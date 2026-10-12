@@ -66,6 +66,14 @@ type Driver struct {
 	// process (registrytls.go); registries() hashes it without a second
 	// read of the volume.
 	tlsCrt []byte
+
+	// registryImage is the result of ensureRegistryImage
+	// (registryimage.go): the image is checked and pulled once per
+	// process, like the bash LO_REGISTRY_IMAGE_READY.
+	registryImage struct {
+		done bool
+		err  error
+	}
 }
 
 // New builds the driver over its dispatch-provided dependencies.

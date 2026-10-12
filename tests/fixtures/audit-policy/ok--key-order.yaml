@@ -1,0 +1,8 @@
+rules:
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets"]
+  - level: None
+kind: Policy
+apiVersion: audit.k8s.io/v1

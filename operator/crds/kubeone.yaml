@@ -101,6 +101,37 @@ spec:
                         shadowed and never deployed. hetzner = opt in to KubeOne's embedded
                         hcloud CSI. BREAKING for pre-existing clusters that relied on the
                         auto-deployed hcloud CSI — set csi: hetzner to keep it.
+                auditLog:
+                  type: object
+                  description: |
+                    Apiserver audit log (KubeOne features.staticAuditLog). When set, the
+                    apiserver on every control plane writes an audit log with this
+                    policy. The driver checks the policy file and gives KubeOne its
+                    absolute path. A limit that is not set takes the KubeOne default.
+                  required:
+                    - policy
+                  properties:
+                    policy:
+                      type: string
+                      minLength: 1
+                      description: |
+                        Path of the audit Policy file (apiVersion audit.k8s.io/v1,
+                        kind Policy), relative to the cluster file.
+                    maxAge:
+                      type: integer
+                      minimum: 1
+                      maximum: 999999999
+                      description: Days to keep old audit log files (KubeOne default 30).
+                    maxBackup:
+                      type: integer
+                      minimum: 1
+                      maximum: 999999999
+                      description: Number of old audit log files to keep (KubeOne default 3).
+                    maxSize:
+                      type: integer
+                      minimum: 1
+                      maximum: 999999999
+                      description: Size in MB at which the audit log file rotates (KubeOne default 100).
                 kubehz:
                   type: object
                   description: |

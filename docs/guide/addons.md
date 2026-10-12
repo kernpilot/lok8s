@@ -313,6 +313,8 @@ underlying cause.
 | `cert-manager` | cert-manager controller + CRDs (Issuers, Certificates) | `jetstack/cert-manager` v1.21.1 |
 | `cert-manager-webhook-hetzner` | Hetzner DNS-01 ACME solver webhook. **Opt-in**: bootstrap *after* `cert-manager`. Only clusters that issue via Hetzner DNS-01 (e.g. Let's Encrypt on a public plane) need it; kind/dev clusters serving their Gateway from a `cert:` Secret skip it. | `cert-manager-webhook-hetzner` 0.7.0 |
 | `envoy-gateway` | Envoy Gateway controller **+ the upstream Gateway API CRD bundle**. See [upgrading in place](#envoy-gateway-upgrading-in-place) before you bump the pin | `envoyproxy/gateway-helm` v1.9.0 |
+| `rook-ceph` | Rook-Ceph operator + CRDs, and the ceph-csi-operator work orders that yield the RBD `CSIDriver`. The CSI node plugin runs with a [narrowed ClusterRole](#rook-ceph) | `rook-release/rook-ceph` v1.20.6, `ceph-csi-drivers` 1.0.4 |
+| `rook-ceph-csi-kms` | **Opt-in**, after `rook-ceph`: gives the CSI node plugin back the Secret / ServiceAccount-token grants that KMS-encrypted volumes and `mounter: rbd-nbd` need. See [rook-ceph](#rook-ceph) | raw manifests |
 
 ### Cilium driver-specific behavior
 
@@ -669,6 +671,152 @@ and the gateway's guard came off. Note the filter order: Envoy runs
 `oauth2` **before** `rbac`, so an unauthenticated request from a blocked
 source goes to the issuer first and gets refused after it returns.
 Access stays gated, but the service's existence is no longer hidden.
+
+### rook-ceph: least privilege for the CSI node plugin {#rook-ceph}
+
+The `rook-ceph` addon installs the Rook operator and the ceph-csi-operator
+"work orders" (the `Driver`, the plugin ServiceAccounts and their RBAC).
+
+The CSI **node plugin** is a DaemonSet that tolerates every taint, so it
+runs on every node, control planes included. Its ClusterRole is therefore
+what an attacker holds after a takeover of any one node.
+
+The upstream `ceph-csi-drivers` chart grants that role ten rules (RBD and
+NVMe-oF) or eight (CephFS). Five of them serve volume encryption with an
+external KMS, and the addon removes them:
+
+| Rule | What ceph-csi uses it for |
+|---|---|
+| `secrets` get/list/watch | the KMS passphrase Secret, the Vault tenant token, the `rbd-nbd` volume healer, and the block-volume usage metrics (see the exception below) |
+| `configmaps` get | the KMS configuration ConfigMap, the per-tenant Vault config |
+| `serviceaccounts` get | the tenant ServiceAccount (`vaulttenantsa`) |
+| `serviceaccounts/token` create | a `TokenRequest` for that ServiceAccount: **mints a token for any ServiceAccount in the cluster** |
+| `tokenreviews` create | the Vault token-reviewer setup |
+
+A plain, unencrypted RBD or CephFS mount uses none of them: kubelet passes
+the Ceph user credentials to the plugin inside the CSI request. The
+remaining rules (`nodes` get, `persistentvolumes` and `volumeattachments`
+get/list, `persistentvolumeclaims` get, `events`) stay. The plugin reads
+them on every start, and none of them returns a credential.
+
+One exception is not about encryption. `NodeGetVolumeStats` on a
+`volumeMode: Block` RBD volume reads the controller-publish Secret to
+report the used bytes (ceph-csi `internal/rbd/nodeserver.go`,
+`blockNodeGetVolumeStats`).
+
+With the narrowed role that read fails on the volume **stats** of block
+volumes, not on their mount. Kubelet logs the error and the volume keeps
+working. A cluster that needs usage metrics for block volumes bootstraps
+`rook-ceph-csi-kms` (below).
+
+The removal is a guarded JSON patch in the addon's `kustomization.yaml`.
+A `test` on the complete rule precedes each `remove`. A chart bump that
+reorders, merges or widens a rule therefore **fails the render** instead
+of removing the wrong rule.
+
+When you bump `ceph-csi-drivers`, compare the indices with the chart's
+`templates/*-nodeplugin-cr-rbac.yaml` and adjust the patch. Then refresh
+the fixture the render test reads (`internal/addons/testdata/rook-ceph/`,
+its header says how).
+
+The patches cover the RBD, CephFS and NVMe-oF node plugin roles (the NFS
+role carries `nodes get` only). Each target names the driver name the
+addon pins (`rook-ceph.<type>.csi.ceph.com`) and the chart default
+(`<type>.csi.ceph.com`). A target for a driver that is off is a no-op and
+takes effect when a render turns the driver on.
+
+::: warning Upgrade note: the CephFS and NVMe-oF driver names are now pinned
+Only the addon's own `csi-drivers.yaml` selects the drivers. Inline
+`values:` in `spec.bootstrap` reach `chart.yaml` (the Rook operator chart),
+not this generator. So a cluster that runs CephFS or NVMe-oF through this
+addon does it from a fork of the addon, or from a custom target with its
+own `csi-drivers.yaml`, and that copy keeps its own driver names when it
+rebases on this version.
+
+The driver name is the CSI identity: the `CSIDriver` object, the plugin
+workloads, the kubelet registration and `spec.csi.driver` of every PV,
+which is immutable. The addon now pins `rook-ceph.cephfs.csi.ceph.com`
+(before: the chart default `cephfs.csi.ceph.com`) and
+`rook-ceph.nvmeof.csi.ceph.com` (before: `nvmeof.csi.ceph.com`). For
+CephFS the pinned name is the one Rook writes into its own StorageClass and
+VolumeSnapshotClass (`<operatorNamespace>.cephfs.csi.ceph.com`).
+
+When you rebase your copy:
+
+- **Keep the default name**: the patch targets it too, so the role is
+  narrowed and nothing else changes.
+- **Adopt the pinned name**: the CSI identity changes. Point your
+  StorageClasses and VolumeSnapshotClasses at the new name, migrate the
+  PVs (new PVC + copy), then delete the old `Driver` and its classes. Do
+  not delete a `Driver` while a PV still uses it.
+
+The patch acts on the render only. A live old `Driver` that is no longer
+in the render keeps its broad node plugin ClusterRole, and the bootstrap
+does not prune. After the migration delete that `Driver` and its RBAC, or
+narrow the old role by hand with the same patch.
+:::
+
+#### When you need the grants back
+
+Three ceph-csi features read those objects through the Kubernetes API:
+
+- **encrypted volumes with a KMS**: a StorageClass with `encrypted: "true"`
+  and an `encryptionKMSID` (Vault, `vaulttokens`, `vaulttenantsa`, the
+  metadata KMS, ...)
+- **`mounter: rbd-nbd`**: after a plugin restart the volume healer re-reads
+  each attached volume's node-stage Secret to re-map the device
+- **usage metrics for `volumeMode: Block` volumes** (the exception above)
+
+For those clusters bootstrap the opt-in `rook-ceph-csi-kms` addon after
+`rook-ceph`. It binds the five removed rules to the RBD node plugin
+ServiceAccount again, so the effective permissions equal the upstream
+chart's:
+
+```yaml
+spec:
+  bootstrap:
+    - rook-ceph
+    - rook-ceph-csi-kms:
+        dependsOn: [rook-ceph]
+```
+
+::: warning This restores the every-node escalation path
+`rook-ceph-csi-kms` restores the upstream grants, not the minimum a KMS
+needs. With it, root on any node that runs the plugin can read every
+Secret and mint a token for any ServiceAccount again. Enable it only for
+one of the three features above, and track the narrower, per-feature
+grants in [kernpilot/lok8s#265](https://github.com/kernpilot/lok8s/issues/265).
+:::
+
+The binding names the RBD ServiceAccount only. A cluster that also runs the
+CephFS driver with encryption adds that ServiceAccount from a patch in its
+own target:
+
+```yaml
+patches:
+  - target: { kind: ClusterRoleBinding, name: rook-ceph-csi-nodeplugin-kms-crb }
+    patch: |-
+      - op: add
+        path: /subjects/-
+        value:
+          kind: ServiceAccount
+          name: rook-ceph-cephfs-csi-ceph-com-nodeplugin-sa
+          namespace: rook-ceph
+```
+
+#### Verify it
+
+```console
+$ SA=system:serviceaccount:rook-ceph:rook-ceph-rbd-csi-ceph-com-nodeplugin-sa
+$ kubectl auth can-i create serviceaccounts/token --as="${SA}"
+no
+$ kubectl auth can-i get secrets --as="${SA}" --all-namespaces
+no
+$ kubectl auth can-i list volumeattachments --as="${SA}"
+yes
+```
+
+Both `no` lines read `yes` on a cluster that bootstraps `rook-ceph-csi-kms`.
 
 ## Writing a custom addon
 

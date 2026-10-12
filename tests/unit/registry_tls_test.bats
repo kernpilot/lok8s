@@ -408,16 +408,18 @@ _pem() { printf -- '-----BEGIN %s-----\n%s\n-----END %s-----\n' "${1}" "$(printf
   assert_output --partial "10.125.50.102"
 
   # The docker sequence, in order: inspect (absent), create the volume,
-  # populate it through the throwaway container, remove that container.
+  # check the registry image (local in this stub: no pull), populate the
+  # volume through the throwaway container, remove that container.
   run cat "${DOCKER_LOG}"
   assert_line --index 0 "docker volume inspect -f {{.Name}} lok8s-registry-tls"
   assert_line --index 1 "docker volume create lok8s-registry-tls"
   assert_line --index 2 "docker rm -f lok8s-registry-tls-io"
-  assert_line --index 3 "docker container create --name lok8s-registry-tls-io --volume lok8s-registry-tls:/etc/registry/certs registry:2.8.3"
-  assert_line --index 4 --regexp "^docker cp ${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/.registry-tls-tmp.[^/]+/tls.crt lok8s-registry-tls-io:/etc/registry/certs/tls.crt$"
-  assert_line --index 5 --regexp "^docker cp .*/tls.key lok8s-registry-tls-io:/etc/registry/certs/tls.key$"
-  assert_line --index 6 --regexp "^docker cp .*/.sans lok8s-registry-tls-io:/etc/registry/certs/.sans$"
-  assert_line --index 7 "docker rm -f lok8s-registry-tls-io"
+  assert_line --index 3 "docker image inspect -f {{.Id}} registry:2.8.3"
+  assert_line --index 4 "docker container create --name lok8s-registry-tls-io --volume lok8s-registry-tls:/etc/registry/certs registry:2.8.3"
+  assert_line --index 5 --regexp "^docker cp ${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/.registry-tls-tmp.[^/]+/tls.crt lok8s-registry-tls-io:/etc/registry/certs/tls.crt$"
+  assert_line --index 6 --regexp "^docker cp .*/tls.key lok8s-registry-tls-io:/etc/registry/certs/tls.key$"
+  assert_line --index 7 --regexp "^docker cp .*/.sans lok8s-registry-tls-io:/etc/registry/certs/.sans$"
+  assert_line --index 8 "docker rm -f lok8s-registry-tls-io"
   # The scratch store under the domain dir is gone.
   run bash -c "ls -d '${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev'/.registry-tls-tmp.* 2>/dev/null"
   assert_output ""
@@ -520,6 +522,131 @@ _pem() { printf -- '-----BEGIN %s-----\n%s\n-----END %s-----\n' "${1}" "$(printf
   assert_failure
   assert_output --partial "docker container create"
   refute_output --partial "holds no complete"
+}
+
+# The defect: docker prints the implicit-pull notice first and the cause
+# after it. The report names the cause (the Go
+# TestRegistriesTLSCertReportsTheCauseOfAFailedCreate).
+@test "registries_tls_cert: a failed io-container create names the cause, not the implicit-pull notice" {
+  _write_tls_spec true
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  _stub_secret_plugin
+  _stub_docker
+  eval "_inner_docker() $(declare -f docker | tail -n +2)"
+  docker() {
+    if [[ "${1}" == "container" && "${2}" == "create" ]]; then
+      echo "docker ${*}" >> "${DOCKER_LOG}"
+      printf '%s\n' "Unable to find image 'registry:2.8.3' locally" \
+        'Error response from daemon: Get "https://registry-1.docker.io/v2/": dial tcp: lookup registry-1.docker.io: i/o timeout' >&2
+      return 125
+    fi
+    _inner_docker "$@"
+  }
+
+  run lo::registries_tls_cert test.lok8s.dev
+  assert_failure
+  assert_line 'error: docker container create lok8s-registry-tls-io (volume lok8s-registry-tls) failed: Error response from daemon: Get "https://registry-1.docker.io/v2/": dial tcp: lookup registry-1.docker.io: i/o timeout'
+}
+
+# The prod path on a fresh host: the image is not local, the pull fails
+# twice, the third pull succeeds, then the io container is created.
+@test "registries_tls_cert: the registry image is pulled with retries before the io container" {
+  _write_tls_spec true
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  _stub_secret_plugin
+  _stub_docker
+  eval "_inner_docker() $(declare -f docker | tail -n +2)"
+  : > "${BATS_TEST_TMPDIR}/pulls"
+  docker() {
+    case "${1} ${2:-}" in
+      "image inspect") echo "docker ${*}" >> "${DOCKER_LOG}"; return 1 ;;
+      "pull "*)
+        echo "docker ${*}" >> "${DOCKER_LOG}"
+        echo x >> "${BATS_TEST_TMPDIR}/pulls"
+        (( $(wc -l < "${BATS_TEST_TMPDIR}/pulls") > 2 )) && return 0
+        echo "Error response from daemon: net/http: TLS handshake timeout" >&2
+        return 1
+        ;;
+    esac
+    _inner_docker "$@"
+  }
+  sleep() { echo "${1}" >> "${BATS_TEST_TMPDIR}/sleeps"; }
+
+  run lo::registries_tls_cert test.lok8s.dev
+  assert_success
+  assert_line "[warn] docker pull registry:2.8.3 failed (attempt 2 of 4): Error response from daemon: net/http: TLS handshake timeout. Retrying in 5s."
+  run cat "${BATS_TEST_TMPDIR}/sleeps"
+  assert_output "$(printf '2\n5')"
+  # The last pull comes right before the io container create.
+  run grep -B1 '^docker container create ' "${DOCKER_LOG}"
+  assert_line --index 0 "docker pull registry:2.8.3"
+  run _vol_file lok8s-registry-tls tls.crt
+  assert_output "$(_pem CERTIFICATE FAKECRT)"
+}
+
+@test "registries_tls_cert: a pull that fails every attempt stops the mint before the io container" {
+  _write_tls_spec true
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  _stub_secret_plugin
+  _stub_docker
+  eval "_inner_docker() $(declare -f docker | tail -n +2)"
+  docker() {
+    case "${1} ${2:-}" in
+      "image inspect") echo "docker ${*}" >> "${DOCKER_LOG}"; return 1 ;;
+      "pull "*)
+        echo "docker ${*}" >> "${DOCKER_LOG}"
+        echo "Error response from daemon: net/http: TLS handshake timeout" >&2
+        return 1
+        ;;
+    esac
+    _inner_docker "$@"
+  }
+  sleep() { :; }
+
+  run lo::registries_tls_cert test.lok8s.dev
+  assert_failure
+  assert_line "error: docker pull registry:2.8.3 failed after 4 attempts: Error response from daemon: net/http: TLS handshake timeout"
+  run grep -c '^docker container create ' "${DOCKER_LOG}"
+  assert_output "0"
+}
+
+# The same table as the Go TestDockerErrSummary: both implementations print
+# the same bytes.
+@test "docker_err_summary: keeps the last lines that name the cause, masks URL credentials" {
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  local cause='Error response from daemon: Get "https://registry-1.docker.io/v2/": dial tcp: lookup registry-1.docker.io: i/o timeout'
+  run lo::docker_err_summary ""
+  assert_output ""
+  run lo::docker_err_summary "${cause}"$'\n'
+  assert_output "${cause}"
+  run lo::docker_err_summary "Unable to find image 'registry:2.8.3' locally"$'\n'"docker: ${cause}"$'\n\n'"Run 'docker run --help' for more information"$'\n'
+  assert_output "docker: ${cause}"
+  run lo::docker_err_summary $'docker: Error response from daemon: Conflict.\nSee \'docker run --help\'.\n'
+  assert_output "docker: Error response from daemon: Conflict."
+  run lo::docker_err_summary $'one\ntwo  \r\n\t\nthree\nfour\n'
+  assert_output "two | three | four"
+  run lo::docker_err_summary 'Error response from daemon: Get "https://robot:s3cret@registry.example/v2/": proxyconnect tcp: http://u:p@proxy:3128 refused'
+  assert_output 'Error response from daemon: Get "https://***@registry.example/v2/": proxyconnect tcp: http://***@proxy:3128 refused'
+  run lo::docker_err_summary 'Get "https://u:p@ss@proxy.example:3128/v2/": EOF'
+  assert_output 'Get "https://***@proxy.example:3128/v2/": EOF'
+  run lo::docker_err_summary '"https://u:p@h","x@y"'
+  assert_output '"https://***@y"'
+  run lo::docker_err_summary 'Get "https://registry-1.docker.io/v2/": EOF and user@host'
+  assert_output 'Get "https://registry-1.docker.io/v2/": EOF and user@host'
+}
+
+# The Go twin works on bytes. Under a UTF-8 locale the bash summary still
+# must: invalid UTF-8 and U+2003 in a userinfo are masked, a trailing U+2003
+# is not white space (the Go TestDockerErrSummary row).
+@test "docker_err_summary: works on bytes under a UTF-8 locale" {
+  locale -a 2>/dev/null | grep -qiE '^c\.utf-?8$' || skip "no C.UTF-8 locale on this host"
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  LC_ALL=C.UTF-8 run lo::docker_err_summary $'https://u:\xff\xfe@h/ https://u:p\u2003x@h/ end\u2003 \n'
+  assert_success
+  assert_output $'https://***@h/ https://***@h/ end\u2003'
 }
 
 @test "registries_tls_cert: stale .registry-tls-tmp.* dirs are swept before the mint" {

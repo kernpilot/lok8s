@@ -4,7 +4,7 @@
 # copies, stamped from the embedded mirror's VERSION with the Makefile's
 # -ldflags (internal/assets.BuildVersion; the assets version test pins the
 # flag across the Makefile, goreleaser and this file).
-FROM golang:1.26.8-alpine AS lo-build
+FROM golang:1.26.9-alpine AS lo-build
 WORKDIR /src
 COPY go.mod go.sum ./
 # The root module replaces github.com/kernpilot/lok8s/kustomize with the

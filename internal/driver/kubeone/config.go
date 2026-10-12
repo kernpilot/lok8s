@@ -36,9 +36,9 @@ var (
 
 // GenerateConfig ports kubeone::generate_config: render kubeone.yaml from
 // the core template + cluster spec, append a dynamicWorkers block for each
-// pool in spec.workers, then merge spec.oidc (features.openidConnect) and
-// spec.registries (containerd registry auth) into the manifest. Writes
-// <outputDir>/kubeone.yaml.
+// pool in spec.workers, then merge spec.oidc (features.openidConnect),
+// spec.auditLog (features.staticAuditLog) and spec.registries (containerd
+// registry auth) into the manifest. Writes <outputDir>/kubeone.yaml.
 func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outputDir string) error {
 	stderr := d.stderr()
 	// The project's copy wins; else the embedded template (ejected on first
@@ -147,21 +147,60 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 		}
 	}
 
+	// The render and the merges below write a temp file beside the
+	// manifest. It replaces kubeone.yaml only when every merge succeeded,
+	// so a refused merge never leaves a half-written manifest (an older,
+	// complete one stays). The temp file is 0600, like the bash mktemp:
+	// the registry merge can write credentials into it.
 	manifest := filepath.Join(outputDir, "kubeone.yaml")
-	if err := os.WriteFile(manifest, []byte(out.String()+"\n"), 0o644); err != nil { // #nosec G306 -- the kubeone manifest; credentials reach kubeone through the environment
-		return err
+	diskHint := "Check the free disk space and the permissions of the directory, then run lo provision again."
+	tmp, err := os.CreateTemp(outputDir, ".kubeone.yaml.")
+	if err != nil {
+		ui.ErrorTo(stderr, "cannot create a temp file in %s. %s", outputDir, diskHint)
+		return ui.Handled(fmt.Errorf("kubeone: temp manifest: %w", err))
+	}
+	// Removed on every return but the success one (work is cleared after
+	// the rename). On the first SIGINT or SIGTERM lo cancels the context
+	// (cli.WatchInterrupt) and this function still returns, so the defer
+	// runs then too. A SIGHUP or a second signal ends lo at once and can
+	// leave the file: WatchInterrupt does not catch SIGHUP, because
+	// signal.Notify would undo the SIGHUP ignore of `nohup lo …`. (The
+	// bash removes the file on INT, TERM and HUP.)
+	work := tmp.Name()
+	defer func() {
+		if work != "" {
+			_ = os.Remove(work)
+		}
+	}()
+	_, werr := tmp.WriteString(out.String() + "\n")
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		ui.ErrorTo(stderr, "cannot write the manifest in %s. %s", outputDir, diskHint)
+		return ui.Handled(fmt.Errorf("kubeone: write manifest: %w", werr))
 	}
 
 	// spec.oidc → features.openidConnect, merged into the manifest's
 	// features block (no-op without spec.oidc). KubeOne-native: propagates
 	// to joiners, no file delivery.
-	if err := d.injectOIDC(manifest); err != nil {
+	if err := d.injectOIDC(work); err != nil {
+		return err
+	}
+	// spec.auditLog → features.staticAuditLog, merged the same way (no-op
+	// without spec.auditLog). KubeOne uploads the policy file itself.
+	if err := d.injectAuditLog(work, clusterYAML); err != nil {
 		return err
 	}
 	// spec.registries → containerd registry auth (optional secretRef).
-	if err := d.injectRegistryAuth(manifest, clusterYAML); err != nil {
+	if err := d.injectRegistryAuth(work, clusterYAML); err != nil {
 		return err
 	}
+	if err := os.Rename(work, manifest); err != nil {
+		ui.ErrorTo(stderr, "cannot replace %s. Check the permissions of %s, then run lo provision again.", manifest, outputDir)
+		return ui.Handled(fmt.Errorf("kubeone: rename manifest: %w", err))
+	}
+	work = ""
 	ui.DebugTo(stderr, "Generated kubeone.yaml at %s", manifest)
 	return nil
 }

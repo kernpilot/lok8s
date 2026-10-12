@@ -162,6 +162,251 @@ kubeone::_inject_oidc() {
   debug "OIDC: features.openidConnect injected (issuer ${LOK8S_SPEC_OIDC_ISSUER})"
 }
 
+# ── Audit log (KubeOne-native features.staticAuditLog) ───
+
+# kubeone::_audit_log_read <cluster_yaml>: check spec.auditLog and its policy
+# file. On success it sets _AUDIT_LOG_POLICY (the ABSOLUTE policy path; empty
+# without spec.auditLog) and _AUDIT_LOG_KEYS / _AUDIT_LOG_VALS (the KubeOne
+# limit fields and the values the spec sets). A bad value prints an error that
+# names the value and the fix. driver::provision calls it before the
+# infrastructure step, so a typo fails fast; _inject_audit_log calls it again.
+# Go twin: readAuditLog in internal/driver/kubeone/auditlog.go (same checks,
+# same order, same text).
+kubeone::_audit_log_read() {
+  local cluster_yaml="${1}"
+  local tag key val policy policy_path verdict pair spec_key ko_key
+  _AUDIT_LOG_POLICY="" _AUDIT_LOG_KEYS=() _AUDIT_LOG_VALS=()
+
+  tag=$(yq -r '.spec.auditLog | tag' "${cluster_yaml}" 2>/dev/null) \
+    || { error "audit log: cannot read ${cluster_yaml}"; return 1; }
+  [[ "${tag}" != "!!null" ]] || return 0
+  if [[ "${tag}" != "!!map" ]]; then
+    error "audit log: spec.auditLog in ${cluster_yaml} is not a mapping. Set spec.auditLog.policy to the path of an audit Policy file."
+    return 1
+  fi
+  while IFS= read -r key; do
+    case "${key}" in
+      policy|maxAge|maxBackup|maxSize) ;;
+      *)
+        error "audit log: spec.auditLog.${key} in ${cluster_yaml} is not a known field. Use policy, maxAge, maxBackup or maxSize."
+        return 1
+        ;;
+    esac
+  done < <(yq -r '.spec.auditLog | keys | .[]' "${cluster_yaml}")
+
+  tag=$(yq -r '.spec.auditLog.policy | tag' "${cluster_yaml}")
+  policy=$(yq -r '.spec.auditLog.policy' "${cluster_yaml}")
+  if [[ "${tag}" == "!!null" || ( "${tag}" == "!!str" && -z "${policy}" ) ]]; then
+    error "audit log: spec.auditLog.policy in ${cluster_yaml} is not set. Set it to the path of an audit Policy file, relative to the cluster file."
+    return 1
+  fi
+  if [[ "${tag}" != "!!str" ]]; then
+    error "audit log: spec.auditLog.policy in ${cluster_yaml} is not a file path (found $(kubeone::_audit_shown "${tag}" "${policy}")). Set it to the path of an audit Policy file, relative to the cluster file."
+    return 1
+  fi
+
+  # The limits: a fixed list, so the key is safe inside the yq expression.
+  local -a ko_keys=() ko_vals=()
+  for pair in maxAge:logMaxAge maxBackup:logMaxBackup maxSize:logMaxSize; do
+    spec_key="${pair%%:*}"
+    ko_key="${pair#*:}"
+    tag=$(yq -r ".spec.auditLog.${spec_key} | tag" "${cluster_yaml}")
+    [[ "${tag}" != "!!null" ]] || continue
+    val=$(yq -r ".spec.auditLog.${spec_key}" "${cluster_yaml}")
+    # A whole number from 1 to 999999999. KubeOne reads 0 as "not set" and
+    # applies its default, so a written 0 would hide that default: to get it,
+    # leave the field out. Nine digits fit KubeOne's int.
+    if [[ "${tag}" != "!!int" || ! "${val}" =~ ^[1-9][0-9]{0,8}$ ]]; then
+      error "audit log: spec.auditLog.${spec_key} in ${cluster_yaml} must be a whole number from 1 to 999999999 (found $(kubeone::_audit_shown "${tag}" "${val}")). Fix the value, or remove the field to use the KubeOne default."
+      return 1
+    fi
+    ko_keys+=("${ko_key}")
+    ko_vals+=("${val}")
+  done
+
+  # Relative to the cluster file, then made absolute and clean.
+  policy_path="${policy}"
+  [[ "${policy_path}" == /* ]] || policy_path="$(dirname "${cluster_yaml}")/${policy_path}"
+  policy_path=$(kubeone::_abs_path "${policy_path}")
+  if [[ ! -f "${policy_path}" ]]; then
+    error "audit log: policy file not found: ${policy_path} (spec.auditLog.policy: ${policy}). Create the file, or fix spec.auditLog.policy in ${cluster_yaml}."
+    return 1
+  fi
+  verdict=$(kubeone::_audit_policy_verdict "${policy_path}")
+  local plain="lok8s reads a policy file only as plain YAML."
+  case "${verdict}" in
+    ok) ;;
+    unreadable) error "audit log: cannot read the policy file ${policy_path}. Make it readable for the user that runs lo."; return 1 ;;
+    directive)  error "audit log: ${policy_path} has a YAML directive (a line that starts with %). ${plain} Remove the directive."; return 1 ;;
+    invalid)    error "audit log: ${policy_path} is not valid YAML. Fix the file, or set spec.auditLog.policy to another file."; return 1 ;;
+    marker)     error "audit log: ${policy_path} has a value on a document marker line (--- or ...). ${plain} Move the value to the next line."; return 1 ;;
+    emptyfirst) error "audit log: ${policy_path} starts with an empty YAML document. The apiserver reads only the first document and does not start. Remove the extra --- line before the policy."; return 1 ;;
+    duplicate)  error "audit log: ${policy_path} has a duplicate key. ${plain} Keep each key once."; return 1 ;;
+    alias)      error "audit log: ${policy_path} has an anchor or an alias (&name, *name). ${plain} Write the value out in full."; return 1 ;;
+    merge)      error "audit log: ${policy_path} has a merge key (<<). ${plain} Write the keys out in full."; return 1 ;;
+    norules)    error "audit log: ${policy_path} has no rules. The apiserver does not start with a policy that has no rules. Add at least one rule to the rules list."; return 1 ;;
+    yqfailed:*) error "audit log: yq failed while it checked ${policy_path}: ${verdict#yqfailed: }. Make sure that yq is a working v4 release (b install), then run lo provision again."; return 1 ;;
+    *)          error "audit log: ${policy_path} is not an audit Policy. The file must have apiVersion audit.k8s.io/v1 and kind Policy. Fix the file, or set spec.auditLog.policy to another file."; return 1 ;;
+  esac
+  _AUDIT_LOG_POLICY="${policy_path}"
+  _AUDIT_LOG_KEYS=("${ko_keys[@]}")
+  _AUDIT_LOG_VALS=("${ko_vals[@]}")
+}
+
+# kubeone::_audit_policy_verdict <file>: check the policy file and print one
+# word: ok, unreadable, directive, marker, emptyfirst, invalid, duplicate,
+# alias, merge, notpolicy or norules, or "yqfailed: <detail>" when yq itself
+# fails (for example a yq that is not mikefarah yq v4).
+# Go twin: auditPolicyVerdict (the same words, the same order). The fixtures
+# in tests/fixtures/audit-policy/ are named after them.
+#
+# Each yq read below is small and works on every yq v4 release from v4.30 on
+# (no if/elif, no `kind`): bash makes the decision. Where yq and yaml.v3 read
+# a construct differently (an anchor or alias, a merge key, a duplicate key),
+# both implementations refuse it, so they agree and the file means one thing.
+kubeone::_audit_policy_verdict() {
+  local file="${1}" text v
+  [[ -r "${file}" ]] || { echo unreadable; return 0; }
+  # yaml.v3 (and the apiserver) refuse "%YAML 1.2"; yq reads it.
+  if grep -q '^%' "${file}"; then echo directive; return 0; fi
+  # A value on a document marker line ("--- {…}", "--- null"): yq v4.54
+  # parses some of these wrongly. A comment after the marker is fine.
+  if grep -Eq '^(---|\.\.\.)[[:space:]]+[^#[:space:]]' "${file}"; then echo marker; return 0; fi
+  # yq v4.54 drops the first key after a "--- # comment" line. The comment
+  # holds no data, so strip it from the document markers first.
+  text=$(sed -E 's/^(---|\.\.\.)[[:space:]]+#.*$/\1/' "${file}")
+  # The apiserver reads only the first document. An empty one (yq skips it)
+  # stops the apiserver. A text rule, before the parse, as in Go.
+  if kubeone::_audit_empty_first <<<"${text}"; then echo emptyfirst; return 0; fi
+  # Every document must parse. When yq cannot read even a known-good input
+  # with a v4 operator, yq is broken or not mikefarah yq v4 (a distro's
+  # Python yq runs `.` but not `document_index`): not the file's fault.
+  if ! yq -r 'document_index' - <<<"${text}" >/dev/null 2>&1; then
+    if yq -r 'document_index' - <<<'a: 1' >/dev/null 2>&1; then
+      echo invalid
+    else
+      echo "yqfailed: $(yq -r 'document_index' - <<<'a: 1' 2>&1 >/dev/null | head -n 1)"
+    fi
+    return 0
+  fi
+
+  # kubeone::_audit_policy_read <yq expression>: one read of the first
+  # document; on a yq failure it prints the yqfailed word and returns 1.
+  v=$(kubeone::_audit_policy_read "${text}" '[... | select(tag == "!!map") | select((keys | length) != (keys | unique | length))] | length') || { echo "${v}"; return 0; }
+  [[ "${v}" == 0 ]] || { echo duplicate; return 0; }
+  v=$(kubeone::_audit_policy_read "${text}" '[... | select(anchor != "")] | length') || { echo "${v}"; return 0; }
+  [[ "${v}" == 0 ]] || { echo alias; return 0; }
+  v=$(kubeone::_audit_policy_read "${text}" '[... | select(tag == "!!map") | keys | .[] | select(tag == "!!merge")] | length') || { echo "${v}"; return 0; }
+  [[ "${v}" == 0 ]] || { echo merge; return 0; }
+  v=$(kubeone::_audit_policy_read "${text}" 'tag') || { echo "${v}"; return 0; }
+  [[ "${v}" == '!!map' ]] || { echo notpolicy; return 0; }
+  v=$(kubeone::_audit_policy_read "${text}" '.apiVersion == "audit.k8s.io/v1" and .kind == "Policy"') || { echo "${v}"; return 0; }
+  [[ "${v}" == true ]] || { echo notpolicy; return 0; }
+  v=$(kubeone::_audit_policy_read "${text}" '.rules | tag') || { echo "${v}"; return 0; }
+  [[ "${v}" == '!!seq' ]] || { echo norules; return 0; }
+  v=$(kubeone::_audit_policy_read "${text}" '.rules | length') || { echo "${v}"; return 0; }
+  [[ "${v}" != 0 ]] || { echo norules; return 0; }
+  echo ok
+}
+
+# kubeone::_audit_policy_read <text> <yq expression>: the first output line of
+# the expression on the first document of <text>. On a yq failure it prints
+# "yqfailed: <first error line>" and returns 1.
+kubeone::_audit_policy_read() {
+  local out
+  if out=$(yq -r "select(document_index == 0) | ${2}" - <<<"${1}" 2>/dev/null); then
+    printf '%s\n' "${out%%$'\n'*}"
+    return 0
+  fi
+  printf 'yqfailed: %s\n' "$(yq -r "select(document_index == 0) | ${2}" - <<<"${1}" 2>&1 >/dev/null | head -n 1)"
+  return 1
+}
+
+# kubeone::_audit_empty_first: is the first YAML document of the text on stdin
+# empty? Blank lines and comment lines do not count. A document marker (---
+# or ..., with an optional comment) followed by another marker or by nothing
+# is an empty first document. A comment or a blank line before the first ---
+# is not. Go twin: emptyFirstDocument (the same rule).
+kubeone::_audit_empty_first() {
+  local line marker='^(---|\.\.\.)([[:space:]]+#.*|[[:space:]]*)$'
+  local -a lines=()
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    [[ "${line}" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+    lines+=("${line}")
+    (( ${#lines[@]} < 2 )) || break
+  done
+  (( ${#lines[@]} > 0 )) || return 1
+  [[ "${lines[0]}" =~ ${marker} ]] || return 1
+  (( ${#lines[@]} == 1 )) && return 0
+  [[ "${lines[1]}" =~ ${marker} ]]
+}
+
+# spec.auditLog → features.staticAuditLog, so the apiserver on every control
+# plane writes an audit log. KubeOne uploads the policy file to each control
+# plane itself, thus the file only has to exist on this machine. The manifest
+# gets enable, the ABSOLUTE policyFilePath (KubeOne resolves a relative path
+# against its own manifest in .kubeone/), and only the limits the spec sets:
+# KubeOne applies its defaults to the rest. No-op without spec.auditLog.
+# Go twin: injectAuditLog.
+# Usage: kubeone::_inject_audit_log <kubeone.yaml> <cluster_yaml>
+kubeone::_inject_audit_log() {
+  local manifest="${1}" cluster_yaml="${2}" i
+  kubeone::_audit_log_read "${cluster_yaml}" || return 1
+  [[ -n "${_AUDIT_LOG_POLICY}" ]] || return 0
+  # Name the cause: a manifest that does not parse is a template problem; a
+  # write that fails is a disk or permission problem. Go twin: injectAuditLog.
+  if [[ ! -r "${manifest}" ]]; then
+    error "audit log: lok8s cannot read the rendered manifest in ${manifest%/*}. Check the permissions of the directory, then run lo provision again."
+    return 1
+  fi
+  if ! yq -r 'document_index' "${manifest}" >/dev/null 2>&1; then
+    error "audit log: lok8s cannot parse the rendered manifest in ${manifest%/*} as YAML. Check the KubeOne template (drivers/kubeone/cluster/core/kubeone.yaml), then run lo provision again."
+    return 1
+  fi
+  local write_error="audit log: cannot write the manifest in ${manifest%/*}. Check the free disk space and the permissions of the directory, then run lo provision again."
+
+  AUDIT_POLICY="${_AUDIT_LOG_POLICY}" yq -i '
+    .features.staticAuditLog.enable = true |
+    .features.staticAuditLog.config.policyFilePath = strenv(AUDIT_POLICY)
+  ' "${manifest}" || { error "${write_error}"; return 1; }
+  for i in "${!_AUDIT_LOG_KEYS[@]}"; do
+    # env() reads the value as YAML: the validated digits land as an integer.
+    AUDIT_LIMIT="${_AUDIT_LOG_VALS[i]}" yq -i ".features.staticAuditLog.config.${_AUDIT_LOG_KEYS[i]} = env(AUDIT_LIMIT)" "${manifest}" \
+      || { error "${write_error}"; return 1; }
+  done
+  debug "audit log: features.staticAuditLog injected (policy ${_AUDIT_LOG_POLICY})"
+}
+
+# The absolute, lexically clean form of a path, as Go's filepath.Abs makes it:
+# a relative path starts at the working directory, "." and empty parts drop
+# out, ".." removes the part before it. No link is resolved and the path need
+# not exist. Pure bash, because busybox realpath has no -m/-s.
+# Usage: kubeone::_abs_path <path>
+kubeone::_abs_path() {
+  local path="${1}" part
+  local -a parts=() out=()
+  [[ "${path}" == /* ]] || path="${PWD}/${path}"
+  IFS=/ read -r -d '' -a parts < <(printf '%s' "${path}") || true
+  for part in "${parts[@]}"; do
+    case "${part}" in
+      ''|.) ;;
+      ..) (( ${#out[@]} == 0 )) || unset 'out[-1]' ;;
+      *) out+=("${part}") ;;
+    esac
+  done
+  local IFS=/
+  printf '/%s' "${out[*]}"
+}
+
+# How an error names a bad spec.auditLog value: the tag, and the text of a
+# scalar. Usage: kubeone::_audit_shown <tag> <value>
+kubeone::_audit_shown() {
+  case "${1}" in
+    '!!map'|'!!seq') printf '%s' "${1}" ;;
+    *) printf "%s '%s'" "${1}" "${2}" ;;
+  esac
+}
+
 # spec.registries → containerd registry auth, resolved from a per-domain secretRef.
 # Lets a cluster opt into AUTHENTICATED image pulls (e.g. to dodge docker.io
 # anonymous rate limits) WITHOUT putting creds in the manifest: the spec carries
@@ -328,13 +573,67 @@ kubeone::generate_config() {
     done < <(spec::pool_names "${cluster_yaml}")
   fi
 
-  echo "${rendered}" > "${output_dir}/kubeone.yaml"
+  # The render and the merges below write a temp file beside the manifest. It
+  # replaces kubeone.yaml only when every merge succeeded, so a refused merge
+  # never leaves a half-written manifest (an older, complete one stays). mktemp
+  # makes it 0600: the registry merge can write credentials into it. Go twin:
+  # os.CreateTemp + os.Rename in GenerateConfig.
+  local work saved_traps
+  work=$(mktemp "${output_dir}/.kubeone.yaml.XXXXXX") || {
+    error "cannot create a temp file in ${output_dir}. Check the free disk space and the permissions of the directory, then run lo provision again."
+    return 1
+  }
+  # A signal must not leave the temp file behind: it can hold registry
+  # credentials. The traps remove it and then let the signal end the run as
+  # before (the EXIT trap belongs to utils/provider.sh and stays untouched).
+  # The previous INT/TERM/HUP traps come back when the render ends.
+  saved_traps=$(trap -p INT TERM HUP)
+  kubeone::_temp_traps "${work}"
+  kubeone::_render_manifest "${rendered}" "${work}" "${output_dir}" "${cluster_yaml}"
+  local rc=$?
+  trap - INT TERM HUP
+  eval "${saved_traps}"
+  return "${rc}"
+}
+
+# kubeone::_temp_traps <file>: on INT, TERM or HUP remove <file>, then end the
+# run with that signal.
+kubeone::_temp_traps() {
+  local q sig
+  q=$(printf '%q' "${1}")
+  for sig in INT TERM HUP; do
+    # shellcheck disable=SC2064 # expand the path now: the trap can fire after the caller returned
+    trap "rm -f -- ${q}; trap - ${sig}; kill -${sig} \${BASHPID}" "${sig}"
+  done
+}
+
+# kubeone::_render_manifest <rendered> <work> <output_dir> <cluster_yaml>: write
+# the render into the temp file <work>, merge spec.oidc, spec.auditLog and
+# spec.registries into it, and rename it to <output_dir>/kubeone.yaml. On any
+# failure <work> is removed and kubeone.yaml stays as it was.
+kubeone::_render_manifest() {
+  local rendered="${1}" work="${2}" output_dir="${3}" cluster_yaml="${4}"
+  echo "${rendered}" > "${work}" || {
+    rm -f "${work}"
+    error "cannot write the manifest in ${output_dir}. Check the free disk space and the permissions of the directory, then run lo provision again."
+    return 1
+  }
 
   # spec.oidc → features.openidConnect, merged into the manifest's features block
   # (no-op without spec.oidc). KubeOne-native: propagates to joiners, no file.
-  kubeone::_inject_oidc "${output_dir}/kubeone.yaml" || return 1
+  kubeone::_inject_oidc "${work}" || { rm -f "${work}"; return 1; }
+  # spec.auditLog → features.staticAuditLog, merged the same way (no-op without
+  # spec.auditLog). KubeOne uploads the policy file itself.
+  kubeone::_inject_audit_log "${work}" "${cluster_yaml}" || { rm -f "${work}"; return 1; }
   # spec.registries → containerd registry auth (optional; resolves a secretRef).
-  kubeone::_inject_registry_auth "${output_dir}/kubeone.yaml" "${cluster_yaml}" || return 1
+  kubeone::_inject_registry_auth "${work}" "${cluster_yaml}" || { rm -f "${work}"; return 1; }
+  # A directory named kubeone.yaml would take the file INTO it (mv), where
+  # the Go rename fails: refuse it the same way.
+  if [[ -d "${output_dir}/kubeone.yaml" ]] || ! mv -f "${work}" "${output_dir}/kubeone.yaml"; then
+    rm -f "${work}"
+    error "cannot replace ${output_dir}/kubeone.yaml. Check the permissions of ${output_dir}, then run lo provision again."
+    return 1
+  fi
   debug "Generated kubeone.yaml at ${output_dir}/kubeone.yaml"
 }
 

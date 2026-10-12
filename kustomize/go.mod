@@ -1,6 +1,6 @@
 module github.com/kernpilot/lok8s/kustomize
 
-go 1.26.0
+go 1.26.9
 
 require (
 	golang.org/x/crypto v0.57.0

@@ -626,10 +626,28 @@ spec:
   provider:
     name: hetzner
     configRef: hetzner.json
+  auditLog:                          # optional: apiserver audit log
+    policy: audit-policy.yaml        # required in auditLog: relative to this file
+    maxAge: 30                       # optional: days (KubeOne default 30)
+    maxBackup: 10                    # optional: old files to keep (KubeOne default 3)
+    maxSize: 100                     # optional: MB before rotation (KubeOne default 100)
   bootstrap:
     - ./targets/networking
     - ./targets/cnpg-operator
 ```
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `spec.auditLog.policy` | when `auditLog` is set | — | Path of an audit Policy file (`apiVersion: audit.k8s.io/v1`, `kind: Policy`), relative to the cluster file. The driver gives KubeOne the absolute path (`features.staticAuditLog.config.policyFilePath`) |
+| `spec.auditLog.maxAge` | no | KubeOne: `30` | Days to keep old audit log files (`logMaxAge`), a whole number from 1 to 999999999 |
+| `spec.auditLog.maxBackup` | no | KubeOne: `3` | Number of old audit log files to keep (`logMaxBackup`), a whole number from 1 to 999999999 |
+| `spec.auditLog.maxSize` | no | KubeOne: `100` | Size in MB at which the audit log file rotates (`logMaxSize`), a whole number from 1 to 999999999 |
+
+`spec.auditLog` turns on KubeOne's `features.staticAuditLog`. The driver
+checks the spec and the policy file at `lo provision`, before the provider
+creates or changes a server and before it writes the manifest. See [Security: apiserver audit log](../guide/security.md#apiserver-audit-log)
+for the checks, an example policy, and the forced apply that a running
+cluster needs.
 
 **Deprecated fields** (use provider config instead):
 - ~~`spec.ssh`~~ → provider config `sshUser`, `sshPrivateKey`, `sshPublicKey`
