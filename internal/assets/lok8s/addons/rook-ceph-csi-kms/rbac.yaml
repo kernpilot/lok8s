@@ -1,5 +1,6 @@
 # The five rules the rook-ceph addon strips from the node plugin ClusterRole,
-# verbatim from the ceph-csi-drivers chart (templates/rbd-nodeplugin-cr-rbac.yaml),
+# verbatim from the ceph-csi-drivers chart
+# (templates/rbd-nodeplugin-cr-rbac.yaml),
 # bound to the node plugin and the controller plugin ServiceAccounts (the
 # controller plugin loses four of the five; it keeps tokenreviews). Together
 # with the narrowed roles the effective permissions equal the upstream
@@ -11,7 +12,8 @@ kind: ClusterRole
 metadata:
   name: rook-ceph-csi-nodeplugin-kms-cr
 rules:
-  # KMS passphrase / tenant token Secrets; the rbd-nbd healer's node-stage Secret.
+  # KMS passphrase / tenant token Secrets; the rbd-nbd healer's node-stage
+  # Secret.
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get, list, watch]

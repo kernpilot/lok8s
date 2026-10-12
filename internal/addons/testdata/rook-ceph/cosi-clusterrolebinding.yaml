@@ -1,0 +1,29 @@
+# Fixture for internal/addons/rookceph_rbac_test.go: the ClusterRoleBinding
+# the rook-ceph chart ships for the Ceph COSI driver ServiceAccount, exactly
+# as rendered (metadata reduced to the name), BEFORE the rook-ceph addon's
+# `$patch: delete`. The test asserts that the unpatched render carries a
+# binding for the objectstorage-provisioner ServiceAccount and that no
+# ClusterRoleBinding binds that ServiceAccount after the patch, by subject
+# and roleRef rather than by name, so an upstream rename of the binding
+# cannot slip past the patch unnoticed. TestRookCephFixturesMatchChart
+# re-renders the chart (on CI, or LOK8S_ONLINE_TESTS=1) and fails on any
+# drift from this file.
+#
+# chart: rook-ceph v1.20.6
+#
+# Produced from the same renders as nodeplugin-clusterroles.yaml (see its
+# header), taking every ClusterRoleBinding whose subjects name the
+# rook-ceph/objectstorage-provisioner ServiceAccount. Refresh it on every
+# rook-ceph chart version bump.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: objectstorage-provisioner-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: objectstorage-provisioner-role
+subjects:
+  - kind: ServiceAccount
+    name: objectstorage-provisioner
+    namespace: rook-ceph

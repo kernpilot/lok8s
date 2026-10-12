@@ -62,8 +62,12 @@ const (
 	onlineTestsEnv = "LOK8S_ONLINE_TESTS"
 
 	ctrlSecretsRole = "rook-ceph-csi-ctrlplugin-secrets"
-	cosiBinding     = "objectstorage-provisioner-role-binding"
 	kmsRole         = "rook-ceph-csi-nodeplugin-kms-cr"
+	// cosiSA is the Ceph COSI driver ServiceAccount the rook-ceph chart
+	// binds cluster-wide; cosiFixture is that binding as the chart renders
+	// it (header: how to refresh).
+	cosiSA      = "objectstorage-provisioner"
+	cosiFixture = "testdata/rook-ceph/cosi-clusterrolebinding.yaml"
 )
 
 // chartDrivers are the driver types the chart knows.
@@ -227,23 +231,23 @@ func ruleSet(t *testing.T, rules []map[string]any) []string {
 	return set
 }
 
-// fixtureChartVersion reads the `# chart: ceph-csi-drivers <version>` header
-// line of a fixture.
-func fixtureChartVersion(t *testing.T, path string) string {
+// fixtureChartVersion reads the `# chart: <chart> <version>` header line
+// of a fixture.
+func fixtureChartVersion(t *testing.T, path, chart string) string {
 	t.Helper()
 	f, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	re := regexp.MustCompile(`^# chart: ceph-csi-drivers (\S+)$`)
+	re := regexp.MustCompile(`^# chart: ` + regexp.QuoteMeta(chart) + ` (\S+)$`)
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		if m := re.FindStringSubmatch(sc.Text()); m != nil {
 			return m[1]
 		}
 	}
-	t.Fatalf("%s: no `# chart: ceph-csi-drivers <version>` header line", path)
+	t.Fatalf("%s: no `# chart: %s <version>` header line", path, chart)
 	return ""
 }
 
@@ -273,6 +277,27 @@ func readCSIDrivers(t *testing.T, addon string) csiDrivers {
 		t.Fatalf("csi-drivers.yaml: chart=%q version=%q", spec.Chart, spec.Version)
 	}
 	return spec
+}
+
+// rookChartVersion reads `version:` from the addon's chart.yaml (the
+// rook-ceph operator chart).
+func rookChartVersion(t *testing.T, addon string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(addon, "chart.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spec struct {
+		Chart   string `yaml:"chart"`
+		Version string `yaml:"version"`
+	}
+	if err := yaml.Unmarshal(raw, &spec); err != nil {
+		t.Fatal(err)
+	}
+	if spec.Chart != "rook-ceph" || spec.Version == "" {
+		t.Fatalf("chart.yaml: chart=%q version=%q", spec.Chart, spec.Version)
+	}
+	return spec.Version
 }
 
 // normalizeDriverName is the chart's helper of the same name
@@ -465,6 +490,35 @@ func grantsForbidden(r map[string]any, forbidden []string) bool {
 	return slices.ContainsFunc(resourcesOf(r), func(res string) bool { return slices.Contains(forbidden, res) })
 }
 
+// cosiBindings returns every ClusterRoleBinding whose subjects name the
+// COSI ServiceAccount in the Rook namespace, by subject and not by name:
+// an upstream rename must not slip past the delete patch.
+func cosiBindings(objs map[string]object) []object {
+	var out []object
+	for _, k := range sortedKeys(objs) {
+		o := objs[k]
+		if o.Kind != "ClusterRoleBinding" {
+			continue
+		}
+		seq, _ := o.Doc["subjects"].([]any)
+		for _, s := range seq {
+			m, _ := s.(map[string]any)
+			if m["kind"] == "ServiceAccount" && m["name"] == cosiSA && m["namespace"] == rookCephNS {
+				out = append(out, o)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// roleRefName returns a binding's roleRef name.
+func roleRefName(b object) string {
+	ref, _ := b.Doc["roleRef"].(map[string]any)
+	n, _ := ref["name"].(string)
+	return n
+}
+
 // subjectNames returns the ServiceAccount subject names of a binding, all
 // of which must live in the Rook namespace.
 func subjectNames(t *testing.T, b object) []string {
@@ -484,7 +538,7 @@ func subjectNames(t *testing.T, b object) []string {
 }
 
 // ctrlplugin SA names for every expected driver name, sorted.
-func ctrlplugingSANames(names map[string]string) []string {
+func ctrlpluginSANames(names map[string]string) []string {
 	var out []string
 	for n := range names {
 		out = append(out, n+"-ctrlplugin-sa")
@@ -557,18 +611,32 @@ func TestRookCephCSIRBACPatches(t *testing.T) {
 	patches, entries := patchesNode(t, addon)
 	targets, deletes := clusterRoleTargets(t, entries)
 
-	// The COSI ClusterRoleBinding is deleted from the render.
-	if !deletes["ClusterRoleBinding/"+cosiBinding] {
-		t.Errorf("no $patch: delete for ClusterRoleBinding/%s", cosiBinding)
+	// The chart binds the COSI ServiceAccount cluster-wide (the fixture
+	// proves the unpatched render carries such a binding); the patches
+	// must leave no ClusterRoleBinding with that subject, whatever its
+	// name. The delete patch itself is checked for shape only.
+	cosiRaw, err := os.ReadFile(cosiFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cosiFx := cosiBindings(decodeObjects(t, cosiRaw))
+	if len(cosiFx) == 0 {
+		t.Fatalf("%s: no ClusterRoleBinding binds %s/%s", cosiFixture, rookCephNS, cosiSA)
+	}
+	if pin, fix := rookChartVersion(t, addon), fixtureChartVersion(t, cosiFixture, "rook-ceph"); pin != fix {
+		t.Fatalf("chart.yaml pins rook-ceph %s but %s was rendered from %s: refresh it (see its header)", pin, cosiFixture, fix)
+	}
+	if len(deletes) == 0 {
+		t.Errorf("no $patch: delete entry in the patches block")
 	}
 
 	fixtures := map[string]map[string]object{}
-	var raws [][]byte
+	raws := [][]byte{cosiRaw}
 	for _, p := range plugins {
 		// The fixture is the chart output at the pinned version. A bump of
 		// the pin without a refreshed fixture would test the patch against
 		// stale rules, so the two versions must agree.
-		if fix := fixtureChartVersion(t, p.fixture); spec.Version != fix {
+		if fix := fixtureChartVersion(t, p.fixture, "ceph-csi-drivers"); spec.Version != fix {
 			t.Fatalf("csi-drivers.yaml pins ceph-csi-drivers %s but %s was rendered from %s: refresh it (see its header)", spec.Version, p.fixture, fix)
 		}
 		raw, err := os.ReadFile(p.fixture)
@@ -638,7 +706,7 @@ func TestRookCephCSIRBACPatches(t *testing.T) {
 	if ref, _ := binding.Doc["roleRef"].(map[string]any); ref["kind"] != "Role" || ref["name"] != ctrlSecretsRole {
 		t.Errorf("RoleBinding roleRef = %v", ref)
 	}
-	if got, want := subjectNames(t, binding), ctrlplugingSANames(names); !reflect.DeepEqual(got, want) {
+	if got, want := subjectNames(t, binding), ctrlpluginSANames(names); !reflect.DeepEqual(got, want) {
 		t.Errorf("RoleBinding subjects %v, want (derived from csi-drivers.yaml) %v", got, want)
 	}
 	if raw, err := os.ReadFile(filepath.Join(addon, "kustomization.yaml")); err != nil || !strings.Contains(string(raw), "- ctrlplugin-secrets-rbac.yaml") {
@@ -673,6 +741,9 @@ func TestRookCephCSIRBACPatches(t *testing.T) {
 	rendered := renderPatched(t, root, raws, patches)
 	for _, p := range plugins {
 		checkPluginRoles(t, p, names, fixtures[p.name], clusterRoles(rendered, p.suffix), kms)
+	}
+	for _, b := range cosiBindings(rendered) {
+		t.Errorf("ClusterRoleBinding/%s still binds %s/%s to ClusterRole %s after the patches", b.Name, rookCephNS, cosiSA, roleRefName(b))
 	}
 }
 
@@ -755,13 +826,26 @@ func TestRookCephFixturesMatchChart(t *testing.T) {
 		}
 	}
 
-	// The addon as shipped.
-	shipped := renderCopy(func(string) {})
-	if _, ok := shipped["ClusterRoleBinding/"+cosiBinding]; ok {
-		t.Errorf("the shipped render still carries ClusterRoleBinding/%s", cosiBinding)
+	// The COSI binding: the unpatched chart renders exactly the fixture's.
+	cosiRaw, err := os.ReadFile(cosiFixture)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := shipped["ClusterRole/objectstorage-provisioner-role"]; !ok {
-		t.Errorf("the shipped render lost ClusterRole/objectstorage-provisioner-role (only the binding is deleted)")
+	cosiFx := cosiBindings(decodeObjects(t, cosiRaw))
+	if got := cosiBindings(chart); !reflect.DeepEqual(got, cosiFx) {
+		t.Errorf("the chart binds %s/%s with\n%s\nbut the fixture has\n%s\nrefresh %s", rookCephNS, cosiSA, canon(t, got), canon(t, cosiFx), cosiFixture)
+	}
+
+	// The addon as shipped: no binding of the COSI ServiceAccount, by
+	// subject; the ClusterRole it referred to stays (only the binding goes).
+	shipped := renderCopy(func(string) {})
+	for _, b := range cosiBindings(shipped) {
+		t.Errorf("the shipped render still binds %s/%s through ClusterRoleBinding/%s (roleRef %s)", rookCephNS, cosiSA, b.Name, roleRefName(b))
+	}
+	for _, b := range cosiFx {
+		if _, ok := shipped["ClusterRole/"+roleRefName(b)]; !ok {
+			t.Errorf("the shipped render lost ClusterRole/%s (only the binding is deleted)", roleRefName(b))
+		}
 	}
 	for _, k := range []string{"Role/" + ctrlSecretsRole, "RoleBinding/" + ctrlSecretsRole} {
 		if o, ok := shipped[k]; !ok || o.Namespace != rookCephNS {

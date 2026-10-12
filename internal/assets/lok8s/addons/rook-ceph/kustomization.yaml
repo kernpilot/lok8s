@@ -125,9 +125,12 @@ resources:
 #                              StorageClass-referenced secret (provisioner
 #                              controller.go, attacher csi_handler.go, resizer
 #                              csi_resizer.go, snapshotter utils/util.go);
-#                              ceph-csi reads the KMS Secrets. No list/watch
-#                              caller exists: the Secret informer in
-#                              internal/util/k8s/secrets.go is dead code.
+#                              ceph-csi itself Gets the controller publish/
+#                              unpublish credentials from the CSI config
+#                              (rbd/controllerserver.go) and the KMS Secrets.
+#                              No list/watch caller exists: the Secret
+#                              informer in internal/util/k8s/secrets.go is
+#                              dead code.
 #   configmaps get             KMS only (initKMS, controllerserver.go).
 #   serviceaccounts get        KMS only (vaulttenantsa).
 #   serviceaccounts/token      KMS only (TokenRequest for the tenant
@@ -143,16 +146,19 @@ resources:
 # SnapshotMetadataService exists) and every PV/PVC/snapshot/attachment rule.
 #
 # A StorageClass whose secret has another name or lives in another namespace
-# needs its own Role + RoleBinding there: without it the sidecar gets 403 and
-# the PVC stays Pending (expand and snapshot fail the same way); existing
-# mounts are unaffected. See docs/guide/addons.md.
+# needs its own Role + RoleBinding there: without it every controller call
+# that needs the secret fails with 403 (provision, delete, attach, detach,
+# expand, snapshot); volumes already mounted keep working. See
+# docs/guide/addons.md.
 #
 # COSI: the rook-ceph chart also ships a ClusterRoleBinding for the Ceph COSI
 # driver ServiceAccount (objectstorage-provisioner: secrets get/create/
 # update/delete in every namespace). This addon deploys no CephCOSIDriver and
-# no pod runs as that ServiceAccount, so the binding is deleted below. A
-# cluster that runs the COSI driver re-adds it from its own target (the
-# snippet is in docs/guide/addons.md).
+# no pod runs as that ServiceAccount, so the binding is dropped from the
+# render below. The bootstrap applies without prune: an existing cluster
+# deletes the live binding once by hand (docs/guide/addons.md, upgrade
+# note). A cluster that runs the COSI driver re-adds it from its own target
+# (the snippet is in docs/guide/addons.md).
 patches:
   # rbd and nvmeof: ten rules in the same order.
   - target:

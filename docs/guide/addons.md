@@ -765,7 +765,7 @@ upstream ClusterRole as well: 29 rules for RBD and NVMe-oF, 27 for CephFS,
 
 | Rule | What uses it |
 |---|---|
-| `secrets` get/list/watch | the sidecars do a plain `get` on the StorageClass-referenced secret, and ceph-csi reads KMS Secrets. Nothing lists or watches |
+| `secrets` get/list/watch | the sidecars `get` the StorageClass-referenced secret. ceph-csi itself does a `get` for the controller publish and unpublish credentials and for KMS Secrets. Nothing lists or watches |
 | `configmaps` get | KMS only |
 | `serviceaccounts` get | KMS only (`vaulttenantsa`) |
 | `serviceaccounts/token` create | KMS only: **mints a token for any ServiceAccount**, from the controller pod |
@@ -776,21 +776,24 @@ escalation paths, and the snapshot-metadata sidecar needs them when a
 `SnapshotMetadataService` exists. Every PV, PVC, snapshot and attachment
 rule stays.
 
-What the sidecars need comes back namespaced: a `Role` in the Rook
-namespace that grants `get` on Rook's provisioner secrets by name
+What the controller side needs comes back namespaced: a `Role` in the
+Rook namespace that grants `get` on Rook's provisioner secrets by name
 (`rook-csi-rbd-provisioner`, `rook-csi-cephfs-provisioner`, the secrets the
 StorageClass `provisioner`, `controller-expand` and VolumeSnapshotClass
 `snapshotter` parameters reference), bound to the controller plugin
 ServiceAccount of every driver under both names it can have. The node
 secrets (`rook-csi-<type>-node`) stay out: kubelet reads them, not this
-plugin.
+plugin. A `VolumeGroupSnapshotClass` or `VolumeReplicationClass` that
+names another secret needs its own grant the same way.
 
 ::: warning StorageClasses with their own secret
 A StorageClass whose controller-side secret has another name, or lives
-outside the Rook namespace, no longer works for new volumes: the sidecar
-gets a 403 from the API, the PVC stays `Pending`, and expand and snapshot
-of that class fail the same way. Existing mounts keep working. Add a
-`Role` + `RoleBinding` in that namespace from your own target:
+outside the Rook namespace, loses every controller call that needs the
+secret: provision and delete (reclaim), attach and detach, expand and
+snapshot. The sidecar gets a 403 from the API and a new PVC stays
+`Pending`. Mounted volumes keep working: a mounted filesystem does not
+touch the API. Add a `Role` + `RoleBinding` in that
+namespace from your own target (the cephfs subject for CephFS classes):
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -814,23 +817,38 @@ subjects:
   - kind: ServiceAccount
     name: rook-ceph-rbd-csi-ceph-com-ctrlplugin-sa
     namespace: rook-ceph
+  - kind: ServiceAccount
+    name: rook-ceph-cephfs-csi-ceph-com-ctrlplugin-sa
+    namespace: rook-ceph
 ```
 :::
 
-::: warning Upgrade note: re-apply the bootstrap
+::: warning Upgrade note: re-apply the bootstrap, delete the COSI binding once
 The narrowed ClusterRole and the new Role arrive in the same bootstrap
 apply (`lo up`, `lo provision` or `lo bootstrap`). Until the RoleBinding
 lands, a provisioner call in those seconds gets a 403. The sidecars retry
 with backoff, so a PVC from that window binds a little later. Nothing
 restarts.
+
+The bootstrap applies without prune, so the COSI binding below stays on an
+existing cluster. A cluster without the COSI driver deletes it once, by
+hand, and checks the far end:
+
+```console
+$ kubectl delete clusterrolebinding objectstorage-provisioner-role-binding
+$ kubectl auth can-i get secrets -n kube-system \
+    --as=system:serviceaccount:rook-ceph:objectstorage-provisioner
+no
+```
 :::
 
 The rook-ceph chart also ships a `ClusterRoleBinding` for the Ceph COSI
 driver ServiceAccount (`objectstorage-provisioner`: `secrets` get, create,
 update and delete in every namespace). The addon deploys no
-`CephCOSIDriver` and no pod runs as that ServiceAccount, so the addon
-deletes the binding (`$patch: delete`). A cluster that runs the COSI driver
-re-adds it from its own target:
+`CephCOSIDriver` and no pod runs as that ServiceAccount, so the addon drops
+the binding from its render (`$patch: delete`). A new cluster never gets
+it, and an existing cluster deletes it once (above). A cluster that runs the
+COSI driver re-adds it from its own target:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -872,14 +890,16 @@ spec:
 ::: warning This restores the every-node escalation path
 `rook-ceph-csi-kms` restores the upstream grants, not the minimum a KMS
 needs. With it, root on any node that runs the plugin, and the controller
-pod, can read every Secret and mint a token for any ServiceAccount again. Enable it only for
-one of the three features above, and track the narrower, per-feature
-grants in [kernpilot/lok8s#265](https://github.com/kernpilot/lok8s/issues/265).
+pod, can read every Secret and mint a token for any ServiceAccount again.
+Enable it only for one of the three features above, and track the
+narrower, per-feature grants in [kernpilot/lok8s#265](https://github.com/kernpilot/lok8s/issues/265).
 :::
 
-The binding names the RBD ServiceAccount only. A cluster that also runs the
-CephFS driver with encryption adds that ServiceAccount from a patch in its
-own target:
+The binding names the RBD ServiceAccounts only (node plugin and controller
+plugin). A cluster that also runs the CephFS driver with encryption adds
+both CephFS ServiceAccounts from a patch in its own target: CephFS
+initializes encryption on the controller side, so the node subject alone
+restores only half.
 
 ```yaml
 patches:
@@ -891,7 +911,18 @@ patches:
           kind: ServiceAccount
           name: rook-ceph-cephfs-csi-ceph-com-nodeplugin-sa
           namespace: rook-ceph
+      - op: add
+        path: /subjects/-
+        value:
+          kind: ServiceAccount
+          name: rook-ceph-cephfs-csi-ceph-com-ctrlplugin-sa
+          namespace: rook-ceph
 ```
+
+A fork that keeps the chart-default driver names uses
+`cephfs-csi-ceph-com-nodeplugin-sa` and `cephfs-csi-ceph-com-ctrlplugin-sa`.
+NVMe-oF with encryption adds `rook-ceph-nvmeof-csi-ceph-com-nodeplugin-sa`
+and `rook-ceph-nvmeof-csi-ceph-com-ctrlplugin-sa` the same way.
 
 #### Verify it
 
