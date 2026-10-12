@@ -344,28 +344,40 @@ addons::render() {
     [[ ! -f "${addon_dir}/values.${kind}.yaml" ]] || value_files+=("${addon_dir}/values.${kind}.yaml")
     [[ -z "${provider_name}" ]] || [[ ! -f "${addon_dir}/values.${provider_name}.yaml" ]] \
       || value_files+=("${addon_dir}/values.${provider_name}.yaml")
-    # Copy to a mktemp build dir ONLY when there's overlay stacking to do. A chart
-    # that pins its OWN chart.yaml valueFiles — e.g. a target referencing a
-    # cross-tree base `../../../../.lok8s/addons/<x>/values.yaml` (monitoring,
-    # gatus) — must render IN PLACE: a copy breaks those relative paths (they
-    # resolve from /tmp → /.lok8s, missing). Stacking addons carry no cross-tree refs.
-    if [[ -n "${inline_values}" ]] || (( ${#value_files[@]} > 0 )); then
+    # Copy to a mktemp build dir when there's overlay stacking to do, OR
+    # (--dry-run, dynamically scoped as bootstrap_dry_run) unconditionally —
+    # khelm's own chart-dependency resolution can still write Chart.lock/charts
+    # into the real addon dir otherwise, which a dry run must never do. A
+    # chart that pins its OWN chart.yaml valueFiles — e.g. a target
+    # referencing a cross-tree base `../../../../.lok8s/addons/<x>/values.yaml`
+    # (monitoring, gatus) — must render IN PLACE on a real apply: a copy
+    # breaks those relative paths (they resolve from /tmp → /.lok8s, missing).
+    # On a dry run that known, accepted limitation reports as `error` for
+    # that one entry (see bootstrap::_dry_run_one) rather than writing there.
+    local _needs_stack=0
+    { [[ -n "${inline_values}" ]] || (( ${#value_files[@]} > 0 )); } && _needs_stack=1
+    if (( _needs_stack )) || (( ${bootstrap_dry_run:-0} )); then
       build_dir=$(mktemp -d) || { error "addons::render: failed to create temp dir for ${addon_dir}"; return 1; }
       # `/.` (not `/*`) so dotfiles (.helmignore, kustomize overlays, …) come too —
       # a glob drops them and a chart referencing a dotfile would fail to render.
       cp -r "${addon_dir}/." "${build_dir}/" \
         || { error "addons::render: failed to copy ${addon_dir} to temp dir"; rm -rf "${build_dir}"; return 1; }
-      if [[ -n "${inline_values}" ]]; then
-        printf '%s\n' "${inline_values}" > "${build_dir}/values.inline.yaml"
-        value_files+=("${build_dir}/values.inline.yaml")
+      # The merge/chart.yaml-rewrite below is for ACTUAL stacking only — a
+      # dry-run-only copy (nothing to stack) renders from chart.yaml's own
+      # valueFiles, unchanged, now resolved from the copy.
+      if (( _needs_stack )); then
+        if [[ -n "${inline_values}" ]]; then
+          printf '%s\n' "${inline_values}" > "${build_dir}/values.inline.yaml"
+          value_files+=("${build_dir}/values.inline.yaml")
+        fi
+        if ! yq eval-all '. as $item ireduce ({}; . * $item)' "${value_files[@]}" \
+               > "${build_dir}/values.merged.yaml"; then
+          error "addons::render: failed to merge values for ${addon_dir}"
+          rm -rf "${build_dir}"; return 1
+        fi
+        yq -i '.valueFiles = ["values.merged.yaml"]' "${build_dir}/chart.yaml" \
+          || { error "addons::render: failed to set valueFiles in chart.yaml for ${addon_dir}"; rm -rf "${build_dir}"; return 1; }
       fi
-      if ! yq eval-all '. as $item ireduce ({}; . * $item)' "${value_files[@]}" \
-             > "${build_dir}/values.merged.yaml"; then
-        error "addons::render: failed to merge values for ${addon_dir}"
-        rm -rf "${build_dir}"; return 1
-      fi
-      yq -i '.valueFiles = ["values.merged.yaml"]' "${build_dir}/chart.yaml" \
-        || { error "addons::render: failed to set valueFiles in chart.yaml for ${addon_dir}"; rm -rf "${build_dir}"; return 1; }
     fi
   fi
 

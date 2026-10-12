@@ -170,8 +170,17 @@ registry::config_generate() {
       '. + [{ name: $name, ip: $ip, url: $url, domain: $domain, host: "", type: "mirror" }]')
   done
 
-  # Write the full JSON
+  # Write the full JSON. A bootstrap dry run calls driver::export for the
+  # LOK8S_SPEC_*/LOK8S_REGISTRY_* env addon renders read (below) — the
+  # derived VALUES, not a file this cluster's registries don't actually
+  # have yet: write to a disposable temp file instead of the real path
+  # ("nothing in the project changes" — bootstrap::apply exports
+  # LOK8S_BOOTSTRAP_DRYRUN=1 for the duration of a dry run), read the
+  # per-mirror exports back from THAT, then discard it. LOK8S_REGISTRY_JSON
+  # itself still names the real (unwritten) path, same as a normal run.
   LOK8S_REGISTRY_JSON="${domain_dir}/.registries.json"
+  local _reg_write_path="${LOK8S_REGISTRY_JSON}"
+  (( ! ${LOK8S_BOOTSTRAP_DRYRUN:-0} )) || _reg_write_path="$(mktemp)"
   jq -n \
     --argjson shared "$(jq -n --arg v "${shared_enabled}" 'if $v == "true" then true else false end')" \
     --argjson tls "$(jq -n --arg v "${tls_enabled}" 'if $v == "true" then true else false end')" \
@@ -187,7 +196,7 @@ registry::config_generate() {
       network: { name: $net_name, cidr: $net_cidr },
       project_network: $project_network,
       registries: $registries
-    }' > "${LOK8S_REGISTRY_JSON}"
+    }' > "${_reg_write_path}"
 
   # Export scalars for external consumers (libs/image, Tilt, tests)
   export LOK8S_REGISTRY_JSON
@@ -203,8 +212,9 @@ registry::config_generate() {
   local exports
   exports=$(jq -r '.registries[] | select(.type == "mirror") |
     "export LOK8S_REGISTRY_IP_" + (.name | gsub("-";"_") | ascii_upcase) + "=" + .ip' \
-    "${LOK8S_REGISTRY_JSON}")
+    "${_reg_write_path}")
   eval "${exports}"
+  [[ "${_reg_write_path}" == "${LOK8S_REGISTRY_JSON}" ]] || rm -f "${_reg_write_path}"
 }
 
 # ── Query helpers ─────────────────────────────────────────

@@ -17,7 +17,7 @@ import ^libs/bootstrap
 main::provision() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
   local force="${force:-0}"
-  local bootstrap=0 dry_run=0 render_dir="" no_diff=0 only=""
+  local bootstrap=0 dry_run=0 render_dir="" no_diff=0 only="" allow_generators=0
   local -a args=(
     'domain|:^~domain'   'Domain to use'
     'bootstrap|b:+'      'Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)'
@@ -26,6 +26,7 @@ main::provision() {
     'render-dir|:'       "Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory"
     'no-diff|:+'         'Dry run without the kubectl diff: render only, no cluster access'
     'only|:'             'With --bootstrap: apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded'
+    'allow-generators|:+' 'Let --dry-run execute a bash: secrets generator (default: refused — it can run kubectl/lo against the live cluster)'
     "${args[@]:-}"
   )
   :args "Provision a cluster" "${@}"
@@ -34,6 +35,7 @@ main::provision() {
   # precedent), under names no other lib declares.
   local bootstrap_dry_run="${dry_run}" bootstrap_render_dir="${render_dir}"
   local bootstrap_no_diff="${no_diff}" bootstrap_select="${only}"
+  local bootstrap_allow_generators="${allow_generators}"
   # Same reason as `lo build` (see the note there): the domain can come from
   # clusters/.active — state a `lo use` persisted hours ago — and provision
   # reconciles THAT domain's infrastructure. Cloud drivers additionally gate on
