@@ -41,6 +41,9 @@ generators:
 
 resources:
   - namespace.yaml
+  # The controller plugin's namespaced Secret access (see the controller
+  # block below).
+  - ctrlplugin-secrets-rbac.yaml
 
 # ── Least privilege for the CSI node plugin ───────────────────────────────────
 # The node plugin DaemonSet runs on every node (tolerations above), so its
@@ -110,6 +113,46 @@ resources:
 # `mounter: rbd-nbd` healer, block-volume usage metrics)? Bootstrap the
 # `rook-ceph-csi-kms` addon after this one: it binds these five rules to the
 # node plugin ServiceAccount again. See docs/guide/addons.md.
+#
+# ── Least privilege for the CSI controller plugin ─────────────────────────────
+# The controller plugin Deployment (ceph-csi + the external-provisioner,
+# -attacher, -resizer and -snapshotter sidecars) gets the chart's full
+# upstream ClusterRole too (templates/*-ctrlplugin-cr-rbac.yaml: 29 rules for
+# rbd and nvmeof, 27 for cephfs, 16 for nfs). Four of them are wider than any
+# caller, ceph-csi v3.17.0 and the pinned sidecars:
+#
+#   secrets get/list/watch     the four sidecars do a plain Get on the
+#                              StorageClass-referenced secret (provisioner
+#                              controller.go, attacher csi_handler.go, resizer
+#                              csi_resizer.go, snapshotter utils/util.go);
+#                              ceph-csi reads the KMS Secrets. No list/watch
+#                              caller exists: the Secret informer in
+#                              internal/util/k8s/secrets.go is dead code.
+#   configmaps get             KMS only (initKMS, controllerserver.go).
+#   serviceaccounts get        KMS only (vaulttenantsa).
+#   serviceaccounts/token      KMS only (TokenRequest for the tenant
+#     create                   ServiceAccount): mint a token for any
+#                              ServiceAccount, from the controller pod.
+#
+# The patches remove them (rbd/nvmeof: rules 16, 15, 14, 0; cephfs: 24, 23,
+# 1, 0; nfs: its single cluster-wide `secrets get`, rule 7) and
+# ctrlplugin-secrets-rbac.yaml gives back the one thing the sidecars use: a
+# namespaced `get` on Rook's provisioner secrets in the Rook namespace. Kept:
+# tokenreviews and subjectaccessreviews create (no escalation; the
+# external-snapshot-metadata sidecar needs them when a
+# SnapshotMetadataService exists) and every PV/PVC/snapshot/attachment rule.
+#
+# A StorageClass whose secret has another name or lives in another namespace
+# needs its own Role + RoleBinding there: without it the sidecar gets 403 and
+# the PVC stays Pending (expand and snapshot fail the same way); existing
+# mounts are unaffected. See docs/guide/addons.md.
+#
+# COSI: the rook-ceph chart also ships a ClusterRoleBinding for the Ceph COSI
+# driver ServiceAccount (objectstorage-provisioner: secrets get/create/
+# update/delete in every namespace). This addon deploys no CephCOSIDriver and
+# no pod runs as that ServiceAccount, so the binding is deleted below. A
+# cluster that runs the COSI driver re-adds it from its own target (the
+# snippet is in docs/guide/addons.md).
 patches:
   # rbd and nvmeof: ten rules in the same order.
   - target:
@@ -171,3 +214,76 @@ patches:
         value: { apiGroups: [""], resources: [secrets], verbs: [get, list, watch] }
       - op: remove
         path: /rules/1
+  # ── controller plugin ──
+  # rbd and nvmeof: 29 rules in the same order.
+  - target:
+      kind: ClusterRole
+      name: ^(rook-ceph-rbd|rbd|rook-ceph-nvmeof|nvmeof)-csi-ceph-com-ctrlplugin-cr$
+    patch: |-
+      - op: test
+        path: /rules/16
+        value: { apiGroups: [""], resources: [serviceaccounts/token], verbs: [create] }
+      - op: remove
+        path: /rules/16
+      - op: test
+        path: /rules/15
+        value: { apiGroups: [""], resources: [serviceaccounts], verbs: [get] }
+      - op: remove
+        path: /rules/15
+      - op: test
+        path: /rules/14
+        value: { apiGroups: [""], resources: [configmaps], verbs: [get] }
+      - op: remove
+        path: /rules/14
+      - op: test
+        path: /rules/0
+        value: { apiGroups: [""], resources: [secrets], verbs: [get, list, watch] }
+      - op: remove
+        path: /rules/0
+  # cephfs: 27 rules, its own order.
+  - target:
+      kind: ClusterRole
+      name: ^(rook-ceph-cephfs|cephfs)-csi-ceph-com-ctrlplugin-cr$
+    patch: |-
+      - op: test
+        path: /rules/24
+        value: { apiGroups: [""], resources: [serviceaccounts/token], verbs: [create] }
+      - op: remove
+        path: /rules/24
+      - op: test
+        path: /rules/23
+        value: { apiGroups: [""], resources: [serviceaccounts], verbs: [get] }
+      - op: remove
+        path: /rules/23
+      - op: test
+        path: /rules/1
+        value: { apiGroups: [""], resources: [configmaps], verbs: [get] }
+      - op: remove
+        path: /rules/1
+      - op: test
+        path: /rules/0
+        value: { apiGroups: [""], resources: [secrets], verbs: [get, list, watch] }
+      - op: remove
+        path: /rules/0
+  # nfs: 16 rules; only its cluster-wide secrets get goes.
+  - target:
+      kind: ClusterRole
+      name: ^(rook-ceph-nfs|nfs)-csi-ceph-com-ctrlplugin-cr$
+    patch: |-
+      - op: test
+        path: /rules/7
+        value: { apiGroups: [""], resources: [secrets], verbs: [get] }
+      - op: remove
+        path: /rules/7
+  # ── COSI ──
+  # With a target the delete is a no-op when the binding is absent (a render
+  # of the fixtures alone); without one kustomize fails on the missing object.
+  - target:
+      kind: ClusterRoleBinding
+      name: ^objectstorage-provisioner-role-binding$
+    patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: objectstorage-provisioner-role-binding

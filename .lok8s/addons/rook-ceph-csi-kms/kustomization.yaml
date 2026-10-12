@@ -1,8 +1,9 @@
-# rook-ceph-csi-kms — opt-in. Gives the Ceph CSI node plugin back the five
-# API grants the `rook-ceph` addon removes from its ClusterRole (see the
-# `patches:` block in ../rook-ceph/kustomization.yaml for the per-rule
-# evidence): Secrets, ConfigMaps, ServiceAccounts, ServiceAccount tokens and
-# TokenReviews. Bootstrap it only when a cluster uses one of the ceph-csi
+# rook-ceph-csi-kms — opt-in. Gives the Ceph CSI node plugin AND controller
+# plugin back the API grants the `rook-ceph` addon removes from their
+# ClusterRoles (see the `patches:` blocks in ../rook-ceph/kustomization.yaml
+# for the per-rule evidence): Secrets, ConfigMaps, ServiceAccounts,
+# ServiceAccount tokens and TokenReviews. A KMS runs on both sides: the
+# controller plugin creates the encryption key, the node plugin unlocks it. Bootstrap it only when a cluster uses one of the ceph-csi
 # features that reads them through the Kubernetes API:
 #
 #   - volume encryption with an external KMS (`encrypted: "true"` +
@@ -17,9 +18,9 @@
 # credentials inside the CSI request.
 #
 # What this addon restores is the upstream rule set, not the minimum each
-# feature needs. With it, root on any node that runs the plugin can read
-# every Secret in the cluster and mint a token for any ServiceAccount again
-# (`serviceaccounts/token create` is cluster-wide). Keep it off unless one of
+# feature needs. With it, root on any node that runs the plugin, and the
+# controller pod, can read every Secret in the cluster and mint a token for
+# any ServiceAccount again (`serviceaccounts/token create` is cluster-wide). Keep it off unless one of
 # the three cases above applies. Narrower, per-feature grants are tracked in
 # https://github.com/kernpilot/lok8s/issues/265.
 #
@@ -29,11 +30,11 @@
 #       - rook-ceph-csi-kms:
 #           dependsOn: [rook-ceph]
 #
-# The binding targets the RBD node plugin ServiceAccount the `rook-ceph`
-# addon creates. A cluster that also turns on the CephFS or NVMe-oF driver
-# adds its ServiceAccount (`rook-ceph-cephfs-csi-ceph-com-nodeplugin-sa`,
-# `rook-ceph-nvmeof-csi-ceph-com-nodeplugin-sa`) as a further subject from a
-# patch in its own target.
+# The binding targets the RBD node plugin and controller plugin
+# ServiceAccounts the `rook-ceph` addon creates. A cluster that also turns on
+# the CephFS or NVMe-oF driver adds their ServiceAccounts
+# (`rook-ceph-<type>-csi-ceph-com-nodeplugin-sa` and `…-ctrlplugin-sa`) as
+# further subjects from a patch in its own target.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

@@ -1,24 +1,22 @@
 package addons
 
 // rookceph_rbac_test.go — the render-level gate for the least-privilege
-// patch in the rook-ceph addon. The addon strips five rules from the Ceph
-// CSI node plugin ClusterRoles with guarded JSON patches; nothing else in
-// the test matrix renders those patches, so a patch that silently stops
-// matching (a renamed target, a reordered chart) would stay green.
+// patches in the rook-ceph addon. The addon strips rules from the Ceph CSI
+// node plugin and controller plugin ClusterRoles with guarded JSON patches,
+// gives the controller plugin a namespaced Role for the provisioner secrets
+// and deletes the COSI ClusterRoleBinding; nothing else in the test matrix
+// renders those patches, so a patch that silently stops matching (a renamed
+// target, a reordered chart) would stay green.
 //
-// TestRookCephNodePluginRBACPatch runs the real `patches:` block of the
-// addon's kustomization.yaml over a committed fixture of the chart's node
-// plugin ClusterRoles at the pinned ceph-csi-drivers version, through
-// internal/render (the pinned kustomize on core, in-process on lo-full),
-// and asserts the effective roles. The expected role names are derived
-// from csi-drivers.yaml the way the chart derives them, so a dropped name
-// pin fails the test. TestRookCephNodePluginFixtureMatchesChart re-renders
-// the chart itself (khelm, online) and diffs the fixture against it; it
-// runs on CI and on request (TESTING.md: LOK8S_ONLINE_TESTS).
-//
-// Rules and roles are compared as complete objects (every field the chart
-// emits: resourceNames, nonResourceURLs, an aggregationRule, …), not as a
-// projection, so a fixture or a chart that gains a field cannot pass.
+// TestRookCephCSIRBACPatches runs the real `patches:` block of the addon's
+// kustomization.yaml over committed fixtures of the chart's ClusterRoles at
+// the pinned ceph-csi-drivers version, through internal/render (the pinned
+// kustomize on core, in-process on lo-full), and asserts the effective roles
+// as whole objects. The expected role names are derived from
+// csi-drivers.yaml the way the chart derives them, so a dropped name pin
+// fails the test. TestRookCephFixturesMatchChart re-renders the chart itself
+// (khelm, online), diffs the fixtures against it and checks the addon as
+// shipped; it runs on CI and on request (TESTING.md: LOK8S_ONLINE_TESTS).
 
 import (
 	"bufio"
@@ -58,74 +56,95 @@ func TestMain(m *testing.M) {
 const (
 	rookCephAddon    = "internal/assets/lok8s/addons/rook-ceph"
 	rookCephKMSAddon = "internal/assets/lok8s/addons/rook-ceph-csi-kms"
-	rookCephFixture  = "testdata/rook-ceph/nodeplugin-clusterroles.yaml"
+	rookCephNS       = "rook-ceph"
 	// onlineTestsEnv opts the chart re-render in outside CI (it downloads
 	// the pinned chart).
 	onlineTestsEnv = "LOK8S_ONLINE_TESTS"
+
+	ctrlSecretsRole = "rook-ceph-csi-ctrlplugin-secrets"
+	cosiBinding     = "objectstorage-provisioner-role-binding"
+	kmsRole         = "rook-ceph-csi-nodeplugin-kms-cr"
 )
 
-// chartDrivers are the driver types the chart knows. patchedDrivers are the
-// ones whose node plugin role carries the five removed rules; nfs carries
-// `nodes get` only and must stay that way (the gate checks it too).
+// chartDrivers are the driver types the chart knows.
+var chartDrivers = []string{"rbd", "cephfs", "nfs", "nvmeof"}
+
+// nodeForbidden and ctrlForbidden are the API resources the patches strip
+// on each side; no narrowed role may grant one of them. The controller
+// plugin keeps tokenreviews (and subjectaccessreviews) create: no
+// escalation path, and the snapshot-metadata sidecar needs them.
 var (
-	chartDrivers   = []string{"rbd", "cephfs", "nfs", "nvmeof"}
-	patchedDrivers = []string{"rbd", "cephfs", "nvmeof"}
+	nodeForbidden = []string{"secrets", "configmaps", "serviceaccounts", "serviceaccounts/token", "tokenreviews"}
+	ctrlForbidden = []string{"secrets", "configmaps", "serviceaccounts", "serviceaccounts/token"}
 )
-
-// removedResources are the API resources the patch must strip from every
-// node plugin ClusterRole.
-var removedResources = []string{"secrets", "configmaps", "serviceaccounts", "serviceaccounts/token", "tokenreviews"}
 
 // rule builds a PolicyRule the way yaml.v3 decodes one into a generic map
 // (sequences as []any), so expected and decoded rules compare with
 // reflect.DeepEqual.
 func rule(apiGroups, resources, verbs []string) map[string]any {
-	toAny := func(ss []string) []any {
-		out := make([]any, len(ss))
-		for i, s := range ss {
-			out[i] = s
-		}
-		return out
-	}
 	return map[string]any{"apiGroups": toAny(apiGroups), "resources": toAny(resources), "verbs": toAny(verbs)}
 }
 
-// rbdKept is the effective rule list after the patch for the rbd order,
-// which nvmeof shares.
-var rbdKept = []map[string]any{
-	rule([]string{""}, []string{"persistentvolumes"}, []string{"get", "list"}),
-	rule([]string{"storage.k8s.io"}, []string{"volumeattachments"}, []string{"get", "list"}),
-	rule([]string{""}, []string{"nodes"}, []string{"get"}),
-	rule([]string{""}, []string{"events"}, []string{"list", "watch", "create", "update", "patch"}),
-	rule([]string{""}, []string{"persistentvolumeclaims"}, []string{"get"}),
+func toAny(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
 }
 
-// keptRules is the effective rule list per driver type after the patch.
-// nfs is untouched: its chart role is the whole list.
-var keptRules = map[string][]map[string]any{
-	"rbd":    rbdKept,
-	"nvmeof": rbdKept,
-	"cephfs": {
-		rule([]string{""}, []string{"nodes"}, []string{"get"}),
-		rule([]string{""}, []string{"events"}, []string{"list", "watch", "create", "update", "patch"}),
-		rule([]string{""}, []string{"persistentvolumes", "persistentvolumeclaims"}, []string{"get"}),
+var (
+	secretsGLW = rule([]string{""}, []string{"secrets"}, []string{"get", "list", "watch"})
+	configmaps = rule([]string{""}, []string{"configmaps"}, []string{"get"})
+	saGet      = rule([]string{""}, []string{"serviceaccounts"}, []string{"get"})
+	saToken    = rule([]string{""}, []string{"serviceaccounts/token"}, []string{"create"})
+	tokenRev   = rule([]string{"authentication.k8s.io"}, []string{"tokenreviews"}, []string{"create"})
+	kmsFive    = []map[string]any{secretsGLW, configmaps, saGet, saToken, tokenRev}
+	kmsFour    = []map[string]any{secretsGLW, configmaps, saGet, saToken}
+)
+
+// plugin describes one ClusterRole family the addon patches: the chart's
+// name suffix, its fixture, and per driver type the rules the patch must
+// remove (nil: the driver is not patched on this side) and the count that
+// must remain.
+type plugin struct {
+	name      string
+	suffix    string
+	fixture   string
+	forbidden []string
+	removed   map[string][]map[string]any
+	kept      map[string]int
+}
+
+var plugins = []plugin{
+	{
+		name: "nodeplugin", suffix: "-nodeplugin-cr", fixture: "testdata/rook-ceph/nodeplugin-clusterroles.yaml",
+		forbidden: nodeForbidden,
+		removed:   map[string][]map[string]any{"rbd": kmsFive, "nvmeof": kmsFive, "cephfs": kmsFive, "nfs": nil},
+		kept:      map[string]int{"rbd": 5, "nvmeof": 5, "cephfs": 3, "nfs": 1},
 	},
-	"nfs": {
-		rule([]string{""}, []string{"nodes"}, []string{"get"}),
+	{
+		name: "ctrlplugin", suffix: "-ctrlplugin-cr", fixture: "testdata/rook-ceph/ctrlplugin-clusterroles.yaml",
+		forbidden: ctrlForbidden,
+		removed: map[string][]map[string]any{
+			"rbd": kmsFour, "nvmeof": kmsFour, "cephfs": kmsFour,
+			"nfs": {rule([]string{""}, []string{"secrets"}, []string{"get"})},
+		},
+		kept: map[string]int{"rbd": 25, "nvmeof": 25, "cephfs": 23, "nfs": 15},
 	},
 }
 
-// clusterRole is one ClusterRole as a generic document: metadata reduced to
-// the name (the addon's label transformer adds labels the chart does not),
-// everything else exactly as decoded.
-type clusterRole struct {
-	Name string
-	Doc  map[string]any
+// object is one Kubernetes object as a generic document, metadata reduced
+// to name (+ namespace) because the addon's label transformer adds labels
+// the chart does not.
+type object struct {
+	Kind, Name, Namespace string
+	Doc                   map[string]any
 }
 
-// Rules returns the role's rules as generic maps.
-func (c clusterRole) Rules() []map[string]any {
-	seq, _ := c.Doc["rules"].([]any)
+// Rules returns the object's rules as generic maps.
+func (o object) Rules() []map[string]any {
+	seq, _ := o.Doc["rules"].([]any)
 	rules := make([]map[string]any, 0, len(seq))
 	for _, r := range seq {
 		m, _ := r.(map[string]any)
@@ -134,12 +153,12 @@ func (c clusterRole) Rules() []map[string]any {
 	return rules
 }
 
-// decodeClusterRoles returns the ClusterRoles of a multi-document stream
-// whose name ends in -nodeplugin-cr, by name. Any decode error other than
-// EOF fails the test: a corrupt stream must never read as "no roles".
-func decodeClusterRoles(t *testing.T, stream []byte) map[string]clusterRole {
+// decodeObjects returns every object of a multi-document stream, keyed by
+// kind/name. Any decode error other than EOF fails the test: a corrupt
+// stream must never read as "nothing there".
+func decodeObjects(t *testing.T, stream []byte) map[string]object {
 	t.Helper()
-	roles := map[string]clusterRole{}
+	objs := map[string]object{}
 	dec := yaml.NewDecoder(strings.NewReader(string(stream)))
 	for {
 		var doc map[string]any
@@ -148,29 +167,43 @@ func decodeClusterRoles(t *testing.T, stream []byte) map[string]clusterRole {
 			break
 		}
 		if err != nil {
-			t.Fatalf("decoding the ClusterRole stream: %v", err)
+			t.Fatalf("decoding the object stream: %v", err)
 		}
-		if doc["kind"] != "ClusterRole" {
-			continue
-		}
+		kind, _ := doc["kind"].(string)
 		meta, _ := doc["metadata"].(map[string]any)
 		name, _ := meta["name"].(string)
-		if !strings.HasSuffix(name, "-nodeplugin-cr") {
+		ns, _ := meta["namespace"].(string)
+		if kind == "" || name == "" {
 			continue
 		}
-		doc["metadata"] = map[string]any{"name": name}
-		roles[name] = clusterRole{Name: name, Doc: doc}
+		m := map[string]any{"name": name}
+		if ns != "" {
+			m["namespace"] = ns
+		}
+		doc["metadata"] = m
+		objs[kind+"/"+name] = object{Kind: kind, Name: name, Namespace: ns, Doc: doc}
 	}
-	return roles
+	return objs
 }
 
-func sortedNames(roles map[string]clusterRole) []string {
-	names := make([]string, 0, len(roles))
-	for n := range roles {
-		names = append(names, n)
+// clusterRoles filters decoded objects to the ClusterRoles with a suffix.
+func clusterRoles(objs map[string]object, suffix string) map[string]object {
+	out := map[string]object{}
+	for _, o := range objs {
+		if o.Kind == "ClusterRole" && strings.HasSuffix(o.Name, suffix) {
+			out[o.Name] = o
+		}
 	}
-	sort.Strings(names)
-	return names
+	return out
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // canon is the canonical text of a generic document (yaml.v3 sorts map
@@ -195,7 +228,7 @@ func ruleSet(t *testing.T, rules []map[string]any) []string {
 }
 
 // fixtureChartVersion reads the `# chart: ceph-csi-drivers <version>` header
-// line of the fixture.
+// line of a fixture.
 func fixtureChartVersion(t *testing.T, path string) string {
 	t.Helper()
 	f, err := os.Open(path)
@@ -226,9 +259,9 @@ type csiDrivers struct {
 	} `yaml:"values"`
 }
 
-func readCSIDrivers(t *testing.T, path string) csiDrivers {
+func readCSIDrivers(t *testing.T, addon string) csiDrivers {
 	t.Helper()
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(filepath.Join(addon, "csi-drivers.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +270,7 @@ func readCSIDrivers(t *testing.T, path string) csiDrivers {
 		t.Fatal(err)
 	}
 	if spec.Chart != "ceph-csi-drivers" || spec.Version == "" {
-		t.Fatalf("%s: chart=%q version=%q", path, spec.Chart, spec.Version)
+		t.Fatalf("csi-drivers.yaml: chart=%q version=%q", spec.Chart, spec.Version)
 	}
 	return spec
 }
@@ -248,12 +281,13 @@ func normalizeDriverName(name string) string {
 	return strings.ReplaceAll(strings.ToLower(name), ".", "-")
 }
 
-// expectedRoleNames derives, per chart driver type, the node plugin
-// ClusterRole names the chart renders for this addon: the name pinned in
-// csi-drivers.yaml (or the chart default when none is pinned) and the chart
-// default itself, which a fork of the addon can keep.
-func expectedRoleNames(spec csiDrivers) map[string]string {
-	names := map[string]string{} // role name -> driver type
+// expectedNames derives, per chart driver type, the normalized driver names
+// the chart renders for this addon: the name pinned in csi-drivers.yaml (or
+// the chart default when none is pinned) and the chart default itself, which
+// a fork of the addon can keep. The chart appends -nodeplugin-cr,
+// -ctrlplugin-cr, -nodeplugin-sa, -ctrlplugin-sa to them.
+func expectedNames(spec csiDrivers) map[string]string {
+	names := map[string]string{} // normalized name -> driver type
 	for _, typ := range chartDrivers {
 		def := typ + ".csi.ceph.com"
 		pinned := spec.Values.Drivers[typ].Name
@@ -261,17 +295,35 @@ func expectedRoleNames(spec csiDrivers) map[string]string {
 			pinned = def
 		}
 		for _, n := range []string{pinned, def} {
-			names[normalizeDriverName(n)+"-nodeplugin-cr"] = typ
+			names[normalizeDriverName(n)] = typ
 		}
 	}
 	return names
 }
 
+// withSuffix maps expectedNames to object names.
+func withSuffix(names map[string]string, suffix string) map[string]string {
+	out := map[string]string{}
+	for n, typ := range names {
+		out[n+suffix] = typ
+	}
+	return out
+}
+
+// patchEntry is one entry of the kustomization's patches block.
+type patchEntry struct {
+	Target struct {
+		Kind string `yaml:"kind"`
+		Name string `yaml:"name"`
+	} `yaml:"target"`
+	Patch string `yaml:"patch"`
+}
+
 // patchesNode returns the `patches:` mapping value of the addon's
-// kustomization.yaml, untouched.
-func patchesNode(t *testing.T, path string) *yaml.Node {
+// kustomization.yaml, untouched, and its decoded entries.
+func patchesNode(t *testing.T, addon string) (*yaml.Node, []patchEntry) {
 	t.Helper()
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(filepath.Join(addon, "kustomization.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,28 +334,43 @@ func patchesNode(t *testing.T, path string) *yaml.Node {
 	doc := root.Content[0]
 	for i := 0; i+1 < len(doc.Content); i += 2 {
 		if doc.Content[i].Value == "patches" {
-			return doc.Content[i+1]
+			var entries []patchEntry
+			if err := doc.Content[i+1].Decode(&entries); err != nil {
+				t.Fatal(err)
+			}
+			return doc.Content[i+1], entries
 		}
 	}
-	t.Fatalf("%s: no patches: block", path)
-	return nil
+	t.Fatal("kustomization.yaml: no patches: block")
+	return nil, nil
 }
 
-// patchTargets compiles target.name of every entry in the patches block.
-// kustomize treats the name as a regular expression; the addon anchors it.
-func patchTargets(t *testing.T, patches *yaml.Node) []*regexp.Regexp {
+// clusterRoleTargets compiles the ClusterRole targets (kustomize treats the
+// name as a regular expression; the addon anchors it) and returns the
+// `$patch: delete` entries by kind/name.
+func clusterRoleTargets(t *testing.T, entries []patchEntry) (targets []*regexp.Regexp, deletes map[string]bool) {
 	t.Helper()
-	var entries []struct {
-		Target struct {
-			Kind string `yaml:"kind"`
-			Name string `yaml:"name"`
-		} `yaml:"target"`
-	}
-	if err := patches.Decode(&entries); err != nil {
-		t.Fatal(err)
-	}
-	var targets []*regexp.Regexp
+	deletes = map[string]bool{}
 	for _, e := range entries {
+		if strings.Contains(e.Patch, "$patch: delete") {
+			// A delete needs a target: without one kustomize fails when the
+			// object is absent from the render. The body must name the same
+			// object.
+			var obj struct {
+				Kind     string `yaml:"kind"`
+				Metadata struct {
+					Name string `yaml:"name"`
+				} `yaml:"metadata"`
+			}
+			if err := yaml.Unmarshal([]byte(e.Patch), &obj); err != nil {
+				t.Fatal(err)
+			}
+			if e.Target.Kind != obj.Kind || e.Target.Name != "^"+obj.Metadata.Name+"$" {
+				t.Fatalf("$patch: delete for %s/%s has target %+v, want the same object, anchored", obj.Kind, obj.Metadata.Name, e.Target)
+			}
+			deletes[obj.Kind+"/"+obj.Metadata.Name] = true
+			continue
+		}
 		if e.Target.Kind != "ClusterRole" {
 			t.Fatalf("patch target kind %q, want ClusterRole", e.Target.Kind)
 		}
@@ -312,7 +379,7 @@ func patchTargets(t *testing.T, patches *yaml.Node) []*regexp.Regexp {
 		}
 		targets = append(targets, regexp.MustCompile(e.Target.Name))
 	}
-	return targets
+	return targets, deletes
 }
 
 // requireRenderToolchain skips (fails on CI) when core would exec a
@@ -336,18 +403,23 @@ func projectPaths(root string) *config.Paths {
 	return &config.Paths{Base: root, Bin: filepath.Join(root, ".bin")}
 }
 
-// renderPatched applies the addon's patches block to the fixture through
-// the render pipeline and returns the ClusterRoles by name.
-func renderPatched(t *testing.T, root string, fixture []byte, patches *yaml.Node) map[string]clusterRole {
+// renderPatched applies the addon's patches block to the fixtures through
+// the render pipeline and returns the objects by kind/name.
+func renderPatched(t *testing.T, root string, fixtures [][]byte, patches *yaml.Node) map[string]object {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "clusterroles.yaml"), fixture, 0o644); err != nil {
-		t.Fatal(err)
+	var resources []*yaml.Node
+	for i, fx := range fixtures {
+		name := "fixture" + string(rune('a'+i)) + ".yaml"
+		if err := os.WriteFile(filepath.Join(dir, name), fx, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		resources = append(resources, &yaml.Node{Kind: yaml.ScalarNode, Value: name})
 	}
 	kz := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
 		{Kind: yaml.ScalarNode, Value: "apiVersion"}, {Kind: yaml.ScalarNode, Value: "kustomize.config.k8s.io/v1beta1"},
 		{Kind: yaml.ScalarNode, Value: "kind"}, {Kind: yaml.ScalarNode, Value: "Kustomization"},
-		{Kind: yaml.ScalarNode, Value: "resources"}, {Kind: yaml.SequenceNode, Content: []*yaml.Node{{Kind: yaml.ScalarNode, Value: "clusterroles.yaml"}}},
+		{Kind: yaml.ScalarNode, Value: "resources"}, {Kind: yaml.SequenceNode, Content: resources},
 		{Kind: yaml.ScalarNode, Value: "patches"}, patches,
 	}}
 	out, err := yaml.Marshal(kz)
@@ -360,34 +432,19 @@ func renderPatched(t *testing.T, root string, fixture []byte, patches *yaml.Node
 	var stderr strings.Builder
 	rendered, err := render.Build(context.Background(), dir, render.Options{Paths: projectPaths(root), Stderr: &stderr})
 	if err != nil {
-		t.Fatalf("render of the patched fixture failed: %v\n%s", err, stderr.String())
+		t.Fatalf("render of the patched fixtures failed: %v\n%s", err, stderr.String())
 	}
-	return decodeClusterRoles(t, rendered)
+	return decodeObjects(t, rendered)
 }
 
-// kmsAddonRules reads the ClusterRole the rook-ceph-csi-kms addon ships.
-func kmsAddonRules(t *testing.T, root string) []map[string]any {
+// readObjects decodes one YAML file of the addon.
+func readObjects(t *testing.T, path string) map[string]object {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(root, rookCephKMSAddon, "rbac.yaml"))
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
-	for {
-		var doc map[string]any
-		err := dec.Decode(&doc)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			t.Fatalf("decoding rook-ceph-csi-kms/rbac.yaml: %v", err)
-		}
-		if doc["kind"] == "ClusterRole" {
-			return clusterRole{Doc: doc}.Rules()
-		}
-	}
-	t.Fatal("rook-ceph-csi-kms/rbac.yaml: no ClusterRole")
-	return nil
+	return decodeObjects(t, raw)
 }
 
 // resourcesOf returns a rule's resources.
@@ -402,128 +459,233 @@ func resourcesOf(r map[string]any) []string {
 	return out
 }
 
-// grantsRemoved reports whether a rule grants one of the removed resources.
-func grantsRemoved(r map[string]any) bool {
-	return slices.ContainsFunc(resourcesOf(r), func(res string) bool { return slices.Contains(removedResources, res) })
+// grantsForbidden reports whether a rule grants one of the forbidden
+// resources.
+func grantsForbidden(r map[string]any, forbidden []string) bool {
+	return slices.ContainsFunc(resourcesOf(r), func(res string) bool { return slices.Contains(forbidden, res) })
 }
 
-// anyRules converts expected rules to the []any shape yaml.v3 decodes.
-func anyRules(rules []map[string]any) []any {
-	out := make([]any, len(rules))
-	for i, r := range rules {
-		out[i] = r
+// subjectNames returns the ServiceAccount subject names of a binding, all
+// of which must live in the Rook namespace.
+func subjectNames(t *testing.T, b object) []string {
+	t.Helper()
+	seq, _ := b.Doc["subjects"].([]any)
+	var names []string
+	for _, s := range seq {
+		m, _ := s.(map[string]any)
+		if m["kind"] != "ServiceAccount" || m["namespace"] != rookCephNS {
+			t.Errorf("%s/%s: subject %v is not a ServiceAccount in %s", b.Kind, b.Name, m, rookCephNS)
+		}
+		n, _ := m["name"].(string)
+		names = append(names, n)
 	}
+	sort.Strings(names)
+	return names
+}
+
+// ctrlplugin SA names for every expected driver name, sorted.
+func ctrlplugingSANames(names map[string]string) []string {
+	var out []string
+	for n := range names {
+		out = append(out, n+"-ctrlplugin-sa")
+	}
+	sort.Strings(out)
 	return out
 }
 
-func TestRookCephNodePluginRBACPatch(t *testing.T) {
-	t.Parallel()
-	root := testutil.RepoRoot(t)
-	addon := filepath.Join(root, rookCephAddon)
-	spec := readCSIDrivers(t, filepath.Join(addon, "csi-drivers.yaml"))
-
-	// The fixture is the chart output at the pinned version. A bump of the
-	// pin without a refreshed fixture would test the patch against stale
-	// rules, so the two versions must agree.
-	if fix := fixtureChartVersion(t, rookCephFixture); spec.Version != fix {
-		t.Fatalf("csi-drivers.yaml pins ceph-csi-drivers %s but the fixture was rendered from %s: refresh %s (see its header)", spec.Version, fix, rookCephFixture)
-	}
-	fixtureRaw, err := os.ReadFile(rookCephFixture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture := decodeClusterRoles(t, fixtureRaw)
-
-	// The role names come from csi-drivers.yaml the way the chart derives
-	// them. The fixture must carry exactly those roles. Every role of a
-	// patched driver must be matched by exactly one patch target (a target
-	// the chart never emits is a silent no-op for kustomize: the cephfs role
-	// was one, before the addon pinned the cephfs driver name); the nfs
-	// roles by none.
-	expected := expectedRoleNames(spec)
-	var want []string
-	for n := range expected {
-		want = append(want, n)
-	}
-	sort.Strings(want)
-	if got := sortedNames(fixture); !reflect.DeepEqual(got, want) {
-		t.Fatalf("fixture ClusterRoles %v, want (derived from csi-drivers.yaml) %v", got, want)
-	}
-	patches := patchesNode(t, filepath.Join(addon, "kustomization.yaml"))
-	targets := patchTargets(t, patches)
-	for _, n := range want {
-		matches := 0
-		for _, re := range targets {
-			if re.MatchString(n) {
-				matches++
-			}
-		}
-		wantMatches := 0
-		if slices.Contains(patchedDrivers, expected[n]) {
-			wantMatches = 1
-		}
-		if matches != wantMatches {
-			t.Errorf("%s: matched by %d patch targets, want %d", n, matches, wantMatches)
-		}
-	}
-	for _, re := range targets {
-		if !slices.ContainsFunc(want, re.MatchString) {
-			t.Errorf("patch target %s matches no expected ClusterRole", re)
-		}
-	}
-	if t.Failed() {
-		t.FailNow()
-	}
-
-	requireRenderToolchain(t, root, "the rook-ceph RBAC render gate")
-	roles := renderPatched(t, root, fixtureRaw, patches)
-	kms := ruleSet(t, kmsAddonRules(t, root))
-	for _, name := range want {
+// checkPluginRoles asserts, for one plugin family, that roles (the effective
+// render) equals the fixture with exactly the expected rules removed.
+func checkPluginRoles(t *testing.T, p plugin, names map[string]string, fixture, roles map[string]object, kms []string) {
+	t.Helper()
+	expected := withSuffix(names, p.suffix)
+	for _, name := range sortedKeys(expected) {
+		typ := expected[name]
 		got, ok := roles[name]
 		if !ok {
 			t.Errorf("%s: missing from the render", name)
 			continue
 		}
 		for _, r := range got.Rules() {
-			if grantsRemoved(r) {
+			if grantsForbidden(r, p.forbidden) {
 				t.Errorf("%s still grants %s", name, canon(t, r))
 			}
 		}
-		// The effective role is the fixture role with exactly the kept
-		// rules: every other field of the object is untouched.
+		// The effective role is the fixture role with exactly the expected
+		// rules removed, order and every other field untouched.
+		removedSet := ruleSet(t, p.removed[typ])
+		var kept []any
+		var removed []map[string]any
+		for _, r := range fixture[name].Rules() {
+			if slices.Contains(removedSet, canon(t, r)) {
+				removed = append(removed, r)
+			} else {
+				kept = append(kept, r)
+			}
+		}
+		if rs := ruleSet(t, removed); !reflect.DeepEqual(rs, removedSet) {
+			t.Errorf("%s: the fixture carries %d of the %d rules the patch must remove: %v", name, len(removed), len(p.removed[typ]), rs)
+		}
+		if len(kept) != p.kept[typ] {
+			t.Errorf("%s: %d rules kept, want %d", name, len(kept), p.kept[typ])
+		}
 		wantDoc := maps.Clone(fixture[name].Doc)
-		wantDoc["rules"] = anyRules(keptRules[expected[name]])
+		wantDoc["rules"] = kept
 		if !reflect.DeepEqual(got.Doc, wantDoc) {
 			t.Errorf("%s: effective ClusterRole\n got: %s\nwant: %s", name, canon(t, got.Doc), canon(t, wantDoc))
 		}
-		// What the patch removed is exactly what rook-ceph-csi-kms gives
-		// back: fixture minus kept == the KMS addon's ClusterRole (empty
-		// for nfs, which the patch does not touch).
-		kept := ruleSet(t, got.Rules())
-		var removed []map[string]any
-		for _, r := range fixture[name].Rules() {
-			if !slices.Contains(kept, canon(t, r)) {
-				removed = append(removed, r)
+		// What the patch removed is what rook-ceph-csi-kms gives back: the
+		// node plugin's five rules exactly; the controller plugin's four
+		// (it keeps tokenreviews). Not for nfs: it has no KMS, and its
+		// cluster-wide `secrets get` is replaced by the namespaced Role.
+		if p.removed[typ] == nil || typ == "nfs" {
+			continue
+		}
+		for _, r := range removedSet {
+			if !slices.Contains(kms, r) {
+				t.Errorf("%s: removed rule is not restored by rook-ceph-csi-kms: %s", name, r)
 			}
-		}
-		wantRemoved := kms
-		if !slices.Contains(patchedDrivers, expected[name]) {
-			wantRemoved = []string{}
-		}
-		if rs := ruleSet(t, removed); !reflect.DeepEqual(rs, wantRemoved) {
-			t.Errorf("%s: removed rules %v differ from rook-ceph-csi-kms %v", name, rs, wantRemoved)
 		}
 	}
 }
 
-// TestRookCephNodePluginFixtureMatchesChart re-renders the pinned chart
-// through the addon's own generator (khelm, so it downloads the chart) and
-// diffs the node plugin ClusterRoles against the committed fixture as whole
-// objects: the version header alone would let a fixture drift from what the
-// chart really renders. It follows the fixture header's recipe: the addon
-// with its patches removed, every chart driver enabled, once with the
-// addon's pinned driver names and once with the chart defaults.
-func TestRookCephNodePluginFixtureMatchesChart(t *testing.T) {
+func TestRookCephCSIRBACPatches(t *testing.T) {
+	t.Parallel()
+	root := testutil.RepoRoot(t)
+	addon := filepath.Join(root, rookCephAddon)
+	spec := readCSIDrivers(t, addon)
+	names := expectedNames(spec)
+	patches, entries := patchesNode(t, addon)
+	targets, deletes := clusterRoleTargets(t, entries)
+
+	// The COSI ClusterRoleBinding is deleted from the render.
+	if !deletes["ClusterRoleBinding/"+cosiBinding] {
+		t.Errorf("no $patch: delete for ClusterRoleBinding/%s", cosiBinding)
+	}
+
+	fixtures := map[string]map[string]object{}
+	var raws [][]byte
+	for _, p := range plugins {
+		// The fixture is the chart output at the pinned version. A bump of
+		// the pin without a refreshed fixture would test the patch against
+		// stale rules, so the two versions must agree.
+		if fix := fixtureChartVersion(t, p.fixture); spec.Version != fix {
+			t.Fatalf("csi-drivers.yaml pins ceph-csi-drivers %s but %s was rendered from %s: refresh it (see its header)", spec.Version, p.fixture, fix)
+		}
+		raw, err := os.ReadFile(p.fixture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raws = append(raws, raw)
+		fixtures[p.name] = clusterRoles(decodeObjects(t, raw), p.suffix)
+
+		// The role names come from csi-drivers.yaml the way the chart
+		// derives them. The fixture must carry exactly those roles. Every
+		// role the patch covers on this side must be matched by exactly
+		// one target (a target the chart never emits is a silent no-op for
+		// kustomize), every other role by none.
+		expected := withSuffix(names, p.suffix)
+		if got, want := sortedKeys(fixtures[p.name]), sortedKeys(expected); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s fixture ClusterRoles %v, want (derived from csi-drivers.yaml) %v", p.name, got, want)
+		}
+		for _, n := range sortedKeys(expected) {
+			matches := 0
+			for _, re := range targets {
+				if re.MatchString(n) {
+					matches++
+				}
+			}
+			wantMatches := 0
+			if p.removed[expected[n]] != nil {
+				wantMatches = 1
+			}
+			if matches != wantMatches {
+				t.Errorf("%s: matched by %d patch targets, want %d", n, matches, wantMatches)
+			}
+		}
+	}
+	allNames := map[string]bool{}
+	for _, p := range plugins {
+		for n := range withSuffix(names, p.suffix) {
+			allNames[n] = true
+		}
+	}
+	for _, re := range targets {
+		if !slices.ContainsFunc(sortedKeys(allNames), re.MatchString) {
+			t.Errorf("patch target %s matches no expected ClusterRole", re)
+		}
+	}
+
+	// The controller plugin's namespaced Secret access: `get` on Rook's
+	// provisioner secrets by name, bound to every expected ctrlplugin
+	// ServiceAccount.
+	rbac := readObjects(t, filepath.Join(addon, "ctrlplugin-secrets-rbac.yaml"))
+	role, ok := rbac["Role/"+ctrlSecretsRole]
+	if !ok || role.Namespace != rookCephNS {
+		t.Fatalf("Role %s missing or not in %s: %v", ctrlSecretsRole, rookCephNS, sortedKeys(rbac))
+	}
+	wantRule := map[string]any{
+		"apiGroups": toAny([]string{""}), "resources": toAny([]string{"secrets"}),
+		"resourceNames": toAny([]string{"rook-csi-rbd-provisioner", "rook-csi-cephfs-provisioner"}),
+		"verbs":         toAny([]string{"get"}),
+	}
+	if rules := role.Rules(); len(rules) != 1 || !reflect.DeepEqual(rules[0], wantRule) {
+		t.Errorf("Role %s rules\n got: %s\nwant: %s", ctrlSecretsRole, canon(t, rules), canon(t, []any{wantRule}))
+	}
+	binding, ok := rbac["RoleBinding/"+ctrlSecretsRole]
+	if !ok || binding.Namespace != rookCephNS {
+		t.Fatalf("RoleBinding %s missing or not in %s", ctrlSecretsRole, rookCephNS)
+	}
+	if ref, _ := binding.Doc["roleRef"].(map[string]any); ref["kind"] != "Role" || ref["name"] != ctrlSecretsRole {
+		t.Errorf("RoleBinding roleRef = %v", ref)
+	}
+	if got, want := subjectNames(t, binding), ctrlplugingSANames(names); !reflect.DeepEqual(got, want) {
+		t.Errorf("RoleBinding subjects %v, want (derived from csi-drivers.yaml) %v", got, want)
+	}
+	if raw, err := os.ReadFile(filepath.Join(addon, "kustomization.yaml")); err != nil || !strings.Contains(string(raw), "- ctrlplugin-secrets-rbac.yaml") {
+		t.Errorf("kustomization.yaml does not list ctrlplugin-secrets-rbac.yaml as a resource")
+	}
+
+	// rook-ceph-csi-kms binds its ClusterRole to the node plugin AND the
+	// controller plugin ServiceAccount of the rbd driver.
+	kmsObjs := readObjects(t, filepath.Join(root, rookCephKMSAddon, "rbac.yaml"))
+	kmsCR, ok := kmsObjs["ClusterRole/"+kmsRole]
+	if !ok {
+		t.Fatalf("rook-ceph-csi-kms: ClusterRole %s missing", kmsRole)
+	}
+	kms := ruleSet(t, kmsCR.Rules())
+	if !reflect.DeepEqual(kms, ruleSet(t, kmsFive)) {
+		t.Errorf("rook-ceph-csi-kms rules %v, want the five node plugin rules", kms)
+	}
+	var kmsCRB object
+	for _, o := range kmsObjs {
+		if o.Kind == "ClusterRoleBinding" {
+			kmsCRB = o
+		}
+	}
+	if got, want := subjectNames(t, kmsCRB), []string{"rook-ceph-rbd-csi-ceph-com-ctrlplugin-sa", "rook-ceph-rbd-csi-ceph-com-nodeplugin-sa"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("rook-ceph-csi-kms subjects %v, want %v", got, want)
+	}
+	if t.Failed() {
+		t.FailNow()
+	}
+
+	requireRenderToolchain(t, root, "the rook-ceph RBAC render gate")
+	rendered := renderPatched(t, root, raws, patches)
+	for _, p := range plugins {
+		checkPluginRoles(t, p, names, fixtures[p.name], clusterRoles(rendered, p.suffix), kms)
+	}
+}
+
+// TestRookCephFixturesMatchChart re-renders the pinned chart through the
+// addon's own generator (khelm, so it downloads the chart) and diffs both
+// fixtures against it as whole objects: the version header alone would let
+// a fixture drift from what the chart really renders. It follows the fixture
+// headers' recipe: the addon with its patches removed, every chart driver
+// enabled, once with the addon's pinned driver names and once with the
+// chart defaults. A third render is the addon exactly as shipped, which
+// proves the COSI binding is gone, the Role and RoleBinding are in, and the
+// rbd roles are narrowed end to end.
+func TestRookCephFixturesMatchChart(t *testing.T) {
 	t.Parallel()
 	if os.Getenv("CI") == "" && os.Getenv(onlineTestsEnv) == "" {
 		t.Skipf("downloads the pinned chart: runs on CI, or with %s=1", onlineTestsEnv)
@@ -537,21 +699,14 @@ func TestRookCephNodePluginFixtureMatchesChart(t *testing.T) {
 		}
 	}
 	addon := filepath.Join(root, rookCephAddon)
-	expected := expectedRoleNames(readCSIDrivers(t, filepath.Join(addon, "csi-drivers.yaml")))
-	fixtureRaw, err := os.ReadFile(rookCephFixture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture := decodeClusterRoles(t, fixtureRaw)
+	names := expectedNames(readCSIDrivers(t, addon))
 
-	got := map[string]clusterRole{}
-	for _, defaults := range []bool{false, true} {
+	renderCopy := func(mutate func(dir string)) map[string]object {
 		dir := t.TempDir()
 		if err := copyTree(addon, dir); err != nil {
 			t.Fatal(err)
 		}
-		stripPatches(t, filepath.Join(dir, "kustomization.yaml"))
-		enableDrivers(t, filepath.Join(dir, "csi-drivers.yaml"), defaults)
+		mutate(dir)
 		var stderr strings.Builder
 		out, err := render.Build(context.Background(), dir, render.Options{
 			Paths:      projectPaths(root),
@@ -560,25 +715,72 @@ func TestRookCephNodePluginFixtureMatchesChart(t *testing.T) {
 			Stderr:     &stderr,
 		})
 		if err != nil {
-			t.Fatalf("chart render (defaults=%v) failed: %v\n%s", defaults, err, stderr.String())
+			t.Fatalf("chart render failed: %v\n%s", err, stderr.String())
 		}
-		maps.Copy(got, decodeClusterRoles(t, out))
+		return decodeObjects(t, out)
 	}
-	if !reflect.DeepEqual(sortedNames(got), sortedNames(fixture)) {
-		t.Fatalf("chart renders node plugin roles %v, fixture has %v", sortedNames(got), sortedNames(fixture))
+
+	chart := map[string]object{}
+	for _, defaults := range []bool{false, true} {
+		maps.Copy(chart, renderCopy(func(dir string) {
+			stripPatches(t, filepath.Join(dir, "kustomization.yaml"))
+			enableDrivers(t, filepath.Join(dir, "csi-drivers.yaml"), defaults)
+		}))
 	}
-	for n, cr := range got {
-		if !reflect.DeepEqual(cr.Doc, fixture[n].Doc) {
-			t.Errorf("%s: the chart renders\n%s\nbut the fixture has\n%s\nrefresh %s", n, canon(t, cr.Doc), canon(t, fixture[n].Doc), rookCephFixture)
+	for _, p := range plugins {
+		raw, err := os.ReadFile(p.fixture)
+		if err != nil {
+			t.Fatal(err)
 		}
-		// A chart bump must not grow an unpatched role (nfs) into the
-		// removed set unnoticed.
-		if slices.Contains(patchedDrivers, expected[n]) {
+		fixture := clusterRoles(decodeObjects(t, raw), p.suffix)
+		got := clusterRoles(chart, p.suffix)
+		if !reflect.DeepEqual(sortedKeys(got), sortedKeys(fixture)) {
+			t.Fatalf("%s: chart renders %v, fixture has %v", p.name, sortedKeys(got), sortedKeys(fixture))
+		}
+		expected := withSuffix(names, p.suffix)
+		for n, cr := range got {
+			if !reflect.DeepEqual(cr.Doc, fixture[n].Doc) {
+				t.Errorf("%s: the chart renders\n%s\nbut the fixture has\n%s\nrefresh %s", n, canon(t, cr.Doc), canon(t, fixture[n].Doc), p.fixture)
+			}
+			// A chart bump must not grow an unpatched role into the removed
+			// set unnoticed.
+			if p.removed[expected[n]] != nil {
+				continue
+			}
+			for _, r := range cr.Rules() {
+				if grantsForbidden(r, p.forbidden) {
+					t.Errorf("%s: the chart now grants %s to a driver the addon does not patch", n, canon(t, r))
+				}
+			}
+		}
+	}
+
+	// The addon as shipped.
+	shipped := renderCopy(func(string) {})
+	if _, ok := shipped["ClusterRoleBinding/"+cosiBinding]; ok {
+		t.Errorf("the shipped render still carries ClusterRoleBinding/%s", cosiBinding)
+	}
+	if _, ok := shipped["ClusterRole/objectstorage-provisioner-role"]; !ok {
+		t.Errorf("the shipped render lost ClusterRole/objectstorage-provisioner-role (only the binding is deleted)")
+	}
+	for _, k := range []string{"Role/" + ctrlSecretsRole, "RoleBinding/" + ctrlSecretsRole} {
+		if o, ok := shipped[k]; !ok || o.Namespace != rookCephNS {
+			t.Errorf("the shipped render lacks %s in %s", k, rookCephNS)
+		}
+	}
+	for _, p := range plugins {
+		name := "rook-ceph-rbd-csi-ceph-com" + p.suffix
+		got, ok := shipped["ClusterRole/"+name]
+		if !ok {
+			t.Errorf("the shipped render lacks ClusterRole/%s", name)
 			continue
 		}
-		for _, r := range cr.Rules() {
-			if grantsRemoved(r) {
-				t.Errorf("%s: the chart now grants %s to a driver the addon does not patch", n, canon(t, r))
+		if n := len(got.Rules()); n != p.kept["rbd"] {
+			t.Errorf("%s: %d rules in the shipped render, want %d", name, n, p.kept["rbd"])
+		}
+		for _, r := range got.Rules() {
+			if grantsForbidden(r, p.forbidden) {
+				t.Errorf("%s still grants %s in the shipped render", name, canon(t, r))
 			}
 		}
 	}

@@ -756,6 +756,94 @@ does not prune. After the migration delete that `Driver` and its RBAC, or
 narrow the old role by hand with the same patch.
 :::
 
+#### The controller plugin
+
+The CSI **controller plugin** (ceph-csi plus the external-provisioner,
+-attacher, -resizer and -snapshotter sidecars) gets the chart's full
+upstream ClusterRole as well: 29 rules for RBD and NVMe-oF, 27 for CephFS,
+16 for NFS. The addon removes four of them:
+
+| Rule | What uses it |
+|---|---|
+| `secrets` get/list/watch | the sidecars do a plain `get` on the StorageClass-referenced secret, and ceph-csi reads KMS Secrets. Nothing lists or watches |
+| `configmaps` get | KMS only |
+| `serviceaccounts` get | KMS only (`vaulttenantsa`) |
+| `serviceaccounts/token` create | KMS only: **mints a token for any ServiceAccount**, from the controller pod |
+
+NFS loses its single cluster-wide `secrets get` the same way. The addon
+keeps `tokenreviews` and `subjectaccessreviews` create: they are not
+escalation paths, and the snapshot-metadata sidecar needs them when a
+`SnapshotMetadataService` exists. Every PV, PVC, snapshot and attachment
+rule stays.
+
+What the sidecars need comes back namespaced: a `Role` in the Rook
+namespace that grants `get` on Rook's provisioner secrets by name
+(`rook-csi-rbd-provisioner`, `rook-csi-cephfs-provisioner`, the secrets the
+StorageClass `provisioner`, `controller-expand` and VolumeSnapshotClass
+`snapshotter` parameters reference), bound to the controller plugin
+ServiceAccount of every driver under both names it can have. The node
+secrets (`rook-csi-<type>-node`) stay out: kubelet reads them, not this
+plugin.
+
+::: warning StorageClasses with their own secret
+A StorageClass whose controller-side secret has another name, or lives
+outside the Rook namespace, no longer works for new volumes: the sidecar
+gets a 403 from the API, the PVC stays `Pending`, and expand and snapshot
+of that class fail the same way. Existing mounts keep working. Add a
+`Role` + `RoleBinding` in that namespace from your own target:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ceph-csi-ctrlplugin-secrets
+  namespace: <secret namespace>
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [<secret name>]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ceph-csi-ctrlplugin-secrets
+  namespace: <secret namespace>
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: ceph-csi-ctrlplugin-secrets }
+subjects:
+  - kind: ServiceAccount
+    name: rook-ceph-rbd-csi-ceph-com-ctrlplugin-sa
+    namespace: rook-ceph
+```
+:::
+
+::: warning Upgrade note: re-apply the bootstrap
+The narrowed ClusterRole and the new Role arrive in the same bootstrap
+apply (`lo up`, `lo provision` or `lo bootstrap`). Until the RoleBinding
+lands, a provisioner call in those seconds gets a 403. The sidecars retry
+with backoff, so a PVC from that window binds a little later. Nothing
+restarts.
+:::
+
+The rook-ceph chart also ships a `ClusterRoleBinding` for the Ceph COSI
+driver ServiceAccount (`objectstorage-provisioner`: `secrets` get, create,
+update and delete in every namespace). The addon deploys no
+`CephCOSIDriver` and no pod runs as that ServiceAccount, so the addon
+deletes the binding (`$patch: delete`). A cluster that runs the COSI driver
+re-adds it from its own target:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: objectstorage-provisioner-role-binding
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: objectstorage-provisioner-role }
+subjects:
+  - kind: ServiceAccount
+    name: objectstorage-provisioner
+    namespace: rook-ceph
+```
+
 #### When you need the grants back
 
 Three ceph-csi features read those objects through the Kubernetes API:
@@ -768,9 +856,10 @@ Three ceph-csi features read those objects through the Kubernetes API:
 - **usage metrics for `volumeMode: Block` volumes** (the exception above)
 
 For those clusters bootstrap the opt-in `rook-ceph-csi-kms` addon after
-`rook-ceph`. It binds the five removed rules to the RBD node plugin
-ServiceAccount again, so the effective permissions equal the upstream
-chart's:
+`rook-ceph`. It binds the five removed rules to the RBD node plugin and
+controller plugin ServiceAccounts again (a KMS runs on both sides: the
+controller creates the key, the node unlocks it), so the effective
+permissions equal the upstream chart's:
 
 ```yaml
 spec:
@@ -782,8 +871,8 @@ spec:
 
 ::: warning This restores the every-node escalation path
 `rook-ceph-csi-kms` restores the upstream grants, not the minimum a KMS
-needs. With it, root on any node that runs the plugin can read every
-Secret and mint a token for any ServiceAccount again. Enable it only for
+needs. With it, root on any node that runs the plugin, and the controller
+pod, can read every Secret and mint a token for any ServiceAccount again. Enable it only for
 one of the three features above, and track the narrower, per-feature
 grants in [kernpilot/lok8s#265](https://github.com/kernpilot/lok8s/issues/265).
 :::
