@@ -3,11 +3,12 @@
 # as rendered (metadata reduced to the name), BEFORE the rook-ceph addon's
 # `$patch: delete`. The test asserts that the unpatched render carries a
 # binding for the objectstorage-provisioner ServiceAccount and that no
-# ClusterRoleBinding binds that ServiceAccount after the patch, by subject
-# and roleRef rather than by name, so an upstream rename of the binding
-# cannot slip past the patch unnoticed. TestRookCephFixturesMatchChart
-# re-renders the chart (on CI, or LOK8S_ONLINE_TESTS=1) and fails on any
-# drift from this file.
+# ClusterRoleBinding binds that ServiceAccount after the patch. The offline
+# check matches by subject, not by name, so an upstream rename of the
+# binding cannot slip past the patch unnoticed. The roleRef is checked
+# online: TestRookCephFixturesMatchChart re-renders the chart (on CI, or
+# LOK8S_ONLINE_TESTS=1) and fails on any drift from this file, roleRef
+# included.
 #
 # chart: rook-ceph v1.20.6
 #

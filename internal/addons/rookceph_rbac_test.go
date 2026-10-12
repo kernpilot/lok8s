@@ -4,9 +4,9 @@ package addons
 // patches in the rook-ceph addon. The addon strips rules from the Ceph CSI
 // node plugin and controller plugin ClusterRoles with guarded JSON patches,
 // gives the controller plugin a namespaced Role for the provisioner secrets
-// and deletes the COSI ClusterRoleBinding; nothing else in the test matrix
-// renders those patches, so a patch that silently stops matching (a renamed
-// target, a reordered chart) would stay green.
+// and drops the COSI ClusterRoleBinding from the render; nothing else in the
+// test matrix renders those patches, so a patch that silently stops matching
+// (a renamed target, a reordered chart) would stay green.
 //
 // TestRookCephCSIRBACPatches runs the real `patches:` block of the addon's
 // kustomization.yaml over committed fixtures of the chart's ClusterRoles at
