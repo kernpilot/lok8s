@@ -12,18 +12,28 @@ import ^libs/deploy
 import ^libs/build
 import ^libs/gitops
 import ^utils/provider
+import ^libs/bootstrap
 
 main::provision() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
   local force="${force:-0}"
-  local bootstrap=0
+  local bootstrap=0 dry_run=0 render_dir="" no_diff=0 only=""
   local -a args=(
     'domain|:^~domain'   'Domain to use'
     'bootstrap|b:+'      'Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)'
     'force|f:^:+'        'Skip the real-infrastructure confirmation (cloud drivers)'
+    'dry-run|:+'         'With --bootstrap: render every entry and apply nothing, diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)'
+    'render-dir|:'       'Write the dry run'\''s manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory'
+    'no-diff|:+'         'Dry run without the kubectl diff: render only, no cluster access'
+    'only|:'             'With --bootstrap: apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded'
     "${args[@]:-}"
   )
   :args "Provision a cluster" "${@}"
+  bootstrap::mode_check "${bootstrap}" || return 1
+  # The run modes reach bootstrap::apply through dynamic scoping (the `force`
+  # precedent), under names no other lib declares.
+  local bootstrap_dry_run="${dry_run}" bootstrap_render_dir="${render_dir}"
+  local bootstrap_no_diff="${no_diff}" bootstrap_select="${only}"
   # Same reason as `lo build` (see the note there): the domain can come from
   # clusters/.active — state a `lo use` persisted hours ago — and provision
   # reconciles THAT domain's infrastructure. Cloud drivers additionally gate on
@@ -294,10 +304,14 @@ provision::dispatch() {
   # driver touch anything (after the kind check, so a bogus kind stays a
   # plain error). No-op for the local kind driver; every other EXISTING
   # driver targets real infrastructure — new drivers are gated by default.
-  local gate_action="reconcile"
+  # A bootstrap dry run changes nothing, so it is not gated.
+  local gate_action="reconcile" dry_run_only=0
   (( bootstrap_only )) && gate_action="bootstrap"
+  (( bootstrap_only )) && (( ${bootstrap_dry_run:-0} )) && dry_run_only=1
   # `|| return $?`: a decline propagates its sentinel rc 3 to the caller.
-  provision::confirm_infra "${domain}" "${cluster_yaml}" "${kind}" "${gate_action}" || return $?
+  if (( ! dry_run_only )); then
+    provision::confirm_infra "${domain}" "${cluster_yaml}" "${kind}" "${gate_action}" || return $?
+  fi
   # shellcheck source=/dev/null
   source "${kind_script}"
 
@@ -394,7 +408,8 @@ provision::dispatch() {
   # kubehz config + registration. Probe first — tests source this lib
   # standalone without the kubehz lib loaded (same contract as
   # inventory::publish below); with the lib present, every step is gated.
-  if declare -f kubehz::read_config &>/dev/null; then
+  # A bootstrap dry run is read-only: no registration, no inventory, no gitops.
+  if (( ! dry_run_only )) && declare -f kubehz::read_config &>/dev/null; then
     kubehz::read_config "${cluster_yaml}" || return 1
     kubehz::validate_config || return 1
 
@@ -414,8 +429,11 @@ provision::dispatch() {
   local bootstrap_kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name_for_kc}.yaml"
   # Probe first (standalone-source test contract, as above); gated when present.
   if declare -f bootstrap::apply &>/dev/null; then
-    bootstrap::apply "${domain}" "${cluster_yaml}" "${bootstrap_kubeconfig}" || return 1
+    # `|| return $?`: a dry run reports 1 (changes) or 2 (an error) and the
+    # caller's exit code must say which.
+    bootstrap::apply "${domain}" "${cluster_yaml}" "${bootstrap_kubeconfig}" || return $?
   fi
+  (( ! dry_run_only )) || return 0
 
   # Record WHAT was deployed into the cluster itself: the ClusterInventory
   # singleton (lok8s.dev/v1alpha1, name "cluster") — metadata only (versions,

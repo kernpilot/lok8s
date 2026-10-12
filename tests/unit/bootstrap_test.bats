@@ -2552,3 +2552,276 @@ YAML
   assert_success
   assert_output --partial "GATE=1"
 }
+
+# --- --dry-run / --render-dir / --no-diff / --only -----------------------------
+# The run modes reach bootstrap::apply through dynamic scoping
+# (bootstrap_dry_run, bootstrap_render_dir, bootstrap_no_diff,
+# bootstrap_select — set by main::bootstrap / main::provision). A dry run
+# renders every entry like the real run and applies NOTHING: the kubectl stub
+# logs every argv (KLOG) and answers `diff` from a script; `apply` must never
+# appear in the log. The Go twin is internal/bootstrap/dryrun_test.go and the
+# piped lines are diffed across both by hack/parity-orchestrate.sh.
+
+# The two-object `kubectl diff` fixture (GNU diff -u -N over LIVE/MERGED):
+# one object modified, two the live side lacks (asymmetric on purpose: a
+# swapped changed/new count must be visible).
+_dry_canned_diff() {
+  cat <<'DIFF'
+diff -u -N /tmp/LIVE-1/v1.ConfigMap.default.testcni /tmp/MERGED-1/v1.ConfigMap.default.testcni
+--- /tmp/LIVE-1/v1.ConfigMap.default.testcni	2026-10-12 10:00:00.000000000 +0000
++++ /tmp/MERGED-1/v1.ConfigMap.default.testcni	2026-10-12 10:00:00.000000000 +0000
+@@ -3,4 +3,5 @@
+ kind: ConfigMap
+ metadata:
+   name: testcni
++  foo: bar
+diff -u -N /tmp/LIVE-1/v1.ConfigMap.default.extra /tmp/MERGED-1/v1.ConfigMap.default.extra
+--- /tmp/LIVE-1/v1.ConfigMap.default.extra	1970-01-01 00:00:00.000000000 +0000
++++ /tmp/MERGED-1/v1.ConfigMap.default.extra	2026-10-12 10:00:00.000000000 +0000
+@@ -0,0 +1,4 @@
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: extra
+diff -u -N /tmp/LIVE-1/v1.ConfigMap.default.other /tmp/MERGED-1/v1.ConfigMap.default.other
+--- /tmp/LIVE-1/v1.ConfigMap.default.other	1970-01-01 00:00:00.000000000 +0000
++++ /tmp/MERGED-1/v1.ConfigMap.default.other	2026-10-12 10:00:00.000000000 +0000
+@@ -0,0 +1,4 @@
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: other
+DIFF
+}
+
+# _dry_kubectl_stub <rc>... — a kubectl that logs its argv to KLOG and answers
+# the N-th `diff` with the N-th rc (1 → the canned diff on stdout, >1 → an
+# error on stderr). Any other verb is logged too (the assertions grep for it).
+_dry_kubectl_stub() {
+  export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
+  export DRY_RCS="$*" DRY_CALLS="${BATS_TEST_TMPDIR}/diff.calls"; : > "${DRY_CALLS}"
+  kubectl() {
+    echo "kubectl $*" >> "${KLOG}"
+    cat >/dev/null   # drain the manifest
+    [[ " $* " == *" diff "* ]] || return 0
+    echo x >> "${DRY_CALLS}"
+    local n rc=0; n="$(wc -l < "${DRY_CALLS}")"
+    set -- ${DRY_RCS}
+    (( n <= $# )) && rc="${!n}"
+    case "${rc}" in
+      0) return 0 ;;
+      1) _dry_canned_diff; return 1 ;;
+      *) echo "error: the server could not be reached" >&2; return "${rc}" ;;
+    esac
+  }
+  export -f kubectl _dry_canned_diff
+}
+
+@test "bootstrap::apply --dry-run diffs every entry server-side and applies nothing" {
+  mkdir -p "${PATH_LOK8S}/addons/second"
+  write_cluster_spec "testcni" "second: {dependsOn: [testcni]}"
+  _dry_kubectl_stub 0 1
+  local bootstrap_dry_run=1 rc=0
+  local out="${BATS_TEST_TMPDIR}/dry.out" err="${BATS_TEST_TMPDIR}/dry.err"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2> "${err}" || rc=$?
+  [ "${rc}" -eq 1 ]   # something would change
+  run cat "${out}"
+  assert_line --index 0 "bootstrap dry-run: 01-testcni: unchanged"
+  assert_line --index 1 "bootstrap dry-run: 02-second: differs changed=1 new=2"
+  assert_line --index 2 "bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 errors=0"
+  [ "${#lines[@]}" -eq 3 ]
+  # Nothing applied, nothing healed: only the two read-only diffs.
+  ! grep -qE ' (apply|replace|patch|delete) ' "${KLOG}"
+  [ "$(grep -c -- "kubectl --kubeconfig ${KUBECONFIG_FILE} diff --server-side --force-conflicts -f -" "${KLOG}")" -eq 2 ]
+}
+
+@test "bootstrap::apply --dry-run --render-dir writes NN-<entry>.yaml and .diff" {
+  mkdir -p "${PATH_LOK8S}/addons/second"
+  write_cluster_spec "testcni" "second"
+  _dry_kubectl_stub 0 1
+  local bootstrap_dry_run=1 bootstrap_render_dir="${BATS_TEST_TMPDIR}/out/nested" rc=0
+  local err="${BATS_TEST_TMPDIR}/dry.err"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > /dev/null 2> "${err}" || rc=$?
+  [ "${rc}" -eq 1 ]
+  run ls "${bootstrap_render_dir}"
+  assert_output "01-testcni.diff
+01-testcni.yaml
+02-second.diff
+02-second.yaml"
+  grep -q 'kind: ConfigMap' "${bootstrap_render_dir}/01-testcni.yaml"
+  [ "$(tail -c 1 "${bootstrap_render_dir}/01-testcni.yaml" | od -An -c | tr -d ' ')" = '\n' ]
+  [ ! -s "${bootstrap_render_dir}/01-testcni.diff" ]          # unchanged → empty
+  diff <(_dry_canned_diff) "${bootstrap_render_dir}/02-second.diff"
+  grep -q "bootstrap dry-run: files under ${bootstrap_render_dir}" "${err}"
+}
+
+@test "bootstrap::apply --dry-run exit codes: 0 unchanged, 1 differs, 2 error" {
+  write_cluster_spec "testcni"
+  local bootstrap_dry_run=1 want rc
+  for want in 0 1 2; do
+    _dry_kubectl_stub "${want}"
+    rc=0
+    bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" \
+      > "${BATS_TEST_TMPDIR}/rc${want}.out" 2> "${BATS_TEST_TMPDIR}/rc${want}.err" || rc=$?
+    [ "${rc}" -eq "${want}" ]
+  done
+  grep -q '01-testcni: unchanged$' "${BATS_TEST_TMPDIR}/rc0.out"
+  grep -q '01-testcni: differs changed=1 new=2$' "${BATS_TEST_TMPDIR}/rc1.out"
+  grep -q '01-testcni: error$' "${BATS_TEST_TMPDIR}/rc2.out"
+  grep -q 'error: the server could not be reached' "${BATS_TEST_TMPDIR}/rc2.err"
+  grep -q 'bootstrap: kubectl diff failed for testcni (rc=2)' "${BATS_TEST_TMPDIR}/rc2.err"
+}
+
+@test "bootstrap::apply --dry-run --no-diff renders only and never calls kubectl" {
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub
+  local bootstrap_dry_run=1 bootstrap_no_diff=1 bootstrap_render_dir="${BATS_TEST_TMPDIR}/out"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  assert_line --index 0 "bootstrap dry-run: 01-testcni: rendered"
+  assert_line --index 1 "bootstrap dry-run: entries=1 unchanged=0 differs=0 rendered=1 skipped=0 errors=0"
+  [ ! -s "${KLOG}" ]
+  [ -f "${bootstrap_render_dir}/01-testcni.yaml" ]
+  [ ! -e "${bootstrap_render_dir}/01-testcni.diff" ]
+}
+
+@test "bootstrap::apply --dry-run ignores LOK8S_FORCE_RECREATE (diff only, no heal)" {
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub 1
+  export LOK8S_FORCE_RECREATE=1
+  local bootstrap_dry_run=1 rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > /dev/null 2>&1 || rc=$?
+  [ "${rc}" -eq 1 ]
+  ! grep -qE ' (apply|replace|patch|delete) ' "${KLOG}"
+  grep -q ' diff ' "${KLOG}"
+}
+
+@test "bootstrap::apply --dry-run reports the real run's skips (KubeOne full provision defers cilium)" {
+  mkdir -p "${PATH_LOK8S}/addons/cilium"
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - cilium
+YAML
+  export LOK8S_BOOTSTRAP_ONLY=0
+  _dry_kubectl_stub
+  local bootstrap_dry_run=1 rc=0
+  local out="${BATS_TEST_TMPDIR}/dry.out" err="${BATS_TEST_TMPDIR}/dry.err"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2> "${err}" || rc=$?
+  [ "${rc}" -eq 0 ]
+  grep -q '^bootstrap dry-run: 01-cilium: skipped$' "${out}"
+  grep -q 'skipped=1' "${out}"
+  grep -q 'cilium is applied by the KubeOne driver on a full provision' "${err}"
+  [ ! -s "${KLOG}" ]
+}
+
+@test "bootstrap::apply --dry-run does not apply restore.d and says so" {
+  write_cluster_spec "testcni"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/tls.sops.yaml"
+  sops() { echo "sops must not run on a dry run" >&2; return 1; }
+  export -f sops
+  _dry_kubectl_stub 0
+  local bootstrap_dry_run=1 rc=0
+  local err="${BATS_TEST_TMPDIR}/dry.err"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > /dev/null 2> "${err}" || rc=$?
+  [ "${rc}" -eq 0 ]
+  grep -q '^\[bootstrap\] dry-run: restore.d not applied (1 file(s) under clusters/test.lok8s.dev/restore.d)$' "${err}"
+  ! grep -q 'sops must not run' "${err}"
+  ! grep -q ' apply ' "${KLOG}"
+}
+
+@test "bootstrap::apply --only applies the named entries; dependsOn is not expanded" {
+  local log="${BATS_TEST_TMPDIR}/only.log"; : > "${log}"
+  bootstrap::_apply_one() { printf '%s wait=%s\n' "$1" "$7" >> "${log}"; return 0; }
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  write_cluster_spec "a" "b: {dependsOn: [a]}" "c"
+  local bootstrap_select="b"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  run cat "${log}"
+  assert_output "b wait="
+}
+
+@test "bootstrap::apply --only keeps the edges among the selected entries" {
+  local log="${BATS_TEST_TMPDIR}/only.log"; : > "${log}"
+  bootstrap::_apply_one() { printf '%s wait=%s\n' "$1" "$7" >> "${log}"; return 0; }
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  write_cluster_spec "a" "b: {dependsOn: [a]}" "c"
+  local bootstrap_select="b, a"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  run cat "${log}"
+  assert_output "a wait=wait
+b wait="
+}
+
+@test "bootstrap::apply --only matches the addon name of a renamed entry" {
+  local log="${BATS_TEST_TMPDIR}/only.log"; : > "${log}"
+  bootstrap::_apply_one() { echo "$1" >> "${log}"; return 0; }
+  local n; for n in cilium c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  write_cluster_spec "cilium: {name: my-cni}" "c"
+  local bootstrap_select="cilium"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  run cat "${log}"
+  assert_output "my-cni"
+}
+
+@test "bootstrap::apply --only with an unknown name lists the valid names and applies nothing" {
+  local log="${BATS_TEST_TMPDIR}/only.log"; : > "${log}"
+  bootstrap::_apply_one() { echo "$1" >> "${log}"; return 0; }
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  write_cluster_spec "a" "b: {name: bee}" "c"
+  local bootstrap_select="a,nope"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_failure
+  assert_output --partial "bootstrap: --only: unknown entry 'nope' (valid: a, bee, c)"
+  [ ! -s "${log}" ]
+}
+
+@test "bootstrap::apply --only --dry-run numbers the selection from 01" {
+  mkdir -p "${PATH_LOK8S}/addons/second"
+  write_cluster_spec "testcni" "second"
+  _dry_kubectl_stub 0
+  local bootstrap_dry_run=1 bootstrap_select="second"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  assert_line --index 0 "bootstrap dry-run: 01-second: unchanged"
+  assert_line --index 1 "bootstrap dry-run: entries=1 unchanged=1 differs=0 rendered=0 skipped=0 errors=0"
+}
+
+@test "bootstrap::mode_check: the flag dependencies (the lines the Go cli prints)" {
+  local dry_run=0 render_dir="" no_diff=0 only=""
+  run bootstrap::mode_check 1
+  assert_success
+  dry_run=1; run bootstrap::mode_check 0
+  assert_failure; assert_output --partial "--dry-run requires --bootstrap"
+  dry_run=0 only="cilium"; run bootstrap::mode_check 0
+  assert_failure; assert_output --partial "--only requires --bootstrap"
+  only="" render_dir="x"; run bootstrap::mode_check 1
+  assert_failure; assert_output --partial "--render-dir requires --dry-run"
+  render_dir="" no_diff=1; run bootstrap::mode_check 1
+  assert_failure; assert_output --partial "--no-diff requires --dry-run"
+  dry_run=1; run bootstrap::mode_check 1
+  assert_success
+}
+
+@test "bootstrap::dispatch --dry-run skips inventory::publish" {
+  mkdir -p "${PATH_LOK8S}/drivers/lo"
+  printf 'driver::export() { :; }\n' > "${PATH_LOK8S}/drivers/lo/main"
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub 0
+  inventory::publish() { echo "inventory_published"; }
+  local bootstrap_dry_run=1
+  run bootstrap::dispatch "test.lok8s.dev"
+  assert_success
+  refute_output --partial "inventory_published"
+  assert_output --partial "01-testcni: unchanged"
+}
