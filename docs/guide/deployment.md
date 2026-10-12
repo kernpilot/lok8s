@@ -258,56 +258,82 @@ lo provision my-cluster.example.com --bootstrap --dry-run --render-dir /tmp/boot
 ```
 
 The dry run renders every entry exactly as the real run would (the same
-value stack, envsubst, khelm and ordering) and applies nothing: rendering
-happens from an isolated copy, never the project tree, so a chart addon's
-`Chart.lock`/`charts/` or a khelm temp file never lands in your working
-copy. For each entry it asks the API server for a server-side diff
-(`kubectl diff --server-side --force-conflicts`, read-only) and prints one
-line:
+value stack, envsubst, khelm and ordering) and applies nothing. Rendering
+happens inside a disposable copy of the WHOLE project, built once per run:
+`HOME`, `XDG_CONFIG_HOME`/`XDG_DATA_HOME`/`XDG_CACHE_HOME`, `CAROOT` and
+`HELM_CACHE_HOME`/`HELM_CONFIG_HOME`/`HELM_DATA_HOME` point into it, and
+`PATH_SECRETS` always points at the copy's own secrets store — even when
+the real one does not exist yet — so a generator's cache write (a fresh
+password, a keypair) lands only in the copy. `KUBECONFIG` (and
+`KUBERNETES_*`/any `*_TOKEN` var) is unset for the render: a plugin
+executed during it has no cluster to reach. Only the diff step gets the
+real cluster, through an explicit `--kubeconfig`, never through the
+environment. For each entry the dry run asks the API server for a
+server-side diff (`kubectl diff --server-side --force-conflicts`,
+read-only) and prints one line:
 
 ```
 bootstrap dry-run: 01-cilium: unchanged
 bootstrap dry-run: 02-cert-manager: differs changed=2 new=1
 bootstrap dry-run: 03-rook-ceph: skipped
 bootstrap dry-run: restore.d: differs changed=1 new=0
-bootstrap dry-run: entries=4 unchanged=1 differs=2 rendered=0 skipped=1 errors=0
+bootstrap dry-run: entries=4 unchanged=1 differs=2 rendered=0 skipped=1 inconclusive=0 errors=0
 ```
 
 `restore.d` is diffed as its own entry (it would be applied before
 anything else on a real run, so a dry run reports what THAT would change
-too) unless `--only` is given — see below. A `differs` or `needs-crd`
-status (an earlier entry's CRD/webhook has not landed in this read-only,
-sequential probe — expected on a from-scratch cluster, not a real diff)
-both count toward `differs=` in the summary; the per-entry line keeps the
-precise word.
+too) unless `--only` is given — see below. A result the race-class
+server-side errors produce reads `inconclusive (needs-crd)`: an earlier
+entry's CRD/webhook has not landed in this read-only, sequential probe —
+expected on a from-scratch cluster, not a real diff, and not a real error
+either. It is counted in its own `inconclusive=` field, separate from
+`differs=`, and — like an error — keeps the run from exiting clean (see
+the exit codes below). An entry whose render minted NEW secret material
+(a fresh password, a keypair that did not exist yet) is marked
+`(non-repeatable)`: the next real run mints different bytes, so this
+entry's rendered manifest describes a result that run will not reproduce
+verbatim.
 
 `--render-dir <dir>` keeps the rendered manifests (`NN-<entry>.yaml`) and
 the diff text (`NN-<entry>.diff`, empty when unchanged), written with
-`umask 077`. Before writing, it clears only the files a dry run itself
-could own there (`NN-*.yaml`/`.diff`, `restore.d.yaml`/`.diff`) — so a
-stale file from an earlier, differently-numbered or differently-selected
-run never survives alongside the new set and gets mistaken for current.
-Anything else already in the directory is left untouched; the directory
-need not be empty. `--no-diff` renders only and never contacts the
-cluster. The exit
-code is 0 when nothing would change, 1 when a completed diff found a
-change (`differs`/`needs-crd`), and 2 for anything that stopped the
-assessment before it could finish — a render/diff failure, an unreachable
-hosted cluster, a missing kubeconfig, or a bad `--render-dir`. A dry run
-is not gated and ignores `--force`: it never recreates an object. The
-provision tail (kubehz registration, the inventory, the gitops bootstrap)
-is skipped too.
+`umask 077`. The directory is marked as the dry run's own with a
+`.lo-dry-run` file; on a later run, a directory that already carries that
+marker is cleared of only the files it owns (`NN-*.yaml`/`.diff`,
+`restore.d.yaml`/`.diff`) before the new set is written, so a stale entry
+from an earlier, differently-numbered or differently-selected run never
+survives alongside it. A non-empty directory that does NOT carry the
+marker is refused outright — point `--render-dir` at an empty directory,
+or one a prior dry run already owns, never at something else you keep
+there. A symlink is never written through, inside the directory or as the
+directory itself. `--no-diff` renders only and never contacts the
+cluster. The exit code is 0 when nothing would change, 1 when a completed
+diff found a change (`differs` only), and 2 for anything that kept the
+assessment from finishing cleanly — a render/diff failure, an
+`inconclusive` entry, an unreachable hosted cluster, a missing
+kubeconfig, or a bad `--render-dir`. A dry run is not gated and ignores
+`--force`: it never recreates an object. The provision tail (kubehz
+registration, the inventory, the gitops bootstrap) is skipped too.
 
-By default a `bash:` secrets generator refuses to run under `--dry-run`
-(`error: executable generator not run in dry-run`) — a preview must never
-execute arbitrary code or write a live secret. Pass `--allow-generators`
-to run them anyway when you specifically need their output diffed.
+By default, a dry run refuses to execute anything that is not one of
+lok8s' own two built-in exec plugins — the secrets generator and khelm's
+chart renderer. A `bash:` secrets generator specifically (`error:
+executable generator not run in dry-run`), and any OTHER exec plugin an
+addon's kustomization tree references (`error: exec plugin <kind> not run
+in dry-run`), both stop the whole render rather than run with no
+kubeconfig and no live cluster to check. Pass `--allow-generators` to run
+them anyway, when you specifically need their output diffed — the code
+still only gets the isolated project copy, never your real kubeconfig.
+Separately, an entry's `env:` override can never set one of the sandbox's
+own variables (`PATH_SECRETS`, `HOME`, `CAROOT`, `KUBECONFIG`, …) — trying
+to is reported as that entry's own error, naming the variable, rather
+than silently doing nothing.
 
 #### One entry: `--only`
 
 ```bash
 lo provision my-cluster.example.com --bootstrap --only cert-manager
 lo provision my-cluster.example.com --bootstrap --only cert-manager,envoy-gateway --dry-run
+lo provision my-cluster.example.com --bootstrap --only cert-manager --with-restore
 ```
 
 `--only` applies (or dry-runs) the named `spec.bootstrap` entries, matched
@@ -320,6 +346,15 @@ blank name is an error that lists the valid names and changes nothing;
 the selection is validated before any writer runs, so a typo can never
 apply part of the graph (or `restore.d`) before failing. The same flags
 exist on `lo bootstrap`.
+
+`--only` leaves `restore.d` out by default — it names addons, never
+`restore.d` — and on a REAL run prints a loud warning naming every file
+under it that was skipped: restoring a wildcard TLS Secret matters for
+more than the one addon you named, since an addon that would otherwise
+reuse it (cert-manager, say) ACME-reissues instead when it is missing,
+and repeated reissuance can hit the Let's Encrypt rate limit. Pass
+`--with-restore` to apply (or, under `--dry-run`, diff) `restore.d` first,
+exactly as if `--only` were absent.
 
 `--only` never applies `restore.d` — it prints that `restore.d` was
 skipped and leaves the live Secrets it would otherwise restore alone.

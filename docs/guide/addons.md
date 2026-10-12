@@ -32,27 +32,40 @@ lo bootstrap --dry-run --render-dir /tmp/bootstrap   # render + server-side diff
 lo bootstrap --dry-run --no-diff                     # render only, no cluster access
 lo bootstrap --only cert-manager                     # apply this entry only
 lo bootstrap --only cert-manager,envoy-gateway --dry-run
+lo bootstrap --only cert-manager --with-restore      # also restore.d first
 ```
 
-The dry run renders every entry exactly as the real run would — from an
-isolated copy, so nothing is written to the project — and prints one line
-per entry (`unchanged`, `differs changed=N new=M`, `needs-crd`, `rendered`,
-`skipped`, `error`) plus a summary, including a `restore.d` entry for what
-that pre-apply step would change. The exit code is 0 when nothing would
-change, 1 when a completed diff found one (`differs`/`needs-crd`), and 2
-for anything that kept the assessment from finishing at all — a render
-failure, an unreachable hosted cluster, a bad `--render-dir`. `--render-dir`
-holds `NN-<entry>.yaml` and `NN-<entry>.diff` per entry (`umask 077`),
-numbered in the order the run takes; a prior run's own files there are
+The dry run renders every entry exactly as the real run would — inside a
+disposable copy of the WHOLE project (HOME/CAROOT/HELM_*/PATH_SECRETS
+redirected into it, KUBECONFIG unset), so nothing is written to the
+project and no plugin it runs can reach the real cluster — and prints one
+line per entry (`unchanged`, `differs changed=N new=M`,
+`inconclusive (needs-crd)`, `rendered`, `skipped`, `error`, any of them
+possibly `(non-repeatable)` when the render minted new secret material)
+plus a summary, including a `restore.d` entry for what that pre-apply
+step would change. The exit code is 0 when nothing would change, 1 when a
+completed diff found one (`differs` only), and 2 for anything that kept
+the assessment from finishing cleanly — a render failure, an
+`inconclusive` entry, an unreachable hosted cluster, a bad `--render-dir`.
+`--render-dir` holds `NN-<entry>.yaml` and `NN-<entry>.diff` per entry
+(`umask 077`), numbered in the order the run takes, marked as the dry
+run's own with a `.lo-dry-run` file; a prior run's own files there are
 cleared first (a stale entry never survives a renumbered or reselected
-run), anything else in the directory is left alone. By default a `bash:`
-secrets generator is refused
-under `--dry-run` (pass `--allow-generators` to run it anyway) — a preview
-never executes arbitrary code. `--only` matches the entry name (the `name:`
+run), a non-empty directory withOUT that marker is refused outright, and
+a symlink inside it is never written through. By default a dry run
+refuses to run anything that is not one of lok8s' own two built-in exec
+plugins (the secrets generator — including its `bash:` sub-generator —
+and khelm's chart renderer); pass `--allow-generators` to run one anyway
+— a preview still never sees your real kubeconfig. An entry's `env:`
+override can never set one of the sandbox's own variables (`HOME`,
+`PATH_SECRETS`, `KUBECONFIG`, …) — doing so is that entry's own error,
+naming the variable. `--only` matches the entry name (the `name:`
 override when set) or the addon name; `dependsOn` is not expanded (an
 omitted prerequisite is a printed warning, not an error), an unknown or
 blank name lists the valid names and changes nothing, and `--only` never
-applies `restore.d`. Both flags also exist on `lo provision --bootstrap`.
+applies `restore.d` by default — on a real run it warns loudly, naming
+the skipped file(s); `--with-restore` applies/diffs it anyway, first.
+Every flag here also exists on `lo provision --bootstrap`.
 
 ## Addon resolution
 
