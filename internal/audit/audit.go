@@ -39,8 +39,8 @@ import (
 // while its date is in the future, so a minor reaches End-of-Life on its date
 // with no change here. ADD a row when a new minor releases (about every four
 // months; https://kubernetes.io/releases/, https://endoflife.date/kubernetes).
-// Keep at least one row past its EOL: it names the oldest minor the table
-// knows. Mirrors _AUDIT_K8S_MINOR_EOL in .lok8s/libs/audit;
+// A row past its date is inert: nothing reads it, so it can stay or go.
+// Mirrors _AUDIT_K8S_MINOR_EOL in .lok8s/libs/audit;
 // TestK8sMinorEOLMatchesBash fails when the two differ.
 var k8sMinorEOL = []k8sMinorRow{
 	{"1.37", "2027-10-28"},
