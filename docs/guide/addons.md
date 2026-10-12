@@ -34,14 +34,25 @@ lo bootstrap --only cert-manager                     # apply this entry only
 lo bootstrap --only cert-manager,envoy-gateway --dry-run
 ```
 
-The dry run renders every entry exactly as the real run would and prints
-one line per entry (`unchanged`, `differs changed=N new=M`, `rendered`,
-`skipped`, `error`) plus a summary. The exit code is 0 when nothing would
-change, 1 when something would, 2 on an error. `--render-dir` holds
-`NN-<entry>.yaml` and `NN-<entry>.diff` per entry, numbered in the order the
-run takes. `--only` matches the entry name (the `name:` override when set)
-or the addon name; `dependsOn` is not expanded, and an unknown name lists
-the valid names. Both flags also exist on `lo provision --bootstrap`.
+The dry run renders every entry exactly as the real run would — from an
+isolated copy, so nothing is written to the project — and prints one line
+per entry (`unchanged`, `differs changed=N new=M`, `needs-crd`, `rendered`,
+`skipped`, `error`) plus a summary, including a `restore.d` entry for what
+that pre-apply step would change. The exit code is 0 when nothing would
+change, 1 when a completed diff found one (`differs`/`needs-crd`), and 2
+for anything that kept the assessment from finishing at all — a render
+failure, an unreachable hosted cluster, a bad `--render-dir`. `--render-dir`
+holds `NN-<entry>.yaml` and `NN-<entry>.diff` per entry (`umask 077`),
+numbered in the order the run takes; a prior run's own files there are
+cleared first (a stale entry never survives a renumbered or reselected
+run), anything else in the directory is left alone. By default a `bash:`
+secrets generator is refused
+under `--dry-run` (pass `--allow-generators` to run it anyway) — a preview
+never executes arbitrary code. `--only` matches the entry name (the `name:`
+override when set) or the addon name; `dependsOn` is not expanded (an
+omitted prerequisite is a printed warning, not an error), an unknown or
+blank name lists the valid names and changes nothing, and `--only` never
+applies `restore.d`. Both flags also exist on `lo provision --bootstrap`.
 
 ## Addon resolution
 

@@ -258,24 +258,50 @@ lo provision my-cluster.example.com --bootstrap --dry-run --render-dir /tmp/boot
 ```
 
 The dry run renders every entry exactly as the real run would (the same
-value stack, envsubst, khelm and ordering) and applies nothing. For each
-entry it asks the API server for a server-side diff (`kubectl diff
---server-side --force-conflicts`, read-only) and prints one line:
+value stack, envsubst, khelm and ordering) and applies nothing: rendering
+happens from an isolated copy, never the project tree, so a chart addon's
+`Chart.lock`/`charts/` or a khelm temp file never lands in your working
+copy. For each entry it asks the API server for a server-side diff
+(`kubectl diff --server-side --force-conflicts`, read-only) and prints one
+line:
 
 ```
 bootstrap dry-run: 01-cilium: unchanged
 bootstrap dry-run: 02-cert-manager: differs changed=2 new=1
 bootstrap dry-run: 03-rook-ceph: skipped
-bootstrap dry-run: entries=3 unchanged=1 differs=1 rendered=0 skipped=1 errors=0
+bootstrap dry-run: restore.d: differs changed=1 new=0
+bootstrap dry-run: entries=4 unchanged=1 differs=2 rendered=0 skipped=1 errors=0
 ```
 
+`restore.d` is diffed as its own entry (it would be applied before
+anything else on a real run, so a dry run reports what THAT would change
+too) unless `--only` is given — see below. A `differs` or `needs-crd`
+status (an earlier entry's CRD/webhook has not landed in this read-only,
+sequential probe — expected on a from-scratch cluster, not a real diff)
+both count toward `differs=` in the summary; the per-entry line keeps the
+precise word.
+
 `--render-dir <dir>` keeps the rendered manifests (`NN-<entry>.yaml`) and
-the diff text (`NN-<entry>.diff`, empty when unchanged). `--no-diff` renders
-only and never contacts the cluster. The exit code is 0 when nothing would
-change, 1 when something would, 2 when an entry failed to render or diff.
-A dry run is not gated and ignores `--force`: it never recreates an object.
-The provision tail (kubehz registration, the inventory, the gitops
-bootstrap) and `restore.d` are skipped too.
+the diff text (`NN-<entry>.diff`, empty when unchanged), written with
+`umask 077`. Before writing, it clears only the files a dry run itself
+could own there (`NN-*.yaml`/`.diff`, `restore.d.yaml`/`.diff`) — so a
+stale file from an earlier, differently-numbered or differently-selected
+run never survives alongside the new set and gets mistaken for current.
+Anything else already in the directory is left untouched; the directory
+need not be empty. `--no-diff` renders only and never contacts the
+cluster. The exit
+code is 0 when nothing would change, 1 when a completed diff found a
+change (`differs`/`needs-crd`), and 2 for anything that stopped the
+assessment before it could finish — a render/diff failure, an unreachable
+hosted cluster, a missing kubeconfig, or a bad `--render-dir`. A dry run
+is not gated and ignores `--force`: it never recreates an object. The
+provision tail (kubehz registration, the inventory, the gitops bootstrap)
+is skipped too.
+
+By default a `bash:` secrets generator refuses to run under `--dry-run`
+(`error: executable generator not run in dry-run`) — a preview must never
+execute arbitrary code or write a live secret. Pass `--allow-generators`
+to run them anyway when you specifically need their output diffed.
 
 #### One entry: `--only`
 
@@ -287,9 +313,19 @@ lo provision my-cluster.example.com --bootstrap --only cert-manager,envoy-gatewa
 `--only` applies (or dry-runs) the named `spec.bootstrap` entries, matched
 by the entry name (the `name:` override when set) or the addon name.
 `dependsOn` is not expanded: a dependency you do not name is not applied,
-and only the edges among the named entries still order the run. An unknown
-name is an error that lists the valid names. The same flags exist on
-`lo bootstrap`.
+and only the edges among the named entries still order the run — if an
+omitted entry is a prerequisite of one you named, that is printed as a
+warning before anything applies, not silently assumed. An unknown or
+blank name is an error that lists the valid names and changes nothing;
+the selection is validated before any writer runs, so a typo can never
+apply part of the graph (or `restore.d`) before failing. The same flags
+exist on `lo bootstrap`.
+
+`--only` never applies `restore.d` — it prints that `restore.d` was
+skipped and leaves the live Secrets it would otherwise restore alone.
+Without `--only`, a plain `--dry-run` still reports what `restore.d`
+would change (see above); a real, unrestricted run applies it first, as
+always.
 
 It requires an already-provisioned cluster (an existing
 `.kubeconfig/<cluster-name>.yaml`); otherwise it errors and changes nothing.

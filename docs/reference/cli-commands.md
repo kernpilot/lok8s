@@ -439,6 +439,7 @@ lo bootstrap [flags]
 ### Options
 
 ```
+      --allow-generators    Let --dry-run execute a bash: secrets generator (default: refused — it can run kubectl/lo against the live cluster)
       --dry-run             Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
   -h, --help                help for bootstrap
       --no-diff             Dry run without the kubectl diff: render only, no cluster access
@@ -3340,6 +3341,7 @@ lo provision [flags]
 ### Options
 
 ```
+      --allow-generators    Let --dry-run execute a bash: secrets generator (default: refused — it can run kubectl/lo against the live cluster)
   -b, --bootstrap           Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)
       --dry-run             Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
   -h, --help                help for provision
