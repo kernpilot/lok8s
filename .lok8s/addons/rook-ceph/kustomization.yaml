@@ -89,7 +89,8 @@ resources:
 # csi-drivers.yaml (`rook-ceph.<type>.csi.ceph.com`, the ClusterRole is
 # `rook-ceph-<type>-csi-ceph-com-nodeplugin-cr`, chart _helpers.tpl
 # normalizeDriverName) and the chart default (`<type>.csi.ceph.com`), so a
-# cluster that keeps the default identity through an inline override is
+# fork of this addon (the only way to enable these drivers: inline values
+# reach chart.yaml, not this generator) that keeps the default identity is
 # narrowed too. An unmatched target is a no-op for kustomize, so the cephfs
 # and nvmeof targets sit idle while those drivers are off and take effect
 # the moment a cluster turns one on. internal/addons/rookceph_rbac_test.go

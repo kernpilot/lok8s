@@ -1,16 +1,17 @@
 # Fixture for internal/addons/rookceph_rbac_test.go: the Ceph CSI node plugin
 # ClusterRoles exactly as the ceph-csi-drivers chart renders them, BEFORE the
-# rook-ceph addon's least-privilege patches, for the rbd, cephfs and nvmeof
-# drivers under both names each can have: the name the addon pins in
-# csi-drivers.yaml (rook-ceph.<type>.csi.ceph.com) and the chart default
-# (<type>.csi.ceph.com). The test runs the addon's real `patches:` block over
-# this file; TestRookCephNodePluginFixtureMatchesChart re-renders the chart
-# (on CI, or LOK8S_ONLINE_TESTS=1) and fails on any drift from this file.
+# rook-ceph addon's least-privilege patches, for every chart driver (rbd,
+# cephfs, nfs, nvmeof) under both names each can have: the name the addon
+# pins in csi-drivers.yaml (rook-ceph.<type>.csi.ceph.com) and the chart
+# default (<type>.csi.ceph.com; nfs is not pinned, so it has one name). The
+# test runs the addon's real `patches:` block over this file and compares the
+# roles as whole objects; TestRookCephNodePluginFixtureMatchesChart re-renders
+# the chart (on CI, or LOK8S_ONLINE_TESTS=1) and fails on any drift from it.
 #
 # chart: ceph-csi-drivers 1.0.4
 #
 # Produced from two copies of internal/assets/lok8s/addons/rook-ceph, each
-# with the `patches:` block removed and drivers.{rbd,cephfs,nvmeof}.enabled
+# with the `patches:` block removed and drivers.{rbd,cephfs,nfs,nvmeof}.enabled
 # set to true in csi-drivers.yaml; the second copy also with the drivers'
 # `name:` keys removed (chart defaults):
 #   KUSTOMIZE_PLUGIN_HOME=$PWD/.kustomize KHELM_TRUST_ANY_REPO=true \
@@ -79,6 +80,18 @@ rules:
       - tokenreviews
     verbs:
       - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nfs-csi-ceph-com-nodeplugin-cr
+rules:
+  - apiGroups:
+      - ''
+    resources:
+      - nodes
+    verbs:
+      - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

@@ -722,42 +722,38 @@ its header says how).
 The patches cover the RBD, CephFS and NVMe-oF node plugin roles (the NFS
 role carries `nodes get` only). Each target names the driver name the
 addon pins (`rook-ceph.<type>.csi.ceph.com`) and the chart default
-(`<type>.csi.ceph.com`), so a cluster that keeps the default identity
-through an inline override is narrowed too. A target for a driver that is
-off is a no-op and takes effect when you turn the driver on.
+(`<type>.csi.ceph.com`). A target for a driver that is off is a no-op and
+takes effect when a render turns the driver on.
 
 ::: warning Upgrade note: the CephFS and NVMe-oF driver names are now pinned
+Only the addon's own `csi-drivers.yaml` selects the drivers. Inline
+`values:` in `spec.bootstrap` reach `chart.yaml` (the Rook operator chart),
+not this generator. So a cluster that runs CephFS or NVMe-oF through this
+addon does it from a fork of the addon, or from a custom target with its
+own `csi-drivers.yaml`, and that copy keeps its own driver names when it
+rebases on this version.
+
 The driver name is the CSI identity: the `CSIDriver` object, the plugin
 workloads, the kubelet registration and `spec.csi.driver` of every PV,
-which is immutable. The addon now pins `drivers.cephfs.name:
-rook-ceph.cephfs.csi.ceph.com` and `drivers.nvmeof.name:
-rook-ceph.nvmeof.csi.ceph.com`. These are the names Rook writes into its
-own StorageClasses and VolumeSnapshotClasses (`<operatorNamespace>.cephfs.csi.ceph.com`),
-so a cluster that provisions through Rook's classes is unaffected.
+which is immutable. The addon now pins `rook-ceph.cephfs.csi.ceph.com`
+(before: the chart default `cephfs.csi.ceph.com`) and
+`rook-ceph.nvmeof.csi.ceph.com` (before: `nvmeof.csi.ceph.com`). For
+CephFS the pinned name is the one Rook writes into its own StorageClass and
+VolumeSnapshotClass (`<operatorNamespace>.cephfs.csi.ceph.com`).
 
-A cluster that turned CephFS (or NVMe-oF) on through an inline override
-**without** a name ran the driver `cephfs.csi.ceph.com`. After the upgrade
-its driver identity becomes `rook-ceph.cephfs.csi.ceph.com`: a second
-`Driver`, a second plugin set, and new PVs on the new name. Existing PVs
-keep the old driver, and the bootstrap does not prune, so the old `Driver`
-stays until you remove it by hand. Before the upgrade, choose one:
+When you rebase your copy:
 
-- keep the old identity: pin it in the inline values, and the patch still
-  narrows that role:
+- **Keep the default name**: the patch targets it too, so the role is
+  narrowed and nothing else changes.
+- **Adopt the pinned name**: the CSI identity changes. Point your
+  StorageClasses and VolumeSnapshotClasses at the new name, migrate the
+  PVs (new PVC + copy), then delete the old `Driver` and its classes. Do
+  not delete a `Driver` while a PV still uses it.
 
-  ```yaml
-  - rook-ceph:
-      values:
-        drivers:
-          cephfs:
-            enabled: true
-            name: cephfs.csi.ceph.com
-  ```
-
-- move to the Rook name: point your StorageClasses and
-  VolumeSnapshotClasses at `rook-ceph.cephfs.csi.ceph.com`, migrate the
-  PVs (new PVC + copy), then delete the old `Driver` and its
-  StorageClasses. Do not delete a `Driver` while a PV still uses it.
+The patch acts on the render only. A live old `Driver` that is no longer
+in the render keeps its broad node plugin ClusterRole, and the bootstrap
+does not prune. After the migration delete that `Driver` and its RBAC, or
+narrow the old role by hand with the same patch.
 :::
 
 #### When you need the grants back
