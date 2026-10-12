@@ -46,6 +46,13 @@ spec:
       # Ask for group claims so a follow-up `jwt` + `authorization` section
       # (role-gating) can act on them; harmless if the issuer has none.
       - groups
+      # Ask for a refresh token (OIDC Core, section 11). Envoy Gateway uses
+      # it to renew the session when the access token expires (its
+      # `refreshToken` field is true by default). Without a refresh token,
+      # the session ends with the access token and the user signs in again.
+      # Some issuers (ZITADEL, for one) issue a refresh token only for this
+      # scope. If your issuer refuses the scope, remove this line.
+      - offline_access
     # redirectURL/logoutPath deliberately NOT set: Envoy Gateway defaults to
     # https://<host>/oauth2/callback and /logout — register that callback at
     # the issuer for every protected host.
