@@ -537,6 +537,160 @@ for side in bash go; do
 done
 unset PARITY_KUSTOMIZE_LOG
 
+# ── lo bootstrap --dry-run / --only ──────────────────────────────────────────
+# A dry run renders every entry like the real run and applies NOTHING. The
+# stub kustomize answers a manifest (one ConfigMap, named after the dir it
+# renders); the stub kubectl logs every argv, answers `diff` from a script
+# (unchanged for the first entry, a canned two-object diff for the second,
+# unreachable for the third case) and FAILS LOUDLY on `apply`, so a dry run
+# that applies cannot pass on either side. The streams, the exit codes, the
+# kubectl argv and the render dir's files are diffed across the two
+# implementations; the Go side is also pinned to the contract (exit codes
+# 0/1/2, the report lines, no `apply` in the log).
+mkdir -p "${PROJ}/clusters/dry.dev/targets/extra"
+cat > "${PROJ}/clusters/dry.dev/cluster.lok8s.yaml" <<'YAML'
+kind: Lo
+metadata:
+  name: dryc
+spec:
+  runtime: kind
+  network:
+    name: drynet
+    cidr: 10.99.12.0/24
+  registries:
+    tls: false
+  bootstrap:
+    - cilium
+    - ./targets/extra:
+        name: extra-cm
+        dependsOn: [cilium]
+    - ccm
+YAML
+printf 'resources: []\n' > "${PROJ}/clusters/dry.dev/targets/extra/kustomization.yaml"
+: > "${PROJ}/.kubeconfig/dryc.yaml"
+parity::stub "${PROJ}" kustomize <<'SH'
+#!/usr/bin/env bash
+# Parity stub kustomize: one ConfigMap named after the rendered directory
+# (a chart addon renders from a temp copy, so the name comes from chart.yaml
+# when there is one).
+dir="${@: -1}"
+name="$(basename "${dir}")"
+if [[ -f "${dir}/chart.yaml" ]]; then
+  name="$(sed -n 's/^  name: //p' "${dir}/chart.yaml" | head -1)"
+fi
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: %s\n  namespace: kube-system\n' "${name}"
+SH
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub kubectl (dry run): log the argv; `diff` answers per the
+# manifest on stdin (unchanged / a canned two-object diff / unreachable);
+# anything that writes must never be reached.
+echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
+manifest="$(cat)"
+case " $* " in
+  *" diff "*)
+    case "${manifest}" in
+      *"name: cilium"*) exit 0 ;;
+      *"name: extra-cm"*|*"name: extra"*)
+        cat <<'DIFF'
+diff -u -N /tmp/LIVE-1/v1.ConfigMap.kube-system.extra /tmp/MERGED-1/v1.ConfigMap.kube-system.extra
+--- /tmp/LIVE-1/v1.ConfigMap.kube-system.extra	2026-10-12 10:00:00.000000000 +0000
++++ /tmp/MERGED-1/v1.ConfigMap.kube-system.extra	2026-10-12 10:00:00.000000000 +0000
+@@ -3,4 +3,5 @@
+ kind: ConfigMap
+ metadata:
+   name: extra
++  foo: bar
+diff -u -N /tmp/LIVE-1/v1.ConfigMap.kube-system.new /tmp/MERGED-1/v1.ConfigMap.kube-system.new
+--- /tmp/LIVE-1/v1.ConfigMap.kube-system.new	1970-01-01 00:00:00.000000000 +0000
++++ /tmp/MERGED-1/v1.ConfigMap.kube-system.new	2026-10-12 10:00:00.000000000 +0000
+@@ -0,0 +1,4 @@
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: new
+diff -u -N /tmp/LIVE-1/v1.ConfigMap.kube-system.other /tmp/MERGED-1/v1.ConfigMap.kube-system.other
+--- /tmp/LIVE-1/v1.ConfigMap.kube-system.other	1970-01-01 00:00:00.000000000 +0000
++++ /tmp/MERGED-1/v1.ConfigMap.kube-system.other	2026-10-12 10:00:00.000000000 +0000
+@@ -0,0 +1,4 @@
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: other
+DIFF
+        exit 1 ;;
+      *) echo "error: the server could not be reached" >&2; exit 2 ;;
+    esac ;;
+esac
+echo "parity stub: kubectl $1 $2 $3 must not be reached by a dry run" >&2
+exit 7
+SH
+export PARITY_KUBECTL_LOG="${WORK}/kubectl.log"
+# The argv log is cleared BEFORE each side: a dry_expect_rc run (the Go
+# side alone, no post hook) would otherwise leak its calls into the next case.
+dry_pre() { reset_fixtures; rm -rf "${PROJ}/clusters/dry.dev/.registries.json" "${PROJ}/render-out" "${WORK}/kubectl.log"; }
+dry_post() {  # <impl>: keep the kubectl log and the render dir per side (normalized)
+  if [[ -f "${WORK}/kubectl.log" ]]; then
+    sed -E "s|${PROJ}|PROJ|g" "${WORK}/kubectl.log" > "${WORK}/kubectl.${1}.log"
+    rm -f "${WORK}/kubectl.log"
+  else
+    : > "${WORK}/kubectl.${1}.log"
+  fi
+  rm -rf "${WORK}/render.${1}"
+  if [[ -d "${PROJ}/render-out" ]]; then cp -R "${PROJ}/render-out" "${WORK}/render.${1}"; else mkdir -p "${WORK}/render.${1}"; fi
+}
+dry_check() { PARITY_PRE_EACH=dry_pre PARITY_POST_EACH=dry_post check "$@"; }
+dry_expect_rc() { PARITY_PRE_EACH=dry_pre expect_rc "$@"; }
+# The three entries: cilium unchanged, extra-cm differs (1 changed, 2 new),
+# ccm unreachable (an error) → rc 2, every line reported.
+dry_check - bootstrap --domain dry.dev --dry-run --render-dir render-out
+parity::state_same "${WORK}/kubectl.bash.log" "${WORK}/kubectl.go.log" "kubectl argv of lo bootstrap --dry-run" || failures=$((failures + 1))
+tree_check "${WORK}/render.go" "${WORK}/render.bash" "render dir of lo bootstrap --dry-run"
+for side in bash go; do
+  tls_absent "${side}: a dry run never applies"  "${WORK}/kubectl.${side}.log" " apply "
+  tls_pin    "${side}: three server-side diffs"  "${WORK}/kubectl.${side}.log" "^kubectl --kubeconfig PROJ/\.kubeconfig/dryc\.yaml diff --server-side --force-conflicts -f -$"
+  tls_pin    "${side}: cilium unchanged"         "${WORK}/${side}.out" "^bootstrap dry-run: 01-cilium: unchanged$"
+  tls_pin    "${side}: extra-cm differs"         "${WORK}/${side}.out" "^bootstrap dry-run: 02-extra-cm: differs changed=1 new=2$"
+  tls_pin    "${side}: ccm error"                "${WORK}/${side}.out" "^bootstrap dry-run: 03-ccm: error$"
+  tls_pin    "${side}: the summary"              "${WORK}/${side}.out" "^bootstrap dry-run: entries=3 unchanged=1 differs=1 rendered=0 skipped=0 errors=1$"
+  tls_pin    "${side}: the render dir is named"  "${WORK}/${side}.err" "^bootstrap dry-run: files under render-out$"
+  [[ -s "${WORK}/render.${side}/02-extra-cm.diff" ]] && echo "ok: ${side}: 02-extra-cm.diff holds the diff" || fail "${side}: 02-extra-cm.diff empty or missing"
+  [[ -f "${WORK}/render.${side}/01-cilium.diff" && ! -s "${WORK}/render.${side}/01-cilium.diff" ]] && echo "ok: ${side}: 01-cilium.diff is empty" || fail "${side}: 01-cilium.diff not an empty file"
+  [[ -s "${WORK}/render.${side}/03-ccm.yaml" ]] && echo "ok: ${side}: 03-ccm.yaml rendered before the failed diff" || fail "${side}: 03-ccm.yaml missing"
+done
+dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --render-dir render-out
+# --only narrows the run: one entry, numbered from 01; its unchanged diff → rc 0.
+dry_check - bootstrap --domain dry.dev --dry-run --only cilium
+dry_expect_rc 0 bootstrap --domain dry.dev --dry-run --only cilium
+# The addon name of a renamed entry matches; the entry differs → rc 1.
+dry_check - bootstrap --domain dry.dev --dry-run --only extra
+dry_expect_rc 1 bootstrap --domain dry.dev --dry-run --only extra
+# --no-diff: render only, kubectl is never reached (an empty argv log).
+dry_check - bootstrap --domain dry.dev --dry-run --no-diff --only cilium,ccm --render-dir render-out
+for side in bash go; do
+  [[ ! -s "${WORK}/kubectl.${side}.log" ]] && echo "ok: ${side}: --no-diff never reached kubectl" || fail "${side}: --no-diff reached kubectl"
+  tls_pin "${side}: ccm rendered" "${WORK}/${side}.out" "^bootstrap dry-run: 02-ccm: rendered$"
+done
+tree_check "${WORK}/render.go" "${WORK}/render.bash" "render dir of lo bootstrap --dry-run --no-diff"
+# An unknown --only name lists the valid names; the flag dependencies.
+dry_check - bootstrap --domain dry.dev --only nope
+for side in bash go; do
+  tls_pin "${side}: the unknown --only name lists the entries" "${WORK}/${side}.err" "bootstrap: --only: unknown entry 'nope' \(valid: cilium, extra-cm, ccm\)"
+done
+dry_check - bootstrap --domain dry.dev --render-dir render-out
+dry_check - bootstrap --domain dry.dev --no-diff
+dry_check - provision --domain dry.dev --dry-run
+dry_check - provision --domain dry.dev --only cilium
+dry_check - provision --domain dry.dev -b --no-diff
+# lo provision --bootstrap --dry-run: the same dry run through the provision
+# dispatch (kind Lo: no gate either way; the tail's writers are skipped).
+dry_check - provision --domain dry.dev --bootstrap --dry-run --only cilium
+dry_expect_rc 0 provision --domain dry.dev --bootstrap --dry-run --only cilium
+dry_check - provision --domain beta.cloud --bootstrap --dry-run     # cloud kind: NOT gated, stops at the missing kubeconfig (rc 1, never 3)
+dry_expect_rc 1 provision --domain beta.cloud --bootstrap --dry-run
+unset PARITY_KUBECTL_LOG
+parity::stub_kubectl_fail "${PROJ}"
+
 # ── lo provision — the KubeOne manifest (spec.auditLog, spec.oidc) ───────────
 # A mock provider whose provision succeeds (and says so on stderr) and whose
 # output holds no inventory: the driver checks spec.auditLog, provisions,
