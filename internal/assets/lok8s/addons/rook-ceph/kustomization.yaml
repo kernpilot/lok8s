@@ -41,3 +41,110 @@ generators:
 
 resources:
   - namespace.yaml
+
+# ── Least privilege for the CSI node plugin ───────────────────────────────────
+# The node plugin DaemonSet runs on EVERY node (tolerations above), so its
+# ClusterRole is the blast radius of one compromised node. The ceph-csi-drivers
+# chart grants the node plugin the full upstream rule set unconditionally
+# (templates/rbd-nodeplugin-cr-rbac.yaml); five of those rules exist only for
+# volume encryption with an external KMS and are not used by a plain
+# (unencrypted) RBD/CephFS mount, where kubelet hands the Ceph credentials to
+# the plugin inside the CSI request. ceph-csi v3.17.0 (the plugin image this
+# operator release pins) reaches them from these call sites only:
+#
+#   secrets get/list/watch     internal/kms/secretskms.go (metadata KMS
+#                              passphrase Secret), internal/kms/vault_sa.go
+#                              (tenant ServiceAccount token Secret), and
+#                              internal/rbd/rbd_healer.go — the latter ONLY for
+#                              volumes with the `mounter: rbd-nbd` parameter.
+#                              list/watch have no live caller at all.
+#   configmaps get             internal/kms/kms.go (the KMS config ConfigMap),
+#                              internal/kms/vault_tokens.go (tenant config).
+#                              The ceph cluster config is a mounted volume.
+#   serviceaccounts get        internal/kms/vault_sa.go (vaulttenantsa).
+#   serviceaccounts/token      internal/kms/vault_sa.go (TokenRequest for the
+#     create                   tenant ServiceAccount). Lets the holder mint a
+#                              token for ANY ServiceAccount: cluster-wide
+#                              privilege escalation from any node.
+#   tokenreviews create        no caller in ceph-csi; the upstream deploy docs
+#                              tie it to the Vault token-reviewer setup
+#                              (docs/rbd/deploy.md, csi-vaulttokenreview-rbac).
+#
+# Kept: nodes get (topology labels at start-up), persistentvolumes +
+# volumeattachments get/list (the rbd-nbd healer scans them on every start),
+# persistentvolumeclaims get, events (sidecars). None of them reads a credential.
+#
+# The patches are index-based (JSON patch) and GUARDED: every `remove` is
+# preceded by a `test` on the rule it expects at that index, so a chart bump
+# that reorders the rules fails the render instead of removing the wrong rule.
+# Re-verify the indices against the chart's templates/*-nodeplugin-cr-rbac.yaml
+# on every ceph-csi-drivers version bump. Descending order keeps the indices
+# valid while earlier removes are applied.
+#
+# An unmatched target is a no-op for kustomize, so the cephfs patch sits idle
+# while `drivers.cephfs.enabled` is false and takes effect the moment a cluster
+# turns CephFS on.
+#
+# Need the upstream grants back (encrypted volumes with a KMS, or the
+# `mounter: rbd-nbd` healer)? Bootstrap the `rook-ceph-csi-kms` addon after
+# this one: it binds exactly these five rules to the node plugin
+# ServiceAccount again. See docs/guide/addons.md.
+patches:
+  - target:
+      kind: ClusterRole
+      name: rook-ceph-rbd-csi-ceph-com-nodeplugin-cr
+    patch: |-
+      - op: test
+        path: /rules/7/resources/0
+        value: tokenreviews
+      - op: remove
+        path: /rules/7
+      - op: test
+        path: /rules/5/resources/0
+        value: serviceaccounts/token
+      - op: remove
+        path: /rules/5
+      - op: test
+        path: /rules/4/resources/0
+        value: serviceaccounts
+      - op: remove
+        path: /rules/4
+      - op: test
+        path: /rules/3/resources/0
+        value: configmaps
+      - op: remove
+        path: /rules/3
+      - op: test
+        path: /rules/0/resources/0
+        value: secrets
+      - op: remove
+        path: /rules/0
+  - target:
+      kind: ClusterRole
+      name: rook-ceph-cephfs-csi-ceph-com-nodeplugin-cr
+    patch: |-
+      - op: test
+        path: /rules/7/resources/0
+        value: tokenreviews
+      - op: remove
+        path: /rules/7
+      - op: test
+        path: /rules/4/resources/0
+        value: serviceaccounts/token
+      - op: remove
+        path: /rules/4
+      - op: test
+        path: /rules/3/resources/0
+        value: serviceaccounts
+      - op: remove
+        path: /rules/3
+      - op: test
+        path: /rules/2/resources/0
+        value: configmaps
+      - op: remove
+        path: /rules/2
+      - op: test
+        path: /rules/1/resources/0
+        value: secrets
+      - op: remove
+        path: /rules/1
