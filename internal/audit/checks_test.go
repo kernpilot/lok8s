@@ -507,8 +507,8 @@ func TestCheckK8sVersionAbsent(t *testing.T) {
 	}
 }
 
-// The support table: newest first, one row per minor, valid dates, and at
-// least one row past its EOL (it names the oldest minor the table knows).
+// The support table: newest first, one row per minor, valid dates, and each
+// EOL date before the date of the row above it.
 func TestK8sMinorEOLTable(t *testing.T) {
 	for i, row := range k8sMinorEOL {
 		if _, err := time.Parse("2006-01-02", row.eol); err != nil {
