@@ -46,15 +46,22 @@ values:
         tolerations:
           - operator: Exists
     cephfs:
-      # Off. The name is still set, so the node plugin ClusterRole a cluster
-      # gets when it turns CephFS on is the one the least-privilege patch in
-      # kustomization.yaml targets (the chart default, cephfs.csi.ceph.com,
-      # would yield cephfs-csi-ceph-com-nodeplugin-cr and miss the patch).
+      # Off. The name is still pinned, for two reasons: it is the driver name
+      # Rook writes into its CephFS StorageClass and VolumeSnapshotClass
+      # (`<operatorNamespace>.cephfs.csi.ceph.com`), and it is one of the two
+      # names the least-privilege patch in kustomization.yaml targets (the
+      # other is the chart default, cephfs.csi.ceph.com). A cluster that
+      # enables CephFS gets a narrowed node plugin role either way.
       name: rook-ceph.cephfs.csi.ceph.com
       enabled: false
     nfs:
+      # Off. Its node plugin role carries `nodes get` only (chart
+      # nfs-nodeplugin-cr-rbac.yaml), so no patch is needed.
       enabled: false
     nvmeof:
+      # Off. Same rule set as rbd in the chart; pinned and patched like
+      # cephfs so an enabled NVMe-oF driver is narrowed too.
+      name: rook-ceph.nvmeof.csi.ceph.com
       enabled: false
   # Rook already reconciles the per-cluster CephConnection + ClientProfile from the
   # CephCluster CR — leave these EMPTY so this chart does not create rival copies.

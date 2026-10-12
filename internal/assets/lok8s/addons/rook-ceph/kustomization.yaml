@@ -46,7 +46,7 @@ resources:
 # The node plugin DaemonSet runs on every node (tolerations above), so its
 # ClusterRole is the blast radius of one compromised node. The ceph-csi-drivers
 # chart grants the node plugin the full upstream rule set unconditionally
-# (templates/rbd-nodeplugin-cr-rbac.yaml). Five of those rules exist for
+# (templates/*-nodeplugin-cr-rbac.yaml). Five of those rules exist for
 # volume encryption with an external KMS. A plain (unencrypted) RBD or CephFS
 # mount does not use them: kubelet hands the Ceph credentials to the plugin
 # inside the CSI request. ceph-csi v3.17.0 (the plugin image this operator
@@ -83,6 +83,19 @@ resources:
 # volumeattachments get/list (the rbd-nbd healer scans them on every start),
 # persistentvolumeclaims get, events (sidecars). None of them reads a credential.
 #
+# Which roles: rbd, cephfs and nvmeof carry the five rules (rbd and nvmeof in
+# the same order, cephfs in another); nfs carries `nodes get` only and needs
+# no patch. Each target names both the driver name this addon pins in
+# csi-drivers.yaml (`rook-ceph.<type>.csi.ceph.com`, the ClusterRole is
+# `rook-ceph-<type>-csi-ceph-com-nodeplugin-cr`, chart _helpers.tpl
+# normalizeDriverName) and the chart default (`<type>.csi.ceph.com`), so a
+# cluster that keeps the default identity through an inline override is
+# narrowed too. An unmatched target is a no-op for kustomize, so the cephfs
+# and nvmeof targets sit idle while those drivers are off and take effect
+# the moment a cluster turns one on. internal/addons/rookceph_rbac_test.go
+# derives the expected names from csi-drivers.yaml and fails when a target or
+# the fixture drifts from them.
+#
 # The patches are index-based (JSON patch) and guarded: every `remove` is
 # preceded by a `test` on the complete rule it expects at that index, so a
 # chart bump that reorders, merges or widens a rule fails the render instead
@@ -92,19 +105,15 @@ resources:
 # (its header says how). Descending order keeps the indices valid while
 # earlier removes are applied.
 #
-# An unmatched target is a no-op for kustomize, so the cephfs patch sits idle
-# while `drivers.cephfs.enabled` is false and takes effect the moment a cluster
-# turns CephFS on. The driver name is pinned in csi-drivers.yaml for exactly
-# that reason: the target below must match the name the chart renders.
-#
 # Need the upstream grants back (encrypted volumes with a KMS, the
 # `mounter: rbd-nbd` healer, block-volume usage metrics)? Bootstrap the
 # `rook-ceph-csi-kms` addon after this one: it binds these five rules to the
 # node plugin ServiceAccount again. See docs/guide/addons.md.
 patches:
+  # rbd and nvmeof: ten rules in the same order.
   - target:
       kind: ClusterRole
-      name: rook-ceph-rbd-csi-ceph-com-nodeplugin-cr
+      name: ^(rook-ceph-rbd|rbd|rook-ceph-nvmeof|nvmeof)-csi-ceph-com-nodeplugin-cr$
     patch: |-
       - op: test
         path: /rules/7
@@ -131,9 +140,10 @@ patches:
         value: { apiGroups: [""], resources: [secrets], verbs: [get, list, watch] }
       - op: remove
         path: /rules/0
+  # cephfs: eight rules, its own order.
   - target:
       kind: ClusterRole
-      name: rook-ceph-cephfs-csi-ceph-com-nodeplugin-cr
+      name: ^(rook-ceph-cephfs|cephfs)-csi-ceph-com-nodeplugin-cr$
     patch: |-
       - op: test
         path: /rules/7

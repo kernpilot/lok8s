@@ -1,20 +1,233 @@
 # Fixture for internal/addons/rookceph_rbac_test.go: the Ceph CSI node plugin
-# ClusterRoles exactly as the ceph-csi-drivers chart renders them for the
-# rook-ceph addon (driver names rook-ceph.rbd.csi.ceph.com and
-# rook-ceph.cephfs.csi.ceph.com), BEFORE the addon's least-privilege patches.
-# The test runs the addon's real `patches:` block over this file.
+# ClusterRoles exactly as the ceph-csi-drivers chart renders them, BEFORE the
+# rook-ceph addon's least-privilege patches, for the rbd, cephfs and nvmeof
+# drivers under both names each can have: the name the addon pins in
+# csi-drivers.yaml (rook-ceph.<type>.csi.ceph.com) and the chart default
+# (<type>.csi.ceph.com). The test runs the addon's real `patches:` block over
+# this file; TestRookCephNodePluginFixtureMatchesChart re-renders the chart
+# (on CI, or LOK8S_ONLINE_TESTS=1) and fails on any drift from this file.
 #
 # chart: ceph-csi-drivers 1.0.4
 #
-# Produced from a copy of internal/assets/lok8s/addons/rook-ceph with the
-# `patches:` block removed and `drivers.cephfs.enabled: true` in
-# csi-drivers.yaml:
+# Produced from two copies of internal/assets/lok8s/addons/rook-ceph, each
+# with the `patches:` block removed and drivers.{rbd,cephfs,nvmeof}.enabled
+# set to true in csi-drivers.yaml; the second copy also with the drivers'
+# `name:` keys removed (chart defaults):
 #   KUSTOMIZE_PLUGIN_HOME=$PWD/.kustomize KHELM_TRUST_ANY_REPO=true \
 #     .bin/kustomize build --enable-alpha-plugins --enable-exec <copy>
-# then the two *-nodeplugin-cr ClusterRoles, metadata reduced to the name,
+# then every *-nodeplugin-cr ClusterRole, metadata reduced to the name,
 # sorted by name. Refresh it on every ceph-csi-drivers version bump (the test
 # fails while the `chart:` line above and csi-drivers.yaml disagree) and
 # re-check the patch indices against the new rule order.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cephfs-csi-ceph-com-nodeplugin-cr
+rules:
+  - apiGroups:
+      - ''
+    resources:
+      - nodes
+    verbs:
+      - get
+  - apiGroups:
+      - ''
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ''
+    resources:
+      - configmaps
+    verbs:
+      - get
+  - apiGroups:
+      - ''
+    resources:
+      - serviceaccounts
+    verbs:
+      - get
+  - apiGroups:
+      - ''
+    resources:
+      - serviceaccounts/token
+    verbs:
+      - create
+  - apiGroups:
+      - ''
+    resources:
+      - events
+    verbs:
+      - list
+      - watch
+      - create
+      - update
+      - patch
+  - apiGroups:
+      - ''
+    resources:
+      - persistentvolumes
+      - persistentvolumeclaims
+    verbs:
+      - get
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nvmeof-csi-ceph-com-nodeplugin-cr
+rules:
+  - apiGroups:
+      - ''
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ''
+    resources:
+      - persistentvolumes
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - volumeattachments
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ''
+    resources:
+      - configmaps
+    verbs:
+      - get
+  - apiGroups:
+      - ''
+    resources:
+      - serviceaccounts
+    verbs:
+      - get
+  - apiGroups:
+      - ''
+    resources:
+      - serviceaccounts/token
+    verbs:
+      - create
+  - apiGroups:
+      - ''
+    resources:
+      - nodes
+    verbs:
+      - get
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  - apiGroups:
+      - ''
+    resources:
+      - events
+    verbs:
+      - list
+      - watch
+      - create
+      - update
+      - patch
+  - apiGroups:
+      - ''
+    resources:
+      - persistentvolumeclaims
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rbd-csi-ceph-com-nodeplugin-cr
+rules:
+  - apiGroups:
+      - ''
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ''
+    resources:
+      - persistentvolumes
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - volumeattachments
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ''
+    resources:
+      - configmaps
+    verbs:
+      - get
+  - apiGroups:
+      - ''
+    resources:
+      - serviceaccounts
+    verbs:
+      - get
+  - apiGroups:
+      - ''
+    resources:
+      - serviceaccounts/token
+    verbs:
+      - create
+  - apiGroups:
+      - ''
+    resources:
+      - nodes
+    verbs:
+      - get
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  - apiGroups:
+      - ''
+    resources:
+      - events
+    verbs:
+      - list
+      - watch
+      - create
+      - update
+      - patch
+  - apiGroups:
+      - ''
+    resources:
+      - persistentvolumeclaims
+    verbs:
+      - get
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -75,6 +288,80 @@ rules:
       - tokenreviews
     verbs:
       - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rook-ceph-nvmeof-csi-ceph-com-nodeplugin-cr
+rules:
+  - apiGroups:
+      - ''
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ''
+    resources:
+      - persistentvolumes
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - volumeattachments
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - ''
+    resources:
+      - configmaps
+    verbs:
+      - get
+  - apiGroups:
+      - ''
+    resources:
+      - serviceaccounts
+    verbs:
+      - get
+  - apiGroups:
+      - ''
+    resources:
+      - serviceaccounts/token
+    verbs:
+      - create
+  - apiGroups:
+      - ''
+    resources:
+      - nodes
+    verbs:
+      - get
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  - apiGroups:
+      - ''
+    resources:
+      - events
+    verbs:
+      - list
+      - watch
+      - create
+      - update
+      - patch
+  - apiGroups:
+      - ''
+    resources:
+      - persistentvolumeclaims
+    verbs:
+      - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

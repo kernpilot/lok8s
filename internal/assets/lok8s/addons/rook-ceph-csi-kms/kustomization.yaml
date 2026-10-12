@@ -30,9 +30,10 @@
 #           dependsOn: [rook-ceph]
 #
 # The binding targets the RBD node plugin ServiceAccount the `rook-ceph`
-# addon creates. A cluster that also turns on the CephFS driver adds its
-# ServiceAccount (`rook-ceph-cephfs-csi-ceph-com-nodeplugin-sa`) as a second
-# subject from a patch in its own target.
+# addon creates. A cluster that also turns on the CephFS or NVMe-oF driver
+# adds its ServiceAccount (`rook-ceph-cephfs-csi-ceph-com-nodeplugin-sa`,
+# `rook-ceph-nvmeof-csi-ceph-com-nodeplugin-sa`) as a further subject from a
+# patch in its own target.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

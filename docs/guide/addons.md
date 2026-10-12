@@ -681,9 +681,9 @@ The CSI **node plugin** is a DaemonSet that tolerates every taint, so it
 runs on every node, control planes included. Its ClusterRole is therefore
 what an attacker holds after a takeover of any one node.
 
-The upstream `ceph-csi-drivers` chart grants that role ten rules. Five of
-them serve volume encryption with an external KMS, and the addon removes
-them:
+The upstream `ceph-csi-drivers` chart grants that role ten rules (RBD and
+NVMe-oF) or eight (CephFS). Five of them serve volume encryption with an
+external KMS, and the addon removes them:
 
 | Rule | What ceph-csi uses it for |
 |---|---|
@@ -719,10 +719,46 @@ When you bump `ceph-csi-drivers`, compare the indices with the chart's
 the fixture the render test reads (`internal/addons/testdata/rook-ceph/`,
 its header says how).
 
-The same patch covers the CephFS node plugin role. The addon pins the
-CephFS driver name (`rook-ceph.cephfs.csi.ceph.com`) so that role gets the
-name the patch targets. The patch is a no-op while
-`drivers.cephfs.enabled` is `false` and takes effect when you turn CephFS on.
+The patches cover the RBD, CephFS and NVMe-oF node plugin roles (the NFS
+role carries `nodes get` only). Each target names the driver name the
+addon pins (`rook-ceph.<type>.csi.ceph.com`) and the chart default
+(`<type>.csi.ceph.com`), so a cluster that keeps the default identity
+through an inline override is narrowed too. A target for a driver that is
+off is a no-op and takes effect when you turn the driver on.
+
+::: warning Upgrade note: the CephFS and NVMe-oF driver names are now pinned
+The driver name is the CSI identity: the `CSIDriver` object, the plugin
+workloads, the kubelet registration and `spec.csi.driver` of every PV,
+which is immutable. The addon now pins `drivers.cephfs.name:
+rook-ceph.cephfs.csi.ceph.com` and `drivers.nvmeof.name:
+rook-ceph.nvmeof.csi.ceph.com`. These are the names Rook writes into its
+own StorageClasses and VolumeSnapshotClasses (`<operatorNamespace>.cephfs.csi.ceph.com`),
+so a cluster that provisions through Rook's classes is unaffected.
+
+A cluster that turned CephFS (or NVMe-oF) on through an inline override
+**without** a name ran the driver `cephfs.csi.ceph.com`. After the upgrade
+its driver identity becomes `rook-ceph.cephfs.csi.ceph.com`: a second
+`Driver`, a second plugin set, and new PVs on the new name. Existing PVs
+keep the old driver, and the bootstrap does not prune, so the old `Driver`
+stays until you remove it by hand. Before the upgrade, choose one:
+
+- keep the old identity: pin it in the inline values, and the patch still
+  narrows that role:
+
+  ```yaml
+  - rook-ceph:
+      values:
+        drivers:
+          cephfs:
+            enabled: true
+            name: cephfs.csi.ceph.com
+  ```
+
+- move to the Rook name: point your StorageClasses and
+  VolumeSnapshotClasses at `rook-ceph.cephfs.csi.ceph.com`, migrate the
+  PVs (new PVC + copy), then delete the old `Driver` and its
+  StorageClasses. Do not delete a `Driver` while a PV still uses it.
+:::
 
 #### When you need the grants back
 
