@@ -15,6 +15,10 @@
 source "$(dirname "${BASH_SOURCE[0]}")/lib/parity.sh"
 parity::init "${1:-}"
 parity::new_project "${PROJ}"
+# The k8s-version-support check reads the EOL table against today, or against
+# _AUDIT_TODAY when set (both implementations). The real-date cases below run
+# unpinned; the dated section exports the pin per case.
+unset _AUDIT_TODAY
 
 # ── clean.dev — kind=lo, everything as shipped (default bootstrap → the real
 # framework cilium addon), supported k8s, https issuer, no targets.
@@ -185,6 +189,18 @@ mkdir -p "${PROJ}/clusters/gamma.app"
 printf 'kind: Deploy\nspec:\n  clusterRef:\n    domain: identity.net\n' \
   > "${PROJ}/clusters/gamma.app/deploy.lok8s.yaml"
 
+# ── eol.dev — prod intent on 1.34, the minor whose EOL date (2026-10-27) the
+# dated section walks over: pass the day before, fail on the day.
+mkdir -p "${PROJ}/clusters/eol.dev"
+cat > "${PROJ}/clusters/eol.dev/cluster.lok8s.yaml" <<'EOF'
+kind: KubeOne
+metadata:
+  name: eol
+spec:
+  kubernetes:
+    version: v1.34.3
+EOF
+
 # Every case diffs rc/stdout/stderr with the project dir normalized to PROJ
 # (findings embed absolute paths); expect_rc pins the exit-code contract on
 # the Go binary alone.
@@ -216,5 +232,28 @@ expect_rc 1 audit secpol.app --sarif
 expect_rc 0 audit gamma.app
 expect_rc 0 audit '../evil'
 expect_rc 1 audit viol.cloud --json --sarif
+
+# ── The EOL table at pinned dates. The cases above read the table against the
+# real date, so a boundary drift between the two implementations (one side
+# supports a minor ON its EOL date, the other does not) stays invisible until
+# that date. Walk both sides over the 1.34 boundary (2026-10-27) and past the
+# whole table.
+check_dated() {
+  local today="${1}"; shift
+  _AUDIT_TODAY="${today}" parity::run_pair "$@"
+  parity::finish "lo $* (today=${today})" -
+}
+for today in 2026-10-26 2026-10-27 2028-01-01; do
+  for d in clean.dev viol.cloud eol.dev; do
+    check_dated "${today}" audit "${d}"
+    check_dated "${today}" audit "${d}" --json
+  done
+done
+
+# The flip on the Go binary alone, pinned: supported the day before, EOL on
+# the day; past the whole table → warn only, rc 0.
+_AUDIT_TODAY=2026-10-26 expect_rc 0 audit eol.dev
+_AUDIT_TODAY=2026-10-27 expect_rc 1 audit eol.dev
+_AUDIT_TODAY=2028-01-01 expect_rc 0 audit eol.dev
 
 report
