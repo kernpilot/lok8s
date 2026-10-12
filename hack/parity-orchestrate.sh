@@ -654,9 +654,9 @@ for side in bash go; do
   tls_pin    "${side}: ccm error"                "${WORK}/${side}.out" "^bootstrap dry-run: 03-ccm: error$"
   tls_pin    "${side}: the summary"              "${WORK}/${side}.out" "^bootstrap dry-run: entries=3 unchanged=1 differs=1 rendered=0 skipped=0 errors=1$"
   tls_pin    "${side}: the render dir is named"  "${WORK}/${side}.err" "^bootstrap dry-run: files under render-out$"
-  [[ -s "${WORK}/render.${side}/02-extra-cm.diff" ]] && echo "ok: ${side}: 02-extra-cm.diff holds the diff" || fail "${side}: 02-extra-cm.diff empty or missing"
-  [[ -f "${WORK}/render.${side}/01-cilium.diff" && ! -s "${WORK}/render.${side}/01-cilium.diff" ]] && echo "ok: ${side}: 01-cilium.diff is empty" || fail "${side}: 01-cilium.diff not an empty file"
-  [[ -s "${WORK}/render.${side}/03-ccm.yaml" ]] && echo "ok: ${side}: 03-ccm.yaml rendered before the failed diff" || fail "${side}: 03-ccm.yaml missing"
+  if [[ -s "${WORK}/render.${side}/02-extra-cm.diff" ]]; then echo "ok: ${side}: 02-extra-cm.diff holds the diff"; else fail "${side}: 02-extra-cm.diff empty or missing"; fi
+  if [[ -f "${WORK}/render.${side}/01-cilium.diff" && ! -s "${WORK}/render.${side}/01-cilium.diff" ]]; then echo "ok: ${side}: 01-cilium.diff is empty"; else fail "${side}: 01-cilium.diff not an empty file"; fi
+  if [[ -s "${WORK}/render.${side}/03-ccm.yaml" ]]; then echo "ok: ${side}: 03-ccm.yaml rendered before the failed diff"; else fail "${side}: 03-ccm.yaml missing"; fi
 done
 dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --render-dir render-out
 # --only narrows the run: one entry, numbered from 01; its unchanged diff → rc 0.
@@ -668,7 +668,7 @@ dry_expect_rc 1 bootstrap --domain dry.dev --dry-run --only extra
 # --no-diff: render only, kubectl is never reached (an empty argv log).
 dry_check - bootstrap --domain dry.dev --dry-run --no-diff --only cilium,ccm --render-dir render-out
 for side in bash go; do
-  [[ ! -s "${WORK}/kubectl.${side}.log" ]] && echo "ok: ${side}: --no-diff never reached kubectl" || fail "${side}: --no-diff reached kubectl"
+  if [[ ! -s "${WORK}/kubectl.${side}.log" ]]; then echo "ok: ${side}: --no-diff never reached kubectl"; else fail "${side}: --no-diff reached kubectl"; fi
   tls_pin "${side}: ccm rendered" "${WORK}/${side}.out" "^bootstrap dry-run: 02-ccm: rendered$"
 done
 tree_check "${WORK}/render.go" "${WORK}/render.bash" "render dir of lo bootstrap --dry-run --no-diff"
