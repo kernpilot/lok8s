@@ -241,10 +241,18 @@ registry::each() {
   done < <(jq -r '.registries[] | [.name, .ip, (if .url == "" then "-" else .url end), (if .domain == "" then "-" else .domain end), (if .host == "" then "-" else .host end), .type] | @tsv' "${json}")
 }
 
-# Get a single field for a named registry.
+# Get a single field for a named registry. Review round 2, item D: under
+# --dry-run, registry::config_generate's own write is gated (it writes a
+# disposable temp file instead and reads ITS OWN mirror exports back from
+# THAT — see the long comment there), so LOK8S_REGISTRY_JSON can legitimately
+# name a file that was never actually written. A missing file here is
+# "nothing to report yet", not an error: this read runs again later, from
+# driver::export → lo::export_spec_envs, which is now BEFORE the sandbox
+# this dry run writes into even exists.
 # Usage: registry::get <name> <field>
 registry::get() {
   local name="${1}" field="${2}"
+  [[ -f "${LOK8S_REGISTRY_JSON:-}" ]] || return 0
   jq -r --arg n "${name}" --arg f "${field}" \
     '.registries[] | select(.name == $n) | .[$f] // ""' \
     "${LOK8S_REGISTRY_JSON}"
@@ -252,16 +260,19 @@ registry::get() {
 
 # Check if shared mode is enabled (reads from JSON, no globals).
 registry::is_shared() {
+  [[ -f "${LOK8S_REGISTRY_JSON:-}" ]] || return 1
   jq -e '.shared' "${LOK8S_REGISTRY_JSON}" > /dev/null 2>&1
 }
 
 # Check if TLS mode is enabled (reads from JSON, no globals).
 registry::is_tls() {
+  [[ -f "${LOK8S_REGISTRY_JSON:-}" ]] || return 1
   jq -e '.tls' "${LOK8S_REGISTRY_JSON}" > /dev/null 2>&1
 }
 
 # Get the registry listen/connect port (80 plain, 443 TLS).
 registry::port() {
+  [[ -f "${LOK8S_REGISTRY_JSON:-}" ]] || { echo 80; return 0; }
   jq -r '.port // 80' "${LOK8S_REGISTRY_JSON}"
 }
 
@@ -281,16 +292,19 @@ registry::url() {
 
 # Get the shared registry network name.
 registry::network_name() {
+  [[ -f "${LOK8S_REGISTRY_JSON:-}" ]] || return 0
   jq -r '.network.name' "${LOK8S_REGISTRY_JSON}"
 }
 
 # Get the shared registry network CIDR.
 registry::network_cidr() {
+  [[ -f "${LOK8S_REGISTRY_JSON:-}" ]] || return 0
   jq -r '.network.cidr' "${LOK8S_REGISTRY_JSON}"
 }
 
 # Get the project Docker network name.
 registry::project_network() {
+  [[ -f "${LOK8S_REGISTRY_JSON:-}" ]] || return 0
   jq -r '.project_network' "${LOK8S_REGISTRY_JSON}"
 }
 

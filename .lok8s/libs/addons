@@ -325,6 +325,72 @@ addons::detail() {
   printf '\nConfigure an addon: edit its spec.bootstrap inline values, or its addons/<name>/values.<driver>.yaml — see docs/guide/addons.md.\n'
 }
 
+# addons::_exec_plugin_allowed <apiVersion/kind>
+# Review round 2, item C: the only apiVersion/kind pairs a dry run runs
+# without --allow-generators — the secrets.lok8s.dev generator
+# (kustomize/plugins/secret) and khelm's ChartRenderer. Anything else found
+# in a generators:/transformers:/validators: list is refused.
+addons::_exec_plugin_allowed() {
+  case "${1}" in
+    secrets.lok8s.dev/v1/Secret|khelm.mgoltzsche.github.com/v2/ChartRenderer) return 0 ;;
+  esac
+  return 1
+}
+
+# addons::_scan_exec_plugins <dir> <visited-array-name>
+# Recursively scans dir's kustomization tree — dir's own kustomization.yaml,
+# then every LOCAL resources:/bases:/components: entry that is itself a
+# kustomization (recursively, cycle-safe via the caller's visited array) —
+# for a generators:/transformers:/validators: file whose apiVersion/kind is
+# not addons::_exec_plugin_allowed. On the FIRST one found, echoes
+# "<apiVersion> <kind> <path>" and returns 0; returns 1 when none is found
+# anywhere in the tree (review round 2, item C).
+addons::_scan_exec_plugins() {
+  local _dir="${1}" _visited_name="${2}"
+  local -n _visited="${_visited_name}"
+  local _abs
+  _abs="$(cd "${_dir}" 2>/dev/null && pwd -P)" || return 1
+  [[ -z "${_visited["${_abs}"]:-}" ]] || return 1
+  _visited["${_abs}"]=1
+
+  local _kfile="" _n
+  for _n in kustomization.yaml kustomization.yml Kustomization; do
+    [[ -f "${_dir}/${_n}" ]] && { _kfile="${_dir}/${_n}"; break; }
+  done
+  [[ -n "${_kfile}" ]] || return 1
+
+  local _rel _path _av _kind
+  while IFS= read -r _rel; do
+    [[ -n "${_rel}" ]] || continue
+    case "${_rel}" in /*|*://*) continue ;; esac
+    _path="${_dir}/${_rel}"
+    [[ -f "${_path}" ]] || continue
+    _av="$(yq -r '.apiVersion // ""' "${_path}" 2>/dev/null)"
+    _kind="$(yq -r '.kind // ""' "${_path}" 2>/dev/null)"
+    [[ -n "${_av}" && -n "${_kind}" ]] || continue
+    if ! addons::_exec_plugin_allowed "${_av}/${_kind}"; then
+      echo "${_av} ${_kind} ${_path}"
+      return 0
+    fi
+  done < <(yq -r '(.generators // [])[], (.transformers // [])[], (.validators // [])[]' "${_kfile}" 2>/dev/null)
+
+  while IFS= read -r _rel; do
+    [[ -n "${_rel}" ]] || continue
+    case "${_rel}" in /*|*://*) continue ;; esac
+    _path="${_dir}/${_rel}"
+    if [[ -d "${_path}" ]]; then
+      addons::_scan_exec_plugins "${_path}" "${_visited_name}" && return 0
+    elif [[ -f "${_path}" ]]; then
+      _av="$(yq -r '.apiVersion // ""' "${_path}" 2>/dev/null)"
+      _kind="$(yq -r '.kind // ""' "${_path}" 2>/dev/null)"
+      if [[ "${_av}" == "kustomize.config.k8s.io/v1beta1" && "${_kind}" == "Kustomization" ]]; then
+        addons::_scan_exec_plugins "$(dirname "${_path}")" "${_visited_name}" && return 0
+      fi
+    fi
+  done < <(yq -r '(.resources // [])[], (.bases // [])[], (.components // [])[]' "${_kfile}" 2>/dev/null)
+  return 1
+}
+
 # Render a framework addon to stdout via the canonical khelm path — the SINGLE
 # render shared by the bootstrap engine and the KubeOne driver's pre-apply addon
 # staging. Stacks values base < driver(kind) < provider < inline (later wins),
@@ -334,6 +400,20 @@ addons::detail() {
 # Usage: addons::render <addon_dir> <kind> <provider_name> [inline_values]
 addons::render() {
   local addon_dir="${1}" kind="${2}" provider_name="${3:-}" inline_values="${4:-}"
+  # Review round 2, item C: under --dry-run (unless --allow-generators),
+  # refuse every exec plugin that is not lok8s' own built-in set BEFORE
+  # kustomize ever runs it — scanned against the addon's OWN tree, never a
+  # copy, the same as the Go side's RenderIsolated.
+  if (( ${bootstrap_dry_run:-0} )) && (( ! ${bootstrap_allow_generators:-0} )); then
+    local -A _exec_plugin_visited=()
+    local _bad_plugin
+    if _bad_plugin="$(addons::_scan_exec_plugins "${addon_dir}" _exec_plugin_visited)"; then
+      local _bad_av _bad_kind _bad_path
+      read -r _bad_av _bad_kind _bad_path <<< "${_bad_plugin}"
+      error "addons::render: exec plugin ${_bad_av}/${_bad_kind} not run in dry-run (pass --allow-generators to run it): ${_bad_path}"
+      return 1
+    fi
+  fi
   local build_dir="${addon_dir}"
   if [[ -f "${addon_dir}/chart.yaml" ]]; then
     # Stack values: base < driver < provider < inline (later wins). Facts

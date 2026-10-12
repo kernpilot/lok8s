@@ -652,7 +652,7 @@ for side in bash go; do
   tls_pin    "${side}: cilium unchanged"         "${WORK}/${side}.out" "^bootstrap dry-run: 01-cilium: unchanged$"
   tls_pin    "${side}: extra-cm differs"         "${WORK}/${side}.out" "^bootstrap dry-run: 02-extra-cm: differs changed=1 new=2$"
   tls_pin    "${side}: ccm error"                "${WORK}/${side}.out" "^bootstrap dry-run: 03-ccm: error$"
-  tls_pin    "${side}: the summary"              "${WORK}/${side}.out" "^bootstrap dry-run: entries=3 unchanged=1 differs=1 rendered=0 skipped=0 errors=1$"
+  tls_pin    "${side}: the summary"              "${WORK}/${side}.out" "^bootstrap dry-run: entries=3 unchanged=1 differs=1 rendered=0 skipped=0 inconclusive=0 errors=1$"
   tls_pin    "${side}: the render dir is named"  "${WORK}/${side}.err" "^bootstrap dry-run: files under render-out$"
   if [[ -s "${WORK}/render.${side}/02-extra-cm.diff" ]]; then echo "ok: ${side}: 02-extra-cm.diff holds the diff"; else fail "${side}: 02-extra-cm.diff empty or missing"; fi
   if [[ -f "${WORK}/render.${side}/01-cilium.diff" && ! -s "${WORK}/render.${side}/01-cilium.diff" ]]; then echo "ok: ${side}: 01-cilium.diff is empty"; else fail "${side}: 01-cilium.diff not an empty file"; fi

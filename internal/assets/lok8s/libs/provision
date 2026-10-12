@@ -17,7 +17,10 @@ import ^libs/bootstrap
 main::provision() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
   local force="${force:-0}"
-  local bootstrap=0 dry_run=0 render_dir="" no_diff=0 only="" allow_generators=0
+  local bootstrap=0 dry_run=0 render_dir="" no_diff=0 only="" allow_generators=0 with_restore=0
+  # Review round 2, item E: see bootstrap::_flag_given's doc comment.
+  local _only_given=0
+  bootstrap::_flag_given only "${@}" && _only_given=1
   local -a args=(
     'domain|:^~domain'   'Domain to use'
     'bootstrap|b:+'      'Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)'
@@ -26,16 +29,17 @@ main::provision() {
     'render-dir|:'       "Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory"
     'no-diff|:+'         'Dry run without the kubectl diff: render only, no cluster access'
     'only|:'             'With --bootstrap: apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded'
-    'allow-generators|:+' 'Let --dry-run execute a bash: secrets generator (default: refused — it can run kubectl/lo against the live cluster)'
+    'allow-generators|:+' 'Let --dry-run execute a non-builtin exec plugin or a bash: secrets generator (default: refused — either can run kubectl/lo against the live cluster)'
+    'with-restore|:+'    'With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)'
     "${args[@]:-}"
   )
   :args "Provision a cluster" "${@}"
-  bootstrap::mode_check "${bootstrap}" || return 1
+  bootstrap::mode_check "${bootstrap}" "${_only_given}" || return 1
   # The run modes reach bootstrap::apply through dynamic scoping (the `force`
   # precedent), under names no other lib declares.
   local bootstrap_dry_run="${dry_run}" bootstrap_render_dir="${render_dir}"
   local bootstrap_no_diff="${no_diff}" bootstrap_select="${only}"
-  local bootstrap_allow_generators="${allow_generators}"
+  local bootstrap_allow_generators="${allow_generators}" bootstrap_with_restore="${with_restore}"
   # Same reason as `lo build` (see the note there): the domain can come from
   # clusters/.active — state a `lo use` persisted hours ago — and provision
   # reconciles THAT domain's infrastructure. Cloud drivers additionally gate on
@@ -387,6 +391,22 @@ provision::dispatch() {
       # (`lo recover`), where an ungated failure here would be swallowed.
       driver::post_provision "${domain}" || return 1
     fi
+  fi
+
+  # Review round 2, item D: live BEFORE driver::export — Export can write
+  # project state of its own (the Lo driver's .registries.json, gated on
+  # this exact sentinel), and that write happens here, well before
+  # bootstrap::apply (which also sets it, idempotently, for a direct
+  # caller) is ever reached.
+  if (( dry_run_only )); then
+    export LOK8S_BOOTSTRAP_DRYRUN=1
+    if (( ${bootstrap_allow_generators:-0} )); then
+      export LOK8S_BOOTSTRAP_ALLOW_GENERATORS=1
+    else
+      unset LOK8S_BOOTSTRAP_ALLOW_GENERATORS
+    fi
+  else
+    unset LOK8S_BOOTSTRAP_DRYRUN LOK8S_BOOTSTRAP_ALLOW_GENERATORS
   fi
 
   # driver::export: spec-derived env that spec.bootstrap addons consume
