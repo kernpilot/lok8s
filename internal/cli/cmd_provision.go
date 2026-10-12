@@ -29,10 +29,11 @@ func init() {
 // `lo provision --bootstrap` share (bash: the same four args in
 // main::bootstrap and main::provision).
 type bootstrapModeFlags struct {
-	dryRun    bool
-	renderDir string
-	noDiff    bool
-	only      []string
+	dryRun          bool
+	renderDir       string
+	noDiff          bool
+	only            []string
+	allowGenerators bool
 }
 
 func (f *bootstrapModeFlags) bind(cmd *cobra.Command) {
@@ -40,6 +41,7 @@ func (f *bootstrapModeFlags) bind(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.renderDir, "render-dir", "", "Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory")
 	cmd.Flags().BoolVar(&f.noDiff, "no-diff", false, "Dry run without the kubectl diff: render only, no cluster access")
 	cmd.Flags().StringSliceVar(&f.only, "only", nil, "Apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded")
+	cmd.Flags().BoolVar(&f.allowGenerators, "allow-generators", false, "Let --dry-run execute a bash: secrets generator (default: refused — it can run kubectl/lo against the live cluster)")
 }
 
 // options validates the combination and returns the engine's Options. A
@@ -48,7 +50,7 @@ func (f *bootstrapModeFlags) options(stderr io.Writer, bootstrapOnly bool) (boot
 	for _, dep := range []struct {
 		set  bool
 		flag string
-	}{{f.dryRun, "--dry-run"}, {f.renderDir != "", "--render-dir"}, {f.noDiff, "--no-diff"}, {len(f.only) > 0, "--only"}} {
+	}{{f.dryRun, "--dry-run"}, {f.renderDir != "", "--render-dir"}, {f.noDiff, "--no-diff"}, {len(f.only) > 0, "--only"}, {f.allowGenerators, "--allow-generators"}} {
 		if dep.set && !bootstrapOnly {
 			ui.ErrorTo(stderr, "%s requires --bootstrap", dep.flag)
 			return bootstrap.Options{}, ErrHandled
@@ -57,17 +59,26 @@ func (f *bootstrapModeFlags) options(stderr io.Writer, bootstrapOnly bool) (boot
 	for _, dep := range []struct {
 		set  bool
 		flag string
-	}{{f.renderDir != "", "--render-dir"}, {f.noDiff, "--no-diff"}} {
+	}{{f.renderDir != "", "--render-dir"}, {f.noDiff, "--no-diff"}, {f.allowGenerators, "--allow-generators"}} {
 		if dep.set && !f.dryRun {
 			ui.ErrorTo(stderr, "%s requires --dry-run", dep.flag)
 			return bootstrap.Options{}, ErrHandled
 		}
 	}
-	opts := bootstrap.Options{DryRun: f.dryRun, RenderDir: f.renderDir, NoDiff: f.noDiff}
+	opts := bootstrap.Options{DryRun: f.dryRun, RenderDir: f.renderDir, NoDiff: f.noDiff, AllowGenerators: f.allowGenerators}
 	for _, name := range f.only {
 		if name = strings.TrimSpace(name); name != "" {
 			opts.Only = append(opts.Only, name)
 		}
+	}
+	// --only was GIVEN (the flag has at least one raw value) but every
+	// value trimmed to nothing (`--only ' '`, `--only ,`): that is an
+	// operator error, never "no filter" — the latter is what an ABSENT
+	// --only means, and the two must not silently collapse into the same
+	// full, unfiltered apply.
+	if len(f.only) > 0 && len(opts.Only) == 0 {
+		ui.ErrorTo(stderr, "--only: no entry names given")
+		return bootstrap.Options{}, ErrHandled
 	}
 	return opts, nil
 }

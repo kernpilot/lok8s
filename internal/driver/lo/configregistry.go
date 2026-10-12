@@ -223,8 +223,15 @@ func configGenerate(clusterYAML string, errOut io.Writer) (string, error) {
 	if err := enc.Encode(doc); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(jsonPath, buf.Bytes(), 0o644); err != nil {
-		return "", err
+	// A bootstrap dry run calls Export for the LOK8S_SPEC_*/LOK8S_REGISTRY_*
+	// env addon renders read (below) — the derived VALUES, not a file this
+	// cluster's registries don't actually have yet. Skip the write, keep the
+	// exports: "nothing in the project changes" (the bootstrap engine sets
+	// LOK8S_BOOTSTRAP_DRYRUN=1 for the duration of a dry run).
+	if os.Getenv("LOK8S_BOOTSTRAP_DRYRUN") != "1" {
+		if err := os.WriteFile(jsonPath, buf.Bytes(), 0o644); err != nil {
+			return "", err
+		}
 	}
 
 	// Export scalars for external consumers (libs/image, Tilt, tests).

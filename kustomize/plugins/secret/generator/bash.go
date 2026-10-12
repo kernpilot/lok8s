@@ -48,6 +48,20 @@ func (g *Bash) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 	if len(g.spec) == 0 {
 		return nil, nil
 	}
+	// A dry run (lo bootstrap --dry-run / lo provision --bootstrap --dry-run)
+	// renders every entry against production — this generator's job is to
+	// run arbitrary shell (bash -c <exec>, or a <file>), which can itself
+	// run kubectl/lo against the live cluster, independent of whatever the
+	// rendered manifest ends up diffing. "Read-only" has to mean this never
+	// runs, not just "the diff doesn't apply". The bootstrap engine sets
+	// LOK8S_BOOTSTRAP_DRYRUN=1 for the duration of a dry run and
+	// LOK8S_BOOTSTRAP_ALLOW_GENERATORS=1 only when the operator passed the
+	// explicit --allow-generators opt-in (default off); refuse before ANY
+	// cache lookup — a cache hit still counts as "ran" from the caller's
+	// point of view, and an `update: true` entry always re-runs regardless.
+	if os.Getenv("LOK8S_BOOTSTRAP_DRYRUN") == "1" && os.Getenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS") != "1" {
+		return nil, errs.New("executable generator not run in dry-run (pass --allow-generators to run it)")
+	}
 	if ctx.Cache == nil {
 		return nil, errs.New("bash generator requires PATH_SECRETS to be set")
 	}

@@ -52,6 +52,30 @@ import (
 // the render under its mutex and restores them (concurrent DAG entries
 // serialize on the render, never on each other's values).
 func Render(ctx context.Context, paths *config.Paths, runner execx.Runner, stderr io.Writer, addonDir, kind, providerName, inlineValues string, env map[string]string) (string, error) {
+	return renderAddon(ctx, paths, runner, stderr, addonDir, kind, providerName, inlineValues, env, false)
+}
+
+// RenderIsolated is Render for a read-only caller (the bootstrap engine's
+// --dry-run): a chart.yaml addon that needs no value-stack copy normally
+// renders IN PLACE against the real addon directory (see the comment below)
+// — fine for a real apply, but khelm's chart-dependency resolution can still
+// write Chart.lock/charts there, which a dry run must never do. Force the
+// temp-dir copy for EVERY chart.yaml addon, stacked or not, so nothing lands
+// outside --render-dir.
+//
+// Known, accepted limitation: a chart that pins its OWN chart.yaml
+// valueFiles to a path OUTSIDE its directory (a cross-tree ref, e.g.
+// monitoring/gatus's `../../../../.lok8s/addons/<x>/values.yaml`) breaks
+// once copied — the relative path no longer resolves from the temp dir. The
+// render then fails and the entry reports `error`, exactly like any other
+// render failure; a real apply (or `lo build` for that target) still works.
+// Trading that for "a dry run against production never writes into the
+// project" is the right side of the line.
+func RenderIsolated(ctx context.Context, paths *config.Paths, runner execx.Runner, stderr io.Writer, addonDir, kind, providerName, inlineValues string, env map[string]string) (string, error) {
+	return renderAddon(ctx, paths, runner, stderr, addonDir, kind, providerName, inlineValues, env, true)
+}
+
+func renderAddon(ctx context.Context, paths *config.Paths, runner execx.Runner, stderr io.Writer, addonDir, kind, providerName, inlineValues string, env map[string]string, forceCopy bool) (string, error) {
 	buildDir := addonDir
 	if fsutil.FileExists(filepath.Join(addonDir, "chart.yaml")) {
 		// Stack values: base < driver < provider < inline (later wins).
@@ -67,13 +91,14 @@ func Render(ctx context.Context, paths *config.Paths, runner execx.Runner, stder
 		if f := filepath.Join(addonDir, "values."+providerName+".yaml"); providerName != "" && fsutil.FileExists(f) {
 			valueFiles = append(valueFiles, f)
 		}
-		// Copy to a temp build dir ONLY when there's overlay stacking to do.
-		// A chart that pins its OWN chart.yaml valueFiles — e.g. a target
-		// referencing a cross-tree base
+		// Copy to a temp build dir when there's overlay stacking to do, OR
+		// (RenderIsolated only) unconditionally, to keep khelm's dependency
+		// resolution off the real tree. A chart that pins its OWN chart.yaml
+		// valueFiles — e.g. a target referencing a cross-tree base
 		// `../../../../.lok8s/addons/<x>/values.yaml` (monitoring, gatus) —
-		// must render IN PLACE: a copy breaks those relative paths.
-		// Stacking addons carry no cross-tree refs.
-		if inlineValues != "" || len(valueFiles) > 0 {
+		// must render IN PLACE on a real apply: a copy breaks those relative
+		// paths. Stacking addons carry no cross-tree refs.
+		if inlineValues != "" || len(valueFiles) > 0 || forceCopy {
 			tmp, err := os.MkdirTemp("", "lok8s-addon-")
 			if err != nil {
 				ui.ErrorTo(stderr, "addons::render: failed to create temp dir for %s", addonDir)
@@ -87,26 +112,33 @@ func Render(ctx context.Context, paths *config.Paths, runner execx.Runner, stder
 				ui.ErrorTo(stderr, "addons::render: failed to copy %s to temp dir", addonDir)
 				return "", fmt.Errorf("addons render: copy: %w", err)
 			}
-			if inlineValues != "" {
-				inline := filepath.Join(tmp, "values.inline.yaml")
-				if err := os.WriteFile(inline, []byte(inlineValues+"\n"), 0o644); err != nil {
-					ui.ErrorTo(stderr, "addons::render: failed to merge values for %s", addonDir)
-					return "", fmt.Errorf("addons render: write inline values: %w", err)
+			// The merge/chart.yaml-rewrite below is for ACTUAL stacking
+			// only — a forceCopy-only copy (RenderIsolated, nothing to
+			// stack) renders from chart.yaml's own valueFiles, unchanged,
+			// now resolved from the copy (see the cross-tree-ref caveat on
+			// RenderIsolated's doc comment).
+			if inlineValues != "" || len(valueFiles) > 0 {
+				if inlineValues != "" {
+					inline := filepath.Join(tmp, "values.inline.yaml")
+					if err := os.WriteFile(inline, []byte(inlineValues+"\n"), 0o644); err != nil {
+						ui.ErrorTo(stderr, "addons::render: failed to merge values for %s", addonDir)
+						return "", fmt.Errorf("addons render: write inline values: %w", err)
+					}
+					valueFiles = append(valueFiles, inline)
 				}
-				valueFiles = append(valueFiles, inline)
-			}
-			merged, err := MergeValueFiles(valueFiles...)
-			if err != nil {
-				ui.ErrorTo(stderr, "addons::render: failed to merge values for %s", addonDir)
-				return "", fmt.Errorf("addons render: merge values: %w", err)
-			}
-			if err := os.WriteFile(filepath.Join(tmp, "values.merged.yaml"), merged, 0o644); err != nil {
-				ui.ErrorTo(stderr, "addons::render: failed to merge values for %s", addonDir)
-				return "", fmt.Errorf("addons render: write merged values: %w", err)
-			}
-			if err := setChartValueFiles(filepath.Join(tmp, "chart.yaml")); err != nil {
-				ui.ErrorTo(stderr, "addons::render: failed to set valueFiles in chart.yaml for %s", addonDir)
-				return "", fmt.Errorf("addons render: chart.yaml valueFiles: %w", err)
+				merged, err := MergeValueFiles(valueFiles...)
+				if err != nil {
+					ui.ErrorTo(stderr, "addons::render: failed to merge values for %s", addonDir)
+					return "", fmt.Errorf("addons render: merge values: %w", err)
+				}
+				if err := os.WriteFile(filepath.Join(tmp, "values.merged.yaml"), merged, 0o644); err != nil {
+					ui.ErrorTo(stderr, "addons::render: failed to merge values for %s", addonDir)
+					return "", fmt.Errorf("addons render: write merged values: %w", err)
+				}
+				if err := setChartValueFiles(filepath.Join(tmp, "chart.yaml")); err != nil {
+					ui.ErrorTo(stderr, "addons::render: failed to set valueFiles in chart.yaml for %s", addonDir)
+					return "", fmt.Errorf("addons render: chart.yaml valueFiles: %w", err)
+				}
 			}
 		}
 	}
