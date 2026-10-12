@@ -18,6 +18,9 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
   source "${_PROJECT_ROOT}/.lok8s/libs/audit"
+  # The Kubernetes support table is dated: pin the audit's day so a fixture
+  # version keeps its verdict after its minor reaches EOL.
+  _AUDIT_TODAY=2026-10-06
 }
 
 teardown() { teardown_tmpdir; }

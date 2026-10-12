@@ -17,6 +17,9 @@ setup() {
   # (same functions the apply path uses) — the `lo` entrypoint loads it first.
   source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
   source "${_PROJECT_ROOT}/.lok8s/libs/audit"
+  # The Kubernetes support table is dated: pin the audit's day so a fixture
+  # version keeps its verdict after its minor reaches EOL.
+  _AUDIT_TODAY=2026-10-06
 }
 
 teardown() { teardown_tmpdir; }
@@ -1189,6 +1192,52 @@ spec:
 YAML
   audit::run_domain nokind
   assert_equal "$(_status_of k8s-version-support)" "fail"
+}
+
+@test "the support table is dated: 1.34 passes the day before its EOL and fails on the date" {
+  _spec ver-flip <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.34.8" }
+  bootstrap: []
+YAML
+  _AUDIT_TODAY=2026-10-26
+  audit::run_domain ver-flip
+  assert_equal "$(_status_of k8s-version-support)" "pass"
+  _AUDIT_TODAY=2026-10-27
+  audit::run_domain ver-flip
+  assert_equal "$(_status_of k8s-version-support)" "fail"
+}
+
+@test "audit::_k8s_supported lists the minors still supported, oldest first" {
+  run audit::_k8s_supported 2026-10-06
+  assert_output "1.34 1.35 1.36 1.37"
+  run audit::_k8s_supported 2026-10-27
+  assert_output "1.35 1.36 1.37"
+  run audit::_k8s_supported 2028-01-01
+  assert_output ""
+}
+
+@test "a support table that is all past EOL warns that it is out of date" {
+  _spec ver-stale <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.36.1" }
+  bootstrap: []
+YAML
+  _AUDIT_TODAY=2028-01-01
+  audit::run_domain ver-stale
+  assert_equal "$(_status_of k8s-version-support)" "warn"
+}
+
+@test "a malformed _AUDIT_TODAY falls back to today" {
+  _AUDIT_TODAY=not-a-date
+  run audit::_k8s_today
+  assert_output "$(date -u +%Y-%m-%d)"
 }
 
 @test "a newer-than-known k8s minor warns (stale support list)" {

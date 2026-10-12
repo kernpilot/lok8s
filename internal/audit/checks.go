@@ -282,7 +282,9 @@ func (a *Auditor) checkK8sVersion(r *run, specFile, kind string) {
 
 	specURI := a.relURI(specFile)
 	specLineno := specLine(specFile, "spec", "kubernetes", "version")
-	supported := strings.Join(k8sSupportedMinors, ", ")
+	supportedMinors := k8sSupportedMinors(k8sToday())
+	supported := strings.Join(supportedMinors, ", ")
+	latest := k8sLatestMinor()
 
 	raw := altNode(lookupFile(specFile, "spec", "kubernetes", "version"), "")
 	if i := strings.Index(raw, "@"); i >= 0 {
@@ -297,28 +299,37 @@ func (a *Auditor) checkK8sVersion(r *run, specFile, kind string) {
 		}
 		r.emit(Finding{ID: id, Title: title, Severity: "medium", Status: "unknown",
 			Detail:      "Could not parse spec.kubernetes.version ('" + display + "').",
-			Remediation: "Set spec.kubernetes.version to a supported release, e.g. v" + k8sLatestMinor + ".x.",
+			Remediation: "Set spec.kubernetes.version to a supported release, e.g. v" + latest + ".x.",
 			File:        specURI, Line: specLineno})
 		return
 	}
 	minor := m[1] + "." + m[2]
 	rank := minorRank(minor)
-	oldest := k8sSupportedMinors[0]
 
-	if slices.Contains(k8sSupportedMinors, minor) {
+	if slices.Contains(supportedMinors, minor) {
 		r.emit(Finding{ID: id, Title: title, Severity: "high", Status: "pass",
 			Detail:      "Kubernetes " + minor + " is within the supported window (" + supported + ").",
 			Remediation: "Keep upgrading within the window; plan the next minor before this one reaches EOL.",
 			File:        specURI, Line: specLineno})
 		return
 	}
-	if rank > minorRank(k8sLatestMinor) {
+	if rank > minorRank(latest) {
 		r.emit(Finding{ID: id, Title: title, Severity: "low", Status: "warn",
-			Detail:      "Kubernetes " + minor + " is newer than the newest minor this audit knows (" + k8sLatestMinor + ") — the support list may be stale.",
-			Remediation: "Update _AUDIT_K8S_SUPPORTED_MINORS in .lok8s/libs/audit (see https://kubernetes.io/releases/).",
+			Detail:      "Kubernetes " + minor + " is newer than the newest minor this audit knows (" + latest + ") — the support list may be stale.",
+			Remediation: "Add the minor and its EOL date to the support table (k8sMinorEOL in internal/audit/audit.go and _AUDIT_K8S_MINOR_EOL in .lok8s/libs/audit; see https://kubernetes.io/releases/).",
 			File:        specURI, Line: specLineno})
 		return
 	}
+	// Every row of the table is past its EOL: the table itself is out of
+	// date, and no minor can be called supported.
+	if len(supportedMinors) == 0 {
+		r.emit(Finding{ID: id, Title: title, Severity: "low", Status: "warn",
+			Detail:      "Kubernetes " + minor + ": every minor this audit knows is past its EOL date. The support table is out of date.",
+			Remediation: "Add the newer minors and their EOL dates to the support table (k8sMinorEOL in internal/audit/audit.go and _AUDIT_K8S_MINOR_EOL in .lok8s/libs/audit; see https://kubernetes.io/releases/).",
+			File:        specURI, Line: specLineno})
+		return
+	}
+	oldest := supportedMinors[0]
 	severity, status := "high", "fail"
 	if !prodIntent(kind) {
 		severity, status = "medium", "warn"
