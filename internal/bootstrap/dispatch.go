@@ -73,6 +73,13 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string) error {
 		return err
 	}
 
+	// Item D: the dry-run sentinel must be live BEFORE driver::export runs
+	// — Export can write project state of its own (the Lo driver's
+	// .registries.json, gated on this exact variable), and that write
+	// happens here, OUTSIDE Engine.Apply, well before Apply gets a chance
+	// to set it. Restored on return either way.
+	defer SetDryRunEnv(e.Options.DryRun, e.Options.AllowGenerators)()
+
 	// driver::export: idempotent spec-derived env (LOK8S_SPEC_*, …) —
 	// optional per the driver contract, so probe before calling.
 	if ex, ok := drv.(driver.Exporter); ok {

@@ -34,6 +34,7 @@ type bootstrapModeFlags struct {
 	noDiff          bool
 	only            []string
 	allowGenerators bool
+	withRestore     bool
 }
 
 func (f *bootstrapModeFlags) bind(cmd *cobra.Command) {
@@ -41,16 +42,21 @@ func (f *bootstrapModeFlags) bind(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.renderDir, "render-dir", "", "Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory")
 	cmd.Flags().BoolVar(&f.noDiff, "no-diff", false, "Dry run without the kubectl diff: render only, no cluster access")
 	cmd.Flags().StringSliceVar(&f.only, "only", nil, "Apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded")
-	cmd.Flags().BoolVar(&f.allowGenerators, "allow-generators", false, "Let --dry-run execute a bash: secrets generator (default: refused — it can run kubectl/lo against the live cluster)")
+	cmd.Flags().BoolVar(&f.allowGenerators, "allow-generators", false, "Let --dry-run execute a non-builtin exec plugin or a bash: secrets generator (default: refused — either can run kubectl/lo against the live cluster)")
+	cmd.Flags().BoolVar(&f.withRestore, "with-restore", false, "With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)")
 }
 
 // options validates the combination and returns the engine's Options. A
-// flag that needs another is the bash `error` line + rc 1.
-func (f *bootstrapModeFlags) options(stderr io.Writer, bootstrapOnly bool) (bootstrap.Options, error) {
+// flag that needs another is the bash `error` line + rc 1. onlyChanged is
+// cmd.Flags().Changed("only") (review round 2, item E): pflag's
+// StringSliceVar parses an EMPTY value (`--only ""`) through a CSV reader
+// that returns ZERO elements for an empty string, so f.only alone cannot
+// tell "--only ''" apart from "--only never given" — only Changed can.
+func (f *bootstrapModeFlags) options(stderr io.Writer, bootstrapOnly, onlyChanged bool) (bootstrap.Options, error) {
 	for _, dep := range []struct {
 		set  bool
 		flag string
-	}{{f.dryRun, "--dry-run"}, {f.renderDir != "", "--render-dir"}, {f.noDiff, "--no-diff"}, {len(f.only) > 0, "--only"}, {f.allowGenerators, "--allow-generators"}} {
+	}{{f.dryRun, "--dry-run"}, {f.renderDir != "", "--render-dir"}, {f.noDiff, "--no-diff"}, {onlyChanged, "--only"}, {f.allowGenerators, "--allow-generators"}, {f.withRestore, "--with-restore"}} {
 		if dep.set && !bootstrapOnly {
 			ui.ErrorTo(stderr, "%s requires --bootstrap", dep.flag)
 			return bootstrap.Options{}, ErrHandled
@@ -65,18 +71,22 @@ func (f *bootstrapModeFlags) options(stderr io.Writer, bootstrapOnly bool) (boot
 			return bootstrap.Options{}, ErrHandled
 		}
 	}
-	opts := bootstrap.Options{DryRun: f.dryRun, RenderDir: f.renderDir, NoDiff: f.noDiff, AllowGenerators: f.allowGenerators}
+	if f.withRestore && !onlyChanged {
+		ui.ErrorTo(stderr, "--with-restore requires --only")
+		return bootstrap.Options{}, ErrHandled
+	}
+	opts := bootstrap.Options{DryRun: f.dryRun, RenderDir: f.renderDir, NoDiff: f.noDiff, AllowGenerators: f.allowGenerators, WithRestore: f.withRestore}
 	for _, name := range f.only {
 		if name = strings.TrimSpace(name); name != "" {
 			opts.Only = append(opts.Only, name)
 		}
 	}
-	// --only was GIVEN (the flag has at least one raw value) but every
-	// value trimmed to nothing (`--only ' '`, `--only ,`): that is an
-	// operator error, never "no filter" — the latter is what an ABSENT
-	// --only means, and the two must not silently collapse into the same
-	// full, unfiltered apply.
-	if len(f.only) > 0 && len(opts.Only) == 0 {
+	// --only was GIVEN (cmd.Flags().Changed — see onlyChanged's doc above)
+	// but every value trimmed to nothing (`--only ''`, `--only ' '`,
+	// `--only ,`): that is an operator error, never "no filter" — the
+	// latter is what an ABSENT --only means, and the two must not silently
+	// collapse into the same full, unfiltered apply.
+	if onlyChanged && len(opts.Only) == 0 {
 		ui.ErrorTo(stderr, "--only: no entry names given")
 		return bootstrap.Options{}, ErrHandled
 	}
@@ -96,7 +106,7 @@ func newProvisionCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			stderr := cmd.ErrOrStderr()
-			opts, err := mode.options(stderr, bootstrapOnly)
+			opts, err := mode.options(stderr, bootstrapOnly, cmd.Flags().Changed("only"))
 			if err != nil {
 				return err
 			}
@@ -111,6 +121,7 @@ func newProvisionCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			disp := newDispatcher(cmd, paths)
 			disp.Hooks.BootstrapApply = bootstrap.ApplyHook(paths, disp.Runner, disp.Stdout, disp.Stderr, opts)
 			disp.BootstrapDryRun = opts.DryRun
+			disp.BootstrapAllowGenerators = opts.AllowGenerators
 			return dispatchExit(cmd.ErrOrStderr(), disp.Dispatch(cmd.Context(), d, bootstrapOnly))
 		},
 	}
@@ -147,7 +158,7 @@ func newBootstrapCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			stdout, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
-			opts, err := mode.options(stderr, true)
+			opts, err := mode.options(stderr, true, cmd.Flags().Changed("only"))
 			if err != nil {
 				return err
 			}

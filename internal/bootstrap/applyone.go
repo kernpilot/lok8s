@@ -45,7 +45,14 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 	// + envsubst) — the SAME addons.Render the KubeOne driver stages addons
 	// with.
 	ui.DebugTo(stderr, "bootstrap: rendering %s", job.Name)
-	rendered, err := addons.Render(ctx, e.Paths, e.Runner, stderr, job.Dir, job.Kind, job.Provider, job.Inline, jobEnv(job))
+	env := jobEnv(job)
+	// Item B, extended to a real run too for consistency: an entry's env:
+	// must never decide HOME/PATH_SECRETS/KUBECONFIG/… for its own render.
+	if v := addons.ProtectedEnvOverride(env); v != "" {
+		ui.ErrorTo(stderr, "bootstrap: %s: env: may not set %s (protected)", job.Name, v)
+		return 1
+	}
+	rendered, err := addons.Render(ctx, e.Paths, e.Runner, stderr, job.Dir, job.Kind, job.Provider, job.Inline, env)
 	if err != nil {
 		ui.ErrorTo(stderr, "bootstrap: render failed for %s", job.Name)
 		return 1

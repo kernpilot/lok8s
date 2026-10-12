@@ -193,49 +193,58 @@ func (e *Engine) remapDryRunExit(err error) error {
 	return &driver.ExitError{Code: 2, Err: err}
 }
 
-// apply is Apply's body (bash: bootstrap::apply). Order matters for
-// --dry-run and --only: the WHOLE graph is validated — including --only —
-// before any writer runs (restore.d, an addon apply, assets ejection), so
-// "--only typo" or any other planning error can never land a partial write
-// first and only then fail.
+// apply is Apply's body (bash: bootstrap::apply). Under --dry-run it builds
+// the whole-project isolation sandbox (review round 2, item A) ONCE for the
+// whole run and delegates to applyIsolated against a shallow Engine copy
+// whose Paths points into the sandbox — every helper below (loadNodes,
+// addon resolution, the render, restore.d) reads e.Paths, so swapping it
+// once here is enough to run the entire dry run against the copy. A real
+// run needs none of that: PATH_SECRETS points straight at the live store.
 func (e *Engine) apply(ctx context.Context, domain, clusterYAML, kubeconfig string) error {
-	stderr := e.stderr()
-
-	// lo provision drives the bootstrap directly (not via `lo build`), so
-	// the per-domain secrets store isn't exported yet. The
-	// secrets.lok8s.dev generators read $PATH_SECRETS — without it a target
-	// carrying a passwd Secret fails to render. Mirror
-	// libs/build::_export_secrets_path.
-	//
-	// A dry run points PATH_SECRETS at a disposable COPY of the store
-	// instead of the live one: a generator's cache write (a newly minted
-	// password, an in-cluster kubeconfig, …) must land somewhere, and that
-	// somewhere must not be the project. restorePathSecrets runs at every
-	// return (defer), so a later call in this process never inherits a
-	// deleted temp dir.
+	if e.Options.DryRun {
+		sandbox, err := newDryRunSandbox(e.Paths, domain)
+		if err != nil {
+			return e.errorf("bootstrap: dry-run: failed to build the isolation sandbox: %v", err)
+		}
+		defer sandbox.cleanup()
+		defer sandbox.restore()
+		dry := *e
+		dry.Paths = sandbox.paths
+		// clusterYAML is re-rooted into the sandbox too (it almost always
+		// lives under the project, clusters/<domain>/cluster.lok8s.yaml) —
+		// the render must read the SAME copy as everything else, never the
+		// live file. kubeconfig is deliberately left pointing at the real
+		// file: it is the live cluster's credential, read only by the diff
+		// step via an explicit --kubeconfig flag, never through $KUBECONFIG
+		// (which the sandbox just unset).
+		clusterYAML = remapUnderBase(e.Paths.Base, clusterYAML, sandbox.paths.Base)
+		return dry.applyIsolated(ctx, domain, clusterYAML, kubeconfig)
+	}
 	secretsDir := e.Paths.Clusters + "/" + domain + "/secrets"
 	if fsutil.DirExists(secretsDir) {
-		if e.Options.DryRun {
-			tmp, cleanupTmp, err := isolateSecretsStore(secretsDir)
-			if err != nil {
-				return e.errorf("bootstrap: dry-run: failed to isolate the secrets store: %v", err)
-			}
-			defer cleanupTmp()
-			// Scoped + restored (unlike the real-run branch below): this
-			// value is a disposable temp dir that cleanupTmp is about to
-			// remove, so it must not outlive THIS call either.
-			defer setEnvScoped("PATH_SECRETS", tmp)()
-		} else {
-			os.Setenv("PATH_SECRETS", secretsDir)
-		}
+		os.Setenv("PATH_SECRETS", secretsDir)
 	}
+	return e.applyIsolated(ctx, domain, clusterYAML, kubeconfig)
+}
+
+// applyIsolated is apply's body proper, run either directly (a real run)
+// or against a sandboxed *Engine (a dry run — see apply above). Order
+// matters for --dry-run and --only: the WHOLE graph is validated —
+// including --only — before any writer runs (restore.d, an addon apply,
+// assets ejection), so "--only typo" or any other planning error can never
+// land a partial write first and only then fail.
+func (e *Engine) applyIsolated(ctx context.Context, domain, clusterYAML, kubeconfig string) error {
+	stderr := e.stderr()
 
 	// LOK8S_BOOTSTRAP_DRYRUN/LOK8S_BOOTSTRAP_ALLOW_GENERATORS gate the
 	// secrets `bash:` generator (kustomize/plugins/secret/generator) and
 	// the Lo driver's .registries.json write — both read this process env
 	// because they run several layers below here (a kustomize exec plugin,
 	// a driver's Export), too far to thread a parameter through cleanly.
-	// Scoped + restored like PATH_SECRETS above, for the same reason.
+	// This is ALSO set earlier, before driver.Exporter.Export, by the
+	// dispatcher (SetDryRunEnv, item D) — setting it again here is
+	// idempotent and keeps a caller that invokes Engine.Apply directly
+	// (a test, or any future caller that skips the dispatcher) correct too.
 	defer setEnvScoped("LOK8S_BOOTSTRAP_DRYRUN", boolEnv(e.Options.DryRun))()
 	defer setEnvScoped("LOK8S_BOOTSTRAP_ALLOW_GENERATORS", boolEnv(e.Options.DryRun && e.Options.AllowGenerators))()
 
@@ -320,6 +329,16 @@ func (e *Engine) apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 		}
 	}
 
+	// --render-dir is prepared HERE, before the restore.d preview below
+	// (review round 2, item G): restore.d's own diffManifest call writes
+	// restore.d.{yaml,diff} into it too, and used to run before anything
+	// had created the directory at all.
+	if e.Options.DryRun && e.Options.RenderDir != "" {
+		if err := prepareRenderDir(e.Options.RenderDir); err != nil {
+			return e.errorf("bootstrap: --render-dir: %v", err)
+		}
+	}
+
 	// ── restore.d: pre-bootstrap DR restore (sops-encrypted manifests) ──
 	// Applied BEFORE any addon so restored state exists when the addons'
 	// reconcilers first look for it (canonical use: issued wildcard TLS
@@ -329,14 +348,19 @@ func (e *Engine) apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 	// Moved here — AFTER --only is validated — on purpose: restore.d is a
 	// WRITER (it applies Secrets to the live cluster), and "--only typo"
 	// must fail before any writer runs, restore.d included. --only also
-	// takes restore.d out of scope entirely: it names addons, never
+	// takes restore.d out of scope by DEFAULT: it names addons, never
 	// restore.d, so an operator scoping a run to one addon must not have
-	// restore.d silently come along uninvited.
+	// restore.d silently come along uninvited — --with-restore opts back
+	// in (item H), applying restore.d exactly as if --only were absent.
 	var restoreDResult *dryResult
 	switch {
-	case len(e.Options.Only) > 0:
-		if n := countRestoreD(e.Paths.Clusters + "/" + domain); n > 0 {
-			fmt.Fprintf(stderr, "[bootstrap] --only: restore.d skipped (not applied) — %d file(s) under clusters/%s/restore.d\n", n, domain)
+	case len(e.Options.Only) > 0 && !e.Options.WithRestore:
+		if names := restoreDFiles(e.Paths.Clusters + "/" + domain); len(names) > 0 {
+			if e.Options.DryRun {
+				fmt.Fprintf(stderr, "[bootstrap] --only: restore.d skipped (not applied) — %d file(s) under clusters/%s/restore.d\n", len(names), domain)
+			} else {
+				warnRestoreDSkipped(stderr, domain, names)
+			}
 		}
 	case e.Options.DryRun:
 		// Reported as its own line inside runDryRun, not a bare "not
@@ -351,6 +375,23 @@ func (e *Engine) apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 		return e.runDryRun(ctx, nodes, base, restoreDResult)
 	}
 	return e.runDAG(ctx, stderr, nodes, base)
+}
+
+// warnRestoreDSkipped is the LOUD form of the --only/restore.d notice,
+// printed on a REAL (non-dry) run (item H): skipping restore.d is a DR/
+// renewal-posture decision, not a quiet aside — naming an addon with
+// --only must never silently leave a wildcard TLS Secret un-restored and
+// let its owner ACME-reissue instead, which can hit the Let's Encrypt
+// rate limit on a cluster with several such Secrets.
+func warnRestoreDSkipped(stderr io.Writer, domain string, names []string) {
+	fmt.Fprintf(stderr, "\n\033[33m!\033[0m bootstrap: --only applies WITHOUT restoring restore.d (%d file(s) under clusters/%s/restore.d):\n", len(names), domain)
+	for _, n := range names {
+		fmt.Fprintf(stderr, "    %s\n", n)
+	}
+	fmt.Fprintln(stderr, " if one of these is a wildcard TLS Secret an addon (e.g. cert-manager) would")
+	fmt.Fprintln(stderr, " otherwise REUSE, skipping it here means that addon ACME-reissues instead —")
+	fmt.Fprintln(stderr, " repeated reissuance can hit the Let's Encrypt rate limit. Pass --with-restore")
+	fmt.Fprintln(stderr, " to apply restore.d first.")
 }
 
 // boolEnv is "1" for true, "" (unset) for false — the env-sentinel
@@ -383,62 +424,15 @@ func setEnvScoped(key, value string) (restore func()) {
 	}
 }
 
-// isolateSecretsStore copies secretsDir into a fresh temp dir and returns
-// its path plus a cleanup. A dry run's secret generators (passwd:, bash:
-// when --allow-generators) read and cache against the COPY, never the
-// live store.
-func isolateSecretsStore(secretsDir string) (tmp string, cleanup func(), err error) {
-	tmp, err = os.MkdirTemp("", "lok8s-dryrun-secrets-")
-	if err != nil {
-		return "", nil, err
-	}
-	if err := copyDirTree(secretsDir, tmp); err != nil {
-		_ = os.RemoveAll(tmp)
-		return "", nil, err
-	}
-	return tmp, func() { _ = os.RemoveAll(tmp) }, nil
-}
-
-// copyDirTree copies src's CONTENTS into dst, dotfiles included (the
-// secrets store's own SOPS/age dotfiles among them) — same shape as
-// addons.copyTree, duplicated locally rather than exported across the
-// package boundary for one caller.
-func copyDirTree(src, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		target := filepath.Join(dst, rel)
-		if info.Mode()&os.ModeSymlink != 0 {
-			link, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			return os.Symlink(link, target)
-		}
-		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode().Perm())
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(target, data, info.Mode().Perm())
-	})
-}
-
-// countRestoreD counts the clusters/<domain>/restore.d/*.sops.yaml files
-// the real run would apply before the DAG.
-func countRestoreD(domainDir string) int {
+// restoreDFiles lists the clusters/<domain>/restore.d/*.sops.yaml file
+// names the real run would apply before the DAG.
+func restoreDFiles(domainDir string) []string {
 	matches, _ := filepath.Glob(filepath.Join(domainDir, "restore.d", "*.sops.yaml"))
-	return len(matches)
+	names := make([]string, len(matches))
+	for i, m := range matches {
+		names[i] = filepath.Base(m)
+	}
+	return names
 }
 
 // loadNodes parses every entry and resolves its addon dir (ejecting a

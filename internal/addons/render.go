@@ -30,6 +30,41 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// protectedEnvNames are the safety variables no entry's `env:` may set
+// (review round 2, item B) — the bootstrap engine's own PATH_SECRETS/HOME/
+// XDG_*/CAROOT/HELM_*/KUBECONFIG/LOK8S_BOOTSTRAP_* sandbox, never an
+// addon's. renderAddon forces every one of these back to the engine's own
+// current value AFTER merging the entry's env (below), and
+// ProtectedEnvOverride lets a caller detect the attempt and report it
+// explicitly instead of letting it silently do nothing.
+var protectedEnvNames = []string{
+	"LOK8S_BOOTSTRAP_DRYRUN", "LOK8S_BOOTSTRAP_ALLOW_GENERATORS",
+	"PATH_SECRETS",
+	"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
+	"CAROOT", "HELM_CACHE_HOME", "HELM_CONFIG_HOME", "HELM_DATA_HOME",
+	"KUBECONFIG",
+}
+
+// ProtectedEnv is protectedEnvNames, exported for the bootstrap engine's
+// sandbox setup (internal/bootstrap/isolation.go) and for either side's
+// tests — one list, so the sandbox and the override guard can never drift
+// apart on what counts as protected.
+func ProtectedEnv() []string { return append([]string{}, protectedEnvNames...) }
+
+// ProtectedEnvOverride reports the first protected variable name env
+// attempts to set, or "" when none does. Called before a render, by both
+// applyOne and dryRunOne, so an entry that tries to override one of these
+// fails loudly, naming the variable, rather than having its attempt
+// silently neutralized by the render.go merge order below.
+func ProtectedEnvOverride(env map[string]string) string {
+	for _, k := range protectedEnvNames {
+		if _, ok := env[k]; ok {
+			return k
+		}
+	}
+	return ""
+}
+
 // Render renders a framework addon via the canonical khelm path (bash:
 // addons::render). Stacks values base < driver(kind) < provider < inline
 // (later wins), rewrites the chart's valueFiles to the merged set, then
@@ -71,7 +106,25 @@ func Render(ctx context.Context, paths *config.Paths, runner execx.Runner, stder
 // render failure; a real apply (or `lo build` for that target) still works.
 // Trading that for "a dry run against production never writes into the
 // project" is the right side of the line.
-func RenderIsolated(ctx context.Context, paths *config.Paths, runner execx.Runner, stderr io.Writer, addonDir, kind, providerName, inlineValues string, env map[string]string) (string, error) {
+// allowGenerators controls the exec-plugin allowlist (review round 2, item
+// C): when false (the default), a generators:/transformers:/validators:
+// reference anywhere in addonDir's kustomization tree whose apiVersion+kind
+// is not lok8s' own built-in set (the secrets generator, khelm's
+// ChartRenderer) is refused BEFORE kustomize ever runs it. The `bash:`
+// secrets sub-generator keeps its OWN separate refusal inside the secrets
+// plugin itself (it is a builtin, so this scan waves it through, but the
+// LOK8S_BOOTSTRAP_ALLOW_GENERATORS env var — set by the caller alongside
+// this flag — still gates whether it actually executes).
+func RenderIsolated(ctx context.Context, paths *config.Paths, runner execx.Runner, stderr io.Writer, addonDir, kind, providerName, inlineValues string, env map[string]string, allowGenerators bool) (string, error) {
+	if !allowGenerators {
+		refs, err := ScanExecPlugins(addonDir)
+		if err != nil {
+			return "", fmt.Errorf("addons render: exec-plugin scan for %s: %w", addonDir, err)
+		}
+		if len(refs) > 0 {
+			return "", fmt.Errorf("exec plugin %s/%s not run in dry-run (pass --allow-generators to run it): %s", refs[0].APIVersion, refs[0].Kind, refs[0].Path)
+		}
+	}
 	return renderAddon(ctx, paths, runner, stderr, addonDir, kind, providerName, inlineValues, env, true)
 }
 
@@ -156,6 +209,20 @@ func renderAddon(ctx context.Context, paths *config.Paths, runner execx.Runner, 
 	sort.Strings(envNames)
 	for _, k := range envNames {
 		cmdEnv = append(cmdEnv, k+"="+env[k])
+	}
+	// The engine's own safety variables are forced back AFTER the entry's
+	// env is merged (review round 2, item B): a kustomize child's
+	// environment is the whole sandbox's trust boundary (KUBECONFIG, HOME,
+	// the secrets store, …), and os/exec keeps only the LAST value for a
+	// duplicate key — so an entry's `env:` naming one of these must never
+	// be the one that survives. ProtectedEnvOverride, called by the
+	// bootstrap engine before this is ever reached, is what turns an
+	// attempt into a hard, named error instead of a silent no-op; this is
+	// the backstop that holds even if a future caller skips that check.
+	for _, k := range ProtectedEnv() {
+		if v, ok := os.LookupEnv(k); ok {
+			cmdEnv = append(cmdEnv, k+"="+v)
+		}
 	}
 	// The render goes through internal/render: in-process by default, the
 	// pinned kustomize binary via the runner seam under LO_RENDER=exec

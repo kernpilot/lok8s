@@ -77,6 +77,12 @@ type Dispatcher struct {
 	// kubehz registration, the inventory, the gitops bootstrap) are
 	// skipped. Only honoured with bootstrapOnly.
 	BootstrapDryRun bool
+	// BootstrapAllowGenerators is `--allow-generators` alongside
+	// BootstrapDryRun — passed through to runTail's SetDryRunEnv so a
+	// bash: secrets generator or a non-builtin exec plugin can run during
+	// Export too, under the same flag that lets the bootstrap hook itself
+	// run one. No effect without BootstrapDryRun.
+	BootstrapAllowGenerators bool
 
 	// Drivers overrides the driver lookup (nil → the package registry,
 	// driver.Get). The lookup answers "does this kind exist" BEFORE the
@@ -302,6 +308,16 @@ func (d *Dispatcher) bootstrapOnlyGuard(clusterYAML, domainName string) error {
 func (d *Dispatcher) runTail(ctx context.Context, drv driver.Driver, domainName, clusterYAML string, bootstrapOnly, dryRun bool) error {
 	stderr := d.errWriter()
 
+	// Item D: live BEFORE Export, not after — Export can write project
+	// state of its own (the Lo driver's .registries.json) gated on this
+	// exact sentinel, and that write happens here, well before the
+	// bootstrap hook (which used to be the only place this was set) ever
+	// runs. Duplicated from bootstrap.SetDryRunEnv rather than imported:
+	// this package (kubeconfig.go) is imported by internal/build, which
+	// internal/bootstrap (via internal/addons) imports — importing
+	// bootstrap here would cycle straight back through build.
+	defer setDryRunEnv(dryRun, d.BootstrapAllowGenerators)()
+
 	// Export: spec-derived env for spec.bootstrap addons. Runs on BOTH
 	// paths — full provision AND --bootstrap — so a re-applied bootstrap
 	// graph renders with the same env.
@@ -473,4 +489,39 @@ func (d *Dispatcher) DispatchStatus(ctx context.Context, domainName string) erro
 	}
 	fmt.Fprintln(d.outWriter(), status)
 	return nil
+}
+
+// setDryRunEnv scopes LOK8S_BOOTSTRAP_DRYRUN/LOK8S_BOOTSTRAP_ALLOW_GENERATORS
+// for the caller's defer — the same contract as bootstrap.SetDryRunEnv,
+// duplicated here rather than imported (see runTail's comment on why).
+func setDryRunEnv(dryRun, allowGenerators bool) (restore func()) {
+	dv := ""
+	if dryRun {
+		dv = "1"
+	}
+	av := ""
+	if dryRun && allowGenerators {
+		av = "1"
+	}
+	r1 := scopedSetEnv("LOK8S_BOOTSTRAP_DRYRUN", dv)
+	r2 := scopedSetEnv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS", av)
+	return func() { r2(); r1() }
+}
+
+// scopedSetEnv sets key to value (or unsets it, for "") for the duration of
+// the call, returning a restore func that puts the PRIOR value back.
+func scopedSetEnv(key, value string) (restore func()) {
+	prev, had := os.LookupEnv(key)
+	if value == "" {
+		os.Unsetenv(key)
+	} else {
+		os.Setenv(key, value)
+	}
+	return func() {
+		if had {
+			os.Setenv(key, prev)
+		} else {
+			os.Unsetenv(key)
+		}
+	}
 }
