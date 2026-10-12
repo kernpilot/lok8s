@@ -1,15 +1,19 @@
 # The five rules the rook-ceph addon strips from the node plugin ClusterRole,
-# verbatim from the ceph-csi-drivers chart (templates/rbd-nodeplugin-cr-rbac.yaml),
-# bound to the same ServiceAccount. Together with the narrowed role the
-# effective permissions equal the upstream chart's: every node that runs the
-# plugin can read every Secret and mint a token for any ServiceAccount again.
+# verbatim from the ceph-csi-drivers chart
+# (templates/rbd-nodeplugin-cr-rbac.yaml),
+# bound to the node plugin and the controller plugin ServiceAccounts (the
+# controller plugin loses four of the five; it keeps tokenreviews). Together
+# with the narrowed roles the effective permissions equal the upstream
+# chart's: every node that runs the plugin, and the controller pod, can read
+# every Secret and mint a token for any ServiceAccount again.
 # Per-feature, namespaced grants: https://github.com/kernpilot/lok8s/issues/265.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: rook-ceph-csi-nodeplugin-kms-cr
 rules:
-  # KMS passphrase / tenant token Secrets; the rbd-nbd healer's node-stage Secret.
+  # KMS passphrase / tenant token Secrets; the rbd-nbd healer's node-stage
+  # Secret.
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get, list, watch]
@@ -40,4 +44,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: rook-ceph-rbd-csi-ceph-com-nodeplugin-sa
+    namespace: rook-ceph
+  - kind: ServiceAccount
+    name: rook-ceph-rbd-csi-ceph-com-ctrlplugin-sa
     namespace: rook-ceph
