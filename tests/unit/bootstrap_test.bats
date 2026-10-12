@@ -2404,6 +2404,26 @@ YAML
   refute_output --partial "no Ready workers"
 }
 
+#  A hosted cluster a dry run cannot reach (or that has no Ready workers
+# yet) is an INCONCLUSIVE assessment, never "nothing would change" — that
+# must exit 2, not the clean 0 a real run gets for the identical miss.
+@test "hosted apply --dry-run: unreachable cluster is exit 2, not 0" {
+  _hosted_apply_harness
+  kubectl() { echo "error: You must be logged in" >&2; return 1; }
+  local bootstrap_dry_run=1 rc=0
+  run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
+  assert_failure 2
+  assert_output --partial "assessment not done"
+}
+
+@test "hosted apply --dry-run: zero Ready workers is exit 2, not 0" {
+  _hosted_apply_harness
+  kubectl() { printf 'cp1 NotReady control-plane 1d v1.33\n'; }
+  local bootstrap_dry_run=1
+  run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
+  assert_failure 2
+}
+
 @test "hosted apply: zero Ready workers skips with the workers notice (rc 0)" {
   _hosted_apply_harness
   kubectl() { printf 'cp1 NotReady control-plane 1d v1.33\n'; }
@@ -2596,14 +2616,19 @@ DIFF
 
 # _dry_kubectl_stub <rc>... — a kubectl that logs its argv to KLOG and answers
 # the N-th `diff` with the N-th rc (1 → the canned diff on stdout, >1 → an
-# error on stderr). Any other verb is logged too (the assertions grep for it).
+# error on stderr). A dry run may ONLY ever diff — any other verb (apply,
+# replace, patch, …) is a hard test failure, not a silent no-op: a stub that
+# accepts everything can't catch a dry run that actually writes.
 _dry_kubectl_stub() {
   export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
   export DRY_RCS="$*" DRY_CALLS="${BATS_TEST_TMPDIR}/diff.calls"; : > "${DRY_CALLS}"
   kubectl() {
     echo "kubectl $*" >> "${KLOG}"
     cat >/dev/null   # drain the manifest
-    [[ " $* " == *" diff "* ]] || return 0
+    if [[ " $* " != *" diff "* ]]; then
+      echo "parity stub: kubectl $* must not be reached by a dry run" >&2
+      return 9
+    fi
     echo x >> "${DRY_CALLS}"
     local n rc=0; n="$(wc -l < "${DRY_CALLS}")"
     set -- ${DRY_RCS}
@@ -2672,6 +2697,28 @@ _dry_kubectl_stub() {
   grep -q 'bootstrap: kubectl diff failed for testcni (rc=2)' "${BATS_TEST_TMPDIR}/rc2.err"
 }
 
+# kubectl diff's rc 1 means "differences found" by convention, but a
+# generic failure can land on the same rc — the race-class pattern (the
+# same regex bootstrap::_apply_one's CRD/webhook retry uses) classifies as
+# needs-crd (an earlier entry's CRD hasn't landed in THIS read-only probe
+# yet), not a false "differs".
+@test "bootstrap::apply --dry-run: a CRD-not-installed rc 1 is needs-crd, not differs" {
+  write_cluster_spec "testcni"
+  local bootstrap_dry_run=1 rc=0
+  export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
+  kubectl() {
+    echo "kubectl $*" >> "${KLOG}"
+    cat >/dev/null
+    echo 'error: ensure CRDs are installed first' >&2
+    return 1
+  }
+  export -f kubectl
+  local out="${BATS_TEST_TMPDIR}/dry.out"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2>/dev/null || rc=$?
+  [ "${rc}" -eq 1 ]
+  grep -q '^bootstrap dry-run: 01-testcni: needs-crd$' "${out}"
+}
+
 @test "bootstrap::apply --dry-run --no-diff renders only and never calls kubectl" {
   write_cluster_spec "testcni"
   _dry_kubectl_stub
@@ -2721,20 +2768,69 @@ YAML
   [ ! -s "${KLOG}" ]
 }
 
-@test "bootstrap::apply --dry-run does not apply restore.d and says so" {
+# A dry run NEVER applies restore.d — but it DOES decrypt it in memory
+# (read-only, same as any other sops decrypt in this codebase) so it can
+# report what a real run would restore, as its own entry ahead of the
+# addons (lok8s #268 review).
+@test "bootstrap::apply --dry-run diffs restore.d as its own entry (never applies it)" {
   write_cluster_spec "testcni"
   mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
   echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/tls.sops.yaml"
-  sops() { echo "sops must not run on a dry run" >&2; return 1; }
+  local decrypted="${BATS_TEST_TMPDIR}/decrypted"
+  sops() {
+    : > "${decrypted}"
+    printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\n'
+  }
+  export -f sops
+  _dry_kubectl_stub 1 0   # restore.d differs, testcni unchanged
+  local bootstrap_dry_run=1 rc=0
+  local out="${BATS_TEST_TMPDIR}/dry.out"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2>/dev/null || rc=$?
+  [ "${rc}" -eq 1 ]
+  [ -f "${decrypted}" ]
+  grep -q '^bootstrap dry-run: restore.d: differs' "${out}"
+  grep -q '^bootstrap dry-run: 01-testcni: unchanged$' "${out}"
+  grep -q '^bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 errors=0$' "${out}"
+  ! grep -qE ' (apply|replace|patch) ' "${KLOG}"
+}
+
+# --only takes restore.d out of scope entirely — never applied, never
+# diffed — and says so.
+@test "bootstrap::apply --dry-run --only skips restore.d (not applied, not diffed)" {
+  write_cluster_spec "testcni"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/tls.sops.yaml"
+  sops() { echo "sops must not run with --only" >&2; return 1; }
   export -f sops
   _dry_kubectl_stub 0
-  local bootstrap_dry_run=1 rc=0
-  local err="${BATS_TEST_TMPDIR}/dry.err"
-  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > /dev/null 2> "${err}" || rc=$?
+  local bootstrap_dry_run=1 bootstrap_select="testcni" rc=0
+  local out="${BATS_TEST_TMPDIR}/dry.out" err="${BATS_TEST_TMPDIR}/dry.err"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2> "${err}" || rc=$?
   [ "${rc}" -eq 0 ]
-  grep -q '^\[bootstrap\] dry-run: restore.d not applied (1 file(s) under clusters/test.lok8s.dev/restore.d)$' "${err}"
+  ! grep -q 'restore.d' "${out}"
+  grep -q '^\[bootstrap\] --only: restore.d skipped (not applied) — 1 file(s) under clusters/test.lok8s.dev/restore.d$' "${err}"
   ! grep -q 'sops must not run' "${err}"
-  ! grep -q ' apply ' "${KLOG}"
+}
+
+# An unknown --only name is validated BEFORE any writer runs — restore.d
+# included. A typo must never apply (or decrypt) restore.d and only THEN
+# fail.
+@test "bootstrap::apply --only typo never touches restore.d" {
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  write_cluster_spec "a" "b" "c"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/tls.sops.yaml"
+  sops() { echo "sops must not run before --only is validated" >&2; return 1; }
+  export -f sops
+  bootstrap::_apply_one() { echo "$1" >> "${BATS_TEST_TMPDIR}/applied"; return 0; }
+  kubectl() { echo "kubectl $*" >> "${KLOG:-${BATS_TEST_TMPDIR}/kubectl.log}"; return 0; }
+  export -f kubectl
+  local bootstrap_select="a,nope"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_failure
+  assert_output --partial "bootstrap: --only: unknown entry 'nope'"
+  [ ! -f "${BATS_TEST_TMPDIR}/applied" ]
+  ! grep -q 'sops must not run' <<<"${output}"
 }
 
 @test "bootstrap::apply --only applies the named entries; dependsOn is not expanded" {
@@ -2798,7 +2894,7 @@ b wait="
 }
 
 @test "bootstrap::mode_check: the flag dependencies (the lines the Go cli prints)" {
-  local dry_run=0 render_dir="" no_diff=0 only=""
+  local dry_run=0 render_dir="" no_diff=0 only="" allow_generators=0
   run bootstrap::mode_check 1
   assert_success
   dry_run=1; run bootstrap::mode_check 0
@@ -2809,7 +2905,28 @@ b wait="
   assert_failure; assert_output --partial "--render-dir requires --dry-run"
   render_dir="" no_diff=1; run bootstrap::mode_check 1
   assert_failure; assert_output --partial "--no-diff requires --dry-run"
-  dry_run=1; run bootstrap::mode_check 1
+  no_diff=0 allow_generators=1; run bootstrap::mode_check 0
+  assert_failure; assert_output --partial "--allow-generators requires --bootstrap"
+  run bootstrap::mode_check 1
+  assert_failure; assert_output --partial "--allow-generators requires --dry-run"
+  allow_generators=0 dry_run=1; run bootstrap::mode_check 1
+  assert_success
+}
+
+# --only GIVEN but blank (every comma-separated value whitespace/empty) is
+# an error, never "no filter" — the latter is what an ABSENT --only means,
+# and the two must not silently collapse into the same full, unfiltered
+# apply (lok8s #268).
+@test "bootstrap::mode_check: --only blank is an error, not 'no filter'" {
+  local dry_run=0 render_dir="" no_diff=0 allow_generators=0
+  local only=" "
+  run bootstrap::mode_check 1
+  assert_failure; assert_output --partial "--only: no entry names given"
+  only=","
+  run bootstrap::mode_check 1
+  assert_failure; assert_output --partial "--only: no entry names given"
+  only="cilium"
+  run bootstrap::mode_check 1
   assert_success
 }
 
