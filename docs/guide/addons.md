@@ -21,6 +21,28 @@ or re-apply independently:
 lo bootstrap --domain kubehz.dev
 ```
 
+### Preview before you apply
+
+A bootstrap re-applies every entry with `kubectl apply --server-side
+--force-conflicts`, which overwrites live drift in the addons it touches.
+See what would change first, and apply one entry at a time:
+
+```bash
+lo bootstrap --dry-run --render-dir /tmp/bootstrap   # render + server-side diff, apply nothing
+lo bootstrap --dry-run --no-diff                     # render only, no cluster access
+lo bootstrap --only cert-manager                     # apply this entry only
+lo bootstrap --only cert-manager,envoy-gateway --dry-run
+```
+
+The dry run renders every entry exactly as the real run would and prints
+one line per entry (`unchanged`, `differs changed=N new=M`, `rendered`,
+`skipped`, `error`) plus a summary. The exit code is 0 when nothing would
+change, 1 when something would, 2 on an error. `--render-dir` holds
+`NN-<entry>.yaml` and `NN-<entry>.diff` per entry, numbered in the order the
+run takes. `--only` matches the entry name (the `name:` override when set)
+or the addon name; `dependsOn` is not expanded, and an unknown name lists
+the valid names. Both flags also exist on `lo provision --bootstrap`.
+
 ## Addon resolution
 
 | Entry format | Resolves to |

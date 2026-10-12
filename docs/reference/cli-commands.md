@@ -432,13 +432,18 @@ lo bootstrap [flags]
 
 ```
   lo bootstrap
-  lo bootstrap --domain kubehz.dev
+  lo bootstrap --dry-run --render-dir /tmp/bootstrap
+  lo bootstrap --only cert-manager,envoy-gateway
 ```
 
 ### Options
 
 ```
-  -h, --help   help for bootstrap
+      --dry-run             Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
+  -h, --help                help for bootstrap
+      --no-diff             Dry run without the kubectl diff: render only, no cluster access
+      --only strings        Apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded
+      --render-dir string   Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
 ```
 
 ### SEE ALSO
@@ -3329,14 +3334,18 @@ lo provision [flags]
 ```
   lo provision
   lo provision --domain kubehz.in.net --force
-  lo provision --bootstrap
+  lo provision --bootstrap --dry-run --render-dir /tmp/bootstrap
 ```
 
 ### Options
 
 ```
-  -b, --bootstrap   Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)
-  -h, --help        help for provision
+  -b, --bootstrap           Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)
+      --dry-run             Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
+  -h, --help                help for provision
+      --no-diff             Dry run without the kubectl diff: render only, no cluster access
+      --only strings        Apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded
+      --render-dir string   Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
 ```
 
 ### SEE ALSO

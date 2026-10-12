@@ -246,6 +246,51 @@ the addon's pinned version (the Rook operator chart, a `cephVersion`, …), then
 applies the target directly and **bypasses** the dependency graph and its health
 gates.
 
+#### Preview first: `--dry-run`
+
+A re-apply writes every entry with `kubectl apply --server-side
+--force-conflicts`. On a production cluster that overwrites live drift in
+unrelated addons (a `MachineDeployment` replica count an autoscaler owns, a
+live-patched config). Preview the run before you take it:
+
+```bash
+lo provision my-cluster.example.com --bootstrap --dry-run --render-dir /tmp/bootstrap
+```
+
+The dry run renders every entry exactly as the real run would (the same
+value stack, envsubst, khelm and ordering) and applies nothing. For each
+entry it asks the API server for a server-side diff (`kubectl diff
+--server-side --force-conflicts`, read-only) and prints one line:
+
+```
+bootstrap dry-run: 01-cilium: unchanged
+bootstrap dry-run: 02-cert-manager: differs changed=2 new=1
+bootstrap dry-run: 03-rook-ceph: skipped
+bootstrap dry-run: entries=3 unchanged=1 differs=1 rendered=0 skipped=1 errors=0
+```
+
+`--render-dir <dir>` keeps the rendered manifests (`NN-<entry>.yaml`) and
+the diff text (`NN-<entry>.diff`, empty when unchanged). `--no-diff` renders
+only and never contacts the cluster. The exit code is 0 when nothing would
+change, 1 when something would, 2 when an entry failed to render or diff.
+A dry run is not gated and ignores `--force`: it never recreates an object.
+The provision tail (kubehz registration, the inventory, the gitops
+bootstrap) and `restore.d` are skipped too.
+
+#### One entry: `--only`
+
+```bash
+lo provision my-cluster.example.com --bootstrap --only cert-manager
+lo provision my-cluster.example.com --bootstrap --only cert-manager,envoy-gateway --dry-run
+```
+
+`--only` applies (or dry-runs) the named `spec.bootstrap` entries, matched
+by the entry name (the `name:` override when set) or the addon name.
+`dependsOn` is not expanded: a dependency you do not name is not applied,
+and only the edges among the named entries still order the run. An unknown
+name is an error that lists the valid names. The same flags exist on
+`lo bootstrap`.
+
 It requires an already-provisioned cluster (an existing
 `.kubeconfig/<cluster-name>.yaml`); otherwise it errors and changes nothing.
 
