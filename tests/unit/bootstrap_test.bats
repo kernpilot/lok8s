@@ -2653,7 +2653,7 @@ _dry_kubectl_stub() {
   run cat "${out}"
   assert_line --index 0 "bootstrap dry-run: 01-testcni: unchanged"
   assert_line --index 1 "bootstrap dry-run: 02-second: differs changed=1 new=2"
-  assert_line --index 2 "bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 errors=0"
+  assert_line --index 2 "bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0"
   [ "${#lines[@]}" -eq 3 ]
   # Nothing applied, nothing healed: only the two read-only diffs.
   ! grep -qE ' (apply|replace|patch|delete) ' "${KLOG}"
@@ -2699,10 +2699,13 @@ _dry_kubectl_stub() {
 
 # kubectl diff's rc 1 means "differences found" by convention, but a
 # generic failure can land on the same rc — the race-class pattern (the
-# same regex bootstrap::_apply_one's CRD/webhook retry uses) classifies as
-# needs-crd (an earlier entry's CRD hasn't landed in THIS read-only probe
-# yet), not a false "differs".
-@test "bootstrap::apply --dry-run: a CRD-not-installed rc 1 is needs-crd, not differs" {
+# same regex bootstrap::_apply_one's CRD/webhook retry uses), at ANY exit
+# code, classifies as inconclusive (needs-crd) — an earlier entry's CRD
+# hasn't landed in THIS read-only probe yet — never a false "differs",
+# and review round 2, item F: inconclusive is NOT counted as differs, and
+# forces the run's exit to 2 (an assessment that could not be completed),
+# not 1.
+@test "bootstrap::apply --dry-run: a CRD-not-installed rc 1 is inconclusive, not differs" {
   write_cluster_spec "testcni"
   local bootstrap_dry_run=1 rc=0
   export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
@@ -2715,8 +2718,45 @@ _dry_kubectl_stub() {
   export -f kubectl
   local out="${BATS_TEST_TMPDIR}/dry.out"
   bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2>/dev/null || rc=$?
+  [ "${rc}" -eq 2 ]
+  grep -q '^bootstrap dry-run: 01-testcni: inconclusive (needs-crd)$' "${out}"
+  grep -q '^bootstrap dry-run: entries=1 unchanged=0 differs=0 rendered=0 skipped=0 inconclusive=1 errors=0$' "${out}"
+}
+
+# The SAME race pattern at a HIGHER exit code (kubectl's own ">1 = genuine
+# failure" convention) still classifies as inconclusive, not error — the
+# round-2 review subagent's mutation found this exact case untested.
+@test "bootstrap::apply --dry-run: the race pattern at rc>1 is inconclusive too" {
+  write_cluster_spec "testcni"
+  local bootstrap_dry_run=1 rc=0
+  kubectl() {
+    cat >/dev/null
+    echo 'error: failed calling webhook "x.example.com"' >&2
+    return 2
+  }
+  export -f kubectl
+  local out="${BATS_TEST_TMPDIR}/dry2.out"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2>/dev/null || rc=$?
+  [ "${rc}" -eq 2 ]
+  grep -q '^bootstrap dry-run: 01-testcni: inconclusive (needs-crd)$' "${out}"
+}
+
+# KUBECTL_EXTERNAL_DIFF (e.g. `diff -q`) exits 1 on a real difference with
+# NO "--- " header at all — the old heuristic misclassified this as an
+# error; it must still be "differs".
+@test "bootstrap::apply --dry-run: an external diff tool with no header still differs" {
+  write_cluster_spec "testcni"
+  local bootstrap_dry_run=1 rc=0
+  kubectl() {
+    cat >/dev/null
+    echo 'Files LIVE and MERGED differ'
+    return 1
+  }
+  export -f kubectl
+  local out="${BATS_TEST_TMPDIR}/dry3.out"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2>/dev/null || rc=$?
   [ "${rc}" -eq 1 ]
-  grep -q '^bootstrap dry-run: 01-testcni: needs-crd$' "${out}"
+  grep -q '^bootstrap dry-run: 01-testcni: differs$' "${out}"
 }
 
 @test "bootstrap::apply --dry-run --no-diff renders only and never calls kubectl" {
@@ -2726,7 +2766,7 @@ _dry_kubectl_stub() {
   run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
   assert_success
   assert_line --index 0 "bootstrap dry-run: 01-testcni: rendered"
-  assert_line --index 1 "bootstrap dry-run: entries=1 unchanged=0 differs=0 rendered=1 skipped=0 errors=0"
+  assert_line --index 1 "bootstrap dry-run: entries=1 unchanged=0 differs=0 rendered=1 skipped=0 inconclusive=0 errors=0"
   [ ! -s "${KLOG}" ]
   [ -f "${bootstrap_render_dir}/01-testcni.yaml" ]
   [ ! -e "${bootstrap_render_dir}/01-testcni.diff" ]
@@ -2790,7 +2830,7 @@ YAML
   [ -f "${decrypted}" ]
   grep -q '^bootstrap dry-run: restore.d: differs' "${out}"
   grep -q '^bootstrap dry-run: 01-testcni: unchanged$' "${out}"
-  grep -q '^bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 errors=0$' "${out}"
+  grep -q '^bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0$' "${out}"
   ! grep -qE ' (apply|replace|patch) ' "${KLOG}"
 }
 
@@ -2890,43 +2930,219 @@ b wait="
   run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
   assert_success
   assert_line --index 0 "bootstrap dry-run: 01-second: unchanged"
-  assert_line --index 1 "bootstrap dry-run: entries=1 unchanged=1 differs=0 rendered=0 skipped=0 errors=0"
+  assert_line --index 1 "bootstrap dry-run: entries=1 unchanged=1 differs=0 rendered=0 skipped=0 inconclusive=0 errors=0"
+}
+
+# ── Review round 2 items G/H/I/B/C ──────────────────────────────────────
+
+@test "bootstrap::apply --render-dir refuses a foreign non-empty dir without the marker" {
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub 0
+  local dir="${BATS_TEST_TMPDIR}/foreign"
+  mkdir -p "${dir}"
+  echo "not mine" > "${dir}/README.md"
+  local bootstrap_dry_run=1 bootstrap_render_dir="${dir}" rc=0
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_failure
+  assert_output --partial ".lo-dry-run"
+  [ ! -e "${dir}/01-testcni.yaml" ]
+}
+
+@test "bootstrap::apply --render-dir reuses a marked dir and clears only owned files" {
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub 0
+  local dir="${BATS_TEST_TMPDIR}/out"
+  local bootstrap_dry_run=1 bootstrap_render_dir="${dir}"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  [ -f "${dir}/.lo-dry-run" ]
+  echo stale > "${dir}/01-stale.yaml"
+  echo stale > "${dir}/01-stale.diff"
+  _dry_kubectl_stub 0
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  [ ! -e "${dir}/01-stale.yaml" ]
+  [ ! -e "${dir}/01-stale.diff" ]
+  [ -f "${dir}/01-testcni.yaml" ]
+}
+
+# Review round 2, item H: --only applies WITHOUT restoring restore.d on a
+# REAL (non-dry) run too, with a LOUD warning naming the file(s) — not
+# just the dry-run's plain one-liner, since this is a DR/renewal-posture
+# decision on a live cluster.
+@test "bootstrap::apply --only (real run) skips restore.d and warns loudly" {
+  write_cluster_spec "testcni"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/tls-a.sops.yaml"
+  sops() { echo "sops must not run with --only" >&2; return 1; }
+  export -f sops
+  kubectl() { echo "kubectl $*" >> "${KLOG:-${BATS_TEST_TMPDIR}/kubectl.log}"; return 0; }
+  export -f kubectl
+  local bootstrap_select="testcni"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  assert_output --partial "WITHOUT restoring restore.d"
+  assert_output --partial "tls-a.sops.yaml"
+  assert_output --partial "--with-restore"
+  ! grep -q 'sops must not run' <<<"${output}"
+}
+
+@test "bootstrap::apply --only --with-restore applies restore.d before the selected entry" {
+  write_cluster_spec "testcni"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/tls-a.sops.yaml"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/secrets/restore.d"
+  echo 'kind: Secret' > "${PATH_CLUSTERS}/test.lok8s.dev/secrets/restore.d/tls-a.yaml"
+  export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
+  kubectl() { echo "kubectl $*" >> "${KLOG}"; cat >/dev/null; return 0; }
+  export -f kubectl
+  local bootstrap_select="testcni" bootstrap_with_restore=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  refute_output --partial "WITHOUT restoring restore.d"
+  grep -q "restore.d/tls-a.yaml" "${KLOG}"
+}
+
+# Review round 2, item I: an entry whose render mints NEW secret material
+# into the sandboxed store is marked non-repeatable — the next real run
+# would mint different bytes.
+@test "bootstrap::apply --dry-run marks non-repeatable when the render mints new secret material" {
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub 0
+  kustomize() {
+    mkdir -p "${PATH_SECRETS}"
+    echo "minted" > "${PATH_SECRETS}/minted.yaml"
+    echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: testcni"
+  }
+  export -f kustomize
+  local bootstrap_dry_run=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  assert_line --index 0 "bootstrap dry-run: 01-testcni: unchanged (non-repeatable)"
+}
+
+# Review round 2, item B: an entry's env: may never set one of the engine's
+# safety variables — the dry run reports THAT entry as error, naming it.
+@test "bootstrap::apply --dry-run: an entry's env: override of HOME is an error" {
+  write_cluster_spec "testcni:
+      env:
+        HOME: /tmp/evil"
+  _dry_kubectl_stub 0
+  local bootstrap_dry_run=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_failure
+  assert_output --partial "01-testcni: error"
+  assert_output --partial "may not set HOME"
+}
+
+# Review round 2, item C: a non-builtin exec plugin referenced from the
+# addon's own kustomization.yaml is refused under --dry-run before
+# kustomize ever runs it.
+@test "addons::render refuses a non-builtin exec plugin under --dry-run" {
+  local dir="${PATH_LOK8S}/addons/evilplugin"
+  mkdir -p "${dir}"
+  cat > "${dir}/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+generators:
+  - evil.yaml
+YAML
+  cat > "${dir}/evil.yaml" <<'YAML'
+apiVersion: evil.example.com/v1
+kind: EvilGenerator
+metadata:
+  name: x
+YAML
+  kustomize() { echo "kustomize must not run" >&2; return 9; }
+  export -f kustomize
+  local bootstrap_dry_run=1
+  run addons::render "${dir}" "lo" "hetzner" ""
+  assert_failure
+  assert_output --partial "evil.example.com/v1/EvilGenerator"
+}
+
+# --allow-generators skips the scan entirely: the SAME non-builtin-plugin
+# addon that --dry-run alone refuses now reaches kustomize.
+@test "addons::render --allow-generators lets a non-builtin exec plugin run" {
+  local dir="${PATH_LOK8S}/addons/evilplugin2"
+  mkdir -p "${dir}"
+  cat > "${dir}/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+generators:
+  - evil.yaml
+YAML
+  cat > "${dir}/evil.yaml" <<'YAML'
+apiVersion: evil.example.com/v1
+kind: EvilGenerator
+metadata:
+  name: x
+YAML
+  export KUSTOMIZE_CALLED="${BATS_TEST_TMPDIR}/kustomize_called"
+  kustomize() {
+    : > "${KUSTOMIZE_CALLED}"
+    echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: x"
+  }
+  export -f kustomize
+  local bootstrap_dry_run=1 bootstrap_allow_generators=1
+  run addons::render "${dir}" "lo" "hetzner" ""
+  assert_success
+  [ -f "${KUSTOMIZE_CALLED}" ]
 }
 
 @test "bootstrap::mode_check: the flag dependencies (the lines the Go cli prints)" {
-  local dry_run=0 render_dir="" no_diff=0 only="" allow_generators=0
-  run bootstrap::mode_check 1
+  local dry_run=0 render_dir="" no_diff=0 only="" allow_generators=0 with_restore=0
+  run bootstrap::mode_check 1 0
   assert_success
-  dry_run=1; run bootstrap::mode_check 0
+  dry_run=1; run bootstrap::mode_check 0 0
   assert_failure; assert_output --partial "--dry-run requires --bootstrap"
-  dry_run=0 only="cilium"; run bootstrap::mode_check 0
+  dry_run=0 only="cilium"; run bootstrap::mode_check 0 1
   assert_failure; assert_output --partial "--only requires --bootstrap"
-  only="" render_dir="x"; run bootstrap::mode_check 1
+  only="" render_dir="x"; run bootstrap::mode_check 1 0
   assert_failure; assert_output --partial "--render-dir requires --dry-run"
-  render_dir="" no_diff=1; run bootstrap::mode_check 1
+  render_dir="" no_diff=1; run bootstrap::mode_check 1 0
   assert_failure; assert_output --partial "--no-diff requires --dry-run"
-  no_diff=0 allow_generators=1; run bootstrap::mode_check 0
+  no_diff=0 allow_generators=1; run bootstrap::mode_check 0 0
   assert_failure; assert_output --partial "--allow-generators requires --bootstrap"
-  run bootstrap::mode_check 1
+  run bootstrap::mode_check 1 0
   assert_failure; assert_output --partial "--allow-generators requires --dry-run"
-  allow_generators=0 dry_run=1; run bootstrap::mode_check 1
+  allow_generators=0 dry_run=1; run bootstrap::mode_check 1 0
+  assert_success
+  # Review round 2, item H's flag: --with-restore needs --bootstrap AND --only.
+  dry_run=0 with_restore=1; run bootstrap::mode_check 0 0
+  assert_failure; assert_output --partial "--with-restore requires --bootstrap"
+  run bootstrap::mode_check 1 0
+  assert_failure; assert_output --partial "--with-restore requires --only"
+  with_restore=0 only="cilium"; run bootstrap::mode_check 1 1
   assert_success
 }
 
-# --only GIVEN but blank (every comma-separated value whitespace/empty) is
-# an error, never "no filter" — the latter is what an ABSENT --only means,
-# and the two must not silently collapse into the same full, unfiltered
-# apply (lok8s #268).
+# --only GIVEN but blank (every comma-separated value whitespace/empty, OR
+# literally "") is an error, never "no filter" — the latter is what an
+# ABSENT --only means, and the two must not silently collapse into the
+# same full, unfiltered apply (lok8s #268). only_given (the 2nd arg) is
+# what main::bootstrap/main::provision derive from the RAW argv
+# (bootstrap::_flag_given) — review round 2, item E: a bare `only=""`
+# alone can no longer be told apart from "never given" by mode_check, on
+# purpose, matching the Go cli's cmd.Flags().Changed("only") fix.
 @test "bootstrap::mode_check: --only blank is an error, not 'no filter'" {
-  local dry_run=0 render_dir="" no_diff=0 allow_generators=0
-  local only=" "
-  run bootstrap::mode_check 1
+  local dry_run=0 render_dir="" no_diff=0 allow_generators=0 with_restore=0
+  local only=""
+  run bootstrap::mode_check 1 1
+  assert_failure; assert_output --partial "--only: no entry names given"
+  only=" "
+  run bootstrap::mode_check 1 1
   assert_failure; assert_output --partial "--only: no entry names given"
   only=","
-  run bootstrap::mode_check 1
+  run bootstrap::mode_check 1 1
   assert_failure; assert_output --partial "--only: no entry names given"
   only="cilium"
-  run bootstrap::mode_check 1
+  run bootstrap::mode_check 1 1
+  assert_success
+  # only_given=0 (the flag was never on the argv at all) skips the blank
+  # check entirely, whatever only happens to hold — that is the ABSENT case.
+  only=""
+  run bootstrap::mode_check 1 0
   assert_success
 }
 

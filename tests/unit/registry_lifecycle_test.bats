@@ -828,3 +828,48 @@ _pull_script() {
     return 1
   }
 }
+
+# ── Review round 2, item D's exposed bug ───────────────────────────────
+#
+# Setting LOK8S_BOOTSTRAP_DRYRUN BEFORE driver::export (instead of only
+# inside bootstrap::apply, which runs after) means registry::config_generate
+# now runs its OWN dry-run gate (a disposable temp write, never the real
+# path) during driver::export too — so LOK8S_REGISTRY_JSON can legitimately
+# name a file that was never written by the time these query helpers are
+# called from driver::export → lo::export_spec_envs on the SAME dry run.
+# They must report "nothing yet" gracefully, not fail loudly with jq's own
+# "Could not open file" error on stderr (which broke the lo/go stderr
+# parity for a fresh domain's first dry run).
+@test "registry::get on a missing LOK8S_REGISTRY_JSON returns gracefully" {
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/config-registry.sh"
+  export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/does-not-exist.json"
+  run registry::get build host
+  assert_success
+  [ -z "${output}" ]
+  refute_output --partial "Could not open file"
+}
+
+@test "registry::is_shared / is_tls / port on a missing file don't error loudly" {
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/config-registry.sh"
+  export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/does-not-exist.json"
+  run registry::is_shared
+  assert_failure
+  refute_output --partial "Could not open file"
+  run registry::is_tls
+  assert_failure
+  refute_output --partial "Could not open file"
+  run registry::port
+  assert_success
+  [ "${output}" = "80" ]
+}
+
+@test "registry::network_name / network_cidr / project_network on a missing file return empty, not an error" {
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/config-registry.sh"
+  export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/does-not-exist.json"
+  for fn in registry::network_name registry::network_cidr registry::project_network; do
+    run "${fn}"
+    assert_success
+    [ -z "${output}" ]
+    refute_output --partial "Could not open file"
+  done
+}
