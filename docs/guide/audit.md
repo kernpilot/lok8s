@@ -175,18 +175,19 @@ _AUDIT_K8S_MINOR_EOL="1.37:2027-10-28 1.36:2027-06-28 1.35:2027-02-28 1.34:2026-
 ```
 
 A minor is supported while its date is in the future. So a minor reaches
-End-of-Life on its date with no change to the table. Add a row when a new
-minor releases (about every four months; see the
+End-of-Life on its date with no change to the table.
+
+Add a row when a new minor releases (about every four months). The
 [Kubernetes releases page](https://kubernetes.io/releases/) and
-[endoflife.date](https://endoflife.date/kubernetes)), in both places: a test
-fails when the two tables differ.
+[endoflife.date](https://endoflife.date/kubernetes) give the dates. Edit both
+tables: a test fails when they differ.
 
 The audit reports a version newer than the newest row as a low warn ("the
 support list may be stale"). When every row is past its date, it warns that
 the table is out of date.
 
-`_AUDIT_TODAY` (yyyy-mm-dd) pins the day the table is read against. The tests
-use it; leave it unset otherwise.
+`_AUDIT_TODAY` (yyyy-mm-dd) pins the day that the audit compares the table to.
+The tests use it. Leave it unset otherwise.
 
 ## Addon overview (`lo addons --detail`)
 
