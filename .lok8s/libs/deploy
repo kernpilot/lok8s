@@ -10,6 +10,7 @@
 # level, cluster-infra ordering lives in cluster.spec.bootstrap.
 
 import ^utils/types
+import ^utils/domain
 import ^utils/verbose
 import ^utils/kapply
 
@@ -23,7 +24,16 @@ main::deploy() {
     "${args[@]:-}"
   )
   :args "Deploy the domain artifact" "${@}"
-  _resolve_kubeconfig_for_domain
+  # One YAML document (domain::spec_check) for the spec of the domain;
+  # _resolve_kubeconfig_for_domain checks the cluster spec that a deploy spec
+  # names (provision::resolve_clusterref).
+  local spec_file
+  for spec_file in "${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml" "${PATH_CLUSTERS}/${domain}/deploy.lok8s.yaml"; do
+    [[ -f "${spec_file}" ]] || continue
+    domain::spec_check "${spec_file}" || return 1
+    break
+  done
+  _resolve_kubeconfig_for_domain || return 1
 
   if [[ -n "${label:-}" ]]; then
     local lkey="${label%%=*}"

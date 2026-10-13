@@ -185,6 +185,9 @@ bootstrap::dispatch() {
 
   local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   [[ -f "${cluster_yaml}" ]] || { error "cluster spec not found: ${cluster_yaml}"; return 1; }
+  # One YAML document (domain::spec_check): another layout reads as two
+  # different specs in the two implementations.
+  domain::spec_check "${cluster_yaml}" || return 1
 
   local cluster_name
   cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")

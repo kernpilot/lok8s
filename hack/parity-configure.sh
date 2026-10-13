@@ -193,6 +193,45 @@ spec:
     domain: iota.dev
 EOF
 
+# k*.dev — spec.kubernetes.version of a Lo cluster, read by `lo lint` through
+# the one reader of each implementation (lodriver.NodeVersion,
+# spec::kind_node_version). The two readers once disagreed on merge keys,
+# aliases, block scalars and a spec.kubernetes that is not a map. Each case is
+# diffed below and pinned as well. The full shape table is
+# tests/fixtures/kind-node-version/ (TestNodeVersionMatchesBash). A spec with
+# two YAML documents is in that table only: `lo lint` reads the kind of such a
+# spec differently in the two implementations (Go reads the first document)
+# before the reader runs.
+kver_spec() {  # <domain> <spec lines, %b> [<lines before kind:, %b>]
+  mkdir -p "${CL}/${1}"
+  printf '%bkind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: %s\nspec:\n%b  bootstrap: []\n' \
+    "${3:-}" "${1%%.*}" "${2}" > "${CL}/${1}/cluster.lok8s.yaml"
+}
+kver_spec kver.dev    '  kubernetes:\n    version: kindest/node:v1.31.4\n'      # not an image tag
+kver_spec knull.dev   '  kubernetes:\n    version: "null"\n'                    # unset: clean
+kver_spec kmap.dev    '  kubernetes:\n    version: {minor: 31}\n'               # a map: cannot be read
+kver_spec klatest.dev '  kubernetes:\n    version: latest\n'                    # a custom tag: clean
+kver_spec kmerge.dev  '  kubernetes:\n    <<: *v\n' 'x: &v {version: kindest/node:v1.31.4}\n'  # merged value
+kver_spec kalias.dev  '  kubernetes:\n    version: *v\n' 'x: &v kindest/node:v1.31.4\n'        # alias
+kver_spec kblock.dev  '  kubernetes:\n    version: |\n      v1.31.4\n'          # block scalar: clean
+kver_spec klist.dev   '  kubernetes: []\n'                                        # a list: cannot be read
+kver_spec kcycle.dev  '  kubernetes:\n    <<: *k\n    version: v1.31.4\n' 'k: &k\n  <<: *k\n'  # a merge cycle: bounded, refused
+kver_spec knul.dev    '  kubernetes:\n    version: "v1.31.4\\0"\n'          # a NUL byte: refused, never unset
+
+# l*.dev — the document layout of the spec file (domain.SpecLayout,
+# domain::spec_layout). Only one YAML document reads the same in the Go
+# readers (first document) and the bash readers (yq on every document), so
+# `lo lint` refuses every other layout before any other check, in both.
+lay_spec() {  # <domain> <before, %b> <after, %b>
+  mkdir -p "${CL}/${1}"
+  printf '%bkind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: %s\nspec:\n  bootstrap: []\n%b' \
+    "${2}" "${1%%.*}" "${3}" > "${CL}/${1}/cluster.lok8s.yaml"
+}
+lay_spec llead.dev  '---\n'      ''                     # one document after a `---`: clean
+lay_spec ltrail.dev ''           '---\n'                # a trailing `---` (line 7)
+lay_spec lempty.dev '---\n---\n' ''                     # two empty documents, then the spec (line 2)
+lay_spec ltwo.dev   ''           '---\nkind: KubeOne\n' # a second document (line 7)
+
 # sub.alpha.dev — the one-cluster-per-apex violation.
 mkdir -p "${CL}/sub.alpha.dev"
 printf 'kind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: sub\nspec:\n  bootstrap: []\n' \
@@ -316,6 +355,50 @@ check - lint --domain epsilon.app       # clusterRef.domain not found
 check - lint --domain sub.alpha.dev     # apex violation reported repo-globally anyway
 check - lint --domain iota.dev          # fully clean domain
 check - lint --domain nowhere.dev       # no spec at all
+# The version cases are pinned as well: parity alone also passes when both
+# sides drift together.
+kver_pin() {  # <label> <file> <fixed string> [absent]
+  if grep -qF -- "${3}" "${2}"; then
+    if [[ -z "${4:-}" ]]; then echo "ok: ${1}"; else fail "${1} — '${3}' found in ${2}"; fi
+  elif [[ -n "${4:-}" ]]; then echo "ok: ${1}"
+  else fail "${1} — '${3}' not in ${2}"; fi
+}
+kver_problem() {  # <domain> <the problem line, without the indent>
+  check - lint --domain "${1}"
+  for side in bash go; do
+    kver_pin "${side}: ${1} reports the version" "${WORK}/${side}.err" "  ${2}"
+    if grep -qE '^\[error\] *$' "${WORK}/${side}.err"; then fail "${side}: ${1} printed an empty [error] line"; fi
+  done
+}
+kver_clean() {  # <domain>
+  check - lint --domain "${1}"
+  for side in bash go; do
+    kver_pin "${side}: ${1} passes" "${WORK}/${side}.out" "  OK"
+    kver_pin "${side}: ${1} reports no version" "${WORK}/${side}.err" "spec.kubernetes.version" absent
+  done
+}
+kver_hint="Set a kindest/node image tag, for example v1.31.4. To use the default node image of kind, remove the key."
+kver_problem kver.dev   "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. ${kver_hint}"
+kver_clean   knull.dev
+kver_problem kmap.dev   "spec.kubernetes.version cannot be read: the value is a map, not a single value. Write spec.kubernetes.version as a single value."
+kver_clean   klatest.dev
+kver_problem kmerge.dev "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. ${kver_hint}"
+kver_problem kalias.dev "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. ${kver_hint}"
+kver_clean   kblock.dev
+kver_problem klist.dev  "spec.kubernetes.version cannot be read: spec.kubernetes is a list, not a map. Write spec.kubernetes as a YAML map."
+kver_problem kcycle.dev "spec.kubernetes.version cannot be read: the merge keys (<<) on the path to the value form a cycle. Remove the cycle."
+kver_problem knul.dev   "spec.kubernetes.version 'v1.31.4?' contains a control character (shown as '?'). Remove the control character."
+kver_clean   llead.dev
+lay_problem() {  # <domain> <the problem, after the spec path>
+  check - lint --domain "${1}"
+  for side in bash go; do
+    kver_pin "${side}: ${1} reports the layout" "${WORK}/${side}.err" "/clusters/${1}/cluster.lok8s.yaml ${2}"
+    kver_pin "${side}: ${1} runs no other check" "${WORK}/${side}.err" "Missing required field" absent
+  done
+}
+lay_problem ltrail.dev "holds more than one YAML document. Remove line 7 (a '---' line after the spec)."
+lay_problem lempty.dev "holds an empty YAML document before the spec. Remove line 2 (a '---' line)."
+lay_problem ltwo.dev "holds more than one YAML document. Remove lines 7 to 8 (the '---' at line 7 and everything after it)."
 check - --domain iota.dev lint          # global-flag spelling
 # Go-only: --notes adds the default-equal advisory and changes nothing
 # else: same exit code, same stderr, stdout equal once the [note] lines

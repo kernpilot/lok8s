@@ -47,11 +47,19 @@ lo::render_nodes() {
   local domain="${DOMAIN_NAME:-${LO_DEFAULT_DOMAIN}}"
   local certs_d_host="${PATH_CLUSTERS}/${domain}/.containerd/certs.d"
 
+  # No image line for an unset version: kind then selects the default node
+  # image of its own release (spec::kind_node_version). The "null" guard keeps
+  # a raw yq read from ever rendering kindest/node:null.
+  local image=""
+  if [[ -n "${k8s_version}" && "${k8s_version}" != "null" ]]; then
+    image="
+    image: \"kindest/node:${k8s_version}\""
+  fi
+
   local i
   for (( i = 0; i < LOK8S_CP_COUNT; i++ )); do
     result+="
-  - role: control-plane
-    image: \"kindest/node:${k8s_version}\""
+  - role: control-plane${image}"
     if (( i == 0 )); then
       result+="
     kubeadmConfigPatches:
@@ -119,8 +127,7 @@ $(lo::render_certs_d_mount "${certs_d_host}")"
 
   for (( i = 0; i < LOK8S_WORKER_COUNT; i++ )); do
     result+="
-  - role: worker
-    image: \"kindest/node:${k8s_version}\"
+  - role: worker${image}
     extraMounts:
 $(lo::render_certs_d_mount "${certs_d_host}")"
   done

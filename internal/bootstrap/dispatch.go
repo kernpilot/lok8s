@@ -52,6 +52,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string) error {
 	if !fsutil.FileExists(clusterYAML) {
 		return e.errorf("cluster spec not found: %s", clusterYAML)
 	}
+	// One YAML document (domain.CheckSpecLayout): another layout reads as
+	// two different specs in the two implementations.
+	if err := domain.CheckSpecLayout(clusterYAML, stderr); err != nil {
+		return err
+	}
 
 	clusterName := specMetadataName(clusterYAML)
 	kubeconfig := filepath.Join(e.Paths.Base, ".kubeconfig", clusterName+".yaml")

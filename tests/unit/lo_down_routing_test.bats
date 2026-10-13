@@ -153,6 +153,29 @@ YAML
   [ "${status}" -ne 0 ]
 }
 
+@test "a spec with more than one YAML document must NOT reach driver-destroy" {
+  # The two implementations read such a file as two different specs. The
+  # message names the lines to remove, not the .kind hint of a malformed
+  # driver name: the .kind is correct, the layout is not.
+  _write_spec <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata:
+  name: prod
+---
+kind: Lo
+YAML
+  run main::down
+  [ "${status}" -ne 0 ]
+  _refute_acted "driver-destroy"
+  _refute_acted "tilt-down"
+  local spec="${PATH_CLUSTERS}/${DOMAIN_NAME}/cluster.lok8s.yaml"
+  assert_output --partial "${spec} holds more than one YAML document. Remove lines 5 to 6 (the '---' at line 5 and everything after it)."
+  assert_output --partial "${spec} holds more than one YAML document — refusing to tear down"
+  assert_output --partial "remove the lines that the error names, then run lo down again"
+  refute_output --partial "bare driver name"
+}
+
 @test "a Lo spec takes the local teardown" {
   _write_spec <<'YAML'
 apiVersion: cluster.lok8s.dev/v1beta1

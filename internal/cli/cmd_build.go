@@ -51,6 +51,15 @@ func runBuild(ctx context.Context, paths *config.Paths, o buildOpts, stderr io.W
 		return ErrHandled
 	}
 
+	// One YAML document (domain.CheckSpecLayout): another layout reads as
+	// two different specs in the two implementations, so the build stops
+	// before it reads the spec.
+	if spec := build.SpecFile(filepath.Join(paths.Clusters, d)); spec != "" {
+		if err := domain.CheckSpecLayout(spec, stderr); err != nil {
+			return ErrHandled
+		}
+	}
+
 	// The split trigger itself lives in build.Artifacts (so EVERY build
 	// path honors the spec; a flag-only trigger would let dev builds
 	// silently stale the committed GitOps dir). The flags are debug

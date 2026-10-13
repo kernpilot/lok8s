@@ -177,6 +177,31 @@ func TestDispatchRejectsMaliciousClusterKind(t *testing.T) {
 	}
 }
 
+// The one-document rule (domain.CheckSpecLayout): a spec file with a second
+// document stops `lo bootstrap` before the driver export and the apply, with
+// one [error] line that names the lines to remove. Bash twin:
+// "bootstrap::dispatch refuses a spec file with a second document".
+func TestDispatchRefusesASecondDocument(t *testing.T) {
+	t.Setenv("LOK8S_SPEC_CLUSTER_DOMAIN", "")
+	d, e, errBuf := dispatcherFixture(t, &fakeExportingDriver{}, "lo")
+	spec := filepath.Join(e.Paths.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
+	testutil.WriteFile(t, spec, "apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: e2e-test\nspec:\n  bootstrap:\n    - testcni\n---\nkind: KubeOne\n")
+	e.ApplyOne = func(ctx context.Context, job Job, stdout, stderr io.Writer) int {
+		t.Error("apply must not run")
+		return 0
+	}
+	if err := d.Dispatch(t.Context(), "test.lok8s.dev"); err == nil {
+		t.Fatal("expected failure")
+	}
+	if os.Getenv("LOK8S_SPEC_CLUSTER_DOMAIN") != "" {
+		t.Error("the driver export ran")
+	}
+	want := "[error] " + spec + " holds more than one YAML document. Remove lines 8 to 9 (the '---' at line 8 and everything after it).\n"
+	if errBuf.String() != want {
+		t.Errorf("stderr = %q\nwant     %q", errBuf.String(), want)
+	}
+}
+
 func TestDispatchMissingSpecFails(t *testing.T) {
 	d, _, errBuf := dispatcherFixture(t, &fakeDriver{}, "lo")
 	if err := d.Dispatch(t.Context(), "no-such.domain"); err == nil {

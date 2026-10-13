@@ -287,6 +287,16 @@ YAML
   refute_output --partial '"kind": "lo"'
 }
 
+@test "build_json refuses a spec file with a second document" {
+  # The layout message, not the malformed-kind one. Go twin:
+  # TestBuildRefusesASecondDocument (internal/inventory).
+  export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s"
+  printf 'kind: Lo\nmetadata: { name: two }\n---\nkind: KubeOne\n' | _spec two
+  run inventory::build_json two "${PATH_CLUSTERS}/two/cluster.lok8s.yaml"
+  assert_failure
+  assert_output "[error] ${PATH_CLUSTERS}/two/cluster.lok8s.yaml holds more than one YAML document. Remove lines 3 to 4 (the '---' at line 3 and everything after it)."
+}
+
 @test "build_json still defaults to lo when the spec declares no kind" {
   export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s"
   _spec nokind <<'YAML'

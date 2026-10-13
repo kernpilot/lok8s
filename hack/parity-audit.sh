@@ -201,6 +201,20 @@ spec:
     version: v1.34.3
 EOF
 
+# ── nover.dev — a Lo cluster without spec.kubernetes.version. It uses the
+# default node image of kind: the version check is a neutral pass, not a
+# version that the audit cannot parse.
+mkdir -p "${PROJ}/clusters/nover.dev"
+printf 'kind: Lo\nmetadata:\n  name: nover\nspec:\n  oidc:\n    issuer: https://id.nover.dev\n' \
+  > "${PROJ}/clusters/nover.dev/cluster.lok8s.yaml"
+
+# ── mergever.cloud — prod intent on 1.33 behind a merge key. The audit takes
+# the version from the one reader in both implementations, so both read 1.33
+# (EOL) through the merge key: the same fail on both sides.
+mkdir -p "${PROJ}/clusters/mergever.cloud"
+printf 'pinned: &pinned\n  version: v1.33.2\nkind: KubeOne\nmetadata:\n  name: mergever\nspec:\n  kubernetes:\n    <<: *pinned\n' \
+  > "${PROJ}/clusters/mergever.cloud/cluster.lok8s.yaml"
+
 # Every case diffs rc/stdout/stderr with the project dir normalized to PROJ
 # (findings embed absolute paths); expect_rc pins the exit-code contract on
 # the Go binary alone.
@@ -210,6 +224,29 @@ for d in clean.dev viol.cloud secpol.app identity.net gamma.app; do
   check - audit "${d}"
   check - audit "${d}" --json
   check - audit "${d}" --sarif
+done
+
+# nover.dev: both sides report the neutral pass (pinned: parity alone also
+# passes when both sides drift together).
+check - audit nover.dev
+check - audit nover.dev --json
+for side in bash go; do
+  if grep -qF 'spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release.' "${WORK}/${side}.out" \
+    && ! grep -qF 'Could not parse spec.kubernetes.version' "${WORK}/${side}.out"; then
+    echo "ok: ${side}: nover.dev reports the kind default, not a parse failure"
+  else
+    fail "${side}: nover.dev does not report the kind default node image"
+  fi
+done
+
+# mergever.cloud: the merged version gets its verdict on both sides (pinned).
+check - audit mergever.cloud --json
+for side in bash go; do
+  if grep -qF 'Kubernetes 1.33 is End-of-Life' "${WORK}/${side}.out"; then
+    echo "ok: ${side}: mergever.cloud reads the merged version"
+  else
+    fail "${side}: mergever.cloud does not read the merged version"
+  fi
 done
 
 # Domain resolution forms + the alias.

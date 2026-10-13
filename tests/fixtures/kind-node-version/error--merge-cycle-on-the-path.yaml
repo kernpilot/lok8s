@@ -1,0 +1,7 @@
+k: &k
+  <<: *k
+kind: Lo
+spec:
+  <<: *k
+  kubernetes:
+    version: v1.31.4

@@ -40,6 +40,7 @@
 
 import ^utils/types
 import ^utils/domain
+import ^utils/spec
 import ^utils/verbose
 import ^libs/bootstrap
 
@@ -164,6 +165,15 @@ audit::run_domain() {
     audit::_emit "cluster-spec" "Cluster spec" high unknown \
       "No cluster.lok8s.yaml under ${domain_dir} (deploy-only or missing domain)." \
       "Audit the referenced cluster (spec.clusterRef.domain) instead."
+    return 0
+  fi
+  # One YAML document (domain::spec_layout): another layout reads as two
+  # different specs in the two implementations, so no check reads it.
+  local layout
+  if ! layout=$(domain::spec_layout "${spec_file}"); then
+    audit::_emit "cluster-spec" "Cluster spec" high unknown \
+      "${spec_file} ${layout}" \
+      "Keep one YAML document in the spec file, then audit again."
     return 0
   fi
 
@@ -462,8 +472,29 @@ audit::check_k8s_version() {
   supported=$(audit::_k8s_supported "$(audit::_k8s_today)")
   latest="${_AUDIT_K8S_MINOR_EOL%%:*}"
 
+  # The version comes from the one reader (spec::kubernetes_version, Go:
+  # lodriver.KubernetesVersion), so the audit evaluates the value that
+  # `lo provision` and `lo lint` read: merge keys and aliases resolved, the
+  # last duplicate key, one document.
   local raw
-  raw=$(yq -r '.spec.kubernetes.version // ""' "${spec_file}" 2>/dev/null || echo "")
+  if ! raw=$(spec::kubernetes_version "${spec_file}"); then
+    audit::_emit "${id}" "${title}" medium unknown \
+      "${raw}" \
+      "Set spec.kubernetes.version to a supported release, e.g. v${latest}.x." \
+      "${spec_uri}" "${spec_lineno}"
+    return 0
+  fi
+
+  # A Lo cluster without a version uses the default node image of the installed
+  # kind: there is no version to parse, and nothing is wrong.
+  if [[ "${kind}" == "lo" && -z "${raw}" ]]; then
+    audit::_emit "${id}" "${title}" low pass \
+      "spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release." \
+      "No action. To pin the Kubernetes version, set spec.kubernetes.version to a kindest/node image tag of a supported minor, for example v${latest}.x." \
+      "${spec_uri}" "${spec_lineno}"
+    return 0
+  fi
+
   raw="${raw%%@*}"; raw="${raw#v}"
   if [[ ! "${raw}" =~ ^([0-9]+)\.([0-9]+) ]]; then
     audit::_emit "${id}" "${title}" medium unknown \

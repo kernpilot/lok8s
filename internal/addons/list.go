@@ -70,6 +70,11 @@ func OriginOf(p *config.Paths, name string) string {
 // "lo" hides the crafting.
 func Driver(p *config.Paths, target string, stderr io.Writer) (string, error) {
 	spec := p.Clusters + "/" + target + "/cluster.lok8s.yaml"
+	// One YAML document (domain.CheckSpecLayout), with its own message: the
+	// kind is not malformed, the layout is.
+	if err := domain.CheckSpecLayout(spec, stderr); err != nil {
+		return "", ErrHandled
+	}
 	kind, err := domain.SpecDriver(spec, "lo")
 	if err != nil {
 		ui.ErrorTo(stderr, "cluster spec for '%s' declares a malformed kind (%s) — refusing to assume 'lo'", target, spec)
@@ -397,6 +402,9 @@ func detail(p *config.Paths, d string, out, stderr io.Writer, resolve EntryResol
 	}
 	// A malformed kind is reported, never guessed away: it selects the
 	// values.<driver>.yaml overlay and the driver's default entries.
+	if err := domain.CheckSpecLayout(spec, stderr); err != nil {
+		return ErrHandled
+	}
 	kind, err := domain.SpecDriver(spec, "lo")
 	if err != nil {
 		ui.ErrorTo(stderr, "cluster spec for '%s' declares a malformed kind (%s)", d, spec)

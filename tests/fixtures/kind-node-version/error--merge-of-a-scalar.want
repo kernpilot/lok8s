@@ -1,0 +1,1 @@
+error spec.kubernetes.version cannot be read: a merge key (<<) in the spec file does not refer to a map or a list of maps. Correct the merge key.

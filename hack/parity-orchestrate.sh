@@ -90,7 +90,7 @@ metadata:
 spec:
   runtime: kind
   kubernetes:
-    version: "1.31"
+    version: "v1.31.4"
   network:
     name: sharednet
     cidr: 10.99.8.0/24
@@ -138,18 +138,30 @@ SH
 parity::stub_kubectl_fail "${PROJ}"
 parity::stub "${PROJ}" kind <<'SH'
 #!/usr/bin/env bash
-# Parity stub: ONE synthetic cluster "alpha" exists; delete is a no-op.
+# Parity stub: ONE synthetic cluster "alpha" exists; delete is a no-op. With
+# PARITY_KIND_LOG set, create appends the --config file it got to that log.
 case "${1:-} ${2:-}" in
   "get clusters")   echo "alpha"; exit 0 ;;
   "delete cluster") echo "stub: kind $*"; exit 0 ;;
-  "create cluster") echo "stub: kind $*"; exit 0 ;;
+  "create cluster")
+    echo "stub: kind $*"
+    if [[ -n "${PARITY_KIND_LOG:-}" ]]; then
+      prev=""
+      for arg in "$@"; do
+        if [[ "${prev}" == "--config" ]]; then cat "${arg}" >> "${PARITY_KIND_LOG}"; fi
+        prev="${arg}"
+      done
+    fi
+    exit 0 ;;
 esac
 exit 0
 SH
 parity::stub "${PROJ}" docker <<'SH'
 #!/usr/bin/env bash
 # Parity stub: a docker that owns nothing. rm/prune succeed; listings are
-# empty except the cluster's two named volumes; inspects fail (absent).
+# empty except the cluster's two named volumes; inspects fail (absent). With
+# PARITY_DOCKER_LOG set, every argv is appended to that log.
+if [[ -n "${PARITY_DOCKER_LOG:-}" ]]; then echo "docker $*" >> "${PARITY_DOCKER_LOG}"; fi
 case "${1:-} ${2:-}" in
   "volume ls")       echo "alpha-data"; echo "alpha-cache"; exit 0 ;;
   "system prune")    echo "stub: docker $*"; exit 0 ;;
@@ -309,6 +321,163 @@ KIND_CFG='kind create cluster --name .* --config '
 stateful "${KIND_CFG}" up --domain alpha.dev
 stateful "${KIND_CFG}" up --domain shared.dev
 stateful "${KIND_CFG}" up --domain tls.dev
+
+# ── lo provision — the kind node image (spec.kubernetes.version) ─────────────
+# An unset version (tls.dev has none, nullver.dev has the literal string
+# "null") names no image in the kind config: kind then uses the default node
+# image of its own release. A valid version (goodver.dev, with a digest) names
+# its image, and so does a version behind a merge key (mergever.dev: the Go
+# reader once read it as unset, and kind then made a cluster of its default
+# Kubernetes version). A value that is not an image tag (badver.dev) stops the
+# provision before the first docker call. The kind stub appends the config it
+# gets to PARITY_KIND_LOG, and the docker stub logs every argv: both are
+# diffed across the sides and pinned.
+mkdir -p "${PROJ}/clusters/nullver.dev" "${PROJ}/clusters/goodver.dev" \
+  "${PROJ}/clusters/badver.dev" "${PROJ}/clusters/mergever.dev"
+cat > "${PROJ}/clusters/goodver.dev/cluster.lok8s.yaml" <<'YAML'
+kind: Lo
+metadata:
+  name: goodver
+spec:
+  runtime: kind
+  kubernetes:
+    version: v1.35.0@sha256:0f5cc49c5e73c0c2bb6e2df56e7df189240d83cf94edfa30946482eb08ec57d2
+  network:
+    name: goodnet
+    cidr: 10.99.14.0/24
+  registries:
+    tls: false
+YAML
+cat > "${PROJ}/clusters/nullver.dev/cluster.lok8s.yaml" <<'YAML'
+kind: Lo
+metadata:
+  name: nullver
+spec:
+  runtime: kind
+  kubernetes:
+    version: "null"
+  network:
+    name: nullnet
+    cidr: 10.99.12.0/24
+  registries:
+    tls: false
+YAML
+cat > "${PROJ}/clusters/badver.dev/cluster.lok8s.yaml" <<'YAML'
+kind: Lo
+metadata:
+  name: badver
+spec:
+  runtime: kind
+  kubernetes:
+    version: kindest/node:v1.31.4
+  network:
+    name: badnet
+    cidr: 10.99.13.0/24
+  registries:
+    tls: false
+YAML
+cat > "${PROJ}/clusters/mergever.dev/cluster.lok8s.yaml" <<'YAML'
+pinned: &pinned
+  version: v1.31.4
+kind: Lo
+metadata:
+  name: mergever
+spec:
+  runtime: kind
+  kubernetes:
+    <<: *pinned
+  network:
+    name: mergenet
+    cidr: 10.99.15.0/24
+  registries:
+    tls: false
+YAML
+export PARITY_KIND_LOG="${WORK}/kind.log" PARITY_DOCKER_LOG="${WORK}/docker.log"
+node_pre() { reset_fixtures; rm -f "${PARITY_KIND_LOG}" "${PARITY_DOCKER_LOG}" "${PROJ}/clusters"/{nullver,goodver,badver,mergever,layoutlead,layouttrail,layoutempty,layouttwo}.dev/.registries.json; }
+node_post() {  # <impl>: keep the kind config and the docker argv per side (normalized)
+  local f
+  for f in kind docker; do
+    if [[ -f "${WORK}/${f}.log" ]]; then
+      sed -E "s|${PROJ}|PROJ|g" "${WORK}/${f}.log" > "${WORK}/${f}.${1}.log"
+      rm -f "${WORK}/${f}.log"
+    else
+      : > "${WORK}/${f}.${1}.log"
+    fi
+  done
+}
+node_check() {  # <domain>: lo provision, the streams and the kind config diffed
+  PARITY_PRE_EACH=node_pre PARITY_POST_EACH=node_post check "${KIND_CFG}" provision --domain "${1}"
+  parity::state_same "${WORK}/kind.bash.log" "${WORK}/kind.go.log" "kind config of lo provision --domain ${1}" || failures=$((failures + 1))
+  parity::state_same "${WORK}/docker.bash.log" "${WORK}/docker.go.log" "docker argv of lo provision --domain ${1}" || failures=$((failures + 1))
+}
+# node_pin <label> <file> <want-count> <regex>: the count of matching lines.
+# want-count "+" means one line or more.
+node_pin() {
+  local n
+  n=$(grep -cE -- "${4}" "${2}" || true)
+  if [[ "${n}" == "${3}" || ( "${3}" == "+" && "${n}" -gt 0 ) ]]; then echo "ok: ${1}"; else
+    echo "FAIL: ${1} — ${n} lines match ${4} in ${2}, want ${3}:"; sed 's/^/  /' "${2}" | head -20
+    failures=$((failures + 1))
+  fi
+}
+for d in tls.dev nullver.dev; do
+  node_check "${d}"
+  for side in bash go; do
+    node_pin "${side}: ${d} (unset version) reached kind create" "${WORK}/kind.${side}.log" 1 '^kind: Cluster$'
+    node_pin "${side}: ${d} (unset version) names no node image"  "${WORK}/kind.${side}.log" 0 'image:'
+  done
+done
+node_check goodver.dev
+for side in bash go; do
+  node_pin "${side}: goodver.dev names its node image" "${WORK}/kind.${side}.log" 1 '^    image: "kindest/node:v1\.35\.0@sha256:0f5cc49c5e73c0c2bb6e2df56e7df189240d83cf94edfa30946482eb08ec57d2"$'
+  # Positive control for the "no docker command" pin of badver.dev below:
+  # the docker stub logs on a provision that runs.
+  node_pin "${side}: goodver.dev ran docker commands" "${WORK}/docker.${side}.log" + '^docker '
+done
+node_check mergever.dev
+for side in bash go; do
+  node_pin "${side}: mergever.dev names the merged node image" "${WORK}/kind.${side}.log" 1 '^    image: "kindest/node:v1\.31\.4"$'
+done
+node_check badver.dev
+for side in bash go; do
+  node_pin "${side}: badver.dev is refused with the reason" "${WORK}/${side}.err" 1 "spec\.kubernetes\.version 'kindest/node:v1\.31\.4' is not a valid image tag\. "
+  node_pin "${side}: badver.dev ran no docker command" "${WORK}/docker.${side}.log" 0 '.'
+  node_pin "${side}: badver.dev ran no kind create"    "${WORK}/kind.${side}.log" 0 '.'
+done
+
+# ── lo provision — the document layout of the spec file ──────────────────────
+# Only one YAML document reads the same in the Go readers (first document) and
+# the bash readers (yq on every document). layoutlead.dev (one document after a
+# `---`) provisions; a trailing `---`, two empty documents before the spec and
+# a second document stop the dispatch before the driver is chosen, with one
+# [error] line that names the lines to remove, and run no docker command.
+lay_cluster() {  # <domain> <before, %b> <after, %b> <cidr>
+  mkdir -p "${PROJ}/clusters/${1}"
+  printf '%bkind: Lo\nmetadata:\n  name: %s\nspec:\n  runtime: kind\n  network:\n    name: %snet\n    cidr: %s\n  registries:\n    tls: false\n%b' \
+    "${2}" "${1%%.*}" "${1%%.*}" "${4}" "${3}" > "${PROJ}/clusters/${1}/cluster.lok8s.yaml"
+}
+lay_cluster layoutlead.dev  '---\n'      ''                     10.99.16.0/24
+lay_cluster layouttrail.dev ''           '---\n'                10.99.17.0/24
+lay_cluster layoutempty.dev '---\n---\n' ''                     10.99.18.0/24
+lay_cluster layouttwo.dev   ''           '---\nkind: KubeOne\n' 10.99.19.0/24
+export PARITY_KIND_LOG="${WORK}/kind.log" PARITY_DOCKER_LOG="${WORK}/docker.log"
+node_check layoutlead.dev
+for side in bash go; do
+  node_pin "${side}: layoutlead.dev (one document after ---) reached kind create" "${WORK}/kind.${side}.log" 1 '^kind: Cluster$'
+done
+# fd 3: the commands in the loop never read the table.
+while IFS='|' read -r -u 3 d problem; do
+  node_check "${d}"
+  for side in bash go; do
+    node_pin "${side}: ${d} is refused with the layout" "${WORK}/${side}.err" 1 "/clusters/${d}/cluster\.lok8s\.yaml ${problem}$"
+    node_pin "${side}: ${d} ran no docker command" "${WORK}/docker.${side}.log" 0 '.'
+  done
+done 3<<'LAYOUT'
+layouttrail.dev|holds more than one YAML document\. Remove line 11 \(a '---' line after the spec\)\.
+layoutempty.dev|holds an empty YAML document before the spec\. Remove line 2 \(a '---' line\)\.
+layouttwo.dev|holds more than one YAML document\. Remove lines 11 to 12 \(the '---' at line 11 and everything after it\)\.
+LAYOUT
+unset PARITY_KIND_LOG PARITY_DOCKER_LOG
 
 # ── lo up with registry TLS ──────────────────────────────────────────────────
 # Both implementations mint the registry cert through the Secret plugin into
