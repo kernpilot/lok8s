@@ -95,6 +95,16 @@ spec:
                         CIDR block for the docker bridge network — typically a /24 from
                         the 10.125.<slot>.0/24 plan. See docs/reference/specs.md for the
                         slot allocation.
+                    dnsSearch:
+                      type: array
+                      description: |
+                        DNS search list of the kind nodes (kind networking.dnsSearch,
+                        kind v0.18.0 and later). Default []: the nodes and pods do not
+                        get the search domains of the host. A list replaces it.
+                      items:
+                        type: string
+                        maxLength: 253
+                        pattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
                 registries:
                   type: object
                   description: |

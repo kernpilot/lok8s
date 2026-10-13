@@ -8,7 +8,9 @@ package lint
 // Only keys with a default in docs/reference/specs.md ("Default
 // resolution", the Lo driver): spec.nodes.controlPlane, spec.runtime and
 // the mirror list, read from the driver's own constants (internal/driver/lo
-// defaults.go) so the two cannot drift. A key that is derived from another
+// defaults.go) so the two cannot drift, and spec.network.dnsSearch, whose
+// default is the empty list (the driver renders `dnsSearch: []` for a
+// missing key, see renderKindConfig). A key that is derived from another
 // (the slot network keys) has no fixed value to compare against and gets
 // no note.
 
@@ -64,6 +66,9 @@ func (l *Linter) notes(specFile string) {
 			names = append(names, m.Name)
 		}
 		note("spec.registries.mirrors", strings.Join(names, ", ")+" on the standard upstream URLs")
+	}
+	if n := yqsem.Lookup(root, "spec", "network", "dnsSearch"); n != nil && n.Kind == yaml.SequenceNode && len(n.Content) == 0 {
+		note("spec.network.dnsSearch", "[]")
 	}
 }
 

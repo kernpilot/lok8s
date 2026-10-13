@@ -15,6 +15,7 @@
 #   LOK8S_CP_COUNT, LOK8S_WORKER_COUNT, LOK8S_HOST_PORTS
 #   LOK8S_EXTRA_MOUNTS_COUNT, LOK8S_MAX_CONCURRENT_DOWNLOADS
 #   LOK8S_LB_POOL                     — MetalLB IP range
+#   LOK8S_NETWORK_DNS_SEARCH          — DNS search list of the nodes (space-separated, "" = none)
 #   LOK8S_REMOTE_MODE, LOK8S_REMOTE_EXPOSE, LOK8S_REMOTE_SYNC_*
 #   LOK8S_REMOTE_TILT
 
@@ -232,6 +233,52 @@ lo::read_lb_config() {
   export LOK8S_LB_POOL
 }
 
+# lo::read_dns_search_config — spec.network.dnsSearch, the DNS search list of
+# the kind nodes (the reason is at lo::render_kind_config). A missing key or a
+# null is the empty list: the nodes drop the host's search domains. Each entry
+# must be a lowercase DNS name (labels of a-z, 0-9 and inner hyphens, at most
+# 63 characters per label and 253 in total). The read prints one error per bad
+# entry, then fails. Go twin: readDNSSearchConfig.
+lo::read_dns_search_config() {
+  local cluster_yaml="${1}"
+  # C locale: in a UTF-8 locale the [a-z] range of a bash regex also matches
+  # letters such as é. The Go regexp compares bytes.
+  local LC_ALL=C
+  local re='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
+  local hint="Use only a-z, 0-9, hyphens and dots, for example corp.example.com."
+
+  LOK8S_NETWORK_DNS_SEARCH=""
+  export LOK8S_NETWORK_DNS_SEARCH
+
+  local tag
+  tag=$(yq -r '.spec.network.dnsSearch | tag' "${cluster_yaml}")
+  [[ "${tag}" != '!!null' ]] || return 0
+  if [[ "${tag}" != '!!seq' ]]; then
+    echo "error: spec.network.dnsSearch must be a list of DNS names, got ${tag}. Write a YAML list, for example [corp.example.com]." >&2
+    return 1
+  fi
+
+  local -a tags=()
+  mapfile -t tags < <(yq -r '.spec.network.dnsSearch[] | tag' "${cluster_yaml}")
+  local i name names="" errors=0
+  for i in "${!tags[@]}"; do
+    if [[ "${tags[i]}" != '!!str' ]]; then
+      echo "error: spec.network.dnsSearch[${i}] must be a lowercase DNS name, got ${tags[i]}. ${hint}" >&2
+      errors=$(( errors + 1 ))
+      continue
+    fi
+    name=$(yq -r ".spec.network.dnsSearch[${i}]" "${cluster_yaml}")
+    if [[ ! "${name}" =~ ${re} ]] || (( ${#name} > 253 )); then
+      echo "error: spec.network.dnsSearch[${i}] must be a lowercase DNS name, got '${name}'. ${hint}" >&2
+      errors=$(( errors + 1 ))
+      continue
+    fi
+    names+="${names:+ }${name}"
+  done
+  (( errors == 0 )) || return 1
+  LOK8S_NETWORK_DNS_SEARCH="${names}"
+}
+
 lo::read_remote_config() {
   local cluster_yaml="${1}"
 
@@ -276,11 +323,16 @@ lo::read_remote_config() {
 }
 
 # lo::read_config — read all config sections in the correct order.
+# `|| return 1` on each reader: driver::provision runs this tree with errexit
+# off (`driver::provision || rc=$?` in libs/provision), so without it a failed
+# reader printed its error and the read went on, and the function returned the
+# status of the LAST reader. Go twin: readConfig.
 lo::read_config() {
   local cluster_yaml="${1}"
-  lo::read_network_config "${cluster_yaml}"   # also calls read_registry_config
-  lo::read_node_config "${cluster_yaml}"
+  lo::read_network_config "${cluster_yaml}" || return 1   # also calls read_registry_config
+  lo::read_node_config "${cluster_yaml}" || return 1
   lo::read_lb_config "${cluster_yaml}"
+  lo::read_dns_search_config "${cluster_yaml}" || return 1
 }
 
 # ── Spec env export ───────────────────────────────────────

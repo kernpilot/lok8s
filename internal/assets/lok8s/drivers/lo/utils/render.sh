@@ -3,20 +3,27 @@
 
 import ^utils/oidc
 
-# `dnsSearch: []` (kind v0.18.0+): Docker copies the search domains of the
-# host's resolv.conf into the node's /etc/resolv.conf, and kubelet appends them
-# to the search list of every pod (`search <ns>.svc.cluster.local
-# svc.cluster.local cluster.local fritz.box …`, ndots:5). Resolvers with a fixed
-# time budget (musl, hickory) then fail external names: the Codex CLI timed out
-# every request after 5 s on lanisce/ops. With an empty list kind starts every
-# node container with KIND_DNS_SEARCH="", and the node entrypoint removes the
-# search lines from /etc/resolv.conf on every boot, before systemd starts
-# kubelet. The nameserver stays the one kind chose. Go twin: renderKindConfig.
+# networking.dnsSearch (kind v0.18.0 and later) keeps the host's DNS search
+# domains out of the cluster. Docker copies the `search` line of the host's
+# resolv.conf (a router domain such as fritz.box, a VPN domain such as
+# example.ts.net) into every node, and kubelet appends those domains to the
+# search list of every pod, after the cluster domains and with ndots:5. A pod
+# then sends one query per search domain before the real name, and resolvers
+# with a fixed time budget (musl, hickory) fail external names.
+#
+# kind starts every node container with KIND_DNS_SEARCH=<list> when the key is
+# set (a missing key or a null keeps the host's line). The node entrypoint then
+# writes /etc/resolv.conf with that list as its only search line, or with no
+# search line for the empty list. It does this on every boot, before systemd
+# starts kubelet. The nameserver stays the one kind chose. The default is the
+# empty list; spec.network.dnsSearch (lo::read_dns_search_config) replaces it.
+# Go twin: renderKindConfig.
 lo::render_kind_config() {
   local cluster_name="${1}" k8s_version="${2}" network="${3}" cluster_yaml="${4:-}"
 
-  local nodes_yaml
+  local nodes_yaml dns_search
   nodes_yaml=$(lo::render_nodes "${k8s_version}" "${cluster_yaml}")
+  dns_search=$(lo::render_dns_search)
 
   cat <<EOF
 # Rendered kind config for ${cluster_name}
@@ -27,7 +34,7 @@ networking:
   disableDefaultCNI: true
   podSubnet: "${LO_DEFAULT_POD_CIDR}"
   serviceSubnet: "${LO_DEFAULT_SVC_CIDR}"
-  dnsSearch: []
+  dnsSearch: ${dns_search}
 ${nodes_yaml}
 containerdConfigPatches:
   - |-
@@ -36,6 +43,20 @@ containerdConfigPatches:
     [plugins."io.containerd.grpc.v1.cri".containerd]
       max_concurrent_downloads = ${LOK8S_MAX_CONCURRENT_DOWNLOADS:-3}
 EOF
+}
+
+# lo::render_dns_search — the value of networking.dnsSearch, from the list
+# lo::read_dns_search_config exported: `[]` for none, else a flow list of
+# quoted names (`["corp.example.com", "example.ts.net"]`). Go twin:
+# renderDNSSearch.
+lo::render_dns_search() {
+  local -a names=()
+  read -r -a names <<< "${LOK8S_NETWORK_DNS_SEARCH:-}"
+  local out="" name
+  for name in "${names[@]}"; do
+    out+="${out:+, }\"${name}\""
+  done
+  echo "[${out}]"
 }
 
 lo::render_certs_d_mount() {
