@@ -105,7 +105,9 @@ teardown() {
 # repo's real toolchain install) and it broke the sandbox on its first
 # parity run.
 @test "bootstrap::_sandbox_build tolerates a PATH_BIN symlink escape" {
-  local orig_bin="${PATH_BIN:-${PATH_BASE}/.bin}"
+  # Always the test's own project .bin: an inherited PATH_BIN (CI exports
+  # one) is a real toolchain directory, and this test writes into it.
+  local orig_bin="${PATH_BASE}/.bin"
   export PATH_BIN="${orig_bin}"
   mkdir -p "${PATH_CLUSTERS}/x.dev" "${PATH_BIN}"
   local outside; outside="$(mktemp -d)"
@@ -115,6 +117,7 @@ teardown() {
   [ ! -e "${PATH_BASE}/.bin" ]
   [[ "${PATH_BIN}" == "${orig_bin}" ]]
   bootstrap::_sandbox_cleanup
+  rm -rf "${outside}"
 }
 
 @test "bootstrap::_sandbox_build refuses an escaping symlink in the project" {
