@@ -249,7 +249,7 @@ This happens when the `lok8s-registries` network already exists with a different
 
 ```bash
 lo registry clean --shared
-lo provision lok8s.dev
+lo provision --domain lok8s.dev
 ```
 
 ### Kind nodes cannot reach shared mirrors
@@ -275,4 +275,4 @@ yq '.spec.network.cidr' clusters/lok8s.dev/cluster.lok8s.yaml
 # → 10.125.125.0/24   (build → .101, cache → .102)
 ```
 
-If the cluster was provisioned with a different `spec.network.cidr` than the running registry containers, clean and re-provision: `lo registry clean && lo provision <domain>`.
+If the cluster was provisioned with a different `spec.network.cidr` than the running registry containers, clean and re-provision: `lo registry clean && lo provision --domain <domain>`.
