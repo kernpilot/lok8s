@@ -511,6 +511,28 @@ jobs:
           FIXTURE: single-local-build
           CLUSTER: e2e-slb
 
+      - name: Verify the pod search list holds only the cluster domains
+        # The rendered kind config sets networking.dnsSearch: [] (the reason
+        # is at renderKindConfig), so the search domains of the runner never
+        # reach a pod. The check holds whatever the runner's own search line
+        # is. Both legs run it: the bash leg renders through the frozen tree.
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="${GITHUB_WORKSPACE}/tests/e2e/${FIXTURE}/.kubeconfig/${CLUSTER}.yaml"
+          pod="$(kubectl get pod -l app=app -o jsonpath='{.items[0].metadata.name}')"
+          ns="$(kubectl get pod -l app=app -o jsonpath='{.items[0].metadata.namespace}')"
+          echo "runner: $(grep '^search' /etc/resolv.conf || echo '(no search line)')"
+          observed="$(kubectl -n "${ns}" exec "${pod}" -- cat /etc/resolv.conf | awk '/^search/ { $1 = $1; print }')"
+          expected="search ${ns}.svc.cluster.local svc.cluster.local cluster.local"
+          echo "pod:    ${observed:-(no search line)}"
+          if [ "${observed}" != "${expected}" ]; then
+            echo "::error::The pod search line is '${observed}', expected '${expected}'. The kind nodes kept the host search domains. Read networking.dnsSearch in the kind config that lo up rendered."
+            exit 1
+          fi
+        env:
+          FIXTURE: single-local-build
+          CLUSTER: e2e-slb
+
       - name: Diagnostics on failure
         if: failure()
         run: |

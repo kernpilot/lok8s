@@ -139,10 +139,21 @@ parity::stub_kubectl_fail "${PROJ}"
 parity::stub "${PROJ}" kind <<'SH'
 #!/usr/bin/env bash
 # Parity stub: ONE synthetic cluster "alpha" exists; delete is a no-op.
+# With PARITY_KIND_CONFIG_LOG set, create appends the config file it got
+# (bash: a /dev/fd pipe, Go: a temp file) to that log.
 case "${1:-} ${2:-}" in
   "get clusters")   echo "alpha"; exit 0 ;;
   "delete cluster") echo "stub: kind $*"; exit 0 ;;
-  "create cluster") echo "stub: kind $*"; exit 0 ;;
+  "create cluster")
+    echo "stub: kind $*"
+    if [[ -n "${PARITY_KIND_CONFIG_LOG:-}" ]]; then
+      prev=""
+      for arg in "$@"; do
+        [[ "${prev}" == "--config" ]] && cat "${arg}" >> "${PARITY_KIND_CONFIG_LOG}"
+        prev="${arg}"
+      done
+    fi
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -309,6 +320,55 @@ KIND_CFG='kind create cluster --name .* --config '
 stateful "${KIND_CFG}" up --domain alpha.dev
 stateful "${KIND_CFG}" up --domain shared.dev
 stateful "${KIND_CFG}" up --domain tls.dev
+
+# ── lo up — spec.network.dnsSearch ───────────────────────────────────────────
+# dns.dev sets a search list: the kind stub logs the config `kind create` got
+# on each side, the two logs must be byte-identical, and both must carry the
+# list. dnsbad.dev has bad entries and dnslist.dev a value that is not a
+# list: the read pass rejects them with the same lines on both sides, and
+# kind create never runs. `provision --bootstrap` reads the spec through
+# driver::export (bash) / Export (Go) and must stop there too.
+mkdir -p "${PROJ}/clusters"/{dns.dev,dnsbad.dev,dnslist.dev}
+dns_spec() {  # <domain> <name> <slot> <dnsSearch value…>
+  printf 'kind: Lo\nmetadata:\n  name: %s\nspec:\n  runtime: kind\n  network:\n    name: %snet\n    cidr: 10.99.%s.0/24\n    dnsSearch: %s\n  registries:\n    tls: false\n    shared:\n      enabled: false\n' \
+    "${2}" "${2}" "${3}" "${4}" > "${PROJ}/clusters/${1}/cluster.lok8s.yaml"
+}
+dns_spec dns.dev dnsc 11 '[corp.example.com, example.ts.net]'
+dns_spec dnsbad.dev dnsbad 12 '[corp.example.com, Corp_Example, "", {name: x}]'
+dns_spec dnslist.dev dnslist 13 'corp.example.com'
+export PARITY_KIND_CONFIG_LOG="${WORK}/kindcfg.log"
+dns_pre() { reset_fixtures; rm -f "${PARITY_KIND_CONFIG_LOG}" "${PROJ}/clusters"/dns*.dev/.registries.json; }
+dns_post() { if [[ -f "${PARITY_KIND_CONFIG_LOG}" ]]; then mv "${PARITY_KIND_CONFIG_LOG}" "${WORK}/kindcfg.${1}.log"; else : > "${WORK}/kindcfg.${1}.log"; fi; }
+dns_check() { PARITY_PRE_EACH=dns_pre PARITY_POST_EACH=dns_post check "$@"; }
+dns_check "${KIND_CFG}" up --domain dns.dev
+parity::state_same "${WORK}/kindcfg.bash.log" "${WORK}/kindcfg.go.log" "kind config of lo up --domain dns.dev" || failures=$((failures + 1))
+for side in bash go; do
+  if grep -qx '  dnsSearch: \["corp.example.com", "example.ts.net"\]' "${WORK}/kindcfg.${side}.log"; then
+    echo "ok: ${side}: kind create got the spec.network.dnsSearch list"
+  else fail "${side}: no spec.network.dnsSearch list in ${WORK}/kindcfg.${side}.log"; fi
+done
+# --bootstrap needs the cluster's kubeconfig file before it reads the spec.
+mkdir -p "${PROJ}/.kubeconfig"
+: > "${PROJ}/.kubeconfig/dnsbad.yaml"
+: > "${PROJ}/.kubeconfig/dnslist.yaml"
+for d in dnsbad.dev dnslist.dev; do
+  dns_check - up --domain "${d}"
+  for side in bash go; do
+    if grep -q '^error: spec\.network\.dnsSearch' "${WORK}/${side}.err" && [[ ! -s "${WORK}/kindcfg.${side}.log" ]]; then
+      echo "ok: ${side}: ${d} rejected in the read pass, no kind create"
+    else fail "${side}: ${d} not rejected in the read pass (see ${WORK}/${side}.err)"; fi
+  done
+  dns_check - provision --domain "${d}" --bootstrap
+  for side in bash go; do
+    # shellcheck disable=SC2154 # go_rc / bash_rc: set by parity::run_pair (hack/lib/parity.sh)
+    if [[ "${side}" == go ]]; then side_rc="${go_rc}"; else side_rc="${bash_rc}"; fi
+    if grep -q '^error: spec\.network\.dnsSearch' "${WORK}/${side}.err" && [[ "${side_rc}" != 0 ]]; then
+      echo "ok: ${side}: provision --bootstrap stops at the rejected ${d} spec"
+    else fail "${side}: provision --bootstrap went on past the rejected ${d} spec"; fi
+  done
+done
+rm -f "${PROJ}/.kubeconfig/dnsbad.yaml" "${PROJ}/.kubeconfig/dnslist.yaml"
+unset PARITY_KIND_CONFIG_LOG
 
 # ── lo up with registry TLS ──────────────────────────────────────────────────
 # Both implementations mint the registry cert through the Secret plugin into

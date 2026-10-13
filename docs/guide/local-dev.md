@@ -256,24 +256,56 @@ spec:
 
 ## Host DNS search domains
 
-The search domains of your machine (the `search` line of `/etc/resolv.conf`,
-for example `fritz.box` or a Tailscale `*.ts.net` domain) do not go into the
-cluster. Docker copies that line into every kind node, and kubelet adds it to
-the search list of every pod, which has `ndots:5`. A pod then sends a query for
-each search domain before the real name, and resolvers with a fixed time
-budget (musl, hickory) fail external names.
+By default, the search domains of your machine (the `search` line of
+`/etc/resolv.conf`, for example `fritz.box` or a VPN domain such as
+`example.ts.net`) do not go into the cluster. Docker copies that line into
+every kind node, and kubelet adds it to the search list of every pod, which
+has `ndots:5`. A pod then sends a query for each search domain before the real
+name, and resolvers with a fixed time budget (musl, hickory) fail external
+names.
 
-The kind config that `lo up` renders sets `networking.dnsSearch: []` (kind
-v0.18.0 and later). kind then starts every node with an empty
-`KIND_DNS_SEARCH`, and the node removes the search lines from its
-`/etc/resolv.conf` on every boot, before kubelet starts. A pod's search list
-holds only the cluster domains (`<namespace>.svc.cluster.local
-svc.cluster.local cluster.local`). The nameserver of the node does not change.
-To resolve a short host name from a pod, use the full name, or set
-`dnsConfig.searches` on that pod.
+The kind config that `lo up` renders sets `networking.dnsSearch: []`. kind
+then starts every node with an empty `KIND_DNS_SEARCH`, and the node removes
+the search lines from its `/etc/resolv.conf` on every boot, before kubelet
+starts. A pod's search list holds only the cluster domains
+(`<namespace>.svc.cluster.local svc.cluster.local cluster.local`). The
+nameserver of the node does not change.
 
-A cluster created before this change keeps the host search domains until you
-recreate it (`lo down` and `lo up`).
+The field needs **kind v0.18.0 or later**. An older kind binary stops with an
+unknown-field error on the config. A node image from before kind v0.18.0
+ignores the field, and its nodes keep the host search domains.
+
+Short host names no longer resolve on the nodes either, not only in pods. This
+applies to image pulls (containerd resolves a registry host on the node) and
+to pods with `hostNetwork: true`. Use the full name. For one pod,
+`dnsConfig.searches` also works. For the whole cluster, set
+`spec.network.dnsSearch`.
+
+### Keep search domains: `spec.network.dnsSearch`
+
+If the cluster must resolve short names of your company or home network, list
+the domains in the cluster spec. The list replaces the empty default: lok8s
+writes it to `networking.dnsSearch`, and every node and pod gets these
+domains (pods after the cluster domains).
+
+```yaml
+spec:
+  network:
+    dnsSearch:
+      - corp.example.com
+      - example.ts.net
+```
+
+Each entry must be a lowercase DNS name: the letters `a-z`, the digits `0-9`,
+hyphens and dots, with at most 63 characters per label and 253 in total.
+`lo up` rejects a bad entry before it creates a network or a node, and the
+error names the entry and its value. To keep the full host search line, copy
+its domains into the list. A missing key and `dnsSearch: []` both drop the host
+search domains.
+
+kind sets the search list when it creates the nodes. A cluster created before
+this change, or before you change the list, keeps its old search line until
+you recreate it (`lo down` and `lo up`).
 
 ## Custom in-cluster DNS
 
