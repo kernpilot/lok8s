@@ -131,7 +131,7 @@ spec::_kver_yq() {
     printf '%s\n' "${out}"
     return 0
   fi
-  if (( rc == 124 || rc > 128 )) || grep -qE 'out of memory|cannot allocate memory|stack overflow|goroutine stack exceeds' "${err}"; then
+  if (( rc == 124 || rc > 128 )) || grep -qE 'out of memory|cannot allocate memory|stack overflow|goroutine stack exceeds|SIGSEGV' "${err}"; then
     printf '%s %s\n' "${unreadable}" "${limit}"
   elif grep -q 'unknown flag: --yaml-fix-merge-anchor-to-spec' "${err}"; then
     printf '%s the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (b install installs the pinned yq).\n' "${unreadable}"
