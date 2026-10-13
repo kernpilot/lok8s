@@ -3905,6 +3905,40 @@ SH
   done
 }
 
+# Review round 6, item 1: a keep-chomped block scalar (`|+`) keeps its
+# trailing newlines as part of the value. As the last value of the merged
+# values or of chart.yaml, the staged files keep every one of them (a
+# command substitution drops them) — dry run and real run. The bytes are the
+# pinned yq's, and the Go twin pins the same ones
+# (internal/addons/render_test.go, TestRenderStagingKeepsKeepChompedTrailingNewlines).
+@test "addons::render: the staging keeps the trailing newlines of a keep-chomped last value" {
+  local dir="${PATH_LOK8S}/addons/kept" want="${BATS_TEST_TMPDIR}/want" dry
+  mkdir -p "${dir}" "${want}"
+  printf 'apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: kept\nvalueFiles:\n  - values.yaml\nnote: |+\n  beta\n\n' > "${dir}/chart.yaml"
+  printf 'base: 1\n' > "${dir}/values.yaml"
+  printf 'driver: 2\nkeep: |+\n  alpha\n\n\n' > "${dir}/values.lo.yaml"
+  printf 'apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: kept\nvalueFiles:\n  - values.merged.yaml\nnote: |+\n  beta\n\n' > "${want}/chart.yaml"
+  printf 'base: 1\ndriver: 2\nkeep: |+\n  alpha\n\n\n' > "${want}/values.merged.yaml"
+  export STAGED="${BATS_TEST_TMPDIR}/staged"
+  kustomize() {
+    local d="${@: -1}"
+    rm -rf "${STAGED}"; mkdir -p "${STAGED}"
+    cp "${d}/chart.yaml" "${d}/values.merged.yaml" "${STAGED}/"
+    echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: x"
+  }
+  export -f kustomize
+  local b="${BATS_TEST_TMPDIR}/boundary"
+  mkdir -p "${b}"
+  addons::dry_run_boundary "${b}"
+  for dry in 1 0; do
+    local bootstrap_dry_boundary="${b}" bootstrap_dry_run="${dry}"
+    run addons::render "${dir}" "lo" "" ""
+    assert_success
+    cmp "${want}/values.merged.yaml" "${STAGED}/values.merged.yaml" || { echo "dry=${dry}: $(od -c "${STAGED}/values.merged.yaml")"; return 1; }
+    cmp "${want}/chart.yaml" "${STAGED}/chart.yaml" || { echo "dry=${dry}: $(od -c "${STAGED}/chart.yaml")"; return 1; }
+  done
+}
+
 # Item 3: an object that only one of the two renders has is
 # non-deterministic too (the union of both renders' objects).
 @test "bootstrap::apply --dry-run lists an object only the second render has" {

@@ -635,6 +635,53 @@ func TestRenderDryRunStackedCopyKeepsSymlinks(t *testing.T) {
 	}
 }
 
+// Review round 6, item 1: a keep-chomped block scalar (`|+`) keeps its
+// trailing newlines as part of the value. When it is the last value of the
+// merged values or of chart.yaml, the staged files must still end with every
+// one of them — in a dry run and in a real run. The wanted bytes are what
+// the pinned yq writes (the bash twin, tests/unit/bootstrap_test.bats pins
+// the same bytes):
+//
+//	yq eval-all '. as $item ireduce ({}; . * $item)' values.yaml values.lo.yaml
+//	yq '.valueFiles = ["values.merged.yaml"]' chart.yaml
+func TestRenderStagingKeepsKeepChompedTrailingNewlines(t *testing.T) {
+	const (
+		chart      = "apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: kept\nvalueFiles:\n  - values.yaml\nnote: |+\n  beta\n\n"
+		wantChart  = "apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: kept\nvalueFiles:\n  - values.merged.yaml\nnote: |+\n  beta\n\n"
+		wantMerged = "base: 1\ndriver: 2\nkeep: |+\n  alpha\n\n\n"
+	)
+	for _, dry := range []bool{false, true} {
+		dir := filepath.Join(t.TempDir(), "addons", "kept")
+		testutil.WriteFile(t, filepath.Join(dir, "chart.yaml"), chart)
+		testutil.WriteFile(t, filepath.Join(dir, "values.yaml"), "base: 1\n")
+		testutil.WriteFile(t, filepath.Join(dir, "values.lo.yaml"), "driver: 2\nkeep: |+\n  alpha\n\n\n")
+		p := testPaths(t)
+		t.Setenv(render.ModeEnv, string(render.ModeExec))
+		var gotChart, gotMerged string
+		probe := &probeRunner{t: t, manifest: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n", check: func(d string) {
+			c, _ := os.ReadFile(filepath.Join(d, "chart.yaml"))
+			m, _ := os.ReadFile(filepath.Join(d, "values.merged.yaml"))
+			gotChart, gotMerged = string(c), string(m)
+		}}
+		var errBuf strings.Builder
+		var err error
+		if dry {
+			_, err = RenderDryRun(t.Context(), p, probe, &errBuf, dir, "lo", "", "", nil, dryBoundary(t, p), false)
+		} else {
+			_, err = Render(t.Context(), p, probe, &errBuf, dir, "lo", "", "", nil)
+		}
+		if err != nil {
+			t.Fatalf("dry=%v: %v\n%s", dry, err, errBuf.String())
+		}
+		if gotMerged != wantMerged {
+			t.Errorf("dry=%v: the staged values.merged.yaml = %q, want %q", dry, gotMerged, wantMerged)
+		}
+		if gotChart != wantChart {
+			t.Errorf("dry=%v: the staged chart.yaml = %q, want %q", dry, gotChart, wantChart)
+		}
+	}
+}
+
 // Review round 5, item 2: the staging copy keeps symlinks, and the files it
 // rewrites (chart.yaml, values.inline.yaml, values.merged.yaml) may be
 // links in the addon: a shared ChartRenderer config, shared values. The

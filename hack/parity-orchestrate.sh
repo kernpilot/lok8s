@@ -539,6 +539,53 @@ for side in bash go; do
 done
 unset PARITY_KUSTOMIZE_LOG
 
+# ── lo bootstrap — the staged values, byte for byte ──────────────────────────
+# Review round 6, item 1: the values staging keeps yq's bytes. The last value
+# of the merged values and of chart.yaml is a keep-chomped block scalar
+# (`|+`), whose trailing newlines are part of the value. The stub kustomize
+# copies the staged chart.yaml and values.merged.yaml out of the build copy
+# and fails the build; the copies are diffed across the sides and pinned.
+mkdir -p "${PROJ}/clusters/kept.dev/targets/kept"
+cat > "${PROJ}/clusters/kept.dev/cluster.lok8s.yaml" <<'YAML'
+kind: Lo
+metadata:
+  name: keptc
+spec:
+  runtime: kind
+  network:
+    name: keptnet
+    cidr: 10.99.14.0/24
+  registries:
+    tls: false
+  bootstrap:
+    - ./targets/kept
+YAML
+printf 'apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: kept\nvalueFiles:\n  - values.yaml\nnote: |+\n  beta\n\n' \
+  > "${PROJ}/clusters/kept.dev/targets/kept/chart.yaml"
+printf 'base: 1\n' > "${PROJ}/clusters/kept.dev/targets/kept/values.yaml"
+printf 'driver: 2\nkeep: |+\n  alpha\n\n\n' > "${PROJ}/clusters/kept.dev/targets/kept/values.lo.yaml"
+: > "${PROJ}/.kubeconfig/keptc.yaml"
+parity::stub "${PROJ}" kustomize <<'SH'
+#!/usr/bin/env bash
+# Parity stub kustomize: keep the staged files of the build copy, then fail
+# the build (the case stops at the render).
+d="${@: -1}"
+cp "${d}/chart.yaml" "${d}/values.merged.yaml" "${PARITY_STAGED}/" 2>/dev/null
+echo "Error: parity stub: no render" >&2
+exit 1
+SH
+export PARITY_STAGED="${WORK}/staged"
+kept_pre() { reset_fixtures; rm -rf "${PROJ}/clusters/kept.dev/.registries.json" "${PARITY_STAGED}"; mkdir -p "${PARITY_STAGED}"; }
+kept_post() { rm -rf "${WORK}/staged.${1}"; mv "${PARITY_STAGED}" "${WORK}/staged.${1}"; }
+PARITY_PRE_EACH=kept_pre PARITY_POST_EACH=kept_post check - bootstrap --domain kept.dev
+for f in chart.yaml values.merged.yaml; do
+  parity::state_same "${WORK}/staged.bash/${f}" "${WORK}/staged.go/${f}" "the staged ${f} of the bootstrap render" || failures=$((failures + 1))
+done
+printf 'base: 1\ndriver: 2\nkeep: |+\n  alpha\n\n\n' > "${WORK}/staged.want"
+parity::state_same "${WORK}/staged.want" "${WORK}/staged.go/values.merged.yaml" "the staged values.merged.yaml keeps the trailing newlines of a |+ value" \
+  || failures=$((failures + 1))
+unset PARITY_STAGED
+
 # ── lo bootstrap --dry-run / --only ──────────────────────────────────────────
 # A dry run renders every entry like the real run and applies NOTHING. The
 # stub kustomize answers a manifest (one ConfigMap, named after the dir it

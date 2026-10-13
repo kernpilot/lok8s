@@ -567,14 +567,19 @@ addons::render() {
           || { error "addons::render: failed to merge values for ${addon_dir}"; rm -rf "${build_dir}"; return 1; }
         value_files+=("${build_dir}/values.inline.yaml")
       fi
+      # yq's output is kept byte for byte: the `x` sentinel stops the command
+      # substitution from dropping trailing newlines, which belong to the
+      # value when the last one is a keep-chomped block scalar (`|+`). The
+      # output is captured before the write because chart.yaml is both the
+      # input and the file the write replaces.
       local _staged
-      if ! _staged="$(yq eval-all '. as $item ireduce ({}; . * $item)' "${value_files[@]}")" \
-           || ! printf '%s\n' "${_staged}" | addons::_write_staged "${build_dir}/values.merged.yaml"; then
+      if ! _staged="$(yq eval-all '. as $item ireduce ({}; . * $item)' "${value_files[@]}" && printf x)" \
+           || ! printf '%s' "${_staged%x}" | addons::_write_staged "${build_dir}/values.merged.yaml"; then
         error "addons::render: failed to merge values for ${addon_dir}"
         rm -rf "${build_dir}"; return 1
       fi
-      if ! _staged="$(yq '.valueFiles = ["values.merged.yaml"]' "${build_dir}/chart.yaml")" \
-           || ! printf '%s\n' "${_staged}" | addons::_write_staged "${build_dir}/chart.yaml"; then
+      if ! _staged="$(yq '.valueFiles = ["values.merged.yaml"]' "${build_dir}/chart.yaml" && printf x)" \
+           || ! printf '%s' "${_staged%x}" | addons::_write_staged "${build_dir}/chart.yaml"; then
         error "addons::render: failed to set valueFiles in chart.yaml for ${addon_dir}"
         rm -rf "${build_dir}"; return 1
       fi
