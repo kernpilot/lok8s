@@ -693,3 +693,33 @@ func TestRenderHandsKustomizePluginHomeToTheChild(t *testing.T) {
 		t.Errorf("exported in the shell: the default is still in the env: %v", f.envs[0])
 	}
 }
+
+// The dry run's copy of a stacking addon copies a symlink as its target and
+// skips a dangling one (the real run's copy keeps both as links). The bash
+// twin: addons::_copy_deref.
+func TestRenderDryRunCopyDereferencesSymlinks(t *testing.T) {
+	dir := writeAddon(t)
+	outside := filepath.Join(t.TempDir(), "outside.yaml")
+	testutil.WriteFile(t, outside, "linked: true\n")
+	if err := os.Symlink(outside, filepath.Join(dir, "linked.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/nonexistent/lok8s-dangling", filepath.Join(dir, "dangling.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	p := testPaths(t)
+	b := dryBoundary(t, p)
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
+	probe := &probeRunner{t: t, manifest: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n", check: func(d string) {
+		if fi, err := os.Lstat(filepath.Join(d, "linked.yaml")); err != nil || !fi.Mode().IsRegular() {
+			t.Errorf("linked.yaml is not a regular file in the copy: %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(d, "dangling.yaml")); err == nil {
+			t.Error("the dangling symlink was copied")
+		}
+	}}
+	var errBuf strings.Builder
+	if _, err := RenderDryRun(t.Context(), p, probe, &errBuf, dir, "lo", "hetzner", "", nil, b, false); err != nil {
+		t.Fatalf("RenderDryRun: %v\n%s", err, errBuf.String())
+	}
+}

@@ -3189,6 +3189,26 @@ b wait="
   [ "$(cat "${CAPTURED_BUILD_DIR_FILE}")" = "${dir}" ]
 }
 
+# The dry run's copy of a stacking addon copies a symlink as its target and
+# skips a dangling one (the real run's `cp -r` keeps both as links).
+@test "addons::render --dry-run copies symlinks as targets and skips a dangling one" {
+  echo "linked: true" > "${BATS_TEST_TMPDIR}/outside.yaml"
+  ln -s "${BATS_TEST_TMPDIR}/outside.yaml" "${ADDON_DIR}/linked.yaml"
+  ln -s /nonexistent/lok8s-dangling "${ADDON_DIR}/dangling.yaml"
+  export SEEN="${BATS_TEST_TMPDIR}/seen"
+  kustomize() {
+    local d="${@: -1}"
+    { [[ -f "${d}/linked.yaml" && ! -L "${d}/linked.yaml" ]] && echo regular; [[ -e "${d}/dangling.yaml" || -L "${d}/dangling.yaml" ]] && echo dangling; } > "${SEEN}"
+    echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: x"
+  }
+  export -f kustomize
+  local bootstrap_dry_boundary="${BATS_TEST_TMPDIR}/boundary" bootstrap_dry_run=1
+  mkdir -p "${bootstrap_dry_boundary}"
+  run addons::render "${ADDON_DIR}" "lo" "hetzner" ""
+  assert_success
+  [ "$(cat "${SEEN}")" = "regular" ]
+}
+
 # A restore.d file that does not decrypt is an error (rc 2), never a warning
 # and exit 0: the preview of restore.d would be incomplete.
 @test "bootstrap::apply --dry-run: a restore.d decrypt failure is an error (rc 2)" {

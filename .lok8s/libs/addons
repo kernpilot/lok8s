@@ -430,6 +430,23 @@ addons::_dry_run_local_chart() {
   (( ! _deps )) || echo deps
 }
 
+# addons::_copy_deref <src> <dst>
+# Copies src's contents into dst, every symlink as its target, so a write
+# into the copy never follows a link back into the project; a dangling
+# symlink is skipped (the Go twin: copyTreeDeref).
+addons::_copy_deref() {
+  local _src="${1}" _dst="${2}" _rel
+  mkdir -p "${_dst}" || return 1
+  while IFS= read -r -d '' _rel; do
+    _rel="${_rel#./}"
+    if [[ -d "${_src}/${_rel}" ]]; then
+      mkdir -p "${_dst}/${_rel}" || return 1
+    elif [[ -e "${_src}/${_rel}" ]]; then
+      cp -L "${_src}/${_rel}" "${_dst}/${_rel}" || return 1
+    fi
+  done < <(cd "${_src}" && find -L . -mindepth 1 -print0 2>/dev/null)
+}
+
 # addons::_dry_run_mirror <tmp> <addon_dir> <root> <real_addon> <dir...>
 # Copies the addon directory and the chart closure under tmp at their paths
 # relative to root (every relative reference among them resolves as in the
@@ -445,8 +462,7 @@ addons::_dry_run_mirror() {
     for _c in "${_copied[@]+"${_copied[@]}"}"; do addons::_within "${_c}" "${_d}" && { _covered=1; break; }; done
     (( _covered )) && continue
     _rel="${_d#"${_root}"}"; _rel="${_rel#/}"
-    mkdir -p "${_tmp}/${_rel}" || return 1
-    cp -rL "${_d}/." "${_tmp}/${_rel}/" 2>/dev/null || true
+    addons::_copy_deref "${_d}" "${_tmp}/${_rel}" || return 1
     _copied+=("${_d}")
   done
   while IFS= read -r _vf; do
@@ -517,11 +533,11 @@ addons::render() {
       _cleanup="${build_dir}"
       # `/.` (not `/*`) so dotfiles (.helmignore, kustomize overlays, …) come too —
       # a glob drops them and a chart referencing a dotfile would fail to render.
-      # A dry run copies a symlink as its target (cp -L), so khelm can never
-      # write through one into the project.
-      local -a _cp=(cp -r)
-      (( ! _dry )) || _cp=(cp -rL)
-      "${_cp[@]}" "${addon_dir}/." "${build_dir}/" \
+      # A dry run copies a symlink as its target (addons::_copy_deref), so
+      # khelm can never write through one into the project.
+      local -a _cp=(cp -r "${addon_dir}/." "${build_dir}/")
+      (( ! _dry )) || _cp=(addons::_copy_deref "${addon_dir}" "${build_dir}")
+      "${_cp[@]}" \
         || { error "addons::render: failed to copy ${addon_dir} to temp dir"; rm -rf "${build_dir}"; return 1; }
       if [[ -n "${inline_values}" ]]; then
         printf '%s\n' "${inline_values}" > "${build_dir}/values.inline.yaml"
