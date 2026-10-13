@@ -73,10 +73,32 @@ func TestNodeVersionFixtures(t *testing.T) {
 	}
 }
 
+// bashLocale is the locale the bash twin runs under in
+// TestNodeVersionMatchesBash: en_US.UTF-8, where bash matches 'é' with
+// [A-Za-z] (the C.UTF-8 of a CI runner does not), so the `local LC_ALL=C` of
+// spec::_is_image_tag is under test. Without that locale the test runs in the
+// inherited one; under CI=true a missing locale fails the test (the go-tests
+// job generates it).
+func bashLocale(t *testing.T) []string {
+	t.Helper()
+	out, _ := exec.CommandContext(t.Context(), "locale", "-a").Output()
+	for l := range strings.FieldsSeq(strings.ToLower(string(out))) {
+		if l == "en_us.utf8" || l == "en_us.utf-8" {
+			return []string{"LC_ALL=en_US.UTF-8"}
+		}
+	}
+	if os.Getenv("CI") == "true" {
+		t.Fatal("the locale en_US.UTF-8 is missing under CI (locale-gen en_US.UTF-8)")
+	}
+	t.Log("no en_US.UTF-8 locale: the bash twin runs in the inherited locale")
+	return nil
+}
+
 // TestNodeVersionMatchesBash runs the bash twin (spec::kind_node_version) on
 // every fixture and compares its answer with the Go answer. It needs bash
 // and the pinned yq (.bin/yq); it skips without them, and fails without
-// them under CI=true.
+// them under CI=true. The merge cycles run too: the reads of the twin are
+// bounded (spec::_kver_yq: 10 s, 256 MiB).
 func TestNodeVersionMatchesBash(t *testing.T) {
 	root := testutil.RepoRoot(t)
 	if _, err := os.Stat(filepath.Join(root, ".bin", "yq")); err != nil {
@@ -85,6 +107,7 @@ func TestNodeVersionMatchesBash(t *testing.T) {
 		}
 		t.Skip("no .bin/yq (b install)")
 	}
+	locale := bashLocale(t)
 	spec := filepath.Join(root, ".lok8s", "utils", "spec.sh")
 	// Source the twin with the argsh import stubbed: only the reader runs.
 	script := `import() { :; }; source "$1"
@@ -96,6 +119,7 @@ fi`
 	for path := range nodeVersionFixtures(t) {
 		cmd := exec.CommandContext(t.Context(), "bash", "-c", script, "bash", spec, path)
 		cmd.Env = append(os.Environ(), "PATH="+filepath.Join(root, ".bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+		cmd.Env = append(cmd.Env, locale...)
 		var stderr strings.Builder
 		cmd.Stderr = &stderr
 		out, err := cmd.Output()
@@ -112,16 +136,14 @@ fi`
 }
 
 // TestNodeVersionGoOnlyProblems: the problems whose text the two readers do
-// not share. The YAML parser messages of yaml.v3 and yq differ, and yq
-// overflows its stack on a merge cycle (it uses ~1 GB on the way, so the
-// bash twin is not run on it). Both readers refuse each one.
+// not share: the YAML parser messages of yaml.v3 and yq differ. Both readers
+// refuse each one (the bats twin pins the bash side).
 func TestNodeVersionGoOnlyProblems(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	for _, tc := range []struct{ name, src, want string }{
 		{"parse error", "kind: Lo\nspec: [\n", "spec.kubernetes.version cannot be read: yaml: "},
 		{"unknown anchor", "kind: Lo\nspec:\n  kubernetes:\n    version: *nope\n", "spec.kubernetes.version cannot be read: yaml: "},
-		{"merge cycle", "k: &k\n  <<: *k\nkind: Lo\n", "spec.kubernetes.version cannot be read: a merge key (<<) in the spec file refers back to its own map. Correct the merge key."},
 	} {
 		path := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "-")+".yaml")
 		testutil.WriteFile(t, path, tc.src)
@@ -250,7 +272,7 @@ func TestProvisionMalformedVersionStopsBeforeAnyToolRuns(t *testing.T) {
 	// not at `kind create`. It is never read as unset.
 	for _, tc := range []struct{ name, versionYAML, wantErr string }{
 		{"image reference", "version: kindest/node:v1.31.4", "[error] spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. " + nodeVersionHint},
-		{"map", "version: {minor: 31}", "[error] spec.kubernetes.version cannot be read: the value is a map, not an image tag. " + nodeVersionHint},
+		{"map", "version: {minor: 31}", "[error] spec.kubernetes.version cannot be read: the value is a map, not a single value. Write spec.kubernetes.version as a single value."},
 		{"merge of a scalar", "<<: v1.31.4", "[error] spec.kubernetes.version cannot be read: a merge key (<<) in the spec file does not refer to a map or a list of maps. Correct the merge key."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

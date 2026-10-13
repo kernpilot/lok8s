@@ -1,0 +1,1 @@
+error spec.kubernetes.version 'v1.31.4?' contains a control character (shown as '?'). Remove the control character.

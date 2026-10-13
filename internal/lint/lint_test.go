@@ -114,7 +114,7 @@ func TestKubernetesVersion(t *testing.T) {
 		{name: "lo, not an image tag", spec: "kind: Lo\nspec:\n  kubernetes:\n    version: kindest/node:v1.31.4\n",
 			wantErr: "  spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. Set a kindest/node image tag, for example v1.31.4. To use the default node image of kind, remove the key."},
 		{name: "lo, map", spec: "kind: Lo\nspec:\n  kubernetes:\n    version: {minor: 31}\n",
-			wantErr: "  spec.kubernetes.version cannot be read: the value is a map, not an image tag. "},
+			wantErr: "  spec.kubernetes.version cannot be read: the value is a map, not a single value. Write spec.kubernetes.version as a single value."},
 		// A merge key is resolved: lint reports the merged value.
 		{name: "lo, merged value", spec: "x: &v {version: kindest/node:v1.31.4}\nkind: Lo\nspec:\n  kubernetes:\n    <<: *v\n",
 			wantErr: "  spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. "},

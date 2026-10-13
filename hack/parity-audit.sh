@@ -208,6 +208,13 @@ mkdir -p "${PROJ}/clusters/nover.dev"
 printf 'kind: Lo\nmetadata:\n  name: nover\nspec:\n  oidc:\n    issuer: https://id.nover.dev\n' \
   > "${PROJ}/clusters/nover.dev/cluster.lok8s.yaml"
 
+# ── mergever.cloud — prod intent on 1.33 behind a merge key. The audit takes
+# the version from the one reader in both implementations, so both read 1.33
+# (EOL) through the merge key: the same fail on both sides.
+mkdir -p "${PROJ}/clusters/mergever.cloud"
+printf 'pinned: &pinned\n  version: v1.33.2\nkind: KubeOne\nmetadata:\n  name: mergever\nspec:\n  kubernetes:\n    <<: *pinned\n' \
+  > "${PROJ}/clusters/mergever.cloud/cluster.lok8s.yaml"
+
 # Every case diffs rc/stdout/stderr with the project dir normalized to PROJ
 # (findings embed absolute paths); expect_rc pins the exit-code contract on
 # the Go binary alone.
@@ -229,6 +236,16 @@ for side in bash go; do
     echo "ok: ${side}: nover.dev reports the kind default, not a parse failure"
   else
     fail "${side}: nover.dev does not report the kind default node image"
+  fi
+done
+
+# mergever.cloud: the merged version gets its verdict on both sides (pinned).
+check - audit mergever.cloud --json
+for side in bash go; do
+  if grep -qF 'Kubernetes 1.33 is End-of-Life' "${WORK}/${side}.out"; then
+    echo "ok: ${side}: mergever.cloud reads the merged version"
+  else
+    fail "${side}: mergever.cloud does not read the merged version"
   fi
 done
 

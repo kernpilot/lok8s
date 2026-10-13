@@ -11,9 +11,8 @@ import (
 	"slices"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/kernpilot/lok8s/internal/assets"
+	lodriver "github.com/kernpilot/lok8s/internal/driver/lo"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
@@ -288,10 +287,22 @@ func (a *Auditor) checkK8sVersion(r *run, specFile, kind string) {
 	supported := strings.Join(supportedMinors, ", ")
 	latest := k8sLatestMinor()
 
+	// The version comes from the one reader (lodriver.KubernetesVersion,
+	// bash: spec::kubernetes_version), so the audit evaluates the value
+	// that `lo provision` and `lo lint` read: merge keys and aliases
+	// resolved, the last duplicate key, one document.
+	version, err := lodriver.KubernetesVersion(specFile)
+	if err != nil {
+		r.emit(Finding{ID: id, Title: title, Severity: "medium", Status: "unknown",
+			Detail:      err.Error(),
+			Remediation: "Set spec.kubernetes.version to a supported release, e.g. v" + latest + ".x.",
+			File:        specURI, Line: specLineno})
+		return
+	}
+
 	// A Lo cluster without a version uses the default node image of the
-	// installed kind (lodriver.NodeVersion reads it as unset): there is no
-	// version to parse, and nothing is wrong.
-	if kind == "lo" && k8sVersionUnset(specFile) {
+	// installed kind: there is no version to parse, and nothing is wrong.
+	if kind == "lo" && version == "" {
 		r.emit(Finding{ID: id, Title: title, Severity: "low", Status: "pass",
 			Detail:      "spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release.",
 			Remediation: "No action. To pin the Kubernetes version, set spec.kubernetes.version to a kindest/node image tag of a supported minor, for example v" + latest + ".x.",
@@ -299,7 +310,7 @@ func (a *Auditor) checkK8sVersion(r *run, specFile, kind string) {
 		return
 	}
 
-	raw := altNode(lookupFile(specFile, "spec", "kubernetes", "version"), "")
+	raw := version
 	if i := strings.Index(raw, "@"); i >= 0 {
 		raw = raw[:i]
 	}
@@ -351,44 +362,6 @@ func (a *Auditor) checkK8sVersion(r *run, specFile, kind string) {
 		Detail:      "Kubernetes " + minor + " is End-of-Life (oldest supported minor: " + oldest + ") — no upstream security patches.",
 		Remediation: "Upgrade to a supported minor (" + supported + "); for KubeOne bump spec.kubernetes.version and run 'lo provision'.",
 		File:        specURI, Line: specLineno})
-}
-
-// k8sVersionUnset reports a spec.kubernetes.version that the Lo reader
-// (lodriver.NodeVersion) reads as unset: one YAML document with merge keys
-// that resolve, the file, spec and spec.kubernetes maps or null on the way,
-// and a version that is missing, null, "" or the string "null" (trailing
-// newlines removed). Any other shape is not "unset": the reader refuses it,
-// or reads a version. It repeats the unset half of the reader because audit
-// does not import a driver; TestK8sVersionUnsetMatchesTheReader holds the two
-// together on the shared reader fixtures. Bash: audit::_k8s_version_unset
-// calls the reader itself.
-func k8sVersionUnset(specFile string) bool {
-	docs, err := yqsem.LoadDocs(specFile)
-	if err != nil || len(docs) > 1 {
-		return false
-	}
-	var n *yaml.Node
-	if len(docs) == 1 {
-		n = docs[0]
-	}
-	if yqsem.CheckMerges(n) != nil {
-		return false
-	}
-	n = yqsem.Deref(n)
-	for _, key := range []string{"spec", "kubernetes", "version"} {
-		if yqsem.IsNull(n) {
-			return true
-		}
-		if n.Kind != yaml.MappingNode {
-			return false
-		}
-		n, _ = yqsem.MapGetMerged(n, key)
-	}
-	if yqsem.IsNull(n) {
-		return true
-	}
-	v := strings.TrimRight(n.Value, "\n")
-	return n.Kind == yaml.ScalarNode && (v == "" || v == "null")
 }
 
 // minorRank orders "maj.min" numerically (bash: audit::_minor_rank).

@@ -1,7 +1,11 @@
 package yqsem
 
-// merge.go — YAML merge keys (`<<: *anchor`) as yq resolves them under
-// --yaml-fix-merge-anchor-to-spec, in a path read and in explode(.).
+// merge.go — YAML merge keys (`<<: *anchor`) the way the pinned yq reads a
+// path under --yaml-fix-merge-anchor-to-spec (pkg/yqlib/operator_traverse_
+// path.go, doTraverseMap and traverseMergeAnchor, yq v4.53.3). A plain path
+// read in yq resolves aliases and merge keys one key at a time and never
+// expands the rest of the document, so an alias bomb or an alias cycle off
+// the path costs nothing.
 //
 // Lookup and MapGet do not resolve merge keys, but yq does, in every read.
 // A reader that must never see a merged value as missing uses MapGetMerged
@@ -11,17 +15,20 @@ import (
 	"errors"
 	"io"
 	"os"
+	"slices"
 
 	"gopkg.in/yaml.v3"
 )
 
-// ErrMergeValue is the merge key that yq's explode(.) refuses: its value is
-// not a mapping or a list of mappings ("can only use merge anchors with
-// maps (!!map) or sequences (!!seq) of maps").
+// ErrMergeValue is a merge key whose value is not a mapping or a list of
+// mappings. yq skips such a value without an error (a list stops at the
+// first item that is not a mapping, from its end), so a merged version
+// could vanish; the readers refuse it instead.
 var ErrMergeValue = errors.New("a merge key (<<) does not refer to a map or a list of maps")
 
-// ErrMergeCycle is a merge chain that leads back to its own mapping
-// (`k: &k {<<: *k}`). yq overflows its stack on it.
+// ErrMergeCycle is a merge chain that leads back to a mapping that the read
+// is already in (`k: &k {<<: *k}`). yq recurses on it until it runs out of
+// stack or memory.
 var ErrMergeCycle = errors.New("a merge key (<<) refers back to its own map")
 
 // LoadDocs parses every YAML document of a file, in file order. A file with
@@ -56,119 +63,103 @@ func isMergeKey(k *yaml.Node) bool {
 	return k != nil && k.Kind == yaml.ScalarNode && k.Tag == "!!merge"
 }
 
-// mergeSources returns the mappings that a merge value names, in
-// precedence order: one mapping, or the mappings of a list. ok is false for
-// any other value (ErrMergeValue).
-func mergeSources(v *yaml.Node) (srcs []*yaml.Node, ok bool) {
-	v = Deref(v)
-	if v == nil {
-		return nil, false
+// MapGetMerged reads key from a mapping the way a yq path read does:
+//
+//   - the merge keys first, the last `<<` first; a mapping is read with
+//     these same rules (its own merge keys too); a list is read from its
+//     last item to its first, and stops at an item that is not a mapping;
+//     any other value is skipped;
+//   - then the keys of the mapping itself, in file order.
+//
+// Every match replaces the one before, so a key of the mapping wins (the
+// last duplicate), and among the merged mappings the first `<<` and the
+// first list item win: the YAML spec order. found reports whether the key
+// exists at all (a null value is found). Like yq, the read visits every
+// merge key on the way, also after a match; a merge chain that comes back
+// to a mapping that the read is in is ErrMergeCycle.
+func MapGetMerged(n *yaml.Node, key string) (v *yaml.Node, found bool, err error) {
+	n = Deref(n)
+	if n == nil || n.Kind != yaml.MappingNode {
+		return nil, false, nil
 	}
-	switch v.Kind {
-	case yaml.MappingNode:
-		return []*yaml.Node{v}, true
-	case yaml.SequenceNode:
-		for _, item := range v.Content {
-			item = Deref(item)
-			if item == nil || item.Kind != yaml.MappingNode {
-				return nil, false
-			}
-			srcs = append(srcs, item)
-		}
-		return srcs, true
-	}
-	return nil, false
+	return mapGetMerged(n, key, map[*yaml.Node]bool{})
 }
 
-// MapGetMerged is MapGet with the merge keys of the mapping resolved:
-//
-//   - a key of the mapping itself wins, also when its value is null, and
-//     the last duplicate wins (yq reads the last one);
-//   - otherwise the merge keys supply the key, in file order; for a list
-//     (`<<: [*a, *b]`) the first mapping that has the key wins. A merged
-//     mapping resolves its own merge keys the same way.
-//
-// found reports whether the key exists at all: a null value is found. A
-// merge value that is not a mapping, and a merge cycle, supply nothing here;
-// CheckMerges reports them.
-func MapGetMerged(n *yaml.Node, key string) (v *yaml.Node, found bool) {
-	return mapGetMerged(Deref(n), key, map[*yaml.Node]bool{})
-}
+func mapGetMerged(n *yaml.Node, key string, path map[*yaml.Node]bool) (v *yaml.Node, found bool, err error) {
+	if path[n] {
+		return nil, false, ErrMergeCycle
+	}
+	path[n] = true
+	defer delete(path, n)
 
-func mapGetMerged(n *yaml.Node, key string, seen map[*yaml.Node]bool) (*yaml.Node, bool) {
-	if n == nil || n.Kind != yaml.MappingNode || seen[n] {
-		return nil, false
-	}
-	seen[n] = true
-	var local *yaml.Node
-	found := false
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		if k := Deref(n.Content[i]); k != nil && !isMergeKey(k) && k.Value == key {
-			local, found = Deref(n.Content[i+1]), true
+	read := func(src *yaml.Node) error {
+		sv, sf, err := mapGetMerged(src, key, path)
+		if sf {
+			v, found = sv, true
 		}
+		return err
 	}
-	if found {
-		return local, true
-	}
-	for i := 0; i+1 < len(n.Content); i += 2 {
+	for i := len(n.Content) - 2; i >= 0; i -= 2 {
 		if !isMergeKey(n.Content[i]) {
 			continue
 		}
-		srcs, _ := mergeSources(n.Content[i+1])
-		for _, src := range srcs {
-			if v, ok := mapGetMerged(src, key, seen); ok {
-				return v, true
+		switch src := Deref(n.Content[i+1]); {
+		case src == nil:
+		case src.Kind == yaml.MappingNode:
+			if err := read(src); err != nil {
+				return nil, false, err
 			}
-		}
-	}
-	return nil, false
-}
-
-// CheckMerges walks every node under n (aliases followed once) and returns
-// ErrMergeValue or ErrMergeCycle for the first merge key that yq's
-// explode(.) cannot resolve. explode(.) checks the whole document, not only
-// the path that a reader walks, so this check does too.
-func CheckMerges(n *yaml.Node) error {
-	seen := map[*yaml.Node]bool{}
-	state := map[*yaml.Node]int{} // the merge graph: 1 = on the path, 2 = done
-	var follow func(m *yaml.Node) error
-	follow = func(m *yaml.Node) error {
-		switch state[m] {
-		case 1:
-			return ErrMergeCycle
-		case 2:
-			return nil
-		}
-		state[m] = 1
-		for i := 0; i+1 < len(m.Content); i += 2 {
-			if !isMergeKey(m.Content[i]) {
-				continue
-			}
-			srcs, ok := mergeSources(m.Content[i+1])
-			if !ok {
-				return ErrMergeValue
-			}
-			for _, src := range srcs {
-				if err := follow(src); err != nil {
-					return err
+		case src.Kind == yaml.SequenceNode:
+			for _, item := range slices.Backward(src.Content) {
+				item = Deref(item)
+				if item == nil || item.Kind != yaml.MappingNode {
+					break
+				}
+				if err := read(item); err != nil {
+					return nil, false, err
 				}
 			}
 		}
-		state[m] = 2
-		return nil
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if k := Deref(n.Content[i]); k != nil && !isMergeKey(k) && k.Value == key {
+			v, found = Deref(n.Content[i+1]), true
+		}
+	}
+	return v, found, nil
+}
+
+// CheckMerges returns ErrMergeValue for the first merge key under n (in the
+// whole tree, aliases not followed) whose value is not a mapping or a list
+// of mappings, after one alias step: what yq would skip without an error.
+// It walks each node once and expands nothing. Cycles are MapGetMerged's
+// part: a cycle that a read does not pass through costs nothing.
+func CheckMerges(n *yaml.Node) error {
+	isMap := func(v *yaml.Node) bool {
+		v = Deref(v)
+		return v != nil && v.Kind == yaml.MappingNode
 	}
 	var walk func(n *yaml.Node) error
 	walk = func(n *yaml.Node) error {
-		if n == nil || seen[n] {
+		if n == nil || n.Kind == yaml.AliasNode {
 			return nil
 		}
-		seen[n] = true
-		if n.Kind == yaml.AliasNode {
-			return walk(n.Alias)
-		}
 		if n.Kind == yaml.MappingNode {
-			if err := follow(n); err != nil {
-				return err
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				if !isMergeKey(n.Content[i]) {
+					continue
+				}
+				switch v := Deref(n.Content[i+1]); {
+				case isMap(v):
+				case v != nil && v.Kind == yaml.SequenceNode:
+					for _, item := range v.Content {
+						if !isMap(item) {
+							return ErrMergeValue
+						}
+					}
+				default:
+					return ErrMergeValue
+				}
 			}
 		}
 		for _, c := range n.Content {

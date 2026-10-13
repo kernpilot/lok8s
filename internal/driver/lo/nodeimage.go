@@ -2,14 +2,15 @@ package lo
 
 // nodeimage.go — spec.kubernetes.version → the kind node image tag (bash:
 // spec::kind_node_version in .lok8s/utils/spec.sh). The driver and `lo lint`
-// read the version through this one function. The spec export
+// read the version through NodeVersion, and `lo audit` through
+// KubernetesVersion, the read that NodeVersion starts with. The spec export
 // (exportSpecEnvs) does not: it must not stop a command that does not use
 // the version, so it reads the raw value and only maps "null" to "".
 
 import (
-	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -28,44 +29,66 @@ var nodeVersionRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}(@sha2
 // value.
 const nodeVersionHint = "Set a kindest/node image tag, for example v1.31.4. To use the default node image of kind, remove the key."
 
-// nodeVersionUnreadable starts every NodeVersion problem about the shape of
-// the spec file.
-const nodeVersionUnreadable = "spec.kubernetes.version cannot be read: "
+// versionUnreadable starts every problem about a spec that the reader
+// cannot read.
+const versionUnreadable = "spec.kubernetes.version cannot be read: "
 
-// versionProblem is a NodeVersion error: full sentences for the user, which
-// the caller prints as they are. They end with a period, so they are built
+// controlRe and longRe shape a value that a problem shows (displayValue).
+// The bash twin runs the same two expressions in yq, which uses the same Go
+// regexp engine: [[:cntrl:]] is [\x00-\x1F\x7F].
+var (
+	controlRe = regexp.MustCompile(`[[:cntrl:]]`)
+	longRe    = regexp.MustCompile(`^(.{80}).+$`)
+)
+
+// versionProblem is a reader error: full sentences for the user, which the
+// caller prints as they are. They end with a period, so they are built
 // with fmt.Sprintf and not as error-string literals.
 type versionProblem string
 
 func (p versionProblem) Error() string { return string(p) }
 
-// unreadable is a problem about the shape of the spec file.
+// unreadable is a problem about a spec that the reader cannot read.
 func unreadable(format string, args ...any) error {
-	return versionProblem(nodeVersionUnreadable + fmt.Sprintf(format, args...))
+	return versionProblem(versionUnreadable + fmt.Sprintf(format, args...))
 }
 
-// NodeVersion reads spec.kubernetes.version of a Lo cluster spec file and
-// returns the tag of its kind node image (kindest/node:<tag>).
+// displayValue is a value as a problem shows it: each control character
+// as '?', and at most 80 characters, then "...". A NUL byte or an escape
+// sequence never reaches the terminal.
+func displayValue(v string) string {
+	return longRe.ReplaceAllString(controlRe.ReplaceAllString(v, "?"), "${1}...")
+}
+
+// KubernetesVersion reads spec.kubernetes.version of a cluster spec file
+// with the rules that every driver shares (bash: spec::kubernetes_version
+// in .lok8s/utils/spec.sh). It returns the text of the value, or "" when
+// the version is unset: spec, spec.kubernetes or the key is missing or null
+// (`~` too), or the value is an empty string or the literal string "null".
 //
-// It reads the file as yq does in the bash twin: aliases and merge keys
-// resolved (`explode(.)` under --yaml-fix-merge-anchor-to-spec), trailing
-// newlines of the value removed (bash command substitution removes them).
-//
-// It returns "" when the version is unset: spec, spec.kubernetes or the key
-// is missing or null (`~` too), or the value is an empty string or the
-// literal string "null". For an unset version the kind config names no
-// image, and kind uses the default node image of its own release.
+// It reads the file as a yq path read does in the bash twin (yq
+// --yaml-fix-merge-anchor-to-spec; yqsem.MapGetMerged): aliases and merge
+// keys resolved one key at a time, nothing else expanded, so an alias bomb
+// or an alias cycle off the path costs nothing. Empty documents (a trailing
+// `---`) do not count. The trailing newlines of the value are removed (bash
+// command substitution removes them).
 //
 // A shape that can hold a version but cannot be read is an error, never
-// unset: a file with more than one YAML document, a merge key that yq
-// refuses, a spec or spec.kubernetes that is not a map, a version that is a
-// map or a list. A scalar that is not an image tag is an error too. The
-// error text has no prefix and no indent: the caller prints it.
-func NodeVersion(clusterYAML string) (string, error) {
-	docs, err := yqsem.LoadDocs(clusterYAML)
+// unset: a second YAML document that is not empty, a merge key anywhere in
+// the file that does not refer to a map or a list of maps (yq would skip
+// it), a merge cycle on the way to the value, a spec or spec.kubernetes
+// that is not a map, a version that is a map or a list, a value with a
+// control character (bash would drop a NUL byte). The error text has no
+// prefix and no indent: the caller prints it.
+func KubernetesVersion(specFile string) (string, error) {
+	docs, err := yqsem.LoadDocs(specFile)
 	if err != nil {
 		return "", unreadable("%v. Correct the spec file.", err)
 	}
+	// Empty documents (a trailing `---`) do not count. yq also drops some
+	// of them while it reads, so the count is the only rule both readers
+	// share.
+	docs = slices.DeleteFunc(docs, yqsem.IsNull)
 	if len(docs) > 1 {
 		return "", unreadable("the spec file has %d YAML documents. Keep only the cluster spec in the file.", len(docs))
 	}
@@ -73,13 +96,8 @@ func NodeVersion(clusterYAML string) (string, error) {
 	if len(docs) == 1 {
 		n = docs[0]
 	}
-	switch err := yqsem.CheckMerges(n); {
-	case errors.Is(err, yqsem.ErrMergeValue):
+	if yqsem.CheckMerges(n) != nil {
 		return "", unreadable("a merge key (<<) in the spec file does not refer to a map or a list of maps. Correct the merge key.")
-	case errors.Is(err, yqsem.ErrMergeCycle):
-		// yq overflows its stack here: the bash twin refuses with the
-		// first line of the yq output instead.
-		return "", unreadable("a merge key (<<) in the spec file refers back to its own map. Correct the merge key.")
 	}
 
 	// Each hop: the name of the node in a problem, and the key read from it.
@@ -93,26 +111,46 @@ func NodeVersion(clusterYAML string) (string, error) {
 		if n.Kind != yaml.MappingNode {
 			return "", unreadable("%s is %s, not a map. Write %s as a YAML map.", hop.name, shapeOf(n), hop.name)
 		}
-		n, _ = yqsem.MapGetMerged(n, hop.key)
+		if n, _, err = yqsem.MapGetMerged(n, hop.key); err != nil {
+			// yq recurses on the cycle until it hits the time or memory
+			// limit of the bash twin: one message for both.
+			return "", unreadable("the merge keys (<<) on the way to the value form a cycle, or the read passed its time or memory limit. Remove the cycle.")
+		}
 	}
 	if yqsem.IsNull(n) {
 		return "", nil
 	}
 	if n.Kind != yaml.ScalarNode {
-		return "", unreadable("the value is %s, not an image tag. %s", shapeOf(n), nodeVersionHint)
+		return "", unreadable("the value is %s, not a single value. Write spec.kubernetes.version as a single value.", shapeOf(n))
 	}
 	v := strings.TrimRight(n.Value, "\n")
+	if controlRe.MatchString(v) {
+		return "", versionProblem(fmt.Sprintf("spec.kubernetes.version '%s' contains a control character (shown as '?'). Remove the control character.", displayValue(v)))
+	}
 	if v == "" || v == "null" {
 		return "", nil
-	}
-	if !nodeVersionRe.MatchString(v) {
-		return "", versionProblem(fmt.Sprintf("spec.kubernetes.version '%s' is not a valid image tag. %s", v, nodeVersionHint))
 	}
 	return v, nil
 }
 
-// shapeOf names a node in a NodeVersion problem: "a map", "a list", or the
-// quoted text of a scalar.
+// NodeVersion reads spec.kubernetes.version of a Lo cluster spec file and
+// returns the tag of its kind node image (kindest/node:<tag>), "" when the
+// version is unset (KubernetesVersion). For an unset version the kind
+// config names no image, and kind uses the default node image of its own
+// release. A value that is not an image tag is an error.
+func NodeVersion(clusterYAML string) (string, error) {
+	v, err := KubernetesVersion(clusterYAML)
+	if err != nil || v == "" {
+		return "", err
+	}
+	if !nodeVersionRe.MatchString(v) {
+		return "", versionProblem(fmt.Sprintf("spec.kubernetes.version '%s' is not a valid image tag. %s", displayValue(v), nodeVersionHint))
+	}
+	return v, nil
+}
+
+// shapeOf names a node in a problem: "a map", "a list", or the quoted
+// text of a scalar (displayValue).
 func shapeOf(n *yaml.Node) string {
 	switch n.Kind {
 	case yaml.MappingNode:
@@ -120,7 +158,7 @@ func shapeOf(n *yaml.Node) string {
 	case yaml.SequenceNode:
 		return "a list"
 	}
-	return "'" + strings.TrimRight(n.Value, "\n") + "'"
+	return "'" + displayValue(strings.TrimRight(n.Value, "\n")) + "'"
 }
 
 // nodeImageLine is the `image:` line of one node in the kind config, with

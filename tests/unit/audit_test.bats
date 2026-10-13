@@ -1322,7 +1322,11 @@ YAML
     "spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release."
 }
 
-@test "a Lo version behind a merge key is not read as unset" {
+# The audit takes the version from the reader (spec::kubernetes_version): a
+# merged version and the last duplicate key get their support verdict, and a
+# spec that the reader refuses names the reader's problem. Go twin:
+# TestCheckK8sVersionLoWithoutVersion.
+@test "a version behind a merge key gets its support verdict" {
   _spec ver-merge <<'YAML'
 pinned: &pinned { version: "v1.35.5" }
 apiVersion: cluster.lok8s.dev/v1beta1
@@ -1333,8 +1337,36 @@ spec:
   bootstrap: [ cilium ]
 YAML
   audit::run_domain ver-merge
-  [[ "$(_detail_of k8s-version-support)" != "spec.kubernetes.version is not set."* ]] \
-    || fail "a merged version reads as not set: $(_detail_of k8s-version-support)"
+  assert_equal "$(_status_of k8s-version-support)" "pass"
+  assert_equal "$(_detail_of k8s-version-support)" \
+    "Kubernetes 1.35 is within the supported window (1.34, 1.35, 1.36, 1.37)."
+  _spec ver-merge-ko <<'YAML'
+pinned: &pinned { version: "v1.33.2" }
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { <<: *pinned }
+  bootstrap: []
+YAML
+  audit::run_domain ver-merge-ko
+  assert_equal "$(_status_of k8s-version-support)" "fail"
+}
+
+@test "the last duplicate version key gets the support verdict" {
+  printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: KubeOne\nmetadata: { name: c }\nspec:\n  kubernetes:\n    version: v1.33.2\n    version: v1.35.5\n  bootstrap: []\n' \
+    | _spec ver-dup
+  audit::run_domain ver-dup
+  assert_equal "$(_status_of k8s-version-support)" "pass"
+}
+
+@test "a spec that the version reader refuses names the reader's problem" {
+  printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata: { name: dev }\nspec:\n  kubernetes: []\n  bootstrap: [ cilium ]\n' \
+    | _spec ver-refused
+  audit::run_domain ver-refused
+  assert_equal "$(_status_of k8s-version-support)" "unknown"
+  assert_equal "$(_detail_of k8s-version-support)" \
+    "spec.kubernetes.version cannot be read: spec.kubernetes is a list, not a map. Write spec.kubernetes as a YAML map."
 }
 
 # =============================================================================

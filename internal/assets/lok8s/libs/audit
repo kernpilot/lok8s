@@ -463,10 +463,22 @@ audit::check_k8s_version() {
   supported=$(audit::_k8s_supported "$(audit::_k8s_today)")
   latest="${_AUDIT_K8S_MINOR_EOL%%:*}"
 
+  # The version comes from the one reader (spec::kubernetes_version, Go:
+  # lodriver.KubernetesVersion), so the audit evaluates the value that
+  # `lo provision` and `lo lint` read: merge keys and aliases resolved, the
+  # last duplicate key, one document.
+  local raw
+  if ! raw=$(spec::kubernetes_version "${spec_file}"); then
+    audit::_emit "${id}" "${title}" medium unknown \
+      "${raw}" \
+      "Set spec.kubernetes.version to a supported release, e.g. v${latest}.x." \
+      "${spec_uri}" "${spec_lineno}"
+    return 0
+  fi
+
   # A Lo cluster without a version uses the default node image of the installed
-  # kind (spec::kind_node_version reads it as unset): there is no version to
-  # parse, and nothing is wrong.
-  if [[ "${kind}" == "lo" ]] && audit::_k8s_version_unset "${spec_file}"; then
+  # kind: there is no version to parse, and nothing is wrong.
+  if [[ "${kind}" == "lo" && -z "${raw}" ]]; then
     audit::_emit "${id}" "${title}" low pass \
       "spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release." \
       "No action. To pin the Kubernetes version, set spec.kubernetes.version to a kindest/node image tag of a supported minor, for example v${latest}.x." \
@@ -474,8 +486,6 @@ audit::check_k8s_version() {
     return 0
   fi
 
-  local raw
-  raw=$(yq -r '.spec.kubernetes.version // ""' "${spec_file}" 2>/dev/null || echo "")
   raw="${raw%%@*}"; raw="${raw#v}"
   if [[ ! "${raw}" =~ ^([0-9]+)\.([0-9]+) ]]; then
     audit::_emit "${id}" "${title}" medium unknown \
@@ -521,15 +531,6 @@ audit::check_k8s_version() {
     "Upgrade to a supported minor (${supported// /, }); for KubeOne bump spec.kubernetes.version and run 'lo provision'." \
     "${spec_uri}" "${spec_lineno}"
   return 0
-}
-
-# audit::_k8s_version_unset <spec_file> → true when the one reader
-# (spec::kind_node_version) reads spec.kubernetes.version as unset. A shape
-# that the reader refuses, or a version that it reads, is not "unset". Go twin:
-# k8sVersionUnset.
-audit::_k8s_version_unset() {
-  local version
-  version=$(spec::kind_node_version "${1}") && [[ -z "${version}" ]]
 }
 
 # audit::_k8s_today → the date (UTC yyyy-mm-dd) the support table is read

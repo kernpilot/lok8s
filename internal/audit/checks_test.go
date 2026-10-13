@@ -521,6 +521,7 @@ func TestCheckK8sVersionLoWithoutVersion(t *testing.T) {
 		"kind: Lo\nspec:\n  kubernetes:\n    version: ~\n",
 		"kind: Lo\nspec:\n  kubernetes:\n    version: \"\"\n",
 		"kind: Lo\nspec:\n  kubernetes:\n    version: \"null\"\n",
+		"kind: Lo\nspec:\n  kubernetes:\n    version: |\n      null\n",
 	} {
 		f := k8sFinding(t, spec)
 		if f.Status != "pass" || f.Severity != "low" || f.Detail != detail || f.Remediation != remediation {
@@ -530,38 +531,24 @@ func TestCheckK8sVersionLoWithoutVersion(t *testing.T) {
 	for _, tc := range []struct{ name, spec, status, detail string }{
 		// Only a Lo cluster follows the kind default.
 		{"KubeOne without a version", "kind: KubeOne\n", "unknown", "Could not parse spec.kubernetes.version ('<empty>')."},
-		// A spec that the reader refuses is not "not set".
-		{"Lo with a list", "kind: Lo\nspec:\n  kubernetes: []\n", "unknown", "Could not parse spec.kubernetes.version ('<empty>')."},
-		{"Lo with a single value", "kind: Lo\nspec:\n  kubernetes: v1.31.4\n", "unknown", "Could not parse spec.kubernetes.version ('<empty>')."},
-		{"Lo with a merge key of a scalar", "s: &s v1.31.4\nkind: Lo\nspec:\n  kubernetes: {<<: *s}\n", "unknown", "Could not parse spec.kubernetes.version ('<empty>')."},
+		// A spec that the reader refuses is not "not set": the finding names
+		// the reader's problem.
+		{"Lo with a list", "kind: Lo\nspec:\n  kubernetes: []\n", "unknown",
+			"spec.kubernetes.version cannot be read: spec.kubernetes is a list, not a map. Write spec.kubernetes as a YAML map."},
+		{"Lo with a merge key of a scalar", "s: &s v1.31.4\nkind: Lo\nspec:\n  kubernetes: {<<: *s}\n", "unknown",
+			"spec.kubernetes.version cannot be read: a merge key (<<) in the spec file does not refer to a map or a list of maps. Correct the merge key."},
 		{"Lo with a custom tag", "kind: Lo\nspec:\n  kubernetes:\n    version: latest\n", "unknown", "Could not parse spec.kubernetes.version ('latest')."},
+		// The audit takes the version from the reader: a merged version and
+		// the last duplicate key get their support verdict.
+		{"Lo with a merged version", "x: &v {version: v1.35.4}\nkind: Lo\nspec:\n  kubernetes:\n    <<: *v\n", "pass",
+			"Kubernetes 1.35 is within the supported window (1.34, 1.35, 1.36, 1.37)."},
+		{"KubeOne with a merged version", "x: &v {version: v1.33.2}\nkind: KubeOne\nspec:\n  kubernetes:\n    <<: *v\n", "fail",
+			"Kubernetes 1.33 is End-of-Life (oldest supported minor: 1.34) — no upstream security patches."},
+		{"the last duplicate key", "kind: KubeOne\nspec:\n  kubernetes:\n    version: v1.33.2\n    version: v1.35.4\n", "pass",
+			"Kubernetes 1.35 is within the supported window (1.34, 1.35, 1.36, 1.37)."},
 	} {
 		if f := k8sFinding(t, tc.spec); f.Status != tc.status || f.Detail != tc.detail {
 			t.Errorf("%s: %+v", tc.name, f)
-		}
-	}
-	// A version behind a merge key is set (the Go read of the value does not
-	// resolve merge keys yet, so only "not the neutral pass" is pinned here).
-	if f := k8sFinding(t, "x: &v {version: v1.35.4}\nkind: Lo\nspec:\n  kubernetes:\n    <<: *v\n"); f.Detail == detail {
-		t.Errorf("a merged version reads as not set: %+v", f)
-	}
-}
-
-// TestK8sVersionUnsetMatchesTheReader: k8sVersionUnset repeats the unset
-// half of lodriver.NodeVersion (audit does not import a driver). On every
-// shared reader fixture it must say "unset" exactly where the reader does.
-func TestK8sVersionUnsetMatchesTheReader(t *testing.T) {
-	files, err := filepath.Glob(filepath.Join(testutil.RepoRoot(t), "tests", "fixtures", "kind-node-version", "*.yaml"))
-	if err != nil || len(files) < 50 {
-		t.Fatalf("kind node version fixtures missing (%d found, err %v)", len(files), err)
-	}
-	for _, f := range files {
-		want, err := os.ReadFile(strings.TrimSuffix(f, ".yaml") + ".want")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got, wantUnset := k8sVersionUnset(f), string(want) == "unset\n"; got != wantUnset {
-			t.Errorf("%s: k8sVersionUnset = %v, the reader says %q", filepath.Base(f), got, strings.TrimSpace(string(want)))
 		}
 	}
 }

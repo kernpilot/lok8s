@@ -3,15 +3,15 @@ package yqsem
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
-)
 
-// The expectations below are what the pinned yq (v4.53) prints for
-// `yq --yaml-fix-merge-anchor-to-spec 'explode(.) | .spec.kubernetes.version'`
-// on the same input (the bash reader spec::kind_node_version runs that).
+	"github.com/kernpilot/lok8s/internal/testutil"
+)
 
 func parseYAML(t *testing.T, src string) *yaml.Node {
 	t.Helper()
@@ -29,45 +29,91 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-// versionOf walks spec.kubernetes.version with MapGetMerged.
-func versionOf(root *yaml.Node) (string, bool) {
+// versionOf walks spec.kubernetes.version with MapGetMerged. It renders the
+// result as `yq -r` prints it: the value, or "null" when it is missing.
+func versionOf(root *yaml.Node) (string, error) {
 	n := root
 	for _, key := range []string{"spec", "kubernetes", "version"} {
-		var ok bool
-		if n, ok = MapGetMerged(n, key); !ok {
-			return "", false
+		var found bool
+		var err error
+		if n, found, err = MapGetMerged(n, key); err != nil || !found {
+			return "null", err
 		}
 	}
-	return Scalar(n), true
+	return Scalar(n), nil
+}
+
+// mergeCases are pinned to the pinned yq (TestMapGetMergedMatchesYq): what
+// `yq --yaml-fix-merge-anchor-to-spec -r '.spec.kubernetes.version'` prints.
+// The last four are the yq quirks for a merge value that is not a map; the
+// readers refuse those (CheckMerges), but MapGetMerged still mirrors yq.
+var mergeCases = []struct{ name, src, want string }{
+	{"merge supplies the key", "x: &v {version: v1.31.4}\nspec:\n  kubernetes:\n    <<: *v\n", "v1.31.4"},
+	{"a local key after the merge wins", "a: &a {version: va}\nspec:\n  kubernetes:\n    <<: *a\n    version: vlocal\n", "vlocal"},
+	{"a local key before the merge wins", "a: &a {version: va}\nspec:\n  kubernetes:\n    version: vlocal\n    <<: *a\n", "vlocal"},
+	{"a local null wins over the merge", "a: &a {version: va}\nspec:\n  kubernetes:\n    version: ~\n    <<: *a\n", "~"},
+	{"the first mapping of a list wins", "a: &a {version: va}\nb: &b {version: vb}\nspec:\n  kubernetes:\n    <<: [*a, *b]\n", "va"},
+	{"a list skips the mappings without the key", "a: &a {other: 1}\nb: &b {version: vb}\nspec:\n  kubernetes:\n    <<: [*a, *b]\n", "vb"},
+	{"the first of two merge keys wins", "a: &a {version: va}\nb: &b {version: vb}\nspec:\n  kubernetes:\n    <<: *a\n    <<: *b\n", "va"},
+	{"an inline merge mapping", "spec:\n  kubernetes:\n    <<: {version: vinline}\n", "vinline"},
+	{"a merged mapping resolves its own merge", "a: &a {inner: &i {version: vi}}\nk: &k {<<: *i}\nspec:\n  kubernetes:\n    <<: *k\n", "vi"},
+	{"the last duplicate key wins", "spec:\n  kubernetes:\n    version: va\n    version: vb\n", "vb"},
+	{"an alias on the path", "k: &k\n  kubernetes: {version: vk}\nspec: *k\n", "vk"},
+	{"a merge on the path", "k: &k\n  kubernetes: {version: vk}\nspec:\n  <<: *k\n", "vk"},
+	{"a redefined anchor", "k: &k {version: v0}\nk2: &k {version: vk}\nspec:\n  kubernetes: *k\nlater: &k {version: v9}\n", "vk"},
+	{"a quoted << is a plain key", "x: &x {version: vx}\nspec:\n  kubernetes:\n    \"<<\": *x\n", "null"},
+	{"missing", "spec:\n  kubernetes: {}\n", "null"},
+	{"a merge cycle off the path", "k: &k\n  <<: *k\nspec:\n  kubernetes:\n    version: v1\n", "v1"},
+	{"yq quirk: a scalar merge is skipped", "spec:\n  kubernetes:\n    <<: v9\n    version: vl\n", "vl"},
+	{"yq quirk: a null merge is skipped", "spec:\n  kubernetes:\n    <<: ~\n", "null"},
+	{"yq quirk: a list stops at a scalar, from its end", "a: &a {version: va}\nspec:\n  kubernetes:\n    <<: [*a, v1]\n", "null"},
+	{"yq quirk: the items after the scalar count", "a: &a {version: va}\nspec:\n  kubernetes:\n    <<: [v1, *a]\n", "va"},
 }
 
 func TestMapGetMerged(t *testing.T) {
-	const anchors = "a: &a {version: va}\nb: &b {version: vb}\n"
-	for _, tc := range []struct {
-		name, src, want string
-		found           bool
-	}{
-		{"merge supplies the key", "x: &v {version: v1.31.4}\nspec:\n  kubernetes:\n    <<: *v\n", "v1.31.4", true},
-		{"a local key after the merge wins", anchors + "spec:\n  kubernetes:\n    <<: *a\n    version: vlocal\n", "vlocal", true},
-		{"a local key before the merge wins", anchors + "spec:\n  kubernetes:\n    version: vlocal\n    <<: *a\n", "vlocal", true},
-		{"a local null wins over the merge", anchors + "spec:\n  kubernetes:\n    version: ~\n    <<: *a\n", "~", true},
-		{"the first mapping of a list wins", anchors + "spec:\n  kubernetes:\n    <<: [*a, *b]\n", "va", true},
-		{"a list skips the mappings without the key", "a: &a {other: 1}\nb: &b {version: vb}\nspec:\n  kubernetes:\n    <<: [*a, *b]\n", "vb", true},
-		{"the first of two merge keys wins", anchors + "spec:\n  kubernetes:\n    <<: *a\n    <<: *b\n", "va", true},
-		{"an inline merge mapping", "spec:\n  kubernetes:\n    <<: {version: vinline}\n", "vinline", true},
-		{"a merged mapping resolves its own merge", "a: &a {inner: &i {version: vi}}\nk: &k {<<: *i}\nspec:\n  kubernetes:\n    <<: *k\n", "vi", true},
-		{"the last duplicate key wins", "spec:\n  kubernetes:\n    version: va\n    version: vb\n", "vb", true},
-		{"an alias on the path", "k: &k\n  kubernetes: {version: vk}\nspec: *k\n", "vk", true},
-		{"a merge on the path", "k: &k\n  kubernetes: {version: vk}\nspec:\n  <<: *k\n", "vk", true},
-		{"a quoted << is a plain key", "x: &x {version: vx}\nspec:\n  kubernetes:\n    \"<<\": *x\n", "", false},
-		{"missing", "spec:\n  kubernetes: {}\n", "", false},
-	} {
+	for _, tc := range mergeCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, found := versionOf(parseYAML(t, tc.src))
-			if got != tc.want || found != tc.found {
-				t.Fatalf("version = %q, found %v; want %q, %v", got, found, tc.want, tc.found)
+			got, err := versionOf(parseYAML(t, tc.src))
+			if err != nil || got != tc.want {
+				t.Fatalf("version = %q, %v; want %q", got, err, tc.want)
 			}
 		})
+	}
+}
+
+// TestMapGetMergedMatchesYq runs the pinned yq on every merge case. It needs
+// .bin/yq; it skips without it, and fails without it under CI=true.
+func TestMapGetMergedMatchesYq(t *testing.T) {
+	yq := filepath.Join(testutil.RepoRoot(t), ".bin", "yq")
+	if _, err := os.Stat(yq); err != nil {
+		if os.Getenv("CI") == "true" {
+			t.Fatalf("the pinned yq is missing under CI: %v", err)
+		}
+		t.Skip("no .bin/yq (b install)")
+	}
+	dir := t.TempDir()
+	for i, tc := range mergeCases {
+		path := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "-")+".yaml")
+		writeFile(t, path, tc.src)
+		out, err := exec.CommandContext(t.Context(), yq, "--yaml-fix-merge-anchor-to-spec", "-r", ".spec.kubernetes.version", path).Output()
+		if err != nil {
+			t.Fatalf("case %d (%s): yq: %v", i, tc.name, err)
+		}
+		if got := strings.TrimSuffix(string(out), "\n"); got != tc.want {
+			t.Errorf("%s: yq prints %q, the case says %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestMapGetMergedCycle(t *testing.T) {
+	for _, src := range []string{
+		"k: &k\n  <<: *k\nspec:\n  kubernetes:\n    <<: *k\n    version: v1\n",
+		"k: &k\n  <<: {<<: *k}\nspec:\n  <<: *k\n",
+		"k: &k\n  <<: [*k]\nspec:\n  kubernetes:\n    <<: *k\n",
+	} {
+		if _, err := versionOf(parseYAML(t, src)); !errors.Is(err, ErrMergeCycle) {
+			t.Errorf("%q: err = %v, want ErrMergeCycle", src, err)
+		}
 	}
 }
 
@@ -79,14 +125,19 @@ func TestCheckMerges(t *testing.T) {
 		{"no merge", "spec: {kubernetes: {version: v1}}\n", nil},
 		{"a mapping", "a: &a {version: v1}\nspec:\n  kubernetes:\n    <<: *a\n", nil},
 		{"a list of mappings", "a: &a {x: 1}\nb: &b {y: 2}\nspec:\n  <<: [*a, *b]\n", nil},
+		{"an alias to a list of mappings", "a: &a {x: 1}\nl: &l [*a, {y: 2}]\nspec:\n  <<: *l\n", nil},
 		{"an empty list", "spec:\n  <<: []\n", nil},
 		{"an alias cycle without a merge", "a: &a\n  b: *a\nspec: {}\n", nil},
+		// A cycle is the read's part (MapGetMerged): one off the path costs
+		// nothing and is not an error.
+		{"a merge cycle", "k: &k\n  <<: *k\n", nil},
 		{"a scalar", "s: &s v1\nspec:\n  kubernetes:\n    <<: *s\n", ErrMergeValue},
+		{"an inline scalar", "spec:\n  kubernetes:\n    <<: v1\n", ErrMergeValue},
 		{"a null", "spec:\n  kubernetes:\n    <<: ~\n", ErrMergeValue},
 		{"a list with a scalar", "a: &a {x: 1}\nspec:\n  <<: [*a, v1]\n", ErrMergeValue},
-		// explode(.) checks the whole document, not only spec.kubernetes.
+		{"a list with a list", "a: &a {x: 1}\nspec:\n  <<: [*a, [1]]\n", ErrMergeValue},
+		// The readers refuse a merge key that yq would skip anywhere in the file.
 		{"a bad merge outside the path", "s: &s v1\nmetadata:\n  <<: *s\nspec:\n  kubernetes:\n    version: v1\n", ErrMergeValue},
-		{"a merge cycle", "k: &k\n  <<: *k\n", ErrMergeCycle},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := CheckMerges(parseYAML(t, tc.src)); !errors.Is(got, tc.want) {

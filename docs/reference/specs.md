@@ -322,15 +322,30 @@ image: every node of the kind config gets `image: "kindest/node:<tag>"`.
 - **Refused**: a value that is not an image tag, for example
   `kindest/node:v1.31.4` (the full image name).
 
-`lo lint` and `lo provision` read the version with the same rules in both
-implementations. YAML aliases and merge keys (`<<: *anchor`) are resolved: a
-key of the map wins over a merged key, and in `<<: [*a, *b]` the first map
-wins. Trailing newlines of the value (a block scalar) are removed. The two
-commands also refuse a spec that they cannot read, and never read it as an
-unset version: a spec file with more than one YAML document, a merge key that
-does not refer to a map or a list of maps, a `spec` or `spec.kubernetes` that
-is not a map, or a version that is a map or a list. `lo provision` refuses
-before it creates a VM, a docker network or a container.
+`lo lint`, `lo provision` and `lo audit` read the version with the same rules
+in both implementations:
+
+- YAML aliases and merge keys (`<<: *anchor`) are resolved: a key of the map
+  wins over a merged key, the last duplicate key wins, and in
+  `<<: [*a, *b]` the first map wins. The read follows only the path to the
+  value, so an alias bomb or an alias cycle in another part of the file costs
+  nothing. The bash implementation needs yq v4.47.1 or later (the flag
+  `--yaml-fix-merge-anchor-to-spec`); `b install` installs the pinned yq.
+- Trailing newlines of the value (a block scalar) are removed. Empty YAML
+  documents (a trailing `---`) do not count.
+- These shapes are refused, never read as an unset version: a second YAML
+  document that is not empty, a merge key anywhere in the file that does not
+  refer to a map or a list of maps, merge keys on the path to the value that
+  form a cycle, a `spec` or `spec.kubernetes` that is not a map, a version
+  that is a map or a list, and a value with a control character (a NUL byte,
+  a tab, an escape sequence). A problem shows each control character as `?`
+  and at most 80 characters of the value.
+- Each yq call of the bash implementation stops after 10 seconds or 256 MiB
+  of memory; it then reports the time or memory limit.
+
+`lo provision` refuses before it creates a VM, a docker network or a
+container. `lo audit` reports a refused spec as `unknown` with the same
+problem text.
 
 #### Network Configuration
 

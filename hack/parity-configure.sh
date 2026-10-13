@@ -215,6 +215,8 @@ kver_spec kmerge.dev  '  kubernetes:\n    <<: *v\n' 'x: &v {version: kindest/nod
 kver_spec kalias.dev  '  kubernetes:\n    version: *v\n' 'x: &v kindest/node:v1.31.4\n'        # alias
 kver_spec kblock.dev  '  kubernetes:\n    version: |\n      v1.31.4\n'          # block scalar: clean
 kver_spec klist.dev   '  kubernetes: []\n'                                        # a list: cannot be read
+kver_spec kcycle.dev  '  kubernetes:\n    <<: *k\n    version: v1.31.4\n' 'k: &k\n  <<: *k\n'  # a merge cycle: bounded, refused
+kver_spec knul.dev    '  kubernetes:\n    version: "v1.31.4\\0"\n'          # a NUL byte: refused, never unset
 
 # sub.alpha.dev — the one-cluster-per-apex violation.
 mkdir -p "${CL}/sub.alpha.dev"
@@ -364,12 +366,14 @@ kver_clean() {  # <domain>
 kver_hint="Set a kindest/node image tag, for example v1.31.4. To use the default node image of kind, remove the key."
 kver_problem kver.dev   "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. ${kver_hint}"
 kver_clean   knull.dev
-kver_problem kmap.dev   "spec.kubernetes.version cannot be read: the value is a map, not an image tag. ${kver_hint}"
+kver_problem kmap.dev   "spec.kubernetes.version cannot be read: the value is a map, not a single value. Write spec.kubernetes.version as a single value."
 kver_clean   klatest.dev
 kver_problem kmerge.dev "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. ${kver_hint}"
 kver_problem kalias.dev "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. ${kver_hint}"
 kver_clean   kblock.dev
 kver_problem klist.dev  "spec.kubernetes.version cannot be read: spec.kubernetes is a list, not a map. Write spec.kubernetes as a YAML map."
+kver_problem kcycle.dev "spec.kubernetes.version cannot be read: the merge keys (<<) on the way to the value form a cycle, or the read passed its time or memory limit. Remove the cycle."
+kver_problem knul.dev   "spec.kubernetes.version 'v1.31.4?' contains a control character (shown as '?'). Remove the control character."
 check - --domain iota.dev lint          # global-flag spelling
 # Go-only: --notes adds the default-equal advisory and changes nothing
 # else: same exit code, same stderr, stdout equal once the [note] lines

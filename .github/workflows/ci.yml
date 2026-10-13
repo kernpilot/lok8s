@@ -157,6 +157,15 @@ jobs:
           # .kustomize/ next to khelm.
           make -C kustomize build
 
+      - name: Locale en_US.UTF-8 (the bash twin of the version reader)
+        # TestNodeVersionMatchesBash runs spec::kind_node_version in
+        # en_US.UTF-8: there bash matches 'é' with [A-Za-z] (in C.UTF-8 it
+        # does not), so the `local LC_ALL=C` of spec::_is_image_tag is under
+        # test. Under CI=true the test fails when the locale is missing.
+        run: |
+          locale -a | grep -qiE '^en_US\.utf-?8$' || sudo locale-gen en_US.UTF-8
+          locale -a | grep -iE '^en_US\.utf-?8$'
+
       - name: Test (core + full)
         # Includes the tree-drift gate: the cobra command tree must match the
         # argsh usage list in .lok8s/lo while both implementations exist —

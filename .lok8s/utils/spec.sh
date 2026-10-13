@@ -79,91 +79,205 @@ spec::pool_field() {
   printf '%s\n' "${value}"
 }
 
-# spec::kind_node_version <cluster_yaml> — the ONE reader for the kind node
-# image tag of a Lo cluster (kindest/node:<tag>). Go twin: lodriver.NodeVersion
-# (internal/driver/lo/nodeimage.go). The driver and `lo lint` read the version
-# through it. The spec export (lo::export_spec_envs) does not: it must not stop
-# a command that does not use the version, so it reads the raw value and only
-# maps "null" to "".
+# ── spec.kubernetes.version ──────────────────────────────────────────────────
 #
-# Prints the tag. Prints nothing when the version is unset: spec,
-# spec.kubernetes or the key is missing or null (`~` too), or the value is an
-# empty string or the literal string "null". For an unset version the kind
-# config names no image, and kind uses the default node image of its own
-# release.
+# spec::kubernetes_version reads the value with the rules that every driver
+# shares; spec::kind_node_version adds the kind image-tag check of a Lo
+# cluster. Go twins: lodriver.KubernetesVersion and lodriver.NodeVersion
+# (internal/driver/lo/nodeimage.go). The Lo driver and `lo lint` read the
+# version through spec::kind_node_version, `lo audit` through
+# spec::kubernetes_version. The spec export (lo::export_spec_envs) does not:
+# it must not stop a command that does not use the version, so it reads the
+# raw value and only maps "null" to "". The shared cases are in
+# tests/fixtures/kind-node-version/.
 #
-# Every read runs `explode(.)` under --yaml-fix-merge-anchor-to-spec: the
-# aliases and the merge keys resolve the way the YAML spec defines (a key of
-# the map wins over a merged key; in `<<: [*a, *b]` the first map wins). The
-# command substitution removes the trailing newlines of the value (a block
-# scalar), and so does the Go twin.
-#
-# A shape that can hold a version but cannot be read is an error, never unset:
-# a file with more than one YAML document, a merge key that explode(.) refuses
-# (anywhere in the file), a spec or spec.kubernetes that is not a map, a
-# version that is a map or a list. A scalar that is not an OCI image tag (with
-# an optional @sha256 digest) is an error too. Any tag is valid: `latest` and
-# the tags of `kind build node-image` too. On an error the function prints the
-# problem (no prefix, no indent) on stdout and returns 1. The caller prints it.
-# The shared cases are in tests/fixtures/kind-node-version/.
-spec::kind_node_version() {
-  local cluster_yaml="${1}" out path name shape value
-  local -a yq_spec=(yq --yaml-fix-merge-anchor-to-spec)
+# The reads are plain yq path reads under --yaml-fix-merge-anchor-to-spec:
+# yq resolves the aliases and the merge keys one key at a time and expands
+# nothing else, so an alias bomb or an alias cycle off the path costs
+# nothing (an explode(.) of the file once cost seconds or ~1 GB). A key of
+# the map wins over a merged key, and in `<<: [*a, *b]` the first map wins.
+# Empty documents (a trailing `---`) do not count.
+
+# _SPEC_KVER_TIMEOUT / _SPEC_KVER_MAX_KB: the limits of one yq read
+# (spec::_kver_yq): seconds, and KiB of data memory (ulimit -d). A merge
+# cycle on the path makes yq recurse without end; the limits stop it.
+_SPEC_KVER_TIMEOUT=10
+_SPEC_KVER_MAX_KB=262144
+
+# spec::_kver_yq <cluster_yaml> <yq argument>... — one bounded yq read
+# (--yaml-fix-merge-anchor-to-spec, the limits above). Prints the yq
+# output. On a failure it prints the problem and returns 1. The yq stderr
+# goes to a temporary file and never into the output that the caller reads.
+spec::_kver_yq() {
+  local cluster_yaml="${1}" err out first rc=0
+  shift
   local unreadable="spec.kubernetes.version cannot be read:"
-  local hint="Set a kindest/node image tag, for example v1.31.4. To use the default node image of kind, remove the key."
-
-  # One document only: a second document can hold a version too.
-  if ! out=$("${yq_spec[@]}" ea '[.] | length' "${cluster_yaml}" 2>&1) || [[ ! "${out}" =~ ^[0-9]+$ ]]; then
-    out=$(head -n 1 <<<"${out}")
-    printf '%s %s. Correct the spec file.\n' "${unreadable}" "${out#Error: }"
+  local limit="the merge keys (<<) on the way to the value form a cycle, or the read passed its time or memory limit. Remove the cycle."
+  err=$(mktemp "${TMPDIR:-/tmp}/lo-kver.XXXXXX") || {
+    printf '%s a temporary file cannot be made in %s. Correct TMPDIR.\n' "${unreadable}" "${TMPDIR:-/tmp}"
     return 1
-  fi
-  if (( out > 1 )); then
-    printf '%s the spec file has %s YAML documents. Keep only the cluster spec in the file.\n' "${unreadable}" "${out}"
-    return 1
-  fi
-
-  # Walk the path. Each hop prints "<kind> <tag>" of its node; the walk stops
-  # at the first null (unset) and at the first node that is not a map.
-  for path in . .spec .spec.kubernetes .spec.kubernetes.version; do
-    if ! shape=$("${yq_spec[@]}" "explode(.) | ${path} | kind + \" \" + tag" "${cluster_yaml}" 2>&1); then
-      if [[ "${shape}" == *"can only use merge anchors"* ]]; then
-        printf '%s a merge key (<<) in the spec file does not refer to a map or a list of maps. Correct the merge key.\n' "${unreadable}"
-      else
-        shape=$(head -n 1 <<<"${shape}")
-        printf '%s %s. Correct the spec file.\n' "${unreadable}" "${shape#Error: }"
-      fi
-      return 1
+  }
+  out=$(
+    ulimit -d "${_SPEC_KVER_MAX_KB}" 2>/dev/null
+    if command -v timeout >/dev/null 2>&1; then
+      timeout "${_SPEC_KVER_TIMEOUT}" yq --yaml-fix-merge-anchor-to-spec "${@}" "${cluster_yaml}" 2>"${err}"
+    else
+      yq --yaml-fix-merge-anchor-to-spec "${@}" "${cluster_yaml}" 2>"${err}"
     fi
-    [[ "${shape}" != *" !!null" ]] || return 0
+  ) || rc=$?
+  first=$(head -n 1 "${err}")
+  if (( rc == 0 )); then
+    rm -f "${err}"
+    printf '%s\n' "${out}"
+    return 0
+  fi
+  if (( rc == 124 || rc > 128 )) || grep -qE 'out of memory|cannot allocate memory|stack overflow|goroutine stack exceeds' "${err}"; then
+    printf '%s %s\n' "${unreadable}" "${limit}"
+  elif grep -q 'unknown flag: --yaml-fix-merge-anchor-to-spec' "${err}"; then
+    printf '%s the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (b install installs the pinned yq).\n' "${unreadable}"
+  else
+    printf '%s %s. Correct the spec file.\n' "${unreadable}" "${first#Error: }"
+  fi
+  rm -f "${err}"
+  return 1
+}
+
+# The yq expressions of the reader. Each one runs once (`yq ea`) on the one
+# document that is not empty (spec::_kver_read checks that there is only
+# one), bound to $root. A per-document run would also print a line for each
+# empty document: yq evaluates `[...]` on an empty input too.
+# shellcheck disable=SC2016  # yq program text: $root, $a, $v are yq variables
+_SPEC_KVER_DOC='[.] | map(select(tag != "!!null")) | .[] | . as $root'
+# _SPEC_KVER_DEREF (in the context of an alias node) is the node that the
+# alias names: the last node with that anchor before the alias, as the YAML
+# parser resolves it. It finds the node with `..`, which does not follow
+# aliases, so it expands nothing. `.[-1:] | .[]`, not `.[-1]`: yq collects
+# `[...]` also for an empty input, and `.[-1]` of an empty list fails.
+# shellcheck disable=SC2016  # yq program text: $root, $a, $v are yq variables
+_SPEC_KVER_DEREF='((alias) as $a | (line) as $l | (column) as $c | [$root | .. | select(anchor == $a) | select(line < $l or (line == $l and column < $c))] | .[-1:] | .[])'
+_SPEC_KVER_NODE="((select(kind == \"alias\") | ${_SPEC_KVER_DEREF}), select(kind != \"alias\"))"
+# The number of merge keys in the file whose value (an alias resolved once)
+# is not a map or a list of maps: yq skips those without an error.
+_SPEC_KVER_MERGES="${_SPEC_KVER_DOC} | [.. | select(kind == \"map\") | to_entries | .[] | select(.key | tag == \"!!merge\") | .value | ${_SPEC_KVER_NODE} | select(kind != \"map\" and (kind != \"seq\" or ([.[]? | ${_SPEC_KVER_NODE} | select(kind != \"map\")] | length) > 0))] | length"
+# The value: "true"/"false" (a control character), the value as a problem
+# shows it (each control character as '?', at most 80 characters), and the
+# value itself when it has no control character. The control characters
+# are found inside yq: bash command substitution drops a NUL byte.
+# shellcheck disable=SC2016  # yq program text: $root, $a, $v are yq variables
+_SPEC_KVER_VALUE='tostring | sub("\n+$"; "") as $v | ($v | test("[[:cntrl:]]")) as $c | [($c | tostring), ($v | sub("[[:cntrl:]]"; "?") | sub("^(.{80}).+$"; "${1}..."))] + [$v | select($c | not)] | .[]'
+
+# spec::_kver_read <cluster_yaml> — the shared read. Prints nothing for an
+# unset version, or two lines: the value as a problem shows it, and the
+# value. On a problem prints it (no prefix, no indent) and returns 1.
+spec::_kver_read() {
+  local cluster_yaml="${1}" out path name shape tag n=0
+  local unreadable="spec.kubernetes.version cannot be read:"
+  local -a lines
+
+  # One document: a second document that is not empty can hold a version.
+  # Empty documents (a trailing `---`) do not count; yq also drops some of
+  # them while it reads, so the count is the only rule both readers share.
+  out=$(spec::_kver_yq "${cluster_yaml}" ea -r '[.] | .[] | tag') || { printf '%s\n' "${out}"; return 1; }
+  mapfile -t lines <<<"${out}"
+  for tag in "${lines[@]}"; do
+    [[ -z "${tag}" || "${tag}" == "!!null" ]] || n=$(( n + 1 ))
+  done
+  if (( n > 1 )); then
+    printf '%s the spec file has %s YAML documents. Keep only the cluster spec in the file.\n' "${unreadable}" "${n}"
+    return 1
+  fi
+  (( n == 1 )) || return 0
+
+  # A merge key that yq would skip without an error (its value is not a map
+  # or a list of maps) could hide a version: refuse it, anywhere in the file.
+  out=$(spec::_kver_yq "${cluster_yaml}" ea -r "${_SPEC_KVER_MERGES}") || { printf '%s\n' "${out}"; return 1; }
+  if [[ "${out}" != "0" ]]; then
+    printf '%s a merge key (<<) in the spec file does not refer to a map or a list of maps. Correct the merge key.\n' "${unreadable}"
+    return 1
+  fi
+
+  # Walk the path. Each hop prints "<kind> <tag>" of its node (an alias as
+  # the node it names); the walk stops at the first null (unset) and at the
+  # first node that is not a map.
+  for path in . .spec .spec.kubernetes .spec.kubernetes.version; do
+    out=$(spec::_kver_yq "${cluster_yaml}" ea -r "${_SPEC_KVER_DOC} | ${path} | ${_SPEC_KVER_NODE} | kind + \" \" + tag") || {
+      printf '%s\n' "${out}"
+      return 1
+    }
+    [[ "${out}" != *" !!null" ]] || return 0
     if [[ "${path}" == ".spec.kubernetes.version" ]]; then
-      case "${shape}" in
-        "map "*) printf '%s the value is a map, not an image tag. %s\n' "${unreadable}" "${hint}"; return 1 ;;
-        "seq "*) printf '%s the value is a list, not an image tag. %s\n' "${unreadable}" "${hint}"; return 1 ;;
+      case "${out}" in
+        "map "*) printf '%s the value is a map, not a single value. Write spec.kubernetes.version as a single value.\n' "${unreadable}"; return 1 ;;
+        "seq "*) printf '%s the value is a list, not a single value. Write spec.kubernetes.version as a single value.\n' "${unreadable}"; return 1 ;;
       esac
       break
     fi
     name="${path#.}"
     [[ -n "${name}" ]] || name="the spec file"
-    case "${shape}" in
+    case "${out}" in
       "map "*) continue ;;
       "seq "*) shape="a list" ;;
-      *) shape="'$("${yq_spec[@]}" -r "explode(.) | ${path}" "${cluster_yaml}")'" ;;
+      *)
+        shape=$(spec::_kver_yq "${cluster_yaml}" ea -r "${_SPEC_KVER_DOC} | ${path} | ${_SPEC_KVER_NODE} | ${_SPEC_KVER_VALUE}") || {
+          printf '%s\n' "${shape}"
+          return 1
+        }
+        mapfile -t lines <<<"${shape}"
+        shape="'${lines[1]-}'"
+        ;;
     esac
     printf '%s %s is %s, not a map. Write %s as a YAML map.\n' "${unreadable}" "${name}" "${shape}" "${name}"
     return 1
   done
 
-  if ! value=$("${yq_spec[@]}" -r 'explode(.) | .spec.kubernetes.version' "${cluster_yaml}"); then
-    printf '%s yq cannot read the value. Correct the spec file.\n' "${unreadable}"
+  out=$(spec::_kver_yq "${cluster_yaml}" ea -r "${_SPEC_KVER_DOC} | .spec.kubernetes.version | ${_SPEC_KVER_NODE} | ${_SPEC_KVER_VALUE}") || {
+    printf '%s\n' "${out}"
+    return 1
+  }
+  mapfile -t lines <<<"${out}"
+  if [[ "${lines[0]}" == "true" ]]; then
+    printf "%s\n" "spec.kubernetes.version '${lines[1]-}' contains a control character (shown as '?'). Remove the control character."
     return 1
   fi
-  [[ -n "${value}" && "${value}" != "null" ]] || return 0
+  [[ -n "${lines[2]-}" && "${lines[2]}" != "null" ]] || return 0
+  printf '%s\n%s\n' "${lines[1]}" "${lines[2]}"
+}
+
+# spec::kubernetes_version <cluster_yaml> — the value of
+# spec.kubernetes.version, with the shared rules above. Prints nothing when
+# the version is unset: spec, spec.kubernetes or the key is missing or null
+# (`~` too), or the value is an empty string or the literal string "null".
+# A shape that can hold a version but cannot be read is an error, never
+# unset: a second YAML document that is not empty, a merge key that does not
+# name a map or a list of maps, a merge cycle on the way to the value, a
+# spec or spec.kubernetes that is not a map, a version that is a map or a
+# list, a value with a control character. On an error the function prints
+# the problem (no prefix, no indent) on stdout and returns 1.
+spec::kubernetes_version() {
+  local out
+  out=$(spec::_kver_read "${1}") || { printf '%s\n' "${out}"; return 1; }
+  [[ -z "${out}" ]] || printf '%s\n' "${out#*$'\n'}"
+}
+
+# spec::kind_node_version <cluster_yaml> — the ONE reader for the kind node
+# image tag of a Lo cluster (kindest/node:<tag>). Prints the tag, or nothing
+# when the version is unset (spec::kubernetes_version): the kind config then
+# names no image, and kind uses the default node image of its own release.
+# Any OCI image tag (with an optional @sha256 digest) is valid: `latest` and
+# the tags of `kind build node-image` too. A value that is not an image tag,
+# and every problem of spec::kubernetes_version, is an error: the function
+# prints the problem (no prefix, no indent) on stdout and returns 1.
+spec::kind_node_version() {
+  local out display value
+  local hint="Set a kindest/node image tag, for example v1.31.4. To use the default node image of kind, remove the key."
+  out=$(spec::_kver_read "${1}") || { printf '%s\n' "${out}"; return 1; }
+  [[ -n "${out}" ]] || return 0
+  display="${out%%$'\n'*}" value="${out#*$'\n'}"
   if spec::_is_image_tag "${value}"; then
     printf '%s\n' "${value}"
     return 0
   fi
-  printf "%s\n" "spec.kubernetes.version '${value}' is not a valid image tag. ${hint}"
+  printf "%s\n" "spec.kubernetes.version '${display}' is not a valid image tag. ${hint}"
   return 1
 }
 

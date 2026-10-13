@@ -130,6 +130,66 @@ _verdict() {
   assert_output --regexp '^spec\.kubernetes\.version cannot be read: .+\. Correct the spec file\.$'
 }
 
+# _yq_stub <body> — a yq on PATH that runs <body> (bash) and stays in front
+# of the real one for the rest of the test.
+_yq_stub() {
+  mkdir -p "${BATS_TEST_TMPDIR}/stub"
+  printf '#!/usr/bin/env bash\n%s\n' "${1}" > "${BATS_TEST_TMPDIR}/stub/yq"
+  chmod +x "${BATS_TEST_TMPDIR}/stub/yq"
+  export PATH="${BATS_TEST_TMPDIR}/stub:${PATH}"
+}
+
+@test "spec::kind_node_version: a yq without --yaml-fix-merge-anchor-to-spec names the yq version to install" {
+  _spec "version: v1.31.4"
+  _yq_stub 'echo "Error: unknown flag: --yaml-fix-merge-anchor-to-spec" >&2; exit 1'
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_output "spec.kubernetes.version cannot be read: the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (b install installs the pinned yq)."
+}
+
+@test "spec::kind_node_version: a read past the time limit is named, not read as unset" {
+  _spec "version: v1.31.4"
+  _yq_stub 'sleep 5'
+  _SPEC_KVER_TIMEOUT=1
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_output "spec.kubernetes.version cannot be read: the merge keys (<<) on the way to the value form a cycle, or the read passed its time or memory limit. Remove the cycle."
+}
+
+@test "spec::kind_node_version: a yq that runs out of memory is named" {
+  _spec "version: v1.31.4"
+  _yq_stub 'echo "fatal error: runtime: cannot allocate memory" >&2; exit 2'
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_output "spec.kubernetes.version cannot be read: the merge keys (<<) on the way to the value form a cycle, or the read passed its time or memory limit. Remove the cycle."
+}
+
+@test "spec::kind_node_version: yq stderr stays out of the shape checks" {
+  _spec "version: v1.31.4"
+  local real
+  real=$(command -v yq)
+  _yq_stub "echo 'level=WARN msg=\"a warning\"' >&2; exec '${real}' \"\$@\""
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  assert_success
+  assert_output "v1.31.4"
+}
+
+# The `local LC_ALL=C` of spec::_is_image_tag only matters in a locale where
+# bash matches 'é' with [A-Za-z] (en_US.UTF-8; not C.UTF-8). The Go twin runs
+# every fixture in that locale (TestNodeVersionMatchesBash) and fails under
+# CI without it; here the test skips when the locale is missing.
+@test "spec::kind_node_version: the shared fixtures in the en_US.UTF-8 locale" {
+  locale -a 2>/dev/null | grep -qiE '^en_US\.utf-?8$' || skip "no en_US.UTF-8 locale"
+  local f want got bad=0
+  for f in "${_PROJECT_ROOT}"/tests/fixtures/kind-node-version/error--non-ascii.yaml \
+           "${_PROJECT_ROOT}"/tests/fixtures/kind-node-version/tag--plain.yaml; do
+    want=$(<"${f%.yaml}.want")
+    got=$(LC_ALL=en_US.UTF-8 _verdict "${f}")
+    [[ "${got}" == "${want}" ]] || { printf '%s: got %s\n' "${f##*/}" "${got}" >&2; bad=1; }
+  done
+  (( bad == 0 ))
+}
+
 # ── lo::render_nodes ─────────────────────────────────────────────────────────
 
 @test "lo::render_nodes: an unset version names no image on any node" {
@@ -213,7 +273,7 @@ VERSIONS
 
 @test "lo provision: a version that cannot be read or is not a tag fails before any network, container or VM" {
   local name want
-  for name in error--image-reference error--version-is-a-map error--kubernetes-is-a-list error--merge-of-a-scalar; do
+  for name in error--image-reference error--version-is-a-map error--kubernetes-is-a-list error--merge-of-a-scalar error--merge-cycle-under-kubernetes error--nul-byte; do
     cp "${_PROJECT_ROOT}/tests/fixtures/kind-node-version/${name}.yaml" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
     want=$(<"${_PROJECT_ROOT}/tests/fixtures/kind-node-version/${name}.want")
     want="[error] ${want#error }"

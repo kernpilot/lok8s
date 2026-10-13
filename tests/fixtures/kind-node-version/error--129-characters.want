@@ -1,1 +1,1 @@
-error spec.kubernetes.version 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' is not a valid image tag. Set a kindest/node image tag, for example v1.31.4. To use the default node image of kind, remove the key.
+error spec.kubernetes.version 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...' is not a valid image tag. Set a kindest/node image tag, for example v1.31.4. To use the default node image of kind, remove the key.
