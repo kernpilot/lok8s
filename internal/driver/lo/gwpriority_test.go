@@ -13,12 +13,16 @@ package lo
 //
 // gwDocker simulates the parts of Docker the fix depends on: the version,
 // the endpoints of each node in attach order (eth0, eth1, …) with their
-// priorities, Docker's choice of the default route, and the in-node `ip`
-// reads and the `ip route replace` that overrides that choice.
+// priorities and gateways, Docker's choice of the default route, and the
+// in-node `ip` reads and the `ip route replace` that overrides that choice.
+// Like moby, `docker network inspect` reports the gateway of a network
+// created without --gateway only from Docker 29 on; the endpoint in
+// `docker inspect <node>` always carries it.
 
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -46,8 +50,31 @@ type gwDocker struct {
 	// refuseGwPriority makes `network connect --gw-priority` fail (a
 	// client that does not know the flag).
 	refuseGwPriority bool
-	log              []string
+	// noEndpointGateway makes `docker inspect <node>` print an empty
+	// endpoint gateway.
+	noEndpointGateway bool
+	// failExec makes a `docker exec <node> <cmd>` fail when cmd starts
+	// with one of these prefixes.
+	failExec []string
+	log      []string
 }
+
+// networkReportsGateway is moby's behaviour for a network created with
+// --subnet and no --gateway: the gateway is in `docker network inspect`
+// from Docker 29 on, and empty before.
+func (g *gwDocker) networkReportsGateway() bool {
+	f := strings.Fields(g.version)
+	if len(f) != 2 {
+		return false
+	}
+	major, _, _ := strings.Cut(f[1], ".")
+	n, err := strconv.Atoi(major)
+	return err == nil && n >= 29
+}
+
+// restart is a node restart: Docker programs the default route again, and
+// the route that `ip route replace` set is gone.
+func (g *gwDocker) restart(node string) { delete(g.override, node) }
 
 func newGWDocker(t *testing.T, project string, version string) *gwDocker {
 	g := &gwDocker{
@@ -104,17 +131,32 @@ func (g *gwDocker) handle(c execx.Cmd) error {
 	switch {
 	case c.Name == "kind" && len(a) >= 2 && a[0] == "get" && a[1] == "nodes":
 		writeOut(c, strings.Join(g.nodes, "\n")+"\n")
+	case c.Name == "kind" && len(a) >= 2 && a[0] == "get" && a[1] == "clusters":
+		writeOut(c, "c\n") // the cluster exists: createKindCluster skips the create
 	case c.Name != "docker":
 	case len(a) >= 1 && a[0] == "version":
 		if g.version == "" {
 			return fmt.Errorf("cannot connect to the docker daemon")
 		}
 		writeOut(c, g.version+"\n")
+	case len(a) == 4 && a[0] == "inspect" && a[2] == "--format" &&
+		strings.HasSuffix(a[3], `"}}{{.Gateway}}{{end}}`):
+		// {{with index .NetworkSettings.Networks "<net>"}}{{.Gateway}}{{end}}
+		_, network, _ := strings.Cut(strings.TrimSuffix(a[3], `"}}{{.Gateway}}{{end}}`), `.Networks "`)
+		for _, ep := range g.eps[a[1]] {
+			if ep.network == network && !g.noEndpointGateway {
+				writeOut(c, g.gateways[network])
+			}
+		}
+		writeOut(c, "\n")
 	case len(a) >= 3 && a[0] == "network" && a[1] == "inspect":
 		format := a[len(a)-1]
 		switch {
 		case strings.Contains(format, ".Gateway"):
-			writeOut(c, g.gateways[a[2]]+" \n")
+			if g.networkReportsGateway() {
+				writeOut(c, g.gateways[a[2]])
+			}
+			writeOut(c, " \n")
 		case strings.Contains(format, ".Containers"):
 			for _, n := range g.nodes {
 				for _, ep := range g.eps[n] {
@@ -137,6 +179,11 @@ func (g *gwDocker) handle(c execx.Cmd) error {
 		g.attach(rest[1], rest[0], priority)
 	case len(a) >= 3 && a[0] == "exec":
 		node, cmd := a[1], strings.Join(a[2:], " ")
+		for _, p := range g.failExec {
+			if strings.HasPrefix(cmd, p) {
+				return fmt.Errorf("exit status 1")
+			}
+		}
 		switch {
 		case cmd == "ip -4 route show default":
 			writeOut(c, g.defaultRoute(node)+" \n")
@@ -167,12 +214,19 @@ func (g *gwDocker) calls(prefix string) []string {
 }
 
 // gwDriver wires a driver whose registry map names the shared network
-// "lok8s-registries" and the given project network.
+// "lok8s-registries" and the given project network, with shared mode on.
 func gwDriver(t *testing.T, g *gwDocker, project string) (*Driver, *bytes.Buffer) {
+	t.Helper()
+	return gwDriverShared(t, g, project, `"shared":true,`)
+}
+
+// gwDriverShared is gwDriver with the "shared" member of the registry map
+// spelled out: `"shared":true,`, `"shared":false,` or "" (the key omitted).
+func gwDriverShared(t *testing.T, g *gwDocker, project, shared string) (*Driver, *bytes.Buffer) {
 	t.Helper()
 	d, runner, errBuf, _ := testDriver(t)
 	jsonPath := filepath.Join(t.TempDir(), ".registries.json")
-	testutil.WriteFile(t, jsonPath, `{"shared":true,"tls":false,"port":80,"network":{"name":"lok8s-registries","cidr":"10.125.200.0/24"},"project_network":"`+project+`","registries":[]}`)
+	testutil.WriteFile(t, jsonPath, `{`+shared+`"tls":false,"port":80,"network":{"name":"lok8s-registries","cidr":"10.125.200.0/24"},"project_network":"`+project+`","registries":[]}`)
 	t.Setenv("LOK8S_REGISTRY_JSON", jsonPath)
 	runner.handler = g.handle
 	return d, errBuf
@@ -310,6 +364,193 @@ func TestConnectNodesRepairsANodeAnOlderLok8sAttached(t *testing.T) {
 	assertProjectDefault(t, g, "ops")
 }
 
+func TestRepairReadsTheGatewayFromTheNodeEndpoint(t *testing.T) {
+	// Up to Docker 28.5, `docker network inspect` reports no gateway for a
+	// network created with --subnet and no --gateway, and lo creates the
+	// project network that way. The repair takes the gateway from the
+	// node's own endpoint. A repair that read the network only skipped
+	// every node on the engines that the fallback exists for.
+	for _, tc := range []struct {
+		name, version string
+		attached      bool
+	}{
+		{"Docker 27: a plain connect", "27.5.1 27.5.1", false},
+		{"Docker 28.5: attached at priority 0 by an older lok8s", "28.5.1 28.5.1", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newGWDocker(t, "ops", tc.version)
+			if tc.attached {
+				for _, n := range g.nodes {
+					g.attach(n, "lok8s-registries", 0)
+				}
+			}
+			if g.networkReportsGateway() {
+				t.Fatalf("precondition: %s must report no network gateway", tc.version)
+			}
+			d, errBuf := gwDriver(t, g, "ops")
+
+			if err := d.connectNodesToRegistryNetwork(t.Context(), "c", errBuf); err != nil {
+				t.Fatal(err)
+			}
+			for _, n := range g.nodes {
+				read := "docker inspect " + n + ` --format {{with index .NetworkSettings.Networks "ops"}}{{.Gateway}}{{end}}`
+				if !slices.Contains(g.log, read) {
+					t.Errorf("%s: the endpoint gateway was not read:\n%s", n, strings.Join(g.log, "\n"))
+				}
+				move := "docker exec " + n + " ip route replace default via 10.125.201.192 dev eth0"
+				if !slices.Contains(g.log, move) {
+					t.Errorf("%s: no %q:\n%s", n, move, strings.Join(g.log, "\n"))
+				}
+			}
+			assertProjectDefault(t, g, "ops")
+			if strings.Contains(errBuf.String(), "found no") {
+				t.Fatalf("a warning about a missing gateway or interface:\n%s", errBuf.String())
+			}
+		})
+	}
+}
+
+func TestRepairWarnsWhenNoGatewayIsKnown(t *testing.T) {
+	// No gateway on the endpoint: the route cannot be examined. lo up does
+	// not fail, and every node gets a warning that names it and the network.
+	g := newGWDocker(t, "ops", "27.5.1 27.5.1")
+	g.noEndpointGateway = true
+	d, errBuf := gwDriver(t, g, "ops")
+
+	if err := d.connectNodesToRegistryNetwork(t.Context(), "c", errBuf); err != nil {
+		t.Fatalf("a missing gateway failed the connect: %v", err)
+	}
+	if r := g.calls("docker exec"); len(r) != 0 {
+		t.Fatalf("the route was read or changed without a gateway:\n%s", strings.Join(r, "\n"))
+	}
+	for _, n := range g.nodes {
+		want := "lo: " + n + `: found no IPv4 gateway for network ops (docker inspect: ""). lo did not examine the default route. Examine it: docker exec ` + n + " ip -4 route show default"
+		if !strings.Contains(errBuf.String(), want) {
+			t.Errorf("no warning for %s:\n%s\nwant:\n%s", n, errBuf.String(), want)
+		}
+	}
+}
+
+func TestRepairWarnsWhenANodeCannotBeRead(t *testing.T) {
+	for _, tc := range []struct{ name, fail, want string }{
+		{
+			"the default route", "ip -4 route show default",
+			"lo: c-worker: cannot read the default route (docker exec c-worker ip -4 route show default failed). Make sure that the node runs, then run lo up again.",
+		},
+		{
+			"the interface to the gateway", "ip -o -4 route get",
+			`lo: c-worker: found no interface to gateway 10.125.201.192 of network ops (ip -o -4 route get 10.125.201.192: ""). lo did not change the default route. Examine it: docker exec c-worker ip -4 route show default`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newGWDocker(t, "ops", "27.5.1 27.5.1")
+			g.failExec = []string{tc.fail}
+			d, errBuf := gwDriver(t, g, "ops")
+
+			if err := d.connectNodesToRegistryNetwork(t.Context(), "c", errBuf); err != nil {
+				t.Fatalf("a failed read failed the connect: %v", err)
+			}
+			if r := g.calls("docker exec c-worker ip route replace"); len(r) != 0 {
+				t.Fatalf("the route was changed after a failed read: %v", r)
+			}
+			if !strings.Contains(errBuf.String(), tc.want) {
+				t.Fatalf("no warning:\n%s\nwant:\n%s", errBuf.String(), tc.want)
+			}
+		})
+	}
+}
+
+func TestReconcileRepairsAttachedNodesWhenSharedIsOff(t *testing.T) {
+	// shared.enabled defaulted to true until 2026-08. A cluster created then
+	// keeps its registry attachment after the default changed, and its
+	// registry map now reads "not shared". The route repair runs for every
+	// attached node, also when shared is off (the node-IP healer gates on
+	// membership the same way). Through createKindCluster, the call site in
+	// Provision: the connect helper alone cannot show the gate. Only the
+	// worker is attached: the control plane must stay off the network.
+	for name, shared := range map[string]string{
+		"shared false":   `"shared":false,`,
+		"shared omitted": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			g := newGWDocker(t, "ops", "28.5.1 28.5.1")
+			g.attach("c-worker", "lok8s-registries", 0)
+			d, errBuf := gwDriverShared(t, g, "ops", shared)
+
+			if err := d.createKindCluster(t.Context(), "c", "v1.31.4", "ops", "", io.Discard, errBuf); err != nil {
+				t.Fatal(err)
+			}
+			if c := g.calls("docker network connect"); len(c) != 0 {
+				t.Fatalf("a cluster that is not shared was connected: %v", c)
+			}
+			if r := g.calls("docker exec c-control-plane"); len(r) != 0 {
+				t.Fatalf("the route of a node that is not attached was read: %v", r)
+			}
+			assertProjectDefault(t, g, "ops")
+			if !strings.Contains(errBuf.String(), "c-worker: the default route did not go through ops") {
+				t.Fatalf("no warning names the move:\n%s", errBuf.String())
+			}
+		})
+	}
+}
+
+func TestReconcileLeavesNodesAloneWhenSharedIsOffAndNotAttached(t *testing.T) {
+	// The common case after the default changed: no node is on the registry
+	// network. Nothing is connected, read or changed, and the empty member
+	// list ends the walk before `kind get nodes`.
+	g := newGWDocker(t, "ops", "29.6.2 29.6.2")
+	d, errBuf := gwDriverShared(t, g, "ops", `"shared":false,`)
+
+	if err := d.createKindCluster(t.Context(), "c", "v1.31.4", "ops", "", io.Discard, errBuf); err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []string{"docker network connect", "docker exec", "docker inspect", "kind get nodes"} {
+		if c := g.calls(prefix); len(c) != 0 {
+			t.Errorf("%s called on a cluster that is not shared and not attached: %v", prefix, c)
+		}
+	}
+	if errBuf.Len() != 0 {
+		t.Fatalf("output:\n%s", errBuf.String())
+	}
+}
+
+func TestFallbackRepairRunsAgainAfterANodeRestart(t *testing.T) {
+	// The documented contract of the fallback: Docker programs the default
+	// route again when a node restarts, so the move is gone. The next
+	// `lo up` (a new process) finds the node attached and moves the route
+	// back.
+	g := newGWDocker(t, "ops", "27.5.1 27.5.1")
+	d, errBuf := gwDriver(t, g, "ops")
+	if err := d.connectNodesToRegistryNetwork(t.Context(), "c", errBuf); err != nil {
+		t.Fatal(err)
+	}
+	assertProjectDefault(t, g, "ops")
+
+	for _, n := range g.nodes {
+		g.restart(n)
+	}
+	if got := g.defaultRoute("c-worker"); got != "default via 10.125.200.128 dev eth1" {
+		t.Fatalf("simulation: after the restart the route is %q, want the registry network", got)
+	}
+
+	d2, errBuf2 := gwDriver(t, g, "ops")
+	if err := d2.connectNodesToRegistryNetwork(t.Context(), "c", errBuf2); err != nil {
+		t.Fatal(err)
+	}
+	if c := g.calls("docker network connect"); len(c) != len(g.nodes) {
+		t.Fatalf("connects over both runs: %v, want one per node", c)
+	}
+	for _, n := range g.nodes {
+		if r := g.calls("docker exec " + n + " ip route replace"); len(r) != 2 {
+			t.Errorf("%s: %d route moves over both runs, want 2 (one per lo up)", n, len(r))
+		}
+	}
+	assertProjectDefault(t, g, "ops")
+	if !strings.Contains(errBuf2.String(), "c-worker: the default route did not go through ops — moved it there") {
+		t.Fatalf("the second lo up does not report the move:\n%s", errBuf2.String())
+	}
+}
+
 func TestGwPrioritySupported(t *testing.T) {
 	t.Parallel()
 	for versions, want := range map[string]bool{
@@ -344,7 +585,7 @@ func TestDefaultRouteRepair(t *testing.T) {
 		{"no default route", "", routeGet, "eth0", true},
 		{"right gateway, wrong device", "default via " + gw + " dev eth1", routeGet, "eth0", true},
 		{"two default routes: the first one counts", "default via " + gw + " dev eth0\ndefault via 10.125.200.128 dev eth1", routeGet, "eth0", false},
-		{"gateway unreachable", "default via 10.125.200.128 dev eth1", "", "", false},
+		{"no interface reaches the gateway", "default via 10.125.200.128 dev eth1", "", "", false},
 	} {
 		dev, needed := defaultRouteRepair(tc.current, tc.routeGet, gw)
 		if dev != tc.dev || needed != tc.needed {

@@ -246,10 +246,11 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 
 // createKindCluster renders the kind config and creates the cluster when
 // it does not exist yet, then attaches the nodes to the registry network
-// on a shared cluster. Guarded AND checked for emptiness: this is issue
-// #91's own shape — an unguarded assignment whose failure leaves the
-// variable empty, and the empty value then flows into `kind create
-// --config <(echo "")`.
+// on a shared cluster, and repairs the default route of every node on that
+// network (reconcileRegistryNetworkNodes). Guarded AND checked for
+// emptiness: this is issue #91's own shape — an unguarded assignment whose
+// failure leaves the variable empty, and the empty value then flows into
+// `kind create --config <(echo "")`.
 func (d *Driver) createKindCluster(ctx context.Context, clusterName, k8sVersion, network, cy string, stdout, stderr io.Writer) error {
 	renderedConfig := d.renderKindConfig(clusterName, k8sVersion, network, cy)
 	if strings.TrimSpace(renderedConfig) == "" {
@@ -277,10 +278,7 @@ func (d *Driver) createKindCluster(ctx context.Context, clusterName, k8sVersion,
 			return err
 		}
 	}
-	if d.isShared() {
-		return d.connectNodesToRegistryNetwork(ctx, clusterName, stderr)
-	}
-	return nil
+	return d.reconcileRegistryNetworkNodes(ctx, clusterName, stderr)
 }
 
 // clusterServices runs the post-create steps on the cluster: the

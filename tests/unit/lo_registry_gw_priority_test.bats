@@ -14,11 +14,18 @@
 # container hung on 10.96.0.1:443). Go twin: internal/driver/lo/gwpriority_test.go.
 #
 # The fake docker below simulates what the fix depends on: the version, the
-# endpoints of each node in attach order (eth0, eth1, …) with their priorities,
-# Docker's choice of the default route, and the in-node `ip` reads and the
-# `ip route replace` that overrides that choice. State, per node:
+# endpoints of each node in attach order (eth0, eth1, …) with their priorities
+# and gateways, Docker's choice of the default route, and the in-node `ip`
+# reads and the `ip route replace` that overrides that choice. Like moby,
+# `docker network inspect` reports the gateway of a network created without
+# --gateway only from Docker 29 on; the endpoint in `docker inspect <node>`
+# always carries it. State, per node:
 #   eps/<node>       "<network> <priority> <dev>" lines, in attach order
 #   override/<node>  the default route `ip route replace` set
+#
+# docker and kind are shell functions here. A failing docker and kind stub
+# sits first on PATH as well, so a call that escapes the functions (an exec,
+# `command docker`) fails the test instead of reaching a live daemon.
 
 setup() {
   load "../test_helper"
@@ -37,18 +44,32 @@ setup() {
   : > "${LOG}"
   NODES="c-control-plane c-worker"
   REFUSE_GW_PRIORITY=0
+  NO_ENDPOINT_GATEWAY=0
+  FAIL_EXEC=()
+
+  mkdir -p "${FAKE}/stubbin"
+  local tool
+  for tool in docker kind; do
+    printf '#!/usr/bin/env bash\necho "real %s reached from a unit test: $*" >&2\nexit 97\n' "${tool}" > "${FAKE}/stubbin/${tool}"
+    chmod +x "${FAKE}/stubbin/${tool}"
+  done
+  export PATH="${FAKE}/stubbin:${PATH}"
 }
 
 teardown() { teardown_tmpdir; }
 
-# _world <project> <docker-version> — the registry map, both gateways, and the
-# nodes kind created on the project network (eth0, priority 0).
+# _world <project> <docker-version> [shared-member] — the registry map, both
+# gateways, and the nodes kind created on the project network (eth0, priority
+# 0). shared-member is the "shared" member of the map: '"shared":true,' (the
+# default), '"shared":false,' or '' (the key omitted).
 _world() {
   PROJECT="${1}"
   DOCKER_VERSION="${2}"
+  local shared='"shared":true,'
+  (( $# < 3 )) || shared="${3}"
   export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/.registries.json"
-  printf '{"shared":true,"tls":false,"port":80,"network":{"name":"lok8s-registries","cidr":"10.125.200.0/24"},"project_network":"%s","registries":[]}\n' \
-    "${PROJECT}" > "${LOK8S_REGISTRY_JSON}"
+  printf '{%s"tls":false,"port":80,"network":{"name":"lok8s-registries","cidr":"10.125.200.0/24"},"project_network":"%s","registries":[]}\n' \
+    "${shared}" "${PROJECT}" > "${LOK8S_REGISTRY_JSON}"
   # The shared network's gateway is the first address of its reserved
   # dynamic range, as Docker assigns it.
   echo "10.125.200.128" > "${FAKE}/gw/lok8s-registries"
@@ -64,6 +85,19 @@ _attach() {
   dev="eth$(wc -l < "${FAKE}/eps/${1}")"
   echo "${2} ${3} ${dev}" >> "${FAKE}/eps/${1}"
   rm -f "${FAKE}/override/${1}"
+}
+
+# _restart <node> — a node restart: Docker programs the default route again,
+# and the route that `ip route replace` set is gone.
+_restart() { rm -f "${FAKE}/override/${1}"; }
+
+# _network_reports_gateway — moby's behaviour for a network created with
+# --subnet and no --gateway: the gateway is in `docker network inspect` from
+# Docker 29 on, and empty before.
+_network_reports_gateway() {
+  local -a v
+  read -r -a v <<<"${DOCKER_VERSION}"
+  (( ${#v[@]} == 2 )) && (( ${v[1]%%.*} >= 29 ))
 }
 
 # _default_route <node> — what `ip -4 route show default` prints: the override,
@@ -90,7 +124,8 @@ docker() {
     "network inspect")
       local fmt="${!#}" n
       if [[ "${fmt}" == *".Gateway"* ]]; then
-        echo "$(cat "${FAKE}/gw/${3}" 2>/dev/null) "
+        if _network_reports_gateway; then printf '%s' "$(cat "${FAKE}/gw/${3}" 2>/dev/null)"; fi
+        echo " "
       elif [[ "${fmt}" == *".Containers"* ]]; then
         for n in ${NODES}; do
           if grep -q "^${3} " "${FAKE}/eps/${n}"; then printf '%s ' "${n}"; fi
@@ -105,9 +140,21 @@ docker() {
         prio="${2}"; shift 2
       fi
       _attach "${2}" "${1}" "${prio}" ;;
+    "inspect "*)
+      # {{with index .NetworkSettings.Networks "<net>"}}{{.Gateway}}{{end}}
+      [[ "${3:-}" == "--format" && "${4:-}" == *'"}}{{.Gateway}}{{end}}' ]] || { echo "unexpected docker inspect: $*" >&2; return 99; }
+      local want="${4#*Networks \"}" net prio dev
+      want="${want%%\"*}"
+      while read -r net prio dev; do
+        if [[ "${net}" == "${want}" ]] && (( ! NO_ENDPOINT_GATEWAY )); then cat "${FAKE}/gw/${net}"; fi
+      done < "${FAKE}/eps/${2}"
+      echo ;;
     "exec "*)
       local node="${2}"; shift 2
-      local cmd="${*}" net prio dev
+      local cmd="${*}" net prio dev p
+      for p in "${FAIL_EXEC[@]}"; do
+        [[ "${cmd}" != "${p}"* ]] || return 1
+      done
       case "${cmd}" in
         "ip -4 route show default") echo "$(_default_route "${node}") " ;;
         "ip -o -4 route get "*)
@@ -208,6 +255,137 @@ docker network connect --gw-priority -1 lok8s-registries c-worker"
   _assert_project_default
 }
 
+@test "repair: the gateway comes from the node endpoint (the network reports none before Docker 29)" {
+  # Up to Docker 28.5, `docker network inspect` reports no gateway for a
+  # network created with --subnet and no --gateway, and lo::network creates the
+  # project network that way. A repair that read the network only skipped every
+  # node on the engines that the fallback exists for.
+  local version n
+  for version in "27.5.1 27.5.1" "28.5.1 28.5.1"; do
+    _world ops "${version}"
+    : > "${LOG}"
+    unset _LO_DOCKER_GW_PRIORITY
+    # 28.5 connects with --gw-priority: test the node an older lok8s attached.
+    if [[ "${version}" == 28.* ]]; then
+      for n in ${NODES}; do _attach "${n}" lok8s-registries 0; done
+    fi
+    ! _network_reports_gateway || { echo "precondition: ${version} must report no network gateway" >&2; return 1; }
+
+    run lo::connect_nodes_to_registry_network c
+    assert_success
+    for n in ${NODES}; do
+      grep -qxF "docker inspect ${n} --format {{with index .NetworkSettings.Networks \"ops\"}}{{.Gateway}}{{end}}" "${LOG}" || {
+        echo "${version}: ${n}: the endpoint gateway was not read" >&2; cat "${LOG}" >&2; return 1
+      }
+      grep -qx "docker exec ${n} ip route replace default via 10.125.201.192 dev eth0" "${LOG}" || {
+        echo "${version}: ${n}: the route was not moved" >&2; cat "${LOG}" >&2; return 1
+      }
+    done
+    _assert_project_default
+    refute_output --partial "found no"
+  done
+}
+
+@test "repair: no gateway on the endpoint warns per node, reads nothing, and does not fail" {
+  _world ops "27.5.1 27.5.1"
+  NO_ENDPOINT_GATEWAY=1
+
+  run lo::connect_nodes_to_registry_network c
+  assert_success
+  ! grep -q '^docker exec' "${LOG}" || { echo "the route was read or changed without a gateway:" >&2; grep '^docker exec' "${LOG}" >&2; return 1; }
+  local n
+  for n in ${NODES}; do
+    assert_output --partial "lo: ${n}: found no IPv4 gateway for network ops (docker inspect: \"\"). lo did not examine the default route. Examine it: docker exec ${n} ip -4 route show default"
+  done
+}
+
+@test "repair: a default route that cannot be read gets a warning" {
+  _world ops "27.5.1 27.5.1"
+  FAIL_EXEC=("ip -4 route show default")
+
+  run lo::connect_nodes_to_registry_network c
+  assert_success
+  ! grep -q 'ip route replace' "${LOG}" || { echo "the route was changed after a failed read" >&2; return 1; }
+  assert_output --partial "lo: c-worker: cannot read the default route (docker exec c-worker ip -4 route show default failed). Make sure that the node runs, then run lo up again."
+}
+
+@test "repair: no interface to the gateway gets a warning" {
+  _world ops "27.5.1 27.5.1"
+  FAIL_EXEC=("ip -o -4 route get")
+
+  run lo::connect_nodes_to_registry_network c
+  assert_success
+  ! grep -q 'ip route replace' "${LOG}" || { echo "the route was changed after a failed read" >&2; return 1; }
+  assert_output --partial 'lo: c-worker: found no interface to gateway 10.125.201.192 of network ops (ip -o -4 route get 10.125.201.192: ""). lo did not change the default route. Examine it: docker exec c-worker ip -4 route show default'
+}
+
+@test "reconcile: shared off or omitted, an attached node is repaired and nothing is connected" {
+  # shared.enabled defaulted to true until 2026-08. A cluster created then
+  # keeps its registry attachment after the default changed, and its registry
+  # map now reads "not shared". The route repair runs for every attached node
+  # (lo::heal_node_ips gates on membership the same way). Only the worker is
+  # attached: the control plane must stay off the network.
+  local shared
+  for shared in '"shared":false,' ''; do
+    _world ops "28.5.1 28.5.1" "${shared}"
+    : > "${LOG}"
+    unset _LO_DOCKER_GW_PRIORITY
+    _attach c-worker lok8s-registries 0
+
+    run lo::reconcile_registry_network_nodes c
+    assert_success
+    ! grep -q '^docker network connect' "${LOG}" || { echo "shared='${shared}': a cluster that is not shared was connected" >&2; cat "${LOG}" >&2; return 1; }
+    ! grep -q '^docker exec c-control-plane' "${LOG}" || { echo "shared='${shared}': the route of a node that is not attached was read" >&2; return 1; }
+    _assert_project_default
+    assert_output --partial "c-worker: the default route did not go through ops"
+  done
+}
+
+@test "reconcile: shared off and no node attached, nothing is connected, read or changed" {
+  _world ops "29.6.2 29.6.2" '"shared":false,'
+
+  run lo::reconcile_registry_network_nodes c
+  assert_success
+  assert_output ""
+  ! grep -qE '^docker (network connect|exec|inspect)|^kind get nodes' "${LOG}" || {
+    echo "a call on a cluster that is not shared and not attached:" >&2; cat "${LOG}" >&2; return 1
+  }
+}
+
+@test "reconcile: shared on goes through the connect" {
+  _world ops "29.6.2 29.6.2"
+
+  run lo::reconcile_registry_network_nodes c
+  assert_success
+  [ "$(grep -c '^docker network connect --gw-priority -1 lok8s-registries ' "${LOG}")" -eq 2 ]
+  _assert_project_default
+}
+
+@test "fallback: after a node restart, the next lo up moves the route back" {
+  # The documented contract of the fallback: Docker programs the default route
+  # again when a node restarts, so the move is gone. The next `lo up` (a new
+  # process) finds the node attached and moves the route back.
+  _world ops "27.5.1 27.5.1"
+  lo::connect_nodes_to_registry_network c 2>/dev/null
+  _assert_project_default
+
+  local n
+  for n in ${NODES}; do _restart "${n}"; done
+  [ "$(_default_route c-worker)" == "default via 10.125.200.128 dev eth1" ] || {
+    echo "simulation: after the restart the route is '$(_default_route c-worker)', want the registry network" >&2; return 1
+  }
+
+  unset _LO_DOCKER_GW_PRIORITY
+  run lo::connect_nodes_to_registry_network c
+  assert_success
+  [ "$(grep -c '^docker network connect' "${LOG}")" -eq 2 ] || { echo "want one connect per node over both runs" >&2; cat "${LOG}" >&2; return 1; }
+  for n in ${NODES}; do
+    [ "$(grep -c "^docker exec ${n} ip route replace" "${LOG}")" -eq 2 ] || { echo "${n}: want 2 route moves (one per lo up)" >&2; cat "${LOG}" >&2; return 1; }
+  done
+  _assert_project_default
+  assert_output --partial "c-worker: the default route did not go through ops — moved it there"
+}
+
 @test "lo::gw_priority_supported: client and daemon at Docker 28 or later" {
   local v
   for v in "29.6.2 29.6.2" "28.0.0 28.0.0" "28.0.0-rc.1 28.0.0-rc.1"; do
@@ -231,5 +409,5 @@ docker network connect --gw-priority -1 lok8s-registries c-worker"
   run lo::default_route_repair "default via ${gw} dev eth0"$'\n'"default via 10.125.200.128 dev eth1" "${get}" "${gw}"
   assert_failure
   run lo::default_route_repair "default via 10.125.200.128 dev eth1" "" "${gw}"
-  assert_failure
+  assert_failure 2
 }

@@ -263,19 +263,6 @@ lo::docker_gw_priority() {
   (( _LO_DOCKER_GW_PRIORITY == 1 ))
 }
 
-# lo::network_gateway <network> — the first IPv4 gateway of a docker network;
-# prints nothing when docker reports none.
-lo::network_gateway() {
-  local out gw
-  out=$(docker network inspect "${1}" --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null) || return 0
-  for gw in ${out}; do
-    if ip::validate_format "${gw}" 2>/dev/null; then
-      echo "${gw}"
-      return 0
-    fi
-  done
-}
-
 # lo::route_field <line> <key> — the word after key in one `ip route` line
 # ("dev", "via"); nothing when the line does not carry it.
 lo::route_field() {
@@ -295,11 +282,12 @@ lo::route_field() {
 # `ip -4 route show default`, route-get is `ip -o -4 route get <gw>` for the
 # gateway of the project network. Prints the device that reaches gw (the
 # project network's interface) and returns 0 when the default route is not
-# `via <gw> dev <dev>` yet; returns 1 when it is, or when no device reaches gw.
+# `via <gw> dev <dev>` yet; returns 1 when it is; returns 2 when route-get
+# names no device.
 lo::default_route_repair() {
   local current="${1}" route_get="${2}" gw="${3}" dev first
   dev=$(lo::route_field "${route_get}" dev)
-  [[ -n "${dev}" ]] || return 1
+  [[ -n "${dev}" ]] || return 2
   first="${current%%$'\n'*}"
   if [[ "$(lo::route_field "${first}" via)" == "${gw}" && "$(lo::route_field "${first}" dev)" == "${dev}" ]]; then
     return 1
@@ -307,25 +295,60 @@ lo::default_route_repair() {
   echo "${dev}"
 }
 
-# lo::repair_default_route <node> <network> <gw> — moves the default route of
-# a node back to the project network when it goes through another network. It
+# lo::repair_default_route <node> <network> — moves the default route of a
+# node back to the project network when it goes through another network. It
 # is the fallback for a Docker without --gw-priority, and the repair for a node
-# that an older lok8s attached without a priority. Docker writes the route
+# that an older lok8s attached without a priority. The gateway comes from the
+# node's own endpoint on the project network: Docker fills .Gateway for every
+# connected endpoint, but up to Docker 28.5 `docker network inspect` reports
+# only a gateway that the create requested, and lo::network creates the
+# project network with --subnet and no --gateway. Docker writes the route
 # again when the node restarts, so on such a Docker the next `lo up` repeats
 # the repair. Advisory: a node that cannot be read or changed gets a warning,
-# never a failure. Go twin: repairDefaultRoute.
+# never a failure. Go twin: repairDefaultRoute (nodeGateway).
 lo::repair_default_route() {
-  local node="${1}" network="${2}" gw="${3}"
-  [[ -n "${gw}" ]] || return 0
-  local current route_get dev
-  current=$(docker exec "${node}" ip -4 route show default 2>/dev/null) || return 0
-  route_get=$(docker exec "${node}" ip -o -4 route get "${gw}" 2>/dev/null) || return 0
-  dev=$(lo::default_route_repair "${current}" "${route_get}" "${gw}") || return 0
+  local node="${1}" network="${2}" gw current route_get dev rc=0
+  gw=$(docker inspect "${node}" \
+    --format "{{with index .NetworkSettings.Networks \"${network}\"}}{{.Gateway}}{{end}}" 2>/dev/null) || true
+  if ! ip::validate_format "${gw}" 2>/dev/null; then
+    warn "lo: ${node}: found no IPv4 gateway for network ${network} (docker inspect: \"${gw}\"). lo did not examine the default route. Examine it: docker exec ${node} ip -4 route show default"
+    return 0
+  fi
+  if ! current=$(docker exec "${node}" ip -4 route show default 2>/dev/null); then
+    warn "lo: ${node}: cannot read the default route (docker exec ${node} ip -4 route show default failed). Make sure that the node runs, then run lo up again."
+    return 0
+  fi
+  route_get=$(docker exec "${node}" ip -o -4 route get "${gw}" 2>/dev/null) || route_get=""
+  dev=$(lo::default_route_repair "${current}" "${route_get}" "${gw}") || rc=$?
+  if (( rc == 2 )); then
+    warn "lo: ${node}: found no interface to gateway ${gw} of network ${network} (ip -o -4 route get ${gw}: \"${route_get}\"). lo did not change the default route. Examine it: docker exec ${node} ip -4 route show default"
+    return 0
+  fi
+  (( rc == 0 )) || return 0
   if ! docker exec "${node}" ip route replace default via "${gw}" dev "${dev}" &>/dev/null; then
     warn "lo: ${node}: could not move the default route to ${network} (via ${gw} dev ${dev})"
     return 0
   fi
   warn "lo: ${node}: the default route did not go through ${network} — moved it there (via ${gw} dev ${dev})"
+}
+
+# lo::reconcile_registry_network_nodes <cluster-name> — the step after
+# `kind create`. A shared cluster attaches its nodes to the shared registry
+# network (lo::connect_nodes_to_registry_network). A cluster that is not
+# shared attaches nothing, but its nodes can still be on that network:
+# shared.enabled defaulted to true until 2026-08, and a node keeps its
+# attachment after the default changed. Those nodes get the same route
+# repair. The membership read is the healer's gate too (see
+# lo::nodes_on_registry_network). Advisory when not shared: a registry map
+# that cannot be read is not a reason to fail the provision. Go twin:
+# reconcileRegistryNetworkNodes.
+lo::reconcile_registry_network_nodes() {
+  [[ -n "${LOK8S_REGISTRY_JSON:-}" && -f "${LOK8S_REGISTRY_JSON}" ]] || return 0
+  if registry::is_shared; then
+    lo::connect_nodes_to_registry_network "${1}"
+    return
+  fi
+  _lo_registry_network_nodes "${1}" repair
 }
 
 # lo::connect_nodes_to_registry_network <cluster-name> — attaches the cluster's
@@ -336,41 +359,46 @@ lo::repair_default_route() {
 # attached node goes through lo::repair_default_route too: it repairs a node
 # that an older lok8s attached without a priority.
 lo::connect_nodes_to_registry_network() {
-  local cluster_name="${1}"
-  local registry_network project_network
+  _lo_registry_network_nodes "${1}" attach
+}
+
+# _lo_registry_network_nodes <cluster-name> <attach|repair> — walks the
+# cluster's kind nodes against the shared registry network. A node that is
+# attached goes through lo::repair_default_route. With attach, a node that is
+# not attached is connected (see lo::connect_nodes_to_registry_network); with
+# repair, the node is left alone, and an empty or unreadable member list ends
+# the walk before `kind get nodes`. Go twin: registryNetworkNodes.
+_lo_registry_network_nodes() {
+  local cluster_name="${1}" mode="${2}"
+  local registry_network project_network repair=1
   registry_network=$(registry::network_name)
   project_network=$(registry::project_network)
+  [[ -n "${project_network}" && "${project_network}" != "null" && "${project_network}" != "${registry_network}" ]] || repair=0
 
   # Skip nodes that are already attached — a re-run must not error (nor rely
   # on the 2>/dev/null to hide a real failure for the common no-op case).
-  local members
+  local members members_ok=1
   members=$(docker network inspect "${registry_network}" \
-    -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null || true)
-
-  # The project gateway is read once, on the first node that needs it.
-  local gw="" gw_read=0
-  _lo_connect_repair() {
-    [[ -n "${project_network}" && "${project_network}" != "null" && "${project_network}" != "${registry_network}" ]] || return 0
-    if (( ! gw_read )); then
-      gw=$(lo::network_gateway "${project_network}")
-      gw_read=1
-    fi
-    lo::repair_default_route "${1}" "${project_network}" "${gw}"
-  }
+    -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null) || members_ok=0
+  if [[ "${mode}" != attach ]] && { (( ! members_ok )) || [[ -z "${members//[[:space:]]/}" ]]; }; then
+    return 0
+  fi
 
   local node
   for node in $(kind get nodes --name "${cluster_name}" 2>/dev/null); do
     if [[ " ${members} " == *" ${node} "* ]]; then
-      _lo_connect_repair "${node}"
+      if (( repair )); then lo::repair_default_route "${node}" "${project_network}"; fi
       continue
     fi
+    [[ "${mode}" == attach ]] || continue
     if lo::docker_gw_priority &&
         docker network connect --gw-priority "${LO_REGISTRY_GW_PRIORITY}" "${registry_network}" "${node}" 2>/dev/null; then
       continue
     fi
     docker network connect "${registry_network}" "${node}" 2>/dev/null || true
-    _lo_connect_repair "${node}"
+    if (( repair )); then lo::repair_default_route "${node}" "${project_network}"; fi
   done
+  return 0
 }
 
 # lo::nodes_on_registry_network <cluster-name>

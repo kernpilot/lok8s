@@ -317,20 +317,20 @@ func (d *Driver) dockerGwPriority(ctx context.Context) bool {
 	return d.gwPriority.ok
 }
 
-// networkGateway is the first IPv4 gateway of a docker network, "" when
-// docker reports none (bash: lo::network_gateway).
-func (d *Driver) networkGateway(ctx context.Context, network string) string {
-	out, err := d.output(ctx, "docker", "network", "inspect", network,
-		"--format", "{{range .IPAM.Config}}{{.Gateway}} {{end}}")
-	if err != nil {
-		return ""
+// nodeGateway is the gateway of a node's own endpoint on a docker network
+// (bash: lo::repair_default_route reads it inline). Docker fills .Gateway
+// for every connected endpoint. The network does not always carry it: up to
+// Docker 28.5, `docker network inspect` reports only a gateway that the
+// create requested, and lo creates the project network with --subnet and
+// no --gateway (see network). observed is the value docker printed; gw is
+// that value when it is an IPv4 address, else "".
+func (d *Driver) nodeGateway(ctx context.Context, node, network string) (gw, observed string) {
+	observed, _ = d.output(ctx, "docker", "inspect", node,
+		"--format", fmt.Sprintf(`{{with index .NetworkSettings.Networks "%s"}}{{.Gateway}}{{end}}`, network))
+	if ip := net.ParseIP(observed); ip != nil && ip.To4() != nil {
+		return observed, observed
 	}
-	for gw := range strings.FieldsSeq(out) {
-		if ip := net.ParseIP(gw); ip != nil && ip.To4() != nil {
-			return gw
-		}
-	}
-	return ""
+	return "", observed
 }
 
 // routeField returns the word after key in one `ip route` line ("dev",
@@ -348,8 +348,9 @@ func routeField(line, key string) string {
 // defaultRouteRepair decides the default route of a node from two `ip`
 // reads in the node: current is `ip -4 route show default`, routeGet is
 // `ip -o -4 route get <gw>` for the gateway of the project network. dev is
-// the device that reaches gw (the project network's interface); needed
-// reports that the default route is not `via <gw> dev <dev>` yet.
+// the device that reaches gw (the project network's interface), "" when
+// routeGet names none; needed reports that the default route is not
+// `via <gw> dev <dev>` yet.
 func defaultRouteRepair(current, routeGet, gw string) (dev string, needed bool) {
 	dev = routeField(routeGet, "dev")
 	if dev == "" {
@@ -363,22 +364,34 @@ func defaultRouteRepair(current, routeGet, gw string) (dev string, needed bool) 
 // network when it goes through another network (bash:
 // lo::repair_default_route). It is the fallback for a Docker without
 // --gw-priority, and the repair for a node that an older lok8s attached
-// without a priority. Docker writes the route again when the node restarts,
-// so on such a Docker the next `lo up` repeats the repair. Advisory: a node
-// that cannot be read or changed gets a warning, never a failure.
-func (d *Driver) repairDefaultRoute(ctx context.Context, node, network, gw string, errOut io.Writer) {
+// without a priority. The gateway comes from the node's own endpoint on the
+// project network (nodeGateway). Docker writes the route again when the
+// node restarts, so on such a Docker the next `lo up` repeats the repair.
+// Advisory: a node that cannot be read or changed gets a warning, never a
+// failure.
+func (d *Driver) repairDefaultRoute(ctx context.Context, node, network string, errOut io.Writer) {
+	gw, observed := d.nodeGateway(ctx, node, network)
 	if gw == "" {
+		ui.WarnTo(errOut, `lo: %s: found no IPv4 gateway for network %s (docker inspect: "%s"). lo did not examine the default route. Examine it: docker exec %s ip -4 route show default`,
+			node, network, observed, node)
 		return
 	}
 	current, err := d.output(ctx, "docker", "exec", node, "ip", "-4", "route", "show", "default")
 	if err != nil {
+		ui.WarnTo(errOut, "lo: %s: cannot read the default route (docker exec %s ip -4 route show default failed). Make sure that the node runs, then run lo up again.",
+			node, node)
 		return
 	}
 	routeGet, err := d.output(ctx, "docker", "exec", node, "ip", "-o", "-4", "route", "get", gw)
 	if err != nil {
-		return
+		routeGet = ""
 	}
 	dev, needed := defaultRouteRepair(current, routeGet, gw)
+	if dev == "" {
+		ui.WarnTo(errOut, `lo: %s: found no interface to gateway %s of network %s (ip -o -4 route get %s: "%s"). lo did not change the default route. Examine it: docker exec %s ip -4 route show default`,
+			node, gw, network, gw, routeGet, node)
+		return
+	}
 	if !needed {
 		return
 	}
@@ -387,6 +400,25 @@ func (d *Driver) repairDefaultRoute(ctx context.Context, node, network, gw strin
 		return
 	}
 	ui.WarnTo(errOut, "lo: %s: the default route did not go through %s — moved it there (via %s dev %s)", node, network, gw, dev)
+}
+
+// reconcileRegistryNetworkNodes is the step after `kind create` (bash:
+// lo::reconcile_registry_network_nodes). A shared cluster attaches its nodes
+// to the shared registry network (connectNodesToRegistryNetwork). A cluster
+// that is not shared attaches nothing, but its nodes can still be on that
+// network: shared.enabled defaulted to true until 2026-08, and a node keeps
+// its attachment after the default changed. Those nodes get the same route
+// repair. The membership read is the healer's gate too (see
+// nodesOnRegistryNetwork). Advisory when not shared: a registry map that
+// cannot be read is not a reason to fail the provision.
+func (d *Driver) reconcileRegistryNetworkNodes(ctx context.Context, clusterName string, errOut io.Writer) error {
+	if d.isShared() {
+		return d.connectNodesToRegistryNetwork(ctx, clusterName, errOut)
+	}
+	if rf, err := regFile(); err == nil {
+		d.registryNetworkNodes(ctx, rf, clusterName, false, errOut)
+	}
+	return nil
 }
 
 // connectNodesToRegistryNetwork attaches the cluster's kind nodes to the
@@ -404,25 +436,38 @@ func (d *Driver) connectNodesToRegistryNetwork(ctx context.Context, clusterName 
 	if err != nil {
 		return err
 	}
-	members, _ := d.output(ctx, "docker", "network", "inspect", rf.Network.Name,
+	d.registryNetworkNodes(ctx, rf, clusterName, true, errOut)
+	return nil
+}
+
+// registryNetworkNodes walks the cluster's kind nodes against the shared
+// registry network (bash: _lo_registry_network_nodes). A node that is
+// attached goes through repairDefaultRoute. With attach, a node that is not
+// attached is connected (see connectNodesToRegistryNetwork); without it, the
+// node is left alone, and an empty or unreadable member list ends the walk
+// before `kind get nodes`.
+func (d *Driver) registryNetworkNodes(ctx context.Context, rf *RegistryFile, clusterName string, attach bool, errOut io.Writer) {
+	members, err := d.output(ctx, "docker", "network", "inspect", rf.Network.Name,
 		"-f", "{{range .Containers}}{{.Name}} {{end}}")
+	if !attach && (err != nil || strings.TrimSpace(members) == "") {
+		return
+	}
 
 	nodes, _ := d.output(ctx, "kind", "get", "nodes", "--name", clusterName)
 	memberSet := " " + members + " "
 	project := rf.ProjectNetwork
-	gw, gwRead := "", false
 	repair := func(node string) {
 		if project == "" || project == rf.Network.Name {
 			return
 		}
-		if !gwRead {
-			gw, gwRead = d.networkGateway(ctx, project), true
-		}
-		d.repairDefaultRoute(ctx, node, project, gw, errOut)
+		d.repairDefaultRoute(ctx, node, project, errOut)
 	}
 	for node := range strings.FieldsSeq(nodes) {
 		if strings.Contains(memberSet, " "+node+" ") {
 			repair(node)
+			continue
+		}
+		if !attach {
 			continue
 		}
 		if d.dockerGwPriority(ctx) &&
@@ -432,7 +477,6 @@ func (d *Driver) connectNodesToRegistryNetwork(ctx context.Context, clusterName 
 		_ = d.runQuiet(ctx, "docker", "network", "connect", rf.Network.Name, node)
 		repair(node)
 	}
-	return nil
 }
 
 // nodesOnRegistryNetwork reports whether at least one of the cluster's kind
