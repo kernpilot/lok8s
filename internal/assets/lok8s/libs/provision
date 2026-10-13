@@ -29,7 +29,7 @@ main::provision() {
     'render-dir|:'       "Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory"
     'no-diff|:+'         'Dry run without the kubectl diff: render only, no cluster access'
     'only|:'             'With --bootstrap: apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded'
-    'allow-generators|:+' 'Let --dry-run execute a non-builtin exec plugin or a bash: secrets generator (default: refused — either can run kubectl/lo against the live cluster)'
+    'allow-generators|:+' "Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)"
     'with-restore|:+'    'With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)'
     "${args[@]:-}"
   )

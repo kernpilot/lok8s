@@ -46,7 +46,7 @@ func (f *bootstrapModeFlags) bind(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.renderDir, "render-dir", "", "Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory")
 	cmd.Flags().BoolVar(&f.noDiff, "no-diff", false, "Dry run without the kubectl diff: render only, no cluster access")
 	cmd.Flags().StringSliceVar(&f.only, "only", nil, "Apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded")
-	cmd.Flags().BoolVar(&f.allowGenerators, "allow-generators", false, "Let --dry-run execute a non-builtin exec plugin or a bash: secrets generator (default: refused — either can run kubectl/lo against the live cluster)")
+	cmd.Flags().BoolVar(&f.allowGenerators, "allow-generators", false, "Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)")
 	cmd.Flags().BoolVar(&f.withRestore, "with-restore", false, "With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)")
 }
 
@@ -55,7 +55,7 @@ func (f *bootstrapModeFlags) bind(cmd *cobra.Command) {
 // cmd.Flags().Changed("only") (review round 2, item E): pflag's
 // StringSliceVar parses an EMPTY value (`--only ""`) through a CSV reader
 // that returns ZERO elements for an empty string, so f.only alone cannot
-// tell "--only ''" apart from "--only never given" — only Changed can.
+// tell an empty "--only" value apart from "--only never given" — only Changed can.
 func (f *bootstrapModeFlags) options(stderr io.Writer, bootstrapOnly, onlyChanged bool) (bootstrap.Options, error) {
 	for _, dep := range []struct {
 		set  bool

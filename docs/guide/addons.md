@@ -35,37 +35,28 @@ lo bootstrap --only cert-manager,envoy-gateway --dry-run
 lo bootstrap --only cert-manager --with-restore      # also restore.d first
 ```
 
-The dry run renders every entry exactly as the real run would — inside a
-disposable copy of the WHOLE project (HOME/CAROOT/HELM_*/PATH_SECRETS
-redirected into it, KUBECONFIG unset), so nothing is written to the
-project and no plugin it runs can reach the real cluster — and prints one
-line per entry (`unchanged`, `differs changed=N new=M`,
-`inconclusive (needs-crd)`, `rendered`, `skipped`, `error`, any of them
-possibly `(non-repeatable)` when the render minted new secret material)
-plus a summary, including a `restore.d` entry for what that pre-apply
-step would change. The exit code is 0 when nothing would change, 1 when a
-completed diff found one (`differs` only), and 2 for anything that kept
-the assessment from finishing cleanly — a render failure, an
-`inconclusive` entry, an unreachable hosted cluster, a bad `--render-dir`.
-`--render-dir` holds `NN-<entry>.yaml` and `NN-<entry>.diff` per entry
-(`umask 077`), numbered in the order the run takes, marked as the dry
-run's own with a `.lo-dry-run` file; a prior run's own files there are
-cleared first (a stale entry never survives a renumbered or reselected
-run), a non-empty directory withOUT that marker is refused outright, and
-a symlink inside it is never written through. By default a dry run
-refuses to run anything that is not one of lok8s' own two built-in exec
-plugins (the secrets generator — including its `bash:` sub-generator —
-and khelm's chart renderer); pass `--allow-generators` to run one anyway
-— a preview still never sees your real kubeconfig. An entry's `env:`
-override can never set one of the sandbox's own variables (`HOME`,
-`PATH_SECRETS`, `KUBECONFIG`, …) — doing so is that entry's own error,
-naming the variable. `--only` matches the entry name (the `name:`
-override when set) or the addon name; `dependsOn` is not expanded (an
-omitted prerequisite is a printed warning, not an error), an unknown or
-blank name lists the valid names and changes nothing, and `--only` never
-applies `restore.d` by default — on a real run it warns loudly, naming
-the skipped file(s); `--with-restore` applies/diffs it anyway, first.
-Every flag here also exists on `lo provision --bootstrap`.
+The dry run renders every entry in place, exactly as the real run does
+(the same project, `HOME`, credentials and CA), applies nothing, and prints
+one line per entry (`unchanged`, `differs changed=N new=M`,
+`inconclusive (needs-crd)`, `rendered`, `skipped`, `error`; with
+`(non-repeatable)` when the render generated secret material the store does
+not hold yet) plus a summary, with a `restore.d` line first. The exit code is
+0 when nothing would change, 1 only when a completed diff found a change,
+and 2 for all other failures.
+
+lo and its built-in generators never apply anything and never persist new
+state in a dry run. Executable addon code (an exec plugin other than lok8s'
+Secret and ChartRenderer, a KRM exec or container function, a remote base, a
+`bash:` secrets generator) is refused unless you pass `--allow-generators`,
+which runs it as trusted, with the side effects of a real run. The dry run
+does not confine addon code. An entry's `env:` cannot set lo's own variables
+(`LOK8S_BOOTSTRAP_*`, `BOOTSTRAP_*`, `bootstrap_*`, `PATH_SECRETS`,
+`KUBECONFIG`, `KUSTOMIZE_PLUGIN_HOME`). `--render-dir` holds the rendered
+manifests and diffs, Secrets in plaintext. `--only` leaves `restore.d` out
+unless you add `--with-restore`. The full description, with the table of
+what a dry run refuses, is in
+[Deployment](deployment.md#preview-first-dry-run). Every flag here also
+exists on `lo provision --bootstrap`.
 
 ## Addon resolution
 

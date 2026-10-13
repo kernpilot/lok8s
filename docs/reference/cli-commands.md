@@ -439,7 +439,7 @@ lo bootstrap [flags]
 ### Options
 
 ```
-      --allow-generators    Let --dry-run execute a non-builtin exec plugin or a bash: secrets generator (default: refused — either can run kubectl/lo against the live cluster)
+      --allow-generators    Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)
       --dry-run             Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
   -h, --help                help for bootstrap
       --no-diff             Dry run without the kubectl diff: render only, no cluster access
@@ -3342,7 +3342,7 @@ lo provision [flags]
 ### Options
 
 ```
-      --allow-generators    Let --dry-run execute a non-builtin exec plugin or a bash: secrets generator (default: refused — either can run kubectl/lo against the live cluster)
+      --allow-generators    Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)
   -b, --bootstrap           Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)
       --dry-run             Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
   -h, --help                help for provision
