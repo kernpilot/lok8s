@@ -29,6 +29,10 @@ setup() {
   # lint::secrets calls secrets::* helpers (check_unencrypted / check_flat_shadows),
   # which the `lo` entrypoint loads in production — source them here too.
   source "${_PROJECT_ROOT}/.lok8s/libs/secrets"
+  # lint::dns_search calls dnssearch::check (and it yqbound::run), which lint
+  # imports (a no-op under the stubbed import above) — source them here too.
+  source "${_PROJECT_ROOT}/.lok8s/utils/yqbound.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/dnssearch.sh"
 
   # Create a minimal domain structure
   local domain_dir="${BATS_TEST_TMPDIR}/clusters/test-domain"
@@ -1017,4 +1021,45 @@ _kver_spec() {  # <dir> <kind> [version line]
   assert_output --partial "  ${d}/cluster.lok8s.yaml holds more than one YAML document. Remove line 7 (a '---' line after the spec)."
   assert_output --partial "1 validation error(s)"
   refute_output --partial "  OK"
+}
+
+# --- spec.network.dnsSearch (lint::dns_search; Go twin: Linter.dnsSearch) ---
+
+@test "lint::dns_search fails a list that the Lo driver rejects, one error per problem" {
+  local spec="${BATS_TEST_TMPDIR}/clusters/test-domain/cluster.lok8s.yaml"
+  printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: d\nspec:\n  network:\n    dnsSearch: [corp.example.com, corp_example, ""]\n' > "${spec}"
+  run lint::dns_search "${spec}"
+  [ "${status}" -eq 2 ]
+  assert_output "[error]   spec.network.dnsSearch[1] has a character that is not valid in a DNS name: 'corp_example'. Use only letters, digits, hyphens and dots.
+[error]   spec.network.dnsSearch[2] is empty. Write a DNS name, or remove the entry."
+}
+
+@test "lint::dns_search passes a valid list, a missing key and the spec of another driver" {
+  local spec="${BATS_TEST_TMPDIR}/clusters/test-domain/cluster.lok8s.yaml" body
+  for body in 'kind: Lo\nspec:\n  network:\n    dnsSearch: [Corp.Example.com., example.ts.net]\n' \
+    'kind: Lo\nspec:\n  network:\n    name: n\n' \
+    'kind: KubeOne\nspec:\n  network:\n    dnsSearch: [corp_example]\n'; do
+    # shellcheck disable=SC2059 # the bodies carry \n escapes on purpose
+    printf "${body}" > "${spec}"
+    run lint::dns_search "${spec}"
+    assert_success
+    assert_output ""
+  done
+}
+
+@test "lint::all counts the dnsSearch problems into the verdict" {
+  local spec="${BATS_TEST_TMPDIR}/clusters/test-domain/cluster.lok8s.yaml"
+  printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: test\nspec:\n  bootstrap: []\n  network:\n    dnsSearch: [-bad.example]\n' > "${spec}"
+  run lint::all "test-domain"
+  assert_failure
+  assert_output --partial "[error]   spec.network.dnsSearch[0] has a label that starts or ends with a hyphen: '-bad.example'. Remove that hyphen."
+  assert_output --partial "[error] 1 validation error(s)"
+}
+
+@test "lint::dns_search prints a backslash in a rejected value as it is (no echo -e escape)" {
+  local spec="${BATS_TEST_TMPDIR}/clusters/test-domain/cluster.lok8s.yaml"
+  printf '%s\n' 'kind: Lo' 'spec:' '  network:' "    dnsSearch: ['a\\nb.example']" > "${spec}"
+  run lint::dns_search "${spec}"
+  [ "${status}" -eq 1 ]
+  assert_output "[error]   spec.network.dnsSearch[0] has a character that is not valid in a DNS name: 'a\\nb.example'. Use only letters, digits, hyphens and dots."
 }

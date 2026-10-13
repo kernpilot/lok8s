@@ -430,6 +430,7 @@ Checks:
 - A `Lo` cluster's `spec.kubernetes.version`, when set, is a kind node image tag (any OCI tag, with an optional `@sha256:<digest>`), and the spec can be read: see [Kubernetes version (Lo)](specs.md#kubernetes-version-lo). `lo provision` refuses a different value before it creates a docker network or a container
 - Each `spec.bootstrap` entry resolves to an existing driver addon directory or user path
 - Kustomization files under `targets/` reference existing resources
+- A Lo spec's `spec.network.dnsSearch` passes the driver's own check: one error per bad entry, the same line `lo up` prints (see [Host DNS search domains](../guide/local-dev.md#host-dns-search-domains))
 - Secrets: committed encrypted (`.enc` present and current), and no per-domain secret is shadowed in the deprecated flat `.secrets/` store (identical copy = stale duplicate; differing copy = active drift)
 
 `--format text|editor|github` (Go-only) selects the shape of a finding line. `text` prints as before. `editor` prints `<file>:<line>: [error] <message>`, the shape Vim, Emacs and the IDEs jump to. `github` prints `::error file=<file>,line=<line>::<message>`, the workflow command GitHub Actions turns into an annotation. The file is the path the finding names, else the spec file of the domain. The line is the one the message names, else `1` (the checks work per file). Under `GITHUB_ACTIONS=true` with the process stdout off a terminal (a workflow step) the default is `github`. The environment selects a shape of the same findings, never a code path, and `--format text` overrides it. The auto-select reads the real stdout only: a caller that supplies its own writer (the MCP server, a test) gets `text`. The exit code is the same in every format.
@@ -439,7 +440,7 @@ lo lint --format editor        # file:line: [level] message
 lo lint --format github        # ::error file=…,line=…::message (the default in a GitHub Actions job)
 ```
 
-`--notes` (Go-only) adds an advisory per Lo cluster spec key whose value equals its documented default (see [Cluster specs](specs.md#default-resolution)): `spec.nodes.controlPlane: 1`, `spec.runtime: kind`, and `spec.registries.mirrors` when the list is exactly the four default mirrors on their standard URLs. Each prints as `[note] <file>: <key> equals the default (<value>); you can drop it` on stdout. It is advice only: no finding, the exit code is unchanged, and the spec is never edited. The flag is opt-in because the bash lint prints no such line and the parity harnesses diff every lint case byte for byte.
+`--notes` (Go-only) adds an advisory per Lo cluster spec key whose value equals its documented default (see [Cluster specs](specs.md#default-resolution)): `spec.nodes.controlPlane: 1`, `spec.runtime: kind`, `spec.network.dnsSearch: []`, and `spec.registries.mirrors` when the list is exactly the four default mirrors on their standard URLs. Each prints as `[note] <file>: <key> equals the default (<value>); you can drop it` on stdout. It is advice only: no finding, the exit code is unchanged, and the spec is never edited. The flag is opt-in because the bash lint prints no such line and the parity harnesses diff every lint case byte for byte.
 
 ### lo status
 

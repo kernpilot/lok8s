@@ -1,0 +1,24 @@
+error: spec.network.dnsSearch[1] has a character that is not valid in a DNS name: 'corp_example'. Use only letters, digits, hyphens and dots.
+error: spec.network.dnsSearch[2] is empty. Write a DNS name, or remove the entry.
+error: spec.network.dnsSearch[3] is empty. Write a DNS name, or remove the entry.
+error: spec.network.dnsSearch[4] has an empty label: 'example..com'. Remove the extra dot.
+error: spec.network.dnsSearch[5] has an empty label: '.example'. Remove the extra dot.
+error: spec.network.dnsSearch[6] has an empty label: '.'. Remove the extra dot.
+error: spec.network.dnsSearch[7] has an empty label: 'a.example..'. Remove the extra dot.
+error: spec.network.dnsSearch[8] has a label that starts or ends with a hyphen: '-bad.example'. Remove that hyphen.
+error: spec.network.dnsSearch[9] has a label that starts or ends with a hyphen: 'bad-.example'. Remove that hyphen.
+error: spec.network.dnsSearch[10] has a label of 64 characters: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example'. The limit is 63 characters per label. Use a shorter label.
+error: spec.network.dnsSearch[11] has 257 characters: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b'. The limit is 253, without a trailing dot. Use a shorter name.
+error: spec.network.dnsSearch[12] has a character that is not valid in a DNS name: 'é.example'. Use only letters, digits, hyphens and dots.
+error: spec.network.dnsSearch[13] has a character that is not valid in a DNS name: 'corp.example.com other.example'. Use only letters, digits, hyphens and dots.
+error: spec.network.dnsSearch[14] has a NUL character. Remove the NUL character.
+error: spec.network.dnsSearch[15] has a character that is not valid in a DNS name: 'a\nb.example'. Use only letters, digits, hyphens and dots.
+error: spec.network.dnsSearch[16] has a character that is not valid in a DNS name: 'corp.example.com
+'. Use only letters, digits, hyphens and dots.
+error: spec.network.dnsSearch[17] has a character that is not valid in a DNS name: 'blk.example
+'. Use only letters, digits, hyphens and dots.
+error: spec.network.dnsSearch[18] must be a DNS name. Found a map. Write the entry as text, for example corp.example.com.
+error: spec.network.dnsSearch[19] must be a DNS name. Found a list. Write the entry as text, for example corp.example.com.
+error: spec.network.dnsSearch[20] must be a DNS name. Found the number 123. Write the entry as text, for example corp.example.com.
+error: spec.network.dnsSearch[21] must be a DNS name. Found the boolean true. Write the entry as text, for example corp.example.com.
+error: spec.network.dnsSearch[22] must be a DNS name. Found a value with the tag !custom. Write the entry as text, for example corp.example.com.

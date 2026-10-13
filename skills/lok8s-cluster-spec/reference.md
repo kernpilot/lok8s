@@ -27,6 +27,8 @@ spec:
   network:                                 # auto-derived for *.lok8s.dev; REQUIRED otherwise
     name: <docker-network>                 # default = metadata.name
     cidr: 10.125.<slot>.0/24
+    dnsSearch: []                          # default []: host search domains stay out of nodes/pods;
+                                           # a list of <=32 DNS names replaces it, as written (kind >= v0.18.0)
   nodes:
     controlPlane: 1                        # 1-9
     workers: 0                             # 0-99

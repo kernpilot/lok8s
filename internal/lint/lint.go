@@ -135,6 +135,7 @@ func (l *Linter) all(domain string) bool {
 
 	errs := l.schema(domainDir, specFile)
 	errs += l.kubernetesVersion(domainDir, specFile)
+	errs += l.dnsSearch(specFile)
 	l.notes(specFile)
 	errs += l.clusterref(domainDir, specFile)
 	errs += l.bootstrap(domainDir, specFile, domain)

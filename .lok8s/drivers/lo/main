@@ -11,6 +11,11 @@ _LO_DIR="${BASH_SOURCE[0]%/*}"
 source "${PATH_LOK8S}/utils/ip.sh"
 # shellcheck source=../../utils/oidc.sh
 source "${PATH_LOK8S}/utils/oidc.sh"
+# spec.network.dnsSearch check (also used by `lo lint`) and its bounded yq.
+# shellcheck source=../../utils/yqbound.sh
+source "${PATH_LOK8S}/utils/yqbound.sh"
+# shellcheck source=../../utils/dnssearch.sh
+source "${PATH_LOK8S}/utils/dnssearch.sh"
 # kapply (collapsing progress + heal) for the cluster-service phases.
 # shellcheck source=../../utils/kapply.sh
 source "${PATH_LOK8S}/utils/kapply.sh"
@@ -215,8 +220,10 @@ driver::export() {
   # read_config first: export_spec_envs derives LOK8S_SPEC_LOADBALANCER_POOL from
   # $LOK8S_LB_POOL (set by lo::read_lb_config), so on --bootstrap (where
   # driver::provision — which normally calls read_config — is skipped) the metallb
-  # pool would otherwise render empty.
-  lo::read_config "${cluster_yaml}"
+  # pool would otherwise render empty. `|| return 1`: the caller runs this with
+  # errexit off (`driver::export … || return 1`), and a failed read (a rejected
+  # spec.network.dnsSearch) must stop --bootstrap too (Go: Export).
+  lo::read_config "${cluster_yaml}" || return 1
   lo::export_spec_envs "${cluster_yaml}"
 }
 

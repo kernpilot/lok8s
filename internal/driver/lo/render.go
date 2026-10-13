@@ -28,8 +28,25 @@ import (
 )
 
 // renderKindConfig renders the full kind Cluster config (bash:
-// lo::render_kind_config). Node counts / host ports / extra mounts come from
-// the env the read pass exported, exactly like the bash globals.
+// lo::render_kind_config). Node counts / host ports / extra mounts and the
+// DNS search list come from the env the read pass exported, exactly like
+// the bash globals.
+//
+// networking.dnsSearch (kind v0.18.0 and later) keeps the host's DNS search
+// domains out of the cluster. Docker copies the `search` line of the host's
+// resolv.conf (a router domain such as fritz.box, a VPN domain such as
+// example.ts.net) into every node, and kubelet appends those domains to the
+// search list of every pod, after the cluster domains and with ndots:5. A
+// pod then sends one query per search domain before the real name, and
+// resolvers with a fixed time budget (musl, hickory) fail external names.
+//
+// kind starts every node container with KIND_DNS_SEARCH=<list> when the key
+// is set (a missing key or a null keeps the host's line). The node
+// entrypoint then writes /etc/resolv.conf with that list as its only search
+// line, or with no search line for the empty list. It does this on every
+// boot, before systemd starts kubelet. The nameserver stays the one kind
+// chose. The default is the empty list; spec.network.dnsSearch
+// (readDNSSearchConfig) replaces it.
 func (d *Driver) renderKindConfig(clusterName, k8sVersion, network, clusterYAML string) string {
 	_ = network // the bash accepted it for symmetry; only the env export uses it
 	nodesYAML := d.renderNodes(k8sVersion, clusterYAML)
@@ -41,6 +58,7 @@ networking:
   disableDefaultCNI: true
   podSubnet: "%s"
   serviceSubnet: "%s"
+  dnsSearch: %s
 %s
 containerdConfigPatches:
   - |-
@@ -48,8 +66,22 @@ containerdConfigPatches:
       config_path = "/etc/containerd/certs.d"
     [plugins."io.containerd.grpc.v1.cri".containerd]
       max_concurrent_downloads = %s
-`, clusterName, clusterName, DefaultPodCIDR, DefaultSvcCIDR, nodesYAML,
+`, clusterName, clusterName, DefaultPodCIDR, DefaultSvcCIDR,
+		renderDNSSearch(getenv("LOK8S_NETWORK_DNS_SEARCH")), nodesYAML,
 		config.EnvOr("LOK8S_MAX_CONCURRENT_DOWNLOADS", "3"))
+}
+
+// renderDNSSearch renders the value of networking.dnsSearch from the
+// space-separated list readDNSSearchConfig exported: `[]` for none, else a
+// flow list of quoted names (`["corp.example.com", "example.ts.net"]`).
+// Bash: lo::render_dns_search.
+func renderDNSSearch(list string) string {
+	names := strings.Fields(list)
+	quoted := make([]string, 0, len(names))
+	for _, name := range names {
+		quoted = append(quoted, `"`+name+`"`)
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
 // renderCertsDMount emits the certs.d extraMount entry (bash:

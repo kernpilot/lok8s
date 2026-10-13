@@ -16,6 +16,7 @@ package lo
 //	LOK8S_CP_COUNT, LOK8S_WORKER_COUNT, LOK8S_HOST_PORTS
 //	LOK8S_EXTRA_MOUNTS_COUNT, LOK8S_MAX_CONCURRENT_DOWNLOADS
 //	LOK8S_LB_POOL                     — MetalLB IP range
+//	LOK8S_NETWORK_DNS_SEARCH          — DNS search list of the nodes (space-separated, "" = none)
 //	LOK8S_REMOTE_MODE, LOK8S_REMOTE_EXPOSE, LOK8S_REMOTE_SYNC_*, LOK8S_REMOTE_TILT
 
 import (
@@ -237,6 +238,25 @@ func readLBConfig(clusterYAML string) {
 	os.Setenv("LOK8S_LB_POOL", pool)
 }
 
+// readDNSSearchConfig resolves spec.network.dnsSearch, the DNS search list
+// of the kind nodes (the reason is at renderKindConfig), into
+// LOK8S_NETWORK_DNS_SEARCH (bash: lo::read_dns_search_config). A missing
+// key or a null is the empty list: the nodes drop the host's search
+// domains. CheckDNSSearch decides; the read prints one error per problem,
+// then fails.
+func readDNSSearchConfig(clusterYAML string, errOut io.Writer) error {
+	os.Setenv("LOK8S_NETWORK_DNS_SEARCH", "")
+	names, problems := CheckDNSSearch(yqsem.LoadNode(clusterYAML))
+	for _, p := range problems {
+		fmt.Fprintf(errOut, "error: %s\n", p)
+	}
+	if len(problems) > 0 {
+		return ui.Handled(fmt.Errorf("spec.network.dnsSearch: %d %s", len(problems), plural(len(problems), "problem", "problems")))
+	}
+	os.Setenv("LOK8S_NETWORK_DNS_SEARCH", strings.Join(names, " "))
+	return nil
+}
+
 var syncDestRe = regexp.MustCompile(`^[A-Za-z0-9_./+-]+$`)
 
 // readRemoteConfig resolves spec.remote (bash: lo::read_remote_config).
@@ -304,7 +324,7 @@ func readConfig(clusterYAML string, errOut io.Writer) error {
 		return err
 	}
 	readLBConfig(clusterYAML)
-	return nil
+	return readDNSSearchConfig(clusterYAML, errOut)
 }
 
 // ── Spec env export ───────────────────────────────────────

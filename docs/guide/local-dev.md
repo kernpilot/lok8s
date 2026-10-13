@@ -254,6 +254,73 @@ spec:
     pool: "10.125.125.125-10.125.125.150"   # 26 IPs from slot 125's MetalLB range
 ```
 
+## Host DNS search domains
+
+By default, the search domains of your machine (the `search` line of
+`/etc/resolv.conf`, for example `fritz.box` or a VPN domain such as
+`example.ts.net`) do not go into the cluster. Docker copies that line into
+every kind node, and kubelet adds it to the search list of every pod, which
+has `ndots:5`. A pod then sends a query for each search domain before the real
+name, and resolvers with a fixed time budget (musl, hickory) fail external
+names.
+
+The kind config that `lo up` renders sets `networking.dnsSearch: []`. kind
+then starts every node with an empty `KIND_DNS_SEARCH`, and the node removes
+the search lines from its `/etc/resolv.conf` on every boot, before kubelet
+starts. A pod's search list holds only the cluster domains
+(`<namespace>.svc.cluster.local svc.cluster.local cluster.local`). The
+nameserver of the node does not change.
+
+The field needs **kind v0.18.0 or later**. An older kind binary stops with an
+unknown-field error on the config. A node image from before kind v0.18.0
+ignores the field, and its nodes keep the host search domains.
+
+Short host names no longer resolve on the nodes either, not only in pods. This
+applies to image pulls (containerd resolves a registry host on the node) and
+to pods with `hostNetwork: true`. Use the full name. For one pod,
+`dnsConfig.searches` also works. For the whole cluster, set
+`spec.network.dnsSearch`.
+
+### Keep search domains: `spec.network.dnsSearch`
+
+If the cluster must resolve short names of your company or home network, list
+the domains in the cluster spec. The list replaces the empty default: lok8s
+writes it to `networking.dnsSearch`, and every node and pod gets these
+domains (pods after the cluster domains).
+
+```yaml
+spec:
+  network:
+    dnsSearch:
+      - corp.example.com
+      - example.ts.net
+```
+
+Each entry must be a DNS name: letters (any case), digits, hyphens and dots,
+with at most 63 characters per label and 253 in total. A trailing dot is
+allowed. lok8s writes each entry as you wrote it. The list takes at most 32
+entries, the Kubernetes limit for the search list of a pod (kubelet puts the
+three cluster domains first and drops what does not fit). `lo up` and
+`lo lint` reject a bad entry before anything is created. The error names the
+entry, its value and the fix for that cause. To keep the full host search
+line, copy its domains into the list. A missing key and `dnsSearch: []` both
+drop the host search domains.
+
+YAML anchors, aliases and merge keys (`<<:`) work in the list. lok8s reads
+only `spec.network.dnsSearch` and its entries, so anchors elsewhere in the
+spec cost nothing. The frozen bash implementation reads the list with `yq`
+v4.47.1 or later (it needs `--yaml-fix-merge-anchor-to-spec`; an older `yq`
+stops the read with an error that names its version). Each read has two
+limits. The time limit (10 s) always holds: a pure-bash watchdog stops `yq`,
+with no GNU `timeout` (macOS has none). The memory limit (1 GiB of data
+memory, `ulimit -d`) is best effort: it holds only where the operating system
+enforces it. At a limit, the read stops with one error line that names the
+limit.
+
+kind sets the search list when it creates the nodes. A cluster created before
+this change, or before you change the list, keeps its old search line until
+you recreate it (`lo down` and `lo up`).
+
 ## Custom in-cluster DNS
 
 Declare custom CoreDNS in the cluster spec; `lo up` renders it into a

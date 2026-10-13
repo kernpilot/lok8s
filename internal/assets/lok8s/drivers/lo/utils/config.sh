@@ -15,11 +15,13 @@
 #   LOK8S_CP_COUNT, LOK8S_WORKER_COUNT, LOK8S_HOST_PORTS
 #   LOK8S_EXTRA_MOUNTS_COUNT, LOK8S_MAX_CONCURRENT_DOWNLOADS
 #   LOK8S_LB_POOL                     — MetalLB IP range
+#   LOK8S_NETWORK_DNS_SEARCH          — DNS search list of the nodes (space-separated, "" = none)
 #   LOK8S_REMOTE_MODE, LOK8S_REMOTE_EXPOSE, LOK8S_REMOTE_SYNC_*
 #   LOK8S_REMOTE_TILT
 
 import ^utils/ip
 import ^utils/oidc
+import ^utils/dnssearch
 
 # ── Validation ────────────────────────────────────────────
 
@@ -232,6 +234,32 @@ lo::read_lb_config() {
   export LOK8S_LB_POOL
 }
 
+# lo::read_dns_search_config — spec.network.dnsSearch, the DNS search list of
+# the kind nodes (the reason is at lo::render_kind_config). A missing key or a
+# null is the empty list: the nodes drop the host's search domains.
+# dnssearch::check decides; the read prints one error per problem, then
+# fails. Go twin: readDNSSearchConfig.
+lo::read_dns_search_config() {
+  local cluster_yaml="${1}"
+  LOK8S_NETWORK_DNS_SEARCH=""
+  export LOK8S_NETWORK_DNS_SEARCH
+
+  if ! dnssearch::check "${cluster_yaml}"; then
+    local problem
+    for problem in ${DNSSEARCH_PROBLEMS[@]+"${DNSSEARCH_PROBLEMS[@]}"}; do
+      echo "error: ${problem}" >&2
+    done
+    return 1
+  fi
+  # The `+` form: bash < 4.4 under `set -u` stops on an empty "${a[@]}"
+  # (an empty or missing list).
+  local name names=""
+  for name in ${DNSSEARCH_NAMES[@]+"${DNSSEARCH_NAMES[@]}"}; do
+    names+="${names:+ }${name}"
+  done
+  LOK8S_NETWORK_DNS_SEARCH="${names}"
+}
+
 lo::read_remote_config() {
   local cluster_yaml="${1}"
 
@@ -276,11 +304,16 @@ lo::read_remote_config() {
 }
 
 # lo::read_config — read all config sections in the correct order.
+# `|| return 1` on each reader: driver::provision runs this tree with errexit
+# off (`driver::provision || rc=$?` in libs/provision), so without it a failed
+# reader printed its error and the read went on, and the function returned the
+# status of the LAST reader. Go twin: readConfig.
 lo::read_config() {
   local cluster_yaml="${1}"
-  lo::read_network_config "${cluster_yaml}"   # also calls read_registry_config
-  lo::read_node_config "${cluster_yaml}"
+  lo::read_network_config "${cluster_yaml}" || return 1   # also calls read_registry_config
+  lo::read_node_config "${cluster_yaml}" || return 1
   lo::read_lb_config "${cluster_yaml}"
+  lo::read_dns_search_config "${cluster_yaml}" || return 1
 }
 
 # ── Spec env export ───────────────────────────────────────
