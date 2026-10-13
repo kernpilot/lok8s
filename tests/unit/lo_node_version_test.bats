@@ -180,7 +180,7 @@ _yq_stub() {
 
 @test "spec::kind_node_version: a yq stopped by SIGSEGV is named" {
   _spec "version: v1.31.4"
-  _yq_stub 'kill -SEGV $$'
+  _yq_stub 'ulimit -c 0; kill -SEGV $$'
   run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
   assert_failure
   assert_output "spec.kubernetes.version cannot be read: yq stopped at the memory limit of 256 MiB, or a signal stopped it. Simplify the spec file."
@@ -192,8 +192,9 @@ _yq_stub() {
   mkdir -p "${TMPDIR}"
   # The yq stub stops the read it runs in (its parent) with SIGTERM, as an
   # interrupt of `lo` would.
-  _yq_stub 'kill -TERM "${PPID}"; exec sleep 2'
-  run spec::_kver_yq "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" -r '.kind'
+  _yq_stub 'kill -TERM "${PPID}"; exec sleep 1'
+  run bash -c 'import() { :; }; source "$1/domain.sh"; source "$1/spec.sh"; spec::_kver_yq "$2" -r .kind' \
+    bash "${_PROJECT_ROOT}/.lok8s/utils" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
   [ "${status}" -eq 143 ] || { echo "status ${status}, want 143 (SIGTERM)" >&2; return 1; }
   run ls -A "${TMPDIR}"
   assert_output ""
