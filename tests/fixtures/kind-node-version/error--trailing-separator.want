@@ -1,0 +1,1 @@
+error spec.kubernetes.version cannot be read: the spec file has 2 YAML documents. Keep only the cluster spec in the file.

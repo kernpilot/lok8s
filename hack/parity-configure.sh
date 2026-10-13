@@ -193,16 +193,28 @@ spec:
     domain: iota.dev
 EOF
 
-# kver.dev / knull.dev / kmap.dev — spec.kubernetes.version of a Lo cluster:
-# malformed ("1.31": no kind node image has that tag), the literal string
-# "null" (an unset version: clean), and a map (malformed).
-mkdir -p "${CL}/kver.dev" "${CL}/knull.dev" "${CL}/kmap.dev"
-printf 'kind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: kver\nspec:\n  kubernetes:\n    version: "1.31"\n  bootstrap: []\n' \
-  > "${CL}/kver.dev/cluster.lok8s.yaml"
-printf 'kind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: knull\nspec:\n  kubernetes:\n    version: "null"\n  bootstrap: []\n' \
-  > "${CL}/knull.dev/cluster.lok8s.yaml"
-printf 'kind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: kmap\nspec:\n  kubernetes:\n    version: {minor: 31}\n  bootstrap: []\n' \
-  > "${CL}/kmap.dev/cluster.lok8s.yaml"
+# k*.dev — spec.kubernetes.version of a Lo cluster, read by `lo lint` through
+# the one reader of each implementation (lodriver.NodeVersion,
+# spec::kind_node_version). The two readers once disagreed on merge keys,
+# aliases, block scalars and a spec.kubernetes that is not a map. Each case is
+# diffed below and pinned as well. The full shape table is
+# tests/fixtures/kind-node-version/ (TestNodeVersionMatchesBash). A spec with
+# two YAML documents is in that table only: `lo lint` reads the kind of such a
+# spec differently in the two implementations (Go reads the first document)
+# before the reader runs.
+kver_spec() {  # <domain> <spec lines, %b> [<lines before kind:, %b>]
+  mkdir -p "${CL}/${1}"
+  printf '%bkind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: %s\nspec:\n%b  bootstrap: []\n' \
+    "${3:-}" "${1%%.*}" "${2}" > "${CL}/${1}/cluster.lok8s.yaml"
+}
+kver_spec kver.dev    '  kubernetes:\n    version: kindest/node:v1.31.4\n'      # not an image tag
+kver_spec knull.dev   '  kubernetes:\n    version: "null"\n'                    # unset: clean
+kver_spec kmap.dev    '  kubernetes:\n    version: {minor: 31}\n'               # a map: cannot be read
+kver_spec klatest.dev '  kubernetes:\n    version: latest\n'                    # a custom tag: clean
+kver_spec kmerge.dev  '  kubernetes:\n    <<: *v\n' 'x: &v {version: kindest/node:v1.31.4}\n'  # merged value
+kver_spec kalias.dev  '  kubernetes:\n    version: *v\n' 'x: &v kindest/node:v1.31.4\n'        # alias
+kver_spec kblock.dev  '  kubernetes:\n    version: |\n      v1.31.4\n'          # block scalar: clean
+kver_spec klist.dev   '  kubernetes: []\n'                                        # a list: cannot be read
 
 # sub.alpha.dev — the one-cluster-per-apex violation.
 mkdir -p "${CL}/sub.alpha.dev"
@@ -327,27 +339,37 @@ check - lint --domain epsilon.app       # clusterRef.domain not found
 check - lint --domain sub.alpha.dev     # apex violation reported repo-globally anyway
 check - lint --domain iota.dev          # fully clean domain
 check - lint --domain nowhere.dev       # no spec at all
-# The three version cases are pinned as well: parity alone also passes when
-# both sides drift together.
+# The version cases are pinned as well: parity alone also passes when both
+# sides drift together.
 kver_pin() {  # <label> <file> <fixed string> [absent]
   if grep -qF -- "${3}" "${2}"; then
     if [[ -z "${4:-}" ]]; then echo "ok: ${1}"; else fail "${1} — '${3}' found in ${2}"; fi
   elif [[ -n "${4:-}" ]]; then echo "ok: ${1}"
   else fail "${1} — '${3}' not in ${2}"; fi
 }
-check - lint --domain kver.dev          # malformed spec.kubernetes.version (Lo)
-for side in bash go; do
-  kver_pin "${side}: kver.dev reports the version" "${WORK}/${side}.err" "  spec.kubernetes.version '1.31' is not a kind node version. "
-done
-check - lint --domain knull.dev         # version "null" = unset: clean
-for side in bash go; do
-  kver_pin "${side}: knull.dev passes" "${WORK}/${side}.out" "  OK"
-  kver_pin "${side}: knull.dev reports no version" "${WORK}/${side}.err" "spec.kubernetes.version" absent
-done
-check - lint --domain kmap.dev          # version is a map: malformed
-for side in bash go; do
-  kver_pin "${side}: kmap.dev reports the map" "${WORK}/${side}.err" "  spec.kubernetes.version is a map, not a kind node version. "
-done
+kver_problem() {  # <domain> <the problem line, without the indent>
+  check - lint --domain "${1}"
+  for side in bash go; do
+    kver_pin "${side}: ${1} reports the version" "${WORK}/${side}.err" "  ${2}"
+    if grep -qE '^\[error\] *$' "${WORK}/${side}.err"; then fail "${side}: ${1} printed an empty [error] line"; fi
+  done
+}
+kver_clean() {  # <domain>
+  check - lint --domain "${1}"
+  for side in bash go; do
+    kver_pin "${side}: ${1} passes" "${WORK}/${side}.out" "  OK"
+    kver_pin "${side}: ${1} reports no version" "${WORK}/${side}.err" "spec.kubernetes.version" absent
+  done
+}
+kver_hint="Set a kindest/node image tag, for example v1.31.4. To use the default node image of kind, remove the key."
+kver_problem kver.dev   "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. ${kver_hint}"
+kver_clean   knull.dev
+kver_problem kmap.dev   "spec.kubernetes.version cannot be read: the value is a map, not an image tag. ${kver_hint}"
+kver_clean   klatest.dev
+kver_problem kmerge.dev "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. ${kver_hint}"
+kver_problem kalias.dev "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. ${kver_hint}"
+kver_clean   kblock.dev
+kver_problem klist.dev  "spec.kubernetes.version cannot be read: spec.kubernetes is a list, not a map. Write spec.kubernetes as a YAML map."
 check - --domain iota.dev lint          # global-flag spelling
 # Go-only: --notes adds the default-equal advisory and changes nothing
 # else: same exit code, same stderr, stdout equal once the [note] lines

@@ -462,6 +462,18 @@ audit::check_k8s_version() {
   supported=$(audit::_k8s_supported "$(audit::_k8s_today)")
   latest="${_AUDIT_K8S_MINOR_EOL%%:*}"
 
+  # A Lo cluster without a version uses the default node image of the installed
+  # kind (spec::kind_node_version reads it as unset): there is no version to
+  # parse, and nothing is wrong.
+  if [[ "${kind}" == "lo" ]] && [[ "$(yq -r '.spec.kubernetes.version | [tag == "!!null", . == "", . == "null"] | any' \
+      "${spec_file}" 2>/dev/null)" == "true" ]]; then
+    audit::_emit "${id}" "${title}" low pass \
+      "spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release." \
+      "No action. To pin the Kubernetes version, set spec.kubernetes.version to a kindest/node image tag of a supported minor, for example v${latest}.x." \
+      "${spec_uri}" "${spec_lineno}"
+    return 0
+  fi
+
   local raw
   raw=$(yq -r '.spec.kubernetes.version // ""' "${spec_file}" 2>/dev/null || echo "")
   raw="${raw%%@*}"; raw="${raw#v}"

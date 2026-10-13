@@ -317,8 +317,10 @@ func exportSpecEnvs(clusterYAML string, errOut io.Writer) error {
 	os.Setenv("LOK8S_SPEC_CLUSTER_NAME", yqsem.Or(yqsem.Lookup(root, "metadata", "name"), ""))
 	os.Setenv("LOK8S_SPEC_CLUSTER_DOMAIN", yqsem.Or(yqsem.Lookup(root, "spec", "cluster", "domain"), ""))
 	os.Setenv("LOK8S_SPEC_CLUSTER_NAMESPACE", yqsem.Or(yqsem.Lookup(root, "spec", "cluster", "namespace"), "default"))
-	// The literal string "null" is an unset version too (NodeVersion), so it
-	// never reaches an addon render as a version.
+	// The raw value, not NodeVersion: the export must not stop a command
+	// that does not use the version, and it does not validate. It only maps
+	// the literal string "null" to "" (NodeVersion reads it as unset too), so
+	// "null" never reaches an addon render as a version.
 	k8sVersion := yqsem.Or(yqsem.Lookup(root, "spec", "kubernetes", "version"), "")
 	if k8sVersion == "null" {
 		k8sVersion = ""

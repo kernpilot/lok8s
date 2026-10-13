@@ -201,6 +201,13 @@ spec:
     version: v1.34.3
 EOF
 
+# ── nover.dev — a Lo cluster without spec.kubernetes.version. It uses the
+# default node image of kind: the version check is a neutral pass, not a
+# version that the audit cannot parse.
+mkdir -p "${PROJ}/clusters/nover.dev"
+printf 'kind: Lo\nmetadata:\n  name: nover\nspec:\n  oidc:\n    issuer: https://id.nover.dev\n' \
+  > "${PROJ}/clusters/nover.dev/cluster.lok8s.yaml"
+
 # Every case diffs rc/stdout/stderr with the project dir normalized to PROJ
 # (findings embed absolute paths); expect_rc pins the exit-code contract on
 # the Go binary alone.
@@ -210,6 +217,19 @@ for d in clean.dev viol.cloud secpol.app identity.net gamma.app; do
   check - audit "${d}"
   check - audit "${d}" --json
   check - audit "${d}" --sarif
+done
+
+# nover.dev: both sides report the neutral pass (pinned: parity alone also
+# passes when both sides drift together).
+check - audit nover.dev
+check - audit nover.dev --json
+for side in bash go; do
+  if grep -qF 'spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release.' "${WORK}/${side}.out" \
+    && ! grep -qF 'Could not parse spec.kubernetes.version' "${WORK}/${side}.out"; then
+    echo "ok: ${side}: nover.dev reports the kind default, not a parse failure"
+  else
+    fail "${side}: nover.dev does not report the kind default node image"
+  fi
 done
 
 # Domain resolution forms + the alias.

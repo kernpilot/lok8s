@@ -1,0 +1,1 @@
+error spec.kubernetes.version cannot be read: the value is a map, not an image tag. Set a kindest/node image tag, for example v1.31.4. To use the default node image of kind, remove the key.

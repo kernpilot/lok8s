@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/yqsem"
@@ -286,7 +288,21 @@ func (a *Auditor) checkK8sVersion(r *run, specFile, kind string) {
 	supported := strings.Join(supportedMinors, ", ")
 	latest := k8sLatestMinor()
 
-	raw := altNode(lookupFile(specFile, "spec", "kubernetes", "version"), "")
+	version, readable := k8sVersionNode(specFile)
+
+	// A Lo cluster without a version uses the default node image of the
+	// installed kind (lodriver.NodeVersion reads it as unset): there is no
+	// version to parse, and nothing is wrong.
+	if kind == "lo" && readable && (yqsem.IsNull(version) ||
+		version.Kind == yaml.ScalarNode && (version.Value == "" || version.Value == "null")) {
+		r.emit(Finding{ID: id, Title: title, Severity: "low", Status: "pass",
+			Detail:      "spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release.",
+			Remediation: "No action. To pin the Kubernetes version, set spec.kubernetes.version to a kindest/node image tag of a supported minor, for example v" + latest + ".x.",
+			File:        specURI, Line: specLineno})
+		return
+	}
+
+	raw := altNode(version, "")
 	if i := strings.Index(raw, "@"); i >= 0 {
 		raw = raw[:i]
 	}
@@ -338,6 +354,28 @@ func (a *Auditor) checkK8sVersion(r *run, specFile, kind string) {
 		Detail:      "Kubernetes " + minor + " is End-of-Life (oldest supported minor: " + oldest + ") — no upstream security patches.",
 		Remediation: "Upgrade to a supported minor (" + supported + "); for KubeOne bump spec.kubernetes.version and run 'lo provision'.",
 		File:        specURI, Line: specLineno})
+}
+
+// k8sVersionNode reads spec.kubernetes.version the way the bash check reads
+// it with `yq '.spec.kubernetes.version'`: merge keys resolved, and a scalar
+// on the path reads as null. readable is false where that yq read fails: an
+// unreadable file, or a list on the path.
+func k8sVersionNode(specFile string) (version *yaml.Node, readable bool) {
+	doc := yqsem.Load(specFile)
+	if !doc.OK() {
+		return nil, false
+	}
+	n := yqsem.Deref(doc.Root)
+	for _, key := range []string{"spec", "kubernetes", "version"} {
+		if yqsem.IsNull(n) || n.Kind == yaml.ScalarNode {
+			return nil, true
+		}
+		if n.Kind != yaml.MappingNode {
+			return nil, false
+		}
+		n, _ = yqsem.MapGetMerged(n, key)
+	}
+	return n, true
 }
 
 // minorRank orders "maj.min" numerically (bash: audit::_minor_rank).

@@ -292,8 +292,10 @@ lo::export_spec_envs() {
   LOK8S_SPEC_CLUSTER_DOMAIN=$(yq -r '.spec.cluster.domain // ""' "${cluster_yaml}")
   LOK8S_SPEC_CLUSTER_NAMESPACE=$(yq -r '.spec.cluster.namespace // "default"' "${cluster_yaml}")
   LOK8S_SPEC_KUBERNETES_VERSION=$(yq -r '.spec.kubernetes.version // ""' "${cluster_yaml}")
-  # The literal string "null" is an unset version too (spec::kind_node_version),
-  # so it never reaches an addon render as a version.
+  # The raw value, not spec::kind_node_version: the export must not stop a
+  # command that does not use the version, and it does not validate. It only
+  # maps the literal string "null" to "" (the reader reads it as unset too), so
+  # "null" never reaches an addon render as a version.
   [[ "${LOK8S_SPEC_KUBERNETES_VERSION}" != "null" ]] || LOK8S_SPEC_KUBERNETES_VERSION=""
   LOK8S_SPEC_DNS_DOMAINFILTER=$(yq -r '.spec.dns.domainFilter // ""' "${cluster_yaml}")
   export LOK8S_SPEC_CLUSTER_NAME LOK8S_SPEC_CLUSTER_DOMAIN

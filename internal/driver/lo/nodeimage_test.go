@@ -8,6 +8,7 @@ package lo
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -15,53 +16,124 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/testutil"
-	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 const testDigest = "@sha256:0f5cc49c5e73c0c2bb6e2df56e7df189240d83cf94edfa30946482eb08ec57d2"
 
-func TestNodeVersion(t *testing.T) {
+// nodeVersionFixtures lists tests/fixtures/kind-node-version/<case>.yaml.
+// Each <case>.want holds one line: "unset", "tag <tag>", or "error
+// <message>". The same files drive the bats twin
+// (tests/unit/lo_node_version_test.bats).
+func nodeVersionFixtures(t *testing.T) map[string]string {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(testutil.RepoRoot(t), "tests", "fixtures", "kind-node-version", "*.yaml"))
+	if err != nil || len(files) < 50 {
+		t.Fatalf("kind node version fixtures missing (%d found, err %v)", len(files), err)
+	}
+	out := map[string]string{}
+	for _, f := range files {
+		want, err := os.ReadFile(strings.TrimSuffix(f, ".yaml") + ".want")
+		if err != nil {
+			t.Fatalf("%s has no .want file: %v", filepath.Base(f), err)
+		}
+		out[f] = strings.TrimSuffix(string(want), "\n")
+	}
+	return out
+}
+
+// nodeVersionVerdict renders NodeVersion in the .want format.
+func nodeVersionVerdict(path string) string {
+	v, err := NodeVersion(path)
+	switch {
+	case err != nil:
+		return "error " + err.Error()
+	case v == "":
+		return "unset"
+	}
+	return "tag " + v
+}
+
+func TestNodeVersionFixtures(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct {
-		name, versionYAML, want, wantErr string
-	}{
-		{name: "missing key", versionYAML: ""},
-		{name: "yaml null", versionYAML: "version: null"},
-		{name: "tilde null", versionYAML: "version: ~"},
-		{name: "empty value", versionYAML: "version:"},
-		{name: "empty string", versionYAML: `version: ""`},
-		{name: "literal null string", versionYAML: `version: "null"`},
-		{name: "plain", versionYAML: "version: v1.35.0", want: "v1.35.0"},
-		{name: "quoted", versionYAML: `version: "v1.31.4"`, want: "v1.31.4"},
-		{name: "digest", versionYAML: "version: v1.31.12" + testDigest, want: "v1.31.12" + testDigest},
-		{name: "pre-release", versionYAML: "version: v1.36.0-rc.1", want: "v1.36.0-rc.1"},
-		{name: "no v prefix", versionYAML: `version: "1.31.0"`, wantErr: "spec.kubernetes.version '1.31.0' is not a kind node version."},
-		{name: "minor only", versionYAML: `version: "1.31"`, wantErr: "spec.kubernetes.version '1.31' is not a kind node version."},
-		{name: "float", versionYAML: "version: 1.31", wantErr: "spec.kubernetes.version '1.31' is not a kind node version."},
-		{name: "bool", versionYAML: "version: false", wantErr: "spec.kubernetes.version 'false' is not a kind node version."},
-		{name: "latest", versionYAML: "version: latest", wantErr: "spec.kubernetes.version 'latest' is not a kind node version."},
-		{name: "short digest", versionYAML: "version: v1.35.0@sha256:abc", wantErr: "spec.kubernetes.version 'v1.35.0@sha256:abc' is not a kind node version."},
-		{name: "map", versionYAML: "version: {a: b}", wantErr: "spec.kubernetes.version is a map, not a kind node version."},
-		{name: "list", versionYAML: "version: [v1.35.0]", wantErr: "spec.kubernetes.version is a list, not a kind node version."},
+	seen := map[string]bool{}
+	for path, want := range nodeVersionFixtures(t) {
+		if got := nodeVersionVerdict(path); got != want {
+			t.Errorf("%s:\n got  %q\n want %q", filepath.Base(path), got, want)
+		}
+		verdict, _, _ := strings.Cut(want, " ")
+		if prefix, _, _ := strings.Cut(filepath.Base(path), "--"); prefix != verdict {
+			t.Errorf("%s: the name says %q, the .want file says %q", filepath.Base(path), prefix, verdict)
+		}
+		seen[verdict] = true
+	}
+	for _, v := range []string{"unset", "tag", "error"} {
+		if !seen[v] {
+			t.Errorf("no fixture for the verdict %q", v)
+		}
+	}
+}
+
+// TestNodeVersionMatchesBash runs the bash twin (spec::kind_node_version) on
+// every fixture and compares its answer with the Go answer. It needs bash
+// and the pinned yq (.bin/yq); it skips without them, and fails without
+// them under CI=true.
+func TestNodeVersionMatchesBash(t *testing.T) {
+	root := testutil.RepoRoot(t)
+	if _, err := os.Stat(filepath.Join(root, ".bin", "yq")); err != nil {
+		if os.Getenv("CI") == "true" {
+			t.Fatalf("the pinned yq is missing under CI: %v", err)
+		}
+		t.Skip("no .bin/yq (b install)")
+	}
+	spec := filepath.Join(root, ".lok8s", "utils", "spec.sh")
+	// Source the twin with the argsh import stubbed: only the reader runs.
+	script := `import() { :; }; source "$1"
+if out=$(spec::kind_node_version "$2"); then
+  if [[ -n "${out}" ]]; then printf 'tag %s\n' "${out}"; else echo unset; fi
+else
+  printf 'error %s\n' "${out}"
+fi`
+	for path := range nodeVersionFixtures(t) {
+		cmd := exec.CommandContext(t.Context(), "bash", "-c", script, "bash", spec, path)
+		cmd.Env = append(os.Environ(), "PATH="+filepath.Join(root, ".bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%s: the bash reader failed: %v\n%s", filepath.Base(path), err, stderr.String())
+		}
+		if bash, goVerdict := strings.TrimSuffix(string(out), "\n"), nodeVersionVerdict(path); bash != goVerdict {
+			t.Errorf("%s:\n Go   %q\n bash %q", filepath.Base(path), goVerdict, bash)
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("%s: the bash reader wrote to stderr:\n%s", filepath.Base(path), stderr.String())
+		}
+	}
+}
+
+// TestNodeVersionGoOnlyProblems: the problems whose text the two readers do
+// not share. The YAML parser messages of yaml.v3 and yq differ, and yq
+// overflows its stack on a merge cycle (it uses ~1 GB on the way, so the
+// bash twin is not run on it). Both readers refuse each one.
+func TestNodeVersionGoOnlyProblems(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, tc := range []struct{ name, src, want string }{
+		{"parse error", "kind: Lo\nspec: [\n", "spec.kubernetes.version cannot be read: yaml: "},
+		{"unknown anchor", "kind: Lo\nspec:\n  kubernetes:\n    version: *nope\n", "spec.kubernetes.version cannot be read: yaml: "},
+		{"merge cycle", "k: &k\n  <<: *k\nkind: Lo\n", "spec.kubernetes.version cannot be read: a merge key (<<) in the spec file refers back to its own map. Correct the merge key."},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			spec := filepath.Join(t.TempDir(), "cluster.lok8s.yaml")
-			testutil.WriteFile(t, spec, "kind: Lo\nspec:\n  kubernetes:\n    "+tc.versionYAML+"\n")
-			got, err := NodeVersion(yqsem.LoadNode(spec))
-			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatalf("NodeVersion = %q, nil; want the error %q", got, tc.wantErr)
-				}
-				if !strings.HasPrefix(err.Error(), tc.wantErr) || !strings.HasSuffix(err.Error(), nodeVersionHint) {
-					t.Fatalf("error = %q, want %q + the hint", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil || got != tc.want {
-				t.Fatalf("NodeVersion = %q, %v; want %q, nil", got, err, tc.want)
-			}
-		})
+		path := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "-")+".yaml")
+		testutil.WriteFile(t, path, tc.src)
+		v, err := NodeVersion(path)
+		if err == nil || !strings.HasPrefix(err.Error(), tc.want) {
+			t.Errorf("%s: NodeVersion = %q, %v; want the error %q…", tc.name, v, err, tc.want)
+		}
+	}
+	if _, err := NodeVersion(filepath.Join(dir, "missing.yaml")); err == nil ||
+		!strings.HasPrefix(err.Error(), "spec.kubernetes.version cannot be read: open ") ||
+		!strings.HasSuffix(err.Error(), ". Correct the spec file.") {
+		t.Errorf("a missing file: %v", err)
 	}
 }
 
@@ -127,6 +199,11 @@ func TestProvisionNodeImage(t *testing.T) {
 		{name: "empty string", versionYAML: `version: ""`},
 		{name: "given version", versionYAML: "version: v1.35.0", wantImage: "kindest/node:v1.35.0"},
 		{name: "given digest", versionYAML: "version: v1.31.12" + testDigest, wantImage: "kindest/node:v1.31.12" + testDigest},
+		{name: "custom tag", versionYAML: "version: latest", wantImage: "kindest/node:latest"},
+		// The merge key once read as unset: kind's default Kubernetes
+		// version instead of the one in the spec.
+		{name: "merge key", versionYAML: "<<: {version: v1.31.4}", wantImage: "kindest/node:v1.31.4"},
+		{name: "block scalar", versionYAML: "version: |\n      v1.31.4", wantImage: "kindest/node:v1.31.4"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, runner, _, errBuf, p := provisionFixture(t)
@@ -142,6 +219,14 @@ func TestProvisionNodeImage(t *testing.T) {
 			if slices.ContainsFunc(*argv, func(a string) bool { return strings.HasPrefix(a, "--image") }) {
 				t.Fatalf("kind create carries an --image flag: %v", *argv)
 			}
+			// The image checks below read the captured config: without
+			// --config they would pass on an empty capture.
+			if !slices.Contains(*argv, "--config") {
+				t.Fatalf("kind create carries no --config: %v", *argv)
+			}
+			if !strings.Contains(*config, "\nkind: Cluster\n") || strings.Count(*config, "\n  - role: control-plane") != 1 {
+				t.Fatalf("the captured kind config is not the cluster config with one control-plane node:\n%s", *config)
+			}
 			if strings.Contains(*config, "kindest/node:null") || strings.Contains(*config, "kindest/node:~") {
 				t.Fatalf("the kind config names a null image:\n%s", *config)
 			}
@@ -152,20 +237,21 @@ func TestProvisionNodeImage(t *testing.T) {
 				}
 				return
 			}
-			if want := "\n    image: \"" + tc.wantImage + "\""; images != 1 || !strings.Contains(*config, want) {
-				t.Fatalf("want exactly one node with %q, got %d image lines:\n%s", want, images, *config)
+			if want := "\n  - role: control-plane\n    image: \"" + tc.wantImage + "\""; images != 1 || !strings.Contains(*config, want) {
+				t.Fatalf("want the control-plane node with %q, got %d image lines:\n%s", tc.wantImage, images, *config)
 			}
 		})
 	}
 }
 
 func TestProvisionMalformedVersionStopsBeforeAnyToolRuns(t *testing.T) {
-	// A value kind cannot pull must stop the provision before the first
-	// docker network, registry container or VM — not at `kind create`.
+	// A version that cannot be read or is not an image tag must stop the
+	// provision before the first docker network, registry container or VM,
+	// not at `kind create`. It is never read as unset.
 	for _, tc := range []struct{ name, versionYAML, wantErr string }{
-		{"minor only", `version: "1.31"`, "spec.kubernetes.version '1.31' is not a kind node version."},
-		{"no v prefix", "version: 1.35.0", "spec.kubernetes.version '1.35.0' is not a kind node version."},
-		{"map", "version: {minor: 31}", "spec.kubernetes.version is a map, not a kind node version."},
+		{"image reference", "version: kindest/node:v1.31.4", "[error] spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. " + nodeVersionHint},
+		{"map", "version: {minor: 31}", "[error] spec.kubernetes.version cannot be read: the value is a map, not an image tag. " + nodeVersionHint},
+		{"merge of a scalar", "<<: v1.31.4", "[error] spec.kubernetes.version cannot be read: a merge key (<<) in the spec file does not refer to a map or a list of maps. Correct the merge key."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, runner, _, errBuf, p := provisionFixture(t)

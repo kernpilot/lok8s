@@ -109,12 +109,19 @@ func TestKubernetesVersion(t *testing.T) {
 		{name: "lo, no version", spec: "kind: Lo\nspec: {}\n"},
 		{name: "lo, literal null", spec: "kind: Lo\nspec:\n  kubernetes:\n    version: \"null\"\n"},
 		{name: "lo, valid", spec: "kind: Lo\nspec:\n  kubernetes:\n    version: v1.35.0\n"},
-		{name: "lo, malformed", spec: "kind: Lo\nspec:\n  kubernetes:\n    version: \"1.31\"\n",
-			wantErr: "  spec.kubernetes.version '1.31' is not a kind node version. Use the form vMAJOR.MINOR.PATCH, with an optional @sha256:<digest>, or remove the key to use the default node image of kind."},
+		// The version is only the tag of kindest/node: a custom tag is valid.
+		{name: "lo, custom tag", spec: "kind: Lo\nspec:\n  kubernetes:\n    version: latest\n"},
+		{name: "lo, not an image tag", spec: "kind: Lo\nspec:\n  kubernetes:\n    version: kindest/node:v1.31.4\n",
+			wantErr: "  spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. Set a kindest/node image tag, for example v1.31.4. To use the default node image of kind, remove the key."},
 		{name: "lo, map", spec: "kind: Lo\nspec:\n  kubernetes:\n    version: {minor: 31}\n",
-			wantErr: "  spec.kubernetes.version is a map, not a kind node version."},
+			wantErr: "  spec.kubernetes.version cannot be read: the value is a map, not an image tag. "},
+		// A merge key is resolved: lint reports the merged value.
+		{name: "lo, merged value", spec: "x: &v {version: kindest/node:v1.31.4}\nkind: Lo\nspec:\n  kubernetes:\n    <<: *v\n",
+			wantErr: "  spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. "},
+		{name: "lo, kubernetes is a list", spec: "kind: Lo\nspec:\n  kubernetes: []\n",
+			wantErr: "  spec.kubernetes.version cannot be read: spec.kubernetes is a list, not a map. Write spec.kubernetes as a YAML map."},
 		// Other drivers name the version in their own way (KubeOne: 1.31.0).
-		{name: "kubeone, no v prefix", spec: "kind: KubeOne\nspec:\n  kubernetes:\n    version: \"1.31.0\"\n"},
+		{name: "kubeone, a map", spec: "kind: KubeOne\nspec:\n  kubernetes:\n    version: {minor: 31}\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -143,11 +150,11 @@ func TestRunReportsMalformedKubernetesVersion(t *testing.T) {
 	t.Parallel()
 	l, base, out, errOut := newLinter(t)
 	testutil.WriteFile(t, filepath.Join(base, "clusters", "a.dev", "cluster.lok8s.yaml"),
-		"apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: a\nspec:\n  kubernetes:\n    version: \"1.31\"\n  bootstrap: []\n")
+		"apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: a\nspec:\n  kubernetes:\n    version: kindest/node:v1.31.4\n  bootstrap: []\n")
 	if err := l.Run("a.dev"); err == nil {
 		t.Fatalf("lint passed a malformed version; stdout:\n%s", out.String())
 	}
-	if !strings.Contains(errOut.String(), "spec.kubernetes.version '1.31' is not a kind node version.") {
+	if !strings.Contains(errOut.String(), "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag.") {
 		t.Fatalf("the version problem is not reported; stderr:\n%s", errOut.String())
 	}
 	if strings.Contains(out.String(), "  OK") {

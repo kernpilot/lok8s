@@ -1,0 +1,7 @@
+s: &s v1
+kind: Lo
+metadata:
+  <<: *s
+spec:
+  kubernetes:
+    version: v1.31.4

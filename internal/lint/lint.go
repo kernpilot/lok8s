@@ -204,7 +204,7 @@ func (l *Linter) kubernetesVersion(domainDir, specFile string) int {
 	if kind, err := domain.SpecDriver(specFile, ""); err != nil || kind != lodriver.Name {
 		return 0
 	}
-	if _, err := lodriver.NodeVersion(yqsem.LoadNode(specFile)); err != nil {
+	if _, err := lodriver.NodeVersion(specFile); err != nil {
 		ui.ErrorTo(l.ErrOut, "  %v", err)
 		return 1
 	}

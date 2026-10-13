@@ -128,11 +128,12 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 
 	clusterName := yqsem.Raw(yqsem.Lookup(root, "metadata", "name"))
 	// Validate the node version BEFORE the first VM, docker network or
-	// registry container: a value that kind cannot pull must stop the
-	// provision here, not at `kind create` after the networks and the
-	// registries exist. An unset version is valid ("" — kind's default
-	// node image); the raw yq read rendered it as kindest/node:null.
-	k8sVersion, err := NodeVersion(root)
+	// registry container: a version that cannot be read, or that is not an
+	// image tag, must stop the provision here, not at `kind create` after
+	// the networks and the registries exist. An unset version is valid ("":
+	// kind's default node image); the raw yq read rendered it as
+	// kindest/node:null.
+	k8sVersion, err := NodeVersion(cy)
 	if err != nil {
 		ui.ErrorTo(stderr, "%v", err)
 		return ui.Handled(err)

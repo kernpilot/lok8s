@@ -14,8 +14,11 @@
 # (internal/driver/lo/nodeimage_test.go):
 #   - unset (missing, null, ~, "", "null") → no image line in the kind config,
 #     so kind uses the default node image of its own release;
-#   - a valid version → that image on every node;
-#   - a malformed version → an error BEFORE any docker, kind or provider call.
+#   - an image tag (any OCI tag, with an optional @sha256 digest; aliases and
+#     merge keys resolved) → that image on every node;
+#   - a shape that cannot be read, or a value that is not an image tag → an
+#     error BEFORE any docker, kind or provider call, never "unset".
+# The reader cases are shared with the Go twin: tests/fixtures/kind-node-version/.
 
 setup() {
   load "../test_helper"
@@ -36,7 +39,6 @@ setup() {
 teardown() { teardown_tmpdir; }
 
 DIGEST="@sha256:0f5cc49c5e73c0c2bb6e2df56e7df189240d83cf94edfa30946482eb08ec57d2"
-HINT="Use the form vMAJOR.MINOR.PATCH, with an optional @sha256:<digest>, or remove the key to use the default node image of kind."
 
 # _spec <version line> — a Lo spec; an empty argument leaves the key out.
 _spec() {
@@ -85,45 +87,47 @@ _load() {
 }
 
 # ── spec::kind_node_version ──────────────────────────────────────────────────
+# The shared cases: tests/fixtures/kind-node-version/<verdict>--<case>.yaml, the
+# expected answer in <case>.want ("unset", "tag <tag>" or "error <message>").
+# The Go twin (TestNodeVersionFixtures) reads the same files, and
+# TestNodeVersionMatchesBash runs this reader on each of them.
 
-@test "spec::kind_node_version: an unset version prints nothing and succeeds" {
-  local line out
-  for line in "" "version: null" "version: ~" "version:" 'version: ""' 'version: "null"'; do
-    _spec "${line}"
-    out=$(spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml") || {
-      echo "'${line}' was refused: ${out}" >&2; return 1
-    }
-    [ -z "${out}" ] || { echo "'${line}' printed '${out}', want nothing" >&2; return 1; }
-  done
+# _verdict <spec file> — the reader's answer in the .want format.
+_verdict() {
+  local out
+  if out=$(spec::kind_node_version "${1}"); then
+    if [[ -n "${out}" ]]; then printf 'tag %s\n' "${out}"; else echo unset; fi
+  else
+    printf 'error %s\n' "${out}"
+  fi
 }
 
-@test "spec::kind_node_version: a valid version prints the tag" {
-  local v out
-  for v in v1.35.0 v1.31.4 "v1.31.12${DIGEST}" v1.36.0-rc.1; do
-    _spec "version: ${v}"
-    out=$(spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml")
-    [ "${out}" == "${v}" ] || { echo "'${v}' printed '${out}'" >&2; return 1; }
+@test "spec::kind_node_version: each shared fixture gets its expected answer" {
+  local f want got n=0 bad=0
+  for f in "${_PROJECT_ROOT}"/tests/fixtures/kind-node-version/*.yaml; do
+    want=$(<"${f%.yaml}.want")
+    got=$(_verdict "${f}" 2>"${BATS_TEST_TMPDIR}/stderr")
+    if [[ "${got}" != "${want}" ]]; then
+      printf '%s:\n  got  %s\n  want %s\n' "${f##*/}" "${got}" "${want}" >&2
+      bad=$(( bad + 1 ))
+    fi
+    if [[ -s "${BATS_TEST_TMPDIR}/stderr" ]]; then
+      printf '%s: the reader wrote to stderr:\n' "${f##*/}" >&2
+      cat "${BATS_TEST_TMPDIR}/stderr" >&2
+      bad=$(( bad + 1 ))
+    fi
+    n=$(( n + 1 ))
   done
+  (( n >= 50 )) || { echo "only ${n} fixtures found" >&2; return 1; }
+  (( bad == 0 ))
 }
 
-@test "spec::kind_node_version: a malformed version prints the problem and fails" {
-  local line want rc out
-  while IFS='|' read -r line want; do
-    _spec "${line}"
-    rc=0
-    out=$(spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml") || rc=$?
-    [ "${rc}" -eq 1 ] || { echo "'${line}' was accepted (rc ${rc}, out '${out}')" >&2; return 1; }
-    [ "${out}" == "${want} ${HINT}" ] || { echo "'${line}': got '${out}', want '${want} ${HINT}'" >&2; return 1; }
-  done <<EOF
-version: "1.31.0"|spec.kubernetes.version '1.31.0' is not a kind node version.
-version: "1.31"|spec.kubernetes.version '1.31' is not a kind node version.
-version: 1.31|spec.kubernetes.version '1.31' is not a kind node version.
-version: false|spec.kubernetes.version 'false' is not a kind node version.
-version: latest|spec.kubernetes.version 'latest' is not a kind node version.
-version: v1.35.0@sha256:abc|spec.kubernetes.version 'v1.35.0@sha256:abc' is not a kind node version.
-version: {a: b}|spec.kubernetes.version is a map, not a kind node version.
-version: [v1.35.0]|spec.kubernetes.version is a list, not a kind node version.
-EOF
+@test "spec::kind_node_version: a file that does not parse is an error with the reason, never unset" {
+  local spec="${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  printf 'kind: Lo\nspec: [\n' > "${spec}"
+  run spec::kind_node_version "${spec}"
+  assert_failure
+  assert_output --regexp '^spec\.kubernetes\.version cannot be read: .+\. Correct the spec file\.$'
 }
 
 # ── lo::render_nodes ─────────────────────────────────────────────────────────
@@ -168,7 +172,16 @@ EOF
     if grep '^kind create' "${CALLS}" | grep -q -- '--image'; then
       echo "'${line}': kind create carries --image:" >&2; grep '^kind create' "${CALLS}" >&2; return 1
     fi
-    [ -s "${BATS_TEST_TMPDIR}/kind-config" ] || { echo "'${line}': no kind config captured" >&2; return 1; }
+    # The image check below reads the captured config: it must be the real
+    # cluster config (one control plane, one worker), not an empty capture.
+    grep '^kind create' "${CALLS}" | grep -q -- ' --config ' || {
+      echo "'${line}': kind create carries no --config:" >&2; grep '^kind create' "${CALLS}" >&2; return 1
+    }
+    if ! grep -q '^kind: Cluster$' "${BATS_TEST_TMPDIR}/kind-config" \
+      || [ "$(grep -c '^  - role: ' "${BATS_TEST_TMPDIR}/kind-config")" -ne 2 ]; then
+      echo "'${line}': the captured kind config is not the cluster config:" >&2
+      cat "${BATS_TEST_TMPDIR}/kind-config" >&2; return 1
+    fi
     if grep -q 'image:' "${BATS_TEST_TMPDIR}/kind-config"; then
       echo "'${line}': the kind config names an image:" >&2; cat "${BATS_TEST_TMPDIR}/kind-config" >&2; return 1
     fi
@@ -176,25 +189,34 @@ EOF
 }
 
 @test "lo provision: a given version → that image on every node" {
-  local v
-  for v in v1.35.0 "v1.31.12${DIGEST}"; do
-    _spec "version: ${v}"
+  local line want
+  # <version line, \n for a line break>;<the tag of the node image>
+  while IFS=";" read -r line want; do
+    _spec "${line//\\n/$'\n'}"
     _load
     rm -f "${BATS_TEST_TMPDIR}/kind-config"
 
     local rc=0
     driver::provision test.dev || rc=$?
-    [ "${rc}" -eq 0 ] || { echo "'${v}': provision failed (rc ${rc})" >&2; return 1; }
-    [ "$(grep -c "^    image: \"kindest/node:${v}\"$" "${BATS_TEST_TMPDIR}/kind-config")" -eq 2 ] || {
-      echo "'${v}': want the image on both nodes:" >&2; cat "${BATS_TEST_TMPDIR}/kind-config" >&2; return 1
+    [ "${rc}" -eq 0 ] || { echo "'${line}': provision failed (rc ${rc})" >&2; return 1; }
+    [ "$(grep -c "^    image: \"kindest/node:${want}\"$" "${BATS_TEST_TMPDIR}/kind-config")" -eq 2 ] || {
+      echo "'${line}': want kindest/node:${want} on both nodes:" >&2; cat "${BATS_TEST_TMPDIR}/kind-config" >&2; return 1
     }
-  done
+  done <<VERSIONS
+version: v1.35.0;v1.35.0
+version: v1.31.12${DIGEST};v1.31.12${DIGEST}
+version: latest;latest
+<<: {version: v1.31.4};v1.31.4
+version: |\n      v1.31.4;v1.31.4
+VERSIONS
 }
 
-@test "lo provision: a malformed version fails before any network, container or VM" {
-  local line
-  for line in 'version: "1.31"' 'version: 1.35.0' 'version: {minor: 31}'; do
-    _spec "${line}"
+@test "lo provision: a version that cannot be read or is not a tag fails before any network, container or VM" {
+  local name want
+  for name in error--image-reference error--version-is-a-map error--kubernetes-is-a-list error--merge-of-a-scalar; do
+    cp "${_PROJECT_ROOT}/tests/fixtures/kind-node-version/${name}.yaml" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+    want=$(<"${_PROJECT_ROOT}/tests/fixtures/kind-node-version/${name}.want")
+    want="[error] ${want#error }"
     _load
     export PROVIDER_NAME="hetzner"
     provider::provision() { echo "provider::provision" >> "${CALLS}"; }
@@ -202,12 +224,15 @@ EOF
     : > "${CALLS}"
 
     run driver::provision test.dev
-    [ "${status}" -ne 0 ] || { echo "'${line}': provision accepted it" >&2; return 1; }
-    [[ "${output}" == *"spec.kubernetes.version"*"not a kind node version. ${HINT}"* ]] || {
-      echo "'${line}': the problem is not reported:" >&2; echo "${output}" >&2; return 1
+    [ "${status}" -ne 0 ] || { echo "${name}: provision accepted it" >&2; return 1; }
+    grep -qxF -- "${want}" <<<"${output}" || {
+      echo "${name}: want the line '${want}':" >&2; echo "${output}" >&2; return 1
     }
+    if grep -qE '^\[error\] *$' <<<"${output}"; then
+      echo "${name}: an empty [error] line:" >&2; echo "${output}" >&2; return 1
+    fi
     [ ! -s "${CALLS}" ] || {
-      echo "'${line}': steps ran before the version was rejected:" >&2; cat "${CALLS}" >&2; return 1
+      echo "${name}: steps ran before the version was rejected:" >&2; cat "${CALLS}" >&2; return 1
     }
     unset PROVIDER_NAME
   done

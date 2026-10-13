@@ -507,6 +507,41 @@ func TestCheckK8sVersionAbsent(t *testing.T) {
 	}
 }
 
+// TestCheckK8sVersionLoWithoutVersion: a Lo cluster without a version uses
+// the default node image of kind. The audit reports that as a neutral pass,
+// not as a version it could not parse. Bash twin: the "a Lo cluster without
+// spec.kubernetes.version" tests in tests/unit/audit_test.bats.
+func TestCheckK8sVersionLoWithoutVersion(t *testing.T) {
+	t.Setenv(k8sTodayEnv, "2026-10-06")
+	const detail = "spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release."
+	const remediation = "No action. To pin the Kubernetes version, set spec.kubernetes.version to a kindest/node image tag of a supported minor, for example v1.37.x."
+	for _, spec := range []string{
+		"kind: Lo\n",
+		"kind: Lo\nspec:\n  kubernetes: {}\n",
+		"kind: Lo\nspec:\n  kubernetes:\n    version: ~\n",
+		"kind: Lo\nspec:\n  kubernetes:\n    version: \"\"\n",
+		"kind: Lo\nspec:\n  kubernetes:\n    version: \"null\"\n",
+	} {
+		f := k8sFinding(t, spec)
+		if f.Status != "pass" || f.Severity != "low" || f.Detail != detail || f.Remediation != remediation {
+			t.Errorf("%q: %+v", spec, f)
+		}
+	}
+	for _, tc := range []struct{ name, spec, status, detail string }{
+		// Only a Lo cluster follows the kind default.
+		{"KubeOne without a version", "kind: KubeOne\n", "unknown", "Could not parse spec.kubernetes.version ('<empty>')."},
+		// A version that is set is evaluated, also through a merge key.
+		{"Lo with a merged version", "x: &v {version: v1.35.4}\nkind: Lo\nspec:\n  kubernetes:\n    <<: *v\n", "pass", "Kubernetes 1.35 is within the supported window (1.34, 1.35, 1.36, 1.37)."},
+		// A spec.kubernetes that yq cannot read is not "not set".
+		{"Lo with a list", "kind: Lo\nspec:\n  kubernetes: []\n", "unknown", "Could not parse spec.kubernetes.version ('<empty>')."},
+		{"Lo with a custom tag", "kind: Lo\nspec:\n  kubernetes:\n    version: latest\n", "unknown", "Could not parse spec.kubernetes.version ('latest')."},
+	} {
+		if f := k8sFinding(t, tc.spec); f.Status != tc.status || f.Detail != tc.detail {
+			t.Errorf("%s: %+v", tc.name, f)
+		}
+	}
+}
+
 // The support table: newest first, one row per minor, valid dates, and each
 // EOL date before the date of the row above it.
 func TestK8sMinorEOLTable(t *testing.T) {

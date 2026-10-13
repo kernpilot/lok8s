@@ -72,7 +72,7 @@ spec:
 | `apiVersion` | yes | — | Always `cluster.lok8s.dev/v1beta1` |
 | `kind` | yes | — | Driver: `Lo`, `KubeOne`, `Capi`, `Kkp`, `Kubehz` (a kubehz Space — `hosting: shared`) |
 | `metadata.name` | yes | — | Unique cluster name |
-| `spec.kubernetes.version` | yes (no for `Lo`) | — (`Lo`: the default node image of the installed kind) | Kubernetes version. For `Lo` it is the tag of the kind node image, `vMAJOR.MINOR.PATCH` with an optional `@sha256:<digest>`; `lo lint` and `lo provision` refuse a different shape |
+| `spec.kubernetes.version` | yes (no for `Lo`) | — (`Lo`: the default node image of the installed kind) | Kubernetes version. For `Lo` it is the tag of the kind node image `kindest/node:<tag>`: any image tag, with an optional `@sha256:<digest>`. See [Kubernetes version (Lo)](#kubernetes-version-lo) |
 | `spec.cluster.domain` | yes | — | Cluster FQDN (folder name convention) |
 | `spec.cluster.namespace` | no | `default` | Default namespace |
 | `spec.provider.name` | no | — | Infrastructure provider |
@@ -306,6 +306,31 @@ When a field is missing, the Lo driver fills it in via two layers:
 Build and cache registries are framework-private — they always live
 on the project subnet at `.101` and `.102` and must not be listed in
 `spec.registries.mirrors`.
+
+#### Kubernetes version (Lo) {#kubernetes-version-lo}
+
+For a `Lo` cluster, `spec.kubernetes.version` is the tag of the kind node
+image: every node of the kind config gets `image: "kindest/node:<tag>"`.
+
+- **Unset**: the key is missing or null (`~`), or the value is `""` or the
+  string `"null"`. The kind config then names no image, and kind uses the
+  default node image of its release.
+- **Valid**: any OCI image tag, 1 to 128 letters, digits, `_`, `.` and `-`,
+  that does not start with `.` or `-`. An optional `@sha256:<64 hex>` digest
+  can follow. Examples: `v1.31.4`, `v1.31.4@sha256:<digest>`, `latest`, or
+  the tag of an image that you built with `kind build node-image`.
+- **Refused**: a value that is not an image tag, for example
+  `kindest/node:v1.31.4` (the full image name).
+
+`lo lint` and `lo provision` read the version with the same rules in both
+implementations. YAML aliases and merge keys (`<<: *anchor`) are resolved: a
+key of the map wins over a merged key, and in `<<: [*a, *b]` the first map
+wins. Trailing newlines of the value (a block scalar) are removed. The two
+commands also refuse a spec that they cannot read, and never read it as an
+unset version: a spec file with more than one YAML document, a merge key that
+does not refer to a map or a list of maps, a `spec` or `spec.kubernetes` that
+is not a map, or a version that is a map or a list. `lo provision` refuses
+before it creates a VM, a docker network or a container.
 
 #### Network Configuration
 

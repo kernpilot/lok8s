@@ -1253,6 +1253,48 @@ YAML
   assert_equal "$(_status_of k8s-version-support)" "warn"
 }
 
+# A Lo cluster without spec.kubernetes.version uses the default node image of
+# kind (spec::kind_node_version reads it as unset). The audit reports that as a
+# neutral pass, not as a version it could not parse. Go twin:
+# TestCheckK8sVersionLoWithoutVersion in internal/audit.
+@test "a Lo cluster without spec.kubernetes.version is a neutral pass" {
+  local line
+  for line in "" "  kubernetes: {}" "  kubernetes: { version: ~ }" '  kubernetes: { version: "" }' '  kubernetes: { version: "null" }'; do
+    printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata: { name: dev }\nspec:\n  bootstrap: [ cilium ]\n%s\n' "${line}" | _spec ver-unset
+    audit::run_domain ver-unset
+    assert_equal "$(_status_of k8s-version-support)" "pass"
+    assert_equal "$(_sev_of k8s-version-support)" "low"
+    assert_equal "$(_detail_of k8s-version-support)" \
+      "spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release."
+  done
+}
+
+@test "a missing spec.kubernetes.version is still unknown on a non-Lo cluster" {
+  _spec ver-unset-ko <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  bootstrap: []
+YAML
+  audit::run_domain ver-unset-ko
+  assert_equal "$(_status_of k8s-version-support)" "unknown"
+  assert_equal "$(_detail_of k8s-version-support)" "Could not parse spec.kubernetes.version ('<empty>')."
+}
+
+@test "a Lo spec.kubernetes that is a list is not read as an unset version" {
+  _spec ver-list <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata: { name: dev }
+spec:
+  kubernetes: []
+  bootstrap: [ cilium ]
+YAML
+  audit::run_domain ver-list
+  assert_equal "$(_status_of k8s-version-support)" "unknown"
+}
+
 # =============================================================================
 # Plaintext endpoints
 # =============================================================================

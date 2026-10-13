@@ -1,0 +1,7 @@
+kind: Lo
+metadata:
+  name: kver
+spec:
+  runtime: kind
+  kubernetes:
+    version: v1.36.0-rc.1
