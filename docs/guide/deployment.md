@@ -217,7 +217,7 @@ lo deploy --domain api.example.com -l lok8s.dev/name=api
 The `lo provision` command runs the full lifecycle for a cluster domain:
 
 ```bash
-lo provision example.com
+lo provision --domain example.com
 ```
 
 1. Creates the cluster (via driver contract)
@@ -235,7 +235,7 @@ infrastructure reconcile (no `hcloud`/`kubeone` calls, no Hetzner API check), pa
 `-b` / `--bootstrap`:
 
 ```bash
-lo provision my-cluster.example.com --bootstrap
+lo provision --domain my-cluster.example.com --bootstrap
 ```
 
 It skips the provider reconcile and `driver::provision`, then runs the **same
@@ -254,7 +254,7 @@ unrelated addons (a `MachineDeployment` replica count an autoscaler owns, a
 live-patched config). Preview the run before you start it:
 
 ```bash
-lo provision my-cluster.example.com --bootstrap --dry-run --render-dir /tmp/bootstrap
+lo provision --domain my-cluster.example.com --bootstrap --dry-run --render-dir /tmp/bootstrap
 ```
 
 The dry run renders every entry in place, exactly as the real run does: the
@@ -410,9 +410,9 @@ the gitops bootstrap) is skipped too.
 #### One entry: `--only`
 
 ```bash
-lo provision my-cluster.example.com --bootstrap --only cert-manager
-lo provision my-cluster.example.com --bootstrap --only cert-manager,envoy-gateway --dry-run
-lo provision my-cluster.example.com --bootstrap --only cert-manager --with-restore
+lo provision --domain my-cluster.example.com --bootstrap --only cert-manager
+lo provision --domain my-cluster.example.com --bootstrap --only cert-manager,envoy-gateway --dry-run
+lo provision --domain my-cluster.example.com --bootstrap --only cert-manager --with-restore
 ```
 
 `--only` applies (or dry-runs) the named `spec.bootstrap` entries, matched

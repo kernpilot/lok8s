@@ -257,7 +257,7 @@ spec:
 ### 3. Provision
 
 ```bash
-lo provision dev.example.com
+lo provision --domain dev.example.com
 ```
 
 The dispatch system sources `drivers/k3s/main` automatically based on `kind: K3s`.
