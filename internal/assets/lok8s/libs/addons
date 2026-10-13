@@ -409,11 +409,18 @@ addons::_helm_stub() {
 # addons::_chart_gate_script <real-chartrenderer>
 # Prints the dry run's ChartRenderer (the Go twin: internal/render/
 # chartgate.go): khelm builds the dependencies of a LOCAL chart into the chart
-# directory when one is a file:// chart or charts/ lacks one (Chart.yaml or
-# requirements.yaml); the gate refuses that render (exit 1, reported as
-# `chart-deps <chart>`), and execs the project's ChartRenderer otherwise. It
-# runs for every ChartRenderer config of the render (any file name, nested
-# bases, absolute paths), in the kustomization root kustomize starts it in.
+# directory when one is a file:// chart, or when Helm's dependency check
+# fails on the chart as Helm's loader loads it (.helmignore honoured,
+# dependencies matched by their metadata name). The gate asks helm itself,
+# read-only: every row of `helm dependency list` must say ok or unpacked
+# (no missing, misnamed, wrong-version or doubled dependency), and `helm
+# lint` must not name a dependency the loaded chart lacks (an archive that
+# .helmignore hides is "ok" to `helm dependency list`). Anything it cannot
+# check (helm missing, a chart helm cannot load) is refused too. A refused
+# render exits 1 and is reported as `chart-deps <chart>`; otherwise the gate
+# execs the project's ChartRenderer. It runs for every ChartRenderer config
+# of the render (any file name, nested bases, absolute paths), in the
+# kustomization root kustomize starts it in.
 addons::_chart_gate_script() {
   printf '#!/usr/bin/env bash\nreal=%q\n' "${1}"
   cat <<'GATE'
@@ -422,18 +429,37 @@ config="${KUSTOMIZE_PLUGIN_CONFIG_STRING:-}"
 repo="$(yq -r '.repository // ""' <<< "${config}")"
 chart="$(yq -r '.chart // ""' <<< "${config}")"
 builds_deps() {
-  local dir="${1}" f name dep
+  local dir="${1}" f deps name dep any=0 list line
   for f in Chart.yaml requirements.yaml; do
     [[ -f "${dir}/${f}" ]] || continue
+    deps="$(yq -r '(.dependencies // [])[] | [(.name // ""), (.repository // "")] | @tsv' "${dir}/${f}")" || return 0
     while IFS=$'\t' read -r name dep; do
       [[ -n "${name}${dep}" ]] || continue
+      any=1
       [[ "${dep}" != file://* ]] || return 0
-      [[ -n "${name}" ]] || return 0
-      [[ -d "${dir}/charts/${name}" ]] && continue
-      compgen -G "${dir}/charts/${name}-*.tgz" > /dev/null && continue
-      return 0
-    done < <(yq -r '(.dependencies // [])[] | [(.name // ""), (.repository // "")] | @tsv' "${dir}/${f}" 2>/dev/null)
+    done <<< "${deps}"
   done
+  (( any )) || return 1
+  # The statuses and the lint message below are helm v3's (the helm khelm
+  # v2.8.0 is built from): another helm cannot check this chart.
+  local version
+  version="$(helm version --short 2>/dev/null)" || version=""
+  if [[ "${version}" != v3.* ]]; then
+    echo "lok8s dry-run: chart ${chart}: the dependency check needs helm v3 on PATH (found: ${version:-none})" >&2
+    return 0
+  fi
+  if ! list="$(helm dependency list "${dir}" 2>&1)"; then
+    echo "lok8s dry-run: chart ${chart}: helm dependency list failed: ${list##*$'\n'}" >&2
+    return 0
+  fi
+  while IFS= read -r line; do
+    line="${line%"${line##*[![:space:]]}"}"
+    case "${line}" in ""|NAME*|WARNING*|Warning*) continue ;; esac
+    [[ "${line}" =~ [[:space:]](ok|unpacked)$ ]] || return 0
+  done <<< "${list}"
+  if helm lint "${dir}" 2>&1 | grep -q 'chart directory is missing these dependencies'; then
+    return 0
+  fi
   return 1
 }
 if [[ -z "${repo}" && -n "${chart}" ]]; then
@@ -449,6 +475,16 @@ if [[ -z "${repo}" && -n "${chart}" ]]; then
 fi
 exec "${real}" "$@"
 GATE
+}
+
+# addons::_write_staged <path>
+# Writes stdin to path as a new private regular file of the staging copy:
+# whatever is at path (a symlink the copy kept, or a regular file) is removed
+# first, and noclobber refuses a file that is there again, so the write never
+# goes through a link (the Go twin: writeStagedFile).
+addons::_write_staged() {
+  rm -f -- "${1}" || return 1
+  ( umask 077; set -C; cat > "${1}" )
 }
 
 # addons::_with_env [KEY=value]... -- <command> [args...]
@@ -514,7 +550,11 @@ addons::render() {
     # gatus) — must render IN PLACE: a copy breaks those relative paths (they
     # resolve from /tmp → /.lok8s, missing). Stacking addons carry no cross-tree refs.
     # A dry run copies the same way: khelm's dependency builds are refused at
-    # the ChartRenderer gate, so nothing writes into the copy.
+    # the ChartRenderer gate, so nothing writes into the copy. The copy keeps
+    # symlinks, so every file the staging rewrites (values.inline.yaml,
+    # values.merged.yaml, chart.yaml) is written as a new private file
+    # (addons::_write_staged), never through a link to the addon's file or
+    # a file it shares.
     if [[ -n "${inline_values}" ]] || (( ${#value_files[@]} > 0 )); then
       build_dir=$(mktemp -d -p "${_tmp_root}" lok8s-addon-XXXXXXXX) || { error "addons::render: failed to create temp dir for ${addon_dir}"; return 1; }
       _cleanup="${build_dir}"
@@ -523,16 +563,21 @@ addons::render() {
       cp -r "${addon_dir}/." "${build_dir}/" \
         || { error "addons::render: failed to copy ${addon_dir} to temp dir"; rm -rf "${build_dir}"; return 1; }
       if [[ -n "${inline_values}" ]]; then
-        printf '%s\n' "${inline_values}" > "${build_dir}/values.inline.yaml"
+        printf '%s\n' "${inline_values}" | addons::_write_staged "${build_dir}/values.inline.yaml" \
+          || { error "addons::render: failed to merge values for ${addon_dir}"; rm -rf "${build_dir}"; return 1; }
         value_files+=("${build_dir}/values.inline.yaml")
       fi
-      if ! yq eval-all '. as $item ireduce ({}; . * $item)' "${value_files[@]}" \
-             > "${build_dir}/values.merged.yaml"; then
+      local _staged
+      if ! _staged="$(yq eval-all '. as $item ireduce ({}; . * $item)' "${value_files[@]}")" \
+           || ! printf '%s\n' "${_staged}" | addons::_write_staged "${build_dir}/values.merged.yaml"; then
         error "addons::render: failed to merge values for ${addon_dir}"
         rm -rf "${build_dir}"; return 1
       fi
-      yq -i '.valueFiles = ["values.merged.yaml"]' "${build_dir}/chart.yaml" \
-        || { error "addons::render: failed to set valueFiles in chart.yaml for ${addon_dir}"; rm -rf "${build_dir}"; return 1; }
+      if ! _staged="$(yq '.valueFiles = ["values.merged.yaml"]' "${build_dir}/chart.yaml")" \
+           || ! printf '%s\n' "${_staged}" | addons::_write_staged "${build_dir}/chart.yaml"; then
+        error "addons::render: failed to set valueFiles in chart.yaml for ${addon_dir}"
+        rm -rf "${build_dir}"; return 1
+      fi
     fi
   fi
 

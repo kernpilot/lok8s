@@ -159,13 +159,29 @@ func (o *overlay) runPut(name string, v []byte) error {
 	return o.dr.Save(o.dr.runKey(o.disk.dir, name), v)
 }
 
+// runRead reads a value from the run store. A hit is a value a render of
+// this run generated or updated, which the store does not hold: a real run
+// reads the value that run writes, with other bytes. The reading render is
+// therefore not repeatable either, and is reported (`reuse <name>`).
+func (o *overlay) runRead(name string) ([]byte, bool, error) {
+	v, ok := o.runGet(name)
+	if !ok {
+		return nil, false, nil
+	}
+	if err := o.dr.Minted("reuse " + name); err != nil {
+		return nil, true, err
+	}
+	return v, true, nil
+}
+
 func (o *overlay) Get(key string) ([]byte, error) {
-	if v, ok := o.runGet(FormatName(o.disk.name, o.disk.namespace, key)); ok {
-		return v, nil
+	if v, ok, err := o.runRead(FormatName(o.disk.name, o.disk.namespace, key)); ok {
+		return v, err
 	}
 	return o.disk.Get(key)
 }
 
+// Has only answers; the Get that follows it reports a run-store hit.
 func (o *overlay) Has(key string) bool {
 	if _, ok := o.runGet(FormatName(o.disk.name, o.disk.namespace, key)); ok {
 		return true
@@ -215,8 +231,8 @@ func (o *overlay) ReadByName(filename string) ([]byte, error) {
 	if _, err := o.disk.checkName(filename); err != nil {
 		return nil, err
 	}
-	if v, ok := o.runGet(filename); ok {
-		return v, nil
+	if v, ok, err := o.runRead(filename); ok {
+		return v, err
 	}
 	v, err := o.disk.ReadByName(filename)
 	if errors.Is(err, os.ErrNotExist) {

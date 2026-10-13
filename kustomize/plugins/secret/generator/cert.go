@@ -204,7 +204,9 @@ var ephemeralCA struct {
 
 // dryRunCARoot is caRootCA for a dry run: the CA in CAROOT, else the CA this
 // run minted already (the run store: every Secret of the run signs with the
-// same one), else a new one, minted in memory, kept for the run and reported.
+// same one; the reading render is reported too, a real run signs with
+// another CA), else a new one, minted in memory, kept for the run and
+// reported.
 func dryRunCARoot(ctx *plugin.Context) (cert, key []byte, err error) {
 	dir, cert, key, found, err := certgen.LoadCARoot()
 	if err != nil {
@@ -221,9 +223,15 @@ func dryRunCARoot(ctx *plugin.Context) (cert, key []byte, err error) {
 		c, okc := ctx.RunLoad(id + "/" + certgen.RootName)
 		k, okk := ctx.RunLoad(id + "/" + certgen.RootKeyName)
 		if okc && okk {
+			if err := ctx.Report("reuse caroot " + dir); err != nil {
+				return nil, nil, errs.Wrap("CAROOT", err)
+			}
 			return c, k, nil
 		}
 	} else if pair, ok := ephemeralCA.byID[dir]; ok {
+		if err := ctx.Report("reuse caroot " + dir); err != nil {
+			return nil, nil, errs.Wrap("CAROOT", err)
+		}
 		return pair[0], pair[1], nil
 	}
 	if cert, key, err = certgen.NewCA(ctx.Rand); err != nil {

@@ -10,6 +10,9 @@ package addons
 // Needs .bin/kustomize (b install): skips locally without it, fails on CI.
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -254,7 +257,8 @@ func TestDryRunSecretMintIsInMemoryAndReported(t *testing.T) {
 	}
 
 	// A later render of the same run reads the value back from the run
-	// store: the same bytes, nothing new reported.
+	// store: the same bytes, reported as a reuse (the value is this run's,
+	// not the store's: a render that reads it is not repeatable either).
 	first := out
 	if err := b.ResetReport(); err != nil {
 		t.Fatal(err)
@@ -262,8 +266,8 @@ func TestDryRunSecretMintIsInMemoryAndReported(t *testing.T) {
 	if again, _, err := renderBoth(t, p, runner, b, dir, false); err != nil || again != first {
 		t.Errorf("a second render of the run differs (err %v):\n%s\n%s", err, first, again)
 	}
-	if got := b.ReadReport().Generated; len(got) != 0 {
-		t.Errorf("the second render reported %q", got)
+	if got := b.ReadReport().Generated; len(got) != 1 || got[0] != "reuse Secret.app.ns.PASSWORD" {
+		t.Errorf("the second render reported %q, want the reuse", got)
 	}
 
 	// A new run against an EXISTING store that holds the value: read, not
@@ -471,7 +475,23 @@ func TestDryRunChartGateRefusesUnvendoredDependencies(t *testing.T) {
 	}
 	_ = os.Remove(marker)
 
-	testutil.WriteFile(t, filepath.Join(chartDir, "charts", "redis-1.0.0.tgz"), "x")
+	// A real chart archive that .helmignore hides: Helm's loader does not
+	// see it, khelm would build — refused.
+	testutil.WriteFile(t, filepath.Join(chartDir, ".helmignore"), "*.tgz\n")
+	writeChartArchive(t, filepath.Join(chartDir, "charts", "redis-1.0.0.tgz"), "redis", "1.0.0")
+	if err := b.ResetReport(); err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, err := renderBoth(t, p, runner, b, dir, false); err == nil || fsutil.FileExists(marker) {
+		t.Fatalf("a .helmignore'd archive passed the gate (err %v)\n%s", err, stderr)
+	}
+	if hashDir(t, chartDir) == before {
+		t.Fatal("the fixture did not change the chart directory")
+	}
+	// The same archive, not ignored: vendored, the chart renders.
+	if err := os.Remove(filepath.Join(chartDir, ".helmignore")); err != nil {
+		t.Fatal(err)
+	}
 	if err := b.ResetReport(); err != nil {
 		t.Fatal(err)
 	}
@@ -545,4 +565,80 @@ func TestDryRunKeepsPluginConfigsInTheBoundary(t *testing.T) {
 		}
 		t.Errorf("the render left files in the ambient TMPDIR: %v", names)
 	}
+}
+
+// Review round 5, item 5: an entry whose render reads a value another
+// entry of the run generated (a secretRef to it, through the run store) is
+// not repeatable either: a real run reads the value that run writes, with
+// other bytes. It is reported (`reuse <name>`). A value the store holds is
+// read without a report.
+func TestDryRunReadingAnotherEntrysValueIsReported(t *testing.T) {
+	p, runner, b := execProject(t)
+	store := filepath.Join(p.Base, "clusters", "x.dev", "secrets")
+	t.Setenv("PATH_SECRETS", store)
+	producer := fixtureAddon(t, p.Base, "producer", map[string]string{
+		"kustomization.yaml": "generators:\n- secret.yaml\n",
+		"secret.yaml":        "apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: ns\npasswd:\n  PASSWORD: 24\n",
+	})
+	consumer := fixtureAddon(t, p.Base, "consumer", map[string]string{
+		"kustomization.yaml": "generators:\n- secret.yaml\n",
+		"secret.yaml":        "apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: client\n  namespace: ns\nsecretRef:\n  DB_PASSWORD:\n    secret: app\n    key: PASSWORD\n",
+	})
+	for _, dir := range []string{producer, consumer} {
+		if err := b.ResetReport(); err != nil {
+			t.Fatal(err)
+		}
+		if _, stderr, err := renderBoth(t, p, runner, b, dir, false); err != nil {
+			t.Fatalf("%s: %v\n%s", filepath.Base(dir), err, stderr)
+		}
+	}
+	if got := b.ReadReport().Generated; len(got) != 1 || got[0] != "reuse Secret.app.ns.PASSWORD" {
+		t.Errorf("the consumer's report = %q, want the reuse of the producer's value", got)
+	}
+	if fsutil.DirExists(store) {
+		t.Fatal("a dry run created the secrets store")
+	}
+
+	// A new run whose store holds the value: the consumer reads it from
+	// the store, nothing is reported.
+	testutil.WriteFile(t, filepath.Join(store, "Secret.app.ns.PASSWORD"), "from-the-store")
+	b2, err := NewDryRunBoundary(t.Context(), p, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(b2.Close)
+	if _, stderr, err := renderBoth(t, p, runner, b2, consumer, false); err != nil {
+		t.Fatalf("consumer, second run: %v\n%s", err, stderr)
+	}
+	if got := b2.ReadReport().Generated; len(got) != 0 {
+		t.Errorf("a read from the store was reported: %q", got)
+	}
+}
+
+// writeChartArchive writes a real chart archive (a gzipped tar with one
+// top-level chart directory, as `helm package` writes it).
+func writeChartArchive(t *testing.T, dest, name, version string) {
+	t.Helper()
+	files := map[string]string{
+		name + "/Chart.yaml":        "apiVersion: v2\nname: " + name + "\nversion: " + version + "\n",
+		name + "/templates/cm.yaml": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: " + name + "\n",
+	}
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, n := range []string{name + "/Chart.yaml", name + "/templates/cm.yaml"} {
+		if err := tw.WriteHeader(&tar.Header{Name: n, Mode: 0o644, Size: int64(len(files[n]))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(files[n])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, dest, buf.String())
 }

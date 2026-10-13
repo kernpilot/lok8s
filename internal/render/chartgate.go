@@ -3,8 +3,10 @@ package render
 // chartgate.go — the ChartRenderer gate of `lo bootstrap --dry-run` (both
 // builds; the bash twin is the wrapper script addons::dry_run_boundary
 // writes). khelm builds the dependencies of a LOCAL chart into the chart
-// directory (Chart.lock, charts/, tmpcharts/) whenever they are not vendored
-// or one of them is a file:// chart. A dry run must not write there, so it
+// directory (Chart.lock, charts/, tmpcharts/) whenever Helm's
+// action.CheckDependencies fails on the chart as Helm's loader loads it, or
+// one of them is a file:// chart. The gate decides with Helm's own loader
+// (.helmignore honoured, dependencies matched by their metadata name). A dry run must not write there, so it
 // refuses that render instead: the entry is reported
 // `inconclusive (chart dependencies not vendored)`. The gate runs where khelm
 // runs, for every ChartRenderer config of the render (any file name, any
@@ -22,7 +24,9 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/Masterminds/semver/v3"
 	"gopkg.in/yaml.v3"
+	"helm.sh/helm/v3/pkg/chart/loader"
 )
 
 // DryRunChartRendererEnv names the project's real ChartRenderer binary the
@@ -37,10 +41,8 @@ func chartGateApplies() bool {
 // ChartDepsNotVendored reads a ChartRenderer config (khelm's generator
 // config) and reports whether khelm would build chart dependencies for it:
 // the chart is local (no repository, the path exists, relative to baseDir,
-// the kustomization root) and declares a file:// dependency, or a
-// dependency that charts/ does not hold. Chart.yaml and requirements.yaml
-// (apiVersion v1) dependencies both count. chart is the local chart path
-// ("" for a remote chart).
+// the kustomization root) and chartBuildsDeps says so. chart is the local
+// chart path ("" for a remote chart).
 func ChartDepsNotVendored(config []byte, baseDir string) (chart string, unvendored bool, err error) {
 	var cfg struct {
 		Repository string `yaml:"repository"`
@@ -62,50 +64,64 @@ func ChartDepsNotVendored(config []byte, baseDir string) (chart string, unvendor
 	return cfg.Chart, chartBuildsDeps(path), nil
 }
 
-type chartDeps struct {
-	Dependencies []struct {
-		Name       string `yaml:"name"`
-		Repository string `yaml:"repository"`
-	} `yaml:"dependencies"`
-}
-
-// chartBuildsDeps applies khelm's rule to one chart directory: a file://
-// dependency is always built (so there is no walk into it, and no nesting
-// limit); another dependency is built when charts/ lacks it.
+// chartBuildsDeps reports whether khelm would build the dependencies of the
+// local chart in dir, decided on the chart as Helm's loader loads it (the
+// one khelm loads: .helmignore honoured, a subchart named by its metadata).
+// It is conservative: true when
+//   - the chart does not load (khelm fails too; the dry run cannot say),
+//   - a dependency is a file:// chart (khelm always builds those, so there
+//     is no walk into one and no nesting limit),
+//   - action.CheckDependencies would fail (a dependency that no loaded
+//     subchart has the name of: khelm builds then), or
+//   - `helm dependency list` would not say ok: more than one subchart has
+//     the name, or the subchart's version is not in the dependency's
+//     version constraint (khelm itself renders that one; the bash twin
+//     reads `helm dependency list`, so both refuse it).
+//
+// chartgate_test.go pins this against action.CheckDependencies and
+// action.Dependency.List on real chart fixtures.
 func chartBuildsDeps(dir string) bool {
-	var deps chartDeps
-	for _, f := range []string{"Chart.yaml", "requirements.yaml"} {
-		raw, err := os.ReadFile(filepath.Join(dir, f))
-		if err != nil {
-			continue
-		}
-		var d chartDeps
-		if yaml.Unmarshal(raw, &d) == nil {
-			deps.Dependencies = append(deps.Dependencies, d.Dependencies...)
-		}
+	ch, err := loader.Load(dir)
+	if err != nil || ch.Metadata == nil {
+		return true
 	}
-	for _, dep := range deps.Dependencies {
+	for _, dep := range ch.Metadata.Dependencies {
 		if strings.HasPrefix(dep.Repository, "file://") {
 			return true
 		}
-		if !chartVendored(filepath.Join(dir, "charts"), dep.Name) {
+	}
+	for _, dep := range ch.Metadata.Dependencies {
+		var version string
+		n := 0
+		for _, sub := range ch.Dependencies() {
+			if sub.Name() == dep.Name {
+				n++
+				version = sub.Metadata.Version
+			}
+		}
+		if n != 1 || !versionAccepted(dep.Version, version) {
 			return true
 		}
 	}
 	return false
 }
 
-// chartVendored reports a dependency charts/ holds: a directory named after
-// it, or an archive <name>-<version>.tgz.
-func chartVendored(chartsDir, name string) bool {
-	if name == "" {
-		return false
-	}
-	if info, err := os.Stat(filepath.Join(chartsDir, name)); err == nil && info.IsDir() {
+// versionAccepted is the version check of `helm dependency list`: the
+// subchart's version equals the dependency's version, or is in its
+// constraint.
+func versionAccepted(constraint, version string) bool {
+	if version == constraint {
 		return true
 	}
-	matches, _ := filepath.Glob(filepath.Join(chartsDir, name+"-*.tgz"))
-	return len(matches) > 0
+	c, err := semver.NewConstraint(constraint)
+	if err != nil {
+		return false
+	}
+	v, err := semver.NewVersion(version)
+	if err != nil {
+		return false
+	}
+	return c.Check(v)
 }
 
 // chartGate runs the check for a ChartRenderer invocation (argv as kustomize

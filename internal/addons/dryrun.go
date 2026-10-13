@@ -49,6 +49,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/toolchain"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -293,25 +294,110 @@ func (b *DryRunBoundary) renderEnv(allowGenerators bool, entryPath string) []str
 	return env
 }
 
-// KRMFunctionDeclared reports an addon directory whose YAML declares a KRM
-// function (`config.kubernetes.io/function` or `config.k8s.io/function`):
-// without --enable-exec kustomize skips an exec function silently, so the
-// dry run marks that entry `partial`. A hint, not a boundary: only the
-// addon's own directory is read.
-func KRMFunctionDeclared(dir string) bool {
-	found := false
-	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || found || d.IsDir() {
+// KRMFunctionDeclared reports an entry whose kustomization graph declares
+// a KRM function (`config.kubernetes.io/function` or
+// `config.k8s.io/function`): the YAML under dir, and every local
+// resources, components, bases, generators, transformers and validators
+// reference of a kustomization on the way, followed recursively while it
+// stays under one of roots (the project and its lok8s tree; nothing is
+// followed without roots). Without --enable-exec kustomize skips an exec
+// function silently, so the dry run marks that entry `partial`. A hint, not
+// a boundary: it only reads.
+func KRMFunctionDeclared(dir string, roots ...string) bool {
+	var within []string
+	for _, r := range roots {
+		if r == "" {
+			continue
+		}
+		if abs, err := filepath.EvalSymlinks(r); err == nil {
+			within = append(within, abs)
+		}
+	}
+	inRoots := func(p string) bool {
+		for _, r := range within {
+			if p == r || strings.HasPrefix(p, r+string(filepath.Separator)) {
+				return true
+			}
+		}
+		return false
+	}
+	seen := map[string]bool{}
+	queue := []string{dir}
+	for first := true; len(queue) > 0; first = false {
+		p, err := filepath.EvalSymlinks(queue[0])
+		queue = queue[1:]
+		if err != nil || seen[p] || (!first && !inRoots(p)) {
+			continue
+		}
+		seen[p] = true
+		info, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if !info.IsDir() {
+			if declaresKRMFunction(p) {
+				return true
+			}
+			continue
+		}
+		found := false
+		_ = filepath.WalkDir(p, func(path string, d os.DirEntry, err error) error {
+			if err != nil || found || d.IsDir() {
+				return nil
+			}
+			if ext := filepath.Ext(path); (ext == ".yaml" || ext == ".yml") && declaresKRMFunction(path) {
+				found = true
+			}
 			return nil
+		})
+		if found {
+			return true
 		}
-		if ext := filepath.Ext(path); ext != ".yaml" && ext != ".yml" {
-			return nil
+		for _, ref := range kustomizationRefs(p) {
+			if !filepath.IsAbs(ref) {
+				ref = filepath.Join(p, ref)
+			}
+			queue = append(queue, ref)
 		}
-		raw, err := os.ReadFile(path)
-		if err == nil && (strings.Contains(string(raw), "config.kubernetes.io/function") || strings.Contains(string(raw), "config.k8s.io/function")) {
-			found = true
+	}
+	return false
+}
+
+func declaresKRMFunction(path string) bool {
+	raw, err := os.ReadFile(path)
+	return err == nil && (strings.Contains(string(raw), "config.kubernetes.io/function") || strings.Contains(string(raw), "config.k8s.io/function"))
+}
+
+// kustomizationRefs lists the local references of dir's kustomization file
+// (resources, components, bases, generators, transformers, validators): a
+// remote base (a URL, a git or GitHub reference) and an inline config are
+// left out.
+func kustomizationRefs(dir string) []string {
+	var raw []byte
+	for _, name := range []string{"kustomization.yaml", "kustomization.yml", "Kustomization"} {
+		var err error
+		if raw, err = os.ReadFile(filepath.Join(dir, name)); err == nil {
+			break
 		}
+	}
+	if raw == nil {
 		return nil
-	})
-	return found
+	}
+	var k map[string]any
+	if yaml.Unmarshal(raw, &k) != nil {
+		return nil
+	}
+	var refs []string
+	for _, field := range []string{"resources", "components", "bases", "generators", "transformers", "validators"} {
+		list, _ := k[field].([]any)
+		for _, item := range list {
+			ref, ok := item.(string)
+			if !ok || ref == "" || strings.ContainsAny(ref, "\n") || strings.Contains(ref, "://") ||
+				strings.HasPrefix(ref, "git@") || strings.HasPrefix(ref, "github.com/") {
+				continue
+			}
+			refs = append(refs, ref)
+		}
+	}
+	return refs
 }

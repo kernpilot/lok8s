@@ -634,3 +634,62 @@ func TestRenderDryRunStackedCopyKeepsSymlinks(t *testing.T) {
 		t.Errorf("the copy %s is not under the boundary's TMPDIR %s", buildDir, b.Tmp)
 	}
 }
+
+// Review round 5, item 2: the staging copy keeps symlinks, and the files it
+// rewrites (chart.yaml, values.inline.yaml, values.merged.yaml) may be
+// links in the addon: a shared ChartRenderer config, shared values. The
+// staging writes each as a new private regular file in the copy, so the
+// linked originals stay byte-identical — in a dry run and in a real run
+// (the same staging path).
+func TestRenderStagingNeverWritesThroughSymlinks(t *testing.T) {
+	for _, dry := range []bool{false, true} {
+		dir := writeAddon(t)
+		shared := t.TempDir()
+		originals := map[string]string{
+			"chart.yaml":         "apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: shared\nvalueFiles:\n  - values.yaml\n",
+			"values.inline.yaml": "shared_inline: true\n",
+			"values.merged.yaml": "shared_merged: true\n",
+		}
+		for name, content := range originals {
+			target := filepath.Join(shared, name)
+			testutil.WriteFile(t, target, content)
+			_ = os.Remove(filepath.Join(dir, name))
+			if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		p := testPaths(t)
+		t.Setenv(render.ModeEnv, string(render.ModeExec))
+		probe := &probeRunner{t: t, manifest: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n", check: func(d string) {
+			for name := range originals {
+				fi, err := os.Lstat(filepath.Join(d, name))
+				if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 {
+					t.Errorf("dry=%v: %s in the copy is not a private regular file: %v %v", dry, name, fi, err)
+				}
+			}
+			raw, _ := os.ReadFile(filepath.Join(d, "chart.yaml"))
+			if !strings.Contains(string(raw), "values.merged.yaml") || !strings.Contains(string(raw), "name: shared") {
+				t.Errorf("dry=%v: the staged chart.yaml:\n%s", dry, raw)
+			}
+		}}
+		var errBuf strings.Builder
+		var err error
+		if dry {
+			_, err = RenderDryRun(t.Context(), p, probe, &errBuf, dir, "lo", "hetzner", inlineValues, nil, dryBoundary(t, p), false)
+		} else {
+			_, err = Render(t.Context(), p, probe, &errBuf, dir, "lo", "hetzner", inlineValues, nil)
+		}
+		if err != nil {
+			t.Fatalf("dry=%v: %v\n%s", dry, err, errBuf.String())
+		}
+		for name, content := range originals {
+			raw, err := os.ReadFile(filepath.Join(shared, name))
+			if err != nil || string(raw) != content {
+				t.Errorf("dry=%v: the shared %s changed: %q (%v)", dry, name, raw, err)
+			}
+			if fi, err := os.Lstat(filepath.Join(dir, name)); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("dry=%v: the addon's %s is no longer a symlink", dry, name)
+			}
+		}
+	}
+}

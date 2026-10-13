@@ -1,9 +1,17 @@
 package render
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
+
+	"helm.sh/helm/v3/pkg/action"
+	"helm.sh/helm/v3/pkg/chart/loader"
 )
 
 func writeGateFile(t *testing.T, path, content string) {
@@ -16,50 +24,193 @@ func writeGateFile(t *testing.T, path, content string) {
 	}
 }
 
-// khelm's rule, per chart shape: a local chart builds its dependencies (and
-// writes Chart.lock/charts/ into the chart directory) when one is a file://
-// chart or charts/ lacks one. A remote chart, a local chart without
-// dependencies, and a vendored one render without writing.
+// writeChart writes a minimal real chart (Chart.yaml, one template) into dir.
+func writeChart(t *testing.T, dir, name, version string) {
+	t.Helper()
+	writeGateFile(t, filepath.Join(dir, "Chart.yaml"), "apiVersion: v2\nname: "+name+"\nversion: "+version+"\n")
+	writeGateFile(t, filepath.Join(dir, "templates", "cm.yaml"), "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: "+name+"\n")
+}
+
+// packChart writes the chart in src as a chart archive (a gzipped tar with
+// the chart under one top-level directory, as `helm package` writes it).
+func packChart(t *testing.T, src, dest string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	top := filepath.Base(src)
+	err = filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := tw.WriteHeader(&tar.Header{Name: top + "/" + filepath.ToSlash(rel), Mode: 0o644, Size: int64(len(raw))}); err != nil {
+			return err
+		}
+		_, err = tw.Write(raw)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []interface{ Close() error }{tw, gz, f} {
+		if err := c.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+var depListOK = regexp.MustCompile(`\s(ok|unpacked)\s*$`)
+
+// helmSays is Helm's own verdict on a local chart: khelm builds the
+// dependencies when action.CheckDependencies fails on the loaded chart or a
+// dependency is a file:// chart; the bash twin also refuses what `helm
+// dependency list` does not call ok or unpacked.
+func helmSays(t *testing.T, dir string) bool {
+	t.Helper()
+	ch, err := loader.Load(dir)
+	if err != nil {
+		return true
+	}
+	for _, dep := range ch.Metadata.Dependencies {
+		if strings.HasPrefix(dep.Repository, "file://") {
+			return true
+		}
+	}
+	if action.CheckDependencies(ch, ch.Metadata.Dependencies) != nil {
+		return true
+	}
+	var out strings.Builder
+	if err := action.NewDependency().List(dir, &out); err != nil {
+		return true
+	}
+	for line := range strings.SplitSeq(out.String(), "\n") {
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "NAME") || strings.HasPrefix(strings.ToUpper(line), "WARNING") {
+			continue
+		}
+		if !depListOK.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// khelm's rule on real chart fixtures, decided as Helm's loader sees the
+// chart: a vendored archive or directory renders; an archive that
+// .helmignore hides, a misnamed one, a version outside the constraint, a
+// missing dependency, a corrupt archive, two archives of one dependency and
+// a file:// dependency (vendored or not) are refused. Each local fixture is
+// also checked against Helm's own functions (action.CheckDependencies and
+// action.Dependency.List).
 func TestChartDepsNotVendored(t *testing.T) {
 	base := t.TempDir()
-	chart := func(name, deps string) string {
+	src := t.TempDir()
+	writeChart(t, filepath.Join(src, "redis"), "redis", "1.0.0")
+	writeChart(t, filepath.Join(src, "other", "redis"), "other", "1.0.0") // an archive named redis-*.tgz that holds chart "other"
+	redis11 := filepath.Join(src, "v11", "redis")
+	writeChart(t, redis11, "redis", "1.1.0")
+
+	parent := func(name, deps string) string {
 		dir := filepath.Join(base, name)
-		writeGateFile(t, filepath.Join(dir, "Chart.yaml"), "apiVersion: v2\nname: "+name+"\nversion: 0.1.0\n"+deps)
+		writeChart(t, dir, name, "0.1.0")
+		if deps != "" {
+			writeGateFile(t, filepath.Join(dir, "Chart.yaml"), "apiVersion: v2\nname: "+name+"\nversion: 0.1.0\n"+deps)
+		}
 		return dir
 	}
-	remoteDep := "dependencies:\n  - name: redis\n    version: 1.0.0\n    repository: https://charts.example.test\n"
-	chart("plain", "")
-	chart("unvendored", remoteDep)
-	vendored := chart("vendored", remoteDep)
-	writeGateFile(t, filepath.Join(vendored, "charts", "redis-1.0.0.tgz"), "x")
-	vendoredDir := chart("vendored-dir", remoteDep)
-	writeGateFile(t, filepath.Join(vendoredDir, "charts", "redis", "Chart.yaml"), "name: redis\n")
-	chart("common", "")
-	chart("filedep", "dependencies:\n  - name: common\n    version: 0.1.0\n    repository: file://../common\n")
-	// A file:// dependency is built even when charts/ holds it.
-	fileVendored := chart("filedep-vendored", "dependencies:\n  - name: common\n    version: 0.1.0\n    repository: file://../common\n")
-	writeGateFile(t, filepath.Join(fileVendored, "charts", "common", "Chart.yaml"), "name: common\n")
+	redisDep := func(version string) string {
+		return "dependencies:\n  - name: redis\n    version: \"" + version + "\"\n    repository: https://charts.example.test\n"
+	}
+	parent("plain", "")
+	parent("missing", redisDep("1.0.0"))
+	parent("missing-no-version", "dependencies:\n  - name: redis\n    repository: https://charts.example.test\n")
+	packChart(t, filepath.Join(src, "redis"), filepath.Join(parent("vendored-tgz", redisDep("1.0.0")), "charts", "redis-1.0.0.tgz"))
+	packChart(t, filepath.Join(src, "redis"), filepath.Join(parent("range", redisDep("~1.0.0")), "charts", "redis-1.0.0.tgz"))
+	writeChart(t, filepath.Join(parent("vendored-dir", redisDep("1.0.0")), "charts", "redis"), "redis", "1.0.0")
+	ignored := parent("helmignored", redisDep("1.0.0"))
+	packChart(t, filepath.Join(src, "redis"), filepath.Join(ignored, "charts", "redis-1.0.0.tgz"))
+	writeGateFile(t, filepath.Join(ignored, ".helmignore"), "*.tgz\n")
+	packChart(t, filepath.Join(src, "other", "redis"), filepath.Join(parent("misnamed", redisDep("1.0.0")), "charts", "redis-1.0.0.tgz"))
+	packChart(t, filepath.Join(src, "redis"), filepath.Join(parent("wrong-version", redisDep("2.0.0")), "charts", "redis-1.0.0.tgz"))
+	two := parent("two-archives", redisDep(">=1.0.0"))
+	packChart(t, filepath.Join(src, "redis"), filepath.Join(two, "charts", "redis-1.0.0.tgz"))
+	packChart(t, redis11, filepath.Join(two, "charts", "redis-1.1.0.tgz"))
+	writeGateFile(t, filepath.Join(parent("corrupt", redisDep("1.0.0")), "charts", "redis-1.0.0.tgz"), "x")
+	parent("common", "")
+	fileDep := "dependencies:\n  - name: common\n    version: 0.1.0\n    repository: file://../common\n"
+	parent("filedep", fileDep)
+	writeChart(t, filepath.Join(parent("filedep-vendored", fileDep), "charts", "common"), "common", "0.1.0")
 	v1 := filepath.Join(base, "v1")
 	writeGateFile(t, filepath.Join(v1, "Chart.yaml"), "apiVersion: v1\nname: v1\nversion: 0.1.0\n")
-	writeGateFile(t, filepath.Join(v1, "requirements.yaml"), remoteDep)
+	writeGateFile(t, filepath.Join(v1, "requirements.yaml"), redisDep("1.0.0"))
+	v1v := filepath.Join(base, "v1-vendored")
+	writeGateFile(t, filepath.Join(v1v, "Chart.yaml"), "apiVersion: v1\nname: v1-vendored\nversion: 0.1.0\n")
+	writeGateFile(t, filepath.Join(v1v, "requirements.yaml"), redisDep("1.0.0"))
+	writeChart(t, filepath.Join(v1v, "charts", "redis"), "redis", "1.0.0")
+
 	for _, tc := range []struct {
-		config string
-		want   bool
+		chart string
+		want  bool
 	}{
-		{"chart: ./plain\n", false},
-		{"chart: ./unvendored\n", true},
-		{"chart: " + filepath.Join(base, "unvendored") + "\n", true}, // an absolute path in the project
-		{"chart: ./vendored\n", false},
-		{"chart: ./vendored-dir\n", false},
-		{"chart: ./filedep\n", true},
-		{"chart: ./filedep-vendored\n", true},
-		{"chart: ./v1\n", true}, // requirements.yaml (apiVersion v1)
-		{"repository: https://charts.example.test\nchart: unvendored\n", false},
-		{"chart: ./missing\n", false}, // not a directory: a repo shorthand to khelm
+		{"plain", false},
+		{"vendored-tgz", false},
+		{"range", false},
+		{"vendored-dir", false},
+		{"v1-vendored", false},
+		{"missing", true},
+		{"missing-no-version", true},
+		{"helmignored", true},
+		{"misnamed", true},
+		{"wrong-version", true},
+		{"two-archives", true},
+		{"corrupt", true},
+		{"filedep", true},
+		{"filedep-vendored", true},
+		{"v1", true},
 	} {
-		_, got, err := ChartDepsNotVendored([]byte(tc.config), base)
-		if err != nil || got != tc.want {
-			t.Errorf("%q: unvendored=%v err=%v, want %v", tc.config, got, err, tc.want)
+		dir := filepath.Join(base, tc.chart)
+		// Every fixture but the corrupt one loads: a refusal is for the
+		// dependency, not for a chart Helm cannot read.
+		if _, err := loader.Load(dir); (err != nil) != (tc.chart == "corrupt") {
+			t.Errorf("%s: the fixture loads with %v", tc.chart, err)
+		}
+		if helm := helmSays(t, dir); helm != tc.want {
+			t.Errorf("%s: the fixture is wrong: Helm says %v, the table %v", tc.chart, helm, tc.want)
+		}
+		for _, config := range []string{"chart: ./" + tc.chart + "\n", "chart: " + dir + "\n"} {
+			_, got, err := ChartDepsNotVendored([]byte(config), base)
+			if err != nil || got != tc.want {
+				t.Errorf("%q: unvendored=%v err=%v, want %v", config, got, err, tc.want)
+			}
+		}
+	}
+	for _, config := range []string{
+		"repository: https://charts.example.test\nchart: missing\n", // a remote chart: khelm pulls it into its cache
+		"chart: ./does-not-exist\n",                                 // not a directory: a repo shorthand to khelm
+	} {
+		if _, got, err := ChartDepsNotVendored([]byte(config), base); err != nil || got {
+			t.Errorf("%q: unvendored=%v err=%v, want false", config, got, err)
+		}
+	}
+	// The gate reads only: no fixture gained a lock file or a tmpcharts dir.
+	for _, name := range []string{"missing", "helmignored", "filedep"} {
+		for _, f := range []string{"Chart.lock", "tmpcharts"} {
+			if _, err := os.Stat(filepath.Join(base, name, f)); err == nil {
+				t.Errorf("%s: the gate wrote %s", name, f)
+			}
 		}
 	}
 }

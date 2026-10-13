@@ -44,8 +44,11 @@ vendored)`, `rendered`, `skipped`, `error`) plus a summary, with a
 when objects change on each render (they are listed, for example the CA and
 TLS Secrets of Cilium; `--ignore-nondeterministic` diffs the entry without
 them), `(non-repeatable)` when the render generated or updated secret
-material that the store does not hold, and `(partial: KRM function
-skipped)`. The exit code is 0 when nothing would change, 1 only when a
+material that the store does not hold, or read such material that an
+earlier entry of the run generated, and `(partial: KRM function skipped)`
+(also for a function in a base or component the entry references). The
+chart dependency check is Helm's own (the bash implementation needs helm v3
+on `PATH` for it). The exit code is 0 when nothing would change, 1 only when a
 completed diff found a change, and 2 for all other failures.
 
 The dry run prevents accidental side effects of legitimate addon code and

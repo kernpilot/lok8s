@@ -284,11 +284,19 @@ bootstrap dry-run: entries=4 unchanged=0 differs=3 rendered=0 skipped=1 inconclu
 - `inconclusive (chart dependencies not vendored)`: the entry renders a
   local chart, and khelm would build the dependencies of that chart into the
   chart directory (it writes `Chart.lock` and `charts/`). The dry run does
-  not render the chart. Put the dependencies into the `charts/` directory of
-  the chart, or pass `--allow-generators`. The run exits 2.
+  not render the chart. It decides as Helm does: on the chart as Helm's
+  loader loads it (`.helmignore` applies, and a dependency matches a
+  subchart by the name in its `Chart.yaml`). A missing, misnamed, doubled or
+  hidden dependency, a version outside the dependency's constraint, and a
+  `file://` dependency are not vendored. Put the dependencies into the
+  `charts/` directory of the chart, or pass `--allow-generators`. The run
+  exits 2. The bash implementation asks `helm` for this check (`helm
+  dependency list` and `helm lint`, both read-only), so it needs helm v3 on
+  `PATH`. Without it, such an entry is inconclusive too.
 - `(non-deterministic: N)`, with one `non-deterministic (regenerated on
   every apply)` line for each object: the two renders of the entry gave
-  different content for these objects. Example: the Cilium chart makes a new
+  different content for these objects, or only one of the renders has the
+  object. Example: the Cilium chart makes a new
   CA and new TLS Secrets for Hubble on each render, thus each real apply
   changes them. The result includes these objects: the entry differs, and
   the run exits 1. `--ignore-nondeterministic` diffs the entry without them.
@@ -297,11 +305,14 @@ bootstrap dry-run: entries=4 unchanged=0 differs=3 rendered=0 skipped=1 inconclu
   does not hold yet (a password, a key, a certificate, or a CA because
   `CAROOT` has none), or it updated a value of the store. The dry run keeps
   the value in a store of this run only, which all renders of the run share.
-  The next real run generates different bytes, so the real result differs
-  from this preview.
-- `(partial: KRM function skipped)`: the entry declares a KRM function. A
-  dry run without `--allow-generators` does not run it, thus the objects of
-  the function are not in the preview.
+  An entry that reads such a value (a `secretRef`, the same CA) is
+  non-repeatable too. The next real run generates different bytes, so the
+  real result differs from this preview.
+- `(partial: KRM function skipped)`: the entry declares a KRM function, in
+  its own directory or in a kustomization it references in the project (a
+  base, a component, a generator or transformer file). A dry run without
+  `--allow-generators` does not run it, thus the objects of the function are
+  not in the preview.
 
 **Trust model.** The dry run prevents accidental side effects of
 legitimate addon code and configuration. It is not a security boundary
@@ -337,6 +348,12 @@ What the dry run does not prevent:
 - Adversarial input: a generator kind (apiVersion and kind) that resolves to
   a path outside the plugin home, and a chart or value URL with a crafted
   scheme. Code that runs this way has the access of a real run.
+
+An addon that stacks values renders from a copy (a dry run and a real run
+alike). The copy keeps symlinks, and lo writes the files it changes in the
+copy (`chart.yaml`, `values.inline.yaml`, `values.merged.yaml`) as new
+private files. It never writes through a symlink to a file of the addon or
+to a file the addon shares.
 
 The render writes its temporary files into a private directory of the run
 (`TMPDIR`), which lo removes at the end of the run, also on SIGTERM. A Secret

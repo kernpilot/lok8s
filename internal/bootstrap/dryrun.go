@@ -381,7 +381,7 @@ func (e *Engine) dryRunOne(ctx context.Context, job Job, stem string) dryResult 
 		ui.ErrorTo(stderr, "bootstrap: dry-run report: %v", err)
 		return dryResult{status: dryError}
 	}
-	partial := !e.Options.AllowGenerators && addons.KRMFunctionDeclared(job.Dir)
+	partial := !e.Options.AllowGenerators && addons.KRMFunctionDeclared(job.Dir, e.Paths.Base, e.Paths.Lok8s)
 	renderOnce := func() (string, error) {
 		return addons.RenderDryRun(ctx, e.Paths, e.Runner, stderr, job.Dir, job.Kind, job.Provider, job.Inline, env, e.boundary, e.Options.AllowGenerators)
 	}
@@ -472,21 +472,27 @@ func splitObjects(stream string) (labels []string, content map[string]string, do
 	}
 }
 
-// nondeterministicObjects lists, in the first render's order, the objects
-// whose content differs between two renders of one entry (or that only the
-// first render has).
+// nondeterministicObjects lists the objects whose content differs between
+// two renders of one entry, over the union of the objects of both renders:
+// in the first render's order, then the objects only the second render has
+// (in its order). An object only one render has is listed too.
 func nondeterministicObjects(first, second string) ([]string, error) {
-	labels, a, _, err := splitObjects(first)
+	labelsA, a, _, err := splitObjects(first)
 	if err != nil {
 		return nil, err
 	}
-	_, b, _, err := splitObjects(second)
+	labelsB, b, _, err := splitObjects(second)
 	if err != nil {
 		return nil, err
 	}
 	var out []string
-	for _, l := range labels {
+	for _, l := range labelsA {
 		if other, ok := b[l]; !ok || other != a[l] {
+			out = append(out, l)
+		}
+	}
+	for _, l := range labelsB {
+		if _, ok := a[l]; !ok {
 			out = append(out, l)
 		}
 	}

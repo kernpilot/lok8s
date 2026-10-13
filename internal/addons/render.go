@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -231,8 +232,10 @@ func stageBuildDir(paths *config.Paths, stderr io.Writer, addonDir, kind, provid
 	}
 	// Copy to a temp build dir when there's overlay stacking to do (a dry
 	// run copies the same way: khelm's dependency builds are refused at the
-	// ChartRenderer gate, so nothing writes into a copy or through one of
-	// its symlinks).
+	// ChartRenderer gate). The copy keeps symlinks, so every file the
+	// staging rewrites (values.inline.yaml, values.merged.yaml, chart.yaml)
+	// is written as a new private file (writeStagedFile), never through a
+	// link to the addon's file or a file it shares.
 	if inlineValues != "" || len(valueFiles) > 0 {
 		// Copy to a temp build dir when there's overlay stacking to do.
 		// A chart that pins its OWN chart.yaml valueFiles — e.g. a
@@ -255,7 +258,7 @@ func stageBuildDir(paths *config.Paths, stderr io.Writer, addonDir, kind, provid
 		}
 		if inlineValues != "" {
 			inline := filepath.Join(tmp, "values.inline.yaml")
-			if err := os.WriteFile(inline, []byte(inlineValues+"\n"), 0o644); err != nil {
+			if err := writeStagedFile(inline, []byte(inlineValues+"\n")); err != nil {
 				ui.ErrorTo(stderr, "addons::render: failed to merge values for %s", addonDir)
 				return "", cleanup, fmt.Errorf("addons render: write inline values: %w", err)
 			}
@@ -266,7 +269,7 @@ func stageBuildDir(paths *config.Paths, stderr io.Writer, addonDir, kind, provid
 			ui.ErrorTo(stderr, "addons::render: failed to merge values for %s", addonDir)
 			return "", cleanup, fmt.Errorf("addons render: merge values: %w", err)
 		}
-		if err := os.WriteFile(filepath.Join(tmp, "values.merged.yaml"), merged, 0o644); err != nil {
+		if err := writeStagedFile(filepath.Join(tmp, "values.merged.yaml"), merged); err != nil {
 			ui.ErrorTo(stderr, "addons::render: failed to merge values for %s", addonDir)
 			return "", cleanup, fmt.Errorf("addons render: write merged values: %w", err)
 		}
@@ -333,8 +336,29 @@ func copyTree(src, dst string) error {
 	})
 }
 
+// writeStagedFile writes a file of the staging copy as a new private
+// regular file: whatever is at path (a symlink the copy kept, or a regular
+// file) is removed first, and the file is created exclusively, so the write
+// never goes through a link (bash: rm -f, then a redirect under umask 077).
+func writeStagedFile(path string, data []byte) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
 // setChartValueFiles rewrites chart.yaml's valueFiles to the merged set
-// (bash: yq -i '.valueFiles = ["values.merged.yaml"]').
+// (bash: yq '.valueFiles = ["values.merged.yaml"]'). It reads chart.yaml
+// (through a link, when the copy kept one) and writes the result as a new
+// private file (writeStagedFile): the linked original stays as it is.
 func setChartValueFiles(chartPath string) error {
 	raw, err := os.ReadFile(chartPath)
 	if err != nil {
@@ -367,7 +391,7 @@ func setChartValueFiles(chartPath string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(chartPath, out, 0o644)
+	return writeStagedFile(chartPath, out)
 }
 
 // coerceEnvValues applies the yq transform

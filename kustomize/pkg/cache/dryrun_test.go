@@ -30,8 +30,10 @@ func TestDryRunFromEnvIsNilOutsideADryRun(t *testing.T) {
 }
 
 // The overlay reads the store, generates a missing value in memory and
-// writes nothing: no directory, no file. A generated value and an update
-// (Put of a value the store does not hold) are reported by name only.
+// writes nothing: no directory, no file. A generated value, a read of it
+// from the run store (reuse: the reader is not repeatable either) and an
+// update (Put of a value the store does not hold) are reported by name
+// only.
 func TestOverlayWritesNothingAndReportsWhatItGenerated(t *testing.T) {
 	root := t.TempDir()
 	report := filepath.Join(root, "report")
@@ -63,7 +65,7 @@ func TestOverlayWritesNothingAndReportsWhatItGenerated(t *testing.T) {
 		t.Fatalf("the overlay created the store: %v", err)
 	}
 	raw, _ := os.ReadFile(report)
-	if string(raw) != "secret Secret.app.ns.PASSWORD\nupdate Secret.app.ns.FROM_ENV\n" {
+	if string(raw) != "secret Secret.app.ns.PASSWORD\nreuse Secret.app.ns.PASSWORD\nreuse Secret.app.ns.PASSWORD\nupdate Secret.app.ns.FROM_ENV\n" {
 		t.Errorf("report = %q", raw)
 	}
 	if strings.Contains(string(raw), "s3cret") {
