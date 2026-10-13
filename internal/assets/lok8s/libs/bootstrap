@@ -1456,7 +1456,8 @@ bootstrap::_reserved_env_name() {
 # run); apply nothing. Prints the entry's status field on the first line:
 #   unchanged | differs [changed=N new=M] | inconclusive (<reason>) |
 #   rendered | skipped | error — then the marks: (non-deterministic: N),
-#   (non-repeatable), (partial: KRM function skipped)
+#   (non-repeatable), (partial: KRM function skipped) or (partial: a
+#   reference outside the project was not inspected)
 # and one more line per object that differs between the entry's two renders
 # (regenerated on every apply). With bootstrap_render_dir set it writes
 # <stem>.yaml (the manifests) and <stem>.diff (the diff text, empty when
@@ -1490,9 +1491,10 @@ bootstrap::_dry_run_one() {
     echo error
     return 0
   fi
-  local _partial=0
-  if (( ! ${bootstrap_allow_generators:-0} )) && bootstrap::_krm_declared "${addon_dir}"; then
-    _partial=1
+  # The KRM hint: `function`, `unread` or nothing.
+  local _krm=""
+  if (( ! ${bootstrap_allow_generators:-0} )); then
+    _krm="$(bootstrap::_krm_declared "${addon_dir}")" || _krm=""
   fi
   # The entry renders TWICE: an object whose content differs between the
   # two renders is regenerated on every apply (Cilium's CA and TLS Secrets).
@@ -1511,7 +1513,10 @@ bootstrap::_dry_run_one() {
   done < "${_report}"
   local _tail=""
   (( ! _non_repeatable )) || _tail+=" (non-repeatable)"
-  (( ! _partial )) || _tail+=" (partial: KRM function skipped)"
+  case "${_krm}" in
+    function) _tail+=" (partial: KRM function skipped)" ;;
+    unread) _tail+=" (partial: a reference outside the project was not inspected)" ;;
+  esac
   if (( _chart_refused )); then
     echo "inconclusive (chart dependencies not vendored)${_tail}"
     return 0
@@ -1542,26 +1547,31 @@ bootstrap::_dry_run_one() {
 }
 
 # bootstrap::_krm_declared <dir>
-# Reports (rc 0) an entry whose kustomization graph declares a KRM function
-# (`config.kubernetes.io/function` or `config.k8s.io/function`), or that
-# the hint cannot check. It reads the YAML under dir, and for every
+# The KRM hint of an entry: prints `function` (rc 0) when its kustomization
+# graph declares a KRM function (`config.kubernetes.io/function` or
+# `config.k8s.io/function`), `unread` (rc 0) when no function was found but
+# a reference outside the project, or a remote one, was not read, and
+# nothing (rc 1) otherwise. It reads the YAML under dir, and for every
 # kustomization on the way the kustomization file itself (any of its three
 # names; an inline generator or transformer config can declare a function)
 # and its local resources, components, bases, generators, transformers and
 # validators references, followed recursively. It reads only under
 # PATH_BASE and PATH_LOK8S (the project) and the entry's own directory: a
 # reference or a kustomization file that resolves outside them, or a remote
-# reference, is not read and counts too. grep -r follows no symbolic link
-# below a directory and skips devices and FIFOs; a file it reads by name
-# must be a regular file. The dry run marks that entry `partial`. A hint,
-# not a boundary: it only reads. The Go twin: addons.KRMFunctionDeclared.
+# reference, is not read. A function anywhere in the graph wins over an
+# unread reference. A reference is cleaned lexically before its links
+# resolve (`link/../x` is the `x` next to the link), as kustomize does.
+# grep -r follows no symbolic link below a directory and skips devices and
+# FIFOs; a file it reads by name must be a regular file. The dry run marks
+# the entry `partial`, with a label for each kind. A hint, not a boundary:
+# it only reads. The Go twin: addons.KRMFunctionHint.
 bootstrap::_krm_declared() {
   local _entry
   # A reference that does not exist fails the render on its own.
   _entry="$(realpath -e -- "${1}" 2>/dev/null)" || return 1
   local -a _queue=("${_entry}") _roots=("${_entry}")
   local -A _seen=()
-  local _r _p _k _kf _ref
+  local _r _p _k _kf _ref _unread=0
   local -r _fn1='config.kubernetes.io/function' _fn2='config.k8s.io/function'
   for _r in "${PATH_BASE:-}" "${PATH_LOK8S:-}"; do
     [[ -n "${_r}" ]] || continue
@@ -1569,25 +1579,40 @@ bootstrap::_krm_declared() {
   done
   while (( ${#_queue[@]} )); do
     _p="${_queue[0]}"; _queue=("${_queue[@]:1}")
+    # Lexically first (-s -m: `..` drops the component before it, links
+    # untouched), then the links.
+    _p="$(realpath -s -m -- "${_p}" 2>/dev/null)" || continue
     _p="$(realpath -e -- "${_p}" 2>/dev/null)" || continue
     [[ -z "${_seen[${_p}]:-}" ]] || continue
-    # Outside the project: not read, so the hint cannot rule a function out.
-    bootstrap::_path_under "${_p}" "${_roots[@]}" || return 0
     _seen[${_p}]=1
-    if [[ ! -d "${_p}" ]]; then
-      [[ -f "${_p}" ]] && grep -qs -e "${_fn1}" -e "${_fn2}" -- "${_p}" && return 0
+    # Outside the project: not read, so the hint cannot rule a function out.
+    if ! bootstrap::_path_under "${_p}" "${_roots[@]}"; then
+      _unread=1
       continue
     fi
-    grep -rqs --include='*.yaml' --include='*.yml' -e "${_fn1}" -e "${_fn2}" -- "${_p}" && return 0
+    if [[ ! -d "${_p}" ]]; then
+      if [[ -f "${_p}" ]] && grep -qs -e "${_fn1}" -e "${_fn2}" -- "${_p}"; then
+        echo function; return 0
+      fi
+      continue
+    fi
+    if grep -rqs --include='*.yaml' --include='*.yml' -e "${_fn1}" -e "${_fn2}" -- "${_p}"; then
+      echo function; return 0
+    fi
     for _k in kustomization.yaml kustomization.yml Kustomization; do
       [[ -f "${_p}/${_k}" ]] || continue
       _kf="$(realpath -e -- "${_p}/${_k}" 2>/dev/null)" || break
-      bootstrap::_path_under "${_kf}" "${_roots[@]}" || return 0
-      grep -qs -e "${_fn1}" -e "${_fn2}" -- "${_kf}" && return 0
+      if ! bootstrap::_path_under "${_kf}" "${_roots[@]}"; then
+        _unread=1
+        break
+      fi
+      if grep -qs -e "${_fn1}" -e "${_fn2}" -- "${_kf}"; then
+        echo function; return 0
+      fi
       while IFS= read -r _ref; do
         case "${_ref}" in
           "") ;;
-          *://*|git@*|github.com/*) return 0 ;;   # remote: not read
+          *://*|git@*|github.com/*) _unread=1 ;;   # remote: not read
           /*) _queue+=("${_ref}") ;;
           *) _queue+=("${_p}/${_ref}") ;;
         esac
@@ -1597,7 +1622,8 @@ bootstrap::_krm_declared() {
       break
     done
   done
-  return 1
+  (( _unread )) || return 1
+  echo unread
 }
 
 # bootstrap::_path_under <path> <root>...

@@ -3246,7 +3246,13 @@ SH
   mkdir -p "${root}/charts/app/charts"
   printf 'apiVersion: v2\nname: app\nversion: 0.1.0\ndependencies:\n  - name: common\n    version: 0.1.0\n    repository: https://charts.example\n' > "${root}/charts/app/Chart.yaml"
   _gate() { ( cd "${root}" && PATH="${b}/bin:${PATH}" KUSTOMIZE_PLUGIN_CONFIG_STRING="${1}" LOK8S_BOOTSTRAP_DRYRUN_REPORT="${b}/report" "${gate}" cfg </dev/null ); }
-  local refused="lok8s dry-run: chart charts/app: helm does not report its dependencies as vendored (khelm may build them into the chart directory) — vendor them into charts/ or pass --allow-generators"
+  # Each refusal names its cause and the next action; only a dependency
+  # that helm does not report as vendored gets the vendor advice (review
+  # round 7, items 1 and 2).
+  local p="lok8s dry-run: chart charts/app:"
+  local advice="khelm may build the dependencies into the chart directory. Vendor them into charts/, or pass --allow-generators."
+  local needs="helm v3 (3.3 or a later 3.x) is required for the dependency check."
+  local use_go="Install helm v3, or use the Go implementation (lok8s.yaml: spec.implementation)."
 
   # helm says ok (an archive), or unpacked (a directory): the chart renders.
   # Its log lines on stderr and the warning about an extra chart on stdout
@@ -3261,42 +3267,50 @@ SH
   assert_success
 
   # Every other status of `helm dependency list` is refused and reported.
-  local status
-  for status in missing misnamed "wrong version" "invalid version" "too many matches" corrupt; do
-    printf 'common\t0.1.0\thttps://charts.example\t%s   \n' "${status}" > "${FAKE_HELM}/deplist"
+  local st
+  for st in missing misnamed "wrong version" "invalid version" "too many matches" corrupt; do
+    printf 'common\t0.1.0\thttps://charts.example\t%s   \n' "${st}" > "${FAKE_HELM}/deplist"
     : > "${b}/report"
     run _gate "chart: charts/app"
     assert_failure
-    assert_output "${refused}"
-    [ "$(cat "${b}/report")" = "chart-deps charts/app" ] || { echo "status ${status}: report $(cat "${b}/report")"; return 1; }
+    assert_output "${p} dependency common: ${st} (helm dependency list). ${advice}"
+    [ "$(cat "${b}/report")" = "chart-deps charts/app" ] || { echo "status ${st}: report $(cat "${b}/report")"; return 1; }
   done
 
   # ok to `helm dependency list`, but the loaded chart lacks it (an archive
   # that .helmignore hides): `helm lint` names it — refused.
   printf 'common\t0.1.0\thttps://charts.example\tok\n' > "${FAKE_HELM}/deplist"
-  printf '[WARNING] %s: chart directory is missing these dependencies: common\n' "${root}/charts/app" > "${FAKE_HELM}/lint"
+  printf '[WARNING] %s: chart directory is missing these dependencies: common,extra\n' "${root}/charts/app" > "${FAKE_HELM}/lint"
   run _gate "chart: charts/app"
   assert_failure
-  assert_output "${refused}"
+  assert_output "${p} dependency common,extra: not in the chart that helm loads (helm lint). ${advice}"
   : > "${FAKE_HELM}/lint"
 
-  # What the gate cannot check is refused: a chart helm cannot load (the
-  # last line of helm's stderr says why), no table, a helm that is not v3,
-  # no helm at all. helm's own "no dependencies" answer has no table and
-  # renders: the loaded chart has nothing to build.
+  # What the gate cannot check is refused, each with its own message and
+  # next action, never the vendor advice: a chart helm cannot load (the
+  # last line of helm's stderr says why), no table, no temp file, a helm
+  # that is not v3.3+, no helm at all. helm's own "no dependencies" answer
+  # has no table and renders: the loaded chart has nothing to build.
   echo 1 > "${FAKE_HELM}/deplist.rc"
+  : > "${b}/report"
   run _gate "chart: charts/app"
   assert_failure
-  assert_line "lok8s dry-run: chart charts/app: helm dependency list failed: Error: the chart does not load"
-  refute_output --partial "walk.go"
+  assert_output "${p} helm cannot load the chart: the chart does not load. Fix the chart so that helm can load it."
+  [ "$(cat "${b}/report")" = "chart-deps charts/app" ]
   : > "${FAKE_HELM}/deplist.rc"
   : > "${FAKE_HELM}/table"
   : > "${b}/report"
   run _gate "chart: charts/app"
   assert_failure
-  assert_line "lok8s dry-run: chart charts/app: helm dependency list printed no dependency table"
-  assert_line "${refused}"
+  assert_output "${p} helm dependency list printed no dependency table (helm v3.21.2+g0000000). Use helm v3.21.2, or use the Go implementation (lok8s.yaml: spec.implementation)."
   [ "$(cat "${b}/report")" = "chart-deps charts/app" ]
+  rm "${FAKE_HELM}/table"
+  : > "${b}/report"
+  run env TMPDIR="${BATS_TEST_TMPDIR}/no-such-dir" bash -c 'cd "$1" && PATH="$2/bin:${PATH}" KUSTOMIZE_PLUGIN_CONFIG_STRING="chart: charts/app" LOK8S_BOOTSTRAP_DRYRUN_REPORT="$2/report" "$3" cfg </dev/null' _ "${root}" "${b}" "${gate}"
+  assert_failure
+  assert_output "${p} cannot make a temporary file for the dependency check in ${BATS_TEST_TMPDIR}/no-such-dir. Make sure that this directory exists and is writable."
+  [ "$(cat "${b}/report")" = "chart-deps charts/app" ]
+  : > "${FAKE_HELM}/table"
   printf 'WARNING: no dependencies at %s/charts/app/charts\n' "${root}" > "${FAKE_HELM}/table"
   run _gate "chart: charts/app"
   assert_success
@@ -3305,13 +3319,13 @@ SH
   printf 'v4.0.0+g0000000\n' > "${FAKE_HELM}/version"
   run _gate "chart: charts/app"
   assert_failure
-  assert_line "lok8s dry-run: chart charts/app: the dependency check needs helm v3.3 or later on PATH (found: v4.0.0+g0000000)"
+  assert_output "${p} ${needs} Found: v4.0.0+g0000000. ${use_go}"
   # helm lint checks the dependencies since helm v3.3.0 (an older one would
   # pass an archive that .helmignore hides).
   printf 'v3.2.4+g0000000\n' > "${FAKE_HELM}/version"
   run _gate "chart: charts/app"
   assert_failure
-  assert_line "lok8s dry-run: chart charts/app: the dependency check needs helm v3.3 or later on PATH (found: v3.2.4+g0000000)"
+  assert_output "${p} ${needs} Found: v3.2.4+g0000000. ${use_go}"
   printf 'v3.21.2+g0000000\n' > "${FAKE_HELM}/version"
   # No helm at all: a PATH with yq and the system tools only.
   mkdir -p "${FAKE_HELM}/nohelm"
@@ -3321,7 +3335,7 @@ SH
   run env -C "${root}" PATH="${b}/bin:${FAKE_HELM}/nohelm:/usr/bin:/bin" KUSTOMIZE_PLUGIN_CONFIG_STRING="chart: charts/app" \
     LOK8S_BOOTSTRAP_DRYRUN_REPORT="${b}/report" "${gate}" cfg </dev/null
   assert_failure
-  assert_line "lok8s dry-run: chart charts/app: the dependency check needs helm v3.3 or later on PATH (found: none)"
+  assert_output "${p} ${needs} Found: no helm on PATH. ${use_go}"
 
   # A file:// dependency is always built: refused, vendored or not, without
   # asking helm (requirements.yaml counts too).
@@ -3329,7 +3343,7 @@ SH
   printf 'v0.0.0-not-asked\n' > "${FAKE_HELM}/version"
   run _gate "chart: charts/app"
   assert_failure
-  assert_output "${refused}"
+  assert_output "${p} dependency common is a file:// chart. khelm builds it into the chart directory on each render. Pass --allow-generators to render it."
   printf 'v3.21.2+g0000000\n' > "${FAKE_HELM}/version"
 
   # A chart without dependencies, and a remote chart (a repository: khelm
@@ -3349,18 +3363,24 @@ SH
 
 # The same gate against the real helm v3 on real charts (Helm's loader:
 # .helmignore honoured, a subchart named by its metadata). Skips without
-# helm v3 locally. CI runs it natively with a pinned helm v3 (ci.yml, Bats
+# helm v3.3+ locally. CI runs it natively with a pinned helm v3 (ci.yml, Bats
 # Unit Tests: "Real-helm bats tests"), where CI=true makes a missing helm v3
 # a failure: the argsh container that runs the rest of the suite has no
-# helm. The fixtures are the Go twin's (internal/render/chartgate_test.go,
-# TestChartDepsNotVendored), so both implementations decide them the same.
+# helm. The fixtures and their verdicts are the ONE table both suites read
+# (internal/render/testdata/chartgate-fixtures.txt; the Go twin is
+# TestChartRefusal), so the two cannot drift: a row this test cannot build
+# fails it. The cause column pins each refusal's own message (review round
+# 7, items 2 and 4).
 # bats test_tags=real-helm
 @test "the dry run's ChartRenderer gate decides with the real helm on real charts" {
-  local version
+  local version minor
   version="$(helm version --short 2>/dev/null)" || version=""
-  if [[ "${version}" != v3.* ]]; then
-    [[ -z "${CI:-}" ]] || { echo "CI has no helm v3 (found: ${version:-none})"; return 1; }
-    skip "helm v3 not installed (found: ${version:-none})"
+  minor="${version#v3.}"
+  minor="${minor%%.*}"
+  # The gate's own requirement: helm v3.3 or a later 3.x.
+  if [[ "${version}" != v3.* || ! "${minor}" =~ ^[0-9]+$ ]] || (( 10#${minor} < 3 )); then
+    [[ -z "${CI:-}" ]] || { echo "CI has no helm v3.3+ (found: ${version:-none})"; return 1; }
+    skip "helm v3.3+ not installed (found: ${version:-none})"
   fi
   export HELM_CACHE_HOME="${BATS_TEST_TMPDIR}/helm/cache" HELM_CONFIG_HOME="${BATS_TEST_TMPDIR}/helm/config" HELM_DATA_HOME="${BATS_TEST_TMPDIR}/helm/data"
   local chart_plugin="khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer"
@@ -3371,81 +3391,104 @@ SH
   mkdir -p "${b}"
   addons::dry_run_boundary "${b}"
   local gate="${b}/plugins/${chart_plugin}" root="${BATS_TEST_TMPDIR}/root" src="${BATS_TEST_TMPDIR}/src"
-  _chart() {  # <dir> <name> <version>
+  local table="${_PROJECT_ROOT}/internal/render/testdata/chartgate-fixtures.txt"
+  [ -f "${table}" ]
+  _chart() {  # <dir> <name> [version]: a chart (no version line when empty)
     mkdir -p "${1}/templates"
-    printf 'apiVersion: v2\nname: %s\nversion: %s\n' "${2}" "${3}" > "${1}/Chart.yaml"
+    printf 'apiVersion: v2\nname: %s\n' "${2}" > "${1}/Chart.yaml"
+    [[ -z "${3:-}" ]] || printf 'version: %s\n' "${3}" >> "${1}/Chart.yaml"
     printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: %s\n' "${2}" > "${1}/templates/cm.yaml"
   }
-  _parent() {  # <name> <dependency version>: a chart that needs redis
+  _dep() {  # <file> [version]: append a redis dependency (no version line when empty)
+    printf 'dependencies:\n  - name: redis\n' >> "${1}"
+    [[ -z "${2:-}" ]] || printf '    version: "%s"\n' "${2}" >> "${1}"
+    printf '    repository: https://charts.example.test\n' >> "${1}"
+  }
+  _parent() {  # <name> [dependency version|-none]: a chart that needs redis
     _chart "${root}/${1}" "${1}" 0.1.0
-    printf 'dependencies:\n  - name: redis\n    version: %s\n    repository: https://charts.example.test\n' "${2}" >> "${root}/${1}/Chart.yaml"
     mkdir -p "${root}/${1}/charts"
+    case "${2:-}" in
+      "") ;;
+      -none) _dep "${root}/${1}/Chart.yaml" ;;
+      *) _dep "${root}/${1}/Chart.yaml" "${2}" ;;
+    esac
+  }
+  _tgz() { tar -C "$(dirname "${1}")" -czf "${root}/${2}/charts/${3}" "$(basename "${1}")"; }  # <chart dir> <fixture> <archive>
+  _sub() { _chart "${root}/${1}/charts/${2}" redis "${3:-}"; }                                  # <fixture> <dir> [version]
+  _v1() {
+    mkdir -p "${root}/${1}/charts"
+    printf 'apiVersion: v1\nname: %s\nversion: 0.1.0\n' "${1}" > "${root}/${1}/Chart.yaml"
+    _dep "${root}/${1}/requirements.yaml" 1.0.0
+  }
+  _filedep() {
+    _parent "${1}"
+    printf 'dependencies:\n  - name: common\n    version: 0.1.0\n    repository: file://../common\n' >> "${root}/${1}/Chart.yaml"
+  }
+  _build() {  # <fixture>: build one row of the table; an unknown name fails
+    case "${1}" in
+      plain) _parent plain ;;
+      vendored-tgz) _parent "${1}" 1.0.0; _tgz "${src}/redis/redis" "${1}" redis-1.0.0.tgz ;;
+      vendored-dir) _parent "${1}" 1.0.0; _sub "${1}" redis 1.0.0 ;;
+      range) _parent "${1}" "~1.0.0"; _tgz "${src}/redis/redis" "${1}" redis-1.0.0.tgz ;;
+      v1-vendored) _v1 "${1}"; _sub "${1}" redis 1.0.0 ;;
+      missing) _parent "${1}" 1.0.0 ;;
+      missing-no-version) _parent "${1}" -none ;;
+      helmignored) _parent "${1}" 1.0.0; _tgz "${src}/redis/redis" "${1}" redis-1.0.0.tgz; echo '*.tgz' > "${root}/${1}/.helmignore" ;;
+      misnamed) _parent "${1}" 1.0.0; _tgz "${src}/other/redis" "${1}" redis-1.0.0.tgz ;;
+      wrong-version) _parent "${1}" 2.0.0; _tgz "${src}/redis/redis" "${1}" redis-1.0.0.tgz ;;
+      two-archives) _parent "${1}" ">=1.0.0"; _tgz "${src}/redis/redis" "${1}" redis-1.0.0.tgz; _tgz "${src}/v11/redis" "${1}" redis-1.1.0.tgz ;;
+      corrupt) _parent "${1}" 1.0.0; echo x > "${root}/${1}/charts/redis-1.0.0.tgz" ;;
+      filedep) _filedep "${1}" ;;
+      filedep-vendored) _filedep "${1}"; _chart "${root}/${1}/charts/common" common 0.1.0 ;;
+      v1) _v1 "${1}" ;;
+      symlinked) _parent "${1}" 1.0.0; ln -s "${src}/redis/redis" "${root}/${1}/charts/redis" ;;
+      v2-req) _parent "${1}"; _dep "${root}/${1}/requirements.yaml" 1.0.0; _sub "${1}" redis 1.0.0 ;;
+      v2-req-missing) _parent "${1}"; _dep "${root}/${1}/requirements.yaml" 1.0.0 ;;
+      dir-and-foo-bar) _parent "${1}" 1.0.0; _sub "${1}" redis 1.0.0; _tgz "${src}/rb/redis-bar" "${1}" redis-bar-2.0.0.tgz ;;
+      tgz-and-dir) _parent "${1}" 1.0.0; _tgz "${src}/redis/redis" "${1}" redis-1.0.0.tgz; _sub "${1}" redis 1.0.0 ;;
+      two-dirs) _parent "${1}" 1.0.0; _sub "${1}" redis 1.0.0; _sub "${1}" redis2 1.0.0 ;;
+      parent-no-version) _chart "${root}/${1}" "${1}"; _dep "${root}/${1}/Chart.yaml" 1.0.0; _sub "${1}" redis 1.0.0 ;;
+      sub-no-version) _parent "${1}" 1.0.0; _sub "${1}" redis ;;
+      dep-no-version) _parent "${1}" -none; _sub "${1}" redis 1.0.0 ;;
+      *) echo "chartgate-fixtures.txt: no bats builder for fixture ${1}"; return 1 ;;
+    esac
   }
   _chart "${src}/redis/redis" redis 1.0.0
   _chart "${src}/other/redis" other 1.0.0
-  _gate() { ( cd "${root}" && PATH="${b}/bin:${PATH}" KUSTOMIZE_PLUGIN_CONFIG_STRING="chart: ./${1}" LOK8S_BOOTSTRAP_DRYRUN_REPORT="${b}/report" "${gate}" cfg </dev/null ); }
-
-  _parent vendored-tgz 1.0.0
-  tar -C "${src}/redis" -czf "${root}/vendored-tgz/charts/redis-1.0.0.tgz" redis
-  _parent vendored-dir 1.0.0
-  _chart "${root}/vendored-dir/charts/redis" redis 1.0.0
-  _parent helmignored 1.0.0
-  tar -C "${src}/redis" -czf "${root}/helmignored/charts/redis-1.0.0.tgz" redis
-  echo '*.tgz' > "${root}/helmignored/.helmignore"
-  _parent misnamed 1.0.0
-  tar -C "${src}/other" -czf "${root}/misnamed/charts/redis-1.0.0.tgz" redis
-  _parent wrong-version 2.0.0
-  tar -C "${src}/redis" -czf "${root}/wrong-version/charts/redis-1.0.0.tgz" redis
-  _parent missing 1.0.0
-  # Review round 6, item 6: the cases the two implementations used to
-  # decide differently.
   _chart "${src}/v11/redis" redis 1.1.0
   _chart "${src}/rb/redis-bar" redis-bar 2.0.0
-  _parent two-archives ">=1.0.0"
-  tar -C "${src}/redis" -czf "${root}/two-archives/charts/redis-1.0.0.tgz" redis
-  tar -C "${src}/v11" -czf "${root}/two-archives/charts/redis-1.1.0.tgz" redis
-  _parent symlinked 1.0.0
-  ln -s "${src}/redis/redis" "${root}/symlinked/charts/redis"
-  _chart "${root}/v2-req" v2-req 0.1.0
-  printf 'dependencies:\n  - name: redis\n    version: 1.0.0\n    repository: https://charts.example.test\n' > "${root}/v2-req/requirements.yaml"
-  _chart "${root}/v2-req/charts/redis" redis 1.0.0
-  _chart "${root}/v2-req-missing" v2-req-missing 0.1.0
-  cp "${root}/v2-req/requirements.yaml" "${root}/v2-req-missing/"
-  _parent dir-and-foo-bar 1.0.0
-  _chart "${root}/dir-and-foo-bar/charts/redis" redis 1.0.0
-  tar -C "${src}/rb" -czf "${root}/dir-and-foo-bar/charts/redis-bar-2.0.0.tgz" redis-bar
-  _parent tgz-and-dir 1.0.0
-  tar -C "${src}/redis" -czf "${root}/tgz-and-dir/charts/redis-1.0.0.tgz" redis
-  _chart "${root}/tgz-and-dir/charts/redis" redis 1.0.0
-  _parent two-dirs 1.0.0
-  _chart "${root}/two-dirs/charts/redis" redis 1.0.0
-  _chart "${root}/two-dirs/charts/redis2" redis 1.0.0
-  _parent parent-no-version 1.0.0
-  sed -i '/^version: 0.1.0$/d' "${root}/parent-no-version/Chart.yaml"
-  _chart "${root}/parent-no-version/charts/redis" redis 1.0.0
-  _parent sub-no-version 1.0.0
-  _chart "${root}/sub-no-version/charts/redis" redis 1.0.0
-  sed -i '/^version:/d' "${root}/sub-no-version/charts/redis/Chart.yaml"
-  _chart "${root}/dep-no-version" dep-no-version 0.1.0
-  printf 'dependencies:\n  - name: redis\n    repository: https://charts.example.test\n' >> "${root}/dep-no-version/Chart.yaml"
-  _chart "${root}/dep-no-version/charts/redis" redis 1.0.0
-
-  local c rc out="${BATS_TEST_TMPDIR}/gate.out" err="${BATS_TEST_TMPDIR}/gate.err"
-  for c in vendored-tgz vendored-dir symlinked v2-req tgz-and-dir two-dirs; do
-    rc=0
-    _gate "${c}" >"${out}" 2>"${err}" || rc=$?
-    [ "${rc}" -eq 0 ] || { echo "${c}: rc=${rc}: $(cat "${out}" "${err}")"; return 1; }
-    [ "$(cat "${out}")" = "real-chartrenderer" ] || { echo "${c}: stdout $(cat "${out}")"; return 1; }
-    # helm's log lines (the symlink, the v2 requirements.yaml) are not shown.
-    [ ! -s "${err}" ] || { echo "${c}: stderr $(cat "${err}")"; return 1; }
-  done
-  for c in helmignored misnamed wrong-version missing two-archives v2-req-missing dir-and-foo-bar parent-no-version sub-no-version dep-no-version; do
+  _chart "${root}/common" common 0.1.0   # the file:// target
+  _gate() { ( cd "${root}" && PATH="${b}/bin:${PATH}" KUSTOMIZE_PLUGIN_CONFIG_STRING="chart: ./${1}" LOK8S_BOOTSTRAP_DRYRUN_REPORT="${b}/report" "${gate}" cfg </dev/null ); }
+  local -A cause_text=(
+    [deps]="Vendor them into charts/, or pass --allow-generators."
+    [file]="is a file:// chart. khelm builds it into the chart directory on each render. Pass --allow-generators to render it."
+    [load]="Fix the chart so that helm can load it."
+  )
+  local name verdict cause rc n=0 out="${BATS_TEST_TMPDIR}/gate.out" err="${BATS_TEST_TMPDIR}/gate.err"
+  while read -r name verdict cause; do
+    [[ -n "${name}" && "${name}" != \#* ]] || continue
+    n=$((n + 1))
+    _build "${name}" || return 1
     : > "${b}/report"
-    run _gate "${c}"
-    [ "${status}" -eq 1 ] || { echo "${c}: rc=${status}: ${output}"; return 1; }
-    [ "$(cat "${b}/report")" = "chart-deps ./${c}" ] || { echo "${c}: report $(cat "${b}/report")"; return 1; }
-    [ ! -e "${root}/${c}/Chart.lock" ]
-  done
+    rc=0
+    _gate "${name}" >"${out}" 2>"${err}" || rc=$?
+    if [[ "${verdict}" == render ]]; then
+      [ "${rc}" -eq 0 ] || { echo "${name}: rc=${rc}: $(cat "${out}" "${err}")"; return 1; }
+      [ "$(cat "${out}")" = "real-chartrenderer" ] || { echo "${name}: stdout $(cat "${out}")"; return 1; }
+      # helm's log lines (the symlink, the v2 requirements.yaml) are not shown.
+      [ ! -s "${err}" ] || { echo "${name}: stderr $(cat "${err}")"; return 1; }
+      [ ! -s "${b}/report" ] || { echo "${name}: report $(cat "${b}/report")"; return 1; }
+    else
+      [ "${rc}" -eq 1 ] || { echo "${name}: rc=${rc}: $(cat "${out}" "${err}")"; return 1; }
+      [ "$(cat "${b}/report")" = "chart-deps ./${name}" ] || { echo "${name}: report $(cat "${b}/report")"; return 1; }
+      grep -qF -- "${cause_text[${cause}]}" "${err}" || { echo "${name}: want the ${cause} message, stderr: $(cat "${err}")"; return 1; }
+      if [[ "${cause}" != deps ]] && grep -qF -- "${cause_text[deps]}" "${err}"; then
+        echo "${name}: the vendor advice for a ${cause} refusal: $(cat "${err}")"; return 1
+      fi
+    fi
+    [ ! -e "${root}/${name}/Chart.lock" ] || { echo "${name}: the gate wrote Chart.lock"; return 1; }
+  done < "${table}"
+  [ "${n}" -ge 20 ] || { echo "only ${n} fixtures read from ${table}"; return 1; }
 }
 
 # The gate's refusal through a whole dry run: the entry is inconclusive (not
@@ -4051,17 +4094,17 @@ SH
   local fn=$'apiVersion: example.test/v1\nkind: Fn\nmetadata:\n  name: fn\n  annotations:\n    config.kubernetes.io/function: |\n      exec:\n        path: ./fn\n'
   local entry="${PATH_LOK8S}/addons/testcni" out
   out="$(mktemp -d)"   # outside the project (PATH_BASE is BATS_TEST_TMPDIR)
-  _krm_case() {  # <want> <kustomization of the entry>
+  _krm_case() {  # <want: function|unread|none> <kustomization of the entry>
     printf '%s' "${2}" > "${entry}/kustomization.yaml"
     _dry_kubectl_stub 0
     local bootstrap_dry_run=1
     run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
     assert_success
-    if (( ${1} )); then
-      assert_line "bootstrap dry-run: 01-testcni: unchanged (partial: KRM function skipped)"
-    else
-      assert_line "bootstrap dry-run: 01-testcni: unchanged"
-    fi
+    case "${1}" in
+      function) assert_line "bootstrap dry-run: 01-testcni: unchanged (partial: KRM function skipped)" ;;
+      unread) assert_line "bootstrap dry-run: 01-testcni: unchanged (partial: a reference outside the project was not inspected)" ;;
+      none) assert_line "bootstrap dry-run: 01-testcni: unchanged" ;;
+    esac
   }
   write_cluster_spec "testcni"
   mkdir -p "${PATH_BASE}/shared/base" "${PATH_BASE}/shared/comp" "${PATH_BASE}/fns" "${PATH_BASE}/plain" "${out}/base"
@@ -4073,13 +4116,14 @@ SH
   printf 'resources:\n- cm.yaml\n' > "${PATH_BASE}/plain/kustomization.yaml"
   printf 'transformers:\n- fn.yaml\n' > "${out}/base/kustomization.yaml"
   printf '%s' "${fn}" > "${out}/base/fn.yaml"
-  _krm_case 1 "resources:"$'\n'"- ${PATH_BASE}/shared/base"$'\n'
-  _krm_case 1 "resources:"$'\n'"- ../../../shared/base"$'\n'
-  _krm_case 1 "components:"$'\n'"- ../../../shared/comp"$'\n'
-  _krm_case 1 "transformers:"$'\n'"- ../../../fns/fn.yaml"$'\n'
-  _krm_case 0 "resources:"$'\n'"- ../../../plain"$'\n'
-  _krm_case 1 "resources:"$'\n'"- ../../../plain"$'\n'"- https://github.com/example/repo//base?ref=v1"$'\n'
-  _krm_case 1 "resources:"$'\n'"- ${out}/base"$'\n'
+  _krm_case function "resources:"$'\n'"- ${PATH_BASE}/shared/base"$'\n'
+  _krm_case function "resources:"$'\n'"- ../../../shared/base"$'\n'
+  _krm_case function "components:"$'\n'"- ../../../shared/comp"$'\n'
+  _krm_case function "transformers:"$'\n'"- ../../../fns/fn.yaml"$'\n'
+  _krm_case none "resources:"$'\n'"- ../../../plain"$'\n'
+  # Review round 7, item 3: what the hint did not read has its own label.
+  _krm_case unread "resources:"$'\n'"- ../../../plain"$'\n'"- https://github.com/example/repo//base?ref=v1"$'\n'
+  _krm_case unread "resources:"$'\n'"- ${out}/base"$'\n'
   rm -rf "${out}"
 }
 
@@ -4089,11 +4133,18 @@ SH
 # entry or in a base), reads no file outside the project (grep -r follows
 # no link below the entry), reads regular files only (a FIFO does not block
 # it), and a reference or a kustomization file outside the project, or a
-# remote reference, marks the entry partial. An entry outside the project
-# (a peeked framework addon) reads its own tree.
+# remote reference, marks the entry. An entry outside the project (a peeked
+# framework addon) reads its own tree.
+#
+# Review round 7: an unread reference is its own kind (`unread`, its own
+# label), a function anywhere wins over it (item 3); a referenced DIRECTORY
+# link is followed into the project and marks the entry by what the target
+# holds, or as unread when it leaves the project (item 5); a reference is
+# cleaned lexically before its links resolve, as kustomize does (item 6).
 @test "bootstrap::_krm_declared: inline functions, links and references outside the project" {
   local fn=$'apiVersion: example.test/v1\nkind: Fn\nmetadata:\n  name: fn\n  annotations:\n    config.kubernetes.io/function: |\n      exec:\n        path: ./fn\n'
   local inline=$'transformers:\n- |-\n  apiVersion: example.test/v1\n  kind: Fn\n  metadata:\n    name: fn\n    annotations:\n      config.kubernetes.io/function: |\n        exec:\n          path: ./fn\n'
+  local cm=$'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'
   local out n=0 c=""
   out="$(mktemp -d)"   # outside the project (PATH_BASE is BATS_TEST_TMPDIR)
   printf '%s' "${fn}" > "${out}/fn.yaml"
@@ -4105,46 +4156,77 @@ SH
     mkdir -p "${c}/entry"
     printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: entry\n' > "${c}/entry/cm.yaml"
   }
-  _want() {  # <1 partial|0 not> <label>
-    local rc=0
-    bootstrap::_krm_declared "${c}/entry" || rc=$?
-    if (( ${1} )); then
-      [ "${rc}" -eq 0 ] || { echo "${2}: not marked partial"; return 1; }
+  _base() {  # <dir> <fn|plain>: a base with a KRM function, or a plain one
+    mkdir -p "${1}"
+    if [[ "${2}" == fn ]]; then
+      printf 'transformers:\n- fn.yaml\n' > "${1}/kustomization.yaml"; printf '%s' "${fn}" > "${1}/fn.yaml"
     else
-      [ "${rc}" -ne 0 ] || { echo "${2}: marked partial"; return 1; }
+      printf 'resources:\n- cm.yaml\n' > "${1}/kustomization.yaml"; printf '%s' "${cm}" > "${1}/cm.yaml"
+    fi
+  }
+  _want() {  # <function|unread|none> <label>
+    local rc=0 got
+    got="$(bootstrap::_krm_declared "${c}/entry")" || rc=$?
+    if [[ "${1}" == none ]]; then
+      [ "${rc}" -ne 0 ] && [ -z "${got}" ] || { echo "${2}: marked ${got}"; return 1; }
+    else
+      [ "${rc}" -eq 0 ] && [ "${got}" = "${1}" ] || { echo "${2}: got '${got}' (rc ${rc}), want ${1}"; return 1; }
     fi
   }
   _case; printf '%s' "${inline}" > "${c}/entry/Kustomization"
-  _want 1 "inline function in an extensionless Kustomization"
+  _want function "inline function in an extensionless Kustomization"
   _case; mkdir -p "${c}/shared/base"; printf '%s' "${inline}" > "${c}/shared/base/Kustomization"
   printf 'resources:\n- ../shared/base\n' > "${c}/entry/kustomization.yaml"
-  _want 1 "inline function in a base's extensionless Kustomization"
+  _want function "inline function in a base's extensionless Kustomization"
   _case; printf 'resources:\n- %s/base\n' "${out}" > "${c}/entry/kustomization.yaml"
-  _want 1 "a base outside the project"
+  _want unread "a base outside the project"
   _case; printf 'resources:\n- https://example.test/raw/cm.yaml\n' > "${c}/entry/kustomization.yaml"
-  _want 1 "a remote URL"
+  _want unread "a remote URL"
   _case; printf 'resources:\n- github.com/example/repo/base?ref=v1\n' > "${c}/entry/kustomization.yaml"
-  _want 1 "a remote GitHub base"
+  _want unread "a remote GitHub base"
   _case; printf 'resources:\n- git@github.com:example/repo.git//base\n' > "${c}/entry/kustomization.yaml"
-  _want 1 "a remote git base"
+  _want unread "a remote git base"
+  _case; mkdir -p "${c}/shared/base"; printf '%s' "${inline}" > "${c}/shared/base/Kustomization"
+  printf 'resources:\n- https://example.test/raw/cm.yaml\n- ../shared/base\n' > "${c}/entry/kustomization.yaml"
+  _want function "a remote base and a function: the function wins"
   _case; printf 'resources:\n- cm.yaml\n' > "${c}/entry/kustomization.yaml"; ln -s "${out}/fn.yaml" "${c}/entry/fn.yaml"
-  _want 0 "an unreferenced .yaml link to a file outside"
+  _want none "an unreferenced .yaml link to a file outside"
   _case; printf 'transformers:\n- fn.yaml\n' > "${c}/entry/kustomization.yaml"; ln -s "${out}/fn.yaml" "${c}/entry/fn.yaml"
-  _want 1 "a referenced .yaml link to a file outside"
+  _want unread "a referenced .yaml link to a file outside"
   _case; mkdir -p "${c}/fns"; printf '%s' "${fn}" > "${c}/fns/fn.yaml"
   printf 'transformers:\n- fn.yaml\n' > "${c}/entry/kustomization.yaml"; ln -s "${c}/fns/fn.yaml" "${c}/entry/fn.yaml"
-  _want 1 "a referenced .yaml link to a file inside"
+  _want function "a referenced .yaml link to a file inside"
   _case; mkdir -p "${c}/fns"; printf '%s' "${fn}" > "${c}/fns/fn.yaml"
   printf 'resources:\n- cm.yaml\n' > "${c}/entry/kustomization.yaml"; ln -s "${c}/fns/fn.yaml" "${c}/entry/fn.yaml"
-  _want 0 "an unreferenced .yaml link to a file inside"
+  _want none "an unreferenced .yaml link to a file inside"
   _case; ln -s "${out}/kustomization.yaml" "${c}/entry/kustomization.yaml"
-  _want 1 "a Kustomization that links outside"
+  _want unread "a Kustomization that links outside"
+  # Item 5: referenced directory links.
+  _case; _base "${c}/shared/fnbase" fn; ln -s "${c}/shared/fnbase" "${c}/entry/linked"
+  printf 'resources:\n- linked\n' > "${c}/entry/kustomization.yaml"
+  _want function "a referenced directory link to a base with a function"
+  _case; _base "${c}/shared/plain" plain; ln -s "${c}/shared/plain" "${c}/entry/linked"
+  printf 'resources:\n- linked\n' > "${c}/entry/kustomization.yaml"
+  _want none "a referenced directory link to a plain base"
+  _case; ln -s "${out}/base" "${c}/entry/linked"
+  printf 'resources:\n- linked\n' > "${c}/entry/kustomization.yaml"
+  _want unread "a referenced directory link out of the project"
+  # Item 6: `l/../fns` is the fns next to the link l, not next to its target.
+  _case; mkdir -p "${c}/deep/a"; printf '%s' "${cm}" > "${c}/deep/a/cm.yaml"; ln -s "${c}/deep/a" "${c}/l"
+  _base "${c}/fns" fn; _base "${c}/deep/fns" plain
+  printf 'resources:\n- ../l/../fns\n' > "${c}/entry/kustomization.yaml"
+  _want function "link/../x is cleaned before the link resolves (relative)"
+  printf 'resources:\n- %s/l/../fns\n' "${c}" > "${c}/entry/kustomization.yaml"
+  _want function "link/../x is cleaned before the link resolves (absolute)"
+  _case; mkdir -p "${c}/deep/a"; printf '%s' "${cm}" > "${c}/deep/a/cm.yaml"; ln -s "${c}/deep/a" "${c}/l"
+  _base "${c}/fns" plain; _base "${c}/deep/fns" fn
+  printf 'resources:\n- ../l/../fns\n' > "${c}/entry/kustomization.yaml"
+  _want none "link/../x does not reach the target's sibling"
   _case; printf 'resources:\n- ../nowhere\n' > "${c}/entry/kustomization.yaml"
-  _want 0 "a missing reference"
-  _case; mkdir -p "${c}/shared/base"; printf 'resources:\n- cm.yaml\n' > "${c}/shared/base/kustomization.yaml"
-  printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n' > "${c}/shared/base/cm.yaml"
+  _want none "a missing reference"
+  _case; _base "${c}/shared/base" plain
   printf 'resources:\n- ../shared/base\n' > "${c}/entry/kustomization.yaml"
-  _want 0 "plain"
+  _want none "plain"
 
   # An entry outside the project reads its own tree.
   local own
@@ -4152,13 +4234,13 @@ SH
   mkdir -p "${own}/sub"
   printf 'resources:\n- sub\n' > "${own}/kustomization.yaml"
   printf 'resources:\n- cm.yaml\n' > "${own}/sub/kustomization.yaml"
-  printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n' > "${own}/sub/cm.yaml"
-  ! bootstrap::_krm_declared "${own}" || { echo "a reference into the entry's own directory counted as outside"; return 1; }
+  printf '%s' "${cm}" > "${own}/sub/cm.yaml"
+  ! bootstrap::_krm_declared "${own}" >/dev/null || { echo "a reference into the entry's own directory counted as outside"; return 1; }
 
   # A FIFO named like YAML, below the entry and referenced: never read.
   _case; printf 'resources:\n- cm.yaml\ntransformers:\n- pipe.yaml\n' > "${c}/entry/kustomization.yaml"
   mkfifo "${c}/entry/pipe.yaml"
-  ( rc=0; bootstrap::_krm_declared "${c}/entry" || rc=$?; echo "${rc}" > "${BATS_TEST_TMPDIR}/fifo.rc" ) &
+  ( rc=0; bootstrap::_krm_declared "${c}/entry" >/dev/null || rc=$?; echo "${rc}" > "${BATS_TEST_TMPDIR}/fifo.rc" ) &
   local pid=$! i
   for (( i = 0; i < 100; i++ )); do [[ ! -s "${BATS_TEST_TMPDIR}/fifo.rc" ]] || break; sleep 0.1; done
   if [[ ! -s "${BATS_TEST_TMPDIR}/fifo.rc" ]]; then

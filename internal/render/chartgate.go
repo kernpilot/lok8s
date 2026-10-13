@@ -41,71 +41,87 @@ func chartGateApplies() bool {
 	return os.Getenv("LOK8S_BOOTSTRAP_DRYRUN") == "1" && os.Getenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS") != "1"
 }
 
-// ChartDepsNotVendored reads a ChartRenderer config (khelm's generator
-// config) and reports whether the dry run refuses it because of its chart
-// dependencies: the chart is local (no repository, the path exists,
-// relative to baseDir, the kustomization root) and chartBuildsDeps says so. chartPath is the
-// local chart path as the config names it ("" for a remote chart).
-func ChartDepsNotVendored(config []byte, baseDir string) (chartPath string, unvendored bool, err error) {
+// vendorAdvice ends the refusal of a chart whose dependencies helm does not
+// report as vendored (the bash twin prints the same text).
+const vendorAdvice = "khelm may build the dependencies into the chart directory. Vendor them into charts/, or pass --allow-generators."
+
+// ChartRefusal reads a ChartRenderer config (khelm's generator config) and
+// returns why the dry run refuses to render it ("" when it may render): the
+// chart is local (no repository, the path exists, relative to baseDir, the
+// kustomization root) and chartRefusal refuses it. chartPath is the local
+// chart path as the config names it ("" for a remote chart).
+func ChartRefusal(config []byte, baseDir string) (chartPath, refusal string, err error) {
 	var cfg struct {
 		Repository string `yaml:"repository"`
 		Chart      string `yaml:"chart"`
 	}
 	if err := yaml.Unmarshal(config, &cfg); err != nil {
-		return "", false, fmt.Errorf("chart config: %w", err)
+		return "", "", fmt.Errorf("chart config: %w", err)
 	}
 	if cfg.Repository != "" || cfg.Chart == "" {
-		return "", false, nil
+		return "", "", nil
 	}
 	path := cfg.Chart
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(baseDir, path)
 	}
 	if info, err := os.Stat(path); err != nil || !info.IsDir() {
-		return "", false, nil // a repo shorthand or an OCI reference: khelm pulls into its cache
+		return "", "", nil // a repo shorthand or an OCI reference: khelm pulls into its cache
 	}
-	return cfg.Chart, chartBuildsDeps(path), nil
+	return cfg.Chart, chartRefusal(path), nil
 }
 
-// chartBuildsDeps reports whether the dry run refuses the local chart in
-// dir, decided on the chart as Helm's loader loads it (the one khelm loads:
-// .helmignore honoured, a subchart named by its metadata). It refuses what
-// khelm builds dependencies for, and also what `helm dependency list` does
-// not call ok or unpacked, because the bash twin decides with that command
-// (khelm renders some of those charts without a build, but the twin cannot
-// tell them apart). True when
+// chartRefusal returns why the dry run refuses the local chart in dir ("" when
+// it may render), decided on the chart as Helm's loader loads it (the one
+// khelm loads: .helmignore honoured, a subchart named by its metadata). It
+// refuses what khelm builds dependencies for, and also what `helm dependency
+// list` does not call ok or unpacked, because the bash twin decides with
+// that command (khelm renders some of those charts without a build, but the
+// twin cannot tell them apart). Each cause has its own message and next
+// action; the vendor advice is only for a dependency that is not vendored:
 //   - the chart does not load (khelm fails too; the dry run cannot say),
 //   - a dependency is a file:// chart (khelm always builds those, so there
 //     is no walk into one and no nesting limit),
-//   - no loaded subchart has the name of a dependency (action.
-//     CheckDependencies fails, and khelm builds; `helm lint` says "chart
-//     directory is missing these dependencies"), or
 //   - dependencyStatus, the status column of `helm dependency list`, is
 //     not ok or unpacked for a dependency (missing, misnamed, wrong
-//     version, invalid version, too many matches, corrupt).
+//     version, invalid version, too many matches, corrupt), or
+//   - no loaded subchart has the name of a dependency (action.
+//     CheckDependencies fails, and khelm builds; `helm lint` says "chart
+//     directory is missing these dependencies").
 //
-// chartgate_test.go pins this against action.CheckDependencies and
-// action.Dependency.List on real chart fixtures, and the bats twin pins the
-// bash gate against the real helm v3 on the same fixtures.
-func chartBuildsDeps(dir string) bool {
+// The order is the bash twin's: the table rows in dependency order, then
+// the lint check. chartgate_test.go pins this against action.
+// CheckDependencies and action.Dependency.List on real chart fixtures, and
+// the bats twin pins the bash gate against the real helm v3 on the same
+// fixtures (testdata/chartgate-fixtures.txt).
+func chartRefusal(dir string) string {
 	ch, err := loader.Load(dir)
-	if err != nil || ch.Metadata == nil {
-		return true
+	if err != nil {
+		return fmt.Sprintf("helm cannot load the chart: %v. Fix the chart so that helm can load it.", err)
+	}
+	if ch.Metadata == nil {
+		return "helm cannot load the chart: no Chart.yaml. Fix the chart so that helm can load it."
 	}
 	for _, dep := range ch.Metadata.Dependencies {
 		if strings.HasPrefix(dep.Repository, "file://") {
-			return true
+			return fmt.Sprintf("dependency %s is a file:// chart. khelm builds it into the chart directory on each render. Pass --allow-generators to render it.", dep.Name)
 		}
 	}
 	for _, dep := range ch.Metadata.Dependencies {
-		if loadedSubchart(ch, dep.Name) == nil {
-			return true
-		}
 		if s := dependencyStatus(dir, dep, ch); s != "ok" && s != "unpacked" {
-			return true
+			return fmt.Sprintf("dependency %s: %s (helm dependency list). %s", dep.Name, s, vendorAdvice)
 		}
 	}
-	return false
+	var missing []string
+	for _, dep := range ch.Metadata.Dependencies {
+		if loadedSubchart(ch, dep.Name) == nil {
+			missing = append(missing, dep.Name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Sprintf("dependency %s: not in the chart that helm loads (helm lint). %s", strings.Join(missing, ","), vendorAdvice)
+	}
+	return ""
 }
 
 // loadedSubchart is the last loaded subchart of parent named name, or nil
@@ -219,12 +235,12 @@ func chartGate(args []string, stderr io.Writer) (refused bool, err error) {
 	// chart renders. The gate runs in its own plugin process.
 	prev := log.Writer()
 	log.SetOutput(io.Discard)
-	chartPath, unvendored, err := ChartDepsNotVendored(config, wd)
+	chartPath, refusal, err := ChartRefusal(config, wd)
 	log.SetOutput(prev)
-	if err != nil || !unvendored {
+	if err != nil || refusal == "" {
 		return false, err
 	}
-	fmt.Fprintf(stderr, "lok8s dry-run: chart %s: helm does not report its dependencies as vendored (khelm may build them into the chart directory) — vendor them into charts/ or pass --allow-generators\n", chartPath)
+	fmt.Fprintf(stderr, "lok8s dry-run: chart %s: %s\n", chartPath, refusal)
 	if report := os.Getenv("LOK8S_BOOTSTRAP_DRYRUN_REPORT"); report != "" {
 		f, ferr := os.OpenFile(report, os.O_WRONLY|os.O_APPEND, 0)
 		if ferr != nil {

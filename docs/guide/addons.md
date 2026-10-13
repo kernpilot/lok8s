@@ -46,9 +46,10 @@ TLS Secrets of Cilium; `--ignore-nondeterministic` diffs the entry without
 them), `(non-repeatable)` when the render generated or updated secret
 material that the store does not hold, or read such material that an
 earlier entry of the run generated, and `(partial: KRM function skipped)`
-(also for a function in a base or component the entry references, and for
-a reference outside the project or a remote one, which the dry run does
-not read). The
+(also for a function in a base or component the entry references), or
+`(partial: a reference outside the project was not inspected)` for a
+reference outside the project or a remote one, which the dry run does not
+read. The
 chart dependency check is Helm's own (the bash implementation needs helm
 v3.3 or later on `PATH` for it). The exit code is 0 when nothing would change, 1 only when a
 completed diff found a change, and 2 for all other failures.
@@ -58,16 +59,18 @@ Go implementation uses the Helm v3.21.2 library (the loader and the status
 rule of `helm dependency list`). The bash implementation runs `helm
 dependency list` and `helm lint` and reads only the table on stdout (helm's
 log lines on stderr, for example about a symlinked subchart, are not part of
-the decision). Tests pin both on the same real charts: a symlinked subchart,
+the decision). Tests pin both on the same real charts, from one table
+(`internal/render/testdata/chartgate-fixtures.txt`): a symlinked subchart,
 a v2 chart with `requirements.yaml`, an archive next to the subchart
 directory, two archives of one dependency, a misnamed archive, and a chart, a
-subchart or a dependency without a version. The two can still differ in
+subchart or a dependency without a version. For each refused chart, both
+print the same cause and next action. The two can still differ in
 the cases below. Then one implementation is inconclusive and the other
 renders a chart that khelm does not build. Neither one renders a chart
 whose render writes into the chart directory.
 
-- Without helm v3.3 or later on `PATH`, the bash implementation is
-  inconclusive.
+- Without helm v3 (3.3 or a later 3.x) on `PATH`, the bash implementation
+  is inconclusive.
 - When helm prints no dependency table that the bash implementation can
   read, it is inconclusive.
 - A v2 chart can have a `file://` dependency in `Chart.yaml` and a

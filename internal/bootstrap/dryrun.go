@@ -124,9 +124,10 @@ type dryResult struct {
 	// entry's two renders (a chart that mints a CA or TLS material on every
 	// render): every apply regenerates them.
 	nondeterministic []string
-	// partial marks an entry whose YAML declares a KRM function: kustomize
-	// skips an exec function in a dry run without an error (a hint).
-	partial bool
+	// partial is the KRM hint: a KRM function the entry declares (kustomize
+	// skips an exec function in a dry run without an error), or a reference
+	// outside the project or a remote one that the hint did not read.
+	partial addons.KRMHint
 }
 
 // Inconclusive reasons.
@@ -316,7 +317,8 @@ func (e *Engine) runDryRun(ctx context.Context, nodes []*node, base Job, restore
 // its reason), then `changed=N new=M` for a diff that was counted, then the
 // marks: `(non-deterministic: N)` (objects regenerated on every apply,
 // listed on their own lines), `(non-repeatable)` (the render generated
-// secret material), `(partial: KRM function skipped)`.
+// secret material), `(partial: KRM function skipped)` or `(partial: a
+// reference outside the project was not inspected)`.
 func (r dryResult) render(s ui.Style) string {
 	word := string(r.status)
 	if r.status == dryInconclusive {
@@ -343,8 +345,11 @@ func (r dryResult) render(s ui.Style) string {
 	if r.nonRepeatable {
 		word += " (non-repeatable)"
 	}
-	if r.partial {
+	switch r.partial {
+	case addons.KRMFunction:
 		word += " (partial: KRM function skipped)"
+	case addons.KRMUnread:
+		word += " (partial: a reference outside the project was not inspected)"
 	}
 	return word
 }
@@ -381,7 +386,10 @@ func (e *Engine) dryRunOne(ctx context.Context, job Job, stem string) dryResult 
 		ui.ErrorTo(stderr, "bootstrap: dry-run report: %v", err)
 		return dryResult{status: dryError}
 	}
-	partial := !e.Options.AllowGenerators && addons.KRMFunctionDeclared(job.Dir, e.Paths.Base, e.Paths.Lok8s)
+	partial := addons.KRMNone
+	if !e.Options.AllowGenerators {
+		partial = addons.KRMFunctionHint(job.Dir, e.Paths.Base, e.Paths.Lok8s)
+	}
 	renderOnce := func() (string, error) {
 		return addons.RenderDryRun(ctx, e.Paths, e.Runner, stderr, job.Dir, job.Kind, job.Provider, job.Inline, env, e.boundary, e.Options.AllowGenerators)
 	}

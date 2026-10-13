@@ -118,6 +118,40 @@ func helmSays(t *testing.T, dir string) bool {
 	return !header && !strings.HasPrefix(out.String(), "WARNING: no dependencies at ")
 }
 
+// gateFixture is one row of testdata/chartgate-fixtures.txt, the table the
+// bats twin reads too.
+type gateFixture struct {
+	name, verdict, cause string
+}
+
+// readGateFixtures parses testdata/chartgate-fixtures.txt.
+func readGateFixtures(t *testing.T) []gateFixture {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", "chartgate-fixtures.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []gateFixture
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 || strings.HasPrefix(f[0], "#") {
+			continue
+		}
+		if len(f) != 3 || (f[1] != "render" && f[1] != "refuse") || (f[1] == "render") != (f[2] == "-") {
+			t.Fatalf("chartgate-fixtures.txt: bad row %q", line)
+		}
+		rows = append(rows, gateFixture{f[0], f[1], f[2]})
+	}
+	return rows
+}
+
+// causeText is what the refusal of each cause says (both implementations).
+var causeText = map[string]string{
+	"deps": "Vendor them into charts/, or pass --allow-generators.",
+	"file": "is a file:// chart. khelm builds it into the chart directory on each render. Pass --allow-generators to render it.",
+	"load": "Fix the chart so that helm can load it.",
+}
+
 // khelm's rule on real chart fixtures, decided as Helm's loader sees the
 // chart: a vendored archive or directory renders; an archive that
 // .helmignore hides, a misnamed one, a version outside the constraint, a
@@ -135,7 +169,13 @@ func helmSays(t *testing.T, dir string) bool {
 // next to a directory of the same chart is ok; two directories of one
 // dependency are unpacked; a chart or a subchart without a version does not
 // load, and a dependency without a version is an invalid version.
-func TestChartDepsNotVendored(t *testing.T) {
+//
+// Review round 7, items 2 and 4: the fixtures and their verdicts come from
+// testdata/chartgate-fixtures.txt, the table the bats twin reads, so the two
+// suites cannot drift; every row has a builder here and every builder a
+// row. The cause column pins each refusal's own message: only a dependency
+// that is not vendored gets the vendor advice.
+func TestChartRefusal(t *testing.T) {
 	prev := log.Writer()
 	log.SetOutput(io.Discard) // Helm's loader logs about the symlink and the v2 requirements.yaml
 	t.Cleanup(func() { log.SetOutput(prev) })
@@ -145,118 +185,139 @@ func TestChartDepsNotVendored(t *testing.T) {
 	writeChart(t, filepath.Join(src, "other", "redis"), "other", "1.0.0") // an archive named redis-*.tgz that holds chart "other"
 	redis11 := filepath.Join(src, "v11", "redis")
 	writeChart(t, redis11, "redis", "1.1.0")
+	writeChart(t, filepath.Join(src, "rb", "redis-bar"), "redis-bar", "2.0.0")
+	writeChart(t, filepath.Join(base, "common"), "common", "0.1.0") // the file:// target
 
-	parent := func(name, deps string) string {
-		dir := filepath.Join(base, name)
+	parent := func(dir, deps string) {
+		name := filepath.Base(dir)
 		writeChart(t, dir, name, "0.1.0")
 		if deps != "" {
 			writeGateFile(t, filepath.Join(dir, "Chart.yaml"), "apiVersion: v2\nname: "+name+"\nversion: 0.1.0\n"+deps)
 		}
-		return dir
 	}
 	redisDep := func(version string) string {
 		return "dependencies:\n  - name: redis\n    version: \"" + version + "\"\n    repository: https://charts.example.test\n"
 	}
-	parent("plain", "")
-	parent("missing", redisDep("1.0.0"))
-	parent("missing-no-version", "dependencies:\n  - name: redis\n    repository: https://charts.example.test\n")
-	packChart(t, filepath.Join(src, "redis"), filepath.Join(parent("vendored-tgz", redisDep("1.0.0")), "charts", "redis-1.0.0.tgz"))
-	packChart(t, filepath.Join(src, "redis"), filepath.Join(parent("range", redisDep("~1.0.0")), "charts", "redis-1.0.0.tgz"))
-	writeChart(t, filepath.Join(parent("vendored-dir", redisDep("1.0.0")), "charts", "redis"), "redis", "1.0.0")
-	ignored := parent("helmignored", redisDep("1.0.0"))
-	packChart(t, filepath.Join(src, "redis"), filepath.Join(ignored, "charts", "redis-1.0.0.tgz"))
-	writeGateFile(t, filepath.Join(ignored, ".helmignore"), "*.tgz\n")
-	packChart(t, filepath.Join(src, "other", "redis"), filepath.Join(parent("misnamed", redisDep("1.0.0")), "charts", "redis-1.0.0.tgz"))
-	packChart(t, filepath.Join(src, "redis"), filepath.Join(parent("wrong-version", redisDep("2.0.0")), "charts", "redis-1.0.0.tgz"))
-	two := parent("two-archives", redisDep(">=1.0.0"))
-	packChart(t, filepath.Join(src, "redis"), filepath.Join(two, "charts", "redis-1.0.0.tgz"))
-	packChart(t, redis11, filepath.Join(two, "charts", "redis-1.1.0.tgz"))
-	writeGateFile(t, filepath.Join(parent("corrupt", redisDep("1.0.0")), "charts", "redis-1.0.0.tgz"), "x")
-	parent("common", "")
-	fileDep := "dependencies:\n  - name: common\n    version: 0.1.0\n    repository: file://../common\n"
-	parent("filedep", fileDep)
-	writeChart(t, filepath.Join(parent("filedep-vendored", fileDep), "charts", "common"), "common", "0.1.0")
-	v1 := filepath.Join(base, "v1")
-	writeGateFile(t, filepath.Join(v1, "Chart.yaml"), "apiVersion: v1\nname: v1\nversion: 0.1.0\n")
-	writeGateFile(t, filepath.Join(v1, "requirements.yaml"), redisDep("1.0.0"))
-	v1v := filepath.Join(base, "v1-vendored")
-	writeGateFile(t, filepath.Join(v1v, "Chart.yaml"), "apiVersion: v1\nname: v1-vendored\nversion: 0.1.0\n")
-	writeGateFile(t, filepath.Join(v1v, "requirements.yaml"), redisDep("1.0.0"))
-	writeChart(t, filepath.Join(v1v, "charts", "redis"), "redis", "1.0.0")
-	// Round 6, item 6.
-	symlinked := parent("symlinked", redisDep("1.0.0"))
-	if err := os.MkdirAll(filepath.Join(symlinked, "charts"), 0o755); err != nil {
-		t.Fatal(err)
+	const noVersionDep = "dependencies:\n  - name: redis\n    repository: https://charts.example.test\n"
+	const fileDep = "dependencies:\n  - name: common\n    version: 0.1.0\n    repository: file://../common\n"
+	tgz := func(chart, dir, file string) { packChart(t, chart, filepath.Join(dir, "charts", file)) }
+	sub := func(dir, name, version string) { writeChart(t, filepath.Join(dir, "charts", name), "redis", version) }
+	v1 := func(dir string) {
+		writeGateFile(t, filepath.Join(dir, "Chart.yaml"), "apiVersion: v1\nname: "+filepath.Base(dir)+"\nversion: 0.1.0\n")
+		writeGateFile(t, filepath.Join(dir, "requirements.yaml"), redisDep("1.0.0"))
 	}
-	if err := os.Symlink(filepath.Join(src, "redis"), filepath.Join(symlinked, "charts", "redis")); err != nil {
-		t.Fatal(err)
+	builders := map[string]func(dir string){
+		"plain":              func(d string) { parent(d, "") },
+		"vendored-tgz":       func(d string) { parent(d, redisDep("1.0.0")); tgz(filepath.Join(src, "redis"), d, "redis-1.0.0.tgz") },
+		"vendored-dir":       func(d string) { parent(d, redisDep("1.0.0")); sub(d, "redis", "1.0.0") },
+		"range":              func(d string) { parent(d, redisDep("~1.0.0")); tgz(filepath.Join(src, "redis"), d, "redis-1.0.0.tgz") },
+		"v1-vendored":        func(d string) { v1(d); sub(d, "redis", "1.0.0") },
+		"missing":            func(d string) { parent(d, redisDep("1.0.0")) },
+		"missing-no-version": func(d string) { parent(d, noVersionDep) },
+		"helmignored": func(d string) {
+			parent(d, redisDep("1.0.0"))
+			tgz(filepath.Join(src, "redis"), d, "redis-1.0.0.tgz")
+			writeGateFile(t, filepath.Join(d, ".helmignore"), "*.tgz\n")
+		},
+		"misnamed": func(d string) {
+			parent(d, redisDep("1.0.0"))
+			tgz(filepath.Join(src, "other", "redis"), d, "redis-1.0.0.tgz")
+		},
+		"wrong-version": func(d string) { parent(d, redisDep("2.0.0")); tgz(filepath.Join(src, "redis"), d, "redis-1.0.0.tgz") },
+		"two-archives": func(d string) {
+			parent(d, redisDep(">=1.0.0"))
+			tgz(filepath.Join(src, "redis"), d, "redis-1.0.0.tgz")
+			tgz(redis11, d, "redis-1.1.0.tgz")
+		},
+		"corrupt": func(d string) {
+			parent(d, redisDep("1.0.0"))
+			writeGateFile(t, filepath.Join(d, "charts", "redis-1.0.0.tgz"), "x")
+		},
+		"filedep": func(d string) { parent(d, fileDep) },
+		"filedep-vendored": func(d string) {
+			parent(d, fileDep)
+			writeChart(t, filepath.Join(d, "charts", "common"), "common", "0.1.0")
+		},
+		"v1": v1,
+		"symlinked": func(d string) {
+			parent(d, redisDep("1.0.0"))
+			if err := os.MkdirAll(filepath.Join(d, "charts"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(src, "redis"), filepath.Join(d, "charts", "redis")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"v2-req": func(d string) {
+			parent(d, "")
+			writeGateFile(t, filepath.Join(d, "requirements.yaml"), redisDep("1.0.0"))
+			sub(d, "redis", "1.0.0")
+		},
+		"v2-req-missing": func(d string) {
+			parent(d, "")
+			writeGateFile(t, filepath.Join(d, "requirements.yaml"), redisDep("1.0.0"))
+		},
+		"dir-and-foo-bar": func(d string) {
+			parent(d, redisDep("1.0.0"))
+			sub(d, "redis", "1.0.0")
+			tgz(filepath.Join(src, "rb", "redis-bar"), d, "redis-bar-2.0.0.tgz")
+		},
+		"tgz-and-dir": func(d string) {
+			parent(d, redisDep("1.0.0"))
+			tgz(filepath.Join(src, "redis"), d, "redis-1.0.0.tgz")
+			sub(d, "redis", "1.0.0")
+		},
+		"two-dirs": func(d string) { parent(d, redisDep("1.0.0")); sub(d, "redis", "1.0.0"); sub(d, "redis2", "1.0.0") },
+		"parent-no-version": func(d string) {
+			parent(d, "")
+			writeGateFile(t, filepath.Join(d, "Chart.yaml"), "apiVersion: v2\nname: parent-no-version\n"+redisDep("1.0.0"))
+			sub(d, "redis", "1.0.0")
+		},
+		"sub-no-version": func(d string) {
+			parent(d, redisDep("1.0.0"))
+			sub(d, "redis", "1.0.0")
+			writeGateFile(t, filepath.Join(d, "charts", "redis", "Chart.yaml"), "apiVersion: v2\nname: redis\n")
+		},
+		"dep-no-version": func(d string) { parent(d, noVersionDep); sub(d, "redis", "1.0.0") },
 	}
-	v2req := parent("v2-req", "")
-	writeGateFile(t, filepath.Join(v2req, "requirements.yaml"), redisDep("1.0.0"))
-	writeChart(t, filepath.Join(v2req, "charts", "redis"), "redis", "1.0.0")
-	writeGateFile(t, filepath.Join(parent("v2-req-missing", ""), "requirements.yaml"), redisDep("1.0.0"))
-	writeChart(t, filepath.Join(src, "rb", "redis-bar"), "redis-bar", "2.0.0")
-	fooBar := parent("dir-and-foo-bar", redisDep("1.0.0"))
-	writeChart(t, filepath.Join(fooBar, "charts", "redis"), "redis", "1.0.0")
-	packChart(t, filepath.Join(src, "rb", "redis-bar"), filepath.Join(fooBar, "charts", "redis-bar-2.0.0.tgz"))
-	tgzDir := parent("tgz-and-dir", redisDep("1.0.0"))
-	packChart(t, filepath.Join(src, "redis"), filepath.Join(tgzDir, "charts", "redis-1.0.0.tgz"))
-	writeChart(t, filepath.Join(tgzDir, "charts", "redis"), "redis", "1.0.0")
-	twoDirs := parent("two-dirs", redisDep("1.0.0"))
-	writeChart(t, filepath.Join(twoDirs, "charts", "redis"), "redis", "1.0.0")
-	writeChart(t, filepath.Join(twoDirs, "charts", "redis2"), "redis", "1.0.0")
-	noVersion := parent("parent-no-version", "")
-	writeGateFile(t, filepath.Join(noVersion, "Chart.yaml"), "apiVersion: v2\nname: parent-no-version\n"+redisDep("1.0.0"))
-	writeChart(t, filepath.Join(noVersion, "charts", "redis"), "redis", "1.0.0")
-	subNoVersion := parent("sub-no-version", redisDep("1.0.0"))
-	writeChart(t, filepath.Join(subNoVersion, "charts", "redis"), "redis", "1.0.0")
-	writeGateFile(t, filepath.Join(subNoVersion, "charts", "redis", "Chart.yaml"), "apiVersion: v2\nname: redis\n")
-	depNoVersion := parent("dep-no-version", "dependencies:\n  - name: redis\n    repository: https://charts.example.test\n")
-	writeChart(t, filepath.Join(depNoVersion, "charts", "redis"), "redis", "1.0.0")
 
-	for _, tc := range []struct {
-		chart string
-		want  bool
-	}{
-		{"plain", false},
-		{"vendored-tgz", false},
-		{"range", false},
-		{"vendored-dir", false},
-		{"v1-vendored", false},
-		{"missing", true},
-		{"missing-no-version", true},
-		{"helmignored", true},
-		{"misnamed", true},
-		{"wrong-version", true},
-		{"two-archives", true},
-		{"corrupt", true},
-		{"filedep", true},
-		{"filedep-vendored", true},
-		{"v1", true},
-		{"symlinked", false},
-		{"v2-req", false},
-		{"v2-req-missing", true},
-		{"dir-and-foo-bar", true},
-		{"tgz-and-dir", false},
-		{"two-dirs", false},
-		{"parent-no-version", true},
-		{"sub-no-version", true},
-		{"dep-no-version", true},
-	} {
-		dir := filepath.Join(base, tc.chart)
-		// Every fixture but these loads: a refusal is for the dependency,
-		// not for a chart Helm cannot read.
-		unloadable := tc.chart == "corrupt" || tc.chart == "parent-no-version" || tc.chart == "sub-no-version"
-		if _, err := loader.Load(dir); (err != nil) != unloadable {
-			t.Errorf("%s: the fixture loads with %v", tc.chart, err)
+	rows := readGateFixtures(t)
+	inTable := map[string]bool{}
+	for _, row := range rows {
+		inTable[row.name] = true
+	}
+	for name := range builders {
+		if !inTable[name] {
+			t.Errorf("fixture %s has a builder but no row in testdata/chartgate-fixtures.txt", name)
 		}
-		if helm := helmSays(t, dir); helm != tc.want {
-			t.Errorf("%s: the fixture is wrong: Helm says %v, the table %v", tc.chart, helm, tc.want)
+	}
+	for _, row := range rows {
+		build, ok := builders[row.name]
+		if !ok {
+			t.Errorf("testdata/chartgate-fixtures.txt: no builder for fixture %s", row.name)
+			continue
 		}
-		for _, config := range []string{"chart: ./" + tc.chart + "\n", "chart: " + dir + "\n"} {
-			_, got, err := ChartDepsNotVendored([]byte(config), base)
-			if err != nil || got != tc.want {
-				t.Errorf("%q: unvendored=%v err=%v, want %v", config, got, err, tc.want)
+		dir := filepath.Join(base, row.name)
+		build(dir)
+		want := row.verdict == "refuse"
+		// A fixture that does not load is refused for that, not for a
+		// dependency.
+		if _, err := loader.Load(dir); (err != nil) != (row.cause == "load") {
+			t.Errorf("%s: the fixture loads with %v", row.name, err)
+		}
+		if helm := helmSays(t, dir); helm != want {
+			t.Errorf("%s: the fixture is wrong: Helm says %v, the table %s", row.name, helm, row.verdict)
+		}
+		for _, config := range []string{"chart: ./" + row.name + "\n", "chart: " + dir + "\n"} {
+			_, refusal, err := ChartRefusal([]byte(config), base)
+			if err != nil || (refusal != "") != want {
+				t.Errorf("%q: refusal %q err=%v, want %s", config, refusal, err, row.verdict)
+			}
+			if want && !strings.Contains(refusal, causeText[row.cause]) {
+				t.Errorf("%q: refusal %q, want the %s message", config, refusal, row.cause)
+			}
+			if row.cause != "deps" && strings.Contains(refusal, causeText["deps"]) {
+				t.Errorf("%q: refusal %q gives the vendor advice", config, refusal)
 			}
 		}
 	}
@@ -264,15 +325,15 @@ func TestChartDepsNotVendored(t *testing.T) {
 		"repository: https://charts.example.test\nchart: missing\n", // a remote chart: khelm pulls it into its cache
 		"chart: ./does-not-exist\n",                                 // not a directory: a repo shorthand to khelm
 	} {
-		if _, got, err := ChartDepsNotVendored([]byte(config), base); err != nil || got {
-			t.Errorf("%q: unvendored=%v err=%v, want false", config, got, err)
+		if _, refusal, err := ChartRefusal([]byte(config), base); err != nil || refusal != "" {
+			t.Errorf("%q: refusal %q err=%v, want none", config, refusal, err)
 		}
 	}
 	// The gate reads only: no fixture gained a lock file or a tmpcharts dir.
-	for _, name := range []string{"missing", "helmignored", "filedep"} {
+	for _, row := range rows {
 		for _, f := range []string{"Chart.lock", "tmpcharts"} {
-			if _, err := os.Stat(filepath.Join(base, name, f)); err == nil {
-				t.Errorf("%s: the gate wrote %s", name, f)
+			if _, err := os.Stat(filepath.Join(base, row.name, f)); err == nil {
+				t.Errorf("%s: the gate wrote %s", row.name, f)
 			}
 		}
 	}

@@ -15,84 +15,143 @@ import (
 // itself (an inline function in an extensionless Kustomization, in the entry
 // or in a base), never reads a file outside the project (a .yaml link below
 // the entry is not followed, as grep -r in the bash twin does not), reads
-// regular files only, and marks the entry partial when a reference or a
+// regular files only, and marks the entry when a reference or a
 // kustomization file resolves outside the project or a reference is remote:
-// the hint cannot rule a function out there. The bash twin is tested on the
-// same cases (tests/unit/bootstrap_test.bats, bootstrap::_krm_declared).
-func TestKRMFunctionDeclaredRound6(t *testing.T) {
+// the hint cannot rule a function out there.
+//
+// Review round 7: an unread reference is its own kind (KRMUnread, its own
+// label), a function anywhere wins over it (item 3); a referenced DIRECTORY
+// link is followed into the project and marks the entry by what the target
+// holds, or as unread when it leaves the project (item 5); a reference is
+// cleaned lexically before its links resolve, as kustomize does, so
+// `l/../fns` is the `fns` next to the link, not the one next to its target
+// (item 6). The bash twin runs the same cases (tests/unit/bootstrap_test.bats,
+// bootstrap::_krm_declared).
+func TestKRMFunctionHint(t *testing.T) {
 	const fn = "apiVersion: example.test/v1\nkind: Fn\nmetadata:\n  name: fn\n  annotations:\n    config.kubernetes.io/function: |\n      exec:\n        path: ./fn\n"
 	const inline = "transformers:\n- |-\n  apiVersion: example.test/v1\n  kind: Fn\n  metadata:\n    name: fn\n    annotations:\n      config.kubernetes.io/function: |\n        exec:\n          path: ./fn\n"
+	const fnBase = "transformers:\n- fn.yaml\n"
+	const plainBase = "resources:\n- cm.yaml\n"
+	const cm = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n"
 	for _, tc := range []struct {
 		name  string
-		files map[string]string // relative to the project; "@<rel>" links to <rel> in the project, "@@OUT/<rel>" to <rel> outside it
-		want  bool
+		files map[string]string // relative to the project; "@<rel>" links to <rel> in the project, "@@OUT/<rel>" to <rel> outside it; "@@PROJECT" in content is the project path
+		want  KRMHint
 	}{
 		{"inline function in an extensionless Kustomization", map[string]string{
 			"entry/Kustomization": inline,
-		}, true},
+		}, KRMFunction},
 		{"inline function in a base's extensionless Kustomization", map[string]string{
 			"shared/base/Kustomization": inline,
 			"entry/kustomization.yaml":  "resources:\n- ../shared/base\n",
-		}, true},
+		}, KRMFunction},
 		{"a base outside the project", map[string]string{
 			"entry/kustomization.yaml": "resources:\n- @@OUT/base\n",
-		}, true},
+		}, KRMUnread},
 		{"a remote URL", map[string]string{
 			"entry/kustomization.yaml": "resources:\n- https://example.test/raw/cm.yaml\n",
-		}, true},
+		}, KRMUnread},
 		{"a remote GitHub base", map[string]string{
 			"entry/kustomization.yaml": "resources:\n- github.com/example/repo/base?ref=v1\n",
-		}, true},
+		}, KRMUnread},
 		{"a remote git base", map[string]string{
 			"entry/kustomization.yaml": "resources:\n- git@github.com:example/repo.git//base\n",
-		}, true},
+		}, KRMUnread},
+		{"a remote base and a function: the function wins", map[string]string{
+			"entry/kustomization.yaml":  "resources:\n- https://example.test/raw/cm.yaml\n- ../shared/base\n",
+			"shared/base/Kustomization": inline,
+		}, KRMFunction},
 		{"an unreferenced .yaml link to a file outside", map[string]string{
 			"entry/kustomization.yaml": "resources:\n- cm.yaml\n",
 			"entry/fn.yaml":            "@@OUT/fn.yaml",
-		}, false},
+		}, KRMNone},
 		{"a referenced .yaml link to a file outside", map[string]string{
 			"entry/kustomization.yaml": "transformers:\n- fn.yaml\n",
 			"entry/fn.yaml":            "@@OUT/fn.yaml",
-		}, true},
+		}, KRMUnread},
 		{"a referenced .yaml link to a file inside", map[string]string{
 			"entry/kustomization.yaml": "transformers:\n- fn.yaml\n",
 			"entry/fn.yaml":            "@fns/fn.yaml",
 			"fns/fn.yaml":              fn,
-		}, true},
+		}, KRMFunction},
 		{"an unreferenced .yaml link to a file inside", map[string]string{
 			"entry/kustomization.yaml": "resources:\n- cm.yaml\n",
 			"entry/fn.yaml":            "@fns/fn.yaml",
 			"fns/fn.yaml":              fn,
-		}, false},
+		}, KRMNone},
 		{"a Kustomization that links outside", map[string]string{
 			"entry/kustomization.yaml": "@@OUT/kustomization.yaml",
-		}, true},
+		}, KRMUnread},
+		{"a referenced directory link to a base with a function", map[string]string{
+			"entry/kustomization.yaml":         "resources:\n- linked\n",
+			"entry/linked":                     "@shared/fnbase",
+			"shared/fnbase/kustomization.yaml": fnBase,
+			"shared/fnbase/fn.yaml":            fn,
+		}, KRMFunction},
+		{"a referenced directory link to a plain base", map[string]string{
+			"entry/kustomization.yaml":        "resources:\n- linked\n",
+			"entry/linked":                    "@shared/plain",
+			"shared/plain/kustomization.yaml": plainBase,
+			"shared/plain/cm.yaml":            cm,
+		}, KRMNone},
+		{"a referenced directory link out of the project", map[string]string{
+			"entry/kustomization.yaml": "resources:\n- linked\n",
+			"entry/linked":             "@@OUT/base",
+		}, KRMUnread},
+		{"link/../x is cleaned before the link resolves (relative)", map[string]string{
+			"entry/kustomization.yaml":    "resources:\n- ../l/../fns\n",
+			"l":                           "@deep/a",
+			"deep/a/cm.yaml":              cm,
+			"fns/kustomization.yaml":      fnBase,
+			"fns/fn.yaml":                 fn,
+			"deep/fns/kustomization.yaml": plainBase,
+			"deep/fns/cm.yaml":            cm,
+		}, KRMFunction},
+		{"link/../x is cleaned before the link resolves (absolute)", map[string]string{
+			"entry/kustomization.yaml":    "resources:\n- @@PROJECT/l/../fns\n",
+			"l":                           "@deep/a",
+			"deep/a/cm.yaml":              cm,
+			"fns/kustomization.yaml":      fnBase,
+			"fns/fn.yaml":                 fn,
+			"deep/fns/kustomization.yaml": plainBase,
+			"deep/fns/cm.yaml":            cm,
+		}, KRMFunction},
+		{"link/../x does not reach the target's sibling", map[string]string{
+			"entry/kustomization.yaml":    "resources:\n- ../l/../fns\n",
+			"l":                           "@deep/a",
+			"deep/a/cm.yaml":              cm,
+			"fns/kustomization.yaml":      plainBase,
+			"fns/cm.yaml":                 cm,
+			"deep/fns/kustomization.yaml": fnBase,
+			"deep/fns/fn.yaml":            fn,
+		}, KRMNone},
 		{"a missing reference", map[string]string{
 			"entry/kustomization.yaml": "resources:\n- ../nowhere\n",
-		}, false},
+		}, KRMNone},
 		{"plain", map[string]string{
-			"shared/base/kustomization.yaml": "resources:\n- cm.yaml\n",
-			"shared/base/cm.yaml":            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n",
+			"shared/base/kustomization.yaml": plainBase,
+			"shared/base/cm.yaml":            cm,
 			"entry/kustomization.yaml":       "resources:\n- ../shared/base\n",
-		}, false},
+		}, KRMNone},
 	} {
 		project, out := t.TempDir(), t.TempDir()
 		testutil.WriteFile(t, filepath.Join(out, "fn.yaml"), fn)
-		testutil.WriteFile(t, filepath.Join(out, "kustomization.yaml"), "resources:\n- cm.yaml\n")
-		testutil.WriteFile(t, filepath.Join(out, "base", "kustomization.yaml"), "resources:\n- cm.yaml\n")
+		testutil.WriteFile(t, filepath.Join(out, "kustomization.yaml"), plainBase)
+		testutil.WriteFile(t, filepath.Join(out, "base", "kustomization.yaml"), plainBase)
 		testutil.WriteFile(t, filepath.Join(project, "entry", "cm.yaml"), "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: entry\n")
 		for rel, content := range tc.files {
 			path := filepath.Join(project, rel)
 			switch {
 			case strings.HasPrefix(content, "@@OUT/"):
 				link(t, filepath.Join(out, strings.TrimPrefix(content, "@@OUT/")), path)
-			case strings.HasPrefix(content, "@"):
+			case strings.HasPrefix(content, "@") && !strings.HasPrefix(content, "@@"):
 				link(t, filepath.Join(project, strings.TrimPrefix(content, "@")), path)
 			default:
-				testutil.WriteFile(t, path, strings.ReplaceAll(content, "@@OUT", out))
+				content = strings.ReplaceAll(content, "@@OUT", out)
+				testutil.WriteFile(t, path, strings.ReplaceAll(content, "@@PROJECT", project))
 			}
 		}
-		if got := KRMFunctionDeclared(filepath.Join(project, "entry"), project); got != tc.want {
+		if got := KRMFunctionHint(filepath.Join(project, "entry"), project); got != tc.want {
 			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
 		}
 	}
@@ -100,31 +159,31 @@ func TestKRMFunctionDeclaredRound6(t *testing.T) {
 
 // An entry outside the roots (a framework addon a dry run peeks lives in a
 // temp directory) reads its own tree: a reference into it is inside.
-func TestKRMFunctionDeclaredEntryOutsideTheRoots(t *testing.T) {
+func TestKRMFunctionHintEntryOutsideTheRoots(t *testing.T) {
 	entry, project := t.TempDir(), t.TempDir()
 	testutil.WriteFile(t, filepath.Join(entry, "kustomization.yaml"), "resources:\n- sub\n")
 	testutil.WriteFile(t, filepath.Join(entry, "sub", "kustomization.yaml"), "resources:\n- cm.yaml\n")
 	testutil.WriteFile(t, filepath.Join(entry, "sub", "cm.yaml"), "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n")
-	if KRMFunctionDeclared(entry, project) {
+	if KRMFunctionHint(entry, project) != KRMNone {
 		t.Error("a reference into the entry's own directory counted as outside the project")
 	}
 }
 
 // A FIFO named like YAML (below the entry, or referenced) is never read:
 // the hint must not block on it.
-func TestKRMFunctionDeclaredReadsRegularFilesOnly(t *testing.T) {
+func TestKRMFunctionHintReadsRegularFilesOnly(t *testing.T) {
 	project := t.TempDir()
 	testutil.WriteFile(t, filepath.Join(project, "entry", "kustomization.yaml"), "resources:\n- cm.yaml\ntransformers:\n- pipe.yaml\n")
 	testutil.WriteFile(t, filepath.Join(project, "entry", "cm.yaml"), "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n")
 	if err := syscall.Mkfifo(filepath.Join(project, "entry", "pipe.yaml"), 0o600); err != nil {
 		t.Skipf("mkfifo: %v", err)
 	}
-	done := make(chan bool, 1)
-	go func() { done <- KRMFunctionDeclared(filepath.Join(project, "entry"), project) }()
+	done := make(chan KRMHint, 1)
+	go func() { done <- KRMFunctionHint(filepath.Join(project, "entry"), project) }()
 	select {
 	case got := <-done:
-		if got {
-			t.Error("a FIFO marked the entry partial")
+		if got != KRMNone {
+			t.Errorf("a FIFO marked the entry: %v", got)
 		}
 	case <-time.After(5 * time.Second):
 		// Unblock the reader so the test binary can exit.

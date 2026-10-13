@@ -297,8 +297,11 @@ bootstrap dry-run: entries=4 unchanged=0 differs=3 rendered=0 skipped=1 inconclu
   does not render them. Put the dependencies into the `charts/` directory of
   the chart, or pass `--allow-generators`. The run exits 2. The bash
   implementation asks `helm` for this check (`helm dependency list` and
-  `helm lint`, both read-only), so it needs helm v3.3 or later on `PATH`.
-  Without it, such an entry is inconclusive too.
+  `helm lint`, both read-only), so it needs helm v3 (3.3 or a later 3.x) on
+  `PATH`. Without it, such an entry is inconclusive too. stderr gives the
+  cause and the next action for each refused chart: the vendor advice only
+  for a dependency that is not vendored, other text for a `file://`
+  dependency, a chart that helm cannot load, or a missing helm v3.
 - `(non-deterministic: N)`, with one `non-deterministic (regenerated on
   every apply)` line for each object: the two renders of the entry gave
   different content for these objects, or only one of the renders has the
@@ -318,10 +321,13 @@ bootstrap dry-run: entries=4 unchanged=0 differs=3 rendered=0 skipped=1 inconclu
   its own directory or in a kustomization it references in the project (a
   base, a component, a generator or transformer file, or an inline config in
   the kustomization file). A dry run without `--allow-generators` does not
-  run it, thus the objects of the function are not in the preview. An entry
-  that references a kustomization or a file outside the project, or a
-  remote one, gets this mark too: the dry run does not read it, thus it
-  cannot rule out a function there.
+  run it, thus the objects of the function are not in the preview.
+- `(partial: a reference outside the project was not inspected)`: the
+  entry references a kustomization or a file outside the project, or a
+  remote one, and the dry run found no KRM function in what it read. The
+  dry run does not read such a reference, thus it cannot rule out a
+  function there. A reference resolves as kustomize resolves it: `..` goes
+  up from the path as written, before symbolic links resolve.
 
 **Trust model.** The dry run prevents accidental side effects of
 legitimate addon code and configuration. It is not a security boundary

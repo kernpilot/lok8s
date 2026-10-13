@@ -70,46 +70,51 @@ func TestDryRunListsAnObjectOnlyTheSecondRenderHas(t *testing.T) {
 // file outside the entry's directory marks the entry partial. A reference
 // outside the project, or a remote one, is not read; since review round 6
 // (item 5) it marks the entry partial too, because the hint cannot rule a
-// function out there.
+// function out there, with its own label since review round 7 (item 3).
+const (
+	functionMark = " (partial: KRM function skipped)"
+	unreadMark   = " (partial: a reference outside the project was not inspected)"
+)
+
 func TestDryRunKRMHintFollowsTheKustomizationGraph(t *testing.T) {
 	fn := "apiVersion: example.test/v1\nkind: Fn\nmetadata:\n  name: fn\n  annotations:\n    config.kubernetes.io/function: |\n      exec:\n        path: ./fn\n"
 	for _, tc := range []struct {
 		name  string
 		files map[string]string // relative to the project root
-		want  bool
+		want  string            // the mark after the status, "" for none
 	}{
 		{"base", map[string]string{
 			"shared/base/kustomization.yaml": "transformers:\n- fn.yaml\n",
 			"shared/base/fn.yaml":            fn,
 			"entry/kustomization.yaml":       "resources:\n- ../shared/base\n",
-		}, true},
+		}, functionMark},
 		{"component", map[string]string{
 			"shared/comp/kustomization.yaml": "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\ntransformers:\n- fn.yaml\n",
 			"shared/comp/fn.yaml":            fn,
 			"entry/kustomization.yaml":       "components:\n- ../shared/comp\n",
-		}, true},
+		}, functionMark},
 		{"transformer file", map[string]string{
 			"fns/fn.yaml":              fn,
 			"entry/kustomization.yaml": "transformers:\n- ../fns/fn.yaml\n",
-		}, true},
+		}, functionMark},
 		{"nested", map[string]string{
 			"a/kustomization.yaml":     "resources:\n- ../b\n",
 			"b/kustomization.yaml":     "resources:\n- ../a\nbases:\n- ../c\n", // a cycle, then a base
 			"c/kustomization.yaml":     "generators:\n- fn.yaml\n",
 			"c/fn.yaml":                fn,
 			"entry/kustomization.yaml": "resources:\n- ../a\n",
-		}, true},
+		}, functionMark},
 		{"remote only", map[string]string{
 			"entry/kustomization.yaml": "resources:\n- https://github.com/example/repo//base?ref=v1\n- github.com/example/repo/base\n",
-		}, true},
+		}, unreadMark},
 		{"inline function in an extensionless Kustomization (round 6, item 4)", map[string]string{
 			"entry/Kustomization": "resources:\n- cm.yaml\ntransformers:\n- |-\n  apiVersion: example.test/v1\n  kind: Fn\n  metadata:\n    name: fn\n    annotations:\n      config.kubernetes.io/function: |\n        exec:\n          path: ./fn\n",
-		}, true},
+		}, functionMark},
 		{"plain", map[string]string{
 			"shared/base/kustomization.yaml": "resources:\n- cm.yaml\n",
 			"shared/base/cm.yaml":            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n",
 			"entry/kustomization.yaml":       "resources:\n- ../shared/base\n",
-		}, false},
+		}, ""},
 	} {
 		e, f, _, _, p := testEngine(t)
 		for rel, content := range tc.files {
@@ -123,12 +128,14 @@ func TestDryRunKRMHintFollowsTheKustomizationGraph(t *testing.T) {
 		if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 			t.Fatalf("%s: Apply: %v\n%s", tc.name, err, stderrOf(e))
 		}
-		if marked := strings.Contains(stdoutOf(e), "(partial: KRM function skipped)"); marked != tc.want {
-			t.Errorf("%s: marked=%v, want %v\n%s", tc.name, marked, tc.want, stdoutOf(e))
+		want := "01-entry: unchanged" + tc.want + "\n"
+		if !strings.Contains(stdoutOf(e), want) {
+			t.Errorf("%s: want %q\n%s", tc.name, want, stdoutOf(e))
 		}
 	}
 
-	// Outside the project: not read, and marked partial (round 6, item 5).
+	// Outside the project: not read, and marked partial with its own label
+	// (round 6, item 5; round 7, item 3).
 	e, f, _, _, p := testEngine(t)
 	outside := t.TempDir()
 	testutil.WriteFile(t, filepath.Join(outside, "base", "kustomization.yaml"), "transformers:\n- fn.yaml\n")
@@ -141,7 +148,7 @@ func TestDryRunKRMHintFollowsTheKustomizationGraph(t *testing.T) {
 	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("outside: Apply: %v", err)
 	}
-	if !strings.Contains(stdoutOf(e), "01-entry: unchanged (partial: KRM function skipped)\n") {
+	if !strings.Contains(stdoutOf(e), "01-entry: unchanged"+unreadMark+"\n") {
 		t.Errorf("a base outside the project did not mark the entry partial:\n%s", stdoutOf(e))
 	}
 }

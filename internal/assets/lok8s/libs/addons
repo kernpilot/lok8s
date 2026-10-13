@@ -419,11 +419,13 @@ addons::_helm_stub() {
 # "ok" to `helm dependency list`). khelm renders some of the refused charts
 # without a build (a misnamed archive next to the subchart, for one); the
 # gate refuses them all, the same as the Go twin. Anything it cannot check
-# (helm missing, a chart helm cannot load, no table) is refused too. A
-# refused render exits 1 and is reported as `chart-deps <chart>`; otherwise
-# the gate execs the project's ChartRenderer. It runs for every
-# ChartRenderer config of the render (any file name, nested bases, absolute
-# paths), in the kustomization root kustomize starts it in.
+# (no helm v3.3+, a chart helm cannot load, no table) is refused too. Each
+# cause prints its own message and next action; the vendor advice is only
+# for a dependency that helm does not report as vendored. A refused render
+# exits 1 and is reported as `chart-deps <chart>`; otherwise the gate execs
+# the project's ChartRenderer. It runs for every ChartRenderer config of the
+# render (any file name, nested bases, absolute paths), in the kustomization
+# root kustomize starts it in.
 addons::_chart_gate_script() {
   printf '#!/usr/bin/env bash\nreal=%q\n' "${1}"
   cat <<'GATE'
@@ -431,15 +433,26 @@ config="${KUSTOMIZE_PLUGIN_CONFIG_STRING:-}"
 [[ -n "${config}" ]] || config="$(cat "${1:-/dev/null}")"
 repo="$(yq -r '.repository // ""' <<< "${config}")"
 chart="$(yq -r '.chart // ""' <<< "${config}")"
+vendor_advice="khelm may build the dependencies into the chart directory. Vendor them into charts/, or pass --allow-generators."
+# refuse <message>: the reason of a refusal, after the chart's name.
+refuse() { echo "lok8s dry-run: chart ${chart}: ${1}" >&2; }
+# builds_deps <dir>: rc 0 when the dry run refuses the chart (it printed
+# why), rc 1 when it may render.
 builds_deps() {
   local dir="${1}" f deps name dep any=0 list line
   for f in Chart.yaml requirements.yaml; do
     [[ -f "${dir}/${f}" ]] || continue
-    deps="$(yq -r '(.dependencies // [])[] | [(.name // ""), (.repository // "")] | @tsv' "${dir}/${f}")" || return 0
+    if ! deps="$(yq -r '(.dependencies // [])[] | [(.name // ""), (.repository // "")] | @tsv' "${dir}/${f}" 2>/dev/null)"; then
+      refuse "cannot read the dependencies in ${f}. Fix the chart so that helm can load it."
+      return 0
+    fi
     while IFS=$'\t' read -r name dep; do
       [[ -n "${name}${dep}" ]] || continue
       any=1
-      [[ "${dep}" != file://* ]] || return 0
+      if [[ "${dep}" == file://* ]]; then
+        refuse "dependency ${name} is a file:// chart. khelm builds it into the chart directory on each render. Pass --allow-generators to render it."
+        return 0
+      fi
     done <<< "${deps}"
   done
   (( any )) || return 1
@@ -452,7 +465,7 @@ builds_deps() {
   minor="${version#v3.}"
   minor="${minor%%.*}"
   if [[ "${version}" != v3.* || ! "${minor}" =~ ^[0-9]+$ ]] || (( 10#${minor} < 3 )); then
-    echo "lok8s dry-run: chart ${chart}: the dependency check needs helm v3.3 or later on PATH (found: ${version:-none})" >&2
+    refuse "helm v3 (3.3 or a later 3.x) is required for the dependency check. Found: ${version:-no helm on PATH}. Install helm v3, or use the Go implementation (lok8s.yaml: spec.implementation)."
     return 0
   fi
   # The table is on stdout. helm's log lines go to stderr (a symlinked
@@ -460,10 +473,17 @@ builds_deps() {
   # requirements.yaml: "Warning: Dependencies are handled in Chart.yaml"),
   # so stderr is kept apart and shown only when the command fails.
   local errs rc=0
-  errs="$(mktemp)" || return 0
+  if ! errs="$(mktemp 2>/dev/null)"; then
+    refuse "cannot make a temporary file for the dependency check in ${TMPDIR:-/tmp}. Make sure that this directory exists and is writable."
+    return 0
+  fi
   list="$(helm dependency list "${dir}" 2>"${errs}")" || rc=$?
   if (( rc )); then
-    echo "lok8s dry-run: chart ${chart}: helm dependency list failed: $(tail -n 1 "${errs}")" >&2
+    # `helm dependency list` fails only when helm cannot load the chart; the
+    # last line of its stderr says why (the Go twin prints the loader error).
+    local why
+    why="$(tail -n 1 "${errs}")"
+    refuse "helm cannot load the chart: ${why#Error: }. Fix the chart so that helm can load it."
     rm -f "${errs}"
     return 0
   fi
@@ -484,13 +504,21 @@ builds_deps() {
       [[ "${line%%[[:space:]]*}" != NAME || "${status}" != STATUS ]] || header=1
       continue
     fi
-    [[ "${status}" == ok || "${status}" == unpacked ]] || return 0
+    if [[ "${status}" != ok && "${status}" != unpacked ]]; then
+      name="${line%%"${tab}"*}"
+      name="${name%"${name##*[![:space:]]}"}"
+      refuse "dependency ${name}: ${status} (helm dependency list). ${vendor_advice}"
+      return 0
+    fi
   done <<< "${list}"
   if (( ! header )) && [[ "${list}" != "WARNING: no dependencies at "* ]]; then
-    echo "lok8s dry-run: chart ${chart}: helm dependency list printed no dependency table" >&2
+    refuse "helm dependency list printed no dependency table (helm ${version}). Use helm v3.21.2, or use the Go implementation (lok8s.yaml: spec.implementation)."
     return 0
   fi
-  if helm lint "${dir}" 2>&1 | grep -q 'chart directory is missing these dependencies'; then
+  local missing
+  missing="$(helm lint "${dir}" 2>&1 | sed -n 's/.*chart directory is missing these dependencies: *//p' | head -n 1)"
+  if [[ -n "${missing}" ]]; then
+    refuse "dependency ${missing}: not in the chart that helm loads (helm lint). ${vendor_advice}"
     return 0
   fi
   return 1
@@ -499,7 +527,6 @@ if [[ -z "${repo}" && -n "${chart}" ]]; then
   path="${chart}"
   [[ "${path}" == /* ]] || path="${PWD}/${path}"
   if [[ -d "${path}" ]] && builds_deps "${path}"; then
-    echo "lok8s dry-run: chart ${chart}: helm does not report its dependencies as vendored (khelm may build them into the chart directory) — vendor them into charts/ or pass --allow-generators" >&2
     if [[ -f "${LOK8S_BOOTSTRAP_DRYRUN_REPORT:-}" ]]; then
       echo "chart-deps ${chart}" >> "${LOK8S_BOOTSTRAP_DRYRUN_REPORT}"
     fi

@@ -294,24 +294,40 @@ func (b *DryRunBoundary) renderEnv(allowGenerators bool, entryPath string) []str
 	return env
 }
 
-// KRMFunctionDeclared reports an entry whose kustomization graph declares
-// a KRM function (`config.kubernetes.io/function` or
-// `config.k8s.io/function`), or that the hint cannot check. It reads the
-// YAML under dir, and for every kustomization on the way the kustomization
-// file itself (any of its three names; an inline generator or transformer
-// config can declare a function) and its local resources, components,
-// bases, generators, transformers and validators references, followed
-// recursively. Without --enable-exec kustomize skips an exec function
-// silently, so the dry run marks that entry `partial`. It reads only
-// within the project and its lok8s tree (roots) and the entry's own
+// KRMHint is what the KRM hint found for an entry.
+type KRMHint int
+
+const (
+	// KRMNone: the hint found no KRM function and read every reference.
+	KRMNone KRMHint = iota
+	// KRMFunction: the entry's graph declares a KRM function, which a dry
+	// run without --allow-generators skips (`partial: KRM function skipped`).
+	KRMFunction
+	// KRMUnread: a reference outside the project, or a remote one, was not
+	// read, so the hint cannot rule a function out there (`partial: a
+	// reference outside the project was not inspected`).
+	KRMUnread
+)
+
+// KRMFunctionHint inspects an entry's kustomization graph for a KRM
+// function (`config.kubernetes.io/function` or `config.k8s.io/function`).
+// It reads the YAML under dir, and for every kustomization on the way the
+// kustomization file itself (any of its three names; an inline generator or
+// transformer config can declare a function) and its local resources,
+// components, bases, generators, transformers and validators references,
+// followed recursively. Without --enable-exec kustomize skips an exec
+// function silently, so the dry run marks that entry `partial`. It reads
+// only within the project and its lok8s tree (roots) and the entry's own
 // directory: a reference or a kustomization file that resolves outside
 // them, or a remote reference (a URL, a git or GitHub reference), is not
-// read and marks the entry `partial` as well. A hint, not a boundary: it
-// only reads.
-func KRMFunctionDeclared(dir string, roots ...string) bool {
+// read. A function anywhere in the graph wins (KRMFunction); otherwise an
+// unread reference gives KRMUnread. A reference is cleaned lexically before
+// its links are resolved (`link/../x` is `x` next to the link), as
+// kustomize does. A hint, not a boundary: it only reads.
+func KRMFunctionHint(dir string, roots ...string) KRMHint {
 	entry, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return false
+		return KRMNone
 	}
 	// The entry's own directory counts as inside: a framework addon that a
 	// dry run peeks (never ejects) is in a temp directory.
@@ -332,6 +348,7 @@ func KRMFunctionDeclared(dir string, roots ...string) bool {
 		}
 		return false
 	}
+	unread := false
 	seen := map[string]bool{}
 	queue := []string{entry}
 	for len(queue) > 0 {
@@ -341,22 +358,23 @@ func KRMFunctionDeclared(dir string, roots ...string) bool {
 		if err != nil || seen[p] {
 			continue
 		}
-		if !inside(p) {
-			return true
-		}
 		seen[p] = true
+		if !inside(p) {
+			unread = true
+			continue
+		}
 		info, err := os.Stat(p)
 		if err != nil {
 			continue
 		}
 		if !info.IsDir() {
 			if info.Mode().IsRegular() && declaresKRMFunction(p) {
-				return true
+				return KRMFunction
 			}
 			continue
 		}
 		if subtreeDeclaresKRMFunction(p) {
-			return true
+			return KRMFunction
 		}
 		file := kustomizationFile(p)
 		if file == "" {
@@ -367,27 +385,33 @@ func KRMFunctionDeclared(dir string, roots ...string) bool {
 			continue
 		}
 		if !inside(canon) {
-			return true
+			unread = true
+			continue
 		}
 		raw, err := os.ReadFile(canon)
 		if err != nil {
 			continue
 		}
 		if declaresKRMFunctionIn(raw) {
-			return true
+			return KRMFunction
 		}
 		refs, remote := kustomizationRefs(raw)
 		if remote {
-			return true
+			unread = true
 		}
 		for _, ref := range refs {
-			if !filepath.IsAbs(ref) {
-				ref = filepath.Join(p, ref)
+			if filepath.IsAbs(ref) {
+				ref = filepath.Clean(ref)
+			} else {
+				ref = filepath.Join(p, ref) // Join cleans: link/../x is x
 			}
 			queue = append(queue, ref)
 		}
 	}
-	return false
+	if unread {
+		return KRMUnread
+	}
+	return KRMNone
 }
 
 // subtreeDeclaresKRMFunction scans the *.yaml and *.yml files under dir

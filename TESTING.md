@@ -90,12 +90,14 @@ in-process half (`lo-full`) is `dryrun_inprocess_test.go` (`-tags inprocess`).
 `internal/render/chartgate_test.go` pins the chart gate against Helm's own
 `action.CheckDependencies` and `action.Dependency.List` on real chart
 fixtures; the bats twin (tagged `real-helm`) runs the bash gate against the
-real helm v3 on the same fixtures. It skips without helm v3 locally
-(`bats --filter-tags real-helm tests/unit/bootstrap_test.bats` with a helm v3
-on `PATH` runs it). The argsh container of `unit-tests` has no helm, so that
-job runs it a second time natively, with a pinned helm v3.21.2, where
-`CI=true` turns a missing helm into a failure and the step fails when the
-test skips. The dry run prevents accidental side
+real helm v3 on the same fixtures. Both read one table,
+`internal/render/testdata/chartgate-fixtures.txt` (fixture, verdict, cause
+of a refusal), and fail on a row they cannot build. The bats twin skips
+without helm v3.3+ locally (`bats --filter-tags real-helm tests/unit/` with
+a helm v3.3+ on `PATH` runs every test with that tag). The argsh container
+of `unit-tests` has no helm, so that job runs the tag a second time
+natively, with a pinned helm v3.21.2, where `CI=true` turns a missing helm
+into a failure and the step fails when no test runs or one skips. The dry run prevents accidental side
 effects of legitimate addon code; it is not a security boundary against an
 addon that is made to do harm (see the trust model in
 `docs/guide/deployment.md`), and the tests prove only the first.
