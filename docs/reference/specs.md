@@ -320,7 +320,7 @@ for the `10.125.0.0/16` slot plan.
 |-------|----------|-------------|
 | `name` | no (for `*.lok8s.dev`) | Docker bridge network name (default: `metadata.name`) |
 | `cidr` | no (for `*.lok8s.dev`) | `/24` CIDR for the cluster's slot (default: `10.125.<slot>.0/24`) |
-| `dnsSearch` | no (default `[]`) | DNS search list of the kind nodes and pods (kind `networking.dnsSearch`, kind v0.18.0 or later). `[]` keeps the host's search domains out of the cluster; a list of lowercase DNS names replaces it. See [Host DNS search domains](/guide/local-dev#host-dns-search-domains). |
+| `dnsSearch` | no (default `[]`) | DNS search list of the kind nodes and pods (kind `networking.dnsSearch`, kind v0.18.0 or later). `[]` keeps the host's search domains out of the cluster; a list of at most 32 DNS names (any case, an optional trailing dot) replaces it, as written. `lo lint` checks it. See [Host DNS search domains](/guide/local-dev#host-dns-search-domains). |
 
 Example for an alternate slot:
 

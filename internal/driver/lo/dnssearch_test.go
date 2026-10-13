@@ -100,26 +100,52 @@ func TestRenderDNSSearch(t *testing.T) {
 func readDNSSearch(t *testing.T, specBody string) (string, string, error) {
 	t.Helper()
 	cy := filepath.Join(t.TempDir(), "cluster.lok8s.yaml")
-	testutil.WriteFile(t, cy, "kind: Lo\nmetadata:\n  name: dns\nspec:\n"+specBody)
+	testutil.WriteFile(t, cy, "kind: Lo\nmetadata:\n  name: dns\n"+specBody)
+	return readDNSSearchFile(t, cy)
+}
+
+func readDNSSearchFile(t *testing.T, cy string) (string, string, error) {
+	t.Helper()
 	t.Setenv("LOK8S_NETWORK_DNS_SEARCH", "stale.example")
 	var errBuf bytes.Buffer
 	err := readDNSSearchConfig(cy, &errBuf)
 	return os.Getenv("LOK8S_NETWORK_DNS_SEARCH"), errBuf.String(), err
 }
 
+// dnsSearchList is a spec body with n entries d0.example … d<n-1>.example.
+func dnsSearchList(n int) string {
+	var b strings.Builder
+	b.WriteString("spec:\n  network:\n    dnsSearch:\n")
+	for i := range n {
+		fmt.Fprintf(&b, "      - d%d.example\n", i)
+	}
+	return b.String()
+}
+
 func TestReadDNSSearchConfigAcceptsDNSNames(t *testing.T) {
 	label63 := strings.Repeat("a", 63)
 	name253 := strings.Repeat(label63+".", 3) + strings.Repeat("b", 61) // 3*64 + 61 = 253
+	list32 := make([]string, 32)
+	for i := range list32 {
+		list32[i] = fmt.Sprintf("d%d.example", i)
+	}
 	for _, tc := range []struct{ name, body, want string }{
-		{"no spec.network", "  cluster:\n    domain: lok8s.dev\n", ""},
-		{"no key", "  network:\n    name: n\n", ""},
-		{"null", "  network:\n    dnsSearch: ~\n", ""},
-		{"empty value", "  network:\n    dnsSearch:\n", ""},
-		{"empty list", "  network:\n    dnsSearch: []\n", ""},
-		{"two names", "  network:\n    dnsSearch:\n      - corp.example.com\n      - example.ts.net\n", "corp.example.com example.ts.net"},
-		{"flow list, quoted", "  network:\n    dnsSearch: [\"fritz.box\", 'lan']\n", "fritz.box lan"},
-		{"digits, hyphens, punycode", "  network:\n    dnsSearch: [1and1.example, a-b.example, xn--bcher-kva.example]\n", "1and1.example a-b.example xn--bcher-kva.example"},
-		{"63-character label, 253 characters", "  network:\n    dnsSearch: [" + label63 + ".example, " + name253 + "]\n", label63 + ".example " + name253},
+		{"no spec.network", "spec:\n  cluster:\n    domain: lok8s.dev\n", ""},
+		{"spec.network is not a map", "spec:\n  network: lok8s\n", ""},
+		{"no key", "spec:\n  network:\n    name: n\n", ""},
+		{"null", "spec:\n  network:\n    dnsSearch: ~\n", ""},
+		{"empty value", "spec:\n  network:\n    dnsSearch:\n", ""},
+		{"empty list", "spec:\n  network:\n    dnsSearch: []\n", ""},
+		{"two names", "spec:\n  network:\n    dnsSearch:\n      - corp.example.com\n      - example.ts.net\n", "corp.example.com example.ts.net"},
+		{"flow list, quoted", "spec:\n  network:\n    dnsSearch: [\"fritz.box\", 'lan']\n", "fritz.box lan"},
+		{"digits, hyphens, punycode", "spec:\n  network:\n    dnsSearch: [1and1.example, a-b.example, xn--bcher-kva.example]\n", "1and1.example a-b.example xn--bcher-kva.example"},
+		{"any letter case, as written", "spec:\n  network:\n    dnsSearch: [Corp.Example.com, EXAMPLE.TS.NET]\n", "Corp.Example.com EXAMPLE.TS.NET"},
+		{"trailing dot, as written", "spec:\n  network:\n    dnsSearch: [corp.example.com., " + name253 + ".]\n", "corp.example.com. " + name253 + "."},
+		{"63-character label, 253 characters", "spec:\n  network:\n    dnsSearch: [" + label63 + ".example, " + name253 + "]\n", label63 + ".example " + name253},
+		{"32 entries", dnsSearchList(32), strings.Join(list32, " ")},
+		{"an anchored list", "shared: &s [corp.example.com, x.example]\nspec:\n  network:\n    dnsSearch: *s\n", "corp.example.com x.example"},
+		{"aliased entries", "one: &o corp.example.com\nspec:\n  network:\n    dnsSearch: [*o, y.example, *o]\n", "corp.example.com y.example corp.example.com"},
+		{"an anchored spec.network", "net: &n\n  name: x\n  dnsSearch: [a.example]\nspec:\n  network: *n\n", "a.example"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, stderr, err := readDNSSearch(t, tc.body)
@@ -133,17 +159,19 @@ func TestReadDNSSearchConfigAcceptsDNSNames(t *testing.T) {
 	}
 }
 
+// One line: the value in plain words, then one next action.
 func TestReadDNSSearchConfigRejectsANonList(t *testing.T) {
-	for _, tc := range []struct{ value, tag string }{
-		{"corp.example.com", "!!str"},
-		{"{a: b}", "!!map"},
-		{"true", "!!bool"},
+	for _, tc := range []struct{ value, observed string }{
+		{"corp.example.com", "the text 'corp.example.com'"},
+		{"{a: b}", "a map"},
+		{"true", "the boolean true"},
+		{"5", "the number 5"},
 	} {
-		got, stderr, err := readDNSSearch(t, "  network:\n    dnsSearch: "+tc.value+"\n")
+		got, stderr, err := readDNSSearch(t, "spec:\n  network:\n    dnsSearch: "+tc.value+"\n")
 		if err == nil {
 			t.Fatalf("dnsSearch: %s accepted", tc.value)
 		}
-		want := "error: spec.network.dnsSearch must be a list of DNS names, got " + tc.tag +
+		want := "error: spec.network.dnsSearch must be a list of DNS names. Found " + tc.observed +
 			". Write a YAML list, for example [corp.example.com].\n"
 		if stderr != want {
 			t.Fatalf("dnsSearch: %s: stderr\n%q\nwant\n%q", tc.value, stderr, want)
@@ -154,48 +182,35 @@ func TestReadDNSSearchConfigRejectsANonList(t *testing.T) {
 	}
 }
 
-// Every bad entry gets its own line (index, observed value, next action),
-// and a good entry among them is not exported.
+// More than 32 entries (the Kubernetes pod search-list limit): one line,
+// with the count to remove in the right number.
+func TestReadDNSSearchConfigRejectsMoreThan32Entries(t *testing.T) {
+	for n, remove := range map[int]string{33: "Remove 1 entry.", 34: "Remove 2 entries."} {
+		got, stderr, err := readDNSSearch(t, dnsSearchList(n))
+		if err == nil {
+			t.Fatalf("%d entries accepted", n)
+		}
+		want := fmt.Sprintf("error: spec.network.dnsSearch has %d entries. The limit is 32. %s\n", n, remove)
+		if stderr != want || got != "" {
+			t.Fatalf("%d entries: exported %q, stderr\n%q\nwant\n%q", n, got, stderr, want)
+		}
+	}
+}
+
+// Every bad entry gets its own line: the index, the first failed check
+// with the observed value, and the next action for THAT cause. A good
+// entry among them is not exported. The spec and the expected stderr are
+// shared with the bats twin (tests/unit/lo_dns_search_test.bats), so both
+// implementations print the same bytes.
 func TestReadDNSSearchConfigReportsEveryBadEntry(t *testing.T) {
-	label64 := strings.Repeat("a", 64) + ".example"
-	long := strings.Repeat(strings.Repeat("a", 63)+".", 4) + "b" // 4*64 + 1 = 257
-	got, stderr, err := readDNSSearch(t, `  network:
-    dnsSearch:
-      - corp.example.com
-      - Corp.Example.com
-      - corp_example
-      - ""
-      - example.com.
-      - -bad.example
-      - bad-.example
-      - `+label64+`
-      - `+long+`
-      - é.example
-      - "corp.example.com other.example"
-      - {name: x}
-      - [a]
-      - 123
-      - ~
-`)
+	got, stderr, err := readDNSSearchFile(t, filepath.Join("testdata", "dnssearch_bad.yaml"))
 	if err == nil {
 		t.Fatal("bad entries accepted")
 	}
 	if got != "" {
 		t.Fatalf("a rejected read exported %q", got)
 	}
-	var want strings.Builder
-	for i, observed := range []string{
-		"'Corp.Example.com'", "'corp_example'", "''", "'example.com.'",
-		"'-bad.example'", "'bad-.example'", "'" + label64 + "'", "'" + long + "'",
-		"'é.example'", "'corp.example.com other.example'",
-		"!!map", "!!seq", "!!int", "!!null",
-	} {
-		fmt.Fprintf(&want, "error: spec.network.dnsSearch[%d] must be a lowercase DNS name, got %s. "+
-			"Use only a-z, 0-9, hyphens and dots, for example corp.example.com.\n", i+1, observed)
-	}
-	if stderr != want.String() {
-		t.Fatalf("stderr:\n%s\nwant:\n%s", stderr, want.String())
-	}
+	assertGolden(t, stderr, "dnssearch_bad.golden")
 }
 
 // provisionKindConfig runs Provision on the lifecycle fixture with the
@@ -265,7 +280,7 @@ func TestProvisionRejectsABadDNSSearchBeforeAnyToolRuns(t *testing.T) {
 	if err == nil {
 		t.Fatal("Provision accepted a bad spec.network.dnsSearch entry")
 	}
-	if !strings.Contains(stderr, "error: spec.network.dnsSearch[0] must be a lowercase DNS name, got 'corp_example'.") {
+	if !strings.Contains(stderr, "error: spec.network.dnsSearch[0] has a character that is not valid in a DNS name: 'corp_example'.") {
 		t.Fatalf("wrong error:\n%s", stderr)
 	}
 	if config != "" || len(runner.calls) != 0 {

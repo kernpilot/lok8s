@@ -9,6 +9,7 @@
 import ^utils/types
 import ^utils/domain
 import ^utils/verbose
+import ^utils/dnssearch
 import ^libs/bootstrap
 
 main::lint() {
@@ -400,6 +401,25 @@ lint::schema() {
   return "${errs}"
 }
 
+# -- spec.network.dnsSearch ---------------------------------------------------
+# A Lo spec's DNS search list, through the same check as the driver's read
+# pass (dnssearch::check), so a list that `lo up` rejects fails lint too.
+# Usage: lint::dns_search <spec_file>
+# Returns: number of errors found (Go: Linter.dnsSearch)
+lint::dns_search() {
+  local spec_file="${1}"
+  [[ "$(domain::spec_driver "${spec_file}" 2>/dev/null)" == "lo" ]] || return 0
+  dnssearch::check "${spec_file}" && return 0
+  # The `error` line format, through printf: `error` runs echo -e, which would
+  # turn a backslash in a rejected value into an escape (Go prints it as is).
+  local tag="[error]" problem
+  if verbose::color; then printf -v tag '%b[error]%b' "${RED}" "${NC}"; fi
+  for problem in "${DNSSEARCH_PROBLEMS[@]}"; do
+    printf '%s   %s\n' "${tag}" "${problem}" >&2
+  done
+  return "${#DNSSEARCH_PROBLEMS[@]}"
+}
+
 # -- ClusterRef validation ----------------------------------------------------
 # Validates spec.clusterRef for deploy domains.
 # Usage: lint::clusterref <domain_dir> <spec_file>
@@ -646,6 +666,7 @@ lint::all() {
   fi
 
   lint::schema "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
+  lint::dns_search "${spec_file}"; errors=$(( errors + $? ))
   lint::clusterref "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
   lint::bootstrap "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
   lint::kustomization "${domain_dir}"; errors=$(( errors + $? ))

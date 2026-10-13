@@ -27,8 +27,6 @@ import (
 	"strconv"
 	"strings"
 
-	"gopkg.in/yaml.v3"
-
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/oidc"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -240,48 +238,20 @@ func readLBConfig(clusterYAML string) {
 	os.Setenv("LOK8S_LB_POOL", pool)
 }
 
-// dnsNameRe is a lowercase DNS name: labels of a-z, 0-9 and inner hyphens,
-// at most 63 characters per label (the 253 total is checked apart). The
-// bash twin uses the same expression.
-var dnsNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
-
-// dnsNameHint is the next action of every bad-entry error.
-const dnsNameHint = "Use only a-z, 0-9, hyphens and dots, for example corp.example.com."
-
 // readDNSSearchConfig resolves spec.network.dnsSearch, the DNS search list
 // of the kind nodes (the reason is at renderKindConfig), into
 // LOK8S_NETWORK_DNS_SEARCH (bash: lo::read_dns_search_config). A missing
 // key or a null is the empty list: the nodes drop the host's search
-// domains. Each entry must be a lowercase DNS name of at most 253
-// characters. The read prints one error per bad entry, then fails.
+// domains. CheckDNSSearch decides; the read prints one error per problem,
+// then fails.
 func readDNSSearchConfig(clusterYAML string, errOut io.Writer) error {
 	os.Setenv("LOK8S_NETWORK_DNS_SEARCH", "")
-	n := yqsem.Lookup(yqsem.LoadNode(clusterYAML), "spec", "network", "dnsSearch")
-	if yqsem.IsNull(n) {
-		return nil
+	names, problems := CheckDNSSearch(yqsem.LoadNode(clusterYAML))
+	for _, p := range problems {
+		fmt.Fprintf(errOut, "error: %s\n", p)
 	}
-	if n.Kind != yaml.SequenceNode {
-		fmt.Fprintf(errOut, "error: spec.network.dnsSearch must be a list of DNS names, got %s. Write a YAML list, for example [corp.example.com].\n", n.ShortTag())
-		return ui.Handled(fmt.Errorf("spec.network.dnsSearch is not a list: %s", n.ShortTag()))
-	}
-	var names []string
-	bad := 0
-	for i, item := range yqsem.SeqItems(n) {
-		got := ""
-		switch {
-		case item.ShortTag() != "!!str":
-			got = item.ShortTag()
-		case !dnsNameRe.MatchString(item.Value) || len(item.Value) > 253:
-			got = "'" + item.Value + "'"
-		default:
-			names = append(names, item.Value)
-			continue
-		}
-		fmt.Fprintf(errOut, "error: spec.network.dnsSearch[%d] must be a lowercase DNS name, got %s. %s\n", i, got, dnsNameHint)
-		bad++
-	}
-	if bad > 0 {
-		return ui.Handled(fmt.Errorf("%d bad spec.network.dnsSearch entries", bad))
+	if len(problems) > 0 {
+		return ui.Handled(fmt.Errorf("spec.network.dnsSearch: %d %s", len(problems), plural(len(problems), "problem", "problems")))
 	}
 	os.Setenv("LOK8S_NETWORK_DNS_SEARCH", strings.Join(names, " "))
 	return nil

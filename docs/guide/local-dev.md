@@ -296,12 +296,15 @@ spec:
       - example.ts.net
 ```
 
-Each entry must be a lowercase DNS name: the letters `a-z`, the digits `0-9`,
-hyphens and dots, with at most 63 characters per label and 253 in total.
-`lo up` rejects a bad entry before it creates a network or a node, and the
-error names the entry and its value. To keep the full host search line, copy
-its domains into the list. A missing key and `dnsSearch: []` both drop the host
-search domains.
+Each entry must be a DNS name: letters (any case), digits, hyphens and dots,
+with at most 63 characters per label and 253 in total. A trailing dot is
+allowed. lok8s writes each entry as you wrote it. The list takes at most 32
+entries, the Kubernetes limit for the search list of a pod (kubelet puts the
+three cluster domains first and drops what does not fit). `lo up` and
+`lo lint` reject a bad entry before anything is created. The error names the
+entry, its value and the fix for that cause. To keep the full host search
+line, copy its domains into the list. A missing key and `dnsSearch: []` both
+drop the host search domains.
 
 kind sets the search list when it creates the nodes. A cluster created before
 this change, or before you change the list, keeps its old search line until

@@ -322,36 +322,64 @@ stateful "${KIND_CFG}" up --domain shared.dev
 stateful "${KIND_CFG}" up --domain tls.dev
 
 # ── lo up — spec.network.dnsSearch ───────────────────────────────────────────
-# dns.dev sets a search list: the kind stub logs the config `kind create` got
-# on each side, the two logs must be byte-identical, and both must carry the
-# list. dnsbad.dev has bad entries and dnslist.dev a value that is not a
-# list: the read pass rejects them with the same lines on both sides, and
-# kind create never runs. `provision --bootstrap` reads the spec through
-# driver::export (bash) / Export (Go) and must stop there too.
-mkdir -p "${PROJ}/clusters"/{dns.dev,dnsbad.dev,dnslist.dev}
+# dns.dev sets a search list, dnsalias.dev an anchored list with aliased
+# entries, any letter case and a trailing dot: the kind stub logs the config
+# `kind create` got on each side, the two logs must be byte-identical, and
+# both must carry the list as written. dnsbad.dev has bad entries,
+# dnslist.dev a value that is not a list, and dnsnl.dev two entries that end
+# in a newline (a "…\n" string, a | block scalar): the read pass rejects them
+# with the same lines on both sides, and kind create never runs.
+# `provision --bootstrap` reads the spec through driver::export (bash) /
+# Export (Go) and must stop there too.
+mkdir -p "${PROJ}/clusters"/{dns.dev,dnsalias.dev,dnsbad.dev,dnslist.dev,dnsnl.dev}
 dns_spec() {  # <domain> <name> <slot> <dnsSearch value…>
   printf 'kind: Lo\nmetadata:\n  name: %s\nspec:\n  runtime: kind\n  network:\n    name: %snet\n    cidr: 10.99.%s.0/24\n    dnsSearch: %s\n  registries:\n    tls: false\n    shared:\n      enabled: false\n' \
     "${2}" "${2}" "${3}" "${4}" > "${PROJ}/clusters/${1}/cluster.lok8s.yaml"
 }
 dns_spec dns.dev dnsc 11 '[corp.example.com, example.ts.net]'
-dns_spec dnsbad.dev dnsbad 12 '[corp.example.com, Corp_Example, "", {name: x}]'
+dns_spec dnsbad.dev dnsbad 12 '[corp.example.com, Corp_Example, "", {name: x}, -bad.example, a..example]'
 dns_spec dnslist.dev dnslist 13 'corp.example.com'
+dns_spec dnsnl.dev dnsnl 15 '
+      - "corp.example.com\n"
+      - |
+        blk.example'
+cat > "${PROJ}/clusters/dnsalias.dev/cluster.lok8s.yaml" <<'YAML'
+kind: Lo
+metadata:
+  name: dnsalias
+anchors:
+  one: &one corp.example.com
+  list: &list [*one, Example.TS.net., *one]
+spec:
+  runtime: kind
+  network:
+    name: dnsaliasnet
+    cidr: 10.99.14.0/24
+    dnsSearch: *list
+  registries:
+    tls: false
+    shared:
+      enabled: false
+YAML
 export PARITY_KIND_CONFIG_LOG="${WORK}/kindcfg.log"
 dns_pre() { reset_fixtures; rm -f "${PARITY_KIND_CONFIG_LOG}" "${PROJ}/clusters"/dns*.dev/.registries.json; }
 dns_post() { if [[ -f "${PARITY_KIND_CONFIG_LOG}" ]]; then mv "${PARITY_KIND_CONFIG_LOG}" "${WORK}/kindcfg.${1}.log"; else : > "${WORK}/kindcfg.${1}.log"; fi; }
 dns_check() { PARITY_PRE_EACH=dns_pre PARITY_POST_EACH=dns_post check "$@"; }
-dns_check "${KIND_CFG}" up --domain dns.dev
-parity::state_same "${WORK}/kindcfg.bash.log" "${WORK}/kindcfg.go.log" "kind config of lo up --domain dns.dev" || failures=$((failures + 1))
-for side in bash go; do
-  if grep -qx '  dnsSearch: \["corp.example.com", "example.ts.net"\]' "${WORK}/kindcfg.${side}.log"; then
-    echo "ok: ${side}: kind create got the spec.network.dnsSearch list"
-  else fail "${side}: no spec.network.dnsSearch list in ${WORK}/kindcfg.${side}.log"; fi
+for d in 'dns.dev|  dnsSearch: \["corp\.example\.com", "example\.ts\.net"\]' \
+  'dnsalias.dev|  dnsSearch: \["corp\.example\.com", "Example\.TS\.net\.", "corp\.example\.com"\]'; do
+  line="${d#*|}"; d="${d%%|*}"
+  dns_check "${KIND_CFG}" up --domain "${d}"
+  parity::state_same "${WORK}/kindcfg.bash.log" "${WORK}/kindcfg.go.log" "kind config of lo up --domain ${d}" || failures=$((failures + 1))
+  for side in bash go; do
+    if grep -qx "${line}" "${WORK}/kindcfg.${side}.log"; then
+      echo "ok: ${side}: kind create got the spec.network.dnsSearch list of ${d}"
+    else fail "${side}: no spec.network.dnsSearch list in ${WORK}/kindcfg.${side}.log (${d})"; fi
+  done
 done
 # --bootstrap needs the cluster's kubeconfig file before it reads the spec.
 mkdir -p "${PROJ}/.kubeconfig"
-: > "${PROJ}/.kubeconfig/dnsbad.yaml"
-: > "${PROJ}/.kubeconfig/dnslist.yaml"
-for d in dnsbad.dev dnslist.dev; do
+for d in dnsbad.dev dnslist.dev dnsnl.dev; do
+  : > "${PROJ}/.kubeconfig/${d%.dev}.yaml"
   dns_check - up --domain "${d}"
   for side in bash go; do
     if grep -q '^error: spec\.network\.dnsSearch' "${WORK}/${side}.err" && [[ ! -s "${WORK}/kindcfg.${side}.log" ]]; then
@@ -366,8 +394,8 @@ for d in dnsbad.dev dnslist.dev; do
       echo "ok: ${side}: provision --bootstrap stops at the rejected ${d} spec"
     else fail "${side}: provision --bootstrap went on past the rejected ${d} spec"; fi
   done
+  rm -f "${PROJ}/.kubeconfig/${d%.dev}.yaml"
 done
-rm -f "${PROJ}/.kubeconfig/dnsbad.yaml" "${PROJ}/.kubeconfig/dnslist.yaml"
 unset PARITY_KIND_CONFIG_LOG
 
 # ── lo up with registry TLS ──────────────────────────────────────────────────

@@ -21,7 +21,6 @@ setup() {
   export LOK8S_CP_COUNT=1 LOK8S_WORKER_COUNT=0 LOK8S_HOST_PORTS=false LOK8S_EXTRA_MOUNTS_COUNT=0
   unset LOK8S_SPEC_OIDC_ISSUER LOK8S_SPEC_OIDC_CLIENTID LOK8S_NETWORK_DNS_SEARCH
   GOLDEN="${_PROJECT_ROOT}/internal/driver/lo/testdata"
-  HINT="Use only a-z, 0-9, hyphens and dots, for example corp.example.com."
 }
 
 teardown() { teardown_tmpdir; }
@@ -112,21 +111,21 @@ YAML
   _dns_search "${BATS_TEST_TMPDIR}/kind.yaml" corp.example.com example.ts.net
 }
 
-@test "read_dns_search_config: no key, a null and [] export the empty list" {
+@test "read_dns_search_config: no key, a null, [] and a non-map spec.network export the empty list" {
   local body
-  for body in '  cluster:\n    domain: lok8s.dev\n' '  network:\n    name: n\n' \
+  for body in '  cluster:\n    domain: lok8s.dev\n' '  network: lok8s\n' '  network:\n    name: n\n' \
     '  network:\n    dnsSearch: ~\n' '  network:\n    dnsSearch:\n' '  network:\n    dnsSearch: []\n'; do
     export LOK8S_NETWORK_DNS_SEARCH="stale.example"
     # shellcheck disable=SC2059 # the bodies carry \n escapes on purpose
     lo::read_dns_search_config "$(_spec "$(printf "${body}")")" 2> "${BATS_TEST_TMPDIR}/err"
-    [ ! -s "${BATS_TEST_TMPDIR}/err" ]
+    [ ! -s "${BATS_TEST_TMPDIR}/err" ] || { echo "body ${body}:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1; }
     [ "${LOK8S_NETWORK_DNS_SEARCH}" == "" ] || {
       echo "body ${body}: exported '${LOK8S_NETWORK_DNS_SEARCH}', want ''" >&2; return 1
     }
   done
 }
 
-@test "read_dns_search_config: DNS names are exported space-separated" {
+@test "read_dns_search_config: DNS names are exported as written, space-separated" {
   local label63 name253
   label63="$(printf 'a%.0s' {1..63})"
   name253="${label63}.${label63}.${label63}.$(printf 'b%.0s' {1..61})"
@@ -139,61 +138,77 @@ YAML
       - 1and1.example
       - a-b.example
       - xn--bcher-kva.example
+      - Corp.Example.com
+      - corp.example.com.
       - ${label63}.example
       - ${name253}
+      - ${name253}.
 ")"
-  [ "${LOK8S_NETWORK_DNS_SEARCH}" == "corp.example.com fritz.box lan 1and1.example a-b.example xn--bcher-kva.example ${label63}.example ${name253}" ]
+  [ "${LOK8S_NETWORK_DNS_SEARCH}" == "corp.example.com fritz.box lan 1and1.example a-b.example xn--bcher-kva.example Corp.Example.com corp.example.com. ${label63}.example ${name253} ${name253}." ]
 }
 
-@test "read_dns_search_config: a value that is not a list fails with the observed tag" {
-  local value tag
-  for value in 'corp.example.com:!!str' '{a: b}:!!map' 'true:!!bool'; do
-    tag="${value##*:}"; value="${value%:*}"
+@test "read_dns_search_config: aliases read like their value (an anchored list, aliased entries, an anchored spec.network)" {
+  printf 'kind: Lo\nshared: &s [corp.example.com, x.example]\nspec:\n  network:\n    dnsSearch: *s\n' > "${BATS_TEST_TMPDIR}/a.yaml"
+  lo::read_dns_search_config "${BATS_TEST_TMPDIR}/a.yaml"
+  [ "${LOK8S_NETWORK_DNS_SEARCH}" == "corp.example.com x.example" ]
+
+  printf 'kind: Lo\none: &o corp.example.com\nspec:\n  network:\n    dnsSearch: [*o, y.example, *o]\n' > "${BATS_TEST_TMPDIR}/b.yaml"
+  lo::read_dns_search_config "${BATS_TEST_TMPDIR}/b.yaml"
+  [ "${LOK8S_NETWORK_DNS_SEARCH}" == "corp.example.com y.example corp.example.com" ]
+
+  printf 'kind: Lo\nnet: &n\n  name: x\n  dnsSearch: [a.example]\nspec:\n  network: *n\n' > "${BATS_TEST_TMPDIR}/c.yaml"
+  lo::read_dns_search_config "${BATS_TEST_TMPDIR}/c.yaml"
+  [ "${LOK8S_NETWORK_DNS_SEARCH}" == "a.example" ]
+}
+
+@test "read_dns_search_config: 32 entries pass, more fail with the count to remove" {
+  local n body i
+  for n in 32 33 34; do
+    body="  network:
+    dnsSearch:
+"
+    for (( i = 0; i < n; i++ )); do body+="      - d${i}.example
+"; done
+    local rc=0 want=""
+    lo::read_dns_search_config "$(_spec "${body}")" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+    case "${n}" in
+      33) want="error: spec.network.dnsSearch has 33 entries. The limit is 32. Remove 1 entry." ;;
+      34) want="error: spec.network.dnsSearch has 34 entries. The limit is 32. Remove 2 entries." ;;
+    esac
+    if [[ -z "${want}" ]]; then
+      [ "${rc}" -eq 0 ] || { echo "32 entries rejected:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1; }
+      [ "$(wc -w <<< "${LOK8S_NETWORK_DNS_SEARCH}")" -eq 32 ] || { echo "32 entries: exported '${LOK8S_NETWORK_DNS_SEARCH}'" >&2; return 1; }
+    else
+      [ "${rc}" -ne 0 ] || { echo "${n} entries accepted" >&2; return 1; }
+      [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "${want}" ] || { echo "${n} entries:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1; }
+    fi
+  done
+}
+
+@test "read_dns_search_config: a value that is not a list fails, the value in plain words" {
+  local value observed
+  for value in 'corp.example.com|the text '"'"'corp.example.com'"'"'' '{a: b}|a map' 'true|the boolean true' '5|the number 5'; do
+    observed="${value#*|}"; value="${value%%|*}"
     local rc=0
     lo::read_dns_search_config "$(_spec "  network:
     dnsSearch: ${value}
 ")" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
     [ "${rc}" -ne 0 ]
-    [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "error: spec.network.dnsSearch must be a list of DNS names, got ${tag}. Write a YAML list, for example [corp.example.com]." ]
+    [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "error: spec.network.dnsSearch must be a list of DNS names. Found ${observed}. Write a YAML list, for example [corp.example.com]." ] || {
+      echo "dnsSearch: ${value}:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
+    }
     [ "${LOK8S_NETWORK_DNS_SEARCH}" == "" ]
   done
 }
 
-@test "read_dns_search_config: every bad entry gets its own error, nothing is exported" {
-  local label64 long
-  label64="$(printf 'a%.0s' {1..64}).example"
-  long="$(printf "$(printf 'a%.0s' {1..63}).%.0s" {1..4})b"
-  [ "${#long}" -eq 257 ]
+@test "read_dns_search_config: every bad entry gets the line of its cause (the Go golden, byte for byte)" {
+  # The shared fixture holds one entry per failure cause, an aliased entry,
+  # a "…\n" string and a | block scalar (a newline the value keeps).
   local rc=0
-  lo::read_dns_search_config "$(_spec "  network:
-    dnsSearch:
-      - corp.example.com
-      - Corp.Example.com
-      - corp_example
-      - \"\"
-      - example.com.
-      - -bad.example
-      - bad-.example
-      - ${label64}
-      - ${long}
-      - é.example
-      - \"corp.example.com other.example\"
-      - {name: x}
-      - [a]
-      - 123
-      - ~
-")" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+  lo::read_dns_search_config "${GOLDEN}/dnssearch_bad.yaml" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
   [ "${rc}" -ne 0 ]
   [ "${LOK8S_NETWORK_DNS_SEARCH}" == "" ]
-  local -a observed=("'Corp.Example.com'" "'corp_example'" "''" "'example.com.'"
-    "'-bad.example'" "'bad-.example'" "'${label64}'" "'${long}'"
-    "'é.example'" "'corp.example.com other.example'"
-    '!!map' '!!seq' '!!int' '!!null')
-  local i want=""
-  for i in "${!observed[@]}"; do
-    want+="error: spec.network.dnsSearch[$(( i + 1 ))] must be a lowercase DNS name, got ${observed[i]}. ${HINT}"$'\n'
-  done
-  diff -u <(printf '%s' "${want}") "${BATS_TEST_TMPDIR}/err"
+  diff -u "${GOLDEN}/dnssearch_bad.golden" "${BATS_TEST_TMPDIR}/err"
 }
 
 @test "read_config and driver::export stop at a failed read (errexit off, as provision runs them)" {
@@ -209,10 +224,14 @@ YAML
 
   # A failed EARLIER reader stops the read too: the dnsSearch reader runs
   # last, and its success must not become the verdict.
-  lo::read_network_config() { return 1; }
   lo::read_dns_search_config() { return 0; }
+  lo::read_network_config() { return 1; }
   rc=0; lo::read_config "${spec}" || rc=$?
   [ "${rc}" -ne 0 ] || { echo "read_config returned 0 after a failed network read" >&2; return 1; }
+  lo::read_network_config() { return 0; }
+  lo::read_node_config() { return 1; }
+  rc=0; lo::read_config "${spec}" || rc=$?
+  [ "${rc}" -ne 0 ] || { echo "read_config returned 0 after a failed node read" >&2; return 1; }
 
   # driver::export: a failed read must not hand over to export_spec_envs.
   :args() { domain="test.dev"; }
@@ -295,7 +314,7 @@ _provision_stubs() {
   local rc=0
   driver::provision test.dev 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
   [ "${rc}" -ne 0 ] || { echo "driver::provision returned 0 for a rejected dnsSearch" >&2; return 1; }
-  grep -qF "error: spec.network.dnsSearch[0] must be a lowercase DNS name, got 'corp_example'." "${BATS_TEST_TMPDIR}/err"
+  grep -qF "error: spec.network.dnsSearch[0] has a character that is not valid in a DNS name: 'corp_example'." "${BATS_TEST_TMPDIR}/err"
   if grep -q "lo::network ran" "${BATS_TEST_TMPDIR}/err"; then
     echo "the provision went on to the docker network after the rejected read" >&2; return 1
   fi

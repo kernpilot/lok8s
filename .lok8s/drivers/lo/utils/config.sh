@@ -21,6 +21,7 @@
 
 import ^utils/ip
 import ^utils/oidc
+import ^utils/dnssearch
 
 # ── Validation ────────────────────────────────────────────
 
@@ -235,47 +236,25 @@ lo::read_lb_config() {
 
 # lo::read_dns_search_config — spec.network.dnsSearch, the DNS search list of
 # the kind nodes (the reason is at lo::render_kind_config). A missing key or a
-# null is the empty list: the nodes drop the host's search domains. Each entry
-# must be a lowercase DNS name (labels of a-z, 0-9 and inner hyphens, at most
-# 63 characters per label and 253 in total). The read prints one error per bad
-# entry, then fails. Go twin: readDNSSearchConfig.
+# null is the empty list: the nodes drop the host's search domains.
+# dnssearch::check decides; the read prints one error per problem, then
+# fails. Go twin: readDNSSearchConfig.
 lo::read_dns_search_config() {
   local cluster_yaml="${1}"
-  # C locale: in a UTF-8 locale the [a-z] range of a bash regex also matches
-  # letters such as é. The Go regexp compares bytes.
-  local LC_ALL=C
-  local re='^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
-  local hint="Use only a-z, 0-9, hyphens and dots, for example corp.example.com."
-
   LOK8S_NETWORK_DNS_SEARCH=""
   export LOK8S_NETWORK_DNS_SEARCH
 
-  local tag
-  tag=$(yq -r '.spec.network.dnsSearch | tag' "${cluster_yaml}")
-  [[ "${tag}" != '!!null' ]] || return 0
-  if [[ "${tag}" != '!!seq' ]]; then
-    echo "error: spec.network.dnsSearch must be a list of DNS names, got ${tag}. Write a YAML list, for example [corp.example.com]." >&2
+  if ! dnssearch::check "${cluster_yaml}"; then
+    local problem
+    for problem in "${DNSSEARCH_PROBLEMS[@]}"; do
+      echo "error: ${problem}" >&2
+    done
     return 1
   fi
-
-  local -a tags=()
-  mapfile -t tags < <(yq -r '.spec.network.dnsSearch[] | tag' "${cluster_yaml}")
-  local i name names="" errors=0
-  for i in "${!tags[@]}"; do
-    if [[ "${tags[i]}" != '!!str' ]]; then
-      echo "error: spec.network.dnsSearch[${i}] must be a lowercase DNS name, got ${tags[i]}. ${hint}" >&2
-      errors=$(( errors + 1 ))
-      continue
-    fi
-    name=$(yq -r ".spec.network.dnsSearch[${i}]" "${cluster_yaml}")
-    if [[ ! "${name}" =~ ${re} ]] || (( ${#name} > 253 )); then
-      echo "error: spec.network.dnsSearch[${i}] must be a lowercase DNS name, got '${name}'. ${hint}" >&2
-      errors=$(( errors + 1 ))
-      continue
-    fi
+  local name names=""
+  for name in "${DNSSEARCH_NAMES[@]}"; do
     names+="${names:+ }${name}"
   done
-  (( errors == 0 )) || return 1
   LOK8S_NETWORK_DNS_SEARCH="${names}"
 }
 

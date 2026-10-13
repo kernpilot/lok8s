@@ -357,8 +357,8 @@ jobs:
           printf 'apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: e2e\nspec:\n  implementation:\n    default: %s\n' "${IMPLEMENTATION}" > "${BASE}/lok8s.yaml"
           cat "${BASE}/lok8s.yaml"
 
-      - name: Skip host-side verification for the dev registries (10.125.0.0/16)
-        # `lo up` stands up TLS registry containers on the project subnet
+      - name: Configure the Docker daemon (dev registries 10.125.0.0/16, a canary DNS search domain)
+        # 1. `lo up` stands up TLS registry containers on the project subnet
         # (spec.registries.tls: true in the fixture, the default: the cert
         # is minted into the docker volume <network>-registry-tls, which
         # this job proves end to end) and Tilt pushes the locally-built
@@ -369,13 +369,20 @@ jobs:
         # certs.d regardless. This mirrors the range the framework's own
         # Hetzner provider trusts (see
         # .lok8s/providers/hetzner/.../etc/docker/daemon.json).
+        # 2. dns-search puts a known search domain into the resolv.conf of
+        # every container Docker starts, the kind nodes included, so the
+        # pod check after `lo up` can fail: without networking.dnsSearch: []
+        # in the kind config, the pods would get this domain. It is set
+        # before kind creates the nodes, whatever search line the runner
+        # has (often none). `.invalid` never resolves (RFC 6761).
         run: |
           sudo mkdir -p /etc/docker
           # Merge (don't clobber) any existing daemon.json.
           existing='{}'
           [ -f /etc/docker/daemon.json ] && existing="$(cat /etc/docker/daemon.json)"
           echo "${existing}" \
-            | jq '.["insecure-registries"] = (((.["insecure-registries"] // []) + ["10.125.0.0/16"]) | unique)' \
+            | jq '.["insecure-registries"] = (((.["insecure-registries"] // []) + ["10.125.0.0/16"]) | unique)
+                | .["dns-search"] = (((.["dns-search"] // []) + ["lok8s-canary.invalid"]) | unique)' \
             | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
           # Wait for the daemon to come back before the toolchain uses it.
@@ -513,20 +520,36 @@ jobs:
 
       - name: Verify the pod search list holds only the cluster domains
         # The rendered kind config sets networking.dnsSearch: [] (the reason
-        # is at renderKindConfig), so the search domains of the runner never
-        # reach a pod. The check holds whatever the runner's own search line
-        # is. Both legs run it: the bash leg renders through the frozen tree.
+        # is at renderKindConfig), so the search domains that Docker gives a
+        # container never reach a pod. The Docker daemon step seeded the
+        # canary lok8s-canary.invalid. First prove that Docker still puts it
+        # into a new container (else this check could pass on nothing),
+        # then require the pod search line to hold the cluster domains only.
+        # Both legs run it: the bash leg renders through the frozen tree.
         run: |
           set -euo pipefail
           export KUBECONFIG="${GITHUB_WORKSPACE}/tests/e2e/${FIXTURE}/.kubeconfig/${CLUSTER}.yaml"
-          pod="$(kubectl get pod -l app=app -o jsonpath='{.items[0].metadata.name}')"
-          ns="$(kubectl get pod -l app=app -o jsonpath='{.items[0].metadata.namespace}')"
-          echo "runner: $(grep '^search' /etc/resolv.conf || echo '(no search line)')"
+          canary="lok8s-canary.invalid"
+          # The node image is local after `lo up`; no pull.
+          node_image="$(docker inspect -f '{{.Config.Image}}' "${CLUSTER}-control-plane")"
+          container_search="$(docker run --rm --entrypoint cat "${node_image}" /etc/resolv.conf | awk '/^search/ { $1 = $1; print }')"
+          echo "runner:    $(grep '^search' /etc/resolv.conf || echo '(no search line)')"
+          echo "container: ${container_search:-(no search line)}"
+          case " ${container_search} " in
+            *" ${canary} "*) ;;
+            *)
+              echo "::error::A new container has the search line '${container_search}', without ${canary}." \
+                "The Docker daemon step did not seed the canary, so the pod check would prove nothing."
+              exit 1 ;;
+          esac
+          # Pod name and namespace in one read: two reads can see two pods.
+          read -r ns pod <<<"$(kubectl get pod -l app=app -o jsonpath='{.items[0].metadata.namespace} {.items[0].metadata.name}')"
           observed="$(kubectl -n "${ns}" exec "${pod}" -- cat /etc/resolv.conf | awk '/^search/ { $1 = $1; print }')"
           expected="search ${ns}.svc.cluster.local svc.cluster.local cluster.local"
-          echo "pod:    ${observed:-(no search line)}"
+          echo "pod:       ${observed:-(no search line)}"
           if [ "${observed}" != "${expected}" ]; then
-            echo "::error::The pod search line is '${observed}', expected '${expected}'. The kind nodes kept the host search domains. Read networking.dnsSearch in the kind config that lo up rendered."
+            echo "::error::The pod search line is '${observed}', expected '${expected}'." \
+              "The kind nodes kept the search domains of the host. Read networking.dnsSearch in the kind config that lo up rendered."
             exit 1
           fi
         env:

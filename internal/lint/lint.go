@@ -123,6 +123,7 @@ func (l *Linter) all(domain string) bool {
 	specFile := SpecFile(domainDir)
 
 	errs := l.schema(domainDir, specFile)
+	errs += l.dnsSearch(specFile)
 	l.notes(specFile)
 	errs += l.clusterref(domainDir, specFile)
 	errs += l.bootstrap(domainDir, specFile, domain)
