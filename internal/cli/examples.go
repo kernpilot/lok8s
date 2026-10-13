@@ -30,9 +30,10 @@ var commandExamples = map[string]string{ // #nosec G101 -- example command lines
   lo clean --all`,
 	"provision": `  lo provision
   lo provision --domain kubehz.in.net --force
-  lo provision --bootstrap`,
+  lo provision --bootstrap --dry-run --render-dir /tmp/bootstrap`,
 	"bootstrap": `  lo bootstrap
-  lo bootstrap --domain kubehz.dev`,
+  lo bootstrap --dry-run --render-dir /tmp/bootstrap
+  lo bootstrap --only cert-manager,envoy-gateway`,
 	"build": `  lo build
   lo build --domain kubehz.cloud`,
 	"deploy": `  lo deploy

@@ -26,12 +26,17 @@ func buildInProcess(_ context.Context, _ string, _ Options) ([]byte, error) {
 	return nil, errors.New("render: the in-process renderer is not linked into lo core. Install lo-full")
 }
 
-// DispatchPlugin is a no-op on core: kustomize runs as a child process
-// and execs the plugin BINARIES under KUSTOMIZE_PLUGIN_HOME, never this
-// executable. main still calls it first so both builds share one entry.
-func DispatchPlugin(_ context.Context, _ []string, _ io.Reader, _, _ io.Writer) (handled bool, rc int) {
-	return false, 0
+// DispatchPlugin on core serves one plugin only: the ChartRenderer gate of
+// a dry run (chartgate.go), which kustomize starts from the dry run's plugin
+// home. Every other render execs the plugin BINARIES under
+// KUSTOMIZE_PLUGIN_HOME, never this executable. main calls it first so both
+// builds share one entry.
+func DispatchPlugin(_ context.Context, args []string, _ io.Reader, _, stderr io.Writer) (handled bool, rc int) {
+	return dispatchChartGate(args, stderr)
 }
 
 // Cleanup is a no-op on core (no self-exec plugin home is ever created).
 func Cleanup() {}
+
+// Prepare is a no-op on core (no self-exec plugin home).
+func Prepare() error { return nil }

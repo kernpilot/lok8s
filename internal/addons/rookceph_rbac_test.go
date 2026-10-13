@@ -45,6 +45,11 @@ import (
 // re-render the binary must answer as khelm). On core DispatchPlugin is a
 // no-op and the call falls through.
 func TestMain(m *testing.M) {
+	// The dry-run exec tests (dryrun_exec_test.go) link THIS binary as the
+	// project's Secret plugin, on core and full alike.
+	if handled, rc := secretPluginMain(os.Args, os.Stdout, os.Stderr); handled {
+		os.Exit(rc)
+	}
 	if handled, rc := render.DispatchPlugin(context.Background(), os.Args, os.Stdin, os.Stdout, os.Stderr); handled {
 		os.Exit(rc)
 	}

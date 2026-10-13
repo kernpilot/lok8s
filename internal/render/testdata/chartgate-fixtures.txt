@@ -1,0 +1,37 @@
+# The chart fixtures of the dry run's ChartRenderer gate, with the verdict
+# of both implementations. ONE table for both test suites, so they cannot
+# drift: internal/render/chartgate_test.go (TestChartRefusal, the Go gate,
+# checked against Helm's own action.CheckDependencies and
+# action.Dependency.List) and tests/unit/bootstrap_test.bats ("the dry run's
+# ChartRenderer gate decides with the real helm on real charts", the bash
+# gate against the real helm v3). Each suite builds every fixture named here
+# and fails on a name it cannot build.
+#
+# Columns: <fixture> <verdict: render|refuse> <cause of a refusal: -|deps|file|load>
+#   deps  helm does not report a dependency as vendored (the vendor advice)
+#   file  a file:// dependency (khelm builds it on each render)
+#   load  helm cannot load the chart
+plain                render  -
+vendored-tgz         render  -
+vendored-dir         render  -
+range                render  -
+v1-vendored          render  -
+symlinked            render  -
+v2-req               render  -
+tgz-and-dir          render  -
+two-dirs             render  -
+missing              refuse  deps
+missing-no-version   refuse  deps
+helmignored          refuse  deps
+misnamed             refuse  deps
+wrong-version        refuse  deps
+two-archives         refuse  deps
+v1                   refuse  deps
+v2-req-missing       refuse  deps
+dir-and-foo-bar      refuse  deps
+dep-no-version       refuse  deps
+filedep              refuse  file
+filedep-vendored     refuse  file
+corrupt              refuse  load
+parent-no-version    refuse  load
+sub-no-version       refuse  load

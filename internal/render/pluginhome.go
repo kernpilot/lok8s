@@ -127,3 +127,15 @@ func Cleanup() {
 		}
 	}
 }
+
+// Prepare creates the per-process plugin home now, when an in-process render
+// is selected. A caller that scopes TMPDIR around a render (the bootstrap dry
+// run) calls it first: the home outlives that render, so it must not be
+// created inside the scoped temp directory.
+func Prepare() error {
+	if mode, err := CurrentMode(); err != nil || mode != ModeInProcess {
+		return nil
+	}
+	_, err := selfExecPluginHome()
+	return err
+}

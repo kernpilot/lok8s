@@ -9,6 +9,7 @@ package lo
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -575,5 +576,56 @@ func TestTLSNonBooleanRejected(t *testing.T) {
 	}
 	if !strings.Contains(errBuf.String(), "spec.registries.tls must be true or false") {
 		t.Fatalf("wrong error:\n%s", errBuf.String())
+	}
+}
+
+// A bootstrap dry run (LOK8S_BOOTSTRAP_DRYRUN=1) computes the same
+// .registries.json document a real run writes, never writes the file, and
+// regFile serves the in-memory document — so exportSpecEnvs exports the
+// registry values a real run reads back from the file (the round-2 dry run
+// exported them empty). A real run writes the file and drops the dry run's
+// document. The bash twin: registry_lifecycle_test.bats.
+func TestConfigGenerateDryRunKeepsTheDocumentInMemory(t *testing.T) {
+	_, _, errBuf, p := testDriver(t)
+	cy := loadFixture(t, p.Clusters, "lo-cluster-network.lok8s.yaml")
+	jsonPath := filepath.Join(filepath.Dir(cy), ".registries.json")
+	t.Setenv("LOK8S_BOOTSTRAP_DRYRUN", "1")
+	t.Cleanup(func() { dryRunRegistry.set("", nil) })
+	if err := readNetworkConfig(cy, errBuf); err != nil {
+		t.Fatalf("readNetworkConfig: %v\n%s", err, errBuf.String())
+	}
+	if _, err := os.Stat(jsonPath); err == nil {
+		t.Fatal("a dry run wrote .registries.json")
+	}
+	if err := exportSpecEnvs(cy, errBuf); err != nil {
+		t.Fatalf("exportSpecEnvs: %v", err)
+	}
+	for k, want := range map[string]string{
+		"LOK8S_SPEC_REGISTRY_BUILD_HOST": "lok8s.local",
+		"LOK8S_SPEC_REGISTRY_CACHE_HOST": "lok8s.cache",
+		"LOK8S_SPEC_REGISTRY_BUILD_IP":   "10.125.50.101",
+	} {
+		if got := os.Getenv(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	mem, err := regFile()
+	if err != nil {
+		t.Fatalf("regFile under a dry run: %v", err)
+	}
+
+	t.Setenv("LOK8S_BOOTSTRAP_DRYRUN", "")
+	if err := readNetworkConfig(cy, errBuf); err != nil {
+		t.Fatalf("readNetworkConfig: %v", err)
+	}
+	disk, err := loadRegistryFile(jsonPath)
+	if err != nil {
+		t.Fatalf("the real run did not write the file: %v", err)
+	}
+	if fmt.Sprint(*disk) != fmt.Sprint(*mem) {
+		t.Errorf("the dry run's document differs from the real run's file:\n%+v\n%+v", *mem, *disk)
+	}
+	if dryRunRegistry.doc != nil {
+		t.Error("the real run kept the dry run's document")
 	}
 }

@@ -231,31 +231,52 @@ func SignLeaf(randr io.Reader, caCertPEM, caKeyPEM, leafKeyPEM []byte, hosts []s
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
 }
 
-// LoadOrCreateCARoot loads the shared CA (cert + key PEM) from CAROOT, creating
-// it there — exactly as mkcert would — if absent. This is the one place that
-// touches CAROOT files; the cert: generator calls it for default (CAROOT) leaves.
-func LoadOrCreateCARoot(randr io.Reader) (cert, key []byte, err error) {
-	dir := CARoot()
+// LoadCARoot reads the shared CA (cert + key PEM) from CAROOT and never
+// writes. found is false when CAROOT holds no CA certificate; dir is the
+// resolved CAROOT. A certificate without its key is an error.
+func LoadCARoot() (dir string, cert, key []byte, found bool, err error) {
+	dir = CARoot()
 	if dir == "" {
-		return nil, nil, fmt.Errorf("cannot resolve CAROOT (set $CAROOT)")
+		return "", nil, nil, false, fmt.Errorf("cannot resolve CAROOT (set $CAROOT)")
 	}
-	certPath := filepath.Join(dir, RootName)
-	keyPath := filepath.Join(dir, RootKeyName)
+	c, e := os.ReadFile(filepath.Join(dir, RootName))
+	if e != nil {
+		return dir, nil, nil, false, nil
+	}
+	k, e := os.ReadFile(filepath.Join(dir, RootKeyName))
+	if e != nil {
+		return dir, nil, nil, false, fmt.Errorf("CAROOT %s has %s but no %s (keyless CA cannot sign) — run `mkcert -install` / `lo trust`, or remove it", dir, RootName, RootKeyName)
+	}
+	return dir, c, k, true, nil
+}
 
-	if c, e := os.ReadFile(certPath); e == nil {
-		k, e2 := os.ReadFile(keyPath)
-		if e2 != nil {
-			return nil, nil, fmt.Errorf("CAROOT %s has %s but no %s (keyless CA cannot sign) — run `mkcert -install` / `lo trust`, or remove it", dir, RootName, RootKeyName)
-		}
-		return c, k, nil
-	}
-	// CA absent → create both (mkcert's newCA).
+// NewCA mints a CA key and its self-signed certificate in memory (mkcert's
+// newCA without the files).
+func NewCA(randr io.Reader) (cert, key []byte, err error) {
 	if key, err = NewCAKey(randr); err != nil {
 		return nil, nil, err
 	}
 	if cert, err = SelfSignCA(randr, key); err != nil {
 		return nil, nil, err
 	}
+	return cert, key, nil
+}
+
+// LoadOrCreateCARoot loads the shared CA (cert + key PEM) from CAROOT, creating
+// it there — exactly as mkcert would — if absent. This is the one place that
+// writes CAROOT files; the cert: generator calls it for default (CAROOT) leaves
+// (a dry run calls LoadCARoot instead and never writes).
+func LoadOrCreateCARoot(randr io.Reader) (cert, key []byte, err error) {
+	dir, cert, key, found, err := LoadCARoot()
+	if err != nil || found {
+		return cert, key, err
+	}
+	// CA absent → create both (mkcert's newCA).
+	if cert, key, err = NewCA(randr); err != nil {
+		return nil, nil, err
+	}
+	certPath := filepath.Join(dir, RootName)
+	keyPath := filepath.Join(dir, RootKeyName)
 	if err = os.MkdirAll(dir, 0o755); err != nil {
 		return nil, nil, fmt.Errorf("create CAROOT %s: %w", dir, err)
 	}

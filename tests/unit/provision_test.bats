@@ -625,3 +625,71 @@ CASES
   assert_success
   assert_output "lo"
 }
+
+# --- --bootstrap --dry-run: a read-only dispatch ---
+
+@test "provision::dispatch --bootstrap --dry-run skips the gate and every writer" {
+  yq() {
+    case "$2" in
+      '.kind // ""') echo "KubeOne" ;;
+      .metadata.name*) echo "test-cluster" ;;
+      .spec.gitops.provider*) echo "flux" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+  mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig" "${BATS_TEST_TMPDIR}/.lok8s/drivers/kubeone"
+  touch "${BATS_TEST_TMPDIR}/.kubeconfig/test-cluster.yaml"
+  cat > "${BATS_TEST_TMPDIR}/.lok8s/drivers/kubeone/main" <<'SCRIPT'
+driver::provision() { echo "provision_called"; }
+driver::export() { echo "export_called"; }
+SCRIPT
+  bootstrap::apply() { echo "bootstrap_applied: $1"; }
+  inventory::publish() { echo "inventory_published"; }
+  gitops::bootstrap() { echo "gitops_called"; }
+  kubehz::register_cluster() { echo "registered"; }
+  export -f bootstrap::apply inventory::publish gitops::bootstrap kubehz::register_cluster
+  export LOK8S_KUBEHZ_ACCESS=registered
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  # No terminal: the gate would refuse (rc 3) if it ran.
+  provision::_interactive() { return 1; }
+
+  local bootstrap_dry_run=1
+  run provision::dispatch "test.lok8s.dev" 1
+  assert_success
+  assert_output --partial "export_called"
+  assert_output --partial "bootstrap_applied: test.lok8s.dev"
+  refute_output --partial "real infrastructure"
+  refute_output --partial "provision_called"
+  refute_output --partial "registered"
+  refute_output --partial "inventory_published"
+  refute_output --partial "gitops_called"
+
+  # Without --bootstrap the mode is inert: the gate still refuses.
+  run provision::dispatch "test.lok8s.dev" 0
+  [ "${status}" -eq 3 ]
+  assert_output --partial "refusing to reconcile"
+}
+
+@test "provision::dispatch propagates a dry run's exit code (2 = an entry failed)" {
+  yq() {
+    case "$2" in
+      '.kind // ""') echo "Lo" ;;
+      .metadata.name*) echo "test-cluster" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+  mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig"
+  touch "${BATS_TEST_TMPDIR}/.kubeconfig/test-cluster.yaml"
+  cat > "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/main" <<'SCRIPT'
+driver::provision() { echo "provision_called"; }
+SCRIPT
+  bootstrap::apply() { return 2; }
+  export -f bootstrap::apply
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  local bootstrap_dry_run=1
+  run provision::dispatch "test.lok8s.dev" 1
+  [ "${status}" -eq 2 ]
+}
