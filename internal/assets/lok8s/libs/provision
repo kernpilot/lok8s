@@ -34,7 +34,13 @@ main::provision() {
     "${args[@]:-}"
   )
   :args "Provision a cluster" "${@}"
-  bootstrap::mode_check "${bootstrap}" "${_only_given}" || return 1
+  # A dry run's every failure outside the per-entry diff is rc 2 (a flag
+  # combination here included): bootstrap::_dry_run_exit.
+  _BOOTSTRAP_DRY_DIFFERS=0
+  if ! bootstrap::mode_check "${bootstrap}" "${_only_given}"; then
+    (( dry_run )) && return 2
+    return 1
+  fi
   # The run modes reach bootstrap::apply through dynamic scoping (the `force`
   # precedent), under names no other lib declares.
   local bootstrap_dry_run="${dry_run}" bootstrap_render_dir="${render_dir}"
@@ -46,7 +52,9 @@ main::provision() {
   # an interactive confirmation, but the local kind path is deliberately
   # frictionless and would otherwise never say which domain it acted on.
   echo "lo provision: domain ${domain}" >&2
-  provision::dispatch "${domain}" "${bootstrap}"
+  local _rc=0
+  provision::dispatch "${domain}" "${bootstrap}" || _rc=$?
+  bootstrap::_dry_run_exit "${_rc}"
 }
 
 # ── Real-infrastructure gate ──────────────────────────────

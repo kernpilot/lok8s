@@ -342,7 +342,10 @@ func (e *Engine) dryRunOne(ctx context.Context, job Job, stem string) dryResult 
 	}
 	nonRepeatable := len(minted) > 0
 	if err != nil {
-		ui.ErrorTo(stderr, "bootstrap: render failed for %s: %v", job.Name, err)
+		// The render (or kustomize, or a plugin) already said WHY on stderr;
+		// the cause stays on a debug line (bash prints the same lines).
+		ui.DebugTo(stderr, "bootstrap: %s: %v", job.Name, err)
+		ui.ErrorTo(stderr, "bootstrap: render failed for %s", job.Name)
 		return dryResult{status: dryError, nonRepeatable: nonRepeatable}
 	}
 	// One trailing newline, like the bash `printf '%s\n' "${rendered}"`
@@ -587,7 +590,8 @@ func (e *Engine) dryRunRestoreD(ctx context.Context, domain, kubeconfig string) 
 		}
 		dec, err := e.sopsDecrypt(f)
 		if err != nil {
-			ui.ErrorTo(stderr, "bootstrap: dry-run: restore.d: cannot decrypt %s: %s", filepath.Base(f), firstLine(err.Error()))
+			ui.DebugTo(stderr, "bootstrap: dry-run: restore.d: %s: %s", filepath.Base(f), firstLine(err.Error()))
+			ui.ErrorTo(stderr, "bootstrap: dry-run: restore.d: cannot decrypt %s", filepath.Base(f))
 			failed = true
 			continue
 		}

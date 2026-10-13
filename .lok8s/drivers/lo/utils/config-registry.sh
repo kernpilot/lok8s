@@ -170,18 +170,15 @@ registry::config_generate() {
       '. + [{ name: $name, ip: $ip, url: $url, domain: $domain, host: "", type: "mirror" }]')
   done
 
-  # Write the full JSON. A bootstrap dry run calls driver::export for the
-  # LOK8S_SPEC_*/LOK8S_REGISTRY_* env addon renders read (below) — the
-  # derived VALUES, not a file this cluster's registries don't actually
-  # have yet: write to a disposable temp file instead of the real path
-  # ("nothing in the project changes" — bootstrap::apply exports
-  # LOK8S_BOOTSTRAP_DRYRUN=1 for the duration of a dry run), read the
-  # per-mirror exports back from THAT, then discard it. LOK8S_REGISTRY_JSON
-  # itself still names the real (unwritten) path, same as a normal run.
+  # The full JSON. A bootstrap dry run (LOK8S_BOOTSTRAP_DRYRUN=1) calls
+  # driver::export for the LOK8S_SPEC_*/LOK8S_REGISTRY_* env addon renders
+  # read: it computes the same document, keeps it in memory for the query
+  # helpers below (registry::_json) and never writes the file. A real run
+  # writes it and drops a dry run's document. LOK8S_REGISTRY_JSON names the
+  # path either way.
   LOK8S_REGISTRY_JSON="${domain_dir}/.registries.json"
-  local _reg_write_path="${LOK8S_REGISTRY_JSON}"
-  (( ! ${LOK8S_BOOTSTRAP_DRYRUN:-0} )) || _reg_write_path="$(mktemp)"
-  jq -n \
+  local _reg_doc
+  _reg_doc="$(jq -n \
     --argjson shared "$(jq -n --arg v "${shared_enabled}" 'if $v == "true" then true else false end')" \
     --argjson tls "$(jq -n --arg v "${tls_enabled}" 'if $v == "true" then true else false end')" \
     --argjson port "${reg_port}" \
@@ -196,7 +193,13 @@ registry::config_generate() {
       network: { name: $net_name, cidr: $net_cidr },
       project_network: $project_network,
       registries: $registries
-    }' > "${_reg_write_path}"
+    }')" || return 1
+  if [[ "${LOK8S_BOOTSTRAP_DRYRUN:-}" == "1" ]]; then
+    LOK8S_BOOTSTRAP_DRYRUN_REGISTRY="${_reg_doc}"
+  else
+    unset LOK8S_BOOTSTRAP_DRYRUN_REGISTRY
+    printf '%s\n' "${_reg_doc}" > "${LOK8S_REGISTRY_JSON}"
+  fi
 
   # Export scalars for external consumers (libs/image, Tilt, tests)
   export LOK8S_REGISTRY_JSON
@@ -208,13 +211,26 @@ registry::config_generate() {
   export LOK8S_REGISTRY_IP_BUILD="${build_ip}"
   export LOK8S_REGISTRY_IP_CACHE="${cache_ip}"
 
-  # Mirror IP exports (read back from JSON — single jq call)
+  # Mirror IP exports (read back from the document — single jq call)
   local exports
   exports=$(jq -r '.registries[] | select(.type == "mirror") |
     "export LOK8S_REGISTRY_IP_" + (.name | gsub("-";"_") | ascii_upcase) + "=" + .ip' \
-    "${_reg_write_path}")
+    <<< "${_reg_doc}")
   eval "${exports}"
-  [[ "${_reg_write_path}" == "${LOK8S_REGISTRY_JSON}" ]] || rm -f "${_reg_write_path}"
+}
+
+# registry::_json
+# Prints the registry document: the one a bootstrap dry run computed and
+# kept in memory (LOK8S_BOOTSTRAP_DRYRUN=1 — the file is never written then),
+# else the file LOK8S_REGISTRY_JSON names. Returns 1, silently, when there
+# is neither (the query helpers then report "nothing yet").
+registry::_json() {
+  if [[ "${LOK8S_BOOTSTRAP_DRYRUN:-}" == "1" && -n "${LOK8S_BOOTSTRAP_DRYRUN_REGISTRY:-}" ]]; then
+    printf '%s\n' "${LOK8S_BOOTSTRAP_DRYRUN_REGISTRY}"
+    return 0
+  fi
+  [[ -f "${LOK8S_REGISTRY_JSON:-}" ]] || return 1
+  cat "${LOK8S_REGISTRY_JSON}"
 }
 
 # ── Query helpers ─────────────────────────────────────────
@@ -224,9 +240,8 @@ registry::config_generate() {
 # Callback receives: name ip url domain host type
 # Single jq fork for the entire iteration.
 registry::each() {
-  local callback="${1}"
-  local json="${LOK8S_REGISTRY_JSON:-}"
-  [[ -f "${json}" ]] || { echo "error: .registries.json not found (run registry::config_generate first)" >&2; return 1; }
+  local callback="${1}" _doc
+  _doc="$(registry::_json)" || { echo "error: .registries.json not found (run registry::config_generate first)" >&2; return 1; }
 
   # locals: bash dynamic scoping — without these, `read` clobbers the CALLER's
   # name/ip/url/domain/host/type (e.g. driver::provision's `domain` went empty
@@ -238,42 +253,39 @@ registry::each() {
     [[ "${domain}" != "-" ]] || domain=""
     [[ "${host}" != "-" ]] || host=""
     "${callback}" "${name}" "${ip}" "${url}" "${domain}" "${host}" "${type}"
-  done < <(jq -r '.registries[] | [.name, .ip, (if .url == "" then "-" else .url end), (if .domain == "" then "-" else .domain end), (if .host == "" then "-" else .host end), .type] | @tsv' "${json}")
+  done < <(jq -r '.registries[] | [.name, .ip, (if .url == "" then "-" else .url end), (if .domain == "" then "-" else .domain end), (if .host == "" then "-" else .host end), .type] | @tsv' <<< "${_doc}")
 }
 
-# Get a single field for a named registry. Review round 2, item D: under
-# --dry-run, registry::config_generate's own write is gated (it writes a
-# disposable temp file instead and reads ITS OWN mirror exports back from
-# THAT — see the long comment there), so LOK8S_REGISTRY_JSON can legitimately
-# name a file that was never actually written. A missing file here is
-# "nothing to report yet", not an error: this read runs again later, from
-# driver::export → lo::export_spec_envs, which is now BEFORE the sandbox
-# this dry run writes into even exists.
+# Get a single field for a named registry. The document comes from
+# registry::_json (a bootstrap dry run keeps it in memory); with no document
+# at all there is nothing to report yet, not an error.
 # Usage: registry::get <name> <field>
 registry::get() {
-  local name="${1}" field="${2}"
-  [[ -f "${LOK8S_REGISTRY_JSON:-}" ]] || return 0
+  local name="${1}" field="${2}" _doc
+  _doc="$(registry::_json)" || return 0
   jq -r --arg n "${name}" --arg f "${field}" \
-    '.registries[] | select(.name == $n) | .[$f] // ""' \
-    "${LOK8S_REGISTRY_JSON}"
+    '.registries[] | select(.name == $n) | .[$f] // ""' <<< "${_doc}"
 }
 
 # Check if shared mode is enabled (reads from JSON, no globals).
 registry::is_shared() {
-  [[ -f "${LOK8S_REGISTRY_JSON:-}" ]] || return 1
-  jq -e '.shared' "${LOK8S_REGISTRY_JSON}" > /dev/null 2>&1
+  local _doc
+  _doc="$(registry::_json)" || return 1
+  jq -e '.shared' <<< "${_doc}" > /dev/null 2>&1
 }
 
 # Check if TLS mode is enabled (reads from JSON, no globals).
 registry::is_tls() {
-  [[ -f "${LOK8S_REGISTRY_JSON:-}" ]] || return 1
-  jq -e '.tls' "${LOK8S_REGISTRY_JSON}" > /dev/null 2>&1
+  local _doc
+  _doc="$(registry::_json)" || return 1
+  jq -e '.tls' <<< "${_doc}" > /dev/null 2>&1
 }
 
 # Get the registry listen/connect port (80 plain, 443 TLS).
 registry::port() {
-  [[ -f "${LOK8S_REGISTRY_JSON:-}" ]] || { echo 80; return 0; }
-  jq -r '.port // 80' "${LOK8S_REGISTRY_JSON}"
+  local _doc
+  _doc="$(registry::_json)" || { echo 80; return 0; }
+  jq -r '.port // 80' <<< "${_doc}"
 }
 
 # Build the client-facing URL for a registry IP, honoring TLS mode.
@@ -292,20 +304,23 @@ registry::url() {
 
 # Get the shared registry network name.
 registry::network_name() {
-  [[ -f "${LOK8S_REGISTRY_JSON:-}" ]] || return 0
-  jq -r '.network.name' "${LOK8S_REGISTRY_JSON}"
+  local _doc
+  _doc="$(registry::_json)" || return 0
+  jq -r '.network.name' <<< "${_doc}"
 }
 
 # Get the shared registry network CIDR.
 registry::network_cidr() {
-  [[ -f "${LOK8S_REGISTRY_JSON:-}" ]] || return 0
-  jq -r '.network.cidr' "${LOK8S_REGISTRY_JSON}"
+  local _doc
+  _doc="$(registry::_json)" || return 0
+  jq -r '.network.cidr' <<< "${_doc}"
 }
 
 # Get the project Docker network name.
 registry::project_network() {
-  [[ -f "${LOK8S_REGISTRY_JSON:-}" ]] || return 0
-  jq -r '.project_network' "${LOK8S_REGISTRY_JSON}"
+  local _doc
+  _doc="$(registry::_json)" || return 0
+  jq -r '.project_network' <<< "${_doc}"
 }
 
 # Resolve the Docker container name + network for a registry.

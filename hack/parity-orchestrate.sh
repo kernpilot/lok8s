@@ -342,8 +342,10 @@ mkdir -p "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret"
 cat > "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret/Secret" <<'SH'
 #!/usr/bin/env bash
 # Parity stub Secret plugin: log the store it was handed, answer a fake pair
-# (base64 FAKECRT / FAKEKEY).
-cat >/dev/null
+# (base64 FAKECRT / FAKEKEY). It is the plugin of THIS lok8s: `--capabilities`
+# lists the dry run (lo bootstrap --dry-run probes it before rendering).
+if [[ "${1:-}" == "--capabilities" ]]; then echo dry-run; exit 0; fi
+[[ -t 0 ]] || cat >/dev/null
 echo "PATH_SECRETS=${PATH_SECRETS:-<unset>}" >> "${PARITY_PLUGIN_LOG}"
 printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: registries-tls\n  namespace: lok8s-system\ntype: kubernetes.io/tls\ndata:\n  tls.crt: RkFLRUNSVA==\n  tls.key: RkFLRUtFWQ==\n'
 SH
@@ -578,6 +580,16 @@ name="$(basename "${dir}")"
 if [[ -f "${dir}/chart.yaml" ]]; then
   name="$(sed -n 's/^  name: //p' "${dir}/chart.yaml" | head -1)"
 fi
+# What the render saw (round 3): the registry value a real run reads back
+# from .registries.json, the sentinel, the plugin home, the flags.
+if [[ -n "${PARITY_RENDER_LOG:-}" ]]; then
+  echo "BUILD_HOST=${LOK8S_SPEC_REGISTRY_BUILD_HOST:-<unset>} DRYRUN=${LOK8S_BOOTSTRAP_DRYRUN:-<unset>} HOME=${KUSTOMIZE_PLUGIN_HOME:-<unset>} PATH0=${PATH%%:*} ARGS=$*" >> "${PARITY_RENDER_LOG}"
+fi
+# A slow render, to kill the dry run in the middle of it.
+if [[ -n "${PARITY_SLOW_MARK:-}" ]]; then
+  : > "${PARITY_SLOW_MARK}"
+  sleep 2
+fi
 printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: %s\n  namespace: kube-system\n' "${name}"
 SH
 parity::stub "${PROJ}" kubectl <<'SH'
@@ -586,7 +598,10 @@ parity::stub "${PROJ}" kubectl <<'SH'
 # manifest on stdin (unchanged / a canned two-object diff / unreachable);
 # anything that writes must never be reached.
 echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
-manifest="$(cat)"
+# Only a `-f -` call carries a manifest: never read stdin otherwise (a stub
+# that always reads hangs on a terminal or an open pipe).
+manifest=""
+[[ " $* " != *" -f - "* ]] || manifest="$(cat)"
 case " $* " in
   *" diff "*)
     case "${manifest}" in
@@ -686,8 +701,116 @@ dry_check - provision --domain dry.dev -b --no-diff
 # dispatch (kind Lo: no gate either way; the tail's writers are skipped).
 dry_check - provision --domain dry.dev --bootstrap --dry-run --only cilium
 dry_expect_rc 0 provision --domain dry.dev --bootstrap --dry-run --only cilium
-dry_check - provision --domain beta.cloud --bootstrap --dry-run     # cloud kind: NOT gated, stops at the missing kubeconfig (rc 1, never 3)
-dry_expect_rc 1 provision --domain beta.cloud --bootstrap --dry-run
+dry_check - provision --domain beta.cloud --bootstrap --dry-run     # cloud kind: NOT gated, stops at the missing kubeconfig (rc 2: a dry run's failure outside the diff; never 3)
+dry_expect_rc 2 provision --domain beta.cloud --bootstrap --dry-run
+
+# ── Review round 3: the in-place dry run ─────────────────────────────────────
+# A dry run renders IN PLACE, exactly as a real run does. The project now
+# carries what the round-2 whole-project copy could not survive — a dangling
+# symlink, a directory nobody may read, an 8 GiB sparse file in an ignored
+# cache directory: the dry run never walks the project, never writes into it
+# (no .registries.json either), and still exports the registry values a real
+# run reads back from that file. The stub kustomize logs what the render saw
+# (the boundary's temp path normalized to BOUNDARY).
+ln -s /nonexistent/lok8s-parity-target "${PROJ}/dangling"
+mkdir -p "${PROJ}/locked" "${PROJ}/.cache"
+echo x > "${PROJ}/locked/secret"
+chmod 000 "${PROJ}/locked"
+truncate -s 8G "${PROJ}/.cache/core"
+export PARITY_RENDER_LOG="${WORK}/render.log"
+tree_snapshot() {  # the project tree without the files every run rewrites
+  find "${PROJ}" -path "${PROJ}/locked" -prune -o ! -name lok8s.yaml -printf '%P %y %s %T@\n' 2>/dev/null | sort
+}
+r3_pre() { dry_pre; rm -f "${PARITY_RENDER_LOG}"; tree_snapshot > "${WORK}/tree.before"; }
+r3_post() {  # <impl>
+  dry_post "${1}"
+  tree_snapshot > "${WORK}/tree.after"
+  if diff -q "${WORK}/tree.before" "${WORK}/tree.after" >/dev/null; then : > "${WORK}/tree.${1}.diff"; else diff "${WORK}/tree.before" "${WORK}/tree.after" > "${WORK}/tree.${1}.diff"; fi
+  if [[ -e "${PROJ}/clusters/dry.dev/.registries.json" ]]; then echo present > "${WORK}/registries.${1}"; else echo absent > "${WORK}/registries.${1}"; fi
+  sed -E 's#lok8s-dryrun-[A-Za-z0-9]+#BOUNDARY#g; s#lok8s-(addon|chart)-[A-Za-z0-9]+#COPY#g' "${PARITY_RENDER_LOG}" > "${WORK}/render.${1}.log" 2>/dev/null || : > "${WORK}/render.${1}.log"
+}
+PARITY_PRE_EACH=r3_pre PARITY_POST_EACH=r3_post check - bootstrap --domain dry.dev --dry-run --only cilium
+parity::state_same "${WORK}/render.bash.log" "${WORK}/render.go.log" "what the dry run's render saw" || failures=$((failures + 1))
+for side in bash go; do
+  if [[ ! -s "${WORK}/tree.${side}.diff" ]]; then echo "ok: ${side}: the dry run changed nothing in the project tree"; else fail "${side}: the dry run changed the project tree: $(head -5 "${WORK}/tree.${side}.diff")"; fi
+  if [[ "$(cat "${WORK}/registries.${side}")" == absent ]]; then echo "ok: ${side}: no .registries.json written"; else fail "${side}: the dry run wrote .registries.json"; fi
+  tls_pin    "${side}: the registry value a real run reads back"  "${WORK}/render.${side}.log" "^BUILD_HOST=lok8s\.local DRYRUN=1 "
+  tls_pin    "${side}: the boundary's plugin home and stubs"      "${WORK}/render.${side}.log" " HOME=[^ ]*/BOUNDARY/plugins PATH0=[^ ]*/BOUNDARY/bin "
+  tls_pin    "${side}: a dry run renders with --enable-alpha-plugins" "${WORK}/render.${side}.log" " ARGS=build --enable-alpha-plugins /[^ ]*BOUNDARY/COPY$"
+  tls_absent "${side}: no --enable-exec in a dry run (absent)"    "${WORK}/render.${side}.log" "--enable-exec"
+done
+dry_expect_rc 0 bootstrap --domain dry.dev --dry-run --only cilium
+unset PARITY_RENDER_LOG
+
+# An entry's env: may not set lo's own variables — checked before anything
+# of it is exported: an entry error (dry run rc 2, real run rc 1), and the
+# render never runs. The round-2 escapes are the names below.
+mkdir -p "${PROJ}/clusters/envx.dev/targets/app"
+printf 'resources: []\n' > "${PROJ}/clusters/envx.dev/targets/app/kustomization.yaml"
+: > "${PROJ}/.kubeconfig/envxc.yaml"
+for reserved in LOK8S_BOOTSTRAP_DRYRUN BOOTSTRAP_PROTECTED_ENV_NAMES bootstrap_render_dir; do
+  cat > "${PROJ}/clusters/envx.dev/cluster.lok8s.yaml" <<YAML
+kind: Lo
+metadata:
+  name: envxc
+spec:
+  runtime: kind
+  network:
+    name: envxnet
+    cidr: 10.99.13.0/24
+  registries:
+    tls: false
+  bootstrap:
+    - ./targets/app:
+        env:
+          LOK8S_USER_OK: fine
+          ${reserved}: "0"
+YAML
+  dry_check - bootstrap --domain envx.dev --dry-run
+  dry_expect_rc 2 bootstrap --domain envx.dev --dry-run
+  for side in bash go; do
+    tls_pin "${side}: ${reserved} in an entry env is an entry error" "${WORK}/${side}.err" "bootstrap: app: env: may not set ${reserved} \(reserved for lo\)"
+    tls_absent "${side}: the render never ran for ${reserved}" "${WORK}/kubectl.${side}.log" " diff "
+  done
+  dry_check - bootstrap --domain envx.dev
+  dry_expect_rc 1 bootstrap --domain envx.dev
+done
+
+# The exit contract at both command boundaries: 1 only for a diff that found
+# a change, 2 for every other failure of a dry run (a missing spec, an
+# unknown --only name, a flag combination, a parse error), the real run's
+# codes unchanged.
+dry_check - bootstrap --domain missing.dev --dry-run
+dry_expect_rc 2 bootstrap --domain missing.dev --dry-run
+dry_expect_rc 1 bootstrap --domain missing.dev
+dry_check - bootstrap --domain dry.dev --dry-run --only nope
+dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --only nope
+dry_expect_rc 2 provision --domain dry.dev --bootstrap --dry-run --only nope
+dry_expect_rc 2 provision --domain dry.dev --dry-run
+dry_check - bootstrap --domain dry.dev --dry-run --bogus
+dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --bogus
+dry_expect_rc 2 provision --domain dry.dev --bootstrap --dry-run --bogus
+
+# A dry run killed by SIGTERM in the middle of a render leaves no temp file
+# behind (the bash twin removes its boundary from a chained EXIT trap, the
+# Go binary from the cancelled context's defers).
+export PARITY_SLOW_MARK="${WORK}/slow.started"
+for side in bash go; do
+  sig_tmp="${WORK}/sigterm-tmp.${side}"
+  rm -rf "${sig_tmp}" "${PARITY_SLOW_MARK}"; mkdir -p "${sig_tmp}"
+  parity::select "${PROJ}" "${side}"
+  ( cd "${PROJ}" && TMPDIR="${sig_tmp}" exec "${LO_BIN}" bootstrap --domain dry.dev --dry-run --only cilium </dev/null >/dev/null 2>&1 ) &
+  sig_pid=$!
+  for (( i = 0; i < 100; i++ )); do [[ -e "${PARITY_SLOW_MARK}" ]] && break; sleep 0.1; done
+  if [[ -e "${PARITY_SLOW_MARK}" ]]; then echo "ok: ${side}: the dry run reached the render"; else fail "${side}: the dry run never reached the render"; fi
+  kill -TERM "${sig_pid}" 2>/dev/null || true
+  wait "${sig_pid}" 2>/dev/null || true
+  sleep 3   # the stub render's own sleep ends; an orphan must not write either
+  if [[ -z "$(ls -A "${sig_tmp}")" ]]; then echo "ok: ${side}: SIGTERM mid-render left no temp file"; else fail "${side}: SIGTERM left $(ls -A "${sig_tmp}")"; fi
+done
+unset PARITY_SLOW_MARK sig_tmp sig_pid
+chmod 755 "${PROJ}/locked"
+rm -rf "${PROJ}/locked" "${PROJ}/dangling" "${PROJ}/.cache/core"
 unset PARITY_KUBECTL_LOG
 parity::stub_kubectl_fail "${PROJ}"
 

@@ -231,7 +231,6 @@ _allowed_kind_reads() {
 .lok8s/utils/domain.sh|kind=$(yq -r '.kind // ""' "${spec}"
 .lok8s/libs/crds|kind=$(yq -r '.kind | downcase' "${schema}")
 .lok8s/libs/addons|kind=$(yq -r '.kind // ""' "${dir}/chart.yaml"
-.lok8s/libs/addons|_kind="$(yq -r '.kind // ""' "${_path}"
 .lok8s/libs/build|doc_count=$(yq -N '.kind' "${artifact}"
 .lok8s/libs/hooks|kind="$(yq -r '.kind // ""' <<< "${doc}")"
 .lok8s/libs/lint|spec_kind=$(yq -r '.kind // ""' "${spec_file}")
@@ -243,12 +242,7 @@ ALLOW
 # Reasons, in the same order:
 #   utils/domain.sh   — the reader itself.
 #   libs/crds         — the kind of a CRD SCHEMA source, not a cluster spec.
-#   libs/addons       — a khelm chart.yaml's kind (ChartRenderer), not a driver;
-#                       and (review round 2, item C) a generator/transformer/
-#                       validator plugin config's own apiVersion+kind, read by
-#                       addons::_scan_exec_plugins to classify it against the
-#                       exec-plugin allowlist — a Kubernetes-object-shaped CR,
-#                       not a cluster driver either.
+#   libs/addons       — a khelm chart.yaml's kind (ChartRenderer), not a driver.
 #   libs/build        — counts documents in a rendered artifact.
 #   libs/hooks        — a Kubernetes manifest document's kind, read per document
 #                       out of a `select(documentIndex == …)` split and handed to

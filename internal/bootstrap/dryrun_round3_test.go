@@ -228,7 +228,7 @@ func TestDryRunRestoreDDecryptFailureIsExitTwo(t *testing.T) {
 	if !strings.Contains(stdoutOf(e), "bootstrap dry-run: restore.d: error\n") {
 		t.Errorf("stdout:\n%s", stdoutOf(e))
 	}
-	if !strings.Contains(stderrOf(e), "[error] bootstrap: dry-run: restore.d: cannot decrypt wildcard-tls.sops.yaml: no identity matched") {
+	if !strings.Contains(stderrOf(e), "[error] bootstrap: dry-run: restore.d: cannot decrypt wildcard-tls.sops.yaml\n") {
 		t.Errorf("stderr:\n%s", stderrOf(e))
 	}
 }

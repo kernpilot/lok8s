@@ -195,6 +195,7 @@ func renderAddon(ctx context.Context, paths *config.Paths, runner execx.Runner, 
 	// `valueFrom` entries (no `value`) are left untouched.
 	coerced, err := coerceEnvValues(substituted)
 	if err != nil {
+		ui.ErrorTo(stderr, "addons::render: env coercion failed for %s: %v", addonDir, err)
 		return "", fmt.Errorf("addons render: env coercion for %s: %w", addonDir, err)
 	}
 

@@ -7,11 +7,11 @@
 # HOSTED cluster (the platform owns them there). Extend here, nowhere else.
 BOOTSTRAP_PLATFORM_OWNED="cilium ccm"
 #
-# BOOTSTRAP_PROTECTED_ENV_NAMES: the safety variables no entry's `env:` may
-# set (review round 2, item B) — the engine's own PATH_SECRETS/HOME/XDG_*/
-# CAROOT/HELM_*/KUBECONFIG/LOK8S_BOOTSTRAP_* sandbox, never an addon's. See
-# bootstrap::_protected_env_override.
-BOOTSTRAP_PROTECTED_ENV_NAMES="LOK8S_BOOTSTRAP_DRYRUN LOK8S_BOOTSTRAP_ALLOW_GENERATORS PATH_SECRETS HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME CAROOT HELM_CACHE_HOME HELM_CONFIG_HOME HELM_DATA_HOME KUBECONFIG"
+# An entry's `env:` may not set lo's own orchestration or safety variables:
+# LOK8S_BOOTSTRAP_*, BOOTSTRAP_*, bootstrap_* (every name this engine and
+# the dry run keep their state in), PATH_SECRETS, KUBECONFIG and
+# KUSTOMIZE_PLUGIN_HOME — see bootstrap::_reserved_env_name. It is checked
+# before anything of the entry is exported.
 #
 # Applies spec.bootstrap entries after the cluster is provisioned. Works with ALL
 # drivers (Lo, KubeOne, Capi, Kkp) — not driver-specific.
@@ -62,13 +62,38 @@ main::bootstrap() {
   )
   :args "Apply bootstrap addons" "${@}"
 
-  bootstrap::mode_check 1 "${_only_given}" || return 1
+  # A dry run's every failure outside the per-entry diff is rc 2 (a flag
+  # combination here included): bootstrap::_dry_run_exit.
+  _BOOTSTRAP_DRY_DIFFERS=0
+  if ! bootstrap::mode_check 1 "${_only_given}"; then
+    (( dry_run )) && return 2
+    return 1
+  fi
   # The run modes reach bootstrap::apply through dynamic scoping (the
   # `force` precedent), under names no other lib declares.
   local bootstrap_dry_run="${dry_run}" bootstrap_render_dir="${render_dir}"
   local bootstrap_no_diff="${no_diff}" bootstrap_select="${only}"
   local bootstrap_allow_generators="${allow_generators}" bootstrap_with_restore="${with_restore}"
-  bootstrap::dispatch "${domain}"
+  local _rc=0
+  bootstrap::dispatch "${domain}" || _rc=$?
+  bootstrap::_dry_run_exit "${_rc}"
+}
+
+# bootstrap::_dry_run_exit <rc>
+# The exit contract of a dry run at the command boundary (main::bootstrap,
+# main::provision): 0 when nothing would change, 1 ONLY when an entry's diff
+# found a change (bootstrap::_run_dry set _BOOTSTRAP_DRY_DIFFERS), 2 for
+# every other failure, before or outside the per-entry diff — a caller that
+# gates a change window on rc 1 must never read an error as "changes". A
+# real run's rc passes through unchanged.
+bootstrap::_dry_run_exit() {
+  local _rc="${1}"
+  (( ${bootstrap_dry_run:-0} )) || return "${_rc}"
+  (( _rc != 0 )) || return 0
+  if (( _rc == 1 )) && (( ${_BOOTSTRAP_DRY_DIFFERS:-0} )); then
+    return 1
+  fi
+  return 2
 }
 
 # bootstrap::_flag_given <flag> <args...>
@@ -640,14 +665,15 @@ bootstrap::_apply_one() {
   local addon_name="${1}" addon_dir="${2}" kind="${3}" provider_name="${4}"
   local kubeconfig="${5}" inline_values="${6}" do_wait="${7}" env_lines="${8:-}"
 
-  if [[ -n "${env_lines}" ]]; then
-    local _kv _k _v
-    while IFS= read -r _kv; do
-      [[ -n "${_kv}" ]] || continue
-      _k="${_kv%%=*}"; _v="${_kv#*=}"
-      export "${_k}=${_v}"
-    done <<< "${env_lines}"
+  # An entry's env: may not set lo's own orchestration or safety variables:
+  # checked BEFORE anything of it is exported (an export of, say,
+  # bootstrap_dry_run would otherwise already have changed this shell).
+  local _bad_var
+  if _bad_var="$(bootstrap::_reserved_env_name "${env_lines}")"; then
+    error "bootstrap: ${addon_name}: env: may not set ${_bad_var} (reserved for lo)"
+    return 1
   fi
+  bootstrap::_export_env "${env_lines}"
 
   # The skips shared with the dry run (bootstrap::_skip_reason): the entry is
   # left alone, the reason is on stderr, the entry counts as done.
@@ -655,15 +681,6 @@ bootstrap::_apply_one() {
   if _skip="$(bootstrap::_skip_reason "${addon_dir}" "${kind}")"; then
     echo "${_skip}" >&2
     return 0
-  fi
-
-  # Review round 2, item B, extended to a real run too for consistency: an
-  # entry's env: must never decide HOME/PATH_SECRETS/KUBECONFIG/… for its
-  # own render.
-  local _bad_var
-  if _bad_var="$(bootstrap::_protected_env_override "${env_lines}")"; then
-    error "bootstrap: ${addon_name}: env: may not set ${_bad_var} (protected)"
-    return 1
   fi
 
   # Render via the canonical khelm path (value-stacking + kustomize build +
@@ -1305,7 +1322,10 @@ bootstrap::_select_only() {
 bootstrap::_warn_restore_d_skipped() {
   local _domain="${1}"; shift
   echo "" >&2
-  echo -e "\033[33m!\033[0m bootstrap: --only applies WITHOUT restoring restore.d (${#} file(s) under clusters/${_domain}/restore.d):" >&2
+  # The marker is coloured on a terminal only: piped stderr is plain text.
+  local _mark="!"
+  ! verbose::color || _mark="${YELLOW}!${NC}"
+  echo -e "${_mark} bootstrap: --only applies WITHOUT restoring restore.d (${#} file(s) under clusters/${_domain}/restore.d):" >&2
   local _f
   for _f in "${@}"; do
     echo "    ${_f}" >&2
@@ -1317,40 +1337,57 @@ bootstrap::_warn_restore_d_skipped() {
 }
 
 # bootstrap::_prepare_render_dir <dir>
-# Prepares dir for a dry run's writes (review round 2, item G): created
-# when missing, with a ".lo-dry-run" marker file written into it — the
-# file a LATER call (a future run reusing the directory) checks for to
-# tell "a dry run's own output" apart from "whatever else lives here". An
-# EXISTING, non-empty dir must already carry that marker or the call is
-# refused outright, so a dry run never scribbles into a directory an
-# operator keeps something else in. A dir that does carry the marker is
-# cleared of only the files it owns — NN-<entry>.{yaml,diff} and
-# restore.d.{yaml,diff} — so a stale entry from an earlier, differently-
-# numbered or differently-selected run never survives alongside the new
-# set.
+# Prepares dir for a dry run's writes (the Go twin: prepareRenderDir). The
+# path may not contain a symlink: a rendered Secret must land where the
+# operator pointed, never where a link leads (every existing component is
+# resolved and compared). A missing dir is created 0700 with the
+# ".lo-dry-run" marker; an EXISTING, non-empty dir must carry the marker as
+# a regular file — a prior dry run's own — or the call is refused, so a dry
+# run never scribbles into a directory an operator keeps something else in.
+# A dir that does carry the marker is cleared of only the files it owns —
+# NN-<entry>.{yaml,diff} and restore.d.{yaml,diff} — so a stale entry from
+# an earlier, differently-numbered or differently-selected run never
+# survives alongside the new set. Prints its own [error] line.
 bootstrap::_prepare_render_dir() {
-  local _dir="${1}"
+  local _dir="${1}" _abs _cur="" _part
+  [[ "${_dir}" == /* ]] && _abs="${_dir}" || _abs="${PWD}/${_dir}"
+  local -a _parts=()
+  IFS='/' read -ra _parts <<< "${_abs}"
+  for _part in "${_parts[@]}"; do
+    [[ -n "${_part}" && "${_part}" != "." ]] || continue
+    _cur="${_cur}/${_part}"
+    [[ -e "${_cur}" || -L "${_cur}" ]] || break
+    if [[ -L "${_cur}" ]]; then
+      error "bootstrap: --render-dir: ${_cur} is a symlink — point --render-dir at a path without symlinks"
+      return 1
+    fi
+    if [[ ! -d "${_cur}" ]]; then
+      error "bootstrap: --render-dir: ${_cur} is not a directory"
+      return 1
+    fi
+  done
   local -a _entries=()
   local _e
   if [[ -e "${_dir}" ]]; then
     for _e in "${_dir}"/* "${_dir}"/.[!.]*; do
-      [[ -e "${_e}" ]] && _entries+=("${_e}")
+      [[ -e "${_e}" || -L "${_e}" ]] && _entries+=("${_e}")
     done
   else
-    mkdir -p "${_dir}" || return 1
+    ( umask 077; mkdir -p "${_dir}" ) || { error "bootstrap: --render-dir: cannot create ${_dir}"; return 1; }
   fi
   if (( ${#_entries[@]} == 0 )); then
-    printf '%s\n' "lok8s dry-run output directory — safe to delete" | bootstrap::_write_guarded "${_dir}/.lo-dry-run"
-    return $?
+    printf '%s\n' "lok8s dry-run output directory — safe to delete" | bootstrap::_write_guarded "${_dir}/.lo-dry-run" \
+      || { error "bootstrap: --render-dir: cannot write ${_dir}/.lo-dry-run"; return 1; }
+    return 0
   fi
-  if [[ ! -e "${_dir}/.lo-dry-run" ]]; then
-    error "bootstrap: ${_dir} is not empty and does not carry .lo-dry-run (not a dry run's own output directory) — point --render-dir at an empty or lok8s-owned directory"
+  if [[ -L "${_dir}/.lo-dry-run" || ! -f "${_dir}/.lo-dry-run" ]]; then
+    error "bootstrap: --render-dir: ${_dir} is not empty and does not carry .lo-dry-run as a regular file (not a dry run's own output directory) — point --render-dir at an empty or lok8s-owned directory"
     return 1
   fi
   for _e in "${_entries[@]}"; do
-    [[ -f "${_e}" ]] || continue
+    [[ -f "${_e}" || -L "${_e}" ]] || continue
     [[ "$(basename "${_e}")" =~ ^(restore\.d|[0-9]+-.+)\.(yaml|diff)$ ]] || continue
-    rm -f "${_e}" || return 1
+    rm -f "${_e}" || { error "bootstrap: --render-dir: cannot remove ${_e}"; return 1; }
   done
   return 0
 }
@@ -1374,37 +1411,40 @@ bootstrap::_write_guarded() {
   cat > "${_path}"
 }
 
-# bootstrap::_protected_env_override <env-lines>
-# Reports (echoes the name, returns 0) the first protected variable name
-# env-lines (KEY=value, one per line) attempts to set, or returns 1 when
-# none does (review round 2, item B). Called before a render, by both
-# _apply_one and _dry_run_one, so an entry that tries to override one of
-# these fails loudly, naming the variable, rather than having its attempt
-# silently neutralized by addons::render's own merge-order guard.
-bootstrap::_protected_env_override() {
-  local _lines="${1}" _kv _k _p
+# bootstrap::_reserved_env_name <env-lines>
+# Prints the first name (in byte order) env-lines (KEY=value, one per line)
+# may not set and returns 0, or returns 1 when there is none. Reserved:
+# LOK8S_BOOTSTRAP_*, BOOTSTRAP_*, bootstrap_*, PATH_SECRETS, KUBECONFIG,
+# KUSTOMIZE_PLUGIN_HOME (the Go twin: addons.IsProtectedEnv). A pure check:
+# nothing is exported before it passed.
+bootstrap::_reserved_env_name() {
+  local _lines="${1}" _kv _k
+  local -a _names=()
   while IFS= read -r _kv; do
     [[ -n "${_kv}" ]] || continue
-    _k="${_kv%%=*}"
-    for _p in ${BOOTSTRAP_PROTECTED_ENV_NAMES}; do
-      if [[ "${_k}" == "${_p}" ]]; then
-        echo "${_k}"
-        return 0
-      fi
-    done
+    _names+=("${_kv%%=*}")
   done <<< "${_lines}"
+  (( ${#_names[@]} )) || return 1
+  while IFS= read -r _k; do
+    case "${_k}" in
+      LOK8S_BOOTSTRAP_*|BOOTSTRAP_*|bootstrap_*|PATH_SECRETS|KUBECONFIG|KUSTOMIZE_PLUGIN_HOME)
+        echo "${_k}"
+        return 0 ;;
+    esac
+  done < <(printf '%s\n' "${_names[@]}" | LC_ALL=C sort)
   return 1
 }
 
-# bootstrap::_secrets_fingerprint <dir>
-# A cheap content fingerprint of dir (name, size, mtime of every file
-# under it, recursively) — empty when dir does not exist or holds
-# nothing. Two calls around a render that differ mean the render wrote
-# something new into the sandboxed secrets store (review round 2, item I).
-bootstrap::_secrets_fingerprint() {
-  local _dir="${1}"
-  [[ -n "${_dir}" && -d "${_dir}" ]] || return 0
-  find "${_dir}" -type f -printf '%P:%s:%T@\n' 2>/dev/null | sort | sha256sum | awk '{print $1}'
+# bootstrap::_export_env <env-lines>
+# Exports an entry's env (KEY=value, one per line) into the CALLING shell —
+# always a per-entry subshell. Only after bootstrap::_reserved_env_name.
+bootstrap::_export_env() {
+  local _kv _k _v
+  while IFS= read -r _kv; do
+    [[ -n "${_kv}" ]] || continue
+    _k="${_kv%%=*}"; _v="${_kv#*=}"
+    export "${_k}=${_v}"
+  done <<< "${1}"
 }
 
 # bootstrap::_dry_run_one <name> <dir> <kind> <provider> <kubeconfig> \
@@ -1423,14 +1463,16 @@ bootstrap::_dry_run_one() {
   local addon_name="${1}" addon_dir="${2}" kind="${3}" provider_name="${4}"
   local kubeconfig="${5}" inline_values="${6}" env_lines="${7:-}" stem="${8}"
 
-  if [[ -n "${env_lines}" ]]; then
-    local _kv _k _v
-    while IFS= read -r _kv; do
-      [[ -n "${_kv}" ]] || continue
-      _k="${_kv%%=*}"; _v="${_kv#*=}"
-      export "${_k}=${_v}"
-    done <<< "${env_lines}"
+  # Checked BEFORE anything of the entry is exported: an entry's env: may
+  # not set lo's own variables (LOK8S_BOOTSTRAP_DRYRUN=0, bootstrap_dry_run,
+  # bootstrap_render_dir, … would otherwise switch the dry run off).
+  local _bad_var
+  if _bad_var="$(bootstrap::_reserved_env_name "${env_lines}")"; then
+    error "bootstrap: ${addon_name}: env: may not set ${_bad_var} (reserved for lo)"
+    echo error
+    return 0
   fi
+  bootstrap::_export_env "${env_lines}"
 
   local _skip
   if _skip="$(bootstrap::_skip_reason "${addon_dir}" "${kind}")"; then
@@ -1439,27 +1481,26 @@ bootstrap::_dry_run_one() {
     return 0
   fi
 
-  # Review round 2, item B: an entry's env: must never be the thing that
-  # decides HOME/PATH_SECRETS/KUBECONFIG/… for its own render — report the
-  # attempt as THIS entry's error, naming the variable, before rendering
-  # at all.
-  local _bad_var
-  if _bad_var="$(bootstrap::_protected_env_override "${env_lines}")"; then
-    error "bootstrap: ${addon_name}: env: may not set ${_bad_var} (protected — see the sandbox docs)"
+  debug "bootstrap: rendering ${addon_name}"
+  # The secrets plugin reports every value it generated in memory (the store
+  # lacks it, or CAROOT holds no CA) to the boundary's report file: the next
+  # real run generates different bytes, so the entry is non-repeatable.
+  local _report="${bootstrap_dry_boundary}/report" _non_repeatable=0
+  if ! : > "${_report}"; then
+    error "bootstrap: dry-run report: cannot reset ${_report}"
     echo error
     return 0
   fi
-
-  debug "bootstrap: rendering ${addon_name}"
-  local _secrets_before _non_repeatable=0
-  _secrets_before="$(bootstrap::_secrets_fingerprint "${PATH_SECRETS:-}")"
-  local rendered _render_rc=0
+  local rendered _render_rc=0 _m
   rendered=$(addons::render "${addon_dir}" "${kind}" "${provider_name}" "${inline_values}") || _render_rc=$?
-  [[ "$(bootstrap::_secrets_fingerprint "${PATH_SECRETS:-}")" == "${_secrets_before}" ]] || _non_repeatable=1
+  if [[ -s "${_report}" ]]; then
+    _non_repeatable=1
+    while IFS= read -r _m; do
+      debug "bootstrap: ${addon_name}: generated in memory: ${_m}"
+    done < "${_report}"
+  fi
   if (( _render_rc != 0 )); then
-    # addons::render's own error() calls already said WHY (a refused exec
-    # plugin or bash: generator, a now-unreachable cross-tree valueFiles
-    # ref, …) on stderr.
+    # addons::render (or kustomize, or a plugin) already said WHY on stderr.
     error "bootstrap: render failed for ${addon_name}"
     if (( _non_repeatable )); then echo "error (non-repeatable)"; else echo error; fi
     return 0
@@ -1507,7 +1548,7 @@ bootstrap::_diff_manifest() {
   # The diff's stdout is the diff text; its stderr (warnings, the error of a
   # failed call) is forwarded to ours.
   local _derr _diff _drc=0 _emsg
-  _derr="$(mktemp)"
+  _derr="$(mktemp -p "${bootstrap_dry_boundary:-${TMPDIR:-/tmp}}")" || { error "bootstrap: dry-run: no temp file"; echo error; return 0; }
   _diff=$(printf '%s\n' "${rendered}" \
     | kubectl --kubeconfig "${kubeconfig}" diff --server-side --force-conflicts -f - 2>"${_derr}") || _drc=$?
   _emsg="$(cat "${_derr}" 2>/dev/null || true)"
@@ -1593,7 +1634,7 @@ bootstrap::_dry_run_restore_d() {
   done
   (( ${#_rd_files[@]} )) || return 0
 
-  local _rd_docs="" _rd_base _rd_plain _rd_dec
+  local _rd_docs="" _rd_base _rd_plain _rd_dec _rd_failed=0
   for _rd_f in "${_rd_files[@]}"; do
     _rd_base="$(basename "${_rd_f}" .sops.yaml)"
     _rd_plain="${PATH_CLUSTERS}/${domain}/secrets/restore.d/${_rd_base}.yaml"
@@ -1601,12 +1642,24 @@ bootstrap::_dry_run_restore_d() {
       _rd_docs+="$(cat "${_rd_plain}")"$'\n---\n'
       continue
     fi
-    if _rd_dec="$(sops -d "${_rd_f}" 2>/dev/null)"; then
+    local _rd_err
+    _rd_err="$(mktemp -p "${bootstrap_dry_boundary:-${TMPDIR:-/tmp}}")" || { error "bootstrap: dry-run: no temp file"; echo error; return 0; }
+    if _rd_dec="$(sops -d "${_rd_f}" 2>"${_rd_err}" </dev/null)"; then
       _rd_docs+="${_rd_dec}"$'\n---\n'
     else
-      warn "bootstrap: dry-run: restore.d could not decrypt ${_rd_base} — excluded from the diff (its owner would re-create/re-issue on a real run)"
+      # Decrypted with the normal sops key discovery (HOME is the real one):
+      # a file that does not decrypt makes the preview of restore.d
+      # incomplete, so the run cannot say "nothing would change".
+      debug "bootstrap: dry-run: restore.d: ${_rd_base}.sops.yaml: $(head -n1 "${_rd_err}" 2>/dev/null)"
+      error "bootstrap: dry-run: restore.d: cannot decrypt ${_rd_base}.sops.yaml"
+      _rd_failed=1
     fi
+    rm -f "${_rd_err}"
   done
+  if (( _rd_failed )); then
+    echo error
+    return 0
+  fi
   [[ -n "${_rd_docs}" ]] || return 0
   bootstrap::_diff_manifest "${_rd_docs}" "restore.d" "${kubeconfig}" "restore.d"
 }
@@ -1683,137 +1736,46 @@ bootstrap::_run_dry() {
     "${_total}" "${_c_unchanged}" "${_c_differs}" "${_c_rendered}" "${_c_skipped}" "${_c_inconclusive}" "${_c_errors}"
   [[ -z "${bootstrap_render_dir:-}" ]] || echo "bootstrap dry-run: files under ${bootstrap_render_dir}" >&2
   if (( _c_errors > 0 )) || (( _c_inconclusive > 0 )); then return 2; fi
-  if (( _c_differs > 0 )); then return 1; fi
+  if (( _c_differs > 0 )); then
+    # The ONE rc 1 a dry run has (bootstrap::_dry_run_exit reads it).
+    _BOOTSTRAP_DRY_DIFFERS=1
+    return 1
+  fi
   return 0
 }
 
-# bootstrap::_sandbox_copy_tree <src> <dst> [exclude]
-# Copies src's content into dst for the --dry-run sandbox (review round 2,
-# item A): .git is excluded (never read by a render, can be arbitrarily
-# large); exclude, when given, names ONE MORE absolute path under src to
-# skip entirely — PATH_BIN (the b-managed toolchain, often symlinked to a
-# shared install OUTSIDE the project): read-only, never read by a render,
-# and its own symlinks are EXPECTED to point outside the project, which
-# the escaping-symlink refusal below would otherwise reject for no
-# benefit (this exact shape broke the sandbox's first parity run:
-# PROJ/.bin/argsh -> the repo's real toolchain install). Every OTHER
-# symlink is copied AS ITS TARGET's content (tar -h dereferences) when
-# the target stays inside src, refused outright otherwise — that is
-# exactly the shape of reference that could let a render escape the
-# sandbox. Checked BEFORE the copy runs (tar -h would otherwise happily
-# dereference an escaping symlink too).
-bootstrap::_sandbox_copy_tree() {
-  local _src="${1}" _dst="${2}" _exclude="${3:-}"
-  local -a _prune=(-name .git)
-  local _exclude_rel=""
-  case "${_exclude}" in
-    "${_src}"|"${_src}"/*)
-      _exclude_rel="${_exclude#"${_src}"/}"
-      _prune=(-name .git -o -path "${_exclude}")
-      ;;
-  esac
-  local -a _syms=()
-  local _link _target
-  while IFS= read -r _link; do
-    _syms+=("${_link}")
-  done < <(find "${_src}" \( "${_prune[@]}" \) -prune -o -type l -print 2>/dev/null)
-  for _link in "${_syms[@]+"${_syms[@]}"}"; do
-    _target="$(readlink -f "${_link}" 2>/dev/null)" || {
-      error "bootstrap: dry-run sandbox: broken symlink ${_link}"
-      return 1
-    }
-    case "${_target}" in
-      "${_src}"|"${_src}"/*) : ;;
-      *)
-        error "bootstrap: dry-run sandbox: refusing symlink ${_link} -> ${_target} (escapes the project)"
-        return 1
-        ;;
-    esac
-  done
-  mkdir -p "${_dst}" || return 1
-  if [[ -n "${_exclude_rel}" ]]; then
-    tar --exclude=.git --exclude="./${_exclude_rel}" -h -cf - -C "${_src}" . | tar -xf - -C "${_dst}"
+# bootstrap::_dry_run_trap <dir>
+# Removes <dir> (the dry run's boundary: the plugin home, the stubs, the
+# report, every copy and temp file of the run) on EXIT, CHAINED in front of
+# the EXIT trap this shell already has (bats keeps its own there, and so may
+# any caller). Bash runs the EXIT trap on SIGINT and SIGTERM too, so an
+# interrupted dry run leaves nothing behind. In a subshell, `trap -p` shows
+# the PARENT's traps, which never run there: chaining one would run the
+# parent's trap in the subshell (bats then reported a test twice), so a
+# subshell installs only its own removal. bootstrap::_dry_run_untrap undoes
+# it at the end of the run.
+bootstrap::_dry_run_trap() {
+  local _dir="${1}" _prev=""
+  if (( BASHPID == $$ )); then
+    local -a _p=()
+    eval "_p=($(trap -p EXIT))"
+    (( ${#_p[@]} < 3 )) || _prev="${_p[2]}"
+  fi
+  _BOOTSTRAP_DRY_PREV_TRAP="${_prev}"
+  # shellcheck disable=SC2064 # expand now: the dir and the prior trap are fixed values
+  trap "rm -rf -- $(printf '%q' "${_dir}")${_prev:+; ${_prev}}" EXIT
+}
+
+# bootstrap::_dry_run_untrap <dir>
+# Removes the boundary and puts the shell's own EXIT trap back.
+bootstrap::_dry_run_untrap() {
+  rm -rf -- "${1}"
+  if [[ -n "${_BOOTSTRAP_DRY_PREV_TRAP:-}" ]]; then
+    trap -- "${_BOOTSTRAP_DRY_PREV_TRAP}" EXIT
   else
-    tar --exclude=.git -h -cf - -C "${_src}" . | tar -xf - -C "${_dst}"
+    trap - EXIT
   fi
-}
-
-# bootstrap::_sandbox_build <domain>
-# Builds the whole-project dry-run isolation sandbox (review round 2, item
-# A): the ENTIRE project (PATH_BASE) copied once into a disposable temp
-# tree; PATH_BASE/PATH_LOK8S/PATH_CLUSTERS re-rooted into the copy;
-# HOME/XDG_*/CAROOT/HELM_* pointed at fresh empty dirs under the same temp
-# root; PATH_SECRETS pointed at the COPY's clusters/<domain>/secrets —
-# ALWAYS, even when that directory does not exist yet, so a generator that
-# creates one on first use creates it only in the disposable copy; every
-# cluster-credential-shaped env var (KUBECONFIG, KUBERNETES_*, *_TOKEN,
-# bare TOKEN) UNSET, so a plugin executed during the render has nothing to
-# authenticate to — only the later kubectl diff gets the real kubeconfig,
-# via an explicit --kubeconfig flag, never through $KUBECONFIG.
-#
-# Sets bootstrap_sandbox_root (for bootstrap::_sandbox_cleanup) and
-# reassigns PATH_BASE/PATH_LOK8S/PATH_CLUSTERS/HOME/… in the CURRENT shell
-# for the rest of this run. Values are never explicitly restored — bash
-# has no RAII and a RETURN trap is not scoped to one call (it fires on
-# every nested function's own return too); this process exits shortly
-# after bootstrap::apply returns either way, the same reasoning the
-# PATH_SECRETS-only isolation this replaces already relied on. The temp
-# TREE itself is removed by an EXIT trap the caller installs
-# (bootstrap::_sandbox_cleanup) — a real resource, unlike env vars in a
-# soon-dying process.
-bootstrap::_sandbox_build() {
-  local _domain="${1}"
-  local _root
-  _root="$(mktemp -d)" || {
-    error "bootstrap: dry-run: failed to build the isolation sandbox"
-    return 1
-  }
-  local _copy="${_root}/project"
-  if ! bootstrap::_sandbox_copy_tree "${PATH_BASE}" "${_copy}" "${PATH_BIN:-}"; then
-    rm -rf "${_root}"
-    return 1
-  fi
-
-  # Re-root PATH_LOK8S/PATH_CLUSTERS the same way the project itself moved
-  # — inside the copy when they live under PATH_BASE (the common case),
-  # else unchanged (an embedded/external location — read-only either way,
-  # no copy needed).
-  local _new_lok8s="${PATH_LOK8S}" _new_clusters="${PATH_CLUSTERS}"
-  case "${PATH_LOK8S}" in
-    "${PATH_BASE}"/*) _new_lok8s="${_copy}/${PATH_LOK8S#"${PATH_BASE}"/}" ;;
-  esac
-  case "${PATH_CLUSTERS}" in
-    "${PATH_BASE}"/*) _new_clusters="${_copy}/${PATH_CLUSTERS#"${PATH_BASE}"/}" ;;
-  esac
-
-  local _home="${_root}/home"
-  mkdir -p "${_home}/.config/helm" "${_home}/.local/share/helm" "${_home}/.cache/helm" "${_home}/.caroot" || {
-    rm -rf "${_root}"
-    error "bootstrap: dry-run: failed to build the isolation sandbox"
-    return 1
-  }
-
-  bootstrap_sandbox_root="${_root}"
-  export PATH_BASE="${_copy}" PATH_LOK8S="${_new_lok8s}" PATH_CLUSTERS="${_new_clusters}"
-  export HOME="${_home}"
-  export XDG_CONFIG_HOME="${_home}/.config" XDG_DATA_HOME="${_home}/.local/share" XDG_CACHE_HOME="${_home}/.cache"
-  export CAROOT="${_home}/.caroot"
-  export HELM_CACHE_HOME="${_home}/.cache/helm" HELM_CONFIG_HOME="${_home}/.config/helm" HELM_DATA_HOME="${_home}/.local/share/helm"
-  export PATH_SECRETS="${_new_clusters}/${_domain}/secrets"
-  unset KUBECONFIG
-  local _k
-  while IFS= read -r _k; do
-    [[ -n "${_k}" ]] && unset "${_k}"
-  done < <(compgen -e | grep -E '^(KUBECONFIG$|KUBERNETES_|.*_TOKEN$|^TOKEN$)' 2>/dev/null || true)
-  return 0
-}
-
-# bootstrap::_sandbox_cleanup
-# Removes the dry-run sandbox's temp tree. Installed by bootstrap::apply as
-# a trap on EXIT (not RETURN — a RETURN trap is not scoped to the
-# declaring frame; it fires on every nested function's own return too).
-bootstrap::_sandbox_cleanup() {
-  [[ -z "${bootstrap_sandbox_root:-}" ]] || rm -rf "${bootstrap_sandbox_root}"
+  _BOOTSTRAP_DRY_PREV_TRAP=""
 }
 
 # bootstrap::apply <domain> <cluster_yaml> <kubeconfig>
@@ -1826,38 +1788,24 @@ bootstrap::_sandbox_cleanup() {
 bootstrap::apply() {
   local domain="${1}" cluster_yaml="${2}" kubeconfig="${3}"
 
-  # Review round 2, item A: under --dry-run, build the whole-project
-  # isolation sandbox ONCE for the whole run — PATH_BASE/PATH_LOK8S/
-  # PATH_CLUSTERS/HOME/XDG_*/CAROOT/HELM_*/PATH_SECRETS redirected,
-  # KUBECONFIG and every cluster-credential-shaped var unset — and
-  # re-root cluster_yaml into it (it almost always lives under the
-  # project). kubeconfig stays pointing at the REAL file: the diff step
-  # reads it explicitly via --kubeconfig, never through $KUBECONFIG
-  # (which the sandbox just unset).
-  #
-  # A real run needs none of that: PATH_SECRETS points straight at the
-  # live store (lo provision drives the bootstrap directly, not via
-  # `lo build`, so the per-domain store isn't exported yet — mirror
-  # libs/build::_export_secrets_path).
-  if (( ${bootstrap_dry_run:-0} )); then
-    local _apply_orig_base="${PATH_BASE}"
-    trap 'bootstrap::_sandbox_cleanup' EXIT
-    bootstrap::_sandbox_build "${domain}" || return 2
-    case "${cluster_yaml}" in
-      "${_apply_orig_base}"/*) cluster_yaml="${PATH_BASE}/${cluster_yaml#"${_apply_orig_base}"/}" ;;
-    esac
-  elif [[ -d "${PATH_CLUSTERS}/${domain}/secrets" ]]; then
+  # The per-domain secrets store, on a real run and a dry run alike (lo
+  # provision drives the bootstrap directly, not via `lo build`, so the
+  # store isn't exported yet — mirror libs/build::_export_secrets_path). A
+  # dry run renders IN PLACE, exactly as a real run does: it reads the store
+  # (the secrets plugin never writes it then), with HOME, credentials and the
+  # CA unchanged.
+  if [[ -d "${PATH_CLUSTERS}/${domain}/secrets" ]]; then
     export PATH_SECRETS="${PATH_CLUSTERS}/${domain}/secrets"
   fi
 
-  # LOK8S_BOOTSTRAP_DRYRUN/LOK8S_BOOTSTRAP_ALLOW_GENERATORS gate the secrets
-  # `bash:` generator (the kustomize exec plugin — the SAME compiled binary
-  # both `lo` implementations shell out to) and the Lo driver's
-  # .registries.json write (registry::config_generate): both run several
-  # layers below here, too far to thread a parameter through cleanly. ALSO
-  # set earlier now, before driver::export (bootstrap::dispatch /
-  # provision::dispatch, item D) — set again here, idempotently, for a
-  # caller that invokes bootstrap::apply directly.
+  # LOK8S_BOOTSTRAP_DRYRUN/LOK8S_BOOTSTRAP_ALLOW_GENERATORS: the sentinel
+  # every lo state writer checks at its source — the secrets plugin (the
+  # SAME compiled binary both `lo` implementations shell out to: it reads
+  # the store and keeps new values in memory, refuses a `bash:` generator,
+  # never writes CAROOT) and the Lo driver's .registries.json
+  # (registry::config_generate). Set before driver::export already
+  # (bootstrap::dispatch / provision::dispatch); set again here,
+  # idempotently, for a caller that invokes bootstrap::apply directly.
   if (( ${bootstrap_dry_run:-0} )); then
     export LOK8S_BOOTSTRAP_DRYRUN=1
     if (( ${bootstrap_allow_generators:-0} )); then
@@ -2116,8 +2064,24 @@ bootstrap::apply() {
   # diff} into it too, and used to run before anything had created the
   # directory at all.
   if (( ${bootstrap_dry_run:-0} )) && [[ -n "${bootstrap_render_dir:-}" ]]; then
-    bootstrap::_prepare_render_dir "${bootstrap_render_dir}" \
-      || { error "bootstrap: --render-dir: ${bootstrap_render_dir}"; return 2; }
+    bootstrap::_prepare_render_dir "${bootstrap_render_dir}" || return 2
+    echo "bootstrap dry-run: ${bootstrap_render_dir} holds the rendered manifests in plaintext, Secrets included" >&2
+  fi
+
+  # The dry run's render boundary (libs/addons: addons::dry_run_boundary):
+  # the restricted plugin home, the refusing docker/git, the report file —
+  # and every copy and temp file of the run. Built once, after the plan is
+  # valid and before the first line of the report; removed on EXIT, chained
+  # in front of the caller's own EXIT trap (bootstrap::_dry_run_trap).
+  local bootstrap_dry_boundary=""
+  if (( ${bootstrap_dry_run:-0} )); then
+    bootstrap_dry_boundary="$(mktemp -d "${TMPDIR:-/tmp}/lok8s-dryrun-XXXXXXXX")" \
+      || { error "bootstrap dry-run: cannot create the render boundary"; return 2; }
+    bootstrap::_dry_run_trap "${bootstrap_dry_boundary}"
+    if ! addons::dry_run_boundary "${bootstrap_dry_boundary}"; then
+      bootstrap::_dry_run_untrap "${bootstrap_dry_boundary}"
+      return 2
+    fi
   fi
 
   # ── restore.d: pre-bootstrap DR restore (sops-encrypted manifests) ──
@@ -2164,8 +2128,10 @@ bootstrap::apply() {
 
   # ── --dry-run: render + diff, sequentially, apply nothing ──
   if (( ${bootstrap_dry_run:-0} )); then
-    bootstrap::_run_dry
-    return $?
+    local _dry_rc=0
+    bootstrap::_run_dry || _dry_rc=$?
+    bootstrap::_dry_run_untrap "${bootstrap_dry_boundary}"
+    return "${_dry_rc}"
   fi
 
   # ── Run the DAG: launch every entry whose deps are done, up to the cap ──
