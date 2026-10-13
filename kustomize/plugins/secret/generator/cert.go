@@ -2,6 +2,7 @@ package generator
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/kernpilot/lok8s/kustomize/pkg/cache"
 	"github.com/kernpilot/lok8s/kustomize/pkg/certgen"
@@ -150,7 +151,14 @@ func storeCA(ctx *plugin.Context, ref string) (cert, key []byte, err error) {
 	if pathSecrets == "" {
 		return nil, nil, errs.New("cert: PATH_SECRETS must be set to resolve caRef")
 	}
-	store, err := cache.New(pathSecrets, caNs, caName)
+	// OpenStore is the overlay in a dry run: the CA is read, or minted in
+	// memory and reported, never written.
+	var store plugin.CacheStore
+	if ctx.OpenStore != nil {
+		store, err = ctx.OpenStore(caNs, caName)
+	} else {
+		store, err = cache.New(pathSecrets, caNs, caName)
+	}
 	if err != nil {
 		return nil, nil, errs.Wrap("caRef", err)
 	}
@@ -170,11 +178,50 @@ func storeCA(ctx *plugin.Context, ref string) (cert, key []byte, err error) {
 // trustable via `mkcert -install` / `lo trust`. It writes rootCA.pem under the
 // user's CAROOT (a side effect outside PATH_SECRETS); use caRef for a
 // self-contained own CA (CI / isolated instances).
+//
+// A dry run never writes CAROOT: it uses the existing CA, or mints one in
+// memory (shared by every leaf of this plugin process) and reports it, so lo
+// marks the entry non-repeatable.
 func caRootCA(ctx *plugin.Context) (cert, key []byte, err error) {
+	if ctx.DryRun {
+		return dryRunCARoot(ctx)
+	}
 	cert, key, err = certgen.LoadOrCreateCARoot(ctx.Rand)
 	if err != nil {
 		return nil, nil, errs.Wrap("CAROOT", err)
 	}
+	return cert, key, nil
+}
+
+// ephemeralCA holds the CAs a dry run minted in memory, by CAROOT path.
+var ephemeralCA struct {
+	mu   sync.Mutex
+	byID map[string][2][]byte
+}
+
+func dryRunCARoot(ctx *plugin.Context) (cert, key []byte, err error) {
+	dir, cert, key, found, err := certgen.LoadCARoot()
+	if err != nil {
+		return nil, nil, errs.Wrap("CAROOT", err)
+	}
+	if found {
+		return cert, key, nil
+	}
+	ephemeralCA.mu.Lock()
+	defer ephemeralCA.mu.Unlock()
+	if pair, ok := ephemeralCA.byID[dir]; ok {
+		return pair[0], pair[1], nil
+	}
+	if cert, key, err = certgen.NewCA(ctx.Rand); err != nil {
+		return nil, nil, errs.Wrap("CAROOT", err)
+	}
+	if err := ctx.Report("caroot " + dir); err != nil {
+		return nil, nil, errs.Wrap("CAROOT", err)
+	}
+	if ephemeralCA.byID == nil {
+		ephemeralCA.byID = map[string][2][]byte{}
+	}
+	ephemeralCA.byID[dir] = [2][]byte{cert, key}
 	return cert, key, nil
 }
 

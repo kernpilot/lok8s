@@ -38,6 +38,26 @@ type Context struct {
 	// Rand is the source of randomness. Defaults to crypto/rand.Reader.
 	// Tests inject deterministic readers.
 	Rand io.Reader
+	// DryRun marks a read-only render (lo bootstrap --dry-run): Cache is
+	// then the read-only overlay, and a generator writes no file of its
+	// own either (no .sha, no .bash-allow, no CAROOT).
+	DryRun bool
+	// Minted reports material a dry run generated in memory (a CA, an
+	// entry the store lacks), so lo marks the entry non-repeatable. nil
+	// outside a dry run.
+	Minted func(what string) error
+	// OpenStore opens the store of another Secret (namespace, name) the
+	// same way Cache was opened (the overlay in a dry run). nil when
+	// PATH_SECRETS is unset.
+	OpenStore func(namespace, name string) (CacheStore, error)
+}
+
+// Report calls Minted when it is set.
+func (c *Context) Report(what string) error {
+	if c.Minted == nil {
+		return nil
+	}
+	return c.Minted(what)
 }
 
 // CacheStore is the minimal cache interface a Context exposes to

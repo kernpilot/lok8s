@@ -530,3 +530,20 @@ func TestBash_DefaultCachesValue(t *testing.T) {
 		t.Errorf("default must cache: expected v1 (cached), got %q", e[0].Value)
 	}
 }
+
+// With --allow-generators the dry run runs the command (trusted addon code)
+// but lo's own generator still writes no .sha and no .bash-allow.
+func TestBash_DryRunWithAllowWritesNoAllowFiles(t *testing.T) {
+	t.Setenv("LOK8S_BOOTSTRAP_DRYRUN", "1")
+	t.Setenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS", "1")
+	ctx, dir := bashCtx(t)
+	ctx.DryRun = true
+	if _, err := NewBash(map[string]specpkg.BashEntry{"KEY": {Exec: "echo hello"}}).Generate(ctx); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	for _, name := range []string{shaFileName("test", "default", "KEY"), ".bash-allow"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			t.Errorf("a dry run wrote %s", name)
+		}
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/addons"
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
@@ -87,6 +88,10 @@ type Engine struct {
 	// Options are the run modes (--dry-run, --render-dir, --no-diff,
 	// --only); the zero value is the plain apply.
 	Options Options
+
+	// boundary is the dry run's render boundary, set for the length of a
+	// dry run (apply).
+	boundary *addons.DryRunBoundary
 }
 
 func (e *Engine) stdout() io.Writer {
@@ -193,60 +198,30 @@ func (e *Engine) remapDryRunExit(err error) error {
 	return &driver.ExitError{Code: 2, Err: err}
 }
 
-// apply is Apply's body (bash: bootstrap::apply). Under --dry-run it builds
-// the whole-project isolation sandbox (review round 2, item A) ONCE for the
-// whole run and delegates to applyIsolated against a shallow Engine copy
-// whose Paths points into the sandbox — every helper below (loadNodes,
-// addon resolution, the render, restore.d) reads e.Paths, so swapping it
-// once here is enough to run the entire dry run against the copy. A real
-// run needs none of that: PATH_SECRETS points straight at the live store.
+// apply is Apply's body (bash: bootstrap::apply). A dry run renders in
+// place, exactly as a real run does (the same project, HOME, credentials
+// and CA); see dryrun.go and internal/addons/dryrun.go for what it does
+// differently. Order matters for --dry-run and --only: the WHOLE graph is
+// validated — including --only — before any writer runs (restore.d, an
+// addon apply, assets ejection), so "--only typo" or any other planning
+// error can never land a partial write first and only then fail.
 func (e *Engine) apply(ctx context.Context, domain, clusterYAML, kubeconfig string) error {
-	if e.Options.DryRun {
-		sandbox, err := newDryRunSandbox(e.Paths, domain)
-		if err != nil {
-			return e.errorf("bootstrap: dry-run: failed to build the isolation sandbox: %v", err)
-		}
-		defer sandbox.cleanup()
-		defer sandbox.restore()
-		dry := *e
-		dry.Paths = sandbox.paths
-		// clusterYAML is re-rooted into the sandbox too (it almost always
-		// lives under the project, clusters/<domain>/cluster.lok8s.yaml) —
-		// the render must read the SAME copy as everything else, never the
-		// live file. kubeconfig is deliberately left pointing at the real
-		// file: it is the live cluster's credential, read only by the diff
-		// step via an explicit --kubeconfig flag, never through $KUBECONFIG
-		// (which the sandbox just unset).
-		clusterYAML = remapUnderBase(e.Paths.Base, clusterYAML, sandbox.paths.Base)
-		return dry.applyIsolated(ctx, domain, clusterYAML, kubeconfig)
-	}
-	secretsDir := e.Paths.Clusters + "/" + domain + "/secrets"
-	if fsutil.DirExists(secretsDir) {
-		os.Setenv("PATH_SECRETS", secretsDir)
-	}
-	return e.applyIsolated(ctx, domain, clusterYAML, kubeconfig)
-}
-
-// applyIsolated is apply's body proper, run either directly (a real run)
-// or against a sandboxed *Engine (a dry run — see apply above). Order
-// matters for --dry-run and --only: the WHOLE graph is validated —
-// including --only — before any writer runs (restore.d, an addon apply,
-// assets ejection), so "--only typo" or any other planning error can never
-// land a partial write first and only then fail.
-func (e *Engine) applyIsolated(ctx context.Context, domain, clusterYAML, kubeconfig string) error {
 	stderr := e.stderr()
 
-	// LOK8S_BOOTSTRAP_DRYRUN/LOK8S_BOOTSTRAP_ALLOW_GENERATORS gate the
-	// secrets `bash:` generator (kustomize/plugins/secret/generator) and
-	// the Lo driver's .registries.json write — both read this process env
-	// because they run several layers below here (a kustomize exec plugin,
-	// a driver's Export), too far to thread a parameter through cleanly.
-	// This is ALSO set earlier, before driver.Exporter.Export, by the
-	// dispatcher (SetDryRunEnv, item D) — setting it again here is
-	// idempotent and keeps a caller that invokes Engine.Apply directly
-	// (a test, or any future caller that skips the dispatcher) correct too.
-	defer setEnvScoped("LOK8S_BOOTSTRAP_DRYRUN", boolEnv(e.Options.DryRun))()
-	defer setEnvScoped("LOK8S_BOOTSTRAP_ALLOW_GENERATORS", boolEnv(e.Options.DryRun && e.Options.AllowGenerators))()
+	// LOK8S_BOOTSTRAP_DRYRUN/LOK8S_BOOTSTRAP_ALLOW_GENERATORS: the
+	// sentinel every lo state writer checks at its source (dryrunenv.go).
+	// The dispatcher sets it before driver.Exporter.Export already; setting
+	// it again here is idempotent and keeps a direct caller of Engine.Apply
+	// (a test) correct too.
+	defer SetDryRunEnv(e.Options.DryRun, e.Options.AllowGenerators)()
+
+	// The per-domain secrets store, on a real run and a dry run alike (lo
+	// provision drives the bootstrap directly, not via `lo build`, so the
+	// store is not exported yet — mirror libs/build::_export_secrets_path).
+	// A dry run reads it; the secrets plugin never writes it then.
+	if secretsDir := e.Paths.Clusters + "/" + domain + "/secrets"; fsutil.DirExists(secretsDir) {
+		os.Setenv("PATH_SECRETS", secretsDir)
+	}
 
 	if !fsutil.FileExists(kubeconfig) {
 		return e.errorf("bootstrap: kubeconfig not found: %s", kubeconfig)
@@ -337,6 +312,21 @@ func (e *Engine) applyIsolated(ctx context.Context, domain, clusterYAML, kubecon
 		if err := prepareRenderDir(e.Options.RenderDir); err != nil {
 			return e.errorf("bootstrap: --render-dir: %v", err)
 		}
+		fmt.Fprintf(stderr, "bootstrap dry-run: %s holds the rendered manifests in plaintext, Secrets included\n", e.Options.RenderDir)
+	}
+
+	// The dry run's render boundary (internal/addons/dryrun.go): the
+	// restricted plugin home, the refusing docker/git, the report file. Built
+	// once, after the plan is valid and before the first line of the report;
+	// removed on every exit path (an interrupt cancels ctx and returns here).
+	if e.Options.DryRun {
+		b, err := addons.NewDryRunBoundary(ctx, e.Paths, e.Runner)
+		if err != nil {
+			return e.errorf("bootstrap dry-run: %v", err)
+		}
+		defer b.Close()
+		e.boundary = b
+		defer func() { e.boundary = nil }()
 	}
 
 	// ── restore.d: pre-bootstrap DR restore (sops-encrypted manifests) ──
@@ -384,7 +374,8 @@ func (e *Engine) applyIsolated(ctx context.Context, domain, clusterYAML, kubecon
 // let its owner ACME-reissue instead, which can hit the Let's Encrypt
 // rate limit on a cluster with several such Secrets.
 func warnRestoreDSkipped(stderr io.Writer, domain string, names []string) {
-	fmt.Fprintf(stderr, "\n\033[33m!\033[0m bootstrap: --only applies WITHOUT restoring restore.d (%d file(s) under clusters/%s/restore.d):\n", len(names), domain)
+	// The marker is coloured on a terminal only: piped stderr is plain text.
+	fmt.Fprintf(stderr, "\n%s bootstrap: --only applies WITHOUT restoring restore.d (%d file(s) under clusters/%s/restore.d):\n", ui.For(stderr).Warn("!"), len(names), domain)
 	for _, n := range names {
 		fmt.Fprintf(stderr, "    %s\n", n)
 	}

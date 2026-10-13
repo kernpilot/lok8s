@@ -91,9 +91,13 @@ func (g *Bash) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 					k, strings.TrimSpace(string(existing)), entryHash)
 			}
 		} else if os.IsNotExist(err) {
-			// First run — create the .sha file.
-			if err := os.WriteFile(shaFile, []byte(entryHash+"\n"), 0644); err != nil { // #nosec G306 -- a content hash for the allow gate, not a secret
-				return nil, errs.Newf("bash %s: failed to write .sha file: %v", k, err)
+			// First run — create the .sha file. A dry run (only reached with
+			// --allow-generators) writes no file: the hash is trusted on
+			// first use for this run only.
+			if !ctx.DryRun {
+				if err := os.WriteFile(shaFile, []byte(entryHash+"\n"), 0644); err != nil { // #nosec G306 -- a content hash for the allow gate, not a secret
+					return nil, errs.Newf("bash %s: failed to write .sha file: %v", k, err)
+				}
 			}
 		} else {
 			return nil, errs.Newf("bash %s: failed to read .sha file: %v", k, err)
@@ -102,7 +106,7 @@ func (g *Bash) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 	}
 
 	// Layer 2: verify local .bash-allow (hash-of-hashes).
-	if err := verifyBashAllow(ctx.Cache.Dir(), allHashes); err != nil {
+	if err := verifyBashAllow(ctx.Cache.Dir(), allHashes, ctx.DryRun); err != nil {
 		return nil, err
 	}
 
@@ -166,7 +170,10 @@ func shaFileName(secret, namespace, key string) string {
 // approved set works for both per-target and full builds, while still forcing
 // re-approval whenever a NEW or CHANGED command appears (its hash is absent from
 // the set until approved).
-func verifyBashAllow(cacheDir string, entryHashes []string) error {
+//
+// dryRun (a dry run with --allow-generators) never writes the file: the
+// first-use approval holds for this run only.
+func verifyBashAllow(cacheDir string, entryHashes []string, dryRun bool) error {
 	allowFile := filepath.Join(cacheDir, ".bash-allow")
 
 	data, err := os.ReadFile(allowFile)
@@ -174,6 +181,9 @@ func verifyBashAllow(cacheDir string, entryHashes []string) error {
 		// First run — auto-create with this build's hashes (same
 		// trust-on-first-use as the per-entry .sha files). `lo secrets allow`
 		// later writes the union across all targets.
+		if dryRun {
+			return nil
+		}
 		return writeBashAllow(allowFile, entryHashes)
 	} else if err != nil {
 		return fmt.Errorf("failed to read .bash-allow: %w", err)

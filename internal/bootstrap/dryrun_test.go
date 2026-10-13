@@ -616,6 +616,7 @@ func TestApplyAndDryRunSendTheSameManifest(t *testing.T) {
 		return nil
 	}
 	e.Options.DryRun = true
+	withBoundary(t, e)
 	res := e.dryRunOne(t.Context(), job, "01-testcni")
 	if res.status != dryUnchanged {
 		t.Fatalf("dryRunOne status = %v (%s)", res.status, stderrOf(e))
@@ -655,50 +656,25 @@ func TestDispatchDryRunSkipsTheInventory(t *testing.T) {
 	}
 }
 
-// PATH_SECRETS, under a dry run, must point at a COPY of the store — never
-// the original path — so a generator's cache write (passwd:, or bash: with
-// --allow-generators) lands in something disposable. The copy carries the
-// same content and is gone again once Apply returns; PATH_SECRETS itself
-// is restored to whatever it was before (never leaked across calls).
-func TestDryRunIsolatesPathSecrets(t *testing.T) {
+// A dry run renders in place: PATH_SECRETS is the REAL per-domain store
+// during the render (the secrets plugin reads it and never writes it), the
+// same value a real run exports.
+func TestDryRunReadsTheRealStore(t *testing.T) {
 	e, f, spec, kc := dryEngine(t, "testcni")
 	secretsDir := filepath.Join(e.Paths.Clusters, "test.lok8s.dev", "secrets")
 	testutil.WriteFile(t, filepath.Join(secretsDir, "Secret.app.default.TOKEN"), "ENC[token]\n")
-	os.Setenv("PATH_SECRETS", "/should-be-restored")
-	t.Cleanup(func() { os.Unsetenv("PATH_SECRETS") })
-
-	// Observed and read INSIDE the handler, while Apply is still running:
-	// the isolation copy is removed by the time Apply returns (correctly —
-	// that's the cleanup assertion below), so the content check has to
-	// happen before then.
-	var seenDuring, copyContent string
-	var copyReadErr error
+	t.Setenv("PATH_SECRETS", "")
+	var seen string
 	diffAnswers(t, f, 0)
 	f2 := f.handler
 	f.handler = func(c execx.Cmd) error {
-		if seenDuring == "" {
-			seenDuring = os.Getenv("PATH_SECRETS")
-			raw, err := os.ReadFile(filepath.Join(seenDuring, "Secret.app.default.TOKEN"))
-			copyContent, copyReadErr = string(raw), err
-		}
+		seen = os.Getenv("PATH_SECRETS")
 		return f2(c)
 	}
 	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if seenDuring == "" {
-		t.Fatal("PATH_SECRETS was never observed during the run")
-	}
-	if seenDuring == secretsDir {
-		t.Errorf("PATH_SECRETS pointed at the real store during a dry run: %s", seenDuring)
-	}
-	if copyReadErr != nil || copyContent != "ENC[token]\n" {
-		t.Errorf("the copy did not carry the real store's content: %v %q", copyReadErr, copyContent)
-	}
-	if fsutil.DirExists(seenDuring) {
-		t.Errorf("the isolated copy %s was not cleaned up", seenDuring)
-	}
-	if got := os.Getenv("PATH_SECRETS"); got != "/should-be-restored" {
-		t.Errorf("PATH_SECRETS = %q after Apply, want the restored prior value", got)
+	if seen != secretsDir {
+		t.Errorf("PATH_SECRETS during the dry run = %q, want the real store %s", seen, secretsDir)
 	}
 }

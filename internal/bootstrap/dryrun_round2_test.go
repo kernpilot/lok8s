@@ -3,12 +3,11 @@ package bootstrap
 // dryrun_round2_test.go — review round 2 on #268: the kubectl-diff
 // reclassification (item F: inconclusive vs. differs vs. error, dropping
 // the "--- " heuristic), the render-dir marker/ownership and symlink guard
-// (item G), the restore.d/--only/--with-restore policy (item H), the
-// non-repeatable marking (item I), and an entry's env: being refused at
-// the dry-run report level too (item B).
+// (item G), the restore.d/--only/--with-restore policy (item H) and the
+// unmarked repeatable entry (item I). Round 3 (the in-place redesign) is in
+// dryrun_round3_test.go.
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -283,35 +282,8 @@ func TestOnlyDryRunSkipsRestoreDPlainMessage(t *testing.T) {
 	}
 }
 
-// ── Item I: an entry whose render mints new secret material is marked
-// non-repeatable ───────────────────────────────────────────────────────
-
-// secretMintingRunner wraps the fake runner and, on the kustomize call
-// (the render), writes a NEW file into the sandboxed PATH_SECRETS — the
-// shape a generator minting a fresh password/keypair takes.
-type secretMintingRunner struct{ inner *fakeRunner }
-
-func (r secretMintingRunner) Run(ctx context.Context, c execx.Cmd) error {
-	if c.Name == "kustomize" {
-		if dir := os.Getenv("PATH_SECRETS"); dir != "" {
-			_ = os.MkdirAll(dir, 0o700)
-			_ = os.WriteFile(filepath.Join(dir, "minted.yaml"), []byte("new secret\n"), 0o600)
-		}
-	}
-	return r.inner.Run(ctx, c)
-}
-
-func TestDryRunMarksEntryNonRepeatableWhenItMintsNewSecretMaterial(t *testing.T) {
-	e, f, spec, kc := dryEngine(t, "testcni")
-	e.Runner = secretMintingRunner{f}
-	diffAnswers(t, f, 0)
-	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
-		t.Fatalf("Apply: %v", err)
-	}
-	if !strings.Contains(stdoutOf(e), "01-testcni: unchanged (non-repeatable)") {
-		t.Errorf("stdout:\n%s", stdoutOf(e))
-	}
-}
+// ── Item I: non-repeatable marking (the round-3 report-file plumbing is
+// in dryrun_round3_test.go) ────────────────────────────────────────────
 
 // An entry that mints NOTHING is not marked.
 func TestDryRunDoesNotMarkNonRepeatableWhenNothingMinted(t *testing.T) {
@@ -324,25 +296,3 @@ func TestDryRunDoesNotMarkNonRepeatableWhenNothingMinted(t *testing.T) {
 		t.Errorf("stdout:\n%s", stdoutOf(e))
 	}
 }
-
-// ── Item B: an entry's env: override is reported as THIS entry's error ─
-
-func TestDryRunEntryEnvOverrideIsReportedAsError(t *testing.T) {
-	e, _, _, _, p := testEngine(t)
-	writeStackAddon(t, p)
-	spec := writeClusterSpec(t, p, "testcni:\n      env:\n        HOME: /tmp/evil")
-	kc := writeKubeconfig(t, p)
-	e.Options.DryRun = true
-
-	err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
-	if driver.ExitCode(err) != 2 {
-		t.Fatalf("exit = %d, want 2", driver.ExitCode(err))
-	}
-	if !strings.Contains(stdoutOf(e), "01-testcni: error") {
-		t.Errorf("stdout:\n%s", stdoutOf(e))
-	}
-	if !strings.Contains(stderrOf(e), "may not set HOME") {
-		t.Errorf("stderr should name HOME:\n%s", stderrOf(e))
-	}
-}
-

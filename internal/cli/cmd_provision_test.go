@@ -101,14 +101,20 @@ func TestDestroyAndBootstrapRefusals(t *testing.T) {
 }
 
 // The run-mode flags: --render-dir/--no-diff need --dry-run, and on
-// provision all four need --bootstrap (bash: the same error lines, rc 1).
+// provision all four need --bootstrap (bash: the same error lines, rc 1 —
+// rc 2 when the command line asks for --dry-run: a dry run's every failure
+// outside the per-entry diff is rc 2).
 func TestBootstrapModeFlagDependencies(t *testing.T) {
 	p, _, exits := orchestrateProject(t)
+	_, stderr, err := runLo(t, NewRoot(p), "provision", "--dry-run", "--domain", "alpha.dev")
+	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "[error] --dry-run requires --bootstrap") || len(*exits) != 1 || (*exits)[0] != 2 {
+		t.Errorf("provision --dry-run: err=%v exits=%v stderr=%q", err, *exits, stderr)
+	}
+	*exits = nil
 	for _, tc := range []struct {
 		argv []string
 		want string
 	}{
-		{[]string{"provision", "--dry-run", "--domain", "alpha.dev"}, "--dry-run requires --bootstrap"},
 		{[]string{"provision", "--only", "cilium", "--domain", "alpha.dev"}, "--only requires --bootstrap"},
 		{[]string{"provision", "--render-dir", "x", "--domain", "alpha.dev"}, "--render-dir requires --bootstrap"},
 		{[]string{"provision", "--allow-generators", "--domain", "alpha.dev"}, "--allow-generators requires --bootstrap"},
@@ -127,11 +133,12 @@ func TestBootstrapModeFlagDependencies(t *testing.T) {
 
 // A bootstrap dry run is not gated: on a cloud domain without --force it
 // passes the real-infrastructure gate and stops at the next guard (no
-// kubeconfig yet) with rc 1, never the decline's rc 3.
+// kubeconfig yet) with rc 2 (a failure outside the per-entry diff), never
+// the decline's rc 3.
 func TestProvisionBootstrapDryRunIsNotGated(t *testing.T) {
 	p, _, exits := orchestrateProject(t)
 	_, stderr, err := runLo(t, NewRoot(p), "provision", "--bootstrap", "--dry-run", "--domain", "beta.cloud")
-	if !errors.Is(err, ErrHandled) || len(*exits) != 0 {
+	if !errors.Is(err, ErrHandled) || len(*exits) != 1 || (*exits)[0] != 2 {
 		t.Fatalf("err=%v exits=%v stderr=%q", err, *exits, stderr)
 	}
 	if strings.Contains(stderr, "real infrastructure") || !strings.Contains(stderr, "--bootstrap needs an existing cluster") {

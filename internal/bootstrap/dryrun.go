@@ -19,8 +19,7 @@ package bootstrap
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -312,42 +311,37 @@ func (r dryResult) render(s ui.Style) string {
 }
 
 // dryRunOne renders ONE entry and diffs it against the cluster (bash:
-// bootstrap::_dry_run_one). The skips are the real run's (the hosted
-// platform-owned addons, the KubeOne cilium/ccm defer), so the report
-// names what the real run would not touch either.
+// bootstrap::_dry_run_one). The entry's env is checked first: it may not
+// set lo's own variables (addons.IsProtectedEnv). The skips are the real
+// run's (the hosted platform-owned addons, the KubeOne cilium/ccm defer), so
+// the report names what the real run would not touch either.
 func (e *Engine) dryRunOne(ctx context.Context, job Job, stem string) dryResult {
 	stderr := e.stderr()
+	env := jobEnv(job)
+	if v := addons.ProtectedEnvOverride(env); v != "" {
+		ui.ErrorTo(stderr, "bootstrap: %s: env: may not set %s (reserved for lo)", job.Name, v)
+		return dryResult{status: dryError}
+	}
 	if reason, skip := e.skipReason(job); skip {
 		fmt.Fprintln(stderr, reason)
 		return dryResult{status: drySkipped}
 	}
 	ui.DebugTo(stderr, "bootstrap: rendering %s", job.Name)
-	env := jobEnv(job)
-	// Item B: an entry's env: must never be the thing that decides HOME,
-	// PATH_SECRETS, KUBECONFIG, … for its own render — report the attempt
-	// as this entry's error, naming the variable, before rendering at all.
-	if v := addons.ProtectedEnvOverride(env); v != "" {
-		ui.ErrorTo(stderr, "bootstrap: %s: env: may not set %s (protected — see the sandbox docs)", job.Name, v)
+	// The secrets plugin reports every value it generated in memory (the
+	// store lacks it, or CAROOT holds no CA) to the boundary's report file:
+	// the next real run generates different bytes, so the entry is marked
+	// non-repeatable.
+	if err := e.boundary.ResetReport(); err != nil {
+		ui.ErrorTo(stderr, "bootstrap: dry-run report: %v", err)
 		return dryResult{status: dryError}
 	}
-	// A snapshot of the sandboxed secrets store BEFORE this entry renders,
-	// compared against one taken after (item I): a generator that mints
-	// NEW material — a fresh random password, a keypair that didn't exist
-	// yet — changes the store even inside the sandbox, and the NEXT real
-	// run mints different bytes. The entry's report says so, rather than
-	// implying the diff just shown is exactly what a real run would do.
-	secretsDir := os.Getenv("PATH_SECRETS")
-	before := secretsFingerprint(secretsDir)
-	// RenderIsolated, never Render: khelm's own chart-dependency resolution
-	// must not write Chart.lock/charts into the real addon directory either
-	// — "read-only" covers the render, not just the apply.
-	rendered, err := addons.RenderIsolated(ctx, e.Paths, e.Runner, stderr, job.Dir, job.Kind, job.Provider, job.Inline, env, e.Options.AllowGenerators)
-	nonRepeatable := secretsFingerprint(secretsDir) != before
+	rendered, err := addons.RenderDryRun(ctx, e.Paths, e.Runner, stderr, job.Dir, job.Kind, job.Provider, job.Inline, env, e.boundary, e.Options.AllowGenerators)
+	minted := e.boundary.Minted()
+	for _, m := range minted {
+		ui.DebugTo(stderr, "bootstrap: %s: generated in memory: %s", job.Name, m)
+	}
+	nonRepeatable := len(minted) > 0
 	if err != nil {
-		// %v, not a bare "render failed": a refused bash: generator or a
-		// now-unreachable cross-tree valueFiles ref (RenderIsolated's
-		// documented limitation) both need to say WHY, not just that it
-		// failed.
 		ui.ErrorTo(stderr, "bootstrap: render failed for %s: %v", job.Name, err)
 		return dryResult{status: dryError, nonRepeatable: nonRepeatable}
 	}
@@ -357,38 +351,6 @@ func (e *Engine) dryRunOne(ctx context.Context, job Job, stem string) dryResult 
 	res := e.diffManifest(ctx, job.Kubeconfig, rendered, stem, job.Name)
 	res.nonRepeatable = nonRepeatable
 	return res
-}
-
-// secretsFingerprint is a cheap content fingerprint of dir (name, size,
-// mtime of every file under it, recursively) — "" when dir does not exist
-// or holds nothing. Two calls around a render that differ mean the render
-// wrote something new into the sandboxed secrets store (item I).
-func secretsFingerprint(dir string) string {
-	if dir == "" {
-		return ""
-	}
-	var parts []string
-	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		rel, err := filepath.Rel(dir, path)
-		if err != nil {
-			rel = path
-		}
-		parts = append(parts, fmt.Sprintf("%s:%d:%d", rel, info.Size(), info.ModTime().UnixNano()))
-		return nil
-	})
-	if len(parts) == 0 {
-		return ""
-	}
-	sort.Strings(parts)
-	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
-	return hex.EncodeToString(sum[:])
 }
 
 // diffManifest writes one rendered manifest's dry-run outcome: <stem>.yaml
@@ -477,37 +439,36 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, stem, l
 // item G).
 const renderDirMarker = ".lo-dry-run"
 
-// prepareRenderDir prepares dir for a dry run's writes (item G): created
-// when missing. An EXISTING, non-empty dir must already carry
-// renderDirMarker — a prior dry run's own — or the call is refused
-// outright, so a dry run never scribbles into a directory an operator
-// keeps something else in. A dir that does carry the marker is cleared of
-// only the files it owns (NN-<entry>.{yaml,diff}, restore.d.{yaml,diff}) —
-// a stale entry from an earlier, differently-numbered or
-// differently-selected run never survives alongside the new set.
+// prepareRenderDir prepares dir for a dry run's writes (bash:
+// bootstrap::_prepare_render_dir). The path may not contain a symlink (a
+// rendered Secret must land where the operator pointed, never somewhere a
+// link leads). A missing dir is created 0700 with the marker; an EXISTING,
+// non-empty dir must carry renderDirMarker as a regular file — a prior dry
+// run's own — or the call is refused, so a dry run never scribbles into a
+// directory an operator keeps something else in. A dir that does carry the
+// marker is cleared of only the files it owns (NN-<entry>.{yaml,diff},
+// restore.d.{yaml,diff}): a stale entry from an earlier,
+// differently-numbered or differently-selected run never survives alongside
+// the new set.
 func prepareRenderDir(dir string) error {
+	if err := refuseSymlinkedPath(dir); err != nil {
+		return err
+	}
 	entries, err := os.ReadDir(dir)
 	switch {
 	case os.IsNotExist(err):
-		if err := os.MkdirAll(dir, 0o750); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
-		return writeGuarded(filepath.Join(dir, renderDirMarker), []byte("lok8s dry-run output directory — safe to delete\n"), 0o600)
+		return writeGuarded(filepath.Join(dir, renderDirMarker), []byte(renderDirMarkerText), 0o600)
 	case err != nil:
 		return err
 	}
 	if len(entries) == 0 {
-		return writeGuarded(filepath.Join(dir, renderDirMarker), []byte("lok8s dry-run output directory — safe to delete\n"), 0o600)
+		return writeGuarded(filepath.Join(dir, renderDirMarker), []byte(renderDirMarkerText), 0o600)
 	}
-	hasMarker := false
-	for _, en := range entries {
-		if en.Name() == renderDirMarker {
-			hasMarker = true
-			break
-		}
-	}
-	if !hasMarker {
-		return fmt.Errorf("%s is not empty and does not carry %s (not a dry run's own output directory) — point --render-dir at an empty or lok8s-owned directory", dir, renderDirMarker)
+	if fi, err := os.Lstat(filepath.Join(dir, renderDirMarker)); err != nil || !fi.Mode().IsRegular() {
+		return fmt.Errorf("%s is not empty and does not carry %s as a regular file (not a dry run's own output directory) — point --render-dir at an empty or lok8s-owned directory", dir, renderDirMarker)
 	}
 	for _, en := range entries {
 		if en.IsDir() || !renderOwnedRe.MatchString(en.Name()) {
@@ -515,6 +476,39 @@ func prepareRenderDir(dir string) error {
 		}
 		if err := os.Remove(filepath.Join(dir, en.Name())); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+const renderDirMarkerText = "lok8s dry-run output directory — safe to delete\n"
+
+// refuseSymlinkedPath walks dir's components from the root and refuses the
+// first one that is a symlink (the lexical path and the resolved path must
+// be the same). Components that do not exist yet are created by the caller.
+func refuseSymlinkedPath(dir string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	cur := filepath.VolumeName(abs) + string(filepath.Separator)
+	for part := range strings.SplitSeq(strings.TrimPrefix(abs, cur), string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		fi, err := os.Lstat(cur)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symlink — point --render-dir at a path without symlinks", cur)
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("%s is not a directory", cur)
 		}
 	}
 	return nil
@@ -562,11 +556,13 @@ func summarizeDiff(diff string) (changed, added int, counted bool) {
 // applied" alone hides a Secret a typo'd --only, or an out-of-date backup,
 // would silently overwrite on the next real run. Reads every
 // restore.d/*.sops.yaml exactly like restoreD (plaintext working copy
-// first, else sops-decrypt in memory — never writes, never applies),
-// concatenates them into ONE manifest, and diffs it like any other entry.
-// Returns nil when there is nothing under restore.d to report (no
-// directory, or every *.sops.yaml failed to decrypt) — the caller prints no
-// line for it then, same as a real run skipping an empty restore.d.
+// first, else a sops decrypt in memory with the normal key discovery —
+// never writes, never applies), concatenates them into ONE manifest, and
+// diffs it like any other entry. A file that does not decrypt is an error
+// (exit 2): the preview of restore.d is incomplete, so the run cannot say
+// "nothing would change". Returns nil when there is nothing under restore.d
+// to report (no directory, no file) — the caller prints no line for it then,
+// same as a real run skipping an empty restore.d.
 func (e *Engine) dryRunRestoreD(ctx context.Context, domain, kubeconfig string) *dryResult {
 	stderr := e.stderr()
 	rdir := e.Paths.Clusters + "/" + domain + "/restore.d"
@@ -576,6 +572,7 @@ func (e *Engine) dryRunRestoreD(ctx context.Context, domain, kubeconfig string) 
 	files, _ := filepath.Glob(rdir + "/*.sops.yaml")
 	sort.Strings(files)
 	var docs []string
+	failed := false
 	for _, f := range files {
 		if !fsutil.FileExists(f) {
 			continue
@@ -590,10 +587,14 @@ func (e *Engine) dryRunRestoreD(ctx context.Context, domain, kubeconfig string) 
 		}
 		dec, err := e.sopsDecrypt(f)
 		if err != nil {
-			ui.WarnTo(stderr, "bootstrap: dry-run: restore.d could not decrypt %s — excluded from the diff (its owner would re-create/re-issue on a real run)", base)
+			ui.ErrorTo(stderr, "bootstrap: dry-run: restore.d: cannot decrypt %s: %s", filepath.Base(f), firstLine(err.Error()))
+			failed = true
 			continue
 		}
 		docs = append(docs, strings.TrimRight(string(dec), "\n"))
+	}
+	if failed {
+		return &dryResult{status: dryError}
 	}
 	if len(docs) == 0 {
 		return nil

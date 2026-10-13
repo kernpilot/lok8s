@@ -48,6 +48,12 @@ func DispatchPlugin(ctx context.Context, args []string, stdin io.Reader, stdout,
 	argv0 := filepath.ToSlash(args[0])
 	switch {
 	case strings.HasSuffix(argv0, "/secret/Secret"):
+		// `Secret --capabilities`, like the standalone plugin binary: the
+		// dry run's probe (internal/addons.NewDryRunBoundary).
+		if len(args) == 2 && args[1] == "--capabilities" {
+			fmt.Fprintln(stdout, secret.Capabilities)
+			return true, 0
+		}
 		applyPluginEnv(args[0], secretPluginRel)
 		if err := secret.Run(args, stdin, stdout, plugin.DefaultEnv); err != nil {
 			fmt.Fprintln(stderr, "secret plugin:", err)

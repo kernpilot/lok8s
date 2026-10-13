@@ -347,3 +347,53 @@ func entryKeys(es []plugin.Entry) []string {
 	}
 	return k
 }
+
+// A dry run never writes CAROOT: with no CA there, the leaf is signed by a
+// CA minted in memory (one per plugin process) and the mint is reported.
+func TestCert_DryRunNeverWritesCAROOT(t *testing.T) {
+	caroot := filepath.Join(t.TempDir(), "caroot")
+	t.Setenv("CAROOT", caroot)
+	var reported []string
+	ctx := certCtx(t, t.TempDir(), "ns", "web")
+	ctx.DryRun = true
+	ctx.Minted = func(what string) error { reported = append(reported, what); return nil }
+	g := NewCert(&specpkg.CertSpec{Hosts: []string{"web.test"}})
+	if _, err := g.Generate(ctx); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if _, err := os.Stat(caroot); err == nil {
+		t.Fatal("a dry run wrote CAROOT")
+	}
+	if len(reported) != 1 || reported[0] != "caroot "+caroot {
+		t.Errorf("reported = %q", reported)
+	}
+	// A second leaf of the same process reuses the in-memory CA.
+	ctx2 := certCtx(t, t.TempDir(), "ns", "api")
+	ctx2.DryRun, ctx2.Minted = true, ctx.Minted
+	if _, err := NewCert(&specpkg.CertSpec{Hosts: []string{"api.test"}}).Generate(ctx2); err != nil {
+		t.Fatal(err)
+	}
+	if len(reported) != 1 {
+		t.Errorf("the in-memory CA was minted twice: %q", reported)
+	}
+}
+
+// An existing CAROOT CA is used as it is: nothing reported, nothing written.
+func TestCert_DryRunUsesTheExistingCA(t *testing.T) {
+	caroot := t.TempDir()
+	t.Setenv("CAROOT", caroot)
+	if _, _, err := certgen.LoadOrCreateCARoot(rand.Reader); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadDir(caroot)
+	ctx := certCtx(t, t.TempDir(), "ns", "web")
+	ctx.DryRun = true
+	ctx.Minted = func(what string) error { t.Errorf("reported %q with a CA in CAROOT", what); return nil }
+	if _, err := NewCert(&specpkg.CertSpec{Hosts: []string{"web.test"}}).Generate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadDir(caroot)
+	if len(after) != len(before) {
+		t.Errorf("CAROOT changed: %v -> %v", before, after)
+	}
+}

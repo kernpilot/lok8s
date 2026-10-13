@@ -7,8 +7,12 @@ package cli
 // standalone bootstrap core internal/bootstrap.
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -93,6 +97,66 @@ func (f *bootstrapModeFlags) options(stderr io.Writer, bootstrapOnly, onlyChange
 	return opts, nil
 }
 
+// exit maps the command's result onto the process exit code. A dry run has
+// its own contract at this boundary, for `lo bootstrap` and `lo provision
+// --bootstrap` alike: 0 when nothing would change, 1 ONLY when an entry's
+// diff found a change (bootstrap.ErrDryRunDiffers), and 2 for every other
+// failure, before or outside the per-entry diff (a flag combination, a
+// missing spec or kubeconfig, a driver export, the render boundary): a
+// caller that gates a change window on rc 1 must never read an error as
+// "changes". An interrupt keeps its 128+n code (main maps it).
+func (f *bootstrapModeFlags) exit(stderr io.Writer, err error) error {
+	if !f.dryRun || err == nil || errors.Is(err, bootstrap.ErrDryRunDiffers) || errors.Is(err, context.Canceled) {
+		return dispatchExit(stderr, err)
+	}
+	if !errors.Is(err, ErrHandled) && !isChildExit(err) {
+		ui.ErrorTo(stderr, "%v", err)
+	}
+	exitNow(2)
+	return ErrHandled
+}
+
+// parseErrors is argshFlagErrors and argshNoArgs with the dry-run exit: a
+// parse error of a command line that asks for --dry-run exits 2 (bash: the
+// argsh parser exits 2 on every parse error), never 1.
+func (f *bootstrapModeFlags) parseErrors(cmd *cobra.Command) *cobra.Command {
+	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		herr := argshErrorf(c.ErrOrStderr(), "%s", argshFlagError(c, err.Error()))
+		if argvAsksDryRun(os.Args[1:]) {
+			exitNow(2)
+		}
+		return herr
+	})
+	args := cmd.Args
+	cmd.Args = func(c *cobra.Command, a []string) error {
+		err := args(c, a)
+		if err != nil && f.dryRun {
+			exitNow(2)
+		}
+		return err
+	}
+	return cmd
+}
+
+// argvAsksDryRun reports a --dry-run among the raw arguments (up to `--`).
+// A flag parse error stops pflag before it reads every flag, so the parsed
+// value cannot answer this.
+func argvAsksDryRun(argv []string) bool {
+	for _, a := range argv {
+		if a == "--" {
+			return false
+		}
+		if a == "--dry-run" {
+			return true
+		}
+		if v, ok := strings.CutPrefix(a, "--dry-run="); ok {
+			b, err := strconv.ParseBool(v)
+			return err != nil || b
+		}
+	}
+	return false
+}
+
 func newProvisionCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	var bootstrapOnly bool
 	var mode bootstrapModeFlags
@@ -108,7 +172,7 @@ func newProvisionCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			stderr := cmd.ErrOrStderr()
 			opts, err := mode.options(stderr, bootstrapOnly, cmd.Flags().Changed("only"))
 			if err != nil {
-				return err
+				return mode.exit(stderr, err)
 			}
 			d := ambientMainEnv(cmd, paths)
 			// Same reason as `lo build`: the domain can come from
@@ -122,12 +186,12 @@ func newProvisionCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			disp.Hooks.BootstrapApply = bootstrap.ApplyHook(paths, disp.Runner, disp.Stdout, disp.Stderr, opts)
 			disp.BootstrapDryRun = opts.DryRun
 			disp.BootstrapAllowGenerators = opts.AllowGenerators
-			return dispatchExit(cmd.ErrOrStderr(), disp.Dispatch(cmd.Context(), d, bootstrapOnly))
+			return mode.exit(cmd.ErrOrStderr(), disp.Dispatch(cmd.Context(), d, bootstrapOnly))
 		},
 	}
 	cmd.Flags().BoolVarP(&bootstrapOnly, "bootstrap", "b", false, "Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)")
 	mode.bind(cmd)
-	return argshFlagErrors(cmd)
+	return mode.parseErrors(cmd)
 }
 
 func newDestroyCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
@@ -160,7 +224,7 @@ func newBootstrapCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			stdout, stderr := cmd.OutOrStdout(), cmd.ErrOrStderr()
 			opts, err := mode.options(stderr, true, cmd.Flags().Changed("only"))
 			if err != nil {
-				return err
+				return mode.exit(stderr, err)
 			}
 			d := ambientMainEnv(cmd, paths)
 			runner := newRunner(paths)
@@ -170,9 +234,9 @@ func newBootstrapCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 				Drivers:          disp.Drivers,
 				InventoryPublish: inventory.PublishHook(paths, runner, stderr),
 			}
-			return dispatchExit(cmd.ErrOrStderr(), bd.Dispatch(cmd.Context(), d))
+			return mode.exit(cmd.ErrOrStderr(), bd.Dispatch(cmd.Context(), d))
 		},
 	}
 	mode.bind(cmd)
-	return argshFlagErrors(cmd)
+	return mode.parseErrors(cmd)
 }
