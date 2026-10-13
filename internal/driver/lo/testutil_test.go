@@ -637,9 +637,12 @@ func (f *fakeDocker) disconnectNetwork(_ execx.Cmd, rest []string) error {
 	return nil
 }
 
-// connectNetwork answers `docker network connect NET NAME` with a fixed
-// address in the dynamic range.
+// connectNetwork answers `docker network connect [--gw-priority N] NET NAME`
+// with a fixed address in the dynamic range.
 func (f *fakeDocker) connectNetwork(_ execx.Cmd, rest []string) error {
+	if len(rest) >= 2 && rest[0] == "--gw-priority" {
+		rest = rest[2:]
+	}
 	if len(rest) >= 2 {
 		f.addMember(rest[0], "10.125.200.240/24", rest[1])
 	}
