@@ -202,6 +202,20 @@ _shim_main_deploy() {
   assert_output --partial "expected key=value"
 }
 
+@test "main::deploy refuses a spec file with a second document" {
+  # The two implementations read such a file as two different specs. Go twin:
+  # TestDeployRefusesASecondDocument (internal/cli).
+  _shim_main_deploy
+  local spec
+  for spec in cluster.lok8s.yaml deploy.lok8s.yaml; do
+    rm -f "${PATH_CLUSTERS}/test.lok8s.dev"/*.lok8s.yaml
+    printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: fixture\n---\n' > "${PATH_CLUSTERS}/test.lok8s.dev/${spec}"
+    run main::deploy
+    assert_failure
+    assert_output "[error] ${PATH_CLUSTERS}/test.lok8s.dev/${spec} holds more than one YAML document. Remove line 5 (a '---' line after the spec)."
+  done
+}
+
 @test "main::deploy -l foo= (empty value) errors expected key=value" {
   _shim_main_deploy
   run main::deploy -l foo=

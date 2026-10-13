@@ -56,6 +56,9 @@ addons::_driver() {
   local target="${1:-${domain:-${DOMAIN_NAME:-lok8s.dev}}}"
   local spec="${PATH_CLUSTERS}/${target}/cluster.lok8s.yaml"
   local kind rc=0
+  # One YAML document (domain::spec_check), with its own message: the kind is
+  # not malformed, the layout is.
+  domain::spec_check "${spec}" || return 1
   kind=$(domain::spec_driver "${spec}" lo) || rc=$?
   if (( rc )); then
     error "cluster spec for '${target}' declares a malformed kind (${spec}) — refusing to assume 'lo'"
@@ -281,6 +284,7 @@ addons::detail() {
   # values.<driver>.yaml overlay and the driver's default entries, so a
   # malformed one must be reported, not guessed away.
   local kind
+  domain::spec_check "${spec}" || return 1
   kind=$(domain::spec_driver "${spec}" lo) || {
     error "cluster spec for '${domain}' declares a malformed kind (${spec})"
     return 1

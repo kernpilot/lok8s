@@ -3,6 +3,42 @@
 lok8s uses YAML spec files to define clusters and deployments. These specs
 double as Kubernetes CRDs when used with the operator.
 
+## One YAML document per spec file {#one-document}
+
+A spec file (`cluster.lok8s.yaml` or `deploy.lok8s.yaml`) holds one YAML
+document. The Go readers of `lo` read only the first document of a file, and
+the bash readers (yq) read every document. Thus a file with more than one
+document gives two different specs, and each command that reads the spec
+refuses the file.
+
+A spec file can have these lines:
+
+- one `---` line before the spec;
+- one `...` line (the document end marker) after the spec;
+- blank lines, comment lines and `%` directives.
+
+`lo` refuses these layouts:
+
+- a `---` line after the spec, also a `---` at the end of the file with
+  nothing after it;
+- empty documents before the spec (two or more `---` lines before it);
+- text after a `...` line.
+
+The error names the spec file and the lines to remove. For example:
+
+```text
+[error] clusters/example.dev/cluster.lok8s.yaml holds more than one YAML document. Remove line 8 (a '---' line after the spec).
+```
+
+These commands refuse such a file before they change something:
+`lo provision`, `lo up`, `lo bootstrap`, `lo destroy`, `lo down`,
+`lo recover`, `lo build`, `lo deploy` (also for the cluster spec that
+`spec.clusterRef` names), the `lo kubehz` commands that read the spec,
+`lo addons` and `lo lint`. `lo status` shows the error in its Cluster
+section. `lo audit` reports the file as one `unknown` finding and runs no
+other check on it. `lo use` and `lo doctor` show the driver of such a domain
+as `?`.
+
 ## cluster.lok8s.yaml
 
 Defines a cluster domain. The `kind` field determines which driver contract
@@ -325,12 +361,8 @@ image: every node of the kind config gets `image: "kindest/node:<tag>"`.
 `lo lint`, `lo provision` and `lo audit` read the version with the same rules
 in both implementations:
 
-- The spec file holds one YAML document. A `---` line before it and a `...`
-  line after it are allowed; a trailing `---`, empty documents before the
-  spec and a second document are refused, with the line of the marker.
-  `lo provision` and `lo lint` check this first, for every cluster spec,
-  because the Go readers read only the first document and the bash readers
-  read every document: such a file reads as two different specs.
+- The spec file holds one YAML document
+  ([One YAML document per spec file](#one-document)).
 - YAML aliases and merge keys (`<<: *anchor`) are resolved: a key of the map
   wins over a merged key, the last duplicate key wins, and in
   `<<: [*a, *b]` the first map wins. An anchor can be on a key. An alias
@@ -348,10 +380,11 @@ in both implementations:
   map or a list; a value with a control character (a NUL byte, a tab, an
   escape sequence, U+0085, U+2028, a bidi override). A problem shows each
   control character as `?` and at most 80 characters of the value.
-- Each yq call of the bash implementation has a time limit of 10 s, in bash
-  itself (it does not need GNU `timeout`, so it holds on macOS too), and a
+- Each yq call of the bash implementation has a time limit of 10 s and a
   memory limit of 256 MiB (`ulimit -d`) where the operating system enforces
-  it. A call that passes a limit is reported with that limit.
+  it. The time limit uses a background `sleep`, not GNU `timeout`, so it
+  holds on macOS too. A call that passes a limit is reported with that
+  limit.
 
 `lo provision` refuses before it creates a VM, a docker network or a
 container. `lo audit` reports a refused spec as `unknown` with the same

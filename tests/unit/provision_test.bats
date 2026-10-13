@@ -598,7 +598,7 @@ YAML
 
 # --- provision::read_kind: one YAML document ---
 # A cluster spec file with more than one YAML document stops the dispatch
-# before the driver is chosen (domain::spec_layout): the Go readers decode the
+# before the driver is chosen (domain::spec_check): the Go readers decode the
 # first document and the bash readers every document, so the file reads as two
 # different specs. Go twin: TestReadKindRefusesASecondDocument.
 
@@ -609,11 +609,11 @@ YAML
     printf '%b' "${src}" > "${spec}"
     run provision::read_kind "${spec}"
     assert_failure
-    assert_output --partial "cluster spec ${spec} holds more than one YAML document ${want}. Keep one document: remove line "
+    assert_output "[error] ${spec} ${want}"
   done <<'CASES'
-kind: Lo\nspec: {}\n---\n|(line 3: '---')
----\n---\nkind: Lo\n|(line 2: '---')
-kind: Lo\n---\nkind: KubeOne\n|(line 2: '---')
+kind: Lo\nspec: {}\n---\n|holds more than one YAML document. Remove line 3 (a '---' line after the spec).
+---\n---\nkind: Lo\n|holds an empty YAML document before the spec. Remove line 2 (a '---' line).
+kind: Lo\n---\nkind: KubeOne\n|holds more than one YAML document. Remove lines 2 to 3 (the '---' at line 2 and everything after it).
 CASES
 }
 
@@ -624,6 +624,54 @@ CASES
   run provision::read_kind "${spec}"
   assert_success
   assert_output "lo"
+}
+
+# --- the one-document rule, command by command ---
+# provision, destroy and status resolve the spec with provision::resolve_spec,
+# deploy and the build kubeconfig follow a clusterRef with
+# provision::resolve_clusterref: each stops before the driver, with one
+# [error] line that names the lines to remove. Go twins:
+# TestDispatchRefusesASecondDocument, TestResolveClusterRefRefusesASecondDocument.
+
+@test "provision::dispatch, dispatch_destroy and dispatch_status refuse a spec file with a second document" {
+  local spec="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml" call
+  printf -- '---\n' >> "${spec}"
+  cat > "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/main" <<'SCRIPT'
+driver::provision() { echo "DRIVER"; }
+driver::destroy() { echo "DRIVER"; }
+driver::status() { echo "DRIVER"; }
+driver::export() { echo "DRIVER"; }
+SCRIPT
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  for call in "provision::dispatch test.lok8s.dev" "provision::dispatch test.lok8s.dev 1" \
+              "provision::dispatch_destroy test.lok8s.dev" "provision::dispatch_status test.lok8s.dev"; do
+    # shellcheck disable=SC2086  # the function name and its arguments
+    run ${call}
+    assert_failure
+    assert_output "[error] ${spec} holds more than one YAML document. Remove line 16 (a '---' line after the spec)."
+  done
+}
+
+@test "provision::dispatch_status and resolve_clusterref refuse a deploy spec, or the cluster spec that it names, with a second document" {
+  local deploy="${BATS_TEST_TMPDIR}/clusters/staging.lok8s.dev/deploy.lok8s.yaml"
+  local cluster="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml" broken want
+  mkdir -p "${deploy%/*}"
+  cat > "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/main" <<'SCRIPT'
+driver::status() { echo "DRIVER"; }
+SCRIPT
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  for broken in "${deploy}" "${cluster}"; do
+    cp "${FIXTURES_DIR}/deploy-domain.lok8s.yaml" "${deploy}"
+    cp "${FIXTURES_DIR}/lo-cluster.lok8s.yaml" "${cluster}"
+    printf -- '---\n' >> "${broken}"
+    want="[error] ${broken} holds more than one YAML document. Remove line $(wc -l < "${broken}") (a '---' line after the spec)."
+    run provision::dispatch_status staging.lok8s.dev
+    assert_failure
+    assert_output "${want}"
+    run provision::resolve_clusterref staging.lok8s.dev
+    assert_failure
+    assert_output "${want}"
+  done
 }
 
 # --- --bootstrap --dry-run: a read-only dispatch ---

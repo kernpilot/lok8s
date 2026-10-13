@@ -127,8 +127,8 @@ func (l *Linter) all(domain string) bool {
 	// The document layout comes first (bash: the same check in lint::all):
 	// a spec file with more than one YAML document reads as two different
 	// specs in the two implementations, so no other check runs on it.
-	if line, marker, ok := specLayout(specFile); !ok {
-		ui.ErrorTo(l.ErrOut, "  %s holds more than one YAML document (line %d: '%s'). Keep one document: remove line %d and every document after the first.", specFile, line, marker, line)
+	if problem, ok := specLayout(specFile); !ok {
+		ui.ErrorTo(l.ErrOut, "  %s %s", specFile, problem)
 		ui.ErrorTo(l.ErrOut, "1 validation error(s)")
 		return false
 	}
@@ -438,6 +438,6 @@ func bufLines(buf *bytes.Buffer) []string {
 
 // specLayout is domain.SpecLayout (the per-domain run's `domain` parameter
 // hides the package name there).
-func specLayout(specFile string) (line int, marker string, ok bool) {
+func specLayout(specFile string) (problem string, ok bool) {
 	return domain.SpecLayout(specFile)
 }

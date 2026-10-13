@@ -57,11 +57,20 @@ func ResolveSpec(p *config.Paths, domainName string, stderr io.Writer) (*Spec, e
 		return nil, ui.Handled(fmt.Errorf("invalid domain name: %s", domainName))
 	}
 	base := filepath.Join(p.Clusters, domainName)
-	if fsutil.FileExists(filepath.Join(base, "cluster.lok8s.yaml")) {
-		return &Spec{Domain: domainName, File: filepath.Join(base, "cluster.lok8s.yaml"), Kind: SpecKindCluster}, nil
-	}
-	if fsutil.FileExists(filepath.Join(base, "deploy.lok8s.yaml")) {
-		return &Spec{Domain: domainName, File: filepath.Join(base, "deploy.lok8s.yaml"), Kind: SpecKindDeploy}, nil
+	// The one-document rule (domain.CheckSpecLayout) holds for every command
+	// that resolves a spec here: provision, destroy, status, recover.
+	for _, s := range [...]struct {
+		name string
+		kind string
+	}{{"cluster.lok8s.yaml", SpecKindCluster}, {"deploy.lok8s.yaml", SpecKindDeploy}} {
+		file := filepath.Join(base, s.name)
+		if !fsutil.FileExists(file) {
+			continue
+		}
+		if err := domainpkg.CheckSpecLayout(file, stderr); err != nil {
+			return nil, err
+		}
+		return &Spec{Domain: domainName, File: file, Kind: s.kind}, nil
 	}
 	// On a terminal the line carries the next step (ui.ErrorNext); piped it
 	// is the [error] line both implementations print.
@@ -82,6 +91,9 @@ func ResolveClusterRef(p *config.Paths, domainName string, stderr io.Writer) (st
 		ui.ErrorTo(stderr, "No deploy.lok8s.yaml found for %s", domainName)
 		return "", ui.Handled(fmt.Errorf("no deploy spec for %s", domainName))
 	}
+	if err := domainpkg.CheckSpecLayout(specFile, stderr); err != nil {
+		return "", err
+	}
 	info, _ := readSpecInfo(specFile)
 	ref := info.Spec.ClusterRef.Domain
 	if ref == "" {
@@ -96,25 +108,23 @@ func ResolveClusterRef(p *config.Paths, domainName string, stderr io.Writer) (st
 		ui.ErrorTo(stderr, "clusterRef domain %s has no cluster.lok8s.yaml", ref)
 		return "", ui.Handled(fmt.Errorf("clusterRef domain %s has no cluster spec", ref))
 	}
+	if err := domainpkg.CheckSpecLayout(filepath.Join(p.Clusters, ref, "cluster.lok8s.yaml"), stderr); err != nil {
+		return "", err
+	}
 	return ref, nil
 }
-
-// errSpecLayout is a cluster spec file with more than one YAML document
-// (ReadKind prints the line).
-var errSpecLayout = errors.New("cluster spec holds more than one YAML document")
 
 // ReadKind reads the driver name for the dispatch, with the errors the
 // dispatch wants to print (bash: provision::read_kind — the message layer
 // over domain::spec_driver, which owns the reading, coercion, and shape
 // guard).
 //
-// The document layout comes first (domainpkg.SpecLayout): a spec file with
+// The document layout comes first (domainpkg.CheckSpecLayout): a spec file with
 // more than one YAML document reads as two different specs in the two
 // implementations, so it stops here, before the driver is chosen.
 func ReadKind(clusterYAML string, stderr io.Writer) (string, error) {
-	if line, marker, ok := domainpkg.SpecLayout(clusterYAML); !ok {
-		ui.ErrorTo(stderr, "cluster spec %s holds more than one YAML document (line %d: '%s'). Keep one document: remove line %d and every document after the first.", clusterYAML, line, marker, line)
-		return "", ui.Handled(errSpecLayout)
+	if err := domainpkg.CheckSpecLayout(clusterYAML, stderr); err != nil {
+		return "", err
 	}
 	kind, err := domainpkg.SpecDriver(clusterYAML, "")
 	switch {

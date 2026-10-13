@@ -4,6 +4,7 @@ package provision
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -139,6 +140,36 @@ func TestResolveClusterRefDanglingRef(t *testing.T) {
 	assertContains(t, errBuf.String(), "clusterRef domain not found")
 }
 
+// The one-document rule holds for the deploy spec and for the cluster spec
+// that it names (lo deploy, the lo build kubeconfig). Bash twin:
+// "provision::resolve_clusterref refuses a spec file with a second document".
+func TestResolveClusterRefRefusesASecondDocument(t *testing.T) {
+	t.Parallel()
+	const want = " holds more than one YAML document. Remove line 8 (a '---' line after the spec).\n"
+	for _, broken := range []string{"staging.lok8s.dev/deploy.lok8s.yaml", "test.lok8s.dev/cluster.lok8s.yaml"} {
+		t.Run(broken, func(t *testing.T) {
+			t.Parallel()
+			p := testPaths(t)
+			testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"), loSpecYAML)
+			testutil.WriteFile(t, filepath.Join(p.Clusters, "staging.lok8s.dev", "deploy.lok8s.yaml"), deploySpecYAML)
+			spec := filepath.Join(p.Clusters, broken)
+			src, err := os.ReadFile(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			testutil.WriteFile(t, spec, string(src)+"---\n")
+			var errBuf bytes.Buffer
+			ref, err := ResolveClusterRef(p, "staging.lok8s.dev", &errBuf)
+			if err == nil {
+				t.Fatalf("ResolveClusterRef = %q, nil; want the layout error", ref)
+			}
+			if got := errBuf.String(); got != "[error] "+spec+want {
+				t.Fatalf("stderr = %q\nwant     %q", got, "[error] "+spec+want)
+			}
+		})
+	}
+}
+
 // TestReadKindRefusesASecondDocument: a cluster spec file with more than
 // one YAML document stops the dispatch before the driver is chosen, with
 // the line that starts the second document (domain.SpecLayout). The Go
@@ -147,9 +178,9 @@ func TestResolveClusterRefDanglingRef(t *testing.T) {
 // in tests/unit/provision_test.bats.
 func TestReadKindRefusesASecondDocument(t *testing.T) {
 	for _, tc := range []struct{ name, src, want string }{
-		{"trailing separator", "kind: Lo\nspec: {}\n---\n", "(line 3: '---')"},
-		{"two empty documents then the spec", "---\n---\nkind: Lo\n", "(line 2: '---')"},
-		{"two documents", "kind: Lo\n---\nkind: KubeOne\n", "(line 2: '---')"},
+		{"trailing separator", "kind: Lo\nspec: {}\n---\n", "holds more than one YAML document. Remove line 3 (a '---' line after the spec)."},
+		{"two empty documents then the spec", "---\n---\nkind: Lo\n", "holds an empty YAML document before the spec. Remove line 2 (a '---' line)."},
+		{"two documents", "kind: Lo\n---\nkind: KubeOne\n", "holds more than one YAML document. Remove lines 2 to 3 (the '---' at line 2 and everything after it)."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := filepath.Join(t.TempDir(), "cluster.lok8s.yaml")
@@ -159,7 +190,7 @@ func TestReadKindRefusesASecondDocument(t *testing.T) {
 			if err == nil {
 				t.Fatalf("ReadKind = %q, nil; want the layout error", kind)
 			}
-			want := "[error] cluster spec " + spec + " holds more than one YAML document " + tc.want + ". Keep one document: remove line "
+			want := "[error] " + spec + " " + tc.want + "\n"
 			if !strings.Contains(stderr.String(), want) {
 				t.Fatalf("stderr = %q, want %q…", stderr.String(), want)
 			}

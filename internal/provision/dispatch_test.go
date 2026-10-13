@@ -290,6 +290,69 @@ func TestDispatchStatusDeployMissingClusterRef(t *testing.T) {
 	assertContains(t, errBuf.String(), "missing spec.clusterRef.domain")
 }
 
+// The one-document rule holds for provision, destroy and status
+// (ResolveSpec): a spec file with a second document stops each before the
+// driver, with one [error] line that names the lines to remove. Also for a
+// deploy spec, and for the cluster spec that a deploy spec names. Bash twin:
+// "provision::dispatch, dispatch_destroy and dispatch_status refuse a spec
+// file with a second document" in tests/unit/provision_test.bats.
+func TestDispatchRefusesASecondDocument(t *testing.T) {
+	const want = " holds more than one YAML document. Remove line 8 (a '---' line after the spec).\n"
+	for name, call := range map[string]func(*Dispatcher, string) error{
+		"provision": func(d *Dispatcher, dom string) error { return d.Dispatch(t.Context(), dom, false) },
+		"bootstrap": func(d *Dispatcher, dom string) error { return d.Dispatch(t.Context(), dom, true) },
+		"destroy":   func(d *Dispatcher, dom string) error { return d.DispatchDestroy(t.Context(), dom) },
+		"status":    func(d *Dispatcher, dom string) error { return d.DispatchStatus(t.Context(), dom) },
+	} {
+		t.Run(name+"/cluster spec", func(t *testing.T) {
+			log := []string{}
+			d, errBuf := loDispatcher(t, &fakeDriver{log: &log})
+			spec := filepath.Join(d.Paths.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
+			testutil.WriteFile(t, spec, loSpecYAML+"---\n")
+			if err := call(d, "test.lok8s.dev"); err == nil {
+				t.Fatal("expected failure")
+			}
+			if len(log) != 0 {
+				t.Errorf("the driver ran: %v", log)
+			}
+			if got := errBuf.String(); got != "[error] "+spec+want {
+				t.Errorf("stderr = %q\nwant     %q", got, "[error] "+spec+want)
+			}
+		})
+	}
+	t.Run("status/the cluster spec that a deploy spec names", func(t *testing.T) {
+		log := []string{}
+		d, errBuf := loDispatcher(t, &fakeDriver{log: &log})
+		spec := filepath.Join(d.Paths.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
+		testutil.WriteFile(t, spec, loSpecYAML+"---\n")
+		testutil.WriteFile(t, filepath.Join(d.Paths.Clusters, "staging.lok8s.dev", "deploy.lok8s.yaml"), deploySpecYAML)
+		if err := d.DispatchStatus(t.Context(), "staging.lok8s.dev"); err == nil {
+			t.Fatal("expected failure")
+		}
+		if len(log) != 0 {
+			t.Errorf("the driver ran: %v", log)
+		}
+		if got := errBuf.String(); got != "[error] "+spec+want {
+			t.Errorf("stderr = %q\nwant     %q", got, "[error] "+spec+want)
+		}
+	})
+	t.Run("status/deploy spec", func(t *testing.T) {
+		log := []string{}
+		d, errBuf := loDispatcher(t, &fakeDriver{log: &log})
+		spec := filepath.Join(d.Paths.Clusters, "staging.lok8s.dev", "deploy.lok8s.yaml")
+		testutil.WriteFile(t, spec, deploySpecYAML+"---\n")
+		if err := d.DispatchStatus(t.Context(), "staging.lok8s.dev"); err == nil {
+			t.Fatal("expected failure")
+		}
+		if len(log) != 0 {
+			t.Errorf("the driver ran: %v", log)
+		}
+		if got := errBuf.String(); got != "[error] "+spec+want {
+			t.Errorf("stderr = %q\nwant     %q", got, "[error] "+spec+want)
+		}
+	})
+}
+
 // ── LoadProviderCreds ─────────────────────────────────────
 
 // The provider is loaded and validated BEFORE the driver is built, so the

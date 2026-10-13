@@ -89,8 +89,8 @@ func displayValue(v string) string {
 // (bash would drop a NUL byte). The error text has no
 // prefix and no indent: the caller prints it.
 func KubernetesVersion(specFile string) (string, error) {
-	if line, marker, ok := domain.SpecLayout(specFile); !ok {
-		return "", unreadable("the spec file holds more than one YAML document (line %d: '%s'). Keep one document: remove line %d and every document after the first.", line, marker, line)
+	if problem, ok := domain.SpecLayout(specFile); !ok {
+		return "", unreadable("the spec file %s", problem)
 	}
 	docs, err := yqsem.LoadDocs(specFile)
 	if err != nil {

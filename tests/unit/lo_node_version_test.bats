@@ -149,8 +149,8 @@ _yq_stub() {
 
 @test "spec::kind_node_version: a read past the time limit is named, without timeout(1)" {
   _spec "version: v1.31.4"
-  # The time limit is pure bash (macOS has no GNU timeout): a timeout(1)
-  # call fails the test.
+  # The time limit needs no GNU timeout (macOS has none): a timeout(1) call
+  # fails the test.
   timeout() { echo "timeout(1) was called" >&2; return 99; }
   export -f timeout
   _yq_stub 'exec sleep 5'
@@ -186,18 +186,96 @@ _yq_stub() {
   assert_output "spec.kubernetes.version cannot be read: yq stopped at the memory limit of 256 MiB, or a signal stopped it. Simplify the spec file."
 }
 
-@test "spec::_kver_yq: an interrupt removes the temporary files" {
+# _gone <pattern> — true when no process matches <pattern> (pgrep -f) within
+# 2 s. A process that a signal stops can stay visible for a moment.
+_gone() {
+  local i
+  for i in $(seq 1 20); do
+    pgrep -f "${1}" >/dev/null || return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+# _kill_left <pattern> — stop the processes that a failed test left behind.
+_kill_left() {
+  local p
+  for p in $(pgrep -f "${1}"); do kill "${p}" 2>/dev/null || :; done
+}
+
+@test "spec::_kver_yq: the watchdog does not stop a read that ends before the time limit" {
+  _spec "version: v1.31.4"
+  local real
+  real=$(command -v yq)
+  # Each yq call takes 0.5 s, the limit is 3 s. A watchdog that does not wait
+  # (a `read -t` on a process substitution on macOS ends at once) stops yq.
+  _yq_stub "sleep 0.5; exec '${real}' \"\$@\""
+  _SPEC_KVER_TIMEOUT=3
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  assert_success
+  assert_output "v1.31.4"
+}
+
+@test "spec::_kver_yq: a read that ends in time leaves no watchdog sleep behind" {
+  _spec "version: v1.31.4"
+  # A time limit that no other process uses, so pgrep finds only this sleep.
+  _SPEC_KVER_TIMEOUT=$(( 7000 + RANDOM % 1000 ))
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  assert_success
+  assert_output "v1.31.4"
+  _gone "^sleep ${_SPEC_KVER_TIMEOUT}\$" || {
+    _kill_left "^sleep ${_SPEC_KVER_TIMEOUT}\$"
+    echo "the watchdog left 'sleep ${_SPEC_KVER_TIMEOUT}' running" >&2; return 1
+  }
+}
+
+# A `read -t N` on a process substitution opened read-write (`<> <(:)`)
+# waits on Linux only: on macOS it ends at once, and every read timed out.
+@test "the bash tree has no read on a process substitution opened read-write" {
+  run grep -rnE '<>[[:space:]]*<\(' "${_PROJECT_ROOT}/.lok8s" "${_PROJECT_ROOT}/internal/assets/lok8s"
+  assert_failure 1
+  assert_output ""
+}
+
+# An interrupt of the read (TERM, or INT from Ctrl-C) stops yq and the
+# watchdog, and the EXIT trap removes the temporary files. The read runs
+# outside `run`, so a yq or a sleep that the traps miss stays visible.
+@test "spec::_kver_yq: an interrupt stops yq and the watchdog and removes the temporary files" {
   _spec "version: v1.31.4"
   export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
   mkdir -p "${TMPDIR}"
-  # The yq stub stops the read it runs in (its parent) with SIGTERM, as an
-  # interrupt of `lo` would.
-  _yq_stub 'kill -TERM "${PPID}"; exec sleep 1'
-  run bash -c 'import() { :; }; source "$1/domain.sh"; source "$1/spec.sh"; spec::_kver_yq "$2" -r .kind' \
-    bash "${_PROJECT_ROOT}/.lok8s/utils" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
-  [ "${status}" -eq 143 ] || { echo "status ${status}, want 143 (SIGTERM)" >&2; return 1; }
-  run ls -A "${TMPDIR}"
-  assert_output ""
+  local sig want rc limit stub_sleep bad=0
+  for sig in TERM INT; do
+    want=143
+    [[ "${sig}" == INT ]] && want=130
+    # Durations that no other process uses, so pgrep finds only these.
+    limit=$(( 8000 + RANDOM % 1000 ))
+    stub_sleep=$(( 9000 + RANDOM % 1000 ))
+    # The yq stub stops the read it runs in (its parent) with the signal, as
+    # an interrupt of `lo` would, then waits: only a trap stops it sooner.
+    _yq_stub "kill -${sig} \"\${PPID}\"; exec sleep ${stub_sleep}"
+    rc=0
+    _SPEC_KVER_TIMEOUT="${limit}" bash -c \
+      'import() { :; }; source "$1/domain.sh"; source "$1/spec.sh"; _SPEC_KVER_TIMEOUT=$3; spec::_kver_yq "$2" -r .kind' \
+      bash "${_PROJECT_ROOT}/.lok8s/utils" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" "${limit}" \
+      >"${BATS_TEST_TMPDIR}/out" 2>&1 || rc=$?
+    if (( rc != want )); then
+      echo "${sig}: status ${rc}, want ${want}" >&2; bad=1
+    fi
+    if ! _gone "^sleep ${stub_sleep}\$"; then
+      echo "${sig}: the trap did not stop yq" >&2; bad=1
+    fi
+    if ! _gone "^sleep ${limit}\$"; then
+      echo "${sig}: the trap did not stop the watchdog" >&2; bad=1
+    fi
+    if [[ -n "$(ls -A "${TMPDIR}")" ]]; then
+      echo "${sig}: temporary files remain: $(ls -A "${TMPDIR}")" >&2; bad=1
+    fi
+    _kill_left "^sleep ${stub_sleep}\$"
+    _kill_left "^sleep ${limit}\$"
+    rm -rf "${TMPDIR:?}"/*
+  done
+  (( bad == 0 ))
 }
 
 @test "spec::kind_node_version: yq stderr stays out of the shape checks" {
@@ -350,4 +428,22 @@ version: ~|
 |
 version: v1.35.0|v1.35.0
 EOF
+}
+
+# ── the run header of lo up ──────────────────────────────────────────────────
+# Go twin: TestRunHeaderShapes (internal/cli/cmd_up_test.go).
+
+@test "_lo_header: a spec file with a second document shows no driver and no version" {
+  eval "$(sed -n '/^_lo_header()/,/^}/p' "${_PROJECT_ROOT}/.lok8s/lo")"
+  declare -f _lo_header >/dev/null || { echo "could not extract _lo_header from .lok8s/lo" >&2; return 1; }
+  export KUBECONFIG="${PATH_BASE}/.kubeconfig/lotest.yaml"
+  _spec "version: v1.31.4"
+  run _lo_header test.dev
+  assert_success
+  assert_line --index 0 $'  \033[1;36mtest.dev\033[0m  \033[2mlo · kind · v1.31.4\033[0m'
+  printf -- '---\nkind: KubeOne\nspec:\n  kubernetes:\n    version: v1.20.0\n' >> "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  run _lo_header test.dev
+  assert_success
+  assert_line --index 0 $'  \033[1;36mtest.dev\033[0m  \033[2m\033[0m'
+  refute_output --partial "registries"
 }

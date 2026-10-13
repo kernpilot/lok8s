@@ -449,8 +449,8 @@ done
 # Only one YAML document reads the same in the Go readers (first document) and
 # the bash readers (yq on every document). layoutlead.dev (one document after a
 # `---`) provisions; a trailing `---`, two empty documents before the spec and
-# a second document stop the dispatch before the driver is chosen, with the
-# line of the marker, and run no docker command.
+# a second document stop the dispatch before the driver is chosen, with one
+# [error] line that names the lines to remove, and run no docker command.
 lay_cluster() {  # <domain> <before, %b> <after, %b> <cidr>
   mkdir -p "${PROJ}/clusters/${1}"
   printf '%bkind: Lo\nmetadata:\n  name: %s\nspec:\n  runtime: kind\n  network:\n    name: %snet\n    cidr: %s\n  registries:\n    tls: false\n%b' \
@@ -465,13 +465,18 @@ node_check layoutlead.dev
 for side in bash go; do
   node_pin "${side}: layoutlead.dev (one document after ---) reached kind create" "${WORK}/kind.${side}.log" 1 '^kind: Cluster$'
 done
-for d in layouttrail.dev:11 layoutempty.dev:2 layouttwo.dev:11; do
-  node_check "${d%%:*}"
+# fd 3: the commands in the loop never read the table.
+while IFS='|' read -r -u 3 d problem; do
+  node_check "${d}"
   for side in bash go; do
-    node_pin "${side}: ${d%%:*} is refused with the layout" "${WORK}/${side}.err" 1 "/clusters/${d%%:*}/cluster\.lok8s\.yaml holds more than one YAML document \(line ${d##*:}: '---'\)\. Keep one document: remove line ${d##*:} and every document after the first\.$"
-    node_pin "${side}: ${d%%:*} ran no docker command" "${WORK}/docker.${side}.log" 0 '.'
+    node_pin "${side}: ${d} is refused with the layout" "${WORK}/${side}.err" 1 "/clusters/${d}/cluster\.lok8s\.yaml ${problem}$"
+    node_pin "${side}: ${d} ran no docker command" "${WORK}/docker.${side}.log" 0 '.'
   done
-done
+done 3<<'LAYOUT'
+layouttrail.dev|holds more than one YAML document\. Remove line 11 \(a '---' line after the spec\)\.
+layoutempty.dev|holds an empty YAML document before the spec\. Remove line 2 \(a '---' line\)\.
+layouttwo.dev|holds more than one YAML document\. Remove lines 11 to 12 \(the '---' at line 11 and everything after it\)\.
+LAYOUT
 unset PARITY_KIND_LOG PARITY_DOCKER_LOG
 
 # ── lo up with registry TLS ──────────────────────────────────────────────────

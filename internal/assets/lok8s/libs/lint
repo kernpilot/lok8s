@@ -670,9 +670,9 @@ lint::all() {
   # The document layout comes first (domain::spec_layout): a spec file with
   # more than one YAML document reads as two different specs in the two
   # implementations, so no other check runs on it.
-  local at
-  if ! at=$(domain::spec_layout "${spec_file}"); then
-    error "  ${spec_file} holds more than one YAML document (line ${at%% *}: '${at#* }'). Keep one document: remove line ${at%% *} and every document after the first."
+  local layout
+  if ! layout=$(domain::spec_layout "${spec_file}"); then
+    error "  ${spec_file} ${layout}"
     error "1 validation error(s)"
     return 1
   fi

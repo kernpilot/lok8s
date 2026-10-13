@@ -1,7 +1,6 @@
 package domain
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,7 +11,7 @@ import (
 )
 
 // specLayoutFixtures lists tests/fixtures/spec-layout/<verdict>--<case>.yaml
-// with the expected answer in <case>.want: "ok" or "<line> <marker>". The
+// with the expected answer in <case>.want: "ok" or the problem text. The
 // bats twin (tests/unit/domain_spec_layout_test.bats) reads the same files.
 func specLayoutFixtures(t *testing.T) map[string]string {
 	t.Helper()
@@ -32,11 +31,10 @@ func specLayoutFixtures(t *testing.T) map[string]string {
 }
 
 func specLayoutVerdict(path string) string {
-	line, marker, ok := SpecLayout(path)
-	if ok {
-		return "ok"
+	if problem, ok := SpecLayout(path); !ok {
+		return problem
 	}
-	return fmt.Sprintf("%d %s", line, marker)
+	return "ok"
 }
 
 func TestSpecLayoutFixtures(t *testing.T) {
@@ -48,7 +46,7 @@ func TestSpecLayoutFixtures(t *testing.T) {
 			t.Errorf("%s: the name says %q, the .want file says %q", filepath.Base(path), prefix, want)
 		}
 	}
-	if _, _, ok := SpecLayout(filepath.Join(t.TempDir(), "missing.yaml")); !ok {
+	if _, ok := SpecLayout(filepath.Join(t.TempDir(), "missing.yaml")); !ok {
 		t.Error("a missing file is not ok: the readers report it themselves")
 	}
 }

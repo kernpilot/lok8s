@@ -165,6 +165,14 @@ func (a *Auditor) RunDomain(d string) []Finding {
 			Remediation: "Audit the referenced cluster (spec.clusterRef.domain) instead."})
 		return r.findings
 	}
+	// One YAML document (domain.SpecLayout): another layout reads as two
+	// different specs in the two implementations, so no check reads it.
+	if problem, ok := domain.SpecLayout(specFile); !ok {
+		r.emit(Finding{ID: "cluster-spec", Title: "Cluster spec", Severity: "high", Status: "unknown",
+			Detail:      specFile + " " + problem,
+			Remediation: "Keep one YAML document in the spec file, then audit again."})
+		return r.findings
+	}
 
 	kind, err := domain.SpecDriver(specFile, "")
 	if err != nil {

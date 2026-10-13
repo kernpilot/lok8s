@@ -389,16 +389,16 @@ kver_problem klist.dev  "spec.kubernetes.version cannot be read: spec.kubernetes
 kver_problem kcycle.dev "spec.kubernetes.version cannot be read: the merge keys (<<) on the path to the value form a cycle. Remove the cycle."
 kver_problem knul.dev   "spec.kubernetes.version 'v1.31.4?' contains a control character (shown as '?'). Remove the control character."
 kver_clean   llead.dev
-lay_problem() {  # <domain> <line>
+lay_problem() {  # <domain> <the problem, after the spec path>
   check - lint --domain "${1}"
   for side in bash go; do
-    kver_pin "${side}: ${1} reports the layout" "${WORK}/${side}.err" "/clusters/${1}/cluster.lok8s.yaml holds more than one YAML document (line ${2}: '---'). Keep one document: remove line ${2} and every document after the first."
+    kver_pin "${side}: ${1} reports the layout" "${WORK}/${side}.err" "/clusters/${1}/cluster.lok8s.yaml ${2}"
     kver_pin "${side}: ${1} runs no other check" "${WORK}/${side}.err" "Missing required field" absent
   done
 }
-lay_problem ltrail.dev 7
-lay_problem lempty.dev 2
-lay_problem ltwo.dev 7
+lay_problem ltrail.dev "holds more than one YAML document. Remove line 7 (a '---' line after the spec)."
+lay_problem lempty.dev "holds an empty YAML document before the spec. Remove line 2 (a '---' line)."
+lay_problem ltwo.dev "holds more than one YAML document. Remove lines 7 to 8 (the '---' at line 7 and everything after it)."
 check - --domain iota.dev lint          # global-flag spelling
 # Go-only: --notes adds the default-equal advisory and changes nothing
 # else: same exit code, same stderr, stdout equal once the [note] lines

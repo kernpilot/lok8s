@@ -1571,6 +1571,19 @@ YAML
   assert_equal "$(_status_of cluster-spec)" "unknown"
 }
 
+@test "a spec file with a second document yields one unknown and no other check" {
+  # The two implementations would read two different specs, so no check reads
+  # the file. Go twin: TestRunDomainSecondDocument.
+  local spec="${PATH_CLUSTERS}/two/cluster.lok8s.yaml"
+  mkdir -p "${spec%/*}"
+  printf 'kind: Lo\nspec:\n  kubernetes:\n    version: v1.20.0\n---\nkind: KubeOne\n' > "${spec}"
+  audit::run_domain two
+  assert_equal "${#_AUDIT_FINDINGS[@]}" 1
+  assert_equal "$(_status_of cluster-spec)" "unknown"
+  assert_equal "$(_sev_of cluster-spec)" "high"
+  assert_equal "$(_detail_of cluster-spec)" "${spec} holds more than one YAML document. Remove lines 5 to 6 (the '---' at line 5 and everything after it)."
+}
+
 @test "a high/critical unknown caps the grade — couldn't-check is not a perfect score" {
   # A deploy-only domain yields a single HIGH 'unknown' (cluster-spec); it must
   # NOT read as a perfect A/100 for score-keyed tooling.

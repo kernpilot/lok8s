@@ -1014,7 +1014,7 @@ _kver_spec() {  # <dir> <kind> [version line]
   printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: a\nspec:\n  bootstrap: []\n---\n' > "${d}/cluster.lok8s.yaml"
   run lint::all twodoc
   assert_failure
-  assert_output --partial "  ${d}/cluster.lok8s.yaml holds more than one YAML document (line 7: '---'). Keep one document: remove line 7 and every document after the first."
+  assert_output --partial "  ${d}/cluster.lok8s.yaml holds more than one YAML document. Remove line 7 (a '---' line after the spec)."
   assert_output --partial "1 validation error(s)"
   refute_output --partial "  OK"
 }

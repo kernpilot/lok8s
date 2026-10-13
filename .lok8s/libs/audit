@@ -167,6 +167,15 @@ audit::run_domain() {
       "Audit the referenced cluster (spec.clusterRef.domain) instead."
     return 0
   fi
+  # One YAML document (domain::spec_layout): another layout reads as two
+  # different specs in the two implementations, so no check reads it.
+  local layout
+  if ! layout=$(domain::spec_layout "${spec_file}"); then
+    audit::_emit "cluster-spec" "Cluster spec" high unknown \
+      "${spec_file} ${layout}" \
+      "Keep one YAML document in the spec file, then audit again."
+    return 0
+  fi
 
   local kind provider
   kind=$(domain::spec_driver "${spec_file}") || kind=""

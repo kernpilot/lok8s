@@ -80,9 +80,12 @@ domain::resolve() {
 #          With a fallback given, the fallback is echoed and the rc is 0.
 #   rc 2 — `.kind` is present but is not a bare driver name. NEVER defaulted:
 #          the value reaches a path we source, and quietly replacing a crafted
-#          one with "lo" would hide the crafting.
+#          one with "lo" would hide the crafting. A spec file with more than
+#          one YAML document (domain::spec_layout) is rc 2 too: it reads as two
+#          different specs in the two implementations (Go: ErrSpecLayout).
 domain::spec_driver() {
   local spec="${1}" fallback="${2-}"
+  domain::spec_layout "${spec}" >/dev/null || return 2
   # No `-f` pre-check: a missing file and an unreadable one are the same answer
   # (rc 1, or the fallback), and yq already reports both. No `yq | tr` pipeline
   # either — without pipefail a yq failure would be masked by tr's rc 0 and
@@ -108,44 +111,104 @@ domain::spec_driver() {
 # (yq drops empty documents before the first one, keeps the ones after it, and
 # prints one line per document). The same file then reads as two different
 # specs. Only one layout reads the same in both: one document, with an
-# optional `---` before it and an optional `...` after it. `lo provision`,
-# `lo lint` and the spec.kubernetes.version reader refuse every other layout.
+# optional `---` before it and an optional `...` after it. Every command that
+# reads a spec refuses every other layout: through domain::spec_check where it
+# resolves the spec file, and through domain::spec_driver.
 #
-# Returns 0 for that layout: no content before a `---` line, no second `---`
-# line, no content after a `...` line (blank lines, comments and `%`
-# directives are not content). Otherwise prints "<line> <marker>" (the 1-based
-# line and the marker, `---` or `...`, that breaks the layout) and returns 1.
-# A file that cannot be read returns 0: the readers report that themselves.
+# Returns 0 for that layout: one `---` line at most before the content, no
+# `---` line after it, no content after a `...` line (blank lines, comments
+# and `%` directives are not content). Otherwise prints the problem, a text
+# that continues the file name ("<file> <problem>") and says which lines to
+# remove, and returns 1. A file that cannot be read returns 0: the readers
+# report that themselves.
 domain::spec_layout() {
-  local spec="${1}" text rest n=0 content=0 started=0 end_line=0
+  local spec="${1}" text rest n=0 last=0 content=0 started=0 end_line=0
+  local -a lines=() extra=()
   [[ -r "${spec}" ]] || return 0
   while IFS= read -r text || [[ -n "${text}" ]]; do
+    lines+=("${text%$'\r'}")
+  done < "${spec}"
+  for text in "${lines[@]}"; do
     n=$(( n + 1 ))
-    text="${text%$'\r'}"
+    domain::_layout_blank "${text}" || last=${n}
+  done
+  n=0
+  for text in "${lines[@]}"; do
+    n=$(( n + 1 ))
     if [[ "${text}" =~ ^(---|\.\.\.)([[:blank:]](.*))?$ ]]; then
       if [[ "${BASH_REMATCH[1]}" == "..." ]]; then
         (( end_line )) || end_line=${n}
         continue
       fi
-      if (( content || started || end_line )); then
-        printf '%s ---\n' "${n}"
-        return 1
-      fi
-      started=1
       rest="${BASH_REMATCH[3]}"
+      if (( content || end_line )); then
+        domain::_layout_after "${n}" "${last}"
+        return 1
+      elif (( started )); then
+        extra+=("${n}")
+      else
+        started=1
+      fi
       rest="${rest#"${rest%%[![:blank:]]*}"}"
-      [[ -z "${rest}" || "${rest}" == "#"* ]] || content=1
+      if [[ -n "${rest}" && "${rest}" != "#"* ]]; then
+        if (( ${#extra[@]} )); then domain::_layout_leading "${extra[@]}"; return 1; fi
+        content=1
+      fi
       continue
     fi
-    rest="${text#"${text%%[![:blank:]]*}"}"
-    [[ -z "${rest}" || "${rest}" == "#"* || "${text}" == "%"* ]] && continue
+    domain::_layout_blank "${text}" && continue
     if (( end_line )); then
-      printf '%s ...\n' "${end_line}"
+      domain::_layout_end "${end_line}" "${n}" "${last}"
       return 1
     fi
+    if (( ${#extra[@]} )); then domain::_layout_leading "${extra[@]}"; return 1; fi
     content=1
-  done < "${spec}"
+  done
+  if (( ${#extra[@]} )); then domain::_layout_leading "${extra[@]}"; return 1; fi
   return 0
+}
+
+# domain::_layout_blank <line> — a line that is not content: blank, a comment
+# or a `%` directive.
+domain::_layout_blank() {
+  local rest="${1#"${1%%[![:blank:]]*}"}"
+  [[ -z "${rest}" || "${rest}" == "#"* || "${1}" == "%"* ]]
+}
+
+# The problems of domain::spec_layout, one per layout case (Go twins:
+# layoutLeading, layoutAfter, layoutEnd).
+domain::_layout_leading() {  # <line>... — `---` lines of empty documents before the spec
+  if (( $# == 1 )); then
+    printf "holds an empty YAML document before the spec. Remove line %s (a '---' line).\n" "${1}"
+    return 0
+  fi
+  local list="${*:1:$#-1}"
+  printf "holds empty YAML documents before the spec. Remove lines %s and %s (the '---' lines).\n" "${list// /, }" "${!#}"
+}
+domain::_layout_after() {  # <line> <last> — a `---` line after the spec
+  if (( ${2} <= ${1} )); then
+    printf "holds more than one YAML document. Remove line %s (a '---' line after the spec).\n" "${1}"
+  else
+    printf "holds more than one YAML document. Remove lines %s to %s (the '---' at line %s and everything after it).\n" "${1}" "${2}" "${1}"
+  fi
+}
+domain::_layout_end() {  # <end line> <line> <last> — content after the `...`
+  if (( ${3} <= ${2} )); then
+    printf "holds text after the document end marker '...' at line %s. Remove line %s.\n" "${1}" "${2}"
+  else
+    printf "holds text after the document end marker '...' at line %s. Remove lines %s to %s.\n" "${1}" "${2}" "${3}"
+  fi
+}
+
+# domain::spec_check <spec_file> — `error "<file> <problem>"` and rc 1 for a
+# spec file whose layout domain::spec_layout refuses (Go twin:
+# domain.CheckSpecLayout). Every command that resolves a spec file calls it
+# before it reads the file.
+domain::spec_check() {
+  local problem
+  problem=$(domain::spec_layout "${1}") && return 0
+  error "${1} ${problem}"
+  return 1
 }
 
 # domain::driver — the driver a domain's cluster spec declares, lowercased

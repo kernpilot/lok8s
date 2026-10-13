@@ -1,1 +1,1 @@
-2 ---
+holds more than one YAML document. Remove line 2 (a '---' line after the spec).

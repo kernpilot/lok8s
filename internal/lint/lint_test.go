@@ -173,7 +173,7 @@ func TestRunRefusesASecondDocument(t *testing.T) {
 	if err := l.Run("a.dev"); err == nil {
 		t.Fatalf("lint passed a spec with two documents; stdout:\n%s", out.String())
 	}
-	want := "[error]   " + spec + " holds more than one YAML document (line 7: '---'). Keep one document: remove line 7 and every document after the first.\n[error] 1 validation error(s)\n"
+	want := "[error]   " + spec + " holds more than one YAML document. Remove line 7 (a '---' line after the spec).\n[error] 1 validation error(s)\n"
 	if !strings.Contains(errOut.String(), want) {
 		t.Fatalf("stderr:\n%s\nwant:\n%s", errOut.String(), want)
 	}

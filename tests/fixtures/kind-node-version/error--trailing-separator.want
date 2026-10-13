@@ -1,1 +1,1 @@
-error spec.kubernetes.version cannot be read: the spec file holds more than one YAML document (line 8: '---'). Keep one document: remove line 8 and every document after the first.
+error spec.kubernetes.version cannot be read: the spec file holds more than one YAML document. Remove line 8 (a '---' line after the spec).

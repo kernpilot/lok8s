@@ -83,8 +83,14 @@ func Resolve(explicit, clustersDir string, warnTo io.Writer) string {
 // SpecDriver is THE reader for "which driver does this cluster spec declare".
 // Returns the lowercased `.kind`. A missing/unreadable file or an absent or
 // empty key returns fallback when given, else ErrNoDriver. A present but
-// non-bare value returns ErrMalformedDriver and is never defaulted.
+// non-bare value returns ErrMalformedDriver and is never defaulted. A spec
+// file with more than one YAML document (SpecLayout) returns ErrSpecLayout,
+// which wraps ErrMalformedDriver: never defaulted either, and the same
+// answer as the bash twin, which reads every document.
 func SpecDriver(specPath, fallback string) (string, error) {
+	if _, ok := SpecLayout(specPath); !ok {
+		return "", ErrSpecLayout
+	}
 	var doc struct {
 		Kind string `yaml:"kind"`
 	}

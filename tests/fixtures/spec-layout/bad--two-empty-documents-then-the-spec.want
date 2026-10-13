@@ -1,1 +1,1 @@
-2 ---
+holds an empty YAML document before the spec. Remove line 2 (a '---' line).

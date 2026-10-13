@@ -114,11 +114,15 @@ _SPEC_KVER_MAX_READS=10000
 # prints the problem and returns 1. The yq stderr goes to a file and never
 # into the output that the caller reads.
 #
-# The time limit is pure bash, so it also holds without GNU timeout (macOS): a
-# watchdog stops yq after _SPEC_KVER_TIMEOUT seconds. The memory limit is
-# `ulimit -d`, best effort: an OS that does not enforce it gets the time limit
-# only. The body is a subshell, so its traps remove the temporary files on an
-# interrupt and change nothing in the caller.
+# The time limit needs no GNU timeout (macOS has none): a watchdog subshell
+# runs `sleep N` in the background and waits for it; when the sleep ends, the
+# watchdog stops yq. When yq ends first, the read stops the watchdog, and the
+# watchdog's TERM trap stops its sleep, so no `sleep` process stays behind.
+# (A `read -t N` on a process substitution that is opened read-write is not
+# portable: on macOS the read ends at once, and every read timed out.) The
+# memory limit is `ulimit -d`, best effort: an OS that does not enforce it gets
+# the time limit only. The body is a subshell, so its traps remove the
+# temporary files on an interrupt and change nothing in the caller.
 spec::_kver_yq() (
   cluster_yaml="${1}"
   shift
@@ -136,12 +140,19 @@ spec::_kver_yq() (
     exec yq --yaml-fix-merge-anchor-to-spec "${@}" "${cluster_yaml}" >"${tmp}/out" 2>"${tmp}/err"
   ) &
   pid=$!
-  # The watchdog sleeps in `read -t` (no sleep process to leave behind).
+  # The watchdog: a background sleep and a wait for it (portable, see above).
+  # A TERM (the read is done) interrupts the wait; the trap stops the sleep.
+  # The trap comes first and names the sleep with `jobs -p`, so a TERM at any
+  # point leaves no sleep behind. The watchdog writes nothing, and it holds no
+  # pipe of the caller: a caller that reads the output with $(...) waits for
+  # all writers to close the pipe.
   (
-    read -r -t "${_SPEC_KVER_TIMEOUT}" <> <(:) || :
+    trap 'kill -TERM $(jobs -p) 2>/dev/null; exit 0' TERM
+    sleep "${_SPEC_KVER_TIMEOUT}" &
+    wait "$!" || exit 0
     : >"${tmp}/timeout"
     kill -TERM "${pid}" 2>/dev/null
-  ) &
+  ) >/dev/null 2>&1 &
   watchdog=$!
   rc=0
   wait "${pid}" 2>/dev/null || rc=$?
@@ -227,8 +238,7 @@ spec::_kver_read() {
   # One YAML document: another layout reads as a different spec in the two
   # implementations.
   if ! at=$(domain::spec_layout "${cluster_yaml}"); then
-    printf "%s the spec file holds more than one YAML document (line %s: '%s'). Keep one document: remove line %s and every document after the first.\n" \
-      "${unreadable}" "${at%% *}" "${at#* }" "${at%% *}"
+    printf '%s the spec file %s\n' "${unreadable}" "${at}"
     return 1
   fi
 
