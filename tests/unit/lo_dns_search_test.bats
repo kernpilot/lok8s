@@ -345,6 +345,33 @@ exec "'"${real}"'" "$@"'
     "${_PROJECT_ROOT}/.lok8s/utils/dnssearch.sh" "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/config.sh" \
     "${_PROJECT_ROOT}/.lok8s/libs/lint" || true)"
   [ -z "${hits}" ] || { echo "an unguarded expansion:" >&2; echo "${hits}" >&2; return 1; }
+  # The dnsSearch bash files: no array value expansion without the guard
+  # (an array there can be empty: no list, no flag, no problem). Code lines
+  # only: a comment may name the construct.
+  hits="$(grep -nE '^[^#]*[^+#]"\$\{[A-Za-z_][A-Za-z_0-9]*\[@\]\}"' \
+    "${_PROJECT_ROOT}/.lok8s/utils/dnssearch.sh" "${_PROJECT_ROOT}/.lok8s/utils/yqbound.sh" \
+    "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/render.sh" || true)"
+  [ -z "${hits}" ] || { echo "an unguarded expansion:" >&2; echo "${hits}" >&2; return 1; }
+}
+
+# The default render (no spec.network.dnsSearch: an empty list) under the
+# entrypoint's `set -euo pipefail`, in LOK8S_TEST_BASH (a bash < 4.4, where an
+# empty "${a[@]}" is an unbound variable) or the default bash. It must equal
+# the golden that the Go render matches.
+@test "render under set -euo pipefail: the default (empty) list and a list render without an unbound variable" {
+  local sh="${LOK8S_TEST_BASH:-bash}" list golden
+  for list in "" "corp.example.com example.ts.net"; do
+    golden=kindconfig_default.golden
+    [[ -z "${list}" ]] || golden=kindconfig_dnssearch.golden
+    export LOK8S_NETWORK_DNS_SEARCH="${list}"
+    run "${sh}" -euo pipefail -c 'import() { :; }
+      source "$1/utils/verbose.sh"; source "$1/drivers/lo/main"
+      lo::render_kind_config test-shared v1.31.4 lok8s ""' _ "${_PROJECT_ROOT}/.lok8s"
+    [ "${status}" -eq 0 ] || { echo "${sh}: status ${status}: ${output}" >&2; return 1; }
+    [ "${output}" == "$(cat "${GOLDEN}/${golden}")" ] || {
+      echo "${sh}: list '${list}': the render differs from ${golden}:" >&2; echo "${output}" >&2; return 1
+    }
+  done
 }
 
 @test "read_dns_search_config: 32 entries pass, more fail with the count to remove" {

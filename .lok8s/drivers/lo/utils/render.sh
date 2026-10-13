@@ -52,8 +52,10 @@ EOF
 lo::render_dns_search() {
   local -a names=()
   read -r -a names <<< "${LOK8S_NETWORK_DNS_SEARCH:-}"
+  # The `+` form: bash < 4.4 under `set -u` stops on an empty "${a[@]}",
+  # and the list is empty by default (no spec.network.dnsSearch).
   local out="" name
-  for name in "${names[@]}"; do
+  for name in ${names[@]+"${names[@]}"}; do
     out+="${out:+, }\"${name}\""
   done
   echo "[${out}]"
