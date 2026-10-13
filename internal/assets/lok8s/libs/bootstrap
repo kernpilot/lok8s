@@ -1543,53 +1543,70 @@ bootstrap::_dry_run_one() {
 
 # bootstrap::_krm_declared <dir>
 # Reports (rc 0) an entry whose kustomization graph declares a KRM function
-# (`config.kubernetes.io/function` or `config.k8s.io/function`): the YAML
-# under dir, and every local resources, components, bases, generators,
-# transformers and validators reference of a kustomization on the way,
-# followed recursively while it stays under PATH_BASE or PATH_LOK8S (the
-# project). The dry run marks that entry `partial`. A hint, not a boundary:
-# it only reads. The Go twin: addons.KRMFunctionDeclared.
+# (`config.kubernetes.io/function` or `config.k8s.io/function`), or that
+# the hint cannot check. It reads the YAML under dir, and for every
+# kustomization on the way the kustomization file itself (any of its three
+# names; an inline generator or transformer config can declare a function)
+# and its local resources, components, bases, generators, transformers and
+# validators references, followed recursively. It reads only under
+# PATH_BASE and PATH_LOK8S (the project) and the entry's own directory: a
+# reference or a kustomization file that resolves outside them, or a remote
+# reference, is not read and counts too. grep -r follows no symbolic link
+# below a directory and skips devices and FIFOs; a file it reads by name
+# must be a regular file. The dry run marks that entry `partial`. A hint,
+# not a boundary: it only reads. The Go twin: addons.KRMFunctionDeclared.
 bootstrap::_krm_declared() {
-  local -a _queue=("${1}") _roots=()
+  local _entry
+  # A reference that does not exist fails the render on its own.
+  _entry="$(realpath -e -- "${1}" 2>/dev/null)" || return 1
+  local -a _queue=("${_entry}") _roots=("${_entry}")
   local -A _seen=()
-  local _r _p _k _ref _first=1 _in
+  local _r _p _k _kf _ref
+  local -r _fn1='config.kubernetes.io/function' _fn2='config.k8s.io/function'
   for _r in "${PATH_BASE:-}" "${PATH_LOK8S:-}"; do
     [[ -n "${_r}" ]] || continue
     _r="$(realpath -e -- "${_r}" 2>/dev/null)" && _roots+=("${_r}")
   done
   while (( ${#_queue[@]} )); do
     _p="${_queue[0]}"; _queue=("${_queue[@]:1}")
-    if ! _p="$(realpath -e -- "${_p}" 2>/dev/null)" || [[ -n "${_seen[${_p}]:-}" ]]; then
-      _first=0; continue
-    fi
-    if (( ! _first )); then
-      _in=0
-      for _r in "${_roots[@]+"${_roots[@]}"}"; do
-        [[ "${_p}" != "${_r}" && "${_p}" != "${_r}/"* ]] || { _in=1; break; }
-      done
-      (( _in )) || continue
-    fi
-    _first=0
+    _p="$(realpath -e -- "${_p}" 2>/dev/null)" || continue
+    [[ -z "${_seen[${_p}]:-}" ]] || continue
+    # Outside the project: not read, so the hint cannot rule a function out.
+    bootstrap::_path_under "${_p}" "${_roots[@]}" || return 0
     _seen[${_p}]=1
     if [[ ! -d "${_p}" ]]; then
-      grep -qs -e 'config.kubernetes.io/function' -e 'config.k8s.io/function' -- "${_p}" && return 0
+      [[ -f "${_p}" ]] && grep -qs -e "${_fn1}" -e "${_fn2}" -- "${_p}" && return 0
       continue
     fi
-    grep -rqs --include='*.yaml' --include='*.yml' \
-      -e 'config.kubernetes.io/function' -e 'config.k8s.io/function' -- "${_p}" && return 0
+    grep -rqs --include='*.yaml' --include='*.yml' -e "${_fn1}" -e "${_fn2}" -- "${_p}" && return 0
     for _k in kustomization.yaml kustomization.yml Kustomization; do
       [[ -f "${_p}/${_k}" ]] || continue
+      _kf="$(realpath -e -- "${_p}/${_k}" 2>/dev/null)" || break
+      bootstrap::_path_under "${_kf}" "${_roots[@]}" || return 0
+      grep -qs -e "${_fn1}" -e "${_fn2}" -- "${_kf}" && return 0
       while IFS= read -r _ref; do
         case "${_ref}" in
-          ""|*://*|git@*|github.com/*) continue ;;
+          "") ;;
+          *://*|git@*|github.com/*) return 0 ;;   # remote: not read
           /*) _queue+=("${_ref}") ;;
           *) _queue+=("${_p}/${_ref}") ;;
         esac
       done < <(yq -r '(.resources // [], .components // [], .bases // [], .generators // [],
                        .transformers // [], .validators // []) | .[] | select(tag == "!!str") | select(test("\n") | not)' \
-                 "${_p}/${_k}" 2>/dev/null)
+                 "${_kf}" 2>/dev/null)
       break
     done
+  done
+  return 1
+}
+
+# bootstrap::_path_under <path> <root>...
+# rc 0 when path is one of the roots or below one of them (all canonical).
+bootstrap::_path_under() {
+  local _path="${1}" _root
+  shift
+  for _root in "${@}"; do
+    [[ "${_path}" != "${_root}" && "${_path}" != "${_root}/"* ]] || return 0
   done
   return 1
 }

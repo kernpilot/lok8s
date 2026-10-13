@@ -296,15 +296,26 @@ func (b *DryRunBoundary) renderEnv(allowGenerators bool, entryPath string) []str
 
 // KRMFunctionDeclared reports an entry whose kustomization graph declares
 // a KRM function (`config.kubernetes.io/function` or
-// `config.k8s.io/function`): the YAML under dir, and every local
-// resources, components, bases, generators, transformers and validators
-// reference of a kustomization on the way, followed recursively while it
-// stays under one of roots (the project and its lok8s tree; nothing is
-// followed without roots). Without --enable-exec kustomize skips an exec
-// function silently, so the dry run marks that entry `partial`. A hint, not
-// a boundary: it only reads.
+// `config.k8s.io/function`), or that the hint cannot check. It reads the
+// YAML under dir, and for every kustomization on the way the kustomization
+// file itself (any of its three names; an inline generator or transformer
+// config can declare a function) and its local resources, components,
+// bases, generators, transformers and validators references, followed
+// recursively. Without --enable-exec kustomize skips an exec function
+// silently, so the dry run marks that entry `partial`. It reads only
+// within the project and its lok8s tree (roots) and the entry's own
+// directory: a reference or a kustomization file that resolves outside
+// them, or a remote reference (a URL, a git or GitHub reference), is not
+// read and marks the entry `partial` as well. A hint, not a boundary: it
+// only reads.
 func KRMFunctionDeclared(dir string, roots ...string) bool {
-	var within []string
+	entry, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false
+	}
+	// The entry's own directory counts as inside: a framework addon that a
+	// dry run peeks (never ejects) is in a temp directory.
+	within := []string{entry}
 	for _, r := range roots {
 		if r == "" {
 			continue
@@ -313,7 +324,7 @@ func KRMFunctionDeclared(dir string, roots ...string) bool {
 			within = append(within, abs)
 		}
 	}
-	inRoots := func(p string) bool {
+	inside := func(p string) bool {
 		for _, r := range within {
 			if p == r || strings.HasPrefix(p, r+string(filepath.Separator)) {
 				return true
@@ -322,12 +333,16 @@ func KRMFunctionDeclared(dir string, roots ...string) bool {
 		return false
 	}
 	seen := map[string]bool{}
-	queue := []string{dir}
-	for first := true; len(queue) > 0; first = false {
+	queue := []string{entry}
+	for len(queue) > 0 {
+		// A reference that does not exist fails the render on its own.
 		p, err := filepath.EvalSymlinks(queue[0])
 		queue = queue[1:]
-		if err != nil || seen[p] || (!first && !inRoots(p)) {
+		if err != nil || seen[p] {
 			continue
+		}
+		if !inside(p) {
+			return true
 		}
 		seen[p] = true
 		info, err := os.Stat(p)
@@ -335,25 +350,37 @@ func KRMFunctionDeclared(dir string, roots ...string) bool {
 			continue
 		}
 		if !info.IsDir() {
-			if declaresKRMFunction(p) {
+			if info.Mode().IsRegular() && declaresKRMFunction(p) {
 				return true
 			}
 			continue
 		}
-		found := false
-		_ = filepath.WalkDir(p, func(path string, d os.DirEntry, err error) error {
-			if err != nil || found || d.IsDir() {
-				return nil
-			}
-			if ext := filepath.Ext(path); (ext == ".yaml" || ext == ".yml") && declaresKRMFunction(path) {
-				found = true
-			}
-			return nil
-		})
-		if found {
+		if subtreeDeclaresKRMFunction(p) {
 			return true
 		}
-		for _, ref := range kustomizationRefs(p) {
+		file := kustomizationFile(p)
+		if file == "" {
+			continue
+		}
+		canon, err := filepath.EvalSymlinks(file)
+		if err != nil {
+			continue
+		}
+		if !inside(canon) {
+			return true
+		}
+		raw, err := os.ReadFile(canon)
+		if err != nil {
+			continue
+		}
+		if declaresKRMFunctionIn(raw) {
+			return true
+		}
+		refs, remote := kustomizationRefs(raw)
+		if remote {
+			return true
+		}
+		for _, ref := range refs {
 			if !filepath.IsAbs(ref) {
 				ref = filepath.Join(p, ref)
 			}
@@ -363,41 +390,70 @@ func KRMFunctionDeclared(dir string, roots ...string) bool {
 	return false
 }
 
-func declaresKRMFunction(path string) bool {
-	raw, err := os.ReadFile(path)
-	return err == nil && (strings.Contains(string(raw), "config.kubernetes.io/function") || strings.Contains(string(raw), "config.k8s.io/function"))
+// subtreeDeclaresKRMFunction scans the *.yaml and *.yml files under dir
+// (bash: grep -r --include). Like grep -r it does not follow a symbolic link
+// below dir and reads regular files only: a link to a file outside the
+// project, or a FIFO, is never read. A linked file that the kustomization
+// references is read through the graph, where the inside check applies.
+func subtreeDeclaresKRMFunction(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || found || !d.Type().IsRegular() {
+			return nil
+		}
+		if ext := filepath.Ext(path); (ext == ".yaml" || ext == ".yml") && declaresKRMFunction(path) {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
-// kustomizationRefs lists the local references of dir's kustomization file
-// (resources, components, bases, generators, transformers, validators): a
-// remote base (a URL, a git or GitHub reference) and an inline config are
-// left out.
-func kustomizationRefs(dir string) []string {
-	var raw []byte
+func declaresKRMFunction(path string) bool {
+	raw, err := os.ReadFile(path)
+	return err == nil && declaresKRMFunctionIn(raw)
+}
+
+func declaresKRMFunctionIn(raw []byte) bool {
+	return strings.Contains(string(raw), "config.kubernetes.io/function") || strings.Contains(string(raw), "config.k8s.io/function")
+}
+
+// kustomizationFile is dir's kustomization file: the first of
+// kustomization.yaml, kustomization.yml and Kustomization that is a
+// regular file, "" when there is none.
+func kustomizationFile(dir string) string {
 	for _, name := range []string{"kustomization.yaml", "kustomization.yml", "Kustomization"} {
-		var err error
-		if raw, err = os.ReadFile(filepath.Join(dir, name)); err == nil {
-			break
+		path := filepath.Join(dir, name)
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			return path
 		}
 	}
-	if raw == nil {
-		return nil
-	}
+	return ""
+}
+
+// kustomizationRefs lists the local references of a kustomization file
+// (resources, components, bases, generators, transformers, validators). An
+// inline config is not a reference (the caller reads the file for it).
+// remote reports a remote reference (a URL, a git or GitHub reference),
+// which the hint does not read.
+func kustomizationRefs(raw []byte) (refs []string, remote bool) {
 	var k map[string]any
 	if yaml.Unmarshal(raw, &k) != nil {
-		return nil
+		return nil, false
 	}
-	var refs []string
 	for _, field := range []string{"resources", "components", "bases", "generators", "transformers", "validators"} {
 		list, _ := k[field].([]any)
 		for _, item := range list {
 			ref, ok := item.(string)
-			if !ok || ref == "" || strings.ContainsAny(ref, "\n") || strings.Contains(ref, "://") ||
-				strings.HasPrefix(ref, "git@") || strings.HasPrefix(ref, "github.com/") {
-				continue
+			switch {
+			case !ok || ref == "" || strings.Contains(ref, "\n"):
+			case strings.Contains(ref, "://") || strings.HasPrefix(ref, "git@") || strings.HasPrefix(ref, "github.com/"):
+				remote = true
+			default:
+				refs = append(refs, ref)
 			}
-			refs = append(refs, ref)
 		}
 	}
-	return refs
+	return refs, remote
 }

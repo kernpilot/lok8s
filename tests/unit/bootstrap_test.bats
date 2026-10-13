@@ -4044,8 +4044,9 @@ SH
 # Item 4: the KRM hint follows the kustomization graph within the project:
 # a function in a base the entry references (../base), in a component, or
 # in a transformer file outside the entry's directory marks the entry
-# partial; a reference outside the project, or a remote one, is not
-# followed.
+# partial; a reference outside the project, or a remote one, is not read
+# and (review round 6, item 5) marks the entry partial too: the hint cannot
+# rule a function out there.
 @test "bootstrap::apply --dry-run: the KRM hint follows the kustomization graph" {
   local fn=$'apiVersion: example.test/v1\nkind: Fn\nmetadata:\n  name: fn\n  annotations:\n    config.kubernetes.io/function: |\n      exec:\n        path: ./fn\n'
   local entry="${PATH_LOK8S}/addons/testcni" out
@@ -4076,9 +4077,98 @@ SH
   _krm_case 1 "resources:"$'\n'"- ../../../shared/base"$'\n'
   _krm_case 1 "components:"$'\n'"- ../../../shared/comp"$'\n'
   _krm_case 1 "transformers:"$'\n'"- ../../../fns/fn.yaml"$'\n'
-  _krm_case 0 "resources:"$'\n'"- ../../../plain"$'\n'"- https://github.com/example/repo//base?ref=v1"$'\n'
-  _krm_case 0 "resources:"$'\n'"- ${out}/base"$'\n'
+  _krm_case 0 "resources:"$'\n'"- ../../../plain"$'\n'
+  _krm_case 1 "resources:"$'\n'"- ../../../plain"$'\n'"- https://github.com/example/repo//base?ref=v1"$'\n'
+  _krm_case 1 "resources:"$'\n'"- ${out}/base"$'\n'
   rm -rf "${out}"
+}
+
+# Review round 6, items 4 and 5 — the same cases as the Go twin
+# (internal/addons/krm_test.go): the hint reads the kustomization file
+# itself (an inline function in an extensionless Kustomization, in the
+# entry or in a base), reads no file outside the project (grep -r follows
+# no link below the entry), reads regular files only (a FIFO does not block
+# it), and a reference or a kustomization file outside the project, or a
+# remote reference, marks the entry partial. An entry outside the project
+# (a peeked framework addon) reads its own tree.
+@test "bootstrap::_krm_declared: inline functions, links and references outside the project" {
+  local fn=$'apiVersion: example.test/v1\nkind: Fn\nmetadata:\n  name: fn\n  annotations:\n    config.kubernetes.io/function: |\n      exec:\n        path: ./fn\n'
+  local inline=$'transformers:\n- |-\n  apiVersion: example.test/v1\n  kind: Fn\n  metadata:\n    name: fn\n    annotations:\n      config.kubernetes.io/function: |\n        exec:\n          path: ./fn\n'
+  local out n=0 c=""
+  out="$(mktemp -d)"   # outside the project (PATH_BASE is BATS_TEST_TMPDIR)
+  printf '%s' "${fn}" > "${out}/fn.yaml"
+  printf 'resources:\n- cm.yaml\n' > "${out}/kustomization.yaml"
+  mkdir -p "${out}/base"
+  printf 'resources:\n- cm.yaml\n' > "${out}/base/kustomization.yaml"
+  _case() {  # a fresh case directory c (in the project) with an entry/
+    n=$((n + 1)); c="${PATH_BASE}/krm${n}"
+    mkdir -p "${c}/entry"
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: entry\n' > "${c}/entry/cm.yaml"
+  }
+  _want() {  # <1 partial|0 not> <label>
+    local rc=0
+    bootstrap::_krm_declared "${c}/entry" || rc=$?
+    if (( ${1} )); then
+      [ "${rc}" -eq 0 ] || { echo "${2}: not marked partial"; return 1; }
+    else
+      [ "${rc}" -ne 0 ] || { echo "${2}: marked partial"; return 1; }
+    fi
+  }
+  _case; printf '%s' "${inline}" > "${c}/entry/Kustomization"
+  _want 1 "inline function in an extensionless Kustomization"
+  _case; mkdir -p "${c}/shared/base"; printf '%s' "${inline}" > "${c}/shared/base/Kustomization"
+  printf 'resources:\n- ../shared/base\n' > "${c}/entry/kustomization.yaml"
+  _want 1 "inline function in a base's extensionless Kustomization"
+  _case; printf 'resources:\n- %s/base\n' "${out}" > "${c}/entry/kustomization.yaml"
+  _want 1 "a base outside the project"
+  _case; printf 'resources:\n- https://example.test/raw/cm.yaml\n' > "${c}/entry/kustomization.yaml"
+  _want 1 "a remote URL"
+  _case; printf 'resources:\n- github.com/example/repo/base?ref=v1\n' > "${c}/entry/kustomization.yaml"
+  _want 1 "a remote GitHub base"
+  _case; printf 'resources:\n- git@github.com:example/repo.git//base\n' > "${c}/entry/kustomization.yaml"
+  _want 1 "a remote git base"
+  _case; printf 'resources:\n- cm.yaml\n' > "${c}/entry/kustomization.yaml"; ln -s "${out}/fn.yaml" "${c}/entry/fn.yaml"
+  _want 0 "an unreferenced .yaml link to a file outside"
+  _case; printf 'transformers:\n- fn.yaml\n' > "${c}/entry/kustomization.yaml"; ln -s "${out}/fn.yaml" "${c}/entry/fn.yaml"
+  _want 1 "a referenced .yaml link to a file outside"
+  _case; mkdir -p "${c}/fns"; printf '%s' "${fn}" > "${c}/fns/fn.yaml"
+  printf 'transformers:\n- fn.yaml\n' > "${c}/entry/kustomization.yaml"; ln -s "${c}/fns/fn.yaml" "${c}/entry/fn.yaml"
+  _want 1 "a referenced .yaml link to a file inside"
+  _case; mkdir -p "${c}/fns"; printf '%s' "${fn}" > "${c}/fns/fn.yaml"
+  printf 'resources:\n- cm.yaml\n' > "${c}/entry/kustomization.yaml"; ln -s "${c}/fns/fn.yaml" "${c}/entry/fn.yaml"
+  _want 0 "an unreferenced .yaml link to a file inside"
+  _case; ln -s "${out}/kustomization.yaml" "${c}/entry/kustomization.yaml"
+  _want 1 "a Kustomization that links outside"
+  _case; printf 'resources:\n- ../nowhere\n' > "${c}/entry/kustomization.yaml"
+  _want 0 "a missing reference"
+  _case; mkdir -p "${c}/shared/base"; printf 'resources:\n- cm.yaml\n' > "${c}/shared/base/kustomization.yaml"
+  printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n' > "${c}/shared/base/cm.yaml"
+  printf 'resources:\n- ../shared/base\n' > "${c}/entry/kustomization.yaml"
+  _want 0 "plain"
+
+  # An entry outside the project reads its own tree.
+  local own
+  own="$(mktemp -d)"
+  mkdir -p "${own}/sub"
+  printf 'resources:\n- sub\n' > "${own}/kustomization.yaml"
+  printf 'resources:\n- cm.yaml\n' > "${own}/sub/kustomization.yaml"
+  printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n' > "${own}/sub/cm.yaml"
+  ! bootstrap::_krm_declared "${own}" || { echo "a reference into the entry's own directory counted as outside"; return 1; }
+
+  # A FIFO named like YAML, below the entry and referenced: never read.
+  _case; printf 'resources:\n- cm.yaml\ntransformers:\n- pipe.yaml\n' > "${c}/entry/kustomization.yaml"
+  mkfifo "${c}/entry/pipe.yaml"
+  ( rc=0; bootstrap::_krm_declared "${c}/entry" || rc=$?; echo "${rc}" > "${BATS_TEST_TMPDIR}/fifo.rc" ) &
+  local pid=$! i
+  for (( i = 0; i < 100; i++ )); do [[ ! -s "${BATS_TEST_TMPDIR}/fifo.rc" ]] || break; sleep 0.1; done
+  if [[ ! -s "${BATS_TEST_TMPDIR}/fifo.rc" ]]; then
+    timeout 2 bash -c ': > "${1}"' _ "${c}/entry/pipe.yaml" || true   # unblock the reader
+    wait "${pid}" || true
+    echo "the hint blocked on a FIFO"; return 1
+  fi
+  wait "${pid}"
+  [ "$(cat "${BATS_TEST_TMPDIR}/fifo.rc")" -ne 0 ] || { echo "a FIFO marked the entry partial"; return 1; }
+  rm -rf "${out}" "${own}"
 }
 
 # Item 5 (`reuse <name>`: an entry that reads a value another entry of the

@@ -46,7 +46,9 @@ TLS Secrets of Cilium; `--ignore-nondeterministic` diffs the entry without
 them), `(non-repeatable)` when the render generated or updated secret
 material that the store does not hold, or read such material that an
 earlier entry of the run generated, and `(partial: KRM function skipped)`
-(also for a function in a base or component the entry references). The
+(also for a function in a base or component the entry references, and for
+a reference outside the project or a remote one, which the dry run does
+not read). The
 chart dependency check is Helm's own (the bash implementation needs helm
 v3.3 or later on `PATH` for it). The exit code is 0 when nothing would change, 1 only when a
 completed diff found a change, and 2 for all other failures.

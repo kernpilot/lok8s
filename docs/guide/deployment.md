@@ -316,9 +316,12 @@ bootstrap dry-run: entries=4 unchanged=0 differs=3 rendered=0 skipped=1 inconclu
   real result differs from this preview.
 - `(partial: KRM function skipped)`: the entry declares a KRM function, in
   its own directory or in a kustomization it references in the project (a
-  base, a component, a generator or transformer file). A dry run without
-  `--allow-generators` does not run it, thus the objects of the function are
-  not in the preview.
+  base, a component, a generator or transformer file, or an inline config in
+  the kustomization file). A dry run without `--allow-generators` does not
+  run it, thus the objects of the function are not in the preview. An entry
+  that references a kustomization or a file outside the project, or a
+  remote one, gets this mark too: the dry run does not read it, thus it
+  cannot rule out a function there.
 
 **Trust model.** The dry run prevents accidental side effects of
 legitimate addon code and configuration. It is not a security boundary

@@ -68,7 +68,9 @@ func TestDryRunListsAnObjectOnlyTheSecondRenderHas(t *testing.T) {
 // The KRM hint follows the kustomization graph: a function declared in a
 // base the entry references (../base), in a component, or in a transformer
 // file outside the entry's directory marks the entry partial. A reference
-// outside the project, or a remote one, is not followed.
+// outside the project, or a remote one, is not read; since review round 6
+// (item 5) it marks the entry partial too, because the hint cannot rule a
+// function out there.
 func TestDryRunKRMHintFollowsTheKustomizationGraph(t *testing.T) {
 	fn := "apiVersion: example.test/v1\nkind: Fn\nmetadata:\n  name: fn\n  annotations:\n    config.kubernetes.io/function: |\n      exec:\n        path: ./fn\n"
 	for _, tc := range []struct {
@@ -99,7 +101,10 @@ func TestDryRunKRMHintFollowsTheKustomizationGraph(t *testing.T) {
 		}, true},
 		{"remote only", map[string]string{
 			"entry/kustomization.yaml": "resources:\n- https://github.com/example/repo//base?ref=v1\n- github.com/example/repo/base\n",
-		}, false},
+		}, true},
+		{"inline function in an extensionless Kustomization (round 6, item 4)", map[string]string{
+			"entry/Kustomization": "resources:\n- cm.yaml\ntransformers:\n- |-\n  apiVersion: example.test/v1\n  kind: Fn\n  metadata:\n    name: fn\n    annotations:\n      config.kubernetes.io/function: |\n        exec:\n          path: ./fn\n",
+		}, true},
 		{"plain", map[string]string{
 			"shared/base/kustomization.yaml": "resources:\n- cm.yaml\n",
 			"shared/base/cm.yaml":            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n",
@@ -123,7 +128,7 @@ func TestDryRunKRMHintFollowsTheKustomizationGraph(t *testing.T) {
 		}
 	}
 
-	// Outside the project: not followed.
+	// Outside the project: not read, and marked partial (round 6, item 5).
 	e, f, _, _, p := testEngine(t)
 	outside := t.TempDir()
 	testutil.WriteFile(t, filepath.Join(outside, "base", "kustomization.yaml"), "transformers:\n- fn.yaml\n")
@@ -136,7 +141,7 @@ func TestDryRunKRMHintFollowsTheKustomizationGraph(t *testing.T) {
 	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("outside: Apply: %v", err)
 	}
-	if strings.Contains(stdoutOf(e), "(partial") {
-		t.Errorf("a base outside the project was followed:\n%s", stdoutOf(e))
+	if !strings.Contains(stdoutOf(e), "01-entry: unchanged (partial: KRM function skipped)\n") {
+		t.Errorf("a base outside the project did not mark the entry partial:\n%s", stdoutOf(e))
 	}
 }
