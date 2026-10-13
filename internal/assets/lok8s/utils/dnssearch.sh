@@ -16,17 +16,22 @@
 #     merges the way the YAML spec says (a key of the map itself wins, then
 #     the merged maps in order), the same rule as yqsem.LookupMerged. The
 #     flag also stops yq's per-read warning about merge keys.
-#   - Every yq call runs bounded (dnssearch::_read): a hit bound is one
-#     problem line, not a stuck command or a host out of memory. Go reads the
-#     tree in-process and needs no bound.
+#   - Every yq call runs bounded (dnssearch::_read through yqbound::run): a
+#     hit bound is one problem line, not a stuck command or a host out of
+#     memory. The time limit always holds (pure bash, no timeout(1)); the
+#     memory cap is `ulimit -d`, best effort (where the OS enforces it). Go
+#     reads the tree in-process and needs no bound.
 #   - The character check runs through yq's test(), the same Go regexp
 #     engine as the Go twin, so both decide alike on non-ASCII text, control
 #     characters and newlines.
 
+import ^utils/yqbound
+
 # The most entries spec.network.dnsSearch takes: the Kubernetes limit for
 # the search list of a pod (MaxDNSSearchPaths).
 DNSSEARCH_MAX=32
-# The bound of one yq call: wall-clock seconds and virtual memory (KiB).
+# The bound of one yq call (yqbound::run): wall-clock seconds, and KiB of
+# data memory (ulimit -d, where the OS enforces it).
 DNSSEARCH_YQ_SECONDS=10
 DNSSEARCH_YQ_KIB=1048576
 
@@ -99,42 +104,35 @@ dnssearch::check() {
 # so the check sees what the Go twin sees. printf -v, not $(…), hands the
 # value back for the same reason.
 #
-# The call runs with --yaml-fix-merge-anchor-to-spec, in a subshell with
-# `ulimit -v DNSSEARCH_YQ_KIB` and `timeout DNSSEARCH_YQ_SECONDS`. Returns 0;
-# 1 when yq failed on its own (an unreadable or unparsable file: its stderr
-# goes to stderr as is, the other readers report the file); 2 when a bound
-# hit (yq's stderr is then a Go runtime dump and is dropped).
+# The call runs with --yaml-fix-merge-anchor-to-spec through yqbound::run
+# (DNSSEARCH_YQ_SECONDS, DNSSEARCH_YQ_KIB). Returns its status: 0; 1 when yq
+# failed on its own (an unreadable or unparsable file: its stderr goes to
+# stderr as is, the other readers report the file); 2 at the time limit; 3
+# at the memory cap or a signal; 4 without a temporary directory.
 dnssearch::_read() {
-  local err out rc=0
-  err="$(mktemp)" || return 1
-  out="$( ( ulimit -v "${DNSSEARCH_YQ_KIB}" 2>/dev/null
-            exec timeout "${DNSSEARCH_YQ_SECONDS}" yq --yaml-fix-merge-anchor-to-spec -r "${3}" "${2}"
-          ) 2>"${err}"
-          status=$?; printf x; exit "${status}" )" || rc=$?
+  local out rc=0
+  out="$(yqbound::run "${DNSSEARCH_YQ_SECONDS}" "${DNSSEARCH_YQ_KIB}" "${2}" --yaml-fix-merge-anchor-to-spec -r "${3}"
+         status=$?; printf x; exit "${status}")" || rc=$?
+  (( rc == 0 )) || return "${rc}"
   out="${out%x}"
-  if (( rc == 0 )); then
-    [[ ! -s "${err}" ]] || cat "${err}" >&2
-    rm -f "${err}"
-    printf -v "${1}" '%s' "${out%$'\n'}"
-    return 0
-  fi
-  if (( rc == 124 || rc == 137 )) || grep -qiE 'out of memory|cannot allocate memory|stack exceeds' "${err}"; then
-    rm -f "${err}"
-    return 2
-  fi
-  cat "${err}" >&2
-  rm -f "${err}"
-  return 1
+  printf -v "${1}" '%s' "${out%$'\n'}"
 }
 
-# dnssearch::_stop <rc> — end the check after a failed dnssearch::_read: a hit
-# bound is one problem (returns 1); a yq error of its own reads as "no list"
-# (returns 0), like the Go twin on an unparsable file.
+# dnssearch::_stop <rc> — end the check after a failed dnssearch::_read (rc as
+# yqbound::run). A yq error of its own reads as "no list" (returns 0), like the
+# Go twin on an unparsable file. A hit limit or a missing temporary directory
+# is one problem (returns 1).
 dnssearch::_stop() {
   DNSSEARCH_NAMES=()
   DNSSEARCH_PROBLEMS=()
-  (( ${1} == 2 )) || return 0
-  DNSSEARCH_PROBLEMS+=("spec.network.dnsSearch could not be read: yq stopped at the limit of ${DNSSEARCH_YQ_SECONDS} s and $(( DNSSEARCH_YQ_KIB / 1024 )) MiB. Write spec.network without YAML aliases and merge keys.")
+  local cause
+  case "${1}" in
+    2) cause="yq did not finish in ${DNSSEARCH_YQ_SECONDS} s. Write spec.network without YAML aliases and merge keys." ;;
+    3) cause="yq stopped at the memory limit of $(( DNSSEARCH_YQ_KIB / 1024 )) MiB, or a signal stopped it. Write spec.network without YAML aliases and merge keys." ;;
+    4) cause="lo cannot create a temporary directory in ${TMPDIR:-/tmp}. Correct TMPDIR." ;;
+    *) return 0 ;;
+  esac
+  DNSSEARCH_PROBLEMS+=("spec.network.dnsSearch could not be read: ${cause}")
   return 1
 }
 

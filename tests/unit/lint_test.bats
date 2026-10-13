@@ -29,8 +29,9 @@ setup() {
   # lint::secrets calls secrets::* helpers (check_unencrypted / check_flat_shadows),
   # which the `lo` entrypoint loads in production — source them here too.
   source "${_PROJECT_ROOT}/.lok8s/libs/secrets"
-  # lint::dns_search calls dnssearch::check, which lint imports (a no-op under
-  # the stubbed import above) — source it here too.
+  # lint::dns_search calls dnssearch::check (and it yqbound::run), which lint
+  # imports (a no-op under the stubbed import above) — source them here too.
+  source "${_PROJECT_ROOT}/.lok8s/utils/yqbound.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/dnssearch.sh"
 
   # Create a minimal domain structure

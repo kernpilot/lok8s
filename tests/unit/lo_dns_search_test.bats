@@ -210,8 +210,8 @@ _read_quiet() {
   }
 }
 
-# _slow_yq <script-body> — a yq stub first on PATH (the bound wraps the yq
-# BINARY through `timeout`, so a function stub would not reach it).
+# _slow_yq <script-body> — a yq stub first on PATH (yqbound::run runs the yq
+# BINARY in a background subshell, so a function stub would not reach it).
 _slow_yq() {
   mkdir -p "${BATS_TEST_TMPDIR}/yq-bin"
   printf '#!/usr/bin/env bash\n%s\n' "${1}" > "${BATS_TEST_TMPDIR}/yq-bin/yq"
@@ -219,30 +219,36 @@ _slow_yq() {
   PATH="${BATS_TEST_TMPDIR}/yq-bin:${PATH}"
 }
 
-@test "read_dns_search_config: a yq call that hits the time or memory bound is one error line, not a hang" {
-  local spec want rc
+# The limit cases of yqbound::run itself are in tests/unit/yqbound_test.bats;
+# these pin the problem line each one becomes.
+@test "read_dns_search_config: a yq call at a limit is one error line per cause, not a hang" {
+  local spec rc
   spec="$(_spec "  network:
     dnsSearch: [a.example]
 ")"
-  want="error: spec.network.dnsSearch could not be read: yq stopped at the limit of 1 s and 1024 MiB. Write spec.network without YAML aliases and merge keys."
   DNSSEARCH_YQ_SECONDS=1
-  ( _slow_yq 'sleep 30'
+  ( _slow_yq 'exec sleep 30'
     rc=0; lo::read_dns_search_config "${spec}" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
-    [ "${rc}" -ne 0 ] && [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "${want}" ] ) || {
-    echo "time bound:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
+    [ "${rc}" -ne 0 ] && [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "error: spec.network.dnsSearch could not be read: yq did not finish in 1 s. Write spec.network without YAML aliases and merge keys." ] ) || {
+    echo "time limit:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
   }
   ( _slow_yq 'echo "fatal error: runtime: out of memory" >&2; echo "goroutine 1 [running]:" >&2; exit 2'
     rc=0; lo::read_dns_search_config "${spec}" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
-    [ "${rc}" -ne 0 ] && [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "${want}" ] ) || {
-    echo "memory bound:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
+    [ "${rc}" -ne 0 ] && [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "error: spec.network.dnsSearch could not be read: yq stopped at the memory limit of 1024 MiB, or a signal stopped it. Write spec.network without YAML aliases and merge keys." ] ) || {
+    echo "memory limit:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
   }
-  # The memory bound is set on the yq process itself.
-  ( _slow_yq 'echo "virtual memory: $(ulimit -v)" >&2; exit 1'
+  ( TMPDIR="${BATS_TEST_TMPDIR}/no-such-dir"
+    rc=0; lo::read_dns_search_config "${spec}" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+    [ "${rc}" -ne 0 ] && [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "error: spec.network.dnsSearch could not be read: lo cannot create a temporary directory in ${BATS_TEST_TMPDIR}/no-such-dir. Correct TMPDIR." ] ) || {
+    echo "TMPDIR:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
+  }
+  # The data-memory cap is set on the yq process itself (DNSSEARCH_YQ_KIB).
+  ( _slow_yq 'echo "data memory: $(ulimit -d)" >&2; exit 1'
     lo::read_dns_search_config "${spec}" 2> "${BATS_TEST_TMPDIR}/err"
-    [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "virtual memory: 1048576" ] ) || {
+    [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "data memory: 1048576" ] ) || {
     echo "ulimit:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
   }
-  # A yq error of its own (not a bound) reaches stderr as it is, and the
+  # A yq error of its own (not a limit) reaches stderr as it is, and the
   # read finds no list, like the Go twin on an unparsable file.
   ( _slow_yq 'echo "Error: bad file: yaml: line 3: mapping values are not allowed" >&2; exit 1'
     rc=0; lo::read_dns_search_config "${spec}" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
