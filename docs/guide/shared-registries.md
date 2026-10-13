@@ -115,11 +115,35 @@ Since 2026-08 the shared network reserves its upper half (`10.125.200.128/25`) a
 
 `lo up` detects and repairs this on every run: it compares each node's kubelet `--node-ip` with the node's address on the cluster network, rewrites the stale address across the node's kubeadm files, restarts kubelet, and restarts the node's CNI agent. The check runs when the spec opts into shared mode **or** when any node still carries a registry-network attachment, so a cluster provisioned under the old shared default gets healed too. Per-project clusters have one network per node, so they cannot drift.
 
+## The default route
+
+The default route of a kind node must go through the cluster network: the node sends all traffic that no other route covers through it, the service network (`10.96.0.0/12`) too. For a container on two networks, Docker takes the default route from the network with the highest gateway priority. Between equal priorities, it takes the network whose name sorts first. Before the fix, both endpoints had the same priority. A cluster network whose name sorts after `lok8s-registries` (for example `ops`) lost the default route to the registry network. Then node-to-service traffic left with the registry address, `rp_filter` dropped part of the replies, and the Cilium agent could not reach the API server at `10.96.0.1`.
+
+`lo up` connects a node to the registry network with `docker network connect --gw-priority -1`. The flag needs Docker 28.0 or later, for the client and for the daemon. The cluster network keeps the default priority 0, so it keeps the default route for every network name, also after a node restart.
+
+With an older Docker, `lo up` connects without the flag. Then it moves the default route in the node: `ip route replace default via <cluster gateway> dev <cluster interface>`. `lo up` reads the cluster gateway from the node's own endpoint on the cluster network (`docker inspect <node>`). It does not use `docker network inspect`. Up to Docker 28.5, that command shows no gateway for a network created without `--gateway`, and lo creates the cluster network that way. If `lo up` finds no gateway, or cannot read the route in the node, it writes a warning. The warning names the node, the network and the value that `lo up` got, and it tells you what to do. A node that does not run gets its own warning: start the node, then run `lo up` again. Then `lo up` continues with the next node.
+
+The route move does not survive a node restart. When the node starts again, Docker sets the default route again from the gateway priorities. Run `lo up` after a node restart: it moves the route again.
+
+`lo up` also examines every node of the cluster that has an endpoint on the registry network, also when `shared.enabled` is `false` or omitted. It does not touch the other members of that network (the registries, the nodes of other clusters). A cluster from the time of the old shared default keeps its attachment (see [Migrating from the old shared default](#migrating-from-the-old-shared-default)). `lo up` moves the default route of such a node. It does the same for a node that an older lok8s attached without a priority. `lo up` does not change the priority of an endpoint that exists. Thus on Docker 28 or later, a node with an endpoint at priority 0 gets only the temporary route move. To make the fix permanent, do one of these steps:
+
+- Detach the node (`docker network disconnect lok8s-registries <node>`), then run `lo up`. A shared cluster attaches the node again, at priority `-1`. A cluster that is not shared leaves it detached.
+- Recreate the cluster.
+
+`lo up` does not examine these containers:
+
+- The load balancer of an HA cluster (`<cluster>-external-load-balancer`). `lo up` attaches it like a node, but its image has no `ip` command. It forwards from the host to the control-plane nodes on the cluster network, so its default route does not matter.
+- On Docker 28 or later, a node whose registry endpoint has a negative gateway priority. That endpoint cannot hold the default route, so the route is correct.
+
+The repair supports only the Docker engine. lok8s reads the network data in the format of `docker inspect` from Docker. lok8s does not support a `docker` command that Podman supplies.
+
+To examine a node, run `docker exec <node> ip route show default`. The gateway must be the gateway of the cluster network.
+
 ## Migrating from the old shared default
 
 Before 2026-08, `shared.enabled` defaulted to `true`. If your spec omits the key, the next `lo up` provisions per-project mirrors at `.103+` on the project subnet. Two consequences:
 
-1. Your kind nodes keep their `lok8s-registries` attachment until the cluster is recreated. This is harmless: the node-IP check above still guards them.
+1. Your kind nodes keep their `lok8s-registries` attachment until the cluster is recreated. This is harmless: the node-IP check and the default-route check above still guard them.
 2. The old shared mirror containers (`lok8s-registry-io-*`) and their volumes stay behind. Remove them with `lo registry clean --shared` when no other project uses them.
 
 To keep the old behavior, set `spec.registries.shared.enabled: true` explicitly.
