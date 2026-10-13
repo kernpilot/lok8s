@@ -396,9 +396,8 @@ func boolEnv(b bool) string {
 
 // setEnvScoped sets key to value (or unsets it, for "") for the duration of
 // the call, returning a restore func that puts the PRIOR value back (or
-// unsets it, if it was never set) — os.Setenv alone would leak across
-// sequential Apply calls in the same process once dry-run isolation needs
-// scoping, same as the production env already restores LOK8S_* globals.
+// unsets it, if it was never set) — os.Setenv alone would leak the dry-run
+// sentinel across sequential Apply calls in the same process.
 func setEnvScoped(key, value string) (restore func()) {
 	prev, had := os.LookupEnv(key)
 	if value == "" {

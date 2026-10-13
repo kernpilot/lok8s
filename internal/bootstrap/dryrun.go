@@ -57,11 +57,12 @@ type Options struct {
 	// name. dependsOn is NOT expanded: a dependency that is not named is
 	// not applied. An unknown name is an error that lists the valid names.
 	Only []string
-	// AllowGenerators lets a dry run execute a `bash:` secrets generator or
-	// a non-builtin exec plugin (default off): a dry run otherwise refuses
-	// both outright — either can run kubectl/lo against the live cluster,
-	// which is not read-only no matter what the rendered diff says. No
-	// effect outside --dry-run.
+	// AllowGenerators runs the addon's own executable code in a dry run
+	// (an exec plugin other than lok8s' two built-ins, a KRM exec or
+	// container function, a remote base, a `bash:` secrets generator) as
+	// trusted, with the side effects of a real run (default off: refused at
+	// the render boundary, internal/addons/dryrun.go). lo's own writes stay
+	// suppressed either way. No effect outside --dry-run.
 	AllowGenerators bool
 	// WithRestore includes restore.d in an --only run (default off:
 	// --only skips restore.d and, on a real run, warns loudly when it is
@@ -104,10 +105,10 @@ type dryResult struct {
 	// (an external diff tool), so the counts are not printed.
 	changed, added int
 	counted        bool
-	// nonRepeatable marks an entry whose render minted NEW secret material
-	// into the sandboxed store (review round 2, item I): the next REAL run
-	// generates different bytes (a fresh random password, a new keypair),
-	// so this entry's rendered manifest — and whatever its diff reported —
+	// nonRepeatable marks an entry whose render generated secret material
+	// in memory (the secrets plugin's report: a value the store lacks, a CA
+	// CAROOT lacks): the next REAL run generates different bytes, so this
+	// entry's rendered manifest — and whatever its diff reported —
 	// describes a result the real run will not reproduce verbatim.
 	nonRepeatable bool
 }

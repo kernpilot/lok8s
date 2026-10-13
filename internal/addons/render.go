@@ -35,7 +35,7 @@ import (
 // orchestration and safety variables: LOK8S_BOOTSTRAP_*, BOOTSTRAP_*,
 // bootstrap_* (the bash engine's own names), PATH_SECRETS, KUBECONFIG and
 // KUSTOMIZE_PLUGIN_HOME. An entry that names one is an entry error on a
-// real run and on a dry run alike (bash: bootstrap::_protected_env_override).
+// real run and on a dry run alike (bash: bootstrap::_reserved_env_name).
 func ProtectedEnvOverride(env map[string]string) string {
 	names := make([]string, 0, len(env))
 	for k := range env {
