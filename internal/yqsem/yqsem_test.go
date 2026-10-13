@@ -213,3 +213,61 @@ func TestDocLoadStates(t *testing.T) {
 		t.Error("LoadNode")
 	}
 }
+
+// MapGetMerged / LookupMerged read merge keys the way yq does with
+// --yaml-fix-merge-anchor-to-spec (pinned against yq v4.53.3 by
+// tests/unit/lo_dns_search_test.bats and hack/parity-*.sh through the
+// spec.network.dnsSearch reader).
+func TestMapGetMerged(t *testing.T) {
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(`
+a: &a {k: from-a, only-a: 1}
+b: &b {k: from-b, only-b: 2}
+c: &c {<<: *b}
+self: &self {x: 1}
+one: {<<: *a}
+local: {k: local, <<: *a}
+first: {<<: [*a, *b]}
+nested: {<<: *c}
+quoted: {"<<": *a}
+deep: {<<: *a, sub: {<<: *b}}
+`), &root); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		path []string
+		want string // "" = nil
+	}{
+		{[]string{"one", "k"}, "from-a"},
+		{[]string{"local", "k"}, "local"},
+		{[]string{"first", "k"}, "from-a"},
+		{[]string{"first", "only-b"}, "2"},
+		{[]string{"nested", "k"}, "from-b"},
+		{[]string{"quoted", "k"}, ""},
+		{[]string{"deep", "sub", "only-b"}, "2"},
+		{[]string{"one", "missing"}, ""},
+		{[]string{"self", "x"}, "1"},
+	} {
+		got := ""
+		if n := LookupMerged(&root, tc.path...); n != nil {
+			got = n.Value
+		}
+		if got != tc.want {
+			t.Errorf("LookupMerged(%v) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+	// Plain Lookup does not merge.
+	if n := Lookup(&root, "one", "k"); n != nil {
+		t.Errorf("Lookup follows merge keys: %q", n.Value)
+	}
+}
+
+// A map that merges itself ends at the depth bound instead of looping.
+func TestMapGetMergedStopsOnAMergeCycle(t *testing.T) {
+	m := &yaml.Node{Kind: yaml.MappingNode}
+	alias := &yaml.Node{Kind: yaml.AliasNode, Alias: m}
+	m.Content = []*yaml.Node{{Kind: yaml.ScalarNode, Tag: "!!merge", Value: "<<"}, alias}
+	if n := MapGetMerged(m, "k"); n != nil {
+		t.Fatalf("MapGetMerged on a merge cycle = %v, want nil", n)
+	}
+}

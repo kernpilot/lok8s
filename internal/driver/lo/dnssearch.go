@@ -30,9 +30,14 @@ var dnsCharsRe = regexp.MustCompile(`^[A-Za-z0-9.-]*$`)
 // prefix; the caller adds `error: ` or the lint indent). A missing key, a
 // null and a spec.network that is not a map give no names and no problems.
 // DNS is case-insensitive and a trailing dot marks a fully qualified name,
-// so both are valid. A spec with a problem returns no names.
+// so both are valid. A spec with a problem returns no names. Aliases
+// resolve one level per node (the list, each entry), never the whole tree:
+// an alias cycle inside the list reads as "a list", and one anywhere else
+// costs nothing.
 func CheckDNSSearch(root *yaml.Node) (names, problems []string) {
-	n := yqsem.Lookup(root, "spec", "network", "dnsSearch")
+	// Merge keys on the path resolve as in yq with
+	// --yaml-fix-merge-anchor-to-spec (the bash twin's flag).
+	n := yqsem.LookupMerged(root, "spec", "network", "dnsSearch")
 	if yqsem.IsNull(n) {
 		return nil, nil
 	}

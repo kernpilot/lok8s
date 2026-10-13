@@ -322,7 +322,7 @@ check - --domain iota.dev lint          # global-flag spelling
 # and a trailing dot pass; a spec.network that is not a map has no list;
 # a bad entry behind an alias fails; one entry per failure cause (newlines in the value included) fails with
 # the same lines on both sides.
-mkdir -p "${CL}"/{dnsok.dev,dnsnet.dev,dnsbad.dev,dnsalias.dev}
+mkdir -p "${CL}"/{dnsok.dev,dnsnet.dev,dnsbad.dev,dnsalias.dev,dnsmerge.dev,dnscycle.dev}
 cat > "${CL}/dnsok.dev/cluster.lok8s.yaml" <<'EOF'
 kind: Lo
 apiVersion: lok8s.dev/v1
@@ -340,6 +340,47 @@ printf 'kind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: dnsnet\nspec:\n  
 # An anchored list with a bad aliased entry: rejected through the alias.
 printf 'kind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: dnsalias\nbad: &bad corp_example\nlist: &list [*bad, ok.example]\nspec:\n  bootstrap: []\n  network:\n    dnsSearch: *list\n' \
   > "${CL}/dnsalias.dev/cluster.lok8s.yaml"
+# Merge keys: one in an unrelated field, one on spec.network that supplies a
+# list with a bad entry (resolved the YAML spec way on both sides, no yq
+# merge-key WARN line). Alias cycles: outside spec.network (no cost, a
+# self-merging map and a 9^9-entry anchor tree included), and one inside
+# the list (read one level: "Found a list").
+cat > "${CL}/dnsmerge.dev/cluster.lok8s.yaml" <<'EOF'
+kind: Lo
+apiVersion: lok8s.dev/v1
+metadata:
+  name: dnsmerge
+base: &base {dnsSearch: [ok.example, bad_entry.example]}
+other: {<<: *base, x: 1}
+spec:
+  bootstrap: []
+  network:
+    <<: *base
+EOF
+cat > "${CL}/dnscycle.dev/cluster.lok8s.yaml" <<'EOF'
+kind: Lo
+apiVersion: lok8s.dev/v1
+metadata:
+  name: dnscycle
+outside: &outside [x.example, *outside]
+other: *outside
+inside: &inside [ok.example, *inside]
+selfm: &selfm {<<: *selfm}
+l0: &l0 [x.example, x.example, x.example, x.example, x.example, x.example, x.example, x.example, x.example]
+l1: &l1 [*l0, *l0, *l0, *l0, *l0, *l0, *l0, *l0, *l0]
+l2: &l2 [*l1, *l1, *l1, *l1, *l1, *l1, *l1, *l1, *l1]
+l3: &l3 [*l2, *l2, *l2, *l2, *l2, *l2, *l2, *l2, *l2]
+l4: &l4 [*l3, *l3, *l3, *l3, *l3, *l3, *l3, *l3, *l3]
+l5: &l5 [*l4, *l4, *l4, *l4, *l4, *l4, *l4, *l4, *l4]
+l6: &l6 [*l5, *l5, *l5, *l5, *l5, *l5, *l5, *l5, *l5]
+l7: &l7 [*l6, *l6, *l6, *l6, *l6, *l6, *l6, *l6, *l6]
+l8: &l8 [*l7, *l7, *l7, *l7, *l7, *l7, *l7, *l7, *l7]
+big: *l8
+spec:
+  bootstrap: []
+  network:
+    dnsSearch: *inside
+EOF
 # The shared fixture of the driver tests (one entry per failure cause).
 { echo 'apiVersion: lok8s.dev/v1'; cat "${ROOT}/internal/driver/lo/testdata/dnssearch_bad.yaml"; } \
   > "${CL}/dnsbad.dev/cluster.lok8s.yaml"
@@ -351,6 +392,20 @@ for side in bash go; do
     echo "ok: ${side}: lint rejects the bad entry behind the alias"
   else fail "${side}: lint does not reject the bad entry behind the alias (see ${WORK}/${side}.err)"; fi
 done
+check - lint --domain dnsmerge.dev
+dns_pin() {  # <label> <regex>: the line on both sides, no yq WARN line
+  local side
+  for side in bash go; do
+    if grep -qE -- "${2}" "${WORK}/${side}.err" && ! grep -q 'yaml-fix-merge-anchor-to-spec' "${WORK}/${side}.err" "${WORK}/${side}.out"; then
+      echo "ok: ${side}: ${1}"
+    else fail "${side}: ${1} (see ${WORK}/${side}.err)"; fi
+  done
+}
+dns_pin "lint resolves the merge key on spec.network, no WARN" "^\[error\]   spec\.network\.dnsSearch\[1\] has a character that is not valid in a DNS name: 'bad_entry\.example'\."
+start=${SECONDS}
+check - lint --domain dnscycle.dev
+dns_pin "lint reads the alias cycle in the list one level" "^\[error\]   spec\.network\.dnsSearch\[1\] must be a DNS name\. Found a list\."
+if (( SECONDS - start < 30 )); then echo "ok: lint --domain dnscycle.dev took $(( SECONDS - start )) s (both sides)"; else fail "lint --domain dnscycle.dev took $(( SECONDS - start )) s"; fi
 check - lint --domain dnsbad.dev
 for side in bash go; do
   # Anti-vacuity: 21 of the 23 fixture entries are bad, one line each.

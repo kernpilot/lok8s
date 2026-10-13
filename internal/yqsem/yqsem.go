@@ -75,6 +75,62 @@ func Lookup(n *yaml.Node, path ...string) *yaml.Node {
 	return n
 }
 
+// maxMergeDepth bounds the merge-key walk of MapGetMerged: a map that
+// merges itself (directly or through others) ends there.
+const maxMergeDepth = 32
+
+// MapGetMerged is MapGet with YAML merge keys (`<<: *a`, `<<: [*a, *b]`)
+// resolved the way the YAML spec, and yq with --yaml-fix-merge-anchor-to-
+// spec, read them: a key of the map itself wins; else the merged maps in
+// order, the first that has the key (its own merge keys count too). Nil
+// when no map on that walk has the key.
+func MapGetMerged(n *yaml.Node, key string) *yaml.Node {
+	return mapGetMerged(n, key, 0)
+}
+
+func mapGetMerged(n *yaml.Node, key string, depth int) *yaml.Node {
+	n = Deref(n)
+	if n == nil || n.Kind != yaml.MappingNode || depth > maxMergeDepth {
+		return nil
+	}
+	var merged []*yaml.Node
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k := Deref(n.Content[i])
+		switch {
+		case k == nil:
+		case k.ShortTag() == "!!merge":
+			merged = append(merged, n.Content[i+1])
+		case k.Value == key:
+			return Deref(n.Content[i+1])
+		}
+	}
+	for _, m := range merged {
+		sources := []*yaml.Node{m}
+		if d := Deref(m); d != nil && d.Kind == yaml.SequenceNode {
+			sources = d.Content
+		}
+		for _, s := range sources {
+			if v := mapGetMerged(s, key, depth+1); v != nil {
+				return v
+			}
+		}
+	}
+	return nil
+}
+
+// LookupMerged is Lookup through MapGetMerged: yq's `.a.b.c` with
+// --yaml-fix-merge-anchor-to-spec on a spec with merge keys.
+func LookupMerged(n *yaml.Node, path ...string) *yaml.Node {
+	n = Deref(n)
+	for _, key := range path {
+		n = MapGetMerged(n, key)
+		if n == nil {
+			return nil
+		}
+	}
+	return n
+}
+
 // HasKey reports whether the mapping node carries key (yq: `has("k")`).
 func HasKey(n *yaml.Node, key string) bool {
 	n = Deref(n)

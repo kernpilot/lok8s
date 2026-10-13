@@ -122,6 +122,21 @@ func dnsSearchList(n int) string {
 	return b.String()
 }
 
+// dnsHeavyAnchors is YAML that a whole-document alias expansion cannot
+// afford: a self-merging map and a 9^9-entry anchor tree.
+const dnsHeavyAnchors = `selfm: &selfm {<<: *selfm}
+l0: &l0 [x.example, x.example, x.example, x.example, x.example, x.example, x.example, x.example, x.example]
+l1: &l1 [*l0, *l0, *l0, *l0, *l0, *l0, *l0, *l0, *l0]
+l2: &l2 [*l1, *l1, *l1, *l1, *l1, *l1, *l1, *l1, *l1]
+l3: &l3 [*l2, *l2, *l2, *l2, *l2, *l2, *l2, *l2, *l2]
+l4: &l4 [*l3, *l3, *l3, *l3, *l3, *l3, *l3, *l3, *l3]
+l5: &l5 [*l4, *l4, *l4, *l4, *l4, *l4, *l4, *l4, *l4]
+l6: &l6 [*l5, *l5, *l5, *l5, *l5, *l5, *l5, *l5, *l5]
+l7: &l7 [*l6, *l6, *l6, *l6, *l6, *l6, *l6, *l6, *l6]
+l8: &l8 [*l7, *l7, *l7, *l7, *l7, *l7, *l7, *l7, *l7]
+big: *l8
+`
+
 func TestReadDNSSearchConfigAcceptsDNSNames(t *testing.T) {
 	label63 := strings.Repeat("a", 63)
 	name253 := strings.Repeat(label63+".", 3) + strings.Repeat("b", 61) // 3*64 + 61 = 253
@@ -146,6 +161,13 @@ func TestReadDNSSearchConfigAcceptsDNSNames(t *testing.T) {
 		{"an anchored list", "shared: &s [corp.example.com, x.example]\nspec:\n  network:\n    dnsSearch: *s\n", "corp.example.com x.example"},
 		{"aliased entries", "one: &o corp.example.com\nspec:\n  network:\n    dnsSearch: [*o, y.example, *o]\n", "corp.example.com y.example corp.example.com"},
 		{"an anchored spec.network", "net: &n\n  name: x\n  dnsSearch: [a.example]\nspec:\n  network: *n\n", "a.example"},
+		{"nested aliases", "one: &one corp.example.com\ninner: &inner [*one, two.example]\nnet: &net {name: x, dnsSearch: *inner}\nspec:\n  network: *net\n", "corp.example.com two.example"},
+		{"a merge key on spec.network", "base: &base {dnsSearch: [m.example]}\nspec:\n  network:\n    <<: *base\n    name: x\n", "m.example"},
+		{"a local key over a merge key", "base: &base {dnsSearch: [m.example]}\nspec:\n  network:\n    dnsSearch: [local.example]\n    <<: *base\n", "local.example"},
+		{"the first of two merged maps", "a: &a {dnsSearch: [a.example]}\nb: &b {dnsSearch: [b.example]}\nspec:\n  network: {<<: [*a, *b]}\n", "a.example"},
+		{"a merge key on spec", "s: &s {network: {dnsSearch: [s.example]}}\nspec:\n  <<: *s\n", "s.example"},
+		{"a merge key in another field", "base: &base {x: 1}\nother: {<<: *base, y: 2}\nspec:\n  network:\n    dnsSearch: [a.example]\n", "a.example"},
+		{"alias cycles and a large anchor tree outside spec.network", "cyc: &cyc [x.example, *cyc]\nother: *cyc\n" + dnsHeavyAnchors + "spec:\n  network:\n    dnsSearch: [a.example]\n", "a.example"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, stderr, err := readDNSSearch(t, tc.body)
@@ -179,6 +201,19 @@ func TestReadDNSSearchConfigRejectsANonList(t *testing.T) {
 		if got != "" {
 			t.Fatalf("dnsSearch: %s: a rejected read exported %q", tc.value, got)
 		}
+	}
+}
+
+// An alias cycle inside the list resolves one level, as in the bash twin
+// (yq's explode(.) on an alias node): the cyclic entry is a list.
+func TestReadDNSSearchConfigReadsAnAliasCycleOneLevel(t *testing.T) {
+	got, stderr, err := readDNSSearch(t, "cyc: &cyc [x.example, *cyc]\nspec:\n  network:\n    dnsSearch: *cyc\n")
+	if err == nil || got != "" {
+		t.Fatalf("accepted: exported %q", got)
+	}
+	want := "error: spec.network.dnsSearch[1] must be a DNS name. Found a list. Write the entry as text, for example corp.example.com.\n"
+	if stderr != want {
+		t.Fatalf("stderr\n%q\nwant\n%q", stderr, want)
 	}
 }
 

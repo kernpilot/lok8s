@@ -87,8 +87,13 @@ spec:
             the Kubernetes limit for the search list of a pod.
           items:
             type: string
-            maxLength: 254
-            pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$'
+            # The CLI rule (CheckDNSSearch): at most 253 characters without
+            # the trailing dot, so 254 only with it.
+            anyOf:
+              - maxLength: 253
+                pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
+              - maxLength: 254
+                pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.$'
     registries:
       type: object
       description: |

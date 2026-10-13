@@ -331,7 +331,7 @@ stateful "${KIND_CFG}" up --domain tls.dev
 # with the same lines on both sides, and kind create never runs.
 # `provision --bootstrap` reads the spec through driver::export (bash) /
 # Export (Go) and must stop there too.
-mkdir -p "${PROJ}/clusters"/{dns.dev,dnsalias.dev,dnsbad.dev,dnslist.dev,dnsnl.dev}
+mkdir -p "${PROJ}/clusters"/{dns.dev,dnsalias.dev,dnsmisc.dev,dnsbad.dev,dnslist.dev,dnsnl.dev}
 dns_spec() {  # <domain> <name> <slot> <dnsSearch value…>
   printf 'kind: Lo\nmetadata:\n  name: %s\nspec:\n  runtime: kind\n  network:\n    name: %snet\n    cidr: 10.99.%s.0/24\n    dnsSearch: %s\n  registries:\n    tls: false\n    shared:\n      enabled: false\n' \
     "${2}" "${2}" "${3}" "${4}" > "${PROJ}/clusters/${1}/cluster.lok8s.yaml"
@@ -361,12 +361,46 @@ spec:
     shared:
       enabled: false
 YAML
+# dnsmisc.dev: a merge key in an unrelated field, alias cycles, a
+# self-merging map and a 9^9-entry anchor tree outside spec.network. None
+# may slow the read or print a yq merge-key WARN line.
+cat > "${PROJ}/clusters/dnsmisc.dev/cluster.lok8s.yaml" <<'YAML'
+kind: Lo
+metadata:
+  name: dnsmisc
+base: &base {x: 1}
+other: {<<: *base, y: 2}
+cyc: &cyc [x.example, *cyc]
+more: *cyc
+selfm: &selfm {<<: *selfm}
+l0: &l0 [x.example, x.example, x.example, x.example, x.example, x.example, x.example, x.example, x.example]
+l1: &l1 [*l0, *l0, *l0, *l0, *l0, *l0, *l0, *l0, *l0]
+l2: &l2 [*l1, *l1, *l1, *l1, *l1, *l1, *l1, *l1, *l1]
+l3: &l3 [*l2, *l2, *l2, *l2, *l2, *l2, *l2, *l2, *l2]
+l4: &l4 [*l3, *l3, *l3, *l3, *l3, *l3, *l3, *l3, *l3]
+l5: &l5 [*l4, *l4, *l4, *l4, *l4, *l4, *l4, *l4, *l4]
+l6: &l6 [*l5, *l5, *l5, *l5, *l5, *l5, *l5, *l5, *l5]
+l7: &l7 [*l6, *l6, *l6, *l6, *l6, *l6, *l6, *l6, *l6]
+l8: &l8 [*l7, *l7, *l7, *l7, *l7, *l7, *l7, *l7, *l7]
+big: *l8
+spec:
+  runtime: kind
+  network:
+    name: dnsmiscnet
+    cidr: 10.99.16.0/24
+    dnsSearch: [corp.example.com]
+  registries:
+    tls: false
+    shared:
+      enabled: false
+YAML
 export PARITY_KIND_CONFIG_LOG="${WORK}/kindcfg.log"
 dns_pre() { reset_fixtures; rm -f "${PARITY_KIND_CONFIG_LOG}" "${PROJ}/clusters"/dns*.dev/.registries.json; }
 dns_post() { if [[ -f "${PARITY_KIND_CONFIG_LOG}" ]]; then mv "${PARITY_KIND_CONFIG_LOG}" "${WORK}/kindcfg.${1}.log"; else : > "${WORK}/kindcfg.${1}.log"; fi; }
 dns_check() { PARITY_PRE_EACH=dns_pre PARITY_POST_EACH=dns_post check "$@"; }
 for d in 'dns.dev|  dnsSearch: \["corp\.example\.com", "example\.ts\.net"\]' \
-  'dnsalias.dev|  dnsSearch: \["corp\.example\.com", "Example\.TS\.net\.", "corp\.example\.com"\]'; do
+  'dnsalias.dev|  dnsSearch: \["corp\.example\.com", "Example\.TS\.net\.", "corp\.example\.com"\]' \
+  'dnsmisc.dev|  dnsSearch: \["corp\.example\.com"\]'; do
   line="${d#*|}"; d="${d%%|*}"
   dns_check "${KIND_CFG}" up --domain "${d}"
   parity::state_same "${WORK}/kindcfg.bash.log" "${WORK}/kindcfg.go.log" "kind config of lo up --domain ${d}" || failures=$((failures + 1))
@@ -374,6 +408,9 @@ for d in 'dns.dev|  dnsSearch: \["corp\.example\.com", "example\.ts\.net"\]' \
     if grep -qx "${line}" "${WORK}/kindcfg.${side}.log"; then
       echo "ok: ${side}: kind create got the spec.network.dnsSearch list of ${d}"
     else fail "${side}: no spec.network.dnsSearch list in ${WORK}/kindcfg.${side}.log (${d})"; fi
+    if grep -q 'yaml-fix-merge-anchor-to-spec' "${WORK}/${side}.err" "${WORK}/${side}.out"; then
+      fail "${side}: a yq merge-key WARN line in the output of lo up --domain ${d}"
+    fi
   done
 done
 # --bootstrap needs the cluster's kubeconfig file before it reads the spec.

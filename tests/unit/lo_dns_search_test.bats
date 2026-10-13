@@ -161,6 +161,97 @@ YAML
   [ "${LOK8S_NETWORK_DNS_SEARCH}" == "a.example" ]
 }
 
+# _read_quiet <file> <want-list> — the read exports <want-list>, prints nothing
+# on stderr (no yq merge-key WARN line either) and takes under 5 s.
+_read_quiet() {
+  local start=${SECONDS}
+  lo::read_dns_search_config "${1}" 2> "${BATS_TEST_TMPDIR}/err" || { echo "read failed:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1; }
+  (( SECONDS - start < 5 )) || { echo "read took $(( SECONDS - start )) s" >&2; return 1; }
+  [ ! -s "${BATS_TEST_TMPDIR}/err" ] || { echo "stderr is not empty:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1; }
+  [ "${LOK8S_NETWORK_DNS_SEARCH}" == "${2}" ] || { echo "exported '${LOK8S_NETWORK_DNS_SEARCH}', want '${2}'" >&2; return 1; }
+}
+
+@test "read_dns_search_config: nested aliases and merge keys resolve, the YAML spec way (Go: yqsem.LookupMerged)" {
+  printf 'kind: Lo\none: &one corp.example.com\ninner: &inner [*one, two.example]\nnet: &net {name: x, dnsSearch: *inner}\nspec:\n  network: *net\n' > "${BATS_TEST_TMPDIR}/nested.yaml"
+  _read_quiet "${BATS_TEST_TMPDIR}/nested.yaml" "corp.example.com two.example"
+  printf 'kind: Lo\nbase: &base {dnsSearch: [m.example]}\nspec:\n  network:\n    <<: *base\n    name: x\n' > "${BATS_TEST_TMPDIR}/merge.yaml"
+  _read_quiet "${BATS_TEST_TMPDIR}/merge.yaml" "m.example"
+  printf 'kind: Lo\nbase: &base {dnsSearch: [m.example]}\nspec:\n  network:\n    dnsSearch: [local.example]\n    <<: *base\n' > "${BATS_TEST_TMPDIR}/local.yaml"
+  _read_quiet "${BATS_TEST_TMPDIR}/local.yaml" "local.example"
+  printf 'kind: Lo\na: &a {dnsSearch: [a.example]}\nb: &b {dnsSearch: [b.example]}\nspec:\n  network: {<<: [*a, *b]}\n' > "${BATS_TEST_TMPDIR}/first.yaml"
+  _read_quiet "${BATS_TEST_TMPDIR}/first.yaml" "a.example"
+  printf 'kind: Lo\ns: &s {network: {dnsSearch: [s.example]}}\nspec:\n  <<: *s\n' > "${BATS_TEST_TMPDIR}/spec.yaml"
+  _read_quiet "${BATS_TEST_TMPDIR}/spec.yaml" "s.example"
+}
+
+@test "read_dns_search_config: merge keys, alias cycles and a large anchor tree outside spec.network cost nothing" {
+  # A self-merging map and a 9^9-entry anchor tree: a whole-document
+  # explode(.) runs out of memory on either (bounded here by dnssearch::_read).
+  {
+    printf 'kind: Lo\nbase: &base {x: 1}\nother: {<<: *base, y: 2}\ncyc: &cyc [x.example, *cyc]\nmore: *cyc\nselfm: &selfm {<<: *selfm}\n'
+    printf 'l0: &l0 [x.example, x.example, x.example, x.example, x.example, x.example, x.example, x.example, x.example]\n'
+    local i
+    for i in 1 2 3 4 5 6 7 8; do
+      printf 'l%d: &l%d [*l%d, *l%d, *l%d, *l%d, *l%d, *l%d, *l%d, *l%d, *l%d]\n' "${i}" "${i}" $(( i - 1 )) $(( i - 1 )) $(( i - 1 )) $(( i - 1 )) $(( i - 1 )) $(( i - 1 )) $(( i - 1 )) $(( i - 1 )) $(( i - 1 ))
+    done
+    printf 'big: *l8\nspec:\n  network:\n    dnsSearch: [a.example]\n'
+  } > "${BATS_TEST_TMPDIR}/outside.yaml"
+  _read_quiet "${BATS_TEST_TMPDIR}/outside.yaml" "a.example"
+}
+
+@test "read_dns_search_config: an alias cycle inside the list resolves one level (the entry is a list)" {
+  printf 'kind: Lo\ncyc: &cyc [x.example, *cyc]\nspec:\n  network:\n    dnsSearch: *cyc\n' > "${BATS_TEST_TMPDIR}/cycle.yaml"
+  local rc=0 start=${SECONDS}
+  lo::read_dns_search_config "${BATS_TEST_TMPDIR}/cycle.yaml" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+  [ "${rc}" -ne 0 ]
+  (( SECONDS - start < 5 ))
+  [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "error: spec.network.dnsSearch[1] must be a DNS name. Found a list. Write the entry as text, for example corp.example.com." ] || {
+    cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
+  }
+}
+
+# _slow_yq <script-body> — a yq stub first on PATH (the bound wraps the yq
+# BINARY through `timeout`, so a function stub would not reach it).
+_slow_yq() {
+  mkdir -p "${BATS_TEST_TMPDIR}/yq-bin"
+  printf '#!/usr/bin/env bash\n%s\n' "${1}" > "${BATS_TEST_TMPDIR}/yq-bin/yq"
+  chmod +x "${BATS_TEST_TMPDIR}/yq-bin/yq"
+  PATH="${BATS_TEST_TMPDIR}/yq-bin:${PATH}"
+}
+
+@test "read_dns_search_config: a yq call that hits the time or memory bound is one error line, not a hang" {
+  local spec want rc
+  spec="$(_spec "  network:
+    dnsSearch: [a.example]
+")"
+  want="error: spec.network.dnsSearch could not be read: yq stopped at the limit of 1 s and 1024 MiB. Write spec.network without YAML aliases and merge keys."
+  DNSSEARCH_YQ_SECONDS=1
+  ( _slow_yq 'sleep 30'
+    rc=0; lo::read_dns_search_config "${spec}" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+    [ "${rc}" -ne 0 ] && [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "${want}" ] ) || {
+    echo "time bound:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
+  }
+  ( _slow_yq 'echo "fatal error: runtime: out of memory" >&2; echo "goroutine 1 [running]:" >&2; exit 2'
+    rc=0; lo::read_dns_search_config "${spec}" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+    [ "${rc}" -ne 0 ] && [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "${want}" ] ) || {
+    echo "memory bound:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
+  }
+  # The memory bound is set on the yq process itself.
+  ( _slow_yq 'echo "virtual memory: $(ulimit -v)" >&2; exit 1'
+    lo::read_dns_search_config "${spec}" 2> "${BATS_TEST_TMPDIR}/err"
+    [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "virtual memory: 1048576" ] ) || {
+    echo "ulimit:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
+  }
+  # A yq error of its own (not a bound) reaches stderr as it is, and the
+  # read finds no list, like the Go twin on an unparsable file.
+  ( _slow_yq 'echo "Error: bad file: yaml: line 3: mapping values are not allowed" >&2; exit 1'
+    rc=0; lo::read_dns_search_config "${spec}" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+    [ "${rc}" -eq 0 ] && [ "${LOK8S_NETWORK_DNS_SEARCH}" == "" ] &&
+      [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "Error: bad file: yaml: line 3: mapping values are not allowed" ] ) || {
+    echo "own error:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
+  }
+}
+
 @test "read_dns_search_config: 32 entries pass, more fail with the count to remove" {
   local n body i
   for n in 32 33 34; do
