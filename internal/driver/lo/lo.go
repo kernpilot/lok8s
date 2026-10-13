@@ -74,6 +74,13 @@ type Driver struct {
 		done bool
 		err  error
 	}
+
+	// gwPriority is the result of dockerGwPriority (network.go): docker
+	// version is asked once per process, like the bash
+	// _LO_DOCKER_GW_PRIORITY.
+	gwPriority struct {
+		done, ok bool
+	}
 }
 
 // New builds the driver over its dispatch-provided dependencies.
@@ -271,7 +278,7 @@ func (d *Driver) createKindCluster(ctx context.Context, clusterName, k8sVersion,
 		}
 	}
 	if d.isShared() {
-		return d.connectNodesToRegistryNetwork(ctx, clusterName)
+		return d.connectNodesToRegistryNetwork(ctx, clusterName, stderr)
 	}
 	return nil
 }

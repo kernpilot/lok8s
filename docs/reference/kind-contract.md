@@ -92,7 +92,7 @@ drivers/lo/
 5. Start registry containers (build, cache, pull-through mirrors)
 6. Write containerd `certs.d/` tree (bind-mounted into kind nodes)
 7. Render + create kind cluster
-8. Connect nodes to shared registry network
+8. Connect nodes to shared registry network, at gateway priority `-1` so the cluster network keeps the default route (Docker 28+; an older Docker gets a plain connect and an in-node `ip route replace`, see [The default route](/guide/shared-registries#the-default-route))
 9. Extract kubeconfig
 10. Apply local-registry-hosting ConfigMap (KEP-1755)
 11. Apply registry ConfigMap + CoreDNS config (incl. `spec.coredns` →

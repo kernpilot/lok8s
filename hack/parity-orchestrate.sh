@@ -695,4 +695,110 @@ for fixture in "${ROOT}"/tests/fixtures/audit-policy/*--*.yaml; do
 done
 (( ko_n >= 20 )) || fail "only ${ko_n} audit policy fixtures found"
 
+# ── lo provision — the registry network's gateway priority ───────────────────
+# A shared-registries cluster whose project network ("zz-gwnet") sorts after
+# "lok8s-registries": with the same gateway priority, Docker gives the default
+# route to the registry network. The stubs: kind reports two nodes; docker
+# answers `docker version` with PARITY_DOCKER_VERSION, the gateway of the
+# project network, and the in-node `ip` reads (a default route through the
+# registry network on eth1, the project network on eth0); PARITY_ATTACHED=1
+# lists the nodes as members of the registry network. Docker 28+: the connect
+# carries --gw-priority -1 and the route is not touched. Docker 27: a plain
+# connect, then the route replace. An attached node: no connect, the route
+# replace. The docker argv is diffed across the sides and pinned.
+mkdir -p "${PROJ}/clusters/gwprio.dev"
+cat > "${PROJ}/clusters/gwprio.dev/cluster.lok8s.yaml" <<'YAML'
+kind: Lo
+metadata:
+  name: zz-gwprio
+spec:
+  runtime: kind
+  kubernetes:
+    version: v1.31.4
+  network:
+    name: zz-gwnet
+    cidr: 10.99.16.0/24
+  registries:
+    tls: false
+    shared:
+      enabled: true
+YAML
+parity::stub "${PROJ}" kind <<'SH'
+#!/usr/bin/env bash
+# Parity stub (gateway priority): no cluster exists; two nodes.
+case "${1:-} ${2:-}" in
+  "get nodes")      printf 'zz-gwprio-control-plane\nzz-gwprio-worker\n'; exit 0 ;;
+  "create cluster") echo "stub: kind $*"; exit 0 ;;
+esac
+exit 0
+SH
+parity::stub "${PROJ}" docker <<'SH'
+#!/usr/bin/env bash
+# Parity stub (gateway priority): the argv log, the version, the project
+# gateway, the members of the registry network and the in-node `ip` reads.
+echo "docker $*" >> "${PARITY_DOCKER_LOG}"
+case "${1:-} ${2:-}" in
+  "version --format") echo "${PARITY_DOCKER_VERSION}"; exit 0 ;;
+  "network inspect")
+    case "$*" in
+      *".Gateway"*)    echo "10.99.16.1 "; exit 0 ;;
+      *".Containers"*) if [[ "${PARITY_ATTACHED:-0}" == 1 ]]; then echo "zz-gwprio-control-plane zz-gwprio-worker "; exit 0; fi ;;
+    esac
+    exit 1 ;;
+  "exec "*)
+    case "$*" in
+      *"ip -4 route show default") echo "default via 10.125.200.128 dev eth1"; exit 0 ;;
+      *"ip -o -4 route get 10.99.16.1") echo "10.99.16.1 dev eth0 src 10.99.16.193 uid 0"; exit 0 ;;
+    esac
+    exit 0 ;;
+  "inspect "*) exit 1 ;;
+esac
+exit 0
+SH
+export PARITY_DOCKER_LOG="${WORK}/docker.log"
+gw_pre() { reset_fixtures; rm -f "${PARITY_DOCKER_LOG}" "${PROJ}/clusters/gwprio.dev/.registries.json"; }
+gw_post() {  # <impl>: keep the docker argv per side (normalized)
+  if [[ -f "${PARITY_DOCKER_LOG}" ]]; then
+    sed -E "s|${PROJ}|PROJ|g" "${PARITY_DOCKER_LOG}" > "${WORK}/docker.${1}.log"
+    rm -f "${PARITY_DOCKER_LOG}"
+  else
+    : > "${WORK}/docker.${1}.log"
+  fi
+}
+gw_check() {  # <label>: lo provision --domain gwprio.dev, streams and docker argv diffed
+  PARITY_PRE_EACH=gw_pre PARITY_POST_EACH=gw_post check "${KIND_CFG}" provision --domain gwprio.dev
+  parity::state_same "${WORK}/docker.bash.log" "${WORK}/docker.go.log" "docker argv of lo provision --domain gwprio.dev (${1})" || failures=$((failures + 1))
+}
+gw_pin() {  # <label> <file> <want-count> <regex>
+  local n
+  n=$(grep -cE -- "${4}" "${2}" || true)
+  if [[ "${n}" == "${3}" ]]; then echo "ok: ${1}"; else
+    echo "FAIL: ${1} — ${n} lines match ${4} in ${2}, want ${3}:"; sed 's/^/  /' "${2}" | head -40
+    failures=$((failures + 1))
+  fi
+}
+export PARITY_DOCKER_VERSION="29.6.2 29.6.2"
+gw_check "Docker 29"
+for side in bash go; do
+  gw_pin "${side}: Docker 29: one version read"                 "${WORK}/docker.${side}.log" 1 '^docker version '
+  gw_pin "${side}: Docker 29: both nodes connect at priority -1" "${WORK}/docker.${side}.log" 2 '^docker network connect --gw-priority -1 lok8s-registries zz-gwprio-(control-plane|worker)$'
+  gw_pin "${side}: Docker 29: no plain connect"                  "${WORK}/docker.${side}.log" 0 '^docker network connect lok8s-registries '
+  gw_pin "${side}: Docker 29: the route is not touched"          "${WORK}/docker.${side}.log" 0 '^docker exec .* ip '
+done
+export PARITY_DOCKER_VERSION="27.5.1 27.5.1"
+gw_check "Docker 27"
+for side in bash go; do
+  gw_pin "${side}: Docker 27: no --gw-priority"                  "${WORK}/docker.${side}.log" 0 'gw-priority'
+  gw_pin "${side}: Docker 27: both nodes connect plainly"        "${WORK}/docker.${side}.log" 2 '^docker network connect lok8s-registries zz-gwprio-(control-plane|worker)$'
+  gw_pin "${side}: Docker 27: both routes move to the project network" "${WORK}/docker.${side}.log" 2 '^docker exec zz-gwprio-(control-plane|worker) ip route replace default via 10\.99\.16\.1 dev eth0$'
+  gw_pin "${side}: Docker 27: the move is reported"              "${WORK}/${side}.err" 2 'zz-gwprio-(control-plane|worker): the default route did not go through zz-gwnet — moved it there \(via 10\.99\.16\.1 dev eth0\)'
+done
+export PARITY_DOCKER_VERSION="29.6.2 29.6.2" PARITY_ATTACHED=1
+gw_check "attached without a priority"
+for side in bash go; do
+  gw_pin "${side}: attached: no connect"                         "${WORK}/docker.${side}.log" 0 '^docker network connect '
+  gw_pin "${side}: attached: both routes move to the project network" "${WORK}/docker.${side}.log" 2 '^docker exec zz-gwprio-(control-plane|worker) ip route replace default via 10\.99\.16\.1 dev eth0$'
+done
+unset PARITY_DOCKER_LOG PARITY_DOCKER_VERSION PARITY_ATTACHED
+
 report

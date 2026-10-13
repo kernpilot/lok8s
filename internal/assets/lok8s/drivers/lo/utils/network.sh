@@ -220,10 +220,126 @@ lo::registry_network() {
   lo::registry_network_create "${network}" "${subnet}" "${dynamic_range}"
 }
 
+# The gateway priority of a kind node's endpoint on the shared registry
+# network. kind creates the node on the project network with the default
+# priority 0. A container on two networks gets its default route from the
+# network with the highest priority; between equal priorities Docker takes the
+# network whose name sorts first. Without a priority, a project network whose
+# name sorts after "lok8s-registries" (for example "ops") lost the default
+# route to the registry network: node-to-service traffic left with the registry
+# address, rp_filter dropped part of the replies, and the Cilium init container
+# hung on https://10.96.0.1:443. With -1 the project network keeps the default
+# route for every name. Go twin: registryGwPriority (internal/driver/lo).
+LO_REGISTRY_GW_PRIORITY=-1
+# The first Docker release whose `docker network connect` accepts
+# --gw-priority (28.0, API 1.48).
+LO_GW_PRIORITY_MIN_MAJOR=28
+
+# lo::gw_priority_supported <versions> — true when `docker version --format
+# '{{.Client.Version}} {{.Server.Version}}'` names a client AND a daemon of
+# Docker 28.0 or later: the client parses the flag, the daemon applies it. A
+# value that does not parse (another engine, no daemon) reads as false.
+lo::gw_priority_supported() {
+  local -a fields
+  read -r -a fields <<<"${1}"
+  (( ${#fields[@]} == 2 )) || return 1
+  local v major
+  for v in "${fields[@]}"; do
+    major="${v%%.*}"
+    [[ "${major}" =~ ^[0-9]+$ ]] || return 1
+    (( 10#${major} >= LO_GW_PRIORITY_MIN_MAJOR )) || return 1
+  done
+}
+
+# lo::docker_gw_priority — lo::gw_priority_supported for the docker on PATH,
+# asked once per process (_LO_DOCKER_GW_PRIORITY caches the answer).
+lo::docker_gw_priority() {
+  if [[ -z "${_LO_DOCKER_GW_PRIORITY:-}" ]]; then
+    local versions
+    versions=$(docker version --format '{{.Client.Version}} {{.Server.Version}}' 2>/dev/null) || versions=""
+    _LO_DOCKER_GW_PRIORITY=0
+    if lo::gw_priority_supported "${versions}"; then _LO_DOCKER_GW_PRIORITY=1; fi
+  fi
+  (( _LO_DOCKER_GW_PRIORITY == 1 ))
+}
+
+# lo::network_gateway <network> — the first IPv4 gateway of a docker network;
+# prints nothing when docker reports none.
+lo::network_gateway() {
+  local out gw
+  out=$(docker network inspect "${1}" --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null) || return 0
+  for gw in ${out}; do
+    if ip::validate_format "${gw}" 2>/dev/null; then
+      echo "${gw}"
+      return 0
+    fi
+  done
+}
+
+# lo::route_field <line> <key> — the word after key in one `ip route` line
+# ("dev", "via"); nothing when the line does not carry it.
+lo::route_field() {
+  local -a f
+  read -r -a f <<<"${1}"
+  local i
+  for (( i = 0; i + 1 < ${#f[@]}; i++ )); do
+    if [[ "${f[${i}]}" == "${2}" ]]; then
+      echo "${f[$(( i + 1 ))]}"
+      return 0
+    fi
+  done
+}
+
+# lo::default_route_repair <current> <route-get> <gw> — decides the default
+# route of a node from two `ip` reads in the node: current is
+# `ip -4 route show default`, route-get is `ip -o -4 route get <gw>` for the
+# gateway of the project network. Prints the device that reaches gw (the
+# project network's interface) and returns 0 when the default route is not
+# `via <gw> dev <dev>` yet; returns 1 when it is, or when no device reaches gw.
+lo::default_route_repair() {
+  local current="${1}" route_get="${2}" gw="${3}" dev first
+  dev=$(lo::route_field "${route_get}" dev)
+  [[ -n "${dev}" ]] || return 1
+  first="${current%%$'\n'*}"
+  if [[ "$(lo::route_field "${first}" via)" == "${gw}" && "$(lo::route_field "${first}" dev)" == "${dev}" ]]; then
+    return 1
+  fi
+  echo "${dev}"
+}
+
+# lo::repair_default_route <node> <network> <gw> — moves the default route of
+# a node back to the project network when it goes through another network. It
+# is the fallback for a Docker without --gw-priority, and the repair for a node
+# that an older lok8s attached without a priority. Docker writes the route
+# again when the node restarts, so on such a Docker the next `lo up` repeats
+# the repair. Advisory: a node that cannot be read or changed gets a warning,
+# never a failure. Go twin: repairDefaultRoute.
+lo::repair_default_route() {
+  local node="${1}" network="${2}" gw="${3}"
+  [[ -n "${gw}" ]] || return 0
+  local current route_get dev
+  current=$(docker exec "${node}" ip -4 route show default 2>/dev/null) || return 0
+  route_get=$(docker exec "${node}" ip -o -4 route get "${gw}" 2>/dev/null) || return 0
+  dev=$(lo::default_route_repair "${current}" "${route_get}" "${gw}") || return 0
+  if ! docker exec "${node}" ip route replace default via "${gw}" dev "${dev}" &>/dev/null; then
+    warn "lo: ${node}: could not move the default route to ${network} (via ${gw} dev ${dev})"
+    return 0
+  fi
+  warn "lo: ${node}: the default route did not go through ${network} — moved it there (via ${gw} dev ${dev})"
+}
+
+# lo::connect_nodes_to_registry_network <cluster-name> — attaches the cluster's
+# kind nodes to the shared registry network. The registry endpoint gets the
+# gateway priority LO_REGISTRY_GW_PRIORITY, so the project network keeps the
+# default route of the node. A Docker without --gw-priority (or a connect that
+# refuses the flag) gets a plain connect, then lo::repair_default_route. An
+# attached node goes through lo::repair_default_route too: it repairs a node
+# that an older lok8s attached without a priority.
 lo::connect_nodes_to_registry_network() {
   local cluster_name="${1}"
-  local registry_network
+  local registry_network project_network
   registry_network=$(registry::network_name)
+  project_network=$(registry::project_network)
 
   # Skip nodes that are already attached — a re-run must not error (nor rely
   # on the 2>/dev/null to hide a real failure for the common no-op case).
@@ -231,10 +347,29 @@ lo::connect_nodes_to_registry_network() {
   members=$(docker network inspect "${registry_network}" \
     -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null || true)
 
+  # The project gateway is read once, on the first node that needs it.
+  local gw="" gw_read=0
+  _lo_connect_repair() {
+    [[ -n "${project_network}" && "${project_network}" != "null" && "${project_network}" != "${registry_network}" ]] || return 0
+    if (( ! gw_read )); then
+      gw=$(lo::network_gateway "${project_network}")
+      gw_read=1
+    fi
+    lo::repair_default_route "${1}" "${project_network}" "${gw}"
+  }
+
   local node
   for node in $(kind get nodes --name "${cluster_name}" 2>/dev/null); do
-    [[ " ${members} " == *" ${node} "* ]] && continue
+    if [[ " ${members} " == *" ${node} "* ]]; then
+      _lo_connect_repair "${node}"
+      continue
+    fi
+    if lo::docker_gw_priority &&
+        docker network connect --gw-priority "${LO_REGISTRY_GW_PRIORITY}" "${registry_network}" "${node}" 2>/dev/null; then
+      continue
+    fi
     docker network connect "${registry_network}" "${node}" 2>/dev/null || true
+    _lo_connect_repair "${node}"
   done
 }
 

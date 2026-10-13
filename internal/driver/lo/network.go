@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -269,11 +270,136 @@ func (d *Driver) registryNetwork(ctx context.Context, errOut io.Writer) error {
 	return d.registryNetworkCreate(ctx, network, subnet, dynamicRange)
 }
 
+// registryGwPriority is the gateway priority of a kind node's endpoint on
+// the shared registry network. kind creates the node on the project network
+// with the default priority 0. A container on two networks gets its default
+// route from the network with the highest priority; between equal
+// priorities Docker takes the network whose name sorts first. Without a
+// priority, a project network whose name sorts after "lok8s-registries"
+// (for example "ops") lost the default route to the registry network:
+// node-to-service traffic left with the registry address, rp_filter dropped
+// part of the replies, and the Cilium init container hung on
+// https://10.96.0.1:443. With -1 the project network keeps the default
+// route for every name.
+const registryGwPriority = "-1"
+
+// gwPriorityMinMajor is the first Docker release whose `docker network
+// connect` accepts --gw-priority (28.0, API 1.48).
+const gwPriorityMinMajor = 28
+
+// gwPrioritySupported reports whether `docker version --format
+// '{{.Client.Version}} {{.Server.Version}}'` names a client AND a daemon of
+// Docker 28.0 or later: the client parses the flag, the daemon applies it.
+// A value that does not parse (another engine, no daemon) reads as false.
+func gwPrioritySupported(versions string) bool {
+	fields := strings.Fields(versions)
+	if len(fields) != 2 {
+		return false
+	}
+	for _, v := range fields {
+		major, _, _ := strings.Cut(v, ".")
+		n, err := strconv.Atoi(major)
+		if err != nil || n < gwPriorityMinMajor {
+			return false
+		}
+	}
+	return true
+}
+
+// dockerGwPriority is gwPrioritySupported for the docker on PATH, asked once
+// per process (bash: lo::docker_gw_priority).
+func (d *Driver) dockerGwPriority(ctx context.Context) bool {
+	if !d.gwPriority.done {
+		versions, err := d.output(ctx, "docker", "version", "--format", "{{.Client.Version}} {{.Server.Version}}")
+		d.gwPriority.done = true
+		d.gwPriority.ok = err == nil && gwPrioritySupported(versions)
+	}
+	return d.gwPriority.ok
+}
+
+// networkGateway is the first IPv4 gateway of a docker network, "" when
+// docker reports none (bash: lo::network_gateway).
+func (d *Driver) networkGateway(ctx context.Context, network string) string {
+	out, err := d.output(ctx, "docker", "network", "inspect", network,
+		"--format", "{{range .IPAM.Config}}{{.Gateway}} {{end}}")
+	if err != nil {
+		return ""
+	}
+	for gw := range strings.FieldsSeq(out) {
+		if ip := net.ParseIP(gw); ip != nil && ip.To4() != nil {
+			return gw
+		}
+	}
+	return ""
+}
+
+// routeField returns the word after key in one `ip route` line ("dev",
+// "via"), "" when the line does not carry it.
+func routeField(line, key string) string {
+	f := strings.Fields(line)
+	for i := 0; i+1 < len(f); i++ {
+		if f[i] == key {
+			return f[i+1]
+		}
+	}
+	return ""
+}
+
+// defaultRouteRepair decides the default route of a node from two `ip`
+// reads in the node: current is `ip -4 route show default`, routeGet is
+// `ip -o -4 route get <gw>` for the gateway of the project network. dev is
+// the device that reaches gw (the project network's interface); needed
+// reports that the default route is not `via <gw> dev <dev>` yet.
+func defaultRouteRepair(current, routeGet, gw string) (dev string, needed bool) {
+	dev = routeField(routeGet, "dev")
+	if dev == "" {
+		return "", false
+	}
+	first, _, _ := strings.Cut(current, "\n")
+	return dev, routeField(first, "via") != gw || routeField(first, "dev") != dev
+}
+
+// repairDefaultRoute moves the default route of a node back to the project
+// network when it goes through another network (bash:
+// lo::repair_default_route). It is the fallback for a Docker without
+// --gw-priority, and the repair for a node that an older lok8s attached
+// without a priority. Docker writes the route again when the node restarts,
+// so on such a Docker the next `lo up` repeats the repair. Advisory: a node
+// that cannot be read or changed gets a warning, never a failure.
+func (d *Driver) repairDefaultRoute(ctx context.Context, node, network, gw string, errOut io.Writer) {
+	if gw == "" {
+		return
+	}
+	current, err := d.output(ctx, "docker", "exec", node, "ip", "-4", "route", "show", "default")
+	if err != nil {
+		return
+	}
+	routeGet, err := d.output(ctx, "docker", "exec", node, "ip", "-o", "-4", "route", "get", gw)
+	if err != nil {
+		return
+	}
+	dev, needed := defaultRouteRepair(current, routeGet, gw)
+	if !needed {
+		return
+	}
+	if err := d.runQuiet(ctx, "docker", "exec", node, "ip", "route", "replace", "default", "via", gw, "dev", dev); err != nil {
+		ui.WarnTo(errOut, "lo: %s: could not move the default route to %s (via %s dev %s)", node, network, gw, dev)
+		return
+	}
+	ui.WarnTo(errOut, "lo: %s: the default route did not go through %s — moved it there (via %s dev %s)", node, network, gw, dev)
+}
+
 // connectNodesToRegistryNetwork attaches the cluster's kind nodes to the
 // shared registry network (bash: lo::connect_nodes_to_registry_network).
 // Skips nodes that are already attached — a re-run must not error (nor rely
 // on error suppression to hide a real failure for the common no-op case).
-func (d *Driver) connectNodesToRegistryNetwork(ctx context.Context, clusterName string) error {
+//
+// The registry endpoint gets the gateway priority registryGwPriority, so the
+// project network keeps the default route of the node. A Docker without
+// --gw-priority (or a connect that refuses the flag) gets a plain connect,
+// then repairDefaultRoute. An attached node goes through repairDefaultRoute
+// too: it repairs a node that an older lok8s attached without a priority.
+func (d *Driver) connectNodesToRegistryNetwork(ctx context.Context, clusterName string, errOut io.Writer) error {
 	rf, err := regFile()
 	if err != nil {
 		return err
@@ -283,11 +409,28 @@ func (d *Driver) connectNodesToRegistryNetwork(ctx context.Context, clusterName 
 
 	nodes, _ := d.output(ctx, "kind", "get", "nodes", "--name", clusterName)
 	memberSet := " " + members + " "
+	project := rf.ProjectNetwork
+	gw, gwRead := "", false
+	repair := func(node string) {
+		if project == "" || project == rf.Network.Name {
+			return
+		}
+		if !gwRead {
+			gw, gwRead = d.networkGateway(ctx, project), true
+		}
+		d.repairDefaultRoute(ctx, node, project, gw, errOut)
+	}
 	for node := range strings.FieldsSeq(nodes) {
 		if strings.Contains(memberSet, " "+node+" ") {
+			repair(node)
+			continue
+		}
+		if d.dockerGwPriority(ctx) &&
+			d.runQuiet(ctx, "docker", "network", "connect", "--gw-priority", registryGwPriority, rf.Network.Name, node) == nil {
 			continue
 		}
 		_ = d.runQuiet(ctx, "docker", "network", "connect", rf.Network.Name, node)
+		repair(node)
 	}
 	return nil
 }
