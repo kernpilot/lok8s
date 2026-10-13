@@ -923,3 +923,50 @@ YAML
   run _ls "${dom}"
   assert_success
 }
+
+# --- lint tests: spec.kubernetes.version (Lo) ---
+# `lo lint` reports the version that `lo provision` refuses (the one reader,
+# spec::kind_node_version). An unset version is valid: kind then uses its
+# default node image. Go twin: TestKubernetesVersion in internal/lint.
+
+_kver_spec() {  # <dir> <kind> [version line]
+  mkdir -p "${1}"
+  {
+    printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: %s\nmetadata:\n  name: kver\nspec:\n  bootstrap: []\n' "${2}"
+    if [[ -n "${3:-}" ]]; then printf '  kubernetes:\n    %s\n' "${3}"; fi
+  } > "${1}/cluster.lok8s.yaml"
+}
+
+@test "lint::kubernetes_version reports a malformed Lo version" {
+  local d="${PATH_CLUSTERS}/kver"
+  _kver_spec "${d}" Lo 'version: "1.31"'
+  run lint::kubernetes_version "${d}" "${d}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "  spec.kubernetes.version '1.31' is not a kind node version. Use the form vMAJOR.MINOR.PATCH, with an optional @sha256:<digest>, or remove the key to use the default node image of kind."
+}
+
+@test "lint::kubernetes_version accepts an unset, a null-string and a valid Lo version" {
+  local d="${PATH_CLUSTERS}/kver" line
+  for line in "" 'version: "null"' "version: v1.35.0"; do
+    _kver_spec "${d}" Lo "${line}"
+    run lint::kubernetes_version "${d}" "${d}/cluster.lok8s.yaml"
+    assert_success
+    assert_output ""
+  done
+}
+
+@test "lint::kubernetes_version leaves other drivers alone" {
+  local d="${PATH_CLUSTERS}/kver"
+  _kver_spec "${d}" KubeOne 'version: "1.31.0"'
+  run lint::kubernetes_version "${d}" "${d}/cluster.lok8s.yaml"
+  assert_success
+}
+
+@test "lint::all counts a malformed Lo version and prints no OK" {
+  local d="${PATH_CLUSTERS}/kver"
+  _kver_spec "${d}" Lo 'version: "1.31"'
+  run lint::all kver
+  assert_failure
+  assert_output --partial "spec.kubernetes.version '1.31' is not a kind node version."
+  refute_output --partial "  OK"
+}

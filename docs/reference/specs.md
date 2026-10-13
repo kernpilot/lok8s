@@ -72,7 +72,7 @@ spec:
 | `apiVersion` | yes | — | Always `cluster.lok8s.dev/v1beta1` |
 | `kind` | yes | — | Driver: `Lo`, `KubeOne`, `Capi`, `Kkp`, `Kubehz` (a kubehz Space — `hosting: shared`) |
 | `metadata.name` | yes | — | Unique cluster name |
-| `spec.kubernetes.version` | yes | — | Kubernetes version |
+| `spec.kubernetes.version` | yes (no for `Lo`) | — (`Lo`: the default node image of the installed kind) | Kubernetes version. For `Lo` it is the tag of the kind node image, `vMAJOR.MINOR.PATCH` with an optional `@sha256:<digest>`; `lo lint` and `lo provision` refuse a different shape |
 | `spec.cluster.domain` | yes | — | Cluster FQDN (folder name convention) |
 | `spec.cluster.namespace` | no | `default` | Default namespace |
 | `spec.provider.name` | no | — | Infrastructure provider |
@@ -203,7 +203,7 @@ metadata:
   name: local
 spec:
   kubernetes:
-    version: "v1.31.4"         # Kubernetes version
+    version: "v1.31.4"         # kind node image tag (default: the node image of the installed kind)
   cluster:
     domain: lok8s.dev           # Cluster FQDN (required)
     namespace: default          # Default namespace
@@ -286,6 +286,7 @@ When a field is missing, the Lo driver fills it in via two layers:
    | `nodes.controlPlane` | `1` |
    | `nodes.workers` | `0` |
    | `nodes.maxConcurrentDownloads` | `3` |
+   | `kubernetes.version` | none: the kind config names no node image, so kind uses the default node image of its release (`kind version` in `.bin` names that release) |
    | `runtime` | `kind` |
    | `bootstrap` | `[cilium]` |
 

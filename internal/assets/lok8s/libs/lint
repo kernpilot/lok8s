@@ -8,6 +8,7 @@
 
 import ^utils/types
 import ^utils/domain
+import ^utils/spec
 import ^utils/verbose
 import ^libs/bootstrap
 
@@ -400,6 +401,27 @@ lint::schema() {
   return "${errs}"
 }
 
+# -- Kubernetes version (Lo) --------------------------------------------------
+# Validates spec.kubernetes.version of a Lo cluster spec through the reader the
+# driver uses (spec::kind_node_version), so `lo lint` reports the value that
+# `lo provision` refuses. An unset version is valid: kind then uses its default
+# node image.
+# Usage: lint::kubernetes_version <domain_dir> <spec_file>
+# Returns: number of errors found
+lint::kubernetes_version() {
+  local domain_dir="${1}" spec_file="${2}"
+
+  [[ -f "${domain_dir}/cluster.lok8s.yaml" ]] || return 0
+  local kind problem
+  kind=$(domain::spec_driver "${spec_file}") || return 0
+  [[ "${kind}" == "lo" ]] || return 0
+  if ! problem=$(spec::kind_node_version "${spec_file}"); then
+    error "  ${problem}"
+    return 1
+  fi
+  return 0
+}
+
 # -- ClusterRef validation ----------------------------------------------------
 # Validates spec.clusterRef for deploy domains.
 # Usage: lint::clusterref <domain_dir> <spec_file>
@@ -646,6 +668,7 @@ lint::all() {
   fi
 
   lint::schema "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
+  lint::kubernetes_version "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
   lint::clusterref "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
   lint::bootstrap "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
   lint::kustomization "${domain_dir}"; errors=$(( errors + $? ))

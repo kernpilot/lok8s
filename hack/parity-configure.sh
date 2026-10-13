@@ -193,6 +193,17 @@ spec:
     domain: iota.dev
 EOF
 
+# kver.dev / knull.dev / kmap.dev — spec.kubernetes.version of a Lo cluster:
+# malformed ("1.31": no kind node image has that tag), the literal string
+# "null" (an unset version: clean), and a map (malformed).
+mkdir -p "${CL}/kver.dev" "${CL}/knull.dev" "${CL}/kmap.dev"
+printf 'kind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: kver\nspec:\n  kubernetes:\n    version: "1.31"\n  bootstrap: []\n' \
+  > "${CL}/kver.dev/cluster.lok8s.yaml"
+printf 'kind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: knull\nspec:\n  kubernetes:\n    version: "null"\n  bootstrap: []\n' \
+  > "${CL}/knull.dev/cluster.lok8s.yaml"
+printf 'kind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: kmap\nspec:\n  kubernetes:\n    version: {minor: 31}\n  bootstrap: []\n' \
+  > "${CL}/kmap.dev/cluster.lok8s.yaml"
+
 # sub.alpha.dev — the one-cluster-per-apex violation.
 mkdir -p "${CL}/sub.alpha.dev"
 printf 'kind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: sub\nspec:\n  bootstrap: []\n' \
@@ -316,6 +327,27 @@ check - lint --domain epsilon.app       # clusterRef.domain not found
 check - lint --domain sub.alpha.dev     # apex violation reported repo-globally anyway
 check - lint --domain iota.dev          # fully clean domain
 check - lint --domain nowhere.dev       # no spec at all
+# The three version cases are pinned as well: parity alone also passes when
+# both sides drift together.
+kver_pin() {  # <label> <file> <fixed string> [absent]
+  if grep -qF -- "${3}" "${2}"; then
+    if [[ -z "${4:-}" ]]; then echo "ok: ${1}"; else fail "${1} — '${3}' found in ${2}"; fi
+  elif [[ -n "${4:-}" ]]; then echo "ok: ${1}"
+  else fail "${1} — '${3}' not in ${2}"; fi
+}
+check - lint --domain kver.dev          # malformed spec.kubernetes.version (Lo)
+for side in bash go; do
+  kver_pin "${side}: kver.dev reports the version" "${WORK}/${side}.err" "  spec.kubernetes.version '1.31' is not a kind node version. "
+done
+check - lint --domain knull.dev         # version "null" = unset: clean
+for side in bash go; do
+  kver_pin "${side}: knull.dev passes" "${WORK}/${side}.out" "  OK"
+  kver_pin "${side}: knull.dev reports no version" "${WORK}/${side}.err" "spec.kubernetes.version" absent
+done
+check - lint --domain kmap.dev          # version is a map: malformed
+for side in bash go; do
+  kver_pin "${side}: kmap.dev reports the map" "${WORK}/${side}.err" "  spec.kubernetes.version is a map, not a kind node version. "
+done
 check - --domain iota.dev lint          # global-flag spelling
 # Go-only: --notes adds the default-equal advisory and changes nothing
 # else: same exit code, same stderr, stdout equal once the [note] lines

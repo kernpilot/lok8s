@@ -53,7 +53,7 @@ metadata:
 spec:
   runtime: kind
   kubernetes:
-    version: "1.31.0"
+    version: "v1.31.0"
 YAML
 }
 

@@ -76,9 +76,12 @@ func (d *Driver) renderNodes(k8sVersion, clusterYAML string) string {
 	extraMounts := atoiOr(getenv("LOK8S_EXTRA_MOUNTS_COUNT"), 0)
 
 	root := yqsem.LoadNode(clusterYAML)
+	// No image line for an unset version: kind then selects the default
+	// node image of its own release (see NodeVersion).
+	image := nodeImageLine(k8sVersion)
 
 	for i := range cpCount {
-		fmt.Fprintf(&b, "\n  - role: control-plane\n    image: \"kindest/node:%s\"", k8sVersion)
+		b.WriteString("\n  - role: control-plane" + image)
 		if i == 0 {
 			b.WriteString(`
     kubeadmConfigPatches:
@@ -138,8 +141,8 @@ func (d *Driver) renderNodes(k8sVersion, clusterYAML string) string {
 	}
 
 	for range workerCount {
-		fmt.Fprintf(&b, "\n  - role: worker\n    image: \"kindest/node:%s\"\n    extraMounts:\n%s",
-			k8sVersion, renderCertsDMount(certsDHost))
+		fmt.Fprintf(&b, "\n  - role: worker%s\n    extraMounts:\n%s",
+			image, renderCertsDMount(certsDHost))
 	}
 
 	return b.String()

@@ -15,6 +15,8 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/domain"
+	lodriver "github.com/kernpilot/lok8s/internal/driver/lo"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/secrets"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -123,6 +125,7 @@ func (l *Linter) all(domain string) bool {
 	specFile := SpecFile(domainDir)
 
 	errs := l.schema(domainDir, specFile)
+	errs += l.kubernetesVersion(domainDir, specFile)
 	l.notes(specFile)
 	errs += l.clusterref(domainDir, specFile)
 	errs += l.bootstrap(domainDir, specFile, domain)
@@ -187,6 +190,25 @@ func (l *Linter) schema(domainDir, specFile string) int {
 		}
 	}
 	return errs
+}
+
+// kubernetesVersion validates spec.kubernetes.version of a Lo cluster spec
+// through the reader the driver uses (lodriver.NodeVersion), so `lo lint`
+// reports the value that `lo provision` refuses. An unset version is valid:
+// kind then uses its default node image. Bash: lint::kubernetes_version.
+// Returns the number of errors.
+func (l *Linter) kubernetesVersion(domainDir, specFile string) int {
+	if !fsutil.IsRegular(domainDir + "/cluster.lok8s.yaml") {
+		return 0
+	}
+	if kind, err := domain.SpecDriver(specFile, ""); err != nil || kind != lodriver.Name {
+		return 0
+	}
+	if _, err := lodriver.NodeVersion(yqsem.LoadNode(specFile)); err != nil {
+		ui.ErrorTo(l.ErrOut, "  %v", err)
+		return 1
+	}
+	return 0
 }
 
 // clusterref validates spec.clusterRef for deploy domains (bash:

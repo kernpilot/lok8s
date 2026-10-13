@@ -1,5 +1,6 @@
 # shellcheck shell=bash
-# spec.sh — the ONE reader for spec.workers, shared by every driver.
+# spec.sh — the ONE reader for spec.workers, shared by every driver, and for
+# the kind node version of a Lo cluster (spec::kind_node_version, at the end).
 #
 # Three drivers (kkp, kubeone, capi) turn `spec.workers` into machine
 # deployments. Each one used to carry its own copy of the same three facts, and
@@ -76,4 +77,37 @@ spec::pool_field() {
   value=$(yq -r ".spec.workers.[\"${pool}\"].${field}" "${cluster_yaml}") || return 1
   [[ -n "${value}" && "${value}" != "null" ]] || value="${default}"
   printf '%s\n' "${value}"
+}
+
+# spec::kind_node_version <cluster_yaml> — the ONE reader for the kind node
+# image tag of a Lo cluster (kindest/node:<tag>). Go twin: lodriver.NodeVersion
+# (internal/driver/lo/nodeimage.go). The driver, the export and `lo lint` read
+# the version through it.
+#
+# Prints the tag. Prints nothing when spec.kubernetes.version is unset: the key
+# is missing, null (`~` too), an empty string, or the literal string "null".
+# For an unset version the kind config names no image, and kind uses the
+# default node image of its own release. `yq -r` prints `null` for a missing
+# key and `~` for a tilde null; both once reached the image as
+# kindest/node:null. The tag read tells a null from a string first.
+#
+# A value of a different shape is malformed: the function prints the problem
+# (no prefix, no indent) on stdout and returns 1. The caller prints it.
+spec::kind_node_version() {
+  local cluster_yaml="${1}" tag version
+  local hint="Use the form vMAJOR.MINOR.PATCH, with an optional @sha256:<digest>, or remove the key to use the default node image of kind."
+  tag=$(yq -r '.spec.kubernetes.version | tag' "${cluster_yaml}") || return 1
+  case "${tag}" in
+    '!!null') return 0 ;;
+    '!!map')  printf '%s\n' "spec.kubernetes.version is a map, not a kind node version. ${hint}"; return 1 ;;
+    '!!seq')  printf '%s\n' "spec.kubernetes.version is a list, not a kind node version. ${hint}"; return 1 ;;
+  esac
+  version=$(yq -r '.spec.kubernetes.version' "${cluster_yaml}") || return 1
+  [[ -n "${version}" && "${version}" != "null" ]] || return 0
+  if [[ "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(@sha256:[0-9a-f]{64})?$ ]]; then
+    printf '%s\n' "${version}"
+    return 0
+  fi
+  printf '%s\n' "spec.kubernetes.version '${version}' is not a kind node version. ${hint}"
+  return 1
 }

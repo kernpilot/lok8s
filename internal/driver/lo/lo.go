@@ -127,7 +127,16 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	}
 
 	clusterName := yqsem.Raw(yqsem.Lookup(root, "metadata", "name"))
-	k8sVersion := yqsem.Raw(yqsem.Lookup(root, "spec", "kubernetes", "version"))
+	// Validate the node version BEFORE the first VM, docker network or
+	// registry container: a value that kind cannot pull must stop the
+	// provision here, not at `kind create` after the networks and the
+	// registries exist. An unset version is valid ("" — kind's default
+	// node image); the raw yq read rendered it as kindest/node:null.
+	k8sVersion, err := NodeVersion(root)
+	if err != nil {
+		ui.ErrorTo(stderr, "%v", err)
+		return ui.Handled(err)
+	}
 
 	// Remote: provision VM, wait for SSH/Docker, set DOCKER_HOST.
 	if d.deps.ProviderName != "" && d.deps.Provider != nil {

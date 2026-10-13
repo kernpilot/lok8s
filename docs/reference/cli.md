@@ -426,6 +426,7 @@ lo lint [--domain <domain>] [--notes]
 
 Checks:
 - Each domain has `cluster.lok8s.yaml` or `deploy.lok8s.yaml`
+- A `Lo` cluster's `spec.kubernetes.version`, when set, is a kind node image tag: `vMAJOR.MINOR.PATCH` with an optional `@sha256:<digest>`. `lo provision` refuses a different value before it creates a docker network or a container
 - Each `spec.bootstrap` entry resolves to an existing driver addon directory or user path
 - Kustomization files under `targets/` reference existing resources
 - Secrets: committed encrypted (`.enc` present and current), and no per-domain secret is shadowed in the deprecated flat `.secrets/` store (identical copy = stale duplicate; differing copy = active drift)
