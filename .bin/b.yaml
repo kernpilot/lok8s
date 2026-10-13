@@ -58,7 +58,11 @@ binaries:
     groups: [kustomize]
   # khelm: kustomize exec plugin discovered via KUSTOMIZE_PLUGIN_HOME.
   # Used for bootstrap addons at .lok8s/addons/{cilium,metallb,...}.
-  # The framework itself never shells out to the helm CLI.
+  # Charts render through khelm, not the helm CLI. One exception: the bash
+  # implementation's dry-run chart gate (`lo bootstrap --dry-run` routed to
+  # bash) runs `helm dependency list` and `helm lint`, read-only, and needs
+  # a helm v3 on PATH. helm is not in this file: install it yourself for
+  # that (CI pins v3.21.2 for the real-helm bats tests).
   github.com/mgoltzsche/khelm:
     file: ../.kustomize/khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer
     groups: [kustomize]

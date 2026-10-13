@@ -21,6 +21,84 @@ or re-apply independently:
 lo bootstrap --domain kubehz.dev
 ```
 
+### Preview before you apply
+
+A bootstrap re-applies every entry with `kubectl apply --server-side
+--force-conflicts`, which overwrites live drift in the addons it touches.
+See what would change first, and apply one entry at a time:
+
+```bash
+lo bootstrap --dry-run --render-dir /tmp/bootstrap   # render + server-side diff, apply nothing
+lo bootstrap --dry-run --no-diff                     # render only, no cluster access
+lo bootstrap --only cert-manager                     # apply this entry only
+lo bootstrap --only cert-manager,envoy-gateway --dry-run
+lo bootstrap --only cert-manager --with-restore      # also restore.d first
+```
+
+The dry run renders every entry in place, exactly as the real run does
+(the same project, `HOME`, credentials and CA), applies nothing, and prints
+one line per entry (`unchanged`, `differs changed=N new=M`,
+`inconclusive (needs-crd)`, `inconclusive (chart dependencies not
+vendored)`, `rendered`, `skipped`, `error`) plus a summary, with a
+`restore.d` line first. Marks after the status: `(non-deterministic: N)`
+when objects change on each render (they are listed, for example the CA and
+TLS Secrets of Cilium; `--ignore-nondeterministic` diffs the entry without
+them), `(non-repeatable)` when the render generated or updated secret
+material that the store does not hold, or read such material that an
+earlier entry of the run generated, and `(partial: KRM function skipped)`
+(also for a function in a base or component the entry references), or
+`(partial: a reference outside the project was not inspected)` for a
+reference outside the project or a remote one, which the dry run does not
+read. The
+chart dependency check is Helm's own (the bash implementation needs helm
+v3.3 or later on `PATH` for it). The exit code is 0 when nothing would change, 1 only when a
+completed diff found a change, and 2 for all other failures.
+
+The two implementations decide the chart dependency check the same way. The
+Go implementation uses the Helm v3.21.2 library (the loader and the status
+rule of `helm dependency list`). The bash implementation runs `helm
+dependency list` and `helm lint` and reads only the table on stdout (helm's
+log lines on stderr, for example about a symlinked subchart, are not part of
+the decision). Tests pin both on the same real charts, from one table
+(`internal/render/testdata/chartgate-fixtures.txt`): a symlinked subchart,
+a v2 chart with `requirements.yaml`, an archive next to the subchart
+directory, two archives of one dependency, a misnamed archive, and a chart, a
+subchart or a dependency without a version. For each refused chart, both
+print the same cause and next action. The two can still differ in
+the cases below. Then one implementation is inconclusive and the other
+renders a chart that khelm does not build. Neither one renders a chart
+whose render writes into the chart directory.
+
+- Without helm v3 (3.3 or a later 3.x) on `PATH`, the bash implementation
+  is inconclusive.
+- When helm prints no dependency table that the bash implementation can
+  read, it is inconclusive.
+- A v2 chart can have a `file://` dependency in `Chart.yaml` and a
+  `requirements.yaml` that replaces the dependencies. Helm (and khelm) then
+  read only `requirements.yaml`, but the bash implementation reads both
+  files and is inconclusive.
+- A helm v3 release other than v3.21.2 can give a different status for a
+  dependency. Then either implementation can be the inconclusive one.
+
+The dry run prevents accidental side effects of legitimate addon code and
+configuration. It is not a security boundary: a malicious addon can still
+execute code during a dry run, and the real bootstrap runs the same addon
+with full credentials. lo and its built-in generators never apply anything
+and never persist new state in a dry run. Executable addon code (an exec
+plugin other than lok8s' Secret and ChartRenderer, a KRM exec or container
+function, a remote base, a `helmCharts` chart that is not in `chartHome`, a
+build of chart dependencies, a helm plugin, a `bash:` secrets generator) is
+refused unless you pass `--allow-generators`, which runs it as trusted, with
+the side effects of a real run. Helm caches may be populated. An entry's
+`env:` goes only to the render and cannot set lo's own variables
+(`LOK8S_BOOTSTRAP_*`, `BOOTSTRAP_*`, `bootstrap_*`, `PATH_SECRETS`,
+`KUBECONFIG`, `KUSTOMIZE_PLUGIN_HOME`, `HELM_PLUGINS`). `--render-dir` holds
+the rendered manifests and diffs, Secrets in plaintext (mode 0700).
+`--only` leaves `restore.d` out unless you add `--with-restore`. The full
+description, with the table of what a dry run refuses and what it does not
+prevent, is in [Deployment](deployment.md#preview-first-dry-run). Every flag
+here also exists on `lo provision --bootstrap`.
+
 ## Addon resolution
 
 | Entry format | Resolves to |

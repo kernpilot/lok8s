@@ -71,6 +71,19 @@ type Dispatcher struct {
 	// provision::_interactive).
 	Interactive func() bool
 
+	// BootstrapDryRun is `--bootstrap --dry-run`: the bootstrap hook
+	// renders and diffs but applies nothing, so the run is read-only. The
+	// real-infrastructure gate is not asked and the tail's writers (the
+	// kubehz registration, the inventory, the gitops bootstrap) are
+	// skipped. Only honoured with bootstrapOnly.
+	BootstrapDryRun bool
+	// BootstrapAllowGenerators is `--allow-generators` alongside
+	// BootstrapDryRun — passed through to runTail's SetDryRunEnv so a
+	// bash: secrets generator or a non-builtin exec plugin can run during
+	// Export too, under the same flag that lets the bootstrap hook itself
+	// run one. No effect without BootstrapDryRun.
+	BootstrapAllowGenerators bool
+
 	// Drivers overrides the driver lookup (nil → the package registry,
 	// driver.Get). The lookup answers "does this kind exist" BEFORE the
 	// gate, exactly where bash stats drivers/<kind>/main; the factory runs
@@ -178,13 +191,17 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapO
 
 	// Real-infrastructure gate: summary + confirmation BEFORE the provider
 	// or driver touch anything (after the kind check, so a bogus kind stays
-	// a plain error). A decline propagates its sentinel.
+	// a plain error). A decline propagates its sentinel. A bootstrap dry
+	// run changes nothing, so it is not gated.
+	dryRun := bootstrapOnly && d.BootstrapDryRun
 	gateAction := ActionReconcile
 	if bootstrapOnly {
 		gateAction = ActionBootstrap
 	}
-	if err := d.ConfirmInfra(domainName, clusterYAML, kind, gateAction); err != nil {
-		return err
+	if !dryRun {
+		if err := d.ConfirmInfra(domainName, clusterYAML, kind, gateAction); err != nil {
+			return err
+		}
 	}
 
 	deps := d.newDeps()
@@ -228,7 +245,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, domainName string, bootstrapO
 			}
 		}
 	}
-	return d.runTail(ctx, drv, domainName, clusterYAML, bootstrapOnly)
+	return d.runTail(ctx, drv, domainName, clusterYAML, bootstrapOnly, dryRun)
 }
 
 // loadSpecProvider loads and validates the spec's provider into deps for
@@ -285,9 +302,21 @@ func (d *Dispatcher) bootstrapOnlyGuard(clusterYAML, domainName string) error {
 }
 
 // runTail is the shared post-provision tail: Export → LOK8S_BOOTSTRAP_ONLY
-// → kubehz registration → bootstrap → inventory (fail-soft) → gitops.
-func (d *Dispatcher) runTail(ctx context.Context, drv driver.Driver, domainName, clusterYAML string, bootstrapOnly bool) error {
+// → kubehz registration → bootstrap → inventory (fail-soft) → gitops. A
+// bootstrap dry run keeps only Export and the bootstrap hook: every other
+// step writes somewhere.
+func (d *Dispatcher) runTail(ctx context.Context, drv driver.Driver, domainName, clusterYAML string, bootstrapOnly, dryRun bool) error {
 	stderr := d.errWriter()
+
+	// Item D: live BEFORE Export, not after — Export can write project
+	// state of its own (the Lo driver's .registries.json) gated on this
+	// exact sentinel, and that write happens here, well before the
+	// bootstrap hook (which used to be the only place this was set) ever
+	// runs. Duplicated from bootstrap.SetDryRunEnv rather than imported:
+	// this package (kubeconfig.go) is imported by internal/build, which
+	// internal/bootstrap (via internal/addons) imports — importing
+	// bootstrap here would cycle straight back through build.
+	defer setDryRunEnv(dryRun, d.BootstrapAllowGenerators)()
 
 	// Export: spec-derived env for spec.bootstrap addons. Runs on BOTH
 	// paths — full provision AND --bootstrap — so a re-applied bootstrap
@@ -306,7 +335,7 @@ func (d *Dispatcher) runTail(ctx context.Context, drv driver.Driver, domainName,
 		os.Setenv("LOK8S_BOOTSTRAP_ONLY", "0")
 	}
 
-	if d.Hooks.KubehzRegister != nil {
+	if d.Hooks.KubehzRegister != nil && !dryRun {
 		if err := d.Hooks.KubehzRegister(ctx, domainName, clusterYAML); err != nil {
 			return err
 		}
@@ -317,6 +346,9 @@ func (d *Dispatcher) runTail(ctx context.Context, drv driver.Driver, domainName,
 		if err := d.Hooks.BootstrapApply(ctx, domainName, clusterYAML, bootstrapKubeconfig); err != nil {
 			return err
 		}
+	}
+	if dryRun {
+		return nil
 	}
 
 	if d.Hooks.InventoryPublish != nil {
@@ -457,4 +489,39 @@ func (d *Dispatcher) DispatchStatus(ctx context.Context, domainName string) erro
 	}
 	fmt.Fprintln(d.outWriter(), status)
 	return nil
+}
+
+// setDryRunEnv scopes LOK8S_BOOTSTRAP_DRYRUN/LOK8S_BOOTSTRAP_ALLOW_GENERATORS
+// for the caller's defer — the same contract as bootstrap.SetDryRunEnv,
+// duplicated here rather than imported (see runTail's comment on why).
+func setDryRunEnv(dryRun, allowGenerators bool) (restore func()) {
+	dv := ""
+	if dryRun {
+		dv = "1"
+	}
+	av := ""
+	if dryRun && allowGenerators {
+		av = "1"
+	}
+	r1 := scopedSetEnv("LOK8S_BOOTSTRAP_DRYRUN", dv)
+	r2 := scopedSetEnv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS", av)
+	return func() { r2(); r1() }
+}
+
+// scopedSetEnv sets key to value (or unsets it, for "") for the duration of
+// the call, returning a restore func that puts the PRIOR value back.
+func scopedSetEnv(key, value string) (restore func()) {
+	prev, had := os.LookupEnv(key)
+	if value == "" {
+		os.Unsetenv(key)
+	} else {
+		os.Setenv(key, value)
+	}
+	return func() {
+		if had {
+			os.Setenv(key, prev)
+		} else {
+			os.Unsetenv(key)
+		}
+	}
 }

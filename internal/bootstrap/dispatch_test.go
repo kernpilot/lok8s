@@ -88,6 +88,36 @@ func TestDispatchRunsDriverExportBeforeApply(t *testing.T) {
 	}
 }
 
+// Review round 2, item D: the standalone `lo bootstrap --dry-run` path
+// must set LOK8S_BOOTSTRAP_DRYRUN BEFORE driver::export runs too — Export
+// can write project state of its own (the Lo driver's .registries.json),
+// and that write happens here, not inside Engine.Apply.
+type dryRunEnvExportingDriver struct {
+	fakeDriver
+	seenDryRun *string
+}
+
+func (d *dryRunEnvExportingDriver) Export(ctx context.Context, domain string) error {
+	*d.seenDryRun = os.Getenv("LOK8S_BOOTSTRAP_DRYRUN")
+	return nil
+}
+
+func TestDispatchBootstrapDryRunSetsEnvBeforeExport(t *testing.T) {
+	t.Setenv("LOK8S_BOOTSTRAP_DRYRUN", "")
+	var seenDryRun string
+	d, e, _ := dispatcherFixture(t, &dryRunEnvExportingDriver{seenDryRun: &seenDryRun}, "lo")
+	e.Options.DryRun = true
+	if err := d.Dispatch(t.Context(), "test.lok8s.dev"); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if seenDryRun != "1" {
+		t.Errorf("LOK8S_BOOTSTRAP_DRYRUN during Export = %q, want 1", seenDryRun)
+	}
+	if os.Getenv("LOK8S_BOOTSTRAP_DRYRUN") != "" {
+		t.Error("LOK8S_BOOTSTRAP_DRYRUN leaked past Dispatch")
+	}
+}
+
 func TestDispatchToleratesDriverWithoutExport(t *testing.T) {
 	d, e, _ := dispatcherFixture(t, &fakeDriver{}, "lo")
 	applied := false
@@ -180,7 +210,7 @@ func TestDispatchInventoryPublishRunsAfterApply(t *testing.T) {
 func TestApplyHookSatisfiesProvisionHooksSeam(t *testing.T) {
 	p := testPaths(t)
 	hook := ApplyHook(p, runnerFunc(func(ctx context.Context, c execx.Cmd) error { return nil }),
-		io.Discard, io.Discard)
+		io.Discard, io.Discard, Options{})
 	// Compile-time: the hook slots into the dispatch seam it was built for.
 	hooks := provision.Hooks{BootstrapApply: hook}
 	if hooks.BootstrapApply == nil {

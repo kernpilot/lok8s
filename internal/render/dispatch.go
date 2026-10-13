@@ -48,6 +48,12 @@ func DispatchPlugin(ctx context.Context, args []string, stdin io.Reader, stdout,
 	argv0 := filepath.ToSlash(args[0])
 	switch {
 	case strings.HasSuffix(argv0, "/secret/Secret"):
+		// `Secret --capabilities`, like the standalone plugin binary: the
+		// dry run's probe (internal/addons.NewDryRunBoundary).
+		if len(args) == 2 && args[1] == "--capabilities" {
+			fmt.Fprintln(stdout, secret.Capabilities)
+			return true, 0
+		}
 		applyPluginEnv(args[0], secretPluginRel)
 		if err := secret.Run(args, stdin, stdout, plugin.DefaultEnv); err != nil {
 			fmt.Fprintln(stderr, "secret plugin:", err)
@@ -55,7 +61,24 @@ func DispatchPlugin(ctx context.Context, args []string, stdin io.Reader, stdout,
 		}
 		return true, 0
 	case strings.HasSuffix(argv0, "/chartrenderer/ChartRenderer"):
+		// The exec pipeline's dry-run gate (LO_RENDER=exec): check, then
+		// exec the project's ChartRenderer.
+		if handled, rc := dispatchChartGate(args, stderr); handled {
+			return true, rc
+		}
 		applyPluginEnv(args[0], chartRendererPluginRel)
+		// The in-process dry run's gate: a local chart whose dependencies
+		// are not vendored is refused before khelm builds them.
+		if chartGateApplies() {
+			refused, err := chartGate(args, stderr)
+			if err != nil {
+				fmt.Fprintf(stderr, "lok8s dry-run: chart gate: %v\n", err)
+				return true, 1
+			}
+			if refused {
+				return true, 1
+			}
+		}
 		if err := runChartRenderer(ctx, args, stdout, stderr); err != nil {
 			fmt.Fprintf(stderr, "khelm: %s\n", err)
 			return true, 1

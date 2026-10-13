@@ -9,6 +9,7 @@ package provision
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -105,6 +106,72 @@ func TestDispatchBootstrapOnlyNeedsExistingCluster(t *testing.T) {
 	}
 	assertContains(t, errBuf.String(), "existing cluster")
 	refuteContains(t, strings.Join(log, ","), "provision:")
+}
+
+// dryRunEnvCapturingDriver's Export records LOK8S_BOOTSTRAP_DRYRUN/
+// LOK8S_BOOTSTRAP_ALLOW_GENERATORS at the instant it runs — the ONLY way
+// to prove ordering (review round 2, item D), since a later read in the
+// test body would see runTail's own defer having already restored them.
+type dryRunEnvCapturingDriver struct {
+	*fakeDriver
+	seenDryRun, seenAllow *string
+}
+
+func (d dryRunEnvCapturingDriver) Export(ctx context.Context, domain string) error {
+	*d.seenDryRun = os.Getenv("LOK8S_BOOTSTRAP_DRYRUN")
+	*d.seenAllow = os.Getenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS")
+	return nil
+}
+
+// Review round 2, item D: through the REAL dispatch path (runTail), not
+// Engine.Apply alone — LOK8S_BOOTSTRAP_DRYRUN/ALLOW_GENERATORS must be
+// live BEFORE driver::export runs, so Export's own writes (the Lo driver's
+// .registries.json) are gated too, and restored once Dispatch returns.
+func TestDispatchBootstrapDryRunSetsEnvBeforeExport(t *testing.T) {
+	t.Setenv("LOK8S_BOOTSTRAP_ONLY", "")
+	t.Setenv("LOK8S_BOOTSTRAP_DRYRUN", "")
+	t.Setenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS", "")
+	var seenDryRun, seenAllow string
+	log := []string{}
+	d, _ := loDispatcher(t, dryRunEnvCapturingDriver{&fakeDriver{log: &log}, &seenDryRun, &seenAllow})
+	testutil.WriteFile(t, filepath.Join(d.Paths.Base, ".kubeconfig", "test-cluster.yaml"), "")
+	d.BootstrapDryRun = true
+	d.BootstrapAllowGenerators = true
+	d.Hooks.BootstrapApply = func(ctx context.Context, domain, yaml, kubeconfig string) error { return nil }
+	if err := d.Dispatch(t.Context(), "test.lok8s.dev", true); err != nil {
+		t.Fatal(err)
+	}
+	if seenDryRun != "1" {
+		t.Errorf("LOK8S_BOOTSTRAP_DRYRUN during Export = %q, want 1", seenDryRun)
+	}
+	if seenAllow != "1" {
+		t.Errorf("LOK8S_BOOTSTRAP_ALLOW_GENERATORS during Export = %q, want 1", seenAllow)
+	}
+	if os.Getenv("LOK8S_BOOTSTRAP_DRYRUN") != "" {
+		t.Error("LOK8S_BOOTSTRAP_DRYRUN leaked past Dispatch")
+	}
+	if os.Getenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS") != "" {
+		t.Error("LOK8S_BOOTSTRAP_ALLOW_GENERATORS leaked past Dispatch")
+	}
+}
+
+// A non-dry-run Export must see NEITHER variable, even with
+// BootstrapAllowGenerators left set from a prior flag parse (it has no
+// effect without BootstrapDryRun).
+func TestDispatchRealRunExportSeesNoDryRunEnv(t *testing.T) {
+	t.Setenv("LOK8S_BOOTSTRAP_ONLY", "")
+	t.Setenv("LOK8S_BOOTSTRAP_DRYRUN", "")
+	t.Setenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS", "")
+	var seenDryRun, seenAllow string
+	log := []string{}
+	d, _ := loDispatcher(t, dryRunEnvCapturingDriver{&fakeDriver{log: &log}, &seenDryRun, &seenAllow})
+	d.BootstrapAllowGenerators = true
+	if err := d.Dispatch(t.Context(), "test.lok8s.dev", false); err != nil {
+		t.Fatal(err)
+	}
+	if seenDryRun != "" || seenAllow != "" {
+		t.Errorf("a real run's Export saw DRYRUN=%q ALLOW=%q, want both empty", seenDryRun, seenAllow)
+	}
 }
 
 // bats: "provision::dispatch invokes driver::post_provision when defined"
@@ -270,5 +337,55 @@ spec:
 	}
 	if fmt.Sprint(log) != "[provision:cloud.dev destroy:cloud.dev]" {
 		t.Errorf("driver calls = %v", log)
+	}
+}
+
+// A bootstrap dry run is read-only: no gate, no registration, no inventory,
+// no gitops — only the export and the bootstrap hook run.
+func TestDispatchBootstrapDryRunSkipsGateAndWriters(t *testing.T) {
+	t.Setenv("LOK8S_BOOTSTRAP_ONLY", "")
+	log := []string{}
+	d, errBuf := loDispatcher(t, fakeExportingDriver{&fakeDriver{log: &log}})
+	// A cloud kind so the gate would refuse without --force.
+	testutil.WriteFile(t, filepath.Join(d.Paths.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"),
+		"kind: KubeOne\nmetadata:\n  name: test-cluster\nspec:\n  kubernetes:\n    version: \"1.31.0\"\n  gitops:\n    provider: flux\n")
+	d.Drivers = func(name string) (driver.Factory, bool) {
+		if name != "kubeone" {
+			return nil, false
+		}
+		return func(deps *driver.Deps) (driver.Driver, error) {
+			return fakeExportingDriver{&fakeDriver{log: &log}}, nil
+		}, true
+	}
+	d.Interactive = func() bool { return false }
+	d.BootstrapDryRun = true
+	testutil.WriteFile(t, filepath.Join(d.Paths.Base, ".kubeconfig", "test-cluster.yaml"), "")
+	d.Hooks.KubehzRegister = func(ctx context.Context, domain, yaml string) error {
+		log = append(log, "registered")
+		return nil
+	}
+	d.Hooks.BootstrapApply = func(ctx context.Context, domain, yaml, kubeconfig string) error {
+		log = append(log, "bootstrap_applied:"+domain)
+		return nil
+	}
+	d.Hooks.InventoryPublish = func(ctx context.Context, domain, yaml, kubeconfig string) {
+		log = append(log, "inventory")
+	}
+	d.Hooks.GitopsBootstrap = func(ctx context.Context, domain, provider string) error {
+		log = append(log, "gitops")
+		return nil
+	}
+	if err := d.Dispatch(t.Context(), "test.lok8s.dev", true); err != nil {
+		t.Fatalf("Dispatch: %v\n%s", err, errBuf.String())
+	}
+	if joined := strings.Join(log, ","); joined != "export:test.lok8s.dev,bootstrap_applied:test.lok8s.dev" {
+		t.Errorf("log = %s", joined)
+	}
+	refuteContains(t, errBuf.String(), "real infrastructure")
+	// Without --bootstrap the field is inert: the gate still asks.
+	d.BootstrapDryRun = true
+	log = nil
+	if err := d.Dispatch(t.Context(), "test.lok8s.dev", false); !errors.Is(err, driver.ErrDeclined) {
+		t.Errorf("a full provision with the dry-run field set must still be gated, got %v", err)
 	}
 }
