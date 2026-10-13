@@ -158,6 +158,30 @@ after" ]
   _clean
 }
 
+# _ppid <pid> / _children <pid> — from /proc where it exists (the CI bats
+# container has no ps), else from ps (macOS).
+_ppid() {
+  if [[ -r "/proc/${1}/stat" ]]; then
+    local stat state ppid
+    stat="$(< "/proc/${1}/stat")" || return 1
+    stat="${stat##*) }"
+    read -r state ppid _ <<< "${stat}"
+    echo "${ppid}"
+  else
+    ps -o ppid= -p "${1}" | tr -d ' '
+  fi
+}
+_children() {
+  if [[ -d /proc/self ]]; then
+    local dir
+    for dir in /proc/[0-9]*; do
+      [[ "$(_ppid "${dir#/proc/}" 2>/dev/null)" != "${1}" ]] || echo "${dir#/proc/}"
+    done
+  else
+    ps -A -o pid=,ppid= | awk -v p="${1}" '$2 == p { print $1 }'
+  fi
+}
+
 # _interrupt <signal> <status> — send <signal> to the body of yqbound::run (the
 # subshell with the traps) while yq runs: yq AND the watchdog stop, the
 # temporary directory goes, the status is <status>.
@@ -170,10 +194,10 @@ _interrupt() {
   [ -s "${BATS_TEST_TMPDIR}/yq.pid" ]
   local yq body watchdog
   yq="$(cat "${BATS_TEST_TMPDIR}/yq.pid")"
-  body="$(ps -o ppid= -p "${yq}" | tr -d ' ')"
+  body="$(_ppid "${yq}")"
   [ -n "${body}" ]
   # The watchdog: the other child of the body.
-  watchdog="$(ps -o pid= --ppid "${body}" | tr -d ' ' | grep -vx "${yq}" | head -n 1)"
+  watchdog="$(_children "${body}" | grep -vx "${yq}" | head -n 1)"
   [ -n "${watchdog}" ] || { echo "no watchdog under ${body}" >&2; return 1; }
   kill "-${1}" "${body}"
   local rc=0
@@ -185,6 +209,9 @@ _interrupt() {
 }
 
 @test "yqbound::run: TERM and QUIT stop yq and the watchdog and remove the temporary directory" {
+  # As in the CI bats container: no ps on PATH (a stub that fails).
+  printf '#!/usr/bin/env bash\nexit 127\n' > "${STUBS}/ps"
+  chmod +x "${STUBS}/ps"
   _interrupt TERM 143
   _interrupt QUIT 131
   _clean
