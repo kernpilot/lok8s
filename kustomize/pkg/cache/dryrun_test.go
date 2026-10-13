@@ -33,7 +33,8 @@ func TestDryRunFromEnvIsNilOutsideADryRun(t *testing.T) {
 // writes nothing: no directory, no file. A generated value, a read of it
 // from the run store (reuse: the reader is not repeatable either) and an
 // update (Put of a value the store does not hold) are reported by name
-// only.
+// only, each name once: the two reads of the generated value give one
+// `reuse` line (review round 6, item 7).
 func TestOverlayWritesNothingAndReportsWhatItGenerated(t *testing.T) {
 	root := t.TempDir()
 	report := filepath.Join(root, "report")
@@ -65,7 +66,7 @@ func TestOverlayWritesNothingAndReportsWhatItGenerated(t *testing.T) {
 		t.Fatalf("the overlay created the store: %v", err)
 	}
 	raw, _ := os.ReadFile(report)
-	if string(raw) != "secret Secret.app.ns.PASSWORD\nreuse Secret.app.ns.PASSWORD\nreuse Secret.app.ns.PASSWORD\nupdate Secret.app.ns.FROM_ENV\n" {
+	if string(raw) != "secret Secret.app.ns.PASSWORD\nreuse Secret.app.ns.PASSWORD\nupdate Secret.app.ns.FROM_ENV\n" {
 		t.Errorf("report = %q", raw)
 	}
 	if strings.Contains(string(raw), "s3cret") {
@@ -192,6 +193,11 @@ func TestRunStoreCarriesValuesAcrossPluginProcesses(t *testing.T) {
 	raw, _ := os.ReadFile(report)
 	if strings.Count(string(raw), "secret Secret.app.ns.PASSWORD") != 1 {
 		t.Errorf("report = %q, want the generation reported once", raw)
+	}
+	// Two later processes read the value back (a secretRef, a Get): one
+	// `reuse` line, not one per read (review round 6, item 7).
+	if strings.Count(string(raw), "reuse Secret.app.ns.PASSWORD\n") != 1 {
+		t.Errorf("report = %q, want the reuse reported once", raw)
 	}
 }
 

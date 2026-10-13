@@ -4010,20 +4010,14 @@ SH
   rm -rf "${out}"
 }
 
-# Item 5: the plugin reports a read of a value another entry of the run
-# generated (`reuse <name>`): that entry is non-repeatable too.
-@test "bootstrap::apply --dry-run: an entry that reuses a run value is non-repeatable" {
-  mkdir -p "${PATH_LOK8S}/addons/second"
-  write_cluster_spec "testcni" "second"
-  _dry_kubectl_stub 0 0
-  kustomize() {
-    [[ "${@: -1}" != */second ]] || echo "reuse Secret.app.ns.PASSWORD" >> "${LOK8S_BOOTSTRAP_DRYRUN_REPORT}"
-    echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: x"
-  }
-  export -f kustomize
-  local bootstrap_dry_run=1
-  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
-  assert_success
-  assert_line "bootstrap dry-run: 01-testcni: unchanged"
-  assert_line "bootstrap dry-run: 02-second: unchanged (non-repeatable)"
-}
+# Item 5 (`reuse <name>`: an entry that reads a value another entry of the
+# run generated is non-repeatable too) has no bats test here. The `reuse`
+# line comes from the Secret plugin, which both implementations run as the
+# same binary; a bats stub that writes the line would only repeat the
+# report parsing that "the renders share one run store" already covers (an
+# `update` line), and passes without the plugin change (review round 6,
+# item 8). The plugin's real path is covered in Go:
+# kustomize/pkg/cache/dryrun_test.go (TestRunStoreCarriesValuesAcrossPluginProcesses)
+# and internal/addons/dryrun_exec_test.go
+# (TestDryRunReadingAnotherEntrysValueIsReported: the real kustomize and
+# plugin, a producer entry and a consumer entry of one run).

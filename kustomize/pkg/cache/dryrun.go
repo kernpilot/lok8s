@@ -17,8 +17,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/kernpilot/lok8s/kustomize/pkg/errs"
@@ -104,10 +106,14 @@ func (d *DryRun) Save(key string, v []byte) error {
 }
 
 // Minted reports generated material (a store entry, or a CA) to the report
-// file. It never writes the material itself, only its name. A report file
-// that cannot be opened is an error: lo must not show an entry as
-// repeatable when it is not. Without a report file (a dry run that lo did
-// not start) it does nothing.
+// file. It never writes the material itself, only its name. A line the
+// report holds already is not written again: a value that every Get of the
+// render reads back (`reuse <name>`) is reported once per entry, also
+// across the plugin processes of the entry (lo empties the report before
+// an entry renders, and the renders of a dry run run one after the other).
+// A report file that cannot be opened or read is an error: lo must not
+// show an entry as repeatable when it is not. Without a report file (a dry
+// run that lo did not start) it does nothing.
 func (d *DryRun) Minted(what string) error {
 	if d == nil || d.report == "" {
 		return nil
@@ -115,9 +121,19 @@ func (d *DryRun) Minted(what string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	// No O_CREATE: lo created the file. The plugin never creates one.
-	f, err := os.OpenFile(d.report, os.O_WRONLY|os.O_APPEND, 0)
+	f, err := os.OpenFile(d.report, os.O_RDWR|os.O_APPEND, 0)
 	if err != nil {
 		return fmt.Errorf("dry-run report: %w", err)
+	}
+	have, err := io.ReadAll(f)
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("dry-run report: %w", err)
+	}
+	for line := range strings.SplitSeq(string(have), "\n") {
+		if line == what {
+			return f.Close()
+		}
 	}
 	if _, err := fmt.Fprintln(f, what); err != nil {
 		_ = f.Close()
