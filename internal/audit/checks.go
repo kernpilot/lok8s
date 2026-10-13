@@ -288,13 +288,10 @@ func (a *Auditor) checkK8sVersion(r *run, specFile, kind string) {
 	supported := strings.Join(supportedMinors, ", ")
 	latest := k8sLatestMinor()
 
-	version, readable := k8sVersionNode(specFile)
-
 	// A Lo cluster without a version uses the default node image of the
 	// installed kind (lodriver.NodeVersion reads it as unset): there is no
 	// version to parse, and nothing is wrong.
-	if kind == "lo" && readable && (yqsem.IsNull(version) ||
-		version.Kind == yaml.ScalarNode && (version.Value == "" || version.Value == "null")) {
+	if kind == "lo" && k8sVersionUnset(specFile) {
 		r.emit(Finding{ID: id, Title: title, Severity: "low", Status: "pass",
 			Detail:      "spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release.",
 			Remediation: "No action. To pin the Kubernetes version, set spec.kubernetes.version to a kindest/node image tag of a supported minor, for example v" + latest + ".x.",
@@ -302,7 +299,7 @@ func (a *Auditor) checkK8sVersion(r *run, specFile, kind string) {
 		return
 	}
 
-	raw := altNode(version, "")
+	raw := altNode(lookupFile(specFile, "spec", "kubernetes", "version"), "")
 	if i := strings.Index(raw, "@"); i >= 0 {
 		raw = raw[:i]
 	}
@@ -356,26 +353,42 @@ func (a *Auditor) checkK8sVersion(r *run, specFile, kind string) {
 		File:        specURI, Line: specLineno})
 }
 
-// k8sVersionNode reads spec.kubernetes.version the way the bash check reads
-// it with `yq '.spec.kubernetes.version'`: merge keys resolved, and a scalar
-// on the path reads as null. readable is false where that yq read fails: an
-// unreadable file, or a list on the path.
-func k8sVersionNode(specFile string) (version *yaml.Node, readable bool) {
-	doc := yqsem.Load(specFile)
-	if !doc.OK() {
-		return nil, false
+// k8sVersionUnset reports a spec.kubernetes.version that the Lo reader
+// (lodriver.NodeVersion) reads as unset: one YAML document with merge keys
+// that resolve, the file, spec and spec.kubernetes maps or null on the way,
+// and a version that is missing, null, "" or the string "null" (trailing
+// newlines removed). Any other shape is not "unset": the reader refuses it,
+// or reads a version. It repeats the unset half of the reader because audit
+// does not import a driver; TestK8sVersionUnsetMatchesTheReader holds the two
+// together on the shared reader fixtures. Bash: audit::_k8s_version_unset
+// calls the reader itself.
+func k8sVersionUnset(specFile string) bool {
+	docs, err := yqsem.LoadDocs(specFile)
+	if err != nil || len(docs) > 1 {
+		return false
 	}
-	n := yqsem.Deref(doc.Root)
+	var n *yaml.Node
+	if len(docs) == 1 {
+		n = docs[0]
+	}
+	if yqsem.CheckMerges(n) != nil {
+		return false
+	}
+	n = yqsem.Deref(n)
 	for _, key := range []string{"spec", "kubernetes", "version"} {
-		if yqsem.IsNull(n) || n.Kind == yaml.ScalarNode {
-			return nil, true
+		if yqsem.IsNull(n) {
+			return true
 		}
 		if n.Kind != yaml.MappingNode {
-			return nil, false
+			return false
 		}
 		n, _ = yqsem.MapGetMerged(n, key)
 	}
-	return n, true
+	if yqsem.IsNull(n) {
+		return true
+	}
+	v := strings.TrimRight(n.Value, "\n")
+	return n.Kind == yaml.ScalarNode && (v == "" || v == "null")
 }
 
 // minorRank orders "maj.min" numerically (bash: audit::_minor_rank).

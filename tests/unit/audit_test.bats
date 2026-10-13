@@ -1282,17 +1282,59 @@ YAML
   assert_equal "$(_detail_of k8s-version-support)" "Could not parse spec.kubernetes.version ('<empty>')."
 }
 
-@test "a Lo spec.kubernetes that is a list is not read as an unset version" {
-  _spec ver-list <<'YAML'
+@test "a Lo spec that the version reader refuses is not read as an unset version" {
+  local line
+  for line in "  kubernetes: []" "  kubernetes: v1.31.4"; do
+    printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata: { name: dev }\nspec:\n  bootstrap: [ cilium ]\n%s\n' "${line}" | _spec ver-list
+    audit::run_domain ver-list
+    assert_equal "$(_status_of k8s-version-support)" "unknown"
+  done
+}
+
+# The decision is the reader's own (spec::kind_node_version), not a plain yq
+# path: a plain path skips a merge key of a scalar (null: "not set") and
+# keeps the trailing newline of a block scalar ("null\n": a version).
+@test "a Lo spec reads as unset exactly where the version reader says so" {
+  _spec ver-badmerge <<'YAML'
+s: &s v1.31.4
 apiVersion: cluster.lok8s.dev/v1beta1
 kind: Lo
 metadata: { name: dev }
 spec:
-  kubernetes: []
+  kubernetes: { <<: *s }
   bootstrap: [ cilium ]
 YAML
-  audit::run_domain ver-list
+  audit::run_domain ver-badmerge
   assert_equal "$(_status_of k8s-version-support)" "unknown"
+  _spec ver-blocknull <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata: { name: dev }
+spec:
+  kubernetes:
+    version: |
+      null
+  bootstrap: [ cilium ]
+YAML
+  audit::run_domain ver-blocknull
+  assert_equal "$(_status_of k8s-version-support)" "pass"
+  assert_equal "$(_detail_of k8s-version-support)" \
+    "spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release."
+}
+
+@test "a Lo version behind a merge key is not read as unset" {
+  _spec ver-merge <<'YAML'
+pinned: &pinned { version: "v1.35.5" }
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata: { name: dev }
+spec:
+  kubernetes: { <<: *pinned }
+  bootstrap: [ cilium ]
+YAML
+  audit::run_domain ver-merge
+  [[ "$(_detail_of k8s-version-support)" != "spec.kubernetes.version is not set."* ]] \
+    || fail "a merged version reads as not set: $(_detail_of k8s-version-support)"
 }
 
 # =============================================================================
