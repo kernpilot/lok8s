@@ -76,6 +76,11 @@ func dnsSearchEntryProblem(item *yaml.Node) string {
 			". Write the entry as text, for example corp.example.com."
 	}
 	v := item.Value
+	// Its own cause: the bash twin finds a NUL inside yq (a $(…) capture
+	// drops the byte), and the value is not printed.
+	if strings.ContainsRune(v, 0) {
+		return "has a NUL character. Remove the NUL character."
+	}
 	if !dnsCharsRe.MatchString(v) {
 		return "has a character that is not valid in a DNS name: '" + v + "'. Use only letters, digits, hyphens and dots."
 	}

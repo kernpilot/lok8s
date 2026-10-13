@@ -408,10 +408,10 @@ dns_pin "lint reads the alias cycle in the list one level" "^\[error\]   spec\.n
 if (( SECONDS - start < 30 )); then echo "ok: lint --domain dnscycle.dev took $(( SECONDS - start )) s (both sides)"; else fail "lint --domain dnscycle.dev took $(( SECONDS - start )) s"; fi
 check - lint --domain dnsbad.dev
 for side in bash go; do
-  # Anti-vacuity: 21 of the 23 fixture entries are bad, one line each.
-  if [[ "$(grep -c '^\[error\]   spec\.network\.dnsSearch\[' "${WORK}/${side}.err")" == 21 ]]; then
-    echo "ok: ${side}: lint reports the 21 bad dnsSearch entries"
-  else fail "${side}: lint does not report 21 bad dnsSearch entries (see ${WORK}/${side}.err)"; fi
+  # Anti-vacuity: 22 of the 24 fixture entries are bad, one line each.
+  if [[ "$(grep -c '^\[error\]   spec\.network\.dnsSearch\[' "${WORK}/${side}.err")" == 22 ]]; then
+    echo "ok: ${side}: lint reports the 22 bad dnsSearch entries"
+  else fail "${side}: lint does not report 22 bad dnsSearch entries (see ${WORK}/${side}.err)"; fi
 done
 # Go-only: --notes adds the default-equal advisory and changes nothing
 # else: same exit code, same stderr, stdout equal once the [note] lines

@@ -72,16 +72,19 @@ args: -r .a ${BATS_TEST_TMPDIR}/in.yaml" ]
   _clean
 }
 
-@test "yqbound::run: a signal exit (SIGSEGV) and a Go allocation failure map to the memory status" {
+@test "yqbound::run: a signal exit is 64+N (SIGSEGV: 75), a Go allocation failure is the memory status" {
   # No core file: a core dump holds the environment of the process (tokens
   # included), and it lands in the working directory. The stub turns core
   # dumps off and dies in the test directory, which the check below reads.
   _yq 'ulimit -c 0; cd "'"${BATS_TEST_TMPDIR}"'" && kill -SEGV $$'
   _run_bound 5
-  [ "${rc}" -eq 3 ] || { echo "SIGSEGV: rc ${rc}" >&2; return 1; }
+  [ "${rc}" -eq 75 ] || { echo "SIGSEGV: rc ${rc}" >&2; return 1; }
   if compgen -G "${BATS_TEST_TMPDIR}/core*" >/dev/null; then
     echo "the SIGSEGV stub left a core file" >&2; return 1
   fi
+  _yq 'kill -KILL $$'
+  _run_bound 5
+  [ "${rc}" -eq 73 ] || { echo "SIGKILL: rc ${rc}" >&2; return 1; }
   local message
   for message in "fatal error: runtime: out of memory" "runtime: cannot allocate memory" \
     "runtime: goroutine stack exceeds 1000000000-byte limit"; do
@@ -90,6 +93,14 @@ args: -r .a ${BATS_TEST_TMPDIR}/in.yaml" ]
     [ "${rc}" -eq 3 ] || { echo "${message}: rc ${rc}" >&2; return 1; }
     [ ! -s "${BATS_TEST_TMPDIR}/err" ] || { echo "${message}: the runtime dump reached stderr" >&2; return 1; }
   done
+  _clean
+}
+
+@test "yqbound::run: an unknown flag (an old yq) is its own status, the usage text dropped" {
+  _yq 'echo "Error: unknown flag: --yaml-fix-merge-anchor-to-spec" >&2; echo "Usage:" >&2; exit 1'
+  _run_bound 5
+  [ "${rc}" -eq 5 ] || { echo "rc ${rc}" >&2; return 1; }
+  [ ! -s "${BATS_TEST_TMPDIR}/err" ]
   _clean
 }
 
@@ -109,23 +120,72 @@ args: -r .a ${BATS_TEST_TMPDIR}/in.yaml" ]
   [ ! -e "${BATS_TEST_TMPDIR}/ran" ]
 }
 
-@test "yqbound::run: TERM stops yq and the watchdog and removes the temporary directory" {
+@test "yqbound::run: the watchdog waits the full time limit (a slower yq is not stopped early)" {
+  # The macOS failure of `read -t … <> <(:)`: the read returned at once and
+  # the watchdog stopped every yq. A yq that takes 2 s under a 6 s limit must
+  # succeed and take its 2 s.
+  _yq 'sleep 2; echo done'
+  local start=${SECONDS}
+  _run_bound 6
+  [ "${rc}" -eq 0 ] || { echo "rc ${rc}" >&2; return 1; }
+  [ "$(cat "${BATS_TEST_TMPDIR}/out")" == "done" ]
+  (( SECONDS - start >= 2 ))
+  _clean
+}
+
+@test "the bash tree waits on no /dev/fd pipe (\`<> <(\` does not work on macOS)" {
+  local hits
+  # Code lines only: a comment may name the construct.
+  hits="$(grep -rnE '^[^#]*<>[[:space:]]*<\(' "${_PROJECT_ROOT}/.lok8s" "${_PROJECT_ROOT}/internal/assets/lok8s" 2>/dev/null || true)"
+  [ -z "${hits}" ] || { echo "a read-write redirect from a process substitution:" >&2; echo "${hits}" >&2; return 1; }
+}
+
+@test "yqbound::run: a successful yq under set -e outside || returns 0 with its output" {
+  _yq 'echo value'
+  # A fresh bash: errexit is live there (bats runs the test body in a
+  # context that a `||` would switch off).
+  run bash -ec 'source "$1"; yqbound::run 5 262144 "$2" -r .a; echo "after"' _ \
+    "${_PROJECT_ROOT}/.lok8s/utils/yqbound.sh" "${BATS_TEST_TMPDIR}/in.yaml"
+  [ "${status}" -eq 0 ] || { echo "status ${status}: ${output}" >&2; return 1; }
+  [ "${output}" == "value
+after" ]
+  # A `kill` that fails (the watchdog is gone already) must not stop it either.
+  run bash -ec 'kill() { builtin kill "$@" 2>/dev/null; return 1; }; source "$1"; yqbound::run 5 262144 "$2" -r .a; echo "after"' _ \
+    "${_PROJECT_ROOT}/.lok8s/utils/yqbound.sh" "${BATS_TEST_TMPDIR}/in.yaml"
+  [ "${status}" -eq 0 ] || { echo "status ${status}: ${output}" >&2; return 1; }
+  [ "${output}" == "value
+after" ]
+  _clean
+}
+
+# _interrupt <signal> <status> — send <signal> to the body of yqbound::run (the
+# subshell with the traps) while yq runs: yq AND the watchdog stop, the
+# temporary directory goes, the status is <status>.
+_interrupt() {
+  rm -f "${BATS_TEST_TMPDIR}/yq.pid"
   _yq 'echo $$ > "'"${BATS_TEST_TMPDIR}"'/yq.pid"; exec sleep 30'
   yqbound::run 20 262144 "${BATS_TEST_TMPDIR}/in.yaml" '.a' > /dev/null 2>&1 &
   local bound=$! i
   for (( i = 0; i < 50; i++ )); do [ -s "${BATS_TEST_TMPDIR}/yq.pid" ] && break; sleep 0.1; done
   [ -s "${BATS_TEST_TMPDIR}/yq.pid" ]
-  # TERM to the body of yqbound::run (the subshell with the traps): the
-  # parent of the subshell that exec'd yq.
-  local body
-  body="$(ps -o ppid= -p "$(cat "${BATS_TEST_TMPDIR}/yq.pid")" | tr -d ' ')"
+  local yq body watchdog
+  yq="$(cat "${BATS_TEST_TMPDIR}/yq.pid")"
+  body="$(ps -o ppid= -p "${yq}" | tr -d ' ')"
   [ -n "${body}" ]
-  kill -TERM "${body}"
+  # The watchdog: the other child of the body.
+  watchdog="$(ps -o pid= --ppid "${body}" | tr -d ' ' | grep -vx "${yq}" | head -n 1)"
+  [ -n "${watchdog}" ] || { echo "no watchdog under ${body}" >&2; return 1; }
+  kill "-${1}" "${body}"
   local rc=0
   wait "${bound}" || rc=$?
-  [ "${rc}" -eq 143 ] || { echo "rc ${rc}" >&2; return 1; }
-  if kill -0 "$(cat "${BATS_TEST_TMPDIR}/yq.pid")" 2>/dev/null; then
-    echo "yq still runs" >&2; return 1
-  fi
+  [ "${rc}" -eq "${2}" ] || { echo "${1}: rc ${rc}" >&2; return 1; }
+  for (( i = 0; i < 20; i++ )); do kill -0 "${yq}" 2>/dev/null || kill -0 "${watchdog}" 2>/dev/null || break; sleep 0.1; done
+  if kill -0 "${yq}" 2>/dev/null; then echo "${1}: yq still runs" >&2; return 1; fi
+  if kill -0 "${watchdog}" 2>/dev/null; then echo "${1}: the watchdog still runs" >&2; return 1; fi
+}
+
+@test "yqbound::run: TERM and QUIT stop yq and the watchdog and remove the temporary directory" {
+  _interrupt TERM 143
+  _interrupt QUIT 131
   _clean
 }

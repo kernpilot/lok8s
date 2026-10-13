@@ -68,15 +68,21 @@ dnssearch::check() {
     return 1
   fi
 
-  local i entry value problem found matches
+  local i entry value problem found matches nul
   for i in "${!tags[@]}"; do
     entry="${list} | .[${i}] | explode(.)"
-    value=""
+    value="" nul=false
     if [[ "${tags[i]}" == '!!str' ]]; then
-      dnssearch::_read value "${file}" "${entry}" || { dnssearch::_stop $?; return $?; }
+      # A NUL byte is found inside yq: bash drops it from a $(…) capture.
+      dnssearch::_read nul "${file}" "${entry} | test(\"\\x00\")" || { dnssearch::_stop $?; return $?; }
+      if [[ "${nul}" != true ]]; then
+        dnssearch::_read value "${file}" "${entry}" || { dnssearch::_stop $?; return $?; }
+      fi
     fi
-    if [[ "${tags[i]}" == '!!null' || ( "${tags[i]}" == '!!str' && -z "${value}" ) ]]; then
+    if [[ "${tags[i]}" == '!!null' || ( "${tags[i]}" == '!!str' && "${nul}" != true && -z "${value}" ) ]]; then
       problem="is empty. Write a DNS name, or remove the entry."
+    elif [[ "${nul}" == true ]]; then
+      problem="has a NUL character. Remove the NUL character."
     elif [[ "${tags[i]}" != '!!str' ]]; then
       dnssearch::_describe found "${file}" "${entry}" "${tags[i]}" || { dnssearch::_stop $?; return $?; }
       problem="must be a DNS name. Found ${found}. Write the entry as text, for example corp.example.com."
@@ -120,20 +126,48 @@ dnssearch::_read() {
 
 # dnssearch::_stop <rc> — end the check after a failed dnssearch::_read (rc as
 # yqbound::run). A yq error of its own reads as "no list" (returns 0), like the
-# Go twin on an unparsable file. A hit limit or a missing temporary directory
-# is one problem (returns 1).
+# Go twin on an unparsable file: yq's stderr is already on stderr. Every
+# other status is one problem line with one cause (returns 1).
 dnssearch::_stop() {
   DNSSEARCH_NAMES=()
   DNSSEARCH_PROBLEMS=()
-  local cause
-  case "${1}" in
-    2) cause="yq did not finish in ${DNSSEARCH_YQ_SECONDS} s. Write spec.network without YAML aliases and merge keys." ;;
-    3) cause="yq stopped at the memory limit of $(( DNSSEARCH_YQ_KIB / 1024 )) MiB, or a signal stopped it. Write spec.network without YAML aliases and merge keys." ;;
-    4) cause="lo cannot create a temporary directory in ${TMPDIR:-/tmp}. Correct TMPDIR." ;;
-    *) return 0 ;;
+  local rc="${1}" tmpdir="${TMPDIR:-/tmp}" cause
+  case "${rc}" in
+    1) return 0 ;;
+    2) cause="yq did not finish in ${DNSSEARCH_YQ_SECONDS} s. Write spec.network.dnsSearch without YAML aliases." ;;
+    3) cause="yq stopped at the memory limit of $(( DNSSEARCH_YQ_KIB / 1024 )) MiB. Write spec.network.dnsSearch without YAML aliases." ;;
+    4)
+      if [[ ! -d "${tmpdir}" ]]; then
+        cause="the temporary directory ${tmpdir} does not exist. Set TMPDIR to a directory that exists."
+      elif [[ ! -w "${tmpdir}" ]]; then
+        cause="the temporary directory ${tmpdir} is not writable. Set TMPDIR to a writable directory."
+      else
+        cause="lo cannot create a temporary directory or a FIFO in ${tmpdir}. Set TMPDIR to a local directory."
+      fi
+      ;;
+    5) cause="the installed yq ($(dnssearch::_yq_version)) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (lo toolchain install, or b install, installs the pinned yq)." ;;
+    *)
+      if (( rc > 64 && rc < 128 )); then
+        cause="the signal SIG$(kill -l $(( rc - 64 )) 2>/dev/null || echo $(( rc - 64 ))) stopped yq. Run the command again."
+      else
+        cause="yq stopped with the exit status ${rc}. Run the command again."
+      fi
+      ;;
   esac
   DNSSEARCH_PROBLEMS+=("spec.network.dnsSearch could not be read: ${cause}")
   return 1
+}
+
+# dnssearch::_yq_version — the version of the yq on PATH (v4.53.3), or
+# "version unknown".
+dnssearch::_yq_version() {
+  local version
+  version="$(yq --version 2>/dev/null)" || version=""
+  if [[ "${version}" =~ v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+    printf 'v%s' "${BASH_REMATCH[1]}"
+  else
+    printf 'version unknown'
+  fi
 }
 
 # dnssearch::_describe <var> <file> <expr> <tag> — set <var> to the value at

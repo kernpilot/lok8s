@@ -309,10 +309,13 @@ drop the host search domains.
 YAML anchors, aliases and merge keys (`<<:`) work in the list. lok8s reads
 only `spec.network.dnsSearch` and its entries, so anchors elsewhere in the
 spec cost nothing. The frozen bash implementation reads the list with `yq`
-under two limits per read. The time limit (10 s) always holds, also without
-GNU `timeout` (macOS). The memory limit (1 GiB of data memory, `ulimit -d`) is
-best effort: it holds only where the operating system enforces it. At a limit,
-the read stops with one error line that names the limit.
+v4.47.1 or later (it needs `--yaml-fix-merge-anchor-to-spec`; an older `yq`
+stops the read with an error that names its version). Each read has two
+limits. The time limit (10 s) always holds: a pure-bash watchdog stops `yq`,
+with no GNU `timeout` (macOS has none). The memory limit (1 GiB of data
+memory, `ulimit -d`) is best effort: it holds only where the operating system
+enforces it. At a limit, the read stops with one error line that names the
+limit.
 
 kind sets the search list when it creates the nodes. A cluster created before
 this change, or before you change the list, keeps its old search line until

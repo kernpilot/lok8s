@@ -246,13 +246,15 @@ lo::read_dns_search_config() {
 
   if ! dnssearch::check "${cluster_yaml}"; then
     local problem
-    for problem in "${DNSSEARCH_PROBLEMS[@]}"; do
+    for problem in ${DNSSEARCH_PROBLEMS[@]+"${DNSSEARCH_PROBLEMS[@]}"}; do
       echo "error: ${problem}" >&2
     done
     return 1
   fi
+  # The `+` form: bash < 4.4 under `set -u` stops on an empty "${a[@]}"
+  # (an empty or missing list).
   local name names=""
-  for name in "${DNSSEARCH_NAMES[@]}"; do
+  for name in ${DNSSEARCH_NAMES[@]+"${DNSSEARCH_NAMES[@]}"}; do
     names+="${names:+ }${name}"
   done
   LOK8S_NETWORK_DNS_SEARCH="${names}"

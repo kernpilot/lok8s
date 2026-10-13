@@ -153,7 +153,7 @@ side.
 | `kind`, `tilt`, `mkcert` (`local`) | yes (default on) | yes | the local dev loop: `lo up` (kind), Tilt, `lo trust` (mkcert) |
 | `kubeone`, `hcloud` (`cloud`) | opt-in (`--groups …,cloud`) | `kubeone`/`capi` profiles (+ `clusterctl`) | the provisioning drivers exec them |
 | `docker` | no (install Docker yourself) | `oci://docker` | the Lo driver and Tilt |
-| `argsh`, `jq`, `yq`, `envsubst`, `sops`, `ssh-to-age` | **no**: the binary links or reimplements them (add them by hand when `lok8s.yaml` routes commands to bash; the file's header shows how) | yes | the frozen `.lok8s/lo`, the provider plugins, `lo build` split mode (`yq`/`sops` subprocesses), the bats suites |
+| `argsh`, `jq`, `yq` (v4.47.1 or later), `envsubst`, `sops`, `ssh-to-age` | **no**: the binary links or reimplements them (add them by hand when `lok8s.yaml` routes commands to bash; the file's header shows how) | yes | the frozen `.lok8s/lo`, the provider plugins, `lo build` split mode (`yq`/`sops` subprocesses), the bats suites |
 | `bats` | no | yes | contributors running `tests/` |
 | `lo` itself | no — you installed it (`lo-install.sh`) | the `core` profile declares the release asset | everyone |
 

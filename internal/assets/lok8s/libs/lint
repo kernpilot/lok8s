@@ -414,7 +414,7 @@ lint::dns_search() {
   # turn a backslash in a rejected value into an escape (Go prints it as is).
   local tag="[error]" problem
   if verbose::color; then printf -v tag '%b[error]%b' "${RED}" "${NC}"; fi
-  for problem in "${DNSSEARCH_PROBLEMS[@]}"; do
+  for problem in ${DNSSEARCH_PROBLEMS[@]+"${DNSSEARCH_PROBLEMS[@]}"}; do
     printf '%s   %s\n' "${tag}" "${problem}" >&2
   done
   return "${#DNSSEARCH_PROBLEMS[@]}"

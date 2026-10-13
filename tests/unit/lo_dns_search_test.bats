@@ -221,41 +221,97 @@ _slow_yq() {
 
 # The limit cases of yqbound::run itself are in tests/unit/yqbound_test.bats;
 # these pin the problem line each one becomes.
+# _limit_line <stub> <want> — with the yq stub, the read fails with exactly
+# the line <want> (one cause, one next action).
+_limit_line() {
+  ( _slow_yq "${1}"
+    local rc=0
+    lo::read_dns_search_config "${LIMIT_SPEC}" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+    [ "${rc}" -ne 0 ] && [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "${2}" ] ) || {
+    echo "stub: ${1}" >&2; echo "want: ${2}" >&2; echo "got:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
+  }
+}
+
 @test "read_dns_search_config: a yq call at a limit is one error line per cause, not a hang" {
-  local spec rc
-  spec="$(_spec "  network:
+  LIMIT_SPEC="$(_spec "  network:
     dnsSearch: [a.example]
 ")"
+  local prefix="error: spec.network.dnsSearch could not be read:"
   DNSSEARCH_YQ_SECONDS=1
-  ( _slow_yq 'exec sleep 30'
-    rc=0; lo::read_dns_search_config "${spec}" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
-    [ "${rc}" -ne 0 ] && [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "error: spec.network.dnsSearch could not be read: yq did not finish in 1 s. Write spec.network without YAML aliases and merge keys." ] ) || {
-    echo "time limit:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
-  }
-  ( _slow_yq 'echo "fatal error: runtime: out of memory" >&2; echo "goroutine 1 [running]:" >&2; exit 2'
-    rc=0; lo::read_dns_search_config "${spec}" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
-    [ "${rc}" -ne 0 ] && [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "error: spec.network.dnsSearch could not be read: yq stopped at the memory limit of 1024 MiB, or a signal stopped it. Write spec.network without YAML aliases and merge keys." ] ) || {
-    echo "memory limit:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
-  }
+  _limit_line 'exec sleep 30' \
+    "${prefix} yq did not finish in 1 s. Write spec.network.dnsSearch without YAML aliases."
+  _limit_line 'echo "fatal error: runtime: out of memory" >&2; echo "goroutine 1 [running]:" >&2; exit 2' \
+    "${prefix} yq stopped at the memory limit of 1024 MiB. Write spec.network.dnsSearch without YAML aliases."
+  _limit_line 'ulimit -c 0; cd "'"${BATS_TEST_TMPDIR}"'" && kill -SEGV $$' \
+    "${prefix} the signal SIGSEGV stopped yq. Run the command again."
+  # An old yq (before v4.47.1): the version it reports is in the line.
+  _limit_line 'if [[ "${1:-}" == --version ]]; then echo "yq (https://github.com/mikefarah/yq/) version v4.46.1"; exit 0; fi
+echo "Error: unknown flag: --yaml-fix-merge-anchor-to-spec" >&2; echo "Usage:" >&2; exit 1' \
+    "${prefix} the installed yq (v4.46.1) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (lo toolchain install, or b install, installs the pinned yq)."
   ( TMPDIR="${BATS_TEST_TMPDIR}/no-such-dir"
-    rc=0; lo::read_dns_search_config "${spec}" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
-    [ "${rc}" -ne 0 ] && [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "error: spec.network.dnsSearch could not be read: lo cannot create a temporary directory in ${BATS_TEST_TMPDIR}/no-such-dir. Correct TMPDIR." ] ) || {
-    echo "TMPDIR:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
-  }
+    _limit_line 'echo unused' "${prefix} the temporary directory ${BATS_TEST_TMPDIR}/no-such-dir does not exist. Set TMPDIR to a directory that exists." )
+  mkdir -p "${BATS_TEST_TMPDIR}/read-only"
+  chmod 555 "${BATS_TEST_TMPDIR}/read-only"
+  if [[ ! -w "${BATS_TEST_TMPDIR}/read-only" ]]; then  # root can write anyway
+    ( TMPDIR="${BATS_TEST_TMPDIR}/read-only"
+      _limit_line 'echo unused' "${prefix} the temporary directory ${BATS_TEST_TMPDIR}/read-only is not writable. Set TMPDIR to a writable directory." )
+  fi
+  chmod 755 "${BATS_TEST_TMPDIR}/read-only"
   # The data-memory cap is set on the yq process itself (DNSSEARCH_YQ_KIB).
   ( _slow_yq 'echo "data memory: $(ulimit -d)" >&2; exit 1'
-    lo::read_dns_search_config "${spec}" 2> "${BATS_TEST_TMPDIR}/err"
+    lo::read_dns_search_config "${LIMIT_SPEC}" 2> "${BATS_TEST_TMPDIR}/err"
     [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "data memory: 1048576" ] ) || {
     echo "ulimit:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
   }
   # A yq error of its own (not a limit) reaches stderr as it is, and the
   # read finds no list, like the Go twin on an unparsable file.
   ( _slow_yq 'echo "Error: bad file: yaml: line 3: mapping values are not allowed" >&2; exit 1'
-    rc=0; lo::read_dns_search_config "${spec}" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+    local rc=0
+    lo::read_dns_search_config "${LIMIT_SPEC}" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
     [ "${rc}" -eq 0 ] && [ "${LOK8S_NETWORK_DNS_SEARCH}" == "" ] &&
       [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "Error: bad file: yaml: line 3: mapping values are not allowed" ] ) || {
     echo "own error:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
   }
+}
+
+@test "dnssearch::_stop: an exit status with no own cause is still a failure with its number" {
+  local rc=0
+  dnssearch::_stop 130 || rc=$?
+  [ "${rc}" -eq 1 ]
+  [ "${#DNSSEARCH_PROBLEMS[@]}" -eq 1 ]
+  [ "${DNSSEARCH_PROBLEMS[0]}" == "spec.network.dnsSearch could not be read: yq stopped with the exit status 130. Run the command again." ]
+  rc=0
+  dnssearch::_stop 1 || rc=$?
+  [ "${rc}" -eq 0 ] && [ "${#DNSSEARCH_PROBLEMS[@]}" -eq 0 ]
+}
+
+# LOK8S_TEST_BASH: a bash < 4.4 to run the set -u case in (there an empty
+# "${a[@]}" is an unbound variable); the default bash runs it too.
+@test "read_dns_search_config under set -u: no list, an empty list and a list export without an unbound variable" {
+  local sh="${LOK8S_TEST_BASH:-bash}" body
+  for body in '  cluster: {domain: lok8s.dev}\n' '  network:\n    dnsSearch: []\n' '  network:\n    dnsSearch: [a.example, b.example]\n' '  network:\n    dnsSearch: [bad_entry]\n'; do
+    # shellcheck disable=SC2059 # the bodies carry \n escapes on purpose
+    printf "kind: Lo\nspec:\n${body}" > "${BATS_TEST_TMPDIR}/u.yaml"
+    run "${sh}" -uc 'import() { :; }
+      source "$1/utils/verbose.sh"; source "$1/utils/yqbound.sh"; source "$1/utils/dnssearch.sh"; source "$1/drivers/lo/utils/config.sh"
+      rc=0; lo::read_dns_search_config "$2" || rc=$?
+      echo "rc=${rc} list=[${LOK8S_NETWORK_DNS_SEARCH}]"' _ "${_PROJECT_ROOT}/.lok8s" "${BATS_TEST_TMPDIR}/u.yaml"
+    [ "${status}" -eq 0 ] || { echo "${sh}: status ${status}: ${output}" >&2; return 1; }
+    case "${body}" in
+      *a.example*) [ "${lines[-1]}" == "rc=0 list=[a.example b.example]" ] ;;
+      *bad_entry*) [ "${lines[-1]}" == "rc=1 list=[]" ] ;;
+      *) [ "${lines[-1]}" == "rc=0 list=[]" ] ;;
+    esac || { echo "${sh}: ${output}" >&2; return 1; }
+    if [[ "${output}" == *"unbound variable"* ]]; then echo "${sh}: ${output}" >&2; return 1; fi
+  done
+}
+
+@test "the dnsSearch arrays are expanded with the + guard (bash < 4.4 under set -u)" {
+  local hits
+  hits="$(grep -nE '(^|[^+])"\$\{DNSSEARCH_(NAMES|PROBLEMS)\[@\]\}"' \
+    "${_PROJECT_ROOT}/.lok8s/utils/dnssearch.sh" "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/config.sh" \
+    "${_PROJECT_ROOT}/.lok8s/libs/lint" || true)"
+  [ -z "${hits}" ] || { echo "an unguarded expansion:" >&2; echo "${hits}" >&2; return 1; }
 }
 
 @test "read_dns_search_config: 32 entries pass, more fail with the count to remove" {
