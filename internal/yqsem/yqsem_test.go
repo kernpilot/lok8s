@@ -214,11 +214,11 @@ func TestDocLoadStates(t *testing.T) {
 	}
 }
 
-// MapGetMerged / LookupMerged read merge keys the way yq does with
-// --yaml-fix-merge-anchor-to-spec (pinned against yq v4.53.3 by
-// tests/unit/lo_dns_search_test.bats and hack/parity-*.sh through the
-// spec.network.dnsSearch reader).
-func TestMapGetMerged(t *testing.T) {
+// LookupMerged walks a path through MapGetMerged (merge.go): merge keys
+// resolve the way yq does with --yaml-fix-merge-anchor-to-spec (pinned
+// against yq v4.53.3 by tests/unit/lo_dns_search_test.bats and the parity
+// harnesses through the spec.network.dnsSearch reader).
+func TestLookupMerged(t *testing.T) {
 	var root yaml.Node
 	if err := yaml.Unmarshal([]byte(`
 a: &a {k: from-a, only-a: 1}
@@ -248,8 +248,12 @@ deep: {<<: *a, sub: {<<: *b}}
 		{[]string{"one", "missing"}, ""},
 		{[]string{"self", "x"}, "1"},
 	} {
+		n, err := LookupMerged(&root, tc.path...)
+		if err != nil {
+			t.Fatalf("LookupMerged(%v): %v", tc.path, err)
+		}
 		got := ""
-		if n := LookupMerged(&root, tc.path...); n != nil {
+		if n != nil {
 			got = n.Value
 		}
 		if got != tc.want {
@@ -262,12 +266,13 @@ deep: {<<: *a, sub: {<<: *b}}
 	}
 }
 
-// A map that merges itself ends at the depth bound instead of looping.
-func TestMapGetMergedStopsOnAMergeCycle(t *testing.T) {
+// A map that merges itself is MapGetMerged's ErrMergeCycle, not a loop.
+func TestLookupMergedStopsOnAMergeCycle(t *testing.T) {
 	m := &yaml.Node{Kind: yaml.MappingNode}
 	alias := &yaml.Node{Kind: yaml.AliasNode, Alias: m}
 	m.Content = []*yaml.Node{{Kind: yaml.ScalarNode, Tag: "!!merge", Value: "<<"}, alias}
-	if n := MapGetMerged(m, "k"); n != nil {
-		t.Fatalf("MapGetMerged on a merge cycle = %v, want nil", n)
+	root := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{{Kind: yaml.ScalarNode, Tag: "!!str", Value: "m"}, m}}
+	if n, err := LookupMerged(root, "m", "k"); err == nil {
+		t.Fatalf("LookupMerged on a merge cycle = %v, nil error", n)
 	}
 }

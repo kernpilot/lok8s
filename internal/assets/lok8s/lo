@@ -208,9 +208,14 @@ _lo_header() {
   local deploy_spec="${PATH_CLUSTERS}/${domain}/deploy.lok8s.yaml"
   local meta="" kind=""
   if command -v yq &>/dev/null && [[ -f "${spec}" ]]; then
-    local ver
+    local ver=""
     kind=$(domain::spec_driver "${spec}") || kind=""
-    ver=$(yq -r '.spec.kubernetes.version // ""' "${spec}" 2>/dev/null)
+    # A spec file with more than one YAML document (domain::spec_layout) shows
+    # no version: the two implementations read different values from it, and
+    # the provision step refuses the file.
+    if domain::spec_layout "${spec}" >/dev/null; then
+      ver=$(yq -r '.spec.kubernetes.version // ""' "${spec}" 2>/dev/null)
+    fi
     meta="${kind}"
     [[ "${kind}" == "lo" ]] && meta="${meta} · kind"
     [[ -n "${ver}" && "${ver}" != "null" ]] && meta="${meta} · ${ver%%@*}"
@@ -305,6 +310,14 @@ main::down() {
   # "deploy" there and would send those domains down the driver branch.
   local spec="${PATH_CLUSTERS}/${DOMAIN_NAME:-}/cluster.lok8s.yaml" kind=""
   if [[ -f "${spec}" ]]; then
+    # One YAML document (domain::spec_check): another layout reads as two
+    # different specs in the two implementations. The [error] line says which
+    # lines to remove; the .kind hint below would be the wrong next action.
+    domain::spec_check "${spec}" || {
+      printf '  \033[31m✗ %s holds more than one YAML document — refusing to tear down\033[0m\n' "${spec}"
+      printf '  \033[2m  remove the lines that the error names, then run lo down again\033[0m\n'
+      return 1
+    }
     kind=$(provision::read_kind "${spec}") || {
       # provision::read_kind has already said WHICH way it is wrong (absent vs
       # malformed) one frame up. This frame says what to do about it.

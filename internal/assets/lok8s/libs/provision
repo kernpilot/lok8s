@@ -149,7 +149,9 @@ _resolve_kubeconfig_for_domain() {
   if [[ -f "${domain_dir}/deploy.lok8s.yaml" ]] && [[ ! -f "${domain_dir}/cluster.lok8s.yaml" ]]; then
     ref_cluster="${cluster_override:-}"
     if [[ -z "${ref_cluster}" ]]; then
-      ref_cluster=$(provision::resolve_clusterref "${domain}")
+      # A failure (no clusterRef, or a spec with more than one YAML document)
+      # stops the caller, with or without errexit (Go twin: an error).
+      ref_cluster=$(provision::resolve_clusterref "${domain}") || return 1
     fi
     debug "Deploy domain ${domain} -> cluster ${ref_cluster}"
   elif [[ -n "${cluster_override:-}" ]]; then
@@ -206,6 +208,9 @@ provision::resolve_spec() {
     error "No cluster.lok8s.yaml or deploy.lok8s.yaml found in clusters/${domain}/"
     return 1
   fi
+  # The one-document rule (domain::spec_check) holds for every command that
+  # resolves a spec here: provision, destroy, status, recover.
+  domain::spec_check "${LOK8S_SPEC_FILE}"
 }
 
 # Resolve the clusterRef from a deploy.lok8s.yaml to its cluster domain.
@@ -222,6 +227,7 @@ provision::resolve_clusterref() {
     return 1
   fi
 
+  domain::spec_check "${spec_file}" || return 1
   local cluster_ref
   cluster_ref=$(yq -r '.spec.clusterRef.domain // ""' "${spec_file}")
   if [[ -z "${cluster_ref}" ]]; then
@@ -239,6 +245,7 @@ provision::resolve_clusterref() {
     error "clusterRef domain ${cluster_ref} has no cluster.lok8s.yaml"
     return 1
   fi
+  domain::spec_check "${PATH_CLUSTERS}/${cluster_ref}/cluster.lok8s.yaml" || return 1
 
   echo "${cluster_ref}"
 }
@@ -274,8 +281,13 @@ provision::load_provider_creds() {
 # provision::read_kind <cluster_yaml> — the driver name for the dispatch, with
 # the errors dispatch wants to print. The reading, the coercion and the shape
 # guard live in domain::spec_driver; this is the message layer over it.
+#
+# The document layout comes first (domain::spec_check): a spec file with more
+# than one YAML document reads as two different specs in the two
+# implementations, so it stops here, before the driver is chosen.
 provision::read_kind() {
   local kind rc=0
+  domain::spec_check "${1}" || return 1
   kind=$(domain::spec_driver "${1}") || rc=$?
   case "${rc}" in
     0) echo "${kind}" ;;
@@ -546,7 +558,9 @@ provision::dispatch_destroy() {
 # Usage: provision::dispatch_status <domain>
 provision::dispatch_status() {
   local domain="${1}"
-  provision::resolve_spec "${domain}"
+  # Stop on a missing spec or a spec with more than one YAML document, as
+  # provision::dispatch does (Go twin: DispatchStatus).
+  provision::resolve_spec "${domain}" || return 1
 
   if [[ "${LOK8S_SPEC_KIND}" == "deploy" ]]; then
     # For deployment domains, check the referenced cluster

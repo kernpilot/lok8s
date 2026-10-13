@@ -73,6 +73,20 @@ teardown() { teardown_tmpdir; }
   [ "${output}" != "lo" ]
 }
 
+@test "domain::spec_driver reports a spec file with a second document as rc 2, never defaulted" {
+  # One YAML document (domain::spec_layout), for every reader of the driver.
+  # Go twin: TestSpecDriver (ErrSpecLayout). The trailing `---` case reads as
+  # a valid kind without the layout check (yq prints nothing for the empty
+  # document), so the shape guard cannot catch it.
+  local src
+  for src in 'kind: KubeOne\n---\nkind: Lo\n' 'kind: KubeOne\nmetadata:\n  name: t\n---\n'; do
+    printf '%b' "${src}" > "${SPEC}"
+    run domain::spec_driver "${SPEC}" lo
+    [ "${status}" -eq 2 ] || { echo "${src}: rc ${status}, output '${output}', want rc 2" >&2; return 1; }
+    [ "${output}" = "" ]
+  done
+}
+
 @test "domain::spec_driver applies the fallback only when there is nothing to read" {
   run domain::spec_driver "${BATS_TEST_TMPDIR}/absent.yaml" lo
   [ "${status}" -eq 0 ]

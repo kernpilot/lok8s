@@ -8,6 +8,7 @@
 
 import ^utils/types
 import ^utils/domain
+import ^utils/spec
 import ^utils/verbose
 import ^utils/dnssearch
 import ^libs/bootstrap
@@ -401,6 +402,27 @@ lint::schema() {
   return "${errs}"
 }
 
+# -- Kubernetes version (Lo) --------------------------------------------------
+# Validates spec.kubernetes.version of a Lo cluster spec through the reader the
+# driver uses (spec::kind_node_version), so `lo lint` reports the value that
+# `lo provision` refuses. An unset version is valid: kind then uses its default
+# node image.
+# Usage: lint::kubernetes_version <domain_dir> <spec_file>
+# Returns: number of errors found
+lint::kubernetes_version() {
+  local domain_dir="${1}" spec_file="${2}"
+
+  [[ -f "${domain_dir}/cluster.lok8s.yaml" ]] || return 0
+  local kind problem
+  kind=$(domain::spec_driver "${spec_file}") || return 0
+  [[ "${kind}" == "lo" ]] || return 0
+  if ! problem=$(spec::kind_node_version "${spec_file}"); then
+    error "  ${problem}"
+    return 1
+  fi
+  return 0
+}
+
 # -- spec.network.dnsSearch ---------------------------------------------------
 # A Lo spec's DNS search list, through the same check as the driver's read
 # pass (dnssearch::check), so a list that `lo up` rejects fails lint too.
@@ -665,7 +687,18 @@ lint::all() {
     spec_file="${domain_dir}/deploy.lok8s.yaml"
   fi
 
+  # The document layout comes first (domain::spec_layout): a spec file with
+  # more than one YAML document reads as two different specs in the two
+  # implementations, so no other check runs on it.
+  local layout
+  if ! layout=$(domain::spec_layout "${spec_file}"); then
+    error "  ${spec_file} ${layout}"
+    error "1 validation error(s)"
+    return 1
+  fi
+
   lint::schema "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
+  lint::kubernetes_version "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
   lint::dns_search "${spec_file}"; errors=$(( errors + $? ))
   lint::clusterref "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
   lint::bootstrap "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))

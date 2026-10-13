@@ -97,3 +97,87 @@ func TestLabelsQueryMultiDocQuirk(t *testing.T) {
 		t.Fatalf("labelsQuery(labelled) = %q, want \"1\"", got)
 	}
 }
+
+// TestKubernetesVersion: `lo lint` reports the spec.kubernetes.version that
+// `lo provision` refuses (lodriver.NodeVersion), on a Lo cluster spec only.
+// An unset version is clean: kind uses its default node image.
+func TestKubernetesVersion(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, spec, wantErr string
+	}{
+		{name: "lo, no version", spec: "kind: Lo\nspec: {}\n"},
+		{name: "lo, literal null", spec: "kind: Lo\nspec:\n  kubernetes:\n    version: \"null\"\n"},
+		{name: "lo, valid", spec: "kind: Lo\nspec:\n  kubernetes:\n    version: v1.35.0\n"},
+		// The version is only the tag of kindest/node: a custom tag is valid.
+		{name: "lo, custom tag", spec: "kind: Lo\nspec:\n  kubernetes:\n    version: latest\n"},
+		{name: "lo, not an image tag", spec: "kind: Lo\nspec:\n  kubernetes:\n    version: kindest/node:v1.31.4\n",
+			wantErr: "  spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. Set a kindest/node image tag, for example v1.31.4. To use the default node image of kind, remove the key."},
+		{name: "lo, map", spec: "kind: Lo\nspec:\n  kubernetes:\n    version: {minor: 31}\n",
+			wantErr: "  spec.kubernetes.version cannot be read: the value is a map, not a single value. Write spec.kubernetes.version as a single value."},
+		// A merge key is resolved: lint reports the merged value.
+		{name: "lo, merged value", spec: "x: &v {version: kindest/node:v1.31.4}\nkind: Lo\nspec:\n  kubernetes:\n    <<: *v\n",
+			wantErr: "  spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. "},
+		{name: "lo, kubernetes is a list", spec: "kind: Lo\nspec:\n  kubernetes: []\n",
+			wantErr: "  spec.kubernetes.version cannot be read: spec.kubernetes is a list, not a map. Write spec.kubernetes as a YAML map."},
+		// Other drivers name the version in their own way (KubeOne: 1.31.0).
+		{name: "kubeone, a map", spec: "kind: KubeOne\nspec:\n  kubernetes:\n    version: {minor: 31}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			l, base, _, errOut := newLinter(t)
+			dir := filepath.Join(base, "clusters", "a.dev")
+			spec := filepath.Join(dir, "cluster.lok8s.yaml")
+			testutil.WriteFile(t, spec, tc.spec)
+
+			got := l.kubernetesVersion(dir, spec)
+			if tc.wantErr == "" {
+				if got != 0 || errOut.Len() != 0 {
+					t.Fatalf("kubernetesVersion = %d, want 0 and no output; stderr:\n%s", got, errOut.String())
+				}
+				return
+			}
+			if got != 1 || !strings.Contains(errOut.String(), tc.wantErr) {
+				t.Fatalf("kubernetesVersion = %d, want 1 and %q; stderr:\n%s", got, tc.wantErr, errOut.String())
+			}
+		})
+	}
+}
+
+// TestRunReportsMalformedKubernetesVersion: the check is wired into the
+// per-domain run and decides its verdict.
+func TestRunReportsMalformedKubernetesVersion(t *testing.T) {
+	t.Parallel()
+	l, base, out, errOut := newLinter(t)
+	testutil.WriteFile(t, filepath.Join(base, "clusters", "a.dev", "cluster.lok8s.yaml"),
+		"apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: a\nspec:\n  kubernetes:\n    version: kindest/node:v1.31.4\n  bootstrap: []\n")
+	if err := l.Run("a.dev"); err == nil {
+		t.Fatalf("lint passed a malformed version; stdout:\n%s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag.") {
+		t.Fatalf("the version problem is not reported; stderr:\n%s", errOut.String())
+	}
+	if strings.Contains(out.String(), "  OK") {
+		t.Fatalf("a failing domain printed OK:\n%s", out.String())
+	}
+}
+
+// TestRunRefusesASecondDocument: a spec file with more than one YAML
+// document is one validation error, and no other check runs on it (they
+// would read two different specs in the two implementations).
+func TestRunRefusesASecondDocument(t *testing.T) {
+	t.Parallel()
+	l, base, out, errOut := newLinter(t)
+	spec := filepath.Join(base, "clusters", "a.dev", "cluster.lok8s.yaml")
+	testutil.WriteFile(t, spec, "apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: a\nspec:\n  bootstrap: []\n---\n")
+	if err := l.Run("a.dev"); err == nil {
+		t.Fatalf("lint passed a spec with two documents; stdout:\n%s", out.String())
+	}
+	want := "[error]   " + spec + " holds more than one YAML document. Remove line 7 (a '---' line after the spec).\n[error] 1 validation error(s)\n"
+	if !strings.Contains(errOut.String(), want) {
+		t.Fatalf("stderr:\n%s\nwant:\n%s", errOut.String(), want)
+	}
+	if strings.Contains(out.String(), "  OK") {
+		t.Fatalf("a failing domain printed OK:\n%s", out.String())
+	}
+}

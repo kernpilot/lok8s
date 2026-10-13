@@ -507,6 +507,52 @@ func TestCheckK8sVersionAbsent(t *testing.T) {
 	}
 }
 
+// TestCheckK8sVersionLoWithoutVersion: a Lo cluster without a version uses
+// the default node image of kind. The audit reports that as a neutral pass,
+// not as a version it could not parse. Bash twin: the "a Lo cluster without
+// spec.kubernetes.version" tests in tests/unit/audit_test.bats.
+func TestCheckK8sVersionLoWithoutVersion(t *testing.T) {
+	t.Setenv(k8sTodayEnv, "2026-10-06")
+	const detail = "spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release."
+	const remediation = "No action. To pin the Kubernetes version, set spec.kubernetes.version to a kindest/node image tag of a supported minor, for example v1.37.x."
+	for _, spec := range []string{
+		"kind: Lo\n",
+		"kind: Lo\nspec:\n  kubernetes: {}\n",
+		"kind: Lo\nspec:\n  kubernetes:\n    version: ~\n",
+		"kind: Lo\nspec:\n  kubernetes:\n    version: \"\"\n",
+		"kind: Lo\nspec:\n  kubernetes:\n    version: \"null\"\n",
+		"kind: Lo\nspec:\n  kubernetes:\n    version: |\n      null\n",
+	} {
+		f := k8sFinding(t, spec)
+		if f.Status != "pass" || f.Severity != "low" || f.Detail != detail || f.Remediation != remediation {
+			t.Errorf("%q: %+v", spec, f)
+		}
+	}
+	for _, tc := range []struct{ name, spec, status, detail string }{
+		// Only a Lo cluster follows the kind default.
+		{"KubeOne without a version", "kind: KubeOne\n", "unknown", "Could not parse spec.kubernetes.version ('<empty>')."},
+		// A spec that the reader refuses is not "not set": the finding names
+		// the reader's problem.
+		{"Lo with a list", "kind: Lo\nspec:\n  kubernetes: []\n", "unknown",
+			"spec.kubernetes.version cannot be read: spec.kubernetes is a list, not a map. Write spec.kubernetes as a YAML map."},
+		{"Lo with a merge key of a scalar", "s: &s v1.31.4\nkind: Lo\nspec:\n  kubernetes: {<<: *s}\n", "unknown",
+			"spec.kubernetes.version cannot be read: a merge key (<<) in the spec file does not refer to a map or a list of maps. Correct the merge key."},
+		{"Lo with a custom tag", "kind: Lo\nspec:\n  kubernetes:\n    version: latest\n", "unknown", "Could not parse spec.kubernetes.version ('latest')."},
+		// The audit takes the version from the reader: a merged version and
+		// the last duplicate key get their support verdict.
+		{"Lo with a merged version", "x: &v {version: v1.35.4}\nkind: Lo\nspec:\n  kubernetes:\n    <<: *v\n", "pass",
+			"Kubernetes 1.35 is within the supported window (1.34, 1.35, 1.36, 1.37)."},
+		{"KubeOne with a merged version", "x: &v {version: v1.33.2}\nkind: KubeOne\nspec:\n  kubernetes:\n    <<: *v\n", "fail",
+			"Kubernetes 1.33 is End-of-Life (oldest supported minor: 1.34) — no upstream security patches."},
+		{"the last duplicate key", "kind: KubeOne\nspec:\n  kubernetes:\n    version: v1.33.2\n    version: v1.35.4\n", "pass",
+			"Kubernetes 1.35 is within the supported window (1.34, 1.35, 1.36, 1.37)."},
+	} {
+		if f := k8sFinding(t, tc.spec); f.Status != tc.status || f.Detail != tc.detail {
+			t.Errorf("%s: %+v", tc.name, f)
+		}
+	}
+}
+
 // The support table: newest first, one row per minor, valid dates, and each
 // EOL date before the date of the row above it.
 func TestK8sMinorEOLTable(t *testing.T) {

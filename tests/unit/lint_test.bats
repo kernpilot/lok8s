@@ -152,6 +152,10 @@ _mock_yq_valid() {
     esac
   }
   export -f yq
+  # The version reader sends its own yq queries (explode, kind, tag), which
+  # this mock does not answer. Its own tests cover it
+  # (lo_node_version_test.bats). Here the spec has no version.
+  spec::kind_node_version() { :; }
 }
 
 # --- lint tests: spec existence ---
@@ -323,6 +327,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "deploy-domain"
   assert_success
@@ -354,6 +359,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_failure
@@ -394,6 +400,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_failure
@@ -423,6 +430,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_failure
@@ -452,6 +460,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_failure
@@ -499,6 +508,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "deploy-no-ref"
   assert_failure
@@ -532,6 +542,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_success
@@ -572,6 +583,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_failure
@@ -613,6 +625,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_success
@@ -658,6 +671,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_success
@@ -768,6 +782,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "deploy-bad-ref"
   assert_failure
@@ -828,6 +843,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "deploy-wrong-ref"
   assert_failure
@@ -888,6 +904,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "deploy-valid-ref"
   assert_success
@@ -926,6 +943,84 @@ YAML
   _ls() ( set -euo pipefail; domain=""; lint::secrets "$1" )
   run _ls "${dom}"
   assert_success
+}
+
+# --- lint tests: spec.kubernetes.version (Lo) ---
+# `lo lint` reports the version that `lo provision` refuses (the one reader,
+# spec::kind_node_version). An unset version is valid: kind then uses its
+# default node image. Go twin: TestKubernetesVersion in internal/lint.
+
+_kver_spec() {  # <dir> <kind> [version line]
+  mkdir -p "${1}"
+  {
+    printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: %s\nmetadata:\n  name: kver\nspec:\n  bootstrap: []\n' "${2}"
+    if [[ -n "${3:-}" ]]; then printf '  kubernetes:\n    %s\n' "${3}"; fi
+  } > "${1}/cluster.lok8s.yaml"
+}
+
+@test "lint::kubernetes_version reports a Lo version that is not an image tag" {
+  local d="${PATH_CLUSTERS}/kver"
+  _kver_spec "${d}" Lo 'version: kindest/node:v1.31.4'
+  run lint::kubernetes_version "${d}" "${d}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "  spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. Set a kindest/node image tag, for example v1.31.4. To use the default node image of kind, remove the key."
+}
+
+@test "lint::kubernetes_version reports a Lo spec.kubernetes that cannot be read" {
+  local d="${PATH_CLUSTERS}/kver"
+  mkdir -p "${d}"
+  printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: kver\nspec:\n  kubernetes: []\n' > "${d}/cluster.lok8s.yaml"
+  run lint::kubernetes_version "${d}" "${d}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "  spec.kubernetes.version cannot be read: spec.kubernetes is a list, not a map. Write spec.kubernetes as a YAML map."
+}
+
+@test "lint::kubernetes_version resolves a merge key" {
+  local d="${PATH_CLUSTERS}/kver"
+  mkdir -p "${d}"
+  printf 'x: &v {version: kindest/node:v1.31.4}\nkind: Lo\nmetadata:\n  name: kver\nspec:\n  kubernetes:\n    <<: *v\n' > "${d}/cluster.lok8s.yaml"
+  run lint::kubernetes_version "${d}" "${d}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "  spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. "
+}
+
+@test "lint::kubernetes_version accepts an unset, a null-string, a valid and a custom Lo version" {
+  local d="${PATH_CLUSTERS}/kver" line
+  for line in "" 'version: "null"' "version: v1.35.0" "version: latest" "version: v1.31.0-custom"; do
+    _kver_spec "${d}" Lo "${line}"
+    run lint::kubernetes_version "${d}" "${d}/cluster.lok8s.yaml"
+    assert_success
+    assert_output ""
+  done
+}
+
+@test "lint::kubernetes_version leaves other drivers alone" {
+  local d="${PATH_CLUSTERS}/kver"
+  _kver_spec "${d}" KubeOne 'version: {minor: 31}'
+  run lint::kubernetes_version "${d}" "${d}/cluster.lok8s.yaml"
+  assert_success
+}
+
+@test "lint::all counts a Lo version that is not an image tag and prints no OK" {
+  local d="${PATH_CLUSTERS}/kver"
+  _kver_spec "${d}" Lo 'version: kindest/node:v1.31.4'
+  run lint::all kver
+  assert_failure
+  assert_output --partial "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag."
+  refute_output --partial "  OK"
+}
+
+# --- lint::all: one YAML document ---
+# Go twin: TestRunRefusesASecondDocument.
+@test "lint::all refuses a spec file with a second document and runs no other check" {
+  local d="${PATH_CLUSTERS}/twodoc"
+  mkdir -p "${d}"
+  printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: a\nspec:\n  bootstrap: []\n---\n' > "${d}/cluster.lok8s.yaml"
+  run lint::all twodoc
+  assert_failure
+  assert_output --partial "  ${d}/cluster.lok8s.yaml holds more than one YAML document. Remove line 7 (a '---' line after the spec)."
+  assert_output --partial "1 validation error(s)"
+  refute_output --partial "  OK"
 }
 
 # --- spec.network.dnsSearch (lint::dns_search; Go twin: Linter.dnsSearch) ---

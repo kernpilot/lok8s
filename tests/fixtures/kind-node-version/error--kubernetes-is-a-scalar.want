@@ -1,0 +1,1 @@
+error spec.kubernetes.version cannot be read: spec.kubernetes is 'v1.31.4', not a map. Write spec.kubernetes as a YAML map.

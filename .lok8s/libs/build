@@ -6,6 +6,7 @@
 # which composes the domain's targets — into ONE clusters/<domain>/artifacts.yaml.
 
 import ^utils/types
+import ^utils/domain
 import ^utils/verbose
 import ^utils/template
 
@@ -34,6 +35,13 @@ main::build() {
     return 1
   fi
 
+  # One YAML document (domain::spec_check): another layout reads as two
+  # different specs in the two implementations, so the build stops before it
+  # reads the spec.
+  local spec_file
+  spec_file=$(build::_spec_file "${PATH_CLUSTERS}/${domain}")
+  [[ -z "${spec_file}" ]] || domain::spec_check "${spec_file}" || return 1
+
   # The split trigger itself lives in build::artifacts (so EVERY build path —
   # incl. env::kustomization's direct call in the `lo up` loop — honors the
   # spec; a flag-only trigger would let dev builds silently stale the
@@ -61,7 +69,7 @@ main::build() {
   # artifacts is unaffected.
   echo "lo build: domain ${domain}" >&2
 
-  _resolve_kubeconfig_for_domain
+  _resolve_kubeconfig_for_domain || return 1
   # --no-secrets rides through to build::split via the env, independent of the
   # split trigger (spec- or flag-driven) — it only shapes WHAT a split emits.
   LOK8S_BUILD_SPLIT="${override}" \

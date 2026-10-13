@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/assets"
+	lodriver "github.com/kernpilot/lok8s/internal/driver/lo"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
@@ -286,7 +287,30 @@ func (a *Auditor) checkK8sVersion(r *run, specFile, kind string) {
 	supported := strings.Join(supportedMinors, ", ")
 	latest := k8sLatestMinor()
 
-	raw := altNode(lookupFile(specFile, "spec", "kubernetes", "version"), "")
+	// The version comes from the one reader (lodriver.KubernetesVersion,
+	// bash: spec::kubernetes_version), so the audit evaluates the value
+	// that `lo provision` and `lo lint` read: merge keys and aliases
+	// resolved, the last duplicate key, one document.
+	version, err := lodriver.KubernetesVersion(specFile)
+	if err != nil {
+		r.emit(Finding{ID: id, Title: title, Severity: "medium", Status: "unknown",
+			Detail:      err.Error(),
+			Remediation: "Set spec.kubernetes.version to a supported release, e.g. v" + latest + ".x.",
+			File:        specURI, Line: specLineno})
+		return
+	}
+
+	// A Lo cluster without a version uses the default node image of the
+	// installed kind: there is no version to parse, and nothing is wrong.
+	if kind == "lo" && version == "" {
+		r.emit(Finding{ID: id, Title: title, Severity: "low", Status: "pass",
+			Detail:      "spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release.",
+			Remediation: "No action. To pin the Kubernetes version, set spec.kubernetes.version to a kindest/node image tag of a supported minor, for example v" + latest + ".x.",
+			File:        specURI, Line: specLineno})
+		return
+	}
+
+	raw := version
 	if i := strings.Index(raw, "@"); i >= 0 {
 		raw = raw[:i]
 	}

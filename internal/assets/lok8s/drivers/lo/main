@@ -31,6 +31,7 @@ source "${_LO_DIR}/utils/expose.sh"
 source "${_LO_DIR}/utils/remote.sh"
 
 import ^utils/verbose
+import ^utils/spec
 
 # ── CLI dispatch ──────────────────────────────────────────
 
@@ -60,7 +61,15 @@ driver::provision() {
     kind)
       local cluster_name k8s_version
       cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
-      k8s_version=$(yq -r '.spec.kubernetes.version' "${cluster_yaml}")
+      # Validate the node version BEFORE the first VM, docker network or
+      # registry container: a version that cannot be read, or that is not an
+      # image tag, must stop the provision here, not at `kind create` after the
+      # networks and the registries exist. An unset version is valid ("": kind's
+      # default node image); the raw yq read rendered it as kindest/node:null.
+      k8s_version=$(spec::kind_node_version "${cluster_yaml}") || {
+        error "${k8s_version}"
+        return 1
+      }
 
       # Remote: provision VM, wait for SSH/Docker, set DOCKER_HOST
       if [[ -n "${PROVIDER_NAME:-}" ]] && declare -F provider::provision &>/dev/null; then

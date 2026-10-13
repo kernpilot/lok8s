@@ -5,8 +5,9 @@
 # with no GNU timeout(1) (macOS has none by default). The watchdog waits in
 # `read -t` on a FIFO that it opens read-write itself: no writer ever comes,
 # so the read returns at the time limit, and no sleep process is left
-# behind. A FIFO, not `<> <(:)`: macOS cannot reopen the read end of a pipe
-# through /dev/fd (EACCES, or EOF at once), so that wait returned at once.
+# behind. A FIFO, not a read-write redirect onto a process substitution:
+# macOS cannot reopen the read end of a pipe through /dev/fd (EACCES, or EOF
+# at once), so that wait returned at once.
 # The memory cap is `ulimit -d` (data memory), best effort: it holds where
 # the OS enforces it (Linux); elsewhere the time limit is the only bound.
 # `ulimit -v` is not used: Go reserves large virtual address ranges, so a

@@ -37,7 +37,11 @@ var dnsCharsRe = regexp.MustCompile(`^[A-Za-z0-9.-]*$`)
 func CheckDNSSearch(root *yaml.Node) (names, problems []string) {
 	// Merge keys on the path resolve as in yq with
 	// --yaml-fix-merge-anchor-to-spec (the bash twin's flag).
-	n := yqsem.LookupMerged(root, "spec", "network", "dnsSearch")
+	n, err := yqsem.LookupMerged(root, "spec", "network", "dnsSearch")
+	if err != nil {
+		return nil, []string{"spec.network.dnsSearch could not be read: " + err.Error() +
+			". Correct the merge key on the path to spec.network.dnsSearch."}
+	}
 	if yqsem.IsNull(n) {
 		return nil, nil
 	}

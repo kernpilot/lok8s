@@ -1,0 +1,1 @@
+error spec.kubernetes.version cannot be read: the value is a list, not a single value. Write spec.kubernetes.version as a single value.

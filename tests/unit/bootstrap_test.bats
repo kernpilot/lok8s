@@ -2160,6 +2160,30 @@ YAML
   [[ "${output}" != *"apply must not run"* ]]
 }
 
+# The one-document rule (domain::spec_check): a spec file with a second
+# document stops `lo bootstrap` before the driver export and the apply, with one
+# [error] line that names the lines to remove. Go twin:
+# TestDispatchRefusesASecondDocument (internal/bootstrap).
+@test "bootstrap::dispatch refuses a spec file with a second document" {
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata:
+  name: e2e-test
+spec:
+  bootstrap:
+    - testcni
+---
+kind: KubeOne
+YAML
+  _write_fake_driver_with_export
+  bootstrap::apply() { echo "apply must not run"; }
+
+  run bootstrap::dispatch "test.lok8s.dev"
+  assert_failure
+  assert_output "[error] ${CLUSTER_YAML} holds more than one YAML document. Remove lines 8 to 9 (the '---' at line 8 and everything after it)."
+}
+
 @test "bootstrap::dispatch rejects a path-traversal domain (no filesystem access)" {
   run bootstrap::dispatch "../../../etc"
   assert_failure

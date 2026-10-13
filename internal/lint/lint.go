@@ -15,6 +15,8 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/domain"
+	lodriver "github.com/kernpilot/lok8s/internal/driver/lo"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/secrets"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -122,7 +124,17 @@ func (l *Linter) all(domain string) bool {
 
 	specFile := SpecFile(domainDir)
 
+	// The document layout comes first (bash: the same check in lint::all):
+	// a spec file with more than one YAML document reads as two different
+	// specs in the two implementations, so no other check runs on it.
+	if problem, ok := specLayout(specFile); !ok {
+		ui.ErrorTo(l.ErrOut, "  %s %s", specFile, problem)
+		ui.ErrorTo(l.ErrOut, "1 validation error(s)")
+		return false
+	}
+
 	errs := l.schema(domainDir, specFile)
+	errs += l.kubernetesVersion(domainDir, specFile)
 	errs += l.dnsSearch(specFile)
 	l.notes(specFile)
 	errs += l.clusterref(domainDir, specFile)
@@ -188,6 +200,25 @@ func (l *Linter) schema(domainDir, specFile string) int {
 		}
 	}
 	return errs
+}
+
+// kubernetesVersion validates spec.kubernetes.version of a Lo cluster spec
+// through the reader the driver uses (lodriver.NodeVersion), so `lo lint`
+// reports the value that `lo provision` refuses. An unset version is valid:
+// kind then uses its default node image. Bash: lint::kubernetes_version.
+// Returns the number of errors.
+func (l *Linter) kubernetesVersion(domainDir, specFile string) int {
+	if !fsutil.IsRegular(domainDir + "/cluster.lok8s.yaml") {
+		return 0
+	}
+	if kind, err := domain.SpecDriver(specFile, ""); err != nil || kind != lodriver.Name {
+		return 0
+	}
+	if _, err := lodriver.NodeVersion(specFile); err != nil {
+		ui.ErrorTo(l.ErrOut, "  %v", err)
+		return 1
+	}
+	return 0
 }
 
 // clusterref validates spec.clusterRef for deploy domains (bash:
@@ -404,4 +435,10 @@ func bufLines(buf *bytes.Buffer) []string {
 		return nil
 	}
 	return strings.Split(s, "\n")
+}
+
+// specLayout is domain.SpecLayout (the per-domain run's `domain` parameter
+// hides the package name there).
+func specLayout(specFile string) (problem string, ok bool) {
+	return domain.SpecLayout(specFile)
 }

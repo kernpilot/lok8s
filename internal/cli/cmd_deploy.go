@@ -8,12 +8,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
 	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/deploy"
+	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/kapply"
 )
@@ -48,6 +50,15 @@ func newDeployCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			// DOMAIN_NAME, the ambient KUBECONFIG …) — kapply reads
 			// LOK8S_FORCE_RECREATE at construction, so this runs first.
 			d := ambientMainEnv(cmd, paths)
+
+			// One YAML document (domain.CheckSpecLayout) for the spec of the
+			// domain; ResolveKubeconfigForDomain checks the cluster spec that
+			// a deploy spec names (provision.ResolveClusterRef).
+			if spec := build.SpecFile(filepath.Join(paths.Clusters, d)); spec != "" {
+				if err := domain.CheckSpecLayout(spec, stderr); err != nil {
+					return ErrHandled
+				}
+			}
 
 			// Kubeconfig pass A: a deploy domain follows its clusterRef (or the
 			// --cluster-override) BEFORE the label is even looked at, like bash.

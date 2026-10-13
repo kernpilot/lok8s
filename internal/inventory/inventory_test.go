@@ -339,6 +339,20 @@ func TestBuildRefusesMalformedKind(t *testing.T) {
 	}
 }
 
+// bats: "build_json refuses a spec file with a second document" — the
+// layout message, not the malformed-kind one.
+func TestBuildRefusesASecondDocument(t *testing.T) {
+	p := realPaths(t)
+	spec := writeSpec(t, p, "two", "kind: Lo\nmetadata: { name: two }\n---\nkind: KubeOne\n")
+	var errBuf bytes.Buffer
+	if _, err := BuildJSON(p, &errBuf, "two", spec); err == nil {
+		t.Fatal("expected failure")
+	}
+	if want := "[error] " + spec + " holds more than one YAML document. Remove lines 3 to 4 (the '---' at line 3 and everything after it).\n"; errBuf.String() != want {
+		t.Errorf("stderr = %q, want %q", errBuf.String(), want)
+	}
+}
+
 // bats: "build_json still defaults to lo when the spec declares no kind"
 func TestBuildDefaultsMissingKindToLo(t *testing.T) {
 	p := realPaths(t)

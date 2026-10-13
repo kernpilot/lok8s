@@ -125,6 +125,31 @@ func TestDownSpecWithoutKindRefuses(t *testing.T) {
 	}
 }
 
+// bats: "a spec with more than one YAML document must NOT reach
+// driver-destroy". The message names the lines to remove, not the .kind hint
+// of a malformed driver name: the .kind is correct, the layout is not.
+func TestDownSpecWithSecondDocumentRefuses(t *testing.T) {
+	h := newDownHarness(t)
+	h.spec(t, "apiVersion: cluster.lok8s.dev/v1beta1\nkind: KubeOne\nmetadata:\n  name: prod\n---\nkind: Lo\n")
+	err := runDown(t.Context(), h.deps, "test.dev", "test-down")
+	if !errors.Is(err, ErrHandled) {
+		t.Fatalf("err = %v", err)
+	}
+	if len(h.acted) != 0 || len(h.runner.calls) != 0 {
+		t.Errorf("acted=%v calls=%v", h.acted, h.runner.calls)
+	}
+	spec := filepath.Join(h.deps.paths.Clusters, "test.dev", "cluster.lok8s.yaml")
+	wantErr := "[error] " + spec + " holds more than one YAML document. Remove lines 5 to 6 (the '---' at line 5 and everything after it).\n"
+	if h.errOut.String() != wantErr {
+		t.Errorf("stderr = %q\nwant     %q", h.errOut.String(), wantErr)
+	}
+	wantOut := "  \033[31m✗ " + spec + " holds more than one YAML document — refusing to tear down\033[0m\n" +
+		"  \033[2m  remove the lines that the error names, then run lo down again\033[0m\n"
+	if !strings.HasSuffix(h.out.String(), wantOut) || strings.Contains(h.out.String(), "bare driver name") {
+		t.Errorf("stdout = %q\nwant suffix %q", h.out.String(), wantOut)
+	}
+}
+
 // bats: "a Lo spec takes the local teardown" + the registry branches.
 func TestDownLoSpecLocalTeardown(t *testing.T) {
 	h := newDownHarness(t)

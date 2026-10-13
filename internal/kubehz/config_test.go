@@ -72,6 +72,20 @@ func TestReadConfigFailsOnMissingSpec(t *testing.T) {
 	mustContain(t, h.output(), "cannot read cluster spec")
 }
 
+// One YAML document: every lo kubehz command reads the spec here. Bash twin:
+// "read_config: refuses a spec file with a second document".
+func TestReadConfigRefusesASecondDocument(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	p := h.writeSpec("test.kubehz.dev", "kind: KubeOne\nspec:\n  kubehz:\n    access: registered\n---\n")
+	_, err := h.ctx.ReadConfig(p)
+	mustErr(t, err)
+	want := "[error] " + p + " holds more than one YAML document. Remove line 5 (a '---' line after the spec).\n"
+	if h.output() != want {
+		t.Fatalf("output = %q\nwant     %q", h.output(), want)
+	}
+}
+
 func TestReadConfigPropagatesParseFailure(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)

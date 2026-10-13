@@ -90,6 +90,9 @@ kubehz::read_config() {
     error "cannot read cluster spec: ${cluster_yaml:-<empty path>}"
     return 1
   fi
+  # One YAML document (domain::spec_check), for every lo kubehz command and
+  # every driver: yq reads every document, the Go twin the first document.
+  domain::spec_check "${cluster_yaml}" || return 1
 
   # || return on every read: errexit is suppressed in the driver call trees
   # (libs/provision runs `driver::provision || rc=$?`), so a yq parse failure

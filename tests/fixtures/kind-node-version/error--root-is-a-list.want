@@ -1,0 +1,1 @@
+error spec.kubernetes.version cannot be read: the spec file is a list, not a map. Write the spec file as a YAML map.

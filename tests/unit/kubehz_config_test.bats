@@ -125,6 +125,18 @@ teardown() {
   assert_output --partial "cannot read cluster spec"
 }
 
+@test "read_config: refuses a spec file with a second document" {
+  # One YAML document: every lo kubehz command reads the spec here. Go twin:
+  # TestReadConfigRefusesASecondDocument.
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  local spec="${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev/cluster.lok8s.yaml"
+  printf 'kind: KubeOne\nspec:\n  kubehz:\n    access: registered\n---\n' > "${spec}"
+
+  run kubehz::read_config "${spec}"
+  assert_failure
+  assert_output "[error] ${spec} holds more than one YAML document. Remove line 5 (a '---' line after the spec)."
+}
+
 @test "read_config: propagates a yq failure instead of exporting empty vars" {
   yq() { return 1; }
   export -f yq

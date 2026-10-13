@@ -3,6 +3,42 @@
 lok8s uses YAML spec files to define clusters and deployments. These specs
 double as Kubernetes CRDs when used with the operator.
 
+## One YAML document per spec file {#one-document}
+
+A spec file (`cluster.lok8s.yaml` or `deploy.lok8s.yaml`) holds one YAML
+document. The Go readers of `lo` read only the first document of a file, and
+the bash readers (yq) read every document. Thus a file with more than one
+document gives two different specs, and each command that reads the spec
+refuses the file.
+
+A spec file can have these lines:
+
+- one `---` line before the spec;
+- one `...` line (the document end marker) after the spec;
+- blank lines, comment lines and `%` directives.
+
+`lo` refuses these layouts:
+
+- a `---` line after the spec, also a `---` at the end of the file with
+  nothing after it;
+- empty documents before the spec (two or more `---` lines before it);
+- text after a `...` line.
+
+The error names the spec file and the lines to remove. For example:
+
+```text
+[error] clusters/example.dev/cluster.lok8s.yaml holds more than one YAML document. Remove line 8 (a '---' line after the spec).
+```
+
+These commands refuse such a file before they change something:
+`lo provision`, `lo up`, `lo bootstrap`, `lo destroy`, `lo down`,
+`lo recover`, `lo build`, `lo deploy` (also for the cluster spec that
+`spec.clusterRef` names), the `lo kubehz` commands that read the spec,
+`lo addons` and `lo lint`. `lo status` shows the error in its Cluster
+section. `lo audit` reports the file as one `unknown` finding and runs no
+other check on it. `lo use` and `lo doctor` show the driver of such a domain
+as `?`.
+
 ## cluster.lok8s.yaml
 
 Defines a cluster domain. The `kind` field determines which driver contract
@@ -72,7 +108,7 @@ spec:
 | `apiVersion` | yes | — | Always `cluster.lok8s.dev/v1beta1` |
 | `kind` | yes | — | Driver: `Lo`, `KubeOne`, `Capi`, `Kkp`, `Kubehz` (a kubehz Space — `hosting: shared`) |
 | `metadata.name` | yes | — | Unique cluster name |
-| `spec.kubernetes.version` | yes | — | Kubernetes version |
+| `spec.kubernetes.version` | yes (no for `Lo`) | — (`Lo`: the default node image of the installed kind) | Kubernetes version. For `Lo` it is the tag of the kind node image `kindest/node:<tag>`: any image tag, with an optional `@sha256:<digest>`. See [Kubernetes version (Lo)](#kubernetes-version-lo) |
 | `spec.cluster.domain` | yes | — | Cluster FQDN (folder name convention) |
 | `spec.cluster.namespace` | no | `default` | Default namespace |
 | `spec.provider.name` | no | — | Infrastructure provider |
@@ -203,7 +239,7 @@ metadata:
   name: local
 spec:
   kubernetes:
-    version: "v1.31.4"         # Kubernetes version
+    version: "v1.31.4"         # kind node image tag (default: the node image of the installed kind)
   cluster:
     domain: lok8s.dev           # Cluster FQDN (required)
     namespace: default          # Default namespace
@@ -288,6 +324,7 @@ When a field is missing, the Lo driver fills it in via two layers:
    | `nodes.controlPlane` | `1` |
    | `nodes.workers` | `0` |
    | `nodes.maxConcurrentDownloads` | `3` |
+   | `kubernetes.version` | none: the kind config names no node image, so kind uses the default node image of its release (`kind version` in `.bin` names that release) |
    | `runtime` | `kind` |
    | `bootstrap` | `[cilium]` |
 
@@ -307,6 +344,53 @@ When a field is missing, the Lo driver fills it in via two layers:
 Build and cache registries are framework-private — they always live
 on the project subnet at `.101` and `.102` and must not be listed in
 `spec.registries.mirrors`.
+
+#### Kubernetes version (Lo) {#kubernetes-version-lo}
+
+For a `Lo` cluster, `spec.kubernetes.version` is the tag of the kind node
+image: every node of the kind config gets `image: "kindest/node:<tag>"`.
+
+- **Unset**: the key is missing or null (`~`), or the value is `""` or the
+  string `"null"`. The kind config then names no image, and kind uses the
+  default node image of its release.
+- **Valid**: any OCI image tag, 1 to 128 letters, digits, `_`, `.` and `-`,
+  that does not start with `.` or `-`. An optional `@sha256:<64 hex>` digest
+  can follow. Examples: `v1.31.4`, `v1.31.4@sha256:<digest>`, `latest`, or
+  the tag of an image that you built with `kind build node-image`.
+- **Refused**: a value that is not an image tag, for example
+  `kindest/node:v1.31.4` (the full image name).
+
+`lo lint`, `lo provision` and `lo audit` read the version with the same rules
+in both implementations:
+
+- The spec file holds one YAML document
+  ([One YAML document per spec file](#one-document)).
+- YAML aliases and merge keys (`<<: *anchor`) are resolved: a key of the map
+  wins over a merged key, the last duplicate key wins, and in
+  `<<: [*a, *b]` the first map wins. An anchor can be on a key. An alias
+  that is used as a key is not resolved (yq reads it by its own name). The
+  read follows only the path to the value, so an alias bomb or an alias
+  cycle in another part of the file costs nothing. The bash implementation
+  needs yq v4.47.1 or later (the flag `--yaml-fix-merge-anchor-to-spec`);
+  `b install` installs the pinned yq.
+- Trailing newlines of the value (a block scalar) are removed.
+- These shapes are refused, never read as an unset version: a merge key
+  anywhere in the file that does not refer to a map or a list of maps; merge
+  keys on the path to the value that form a cycle, or that need more than
+  10000 map reads (yq reads a merged map again for each merge key that names
+  it); a `spec` or `spec.kubernetes` that is not a map; a version that is a
+  map or a list; a value with a control character (a NUL byte, a tab, an
+  escape sequence, U+0085, U+2028, a bidi override). A problem shows each
+  control character as `?` and at most 80 characters of the value.
+- Each yq call of the bash implementation has a time limit of 10 s and a
+  memory limit of 256 MiB (`ulimit -d`) where the operating system enforces
+  it. The time limit uses a background `sleep`, not GNU `timeout`, so it
+  holds on macOS too. A call that passes a limit is reported with that
+  limit.
+
+`lo provision` refuses before it creates a VM, a docker network or a
+container. `lo audit` reports a refused spec as `unknown` with the same
+problem text.
 
 #### Network Configuration
 

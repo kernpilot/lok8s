@@ -426,6 +426,8 @@ lo lint [--domain <domain>] [--notes]
 
 Checks:
 - Each domain has `cluster.lok8s.yaml` or `deploy.lok8s.yaml`
+- The spec file holds one YAML document: see [One YAML document per spec file](specs.md#one-document). Another layout is one error that names the lines to remove, and no other check runs on that domain. Every other command that reads the spec refuses it too
+- A `Lo` cluster's `spec.kubernetes.version`, when set, is a kind node image tag (any OCI tag, with an optional `@sha256:<digest>`), and the spec can be read: see [Kubernetes version (Lo)](specs.md#kubernetes-version-lo). `lo provision` refuses a different value before it creates a docker network or a container
 - Each `spec.bootstrap` entry resolves to an existing driver addon directory or user path
 - Kustomization files under `targets/` reference existing resources
 - A Lo spec's `spec.network.dnsSearch` passes the driver's own check: one error per bad entry, the same line `lo up` prints (see [Host DNS search domains](../guide/local-dev.md#host-dns-search-domains))

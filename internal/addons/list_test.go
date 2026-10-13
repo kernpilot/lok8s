@@ -101,6 +101,33 @@ func TestDriverRefusesMalformedKind(t *testing.T) {
 	}
 }
 
+// A spec file with more than one YAML document gets the layout message, not
+// the malformed-kind one: the kind is correct, the layout is not. Bash twin:
+// "addons::_driver and addons::detail refuse a spec file with a second
+// document". (Detail stops before it calls the resolver, so nil is enough.)
+func TestDriverAndDetailRefuseASecondDocument(t *testing.T) {
+	t.Parallel()
+	p := sandbox(t, "")
+	writeSpec(t, p, "two", "kind: Lo\nspec:\n  bootstrap: []\n---\nkind: KubeOne\n")
+	spec := filepath.Join(p.Clusters, "two", "cluster.lok8s.yaml")
+	want := "[error] " + spec + " holds more than one YAML document. Remove lines 4 to 5 (the '---' at line 4 and everything after it).\n"
+	var stderr bytes.Buffer
+	if got, err := Driver(p, "two", &stderr); err == nil || got != "" {
+		t.Errorf("Driver = %q, %v", got, err)
+	}
+	if stderr.String() != want {
+		t.Errorf("Driver stderr = %q\nwant           %q", stderr.String(), want)
+	}
+	stderr.Reset()
+	var out bytes.Buffer
+	if err := Detail(p, "two", &out, &stderr, nil); err == nil {
+		t.Error("Detail passed")
+	}
+	if stderr.String() != want || out.Len() != 0 {
+		t.Errorf("Detail stdout = %q, stderr = %q\nwant stderr %q", out.String(), stderr.String(), want)
+	}
+}
+
 func TestListAndShow(t *testing.T) {
 	p := sandbox(t, "")
 	root := Dir(p)
