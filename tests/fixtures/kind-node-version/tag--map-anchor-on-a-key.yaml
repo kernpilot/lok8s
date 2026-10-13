@@ -1,0 +1,8 @@
+? &m {version: v1.31.4}
+: x
+kind: Lo
+metadata:
+  name: kver
+spec:
+  runtime: kind
+  kubernetes: *m

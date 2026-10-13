@@ -595,3 +595,33 @@ YAML
   provision::load_provider_creds "test.lok8s.dev"
   [ "${HCLOUD_TOKEN}" = "env-token" ]
 }
+
+# --- provision::read_kind: one YAML document ---
+# A cluster spec file with more than one YAML document stops the dispatch
+# before the driver is chosen (domain::spec_layout): the Go readers decode the
+# first document and the bash readers every document, so the file reads as two
+# different specs. Go twin: TestReadKindRefusesASecondDocument.
+
+@test "provision::read_kind refuses a spec file with a second document" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  local spec="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml" src want
+  while IFS='|' read -r src want; do
+    printf '%b' "${src}" > "${spec}"
+    run provision::read_kind "${spec}"
+    assert_failure
+    assert_output --partial "cluster spec ${spec} holds more than one YAML document ${want}. Keep one document: remove line "
+  done <<'CASES'
+kind: Lo\nspec: {}\n---\n|(line 3: '---')
+---\n---\nkind: Lo\n|(line 2: '---')
+kind: Lo\n---\nkind: KubeOne\n|(line 2: '---')
+CASES
+}
+
+@test "provision::read_kind reads one document, also after a ---" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  local spec="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  printf -- '---\nkind: Lo\n' > "${spec}"
+  run provision::read_kind "${spec}"
+  assert_success
+  assert_output "lo"
+}

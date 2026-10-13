@@ -1,5 +1,8 @@
 kind: Lo
-spec: {}
+metadata:
+  name: kver
+spec:
+  runtime: kind
 ---
 kind: Lo
 metadata:

@@ -10,11 +10,11 @@ package lo
 import (
 	"fmt"
 	"regexp"
-	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
@@ -35,11 +35,19 @@ const versionUnreadable = "spec.kubernetes.version cannot be read: "
 
 // controlRe and longRe shape a value that a problem shows (displayValue).
 // The bash twin runs the same two expressions in yq, which uses the same Go
-// regexp engine: [[:cntrl:]] is [\x00-\x1F\x7F].
+// regexp engine. controlRe is every control character: the C0 and C1
+// controls (\p{Cc}: NUL, ESC, U+0085, U+009B …), the format characters
+// (\p{Cf}: the bidi overrides …) and the line and paragraph separators
+// (U+2028, U+2029).
 var (
-	controlRe = regexp.MustCompile(`[[:cntrl:]]`)
+	controlRe = regexp.MustCompile(`[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]`)
 	longRe    = regexp.MustCompile(`^(.{80}).+$`)
 )
+
+// maxMergeReads is the most mapping reads that the merge keys of one
+// mapping on the path may cost (yqsem.MergeReads). Bash twin:
+// _SPEC_KVER_MAX_READS.
+const maxMergeReads = 10000
 
 // versionProblem is a reader error: full sentences for the user, which the
 // caller prints as they are. They end with a period, so they are built
@@ -69,31 +77,27 @@ func displayValue(v string) string {
 // It reads the file as a yq path read does in the bash twin (yq
 // --yaml-fix-merge-anchor-to-spec; yqsem.MapGetMerged): aliases and merge
 // keys resolved one key at a time, nothing else expanded, so an alias bomb
-// or an alias cycle off the path costs nothing. Empty documents (a trailing
-// `---`) do not count. The trailing newlines of the value are removed (bash
-// command substitution removes them).
+// or an alias cycle off the path costs nothing. The trailing newlines of
+// the value are removed (bash command substitution removes them).
 //
 // A shape that can hold a version but cannot be read is an error, never
-// unset: a second YAML document that is not empty, a merge key anywhere in
-// the file that does not refer to a map or a list of maps (yq would skip
-// it), a merge cycle on the way to the value, a spec or spec.kubernetes
-// that is not a map, a version that is a map or a list, a value with a
-// control character (bash would drop a NUL byte). The error text has no
+// unset: a layout other than one YAML document (domain.SpecLayout), a merge
+// key anywhere in the file that does not refer to a map or a list of maps
+// (yq would skip it), merge keys on the path that form a cycle or need more
+// than maxMergeReads map reads, a spec or spec.kubernetes that is not a
+// map, a version that is a map or a list, a value with a control character
+// (bash would drop a NUL byte). The error text has no
 // prefix and no indent: the caller prints it.
 func KubernetesVersion(specFile string) (string, error) {
+	if line, marker, ok := domain.SpecLayout(specFile); !ok {
+		return "", unreadable("the spec file holds more than one YAML document (line %d: '%s'). Keep one document: remove line %d and every document after the first.", line, marker, line)
+	}
 	docs, err := yqsem.LoadDocs(specFile)
 	if err != nil {
 		return "", unreadable("%v. Correct the spec file.", err)
 	}
-	// Empty documents (a trailing `---`) do not count. yq also drops some
-	// of them while it reads, so the count is the only rule both readers
-	// share.
-	docs = slices.DeleteFunc(docs, yqsem.IsNull)
-	if len(docs) > 1 {
-		return "", unreadable("the spec file has %d YAML documents. Keep only the cluster spec in the file.", len(docs))
-	}
 	var n *yaml.Node
-	if len(docs) == 1 {
+	if len(docs) > 0 {
 		n = docs[0]
 	}
 	if yqsem.CheckMerges(n) != nil {
@@ -101,6 +105,9 @@ func KubernetesVersion(specFile string) (string, error) {
 	}
 
 	// Each hop: the name of the node in a problem, and the key read from it.
+	// Before a mapping is read, its merge keys are counted
+	// (yqsem.MergeReads): yq reads a mapping again for each merge key that
+	// names it, so a doubling chain would cost the bash twin minutes.
 	n = yqsem.Deref(n)
 	for _, hop := range [...]struct{ name, key string }{
 		{"the spec file", "spec"}, {"spec", "kubernetes"}, {"spec.kubernetes", "version"},
@@ -111,10 +118,15 @@ func KubernetesVersion(specFile string) (string, error) {
 		if n.Kind != yaml.MappingNode {
 			return "", unreadable("%s is %s, not a map. Write %s as a YAML map.", hop.name, shapeOf(n), hop.name)
 		}
+		reads, err := yqsem.MergeReads(n, maxMergeReads)
+		if err != nil {
+			return "", unreadable("the merge keys (<<) on the path to the value form a cycle. Remove the cycle.")
+		}
+		if reads > maxMergeReads {
+			return "", unreadable("the merge keys (<<) on the path to the value need more than %d map reads. Merge fewer maps.", maxMergeReads)
+		}
 		if n, _, err = yqsem.MapGetMerged(n, hop.key); err != nil {
-			// yq recurses on the cycle until it hits the time or memory
-			// limit of the bash twin: one message for both.
-			return "", unreadable("the merge keys (<<) on the way to the value form a cycle, or the read passed its time or memory limit. Remove the cycle.")
+			return "", unreadable("the merge keys (<<) on the path to the value form a cycle. Remove the cycle.")
 		}
 	}
 	if yqsem.IsNull(n) {

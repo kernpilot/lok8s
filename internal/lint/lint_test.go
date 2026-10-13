@@ -161,3 +161,23 @@ func TestRunReportsMalformedKubernetesVersion(t *testing.T) {
 		t.Fatalf("a failing domain printed OK:\n%s", out.String())
 	}
 }
+
+// TestRunRefusesASecondDocument: a spec file with more than one YAML
+// document is one validation error, and no other check runs on it (they
+// would read two different specs in the two implementations).
+func TestRunRefusesASecondDocument(t *testing.T) {
+	t.Parallel()
+	l, base, out, errOut := newLinter(t)
+	spec := filepath.Join(base, "clusters", "a.dev", "cluster.lok8s.yaml")
+	testutil.WriteFile(t, spec, "apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: a\nspec:\n  bootstrap: []\n---\n")
+	if err := l.Run("a.dev"); err == nil {
+		t.Fatalf("lint passed a spec with two documents; stdout:\n%s", out.String())
+	}
+	want := "[error]   " + spec + " holds more than one YAML document (line 7: '---'). Keep one document: remove line 7 and every document after the first.\n[error] 1 validation error(s)\n"
+	if !strings.Contains(errOut.String(), want) {
+		t.Fatalf("stderr:\n%s\nwant:\n%s", errOut.String(), want)
+	}
+	if strings.Contains(out.String(), "  OK") {
+		t.Fatalf("a failing domain printed OK:\n%s", out.String())
+	}
+}

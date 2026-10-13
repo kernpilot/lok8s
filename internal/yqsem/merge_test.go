@@ -2,11 +2,13 @@ package yqsem
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -45,7 +47,7 @@ func versionOf(root *yaml.Node) (string, error) {
 
 // mergeCases are pinned to the pinned yq (TestMapGetMergedMatchesYq): what
 // `yq --yaml-fix-merge-anchor-to-spec -r '.spec.kubernetes.version'` prints.
-// The last four are the yq quirks for a merge value that is not a map; the
+// The yq quirks for a merge value that is not a map are pinned too; the
 // readers refuse those (CheckMerges), but MapGetMerged still mirrors yq.
 var mergeCases = []struct{ name, src, want string }{
 	{"merge supplies the key", "x: &v {version: v1.31.4}\nspec:\n  kubernetes:\n    <<: *v\n", "v1.31.4"},
@@ -68,6 +70,11 @@ var mergeCases = []struct{ name, src, want string }{
 	{"yq quirk: a null merge is skipped", "spec:\n  kubernetes:\n    <<: ~\n", "null"},
 	{"yq quirk: a list stops at a scalar, from its end", "a: &a {version: va}\nspec:\n  kubernetes:\n    <<: [*a, v1]\n", "null"},
 	{"yq quirk: the items after the scalar count", "a: &a {version: va}\nspec:\n  kubernetes:\n    <<: [v1, *a]\n", "va"},
+	// yq reads an alias used as a key by its own name, and an aliased `<<`
+	// is not a merge key.
+	{"an alias key is not resolved", "x: &k version\nspec:\n  kubernetes:\n    *k : v1.31.4\n", "null"},
+	{"an alias key matches its own name", "x: &version other\nspec:\n  kubernetes:\n    *version : v1.31.4\n", "v1.31.4"},
+	{"an aliased << is a plain key", "m: &m <<\na: &a {version: va}\nspec:\n  kubernetes:\n    *m : *a\n", "null"},
 }
 
 func TestMapGetMerged(t *testing.T) {
@@ -102,6 +109,64 @@ func TestMapGetMergedMatchesYq(t *testing.T) {
 		if got := strings.TrimSuffix(string(out), "\n"); got != tc.want {
 			t.Errorf("%s: yq prints %q, the case says %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// doublingChain is a<n> merging a<n-1> twice, down to a0 with the version:
+// 2^(n+1)-1 map reads for yq, which does not reuse a read.
+func doublingChain(n int) string {
+	var b strings.Builder
+	b.WriteString("a0: &a0 {version: v1.31.4}\n")
+	for i := 1; i <= n; i++ {
+		fmt.Fprintf(&b, "a%d: &a%d {<<: [*a%d, *a%d]}\n", i, i, i-1, i-1)
+	}
+	fmt.Fprintf(&b, "spec:\n  kubernetes:\n    <<: *a%d\n", n)
+	return b.String()
+}
+
+// TestMapGetMergedReusesReads: a mapping that many merge keys share is
+// read once, so a doubling chain of 30 mappings (2^31 paths) is read in a
+// few hundred map reads, not two billion.
+func TestMapGetMergedReusesReads(t *testing.T) {
+	root := parseYAML(t, doublingChain(30))
+	start := time.Now()
+	got, err := versionOf(root)
+	if err != nil || got != "v1.31.4" {
+		t.Fatalf("version = %q, %v; want v1.31.4", got, err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("the read took %v: the shared mappings are read again", d)
+	}
+}
+
+func TestMergeReads(t *testing.T) {
+	for _, tc := range []struct {
+		name, src string
+		limit     int
+		want      int
+		err       error
+	}{
+		{"no merge", "spec:\n  kubernetes: {version: v1}\n", 100, 1, nil},
+		{"one merge", "a: &a {version: v1}\nspec:\n  kubernetes:\n    <<: *a\n", 100, 2, nil},
+		{"a list counts each item", "a: &a {x: 1}\nspec:\n  kubernetes:\n    <<: [*a, *a, {y: 2}]\n", 100, 4, nil},
+		{"a nested merge", "a: &a {x: 1}\nb: &b {<<: *a}\nspec:\n  kubernetes:\n    <<: [*b, *a]\n", 100, 4, nil},
+		{"a doubling chain of 5 (spec.kubernetes + 63)", doublingChain(5), 100, 64, nil},
+		{"a doubling chain of 30 stops at the limit", doublingChain(30), 10000, 10001, nil},
+		{"a cycle", "k: &k\n  <<: *k\nspec:\n  kubernetes:\n    <<: *k\n", 100, 0, ErrMergeCycle},
+		// The count visits every merge key: a cycle behind a chain that
+		// already passed the limit is still a cycle.
+		{"a cycle behind the limit", strings.Replace(doublingChain(20), "spec:\n  kubernetes:\n    <<: *a20\n", "k: &k\n  <<: *k\nspec:\n  kubernetes:\n    <<: [*a20, *k]\n", 1), 10, 0, ErrMergeCycle},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k8s, _, err := MapGetMerged(Lookup(parseYAML(t, tc.src), "spec"), "kubernetes")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := MergeReads(k8s, tc.limit)
+			if !errors.Is(err, tc.err) || (tc.err == nil && got != tc.want) {
+				t.Fatalf("MergeReads = %d, %v; want %d, %v", got, err, tc.want, tc.err)
+			}
+		})
 	}
 }
 

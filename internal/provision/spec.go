@@ -99,11 +99,23 @@ func ResolveClusterRef(p *config.Paths, domainName string, stderr io.Writer) (st
 	return ref, nil
 }
 
+// errSpecLayout is a cluster spec file with more than one YAML document
+// (ReadKind prints the line).
+var errSpecLayout = errors.New("cluster spec holds more than one YAML document")
+
 // ReadKind reads the driver name for the dispatch, with the errors the
 // dispatch wants to print (bash: provision::read_kind — the message layer
 // over domain::spec_driver, which owns the reading, coercion, and shape
 // guard).
+//
+// The document layout comes first (domainpkg.SpecLayout): a spec file with
+// more than one YAML document reads as two different specs in the two
+// implementations, so it stops here, before the driver is chosen.
 func ReadKind(clusterYAML string, stderr io.Writer) (string, error) {
+	if line, marker, ok := domainpkg.SpecLayout(clusterYAML); !ok {
+		ui.ErrorTo(stderr, "cluster spec %s holds more than one YAML document (line %d: '%s'). Keep one document: remove line %d and every document after the first.", clusterYAML, line, marker, line)
+		return "", ui.Handled(errSpecLayout)
+	}
 	kind, err := domainpkg.SpecDriver(clusterYAML, "")
 	switch {
 	case err == nil:

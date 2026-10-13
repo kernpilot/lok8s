@@ -147,13 +147,27 @@ _yq_stub() {
   assert_output "spec.kubernetes.version cannot be read: the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (b install installs the pinned yq)."
 }
 
-@test "spec::kind_node_version: a read past the time limit is named, not read as unset" {
+@test "spec::kind_node_version: a read past the time limit is named, without timeout(1)" {
   _spec "version: v1.31.4"
-  _yq_stub 'sleep 5'
+  # The time limit is pure bash (macOS has no GNU timeout): a timeout(1)
+  # call fails the test.
+  timeout() { echo "timeout(1) was called" >&2; return 99; }
+  export -f timeout
+  _yq_stub 'exec sleep 5'
   _SPEC_KVER_TIMEOUT=1
   run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
   assert_failure
-  assert_output "spec.kubernetes.version cannot be read: the merge keys (<<) on the way to the value form a cycle, or the read passed its time or memory limit. Remove the cycle."
+  assert_output "spec.kubernetes.version cannot be read: yq did not finish in 1 s. Simplify the spec file."
+}
+
+@test "spec::kind_node_version: yq runs under the data memory limit (ulimit -d)" {
+  _spec "version: v1.31.4"
+  _yq_stub "ulimit -d > '${BATS_TEST_TMPDIR}/limit'; exit 1"
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  assert_failure
+  [ "$(cat "${BATS_TEST_TMPDIR}/limit")" = "262144" ] || {
+    echo "yq ran with ulimit -d $(cat "${BATS_TEST_TMPDIR}/limit"), want 262144" >&2; return 1
+  }
 }
 
 @test "spec::kind_node_version: a yq that runs out of memory is named" {
@@ -161,7 +175,28 @@ _yq_stub() {
   _yq_stub 'echo "fatal error: runtime: cannot allocate memory" >&2; exit 2'
   run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
   assert_failure
-  assert_output "spec.kubernetes.version cannot be read: the merge keys (<<) on the way to the value form a cycle, or the read passed its time or memory limit. Remove the cycle."
+  assert_output "spec.kubernetes.version cannot be read: yq stopped at the memory limit of 256 MiB, or a signal stopped it. Simplify the spec file."
+}
+
+@test "spec::kind_node_version: a yq stopped by SIGSEGV is named" {
+  _spec "version: v1.31.4"
+  _yq_stub 'kill -SEGV $$'
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_output "spec.kubernetes.version cannot be read: yq stopped at the memory limit of 256 MiB, or a signal stopped it. Simplify the spec file."
+}
+
+@test "spec::_kver_yq: an interrupt removes the temporary files" {
+  _spec "version: v1.31.4"
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  # The yq stub stops the read it runs in (its parent) with SIGTERM, as an
+  # interrupt of `lo` would.
+  _yq_stub 'kill -TERM "${PPID}"; exec sleep 2'
+  run spec::_kver_yq "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" -r '.kind'
+  [ "${status}" -eq 143 ] || { echo "status ${status}, want 143 (SIGTERM)" >&2; return 1; }
+  run ls -A "${TMPDIR}"
+  assert_output ""
 }
 
 @test "spec::kind_node_version: yq stderr stays out of the shape checks" {

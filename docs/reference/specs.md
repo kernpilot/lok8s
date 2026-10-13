@@ -325,23 +325,33 @@ image: every node of the kind config gets `image: "kindest/node:<tag>"`.
 `lo lint`, `lo provision` and `lo audit` read the version with the same rules
 in both implementations:
 
+- The spec file holds one YAML document. A `---` line before it and a `...`
+  line after it are allowed; a trailing `---`, empty documents before the
+  spec and a second document are refused, with the line of the marker.
+  `lo provision` and `lo lint` check this first, for every cluster spec,
+  because the Go readers read only the first document and the bash readers
+  read every document: such a file reads as two different specs.
 - YAML aliases and merge keys (`<<: *anchor`) are resolved: a key of the map
   wins over a merged key, the last duplicate key wins, and in
-  `<<: [*a, *b]` the first map wins. The read follows only the path to the
-  value, so an alias bomb or an alias cycle in another part of the file costs
-  nothing. The bash implementation needs yq v4.47.1 or later (the flag
-  `--yaml-fix-merge-anchor-to-spec`); `b install` installs the pinned yq.
-- Trailing newlines of the value (a block scalar) are removed. Empty YAML
-  documents (a trailing `---`) do not count.
-- These shapes are refused, never read as an unset version: a second YAML
-  document that is not empty, a merge key anywhere in the file that does not
-  refer to a map or a list of maps, merge keys on the path to the value that
-  form a cycle, a `spec` or `spec.kubernetes` that is not a map, a version
-  that is a map or a list, and a value with a control character (a NUL byte,
-  a tab, an escape sequence). A problem shows each control character as `?`
-  and at most 80 characters of the value.
-- Each yq call of the bash implementation stops after 10 seconds or 256 MiB
-  of memory; it then reports the time or memory limit.
+  `<<: [*a, *b]` the first map wins. An anchor can be on a key. An alias
+  that is used as a key is not resolved (yq reads it by its own name). The
+  read follows only the path to the value, so an alias bomb or an alias
+  cycle in another part of the file costs nothing. The bash implementation
+  needs yq v4.47.1 or later (the flag `--yaml-fix-merge-anchor-to-spec`);
+  `b install` installs the pinned yq.
+- Trailing newlines of the value (a block scalar) are removed.
+- These shapes are refused, never read as an unset version: a merge key
+  anywhere in the file that does not refer to a map or a list of maps; merge
+  keys on the path to the value that form a cycle, or that need more than
+  10000 map reads (yq reads a merged map again for each merge key that names
+  it); a `spec` or `spec.kubernetes` that is not a map; a version that is a
+  map or a list; a value with a control character (a NUL byte, a tab, an
+  escape sequence, U+0085, U+2028, a bidi override). A problem shows each
+  control character as `?` and at most 80 characters of the value.
+- Each yq call of the bash implementation has a time limit of 10 s, in bash
+  itself (it does not need GNU `timeout`, so it holds on macOS too), and a
+  memory limit of 256 MiB (`ulimit -d`) where the operating system enforces
+  it. A call that passes a limit is reported with that limit.
 
 `lo provision` refuses before it creates a VM, a docker network or a
 container. `lo audit` reports a refused spec as `unknown` with the same

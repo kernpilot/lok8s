@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/testutil"
@@ -108,16 +109,17 @@ func TestNodeVersionMatchesBash(t *testing.T) {
 		t.Skip("no .bin/yq (b install)")
 	}
 	locale := bashLocale(t)
-	spec := filepath.Join(root, ".lok8s", "utils", "spec.sh")
-	// Source the twin with the argsh import stubbed: only the reader runs.
-	script := `import() { :; }; source "$1"
+	utils := filepath.Join(root, ".lok8s", "utils")
+	// Source the twin and its domain util (domain::spec_layout) with the
+	// argsh import stubbed: only the reader runs.
+	script := `import() { :; }; source "$1/domain.sh"; source "$1/spec.sh"
 if out=$(spec::kind_node_version "$2"); then
   if [[ -n "${out}" ]]; then printf 'tag %s\n' "${out}"; else echo unset; fi
 else
   printf 'error %s\n' "${out}"
 fi`
 	for path := range nodeVersionFixtures(t) {
-		cmd := exec.CommandContext(t.Context(), "bash", "-c", script, "bash", spec, path)
+		cmd := exec.CommandContext(t.Context(), "bash", "-c", script, "bash", utils, path)
 		cmd.Env = append(os.Environ(), "PATH="+filepath.Join(root, ".bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
 		cmd.Env = append(cmd.Env, locale...)
 		var stderr strings.Builder
@@ -132,6 +134,22 @@ fi`
 		if stderr.Len() != 0 {
 			t.Errorf("%s: the bash reader wrote to stderr:\n%s", filepath.Base(path), stderr.String())
 		}
+	}
+}
+
+// TestNodeVersionMergeChainIsQuick: a doubling chain of 30 mappings would
+// cost a yq path read 2^31 map reads. The merge-read count refuses it at
+// once, in Go and (TestNodeVersionMatchesBash) in bash, before any read.
+func TestNodeVersionMergeChainIsQuick(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(testutil.RepoRoot(t), "tests", "fixtures", "kind-node-version", "error--merge-doubling-chain.yaml")
+	start := time.Now()
+	_, err := NodeVersion(path)
+	if err == nil || !strings.Contains(err.Error(), "need more than 10000 map reads") {
+		t.Fatalf("NodeVersion: %v; want the map-read limit", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("NodeVersion took %v on a doubling chain", d)
 	}
 }
 

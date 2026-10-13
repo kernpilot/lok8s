@@ -138,3 +138,37 @@ func TestResolveClusterRefDanglingRef(t *testing.T) {
 	}
 	assertContains(t, errBuf.String(), "clusterRef domain not found")
 }
+
+// TestReadKindRefusesASecondDocument: a cluster spec file with more than
+// one YAML document stops the dispatch before the driver is chosen, with
+// the line that starts the second document (domain.SpecLayout). The Go
+// readers decode the first document and the bash readers every document, so
+// such a file reads as two different specs. Bash twin: provision::read_kind
+// in tests/unit/provision_test.bats.
+func TestReadKindRefusesASecondDocument(t *testing.T) {
+	for _, tc := range []struct{ name, src, want string }{
+		{"trailing separator", "kind: Lo\nspec: {}\n---\n", "(line 3: '---')"},
+		{"two empty documents then the spec", "---\n---\nkind: Lo\n", "(line 2: '---')"},
+		{"two documents", "kind: Lo\n---\nkind: KubeOne\n", "(line 2: '---')"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := filepath.Join(t.TempDir(), "cluster.lok8s.yaml")
+			testutil.WriteFile(t, spec, tc.src)
+			var stderr bytes.Buffer
+			kind, err := ReadKind(spec, &stderr)
+			if err == nil {
+				t.Fatalf("ReadKind = %q, nil; want the layout error", kind)
+			}
+			want := "[error] cluster spec " + spec + " holds more than one YAML document " + tc.want + ". Keep one document: remove line "
+			if !strings.Contains(stderr.String(), want) {
+				t.Fatalf("stderr = %q, want %q…", stderr.String(), want)
+			}
+		})
+	}
+	// One document, also after a `---`, reads as before.
+	spec := filepath.Join(t.TempDir(), "cluster.lok8s.yaml")
+	testutil.WriteFile(t, spec, "---\nkind: Lo\n")
+	if kind, err := ReadKind(spec, &bytes.Buffer{}); err != nil || kind != "lo" {
+		t.Fatalf("ReadKind = %q, %v; want lo", kind, err)
+	}
+}

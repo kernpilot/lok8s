@@ -1,1 +1,1 @@
-error spec.kubernetes.version cannot be read: the merge keys (<<) on the way to the value form a cycle, or the read passed its time or memory limit. Remove the cycle.
+error spec.kubernetes.version cannot be read: the merge keys (<<) on the path to the value form a cycle. Remove the cycle.

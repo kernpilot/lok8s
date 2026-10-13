@@ -667,6 +667,16 @@ lint::all() {
     spec_file="${domain_dir}/deploy.lok8s.yaml"
   fi
 
+  # The document layout comes first (domain::spec_layout): a spec file with
+  # more than one YAML document reads as two different specs in the two
+  # implementations, so no other check runs on it.
+  local at
+  if ! at=$(domain::spec_layout "${spec_file}"); then
+    error "  ${spec_file} holds more than one YAML document (line ${at%% *}: '${at#* }'). Keep one document: remove line ${at%% *} and every document after the first."
+    error "1 validation error(s)"
+    return 1
+  fi
+
   lint::schema "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
   lint::kubernetes_version "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))
   lint::clusterref "${domain_dir}" "${spec_file}"; errors=$(( errors + $? ))

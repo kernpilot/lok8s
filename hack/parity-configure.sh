@@ -218,6 +218,20 @@ kver_spec klist.dev   '  kubernetes: []\n'                                      
 kver_spec kcycle.dev  '  kubernetes:\n    <<: *k\n    version: v1.31.4\n' 'k: &k\n  <<: *k\n'  # a merge cycle: bounded, refused
 kver_spec knul.dev    '  kubernetes:\n    version: "v1.31.4\\0"\n'          # a NUL byte: refused, never unset
 
+# l*.dev — the document layout of the spec file (domain.SpecLayout,
+# domain::spec_layout). Only one YAML document reads the same in the Go
+# readers (first document) and the bash readers (yq on every document), so
+# `lo lint` refuses every other layout before any other check, in both.
+lay_spec() {  # <domain> <before, %b> <after, %b>
+  mkdir -p "${CL}/${1}"
+  printf '%bkind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: %s\nspec:\n  bootstrap: []\n%b' \
+    "${2}" "${1%%.*}" "${3}" > "${CL}/${1}/cluster.lok8s.yaml"
+}
+lay_spec llead.dev  '---\n'      ''                     # one document after a `---`: clean
+lay_spec ltrail.dev ''           '---\n'                # a trailing `---` (line 7)
+lay_spec lempty.dev '---\n---\n' ''                     # two empty documents, then the spec (line 2)
+lay_spec ltwo.dev   ''           '---\nkind: KubeOne\n' # a second document (line 7)
+
 # sub.alpha.dev — the one-cluster-per-apex violation.
 mkdir -p "${CL}/sub.alpha.dev"
 printf 'kind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: sub\nspec:\n  bootstrap: []\n' \
@@ -372,8 +386,19 @@ kver_problem kmerge.dev "spec.kubernetes.version 'kindest/node:v1.31.4' is not a
 kver_problem kalias.dev "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. ${kver_hint}"
 kver_clean   kblock.dev
 kver_problem klist.dev  "spec.kubernetes.version cannot be read: spec.kubernetes is a list, not a map. Write spec.kubernetes as a YAML map."
-kver_problem kcycle.dev "spec.kubernetes.version cannot be read: the merge keys (<<) on the way to the value form a cycle, or the read passed its time or memory limit. Remove the cycle."
+kver_problem kcycle.dev "spec.kubernetes.version cannot be read: the merge keys (<<) on the path to the value form a cycle. Remove the cycle."
 kver_problem knul.dev   "spec.kubernetes.version 'v1.31.4?' contains a control character (shown as '?'). Remove the control character."
+kver_clean   llead.dev
+lay_problem() {  # <domain> <line>
+  check - lint --domain "${1}"
+  for side in bash go; do
+    kver_pin "${side}: ${1} reports the layout" "${WORK}/${side}.err" "/clusters/${1}/cluster.lok8s.yaml holds more than one YAML document (line ${2}: '---'). Keep one document: remove line ${2} and every document after the first."
+    kver_pin "${side}: ${1} runs no other check" "${WORK}/${side}.err" "Missing required field" absent
+  done
+}
+lay_problem ltrail.dev 7
+lay_problem lempty.dev 2
+lay_problem ltwo.dev 7
 check - --domain iota.dev lint          # global-flag spelling
 # Go-only: --notes adds the default-equal advisory and changes nothing
 # else: same exit code, same stderr, stdout equal once the [note] lines

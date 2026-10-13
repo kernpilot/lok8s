@@ -393,7 +393,7 @@ spec:
     tls: false
 YAML
 export PARITY_KIND_LOG="${WORK}/kind.log" PARITY_DOCKER_LOG="${WORK}/docker.log"
-node_pre() { reset_fixtures; rm -f "${PARITY_KIND_LOG}" "${PARITY_DOCKER_LOG}" "${PROJ}/clusters"/{nullver,goodver,badver,mergever}.dev/.registries.json; }
+node_pre() { reset_fixtures; rm -f "${PARITY_KIND_LOG}" "${PARITY_DOCKER_LOG}" "${PROJ}/clusters"/{nullver,goodver,badver,mergever,layoutlead,layouttrail,layoutempty,layouttwo}.dev/.registries.json; }
 node_post() {  # <impl>: keep the kind config and the docker argv per side (normalized)
   local f
   for f in kind docker; do
@@ -443,6 +443,34 @@ for side in bash go; do
   node_pin "${side}: badver.dev is refused with the reason" "${WORK}/${side}.err" 1 "spec\.kubernetes\.version 'kindest/node:v1\.31\.4' is not a valid image tag\. "
   node_pin "${side}: badver.dev ran no docker command" "${WORK}/docker.${side}.log" 0 '.'
   node_pin "${side}: badver.dev ran no kind create"    "${WORK}/kind.${side}.log" 0 '.'
+done
+
+# ── lo provision — the document layout of the spec file ──────────────────────
+# Only one YAML document reads the same in the Go readers (first document) and
+# the bash readers (yq on every document). layoutlead.dev (one document after a
+# `---`) provisions; a trailing `---`, two empty documents before the spec and
+# a second document stop the dispatch before the driver is chosen, with the
+# line of the marker, and run no docker command.
+lay_cluster() {  # <domain> <before, %b> <after, %b> <cidr>
+  mkdir -p "${PROJ}/clusters/${1}"
+  printf '%bkind: Lo\nmetadata:\n  name: %s\nspec:\n  runtime: kind\n  network:\n    name: %snet\n    cidr: %s\n  registries:\n    tls: false\n%b' \
+    "${2}" "${1%%.*}" "${1%%.*}" "${4}" "${3}" > "${PROJ}/clusters/${1}/cluster.lok8s.yaml"
+}
+lay_cluster layoutlead.dev  '---\n'      ''                     10.99.16.0/24
+lay_cluster layouttrail.dev ''           '---\n'                10.99.17.0/24
+lay_cluster layoutempty.dev '---\n---\n' ''                     10.99.18.0/24
+lay_cluster layouttwo.dev   ''           '---\nkind: KubeOne\n' 10.99.19.0/24
+export PARITY_KIND_LOG="${WORK}/kind.log" PARITY_DOCKER_LOG="${WORK}/docker.log"
+node_check layoutlead.dev
+for side in bash go; do
+  node_pin "${side}: layoutlead.dev (one document after ---) reached kind create" "${WORK}/kind.${side}.log" 1 '^kind: Cluster$'
+done
+for d in layouttrail.dev:11 layoutempty.dev:2 layouttwo.dev:11; do
+  node_check "${d%%:*}"
+  for side in bash go; do
+    node_pin "${side}: ${d%%:*} is refused with the layout" "${WORK}/${side}.err" 1 "/clusters/${d%%:*}/cluster\.lok8s\.yaml holds more than one YAML document \(line ${d##*:}: '---'\)\. Keep one document: remove line ${d##*:} and every document after the first\.$"
+    node_pin "${side}: ${d%%:*} ran no docker command" "${WORK}/docker.${side}.log" 0 '.'
+  done
 done
 unset PARITY_KIND_LOG PARITY_DOCKER_LOG
 

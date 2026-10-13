@@ -99,6 +99,55 @@ domain::spec_driver() {
   echo "${kind}"
 }
 
+# domain::spec_layout <spec_file> — the document layout of a spec file (Go
+# twin: domain.SpecLayout in internal/domain/layout.go).
+#
+# The two implementations read a spec file in different ways when it has more
+# than one YAML document: the Go readers decode the first document (yaml.v3
+# counts an empty one before it), the bash readers run yq on every document
+# (yq drops empty documents before the first one, keeps the ones after it, and
+# prints one line per document). The same file then reads as two different
+# specs. Only one layout reads the same in both: one document, with an
+# optional `---` before it and an optional `...` after it. `lo provision`,
+# `lo lint` and the spec.kubernetes.version reader refuse every other layout.
+#
+# Returns 0 for that layout: no content before a `---` line, no second `---`
+# line, no content after a `...` line (blank lines, comments and `%`
+# directives are not content). Otherwise prints "<line> <marker>" (the 1-based
+# line and the marker, `---` or `...`, that breaks the layout) and returns 1.
+# A file that cannot be read returns 0: the readers report that themselves.
+domain::spec_layout() {
+  local spec="${1}" text rest n=0 content=0 started=0 end_line=0
+  [[ -r "${spec}" ]] || return 0
+  while IFS= read -r text || [[ -n "${text}" ]]; do
+    n=$(( n + 1 ))
+    text="${text%$'\r'}"
+    if [[ "${text}" =~ ^(---|\.\.\.)([[:blank:]](.*))?$ ]]; then
+      if [[ "${BASH_REMATCH[1]}" == "..." ]]; then
+        (( end_line )) || end_line=${n}
+        continue
+      fi
+      if (( content || started || end_line )); then
+        printf '%s ---\n' "${n}"
+        return 1
+      fi
+      started=1
+      rest="${BASH_REMATCH[3]}"
+      rest="${rest#"${rest%%[![:blank:]]*}"}"
+      [[ -z "${rest}" || "${rest}" == "#"* ]] || content=1
+      continue
+    fi
+    rest="${text#"${text%%[![:blank:]]*}"}"
+    [[ -z "${rest}" || "${rest}" == "#"* || "${text}" == "%"* ]] && continue
+    if (( end_line )); then
+      printf '%s ...\n' "${end_line}"
+      return 1
+    fi
+    content=1
+  done < "${spec}"
+  return 0
+}
+
 # domain::driver — the driver a domain's cluster spec declares, lowercased
 # (`kind: Lo` → lo, `kind: KubeOne` → kubeone …). Deploy-only domains
 # (deploy.lok8s.yaml, no cluster spec) print "deploy"; a missing domain dir
