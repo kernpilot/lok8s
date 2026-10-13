@@ -254,6 +254,27 @@ spec:
     pool: "10.125.125.125-10.125.125.150"   # 26 IPs from slot 125's MetalLB range
 ```
 
+## Host DNS search domains
+
+The search domains of your machine (the `search` line of `/etc/resolv.conf`,
+for example `fritz.box` or a Tailscale `*.ts.net` domain) do not go into the
+cluster. Docker copies that line into every kind node, and kubelet adds it to
+the search list of every pod, which has `ndots:5`. A pod then sends a query for
+each search domain before the real name, and resolvers with a fixed time
+budget (musl, hickory) fail external names.
+
+The kind config that `lo up` renders sets `networking.dnsSearch: []` (kind
+v0.18.0 and later). kind then starts every node with an empty
+`KIND_DNS_SEARCH`, and the node removes the search lines from its
+`/etc/resolv.conf` on every boot, before kubelet starts. A pod's search list
+holds only the cluster domains (`<namespace>.svc.cluster.local
+svc.cluster.local cluster.local`). The nameserver of the node does not change.
+To resolve a short host name from a pod, use the full name, or set
+`dnsConfig.searches` on that pod.
+
+A cluster created before this change keeps the host search domains until you
+recreate it (`lo down` and `lo up`).
+
 ## Custom in-cluster DNS
 
 Declare custom CoreDNS in the cluster spec; `lo up` renders it into a

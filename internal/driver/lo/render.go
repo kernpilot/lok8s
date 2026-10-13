@@ -30,6 +30,16 @@ import (
 // renderKindConfig renders the full kind Cluster config (bash:
 // lo::render_kind_config). Node counts / host ports / extra mounts come from
 // the env the read pass exported, exactly like the bash globals.
+//
+// `dnsSearch: []` (kind v0.18.0+): Docker copies the search domains of the
+// host's resolv.conf into the node's /etc/resolv.conf, and kubelet appends
+// them to the search list of every pod (`search <ns>.svc.cluster.local
+// svc.cluster.local cluster.local fritz.box …`, ndots:5). Resolvers with a
+// fixed time budget (musl, hickory) then fail external names: the Codex CLI
+// timed out every request after 5 s on lanisce/ops. With an empty list
+// kind starts every node container with KIND_DNS_SEARCH="", and the node
+// entrypoint removes the search lines from /etc/resolv.conf on every boot,
+// before systemd starts kubelet. The nameserver stays the one kind chose.
 func (d *Driver) renderKindConfig(clusterName, k8sVersion, network, clusterYAML string) string {
 	_ = network // the bash accepted it for symmetry; only the env export uses it
 	nodesYAML := d.renderNodes(k8sVersion, clusterYAML)
@@ -41,6 +51,7 @@ networking:
   disableDefaultCNI: true
   podSubnet: "%s"
   serviceSubnet: "%s"
+  dnsSearch: []
 %s
 containerdConfigPatches:
   - |-
