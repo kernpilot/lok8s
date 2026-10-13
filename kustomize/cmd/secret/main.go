@@ -39,6 +39,15 @@ func main() {
 		fmt.Println(version.Version)
 		return
 	}
+	// `Secret --capabilities` lists what this build supports, one word per
+	// line. `lo bootstrap --dry-run` requires "dry-run" before it renders
+	// (the plugin reads the store, generates in memory, never writes); an
+	// older build reads the flag as a config path and fails, so lo refuses
+	// it rather than let it write the secrets store.
+	if len(os.Args) == 2 && os.Args[1] == "--capabilities" {
+		fmt.Println(secret.Capabilities)
+		return
+	}
 	if err := secret.Run(os.Args, os.Stdin, os.Stdout, plugin.DefaultEnv); err != nil {
 		plugin.Fail(err)
 	}

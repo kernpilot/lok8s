@@ -114,24 +114,33 @@ func (c *Cache) GetOrCreate(key string, gen func() ([]byte, error)) ([]byte, err
 // filename with no path separators or `..` components, and the result
 // must remain inside c.dir.
 func (c *Cache) ReadByName(filename string) ([]byte, error) {
+	full, err := c.checkName(filename)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(full)
+}
+
+// checkName validates a ReadByName filename and returns its full path.
+func (c *Cache) checkName(filename string) (string, error) {
 	if filename == "" {
-		return nil, errs.New("cache: empty filename")
+		return "", errs.New("cache: empty filename")
 	}
 	clean := filepath.Clean(filename)
 	if clean != filename {
-		return nil, errs.Newf("cache: filename must be plain (got %q, cleaned to %q)", filename, clean)
+		return "", errs.Newf("cache: filename must be plain (got %q, cleaned to %q)", filename, clean)
 	}
 	if strings.ContainsAny(filename, "/\\") {
-		return nil, errs.Newf("cache: filename must not contain path separators: %q", filename)
+		return "", errs.Newf("cache: filename must not contain path separators: %q", filename)
 	}
 	if filename == ".." || filename == "." || strings.HasPrefix(filename, "..") {
-		return nil, errs.Newf("cache: filename must not start with .: %q", filename)
+		return "", errs.Newf("cache: filename must not start with .: %q", filename)
 	}
 	full := filepath.Join(c.dir, filename)
 	// Verify the resolved path stays within c.dir.
 	rel, err := filepath.Rel(c.dir, full)
 	if err != nil || strings.HasPrefix(rel, "..") {
-		return nil, errs.Newf("cache: filename escapes cache dir: %q", filename)
+		return "", errs.Newf("cache: filename escapes cache dir: %q", filename)
 	}
-	return os.ReadFile(full)
+	return full, nil
 }

@@ -325,20 +325,280 @@ addons::detail() {
   printf '\nConfigure an addon: edit its spec.bootstrap inline values, or its addons/<name>/values.<driver>.yaml — see docs/guide/addons.md.\n'
 }
 
+# ── lo bootstrap --dry-run: the render boundary ──────────────────────────
+# The Go twin is internal/addons/dryrun.go (the texts are the same).
+#
+# Scope: the dry run prevents ACCIDENTAL side effects of legitimate addon code
+# and configuration. It is NOT a security boundary against an addon crafted to
+# do harm: the real bootstrap runs that same addon with full credentials, and a
+# malicious addon can still execute code during a dry run.
+#
+# A dry run renders IN PLACE, exactly as a real run does (the same project,
+# HOME, credentials and CA; the helm caches may be populated). lo's own state
+# writes are suppressed at their source (LOK8S_BOOTSTRAP_DRYRUN=1: the secrets
+# plugin keeps new or updated values in the RUN store, the cert generator
+# never writes CAROOT, .registries.json stays in memory). The code an addon
+# runs is refused where it would execute: kustomize runs with a plugin home
+# that holds only lok8s' Secret plugin and the ChartRenderer gate, without
+# --enable-exec (a KRM exec function never runs), with `docker`, `git` and
+# `helm pull` refused first on PATH, and with an empty HELM_PLUGINS. Every temp
+# file of the render goes to the boundary (TMPDIR). --allow-generators lifts
+# the code refusals: the addon code runs as trusted, with the side effects of a
+# real run. Every security-relevant name below carries the bootstrap_ prefix an
+# entry's env: may not set.
+
+# addons::dry_run_boundary <dir>
+# Builds the boundary of one dry run in <dir> (a fresh directory the caller
+# owns and removes): plugins/ links the project's Secret plugin and holds the
+# ChartRenderer gate in place of the project's ChartRenderer (a plugin the
+# project does not have is missing there too, as in a real run); bin/ holds
+# the refusing docker, git and helm; helm-plugins/ is empty; store/ is the run
+# store; tmp/ is the render's TMPDIR; report is the report file. A Secret
+# plugin without the dry-run capability (`Secret --capabilities`) would write
+# the secrets store: refused.
+addons::dry_run_boundary() {
+  local _dir="${1}" _home="${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}" _d
+  for _d in plugins bin helm-plugins store tmp; do
+    mkdir -p "${_dir}/${_d}" && chmod 700 "${_dir}/${_d}" || return 1
+  done
+  local _secret="secrets.lok8s.dev/v1/secret/Secret" _chart="khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer"
+  if [[ -f "${_home}/${_secret}" ]]; then
+    mkdir -p "$(dirname "${_dir}/plugins/${_secret}")" && ln -s "${_home}/${_secret}" "${_dir}/plugins/${_secret}" || return 1
+  fi
+  if [[ -f "${_home}/${_chart}" ]]; then
+    mkdir -p "$(dirname "${_dir}/plugins/${_chart}")" || return 1
+    addons::_chart_gate_script "${_home}/${_chart}" > "${_dir}/plugins/${_chart}" || return 1
+    chmod 700 "${_dir}/plugins/${_chart}" || return 1
+  fi
+  printf '#!/bin/sh\necho %s >&2\nexit 1\n' \
+    "'lok8s dry-run: a KRM container function is not run in a dry run (pass --allow-generators to run it)'" > "${_dir}/bin/docker" || return 1
+  printf '#!/bin/sh\necho %s >&2\nexit 1\n' \
+    "'lok8s dry-run: a remote base is not fetched in a dry run (pass --allow-generators to fetch it)'" > "${_dir}/bin/git" || return 1
+  addons::_helm_stub "${_dir}/bin" > "${_dir}/bin/helm" || return 1
+  chmod 700 "${_dir}/bin/docker" "${_dir}/bin/git" "${_dir}/bin/helm" || return 1
+  ( umask 077; : > "${_dir}/report" ) || return 1
+  local _plugin="${_home}/${_secret}"
+  if [[ -f "${_plugin}" ]] && ! "${_plugin}" --capabilities 2>/dev/null </dev/null | grep -qx 'dry-run'; then
+    error "bootstrap dry-run: the Secret plugin ${_plugin#"${PATH_BASE}/"} does not support a dry run (it would write the secrets store) — run 'lo toolchain install' to install the plugin of this lo"
+    return 1
+  fi
+  return 0
+}
+
+# addons::_helm_stub <stub-dir>
+# Prints the dry run's `helm`: it refuses `helm pull` (kustomize's helmCharts
+# pulls a chart that chartHome lacks into the project) and runs the real
+# helm, the next one on PATH, for everything else (version, template of a
+# vendored chart).
+addons::_helm_stub() {
+  printf '%s\n' \
+    '#!/bin/sh' \
+    'if [ "${1:-}" = pull ]; then' \
+    "  echo 'lok8s dry-run: helmCharts needs --allow-generators in a dry run (helm pull writes the chart into the project)' >&2" \
+    '  exit 1' \
+    'fi' \
+    'IFS=:' \
+    'for d in $PATH; do' \
+    "  [ \"\$d\" = '${1}' ] && continue" \
+    '  if [ -x "$d/helm" ] && [ ! -d "$d/helm" ]; then exec "$d/helm" "$@"; fi' \
+    'done' \
+    "echo 'lok8s dry-run: helm: not found on PATH' >&2" \
+    'exit 127'
+}
+
+# addons::_chart_gate_script <real-chartrenderer>
+# Prints the dry run's ChartRenderer (the Go twin: internal/render/
+# chartgate.go): khelm builds the dependencies of a LOCAL chart into the chart
+# directory when one is a file:// chart, or when Helm's dependency check
+# fails on the chart as Helm's loader loads it (.helmignore honoured,
+# dependencies matched by their metadata name). The gate asks helm itself,
+# read-only: every row of the table `helm dependency list` prints on stdout
+# must say ok or unpacked (not missing, misnamed, wrong version, invalid
+# version, too many matches or corrupt), and `helm lint` must not name a
+# dependency the loaded chart lacks (an archive that .helmignore hides is
+# "ok" to `helm dependency list`). khelm renders some of the refused charts
+# without a build (a misnamed archive next to the subchart, for one); the
+# gate refuses them all, the same as the Go twin. Anything it cannot check
+# (no helm v3.3+, a chart helm cannot load, no table) is refused too. Each
+# cause prints its own message and next action; the vendor advice is only
+# for a dependency that helm does not report as vendored. A refused render
+# exits 1 and is reported as `chart-deps <chart>`; otherwise the gate execs
+# the project's ChartRenderer. It runs for every ChartRenderer config of the
+# render (any file name, nested bases, absolute paths), in the kustomization
+# root kustomize starts it in.
+addons::_chart_gate_script() {
+  printf '#!/usr/bin/env bash\nreal=%q\n' "${1}"
+  cat <<'GATE'
+config="${KUSTOMIZE_PLUGIN_CONFIG_STRING:-}"
+[[ -n "${config}" ]] || config="$(cat "${1:-/dev/null}")"
+repo="$(yq -r '.repository // ""' <<< "${config}")"
+chart="$(yq -r '.chart // ""' <<< "${config}")"
+vendor_advice="khelm may build the dependencies into the chart directory. Vendor them into charts/, or pass --allow-generators."
+# refuse <message>: the reason of a refusal, after the chart's name.
+refuse() { echo "lok8s dry-run: chart ${chart}: ${1}" >&2; }
+# builds_deps <dir>: rc 0 when the dry run refuses the chart (it printed
+# why), rc 1 when it may render.
+builds_deps() {
+  local dir="${1}" f deps name dep any=0 list line
+  for f in Chart.yaml requirements.yaml; do
+    [[ -f "${dir}/${f}" ]] || continue
+    if ! deps="$(yq -r '(.dependencies // [])[] | [(.name // ""), (.repository // "")] | @tsv' "${dir}/${f}" 2>/dev/null)"; then
+      refuse "cannot read the dependencies in ${f}. Fix the chart so that helm can load it."
+      return 0
+    fi
+    while IFS=$'\t' read -r name dep; do
+      [[ -n "${name}${dep}" ]] || continue
+      any=1
+      if [[ "${dep}" == file://* ]]; then
+        refuse "dependency ${name} is a file:// chart. khelm builds it into the chart directory on each render. Pass --allow-generators to render it."
+        return 0
+      fi
+    done <<< "${deps}"
+  done
+  (( any )) || return 1
+  # The statuses and the lint message below are helm v3's (the helm khelm
+  # v2.8.0 is built from): another helm cannot check this chart. `helm lint`
+  # checks the dependencies since helm v3.3.0; an older helm would pass an
+  # archive that .helmignore hides.
+  local version minor
+  version="$(helm version --short 2>/dev/null)" || version=""
+  minor="${version#v3.}"
+  minor="${minor%%.*}"
+  if [[ "${version}" != v3.* || ! "${minor}" =~ ^[0-9]+$ ]] || (( 10#${minor} < 3 )); then
+    refuse "helm v3 (3.3 or a later 3.x) is required for the dependency check. Found: ${version:-no helm on PATH}. Install helm v3, or use the Go implementation (lok8s.yaml: spec.implementation)."
+    return 0
+  fi
+  # The table is on stdout. helm's log lines go to stderr (a symlinked
+  # subchart: "found symbolic link in path"; a v2 chart with
+  # requirements.yaml: "Warning: Dependencies are handled in Chart.yaml"),
+  # so stderr is kept apart and shown only when the command fails.
+  local errs rc=0
+  if ! errs="$(mktemp 2>/dev/null)"; then
+    refuse "cannot make a temporary file for the dependency check in ${TMPDIR:-/tmp}. Make sure that this directory exists and is writable."
+    return 0
+  fi
+  list="$(helm dependency list "${dir}" 2>"${errs}")" || rc=$?
+  if (( rc )); then
+    # `helm dependency list` fails only when helm cannot load the chart; the
+    # last line of its stderr says why (the Go twin prints the loader error).
+    local why
+    why="$(tail -n 1 "${errs}")"
+    refuse "helm cannot load the chart: ${why#Error: }. Fix the chart so that helm can load it."
+    rm -f "${errs}"
+    return 0
+  fi
+  rm -f "${errs}"
+  # A row of the table is four tab-separated columns (NAME, VERSION,
+  # REPOSITORY, STATUS); the rows after the header must all say ok or
+  # unpacked. Other lines are not rows (the warnings about extra charts in
+  # charts/). No table at all is refused, unless helm says that the loaded
+  # chart has no dependencies.
+  local header=0 tabs status tab=$'\t'
+  while IFS= read -r line; do
+    tabs="${line//[!${tab}]/}"
+    (( ${#tabs} == 3 )) || continue
+    status="${line##*"${tab}"}"
+    status="${status%"${status##*[![:space:]]}"}"
+    status="${status#"${status%%[![:space:]]*}"}"
+    if (( ! header )); then
+      [[ "${line%%[[:space:]]*}" != NAME || "${status}" != STATUS ]] || header=1
+      continue
+    fi
+    if [[ "${status}" != ok && "${status}" != unpacked ]]; then
+      name="${line%%"${tab}"*}"
+      name="${name%"${name##*[![:space:]]}"}"
+      refuse "dependency ${name}: ${status} (helm dependency list). ${vendor_advice}"
+      return 0
+    fi
+  done <<< "${list}"
+  if (( ! header )) && [[ "${list}" != "WARNING: no dependencies at "* ]]; then
+    refuse "helm dependency list printed no dependency table (helm ${version}). Use helm v3.21.2, or use the Go implementation (lok8s.yaml: spec.implementation)."
+    return 0
+  fi
+  local missing
+  missing="$(helm lint "${dir}" 2>&1 | sed -n 's/.*chart directory is missing these dependencies: *//p' | head -n 1)"
+  if [[ -n "${missing}" ]]; then
+    refuse "dependency ${missing}: not in the chart that helm loads (helm lint). ${vendor_advice}"
+    return 0
+  fi
+  return 1
+}
+if [[ -z "${repo}" && -n "${chart}" ]]; then
+  path="${chart}"
+  [[ "${path}" == /* ]] || path="${PWD}/${path}"
+  if [[ -d "${path}" ]] && builds_deps "${path}"; then
+    if [[ -f "${LOK8S_BOOTSTRAP_DRYRUN_REPORT:-}" ]]; then
+      echo "chart-deps ${chart}" >> "${LOK8S_BOOTSTRAP_DRYRUN_REPORT}"
+    fi
+    exit 1
+  fi
+fi
+exec "${real}" "$@"
+GATE
+}
+
+# addons::_write_staged <path>
+# Writes stdin to path as a new private regular file of the staging copy:
+# whatever is at path (a symlink the copy kept, or a regular file) is removed
+# first, and noclobber refuses a file that is there again, so the write never
+# goes through a link (the Go twin: writeStagedFile).
+addons::_write_staged() {
+  rm -f -- "${1}" || return 1
+  ( umask 077; set -C; cat > "${1}" )
+}
+
+# addons::_with_env [KEY=value]... -- <command> [args...]
+# Runs command with the KEY=value pairs exported. Called as one element of a
+# pipeline, so the exports stay in that subshell. No local variable: an
+# entry's env (KEY=value) can therefore never shadow a name this function
+# reads (Astra's `env: {stem: …}`).
+addons::_with_env() {
+  while (( ${#} )) && [[ "${1}" != "--" ]]; do
+    # shellcheck disable=SC2163 # ${1} is KEY=value: export sets and exports KEY
+    export "${1}" || return 1
+    shift
+  done
+  shift
+  "${@}"
+}
+
 # Render a framework addon to stdout via the canonical khelm path — the SINGLE
 # render shared by the bootstrap engine and the KubeOne driver's pre-apply addon
 # staging. Stacks values base < driver(kind) < provider < inline (later wins),
 # rewrites the chart's valueFiles to the merged set, then
 # `kustomize build --enable-alpha-plugins` + envsubst (LOK8S_USER_* placeholders
 # the caller exported, e.g. cilium's k8sServiceHost).
-# Usage: addons::render <addon_dir> <kind> <provider_name> [inline_values]
+#
+# env-lines (KEY=value, one per line) is the entry's `env:`: it reaches ONLY the
+# kustomize child and the envsubst lookup (the Go twin: addons.Render), never
+# this shell.
+#
+# A dry run (bootstrap_dry_run, dynamically scoped from bootstrap::apply, with
+# its boundary in bootstrap_dry_boundary) renders with the boundary (see
+# above): the plugin home, no --enable-exec, the refusing docker/git/helm, the
+# empty HELM_PLUGINS, the run store, the report file and TMPDIR.
+# Usage: addons::render <addon_dir> <kind> <provider_name> [inline_values] [env-lines]
 addons::render() {
-  local addon_dir="${1}" kind="${2}" provider_name="${3:-}" inline_values="${4:-}"
-  local build_dir="${addon_dir}"
+  local addon_dir="${1}" kind="${2}" provider_name="${3:-}" inline_values="${4:-}" env_lines="${5:-}"
+  local _dry=0 _tmp_root="${TMPDIR:-/tmp}"
+  if (( ${bootstrap_dry_run:-0} )); then
+    [[ -d "${bootstrap_dry_boundary:-}" ]] || { error "addons::render: a dry run needs its boundary"; return 1; }
+    _dry=1
+    _tmp_root="${bootstrap_dry_boundary}/tmp"
+  fi
+  local -a _entry=()
+  local _kv _wl_extra="" _path="${PATH}"
+  while IFS= read -r _kv; do
+    [[ -n "${_kv}" ]] || continue
+    _entry+=("${_kv}")
+    [[ "${_kv%%=*}" != "PATH" ]] || _path="${_kv#*=}"
+    [[ ! "${_kv%%=*}" =~ ^LOK8S_(SPEC|USER)_ ]] || _wl_extra+="\${${_kv%%=*}} "
+  done <<< "${env_lines}"
+  local build_dir="${addon_dir}" _cleanup=""
   if [[ -f "${addon_dir}/chart.yaml" ]]; then
     # Stack values: base < driver < provider < inline (later wins). Facts
-    # (provider env) beat preferences (driver flavor) beat chart defaults (base);
-    # explicit caller intent (inline) beats all.
+    # (provider env) beat preferences (driver flavor) beat chart defaults
+    # (base); explicit caller intent (inline) beats all.
     local -a value_files=()
     [[ ! -f "${addon_dir}/values.yaml" ]] || value_files+=("${addon_dir}/values.yaml")
     [[ ! -f "${addon_dir}/values.${kind}.yaml" ]] || value_files+=("${addon_dir}/values.${kind}.yaml")
@@ -349,42 +609,72 @@ addons::render() {
     # cross-tree base `../../../../.lok8s/addons/<x>/values.yaml` (monitoring,
     # gatus) — must render IN PLACE: a copy breaks those relative paths (they
     # resolve from /tmp → /.lok8s, missing). Stacking addons carry no cross-tree refs.
+    # A dry run copies the same way: khelm's dependency builds are refused at
+    # the ChartRenderer gate, so nothing writes into the copy. The copy keeps
+    # symlinks, so every file the staging rewrites (values.inline.yaml,
+    # values.merged.yaml, chart.yaml) is written as a new private file
+    # (addons::_write_staged), never through a link to the addon's file or
+    # a file it shares.
     if [[ -n "${inline_values}" ]] || (( ${#value_files[@]} > 0 )); then
-      build_dir=$(mktemp -d) || { error "addons::render: failed to create temp dir for ${addon_dir}"; return 1; }
+      build_dir=$(mktemp -d -p "${_tmp_root}" lok8s-addon-XXXXXXXX) || { error "addons::render: failed to create temp dir for ${addon_dir}"; return 1; }
+      _cleanup="${build_dir}"
       # `/.` (not `/*`) so dotfiles (.helmignore, kustomize overlays, …) come too —
       # a glob drops them and a chart referencing a dotfile would fail to render.
       cp -r "${addon_dir}/." "${build_dir}/" \
         || { error "addons::render: failed to copy ${addon_dir} to temp dir"; rm -rf "${build_dir}"; return 1; }
       if [[ -n "${inline_values}" ]]; then
-        printf '%s\n' "${inline_values}" > "${build_dir}/values.inline.yaml"
+        printf '%s\n' "${inline_values}" | addons::_write_staged "${build_dir}/values.inline.yaml" \
+          || { error "addons::render: failed to merge values for ${addon_dir}"; rm -rf "${build_dir}"; return 1; }
         value_files+=("${build_dir}/values.inline.yaml")
       fi
-      if ! yq eval-all '. as $item ireduce ({}; . * $item)' "${value_files[@]}" \
-             > "${build_dir}/values.merged.yaml"; then
+      # yq's output is kept byte for byte: the `x` sentinel stops the command
+      # substitution from dropping trailing newlines, which belong to the
+      # value when the last one is a keep-chomped block scalar (`|+`). The
+      # output is captured before the write because chart.yaml is both the
+      # input and the file the write replaces.
+      local _staged
+      if ! _staged="$(yq eval-all '. as $item ireduce ({}; . * $item)' "${value_files[@]}" && printf x)" \
+           || ! printf '%s' "${_staged%x}" | addons::_write_staged "${build_dir}/values.merged.yaml"; then
         error "addons::render: failed to merge values for ${addon_dir}"
         rm -rf "${build_dir}"; return 1
       fi
-      yq -i '.valueFiles = ["values.merged.yaml"]' "${build_dir}/chart.yaml" \
-        || { error "addons::render: failed to set valueFiles in chart.yaml for ${addon_dir}"; rm -rf "${build_dir}"; return 1; }
+      if ! _staged="$(yq '.valueFiles = ["values.merged.yaml"]' "${build_dir}/chart.yaml" && printf x)" \
+           || ! printf '%s' "${_staged%x}" | addons::_write_staged "${build_dir}/chart.yaml"; then
+        error "addons::render: failed to set valueFiles in chart.yaml for ${addon_dir}"
+        rm -rf "${build_dir}"; return 1
+      fi
     fi
   fi
 
   # KHELM_TRUST_ANY_REPO: chart repos are declared in our own version-controlled
   # chart.yaml (the trust boundary is code review), so trust them — no manual
   # `helm repo add`, versions stay pinned.
-  # --enable-exec: secrets.lok8s.dev is an exec plugin (an addon may carry a
-  # Secret.*.yaml generator next to its chart, e.g. ccm's hcloud secret).
+  # A real run passes --enable-exec (KRM exec functions); a dry run does not:
+  # the built-in plugins are legacy exec plugins, which --enable-alpha-plugins
+  # enables alone. The dry run's values come after the entry's env, so they win.
   local whitelist rc=0 out
-  whitelist=$(template::envsubst_whitelist)
+  whitelist="$(template::envsubst_whitelist)${_wl_extra}"
+  local -a _kenv=(KHELM_TRUST_ANY_REPO=true) _kflags=(--enable-alpha-plugins --enable-exec)
+  if (( _dry )); then
+    _kenv+=(LOK8S_BOOTSTRAP_DRYRUN=1 "LOK8S_BOOTSTRAP_DRYRUN_REPORT=${bootstrap_dry_boundary}/report"
+      "LOK8S_BOOTSTRAP_DRYRUN_STORE=${bootstrap_dry_boundary}/store" "TMPDIR=${bootstrap_dry_boundary}/tmp")
+    if (( ${bootstrap_allow_generators:-0} )); then
+      _kenv+=(LOK8S_BOOTSTRAP_ALLOW_GENERATORS=1)
+    else
+      _kflags=(--enable-alpha-plugins)
+      _kenv+=("KUSTOMIZE_PLUGIN_HOME=${bootstrap_dry_boundary}/plugins" "PATH=${bootstrap_dry_boundary}/bin:${_path}"
+        "HELM_PLUGINS=${bootstrap_dry_boundary}/helm-plugins")
+    fi
+  fi
   # Container env `value`s MUST be strings (k8s schema). Helm coerces numeric
   # values (e.g. cilium's KUBERNETES_SERVICE_PORT from k8sServicePort) back to
   # ints and charts emit them unquoted → `kubectl apply` rejects them. Coerce
   # every container env value to a string; `valueFrom` entries (no `value`) are
   # left untouched.
-  out=$(KHELM_TRUST_ANY_REPO=true kustomize build --enable-alpha-plugins --enable-exec "${build_dir}" \
-          | template::envsubst "${whitelist}" \
+  out=$( addons::_with_env "${_entry[@]+"${_entry[@]}"}" "${_kenv[@]}" -- kustomize build "${_kflags[@]}" "${build_dir}" \
+          | addons::_with_env "${_entry[@]+"${_entry[@]}"}" -- template::envsubst "${whitelist}" \
           | yq eval '(.. | select(tag == "!!map" and has("env") and (.env | tag == "!!seq")) | .env[] | select(has("value")) | .value) |= tostring') || rc=$?
-  [[ "${build_dir}" == "${addon_dir}" ]] || rm -rf "${build_dir}"
+  [[ -z "${_cleanup}" ]] || rm -rf "${_cleanup}"
   # A successful build that yields nothing means the addon rendered no resources —
   # almost always a misconfig (wrong path, everything filtered out). Fail loud
   # rather than report success for an empty apply.

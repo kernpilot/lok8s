@@ -14,9 +14,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/addons"
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/kapply"
@@ -82,6 +84,14 @@ type Engine struct {
 	// SopsDecrypt decrypts one restore.d/*.sops.yaml in memory (nil → the
 	// secrets package's sops library decrypt — NEVER a sops|kubectl pipe).
 	SopsDecrypt func(path string) ([]byte, error)
+
+	// Options are the run modes (--dry-run, --render-dir, --no-diff,
+	// --only); the zero value is the plain apply.
+	Options Options
+
+	// boundary is the dry run's render boundary, set for the length of a
+	// dry run (apply).
+	boundary *addons.DryRunBoundary
 }
 
 func (e *Engine) stdout() io.Writer {
@@ -162,15 +172,55 @@ type node struct {
 // non-zero if anything failed or was skipped (so the caller re-runs `lo up`
 // to converge).
 func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig string) error {
+	err := e.apply(ctx, domain, clusterYAML, kubeconfig)
+	return e.remapDryRunExit(err)
+}
+
+// remapDryRunExit maps ANY error a dry run returns onto its contract (exit
+// 0 clean, 1 something would change, >1 everything else: a launch failure,
+// a planning error, a missing kubeconfig, a --render-dir failure, …) — the
+// bare "anything else → 1" driver.ExitCode falls back to otherwise would
+// read as "something would change" to a caller that only checks rc!=0.
+// Real-apply exit codes are untouched (only called when e.Options.DryRun).
+func (e *Engine) remapDryRunExit(err error) error {
+	if err == nil || !e.Options.DryRun {
+		return err
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err // a cancelled run reports ctx.Err(), not a remapped code
+	}
+	if errors.Is(err, ErrDryRunDiffers) {
+		return err // already the correct rc 1 — "something would change"
+	}
+	if _, ok := errors.AsType[*driver.ExitError](err); ok {
+		return err // already carries an explicit code (e.g. runDryRun's rc 2)
+	}
+	return &driver.ExitError{Code: 2, Err: err}
+}
+
+// apply is Apply's body (bash: bootstrap::apply). A dry run renders in
+// place, exactly as a real run does (the same project, HOME, credentials
+// and CA); see dryrun.go and internal/addons/dryrun.go for what it does
+// differently. Order matters for --dry-run and --only: the WHOLE graph is
+// validated — including --only — before any writer runs (restore.d, an
+// addon apply, assets ejection), so "--only typo" or any other planning
+// error can never land a partial write first and only then fail.
+func (e *Engine) apply(ctx context.Context, domain, clusterYAML, kubeconfig string) error {
 	stderr := e.stderr()
 
-	// lo provision drives the bootstrap directly (not via `lo build`), so
-	// the per-domain secrets store isn't exported yet. The
-	// secrets.lok8s.dev generators read $PATH_SECRETS — without it a target
-	// carrying a passwd Secret fails to render. Mirror
-	// libs/build::_export_secrets_path.
-	if fsutil.DirExists(e.Paths.Clusters + "/" + domain + "/secrets") {
-		os.Setenv("PATH_SECRETS", e.Paths.Clusters+"/"+domain+"/secrets")
+	// LOK8S_BOOTSTRAP_DRYRUN/LOK8S_BOOTSTRAP_ALLOW_GENERATORS: the
+	// sentinel every lo state writer checks at its source (dryrunenv.go).
+	// The dispatcher sets it before driver.Exporter.Export already; setting
+	// it again here is idempotent and keeps a direct caller of Engine.Apply
+	// (a test) correct too.
+	defer SetDryRunEnv(e.Options.DryRun, e.Options.AllowGenerators)()
+
+	// The per-domain secrets store, on a real run and a dry run alike (lo
+	// provision drives the bootstrap directly, not via `lo build`, so the
+	// store is not exported yet — mirror libs/build::_export_secrets_path).
+	// A dry run reads it; the secrets plugin never writes it then.
+	if secretsDir := e.Paths.Clusters + "/" + domain + "/secrets"; fsutil.DirExists(secretsDir) {
+		os.Setenv("PATH_SECRETS", secretsDir)
 	}
 
 	if !fsutil.FileExists(kubeconfig) {
@@ -209,13 +259,25 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 
 	// ── Hosted gate ─────────────────────────────────────────────────
 	// AFTER the empty-entries return on purpose: a spec with no bootstrap
-	// entries must not probe the cluster at all. Both skip WITHOUT failing
-	// the provision (the cluster itself is fine); re-running later is
-	// idempotent.
-	if base.Hosted {
+	// entries must not probe the cluster at all. A render-only dry run
+	// (--no-diff) never touches the cluster, so it does not probe either.
+	//
+	// A REAL run skips the provision WITHOUT failing it on a probe miss
+	// (the cluster itself is fine; re-running later is idempotent) — that
+	// is unchanged. A DRY run is an explicit ask to assess the cluster, so
+	// the SAME miss is the opposite of "nothing would change": it means
+	// the assessment could not be done at all, which must never read as a
+	// clean exit 0 to a caller gating a change window on this exit code.
+	if base.Hosted && (!e.Options.DryRun || !e.Options.NoDiff) {
 		proceed, err := e.hostedGate(ctx, domain, kubeconfig)
-		if err != nil || !proceed {
+		if err != nil {
 			return err
+		}
+		if !proceed {
+			if e.Options.DryRun {
+				return e.errorf("bootstrap dry-run: assessment not done (hosted cluster unreachable or not ready — see above)")
+			}
+			return nil
 		}
 	}
 
@@ -227,21 +289,140 @@ func (e *Engine) Apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 	// (LOK8S_USER_* vars).
 	exportAPIEndpoint(stderr, kubeconfig)
 
+	nodes, err := e.loadNodes(stderr, domain, kind, entries)
+	if err != nil || len(nodes) == 0 {
+		return err
+	}
+	// The whole graph is validated (names, edges, cycles) BEFORE --only
+	// narrows it, so a typo in a dependsOn is reported either way.
+	if err := planDAG(stderr, nodes); err != nil {
+		return err
+	}
+	if len(e.Options.Only) > 0 {
+		if nodes, err = selectOnly(stderr, nodes, e.Options.Only); err != nil {
+			return err
+		}
+	}
+
+	// The dry run's render boundary (internal/addons/dryrun.go): the
+	// restricted plugin home, the refusing stubs, the run store, the
+	// render's TMPDIR, the report file. Built once, after the plan is valid
+	// and before anything is written or reported; removed on every exit path
+	// (an interrupt cancels ctx and returns here).
+	if e.Options.DryRun {
+		b, err := addons.NewDryRunBoundary(ctx, e.Paths, e.Runner)
+		if err != nil {
+			return e.errorf("bootstrap dry-run: %v", err)
+		}
+		defer b.Close()
+		e.boundary = b
+		defer func() { e.boundary = nil }()
+	}
+
+	// --render-dir is prepared HERE: after the boundary (a refusal there
+	// leaves no directory behind) and before the restore.d preview below,
+	// which writes restore.d.{yaml,diff} into it too.
+	if e.Options.DryRun && e.Options.RenderDir != "" {
+		if err := prepareRenderDir(e.Options.RenderDir, stderr); err != nil {
+			return e.errorf("bootstrap: --render-dir: %v", err)
+		}
+		fmt.Fprintf(stderr, "bootstrap dry-run: %s holds the rendered manifests in plaintext, Secrets included\n", e.Options.RenderDir)
+	}
+
 	// ── restore.d: pre-bootstrap DR restore (sops-encrypted manifests) ──
 	// Applied BEFORE any addon so restored state exists when the addons'
 	// reconcilers first look for it (canonical use: issued wildcard TLS
 	// Secrets — cert-manager REUSES instead of re-issuing via ACME, keeping
 	// clear of the Let's Encrypt duplicate-cert limit).
-	e.restoreD(ctx, domain, kubeconfig)
-
-	nodes, err := e.loadNodes(stderr, domain, kind, entries)
-	if err != nil || len(nodes) == 0 {
-		return err
+	//
+	// Moved here — AFTER --only is validated — on purpose: restore.d is a
+	// WRITER (it applies Secrets to the live cluster), and "--only typo"
+	// must fail before any writer runs, restore.d included. --only also
+	// takes restore.d out of scope by DEFAULT: it names addons, never
+	// restore.d, so an operator scoping a run to one addon must not have
+	// restore.d silently come along uninvited — --with-restore opts back
+	// in (item H), applying restore.d exactly as if --only were absent.
+	var restoreDResult *dryResult
+	switch {
+	case len(e.Options.Only) > 0 && !e.Options.WithRestore:
+		if names := restoreDFiles(e.Paths.Clusters + "/" + domain); len(names) > 0 {
+			if e.Options.DryRun {
+				fmt.Fprintf(stderr, "[bootstrap] --only: restore.d skipped (not applied) — %d file(s) under clusters/%s/restore.d\n", len(names), domain)
+			} else {
+				warnRestoreDSkipped(stderr, domain, names)
+			}
+		}
+	case e.Options.DryRun:
+		// Reported as its own line inside runDryRun, not a bare "not
+		// applied" — an operator previewing a bootstrap needs to see
+		// what restore.d would actually change, the same as any addon.
+		restoreDResult = e.dryRunRestoreD(ctx, domain, kubeconfig)
+	default:
+		e.restoreD(ctx, domain, kubeconfig)
 	}
-	if err := planDAG(stderr, nodes); err != nil {
-		return err
+
+	if e.Options.DryRun {
+		return e.runDryRun(ctx, nodes, base, restoreDResult)
 	}
 	return e.runDAG(ctx, stderr, nodes, base)
+}
+
+// warnRestoreDSkipped is the LOUD form of the --only/restore.d notice,
+// printed on a REAL (non-dry) run (item H): skipping restore.d is a DR/
+// renewal-posture decision, not a quiet aside — naming an addon with
+// --only must never silently leave a wildcard TLS Secret un-restored and
+// let its owner ACME-reissue instead, which can hit the Let's Encrypt
+// rate limit on a cluster with several such Secrets.
+func warnRestoreDSkipped(stderr io.Writer, domain string, names []string) {
+	// The marker is coloured on a terminal only: piped stderr is plain text.
+	fmt.Fprintf(stderr, "\n%s bootstrap: --only applies WITHOUT restoring restore.d (%d file(s) under clusters/%s/restore.d):\n", ui.For(stderr).Warn("!"), len(names), domain)
+	for _, n := range names {
+		fmt.Fprintf(stderr, "    %s\n", n)
+	}
+	fmt.Fprintln(stderr, " if one of these is a wildcard TLS Secret an addon (e.g. cert-manager) would")
+	fmt.Fprintln(stderr, " otherwise REUSE, skipping it here means that addon ACME-reissues instead —")
+	fmt.Fprintln(stderr, " repeated reissuance can hit the Let's Encrypt rate limit. Pass --with-restore")
+	fmt.Fprintln(stderr, " to apply restore.d first.")
+}
+
+// boolEnv is "1" for true, "" (unset) for false — the env-sentinel
+// convention LOK8S_BOOTSTRAP_DRYRUN/LOK8S_BOOTSTRAP_ALLOW_GENERATORS use.
+func boolEnv(b bool) string {
+	if b {
+		return "1"
+	}
+	return ""
+}
+
+// setEnvScoped sets key to value (or unsets it, for "") for the duration of
+// the call, returning a restore func that puts the PRIOR value back (or
+// unsets it, if it was never set) — os.Setenv alone would leak the dry-run
+// sentinel across sequential Apply calls in the same process.
+func setEnvScoped(key, value string) (restore func()) {
+	prev, had := os.LookupEnv(key)
+	if value == "" {
+		os.Unsetenv(key)
+	} else {
+		os.Setenv(key, value)
+	}
+	return func() {
+		if had {
+			os.Setenv(key, prev)
+		} else {
+			os.Unsetenv(key)
+		}
+	}
+}
+
+// restoreDFiles lists the clusters/<domain>/restore.d/*.sops.yaml file
+// names the real run would apply before the DAG.
+func restoreDFiles(domainDir string) []string {
+	matches, _ := filepath.Glob(filepath.Join(domainDir, "restore.d", "*.sops.yaml"))
+	names := make([]string, len(matches))
+	for i, m := range matches {
+		names[i] = filepath.Base(m)
+	}
+	return names
 }
 
 // loadNodes parses every entry and resolves its addon dir (ejecting a
@@ -263,7 +444,18 @@ func (e *Engine) loadNodes(stderr io.Writer, domain, kind string, entries []stri
 			// disk, or serve the embedded copy under --no-eject.
 			// The unit is the addon DIR's name, not parsed.Name (an
 			// explicit `name:` override renames the entry, not the addon).
-			dir, _, err := assets.Resolve(e.Paths, "addons/"+filepath.Base(parsed.Dir))
+			//
+			// A dry run NEVER ejects, whatever the project's policy — Peek
+			// instead of Resolve: a read-only preview must not plant a new
+			// addon directory in the project just because it looked at it.
+			// Resolve's ejection is otherwise harmless and idempotent, so a
+			// real run keeps it.
+			rel := "addons/" + filepath.Base(parsed.Dir)
+			resolveAsset := assets.Resolve
+			if e.Options.DryRun {
+				resolveAsset = assets.Peek
+			}
+			dir, _, err := resolveAsset(e.Paths, rel)
 			if err != nil {
 				return nil, e.errorf("bootstrap: %v", err)
 			}
@@ -346,8 +538,13 @@ func planDAG(stderr io.Writer, nodes []*node) error {
 		}
 	}
 
-	// Derive per-entry effective deps, the dep-target flag, in-degree and
-	// reverse adjacency — used by cycle-check + runner.
+	return checkCycle(stderr, nodes, deriveEdges(nodes))
+}
+
+// deriveEdges derives, from each node's deps set, the per-entry effective
+// deps, the dep-target flag and the reverse adjacency (used by the cycle
+// check, the runner and the --only subset), returning the in-degrees.
+func deriveEdges(nodes []*node) []int {
 	indeg := make([]int, len(nodes))
 	for i, nd := range nodes {
 		for pi := range nd.deps {
@@ -357,7 +554,7 @@ func planDAG(stderr io.Writer, nodes []*node) error {
 			indeg[i]++
 		}
 	}
-	return checkCycle(stderr, nodes, indeg)
+	return indeg
 }
 
 // checkCycle is the cycle detection (Kahn): peel off in-degree-0 nodes;

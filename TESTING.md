@@ -73,6 +73,35 @@ go test ./internal/secrets/ -run TestEncrypt -v    # one package / one test
 go test ./internal/inventory/ -update              # rewrite that package's goldens
 ```
 
+The `lo bootstrap --dry-run` boundary is proven against the real pinned
+kustomize: `internal/addons/dryrun_exec_test.go` renders with `.bin/kustomize`
+and this test binary as the Secret plugin and the ChartRenderer gate (a KRM
+exec function never runs, a foreign exec plugin does not resolve, the refusing
+`docker`/`git` stop a container function and a remote base, the refusing `helm
+pull` stops a `helmCharts` chart that is not vendored, the gate refuses a
+local chart whose dependencies are not vendored (a real archive that
+`.helmignore` hides included) and writes nothing into it, the secrets plugin
+and the cert generator write nothing and report what they generated, updated
+or read from another entry of the run, a store miss in an existing store
+directory writes nothing, the plugin configs stay in the boundary), and every
+refusal is checked again with `--allow-generators`, where the fixture's code
+runs. It skips without `.bin/kustomize` and fails under `CI=true`. The
+in-process half (`lo-full`) is `dryrun_inprocess_test.go` (`-tags inprocess`).
+`internal/render/chartgate_test.go` pins the chart gate against Helm's own
+`action.CheckDependencies` and `action.Dependency.List` on real chart
+fixtures; the bats twin (tagged `real-helm`) runs the bash gate against the
+real helm v3 on the same fixtures. Both read one table,
+`internal/render/testdata/chartgate-fixtures.txt` (fixture, verdict, cause
+of a refusal), and fail on a row they cannot build. The bats twin skips
+without helm v3.3+ locally (`bats --filter-tags real-helm tests/unit/` with
+a helm v3.3+ on `PATH` runs every test with that tag). The argsh container
+of `unit-tests` has no helm, so that job runs the tag a second time
+natively, with a pinned helm v3.21.2, where `CI=true` turns a missing helm
+into a failure and the step fails when no test runs or one skips. The dry run prevents accidental side
+effects of legitimate addon code; it is not a security boundary against an
+addon that is made to do harm (see the trust model in
+`docs/guide/deployment.md`), and the tests prove only the first.
+
 Run `go test ./internal/<pkg>/ -update` to rewrite a package's golden files
 under `testdata/` from the current output, then review the diff before you
 commit it.

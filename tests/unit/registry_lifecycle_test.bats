@@ -828,3 +828,85 @@ _pull_script() {
     return 1
   }
 }
+
+# ── Review round 2, item D's exposed bug ───────────────────────────────
+#
+# Setting LOK8S_BOOTSTRAP_DRYRUN BEFORE driver::export (instead of only
+# inside bootstrap::apply, which runs after) means registry::config_generate
+# now runs its OWN dry-run gate (a disposable temp write, never the real
+# path) during driver::export too — so LOK8S_REGISTRY_JSON can legitimately
+# name a file that was never written by the time these query helpers are
+# called from driver::export → lo::export_spec_envs on the SAME dry run.
+# They must report "nothing yet" gracefully, not fail loudly with jq's own
+# "Could not open file" error on stderr (which broke the lo/go stderr
+# parity for a fresh domain's first dry run).
+@test "registry::get on a missing LOK8S_REGISTRY_JSON returns gracefully" {
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/config-registry.sh"
+  export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/does-not-exist.json"
+  run registry::get build host
+  assert_success
+  [ -z "${output}" ]
+  refute_output --partial "Could not open file"
+}
+
+@test "registry::is_shared / is_tls / port on a missing file don't error loudly" {
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/config-registry.sh"
+  export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/does-not-exist.json"
+  run registry::is_shared
+  assert_failure
+  refute_output --partial "Could not open file"
+  run registry::is_tls
+  assert_failure
+  refute_output --partial "Could not open file"
+  run registry::port
+  assert_success
+  [ "${output}" = "80" ]
+}
+
+@test "registry::network_name / network_cidr / project_network on a missing file return empty, not an error" {
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/config-registry.sh"
+  export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/does-not-exist.json"
+  for fn in registry::network_name registry::network_cidr registry::project_network; do
+    run "${fn}"
+    assert_success
+    [ -z "${output}" ]
+    refute_output --partial "Could not open file"
+  done
+}
+
+# ── Review round 3: a dry run keeps the registry document in memory ───
+#
+# A bootstrap dry run (LOK8S_BOOTSTRAP_DRYRUN=1) computes the same
+# .registries.json document a real run writes, never writes the file, and
+# the query helpers read the in-memory document — so lo::export_spec_envs
+# exports the registry values a real run reads back from the file (the
+# round-2 dry run exported them empty). A real run writes the file and drops
+# the dry run's document. The Go twin: TestConfigGenerateDryRunKeepsTheDocumentInMemory.
+@test "registry::config_generate under a dry run keeps the document in memory, never writes it" {
+  _write_spec
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  local spec="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  local json="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/.registries.json"
+  export LOK8S_BOOTSTRAP_DRYRUN=1
+  lo::read_network_config "${spec}"
+  [ ! -e "${json}" ]
+  [ "${LOK8S_REGISTRY_JSON}" = "${json}" ]
+  run registry::get build host
+  assert_output "lok8s.local"
+  run registry::get cache host
+  assert_output "lok8s.cache"
+  run registry::network_name
+  assert_output "lok8s-registries"
+  lo::export_spec_envs "${spec}"
+  [ "${LOK8S_SPEC_REGISTRY_BUILD_HOST}" = "lok8s.local" ]
+  [ "${LOK8S_SPEC_REGISTRY_CACHE_HOST}" = "lok8s.cache" ]
+  [ ! -e "${json}" ]
+
+  # The real run writes the same document and drops the dry run's.
+  local mem="${LOK8S_BOOTSTRAP_DRYRUN_REGISTRY}"
+  unset LOK8S_BOOTSTRAP_DRYRUN
+  lo::read_network_config "${spec}"
+  [ -f "${json}" ]
+  [ "$(cat "${json}")" = "${mem}" ]
+  [ -z "${LOK8S_BOOTSTRAP_DRYRUN_REGISTRY:-}" ]
+}

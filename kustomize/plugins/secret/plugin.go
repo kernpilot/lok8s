@@ -62,10 +62,19 @@ func (p *Plugin) Build(env func(string) (string, bool), fileRoot string) (*plugi
 	// Resolve $PATH_SECRETS for the cache. Allowed to be unset; the
 	// cache pointer will be nil and cached generators will return a
 	// clear error if used.
+	//
+	// A dry run (LOK8S_BOOTSTRAP_DRYRUN=1) opens the read-only overlay
+	// instead: it reads the existing store, generates a missing value in
+	// memory, writes nothing and reports what it generated.
 	pathSecrets, _ := env(PathSecretsEnv)
+	dr := cache.DryRunFromEnv(env)
 	var c plugin.CacheStore
+	var open func(namespace, name string) (plugin.CacheStore, error)
 	if pathSecrets != "" {
-		concreteCache, err := cache.New(pathSecrets, p.spec.Metadata.Namespace, p.spec.Metadata.Name)
+		open = func(namespace, name string) (plugin.CacheStore, error) {
+			return cache.Open(pathSecrets, namespace, name, dr)
+		}
+		concreteCache, err := open(p.spec.Metadata.Namespace, p.spec.Metadata.Name)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -79,6 +88,13 @@ func (p *Plugin) Build(env func(string) (string, bool), fileRoot string) (*plugi
 		Env:       env,
 		FileRoot:  fileRoot,
 		Rand:      random.Reader,
+		OpenStore: open,
+	}
+	if dr != nil {
+		ctx.DryRun = true
+		ctx.Minted = dr.Minted
+		ctx.RunLoad = dr.Load
+		ctx.RunSave = dr.Save
 	}
 
 	r := plugin.NewRegistry()

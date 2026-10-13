@@ -111,11 +111,18 @@ YAML
   }
   export -f kustomize
 
-  envsubst() { cat; }
+  # `envsubst --version` (template::envsubst_flavor's probe) must not drain
+  # the manifest the render pipes through.
+  envsubst() { [[ "${1:-}" != --version ]] || return 0; cat; }
   export -f envsubst
 
   kubectl() { return 0; }
   export -f kubectl
+
+  # The dry run's boundary links the project's plugins (none here) and runs
+  # the Secret plugin's capability probe only when there is one: never let an
+  # inherited plugin home (CI exports one) leak into these tests.
+  export KUSTOMIZE_PLUGIN_HOME="${BATS_TEST_TMPDIR}/.kustomize"
 
   source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
@@ -564,17 +571,23 @@ YAML
 
 # --- env wiring: env: {…} → exported around addons::render --------------------
 
-@test "bootstrap::apply exports env: overrides into the addons::render env" {
-  # The new `env:` map is exported (this addon's subshell only) before render,
-  # so render's envsubst whitelist picks up LOK8S_USER_*/LOK8S_SPEC_* names.
-  local capture="${BATS_TEST_TMPDIR}/env_capture"
-  : > "${capture}"
-  # Capture what addons::render sees for the var, then emit a dummy manifest.
-  addons::render() {
-    printf '%s\n' "${LOK8S_USER_TESTVAR:-UNSET}" > "${capture}"
+@test "bootstrap::apply passes env: overrides to the render only, never the orchestration shell" {
+  # The entry's `env:` reaches the render's processes (kustomize, envsubst:
+  # render's envsubst whitelist picks up LOK8S_USER_*/LOK8S_SPEC_* names) and
+  # nothing else: the apply in the orchestration shell never sees it (the Go
+  # twin passes it to the render process only).
+  export KCAP="${BATS_TEST_TMPDIR}/kustomize_env" ACAP="${BATS_TEST_TMPDIR}/kubectl_env"
+  : > "${KCAP}"; : > "${ACAP}"
+  kustomize() {
+    printf '%s\n' "${LOK8S_USER_TESTVAR:-UNSET}" > "${KCAP}"
     printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'
+  }
+  kubectl() {
+    printf '%s\n' "${LOK8S_USER_TESTVAR:-UNSET}" >> "${ACAP}"
+    [[ " $* " != *" -f - "* ]] || cat >/dev/null
     return 0
   }
+  export -f kustomize kubectl
 
   cat > "${CLUSTER_YAML}" <<'YAML'
 apiVersion: cluster.lok8s.dev/v1beta1
@@ -590,9 +603,12 @@ spec:
           LOK8S_USER_TESTVAR: hello
 YAML
 
-  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
   assert_success
-  [ "$(cat "${capture}")" = "hello" ]
+  [ "$(cat "${KCAP}")" = "hello" ]
+  [ -s "${ACAP}" ]
+  ! grep -qv '^UNSET$' "${ACAP}"
+
 }
 
 # --- scheduler: parallel batches split by wait: true barriers ----------------
@@ -2214,7 +2230,7 @@ YAML
   local d="${PATH_CLUSTERS}/test.lok8s.dev"
   mkdir -p "${d}/restore.d"
   echo "cipher" > "${d}/restore.d/tls-b.sops.yaml"
-  kubectl() { cat > /dev/null; echo "$*" >> "${BATS_TEST_TMPDIR}/kubectl.log"; }
+  kubectl() { [[ " $* " != *" -f - "* ]] || cat > /dev/null; echo "$*" >> "${BATS_TEST_TMPDIR}/kubectl.log"; }
   sops() { echo "$*" >> "${BATS_TEST_TMPDIR}/sops.log"; echo "kind: Secret"; }
   run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
   [ "$status" -eq 0 ]
@@ -2404,6 +2420,26 @@ YAML
   refute_output --partial "no Ready workers"
 }
 
+#  A hosted cluster a dry run cannot reach (or that has no Ready workers
+# yet) is an INCONCLUSIVE assessment, never "nothing would change" — that
+# must exit 2, not the clean 0 a real run gets for the identical miss.
+@test "hosted apply --dry-run: unreachable cluster is exit 2, not 0" {
+  _hosted_apply_harness
+  kubectl() { echo "error: You must be logged in" >&2; return 1; }
+  local bootstrap_dry_run=1 rc=0
+  run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
+  assert_failure 2
+  assert_output --partial "assessment not done"
+}
+
+@test "hosted apply --dry-run: zero Ready workers is exit 2, not 0" {
+  _hosted_apply_harness
+  kubectl() { printf 'cp1 NotReady control-plane 1d v1.33\n'; }
+  local bootstrap_dry_run=1
+  run bootstrap::apply "h.test" "${PATH_CLUSTERS}/h.test/cluster.lok8s.yaml" "${BATS_TEST_TMPDIR}/kc.yaml"
+  assert_failure 2
+}
+
 @test "hosted apply: zero Ready workers skips with the workers notice (rc 0)" {
   _hosted_apply_harness
   kubectl() { printf 'cp1 NotReady control-plane 1d v1.33\n'; }
@@ -2551,4 +2587,1726 @@ YAML
   run bootstrap::dispatch "${dom}"
   assert_success
   assert_output --partial "GATE=1"
+}
+
+# --- --dry-run / --render-dir / --no-diff / --only -----------------------------
+# The run modes reach bootstrap::apply through dynamic scoping
+# (bootstrap_dry_run, bootstrap_render_dir, bootstrap_no_diff,
+# bootstrap_select — set by main::bootstrap / main::provision). A dry run
+# renders every entry like the real run and applies NOTHING: the kubectl stub
+# logs every argv (KLOG) and answers `diff` from a script; `apply` must never
+# appear in the log. The Go twin is internal/bootstrap/dryrun_test.go and the
+# piped lines are diffed across both by hack/parity-orchestrate.sh.
+
+# The two-object `kubectl diff` fixture (GNU diff -u -N over LIVE/MERGED):
+# one object modified, two the live side lacks (asymmetric on purpose: a
+# swapped changed/new count must be visible).
+_dry_canned_diff() {
+  cat <<'DIFF'
+diff -u -N /tmp/LIVE-1/v1.ConfigMap.default.testcni /tmp/MERGED-1/v1.ConfigMap.default.testcni
+--- /tmp/LIVE-1/v1.ConfigMap.default.testcni	2026-10-12 10:00:00.000000000 +0000
++++ /tmp/MERGED-1/v1.ConfigMap.default.testcni	2026-10-12 10:00:00.000000000 +0000
+@@ -3,4 +3,5 @@
+ kind: ConfigMap
+ metadata:
+   name: testcni
++  foo: bar
+diff -u -N /tmp/LIVE-1/v1.ConfigMap.default.extra /tmp/MERGED-1/v1.ConfigMap.default.extra
+--- /tmp/LIVE-1/v1.ConfigMap.default.extra	1970-01-01 00:00:00.000000000 +0000
++++ /tmp/MERGED-1/v1.ConfigMap.default.extra	2026-10-12 10:00:00.000000000 +0000
+@@ -0,0 +1,4 @@
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: extra
+diff -u -N /tmp/LIVE-1/v1.ConfigMap.default.other /tmp/MERGED-1/v1.ConfigMap.default.other
+--- /tmp/LIVE-1/v1.ConfigMap.default.other	1970-01-01 00:00:00.000000000 +0000
++++ /tmp/MERGED-1/v1.ConfigMap.default.other	2026-10-12 10:00:00.000000000 +0000
+@@ -0,0 +1,4 @@
++apiVersion: v1
++kind: ConfigMap
++metadata:
++  name: other
+DIFF
+}
+
+# _dry_kubectl_stub <rc>... — a kubectl that logs its argv to KLOG and answers
+# the N-th `diff` with the N-th rc (1 → the canned diff on stdout, >1 → an
+# error on stderr). A dry run may ONLY ever diff — any other verb (apply,
+# replace, patch, …) is a hard test failure, not a silent no-op: a stub that
+# accepts everything can't catch a dry run that actually writes.
+_dry_kubectl_stub() {
+  export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
+  export DRY_RCS="$*" DRY_CALLS="${BATS_TEST_TMPDIR}/diff.calls"; : > "${DRY_CALLS}"
+  kubectl() {
+    echo "kubectl $*" >> "${KLOG}"
+    # Drain the manifest — only a `-f -` call has one: a stub that reads
+    # stdin unconditionally hangs on a terminal (or an open pipe).
+    [[ " $* " != *" -f - "* ]] || cat >/dev/null
+    if [[ " $* " != *" diff "* ]]; then
+      echo "parity stub: kubectl $* must not be reached by a dry run" >&2
+      return 9
+    fi
+    echo x >> "${DRY_CALLS}"
+    local n rc=0; n="$(wc -l < "${DRY_CALLS}")"
+    set -- ${DRY_RCS}
+    (( n <= $# )) && rc="${!n}"
+    case "${rc}" in
+      0) return 0 ;;
+      1) _dry_canned_diff; return 1 ;;
+      *) echo "error: the server could not be reached" >&2; return "${rc}" ;;
+    esac
+  }
+  export -f kubectl _dry_canned_diff
+}
+
+@test "bootstrap::apply --dry-run diffs every entry server-side and applies nothing" {
+  mkdir -p "${PATH_LOK8S}/addons/second"
+  write_cluster_spec "testcni" "second: {dependsOn: [testcni]}"
+  _dry_kubectl_stub 0 1
+  local bootstrap_dry_run=1 rc=0
+  local out="${BATS_TEST_TMPDIR}/dry.out" err="${BATS_TEST_TMPDIR}/dry.err"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2> "${err}" || rc=$?
+  [ "${rc}" -eq 1 ]   # something would change
+  run cat "${out}"
+  assert_line --index 0 "bootstrap dry-run: 01-testcni: unchanged"
+  assert_line --index 1 "bootstrap dry-run: 02-second: differs changed=1 new=2"
+  assert_line --index 2 "bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0 nondeterministic=0"
+  [ "${#lines[@]}" -eq 3 ]
+  # Nothing applied, nothing healed: only the two read-only diffs.
+  ! grep -qE ' (apply|replace|patch|delete) ' "${KLOG}"
+  [ "$(grep -c -- "kubectl --kubeconfig ${KUBECONFIG_FILE} diff --server-side --force-conflicts -f -" "${KLOG}")" -eq 2 ]
+}
+
+@test "bootstrap::apply --dry-run --render-dir writes NN-<entry>.yaml and .diff" {
+  mkdir -p "${PATH_LOK8S}/addons/second"
+  write_cluster_spec "testcni" "second"
+  _dry_kubectl_stub 0 1
+  local bootstrap_dry_run=1 bootstrap_render_dir="${BATS_TEST_TMPDIR}/out/nested" rc=0
+  local err="${BATS_TEST_TMPDIR}/dry.err"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > /dev/null 2> "${err}" || rc=$?
+  [ "${rc}" -eq 1 ]
+  run ls "${bootstrap_render_dir}"
+  assert_output "01-testcni.diff
+01-testcni.yaml
+02-second.diff
+02-second.yaml"
+  grep -q 'kind: ConfigMap' "${bootstrap_render_dir}/01-testcni.yaml"
+  [ "$(tail -c 1 "${bootstrap_render_dir}/01-testcni.yaml" | od -An -c | tr -d ' ')" = '\n' ]
+  [ ! -s "${bootstrap_render_dir}/01-testcni.diff" ]          # unchanged → empty
+  diff <(_dry_canned_diff) "${bootstrap_render_dir}/02-second.diff"
+  grep -q "bootstrap dry-run: files under ${bootstrap_render_dir}" "${err}"
+}
+
+@test "bootstrap::apply --dry-run exit codes: 0 unchanged, 1 differs, 2 error" {
+  write_cluster_spec "testcni"
+  local bootstrap_dry_run=1 want rc
+  for want in 0 1 2; do
+    _dry_kubectl_stub "${want}"
+    rc=0
+    bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" \
+      > "${BATS_TEST_TMPDIR}/rc${want}.out" 2> "${BATS_TEST_TMPDIR}/rc${want}.err" || rc=$?
+    [ "${rc}" -eq "${want}" ]
+  done
+  grep -q '01-testcni: unchanged$' "${BATS_TEST_TMPDIR}/rc0.out"
+  grep -q '01-testcni: differs changed=1 new=2$' "${BATS_TEST_TMPDIR}/rc1.out"
+  grep -q '01-testcni: error$' "${BATS_TEST_TMPDIR}/rc2.out"
+  grep -q 'error: the server could not be reached' "${BATS_TEST_TMPDIR}/rc2.err"
+  grep -q 'bootstrap: kubectl diff failed for testcni (rc=2)' "${BATS_TEST_TMPDIR}/rc2.err"
+}
+
+# kubectl diff's rc 1 means "differences found" by convention, but a
+# generic failure can land on the same rc — the race-class pattern (the
+# same regex bootstrap::_apply_one's CRD/webhook retry uses), at ANY exit
+# code, classifies as inconclusive (needs-crd) — an earlier entry's CRD
+# hasn't landed in THIS read-only probe yet — never a false "differs",
+# and review round 2, item F: inconclusive is NOT counted as differs, and
+# forces the run's exit to 2 (an assessment that could not be completed),
+# not 1.
+@test "bootstrap::apply --dry-run: a CRD-not-installed rc 1 is inconclusive, not differs" {
+  write_cluster_spec "testcni"
+  local bootstrap_dry_run=1 rc=0
+  export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
+  kubectl() {
+    echo "kubectl $*" >> "${KLOG}"
+    [[ " $* " != *" -f - "* ]] || cat >/dev/null
+    echo 'error: ensure CRDs are installed first' >&2
+    return 1
+  }
+  export -f kubectl
+  local out="${BATS_TEST_TMPDIR}/dry.out"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2>/dev/null || rc=$?
+  [ "${rc}" -eq 2 ]
+  grep -q '^bootstrap dry-run: 01-testcni: inconclusive (needs-crd)$' "${out}"
+  grep -q '^bootstrap dry-run: entries=1 unchanged=0 differs=0 rendered=0 skipped=0 inconclusive=1 errors=0 nondeterministic=0$' "${out}"
+}
+
+# The SAME race pattern at a HIGHER exit code (kubectl's own ">1 = genuine
+# failure" convention) still classifies as inconclusive, not error — the
+# round-2 review subagent's mutation found this exact case untested.
+@test "bootstrap::apply --dry-run: the race pattern at rc>1 is inconclusive too" {
+  write_cluster_spec "testcni"
+  local bootstrap_dry_run=1 rc=0
+  kubectl() {
+    [[ " $* " != *" -f - "* ]] || cat >/dev/null
+    echo 'error: failed calling webhook "x.example.com"' >&2
+    return 2
+  }
+  export -f kubectl
+  local out="${BATS_TEST_TMPDIR}/dry2.out"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2>/dev/null || rc=$?
+  [ "${rc}" -eq 2 ]
+  grep -q '^bootstrap dry-run: 01-testcni: inconclusive (needs-crd)$' "${out}"
+}
+
+# KUBECTL_EXTERNAL_DIFF (e.g. `diff -q`) exits 1 on a real difference with
+# NO "--- " header at all — the old heuristic misclassified this as an
+# error; it must still be "differs".
+@test "bootstrap::apply --dry-run: an external diff tool with no header still differs" {
+  write_cluster_spec "testcni"
+  local bootstrap_dry_run=1 rc=0
+  kubectl() {
+    [[ " $* " != *" -f - "* ]] || cat >/dev/null
+    echo 'Files LIVE and MERGED differ'
+    return 1
+  }
+  export -f kubectl
+  local out="${BATS_TEST_TMPDIR}/dry3.out"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2>/dev/null || rc=$?
+  [ "${rc}" -eq 1 ]
+  grep -q '^bootstrap dry-run: 01-testcni: differs$' "${out}"
+}
+
+@test "bootstrap::apply --dry-run --no-diff renders only and never calls kubectl" {
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub
+  local bootstrap_dry_run=1 bootstrap_no_diff=1 bootstrap_render_dir="${BATS_TEST_TMPDIR}/out"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line --index 0 "bootstrap dry-run: ${bootstrap_render_dir} holds the rendered manifests in plaintext, Secrets included"
+  assert_line --index 1 "bootstrap dry-run: 01-testcni: rendered"
+  assert_line --index 2 "bootstrap dry-run: entries=1 unchanged=0 differs=0 rendered=1 skipped=0 inconclusive=0 errors=0 nondeterministic=0"
+  [ ! -s "${KLOG}" ]
+  [ -f "${bootstrap_render_dir}/01-testcni.yaml" ]
+  [ ! -e "${bootstrap_render_dir}/01-testcni.diff" ]
+}
+
+@test "bootstrap::apply --dry-run ignores LOK8S_FORCE_RECREATE (diff only, no heal)" {
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub 1
+  export LOK8S_FORCE_RECREATE=1
+  local bootstrap_dry_run=1 rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > /dev/null 2>&1 || rc=$?
+  [ "${rc}" -eq 1 ]
+  ! grep -qE ' (apply|replace|patch|delete) ' "${KLOG}"
+  grep -q ' diff ' "${KLOG}"
+}
+
+@test "bootstrap::apply --dry-run reports the real run's skips (KubeOne full provision defers cilium)" {
+  mkdir -p "${PATH_LOK8S}/addons/cilium"
+  cat > "${CLUSTER_YAML}" <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata:
+  name: e2e-test
+spec:
+  provider:
+    name: hetzner
+  bootstrap:
+    - cilium
+YAML
+  export LOK8S_BOOTSTRAP_ONLY=0
+  _dry_kubectl_stub
+  local bootstrap_dry_run=1 rc=0
+  local out="${BATS_TEST_TMPDIR}/dry.out" err="${BATS_TEST_TMPDIR}/dry.err"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2> "${err}" || rc=$?
+  [ "${rc}" -eq 0 ]
+  grep -q '^bootstrap dry-run: 01-cilium: skipped$' "${out}"
+  grep -q 'skipped=1' "${out}"
+  grep -q 'cilium is applied by the KubeOne driver on a full provision' "${err}"
+  [ ! -s "${KLOG}" ]
+}
+
+# A dry run NEVER applies restore.d — but it DOES decrypt it in memory
+# (read-only, same as any other sops decrypt in this codebase) so it can
+# report what a real run would restore, as its own entry ahead of the
+# addons (lok8s #268 review).
+@test "bootstrap::apply --dry-run diffs restore.d as its own entry (never applies it)" {
+  write_cluster_spec "testcni"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/tls.sops.yaml"
+  local decrypted="${BATS_TEST_TMPDIR}/decrypted"
+  sops() {
+    : > "${decrypted}"
+    printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\n'
+  }
+  export -f sops
+  _dry_kubectl_stub 1 0   # restore.d differs, testcni unchanged
+  local bootstrap_dry_run=1 rc=0
+  local out="${BATS_TEST_TMPDIR}/dry.out"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2>/dev/null || rc=$?
+  [ "${rc}" -eq 1 ]
+  [ -f "${decrypted}" ]
+  grep -q '^bootstrap dry-run: restore.d: differs' "${out}"
+  grep -q '^bootstrap dry-run: 01-testcni: unchanged$' "${out}"
+  grep -q '^bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0 nondeterministic=0$' "${out}"
+  ! grep -qE ' (apply|replace|patch) ' "${KLOG}"
+}
+
+# --only takes restore.d out of scope entirely — never applied, never
+# diffed — and says so.
+@test "bootstrap::apply --dry-run --only skips restore.d (not applied, not diffed)" {
+  write_cluster_spec "testcni"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/tls.sops.yaml"
+  sops() { echo "sops must not run with --only" >&2; return 1; }
+  export -f sops
+  _dry_kubectl_stub 0
+  local bootstrap_dry_run=1 bootstrap_select="testcni" rc=0
+  local out="${BATS_TEST_TMPDIR}/dry.out" err="${BATS_TEST_TMPDIR}/dry.err"
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2> "${err}" || rc=$?
+  [ "${rc}" -eq 0 ]
+  ! grep -q 'restore.d' "${out}"
+  grep -q '^\[bootstrap\] --only: restore.d skipped (not applied) — 1 file(s) under clusters/test.lok8s.dev/restore.d$' "${err}"
+  ! grep -q 'sops must not run' "${err}"
+}
+
+# An unknown --only name is validated BEFORE any writer runs — restore.d
+# included. A typo must never apply (or decrypt) restore.d and only THEN
+# fail.
+@test "bootstrap::apply --only typo never touches restore.d" {
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  write_cluster_spec "a" "b" "c"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/tls.sops.yaml"
+  sops() { echo "sops must not run before --only is validated" >&2; return 1; }
+  export -f sops
+  bootstrap::_apply_one() { echo "$1" >> "${BATS_TEST_TMPDIR}/applied"; return 0; }
+  kubectl() { echo "kubectl $*" >> "${KLOG:-${BATS_TEST_TMPDIR}/kubectl.log}"; return 0; }
+  export -f kubectl
+  local bootstrap_select="a,nope"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_failure
+  assert_output --partial "bootstrap: --only: unknown entry 'nope'"
+  [ ! -f "${BATS_TEST_TMPDIR}/applied" ]
+  ! grep -q 'sops must not run' <<<"${output}"
+}
+
+@test "bootstrap::apply --only applies the named entries; dependsOn is not expanded" {
+  local log="${BATS_TEST_TMPDIR}/only.log"; : > "${log}"
+  bootstrap::_apply_one() { printf '%s wait=%s\n' "$1" "$7" >> "${log}"; return 0; }
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  write_cluster_spec "a" "b: {dependsOn: [a]}" "c"
+  local bootstrap_select="b"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  run cat "${log}"
+  assert_output "b wait="
+}
+
+@test "bootstrap::apply --only keeps the edges among the selected entries" {
+  local log="${BATS_TEST_TMPDIR}/only.log"; : > "${log}"
+  bootstrap::_apply_one() { printf '%s wait=%s\n' "$1" "$7" >> "${log}"; return 0; }
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  write_cluster_spec "a" "b: {dependsOn: [a]}" "c"
+  local bootstrap_select="b, a"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  run cat "${log}"
+  assert_output "a wait=wait
+b wait="
+}
+
+@test "bootstrap::apply --only matches the addon name of a renamed entry" {
+  local log="${BATS_TEST_TMPDIR}/only.log"; : > "${log}"
+  bootstrap::_apply_one() { echo "$1" >> "${log}"; return 0; }
+  local n; for n in cilium c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  write_cluster_spec "cilium: {name: my-cni}" "c"
+  local bootstrap_select="cilium"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  run cat "${log}"
+  assert_output "my-cni"
+}
+
+@test "bootstrap::apply --only with an unknown name lists the valid names and applies nothing" {
+  local log="${BATS_TEST_TMPDIR}/only.log"; : > "${log}"
+  bootstrap::_apply_one() { echo "$1" >> "${log}"; return 0; }
+  local n; for n in a b c; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  write_cluster_spec "a" "b: {name: bee}" "c"
+  local bootstrap_select="a,nope"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_failure
+  assert_output --partial "bootstrap: --only: unknown entry 'nope' (valid: a, bee, c)"
+  [ ! -s "${log}" ]
+}
+
+@test "bootstrap::apply --only --dry-run numbers the selection from 01" {
+  mkdir -p "${PATH_LOK8S}/addons/second"
+  write_cluster_spec "testcni" "second"
+  _dry_kubectl_stub 0
+  local bootstrap_dry_run=1 bootstrap_select="second"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  assert_line --index 0 "bootstrap dry-run: 01-second: unchanged"
+  assert_line --index 1 "bootstrap dry-run: entries=1 unchanged=1 differs=0 rendered=0 skipped=0 inconclusive=0 errors=0 nondeterministic=0"
+}
+
+# ── Review round 2 items G/H/I/B/C ──────────────────────────────────────
+
+@test "bootstrap::apply --render-dir refuses a foreign non-empty dir without the marker" {
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub 0
+  local dir="${BATS_TEST_TMPDIR}/foreign"
+  mkdir -p "${dir}"
+  echo "not mine" > "${dir}/README.md"
+  local bootstrap_dry_run=1 bootstrap_render_dir="${dir}" rc=0
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_failure
+  assert_output --partial ".lo-dry-run"
+  [ ! -e "${dir}/01-testcni.yaml" ]
+}
+
+@test "bootstrap::apply --render-dir reuses a marked dir and clears only owned files" {
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub 0
+  local dir="${BATS_TEST_TMPDIR}/out"
+  local bootstrap_dry_run=1 bootstrap_render_dir="${dir}"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  [ -f "${dir}/.lo-dry-run" ]
+  echo stale > "${dir}/01-stale.yaml"
+  echo stale > "${dir}/01-stale.diff"
+  _dry_kubectl_stub 0
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  [ ! -e "${dir}/01-stale.yaml" ]
+  [ ! -e "${dir}/01-stale.diff" ]
+  [ -f "${dir}/01-testcni.yaml" ]
+}
+
+# Review round 2, item H: --only applies WITHOUT restoring restore.d on a
+# REAL (non-dry) run too, with a LOUD warning naming the file(s) — not
+# just the dry-run's plain one-liner, since this is a DR/renewal-posture
+# decision on a live cluster.
+@test "bootstrap::apply --only (real run) skips restore.d and warns loudly" {
+  write_cluster_spec "testcni"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/tls-a.sops.yaml"
+  sops() { echo "sops must not run with --only" >&2; return 1; }
+  export -f sops
+  kubectl() { echo "kubectl $*" >> "${KLOG:-${BATS_TEST_TMPDIR}/kubectl.log}"; return 0; }
+  export -f kubectl
+  local bootstrap_select="testcni"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  assert_output --partial "WITHOUT restoring restore.d"
+  assert_output --partial "tls-a.sops.yaml"
+  assert_output --partial "--with-restore"
+  ! grep -q 'sops must not run' <<<"${output}"
+}
+
+@test "bootstrap::apply --only --with-restore applies restore.d before the selected entry" {
+  write_cluster_spec "testcni"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/tls-a.sops.yaml"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/secrets/restore.d"
+  echo 'kind: Secret' > "${PATH_CLUSTERS}/test.lok8s.dev/secrets/restore.d/tls-a.yaml"
+  export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
+  kubectl() { echo "kubectl $*" >> "${KLOG}"; [[ " $* " != *" -f - "* ]] || cat >/dev/null; return 0; }
+  export -f kubectl
+  local bootstrap_select="testcni" bootstrap_with_restore=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  refute_output --partial "WITHOUT restoring restore.d"
+  grep -q "restore.d/tls-a.yaml" "${KLOG}"
+}
+
+# --- Review round 3: the in-place dry run -------------------------------------
+# A dry run renders in place, exactly as a real run does. lo's own writes are
+# suppressed at their source (the secrets plugin reports what it generated in
+# memory to the boundary's report file), and executable addon code is refused
+# at the boundary (the plugin home, no --enable-exec, the refusing docker and
+# git). The Go twin is internal/bootstrap/dryrun_round3_test.go and
+# internal/addons/dryrun_*_test.go.
+
+# The secrets plugin reports a value it generated in memory: the entry is
+# marked non-repeatable, and the next entry starts from an empty report.
+@test "bootstrap::apply --dry-run marks an entry non-repeatable from the plugin's report" {
+  mkdir -p "${PATH_LOK8S}/addons/second"
+  write_cluster_spec "testcni" "second"
+  _dry_kubectl_stub 0 0
+  export REPORTED="${BATS_TEST_TMPDIR}/reported"
+  kustomize() {
+    if [[ ! -e "${REPORTED}" ]]; then
+      : > "${REPORTED}"
+      echo "secret Secret.app.ns.PASSWORD" >> "${LOK8S_BOOTSTRAP_DRYRUN_REPORT}"
+    fi
+    echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: testcni"
+  }
+  export -f kustomize
+  local bootstrap_dry_run=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line --index 0 "bootstrap dry-run: 01-testcni: unchanged (non-repeatable)"
+  assert_line --index 1 "bootstrap dry-run: 02-second: unchanged"
+}
+
+# An entry's env: may not set lo's own variables — checked BEFORE anything
+# of the entry is exported, an entry error on a dry run and a real run. The
+# round-2 escapes: LOK8S_BOOTSTRAP_DRYRUN=0, BOOTSTRAP_PROTECTED_ENV_NAMES="",
+# bootstrap_render_dir=… (the old check ran after the export).
+@test "an entry's env: may not set lo's own variables (dry run and real run)" {
+  local name
+  for name in LOK8S_BOOTSTRAP_DRYRUN LOK8S_BOOTSTRAP_ALLOW_GENERATORS LOK8S_BOOTSTRAP_DRYRUN_REPORT \
+              BOOTSTRAP_PROTECTED_ENV_NAMES bootstrap_render_dir bootstrap_dry_run \
+              PATH_SECRETS KUBECONFIG KUSTOMIZE_PLUGIN_HOME HELM_PLUGINS; do
+    write_cluster_spec "testcni:
+      env:
+        LOK8S_USER_OK: fine
+        ${name}: \"0\""
+    export KCALLED="${BATS_TEST_TMPDIR}/kustomize.${name}"
+    kustomize() { : > "${KCALLED}"; echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: x"; }
+    export -f kustomize
+
+    _dry_kubectl_stub 0
+    local bootstrap_dry_run=1
+    run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+    [ "${status}" -eq 2 ] || { echo "dry ${name}: rc=${status}"; return 1; }
+    assert_output --partial "bootstrap: testcni: env: may not set ${name} (reserved for lo)"
+    assert_output --partial "01-testcni: error"
+    [ ! -e "${KCALLED}" ] || { echo "dry ${name}: the render ran"; return 1; }
+    ! grep -q ' apply ' "${KLOG}"
+
+    bootstrap_dry_run=0
+    kubectl() { echo "kubectl $*" >> "${KLOG}"; [[ " $* " != *" -f - "* ]] || cat >/dev/null; return 0; }
+    export -f kubectl
+    run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+    [ "${status}" -eq 1 ] || { echo "real ${name}: rc=${status}"; return 1; }
+    assert_output --partial "bootstrap: testcni: env: may not set ${name} (reserved for lo)"
+    [ ! -e "${KCALLED}" ] || { echo "real ${name}: the render ran"; return 1; }
+  done
+}
+
+# The dry run's render reaches kustomize with the boundary: the plugin home
+# that links only the built-ins, no --enable-exec, the refusing docker and
+# git first on PATH, the sentinel and the report file. --allow-generators
+# keeps the real run's plugin home, flags and PATH.
+@test "addons::render --dry-run renders with the boundary; --allow-generators with the real run's" {
+  export KARGS="${BATS_TEST_TMPDIR}/kargs" KENV="${BATS_TEST_TMPDIR}/kenv"
+  kustomize() {
+    echo "$*" > "${KARGS}"
+    printf 'home=%s\npath=%s\ndry=%s\nreport=%s\nallow=%s\nhelm=%s\ntmp=%s\nstore=%s\n' "${KUSTOMIZE_PLUGIN_HOME:-}" "${PATH%%:*}" \
+      "${LOK8S_BOOTSTRAP_DRYRUN:-}" "${LOK8S_BOOTSTRAP_DRYRUN_REPORT:-}" "${LOK8S_BOOTSTRAP_ALLOW_GENERATORS:-}" \
+      "${HELM_PLUGINS:-}" "${TMPDIR:-}" "${LOK8S_BOOTSTRAP_DRYRUN_STORE:-}" > "${KENV}"
+    echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: x"
+  }
+  export -f kustomize
+  local bootstrap_dry_boundary="${BATS_TEST_TMPDIR}/boundary"
+  mkdir -p "${bootstrap_dry_boundary}"
+  run addons::dry_run_boundary "${bootstrap_dry_boundary}"
+  assert_success
+  local bootstrap_dry_run=1
+  run addons::render "${ADDON_DIR}" "lo" "hetzner" ""
+  assert_success
+  run cat "${KARGS}"
+  refute_output --partial "--enable-exec"
+  assert_output --partial "--enable-alpha-plugins"
+  run cat "${KENV}"
+  assert_line "home=${bootstrap_dry_boundary}/plugins"
+  assert_line "path=${bootstrap_dry_boundary}/bin"
+  assert_line "dry=1"
+  assert_line "report=${bootstrap_dry_boundary}/report"
+  assert_line "allow="
+  assert_line "helm=${bootstrap_dry_boundary}/helm-plugins"
+  assert_line "tmp=${bootstrap_dry_boundary}/tmp"
+  assert_line "store=${bootstrap_dry_boundary}/store"
+  local d
+  for d in plugins bin helm-plugins store tmp; do
+    [ "$(stat -c %a "${bootstrap_dry_boundary}/${d}")" = "700" ] || { echo "${d} is not 0700"; return 1; }
+  done
+  [ -z "$(ls -A "${bootstrap_dry_boundary}/helm-plugins")" ]
+  run "${bootstrap_dry_boundary}/bin/docker" run x
+  assert_failure
+  assert_output "lok8s dry-run: a KRM container function is not run in a dry run (pass --allow-generators to run it)"
+  run "${bootstrap_dry_boundary}/bin/git" clone x
+  assert_failure
+  assert_output "lok8s dry-run: a remote base is not fetched in a dry run (pass --allow-generators to fetch it)"
+
+  local bootstrap_allow_generators=1
+  run addons::render "${ADDON_DIR}" "lo" "hetzner" ""
+  assert_success
+  run cat "${KARGS}"
+  assert_output --partial "--enable-exec"
+  run cat "${KENV}"
+  assert_line "home=${KUSTOMIZE_PLUGIN_HOME}"
+  assert_line "allow=1"
+  assert_line "helm=${HELM_PLUGINS:-}"
+  # The run store and TMPDIR stay the boundary's with --allow-generators too.
+  assert_line "tmp=${bootstrap_dry_boundary}/tmp"
+  assert_line "store=${bootstrap_dry_boundary}/store"
+}
+
+# Review round 4, item A1: kustomize's helmCharts pulls a chart that
+# chartHome lacks into the project with `helm pull`. The dry run's helm
+# refuses the pull; anything else (helm version, helm template of a vendored
+# chart) runs the next helm on PATH with the same argv.
+@test "the dry run's helm refuses a pull and runs the real helm otherwise" {
+  local b="${BATS_TEST_TMPDIR}/boundary" real="${BATS_TEST_TMPDIR}/realbin"
+  mkdir -p "${b}" "${real}"
+  addons::dry_run_boundary "${b}"
+  printf '#!/bin/sh\necho "real-helm $*"\n' > "${real}/helm"; chmod +x "${real}/helm"
+  PATH="${b}/bin:${real}:${PATH}" run "${b}/bin/helm" pull oci://charts.example/app --untar --untardir charts
+  assert_failure
+  assert_output "lok8s dry-run: helmCharts needs --allow-generators in a dry run (helm pull writes the chart into the project)"
+  PATH="${b}/bin:${real}:${PATH}" run "${b}/bin/helm" version --short
+  assert_success
+  assert_output "real-helm version --short"
+  PATH="${b}/bin:${real}:${PATH}" run "${b}/bin/helm" template app charts/app-1.0.0/app --values v.yaml
+  assert_success
+  assert_output "real-helm template app charts/app-1.0.0/app --values v.yaml"
+}
+
+# A Secret plugin that predates the dry run (no `--capabilities`) would write
+# the secrets store: the dry run refuses it before anything renders (rc 2).
+@test "bootstrap::apply --dry-run refuses a Secret plugin without the dry-run capability" {
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub 0
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret"
+  mkdir -p "$(dirname "${plugin}")"
+  printf '#!/bin/sh\nexit 1\n' > "${plugin}"; chmod +x "${plugin}"
+  local bootstrap_dry_run=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 2 ]
+  assert_output --partial "does not support a dry run (it would write the secrets store)"
+  refute_output --partial "01-testcni"
+  printf '#!/bin/sh\necho dry-run\n' > "${plugin}"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_output --partial "01-testcni: unchanged"
+}
+
+# _fake_helm: a helm v3 stand-in first on PATH (the boundary's helm stub
+# execs it). Its answers come from files under ${FAKE_HELM}: version,
+# deplist (the rows of `helm dependency list`), deplist.rc, lint (a line
+# `helm lint` prints). It never reads stdin.
+_fake_helm() {
+  export FAKE_HELM="${BATS_TEST_TMPDIR}/fakehelm"
+  mkdir -p "${FAKE_HELM}/bin"
+  printf 'v3.21.2+g0000000\n' > "${FAKE_HELM}/version"
+  printf 'common\t0.1.0  \thttps://charts.example\tok      \n' > "${FAKE_HELM}/deplist"
+  : > "${FAKE_HELM}/lint"
+  cat > "${FAKE_HELM}/bin/helm" <<'SH'
+#!/usr/bin/env bash
+# The fake answers like helm v3: `dependency list` logs to stderr (the
+# loader's lines about a symlinked subchart and a v2 requirements.yaml) and
+# prints its table, then the warnings about extra charts, on stdout.
+# ${FAKE_HELM}/table, when it exists, replaces the table.
+case "${1:-}" in
+  version) cat "${FAKE_HELM}/version" ;;
+  dependency)
+    echo "walk.go:75: found symbolic link in path: ${3:-}/charts/common resolves to /src/common. Contents of linked file included and used" >&2
+    echo 'load.go:120: Warning: Dependencies are handled in Chart.yaml since apiVersion "v2". We recommend migrating dependencies to Chart.yaml.' >&2
+    if [[ -s "${FAKE_HELM}/deplist.rc" ]]; then echo "Error: the chart does not load" >&2; exit 1; fi
+    if [[ -e "${FAKE_HELM}/table" ]]; then cat "${FAKE_HELM}/table"; exit 0; fi
+    printf 'NAME  \tVERSION\tREPOSITORY            \tSTATUS\n'; cat "${FAKE_HELM}/deplist"; echo
+    echo "WARNING: \"${3:-}/charts/extra\" is not in Chart.yaml." ;;
+  lint)
+    echo "==> Linting ${2:-}"
+    [[ ! -s "${FAKE_HELM}/lint" ]] || cat "${FAKE_HELM}/lint"
+    echo "1 chart(s) linted, 0 chart(s) failed" ;;
+  *) echo "fake helm: unexpected $*" >&2; exit 9 ;;
+esac
+SH
+  chmod +x "${FAKE_HELM}/bin/helm"
+  export PATH="${FAKE_HELM}/bin:${PATH}"
+}
+
+# Review rounds 4 and 5: khelm builds a LOCAL chart's dependencies into the
+# chart directory (Chart.lock, charts/, tmpcharts/) when Helm's dependency
+# check fails on the chart as Helm's loader loads it, or one is a file://
+# chart. The boundary's ChartRenderer is a gate in place of the project's:
+# it asks helm (`helm dependency list`: every row ok or unpacked; `helm
+# lint`: no dependency the loaded chart lacks), refuses that render and
+# reports the chart; a vendored chart, or a remote one, runs the project's
+# ChartRenderer with the same argv. What it cannot check is refused.
+@test "the dry run's ChartRenderer gate asks helm and refuses what it cannot clear" {
+  _fake_helm
+  local chart_plugin="khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer"
+  mkdir -p "$(dirname "${KUSTOMIZE_PLUGIN_HOME}/${chart_plugin}")"
+  printf '#!/bin/sh\necho "real-chartrenderer $*"\n' > "${KUSTOMIZE_PLUGIN_HOME}/${chart_plugin}"
+  chmod +x "${KUSTOMIZE_PLUGIN_HOME}/${chart_plugin}"
+  local b="${BATS_TEST_TMPDIR}/boundary"
+  mkdir -p "${b}"
+  addons::dry_run_boundary "${b}"
+  local gate="${b}/plugins/${chart_plugin}"
+  [ -x "${gate}" ]
+  [ ! -L "${gate}" ]
+  local root="${BATS_TEST_TMPDIR}/root"
+  mkdir -p "${root}/charts/app/charts"
+  printf 'apiVersion: v2\nname: app\nversion: 0.1.0\ndependencies:\n  - name: common\n    version: 0.1.0\n    repository: https://charts.example\n' > "${root}/charts/app/Chart.yaml"
+  _gate() { ( cd "${root}" && PATH="${b}/bin:${PATH}" KUSTOMIZE_PLUGIN_CONFIG_STRING="${1}" LOK8S_BOOTSTRAP_DRYRUN_REPORT="${b}/report" "${gate}" cfg </dev/null ); }
+  # Each refusal names its cause and the next action; only a dependency
+  # that helm does not report as vendored gets the vendor advice (review
+  # round 7, items 1 and 2).
+  local p="lok8s dry-run: chart charts/app:"
+  local advice="khelm may build the dependencies into the chart directory. Vendor them into charts/, or pass --allow-generators."
+  local needs="helm v3 (3.3 or a later 3.x) is required for the dependency check."
+  local use_go="Install helm v3, or use the Go implementation (lok8s.yaml: spec.implementation)."
+
+  # helm says ok (an archive), or unpacked (a directory): the chart renders.
+  # Its log lines on stderr and the warning about an extra chart on stdout
+  # are not rows of the table (review round 6, item 2).
+  : > "${b}/report"
+  run _gate "chart: charts/app"
+  assert_success
+  assert_output "real-chartrenderer cfg"
+  [ ! -s "${b}/report" ]
+  printf 'common\t0.1.0\thttps://charts.example\tunpacked\n' > "${FAKE_HELM}/deplist"
+  run _gate "chart: ${root}/charts/app"
+  assert_success
+
+  # Every other status of `helm dependency list` is refused and reported.
+  local st
+  for st in missing misnamed "wrong version" "invalid version" "too many matches" corrupt; do
+    printf 'common\t0.1.0\thttps://charts.example\t%s   \n' "${st}" > "${FAKE_HELM}/deplist"
+    : > "${b}/report"
+    run _gate "chart: charts/app"
+    assert_failure
+    assert_output "${p} dependency common: ${st} (helm dependency list). ${advice}"
+    [ "$(cat "${b}/report")" = "chart-deps charts/app" ] || { echo "status ${st}: report $(cat "${b}/report")"; return 1; }
+  done
+
+  # ok to `helm dependency list`, but the loaded chart lacks it (an archive
+  # that .helmignore hides): `helm lint` names it — refused.
+  printf 'common\t0.1.0\thttps://charts.example\tok\n' > "${FAKE_HELM}/deplist"
+  printf '[WARNING] %s: chart directory is missing these dependencies: common,extra\n' "${root}/charts/app" > "${FAKE_HELM}/lint"
+  run _gate "chart: charts/app"
+  assert_failure
+  assert_output "${p} dependency common,extra: not in the chart that helm loads (helm lint). ${advice}"
+  : > "${FAKE_HELM}/lint"
+
+  # What the gate cannot check is refused, each with its own message and
+  # next action, never the vendor advice: a chart helm cannot load (the
+  # last line of helm's stderr says why), no table, no temp file, a helm
+  # that is not v3.3+, no helm at all. helm's own "no dependencies" answer
+  # has no table and renders: the loaded chart has nothing to build.
+  echo 1 > "${FAKE_HELM}/deplist.rc"
+  : > "${b}/report"
+  run _gate "chart: charts/app"
+  assert_failure
+  assert_output "${p} helm cannot load the chart: the chart does not load. Fix the chart so that helm can load it."
+  [ "$(cat "${b}/report")" = "chart-deps charts/app" ]
+  : > "${FAKE_HELM}/deplist.rc"
+  : > "${FAKE_HELM}/table"
+  : > "${b}/report"
+  run _gate "chart: charts/app"
+  assert_failure
+  assert_output "${p} helm dependency list printed no dependency table (helm v3.21.2+g0000000). Use helm v3.21.2, or use the Go implementation (lok8s.yaml: spec.implementation)."
+  [ "$(cat "${b}/report")" = "chart-deps charts/app" ]
+  rm "${FAKE_HELM}/table"
+  : > "${b}/report"
+  run env TMPDIR="${BATS_TEST_TMPDIR}/no-such-dir" bash -c 'cd "$1" && PATH="$2/bin:${PATH}" KUSTOMIZE_PLUGIN_CONFIG_STRING="chart: charts/app" LOK8S_BOOTSTRAP_DRYRUN_REPORT="$2/report" "$3" cfg </dev/null' _ "${root}" "${b}" "${gate}"
+  assert_failure
+  assert_output "${p} cannot make a temporary file for the dependency check in ${BATS_TEST_TMPDIR}/no-such-dir. Make sure that this directory exists and is writable."
+  [ "$(cat "${b}/report")" = "chart-deps charts/app" ]
+  : > "${FAKE_HELM}/table"
+  printf 'WARNING: no dependencies at %s/charts/app/charts\n' "${root}" > "${FAKE_HELM}/table"
+  run _gate "chart: charts/app"
+  assert_success
+  assert_output "real-chartrenderer cfg"
+  rm "${FAKE_HELM}/table"
+  printf 'v4.0.0+g0000000\n' > "${FAKE_HELM}/version"
+  run _gate "chart: charts/app"
+  assert_failure
+  assert_output "${p} ${needs} Found: v4.0.0+g0000000. ${use_go}"
+  # helm lint checks the dependencies since helm v3.3.0 (an older one would
+  # pass an archive that .helmignore hides).
+  printf 'v3.2.4+g0000000\n' > "${FAKE_HELM}/version"
+  run _gate "chart: charts/app"
+  assert_failure
+  assert_output "${p} ${needs} Found: v3.2.4+g0000000. ${use_go}"
+  printf 'v3.21.2+g0000000\n' > "${FAKE_HELM}/version"
+  # No helm at all: a PATH with yq and the system tools only.
+  mkdir -p "${FAKE_HELM}/nohelm"
+  ln -s "$(command -v yq)" "${FAKE_HELM}/nohelm/yq"
+  run env PATH="${b}/bin:${FAKE_HELM}/nohelm:/usr/bin:/bin" bash -c '[[ -z "$(command -v helm)" || "$(command -v helm)" == "'"${b}"'/bin/helm" ]]'
+  assert_success
+  run env -C "${root}" PATH="${b}/bin:${FAKE_HELM}/nohelm:/usr/bin:/bin" KUSTOMIZE_PLUGIN_CONFIG_STRING="chart: charts/app" \
+    LOK8S_BOOTSTRAP_DRYRUN_REPORT="${b}/report" "${gate}" cfg </dev/null
+  assert_failure
+  assert_output "${p} ${needs} Found: no helm on PATH. ${use_go}"
+
+  # A file:// dependency is always built: refused, vendored or not, without
+  # asking helm (requirements.yaml counts too).
+  printf 'dependencies:\n  - name: common\n    version: 0.1.0\n    repository: file://../common\n' > "${root}/charts/app/requirements.yaml"
+  printf 'v0.0.0-not-asked\n' > "${FAKE_HELM}/version"
+  run _gate "chart: charts/app"
+  assert_failure
+  assert_output "${p} dependency common is a file:// chart. khelm builds it into the chart directory on each render. Pass --allow-generators to render it."
+  printf 'v3.21.2+g0000000\n' > "${FAKE_HELM}/version"
+
+  # A chart without dependencies, and a remote chart (a repository: khelm
+  # pulls it into its cache), run. The config file argument stands in when
+  # the environment has none.
+  run _gate $'repository: https://charts.example\nchart: app'
+  assert_success
+  printf 'chart: charts/app\n' > "${root}/cfg"
+  run _gate ""
+  assert_failure
+  rm "${root}/charts/app/requirements.yaml"
+  printf 'apiVersion: v2\nname: app\nversion: 0.1.0\n' > "${root}/charts/app/Chart.yaml"
+  run _gate "chart: charts/app"
+  assert_success
+  [ ! -e "${root}/charts/app/Chart.lock" ]
+}
+
+# The same gate against the real helm v3 on real charts (Helm's loader:
+# .helmignore honoured, a subchart named by its metadata). Skips without
+# helm v3.3+ locally. CI runs it natively with a pinned helm v3 (ci.yml, Bats
+# Unit Tests: "Real-helm bats tests"), where CI=true makes a missing helm v3
+# a failure: the argsh container that runs the rest of the suite has no
+# helm. The fixtures and their verdicts are the ONE table both suites read
+# (internal/render/testdata/chartgate-fixtures.txt; the Go twin is
+# TestChartRefusal), so the two cannot drift: a row this test cannot build
+# fails it. The cause column pins each refusal's own message (review round
+# 7, items 2 and 4).
+# bats test_tags=real-helm
+@test "the dry run's ChartRenderer gate decides with the real helm on real charts" {
+  local version minor
+  version="$(helm version --short 2>/dev/null)" || version=""
+  minor="${version#v3.}"
+  minor="${minor%%.*}"
+  # The gate's own requirement: helm v3.3 or a later 3.x.
+  if [[ "${version}" != v3.* || ! "${minor}" =~ ^[0-9]+$ ]] || (( 10#${minor} < 3 )); then
+    [[ -z "${CI:-}" ]] || { echo "CI has no helm v3.3+ (found: ${version:-none})"; return 1; }
+    skip "helm v3.3+ not installed (found: ${version:-none})"
+  fi
+  export HELM_CACHE_HOME="${BATS_TEST_TMPDIR}/helm/cache" HELM_CONFIG_HOME="${BATS_TEST_TMPDIR}/helm/config" HELM_DATA_HOME="${BATS_TEST_TMPDIR}/helm/data"
+  local chart_plugin="khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer"
+  mkdir -p "$(dirname "${KUSTOMIZE_PLUGIN_HOME}/${chart_plugin}")"
+  printf '#!/bin/sh\necho real-chartrenderer\n' > "${KUSTOMIZE_PLUGIN_HOME}/${chart_plugin}"
+  chmod +x "${KUSTOMIZE_PLUGIN_HOME}/${chart_plugin}"
+  local b="${BATS_TEST_TMPDIR}/boundary"
+  mkdir -p "${b}"
+  addons::dry_run_boundary "${b}"
+  local gate="${b}/plugins/${chart_plugin}" root="${BATS_TEST_TMPDIR}/root" src="${BATS_TEST_TMPDIR}/src"
+  local table="${_PROJECT_ROOT}/internal/render/testdata/chartgate-fixtures.txt"
+  [ -f "${table}" ]
+  _chart() {  # <dir> <name> [version]: a chart (no version line when empty)
+    mkdir -p "${1}/templates"
+    printf 'apiVersion: v2\nname: %s\n' "${2}" > "${1}/Chart.yaml"
+    [[ -z "${3:-}" ]] || printf 'version: %s\n' "${3}" >> "${1}/Chart.yaml"
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: %s\n' "${2}" > "${1}/templates/cm.yaml"
+  }
+  _dep() {  # <file> [version]: append a redis dependency (no version line when empty)
+    printf 'dependencies:\n  - name: redis\n' >> "${1}"
+    [[ -z "${2:-}" ]] || printf '    version: "%s"\n' "${2}" >> "${1}"
+    printf '    repository: https://charts.example.test\n' >> "${1}"
+  }
+  _parent() {  # <name> [dependency version|-none]: a chart that needs redis
+    _chart "${root}/${1}" "${1}" 0.1.0
+    mkdir -p "${root}/${1}/charts"
+    case "${2:-}" in
+      "") ;;
+      -none) _dep "${root}/${1}/Chart.yaml" ;;
+      *) _dep "${root}/${1}/Chart.yaml" "${2}" ;;
+    esac
+  }
+  _tgz() { tar -C "$(dirname "${1}")" -czf "${root}/${2}/charts/${3}" "$(basename "${1}")"; }  # <chart dir> <fixture> <archive>
+  _sub() { _chart "${root}/${1}/charts/${2}" redis "${3:-}"; }                                  # <fixture> <dir> [version]
+  _v1() {
+    mkdir -p "${root}/${1}/charts"
+    printf 'apiVersion: v1\nname: %s\nversion: 0.1.0\n' "${1}" > "${root}/${1}/Chart.yaml"
+    _dep "${root}/${1}/requirements.yaml" 1.0.0
+  }
+  _filedep() {
+    _parent "${1}"
+    printf 'dependencies:\n  - name: common\n    version: 0.1.0\n    repository: file://../common\n' >> "${root}/${1}/Chart.yaml"
+  }
+  _build() {  # <fixture>: build one row of the table; an unknown name fails
+    case "${1}" in
+      plain) _parent plain ;;
+      vendored-tgz) _parent "${1}" 1.0.0; _tgz "${src}/redis/redis" "${1}" redis-1.0.0.tgz ;;
+      vendored-dir) _parent "${1}" 1.0.0; _sub "${1}" redis 1.0.0 ;;
+      range) _parent "${1}" "~1.0.0"; _tgz "${src}/redis/redis" "${1}" redis-1.0.0.tgz ;;
+      v1-vendored) _v1 "${1}"; _sub "${1}" redis 1.0.0 ;;
+      missing) _parent "${1}" 1.0.0 ;;
+      missing-no-version) _parent "${1}" -none ;;
+      helmignored) _parent "${1}" 1.0.0; _tgz "${src}/redis/redis" "${1}" redis-1.0.0.tgz; echo '*.tgz' > "${root}/${1}/.helmignore" ;;
+      misnamed) _parent "${1}" 1.0.0; _tgz "${src}/other/redis" "${1}" redis-1.0.0.tgz ;;
+      wrong-version) _parent "${1}" 2.0.0; _tgz "${src}/redis/redis" "${1}" redis-1.0.0.tgz ;;
+      two-archives) _parent "${1}" ">=1.0.0"; _tgz "${src}/redis/redis" "${1}" redis-1.0.0.tgz; _tgz "${src}/v11/redis" "${1}" redis-1.1.0.tgz ;;
+      corrupt) _parent "${1}" 1.0.0; echo x > "${root}/${1}/charts/redis-1.0.0.tgz" ;;
+      filedep) _filedep "${1}" ;;
+      filedep-vendored) _filedep "${1}"; _chart "${root}/${1}/charts/common" common 0.1.0 ;;
+      v1) _v1 "${1}" ;;
+      symlinked) _parent "${1}" 1.0.0; ln -s "${src}/redis/redis" "${root}/${1}/charts/redis" ;;
+      v2-req) _parent "${1}"; _dep "${root}/${1}/requirements.yaml" 1.0.0; _sub "${1}" redis 1.0.0 ;;
+      v2-req-missing) _parent "${1}"; _dep "${root}/${1}/requirements.yaml" 1.0.0 ;;
+      dir-and-foo-bar) _parent "${1}" 1.0.0; _sub "${1}" redis 1.0.0; _tgz "${src}/rb/redis-bar" "${1}" redis-bar-2.0.0.tgz ;;
+      tgz-and-dir) _parent "${1}" 1.0.0; _tgz "${src}/redis/redis" "${1}" redis-1.0.0.tgz; _sub "${1}" redis 1.0.0 ;;
+      two-dirs) _parent "${1}" 1.0.0; _sub "${1}" redis 1.0.0; _sub "${1}" redis2 1.0.0 ;;
+      parent-no-version) _chart "${root}/${1}" "${1}"; _dep "${root}/${1}/Chart.yaml" 1.0.0; _sub "${1}" redis 1.0.0 ;;
+      sub-no-version) _parent "${1}" 1.0.0; _sub "${1}" redis ;;
+      dep-no-version) _parent "${1}" -none; _sub "${1}" redis 1.0.0 ;;
+      *) echo "chartgate-fixtures.txt: no bats builder for fixture ${1}"; return 1 ;;
+    esac
+  }
+  _chart "${src}/redis/redis" redis 1.0.0
+  _chart "${src}/other/redis" other 1.0.0
+  _chart "${src}/v11/redis" redis 1.1.0
+  _chart "${src}/rb/redis-bar" redis-bar 2.0.0
+  _chart "${root}/common" common 0.1.0   # the file:// target
+  _gate() { ( cd "${root}" && PATH="${b}/bin:${PATH}" KUSTOMIZE_PLUGIN_CONFIG_STRING="chart: ./${1}" LOK8S_BOOTSTRAP_DRYRUN_REPORT="${b}/report" "${gate}" cfg </dev/null ); }
+  local -A cause_text=(
+    [deps]="Vendor them into charts/, or pass --allow-generators."
+    [file]="is a file:// chart. khelm builds it into the chart directory on each render. Pass --allow-generators to render it."
+    [load]="Fix the chart so that helm can load it."
+  )
+  local name verdict cause rc n=0 out="${BATS_TEST_TMPDIR}/gate.out" err="${BATS_TEST_TMPDIR}/gate.err"
+  while read -r name verdict cause; do
+    [[ -n "${name}" && "${name}" != \#* ]] || continue
+    n=$((n + 1))
+    _build "${name}" || return 1
+    : > "${b}/report"
+    rc=0
+    _gate "${name}" >"${out}" 2>"${err}" || rc=$?
+    if [[ "${verdict}" == render ]]; then
+      [ "${rc}" -eq 0 ] || { echo "${name}: rc=${rc}: $(cat "${out}" "${err}")"; return 1; }
+      [ "$(cat "${out}")" = "real-chartrenderer" ] || { echo "${name}: stdout $(cat "${out}")"; return 1; }
+      # helm's log lines (the symlink, the v2 requirements.yaml) are not shown.
+      [ ! -s "${err}" ] || { echo "${name}: stderr $(cat "${err}")"; return 1; }
+      [ ! -s "${b}/report" ] || { echo "${name}: report $(cat "${b}/report")"; return 1; }
+    else
+      [ "${rc}" -eq 1 ] || { echo "${name}: rc=${rc}: $(cat "${out}" "${err}")"; return 1; }
+      [ "$(cat "${b}/report")" = "chart-deps ./${name}" ] || { echo "${name}: report $(cat "${b}/report")"; return 1; }
+      grep -qF -- "${cause_text[${cause}]}" "${err}" || { echo "${name}: want the ${cause} message, stderr: $(cat "${err}")"; return 1; }
+      if [[ "${cause}" != deps ]] && grep -qF -- "${cause_text[deps]}" "${err}"; then
+        echo "${name}: the vendor advice for a ${cause} refusal: $(cat "${err}")"; return 1
+      fi
+    fi
+    [ ! -e "${root}/${name}/Chart.lock" ] || { echo "${name}: the gate wrote Chart.lock"; return 1; }
+  done < "${table}"
+  [ "${n}" -ge 20 ] || { echo "only ${n} fixtures read from ${table}"; return 1; }
+}
+
+# The gate's refusal through a whole dry run: the entry is inconclusive (not
+# an error), the run exits 2, nothing is written into the chart; vendored,
+# the same entry renders through the project's ChartRenderer.
+@test "bootstrap::apply --dry-run: unvendored chart dependencies are inconclusive" {
+  _fake_helm
+  local chart_plugin="khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer"
+  mkdir -p "$(dirname "${KUSTOMIZE_PLUGIN_HOME}/${chart_plugin}")"
+  export REAL_RAN="${BATS_TEST_TMPDIR}/real-ran"
+  printf '#!/bin/sh\n: > "%s"\n' "${REAL_RAN}" > "${KUSTOMIZE_PLUGIN_HOME}/${chart_plugin}"
+  chmod +x "${KUSTOMIZE_PLUGIN_HOME}/${chart_plugin}"
+  mkdir -p "${PATH_BASE}/charts/app/charts"
+  printf 'apiVersion: v2\nname: app\nversion: 0.1.0\ndependencies:\n  - name: common\n    version: 0.1.0\n    repository: https://charts.example\n' > "${PATH_BASE}/charts/app/Chart.yaml"
+  printf 'common\t0.1.0\thttps://charts.example\tmissing\n' > "${FAKE_HELM}/deplist"
+  local dir="${PATH_LOK8S}/addons/app"
+  mkdir -p "${dir}"
+  printf 'apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: app\nchart: %s\n' "${PATH_BASE}/charts/app" > "${dir}/chart.yaml"
+  # kustomize starts the ChartRenderer of its plugin home in the
+  # kustomization root, with the generator config.
+  kustomize() {
+    local d="${@: -1}"
+    ( cd "${d}" && KUSTOMIZE_PLUGIN_CONFIG_STRING="$(cat chart.yaml)" \
+        "${KUSTOMIZE_PLUGIN_HOME}/khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer" cfg </dev/null ) || return 1
+    echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: app"
+  }
+  export -f kustomize
+  write_cluster_spec "app"
+  _dry_kubectl_stub 0
+  local bootstrap_dry_run=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 2 ] || { echo "rc=${status}: ${output}"; return 1; }
+  assert_line "bootstrap dry-run: 01-app: inconclusive (chart dependencies not vendored)"
+  assert_line "bootstrap dry-run: entries=1 unchanged=0 differs=0 rendered=0 skipped=0 inconclusive=1 errors=0 nondeterministic=0"
+  [ ! -e "${REAL_RAN}" ]
+  [ -z "$(ls -A "${PATH_BASE}/charts/app/charts")" ]
+
+  printf 'common\t0.1.0\thttps://charts.example\tunpacked\n' > "${FAKE_HELM}/deplist"
+  _dry_kubectl_stub 0
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: 01-app: unchanged"
+  [ -e "${REAL_RAN}" ]
+}
+
+# Review round 4, item D: the dry run stacks values in a copy in the boundary
+# that keeps symlinks the way the real run's copy does (`cp -r`), a dangling
+# one included; the copy is gone after the render.
+@test "addons::render --dry-run stacks values in a boundary copy that keeps symlinks like the real run" {
+  echo "linked: true" > "${BATS_TEST_TMPDIR}/outside.yaml"
+  ln -s "${BATS_TEST_TMPDIR}/outside.yaml" "${ADDON_DIR}/linked.yaml"
+  ln -s /nonexistent/lok8s-dangling "${ADDON_DIR}/dangling.yaml"
+  export SEEN="${BATS_TEST_TMPDIR}/seen"
+  kustomize() {
+    local d="${@: -1}"
+    { [[ -L "${d}/linked.yaml" ]] && echo linked; [[ -L "${d}/dangling.yaml" ]] && echo dangling; echo "dir=${d}"; } > "${SEEN}"
+    echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: x"
+  }
+  export -f kustomize
+  local b="${BATS_TEST_TMPDIR}/boundary"
+  mkdir -p "${b}"
+  addons::dry_run_boundary "${b}"
+  local bootstrap_dry_boundary="${b}" bootstrap_dry_run=1
+  run addons::render "${ADDON_DIR}" "lo" "hetzner" ""
+  assert_success
+  run cat "${SEEN}"
+  assert_line linked
+  assert_line dangling
+  assert_line --regexp "^dir=${b}/tmp/lok8s-addon-"
+  [ -z "$(ls -A "${b}/tmp")" ]
+  bootstrap_dry_run=0
+  run addons::render "${ADDON_DIR}" "lo" "hetzner" ""
+  assert_success
+  run cat "${SEEN}"
+  assert_line linked
+  assert_line dangling
+}
+
+# A restore.d file that does not decrypt is an error (rc 2), never a warning
+# and exit 0: the preview of restore.d would be incomplete.
+@test "bootstrap::apply --dry-run: a restore.d decrypt failure is an error (rc 2)" {
+  write_cluster_spec "testcni"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/wildcard-tls.sops.yaml"
+  sops() { echo "Failed to get the data key required to decrypt the SOPS file." >&2; return 128; }
+  export -f sops
+  _dry_kubectl_stub 0
+  local bootstrap_dry_run=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 2 ]
+  assert_line "bootstrap dry-run: restore.d: error"
+  assert_output --partial "[error] bootstrap: dry-run: restore.d: cannot decrypt wildcard-tls.sops.yaml"
+}
+
+# The same with REAL sops material when the toolchain has sops, ssh-keygen
+# and ssh-to-age: the normal key discovery (SOPS_AGE_KEY) decrypts and the
+# file is diffed; another key fails and the run exits 2.
+@test "bootstrap::apply --dry-run: restore.d with real sops (right key diffs, wrong key rc 2)" {
+  local t
+  for t in sops ssh-keygen ssh-to-age; do
+    command -v "${t}" >/dev/null || skip "${t} not installed"
+  done
+  unset -f sops
+  write_cluster_spec "testcni"
+  local k="${BATS_TEST_TMPDIR}/k1" k2="${BATS_TEST_TMPDIR}/k2"
+  ssh-keygen -q -t ed25519 -N '' -f "${k}" </dev/null
+  ssh-keygen -q -t ed25519 -N '' -f "${k2}" </dev/null
+  local recipient identity other
+  recipient="$(ssh-to-age < "${k}.pub")"
+  identity="$(ssh-to-age -private-key -i "${k}")"
+  other="$(ssh-to-age -private-key -i "${k2}")"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: wildcard-tls\nstringData:\n  tls.key: restored\n' > "${BATS_TEST_TMPDIR}/tls.yaml"
+  ( cd "${BATS_TEST_TMPDIR}" && sops --encrypt --age "${recipient}" --input-type yaml --output-type yaml tls.yaml ) \
+    > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/wildcard-tls.sops.yaml" </dev/null
+  _dry_kubectl_stub 0 0
+  local bootstrap_dry_run=1
+  SOPS_AGE_KEY="${identity}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: restore.d: unchanged"
+  _dry_kubectl_stub 0 0
+  SOPS_AGE_KEY="${other}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 2 ]
+  assert_line "bootstrap dry-run: restore.d: error"
+}
+
+# --render-dir: a symlinked dir or path component is refused, a fresh dir is
+# 0700, the marker must be a regular file, and the run says once that the
+# directory holds plaintext Secrets (no ANSI on piped stderr).
+@test "bootstrap::apply --dry-run --render-dir hardening" {
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub 0
+  local bootstrap_dry_run=1 target="${BATS_TEST_TMPDIR}/target"
+  mkdir -p "${target}"
+  ln -s "${target}" "${BATS_TEST_TMPDIR}/link"
+  local bootstrap_render_dir="${BATS_TEST_TMPDIR}/link"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 2 ]; assert_output --partial "${BATS_TEST_TMPDIR}/link is a symlink"
+  bootstrap_render_dir="${BATS_TEST_TMPDIR}/link/out"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 2 ]; [ ! -e "${target}/out" ]
+  [ -z "$(ls -A "${target}")" ]
+
+  bootstrap_render_dir="${BATS_TEST_TMPDIR}/fresh/out"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  [ "$(stat -c %a "${bootstrap_render_dir}")" = "700" ]
+  [ "$(grep -c "bootstrap dry-run: ${bootstrap_render_dir} holds the rendered manifests in plaintext, Secrets included" <<< "${output}")" -eq 1 ]
+  ! grep -q $'\033\[' <<< "${output}"
+
+  local d="${BATS_TEST_TMPDIR}/marked"
+  mkdir -p "${d}/.lo-dry-run"; echo x > "${d}/01-old.yaml"
+  bootstrap_render_dir="${d}"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 2 ]; assert_output --partial "as a regular file"
+  [ -f "${d}/01-old.yaml" ]
+}
+
+# A dry run leaves no temp file behind: not when it finishes, not when it
+# is killed (SIGTERM) in the middle of a render. And it CHAINS the caller's
+# EXIT trap instead of replacing it.
+@test "bootstrap::apply --dry-run leaves no temp files (finished or SIGTERM) and chains the EXIT trap" {
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub 0
+  local tmp="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${tmp}"
+  ( export TMPDIR="${tmp}"; bootstrap_dry_run=1
+    trap 'echo caller-trap-ran > "${BATS_TEST_TMPDIR}/caller-trap"' EXIT
+    bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null >/dev/null 2>&1 ) || true
+  [ -z "$(ls -A "${tmp}")" ] || { ls -la "${tmp}"; return 1; }
+
+  # The main-shell path: the caller's EXIT trap is still there afterwards.
+  export _PROJECT_ROOT
+  bash -c '
+    source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap" 2>/dev/null
+    trap "echo caller" EXIT
+    bootstrap::_dry_run_trap /nonexistent/x
+    trap -p EXIT
+    bootstrap::_dry_run_untrap /nonexistent/x
+    trap -p EXIT' > "${BATS_TEST_TMPDIR}/traps" 2>&1 || true
+  # The chained trap while the run lasts, the caller's own trap afterwards,
+  # and the caller's trap running at exit.
+  run cat "${BATS_TEST_TMPDIR}/traps"
+  assert_line --index 0 "trap -- 'rm -rf -- /nonexistent/x; echo caller' EXIT"
+  assert_line --index 1 "trap -- 'echo caller' EXIT"
+  assert_line --index 2 "caller"
+
+  export SLEPT="${BATS_TEST_TMPDIR}/slept"
+  kustomize() { sleep 2; : > "${SLEPT}"; echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: x"; }
+  export -f kustomize
+  ( export TMPDIR="${tmp}"; bootstrap_dry_run=1
+    exec bash -c 'source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"; source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"; source "${_PROJECT_ROOT}/.lok8s/libs/addons"; source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"; source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"; bootstrap_dry_run=1 bootstrap::apply test.lok8s.dev "'"${CLUSTER_YAML}"'" "'"${KUBECONFIG_FILE}"'"' \
+      </dev/null >/dev/null 2>&1 ) &
+  local pid=$!
+  local i
+  for (( i = 0; i < 50; i++ )); do
+    [[ -n "$(ls -A "${tmp}")" ]] && break
+    sleep 0.1
+  done
+  [ -n "$(ls -A "${tmp}")" ]          # the boundary exists mid-run
+  kill -TERM "${pid}"
+  wait "${pid}" || true
+  for (( i = 0; i < 40 && ! -e "${SLEPT}"; i++ )); do sleep 0.1; done
+  sleep 0.5
+  [ -z "$(ls -A "${tmp}")" ] || { ls -laR "${tmp}"; return 1; }
+}
+
+@test "bootstrap::mode_check: the flag dependencies (the lines the Go cli prints)" {
+  local dry_run=0 render_dir="" no_diff=0 only="" allow_generators=0 with_restore=0 ignore_nondeterministic=0
+  run bootstrap::mode_check 1 0
+  assert_success
+  dry_run=1; run bootstrap::mode_check 0 0
+  assert_failure; assert_output --partial "--dry-run requires --bootstrap"
+  dry_run=0 only="cilium"; run bootstrap::mode_check 0 1
+  assert_failure; assert_output --partial "--only requires --bootstrap"
+  only="" render_dir="x"; run bootstrap::mode_check 1 0
+  assert_failure; assert_output --partial "--render-dir requires --dry-run"
+  render_dir="" no_diff=1; run bootstrap::mode_check 1 0
+  assert_failure; assert_output --partial "--no-diff requires --dry-run"
+  no_diff=0 allow_generators=1; run bootstrap::mode_check 0 0
+  assert_failure; assert_output --partial "--allow-generators requires --bootstrap"
+  run bootstrap::mode_check 1 0
+  assert_failure; assert_output --partial "--allow-generators requires --dry-run"
+  allow_generators=0 dry_run=1; run bootstrap::mode_check 1 0
+  assert_success
+  # Review round 2, item H's flag: --with-restore needs --bootstrap AND --only.
+  dry_run=0 with_restore=1; run bootstrap::mode_check 0 0
+  assert_failure; assert_output --partial "--with-restore requires --bootstrap"
+  run bootstrap::mode_check 1 0
+  assert_failure; assert_output --partial "--with-restore requires --only"
+  with_restore=0 only="cilium"; run bootstrap::mode_check 1 1
+  assert_success
+  # Review round 4: --ignore-nondeterministic needs --bootstrap AND --dry-run.
+  only="" dry_run=0 ignore_nondeterministic=1; run bootstrap::mode_check 0 0
+  assert_failure; assert_output --partial "--ignore-nondeterministic requires --bootstrap"
+  run bootstrap::mode_check 1 0
+  assert_failure; assert_output --partial "--ignore-nondeterministic requires --dry-run"
+  dry_run=1; run bootstrap::mode_check 1 0
+  assert_success
+}
+
+# --only GIVEN but blank (every comma-separated value whitespace/empty, OR
+# literally "") is an error, never "no filter" — the latter is what an
+# ABSENT --only means, and the two must not silently collapse into the
+# same full, unfiltered apply (lok8s #268). only_given (the 2nd arg) is
+# what main::bootstrap/main::provision derive from the RAW argv
+# (bootstrap::_flag_given) — review round 2, item E: a bare `only=""`
+# alone can no longer be told apart from "never given" by mode_check, on
+# purpose, matching the Go cli's cmd.Flags().Changed("only") fix.
+@test "bootstrap::mode_check: --only blank is an error, not 'no filter'" {
+  local dry_run=0 render_dir="" no_diff=0 allow_generators=0 with_restore=0
+  local only=""
+  run bootstrap::mode_check 1 1
+  assert_failure; assert_output --partial "--only: no entry names given"
+  only=" "
+  run bootstrap::mode_check 1 1
+  assert_failure; assert_output --partial "--only: no entry names given"
+  only=","
+  run bootstrap::mode_check 1 1
+  assert_failure; assert_output --partial "--only: no entry names given"
+  only="cilium"
+  run bootstrap::mode_check 1 1
+  assert_success
+  # only_given=0 (the flag was never on the argv at all) skips the blank
+  # check entirely, whatever only happens to hold — that is the ABSENT case.
+  only=""
+  run bootstrap::mode_check 1 0
+  assert_success
+}
+
+@test "bootstrap::dispatch --dry-run skips inventory::publish" {
+  mkdir -p "${PATH_LOK8S}/drivers/lo"
+  printf 'driver::export() { :; }\n' > "${PATH_LOK8S}/drivers/lo/main"
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub 0
+  inventory::publish() { echo "inventory_published"; }
+  local bootstrap_dry_run=1
+  run bootstrap::dispatch "test.lok8s.dev"
+  assert_success
+  refute_output --partial "inventory_published"
+  assert_output --partial "01-testcni: unchanged"
+}
+
+# --- Review round 4: accidental side effects, not a security boundary --------
+# The Go twin is internal/bootstrap/dryrun_round4_test.go and
+# internal/addons/dryrun_*_test.go.
+
+# Item A4 (Astra): an entry's env: reaches only the render's processes.
+# Exported into the orchestration shell, `env: {stem: ../outside}` redirected
+# the render dir's files; addon_dir and kubeconfig were shadowable the same
+# way (a dry run and a real run).
+@test "bootstrap::apply: an entry's env: cannot shadow the orchestration's variables" {
+  write_cluster_spec "testcni:
+      env:
+        stem: ../outside
+        addon_dir: /nonexistent/addon
+        kubeconfig: /nonexistent/kubeconfig
+        rendered: shadowed"
+  _dry_kubectl_stub 0
+  local dir="${BATS_TEST_TMPDIR}/out" bootstrap_dry_run=1
+  local bootstrap_render_dir="${dir}"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: 01-testcni: unchanged"
+  [ ! -e "${BATS_TEST_TMPDIR}/outside.yaml" ]
+  [ ! -e "${BATS_TEST_TMPDIR}/outside.diff" ]
+  grep -q 'name: testcni' "${dir}/01-testcni.yaml"
+  [ -f "${dir}/01-testcni.diff" ]
+  grep -qF -- "kubectl --kubeconfig ${KUBECONFIG_FILE} diff " "${KLOG}"
+  ! grep -q nonexistent "${KLOG}"
+
+  # The real run applies with the cluster's kubeconfig.
+  bootstrap_dry_run=0 bootstrap_render_dir=""
+  export KLOG="${BATS_TEST_TMPDIR}/kubectl.real.log"; : > "${KLOG}"
+  kubectl() { echo "kubectl $*" >> "${KLOG}"; [[ " $* " != *" -f - "* ]] || cat >/dev/null; return 0; }
+  export -f kubectl
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  grep -qF -- "--kubeconfig ${KUBECONFIG_FILE}" "${KLOG}"
+  ! grep -q nonexistent "${KLOG}"
+}
+
+# Item A8: the entry renders twice; an object whose content differs between
+# the renders (a chart that mints TLS material per render, as Cilium does) is
+# listed as regenerated on every apply. The verdict stays honest (it differs
+# on the cluster: exit 1); --ignore-nondeterministic judges the entry
+# without it (exit 0 when only it differs), and still lists it. The render
+# dir keeps the full render either way.
+@test "bootstrap::apply --dry-run lists the objects a chart regenerates on every apply" {
+  write_cluster_spec "testcni"
+  export RENDERS="${BATS_TEST_TMPDIR}/renders" DIFFIN="${BATS_TEST_TMPDIR}/diff.in"
+  : > "${RENDERS}"
+  kustomize() {
+    echo x >> "${RENDERS}"
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: stable\n  namespace: kube-system\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: cilium-ca\n  namespace: kube-system\ndata:\n  ca.crt: Q0Et%d\n' "$(wc -l < "${RENDERS}")"
+  }
+  export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
+  kubectl() {
+    echo "kubectl $*" >> "${KLOG}"
+    local in=""
+    [[ " $* " != *" -f - "* ]] || in="$(cat)"
+    printf '%s\n' "${in}" > "${DIFFIN}"
+    if [[ "${in}" == *cilium-ca* ]]; then _dry_canned_diff; return 1; fi
+    return 0
+  }
+  export -f kustomize kubectl _dry_canned_diff
+  local dir="${BATS_TEST_TMPDIR}/out" bootstrap_dry_run=1
+  local bootstrap_render_dir="${dir}"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 1 ] || { echo "rc=${status}: ${output}"; return 1; }
+  [ "$(wc -l < "${RENDERS}")" -eq 2 ]
+  assert_line "bootstrap dry-run: 01-testcni: differs changed=1 new=2 (non-deterministic: 1)"
+  assert_line "bootstrap dry-run: 01-testcni: non-deterministic (regenerated on every apply): v1 Secret kube-system/cilium-ca"
+  assert_line "bootstrap dry-run: entries=1 unchanged=0 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0 nondeterministic=1"
+  grep -q cilium-ca "${dir}/01-testcni.yaml"
+
+  : > "${RENDERS}"
+  local bootstrap_ignore_nondet=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: 01-testcni: unchanged (non-deterministic: 1)"
+  assert_line "bootstrap dry-run: 01-testcni: non-deterministic (regenerated on every apply): v1 Secret kube-system/cilium-ca"
+  assert_line "bootstrap dry-run: entries=1 unchanged=1 differs=0 rendered=0 skipped=0 inconclusive=0 errors=0 nondeterministic=1"
+  ! grep -q cilium-ca "${DIFFIN}"
+  grep -q 'name: stable' "${DIFFIN}"
+  grep -q cilium-ca "${dir}/01-testcni.yaml"
+}
+
+# A deterministic render lists nothing; when --ignore-nondeterministic leaves
+# nothing to diff, the entry is unchanged and kubectl is never asked.
+@test "bootstrap::apply --dry-run --ignore-nondeterministic: nothing left to diff is unchanged" {
+  write_cluster_spec "testcni"
+  export RENDERS="${BATS_TEST_TMPDIR}/renders"; : > "${RENDERS}"
+  kustomize() {
+    echo x >> "${RENDERS}"
+    printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: only\ndata:\n  k: %d\n' "$(wc -l < "${RENDERS}")"
+  }
+  export -f kustomize
+  _dry_kubectl_stub 1
+  local dir="${BATS_TEST_TMPDIR}/out" bootstrap_dry_run=1 bootstrap_ignore_nondet=1
+  local bootstrap_render_dir="${dir}"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: 01-testcni: unchanged (non-deterministic: 1)"
+  assert_line "bootstrap dry-run: 01-testcni: non-deterministic (regenerated on every apply): v1 Secret only"
+  [ ! -s "${KLOG}" ]
+  [ -f "${dir}/01-testcni.diff" ]
+  [ ! -s "${dir}/01-testcni.diff" ]
+}
+
+# Item D: an entry whose YAML declares a KRM function is marked partial
+# (without --enable-exec kustomize skips an exec function silently);
+# --allow-generators runs it, so there is no mark then.
+@test "bootstrap::apply --dry-run marks an entry that declares a KRM function partial" {
+  write_cluster_spec "testcni"
+  printf 'metadata:\n  annotations:\n    config.kubernetes.io/function: |\n      exec:\n        path: ./fn\n' > "${ADDON_DIR}/fn.yaml"
+  _dry_kubectl_stub 0
+  local bootstrap_dry_run=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: 01-testcni: unchanged (partial: KRM function skipped)"
+  _dry_kubectl_stub 0
+  local bootstrap_allow_generators=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: 01-testcni: unchanged"
+}
+
+# Item A5: every render of a run shares ONE run store (0700, in the
+# boundary) and the boundary's TMPDIR; a value the plugin updated in the
+# store marks the entry non-repeatable like a generated one.
+@test "bootstrap::apply --dry-run: the renders share one run store and the boundary's TMPDIR" {
+  mkdir -p "${PATH_LOK8S}/addons/second"
+  write_cluster_spec "testcni" "second"
+  _dry_kubectl_stub 0 0
+  export STORES="${BATS_TEST_TMPDIR}/stores"; : > "${STORES}"
+  kustomize() {
+    printf '%s %s %s\n' "${LOK8S_BOOTSTRAP_DRYRUN_STORE:-}" \
+      "$(stat -c %a "${LOK8S_BOOTSTRAP_DRYRUN_STORE:-/nonexistent}" 2>/dev/null)" "${TMPDIR:-}" >> "${STORES}"
+    [[ "${@: -1}" != */second ]] || echo "update Secret.app.ns.PASSWORD" >> "${LOK8S_BOOTSTRAP_DRYRUN_REPORT}"
+    echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: x"
+  }
+  export -f kustomize
+  local bootstrap_dry_run=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: 01-testcni: unchanged"
+  assert_line "bootstrap dry-run: 02-second: unchanged (non-repeatable)"
+  [ "$(wc -l < "${STORES}")" -eq 4 ]
+  [ "$(sort -u "${STORES}" | wc -l)" -eq 1 ]
+  run cat "${STORES}"
+  assert_line --index 0 --regexp "^/.*/lok8s-dryrun-[A-Za-z0-9]+/store 700 /.*/lok8s-dryrun-[A-Za-z0-9]+/tmp$"
+}
+
+# Item A9: an existing --render-dir that group or others may read is
+# tightened to 0700 (stderr says so); the directory is created only after
+# the boundary is built, so a refusal there leaves nothing behind.
+@test "bootstrap::apply --dry-run tightens an open --render-dir and creates none after a boundary refusal" {
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub 0
+  local dir="${BATS_TEST_TMPDIR}/open" bootstrap_dry_run=1
+  mkdir -m 755 "${dir}"
+  local bootstrap_render_dir="${dir}"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  [ "$(stat -c %a "${dir}")" = "700" ]
+  assert_line "bootstrap dry-run: ${dir} was 0755: tightened to 0700"
+
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret"
+  mkdir -p "$(dirname "${plugin}")"
+  printf '#!/bin/sh\nexit 1\n' > "${plugin}"; chmod +x "${plugin}"
+  bootstrap_render_dir="${BATS_TEST_TMPDIR}/fresh"
+  _dry_kubectl_stub 0
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 2 ]
+  assert_output --partial "does not support a dry run"
+  [ ! -e "${bootstrap_render_dir}" ]
+}
+
+# Item D: the real run's skips come first, then the reserved-env check: an
+# entry the run skips (a platform-owned addon on a hosted cluster) is
+# skipped, not an env error, dry or real.
+@test "an entry's env: is checked after the real run's skips (dry run and real run)" {
+  export LOK8S_BOOTSTRAP_HOSTED=true
+  run bootstrap::_apply_one "cilium" "/nonexistent/addons/cilium" "kubeone" "hetzner" "/kc" "" "" "KUBECONFIG=/tmp/evil"
+  assert_success
+  assert_output --partial "platform-owned on a hosted cluster"
+  refute_output --partial "may not set"
+  local bootstrap_dry_run=1 bootstrap_dry_boundary="${BATS_TEST_TMPDIR}/boundary"
+  mkdir -p "${bootstrap_dry_boundary}"
+  run bootstrap::_dry_run_one "cilium" "/nonexistent/addons/cilium" "kubeone" "hetzner" "/kc" "" "KUBECONFIG=/tmp/evil" "01-cilium"
+  assert_success
+  assert_line "skipped"
+  refute_output --partial "may not set"
+}
+
+# --- Review round 5 -----------------------------------------------------------
+# The Go twin is internal/bootstrap/dryrun_round5_test.go,
+# internal/addons/render_test.go and internal/render/chartgate_test.go.
+
+# Item 2: the staging copy keeps symlinks, and the files it rewrites
+# (chart.yaml, values.inline.yaml, values.merged.yaml) may be links in the
+# addon: a shared ChartRenderer config, shared values. Each is written as a
+# new private regular file in the copy; the linked originals stay
+# byte-identical — in a dry run and in a real run (the same staging path).
+@test "addons::render: the staging never writes through a symlink (dry run and real run)" {
+  local shared="${BATS_TEST_TMPDIR}/shared" f
+  mkdir -p "${shared}"
+  printf 'apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: shared\nvalueFiles:\n  - values.yaml\n' > "${shared}/chart.yaml"
+  printf 'shared_inline: true\n' > "${shared}/values.inline.yaml"
+  printf 'shared_merged: true\n' > "${shared}/values.merged.yaml"
+  for f in chart.yaml values.inline.yaml values.merged.yaml; do
+    rm -f "${ADDON_DIR}/${f}"
+    ln -s "${shared}/${f}" "${ADDON_DIR}/${f}"
+  done
+  ( cd "${shared}" && sha256sum chart.yaml values.inline.yaml values.merged.yaml ) > "${BATS_TEST_TMPDIR}/before"
+  export SEEN="${BATS_TEST_TMPDIR}/seen"
+  kustomize() {
+    local d="${@: -1}" g
+    : > "${SEEN}"
+    for g in chart.yaml values.inline.yaml values.merged.yaml; do
+      if [[ -f "${d}/${g}" && ! -L "${d}/${g}" ]]; then
+        echo "${g} $(stat -c %a "${d}/${g}")" >> "${SEEN}"
+      else
+        echo "${g} not-a-regular-file" >> "${SEEN}"
+      fi
+    done
+    grep -q 'values.merged.yaml' "${d}/chart.yaml" && grep -q 'name: shared' "${d}/chart.yaml" && echo "chart.yaml staged" >> "${SEEN}"
+    echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: x"
+  }
+  export -f kustomize
+  local b="${BATS_TEST_TMPDIR}/boundary" dry
+  mkdir -p "${b}"
+  addons::dry_run_boundary "${b}"
+  for dry in 1 0; do
+    local bootstrap_dry_boundary="${b}" bootstrap_dry_run="${dry}"
+    run addons::render "${ADDON_DIR}" "lo" "hetzner" "inline_marker: inline"
+    assert_success
+    run cat "${SEEN}"
+    assert_line "chart.yaml 600"
+    assert_line "values.inline.yaml 600"
+    assert_line "values.merged.yaml 600"
+    assert_line "chart.yaml staged"
+    ( cd "${shared}" && sha256sum -c --quiet "${BATS_TEST_TMPDIR}/before" ) || { echo "dry=${dry}: a shared file changed"; return 1; }
+    for f in chart.yaml values.inline.yaml values.merged.yaml; do
+      [ -L "${ADDON_DIR}/${f}" ] || { echo "dry=${dry}: ${f} is no longer a symlink"; return 1; }
+    done
+  done
+}
+
+# Review round 6, item 1: a keep-chomped block scalar (`|+`) keeps its
+# trailing newlines as part of the value. As the last value of the merged
+# values or of chart.yaml, the staged files keep every one of them (a
+# command substitution drops them) — dry run and real run. The bytes are the
+# pinned yq's, and the Go twin pins the same ones
+# (internal/addons/render_test.go, TestRenderStagingKeepsKeepChompedTrailingNewlines).
+@test "addons::render: the staging keeps the trailing newlines of a keep-chomped last value" {
+  local dir="${PATH_LOK8S}/addons/kept" want="${BATS_TEST_TMPDIR}/want" dry
+  mkdir -p "${dir}" "${want}"
+  printf 'apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: kept\nvalueFiles:\n  - values.yaml\nnote: |+\n  beta\n\n' > "${dir}/chart.yaml"
+  printf 'base: 1\n' > "${dir}/values.yaml"
+  printf 'driver: 2\nkeep: |+\n  alpha\n\n\n' > "${dir}/values.lo.yaml"
+  printf 'apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: kept\nvalueFiles:\n  - values.merged.yaml\nnote: |+\n  beta\n\n' > "${want}/chart.yaml"
+  printf 'base: 1\ndriver: 2\nkeep: |+\n  alpha\n\n\n' > "${want}/values.merged.yaml"
+  export STAGED="${BATS_TEST_TMPDIR}/staged"
+  kustomize() {
+    local d="${@: -1}"
+    rm -rf "${STAGED}"; mkdir -p "${STAGED}"
+    cp "${d}/chart.yaml" "${d}/values.merged.yaml" "${STAGED}/"
+    echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: x"
+  }
+  export -f kustomize
+  local b="${BATS_TEST_TMPDIR}/boundary"
+  mkdir -p "${b}"
+  addons::dry_run_boundary "${b}"
+  for dry in 1 0; do
+    local bootstrap_dry_boundary="${b}" bootstrap_dry_run="${dry}"
+    run addons::render "${dir}" "lo" "" ""
+    assert_success
+    cmp "${want}/values.merged.yaml" "${STAGED}/values.merged.yaml" || { echo "dry=${dry}: $(od -c "${STAGED}/values.merged.yaml")"; return 1; }
+    cmp "${want}/chart.yaml" "${STAGED}/chart.yaml" || { echo "dry=${dry}: $(od -c "${STAGED}/chart.yaml")"; return 1; }
+  done
+}
+
+# Item 3: an object that only one of the two renders has is
+# non-deterministic too (the union of both renders' objects).
+@test "bootstrap::apply --dry-run lists an object only the second render has" {
+  write_cluster_spec "testcni"
+  export RENDERS="${BATS_TEST_TMPDIR}/renders" DIFFIN="${BATS_TEST_TMPDIR}/diff.in"
+  : > "${RENDERS}"
+  kustomize() {
+    echo x >> "${RENDERS}"
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: stable\n  namespace: kube-system\n'
+    if [[ "$(wc -l < "${RENDERS}")" -eq 2 ]]; then
+      printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: late\n  namespace: kube-system\n'
+    fi
+  }
+  export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
+  kubectl() {
+    echo "kubectl $*" >> "${KLOG}"
+    local in=""
+    [[ " $* " != *" -f - "* ]] || in="$(cat)"
+    printf '%s\n' "${in}" > "${DIFFIN}"
+    return 0
+  }
+  export -f kustomize kubectl
+  local bootstrap_dry_run=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: 01-testcni: unchanged (non-deterministic: 1)"
+  assert_line "bootstrap dry-run: 01-testcni: non-deterministic (regenerated on every apply): v1 Secret kube-system/late"
+  assert_line --regexp " nondeterministic=1$"
+  ! grep -q late "${DIFFIN}"
+}
+
+# Item 4: the KRM hint follows the kustomization graph within the project:
+# a function in a base the entry references (../base), in a component, or
+# in a transformer file outside the entry's directory marks the entry
+# partial; a reference outside the project, or a remote one, is not read
+# and (review round 6, item 5) marks the entry partial too: the hint cannot
+# rule a function out there.
+@test "bootstrap::apply --dry-run: the KRM hint follows the kustomization graph" {
+  local fn=$'apiVersion: example.test/v1\nkind: Fn\nmetadata:\n  name: fn\n  annotations:\n    config.kubernetes.io/function: |\n      exec:\n        path: ./fn\n'
+  local entry="${PATH_LOK8S}/addons/testcni" out
+  out="$(mktemp -d)"   # outside the project (PATH_BASE is BATS_TEST_TMPDIR)
+  _krm_case() {  # <want: function|unread|none> <kustomization of the entry>
+    printf '%s' "${2}" > "${entry}/kustomization.yaml"
+    _dry_kubectl_stub 0
+    local bootstrap_dry_run=1
+    run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+    assert_success
+    case "${1}" in
+      function) assert_line "bootstrap dry-run: 01-testcni: unchanged (partial: KRM function skipped)" ;;
+      unread) assert_line "bootstrap dry-run: 01-testcni: unchanged (partial: a reference outside the project was not inspected)" ;;
+      none) assert_line "bootstrap dry-run: 01-testcni: unchanged" ;;
+    esac
+  }
+  write_cluster_spec "testcni"
+  mkdir -p "${PATH_BASE}/shared/base" "${PATH_BASE}/shared/comp" "${PATH_BASE}/fns" "${PATH_BASE}/plain" "${out}/base"
+  printf 'transformers:\n- fn.yaml\n' > "${PATH_BASE}/shared/base/kustomization.yaml"
+  printf '%s' "${fn}" > "${PATH_BASE}/shared/base/fn.yaml"
+  printf 'kind: Component\ntransformers:\n- fn.yaml\n' > "${PATH_BASE}/shared/comp/kustomization.yaml"
+  printf '%s' "${fn}" > "${PATH_BASE}/shared/comp/fn.yaml"
+  printf '%s' "${fn}" > "${PATH_BASE}/fns/fn.yaml"
+  printf 'resources:\n- cm.yaml\n' > "${PATH_BASE}/plain/kustomization.yaml"
+  printf 'transformers:\n- fn.yaml\n' > "${out}/base/kustomization.yaml"
+  printf '%s' "${fn}" > "${out}/base/fn.yaml"
+  _krm_case function "resources:"$'\n'"- ${PATH_BASE}/shared/base"$'\n'
+  _krm_case function "resources:"$'\n'"- ../../../shared/base"$'\n'
+  _krm_case function "components:"$'\n'"- ../../../shared/comp"$'\n'
+  _krm_case function "transformers:"$'\n'"- ../../../fns/fn.yaml"$'\n'
+  _krm_case none "resources:"$'\n'"- ../../../plain"$'\n'
+  # Review round 7, item 3: what the hint did not read has its own label.
+  _krm_case unread "resources:"$'\n'"- ../../../plain"$'\n'"- https://github.com/example/repo//base?ref=v1"$'\n'
+  _krm_case unread "resources:"$'\n'"- ${out}/base"$'\n'
+  rm -rf "${out}"
+}
+
+# Review round 6, items 4 and 5 — the same cases as the Go twin
+# (internal/addons/krm_test.go): the hint reads the kustomization file
+# itself (an inline function in an extensionless Kustomization, in the
+# entry or in a base), reads no file outside the project (grep -r follows
+# no link below the entry), reads regular files only (a FIFO does not block
+# it), and a reference or a kustomization file outside the project, or a
+# remote reference, marks the entry. An entry outside the project (a peeked
+# framework addon) reads its own tree.
+#
+# Review round 7: an unread reference is its own kind (`unread`, its own
+# label), a function anywhere wins over it (item 3); a referenced DIRECTORY
+# link is followed into the project and marks the entry by what the target
+# holds, or as unread when it leaves the project (item 5); a reference is
+# cleaned lexically before its links resolve, as kustomize does (item 6).
+@test "bootstrap::_krm_declared: inline functions, links and references outside the project" {
+  local fn=$'apiVersion: example.test/v1\nkind: Fn\nmetadata:\n  name: fn\n  annotations:\n    config.kubernetes.io/function: |\n      exec:\n        path: ./fn\n'
+  local inline=$'transformers:\n- |-\n  apiVersion: example.test/v1\n  kind: Fn\n  metadata:\n    name: fn\n    annotations:\n      config.kubernetes.io/function: |\n        exec:\n          path: ./fn\n'
+  local cm=$'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'
+  local out n=0 c=""
+  out="$(mktemp -d)"   # outside the project (PATH_BASE is BATS_TEST_TMPDIR)
+  printf '%s' "${fn}" > "${out}/fn.yaml"
+  printf 'resources:\n- cm.yaml\n' > "${out}/kustomization.yaml"
+  mkdir -p "${out}/base"
+  printf 'resources:\n- cm.yaml\n' > "${out}/base/kustomization.yaml"
+  _case() {  # a fresh case directory c (in the project) with an entry/
+    n=$((n + 1)); c="${PATH_BASE}/krm${n}"
+    mkdir -p "${c}/entry"
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: entry\n' > "${c}/entry/cm.yaml"
+  }
+  _base() {  # <dir> <fn|plain>: a base with a KRM function, or a plain one
+    mkdir -p "${1}"
+    if [[ "${2}" == fn ]]; then
+      printf 'transformers:\n- fn.yaml\n' > "${1}/kustomization.yaml"; printf '%s' "${fn}" > "${1}/fn.yaml"
+    else
+      printf 'resources:\n- cm.yaml\n' > "${1}/kustomization.yaml"; printf '%s' "${cm}" > "${1}/cm.yaml"
+    fi
+  }
+  _want() {  # <function|unread|none> <label>
+    local rc=0 got
+    got="$(bootstrap::_krm_declared "${c}/entry")" || rc=$?
+    if [[ "${1}" == none ]]; then
+      [ "${rc}" -ne 0 ] && [ -z "${got}" ] || { echo "${2}: marked ${got}"; return 1; }
+    else
+      [ "${rc}" -eq 0 ] && [ "${got}" = "${1}" ] || { echo "${2}: got '${got}' (rc ${rc}), want ${1}"; return 1; }
+    fi
+  }
+  _case; printf '%s' "${inline}" > "${c}/entry/Kustomization"
+  _want function "inline function in an extensionless Kustomization"
+  _case; mkdir -p "${c}/shared/base"; printf '%s' "${inline}" > "${c}/shared/base/Kustomization"
+  printf 'resources:\n- ../shared/base\n' > "${c}/entry/kustomization.yaml"
+  _want function "inline function in a base's extensionless Kustomization"
+  _case; printf 'resources:\n- %s/base\n' "${out}" > "${c}/entry/kustomization.yaml"
+  _want unread "a base outside the project"
+  _case; printf 'resources:\n- https://example.test/raw/cm.yaml\n' > "${c}/entry/kustomization.yaml"
+  _want unread "a remote URL"
+  _case; printf 'resources:\n- github.com/example/repo/base?ref=v1\n' > "${c}/entry/kustomization.yaml"
+  _want unread "a remote GitHub base"
+  _case; printf 'resources:\n- git@github.com:example/repo.git//base\n' > "${c}/entry/kustomization.yaml"
+  _want unread "a remote git base"
+  _case; mkdir -p "${c}/shared/base"; printf '%s' "${inline}" > "${c}/shared/base/Kustomization"
+  printf 'resources:\n- https://example.test/raw/cm.yaml\n- ../shared/base\n' > "${c}/entry/kustomization.yaml"
+  _want function "a remote base and a function: the function wins"
+  _case; printf 'resources:\n- cm.yaml\n' > "${c}/entry/kustomization.yaml"; ln -s "${out}/fn.yaml" "${c}/entry/fn.yaml"
+  _want none "an unreferenced .yaml link to a file outside"
+  _case; printf 'transformers:\n- fn.yaml\n' > "${c}/entry/kustomization.yaml"; ln -s "${out}/fn.yaml" "${c}/entry/fn.yaml"
+  _want unread "a referenced .yaml link to a file outside"
+  _case; mkdir -p "${c}/fns"; printf '%s' "${fn}" > "${c}/fns/fn.yaml"
+  printf 'transformers:\n- fn.yaml\n' > "${c}/entry/kustomization.yaml"; ln -s "${c}/fns/fn.yaml" "${c}/entry/fn.yaml"
+  _want function "a referenced .yaml link to a file inside"
+  _case; mkdir -p "${c}/fns"; printf '%s' "${fn}" > "${c}/fns/fn.yaml"
+  printf 'resources:\n- cm.yaml\n' > "${c}/entry/kustomization.yaml"; ln -s "${c}/fns/fn.yaml" "${c}/entry/fn.yaml"
+  _want none "an unreferenced .yaml link to a file inside"
+  _case; ln -s "${out}/kustomization.yaml" "${c}/entry/kustomization.yaml"
+  _want unread "a Kustomization that links outside"
+  # Item 5: referenced directory links.
+  _case; _base "${c}/shared/fnbase" fn; ln -s "${c}/shared/fnbase" "${c}/entry/linked"
+  printf 'resources:\n- linked\n' > "${c}/entry/kustomization.yaml"
+  _want function "a referenced directory link to a base with a function"
+  _case; _base "${c}/shared/plain" plain; ln -s "${c}/shared/plain" "${c}/entry/linked"
+  printf 'resources:\n- linked\n' > "${c}/entry/kustomization.yaml"
+  _want none "a referenced directory link to a plain base"
+  _case; ln -s "${out}/base" "${c}/entry/linked"
+  printf 'resources:\n- linked\n' > "${c}/entry/kustomization.yaml"
+  _want unread "a referenced directory link out of the project"
+  # Item 6: `l/../fns` is the fns next to the link l, not next to its target.
+  _case; mkdir -p "${c}/deep/a"; printf '%s' "${cm}" > "${c}/deep/a/cm.yaml"; ln -s "${c}/deep/a" "${c}/l"
+  _base "${c}/fns" fn; _base "${c}/deep/fns" plain
+  printf 'resources:\n- ../l/../fns\n' > "${c}/entry/kustomization.yaml"
+  _want function "link/../x is cleaned before the link resolves (relative)"
+  printf 'resources:\n- %s/l/../fns\n' "${c}" > "${c}/entry/kustomization.yaml"
+  _want function "link/../x is cleaned before the link resolves (absolute)"
+  _case; mkdir -p "${c}/deep/a"; printf '%s' "${cm}" > "${c}/deep/a/cm.yaml"; ln -s "${c}/deep/a" "${c}/l"
+  _base "${c}/fns" plain; _base "${c}/deep/fns" fn
+  printf 'resources:\n- ../l/../fns\n' > "${c}/entry/kustomization.yaml"
+  _want none "link/../x does not reach the target's sibling"
+  _case; printf 'resources:\n- ../nowhere\n' > "${c}/entry/kustomization.yaml"
+  _want none "a missing reference"
+  _case; _base "${c}/shared/base" plain
+  printf 'resources:\n- ../shared/base\n' > "${c}/entry/kustomization.yaml"
+  _want none "plain"
+
+  # An entry outside the project reads its own tree.
+  local own
+  own="$(mktemp -d)"
+  mkdir -p "${own}/sub"
+  printf 'resources:\n- sub\n' > "${own}/kustomization.yaml"
+  printf 'resources:\n- cm.yaml\n' > "${own}/sub/kustomization.yaml"
+  printf '%s' "${cm}" > "${own}/sub/cm.yaml"
+  ! bootstrap::_krm_declared "${own}" >/dev/null || { echo "a reference into the entry's own directory counted as outside"; return 1; }
+
+  # A FIFO named like YAML, below the entry and referenced: never read.
+  _case; printf 'resources:\n- cm.yaml\ntransformers:\n- pipe.yaml\n' > "${c}/entry/kustomization.yaml"
+  mkfifo "${c}/entry/pipe.yaml"
+  ( rc=0; bootstrap::_krm_declared "${c}/entry" >/dev/null || rc=$?; echo "${rc}" > "${BATS_TEST_TMPDIR}/fifo.rc" ) &
+  local pid=$! i
+  for (( i = 0; i < 100; i++ )); do [[ ! -s "${BATS_TEST_TMPDIR}/fifo.rc" ]] || break; sleep 0.1; done
+  if [[ ! -s "${BATS_TEST_TMPDIR}/fifo.rc" ]]; then
+    timeout 2 bash -c ': > "${1}"' _ "${c}/entry/pipe.yaml" || true   # unblock the reader
+    wait "${pid}" || true
+    echo "the hint blocked on a FIFO"; return 1
+  fi
+  wait "${pid}"
+  [ "$(cat "${BATS_TEST_TMPDIR}/fifo.rc")" -ne 0 ] || { echo "a FIFO marked the entry partial"; return 1; }
+  rm -rf "${out}" "${own}"
+}
+
+# Item 5 (`reuse <name>`: an entry that reads a value another entry of the
+# run generated is non-repeatable too) has no bats test here. The `reuse`
+# line comes from the Secret plugin, which both implementations run as the
+# same binary; a bats stub that writes the line would only repeat the
+# report parsing that "the renders share one run store" already covers (an
+# `update` line), and passes without the plugin change (review round 6,
+# item 8). The plugin's real path is covered in Go:
+# kustomize/pkg/cache/dryrun_test.go (TestRunStoreCarriesValuesAcrossPluginProcesses)
+# and internal/addons/dryrun_exec_test.go
+# (TestDryRunReadingAnotherEntrysValueIsReported: the real kustomize and
+# plugin, a producer entry and a consumer entry of one run).
+
+# --- Review round 8 -----------------------------------------------------------
+# The Go twin is internal/bootstrap/dryrun_round8_test.go.
+
+# --render-dir together with restore.d: the render dir is prepared (created,
+# or a reused dry-run dir cleared of its owned files) BEFORE the restore.d
+# preview, which writes restore.d.{yaml,diff} into it. (a) A dir that does
+# not exist yet: restore.d's files land in it and its status is the diff's,
+# not an error. (b) A reused dry-run dir with an old restore.d.yaml/.diff
+# and a stale entry file: restore.d's files are this run's, the stale entry
+# file is gone.
+@test "bootstrap::apply --dry-run --render-dir with restore.d (new and reused dir)" {
+  write_cluster_spec "testcni"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/tls.sops.yaml"
+  sops() { printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\n'; }
+  export -f sops
+  local bootstrap_dry_run=1 bootstrap_render_dir="${BATS_TEST_TMPDIR}/fresh/out"
+
+  # (a) a new dir
+  _dry_kubectl_stub 1 0   # restore.d differs, testcni unchanged
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 1 ] || { echo "rc=${status}: ${output}"; return 1; }
+  assert_line "bootstrap dry-run: restore.d: differs changed=1 new=2"
+  grep -q 'name: tls' "${bootstrap_render_dir}/restore.d.yaml"
+  grep -q '^--- /tmp/LIVE-1/' "${bootstrap_render_dir}/restore.d.diff"
+
+  # (b) a reused dry-run dir with the files of an earlier run
+  local d="${BATS_TEST_TMPDIR}/reused"
+  mkdir -m 700 "${d}"
+  printf 'lok8s dry-run output directory — safe to delete\n' > "${d}/.lo-dry-run"
+  echo 'old restore.d manifest' > "${d}/restore.d.yaml"
+  echo 'old restore.d diff' > "${d}/restore.d.diff"
+  echo 'old entry' > "${d}/05-stale.yaml"
+  echo 'old entry diff' > "${d}/05-stale.diff"
+  bootstrap_render_dir="${d}"
+  _dry_kubectl_stub 0 0   # both unchanged
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: restore.d: unchanged"
+  grep -q 'name: tls' "${d}/restore.d.yaml"
+  ! grep -q 'old' "${d}/restore.d.yaml"
+  [ -f "${d}/restore.d.diff" ] && [ ! -s "${d}/restore.d.diff" ]
+  [ ! -e "${d}/05-stale.yaml" ] && [ ! -e "${d}/05-stale.diff" ]
+  [ -f "${d}/01-testcni.yaml" ]
 }

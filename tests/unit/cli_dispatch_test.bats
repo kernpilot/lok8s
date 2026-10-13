@@ -85,3 +85,28 @@ _run_lo() {
   [ "$status" -eq 0 ]
   [[ "$output" != *"Usage:"* ]]
 }
+
+# Review round 4, item C(f): a dry run's flag error is rc 2 through the real
+# entrypoint, at both command boundaries (lo bootstrap, lo provision
+# --bootstrap): `--only=` (given but blank) and `--with-restore` without
+# --only. A real run's flag error stays rc 1. The Go twin:
+# internal/cli/cmd_bootstrap_dryrun_test.go; hack/parity-orchestrate.sh
+# compares both implementations.
+@test "lo bootstrap --dry-run: a flag error is rc 2 through the entrypoint" {
+  [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
+  _run_lo bootstrap --dry-run --only= </dev/null
+  [ "$status" -eq 2 ] || { echo "rc=${status}: ${output}"; return 1; }
+  [[ "$output" == *"--only: no entry names given"* ]]
+  _run_lo bootstrap --dry-run --with-restore </dev/null
+  [ "$status" -eq 2 ] || { echo "rc=${status}: ${output}"; return 1; }
+  [[ "$output" == *"--with-restore requires --only"* ]]
+  _run_lo provision --bootstrap --dry-run --only= </dev/null
+  [ "$status" -eq 2 ] || { echo "rc=${status}: ${output}"; return 1; }
+  _run_lo provision --bootstrap --dry-run --with-restore </dev/null
+  [ "$status" -eq 2 ] || { echo "rc=${status}: ${output}"; return 1; }
+  _run_lo bootstrap --with-restore </dev/null
+  [ "$status" -eq 1 ] || { echo "rc=${status}: ${output}"; return 1; }
+  _run_lo bootstrap --ignore-nondeterministic </dev/null
+  [ "$status" -eq 1 ] || { echo "rc=${status}: ${output}"; return 1; }
+  [[ "$output" == *"--ignore-nondeterministic requires --dry-run"* ]]
+}
