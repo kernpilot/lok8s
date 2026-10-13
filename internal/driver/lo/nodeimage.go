@@ -32,6 +32,18 @@ const nodeVersionHint = "Set a kindest/node image tag, for example v1.31.4. To u
 // the spec file.
 const nodeVersionUnreadable = "spec.kubernetes.version cannot be read: "
 
+// versionProblem is a NodeVersion error: full sentences for the user, which
+// the caller prints as they are. They end with a period, so they are built
+// with fmt.Sprintf and not as error-string literals.
+type versionProblem string
+
+func (p versionProblem) Error() string { return string(p) }
+
+// unreadable is a problem about the shape of the spec file.
+func unreadable(format string, args ...any) error {
+	return versionProblem(nodeVersionUnreadable + fmt.Sprintf(format, args...))
+}
+
 // NodeVersion reads spec.kubernetes.version of a Lo cluster spec file and
 // returns the tag of its kind node image (kindest/node:<tag>).
 //
@@ -52,10 +64,10 @@ const nodeVersionUnreadable = "spec.kubernetes.version cannot be read: "
 func NodeVersion(clusterYAML string) (string, error) {
 	docs, err := yqsem.LoadDocs(clusterYAML)
 	if err != nil {
-		return "", errors.New(nodeVersionUnreadable + err.Error() + ". Correct the spec file.")
+		return "", unreadable("%v. Correct the spec file.", err)
 	}
 	if len(docs) > 1 {
-		return "", fmt.Errorf("%sthe spec file has %d YAML documents. Keep only the cluster spec in the file.", nodeVersionUnreadable, len(docs))
+		return "", unreadable("the spec file has %d YAML documents. Keep only the cluster spec in the file.", len(docs))
 	}
 	var n *yaml.Node
 	if len(docs) == 1 {
@@ -63,11 +75,11 @@ func NodeVersion(clusterYAML string) (string, error) {
 	}
 	switch err := yqsem.CheckMerges(n); {
 	case errors.Is(err, yqsem.ErrMergeValue):
-		return "", errors.New(nodeVersionUnreadable + "a merge key (<<) in the spec file does not refer to a map or a list of maps. Correct the merge key.")
+		return "", unreadable("a merge key (<<) in the spec file does not refer to a map or a list of maps. Correct the merge key.")
 	case errors.Is(err, yqsem.ErrMergeCycle):
 		// yq overflows its stack here: the bash twin refuses with the
 		// first line of the yq output instead.
-		return "", errors.New(nodeVersionUnreadable + "a merge key (<<) in the spec file refers back to its own map. Correct the merge key.")
+		return "", unreadable("a merge key (<<) in the spec file refers back to its own map. Correct the merge key.")
 	}
 
 	// Each hop: the name of the node in a problem, and the key read from it.
@@ -79,7 +91,7 @@ func NodeVersion(clusterYAML string) (string, error) {
 			return "", nil
 		}
 		if n.Kind != yaml.MappingNode {
-			return "", fmt.Errorf("%s%s is %s, not a map. Write %s as a YAML map.", nodeVersionUnreadable, hop.name, shapeOf(n), hop.name)
+			return "", unreadable("%s is %s, not a map. Write %s as a YAML map.", hop.name, shapeOf(n), hop.name)
 		}
 		n, _ = yqsem.MapGetMerged(n, hop.key)
 	}
@@ -87,14 +99,14 @@ func NodeVersion(clusterYAML string) (string, error) {
 		return "", nil
 	}
 	if n.Kind != yaml.ScalarNode {
-		return "", fmt.Errorf("%sthe value is %s, not an image tag. %s", nodeVersionUnreadable, shapeOf(n), nodeVersionHint)
+		return "", unreadable("the value is %s, not an image tag. %s", shapeOf(n), nodeVersionHint)
 	}
 	v := strings.TrimRight(n.Value, "\n")
 	if v == "" || v == "null" {
 		return "", nil
 	}
 	if !nodeVersionRe.MatchString(v) {
-		return "", fmt.Errorf("spec.kubernetes.version '%s' is not a valid image tag. %s", v, nodeVersionHint)
+		return "", versionProblem(fmt.Sprintf("spec.kubernetes.version '%s' is not a valid image tag. %s", v, nodeVersionHint))
 	}
 	return v, nil
 }
