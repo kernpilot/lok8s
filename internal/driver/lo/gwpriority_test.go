@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -40,13 +41,37 @@ type gwEndpoint struct {
 	dev      string
 }
 
+// gwExit is a failed command with its exit status, like *exec.ExitError.
+type gwExit struct {
+	code int
+	msg  string
+}
+
+func (e gwExit) Error() string { return e.msg }
+func (e gwExit) ExitCode() int { return e.code }
+
 type gwDocker struct {
 	t        *testing.T
 	version  string            // `docker version` answer; "" = the command fails
 	gateways map[string]string // network → IPv4 gateway
-	nodes    []string          // `kind get nodes`
+	nodes    []string          // the cluster's nodes in `kind get nodes`
+	// lb is kind's HA load balancer ("" = none): `kind get nodes` lists it
+	// after the nodes, with the role label external-load-balancer. Its
+	// image has no `ip`, so every docker exec in it fails.
+	lb       string
 	eps      map[string][]gwEndpoint
 	override map[string]string // node → the default route `ip route replace` set
+	// foreign are other members of lok8s-registries: the registries and
+	// another cluster's nodes. They are not in `kind get nodes`.
+	foreign []string
+	// stopped nodes: State.Running is false, the endpoint has no gateway,
+	// and a docker exec fails.
+	stopped map[string]bool
+	// gone nodes: `kind get nodes` lists them, docker inspect fails.
+	gone map[string]bool
+	// membersRead, when set, makes the member read of lok8s-registries
+	// fail after it printed this partial list.
+	membersRead string
 	// refuseGwPriority makes `network connect --gw-priority` fail (a
 	// client that does not know the flag).
 	refuseGwPriority bool
@@ -56,21 +81,27 @@ type gwDocker struct {
 	// failExec makes a `docker exec <node> <cmd>` fail when cmd starts
 	// with one of these prefixes.
 	failExec []string
-	log      []string
+	// noRouteDev makes `ip -o -4 route get` succeed with no output.
+	noRouteDev bool
+	log        []string
+}
+
+// daemonMajor is the major version of the daemon in g.version, 0 when it
+// does not parse.
+func (g *gwDocker) daemonMajor() int {
+	f := strings.Fields(g.version)
+	if len(f) != 2 {
+		return 0
+	}
+	major, _, _ := strings.Cut(f[1], ".")
+	n, _ := strconv.Atoi(major)
+	return n
 }
 
 // networkReportsGateway is moby's behaviour for a network created with
 // --subnet and no --gateway: the gateway is in `docker network inspect`
 // from Docker 29 on, and empty before.
-func (g *gwDocker) networkReportsGateway() bool {
-	f := strings.Fields(g.version)
-	if len(f) != 2 {
-		return false
-	}
-	major, _, _ := strings.Cut(f[1], ".")
-	n, err := strconv.Atoi(major)
-	return err == nil && n >= 29
-}
+func (g *gwDocker) networkReportsGateway() bool { return g.daemonMajor() >= 29 }
 
 // restart is a node restart: Docker programs the default route again, and
 // the route that `ip route replace` set is gone.
@@ -89,6 +120,8 @@ func newGWDocker(t *testing.T, project string, version string) *gwDocker {
 		nodes:    []string{"c-control-plane", "c-worker"},
 		eps:      map[string][]gwEndpoint{},
 		override: map[string]string{},
+		stopped:  map[string]bool{},
+		gone:     map[string]bool{},
 	}
 	// kind creates every node on the project network: eth0, priority 0.
 	for _, n := range g.nodes {
@@ -97,10 +130,34 @@ func newGWDocker(t *testing.T, project string, version string) *gwDocker {
 	return g
 }
 
+// newHAGWDocker is an HA cluster: three control-plane nodes, a worker and
+// kind's load balancer, all on the project network.
+func newHAGWDocker(t *testing.T, project string, version string) *gwDocker {
+	g := newGWDocker(t, project, version)
+	g.nodes = []string{"c-control-plane", "c-control-plane2", "c-control-plane3", "c-worker"}
+	g.lb = "c-external-load-balancer"
+	for _, n := range append(slices.Clone(g.nodes), g.lb) {
+		g.eps[n] = []gwEndpoint{{network: project, dev: "eth0"}}
+	}
+	return g
+}
+
+// containers is the cluster's containers as `kind get nodes` lists them.
+func (g *gwDocker) containers() []string {
+	if g.lb == "" {
+		return slices.Clone(g.nodes)
+	}
+	return append(slices.Clone(g.nodes), g.lb)
+}
+
 // attach adds an endpoint the way an older lok8s did (priority 0).
 func (g *gwDocker) attach(node, network string, priority int) {
 	g.eps[node] = append(g.eps[node], gwEndpoint{network: network, priority: priority, dev: fmt.Sprintf("eth%d", len(g.eps[node]))})
 	delete(g.override, node) // Docker programs the gateway again on a connect
+}
+
+func (g *gwDocker) attached(node, network string) bool {
+	return slices.ContainsFunc(g.eps[node], func(ep gwEndpoint) bool { return ep.network == network })
 }
 
 // dockerDefault is Docker's choice: the highest priority, then the network
@@ -124,13 +181,56 @@ func (g *gwDocker) defaultRoute(node string) string {
 	return g.dockerDefault(node)
 }
 
+var gwNetworkField = regexp.MustCompile(`\{\{with index \.NetworkSettings\.Networks "([^"]+)"\}\}\{\{\.(Gateway|GwPriority)\}\}\{\{end\}\}`)
+
+// inspect evaluates the --format of `docker inspect <node>` for the pieces
+// the driver uses. .GwPriority before Docker 28 fails the template, as the
+// field does not exist there.
+func (g *gwDocker) inspect(node, format string) (string, error) {
+	if _, ok := g.eps[node]; !ok || g.gone[node] {
+		return "", gwExit{1, "Error: No such object: " + node}
+	}
+	if strings.Contains(format, ".GwPriority") && g.daemonMajor() < 28 {
+		return "", gwExit{1, `template: :1: can't evaluate field GwPriority`}
+	}
+	role := "worker"
+	switch {
+	case node == g.lb:
+		role = "external-load-balancer"
+	case strings.Contains(node, "-control-plane"):
+		role = "control-plane"
+	}
+	out := strings.ReplaceAll(format, `{{index .Config.Labels "io.x-k8s.kind.role"}}`, role)
+	out = strings.ReplaceAll(out, `{{.State.Running}}`, strconv.FormatBool(!g.stopped[node]))
+	out = gwNetworkField.ReplaceAllStringFunc(out, func(m string) string {
+		sm := gwNetworkField.FindStringSubmatch(m)
+		for _, ep := range g.eps[node] {
+			if ep.network != sm[1] {
+				continue
+			}
+			if sm[2] == "GwPriority" {
+				return strconv.Itoa(ep.priority)
+			}
+			if g.noEndpointGateway || g.stopped[node] {
+				return ""
+			}
+			return g.gateways[ep.network]
+		}
+		return ""
+	})
+	if strings.Contains(out, "{{") {
+		g.t.Errorf("unexpected docker inspect format: %s", format)
+	}
+	return out, nil
+}
+
 func (g *gwDocker) handle(c execx.Cmd) error {
 	argv := strings.Join(append([]string{c.Name}, c.Args...), " ")
 	g.log = append(g.log, argv)
 	a := c.Args
 	switch {
 	case c.Name == "kind" && len(a) >= 2 && a[0] == "get" && a[1] == "nodes":
-		writeOut(c, strings.Join(g.nodes, "\n")+"\n")
+		writeOut(c, strings.Join(g.containers(), "\n")+"\n")
 	case c.Name == "kind" && len(a) >= 2 && a[0] == "get" && a[1] == "clusters":
 		writeOut(c, "c\n") // the cluster exists: createKindCluster skips the create
 	case c.Name != "docker":
@@ -139,16 +239,12 @@ func (g *gwDocker) handle(c execx.Cmd) error {
 			return fmt.Errorf("cannot connect to the docker daemon")
 		}
 		writeOut(c, g.version+"\n")
-	case len(a) == 4 && a[0] == "inspect" && a[2] == "--format" &&
-		strings.HasSuffix(a[3], `"}}{{.Gateway}}{{end}}`):
-		// {{with index .NetworkSettings.Networks "<net>"}}{{.Gateway}}{{end}}
-		_, network, _ := strings.Cut(strings.TrimSuffix(a[3], `"}}{{.Gateway}}{{end}}`), `.Networks "`)
-		for _, ep := range g.eps[a[1]] {
-			if ep.network == network && !g.noEndpointGateway {
-				writeOut(c, g.gateways[network])
-			}
+	case len(a) == 4 && a[0] == "inspect" && a[2] == "--format":
+		out, err := g.inspect(a[1], a[3])
+		if err != nil {
+			return err
 		}
-		writeOut(c, "\n")
+		writeOut(c, out+"\n")
 	case len(a) >= 3 && a[0] == "network" && a[1] == "inspect":
 		format := a[len(a)-1]
 		switch {
@@ -158,11 +254,18 @@ func (g *gwDocker) handle(c execx.Cmd) error {
 			}
 			writeOut(c, " \n")
 		case strings.Contains(format, ".Containers"):
-			for _, n := range g.nodes {
-				for _, ep := range g.eps[n] {
-					if ep.network == a[2] {
-						writeOut(c, n+" ")
-					}
+			if g.membersRead != "" && a[2] == "lok8s-registries" {
+				writeOut(c, g.membersRead)
+				return gwExit{1, "Error response from daemon: context deadline exceeded"}
+			}
+			if a[2] == "lok8s-registries" {
+				for _, n := range g.foreign {
+					writeOut(c, n+" ")
+				}
+			}
+			for _, n := range g.containers() {
+				if g.attached(n, a[2]) {
+					writeOut(c, n+" ")
 				}
 			}
 			writeOut(c, "\n")
@@ -171,17 +274,26 @@ func (g *gwDocker) handle(c execx.Cmd) error {
 		rest, priority := a[2:], 0
 		if len(rest) >= 2 && rest[0] == "--gw-priority" {
 			if g.refuseGwPriority {
-				return fmt.Errorf("unknown flag: --gw-priority")
+				return gwExit{125, "unknown flag: --gw-priority"}
 			}
 			priority, _ = strconv.Atoi(rest[1])
 			rest = rest[2:]
 		}
+		if g.attached(rest[1], rest[0]) {
+			return gwExit{1, "Error response from daemon: endpoint with name " + rest[1] + " already exists in network " + rest[0]}
+		}
 		g.attach(rest[1], rest[0], priority)
 	case len(a) >= 3 && a[0] == "exec":
 		node, cmd := a[1], strings.Join(a[2:], " ")
+		if node == g.lb {
+			return gwExit{127, `OCI runtime exec failed: exec: "ip": executable file not found in $PATH`}
+		}
+		if g.stopped[node] {
+			return gwExit{1, "Error response from daemon: container " + node + " is not running"}
+		}
 		for _, p := range g.failExec {
 			if strings.HasPrefix(cmd, p) {
-				return fmt.Errorf("exit status 1")
+				return gwExit{2, "ip: failed"}
 			}
 		}
 		switch {
@@ -189,6 +301,9 @@ func (g *gwDocker) handle(c execx.Cmd) error {
 			writeOut(c, g.defaultRoute(node)+" \n")
 		case strings.HasPrefix(cmd, "ip -o -4 route get "):
 			gw := strings.TrimPrefix(cmd, "ip -o -4 route get ")
+			if g.noRouteDev {
+				break
+			}
 			for _, ep := range g.eps[node] {
 				if g.gateways[ep.network] == gw {
 					writeOut(c, gw+" dev "+ep.dev+" src 10.0.0.9 uid 0 \\    cache \n")
@@ -393,8 +508,10 @@ func TestRepairReadsTheGatewayFromTheNodeEndpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, n := range g.nodes {
-				read := "docker inspect " + n + ` --format {{with index .NetworkSettings.Networks "ops"}}{{.Gateway}}{{end}}`
-				if !slices.Contains(g.log, read) {
+				read := slices.ContainsFunc(g.calls("docker inspect "+n+" --format "), func(l string) bool {
+					return strings.Contains(l, `{{with index .NetworkSettings.Networks "ops"}}{{.Gateway}}{{end}}`)
+				})
+				if !read {
 					t.Errorf("%s: the endpoint gateway was not read:\n%s", n, strings.Join(g.log, "\n"))
 				}
 				move := "docker exec " + n + " ip route replace default via 10.125.201.192 dev eth0"
@@ -424,7 +541,7 @@ func TestRepairWarnsWhenNoGatewayIsKnown(t *testing.T) {
 		t.Fatalf("the route was read or changed without a gateway:\n%s", strings.Join(r, "\n"))
 	}
 	for _, n := range g.nodes {
-		want := "lo: " + n + `: found no IPv4 gateway for network ops (docker inspect: ""). lo did not examine the default route. Examine it: docker exec ` + n + " ip -4 route show default"
+		want := "lo: " + n + `: found no IPv4 gateway for network ops (docker inspect: ""). lo did not examine the default route. Attach the node to ops (docker network connect ops ` + n + "). Then run lo up again."
 		if !strings.Contains(errBuf.String(), want) {
 			t.Errorf("no warning for %s:\n%s\nwant:\n%s", n, errBuf.String(), want)
 		}
@@ -432,25 +549,39 @@ func TestRepairWarnsWhenNoGatewayIsKnown(t *testing.T) {
 }
 
 func TestRepairWarnsWhenANodeCannotBeRead(t *testing.T) {
+	// A failed command shows its exit status, an empty answer shows "". Each
+	// warning ends with the action that removes its cause.
 	for _, tc := range []struct{ name, fail, want string }{
 		{
-			"the default route", "ip -4 route show default",
-			"lo: c-worker: cannot read the default route (docker exec c-worker ip -4 route show default failed). Make sure that the node runs, then run lo up again.",
+			"the default route fails", "ip -4 route show default",
+			"lo: c-worker: cannot read the default route (docker exec c-worker ip -4 route show default: exit status 2). lo did not change the default route. Make sure that the node has the ip command (iproute2). Then run lo up again.",
 		},
 		{
-			"the interface to the gateway", "ip -o -4 route get",
-			`lo: c-worker: found no interface to gateway 10.125.201.192 of network ops (ip -o -4 route get 10.125.201.192: ""). lo did not change the default route. Examine it: docker exec c-worker ip -4 route show default`,
+			"the interface to the gateway fails", "ip -o -4 route get",
+			"lo: c-worker: found no interface to gateway 10.125.201.192 of network ops (ip -o -4 route get 10.125.201.192: exit status 2). lo did not change the default route. Make sure that the node has an address in the subnet of ops (docker exec c-worker ip -4 addr show). Then run lo up again.",
+		},
+		{
+			"the interface to the gateway is not named", "",
+			`lo: c-worker: found no interface to gateway 10.125.201.192 of network ops (ip -o -4 route get 10.125.201.192: ""). lo did not change the default route. Make sure that the node has an address in the subnet of ops (docker exec c-worker ip -4 addr show). Then run lo up again.`,
+		},
+		{
+			"the move fails", "ip route replace",
+			"lo: c-worker: could not move the default route to ops (ip route replace default via 10.125.201.192 dev eth0: exit status 2). Move the route by hand (docker exec c-worker ip route replace default via 10.125.201.192 dev eth0). Then run lo up again.",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newGWDocker(t, "ops", "27.5.1 27.5.1")
-			g.failExec = []string{tc.fail}
+			if tc.fail != "" {
+				g.failExec = []string{tc.fail}
+			} else {
+				g.noRouteDev = true
+			}
 			d, errBuf := gwDriver(t, g, "ops")
 
 			if err := d.connectNodesToRegistryNetwork(t.Context(), "c", errBuf); err != nil {
 				t.Fatalf("a failed read failed the connect: %v", err)
 			}
-			if r := g.calls("docker exec c-worker ip route replace"); len(r) != 0 {
+			if r := g.calls("docker exec c-worker ip route replace"); len(r) != 0 && tc.fail != "ip route replace" {
 				t.Fatalf("the route was changed after a failed read: %v", r)
 			}
 			if !strings.Contains(errBuf.String(), tc.want) {
@@ -549,6 +680,207 @@ func TestFallbackRepairRunsAgainAfterANodeRestart(t *testing.T) {
 	if !strings.Contains(errBuf2.String(), "c-worker: the default route did not go through ops — moved it there") {
 		t.Fatalf("the second lo up does not report the move:\n%s", errBuf2.String())
 	}
+}
+
+// gwForeign are members of lok8s-registries that are not this cluster's:
+// another cluster's node and a shared registry.
+var gwForeign = []string{"other-control-plane", "lok8s-registry-io-docker"}
+
+// assertOnlyClusterTouched: no call names a foreign member, and no docker
+// exec reaches the load balancer or a container outside the cluster.
+func assertOnlyClusterTouched(t *testing.T, g *gwDocker) {
+	t.Helper()
+	for _, l := range g.log {
+		for _, f := range gwForeign {
+			if strings.Contains(l, " "+f) {
+				t.Errorf("a foreign member was touched: %s", l)
+			}
+		}
+	}
+	for _, l := range g.calls("docker exec ") {
+		node := strings.Fields(l)[2]
+		if !slices.Contains(g.nodes, node) {
+			t.Errorf("docker exec outside the cluster's nodes: %s", l)
+		}
+	}
+}
+
+func TestRepairOnAnHACluster(t *testing.T) {
+	// `kind get nodes` lists kind's HA load balancer too. Its envoy image
+	// has no `ip`: a docker exec in it fails, and a repair that tried printed
+	// a warning on every lo up. The load balancer is attached like a node
+	// (the connect did that before the gateway priority existed), but its
+	// route is never read. Other members of the registry network (another
+	// cluster's node, a registry) are never touched.
+	for _, tc := range []struct {
+		name, project, version string
+		attachedAt             *int // nil: nothing attached yet
+		wantExec, wantMoves    bool
+	}{
+		{"healthy, Docker 29, attached at -1", "ops", "29.6.2 29.6.2", new(-1), false, false},
+		{"healthy, Docker 27, a name before lok8s-registries", "kubehz", "27.5.1 27.5.1", new(0), true, false},
+		{"Docker 27, attached at 0 by an older lok8s", "ops", "27.5.1 27.5.1", new(0), true, true},
+		{"Docker 29, a fresh attach", "ops", "29.6.2 29.6.2", nil, false, false},
+		{"Docker 27, a fresh attach", "ops", "27.5.1 27.5.1", nil, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newHAGWDocker(t, tc.project, tc.version)
+			g.foreign = gwForeign
+			if tc.attachedAt != nil {
+				for _, n := range g.containers() {
+					g.attach(n, "lok8s-registries", *tc.attachedAt)
+				}
+			}
+			d, errBuf := gwDriver(t, g, tc.project)
+
+			if err := d.connectNodesToRegistryNetwork(t.Context(), "c", errBuf); err != nil {
+				t.Fatal(err)
+			}
+			assertOnlyClusterTouched(t, g)
+			assertProjectDefault(t, g, tc.project)
+			if !g.attached(g.lb, "lok8s-registries") {
+				t.Errorf("the load balancer is not attached (the connect attached it before the gateway priority existed)")
+			}
+			if got := len(g.calls("docker exec ")) > 0; got != tc.wantExec {
+				t.Errorf("docker exec called: %v, want %v:\n%s", got, tc.wantExec, strings.Join(g.log, "\n"))
+			}
+			if strings.Contains(errBuf.String(), g.lb) {
+				t.Errorf("a warning names the load balancer:\n%s", errBuf.String())
+			}
+			moves := strings.Count(errBuf.String(), "moved it there")
+			if tc.wantMoves && moves != len(g.nodes) || !tc.wantMoves && errBuf.Len() != 0 {
+				t.Errorf("output (want a move per node: %v):\n%s", tc.wantMoves, errBuf.String())
+			}
+		})
+	}
+}
+
+func TestRepairSkipsANodeAtANegativePriority(t *testing.T) {
+	// Docker 28+: a registry endpoint at a negative gateway priority cannot
+	// hold the default route. The repair reads that priority in the same
+	// `docker inspect` and skips the three in-node commands. A node at 0 (an
+	// older lok8s) is still repaired.
+	g := newGWDocker(t, "ops", "28.5.1 28.5.1")
+	g.attach("c-control-plane", "lok8s-registries", -1)
+	g.attach("c-worker", "lok8s-registries", 0)
+	d, errBuf := gwDriver(t, g, "ops")
+
+	if err := d.connectNodesToRegistryNetwork(t.Context(), "c", errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if r := g.calls("docker exec c-control-plane"); len(r) != 0 {
+		t.Fatalf("a node at priority -1 was read or changed: %v", r)
+	}
+	if r := g.calls("docker exec c-worker ip route replace"); len(r) != 1 {
+		t.Fatalf("the node at priority 0 was not repaired:\n%s", strings.Join(g.log, "\n"))
+	}
+	if n := len(g.calls("docker inspect ")); n != 2 {
+		t.Fatalf("%d docker inspect calls, want one per node:\n%s", n, strings.Join(g.log, "\n"))
+	}
+	assertProjectDefault(t, g, "ops")
+	if strings.Contains(errBuf.String(), "c-control-plane") {
+		t.Fatalf("output for the node at -1:\n%s", errBuf.String())
+	}
+}
+
+func TestRepairWarnsForANodeThatDoesNotRun(t *testing.T) {
+	// A stopped node has no endpoint gateway, and a docker exec in it fails.
+	// The warning says that the node does not run, not that a gateway is
+	// missing.
+	g := newGWDocker(t, "ops", "27.5.1 27.5.1")
+	for _, n := range g.nodes {
+		g.attach(n, "lok8s-registries", 0)
+	}
+	g.stopped["c-worker"] = true
+	d, errBuf := gwDriver(t, g, "ops")
+
+	if err := d.connectNodesToRegistryNetwork(t.Context(), "c", errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if r := g.calls("docker exec c-worker"); len(r) != 0 {
+		t.Fatalf("docker exec in a node that does not run: %v", r)
+	}
+	want := `lo: c-worker: the node is not running (State.Running: "false"). lo did not examine the default route. Start the node (docker start c-worker). Then run lo up again.`
+	if !strings.Contains(errBuf.String(), want) {
+		t.Fatalf("no warning:\n%s\nwant:\n%s", errBuf.String(), want)
+	}
+	if strings.Contains(errBuf.String(), "found no IPv4 gateway") {
+		t.Fatalf("a stopped node reported as a missing gateway:\n%s", errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "c-control-plane: the default route did not go through ops") {
+		t.Fatalf("the running node was not repaired:\n%s", errBuf.String())
+	}
+}
+
+func TestRepairWarnsForANodeThatCannotBeInspected(t *testing.T) {
+	g := newGWDocker(t, "ops", "27.5.1 27.5.1")
+	for _, n := range g.nodes {
+		g.attach(n, "lok8s-registries", 0)
+	}
+	g.gone["c-worker"] = true
+	d, errBuf := gwDriver(t, g, "ops")
+
+	if err := d.connectNodesToRegistryNetwork(t.Context(), "c", errBuf); err != nil {
+		t.Fatal(err)
+	}
+	want := "lo: c-worker: cannot inspect the node (docker inspect c-worker: exit status 1). lo did not examine the default route. Make sure that the node exists. Then run lo up again."
+	if !strings.Contains(errBuf.String(), want) {
+		t.Fatalf("no warning:\n%s\nwant:\n%s", errBuf.String(), want)
+	}
+	if r := g.calls("docker exec c-worker"); len(r) != 0 {
+		t.Fatalf("docker exec in a node that cannot be inspected: %v", r)
+	}
+}
+
+func TestMemberReadThatFailsWithPartialOutput(t *testing.T) {
+	// The member read of lok8s-registries fails after it printed a partial
+	// list: another cluster's node, and c-worker, which is NOT attached. A
+	// failed read is no membership. The connect still attaches every node
+	// (Docker refuses a second endpoint for c-control-plane, which an older
+	// lok8s attached, and the repair moves its route). The repair-only walk
+	// touches nothing.
+	partial := "other-control-plane c-worker "
+
+	t.Run("connect", func(t *testing.T) {
+		g := newGWDocker(t, "ops", "29.6.2 29.6.2")
+		g.foreign = gwForeign
+		g.attach("c-control-plane", "lok8s-registries", 0)
+		g.membersRead = partial
+		d, errBuf := gwDriver(t, g, "ops")
+
+		if err := d.connectNodesToRegistryNetwork(t.Context(), "c", errBuf); err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range g.nodes {
+			if !g.attached(n, "lok8s-registries") {
+				t.Errorf("%s is not attached:\n%s", n, strings.Join(g.log, "\n"))
+			}
+		}
+		if n := len(g.eps["c-control-plane"]); n != 2 {
+			t.Errorf("c-control-plane has %d endpoints, want 2", n)
+		}
+		assertOnlyClusterTouched(t, g)
+		assertProjectDefault(t, g, "ops")
+	})
+	t.Run("repair only", func(t *testing.T) {
+		g := newGWDocker(t, "ops", "29.6.2 29.6.2")
+		g.foreign = gwForeign
+		g.attach("c-worker", "lok8s-registries", 0)
+		g.membersRead = partial
+		d, errBuf := gwDriverShared(t, g, "ops", `"shared":false,`)
+
+		if err := d.createKindCluster(t.Context(), "c", "v1.31.4", "ops", "", io.Discard, errBuf); err != nil {
+			t.Fatal(err)
+		}
+		for _, prefix := range []string{"docker network connect", "docker exec", "docker inspect", "kind get nodes"} {
+			if c := g.calls(prefix); len(c) != 0 {
+				t.Errorf("%s after a failed member read: %v", prefix, c)
+			}
+		}
+		if errBuf.Len() != 0 {
+			t.Fatalf("output:\n%s", errBuf.String())
+		}
+	})
 }
 
 func TestGwPrioritySupported(t *testing.T) {

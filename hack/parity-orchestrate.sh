@@ -698,20 +698,26 @@ done
 # ── lo provision — the registry network's gateway priority ───────────────────
 # A shared-registries cluster whose project network ("zz-gwnet") sorts after
 # "lok8s-registries": with the same gateway priority, Docker gives the default
-# route to the registry network. The stubs: kind reports two nodes; docker
-# answers `docker version` with PARITY_DOCKER_VERSION, the gateway of each
-# node's endpoint on the project network (`docker inspect <node>`; empty with
-# PARITY_NO_GATEWAY=1), and the in-node `ip` reads (a default route through
-# the registry network on eth1, the project network on eth0);
-# PARITY_ATTACHED=1 lists the nodes as members of the registry network.
+# route to the registry network. The stubs: kind reports two nodes (with
+# PARITY_HA=1 also kind's HA load balancer, whose image has no `ip`: a docker
+# exec in it fails with 127); docker answers `docker version` with
+# PARITY_DOCKER_VERSION, `docker inspect <node>` with the kind role, a running
+# state, the gateway of the node's endpoint on the project network (empty with
+# PARITY_NO_GATEWAY=1) and, when asked, the gateway priority of its registry
+# endpoint (PARITY_GW_PRIO, default 0), and the in-node `ip` reads (a default
+# route through the registry network on eth1, the project network on eth0).
+# The registry network always has two foreign members (another cluster's
+# node, a registry that is not one of this project's mirrors);
+# PARITY_ATTACHED=1 lists the cluster's containers too.
 # `docker network inspect` reports no gateway for the project network: the
 # shape of every Docker up to 28.5 for a network created with --subnet and no
 # --gateway. Docker 28+: the connect carries --gw-priority -1 and the route is
 # not touched. Docker 27: a plain connect, then the route replace. An attached
 # node: no connect, the route replace, also when shared is off (gwprio-off.dev,
 # a cluster created under the old shared default). No gateway: one warning per
-# node, the route is not read. The docker argv is diffed across the sides and
-# pinned.
+# node, the route is not read. HA: the load balancer is never exec'd and never
+# named in a warning; at priority -1 on Docker 29 no node is exec'd either.
+# The docker argv is diffed across the sides and pinned.
 mkdir -p "${PROJ}/clusters/gwprio.dev" "${PROJ}/clusters/gwprio-off.dev"
 cat > "${PROJ}/clusters/gwprio.dev/cluster.lok8s.yaml" <<'YAML'
 kind: Lo
@@ -745,9 +751,13 @@ spec:
 YAML
 parity::stub "${PROJ}" kind <<'SH'
 #!/usr/bin/env bash
-# Parity stub (gateway priority): no cluster exists; two nodes.
+# Parity stub (gateway priority): no cluster exists; two nodes, and the HA
+# load balancer with PARITY_HA=1.
 case "${1:-} ${2:-}" in
-  "get nodes")      printf 'zz-gwprio-control-plane\nzz-gwprio-worker\n'; exit 0 ;;
+  "get nodes")
+    printf 'zz-gwprio-control-plane\nzz-gwprio-worker\n'
+    if [[ "${PARITY_HA:-0}" == 1 ]]; then echo zz-gwprio-external-load-balancer; fi
+    exit 0 ;;
   "create cluster") echo "stub: kind $*"; exit 0 ;;
 esac
 exit 0
@@ -762,9 +772,21 @@ case "${1:-} ${2:-}" in
   "network inspect")
     case "$*" in
       *".Gateway"*)    echo " "; exit 0 ;;
-      *".Containers"*) if [[ "${PARITY_ATTACHED:-0}" == 1 ]]; then echo "zz-gwprio-control-plane zz-gwprio-worker "; exit 0; fi ;;
+      *".Containers"*)
+        if [[ "${3}" == lok8s-registries ]]; then
+          printf 'other-control-plane lok8s-registry-zz-foreign '
+          if [[ "${PARITY_ATTACHED:-0}" == 1 ]]; then
+            printf 'zz-gwprio-control-plane zz-gwprio-worker '
+            if [[ "${PARITY_HA:-0}" == 1 ]]; then printf 'zz-gwprio-external-load-balancer '; fi
+          fi
+          echo
+          exit 0
+        fi ;;
     esac
     exit 1 ;;
+  "exec zz-gwprio-external-load-balancer")
+    echo 'OCI runtime exec failed: exec: "ip": executable file not found in $PATH' >&2
+    exit 127 ;;
   "exec "*)
     case "$*" in
       *"ip -4 route show default") echo "default via 10.125.200.128 dev eth1"; exit 0 ;;
@@ -773,8 +795,17 @@ case "${1:-} ${2:-}" in
     exit 0 ;;
   "inspect "*)
     case "$*" in
-      *'Networks "zz-gwnet"}}{{.Gateway}}{{end}}')
-        if [[ "${PARITY_NO_GATEWAY:-0}" == 1 ]]; then echo; else echo "10.99.16.1"; fi
+      *'{{index .Config.Labels "io.x-k8s.kind.role"}}'*'Networks "zz-gwnet"}}{{.Gateway}}{{end}}'*)
+        role=worker
+        case "${2}" in
+          *-external-load-balancer) role=external-load-balancer ;;
+          *-control-plane)          role=control-plane ;;
+        esac
+        gw=10.99.16.1
+        if [[ "${PARITY_NO_GATEWAY:-0}" == 1 ]]; then gw=""; fi
+        out="${role}|true|${gw}"
+        if [[ "$*" == *GwPriority* ]]; then out+="|${PARITY_GW_PRIO:-0}"; fi
+        echo "${out}"
         exit 0 ;;
     esac
     exit 1 ;;
@@ -822,7 +853,8 @@ for side in bash go; do
   gw_pin "${side}: Docker 27: both nodes connect plainly"        "${WORK}/docker.${side}.log" 2 '^docker network connect lok8s-registries zz-gwprio-(control-plane|worker)$'
   gw_pin "${side}: Docker 27: both routes move to the project network" "${WORK}/docker.${side}.log" 2 '^docker exec zz-gwprio-(control-plane|worker) ip route replace default via 10\.99\.16\.1 dev eth0$'
   gw_pin "${side}: Docker 27: the move is reported"              "${WORK}/${side}.err" 2 'zz-gwprio-(control-plane|worker): the default route did not go through zz-gwnet — moved it there \(via 10\.99\.16\.1 dev eth0\)'
-  gw_pin "${side}: Docker 27: the gateway comes from each node endpoint" "${WORK}/docker.${side}.log" 2 '^docker inspect zz-gwprio-(control-plane|worker) --format \{\{with index \.NetworkSettings\.Networks "zz-gwnet"\}\}\{\{\.Gateway\}\}\{\{end\}\}$'
+  gw_pin "${side}: Docker 27: the gateway comes from each node endpoint" "${WORK}/docker.${side}.log" 2 '^docker inspect zz-gwprio-(control-plane|worker) --format .*\{\{with index \.NetworkSettings\.Networks "zz-gwnet"\}\}\{\{\.Gateway\}\}\{\{end\}\}'
+  gw_pin "${side}: Docker 27: GwPriority is not asked"           "${WORK}/docker.${side}.log" 0 'GwPriority'
   gw_pin "${side}: Docker 27: the network gateway is not read"   "${WORK}/docker.${side}.log" 0 '^docker network inspect zz-gwnet .*\.Gateway'
 done
 export PARITY_NO_GATEWAY=1
@@ -849,6 +881,22 @@ for side in bash go; do
   gw_pin "${side}: shared off, not attached: no connect"         "${WORK}/docker.${side}.log" 0 '^docker network connect '
   gw_pin "${side}: shared off, not attached: no node read"       "${WORK}/docker.${side}.log" 0 '^docker (exec .* ip |inspect zz-gwprio-[a-z-]+ --format .*\.Gateway)'
 done
-unset PARITY_DOCKER_LOG PARITY_DOCKER_VERSION PARITY_ATTACHED
+export PARITY_HA=1 PARITY_ATTACHED=1 PARITY_DOCKER_VERSION="29.6.2 29.6.2" PARITY_GW_PRIO=-1
+gw_check "HA, Docker 29, attached at -1"
+for side in bash go; do
+  gw_pin "${side}: HA, -1: no docker exec"                       "${WORK}/docker.${side}.log" 0 '^docker exec '
+  gw_pin "${side}: HA, -1: one inspect per container"            "${WORK}/docker.${side}.log" 3 '^docker inspect zz-gwprio-(control-plane|worker|external-load-balancer) --format .*GwPriority'
+  gw_pin "${side}: HA, -1: no foreign member touched"            "${WORK}/docker.${side}.log" 0 ' (other-control-plane|lok8s-registry-zz-foreign)( |$)'
+  gw_pin "${side}: HA, -1: no warning"                           "${WORK}/${side}.err" 0 'lo: zz-gwprio-'
+done
+export PARITY_DOCKER_VERSION="27.5.1 27.5.1"
+unset PARITY_GW_PRIO
+gw_check "HA, Docker 27, attached at 0"
+for side in bash go; do
+  gw_pin "${side}: HA, 27: the load balancer is not exec'd"      "${WORK}/docker.${side}.log" 0 '^docker exec zz-gwprio-external-load-balancer '
+  gw_pin "${side}: HA, 27: both node routes move"                "${WORK}/docker.${side}.log" 2 '^docker exec zz-gwprio-(control-plane|worker) ip route replace default via 10\.99\.16\.1 dev eth0$'
+  gw_pin "${side}: HA, 27: no warning names the load balancer"   "${WORK}/${side}.err" 0 'external-load-balancer'
+done
+unset PARITY_DOCKER_LOG PARITY_DOCKER_VERSION PARITY_ATTACHED PARITY_HA
 
 report
