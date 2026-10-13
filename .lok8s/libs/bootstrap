@@ -9,9 +9,10 @@ BOOTSTRAP_PLATFORM_OWNED="cilium ccm"
 #
 # An entry's `env:` may not set lo's own orchestration or safety variables:
 # LOK8S_BOOTSTRAP_*, BOOTSTRAP_*, bootstrap_* (every name this engine and
-# the dry run keep their state in), PATH_SECRETS, KUBECONFIG and
-# KUSTOMIZE_PLUGIN_HOME — see bootstrap::_reserved_env_name. It is checked
-# before anything of the entry is exported.
+# the dry run keep their state in), PATH_SECRETS, KUBECONFIG,
+# KUSTOMIZE_PLUGIN_HOME and HELM_PLUGINS — see bootstrap::_reserved_env_name.
+# The entry's env reaches only its render subprocesses (addons::render),
+# never this shell.
 #
 # Applies spec.bootstrap entries after the cluster is provisioned. Works with ALL
 # drivers (Lo, KubeOne, Capi, Kkp) — not driver-specific.
@@ -44,7 +45,7 @@ import ^libs/addons
 
 main::bootstrap() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
-  local dry_run=0 render_dir="" no_diff=0 only="" allow_generators=0 with_restore=0
+  local dry_run=0 render_dir="" no_diff=0 only="" allow_generators=0 with_restore=0 ignore_nondeterministic=0
   # Review round 2, item E: whether --only was GIVEN at all, read from the
   # RAW argv before :args ever touches it — :args alone cannot tell
   # "--only ''" apart from "--only never given" (both leave `only` empty).
@@ -58,6 +59,7 @@ main::bootstrap() {
     'only|:'            'Apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded'
     'allow-generators|:+' "Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)"
     'with-restore|:+'   'With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)'
+    'ignore-nondeterministic|:+' 'Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)'
     "${args[@]:-}"
   )
   :args "Apply bootstrap addons" "${@}"
@@ -74,6 +76,7 @@ main::bootstrap() {
   local bootstrap_dry_run="${dry_run}" bootstrap_render_dir="${render_dir}"
   local bootstrap_no_diff="${no_diff}" bootstrap_select="${only}"
   local bootstrap_allow_generators="${allow_generators}" bootstrap_with_restore="${with_restore}"
+  local bootstrap_ignore_nondet="${ignore_nondeterministic}"
   local _rc=0
   bootstrap::dispatch "${domain}" || _rc=$?
   bootstrap::_dry_run_exit "${_rc}"
@@ -129,11 +132,13 @@ bootstrap::mode_check() {
     if (( _only_given )); then error "--only requires --bootstrap"; return 1; fi
     if (( ${allow_generators:-0} )); then error "--allow-generators requires --bootstrap"; return 1; fi
     if (( ${with_restore:-0} )); then error "--with-restore requires --bootstrap"; return 1; fi
+    if (( ${ignore_nondeterministic:-0} )); then error "--ignore-nondeterministic requires --bootstrap"; return 1; fi
   fi
   if (( ! ${dry_run:-0} )); then
     if [[ -n "${render_dir:-}" ]]; then error "--render-dir requires --dry-run"; return 1; fi
     if (( ${no_diff:-0} )); then error "--no-diff requires --dry-run"; return 1; fi
     if (( ${allow_generators:-0} )); then error "--allow-generators requires --dry-run"; return 1; fi
+    if (( ${ignore_nondeterministic:-0} )); then error "--ignore-nondeterministic requires --dry-run"; return 1; fi
   fi
   # --with-restore only means anything alongside --only (item H).
   if (( ${with_restore:-0} )) && (( ! _only_given )); then
@@ -511,8 +516,8 @@ bootstrap::_parse_entry() {
         error "bootstrap: '${_raw}' env: values must be scalars; non-scalar value for: ${_bad_env//$'\n'/, } (did you mean values:?)"
         return 1
       fi
-      # Each env: key is exported VERBATIM by _apply_one, so it must be a valid
-      # POSIX shell variable name. A key containing '-'/'.' , starting with a
+      # Each env: key is exported VERBATIM into the render's processes
+      # (addons::render), so it must be a valid POSIX shell variable name. A key containing '-'/'.' , starting with a
       # digit, or empty would make `export` fail or silently misbehave. Validate
       # here (fail fast at parse time, before any apply) with a clear message.
       local _ek
@@ -524,7 +529,7 @@ bootstrap::_parse_entry() {
         fi
       done < <(yq -r '.env // {} | keys | .[]' <<<"${_valjson}")
       # Flatten env: {KEY: scalar} → newline-separated KEY=val lines (scalar
-      # values, coerced to string). Consumed by _apply_one as exported env vars.
+      # values, coerced to string). Passed to the render's processes only.
       _o_env="$(yq -r '.env // {} | to_entries[] | .key + "=" + (.value | tostring)' <<<"${_valjson}")"
     fi
     if [[ "$(yq -r 'has("dependsOn")' <<<"${_valjson}")" == "true" ]]; then
@@ -656,24 +661,17 @@ bootstrap::_skip_reason() {
 # background subshells; a shared KAPPLY_LAST_OUTPUT would race across them.
 #
 # <env-lines> (optional) is a newline-separated list of KEY=VALUE envsubst
-# overrides from `- <name>: { env: {...} }`. Each is exported HERE (this subshell
-# only — never leaking across entries) before addons::render, so render's envsubst
-# whitelist (template::envsubst_whitelist → ${LOK8S_USER_*}/${LOK8S_SPEC_*}) picks
-# it up. Name the keys accordingly (e.g. LOK8S_USER_API_HOST) — the same
-# convention the addons reference; other names are exported but not whitelisted.
+# overrides from `- <name>: { env: {...} }`. They reach ONLY the render's
+# processes (addons::render passes them to kustomize and envsubst), never this
+# shell: an entry's env can therefore not shadow a variable of the
+# orchestration (stem, addon_dir, kubeconfig). Render's envsubst whitelist
+# (template::envsubst_whitelist → ${LOK8S_USER_*}/${LOK8S_SPEC_*}) picks them
+# up. Name the keys accordingly (e.g. LOK8S_USER_API_HOST) — the same
+# convention the addons reference; other names reach the render but are not
+# whitelisted.
 bootstrap::_apply_one() {
   local addon_name="${1}" addon_dir="${2}" kind="${3}" provider_name="${4}"
   local kubeconfig="${5}" inline_values="${6}" do_wait="${7}" env_lines="${8:-}"
-
-  # An entry's env: may not set lo's own orchestration or safety variables:
-  # checked BEFORE anything of it is exported (an export of, say,
-  # bootstrap_dry_run would otherwise already have changed this shell).
-  local _bad_var
-  if _bad_var="$(bootstrap::_reserved_env_name "${env_lines}")"; then
-    error "bootstrap: ${addon_name}: env: may not set ${_bad_var} (reserved for lo)"
-    return 1
-  fi
-  bootstrap::_export_env "${env_lines}"
 
   # The skips shared with the dry run (bootstrap::_skip_reason): the entry is
   # left alone, the reason is on stderr, the entry counts as done.
@@ -683,11 +681,19 @@ bootstrap::_apply_one() {
     return 0
   fi
 
+  # An entry's env: may not set lo's own orchestration or safety variables.
+  # The env reaches only the render (addons::render), never this shell.
+  local _bad_var
+  if _bad_var="$(bootstrap::_reserved_env_name "${env_lines}")"; then
+    error "bootstrap: ${addon_name}: env: may not set ${_bad_var} (reserved for lo)"
+    return 1
+  fi
+
   # Render via the canonical khelm path (value-stacking + kustomize build +
   # envsubst) — the SAME addons::render the KubeOne driver stages addons with.
   debug "bootstrap: rendering ${addon_name}"
   local rendered
-  if ! rendered=$(addons::render "${addon_dir}" "${kind}" "${provider_name}" "${inline_values}"); then
+  if ! rendered=$(addons::render "${addon_dir}" "${kind}" "${provider_name}" "${inline_values}" "${env_lines}"); then
     error "bootstrap: render failed for ${addon_name}"
     return 1
   fi
@@ -1375,14 +1381,23 @@ bootstrap::_prepare_render_dir() {
   else
     ( umask 077; mkdir -p "${_dir}" ) || { error "bootstrap: --render-dir: cannot create ${_dir}"; return 1; }
   fi
+  if (( ${#_entries[@]} > 0 )) && [[ -L "${_dir}/.lo-dry-run" || ! -f "${_dir}/.lo-dry-run" ]]; then
+    error "bootstrap: --render-dir: ${_dir} is not empty and does not carry .lo-dry-run as a regular file (not a dry run's own output directory) — point --render-dir at an empty or lok8s-owned directory"
+    return 1
+  fi
+  # An existing directory holds rendered Secrets in plaintext too: one that
+  # group or others may read is tightened to 0700 (an empty one, or a dry
+  # run's own).
+  local _mode
+  _mode="$(stat -c '%a' "${_dir}")" || return 1
+  if (( 8#${_mode} & 8#077 )); then
+    chmod 700 "${_dir}" || { error "bootstrap: --render-dir: cannot tighten ${_dir}"; return 1; }
+    printf 'bootstrap dry-run: %s was %04o: tightened to 0700\n' "${_dir}" "$(( 8#${_mode} & 8#777 ))" >&2
+  fi
   if (( ${#_entries[@]} == 0 )); then
     printf '%s\n' "lok8s dry-run output directory — safe to delete" | bootstrap::_write_guarded "${_dir}/.lo-dry-run" \
       || { error "bootstrap: --render-dir: cannot write ${_dir}/.lo-dry-run"; return 1; }
     return 0
-  fi
-  if [[ -L "${_dir}/.lo-dry-run" || ! -f "${_dir}/.lo-dry-run" ]]; then
-    error "bootstrap: --render-dir: ${_dir} is not empty and does not carry .lo-dry-run as a regular file (not a dry run's own output directory) — point --render-dir at an empty or lok8s-owned directory"
-    return 1
   fi
   for _e in "${_entries[@]}"; do
     [[ -f "${_e}" || -L "${_e}" ]] || continue
@@ -1415,8 +1430,7 @@ bootstrap::_write_guarded() {
 # Prints the first name (in byte order) env-lines (KEY=value, one per line)
 # may not set and returns 0, or returns 1 when there is none. Reserved:
 # LOK8S_BOOTSTRAP_*, BOOTSTRAP_*, bootstrap_*, PATH_SECRETS, KUBECONFIG,
-# KUSTOMIZE_PLUGIN_HOME (the Go twin: addons.IsProtectedEnv). A pure check:
-# nothing is exported before it passed.
+# KUSTOMIZE_PLUGIN_HOME, HELM_PLUGINS (the Go twin: addons.IsProtectedEnv).
 bootstrap::_reserved_env_name() {
   local _lines="${1}" _kv _k
   local -a _names=()
@@ -1427,7 +1441,7 @@ bootstrap::_reserved_env_name() {
   (( ${#_names[@]} )) || return 1
   while IFS= read -r _k; do
     case "${_k}" in
-      LOK8S_BOOTSTRAP_*|BOOTSTRAP_*|bootstrap_*|PATH_SECRETS|KUBECONFIG|KUSTOMIZE_PLUGIN_HOME)
+      LOK8S_BOOTSTRAP_*|BOOTSTRAP_*|bootstrap_*|PATH_SECRETS|KUBECONFIG|KUSTOMIZE_PLUGIN_HOME|HELM_PLUGINS)
         echo "${_k}"
         return 0 ;;
     esac
@@ -1435,44 +1449,22 @@ bootstrap::_reserved_env_name() {
   return 1
 }
 
-# bootstrap::_export_env <env-lines>
-# Exports an entry's env (KEY=value, one per line) into the CALLING shell —
-# always a per-entry subshell. Only after bootstrap::_reserved_env_name.
-bootstrap::_export_env() {
-  local _kv _k _v
-  while IFS= read -r _kv; do
-    [[ -n "${_kv}" ]] || continue
-    _k="${_kv%%=*}"; _v="${_kv#*=}"
-    export "${_k}=${_v}"
-  done <<< "${1}"
-}
-
 # bootstrap::_dry_run_one <name> <dir> <kind> <provider> <kubeconfig> \
 #                         <inline-values> <env-lines> <stem>
 # Render ONE entry exactly as _apply_one would and diff it against the cluster
 # (`kubectl diff --server-side --force-conflicts`, a read-only server-side dry
-# run); apply nothing. Prints the entry's status field on stdout:
-#   unchanged | differs [changed=N new=M] | inconclusive (needs-crd) |
-#   rendered | skipped | error — each possibly suffixed " (non-repeatable)"
-#   when the render minted new secret material (item I).
-# and, with bootstrap_render_dir set, writes <stem>.yaml (the manifests) and
-# <stem>.diff (the diff text, empty when unchanged). MUST run in a subshell
-# (`$( … )` in _run_dry): the env: exports stay local to the entry. Always
-# returns 0; the status word is the result.
+# run); apply nothing. Prints the entry's status field on the first line:
+#   unchanged | differs [changed=N new=M] | inconclusive (<reason>) |
+#   rendered | skipped | error — then the marks: (non-deterministic: N),
+#   (non-repeatable), (partial: KRM function skipped)
+# and one more line per object that differs between the entry's two renders
+# (regenerated on every apply). With bootstrap_render_dir set it writes
+# <stem>.yaml (the manifests) and <stem>.diff (the diff text, empty when
+# unchanged). Runs in a subshell (`$( … )` in _run_dry). Always returns 0;
+# the status is the result. The Go twin: Engine.dryRunOne.
 bootstrap::_dry_run_one() {
   local addon_name="${1}" addon_dir="${2}" kind="${3}" provider_name="${4}"
   local kubeconfig="${5}" inline_values="${6}" env_lines="${7:-}" stem="${8}"
-
-  # Checked BEFORE anything of the entry is exported: an entry's env: may
-  # not set lo's own variables (LOK8S_BOOTSTRAP_DRYRUN=0, bootstrap_dry_run,
-  # bootstrap_render_dir, … would otherwise switch the dry run off).
-  local _bad_var
-  if _bad_var="$(bootstrap::_reserved_env_name "${env_lines}")"; then
-    error "bootstrap: ${addon_name}: env: may not set ${_bad_var} (reserved for lo)"
-    echo error
-    return 0
-  fi
-  bootstrap::_export_env "${env_lines}"
 
   local _skip
   if _skip="$(bootstrap::_skip_reason "${addon_dir}" "${kind}")"; then
@@ -1480,41 +1472,121 @@ bootstrap::_dry_run_one() {
     echo skipped
     return 0
   fi
+  # An entry's env: may not set lo's own variables; it reaches only the
+  # render subprocesses (addons::render), never this shell.
+  local _bad_var
+  if _bad_var="$(bootstrap::_reserved_env_name "${env_lines}")"; then
+    error "bootstrap: ${addon_name}: env: may not set ${_bad_var} (reserved for lo)"
+    echo error
+    return 0
+  fi
 
   debug "bootstrap: rendering ${addon_name}"
-  # The secrets plugin reports every value it generated in memory (the store
-  # lacks it, or CAROOT holds no CA) to the boundary's report file: the next
-  # real run generates different bytes, so the entry is non-repeatable.
-  local _report="${bootstrap_dry_boundary}/report" _non_repeatable=0
+  # The secrets plugin reports what it generated or updated in the run store,
+  # the chart gate the charts it refused, to the boundary's report file.
+  local _report="${bootstrap_dry_boundary}/report"
   if ! : > "${_report}"; then
     error "bootstrap: dry-run report: cannot reset ${_report}"
     echo error
     return 0
   fi
-  local rendered _render_rc=0 _m
-  rendered=$(addons::render "${addon_dir}" "${kind}" "${provider_name}" "${inline_values}") || _render_rc=$?
-  if [[ -s "${_report}" ]]; then
-    _non_repeatable=1
-    while IFS= read -r _m; do
-      debug "bootstrap: ${addon_name}: generated in memory: ${_m}"
-    done < "${_report}"
+  local _partial=0
+  if (( ! ${bootstrap_allow_generators:-0} )) && grep -rqs --include='*.yaml' --include='*.yml' \
+       -e 'config.kubernetes.io/function' -e 'config.k8s.io/function' "${addon_dir}"; then
+    _partial=1
+  fi
+  # The entry renders TWICE: an object whose content differs between the
+  # two renders is regenerated on every apply (Cilium's CA and TLS Secrets).
+  local rendered second _render_rc=0
+  rendered=$(addons::render "${addon_dir}" "${kind}" "${provider_name}" "${inline_values}" "${env_lines}") || _render_rc=$?
+  if (( _render_rc == 0 )); then
+    second=$(addons::render "${addon_dir}" "${kind}" "${provider_name}" "${inline_values}" "${env_lines}") || _render_rc=$?
+  fi
+  local _m _non_repeatable=0 _chart_refused=0
+  while IFS= read -r _m; do
+    case "${_m}" in
+      "") ;;
+      "chart-deps "*) _chart_refused=1 ;;
+      *) _non_repeatable=1; debug "bootstrap: ${addon_name}: generated in the dry run: ${_m}" ;;
+    esac
+  done < "${_report}"
+  local _tail=""
+  (( ! _non_repeatable )) || _tail+=" (non-repeatable)"
+  (( ! _partial )) || _tail+=" (partial: KRM function skipped)"
+  if (( _chart_refused )); then
+    echo "inconclusive (chart dependencies not vendored)${_tail}"
+    return 0
   fi
   if (( _render_rc != 0 )); then
     # addons::render (or kustomize, or a plugin) already said WHY on stderr.
     error "bootstrap: render failed for ${addon_name}"
-    if (( _non_repeatable )); then echo "error (non-repeatable)"; else echo error; fi
+    echo "error${_tail}"
     return 0
   fi
-  local _status
-  _status="$(bootstrap::_diff_manifest "${rendered}" "${stem}" "${kubeconfig}" "${addon_name}")"
-  if (( _non_repeatable )); then
-    echo "${_status} (non-repeatable)"
-  else
-    echo "${_status}"
+  local -a _nd=()
+  local _ndout
+  if ! _ndout="$(bootstrap::_nd_objects "${rendered}" "${second}")"; then
+    error "bootstrap: ${addon_name}: cannot compare the two renders"
+    echo "error${_tail}"
+    return 0
   fi
+  [[ -z "${_ndout}" ]] || mapfile -t _nd <<< "${_ndout}"
+  local _diff_input="${rendered}"
+  if (( ${bootstrap_ignore_nondet:-0} )) && (( ${#_nd[@]} > 0 )); then
+    _diff_input="$(bootstrap::_without_objects "${rendered}" "${_nd[@]}")"
+  fi
+  local _status
+  _status="$(bootstrap::_diff_manifest "${rendered}" "${stem}" "${kubeconfig}" "${addon_name}" "${_diff_input}")"
+  (( ${#_nd[@]} == 0 )) || _status+=" (non-deterministic: ${#_nd[@]})"
+  echo "${_status}${_tail}"
+  (( ${#_nd[@]} == 0 )) || printf '%s\n' "${_nd[@]}"
 }
 
-# bootstrap::_diff_manifest <rendered> <stem> <kubeconfig> <label>
+# bootstrap::_object_lines <stream>
+# One line per object of a rendered YAML stream: `<label>\t<canonical json>`
+# (keys sorted), the label `<apiVersion> <kind> <namespace>/<name>` (or
+# `<apiVersion> <kind> <name>` for a cluster-scoped object) — the Go twin:
+# splitObjects and objectLabel.
+bootstrap::_object_lines() {
+  local -a _rc
+  yq -o=json -I=0 'select(. != null and tag == "!!map")' <<< "${1}" | jq -S -c '.' | jq -r '
+    def str: if type == "string" then . else "" end;
+    (.metadata | if type == "object" then . else {} end) as $m
+    | ($m.namespace | str) as $ns
+    | "\(.apiVersion | str) \(.kind | str) \(if $ns != "" then $ns + "/" else "" end)\($m.name | str)\t\(tojson)"'
+  _rc=("${PIPESTATUS[@]}")
+  (( _rc[0] == 0 && _rc[1] == 0 && _rc[2] == 0 ))
+}
+
+# bootstrap::_nd_objects <render-a> <render-b>
+# The labels, in the first render's order, of the objects whose content
+# differs between two renders of one entry (or that only the first render
+# has) — the Go twin: nondeterministicObjects.
+bootstrap::_nd_objects() {
+  local _a _b
+  _a="$(bootstrap::_object_lines "${1}")" || return 1
+  _b="$(bootstrap::_object_lines "${2}")" || return 1
+  awk -F'\t' '
+    FNR == NR { b[$1] = substr($0, length($1) + 2); next }
+    { l = $1; if (!(l in a)) order[++n] = l; a[l] = substr($0, length(l) + 2) }
+    END { for (i = 1; i <= n; i++) { l = order[i]; if (l != "" && (!(l in b) || b[l] != a[l])) print l } }
+  ' <(printf '%s\n' "${_b}") <(printf '%s\n' "${_a}")
+}
+
+# bootstrap::_without_objects <stream> <label>...
+# The rendered stream without the named objects (what
+# --ignore-nondeterministic diffs). Empty when nothing is left.
+bootstrap::_without_objects() {
+  local _stream="${1}"; shift
+  local _kept
+  _kept="$(bootstrap::_object_lines "${_stream}" | awk -F'\t' -v drop="$(printf '%s\n' "${@}")" '
+    BEGIN { n = split(drop, d, "\n"); for (i = 1; i <= n; i++) if (d[i] != "") skip[d[i]] = 1 }
+    !($1 in skip) { print substr($0, length($1) + 2) }')"
+  [[ -n "${_kept}" ]] || return 0
+  yq -p=json -o=yaml '.' <<< "${_kept}"
+}
+
+# bootstrap::_diff_manifest <rendered> <stem> <kubeconfig> <label> [diff-input]
 # Writes <stem>.yaml to --render-dir (unless already written for a NoDiff
 # caller), then (unless --no-diff) a server-side `kubectl diff`, classified
 # into the report's status vocabulary — unchanged | differs [changed=N
@@ -1524,6 +1596,7 @@ bootstrap::_dry_run_one() {
 # stdout; always returns 0.
 bootstrap::_diff_manifest() {
   local rendered="${1}" stem="${2}" kubeconfig="${3}" label="${4}"
+  local diff_input="${5-${1}}"
   # umask 077 for the duration of the writes below: these are RENDERED
   # Secrets (restore.d, or an addon carrying one) — never world/group
   # readable, even transiently.
@@ -1544,12 +1617,24 @@ bootstrap::_diff_manifest() {
     echo rendered
     return 0
   fi
+  # --ignore-nondeterministic left nothing to diff.
+  if [[ -z "${diff_input//[[:space:]]/}" ]]; then
+    if [[ -n "${bootstrap_render_dir:-}" ]] && ! : | bootstrap::_write_guarded "${bootstrap_render_dir}/${stem}.diff"; then
+      umask "${_prior_umask}"
+      error "bootstrap: --render-dir: cannot write ${stem}.diff"
+      echo error
+      return 0
+    fi
+    umask "${_prior_umask}"
+    echo unchanged
+    return 0
+  fi
 
   # The diff's stdout is the diff text; its stderr (warnings, the error of a
   # failed call) is forwarded to ours.
   local _derr _diff _drc=0 _emsg
   _derr="$(mktemp -p "${bootstrap_dry_boundary:-${TMPDIR:-/tmp}}")" || { error "bootstrap: dry-run: no temp file"; echo error; return 0; }
-  _diff=$(printf '%s\n' "${rendered}" \
+  _diff=$(printf '%s\n' "${diff_input}" \
     | kubectl --kubeconfig "${kubeconfig}" diff --server-side --force-conflicts -f - 2>"${_derr}") || _drc=$?
   _emsg="$(cat "${_derr}" 2>/dev/null || true)"
   rm -f "${_derr}"
@@ -1680,9 +1765,9 @@ bootstrap::_run_dry() {
   local _width=${#n}
   (( _width < 2 )) && _width=2
   local -A _ddone=()
-  local _c_unchanged=0 _c_differs=0 _c_rendered=0 _c_skipped=0 _c_inconclusive=0 _c_errors=0 _seq=0 _total=0
-  local _pick _i3 _d3 _ready _stem _status
-  local -a _dl
+  local _c_unchanged=0 _c_differs=0 _c_rendered=0 _c_skipped=0 _c_inconclusive=0 _c_errors=0 _c_nd=0 _seq=0 _total=0
+  local _pick _i3 _d3 _ready _stem _status _one _ndl
+  local -a _dl _ndlines
   # restore.d's own entry (computed by bootstrap::apply before narrowing to
   # --only — see there), reported FIRST: a real run applies it before any
   # addon too. Review round 2, item F: inconclusive (needs-crd) is counted
@@ -1717,9 +1802,15 @@ bootstrap::_run_dry() {
     _ddone["${_pick}"]=1
     _seq=$(( _seq + 1 ))
     _stem="$(printf '%0*d-%s' "${_width}" "${_seq}" "${_names[_pick]}")"
-    # A subshell: the entry's env: exports and the render's env stay local.
-    _status="$( bootstrap::_dry_run_one "${_names[_pick]}" "${_dirs[_pick]}" "${kind}" \
+    # A subshell: the render's state stays local. Line 1 is the status, every
+    # further line an object regenerated on every apply.
+    _ndlines=()
+    _one="$( bootstrap::_dry_run_one "${_names[_pick]}" "${_dirs[_pick]}" "${kind}" \
       "${provider_name}" "${kubeconfig}" "${_inlines[_pick]}" "${_envs[_pick]}" "${_stem}" )" || true
+    _status="${_one%%$'\n'*}"
+    if [[ "${_one}" == *$'\n'* ]]; then
+      mapfile -t _ndlines <<< "${_one#*$'\n'}"
+    fi
     case "${_status}" in
       unchanged*)      _c_unchanged=$(( _c_unchanged + 1 )) ;;
       differs*)        _c_differs=$(( _c_differs + 1 )) ;;
@@ -1730,10 +1821,15 @@ bootstrap::_run_dry() {
       *)               _status="error"; _c_errors=$(( _c_errors + 1 )) ;;
     esac
     printf 'bootstrap dry-run: %s: %s\n' "${_stem}" "${_status}"
+    for _ndl in "${_ndlines[@]+"${_ndlines[@]}"}"; do
+      [[ -n "${_ndl}" ]] || continue
+      printf 'bootstrap dry-run: %s: non-deterministic (regenerated on every apply): %s\n' "${_stem}" "${_ndl}"
+      _c_nd=$(( _c_nd + 1 ))
+    done
   done
   _total=$(( _total + _seq ))
-  printf 'bootstrap dry-run: entries=%d unchanged=%d differs=%d rendered=%d skipped=%d inconclusive=%d errors=%d\n' \
-    "${_total}" "${_c_unchanged}" "${_c_differs}" "${_c_rendered}" "${_c_skipped}" "${_c_inconclusive}" "${_c_errors}"
+  printf 'bootstrap dry-run: entries=%d unchanged=%d differs=%d rendered=%d skipped=%d inconclusive=%d errors=%d nondeterministic=%d\n' \
+    "${_total}" "${_c_unchanged}" "${_c_differs}" "${_c_rendered}" "${_c_skipped}" "${_c_inconclusive}" "${_c_errors}" "${_c_nd}"
   [[ -z "${bootstrap_render_dir:-}" ]] || echo "bootstrap dry-run: files under ${bootstrap_render_dir}" >&2
   if (( _c_errors > 0 )) || (( _c_inconclusive > 0 )); then return 2; fi
   if (( _c_differs > 0 )); then
@@ -2059,20 +2155,12 @@ bootstrap::apply() {
     bootstrap::_select_only "${bootstrap_select}" || return 1
   fi
 
-  # --render-dir is prepared HERE, before the restore.d preview below
-  # (review round 2, item G): restore.d's own diff writes restore.d.{yaml,
-  # diff} into it too, and used to run before anything had created the
-  # directory at all.
-  if (( ${bootstrap_dry_run:-0} )) && [[ -n "${bootstrap_render_dir:-}" ]]; then
-    bootstrap::_prepare_render_dir "${bootstrap_render_dir}" || return 2
-    echo "bootstrap dry-run: ${bootstrap_render_dir} holds the rendered manifests in plaintext, Secrets included" >&2
-  fi
-
   # The dry run's render boundary (libs/addons: addons::dry_run_boundary):
-  # the restricted plugin home, the refusing docker/git, the report file —
-  # and every copy and temp file of the run. Built once, after the plan is
-  # valid and before the first line of the report; removed on EXIT, chained
-  # in front of the caller's own EXIT trap (bootstrap::_dry_run_trap).
+  # the restricted plugin home, the refusing docker/git/helm, the empty helm
+  # plugin dir, the run store, the render's TMPDIR, the report file — and
+  # every copy and temp file of the run. Built once, after the plan is valid
+  # and before anything is written or reported; removed on EXIT, chained in
+  # front of the caller's own EXIT trap (bootstrap::_dry_run_trap).
   local bootstrap_dry_boundary=""
   if (( ${bootstrap_dry_run:-0} )); then
     bootstrap_dry_boundary="$(mktemp -d "${TMPDIR:-/tmp}/lok8s-dryrun-XXXXXXXX")" \
@@ -2082,6 +2170,17 @@ bootstrap::apply() {
       bootstrap::_dry_run_untrap "${bootstrap_dry_boundary}"
       return 2
     fi
+  fi
+
+  # --render-dir is prepared HERE: after the boundary (a refusal there leaves
+  # no directory behind) and before the restore.d preview below, which writes
+  # restore.d.{yaml,diff} into it too.
+  if (( ${bootstrap_dry_run:-0} )) && [[ -n "${bootstrap_render_dir:-}" ]]; then
+    if ! bootstrap::_prepare_render_dir "${bootstrap_render_dir}"; then
+      bootstrap::_dry_run_untrap "${bootstrap_dry_boundary}"
+      return 2
+    fi
+    echo "bootstrap dry-run: ${bootstrap_render_dir} holds the rendered manifests in plaintext, Secrets included" >&2
   fi
 
   # ── restore.d: pre-bootstrap DR restore (sops-encrypted manifests) ──

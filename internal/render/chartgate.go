@@ -29,9 +29,6 @@ import (
 // dry run's gate execs after the check (the exec pipeline only).
 const DryRunChartRendererEnv = "LOK8S_BOOTSTRAP_CHARTRENDERER"
 
-// maxChartNesting bounds the file:// walk (khelm: 20; the bash twin too).
-const maxChartNesting = 20
-
 // chartGateApplies reports a dry run that has not lifted the gate.
 func chartGateApplies() bool {
 	return os.Getenv("LOK8S_BOOTSTRAP_DRYRUN") == "1" && os.Getenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS") != "1"
@@ -62,7 +59,7 @@ func ChartDepsNotVendored(config []byte, baseDir string) (chart string, unvendor
 	if info, err := os.Stat(path); err != nil || !info.IsDir() {
 		return "", false, nil // a repo shorthand or an OCI reference: khelm pulls into its cache
 	}
-	return cfg.Chart, chartBuildsDeps(path, 0), nil
+	return cfg.Chart, chartBuildsDeps(path), nil
 }
 
 type chartDeps struct {
@@ -73,12 +70,9 @@ type chartDeps struct {
 }
 
 // chartBuildsDeps applies khelm's rule to one chart directory: a file://
-// dependency is always built; another dependency is built when charts/
-// lacks it.
-func chartBuildsDeps(dir string, depth int) bool {
-	if depth > maxChartNesting {
-		return true
-	}
+// dependency is always built (so there is no walk into it, and no nesting
+// limit); another dependency is built when charts/ lacks it.
+func chartBuildsDeps(dir string) bool {
 	var deps chartDeps
 	for _, f := range []string{"Chart.yaml", "requirements.yaml"} {
 		raw, err := os.ReadFile(filepath.Join(dir, f))

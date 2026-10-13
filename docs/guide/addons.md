@@ -38,25 +38,34 @@ lo bootstrap --only cert-manager --with-restore      # also restore.d first
 The dry run renders every entry in place, exactly as the real run does
 (the same project, `HOME`, credentials and CA), applies nothing, and prints
 one line per entry (`unchanged`, `differs changed=N new=M`,
-`inconclusive (needs-crd)`, `rendered`, `skipped`, `error`; with
-`(non-repeatable)` when the render generated secret material the store does
-not hold yet) plus a summary, with a `restore.d` line first. The exit code is
-0 when nothing would change, 1 only when a completed diff found a change,
-and 2 for all other failures.
+`inconclusive (needs-crd)`, `inconclusive (chart dependencies not
+vendored)`, `rendered`, `skipped`, `error`) plus a summary, with a
+`restore.d` line first. Marks after the status: `(non-deterministic: N)`
+when objects change on each render (they are listed, for example the CA and
+TLS Secrets of Cilium; `--ignore-nondeterministic` diffs the entry without
+them), `(non-repeatable)` when the render generated or updated secret
+material that the store does not hold, and `(partial: KRM function
+skipped)`. The exit code is 0 when nothing would change, 1 only when a
+completed diff found a change, and 2 for all other failures.
 
-lo and its built-in generators never apply anything and never persist new
-state in a dry run. Executable addon code (an exec plugin other than lok8s'
-Secret and ChartRenderer, a KRM exec or container function, a remote base, a
-`bash:` secrets generator) is refused unless you pass `--allow-generators`,
-which runs it as trusted, with the side effects of a real run. The dry run
-does not confine addon code. An entry's `env:` cannot set lo's own variables
+The dry run prevents accidental side effects of legitimate addon code and
+configuration. It is not a security boundary: a malicious addon can still
+execute code during a dry run, and the real bootstrap runs the same addon
+with full credentials. lo and its built-in generators never apply anything
+and never persist new state in a dry run. Executable addon code (an exec
+plugin other than lok8s' Secret and ChartRenderer, a KRM exec or container
+function, a remote base, a `helmCharts` chart that is not in `chartHome`, a
+build of chart dependencies, a helm plugin, a `bash:` secrets generator) is
+refused unless you pass `--allow-generators`, which runs it as trusted, with
+the side effects of a real run. Helm caches may be populated. An entry's
+`env:` goes only to the render and cannot set lo's own variables
 (`LOK8S_BOOTSTRAP_*`, `BOOTSTRAP_*`, `bootstrap_*`, `PATH_SECRETS`,
-`KUBECONFIG`, `KUSTOMIZE_PLUGIN_HOME`). `--render-dir` holds the rendered
-manifests and diffs, Secrets in plaintext. `--only` leaves `restore.d` out
-unless you add `--with-restore`. The full description, with the table of
-what a dry run refuses, is in
-[Deployment](deployment.md#preview-first-dry-run). Every flag here also
-exists on `lo provision --bootstrap`.
+`KUBECONFIG`, `KUSTOMIZE_PLUGIN_HOME`, `HELM_PLUGINS`). `--render-dir` holds
+the rendered manifests and diffs, Secrets in plaintext (mode 0700).
+`--only` leaves `restore.d` out unless you add `--with-restore`. The full
+description, with the table of what a dry run refuses and what it does not
+prevent, is in [Deployment](deployment.md#preview-first-dry-run). Every flag
+here also exists on `lo provision --bootstrap`.
 
 ## Addon resolution
 

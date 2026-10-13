@@ -36,6 +36,9 @@ func TestChartDepsNotVendored(t *testing.T) {
 	writeGateFile(t, filepath.Join(vendoredDir, "charts", "redis", "Chart.yaml"), "name: redis\n")
 	chart("common", "")
 	chart("filedep", "dependencies:\n  - name: common\n    version: 0.1.0\n    repository: file://../common\n")
+	// A file:// dependency is built even when charts/ holds it.
+	fileVendored := chart("filedep-vendored", "dependencies:\n  - name: common\n    version: 0.1.0\n    repository: file://../common\n")
+	writeGateFile(t, filepath.Join(fileVendored, "charts", "common", "Chart.yaml"), "name: common\n")
 	v1 := filepath.Join(base, "v1")
 	writeGateFile(t, filepath.Join(v1, "Chart.yaml"), "apiVersion: v1\nname: v1\nversion: 0.1.0\n")
 	writeGateFile(t, filepath.Join(v1, "requirements.yaml"), remoteDep)
@@ -49,6 +52,7 @@ func TestChartDepsNotVendored(t *testing.T) {
 		{"chart: ./vendored\n", false},
 		{"chart: ./vendored-dir\n", false},
 		{"chart: ./filedep\n", true},
+		{"chart: ./filedep-vendored\n", true},
 		{"chart: ./v1\n", true}, // requirements.yaml (apiVersion v1)
 		{"repository: https://charts.example.test\nchart: unvendored\n", false},
 		{"chart: ./missing\n", false}, // not a directory: a repo shorthand to khelm

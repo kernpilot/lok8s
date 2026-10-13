@@ -139,8 +139,9 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 	return 0
 }
 
-// jobEnv parses the job's env overrides (bash: exported per-subshell before
-// addons::render, never leaking across entries). Name the keys
+// jobEnv parses the job's env overrides. They reach the render's processes
+// only, never lo's own state (bash: addons::render passes them to kustomize
+// and envsubst, never to the orchestration shell). Name the keys
 // LOK8S_USER_*/LOK8S_SPEC_* — the same convention the addons reference;
 // other names are passed to the render process but not
 // envsubst-whitelisted.

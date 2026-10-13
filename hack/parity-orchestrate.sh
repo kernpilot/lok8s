@@ -583,7 +583,7 @@ fi
 # What the render saw (round 3): the registry value a real run reads back
 # from .registries.json, the sentinel, the plugin home, the flags.
 if [[ -n "${PARITY_RENDER_LOG:-}" ]]; then
-  echo "BUILD_HOST=${LOK8S_SPEC_REGISTRY_BUILD_HOST:-<unset>} DRYRUN=${LOK8S_BOOTSTRAP_DRYRUN:-<unset>} HOME=${KUSTOMIZE_PLUGIN_HOME:-<unset>} PATH0=${PATH%%:*} ARGS=$*" >> "${PARITY_RENDER_LOG}"
+  echo "BUILD_HOST=${LOK8S_SPEC_REGISTRY_BUILD_HOST:-<unset>} DRYRUN=${LOK8S_BOOTSTRAP_DRYRUN:-<unset>} HOME=${KUSTOMIZE_PLUGIN_HOME:-<unset>} PATH0=${PATH%%:*} HELMP=${HELM_PLUGINS:-<unset>} TMP=${TMPDIR:-<unset>} STORE=${LOK8S_BOOTSTRAP_DRYRUN_STORE:-<unset>} ARGS=$*" >> "${PARITY_RENDER_LOG}"
 fi
 # A slow render, to kill the dry run in the middle of it.
 if [[ -n "${PARITY_SLOW_MARK:-}" ]]; then
@@ -591,6 +591,12 @@ if [[ -n "${PARITY_SLOW_MARK:-}" ]]; then
   sleep 2
 fi
 printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: %s\n  namespace: kube-system\n' "${name}"
+# Round 4: a CA Secret whose data changes on every render (a chart that
+# mints TLS material per render, as Cilium does).
+if [[ -n "${PARITY_ND_COUNTER:-}" ]]; then
+  echo x >> "${PARITY_ND_COUNTER}"
+  printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: %s-ca\n  namespace: kube-system\ndata:\n  ca.crt: Q0Et%s\n' "${name}" "$(wc -l < "${PARITY_ND_COUNTER}" | tr -d ' ')"
+fi
 SH
 parity::stub "${PROJ}" kubectl <<'SH'
 #!/usr/bin/env bash
@@ -605,8 +611,7 @@ manifest=""
 case " $* " in
   *" diff "*)
     case "${manifest}" in
-      *"name: cilium"*) exit 0 ;;
-      *"name: extra-cm"*|*"name: extra"*)
+      *"name: cilium-ca"*|*"name: extra-cm"*|*"name: extra"*)
         cat <<'DIFF'
 diff -u -N /tmp/LIVE-1/v1.ConfigMap.kube-system.extra /tmp/MERGED-1/v1.ConfigMap.kube-system.extra
 --- /tmp/LIVE-1/v1.ConfigMap.kube-system.extra	2026-10-12 10:00:00.000000000 +0000
@@ -634,6 +639,7 @@ diff -u -N /tmp/LIVE-1/v1.ConfigMap.kube-system.other /tmp/MERGED-1/v1.ConfigMap
 +  name: other
 DIFF
         exit 1 ;;
+      *"name: cilium"*) exit 0 ;;
       *) echo "error: the server could not be reached" >&2; exit 2 ;;
     esac ;;
 esac
@@ -667,7 +673,7 @@ for side in bash go; do
   tls_pin    "${side}: cilium unchanged"         "${WORK}/${side}.out" "^bootstrap dry-run: 01-cilium: unchanged$"
   tls_pin    "${side}: extra-cm differs"         "${WORK}/${side}.out" "^bootstrap dry-run: 02-extra-cm: differs changed=1 new=2$"
   tls_pin    "${side}: ccm error"                "${WORK}/${side}.out" "^bootstrap dry-run: 03-ccm: error$"
-  tls_pin    "${side}: the summary"              "${WORK}/${side}.out" "^bootstrap dry-run: entries=3 unchanged=1 differs=1 rendered=0 skipped=0 inconclusive=0 errors=1$"
+  tls_pin    "${side}: the summary"              "${WORK}/${side}.out" "^bootstrap dry-run: entries=3 unchanged=1 differs=1 rendered=0 skipped=0 inconclusive=0 errors=1 nondeterministic=0$"
   tls_pin    "${side}: the render dir is named"  "${WORK}/${side}.err" "^bootstrap dry-run: files under render-out$"
   if [[ -s "${WORK}/render.${side}/02-extra-cm.diff" ]]; then echo "ok: ${side}: 02-extra-cm.diff holds the diff"; else fail "${side}: 02-extra-cm.diff empty or missing"; fi
   if [[ -f "${WORK}/render.${side}/01-cilium.diff" && ! -s "${WORK}/render.${side}/01-cilium.diff" ]]; then echo "ok: ${side}: 01-cilium.diff is empty"; else fail "${side}: 01-cilium.diff not an empty file"; fi
@@ -736,8 +742,9 @@ for side in bash go; do
   if [[ "$(cat "${WORK}/registries.${side}")" == absent ]]; then echo "ok: ${side}: no .registries.json written"; else fail "${side}: the dry run wrote .registries.json"; fi
   tls_pin    "${side}: the registry value a real run reads back"  "${WORK}/render.${side}.log" "^BUILD_HOST=lok8s\.local DRYRUN=1 "
   tls_pin    "${side}: the boundary's plugin home and stubs"      "${WORK}/render.${side}.log" " HOME=[^ ]*/BOUNDARY/plugins PATH0=[^ ]*/BOUNDARY/bin "
-  tls_pin    "${side}: a dry run renders with --enable-alpha-plugins" "${WORK}/render.${side}.log" " ARGS=build --enable-alpha-plugins /[^ ]*BOUNDARY/COPY$"
+  tls_pin    "${side}: a dry run renders with --enable-alpha-plugins" "${WORK}/render.${side}.log" " ARGS=build --enable-alpha-plugins /[^ ]*BOUNDARY/tmp/COPY$"
   tls_absent "${side}: no --enable-exec in a dry run (absent)"    "${WORK}/render.${side}.log" "--enable-exec"
+  tls_pin    "${side}: the boundary's helm plugins, TMPDIR and run store" "${WORK}/render.${side}.log" " HELMP=[^ ]*/BOUNDARY/helm-plugins TMP=[^ ]*/BOUNDARY/tmp STORE=[^ ]*/BOUNDARY/store "
 done
 dry_expect_rc 0 bootstrap --domain dry.dev --dry-run --only cilium
 unset PARITY_RENDER_LOG
@@ -748,7 +755,7 @@ unset PARITY_RENDER_LOG
 mkdir -p "${PROJ}/clusters/envx.dev/targets/app"
 printf 'resources: []\n' > "${PROJ}/clusters/envx.dev/targets/app/kustomization.yaml"
 : > "${PROJ}/.kubeconfig/envxc.yaml"
-for reserved in LOK8S_BOOTSTRAP_DRYRUN BOOTSTRAP_PROTECTED_ENV_NAMES bootstrap_render_dir; do
+for reserved in LOK8S_BOOTSTRAP_DRYRUN BOOTSTRAP_PROTECTED_ENV_NAMES bootstrap_render_dir HELM_PLUGINS; do
   cat > "${PROJ}/clusters/envx.dev/cluster.lok8s.yaml" <<YAML
 kind: Lo
 metadata:
@@ -790,6 +797,43 @@ dry_expect_rc 2 provision --domain dry.dev --dry-run
 dry_check - bootstrap --domain dry.dev --dry-run --bogus
 dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --bogus
 dry_expect_rc 2 provision --domain dry.dev --bootstrap --dry-run --bogus
+# Review round 4, item C(f): the flag errors of a dry run are rc 2 too —
+# --only given but blank, --with-restore without --only — at both command
+# boundaries; --ignore-nondeterministic needs --bootstrap and --dry-run (a
+# real run's flag error stays rc 1).
+dry_check - bootstrap --domain dry.dev --dry-run --only=
+dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --only=
+dry_check - provision --domain dry.dev --bootstrap --dry-run --only=
+dry_expect_rc 2 provision --domain dry.dev --bootstrap --dry-run --only=
+dry_check - bootstrap --domain dry.dev --dry-run --with-restore
+dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --with-restore
+dry_check - provision --domain dry.dev --bootstrap --dry-run --with-restore
+dry_expect_rc 2 provision --domain dry.dev --bootstrap --dry-run --with-restore
+dry_check - bootstrap --domain dry.dev --ignore-nondeterministic
+dry_expect_rc 1 bootstrap --domain dry.dev --ignore-nondeterministic
+dry_check - provision --domain dry.dev --dry-run --ignore-nondeterministic
+dry_expect_rc 2 provision --domain dry.dev --dry-run --ignore-nondeterministic
+
+# Review round 4, item A8: every entry renders twice; an object whose content
+# differs between the two renders is listed as regenerated on every apply.
+# The verdict stays honest (the stub's diff sees the Secret: rc 1);
+# --ignore-nondeterministic judges the entry without it (rc 0) and still
+# lists it.
+export PARITY_ND_COUNTER="${WORK}/nd.count"
+dry_check - bootstrap --domain dry.dev --dry-run --only cilium
+dry_expect_rc 1 bootstrap --domain dry.dev --dry-run --only cilium
+for side in bash go; do
+  tls_pin "${side}: the entry differs, its regenerated object counted" "${WORK}/${side}.out" "^bootstrap dry-run: 01-cilium: differs changed=1 new=2 \(non-deterministic: 1\)$"
+  tls_pin "${side}: the regenerated object is listed" "${WORK}/${side}.out" "^bootstrap dry-run: 01-cilium: non-deterministic \(regenerated on every apply\): v1 Secret kube-system/cilium-ca$"
+  tls_pin "${side}: the summary counts it" "${WORK}/${side}.out" " errors=0 nondeterministic=1$"
+done
+dry_check - bootstrap --domain dry.dev --dry-run --only cilium --ignore-nondeterministic
+dry_expect_rc 0 bootstrap --domain dry.dev --dry-run --only cilium --ignore-nondeterministic
+dry_expect_rc 0 provision --domain dry.dev --bootstrap --dry-run --only cilium --ignore-nondeterministic
+for side in bash go; do
+  tls_pin "${side}: --ignore-nondeterministic: unchanged, still listed" "${WORK}/${side}.out" "^bootstrap dry-run: 01-cilium: unchanged \(non-deterministic: 1\)$"
+done
+unset PARITY_ND_COUNTER
 
 # A dry run killed by SIGTERM in the middle of a render leaves no temp file
 # behind (the bash twin removes its boundary from a chained EXIT trap, the

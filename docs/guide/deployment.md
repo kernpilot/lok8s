@@ -260,16 +260,18 @@ lo provision my-cluster.example.com --bootstrap --dry-run --render-dir /tmp/boot
 The dry run renders every entry in place, exactly as the real run does: the
 same project, the same value stack, envsubst, khelm and order, and the same
 `HOME`, credentials and CA. Thus sops, exec auth and kubectl behave as in a
-real run. It applies nothing. For each entry it asks the API server for a
-server-side diff (`kubectl diff --server-side --force-conflicts`, read-only)
-and prints one line:
+real run. It applies nothing. It renders each entry two times, then asks the
+API server for a server-side diff (`kubectl diff --server-side
+--force-conflicts`, read-only) and prints one line for each entry:
 
 ```
 bootstrap dry-run: restore.d: differs changed=1 new=0
-bootstrap dry-run: 01-cilium: unchanged
+bootstrap dry-run: 01-cilium: differs changed=2 new=0 (non-deterministic: 2)
+bootstrap dry-run: 01-cilium: non-deterministic (regenerated on every apply): v1 Secret kube-system/cilium-ca
+bootstrap dry-run: 01-cilium: non-deterministic (regenerated on every apply): v1 Secret kube-system/hubble-server-certs
 bootstrap dry-run: 02-cert-manager: differs changed=2 new=1
 bootstrap dry-run: 03-rook-ceph: skipped
-bootstrap dry-run: entries=4 unchanged=1 differs=2 rendered=0 skipped=1 inconclusive=0 errors=0
+bootstrap dry-run: entries=4 unchanged=0 differs=3 rendered=0 skipped=1 inconclusive=0 errors=0 nondeterministic=2
 ```
 
 - `restore.d` is diffed as its own entry, because a real run applies it
@@ -279,50 +281,86 @@ bootstrap dry-run: entries=4 unchanged=1 differs=2 rendered=0 skipped=1 inconclu
   or the webhook of an earlier entry is not in the cluster yet (expected on
   a new cluster). The run cannot say what this entry changes, so the run
   exits 2.
+- `inconclusive (chart dependencies not vendored)`: the entry renders a
+  local chart, and khelm would build the dependencies of that chart into the
+  chart directory (it writes `Chart.lock` and `charts/`). The dry run does
+  not render the chart. Put the dependencies into the `charts/` directory of
+  the chart, or pass `--allow-generators`. The run exits 2.
+- `(non-deterministic: N)`, with one `non-deterministic (regenerated on
+  every apply)` line for each object: the two renders of the entry gave
+  different content for these objects. Example: the Cilium chart makes a new
+  CA and new TLS Secrets for Hubble on each render, thus each real apply
+  changes them. The result includes these objects: the entry differs, and
+  the run exits 1. `--ignore-nondeterministic` diffs the entry without them.
+  The run still lists them, and `--render-dir` keeps them.
 - `(non-repeatable)`: the render generated secret material that the store
   does not hold yet (a password, a key, a certificate, or a CA because
-  `CAROOT` has none). The dry run keeps it in memory only. The next real run
-  generates different bytes, so the real result differs from this preview.
+  `CAROOT` has none), or it updated a value of the store. The dry run keeps
+  the value in a store of this run only, which all renders of the run share.
+  The next real run generates different bytes, so the real result differs
+  from this preview.
+- `(partial: KRM function skipped)`: the entry declares a KRM function. A
+  dry run without `--allow-generators` does not run it, thus the objects of
+  the function are not in the preview.
 
-**Trust model.** lo and its built-in generators never apply anything and
-never persist new state in a dry run: the secrets plugin reads the store and
-keeps new values in memory, the cert generator never writes `CAROOT`, the Lo
-driver never writes `.registries.json`, and a framework addon is never
-ejected. Executable addon code is refused unless you pass
+**Trust model.** The dry run prevents accidental side effects of
+legitimate addon code and configuration. It is not a security boundary
+against an addon that is made to do harm: the real bootstrap runs the same
+addon with full credentials. A malicious addon can still execute code during
+a dry run.
+
+lo and its built-in generators never apply anything and never persist new
+state in a dry run: the secrets plugin reads the store and keeps new or
+updated values in a store of this run only, the cert generator never writes
+`CAROOT`, the Lo driver never writes `.registries.json`, and a framework
+addon is never ejected. Executable addon code is refused unless you pass
 `--allow-generators`:
 
 | Addon code | In a dry run |
 |---|---|
-| a legacy exec or Go plugin that is not lok8s' Secret or ChartRenderer | does not resolve: the plugin home of a dry run links only those two |
-| a KRM exec function (`config.kubernetes.io/function` with `exec:`) | never runs: kustomize runs without `--enable-exec` and skips it, so its objects are missing from the preview |
+| a legacy exec or Go plugin that is not lok8s' Secret or ChartRenderer | does not resolve: the plugin home of a dry run holds only those two |
+| a KRM exec function (`config.kubernetes.io/function` with `exec:`) | never runs: kustomize runs without `--enable-exec` and skips it, and the entry is `partial` |
 | a KRM container function | fails: `docker` refuses |
 | a remote base (a git URL in `resources:`) | fails: `git` refuses |
+| `helmCharts` (the helm chart inflator of kustomize) | a chart that is not in `chartHome` fails: `helmCharts needs --allow-generators in a dry run` (`helm pull` refuses). A chart that is already in `chartHome` renders. |
+| a local chart whose dependencies are not vendored | does not render: the entry is `inconclusive` |
+| a helm plugin | does not resolve: `HELM_PLUGINS` is an empty directory |
 | a `bash:` secrets generator | fails: the secrets plugin refuses it |
 
 `--allow-generators` runs this code as trusted, with the side effects of a
-real run. The dry run does not confine addon code: code that runs (khelm's
-chart downloads, a remote file URL, the code `--allow-generators` lets run)
-has the access of a real run.
+real run.
 
-A local chart (or a `file://` dependency of it) must be in the project: a
-dry run refuses a chart path that resolves outside it, as an error of that
-entry. When khelm would build the dependencies of a local chart (it writes
-`Chart.lock` and `charts/`), the dry run renders from a copy. A Secret plugin
-that is older than the dry run would write the store: the dry run refuses it
-(`lo toolchain install` installs the plugin of your `lo`).
+What the dry run does not prevent:
 
-An entry's `env:` cannot set lo's own variables (`LOK8S_BOOTSTRAP_*`,
+- Helm caches may be populated: khelm downloads a remote chart into the helm
+  cache of your `HOME`, as a real run does.
+- Adversarial input: a generator kind (apiVersion and kind) that resolves to
+  a path outside the plugin home, and a chart or value URL with a crafted
+  scheme. Code that runs this way has the access of a real run.
+
+The render writes its temporary files into a private directory of the run
+(`TMPDIR`), which lo removes at the end of the run, also on SIGTERM. A Secret
+plugin that is older than the dry run would write the store: the dry run
+refuses it (`lo toolchain install` installs the plugin of your `lo`).
+
+An entry's `env:` goes only to the render (kustomize and envsubst), never to
+lo itself. It cannot set lo's own variables (`LOK8S_BOOTSTRAP_*`,
 `BOOTSTRAP_*`, `bootstrap_*`, `PATH_SECRETS`, `KUBECONFIG`,
-`KUSTOMIZE_PLUGIN_HOME`). Such an entry is an error, on a dry run and on a
-real run, and lo names the variable.
+`KUSTOMIZE_PLUGIN_HOME`, `HELM_PLUGINS`). Such an entry is an error, on a dry
+run and on a real run, and lo names the variable. lo does this check after
+the skips of the real run: an entry that the run skips is `skipped`, not an
+error.
 
 `--render-dir <dir>` keeps the rendered manifests (`NN-<entry>.yaml`) and
 the diff text (`NN-<entry>.diff`, empty when unchanged). The directory holds
-rendered Secrets in plaintext; the run says so on stderr. lo creates a new
-directory with mode 0700 and marks it with a `.lo-dry-run` file. A later run
-clears only the files it owns (`NN-*.yaml`/`.diff`, `restore.d.yaml`/`.diff`).
-lo refuses a non-empty directory without the marker (as a regular file), a
-path with a symlink in it, and a symlink inside the directory.
+rendered Secrets in plaintext; the run says so on stderr. lo prepares the
+directory after the checks of the run (a failed check leaves no directory).
+lo creates a new directory with mode 0700 and marks it with a `.lo-dry-run`
+file. lo changes an existing directory that the group or others can read to
+mode 0700, and says so on stderr. A later run clears only the files it owns
+(`NN-*.yaml`/`.diff`, `restore.d.yaml`/`.diff`). lo refuses a non-empty
+directory without the marker (as a regular file), a path with a symlink in
+it, and a symlink inside the directory.
 
 `--no-diff` renders only and never contacts the cluster.
 
@@ -331,9 +369,11 @@ path with a symlink in it, and a symlink inside the directory.
 (`differs`), and 2 for all other failures: a render or diff error, an
 `inconclusive` entry, a restore.d file that does not decrypt, an unreachable
 hosted cluster, a missing spec or kubeconfig, an unknown `--only` name, a bad
-flag or `--render-dir`. A dry run is not gated and ignores `--force`: it
-never recreates an object. The provision tail (kubehz registration, the
-inventory, the gitops bootstrap) is skipped too.
+flag (also `--only=` without a name and `--with-restore` without `--only`),
+a bad `--render-dir`, and an error before the command starts (for example a
+missing bash tree). A dry run is not gated and ignores `--force`: it never
+recreates an object. The provision tail (kubehz registration, the inventory,
+the gitops bootstrap) is skipped too.
 
 #### One entry: `--only`
 

@@ -75,13 +75,21 @@ go test ./internal/inventory/ -update              # rewrite that package's gold
 
 The `lo bootstrap --dry-run` boundary is proven against the real pinned
 kustomize: `internal/addons/dryrun_exec_test.go` renders with `.bin/kustomize`
-and this test binary as the Secret plugin (a KRM exec function never runs, a
-foreign exec plugin does not resolve, the refusing `docker`/`git` stop a
-container function and a remote base, the secrets plugin and the cert
-generator write nothing and report what they generated), and every refusal
-is checked again with `--allow-generators`, where the fixture's code runs.
-It skips without `.bin/kustomize` and fails under `CI=true`. The in-process
-half (`lo-full`) is `dryrun_inprocess_test.go` (`-tags inprocess`).
+and this test binary as the Secret plugin and the ChartRenderer gate (a KRM
+exec function never runs, a foreign exec plugin does not resolve, the
+refusing `docker`/`git` stop a container function and a remote base, the
+refusing `helm pull` stops a `helmCharts` chart that is not vendored, the
+gate refuses a local chart whose dependencies are not vendored and writes
+nothing into it, the secrets plugin and the cert generator write nothing and
+report what they generated or updated, a store miss in an existing store
+directory writes nothing, the plugin configs stay in the boundary), and
+every refusal is checked again with `--allow-generators`, where the
+fixture's code runs. It skips without `.bin/kustomize` and fails under
+`CI=true`. The in-process half (`lo-full`) is `dryrun_inprocess_test.go`
+(`-tags inprocess`). The dry run prevents accidental side effects of
+legitimate addon code; it is not a security boundary against an addon that
+is made to do harm (see the trust model in `docs/guide/deployment.md`), and
+the tests prove only the first.
 
 Run `go test ./internal/<pkg>/ -update` to rewrite a package's golden files
 under `testdata/` from the current output, then review the diff before you
