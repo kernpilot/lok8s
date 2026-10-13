@@ -46,9 +46,15 @@ dnssearch::check() {
   DNSSEARCH_PROBLEMS=()
   local list='.spec.network.dnsSearch | explode(.)'
 
-  local tag
+  local tag rc=0
   # "" when spec.network is not a map: yq yields no value at all.
-  dnssearch::_read tag "${file}" "${list} | tag" || { dnssearch::_stop $?; return $?; }
+  dnssearch::_read tag "${file}" "${list} | tag" || rc=$?
+  if (( rc == 5 )) && dnssearch::_unset_without_flag "${file}" "${list}"; then
+    # A yq before v4.47.1 (no --yaml-fix-merge-anchor-to-spec): only a spec
+    # that sets the list needs the newer yq.
+    return 0
+  fi
+  (( rc == 0 )) || { dnssearch::_stop "${rc}"; return $?; }
   [[ -n "${tag}" && "${tag}" != '!!null' ]] || return 0
   if [[ "${tag}" != '!!seq' ]]; then
     local found
@@ -110,14 +116,18 @@ dnssearch::check() {
 # so the check sees what the Go twin sees. printf -v, not $(…), hands the
 # value back for the same reason.
 #
-# The call runs with --yaml-fix-merge-anchor-to-spec through yqbound::run
-# (DNSSEARCH_YQ_SECONDS, DNSSEARCH_YQ_KIB). Returns its status: 0; 1 when yq
-# failed on its own (an unreadable or unparsable file: its stderr goes to
-# stderr as is, the other readers report the file); 2 at the time limit; 3
-# at the memory cap or a signal; 4 without a temporary directory.
+# The call runs through yqbound::run (DNSSEARCH_YQ_SECONDS, DNSSEARCH_YQ_KIB)
+# with --yaml-fix-merge-anchor-to-spec, unless the 4th argument is "plain".
+# Returns the yqbound::run status: 0; 1 when yq failed on its own (an
+# unreadable or unparsable file: its stderr goes to stderr as is, the other
+# readers report the file); 2 at the time limit; 3 at the memory cap; 4
+# without a temporary directory or FIFO; 5 when yq does not know a flag (a
+# yq before v4.47.1); 64+N when the signal N stopped yq.
 dnssearch::_read() {
   local out rc=0
-  out="$(yqbound::run "${DNSSEARCH_YQ_SECONDS}" "${DNSSEARCH_YQ_KIB}" "${2}" --yaml-fix-merge-anchor-to-spec -r "${3}"
+  local -a flags=(--yaml-fix-merge-anchor-to-spec)
+  [[ "${4:-}" != plain ]] || flags=()
+  out="$(yqbound::run "${DNSSEARCH_YQ_SECONDS}" "${DNSSEARCH_YQ_KIB}" "${2}" ${flags[@]+"${flags[@]}"} -r "${3}"
          status=$?; printf x; exit "${status}")" || rc=$?
   (( rc == 0 )) || return "${rc}"
   out="${out%x}"
@@ -145,7 +155,7 @@ dnssearch::_stop() {
         cause="lo cannot create a temporary directory or a FIFO in ${tmpdir}. Set TMPDIR to a local directory."
       fi
       ;;
-    5) cause="the installed yq ($(dnssearch::_yq_version)) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (lo toolchain install, or b install, installs the pinned yq)." ;;
+    5) cause="the installed yq ($(dnssearch::_yq_version)) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later." ;;
     *)
       if (( rc > 64 && rc < 128 )); then
         cause="the signal SIG$(kill -l $(( rc - 64 )) 2>/dev/null || echo $(( rc - 64 ))) stopped yq. Run the command again."
@@ -156,6 +166,15 @@ dnssearch::_stop() {
   esac
   DNSSEARCH_PROBLEMS+=("spec.network.dnsSearch could not be read: ${cause}")
   return 1
+}
+
+# dnssearch::_unset_without_flag <file> <list-expr> — true when the spec sets
+# no list (missing, null, or spec.network not a map), read without
+# --yaml-fix-merge-anchor-to-spec, which an old yq does not know.
+dnssearch::_unset_without_flag() {
+  local tag
+  dnssearch::_read tag "${1}" "${2} | tag" plain || return 1
+  [[ -z "${tag}" || "${tag}" == '!!null' ]]
 }
 
 # dnssearch::_yq_version — the version of the yq on PATH (v4.53.3), or

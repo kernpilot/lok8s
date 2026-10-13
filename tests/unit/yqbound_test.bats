@@ -2,8 +2,9 @@
 # yqbound_test.bats — yqbound::run (.lok8s/utils/yqbound.sh): one yq call with a
 # time limit that always holds (pure bash, no timeout(1)) and a data-memory
 # cap (ulimit -d, best effort), and an exit status per outcome: 0 success,
-# 1 a yq error of its own, 2 the time limit, 3 the memory cap or a signal,
-# 4 no temporary directory.
+# 1 a yq error of its own, 2 the time limit, 3 the memory cap, 4 no
+# temporary directory or FIFO, 5 an unknown flag (an old yq), 64+N the
+# signal N.
 
 setup() {
   load "../test_helper"
@@ -209,10 +210,35 @@ _interrupt() {
 }
 
 @test "yqbound::run: TERM and QUIT stop yq and the watchdog and remove the temporary directory" {
-  # As in the CI bats container: no ps on PATH (a stub that fails).
-  printf '#!/usr/bin/env bash\nexit 127\n' > "${STUBS}/ps"
-  chmod +x "${STUBS}/ps"
+  # With /proc (Linux), as in the CI bats container: no ps on PATH (a stub
+  # that fails). Without /proc (macOS), _ppid / _children need the real ps.
+  if [[ -d /proc/self ]]; then
+    printf '#!/usr/bin/env bash\nexit 127\n' > "${STUBS}/ps"
+    chmod +x "${STUBS}/ps"
+  fi
   _interrupt TERM 143
   _interrupt QUIT 131
   _clean
+}
+
+@test "yqbound::run: a SIGKILLed body does not hold the caller's \$(…) open until the time limit" {
+  rm -f "${BATS_TEST_TMPDIR}/yq.pid" "${BATS_TEST_TMPDIR}/done"
+  _yq 'echo $$ > "'"${BATS_TEST_TMPDIR}"'/yq.pid"; exec sleep 30'
+  # `|| :`: the killed body ends the $(…) with 137, and bats runs with set -e.
+  ( out="$(yqbound::run 8 262144 "${BATS_TEST_TMPDIR}/in.yaml" '.a')" || :; : "${out}"; echo done > "${BATS_TEST_TMPDIR}/done" ) &
+  local caller=$! i
+  for (( i = 0; i < 50; i++ )); do [ -s "${BATS_TEST_TMPDIR}/yq.pid" ] && break; sleep 0.1; done
+  [ -s "${BATS_TEST_TMPDIR}/yq.pid" ]
+  local yq body start
+  yq="$(cat "${BATS_TEST_TMPDIR}/yq.pid")"
+  body="$(_ppid "${yq}")"
+  [ -n "${body}" ]
+  start=${SECONDS}
+  kill -KILL "${body}"
+  for (( i = 0; i < 60; i++ )); do [ -e "${BATS_TEST_TMPDIR}/done" ] && break; sleep 0.1; done
+  local took=$(( SECONDS - start ))
+  kill -TERM "${yq}" 2>/dev/null || :
+  wait "${caller}" 2>/dev/null || :
+  [ -e "${BATS_TEST_TMPDIR}/done" ] || { echo "the caller's \$(…) did not return within 6 s" >&2; return 1; }
+  (( took < 4 )) || { echo "the caller's \$(…) returned after ${took} s" >&2; return 1; }
 }

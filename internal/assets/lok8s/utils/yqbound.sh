@@ -47,11 +47,14 @@ yqbound::run() (
     exec yq "${@}" "${file}" >"${tmp}/out" 2>"${tmp}/err"
   ) &
   pid=$!
+  # The watchdog's stdout and stderr go to /dev/null: if the body dies (a
+  # SIGKILL), the watchdog must not hold the caller's $(…) pipe open until
+  # the time limit.
   (
     read -r -t "${seconds}" <>"${tmp}/tick" || :
     : >"${tmp}/timeout"
     kill -TERM "${pid}" 2>/dev/null
-  ) &
+  ) >/dev/null 2>&1 &
   watchdog=$!
   rc=0
   wait "${pid}" 2>/dev/null || rc=$?

@@ -247,7 +247,7 @@ _limit_line() {
   # An old yq (before v4.47.1): the version it reports is in the line.
   _limit_line 'if [[ "${1:-}" == --version ]]; then echo "yq (https://github.com/mikefarah/yq/) version v4.46.1"; exit 0; fi
 echo "Error: unknown flag: --yaml-fix-merge-anchor-to-spec" >&2; echo "Usage:" >&2; exit 1' \
-    "${prefix} the installed yq (v4.46.1) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (lo toolchain install, or b install, installs the pinned yq)."
+    "${prefix} the installed yq (v4.46.1) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later."
   ( TMPDIR="${BATS_TEST_TMPDIR}/no-such-dir"
     _limit_line 'echo unused' "${prefix} the temporary directory ${BATS_TEST_TMPDIR}/no-such-dir does not exist. Set TMPDIR to a directory that exists." )
   mkdir -p "${BATS_TEST_TMPDIR}/read-only"
@@ -272,6 +272,39 @@ echo "Error: unknown flag: --yaml-fix-merge-anchor-to-spec" >&2; echo "Usage:" >
       [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "Error: bad file: yaml: line 3: mapping values are not allowed" ] ) || {
     echo "own error:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
   }
+}
+
+# _old_yq — a yq before v4.47.1: it rejects --yaml-fix-merge-anchor-to-spec
+# and reports v4.46.1; every other call goes to the real yq.
+_old_yq() {
+  local real
+  real="$(command -v yq)"
+  _slow_yq 'for arg in "$@"; do
+  [[ "${arg}" != --yaml-fix-merge-anchor-to-spec ]] || { echo "Error: unknown flag: --yaml-fix-merge-anchor-to-spec" >&2; echo "Usage:" >&2; exit 1; }
+done
+if [[ "${1:-}" == --version ]]; then echo "yq (https://github.com/mikefarah/yq/) version v4.46.1"; exit 0; fi
+exec "'"${real}"'" "$@"'
+}
+
+@test "read_dns_search_config with a yq before v4.47.1: a spec without the list reads as no list, a list needs the newer yq" {
+  local body rc
+  for body in '  cluster: {domain: lok8s.dev}\n' '  network: lok8s\n' '  network:\n    name: n\n    dnsSearch: ~\n'; do
+    # shellcheck disable=SC2059 # the bodies carry \n escapes on purpose
+    ( _old_yq
+      export LOK8S_NETWORK_DNS_SEARCH="stale.example"
+      rc=0; lo::read_dns_search_config "$(_spec "$(printf "${body}")")" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+      [ "${rc}" -eq 0 ] && [ "${LOK8S_NETWORK_DNS_SEARCH}" == "" ] && [ ! -s "${BATS_TEST_TMPDIR}/err" ] ) || {
+      echo "body ${body}:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
+    }
+  done
+  for body in '  network:\n    dnsSearch: [a.example]\n' '  network:\n    dnsSearch: []\n'; do
+    # shellcheck disable=SC2059 # the bodies carry \n escapes on purpose
+    ( _old_yq
+      rc=0; lo::read_dns_search_config "$(_spec "$(printf "${body}")")" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+      [ "${rc}" -ne 0 ] && [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "error: spec.network.dnsSearch could not be read: the installed yq (v4.46.1) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later." ] ) || {
+      echo "body ${body}:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
+    }
+  done
 }
 
 @test "dnssearch::_stop: an exit status with no own cause is still a failure with its number" {
