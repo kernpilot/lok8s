@@ -50,6 +50,11 @@ type Context struct {
 	// same way Cache was opened (the overlay in a dry run). nil when
 	// PATH_SECRETS is unset.
 	OpenStore func(namespace, name string) (CacheStore, error)
+	// RunLoad and RunSave read and keep material a dry run generated for
+	// the rest of the run (the run store lo owns), e.g. an in-memory CA
+	// every later Secret of the run must sign with. nil outside a dry run.
+	RunLoad func(key string) ([]byte, bool)
+	RunSave func(key string, value []byte) error
 }
 
 // Report calls Minted when it is set.

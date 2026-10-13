@@ -36,18 +36,18 @@ var raceRe = regexp.MustCompile(`ensure CRDs are installed first|failed calling 
 // concurrent jobs) maps to the Applier being function-local here: each
 // invocation owns its own output state, so concurrent goroutines never race.
 func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer) int {
+	if reason, skip := e.skipReason(job); skip {
+		fmt.Fprintln(stderr, reason)
+		return 0
+	}
 	// An entry's env: may not set lo's own orchestration or safety
 	// variables (LOK8S_BOOTSTRAP_*, BOOTSTRAP_*, bootstrap_*, PATH_SECRETS,
-	// KUBECONFIG, KUSTOMIZE_PLUGIN_HOME): checked first, before anything
-	// else reads the entry — an entry error, on a real run as on a dry run.
+	// KUBECONFIG, KUSTOMIZE_PLUGIN_HOME, HELM_PLUGINS): an entry error, on a
+	// real run as on a dry run, checked before the render reads the entry.
 	env := jobEnv(job)
 	if v := addons.ProtectedEnvOverride(env); v != "" {
 		ui.ErrorTo(stderr, "bootstrap: %s: env: may not set %s (reserved for lo)", job.Name, v)
 		return 1
-	}
-	if reason, skip := e.skipReason(job); skip {
-		fmt.Fprintln(stderr, reason)
-		return 0
 	}
 
 	// Render via the canonical khelm path (value-stacking + kustomize build

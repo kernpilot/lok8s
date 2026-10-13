@@ -9,7 +9,14 @@ import (
 )
 
 func dryRunEnv(report string) func(string) (string, bool) {
+	return dryRunEnvStore(report, "")
+}
+
+func dryRunEnvStore(report, store string) func(string) (string, bool) {
 	vals := map[string]string{DryRunEnv: "1", DryRunReportEnv: report}
+	if store != "" {
+		vals[DryRunStoreEnv] = store
+	}
 	return func(k string) (string, bool) { v, ok := vals[k]; return v, ok }
 }
 
@@ -23,8 +30,8 @@ func TestDryRunFromEnvIsNilOutsideADryRun(t *testing.T) {
 }
 
 // The overlay reads the store, generates a missing value in memory and
-// writes nothing: no directory, no file. A generated value is reported by
-// name only; a Put (a value read from an env var) is not.
+// writes nothing: no directory, no file. A generated value and an update
+// (Put of a value the store does not hold) are reported by name only.
 func TestOverlayWritesNothingAndReportsWhatItGenerated(t *testing.T) {
 	root := t.TempDir()
 	report := filepath.Join(root, "report")
@@ -56,7 +63,7 @@ func TestOverlayWritesNothingAndReportsWhatItGenerated(t *testing.T) {
 		t.Fatalf("the overlay created the store: %v", err)
 	}
 	raw, _ := os.ReadFile(report)
-	if string(raw) != "secret Secret.app.ns.PASSWORD\n" {
+	if string(raw) != "secret Secret.app.ns.PASSWORD\nupdate Secret.app.ns.FROM_ENV\n" {
 		t.Errorf("report = %q", raw)
 	}
 	if strings.Contains(string(raw), "s3cret") {
@@ -90,7 +97,7 @@ func TestOverlayReadByNameMissIsReported(t *testing.T) {
 	_ = os.WriteFile(report, nil, 0o600)
 	s, _ := Open(filepath.Join(root, "store"), "ns", "ref", DryRunFromEnv(dryRunEnv(report)))
 	_, err := s.ReadByName("Secret.app.ns.PASSWORD")
-	if err == nil || !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "a dry run writes no store entry") {
+	if err == nil || !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "not generated earlier in this dry run") {
 		t.Fatalf("err = %v", err)
 	}
 	if raw, _ := os.ReadFile(report); string(raw) != "secretRef Secret.app.ns.PASSWORD\n" {
@@ -112,4 +119,90 @@ func TestDryRunReportMustExist(t *testing.T) {
 	if _, err := os.Stat(report); !errors.Is(err, os.ErrNotExist) {
 		t.Error("the plugin created the report file")
 	}
+}
+
+// A miss in an EXISTING store directory (the production case: the store is
+// there, one value is new) writes nothing into it, generate or update.
+func TestOverlayMissInAnExistingStoreWritesNothing(t *testing.T) {
+	root := t.TempDir()
+	report := filepath.Join(root, "report")
+	_ = os.WriteFile(report, nil, 0o600)
+	store := filepath.Join(root, "store")
+	c, _ := New(store, "ns", "app")
+	_ = c.Put("OLD", []byte("old"))
+	before := dirListing(t, store)
+	s, _ := Open(store, "ns", "app", DryRunFromEnv(dryRunEnvStore(report, filepath.Join(root, "run"))))
+	if _, err := s.GetOrCreate("NEW", func() ([]byte, error) { return []byte("v"), nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put("OLD", []byte("changed")); err != nil {
+		t.Fatal(err)
+	}
+	if after := dirListing(t, store); after != before {
+		t.Errorf("the store changed:\nbefore %s\nafter  %s", before, after)
+	}
+	if v, _ := os.ReadFile(filepath.Join(store, FormatName("app", "ns", "OLD"))); string(v) != "old" {
+		t.Errorf("OLD = %q, want the stored value untouched", v)
+	}
+}
+
+// The run store carries a value from one plugin process (one DryRun) to the
+// next: a later Secret of the same run reads what an earlier one generated
+// or updated. It is 0700/0600.
+func TestRunStoreCarriesValuesAcrossPluginProcesses(t *testing.T) {
+	root := t.TempDir()
+	report := filepath.Join(root, "report")
+	_ = os.WriteFile(report, nil, 0o600)
+	store, run := filepath.Join(root, "store"), filepath.Join(root, "run")
+	first, _ := Open(store, "ns", "app", DryRunFromEnv(dryRunEnvStore(report, run)))
+	v1, err := first.GetOrCreate("PASSWORD", func() ([]byte, error) { return []byte("gen-1"), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = first.Put("FROM_ENV", []byte("env-1"))
+	second, _ := Open(store, "ns", "ref", DryRunFromEnv(dryRunEnvStore(report, run)))
+	if v, err := second.ReadByName(FormatName("app", "ns", "PASSWORD")); err != nil || string(v) != string(v1) {
+		t.Errorf("secretRef in a later process = %q, %v", v, err)
+	}
+	again, _ := Open(store, "ns", "app", DryRunFromEnv(dryRunEnvStore(report, run)))
+	if v, _ := again.GetOrCreate("PASSWORD", func() ([]byte, error) { return []byte("gen-2"), nil }); string(v) != "gen-1" {
+		t.Errorf("a later render regenerated the value: %q", v)
+	}
+	if v, _ := again.Get("FROM_ENV"); string(v) != "env-1" {
+		t.Errorf("a later process lost the update: %q", v)
+	}
+	if _, err := os.Stat(store); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the real store was created: %v", err)
+	}
+	_ = filepath.Walk(run, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		want := os.FileMode(0o600)
+		if info.IsDir() {
+			want = 0o700
+		}
+		if p != run && info.Mode().Perm() != want {
+			t.Errorf("%s mode %v, want %v", p, info.Mode().Perm(), want)
+		}
+		return nil
+	})
+	raw, _ := os.ReadFile(report)
+	if strings.Count(string(raw), "secret Secret.app.ns.PASSWORD") != 1 {
+		t.Errorf("report = %q, want the generation reported once", raw)
+	}
+}
+
+func dirListing(t *testing.T, dir string) string {
+	t.Helper()
+	var b strings.Builder
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		info, _ := e.Info()
+		b.WriteString(e.Name() + " " + info.ModTime().String() + "\n")
+	}
+	return b.String()
 }

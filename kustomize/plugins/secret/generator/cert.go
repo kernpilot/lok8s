@@ -1,6 +1,8 @@
 package generator
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"sync"
 
@@ -193,12 +195,16 @@ func caRootCA(ctx *plugin.Context) (cert, key []byte, err error) {
 	return cert, key, nil
 }
 
-// ephemeralCA holds the CAs a dry run minted in memory, by CAROOT path.
+// ephemeralCA holds the CAs a dry run minted in memory, by CAROOT path,
+// when no run store is wired (a direct caller; lo always wires one).
 var ephemeralCA struct {
 	mu   sync.Mutex
 	byID map[string][2][]byte
 }
 
+// dryRunCARoot is caRootCA for a dry run: the CA in CAROOT, else the CA this
+// run minted already (the run store: every Secret of the run signs with the
+// same one), else a new one, minted in memory, kept for the run and reported.
 func dryRunCARoot(ctx *plugin.Context) (cert, key []byte, err error) {
 	dir, cert, key, found, err := certgen.LoadCARoot()
 	if err != nil {
@@ -207,9 +213,17 @@ func dryRunCARoot(ctx *plugin.Context) (cert, key []byte, err error) {
 	if found {
 		return cert, key, nil
 	}
+	sum := sha256.Sum256([]byte(dir))
+	id := "caroot-" + hex.EncodeToString(sum[:8])
 	ephemeralCA.mu.Lock()
 	defer ephemeralCA.mu.Unlock()
-	if pair, ok := ephemeralCA.byID[dir]; ok {
+	if ctx.RunLoad != nil {
+		c, okc := ctx.RunLoad(id + "/" + certgen.RootName)
+		k, okk := ctx.RunLoad(id + "/" + certgen.RootKeyName)
+		if okc && okk {
+			return c, k, nil
+		}
+	} else if pair, ok := ephemeralCA.byID[dir]; ok {
 		return pair[0], pair[1], nil
 	}
 	if cert, key, err = certgen.NewCA(ctx.Rand); err != nil {
@@ -217,6 +231,15 @@ func dryRunCARoot(ctx *plugin.Context) (cert, key []byte, err error) {
 	}
 	if err := ctx.Report("caroot " + dir); err != nil {
 		return nil, nil, errs.Wrap("CAROOT", err)
+	}
+	if ctx.RunSave != nil {
+		if err := ctx.RunSave(id+"/"+certgen.RootKeyName, key); err != nil {
+			return nil, nil, errs.Wrap("CAROOT", err)
+		}
+		if err := ctx.RunSave(id+"/"+certgen.RootName, cert); err != nil {
+			return nil, nil, errs.Wrap("CAROOT", err)
+		}
+		return cert, key, nil
 	}
 	if ephemeralCA.byID == nil {
 		ephemeralCA.byID = map[string][2][]byte{}

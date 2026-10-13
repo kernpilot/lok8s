@@ -30,7 +30,6 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
-	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/testutil"
 	"gopkg.in/yaml.v3"
@@ -382,7 +381,7 @@ func TestProtectedEnvOverride(t *testing.T) {
 	for _, bad := range []string{
 		"LOK8S_BOOTSTRAP_DRYRUN", "LOK8S_BOOTSTRAP_ALLOW_GENERATORS", "LOK8S_BOOTSTRAP_DRYRUN_REPORT",
 		"LOK8S_BOOTSTRAP_ONLY", "BOOTSTRAP_PROTECTED_ENV_NAMES", "BOOTSTRAP_PLATFORM_OWNED",
-		"bootstrap_render_dir", "bootstrap_dry_run", "PATH_SECRETS", "KUBECONFIG", "KUSTOMIZE_PLUGIN_HOME",
+		"bootstrap_render_dir", "bootstrap_dry_run", "PATH_SECRETS", "KUBECONFIG", "KUSTOMIZE_PLUGIN_HOME", "HELM_PLUGINS",
 	} {
 		if got := ProtectedEnvOverride(map[string]string{"LOK8S_USER_FOO": "x", bad: "y"}); got != bad {
 			t.Errorf("%s: got %q", bad, got)
@@ -443,6 +442,9 @@ func TestRenderDryRunBoundaryReachesKustomize(t *testing.T) {
 		"PATH":                          b.StubBin + string(os.PathListSeparator) + "/entry/bin",
 		"LOK8S_BOOTSTRAP_DRYRUN":        "1",
 		"LOK8S_BOOTSTRAP_DRYRUN_REPORT": b.Report,
+		"LOK8S_BOOTSTRAP_DRYRUN_STORE":  b.Store,
+		"TMPDIR":                        b.Tmp,
+		"HELM_PLUGINS":                  b.HelmPlugins,
 	} {
 		if got := lastEnvValue(env, key); got != want {
 			t.Errorf("%s = %q, want %q", key, got, want)
@@ -451,7 +453,7 @@ func TestRenderDryRunBoundaryReachesKustomize(t *testing.T) {
 	if got := lastEnvValue(env, "LOK8S_BOOTSTRAP_ALLOW_GENERATORS"); got != "" {
 		t.Errorf("LOK8S_BOOTSTRAP_ALLOW_GENERATORS = %q without --allow-generators", got)
 	}
-	for _, name := range []string{"docker", "git"} {
+	for _, name := range []string{"docker", "git", "helm"} {
 		info, err := os.Stat(filepath.Join(b.StubBin, name))
 		if err != nil || info.Mode()&0o111 == 0 {
 			t.Errorf("refusing %s stub missing or not executable: %v", name, err)
@@ -480,104 +482,14 @@ func TestRenderDryRunAllowGeneratorsIsTheRealRunsRender(t *testing.T) {
 	if got := lastEnvValue(env, "PATH"); got != "" {
 		t.Errorf("PATH overlay = %q, want none", got)
 	}
+	if got := lastEnvValue(env, "HELM_PLUGINS"); got != "" {
+		t.Errorf("HELM_PLUGINS overlay = %q, want the operator's (none)", got)
+	}
+	if got := lastEnvValue(env, "TMPDIR"); got != b.Tmp {
+		t.Errorf("TMPDIR = %q, want the boundary's even with --allow-generators", got)
+	}
 	if lastEnvValue(env, "LOK8S_BOOTSTRAP_DRYRUN") != "1" || lastEnvValue(env, "LOK8S_BOOTSTRAP_ALLOW_GENERATORS") != "1" {
 		t.Errorf("sentinels missing: %v", env)
-	}
-}
-
-// localChartAddon writes <base>/addons/<name>: a chart.yaml addon whose
-// chart is chartRef, with no values to stack (the real run renders it in
-// place).
-func localChartAddon(t *testing.T, base, name, chartRef string) string {
-	t.Helper()
-	dir := filepath.Join(base, "addons", name)
-	testutil.WriteFile(t, filepath.Join(dir, "chart.yaml"),
-		"apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: "+name+"\nchart: "+chartRef+"\n")
-	return dir
-}
-
-func writeChart(t *testing.T, dir, deps string) {
-	t.Helper()
-	testutil.WriteFile(t, filepath.Join(dir, "Chart.yaml"), "apiVersion: v2\nname: c\nversion: 0.1.0\n"+deps)
-	testutil.WriteFile(t, filepath.Join(dir, "templates", "cm.yaml"), "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: c\n")
-}
-
-// A local chart (or a file:// dependency of it) that resolves outside the
-// project is an entry error in a dry run; kustomize never runs.
-func TestRenderDryRunRefusesAChartOutsideTheProject(t *testing.T) {
-	p := testPaths(t)
-	outside := t.TempDir()
-	writeChart(t, filepath.Join(outside, "chart"), "")
-	dep := t.TempDir()
-	writeChart(t, filepath.Join(dep, "common"), "")
-	inside := filepath.Join(p.Base, "charts", "app")
-	writeChart(t, inside, "dependencies:\n  - name: common\n    version: 0.1.0\n    repository: file://"+filepath.Join(dep, "common")+"\n")
-	for name, ref := range map[string]string{"abs": filepath.Join(outside, "chart"), "dep": "../../charts/app"} {
-		dir := localChartAddon(t, p.Base, name, ref)
-		f := newFakeKustomize(t, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n")
-		var errBuf strings.Builder
-		_, err := RenderDryRun(t.Context(), p, f, &errBuf, dir, "lo", "", "", nil, dryBoundary(t, p), false)
-		if err == nil || !strings.Contains(err.Error(), "resolves outside the project") {
-			t.Errorf("%s: err = %v", name, err)
-		}
-		if len(f.calls) != 0 {
-			t.Errorf("%s: kustomize ran: %v", name, f.calls)
-		}
-		// The real run keeps rendering it (no new refusal there).
-		f2 := newFakeKustomize(t, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n")
-		if _, err := Render(t.Context(), p, f2, &errBuf, dir, "lo", "", "", nil); err != nil {
-			t.Errorf("%s: real render: %v", name, err)
-		}
-	}
-}
-
-// A local chart that khelm builds dependencies for renders from a copy in
-// the boundary (the real run renders it in place and khelm writes
-// Chart.lock and charts/ next to it); the copy keeps the relative layout,
-// symlinks are copied as their targets. A chart without dependencies, like
-// the real run, renders in place.
-func TestRenderDryRunCopiesOnlyAChartThatBuildsDependencies(t *testing.T) {
-	p := testPaths(t)
-	writeChart(t, filepath.Join(p.Base, "charts", "common"), "")
-	writeChart(t, filepath.Join(p.Base, "charts", "app"), "dependencies:\n  - name: common\n    version: 0.1.0\n    repository: file://../common\n")
-	if err := os.Symlink(filepath.Join(p.Base, "charts", "common", "Chart.yaml"), filepath.Join(p.Base, "charts", "app", "Linked.yaml")); err != nil {
-		t.Fatal(err)
-	}
-	dir := localChartAddon(t, p.Base, "app", "../../charts/app")
-	b := dryBoundary(t, p)
-	var buildDir string
-	probe := &probeRunner{t: t, manifest: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n", check: func(d string) {
-		buildDir = d
-		for _, rel := range []string{"chart.yaml", "../../charts/app/Chart.yaml", "../../charts/common/Chart.yaml"} {
-			if _, err := os.Stat(filepath.Join(d, rel)); err != nil {
-				t.Errorf("the copy lacks %s: %v", rel, err)
-			}
-		}
-		if fi, err := os.Lstat(filepath.Join(d, "../../charts/app/Linked.yaml")); err != nil || fi.Mode()&os.ModeSymlink != 0 {
-			t.Errorf("a symlink in the chart was not copied as its target: %v", err)
-		}
-	}}
-	t.Setenv(render.ModeEnv, string(render.ModeExec))
-	var errBuf strings.Builder
-	if _, err := RenderDryRun(t.Context(), p, probe, &errBuf, dir, "lo", "", "", nil, b, false); err != nil {
-		t.Fatalf("RenderDryRun: %v (%s)", err, errBuf.String())
-	}
-	if !strings.HasPrefix(buildDir, b.Dir+string(filepath.Separator)) {
-		t.Errorf("rendered from %s, want a copy under the boundary %s", buildDir, b.Dir)
-	}
-	if fsutil.DirExists(buildDir) {
-		t.Errorf("the copy %s outlived the render", buildDir)
-	}
-
-	// No dependencies: in place, like the real run.
-	writeChart(t, filepath.Join(p.Base, "charts", "plain"), "")
-	plain := localChartAddon(t, p.Base, "plain", "../../charts/plain")
-	f := newFakeKustomize(t, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n")
-	if _, err := RenderDryRun(t.Context(), p, f, &errBuf, plain, "lo", "", "", nil, b, false); err != nil {
-		t.Fatalf("RenderDryRun plain: %v", err)
-	}
-	if f.buildDirs[0] != plain {
-		t.Errorf("a chart without dependencies rendered from %s, want in place", f.buildDirs[0])
 	}
 }
 
@@ -694,32 +606,31 @@ func TestRenderHandsKustomizePluginHomeToTheChild(t *testing.T) {
 	}
 }
 
-// The dry run's copy of a stacking addon copies a symlink as its target and
-// skips a dangling one (the real run's copy keeps both as links). The bash
-// twin: addons::_copy_deref.
-func TestRenderDryRunCopyDereferencesSymlinks(t *testing.T) {
+// A dry run copies a stacking addon exactly as the real run does: symlinks
+// stay symlinks (khelm's dependency builds are refused at the ChartRenderer
+// gate, so nothing writes through one).
+func TestRenderDryRunStackedCopyKeepsSymlinks(t *testing.T) {
 	dir := writeAddon(t)
 	outside := filepath.Join(t.TempDir(), "outside.yaml")
 	testutil.WriteFile(t, outside, "linked: true\n")
 	if err := os.Symlink(outside, filepath.Join(dir, "linked.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("/nonexistent/lok8s-dangling", filepath.Join(dir, "dangling.yaml")); err != nil {
-		t.Fatal(err)
-	}
 	p := testPaths(t)
 	b := dryBoundary(t, p)
 	t.Setenv(render.ModeEnv, string(render.ModeExec))
+	var buildDir string
 	probe := &probeRunner{t: t, manifest: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n", check: func(d string) {
-		if fi, err := os.Lstat(filepath.Join(d, "linked.yaml")); err != nil || !fi.Mode().IsRegular() {
-			t.Errorf("linked.yaml is not a regular file in the copy: %v", err)
-		}
-		if _, err := os.Lstat(filepath.Join(d, "dangling.yaml")); err == nil {
-			t.Error("the dangling symlink was copied")
+		buildDir = d
+		if fi, err := os.Lstat(filepath.Join(d, "linked.yaml")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("linked.yaml is not a symlink in the copy (the real run keeps it): %v", err)
 		}
 	}}
 	var errBuf strings.Builder
 	if _, err := RenderDryRun(t.Context(), p, probe, &errBuf, dir, "lo", "hetzner", "", nil, b, false); err != nil {
 		t.Fatalf("RenderDryRun: %v\n%s", err, errBuf.String())
+	}
+	if !strings.HasPrefix(buildDir, b.Tmp+string(filepath.Separator)) {
+		t.Errorf("the copy %s is not under the boundary's TMPDIR %s", buildDir, b.Tmp)
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/render"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func inProcessProject(t *testing.T) (*config.Paths, *DryRunBoundary) {
@@ -123,7 +124,39 @@ func TestDryRunInProcessSecretMintIsInMemoryAndReported(t *testing.T) {
 	if !strings.Contains(out, "PASSWORD:") || fsutil.DirExists(store) {
 		t.Fatalf("store created=%v, out:\n%s", fsutil.DirExists(store), out)
 	}
-	if got := b.Minted(); len(got) != 1 || got[0] != "secret Secret.app.ns.PASSWORD" {
+	if got := b.ReadReport().Generated; len(got) != 1 || got[0] != "secret Secret.app.ns.PASSWORD" {
 		t.Errorf("report = %q", got)
+	}
+}
+
+// lo-full: the gate runs in-process before khelm (the library). An
+// unvendored local chart is refused and reported, the chart directory is
+// untouched; a local chart without dependencies renders through khelm.
+func TestDryRunInProcessChartGate(t *testing.T) {
+	p, b := inProcessProject(t)
+	chartDir := filepath.Join(p.Base, "charts", "app")
+	testutil.WriteFile(t, filepath.Join(chartDir, "Chart.yaml"), "apiVersion: v2\nname: app\nversion: 0.1.0\ndependencies:\n  - name: redis\n    version: 1.0.0\n    repository: https://charts.example.test\n")
+	testutil.WriteFile(t, filepath.Join(chartDir, "templates", "cm.yaml"), "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: from-chart\n")
+	dir := fixtureAddon(t, p.Base, "app", map[string]string{
+		"kustomization.yaml": "generators:\n- helm.yaml\n",
+		"helm.yaml":          "apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: app\nchart: ../../charts/app\n",
+	})
+	before := hashDir(t, chartDir)
+	if err := b.ResetReport(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := renderInProcess(t, p, b, dir, false); err == nil {
+		t.Fatal("the in-process dry render of an unvendored chart succeeded")
+	}
+	if got := b.ReadReport().UnvendoredCharts; len(got) != 1 {
+		t.Errorf("report = %q", got)
+	}
+	if hashDir(t, chartDir) != before {
+		t.Error("the chart directory changed")
+	}
+	testutil.WriteFile(t, filepath.Join(chartDir, "Chart.yaml"), "apiVersion: v2\nname: app\nversion: 0.1.0\n")
+	out, stderr, err := renderInProcess(t, p, b, dir, false)
+	if err != nil || !strings.Contains(out, "from-chart") {
+		t.Fatalf("a chart without dependencies did not render in-process: %v\n%s", err, stderr)
 	}
 }

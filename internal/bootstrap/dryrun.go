@@ -35,6 +35,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"gopkg.in/yaml.v3"
 )
 
 // Options are the run modes a CLI invocation selects (the flags of
@@ -64,6 +65,11 @@ type Options struct {
 	// the render boundary, internal/addons/dryrun.go). lo's own writes stay
 	// suppressed either way. No effect outside --dry-run.
 	AllowGenerators bool
+	// IgnoreNondeterministic diffs a dry run's entries without the objects
+	// that differ between the entry's two renders (regenerated on every
+	// apply, e.g. Cilium's CA and TLS Secrets): the verdict is 0 when only
+	// they differ. They are still listed. No effect outside --dry-run.
+	IgnoreNondeterministic bool
 	// WithRestore includes restore.d in an --only run (default off:
 	// --only skips restore.d and, on a real run, warns loudly when it is
 	// non-empty — restoring a wildcard TLS Secret matters for more than
@@ -82,15 +88,15 @@ type dryRunStatus string
 const (
 	dryUnchanged dryRunStatus = "unchanged" // diff rc 0
 	dryDiffers   dryRunStatus = "differs"   // diff rc 1, a completed diff
-	// dryInconclusive is printed as "inconclusive (needs-crd)": the race-
-	// class stderr raceRe matches (applyone.go) — an earlier entry's
-	// CRD/webhook has not landed in THIS read-only probe yet, so the diff
-	// result proves nothing either way. A sequential dry run never
-	// establishes CRDs, so a later entry can show this even when the real
-	// (parallel, retrying) apply would not. Review round 2, item F: this
-	// does NOT count as "differs" — it is its own summary field, and it
-	// forces the run's exit to 2 (an assessment that could not be
-	// completed), the same as a genuine error.
+	// dryInconclusive: the dry run could not assess the entry. Printed
+	// with its reason: "inconclusive (needs-crd)" — the race-class stderr
+	// raceRe matches (applyone.go), an earlier entry's CRD/webhook has not
+	// landed in THIS read-only probe yet (a sequential dry run never
+	// establishes CRDs); "inconclusive (chart dependencies not vendored)" —
+	// the ChartRenderer gate refused a local chart khelm would build
+	// dependencies for (internal/render/chartgate.go). It does NOT count as
+	// "differs": it is its own summary field, and it forces the run's exit
+	// to 2 (an assessment that could not be completed), like an error.
 	dryInconclusive dryRunStatus = "inconclusive"
 	dryRendered     dryRunStatus = "rendered" // --no-diff: rendered, not diffed
 	drySkipped      dryRunStatus = "skipped"  // the real run would skip it too
@@ -111,7 +117,23 @@ type dryResult struct {
 	// entry's rendered manifest — and whatever its diff reported —
 	// describes a result the real run will not reproduce verbatim.
 	nonRepeatable bool
+	// reason is the inconclusive status's reason (needs-crd, chart
+	// dependencies not vendored).
+	reason string
+	// nondeterministic lists the objects whose content differed between the
+	// entry's two renders (a chart that mints a CA or TLS material on every
+	// render): every apply regenerates them.
+	nondeterministic []string
+	// partial marks an entry whose YAML declares a KRM function: kustomize
+	// skips an exec function in a dry run without an error (a hint).
+	partial bool
 }
+
+// Inconclusive reasons.
+const (
+	reasonNeedsCRD        = "needs-crd"
+	reasonChartDepsVendor = "chart dependencies not vendored"
+)
 
 // selectOnly keeps the entries named in only (bash: bootstrap::_select_only).
 // A name matches the entry identity (the `name:` override when set, else
@@ -246,7 +268,7 @@ func (e *Engine) runDryRun(ctx context.Context, nodes []*node, base Job, restore
 	order := topoOrder(nodes)
 	width := max(len(strconv.Itoa(len(order))), 2)
 	counts := map[dryRunStatus]int{}
-	total := 0
+	total, nondeterministic := 0, 0
 	if restoreD != nil {
 		total++
 		counts[restoreD.status]++
@@ -266,14 +288,18 @@ func (e *Engine) runDryRun(ctx context.Context, nodes []*node, base Job, restore
 		res := e.dryRunOne(ctx, job, stem)
 		total++
 		counts[res.status]++
+		nondeterministic += len(res.nondeterministic)
 		fmt.Fprintf(stdout, "bootstrap dry-run: %s: %s\n", stem, res.render(ui.For(stdout)))
+		for _, obj := range res.nondeterministic {
+			fmt.Fprintf(stdout, "bootstrap dry-run: %s: non-deterministic (regenerated on every apply): %s\n", stem, obj)
+		}
 	}
 	// Review round 2, item F: inconclusive (needs-crd) is counted
 	// SEPARATELY from differs now — it proves nothing either way, so
 	// folding it into "differs" would overstate what the run actually
 	// found. Both it and errors move the exit to 2 (below).
-	fmt.Fprintf(stdout, "bootstrap dry-run: entries=%d unchanged=%d differs=%d rendered=%d skipped=%d inconclusive=%d errors=%d\n",
-		total, counts[dryUnchanged], counts[dryDiffers], counts[dryRendered], counts[drySkipped], counts[dryInconclusive], counts[dryError])
+	fmt.Fprintf(stdout, "bootstrap dry-run: entries=%d unchanged=%d differs=%d rendered=%d skipped=%d inconclusive=%d errors=%d nondeterministic=%d\n",
+		total, counts[dryUnchanged], counts[dryDiffers], counts[dryRendered], counts[drySkipped], counts[dryInconclusive], counts[dryError], nondeterministic)
 	if e.Options.RenderDir != "" {
 		fmt.Fprintf(stderr, "bootstrap dry-run: files under %s\n", e.Options.RenderDir)
 	}
@@ -286,13 +312,19 @@ func (e *Engine) runDryRun(ctx context.Context, nodes []*node, base Job, restore
 	return nil
 }
 
-// render is the report's status field: the word, then `changed=N new=M`
-// for a diff that was counted, then `(non-repeatable)` when the render
-// minted new secret material (item I).
+// render is the report's status field: the word (an inconclusive one with
+// its reason), then `changed=N new=M` for a diff that was counted, then the
+// marks: `(non-deterministic: N)` (objects regenerated on every apply,
+// listed on their own lines), `(non-repeatable)` (the render generated
+// secret material), `(partial: KRM function skipped)`.
 func (r dryResult) render(s ui.Style) string {
 	word := string(r.status)
 	if r.status == dryInconclusive {
-		word = "inconclusive (needs-crd)"
+		reason := r.reason
+		if reason == "" {
+			reason = reasonNeedsCRD
+		}
+		word = "inconclusive (" + reason + ")"
 	}
 	switch r.status {
 	case dryUnchanged:
@@ -305,56 +337,201 @@ func (r dryResult) render(s ui.Style) string {
 	if r.status == dryDiffers && r.counted {
 		word = fmt.Sprintf("%s changed=%d new=%d", word, r.changed, r.added)
 	}
+	if n := len(r.nondeterministic); n > 0 {
+		word += fmt.Sprintf(" (non-deterministic: %d)", n)
+	}
 	if r.nonRepeatable {
 		word += " (non-repeatable)"
+	}
+	if r.partial {
+		word += " (partial: KRM function skipped)"
 	}
 	return word
 }
 
 // dryRunOne renders ONE entry and diffs it against the cluster (bash:
-// bootstrap::_dry_run_one). The entry's env is checked first: it may not
-// set lo's own variables (addons.IsProtectedEnv). The skips are the real
-// run's (the hosted platform-owned addons, the KubeOne cilium/ccm defer), so
-// the report names what the real run would not touch either.
+// bootstrap::_dry_run_one). The skips are the real run's (the hosted
+// platform-owned addons, the KubeOne cilium/ccm defer), so the report names
+// what the real run would not touch either; then the entry's env is
+// checked: it may not set lo's own variables (addons.IsProtectedEnv).
+//
+// The entry renders TWICE: an object whose content differs between the two
+// renders is regenerated on every apply (a chart that mints a CA or TLS
+// material per render, Cilium's for example), so the report lists it as
+// non-deterministic. The diff is honest by default (those objects differ on
+// the cluster, every apply rotates them); --ignore-nondeterministic diffs
+// without them. The secrets plugin keeps what it generated in the run store,
+// so its values are the same in both renders.
 func (e *Engine) dryRunOne(ctx context.Context, job Job, stem string) dryResult {
 	stderr := e.stderr()
+	if reason, skip := e.skipReason(job); skip {
+		fmt.Fprintln(stderr, reason)
+		return dryResult{status: drySkipped}
+	}
 	env := jobEnv(job)
 	if v := addons.ProtectedEnvOverride(env); v != "" {
 		ui.ErrorTo(stderr, "bootstrap: %s: env: may not set %s (reserved for lo)", job.Name, v)
 		return dryResult{status: dryError}
 	}
-	if reason, skip := e.skipReason(job); skip {
-		fmt.Fprintln(stderr, reason)
-		return dryResult{status: drySkipped}
-	}
 	ui.DebugTo(stderr, "bootstrap: rendering %s", job.Name)
-	// The secrets plugin reports every value it generated in memory (the
-	// store lacks it, or CAROOT holds no CA) to the boundary's report file:
-	// the next real run generates different bytes, so the entry is marked
-	// non-repeatable.
+	// The secrets plugin reports what it generated or updated in the run
+	// store, and the chart gate the charts it refused, to the boundary's
+	// report file.
 	if err := e.boundary.ResetReport(); err != nil {
 		ui.ErrorTo(stderr, "bootstrap: dry-run report: %v", err)
 		return dryResult{status: dryError}
 	}
-	rendered, err := addons.RenderDryRun(ctx, e.Paths, e.Runner, stderr, job.Dir, job.Kind, job.Provider, job.Inline, env, e.boundary, e.Options.AllowGenerators)
-	minted := e.boundary.Minted()
-	for _, m := range minted {
-		ui.DebugTo(stderr, "bootstrap: %s: generated in memory: %s", job.Name, m)
+	partial := !e.Options.AllowGenerators && addons.KRMFunctionDeclared(job.Dir)
+	renderOnce := func() (string, error) {
+		return addons.RenderDryRun(ctx, e.Paths, e.Runner, stderr, job.Dir, job.Kind, job.Provider, job.Inline, env, e.boundary, e.Options.AllowGenerators)
 	}
-	nonRepeatable := len(minted) > 0
+	rendered, err := renderOnce()
+	var second string
+	if err == nil {
+		second, err = renderOnce()
+	}
+	report := e.boundary.ReadReport()
+	for _, m := range report.Generated {
+		ui.DebugTo(stderr, "bootstrap: %s: generated in the dry run: %s", job.Name, m)
+	}
+	nonRepeatable := len(report.Generated) > 0
+	if len(report.UnvendoredCharts) > 0 {
+		return dryResult{status: dryInconclusive, reason: reasonChartDepsVendor, nonRepeatable: nonRepeatable, partial: partial}
+	}
 	if err != nil {
 		// The render (or kustomize, or a plugin) already said WHY on stderr;
 		// the cause stays on a debug line (bash prints the same lines).
 		ui.DebugTo(stderr, "bootstrap: %s: %v", job.Name, err)
 		ui.ErrorTo(stderr, "bootstrap: render failed for %s", job.Name)
-		return dryResult{status: dryError, nonRepeatable: nonRepeatable}
+		return dryResult{status: dryError, nonRepeatable: nonRepeatable, partial: partial}
+	}
+	nondeterministic, err := nondeterministicObjects(rendered, second)
+	if err != nil {
+		ui.ErrorTo(stderr, "bootstrap: %s: cannot compare the two renders: %v", job.Name, err)
+		return dryResult{status: dryError, nonRepeatable: nonRepeatable, partial: partial}
 	}
 	// One trailing newline, like the bash `printf '%s\n' "${rendered}"`
 	// of a command substitution: the files must match byte for byte.
 	rendered = strings.TrimRight(rendered, "\n") + "\n"
-	res := e.diffManifest(ctx, job.Kubeconfig, rendered, stem, job.Name)
-	res.nonRepeatable = nonRepeatable
+	diffInput := rendered
+	if e.Options.IgnoreNondeterministic && len(nondeterministic) > 0 {
+		if diffInput, err = withoutObjects(rendered, nondeterministic); err != nil {
+			ui.ErrorTo(stderr, "bootstrap: %s: %v", job.Name, err)
+			return dryResult{status: dryError, nonRepeatable: nonRepeatable, partial: partial}
+		}
+	}
+	res := e.diffManifest(ctx, job.Kubeconfig, rendered, diffInput, stem, job.Name)
+	res.nonRepeatable, res.partial, res.nondeterministic = nonRepeatable, partial, nondeterministic
 	return res
+}
+
+// objectLabel names a rendered object: `<apiVersion> <kind> <namespace>/<name>`,
+// or `<apiVersion> <kind> <name>` for a cluster-scoped one (bash:
+// bootstrap::_nd_objects prints the same).
+func objectLabel(doc map[string]any) string {
+	str := func(v any) string {
+		s, _ := v.(string)
+		return s
+	}
+	meta, _ := doc["metadata"].(map[string]any)
+	name, ns := str(meta["name"]), str(meta["namespace"])
+	if ns != "" {
+		name = ns + "/" + name
+	}
+	return str(doc["apiVersion"]) + " " + str(doc["kind"]) + " " + name
+}
+
+// splitObjects decodes a rendered YAML stream into its objects, in order,
+// each with its label and its canonical (re-encoded) content.
+func splitObjects(stream string) (labels []string, content map[string]string, docs map[string]*yaml.Node, err error) {
+	content, docs = map[string]string{}, map[string]*yaml.Node{}
+	dec := yaml.NewDecoder(strings.NewReader(stream))
+	for {
+		var node yaml.Node
+		if err := dec.Decode(&node); err != nil {
+			if errors.Is(err, io.EOF) {
+				return labels, content, docs, nil
+			}
+			return nil, nil, nil, err
+		}
+		var m map[string]any
+		if node.Decode(&m) != nil || m == nil {
+			continue
+		}
+		raw, err := yaml.Marshal(m)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		label := objectLabel(m)
+		if _, seen := content[label]; !seen {
+			labels = append(labels, label)
+		}
+		content[label] = string(raw)
+		n := node
+		docs[label] = &n
+	}
+}
+
+// nondeterministicObjects lists, in the first render's order, the objects
+// whose content differs between two renders of one entry (or that only the
+// first render has).
+func nondeterministicObjects(first, second string) ([]string, error) {
+	labels, a, _, err := splitObjects(first)
+	if err != nil {
+		return nil, err
+	}
+	_, b, _, err := splitObjects(second)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, l := range labels {
+		if other, ok := b[l]; !ok || other != a[l] {
+			out = append(out, l)
+		}
+	}
+	return out, nil
+}
+
+// withoutObjects is the rendered stream without the named objects (what
+// --ignore-nondeterministic diffs). Empty when nothing is left.
+func withoutObjects(stream string, drop []string) (string, error) {
+	skip := map[string]bool{}
+	for _, l := range drop {
+		skip[l] = true
+	}
+	labels, _, docs, err := splitObjects(stream)
+	if err != nil {
+		return "", err
+	}
+	var parts []string
+	for _, l := range labels {
+		if skip[l] {
+			continue
+		}
+		raw, err := marshalYAML(docs[l])
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, strings.TrimRight(raw, "\n"))
+	}
+	if len(parts) == 0 {
+		return "", nil
+	}
+	return strings.Join(parts, "\n---\n") + "\n", nil
+}
+
+func marshalYAML(n *yaml.Node) (string, error) {
+	var b strings.Builder
+	enc := yaml.NewEncoder(&b)
+	enc.SetIndent(2)
+	if err := enc.Encode(n); err != nil {
+		return "", err
+	}
+	if err := enc.Close(); err != nil {
+		return "", err
+	}
+	return b.String(), nil
 }
 
 // diffManifest writes one rendered manifest's dry-run outcome: <stem>.yaml
@@ -366,7 +543,7 @@ func (e *Engine) dryRunOne(ctx context.Context, job Job, stem string) dryResult 
 // label is the plain addon name (no "NN-" render-dir prefix) used in the
 // error message, so it reads the same as the bash twin's — stem stays the
 // render-dir file stem (the --render-dir path and nothing else).
-func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, stem, label string) dryResult {
+func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInput, stem, label string) dryResult {
 	stderr := e.stderr()
 	if e.Options.RenderDir != "" {
 		if err := writeGuarded(filepath.Join(e.Options.RenderDir, stem+".yaml"), []byte(rendered), 0o600); err != nil {
@@ -377,12 +554,22 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, stem, l
 	if e.Options.NoDiff {
 		return dryResult{status: dryRendered}
 	}
+	// --ignore-nondeterministic left nothing to diff.
+	if strings.TrimSpace(diffInput) == "" {
+		if e.Options.RenderDir != "" {
+			if err := writeGuarded(filepath.Join(e.Options.RenderDir, stem+".diff"), nil, 0o600); err != nil {
+				ui.ErrorTo(stderr, "bootstrap: --render-dir: %v", err)
+				return dryResult{status: dryError}
+			}
+		}
+		return dryResult{status: dryUnchanged}
+	}
 
 	var out, errOut strings.Builder
 	err := e.Runner.Run(ctx, execx.Cmd{
 		Name:   "kubectl",
 		Args:   []string{"--kubeconfig", kubeconfig, "diff", "--server-side", "--force-conflicts", "-f", "-"},
-		Stdin:  strings.NewReader(rendered),
+		Stdin:  strings.NewReader(diffInput),
 		Stdout: &out, Stderr: &errOut,
 	})
 	rc := execx.ExitCode(err)
@@ -419,7 +606,7 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, stem, l
 		ui.ErrorTo(stderr, "bootstrap: kubectl diff failed to start for %s: %v", label, err)
 		return dryResult{status: dryError}
 	case raceRe.MatchString(errMsg):
-		return dryResult{status: dryInconclusive}
+		return dryResult{status: dryInconclusive, reason: reasonNeedsCRD}
 	case rc == 0:
 		return dryResult{status: dryUnchanged}
 	case rc == 1:
@@ -446,7 +633,9 @@ const renderDirMarker = ".lo-dry-run"
 // prepareRenderDir prepares dir for a dry run's writes (bash:
 // bootstrap::_prepare_render_dir). The path may not contain a symlink (a
 // rendered Secret must land where the operator pointed, never somewhere a
-// link leads). A missing dir is created 0700 with the marker; an EXISTING,
+// link leads). A missing dir is created 0700 with the marker; an existing
+// one that group or others may read is tightened to 0700 (and stderr says
+// so); an EXISTING,
 // non-empty dir must carry renderDirMarker as a regular file — a prior dry
 // run's own — or the call is refused, so a dry run never scribbles into a
 // directory an operator keeps something else in. A dir that does carry the
@@ -454,7 +643,7 @@ const renderDirMarker = ".lo-dry-run"
 // restore.d.{yaml,diff}): a stale entry from an earlier,
 // differently-numbered or differently-selected run never survives alongside
 // the new set.
-func prepareRenderDir(dir string) error {
+func prepareRenderDir(dir string, stderr io.Writer) error {
 	if err := refuseSymlinkedPath(dir); err != nil {
 		return err
 	}
@@ -468,11 +657,22 @@ func prepareRenderDir(dir string) error {
 	case err != nil:
 		return err
 	}
+	if len(entries) > 0 {
+		if fi, err := os.Lstat(filepath.Join(dir, renderDirMarker)); err != nil || !fi.Mode().IsRegular() {
+			return fmt.Errorf("%s is not empty and does not carry %s as a regular file (not a dry run's own output directory) — point --render-dir at an empty or lok8s-owned directory", dir, renderDirMarker)
+		}
+	}
+	// An existing directory holds rendered Secrets in plaintext too: one
+	// that group or others may read is tightened to 0700 (an empty one, or
+	// a dry run's own).
+	if fi, err := os.Stat(dir); err == nil && fi.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return err
+		}
+		fmt.Fprintf(stderr, "bootstrap dry-run: %s was %04o: tightened to 0700\n", dir, fi.Mode().Perm())
+	}
 	if len(entries) == 0 {
 		return writeGuarded(filepath.Join(dir, renderDirMarker), []byte(renderDirMarkerText), 0o600)
-	}
-	if fi, err := os.Lstat(filepath.Join(dir, renderDirMarker)); err != nil || !fi.Mode().IsRegular() {
-		return fmt.Errorf("%s is not empty and does not carry %s as a regular file (not a dry run's own output directory) — point --render-dir at an empty or lok8s-owned directory", dir, renderDirMarker)
 	}
 	for _, en := range entries {
 		if en.IsDir() || !renderOwnedRe.MatchString(en.Name()) {
@@ -605,6 +805,6 @@ func (e *Engine) dryRunRestoreD(ctx context.Context, domain, kubeconfig string) 
 		return nil
 	}
 	rendered := strings.Join(docs, "\n---\n") + "\n"
-	res := e.diffManifest(ctx, kubeconfig, rendered, "restore.d", "restore.d")
+	res := e.diffManifest(ctx, kubeconfig, rendered, rendered, "restore.d", "restore.d")
 	return &res
 }

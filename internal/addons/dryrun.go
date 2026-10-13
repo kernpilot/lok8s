@@ -3,37 +3,46 @@ package addons
 // dryrun.go — the render boundary of `lo bootstrap --dry-run` (bash:
 // addons::dry_run_boundary and the dry-run branch of addons::render).
 //
+// Scope: the dry run prevents ACCIDENTAL side effects of legitimate addon
+// code and configuration. It is NOT a security boundary against an addon
+// crafted to do harm: the real bootstrap runs that same addon with full
+// credentials, and a malicious addon can still execute code during a dry
+// run (docs/guide/deployment.md, "Trust model").
+//
 // A dry run renders IN PLACE, exactly as a real run does: the same project,
 // the same HOME, credentials and CA, so sops, exec auth and kubectl behave
-// as in a real run. Two things are different:
+// as in a real run, and the helm caches may be populated. What differs:
 //
-//   - lo's own state writes are suppressed at their source (the secrets
-//     plugin keeps new values in memory, the cert generator never writes
-//     CAROOT, the Lo driver never writes .registries.json, assets are
-//     peeked, never ejected) — LOK8S_BOOTSTRAP_DRYRUN=1.
-//   - executable addon code is refused where it would execute: kustomize
-//     runs with a plugin home that holds only lok8s' two built-in plugins
-//     (so any other legacy exec or Go plugin does not resolve), without
-//     --enable-exec (so a KRM exec function never runs), and with a PATH
-//     whose `docker` and `git` refuse (so a KRM container function and a
-//     remote git base fail). The `bash:` secrets generator refuses on its
-//     own. --allow-generators lifts all of this: the addon code then runs
-//     as trusted, with the side effects of a real run.
+//   - lo's own state writes are suppressed at their source
+//     (LOK8S_BOOTSTRAP_DRYRUN=1): the secrets plugin reads the store and
+//     keeps new or updated values in the RUN store (a 0700 directory in the
+//     boundary, removed with it), the cert generator never writes CAROOT, the
+//     Lo driver never writes .registries.json, assets are peeked, never
+//     ejected.
+//   - the code an addon runs is refused where it would execute: kustomize
+//     runs with a plugin home that holds only lok8s' Secret plugin and the
+//     ChartRenderer gate (any other legacy exec or Go plugin does not
+//     resolve), without --enable-exec (a KRM exec function never runs), with
+//     `docker`, `git` and `helm pull` refused first on PATH (a KRM container
+//     function, a remote base, kustomize's helmCharts pull), and with an
+//     empty HELM_PLUGINS (no helm downloader plugin). The ChartRenderer gate
+//     (internal/render/chartgate.go) refuses a local chart whose
+//     dependencies khelm would build into the chart directory. The `bash:`
+//     secrets generator refuses on its own.
+//   - every temp file of the render (kustomize's plugin configs, helm's
+//     values) goes to the boundary: TMPDIR.
 //
-// The dry run does not confine addon code that runs anyway (khelm's chart
-// downloads, a remote file URL, the code --allow-generators runs).
+// --allow-generators lifts the code refusals: the addon code then runs as
+// trusted, with the side effects of a real run. lo's own writes stay
+// suppressed.
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -47,46 +56,62 @@ const (
 	DryRunEnv = "LOK8S_BOOTSTRAP_DRYRUN"
 	// AllowGeneratorsEnv lets the `bash:` secrets generator run in a dry run.
 	AllowGeneratorsEnv = "LOK8S_BOOTSTRAP_ALLOW_GENERATORS"
-	// DryRunReportEnv names the file the secrets plugin reports generated
-	// material to (kustomize/pkg/cache.DryRunReportEnv).
+	// DryRunReportEnv names the file the secrets plugin and the chart gate
+	// report to (kustomize/pkg/cache.DryRunReportEnv).
 	DryRunReportEnv = "LOK8S_BOOTSTRAP_DRYRUN_REPORT"
+	// DryRunStoreEnv names the run store (kustomize/pkg/cache.DryRunStoreEnv).
+	DryRunStoreEnv = "LOK8S_BOOTSTRAP_DRYRUN_STORE"
 	// KustomizePluginHomeEnv is kustomize's plugin-home variable.
 	KustomizePluginHomeEnv = "KUSTOMIZE_PLUGIN_HOME"
+	// HelmPluginsEnv is helm's plugin directory (downloader/getter plugins).
+	HelmPluginsEnv = "HELM_PLUGINS"
 )
 
-// Refusal stubs: the `docker` and `git` a dry run puts first on PATH. The
-// texts are part of the contract (bash writes the same scripts).
+// Refusal stubs: the `docker`, `git` and `helm` a dry run puts first on
+// PATH. The texts are part of the contract (bash writes the same scripts).
 const (
 	dockerRefusal = "lok8s dry-run: a KRM container function is not run in a dry run (pass --allow-generators to run it)"
 	gitRefusal    = "lok8s dry-run: a remote base is not fetched in a dry run (pass --allow-generators to fetch it)"
+	helmRefusal   = "lok8s dry-run: helmCharts needs --allow-generators in a dry run (helm pull writes the chart into the project)"
 )
 
 // DryRunBoundary is the per-run state of a dry run: a 0700 temp directory
-// holding the restricted plugin home, the refusing stubs, the report file
-// and every per-chart copy. Close removes it.
+// holding the restricted plugin home, the refusing stubs, an empty helm
+// plugin directory, the run store, the render's TMPDIR and the report file.
+// Close removes it.
 type DryRunBoundary struct {
-	Dir        string
-	PluginHome string
-	StubBin    string
-	Report     string
+	Dir         string
+	PluginHome  string
+	StubBin     string
+	HelmPlugins string
+	Store       string
+	Tmp         string
+	Report      string
+	// ChartRenderer is the project's real ChartRenderer the gate execs in
+	// the exec pipeline ("" when the project has none).
+	ChartRenderer string
 }
 
 // NewDryRunBoundary builds the boundary of one dry run. The restricted
-// plugin home links the project's own Secret and ChartRenderer plugins
-// (config.KustomizePluginHome): a plugin the project does not have is
-// missing there too, exactly as in a real run. In the exec pipeline the
-// Secret plugin must support the dry run (`Secret --capabilities` lists
-// "dry-run"); an older one would write the secrets store, so it is refused.
+// plugin home links the project's Secret plugin and, in place of the
+// project's ChartRenderer, this binary as the ChartRenderer gate (a plugin
+// the project does not have is missing there too, exactly as in a real
+// run). In the exec pipeline the Secret plugin must support the dry run
+// (`Secret --capabilities` lists "dry-run"); an older one would write the
+// secrets store, so it is refused.
 func NewDryRunBoundary(ctx context.Context, paths *config.Paths, runner execx.Runner) (*DryRunBoundary, error) {
 	dir, err := os.MkdirTemp("", "lok8s-dryrun-")
 	if err != nil {
 		return nil, fmt.Errorf("dry-run boundary: %w", err)
 	}
 	b := &DryRunBoundary{
-		Dir:        dir,
-		PluginHome: filepath.Join(dir, "plugins"),
-		StubBin:    filepath.Join(dir, "bin"),
-		Report:     filepath.Join(dir, "report"),
+		Dir:         dir,
+		PluginHome:  filepath.Join(dir, "plugins"),
+		StubBin:     filepath.Join(dir, "bin"),
+		HelmPlugins: filepath.Join(dir, "helm-plugins"),
+		Store:       filepath.Join(dir, "store"),
+		Tmp:         filepath.Join(dir, "tmp"),
+		Report:      filepath.Join(dir, "report"),
 	}
 	if err := b.build(ctx, paths, runner); err != nil {
 		b.Close()
@@ -96,28 +121,33 @@ func NewDryRunBoundary(ctx context.Context, paths *config.Paths, runner execx.Ru
 }
 
 func (b *DryRunBoundary) build(ctx context.Context, paths *config.Paths, runner execx.Runner) error {
+	for _, d := range []string{b.PluginHome, b.StubBin, b.HelmPlugins, b.Store, b.Tmp} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return fmt.Errorf("dry-run boundary: %w", err)
+		}
+	}
 	home := config.KustomizePluginHome(paths)
-	for _, rel := range []string{toolchain.SecretPluginRel, toolchain.ChartRendererPluginRel} {
-		src := filepath.Join(home, filepath.FromSlash(rel))
-		if !fsutil.FileExists(src) {
-			continue
+	if src := filepath.Join(home, filepath.FromSlash(toolchain.SecretPluginRel)); fsutil.FileExists(src) {
+		if err := b.link(src, toolchain.SecretPluginRel); err != nil {
+			return err
 		}
-		dst := filepath.Join(b.PluginHome, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+	}
+	if src := filepath.Join(home, filepath.FromSlash(toolchain.ChartRendererPluginRel)); fsutil.FileExists(src) {
+		self, err := os.Executable()
+		if err != nil {
 			return fmt.Errorf("dry-run boundary: %w", err)
 		}
-		if err := os.Symlink(src, dst); err != nil {
-			return fmt.Errorf("dry-run boundary: %w", err)
+		if err := b.link(self, toolchain.ChartRendererPluginRel); err != nil {
+			return err
 		}
+		b.ChartRenderer = src
 	}
-	if err := os.MkdirAll(b.PluginHome, 0o700); err != nil {
-		return fmt.Errorf("dry-run boundary: %w", err)
+	stubs := map[string]string{
+		"docker": "#!/bin/sh\necho '" + dockerRefusal + "' >&2\nexit 1\n",
+		"git":    "#!/bin/sh\necho '" + gitRefusal + "' >&2\nexit 1\n",
+		"helm":   helmStub(b.StubBin),
 	}
-	if err := os.MkdirAll(b.StubBin, 0o700); err != nil {
-		return fmt.Errorf("dry-run boundary: %w", err)
-	}
-	for name, msg := range map[string]string{"docker": dockerRefusal, "git": gitRefusal} {
-		script := "#!/bin/sh\necho '" + msg + "' >&2\nexit 1\n"
+	for name, script := range stubs {
 		if err := os.WriteFile(filepath.Join(b.StubBin, name), []byte(script), 0o700); err != nil { // #nosec G306 -- an executable refusal stub
 			return fmt.Errorf("dry-run boundary: %w", err)
 		}
@@ -126,6 +156,35 @@ func (b *DryRunBoundary) build(ctx context.Context, paths *config.Paths, runner 
 		return fmt.Errorf("dry-run boundary: %w", err)
 	}
 	return b.checkSecretPlugin(ctx, paths, runner, home)
+}
+
+// helmStub refuses `helm pull` (kustomize's helmCharts pulls a chart that
+// chartHome lacks into the project) and runs the real helm, the next one on
+// PATH, for everything else (version, template of a vendored chart).
+func helmStub(stubDir string) string {
+	return "#!/bin/sh\n" +
+		"if [ \"${1:-}\" = pull ]; then\n" +
+		"  echo '" + helmRefusal + "' >&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"IFS=:\n" +
+		"for d in $PATH; do\n" +
+		"  [ \"$d\" = '" + stubDir + "' ] && continue\n" +
+		"  if [ -x \"$d/helm\" ] && [ ! -d \"$d/helm\" ]; then exec \"$d/helm\" \"$@\"; fi\n" +
+		"done\n" +
+		"echo 'lok8s dry-run: helm: not found on PATH' >&2\n" +
+		"exit 127\n"
+}
+
+func (b *DryRunBoundary) link(src, rel string) error {
+	dst := filepath.Join(b.PluginHome, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return fmt.Errorf("dry-run boundary: %w", err)
+	}
+	if err := os.Symlink(src, dst); err != nil {
+		return fmt.Errorf("dry-run boundary: %w", err)
+	}
+	return nil
 }
 
 // checkSecretPlugin refuses a Secret plugin that predates the dry run. The
@@ -166,21 +225,37 @@ func (b *DryRunBoundary) ResetReport() error {
 	return os.WriteFile(b.Report, nil, 0o600)
 }
 
-// Minted returns the report lines of the last render: one per value the
-// secrets plugin generated in memory (a store entry, a CA). Empty means the
-// render is repeatable.
-func (b *DryRunBoundary) Minted() []string {
+// Report is what the secrets plugin and the chart gate reported for the
+// last entry.
+type Report struct {
+	// Generated lists the material the dry run generated or updated in its
+	// run store (`secret`, `update`, `secretRef`, `caroot` lines): the
+	// entry is non-repeatable.
+	Generated []string
+	// UnvendoredCharts lists the local charts the gate refused (`chart-deps`
+	// lines): the entry is inconclusive.
+	UnvendoredCharts []string
+}
+
+// ReadReport parses the report file. A report that cannot be read counts as
+// generated material (the entry is then non-repeatable, never silently
+// repeatable).
+func (b *DryRunBoundary) ReadReport() Report {
 	raw, err := os.ReadFile(b.Report)
 	if err != nil {
-		return []string{"report unreadable: " + err.Error()}
+		return Report{Generated: []string{"report unreadable: " + err.Error()}}
 	}
-	var lines []string
+	var r Report
 	for line := range strings.SplitSeq(strings.TrimRight(string(raw), "\n"), "\n") {
-		if line != "" {
-			lines = append(lines, line)
+		switch kind, rest, _ := strings.Cut(line, " "); kind {
+		case "":
+		case "chart-deps":
+			r.UnvendoredCharts = append(r.UnvendoredCharts, rest)
+		default:
+			r.Generated = append(r.Generated, line)
 		}
 	}
-	return lines
+	return r
 }
 
 // StubPath returns path with the refusing stubs first.
@@ -191,224 +266,52 @@ func (b *DryRunBoundary) StubPath(path string) string {
 	return b.StubBin + string(os.PathListSeparator) + path
 }
 
-// chartRef is the part of a khelm ChartRenderer config the dry run reads.
-type chartRef struct {
-	Repository string   `yaml:"repository"`
-	Chart      string   `yaml:"chart"`
-	ValueFiles []string `yaml:"valueFiles"`
+// renderEnv is the overlay a dry run's render gets AFTER the entry's env
+// (os/exec keeps the last value of a key). entryPath is the entry's PATH
+// ("" = the process PATH).
+func (b *DryRunBoundary) renderEnv(allowGenerators bool, entryPath string) []string {
+	env := []string{
+		DryRunEnv + "=1",
+		DryRunReportEnv + "=" + b.Report,
+		DryRunStoreEnv + "=" + b.Store,
+		"TMPDIR=" + b.Tmp,
+	}
+	if allowGenerators {
+		return append(env, AllowGeneratorsEnv+"=1")
+	}
+	if entryPath == "" {
+		entryPath = os.Getenv("PATH")
+	}
+	env = append(env,
+		KustomizePluginHomeEnv+"="+b.PluginHome,
+		"PATH="+b.StubPath(entryPath),
+		HelmPluginsEnv+"="+b.HelmPlugins,
+	)
+	if b.ChartRenderer != "" {
+		env = append(env, render.DryRunChartRendererEnv+"="+b.ChartRenderer)
+	}
+	return env
 }
 
-// chartDeps is the dependency list of a Chart.yaml.
-type chartDeps struct {
-	Dependencies []struct {
-		Name       string `yaml:"name"`
-		Repository string `yaml:"repository"`
-	} `yaml:"dependencies"`
-}
-
-// localChart is a chart.yaml addon's local chart, resolved for a dry run.
-type localChart struct {
-	root       string   // the containment root (resolved)
-	addon      string   // the addon directory (resolved)
-	dirs       []string // the chart and its file:// dependencies (resolved)
-	buildsDeps bool     // khelm builds dependencies (writes Chart.lock, charts/)
-	valueFiles []string // chart.yaml's local valueFiles (resolved)
-}
-
-// resolveLocalChart reads addonDir/chart.yaml. A remote chart returns nil.
-// A local chart and every file:// dependency must resolve inside the
-// project (or, for an addon served outside the project, inside the addon
-// directory): a dry run refuses anything else as an entry error.
-func resolveLocalChart(addonDir, projectBase string) (*localChart, error) {
-	raw, err := os.ReadFile(filepath.Join(addonDir, "chart.yaml"))
-	if err != nil {
-		return nil, err
-	}
-	var ref chartRef
-	if err := yaml.Unmarshal(raw, &ref); err != nil {
-		return nil, fmt.Errorf("chart.yaml: %w", err)
-	}
-	if ref.Repository != "" || ref.Chart == "" {
-		return nil, nil
-	}
-	chartPath := ref.Chart
-	if !filepath.IsAbs(chartPath) {
-		chartPath = filepath.Join(addonDir, chartPath)
-	}
-	if !fsutil.DirExists(chartPath) {
-		return nil, nil // a repo shorthand (@repo/chart) or an OCI reference
-	}
-	addon, err := filepath.EvalSymlinks(addonDir)
-	if err != nil {
-		return nil, err
-	}
-	root := addon
-	if base, err := filepath.EvalSymlinks(projectBase); err == nil && within(base, addon) {
-		root = base
-	}
-	lc := &localChart{root: root, addon: addon}
-	if err := lc.walk(chartPath, "chart "+ref.Chart, map[string]bool{}, 0); err != nil {
-		return nil, err
-	}
-	for _, vf := range ref.ValueFiles {
-		if strings.Contains(vf, "://") {
-			continue
+// KRMFunctionDeclared reports an addon directory whose YAML declares a KRM
+// function (`config.kubernetes.io/function` or `config.k8s.io/function`):
+// without --enable-exec kustomize skips an exec function silently, so the
+// dry run marks that entry `partial`. A hint, not a boundary: only the
+// addon's own directory is read.
+func KRMFunctionDeclared(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || found || d.IsDir() {
+			return nil
 		}
-		p := vf
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(addonDir, p)
+		if ext := filepath.Ext(path); ext != ".yaml" && ext != ".yml" {
+			return nil
 		}
-		if resolved, err := filepath.EvalSymlinks(p); err == nil {
-			lc.valueFiles = append(lc.valueFiles, resolved)
+		raw, err := os.ReadFile(path)
+		if err == nil && (strings.Contains(string(raw), "config.kubernetes.io/function") || strings.Contains(string(raw), "config.k8s.io/function")) {
+			found = true
 		}
-	}
-	return lc, nil
-}
-
-func (lc *localChart) walk(chartPath, what string, seen map[string]bool, depth int) error {
-	if depth > 20 {
-		return errors.New("local chart dependencies nest deeper than 20 levels")
-	}
-	resolved, err := filepath.EvalSymlinks(chartPath)
-	if err != nil {
-		return fmt.Errorf("%s: %w", what, err)
-	}
-	if !within(lc.root, resolved) {
-		return fmt.Errorf("%s resolves outside the project (%s) — a dry run renders only charts inside the project", what, resolved)
-	}
-	if seen[resolved] {
 		return nil
-	}
-	seen[resolved] = true
-	lc.dirs = append(lc.dirs, resolved)
-	raw, err := os.ReadFile(filepath.Join(resolved, "Chart.yaml"))
-	if err != nil {
-		return nil // not a chart directory: khelm reports it
-	}
-	var meta chartDeps
-	if yaml.Unmarshal(raw, &meta) != nil {
-		return nil
-	}
-	if len(meta.Dependencies) > 0 {
-		lc.buildsDeps = true
-	}
-	for _, dep := range meta.Dependencies {
-		rel, ok := strings.CutPrefix(dep.Repository, "file://")
-		if !ok {
-			continue
-		}
-		next := rel
-		if !filepath.IsAbs(next) {
-			next = filepath.Join(resolved, next)
-		}
-		if err := lc.walk(next, "file:// dependency "+dep.Name, seen, depth+1); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// mirror copies the addon directory, the chart closure and the local
-// valueFiles under tmp, at their paths relative to the containment root,
-// so every relative reference among them resolves as in the project. khelm
-// then writes Chart.lock and charts/ into the copy. Returns the copy of the
-// addon directory, the directory to render.
-func (lc *localChart) mirror(tmp string) (string, error) {
-	copied := []string{}
-	place := func(src string) string { return filepath.Join(tmp, mustRel(lc.root, src)) }
-	for _, d := range append([]string{lc.addon}, lc.dirs...) {
-		if coveredBy(copied, d) {
-			continue
-		}
-		if err := copyTreeDeref(d, place(d), 0); err != nil {
-			return "", err
-		}
-		copied = append(copied, d)
-	}
-	for _, vf := range lc.valueFiles {
-		if coveredBy(copied, vf) {
-			continue
-		}
-		if !within(lc.root, vf) {
-			return "", fmt.Errorf("valueFile %s resolves outside the project — a dry run cannot isolate this chart", vf)
-		}
-		if err := copyFileDeref(vf, place(vf)); err != nil {
-			return "", err
-		}
-	}
-	return place(lc.addon), nil
-}
-
-// within reports whether p is root or below it (both resolved, absolute).
-func within(root, p string) bool {
-	rel, err := filepath.Rel(root, p)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
-}
-
-func coveredBy(dirs []string, p string) bool {
-	for _, d := range dirs {
-		if within(d, p) {
-			return true
-		}
-	}
-	return false
-}
-
-func mustRel(root, p string) string {
-	rel, err := filepath.Rel(root, p)
-	if err != nil {
-		return filepath.Base(p)
-	}
-	return rel
-}
-
-// copyTreeDeref copies src's contents into dst and copies a symlink as its
-// target's content, so a write into the copy can never follow a link back
-// into the project. A dangling symlink is skipped.
-func copyTreeDeref(src, dst string, depth int) error {
-	if depth > 40 {
-		return fmt.Errorf("copy %s: symlinks nest too deep", src)
-	}
-	if err := os.MkdirAll(dst, 0o700); err != nil {
-		return err
-	}
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		return err
-	}
-	for _, en := range entries {
-		s, d := filepath.Join(src, en.Name()), filepath.Join(dst, en.Name())
-		info, err := os.Stat(s) // follows a symlink
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				continue
-			}
-			return err
-		}
-		if info.IsDir() {
-			if err := copyTreeDeref(s, d, depth+1); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := copyFileDeref(s, d); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func copyFileDeref(src, dst string) error {
-	info, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, info.Mode().Perm())
+	})
+	return found
 }

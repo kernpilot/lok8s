@@ -93,6 +93,8 @@ func (p *Plugin) Build(env func(string) (string, bool), fileRoot string) (*plugi
 	if dr != nil {
 		ctx.DryRun = true
 		ctx.Minted = dr.Minted
+		ctx.RunLoad = dr.Load
+		ctx.RunSave = dr.Save
 	}
 
 	r := plugin.NewRegistry()

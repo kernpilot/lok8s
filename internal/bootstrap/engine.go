@@ -304,21 +304,11 @@ func (e *Engine) apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 		}
 	}
 
-	// --render-dir is prepared HERE, before the restore.d preview below
-	// (review round 2, item G): restore.d's own diffManifest call writes
-	// restore.d.{yaml,diff} into it too, and used to run before anything
-	// had created the directory at all.
-	if e.Options.DryRun && e.Options.RenderDir != "" {
-		if err := prepareRenderDir(e.Options.RenderDir); err != nil {
-			return e.errorf("bootstrap: --render-dir: %v", err)
-		}
-		fmt.Fprintf(stderr, "bootstrap dry-run: %s holds the rendered manifests in plaintext, Secrets included\n", e.Options.RenderDir)
-	}
-
 	// The dry run's render boundary (internal/addons/dryrun.go): the
-	// restricted plugin home, the refusing docker/git, the report file. Built
-	// once, after the plan is valid and before the first line of the report;
-	// removed on every exit path (an interrupt cancels ctx and returns here).
+	// restricted plugin home, the refusing stubs, the run store, the
+	// render's TMPDIR, the report file. Built once, after the plan is valid
+	// and before anything is written or reported; removed on every exit path
+	// (an interrupt cancels ctx and returns here).
 	if e.Options.DryRun {
 		b, err := addons.NewDryRunBoundary(ctx, e.Paths, e.Runner)
 		if err != nil {
@@ -327,6 +317,16 @@ func (e *Engine) apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 		defer b.Close()
 		e.boundary = b
 		defer func() { e.boundary = nil }()
+	}
+
+	// --render-dir is prepared HERE: after the boundary (a refusal there
+	// leaves no directory behind) and before the restore.d preview below,
+	// which writes restore.d.{yaml,diff} into it too.
+	if e.Options.DryRun && e.Options.RenderDir != "" {
+		if err := prepareRenderDir(e.Options.RenderDir, stderr); err != nil {
+			return e.errorf("bootstrap: --render-dir: %v", err)
+		}
+		fmt.Fprintf(stderr, "bootstrap dry-run: %s holds the rendered manifests in plaintext, Secrets included\n", e.Options.RenderDir)
 	}
 
 	// ── restore.d: pre-bootstrap DR restore (sops-encrypted manifests) ──

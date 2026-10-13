@@ -206,7 +206,11 @@ func TestDryRunExitCodesAtBothBoundaries(t *testing.T) {
 		{"bootstrap positional", []string{"bootstrap", "--dry-run", "extra"}, 0, []int{2}},
 		{"bootstrap unknown flag", []string{"bootstrap", "--bogus", "--dry-run"}, 0, []int{2}},
 		{"provision unknown flag", []string{"provision", "-b", "--dry-run", "--bogus"}, 0, []int{2}},
+		{"provision --ignore-nondeterministic without --bootstrap", []string{"provision", "--dry-run", "--ignore-nondeterministic", "--domain", dryDomain}, 0, []int{2}},
+		{"bootstrap --dry-run --only= (blank)", []string{"bootstrap", "--dry-run", "--only=", "--domain", dryDomain}, 0, []int{2}},
+		{"bootstrap --dry-run --with-restore", []string{"bootstrap", "--dry-run", "--with-restore", "--domain", dryDomain}, 0, []int{2}},
 		// The real run keeps rc 1 for the same failures.
+		{"real --ignore-nondeterministic", []string{"bootstrap", "--ignore-nondeterministic", "--domain", dryDomain}, 0, nil},
 		{"real missing spec", []string{"bootstrap", "--domain", "missing.dev"}, 0, nil},
 		{"real unknown flag", []string{"bootstrap", "--bogus"}, 0, nil},
 	} {

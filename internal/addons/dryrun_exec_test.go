@@ -249,27 +249,72 @@ func TestDryRunSecretMintIsInMemoryAndReported(t *testing.T) {
 	if fsutil.DirExists(store) {
 		t.Fatal("a dry run created the secrets store")
 	}
-	if got := b.Minted(); len(got) != 1 || got[0] != "secret Secret.app.ns.PASSWORD" {
+	if got := b.ReadReport().Generated; len(got) != 1 || got[0] != "secret Secret.app.ns.PASSWORD" {
 		t.Errorf("report = %q, want the one generated entry", got)
 	}
 
-	testutil.WriteFile(t, filepath.Join(store, "Secret.app.ns.PASSWORD"), "from-the-store")
-	before := hashDir(t, store)
+	// A later render of the same run reads the value back from the run
+	// store: the same bytes, nothing new reported.
+	first := out
 	if err := b.ResetReport(); err != nil {
 		t.Fatal(err)
 	}
-	out, stderr, err = renderBoth(t, p, runner, b, dir, false)
+	if again, _, err := renderBoth(t, p, runner, b, dir, false); err != nil || again != first {
+		t.Errorf("a second render of the run differs (err %v):\n%s\n%s", err, first, again)
+	}
+	if got := b.ReadReport().Generated; len(got) != 0 {
+		t.Errorf("the second render reported %q", got)
+	}
+
+	// A new run against an EXISTING store that holds the value: read, not
+	// reported, the store untouched (a store with other entries too).
+	testutil.WriteFile(t, filepath.Join(store, "Secret.app.ns.PASSWORD"), "from-the-store")
+	testutil.WriteFile(t, filepath.Join(store, "Secret.other.ns.KEY"), "other")
+	before := hashDir(t, store)
+	b2, err := NewDryRunBoundary(t.Context(), p, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(b2.Close)
+	out, stderr, err = renderBoth(t, p, runner, b2, dir, false)
 	if err != nil {
 		t.Fatalf("dry render: %v\n%s", err, stderr)
 	}
 	if !strings.Contains(out, base64.StdEncoding.EncodeToString([]byte("from-the-store"))) {
 		t.Errorf("the stored value was not read:\n%s", out)
 	}
-	if got := b.Minted(); len(got) != 0 {
+	if got := b2.ReadReport().Generated; len(got) != 0 {
 		t.Errorf("a stored value was reported as generated: %q", got)
 	}
 	if hashDir(t, store) != before {
 		t.Error("a dry run changed the secrets store")
+	}
+}
+
+// A miss in an EXISTING store directory (the production shape: the store is
+// there, one value is new) generates the value in the run store and writes
+// nothing into the store.
+func TestDryRunMissInAnExistingStoreWritesNothing(t *testing.T) {
+	p, runner, b := execProject(t)
+	store := filepath.Join(p.Base, "clusters", "x.dev", "secrets")
+	testutil.WriteFile(t, filepath.Join(store, "Secret.app.ns.OLD"), "old")
+	t.Setenv("PATH_SECRETS", store)
+	before := hashDir(t, store)
+	dir := fixtureAddon(t, p.Base, "app", map[string]string{
+		"kustomization.yaml": "generators:\n- secret.yaml\n",
+		"secret.yaml":        "apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: ns\npasswd:\n  NEW: 24\n",
+	})
+	if _, stderr, err := renderBoth(t, p, runner, b, dir, false); err != nil {
+		t.Fatalf("dry render: %v\n%s", err, stderr)
+	}
+	if hashDir(t, store) != before {
+		t.Errorf("a dry run wrote into the existing store:\n%s", hashDir(t, store))
+	}
+	if got := b.ReadReport().Generated; len(got) != 1 || got[0] != "secret Secret.app.ns.NEW" {
+		t.Errorf("report = %q", got)
+	}
+	if ents, _ := os.ReadDir(b.Store); len(ents) == 0 {
+		t.Error("the run store holds nothing: the value was not kept for the run")
 	}
 }
 
@@ -298,7 +343,7 @@ func TestDryRunCAMintIsEphemeralAndReported(t *testing.T) {
 	if fsutil.DirExists(caroot) || fsutil.DirExists(store) {
 		t.Fatal("a dry run wrote CAROOT or the store")
 	}
-	minted := strings.Join(b.Minted(), "\n")
+	minted := strings.Join(b.ReadReport().Generated, "\n")
 	if !strings.Contains(minted, "caroot "+caroot) {
 		t.Errorf("the CA mint was not reported: %q", minted)
 	}
@@ -350,4 +395,154 @@ func hashDir(t *testing.T, dir string) string {
 		t.Fatal(err)
 	}
 	return b.String()
+}
+
+// fakeChartRenderer installs a "real" ChartRenderer in the project's plugin
+// home: it records its environment, touches marker and renders one
+// ConfigMap. The dry run's gate (this test binary, render.DispatchPlugin in
+// TestMain) execs it when the chart may render.
+func fakeChartRenderer(t *testing.T, marker string) string {
+	t.Helper()
+	path := filepath.Join(os.Getenv(KustomizePluginHomeEnv), filepath.FromSlash(toolchain.ChartRendererPluginRel))
+	script := fmt.Sprintf("#!/bin/sh\ntouch '%s'\nprintf 'TMPDIR=%%s\\nHELM_PLUGINS=%%s\\n' \"$TMPDIR\" \"${HELM_PLUGINS:-}\" > '%s.env'\nprintf 'apiVersion: v1\\nkind: ConfigMap\\nmetadata:\\n  name: from-chart\\n'\n", marker, marker)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil { // #nosec G306 -- a test executable
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The ChartRenderer gate refuses a local chart whose dependencies khelm
+// would build into the chart directory, for every shape a ChartRenderer
+// config takes (a top-level chart.yaml, another file name, a nested base, an
+// absolute chart path): khelm never runs, the chart directory is untouched,
+// the entry is reported inconclusive. A vendored chart renders; with
+// --allow-generators khelm runs as in a real run.
+func TestDryRunChartGateRefusesUnvendoredDependencies(t *testing.T) {
+	p, _, _ := execProject(t)
+	marker := filepath.Join(t.TempDir(), "KHELM")
+	fakeChartRenderer(t, marker)
+	runner := execx.NewRunner(p)
+	b, err := NewDryRunBoundary(t.Context(), p, runner) // after the ChartRenderer exists
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(b.Close)
+	chartDir := filepath.Join(p.Base, "charts", "app")
+	testutil.WriteFile(t, filepath.Join(chartDir, "Chart.yaml"), "apiVersion: v2\nname: app\nversion: 0.1.0\ndependencies:\n  - name: redis\n    version: 1.0.0\n    repository: https://charts.example.test\n")
+	renderer := func(chart string) string {
+		return "apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: app\nchart: " + chart + "\n"
+	}
+	shapes := map[string]map[string]string{
+		"chart.yaml": {"kustomization.yaml": "generators:\n- chart.yaml\n", "chart.yaml": renderer("../../charts/app")},
+		"helm.yaml":  {"kustomization.yaml": "generators:\n- helm.yaml\n", "helm.yaml": renderer("../../charts/app")},
+		"absolute":   {"kustomization.yaml": "generators:\n- chart.yaml\n", "chart.yaml": renderer(chartDir)},
+		"nested":     {"kustomization.yaml": "resources:\n- base\n", "base/kustomization.yaml": "generators:\n- chart.yaml\n", "base/chart.yaml": renderer("../../../charts/app")},
+	}
+	before := hashDir(t, chartDir)
+	for name, files := range shapes {
+		dir := fixtureAddon(t, p.Base, "gate-"+strings.ReplaceAll(name, ".", "-"), files)
+		if err := b.ResetReport(); err != nil {
+			t.Fatal(err)
+		}
+		_, stderr, err := renderBoth(t, p, runner, b, dir, false)
+		if err == nil {
+			t.Errorf("%s: the dry render of an unvendored chart succeeded", name)
+		}
+		if fsutil.FileExists(marker) {
+			t.Fatalf("%s: khelm ran on an unvendored chart", name)
+		}
+		if got := b.ReadReport().UnvendoredCharts; len(got) != 1 {
+			t.Errorf("%s: report = %q, want the refused chart\n%s", name, got, stderr)
+		}
+		if !strings.Contains(stderr, "its dependencies are not vendored") {
+			t.Errorf("%s: stderr:\n%s", name, stderr)
+		}
+	}
+	if hashDir(t, chartDir) != before {
+		t.Error("the chart directory changed")
+	}
+
+	dir := fixtureAddon(t, p.Base, "gate-allow", shapes["chart.yaml"])
+	if _, _, err := renderBoth(t, p, runner, b, dir, true); err != nil || !fsutil.FileExists(marker) {
+		t.Fatalf("--allow-generators did not run khelm (fixture dead?): %v", err)
+	}
+	_ = os.Remove(marker)
+
+	testutil.WriteFile(t, filepath.Join(chartDir, "charts", "redis-1.0.0.tgz"), "x")
+	if err := b.ResetReport(); err != nil {
+		t.Fatal(err)
+	}
+	out, stderr, err := renderBoth(t, p, runner, b, dir, false)
+	if err != nil || !strings.Contains(out, "from-chart") {
+		t.Fatalf("a vendored chart did not render: %v\n%s", err, stderr)
+	}
+	env, _ := os.ReadFile(marker + ".env")
+	if !strings.Contains(string(env), "TMPDIR="+b.Tmp+"\n") || !strings.Contains(string(env), "HELM_PLUGINS="+b.HelmPlugins+"\n") {
+		t.Errorf("khelm's environment in a dry run:\n%s", env)
+	}
+	if ents, _ := os.ReadDir(b.HelmPlugins); len(ents) != 0 {
+		t.Errorf("the dry run's helm plugin directory is not empty: %v", ents)
+	}
+}
+
+// kustomize's own helmCharts pulls a chart that chartHome lacks into the
+// project (`helm pull --untar`): the dry run's helm refuses the pull; a
+// chart already vendored in chartHome renders through the real helm.
+func TestDryRunRefusesAHelmChartsPull(t *testing.T) {
+	p, runner, b := execProject(t)
+	marker := filepath.Join(t.TempDir(), "PULLED")
+	spyBin := t.TempDir()
+	spy := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\n  version) echo v3.14.0 ;;\n  pull) touch '%s' ; exit 1 ;;\n  template) printf 'apiVersion: v1\\nkind: ConfigMap\\nmetadata:\\n  name: from-helm\\n' ;;\nesac\n", marker)
+	if err := os.WriteFile(filepath.Join(spyBin, "helm"), []byte(spy), 0o755); err != nil { // #nosec G306 -- a test executable
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", spyBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	dir := fixtureAddon(t, p.Base, "helmcharts", map[string]string{
+		"kustomization.yaml": "helmCharts:\n- name: c\n  repo: https://charts.example.test\n  version: 1.0.0\n",
+	})
+	_, stderr, err := renderBoth(t, p, runner, b, dir, false)
+	if err == nil || !strings.Contains(stderr, helmRefusal) {
+		t.Fatalf("err=%v, want the helm pull refusal:\n%s", err, stderr)
+	}
+	if fsutil.FileExists(marker) || fsutil.DirExists(filepath.Join(dir, "charts")) {
+		t.Fatal("a dry run pulled the chart")
+	}
+	if _, _, _ = renderBoth(t, p, runner, b, dir, true); !fsutil.FileExists(marker) {
+		t.Fatal("--allow-generators did not pull (fixture dead?)")
+	}
+	_ = os.Remove(marker)
+	// kustomize's chartHome for a versioned chart: charts/<name>-<version>/<name>.
+	testutil.WriteFile(t, filepath.Join(dir, "charts", "c-1.0.0", "c", "Chart.yaml"), "apiVersion: v2\nname: c\nversion: 1.0.0\n")
+	testutil.WriteFile(t, filepath.Join(dir, "charts", "c-1.0.0", "c", "values.yaml"), "{}\n")
+	out, stderr, err := renderBoth(t, p, runner, b, dir, false)
+	if err != nil || !strings.Contains(out, "from-helm") || fsutil.FileExists(marker) {
+		t.Fatalf("a vendored helmCharts chart did not render through the real helm: %v\n%s\n%s", err, out, stderr)
+	}
+}
+
+// kustomize writes each legacy plugin's config (literal secret values
+// included) to a temp file and removes it only on success: a dry run's
+// render writes it to the boundary, never the ambient TMPDIR.
+func TestDryRunKeepsPluginConfigsInTheBoundary(t *testing.T) {
+	p, runner, b := execProject(t)
+	ambient := t.TempDir()
+	t.Setenv("TMPDIR", ambient)
+	t.Setenv("PATH_SECRETS", filepath.Join(p.Base, "store"))
+	dir := fixtureAddon(t, p.Base, "fails", map[string]string{
+		"kustomization.yaml": "generators:\n- secret.yaml\n",
+		"secret.yaml":        "apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: s\n  namespace: ns\nliterals:\n  TOKEN: literal-s3cret\nbash:\n  X:\n    exec: echo x\n",
+	})
+	if _, _, err := renderBoth(t, p, runner, b, dir, false); err == nil {
+		t.Fatal("the bash: generator was not refused")
+	}
+	if ents, _ := os.ReadDir(ambient); len(ents) != 0 {
+		names := []string{}
+		for _, e := range ents {
+			names = append(names, e.Name())
+		}
+		t.Errorf("the render left files in the ambient TMPDIR: %v", names)
+	}
 }

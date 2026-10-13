@@ -111,7 +111,7 @@ func TestDryRunDiffsEveryEntryAndAppliesNothing(t *testing.T) {
 	}
 	want := "bootstrap dry-run: 01-testcni: unchanged\n" +
 		"bootstrap dry-run: 02-second: differs changed=1 new=2\n" +
-		"bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0\n"
+		"bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0 nondeterministic=0\n"
 	if got := stdoutOf(e); got != want {
 		t.Errorf("stdout:\n%s\nwant:\n%s", got, want)
 	}
@@ -197,7 +197,7 @@ func TestDryRunNoDiffNeverReachesTheCluster(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 	want := "bootstrap dry-run: 01-testcni: rendered\n" +
-		"bootstrap dry-run: entries=1 unchanged=0 differs=0 rendered=1 skipped=0 inconclusive=0 errors=0\n"
+		"bootstrap dry-run: entries=1 unchanged=0 differs=0 rendered=1 skipped=0 inconclusive=0 errors=0 nondeterministic=0\n"
 	if got := stdoutOf(e); got != want {
 		t.Errorf("stdout:\n%s", got)
 	}
@@ -294,7 +294,7 @@ func TestDryRunDiffsRestoreDAsItsOwnEntry(t *testing.T) {
 	}
 	want := "bootstrap dry-run: restore.d: differs changed=1 new=2\n" +
 		"bootstrap dry-run: 01-testcni: unchanged\n" +
-		"bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0\n"
+		"bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0 nondeterministic=0\n"
 	if got := stdoutOf(e); got != want {
 		t.Errorf("stdout:\n%s\nwant:\n%s", got, want)
 	}
@@ -449,7 +449,7 @@ func TestOnlyDryRunNumbersTheSelection(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 	want := "bootstrap dry-run: 01-second: unchanged\n" +
-		"bootstrap dry-run: entries=1 unchanged=1 differs=0 rendered=0 skipped=0 inconclusive=0 errors=0\n"
+		"bootstrap dry-run: entries=1 unchanged=1 differs=0 rendered=0 skipped=0 inconclusive=0 errors=0 nondeterministic=0\n"
 	if got := stdoutOf(e); got != want {
 		t.Errorf("stdout:\n%s", got)
 	}

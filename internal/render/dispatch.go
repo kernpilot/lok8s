@@ -61,7 +61,24 @@ func DispatchPlugin(ctx context.Context, args []string, stdin io.Reader, stdout,
 		}
 		return true, 0
 	case strings.HasSuffix(argv0, "/chartrenderer/ChartRenderer"):
+		// The exec pipeline's dry-run gate (LO_RENDER=exec): check, then
+		// exec the project's ChartRenderer.
+		if handled, rc := dispatchChartGate(args, stderr); handled {
+			return true, rc
+		}
 		applyPluginEnv(args[0], chartRendererPluginRel)
+		// The in-process dry run's gate: a local chart whose dependencies
+		// are not vendored is refused before khelm builds them.
+		if chartGateApplies() {
+			refused, err := chartGate(args, stderr)
+			if err != nil {
+				fmt.Fprintf(stderr, "lok8s dry-run: chart gate: %v\n", err)
+				return true, 1
+			}
+			if refused {
+				return true, 1
+			}
+		}
 		if err := runChartRenderer(ctx, args, stdout, stderr); err != nil {
 			fmt.Fprintf(stderr, "khelm: %s\n", err)
 			return true, 1

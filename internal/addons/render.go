@@ -33,9 +33,10 @@ import (
 // ProtectedEnvOverride reports the first variable (in byte order) an
 // entry's `env:` may not set, or "" when there is none. These are lo's
 // orchestration and safety variables: LOK8S_BOOTSTRAP_*, BOOTSTRAP_*,
-// bootstrap_* (the bash engine's own names), PATH_SECRETS, KUBECONFIG and
-// KUSTOMIZE_PLUGIN_HOME. An entry that names one is an entry error on a
-// real run and on a dry run alike (bash: bootstrap::_reserved_env_name).
+// bootstrap_* (the bash engine's own names), PATH_SECRETS, KUBECONFIG,
+// KUSTOMIZE_PLUGIN_HOME and HELM_PLUGINS. An entry that names one is an
+// entry error on a real run and on a dry run alike (bash:
+// bootstrap::_reserved_env_name).
 func ProtectedEnvOverride(env map[string]string) string {
 	names := make([]string, 0, len(env))
 	for k := range env {
@@ -58,7 +59,7 @@ func IsProtectedEnv(name string) bool {
 		}
 	}
 	switch name {
-	case "PATH_SECRETS", "KUBECONFIG", KustomizePluginHomeEnv:
+	case "PATH_SECRETS", "KUBECONFIG", KustomizePluginHomeEnv, HelmPluginsEnv:
 		return true
 	}
 	return false
@@ -140,24 +141,20 @@ func renderAddon(ctx context.Context, paths *config.Paths, runner execx.Runner, 
 	// entry's env (os/exec keeps the last value of a key).
 	enableExec := true
 	if dry != nil {
-		cmdEnv = append(cmdEnv, DryRunEnv+"=1", DryRunReportEnv+"="+dry.Report)
-		if allowGenerators {
-			cmdEnv = append(cmdEnv, AllowGeneratorsEnv+"=1")
-		} else {
-			enableExec = false
-			path, ok := env["PATH"]
-			if !ok {
-				path = os.Getenv("PATH")
-			}
-			cmdEnv = append(cmdEnv, KustomizePluginHomeEnv+"="+dry.PluginHome, "PATH="+dry.StubPath(path))
+		cmdEnv = append(cmdEnv, dry.renderEnv(allowGenerators, env["PATH"])...)
+		enableExec = allowGenerators
+		// In-process, kustomize resolves docker, git and helm through THIS
+		// process's PATH and writes its temp files to THIS process's TMPDIR,
+		// so a dry run sets both for the length of the render (a dry run
+		// renders one entry at a time). The exec pipeline gets the same
+		// values through the overlay above.
+		if err := render.Prepare(); err != nil {
+			return "", fmt.Errorf("addons render: %w", err)
 		}
-	}
-	// In-process, kustomize resolves docker and git through THIS process's
-	// PATH, so a dry run puts the refusing stubs first for the length of
-	// the render (a dry run renders one entry at a time). The exec pipeline
-	// gets the same PATH through the overlay above.
-	if dry != nil && !allowGenerators {
-		defer scopePath(dry.StubPath(os.Getenv("PATH")))()
+		defer scopeEnv("TMPDIR", dry.Tmp)()
+		if !allowGenerators {
+			defer scopeEnv("PATH", dry.StubPath(os.Getenv("PATH")))()
+		}
 	}
 	// The render goes through internal/render: in-process by default, the
 	// pinned kustomize binary via the runner seam under LO_RENDER=exec
@@ -232,21 +229,11 @@ func stageBuildDir(paths *config.Paths, stderr io.Writer, addonDir, kind, provid
 	if f := filepath.Join(addonDir, "values."+providerName+".yaml"); providerName != "" && fsutil.FileExists(f) {
 		valueFiles = append(valueFiles, f)
 	}
-	stack := inlineValues != "" || len(valueFiles) > 0
-	// A dry run checks the local chart first: a chart or a file://
-	// dependency outside the project is an entry error, and a chart
-	// khelm builds dependencies for must not write into the project.
-	var local *localChart
-	if dry != nil {
-		lc, err := resolveLocalChart(addonDir, paths.Base)
-		if err != nil {
-			ui.ErrorTo(stderr, "addons::render: %s: %v", addonDir, err)
-			return "", cleanup, fmt.Errorf("addons render: %w", err)
-		}
-		local = lc
-	}
-	switch {
-	case stack:
+	// Copy to a temp build dir when there's overlay stacking to do (a dry
+	// run copies the same way: khelm's dependency builds are refused at the
+	// ChartRenderer gate, so nothing writes into a copy or through one of
+	// its symlinks).
+	if inlineValues != "" || len(valueFiles) > 0 {
 		// Copy to a temp build dir when there's overlay stacking to do.
 		// A chart that pins its OWN chart.yaml valueFiles — e.g. a
 		// target referencing a cross-tree base
@@ -261,14 +248,8 @@ func stageBuildDir(paths *config.Paths, stderr io.Writer, addonDir, kind, provid
 		buildDir = tmp
 		cleanup = func() { _ = os.RemoveAll(tmp) }
 		// Dotfiles too (bash: `cp -r dir/.`) — a glob drops them and a
-		// chart referencing a dotfile would fail to render. A dry run
-		// copies a symlink as its target, so khelm can never write
-		// through one into the project.
-		copyFn := copyTree
-		if dry != nil {
-			copyFn = func(src, dst string) error { return copyTreeDeref(src, dst, 0) }
-		}
-		if err := copyFn(addonDir, tmp); err != nil {
+		// chart referencing a dotfile would fail to render.
+		if err := copyTree(addonDir, tmp); err != nil {
 			ui.ErrorTo(stderr, "addons::render: failed to copy %s to temp dir", addonDir)
 			return "", cleanup, fmt.Errorf("addons render: copy: %w", err)
 		}
@@ -293,35 +274,19 @@ func stageBuildDir(paths *config.Paths, stderr io.Writer, addonDir, kind, provid
 			ui.ErrorTo(stderr, "addons::render: failed to set valueFiles in chart.yaml for %s", addonDir)
 			return "", cleanup, fmt.Errorf("addons render: chart.yaml valueFiles: %w", err)
 		}
-	case local != nil && local.buildsDeps:
-		// Dry run only: the real run renders this chart in place and
-		// khelm writes Chart.lock and charts/ next to it. Render from a
-		// copy that keeps the relative layout instead.
-		tmp, err := os.MkdirTemp(dryTempRoot(dry), "lok8s-chart-")
-		if err != nil {
-			ui.ErrorTo(stderr, "addons::render: failed to create temp dir for %s", addonDir)
-			return "", cleanup, fmt.Errorf("addons render: temp dir: %w", err)
-		}
-		cleanup = func() { _ = os.RemoveAll(tmp) }
-		dir, err := local.mirror(tmp)
-		if err != nil {
-			ui.ErrorTo(stderr, "addons::render: %s: %v", addonDir, err)
-			return "", cleanup, fmt.Errorf("addons render: copy: %w", err)
-		}
-		buildDir = dir
 	}
 	return buildDir, cleanup, nil
 }
 
-// scopePath sets PATH and returns the restore.
-func scopePath(path string) (restore func()) {
-	prev, had := os.LookupEnv("PATH")
-	os.Setenv("PATH", path)
+// scopeEnv sets key and returns the restore.
+func scopeEnv(key, value string) (restore func()) {
+	prev, had := os.LookupEnv(key)
+	os.Setenv(key, value)
 	return func() {
 		if had {
-			os.Setenv("PATH", prev)
+			os.Setenv(key, prev)
 		} else {
-			os.Unsetenv("PATH")
+			os.Unsetenv(key)
 		}
 	}
 }
@@ -332,7 +297,7 @@ func dryTempRoot(dry *DryRunBoundary) string {
 	if dry == nil {
 		return ""
 	}
-	return dry.Dir
+	return dry.Tmp
 }
 
 // copyTree copies src's CONTENTS into dst (bash: cp -r src/. dst/ —

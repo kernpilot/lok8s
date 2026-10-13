@@ -439,13 +439,14 @@ lo bootstrap [flags]
 ### Options
 
 ```
-      --allow-generators    Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)
-      --dry-run             Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
-  -h, --help                help for bootstrap
-      --no-diff             Dry run without the kubectl diff: render only, no cluster access
-      --only strings        Apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded
-      --render-dir string   Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
-      --with-restore        With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
+      --allow-generators          Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)
+      --dry-run                   Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
+  -h, --help                      help for bootstrap
+      --ignore-nondeterministic   Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)
+      --no-diff                   Dry run without the kubectl diff: render only, no cluster access
+      --only strings              Apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded
+      --render-dir string         Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
+      --with-restore              With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
 ```
 
 ### SEE ALSO
@@ -3342,14 +3343,15 @@ lo provision [flags]
 ### Options
 
 ```
-      --allow-generators    Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)
-  -b, --bootstrap           Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)
-      --dry-run             Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
-  -h, --help                help for provision
-      --no-diff             Dry run without the kubectl diff: render only, no cluster access
-      --only strings        Apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded
-      --render-dir string   Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
-      --with-restore        With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
+      --allow-generators          Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)
+  -b, --bootstrap                 Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)
+      --dry-run                   Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
+  -h, --help                      help for provision
+      --ignore-nondeterministic   Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)
+      --no-diff                   Dry run without the kubectl diff: render only, no cluster access
+      --only strings              Apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded
+      --render-dir string         Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
+      --with-restore              With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
 ```
 
 ### SEE ALSO

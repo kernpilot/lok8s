@@ -39,6 +39,7 @@ type bootstrapModeFlags struct {
 	only            []string
 	allowGenerators bool
 	withRestore     bool
+	ignoreNondet    bool
 }
 
 func (f *bootstrapModeFlags) bind(cmd *cobra.Command) {
@@ -48,6 +49,7 @@ func (f *bootstrapModeFlags) bind(cmd *cobra.Command) {
 	cmd.Flags().StringSliceVar(&f.only, "only", nil, "Apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded")
 	cmd.Flags().BoolVar(&f.allowGenerators, "allow-generators", false, "Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)")
 	cmd.Flags().BoolVar(&f.withRestore, "with-restore", false, "With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)")
+	cmd.Flags().BoolVar(&f.ignoreNondet, "ignore-nondeterministic", false, "Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)")
 }
 
 // options validates the combination and returns the engine's Options. A
@@ -60,7 +62,7 @@ func (f *bootstrapModeFlags) options(stderr io.Writer, bootstrapOnly, onlyChange
 	for _, dep := range []struct {
 		set  bool
 		flag string
-	}{{f.dryRun, "--dry-run"}, {f.renderDir != "", "--render-dir"}, {f.noDiff, "--no-diff"}, {onlyChanged, "--only"}, {f.allowGenerators, "--allow-generators"}, {f.withRestore, "--with-restore"}} {
+	}{{f.dryRun, "--dry-run"}, {f.renderDir != "", "--render-dir"}, {f.noDiff, "--no-diff"}, {onlyChanged, "--only"}, {f.allowGenerators, "--allow-generators"}, {f.withRestore, "--with-restore"}, {f.ignoreNondet, "--ignore-nondeterministic"}} {
 		if dep.set && !bootstrapOnly {
 			ui.ErrorTo(stderr, "%s requires --bootstrap", dep.flag)
 			return bootstrap.Options{}, ErrHandled
@@ -69,7 +71,7 @@ func (f *bootstrapModeFlags) options(stderr io.Writer, bootstrapOnly, onlyChange
 	for _, dep := range []struct {
 		set  bool
 		flag string
-	}{{f.renderDir != "", "--render-dir"}, {f.noDiff, "--no-diff"}, {f.allowGenerators, "--allow-generators"}} {
+	}{{f.renderDir != "", "--render-dir"}, {f.noDiff, "--no-diff"}, {f.allowGenerators, "--allow-generators"}, {f.ignoreNondet, "--ignore-nondeterministic"}} {
 		if dep.set && !f.dryRun {
 			ui.ErrorTo(stderr, "%s requires --dry-run", dep.flag)
 			return bootstrap.Options{}, ErrHandled
@@ -79,7 +81,7 @@ func (f *bootstrapModeFlags) options(stderr io.Writer, bootstrapOnly, onlyChange
 		ui.ErrorTo(stderr, "--with-restore requires --only")
 		return bootstrap.Options{}, ErrHandled
 	}
-	opts := bootstrap.Options{DryRun: f.dryRun, RenderDir: f.renderDir, NoDiff: f.noDiff, AllowGenerators: f.allowGenerators, WithRestore: f.withRestore}
+	opts := bootstrap.Options{DryRun: f.dryRun, RenderDir: f.renderDir, NoDiff: f.noDiff, AllowGenerators: f.allowGenerators, WithRestore: f.withRestore, IgnoreNondeterministic: f.ignoreNondet}
 	for _, name := range f.only {
 		if name = strings.TrimSpace(name); name != "" {
 			opts.Only = append(opts.Only, name)
