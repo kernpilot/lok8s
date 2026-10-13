@@ -415,7 +415,9 @@ addons::_dry_run_local_chart() {
     _dirs+=("${_real}")
     [[ -f "${_real}/Chart.yaml" ]] || continue
     _n="$(yq -r '(.dependencies // []) | length' "${_real}/Chart.yaml" 2>/dev/null)" || continue
-    [[ "${_n}" =~ ^[0-9]+$ ]] && (( _n > 0 )) || continue
+    if [[ ! "${_n}" =~ ^[0-9]+$ ]] || (( _n == 0 )); then
+      continue
+    fi
     _deps=1
     while IFS=$'\t' read -r _dname _drepo; do
       [[ "${_drepo}" == file://* ]] || continue

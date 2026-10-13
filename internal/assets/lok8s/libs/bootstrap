@@ -1757,9 +1757,9 @@ bootstrap::_run_dry() {
 bootstrap::_dry_run_trap() {
   local _dir="${1}" _prev=""
   if (( BASHPID == $$ )); then
-    local -a _p=()
-    eval "_p=($(trap -p EXIT))"
-    (( ${#_p[@]} < 3 )) || _prev="${_p[2]}"
+    local -a _trap_words=()
+    eval "_trap_words=($(trap -p EXIT))"
+    (( ${#_trap_words[@]} < 3 )) || _prev="${_trap_words[2]}"
   fi
   _BOOTSTRAP_DRY_PREV_TRAP="${_prev}"
   # shellcheck disable=SC2064 # expand now: the dir and the prior trap are fixed values
