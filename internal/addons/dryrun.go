@@ -27,7 +27,7 @@ package addons
 //     function, a remote base, kustomize's helmCharts pull), and with an
 //     empty HELM_PLUGINS (no helm downloader plugin). The ChartRenderer gate
 //     (internal/render/chartgate.go) refuses a local chart whose
-//     dependencies khelm would build into the chart directory. The `bash:`
+//     dependencies khelm may build into the chart directory. The `bash:`
 //     secrets generator refuses on its own.
 //   - every temp file of the render (kustomize's plugin configs, helm's
 //     values) goes to the boundary: TMPDIR.

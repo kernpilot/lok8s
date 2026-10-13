@@ -47,9 +47,33 @@ them), `(non-repeatable)` when the render generated or updated secret
 material that the store does not hold, or read such material that an
 earlier entry of the run generated, and `(partial: KRM function skipped)`
 (also for a function in a base or component the entry references). The
-chart dependency check is Helm's own (the bash implementation needs helm v3
-on `PATH` for it). The exit code is 0 when nothing would change, 1 only when a
+chart dependency check is Helm's own (the bash implementation needs helm
+v3.3 or later on `PATH` for it). The exit code is 0 when nothing would change, 1 only when a
 completed diff found a change, and 2 for all other failures.
+
+The two implementations decide the chart dependency check the same way. The
+Go implementation uses the Helm v3.21.2 library (the loader and the status
+rule of `helm dependency list`). The bash implementation runs `helm
+dependency list` and `helm lint` and reads only the table on stdout (helm's
+log lines on stderr, for example about a symlinked subchart, are not part of
+the decision). Tests pin both on the same real charts: a symlinked subchart,
+a v2 chart with `requirements.yaml`, an archive next to the subchart
+directory, two archives of one dependency, a misnamed archive, and a chart, a
+subchart or a dependency without a version. The two can still differ in
+the cases below. Then one implementation is inconclusive and the other
+renders a chart that khelm does not build. Neither one renders a chart
+whose render writes into the chart directory.
+
+- Without helm v3.3 or later on `PATH`, the bash implementation is
+  inconclusive.
+- When helm prints no dependency table that the bash implementation can
+  read, it is inconclusive.
+- A v2 chart can have a `file://` dependency in `Chart.yaml` and a
+  `requirements.yaml` that replaces the dependencies. Helm (and khelm) then
+  read only `requirements.yaml`, but the bash implementation reads both
+  files and is inconclusive.
+- A helm v3 release other than v3.21.2 can give a different status for a
+  dependency. Then either implementation can be the inconclusive one.
 
 The dry run prevents accidental side effects of legitimate addon code and
 configuration. It is not a security boundary: a malicious addon can still

@@ -93,8 +93,8 @@ const (
 	// raceRe matches (applyone.go), an earlier entry's CRD/webhook has not
 	// landed in THIS read-only probe yet (a sequential dry run never
 	// establishes CRDs); "inconclusive (chart dependencies not vendored)" —
-	// the ChartRenderer gate refused a local chart khelm would build
-	// dependencies for (internal/render/chartgate.go). It does NOT count as
+	// the ChartRenderer gate refused a local chart whose dependencies khelm
+	// may build (internal/render/chartgate.go). It does NOT count as
 	// "differs": it is its own summary field, and it forces the run's exit
 	// to 2 (an assessment that could not be completed), like an error.
 	dryInconclusive dryRunStatus = "inconclusive"

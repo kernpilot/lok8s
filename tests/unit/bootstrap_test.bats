@@ -3198,11 +3198,19 @@ _fake_helm() {
   : > "${FAKE_HELM}/lint"
   cat > "${FAKE_HELM}/bin/helm" <<'SH'
 #!/usr/bin/env bash
+# The fake answers like helm v3: `dependency list` logs to stderr (the
+# loader's lines about a symlinked subchart and a v2 requirements.yaml) and
+# prints its table, then the warnings about extra charts, on stdout.
+# ${FAKE_HELM}/table, when it exists, replaces the table.
 case "${1:-}" in
   version) cat "${FAKE_HELM}/version" ;;
   dependency)
+    echo "walk.go:75: found symbolic link in path: ${3:-}/charts/common resolves to /src/common. Contents of linked file included and used" >&2
+    echo 'load.go:120: Warning: Dependencies are handled in Chart.yaml since apiVersion "v2". We recommend migrating dependencies to Chart.yaml.' >&2
     if [[ -s "${FAKE_HELM}/deplist.rc" ]]; then echo "Error: the chart does not load" >&2; exit 1; fi
-    printf 'NAME  \tVERSION\tREPOSITORY            \tSTATUS\n'; cat "${FAKE_HELM}/deplist"; echo ;;
+    if [[ -e "${FAKE_HELM}/table" ]]; then cat "${FAKE_HELM}/table"; exit 0; fi
+    printf 'NAME  \tVERSION\tREPOSITORY            \tSTATUS\n'; cat "${FAKE_HELM}/deplist"; echo
+    echo "WARNING: \"${3:-}/charts/extra\" is not in Chart.yaml." ;;
   lint)
     echo "==> Linting ${2:-}"
     [[ ! -s "${FAKE_HELM}/lint" ]] || cat "${FAKE_HELM}/lint"
@@ -3238,9 +3246,11 @@ SH
   mkdir -p "${root}/charts/app/charts"
   printf 'apiVersion: v2\nname: app\nversion: 0.1.0\ndependencies:\n  - name: common\n    version: 0.1.0\n    repository: https://charts.example\n' > "${root}/charts/app/Chart.yaml"
   _gate() { ( cd "${root}" && PATH="${b}/bin:${PATH}" KUSTOMIZE_PLUGIN_CONFIG_STRING="${1}" LOK8S_BOOTSTRAP_DRYRUN_REPORT="${b}/report" "${gate}" cfg </dev/null ); }
-  local refused="lok8s dry-run: chart charts/app: its dependencies are not vendored (khelm would build them into the chart directory) — vendor them into charts/ or pass --allow-generators"
+  local refused="lok8s dry-run: chart charts/app: helm does not report its dependencies as vendored (khelm may build them into the chart directory) — vendor them into charts/ or pass --allow-generators"
 
   # helm says ok (an archive), or unpacked (a directory): the chart renders.
+  # Its log lines on stderr and the warning about an extra chart on stdout
+  # are not rows of the table (review round 6, item 2).
   : > "${b}/report"
   run _gate "chart: charts/app"
   assert_success
@@ -3270,17 +3280,38 @@ SH
   assert_output "${refused}"
   : > "${FAKE_HELM}/lint"
 
-  # What the gate cannot check is refused: a chart helm cannot load, a helm
-  # that is not v3, no helm at all.
+  # What the gate cannot check is refused: a chart helm cannot load (the
+  # last line of helm's stderr says why), no table, a helm that is not v3,
+  # no helm at all. helm's own "no dependencies" answer has no table and
+  # renders: the loaded chart has nothing to build.
   echo 1 > "${FAKE_HELM}/deplist.rc"
   run _gate "chart: charts/app"
   assert_failure
   assert_line "lok8s dry-run: chart charts/app: helm dependency list failed: Error: the chart does not load"
+  refute_output --partial "walk.go"
   : > "${FAKE_HELM}/deplist.rc"
+  : > "${FAKE_HELM}/table"
+  : > "${b}/report"
+  run _gate "chart: charts/app"
+  assert_failure
+  assert_line "lok8s dry-run: chart charts/app: helm dependency list printed no dependency table"
+  assert_line "${refused}"
+  [ "$(cat "${b}/report")" = "chart-deps charts/app" ]
+  printf 'WARNING: no dependencies at %s/charts/app/charts\n' "${root}" > "${FAKE_HELM}/table"
+  run _gate "chart: charts/app"
+  assert_success
+  assert_output "real-chartrenderer cfg"
+  rm "${FAKE_HELM}/table"
   printf 'v4.0.0+g0000000\n' > "${FAKE_HELM}/version"
   run _gate "chart: charts/app"
   assert_failure
-  assert_line "lok8s dry-run: chart charts/app: the dependency check needs helm v3 on PATH (found: v4.0.0+g0000000)"
+  assert_line "lok8s dry-run: chart charts/app: the dependency check needs helm v3.3 or later on PATH (found: v4.0.0+g0000000)"
+  # helm lint checks the dependencies since helm v3.3.0 (an older one would
+  # pass an archive that .helmignore hides).
+  printf 'v3.2.4+g0000000\n' > "${FAKE_HELM}/version"
+  run _gate "chart: charts/app"
+  assert_failure
+  assert_line "lok8s dry-run: chart charts/app: the dependency check needs helm v3.3 or later on PATH (found: v3.2.4+g0000000)"
   printf 'v3.21.2+g0000000\n' > "${FAKE_HELM}/version"
   # No helm at all: a PATH with yq and the system tools only.
   mkdir -p "${FAKE_HELM}/nohelm"
@@ -3290,7 +3321,7 @@ SH
   run env -C "${root}" PATH="${b}/bin:${FAKE_HELM}/nohelm:/usr/bin:/bin" KUSTOMIZE_PLUGIN_CONFIG_STRING="chart: charts/app" \
     LOK8S_BOOTSTRAP_DRYRUN_REPORT="${b}/report" "${gate}" cfg </dev/null
   assert_failure
-  assert_line "lok8s dry-run: chart charts/app: the dependency check needs helm v3 on PATH (found: none)"
+  assert_line "lok8s dry-run: chart charts/app: the dependency check needs helm v3.3 or later on PATH (found: none)"
 
   # A file:// dependency is always built: refused, vendored or not, without
   # asking helm (requirements.yaml counts too).
@@ -3318,7 +3349,12 @@ SH
 
 # The same gate against the real helm v3 on real charts (Helm's loader:
 # .helmignore honoured, a subchart named by its metadata). Skips without
-# helm v3 locally; on CI a missing helm v3 fails the test.
+# helm v3 locally. CI runs it natively with a pinned helm v3 (ci.yml, Bats
+# Unit Tests: "Real-helm bats tests"), where CI=true makes a missing helm v3
+# a failure: the argsh container that runs the rest of the suite has no
+# helm. The fixtures are the Go twin's (internal/render/chartgate_test.go,
+# TestChartDepsNotVendored), so both implementations decide them the same.
+# bats test_tags=real-helm
 @test "the dry run's ChartRenderer gate decides with the real helm on real charts" {
   local version
   version="$(helm version --short 2>/dev/null)" || version=""
@@ -3361,14 +3397,49 @@ SH
   _parent wrong-version 2.0.0
   tar -C "${src}/redis" -czf "${root}/wrong-version/charts/redis-1.0.0.tgz" redis
   _parent missing 1.0.0
+  # Review round 6, item 6: the cases the two implementations used to
+  # decide differently.
+  _chart "${src}/v11/redis" redis 1.1.0
+  _chart "${src}/rb/redis-bar" redis-bar 2.0.0
+  _parent two-archives ">=1.0.0"
+  tar -C "${src}/redis" -czf "${root}/two-archives/charts/redis-1.0.0.tgz" redis
+  tar -C "${src}/v11" -czf "${root}/two-archives/charts/redis-1.1.0.tgz" redis
+  _parent symlinked 1.0.0
+  ln -s "${src}/redis/redis" "${root}/symlinked/charts/redis"
+  _chart "${root}/v2-req" v2-req 0.1.0
+  printf 'dependencies:\n  - name: redis\n    version: 1.0.0\n    repository: https://charts.example.test\n' > "${root}/v2-req/requirements.yaml"
+  _chart "${root}/v2-req/charts/redis" redis 1.0.0
+  _chart "${root}/v2-req-missing" v2-req-missing 0.1.0
+  cp "${root}/v2-req/requirements.yaml" "${root}/v2-req-missing/"
+  _parent dir-and-foo-bar 1.0.0
+  _chart "${root}/dir-and-foo-bar/charts/redis" redis 1.0.0
+  tar -C "${src}/rb" -czf "${root}/dir-and-foo-bar/charts/redis-bar-2.0.0.tgz" redis-bar
+  _parent tgz-and-dir 1.0.0
+  tar -C "${src}/redis" -czf "${root}/tgz-and-dir/charts/redis-1.0.0.tgz" redis
+  _chart "${root}/tgz-and-dir/charts/redis" redis 1.0.0
+  _parent two-dirs 1.0.0
+  _chart "${root}/two-dirs/charts/redis" redis 1.0.0
+  _chart "${root}/two-dirs/charts/redis2" redis 1.0.0
+  _parent parent-no-version 1.0.0
+  sed -i '/^version: 0.1.0$/d' "${root}/parent-no-version/Chart.yaml"
+  _chart "${root}/parent-no-version/charts/redis" redis 1.0.0
+  _parent sub-no-version 1.0.0
+  _chart "${root}/sub-no-version/charts/redis" redis 1.0.0
+  sed -i '/^version:/d' "${root}/sub-no-version/charts/redis/Chart.yaml"
+  _chart "${root}/dep-no-version" dep-no-version 0.1.0
+  printf 'dependencies:\n  - name: redis\n    repository: https://charts.example.test\n' >> "${root}/dep-no-version/Chart.yaml"
+  _chart "${root}/dep-no-version/charts/redis" redis 1.0.0
 
-  local c
-  for c in vendored-tgz vendored-dir; do
-    run _gate "${c}"
-    [ "${status}" -eq 0 ] || { echo "${c}: rc=${status}: ${output}"; return 1; }
-    assert_output "real-chartrenderer"
+  local c rc out="${BATS_TEST_TMPDIR}/gate.out" err="${BATS_TEST_TMPDIR}/gate.err"
+  for c in vendored-tgz vendored-dir symlinked v2-req tgz-and-dir two-dirs; do
+    rc=0
+    _gate "${c}" >"${out}" 2>"${err}" || rc=$?
+    [ "${rc}" -eq 0 ] || { echo "${c}: rc=${rc}: $(cat "${out}" "${err}")"; return 1; }
+    [ "$(cat "${out}")" = "real-chartrenderer" ] || { echo "${c}: stdout $(cat "${out}")"; return 1; }
+    # helm's log lines (the symlink, the v2 requirements.yaml) are not shown.
+    [ ! -s "${err}" ] || { echo "${c}: stderr $(cat "${err}")"; return 1; }
   done
-  for c in helmignored misnamed wrong-version missing; do
+  for c in helmignored misnamed wrong-version missing two-archives v2-req-missing dir-and-foo-bar parent-no-version sub-no-version dep-no-version; do
     : > "${b}/report"
     run _gate "${c}"
     [ "${status}" -eq 1 ] || { echo "${c}: rc=${status}: ${output}"; return 1; }

@@ -282,17 +282,23 @@ bootstrap dry-run: entries=4 unchanged=0 differs=3 rendered=0 skipped=1 inconclu
   a new cluster). The run cannot say what this entry changes, so the run
   exits 2.
 - `inconclusive (chart dependencies not vendored)`: the entry renders a
-  local chart, and khelm would build the dependencies of that chart into the
+  local chart, and khelm can build the dependencies of that chart into the
   chart directory (it writes `Chart.lock` and `charts/`). The dry run does
   not render the chart. It decides as Helm does: on the chart as Helm's
   loader loads it (`.helmignore` applies, and a dependency matches a
-  subchart by the name in its `Chart.yaml`). A missing, misnamed, doubled or
-  hidden dependency, a version outside the dependency's constraint, and a
-  `file://` dependency are not vendored. Put the dependencies into the
-  `charts/` directory of the chart, or pass `--allow-generators`. The run
-  exits 2. The bash implementation asks `helm` for this check (`helm
-  dependency list` and `helm lint`, both read-only), so it needs helm v3 on
-  `PATH`. Without it, such an entry is inconclusive too.
+  subchart by the name in its `Chart.yaml`), and with the status column of
+  `helm dependency list`, which must be `ok` or `unpacked` for each
+  dependency. These are not vendored: a missing, misnamed or hidden
+  dependency, two archives of one dependency, a version outside the
+  dependency's constraint, a dependency without a version, a chart that does
+  not load, and a `file://` dependency. A real run renders some of these
+  charts without a build (for example a misnamed archive next to the
+  correct subchart directory), but the dry run cannot tell them apart and
+  does not render them. Put the dependencies into the `charts/` directory of
+  the chart, or pass `--allow-generators`. The run exits 2. The bash
+  implementation asks `helm` for this check (`helm dependency list` and
+  `helm lint`, both read-only), so it needs helm v3.3 or later on `PATH`.
+  Without it, such an entry is inconclusive too.
 - `(non-deterministic: N)`, with one `non-deterministic (regenerated on
   every apply)` line for each object: the two renders of the entry gave
   different content for these objects, or only one of the renders has the

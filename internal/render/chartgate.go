@@ -6,9 +6,10 @@ package render
 // directory (Chart.lock, charts/, tmpcharts/) whenever Helm's
 // action.CheckDependencies fails on the chart as Helm's loader loads it, or
 // one of them is a file:// chart. The gate decides with Helm's own loader
-// (.helmignore honoured, dependencies matched by their metadata name). A dry run must not write there, so it
-// refuses that render instead: the entry is reported
-// `inconclusive (chart dependencies not vendored)`. The gate runs where khelm
+// (.helmignore honoured, dependencies matched by their metadata name) and
+// the status rule of `helm dependency list`, which the bash twin runs. A dry
+// run must not write there, so it refuses that render instead: the entry is
+// reported `inconclusive (chart dependencies not vendored)`. The gate runs where khelm
 // runs, for every ChartRenderer config of the render (any file name, any
 // nested base, an absolute chart path): in-process (lo-full) before khelm,
 // and in the exec pipeline as the dry run's ChartRenderer, which execs the
@@ -19,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +28,7 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"gopkg.in/yaml.v3"
+	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/chart/loader"
 )
 
@@ -39,11 +42,11 @@ func chartGateApplies() bool {
 }
 
 // ChartDepsNotVendored reads a ChartRenderer config (khelm's generator
-// config) and reports whether khelm would build chart dependencies for it:
-// the chart is local (no repository, the path exists, relative to baseDir,
-// the kustomization root) and chartBuildsDeps says so. chart is the local
-// chart path ("" for a remote chart).
-func ChartDepsNotVendored(config []byte, baseDir string) (chart string, unvendored bool, err error) {
+// config) and reports whether the dry run refuses it because of its chart
+// dependencies: the chart is local (no repository, the path exists,
+// relative to baseDir, the kustomization root) and chartBuildsDeps says so. chartPath is the
+// local chart path as the config names it ("" for a remote chart).
+func ChartDepsNotVendored(config []byte, baseDir string) (chartPath string, unvendored bool, err error) {
 	var cfg struct {
 		Repository string `yaml:"repository"`
 		Chart      string `yaml:"chart"`
@@ -64,22 +67,26 @@ func ChartDepsNotVendored(config []byte, baseDir string) (chart string, unvendor
 	return cfg.Chart, chartBuildsDeps(path), nil
 }
 
-// chartBuildsDeps reports whether khelm would build the dependencies of the
-// local chart in dir, decided on the chart as Helm's loader loads it (the
-// one khelm loads: .helmignore honoured, a subchart named by its metadata).
-// It is conservative: true when
+// chartBuildsDeps reports whether the dry run refuses the local chart in
+// dir, decided on the chart as Helm's loader loads it (the one khelm loads:
+// .helmignore honoured, a subchart named by its metadata). It refuses what
+// khelm builds dependencies for, and also what `helm dependency list` does
+// not call ok or unpacked, because the bash twin decides with that command
+// (khelm renders some of those charts without a build, but the twin cannot
+// tell them apart). True when
 //   - the chart does not load (khelm fails too; the dry run cannot say),
 //   - a dependency is a file:// chart (khelm always builds those, so there
 //     is no walk into one and no nesting limit),
-//   - action.CheckDependencies would fail (a dependency that no loaded
-//     subchart has the name of: khelm builds then), or
-//   - `helm dependency list` would not say ok: more than one subchart has
-//     the name, or the subchart's version is not in the dependency's
-//     version constraint (khelm itself renders that one; the bash twin
-//     reads `helm dependency list`, so both refuse it).
+//   - no loaded subchart has the name of a dependency (action.
+//     CheckDependencies fails, and khelm builds; `helm lint` says "chart
+//     directory is missing these dependencies"), or
+//   - dependencyStatus, the status column of `helm dependency list`, is
+//     not ok or unpacked for a dependency (missing, misnamed, wrong
+//     version, invalid version, too many matches, corrupt).
 //
 // chartgate_test.go pins this against action.CheckDependencies and
-// action.Dependency.List on real chart fixtures.
+// action.Dependency.List on real chart fixtures, and the bats twin pins the
+// bash gate against the real helm v3 on the same fixtures.
 func chartBuildsDeps(dir string) bool {
 	ch, err := loader.Load(dir)
 	if err != nil || ch.Metadata == nil {
@@ -91,37 +98,102 @@ func chartBuildsDeps(dir string) bool {
 		}
 	}
 	for _, dep := range ch.Metadata.Dependencies {
-		var version string
-		n := 0
-		for _, sub := range ch.Dependencies() {
-			if sub.Name() == dep.Name {
-				n++
-				version = sub.Metadata.Version
-			}
+		if loadedSubchart(ch, dep.Name) == nil {
+			return true
 		}
-		if n != 1 || !versionAccepted(dep.Version, version) {
+		if s := dependencyStatus(dir, dep, ch); s != "ok" && s != "unpacked" {
 			return true
 		}
 	}
 	return false
 }
 
-// versionAccepted is the version check of `helm dependency list`: the
-// subchart's version equals the dependency's version, or is in its
+// loadedSubchart is the last loaded subchart of parent named name, or nil
+// (helm's dependencyStatus takes the last one too).
+func loadedSubchart(parent *chart.Chart, name string) *chart.Chart {
+	var found *chart.Chart
+	for _, sub := range parent.Dependencies() {
+		if sub.Name() == name {
+			found = sub
+		}
+	}
+	return found
+}
+
+// dependencyStatus is the STATUS column of `helm dependency list` for one
+// dependency: Helm v3's action.Dependency.dependencyStatus (helm.sh/helm/v3
+// v3.21.2, pkg/action/dependency.go), which is unexported, step by step.
+// An archive charts/<name>-*.tgz decides first (with more than one, only
+// the names whose suffix is a strict semver count); otherwise the loaded
+// subchart does.
+func dependencyStatus(chartPath string, dep *chart.Dependency, parent *chart.Chart) string {
+	archives, err := filepath.Glob(filepath.Join(chartPath, "charts", dep.Name+"-*.tgz"))
+	switch {
+	case err != nil:
+		return "bad pattern"
+	case len(archives) > 1:
+		var found []string
+		for _, arc := range archives {
+			maybeVersion := strings.TrimPrefix(strings.TrimSuffix(filepath.Base(arc), ".tgz"), dep.Name+"-")
+			if _, err := semver.StrictNewVersion(maybeVersion); err == nil {
+				found = append(found, arc)
+			}
+		}
+		if len(found) > 1 {
+			return "too many matches"
+		}
+		if len(found) == 1 {
+			if r := archiveStatus(found[0], dep); r != "" {
+				return r
+			}
+		}
+	case len(archives) == 1:
+		if r := archiveStatus(archives[0], dep); r != "" {
+			return r
+		}
+	}
+	sub := loadedSubchart(parent, dep.Name)
+	if sub == nil {
+		return "missing"
+	}
+	return versionStatus(dep.Version, sub.Metadata.Version, "unpacked")
+}
+
+// archiveStatus is Helm's statArchiveForStatus: the status of one chart
+// archive for dep, or "" when the archive is not there.
+func archiveStatus(archive string, dep *chart.Dependency) string {
+	if _, err := os.Stat(archive); err != nil {
+		return ""
+	}
+	c, err := loader.Load(archive)
+	if err != nil {
+		return "corrupt"
+	}
+	if c.Name() != dep.Name {
+		return "misnamed"
+	}
+	return versionStatus(dep.Version, c.Metadata.Version, "ok")
+}
+
+// versionStatus is the version check of `helm dependency list`: ok when the
+// subchart's version equals the dependency's version or is in its
 // constraint.
-func versionAccepted(constraint, version string) bool {
+func versionStatus(constraint, version, ok string) string {
 	if version == constraint {
-		return true
+		return ok
 	}
 	c, err := semver.NewConstraint(constraint)
 	if err != nil {
-		return false
+		return "invalid version"
 	}
 	v, err := semver.NewVersion(version)
 	if err != nil {
-		return false
+		return "invalid version"
 	}
-	return c.Check(v)
+	if !c.Check(v) {
+		return "wrong version"
+	}
+	return ok
 }
 
 // chartGate runs the check for a ChartRenderer invocation (argv as kustomize
@@ -141,17 +213,24 @@ func chartGate(args []string, stderr io.Writer) (refused bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	chart, unvendored, err := ChartDepsNotVendored(config, wd)
+	// Helm's loader logs to the standard logger (a symlinked subchart, a v2
+	// chart with requirements.yaml). The check is silent, as in the bash
+	// twin, which keeps helm's stderr; khelm logs the same lines when the
+	// chart renders. The gate runs in its own plugin process.
+	prev := log.Writer()
+	log.SetOutput(io.Discard)
+	chartPath, unvendored, err := ChartDepsNotVendored(config, wd)
+	log.SetOutput(prev)
 	if err != nil || !unvendored {
 		return false, err
 	}
-	fmt.Fprintf(stderr, "lok8s dry-run: chart %s: its dependencies are not vendored (khelm would build them into the chart directory) — vendor them into charts/ or pass --allow-generators\n", chart)
+	fmt.Fprintf(stderr, "lok8s dry-run: chart %s: helm does not report its dependencies as vendored (khelm may build them into the chart directory) — vendor them into charts/ or pass --allow-generators\n", chartPath)
 	if report := os.Getenv("LOK8S_BOOTSTRAP_DRYRUN_REPORT"); report != "" {
 		f, ferr := os.OpenFile(report, os.O_WRONLY|os.O_APPEND, 0)
 		if ferr != nil {
 			return true, ferr
 		}
-		_, werr := fmt.Fprintf(f, "chart-deps %s\n", chart)
+		_, werr := fmt.Fprintf(f, "chart-deps %s\n", chartPath)
 		if cerr := f.Close(); werr == nil {
 			werr = cerr
 		}

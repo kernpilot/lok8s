@@ -412,15 +412,18 @@ addons::_helm_stub() {
 # directory when one is a file:// chart, or when Helm's dependency check
 # fails on the chart as Helm's loader loads it (.helmignore honoured,
 # dependencies matched by their metadata name). The gate asks helm itself,
-# read-only: every row of `helm dependency list` must say ok or unpacked
-# (no missing, misnamed, wrong-version or doubled dependency), and `helm
-# lint` must not name a dependency the loaded chart lacks (an archive that
-# .helmignore hides is "ok" to `helm dependency list`). Anything it cannot
-# check (helm missing, a chart helm cannot load) is refused too. A refused
-# render exits 1 and is reported as `chart-deps <chart>`; otherwise the gate
-# execs the project's ChartRenderer. It runs for every ChartRenderer config
-# of the render (any file name, nested bases, absolute paths), in the
-# kustomization root kustomize starts it in.
+# read-only: every row of the table `helm dependency list` prints on stdout
+# must say ok or unpacked (not missing, misnamed, wrong version, invalid
+# version, too many matches or corrupt), and `helm lint` must not name a
+# dependency the loaded chart lacks (an archive that .helmignore hides is
+# "ok" to `helm dependency list`). khelm renders some of the refused charts
+# without a build (a misnamed archive next to the subchart, for one); the
+# gate refuses them all, the same as the Go twin. Anything it cannot check
+# (helm missing, a chart helm cannot load, no table) is refused too. A
+# refused render exits 1 and is reported as `chart-deps <chart>`; otherwise
+# the gate execs the project's ChartRenderer. It runs for every
+# ChartRenderer config of the render (any file name, nested bases, absolute
+# paths), in the kustomization root kustomize starts it in.
 addons::_chart_gate_script() {
   printf '#!/usr/bin/env bash\nreal=%q\n' "${1}"
   cat <<'GATE'
@@ -441,22 +444,52 @@ builds_deps() {
   done
   (( any )) || return 1
   # The statuses and the lint message below are helm v3's (the helm khelm
-  # v2.8.0 is built from): another helm cannot check this chart.
-  local version
+  # v2.8.0 is built from): another helm cannot check this chart. `helm lint`
+  # checks the dependencies since helm v3.3.0; an older helm would pass an
+  # archive that .helmignore hides.
+  local version minor
   version="$(helm version --short 2>/dev/null)" || version=""
-  if [[ "${version}" != v3.* ]]; then
-    echo "lok8s dry-run: chart ${chart}: the dependency check needs helm v3 on PATH (found: ${version:-none})" >&2
+  minor="${version#v3.}"
+  minor="${minor%%.*}"
+  if [[ "${version}" != v3.* || ! "${minor}" =~ ^[0-9]+$ ]] || (( 10#${minor} < 3 )); then
+    echo "lok8s dry-run: chart ${chart}: the dependency check needs helm v3.3 or later on PATH (found: ${version:-none})" >&2
     return 0
   fi
-  if ! list="$(helm dependency list "${dir}" 2>&1)"; then
-    echo "lok8s dry-run: chart ${chart}: helm dependency list failed: ${list##*$'\n'}" >&2
+  # The table is on stdout. helm's log lines go to stderr (a symlinked
+  # subchart: "found symbolic link in path"; a v2 chart with
+  # requirements.yaml: "Warning: Dependencies are handled in Chart.yaml"),
+  # so stderr is kept apart and shown only when the command fails.
+  local errs rc=0
+  errs="$(mktemp)" || return 0
+  list="$(helm dependency list "${dir}" 2>"${errs}")" || rc=$?
+  if (( rc )); then
+    echo "lok8s dry-run: chart ${chart}: helm dependency list failed: $(tail -n 1 "${errs}")" >&2
+    rm -f "${errs}"
     return 0
   fi
+  rm -f "${errs}"
+  # A row of the table is four tab-separated columns (NAME, VERSION,
+  # REPOSITORY, STATUS); the rows after the header must all say ok or
+  # unpacked. Other lines are not rows (the warnings about extra charts in
+  # charts/). No table at all is refused, unless helm says that the loaded
+  # chart has no dependencies.
+  local header=0 tabs status tab=$'\t'
   while IFS= read -r line; do
-    line="${line%"${line##*[![:space:]]}"}"
-    case "${line}" in ""|NAME*|WARNING*|Warning*) continue ;; esac
-    [[ "${line}" =~ [[:space:]](ok|unpacked)$ ]] || return 0
+    tabs="${line//[!${tab}]/}"
+    (( ${#tabs} == 3 )) || continue
+    status="${line##*"${tab}"}"
+    status="${status%"${status##*[![:space:]]}"}"
+    status="${status#"${status%%[![:space:]]*}"}"
+    if (( ! header )); then
+      [[ "${line%%[[:space:]]*}" != NAME || "${status}" != STATUS ]] || header=1
+      continue
+    fi
+    [[ "${status}" == ok || "${status}" == unpacked ]] || return 0
   done <<< "${list}"
+  if (( ! header )) && [[ "${list}" != "WARNING: no dependencies at "* ]]; then
+    echo "lok8s dry-run: chart ${chart}: helm dependency list printed no dependency table" >&2
+    return 0
+  fi
   if helm lint "${dir}" 2>&1 | grep -q 'chart directory is missing these dependencies'; then
     return 0
   fi
@@ -466,7 +499,7 @@ if [[ -z "${repo}" && -n "${chart}" ]]; then
   path="${chart}"
   [[ "${path}" == /* ]] || path="${PWD}/${path}"
   if [[ -d "${path}" ]] && builds_deps "${path}"; then
-    echo "lok8s dry-run: chart ${chart}: its dependencies are not vendored (khelm would build them into the chart directory) — vendor them into charts/ or pass --allow-generators" >&2
+    echo "lok8s dry-run: chart ${chart}: helm does not report its dependencies as vendored (khelm may build them into the chart directory) — vendor them into charts/ or pass --allow-generators" >&2
     if [[ -f "${LOK8S_BOOTSTRAP_DRYRUN_REPORT:-}" ]]; then
       echo "chart-deps ${chart}" >> "${LOK8S_BOOTSTRAP_DRYRUN_REPORT}"
     fi

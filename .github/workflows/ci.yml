@@ -93,6 +93,48 @@ jobs:
           PATH_BIN: ${{ github.workspace }}/.bin
         run: ./.bin/argsh test tests/unit/
 
+      - name: Real-helm bats tests (native, pinned helm v3)
+        # The argsh container above has no helm and forwards no CI
+        # variable, so the bats tests tagged `real-helm` (the bash dry-run
+        # chart gate against the real helm on real charts) skip there. This
+        # step runs them on the runner: helm v3.21.2 (the helm that khelm
+        # v2.8.0 and lo link, internal/toolchain/pins.go) and bats with its
+        # two libraries at the versions e2e.yml pins, each tarball
+        # checksum-verified. CI=true (Actions sets it) makes a missing helm
+        # v3 fail the test; the step also fails when no test ran or one
+        # skipped.
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          HELM_VERSION=3.21.2
+          curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" -o "${tmp}/helm.tar.gz"
+          echo "0a745198de24545d0055cd8414bc8d2ba10363ef5f5d38369ea1b399671cc083  ${tmp}/helm.tar.gz" | sha256sum -c -
+          tar -xzf "${tmp}/helm.tar.gz" -C "${tmp}" linux-amd64/helm
+          install -m 0755 "${tmp}/linux-amd64/helm" "${HOME}/.local/bin/helm"
+          install_tarball() { # <repo> <tag> <sha256> <dest>
+            local repo="$1" tag="$2" sum="$3" dest="$4"
+            curl -fsSL "https://github.com/bats-core/${repo}/archive/refs/tags/${tag}.tar.gz" -o "${tmp}/src.tar.gz"
+            echo "${sum}  ${tmp}/src.tar.gz" | sha256sum -c -
+            mkdir -p "${dest}"
+            tar -xzf "${tmp}/src.tar.gz" -C "${dest}" --strip-components=1
+          }
+          install_tarball bats-core v1.13.0 \
+            a85e12b8828271a152b338ca8109aa23493b57950987c8e6dff97ba492772ff3 "${tmp}/bats-core"
+          "${tmp}/bats-core/install.sh" "${HOME}/.local"
+          # tests/lib/bats_libs.bash looks in ~/.local/lib among others.
+          install_tarball bats-support v0.3.0 \
+            7815237aafeb42ddcc1b8c698fc5808026d33317d8701d5ec2396e9634e2918f "${HOME}/.local/lib/bats-support"
+          install_tarball bats-assert v2.1.0 \
+            98ca3b685f8b8993e48ec057565e6e2abcc541034ed5b0e81f191505682037fd "${HOME}/.local/lib/bats-assert"
+          export PATH="${HOME}/.local/bin:${GITHUB_WORKSPACE}/.bin:${PATH}"
+          helm version --short
+          bats --version
+          echo "CI=${CI:-<unset>}"
+          out="$(bats --filter-tags real-helm tests/unit/bootstrap_test.bats)" || { echo "${out}"; exit 1; }
+          echo "${out}"
+          grep -q '^ok ' <<< "${out}" || { echo "::error::no real-helm bats test ran"; exit 1; }
+          if grep -q '# skip' <<< "${out}"; then echo "::error::a real-helm bats test skipped"; exit 1; fi
+
       - name: CRD drift gate (lo crds check)
         # libs/crds calls itself "the CI drift gate" — this is the workflow
         # step that runs it. Fails when any operator/crds/*.yaml (or the

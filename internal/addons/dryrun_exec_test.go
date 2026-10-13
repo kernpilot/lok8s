@@ -461,7 +461,7 @@ func TestDryRunChartGateRefusesUnvendoredDependencies(t *testing.T) {
 		if got := b.ReadReport().UnvendoredCharts; len(got) != 1 {
 			t.Errorf("%s: report = %q, want the refused chart\n%s", name, got, stderr)
 		}
-		if !strings.Contains(stderr, "its dependencies are not vendored") {
+		if !strings.Contains(stderr, "helm does not report its dependencies as vendored (khelm may build them into the chart directory)") {
 			t.Errorf("%s: stderr:\n%s", name, stderr)
 		}
 	}

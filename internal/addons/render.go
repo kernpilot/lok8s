@@ -210,8 +210,8 @@ func renderAddon(ctx context.Context, paths *config.Paths, runner execx.Runner, 
 // stageBuildDir returns the directory kustomize builds for one addon and
 // the cleanup of anything it staged (bash: the build_dir half of
 // addons::render): the addon directory itself, or a temp copy when values
-// stack (inline values, values[.<kind>|.<provider>].yaml) and, in a dry
-// run, when khelm would build a local chart's dependencies.
+// stack (inline values, values[.<kind>|.<provider>].yaml); a dry run keeps
+// the copy in the boundary's TMPDIR.
 func stageBuildDir(paths *config.Paths, stderr io.Writer, addonDir, kind, providerName, inlineValues string, dry *DryRunBoundary) (buildDir string, cleanup func(), err error) {
 	buildDir, cleanup = addonDir, func() {}
 	if !fsutil.FileExists(filepath.Join(addonDir, "chart.yaml")) {
