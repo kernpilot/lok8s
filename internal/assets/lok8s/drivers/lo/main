@@ -146,9 +146,9 @@ driver::provision() {
         kind create cluster --name "${cluster_name}" --config <(echo "${rendered_config}") || return 1
       fi
 
-      if registry::is_shared; then
-        lo::connect_nodes_to_registry_network "${cluster_name}" || return 1
-      fi
+      # Shared: attach the nodes to the registry network. Shared or not: move
+      # the default route of every attached node back to the cluster network.
+      lo::reconcile_registry_network_nodes "${cluster_name}" || return 1
 
       # Cluster services — each wrapped in a named, collapsing progress phase.
       # (called for its side effect — writing the kubeconfig file; its echoed
