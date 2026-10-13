@@ -165,7 +165,9 @@ func dispatchChartGate(args []string, stderr io.Writer) (handled bool, rc int) {
 		}
 	}
 	argv := append([]string{real}, args[1:]...)
-	err := syscall.Exec(real, argv, os.Environ()) // #nosec G204 -- the project's own ChartRenderer, as a real run starts it
+	// #nosec G204 G702 -- the project's own ChartRenderer with kustomize's
+	// argv, as a real run starts it; no shell parses it.
+	err := syscall.Exec(real, argv, os.Environ())
 	fmt.Fprintf(stderr, "lok8s dry-run: exec %s: %v\n", real, err)
 	return true, 1
 }

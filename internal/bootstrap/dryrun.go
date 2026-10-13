@@ -666,7 +666,7 @@ func prepareRenderDir(dir string, stderr io.Writer) error {
 	// that group or others may read is tightened to 0700 (an empty one, or
 	// a dry run's own).
 	if fi, err := os.Stat(dir); err == nil && fi.Mode().Perm()&0o077 != 0 {
-		if err := os.Chmod(dir, 0o700); err != nil {
+		if err := os.Chmod(dir, 0o700); err != nil { // #nosec G302 -- a directory: 0700 is owner-only
 			return err
 		}
 		fmt.Fprintf(stderr, "bootstrap dry-run: %s was %04o: tightened to 0700\n", dir, fi.Mode().Perm())
