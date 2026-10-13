@@ -4264,3 +4264,49 @@ SH
 # and internal/addons/dryrun_exec_test.go
 # (TestDryRunReadingAnotherEntrysValueIsReported: the real kustomize and
 # plugin, a producer entry and a consumer entry of one run).
+
+# --- Review round 8 -----------------------------------------------------------
+# The Go twin is internal/bootstrap/dryrun_round8_test.go.
+
+# --render-dir together with restore.d: the render dir is prepared (created,
+# or a reused dry-run dir cleared of its owned files) BEFORE the restore.d
+# preview, which writes restore.d.{yaml,diff} into it. (a) A dir that does
+# not exist yet: restore.d's files land in it and its status is the diff's,
+# not an error. (b) A reused dry-run dir with an old restore.d.yaml/.diff
+# and a stale entry file: restore.d's files are this run's, the stale entry
+# file is gone.
+@test "bootstrap::apply --dry-run --render-dir with restore.d (new and reused dir)" {
+  write_cluster_spec "testcni"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/tls.sops.yaml"
+  sops() { printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\n'; }
+  export -f sops
+  local bootstrap_dry_run=1 bootstrap_render_dir="${BATS_TEST_TMPDIR}/fresh/out"
+
+  # (a) a new dir
+  _dry_kubectl_stub 1 0   # restore.d differs, testcni unchanged
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 1 ] || { echo "rc=${status}: ${output}"; return 1; }
+  assert_line "bootstrap dry-run: restore.d: differs changed=1 new=2"
+  grep -q 'name: tls' "${bootstrap_render_dir}/restore.d.yaml"
+  grep -q '^--- /tmp/LIVE-1/' "${bootstrap_render_dir}/restore.d.diff"
+
+  # (b) a reused dry-run dir with the files of an earlier run
+  local d="${BATS_TEST_TMPDIR}/reused"
+  mkdir -m 700 "${d}"
+  printf 'lok8s dry-run output directory — safe to delete\n' > "${d}/.lo-dry-run"
+  echo 'old restore.d manifest' > "${d}/restore.d.yaml"
+  echo 'old restore.d diff' > "${d}/restore.d.diff"
+  echo 'old entry' > "${d}/05-stale.yaml"
+  echo 'old entry diff' > "${d}/05-stale.diff"
+  bootstrap_render_dir="${d}"
+  _dry_kubectl_stub 0 0   # both unchanged
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: restore.d: unchanged"
+  grep -q 'name: tls' "${d}/restore.d.yaml"
+  ! grep -q 'old' "${d}/restore.d.yaml"
+  [ -f "${d}/restore.d.diff" ] && [ ! -s "${d}/restore.d.diff" ]
+  [ ! -e "${d}/05-stale.yaml" ] && [ ! -e "${d}/05-stale.diff" ]
+  [ -f "${d}/01-testcni.yaml" ]
+}
