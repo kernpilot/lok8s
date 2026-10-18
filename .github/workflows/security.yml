@@ -130,7 +130,7 @@ jobs:
         # Code scanning uploads need the Security tab enabled for the repo;
         # tolerate an upload failure so the scan itself stays the gate.
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         if: always()
         with:
           sarif_file: trivy-results.sarif
@@ -157,7 +157,7 @@ jobs:
         # Code scanning uploads need the Security tab enabled for the repo;
         # tolerate an upload failure so the scan itself stays the gate.
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         if: always()
         with:
           sarif_file: trivy-image-results.sarif
@@ -225,7 +225,7 @@ jobs:
         # Code scanning uploads need the Security tab enabled for the repo;
         # tolerate an upload failure so the scan itself stays the gate.
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         if: always()
         with:
           sarif_file: shellcheck-results.sarif
