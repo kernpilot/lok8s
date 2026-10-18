@@ -197,6 +197,22 @@ YAML
     || fail "spec.mergeType is '${got}', expected exactly 'StrategicMerge' (the CRD accepts StrategicMerge and JSONMerge; 'Replace' and any typo are rejected)"
 }
 
+@test "the sso-gate policy asks for a refresh token and leaves the refresh on" {
+  local scopes refresh
+  # Envoy Gateway renews an expired session with the refresh token. Some
+  # issuers (ZITADEL, for one) issue a refresh token only for
+  # offline_access. Without it, each user signs in again every time the
+  # access token expires.
+  scopes="$(_render | yq eval -N '.spec.oidc.scopes[]' -)"
+  grep -qx 'offline_access' <<<"${scopes}" \
+    || fail "spec.oidc.scopes is [${scopes//$'\n'/, }], expected it to hold offline_access"
+  # refreshToken is true by default (Envoy Gateway v1.9). An explicit false
+  # turns the refresh off, even with a refresh token.
+  refresh="$(_render | yq eval -N '.spec.oidc.refreshToken' -)"
+  [ "${refresh}" = "null" ] || [ "${refresh}" = "true" ] \
+    || fail "spec.oidc.refreshToken is '${refresh}', expected unset (the default, true) or true"
+}
+
 @test "every sso-gate target selects the labeled HTTPRoutes, group and labels included" {
   local line group kind labels fields n=0
   while IFS='|' read -r group kind labels fields; do
