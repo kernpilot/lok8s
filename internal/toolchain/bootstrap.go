@@ -15,10 +15,12 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -93,13 +96,19 @@ type BootstrapOptions struct {
 	// Runner runs `.bin/b install` (the hermetic seam). Nil = execx over
 	// Paths{Base, Bin}.
 	Runner execx.Runner
-	// Client performs the download. Nil = a 5-minute-timeout client that
-	// refuses to follow a redirect off https.
+	// Client performs the download. Nil = a client with a 2-minute timeout
+	// per attempt that refuses to follow a redirect off https.
 	Client *http.Client
 	// Release overrides the pin (tests). Nil = BRelease.
 	Release *Release
 	// GOOS/GOARCH override the host (tests). "" = runtime.
 	GOOS, GOARCH string
+	// Sleep is the wait between download attempts. Nil = clock.Sleep,
+	// which ends with the context.
+	Sleep clock.SleepFunc
+	// CreateTemp makes the temp file a download is written to. Nil =
+	// os.CreateTemp. Tests pass one whose writes fail.
+	CreateTemp func(dir, pattern string) (*os.File, error)
 }
 
 func (o *BootstrapOptions) out() io.Writer {
@@ -167,7 +176,7 @@ func Bootstrap(ctx context.Context, o BootstrapOptions) error {
 			fmt.Fprintf(out, "  would install  %s\n", relOrAbs(o.Base, bPath))
 		} else {
 			fmt.Fprintf(out, "  downloading %s\n", url)
-			if err := downloadVerifyExtract(ctx, o.client(), url, sum, o.Bin, bPath); err != nil {
+			if err := downloadVerifyExtract(ctx, o.client(), url, sum, o.Bin, bPath, o.stderr(), o.sleep(), o.createTemp()); err != nil {
 				return err
 			}
 			fmt.Fprintf(out, "  verified sha256 %s…, installed %s\n", sum[:12], relOrAbs(o.Base, bPath))
@@ -204,25 +213,48 @@ func Bootstrap(ctx context.Context, o BootstrapOptions) error {
 	return nil
 }
 
+func (o *BootstrapOptions) sleep() clock.SleepFunc {
+	if o.Sleep != nil {
+		return o.Sleep
+	}
+	return clock.Sleep
+}
+
+func (o *BootstrapOptions) createTemp() func(dir, pattern string) (*os.File, error) {
+	if o.CreateTemp != nil {
+		return o.CreateTemp
+	}
+	return os.CreateTemp
+}
+
 func (o *BootstrapOptions) client() *http.Client {
 	if o.Client != nil {
 		return o.Client
 	}
+	// The timeout is per attempt: b's tarball is ~5 MB, and with the
+	// retries (downloadBackoff) the worst case stays near 8 minutes.
 	return &http.Client{
-		Timeout:       5 * time.Minute,
+		Timeout:       2 * time.Minute,
 		CheckRedirect: refuseNonHTTPSRedirect,
 	}
 }
+
+// The two redirect refusals. They are policy, not a network blip, so the
+// download never retries them.
+var (
+	errTooManyRedirects = errors.New("too many redirects")
+	errRedirectRefused  = errors.New("redirect to a non-https URL refused")
+)
 
 // refuseNonHTTPSRedirect is the download client's redirect policy: a hop
 // off https (a downgrade to plain http) is refused, and so is a chain of
 // ten or more redirects. Named so the guard is testable on its own.
 func refuseNonHTTPSRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
-		return errors.New("too many redirects")
+		return errTooManyRedirects
 	}
 	if req.URL.Scheme != "https" {
-		return fmt.Errorf("redirect to a non-https URL refused: %s", req.URL)
+		return fmt.Errorf("%w: %s", errRedirectRefused, req.URL)
 	}
 	return nil
 }
@@ -231,48 +263,123 @@ func refuseNonHTTPSRedirect(req *http.Request, via []*http.Request) error {
 // tarball is ~5 MB; the binary inside ~15 MB). A var so a test can lower it.
 var maxTarballBytes int64 = 256 << 20
 
-// downloadVerifyExtract fetches url into a temp file under bin, checks its
-// sha256 against want BEFORE reading it as an archive, then extracts the
-// single `b` member to dst (staged next to it and renamed, so an
-// interrupted run never leaves a half-written b).
-func downloadVerifyExtract(ctx context.Context, client *http.Client, url, want, bin, dst string) error {
+// The download retries a transient failure (B410: one dial timeout on a
+// fresh VM failed a whole `lo toolchain install`). downloadBackoff is the
+// wait before each retry, so there are len(downloadBackoff)+1 attempts.
+var downloadBackoff = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
+
+// retryableError marks a download failure that another attempt can fix: a
+// transport error, a body that broke off, HTTP 429 or a 5xx.
+type retryableError struct{ err error }
+
+func (e *retryableError) Error() string { return e.err.Error() }
+func (e *retryableError) Unwrap() error { return e.err }
+
+// downloadVerifyExtract fetches url into a temp file under bin (retrying a
+// transient failure, see downloadBackoff), checks its sha256 against want
+// BEFORE reading it as an archive, then extracts the single `b` member to
+// dst (staged next to it and renamed, so an interrupted run never leaves a
+// half-written b). A checksum mismatch is never retried. Each retry prints
+// one line to stderr.
+func downloadVerifyExtract(ctx context.Context, client *http.Client, url, want, bin, dst string, stderr io.Writer, sleep clock.SleepFunc, createTemp func(dir, pattern string) (*os.File, error)) error {
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
+	attempts := len(downloadBackoff) + 1
+	var tmpName, got string
+	for attempt := 1; ; attempt++ {
+		var err error
+		tmpName, got, err = download(ctx, client, url, bin, createTemp)
+		if err == nil {
+			break
+		}
+		var transient *retryableError
+		if !errors.As(err, &transient) || ctx.Err() != nil {
+			return err
+		}
+		if attempt >= attempts {
+			return fmt.Errorf("%w (gave up after %d attempts)", transient.err, attempt)
+		}
+		wait := downloadBackoff[attempt-1]
+		fmt.Fprintf(stderr, "  %v; retrying in %s (%d/%d)\n", transient.err, wait, attempt+1, attempts)
+		if err := sleep(ctx, wait); err != nil {
+			return fmt.Errorf("download %s: %w", url, err)
+		}
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("download %s: %w", url, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: HTTP %s", url, resp.Status)
-	}
-	tmp, err := os.CreateTemp(bin, ".b-download-*.tar.gz")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
-	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(resp.Body, maxTarballBytes+1))
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return fmt.Errorf("download %s: %w", url, err)
-	}
-	if n > maxTarballBytes {
-		return fmt.Errorf("download %s: larger than %d bytes, refusing", url, maxTarballBytes)
-	}
-	got := hex.EncodeToString(h.Sum(nil))
 	if got != want {
 		return fmt.Errorf("checksum MISMATCH for %s: expected %s, got %s. The download is corrupt or tampered with; nothing was installed", url, want, got)
 	}
 	return extractB(tmpName, dst)
+}
+
+// download makes one attempt: GET url into a temp file under bin. It
+// returns the file and its sha256; on any error it leaves no file behind.
+// A transient failure comes back as a *retryableError.
+func download(ctx context.Context, client *http.Client, url, bin string, createTemp func(dir, pattern string) (*os.File, error)) (string, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		err = fmt.Errorf("download %s: %w", url, err)
+		if transientTransport(ctx, err) {
+			return "", "", &retryableError{err}
+		}
+		return "", "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		err := fmt.Errorf("download %s: HTTP %s", url, resp.Status)
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			return "", "", &retryableError{err}
+		}
+		return "", "", err
+	}
+	tmp, err := createTemp(bin, ".b-download-*.tar.gz")
+	if err != nil {
+		return "", "", err
+	}
+	tmpName := tmp.Name()
+	h := sha256.New()
+	n, copyErr := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(resp.Body, maxTarballBytes+1))
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmpName)
+		err := fmt.Errorf("download %s: %w", url, copyErr)
+		// A failed write to the temp file (disk full, EIO) is local and
+		// permanent; a read that broke off (reset, unexpected EOF) is not.
+		var pathErr *fs.PathError
+		if ctx.Err() == nil && !errors.As(copyErr, &pathErr) {
+			return "", "", &retryableError{err}
+		}
+		return "", "", err
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmpName)
+		return "", "", closeErr
+	}
+	if n > maxTarballBytes {
+		_ = os.Remove(tmpName)
+		return "", "", fmt.Errorf("download %s: larger than %d bytes, refusing", url, maxTarballBytes)
+	}
+	return tmpName, hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// transientTransport reports whether a client.Do error is worth another
+// attempt: everything except a cancelled caller, a refused redirect and a
+// TLS certificate the server will present again unchanged (Go wraps every
+// verification failure in tls.CertificateVerificationError).
+func transientTransport(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(err, errRedirectRefused) || errors.Is(err, errTooManyRedirects) {
+		return false
+	}
+	var certErr *tls.CertificateVerificationError
+	return !errors.As(err, &certErr)
 }
 
 // extractB copies the `b` member of a verified tar.gz to dst (0755).
