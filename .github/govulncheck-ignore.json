@@ -24,6 +24,12 @@
       "module": "github.com/containerd/containerd",
       "reason": "CRI checkpoint restore (CDI annotation smuggling). Same path as GO-2026-5622; no CRI service in lo.",
       "review_by": "2026-12-01"
+    },
+    {
+      "id": "GO-2026-6791",
+      "module": "github.com/containerd/containerd",
+      "reason": "CRI checkpoint restore ignores the destination security context. Same path as GO-2026-5622: init-time reachability through helm's OCI client only; no CRI service in lo. No fix in the 1.7 line.",
+      "review_by": "2026-12-01"
     }
   ]
 }

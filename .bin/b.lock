@@ -3,7 +3,7 @@
   "tool": {
     "b": "v4.18.4"
   },
-  "timestamp": "2026-07-31T12:47:50Z",
+  "timestamp": "2026-10-21T11:16:16Z",
   "binaries": [
     {
       "name": "argsh",
@@ -56,7 +56,7 @@
     },
     {
       "name": "kustomize",
-      "version": "",
+      "version": "v5.8.1",
       "sha256": "f7b1605aa5143e0dcbd754a4d43c47ad7a560c540b1356b064d69fe236164494",
       "source": "github.com/kubernetes-sigs/kustomize",
       "preset": true
@@ -84,8 +84,8 @@
     },
     {
       "name": "khelm",
-      "version": "",
-      "sha256": "65b890dbaed53d5bd29ce1b801047e978966a7d1071aa6d5dbec90473cc982b4",
+      "version": "v2.8.0",
+      "sha256": "f9a36519c147fc846aa69ca5a19f6259cb2c94f88550ae34de2bdb971b39495c",
       "source": "github.com/mgoltzsche/khelm",
       "provider": "github"
     },
