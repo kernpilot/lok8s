@@ -1,6 +1,6 @@
 module github.com/kernpilot/lok8s
 
-go 1.26.9
+go 1.26.10
 
 require (
 	charm.land/bubbles/v2 v2.2.1
