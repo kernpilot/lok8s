@@ -103,6 +103,9 @@ type BootstrapOptions struct {
 	Release *Release
 	// GOOS/GOARCH override the host (tests). "" = runtime.
 	GOOS, GOARCH string
+	// Sleep is the wait between download attempts. Nil = clock.Sleep,
+	// which ends with the context.
+	Sleep clock.SleepFunc
 }
 
 func (o *BootstrapOptions) out() io.Writer {
@@ -170,7 +173,7 @@ func Bootstrap(ctx context.Context, o BootstrapOptions) error {
 			fmt.Fprintf(out, "  would install  %s\n", relOrAbs(o.Base, bPath))
 		} else {
 			fmt.Fprintf(out, "  downloading %s\n", url)
-			if err := downloadVerifyExtract(ctx, o.client(), url, sum, o.Bin, bPath, o.stderr()); err != nil {
+			if err := downloadVerifyExtract(ctx, o.client(), url, sum, o.Bin, bPath, o.stderr(), o.sleep()); err != nil {
 				return err
 			}
 			fmt.Fprintf(out, "  verified sha256 %s…, installed %s\n", sum[:12], relOrAbs(o.Base, bPath))
@@ -205,6 +208,13 @@ func Bootstrap(ctx context.Context, o BootstrapOptions) error {
 		return fmt.Errorf("b install: %w", err)
 	}
 	return nil
+}
+
+func (o *BootstrapOptions) sleep() clock.SleepFunc {
+	if o.Sleep != nil {
+		return o.Sleep
+	}
+	return clock.Sleep
 }
 
 func (o *BootstrapOptions) client() *http.Client {
@@ -245,13 +255,8 @@ var maxTarballBytes int64 = 256 << 20
 
 // The download retries a transient failure (B410: one dial timeout on a
 // fresh VM failed a whole `lo toolchain install`). downloadBackoff is the
-// wait before each retry, so there are len(downloadBackoff)+1 attempts;
-// sleep is the wait itself (clock.Sleep ends with the context). Vars so a
-// test can record the waits.
-var (
-	downloadBackoff                 = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
-	sleep           clock.SleepFunc = clock.Sleep
-)
+// wait before each retry, so there are len(downloadBackoff)+1 attempts.
+var downloadBackoff = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
 
 // retryableError marks a download failure that another attempt can fix: a
 // transport error, a body that broke off, HTTP 429 or a 5xx.
@@ -266,7 +271,7 @@ func (e *retryableError) Unwrap() error { return e.err }
 // dst (staged next to it and renamed, so an interrupted run never leaves a
 // half-written b). A checksum mismatch is never retried. Each retry prints
 // one line to stderr.
-func downloadVerifyExtract(ctx context.Context, client *http.Client, url, want, bin, dst string, stderr io.Writer) error {
+func downloadVerifyExtract(ctx context.Context, client *http.Client, url, want, bin, dst string, stderr io.Writer, sleep clock.SleepFunc) error {
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		return err
 	}

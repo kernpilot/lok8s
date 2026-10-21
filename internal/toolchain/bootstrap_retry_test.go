@@ -21,18 +21,13 @@ import (
 
 // B410: the b download is retried on a transient failure, and only then.
 
-// recordSleeps replaces the backoff wait with a recorder, so the tests run
-// instantly and can assert the waits.
-func recordSleeps(t *testing.T) *[]time.Duration {
-	t.Helper()
-	var waits []time.Duration
-	saved := sleep
-	sleep = func(ctx context.Context, d time.Duration) error {
-		waits = append(waits, d)
-		return ctx.Err()
-	}
-	t.Cleanup(func() { sleep = saved })
-	return &waits
+// recorder is a BootstrapOptions.Sleep that records the waits and returns
+// at once, so the tests run instantly and can assert the waits.
+type recorder struct{ waits []time.Duration }
+
+func (r *recorder) sleep(ctx context.Context, d time.Duration) error {
+	r.waits = append(r.waits, d)
+	return ctx.Err()
 }
 
 // timeoutErr is a net.Error that reports a timeout, like a dial i/o timeout.
@@ -58,7 +53,7 @@ func (f *flakyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 
 // bootstrapOnce runs Bootstrap against baseURL with the given client and
 // returns the stderr text, the bin dir, the runner and Bootstrap's error.
-func bootstrapOnce(t *testing.T, client *http.Client, baseURL, sum string) (string, string, *recRunner, error) {
+func bootstrapOnce(t *testing.T, rec *recorder, client *http.Client, baseURL, sum string) (string, string, *recRunner, error) {
 	t.Helper()
 	rel := &Release{Version: "9.9.9", BaseURL: baseURL, Assets: map[string]string{"b-linux-amd64.tar.gz": sum}}
 	base := t.TempDir()
@@ -67,6 +62,7 @@ func bootstrapOnce(t *testing.T, client *http.Client, baseURL, sum string) (stri
 	r := &recRunner{}
 	err := Bootstrap(t.Context(), BootstrapOptions{
 		Base: base, Bin: bin, Out: &out, Stderr: &errOut, Runner: r, Client: client, Release: rel, GOOS: "linux", GOARCH: "amd64",
+		Sleep: rec.sleep,
 	})
 	return errOut.String(), bin, r, err
 }
@@ -80,22 +76,22 @@ func assertNoLeftovers(t *testing.T, bin string) {
 
 // The crowd's case (B410): two dial timeouts, then the release answers.
 func TestBootstrapRetriesATransientDialFailure(t *testing.T) {
-	waits := recordSleeps(t)
+	rec := &recorder{}
 	tb := fakeTarball(t, map[string]string{"b": "#!/bin/sh\n"})
 	var hits int32
 	srv := server(t, "b-linux-amd64.tar.gz", tb, &hits)
 	flaky := &flakyTransport{fail: 2, next: srv.Client().Transport}
 	client := &http.Client{Transport: flaky, CheckRedirect: refuseNonHTTPSRedirect}
 
-	stderr, bin, r, err := bootstrapOnce(t, client, srv.URL, sha256hex(tb))
+	stderr, bin, r, err := bootstrapOnce(t, rec, client, srv.URL, sha256hex(tb))
 	if err != nil {
 		t.Fatalf("Bootstrap after two transient failures: %v\n%s", err, stderr)
 	}
 	if got := flaky.calls.Load(); got != 3 {
 		t.Fatalf("round trips = %d, want 3 (2 failed + 1 ok)", got)
 	}
-	if want := []time.Duration{2 * time.Second, 4 * time.Second}; !slices.Equal(*waits, want) {
-		t.Fatalf("waits = %v, want %v", *waits, want)
+	if want := []time.Duration{2 * time.Second, 4 * time.Second}; !slices.Equal(rec.waits, want) {
+		t.Fatalf("waits = %v, want %v", rec.waits, want)
 	}
 	for _, line := range []string{"retrying in 2s (2/4)", "retrying in 4s (3/4)", "i/o timeout"} {
 		if !strings.Contains(stderr, line) {
@@ -125,16 +121,16 @@ func statusServer(t *testing.T, codes []int, body []byte, hits *int32) *httptest
 }
 
 func TestBootstrapRetries500And503And429(t *testing.T) {
-	waits := recordSleeps(t)
+	rec := &recorder{}
 	tb := fakeTarball(t, map[string]string{"b": "#!/bin/sh\n"})
 	var hits int32
 	srv := statusServer(t, []int{http.StatusInternalServerError, http.StatusServiceUnavailable, http.StatusTooManyRequests}, tb, &hits)
-	stderr, bin, _, err := bootstrapOnce(t, srv.Client(), srv.URL, sha256hex(tb))
+	stderr, bin, _, err := bootstrapOnce(t, rec, srv.Client(), srv.URL, sha256hex(tb))
 	if err != nil {
 		t.Fatalf("Bootstrap after 500 + 503 + 429: %v\n%s", err, stderr)
 	}
-	if atomic.LoadInt32(&hits) != 4 || len(*waits) != 3 {
-		t.Fatalf("hits = %d, waits = %v; want 4 and three waits", hits, *waits)
+	if atomic.LoadInt32(&hits) != 4 || len(rec.waits) != 3 {
+		t.Fatalf("hits = %d, waits = %v; want 4 and three waits", hits, rec.waits)
 	}
 	if !strings.Contains(stderr, "HTTP 500") || !strings.Contains(stderr, "HTTP 503") || !strings.Contains(stderr, "HTTP 429") {
 		t.Fatalf("stderr lacks the statuses:\n%s", stderr)
@@ -144,7 +140,7 @@ func TestBootstrapRetries500And503And429(t *testing.T) {
 
 // A body that breaks off mid-stream is retried, and the partial file goes.
 func TestBootstrapRetriesABodyThatBreaksOff(t *testing.T) {
-	recordSleeps(t)
+	rec := &recorder{}
 	tb := fakeTarball(t, map[string]string{"b": "#!/bin/sh\n" + strings.Repeat("x", 4096)})
 	var hits int32
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -156,7 +152,7 @@ func TestBootstrapRetriesABodyThatBreaksOff(t *testing.T) {
 		_, _ = w.Write(tb)
 	}))
 	t.Cleanup(srv.Close)
-	stderr, bin, _, err := bootstrapOnce(t, srv.Client(), srv.URL, sha256hex(tb))
+	stderr, bin, _, err := bootstrapOnce(t, rec, srv.Client(), srv.URL, sha256hex(tb))
 	if err != nil {
 		t.Fatalf("Bootstrap after a broken body: %v\n%s", err, stderr)
 	}
@@ -171,18 +167,18 @@ func TestBootstrapRetriesABodyThatBreaksOff(t *testing.T) {
 
 // Four attempts, three waits (2, 4, 8 s), then the last error with the count.
 func TestBootstrapGivesUpAfterFourAttempts(t *testing.T) {
-	waits := recordSleeps(t)
+	rec := &recorder{}
 	var hits int32
 	srv := statusServer(t, []int{502, 502, 502, 502, 502}, nil, &hits)
-	stderr, bin, r, err := bootstrapOnce(t, srv.Client(), srv.URL, strings.Repeat("a", 64))
+	stderr, bin, r, err := bootstrapOnce(t, rec, srv.Client(), srv.URL, strings.Repeat("a", 64))
 	if err == nil || !strings.Contains(err.Error(), "HTTP 502") || !strings.Contains(err.Error(), "gave up after 4 attempts") {
 		t.Fatalf("err = %v", err)
 	}
 	if atomic.LoadInt32(&hits) != 4 {
 		t.Fatalf("hits = %d, want 4", hits)
 	}
-	if want := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}; !slices.Equal(*waits, want) {
-		t.Fatalf("waits = %v, want %v", *waits, want)
+	if want := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}; !slices.Equal(rec.waits, want) {
+		t.Fatalf("waits = %v, want %v", rec.waits, want)
 	}
 	if strings.Count(stderr, "retrying in") != 3 {
 		t.Fatalf("want 3 retry lines:\n%s", stderr)
@@ -195,48 +191,48 @@ func TestBootstrapGivesUpAfterFourAttempts(t *testing.T) {
 
 // A 404 is a wrong pin, not a blip: one request, no wait.
 func TestBootstrapDoesNotRetryA404(t *testing.T) {
-	waits := recordSleeps(t)
+	rec := &recorder{}
 	var hits int32
 	srv := statusServer(t, []int{http.StatusNotFound}, nil, &hits)
-	stderr, _, _, err := bootstrapOnce(t, srv.Client(), srv.URL, strings.Repeat("a", 64))
+	stderr, _, _, err := bootstrapOnce(t, rec, srv.Client(), srv.URL, strings.Repeat("a", 64))
 	if err == nil || !strings.Contains(err.Error(), "HTTP 404") || strings.Contains(err.Error(), "gave up") {
 		t.Fatalf("err = %v", err)
 	}
-	if atomic.LoadInt32(&hits) != 1 || len(*waits) != 0 || stderr != "" {
-		t.Fatalf("a 404 was retried: hits = %d, waits = %v, stderr = %q", hits, *waits, stderr)
+	if atomic.LoadInt32(&hits) != 1 || len(rec.waits) != 0 || stderr != "" {
+		t.Fatalf("a 404 was retried: hits = %d, waits = %v, stderr = %q", hits, rec.waits, stderr)
 	}
 }
 
 // A checksum mismatch is never retried: the download arrived whole.
 func TestBootstrapDoesNotRetryAChecksumMismatch(t *testing.T) {
-	waits := recordSleeps(t)
+	rec := &recorder{}
 	tb := fakeTarball(t, map[string]string{"b": "#!/bin/sh\n"})
 	var hits int32
 	srv := server(t, "b-linux-amd64.tar.gz", tb, &hits)
-	_, bin, _, err := bootstrapOnce(t, srv.Client(), srv.URL, strings.Repeat("0", 64))
+	_, bin, _, err := bootstrapOnce(t, rec, srv.Client(), srv.URL, strings.Repeat("0", 64))
 	if err == nil || !strings.Contains(err.Error(), "checksum MISMATCH") {
 		t.Fatalf("err = %v", err)
 	}
-	if atomic.LoadInt32(&hits) != 1 || len(*waits) != 0 {
-		t.Fatalf("a checksum mismatch was retried: hits = %d, waits = %v", hits, *waits)
+	if atomic.LoadInt32(&hits) != 1 || len(rec.waits) != 0 {
+		t.Fatalf("a checksum mismatch was retried: hits = %d, waits = %v", hits, rec.waits)
 	}
 	assertNoLeftovers(t, bin)
 }
 
 // An oversized download is refused once, not retried, and leaves no file.
 func TestBootstrapDoesNotRetryAnOversizedDownload(t *testing.T) {
-	waits := recordSleeps(t)
+	rec := &recorder{}
 	saved := maxTarballBytes
 	maxTarballBytes = 16
 	t.Cleanup(func() { maxTarballBytes = saved })
 	var hits int32
 	srv := statusServer(t, nil, bytes.Repeat([]byte("x"), 64), &hits)
-	_, bin, _, err := bootstrapOnce(t, srv.Client(), srv.URL, strings.Repeat("a", 64))
+	_, bin, _, err := bootstrapOnce(t, rec, srv.Client(), srv.URL, strings.Repeat("a", 64))
 	if err == nil || !strings.Contains(err.Error(), "larger than 16 bytes") {
 		t.Fatalf("err = %v", err)
 	}
-	if atomic.LoadInt32(&hits) != 1 || len(*waits) != 0 {
-		t.Fatalf("an oversized download was retried: hits = %d, waits = %v", hits, *waits)
+	if atomic.LoadInt32(&hits) != 1 || len(rec.waits) != 0 {
+		t.Fatalf("an oversized download was retried: hits = %d, waits = %v", hits, rec.waits)
 	}
 	assertNoLeftovers(t, bin)
 }
@@ -244,17 +240,17 @@ func TestBootstrapDoesNotRetryAnOversizedDownload(t *testing.T) {
 // A server whose certificate the client does not trust: the handshake
 // fails the same way every time, so it is not retried.
 func TestBootstrapDoesNotRetryAnUntrustedCertificate(t *testing.T) {
-	waits := recordSleeps(t)
+	rec := &recorder{}
 	var hits int32
 	srv := statusServer(t, nil, []byte("x"), &hits)
 	client := &http.Client{CheckRedirect: refuseNonHTTPSRedirect} // no test CA
-	_, _, _, err := bootstrapOnce(t, client, srv.URL, strings.Repeat("a", 64))
+	_, _, _, err := bootstrapOnce(t, rec, client, srv.URL, strings.Repeat("a", 64))
 	var certErr *tls.CertificateVerificationError
 	if !errors.As(err, &certErr) {
 		t.Fatalf("err = %v, want a certificate verification error", err)
 	}
-	if len(*waits) != 0 || atomic.LoadInt32(&hits) != 0 {
-		t.Fatalf("an untrusted certificate was retried: waits = %v, hits = %d", *waits, hits)
+	if len(rec.waits) != 0 || atomic.LoadInt32(&hits) != 0 {
+		t.Fatalf("an untrusted certificate was retried: waits = %v, hits = %d", rec.waits, hits)
 	}
 }
 
@@ -265,17 +261,15 @@ func TestBootstrapStopsRetryingWhenCancelled(t *testing.T) {
 	srv := server(t, "b-linux-amd64.tar.gz", tb, &hits)
 	flaky := &flakyTransport{fail: 10, next: srv.Client().Transport}
 	ctx, cancel := context.WithCancel(t.Context())
-	saved := sleep
-	sleep = func(ctx context.Context, d time.Duration) error {
+	cancelOnWait := func(ctx context.Context, d time.Duration) error {
 		cancel() // the user pressed ^C during the first wait
 		return ctx.Err()
 	}
-	t.Cleanup(func() { sleep = saved })
 	rel := &Release{Version: "9.9.9", BaseURL: srv.URL, Assets: map[string]string{"b-linux-amd64.tar.gz": sha256hex(tb)}}
 	base := t.TempDir()
 	err := Bootstrap(ctx, BootstrapOptions{
 		Base: base, Bin: filepath.Join(base, ".bin"), Out: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, Runner: &recRunner{},
-		Client: &http.Client{Transport: flaky}, Release: rel, GOOS: "linux", GOARCH: "amd64",
+		Client: &http.Client{Transport: flaky}, Release: rel, GOOS: "linux", GOARCH: "amd64", Sleep: cancelOnWait,
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
