@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -53,17 +54,21 @@ func (f *flakyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 
 // bootstrapOnce runs Bootstrap against baseURL with the given client and
 // returns the stderr text, the bin dir, the runner and Bootstrap's error.
-func bootstrapOnce(t *testing.T, rec *recorder, client *http.Client, baseURL, sum string) (string, string, *recRunner, error) {
+func bootstrapOnce(t *testing.T, rec *recorder, client *http.Client, baseURL, sum string, mutate ...func(*BootstrapOptions)) (string, string, *recRunner, error) {
 	t.Helper()
 	rel := &Release{Version: "9.9.9", BaseURL: baseURL, Assets: map[string]string{"b-linux-amd64.tar.gz": sum}}
 	base := t.TempDir()
 	bin := filepath.Join(base, ".bin")
 	var out, errOut bytes.Buffer
 	r := &recRunner{}
-	err := Bootstrap(t.Context(), BootstrapOptions{
+	o := BootstrapOptions{
 		Base: base, Bin: bin, Out: &out, Stderr: &errOut, Runner: r, Client: client, Release: rel, GOOS: "linux", GOARCH: "amd64",
 		Sleep: rec.sleep,
-	})
+	}
+	for _, m := range mutate {
+		m(&o)
+	}
+	err := Bootstrap(t.Context(), o)
 	return errOut.String(), bin, r, err
 }
 
@@ -201,6 +206,34 @@ func TestBootstrapDoesNotRetryA404(t *testing.T) {
 	if atomic.LoadInt32(&hits) != 1 || len(rec.waits) != 0 || stderr != "" {
 		t.Fatalf("a 404 was retried: hits = %d, waits = %v, stderr = %q", hits, rec.waits, stderr)
 	}
+}
+
+// A failed write to the temp file (disk full, EIO) is local and permanent:
+// it is not retried. The injected temp file is open read-only, so its write
+// fails with an *fs.PathError, the error shape of a disk-full write.
+func TestBootstrapDoesNotRetryAFailedTempFileWrite(t *testing.T) {
+	rec := &recorder{}
+	tb := fakeTarball(t, map[string]string{"b": "#!/bin/sh\n"})
+	var hits int32
+	srv := statusServer(t, nil, tb, &hits)
+	readOnly := func(dir, pattern string) (*os.File, error) {
+		f, err := os.CreateTemp(dir, pattern)
+		if err != nil {
+			return nil, err
+		}
+		if err := f.Close(); err != nil {
+			return nil, err
+		}
+		return os.Open(f.Name())
+	}
+	stderr, bin, _, err := bootstrapOnce(t, rec, srv.Client(), srv.URL, sha256hex(tb), func(o *BootstrapOptions) { o.CreateTemp = readOnly })
+	if _, ok := errors.AsType[*fs.PathError](err); !ok {
+		t.Fatalf("err = %v, want the temp file's write error", err)
+	}
+	if atomic.LoadInt32(&hits) != 1 || len(rec.waits) != 0 || stderr != "" {
+		t.Fatalf("a failed temp-file write was retried: hits = %d, waits = %v, stderr = %q", hits, rec.waits, stderr)
+	}
+	assertNoLeftovers(t, bin)
 }
 
 // A checksum mismatch is never retried: the download arrived whole.

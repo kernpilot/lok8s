@@ -106,6 +106,9 @@ type BootstrapOptions struct {
 	// Sleep is the wait between download attempts. Nil = clock.Sleep,
 	// which ends with the context.
 	Sleep clock.SleepFunc
+	// CreateTemp makes the temp file a download is written to. Nil =
+	// os.CreateTemp. Tests pass one whose writes fail.
+	CreateTemp func(dir, pattern string) (*os.File, error)
 }
 
 func (o *BootstrapOptions) out() io.Writer {
@@ -173,7 +176,7 @@ func Bootstrap(ctx context.Context, o BootstrapOptions) error {
 			fmt.Fprintf(out, "  would install  %s\n", relOrAbs(o.Base, bPath))
 		} else {
 			fmt.Fprintf(out, "  downloading %s\n", url)
-			if err := downloadVerifyExtract(ctx, o.client(), url, sum, o.Bin, bPath, o.stderr(), o.sleep()); err != nil {
+			if err := downloadVerifyExtract(ctx, o.client(), url, sum, o.Bin, bPath, o.stderr(), o.sleep(), o.createTemp()); err != nil {
 				return err
 			}
 			fmt.Fprintf(out, "  verified sha256 %s…, installed %s\n", sum[:12], relOrAbs(o.Base, bPath))
@@ -215,6 +218,13 @@ func (o *BootstrapOptions) sleep() clock.SleepFunc {
 		return o.Sleep
 	}
 	return clock.Sleep
+}
+
+func (o *BootstrapOptions) createTemp() func(dir, pattern string) (*os.File, error) {
+	if o.CreateTemp != nil {
+		return o.CreateTemp
+	}
+	return os.CreateTemp
 }
 
 func (o *BootstrapOptions) client() *http.Client {
@@ -271,7 +281,7 @@ func (e *retryableError) Unwrap() error { return e.err }
 // dst (staged next to it and renamed, so an interrupted run never leaves a
 // half-written b). A checksum mismatch is never retried. Each retry prints
 // one line to stderr.
-func downloadVerifyExtract(ctx context.Context, client *http.Client, url, want, bin, dst string, stderr io.Writer, sleep clock.SleepFunc) error {
+func downloadVerifyExtract(ctx context.Context, client *http.Client, url, want, bin, dst string, stderr io.Writer, sleep clock.SleepFunc, createTemp func(dir, pattern string) (*os.File, error)) error {
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		return err
 	}
@@ -279,7 +289,7 @@ func downloadVerifyExtract(ctx context.Context, client *http.Client, url, want, 
 	var tmpName, got string
 	for attempt := 1; ; attempt++ {
 		var err error
-		tmpName, got, err = download(ctx, client, url, bin)
+		tmpName, got, err = download(ctx, client, url, bin, createTemp)
 		if err == nil {
 			break
 		}
@@ -306,7 +316,7 @@ func downloadVerifyExtract(ctx context.Context, client *http.Client, url, want, 
 // download makes one attempt: GET url into a temp file under bin. It
 // returns the file and its sha256; on any error it leaves no file behind.
 // A transient failure comes back as a *retryableError.
-func download(ctx context.Context, client *http.Client, url, bin string) (string, string, error) {
+func download(ctx context.Context, client *http.Client, url, bin string, createTemp func(dir, pattern string) (*os.File, error)) (string, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", "", err
@@ -327,7 +337,7 @@ func download(ctx context.Context, client *http.Client, url, bin string) (string
 		}
 		return "", "", err
 	}
-	tmp, err := os.CreateTemp(bin, ".b-download-*.tar.gz")
+	tmp, err := createTemp(bin, ".b-download-*.tar.gz")
 	if err != nil {
 		return "", "", err
 	}
