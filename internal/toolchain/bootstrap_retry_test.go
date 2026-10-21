@@ -245,8 +245,7 @@ func TestBootstrapDoesNotRetryAnUntrustedCertificate(t *testing.T) {
 	srv := statusServer(t, nil, []byte("x"), &hits)
 	client := &http.Client{CheckRedirect: refuseNonHTTPSRedirect} // no test CA
 	_, _, _, err := bootstrapOnce(t, rec, client, srv.URL, strings.Repeat("a", 64))
-	var certErr *tls.CertificateVerificationError
-	if !errors.As(err, &certErr) {
+	if _, ok := errors.AsType[*tls.CertificateVerificationError](err); !ok {
 		t.Fatalf("err = %v, want a certificate verification error", err)
 	}
 	if len(rec.waits) != 0 || atomic.LoadInt32(&hits) != 0 {
