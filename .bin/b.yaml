@@ -51,10 +51,13 @@ binaries:
   # for LO_RENDER=exec. Also the frozen bash implementation (a routed command)
   # and the parity harnesses. The pins consumers get are generated from
   # internal/toolchain/pins.go (kustomize v5.8.1 ↔ api v0.21.1, khelm
-  # v2.8.0 — drift-tested against go.mod); this contributor file floats
-  # them on purpose so the render tests can A/B against whatever b.lock
-  # holds. Keep in step with go.mod when bumping.
+  # v2.8.0, drift-tested against go.mod). This contributor file pins the
+  # same releases: the render byte-parity tests compare these binaries
+  # with the libraries lo-full links. A floating pin installed khelm
+  # v3.0.0 (2026-10-18) and failed TestBuildInProcessMatchesPinnedBinaryChart
+  # on every PR. Bump these two with go.mod and pins.go.
   kustomize:
+    version: v5.8.1
     groups: [kustomize]
   # khelm: kustomize exec plugin discovered via KUSTOMIZE_PLUGIN_HOME.
   # Used for bootstrap addons at .lok8s/addons/{cilium,metallb,...}.
@@ -64,6 +67,7 @@ binaries:
   # a helm v3 on PATH. helm is not in this file: install it yourself for
   # that (CI pins v3.21.2 for the real-helm bats tests).
   github.com/mgoltzsche/khelm:
+    version: v2.8.0
     file: ../.kustomize/khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer
     groups: [kustomize]
 
