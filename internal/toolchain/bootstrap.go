@@ -16,11 +16,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -95,8 +96,8 @@ type BootstrapOptions struct {
 	// Runner runs `.bin/b install` (the hermetic seam). Nil = execx over
 	// Paths{Base, Bin}.
 	Runner execx.Runner
-	// Client performs the download. Nil = a 5-minute-timeout client that
-	// refuses to follow a redirect off https.
+	// Client performs the download. Nil = a client with a 2-minute timeout
+	// per attempt that refuses to follow a redirect off https.
 	Client *http.Client
 	// Release overrides the pin (tests). Nil = BRelease.
 	Release *Release
@@ -210,8 +211,10 @@ func (o *BootstrapOptions) client() *http.Client {
 	if o.Client != nil {
 		return o.Client
 	}
+	// The timeout is per attempt: b's tarball is ~5 MB, and with the
+	// retries (downloadBackoff) the worst case stays near 8 minutes.
 	return &http.Client{
-		Timeout:       5 * time.Minute,
+		Timeout:       2 * time.Minute,
 		CheckRedirect: refuseNonHTTPSRedirect,
 	}
 }
@@ -241,22 +244,13 @@ func refuseNonHTTPSRedirect(req *http.Request, via []*http.Request) error {
 var maxTarballBytes int64 = 256 << 20
 
 // The download retries a transient failure (B410: one dial timeout on a
-// fresh VM failed a whole `lo toolchain install`). downloadAttempts is the
-// total number of tries, downloadBackoff the wait before each retry, and
-// sleep the wait itself. Vars so a test can record the waits.
+// fresh VM failed a whole `lo toolchain install`). downloadBackoff is the
+// wait before each retry, so there are len(downloadBackoff)+1 attempts;
+// sleep is the wait itself (clock.Sleep ends with the context). Vars so a
+// test can record the waits.
 var (
-	downloadAttempts = 4
-	downloadBackoff  = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
-	sleep            = func(ctx context.Context, d time.Duration) error {
-		t := time.NewTimer(d)
-		defer t.Stop()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-t.C:
-			return nil
-		}
-	}
+	downloadBackoff                 = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
+	sleep           clock.SleepFunc = clock.Sleep
 )
 
 // retryableError marks a download failure that another attempt can fix: a
@@ -276,6 +270,7 @@ func downloadVerifyExtract(ctx context.Context, client *http.Client, url, want, 
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		return err
 	}
+	attempts := len(downloadBackoff) + 1
 	var tmpName, got string
 	for attempt := 1; ; attempt++ {
 		var err error
@@ -287,11 +282,11 @@ func downloadVerifyExtract(ctx context.Context, client *http.Client, url, want, 
 		if !errors.As(err, &transient) || ctx.Err() != nil {
 			return err
 		}
-		if attempt >= downloadAttempts {
+		if attempt >= attempts {
 			return fmt.Errorf("%w (gave up after %d attempts)", transient.err, attempt)
 		}
-		wait := downloadBackoff[min(attempt, len(downloadBackoff))-1]
-		fmt.Fprintf(stderr, "  download failed: %v; retrying in %s (%d/%d)\n", transient.err, wait, attempt+1, downloadAttempts)
+		wait := downloadBackoff[attempt-1]
+		fmt.Fprintf(stderr, "  %v; retrying in %s (%d/%d)\n", transient.err, wait, attempt+1, attempts)
 		if err := sleep(ctx, wait); err != nil {
 			return fmt.Errorf("download %s: %w", url, err)
 		}
@@ -338,8 +333,10 @@ func download(ctx context.Context, client *http.Client, url, bin string) (string
 	if copyErr != nil {
 		_ = os.Remove(tmpName)
 		err := fmt.Errorf("download %s: %w", url, copyErr)
-		if ctx.Err() == nil {
-			// The body broke off (connection reset, unexpected EOF).
+		// A failed write to the temp file (disk full, EIO) is local and
+		// permanent; a read that broke off (reset, unexpected EOF) is not.
+		var pathErr *fs.PathError
+		if ctx.Err() == nil && !errors.As(copyErr, &pathErr) {
 			return "", "", &retryableError{err}
 		}
 		return "", "", err
@@ -357,7 +354,8 @@ func download(ctx context.Context, client *http.Client, url, bin string) (string
 
 // transientTransport reports whether a client.Do error is worth another
 // attempt: everything except a cancelled caller, a refused redirect and a
-// TLS certificate the server will present again unchanged.
+// TLS certificate the server will present again unchanged (Go wraps every
+// verification failure in tls.CertificateVerificationError).
 func transientTransport(ctx context.Context, err error) bool {
 	if ctx.Err() != nil {
 		return false
@@ -366,13 +364,7 @@ func transientTransport(ctx context.Context, err error) bool {
 		return false
 	}
 	var certErr *tls.CertificateVerificationError
-	var hostErr x509.HostnameError
-	var authErr x509.UnknownAuthorityError
-	var invalidErr x509.CertificateInvalidError
-	if errors.As(err, &certErr) || errors.As(err, &hostErr) || errors.As(err, &authErr) || errors.As(err, &invalidErr) {
-		return false
-	}
-	return true
+	return !errors.As(err, &certErr)
 }
 
 // extractB copies the `b` member of a verified tar.gz to dst (0755).
