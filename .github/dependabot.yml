@@ -29,5 +29,7 @@ updates:
     commit-message:
       prefix: "chore(deps)"
     # Note for the reviewer of a kustomize / khelm / helm bump: those pins
-    # are drift-tested in internal/toolchain/pins.go against go.mod and the
-    # .bin/b.yaml template, so CI goes red until all three move together.
+    # are drift-tested in internal/toolchain/pins.go against go.mod, the
+    # .bin/b.yaml template and the contributor .bin/b.yaml (refresh
+    # .bin/b.lock with b install), so CI goes red until all of them move
+    # together.
