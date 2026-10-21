@@ -266,7 +266,7 @@ func (e *retryableError) Error() string { return e.err.Error() }
 func (e *retryableError) Unwrap() error { return e.err }
 
 // downloadVerifyExtract fetches url into a temp file under bin (retrying a
-// transient failure, see downloadAttempts), checks its sha256 against want
+// transient failure, see downloadBackoff), checks its sha256 against want
 // BEFORE reading it as an archive, then extracts the single `b` member to
 // dst (staged next to it and renamed, so an interrupted run never leaves a
 // half-written b). A checksum mismatch is never retried. Each retry prints
