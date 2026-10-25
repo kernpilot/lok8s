@@ -1578,4 +1578,62 @@ for side in bash go; do
 done
 unset PARITY_DOCKER_LOG PARITY_DOCKER_VERSION PARITY_ATTACHED PARITY_HA
 
+# ── lo destroy --remote — the cluster_name guard ─────────────────────────────
+# A provider with the destroy_plan hook (mockplan) deletes by cluster_name:
+# the hetzner provider deletes every resource that carries
+# lok8s.dev/cluster=<cluster_name>. dupa.cloud and dupb.cloud share one
+# cluster_name, solo.cloud has its own. The guard refuses the shared name,
+# lists the plan and needs the cluster_name: off a terminal (stdin closed)
+# only --confirm-cluster gets past it, --force does not. The matching name
+# runs the driver's destroy, which calls the provider's destroy.
+mkdir -p "${PROJ}/.lok8s/providers/mockplan"
+cat > "${PROJ}/.lok8s/providers/mockplan/main" <<'SH'
+#!/usr/bin/env argsh
+# mockplan — parity-harness provider with the destroy_plan hook.
+provider::validate() { return 0; }
+provider::credential_data() { return 0; }
+provider::provision() { return 0; }
+provider::destroy() { echo "mockplan destroy ran: ${1##*/} plan: ${LOK8S_DESTROY_PLAN//$'\n'/|}" >&2; return 0; }
+provider::output() { printf '{}\n'; }
+provider::destroy_plan() {
+  local name
+  name="$(sed -n 's/^cluster_name: //p' "${1}")"
+  printf 'cluster\t%s\nserver\t42\t%s-cp-0\nvolume\t7\t%s-data\n' "${name}" "${name}" "${name}"
+}
+SH
+plan_spec() {  # <domain> <cluster_name>: a KubeOne domain on mockplan
+  mkdir -p "${PROJ}/clusters/${1}"
+  printf 'cluster_name: %s\n' "${2}" > "${PROJ}/clusters/${1}/provider.yaml"
+  printf 'kind: KubeOne\nmetadata:\n  name: %s\nspec:\n  kubernetes:\n    version: "1.31.0"\n  provider:\n    name: mockplan\n    configRef: provider.yaml\n' \
+    "${1%%.*}" > "${PROJ}/clusters/${1}/cluster.lok8s.yaml"
+}
+plan_spec dupa.cloud shared-name
+plan_spec dupb.cloud shared-name
+plan_spec solo.cloud solo-name
+check - destroy --domain dupa.cloud -r -f --confirm-cluster shared-name  # shared cluster_name: refused (rc 3)
+check - destroy --domain solo.cloud -r -f                               # --force alone off a terminal: refused, plan listed
+check - destroy --domain solo.cloud -r --confirm-cluster other          # another name: refused
+check - destroy --domain solo.cloud -r --confirm-cluster solo-name      # the name: the driver and the provider destroy run
+check - down --domain solo.cloud -r                                     # lo down reaches the guard: refused, names the flag
+check - destroy --domain solo.cloud -f --confirm-cluster solo-name      # no -r: no guard, --confirm-cluster refused (rc 1)
+expect_rc 3 destroy --domain dupa.cloud -r -f --confirm-cluster shared-name
+expect_rc 3 destroy --domain solo.cloud -r -f
+expect_rc 1 destroy --domain solo.cloud -f --confirm-cluster solo-name
+for side in bash go; do
+  parity::run "${side}" "${PROJ}" destroy --domain solo.cloud -r --confirm-cluster solo-name || true
+  grep -qF "mockplan destroy ran: provider.yaml plan: cluster	solo-name|server	42	solo-name-cp-0|volume	7	solo-name-data" "${WORK}/${side}.err" \
+    || fail "${side}: destroy --confirm-cluster solo-name did not hand the confirmed plan to the provider destroy"
+  parity::run "${side}" "${PROJ}" destroy --domain solo.cloud -r -f || true
+  grep -q 'mockplan destroy ran' "${WORK}/${side}.err" \
+    && fail "${side}: destroy -f without --confirm-cluster reached the provider destroy"
+  grep -q '^    server solo-name-cp-0 (42)$' "${WORK}/${side}.err" \
+    || fail "${side}: the destroy plan was not listed"
+  grep -q "To confirm, run: lo destroy --domain solo.cloud -r --confirm-cluster solo-name" "${WORK}/${side}.err" \
+    || fail "${side}: the refusal does not name -r and --confirm-cluster"
+  parity::run "${side}" "${PROJ}" destroy --domain dupa.cloud -r --confirm-cluster shared-name || true
+  grep -q "cluster_name 'shared-name' of 'dupa.cloud' is also the cluster_name of: dupb.cloud." "${WORK}/${side}.err" \
+    || fail "${side}: the shared cluster_name was not refused"
+done
+rm -rf "${PROJ}/clusters"/{dupa,dupb,solo}.cloud "${PROJ}/.lok8s/providers/mockplan"
+
 report

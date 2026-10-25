@@ -284,6 +284,40 @@ func (p *Provider) ProviderStatus(ctx context.Context, configFile string) (strin
 	return strings.TrimRight(out.String(), "\n"), nil
 }
 
+// destroyPlanScript calls the OPTIONAL provider::destroy_plan hook. The
+// first output line is "plan" when the plugin has the hook; a plugin
+// without it prints nothing and exits 0.
+const destroyPlanScript = `set -euo pipefail
+source "${PATH_BIN}/argsh"
+import ^utils/provider
+provider::load "${1}" >/dev/null 2>&1
+declare -F provider::destroy_plan >/dev/null || exit 0
+echo plan
+provider::destroy_plan "${2}" "${3}"`
+
+// DestroyPlan is the optional provider::destroy_plan hook (READ-ONLY): the
+// text the hook prints, and ok=false when the plugin has no such hook.
+func (p *Provider) DestroyPlan(ctx context.Context, configFile, workDir string) (string, bool, error) {
+	env, err := p.l.env(p.name)
+	if err != nil {
+		return "", false, err
+	}
+	var out strings.Builder
+	err = p.l.runner().Run(ctx, execx.Cmd{
+		Name:   "bash",
+		Args:   []string{"-c", destroyPlanScript, "lo-provider", p.name, configFile, workDir},
+		Dir:    p.l.Paths.Base,
+		Env:    env,
+		Stdout: &out,
+		Stderr: p.l.errOut(),
+	})
+	if err != nil {
+		return "", false, err
+	}
+	plan, ok := strings.CutPrefix(out.String(), "plan\n")
+	return plan, ok, nil
+}
+
 // ErrNoProvider reports a kubeone seam invoked with no provider loaded —
 // the bash _append_inventory calls provider::output unconditionally, so a
 // missing provider is a hard error there too.

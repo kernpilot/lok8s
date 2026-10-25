@@ -213,3 +213,37 @@ func TestEnvCarriesKustomizePluginHome(t *testing.T) {
 		t.Fatalf("Env ignores the exported plugin home: %v", Env(p, "/tree"))
 	}
 }
+
+func TestDestroyPlanCallsTheOptionalHook(t *testing.T) {
+	l, r, _ := testLoader(t)
+	p := &Provider{l: l, name: "hetzner"}
+	var _ driver.ProviderDestroyPlanner = p
+
+	r.handler = func(c execx.Cmd) error {
+		io.WriteString(c.Stdout, "plan\ncluster\tprod-a\nserver\t42\tcp-0\n")
+		return nil
+	}
+	plan, ok, err := p.DestroyPlan(t.Context(), "/cfg.json", "/work")
+	if err != nil || !ok || plan != "cluster\tprod-a\nserver\t42\tcp-0\n" {
+		t.Fatalf("plan = %q ok=%v err=%v", plan, ok, err)
+	}
+	c := r.calls[0]
+	if got := strings.Join(c.Args[2:], " "); got != "lo-provider hetzner /cfg.json /work" {
+		t.Errorf("argv = %q", got)
+	}
+	if !strings.Contains(c.Args[1], "declare -F provider::destroy_plan") || !strings.Contains(c.Args[1], `provider::destroy_plan "${2}" "${3}"`) {
+		t.Errorf("script does not probe and call the hook: %q", c.Args[1])
+	}
+
+	// A plugin without the hook prints nothing: ok=false, no error.
+	r.handler = func(c execx.Cmd) error { return nil }
+	if plan, ok, err := p.DestroyPlan(t.Context(), "/cfg.json", "/work"); err != nil || ok || plan != "" {
+		t.Fatalf("no hook: plan = %q ok=%v err=%v", plan, ok, err)
+	}
+
+	// A failed plan is an error.
+	r.handler = func(c execx.Cmd) error { return errors.New("exit status 1") }
+	if _, _, err := p.DestroyPlan(t.Context(), "/cfg.json", "/work"); err == nil {
+		t.Fatal("expected the failure to surface")
+	}
+}

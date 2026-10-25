@@ -100,6 +100,21 @@ type ProviderStatuser interface {
 	ProviderStatus(ctx context.Context, configFile string) (string, error)
 }
 
+// ProviderDestroyPlanner is the optional provider::destroy_plan hook:
+// READ-ONLY, what provider::destroy would delete. Line 1 is
+// "cluster\t<cluster_name>", then one "<resource>\t<id>\t<name>" line per
+// resource. ok=false when the provider has no such hook.
+type ProviderDestroyPlanner interface {
+	DestroyPlan(ctx context.Context, configFile, workDir string) (plan string, ok bool, err error)
+}
+
+// DestroyPlanEnv carries the plan that `lo destroy` showed and the operator
+// confirmed to the driver's provider::destroy, which then deletes only
+// those resources. Only the destroy guard sets it; every other path starts
+// without it (the binary clears an inherited value at start, and so does
+// the destroy dispatch).
+const DestroyPlanEnv = "LOK8S_DESTROY_PLAN"
+
 // Deps is what the dispatch hands a driver factory. Provider fields are nil
 // or empty until the dispatch loads a provider (bash sources the provider
 // into globals AFTER sourcing the driver; the shared pointer mirrors that —

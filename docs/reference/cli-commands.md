@@ -788,8 +788,9 @@ lo destroy [flags]
 ### Options
 
 ```
-  -h, --help   help for destroy
-  -y, --yes    Answer the confirmation on a terminal (off a terminal there is none)
+      --confirm-cluster string   The provider's cluster_name, to confirm the destroy off a terminal (--force does not replace it)
+  -h, --help                     help for destroy
+  -y, --yes                      Answer the confirmation on a terminal (off a terminal there is none)
 ```
 
 ### SEE ALSO

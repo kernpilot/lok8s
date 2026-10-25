@@ -168,38 +168,169 @@ provider::provision() {
   debug "hetzner provision complete"
 }
 
+# hetzner::_destroy_cluster_name <config_file>
+# The cluster name provider::destroy deletes by: the descriptor's
+# cluster_name, and nothing else. A name guessed from the provision dump or a
+# server name would delete by a label nobody confirmed, and `lo destroy`
+# checks the other domains for the same cluster_name (one name resolution
+# for both).
+hetzner::_destroy_cluster_name() {
+  local config_file="${1}" cluster_name=""
+  cluster_name=$(_cfg '.cluster_name // ""' 2>/dev/null || echo "")
+  [[ -n "${cluster_name}" ]] || {
+    error "hetzner: the descriptor ${config_file} has no cluster_name. The destroy deletes every resource that carries lok8s.dev/cluster=<cluster_name>, so it needs the name. Nothing was deleted. Set cluster_name in the descriptor."
+    return 1
+  }
+  echo "${cluster_name}"
+}
+
+# The resource types provider::destroy deletes, in its delete order.
+_HETZNER_DESTROY_ORDER=(load-balancer server placement-group firewall volume floating-ip ssh-key network)
+
+# hetzner::_destroy_resources <cluster_name>
+# One "<resource>\t<id>\t<name>" line per hcloud resource that carries
+# lok8s.dev/cluster=<cluster_name>, in the order provider::destroy deletes
+# them. READ-ONLY. A list that fails stops it (rc 1): an empty list must
+# mean "no resource", never "hcloud did not answer".
+hetzner::_destroy_resources() {
+  local selector="lok8s.dev/cluster=${1}" resource json
+  for resource in "${_HETZNER_DESTROY_ORDER[@]}"; do
+    if ! json="$(hcloud "${resource}" list -o json -l "${selector}")" ||
+       ! jq -r --arg r "${resource}" '(. // [])[] | [$r, (.id | tostring), (.name // "")] | @tsv' <<<"${json}"; then
+      error "hetzner: could not list the ${resource} resources with ${selector}. Nothing was deleted. Check the hcloud token and the API, then run the destroy again."
+      return 1
+    fi
+  done
+}
+
+# hetzner::_confirmed_rows <cluster_name> <listed>
+# Check LOK8S_DESTROY_PLAN against the live list and set
+# _HETZNER_CONFIRMED_ROWS to the rows to delete: plan ∩ live list, as
+# "<resource>\t<id>\t<name>" lines. A plan line is split at each tab (a
+# double tab is an empty field), a trailing CR is dropped. rc 1, nothing
+# set, when the plan is empty, does not start with the cluster line of
+# <cluster_name>, or has a line whose type is not exactly one of
+# _HETZNER_DESTROY_ORDER or whose id is not a number: one bad line refuses
+# the whole plan.
+hetzner::_confirmed_rows() {
+  local cluster_name="${1}" listed="${2}" line kind rid rname rest planned header=1 t known
+  local -A live=()
+  _HETZNER_CONFIRMED_ROWS=""
+  while IFS=$'\t' read -r kind rid rname; do
+    [[ -n "${kind}" ]] || continue
+    live["${kind}"$'\t'"${rid}"]="${kind}"$'\t'"${rid}"$'\t'"${rname}"
+  done <<<"${listed}"
+
+  local rows="" key
+  local -A planned_keys=()
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    [[ -n "${line}" ]] || continue
+    kind="${line%%$'\t'*}" rest="" rname=""
+    [[ "${line}" != *$'\t'* ]] || rest="${line#*$'\t'}"
+    rid="${rest%%$'\t'*}"
+    [[ "${rest}" != *$'\t'* ]] || rname="${rest#*$'\t'}"
+    if (( header )); then
+      header=0
+      planned="${rid}"
+      if [[ "${kind}" != "cluster" ]]; then
+        error "hetzner: the confirmed destroy plan does not start with its cluster line (it starts with '${line//$'\t'/ }'). Nothing was deleted. Run lo destroy again."
+        return 1
+      fi
+      if [[ "${planned}" != "${cluster_name}" ]]; then
+        error "hetzner: the confirmed destroy plan is for cluster_name '${planned}', but the descriptor has '${cluster_name}'. Nothing was deleted. Run lo destroy again."
+        return 1
+      fi
+      continue
+    fi
+    known=0
+    for t in "${_HETZNER_DESTROY_ORDER[@]}"; do
+      [[ "${kind}" != "${t}" ]] || known=1
+    done
+    if (( ! known )) || [[ ! "${rid}" =~ ^[1-9][0-9]*$ ]]; then
+      error "hetzner: the confirmed destroy plan has a line that lo destroy does not write: '${line//$'\t'/ }' (the type must be one of ${_HETZNER_DESTROY_ORDER[*]}, the id a number). Nothing was deleted. Run lo destroy again."
+      return 1
+    fi
+    key="${kind}"$'\t'"${rid}"
+    planned_keys["${key}"]=1
+    if [[ -n "${live[${key}]:-}" ]]; then
+      rows+="${live[${key}]}"$'\n'
+    else
+      warn "hetzner: skipped ${kind} ${rid} of the confirmed plan: no ${kind} with this id carries lok8s.dev/cluster=${cluster_name} now. It is gone, or it is not of this cluster."
+    fi
+  done <<<"${LOK8S_DESTROY_PLAN}"
+
+  if (( header )); then
+    error "hetzner: the confirmed destroy plan is empty. Nothing was deleted. Run lo destroy again."
+    return 1
+  fi
+
+  while IFS=$'\t' read -r kind rid rname; do
+    [[ -n "${kind}" && -z "${planned_keys[${kind}$'\t'${rid}]:-}" ]] || continue
+    warn "hetzner: kept ${kind} ${rid} ${rname} (lok8s.dev/cluster=${cluster_name}): it is not in the confirmed plan. Delete it by hand, or run lo destroy again."
+  done <<<"${listed}"
+  _HETZNER_CONFIRMED_ROWS="${rows}"
+}
+
 provider::destroy() {
   local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
   local work_dir="${2:-/tmp}"
   export PROVIDER_CONFIG_FILE="${config_file}"
 
-  # Try to read cluster_name from config, fall back to dump state
-  local cluster_name=""
-  cluster_name=$(_cfg '.cluster_name // ""' 2>/dev/null || echo "")
-  if [[ -z "${cluster_name}" ]] && [[ -f "${work_dir}/hetzner.dump.json" ]]; then
-    cluster_name=$(jq -r '.name // .cluster_name // empty' "${work_dir}/hetzner.dump.json" 2>/dev/null || echo "")
-  fi
-
-  # Fall back to reading the name field from the JSON descriptor
-  if [[ -z "${cluster_name}" ]] && [[ -f "${config_file}" ]]; then
-    cluster_name=$(jq -r 'if .server then .server[0].name | split("-") | .[:-2] | join("-") else .cluster_name // empty end' "${config_file}" 2>/dev/null || echo "")
-  fi
-
-  [[ -n "${cluster_name}" ]] || { error "cannot determine cluster name for destroy"; return 1; }
-
-  local selector="lok8s.dev/cluster=${cluster_name}"
+  local cluster_name rows listed
+  cluster_name="$(hetzner::_destroy_cluster_name "${config_file}")" || return 1
   debug "destroying hetzner resources for ${cluster_name}"
 
-  local ids
-  for resource in load-balancer server placement-group firewall volume floating-ip ssh-key network; do
-    ids=$(hcloud "${resource}" list -o json -l "${selector}" | jq -r '.[].id' 2>/dev/null || echo "")
-    for id in ${ids}; do
+  # The live list: what carries lok8s.dev/cluster=<cluster_name> now. Every
+  # delete below is in it. A list that fails stops the destroy.
+  listed="$(hetzner::_destroy_resources "${cluster_name}")" || return 1
+
+  if [[ -n "${LOK8S_DESTROY_PLAN:-}" ]]; then
+    # `lo destroy` showed this plan and the operator confirmed it: delete
+    # these resources and no others. kubeone reset ran in between, so the
+    # live list can differ. The plan is checked line by line, because the
+    # variable comes from the environment: an allowed type and a numeric id
+    # only, else nothing is deleted. A plan id that is not in the live list
+    # is not deleted (it is gone, or it does not carry the label); a live
+    # resource that is not in the plan stays.
+    hetzner::_confirmed_rows "${cluster_name}" "${listed}" || return 1
+    rows="${_HETZNER_CONFIRMED_ROWS}"
+  else
+    rows="${listed}"
+  fi
+
+  local resource id type
+  for type in "${_HETZNER_DESTROY_ORDER[@]}"; do
+    while IFS=$'\t' read -r resource id _; do
+      [[ "${resource}" == "${type}" && -n "${id}" ]] || continue
       debug "deleting ${resource} ${id}"
       hcloud "${resource}" delete "${id}" 2>/dev/null || true
-    done
+    done <<<"${rows}"
   done
 
   debug "hetzner destroy complete for ${cluster_name}"
+}
+
+# ── Optional hook: destroy_plan ──────────────────────────
+#
+# provider::destroy_plan <config_file> <work_dir>
+#   READ-ONLY. What provider::destroy would delete. Line 1 is
+#   "cluster<TAB><cluster_name>", then one "<resource><TAB><id><TAB><name>"
+#   line per resource. provider::destroy deletes EVERY resource in the
+#   token's project that carries lok8s.dev/cluster=<cluster_name>, so
+#   `lo destroy` shows this list, refuses a cluster_name that another domain
+#   also uses, and asks for the cluster_name before it deletes anything. The
+#   confirmed plan comes back to provider::destroy in LOK8S_DESTROY_PLAN.
+#   Fails (rc 1) when the descriptor has no cluster_name or a list fails.
+provider::destroy_plan() {
+  local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
+  export PROVIDER_CONFIG_FILE="${config_file}"
+
+  local cluster_name rows
+  cluster_name="$(hetzner::_destroy_cluster_name "${config_file}")" || return 1
+  rows="$(hetzner::_destroy_resources "${cluster_name}")" || return 1
+  printf 'cluster\t%s\n' "${cluster_name}"
+  [[ -z "${rows}" ]] || printf '%s\n' "${rows}"
 }
 
 # ── Standard output ──────────────────────────────────────
