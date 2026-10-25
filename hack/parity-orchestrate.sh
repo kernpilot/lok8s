@@ -1021,9 +1021,9 @@ tree_check "${WORK}/render.go" "${WORK}/render.bash" "render dir of lo bootstrap
 for side in bash go; do
   tls_absent "${side}: a dry run never applies"  "${WORK}/kubectl.${side}.log" " apply "
   tls_pin    "${side}: three server-side diffs"  "${WORK}/kubectl.${side}.log" "^kubectl --kubeconfig PROJ/\.kubeconfig/dryc\.yaml diff --server-side --force-conflicts -f -$"
-  tls_pin    "${side}: cilium unchanged"         "${WORK}/${side}.out" "^bootstrap dry-run: 01-cilium: unchanged$"
-  tls_pin    "${side}: extra-cm differs"         "${WORK}/${side}.out" "^bootstrap dry-run: 02-extra-cm: differs changed=1 new=2$"
-  tls_pin    "${side}: ccm error"                "${WORK}/${side}.out" "^bootstrap dry-run: 03-ccm: error$"
+  tls_pin    "${side}: cilium unchanged"         "${WORK}/${side}.out" "^bootstrap dry-run: cilium: unchanged$"
+  tls_pin    "${side}: extra-cm differs"         "${WORK}/${side}.out" "^bootstrap dry-run: extra-cm: differs changed=1 new=2$"
+  tls_pin    "${side}: ccm error"                "${WORK}/${side}.out" "^bootstrap dry-run: ccm: error$"
   tls_pin    "${side}: the summary"              "${WORK}/${side}.out" "^bootstrap dry-run: entries=3 unchanged=1 differs=1 rendered=0 skipped=0 inconclusive=0 errors=1 nondeterministic=0$"
   tls_pin    "${side}: the render dir is named"  "${WORK}/${side}.err" "^bootstrap dry-run: files under render-out$"
   if [[ -s "${WORK}/render.${side}/02-extra-cm.diff" ]]; then echo "ok: ${side}: 02-extra-cm.diff holds the diff"; else fail "${side}: 02-extra-cm.diff empty or missing"; fi
@@ -1031,17 +1031,24 @@ for side in bash go; do
   if [[ -s "${WORK}/render.${side}/03-ccm.yaml" ]]; then echo "ok: ${side}: 03-ccm.yaml rendered before the failed diff"; else fail "${side}: 03-ccm.yaml missing"; fi
 done
 dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --render-dir render-out
-# --only narrows the run: one entry, numbered from 01; its unchanged diff → rc 0.
+# --only narrows the run: one entry; its unchanged diff → rc 0.
 dry_check - bootstrap --domain dry.dev --dry-run --only cilium
 dry_expect_rc 0 bootstrap --domain dry.dev --dry-run --only cilium
 # The addon name of a renamed entry matches; the entry differs → rc 1.
 dry_check - bootstrap --domain dry.dev --dry-run --only extra
 dry_expect_rc 1 bootstrap --domain dry.dev --dry-run --only extra
+# The key as written in spec.bootstrap matches too (`./targets/extra`); the
+# report line names the entry the way --only takes it (#281).
+dry_check - bootstrap --domain dry.dev --dry-run --only ./targets/extra
+dry_expect_rc 1 bootstrap --domain dry.dev --dry-run --only ./targets/extra
+for side in bash go; do
+  tls_pin "${side}: --only takes the key as written" "${WORK}/${side}.out" "^bootstrap dry-run: extra-cm: differs changed=1 new=2$"
+done
 # --no-diff: render only, kubectl is never reached (an empty argv log).
 dry_check - bootstrap --domain dry.dev --dry-run --no-diff --only cilium,ccm --render-dir render-out
 for side in bash go; do
   if [[ ! -s "${WORK}/kubectl.${side}.log" ]]; then echo "ok: ${side}: --no-diff never reached kubectl"; else fail "${side}: --no-diff reached kubectl"; fi
-  tls_pin "${side}: ccm rendered" "${WORK}/${side}.out" "^bootstrap dry-run: 02-ccm: rendered$"
+  tls_pin "${side}: ccm rendered" "${WORK}/${side}.out" "^bootstrap dry-run: ccm: rendered$"
 done
 tree_check "${WORK}/render.go" "${WORK}/render.bash" "render dir of lo bootstrap --dry-run --no-diff"
 # An unknown --only name lists the valid names; the flag dependencies.
@@ -1174,15 +1181,15 @@ export PARITY_ND_COUNTER="${WORK}/nd.count"
 dry_check - bootstrap --domain dry.dev --dry-run --only cilium
 dry_expect_rc 1 bootstrap --domain dry.dev --dry-run --only cilium
 for side in bash go; do
-  tls_pin "${side}: the entry differs, its regenerated object counted" "${WORK}/${side}.out" "^bootstrap dry-run: 01-cilium: differs changed=1 new=2 \(non-deterministic: 1\)$"
-  tls_pin "${side}: the regenerated object is listed" "${WORK}/${side}.out" "^bootstrap dry-run: 01-cilium: non-deterministic \(regenerated on every apply\): v1 Secret kube-system/cilium-ca$"
+  tls_pin "${side}: the entry differs, its regenerated object counted" "${WORK}/${side}.out" "^bootstrap dry-run: cilium: differs changed=1 new=2 \(non-deterministic: 1\)$"
+  tls_pin "${side}: the regenerated object is listed" "${WORK}/${side}.out" "^bootstrap dry-run: cilium: non-deterministic \(regenerated on every apply\): v1 Secret kube-system/cilium-ca$"
   tls_pin "${side}: the summary counts it" "${WORK}/${side}.out" " errors=0 nondeterministic=1$"
 done
 dry_check - bootstrap --domain dry.dev --dry-run --only cilium --ignore-nondeterministic
 dry_expect_rc 0 bootstrap --domain dry.dev --dry-run --only cilium --ignore-nondeterministic
 dry_expect_rc 0 provision --domain dry.dev --bootstrap --dry-run --only cilium --ignore-nondeterministic
 for side in bash go; do
-  tls_pin "${side}: --ignore-nondeterministic: unchanged, still listed" "${WORK}/${side}.out" "^bootstrap dry-run: 01-cilium: unchanged \(non-deterministic: 1\)$"
+  tls_pin "${side}: --ignore-nondeterministic: unchanged, still listed" "${WORK}/${side}.out" "^bootstrap dry-run: cilium: unchanged \(non-deterministic: 1\)$"
 done
 unset PARITY_ND_COUNTER
 

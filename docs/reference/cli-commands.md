@@ -444,7 +444,7 @@ lo bootstrap [flags]
   -h, --help                      help for bootstrap
       --ignore-nondeterministic   Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)
       --no-diff                   Dry run without the kubectl diff: render only, no cluster access
-      --only strings              Apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded
+      --only strings              Apply (or dry-run) only these spec.bootstrap entries, comma-separated. A value selects every entry whose name (name:, else the last path element), key as written in spec.bootstrap (./targets/flux) or directory name (of an addon or a target) is equal to it: --only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster. dependsOn is not expanded
       --render-dir string         Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
       --with-restore              With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
 ```
@@ -3349,7 +3349,7 @@ lo provision [flags]
   -h, --help                      help for provision
       --ignore-nondeterministic   Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)
       --no-diff                   Dry run without the kubectl diff: render only, no cluster access
-      --only strings              Apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded
+      --only strings              Apply (or dry-run) only these spec.bootstrap entries, comma-separated. A value selects every entry whose name (name:, else the last path element), key as written in spec.bootstrap (./targets/flux) or directory name (of an addon or a target) is equal to it: --only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster. dependsOn is not expanded
       --render-dir string         Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
       --with-restore              With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
 ```

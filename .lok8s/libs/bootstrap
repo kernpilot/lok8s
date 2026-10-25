@@ -56,7 +56,7 @@ main::bootstrap() {
     'dry-run|:+'        'Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)'
     'render-dir|:'      "Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory"
     'no-diff|:+'        'Dry run without the kubectl diff: render only, no cluster access'
-    'only|:'            'Apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded'
+    'only|:'            'Apply (or dry-run) only these spec.bootstrap entries, comma-separated. A value selects every entry whose name (name:, else the last path element), key as written in spec.bootstrap (./targets/flux) or directory name (of an addon or a target) is equal to it: --only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster. dependsOn is not expanded'
     'allow-generators|:+' "Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)"
     'with-restore|:+'   'With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)'
     'ignore-nondeterministic|:+' 'Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)'
@@ -283,13 +283,15 @@ bootstrap::_resolve_entries() {
   return 0
 }
 
-# bootstrap::_parse_entry <domain> <entry-json> <name> <dir> <inline> <env> <wait> <deps> [explicit]
+# bootstrap::_parse_entry <domain> <entry-json> <name> <dir> <inline> <env> <wait> <deps> [explicit] [key]
 # Parse ONE spec.bootstrap entry (the compact JSON from _resolve_entries) into the
 # fields the apply path needs — passed back through namerefs (the trailing args
 # are caller variable NAMES). The 9th (explicit) is OPTIONAL: set to "true" iff
 # this entry carries an explicit `name:` override, so the caller can treat a name
 # collision as a hard error instead of a tolerated basename clash; omit it and a
 # throwaway local is used instead (so existing six-out-param callers still work).
+# The 10th (key) is OPTIONAL too: the <name-or-path> as written in spec.bootstrap
+# (`cilium`, `./targets/flux`), which --only accepts.
 # Returns 1 (after printing an error) on a malformed entry or on `values:` set
 # against a non-chart target. Pure apart from that one filesystem touch (the
 # chart.yaml check).
@@ -336,9 +338,9 @@ bootstrap::_resolve_entries() {
 bootstrap::_parse_entry() {
   local _domain="${1}" _entry="${2}"
   local -n _o_name="${3}" _o_dir="${4}" _o_inline="${5}" _o_env="${6}" _o_wait="${7}" _o_deps="${8}"
-  local _bs_discard_explicit=""
-  local -n _o_explicit="${9:-_bs_discard_explicit}"
-  _o_name=""; _o_dir=""; _o_inline=""; _o_env=""; _o_wait="false"; _o_deps=""; _o_explicit="false"
+  local _bs_discard_explicit="" _bs_discard_key=""
+  local -n _o_explicit="${9:-_bs_discard_explicit}" _o_key="${10:-_bs_discard_key}"
+  _o_name=""; _o_dir=""; _o_inline=""; _o_env=""; _o_wait="false"; _o_deps=""; _o_explicit="false"; _o_key=""
 
   local _raw _valjson=""
   if [[ "${_entry}" == \{* ]]; then
@@ -374,6 +376,7 @@ bootstrap::_parse_entry() {
     _raw="$(yq -r '.' <<<"${_entry}")" \
       || { error "bootstrap: failed to parse entry ${_entry}"; return 1; }
   fi
+  _o_key="${_raw}"
 
   # Resolve <name-or-path> → addon name + dir. Identical rules for a scalar entry
   # and a map key: absolute path, ./|../ path relative to the cluster dir, or a
@@ -1242,10 +1245,12 @@ bootstrap::_derive_edges() {
 # bootstrap::_select_only <names-csv>
 # Keep only the entries named (comma-separated) in the calling frame's parallel
 # arrays and edge set, then re-derive the scheduler fields. A name matches the
-# entry identity (`name:` override, else the basename / map key) or the addon
-# directory's name, so a renamed framework addon answers to both. dependsOn is
-# NOT expanded: only the edges among the kept entries survive. An unknown name
-# is an error that lists the valid entry names.
+# entry identity (`name:` override, else the basename / map key), the key as
+# written in spec.bootstrap (`./targets/flux`, the _rawkeys array) or the addon
+# directory's name, so a renamed framework addon answers to each. The key also
+# tells apart a target and an addon with the same basename. dependsOn is NOT
+# expanded: only the edges among the kept entries survive. An unknown name is
+# an error that lists the valid entry names.
 bootstrap::_select_only() {
   local _csv="${1}" _want _k3 _found
   local -a _wants=() _keep=()
@@ -1256,7 +1261,8 @@ bootstrap::_select_only() {
     [[ -n "${_want}" ]] || continue
     _found=0
     for (( _k3 = 0; _k3 < n; _k3++ )); do
-      if [[ "${_names[_k3]}" == "${_want}" || "$(basename "${_dirs[_k3]}")" == "${_want}" ]]; then
+      if [[ "${_names[_k3]}" == "${_want}" || "${_rawkeys[_k3]:-}" == "${_want}" \
+            || "$(basename "${_dirs[_k3]}")" == "${_want}" ]]; then
         _keep[_k3]=1; _found=1
       fi
     done
@@ -1293,7 +1299,7 @@ bootstrap::_select_only() {
     done <<< "${_depnames[_k3]}"
   done
 
-  local -a _n_names=() _n_dirs=() _n_inlines=() _n_envs=() _n_waits=() _n_depnames=() _n_explicit=()
+  local -a _n_names=() _n_dirs=() _n_inlines=() _n_envs=() _n_waits=() _n_depnames=() _n_explicit=() _n_rawkeys=()
   local -A _remap=()
   local _new=0
   for (( _k3 = 0; _k3 < n; _k3++ )); do
@@ -1301,7 +1307,7 @@ bootstrap::_select_only() {
     _remap["${_k3}"]="${_new}"
     _n_names+=("${_names[_k3]}"); _n_dirs+=("${_dirs[_k3]}"); _n_inlines+=("${_inlines[_k3]}")
     _n_envs+=("${_envs[_k3]}"); _n_waits+=("${_waits[_k3]}"); _n_depnames+=("${_depnames[_k3]}")
-    _n_explicit+=("${_explicit[_k3]}")
+    _n_explicit+=("${_explicit[_k3]}"); _n_rawkeys+=("${_rawkeys[_k3]:-}")
     _new=$(( _new + 1 ))
   done
   local -A _n_edge=()
@@ -1314,7 +1320,7 @@ bootstrap::_select_only() {
   _names=("${_n_names[@]+"${_n_names[@]}"}"); _dirs=("${_n_dirs[@]+"${_n_dirs[@]}"}")
   _inlines=("${_n_inlines[@]+"${_n_inlines[@]}"}"); _envs=("${_n_envs[@]+"${_n_envs[@]}"}")
   _waits=("${_n_waits[@]+"${_n_waits[@]}"}"); _depnames=("${_n_depnames[@]+"${_n_depnames[@]}"}")
-  _explicit=("${_n_explicit[@]+"${_n_explicit[@]}"}")
+  _explicit=("${_n_explicit[@]+"${_n_explicit[@]}"}"); _rawkeys=("${_n_rawkeys[@]+"${_n_rawkeys[@]}"}")
   for _key in "${!_edge[@]}"; do unset "_edge[${_key}]"; done
   for _key in "${!_n_edge[@]}"; do _edge["${_key}"]=1; done
   n="${_new}"
@@ -1857,8 +1863,12 @@ bootstrap::_dry_run_restore_d() {
 # index among the ready entries first — what the launch loop does with one
 # slot), SEQUENTIALLY, so the report comes out in the same order on every run
 # and on both implementations (piped output is a contract). One report line
-# per entry, then a summary. Returns 0 when nothing would change, 1 when
-# something would, 2 when an entry failed to render or diff.
+# per entry, then a summary. A report line names the entry by its entry name,
+# which --only accepts (#281); when two entries of the run share the name (a
+# tolerated basename collision), the line adds the key as written,
+# `rook-ceph (./targets/rook-ceph)`, which selects that one entry. Only the
+# render-dir files carry the NN- order prefix. Returns 0 when nothing would
+# change, 1 when something would, 2 when an entry failed to render or diff.
 bootstrap::_run_dry() {
   # --render-dir is prepared earlier now (bootstrap::apply, BEFORE the
   # restore.d preview — item G): restore.d's own diff needs a writable,
@@ -1868,7 +1878,7 @@ bootstrap::_run_dry() {
   (( _width < 2 )) && _width=2
   local -A _ddone=()
   local _c_unchanged=0 _c_differs=0 _c_rendered=0 _c_skipped=0 _c_inconclusive=0 _c_errors=0 _c_nd=0 _seq=0 _total=0
-  local _pick _i3 _d3 _ready _stem _status _one _ndl
+  local _pick _i3 _d3 _ready _stem _status _one _ndl _label _c3 _same
   local -a _dl _ndlines
   # restore.d's own entry (computed by bootstrap::apply before narrowing to
   # --only — see there), reported FIRST: a real run applies it before any
@@ -1904,6 +1914,11 @@ bootstrap::_run_dry() {
     _ddone["${_pick}"]=1
     _seq=$(( _seq + 1 ))
     _stem="$(printf '%0*d-%s' "${_width}" "${_seq}" "${_names[_pick]}")"
+    _label="${_names[_pick]}" _same=0
+    for (( _c3 = 0; _c3 < n; _c3++ )); do
+      [[ "${_names[_c3]}" != "${_label}" ]] || _same=$(( _same + 1 ))
+    done
+    (( _same < 2 )) || _label+=" (${_rawkeys[_pick]:-})"
     # A subshell: the render's state stays local. Line 1 is the status, every
     # further line an object regenerated on every apply.
     _ndlines=()
@@ -1922,10 +1937,10 @@ bootstrap::_run_dry() {
       error*)          _c_errors=$(( _c_errors + 1 )) ;;
       *)               _status="error"; _c_errors=$(( _c_errors + 1 )) ;;
     esac
-    printf 'bootstrap dry-run: %s: %s\n' "${_stem}" "${_status}"
+    printf 'bootstrap dry-run: %s: %s\n' "${_label}" "${_status}"
     for _ndl in "${_ndlines[@]+"${_ndlines[@]}"}"; do
       [[ -n "${_ndl}" ]] || continue
-      printf 'bootstrap dry-run: %s: non-deterministic (regenerated on every apply): %s\n' "${_stem}" "${_ndl}"
+      printf 'bootstrap dry-run: %s: non-deterministic (regenerated on every apply): %s\n' "${_label}" "${_ndl}"
       _c_nd=$(( _c_nd + 1 ))
     done
   done
@@ -2130,18 +2145,19 @@ bootstrap::apply() {
   [[ "${max_parallel}" =~ ^[0-9]+$ ]] && (( max_parallel >= 1 )) || max_parallel=8
 
   # Parse ALL entries up front into parallel arrays (array index = DAG node).
-  local -a _names=() _dirs=() _inlines=() _envs=() _waits=() _depnames=() _explicit=()
+  local -a _names=() _dirs=() _inlines=() _envs=() _waits=() _depnames=() _explicit=() _rawkeys=()
   local n=0 entry
   for entry in "${bootstrap_entries[@]}"; do
     [[ -n "${entry}" ]] || continue
-    local _nm _dr _in _ev _wt _dp _ex
-    bootstrap::_parse_entry "${domain}" "${entry}" _nm _dr _in _ev _wt _dp _ex || return 1
+    local _nm _dr _in _ev _wt _dp _ex _ky
+    bootstrap::_parse_entry "${domain}" "${entry}" _nm _dr _in _ev _wt _dp _ex _ky || return 1
     if [[ ! -d "${_dr}" ]]; then
       error "bootstrap: addon not found: ${entry} (resolved to ${_dr})"
       return 1
     fi
     _names+=("${_nm}"); _dirs+=("${_dr}"); _inlines+=("${_in}")
     _envs+=("${_ev}"); _waits+=("${_wt}"); _depnames+=("${_dp}"); _explicit+=("${_ex}")
+    _rawkeys+=("${_ky}")
     n=$(( n + 1 ))
   done
   (( n > 0 )) || { debug "bootstrap: nothing to apply for ${domain} (kind=${kind})"; return 0; }

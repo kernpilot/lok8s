@@ -46,7 +46,7 @@ func (f *bootstrapModeFlags) bind(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&f.dryRun, "dry-run", false, "Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)")
 	cmd.Flags().StringVar(&f.renderDir, "render-dir", "", "Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory")
 	cmd.Flags().BoolVar(&f.noDiff, "no-diff", false, "Dry run without the kubectl diff: render only, no cluster access")
-	cmd.Flags().StringSliceVar(&f.only, "only", nil, "Apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded")
+	cmd.Flags().StringSliceVar(&f.only, "only", nil, "Apply (or dry-run) only these spec.bootstrap entries, comma-separated. A value selects every entry whose name (name:, else the last path element), key as written in spec.bootstrap (./targets/flux) or directory name (of an addon or a target) is equal to it: --only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster. dependsOn is not expanded")
 	cmd.Flags().BoolVar(&f.allowGenerators, "allow-generators", false, "Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)")
 	cmd.Flags().BoolVar(&f.withRestore, "with-restore", false, "With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)")
 	cmd.Flags().BoolVar(&f.ignoreNondet, "ignore-nondeterministic", false, "Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)")

@@ -192,3 +192,25 @@ func TestBootstrapOnlyUnknownNameListsEntries(t *testing.T) {
 		t.Errorf("err=%v exits=%v stderr=%q", err, *exits, stderr)
 	}
 }
+
+// --help says which values --only takes, the directory-name match
+// included, on both commands that carry the flag.
+func TestOnlyHelpNamesTheMatchedForms(t *testing.T) {
+	for _, command := range []string{"bootstrap", "provision"} {
+		stdout, _, err := runLo(t, NewRoot(synthProject(t)), command, "--help")
+		if err != nil {
+			t.Fatalf("%s --help: %v", command, err)
+		}
+		flat := strings.Join(strings.Fields(stdout), " ")
+		for _, want := range []string{
+			"name (name:, else the last path element)",
+			"key as written in spec.bootstrap (./targets/flux)",
+			"directory name (of an addon or a target)",
+			"--only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster",
+		} {
+			if !strings.Contains(flat, want) {
+				t.Errorf("%s --help lacks %q:\n%s", command, want, stdout)
+			}
+		}
+	}
+}

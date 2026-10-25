@@ -33,6 +33,19 @@ ARGSH_SOURCE="${BASH_SOURCE[0]}"
 PATH_SCRIPTS="${PATH_LOK8S}"
 export PATH_SCRIPTS
 
+# Every command, `lo doctor` too, runs on the argsh runtime in the project's
+# .bin. Without it, name the fix instead of a raw bash error (a new git
+# worktree has no .bin/argsh until `b install` runs in it). The pattern and
+# the two texts are the Go doctor's (internal/toolchain/argsh.go, pinned by
+# its test).
+if [[ ! -f "${PATH_BIN}/argsh" ]]; then
+  _lo_fix="add github.com/arg-sh/argsh to the b.yaml in the same directory, then b install"
+  if grep -Eq '^[[:space:]]*(alias:[[:space:]]*argsh[[:space:]]*$|([^#[:space:]][^[:space:]]*/)?argsh:)' "${PATH_BIN}/b.yaml" 2>/dev/null; then
+    _lo_fix="b install"
+  fi
+  echo "[error] argsh is missing at ${PATH_BIN}/argsh: lo runs on it (fix: ${_lo_fix})" >&2
+  exit 1
+fi
 source "${PATH_BIN}/argsh"
 import ^libs/deploy
 import ^libs/tilt

@@ -69,7 +69,7 @@ func TestEntryEnvReservedNamesAreAnEntryError(t *testing.T) {
 				if strings.Contains(f.log(), "kustomize") {
 					t.Errorf("dry=%v: the render ran despite the refusal:\n%s", dry, f.log())
 				}
-				if dry && !strings.Contains(stdoutOf(e), "01-testcni: error") {
+				if dry && !strings.Contains(stdoutOf(e), "testcni: error") {
 					t.Errorf("stdout:\n%s", stdoutOf(e))
 				}
 			})
@@ -111,10 +111,10 @@ func TestDryRunReportMarksTheEntryNonRepeatable(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 	out := stdoutOf(e)
-	if !strings.Contains(out, "01-testcni: unchanged (non-repeatable)\n") {
+	if !strings.Contains(out, "testcni: unchanged (non-repeatable)\n") {
 		t.Errorf("the reporting entry is not marked:\n%s", out)
 	}
-	if !strings.Contains(out, "02-second: unchanged\n") {
+	if !strings.Contains(out, "second: unchanged\n") {
 		t.Errorf("the report leaked into the next entry:\n%s", out)
 	}
 }

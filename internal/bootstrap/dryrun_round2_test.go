@@ -41,7 +41,7 @@ func TestDryRunInconclusiveDoesNotCountAsDiffers(t *testing.T) {
 	if errors.Is(err, ErrDryRunDiffers) {
 		t.Error("inconclusive must not report as ErrDryRunDiffers")
 	}
-	want := "bootstrap dry-run: 01-testcni: inconclusive (needs-crd)\n" +
+	want := "bootstrap dry-run: testcni: inconclusive (needs-crd)\n" +
 		"bootstrap dry-run: entries=1 unchanged=0 differs=0 rendered=0 skipped=0 inconclusive=1 errors=0 nondeterministic=0\n"
 	if got := stdoutOf(e); got != want {
 		t.Errorf("stdout:\n%s\nwant:\n%s", got, want)
@@ -61,7 +61,7 @@ func TestDryRunInconclusiveAtRCOne(t *testing.T) {
 	if driver.ExitCode(err) != 2 {
 		t.Fatalf("exit = %d, want 2", driver.ExitCode(err))
 	}
-	if !strings.Contains(stdoutOf(e), "01-testcni: inconclusive (needs-crd)") {
+	if !strings.Contains(stdoutOf(e), "testcni: inconclusive (needs-crd)") {
 		t.Errorf("stdout:\n%s", stdoutOf(e))
 	}
 }
@@ -79,7 +79,7 @@ func TestDryRunExternalDiffWithoutHeaderStillDiffers(t *testing.T) {
 	if !errors.Is(err, ErrDryRunDiffers) {
 		t.Fatalf("err = %v, want ErrDryRunDiffers", err)
 	}
-	if !strings.Contains(stdoutOf(e), "01-testcni: differs\n") {
+	if !strings.Contains(stdoutOf(e), "testcni: differs\n") {
 		t.Errorf("stdout:\n%s", stdoutOf(e))
 	}
 }
@@ -93,7 +93,7 @@ func TestDryRunLaunchFailureIsError(t *testing.T) {
 	if driver.ExitCode(err) != 2 {
 		t.Fatalf("exit = %d, want 2", driver.ExitCode(err))
 	}
-	if !strings.Contains(stdoutOf(e), "01-testcni: error\n") {
+	if !strings.Contains(stdoutOf(e), "testcni: error\n") {
 		t.Errorf("stdout:\n%s", stdoutOf(e))
 	}
 	if !strings.Contains(stderrOf(e), "failed to start") {

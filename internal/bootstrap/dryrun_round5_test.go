@@ -55,8 +55,8 @@ func TestDryRunListsAnObjectOnlyTheSecondRenderHas(t *testing.T) {
 		t.Fatalf("Apply: %v\n%s", err, stderrOf(e))
 	}
 	out := stdoutOf(e)
-	if !strings.Contains(out, "01-testcni: unchanged (non-deterministic: 1)\n") ||
-		!strings.Contains(out, "01-testcni: non-deterministic (regenerated on every apply): v1 Secret kube-system/late\n") ||
+	if !strings.Contains(out, "testcni: unchanged (non-deterministic: 1)\n") ||
+		!strings.Contains(out, "testcni: non-deterministic (regenerated on every apply): v1 Secret kube-system/late\n") ||
 		!strings.Contains(out, " nondeterministic=1\n") {
 		t.Errorf("stdout:\n%s", out)
 	}
@@ -128,7 +128,7 @@ func TestDryRunKRMHintFollowsTheKustomizationGraph(t *testing.T) {
 		if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 			t.Fatalf("%s: Apply: %v\n%s", tc.name, err, stderrOf(e))
 		}
-		want := "01-entry: unchanged" + tc.want + "\n"
+		want := "entry: unchanged" + tc.want + "\n"
 		if !strings.Contains(stdoutOf(e), want) {
 			t.Errorf("%s: want %q\n%s", tc.name, want, stdoutOf(e))
 		}
@@ -148,7 +148,7 @@ func TestDryRunKRMHintFollowsTheKustomizationGraph(t *testing.T) {
 	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("outside: Apply: %v", err)
 	}
-	if !strings.Contains(stdoutOf(e), "01-entry: unchanged"+unreadMark+"\n") {
+	if !strings.Contains(stdoutOf(e), "entry: unchanged"+unreadMark+"\n") {
 		t.Errorf("a base outside the project did not mark the entry partial:\n%s", stdoutOf(e))
 	}
 }

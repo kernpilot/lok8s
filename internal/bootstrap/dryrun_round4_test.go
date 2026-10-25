@@ -69,7 +69,7 @@ func TestDryRunNonDeterministicObjects(t *testing.T) {
 		if r.renders != 2 {
 			t.Errorf("ignore=%v: %d renders, want 2", ignore, r.renders)
 		}
-		if !strings.Contains(out, "bootstrap dry-run: 01-testcni: non-deterministic (regenerated on every apply): v1 Secret kube-system/cilium-ca\n") {
+		if !strings.Contains(out, "bootstrap dry-run: testcni: non-deterministic (regenerated on every apply): v1 Secret kube-system/cilium-ca\n") {
 			t.Errorf("ignore=%v: the object is not listed:\n%s", ignore, out)
 		}
 		if !strings.Contains(out, " nondeterministic=1\n") {
@@ -80,13 +80,13 @@ func TestDryRunNonDeterministicObjects(t *testing.T) {
 			t.Errorf("ignore=%v: the render dir lacks the object", ignore)
 		}
 		if ignore {
-			if err != nil || !strings.Contains(out, "01-testcni: unchanged (non-deterministic: 1)\n") {
+			if err != nil || !strings.Contains(out, "testcni: unchanged (non-deterministic: 1)\n") {
 				t.Errorf("--ignore-nondeterministic: err=%v\n%s", err, out)
 			}
 			if len(r.diffIn) != 1 || strings.Contains(r.diffIn[0], "cilium-ca") || !strings.Contains(r.diffIn[0], "stable") {
 				t.Errorf("--ignore-nondeterministic diffed %q", r.diffIn)
 			}
-		} else if driver.ExitCode(err) != 1 || !strings.Contains(out, "01-testcni: differs changed=1 new=0 (non-deterministic: 1)\n") {
+		} else if driver.ExitCode(err) != 1 || !strings.Contains(out, "testcni: differs changed=1 new=0 (non-deterministic: 1)\n") {
 			t.Errorf("default: err=%v\n%s", err, out)
 		}
 	}
@@ -117,7 +117,7 @@ func TestDryRunChartGateRefusalIsInconclusive(t *testing.T) {
 	if driver.ExitCode(err) != 2 {
 		t.Fatalf("exit = %d, want 2 (err %v)", driver.ExitCode(err), err)
 	}
-	if !strings.Contains(stdoutOf(e), "01-testcni: inconclusive (chart dependencies not vendored)\n") || !strings.Contains(stdoutOf(e), " inconclusive=1 errors=0 ") {
+	if !strings.Contains(stdoutOf(e), "testcni: inconclusive (chart dependencies not vendored)\n") || !strings.Contains(stdoutOf(e), " inconclusive=1 errors=0 ") {
 		t.Errorf("stdout:\n%s", stdoutOf(e))
 	}
 }
@@ -134,7 +134,7 @@ func TestDryRunMarksADeclaredKRMFunctionPartial(t *testing.T) {
 		if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 			t.Fatalf("Apply: %v", err)
 		}
-		marked := strings.Contains(stdoutOf(e), "01-testcni: unchanged (partial: KRM function skipped)\n")
+		marked := strings.Contains(stdoutOf(e), "testcni: unchanged (partial: KRM function skipped)\n")
 		if marked == allow {
 			t.Errorf("allow=%v: marked=%v\n%s", allow, marked, stdoutOf(e))
 		}

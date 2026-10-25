@@ -135,7 +135,10 @@ func (r *Runner) bashProvider(ctx context.Context, name string) (Provider, error
 func (p *bashProviderImpl) HasRebuild() bool { return p.rebuild }
 func (p *bashProviderImpl) HasDoctor() bool  { return p.doctor }
 
-func (p *bashProviderImpl) call(ctx context.Context, fn string, stdout, stderr io.Writer, args ...string) error {
+// call runs one contract function. stdin nil is an empty stdin (exec's
+// execx.WithoutStdin): only the rebuild, after the consent, passes the
+// terminal.
+func (p *bashProviderImpl) call(ctx context.Context, fn string, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 	env, err := p.r.env()
 	if err != nil {
 		return err
@@ -146,34 +149,37 @@ func (p *bashProviderImpl) call(ctx context.Context, fn string, stdout, stderr i
 		Args:   argv,
 		Dir:    p.r.Paths.Base,
 		Env:    env,
+		Stdin:  stdin,
 		Stdout: stdout,
 		Stderr: stderr,
 	})
 }
 
-// Doctor: `provider::doctor <config> 2>/dev/null` — exit ignored.
+// Doctor: `provider::doctor <config> 2>/dev/null </dev/null` — exit ignored.
 func (p *bashProviderImpl) Doctor(ctx context.Context, configFile string) string {
 	var out strings.Builder
-	_ = p.call(ctx, "provider::doctor", &out, io.Discard, configFile)
+	_ = p.call(ctx, "provider::doctor", nil, &out, io.Discard, configFile)
 	return out.String()
 }
 
-// Rebuild: `provider::rebuild <config> <work_dir>` — output passes through.
+// Rebuild: `provider::rebuild <config> <work_dir>` — output passes through;
+// stdin is the terminal, or empty when the input is not a terminal.
 func (p *bashProviderImpl) Rebuild(ctx context.Context, configFile, workDir string) error {
-	return p.call(ctx, "provider::rebuild", p.r.out(), p.r.errOut(), configFile, workDir)
+	return p.call(ctx, "provider::rebuild", p.r.ttyIn(), p.r.out(), p.r.errOut(), configFile, workDir)
 }
 
-// Output: `provider::output <config> 2>/dev/null`.
+// Output: `provider::output <config> 2>/dev/null </dev/null`.
 func (p *bashProviderImpl) Output(ctx context.Context, configFile string) ([]byte, error) {
 	var out strings.Builder
-	if err := p.call(ctx, "provider::output", &out, io.Discard, configFile); err != nil {
+	if err := p.call(ctx, "provider::output", nil, &out, io.Discard, configFile); err != nil {
 		return nil, err
 	}
 	return []byte(out.String()), nil
 }
 
 // bashProvision is the default Provision phase: provision::dispatch in a
-// bash child (see provisionScript). Output passes through; DEBUG /
+// bash child (see provisionScript). Output passes through; stdin is the
+// terminal, or empty when the input is not a terminal; DEBUG /
 // LOK8S_NONINTERACTIVE / the loaded HCLOUD_*/HROBOT_* creds ride the
 // inherited environment.
 func (r *Runner) bashProvision(ctx context.Context, domainName string) error {
@@ -186,6 +192,7 @@ func (r *Runner) bashProvision(ctx context.Context, domainName string) error {
 		Args:   []string{"-c", provisionScript, "lo-recover-provision", domainName},
 		Dir:    r.Paths.Base,
 		Env:    env,
+		Stdin:  r.ttyIn(),
 		Stdout: r.out(),
 		Stderr: r.errOut(),
 	})

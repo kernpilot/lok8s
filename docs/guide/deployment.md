@@ -266,13 +266,17 @@ API server for a server-side diff (`kubectl diff --server-side
 
 ```
 bootstrap dry-run: restore.d: differs changed=1 new=0
-bootstrap dry-run: 01-cilium: differs changed=2 new=0 (non-deterministic: 2)
-bootstrap dry-run: 01-cilium: non-deterministic (regenerated on every apply): v1 Secret kube-system/cilium-ca
-bootstrap dry-run: 01-cilium: non-deterministic (regenerated on every apply): v1 Secret kube-system/hubble-server-certs
-bootstrap dry-run: 02-cert-manager: differs changed=2 new=1
-bootstrap dry-run: 03-rook-ceph: skipped
+bootstrap dry-run: cilium: differs changed=2 new=0 (non-deterministic: 2)
+bootstrap dry-run: cilium: non-deterministic (regenerated on every apply): v1 Secret kube-system/cilium-ca
+bootstrap dry-run: cilium: non-deterministic (regenerated on every apply): v1 Secret kube-system/hubble-server-certs
+bootstrap dry-run: cert-manager: differs changed=2 new=1
+bootstrap dry-run: rook-ceph: skipped
 bootstrap dry-run: entries=4 unchanged=0 differs=3 rendered=0 skipped=1 inconclusive=0 errors=0 nondeterministic=2
 ```
+
+Each line names the entry by its entry name, which `--only` accepts. The
+lines come in the order of the run; only the `--render-dir` files carry the
+`NN-` order prefix.
 
 - `restore.d` is diffed as its own entry, because a real run applies it
   before all other entries. The files decrypt with the normal sops key
@@ -415,8 +419,14 @@ lo provision --domain my-cluster.example.com --bootstrap --only cert-manager,env
 lo provision --domain my-cluster.example.com --bootstrap --only cert-manager --with-restore
 ```
 
-`--only` applies (or dry-runs) the named `spec.bootstrap` entries, matched
-by the entry name (the `name:` override when set) or the addon name.
+`--only` applies (or dry-runs) the named `spec.bootstrap` entries. A value
+selects every entry that it matches by the entry name (the `name:` override
+when set, else the last path element), by the key as written in
+`spec.bootstrap` (`./targets/flux` for `- ./targets/flux: {dependsOn:
+[fluxcd]}`), or by the directory name of the addon or the target. Thus
+`--only rook-ceph` selects the `rook-ceph` addon and also
+`./targets/rook-ceph`, also when its `name:` is `rook-ceph-cluster`. The key
+selects one of them: `--only ./targets/rook-ceph`.
 `dependsOn` is not expanded: a dependency you do not name is not applied,
 and only the edges among the named entries order the run. When an omitted
 entry is a prerequisite of a named one, lo prints a warning before it
