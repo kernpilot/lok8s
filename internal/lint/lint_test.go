@@ -193,8 +193,8 @@ func TestSecretsReportsADomainWithoutAStore(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(cl, "new.dev", "cluster.lok8s.yaml"), "kind: Lo\n")
 	testutil.WriteFile(t, filepath.Join(base, ".secrets", "Secret.flat.default.K"), "flat\n")
 	l.secrets(filepath.Join(cl, "new.dev"), "new.dev")
-	want := "[warn]   [error] domain new.dev has no secrets store: " + cl + "/new.dev/secrets does not exist, and this project keeps a store per domain (" + cl + "/a.dev/secrets). lo does not use the flat .secrets/ store for new.dev.\n" +
-		"[warn]   [error]   To generate new values, create the empty directory " + cl + "/new.dev/secrets. To use the values of another domain, copy its .enc files into that directory, then run \"lo secrets decrypt --domain new.dev\".\n"
+	want := "[warn]   [error] domain new.dev has no secrets store: " + cl + "/new.dev/secrets does not exist, and this project keeps a store per domain (" + cl + "/a.dev/secrets). lo does not fall back to " + base + "/.secrets.\n" +
+		"[warn]   [error]   Create the empty directory " + cl + "/new.dev/secrets to generate new values for new.dev.\n"
 	if errOut.String() != want {
 		t.Errorf("stderr:\n got %q\nwant %q", errOut.String(), want)
 	}

@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,7 +41,7 @@ func LoadProviderCreds(p *config.Paths, domainName string) error {
 				continue
 			}
 			if raw, err = secrets.DecryptEntry(f + ".enc"); err != nil {
-				ui.Warn("cannot read Secret.hetzner.provisioning.%s: the plaintext is missing, and no local age identity decrypts its .enc. Set %s, or set SOPS_AGE_KEY or LOK8S_SSH_KEY to an identity of the store.", k, k)
+				ui.Warn("%s", credWarning("Secret.hetzner.provisioning."+k, k, err))
 				continue
 			}
 		}
@@ -59,4 +60,19 @@ func LoadProviderCreds(p *config.Paths, domainName string) error {
 		os.Setenv("HETZNER_ROBOT_PASSWORD", pw)
 	}
 	return nil
+}
+
+// credWarning names the cause class of a failed credential decrypt and the
+// next action (bash: provision::_cred_warning). The bash twin has one more
+// class, "sops is not installed": the Go binary links sops.
+func credWarning(entry, envVar string, err error) string {
+	identityHint := "Set " + envVar + ", or set SOPS_AGE_KEY, SOPS_AGE_KEY_FILE or LOK8S_SSH_KEY to an identity of the store."
+	switch {
+	case errors.Is(err, secrets.ErrNoIdentity):
+		return "cannot read " + entry + ": the plaintext is missing, and no local age identity was found for its .enc. " + identityHint
+	case errors.Is(err, secrets.ErrReadEnc):
+		return "cannot read " + entry + ": the plaintext is missing, and its .enc cannot be read. Set " + envVar + ", or make " + entry + ".enc readable."
+	default:
+		return "cannot read " + entry + ": the plaintext is missing, and its .enc does not decrypt with the local age identity (another identity, or a damaged file). " + identityHint
+	}
 }

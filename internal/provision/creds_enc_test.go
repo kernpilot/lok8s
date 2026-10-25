@@ -117,34 +117,54 @@ func TestLoadProviderCredsDecryptsAnEncOnlyStore(t *testing.T) {
 	}
 }
 
-// An .enc that no local identity decrypts is skipped with a warning by name
-// (never a value), and LoadProviderCreds still returns nil.
-func TestLoadProviderCredsWarnsOnAnUnreadableEnc(t *testing.T) {
-	p, store, _ := encStore(t, map[string]string{"HCLOUD_TOKEN": "tok-enc"})
+// An .enc that does not decrypt is skipped with a warning that names the
+// entry and the cause class (never a value), and LoadProviderCreds still
+// returns nil.
+func TestLoadProviderCredsWarnsWithTheCause(t *testing.T) {
+	const entry = "Secret.hetzner.provisioning.HCLOUD_TOKEN"
+	identityHint := "Set HCLOUD_TOKEN, or set SOPS_AGE_KEY, SOPS_AGE_KEY_FILE or LOK8S_SSH_KEY to an identity of the store.\n"
 	other, err := age.GenerateX25519Identity()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"", other.String()} { // no identity; a wrong one
-		os.Unsetenv("SOPS_AGE_KEY")
-		if key != "" {
-			t.Setenv("SOPS_AGE_KEY", key)
-		}
-		os.Unsetenv("HCLOUD_TOKEN")
-		stderr := captureStderr(t, func() {
-			if err := LoadProviderCreds(p, "test.lok8s.dev"); err != nil {
-				t.Fatal(err)
+	cases := []struct {
+		name, key, want string
+		unreadable      bool
+	}{
+		{"no identity", "", "[warn] cannot read " + entry + ": the plaintext is missing, and no local age identity was found for its .enc. " + identityHint, false},
+		{"another identity", other.String(), "[warn] cannot read " + entry + ": the plaintext is missing, and its .enc does not decrypt with the local age identity (another identity, or a damaged file). " + identityHint, false},
+		{"unreadable .enc", other.String(), "[warn] cannot read " + entry + ": the plaintext is missing, and its .enc cannot be read. Set HCLOUD_TOKEN, or make " + entry + ".enc readable.\n", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.unreadable && os.Geteuid() == 0 {
+				t.Skip("root reads a 0000 file")
+			}
+			p, store, _ := encStore(t, map[string]string{"HCLOUD_TOKEN": "tok-enc"})
+			if c.key != "" {
+				t.Setenv("SOPS_AGE_KEY", c.key)
+			}
+			if c.unreadable {
+				enc := filepath.Join(store, entry+".enc")
+				if err := os.Chmod(enc, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(enc, 0o600) })
+			}
+			stderr := captureStderr(t, func() {
+				if err := LoadProviderCreds(p, "test.lok8s.dev"); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if stderr != c.want {
+				t.Errorf("stderr:\n got %q\nwant %q", stderr, c.want)
+			}
+			if got := os.Getenv("HCLOUD_TOKEN"); got != "" {
+				t.Errorf("HCLOUD_TOKEN = %q", got)
+			}
+			if plain := plaintextsIn(t, store); len(plain) != 0 {
+				t.Errorf("plaintext written to the store: %v", plain)
 			}
 		})
-		want := "[warn] cannot read Secret.hetzner.provisioning.HCLOUD_TOKEN: the plaintext is missing, and no local age identity decrypts its .enc. Set HCLOUD_TOKEN, or set SOPS_AGE_KEY or LOK8S_SSH_KEY to an identity of the store.\n"
-		if stderr != want {
-			t.Errorf("key=%t: stderr = %q, want %q", key != "", stderr, want)
-		}
-		if got := os.Getenv("HCLOUD_TOKEN"); got != "" {
-			t.Errorf("key=%t: HCLOUD_TOKEN = %q", key != "", got)
-		}
-		if plain := plaintextsIn(t, store); len(plain) != 0 {
-			t.Errorf("plaintext written to the store: %v", plain)
-		}
 	}
 }

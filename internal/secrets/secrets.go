@@ -86,10 +86,7 @@ func (c *Context) runner() execx.Runner {
 // flatStore resolves the deprecated flat store the way bash does:
 // ${PATH_SECRETS:-${PATH_BASE}/.secrets}.
 func (c *Context) flatStore() string {
-	if c.Paths.SecretsEnv != "" {
-		return c.Paths.SecretsEnv
-	}
-	return c.Paths.Base + "/.secrets"
+	return config.FlatSecretsStore(c.Paths)
 }
 
 // StorePath resolves the secrets store for the current context (bash:
@@ -118,7 +115,7 @@ func (c *Context) StorePath() string {
 // refusal (domain.CheckSecretsStore) and returns ErrHandled.
 func (c *Context) ResolveStore() (string, error) {
 	if c.Domain == "" || !fsutil.DirExists(c.Paths.Clusters+"/"+c.Domain+"/secrets") {
-		if err := domain.CheckSecretsStore(c.Paths.Clusters, c.Domain, c.ErrOut); err != nil {
+		if err := domain.CheckSecretsStore(c.Paths.Clusters, c.Domain, c.flatStore(), c.ErrOut); err != nil {
 			return "", ErrHandled
 		}
 	}

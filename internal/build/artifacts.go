@@ -96,7 +96,7 @@ func Artifacts(ctx context.Context, o Options) error {
 	// store would read and generate values in the wrong place. A
 	// --no-secrets render never reads the store, so it does not stop.
 	if !o.NoSecrets {
-		if err := domain.CheckSecretsStore(o.Paths.Clusters, o.Domain, stderr); err != nil {
+		if err := domain.CheckSecretsStore(o.Paths.Clusters, o.Domain, config.FlatSecretsStore(o.Paths), stderr); err != nil {
 			return err
 		}
 	}

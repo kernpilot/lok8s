@@ -304,10 +304,11 @@ build::artifacts() {
   # A domain without its own store in a project that keeps one per domain stops
   # here: the flat store would read and generate values in the wrong place. A
   # --no-secrets render never reads the store, so it does not stop.
-  if (( ! ${LOK8S_BUILD_NO_SECRETS:-0} )); then
-    domain::check_secrets_store "${domain}" || return 1
+  if (( ${LOK8S_BUILD_NO_SECRETS:-0} )); then
+    build::_export_secrets_path "${domain_dir}"
+  else
+    domain::export_secrets_store "${domain}" || return 1
   fi
-  build::_export_secrets_path "${domain_dir}"
   build::_resolve_api "${domain_dir}"
 
   # Resolve kubeconfig (some targets need it for cluster-aware kustomize

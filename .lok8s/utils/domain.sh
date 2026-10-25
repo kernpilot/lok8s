@@ -259,26 +259,40 @@ domain::require_driver() {
 # back to the flat .secrets/ store. That is the case when the domain
 # directory exists, it has no clusters/<domain>/secrets directory, and the
 # project keeps a store per domain: another clusters/*/secrets directory
-# exists. A project with only the flat store keeps working (returns 0).
-# The silent fallback read and generated values in the wrong store: the
-# first build of a new domain directory generated a new sops-age key and new
-# tokens into the flat store. Prints the refusal and returns 1. Go twin:
-# domain.CheckSecretsStore.
+# exists (the first in byte order, LC_ALL=C, is named, as the Go twin does).
+# A project with only the flat store keeps working (returns 0). An explicit
+# PATH_SECRETS does not override the refusal. The silent fallback read and
+# generated values in the wrong store: the first build of a new domain
+# directory generated a new sops-age key and new tokens into the flat store.
+# Prints the refusal and returns 1. Go twin: domain.CheckSecretsStore.
 domain::check_secrets_store() {
   local domain="${1:-}"
   local path_clusters="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}"
   [[ -n "${domain}" && -d "${path_clusters}/${domain}" ]] || return 0
   [[ ! -d "${path_clusters}/${domain}/secrets" ]] || return 0
   local d other=""
+  local -a stores=()
   for d in "${path_clusters}"/*/secrets; do
-    if [[ -d "${d}" ]]; then
-      other="${d}"
-      break
-    fi
+    [[ ! -d "${d}" ]] || stores+=("${d}")
   done
-  [[ -n "${other}" ]] || return 0
+  (( ${#stores[@]} )) || return 0
+  other="$(printf '%s\n' "${stores[@]}" | LC_ALL=C sort | head -n 1)"
   local store="${path_clusters}/${domain}/secrets"
-  error "domain ${domain} has no secrets store: ${store} does not exist, and this project keeps a store per domain (${other}). lo does not use the flat .secrets/ store for ${domain}."
-  error "  To generate new values, create the empty directory ${store}. To use the values of another domain, copy its .enc files into that directory, then run \"lo secrets decrypt --domain ${domain}\"."
+  error "domain ${domain} has no secrets store: ${store} does not exist, and this project keeps a store per domain (${other}). lo does not fall back to ${PATH_SECRETS:-${PATH_BASE:-}/.secrets}."
+  error "  Create the empty directory ${store} to generate new values for ${domain}."
   return 1
+}
+
+# domain::export_secrets_store <domain> — the one check-then-export every
+# store reader runs: refuse a domain without a store (check_secrets_store),
+# else point PATH_SECRETS at clusters/<domain>/secrets when it exists. A
+# project with only the flat store keeps its PATH_SECRETS. Returns 1 on the
+# refusal.
+domain::export_secrets_store() {
+  local domain="${1:-}"
+  local path_clusters="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}"
+  domain::check_secrets_store "${domain}" || return 1
+  if [[ -n "${domain}" && -d "${path_clusters}/${domain}/secrets" ]]; then
+    export PATH_SECRETS="${path_clusters}/${domain}/secrets"
+  fi
 }

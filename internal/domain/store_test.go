@@ -67,20 +67,32 @@ func TestCheckSecretsStoreMessage(t *testing.T) {
 	clusters := filepath.Join(t.TempDir(), "clusters")
 	mkdirs(t, filepath.Join(clusters, "kubehz.dev", "secrets"), filepath.Join(clusters, "green.dev"))
 	var buf bytes.Buffer
-	err := CheckSecretsStore(clusters, "green.dev", &buf)
+	// The message names the store lo would otherwise use, here an explicit
+	// PATH_SECRETS: it does not override the refusal.
+	err := CheckSecretsStore(clusters, "green.dev", "/custom/flat", &buf)
 	if !errors.Is(err, ui.ErrHandled) {
 		t.Fatalf("err = %v, want ui.ErrHandled", err)
 	}
 	store := clusters + "/green.dev/secrets"
-	want := "[error] domain green.dev has no secrets store: " + store + " does not exist, and this project keeps a store per domain (" + clusters + "/kubehz.dev/secrets). lo does not use the flat .secrets/ store for green.dev.\n" +
-		"[error]   To generate new values, create the empty directory " + store + ". To use the values of another domain, copy its .enc files into that directory, then run \"lo secrets decrypt --domain green.dev\".\n"
+	want := "[error] domain green.dev has no secrets store: " + store + " does not exist, and this project keeps a store per domain (" + clusters + "/kubehz.dev/secrets). lo does not fall back to /custom/flat.\n" +
+		"[error]   Create the empty directory " + store + " to generate new values for green.dev.\n"
 	if buf.String() != want {
 		t.Errorf("message:\n got %q\nwant %q", buf.String(), want)
 	}
 	// Creating the empty store is the documented way out.
 	mkdirs(t, store)
 	buf.Reset()
-	if err := CheckSecretsStore(clusters, "green.dev", &buf); err != nil || buf.Len() != 0 {
+	if err := CheckSecretsStore(clusters, "green.dev", "/custom/flat", &buf); err != nil || buf.Len() != 0 {
 		t.Errorf("with the store: err = %v, output %q", err, buf.String())
+	}
+}
+
+// The other store is the first in byte order (bash: LC_ALL=C sort), so both
+// implementations name the same one whatever the locale.
+func TestMissingSecretsStoreNamesTheByteOrderFirst(t *testing.T) {
+	clusters := filepath.Join(t.TempDir(), "clusters")
+	mkdirs(t, filepath.Join(clusters, "a.dev", "secrets"), filepath.Join(clusters, "B.dev", "secrets"), filepath.Join(clusters, "new.dev"))
+	if other, ok := MissingSecretsStore(clusters, "new.dev"); !ok || other != clusters+"/B.dev/secrets" {
+		t.Errorf("MissingSecretsStore = (%q, %v), want B.dev (byte order)", other, ok)
 	}
 }

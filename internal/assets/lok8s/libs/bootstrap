@@ -1994,10 +1994,7 @@ bootstrap::apply() {
   # CA unchanged. A domain without its own store in a project that keeps one
   # per domain stops here (domain::check_secrets_store): the flat store would
   # read and generate values in the wrong place.
-  domain::check_secrets_store "${domain}" || return 1
-  if [[ -d "${PATH_CLUSTERS}/${domain}/secrets" ]]; then
-    export PATH_SECRETS="${PATH_CLUSTERS}/${domain}/secrets"
-  fi
+  domain::export_secrets_store "${domain}" || return 1
 
   # LOK8S_BOOTSTRAP_DRYRUN/LOK8S_BOOTSTRAP_ALLOW_GENERATORS: the sentinel
   # every lo state writer checks at its source — the secrets plugin (the

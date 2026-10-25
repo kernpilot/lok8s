@@ -47,15 +47,17 @@ func MissingSecretsStore(clustersDir, domain string) (other string, ok bool) {
 }
 
 // CheckSecretsStore prints the refusal to errTo and returns ui.ErrHandled
-// when MissingSecretsStore reports the domain, else nil. The paths are
-// string-joined like the bash message (bash interpolates them verbatim).
-func CheckSecretsStore(clustersDir, domain string, errTo io.Writer) error {
+// when MissingSecretsStore reports the domain, else nil. flat is the store
+// lo would otherwise use (config.FlatSecretsStore). An explicit PATH_SECRETS
+// does not override the refusal. The paths are string-joined like the bash
+// message (bash interpolates them verbatim).
+func CheckSecretsStore(clustersDir, domain, flat string, errTo io.Writer) error {
 	other, ok := MissingSecretsStore(clustersDir, domain)
 	if !ok {
 		return nil
 	}
 	store := clustersDir + "/" + domain + "/secrets"
-	ui.ErrorTo(errTo, "domain %s has no secrets store: %s does not exist, and this project keeps a store per domain (%s). lo does not use the flat .secrets/ store for %s.", domain, store, other, domain)
-	ui.ErrorTo(errTo, "  To generate new values, create the empty directory %s. To use the values of another domain, copy its .enc files into that directory, then run \"lo secrets decrypt --domain %s\".", store, domain)
+	ui.ErrorTo(errTo, "domain %s has no secrets store: %s does not exist, and this project keeps a store per domain (%s). lo does not fall back to %s.", domain, store, other, flat)
+	ui.ErrorTo(errTo, "  Create the empty directory %s to generate new values for %s.", store, domain)
 	return ui.ErrHandled
 }

@@ -11,6 +11,7 @@
 # argsh disable-file=AG012
 
 import ^utils/types
+import ^utils/domain
 import ^utils/verbose
 import ^drivers/capi/generate
 
@@ -88,6 +89,8 @@ k8s::infrastructure() {
   :args "Build infrastructure artifacts" "${@}"
   local domain="${domain:-${DOMAIN_NAME:-lok8s.dev}}"
   local out_dir="${PATH_CLUSTERS}/${domain}/artifacts"
+  # The domain's own store, as `lo build` uses it; no silent flat fallback.
+  domain::export_secrets_store "${domain}" || return 1
   mkdir -p "${out_dir}"
   KUBECONFIG="${PATH_BASE}/.kubeconfig/secret.${domain}.yaml" \
     kustomize build --enable-alpha-plugins "${PATH_CLUSTERS}/${domain}/targets" > "${out_dir}/infrastructure.yaml"
@@ -112,6 +115,7 @@ k8s::platform() {
     error "Overlay not found: ${overlay}"
     return 1
   fi
+  domain::export_secrets_store "${domain}" || return 1
   mkdir -p "${out_dir}"
   KUBECONFIG="${PATH_BASE}/.kubeconfig/secret.${domain}.yaml" \
     kustomize build --enable-alpha-plugins "${overlay}" > "${out_dir}/platform.yaml"

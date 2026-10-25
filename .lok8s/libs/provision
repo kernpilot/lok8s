@@ -265,16 +265,18 @@ provision::resolve_clusterref() {
 # — provision loads them too but only runs after rebuild, too late for recover.
 provision::load_provider_creds() {
   local domain="${1}"
-  local secrets_dir="${PATH_CLUSTERS}/${domain}/secrets" k v f
+  local secrets_dir="${PATH_CLUSTERS}/${domain}/secrets" k v f rc
   for k in HCLOUD_TOKEN HROBOT_USER HROBOT_PASSWORD; do
     [[ -n "${!k:-}" ]] && continue
     f="${secrets_dir}/Secret.hetzner.provisioning.${k}"
     if ! v="$(cat "${f}" 2>/dev/null)"; then
       [[ -f "${f}.enc" ]] || continue
-      v="$(secrets::decrypt_entry "${f}.enc")" || {
-        warn "cannot read Secret.hetzner.provisioning.${k}: the plaintext is missing, and no local age identity decrypts its .enc. Set ${k}, or set SOPS_AGE_KEY or LOK8S_SSH_KEY to an identity of the store."
+      rc=0
+      v="$(secrets::decrypt_entry "${f}.enc")" || rc=$?
+      if (( rc )); then
+        provision::_cred_warning "Secret.hetzner.provisioning.${k}" "${k}" "${rc}"
         continue
-      }
+      fi
     fi
     [[ -n "${v}" ]] && export "${k}=${v}"
   done
@@ -287,6 +289,20 @@ provision::load_provider_creds() {
   # block was inline in dispatch; a landmine once extracted. Pinned by the
   # "returns 0 when robot creds absent" unit test.
   return 0
+}
+
+# provision::_cred_warning <entry> <env_var> <rc> — the warning for a failed
+# credential decrypt: the cause class (secrets::decrypt_entry's return code)
+# and the next action. Go twin: provision.credWarning.
+provision::_cred_warning() {
+  local entry="${1}" var="${2}" rc="${3}"
+  local hint="Set ${var}, or set SOPS_AGE_KEY, SOPS_AGE_KEY_FILE or LOK8S_SSH_KEY to an identity of the store."
+  case "${rc}" in
+    2) warn "cannot read ${entry}: the plaintext is missing, and no local age identity was found for its .enc. ${hint}" ;;
+    3) warn "cannot read ${entry}: the plaintext is missing, and its .enc cannot be read. Set ${var}, or make ${entry}.enc readable." ;;
+    4) warn "cannot read ${entry}: the plaintext is missing, and sops is not installed. Set ${var}, or install sops (b install)." ;;
+    *) warn "cannot read ${entry}: the plaintext is missing, and its .enc does not decrypt with the local age identity (another identity, or a damaged file). ${hint}" ;;
+  esac
 }
 
 # provision::read_kind <cluster_yaml> — the driver name for the dispatch, with

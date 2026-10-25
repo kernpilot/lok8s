@@ -223,7 +223,7 @@ func (e *Engine) apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 	// without its own store in a project that keeps one per domain stops
 	// here (domain.CheckSecretsStore): the flat store would read and generate
 	// values in the wrong place.
-	if err := domainpkg.CheckSecretsStore(e.Paths.Clusters, domain, stderr); err != nil {
+	if err := domainpkg.CheckSecretsStore(e.Paths.Clusters, domain, config.FlatSecretsStore(e.Paths), stderr); err != nil {
 		return err
 	}
 	if secretsDir := e.Paths.Clusters + "/" + domain + "/secrets"; fsutil.DirExists(secretsDir) {

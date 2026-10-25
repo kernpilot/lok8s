@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/testutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -31,8 +32,13 @@ func TestApplyRefusesADomainWithoutAStore(t *testing.T) {
 		if err == nil {
 			t.Fatalf("dry=%v: a domain without a store bootstrapped", dry)
 		}
-		if !dry && !errors.Is(err, ui.ErrHandled) {
+		// The dry run wraps it in its exit code (driver.ExitError, rc 2:
+		// "not a diff"); the refusal is still the handled error inside.
+		if !errors.Is(err, ui.ErrHandled) {
 			t.Errorf("dry=%v: err = %v, want ui.ErrHandled", dry, err)
+		}
+		if dry && driver.ExitCode(err) != 2 {
+			t.Errorf("dry run: rc = %d, want 2", driver.ExitCode(err))
 		}
 		if !strings.Contains(errOut.String(), "[error] domain test.lok8s.dev has no secrets store: "+p.Clusters+"/test.lok8s.dev/secrets does not exist") {
 			t.Errorf("dry=%v: stderr = %q", dry, errOut.String())

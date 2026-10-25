@@ -772,10 +772,7 @@ kubeone::render_addons() {
   # flat values. A domain without a store in a project that keeps one per
   # domain stops here (domain::check_secrets_store).
   if [[ -n "${bootstrap_domain}" ]]; then
-    domain::check_secrets_store "${bootstrap_domain}" || return 1
-    if [[ -d "${PATH_CLUSTERS}/${bootstrap_domain}/secrets" ]]; then
-      export PATH_SECRETS="${PATH_CLUSTERS}/${bootstrap_domain}/secrets"
-    fi
+    domain::export_secrets_store "${bootstrap_domain}" || return 1
   fi
   local addons_dir="${work_dir}/addons"
   # This addon set is Hetzner-specific (cilium values.hetzner, the robot-aware
