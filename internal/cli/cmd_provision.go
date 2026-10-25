@@ -197,7 +197,8 @@ func newProvisionCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 }
 
 func newDestroyCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
-	return argshFlagErrors(&cobra.Command{
+	var confirmCluster string
+	cmd := &cobra.Command{
 		Use:          "destroy",
 		Aliases:      spec.aliases,
 		Short:        spec.short,
@@ -207,9 +208,13 @@ func newDestroyCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			d := ambientMainEnv(cmd, paths)
-			return dispatchExit(cmd.ErrOrStderr(), newDispatcher(cmd, paths).DispatchDestroy(cmd.Context(), d))
+			disp := newDispatcher(cmd, paths)
+			disp.ConfirmCluster = confirmCluster
+			return dispatchExit(cmd.ErrOrStderr(), disp.DispatchDestroy(cmd.Context(), d))
 		},
-	})
+	}
+	cmd.Flags().StringVar(&confirmCluster, "confirm-cluster", "", "The provider's cluster_name, to confirm the destroy off a terminal (--force does not replace it)")
+	return argshFlagErrors(cmd)
 }
 
 func newBootstrapCommand(paths *config.Paths, spec commandSpec) *cobra.Command {

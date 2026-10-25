@@ -100,6 +100,14 @@ type ProviderStatuser interface {
 	ProviderStatus(ctx context.Context, configFile string) (string, error)
 }
 
+// ProviderDestroyPlanner is the optional provider::destroy_plan hook:
+// READ-ONLY, what provider::destroy would delete. Line 1 is
+// "cluster\t<cluster_name>", then one "<resource>\t<id>\t<name>" line per
+// resource. ok=false when the provider has no such hook.
+type ProviderDestroyPlanner interface {
+	DestroyPlan(ctx context.Context, configFile, workDir string) (plan string, ok bool, err error)
+}
+
 // Deps is what the dispatch hands a driver factory. Provider fields are nil
 // or empty until the dispatch loads a provider (bash sources the provider
 // into globals AFTER sourcing the driver; the shared pointer mirrors that —

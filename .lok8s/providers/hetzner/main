@@ -168,12 +168,11 @@ provider::provision() {
   debug "hetzner provision complete"
 }
 
-provider::destroy() {
-  local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
-  local work_dir="${2:-/tmp}"
-  export PROVIDER_CONFIG_FILE="${config_file}"
-
-  # Try to read cluster_name from config, fall back to dump state
+# hetzner::_destroy_cluster_name <config_file> <work_dir>
+# The cluster name provider::destroy deletes by: the descriptor's
+# cluster_name, else the provision dump, else the first server name.
+hetzner::_destroy_cluster_name() {
+  local config_file="${1}" work_dir="${2}"
   local cluster_name=""
   cluster_name=$(_cfg '.cluster_name // ""' 2>/dev/null || echo "")
   if [[ -z "${cluster_name}" ]] && [[ -f "${work_dir}/hetzner.dump.json" ]]; then
@@ -186,20 +185,58 @@ provider::destroy() {
   fi
 
   [[ -n "${cluster_name}" ]] || { error "cannot determine cluster name for destroy"; return 1; }
+  echo "${cluster_name}"
+}
 
-  local selector="lok8s.dev/cluster=${cluster_name}"
+# hetzner::_destroy_resources <cluster_name>
+# One "<resource>\t<id>\t<name>" line per hcloud resource that carries
+# lok8s.dev/cluster=<cluster_name>, in the order provider::destroy deletes
+# them. READ-ONLY.
+hetzner::_destroy_resources() {
+  local selector="lok8s.dev/cluster=${1}" resource
+  for resource in load-balancer server placement-group firewall volume floating-ip ssh-key network; do
+    hcloud "${resource}" list -o json -l "${selector}" \
+      | jq -r --arg r "${resource}" '.[] | [$r, (.id | tostring), (.name // "")] | @tsv' 2>/dev/null || true
+  done
+}
+
+provider::destroy() {
+  local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
+  local work_dir="${2:-/tmp}"
+  export PROVIDER_CONFIG_FILE="${config_file}"
+
+  local cluster_name
+  cluster_name="$(hetzner::_destroy_cluster_name "${config_file}" "${work_dir}")" || return 1
   debug "destroying hetzner resources for ${cluster_name}"
 
-  local ids
-  for resource in load-balancer server placement-group firewall volume floating-ip ssh-key network; do
-    ids=$(hcloud "${resource}" list -o json -l "${selector}" | jq -r '.[].id' 2>/dev/null || echo "")
-    for id in ${ids}; do
-      debug "deleting ${resource} ${id}"
-      hcloud "${resource}" delete "${id}" 2>/dev/null || true
-    done
-  done
+  local resource id
+  while IFS=$'\t' read -r resource id _; do
+    [[ -n "${id}" ]] || continue
+    debug "deleting ${resource} ${id}"
+    hcloud "${resource}" delete "${id}" 2>/dev/null || true
+  done < <(hetzner::_destroy_resources "${cluster_name}")
 
   debug "hetzner destroy complete for ${cluster_name}"
+}
+
+# ── Optional hook: destroy_plan ──────────────────────────
+#
+# provider::destroy_plan <config_file> <work_dir>
+#   READ-ONLY. What provider::destroy would delete. Line 1 is
+#   "cluster<TAB><cluster_name>", then one "<resource><TAB><id><TAB><name>"
+#   line per resource. provider::destroy deletes EVERY resource in the
+#   token's project that carries lok8s.dev/cluster=<cluster_name>, so
+#   `lo destroy` shows this list, refuses a cluster_name that another domain
+#   also uses, and asks for the cluster_name before it deletes anything.
+provider::destroy_plan() {
+  local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
+  local work_dir="${2:-/tmp}"
+  export PROVIDER_CONFIG_FILE="${config_file}"
+
+  local cluster_name
+  cluster_name="$(hetzner::_destroy_cluster_name "${config_file}" "${work_dir}")" || return 1
+  printf 'cluster\t%s\n' "${cluster_name}"
+  hetzner::_destroy_resources "${cluster_name}"
 }
 
 # ── Standard output ──────────────────────────────────────

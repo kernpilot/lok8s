@@ -274,10 +274,27 @@ Selective deploy is **opt-in**: pass `-l key=value` to apply only the objects ca
 Destroy a cluster.
 
 ```bash
-lo destroy [--domain <domain>]
+lo destroy [--domain <domain>] [--confirm-cluster <cluster_name>]
 ```
 
 Calls `driver::destroy` from the appropriate driver contract.
+
+With `--remote`, a provider that deletes by a cluster name (the hetzner
+provider deletes every resource in the token's project that carries
+`lok8s.dev/cluster=<cluster_name>`) gets a guard before anything is deleted:
+
+1. When another domain under `clusters/` has the same `cluster_name`
+   (`hetzner.json`, the `spec.provider.configRef` file or an inline
+   `spec.provider.config`), the destroy stops. A domain that was copied
+   from another one and kept the name would delete the other cluster too.
+2. The destroy lists the resources that the provider would delete.
+3. On a terminal, type the `cluster_name` to continue. Off a terminal, pass
+   it with `--confirm-cluster <cluster_name>`. `--force` does not replace
+   it. A refusal exits `3` and deletes nothing.
+
+This guard replaces the `yes` prompt for such a provider. `lo init cluster`
+refuses a domain whose cluster name (the first label of the domain) another
+domain already uses as its `metadata.name` or its `cluster_name`.
 
 ### lo recover
 

@@ -66,6 +66,10 @@ type Dispatcher struct {
 	// Remote is remote mode (bash: LOK8S_REMOTE=1): the lo driver loses its
 	// gate exemption and gains provider loading.
 	Remote bool
+	// ConfirmCluster is `lo destroy --confirm-cluster <name>`: the answer to
+	// the cluster_name guard off a terminal (destroy_guard.go). Force does
+	// not replace it.
+	ConfirmCluster string
 	// Interactive overrides the tty/CI/LOK8S_NONINTERACTIVE detection
 	// (tests stub it exactly like the bats redefine
 	// provision::_interactive).
@@ -397,15 +401,10 @@ func (d *Dispatcher) DispatchDestroy(ctx context.Context, domainName string) err
 		return ui.Handled(fmt.Errorf("unknown cluster kind %s", kind))
 	}
 
-	// Real-infrastructure gate — destroying a cloud cluster deprovisions
-	// servers/LBs/volumes; confirm BEFORE deregistration or the driver run.
-	if err := d.ConfirmInfra(domainName, clusterYAML, kind, ActionDestroy); err != nil {
-		return err
-	}
-
 	// Provider only in remote mode (bash: destroy loads it for --remote;
 	// note: load only, no validate — matching the bash destroy path).
-	// Loaded before the driver is built, so its Deps are complete.
+	// Loaded before the driver is built, so its Deps are complete, and
+	// before the gate, which asks the provider what it would delete.
 	deps := d.newDeps()
 	if d.Remote {
 		if name := ReadProviderName(clusterYAML); name != "" {
@@ -421,6 +420,20 @@ func (d *Dispatcher) DispatchDestroy(ctx context.Context, domainName string) err
 				return err
 			}
 			deps.Provider, deps.ProviderName, deps.ProviderConfigFile = prov, name, cfg
+		}
+	}
+
+	// Real-infrastructure gate — destroying a cloud cluster deprovisions
+	// servers/LBs/volumes; confirm BEFORE deregistration or the driver run.
+	// A provider that deletes by cluster_name gets the cluster_name guard
+	// instead (destroy_guard.go).
+	guarded, err := d.guardDestroy(ctx, domainName, kind, deps)
+	if err != nil {
+		return err
+	}
+	if !guarded {
+		if err := d.ConfirmInfra(domainName, clusterYAML, kind, ActionDestroy); err != nil {
+			return err
 		}
 	}
 	drv, err := factory(deps)

@@ -146,6 +146,15 @@ func WriteClusterSpec(clusters, dom, driverName string, force bool, out, stderr 
 		ui.ErrorTo(stderr, "%v", err)
 		return ErrHandled
 	}
+	// The cluster name names the kubeconfig file, and the provider's
+	// cluster_name selects what lo destroy deletes. A second domain with the
+	// same name shares the kubeconfig, and its destroy can delete the
+	// resources of the other (domain.ClusterNameUsers).
+	name := ClusterName(dom)
+	if users := domain.ClusterNameUsers(clusters, dom, name, true); len(users) > 0 {
+		ui.ErrorTo(stderr, "the cluster name '%s' (the first label of %s) is already in use by: %s, as metadata.name or as the provider cluster_name. Two domains with one cluster name share a kubeconfig, and lo destroy of one can delete the resources of the other. Nothing was written. Choose a domain with another first label.", name, dom, strings.Join(users, ", "))
+		return ErrHandled
+	}
 	dir := filepath.Join(clusters, dom)
 	file := filepath.Join(dir, "cluster.lok8s.yaml")
 	if fsutil.FileExists(file) && !force {

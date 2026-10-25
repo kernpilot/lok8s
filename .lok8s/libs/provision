@@ -142,6 +142,106 @@ provision::confirm_infra() {
   fi
 }
 
+# provision::_cluster_name_users <domain> <cluster_name>
+# The OTHER domains under clusters/ whose provider config carries
+# <cluster_name>: clusters/<d>/hetzner.json, the file of
+# spec.provider.configRef, or an inline spec.provider.config. One per line,
+# sorted (Go twin: clusterNameUsers).
+provision::_cluster_name_users() {
+  local self="${1}" name="${2}" dir other spec ref f
+  local -a files=() names=() users=()
+  for dir in "${PATH_CLUSTERS}"/*/; do
+    [[ -d "${dir}" ]] || continue
+    other="$(basename "${dir}")"
+    [[ "${other}" != "${self}" && "${other}" != .* ]] || continue
+    files=() names=()
+    [[ ! -f "${dir}hetzner.json" ]] || files+=("${dir}hetzner.json")
+    spec="${dir}cluster.lok8s.yaml"
+    if [[ -f "${spec}" ]]; then
+      ref="$(yq -r '.spec.provider.configRef // ""' "${spec}" 2>/dev/null)" || ref=""
+      [[ -z "${ref}" || ! -f "${dir}${ref}" ]] || files+=("${dir}${ref}")
+      names+=("$(yq -r '.spec.provider.config.cluster_name // ""' "${spec}" 2>/dev/null)")
+    fi
+    for f in "${files[@]}"; do
+      names+=("$(yq -r '.cluster_name // ""' "${f}" 2>/dev/null)")
+    done
+    for f in "${names[@]}"; do
+      [[ "${f}" != "${name}" ]] || { users+=("${other}"); break; }
+    done
+  done
+  (( ${#users[@]} == 0 )) || printf '%s\n' "${users[@]}" | LC_ALL=C sort
+}
+
+# provision::_destroy_guard <domain> <kind>
+# The cluster_name guard of `lo destroy`, for a provider with the
+# provider::destroy_plan hook (Go twin: destroy_guard.go). Such a provider
+# deletes by a name, not by a list: the hetzner provider deletes EVERY
+# resource in the token's project that carries lok8s.dev/cluster=<cluster_name>.
+# A domain copied from another one that kept the cluster_name and the token
+# would delete the other cluster too. So: refuse a cluster_name another
+# domain uses, print what would be deleted, and take the cluster_name typed
+# on a terminal or from --confirm-cluster (`confirm_cluster`, dynamic
+# scoping from main::destroy). `force` does not skip it. Returns 3 on a
+# refusal or a decline (nothing ran), 1 when the plan fails.
+provision::_destroy_guard() {
+  local domain="${1}" kind="${2}"
+  local work_dir="${PATH_CLUSTERS}/${domain}/.provider"
+  [[ "${kind}" != "kubeone" ]] || work_dir="${PATH_CLUSTERS}/${domain}/.kubeone"
+
+  local plan
+  plan="$(provider::destroy_plan "${PROVIDER_CONFIG_FILE:-}" "${work_dir}")" || return 1
+
+  local name="" line rkind rid rname
+  local -a rows=()
+  while IFS= read -r line; do
+    [[ -n "${line//$'\t'/}" ]] || continue
+    IFS=$'\t' read -r rkind rid rname <<<"${line}"
+    if [[ "${rkind}" == "cluster" && -z "${name}" && ${#rows[@]} -eq 0 ]]; then
+      name="${rid}${rname:+$'\t'${rname}}"
+      continue
+    fi
+    rows+=("${rkind}"$'\t'"${rid}"$'\t'"${rname}")
+  done <<<"${plan}"
+
+  if [[ -z "${name}" ]]; then
+    error "the provider gave no cluster_name for '${domain}'. Nothing was deleted. Set cluster_name in the provider config, then run lo destroy again."
+    return 3
+  fi
+
+  local users
+  users="$(provision::_cluster_name_users "${domain}" "${name}")"
+  if [[ -n "${users}" ]]; then
+    error "cluster_name '${name}' of '${domain}' is also the cluster_name of: ${users//$'\n'/, }. The provider deletes every resource of a cluster_name, so this destroy would delete the resources of those domains too. Nothing was deleted. Give each domain its own cluster_name, then run lo destroy again."
+    return 3
+  fi
+
+  {
+    printf '\n  \033[1;33m⚠ %s\033[0m \033[2m·\033[0m destroy deletes these resources of cluster_name \033[1m%s\033[0m:\n' "${domain}" "${name}"
+    (( ${#rows[@]} )) || printf '    (no resource found)\n'
+    local row
+    for row in "${rows[@]}"; do
+      IFS=$'\t' read -r rkind rid rname <<<"${row}"
+      printf '    %s %s (%s)\n' "${rkind}" "${rname}" "${rid}"
+    done
+  } >&2
+
+  if [[ -n "${confirm_cluster:-}" ]]; then
+    [[ "${confirm_cluster}" == "${name}" ]] || {
+      error "--confirm-cluster '${confirm_cluster}' does not match the cluster_name '${name}' of '${domain}'. Nothing was deleted."
+      return 3
+    }
+    return 0
+  fi
+  if ! provision::_interactive; then
+    error "refusing to destroy '${domain}' non-interactively. Confirm the cluster_name: lo destroy --domain ${domain} --confirm-cluster ${name}"
+    return 3
+  fi
+  local ans=""
+  printf '\n  type the cluster_name (%s) to delete these resources: ' "${name}" >&2
+  read -r ans || { error "aborted — '${domain}' left untouched"; return 3; }
+  [[ "${ans}" == "${name}" ]] || { error "aborted — '${domain}' left untouched"; return 3; }
+}
+
 # Resolve KUBECONFIG for deploy domains that reference another cluster.
 # Requires: $domain, $cluster_override (optional), $PATH_LOK8S
 _resolve_kubeconfig_for_domain() {
@@ -545,14 +645,8 @@ provision::dispatch_destroy() {
   local kind_script="${PATH_LOK8S}/drivers/${kind}/main"
   [[ -f "${kind_script}" ]] || { error "Unknown cluster kind: ${kind}"; return 1; }
 
-  # Real-infrastructure gate — destroying a cloud cluster deprovisions
-  # servers/LBs/volumes; confirm before deregistration or the driver run.
-  # `|| return $?`: a decline propagates its sentinel rc 3 to the caller.
-  provision::confirm_infra "${domain}" "${cluster_yaml}" "${kind}" "destroy" || return $?
-  # shellcheck source=/dev/null
-  source "${kind_script}"
-
-  # Source provider if present and --remote was used (needed for destroy)
+  # Source provider if present and --remote was used (needed for destroy).
+  # Loaded before the gate, which asks the provider what it would delete.
   if [[ "${LOK8S_REMOTE:-}" == "1" ]]; then
     local provider_name
     provider_name=$(provider::read_name "${cluster_yaml}" 2>/dev/null) || true
@@ -561,6 +655,19 @@ provision::dispatch_destroy() {
       provider::load "${provider_name}"
     fi
   fi
+
+  # Real-infrastructure gate — destroying a cloud cluster deprovisions
+  # servers/LBs/volumes; confirm before deregistration or the driver run.
+  # A provider that deletes by cluster_name gets the cluster_name guard
+  # instead (provision::_destroy_guard).
+  # `|| return $?`: a decline propagates its sentinel rc 3 to the caller.
+  if [[ -n "${PROVIDER_NAME:-}" ]] && declare -F provider::destroy_plan &>/dev/null; then
+    provision::_destroy_guard "${domain}" "${kind}" || return $?
+  else
+    provision::confirm_infra "${domain}" "${cluster_yaml}" "${kind}" "destroy" || return $?
+  fi
+  # shellcheck source=/dev/null
+  source "${kind_script}"
 
   # kubehz deregistration: deregister before destroying. Best-effort HERE
   # only — deregister_cluster now returns 1 when the platform row was not

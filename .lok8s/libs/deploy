@@ -50,8 +50,11 @@ main::deploy() {
 
 main::destroy() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
+  # confirm_cluster: read by provision::_destroy_guard (dynamic scoping).
+  local confirm_cluster
   local -a args=(
     'domain|:^~domain'  'Domain to use'
+    'confirm-cluster|'  "The provider's cluster_name, to confirm the destroy off a terminal (--force does not replace it)"
     "${args[@]:-}"
   )
   :args "Destroy a cluster" "${@}"
