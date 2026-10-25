@@ -420,11 +420,13 @@ lo provision --domain my-cluster.example.com --bootstrap --only cert-manager --w
 ```
 
 `--only` applies (or dry-runs) the named `spec.bootstrap` entries. A value
-matches an entry by its entry name (the `name:` override when set, else the
-last path element), by its key as written in `spec.bootstrap`
-(`./targets/flux` for `- ./targets/flux: {dependsOn: [fluxcd]}`), or by its
-addon directory name. The key tells apart an addon and a target with the
-same last path element (`rook-ceph` and `./targets/rook-ceph`).
+selects every entry that it matches by the entry name (the `name:` override
+when set, else the last path element), by the key as written in
+`spec.bootstrap` (`./targets/flux` for `- ./targets/flux: {dependsOn:
+[fluxcd]}`), or by the directory name of the addon or the target. Thus
+`--only rook-ceph` selects the `rook-ceph` addon and also
+`./targets/rook-ceph`, also when its `name:` is `rook-ceph-cluster`. The key
+selects one of them: `--only ./targets/rook-ceph`.
 `dependsOn` is not expanded: a dependency you do not name is not applied,
 and only the edges among the named entries order the run. When an omitted
 entry is a prerequisite of a named one, lo prints a warning before it

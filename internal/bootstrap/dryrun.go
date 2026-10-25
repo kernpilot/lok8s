@@ -260,8 +260,11 @@ func topoOrder(nodes []*node) []int {
 // runDryRun renders (and diffs) every entry in topological order and
 // prints one report line per entry plus a summary (bash:
 // bootstrap::_run_dry). A report line names the entry by its entry name,
-// which --only accepts (#281). Only the render-dir files carry the NN-
-// order prefix. Off a terminal the lines are the plain contract;
+// which --only accepts (#281); when two entries of the run share the name
+// (a tolerated basename collision), the line adds the key as written,
+// `rook-ceph (./targets/rook-ceph)`, which selects that one entry. Only the
+// render-dir files carry the NN- order prefix. Off a terminal the lines are
+// the plain contract;
 // on a terminal the status word is painted. restoreD is the already-computed
 // restore.d pseudo-entry (nil when there was nothing to restore, or --only
 // narrowed the run — restore.d is out of scope either way; see Apply).
@@ -275,6 +278,10 @@ func (e *Engine) runDryRun(ctx context.Context, nodes []*node, base Job, restore
 	width := max(len(strconv.Itoa(len(order))), 2)
 	counts := map[dryRunStatus]int{}
 	total, nondeterministic := 0, 0
+	sameName := map[string]int{}
+	for _, nd := range nodes {
+		sameName[nd.entry.Name]++
+	}
 	if restoreD != nil {
 		total++
 		counts[restoreD.status]++
@@ -291,13 +298,17 @@ func (e *Engine) runDryRun(ctx context.Context, nodes []*node, base Job, restore
 		// on purpose even when the caller passed --force.
 		job.Wait, job.Force, job.NonInteractive = false, false, true
 		stem := fmt.Sprintf("%0*d-%s", width, pos+1, nd.entry.Name)
+		label := nd.entry.Name
+		if sameName[label] > 1 {
+			label += " (" + nd.entry.Key + ")"
+		}
 		res := e.dryRunOne(ctx, job, stem)
 		total++
 		counts[res.status]++
 		nondeterministic += len(res.nondeterministic)
-		fmt.Fprintf(stdout, "bootstrap dry-run: %s: %s\n", nd.entry.Name, res.render(ui.For(stdout)))
+		fmt.Fprintf(stdout, "bootstrap dry-run: %s: %s\n", label, res.render(ui.For(stdout)))
 		for _, obj := range res.nondeterministic {
-			fmt.Fprintf(stdout, "bootstrap dry-run: %s: non-deterministic (regenerated on every apply): %s\n", nd.entry.Name, obj)
+			fmt.Fprintf(stdout, "bootstrap dry-run: %s: non-deterministic (regenerated on every apply): %s\n", label, obj)
 		}
 	}
 	// Review round 2, item F: inconclusive (needs-crd) is counted

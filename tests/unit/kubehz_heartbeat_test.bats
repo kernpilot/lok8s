@@ -46,11 +46,16 @@ setup() {
   cat > "${stubs}" <<'STUBS_EOF'
 # timeout: the pod's `timeout SECS CMD ARGS` (busybox and coreutils take the
 # same form). It logs the bound and the command, and runs the command as a
-# shell function, so the kubectl stub below answers it.
+# shell function, so the kubectl stub below answers it. A command that
+# contains STUB_TIMEOUT_MATCH times out instead: busybox kills it with
+# SIGTERM (rc 143), and it prints nothing.
 timeout() {
-  _secs=$1
+  local secs=$1
   shift
-  printf '%s %s\n' "${_secs}" "$*" >> "${STUB_TIMEOUT_LOG}"
+  printf '%s %s\n' "${secs}" "$*" >> "${STUB_TIMEOUT_LOG}"
+  case "$*" in
+    *"${STUB_TIMEOUT_MATCH:-<none>}"*) return 143 ;;
+  esac
   "$@"
 }
 kubectl() {
@@ -58,8 +63,9 @@ kubectl() {
   # In the pod, kubectl reads the in-cluster config. A client-config flag
   # makes it skip that config and dial localhost:8080 (B423, proven on prod
   # with alpine/k8s 1.31.4): the stub refuses the same way.
-  for _arg in "$@"; do
-    case "${_arg}" in
+  local arg
+  for arg in "$@"; do
+    case "${arg}" in
       --request-timeout|--request-timeout=*|--server|--server=*|-s|--kubeconfig|--kubeconfig=*|\
       --context|--context=*|--cluster|--cluster=*|--user|--user=*|--token|--token=*|\
       --username|--username=*|--password|--password=*|--certificate-authority|--certificate-authority=*|\
@@ -87,7 +93,9 @@ kubectl() {
     "version -o json") printf '{\n  "clientVersion": { "gitVersion": "v1.31.4" },\n  "serverVersion": { "gitVersion": "v1.35.5" }\n}\n' ;;
 
     # Node NAMES (the FIX): a targeted jsonpath over .items[].metadata.name.
-    "get nodes -o jsonpath="*) printf 'cp-1\nworker-1\n' ;;
+    "get nodes -o jsonpath="*)
+      [ -z "${STUB_NODES_FAIL:-}" ] || return 1
+      printf 'cp-1\nworker-1\n' ;;
     # Realistic multi-node dump WITH the greedy-sed traps (runtimeHandlers +
     # volumesAttached). Dormant unless the extraction regresses to `-o json`.
     "get nodes -o json") printf '%s\n' '{"items":[{"metadata":{"name":"cp-1"},"status":{"runtimeHandlers":[{"name":"runc"},{"name":"crun"}],"volumesAttached":[{"name":"kubernetes.io/csi/csi.hetzner.cloud^0001"}]}},{"metadata":{"name":"worker-1"},"status":{"runtimeHandlers":[{"name":"runc"}]}}]}' ;;
@@ -137,8 +145,14 @@ kubectl() {
     # kube-apiserver pod command+args (jsonpath renders the JSON array);
     # empty = pod not visible (managed CP).
     *"-l component=kube-apiserver"*) printf '%s' "${STUB_APISERVER_PODS-}" ;;
+    # The CRD exists (STUB_CAPI) or the apiserver answers NotFound.
     "get crd clusters.cluster.x-k8s.io"*)
-      [ -n "${STUB_CAPI:-}" ] && return 0 || return 1 ;;
+      if [ -n "${STUB_CAPI:-}" ]; then
+        printf 'customresourcedefinition.apiextensions.k8s.io/clusters.cluster.x-k8s.io\n'
+        return 0
+      fi
+      echo 'Error from server (NotFound): customresourcedefinitions.apiextensions.k8s.io "clusters.cluster.x-k8s.io" not found' >&2
+      return 1 ;;
     "get daemonsets -n kube-system"*)
       if [ -n "${STUB_DAEMONSETS+x}" ]; then printf '%s' "${STUB_DAEMONSETS}"; else printf 'cilium\nkube-proxy\n'; fi ;;
     "get configmap kubeadm-config"*)
@@ -681,7 +695,7 @@ teardown() {
   assert_line "5 kubectl get configmap kubehz-agent-config -n kubehz-system -o jsonpath={.metadata.annotations}"
   assert_line --partial "5 kubectl get pods -n kube-system -l component=kube-apiserver -o jsonpath="
   assert_line --partial "5 kubectl get pods -n kube-system -l component=etcd -o jsonpath="
-  assert_line "5 kubectl get crd clusters.cluster.x-k8s.io"
+  assert_line "5 kubectl get crd clusters.cluster.x-k8s.io -o name"
   assert_line --partial "5 kubectl get daemonsets -n kube-system -o jsonpath="
   assert_line "5 kubectl get configmap kubeadm-config -n kube-system -o jsonpath={.data.ClusterConfiguration}"
   assert_line "5 kubectl get storageclasses -o json"
@@ -696,6 +710,49 @@ teardown() {
   assert_output "12"
   run grep -vc '^5 kubectl get ' "${STUB_TIMEOUT_LOG}"
   assert_output "0"
+}
+
+# A probe for a field the contract has no "unknown" value for (a count, a
+# list, capiManaged) that times out is unknown, never 0 or []: the tick sends
+# no assessment, the heartbeat still goes out, and the 24h marker does not
+# move, so the next tick probes again.
+@test "assessment: a timed-out probe defers the assessment, never a 0" {
+  local match
+  for match in "get services -A" "get validatingwebhookconfigurations" "get mutatingwebhookconfigurations" \
+      "node-role.kubernetes.io/control-plane" "get storageclasses" "get pv " "get crd clusters.cluster.x-k8s.io"; do
+    export STUB_TIMEOUT_MATCH="${match}"
+    rm -f "${STUB_PAYLOAD_OUT}" "${STUB_ANNOTATE_LOG}"
+    run bash "${RUNNER}"
+    assert_success
+    assert_output --partial "kubehz: assessment deferred: no answer for "
+    run command jq -e 'has("assessment") | not' "${STUB_PAYLOAD_OUT}"
+    assert_success
+    run command jq -r '.clusterId' "${STUB_PAYLOAD_OUT}"
+    assert_output "test.example.com"
+    run grep -F "kubehz.cloud/last-assessment=" "${STUB_ANNOTATE_LOG}"
+    assert_failure
+  done
+}
+
+@test "assessment: a failed node list leaves cpUsage.nodes unknown, never 0" {
+  export STUB_NODES_FAIL=1
+  run bash "${RUNNER}"
+  assert_success
+  assert_output --partial "kubehz: assessment deferred: no answer for cpUsage.nodes"
+  run command jq -e 'has("assessment") | not' "${STUB_PAYLOAD_OUT}"
+  assert_success
+}
+
+@test "assessment: a missing CAPI CRD (NotFound) reads capiManaged false; the CRD reads true" {
+  run bash "${RUNNER}"
+  assert_success
+  run command jq -r '.assessment.capiManaged' "${STUB_PAYLOAD_OUT}"
+  assert_output "false"
+  export STUB_CAPI=1
+  run bash "${RUNNER}"
+  assert_success
+  run command jq -r '.assessment.capiManaged' "${STUB_PAYLOAD_OUT}"
+  assert_output "true"
 }
 
 # ── Assessment: RBAC ships with the kustomization ────────

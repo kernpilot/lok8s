@@ -56,7 +56,7 @@ main::bootstrap() {
     'dry-run|:+'        'Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)'
     'render-dir|:'      "Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory"
     'no-diff|:+'        'Dry run without the kubectl diff: render only, no cluster access'
-    'only|:'            'Apply (or dry-run) only these spec.bootstrap entries, comma-separated. Each value is an entry name (name:, else the last path element), a key as written in spec.bootstrap (./targets/flux) or an addon directory name. dependsOn is not expanded'
+    'only|:'            'Apply (or dry-run) only these spec.bootstrap entries, comma-separated. A value selects every entry whose name (name:, else the last path element), key as written in spec.bootstrap (./targets/flux) or directory name (of an addon or a target) is equal to it: --only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster. dependsOn is not expanded'
     'allow-generators|:+' "Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)"
     'with-restore|:+'   'With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)'
     'ignore-nondeterministic|:+' 'Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)'
@@ -1864,9 +1864,11 @@ bootstrap::_dry_run_restore_d() {
 # slot), SEQUENTIALLY, so the report comes out in the same order on every run
 # and on both implementations (piped output is a contract). One report line
 # per entry, then a summary. A report line names the entry by its entry name,
-# which --only accepts (#281); only the render-dir files carry the NN- order
-# prefix. Returns 0 when nothing would change, 1 when something would, 2 when
-# an entry failed to render or diff.
+# which --only accepts (#281); when two entries of the run share the name (a
+# tolerated basename collision), the line adds the key as written,
+# `rook-ceph (./targets/rook-ceph)`, which selects that one entry. Only the
+# render-dir files carry the NN- order prefix. Returns 0 when nothing would
+# change, 1 when something would, 2 when an entry failed to render or diff.
 bootstrap::_run_dry() {
   # --render-dir is prepared earlier now (bootstrap::apply, BEFORE the
   # restore.d preview — item G): restore.d's own diff needs a writable,
@@ -1876,7 +1878,7 @@ bootstrap::_run_dry() {
   (( _width < 2 )) && _width=2
   local -A _ddone=()
   local _c_unchanged=0 _c_differs=0 _c_rendered=0 _c_skipped=0 _c_inconclusive=0 _c_errors=0 _c_nd=0 _seq=0 _total=0
-  local _pick _i3 _d3 _ready _stem _status _one _ndl
+  local _pick _i3 _d3 _ready _stem _status _one _ndl _label _c3 _same
   local -a _dl _ndlines
   # restore.d's own entry (computed by bootstrap::apply before narrowing to
   # --only — see there), reported FIRST: a real run applies it before any
@@ -1912,6 +1914,11 @@ bootstrap::_run_dry() {
     _ddone["${_pick}"]=1
     _seq=$(( _seq + 1 ))
     _stem="$(printf '%0*d-%s' "${_width}" "${_seq}" "${_names[_pick]}")"
+    _label="${_names[_pick]}" _same=0
+    for (( _c3 = 0; _c3 < n; _c3++ )); do
+      [[ "${_names[_c3]}" != "${_label}" ]] || _same=$(( _same + 1 ))
+    done
+    (( _same < 2 )) || _label+=" (${_rawkeys[_pick]:-})"
     # A subshell: the render's state stays local. Line 1 is the status, every
     # further line an object regenerated on every apply.
     _ndlines=()
@@ -1930,10 +1937,10 @@ bootstrap::_run_dry() {
       error*)          _c_errors=$(( _c_errors + 1 )) ;;
       *)               _status="error"; _c_errors=$(( _c_errors + 1 )) ;;
     esac
-    printf 'bootstrap dry-run: %s: %s\n' "${_names[_pick]}" "${_status}"
+    printf 'bootstrap dry-run: %s: %s\n' "${_label}" "${_status}"
     for _ndl in "${_ndlines[@]+"${_ndlines[@]}"}"; do
       [[ -n "${_ndl}" ]] || continue
-      printf 'bootstrap dry-run: %s: non-deterministic (regenerated on every apply): %s\n' "${_names[_pick]}" "${_ndl}"
+      printf 'bootstrap dry-run: %s: non-deterministic (regenerated on every apply): %s\n' "${_label}" "${_ndl}"
       _c_nd=$(( _c_nd + 1 ))
     done
   done

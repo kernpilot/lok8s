@@ -3008,6 +3008,42 @@ b wait="
   assert_output "rook-ceph ${PATH_CLUSTERS}/test.lok8s.dev/./targets/rook-ceph"
 }
 
+# A bare value also matches the directory name of an addon or a target, so
+# --only rook-ceph selects ./targets/rook-ceph named rook-ceph-cluster too
+# (the --help text says so).
+@test "bootstrap::apply --only: a bare name also matches a target directory" {
+  local log="${BATS_TEST_TMPDIR}/only.log"; : > "${log}"
+  bootstrap::_apply_one() { echo "$1" >> "${log}"; return 0; }
+  mkdir -p "${PATH_LOK8S}/addons/rook-ceph" "${PATH_CLUSTERS}/test.lok8s.dev/targets/rook-ceph"
+  write_cluster_spec "rook-ceph" "./targets/rook-ceph: {name: rook-ceph-cluster}"
+  local bootstrap_select="rook-ceph"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  run sort "${log}"
+  assert_output "rook-ceph
+rook-ceph-cluster"
+}
+
+# Two entries may share a name (a basename collision nothing depends on).
+# Their report lines add the key as written, so the two lines differ and each
+# names the --only value that selects that one entry.
+@test "bootstrap::apply --dry-run adds the key when two entries share a name" {
+  mkdir -p "${PATH_LOK8S}/addons/second" "${PATH_CLUSTERS}/test.lok8s.dev/targets/second"
+  printf 'resources: []\n' > "${PATH_CLUSTERS}/test.lok8s.dev/targets/second/kustomization.yaml"
+  write_cluster_spec "second" "./targets/second"
+  _dry_kubectl_stub 0 1
+  local bootstrap_dry_run=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  [ "${status}" -eq 1 ]
+  assert_line "bootstrap dry-run: second (second): unchanged"
+  assert_line "bootstrap dry-run: second (./targets/second): differs changed=1 new=2"
+  _dry_kubectl_stub 0
+  local bootstrap_select="./targets/second"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_success
+  assert_line "bootstrap dry-run: second: unchanged"
+}
+
 # #281: a dry-run report line names the entry by a name --only accepts (the
 # entry name, here a name: override), never by the NN- file stem.
 @test "bootstrap::apply --dry-run names each entry the way --only takes it" {

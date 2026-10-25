@@ -503,6 +503,57 @@ func TestOnlyKeySelectsTheTargetNotTheAddonOfTheSameName(t *testing.T) {
 	}
 }
 
+// A bare value also matches the directory name of an addon or a target, so
+// --only rook-ceph selects ./targets/rook-ceph named rook-ceph-cluster too
+// (the --help text says so).
+func TestOnlyBareNameAlsoMatchesATargetDirectory(t *testing.T) {
+	e, log, spec, kc, p := schedEngine(t, "rook-ceph", "./targets/rook-ceph: {name: rook-ceph-cluster}")
+	if err := os.MkdirAll(filepath.Join(p.Clusters, "test.lok8s.dev", "targets", "rook-ceph"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	e.ApplyOne = func(ctx context.Context, job Job, stdout, stderr io.Writer) int {
+		log.add(job.Name)
+		return 0
+	}
+	e.Options.Only = []string{"rook-ceph"}
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if log.count() != 2 || !log.has("rook-ceph") || !log.has("rook-ceph-cluster") {
+		t.Errorf("applied %v, want rook-ceph and rook-ceph-cluster", log.events)
+	}
+}
+
+// Two entries may share a name (a basename collision nothing depends on).
+// Their report lines add the key as written, so the two lines differ and
+// each names the --only value that selects that one entry.
+func TestDryRunReportAddsTheKeyWhenNamesCollide(t *testing.T) {
+	e, f, spec, kc := dryEngine(t, "second", "./targets/second")
+	testutil.WriteFile(t, filepath.Join(e.Paths.Clusters, "test.lok8s.dev", "targets", "second", "kustomization.yaml"), "resources: []\n")
+	diffAnswers(t, f, 0, 1)
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); !errors.Is(err, ErrDryRunDiffers) {
+		t.Fatalf("err = %v\n%s", err, stderrOf(e))
+	}
+	for _, want := range []string{
+		"bootstrap dry-run: second (second): unchanged\n",
+		"bootstrap dry-run: second (./targets/second): differs changed=1 new=2\n",
+	} {
+		if !strings.Contains(stdoutOf(e), want) {
+			t.Errorf("missing %q in:\n%s", want, stdoutOf(e))
+		}
+	}
+	// The key from the line selects that one entry; alone, it has no clash.
+	e.Stdout.(interface{ Reset() }).Reset()
+	e.Options.Only = []string{"./targets/second"}
+	diffAnswers(t, f, 0)
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
+		t.Fatalf("--only ./targets/second: %v", err)
+	}
+	if !strings.HasPrefix(stdoutOf(e), "bootstrap dry-run: second: unchanged\nbootstrap dry-run: entries=1 ") {
+		t.Errorf("--only ./targets/second:\n%s", stdoutOf(e))
+	}
+}
+
 // #281: a report line names the entry by a name --only accepts (the entry
 // name, here a name: override), never by the NN- file stem.
 func TestDryRunReportNamesEachEntryTheWayOnlyTakesIt(t *testing.T) {

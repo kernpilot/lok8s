@@ -126,5 +126,10 @@ YAML
   mkdir -p "${bin}"
   run env PATH_BIN="${bin}" bash "${_PROJECT_ROOT}/.lok8s/lo" doctor < /dev/null
   assert_failure
+  assert_output "[error] argsh is missing at ${bin}/argsh: lo runs on it (fix: add github.com/arg-sh/argsh to the b.yaml in the same directory, then b install)"
+  # A b.yaml that lists argsh needs only the install (the Go doctor's rule).
+  printf 'binaries:\n  argsh: {}\n' > "${bin}/b.yaml"
+  run env PATH_BIN="${bin}" bash "${_PROJECT_ROOT}/.lok8s/lo" doctor < /dev/null
+  assert_failure
   assert_output "[error] argsh is missing at ${bin}/argsh: lo runs on it (fix: b install)"
 }

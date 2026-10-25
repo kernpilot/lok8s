@@ -3,60 +3,47 @@ package toolchain
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
+// The fix for a missing argsh, in Go (lo doctor, lo recover) and in the
+// bash entrypoint (.lok8s/lo) alike: the same pattern decides, the same
+// text says it. TestArgshFixMatchesTheBashEntrypoint pins the entrypoint to
+// these values.
+const (
+	// ArgshListedPattern matches a b.yaml line that installs argsh: a key
+	// whose last path element is argsh (`argsh:`,
+	// `github.com/arg-sh/argsh:`) or `alias: argsh`. A commented line does
+	// not match. grep -E reads it the same way.
+	ArgshListedPattern = `^[[:space:]]*(alias:[[:space:]]*argsh[[:space:]]*$|([^#[:space:]][^[:space:]]*/)?argsh:)`
+	// ArgshFixInstall is the fix when the b.yaml lists argsh.
+	ArgshFixInstall = "b install"
+	// ArgshFixAdd is the fix when it does not.
+	ArgshFixAdd = "add github.com/arg-sh/argsh to the b.yaml in the same directory, then b install"
+)
+
+var argshListedRe = regexp.MustCompile(ArgshListedPattern)
+
 // Argsh reports the argsh runtime of a project: the file every bash child
 // sources (`source "${PATH_BIN}/argsh"`: the bash tree, a routed command,
-// the provider plugins), present or not, and the command that installs it
-// there. bin is the project's .bin. The path is the project's own on
-// purpose: an argsh elsewhere on PATH (the main checkout of a git
-// worktree, for example) does not count, because no child looks there.
+// the provider plugins), present or not, and the fix when it is not. bin is
+// the project's .bin. The path is the project's own on purpose: an argsh
+// elsewhere on PATH (the main checkout of a git worktree, for example) does
+// not count, because no child looks there.
 func Argsh(bin string) (path, fix string, ok bool) {
 	path = filepath.Join(bin, "argsh")
 	ok = fsutil.FileExists(path)
-	b := "b install"
-	if fsutil.IsExecutable(filepath.Join(bin, "b")) {
-		b = ".bin/b install"
-	}
-	byaml := filepath.Join(bin, "b.yaml")
-	switch {
-	case listsArgsh(byaml):
-		fix = b
-	case HasMarker(byaml):
-		// The `lo toolchain install` template keeps argsh in the bash
-		// group, commented out unless the group was selected.
-		fix = "uncomment the bash group in .bin/b.yaml, then " + b
-	default:
-		fix = "add github.com/arg-sh/argsh to .bin/b.yaml, then " + b
-	}
-	return path, fix, ok
-}
-
-// listsArgsh reports whether a b.yaml installs argsh: a binaries key whose
-// last path element is argsh (`argsh`, `github.com/arg-sh/argsh`), or an
-// entry with `alias: argsh`.
-func listsArgsh(byaml string) bool {
-	raw, err := os.ReadFile(byaml)
-	if err != nil {
-		return false
-	}
-	var doc struct {
-		Binaries map[string]struct {
-			Alias string `yaml:"alias"`
-		} `yaml:"binaries"`
-	}
-	if yaml.Unmarshal(raw, &doc) != nil {
-		return false
-	}
-	for key, entry := range doc.Binaries {
-		if key == "argsh" || strings.HasSuffix(key, "/argsh") || entry.Alias == "argsh" {
-			return true
+	fix = ArgshFixAdd
+	if raw, err := os.ReadFile(filepath.Join(bin, "b.yaml")); err == nil {
+		for line := range strings.SplitSeq(string(raw), "\n") {
+			if argshListedRe.MatchString(line) {
+				fix = ArgshFixInstall
+				break
+			}
 		}
 	}
-	return false
+	return path, fix, ok
 }

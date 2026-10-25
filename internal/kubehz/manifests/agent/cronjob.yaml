@@ -188,9 +188,16 @@ spec:
                   # kills the whole heartbeat before it ever POSTs.
                   # Cap the per-node loop at 20 to bound the beat's runtime; a
                   # larger cluster reports its first 20 nodes AND logs the
-                  # truncation to stderr (never a silent drop).
-                  NODES_ALL=$(kubectl get nodes \
-                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null) || NODES_ALL=""
+                  # truncation to stderr (never a silent drop). NODES_OK tells
+                  # an empty answer apart from a failed call: the assessment
+                  # sends cpUsage.nodes only from a call that answered.
+                  NODES_OK=""
+                  if NODES_ALL=$(kubectl get nodes \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null); then
+                    NODES_OK=1
+                  else
+                    NODES_ALL=""
+                  fi
                   NODES=$(echo "${NODES_ALL}" | head -20)
                   NODE_TOTAL=$(echo "${NODES_ALL}" | grep -c . || true)
                   [ "${NODE_TOTAL}" -gt 20 ] && echo "kubehz: heartbeat summarizes the first 20 of ${NODE_TOTAL} nodes" >&2
@@ -393,9 +400,15 @@ spec:
                     # /readyz etcd check captured above.
                     # Every assessment probe runs under `timeout 5` (B423,
                     # above): a stalled apiserver degrades THAT probe
-                    # (fail-soft empty) instead of eating the whole beat
-                    # (activeDeadlineSeconds is the backstop, but it kills
-                    # the beat with it).
+                    # instead of eating the whole beat (activeDeadlineSeconds
+                    # is the backstop, but it kills the beat with it).
+                    # A field the contract has no "unknown" value for (a count,
+                    # a list, capiManaged) must come from a call that answered:
+                    # a failed or timed-out call is UNKNOWN, never 0 or [].
+                    # UNKNOWN collects those fields. With any of them, this tick
+                    # sends no assessment (the api has no null for them), the
+                    # 24h marker does not move, and the next tick probes again.
+                    UNKNOWN=""
                     APISERVER_ARGS=$(timeout 5 kubectl get pods -n kube-system -l component=kube-apiserver \
                       -o jsonpath='{.items[*].spec.containers[0].command} {.items[*].spec.containers[0].args}' 2>/dev/null) || APISERVER_ARGS=""
                     DATASTORE="unknown"
@@ -417,8 +430,15 @@ spec:
                         ;;
                     esac
 
-                    CAPI=false
-                    timeout 5 kubectl get crd clusters.cluster.x-k8s.io >/dev/null 2>&1 && CAPI=true
+                    # capiManaged: the CRD answers -> true; NotFound -> false;
+                    # any other failure (a timeout) -> unknown.
+                    CAPI=""
+                    if CAPI_OUT=$(timeout 5 kubectl get crd clusters.cluster.x-k8s.io -o name 2>&1); then
+                      CAPI=true
+                    else
+                      case "${CAPI_OUT}" in *"(NotFound)"*) CAPI=false ;; esac
+                    fi
+                    [ -n "${CAPI}" ] || UNKNOWN="${UNKNOWN} capiManaged"
 
                     # CNI guess from the kube-system daemonsets; only kube-proxy
                     # present -> "kube-proxy-only" (no CNI daemonset visible).
@@ -448,11 +468,12 @@ spec:
                         sed -n 's/.*--service-cluster-ip-range=\([^" ]*\).*/\1/p' | head -1)
                     fi
 
-                    SC_JSON=$(timeout 5 kubectl get storageclasses -o json 2>/dev/null | \
+                    SC_RAW=$(timeout 5 kubectl get storageclasses -o json 2>/dev/null) || SC_RAW=""
+                    SC_JSON=$(printf '%s' "${SC_RAW}" | \
                       jq -c '[.items[] | {name: .metadata.name, provisioner: .provisioner,
                           isDefault: ((.metadata.annotations["storageclass.kubernetes.io/is-default-class"] // "false") == "true")}]' \
                         2>/dev/null) || SC_JSON=""
-                    [ -n "${SC_JSON}" ] || SC_JSON="[]"
+                    [ -n "${SC_JSON}" ] || { UNKNOWN="${UNKNOWN} storageClasses"; SC_JSON="[]"; }
                     # The api's zod schema caps arrays at 50 — an uncapped list
                     # 400s the WHOLE heartbeat. Cap here (first 50, logged, never
                     # a silent drop) so the beat always fits the contract.
@@ -464,9 +485,13 @@ spec:
 
                     # PV summary: jq flattens each PV to "provisioner<TAB>capacity",
                     # awk converts capacities to Gi and groups by provisioner.
-                    PV_LINES=$(timeout 5 kubectl get pv -o json 2>/dev/null | \
-                      jq -r '.items[] | [(.metadata.annotations["pv.kubernetes.io/provisioned-by"] // .spec.csi.driver // "unknown"),
-                          (.spec.capacity.storage // "0")] | @tsv' 2>/dev/null) || PV_LINES=""
+                    PV_RAW=$(timeout 5 kubectl get pv -o json 2>/dev/null) || PV_RAW=""
+                    # `.items |` first: input that is not a PV list fails jq,
+                    # and the summary is unknown instead of zero PVs.
+                    PV_LINES=$(printf '%s' "${PV_RAW}" | \
+                      jq -er '.items | map([(.metadata.annotations["pv.kubernetes.io/provisioned-by"] // .spec.csi.driver // "unknown"),
+                          (.spec.capacity.storage // "0")] | @tsv) | join("\n")' 2>/dev/null) || {
+                      UNKNOWN="${UNKNOWN} pvSummary"; PV_LINES=""; }
                     PV_SUMMARY=$(printf '%s\n' "${PV_LINES}" | awk -F'\t' '
                       function gi(s,  n, u) {
                         n = s + 0; u = s
@@ -496,53 +521,71 @@ spec:
                         printf "}}"
                       }') || PV_SUMMARY='{"count":0,"totalGi":0,"byProvisioner":{}}'
 
-                    LB_COUNT=$(timeout 5 kubectl get services -A -o json 2>/dev/null | \
+                    # The counts: each from a call that answered, else unknown.
+                    # An empty kubectl answer makes jq print nothing.
+                    LB_RAW=$(timeout 5 kubectl get services -A -o json 2>/dev/null) || LB_RAW=""
+                    LB_COUNT=$(printf '%s' "${LB_RAW}" | \
                       jq '[.items[] | select(.spec.type == "LoadBalancer")] | length' 2>/dev/null) || LB_COUNT=""
-                    [ -n "${LB_COUNT}" ] || LB_COUNT=0
-                    VALIDATING=$(timeout 5 kubectl get validatingwebhookconfigurations -o json 2>/dev/null | \
-                      jq '.items | length' 2>/dev/null) || VALIDATING=""
-                    [ -n "${VALIDATING}" ] || VALIDATING=0
-                    MUTATING=$(timeout 5 kubectl get mutatingwebhookconfigurations -o json 2>/dev/null | \
-                      jq '.items | length' 2>/dev/null) || MUTATING=""
-                    [ -n "${MUTATING}" ] || MUTATING=0
+                    [ -n "${LB_COUNT}" ] || UNKNOWN="${UNKNOWN} loadBalancers"
+                    VW_RAW=$(timeout 5 kubectl get validatingwebhookconfigurations -o json 2>/dev/null) || VW_RAW=""
+                    VALIDATING=$(printf '%s' "${VW_RAW}" | jq '.items | length' 2>/dev/null) || VALIDATING=""
+                    [ -n "${VALIDATING}" ] || UNKNOWN="${UNKNOWN} webhooks.validating"
+                    MW_RAW=$(timeout 5 kubectl get mutatingwebhookconfigurations -o json 2>/dev/null) || MW_RAW=""
+                    MUTATING=$(printf '%s' "${MW_RAW}" | jq '.items | length' 2>/dev/null) || MUTATING=""
+                    [ -n "${MUTATING}" ] || UNKNOWN="${UNKNOWN} webhooks.mutating"
 
-                    CP_NODES=$(timeout 5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name 2>/dev/null | grep -c .) || CP_NODES=0
-                    if [ "${CP_NODES}" = "0" ]; then
-                      CP_NODES=$(timeout 5 kubectl get nodes -l node-role.kubernetes.io/master -o name 2>/dev/null | grep -c .) || CP_NODES=0
+                    # cpNodes: the control-plane label, else the legacy master
+                    # label. `grep -c` prints 0 and exits 1 on no line.
+                    CP_NODES=""
+                    if CP_NAMES=$(timeout 5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name 2>/dev/null); then
+                      CP_NODES=$(printf '%s\n' "${CP_NAMES}" | grep -c .) || CP_NODES=0
+                      if [ "${CP_NODES}" = "0" ]; then
+                        if CP_NAMES=$(timeout 5 kubectl get nodes -l node-role.kubernetes.io/master -o name 2>/dev/null); then
+                          CP_NODES=$(printf '%s\n' "${CP_NAMES}" | grep -c .) || CP_NODES=0
+                        else
+                          CP_NODES=""
+                        fi
+                      fi
                     fi
+                    [ -n "${CP_NODES}" ] || UNKNOWN="${UNKNOWN} cpUsage.cpNodes"
+                    [ -n "${NODES_OK}" ] || UNKNOWN="${UNKNOWN} cpUsage.nodes"
 
                     # etcdDbBytes needs the etcd metrics endpoint (TLS client
                     # certs, CP-local) — unreachable from this pod: null.
                     # Assembled with jq (in the alpine/k8s image) so a probe
                     # value can never break the JSON; any assembly failure
                     # drops the assessment, never the heartbeat.
-                    ASSESSMENT=$(jq -cn \
-                      --arg collectedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                      --arg k8sVersion "${KUBE_VERSION}" \
-                      --arg datastore "${DATASTORE}" \
-                      --argjson etcdReachable "${ETCD_REACHABLE}" \
-                      --argjson capiManaged "${CAPI}" \
-                      --arg cni "${CNI}" \
-                      --arg podCidr "${POD_CIDR}" \
-                      --arg serviceCidr "${SERVICE_CIDR}" \
-                      --argjson storageClasses "${SC_JSON}" \
-                      --argjson pvSummary "${PV_SUMMARY}" \
-                      --argjson loadBalancers "${LB_COUNT}" \
-                      --argjson validating "${VALIDATING}" \
-                      --argjson mutating "${MUTATING}" \
-                      --argjson nodes "${NODE_TOTAL:-0}" \
-                      --argjson cpNodes "${CP_NODES}" \
-                      '{collectedAt: $collectedAt, k8sVersion: $k8sVersion,
-                        datastore: $datastore, etcdReachable: $etcdReachable,
-                        capiManaged: $capiManaged, cni: $cni,
-                        podCidr: (if $podCidr == "" then null else $podCidr end),
-                        serviceCidr: (if $serviceCidr == "" then null else $serviceCidr end),
-                        storageClasses: $storageClasses, pvSummary: $pvSummary,
-                        loadBalancers: $loadBalancers,
-                        webhooks: {validating: $validating, mutating: $mutating},
-                        cpUsage: {nodes: $nodes, cpNodes: $cpNodes, etcdDbBytes: null}}' \
-                      2>/dev/null) || ASSESSMENT=""
-                    [ -n "${ASSESSMENT}" ] || echo "kubehz: assessment assembly failed; heartbeat continues without it" >&2
+                    if [ -n "${UNKNOWN}" ]; then
+                      echo "kubehz: assessment deferred: no answer for${UNKNOWN}; the next tick probes again" >&2
+                    else
+                      ASSESSMENT=$(jq -cn \
+                        --arg collectedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                        --arg k8sVersion "${KUBE_VERSION}" \
+                        --arg datastore "${DATASTORE}" \
+                        --argjson etcdReachable "${ETCD_REACHABLE}" \
+                        --argjson capiManaged "${CAPI}" \
+                        --arg cni "${CNI}" \
+                        --arg podCidr "${POD_CIDR}" \
+                        --arg serviceCidr "${SERVICE_CIDR}" \
+                        --argjson storageClasses "${SC_JSON}" \
+                        --argjson pvSummary "${PV_SUMMARY}" \
+                        --argjson loadBalancers "${LB_COUNT}" \
+                        --argjson validating "${VALIDATING}" \
+                        --argjson mutating "${MUTATING}" \
+                        --argjson nodes "${NODE_TOTAL:-0}" \
+                        --argjson cpNodes "${CP_NODES}" \
+                        '{collectedAt: $collectedAt, k8sVersion: $k8sVersion,
+                          datastore: $datastore, etcdReachable: $etcdReachable,
+                          capiManaged: $capiManaged, cni: $cni,
+                          podCidr: (if $podCidr == "" then null else $podCidr end),
+                          serviceCidr: (if $serviceCidr == "" then null else $serviceCidr end),
+                          storageClasses: $storageClasses, pvSummary: $pvSummary,
+                          loadBalancers: $loadBalancers,
+                          webhooks: {validating: $validating, mutating: $mutating},
+                          cpUsage: {nodes: $nodes, cpNodes: $cpNodes, etcdDbBytes: null}}' \
+                        2>/dev/null) || ASSESSMENT=""
+                      [ -n "${ASSESSMENT}" ] || echo "kubehz: assessment assembly failed; heartbeat continues without it" >&2
+                    fi
                   fi
 
                   ASSESSMENT_FIELD=""

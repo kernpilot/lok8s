@@ -463,6 +463,22 @@ EOF
   assert_output "2"
 }
 
+# The provider load runs before the consent too: a plugin that reads stdin
+# while it loads must not get the prompt's input. The real
+# recover::_load_provider runs here; the test above replaces it.
+@test "recover: the provider load does not read the prompt's input" {
+  _RECOVER_SPEC="${_FAKE_SPEC}" _RECOVER_DOMAIN="test.dom"
+  provider::read_name() { echo "mock"; }
+  provider::write_config() { PROVIDER_CONFIG_FILE="${_FAKE_CFG}"; }
+  provider::load() { echo "load ${1} read: $(cat)" >> "${RECORD}"; }
+
+  recover::_load_provider <<<"yes"
+  [ "${_RECOVER_PROVIDER}" = "mock" ]
+  [ "${_RECOVER_CONFIG}" = "${_FAKE_CFG}" ]
+  run cat "${RECORD}"
+  assert_output "load mock read: "
+}
+
 # ── consent wording ──────────────────────────────────────────────────────────
 
 # The consent count is HONEST about a failed inventory resolution: an empty
