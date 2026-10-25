@@ -206,11 +206,14 @@ hetzner::_destroy_resources() {
 # hetzner::_confirmed_rows <cluster_name> <listed>
 # Check LOK8S_DESTROY_PLAN against the live list and set
 # _HETZNER_CONFIRMED_ROWS to the rows to delete: plan ∩ live list, as
-# "<resource>\t<id>\t<name>" lines. rc 1, nothing set, on a plan of another
-# cluster_name or a line with a type outside _HETZNER_DESTROY_ORDER or an id
-# that is not a number.
+# "<resource>\t<id>\t<name>" lines. A plan line is split at each tab (a
+# double tab is an empty field), a trailing CR is dropped. rc 1, nothing
+# set, when the plan is empty, does not start with the cluster line of
+# <cluster_name>, or has a line whose type is not exactly one of
+# _HETZNER_DESTROY_ORDER or whose id is not a number: one bad line refuses
+# the whole plan.
 hetzner::_confirmed_rows() {
-  local cluster_name="${1}" listed="${2}" line kind rid rname planned header=1
+  local cluster_name="${1}" listed="${2}" line kind rid rname rest planned header=1 t known
   local -A live=()
   _HETZNER_CONFIRMED_ROWS=""
   while IFS=$'\t' read -r kind rid rname; do
@@ -221,8 +224,12 @@ hetzner::_confirmed_rows() {
   local rows="" key
   local -A planned_keys=()
   while IFS= read -r line; do
+    line="${line%$'\r'}"
     [[ -n "${line}" ]] || continue
-    IFS=$'\t' read -r kind rid rname <<<"${line}"
+    kind="${line%%$'\t'*}" rest="" rname=""
+    [[ "${line}" != *$'\t'* ]] || rest="${line#*$'\t'}"
+    rid="${rest%%$'\t'*}"
+    [[ "${rest}" != *$'\t'* ]] || rname="${rest#*$'\t'}"
     if (( header )); then
       header=0
       planned="${rid}"
@@ -236,7 +243,11 @@ hetzner::_confirmed_rows() {
       fi
       continue
     fi
-    if [[ " ${_HETZNER_DESTROY_ORDER[*]} " != *" ${kind} "* || ! "${rid}" =~ ^[0-9]+$ ]]; then
+    known=0
+    for t in "${_HETZNER_DESTROY_ORDER[@]}"; do
+      [[ "${kind}" != "${t}" ]] || known=1
+    done
+    if (( ! known )) || [[ ! "${rid}" =~ ^[1-9][0-9]*$ ]]; then
       error "hetzner: the confirmed destroy plan has a line that lo destroy does not write: '${line//$'\t'/ }' (the type must be one of ${_HETZNER_DESTROY_ORDER[*]}, the id a number). Nothing was deleted. Run lo destroy again."
       return 1
     fi
@@ -248,6 +259,11 @@ hetzner::_confirmed_rows() {
       warn "hetzner: skipped ${kind} ${rid} of the confirmed plan: no ${kind} with this id carries lok8s.dev/cluster=${cluster_name} now. It is gone, or it is not of this cluster."
     fi
   done <<<"${LOK8S_DESTROY_PLAN}"
+
+  if (( header )); then
+    error "hetzner: the confirmed destroy plan is empty. Nothing was deleted. Run lo destroy again."
+    return 1
+  fi
 
   while IFS=$'\t' read -r kind rid rname; do
     [[ -n "${kind}" && -z "${planned_keys[${kind}$'\t'${rid}]:-}" ]] || continue

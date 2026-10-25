@@ -170,3 +170,74 @@ volume delete 7"
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
 }
+
+# ── review round 3 (#299): edge cases of the confirmed plan ──────────────────
+
+@test "provider::destroy refuses a plan line whose type only contains an allowed type, and deletes nothing" {
+  # The type is one tab-separated field: "load-balancer server" is no type.
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nload-balancer server\t42\tcp-0\nvolume\t7\tdata-0'
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "the confirmed destroy plan has a line that lo destroy does not write: 'load-balancer server 42 cp-0'"
+  run grep -c ' delete ' "${HCLOUD_LOG}"
+  assert_output "0"
+}
+
+@test "provider::destroy refuses an empty plan" {
+  export LOK8S_DESTROY_PLAN=$'\n\n'
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "hetzner: the confirmed destroy plan is empty. Nothing was deleted. Run lo destroy again."
+  run grep -c ' delete ' "${HCLOUD_LOG}"
+  assert_output "0"
+}
+
+@test "provider::destroy reads a plan with CRLF line ends" {
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\r\nserver\t42\tcp-0\r\n'
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  run grep ' delete ' "${HCLOUD_LOG}"
+  assert_output "server delete 42"
+}
+
+@test "provider::destroy refuses a double tab, a leading zero and a second cluster line" {
+  local plan
+  for plan in $'cluster\tprod-a\nvolume\t\t7' $'cluster\tprod-a\nserver\t042\tcp-0' $'cluster\tprod-a\ncluster\tprod-b\nserver\t42'; do
+    : > "${HCLOUD_LOG}"
+    export LOK8S_DESTROY_PLAN="${plan}"
+    run provider::destroy "${DESC}" "${WORK}"
+    assert_failure
+    assert_output --partial "the confirmed destroy plan has a line that lo destroy does not write"
+    run grep -c ' delete ' "${HCLOUD_LOG}"
+    assert_output "0"
+  done
+}
+
+@test "provider::destroy keeps every live resource outside the plan, with a warning each" {
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0\nvolume\t7\tdata-0'
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  assert_output --partial "kept load-balancer 11 api-lb"
+  assert_output --partial "kept server 43 cp-1"
+  assert_output --partial "kept network 9 net"
+  refute_output --partial "kept server 42"
+  refute_output --partial "kept volume 7"
+  run grep ' delete ' "${HCLOUD_LOG}"
+  assert_output "server delete 42
+volume delete 7"
+}
+
+@test "provider::destroy stops when hcloud answers a list with no JSON" {
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    [[ "$2" == "list" ]] || return 0
+    if [[ "$1" == server ]]; then echo 'not json'; else echo '[]'; fi
+  }
+  export -f hcloud
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0'
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "hetzner: could not list the server resources with lok8s.dev/cluster=prod-a. Nothing was deleted."
+  run grep -c ' delete ' "${HCLOUD_LOG}"
+  assert_output "0"
+}
