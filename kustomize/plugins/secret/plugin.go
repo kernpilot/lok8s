@@ -17,6 +17,7 @@ package secret
 import (
 	"io"
 	"os"
+	"sort"
 
 	"github.com/kernpilot/lok8s/kustomize/pkg/cache"
 	"github.com/kernpilot/lok8s/kustomize/pkg/errs"
@@ -79,6 +80,9 @@ func (p *Plugin) Build(env func(string) (string, bool), fileRoot string) (*plugi
 			return nil, nil, err
 		}
 		c = concreteCache
+		if err := p.preflight(pathSecrets); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	ctx := &plugin.Context{
@@ -112,6 +116,49 @@ func (p *Plugin) Build(env func(string) (string, bool), fileRoot string) (*plugi
 	r.Add(generator.NewCert(p.spec.Cert))
 
 	return r, ctx, nil
+}
+
+// preflight refuses the run before any generator reads or writes the store
+// when an entry the Secret uses has its .enc but no plaintext (B425): every
+// entry of this Secret, each secretRef target and the caRef CA store. A
+// refusal in the middle of the run (an earlier key generated, a later key
+// refused) would leave the store half-written. An `update: true` key (env,
+// bash) is not checked: the generator writes it whatever the store holds.
+func (p *Plugin) preflight(dir string) error {
+	ns := p.spec.Metadata.Namespace
+	name := p.spec.Metadata.Name
+	overwrite := map[string]bool{}
+	for k, e := range p.spec.Env {
+		if e.Update {
+			overwrite[cache.FormatName(name, ns, k)] = true
+		}
+	}
+	for k, e := range p.spec.Bash {
+		if e.Update {
+			overwrite[cache.FormatName(name, ns, k)] = true
+		}
+	}
+	if err := cache.FirstEncryptedOnly(dir, cache.FormatName(name, ns, ""), overwrite); err != nil {
+		return err
+	}
+	refs := make([]string, 0, len(p.spec.SecretRef))
+	for k := range p.spec.SecretRef {
+		refs = append(refs, k)
+	}
+	sort.Strings(refs)
+	for _, k := range refs {
+		e := p.spec.SecretRef[k]
+		if err := cache.EncryptedOnly(dir, cache.FormatName(e.Secret, e.EffectiveNamespace(ns), e.Key)); err != nil {
+			return err
+		}
+	}
+	if p.spec.Cert != nil && p.spec.Cert.CARef != "" {
+		caName, caNs := generator.ParseCARef(p.spec.Cert.CARef, ns)
+		if err := cache.FirstEncryptedOnly(dir, cache.FormatName(caName, caNs, ""), nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Emit serializes the merged entries as a Kubernetes Secret resource.

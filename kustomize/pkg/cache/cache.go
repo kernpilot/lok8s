@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/kernpilot/lok8s/kustomize/pkg/errs"
@@ -53,29 +54,62 @@ func (e *EncryptedOnlyError) Error() string {
 }
 
 // DecryptCommand is the lo command that writes the plaintexts of the store
-// dir. A per-domain store (clusters/<domain>/secrets) names its domain; any
-// other store (the flat .secrets/) gets the command without --domain.
+// dir. A per-domain store (<project>/clusters/<domain>/secrets) names its
+// domain; any other store (the flat .secrets/, a copy elsewhere) gets the
+// command without --domain.
 func DecryptCommand(dir string) string {
-	if filepath.Base(dir) == "secrets" {
-		d := filepath.Base(filepath.Dir(dir))
-		if d != "." && d != string(filepath.Separator) && d != "" {
-			return "lo secrets decrypt --domain " + d
-		}
+	domainDir := filepath.Dir(dir)
+	d := filepath.Base(domainDir)
+	if filepath.Base(dir) == "secrets" && filepath.Base(filepath.Dir(domainDir)) == "clusters" &&
+		d != "." && d != string(filepath.Separator) && d != "" {
+		return "lo secrets decrypt --domain " + d
 	}
 	return "lo secrets decrypt"
 }
 
 // EncryptedOnly returns an *EncryptedOnlyError when the entry name has no
-// plaintext in dir and its encrypted twin exists, else nil.
+// plaintext in dir and its encrypted twin exists, else nil. The plaintext
+// check follows a symlink: a dangling symlink is no plaintext, so a value is
+// not generated next to the .enc through it.
 func EncryptedOnly(dir, name string) error {
 	full := filepath.Join(dir, name)
-	if _, err := os.Lstat(full); err == nil || !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(full); err == nil || !errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	if _, err := os.Lstat(full + EncSuffix); err != nil {
+	if _, err := os.Stat(full + EncSuffix); err != nil {
 		return nil
 	}
 	return &EncryptedOnlyError{Dir: dir, Name: name}
+}
+
+// FirstEncryptedOnly returns the *EncryptedOnlyError of the first entry (in
+// byte order) in dir whose name starts with prefix, whose .enc exists and
+// whose plaintext does not, else nil. Entries named in skip are not checked
+// (the plugin passes the `update: true` keys: it writes them whatever the
+// store holds). The plugin checks a Secret's whole prefix before any
+// generator runs, so a refusal never leaves the store half-written (an
+// earlier key generated, a later key refused).
+func FirstEncryptedOnly(dir, prefix string, skip map[string]bool) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) && strings.HasSuffix(e.Name(), EncSuffix) {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if skip[strings.TrimSuffix(n, EncSuffix)] {
+			continue
+		}
+		if eerr := EncryptedOnly(dir, strings.TrimSuffix(n, EncSuffix)); eerr != nil {
+			return eerr
+		}
+	}
+	return nil
 }
 
 // Cache stores secret values for a single (name, namespace) tuple.

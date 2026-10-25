@@ -140,3 +140,64 @@ func TestRun_GeneratesWhenNeitherExists(t *testing.T) {
 		t.Errorf("stored = %d bytes, %v", len(raw), err)
 	}
 }
+
+// The plugin checks every entry a Secret uses before any generator runs. A
+// refusal in the middle of the run left the store half-written: an earlier
+// key (no .enc, no plaintext) was generated, then a later key (.enc only)
+// stopped the run.
+func TestRun_EncryptedTwinStopsBeforeAnyWrite(t *testing.T) {
+	cases := []struct {
+		name, spec, encOnly string
+		env                 map[string]string
+	}{
+		{"passwd: A new, B encrypted-only", `apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata: {name: db, namespace: default}
+passwd:
+  A: 32
+  B: 32
+`, "Secret.db.default.B", nil},
+		{"htpasswd: username new, password encrypted-only", `apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata: {name: web, namespace: default}
+htpasswd:
+  auth: {}
+`, "Secret.web.default.auth.password", nil},
+		{"cert: ca.key new, ca.crt encrypted-only", `apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata: {name: myca, namespace: default}
+cert:
+  ca: true
+`, "Secret.myca.default.ca.crt", nil},
+		{"passwd new, secretRef target encrypted-only", `apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata: {name: app, namespace: default}
+passwd:
+  A: 32
+secretRef:
+  DB: db/PASSWORD
+`, "Secret.db.default.PASSWORD", nil},
+		{"leaf key new, caRef CA encrypted-only", `apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata: {name: leaf, namespace: default}
+cert:
+  hosts: [a.example.dev]
+  caRef: myca
+`, "Secret.myca.default.ca.key", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store := encStore(t, c.encOnly)
+			env := map[string]string{"PATH_SECRETS": store}
+			maps.Copy(env, c.env)
+			before := listing(t, store)
+			if _, err := runEntry(t, []byte(c.spec), env); err == nil ||
+				!strings.Contains(err.Error(), "cannot read "+c.encOnly+": ") {
+				t.Fatalf("err = %v", err)
+			}
+			if after := listing(t, store); after != before {
+				t.Errorf("the store changed:\nbefore %s\nafter  %s", before, after)
+			}
+		})
+	}
+}

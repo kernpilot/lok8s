@@ -6,6 +6,8 @@
 
 setup() {
   load "../test_helper"
+  # `run --separate-stderr` (the decrypt compare test) needs bats >= 1.5.
+  bats_require_minimum_version 1.5.0
   setup_tmpdir
 
   export PATH="${_PROJECT_ROOT}/.bin:${PATH}"
@@ -75,11 +77,14 @@ require_tools() {
 
   SOPS_AGE_KEY="$(ssh-to-age -private-key < "${BATS_TEST_TMPDIR}/id")"
   export SOPS_AGE_KEY
-  domain=alpha.dev run secrets::decrypt < /dev/null
+  # stdout keeps its old contract (piped stdout); the warnings and the skip
+  # count go to stderr.
+  domain=alpha.dev run --separate-stderr secrets::decrypt < /dev/null
   assert_success
+  assert_output 'Decrypted 1 secret(s)'
+  output="${stderr}" lines=("${stderr_lines[@]}")
   assert_line '[warn] Secret.app.default.EDITED: the plaintext is newer than Secret.app.default.EDITED.enc and differs from it. Decrypt kept the plaintext.'
   assert_line '[warn] 1 plaintext(s) differ from the .enc. To store them, run "lo secrets encrypt --domain alpha.dev". To use the .enc values, delete these plaintexts, then run "lo secrets decrypt --domain alpha.dev".'
-  assert_line 'Decrypted 1 secret(s)'
   assert_line 'Skipped 2 secret(s) with a newer plaintext: 1 equal, 1 differ'
   refute_output --partial 'SAME:'
   local v
@@ -88,6 +93,40 @@ require_tools() {
   done
   [ "$(cat "${PATH_SECRETS}/Secret.app.default.EDITED")" = 'local-edit-value' ]
   [ "$(cat "${PATH_SECRETS}/Secret.app.default.GONE")" = 'restored-value' ]
+}
+
+# The compare path discards the sops stderr: on a MAC mismatch the CLI prints
+# two unkeyed SHA-512 digests of the plaintext. A stub sops prints that shape;
+# only the fixed line with the file name may reach the output. No crypto tools
+# needed.
+@test "secrets decrypt: a failed compare prints no sops digest" {
+  printf 'v' > "${PATH_SECRETS}/Secret.app.default.K"
+  printf '{"data":"ENC[fake]","sops":{}}' > "${PATH_SECRETS}/Secret.app.default.K.enc"
+  touch -t 202001010000 "${PATH_SECRETS}/Secret.app.default.K.enc"
+  sops() {
+    echo "MAC mismatch. File has 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08, computed 60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752" >&2
+    return 1
+  }
+  export -f sops
+  export SOPS_AGE_KEY="stub-identity"
+  run secrets::decrypt < /dev/null
+  assert_failure
+  assert_output '[error] Failed to decrypt Secret.app.default.K.enc'
+}
+
+# A kept plaintext that cannot be read is named as such, not as a decrypt
+# failure (and the run does not die on a bare redirection error).
+@test "secrets decrypt: an unreadable kept plaintext is named" {
+  [[ "${EUID}" -ne 0 ]] || skip "root reads a 0000 file"
+  printf 'v' > "${PATH_SECRETS}/Secret.app.default.K"
+  printf '{"data":"ENC[fake]","sops":{}}' > "${PATH_SECRETS}/Secret.app.default.K.enc"
+  touch -t 202001010000 "${PATH_SECRETS}/Secret.app.default.K.enc"
+  chmod 000 "${PATH_SECRETS}/Secret.app.default.K"
+  export SOPS_AGE_KEY="stub-identity"
+  run secrets::decrypt < /dev/null
+  chmod 600 "${PATH_SECRETS}/Secret.app.default.K"
+  assert_failure
+  assert_output '[error] Failed to read Secret.app.default.K'
 }
 
 # A kept plaintext whose .enc this key cannot decrypt fails the run, the same

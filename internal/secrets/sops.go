@@ -9,6 +9,7 @@ package secrets
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -141,6 +142,10 @@ func (d ageDecryptor) Decrypt(ctx context.Context, req *keyservice.DecryptReques
 	return &keyservice.DecryptResponse{Plaintext: plaintext}, nil
 }
 
+// errMACMismatch: the decrypted values do not match the file's MAC (a
+// changed or damaged .enc).
+var errMACMismatch = errors.New("failed to verify data integrity: the MAC of the file does not match its values")
+
 // sopsDecryptData decrypts a binary-mode .enc payload with the given age
 // identity (decrypt.Data with the identity injected instead of read from
 // SOPS_AGE_KEY). Decrypt does NOT consult .sops.yaml (recipients live in
@@ -170,7 +175,9 @@ func sopsDecryptData(encBytes []byte, ageKey string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to decrypt original mac: %w", err)
 	}
 	if originalMac != mac {
-		return nil, fmt.Errorf("failed to verify data integrity. expected mac %q, got %q", originalMac, mac)
+		// Never the two MACs: they are unkeyed SHA-512 digests of the
+		// plaintext, and the callers print this error.
+		return nil, errMACMismatch
 	}
 	return store.EmitPlainFile(tree.Branches)
 }

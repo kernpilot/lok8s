@@ -548,12 +548,15 @@ func TestDecryptSkipComparesWithTheEnc(t *testing.T) {
 	if err := c.Decrypt("/nonexistent-ssh-key"); err != nil {
 		t.Fatalf("Decrypt = %v (a difference must not fail the run)", err)
 	}
-	wantOut := "Decrypted 1 secret(s)\nSkipped 2 secret(s) with a newer plaintext: 1 equal, 1 differ\n"
+	// stdout is what it was before the compare (piped stdout is the
+	// contract); the skip count goes to stderr.
+	wantOut := "Decrypted 1 secret(s)\n"
 	if out.String() != wantOut {
 		t.Errorf("stdout:\n got %q\nwant %q", out.String(), wantOut)
 	}
 	wantErr := "[warn] Secret.app.default.EDITED: the plaintext is newer than Secret.app.default.EDITED.enc and differs from it. Decrypt kept the plaintext.\n" +
-		"[warn] 1 plaintext(s) differ from the .enc. To store them, run \"lo secrets encrypt --domain alpha.dev\". To use the .enc values, delete these plaintexts, then run \"lo secrets decrypt --domain alpha.dev\".\n"
+		"[warn] 1 plaintext(s) differ from the .enc. To store them, run \"lo secrets encrypt --domain alpha.dev\". To use the .enc values, delete these plaintexts, then run \"lo secrets decrypt --domain alpha.dev\".\n" +
+		"Skipped 2 secret(s) with a newer plaintext: 1 equal, 1 differ\n"
 	if errOut.String() != wantErr {
 		t.Errorf("stderr:\n got %q\nwant %q", errOut.String(), wantErr)
 	}
@@ -579,7 +582,7 @@ func TestDecryptSkipComparesWithTheEnc(t *testing.T) {
 	if err := c.Decrypt("/nonexistent-ssh-key"); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "Skipped 3 secret(s) with a newer plaintext: 3 equal, 0 differ\n" || errOut.String() != "" {
+	if out.String() != "" || errOut.String() != "Skipped 3 secret(s) with a newer plaintext: 3 equal, 0 differ\n" {
 		t.Errorf("stdout %q stderr %q", out.String(), errOut.String())
 	}
 }
@@ -604,7 +607,7 @@ func TestDecryptSkipCompareFailsOnAnUnreadableEnc(t *testing.T) {
 	if err := c.Decrypt("/nonexistent-ssh-key"); !errors.Is(err, ErrHandled) {
 		t.Fatalf("Decrypt = %v, want ErrHandled", err)
 	}
-	if !strings.Contains(errOut.String(), "[error] Failed to decrypt Secret.app.default.K.enc") {
-		t.Errorf("stderr: %s", errOut.String())
+	if errOut.String() != "[error] Failed to decrypt Secret.app.default.K.enc\n" {
+		t.Errorf("stderr: %q", errOut.String())
 	}
 }

@@ -115,6 +115,7 @@ func TestDecryptCommand(t *testing.T) {
 		"/p/clusters/alpha.dev/secrets": "lo secrets decrypt --domain alpha.dev",
 		"/p/.secrets":                   "lo secrets decrypt",
 		"/p/custom-store":               "lo secrets decrypt",
+		"/tmp/x/secrets":                "lo secrets decrypt", // a copy outside clusters/
 		"secrets":                       "lo secrets decrypt",
 		"/secrets":                      "lo secrets decrypt",
 	}
@@ -152,5 +153,47 @@ func TestOverlayEncryptedTwinStops(t *testing.T) {
 	}
 	if after := dirListing(t, store); after != before {
 		t.Errorf("the store changed:\nbefore %s\nafter  %s", before, after)
+	}
+}
+
+// A dangling symlink is no plaintext: with the .enc next to it, the entry is
+// encrypted-only, and GetOrCreate does not generate through the link.
+func TestDanglingPlaintextSymlinkIsNotAPlaintext(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "clusters", "alpha.dev", "secrets")
+	fakeEnc(t, dir, "Secret.app.default.PASSWORD")
+	if err := os.Symlink(filepath.Join(dir, "gone"), filepath.Join(dir, "Secret.app.default.PASSWORD")); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := New(dir, "default", "app")
+	called := false
+	_, err := c.GetOrCreate("PASSWORD", func() ([]byte, error) { called = true; return []byte("minted"), nil })
+	var eo *EncryptedOnlyError
+	if !errors.As(err, &eo) || called {
+		t.Fatalf("GetOrCreate err = %v, generated = %v", err, called)
+	}
+	if fi, err := os.Lstat(filepath.Join(dir, "Secret.app.default.PASSWORD")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the symlink was replaced: %v", err)
+	}
+}
+
+// FirstEncryptedOnly reports the first encrypted-only entry of a prefix in
+// byte order and skips the names it is told to (the update: true keys).
+func TestFirstEncryptedOnly(t *testing.T) {
+	dir := t.TempDir()
+	fakeEnc(t, dir, "Secret.app.default.B")
+	fakeEnc(t, dir, "Secret.app.default.C")
+	fakeEnc(t, dir, "Secret.other.default.A")
+	if err := os.WriteFile(filepath.Join(dir, "Secret.app.default.C"), []byte("v"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var eo *EncryptedOnlyError
+	if err := FirstEncryptedOnly(dir, "Secret.app.default.", nil); !errors.As(err, &eo) || eo.Name != "Secret.app.default.B" {
+		t.Errorf("err = %v, want Secret.app.default.B", err)
+	}
+	if err := FirstEncryptedOnly(dir, "Secret.app.default.", map[string]bool{"Secret.app.default.B": true}); err != nil {
+		t.Errorf("skip: err = %v", err)
+	}
+	if err := FirstEncryptedOnly(filepath.Join(dir, "missing"), "Secret.", nil); err != nil {
+		t.Errorf("missing dir: err = %v", err)
 	}
 }

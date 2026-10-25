@@ -258,6 +258,10 @@ func dryRunCARoot(ctx *plugin.Context) (cert, key []byte, err error) {
 
 // parseCARef splits "<secret>[/<namespace>]" into (secret, namespace),
 // defaulting the namespace to defNs.
+// ParseCARef is parseCARef for the plugin's preflight (secret.Plugin.Build):
+// the Secret name and namespace of the CA store a caRef names.
+func ParseCARef(ref, defNs string) (secret, namespace string) { return parseCARef(ref, defNs) }
+
 func parseCARef(ref, defNs string) (secret, namespace string) {
 	secret, namespace, found := strings.Cut(ref, "/")
 	if !found || namespace == "" {
