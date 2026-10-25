@@ -140,3 +140,27 @@ setup() {
   assert_output --partial 'path: "/etc/ceph/x"'
   refute_output --partial '/cloud.d/'
 }
+
+# One reader for a public key line (cloud-config::key_line): ssh::pub, the
+# CLOUD_SSH_AUTHORIZED_KEYS check and the hetzner rebuild use it. The comment
+# is dropped, a line that is no key is skipped (ssh::pub) or refused.
+@test "ssh::pub emits '<type> <base64>' per key line and skips a line that is no key" {
+  printf 'ssh-ed25519 AAAAC3NzaKeyOne alice "laptop"\n# a comment\n\necdsa-sha2-nistp256 AAAAE2VjZHNh= bob\n' > "${PUB}/a.pub"
+  export CLOUD_PATH_PUB="${PUB}"
+  run ssh::pub
+  assert_success
+  assert_output "ssh-ed25519 AAAAC3NzaKeyOne
+ecdsa-sha2-nistp256 AAAAE2VjZHNh="
+}
+
+@test "CLOUD_SSH_AUTHORIZED_KEYS: the comment is dropped, a line that is no key stops the generation" {
+  export CLOUD_PATH="${CL}" CLOUD_PATH_LIB="${LIB}" CLOUD_USER=root CLOUD_PATH_PUB="${PUB}"
+  export CLOUD_SSH_AUTHORIZED_KEYS='ssh-ed25519 AAAAC3NzaKeyOne alice: "x"'
+  run cloud-config::generate
+  assert_success
+  assert_output --partial $'ssh_authorized_keys:\n- ssh-ed25519 AAAAC3NzaKeyOne\n'
+  export CLOUD_SSH_AUTHORIZED_KEYS='not a key'
+  run cloud-config::generate
+  assert_failure
+  assert_output --partial "CLOUD_SSH_AUTHORIZED_KEYS holds a line that is not '<type> <base64>': not a key"
+}

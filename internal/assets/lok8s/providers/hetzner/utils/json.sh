@@ -42,6 +42,32 @@ dry-run::cloud-config() {
 
 # ── JSON helpers ─────────────────────────────────────────
 
+# The descriptor keys that refer to another resource. On these keys a number
+# is an index into the top-level list of that resource type, and the create
+# loop replaces it with that resource's hcloud id (`"ssh-key": [0]`,
+# `"network": 0`, `"server": 1` on a volume). A number on any other key is a
+# literal and passes verbatim (`"size": 100` on a volume, `"image": 12345` for
+# a snapshot). Before, every number was dereferenced, and `"size": 100`
+# reached hcloud as `--size null` (2026-10-23).
+_HETZNER_REF_KEYS='["ssh-key","network","server","volume","placement-group","firewall"]'
+
+# jq definition: the hcloud value of one descriptor entry (.key, .value).
+# $root is the whole descriptor, $refs is _HETZNER_REF_KEYS. A list on a
+# reference key becomes the comma-separated ids; a list on any other key
+# becomes its comma-separated values.
+_HETZNER_JQ_VALUE='
+  def hcloud_value($root; $refs):
+    .key as $key
+    | if any($refs[]; . == $key) | not then
+        (if (.value | type) == "array" then .value | map(tostring) | join(",") else .value end)
+      elif (.value | type) == "number" then
+        $root[$key][.value].id
+      elif (.value | type) == "array" then
+        [ .value[] | $root[$key][.].id ] | @csv
+      else
+        .value
+      end;'
+
 hetzner::json() {
   jq "${@}" <(echo "${CLOUD_HETZNER_JSON}")
 }
@@ -124,26 +150,12 @@ hetzner::create() {
       # shellcheck disable=2016
       mapfile -t fields < <(hetzner::json -rc \
         --arg what "${what}" \
-        --argjson i "${i}" '. as $root |
+        --argjson i "${i}" \
+        --argjson refs "${_HETZNER_REF_KEYS}" "${_HETZNER_JQ_VALUE}"' . as $root |
           .[$what][$i]
             | to_entries
             | .[]
-            | "--" + .key, (
-              if .value
-                | type == "number"
-              then
-                $root[.key][.value].id
-              elif .value
-                | type == "array"
-              then
-                [ .key as $key
-                  | .value[]
-                  | $root[$key][.].id
-                ] | @csv
-              else
-                .value
-              end
-          )
+            | "--" + .key, hcloud_value($root; $refs)
         '
       )
 
@@ -183,30 +195,15 @@ hetzner::create() {
     # shellcheck disable=2016
     mapfile -t fields < <(hetzner::json -rc \
       --arg what "${what}" \
-      --argjson i "${i}" '. as $root |
+      --argjson i "${i}" \
+      --argjson refs "${_HETZNER_REF_KEYS}" "${_HETZNER_JQ_VALUE}"' . as $root |
         .[$what][$i]
           | to_entries
           | .[]
           | "--" + .key + (
               if (.value | type) == "boolean" then "=" + (.value | tostring) else "" end
             ), (
-            if (.value | type) == "boolean"
-            then
-              ""
-            elif .value
-              | type == "number"
-            then
-              $root[.key][.value].id
-            elif .value
-              | type == "array"
-            then
-              [ .key as $key
-                | .value[]
-                | $root[$key][.].id
-              ] | @csv
-            else
-              .value
-            end
+            if (.value | type) == "boolean" then "" else hcloud_value($root; $refs) end
         )
       '
     )
