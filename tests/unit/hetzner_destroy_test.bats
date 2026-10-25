@@ -118,3 +118,55 @@ network delete 9"
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
 }
+
+# ── review round 2 (#299): the confirmed plan comes from the environment ──
+# provider::destroy deletes only plan ∩ the live list labelled with the
+# cluster, and refuses a plan line lo destroy does not write.
+
+@test "provider::destroy refuses a confirmed plan with an unknown resource type, and deletes nothing" {
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0\ncertificate\t5\tapi-cert'
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "hetzner: the confirmed destroy plan has a line that lo destroy does not write: 'certificate 5 api-cert' (the type must be one of load-balancer server placement-group firewall volume floating-ip ssh-key network, the id a number). Nothing was deleted."
+  run grep -c ' delete ' "${HCLOUD_LOG}"
+  assert_output "0"
+}
+
+@test "provider::destroy refuses a confirmed plan with an id that is not a number, and deletes nothing" {
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0\nvolume\tdata-0\tdata-0'
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "the confirmed destroy plan has a line that lo destroy does not write: 'volume data-0 data-0'"
+  run grep -c ' delete ' "${HCLOUD_LOG}"
+  assert_output "0"
+}
+
+@test "provider::destroy skips a plan id that is not in the labelled list, and deletes the rest" {
+  # 77 is a server without the label (or of another cluster): never deleted.
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0\nserver\t77\tforeign-0\nvolume\t7\tdata-0'
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  assert_output --partial "hetzner: skipped server 77 of the confirmed plan: no server with this id carries lok8s.dev/cluster=prod-a now. It is gone, or it is not of this cluster."
+  run grep ' delete ' "${HCLOUD_LOG}"
+  assert_output "server delete 42
+volume delete 7"
+}
+
+@test "provider::destroy with a confirmed plan stops when the list fails, and deletes nothing" {
+  export LIST_FAIL=network
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0'
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "hetzner: could not list the network resources with lok8s.dev/cluster=prod-a. Nothing was deleted."
+  run grep -c ' delete ' "${HCLOUD_LOG}"
+  assert_output "0"
+}
+
+@test "provider::destroy refuses a confirmed plan without its cluster line" {
+  export LOK8S_DESTROY_PLAN=$'server\t42\tcp-0'
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "hetzner: the confirmed destroy plan does not start with its cluster line (it starts with 'server 42 cp-0'). Nothing was deleted."
+  run grep -c ' delete ' "${HCLOUD_LOG}"
+  assert_output "0"
+}

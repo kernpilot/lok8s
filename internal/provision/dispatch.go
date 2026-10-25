@@ -377,6 +377,10 @@ func (d *Dispatcher) runTail(ctx context.Context, drv driver.Driver, domainName,
 // to the caller (which would suppress its orphaned-infra warning).
 func (d *Dispatcher) DispatchDestroy(ctx context.Context, domainName string) error {
 	stderr := d.errWriter()
+	// Only the guard below sets the confirmed plan: an inherited value
+	// (another process, a hand-set variable) must never reach the
+	// provider's destroy.
+	os.Unsetenv(driver.DestroyPlanEnv)
 
 	// Fail fast on a missing/bogus domain — same rule as Dispatch.
 	spec, err := ResolveSpec(d.Paths, domainName, stderr)
@@ -428,7 +432,7 @@ func (d *Dispatcher) DispatchDestroy(ctx context.Context, domainName string) err
 	// A provider that deletes by cluster_name gets the cluster_name guard
 	// instead (destroy_guard.go).
 	guarded, skip, err := d.guardDestroy(ctx, domainName, kind, clusterYAML, deps)
-	defer os.Unsetenv(DestroyPlanEnv)
+	defer os.Unsetenv(driver.DestroyPlanEnv)
 	if err != nil {
 		return err
 	}

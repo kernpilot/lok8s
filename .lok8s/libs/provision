@@ -678,6 +678,9 @@ provision::dispatch() {
 # Usage: provision::dispatch_destroy <domain>
 provision::dispatch_destroy() {
   local domain="${1}"
+  # Only provision::_destroy_guard sets the confirmed plan: an inherited
+  # value must never reach the provider's destroy (Go twin: DispatchDestroy).
+  unset LOK8S_DESTROY_PLAN
   # Fail fast on a missing/bogus domain — same rule as provision::dispatch;
   # continuing would feed the gate/driver an unset LOK8S_SPEC_FILE.
   provision::resolve_spec "${domain}" || return 1

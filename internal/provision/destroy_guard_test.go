@@ -64,7 +64,7 @@ func guardHarness(t *testing.T, input string, interactive bool) (*Dispatcher, *b
 // answers for every kind and records the destroy plan it sees.
 func guardHarnessSpec(t *testing.T, spec, input string, interactive bool) (*Dispatcher, *bytes.Buffer, *[]string, *planProvider) {
 	t.Helper()
-	t.Cleanup(func() { os.Unsetenv(DestroyPlanEnv) })
+	t.Cleanup(func() { os.Unsetenv(driver.DestroyPlanEnv) })
 	p := testPaths(t)
 	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.prod", "cluster.lok8s.yaml"), spec)
 	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.prod", "hetzner.json"), `{"cluster_name": "prod-a"}`)
@@ -98,7 +98,7 @@ func guardHarnessSpec(t *testing.T, spec, input string, interactive bool) (*Disp
 type planDriver struct{ fakeDriver }
 
 func (f *planDriver) Destroy(ctx context.Context, domain string) error {
-	*f.log = append(*f.log, "destroy:"+domain, "plan-env:"+strings.ReplaceAll(os.Getenv(DestroyPlanEnv), "\t", " "))
+	*f.log = append(*f.log, "destroy:"+domain, "plan-env:"+strings.ReplaceAll(os.Getenv(driver.DestroyPlanEnv), "\t", " "))
 	return f.destroyErr
 }
 
@@ -154,8 +154,8 @@ func TestDestroyGuardRunsTheDestroyWithTheMatchingConfirmCluster(t *testing.T) {
 	if got := strings.Join(*log, ","); got != want {
 		t.Fatalf("calls = %q, want %q", got, want)
 	}
-	if v, ok := os.LookupEnv(DestroyPlanEnv); ok {
-		t.Errorf("%s is still set after the destroy: %q", DestroyPlanEnv, v)
+	if v, ok := os.LookupEnv(driver.DestroyPlanEnv); ok {
+		t.Errorf("%s is still set after the destroy: %q", driver.DestroyPlanEnv, v)
 	}
 	// One question per run: the yes-prompt of ConfirmInfra is not asked.
 	refuteContains(t, errBuf.String(), "type yes to continue")
@@ -283,5 +283,20 @@ func TestDestroyGuardSkipsDriversThatDoNotDeleteThroughTheProvider(t *testing.T)
 		}
 		assertContains(t, errBuf.String(), "checks no cluster_name: "+tc.reason+".")
 		refuteContains(t, strings.Join(*log, ","), "destroy:")
+	}
+}
+
+// An inherited LOK8S_DESTROY_PLAN must never reach a destroy that the guard
+// did not confirm (bats twin: "an inherited plan is cleared on a guard-less
+// destroy"). Without -r no guard runs.
+func TestDestroyGuardClearsAnInheritedPlan(t *testing.T) {
+	d, _, log, _ := guardHarness(t, "", false)
+	t.Setenv(driver.DestroyPlanEnv, "cluster\tprod-a\nserver\t42\tcp-0")
+	d.Remote, d.Force = false, true
+	if err := d.DispatchDestroy(t.Context(), "test.prod"); err != nil {
+		t.Fatalf("expected the forced destroy to run, got %v", err)
+	}
+	if got := strings.Join(*log, ","); got != "DEREGISTERED,destroy:test.prod,plan-env:" {
+		t.Fatalf("calls = %q: the driver saw an inherited plan", got)
 	}
 }

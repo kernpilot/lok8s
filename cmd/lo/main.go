@@ -17,6 +17,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/cli"
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/render"
 )
 
@@ -46,6 +47,11 @@ func main() {
 func run(ctx context.Context, interrupted func() int) int {
 	defer assets.Cleanup()
 	defer render.Cleanup()
+	// The confirmed destroy plan is set only by the destroy guard of this
+	// run (internal/provision/destroy_guard.go). A value inherited from the
+	// caller's environment must not reach a provider through any path,
+	// a command routed to the bash tree included.
+	os.Unsetenv(driver.DestroyPlanEnv)
 	paths, err := config.ResolvePaths()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lo: %v\n", err)

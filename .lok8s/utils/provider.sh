@@ -96,8 +96,10 @@
 #     cluster_name that another domain also uses, prints the list, and asks
 #     for the cluster_name (or takes --confirm-cluster) instead of the
 #     yes-prompt. --force does not skip it. The confirmed plan reaches
-#     provider::destroy in LOK8S_DESTROY_PLAN; the provider deletes exactly
-#     those resources.
+#     provider::destroy in LOK8S_DESTROY_PLAN; the provider deletes only the
+#     plan's resources that its live list still shows, and refuses a plan
+#     line of an unknown type or with an id that is not a number. Only the
+#     destroy guard sets the variable; lo clears an inherited value.
 #
 # ── Spec shape ──────────────────────────────────────────────────
 #

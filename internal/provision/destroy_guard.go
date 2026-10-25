@@ -30,9 +30,6 @@ import (
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
-// DestroyPlanEnv carries the confirmed destroy plan to provider::destroy.
-const DestroyPlanEnv = "LOK8S_DESTROY_PLAN"
-
 // destroyResource is one line of a destroy plan.
 type destroyResource struct{ kind, id, name string }
 
@@ -156,6 +153,6 @@ func (d *Dispatcher) guardDestroy(ctx context.Context, domainName, kind, cluster
 	}
 	// The driver's provider::destroy deletes exactly the confirmed plan
 	// (bash: the plan from a command substitution, no trailing newline).
-	os.Setenv(DestroyPlanEnv, strings.TrimRight(text, "\n"))
+	os.Setenv(driver.DestroyPlanEnv, strings.TrimRight(text, "\n"))
 	return true, "", nil
 }

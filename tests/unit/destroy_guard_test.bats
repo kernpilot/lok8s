@@ -252,3 +252,16 @@ server 42 cp-0"
   [ "${status}" -eq 1 ]
   assert_output --partial "checks no cluster_name: the capi driver does not destroy through the provider."
 }
+
+# An inherited LOK8S_DESTROY_PLAN must never reach a destroy that the guard
+# did not confirm (Go twin: TestDestroyGuardClearsAnInheritedPlan).
+@test "destroy guard: an inherited plan is cleared on a guard-less destroy" {
+  _assume_no_tty
+  unset LOK8S_REMOTE
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0'
+  local force=1
+  run provision::dispatch_destroy test.prod < /dev/null
+  assert_success
+  run grep '^plan-env:' "${CALLS}"
+  assert_output "plan-env:"
+}

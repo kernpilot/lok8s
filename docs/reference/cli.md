@@ -294,8 +294,10 @@ provider deletes every resource in the token's project that carries
 3. On a terminal, type the `cluster_name` to continue. Off a terminal, pass
    it with `--confirm-cluster <cluster_name>`. `--force` does not replace
    it. A refusal exits `3` and deletes nothing.
-4. The provider then deletes exactly the listed resources. A resource that
-   is new since the confirmation stays, with a warning.
+4. The provider then deletes only the listed resources that still carry the
+   label. A resource that is new since the confirmation stays, with a
+   warning. `LOK8S_DESTROY_PLAN` carries the list to the provider; only this
+   guard sets it, and `lo` clears an inherited value.
 
 This guard replaces the `yes` prompt for such a provider. It runs for the
 `lo` driver and a KubeOne cluster that is not hosted (the drivers that
