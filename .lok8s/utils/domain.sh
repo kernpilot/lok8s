@@ -278,7 +278,7 @@ domain::check_secrets_store() {
   (( ${#stores[@]} )) || return 0
   other="$(printf '%s\n' "${stores[@]}" | LC_ALL=C sort | head -n 1)"
   local store="${path_clusters}/${domain}/secrets"
-  error "domain ${domain} has no secrets store: ${store} does not exist, and this project keeps a store per domain (${other}). lo does not fall back to ${PATH_SECRETS:-${PATH_BASE:-}/.secrets}."
+  error "domain ${domain} has no secrets store: ${store} does not exist, and this project keeps a store per domain (${other}). lo does not fall back to ${PATH_SECRETS:-${PATH_BASE:-.}/.secrets}."
   error "  Create the empty directory ${store} to generate new values for ${domain}."
   return 1
 }

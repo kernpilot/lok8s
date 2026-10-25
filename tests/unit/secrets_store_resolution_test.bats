@@ -57,6 +57,17 @@ _refusal() { echo "[error] domain new.dev has no secrets store: ${PATH_CLUSTERS}
 [error]   Create the empty directory ${PATH_CLUSTERS}/new.dev/secrets to generate new values for new.dev."
 }
 
+# With neither PATH_SECRETS nor PATH_BASE set (a bare unit context), the
+# named fallback is ./.secrets, never /.secrets.
+@test "check_secrets_store: names ./.secrets when PATH_SECRETS and PATH_BASE are unset" {
+  _per_domain_project
+  ( unset PATH_SECRETS PATH_BASE
+    run domain::check_secrets_store new.dev
+    assert_failure
+    assert_line --partial "lo does not fall back to ./.secrets."
+  )
+}
+
 # The other store is the first in byte order (LC_ALL=C), as the Go twin
 # names it, whatever the locale's collation.
 @test "check_secrets_store: names the byte-order first store in any locale" {
