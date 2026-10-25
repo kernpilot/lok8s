@@ -52,6 +52,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/config"
@@ -92,8 +93,14 @@ type Runner struct {
 	Exec   execx.Runner
 	Stdout io.Writer
 	Stderr io.Writer
-	// In is the consent prompt's input (bash: `read -r ans` on stdin).
+	// In is the consent prompt's input (bash: `read -r ans` on stdin). No
+	// child reads it before the consent: every child gets an empty stdin
+	// (execx.WithoutStdin), and only the rebuild and the provision, after
+	// the consent, get In, and only when it is a terminal.
 	In io.Reader
+	// InIsTerminal overrides the terminal check of In (nil → In is an
+	// *os.File on a terminal).
+	InIsTerminal func() bool
 
 	// Force is the global --force|-f (bash: the dynamic-scope ${force}).
 	Force bool
@@ -160,11 +167,28 @@ func (r *Runner) in() io.Reader {
 	return os.Stdin
 }
 
+// exec is the runner of every child. A child with no Stdin gets an empty
+// one, never the process stdin: the consent prompt reads that stdin, and a
+// child that inherits it (an ssh probe in provider::doctor) reads a piped
+// answer to the end before the prompt asks.
 func (r *Runner) exec() execx.Runner {
 	if r.Exec != nil {
-		return r.Exec
+		return execx.WithoutStdin(r.Exec)
 	}
-	return execx.NewRunner(r.Paths)
+	return execx.WithoutStdin(execx.NewRunner(r.Paths))
+}
+
+// ttyIn is the stdin of a child after the consent (the rebuild, the
+// provision): In when it is a terminal, so a child can still ask the
+// operator something, else an empty reader. A pipe is the prompt's input.
+func (r *Runner) ttyIn() io.Reader {
+	isTerminal := false
+	if r.InIsTerminal != nil {
+		isTerminal = r.InIsTerminal()
+	} else if f, ok := r.in().(*os.File); ok {
+		isTerminal = term.IsTerminal(int(f.Fd()))
+	}
+	return execx.TerminalOrEmpty(r.in(), isTerminal)
 }
 
 func (r *Runner) now() time.Time {
