@@ -45,9 +45,15 @@ provider::destroy_plan() {
   printf '%b' "${PLAN-cluster\tprod-a\nload-balancer\t11\tapi-lb\nserver\t42\tcp-0\n}"
 }
 SH
+  # The driver records the confirmed plan its provider::destroy would read.
   cat > "${PATH_LOK8S}/drivers/kubeone/main" <<'SH'
-driver::destroy() { echo "DRIVER-DESTROY-RAN" >> "${CALLS}"; }
+driver::destroy() {
+  echo "DRIVER-DESTROY-RAN" >> "${CALLS}"
+  echo "plan-env:${LOK8S_DESTROY_PLAN//$'\t'/ }" >> "${CALLS}"
+}
 SH
+  mkdir -p "${PATH_LOK8S}/drivers/capi"
+  cp "${PATH_LOK8S}/drivers/kubeone/main" "${PATH_LOK8S}/drivers/capi/main"
 
   _domain test.prod prod-a
   kubehz::read_config() { :; }
@@ -117,7 +123,7 @@ _nothing_ran() {
   run provision::dispatch_destroy test.prod < /dev/null
   [ "${status}" -eq 3 ]
   assert_output --partial $'destroy deletes these resources of cluster_name \033[1mprod-a\033[0m:\n    load-balancer api-lb (11)\n    server cp-0 (42)\n'
-  assert_output --partial "refusing to destroy 'test.prod' non-interactively. Confirm the cluster_name: lo destroy --domain test.prod --confirm-cluster prod-a"
+  assert_output --partial "there is no terminal to ask for the cluster_name of 'test.prod'. Nothing was deleted. To confirm, run: lo destroy --domain test.prod -r --confirm-cluster prod-a"
   refute_output --partial "type yes to continue"
   _nothing_ran
 }
@@ -141,7 +147,10 @@ _nothing_ran() {
   run cat "${CALLS}"
   assert_output "plan:hetzner.json:${PATH_CLUSTERS}/test.prod/.kubeone
 DEREGISTERED
-DRIVER-DESTROY-RAN"
+DRIVER-DESTROY-RAN
+plan-env:cluster prod-a
+load-balancer 11 api-lb
+server 42 cp-0"
 }
 
 @test "destroy guard: on a terminal the typed cluster_name runs the destroy, yes does not" {
@@ -155,8 +164,16 @@ DRIVER-DESTROY-RAN"
   : > "${CALLS}"
   run provision::dispatch_destroy test.prod <<< "yes"
   [ "${status}" -eq 3 ]
-  assert_output --partial "aborted — 'test.prod' left untouched"
+  assert_output --partial "the answer is not the cluster_name 'prod-a'. Nothing was deleted."
   _nothing_ran
+
+  # A last line without a newline, with spaces and a CR, counts (Go twin:
+  # Dispatcher.readAnswer).
+  : > "${CALLS}"
+  run provision::dispatch_destroy test.prod < <(printf ' prod-a\r')
+  assert_success
+  run grep -c DRIVER-DESTROY-RAN "${CALLS}"
+  assert_output "1"
 }
 
 @test "destroy guard: a failed plan stops the destroy" {
@@ -188,4 +205,50 @@ DRIVER-DESTROY-RAN"
   refute_output --partial "type the cluster_name"
   run grep -c DRIVER-DESTROY-RAN "${CALLS}"
   assert_output "1"
+}
+
+# Without -r no provider is loaded and no guard runs: --confirm-cluster must
+# not let the destroy run as if it were confirmed.
+@test "destroy guard: --confirm-cluster without -r is refused, and nothing runs" {
+  _assume_no_tty
+  unset LOK8S_REMOTE
+  local force=1 confirm_cluster=prod-a
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 1 ]
+  assert_output --partial "--confirm-cluster 'prod-a' is set, but the destroy of 'test.prod' checks no cluster_name: it runs without -r (--remote), so no provider is loaded. Nothing was deleted. Add -r for a provider cluster, or remove --confirm-cluster."
+  _nothing_ran
+
+  # Without --confirm-cluster the forced destroy runs as before.
+  confirm_cluster=""
+  run provision::dispatch_destroy test.prod < /dev/null
+  assert_success
+  run grep -c DRIVER-DESTROY-RAN "${CALLS}"
+  assert_output "1"
+}
+
+@test "destroy guard: a hosted KubeOne cluster and a capi cluster get no plan, and --confirm-cluster is refused" {
+  _assume_tty
+  yq -i '.spec.kubehz = {"hosting": "hosted", "apiUrl": "https://api.example.com"}' "${PATH_CLUSTERS}/test.prod/cluster.lok8s.yaml"
+  run provision::dispatch_destroy test.prod <<< "yes"
+  assert_success
+  assert_output --partial "type yes to continue"
+  refute_output --partial "destroy deletes these resources"
+  run grep -c '^plan:' "${CALLS}"
+  assert_output "0"
+  local confirm_cluster=prod-a
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 1 ]
+  assert_output --partial "checks no cluster_name: a hosted cluster is destroyed through the kubehz API, not the provider."
+
+  confirm_cluster=""
+  _domain capi.prod prod-c
+  yq -i '.kind = "Capi"' "${PATH_CLUSTERS}/capi.prod/cluster.lok8s.yaml"
+  : > "${CALLS}"
+  run provision::dispatch_destroy capi.prod <<< "yes"
+  assert_success
+  refute_output --partial "destroy deletes these resources"
+  confirm_cluster=prod-c
+  run provision::dispatch_destroy capi.prod < /dev/null
+  [ "${status}" -eq 1 ]
+  assert_output --partial "checks no cluster_name: the capi driver does not destroy through the provider."
 }

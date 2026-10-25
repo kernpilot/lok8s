@@ -23,6 +23,7 @@ setup() {
   hcloud() {
     printf '%s\n' "$*" >> "${HCLOUD_LOG}"
     [[ "$2" == "list" ]] || return 0
+    [[ "$1" != "${LIST_FAIL:-}" ]] || { echo "hcloud: server error (service_error)" >&2; return 1; }
     case "$1" in
       load-balancer) echo '[{"id":11,"name":"api-lb","labels":{"lok8s.dev/cluster":"prod-a"}}]' ;;
       server)        echo '[{"id":42,"name":"cp-0"},{"id":43,"name":"cp-1"}]' ;;
@@ -66,22 +67,54 @@ volume delete 7
 network delete 9"
 }
 
-@test "provider::destroy_plan takes the cluster name from the provision dump, as destroy does" {
+# One name resolution: the descriptor's cluster_name, which `lo destroy`
+# also checks against the other domains. A name from the provision dump or a
+# server name is never used.
+@test "provider::destroy_plan and provider::destroy refuse a descriptor without cluster_name" {
   printf '{"server": [{"name": "x-cp-0-a", "type": "cx43"}]}\n' > "${DESC}"
   printf '{"cluster_name": "from-dump"}\n' > "${WORK}/hetzner.dump.json"
   run provider::destroy_plan "${DESC}" "${WORK}"
-  assert_success
-  assert_line --index 0 "$(printf 'cluster\tfrom-dump')"
-  run grep -c -- '-l lok8s.dev/cluster=from-dump$' "${HCLOUD_LOG}"
-  assert_output "8"
-}
-
-@test "provider::destroy_plan fails without a cluster name, and lists nothing" {
-  printf '{}\n' > "${DESC}"
-  run provider::destroy_plan "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "cannot determine cluster name for destroy"
+  assert_output --partial "hetzner: the descriptor ${DESC} has no cluster_name. The destroy deletes every resource that carries lok8s.dev/cluster=<cluster_name>, so it needs the name. Nothing was deleted."
   refute_output --partial "cluster	"
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_failure
   run cat "${HCLOUD_LOG}"
   assert_output ""
+}
+
+# A failed list must stop the plan: an empty list reads as "no resource".
+@test "provider::destroy_plan and provider::destroy stop when a list fails" {
+  export LIST_FAIL=volume
+  run provider::destroy_plan "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "hetzner: could not list the volume resources with lok8s.dev/cluster=prod-a. Nothing was deleted."
+  refute_output --partial "cluster	prod-a"
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_failure
+  run grep -c ' delete ' "${HCLOUD_LOG}"
+  assert_output "0"
+}
+
+# The confirmed plan of `lo destroy` (LOK8S_DESTROY_PLAN): delete exactly
+# those resources. A resource that is new since the confirmation stays.
+@test "provider::destroy deletes exactly the confirmed plan and keeps a new resource" {
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nload-balancer\t11\tapi-lb\nserver\t42\tcp-0\nvolume\t7\tdata-0\nnetwork\t9\tnet'
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  assert_output --partial "hetzner: kept server 43 cp-1 (lok8s.dev/cluster=prod-a): it is not in the confirmed plan."
+  run grep ' delete ' "${HCLOUD_LOG}"
+  assert_output "load-balancer delete 11
+server delete 42
+volume delete 7
+network delete 9"
+}
+
+@test "provider::destroy refuses a confirmed plan of another cluster_name" {
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod-b\nserver\t42\tcp-0'
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "hetzner: the confirmed destroy plan is for cluster_name 'prod-b', but the descriptor has 'prod-a'. Nothing was deleted."
+  run grep -c ' delete ' "${HCLOUD_LOG}"
+  assert_output "0"
 }

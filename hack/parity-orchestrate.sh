@@ -1593,7 +1593,7 @@ cat > "${PROJ}/.lok8s/providers/mockplan/main" <<'SH'
 provider::validate() { return 0; }
 provider::credential_data() { return 0; }
 provider::provision() { return 0; }
-provider::destroy() { echo "mockplan destroy ran: ${1##*/}" >&2; return 0; }
+provider::destroy() { echo "mockplan destroy ran: ${1##*/} plan: ${LOK8S_DESTROY_PLAN//$'\n'/|}" >&2; return 0; }
 provider::output() { printf '{}\n'; }
 provider::destroy_plan() {
   local name
@@ -1615,19 +1615,21 @@ check - destroy --domain solo.cloud -r -f                               # --forc
 check - destroy --domain solo.cloud -r --confirm-cluster other          # another name: refused
 check - destroy --domain solo.cloud -r --confirm-cluster solo-name      # the name: the driver and the provider destroy run
 check - down --domain solo.cloud -r                                     # lo down reaches the guard: refused, names the flag
+check - destroy --domain solo.cloud -f --confirm-cluster solo-name      # no -r: no guard, --confirm-cluster refused (rc 1)
 expect_rc 3 destroy --domain dupa.cloud -r -f --confirm-cluster shared-name
 expect_rc 3 destroy --domain solo.cloud -r -f
+expect_rc 1 destroy --domain solo.cloud -f --confirm-cluster solo-name
 for side in bash go; do
   parity::run "${side}" "${PROJ}" destroy --domain solo.cloud -r --confirm-cluster solo-name || true
-  grep -q '^mockplan destroy ran: provider.yaml$' "${WORK}/${side}.err" \
-    || fail "${side}: destroy --confirm-cluster solo-name did not reach the provider destroy"
+  grep -qF "mockplan destroy ran: provider.yaml plan: cluster	solo-name|server	42	solo-name-cp-0|volume	7	solo-name-data" "${WORK}/${side}.err" \
+    || fail "${side}: destroy --confirm-cluster solo-name did not hand the confirmed plan to the provider destroy"
   parity::run "${side}" "${PROJ}" destroy --domain solo.cloud -r -f || true
   grep -q 'mockplan destroy ran' "${WORK}/${side}.err" \
     && fail "${side}: destroy -f without --confirm-cluster reached the provider destroy"
   grep -q '^    server solo-name-cp-0 (42)$' "${WORK}/${side}.err" \
     || fail "${side}: the destroy plan was not listed"
-  grep -q "Confirm the cluster_name: lo destroy --domain solo.cloud --confirm-cluster solo-name" "${WORK}/${side}.err" \
-    || fail "${side}: the refusal does not name --confirm-cluster"
+  grep -q "To confirm, run: lo destroy --domain solo.cloud -r --confirm-cluster solo-name" "${WORK}/${side}.err" \
+    || fail "${side}: the refusal does not name -r and --confirm-cluster"
   parity::run "${side}" "${PROJ}" destroy --domain dupa.cloud -r --confirm-cluster shared-name || true
   grep -q "cluster_name 'shared-name' of 'dupa.cloud' is also the cluster_name of: dupb.cloud." "${WORK}/${side}.err" \
     || fail "${side}: the shared cluster_name was not refused"

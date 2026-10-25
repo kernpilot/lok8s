@@ -59,15 +59,19 @@ func TestClusterNameUsersFindsEveryProviderConfig(t *testing.T) {
 		{"x.cloud", "", true, ""},
 	}
 	for _, tc := range cases {
-		got := strings.Join(ClusterNameUsers(clusters, tc.self, tc.name, tc.metadata), ",")
+		users := ProviderClusterNameUsers
+		if tc.metadata {
+			users = ClusterNameUsers
+		}
+		got := strings.Join(users(clusters, tc.self, tc.name), ",")
 		if got != tc.want {
-			t.Errorf("ClusterNameUsers(%s, %q, metadata=%v) = %q, want %q", tc.self, tc.name, tc.metadata, got, tc.want)
+			t.Errorf("users(%s, %q, metadata=%v) = %q, want %q", tc.self, tc.name, tc.metadata, got, tc.want)
 		}
 	}
 }
 
 func TestClusterNameUsersWithoutClustersDir(t *testing.T) {
-	if got := ClusterNameUsers(filepath.Join(t.TempDir(), "nope"), "a", "prod", true); got != nil {
+	if got := ClusterNameUsers(filepath.Join(t.TempDir(), "nope"), "a", "prod"); got != nil {
 		t.Fatalf("got %v, want nil", got)
 	}
 }

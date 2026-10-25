@@ -168,35 +168,35 @@ provider::provision() {
   debug "hetzner provision complete"
 }
 
-# hetzner::_destroy_cluster_name <config_file> <work_dir>
+# hetzner::_destroy_cluster_name <config_file>
 # The cluster name provider::destroy deletes by: the descriptor's
-# cluster_name, else the provision dump, else the first server name.
+# cluster_name, and nothing else. A name guessed from the provision dump or a
+# server name would delete by a label nobody confirmed, and `lo destroy`
+# checks the other domains for the same cluster_name (one name resolution
+# for both).
 hetzner::_destroy_cluster_name() {
-  local config_file="${1}" work_dir="${2}"
-  local cluster_name=""
+  local config_file="${1}" cluster_name=""
   cluster_name=$(_cfg '.cluster_name // ""' 2>/dev/null || echo "")
-  if [[ -z "${cluster_name}" ]] && [[ -f "${work_dir}/hetzner.dump.json" ]]; then
-    cluster_name=$(jq -r '.name // .cluster_name // empty' "${work_dir}/hetzner.dump.json" 2>/dev/null || echo "")
-  fi
-
-  # Fall back to reading the name field from the JSON descriptor
-  if [[ -z "${cluster_name}" ]] && [[ -f "${config_file}" ]]; then
-    cluster_name=$(jq -r 'if .server then .server[0].name | split("-") | .[:-2] | join("-") else .cluster_name // empty end' "${config_file}" 2>/dev/null || echo "")
-  fi
-
-  [[ -n "${cluster_name}" ]] || { error "cannot determine cluster name for destroy"; return 1; }
+  [[ -n "${cluster_name}" ]] || {
+    error "hetzner: the descriptor ${config_file} has no cluster_name. The destroy deletes every resource that carries lok8s.dev/cluster=<cluster_name>, so it needs the name. Nothing was deleted. Set cluster_name in the descriptor."
+    return 1
+  }
   echo "${cluster_name}"
 }
 
 # hetzner::_destroy_resources <cluster_name>
 # One "<resource>\t<id>\t<name>" line per hcloud resource that carries
 # lok8s.dev/cluster=<cluster_name>, in the order provider::destroy deletes
-# them. READ-ONLY.
+# them. READ-ONLY. A list that fails stops it (rc 1): an empty list must
+# mean "no resource", never "hcloud did not answer".
 hetzner::_destroy_resources() {
-  local selector="lok8s.dev/cluster=${1}" resource
+  local selector="lok8s.dev/cluster=${1}" resource json
   for resource in load-balancer server placement-group firewall volume floating-ip ssh-key network; do
-    hcloud "${resource}" list -o json -l "${selector}" \
-      | jq -r --arg r "${resource}" '.[] | [$r, (.id | tostring), (.name // "")] | @tsv' 2>/dev/null || true
+    if ! json="$(hcloud "${resource}" list -o json -l "${selector}")" ||
+       ! jq -r --arg r "${resource}" '(. // [])[] | [$r, (.id | tostring), (.name // "")] | @tsv' <<<"${json}"; then
+      error "hetzner: could not list the ${resource} resources with ${selector}. Nothing was deleted. Check the hcloud token and the API, then run the destroy again."
+      return 1
+    fi
   done
 }
 
@@ -205,16 +205,39 @@ provider::destroy() {
   local work_dir="${2:-/tmp}"
   export PROVIDER_CONFIG_FILE="${config_file}"
 
-  local cluster_name
-  cluster_name="$(hetzner::_destroy_cluster_name "${config_file}" "${work_dir}")" || return 1
+  local cluster_name rows listed
+  cluster_name="$(hetzner::_destroy_cluster_name "${config_file}")" || return 1
   debug "destroying hetzner resources for ${cluster_name}"
+
+  if [[ -n "${LOK8S_DESTROY_PLAN:-}" ]]; then
+    # `lo destroy` showed this plan and the operator confirmed it: delete
+    # exactly these resources. kubeone reset ran in between, so a new list
+    # can differ. A resource that is new since the confirmation stays.
+    local planned
+    planned="$(sed -n $'s/^cluster\t//p' <<<"${LOK8S_DESTROY_PLAN}" | head -1)"
+    [[ "${planned}" == "${cluster_name}" ]] || {
+      error "hetzner: the confirmed destroy plan is for cluster_name '${planned}', but the descriptor has '${cluster_name}'. Nothing was deleted. Run lo destroy again."
+      return 1
+    }
+    rows="$(grep -v $'^cluster\t' <<<"${LOK8S_DESTROY_PLAN}" || true)"
+    if listed="$(hetzner::_destroy_resources "${cluster_name}" 2>/dev/null)"; then
+      local line
+      while IFS= read -r line; do
+        [[ -n "${line}" ]] || continue
+        grep -qxF "${line}" <<<"${rows}" ||
+          warn "hetzner: kept ${line//$'\t'/ } (lok8s.dev/cluster=${cluster_name}): it is not in the confirmed plan. Delete it by hand, or run lo destroy again."
+      done <<<"${listed}"
+    fi
+  else
+    rows="$(hetzner::_destroy_resources "${cluster_name}")" || return 1
+  fi
 
   local resource id
   while IFS=$'\t' read -r resource id _; do
     [[ -n "${id}" ]] || continue
     debug "deleting ${resource} ${id}"
     hcloud "${resource}" delete "${id}" 2>/dev/null || true
-  done < <(hetzner::_destroy_resources "${cluster_name}")
+  done <<<"${rows}"
 
   debug "hetzner destroy complete for ${cluster_name}"
 }
@@ -227,16 +250,18 @@ provider::destroy() {
 #   line per resource. provider::destroy deletes EVERY resource in the
 #   token's project that carries lok8s.dev/cluster=<cluster_name>, so
 #   `lo destroy` shows this list, refuses a cluster_name that another domain
-#   also uses, and asks for the cluster_name before it deletes anything.
+#   also uses, and asks for the cluster_name before it deletes anything. The
+#   confirmed plan comes back to provider::destroy in LOK8S_DESTROY_PLAN.
+#   Fails (rc 1) when the descriptor has no cluster_name or a list fails.
 provider::destroy_plan() {
   local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
-  local work_dir="${2:-/tmp}"
   export PROVIDER_CONFIG_FILE="${config_file}"
 
-  local cluster_name
-  cluster_name="$(hetzner::_destroy_cluster_name "${config_file}" "${work_dir}")" || return 1
+  local cluster_name rows
+  cluster_name="$(hetzner::_destroy_cluster_name "${config_file}")" || return 1
+  rows="$(hetzner::_destroy_resources "${cluster_name}")" || return 1
   printf 'cluster\t%s\n' "${cluster_name}"
-  hetzner::_destroy_resources "${cluster_name}"
+  [[ -z "${rows}" ]] || printf '%s\n' "${rows}"
 }
 
 # ── Standard output ──────────────────────────────────────

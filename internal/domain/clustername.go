@@ -7,8 +7,13 @@ package domain
 // lok8s.dev/cluster=<cluster_name>), and the spec's metadata.name (the
 // kubeconfig file, the kind cluster). A domain copied from another one keeps
 // both. `lo destroy` refuses a provider cluster_name that another domain
-// uses (bash twin: provision::_cluster_name_users); `lo init cluster`
-// refuses a name that another domain uses as either.
+// uses (ProviderClusterNameUsers; bash twin: provision::_cluster_name_users);
+// `lo init cluster` refuses a name that another domain uses as either
+// (ClusterNameUsers).
+//
+// The provider deletes by the cluster_name of its config and nothing else
+// (hetzner::_destroy_cluster_name refuses a descriptor without one), so the
+// scan reads the same key: one name resolution for both.
 
 import (
 	"os"
@@ -19,51 +24,32 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
-
-// readYAML parses a YAML (or JSON) file; nil when it is missing or broken.
-func readYAML(file string) *yaml.Node {
-	raw, err := os.ReadFile(file)
-	if err != nil {
-		return nil
-	}
-	var doc yaml.Node
-	if yaml.Unmarshal(raw, &doc) != nil {
-		return nil
-	}
-	return &doc
-}
-
-// isFile reports a regular file (or a link to one).
-func isFile(path string) bool {
-	st, err := os.Stat(path)
-	return err == nil && st.Mode().IsRegular()
-}
 
 // providerClusterNames reads the cluster_name of a domain dir's provider
 // config: clusters/<d>/hetzner.json, the file of spec.provider.configRef and
 // an inline spec.provider.config (bash: yq -r '.cluster_name // ""' on each).
 func providerClusterNames(dir string, spec *yaml.Node) []string {
 	var names []string
-	if f := filepath.Join(dir, "hetzner.json"); isFile(f) {
-		names = append(names, yqsem.Or(yqsem.MapGet(readYAML(f), "cluster_name"), ""))
+	if f := filepath.Join(dir, "hetzner.json"); fsutil.IsRegular(f) {
+		names = append(names, yqsem.Or(yqsem.MapGet(yqsem.LoadNode(f), "cluster_name"), ""))
 	}
 	if spec == nil {
 		return names
 	}
 	if ref := yqsem.Or(yqsem.Lookup(spec, "spec", "provider", "configRef"), ""); ref != "" {
-		if f := filepath.Join(dir, ref); isFile(f) {
-			names = append(names, yqsem.Or(yqsem.MapGet(readYAML(f), "cluster_name"), ""))
+		if f := filepath.Join(dir, ref); fsutil.IsRegular(f) {
+			names = append(names, yqsem.Or(yqsem.MapGet(yqsem.LoadNode(f), "cluster_name"), ""))
 		}
 	}
 	return append(names, yqsem.Or(yqsem.Lookup(spec, "spec", "provider", "config", "cluster_name"), ""))
 }
 
-// ClusterNameUsers lists the domains under clusters, other than self, whose
-// provider config carries cluster_name name, and with metadata also the
-// domains whose cluster.lok8s.yaml has metadata.name name. Sorted.
-func ClusterNameUsers(clusters, self, name string, metadata bool) []string {
+// nameUsers lists the domains under clusters, other than self, for which
+// names(dir, spec) holds name. Sorted.
+func nameUsers(clusters, self, name string, names func(dir string, spec *yaml.Node) []string) []string {
 	if name == "" {
 		return nil
 	}
@@ -78,22 +64,37 @@ func ClusterNameUsers(clusters, self, name string, metadata bool) []string {
 			continue
 		}
 		dir := filepath.Join(clusters, other)
-		// os.Stat follows a link, as the bash glob clusters/*/ does.
-		if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		// fsutil.DirExists follows a link, as the bash glob clusters/*/ does.
+		if !fsutil.DirExists(dir) {
 			continue
 		}
 		var spec *yaml.Node
-		if f := filepath.Join(dir, "cluster.lok8s.yaml"); isFile(f) {
-			spec = readYAML(f)
+		if f := filepath.Join(dir, "cluster.lok8s.yaml"); fsutil.IsRegular(f) {
+			spec = yqsem.LoadNode(f)
 		}
-		names := providerClusterNames(dir, spec)
-		if metadata && spec != nil {
-			names = append(names, yqsem.Or(yqsem.Lookup(spec, "metadata", "name"), ""))
-		}
-		if slices.Contains(names, name) {
+		if slices.Contains(names(dir, spec), name) {
 			users = append(users, other)
 		}
 	}
 	sort.Strings(users)
 	return users
+}
+
+// ProviderClusterNameUsers lists the domains under clusters, other than
+// self, whose provider config carries cluster_name name. Sorted.
+func ProviderClusterNameUsers(clusters, self, name string) []string {
+	return nameUsers(clusters, self, name, providerClusterNames)
+}
+
+// ClusterNameUsers lists the domains under clusters, other than self, that
+// use name as their provider cluster_name or as the metadata.name of their
+// cluster.lok8s.yaml. Sorted.
+func ClusterNameUsers(clusters, self, name string) []string {
+	return nameUsers(clusters, self, name, func(dir string, spec *yaml.Node) []string {
+		names := providerClusterNames(dir, spec)
+		if spec != nil {
+			names = append(names, yqsem.Or(yqsem.Lookup(spec, "metadata", "name"), ""))
+		}
+		return names
+	})
 }

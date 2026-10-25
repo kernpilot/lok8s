@@ -427,11 +427,19 @@ func (d *Dispatcher) DispatchDestroy(ctx context.Context, domainName string) err
 	// servers/LBs/volumes; confirm BEFORE deregistration or the driver run.
 	// A provider that deletes by cluster_name gets the cluster_name guard
 	// instead (destroy_guard.go).
-	guarded, err := d.guardDestroy(ctx, domainName, kind, deps)
+	guarded, skip, err := d.guardDestroy(ctx, domainName, kind, clusterYAML, deps)
+	defer os.Unsetenv(DestroyPlanEnv)
 	if err != nil {
 		return err
 	}
 	if !guarded {
+		// --confirm-cluster names a cluster_name that no guard checks: the
+		// destroy must not run as if it were confirmed (without -r, a forced
+		// kubeone destroy resets the nodes and leaves the servers up).
+		if d.ConfirmCluster != "" {
+			ui.ErrorTo(stderr, "--confirm-cluster '%s' is set, but the destroy of '%s' checks no cluster_name: %s. Nothing was deleted. Add -r for a provider cluster, or remove --confirm-cluster.", d.ConfirmCluster, domainName, skip)
+			return ui.Handled(fmt.Errorf("destroy %s: --confirm-cluster without a cluster_name guard", domainName))
+		}
 		if err := d.ConfirmInfra(domainName, clusterYAML, kind, ActionDestroy); err != nil {
 			return err
 		}

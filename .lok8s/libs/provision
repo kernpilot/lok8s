@@ -79,6 +79,19 @@ provision::_interactive() {
   [[ -t 0 ]]
 }
 
+# provision::_read_answer <var>
+# One answer line from stdin into <var> (Go twin: Dispatcher.readAnswer): a
+# last line without a newline counts, and spaces, tabs and a CR around the
+# answer are trimmed. rc 1 at the end of the input with no answer.
+provision::_read_answer() {
+  local -n _answer="${1}"
+  local line=""
+  IFS= read -r line || [[ -n "${line}" ]] || return 1
+  line="${line#"${line%%[!$' \t\r']*}"}"
+  line="${line%"${line##*[!$' \t\r']}"}"
+  _answer="${line}"
+}
+
 # provision::confirm_infra <domain> <cluster_yaml> <kind> <action>
 #   action: reconcile | bootstrap | destroy
 # Prompt goes to stderr, the answer is read from stdin (testable — same idiom
@@ -133,11 +146,11 @@ provision::confirm_infra() {
   local ans=""
   if [[ "${action}" == "destroy" ]]; then
     printf '\n  continue? [type yes to continue] ' >&2
-    read -r ans || { error "aborted — '${domain}' left untouched"; return 3; }
+    provision::_read_answer ans || { error "aborted — '${domain}' left untouched"; return 3; }
     [[ "${ans}" == "yes" ]] || { error "aborted — '${domain}' left untouched"; return 3; }
   else
     printf '\n  proceed? [y/N] ' >&2
-    read -r ans || { error "aborted — '${domain}' left untouched"; return 3; }
+    provision::_read_answer ans || { error "aborted — '${domain}' left untouched"; return 3; }
     [[ "${ans,,}" =~ ^(y|yes)$ ]] || { error "aborted — '${domain}' left untouched"; return 3; }
   fi
 }
@@ -146,7 +159,7 @@ provision::confirm_infra() {
 # The OTHER domains under clusters/ whose provider config carries
 # <cluster_name>: clusters/<d>/hetzner.json, the file of
 # spec.provider.configRef, or an inline spec.provider.config. One per line,
-# sorted (Go twin: clusterNameUsers).
+# sorted (Go twin: domain.ProviderClusterNameUsers).
 provision::_cluster_name_users() {
   local self="${1}" name="${2}" dir other spec ref f
   local -a files=() names=() users=()
@@ -172,6 +185,38 @@ provision::_cluster_name_users() {
   (( ${#users[@]} == 0 )) || printf '%s\n' "${users[@]}" | LC_ALL=C sort
 }
 
+# provision::_destroy_guard_skip <kind> <cluster_yaml> <provider_name>
+# Print why the cluster_name guard does not run for this destroy; nothing
+# when it runs (Go twin: the skip reasons of guardDestroy). The guard runs
+# when the driver destroys through provider::destroy (the lo driver, a
+# KubeOne cluster that is not hosted) and the loaded provider has the
+# provider::destroy_plan hook.
+provision::_destroy_guard_skip() {
+  local kind="${1}" cluster_yaml="${2}" provider_name="${3}"
+  if [[ -z "${provider_name}" ]]; then
+    if [[ "${LOK8S_REMOTE:-}" != "1" ]]; then
+      echo "it runs without -r (--remote), so no provider is loaded"
+    else
+      echo "the spec names no provider"
+    fi
+    return 0
+  fi
+  case "${kind}" in
+    lo) ;;
+    kubeone)
+      if [[ "$(yq -r '.spec.kubehz.hosting // "self"' "${cluster_yaml}" 2>/dev/null)" == "hosted" ]]; then
+        echo "a hosted cluster is destroyed through the kubehz API, not the provider"
+        return 0
+      fi
+      ;;
+    *)
+      echo "the ${kind} driver does not destroy through the provider"
+      return 0
+      ;;
+  esac
+  declare -F provider::destroy_plan &>/dev/null || echo "provider '${provider_name}' has no destroy plan"
+}
+
 # provision::_destroy_guard <domain> <kind>
 # The cluster_name guard of `lo destroy`, for a provider with the
 # provider::destroy_plan hook (Go twin: destroy_guard.go). Such a provider
@@ -181,8 +226,9 @@ provision::_cluster_name_users() {
 # would delete the other cluster too. So: refuse a cluster_name another
 # domain uses, print what would be deleted, and take the cluster_name typed
 # on a terminal or from --confirm-cluster (`confirm_cluster`, dynamic
-# scoping from main::destroy). `force` does not skip it. Returns 3 on a
-# refusal or a decline (nothing ran), 1 when the plan fails.
+# scoping from main::destroy). `force` does not skip it. The confirmed plan
+# goes to the driver's provider::destroy in LOK8S_DESTROY_PLAN. Returns 3 on
+# a refusal or a decline (nothing ran), 1 when the plan fails.
 provision::_destroy_guard() {
   local domain="${1}" kind="${2}"
   local work_dir="${PATH_CLUSTERS}/${domain}/.provider"
@@ -230,16 +276,19 @@ provision::_destroy_guard() {
       error "--confirm-cluster '${confirm_cluster}' does not match the cluster_name '${name}' of '${domain}'. Nothing was deleted."
       return 3
     }
-    return 0
-  fi
-  if ! provision::_interactive; then
-    error "refusing to destroy '${domain}' non-interactively. Confirm the cluster_name: lo destroy --domain ${domain} --confirm-cluster ${name}"
+  elif ! provision::_interactive; then
+    error "there is no terminal to ask for the cluster_name of '${domain}'. Nothing was deleted. To confirm, run: lo destroy --domain ${domain} -r --confirm-cluster ${name}"
     return 3
+  else
+    local ans=""
+    printf '\n  type the cluster_name (%s) to delete these resources: ' "${name}" >&2
+    if ! provision::_read_answer ans || [[ "${ans}" != "${name}" ]]; then
+      error "the answer is not the cluster_name '${name}'. Nothing was deleted."
+      return 3
+    fi
   fi
-  local ans=""
-  printf '\n  type the cluster_name (%s) to delete these resources: ' "${name}" >&2
-  read -r ans || { error "aborted — '${domain}' left untouched"; return 3; }
-  [[ "${ans}" == "${name}" ]] || { error "aborted — '${domain}' left untouched"; return 3; }
+  # The driver's provider::destroy deletes exactly the confirmed plan.
+  export LOK8S_DESTROY_PLAN="${plan}"
 }
 
 # Resolve KUBECONFIG for deploy domains that reference another cluster.
@@ -647,8 +696,8 @@ provision::dispatch_destroy() {
 
   # Source provider if present and --remote was used (needed for destroy).
   # Loaded before the gate, which asks the provider what it would delete.
+  local provider_name=""
   if [[ "${LOK8S_REMOTE:-}" == "1" ]]; then
-    local provider_name
     provider_name=$(provider::read_name "${cluster_yaml}" 2>/dev/null) || true
     if [[ -n "${provider_name}" ]]; then
       provider::write_config "${cluster_yaml}"
@@ -661,9 +710,18 @@ provision::dispatch_destroy() {
   # A provider that deletes by cluster_name gets the cluster_name guard
   # instead (provision::_destroy_guard).
   # `|| return $?`: a decline propagates its sentinel rc 3 to the caller.
-  if [[ -n "${PROVIDER_NAME:-}" ]] && declare -F provider::destroy_plan &>/dev/null; then
+  local guard_skip
+  guard_skip="$(provision::_destroy_guard_skip "${kind}" "${cluster_yaml}" "${provider_name}")"
+  if [[ -z "${guard_skip}" ]]; then
     provision::_destroy_guard "${domain}" "${kind}" || return $?
   else
+    # --confirm-cluster names a cluster_name that no guard checks: the
+    # destroy must not run as if it were confirmed (without -r, a forced
+    # kubeone destroy resets the nodes and leaves the servers up).
+    if [[ -n "${confirm_cluster:-}" ]]; then
+      error "--confirm-cluster '${confirm_cluster}' is set, but the destroy of '${domain}' checks no cluster_name: ${guard_skip}. Nothing was deleted. Add -r for a provider cluster, or remove --confirm-cluster."
+      return 1
+    fi
     provision::confirm_infra "${domain}" "${cluster_yaml}" "${kind}" "destroy" || return $?
   fi
   # shellcheck source=/dev/null
