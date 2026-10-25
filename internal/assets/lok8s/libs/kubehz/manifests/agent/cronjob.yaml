@@ -305,13 +305,23 @@ spec:
                   # kubehz-agent-marker Role. An UNREADABLE marker (old install
                   # without the new RBAC) sends NOTHING — fail-closed beats
                   # spamming a full assessment every 5-minute tick.
+                  #
+                  # B423: `timeout 5` bounds a kubectl call, never a kubectl
+                  # client flag. Any client-config flag (--request-timeout,
+                  # --server, --kubeconfig, --context, --token, ...) makes
+                  # kubectl skip the in-cluster config and dial
+                  # localhost:8080, so the call always fails in this pod.
+                  # The marker read failed like that on every tick: the 24h
+                  # gate, the claim nonce and the desired-state poll were
+                  # off. `timeout 5 CMD` is the busybox syntax and the
+                  # coreutils syntax.
                   NOW_EPOCH=$(date -u +%s)
                   ASSESS_NOW=""
                   ASSESS_REQ=""
                   MARKER_OK=""
                   MARKER=""
-                  if MARKER=$(kubectl get configmap kubehz-agent-config -n kubehz-system \
-                      -o jsonpath='{.metadata.annotations}' --request-timeout=5s 2>/dev/null); then
+                  if MARKER=$(timeout 5 kubectl get configmap kubehz-agent-config -n kubehz-system \
+                      -o jsonpath='{.metadata.annotations}' 2>/dev/null); then
                     MARKER_OK=1
                     LAST_ASSESS=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/last-assessment" // ""' 2>/dev/null) || LAST_ASSESS=""
                     ASSESS_REQ=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/assess-requested" // ""' 2>/dev/null) || ASSESS_REQ=""
@@ -381,16 +391,17 @@ spec:
                     # or a unix socket -> kine); neither pod visible (managed /
                     # external CP) -> "unknown". Reachability falls back to the
                     # /readyz etcd check captured above.
-                    # Every assessment probe carries --request-timeout=5s: a
-                    # stalled apiserver degrades THAT probe (fail-soft empty)
-                    # instead of eating the whole beat (activeDeadlineSeconds
-                    # is the backstop, but it kills the beat with it).
-                    APISERVER_ARGS=$(kubectl get pods -n kube-system -l component=kube-apiserver \
-                      -o jsonpath='{.items[*].spec.containers[0].command} {.items[*].spec.containers[0].args}' --request-timeout=5s 2>/dev/null) || APISERVER_ARGS=""
+                    # Every assessment probe runs under `timeout 5` (B423,
+                    # above): a stalled apiserver degrades THAT probe
+                    # (fail-soft empty) instead of eating the whole beat
+                    # (activeDeadlineSeconds is the backstop, but it kills
+                    # the beat with it).
+                    APISERVER_ARGS=$(timeout 5 kubectl get pods -n kube-system -l component=kube-apiserver \
+                      -o jsonpath='{.items[*].spec.containers[0].command} {.items[*].spec.containers[0].args}' 2>/dev/null) || APISERVER_ARGS=""
                     DATASTORE="unknown"
                     ETCD_REACHABLE=false
-                    ETCD_READY=$(kubectl get pods -n kube-system -l component=etcd \
-                      -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{" "}{end}' --request-timeout=5s 2>/dev/null) || ETCD_READY=""
+                    ETCD_READY=$(timeout 5 kubectl get pods -n kube-system -l component=etcd \
+                      -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{" "}{end}' 2>/dev/null) || ETCD_READY=""
                     case "${ETCD_READY}" in
                       *[![:space:]]*)
                         DATASTORE="etcd"
@@ -407,13 +418,13 @@ spec:
                     esac
 
                     CAPI=false
-                    kubectl get crd clusters.cluster.x-k8s.io --request-timeout=5s >/dev/null 2>&1 && CAPI=true
+                    timeout 5 kubectl get crd clusters.cluster.x-k8s.io >/dev/null 2>&1 && CAPI=true
 
                     # CNI guess from the kube-system daemonsets; only kube-proxy
                     # present -> "kube-proxy-only" (no CNI daemonset visible).
                     CNI="unknown"
-                    DS_NAMES=$(kubectl get daemonsets -n kube-system \
-                      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' --request-timeout=5s 2>/dev/null) || DS_NAMES=""
+                    DS_NAMES=$(timeout 5 kubectl get daemonsets -n kube-system \
+                      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null) || DS_NAMES=""
                     case "${DS_NAMES}" in
                       *cilium*)     CNI="cilium" ;;
                       *calico*)     CNI="calico" ;;
@@ -426,8 +437,8 @@ spec:
                     # flag for the service half; null when neither is visible.
                     POD_CIDR=""
                     SERVICE_CIDR=""
-                    KUBEADM_CFG=$(kubectl get configmap kubeadm-config -n kube-system \
-                      -o jsonpath='{.data.ClusterConfiguration}' --request-timeout=5s 2>/dev/null) || KUBEADM_CFG=""
+                    KUBEADM_CFG=$(timeout 5 kubectl get configmap kubeadm-config -n kube-system \
+                      -o jsonpath='{.data.ClusterConfiguration}' 2>/dev/null) || KUBEADM_CFG=""
                     if [ -n "${KUBEADM_CFG}" ]; then
                       POD_CIDR=$(printf '%s\n' "${KUBEADM_CFG}" | sed -n 's/^ *podSubnet: *//p' | head -1)
                       SERVICE_CIDR=$(printf '%s\n' "${KUBEADM_CFG}" | sed -n 's/^ *serviceSubnet: *//p' | head -1)
@@ -437,7 +448,7 @@ spec:
                         sed -n 's/.*--service-cluster-ip-range=\([^" ]*\).*/\1/p' | head -1)
                     fi
 
-                    SC_JSON=$(kubectl get storageclasses -o json --request-timeout=5s 2>/dev/null | \
+                    SC_JSON=$(timeout 5 kubectl get storageclasses -o json 2>/dev/null | \
                       jq -c '[.items[] | {name: .metadata.name, provisioner: .provisioner,
                           isDefault: ((.metadata.annotations["storageclass.kubernetes.io/is-default-class"] // "false") == "true")}]' \
                         2>/dev/null) || SC_JSON=""
@@ -453,7 +464,7 @@ spec:
 
                     # PV summary: jq flattens each PV to "provisioner<TAB>capacity",
                     # awk converts capacities to Gi and groups by provisioner.
-                    PV_LINES=$(kubectl get pv -o json --request-timeout=5s 2>/dev/null | \
+                    PV_LINES=$(timeout 5 kubectl get pv -o json 2>/dev/null | \
                       jq -r '.items[] | [(.metadata.annotations["pv.kubernetes.io/provisioned-by"] // .spec.csi.driver // "unknown"),
                           (.spec.capacity.storage // "0")] | @tsv' 2>/dev/null) || PV_LINES=""
                     PV_SUMMARY=$(printf '%s\n' "${PV_LINES}" | awk -F'\t' '
@@ -485,19 +496,19 @@ spec:
                         printf "}}"
                       }') || PV_SUMMARY='{"count":0,"totalGi":0,"byProvisioner":{}}'
 
-                    LB_COUNT=$(kubectl get services -A -o json --request-timeout=5s 2>/dev/null | \
+                    LB_COUNT=$(timeout 5 kubectl get services -A -o json 2>/dev/null | \
                       jq '[.items[] | select(.spec.type == "LoadBalancer")] | length' 2>/dev/null) || LB_COUNT=""
                     [ -n "${LB_COUNT}" ] || LB_COUNT=0
-                    VALIDATING=$(kubectl get validatingwebhookconfigurations -o json --request-timeout=5s 2>/dev/null | \
+                    VALIDATING=$(timeout 5 kubectl get validatingwebhookconfigurations -o json 2>/dev/null | \
                       jq '.items | length' 2>/dev/null) || VALIDATING=""
                     [ -n "${VALIDATING}" ] || VALIDATING=0
-                    MUTATING=$(kubectl get mutatingwebhookconfigurations -o json --request-timeout=5s 2>/dev/null | \
+                    MUTATING=$(timeout 5 kubectl get mutatingwebhookconfigurations -o json 2>/dev/null | \
                       jq '.items | length' 2>/dev/null) || MUTATING=""
                     [ -n "${MUTATING}" ] || MUTATING=0
 
-                    CP_NODES=$(kubectl get nodes -l node-role.kubernetes.io/control-plane -o name --request-timeout=5s 2>/dev/null | grep -c .) || CP_NODES=0
+                    CP_NODES=$(timeout 5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name 2>/dev/null | grep -c .) || CP_NODES=0
                     if [ "${CP_NODES}" = "0" ]; then
-                      CP_NODES=$(kubectl get nodes -l node-role.kubernetes.io/master -o name --request-timeout=5s 2>/dev/null | grep -c .) || CP_NODES=0
+                      CP_NODES=$(timeout 5 kubectl get nodes -l node-role.kubernetes.io/master -o name 2>/dev/null | grep -c .) || CP_NODES=0
                     fi
 
                     # etcdDbBytes needs the etcd metrics endpoint (TLS client

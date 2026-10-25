@@ -44,8 +44,32 @@ setup() {
   # body (-d) to STUB_PAYLOAD_OUT so the test can assert the wire payload.
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
+# timeout: the pod's `timeout SECS CMD ARGS` (busybox and coreutils take the
+# same form). It logs the bound and the command, and runs the command as a
+# shell function, so the kubectl stub below answers it.
+timeout() {
+  _secs=$1
+  shift
+  printf '%s %s\n' "${_secs}" "$*" >> "${STUB_TIMEOUT_LOG}"
+  "$@"
+}
 kubectl() {
   argv_log kubectl "$@"
+  # In the pod, kubectl reads the in-cluster config. A client-config flag
+  # makes it skip that config and dial localhost:8080 (B423, proven on prod
+  # with alpine/k8s 1.31.4): the stub refuses the same way.
+  for _arg in "$@"; do
+    case "${_arg}" in
+      --request-timeout|--request-timeout=*|--server|--server=*|-s|--kubeconfig|--kubeconfig=*|\
+      --context|--context=*|--cluster|--cluster=*|--user|--user=*|--token|--token=*|\
+      --username|--username=*|--password|--password=*|--certificate-authority|--certificate-authority=*|\
+      --client-certificate|--client-certificate=*|--client-key|--client-key=*|\
+      --insecure-skip-tls-verify|--insecure-skip-tls-verify=*|--tls-server-name|--tls-server-name=*|\
+      --as|--as=*|--as-group|--as-group=*|--as-uid|--as-uid=*|--disable-compression|--disable-compression=*)
+        echo 'The connection to the server localhost:8080 was refused - did you specify the right host or port?' >&2
+        return 1 ;;
+    esac
+  done
   case "$*" in
     # An enrolled agent identity exists: the heartbeat reads its agent-token
     # back and authenticates with it. The empty-token guard skips the POST when
@@ -119,8 +143,8 @@ kubectl() {
       if [ -n "${STUB_DAEMONSETS+x}" ]; then printf '%s' "${STUB_DAEMONSETS}"; else printf 'cilium\nkube-proxy\n'; fi ;;
     "get configmap kubeadm-config"*)
       printf '  networking:\n    dnsDomain: cluster.local\n    podSubnet: 10.244.0.0/16\n    serviceSubnet: 10.96.0.0/12\n' ;;
-    # Prefix-glob matches: the assessment probes append --request-timeout=5s
-    # (a stalled apiserver degrades ONE probe, never the whole beat).
+    # The assessment probes run under `timeout 5` (a stalled apiserver
+    # degrades ONE probe, never the whole beat; the timeout stub above).
     # STUB_SC_JSON overrides the StorageClass dump (the >50-cap fixture).
     "get storageclasses -o json"*)
       if [ -n "${STUB_SC_JSON:-}" ]; then printf '%s\n' "${STUB_SC_JSON}"; else
@@ -193,6 +217,8 @@ STUBS_EOF
   export STUB_PAYLOAD_OUT="${BATS_TEST_TMPDIR}/payload.json"
   export STUB_ANNOTATE_LOG="${BATS_TEST_TMPDIR}/annotate.log"
   export STUB_CURL_LOG="${BATS_TEST_TMPDIR}/curl.log"
+  # Every `timeout SECS CMD …` call: the bound, then the command.
+  export STUB_TIMEOUT_LOG="${BATS_TEST_TMPDIR}/timeout.log"
   # The Authorization headers that curl got (from its config).
   export STUB_AUTH_LOG="${BATS_TEST_TMPDIR}/auth.log"
   # Desired-state poll fixtures: default 304 (unchanged → silent) so the
@@ -626,6 +652,50 @@ teardown() {
   # The heartbeat itself still went out intact.
   run command jq -r '.clusterId' "${STUB_PAYLOAD_OUT}"
   assert_output "test.example.com"
+}
+
+# ── B423: in-cluster kubectl takes no client-config flag ──
+# In the pod, a kubectl client-config flag (--request-timeout, --server, …)
+# makes kubectl skip the in-cluster config and dial localhost:8080. The
+# kubectl stub refuses such a call the same way. The marker read carried
+# --request-timeout=5s: it failed on every tick, so the 24h gate, the claim
+# nonce and the desired-state poll were off, and every assessment probe read
+# empty. `timeout 5` bounds the calls now.
+
+@test "B423: the marker read reaches the apiserver: the assessment probes and the desired-state poll run" {
+  run bash "${RUNNER}"
+  assert_success
+  # The marker was readable, so the desired-state poll ran.
+  refute_output --partial "desired-state poll skipped"
+  run grep -F "curl https://api.example.com/api/clusters/test.example.com/desired" "${STUB_CURL_LOG}"
+  assert_success
+  # Each probe got its answer from the apiserver, not an empty fallback.
+  run command jq -r '[.assessment.datastore, .assessment.cni, .assessment.podCidr, (.assessment.storageClasses | length), .assessment.pvSummary.count, .assessment.loadBalancers, .assessment.webhooks.validating, .assessment.cpUsage.cpNodes] | map(tostring) | join(" ")' "${STUB_PAYLOAD_OUT}"
+  assert_output "etcd cilium 10.244.0.0/16 2 3 2 3 1"
+}
+
+@test "B423: the marker read and every assessment probe run under timeout 5" {
+  run bash "${RUNNER}"
+  assert_success
+  run cat "${STUB_TIMEOUT_LOG}"
+  assert_line "5 kubectl get configmap kubehz-agent-config -n kubehz-system -o jsonpath={.metadata.annotations}"
+  assert_line --partial "5 kubectl get pods -n kube-system -l component=kube-apiserver -o jsonpath="
+  assert_line --partial "5 kubectl get pods -n kube-system -l component=etcd -o jsonpath="
+  assert_line "5 kubectl get crd clusters.cluster.x-k8s.io"
+  assert_line --partial "5 kubectl get daemonsets -n kube-system -o jsonpath="
+  assert_line "5 kubectl get configmap kubeadm-config -n kube-system -o jsonpath={.data.ClusterConfiguration}"
+  assert_line "5 kubectl get storageclasses -o json"
+  assert_line "5 kubectl get pv -o json"
+  assert_line "5 kubectl get services -A -o json"
+  assert_line "5 kubectl get validatingwebhookconfigurations -o json"
+  assert_line "5 kubectl get mutatingwebhookconfigurations -o json"
+  assert_line "5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name"
+  # Twelve bounded calls, each in the plain-seconds form that busybox and
+  # coreutils both take.
+  run grep -c '^5 kubectl get ' "${STUB_TIMEOUT_LOG}"
+  assert_output "12"
+  run grep -vc '^5 kubectl get ' "${STUB_TIMEOUT_LOG}"
+  assert_output "0"
 }
 
 # ── Assessment: RBAC ships with the kustomization ────────
