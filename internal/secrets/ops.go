@@ -6,6 +6,7 @@ package secrets
 // (sops/ssh-to-age are libraries here) and are commented where they occur.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -522,7 +523,10 @@ func (c *Context) Encrypt(name string) error {
 // ── Decrypt ──────────────────────────────────────────────
 
 // Decrypt restores plaintext cache files from .enc twins (bash:
-// secrets::decrypt).
+// secrets::decrypt). A plaintext newer than its .enc is kept. Decrypt
+// compares it in memory with the .enc, warns by entry name when the two
+// differ, and counts both kinds of skip in a summary on stderr (stdout is
+// unchanged). The exit code stays 0 for a difference.
 func (c *Context) Decrypt(sshKey string) error {
 	secretsDir, err := c.ResolveStore()
 	if err != nil {
@@ -563,7 +567,7 @@ func (c *Context) Decrypt(sshKey string) error {
 		ageKey = derived
 	}
 
-	count, skipped := 0, 0
+	count, skippedEqual, skippedDiffer := 0, 0, 0
 	for _, base := range storeEntries(secretsDir, "Secret.") {
 		if !strings.HasSuffix(base[len("Secret."):], ".enc") {
 			continue
@@ -573,10 +577,32 @@ func (c *Context) Decrypt(sshKey string) error {
 			continue
 		}
 
-		// Skip if plaintext is newer than .enc (already decrypted)
+		// Skip if plaintext is newer than .enc (already decrypted). The skip
+		// keeps the plaintext, so compare it in memory with the decrypted
+		// .enc: a plaintext that differs holds a value the .enc does not (a
+		// local edit, or a value a build generated before the decrypt).
+		// Name it, never its value.
 		plaintext := strings.TrimSuffix(encFile, ".enc")
 		if fsutil.IsRegular(plaintext) && newerThan(plaintext, encFile) {
-			skipped++
+			cur, err := os.ReadFile(plaintext)
+			if err != nil {
+				ui.ErrorTo(c.ErrOut, "Failed to read %s", filepath.Base(plaintext))
+				return ErrHandled
+			}
+			dec, err := decryptEncFile(encFile, ageKey)
+			if err != nil {
+				// No library error on this path: a sops error can carry
+				// digests of the plaintext (bash discards the CLI's stderr
+				// here for the same reason).
+				ui.ErrorTo(c.ErrOut, "Failed to decrypt %s", base)
+				return ErrHandled
+			}
+			if bytes.Equal(dec, cur) {
+				skippedEqual++
+			} else {
+				ui.WarnTo(c.ErrOut, "%s: the plaintext is newer than %s and differs from it. Decrypt kept the plaintext.", filepath.Base(plaintext), base)
+				skippedDiffer++
+			}
 			continue
 		}
 
@@ -589,10 +615,9 @@ func (c *Context) Decrypt(sshKey string) error {
 			}
 		}
 		if err != nil {
-			// The bash path surfaces the sops CLI's own stderr before the
-			// [error] line; the library error stands in for it. It never
-			// carries key material.
-			fmt.Fprintln(c.ErrOut, err)
+			// The [error] line names the file only. The bash path discards
+			// the sops CLI's stderr: a MAC mismatch prints two unkeyed
+			// SHA-512 digests of the plaintext. Both print this one line.
 			ui.ErrorTo(c.ErrOut, "Failed to decrypt %s", base)
 			return ErrHandled
 		}
@@ -603,14 +628,43 @@ func (c *Context) Decrypt(sshKey string) error {
 		count++
 	}
 
+	// A differing plaintext is not an error: `lo secrets set` without
+	// --encrypt makes exactly that state on purpose. The warnings name each
+	// entry, and this line gives the two ways out once.
+	if skippedDiffer > 0 {
+		ui.WarnTo(c.ErrOut, "%d plaintext(s) differ from the .enc. To store them, run \"lo secrets encrypt%s\". To use the .enc values, delete these plaintexts, then run \"lo secrets decrypt%s\".",
+			skippedDiffer, domainFlag(c.Domain), domainFlag(c.Domain))
+	}
 	if count > 0 {
 		fmt.Fprintf(c.Out, "Decrypted %d secret(s)\n", count)
 	}
+	// The skip count goes to stderr: piped stdout is the contract (memory
+	// rule), and it carried no skip line before.
+	skipped := skippedEqual + skippedDiffer
 	if skipped > 0 {
-		ui.Debug("Skipped %d (already up to date)", skipped)
+		fmt.Fprintf(c.ErrOut, "Skipped %d secret(s) with a newer plaintext: %d equal, %d differ\n", skipped, skippedEqual, skippedDiffer)
 	}
 	if count == 0 && skipped == 0 {
 		fmt.Fprintf(c.Out, "No encrypted secrets found in %s\n", secretsDir)
 	}
 	return nil
+}
+
+// decryptEncFile decrypts encFile in memory. Nothing is written: the
+// decrypted value lives only in the caller.
+func decryptEncFile(encFile, ageKey string) ([]byte, error) {
+	raw, err := os.ReadFile(encFile)
+	if err != nil {
+		return nil, err
+	}
+	return sopsDecryptData(raw, ageKey)
+}
+
+// domainFlag is the " --domain <d>" suffix of a hint command, empty without
+// a domain.
+func domainFlag(d string) string {
+	if d == "" {
+		return ""
+	}
+	return " --domain " + d
 }

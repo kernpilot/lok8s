@@ -9,6 +9,12 @@
 // The directory naming scheme is identical to the legacy bash plugin
 // (see plugins/secret/README.md) so existing cache directories continue
 // to work after migration.
+//
+// A miss is a miss only when the entry has no encrypted twin either
+// (<entry>.enc, written by `lo secrets encrypt`). When the twin exists, the
+// store holds a value that is not decrypted yet: Get, ReadByName and
+// GetOrCreate return an *EncryptedOnlyError and never generate a new value
+// over it.
 package cache
 
 import (
@@ -25,6 +31,55 @@ const (
 	dirPerm  os.FileMode = 0o700
 	filePerm os.FileMode = 0o600
 )
+
+// EncSuffix is the suffix of an entry's SOPS-encrypted twin: `lo secrets
+// encrypt` writes Secret.<name>.<namespace>.<key>.enc next to the plaintext.
+const EncSuffix = ".enc"
+
+// EncryptedOnlyError reports a store entry that has its encrypted twin but
+// no plaintext. The store holds a value, and the plugin cannot read it until
+// `lo secrets decrypt` writes the plaintext. The plugin does not generate a
+// new value over it: in a fresh worktree that silently replaced every
+// committed value of the store (B425). It is not os.ErrNotExist, so
+// GetOrCreate returns it and does not generate.
+type EncryptedOnlyError struct {
+	Dir  string // the store directory
+	Name string // the entry file name, Secret.<name>.<namespace>.<key>
+}
+
+func (e *EncryptedOnlyError) Error() string {
+	return fmt.Sprintf("cannot read %s: the store %s has %s%s but no plaintext. The plugin does not generate a new value over an encrypted value. Run %q, then build again",
+		e.Name, e.Dir, e.Name, EncSuffix, DecryptCommand(e.Dir))
+}
+
+// DecryptCommand is the lo command that writes the plaintexts of the store
+// dir. A per-domain store (<project>/clusters/<domain>/secrets) names its
+// domain; any other store (the flat .secrets/, a copy elsewhere) gets the
+// command without --domain.
+func DecryptCommand(dir string) string {
+	domainDir := filepath.Dir(dir)
+	d := filepath.Base(domainDir)
+	if filepath.Base(dir) == "secrets" && filepath.Base(filepath.Dir(domainDir)) == "clusters" &&
+		d != "." && d != string(filepath.Separator) && d != "" {
+		return "lo secrets decrypt --domain " + d
+	}
+	return "lo secrets decrypt"
+}
+
+// EncryptedOnly returns an *EncryptedOnlyError when the entry name has no
+// plaintext in dir and its encrypted twin exists, else nil. The plaintext
+// check follows a symlink: a dangling symlink is no plaintext, so a value is
+// not generated next to the .enc through it.
+func EncryptedOnly(dir, name string) error {
+	full := filepath.Join(dir, name)
+	if _, err := os.Stat(full); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if _, err := os.Stat(full + EncSuffix); err != nil {
+		return nil
+	}
+	return &EncryptedOnlyError{Dir: dir, Name: name}
+}
 
 // Cache stores secret values for a single (name, namespace) tuple.
 // Concurrent reads are safe; concurrent writes from different processes
@@ -63,16 +118,25 @@ func (c *Cache) filename(key string) string {
 	return filepath.Join(c.dir, FormatName(c.name, c.namespace, key))
 }
 
-// Has reports whether a cache entry exists for key.
+// Has reports whether the store holds an entry for key: the plaintext, or
+// only its encrypted twin (Get then returns an *EncryptedOnlyError).
 func (c *Cache) Has(key string) bool {
-	_, err := os.Stat(c.filename(key))
+	if _, err := os.Stat(c.filename(key)); err == nil {
+		return true
+	}
+	_, err := os.Stat(c.filename(key) + EncSuffix)
 	return err == nil
 }
 
-// Get returns the cached value for key, or os.ErrNotExist if absent.
+// Get returns the cached value for key. It returns an *EncryptedOnlyError
+// when only the encrypted twin exists, and os.ErrNotExist when neither
+// exists.
 func (c *Cache) Get(key string) ([]byte, error) {
 	data, err := os.ReadFile(c.filename(key))
 	if err != nil {
+		if eerr := EncryptedOnly(c.dir, FormatName(c.name, c.namespace, key)); eerr != nil {
+			return nil, eerr
+		}
 		return nil, err
 	}
 	return data, nil
@@ -84,7 +148,8 @@ func (c *Cache) Put(key string, value []byte) error {
 }
 
 // GetOrCreate returns the cached value if present, otherwise calls gen,
-// stores the result, and returns it. This is the canonical pattern for
+// stores the result, and returns it. It calls gen only when neither the
+// plaintext nor its encrypted twin exists. This is the canonical pattern for
 // cache-first generators:
 //
 //	cached, err := c.GetOrCreate("PASSWORD", func() ([]byte, error) {
@@ -118,7 +183,14 @@ func (c *Cache) ReadByName(filename string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return os.ReadFile(full)
+	data, err := os.ReadFile(full)
+	if err != nil {
+		if eerr := EncryptedOnly(c.dir, filename); eerr != nil {
+			return nil, eerr
+		}
+		return nil, err
+	}
+	return data, nil
 }
 
 // checkName validates a ReadByName filename and returns its full path.

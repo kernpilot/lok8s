@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/kernpilot/lok8s/kustomize/pkg/cache"
 	"github.com/kernpilot/lok8s/kustomize/pkg/errs"
 	"github.com/kernpilot/lok8s/kustomize/pkg/plugin"
 
@@ -91,6 +92,12 @@ func (g *Bash) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 					k, strings.TrimSpace(string(existing)), entryHash)
 			}
 		} else if os.IsNotExist(err) {
+			// A .sha.enc without its plaintext is a committed approval that
+			// is not decrypted yet. Trusting the current hash on first use
+			// would approve a changed command without a review.
+			if eerr := cache.EncryptedOnly(ctx.Cache.Dir(), shaFileName(ctx.Name, ctx.Namespace, k)); eerr != nil {
+				return nil, errs.Wrap(k, eerr)
+			}
 			// First run — create the .sha file. A dry run (only reached with
 			// --allow-generators) writes no file: the hash is trusted on
 			// first use for this run only.
@@ -153,6 +160,10 @@ func hashEntry(entry specpkg.BashEntry) string {
 }
 
 // shaFileName returns the .sha filename for a bash entry.
+// ShaFileName is shaFileName for the plugin's preflight (secret.Plugin.Build):
+// the store file of a bash: entry's approval hash.
+func ShaFileName(secret, namespace, key string) string { return shaFileName(secret, namespace, key) }
+
 func shaFileName(secret, namespace, key string) string {
 	return fmt.Sprintf("Secret.%s.%s.%s.sha", secret, namespace, key)
 }
