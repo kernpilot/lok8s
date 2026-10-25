@@ -55,7 +55,9 @@ generators:
 
 `lo build <domain>` generates `SESSION_KEY` into that domain's store
 (`clusters/<domain>/secrets/`), caches it, and emits the `Secret`. To rotate a
-value, delete its cache file and rebuild. (Charset options and how to generate
+value, delete its cache file and its `.enc` twin, then rebuild. A cache file
+that is missing while its `.enc` twin exists stops the build: run
+`lo secrets decrypt --domain <domain>` first. (Charset options and how to generate
 proper cryptographic keys are covered in the
 [reference](/reference/kustomize-plugins#generating-cryptographic-keys).)
 

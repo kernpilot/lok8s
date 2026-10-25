@@ -149,6 +149,20 @@ if (( cross_rc == 0 )) \
 else
   fail "secrets cross-decrypt"
 fi
-sec_check secrets decrypt                                 # freshness skip → silent
+sec_check secrets decrypt                                 # freshness skip → counted, all equal
+
+# A kept plaintext that differs from its .enc: decrypt names it (never the
+# value), counts both kinds of skip and exits 0.
+for impl in go bash; do
+  printf 'local-edit' > "${WORK}/sec-${impl}/.secrets/Secret.app.default.JWT_SECRET"
+  touch -t 202001010000 "${WORK}/sec-${impl}/.secrets/Secret.app.default.JWT_SECRET.enc"
+done
+sec_check secrets decrypt
+if grep -q 'local-edit' "${WORK}/go.out" "${WORK}/go.err" "${WORK}/bash.out" "${WORK}/bash.err"; then
+  fail "secrets decrypt printed a plaintext value"
+fi
+if ! grep -qx '\[warn\] Secret.app.default.JWT_SECRET: the plaintext is newer than Secret.app.default.JWT_SECRET.enc and differs from it. Decrypt kept the plaintext.' "${WORK}/go.err"; then
+  fail "secrets decrypt did not name the differing plaintext"
+fi
 
 report

@@ -1,6 +1,7 @@
 package generator
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -544,6 +545,31 @@ func TestBash_DryRunWithAllowWritesNoAllowFiles(t *testing.T) {
 	for _, name := range []string{shaFileName("test", "default", "KEY"), ".bash-allow"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
 			t.Errorf("a dry run wrote %s", name)
+		}
+	}
+}
+
+// A committed .sha.enc without its plaintext is an approval that is not
+// decrypted yet (B425). Trust on first use would write a fresh .sha and a
+// fresh .bash-allow for whatever the command is now, so a changed command
+// would run without a review. The generator stops before it runs anything.
+func TestBash_EncryptedShaTwinStops(t *testing.T) {
+	ctx, dir := bashCtx(t)
+	sha := filepath.Join(dir, "Secret.test.default.KEY.sha")
+	if err := os.WriteFile(sha+".enc", []byte(`{"data":"ENC[AES256_GCM,data:fake]","sops":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := NewBash(map[string]specpkg.BashEntry{
+		"KEY": {Exec: "touch " + filepath.Join(dir, "ran") + " && echo hello"},
+	})
+	_, err := g.Generate(ctx)
+	var eo *cache.EncryptedOnlyError
+	if !errors.As(err, &eo) || eo.Name != "Secret.test.default.KEY.sha" {
+		t.Fatalf("err = %v, want *cache.EncryptedOnlyError for the .sha", err)
+	}
+	for _, f := range []string{sha, filepath.Join(dir, ".bash-allow"), filepath.Join(dir, "ran"), filepath.Join(dir, "Secret.test.default.KEY")} {
+		if _, statErr := os.Stat(f); statErr == nil {
+			t.Errorf("%s exists after the refusal", filepath.Base(f))
 		}
 	}
 }

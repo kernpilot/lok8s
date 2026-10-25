@@ -513,3 +513,98 @@ func TestAddKeyContainment(t *testing.T) {
 		t.Errorf("stdout not empty: %q", out.String())
 	}
 }
+
+// A plaintext newer than its .enc is kept, and the skip is no longer silent
+// (the recreate: "Decrypted 71" of 103, 32 skipped without a word). Decrypt
+// compares the kept plaintext with the decrypted .enc in memory, names each
+// one that differs (never its value), counts both kinds in the summary and
+// exits 0.
+func TestDecryptSkipComparesWithTheEnc(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	c.Domain = "alpha.dev"
+	id := testAgeIdentity(t, c)
+	store := c.Paths.Base + "/.secrets"
+	write(t, store+"/Secret.app.default.SAME", "same-value")
+	write(t, store+"/Secret.app.default.EDITED", "committed-value")
+	write(t, store+"/Secret.app.default.GONE", "restored-value")
+	if err := c.Encrypt(""); err != nil {
+		t.Fatal(err)
+	}
+
+	// SAME: newer, equal. EDITED: newer, a value the .enc does not hold.
+	// GONE: no plaintext, so decrypt writes it.
+	write(t, store+"/Secret.app.default.EDITED", "local-edit-value")
+	future := time.Now().Add(2 * time.Second)
+	for _, k := range []string{"SAME", "EDITED"} {
+		if err := os.Chtimes(store+"/Secret.app.default."+k, future, future); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.Remove(store + "/Secret.app.default.GONE")
+
+	t.Setenv("SOPS_AGE_KEY", id.String())
+	out.Reset()
+	errOut.Reset()
+	if err := c.Decrypt("/nonexistent-ssh-key"); err != nil {
+		t.Fatalf("Decrypt = %v (a difference must not fail the run)", err)
+	}
+	wantOut := "Decrypted 1 secret(s)\nSkipped 2 secret(s) with a newer plaintext: 1 equal, 1 differ\n"
+	if out.String() != wantOut {
+		t.Errorf("stdout:\n got %q\nwant %q", out.String(), wantOut)
+	}
+	wantErr := "[warn] Secret.app.default.EDITED: the plaintext is newer than Secret.app.default.EDITED.enc and differs from it. Decrypt kept the plaintext.\n" +
+		"[warn] 1 plaintext(s) differ from the .enc. To store them, run \"lo secrets encrypt --domain alpha.dev\". To use the .enc values, delete these plaintexts, then run \"lo secrets decrypt --domain alpha.dev\".\n"
+	if errOut.String() != wantErr {
+		t.Errorf("stderr:\n got %q\nwant %q", errOut.String(), wantErr)
+	}
+	for _, v := range []string{"local-edit-value", "committed-value", "same-value", "restored-value"} {
+		if strings.Contains(out.String()+errOut.String(), v) {
+			t.Errorf("the output carries the value %q", v)
+		}
+	}
+	// The kept plaintext is untouched; the missing one is restored.
+	if raw, _ := os.ReadFile(store + "/Secret.app.default.EDITED"); string(raw) != "local-edit-value" {
+		t.Errorf("EDITED = %q", raw)
+	}
+	if raw, _ := os.ReadFile(store + "/Secret.app.default.GONE"); string(raw) != "restored-value" {
+		t.Errorf("GONE = %q", raw)
+	}
+
+	// All equal: the summary still counts the skips, and nothing warns.
+	write(t, store+"/Secret.app.default.EDITED", "committed-value")
+	os.Chtimes(store+"/Secret.app.default.EDITED", future, future)
+	nudgeNewer(store+"/Secret.app.default.GONE", store+"/Secret.app.default.GONE.enc")
+	out.Reset()
+	errOut.Reset()
+	if err := c.Decrypt("/nonexistent-ssh-key"); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "Skipped 3 secret(s) with a newer plaintext: 3 equal, 0 differ\n" || errOut.String() != "" {
+		t.Errorf("stdout %q stderr %q", out.String(), errOut.String())
+	}
+}
+
+// A skipped plaintext whose .enc this key cannot decrypt fails the run, the
+// same way a decrypt of a missing plaintext does.
+func TestDecryptSkipCompareFailsOnAnUnreadableEnc(t *testing.T) {
+	c, _, errOut := testEnv(t)
+	testAgeIdentity(t, c)
+	store := c.Paths.Base + "/.secrets"
+	write(t, store+"/Secret.app.default.K", "v")
+	if err := c.Encrypt(""); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	os.Chtimes(store+"/Secret.app.default.K", future, future)
+	other, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SOPS_AGE_KEY", other.String())
+	if err := c.Decrypt("/nonexistent-ssh-key"); !errors.Is(err, ErrHandled) {
+		t.Fatalf("Decrypt = %v, want ErrHandled", err)
+	}
+	if !strings.Contains(errOut.String(), "[error] Failed to decrypt Secret.app.default.K.enc") {
+		t.Errorf("stderr: %s", errOut.String())
+	}
+}

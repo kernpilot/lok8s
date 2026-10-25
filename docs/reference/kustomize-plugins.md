@@ -434,9 +434,17 @@ output. Cached generators (`passwd`, `key`, `template`, `secretRef`, `htpasswd`,
 existing value unchanged. This produces byte-stable kustomize output across
 runs.
 
-To rotate a value, delete its file from `$PATH_SECRETS` and re-run
-`kustomize build`. For htpasswd, deleting just `<key>.bcrypt` regenerates
-the hash with a new salt while preserving the username/password.
+An entry with an encrypted twin (`<entry>.enc`, written by
+`lo secrets encrypt`) but no plaintext is not a cache miss. The store holds
+that value, and it is not decrypted yet. The generator stops with an error
+that names the entry and the command to run (`lo secrets decrypt --domain
+<domain>`). It does not generate a new value over the encrypted one. It
+generates a value only when neither the plaintext nor the `.enc` file exists.
+
+To rotate a value, delete its file and its `.enc` twin from `$PATH_SECRETS`
+and re-run `kustomize build`. For htpasswd, deleting just `<key>.bcrypt`
+(and `<key>.bcrypt.enc`) regenerates the hash with a new salt while
+preserving the username/password.
 
 ### Env contract
 

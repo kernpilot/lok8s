@@ -53,6 +53,62 @@ require_tools() {
   [ "$(cat "${PATH_SECRETS}/Secret.app.default.TOKEN")" = 'super-secret-value' ]
 }
 
+# decrypt keeps a plaintext that is newer than its .enc. It was silent about
+# it (the recreate: "Decrypted 71" of 103, 32 skipped without a word). Now it
+# compares the kept plaintext with the decrypted .enc, names each one that
+# differs (never its value), counts both kinds in the summary and exits 0.
+@test "secrets decrypt: a kept newer plaintext is compared with its .enc" {
+  require_tools
+  ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q
+  export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/id.pub"
+  printf 'same-value' > "${PATH_SECRETS}/Secret.app.default.SAME"
+  printf 'committed-value' > "${PATH_SECRETS}/Secret.app.default.EDITED"
+  printf 'restored-value' > "${PATH_SECRETS}/Secret.app.default.GONE"
+  secrets::init --ssh-key "${BATS_TEST_TMPDIR}/id.pub" >/dev/null
+  secrets::encrypt >/dev/null
+
+  # SAME: newer, equal. EDITED: newer, a value the .enc does not hold.
+  # GONE: no plaintext, so decrypt writes it.
+  printf 'local-edit-value' > "${PATH_SECRETS}/Secret.app.default.EDITED"
+  touch -t 202001010000 "${PATH_SECRETS}"/Secret.*.enc
+  rm "${PATH_SECRETS}/Secret.app.default.GONE"
+
+  SOPS_AGE_KEY="$(ssh-to-age -private-key < "${BATS_TEST_TMPDIR}/id")"
+  export SOPS_AGE_KEY
+  domain=alpha.dev run secrets::decrypt < /dev/null
+  assert_success
+  assert_line '[warn] Secret.app.default.EDITED: the plaintext is newer than Secret.app.default.EDITED.enc and differs from it. Decrypt kept the plaintext.'
+  assert_line '[warn] 1 plaintext(s) differ from the .enc. To store them, run "lo secrets encrypt --domain alpha.dev". To use the .enc values, delete these plaintexts, then run "lo secrets decrypt --domain alpha.dev".'
+  assert_line 'Decrypted 1 secret(s)'
+  assert_line 'Skipped 2 secret(s) with a newer plaintext: 1 equal, 1 differ'
+  refute_output --partial 'SAME:'
+  local v
+  for v in same-value committed-value local-edit-value restored-value; do
+    refute_output --partial "${v}"
+  done
+  [ "$(cat "${PATH_SECRETS}/Secret.app.default.EDITED")" = 'local-edit-value' ]
+  [ "$(cat "${PATH_SECRETS}/Secret.app.default.GONE")" = 'restored-value' ]
+}
+
+# A kept plaintext whose .enc this key cannot decrypt fails the run, the same
+# way a decrypt of a missing plaintext does.
+@test "secrets decrypt: the compare fails on an .enc the key cannot decrypt" {
+  require_tools
+  ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q
+  ssh-keygen -t ed25519 -N '' -C other -f "${BATS_TEST_TMPDIR}/other" -q
+  export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/id.pub"
+  printf 'v' > "${PATH_SECRETS}/Secret.app.default.K"
+  secrets::init --ssh-key "${BATS_TEST_TMPDIR}/id.pub" >/dev/null
+  secrets::encrypt >/dev/null
+  touch -t 202001010000 "${PATH_SECRETS}/Secret.app.default.K.enc"
+
+  SOPS_AGE_KEY="$(ssh-to-age -private-key < "${BATS_TEST_TMPDIR}/other")"
+  export SOPS_AGE_KEY
+  run secrets::decrypt < /dev/null
+  assert_failure
+  assert_line '[error] Failed to decrypt Secret.app.default.K.enc'
+}
+
 @test "secrets: encrypt writes a .secrets/.gitignore that commits only .enc" {
   require_tools
   ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q
