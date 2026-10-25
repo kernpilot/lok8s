@@ -1991,7 +1991,10 @@ bootstrap::apply() {
   # store isn't exported yet — mirror libs/build::_export_secrets_path). A
   # dry run renders IN PLACE, exactly as a real run does: it reads the store
   # (the secrets plugin never writes it then), with HOME, credentials and the
-  # CA unchanged.
+  # CA unchanged. A domain without its own store in a project that keeps one
+  # per domain stops here (domain::check_secrets_store): the flat store would
+  # read and generate values in the wrong place.
+  domain::check_secrets_store "${domain}" || return 1
   if [[ -d "${PATH_CLUSTERS}/${domain}/secrets" ]]; then
     export PATH_SECRETS="${PATH_CLUSTERS}/${domain}/secrets"
   fi

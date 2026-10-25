@@ -373,9 +373,14 @@ func (l *Linter) secrets(domainDir, domain string) {
 	// The bash pipes check_unencrypted's stderr through `warn "  <line>"`, so
 	// each captured line (already carrying its own colored [warn] prefix)
 	// gains a second one. Preserved: the nested prefix IS the bash output.
-	ctx := &secrets.Context{Paths: l.Paths, Domain: domain}
+	// A domain without its own store in a project that keeps one per domain
+	// stops check_unencrypted at its secrets::path (set -e): the refusal
+	// lines (on its stderr, piped through) are all the check prints.
 	var buf bytes.Buffer
-	secrets.CheckUnencrypted(ctx.StorePath(), &buf)
+	ctx := &secrets.Context{Paths: l.Paths, Domain: domain, ErrOut: &buf}
+	if dir, err := ctx.ResolveStore(); err == nil {
+		secrets.CheckUnencrypted(dir, &buf)
+	}
 	for _, line := range bufLines(&buf) {
 		ui.WarnTo(l.ErrOut, "  %s", line)
 	}

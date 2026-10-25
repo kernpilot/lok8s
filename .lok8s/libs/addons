@@ -658,7 +658,12 @@ addons::render() {
   # enables alone. The dry run's values come after the entry's env, so they win.
   local whitelist rc=0 out
   whitelist="$(template::envsubst_whitelist)${_wl_extra}"
-  local -a _kenv=(KHELM_TRUST_ANY_REPO=true) _kflags=(--enable-alpha-plugins --enable-exec)
+  # The plugin home defaults to <project>/.kustomize, the value the Go binary
+  # gives every kustomize child (config.KustomizePluginHome). Read raw, an
+  # unset variable failed the KubeOne addon render with "unable to find plugin
+  # root" in a shell without the project .envrc. A dry run overrides it below.
+  local -a _kenv=(KHELM_TRUST_ANY_REPO=true "KUSTOMIZE_PLUGIN_HOME=${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}")
+  local -a _kflags=(--enable-alpha-plugins --enable-exec)
   if (( _dry )); then
     _kenv+=(LOK8S_BOOTSTRAP_DRYRUN=1 "LOK8S_BOOTSTRAP_DRYRUN_REPORT=${bootstrap_dry_boundary}/report"
       "LOK8S_BOOTSTRAP_DRYRUN_STORE=${bootstrap_dry_boundary}/store" "TMPDIR=${bootstrap_dry_boundary}/tmp")

@@ -6,6 +6,9 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/secrets"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // LoadProviderCreds auto-loads managed provider credentials from the
@@ -14,7 +17,10 @@ import (
 // operator hand-exporting them: the hetzner provider needs HCLOUD_TOKEN,
 // and the bare-metal worker + CCM robot mode need the Robot user/pass.
 // Fills only what's missing; no-op when the secret isn't present
-// (non-hetzner providers, or a fresh checkout before `lo secrets decrypt`).
+// (non-hetzner providers). A store that holds only the committed .enc (a
+// fresh checkout or worktree before `lo secrets decrypt`) is decrypted in
+// memory (secrets.DecryptEntry): the plaintext never reaches the disk. An
+// .enc that no local identity decrypts is skipped with a warning by name.
 // Idempotent + phase-agnostic: shared by Dispatch AND `lo recover`.
 //
 // ALWAYS returns nil — the bash original's trailing `[[ -n ]] && export`
@@ -27,9 +33,16 @@ func LoadProviderCreds(p *config.Paths, domainName string) error {
 		if os.Getenv(k) != "" {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(secretsDir, "Secret.hetzner.provisioning."+k))
+		f := filepath.Join(secretsDir, "Secret.hetzner.provisioning."+k)
+		raw, err := os.ReadFile(f)
 		if err != nil {
-			continue
+			if !fsutil.IsRegular(f + ".enc") {
+				continue
+			}
+			if raw, err = secrets.DecryptEntry(f + ".enc"); err != nil {
+				ui.Warn("cannot read Secret.hetzner.provisioning.%s: the plaintext is missing, and no local age identity decrypts its .enc. Set %s, or set SOPS_AGE_KEY or LOK8S_SSH_KEY to an identity of the store.", k, k)
+				continue
+			}
 		}
 		// Trailing newlines only — matching bash's $(cat …) substitution.
 		v := strings.TrimRight(string(raw), "\n")

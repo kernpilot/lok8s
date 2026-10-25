@@ -18,6 +18,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
+	domainpkg "github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -218,7 +219,13 @@ func (e *Engine) apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 	// The per-domain secrets store, on a real run and a dry run alike (lo
 	// provision drives the bootstrap directly, not via `lo build`, so the
 	// store is not exported yet — mirror libs/build::_export_secrets_path).
-	// A dry run reads it; the secrets plugin never writes it then.
+	// A dry run reads it; the secrets plugin never writes it then. A domain
+	// without its own store in a project that keeps one per domain stops
+	// here (domain.CheckSecretsStore): the flat store would read and generate
+	// values in the wrong place.
+	if err := domainpkg.CheckSecretsStore(e.Paths.Clusters, domain, stderr); err != nil {
+		return err
+	}
 	if secretsDir := e.Paths.Clusters + "/" + domain + "/secrets"; fsutil.DirExists(secretsDir) {
 		os.Setenv("PATH_SECRETS", secretsDir)
 	}

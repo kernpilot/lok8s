@@ -31,7 +31,10 @@ const (
 // hash-of-all-hashes, which a per-target build's subset could never match —
 // see kustomize/plugins/secret/generator/bash.go verifyBashAllow.)
 func (c *Context) Allow() error {
-	secretsDir := c.StorePath()
+	secretsDir, err := c.ResolveStore()
+	if err != nil {
+		return err
+	}
 	if !fsutil.DirExists(secretsDir) {
 		ui.WarnTo(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil
@@ -94,7 +97,10 @@ func stripSpace(s string) string {
 // List lists the store's entries with their encryption state (bash:
 // secrets::list).
 func (c *Context) List() error {
-	secretsDir := c.StorePath()
+	secretsDir, err := c.ResolveStore()
+	if err != nil {
+		return err
+	}
 	if !fsutil.DirExists(secretsDir) {
 		ui.WarnTo(c.ErrOut, "Secrets directory not found: %s", secretsDir)
 		return nil
@@ -134,7 +140,10 @@ func (c *Context) Print(ctx context.Context, patterns []string, onlyOne, toClipb
 		onlyOne = true
 	}
 
-	secretsDir := c.StorePath()
+	secretsDir, err := c.ResolveStore()
+	if err != nil {
+		return err
+	}
 
 	var matches []string
 	for _, base := range storeEntries(secretsDir, "Secret.") {
@@ -230,7 +239,10 @@ func (c *Context) Env(name, namespace string) error {
 		return ErrHandled
 	}
 
-	secretsDir := c.StorePath()
+	secretsDir, err := c.ResolveStore()
+	if err != nil {
+		return err
+	}
 	prefix := "Secret." + name + "." + namespace + "."
 	found := false
 	for _, base := range storeEntries(secretsDir, prefix) {

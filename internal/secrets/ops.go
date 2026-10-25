@@ -90,7 +90,10 @@ creation_rules:
 	if err := c.ensureStore(); err != nil {
 		return err
 	}
-	dir := c.StorePath()
+	dir, err := c.ResolveStore()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -207,7 +210,11 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 			}
 		}
 	} else {
-		stores = append(stores, c.StorePath())
+		dir, err := c.ResolveStore()
+		if err != nil {
+			return err
+		}
+		stores = append(stores, dir)
 	}
 	if len(stores) == 0 {
 		ui.ErrorTo(c.ErrOut, "no secret store found to re-key")
@@ -345,7 +352,10 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 	if err := c.ensureStore(); err != nil {
 		return err
 	}
-	secretsDir := c.StorePath()
+	secretsDir, err := c.ResolveStore()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(secretsDir, 0o755); err != nil {
 		return err
 	}
@@ -437,7 +447,10 @@ func (c *Context) Encrypt(name string) error {
 		return ErrHandled
 	}
 
-	secretsDir := c.StorePath()
+	secretsDir, err := c.ResolveStore()
+	if err != nil {
+		return err
+	}
 	if !fsutil.DirExists(secretsDir) {
 		ui.WarnTo(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil
@@ -511,7 +524,10 @@ func (c *Context) Encrypt(name string) error {
 // Decrypt restores plaintext cache files from .enc twins (bash:
 // secrets::decrypt).
 func (c *Context) Decrypt(sshKey string) error {
-	secretsDir := c.StorePath()
+	secretsDir, err := c.ResolveStore()
+	if err != nil {
+		return err
+	}
 	if !fsutil.DirExists(secretsDir) {
 		ui.WarnTo(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil

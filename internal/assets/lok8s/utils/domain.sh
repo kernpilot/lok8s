@@ -254,3 +254,31 @@ domain::require_driver() {
     return 1
   fi
 }
+
+# domain::check_secrets_store <domain> — refuse a domain that must not fall
+# back to the flat .secrets/ store. That is the case when the domain
+# directory exists, it has no clusters/<domain>/secrets directory, and the
+# project keeps a store per domain: another clusters/*/secrets directory
+# exists. A project with only the flat store keeps working (returns 0).
+# The silent fallback read and generated values in the wrong store: the
+# first build of a new domain directory generated a new sops-age key and new
+# tokens into the flat store. Prints the refusal and returns 1. Go twin:
+# domain.CheckSecretsStore.
+domain::check_secrets_store() {
+  local domain="${1:-}"
+  local path_clusters="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}"
+  [[ -n "${domain}" && -d "${path_clusters}/${domain}" ]] || return 0
+  [[ ! -d "${path_clusters}/${domain}/secrets" ]] || return 0
+  local d other=""
+  for d in "${path_clusters}"/*/secrets; do
+    if [[ -d "${d}" ]]; then
+      other="${d}"
+      break
+    fi
+  done
+  [[ -n "${other}" ]] || return 0
+  local store="${path_clusters}/${domain}/secrets"
+  error "domain ${domain} has no secrets store: ${store} does not exist, and this project keeps a store per domain (${other}). lo does not use the flat .secrets/ store for ${domain}."
+  error "  To generate new values, create the empty directory ${store}. To use the values of another domain, copy its .enc files into that directory, then run \"lo secrets decrypt --domain ${domain}\"."
+  return 1
+}

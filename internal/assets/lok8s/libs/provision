@@ -13,6 +13,7 @@ import ^libs/build
 import ^libs/gitops
 import ^utils/provider
 import ^libs/bootstrap
+import ^libs/secrets
 
 main::provision() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
@@ -255,16 +256,26 @@ provision::resolve_clusterref() {
 # provisioning works without the operator hand-exporting them: the hetzner
 # provider needs HCLOUD_TOKEN, and the bare-metal worker + CCM robot mode need
 # the Robot user/pass. Fills only what's missing; no-op if the secret isn't
-# present (non-hetzner providers, or a fresh checkout before `lo secrets decrypt`).
+# present (non-hetzner providers). A store that holds only the committed .enc
+# (a fresh checkout or worktree before `lo secrets decrypt`) is decrypted in
+# memory (secrets::decrypt_entry): the plaintext never reaches the disk. A
+# .enc that no local identity decrypts is skipped with a warning by name.
 # Idempotent + phase-agnostic: shared by provision::dispatch AND `lo recover`,
 # which must have creds BEFORE its doctor/rebuild phases (they resolve node IPs)
 # — provision loads them too but only runs after rebuild, too late for recover.
 provision::load_provider_creds() {
   local domain="${1}"
-  local secrets_dir="${PATH_CLUSTERS}/${domain}/secrets" k v
+  local secrets_dir="${PATH_CLUSTERS}/${domain}/secrets" k v f
   for k in HCLOUD_TOKEN HROBOT_USER HROBOT_PASSWORD; do
     [[ -n "${!k:-}" ]] && continue
-    v="$(cat "${secrets_dir}/Secret.hetzner.provisioning.${k}" 2>/dev/null)" || continue
+    f="${secrets_dir}/Secret.hetzner.provisioning.${k}"
+    if ! v="$(cat "${f}" 2>/dev/null)"; then
+      [[ -f "${f}.enc" ]] || continue
+      v="$(secrets::decrypt_entry "${f}.enc")" || {
+        warn "cannot read Secret.hetzner.provisioning.${k}: the plaintext is missing, and no local age identity decrypts its .enc. Set ${k}, or set SOPS_AGE_KEY or LOK8S_SSH_KEY to an identity of the store."
+        continue
+      }
+    fi
     [[ -n "${v}" ]] && export "${k}=${v}"
   done
   [[ -n "${HROBOT_USER:-}" ]]     && export ROBOT_USER="${HROBOT_USER}"         HETZNER_ROBOT_USER="${HROBOT_USER}"

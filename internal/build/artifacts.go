@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/render"
@@ -90,7 +91,15 @@ func Artifacts(ctx context.Context, o Options) error {
 	// Per-domain secret isolation + API endpoint exports (LOK8S_USER_API_*),
 	// so ${LOK8S_USER_*}/${LOK8S_SPEC_*} in target manifests resolve at
 	// envsubst time. Exported into the process env so they reach both the
-	// kustomize child and the whitelist below.
+	// kustomize child and the whitelist below. A domain without its own
+	// store in a project that keeps one per domain stops here: the flat
+	// store would read and generate values in the wrong place. A
+	// --no-secrets render never reads the store, so it does not stop.
+	if !o.NoSecrets {
+		if err := domain.CheckSecretsStore(o.Paths.Clusters, o.Domain, stderr); err != nil {
+			return err
+		}
+	}
 	exportSecretsPath(domainDir)
 	resolveAPI(o.Paths, domainDir)
 
@@ -231,8 +240,10 @@ func Artifacts(ctx context.Context, o Options) error {
 // generates + reads ONLY its own secrets — never a shared flat store, so dev
 // secrets can't bleed into prod (and vice versa). A domain opts in simply by
 // having that dir (the `lo secrets --domain <d> …` commands write it).
-// Without it, the inherited flat $PATH_SECRETS is used (single-instance
-// projects). Bash: build::_export_secrets_path.
+// Without it, the inherited flat $PATH_SECRETS is used, but only in a
+// single-instance project: Artifacts refuses a domain without a store when
+// another domain has one (domain.CheckSecretsStore). Bash:
+// build::_export_secrets_path.
 func exportSecretsPath(domainDir string) {
 	secretsDir := filepath.Join(domainDir, "secrets")
 	if info, err := os.Stat(secretsDir); err == nil && info.IsDir() {

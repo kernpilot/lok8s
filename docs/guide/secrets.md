@@ -26,6 +26,12 @@ safely. You need no external secret store to get started.
   per-domain store is the only secrets store. A flat `.secrets/` at the project
   root is a leftover of releases before v0.4.0 (see
   [Migrating a flat `.secrets/` store](#migrating-a-flat-secrets-store)).
+- **A new domain gets no flat fallback.** When one domain has its own store,
+  a domain directory without `clusters/<domain>/secrets/` stops `lo build`,
+  `lo bootstrap`, `lo provision` and `lo secrets` with an error. To generate
+  new values, create the empty directory. To use the values of another domain,
+  copy its `.enc` files into it, then run `lo secrets decrypt --domain <domain>`.
+  A project with only the flat `.secrets/` store works as before.
 - Plaintext cache files are **gitignored**. To share them, commit them
   **encrypted** with SOPS/age (below).
 
@@ -109,6 +115,13 @@ lo secrets --domain prod set HCLOUD_TOKEN <token> --name hetzner --namespace pro
 # …then, in your provisioning script:
 eval "$(lo secrets --domain prod env --name hetzner --namespace provisioning)"   # exports HCLOUD_TOKEN
 ```
+
+`lo provision` and `lo recover` load `HCLOUD_TOKEN`, `HROBOT_USER` and
+`HROBOT_PASSWORD` from `Secret.hetzner.provisioning.*` in the domain store by
+themselves, when the variable is not set. A fresh checkout holds only the
+`.enc` files: they decrypt them in memory with your age identity
+(`SOPS_AGE_KEY`, the SOPS key file, or `LOK8S_SSH_KEY`) and never write the
+plaintext.
 
 `env` emits an `export <key>=<value>` line per key of the named secret, with the
 value shell-quoted (`%q`) so the `eval` is injection-safe. The creds get SOPS
