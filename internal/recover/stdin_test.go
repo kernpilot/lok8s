@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // drainRunner stands in for the bash children of recover. Like the real
@@ -172,3 +174,35 @@ func TestWithoutStdinGivesAChildAnEmptyStdin(t *testing.T) {
 type runnerFunc func(ctx context.Context, c execx.Cmd) error
 
 func (f runnerFunc) Run(ctx context.Context, c execx.Cmd) error { return f(ctx, c) }
+
+// A git worktree without `b install` has no .bin/argsh, and the bash
+// provider plugin cannot start (`lo recover --dry-run`, 2026-10-23). The
+// load names the file and the fix before it starts a child.
+func TestLoadProviderNamesAMissingArgsh(t *testing.T) {
+	h := newHarness(t)
+	h.r.LoadProvider = nil
+	dir := filepath.Join(h.r.Paths.Clusters, "mock.cloud")
+	testutil.WriteFile(t, filepath.Join(dir, "cluster.lok8s.yaml"), "kind: KubeOne\nmetadata: { name: mock }\nspec:\n  provider:\n    name: hetzner\n")
+	testutil.WriteFile(t, filepath.Join(h.r.Paths.Bin, "b.yaml"), "binaries:\n  argsh: {}\n")
+	rec := &argvRecorder{probe: "rebuild\ndoctor\n"}
+	h.r.Exec = rec
+	h.r.domain, h.r.spec = "mock.cloud", filepath.Join(dir, "cluster.lok8s.yaml")
+	if err := h.r.loadProvider(t.Context()); err == nil {
+		t.Fatal("the load passed without .bin/argsh")
+	}
+	if want := "[error] recover: argsh is missing at .bin/argsh: the provider plugin hetzner runs on it (fix: b install)\n"; !strings.Contains(h.errBuf.String(), want) {
+		t.Errorf("stderr = %q, want %q", h.errBuf.String(), want)
+	}
+	if len(rec.cmds) != 0 {
+		t.Errorf("a child started without argsh: %v", rec.cmds)
+	}
+
+	testutil.WriteFile(t, filepath.Join(h.r.Paths.Bin, "argsh"), "#!/usr/bin/env bash\n")
+	h.errBuf.Reset()
+	if err := h.r.loadProvider(t.Context()); err != nil {
+		t.Fatalf("with .bin/argsh: %v\n%s", err, h.errBuf.String())
+	}
+	if len(rec.cmds) != 1 {
+		t.Errorf("want the probe child, got %d children", len(rec.cmds))
+	}
+}

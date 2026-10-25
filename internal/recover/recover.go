@@ -61,6 +61,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/provision"
+	"github.com/kernpilot/lok8s/internal/toolchain"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -399,6 +400,13 @@ func (r *Runner) loadProvider(ctx context.Context) error {
 	r.configCleanup = cleanup
 	newProv := r.NewProvider
 	if newProv == nil {
+		// The bash plugin sources ${PATH_BIN}/argsh. Name the fix before
+		// the child fails with a raw bash error (a git worktree without
+		// `b install`, 2026-10-23).
+		if argsh, fix, ok := toolchain.Argsh(r.Paths.Bin); !ok {
+			ui.ErrorTo(stderr, "recover: argsh is missing at %s: the provider plugin %s runs on it (fix: %s)", config.RelTo(r.Paths.Base, argsh), pname, fix)
+			return ErrHandled
+		}
 		newProv = r.bashProvider
 	}
 	prov, err := newProv(ctx, pname)

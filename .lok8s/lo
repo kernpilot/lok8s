@@ -33,6 +33,13 @@ ARGSH_SOURCE="${BASH_SOURCE[0]}"
 PATH_SCRIPTS="${PATH_LOK8S}"
 export PATH_SCRIPTS
 
+# Every command, `lo doctor` too, runs on the argsh runtime in the project's
+# .bin. Without it, name the fix instead of a raw bash error (a new git
+# worktree has no .bin/argsh until `b install` runs in it).
+if [[ ! -f "${PATH_BIN}/argsh" ]]; then
+  echo "[error] argsh is missing at ${PATH_BIN}/argsh: lo runs on it (fix: b install)" >&2
+  exit 1
+fi
 source "${PATH_BIN}/argsh"
 import ^libs/deploy
 import ^libs/tilt

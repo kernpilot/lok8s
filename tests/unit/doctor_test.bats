@@ -117,3 +117,14 @@ YAML
   assert_success
   assert_output ""
 }
+
+# The git worktree case (kubehz.in.net recreate, 2026-10-23): the project has
+# no .bin/argsh. The entrypoint names the fix before it sources anything, for
+# `lo doctor` as for every other command, instead of a raw bash error.
+@test "lo doctor without the project's .bin/argsh names the fix" {
+  local bin="${BATS_TEST_TMPDIR}/empty-bin"
+  mkdir -p "${bin}"
+  run env PATH_BIN="${bin}" bash "${_PROJECT_ROOT}/.lok8s/lo" doctor < /dev/null
+  assert_failure
+  assert_output "[error] argsh is missing at ${bin}/argsh: lo runs on it (fix: b install)"
+}
