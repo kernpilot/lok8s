@@ -820,6 +820,27 @@ parity::state_same "${WORK}/kustomize.bash.log" "${WORK}/kustomize.go.log" "plug
 for side in bash go; do
   tls_pin "${side}: the render's kustomize child has the project plugin home" "${WORK}/kustomize.${side}.log" "^KUSTOMIZE_PLUGIN_HOME=PROJ/\.kustomize$"
 done
+
+# ── lo bootstrap — a domain without its own secrets store ────────────────────
+# boot.dev has no clusters/boot.dev/secrets. With the store of another domain
+# in the project, the bootstrap stops before any render: the flat .secrets/
+# store would read and generate values in the wrong place. The other store
+# exists for this case only.
+mkdir -p "${PROJ}/clusters/storeholder.dev/secrets"
+PARITY_PRE_EACH=boot_pre PARITY_POST_EACH=boot_post check - bootstrap --domain boot.dev
+for side in bash go; do
+  if [[ -s "${WORK}/kustomize.${side}.log" ]]; then
+    fail "${side}: a domain without a store reached the render"
+  else
+    echo "ok: ${side}: a domain without a store stops before the render"
+  fi
+done
+if grep -qF "[error] domain boot.dev has no secrets store: PROJ/clusters/boot.dev/secrets does not exist" "${WORK}/go.err"; then
+  echo "ok: go: the bootstrap refusal names the domain"
+else
+  fail "go: no bootstrap refusal for a domain without a store"
+fi
+rm -rf "${PROJ}/clusters/storeholder.dev"
 unset PARITY_KUSTOMIZE_LOG
 
 # ── lo bootstrap — the staged values, byte for byte ──────────────────────────

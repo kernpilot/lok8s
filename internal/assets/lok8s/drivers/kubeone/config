@@ -10,6 +10,7 @@
 #   output.json    — tfjson (from hetzner::generate_tfjson or equivalent)
 
 import ^utils/verbose
+import ^utils/domain
 import ^utils/template
 import ^utils/oidc
 import ^utils/spec
@@ -763,6 +764,16 @@ kubeone::render_addons() {
   # members. Same extraction semantics as the bootstrap (_parse_entry).
   local bootstrap_domain=""
   [[ -z "${cluster_yaml}" ]] || bootstrap_domain="$(basename "$(dirname "${cluster_yaml}")")"
+  # The domain's secrets store, exported HERE: this render runs inside
+  # kubeone::apply, before bootstrap::apply exports it, and the Go binary runs
+  # this function through its provider bridge with the flat store in
+  # PATH_SECRETS. The ccm addon renders the hcloud Secret through the secrets
+  # plugin: with the flat store it rendered the CCM credentials from stale
+  # flat values. A domain without a store in a project that keeps one per
+  # domain stops here (domain::check_secrets_store).
+  if [[ -n "${bootstrap_domain}" ]]; then
+    domain::export_secrets_store "${bootstrap_domain}" || return 1
+  fi
   local addons_dir="${work_dir}/addons"
   # This addon set is Hetzner-specific (cilium values.hetzner, the robot-aware
   # hcloud CCM, the hcloud Secret) and render_addons is called unconditionally

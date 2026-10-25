@@ -254,7 +254,9 @@ build::_resolve_api() {
 # there so each instance generates + reads ONLY its own secrets — never a shared
 # flat store, so dev secrets can't bleed into prod (and vice versa). A domain opts
 # in simply by having that dir (the `lo secrets --domain <d> …` commands write it).
-# Without it, the inherited flat $PATH_SECRETS is used (single-instance projects).
+# Without it, the inherited flat $PATH_SECRETS is used, but only in a
+# single-instance project: build::artifacts refuses a domain without a store when
+# another domain has one (domain::check_secrets_store).
 # Mirrors libs/secrets `secrets::path`; see docs/guide/secrets.md.
 # MUST run un-subshelled so the export reaches the kustomize child.
 build::_export_secrets_path() {
@@ -299,7 +301,14 @@ build::artifacts() {
   # Per-domain secret isolation + API endpoint exports (LOK8S_USER_API_*), so
   # ${LOK8S_USER_*}/${LOK8S_SPEC_*} in target manifests resolve at envsubst time.
   # MUST run un-subshelled so the exports reach the kustomize child + whitelist.
-  build::_export_secrets_path "${domain_dir}"
+  # A domain without its own store in a project that keeps one per domain stops
+  # here: the flat store would read and generate values in the wrong place. A
+  # --no-secrets render never reads the store, so it does not stop.
+  if (( ${LOK8S_BUILD_NO_SECRETS:-0} )); then
+    build::_export_secrets_path "${domain_dir}"
+  else
+    domain::export_secrets_store "${domain}" || return 1
+  fi
   build::_resolve_api "${domain_dir}"
 
   # Resolve kubeconfig (some targets need it for cluster-aware kustomize

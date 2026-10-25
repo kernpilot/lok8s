@@ -9,6 +9,7 @@ package secrets
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,6 +24,8 @@ import (
 	"github.com/getsops/sops/v3/keyservice"
 	sopsjson "github.com/getsops/sops/v3/stores/json"
 	"github.com/getsops/sops/v3/version"
+
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // binaryStore is the store the sops CLI uses for --input-type/--output-type
@@ -139,6 +142,55 @@ func (d ageDecryptor) Decrypt(ctx context.Context, req *keyservice.DecryptReques
 		return nil, err
 	}
 	return &keyservice.DecryptResponse{Plaintext: plaintext}, nil
+}
+
+// The causes DecryptEntry reports, so a caller can name the class without
+// printing a library error (which never carries key material, but is noise).
+var (
+	// ErrNoIdentity: no age identity in the decrypt chain.
+	ErrNoIdentity = errors.New("no age identity")
+	// ErrReadEnc: the .enc file cannot be read.
+	ErrReadEnc = errors.New("the .enc cannot be read")
+	// ErrDecryptEnc: the .enc does not decrypt with the identity (another
+	// identity, or a damaged file).
+	ErrDecryptEnc = errors.New("the .enc does not decrypt")
+)
+
+// DecryptEntry decrypts one binary-mode .enc store entry in memory and
+// returns the plaintext; nothing reaches the disk (bash:
+// secrets::decrypt_entry). The age identity comes from the chain `lo secrets
+// decrypt` uses: SOPS_AGE_KEY, the SOPS key file, then the identity derived
+// from the SSH private key (LOK8S_SSH_KEY, default ~/.ssh/id_ed25519). The
+// error is ErrNoIdentity, ErrReadEnc or ErrDecryptEnc (wrapping the cause),
+// checked in that order; a failed derivation counts as no identity.
+func DecryptEntry(encPath string) ([]byte, error) {
+	ageKey := os.Getenv("SOPS_AGE_KEY")
+	if ageKey == "" {
+		ageKey = keysFileIdentity()
+	}
+	if ageKey == "" {
+		sshKey := os.Getenv("LOK8S_SSH_KEY")
+		if sshKey == "" {
+			sshKey = os.Getenv("HOME") + "/.ssh/id_ed25519"
+		}
+		if fsutil.IsRegular(sshKey) {
+			if derived, err := deriveAgePrivateKey(sshKey); err == nil {
+				ageKey = derived
+			}
+		}
+	}
+	if ageKey == "" {
+		return nil, ErrNoIdentity
+	}
+	raw, err := os.ReadFile(encPath)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrReadEnc, err)
+	}
+	dec, err := sopsDecryptData(raw, ageKey)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrDecryptEnc, err)
+	}
+	return dec, nil
 }
 
 // sopsDecryptData decrypts a binary-mode .enc payload with the given age

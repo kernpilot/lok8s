@@ -93,6 +93,22 @@ sec_check secrets path
 sec_check secrets --domain alpha.dev path
 sec_check secrets path --domain alpha.dev
 sec_check s path
+# beta.dev: a domain directory without its own store, in a project that keeps
+# a store per domain (alpha.dev). No flat fallback: the store-reading
+# commands stop with the refusal; `set` creates the store first, then works.
+for impl in go bash; do
+  mkdir -p "${WORK}/sec-${impl}/clusters/beta.dev"
+  printf 'kind: Lo\nmetadata:\n  name: beta\n' > "${WORK}/sec-${impl}/clusters/beta.dev/cluster.lok8s.yaml"
+done
+sec_check secrets --domain beta.dev path
+if ! grep -qF "[error] domain beta.dev has no secrets store: PROJ/clusters/beta.dev/secrets does not exist, and this project keeps a store per domain (PROJ/clusters/alpha.dev/secrets)." "${WORK}/go.err"; then
+  fail "secrets path for a domain without a store: no refusal"
+fi
+sec_check secrets --domain beta.dev list
+sec_check secrets --domain beta.dev decrypt
+sec_check secrets --domain beta.dev set -n app TOKEN beta-secret
+sec_check secrets --domain beta.dev path
+sec_state clusters/beta.dev/secrets/Secret.app.default.TOKEN
 sec_check secrets set -n app JWT_SECRET s3cr3t
 sec_check secrets set --domain alpha.dev -n app -s myns TOKEN dom-secret
 sec_check secrets encrypt              # no .sops.yaml yet → error

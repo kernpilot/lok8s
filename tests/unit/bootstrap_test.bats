@@ -3704,7 +3704,7 @@ SH
   kustomize() { sleep 2; : > "${SLEPT}"; echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: x"; }
   export -f kustomize
   ( export TMPDIR="${tmp}"; bootstrap_dry_run=1
-    exec bash -c 'source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"; source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"; source "${_PROJECT_ROOT}/.lok8s/libs/addons"; source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"; source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"; bootstrap_dry_run=1 bootstrap::apply test.lok8s.dev "'"${CLUSTER_YAML}"'" "'"${KUBECONFIG_FILE}"'"' \
+    exec bash -c 'source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"; source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"; source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"; source "${_PROJECT_ROOT}/.lok8s/libs/addons"; source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"; source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"; bootstrap_dry_run=1 bootstrap::apply test.lok8s.dev "'"${CLUSTER_YAML}"'" "'"${KUBECONFIG_FILE}"'"' \
       </dev/null >/dev/null 2>&1 ) &
   local pid=$!
   local i

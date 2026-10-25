@@ -181,3 +181,21 @@ func TestRunRefusesASecondDocument(t *testing.T) {
 		t.Fatalf("a failing domain printed OK:\n%s", out.String())
 	}
 }
+
+// A domain without its own store, in a project that keeps a store per
+// domain, reports the refusal instead of checking the flat store (bash:
+// check_unencrypted stops at secrets::path; its stderr is piped through
+// `warn "  <line>"`). A plaintext in the flat store is not reported for it.
+func TestSecretsReportsADomainWithoutAStore(t *testing.T) {
+	l, base, _, errOut := newLinter(t)
+	cl := filepath.Join(base, "clusters")
+	testutil.WriteFile(t, filepath.Join(cl, "a.dev", "secrets", "Secret.app.default.K.enc"), "enc\n")
+	testutil.WriteFile(t, filepath.Join(cl, "new.dev", "cluster.lok8s.yaml"), "kind: Lo\n")
+	testutil.WriteFile(t, filepath.Join(base, ".secrets", "Secret.flat.default.K"), "flat\n")
+	l.secrets(filepath.Join(cl, "new.dev"), "new.dev")
+	want := "[warn]   [error] domain new.dev has no secrets store: " + cl + "/new.dev/secrets does not exist, and this project keeps a store per domain (" + cl + "/a.dev/secrets). lo does not fall back to " + base + "/.secrets.\n" +
+		"[warn]   [error]   Create the empty directory " + cl + "/new.dev/secrets to generate new values for new.dev.\n"
+	if errOut.String() != want {
+		t.Errorf("stderr:\n got %q\nwant %q", errOut.String(), want)
+	}
+}
