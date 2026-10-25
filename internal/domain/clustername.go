@@ -13,6 +13,7 @@ package domain
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -89,11 +90,8 @@ func ClusterNameUsers(clusters, self, name string, metadata bool) []string {
 		if metadata && spec != nil {
 			names = append(names, yqsem.Or(yqsem.Lookup(spec, "metadata", "name"), ""))
 		}
-		for _, n := range names {
-			if n == name {
-				users = append(users, other)
-				break
-			}
+		if slices.Contains(names, name) {
+			users = append(users, other)
 		}
 	}
 	sort.Strings(users)
