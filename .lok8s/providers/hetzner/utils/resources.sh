@@ -438,6 +438,35 @@ hetzner::volume() {
   hetzner::create 'volume'
 }
 
+# hetzner::_lb_targets <live-json>
+# One line per top-level target of a described LB:
+# "<type> <selector|ip|server id> use-private-ip=<bool>"; "(no target)" when
+# it has none.
+hetzner::_lb_targets() {
+  local out
+  out="$(jq -r '(.targets // [])[]
+    | "\(.type) \(.label_selector.selector // .ip.ip // (.server.id | tostring)) use-private-ip=\(.use_private_ip // false)"' \
+    <<<"${1}" 2>/dev/null)" || out=""
+  printf '%s\n' "${out:-(no target)}"
+}
+
+# hetzner::_lb_add_target <lb> <add-target args...>
+# add-target with retries: HETZNER_LB_ADD_TRIES attempts (default 4); the
+# wait starts at HETZNER_LB_ADD_DELAY seconds (default 2) and doubles. On a
+# failure it prints the last hcloud error.
+hetzner::_lb_add_target() {
+  local lb="${1}"; shift
+  local tries="${HETZNER_LB_ADD_TRIES:-4}" delay="${HETZNER_LB_ADD_DELAY:-2}" n err=""
+  for (( n = 1; n <= tries; n++ )); do
+    err="$(dry-run::cmd hcloud load-balancer add-target "${lb}" "${@}" 2>&1)" && return 0
+    _hetzner_log "lb ${lb}: add-target attempt ${n}/${tries} failed: ${err}"
+    (( n == tries )) || sleep "${delay}"
+    delay=$(( delay * 2 ))
+  done
+  printf '%s' "${err}"
+  return 1
+}
+
 hetzner::load-balancer() {
   # Set by the create::after hook below when a reconcile call fails. The
   # create loop does not check the status of its hook, so this step does.
@@ -466,15 +495,21 @@ hetzner::load-balancer() {
     # listen_port and destination_port. A new LB, or one hcloud cannot
     # describe, reads as empty: every target and service is added.
     local live
-    live="$(hcloud load-balancer describe "${name}" -o json 2>/dev/null)" || live=""
-    jq -e 'type == "object"' >/dev/null 2>&1 <<<"${live}" || live='{}'
+    if ! live="$(hcloud load-balancer describe "${name}" -o json 2>&1)" ||
+       ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"${live}"; then
+      # An adopted LB (it had an id before this run) that hcloud cannot
+      # describe keeps what it has: say so.
+      [[ -z "${id}" ]] ||
+        warn "lb ${name}: could not read the load balancer (hcloud load-balancer describe: ${live:0:200}). Its targets and services are added, not compared: a stale use-private-ip or port stays. Check them with 'hcloud load-balancer describe ${name}', then run the provision again."
+      live='{}'
+    fi
 
     # NOTE: rows are read as JSON objects (jq -c), NOT csv — label
     # selectors legitimately contain commas and csv-splitting mangled
     # them (and the resulting hcloud errors were silently swallowed).
     local row target_type target_value use_private_ip want_private live_private
-    local api_type match_value
-    # shellcheck disable=SC2031  # i is the outer create-loop index, read inside the per-LB subshell hook
+    local api_type match_value line
+    # shellcheck disable=SC2031  # i is the create-loop index. Only the server hook's subshell reuses i (SC2030); this hook runs in the current shell
     while IFS= read -r row; do
       [[ -n "${row}" ]] || continue
       target_type=$(jq -r '.type // empty' <<<"${row}")
@@ -532,18 +567,36 @@ hetzner::load-balancer() {
       fi
 
       if [[ -n "${live_private}" ]]; then
-        # The API cannot change use_private_ip on a target: remove, then add.
+        # The API cannot change use_private_ip on a target, and it refuses a
+        # second target of the same type and value: remove, then add. Between
+        # the two the LB does not route to this target. With one target (the
+        # API LB of a cluster) the port is down until the add is done.
+        # A private target needs the LB on a network. attach-to-network above
+        # only warns, so check the live LB before the remove.
+        if [[ "${want_private}" == "true" ]] &&
+           ! jq -e '(.private_net // []) | length > 0' >/dev/null 2>&1 <<<"${live}"; then
+          error "lb ${name}: kept target ${target_type} '${target_value}' with use-private-ip ${live_private}. The load balancer is on no private network, so the target cannot get use-private-ip true. Attach the load balancer to the network ('hcloud load-balancer attach-to-network'), then run the provision again."
+          _HETZNER_LB_FAILED=1
+          continue
+        fi
         _hetzner_print "   ♻️  replace \033[3mtarget\033[0m ${target_type}: ${target_value} (use-private-ip ${live_private} -> ${want_private})"
+        while IFS= read -r line; do _hetzner_print "      before: ${line}"; done < <(hetzner::_lb_targets "${live}")
         if ! err=$(dry-run::cmd hcloud load-balancer remove-target "${name}" \
             "${target_args[@]}" 2>&1); then
           error "lb ${name}: could not remove target ${target_type} '${target_value}' to set use-private-ip to ${want_private}: ${err}. Remove it with 'hcloud load-balancer remove-target', then run the provision again."
           _HETZNER_LB_FAILED=1
           continue
         fi
-        if ! err=$(dry-run::cmd hcloud load-balancer add-target "${name}" \
-            "${target_args[@]}" "${private_arg[@]}" 2>&1); then
-          error "lb ${name}: removed target ${target_type} '${target_value}', but could not add it again with use-private-ip ${want_private}: ${err}. The load balancer does not have this target now. Run the provision again, or add it with 'hcloud load-balancer add-target'."
+        if ! err=$(hetzner::_lb_add_target "${name}" "${target_args[@]}" "${private_arg[@]}"); then
+          local hint="hcloud load-balancer add-target ${name} ${target_args[*]}"
+          (( ${#private_arg[@]} == 0 )) || hint+=" ${private_arg[*]}"
+          error "lb ${name}: removed target ${target_type} '${target_value}', but could not add it again with use-private-ip ${want_private} in ${HETZNER_LB_ADD_TRIES:-4} attempts: ${err}. The load balancer does not route to this target now. Add it with '${hint}', or run the provision again."
           _HETZNER_LB_FAILED=1
+        fi
+        if [[ -z "${CLOUD_DRY_RUN:-}" ]]; then
+          local after
+          after="$(hcloud load-balancer describe "${name}" -o json 2>/dev/null)" || after=""
+          while IFS= read -r line; do _hetzner_print "      after:  ${line}"; done < <(hetzner::_lb_targets "${after}")
         fi
         continue
       fi
@@ -557,7 +610,7 @@ hetzner::load-balancer() {
     done < <(hetzner::json -c ".[\"load-balancer\"][${i}][\"#targets\"][]?" 2>/dev/null)
 
     local protocol listen_port dest_port live_service live_protocol live_dest
-    # shellcheck disable=SC2031  # i is the outer create-loop index, read inside the per-LB subshell hook
+    # shellcheck disable=SC2031  # i is the create-loop index. Only the server hook's subshell reuses i (SC2030); this hook runs in the current shell
     while IFS= read -r row; do
       [[ -n "${row}" ]] || continue
       protocol=$(jq -r '.protocol // empty' <<<"${row}")

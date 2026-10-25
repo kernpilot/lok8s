@@ -110,7 +110,17 @@ _install_fakes() {
   }
   export -f ssh
 
-  ssh-keygen() { printf '256 MD5:%s test (ED25519)\n' "${STUB_FP:-aa:bb:cc:dd}"; }
+  # -y derives the public key of a private key, the way the real ssh-keygen
+  # prints it ("<type> <base64> <comment>"); a key with a passphrase fails.
+  ssh-keygen() {
+    if [[ " $* " == *" -y "* ]]; then
+      printf '%s\n' "$*" >> "${SSH_LOG}"
+      [[ -z "${STUB_KEYGEN_Y_FAIL:-}" ]] || { echo "Load key \"${!#}\": incorrect passphrase supplied to decrypt private key" >&2; return 255; }
+      printf '%s\n' "${STUB_DERIVED_PUB:-ssh-ed25519 AAAAtest root@host}"
+      return 0
+    fi
+    printf '256 MD5:%s test (ED25519)\n' "${STUB_FP:-aa:bb:cc:dd}"
+  }
   export -f ssh-keygen
 }
 
@@ -584,6 +594,8 @@ _lookup_hcloud() {
 _descriptor_pubkey() {
   printf 'ssh-ed25519 AAAAC3NzaDescriptorKey lok8s "test": x\n' > "${CFGDIR}/descriptor.pub"
   yq -i -o json ".sshPublicKey = \"${CFGDIR}/descriptor.pub\"" "${DESC}"
+  # sshPrivateKey is the private half of this key
+  export STUB_DERIVED_PUB="ssh-ed25519 AAAAC3NzaDescriptorKey operator@laptop"
 }
 
 @test "provider::rebuild authorizes the descriptor sshPublicKey in the cloud VM user-data" {
@@ -691,7 +703,15 @@ _lb_hcloud() {
     printf '%s\n' "$*" >> "${HCLOUD_LOG}"
     case "$1 $2" in
       "load-balancer list")     echo "${LB_LIST:-${LB_ADOPTED}}" ;;
-      "load-balancer describe") [[ -n "${LIVE_LB:-}" ]] || return 1; echo "${LIVE_LB}" ;;
+      "load-balancer describe")
+        [[ -n "${LIVE_LB:-}" ]] || { echo "hcloud: load balancer not found: ${3}" >&2; return 1; }
+        if [[ -n "${LIVE_LB_AFTER:-}" && -f "${BATS_TEST_TMPDIR}/lb-changed" ]]; then echo "${LIVE_LB_AFTER}"; else echo "${LIVE_LB}"; fi ;;
+      "load-balancer add-target")
+        # LB_ADD_FAILS=<n>: the first n add-target calls fail.
+        local n; n=$(grep -c '^load-balancer add-target' "${HCLOUD_LOG}")
+        (( n > ${LB_ADD_FAILS:-0} )) || { echo "hcloud: target not found (server_error)" >&2; return 1; }
+        [[ "${LB_FAIL:-}" != "add-target" ]] || { echo "hcloud: add-target failed (server_error)" >&2; return 1; }
+        : > "${BATS_TEST_TMPDIR}/lb-changed" ;;
       "server list")            echo '[{"id":42,"name":"cp-0","status":"running"}]' ;;
       "load-balancer "*)
         [[ "${LB_FAIL:-}" != "$2" ]] || { echo "hcloud: ${2} failed (server_error)" >&2; return 1; } ;;
@@ -701,8 +721,12 @@ _lb_hcloud() {
   export -f hcloud
 }
 
+# _live_lb <targets> [<private_net>]: the LB as `describe -o json` prints it;
+# private_net defaults to one network (LB_NO_NET=1: none).
 _live_lb() {
-  LIVE_LB='{"id":5,"name":"api-lb",
+  local net='[{"network":9,"ip":"10.0.0.2"}]'
+  [[ -z "${LB_NO_NET:-}" ]] || net='[]'
+  LIVE_LB='{"id":5,"name":"api-lb","private_net":'"${net}"',
     "targets":['"${1}"'],
     "services":[{"protocol":"tcp","listen_port":6443,"destination_port":6443,"proxyprotocol":false,
                  "health_check":{"protocol":"tcp","port":6443,"interval":15,"timeout":10,"retries":3}}]}'
@@ -776,6 +800,8 @@ load-balancer add-target api-lb --server 42 --use-private-ip"
   _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane", "use-private-ip": true }'
   run hetzner::load-balancer
   assert_success
+  # A new LB cannot be described yet: no warning.
+  refute_output --partial "could not read the load balancer"
   run grep -E '^load-balancer (create|remove-target|add-target|add-service)' "${HCLOUD_LOG}"
   assert_output "load-balancer create --name api-lb --type lb11 --location fsn1 --label lok8s.dev/cluster=t
 load-balancer add-target api-lb --label-selector lok8s.dev/role=control-plane --use-private-ip
@@ -805,4 +831,95 @@ load-balancer add-service api-lb --protocol tcp --listen-port 6443 --destination
   assert_output '["worker",{"lok8s.dev/role":"worker","tier.kubehz.cloud/pro":"true"}]'
   run jq -c '.nodes[] | select(.name == "worker-0") | [.role, .labels]' <<<"${out}"
   assert_output '["worker",{"role.kubehz.cloud/platform":"true"}]'
+}
+
+# ── review round 1 (#297) ────────────────────────────────────────────────────
+
+# The remove/add swap takes the LB's only target (the API endpoint) offline
+# until the add is done: the add is retried, and a failure is loud.
+@test "hetzner::load-balancer retries the add after a remove, then fails the step with a clear error" {
+  _lb_hcloud
+  export LB_FAIL=add-target HETZNER_LB_ADD_TRIES=3 HETZNER_LB_ADD_DELAY=0
+  _live_lb '{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane"},"use_private_ip":true}'
+  _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane" }'
+  run hetzner::load-balancer
+  assert_failure
+  assert_output --partial "before: label_selector lok8s.dev/role=control-plane use-private-ip=true"
+  assert_output --partial "lb api-lb: removed target label-selector 'lok8s.dev/role=control-plane', but could not add it again with use-private-ip false in 3 attempts: hcloud: add-target failed (server_error). The load balancer does not route to this target now. Add it with 'hcloud load-balancer add-target api-lb --label-selector lok8s.dev/role=control-plane', or run the provision again."
+  assert_output --partial "hetzner: the load balancer does not match the descriptor"
+  run grep -c '^load-balancer remove-target' "${HCLOUD_LOG}"
+  assert_output "1"
+  run grep -c '^load-balancer add-target' "${HCLOUD_LOG}"
+  assert_output "3"
+}
+
+@test "hetzner::load-balancer retries a failed add after a remove and prints the targets before and after" {
+  _lb_hcloud
+  export LB_ADD_FAILS=1 HETZNER_LB_ADD_TRIES=3 HETZNER_LB_ADD_DELAY=0
+  _live_lb '{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane"},"use_private_ip":true}'
+  export LIVE_LB_AFTER='{"id":5,"name":"api-lb","targets":[{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane"},"use_private_ip":false}]}'
+  _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane" }'
+  run hetzner::load-balancer
+  assert_success
+  assert_output --partial "before: label_selector lok8s.dev/role=control-plane use-private-ip=true"
+  assert_output --partial "after:  label_selector lok8s.dev/role=control-plane use-private-ip=false"
+  run grep -c '^load-balancer add-target' "${HCLOUD_LOG}"
+  assert_output "2"
+}
+
+@test "hetzner::load-balancer keeps a target when the load balancer has no network for use-private-ip true" {
+  _lb_hcloud
+  export LB_NO_NET=1
+  _live_lb '{"type":"server","server":{"id":42},"use_private_ip":false}'
+  _lb_descriptor '{ "type": "server", "value": "0", "use-private-ip": true }'
+  run hetzner::load-balancer
+  assert_failure
+  assert_output --partial "lb api-lb: kept target server '42' with use-private-ip false. The load balancer is on no private network, so the target cannot get use-private-ip true."
+  run grep -cE '^load-balancer (remove-target|add-target)' "${HCLOUD_LOG}"
+  assert_output "0"
+}
+
+@test "hetzner::load-balancer warns when it cannot describe an adopted load balancer" {
+  _lb_hcloud
+  unset LIVE_LB
+  _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane" }'
+  run hetzner::load-balancer
+  assert_success
+  assert_output --partial "lb api-lb: could not read the load balancer (hcloud load-balancer describe: hcloud: load balancer not found: api-lb). Its targets and services are added, not compared"
+}
+
+# The readiness barrier connects with sshPrivateKey after the reimage: a
+# sshPublicKey of another pair must stop the rebuild before it.
+@test "provider::rebuild stops before any reimage when sshPublicKey is not the key of sshPrivateKey" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  _descriptor_pubkey
+  export STUB_DERIVED_PUB="ssh-ed25519 AAAAC3NzaOtherKey operator@laptop"
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "rebuild: sshPublicKey '${CFGDIR}/descriptor.pub' is not the public key of sshPrivateKey '${BATS_TEST_TMPDIR}/id_key' (ssh-keygen -y gives 'ssh-ed25519 AAAAC3NzaOtherKey')."
+  run grep -c -- "-y -P  -f ${BATS_TEST_TMPDIR}/id_key" "${SSH_LOG}"
+  assert_output "1"
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
+  run cat "${CURL_LOG}"
+  refute_output --partial "/rescue"
+}
+
+@test "provider::rebuild warns and goes on when ssh-keygen cannot read sshPrivateKey" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef" STUB_KEYGEN_Y_FAIL=1
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_success
+  assert_output --partial "[warn] rebuild: cannot check that sshPublicKey '${CFGDIR}/pub/id.pub' is the public key of sshPrivateKey '${BATS_TEST_TMPDIR}/id_key': ssh-keygen -y failed (Load key"
+  run grep -c 'server rebuild cp-0' "${HCLOUD_LOG}"
+  assert_output "1"
+}
+
+@test "provider::rebuild stops before any reimage when sshPrivateKey does not exist" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  rm -f "${BATS_TEST_TMPDIR}/id_key"
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "rebuild: sshPrivateKey '${BATS_TEST_TMPDIR}/id_key' does not exist"
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
 }

@@ -48,25 +48,38 @@ cloud-config::envsubst() {
   fi
 }
 
-# Read all *.pub keys from CLOUD_PATH_PUB
+# cloud-config::key_line <line>
+# The ONE reader of an OpenSSH public key line: print "<type> <base64>", the
+# comment dropped (it can hold any text, and the line goes into YAML). Return
+# 1 when the line is not a public key. ssh::pub, the CLOUD_SSH_AUTHORIZED_KEYS
+# check and the hetzner rebuild (sshPublicKey) all read keys through it.
+cloud-config::key_line() {
+  local re='^((ssh|ecdsa|sk)-[A-Za-z0-9@.-]+)[[:space:]]+([A-Za-z0-9+/]+={0,3})([[:space:]]|$)'
+  [[ "${1:-}" =~ ${re} ]] || return 1
+  printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}"
+}
+
+# Read all *.pub keys from CLOUD_PATH_PUB (a line that is no key is skipped)
 ssh::pub() {
   unset IFS
+  local line
   for pub in $(find "${CLOUD_PATH_PUB}" -type f -name '*.pub' 2>/dev/null); do
-    cut -d' ' -f-2 "${pub}"
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      cloud-config::key_line "${line}" || true
+    done < "${pub}"
   done
 }
 
-# The keys in CLOUD_SSH_AUTHORIZED_KEYS, one per line. Each line goes into the
-# YAML as is, so a line that is not "<type> <base64>" stops the generation.
+# The keys in CLOUD_SSH_AUTHORIZED_KEYS, one per line, as "<type> <base64>".
+# A line that is no public key stops the generation.
 cloud-config::authorized_keys() {
-  local key re='^[a-z0-9@.-]+ [A-Za-z0-9+/]+={0,3}$'
+  local key
   while IFS= read -r key; do
     [[ -n "${key}" ]] || continue
-    [[ "${key}" =~ ${re} ]] || {
+    cloud-config::key_line "${key}" || {
       echo "error: CLOUD_SSH_AUTHORIZED_KEYS holds a line that is not '<type> <base64>': ${key:0:40}" >&2
       return 1
     }
-    echo "${key}"
   done <<<"${CLOUD_SSH_AUTHORIZED_KEYS:-}"
 }
 
