@@ -54,7 +54,8 @@ type Options struct {
 	// access at all (the hosted-cluster probe is skipped too).
 	NoDiff bool
 	// Only restricts the run (real or dry) to the named entries, matched
-	// against the entry name (the `name:` override when set) or the addon
+	// against the entry name (the `name:` override when set), the key as
+	// written in spec.bootstrap (`./targets/flux`) or the addon directory
 	// name. dependsOn is NOT expanded: a dependency that is not named is
 	// not applied. An unknown name is an error that lists the valid names.
 	Only []string
@@ -138,15 +139,17 @@ const (
 
 // selectOnly keeps the entries named in only (bash: bootstrap::_select_only).
 // A name matches the entry identity (the `name:` override when set, else
-// the basename / map key) or the addon directory's name, so a renamed
-// framework addon answers to both. The sub-DAG keeps only the edges among
-// the kept entries: dependsOn is not expanded.
+// the basename / map key), the key as written in spec.bootstrap
+// (`./targets/flux`) or the addon directory's name, so a renamed framework
+// addon answers to each. The key also tells apart a target and an addon
+// with the same basename. The sub-DAG keeps only the edges among the kept
+// entries: dependsOn is not expanded.
 func selectOnly(stderr io.Writer, nodes []*node, only []string) ([]*node, error) {
 	keep := make([]bool, len(nodes))
 	for _, want := range only {
 		found := false
 		for i, nd := range nodes {
-			if nd.entry.Name == want || filepath.Base(nd.entry.Dir) == want {
+			if nd.entry.Name == want || nd.entry.Key == want || filepath.Base(nd.entry.Dir) == want {
 				keep[i] = true
 				found = true
 			}
@@ -256,7 +259,9 @@ func topoOrder(nodes []*node) []int {
 
 // runDryRun renders (and diffs) every entry in topological order and
 // prints one report line per entry plus a summary (bash:
-// bootstrap::_run_dry). Off a terminal the lines are the plain contract;
+// bootstrap::_run_dry). A report line names the entry by its entry name,
+// which --only accepts (#281). Only the render-dir files carry the NN-
+// order prefix. Off a terminal the lines are the plain contract;
 // on a terminal the status word is painted. restoreD is the already-computed
 // restore.d pseudo-entry (nil when there was nothing to restore, or --only
 // narrowed the run — restore.d is out of scope either way; see Apply).
@@ -290,9 +295,9 @@ func (e *Engine) runDryRun(ctx context.Context, nodes []*node, base Job, restore
 		total++
 		counts[res.status]++
 		nondeterministic += len(res.nondeterministic)
-		fmt.Fprintf(stdout, "bootstrap dry-run: %s: %s\n", stem, res.render(ui.For(stdout)))
+		fmt.Fprintf(stdout, "bootstrap dry-run: %s: %s\n", nd.entry.Name, res.render(ui.For(stdout)))
 		for _, obj := range res.nondeterministic {
-			fmt.Fprintf(stdout, "bootstrap dry-run: %s: non-deterministic (regenerated on every apply): %s\n", stem, obj)
+			fmt.Fprintf(stdout, "bootstrap dry-run: %s: non-deterministic (regenerated on every apply): %s\n", nd.entry.Name, obj)
 		}
 	}
 	// Review round 2, item F: inconclusive (needs-crd) is counted

@@ -28,7 +28,7 @@ main::provision() {
     'dry-run|:+'         'With --bootstrap: render every entry and apply nothing, diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)'
     'render-dir|:'       "Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory"
     'no-diff|:+'         'Dry run without the kubectl diff: render only, no cluster access'
-    'only|:'             'With --bootstrap: apply (or dry-run) only these spec.bootstrap entries, by entry name or addon name, comma-separated; dependsOn is not expanded'
+    'only|:'             'With --bootstrap: apply (or dry-run) only these spec.bootstrap entries, comma-separated. Each value is an entry name (name:, else the last path element), a key as written in spec.bootstrap (./targets/flux) or an addon directory name. dependsOn is not expanded'
     'allow-generators|:+' "Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)"
     'with-restore|:+'    'With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)'
     'ignore-nondeterministic|:+' 'Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)'

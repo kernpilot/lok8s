@@ -138,7 +138,7 @@ func TestDryRunThroughTheDispatchNeverWalksOrWritesTheProject(t *testing.T) {
 			if err != nil || len(*exits) != 0 {
 				t.Fatalf("err=%v exits=%v\n%s\n%s", err, *exits, stdout, stderr)
 			}
-			if !strings.Contains(stdout, "bootstrap dry-run: 01-app: unchanged\n") {
+			if !strings.Contains(stdout, "bootstrap dry-run: app: unchanged\n") {
 				t.Errorf("stdout:\n%s", stdout)
 			}
 			if after := treeState(t, p.Base); after != before {

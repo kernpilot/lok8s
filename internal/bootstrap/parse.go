@@ -22,6 +22,10 @@ type Entry struct {
 	// Raw is the compact-JSON entry as resolved (used verbatim in the
 	// "addon not found" error, like bash's ${entry}).
 	Raw string
+	// Key is the <name-or-path> as written in spec.bootstrap (bash: the
+	// `key` out-param of _parse_entry): `cilium`, `./targets/flux`.
+	// --only accepts it.
+	Key string
 	// Name is the entry identity: basename / map-key, or the explicit
 	// `name:` override.
 	Name string
@@ -139,7 +143,7 @@ func ParseEntry(p *config.Paths, stderr io.Writer, domain, entry string) (*Entry
 		return nil, reported
 	}
 	e := &Entry{
-		Raw: spec.Raw, Name: spec.Name, Dir: spec.Dir,
+		Raw: spec.Raw, Key: spec.Key, Name: spec.Name, Dir: spec.Dir,
 		Wait: spec.Wait, Deps: spec.Deps, Explicit: spec.Explicit, Builtin: spec.Builtin,
 	}
 	switch {
