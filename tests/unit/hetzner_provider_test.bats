@@ -505,3 +505,304 @@ JSON
   assert_output --partial '--without-ipv6=false'
   assert_output --partial '--image ubuntu-24.04'
 }
+
+# ── the kubehz.in.net in-place recreate (2026-10-23/24) ──────────────────────
+
+# _load_descriptor <json>: CLOUD_HETZNER_JSON as provider::provision builds it:
+# template::descriptor_json on a hetzner.json, then the lookup that writes the
+# ids of the existing resources into it.
+_load_descriptor() {
+  local file="${BATS_TEST_TMPDIR}/lookup/hetzner.json"
+  mkdir -p "${file%/*}"
+  printf '%s\n' "${1}" > "${file}"
+  CLOUD_HETZNER_JSON="$(template::descriptor_json "${file}")"
+  hetzner::lookup >/dev/null
+}
+
+# _lookup_hcloud: hcloud with existing resources (the `<resource> list -o json`
+# shape the lookup reads: an array of objects with id and name).
+_lookup_hcloud() {
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    case "$1 $2" in
+      "ssh-key list") echo '[{"id":7,"name":"primary","public_key":"ssh-ed25519 AAAA"}]' ;;
+      "network list") echo '[{"id":9,"name":"kubernetes","ip_range":"10.0.0.0/16"}]' ;;
+      "server list")  echo '[{"id":42,"name":"cp-0","status":"running"}]' ;;
+      "volume list")  echo '[]' ;;
+      *) return 0 ;;
+    esac
+  }
+  export -f hcloud
+}
+
+# Finding 1: every number was read as an index into another resource list, so
+# `"size": 100` on a volume reached hcloud as `--size null`.
+@test "hetzner::create passes a number on a non-reference key verbatim and dereferences a reference key" {
+  _lookup_hcloud
+  _load_descriptor '{
+    "ssh-key": [ { "name": "primary", "public-key-from-file": "/dev/null" } ],
+    "network": [ { "name": "kubernetes", "ip-range": "10.0.0.0/16" } ],
+    "server": [
+      { "name": "cp-0", "type": "cx43", "image": "ubuntu-24.04", "ssh-key": [0], "network": 0 },
+      { "name": "cp-1", "type": "cx43", "image": 12345678, "ssh-key": [0], "network": 0 }
+    ],
+    "volume": [ { "name": "data-0", "size": 100, "server": 0, "label": "lok8s.dev/cluster=t" } ]
+  }'
+  : > "${HCLOUD_LOG}"
+  run hetzner::create 'server'
+  assert_success
+  run hetzner::create 'volume'
+  assert_success
+
+  # A snapshot image id is a literal; ssh-key and network are references.
+  run grep -E '^server create' "${HCLOUD_LOG}"
+  assert_output 'server create --name cp-1 --type cx43 --image 12345678 --ssh-key 7 --network 9'
+  # The size is a literal; the server is a reference (cp-0 has the id 42).
+  run grep -E '^volume create' "${HCLOUD_LOG}"
+  assert_output 'volume create --name data-0 --size 100 --server 42 --label lok8s.dev/cluster=t'
+}
+
+@test "hetzner::create gives a bare-metal hook a literal number verbatim and a reference as its id" {
+  _lookup_hcloud
+  _load_descriptor '{
+    "ssh-key": [ { "name": "primary", "public-key-from-file": "/dev/null" } ],
+    "server": [ { "name": "metal-0", "#cloud.root": "true", "#external-ip": "203.0.113.10",
+                  "#ssh-port": 2222, "ssh-key": [0] } ]
+  }'
+  export FIELDS_LOG="${BATS_TEST_TMPDIR}/fields.log"
+  hetzner::create::hook() { printf '%s\n' "${fields[@]}" > "${FIELDS_LOG}"; }
+  run hetzner::create 'server'
+  assert_success
+  run cat "${FIELDS_LOG}"
+  assert_output --partial $'--#ssh-port\n2222\n'
+  assert_output --partial $'--ssh-key\n7'
+  refute_output --partial 'null'
+}
+
+# Finding 2: `hcloud server rebuild` keeps only the creation-time SSH keys. A
+# VM that lok8s did not create came back with no key lok8s can use.
+_descriptor_pubkey() {
+  printf 'ssh-ed25519 AAAAC3NzaDescriptorKey lok8s "test": x\n' > "${CFGDIR}/descriptor.pub"
+  yq -i -o json ".sshPublicKey = \"${CFGDIR}/descriptor.pub\"" "${DESC}"
+}
+
+@test "provider::rebuild authorizes the descriptor sshPublicKey in the cloud VM user-data" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  _descriptor_pubkey
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_success
+
+  # Root access: a top-level list, the key without its comment.
+  run yq -r '.ssh_authorized_keys | join("|")' "${WORK}/rebuild-cp-0.cloud-init.yaml"
+  assert_success
+  assert_output 'ssh-ed25519 AAAAC3NzaDescriptorKey'
+  run cat "${HCLOUD_LOG}"
+  assert_output --partial "server rebuild cp-0 --image ubuntu-24.04 --user-data-from-file ${WORK}/rebuild-cp-0.cloud-init.yaml"
+}
+
+@test "provider::rebuild gives a dedicated access user the descriptor sshPublicKey" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  _descriptor_pubkey
+  yq -i -o json '.cloudInit.user = "lok8s"' "${DESC}"
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_success
+  run yq -r '.users[0].name + "=" + (.users[0]["ssh-authorized-keys"] | join("|"))' "${WORK}/rebuild-cp-0.cloud-init.yaml"
+  assert_output --partial 'lok8s='
+  assert_output --partial 'ssh-ed25519 AAAAC3NzaDescriptorKey'
+  run yq -r 'has("ssh_authorized_keys")' "${WORK}/rebuild-cp-0.cloud-init.yaml"
+  assert_output 'false'
+}
+
+@test "provider::rebuild stops before any reimage when sshPublicKey cannot be read" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  yq -i -o json ".sshPublicKey = \"${CFGDIR}/missing.pub\"" "${DESC}"
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "rebuild: cannot read sshPublicKey '${CFGDIR}/missing.pub'"
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
+  run cat "${CURL_LOG}"
+  refute_output --partial "/rescue"
+  refute_output --partial "/reset/"
+}
+
+@test "provider::rebuild stops before any reimage when sshPublicKey holds no public key" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  printf 'not a key\n' > "${CFGDIR}/bad.pub"
+  yq -i -o json ".sshPublicKey = \"${CFGDIR}/bad.pub\"" "${DESC}"
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "holds no OpenSSH public key"
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
+}
+
+# Finding 3: a cloudInit.path that does not exist fell back to the framework
+# default cloud-init without a message.
+@test "provider::provision stops when cloudInit.path does not exist, before any hcloud call" {
+  yq -i -o json '.cloudInit.path = "no-such-dir"' "${DESC}"
+  run provider::provision "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "hetzner: cloudInit.path 'no-such-dir' does not exist: ${CFGDIR}/no-such-dir."
+  run cat "${HCLOUD_LOG}"
+  assert_output ""
+}
+
+@test "provider::rebuild stops when cloudInit.path is not a directory, before any reimage" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  : > "${CFGDIR}/a-file"
+  yq -i -o json '.cloudInit.path = "a-file"' "${DESC}"
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "hetzner: cloudInit.path 'a-file' is not a directory: ${CFGDIR}/a-file."
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
+}
+
+@test "hetzner::_export_cloudinit_env uses an existing cloudInit.path, and the default without one" {
+  export PROVIDER_CONFIG_FILE="${DESC}"
+  hetzner::_export_cloudinit_env "${DESC}"
+  [ "${CLOUD_PATH}" = "${CFGDIR}/cloud-init" ]
+  yq -i -o json 'del(.cloudInit.path)' "${DESC}"
+  hetzner::_export_cloudinit_env "${DESC}"
+  [ "${CLOUD_PATH}" = "${PATH_LOK8S}/providers/hetzner/cloud-init" ]
+}
+
+# Finding 4 (issue #296): an adopted load balancer kept its old targets and
+# services. add-target answered "already", so a target stayed private after
+# the descriptor dropped use-private-ip.
+_lb_descriptor() {
+  _load_descriptor '{
+    "server": [ { "name": "cp-0", "type": "cx43", "image": "ubuntu-24.04" } ],
+    "load-balancer": [ { "name": "api-lb", "type": "lb11", "location": "fsn1",
+      "label": "lok8s.dev/cluster=t",
+      "#targets": [ '"${1}"' ],
+      "#services": [ { "protocol": "tcp", "listen-port": "6443", "destination-port": "'"${2:-6443}"'" } ] } ]
+  }'
+  : > "${HCLOUD_LOG}"
+}
+
+# _lb_hcloud: the LB api-lb exists. `describe -o json` prints LIVE_LB (the API
+# schema of hcloud-go: targets[].type label_selector|server|ip, use_private_ip,
+# services[].listen_port/destination_port). LB_FAIL=<verb> fails that verb.
+_lb_hcloud() {
+  export LB_ADOPTED='[{"id":5,"name":"api-lb"}]'
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    case "$1 $2" in
+      "load-balancer list")     echo "${LB_LIST:-${LB_ADOPTED}}" ;;
+      "load-balancer describe") [[ -n "${LIVE_LB:-}" ]] || return 1; echo "${LIVE_LB}" ;;
+      "server list")            echo '[{"id":42,"name":"cp-0","status":"running"}]' ;;
+      "load-balancer "*)
+        [[ "${LB_FAIL:-}" != "$2" ]] || { echo "hcloud: ${2} failed (server_error)" >&2; return 1; } ;;
+    esac
+    return 0
+  }
+  export -f hcloud
+}
+
+_live_lb() {
+  LIVE_LB='{"id":5,"name":"api-lb",
+    "targets":['"${1}"'],
+    "services":[{"protocol":"tcp","listen_port":6443,"destination_port":6443,"proxyprotocol":false,
+                 "health_check":{"protocol":"tcp","port":6443,"interval":15,"timeout":10,"retries":3}}]}'
+  export LIVE_LB
+}
+
+@test "hetzner::load-balancer replaces an adopted target whose use-private-ip differs from the descriptor" {
+  _lb_hcloud
+  _live_lb '{"type":"label_selector","label_selector":{"selector":"lok8s.dev/cluster=t,lok8s.dev/role=control-plane"},
+             "use_private_ip":true,"targets":[{"type":"server","server":{"id":42},"use_private_ip":true}]}'
+  _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/cluster=t,lok8s.dev/role=control-plane" }'
+  run hetzner::load-balancer
+  assert_success
+  assert_output --partial "replace"
+  assert_output --partial " label-selector: lok8s.dev/cluster=t,lok8s.dev/role=control-plane (use-private-ip true -> false)"
+
+  # Remove first, then add without --use-private-ip. The service matches.
+  run grep -E '^load-balancer (remove-target|add-target|add-service|update-service)' "${HCLOUD_LOG}"
+  assert_output "load-balancer remove-target api-lb --label-selector lok8s.dev/cluster=t,lok8s.dev/role=control-plane
+load-balancer add-target api-lb --label-selector lok8s.dev/cluster=t,lok8s.dev/role=control-plane"
+}
+
+@test "hetzner::load-balancer replaces a server target by id and adds use-private-ip" {
+  _lb_hcloud
+  _live_lb '{"type":"server","server":{"id":42},"use_private_ip":false}'
+  _lb_descriptor '{ "type": "server", "value": "0", "use-private-ip": true }'
+  run hetzner::load-balancer
+  assert_success
+  run grep -E '^load-balancer (remove-target|add-target)' "${HCLOUD_LOG}"
+  assert_output "load-balancer remove-target api-lb --server 42
+load-balancer add-target api-lb --server 42 --use-private-ip"
+}
+
+@test "hetzner::load-balancer keeps an adopted target and service that match the descriptor" {
+  _lb_hcloud
+  _live_lb '{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane"},"use_private_ip":false}'
+  _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane" }'
+  run hetzner::load-balancer
+  assert_success
+  run grep -cE '^load-balancer (remove-target|add-target|add-service|update-service|delete-service)' "${HCLOUD_LOG}"
+  assert_output "0"
+}
+
+@test "hetzner::load-balancer updates an adopted service whose destination port differs, in place" {
+  _lb_hcloud
+  _live_lb '{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane"},"use_private_ip":false}'
+  _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane" }' 16443
+  run hetzner::load-balancer
+  assert_success
+  run grep -E '^load-balancer (add-service|update-service|delete-service)' "${HCLOUD_LOG}"
+  assert_output "load-balancer update-service api-lb --listen-port 6443 --protocol tcp --destination-port 16443"
+}
+
+@test "hetzner::load-balancer fails the step when it cannot remove a stale target, and adds nothing" {
+  _lb_hcloud
+  export LB_FAIL=remove-target
+  _live_lb '{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane"},"use_private_ip":true}'
+  _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane" }'
+  run hetzner::load-balancer
+  assert_failure
+  assert_output --partial "lb api-lb: could not remove target label-selector 'lok8s.dev/role=control-plane' to set use-private-ip to false: hcloud: remove-target failed (server_error)."
+  assert_output --partial "hetzner: the load balancer does not match the descriptor"
+  run grep -c '^load-balancer add-target' "${HCLOUD_LOG}"
+  assert_output "0"
+}
+
+@test "hetzner::load-balancer adds every target and service to a new load balancer" {
+  _lb_hcloud
+  export LB_LIST='[]'
+  unset LIVE_LB
+  _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane", "use-private-ip": true }'
+  run hetzner::load-balancer
+  assert_success
+  run grep -E '^load-balancer (create|remove-target|add-target|add-service)' "${HCLOUD_LOG}"
+  assert_output "load-balancer create --name api-lb --type lb11 --location fsn1 --label lok8s.dev/cluster=t
+load-balancer add-target api-lb --label-selector lok8s.dev/role=control-plane --use-private-ip
+load-balancer add-service api-lb --protocol tcp --listen-port 6443 --destination-port 6443"
+}
+
+# Finding 5: a static cloud worker's Node lost lok8s.dev/role, and the Pods
+# that select lok8s.dev/role=worker stayed Pending. A bare-metal Node still
+# does not get it: consumers keep bare metal out with that selector.
+@test "provider::output keeps lok8s.dev/role on a cloud VM Node and drops it on a bare-metal Node" {
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    case "$1 $2" in
+      "server list") echo '[{"id":61,"name":"base-fsn1-abc","status":"running",
+        "public_net":{"ipv4":{"ip":"192.0.2.20"}},"private_net":[{"network":9,"ip":"10.0.0.20"}],
+        "labels":{"lok8s.dev/cluster":"test-cluster","lok8s.dev/role":"worker","lok8s.dev/group":"base","tier.kubehz.cloud/pro":"true"}}]' ;;
+      *"list") echo '[]' ;;
+    esac
+    return 0
+  }
+  export -f hcloud
+  yq -i -o json '.server[1]["#labels"] = "lok8s.dev/cluster=test-cluster,lok8s.dev/role=worker,role.kubehz.cloud/platform=true"' "${DESC}"
+  run provider::output "${DESC}"
+  assert_success
+  local out="${output}"
+  run jq -c '.nodes[] | select(.name == "base-fsn1-abc") | [.role, .labels]' <<<"${out}"
+  assert_output '["worker",{"lok8s.dev/role":"worker","tier.kubehz.cloud/pro":"true"}]'
+  run jq -c '.nodes[] | select(.name == "worker-0") | [.role, .labels]' <<<"${out}"
+  assert_output '["worker",{"role.kubehz.cloud/platform":"true"}]'
+}

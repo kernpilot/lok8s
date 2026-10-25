@@ -144,7 +144,7 @@ provider::provision() {
   # provider::rebuild (one helper, so the two can't drift). CLOUD_PATHD is
   # provision-specific: the whole-cluster module set from .cloudInit.modules
   # (rebuild overrides CLOUD_PATHD per server from each server's #cloud.d).
-  hetzner::_export_cloudinit_env "${config_file}"
+  hetzner::_export_cloudinit_env "${config_file}" || return 1
   local ci_modules
   ci_modules=$(_cfg '.cloudInit.modules // ""' 2>/dev/null || echo "")
   export CLOUD_PATHD="${ci_modules}"
@@ -279,12 +279,17 @@ provider::output() {
     role=$(echo "${server}" | jq -r '.labels["lok8s.dev/role"] // "worker"')
     group=$(echo "${server}" | jq -r '.labels["lok8s.dev/group"] // "default"')
     # Node labels to stamp on the k8s Node (via kubeone labelNodes). Carry every
-    # hcloud server label EXCEPT the lok8s.dev/{cluster,role,group} orchestration
+    # hcloud server label EXCEPT the lok8s.dev/{cluster,group} orchestration
     # keys (those select infra, they are not node taxonomy). This is how the
     # tier.kubehz.cloud/* + capability.* + role.kubehz.cloud/platform taxonomy
     # reaches the Node.
+    # lok8s.dev/role stays: it is the role this inventory gives the node, and
+    # workloads select cloud workers by it (nodeSelector lok8s.dev/role=worker).
+    # A machine-controller worker carries it from its MachineDeployment; a
+    # static cloud worker lost it in the 2026-10-24 rebuild, and the Pods that
+    # select it stayed Pending. The bare-metal path below still drops it.
     local node_labels
-    node_labels=$(echo "${server}" | jq -c '(.labels // {}) | del(.["lok8s.dev/cluster"], .["lok8s.dev/role"], .["lok8s.dev/group"])')
+    node_labels=$(echo "${server}" | jq -c '(.labels // {}) | del(.["lok8s.dev/cluster"], .["lok8s.dev/group"])')
     node_labels=$(_validate_node_labels "${node_labels}" "${name}")
 
     nodes=$(echo "${nodes}" | jq \
@@ -320,6 +325,10 @@ provider::output() {
       # base64 padding, k=a=b) is preserved intact instead of truncated at the
       # first "=". select((.[0]|length) > 0) drops a leading "=" / empty key
       # ("=orphan") which would otherwise emit a "" label key.
+      # lok8s.dev/role stays dropped here, unlike on a cloud VM: a bare-metal
+      # Node never carried it, and a consumer can select cloud workers by
+      # lok8s.dev/role=worker to keep a workload off bare metal. Adding it
+      # would move those workloads onto the bare-metal nodes.
       local node_labels
       node_labels=$(echo "${labels}" | jq -R -c 'split(",") | map(select(length>0) | split("=") | select((.[0]|length) > 0) | {(.[0]): (.[1:]|join("="))}) | add // {}
         | del(.["lok8s.dev/cluster"], .["lok8s.dev/role"], .["lok8s.dev/group"], .["role"])')
@@ -431,7 +440,24 @@ provider::rebuild() {
     # shellcheck source=/dev/null
     source "${cc_script}"
   }
-  hetzner::_export_cloudinit_env "${config_file}"
+  hetzner::_export_cloudinit_env "${config_file}" || return 1
+
+  # The rebuild user-data authorizes the descriptor's sshPublicKey.
+  # `hcloud server rebuild` keeps only the SSH keys the server was created
+  # with: a cloud VM that lok8s did not create (a machine-controller VM the
+  # descriptor adopted) came back with no key lok8s can use (2026-10-24).
+  # cloud-config::generate reads CLOUD_SSH_AUTHORIZED_KEYS. It is local, so a
+  # provision that runs later in the same shell does not inherit it.
+  local CLOUD_SSH_AUTHORIZED_KEYS="" cloud_count pubkey
+  cloud_count="$(echo "${desc}" | jq '[(.server // [])[] | select(.["#cloud.root"] != "true")] | length')"
+  if (( cloud_count > 0 )); then
+    pubkey="$(echo "${desc}" | jq -r '.sshPublicKey // ""')"
+    if [[ -z "${pubkey}" ]]; then
+      warn "rebuild: the descriptor has no sshPublicKey. A rebuilt cloud VM keeps only the SSH keys it was created with, so a VM that lok8s did not create can lose SSH access. Set sshPublicKey to the public key of sshPrivateKey."
+    else
+      CLOUD_SSH_AUTHORIZED_KEYS="$(hetzner::_authorized_key "${pubkey}")" || return 1
+    fi
+  fi
 
   # Readiness-barrier SSH command (identity from the descriptor).
   local ssh_key
@@ -564,15 +590,27 @@ provider::rebuild() {
 # both provider::provision and provider::rebuild (they can't drift). CLOUD_PATHD
 # is intentionally NOT set here — each caller owns it (provision: whole-cluster
 # .cloudInit.modules; rebuild: per-server #cloud.d).
+#
+# No cloudInit.path selects the framework default. A cloudInit.path that is not
+# a directory is an error: the old silent fallback to the default gave the
+# nodes a cloud-init the descriptor did not ask for.
 hetzner::_export_cloudinit_env() {
   local config_file="${1}"
-  local ci_path ci_user ci_group ci_pub
-  ci_path="$(_cfg '.cloudInit.path // ""' 2>/dev/null || echo "")"
+  local ci_raw ci_path ci_user ci_group ci_pub
+  ci_raw="$(_cfg '.cloudInit.path // ""' 2>/dev/null || echo "")"
+  ci_path="${ci_raw}"
+  # shellcheck disable=SC2088 # literal "~/" prefix match, expanded via $HOME on the same line
+  [[ "${ci_path}" != "~/"* ]] || ci_path="${HOME}/${ci_path:2}"
   if [[ -n "${ci_path}" && "${ci_path}" != /* ]]; then
     ci_path="$(dirname "${config_file}")/${ci_path}"
   fi
-  if [[ -z "${ci_path}" || ! -d "${ci_path}" ]]; then
+  if [[ -z "${ci_path}" ]]; then
     ci_path="${PATH_LOK8S}/providers/hetzner/cloud-init"
+  elif [[ ! -d "${ci_path}" ]]; then
+    local problem="does not exist"
+    [[ ! -e "${ci_path}" ]] || problem="is not a directory"
+    error "hetzner: cloudInit.path '${ci_raw}' ${problem}: ${ci_path}. A relative path resolves against the directory of ${config_file} (for an inline spec.provider.config, a temporary file: use an absolute path or spec.provider.configRef). Create the directory, correct cloudInit.path, or remove cloudInit.path to use the framework default."
+    return 1
   fi
   export CLOUD_PATH="${ci_path}"
   export CLOUD_PATH_LIB="${PATH_LOK8S}/providers/hetzner/cloud-init"
@@ -620,6 +658,28 @@ hetzner::_rebuild_barrier() {
   done
   error "rebuild: nodes did not reach target state within $(( tries * interval ))s"
   return 1
+}
+
+# hetzner::_authorized_key <pubkey_path>
+# Print "<type> <base64>" of the OpenSSH public key in <pubkey_path> for the
+# rebuild user-data. The comment is dropped: it can hold any text, and the
+# line goes into YAML. Error when the file cannot be read or holds no key.
+hetzner::_authorized_key() {
+  local path="${1}" file line
+  local re='^((ssh|ecdsa|sk)-[A-Za-z0-9@.-]+)[[:space:]]+([A-Za-z0-9+/]+={0,3})([[:space:]]|$)'
+  file="${path}"
+  # shellcheck disable=SC2088 # literal "~/" prefix match, expanded via $HOME on the same line
+  [[ "${file}" != "~/"* ]] || file="${HOME}/${file:2}"
+  if [[ ! -f "${file}" || ! -r "${file}" ]]; then
+    error "rebuild: cannot read sshPublicKey '${path}' (${file}). The rebuilt cloud VMs need it as an authorized key. Correct sshPublicKey in the descriptor, or create the file."
+    return 1
+  fi
+  line="$(grep -m1 -v -e '^[[:space:]]*$' -e '^#' "${file}" || true)"
+  if [[ ! "${line}" =~ ${re} ]]; then
+    error "rebuild: sshPublicKey '${path}' holds no OpenSSH public key (expected '<type> <base64>' on the first line). Set sshPublicKey to the .pub file of sshPrivateKey."
+    return 1
+  fi
+  printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[3]}"
 }
 
 # hetzner::_rescue_fingerprint <pubkey_path>

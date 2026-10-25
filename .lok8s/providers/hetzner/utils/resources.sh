@@ -439,6 +439,10 @@ hetzner::volume() {
 }
 
 hetzner::load-balancer() {
+  # Set by the create::after hook below when a reconcile call fails. The
+  # create loop does not check the status of its hook, so this step does.
+  _HETZNER_LB_FAILED=0
+
   hetzner::create::after() {
     # Attach the LB to the first descriptor network — required before
     # use-private-ip targets can be added.
@@ -453,10 +457,23 @@ hetzner::load-balancer() {
       fi
     fi
 
+    # Reconcile the targets and services of this LB to the descriptor
+    # (issue #296). An adopted LB keeps what it had: an add-target that
+    # answered "already" left a target with use-private-ip=true private after
+    # the descriptor dropped use-private-ip. Read the live LB once and compare.
+    # `hcloud ... -o json` prints the API schema: targets[].type is server,
+    # label_selector or ip, with use_private_ip; services[] carry protocol,
+    # listen_port and destination_port. A new LB, or one hcloud cannot
+    # describe, reads as empty: every target and service is added.
+    local live
+    live="$(hcloud load-balancer describe "${name}" -o json 2>/dev/null)" || live=""
+    jq -e 'type == "object"' >/dev/null 2>&1 <<<"${live}" || live='{}'
+
     # NOTE: rows are read as JSON objects (jq -c), NOT csv — label
     # selectors legitimately contain commas and csv-splitting mangled
     # them (and the resulting hcloud errors were silently swallowed).
-    local row target_type target_value use_private_ip
+    local row target_type target_value use_private_ip want_private live_private
+    local api_type match_value
     # shellcheck disable=SC2031  # i is the outer create-loop index, read inside the per-LB subshell hook
     while IFS= read -r row; do
       [[ -n "${row}" ]] || continue
@@ -464,36 +481,82 @@ hetzner::load-balancer() {
       target_value=$(jq -r '.value // empty' <<<"${row}")
       use_private_ip=$(jq -r '.["use-private-ip"] // "false"' <<<"${row}")
       [[ -n "${target_type}" ]] || continue
-
-      _hetzner_print "   ⭐ add \033[3mtarget\033[0m ${target_type}: ${target_value}"
+      want_private="true"
+      [[ "${use_private_ip}" != "false" ]] || want_private="false"
 
       local -a target_args=()
+      match_value="${target_value}"
       case "${target_type}" in
         server)
           if [[ "${target_value}" =~ ^[0-9]+$ ]]; then
             target_value="$(hetzner::json -r --arg idx "${target_value}" '.server[($idx | tonumber)].id // .server[($idx | tonumber)].name')"
           fi
           target_args+=("--server" "${target_value}")
+          # The live target holds the server id only.
+          match_value="${target_value}"
+          [[ "${match_value}" =~ ^[0-9]+$ ]] ||
+            match_value="$(hetzner::json -r --arg n "${target_value}" '[.server[]? | select(.name == $n) | .id // empty][0] // ""')"
+          api_type="server"
           ;;
         label-selector)
           target_args+=("--label-selector" "${target_value}")
+          api_type="label_selector"
           ;;
         ip)
           target_args+=("--ip" "${target_value}")
+          api_type="ip"
+          ;;
+        *)
+          warn "lb ${name}: skipped target type '${target_type}'. Use server, label-selector or ip."
+          continue
           ;;
       esac
 
-      [[ "${use_private_ip}" == "false" ]] ||
-        target_args+=("--use-private-ip")
+      # use_private_ip of the live target with this type and value; empty when
+      # the LB has no such target.
+      live_private="$(jq -r --arg type "${api_type}" --arg value "${match_value}" '
+        [ (.targets // [])[]
+          | select(.type == $type)
+          | select(if $type == "server" then ((.server.id // "") | tostring) == $value
+                   elif $type == "label_selector" then (.label_selector.selector // "") == $value
+                   else (.ip.ip // "") == $value end)
+          | (.use_private_ip // false) | tostring
+        ] | first // ""' <<<"${live}" 2>/dev/null)" || live_private=""
 
-      if ! err=$(hcloud load-balancer add-target "${name}" \
-          "${target_args[@]}" 2>&1); then
+      local -a private_arg=()
+      [[ "${want_private}" == "false" ]] || private_arg=("--use-private-ip")
+
+      if [[ "${live_private}" == "${want_private}" ]]; then
+        _hetzner_print "   🦗 keep \033[3mtarget\033[0m ${target_type}: ${target_value}"
+        continue
+      fi
+
+      if [[ -n "${live_private}" ]]; then
+        # The API cannot change use_private_ip on a target: remove, then add.
+        _hetzner_print "   ♻️  replace \033[3mtarget\033[0m ${target_type}: ${target_value} (use-private-ip ${live_private} -> ${want_private})"
+        if ! err=$(dry-run::cmd hcloud load-balancer remove-target "${name}" \
+            "${target_args[@]}" 2>&1); then
+          error "lb ${name}: could not remove target ${target_type} '${target_value}' to set use-private-ip to ${want_private}: ${err}. Remove it with 'hcloud load-balancer remove-target', then run the provision again."
+          _HETZNER_LB_FAILED=1
+          continue
+        fi
+        if ! err=$(dry-run::cmd hcloud load-balancer add-target "${name}" \
+            "${target_args[@]}" "${private_arg[@]}" 2>&1); then
+          error "lb ${name}: removed target ${target_type} '${target_value}', but could not add it again with use-private-ip ${want_private}: ${err}. The load balancer does not have this target now. Run the provision again, or add it with 'hcloud load-balancer add-target'."
+          _HETZNER_LB_FAILED=1
+        fi
+        continue
+      fi
+
+      _hetzner_print "   ⭐ add \033[3mtarget\033[0m ${target_type}: ${target_value}"
+      if ! err=$(dry-run::cmd hcloud load-balancer add-target "${name}" \
+          "${target_args[@]}" "${private_arg[@]}" 2>&1); then
         [[ "${err}" == *"already"* ]] ||
           warn "lb ${name}: add-target failed: ${err}"
       fi
     done < <(hetzner::json -c ".[\"load-balancer\"][${i}][\"#targets\"][]?" 2>/dev/null)
 
-    local protocol listen_port dest_port
+    local protocol listen_port dest_port live_service live_protocol live_dest
     # shellcheck disable=SC2031  # i is the outer create-loop index, read inside the per-LB subshell hook
     while IFS= read -r row; do
       [[ -n "${row}" ]] || continue
@@ -502,9 +565,32 @@ hetzner::load-balancer() {
       dest_port=$(jq -r '.["destination-port"] // empty' <<<"${row}")
       [[ -n "${protocol}" ]] || continue
 
+      # The live service on this listen port (the API allows one per port).
+      live_service="$(jq -c --arg port "${listen_port}" '
+        [ (.services // [])[] | select((.listen_port | tostring) == $port) ] | first // empty' <<<"${live}" 2>/dev/null)" || live_service=""
+
+      if [[ -n "${live_service}" ]]; then
+        live_protocol=$(jq -r '.protocol // ""' <<<"${live_service}")
+        live_dest=$(jq -r '.destination_port // "" | tostring' <<<"${live_service}")
+        if [[ "${live_protocol}" == "${protocol}" && "${live_dest}" == "${dest_port}" ]]; then
+          _hetzner_print "   🦗 keep \033[3mservice\033[0m ${protocol}:${listen_port} -> ${dest_port}"
+          continue
+        fi
+        # update-service changes the service in place: the port keeps serving.
+        _hetzner_print "   ♻️  update \033[3mservice\033[0m ${listen_port}: ${live_protocol} -> ${live_dest} to ${protocol} -> ${dest_port}"
+        if ! err=$(dry-run::cmd hcloud load-balancer update-service "${name}" \
+            --listen-port "${listen_port}" \
+            --protocol "${protocol}" \
+            --destination-port "${dest_port}" 2>&1); then
+          error "lb ${name}: could not update service ${listen_port} from ${live_protocol} -> ${live_dest} to ${protocol} -> ${dest_port}: ${err}. Update it with 'hcloud load-balancer update-service', then run the provision again."
+          _HETZNER_LB_FAILED=1
+        fi
+        continue
+      fi
+
       _hetzner_print "   ⭐ add \033[3mservice\033[0m ${protocol}:${listen_port} -> ${dest_port}"
 
-      if ! err=$(hcloud load-balancer add-service "${name}" \
+      if ! err=$(dry-run::cmd hcloud load-balancer add-service "${name}" \
           --protocol "${protocol}" \
           --listen-port "${listen_port}" \
           --destination-port "${dest_port}" 2>&1); then
@@ -514,5 +600,9 @@ hetzner::load-balancer() {
     done < <(hetzner::json -c ".[\"load-balancer\"][${i}][\"#services\"][]?" 2>/dev/null)
   }
 
-  hetzner::create 'load-balancer'
+  hetzner::create 'load-balancer' || return 1
+  (( _HETZNER_LB_FAILED == 0 )) || {
+    error "hetzner: the load balancer does not match the descriptor; the messages above name each target or service. Correct it, then run the provision again."
+    return 1
+  }
 }

@@ -88,9 +88,16 @@ spec:
     name: hetzner
     config:
       cloudInit:
-        path: ./cloud-init            # relative to clusters/<domain>/
+        path: ./cloud-init            # relative to the provider config file (see below)
         modules: "monitoring"          # colon-separated cloud.d sub-configs
 ```
+
+A relative `path` resolves against the directory of the provider config
+file. For a `configRef` descriptor (`hetzner.json`) that is
+`clusters/<domain>/`. An inline `config` block is written to a temporary
+file, so give it an absolute path there. When `path` is set and the
+directory does not exist, `lo provision` and `lo recover` stop with an
+error. They do not fall back to the built-in default.
 
 ### Config directory structure
 

@@ -23,6 +23,9 @@
 #   CLOUD_USER      — default user (default: root)
 #   CLOUD_GROUP     — default group (default: root)
 #   CLOUD_PATH_PUB  — SSH public key directory (default: ~/.ssh)
+#   CLOUD_SSH_AUTHORIZED_KEYS — optional SSH public keys, one per line
+#                     ("<type> <base64>"), authorized for the access user
+#                     (provider::rebuild sets the descriptor's sshPublicKey)
 #   CLOUD_ENV_*     — exported as variables in runcmd (CLOUD_ENV_ prefix stripped)
 # shellcheck disable=2044
 
@@ -51,6 +54,31 @@ ssh::pub() {
   for pub in $(find "${CLOUD_PATH_PUB}" -type f -name '*.pub' 2>/dev/null); do
     cut -d' ' -f-2 "${pub}"
   done
+}
+
+# The keys in CLOUD_SSH_AUTHORIZED_KEYS, one per line. Each line goes into the
+# YAML as is, so a line that is not "<type> <base64>" stops the generation.
+cloud-config::authorized_keys() {
+  local key re='^[a-z0-9@.-]+ [A-Za-z0-9+/]+={0,3}$'
+  while IFS= read -r key; do
+    [[ -n "${key}" ]] || continue
+    [[ "${key}" =~ ${re} ]] || {
+      echo "error: CLOUD_SSH_AUTHORIZED_KEYS holds a line that is not '<type> <base64>': ${key:0:40}" >&2
+      return 1
+    }
+    echo "${key}"
+  done <<<"${CLOUD_SSH_AUTHORIZED_KEYS:-}"
+}
+
+# A top-level ssh_authorized_keys list for root access (disable_root: false
+# installs the keys for root). Nothing when CLOUD_SSH_AUTHORIZED_KEYS is empty.
+# A dedicated CLOUD_USER gets the keys in its own users: entry instead.
+cloud-config::_emit_authorized_keys() {
+  local keys
+  keys="$(cloud-config::authorized_keys)" || return 1
+  [[ -n "${keys}" ]] || return 0
+  printf 'ssh_authorized_keys:\n'
+  printf '%s\n' "${keys}" | sed -e 's_^_- _'
 }
 
 # Returns all config paths for a file type, in precedence order. For each
@@ -405,6 +433,18 @@ cloud-config::generate() {
   local disable_root_yaml="true"
   (( disable_root )) || disable_root_yaml="false"
 
+  # CLOUD_SSH_AUTHORIZED_KEYS: root access gets a top-level list, a dedicated
+  # user gets the keys in its users: entry. Checked here, not inside the
+  # heredoc, where a failed substitution would go unnoticed.
+  local authorized_keys_block="" user_keys=""
+  if (( disable_root )); then
+    user_keys="$(cloud-config::authorized_keys)" || return 1
+    user_keys="$({ ssh::pub; [[ -z "${user_keys}" ]] || printf '%s\n' "${user_keys}"; } | sed -e 's_^_  - _')"
+  else
+    authorized_keys_block="$(cloud-config::_emit_authorized_keys)" || return 1
+    [[ -z "${authorized_keys_block}" ]] || authorized_keys_block=$'\n'"${authorized_keys_block}"
+  fi
+
   cat <<EOF
 #cloud-config
 
@@ -413,7 +453,7 @@ package_upgrade: true
 package_reboot_if_required: true
 
 disable_root: ${disable_root_yaml}
-ssh_pwauth: false
+ssh_pwauth: false${authorized_keys_block}
 
 mounts:
 - [ tmpfs, /run/shm, "tmpfs", "ro,noexec,nosuid", "0", "0" ]
@@ -433,7 +473,7 @@ users:
   lock_passwd: true
   shell: /bin/bash
   ssh-authorized-keys:
-$(ssh::pub | sed -e 's_^_  - _')
+${user_keys}
   groups:
   - docker
   sudo:
