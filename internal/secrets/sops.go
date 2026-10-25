@@ -142,10 +142,6 @@ func (d ageDecryptor) Decrypt(ctx context.Context, req *keyservice.DecryptReques
 	return &keyservice.DecryptResponse{Plaintext: plaintext}, nil
 }
 
-// errMACMismatch: the decrypted values do not match the file's MAC (a
-// changed or damaged .enc).
-var errMACMismatch = errors.New("failed to verify data integrity: the MAC of the file does not match its values")
-
 // sopsDecryptData decrypts a binary-mode .enc payload with the given age
 // identity (decrypt.Data with the identity injected instead of read from
 // SOPS_AGE_KEY). Decrypt does NOT consult .sops.yaml (recipients live in
@@ -181,3 +177,7 @@ func sopsDecryptData(encBytes []byte, ageKey string) ([]byte, error) {
 	}
 	return store.EmitPlainFile(tree.Branches)
 }
+
+// errMACMismatch: the decrypted values do not match the file's MAC (a
+// changed or damaged .enc).
+var errMACMismatch = errors.New("failed to verify data integrity: the MAC of the file does not match its values")
