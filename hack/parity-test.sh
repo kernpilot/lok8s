@@ -165,4 +165,19 @@ if ! grep -qx '\[warn\] Secret.app.default.JWT_SECRET: the plaintext is newer th
   fail "secrets decrypt did not name the differing plaintext"
 fi
 
+# An .enc that does not decrypt: both print one [error] line with the file
+# name only, never the sops stderr (a MAC mismatch prints two unkeyed SHA-512
+# digests of the plaintext). The file sorts last, so the run reaches it.
+for impl in go bash; do
+  printf '{"data":"ENC[fake]","sops":{}}' > "${WORK}/sec-${impl}/.secrets/Secret.zz.default.BAD.enc"
+done
+sec_check secrets decrypt
+if ! grep -qx '\[error\] Failed to decrypt Secret.zz.default.BAD.enc' "${WORK}/bash.err" \
+  || grep -v '^\[' "${WORK}/bash.err" | grep -q .; then
+  fail "secrets decrypt of a bad .enc: not exactly the [error] line"
+fi
+for impl in go bash; do
+  rm -f "${WORK}/sec-${impl}/.secrets/Secret.zz.default.BAD.enc" "${WORK}/sec-${impl}/.secrets/Secret.zz.default.BAD"
+done
+
 report

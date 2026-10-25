@@ -114,6 +114,21 @@ require_tools() {
   assert_output '[error] Failed to decrypt Secret.app.default.K.enc'
 }
 
+# The same on the main decrypt path (no plaintext): the sops stderr is
+# discarded there too, and the line names the file only (as Go).
+@test "secrets decrypt: a failed decrypt prints no sops digest" {
+  printf '{"data":"ENC[fake]","sops":{}}' > "${PATH_SECRETS}/Secret.app.default.K.enc"
+  sops() {
+    echo "MAC mismatch. File has 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08, computed 60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752" >&2
+    return 1
+  }
+  export -f sops
+  export SOPS_AGE_KEY="stub-identity"
+  run secrets::decrypt < /dev/null
+  assert_failure
+  assert_output '[error] Failed to decrypt Secret.app.default.K.enc'
+}
+
 # A kept plaintext that cannot be read is named as such, not as a decrypt
 # failure (and the run does not die on a bare redirection error).
 @test "secrets decrypt: an unreadable kept plaintext is named" {

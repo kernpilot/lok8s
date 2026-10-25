@@ -599,10 +599,9 @@ func (c *Context) Decrypt(sshKey string) error {
 			}
 		}
 		if err != nil {
-			// The bash path surfaces the sops CLI's own stderr before the
-			// [error] line; the library error stands in for it. It never
-			// carries key material.
-			fmt.Fprintln(c.ErrOut, err)
+			// The [error] line names the file only. The bash path discards
+			// the sops CLI's stderr: a MAC mismatch prints two unkeyed
+			// SHA-512 digests of the plaintext. Both print this one line.
 			ui.ErrorTo(c.ErrOut, "Failed to decrypt %s", base)
 			return ErrHandled
 		}

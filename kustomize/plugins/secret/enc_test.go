@@ -177,6 +177,16 @@ passwd:
 secretRef:
   DB: db/PASSWORD
 `, "Secret.db.default.PASSWORD", nil},
+		{"passwd new, template secretRef target encrypted-only", `apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata: {name: app, namespace: default}
+passwd:
+  A: 32
+template:
+  out:
+    pattern: "pw={pw}"
+    secretRef: { pw: db/PASSWORD }
+`, "Secret.db.default.PASSWORD", nil},
 		{"leaf key new, caRef CA encrypted-only", `apiVersion: secrets.lok8s.dev/v1
 kind: Secret
 metadata: {name: leaf, namespace: default}
@@ -197,6 +207,40 @@ cert:
 			}
 			if after := listing(t, store); after != before {
 				t.Errorf("the store changed:\nbefore %s\nafter  %s", before, after)
+			}
+		})
+	}
+}
+
+// The check reads the exact entries the spec uses, never a name prefix. A
+// prefix matched another Secret (Secret a.b in namespace c is stored as
+// Secret.a.b.c.<key>, under the prefix of Secret a in namespace b) and the
+// stale .enc of a key the spec no longer has. Neither stops the build.
+func TestRun_ExactEntriesOnly(t *testing.T) {
+	cases := []struct {
+		name, spec, otherEnc, wrote string
+	}{
+		{"another Secret under the same name prefix", `apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata: {name: a, namespace: b}
+passwd:
+  X: 32
+`, "Secret.a.b.c.KEY", "Secret.a.b.X"},
+		{"a stale key the spec no longer has", `apiVersion: secrets.lok8s.dev/v1
+kind: Secret
+metadata: {name: db, namespace: default}
+passwd:
+  NEW: 32
+`, "Secret.db.default.OLD", "Secret.db.default.NEW"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store := encStore(t, c.otherEnc)
+			if _, err := runEntry(t, []byte(c.spec), map[string]string{"PATH_SECRETS": store}); err != nil {
+				t.Fatalf("err = %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(store, c.wrote)); err != nil {
+				t.Errorf("%s not generated: %v", c.wrote, err)
 			}
 		})
 	}

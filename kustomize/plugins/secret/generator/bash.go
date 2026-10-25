@@ -160,6 +160,10 @@ func hashEntry(entry specpkg.BashEntry) string {
 }
 
 // shaFileName returns the .sha filename for a bash entry.
+// ShaFileName is shaFileName for the plugin's preflight (secret.Plugin.Build):
+// the store file of a bash: entry's approval hash.
+func ShaFileName(secret, namespace, key string) string { return shaFileName(secret, namespace, key) }
+
 func shaFileName(secret, namespace, key string) string {
 	return fmt.Sprintf("Secret.%s.%s.%s.sha", secret, namespace, key)
 }

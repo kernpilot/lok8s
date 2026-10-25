@@ -88,13 +88,14 @@ func TestDecryptMACMismatchPrintsNoDigest(t *testing.T) {
 		t.Errorf("compare path stderr = %q", errOut.String())
 	}
 
-	// The decrypt path (no plaintext): the library error, still no digest.
+	// The decrypt path (no plaintext): the same one line, no library error
+	// (bash discards the sops stderr there too).
 	os.Remove(store + "/Secret.app.default.K")
 	errOut.Reset()
 	if err := c.Decrypt("/nonexistent-ssh-key"); err == nil {
 		t.Fatal("a MAC mismatch decrypted")
 	}
-	if hexRun.MatchString(errOut.String()) || errOut.Len() == 0 {
+	if errOut.String() != "[error] Failed to decrypt Secret.app.default.K.enc\n" {
 		t.Errorf("decrypt path stderr = %q", errOut.String())
 	}
 	if _, err := os.Stat(store + "/Secret.app.default.K"); err == nil {

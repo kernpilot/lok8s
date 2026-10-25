@@ -119,46 +119,96 @@ func (p *Plugin) Build(env func(string) (string, bool), fileRoot string) (*plugi
 }
 
 // preflight refuses the run before any generator reads or writes the store
-// when an entry the Secret uses has its .enc but no plaintext (B425): every
-// entry of this Secret, each secretRef target and the caRef CA store. A
+// when an entry the Secret uses has its .enc but no plaintext (B425). A
 // refusal in the middle of the run (an earlier key generated, a later key
-// refused) would leave the store half-written. An `update: true` key (env,
-// bash) is not checked: the generator writes it whatever the store holds.
+// refused) would leave the store half-written. It checks the exact entries
+// (usedEntries), never a name prefix: a prefix also matched another Secret
+// (Secret a.b in namespace c shares "Secret.a.b." with Secret a in b) and
+// stale .enc files of keys the spec no longer has.
 func (p *Plugin) preflight(dir string) error {
-	ns := p.spec.Metadata.Namespace
-	name := p.spec.Metadata.Name
-	overwrite := map[string]bool{}
-	for k, e := range p.spec.Env {
-		if e.Update {
-			overwrite[cache.FormatName(name, ns, k)] = true
-		}
-	}
-	for k, e := range p.spec.Bash {
-		if e.Update {
-			overwrite[cache.FormatName(name, ns, k)] = true
-		}
-	}
-	if err := cache.FirstEncryptedOnly(dir, cache.FormatName(name, ns, ""), overwrite); err != nil {
-		return err
-	}
-	refs := make([]string, 0, len(p.spec.SecretRef))
-	for k := range p.spec.SecretRef {
-		refs = append(refs, k)
-	}
-	sort.Strings(refs)
-	for _, k := range refs {
-		e := p.spec.SecretRef[k]
-		if err := cache.EncryptedOnly(dir, cache.FormatName(e.Secret, e.EffectiveNamespace(ns), e.Key)); err != nil {
-			return err
-		}
-	}
-	if p.spec.Cert != nil && p.spec.Cert.CARef != "" {
-		caName, caNs := generator.ParseCARef(p.spec.Cert.CARef, ns)
-		if err := cache.FirstEncryptedOnly(dir, cache.FormatName(caName, caNs, ""), nil); err != nil {
+	for _, name := range p.usedEntries() {
+		if err := cache.EncryptedOnly(dir, name); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// usedEntries lists the store entries the Secret's generators read or
+// write, in spec order: the cached keys of this Secret (env, passwd, key,
+// template, bash and its .sha, htpasswd, cert), each secretRef target (also
+// the template secretRef sub-sections) and the caRef CA. An `update: true`
+// key (env, bash) is left out: the generator writes it whatever the store
+// holds. literals, b64 and file read no store.
+func (p *Plugin) usedEntries() []string {
+	name, ns := p.spec.Metadata.Name, p.spec.Metadata.Namespace
+	own := func(k string) string { return cache.FormatName(name, ns, k) }
+	var out []string
+	for _, k := range sortedKeys(p.spec.Env) {
+		if !p.spec.Env[k].Update {
+			out = append(out, own(k))
+		}
+	}
+	for _, k := range sortedKeys(p.spec.Passwd) {
+		out = append(out, own(k))
+	}
+	for _, k := range sortedKeys(p.spec.Key) {
+		out = append(out, own(k))
+	}
+	for _, k := range sortedKeys(p.spec.Template) {
+		out = append(out, own(k))
+		t := p.spec.Template[k]
+		for _, ref := range sortedKeys(t.SecretRef) {
+			r := t.SecretRef[ref]
+			if r.Key == "" {
+				continue // the generator refuses it with its own message
+			}
+			secret, rns := r.Secret, r.Namespace
+			if secret == "" {
+				secret = name
+			}
+			if rns == "" {
+				rns = ns
+			}
+			out = append(out, cache.FormatName(secret, rns, r.Key))
+		}
+	}
+	for _, k := range sortedKeys(p.spec.Bash) {
+		if !p.spec.Bash[k].Update {
+			out = append(out, own(k))
+		}
+		out = append(out, generator.ShaFileName(name, ns, k))
+	}
+	for _, k := range sortedKeys(p.spec.SecretRef) {
+		e := p.spec.SecretRef[k]
+		out = append(out, cache.FormatName(e.Secret, e.EffectiveNamespace(ns), e.Key))
+	}
+	for _, k := range sortedKeys(p.spec.Htpasswd) {
+		out = append(out, own(k+".username"), own(k+".password"), own(k+".bcrypt"))
+	}
+	if c := p.spec.Cert; c != nil {
+		if c.CA {
+			out = append(out, own("ca.key"), own("ca.crt"))
+		}
+		if c.CARef != "" {
+			caName, caNs := generator.ParseCARef(c.CARef, ns)
+			out = append(out, cache.FormatName(caName, caNs, "ca.key"), cache.FormatName(caName, caNs, "ca.crt"))
+		}
+		if len(c.Hosts) > 0 {
+			out = append(out, own("tls.key"), own("tls.crt"))
+		}
+	}
+	return out
+}
+
+// sortedKeys returns the map's keys in byte order.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // Emit serializes the merged entries as a Kubernetes Secret resource.

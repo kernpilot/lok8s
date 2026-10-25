@@ -175,25 +175,3 @@ func TestDanglingPlaintextSymlinkIsNotAPlaintext(t *testing.T) {
 		t.Errorf("the symlink was replaced: %v", err)
 	}
 }
-
-// FirstEncryptedOnly reports the first encrypted-only entry of a prefix in
-// byte order and skips the names it is told to (the update: true keys).
-func TestFirstEncryptedOnly(t *testing.T) {
-	dir := t.TempDir()
-	fakeEnc(t, dir, "Secret.app.default.B")
-	fakeEnc(t, dir, "Secret.app.default.C")
-	fakeEnc(t, dir, "Secret.other.default.A")
-	if err := os.WriteFile(filepath.Join(dir, "Secret.app.default.C"), []byte("v"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var eo *EncryptedOnlyError
-	if err := FirstEncryptedOnly(dir, "Secret.app.default.", nil); !errors.As(err, &eo) || eo.Name != "Secret.app.default.B" {
-		t.Errorf("err = %v, want Secret.app.default.B", err)
-	}
-	if err := FirstEncryptedOnly(dir, "Secret.app.default.", map[string]bool{"Secret.app.default.B": true}); err != nil {
-		t.Errorf("skip: err = %v", err)
-	}
-	if err := FirstEncryptedOnly(filepath.Join(dir, "missing"), "Secret.", nil); err != nil {
-		t.Errorf("missing dir: err = %v", err)
-	}
-}
