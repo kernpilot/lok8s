@@ -28,6 +28,10 @@
 #
 # The binding is the chart's own object (same name, same roleRef), so a
 # cluster that still carries it from an earlier version needs no change.
+#
+# To opt out, removing the entry from spec.bootstrap is not enough: the
+# bootstrap applies without prune, so the binding stays. Also run
+# `kubectl delete clusterrolebinding system-upgrade-controller`.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

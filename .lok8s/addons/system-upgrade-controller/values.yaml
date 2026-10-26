@@ -44,8 +44,10 @@ systemUpgradeController:
     tag: v0.20.1@sha256:aaf4dbf640579a6abfa6390aab927ee664f06814e33c371e69df9dd451ca153a
 
 # The image of the cordon and drain init containers that the controller adds
-# to a Plan's Job (the ConfigMap keys SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE and
-# SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE_WINDOWS; this index has no Windows image).
+# to a Plan's Job (the ConfigMap key SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE). The
+# chart writes the same image into SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE_WINDOWS,
+# and this index has no Windows image: a cordon or drain on a Windows node
+# still fails to pull it. The pin does not change that.
 kubectl:
   image:
     repository: rancher/kuberlr-kubectl

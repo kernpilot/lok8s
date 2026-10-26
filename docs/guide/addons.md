@@ -1024,31 +1024,70 @@ The `system-upgrade-controller` addon installs Rancher's
 system-upgrade-controller (SUC). SUC runs each `Plan` as one Job per node.
 The Rancher chart binds the controller's ServiceAccount
 (`cattle-system/system-upgrade-controller`) to `cluster-admin`. The addon
-deletes that binding from its render and binds three roles instead
-(`rbac.yaml`). A comment on each rule names the source line that needs
-it, and `internal/addons/suc_rbac_test.go` fails when a rule grants more or
-less than those calls need.
+deletes that binding from its render and binds four roles instead
+(`rbac.yaml`). A comment on each rule names the source line that needs it.
+`internal/addons/suc_rbac_test.go` holds the same list of calls, written by
+hand from the source, and fails when a rule grants more or less than those
+calls need. The list is not a runtime proof: a call that the list misses,
+the test misses too.
 
 | Role | Rules | What uses them |
 |---|---|---|
-| ClusterRole `system-upgrade-controller` | `customresourcedefinitions` list, create; get and update on `plans.upgrade.cattle.io` | the controller creates or updates its Plan CRD on every start. The chart ships no CRD |
+| ClusterRole `lok8s-system-upgrade-controller` | `customresourcedefinitions` list, create; get and update on `plans.upgrade.cattle.io` | the controller creates or updates its Plan CRD on every start. The chart ships no CRD |
 | | `namespaces` get on `kube-system` | the cluster ID, read on start |
 | | `nodes` list, watch, update | the node cache; the Plan label and the uncordon after a Job completes |
-| | `jobs` list | the apply engine lists the Plan Jobs (see below) |
-| | `events` create, patch | events on Plans (`cattle-system`) and on the node (`default`) |
-| Role `system-upgrade-controller` (`cattle-system`) | `plans` get, list, watch; `plans/status` update | the Plan cache and the Plan status. The controller never writes a Plan's spec |
-| | `jobs` get, list, watch, create, patch, delete | the Plan Jobs |
+| | `jobs` list | the apply engine lists the Plan Jobs in all namespaces (see below) |
+| Role `lok8s-system-upgrade-controller` (`cattle-system`) | `plans` get, list, watch; `plans/status` update | the Plan cache and the Plan status. The controller never writes a Plan's spec |
+| | `jobs` get, watch, create, patch, delete | the Plan Jobs (the list comes from the ClusterRole) |
 | | `secrets` list, watch | the Secret cache. Every Plan needs it, not only a Plan with `spec.secrets`: the controller handles no Plan before the cache syncs |
 | | `leases` create; get and update on `system-upgrade-controller` | leader election |
+| | `events` create, patch | events on Plans |
+| Role `lok8s-system-upgrade-controller-events` (`default`) | `events` create, patch | events on the node, which land in `default` |
+| ClusterRole `lok8s-system-upgrade-controller-drainer` | see [Cordon and drain](#cordon-and-drain) | the cordon and drain containers of a Plan's Job |
 
-The controller gets no access to Secrets outside `cattle-system`, to pods,
-to RBAC or to any workload. It watches Plans in `cattle-system` only.
+Each object has the prefix `lok8s-`. Upstream SUC manifests and the
+Rancher chart use the names `system-upgrade`, `system-upgrade-drainer`,
+`system-upgrade-controller`, `system-upgrade-controller-drainer` and
+`system-upgrade-controller-psp`. A binding's roleRef cannot change, so a
+binding that reused one of those names would fail to apply on a cluster
+that still carries the old one.
 
-One grant is wider than the work: `jobs` list in all namespaces. The apply
-engine of rancher/wrangler lists the Plan's Jobs by label in every
-namespace, because SUC sets no lister namespace. That request returns the
-spec of every Job in the cluster. The controller creates and deletes Jobs
-only in `cattle-system`.
+The controller also reads API discovery. No rule in the addon grants it:
+the default ClusterRoleBinding `system:discovery` gives it to every
+authenticated user. A cluster that removes that binding breaks the
+controller.
+
+#### What the ServiceAccount can still do
+
+RBAC sees one ServiceAccount, not the pod that uses its token. The
+controller pod, and every Plan Job that runs as
+`system-upgrade-controller`, get all four roles together. With that token
+a holder can:
+
+- read the content of every Secret in `cattle-system` (list, watch);
+- create Jobs in `cattle-system` with any pod template and any
+  ServiceAccount of that namespace. The pods can be privileged and mount
+  host paths, unless an admission policy stops them. SUC itself mounts the
+  host root into its upgrade pods. Root on a node, and the credentials on
+  that node, stay in reach;
+- change every Node (`update`, and `patch` through the drainer): labels,
+  taints, `spec.unschedulable`. RBAC cannot limit the update to the fields
+  SUC writes;
+- through the drainer: read every pod, and evict or delete any pod in any
+  namespace;
+- list every Job in the cluster. The controller lists with a label
+  selector, but the grant has none;
+- create any CustomResourceDefinition, and change the Plan CRD;
+- write the Plan status, the Lease and events in `cattle-system` and
+  `default`.
+
+What it lost against `cluster-admin`: every write to RBAC (roles and
+bindings), impersonation, token requests for other ServiceAccounts,
+Secret reads outside `cattle-system`, pod `create`, `exec` and `attach`,
+and every write outside Nodes, pods (delete and evict), Jobs, Leases,
+events, the Plan status and CRDs. This narrows what a stolen token can do
+in one step. It does not make host-level escalation impossible: see the
+Job item above.
 
 #### Cordon and drain
 
@@ -1056,8 +1095,8 @@ The controller never cordons or drains a node. A Plan with `spec.cordon` or
 `spec.drain` gets an init container that runs `kubectl cordon` or
 `kubectl drain` as the Plan's ServiceAccount (`spec.serviceAccountName`).
 For a Plan that runs as the controller's ServiceAccount, the addon binds the
-ClusterRole `system-upgrade-controller-drainer`
-(ClusterRoleBinding `system-upgrade-drainer`):
+ClusterRole `lok8s-system-upgrade-controller-drainer` (ClusterRoleBinding of
+the same name):
 
 | Plan feature | Rules it needs |
 |---|---|
@@ -1066,8 +1105,10 @@ ClusterRole `system-upgrade-controller-drainer`
 | `spec.drain` with `ignoreDaemonSets` (the default) | also `daemonsets` get |
 | `spec.drain.disableEviction: true` | also `pods` delete |
 
-These rules apply in every namespace. When your Plans use their own
-ServiceAccount, delete `system-upgrade-drainer` from your copy of the addon
+These rules apply to every node and to pods in every namespace, and the
+controller's token holds them too. When your Plans use their own
+ServiceAccount, delete the ClusterRoleBinding
+`lok8s-system-upgrade-controller-drainer` from your copy of the addon
 (`.lok8s/addons/system-upgrade-controller/rbac.yaml`) and from the cluster,
 and bind the ClusterRole to that ServiceAccount in the target that holds
 the Plans:
@@ -1077,7 +1118,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: os-upgrade-drainer
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: system-upgrade-controller-drainer }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: lok8s-system-upgrade-controller-drainer }
 subjects:
   - kind: ServiceAccount
     name: <the Plan's ServiceAccount>
@@ -1085,18 +1126,22 @@ subjects:
 ```
 
 A Plan without `spec.cordon` and `spec.drain` needs none of these rules.
+A Plan author picks `spec.serviceAccountName` freely, so a separate
+ServiceAccount is no trust boundary against a Plan author: an admission
+policy has to limit who writes Plans.
 
 ::: warning Upgrade note: update the ejected copy, delete the old binding once
 `lo` ejects an addon into `.lok8s/addons/<name>/` on first use and never
 overwrites it. A project that bootstrapped this addon before runs
 `lo assets update addons/system-upgrade-controller` (or takes `rbac.yaml`,
-the `patches:` block and the image pins into its modified copy by hand).
+the `patches:` block, the kustomization without its `namespace:` line and
+the image pins into its modified copy by hand).
 
 The bootstrap applies without prune. A cluster that ran an earlier version
 of the addon keeps `ClusterRoleBinding/system-upgrade-controller` (roleRef
 `cluster-admin`), and the controller keeps cluster-admin through it. Apply
 the bootstrap first (`lo up`, `lo provision` or `lo bootstrap`): it adds the
-three new bindings. Then delete the old binding and check the far end:
+four new bindings. Then delete the old binding and check the far end:
 
 ```console
 $ kubectl delete clusterrolebinding system-upgrade-controller
@@ -1109,10 +1154,21 @@ $ kubectl auth can-i update leases/system-upgrade-controller -n cattle-system --
 yes
 ```
 
-A GitOps apply with prune removes the old binding itself when the binding
-is in its inventory. Do not delete it
-before the new bindings exist: the controller then loses its access, logs
-`forbidden` errors and handles no Plan until they arrive.
+The `can-i` lines are spot checks. Until now cluster-admin hid any call
+the new roles miss. Restart the controller, run one Plan that does what
+your Plans do (cordon, drain, Secrets), and look for `forbidden` in the
+log:
+
+```console
+$ kubectl -n cattle-system rollout restart deployment/system-upgrade-controller
+$ kubectl -n cattle-system logs deployment/system-upgrade-controller | grep -i forbidden
+```
+
+A cluster that bootstraps `system-upgrade-controller-cluster-admin` skips
+the delete: that addon owns the binding. A GitOps apply with prune removes
+the old binding itself when the binding is in its inventory. Do not delete
+it before the new bindings exist: the controller then loses its access,
+logs `forbidden` errors and handles no Plan until they arrive.
 :::
 
 #### When you need cluster-admin back
@@ -1137,6 +1193,13 @@ controller logs `forbidden` errors before the addon follows. For the Plan
 case, a better fix is a ServiceAccount of its own with the grants it needs.
 :::
 
+To opt out again, removing the entry from `spec.bootstrap` is not enough:
+the bootstrap applies without prune, so the binding stays. Delete it too:
+
+```console
+$ kubectl delete clusterrolebinding system-upgrade-controller
+```
+
 #### Images
 
 `values.yaml` pins both images by digest: the controller
@@ -1147,7 +1210,10 @@ the digest, so a re-pushed tag changes nothing. A mirror that you set
 through `global.cattle.systemDefaultRegistry` must keep the digests. On a
 bump, change the tag and the digest together, then refresh the render
 fixture (`internal/addons/testdata/system-upgrade-controller/`, its header
-says how).
+says how). The kubectl image has no Windows variant, and the chart uses it
+for Windows nodes too: a cordon or drain on a Windows node still fails to
+pull it. The images a Plan names for its own containers are not pinned
+here.
 
 ## Writing a custom addon
 

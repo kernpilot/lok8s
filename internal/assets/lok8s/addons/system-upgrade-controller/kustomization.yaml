@@ -14,8 +14,11 @@
 #   - the upgrade-Job ServiceAccount/RBAC the Plans reference (distinct from the
 #     chart's own controller ServiceAccount).
 #
-# `namespace: cattle-system` is applied as a transformer because every resource
-# in this addon (chart-rendered + the namespace) lives in cattle-system. We ship
+# No `namespace:` transformer: it would move every namespaced object into
+# cattle-system, and rbac.yaml needs one Role in `default` (the node events).
+# The chart hardcodes cattle-system in every template, and rbac.yaml names
+# the namespace of each object. TestSystemUpgradeControllerFixtureMatchesChart
+# fails when a chart object comes without a namespace. We ship
 # namespace.yaml here (the chart hardcodes the ns but does not create it) so the
 # addon owns the controller's home namespace; the glue target's Plans/RBAC reuse
 # it. (Unlike monitoring/tempo, the ns is NOT owned by a target here — the
@@ -42,8 +45,6 @@ labels:
       lok8s.dev/name: system-upgrade-controller
       lok8s.dev/type: system
       lok8s.dev/category: infrastructure
-
-namespace: cattle-system
 
 generators:
   - chart.yaml

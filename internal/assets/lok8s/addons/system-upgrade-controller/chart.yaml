@@ -3,9 +3,8 @@
 # per-node Job. A generic FRAMEWORK ADDON: this installs ONLY the controller.
 # The chart ships no CRD: the controller creates its Plan CRD when it starts
 # (the RBAC for that is in rbac.yaml). The actual upgrade Plans (what/when to
-# patch) are cluster GLUE and
-# live in the consuming cluster (NOT here) — same shape as cnpg-operator
-# (operator+CRD here, the Cluster CRs in the consumer).
+# patch) are cluster GLUE and live in the consuming cluster (NOT here) — same
+# shape as cnpg-operator (operator+CRD here, the Cluster CRs in the consumer).
 #
 # The chart hardcodes namespace `cattle-system` in every template, so the
 # ChartRenderer namespace, the kustomization `namespace:` transformer, and the
