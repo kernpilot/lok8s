@@ -1,7 +1,9 @@
 # khelm chart spec for Rancher's system-upgrade-controller — the in-cluster OS
 # patcher. It watches upgrade.cattle.io/v1 Plans and runs the patch as a
-# per-node Job. A generic FRAMEWORK ADDON: this installs ONLY the controller +
-# its CRD. The actual upgrade Plans (what/when to patch) are cluster GLUE and
+# per-node Job. A generic FRAMEWORK ADDON: this installs ONLY the controller.
+# The chart ships no CRD: the controller creates its Plan CRD when it starts
+# (the RBAC for that is in rbac.yaml). The actual upgrade Plans (what/when to
+# patch) are cluster GLUE and
 # live in the consuming cluster (NOT here) — same shape as cnpg-operator
 # (operator+CRD here, the Cluster CRs in the consumer).
 #

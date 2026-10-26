@@ -1,0 +1,42 @@
+# system-upgrade-controller-cluster-admin — opt-in, NOT RECOMMENDED. Gives
+# the system-upgrade-controller ServiceAccount (cattle-system) back the
+# chart's ClusterRoleBinding to cluster-admin. The `system-upgrade-controller`
+# addon removes that binding and grants only what the controller calls (see
+# ../system-upgrade-controller/rbac.yaml for the per-rule evidence).
+#
+# The narrowed RBAC covers the controller and the cordon and drain steps of
+# a Plan whose Job runs as the controller's ServiceAccount. Bootstrap this
+# addon only when one of these applies:
+#
+#   - a Plan's Job runs as `system-upgrade-controller` and its upgrade
+#     container calls the Kubernetes API for more than cordon and drain;
+#   - a newer controller version calls the API in a way rbac.yaml does not
+#     cover yet (the controller logs `forbidden` errors), until the addon
+#     follows.
+#
+# With it, the controller pod, and every Plan Job that runs as its
+# ServiceAccount, can do anything in the cluster again: read every Secret,
+# create pods on any node, and change any RBAC. A better fix for the first
+# case is a ServiceAccount of its own for that Plan, with the grants it
+# needs, in the target that holds the Plan.
+#
+#   spec:
+#     bootstrap:
+#       - system-upgrade-controller
+#       - system-upgrade-controller-cluster-admin:
+#           dependsOn: [system-upgrade-controller]
+#
+# The binding is the chart's own object (same name, same roleRef), so a
+# cluster that still carries it from an earlier version needs no change.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: system-upgrade-controller-cluster-admin
+      lok8s.dev/type: system
+      lok8s.dev/category: infrastructure
+
+resources:
+  - clusterrolebinding.yaml
