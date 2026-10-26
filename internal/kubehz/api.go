@@ -125,15 +125,16 @@ func newAPIError(res *httpResult) *apiError {
 // retryAfter reads a Retry-After header in the delta-seconds form ("30"),
 // the form the kubehz api sends. ok is false for no header and for any
 // other form, an HTTP-date included: the bash twin reads the same form
-// only, and lo then does not wait. More than six digits read as 999999
-// seconds, so a huge value cannot overflow. The caller caps the wait.
+// only, and lo then does not wait. More than retryAfterMaxDigits digits
+// read as retryAfterClamp seconds, so a huge value cannot overflow. The
+// caller caps the wait.
 func retryAfter(h http.Header) (d time.Duration, ok bool) {
 	v := strings.TrimSpace(h.Get("Retry-After"))
 	if v == "" || strings.Trim(v, "0123456789") != "" {
 		return 0, false
 	}
-	if len(v) > 6 {
-		v = "999999"
+	if len(v) > retryAfterMaxDigits {
+		v = retryAfterClamp
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
@@ -145,9 +146,26 @@ func retryAfter(h http.Header) (d time.Duration, ok bool) {
 // The register retry bound (#312). A register call that gets 503 or 429
 // with Retry-After tries again: at most registerTries calls in total, and
 // one wait is at most registerMaxWait, so a call waits at most two minutes.
+//
+// The bound holds for each call, not for the whole registration. A mode
+// whose last answer is a refusal lo does not try again (a 502 after two
+// 503s, say) falls back to the next mode, and that mode can wait again. So
+// the worst case is three modes with two waits each: six minutes of
+// waiting, plus up to the 2-minute response-header timeout of httpClient
+// for each of the nine requests (bash curl has no timeout). A shared budget
+// would need state across the bash subshells of the frozen tree for a case
+// where the platform changes its answer in the middle of a call.
+//
+// The bash twin (kubehz::register_post) holds the same values;
+// TestRegisterRetryBoundMatchesBash pins them.
 const (
 	registerTries   = 3
 	registerMaxWait = 60 * time.Second
+
+	// retryAfterMaxDigits and retryAfterClamp: the overflow guard of
+	// retryAfter.
+	retryAfterMaxDigits = 6
+	retryAfterClamp     = "999999"
 )
 
 // registerUnavailableError is a register call that still got 503 or 429 with
@@ -161,6 +179,24 @@ type registerUnavailableError struct {
 
 func (e *registerUnavailableError) Error() string {
 	return "kubehz: the platform did not register the cluster: http status " + strconv.Itoa(e.Status) + optSuffix(" ", e.Code)
+}
+
+// registerRefusedError is a register call that got a refusal (status >= 400)
+// that lo does not try again. The fall back warnings name its status and
+// code; a transport failure, or a refusal from the Hetzner Cloud api, is not
+// one, the same as in the bash twin.
+type registerRefusedError struct{ *apiError }
+
+func (e *registerRefusedError) Unwrap() error { return e.apiError }
+
+// refusedSuffix is " (HTTP <status>[ <code>])" for a registerRefusedError,
+// else "": the part of a fall back warning that names the refusal.
+func refusedSuffix(err error) string {
+	var r *registerRefusedError
+	if !errors.As(err, &r) {
+		return ""
+	}
+	return " (HTTP " + strconv.Itoa(r.Status) + optSuffix(" ", r.Code) + ")"
 }
 
 // unavailable reports a refusal the server asks to try again later: 503
@@ -180,8 +216,11 @@ func (c *Context) registerPost(ctx context.Context, apiURL string, auth bearer, 
 	for try := 1; ; try++ {
 		out, err := c.fetch(ctx, "POST", apiURL+"/api/clusters/register", auth, body)
 		var ae *apiError
-		if err == nil || !errors.As(err, &ae) || !ae.unavailable() {
+		if err == nil || !errors.As(err, &ae) {
 			return out, err
+		}
+		if !ae.unavailable() {
+			return nil, &registerRefusedError{ae}
 		}
 		if try >= registerTries {
 			return nil, &registerUnavailableError{Status: ae.Status, Code: ae.Code, Tries: try}

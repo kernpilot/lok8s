@@ -155,30 +155,32 @@ func (c *Context) RegisterCluster(ctx context.Context, cfg *Config, domain, clus
 }
 
 // registerStop decides whether a failed register step ends the
-// registration instead of a fall back to the next flow. It returns the
-// error to return, or nil to fall back. The registration stops when the
-// context ended (Ctrl-C), and when the platform stayed unavailable through
-// the retry bound: the next flow posts to the same endpoint and gets the
-// same answer, and a cluster without its registration must not look like a
-// success. next is the recovery command without the leading `lo`.
-func (c *Context) registerStop(ctx context.Context, err error, domain, next string) error {
+// registration (stop, with the error to return) or falls back to the next
+// flow (no stop). The registration stops when the context ended (Ctrl-C),
+// and when the platform stayed unavailable through the retry bound: the
+// next flow posts to the same endpoint and gets the same answer, and a
+// cluster without its registration must not look like a success. next is
+// the recovery command without the leading `lo`.
+func (c *Context) registerStop(ctx context.Context, err error, domain, next string) (stop bool, stopErr error) {
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
+		return true, ctxErr
 	}
 	var u *registerUnavailableError
 	if !errors.As(err, &u) {
-		return nil
+		return false, nil
 	}
 	msg := fmt.Sprintf("kubehz: the platform did not register %s (HTTP %d%s, %d tries).", domain, u.Status, optSuffix(" ", u.Code), u.Tries)
 	// Piped, the [error] line names the command: the contract both
-	// implementations print. On a terminal the command goes on a next: line.
+	// implementations print. On a terminal the command goes on a next:
+	// line instead. ui.ErrorNext prints one text in both forms, so the
+	// piped text, which carries the command, is chosen here.
 	w := c.errOut()
 	if ui.For(w).TTY {
 		ui.ErrorNext(w, next, "when the platform is available again", "%s", msg)
 	} else {
 		ui.ErrorTo(w, "%s Run 'lo %s' when the platform is available again.", msg, next)
 	}
-	return ui.Handled(err)
+	return true, ui.Handled(err)
 }
 
 // registerCluster is RegisterCluster with the recovery command that a
@@ -203,10 +205,10 @@ func (c *Context) registerCluster(ctx context.Context, cfg *Config, domain, clus
 		if err == nil {
 			return nil
 		}
-		if stop := c.registerStop(ctx, err, domain, next); stop != nil {
-			return stop
+		if stop, stopErr := c.registerStop(ctx, err, domain, next); stop {
+			return stopErr
 		}
-		c.warnf("kubehz direct claim failed for %s; falling back to the anonymous registration flow", domain)
+		c.warnf("kubehz direct claim failed for %s%s; falling back to the anonymous registration flow", domain, refusedSuffix(err))
 	}
 
 	if c.getenv("HCLOUD_TOKEN") != "" {
@@ -214,10 +216,10 @@ func (c *Context) registerCluster(ctx context.Context, cfg *Config, domain, clus
 		if err == nil {
 			return nil
 		}
-		if stop := c.registerStop(ctx, err, domain, next); stop != nil {
-			return stop
+		if stop, stopErr := c.registerStop(ctx, err, domain, next); stop {
+			return stopErr
 		}
-		c.warnf("kubehz claim-key registration failed for %s; falling back to the legacy fingerprint announce", domain)
+		c.warnf("kubehz claim-key registration failed for %s%s; falling back to the legacy fingerprint announce", domain, refusedSuffix(err))
 	}
 
 	fingerprint, err := c.SSHFingerprint(ctx, clusterYAML)
@@ -229,10 +231,10 @@ func (c *Context) registerCluster(ctx context.Context, cfg *Config, domain, clus
 	body, err := c.registerPost(ctx, apiURL, bearer{},
 		c.registerBody(domain, jsonPair{"domain", domain}, jsonPair{"fingerprint", fingerprint}))
 	if err != nil {
-		if stop := c.registerStop(ctx, err, domain, next); stop != nil {
-			return stop
+		if stop, stopErr := c.registerStop(ctx, err, domain, next); stop {
+			return stopErr
 		}
-		c.warnf("kubehz API request failed for %s, cluster will continue without kubehz integration", domain)
+		c.warnf("kubehz API request failed for %s%s, cluster will continue without kubehz integration", domain, refusedSuffix(err))
 		return nil
 	}
 	v, _ := parseJSON(body)

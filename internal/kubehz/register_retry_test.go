@@ -13,12 +13,17 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/kernpilot/lok8s/internal/testutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -116,6 +121,13 @@ func assertWaits(t *testing.T, w *waitRecorder, want ...time.Duration) {
 	}
 }
 
+// registeredLine is the success line of each mode for registeredBody.
+var registeredLine = map[string]string{
+	"legacy":    "kubehz: cluster 'test.kubehz.dev' registered (pending). Claim it in the dashboard:\n",
+	"bearer":    "kubehz: cluster 'test.kubehz.dev' registered and claimed to your account (cl-001).\n",
+	"claim-key": "kubehz: cluster 'test.kubehz.dev' registered (pending). Claim key 'kubehz-claim-test.kubehz.dev' uploaded to your Hetzner Cloud account.\n",
+}
+
 func TestRegisterRetriesA503WithRetryAfterThenSucceeds(t *testing.T) {
 	for _, mode := range []string{"legacy", "bearer", "claim-key"} {
 		t.Run(mode, func(t *testing.T) {
@@ -128,7 +140,7 @@ func TestRegisterRetriesA503WithRetryAfterThenSucceeds(t *testing.T) {
 			}
 			assertWaits(t, w, 30*time.Second)
 			mustContain(t, h.output(), "[warn] kubehz: the platform answered HTTP 503 REGISTRATION_UNAVAILABLE. Try 2 of 3 in 30s.")
-			mustContain(t, h.output(), "registered")
+			mustContain(t, h.out.String(), registeredLine[mode])
 			mustNotContain(t, h.output(), "falling back")
 			mustNotContain(t, h.output(), "[error]")
 		})
@@ -196,6 +208,16 @@ func TestRegisterRetriesA429WithRetryAfter(t *testing.T) {
 	mustContain(t, h.output(), "(HTTP 429 RATE_LIMITED, 3 tries)")
 }
 
+// ctxBlindTransport sends a request even when its context has ended: with
+// it, only registerPost's own stop keeps a request from going out after a
+// cancel (the default transport would refuse it and hide a loop that goes
+// on after the wait).
+type ctxBlindTransport struct{ rt http.RoundTripper }
+
+func (t ctxBlindTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return t.rt.RoundTrip(r.WithContext(context.Background()))
+}
+
 // Ctrl-C cancels the command context: the wait ends at once, nothing is
 // tried again, and nothing falls back. The context error comes back (the
 // cli maps it to the signal exit and prints nothing more).
@@ -203,6 +225,7 @@ func TestRegisterCancelDuringTheWait(t *testing.T) {
 	for _, mode := range []string{"legacy", "bearer"} {
 		t.Run(mode, func(t *testing.T) {
 			h, w := retryHarness(t, mode)
+			h.ctx.HTTP = &http.Client{Transport: ctxBlindTransport{h.srv.Client().Transport}}
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			w.onWait = cancel
@@ -233,9 +256,69 @@ func TestRegister503WithoutRetryAfterIsNotRetried(t *testing.T) {
 		t.Fatalf("register calls = %d, want 2 (direct claim, then the legacy announce, one try each)", n)
 	}
 	assertWaits(t, w)
-	mustContain(t, h.output(), "falling back to the anonymous registration flow")
-	mustContain(t, h.output(), "kubehz API request failed for test.kubehz.dev")
+	// The fall back warnings name the refusal (status and code).
+	mustContain(t, h.errOut.String(), "[warn] kubehz direct claim failed for test.kubehz.dev (HTTP 503); falling back to the anonymous registration flow\n")
+	mustContain(t, h.errOut.String(), "[warn] kubehz API request failed for test.kubehz.dev (HTTP 503), cluster will continue without kubehz integration\n")
 	mustNotContain(t, h.output(), "[error]")
+}
+
+// A refusal with a code names both; the claim key mode names it too, and a
+// transport failure names nothing.
+func TestRegisterFallBackWarningsNameTheRefusal(t *testing.T) {
+	h, _ := retryHarness(t, "claim-key")
+	scriptRegister(h, answer{400, "", `{"data":{"code":"BAD_REQUEST"}}`})
+	mustOK(t, h.ctx.RegisterCluster(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", loSpec(h)), h.output())
+	mustContain(t, h.errOut.String(), "[warn] kubehz claim-key registration failed for test.kubehz.dev (HTTP 400 BAD_REQUEST); falling back to the legacy fingerprint announce\n")
+	mustContain(t, h.errOut.String(), "[warn] kubehz API request failed for test.kubehz.dev (HTTP 400 BAD_REQUEST), cluster will continue without kubehz integration\n")
+
+	// A refusal from the Hetzner Cloud api (the key upload) is no register
+	// refusal: the bash twin cannot see its status, so neither names it.
+	h, _ = retryHarness(t, "claim-key")
+	scriptRegister(h, answer{200, "", registeredBody})
+	h.handle("POST /v1/ssh_keys", 403, `{"error":{"code":"forbidden"}}`)
+	mustOK(t, h.ctx.RegisterCluster(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", loSpec(h)), h.output())
+	mustContain(t, h.errOut.String(), "[warn] kubehz claim-key registration failed for test.kubehz.dev; falling back to the legacy fingerprint announce\n")
+
+	// A transport failure has no answer to name.
+	h, _ = retryHarness(t, "legacy")
+	h.srv.Close()
+	mustOK(t, h.ctx.RegisterCluster(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", loSpec(h)), h.output())
+	mustContain(t, h.errOut.String(), "[warn] kubehz API request failed for test.kubehz.dev, cluster will continue without kubehz integration\n")
+}
+
+// The bash twin (kubehz::register_post in the embedded tree) holds the same
+// bound, cap, overflow guard and code shape as the Go constants.
+func TestRegisterRetryBoundMatchesBash(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(testutil.RepoRoot(t), "internal", "assets", "lok8s", "libs", "kubehz", "main"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(raw)
+	start := strings.Index(src, "kubehz::register_post() (")
+	if start < 0 {
+		t.Fatal("kubehz::register_post not found in libs/kubehz/main")
+	}
+	body := src[start:]
+	body = body[:strings.Index(body, "\n)\n")]
+	find := func(re string) string {
+		t.Helper()
+		m := regexp.MustCompile(re).FindStringSubmatch(body)
+		if m == nil {
+			t.Fatalf("%s not found in kubehz::register_post", re)
+		}
+		return m[1]
+	}
+	for _, c := range []struct{ name, bash, goVal string }{
+		{"tries", find(`local -r tries=(\d+) `), strconv.Itoa(registerTries)},
+		{"max_wait", find(`max_wait=(\d+)\n`), strconv.Itoa(int(registerMaxWait / time.Second))},
+		{"max digits", find(`\(\( \$\{#ra\} <= (\d+) \)\)`), strconv.Itoa(retryAfterMaxDigits)},
+		{"clamp", find(`\|\| ra=(\d+)\n`), retryAfterClamp},
+		{"code shape", find(`\[\[ "\$\{code\}" =~ (\S+) \]\]`), problemCodeRe.String()},
+	} {
+		if c.bash != c.goVal {
+			t.Errorf("%s: bash %q != Go %q", c.name, c.bash, c.goVal)
+		}
+	}
 }
 
 // A huge Retry-After is capped at registerMaxWait for each wait, so a call

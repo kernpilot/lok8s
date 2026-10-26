@@ -12,8 +12,9 @@ One server for the two sections of the harness that need an api:
   calls of the claim-key mode (/v1/ssh_keys) get an empty key list and a
   created key. These routes take any credential. A register body for a
   domain in UNAVAILABLE gets that refusal instead, every time (#312): 503 or
-  429 with Retry-After 0 (so the retries do not wait), or a 503 without
-  Retry-After.
+  429 with a Retry-After of zero seconds (so the retries do not wait; "00"
+  checks that a leading zero reads as decimal), a 503 without Retry-After,
+  one with the date form, and one whose code is an escape sequence.
 
 Every request is appended to a log as one JSON line: the method, the path,
 the credential (none, the minted bearer, another bearer, or another scheme;
@@ -50,8 +51,10 @@ REGISTERED = {"id": "cl-parity", "registered": True, "claimed": True, "bindSecre
 # (status, Retry-After or None, code).
 UNAVAILABLE = {
     "busy-reg.dev": (503, "0", "REGISTRATION_UNAVAILABLE"),
-    "limit-reg.dev": (429, "0", "RATE_LIMITED"),
+    "limit-reg.dev": (429, "00", "RATE_LIMITED"),
     "bare-reg.dev": (503, None, "REGISTRATION_UNAVAILABLE"),
+    "date-reg.dev": (503, "Wed, 21 Oct 2026 07:28:00 GMT", "REGISTRATION_UNAVAILABLE"),
+    "odd-reg.dev": (503, "0", "\u001b[2JPWNED"),
 }
 
 SPACE = {
