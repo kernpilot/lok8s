@@ -1,0 +1,239 @@
+# The controller's RBAC. It replaces the chart's ClusterRoleBinding to
+# cluster-admin (the kustomization deletes that binding from the render).
+#
+# Every rule names the call that needs it. The sources are
+# rancher/system-upgrade-controller v0.20.1 (commit f1362a3) and the
+# libraries it calls at the versions in its go.mod: rancher/wrangler
+# v3.7.0-rc.1, rancher/lasso v0.2.9 and k8s.io/client-go v0.36.0. The cordon
+# and drain rules come from k8s.io/kubectl (pkg/drain, v0.36.2).
+# internal/addons/suc_rbac_test.go holds the same list of calls, written by
+# hand from that source, and fails when a rule grants more or less than
+# they need.
+#
+# The controller also reads API discovery (wrangler apply.go:166,
+# ServerResourcesForGroupVersion). No rule here grants it: the default
+# ClusterRoleBinding system:discovery gives it to every authenticated user.
+#
+# Every name has the prefix `lok8s-`. Upstream SUC manifests and the Rancher
+# chart use system-upgrade, system-upgrade-drainer, system-upgrade-controller,
+# system-upgrade-controller-drainer and system-upgrade-controller-psp. A
+# binding's roleRef cannot change, so a binding that reused one of those
+# names would fail to apply on a cluster that still carries the old one.
+#
+# Four parts:
+#   - ClusterRole lok8s-system-upgrade-controller: the controller's calls on
+#     cluster-scoped resources and across all namespaces.
+#   - Role lok8s-system-upgrade-controller (cattle-system): its calls in its
+#     own namespace. Its Plan, Secret and Job caches watch only this
+#     namespace (controller.go:96-116; lasso sharedinformerfactory.go:199-202),
+#     so the controller acts on Plans in cattle-system only.
+#   - Role lok8s-system-upgrade-controller-events (default): the events on
+#     the node, which land in `default`.
+#   - ClusterRole lok8s-system-upgrade-controller-drainer: cordon and drain.
+#     The controller does not call these. They are for the init containers
+#     of a Plan's Job that runs as this ServiceAccount
+#     (`spec.serviceAccountName: system-upgrade-controller`, job.go:204).
+#     RBAC cannot tell the two apart: every holder of the ServiceAccount
+#     token gets these rules, the controller pod included. If every Plan
+#     names its own ServiceAccount, delete the binding
+#     lok8s-system-upgrade-controller-drainer, and bind the ClusterRole to
+#     that ServiceAccount instead.
+#
+# The opt-in addon system-upgrade-controller-cluster-admin restores the
+# chart's cluster-admin binding. Do not use it unless a Plan needs it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lok8s-system-upgrade-controller
+rules:
+  # The Plan CRD. The controller creates or updates it on every start
+  # (controller.go:147,194). wrangler crd.go: list :64 (on failure only a
+  # warning), create :83 (only when the list does not show it), get :91 and
+  # :114, update :101. RBAC cannot limit a create to one name.
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    verbs: [list, create]
+  - apiGroups: [apiextensions.k8s.io]
+    resources: [customresourcedefinitions]
+    resourceNames: [plans.upgrade.cattle.io]
+    verbs: [get, update]
+  # The controller reads kube-system on start and stops when it cannot. The
+  # UID is the cluster ID it sends to a Plan's spec.channel URL
+  # (controller.go:141).
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: [kube-system]
+    verbs: [get]
+  # The node cache selects the nodes of a Plan (handle_core.go:16;
+  # upgrade/plan/plan.go:174,190). When a Job completes, the controller
+  # writes the Plan label on the node and clears spec.unschedulable
+  # (handle_batch.go:139). RBAC cannot limit the update to those fields.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [list, watch, update]
+  # The Plan handler applies its Jobs with an owner and without a lister
+  # namespace (handle_upgrade.go:114; the generated
+  # controllers/upgrade.cattle.io/v1/plan.go:156,176). wrangler then lists
+  # the Jobs with the set's label selector in ALL namespaces
+  # (desiredset_process.go:360-369,461). The grant has no selector: a
+  # holder of the token can list every Job in the cluster. This rule also
+  # covers the list of the Job cache in cattle-system, so the Role below
+  # does not repeat it.
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lok8s-system-upgrade-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lok8s-system-upgrade-controller
+subjects:
+  - kind: ServiceAccount
+    name: system-upgrade-controller
+    namespace: cattle-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lok8s-system-upgrade-controller
+  namespace: cattle-system
+rules:
+  # The Plan cache (controller.go:110), the Plan read when a Job changes
+  # (handle_batch.go:54), and the Plan status (handle_batch.go:98; the
+  # generated controllers/upgrade.cattle.io/v1/plan.go:121). The controller
+  # never writes a Plan's spec.
+  - apiGroups: [upgrade.cattle.io]
+    resources: [plans]
+    verbs: [get, list, watch]
+  - apiGroups: [upgrade.cattle.io]
+    resources: [plans/status]
+    verbs: [update]
+  # The Job cache (controller.go:103, handle_batch.go:30; its list comes
+  # from the ClusterRole). wrangler apply creates, reads back and patches
+  # the Jobs (desiredset_crud.go:43,50; desiredset_process.go:189) and
+  # deletes one to replace it (desiredset_crud.go:68). The Job handler
+  # deletes finished and stale Jobs (handle_batch.go:180). A Job can carry
+  # any pod template and any ServiceAccount of this namespace.
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, watch, create, patch, delete]
+  # The Secret cache in cattle-system. It is needed for every Plan, not only
+  # for a Plan with spec.secrets: the controller registers the cache always
+  # (handle_core.go:42, handle_upgrade.go:25) and handles no Plan until every
+  # cache has synced (wrangler generic/factory.go:110-114). The controller
+  # reads a Plan's Secrets from this cache only (upgrade/plan/plan.go:62,256),
+  # never with a get. The Job pods mount them through kubelet. list and
+  # watch return the content of every Secret in this namespace.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [list, watch]
+  # Leader election (controller.go:176): a Lease named after the controller
+  # (SYSTEM_UPGRADE_CONTROLLER_NAME, the pod label upgrade.cattle.io/controller
+  # in the chart's Deployment), in the controller's namespace (wrangler
+  # leader.go:47). client-go leaselock.go: get :43, create :68, update :89.
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    resourceNames: [system-upgrade-controller]
+    verbs: [get, update]
+  # Events on Plans. The recorder creates or patches them
+  # (controller.go:124; client-go record/event.go:334,340).
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lok8s-system-upgrade-controller
+  namespace: cattle-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: lok8s-system-upgrade-controller
+subjects:
+  - kind: ServiceAccount
+    name: system-upgrade-controller
+    namespace: cattle-system
+---
+# Events on the node (controller.go:168-175). A Node has no namespace, so
+# the recorder writes them to `default` (client-go record/event.go:491).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lok8s-system-upgrade-controller-events
+  namespace: default
+rules:
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lok8s-system-upgrade-controller-events
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: lok8s-system-upgrade-controller-events
+subjects:
+  - kind: ServiceAccount
+    name: system-upgrade-controller
+    namespace: cattle-system
+---
+# The Plan features and the rules they need (kubectl pkg/drain, v0.36.2).
+# Remove a rule that none of your Plans need:
+#   spec.cordon (no drain): nodes get, patch.
+#   spec.drain: nodes get, patch; pods list, get; pods/eviction create.
+#   spec.drain with ignoreDaemonSets (the default, job.go:368): also
+#     daemonsets get.
+#   spec.drain.disableEviction: true: also pods delete (job.go:391).
+# The rules apply to every node and to pods in every namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lok8s-system-upgrade-controller-drainer
+rules:
+  # kubectl reads the node (cmd/drain/drain.go:292-305) and patches
+  # spec.unschedulable (cordon.go:104).
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, patch]
+  # drain lists the pods on the node in all namespaces (drain.go:198) and
+  # reads each one until it is gone (drain.go:254).
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  # drain evicts each pod (drain.go:165).
+  - apiGroups: [""]
+    resources: [pods/eviction]
+    verbs: [create]
+  # drain deletes the pods instead with disableEviction (drain.go:148,257).
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [delete]
+  # drain skips a DaemonSet pod after it reads its DaemonSet
+  # (filters.go:195).
+  - apiGroups: [apps]
+    resources: [daemonsets]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lok8s-system-upgrade-controller-drainer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lok8s-system-upgrade-controller-drainer
+subjects:
+  - kind: ServiceAccount
+    name: system-upgrade-controller
+    namespace: cattle-system

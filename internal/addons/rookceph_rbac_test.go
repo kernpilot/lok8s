@@ -162,9 +162,20 @@ func (o object) Rules() []map[string]any {
 	return rules
 }
 
+// objKey is the key of an object in the map of decodeObjects: kind/name
+// for a cluster-scoped object, kind/namespace/name for a namespaced one.
+// Two objects of one kind and name in two namespaces get two keys.
+func objKey(kind, ns, name string) string {
+	if ns == "" {
+		return kind + "/" + name
+	}
+	return kind + "/" + ns + "/" + name
+}
+
 // decodeObjects returns every object of a multi-document stream, keyed by
-// kind/name. Any decode error other than EOF fails the test: a corrupt
-// stream must never read as "nothing there".
+// objKey. Any decode error other than EOF fails the test: a corrupt stream
+// must never read as "nothing there". So does a key that comes twice: the
+// second object must never replace the first unseen.
 func decodeObjects(t *testing.T, stream []byte) map[string]object {
 	t.Helper()
 	objs := map[string]object{}
@@ -190,7 +201,11 @@ func decodeObjects(t *testing.T, stream []byte) map[string]object {
 			m["namespace"] = ns
 		}
 		doc["metadata"] = m
-		objs[kind+"/"+name] = object{Kind: kind, Name: name, Namespace: ns, Doc: doc}
+		key := objKey(kind, ns, name)
+		if _, dup := objs[key]; dup {
+			t.Fatalf("decoding the object stream: %s comes twice", key)
+		}
+		objs[key] = object{Kind: kind, Name: name, Namespace: ns, Doc: doc}
 	}
 	return objs
 }
@@ -477,9 +492,10 @@ func readObjects(t *testing.T, path string) map[string]object {
 	return decodeObjects(t, raw)
 }
 
-// resourcesOf returns a rule's resources.
-func resourcesOf(r map[string]any) []string {
-	seq, _ := r["resources"].([]any)
+// stringsOf returns the strings of a decoded YAML sequence (a rule's
+// resources, verbs, ...); other values are skipped.
+func stringsOf(v any) []string {
+	seq, _ := v.([]any)
 	out := make([]string, 0, len(seq))
 	for _, s := range seq {
 		if str, ok := s.(string); ok {
@@ -488,6 +504,9 @@ func resourcesOf(r map[string]any) []string {
 	}
 	return out
 }
+
+// resourcesOf returns a rule's resources.
+func resourcesOf(r map[string]any) []string { return stringsOf(r["resources"]) }
 
 // grantsForbidden reports whether a rule grants one of the forbidden
 // resources.
@@ -692,7 +711,7 @@ func TestRookCephCSIRBACPatches(t *testing.T) {
 	// provisioner secrets by name, bound to every expected ctrlplugin
 	// ServiceAccount.
 	rbac := readObjects(t, filepath.Join(addon, "ctrlplugin-secrets-rbac.yaml"))
-	role, ok := rbac["Role/"+ctrlSecretsRole]
+	role, ok := rbac[objKey("Role", rookCephNS, ctrlSecretsRole)]
 	if !ok || role.Namespace != rookCephNS {
 		t.Fatalf("Role %s missing or not in %s: %v", ctrlSecretsRole, rookCephNS, sortedKeys(rbac))
 	}
@@ -704,7 +723,7 @@ func TestRookCephCSIRBACPatches(t *testing.T) {
 	if rules := role.Rules(); len(rules) != 1 || !reflect.DeepEqual(rules[0], wantRule) {
 		t.Errorf("Role %s rules\n got: %s\nwant: %s", ctrlSecretsRole, canon(t, rules), canon(t, []any{wantRule}))
 	}
-	binding, ok := rbac["RoleBinding/"+ctrlSecretsRole]
+	binding, ok := rbac[objKey("RoleBinding", rookCephNS, ctrlSecretsRole)]
 	if !ok || binding.Namespace != rookCephNS {
 		t.Fatalf("RoleBinding %s missing or not in %s", ctrlSecretsRole, rookCephNS)
 	}
@@ -852,7 +871,7 @@ func TestRookCephFixturesMatchChart(t *testing.T) {
 			t.Errorf("the shipped render lost ClusterRole/%s (only the binding is deleted)", roleRefName(b))
 		}
 	}
-	for _, k := range []string{"Role/" + ctrlSecretsRole, "RoleBinding/" + ctrlSecretsRole} {
+	for _, k := range []string{objKey("Role", rookCephNS, ctrlSecretsRole), objKey("RoleBinding", rookCephNS, ctrlSecretsRole)} {
 		if o, ok := shipped[k]; !ok || o.Namespace != rookCephNS {
 			t.Errorf("the shipped render lacks %s in %s", k, rookCephNS)
 		}
@@ -892,6 +911,45 @@ func stripPatches(t *testing.T, path string) {
 			doc.Content = append(doc.Content[:i], doc.Content[i+2:]...)
 			break
 		}
+	}
+	out, err := yaml.Marshal(&root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// dropResource removes one entry from the `resources:` list of a
+// kustomization.yaml.
+func dropResource(t *testing.T, path, name string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(raw, &root); err != nil {
+		t.Fatal(err)
+	}
+	doc := root.Content[0]
+	found := false
+	for i := 0; i+1 < len(doc.Content); i += 2 {
+		if doc.Content[i].Value != "resources" {
+			continue
+		}
+		seq := doc.Content[i+1]
+		seq.Content = slices.DeleteFunc(seq.Content, func(n *yaml.Node) bool {
+			if n.Value == name {
+				found = true
+				return true
+			}
+			return false
+		})
+	}
+	if !found {
+		t.Fatalf("%s: no resource %q", path, name)
 	}
 	out, err := yaml.Marshal(&root)
 	if err != nil {

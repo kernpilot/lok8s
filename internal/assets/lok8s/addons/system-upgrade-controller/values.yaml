@@ -6,9 +6,9 @@
 # in 110.0.0; empty default), `systemUpgradeController.image.*`,
 # `kubectl.image.*`, and the `systemUpgrade*`/`kubectl` config knobs consumed by
 # the controller ConfigMap. It does NOT template `replicaCount`, `resources`,
-# `tolerations`, or `global.cattle.psp.*`. The deployment is hardwired to a
-# single replica, `tolerations: [{operator: Exists}]` (already tolerates every
-# taint — control-plane, master, CriticalAddonsOnly, etc.), and sets no
+# `tolerations`, `global.cattle.psp.*` or any RBAC. The deployment is hardwired
+# to a single replica, `tolerations: [{operator: Exists}]` (already tolerates
+# every taint — control-plane, master, CriticalAddonsOnly, etc.), and sets no
 # container resource limits/requests.
 #
 # The CONTROLLER scheduling intent is therefore already satisfied by the chart's
@@ -16,10 +16,39 @@
 # get their tolerations from each Plan's `.spec.tolerations` (the Plans are
 # cluster GLUE, supplied by the consumer), which IS where they take effect.
 #
-# Left effectively empty on purpose: defaults are correct for the controller. A
-# consumer that mirrors images through a private registry can override
-# global.cattle.systemDefaultRegistry inline.
+# The chart binds the controller ServiceAccount to cluster-admin and has no
+# value to change that. The addon's kustomization removes that binding and
+# rbac.yaml grants what the controller calls (see its header).
+#
+# A consumer that mirrors images through a private registry can override
+# global.cattle.systemDefaultRegistry inline. The mirror must keep the
+# digests below.
 global:
   cattle:
     # Pull images from Docker Hub (rancher/*) directly; no private mirror.
     systemDefaultRegistry: ""
+
+# Both images are pinned by digest: the chart's own tag, then the digest of
+# the tag's multi-arch image index. The chart renders `<repository>:<tag>`,
+# so the `<tag>@sha256:<digest>` form gives `repo:tag@sha256:<digest>`. The
+# container runtime pulls by the digest. The tag is for the reader.
+#
+# Resolved on 2026-10-26 from the Docker Hub registry API (the
+# Docker-Content-Digest header of the manifest request, equal to the sha256
+# of the index body) and cross-checked with the Docker Hub tags API. On a
+# bump, change the tag AND the digest, then refresh the render fixture
+# (internal/addons/testdata/system-upgrade-controller/, its header says how).
+systemUpgradeController:
+  image:
+    repository: rancher/system-upgrade-controller
+    tag: v0.20.1@sha256:aaf4dbf640579a6abfa6390aab927ee664f06814e33c371e69df9dd451ca153a
+
+# The image of the cordon and drain init containers that the controller adds
+# to a Plan's Job (the ConfigMap key SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE). The
+# chart writes the same image into SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE_WINDOWS,
+# and this index has no Windows image: a cordon or drain on a Windows node
+# still fails to pull it. The pin does not change that.
+kubectl:
+  image:
+    repository: rancher/kuberlr-kubectl
+    tag: v8.1.1@sha256:74ab36f893ba6c698c709cf53c37bc86e4b4857a96d0d22a1eb28e9be329f8df

@@ -240,7 +240,9 @@ addons::_config_hint() {
     rook-ceph)                    echo "CephCluster/pool/StorageClass in a target: replica count + device filter";;
     rook-ceph-csi-kms)            echo "opt-in after rook-ceph: restores the node plugin's Secret + ServiceAccount-token grants (KMS encryption, mounter=rbd-nbd)";;
     sso-gate)                     echo "patch issuer/clientID from a target + Secret sso-gate-client; label routes sso.lok8s.dev/protect";;
-    system-upgrade-controller)    echo "declare upgrade Plans in a target (Rancher SUC)";;
+    system-upgrade-controller)    echo "declare upgrade Plans in a target (Rancher SUC); the controller runs without cluster-admin";;
+    system-upgrade-controller-cluster-admin)
+                                  echo "opt-in after system-upgrade-controller, not recommended: binds the controller to cluster-admin again";;
     tempo)                        echo "configure trace storage/retention via the tempo values";;
     *)                            echo "";;
   esac

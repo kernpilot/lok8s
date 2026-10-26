@@ -1,0 +1,16 @@
+# The ClusterRoleBinding that the system-upgrade-controller chart (110.0.0)
+# ships, unchanged. The system-upgrade-controller addon deletes it from its
+# render; this opt-in addon applies it again. internal/addons/suc_rbac_test.go
+# compares it with the chart.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: system-upgrade-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: system-upgrade-controller
+    namespace: cattle-system

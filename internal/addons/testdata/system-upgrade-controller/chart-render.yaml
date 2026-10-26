@@ -1,0 +1,167 @@
+# Fixture for internal/addons/suc_rbac_test.go: the system-upgrade-controller
+# chart as the addon renders it BEFORE the addon's RBAC changes, metadata
+# reduced to the name and the namespace. It holds the chart's
+# ServiceAccount, its ClusterRoleBinding to cluster-admin, the controller
+# ConfigMap (the kubectl image of the cordon and drain containers) and the
+# Deployment (the controller image, the ServiceAccount, the pod label that
+# names the leader-election Lease). The offline test reads the names from
+# here, so the RBAC follows the chart. TestSystemUpgradeControllerFixtureMatchesChart
+# re-renders the chart (on CI, or LOK8S_ONLINE_TESTS=1) and fails on any
+# drift from this file.
+#
+# chart: system-upgrade-controller 110.0.0
+#
+# Refresh it on every chart bump and on every image pin change: copy the
+# addon directory, delete `patches:` and the `rbac.yaml` resource from its
+# kustomization.yaml, render it (`KHELM_TRUST_ANY_REPO=true kustomize build
+# --enable-alpha-plugins --enable-exec <copy>`, with KUSTOMIZE_PLUGIN_HOME at
+# .kustomize), drop the Namespace and reduce each object's metadata with
+# `yq 'select(.kind != "Namespace") | .metadata = (.metadata | pick(["name","namespace"]))'`.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: system-upgrade-controller
+  namespace: cattle-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: system-upgrade-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: system-upgrade-controller
+    namespace: cattle-system
+---
+apiVersion: v1
+data:
+  SYSTEM_UPGRADE_CONTROLLER_DEBUG: "false"
+  SYSTEM_UPGRADE_CONTROLLER_LEADER_ELECT: "true"
+  SYSTEM_UPGRADE_CONTROLLER_THREADS: "2"
+  SYSTEM_UPGRADE_JOB_ACTIVE_DEADLINE_SECONDS: "900"
+  SYSTEM_UPGRADE_JOB_BACKOFF_LIMIT: "99"
+  SYSTEM_UPGRADE_JOB_IMAGE_PULL_POLICY: IfNotPresent
+  SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE: rancher/kuberlr-kubectl:v8.1.1@sha256:74ab36f893ba6c698c709cf53c37bc86e4b4857a96d0d22a1eb28e9be329f8df
+  SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE_WINDOWS: rancher/kuberlr-kubectl:v8.1.1@sha256:74ab36f893ba6c698c709cf53c37bc86e4b4857a96d0d22a1eb28e9be329f8df
+  SYSTEM_UPGRADE_JOB_PRIVILEGED: "true"
+  SYSTEM_UPGRADE_JOB_TTL_SECONDS_AFTER_FINISH: "900"
+  SYSTEM_UPGRADE_PLAN_POLLING_INTERVAL: 15m
+kind: ConfigMap
+metadata:
+  name: system-upgrade-controller-config
+  namespace: cattle-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: system-upgrade-controller
+  namespace: cattle-system
+spec:
+  selector:
+    matchLabels:
+      upgrade.cattle.io/controller: system-upgrade-controller
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: controller
+        app.kubernetes.io/name: system-upgrade-controller
+        upgrade.cattle.io/controller: system-upgrade-controller
+    spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: In
+                    values:
+                      - "true"
+              weight: 100
+            - preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/master
+                    operator: In
+                    values:
+                      - "true"
+              weight: 100
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/os
+                    operator: NotIn
+                    values:
+                      - windows
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/name
+                    operator: In
+                    values:
+                      - system-upgrade-controller
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - env:
+            - name: SYSTEM_UPGRADE_CONTROLLER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['upgrade.cattle.io/controller']
+            - name: SYSTEM_UPGRADE_CONTROLLER_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SYSTEM_UPGRADE_CONTROLLER_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          envFrom:
+            - configMapRef:
+                name: system-upgrade-controller-config
+          image: rancher/system-upgrade-controller:v0.20.1@sha256:aaf4dbf640579a6abfa6390aab927ee664f06814e33c371e69df9dd451ca153a
+          imagePullPolicy: IfNotPresent
+          name: system-upgrade-controller
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsGroup: 65534
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - mountPath: /etc/ssl
+              name: etc-ssl
+              readOnly: true
+            - mountPath: /etc/pki
+              name: etc-pki
+              readOnly: true
+            - mountPath: /etc/ca-certificates
+              name: etc-ca-certificates
+              readOnly: true
+            - mountPath: /tmp
+              name: tmp
+      serviceAccountName: system-upgrade-controller
+      tolerations:
+        - operator: Exists
+      volumes:
+        - hostPath:
+            path: /etc/ssl
+            type: DirectoryOrCreate
+          name: etc-ssl
+        - hostPath:
+            path: /etc/pki
+            type: DirectoryOrCreate
+          name: etc-pki
+        - hostPath:
+            path: /etc/ca-certificates
+            type: DirectoryOrCreate
+          name: etc-ca-certificates
+        - emptyDir: {}
+          name: tmp

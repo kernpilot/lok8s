@@ -347,8 +347,12 @@ var configHints = map[string]string{
 	"rook-ceph":                    "CephCluster/pool/StorageClass in a target: replica count + device filter",
 	"rook-ceph-csi-kms":            "opt-in after rook-ceph: restores the node plugin's Secret + ServiceAccount-token grants (KMS encryption, mounter=rbd-nbd)",
 	"sso-gate":                     "patch issuer/clientID from a target + Secret sso-gate-client; label routes sso.lok8s.dev/protect",
-	"system-upgrade-controller":    "declare upgrade Plans in a target (Rancher SUC)",
+	"system-upgrade-controller":    "declare upgrade Plans in a target (Rancher SUC); the controller runs without cluster-admin",
 	"tempo":                        "configure trace storage/retention via the tempo values",
+
+	// Out of order: gofmt does not align a key longer than 40 columns with
+	// the block above.
+	"system-upgrade-controller-cluster-admin": "opt-in after system-upgrade-controller, not recommended: binds the controller to cluster-admin again",
 }
 
 // ConfigHint is the one-line "how to configure" pointer for a framework

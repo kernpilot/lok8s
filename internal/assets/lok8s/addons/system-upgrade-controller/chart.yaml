@@ -1,13 +1,15 @@
 # khelm chart spec for Rancher's system-upgrade-controller — the in-cluster OS
 # patcher. It watches upgrade.cattle.io/v1 Plans and runs the patch as a
-# per-node Job. A generic FRAMEWORK ADDON: this installs ONLY the controller +
-# its CRD. The actual upgrade Plans (what/when to patch) are cluster GLUE and
-# live in the consuming cluster (NOT here) — same shape as cnpg-operator
-# (operator+CRD here, the Cluster CRs in the consumer).
+# per-node Job. A generic FRAMEWORK ADDON: this installs ONLY the controller.
+# The chart ships no CRD: the controller creates its Plan CRD when it starts
+# (the RBAC for that is in rbac.yaml). The actual upgrade Plans (what/when to
+# patch) are cluster GLUE and live in the consuming cluster (NOT here) — same
+# shape as cnpg-operator (operator+CRD here, the Cluster CRs in the consumer).
 #
 # The chart hardcodes namespace `cattle-system` in every template, so the
-# ChartRenderer namespace, the kustomization `namespace:` transformer, and the
-# shipped namespace.yaml are all pinned to `cattle-system` to match.
+# ChartRenderer namespace and the shipped namespace.yaml are pinned to
+# `cattle-system` to match. The kustomization has no `namespace:`
+# transformer (its header says why).
 #
 # kubeVersion must be set explicitly so khelm forwards it to helm — otherwise
 # helm defaults to v1.20.0. Tracks the consuming clusters' Kubernetes version
