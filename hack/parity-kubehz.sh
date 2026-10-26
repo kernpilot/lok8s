@@ -889,6 +889,44 @@ EOF
     bind_check "${UNBOUND}" kubehz register --domain bind-reg.dev            # claim key
     unset HCLOUD_TOKEN HCLOUD_API_BASE
   done
+
+  # ── register: a platform that stays unavailable (#312) ────────────────────
+  # The stub refuses these domains every time: busy-reg.dev with 503 and
+  # Retry-After 0, limit-reg.dev with 429 and Retry-After 00, bare-reg.dev
+  # with 503 and no Retry-After, date-reg.dev with 503 and the date form,
+  # odd-reg.dev with 503, Retry-After 0 and an escape sequence as its code.
+  # Both implementations try 3 times and stop with the same error (no fall
+  # back), or, without a Retry-After they read, try once and fall back with
+  # the same warnings. The request log joins stdout. (The 60 s cap is pinned
+  # by TestRegisterRetryBoundMatchesBash: a stub that makes both wait it
+  # would add minutes to the harness.)
+  for UNAV_DOMAIN in busy-reg.dev limit-reg.dev bare-reg.dev date-reg.dev odd-reg.dev; do
+    mk "${UNAV_DOMAIN}" <<EOF
+kind: Lo
+metadata:
+  name: ${UNAV_DOMAIN%%.*}
+spec:
+  cluster:
+    domain: ${UNAV_DOMAIN}
+  kubehz:
+    access: registered
+    apiUrl: https://127.0.0.1:${STUB_PORT}
+EOF
+  done
+  unav_reset() { : > "${STUB_LOG}"; }
+  unav_record() { { echo "--- requests"; cat "${STUB_LOG}"; } >> "${WORK}/${1}.out"; }
+  unav_check() { PARITY_PRE_EACH=unav_reset PARITY_POST_EACH=unav_record check "$@"; }
+  unav_check "${UNBOUND}" kubehz register --domain busy-reg.dev            # fingerprint announce
+  unav_check "${UNBOUND}" kubehz register --domain limit-reg.dev           # 429
+  unav_check "${UNBOUND}" kubehz register --domain date-reg.dev            # the date form: one try, the fall back
+  unav_check "${UNBOUND}" kubehz register --domain odd-reg.dev             # the code is dropped
+  export KUBEHZ_TOKEN=khzt_parity
+  unav_check "${UNBOUND}" kubehz register --domain busy-reg.dev            # bearer (direct claim)
+  unav_check "${UNBOUND}" kubehz register --domain bare-reg.dev            # one try each, then the fall back
+  unset KUBEHZ_TOKEN
+  export HCLOUD_TOKEN=hc_parity HCLOUD_API_BASE="https://127.0.0.1:${STUB_PORT}"
+  unav_check "${UNBOUND}" kubehz register --domain busy-reg.dev            # claim key
+  unset HCLOUD_TOKEN HCLOUD_API_BASE UNAV_DOMAIN
   unset SSL_CERT_FILE CURL_CA_BUNDLE BIND_FIXTURE BIND_FIXTURES
 fi
 

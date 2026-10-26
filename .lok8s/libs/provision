@@ -635,8 +635,11 @@ provision::dispatch() {
 
     # kubehz registration: register cluster if access != none. Unset access
     # (read_config didn't export it) means no kubehz config — same as none.
+    # A platform that stays unavailable stops the provision here, before the
+    # bootstrap (#312): the error names `lo provision --bootstrap`, which
+    # registers and then bootstraps.
     if [[ "${LOK8S_KUBEHZ_ACCESS:-none}" != "none" ]]; then
-      kubehz::register_cluster "${domain}" "${cluster_yaml}" || return 1
+      kubehz::register_cluster "${domain}" "${cluster_yaml}" "lo provision --bootstrap --domain ${domain}" || return 1
     fi
   fi
 

@@ -444,6 +444,39 @@ and needs no token; if the API is unreachable it warns and provisioning
 continues.
 :::
 
+::: details When the platform is busy: 503 or 429
+The platform can refuse a registration for a short time. Then it answers
+`503` or `429` with a `Retry-After` header and a code, for example
+`REGISTRATION_UNAVAILABLE` or `RATE_LIMITED`. This applies to all three
+register modes: the direct claim with `KUBEHZ_TOKEN`, the claim key with
+`HCLOUD_TOKEN`, and the fingerprint announce.
+
+- lo waits for the time in `Retry-After` and tries again. One register call
+  tries at most 3 times, and one wait is at most 60 seconds. So one call
+  waits at most 2 minutes.
+- Ctrl-C stops the wait at once.
+- If the platform still refuses after the third try, lo stops with an
+  error. The error names the code and the command to run when the platform
+  is available again. lo does not try the next register mode, because the
+  platform gives the same answer to all of them.
+- The command in the error depends on where the registration ran:
+  - After `lo kubehz register`, run `lo kubehz register` again.
+  - After `lo provision`, run `lo provision --bootstrap`. The error stops
+    the provision after the infrastructure is up and before the bootstrap,
+    and the provision exits with status 1. The cluster runs, but it has no
+    `spec.bootstrap` addons and no platform registration. `lo provision
+    --bootstrap` registers the cluster and then applies the bootstrap. It
+    does not provision the infrastructure again.
+- lo does not try a `503` without `Retry-After` again, because the answer
+  gives no time to wait. The registration then continues the same way as
+  when the API does not answer. The warning names the status, for example
+  `(HTTP 503)`.
+- The 2-minute limit applies to each register call. If a call gets two
+  refusals with `Retry-After` and then a different refusal, lo tries the
+  next mode, and that mode can wait again. In that rare case, the waits of
+  the three modes add up to at most 6 minutes.
+:::
+
 ::: details Claim before you deploy: the bind secret
 The pre-agent announce also hands back a one-time **bind secret**.
 `lo kubehz register` stores it at `clusters/<domain>/.kubehz-bind` (mode

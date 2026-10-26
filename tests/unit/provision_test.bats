@@ -180,6 +180,34 @@ SCRIPT
   [[ "${output}" != *"provision_called"* ]]
 }
 
+@test "provision::dispatch (#312): a failed registration stops before the bootstrap and names lo provision --bootstrap" {
+  yq() {
+    case "$2" in
+      '.kind // ""') echo "Lo" ;;
+      .metadata.name*) echo "test-cluster" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+  mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig"
+  touch "${BATS_TEST_TMPDIR}/.kubeconfig/test-cluster.yaml"
+  cat > "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/main" <<'SCRIPT'
+driver::provision() { :; }
+driver::export() { :; }
+SCRIPT
+  # The platform stayed unavailable: register_cluster returns 1.
+  kubehz::register_cluster() { echo "register_next: $3"; return 1; }
+  bootstrap::apply() { echo "bootstrap_applied: $1"; }
+  export -f kubehz::register_cluster bootstrap::apply
+  export LOK8S_KUBEHZ_ACCESS=registered
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  run provision::dispatch "test.lok8s.dev" 1
+  assert_failure
+  assert_output --partial "register_next: lo provision --bootstrap --domain test.lok8s.dev"
+  refute_output --partial "bootstrap_applied"
+}
+
 @test "provision::dispatch --bootstrap fails when the cluster is not provisioned" {
   yq() {
     case "$2" in

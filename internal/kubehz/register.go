@@ -8,7 +8,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
+
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // hcloudAPIBase is `${HCLOUD_API_BASE:-https://api.hetzner.cloud}`.
@@ -32,7 +35,7 @@ func (c *Context) ensureClaimKey(ctx context.Context, domain, apiURL string) err
 		return err
 	}
 
-	body, err := c.fetch(ctx, "POST", apiURL+"/api/clusters/register", bearer{},
+	body, err := c.registerPost(ctx, apiURL, bearer{},
 		c.registerBody(domain, jsonPair{"domain", domain}, jsonPair{"claimKey", true}))
 	if err != nil {
 		return err
@@ -88,7 +91,7 @@ func (c *Context) directClaim(ctx context.Context, cfg *Config, domain, clusterY
 	}
 
 	auth := withBearer(c.getenv("KUBEHZ_TOKEN"))
-	body, err := c.fetch(ctx, "POST", apiURL+"/api/clusters/register", auth,
+	body, err := c.registerPost(ctx, apiURL, auth,
 		c.registerBody(domain, jsonPair{"domain", domain}, jsonPair{"fingerprint", fingerprint}))
 	if err != nil {
 		return err
@@ -140,11 +143,51 @@ func (c *Context) directClaim(ctx context.Context, cfg *Config, domain, clusterY
 
 // RegisterCluster ports kubehz::register_cluster: announce a PENDING cluster
 // with the platform. Non-fatal: warns on failure and returns nil so
-// provisioning continues without kubehz integration.
+// provisioning continues without kubehz integration. Two failures stop it
+// with an error instead (#312): an interrupted command, and a platform that
+// still answers 503 or 429 with Retry-After after the retry bound
+// (registerPost). The error names `lo kubehz register` as the recovery.
 //
 // Order: authenticated direct claim (KUBEHZ_TOKEN) → api-minted claim key
 // (HCLOUD_TOKEN) → the legacy server-key fingerprint announce (no bearer).
 func (c *Context) RegisterCluster(ctx context.Context, cfg *Config, domain, clusterYAML string) error {
+	return c.registerCluster(ctx, cfg, domain, clusterYAML, "kubehz register --domain "+domain)
+}
+
+// registerStop decides whether a failed register step ends the
+// registration (stop, with the error to return) or falls back to the next
+// flow (no stop). The registration stops when the context ended (Ctrl-C),
+// and when the platform stayed unavailable through the retry bound: the
+// next flow posts to the same endpoint and gets the same answer, and a
+// cluster without its registration must not look like a success. next is
+// the recovery command without the leading `lo`.
+func (c *Context) registerStop(ctx context.Context, err error, domain, next string) (stop bool, stopErr error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return true, ctxErr
+	}
+	var u *registerUnavailableError
+	if !errors.As(err, &u) {
+		return false, nil
+	}
+	msg := fmt.Sprintf("kubehz: the platform did not register %s (HTTP %d%s, %d tries).", domain, u.Status, optSuffix(" ", u.Code), u.Tries)
+	// Piped, the [error] line names the command: the contract both
+	// implementations print. On a terminal the command goes on a next:
+	// line instead. ui.ErrorNext prints one text in both forms, so the
+	// piped text, which carries the command, is chosen here.
+	w := c.errOut()
+	if ui.For(w).TTY {
+		ui.ErrorNext(w, next, "when the platform is available again", "%s", msg)
+	} else {
+		ui.ErrorTo(w, "%s Run 'lo %s' when the platform is available again.", msg, next)
+	}
+	return true, ui.Handled(err)
+}
+
+// registerCluster is RegisterCluster with the recovery command that a
+// stopped registration names: `lo kubehz register` for the command, `lo
+// provision --bootstrap` for the provision hook (the provision stops before
+// its bootstrap, and that command registers and then runs the bootstrap).
+func (c *Context) registerCluster(ctx context.Context, cfg *Config, domain, clusterYAML, next string) error {
 	apiURL := cfg.APIURL
 
 	// Defense in depth: the fingerprint travels on this URL; never over plain
@@ -158,17 +201,25 @@ func (c *Context) RegisterCluster(ctx context.Context, cfg *Config, domain, clus
 	}
 
 	if c.getenv("KUBEHZ_TOKEN") != "" {
-		if err := c.directClaim(ctx, cfg, domain, clusterYAML, apiURL); err == nil {
+		err := c.directClaim(ctx, cfg, domain, clusterYAML, apiURL)
+		if err == nil {
 			return nil
 		}
-		c.warnf("kubehz direct claim failed for %s; falling back to the anonymous registration flow", domain)
+		if stop, stopErr := c.registerStop(ctx, err, domain, next); stop {
+			return stopErr
+		}
+		c.warnf("kubehz direct claim failed for %s%s; falling back to the anonymous registration flow", domain, refusedSuffix(err))
 	}
 
 	if c.getenv("HCLOUD_TOKEN") != "" {
-		if err := c.ensureClaimKey(ctx, domain, apiURL); err == nil {
+		err := c.ensureClaimKey(ctx, domain, apiURL)
+		if err == nil {
 			return nil
 		}
-		c.warnf("kubehz claim-key registration failed for %s; falling back to the legacy fingerprint announce", domain)
+		if stop, stopErr := c.registerStop(ctx, err, domain, next); stop {
+			return stopErr
+		}
+		c.warnf("kubehz claim-key registration failed for %s%s; falling back to the legacy fingerprint announce", domain, refusedSuffix(err))
 	}
 
 	fingerprint, err := c.SSHFingerprint(ctx, clusterYAML)
@@ -177,10 +228,13 @@ func (c *Context) RegisterCluster(ctx context.Context, cfg *Config, domain, clus
 		return nil
 	}
 
-	body, err := c.fetch(ctx, "POST", apiURL+"/api/clusters/register", bearer{},
+	body, err := c.registerPost(ctx, apiURL, bearer{},
 		c.registerBody(domain, jsonPair{"domain", domain}, jsonPair{"fingerprint", fingerprint}))
 	if err != nil {
-		c.warnf("kubehz API request failed for %s, cluster will continue without kubehz integration", domain)
+		if stop, stopErr := c.registerStop(ctx, err, domain, next); stop {
+			return stopErr
+		}
+		c.warnf("kubehz API request failed for %s%s, cluster will continue without kubehz integration", domain, refusedSuffix(err))
 		return nil
 	}
 	v, _ := parseJSON(body)
