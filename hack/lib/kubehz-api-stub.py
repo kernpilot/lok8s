@@ -10,7 +10,10 @@ One server for the two sections of the harness that need an api:
 - The register cases: POST /api/clusters/register answers one response that
   fits every register mode and hands out a new bind secret. The Hetzner
   calls of the claim-key mode (/v1/ssh_keys) get an empty key list and a
-  created key. These routes take any credential.
+  created key. These routes take any credential. A register body for a
+  domain in UNAVAILABLE gets that refusal instead, every time (#312): 503 or
+  429 with Retry-After 0 (so the retries do not wait), or a 503 without
+  Retry-After.
 
 Every request is appended to a log as one JSON line: the method, the path,
 the credential (none, the minted bearer, another bearer, or another scheme;
@@ -42,6 +45,14 @@ NEXT_BIND = "009c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
 REGISTERED = {"id": "cl-parity", "registered": True, "claimed": True, "bindSecret": NEXT_BIND,
               "claimKey": {"publicKey": "ssh-ed25519 AAAA k", "fingerprint": "aa:bb",
                            "name": "kubehz-claim-bind-reg.dev"}}
+
+# POST /api/clusters/register refusals by the domain of the body (#312):
+# (status, Retry-After or None, code).
+UNAVAILABLE = {
+    "busy-reg.dev": (503, "0", "REGISTRATION_UNAVAILABLE"),
+    "limit-reg.dev": (429, "0", "RATE_LIMITED"),
+    "bare-reg.dev": (503, None, "REGISTRATION_UNAVAILABLE"),
+}
 
 SPACE = {
     "id": "sp-1a2b3c4d", "tenantId": "t-1", "shardId": "sh-1", "name": "Acme Prod", "slug": "acme",
@@ -165,13 +176,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def answer(self, status, body):
+    def answer(self, status, body, headers=None):
         if isinstance(body, (dict, list)):
             raw, ctype = json.dumps(body).encode(), "application/json"
         else:
             raw = body.encode()
             ctype = "application/yaml" if body.startswith("apiVersion") else "text/html"
         self.send_response(status)
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
@@ -210,6 +223,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.answer(200, {"access_token": TOKEN, "token_type": "Bearer", "expires_in": 3600})
         path = self.path.split("?", 1)[0]
         if self.command == "POST" and path == "/api/clusters/register":
+            busy = UNAVAILABLE.get(body.get("domain")) if isinstance(body, dict) else None
+            if busy:
+                status, retry_after, code = busy
+                return self.answer(*refusal(status, code, "The registration limiter is not available"),
+                                   {"Retry-After": retry_after} if retry_after is not None else None)
             return self.answer(200, REGISTERED)
         if path == "/v1/ssh_keys":
             if self.command == "POST":

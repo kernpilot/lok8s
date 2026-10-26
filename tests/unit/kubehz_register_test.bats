@@ -1073,3 +1073,170 @@ _persist_with_a_planted_link() {
   assert_success
   assert_output '{"domain":"test.kubehz.dev"}'
 }
+
+# ── register: 503/429 with Retry-After (#312) ───────────────────────────
+
+# _retry_sandbox <answer>...: a curl stub for the register endpoint that
+# answers from a script. An answer is <status>:<Retry-After> (an empty
+# Retry-After sends no header, and the value may hold spaces); the n-th call
+# gets the n-th answer, and the
+# last one repeats. The stub writes the answer's headers to the -D file, prints
+# the body, and returns 22 for a status >= 400 (--fail-with-body), as curl
+# does. The Hetzner Cloud calls of the claim key answer as in
+# _register_sandbox. sleep is a stub that records each wait. Each register
+# call goes to STUB_CALLS, each wait to STUB_SLEEPS.
+_retry_sandbox() {
+  yq() {
+    case "$2" in
+      '.kind // ""') echo "Lo" ;;
+      '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+  STUB_ANSWERS=$(IFS='|'; printf '%s' "$*")
+  export STUB_ANSWERS STUB_CALLS="${BATS_TEST_TMPDIR}/register.calls" STUB_SLEEPS="${BATS_TEST_TMPDIR}/sleeps"
+  : > "${STUB_CALLS}"
+  : > "${STUB_SLEEPS}"
+  source "${_PROJECT_ROOT}/tests/lib/curl_capture.sh"
+  curl() {
+    local dump="" prev="" a
+    for a in "$@"; do
+      [[ "${prev}" != -D ]] || dump="${a}"
+      prev="${a}"
+    done
+    curl_capture "$@"
+    case "${CURL_URL}" in
+      */api/clusters/register) ;;
+      *"/v1/ssh_keys?name="*) printf '{"ssh_keys":[]}\n'; return 0 ;;
+      *) printf '{}\n'; return 0 ;;
+    esac
+    echo "${CURL_HEADERS//$'\n'/; }" >> "${STUB_CALLS}"
+    local -a answers
+    IFS='|' read -r -a answers <<<"${STUB_ANSWERS}"
+    local n
+    n=$(wc -l < "${STUB_CALLS}")
+    (( n <= ${#answers[@]} )) || n=${#answers[@]}
+    local status="${answers[n-1]%%:*}" ra="${answers[n-1]#*:}"
+    if [[ -n "${dump}" ]]; then
+      { printf 'HTTP/1.1 %s X\r\n' "${status}"; [[ -z "${ra}" ]] || printf 'Retry-After: %s\r\n' "${ra}"; printf '\r\n'; } > "${dump}"
+    fi
+    if (( status >= 400 )); then
+      printf '{"statusCode":%s,"data":{"code":"%s"}}\n' "${status}" "${STUB_CODE-REGISTRATION_UNAVAILABLE}"
+      return 22
+    fi
+    printf '{"id":"cl-001","registered":true,"claimed":true,"claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"aa:bb","name":"kubehz-claim-test.kubehz.dev"}}\n'
+  }
+  export -f curl
+  sleep() { echo "$1" >> "${STUB_SLEEPS}"; }
+  export -f sleep
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  unset KUBEHZ_TOKEN HCLOUD_TOKEN
+}
+
+_retry_calls() { wc -l < "${STUB_CALLS}" | tr -d ' '; }
+
+@test "register (#312): a 503 with Retry-After, then 200: one retry after the wait the header asks" {
+  local mode
+  for mode in legacy bearer claim-key; do
+    _retry_sandbox 503:30 200:
+    run _register_mode "${mode}"
+    assert_success
+    assert_output --partial "[warn] kubehz: the platform answered HTTP 503 REGISTRATION_UNAVAILABLE. Try 2 of 3 in 30s."
+    assert_output --partial "registered"
+    refute_output --partial "[error]"
+    [ "$(_retry_calls)" = 2 ]
+    run cat "${STUB_SLEEPS}"
+    assert_output "30"
+  done
+  # Each try sends the bearer again (a new curl config every try).
+  _retry_sandbox 503:1 200:
+  KUBEHZ_TOKEN="khzt_test" run kubehz::direct_claim "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" "https://api.kubehz.dev"
+  assert_success
+  run grep -c "Authorization: Bearer khzt_test" "${STUB_CALLS}"
+  assert_output "2"
+}
+
+@test "register (#312): still unavailable after 3 tries stops with the code and the command, no fall back" {
+  # Bearer and claim key both set: a fall back would reach the claim key and
+  # the legacy announce, and add register calls.
+  _retry_sandbox 503:30
+  export KUBEHZ_TOKEN="khzt_test" HCLOUD_TOKEN="hc_test" HCLOUD_API_BASE="https://hc.example"
+  run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_failure 1
+  assert_output --partial "[error] kubehz: the platform did not register test.kubehz.dev (HTTP 503 REGISTRATION_UNAVAILABLE, 3 tries). Run 'lo kubehz register --domain test.kubehz.dev' when the platform is available again."
+  refute_output --partial "falling back"
+  refute_output --partial "continue without kubehz integration"
+  [ "$(_retry_calls)" = 3 ]
+  run cat "${STUB_SLEEPS}"
+  assert_output $'30\n30'
+
+  # Each flow alone stops the same way; the helper's own rc is 3.
+  local mode
+  for mode in legacy claim-key; do
+    _retry_sandbox 503:30
+    [[ "${mode}" != claim-key ]] || export HCLOUD_TOKEN="hc_test" HCLOUD_API_BASE="https://hc.example"
+    run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" "lo provision --bootstrap --domain test.kubehz.dev"
+    assert_failure 1
+    assert_output --partial "(HTTP 503 REGISTRATION_UNAVAILABLE, 3 tries). Run 'lo provision --bootstrap --domain test.kubehz.dev' when"
+    [ "$(_retry_calls)" = 3 ]
+  done
+  _retry_sandbox 503:30
+  run _register_mode bearer
+  assert_failure 3
+}
+
+@test "register (#312): a 429 with Retry-After is tried again" {
+  _retry_sandbox 429:5 200:
+  STUB_CODE=RATE_LIMITED run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  assert_output --partial "HTTP 429 RATE_LIMITED. Try 2 of 3 in 5s."
+  [ "$(_retry_calls)" = 2 ]
+}
+
+@test "register (#312): a 503 without Retry-After is not tried again and falls back as before" {
+  _retry_sandbox 503:
+  export KUBEHZ_TOKEN="khzt_test"
+  run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  assert_output --partial "falling back to the anonymous registration flow"
+  assert_output --partial "kubehz API request failed for test.kubehz.dev"
+  refute_output --partial "[error]"
+  # The direct claim, then the legacy announce: one try each, no wait.
+  [ "$(_retry_calls)" = 2 ]
+  [ ! -s "${STUB_SLEEPS}" ]
+}
+
+@test "register (#312): a huge Retry-After waits at most 60 s; another form is no Retry-After" {
+  _retry_sandbox 503:99999999999999999999
+  run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_failure 1
+  run cat "${STUB_SLEEPS}"
+  assert_output $'60\n60'
+
+  # A leading zero is decimal, not octal.
+  _retry_sandbox 503:09 200:
+  run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  run cat "${STUB_SLEEPS}"
+  assert_output "9"
+
+  local ra
+  for ra in "Wed, 21 Oct 2026 07:28:00 GMT" "1.5" "-5"; do
+    _retry_sandbox "503:${ra}"
+    run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+    assert_success
+    assert_output --partial "kubehz API request failed"
+    [ "$(_retry_calls)" = 1 ]
+  done
+}
+
+@test "register (#312): a code that is not a code shape is dropped from the lines" {
+  _retry_sandbox 503:1
+  # Valid JSON: jq decodes the escape, and the shape check drops the value.
+  STUB_CODE='\u001b[2JPWNED' run kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_failure 1
+  assert_output --partial "(HTTP 503, 3 tries)"
+  refute_output --partial "PWNED"
+}

@@ -403,8 +403,92 @@ kubehz::register_body() {
   fi
 }
 
+# POST a register body (stdin) to <api_url>/api/clusters/register and print
+# the answer of a 2xx. A 503 or 429 with Retry-After tries again (#312): at
+# most 3 tries, and one wait is at most 60 s, so a call waits at most two
+# minutes. Ctrl-C ends the wait (sleep). Retry-After counts in its
+# delta-seconds form only (the form the kubehz api sends); a 503 without it
+# gives no time to wait and is not tried again. The Go twin is
+# registerPost (internal/kubehz/api.go): same bound, same lines.
+# Returns 0 on a 2xx, 3 when the platform still answers 503 or 429 with
+# Retry-After after the last try (the [error] line, with the code and
+# <next>, is printed here; the caller must not fall back), and 1 on any
+# other failure (the caller falls back as before). With <auth> "bearer",
+# KUBEHZ_TOKEN goes into a curl config, built again for each try, never on
+# argv. The body stays in a variable and goes to curl through stdin.
+# Usage: <body> | kubehz::register_post <domain> <api_url> <next> [bearer]
+kubehz::register_post() {
+  local domain="${1}" api_url="${2}" next="${3}" auth="${4:-}"
+  local -r tries=3 max_wait=60
+  local body tmp out rc status ra code delay try=1
+  body=$(cat)
+  while :; do
+    # The header dump (-D) and curl's stderr, removed before any wait.
+    tmp=$(mktemp -d) || return 1
+    rc=0
+    if [[ "${auth}" == bearer ]]; then
+      out=$(printf '%s\n' "${body}" |
+        curl -sSL --fail-with-body --proto-redir =https -X POST "${api_url}/api/clusters/register" \
+          -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}") \
+          -H "Content-Type: application/json" \
+          -D "${tmp}/headers" \
+          --data-binary @- 2>"${tmp}/stderr") || rc=$?
+    else
+      out=$(printf '%s\n' "${body}" |
+        curl -sSL --fail-with-body --proto-redir =https -X POST "${api_url}/api/clusters/register" \
+          -H "Content-Type: application/json" \
+          -D "${tmp}/headers" \
+          --data-binary @- 2>"${tmp}/stderr") || rc=$?
+    fi
+    # curl rc 22 is a status >= 400 (--fail-with-body): the lines below say
+    # what happened, so curl's own "(22)" line is dropped. Any other
+    # non-zero rc is a transport failure, and curl's stderr shows as before.
+    # For 22, read the status and the first Retry-After of the LAST answer
+    # in the header dump (-L writes one block for each redirect).
+    status="" ra=""
+    if (( rc == 22 )); then
+      read -r status ra < <(LC_ALL=C awk '
+        { sub(/\r$/, "") }
+        /^HTTP\// { status = $2; ra = ""; seen = 0; next }
+        !seen && tolower(substr($0, 1, 12)) == "retry-after:" {
+          ra = substr($0, 13); gsub(/^[ \t]+|[ \t]+$/, "", ra); seen = 1
+        }
+        END { if (ra == "") ra = "-"; print status, ra }' "${tmp}/headers") || :
+    elif (( rc != 0 )); then
+      cat "${tmp}/stderr" >&2
+    fi
+    rm -rf "${tmp}"
+    if (( rc == 0 )); then
+      printf '%s\n' "${out}"
+      return 0
+    fi
+    (( rc == 22 )) || return 1
+    if [[ "${status}" != 503 && "${status}" != 429 ]] || [[ ! "${ra}" =~ ^[0-9]+$ ]]; then
+      return 1
+    fi
+    code=$(jq -r '.data.code // .code // empty' <<<"${out}" 2>/dev/null) || code=""
+    # The code comes from the server and goes to the terminal.
+    [[ "${code}" =~ ^[A-Z][A-Z0-9_]{0,63}$ ]] || code=""
+    if (( try >= tries )); then
+      error "kubehz: the platform did not register ${domain} (HTTP ${status}${code:+ ${code}}, ${try} tries). Run '${next}' when the platform is available again."
+      return 3
+    fi
+    # More than six digits read as 999999 s (no overflow); 10# reads a
+    # leading zero as decimal.
+    (( ${#ra} <= 6 )) || ra=999999
+    delay=$(( 10#${ra} ))
+    (( delay <= max_wait )) || delay=${max_wait}
+    try=$(( try + 1 ))
+    warn "kubehz: the platform answered HTTP ${status}${code:+ ${code}}. Try ${try} of ${tries} in ${delay}s."
+    sleep "${delay}"
+  done
+}
+
+# Usage: kubehz::ensure_claim_key <domain> <api_url> [<next>]
+# <next> is the command the error of an unavailable platform names (see
+# kubehz::register_post). rc 3: that error, no fall back.
 kubehz::ensure_claim_key() {
-  local domain="${1}" api_url="${2}"
+  local domain="${1}" api_url="${2}" next="${3:-lo kubehz register --domain ${1}}"
   local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}"
   # HCLOUD_TOKEN travels on this base below — never over plain HTTP.
   http::require_https "${hcloud_api}" "HCLOUD_API_BASE" || return 1
@@ -413,9 +497,7 @@ kubehz::ensure_claim_key() {
   local response
   # shellcheck disable=SC2016  # the filter is jq program text
   response=$(kubehz::register_body "${domain}" '{domain: $d, claimKey: true}' --arg d "${domain}" |
-    curl -fsSL --proto-redir =https -X POST "${api_url}/api/clusters/register" \
-      -H "Content-Type: application/json" \
-      --data-binary @-) || return 1
+    kubehz::register_post "${domain}" "${api_url}" "${next}") || return $?
 
   local cluster_id public_key fingerprint key_name
   cluster_id=$(jq -r '.id // empty' <<<"${response}")
@@ -463,9 +545,11 @@ kubehz::ensure_claim_key() {
 # on the HTTPS API URL and only for THIS opt-in — never printed, never logged.
 #
 # Fail-soft: any failure returns 1 and the caller falls back to the anonymous
-# flow. Usage: kubehz::direct_claim <domain> <cluster_yaml> <api_url>
+# flow. rc 3: the platform stayed unavailable (kubehz::register_post printed
+# the error that names <next>), and the caller must not fall back.
+# Usage: kubehz::direct_claim <domain> <cluster_yaml> <api_url> [<next>]
 kubehz::direct_claim() {
-  local domain="${1}" cluster_yaml="${2}" api_url="${3}"
+  local domain="${1}" cluster_yaml="${2}" api_url="${3}" next="${4:-lo kubehz register --domain ${1}}"
   http::credential_ok KUBEHZ_TOKEN || return 1
 
   local fingerprint
@@ -479,10 +563,7 @@ kubehz::direct_claim() {
   # shellcheck disable=SC2016  # the filter is jq program text
   response=$(kubehz::register_body "${domain}" '{domain: $d, fingerprint: $fp}' \
       --arg d "${domain}" --arg fp "${fingerprint}" |
-    curl -fsSL --proto-redir =https -X POST "${api_url}/api/clusters/register" \
-      -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}") \
-      -H "Content-Type: application/json" \
-      --data-binary @-) || return 1
+    kubehz::register_post "${domain}" "${api_url}" "${next}" bearer) || return $?
 
   local cluster_id claimed
   cluster_id=$(jq -r '.id // empty' <<<"${response}")
@@ -548,10 +629,13 @@ kubehz::direct_claim() {
 # It announces a PENDING cluster (POST /api/clusters/register) with the SSH-key
 # MD5 fingerprint and needs NO bearer/token. Called during provision when
 # access != none. Non-fatal: warns on failure, returns 0 so provisioning
-# continues without kubehz integration.
-# Usage: kubehz::register_cluster <domain> <cluster_yaml>
+# continues without kubehz integration. One failure returns 1 instead (#312):
+# a platform that still answers 503 or 429 with Retry-After after the retry
+# bound (kubehz::register_post). Then no flow falls back, and the error names
+# <next>, the command that registers again (default: lo kubehz register).
+# Usage: kubehz::register_cluster <domain> <cluster_yaml> [<next>]
 kubehz::register_cluster() {
-  local domain="${1}" cluster_yaml="${2}"
+  local domain="${1}" cluster_yaml="${2}" next="${3:-lo kubehz register --domain ${1}}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
 
   # Defense in depth: the fingerprint travels on this URL; never over plain HTTP.
@@ -573,8 +657,11 @@ kubehz::register_cluster() {
   # claimed DIRECTLY at register time — no claim-key mint, no fingerprint hop.
   # Optionally hands the platform the HCLOUD_TOKEN too (spec.kubehz.
   # connectHcloudToken) so the dashboard can drive provisioning.
+  local rc
   if [[ -n "${KUBEHZ_TOKEN:-}" ]]; then
-    kubehz::direct_claim "${domain}" "${cluster_yaml}" "${api_url}" && return 0
+    rc=0
+    kubehz::direct_claim "${domain}" "${cluster_yaml}" "${api_url}" "${next}" || rc=$?
+    case "${rc}" in 0) return 0 ;; 3) return 1 ;; esac
     warn "kubehz direct claim failed for ${domain}; falling back to the anonymous registration flow"
   fi
 
@@ -582,7 +669,9 @@ kubehz::register_cluster() {
   # env during provisioning; a human claims fingerprint-solo in the dashboard.
   # Falls through to the legacy server-key fingerprint announce when unavailable.
   if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
-    kubehz::ensure_claim_key "${domain}" "${api_url}" && return 0
+    rc=0
+    kubehz::ensure_claim_key "${domain}" "${api_url}" "${next}" || rc=$?
+    case "${rc}" in 0) return 0 ;; 3) return 1 ;; esac
     warn "kubehz claim-key registration failed for ${domain}; falling back to the legacy fingerprint announce"
   fi
 
@@ -593,15 +682,16 @@ kubehz::register_cluster() {
   }
 
   local response
+  rc=0
   # shellcheck disable=SC2016  # the filter is jq program text
   response=$(kubehz::register_body "${domain}" '{domain: $d, fingerprint: $fp}' \
       --arg d "${domain}" --arg fp "${fingerprint}" |
-    curl -fsSL --proto-redir =https -X POST "${api_url}/api/clusters/register" \
-      -H "Content-Type: application/json" \
-      --data-binary @-) || {
+    kubehz::register_post "${domain}" "${api_url}" "${next}") || rc=$?
+  (( rc != 3 )) || return 1
+  if (( rc != 0 )); then
     warn "kubehz API request failed for ${domain}, cluster will continue without kubehz integration"
     return 0
-  }
+  fi
 
   local cluster_id
   cluster_id=$(echo "${response}" | jq -r '.id // empty')

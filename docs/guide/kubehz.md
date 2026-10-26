@@ -444,6 +444,27 @@ and needs no token; if the API is unreachable it warns and provisioning
 continues.
 :::
 
+::: details When the platform is busy: 503 or 429
+The platform can refuse a registration for a short time. Then it answers
+`503` or `429` with a `Retry-After` header and a code, for example
+`REGISTRATION_UNAVAILABLE` or `RATE_LIMITED`. This applies to all three
+register modes: the direct claim with `KUBEHZ_TOKEN`, the claim key with
+`HCLOUD_TOKEN`, and the fingerprint announce.
+
+- lo waits for the time in `Retry-After` and tries again. It tries at most
+  3 times. One wait is at most 60 seconds, so lo waits at most 2 minutes.
+- Ctrl-C stops the wait at once.
+- If the platform still refuses after the third try, lo stops with an
+  error. The error names the code and the command to run when the platform
+  is available again. lo does not try the next register mode, because the
+  platform gives the same answer to all of them.
+- `lo kubehz register` names `lo kubehz register`. `lo provision` stops
+  before its bootstrap and names `lo provision --bootstrap`: that command
+  registers the cluster and then applies the bootstrap.
+- A `503` without `Retry-After` gives no time to wait. lo does not try it
+  again, and the register continues as for an API that does not answer.
+:::
+
 ::: details Claim before you deploy: the bind secret
 The pre-agent announce also hands back a one-time **bind secret**.
 `lo kubehz register` stores it at `clusters/<domain>/.kubehz-bind` (mode
