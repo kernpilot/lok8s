@@ -299,7 +299,11 @@ func TestRegisterRetryBoundMatchesBash(t *testing.T) {
 		t.Fatal("kubehz::register_post not found in libs/kubehz/main")
 	}
 	body := src[start:]
-	body = body[:strings.Index(body, "\n)\n")]
+	end := strings.Index(body, "\n)\n")
+	if end < 0 {
+		t.Fatal("the end of kubehz::register_post not found")
+	}
+	body = body[:end]
 	find := func(re string) string {
 		t.Helper()
 		m := regexp.MustCompile(re).FindStringSubmatch(body)

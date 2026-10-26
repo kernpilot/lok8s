@@ -499,9 +499,8 @@ kubehz::ensure_claim_key() {
   http::require_https "${hcloud_api}" "HCLOUD_API_BASE" || return 1
   http::credential_ok HCLOUD_TOKEN || return 1
 
-  local response
+  local response rc=0
   # shellcheck disable=SC2016  # the filter is jq program text
-  local rc=0
   response=$(kubehz::register_body "${domain}" '{domain: $d, claimKey: true}' --arg d "${domain}" |
     kubehz::register_post "${domain}" "${api_url}" "${next}") || rc=$?
   if (( rc != 0 )); then
@@ -571,9 +570,8 @@ kubehz::direct_claim() {
   }
 
   # Direct-attributed register: the bearer proves the tenant; the row lands owned.
-  local response
+  local response rc=0
   # shellcheck disable=SC2016  # the filter is jq program text
-  local rc=0
   response=$(kubehz::register_body "${domain}" '{domain: $d, fingerprint: $fp}' \
       --arg d "${domain}" --arg fp "${fingerprint}" |
     kubehz::register_post "${domain}" "${api_url}" "${next}" bearer) || rc=$?
