@@ -407,9 +407,9 @@ kubehz::register_body() {
 # the answer of a status below 400. A 503 or 429 with Retry-After tries
 # again (#312): at most 3 tries, and one wait is at most 60 s, so one call
 # waits at most two minutes. The bound holds for each call, not for the
-# whole registration: a mode whose last answer is a refusal lo does not try
-# again (a 502 after two 503s, say) falls back, and each of the three modes
-# can wait. Ctrl-C ends the wait (sleep), and the EXIT trap of this subshell
+# whole registration: if the last answer of a mode is a refusal that lo does
+# not try again (for example a 502 after two 503s), lo falls back to the next
+# mode, and each of the three modes can wait. Ctrl-C ends the wait (sleep), and the EXIT trap of this subshell
 # body removes the header dump. Retry-After counts in its delta-seconds form
 # only (the form the kubehz api sends); a 503 without it gives no time to
 # wait and is not tried again. The Go twin is registerPost

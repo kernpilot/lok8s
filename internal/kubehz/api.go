@@ -147,9 +147,10 @@ func retryAfter(h http.Header) (d time.Duration, ok bool) {
 // with Retry-After tries again: at most registerTries calls in total, and
 // one wait is at most registerMaxWait, so a call waits at most two minutes.
 //
-// The bound holds for each call, not for the whole registration. A mode
-// whose last answer is a refusal lo does not try again (a 502 after two
-// 503s, say) falls back to the next mode, and that mode can wait again. So
+// The bound holds for each call, not for the whole registration. If the
+// last answer of a mode is a refusal that lo does not try again (for
+// example a 502 after two 503s), lo falls back to the next mode, and that
+// mode can wait again. So
 // the worst case is three modes with two waits each: six minutes of
 // waiting, plus up to the 2-minute response-header timeout of httpClient
 // for each of the nine requests (bash curl has no timeout). A shared budget
