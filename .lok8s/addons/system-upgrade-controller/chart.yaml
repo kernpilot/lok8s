@@ -7,8 +7,9 @@
 # shape as cnpg-operator (operator+CRD here, the Cluster CRs in the consumer).
 #
 # The chart hardcodes namespace `cattle-system` in every template, so the
-# ChartRenderer namespace, the kustomization `namespace:` transformer, and the
-# shipped namespace.yaml are all pinned to `cattle-system` to match.
+# ChartRenderer namespace and the shipped namespace.yaml are pinned to
+# `cattle-system` to match. The kustomization has no `namespace:`
+# transformer (its header says why).
 #
 # kubeVersion must be set explicitly so khelm forwards it to helm — otherwise
 # helm defaults to v1.20.0. Tracks the consuming clusters' Kubernetes version

@@ -17,8 +17,9 @@
 # No `namespace:` transformer: it would move every namespaced object into
 # cattle-system, and rbac.yaml needs one Role in `default` (the node events).
 # The chart hardcodes cattle-system in every template, and rbac.yaml names
-# the namespace of each object. TestSystemUpgradeControllerFixtureMatchesChart
-# fails when a chart object comes without a namespace. We ship
+# the namespace of each object. internal/addons/suc_rbac_test.go asserts
+# that every namespaced object of the render is in cattle-system, except
+# the events Role and RoleBinding in default. We ship
 # namespace.yaml here (the chart hardcodes the ns but does not create it) so the
 # addon owns the controller's home namespace; the glue target's Plans/RBAC reuse
 # it. (Unlike monitoring/tempo, the ns is NOT owned by a target here — the

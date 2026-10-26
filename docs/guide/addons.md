@@ -1073,13 +1073,16 @@ a holder can:
 - change every Node (`update`, and `patch` through the drainer): labels,
   taints, `spec.unschedulable`. RBAC cannot limit the update to the fields
   SUC writes;
-- through the drainer: read every pod, and evict or delete any pod in any
-  namespace;
+- through the drainer: list and get every pod in every namespace (a list
+  returns the full pod spec, environment values included), get every
+  DaemonSet, and evict or delete any pod;
 - list every Job in the cluster. The controller lists with a label
   selector, but the grant has none;
 - create any CustomResourceDefinition, and change the Plan CRD;
-- write the Plan status, the Lease and events in `cattle-system` and
-  `default`.
+- update Plan status in `cattle-system`; create Leases there and
+  get/update the `system-upgrade-controller` Lease; create/patch Events in
+  `cattle-system` and `default`. The Lease create allows any name: RBAC
+  cannot limit a create by name, only the get and the update.
 
 What it lost against `cluster-admin`: every write to RBAC (roles and
 bindings), impersonation, token requests for other ServiceAccounts,

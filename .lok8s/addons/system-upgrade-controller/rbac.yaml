@@ -20,7 +20,7 @@
 # binding's roleRef cannot change, so a binding that reused one of those
 # names would fail to apply on a cluster that still carries the old one.
 #
-# Five parts:
+# Four parts:
 #   - ClusterRole lok8s-system-upgrade-controller: the controller's calls on
 #     cluster-scoped resources and across all namespaces.
 #   - Role lok8s-system-upgrade-controller (cattle-system): its calls in its

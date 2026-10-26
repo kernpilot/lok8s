@@ -29,14 +29,22 @@ package addons
 // TestSystemUpgradeControllerRBAC is offline: it reads the ServiceAccount,
 // the namespace, the Lease name and the chart's binding from a committed
 // fixture of the chart render, and renders the addon's patch over that
-// fixture through internal/render. TestSystemUpgradeControllerFixtureMatchesChart
-// renders the chart itself (khelm) and reads the upstream manifests (both
-// online) and diffs the fixtures against them; it runs on CI and with
+// fixture through internal/render. It also asserts that every namespaced
+// object of that render is in cattle-system, except the events Role and
+// RoleBinding in default: the addon has no `namespace:` transformer, and a
+// fixture refresh takes whatever the chart renders, so the fixture alone
+// proves nothing. TestSystemUpgradeControllerFixtureMatchesChart renders the
+// chart itself (khelm) and reads the upstream manifests (both online) and
+// diffs the fixtures against them; it runs on CI and with
 // LOK8S_ONLINE_TESTS=1.
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
+	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -63,6 +71,9 @@ const (
 	sucRole        = "lok8s-system-upgrade-controller"
 	sucEventsRole  = "lok8s-system-upgrade-controller-events"
 	sucDrainerRole = "lok8s-system-upgrade-controller-drainer"
+	// sucNamespace is the controller's namespace: the chart hardcodes it in
+	// every template, and namespace.yaml creates it.
+	sucNamespace = "cattle-system"
 	// sucEventsNS is where the recorder writes the events on a Node.
 	sucEventsNS = "default"
 	// sucChartBinding is the chart's ClusterRoleBinding to cluster-admin.
@@ -274,6 +285,70 @@ func sucCheckRulesNeeded(t *testing.T, g sucGrant, calls []sucCall) {
 	}
 }
 
+// sucClusterScoped are the cluster-scoped kinds a render of the addon can
+// carry; every other kind is namespaced.
+var sucClusterScoped = []string{"Namespace", "ClusterRole", "ClusterRoleBinding", "CustomResourceDefinition"}
+
+// checkSUCNamespaces asserts that every namespaced object of a render is in
+// the controller's namespace, except the events Role and RoleBinding in
+// default, and that a cluster-scoped object has no namespace. It also
+// asserts that the render carries the namespaced kinds the addon ships, so
+// the check cannot pass on a render without them.
+func checkSUCNamespaces(t *testing.T, objs map[string]object) {
+	t.Helper()
+	seen := map[string]bool{}
+	for _, k := range sortedKeys(objs) {
+		o := objs[k]
+		if slices.Contains(sucClusterScoped, o.Kind) {
+			if o.Namespace != "" {
+				t.Errorf("%s is cluster-scoped but carries namespace %q", k, o.Namespace)
+			}
+			continue
+		}
+		seen[o.Kind] = true
+		want := sucNamespace
+		if (o.Kind == "Role" || o.Kind == "RoleBinding") && o.Name == sucEventsRole {
+			want = sucEventsNS
+		}
+		if o.Namespace != want {
+			t.Errorf("%s is in namespace %q, want %q (the addon has no namespace: transformer)", k, o.Namespace, want)
+		}
+	}
+	for _, kind := range []string{"ServiceAccount", "ConfigMap", "Deployment", "Role", "RoleBinding"} {
+		if !seen[kind] {
+			t.Errorf("the render has no %s: the namespace check did not see it", kind)
+		}
+	}
+}
+
+// sucCheckNoDuplicates asserts that no atom of a namespaced grant (group,
+// resource, verb, resource name) is already allowed in that namespace by a
+// cluster-wide grant of the same ServiceAccount: such a rule adds nothing
+// and hides what the ClusterRole grants.
+func sucCheckNoDuplicates(t *testing.T, g sucGrant, cluster []sucGrant) {
+	t.Helper()
+	for _, r := range g.role.Rules() {
+		names := stringsOf(r["resourceNames"])
+		if len(names) == 0 {
+			names = []string{sucAnyName}
+		}
+		for _, grp := range stringsOf(r["apiGroups"]) {
+			for _, res := range stringsOf(r["resources"]) {
+				for _, verb := range stringsOf(r["verbs"]) {
+					for _, name := range names {
+						c := sucCall{group: grp, resource: res, verb: verb, ns: g.ns, name: name}
+						for _, cg := range cluster {
+							if cg.allows(c) {
+								t.Errorf("%s %s/%s grants %s %q/%s name %q, which %s/%s already grants in every namespace", g.role.Kind, g.ns, g.role.Name, verb, grp, res, name, cg.role.Kind, cg.role.Name)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 // sucCallsBy returns the resolved calls of the given callers.
 func sucCallsBy(n sucNames, by ...string) []sucCall {
 	var out []sucCall
@@ -310,9 +385,12 @@ func readSUCFixture(t *testing.T) (map[string]object, sucNames) {
 			n.serviceAccount, n.namespace = o.Name, o.Namespace
 		}
 	}
-	dep, ok := objs["Deployment/system-upgrade-controller"]
-	if !ok || n.serviceAccount == "" || n.namespace == "" {
-		t.Fatalf("%s: no Deployment/system-upgrade-controller or no ServiceAccount: %v", sucFixture, sortedKeys(objs))
+	if n.namespace != sucNamespace {
+		t.Fatalf("%s: the ServiceAccount %q is in namespace %q, want %q", sucFixture, n.serviceAccount, n.namespace, sucNamespace)
+	}
+	dep, ok := objs[objKey("Deployment", n.namespace, "system-upgrade-controller")]
+	if !ok || n.serviceAccount == "" {
+		t.Fatalf("%s: no Deployment %s/system-upgrade-controller or no ServiceAccount: %v", sucFixture, n.namespace, sortedKeys(objs))
 	}
 	podSpec := sucNested(dep.Doc, "spec", "template", "spec")
 	if sa, _ := podSpec["serviceAccountName"].(string); sa != n.serviceAccount || dep.Namespace != n.namespace {
@@ -343,7 +421,7 @@ func readSUCFixture(t *testing.T) (map[string]object, sucNames) {
 	if n.lease == "" {
 		t.Fatalf("the Deployment's pod template has no %s label", sucNameLabel)
 	}
-	n.chartBinding, ok = objs["ClusterRoleBinding/"+sucChartBinding]
+	n.chartBinding, ok = objs[objKey("ClusterRoleBinding", "", sucChartBinding)]
 	if !ok {
 		t.Fatalf("%s: no ClusterRoleBinding/%s", sucFixture, sucChartBinding)
 	}
@@ -364,15 +442,16 @@ func sucBindsSA(b object, n sucNames) bool {
 
 // checkSUCBindings asserts that exactly the four bindings of rbac.yaml
 // bind the controller's ServiceAccount, each with that one subject and in
-// its namespace, and that the chart's binding to cluster-admin is gone.
+// its namespace (the key carries it), and that the chart's binding to
+// cluster-admin is gone.
 func checkSUCBindings(t *testing.T, objs map[string]object, n sucNames) {
 	t.Helper()
-	// binding -> namespace + " " + roleRef
+	// binding -> roleRef
 	want := map[string]string{
-		"ClusterRoleBinding/" + sucRole:        " ClusterRole/" + sucRole,
-		"RoleBinding/" + sucRole:               n.namespace + " Role/" + sucRole,
-		"RoleBinding/" + sucEventsRole:         sucEventsNS + " Role/" + sucEventsRole,
-		"ClusterRoleBinding/" + sucDrainerRole: " ClusterRole/" + sucDrainerRole,
+		objKey("ClusterRoleBinding", "", sucRole):         "ClusterRole/" + sucRole,
+		objKey("RoleBinding", n.namespace, sucRole):       "Role/" + sucRole,
+		objKey("RoleBinding", sucEventsNS, sucEventsRole): "Role/" + sucEventsRole,
+		objKey("ClusterRoleBinding", "", sucDrainerRole):  "ClusterRole/" + sucDrainerRole,
 	}
 	got := map[string]string{}
 	for _, k := range sortedKeys(objs) {
@@ -383,15 +462,15 @@ func checkSUCBindings(t *testing.T, objs map[string]object, n sucNames) {
 		ref, _ := o.Doc["roleRef"].(map[string]any)
 		kind, _ := ref["kind"].(string)
 		name, _ := ref["name"].(string)
-		got[k] = o.Namespace + " " + kind + "/" + name
+		got[k] = kind + "/" + name
 		if subjects, _ := o.Doc["subjects"].([]any); len(subjects) != 1 {
 			t.Errorf("%s has %d subjects, want only %s/%s", k, len(subjects), n.namespace, n.serviceAccount)
 		}
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("bindings of %s/%s (namespace roleRef):\n got: %v\nwant: %v", n.namespace, n.serviceAccount, got, want)
+		t.Errorf("bindings of %s/%s (binding: roleRef):\n got: %v\nwant: %v", n.namespace, n.serviceAccount, got, want)
 	}
-	if _, ok := objs["ClusterRoleBinding/"+sucChartBinding]; ok {
+	if _, ok := objs[objKey("ClusterRoleBinding", "", sucChartBinding)]; ok {
 		t.Errorf("ClusterRoleBinding/%s (the chart's binding to cluster-admin) is still in the render", sucChartBinding)
 	}
 }
@@ -466,7 +545,7 @@ func readSUCImages(t *testing.T, root string) (ctrl, kubectl sucImage) {
 
 // checkSUCImages asserts that values.yaml pins both images by digest and
 // that the chart render (objs) uses exactly those references.
-func checkSUCImages(t *testing.T, root string, objs map[string]object) {
+func checkSUCImages(t *testing.T, root string, objs map[string]object, ns string) {
 	t.Helper()
 	ctrlImg, kubectlImg := readSUCImages(t, root)
 	for _, img := range []sucImage{ctrlImg, kubectlImg} {
@@ -477,7 +556,7 @@ func checkSUCImages(t *testing.T, root string, objs map[string]object) {
 	ctrl := ctrlImg.Repository + ":" + ctrlImg.Tag
 	kubectl := kubectlImg.Repository + ":" + kubectlImg.Tag
 
-	dep := objs["Deployment/system-upgrade-controller"]
+	dep := objs[objKey("Deployment", ns, "system-upgrade-controller")]
 	var images []string
 	for _, kind := range []string{"containers", "initContainers"} {
 		seq, _ := sucNested(dep.Doc, "spec", "template", "spec")[kind].([]any)
@@ -490,7 +569,7 @@ func checkSUCImages(t *testing.T, root string, objs map[string]object) {
 	if !reflect.DeepEqual(images, []string{ctrl}) {
 		t.Errorf("Deployment images %v, want [%s]", images, ctrl)
 	}
-	data, _ := objs["ConfigMap/system-upgrade-controller-config"].Doc["data"].(map[string]any)
+	data, _ := objs[objKey("ConfigMap", ns, "system-upgrade-controller-config")].Doc["data"].(map[string]any)
 	for _, key := range []string{"SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE", "SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE_WINDOWS"} {
 		if data[key] != kubectl {
 			t.Errorf("ConfigMap %s = %v, want %s", key, data[key], kubectl)
@@ -575,11 +654,21 @@ func TestSystemUpgradeControllerRBAC(t *testing.T) {
 	}
 
 	rbac := readObjects(t, filepath.Join(addon, "rbac.yaml"))
-	clusterRole, ok1 := rbac["ClusterRole/"+sucRole]
-	role, ok2 := rbac["Role/"+sucRole]
-	eventsRole, ok3 := rbac["Role/"+sucEventsRole]
-	drainer, ok4 := rbac["ClusterRole/"+sucDrainerRole]
-	if !ok1 || !ok2 || !ok3 || !ok4 || role.Namespace != n.namespace || eventsRole.Namespace != sucEventsNS {
+	// The namespaces of the chart objects and of rbac.yaml, before any
+	// lookup below can stop the test on a moved object.
+	both := maps.Clone(fixture)
+	for k, o := range rbac {
+		if _, dup := both[k]; dup {
+			t.Errorf("rbac.yaml redefines %s of the chart", k)
+		}
+		both[k] = o
+	}
+	checkSUCNamespaces(t, both)
+	clusterRole, ok1 := rbac[objKey("ClusterRole", "", sucRole)]
+	role, ok2 := rbac[objKey("Role", n.namespace, sucRole)]
+	eventsRole, ok3 := rbac[objKey("Role", sucEventsNS, sucEventsRole)]
+	drainer, ok4 := rbac[objKey("ClusterRole", "", sucDrainerRole)]
+	if !ok1 || !ok2 || !ok3 || !ok4 {
 		t.Fatalf("rbac.yaml: want ClusterRole/%s, Role %s/%s, Role %s/%s and ClusterRole/%s, have %v",
 			sucRole, n.namespace, sucRole, sucEventsNS, sucEventsRole, sucDrainerRole, sortedKeys(rbac))
 	}
@@ -618,13 +707,19 @@ func TestSystemUpgradeControllerRBAC(t *testing.T) {
 		sucCheckRulesNeeded(t, g, sucCallsBy(n, sucByController))
 	}
 	sucCheckRulesNeeded(t, sucGrant{drainer, ""}, sucCallsBy(n, features...))
+	// No namespaced rule repeats what the token holds cluster-wide (the
+	// drainer included: the same ServiceAccount holds it).
+	clusterGrants := []sucGrant{{clusterRole, ""}, {drainer, ""}}
+	for _, g := range []sucGrant{{role, n.namespace}, {eventsRole, sucEventsNS}} {
+		sucCheckNoDuplicates(t, g, clusterGrants)
+	}
 
 	// The image pins, and the chart render that uses them.
-	checkSUCImages(t, root, fixture)
+	checkSUCImages(t, root, fixture, n.namespace)
 
 	// The opt-in addon restores exactly the chart's binding.
 	admin := readObjects(t, filepath.Join(root, sucAdminAddon, "clusterrolebinding.yaml"))
-	if got, ok := admin["ClusterRoleBinding/"+sucChartBinding]; !ok || len(admin) != 1 || !reflect.DeepEqual(got.Doc, n.chartBinding.Doc) {
+	if got, ok := admin[objKey("ClusterRoleBinding", "", sucChartBinding)]; !ok || len(admin) != 1 || !reflect.DeepEqual(got.Doc, n.chartBinding.Doc) {
 		t.Errorf("%s/clusterrolebinding.yaml\n got: %s\nwant (the chart's binding): %s", sucAdminAddon, canon(t, admin), canon(t, n.chartBinding.Doc))
 	}
 	if res := sucResources(t, filepath.Join(root, sucAdminAddon)); !reflect.DeepEqual(res, []string{"clusterrolebinding.yaml"}) {
@@ -649,6 +744,7 @@ func TestSystemUpgradeControllerRBAC(t *testing.T) {
 	}
 	rendered := renderPatched(t, root, [][]byte{fx, rbacRaw}, patches)
 	checkSUCBindings(t, rendered, n)
+	checkSUCNamespaces(t, rendered)
 	for k, o := range rbac {
 		if !reflect.DeepEqual(rendered[k].Doc, o.Doc) {
 			t.Errorf("%s changed in the render:\n got: %s\nwant: %s", k, canon(t, rendered[k].Doc), canon(t, o.Doc))
@@ -656,33 +752,60 @@ func TestSystemUpgradeControllerRBAC(t *testing.T) {
 	}
 }
 
-// sucFetchUpstreamRBAC reads the RBAC objects of upstream SUC's
-// manifests/ at a release tag.
-func sucFetchUpstreamRBAC(t *testing.T, tag string) map[string]object {
+// sucManifestFile matches a file of manifests/ in the source tarball of a
+// release tag (its entries start with a <repo>-<version>/ directory).
+var sucManifestFile = regexp.MustCompile(`^[^/]+/manifests/[^/]+\.ya?ml$`)
+
+// sucFetchUpstreamRBAC reads the RBAC objects of every file in upstream
+// SUC's manifests/ at a release tag. It lists the directory from the tag's
+// source tarball, so a new file is not missed; codeload has no API rate
+// limit, unlike the contents API without a token. It returns the objects
+// and the file names.
+func sucFetchUpstreamRBAC(t *testing.T, tag string) (map[string]object, []string) {
 	t.Helper()
-	client := &http.Client{Timeout: 30 * time.Second}
+	url := "https://codeload.github.com/rancher/system-upgrade-controller/tar.gz/refs/tags/" + tag
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s: status %d", url, resp.StatusCode)
+	}
+	gz, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	tr := tar.NewReader(gz)
 	out := map[string]object{}
-	for _, f := range []string{"clusterrole.yaml", "clusterrolebinding.yaml", "system-upgrade-controller.yaml"} {
-		url := "https://raw.githubusercontent.com/rancher/system-upgrade-controller/" + tag + "/manifests/" + f
-		resp, err := client.Get(url)
+	var files []string
+	for {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
 		if err != nil {
-			t.Fatalf("GET %s: %v", url, err)
+			t.Fatalf("reading %s: %v", url, err)
 		}
-		body, err := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if err != nil || resp.StatusCode != http.StatusOK {
-			t.Fatalf("GET %s: status %d, %v", url, resp.StatusCode, err)
+		if h.Typeflag != tar.TypeReg || !sucManifestFile.MatchString(h.Name) {
+			continue
 		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatalf("reading %s from %s: %v", h.Name, url, err)
+		}
+		files = append(files, h.Name)
 		for k, o := range decodeObjects(t, body) {
 			if strings.HasSuffix(o.Kind, "Role") || strings.HasSuffix(o.Kind, "RoleBinding") {
 				out[k] = o
 			}
 		}
 	}
-	if len(out) == 0 {
-		t.Fatalf("no RBAC objects in the upstream manifests at %s", tag)
+	if len(files) == 0 || len(out) == 0 {
+		t.Fatalf("no manifests/ files or no RBAC objects in %s (files %v)", url, files)
 	}
-	return out
+	return out, files
 }
 
 // TestSystemUpgradeControllerFixtureMatchesChart renders the pinned chart
@@ -734,7 +857,7 @@ func TestSystemUpgradeControllerFixtureMatchesChart(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	delete(chart, "Namespace/"+n.namespace)
+	delete(chart, objKey("Namespace", "", n.namespace))
 	if !reflect.DeepEqual(sortedKeys(chart), sortedKeys(fixture)) {
 		t.Fatalf("the chart renders %v, the fixture has %v: refresh %s", sortedKeys(chart), sortedKeys(fixture), sucFixture)
 	}
@@ -747,7 +870,8 @@ func TestSystemUpgradeControllerFixtureMatchesChart(t *testing.T) {
 	// The addon as shipped.
 	shipped := renderDir(addon, func(string) {})
 	checkSUCBindings(t, shipped, n)
-	checkSUCImages(t, root, shipped)
+	checkSUCNamespaces(t, shipped)
+	checkSUCImages(t, root, shipped, n.namespace)
 	rbac := readObjects(t, filepath.Join(addon, "rbac.yaml"))
 	for k, o := range rbac {
 		if !reflect.DeepEqual(shipped[k].Doc, o.Doc) {
@@ -757,7 +881,7 @@ func TestSystemUpgradeControllerFixtureMatchesChart(t *testing.T) {
 
 	// The opt-in addon renders the chart's binding, unchanged.
 	admin := renderDir(filepath.Join(root, sucAdminAddon), func(string) {})
-	if got := admin["ClusterRoleBinding/"+sucChartBinding]; len(admin) != 1 || !reflect.DeepEqual(got.Doc, chart["ClusterRoleBinding/"+sucChartBinding].Doc) {
+	if got := admin[objKey("ClusterRoleBinding", "", sucChartBinding)]; len(admin) != 1 || !reflect.DeepEqual(got.Doc, chart[objKey("ClusterRoleBinding", "", sucChartBinding)].Doc) {
 		t.Errorf("the opt-in addon renders %s, want only the chart's ClusterRoleBinding/%s", canon(t, admin), sucChartBinding)
 	}
 
@@ -769,9 +893,10 @@ func TestSystemUpgradeControllerFixtureMatchesChart(t *testing.T) {
 		t.Fatalf("values.yaml: controller tag %q has no version", ctrlImg.Tag)
 	}
 	upstream := readSUCUpstreamNames(t)
-	for k, o := range sucFetchUpstreamRBAC(t, m[1]) {
+	upstreamRBAC, files := sucFetchUpstreamRBAC(t, m[1])
+	for k, o := range upstreamRBAC {
 		if !slices.ContainsFunc(upstream, func(u sucUpstreamName) bool { return u.Kind == o.Kind && u.Name == o.Name }) {
-			t.Errorf("upstream manifests %s carry %s, which %s does not list", m[1], k, sucUpstreamNames)
+			t.Errorf("upstream manifests %s (%v) carry %s, which %s does not list", m[1], files, k, sucUpstreamNames)
 		}
 	}
 }
