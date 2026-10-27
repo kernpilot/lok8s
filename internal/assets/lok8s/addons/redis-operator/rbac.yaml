@@ -98,10 +98,20 @@ rules:
   # Services. The cache (redis_controller.go:101; reconciler.go:58).
   # get, create, update: k8sutils/services.go:118,93,104 and
   # controller/common/reconciler/reconciler.go:50,92. The operator never
-  # deletes a Service.
+  # deletes a Service, but delete is still needed: an update writes the
+  # owner reference of the CR again (k8sutils/services.go:61,174;
+  # reconciler.go:81-92). When that changes the owner references of an
+  # existing Service (an orphaned or adopted one) and the admission plugin
+  # OwnerReferencesPermissionEnforcement is on, the API server allows the
+  # update only with delete on the Service (kubernetes
+  # plugin/pkg/admission/gc/gc_admission.go:103-118, v1.31.0). A refused
+  # update stops the resources step, and a RedisReplication then gets no
+  # replication setup (redisreplication_controller.go:64-79). StatefulSets
+  # and PodDisruptionBudgets have the same owner-reference updates; their
+  # delete is in their rules below.
   - apiGroups: [""]
     resources: [services]
-    verbs: [get, list, watch, create, update]
+    verbs: [get, list, watch, create, update, delete]
   # StatefulSets. The cache (redis_controller.go:102,
   # rediscluster_controller.go:500, redissentinel_controller.go:171;
   # rediscluster_controller.go:487, reconciler.go:58). get:

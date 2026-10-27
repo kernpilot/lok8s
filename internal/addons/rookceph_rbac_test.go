@@ -21,8 +21,6 @@ package addons
 import (
 	"bufio"
 	"context"
-	"errors"
-	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -173,39 +171,22 @@ func objKey(kind, ns, name string) string {
 }
 
 // decodeObjects returns every object of a multi-document stream, keyed by
-// objKey. Any decode error other than EOF fails the test: a corrupt stream
-// must never read as "nothing there". So does a key that comes twice: the
-// second object must never replace the first unseen.
+// objKey, with the metadata reduced to the name and the namespace (the
+// addons' label transformers add labels the charts do not). decodeDocs
+// fails the test on a decode error and on a key that comes twice.
 func decodeObjects(t *testing.T, stream []byte) map[string]object {
 	t.Helper()
 	objs := map[string]object{}
-	dec := yaml.NewDecoder(strings.NewReader(string(stream)))
-	for {
-		var doc map[string]any
-		err := dec.Decode(&doc)
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			t.Fatalf("decoding the object stream: %v", err)
-		}
-		kind, _ := doc["kind"].(string)
-		meta, _ := doc["metadata"].(map[string]any)
+	for _, d := range decodeDocs(t, stream) {
+		meta, _ := d.Doc["metadata"].(map[string]any)
 		name, _ := meta["name"].(string)
 		ns, _ := meta["namespace"].(string)
-		if kind == "" || name == "" {
-			continue
-		}
 		m := map[string]any{"name": name}
 		if ns != "" {
 			m["namespace"] = ns
 		}
-		doc["metadata"] = m
-		key := objKey(kind, ns, name)
-		if _, dup := objs[key]; dup {
-			t.Fatalf("decoding the object stream: %s comes twice", key)
-		}
-		objs[key] = object{Kind: kind, Name: name, Namespace: ns, Doc: doc}
+		d.Doc["metadata"] = m
+		objs[d.Key] = object{Kind: d.Kind, Name: name, Namespace: ns, Doc: d.Doc}
 	}
 	return objs
 }
@@ -297,27 +278,6 @@ func readCSIDrivers(t *testing.T, addon string) csiDrivers {
 		t.Fatalf("csi-drivers.yaml: chart=%q version=%q", spec.Chart, spec.Version)
 	}
 	return spec
-}
-
-// rookChartVersion reads `version:` from the addon's chart.yaml (the
-// rook-ceph operator chart).
-func rookChartVersion(t *testing.T, addon string) string {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(addon, "chart.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var spec struct {
-		Chart   string `yaml:"chart"`
-		Version string `yaml:"version"`
-	}
-	if err := yaml.Unmarshal(raw, &spec); err != nil {
-		t.Fatal(err)
-	}
-	if spec.Chart != "rook-ceph" || spec.Version == "" {
-		t.Fatalf("chart.yaml: chart=%q version=%q", spec.Chart, spec.Version)
-	}
-	return spec.Version
 }
 
 // normalizeDriverName is the chart's helper of the same name
@@ -654,7 +614,7 @@ func TestRookCephCSIRBACPatches(t *testing.T) {
 	if len(cosiFx) == 0 {
 		t.Fatalf("%s: no ClusterRoleBinding binds %s/%s", cosiFixture, rookCephNS, cosiSA)
 	}
-	if pin, fix := rookChartVersion(t, addon), fixtureChartVersion(t, cosiFixture, "rook-ceph"); pin != fix {
+	if pin, fix := chartPinVersion(t, addon, "rook-ceph"), fixtureChartVersion(t, cosiFixture, "rook-ceph"); pin != fix {
 		t.Fatalf("chart.yaml pins rook-ceph %s but %s was rendered from %s: refresh it (see its header)", pin, cosiFixture, fix)
 	}
 	if len(deletes) == 0 {

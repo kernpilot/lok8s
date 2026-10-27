@@ -83,22 +83,6 @@ const (
 	sucNameLabel = "upgrade.cattle.io/controller"
 )
 
-// Scope and name values of a sucCall.
-const (
-	// sucAtCluster: a cluster-scoped resource, or a request across all
-	// namespaces.
-	sucAtCluster = ""
-	// sucAtAnyNS: one namespace that the request does not know in advance.
-	sucAtAnyNS = "*"
-	// sucAtCtrlNS: the controller's namespace (read from the fixture).
-	sucAtCtrlNS = "@namespace"
-	// sucAnyName: the request names no object (list, watch, create), or an
-	// object that RBAC cannot know in advance.
-	sucAnyName = ""
-	// sucLease: the controller's Lease (read from the fixture).
-	sucLease = "@lease"
-)
-
 // The callers in sucCalls: the controller, and the Plan features whose Job
 // containers call the API as the Plan's ServiceAccount.
 const (
@@ -109,17 +93,6 @@ const (
 	sucByDrainNoEvict = "spec.drain.disableEviction"
 )
 
-// sucCall is one Kubernetes API request.
-type sucCall struct {
-	by       string
-	group    string
-	resource string // with the subresource: plans/status
-	verb     string
-	ns       string
-	name     string
-	source   string
-}
-
 // sucCalls: SUC = rancher/system-upgrade-controller v0.20.1 (f1362a3),
 // wrangler = rancher/wrangler v3.7.0-rc.1, client-go = k8s.io/client-go
 // v0.36.0, kubectl = k8s.io/kubectl v0.36.2. A cache (informer) makes a
@@ -127,167 +100,59 @@ type sucCall struct {
 // (1.35 does) it makes one watch with sendInitialEvents and falls back to
 // list and watch when that fails, so the rules keep both verbs. A read from
 // the cache makes no request.
-var sucCalls = []sucCall{
+var sucCalls = []rbacCall{
 	// The Plan CRD, on every start (SUC pkg/upgrade/controller.go:147,194).
-	{sucByController, "apiextensions.k8s.io", "customresourcedefinitions", "list", sucAtCluster, sucAnyName, "wrangler pkg/crd/crd.go:64"},
-	{sucByController, "apiextensions.k8s.io", "customresourcedefinitions", "create", sucAtCluster, sucAnyName, "wrangler pkg/crd/crd.go:83"},
-	{sucByController, "apiextensions.k8s.io", "customresourcedefinitions", "get", sucAtCluster, "plans.upgrade.cattle.io", "wrangler pkg/crd/crd.go:91,114"},
-	{sucByController, "apiextensions.k8s.io", "customresourcedefinitions", "update", sucAtCluster, "plans.upgrade.cattle.io", "wrangler pkg/crd/crd.go:101"},
+	{sucByController, "apiextensions.k8s.io", "customresourcedefinitions", "list", rbacAtCluster, rbacAnyName, "wrangler pkg/crd/crd.go:64"},
+	{sucByController, "apiextensions.k8s.io", "customresourcedefinitions", "create", rbacAtCluster, rbacAnyName, "wrangler pkg/crd/crd.go:83"},
+	{sucByController, "apiextensions.k8s.io", "customresourcedefinitions", "get", rbacAtCluster, "plans.upgrade.cattle.io", "wrangler pkg/crd/crd.go:91,114"},
+	{sucByController, "apiextensions.k8s.io", "customresourcedefinitions", "update", rbacAtCluster, "plans.upgrade.cattle.io", "wrangler pkg/crd/crd.go:101"},
 	// The cluster ID.
-	{sucByController, "", "namespaces", "get", sucAtCluster, "kube-system", "SUC pkg/upgrade/controller.go:141"},
+	{sucByController, "", "namespaces", "get", rbacAtCluster, "kube-system", "SUC pkg/upgrade/controller.go:141"},
 	// The node cache, and the Plan label written after a completed Job.
-	{sucByController, "", "nodes", "list", sucAtCluster, sucAnyName, "SUC pkg/upgrade/handle_core.go:16"},
-	{sucByController, "", "nodes", "watch", sucAtCluster, sucAnyName, "SUC pkg/upgrade/handle_core.go:16"},
-	{sucByController, "", "nodes", "update", sucAtCluster, sucAnyName, "SUC pkg/upgrade/handle_batch.go:139"},
+	{sucByController, "", "nodes", "list", rbacAtCluster, rbacAnyName, "SUC pkg/upgrade/handle_core.go:16"},
+	{sucByController, "", "nodes", "watch", rbacAtCluster, rbacAnyName, "SUC pkg/upgrade/handle_core.go:16"},
+	{sucByController, "", "nodes", "update", rbacAtCluster, rbacAnyName, "SUC pkg/upgrade/handle_batch.go:139"},
 	// The Plan's Jobs. wrangler apply lists them in all namespaces: an
 	// owner and no lister namespace (SUC handle_upgrade.go:114).
-	{sucByController, "batch", "jobs", "list", sucAtCluster, sucAnyName, "wrangler pkg/apply/desiredset_process.go:362,461"},
-	{sucByController, "batch", "jobs", "list", sucAtCtrlNS, sucAnyName, "SUC pkg/upgrade/handle_batch.go:30 (cache, controller.go:103)"},
-	{sucByController, "batch", "jobs", "watch", sucAtCtrlNS, sucAnyName, "SUC pkg/upgrade/handle_batch.go:30 (cache, controller.go:103)"},
-	{sucByController, "batch", "jobs", "create", sucAtCtrlNS, sucAnyName, "wrangler pkg/apply/desiredset_crud.go:43"},
-	{sucByController, "batch", "jobs", "get", sucAtCtrlNS, sucAnyName, "wrangler pkg/apply/desiredset_crud.go:50"},
-	{sucByController, "batch", "jobs", "patch", sucAtCtrlNS, sucAnyName, "wrangler pkg/apply/desiredset_process.go:189"},
-	{sucByController, "batch", "jobs", "delete", sucAtCtrlNS, sucAnyName, "SUC pkg/upgrade/handle_batch.go:180; wrangler pkg/apply/desiredset_crud.go:68"},
+	{sucByController, "batch", "jobs", "list", rbacAtCluster, rbacAnyName, "wrangler pkg/apply/desiredset_process.go:362,461"},
+	{sucByController, "batch", "jobs", "list", rbacAtCtrlNS, rbacAnyName, "SUC pkg/upgrade/handle_batch.go:30 (cache, controller.go:103)"},
+	{sucByController, "batch", "jobs", "watch", rbacAtCtrlNS, rbacAnyName, "SUC pkg/upgrade/handle_batch.go:30 (cache, controller.go:103)"},
+	{sucByController, "batch", "jobs", "create", rbacAtCtrlNS, rbacAnyName, "wrangler pkg/apply/desiredset_crud.go:43"},
+	{sucByController, "batch", "jobs", "get", rbacAtCtrlNS, rbacAnyName, "wrangler pkg/apply/desiredset_crud.go:50"},
+	{sucByController, "batch", "jobs", "patch", rbacAtCtrlNS, rbacAnyName, "wrangler pkg/apply/desiredset_process.go:189"},
+	{sucByController, "batch", "jobs", "delete", rbacAtCtrlNS, rbacAnyName, "SUC pkg/upgrade/handle_batch.go:180; wrangler pkg/apply/desiredset_crud.go:68"},
 	// The Plans and their status.
-	{sucByController, "upgrade.cattle.io", "plans", "list", sucAtCtrlNS, sucAnyName, "SUC pkg/upgrade/controller.go:110 (cache)"},
-	{sucByController, "upgrade.cattle.io", "plans", "watch", sucAtCtrlNS, sucAnyName, "SUC pkg/upgrade/controller.go:110 (cache)"},
-	{sucByController, "upgrade.cattle.io", "plans", "get", sucAtCtrlNS, sucAnyName, "SUC pkg/upgrade/handle_batch.go:54"},
-	{sucByController, "upgrade.cattle.io", "plans/status", "update", sucAtCtrlNS, sucAnyName, "SUC pkg/upgrade/handle_batch.go:98; generated controllers/upgrade.cattle.io/v1/plan.go:121"},
+	{sucByController, "upgrade.cattle.io", "plans", "list", rbacAtCtrlNS, rbacAnyName, "SUC pkg/upgrade/controller.go:110 (cache)"},
+	{sucByController, "upgrade.cattle.io", "plans", "watch", rbacAtCtrlNS, rbacAnyName, "SUC pkg/upgrade/controller.go:110 (cache)"},
+	{sucByController, "upgrade.cattle.io", "plans", "get", rbacAtCtrlNS, rbacAnyName, "SUC pkg/upgrade/handle_batch.go:54"},
+	{sucByController, "upgrade.cattle.io", "plans/status", "update", rbacAtCtrlNS, rbacAnyName, "SUC pkg/upgrade/handle_batch.go:98; generated controllers/upgrade.cattle.io/v1/plan.go:121"},
 	// The Secret cache. Reads go to the cache only (SUC pkg/upgrade/plan/plan.go:62,256).
-	{sucByController, "", "secrets", "list", sucAtCtrlNS, sucAnyName, "SUC pkg/upgrade/handle_core.go:42, handle_upgrade.go:25"},
-	{sucByController, "", "secrets", "watch", sucAtCtrlNS, sucAnyName, "SUC pkg/upgrade/handle_core.go:42, handle_upgrade.go:25"},
+	{sucByController, "", "secrets", "list", rbacAtCtrlNS, rbacAnyName, "SUC pkg/upgrade/handle_core.go:42, handle_upgrade.go:25"},
+	{sucByController, "", "secrets", "watch", rbacAtCtrlNS, rbacAnyName, "SUC pkg/upgrade/handle_core.go:42, handle_upgrade.go:25"},
 	// Events: on Plans in the controller's namespace, on the node in default.
-	{sucByController, "", "events", "create", sucAtCtrlNS, sucAnyName, "SUC controller.go:124; client-go tools/record/event.go:340"},
-	{sucByController, "", "events", "patch", sucAtCtrlNS, sucAnyName, "SUC controller.go:124; client-go tools/record/event.go:334"},
-	{sucByController, "", "events", "create", sucEventsNS, sucAnyName, "SUC controller.go:171; client-go tools/record/event.go:340,491"},
-	{sucByController, "", "events", "patch", sucEventsNS, sucAnyName, "SUC controller.go:171; client-go tools/record/event.go:334,491"},
+	{sucByController, "", "events", "create", rbacAtCtrlNS, rbacAnyName, "SUC controller.go:124; client-go tools/record/event.go:340"},
+	{sucByController, "", "events", "patch", rbacAtCtrlNS, rbacAnyName, "SUC controller.go:124; client-go tools/record/event.go:334"},
+	{sucByController, "", "events", "create", sucEventsNS, rbacAnyName, "SUC controller.go:171; client-go tools/record/event.go:340,491"},
+	{sucByController, "", "events", "patch", sucEventsNS, rbacAnyName, "SUC controller.go:171; client-go tools/record/event.go:334,491"},
 	// Leader election (SUC controller.go:176; wrangler pkg/leader/leader.go:47).
-	{sucByController, "coordination.k8s.io", "leases", "create", sucAtCtrlNS, sucAnyName, "client-go tools/leaderelection/resourcelock/leaselock.go:68"},
-	{sucByController, "coordination.k8s.io", "leases", "get", sucAtCtrlNS, sucLease, "client-go tools/leaderelection/resourcelock/leaselock.go:43"},
-	{sucByController, "coordination.k8s.io", "leases", "update", sucAtCtrlNS, sucLease, "client-go tools/leaderelection/resourcelock/leaselock.go:89"},
+	{sucByController, "coordination.k8s.io", "leases", "create", rbacAtCtrlNS, rbacAnyName, "client-go tools/leaderelection/resourcelock/leaselock.go:68"},
+	{sucByController, "coordination.k8s.io", "leases", "get", rbacAtCtrlNS, rbacLease, "client-go tools/leaderelection/resourcelock/leaselock.go:43"},
+	{sucByController, "coordination.k8s.io", "leases", "update", rbacAtCtrlNS, rbacLease, "client-go tools/leaderelection/resourcelock/leaselock.go:89"},
 
 	// kubectl cordon (SUC pkg/upgrade/job/job.go:423).
-	{sucByCordon, "", "nodes", "get", sucAtCluster, sucAnyName, "kubectl pkg/cmd/drain/drain.go:292-305"},
-	{sucByCordon, "", "nodes", "patch", sucAtCluster, sucAnyName, "kubectl pkg/drain/cordon.go:104"},
+	{sucByCordon, "", "nodes", "get", rbacAtCluster, rbacAnyName, "kubectl pkg/cmd/drain/drain.go:292-305"},
+	{sucByCordon, "", "nodes", "patch", rbacAtCluster, rbacAnyName, "kubectl pkg/drain/cordon.go:104"},
 	// kubectl drain (SUC pkg/upgrade/job/job.go:367).
-	{sucByDrain, "", "nodes", "get", sucAtCluster, sucAnyName, "kubectl pkg/cmd/drain/drain.go:292-305"},
-	{sucByDrain, "", "nodes", "patch", sucAtCluster, sucAnyName, "kubectl pkg/drain/cordon.go:104"},
-	{sucByDrain, "", "pods", "list", sucAtCluster, sucAnyName, "kubectl pkg/drain/drain.go:198"},
-	{sucByDrain, "", "pods", "get", sucAtAnyNS, sucAnyName, "kubectl pkg/drain/drain.go:254"},
-	{sucByDrain, "", "pods/eviction", "create", sucAtAnyNS, sucAnyName, "kubectl pkg/drain/drain.go:165"},
+	{sucByDrain, "", "nodes", "get", rbacAtCluster, rbacAnyName, "kubectl pkg/cmd/drain/drain.go:292-305"},
+	{sucByDrain, "", "nodes", "patch", rbacAtCluster, rbacAnyName, "kubectl pkg/drain/cordon.go:104"},
+	{sucByDrain, "", "pods", "list", rbacAtCluster, rbacAnyName, "kubectl pkg/drain/drain.go:198"},
+	{sucByDrain, "", "pods", "get", rbacAtAnyNS, rbacAnyName, "kubectl pkg/drain/drain.go:254"},
+	{sucByDrain, "", "pods/eviction", "create", rbacAtAnyNS, rbacAnyName, "kubectl pkg/drain/drain.go:165"},
 	// --ignore-daemonsets, on unless the Plan turns it off (job.go:368).
-	{sucByDrainDS, "apps", "daemonsets", "get", sucAtAnyNS, sucAnyName, "kubectl pkg/drain/filters.go:195"},
+	{sucByDrainDS, "apps", "daemonsets", "get", rbacAtAnyNS, rbacAnyName, "kubectl pkg/drain/filters.go:195"},
 	// --disable-eviction (job.go:391).
-	{sucByDrainNoEvict, "", "pods", "delete", sucAtAnyNS, sucAnyName, "kubectl pkg/drain/drain.go:148,257"},
+	{sucByDrainNoEvict, "", "pods", "delete", rbacAtAnyNS, rbacAnyName, "kubectl pkg/drain/drain.go:148,257"},
 }
-
-// sucNames holds what the test reads from the fixture.
-type sucNames struct {
-	namespace, serviceAccount, lease string
-	chartBinding                     object
-}
-
-// resolve replaces the fixture placeholders of a call.
-func (n sucNames) resolve(c sucCall) sucCall {
-	if c.ns == sucAtCtrlNS {
-		c.ns = n.namespace
-	}
-	if c.name == sucLease {
-		c.name = n.lease
-	}
-	return c
-}
-
-// sucRuleAllows reports whether one rule allows a call (no wildcards: the
-// test rejects them before it evaluates).
-func sucRuleAllows(r map[string]any, c sucCall) bool {
-	if !slices.Contains(stringsOf(r["apiGroups"]), c.group) ||
-		!slices.Contains(stringsOf(r["resources"]), c.resource) ||
-		!slices.Contains(stringsOf(r["verbs"]), c.verb) {
-		return false
-	}
-	names := stringsOf(r["resourceNames"])
-	return len(names) == 0 || (c.name != sucAnyName && slices.Contains(names, c.name))
-}
-
-// sucGrant is a role as one binding applies it: in every namespace and at
-// the cluster scope (ns == ""), or in one namespace.
-type sucGrant struct {
-	role object
-	ns   string
-}
-
-func (g sucGrant) allows(c sucCall) bool {
-	if g.ns != "" && c.ns != g.ns {
-		return false
-	}
-	for _, r := range g.role.Rules() {
-		if sucRuleAllows(r, c) {
-			return true
-		}
-	}
-	return false
-}
-
-// sucCheckNoWildcards rejects `*` in any rule field and nonResourceURLs.
-func sucCheckNoWildcards(t *testing.T, o object) {
-	t.Helper()
-	for _, r := range o.Rules() {
-		if _, ok := r["nonResourceURLs"]; ok {
-			t.Errorf("%s/%s: nonResourceURLs in %s", o.Kind, o.Name, canon(t, r))
-		}
-		for _, f := range []string{"apiGroups", "resources", "verbs", "resourceNames"} {
-			if slices.Contains(stringsOf(r[f]), "*") {
-				t.Errorf("%s/%s: wildcard in %s: %s", o.Kind, o.Name, f, canon(t, r))
-			}
-		}
-	}
-}
-
-// sucCheckRulesNeeded asserts that every atom of every rule of g (group,
-// resource, verb, and each resource name or none) serves a call of `by` at
-// the scope g grants. A cluster-wide grant must serve a call on a
-// cluster-scoped resource or across namespaces (sucAtCluster, sucAtAnyNS):
-// a call in a known namespace belongs to a Role there. A namespaced grant
-// must serve a call in its namespace. A rule without resourceNames must
-// serve a call that RBAC cannot restrict by name.
-func sucCheckRulesNeeded(t *testing.T, g sucGrant, calls []sucCall) {
-	t.Helper()
-	for _, r := range g.role.Rules() {
-		names := stringsOf(r["resourceNames"])
-		if len(names) == 0 {
-			names = []string{sucAnyName}
-		}
-		for _, grp := range stringsOf(r["apiGroups"]) {
-			for _, res := range stringsOf(r["resources"]) {
-				for _, verb := range stringsOf(r["verbs"]) {
-					for _, name := range names {
-						needed := slices.ContainsFunc(calls, func(c sucCall) bool {
-							if c.group != grp || c.resource != res || c.verb != verb || c.name != name {
-								return false
-							}
-							if g.ns == "" {
-								return c.ns == sucAtCluster || c.ns == sucAtAnyNS
-							}
-							return c.ns == g.ns
-						})
-						if !needed {
-							scope := "cluster-wide"
-							if g.ns != "" {
-								scope = "in " + g.ns
-							}
-							t.Errorf("%s/%s grants %s %q/%s name %q %s, and no call in the inventory needs it at that scope", g.role.Kind, g.role.Name, verb, grp, res, name, scope)
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
-// sucClusterScoped are the cluster-scoped kinds a render of the addon can
-// carry; every other kind is namespaced.
-var sucClusterScoped = []string{"Namespace", "ClusterRole", "ClusterRoleBinding", "CustomResourceDefinition"}
 
 // checkSUCNamespaces asserts that every namespaced object of a render is in
 // the controller's namespace, except the events Role and RoleBinding in
@@ -299,7 +164,7 @@ func checkSUCNamespaces(t *testing.T, objs map[string]object) {
 	seen := map[string]bool{}
 	for _, k := range sortedKeys(objs) {
 		o := objs[k]
-		if slices.Contains(sucClusterScoped, o.Kind) {
+		if slices.Contains(rbacClusterScoped, o.Kind) {
 			if o.Namespace != "" {
 				t.Errorf("%s is cluster-scoped but carries namespace %q", k, o.Namespace)
 			}
@@ -321,55 +186,22 @@ func checkSUCNamespaces(t *testing.T, objs map[string]object) {
 	}
 }
 
-// sucCheckNoDuplicates asserts that no atom of a namespaced grant (group,
-// resource, verb, resource name) is already allowed in that namespace by a
-// cluster-wide grant of the same ServiceAccount: such a rule adds nothing
-// and hides what the ClusterRole grants.
-func sucCheckNoDuplicates(t *testing.T, g sucGrant, cluster []sucGrant) {
-	t.Helper()
-	for _, r := range g.role.Rules() {
-		names := stringsOf(r["resourceNames"])
-		if len(names) == 0 {
-			names = []string{sucAnyName}
-		}
-		for _, grp := range stringsOf(r["apiGroups"]) {
-			for _, res := range stringsOf(r["resources"]) {
-				for _, verb := range stringsOf(r["verbs"]) {
-					for _, name := range names {
-						c := sucCall{group: grp, resource: res, verb: verb, ns: g.ns, name: name}
-						for _, cg := range cluster {
-							if cg.allows(c) {
-								t.Errorf("%s %s/%s grants %s %q/%s name %q, which %s/%s already grants in every namespace", g.role.Kind, g.ns, g.role.Name, verb, grp, res, name, cg.role.Kind, cg.role.Name)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
+// sucNames holds what the test reads from the fixture: the ServiceAccount
+// (and the Lease) and the chart's binding to cluster-admin.
+type sucNames struct {
+	rbacSubject
+	chartBinding object
 }
 
 // sucCallsBy returns the resolved calls of the given callers.
-func sucCallsBy(n sucNames, by ...string) []sucCall {
-	var out []sucCall
+func sucCallsBy(n sucNames, by ...string) []rbacCall {
+	var out []rbacCall
 	for _, c := range sucCalls {
 		if slices.Contains(by, c.by) {
 			out = append(out, n.resolve(c))
 		}
 	}
 	return out
-}
-
-// sucNested walks nested maps; a missing key gives an empty map.
-func sucNested(m map[string]any, keys ...string) map[string]any {
-	for _, k := range keys {
-		next, _ := m[k].(map[string]any)
-		if next == nil {
-			return map[string]any{}
-		}
-		m = next
-	}
-	return m
 }
 
 // readSUCFixture decodes the fixture and reads the names the RBAC depends on.
@@ -392,7 +224,7 @@ func readSUCFixture(t *testing.T) (map[string]object, sucNames) {
 	if !ok || n.serviceAccount == "" {
 		t.Fatalf("%s: no Deployment %s/system-upgrade-controller or no ServiceAccount: %v", sucFixture, n.namespace, sortedKeys(objs))
 	}
-	podSpec := sucNested(dep.Doc, "spec", "template", "spec")
+	podSpec := nestedMap(dep.Doc, "spec", "template", "spec")
 	if sa, _ := podSpec["serviceAccountName"].(string); sa != n.serviceAccount || dep.Namespace != n.namespace {
 		t.Fatalf("the Deployment runs as %s/%s, the fixture's ServiceAccount is %s/%s", dep.Namespace, sa, n.namespace, n.serviceAccount)
 	}
@@ -407,7 +239,7 @@ func readSUCFixture(t *testing.T) (map[string]object, sucNames) {
 		for _, e := range vars {
 			em, _ := e.(map[string]any)
 			name, _ := em["name"].(string)
-			path, _ := sucNested(em, "valueFrom", "fieldRef")["fieldPath"].(string)
+			path, _ := nestedMap(em, "valueFrom", "fieldRef")["fieldPath"].(string)
 			env[name] = path
 		}
 	}
@@ -417,7 +249,7 @@ func readSUCFixture(t *testing.T) (map[string]object, sucNames) {
 	if got := env["SYSTEM_UPGRADE_CONTROLLER_NAMESPACE"]; got != "metadata.namespace" {
 		t.Fatalf("SYSTEM_UPGRADE_CONTROLLER_NAMESPACE comes from %q, want metadata.namespace", got)
 	}
-	n.lease, _ = sucNested(dep.Doc, "spec", "template", "metadata", "labels")[sucNameLabel].(string)
+	n.lease, _ = nestedMap(dep.Doc, "spec", "template", "metadata", "labels")[sucNameLabel].(string)
 	if n.lease == "" {
 		t.Fatalf("the Deployment's pod template has no %s label", sucNameLabel)
 	}
@@ -426,18 +258,6 @@ func readSUCFixture(t *testing.T) (map[string]object, sucNames) {
 		t.Fatalf("%s: no ClusterRoleBinding/%s", sucFixture, sucChartBinding)
 	}
 	return objs, n
-}
-
-// sucBindsSA reports whether a binding names the controller's ServiceAccount.
-func sucBindsSA(b object, n sucNames) bool {
-	subjects, _ := b.Doc["subjects"].([]any)
-	for _, s := range subjects {
-		m, _ := s.(map[string]any)
-		if m["kind"] == "ServiceAccount" && m["name"] == n.serviceAccount && m["namespace"] == n.namespace {
-			return true
-		}
-	}
-	return false
 }
 
 // checkSUCBindings asserts that exactly the four bindings of rbac.yaml
@@ -456,7 +276,7 @@ func checkSUCBindings(t *testing.T, objs map[string]object, n sucNames) {
 	got := map[string]string{}
 	for _, k := range sortedKeys(objs) {
 		o := objs[k]
-		if o.Kind != "ClusterRoleBinding" && o.Kind != "RoleBinding" || !sucBindsSA(o, n) {
+		if o.Kind != "ClusterRoleBinding" && o.Kind != "RoleBinding" || !rbacBindsSA(o, n.rbacSubject) {
 			continue
 		}
 		ref, _ := o.Doc["roleRef"].(map[string]any)
@@ -559,7 +379,7 @@ func checkSUCImages(t *testing.T, root string, objs map[string]object, ns string
 	dep := objs[objKey("Deployment", ns, "system-upgrade-controller")]
 	var images []string
 	for _, kind := range []string{"containers", "initContainers"} {
-		seq, _ := sucNested(dep.Doc, "spec", "template", "spec")[kind].([]any)
+		seq, _ := nestedMap(dep.Doc, "spec", "template", "spec")[kind].([]any)
 		for _, c := range seq {
 			cm, _ := c.(map[string]any)
 			img, _ := cm["image"].(string)
@@ -577,47 +397,11 @@ func checkSUCImages(t *testing.T, root string, objs map[string]object, ns string
 	}
 }
 
-// sucChartVersion reads `version:` from the addon's chart.yaml.
-func sucChartVersion(t *testing.T, root string) string {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(root, sucAddon, "chart.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var spec struct {
-		Chart   string `yaml:"chart"`
-		Version string `yaml:"version"`
-	}
-	if err := yaml.Unmarshal(raw, &spec); err != nil {
-		t.Fatal(err)
-	}
-	if spec.Chart != "system-upgrade-controller" || spec.Version == "" {
-		t.Fatalf("chart.yaml: chart=%q version=%q", spec.Chart, spec.Version)
-	}
-	return spec.Version
-}
-
-// sucResources reads the `resources:` list of a kustomization.yaml.
-func sucResources(t *testing.T, dir string) []string {
-	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(dir, "kustomization.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var kz struct {
-		Resources []string `yaml:"resources"`
-	}
-	if err := yaml.Unmarshal(raw, &kz); err != nil {
-		t.Fatal(err)
-	}
-	return kz.Resources
-}
-
 // checkSUCPatch asserts the kustomization lists rbac.yaml and deletes the
 // chart's binding with one anchored, targeted `$patch: delete`.
 func checkSUCPatch(t *testing.T, addon string, entries []patchEntry) {
 	t.Helper()
-	if res := sucResources(t, addon); !slices.Contains(res, "rbac.yaml") {
+	if res := kustomizationResources(t, addon); !slices.Contains(res, "rbac.yaml") {
 		t.Errorf("kustomization.yaml does not list rbac.yaml: %v", res)
 	}
 	if len(entries) != 1 {
@@ -644,12 +428,12 @@ func TestSystemUpgradeControllerRBAC(t *testing.T) {
 	root := testutil.RepoRoot(t)
 	addon := filepath.Join(root, sucAddon)
 	fixture, n := readSUCFixture(t)
-	if pin, fix := sucChartVersion(t, root), fixtureChartVersion(t, sucFixture, "system-upgrade-controller"); pin != fix {
+	if pin, fix := chartPinVersion(t, filepath.Join(root, sucAddon), "system-upgrade-controller"), fixtureChartVersion(t, sucFixture, "system-upgrade-controller"); pin != fix {
 		t.Fatalf("chart.yaml pins system-upgrade-controller %s but %s was rendered from %s: refresh it (see its header)", pin, sucFixture, fix)
 	}
 	// The fixture proves the unpatched chart binds the controller to
 	// cluster-admin; the delete patch must remove exactly that object.
-	if ref, _ := n.chartBinding.Doc["roleRef"].(map[string]any); ref["name"] != "cluster-admin" || !sucBindsSA(n.chartBinding, n) {
+	if ref, _ := n.chartBinding.Doc["roleRef"].(map[string]any); ref["name"] != "cluster-admin" || !rbacBindsSA(n.chartBinding, n.rbacSubject) {
 		t.Fatalf("%s: ClusterRoleBinding/%s is not the chart's binding of %s/%s to cluster-admin", sucFixture, sucChartBinding, n.namespace, n.serviceAccount)
 	}
 
@@ -673,7 +457,7 @@ func TestSystemUpgradeControllerRBAC(t *testing.T) {
 			sucRole, n.namespace, sucRole, sucEventsNS, sucEventsRole, sucDrainerRole, sortedKeys(rbac))
 	}
 	for _, o := range []object{clusterRole, role, eventsRole, drainer} {
-		sucCheckNoWildcards(t, o)
+		rbacCheckNoWildcards(t, o)
 	}
 	checkSUCBindings(t, rbac, n)
 
@@ -690,28 +474,28 @@ func TestSystemUpgradeControllerRBAC(t *testing.T) {
 	// Every call is allowed. The controller's calls by its three roles
 	// alone; each Plan feature's calls by the drainer role alone, so that a
 	// Plan ServiceAccount bound to it can cordon and drain.
-	ctrlGrants := []sucGrant{{clusterRole, ""}, {role, n.namespace}, {eventsRole, sucEventsNS}}
+	ctrlGrants := []rbacGrant{{clusterRole, ""}, {role, n.namespace}, {eventsRole, sucEventsNS}}
 	for _, c := range sucCallsBy(n, sucByController) {
-		if !slices.ContainsFunc(ctrlGrants, func(g sucGrant) bool { return g.allows(c) }) {
+		if !slices.ContainsFunc(ctrlGrants, func(g rbacGrant) bool { return g.allows(c) }) {
 			t.Errorf("the controller's roles do not allow %s %q/%s name %q in %q (%s)", c.verb, c.group, c.resource, c.name, c.ns, c.source)
 		}
 	}
 	features := []string{sucByCordon, sucByDrain, sucByDrainDS, sucByDrainNoEvict}
 	for _, c := range sucCallsBy(n, features...) {
-		if !(sucGrant{drainer, ""}).allows(c) {
+		if !(rbacGrant{drainer, ""}).allows(c) {
 			t.Errorf("ClusterRole/%s does not allow %s %q/%s in %q, which %s needs (%s)", sucDrainerRole, c.verb, c.group, c.resource, c.ns, c.by, c.source)
 		}
 	}
 	// No rule grants more than the calls need, at the scope it is granted.
 	for _, g := range ctrlGrants {
-		sucCheckRulesNeeded(t, g, sucCallsBy(n, sucByController))
+		rbacCheckRulesNeeded(t, g, sucCallsBy(n, sucByController))
 	}
-	sucCheckRulesNeeded(t, sucGrant{drainer, ""}, sucCallsBy(n, features...))
+	rbacCheckRulesNeeded(t, rbacGrant{drainer, ""}, sucCallsBy(n, features...))
 	// No namespaced rule repeats what the token holds cluster-wide (the
 	// drainer included: the same ServiceAccount holds it).
-	clusterGrants := []sucGrant{{clusterRole, ""}, {drainer, ""}}
-	for _, g := range []sucGrant{{role, n.namespace}, {eventsRole, sucEventsNS}} {
-		sucCheckNoDuplicates(t, g, clusterGrants)
+	clusterGrants := []rbacGrant{{clusterRole, ""}, {drainer, ""}}
+	for _, g := range []rbacGrant{{role, n.namespace}, {eventsRole, sucEventsNS}} {
+		rbacCheckNoDuplicates(t, g, clusterGrants)
 	}
 
 	// The image pins, and the chart render that uses them.
@@ -722,7 +506,7 @@ func TestSystemUpgradeControllerRBAC(t *testing.T) {
 	if got, ok := admin[objKey("ClusterRoleBinding", "", sucChartBinding)]; !ok || len(admin) != 1 || !reflect.DeepEqual(got.Doc, n.chartBinding.Doc) {
 		t.Errorf("%s/clusterrolebinding.yaml\n got: %s\nwant (the chart's binding): %s", sucAdminAddon, canon(t, admin), canon(t, n.chartBinding.Doc))
 	}
-	if res := sucResources(t, filepath.Join(root, sucAdminAddon)); !reflect.DeepEqual(res, []string{"clusterrolebinding.yaml"}) {
+	if res := kustomizationResources(t, filepath.Join(root, sucAdminAddon)); !reflect.DeepEqual(res, []string{"clusterrolebinding.yaml"}) {
 		t.Errorf("%s/kustomization.yaml resources %v, want [clusterrolebinding.yaml]", sucAdminAddon, res)
 	}
 
