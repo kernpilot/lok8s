@@ -43,14 +43,19 @@ teardown() {
 _make_runner() {
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
+# timeout: the pod's `timeout SECS CMD ARGS`. It runs the command as a shell
+# function, so the kubectl stub below answers it and no real kubectl runs.
+timeout() {
+  shift
+  "$@"
+}
 kubectl() {
   case "$*" in
     *"get secret kubehz-agent"*"agent-token"*) printf 'khz_agt_test' | base64 | tr -d '\n' ;;
     *"get secret kubehz-agent"*"claim-code"*)  printf 'khzc_test'   | base64 | tr -d '\n' ;;
     *"get secret kubehz-agent"*) return 0 ;;
     *"/version"*) printf '{"gitVersion":"v1.35.5"}\n' ;;
-    "get nodes -o jsonpath="*) printf 'cp-1\n' ;;
-    "get node "*) printf '' ;;
+    "get --raw /api/v1/nodes") printf '{"items":[{"metadata":{"name":"cp-1"}}]}\n' ;;
     "get csr -o json") printf '{}\n' ;;
     *"/readyz"*) printf 'ok\n'; return 0 ;;
     "get configmap kubehz-agent-config"*) printf '%s' "${STUB_MARKER:-{\}}" ;;

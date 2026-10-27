@@ -17,6 +17,7 @@ package kubehz
 import (
 	"io/fs"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -284,5 +285,124 @@ func TestAgentProbesAreBoundedByTimeout(t *testing.T) {
 	}
 	if len(probes) < 12 {
 		t.Errorf("%d assessment probes found, want at least 12", len(probes))
+	}
+}
+
+// loopHead matches the head of a sh loop up to its `do`, also after a pipe
+// (`... | while read -r x; do`). loopDone matches a `done` later on the same
+// line (a one-line loop). loopEnd matches a `done` that starts a line.
+var (
+	loopHead = regexp.MustCompile(`(?:^|[|;&(])\s*(for\s+\w+\s+in\s+([^;]*)|while\s[^;]*|until\s[^;]*);\s*do\b`)
+	loopDone = regexp.MustCompile(`;\s*done\b`)
+	loopEnd  = regexp.MustCompile(`^\s*done\b`)
+)
+
+// runtimeLoops returns the 1-based [first, last] line ranges of the loops in
+// a POSIX sh script whose iteration count is known only at run time: every
+// while or until loop, and every for loop whose word list expands something.
+// A for loop over literal words is fixed. A fixed loop nested in a
+// runtime-sized loop is part of its range.
+func runtimeLoops(script string) [][2]int {
+	var out [][2]int
+	lines := strings.Split(script, "\n")
+	for i, l := range lines {
+		m := loopHead.FindStringSubmatch(l)
+		if m == nil || (strings.HasPrefix(m[1], "for") && !strings.ContainsAny(m[2], "$`")) {
+			continue
+		}
+		depth := 0
+		for j := i; j < len(lines); j++ {
+			switch {
+			case loopHead.MatchString(lines[j]) && loopDone.MatchString(lines[j]):
+				// A one-line loop opens and closes on this line.
+			case loopHead.MatchString(lines[j]):
+				depth++
+			case loopEnd.MatchString(lines[j]):
+				depth--
+			}
+			if depth == 0 {
+				out = append(out, [2]int{i + 1, j + 1})
+				break
+			}
+		}
+	}
+	return out
+}
+
+func TestRuntimeLoopsFindsOnlyRuntimeSizedLoops(t *testing.T) {
+	t.Parallel()
+	script := "for comp in a b; do\n  kubectl get pods\ndone\n" +
+		"for node in ${NODES}; do\n  kubectl get node \"${node}\"\ndone\n" +
+		"printf x | while read -r n; do\n  :\ndone\n" +
+		"for n in ${NODES}; do kubectl get nodes \"${n}\"; done\n" +
+		"for c in a b; do kubectl get pods; done\n"
+	got := runtimeLoops(script)
+	want := [][2]int{{4, 6}, {7, 9}, {10, 10}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("runtimeLoops = %v, want %v", got, want)
+	}
+}
+
+// TestHeartbeatKubectlCallsDoNotGrowWithTheCluster (B448): a kubectl call
+// takes ~1.5 s on prod. The heartbeat made 3 calls per node, so at ~18 nodes
+// the tick ran past activeDeadlineSeconds (120 s) and the job was killed
+// before the POST. The node list must be one call, no call may read a
+// single node, and no kubectl call may sit in a runtime-sized loop.
+func TestHeartbeatKubectlCallsDoNotGrowWithTheCluster(t *testing.T) {
+	t.Parallel()
+	script := heartbeatScript(t)
+	loops := runtimeLoops(script)
+	nodeLists := 0
+	for _, c := range kubectlCalls(script) {
+		joined := strings.Join(c.args, " ")
+		if joined == "get --raw /api/v1/nodes" {
+			nodeLists++
+		}
+		if readsOneNode(c.args) {
+			t.Errorf("script line %d: kubectl %s reads one node; a call per node grows with the cluster (B448)", c.line, joined)
+		}
+		for _, l := range loops {
+			if c.line >= l[0] && c.line <= l[1] {
+				t.Errorf("script line %d: kubectl %s runs in the loop at lines %d-%d; the call count grows with the cluster (B448)", c.line, joined, l[0], l[1])
+			}
+		}
+	}
+	if nodeLists != 1 {
+		t.Errorf("%d `kubectl get --raw /api/v1/nodes` calls found, want 1", nodeLists)
+	}
+}
+
+// readsOneNode reports a kubectl call that reads a single node: `get node
+// X`, `get nodes X` (a name, not a flag) or `get --raw /api/v1/nodes/X`.
+func readsOneNode(args []string) bool {
+	if len(args) < 3 || args[0] != "get" {
+		return false
+	}
+	switch args[1] {
+	case "node", "nodes":
+		return !strings.HasPrefix(args[2], "-")
+	case "--raw":
+		return strings.HasPrefix(args[2], "/api/v1/nodes/")
+	}
+	return false
+}
+
+func TestReadsOneNode(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		call string
+		want bool
+	}{
+		{"get node cp-1", true},
+		{`get nodes "${n}"`, true},
+		{"get --raw /api/v1/nodes/cp-1", true},
+		{"get --raw /api/v1/nodes", false},
+		{"get nodes -o json", false},
+		{"get nodes -l node-role.kubernetes.io/control-plane -o name", false},
+		{"get pods -n kube-system", false},
+	} {
+		if got := readsOneNode(strings.Fields(tc.call)); got != tc.want {
+			t.Errorf("readsOneNode(%q) = %v, want %v", tc.call, got, tc.want)
+		}
 	}
 }

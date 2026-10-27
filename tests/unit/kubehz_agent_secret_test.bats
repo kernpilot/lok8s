@@ -51,6 +51,12 @@ teardown() {
 _build_runner() {
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
+# timeout: the pod's `timeout SECS CMD ARGS`. It runs the command as a shell
+# function, so the kubectl stub below answers it and no real kubectl runs.
+timeout() {
+  shift
+  "$@"
+}
 kubectl() {
   argv_log kubectl "$@"
   case "$*" in
@@ -94,31 +100,11 @@ kubectl() {
     *"/version"*) printf '{"major":"1","minor":"35","gitVersion":"v1.35.5","platform":"linux/amd64"}\n' ;;
     "version -o json") printf '{\n  "clientVersion": { "gitVersion": "v1.31.4" },\n  "serverVersion": { "gitVersion": "v1.35.5" }\n}\n' ;;
 
-    # Node NAMES via a targeted jsonpath (the FIX). The `-o json` fixture is a
-    # realistic two-node dump WITH the greedy-sed traps (runtimeHandlers +
-    # volumesAttached): dormant unless the extraction regresses.
-    "get nodes -o jsonpath="*) printf 'cp-1\nworker-1\n' ;;
-    "get nodes -o json") printf '%s\n' '{"items":[{"metadata":{"name":"cp-1"},"status":{"runtimeHandlers":[{"name":"runc"},{"name":"crun"}],"volumesAttached":[{"name":"kubernetes.io/csi/csi.hetzner.cloud^0001"}]}},{"metadata":{"name":"worker-1"},"status":{"runtimeHandlers":[{"name":"runc"}]}}]}' ;;
-
-    # Per-node queries. An unreal node name (a greedy-sed ghost) NotFounds like
-    # real kubectl → the old code's unguarded status=$(…) aborts under set -e.
-    "get node "*)
-      _n=$3
-      case "${_n}" in
-        cp-1|worker-1) : ;;
-        *) echo "Error from server (NotFound): nodes \"${_n}\" not found" >&2; return 1 ;;
-      esac
-      case "$*" in
-        *"jsonpath={.status.conditions"*) printf 'True' ;;
-        *"instance-type}"*) if [ "${_n}" = "cp-1" ]; then printf 'cx32'; else printf 'cpx41'; fi; return 0 ;;
-        *"jsonpath={.metadata.labels}"*)
-          if [ "${_n}" = "cp-1" ]; then
-            printf '%s' '{"kubernetes.io/hostname":"cp-1","node-role.kubernetes.io/control-plane":"","node.kubernetes.io/instance-type":"cx32"}'
-          else
-            printf '%s' '{"kubernetes.io/hostname":"worker-1","node.kubernetes.io/instance-type":"cpx41"}'
-          fi ;;
-        *) printf '' ;;
-      esac ;;
+    # The node list: ONE call for all nodes (B448), read with jq. A realistic
+    # two-node dump WITH the greedy-sed traps (runtimeHandlers +
+    # volumesAttached). cp-1 carries the control-plane label KEY (empty
+    # value); worker-1 does not.
+    "get --raw /api/v1/nodes") printf '%s\n' '{"items":[{"metadata":{"name":"cp-1","labels":{"kubernetes.io/hostname":"cp-1","node-role.kubernetes.io/control-plane":"","node.kubernetes.io/instance-type":"cx32"}},"status":{"conditions":[{"type":"Ready","status":"True"}],"runtimeHandlers":[{"name":"runc"},{"name":"crun"}],"volumesAttached":[{"name":"kubernetes.io/csi/csi.hetzner.cloud^0001"}]}},{"metadata":{"name":"worker-1","labels":{"kubernetes.io/hostname":"worker-1","node.kubernetes.io/instance-type":"cpx41"}},"status":{"conditions":[{"type":"Ready","status":"True"}],"runtimeHandlers":[{"name":"runc"}]}}]}' ;;
     "get csr -o json") printf '{}\n' ;;
     *"/readyz"*) printf 'ok\n'; return 0 ;;
     "get pods"*) printf ''; return 0 ;;
