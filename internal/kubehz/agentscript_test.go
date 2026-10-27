@@ -378,10 +378,10 @@ func readsOneNode(args []string) bool {
 	if len(args) < 3 || args[0] != "get" {
 		return false
 	}
-	switch {
-	case args[1] == "node" || args[1] == "nodes":
+	switch args[1] {
+	case "node", "nodes":
 		return !strings.HasPrefix(args[2], "-")
-	case args[1] == "--raw":
+	case "--raw":
 		return strings.HasPrefix(args[2], "/api/v1/nodes/")
 	}
 	return false
