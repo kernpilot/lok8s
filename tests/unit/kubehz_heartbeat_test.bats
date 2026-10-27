@@ -907,7 +907,7 @@ teardown() {
   # the assessment, as for a failed call. The assessment never reports 0
   # nodes as a fact.
   local body
-  for body in '' '{"items":[{"metadata":' 'not json' '{}'; do
+  for body in '' '{"items":[{"metadata":' '{"items":[{"metadata":{"name":"a"}},' 'not json' '{}'; do
     export STUB_NODES_BODY="${body}"
     rm -f "${STUB_PAYLOAD_OUT}"
     run bash "${RUNNER}"
