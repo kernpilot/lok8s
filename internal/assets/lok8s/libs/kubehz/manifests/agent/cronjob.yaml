@@ -226,8 +226,9 @@ spec:
                   else
                     NODE_LIST="[]"
                   fi
-                  # The api's heartbeat schema accepts at most 500 nodes; a
-                  # longer array 400s the WHOLE heartbeat. A larger cluster
+                  # The api's heartbeat schema accepts at most 500 nodes
+                  # (kubehz-api HB_MAX_NODES); a longer array 400s the WHOLE
+                  # heartbeat. Keep this cap at or under the api's. A larger cluster
                   # reports its first 500 nodes AND logs the truncation to
                   # stderr (never a silent drop). NODE_TOTAL stays the true
                   # count.
@@ -839,7 +840,8 @@ spec:
               # real node is ~23 KB of node JSON (50 images). jq peaks at
               # ~32 MB for 200 nodes (4.6 MB of JSON) and ~70 MB for 500
               # nodes (11.5 MB), measured on prod nodes. 128Mi left a thin
-              # margin at the 500-node cap.
+              # margin at the 500-node cap. jq reads the whole list before
+              # the cap, so above about 1,500 nodes 256Mi may not hold.
               resources:
                 requests:
                   cpu: 50m

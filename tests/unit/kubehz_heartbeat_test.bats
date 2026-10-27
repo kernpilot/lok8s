@@ -844,7 +844,7 @@ teardown() {
   assert_output "etcd cilium 10.244.0.0/16 2 3 2 3 1"
 }
 
-@test "B423: the marker read and every assessment probe run under timeout 5" {
+@test "B423: the marker read and every assessment probe run under timeout 5; the node list under timeout 30" {
   run bash "${RUNNER}"
   assert_success
   run cat "${STUB_TIMEOUT_LOG}"
@@ -901,12 +901,13 @@ teardown() {
   assert_success
 }
 
-@test "B448: an empty, non-JSON or item-less node answer with exit 0 is a failed call" {
-  # kubectl can exit 0 and still answer nothing usable. jq -e then fails,
-  # so the beat sends no nodes and defers the assessment, as for a failed
-  # call. It never reports 0 nodes as a fact.
+@test "B448: an empty, cut, non-JSON or item-less node answer is a failed call" {
+  # kubectl can exit 0 and still answer nothing usable, and a timeout can
+  # cut the answer. jq -e then fails, so the beat sends no nodes and defers
+  # the assessment, as for a failed call. The assessment never reports 0
+  # nodes as a fact.
   local body
-  for body in '' 'not json' '{}'; do
+  for body in '' '{"items":[{"metadata":' 'not json' '{}'; do
     export STUB_NODES_BODY="${body}"
     rm -f "${STUB_PAYLOAD_OUT}"
     run bash "${RUNNER}"

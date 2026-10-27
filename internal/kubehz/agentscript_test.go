@@ -17,6 +17,7 @@ package kubehz
 import (
 	"io/fs"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -337,13 +338,8 @@ func TestRuntimeLoopsFindsOnlyRuntimeSizedLoops(t *testing.T) {
 		"for c in a b; do kubectl get pods; done\n"
 	got := runtimeLoops(script)
 	want := [][2]int{{4, 6}, {7, 9}, {10, 10}}
-	if len(got) != len(want) {
+	if !slices.Equal(got, want) {
 		t.Fatalf("runtimeLoops = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("runtimeLoops = %v, want %v", got, want)
-		}
 	}
 }
 
