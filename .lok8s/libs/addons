@@ -235,7 +235,8 @@ addons::_config_hint() {
     monitoring)                   echo "Prometheus/Grafana scrape + OIDC config via the monitoring target values";;
     oidc-rbac)                    echo "spec.oidc.groupsClaim + the oidc group->cluster-role bindings";;
     promtail)                     echo "bootstrap AFTER loki (its push target); tolerates all taints so control-plane logs ship too";;
-    redis-operator)               echo "declare Redis CRs in a target";;
+    redis-operator)               echo "declare Redis CRs in a target; the operator runs with narrowed RBAC, no aggregation into admin";;
+    redis-operator-chart-rbac)    echo "opt-in after redis-operator, not recommended: binds the chart's broad ClusterRole rules to the operator again";;
     reflector)                    echo "annotate the source Secret/ConfigMap to mirror across namespaces";;
     rook-ceph)                    echo "CephCluster/pool/StorageClass in a target: replica count + device filter";;
     rook-ceph-csi-kms)            echo "opt-in after rook-ceph: restores the node plugin's Secret + ServiceAccount-token grants (KMS encryption, mounter=rbd-nbd)";;

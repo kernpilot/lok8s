@@ -393,6 +393,8 @@ underlying cause.
 | `envoy-gateway` | Envoy Gateway controller **+ the upstream Gateway API CRD bundle**. See [upgrading in place](#envoy-gateway-upgrading-in-place) before you bump the pin | `envoyproxy/gateway-helm` v1.9.0 |
 | `rook-ceph` | Rook-Ceph operator + CRDs, and the ceph-csi-operator work orders that yield the RBD `CSIDriver`. The CSI node plugin runs with a [narrowed ClusterRole](#rook-ceph) | `rook-release/rook-ceph` v1.20.6, `ceph-csi-drivers` 1.0.4 |
 | `rook-ceph-csi-kms` | **Opt-in**, after `rook-ceph`: gives the CSI node plugin back the Secret / ServiceAccount-token grants that KMS-encrypted volumes and `mounter: rbd-nbd` need. See [rook-ceph](#rook-ceph) | raw manifests |
+| `redis-operator` | The OT-CONTAINER-KIT Redis operator + CRDs (`Redis`, `RedisReplication`, `RedisSentinel`, `RedisCluster`). It runs with [narrowed RBAC](#redis-operator), and nothing aggregates into the built-in `admin` role. The CRs go in a target | `ot-container-kit/redis-operator` 0.26.1 |
+| `redis-operator-chart-rbac` | **Opt-in, not recommended**, after `redis-operator`: binds the chart's broad ClusterRole rules to the operator again (without the aggregation). See [redis-operator](#redis-operator) | raw manifests |
 | `system-upgrade-controller` | Rancher's system-upgrade-controller. It runs [without cluster-admin](#system-upgrade-controller), with both images pinned by digest. The `Plan`s go in a target | `rancher/system-upgrade-controller` 110.0.0 |
 | `system-upgrade-controller-cluster-admin` | **Opt-in, not recommended**, after `system-upgrade-controller`: binds the controller to cluster-admin again. See [system-upgrade-controller](#system-upgrade-controller) | raw manifests |
 
@@ -1217,6 +1219,188 @@ says how). The kubectl image has no Windows variant, and the chart uses it
 for Windows nodes too: a cordon or drain on a Windows node still fails to
 pull it. The images a Plan names for its own containers are not pinned
 here.
+
+### redis-operator: narrowed RBAC, no aggregation into admin {#redis-operator}
+
+The `redis-operator` addon installs the OT-CONTAINER-KIT Redis operator
+(chart 0.26.1, operator v0.26.0). The chart binds the operator's
+ServiceAccount (`redis-operator/redis-operator`) to its ClusterRole
+`redis-operator`. That ClusterRole has two problems:
+
+- It grants create, delete, get, list, patch, update and watch on
+  namespaces, Secrets, ConfigMaps, pods, `pods/exec`, Services, PVCs and
+  events in every namespace, and get on every non-resource URL. The
+  operator calls much less (see below).
+- It carries the label `rbac.authorization.k8s.io/aggregate-to-admin`.
+  Kubernetes then copies all of its rules into the built-in ClusterRole
+  `admin`. Every subject with a RoleBinding to `admin` in a namespace can
+  then delete that namespace and read and write the Secrets there through
+  the copied rules.
+
+The addon deletes the chart's ClusterRole and ClusterRoleBinding from its
+render and binds three roles instead (`rbac.yaml`). No object of the addon
+carries an `aggregate-to-*` label. A comment on each rule names the source
+line that needs it. `internal/addons/redis_operator_rbac_test.go` holds the
+same list of calls, written by hand from the operator source, and fails
+when a rule grants more or less than those calls need, when an object of
+the addon aggregates into a built-in role, and when a role grants a verb on
+namespaces. The list is not a runtime proof: a call that the list misses,
+the test misses too.
+
+| Role | Rules | What uses them |
+|---|---|---|
+| ClusterRole `lok8s-redis-operator` | `redis`, `redisclusters`, `redisreplications`, `redissentinels` list, watch, update | the CR caches; the finalizer add and remove (an update of the CR). The operator never creates, patches or deletes a CR |
+| | `redisclusters/status`, `redisreplications/status` update | the status of a RedisCluster and a RedisReplication |
+| | `redisreplications/finalizers` update | the owner reference with `blockOwnerDeletion` on the Sentinel Service and StatefulSet of a RedisReplication (checked when the admission plugin `OwnerReferencesPermissionEnforcement` is on) |
+| | `secrets` get | password and TLS Secrets, read by name. No list, no watch, no write |
+| | `pods` get, list, patch | the Redis pods; the patch writes the role label |
+| | `services` get, list, watch, create, update | the Services of each CR. No delete |
+| | `statefulsets` get, list, watch, create, update, delete | the StatefulSets of each CR; the delete recreates one |
+| | `persistentvolumeclaims` list, update, delete | the PVC resize; the delete when a CR without `storage.keepAfterDelete` goes away |
+| | `poddisruptionbudgets` get, create, update, delete | the PDBs of each CR |
+| | `events` create, patch | RedisCluster events; leader-election events |
+| ClusterRole `lok8s-redis-operator-exec` | `pods/exec` create | `redis-cli` in a RedisCluster pod (create, scale, rebalance). Only a RedisCluster needs it |
+| Role `lok8s-redis-operator-leader-election` (`redis-operator`) | `leases` create; get and update on `6cab913b.redis.opstreelabs.in` | leader election |
+
+The rules are cluster-wide because the chart runs the operator without
+`WATCH_NAMESPACE`: it handles a Redis CR in any namespace. The call list
+holds for the chart's defaults (`--leader-elect`, no `WATCH_NAMESPACE`, no
+webhooks, no `--metrics-secure`). The test reads these from the chart
+render and fails when one changes, for example through
+`redisOperator.watchNamespace` or `redisOperator.webhook` in an inline
+override.
+
+Each object has the prefix `lok8s-`. The chart uses the name
+`redis-operator` for its ClusterRole and ClusterRoleBinding. A binding's
+roleRef cannot change, so a binding that reused that name would fail to
+apply on a cluster that still carries the old one.
+
+The operator also reads API discovery. No rule in the addon grants it: the
+default ClusterRoleBinding `system:discovery` gives it to every
+authenticated user.
+
+#### What the ServiceAccount can still do
+
+A cluster-wide operator that manages workloads keeps a large blast radius.
+With the operator's token a holder can, in every namespace:
+
+- read every Secret whose name it knows (get). It cannot list them;
+- create, change and delete StatefulSets. A StatefulSet can carry any pod
+  template and any ServiceAccount of its namespace, so a holder can start
+  pods that run as any ServiceAccount and mount any Secret, unless an
+  admission policy stops them. This is the largest remaining path;
+- list, get and patch pods (a list returns the full pod spec, environment
+  values included);
+- create and change Services, PodDisruptionBudgets and events, and delete
+  PodDisruptionBudgets;
+- list, resize and delete PVCs. A PVC delete can destroy data;
+- run any command in any container of any pod (`pods/exec`), as long as the
+  binding `lok8s-redis-operator-exec` exists;
+- update every Redis CR and the status of RedisClusters and
+  RedisReplications.
+
+What it lost against the chart's ClusterRole: every verb on namespaces
+and ConfigMaps; every Secret verb except get; pod create, update, delete
+and watch; Service delete; PVC create, get, watch and patch; every Lease
+verb outside `redis-operator`; CRD reads; get on all non-resource URLs;
+create, delete and patch on the Redis CRs; and the copy of its rules into
+`admin`.
+
+#### No RedisCluster: delete the exec binding
+
+`pods/exec` is the widest single grant. Only a RedisCluster needs it. If
+your cluster runs no RedisCluster, delete the ClusterRoleBinding
+`lok8s-redis-operator-exec` from your copy of the addon
+(`.lok8s/addons/redis-operator/rbac.yaml`) and from the cluster:
+
+```console
+$ kubectl delete clusterrolebinding lok8s-redis-operator-exec
+```
+
+A RedisCluster that you add later then fails with `forbidden` on
+`pods/exec` until you restore the binding.
+
+::: warning Upgrade note: update the ejected copy, delete the old ClusterRole and binding once
+`lo` ejects an addon into `.lok8s/addons/<name>/` on first use and never
+overwrites it. A project that bootstrapped this addon before runs
+`lo assets diff addons/redis-operator`, then
+`lo assets update addons/redis-operator`. A copy without a `.lo-origin`
+marker (a vendored copy) refuses the update: when the diff shows only the
+changes of this release, run `lo assets update addons/redis-operator --force`.
+A modified copy takes `rbac.yaml` and the `patches:` block by hand.
+
+The bootstrap applies without prune. A cluster that ran an earlier version
+of the addon keeps `ClusterRole/redis-operator` (with the label
+`aggregate-to-admin`) and `ClusterRoleBinding/redis-operator`. The operator
+keeps its broad rules through them, and `admin` keeps the copied rules.
+Apply the bootstrap first (`lo up`, `lo provision` or `lo bootstrap`): it
+adds the three new bindings. Then delete the old objects and check the far
+end:
+
+```console
+$ kubectl delete clusterrolebinding redis-operator
+$ kubectl delete clusterrole redis-operator
+$ SA=system:serviceaccount:redis-operator:redis-operator
+$ kubectl auth can-i delete namespaces --as="${SA}"
+no
+$ kubectl auth can-i list secrets -n kube-system --as="${SA}"
+no
+$ kubectl auth can-i update leases/6cab913b.redis.opstreelabs.in -n redis-operator --as="${SA}"
+yes
+$ kubectl get clusterrole admin -o json \
+    | jq '[.rules[] | select(((.resources // []) | index("namespaces")) and (.verbs | index("delete")))] | length'
+0
+```
+
+The last check reads the built-in `admin` role: the aggregation controller
+removes the copied rules when the labelled ClusterRole is gone. The
+`can-i` lines are spot checks. Until now the broad rules hid any call that
+the new roles miss. Restart the operator, let it reconcile every Redis CR,
+and look for `forbidden` in the log:
+
+```console
+$ kubectl -n redis-operator rollout restart deployment/redis-operator
+$ kubectl -n redis-operator logs deployment/redis-operator | grep -i forbidden
+```
+
+A GitOps apply with prune removes the old objects itself when they are in
+its inventory. Do not delete them before the new bindings exist: the
+operator then loses its access and handles no CR until they arrive.
+:::
+
+#### When you need the chart's rules back
+
+The opt-in addon `redis-operator-chart-rbac` binds the rules of the
+chart's ClusterRole to the operator again, under the name
+`lok8s-redis-operator-chart-rbac`. It does not restore the label
+`aggregate-to-admin`:
+
+```yaml
+spec:
+  bootstrap:
+    - redis-operator
+    - redis-operator-chart-rbac:
+        dependsOn: [redis-operator]
+```
+
+::: danger Not recommended
+With it, the operator's token can again create and delete namespaces,
+read and write every Secret and ConfigMap, and exec into every pod. Use it
+only when a newer operator logs `forbidden` errors before the addon
+follows.
+:::
+
+To opt out again, removing the entry from `spec.bootstrap` is not enough:
+the bootstrap applies without prune. Delete the objects too:
+
+```console
+$ kubectl delete clusterrolebinding lok8s-redis-operator-chart-rbac
+$ kubectl delete clusterrole lok8s-redis-operator-chart-rbac
+```
+
+If namespace admins must manage Redis CRs, do not use the opt-in addon for
+that. Give them a ClusterRole in a target with only the
+`redis.redis.opstreelabs.in` resources they need.
 
 ## Writing a custom addon
 

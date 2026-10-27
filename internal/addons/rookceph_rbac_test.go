@@ -452,6 +452,13 @@ func projectPaths(root string) *config.Paths {
 // the render pipeline and returns the objects by kind/name.
 func renderPatched(t *testing.T, root string, fixtures [][]byte, patches *yaml.Node) map[string]object {
 	t.Helper()
+	return decodeObjects(t, renderPatchedStream(t, root, fixtures, patches))
+}
+
+// renderPatchedStream is renderPatched without the decode: the rendered
+// stream as it is, labels included.
+func renderPatchedStream(t *testing.T, root string, fixtures [][]byte, patches *yaml.Node) []byte {
+	t.Helper()
 	dir := t.TempDir()
 	var resources []*yaml.Node
 	for i, fx := range fixtures {
@@ -479,7 +486,7 @@ func renderPatched(t *testing.T, root string, fixtures [][]byte, patches *yaml.N
 	if err != nil {
 		t.Fatalf("render of the patched fixtures failed: %v\n%s", err, stderr.String())
 	}
-	return decodeObjects(t, rendered)
+	return rendered
 }
 
 // readObjects decodes one YAML file of the addon.

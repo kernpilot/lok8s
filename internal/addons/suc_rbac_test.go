@@ -276,7 +276,7 @@ func sucCheckRulesNeeded(t *testing.T, g sucGrant, calls []sucCall) {
 							if g.ns != "" {
 								scope = "in " + g.ns
 							}
-							t.Errorf("%s/%s grants %s %q/%s name %q %s, and no call in sucCalls needs it at that scope", g.role.Kind, g.role.Name, verb, grp, res, name, scope)
+							t.Errorf("%s/%s grants %s %q/%s name %q %s, and no call in the inventory needs it at that scope", g.role.Kind, g.role.Name, verb, grp, res, name, scope)
 						}
 					}
 				}
