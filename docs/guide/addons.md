@@ -1254,7 +1254,7 @@ the test misses too.
 | | `redisreplications/finalizers` update | the owner reference with `blockOwnerDeletion` on the Sentinel Service and StatefulSet of a RedisReplication (checked when the admission plugin `OwnerReferencesPermissionEnforcement` is on) |
 | | `secrets` get | password and TLS Secrets, read by name. No list, no watch, no write |
 | | `pods` get, list, patch | the Redis pods; the patch writes the role label |
-| | `services` get, list, watch, create, update | the Services of each CR. No delete |
+| | `services` get, list, watch, create, update, delete | the Services of each CR. The operator never deletes a Service; `delete` is for an update that changes a Service's owner references, which the admission plugin `OwnerReferencesPermissionEnforcement` allows only with delete. Without it, a RedisReplication stops at its resources step on such a cluster |
 | | `statefulsets` get, list, watch, create, update, delete | the StatefulSets of each CR; the delete recreates one |
 | | `persistentvolumeclaims` list, update, delete | the PVC resize; the delete when a CR without `storage.keepAfterDelete` goes away |
 | | `poddisruptionbudgets` get, create, update, delete | the PDBs of each CR |
@@ -1291,8 +1291,8 @@ With the operator's token a holder can, in every namespace:
   admission policy stops them. This is the largest remaining path;
 - list, get and patch pods (a list returns the full pod spec, environment
   values included);
-- create and change Services, PodDisruptionBudgets and events, and delete
-  PodDisruptionBudgets;
+- create, change and delete Services and PodDisruptionBudgets, and create
+  and patch events;
 - list, resize and delete PVCs. A PVC delete can destroy data;
 - run any command in any container of any pod (`pods/exec`), as long as the
   binding `lok8s-redis-operator-exec` exists;
@@ -1300,25 +1300,80 @@ With the operator's token a holder can, in every namespace:
   RedisReplications.
 
 What it lost against the chart's ClusterRole: every verb on namespaces
-and ConfigMaps; every Secret verb except get; pod create, update, delete
-and watch; Service delete; PVC create, get, watch and patch; every Lease
+and ConfigMaps; every Secret verb except get; get, create, patch and
+delete on the Redis CRs, and the status and finalizers grants that the
+operator does not use; pod create, update, delete and watch; patch on
+Services and StatefulSets; PVC create, get, watch and patch; PDB list,
+watch and patch; event get, list, watch, update and delete; every Lease
 verb outside `redis-operator`; CRD reads; get on all non-resource URLs;
-create, delete and patch on the Redis CRs; and the copy of its rules into
-`admin`.
+and the copy of its rules into `admin`.
 
-#### No RedisCluster: delete the exec binding
+#### pods/exec: on by default, only a RedisCluster needs it
 
-`pods/exec` is the widest single grant. Only a RedisCluster needs it. If
-your cluster runs no RedisCluster, delete the ClusterRoleBinding
-`lok8s-redis-operator-exec` from your copy of the addon
-(`.lok8s/addons/redis-operator/rbac.yaml`) and from the cluster:
+The addon keeps `pods/exec` create bound by default (ClusterRole and
+ClusterRoleBinding `lok8s-redis-operator-exec`), so that a RedisCluster
+keeps working after the update. **Exec stays enabled by default: until you
+remove the binding, the exec grant is not reduced.** The operator's token
+can still run any command in any container of any pod.
 
-```console
-$ kubectl delete clusterrolebinding lok8s-redis-operator-exec
-```
+Only a RedisCluster needs exec: the operator runs `redis-cli` in its pods
+to create the cluster, add and remove nodes, and rebalance the slots.
+Redis, RedisReplication and RedisSentinel never use it.
 
-A RedisCluster that you add later then fails with `forbidden` on
-`pods/exec` until you restore the binding.
+Exec is a part of the `redis-operator` addon, not an addon of its own:
+`spec.bootstrap` applies exactly the entries it lists, and lok8s has no
+addon part that is on by default and that a project can switch off by name
+([#316](https://github.com/kernpilot/lok8s/issues/316)). To remove exec,
+change your ejected copy:
+
+1. Make sure that no RedisCluster exists:
+
+   ```console
+   $ kubectl get redisclusters.redis.redis.opstreelabs.in -A
+   No resources found
+   ```
+
+2. In `.lok8s/addons/redis-operator/rbac.yaml`, delete the
+   ClusterRoleBinding document `lok8s-redis-operator-exec`. Keep the
+   ClusterRole: without a binding it grants nothing.
+3. Apply the bootstrap, then delete the binding in the cluster. The
+   bootstrap applies without prune, so step 2 alone leaves it there:
+
+   ```console
+   $ kubectl delete clusterrolebinding lok8s-redis-operator-exec
+   ```
+
+4. Migration from the chart's binding: `ClusterRole/redis-operator` grants
+   `pods/exec` too. Until you delete it and its binding (the upgrade note
+   below), the operator keeps exec through them.
+5. Verify:
+
+   ```console
+   $ SA=system:serviceaccount:redis-operator:redis-operator
+   $ kubectl auth can-i create pods/exec -n <a namespace with Redis CRs> --as="${SA}"
+   no
+   $ kubectl get clusterrolebinding -o json \
+       | jq -r '.items[] | select(any(.subjects[]?; .kind == "ServiceAccount" and .name == "redis-operator" and .namespace == "redis-operator")) | .metadata.name'
+   lok8s-redis-operator
+   ```
+
+   The second command lists every ClusterRoleBinding of the operator.
+   `lok8s-redis-operator-exec` and `redis-operator` must not be in it.
+
+Later releases: your edit makes the copy locally modified.
+`lo assets update addons/redis-operator` then refuses and names the file,
+so an update never binds exec again by itself. Take a later release into
+your copy by hand and keep the binding out. `lo assets update --force`
+replaces your copy and binds exec again: repeat steps 2 and 3 after it. In
+the other direction, no release removes the binding from a copy that has
+it.
+
+A RedisCluster that you add later needs exec back first: put the
+ClusterRoleBinding document back into `rbac.yaml` (or run
+`lo assets update addons/redis-operator --force`), apply the bootstrap,
+then create the RedisCluster. Without exec, the operator logs `forbidden`
+for `pods/exec` and the cluster does not form. `lo doctor` does not warn
+about this yet ([#315](https://github.com/kernpilot/lok8s/issues/315)).
 
 ::: warning Upgrade note: update the ejected copy, delete the old ClusterRole and binding once
 `lo` ejects an addon into `.lok8s/addons/<name>/` on first use and never
@@ -1347,14 +1402,40 @@ $ kubectl auth can-i list secrets -n kube-system --as="${SA}"
 no
 $ kubectl auth can-i update leases/6cab913b.redis.opstreelabs.in -n redis-operator --as="${SA}"
 yes
-$ kubectl get clusterrole admin -o json \
-    | jq '[.rules[] | select(((.resources // []) | index("namespaces")) and (.verbs | index("delete")))] | length'
-0
 ```
 
-The last check reads the built-in `admin` role: the aggregation controller
-removes the copied rules when the labelled ClusterRole is gone. The
-`can-i` lines are spot checks. Until now the broad rules hid any call that
+The removal from `admin` is asynchronous. The delete of the labelled
+ClusterRole queues the clusterrole-aggregation controller, which then
+writes the rules of `admin` again, usually within seconds. Until it does,
+`admin` keeps the copied rules. Poll until no copied rule is left:
+
+```console
+$ for i in $(seq 1 24); do
+    n=$(kubectl get clusterrole admin -o json \
+      | jq '[.rules[] | select(((.apiGroups // []) | index("redis.redis.opstreelabs.in"))
+             or (((.resources // []) | index("namespaces")) and (.verbs | index("delete"))))] | length')
+    echo "admin: ${n} rule(s) left"
+    [ "${n}" = 0 ] && break
+    sleep 5
+  done
+admin: 0 rule(s) left
+```
+
+The built-in `admin` grants no namespace delete and no
+`redis.redis.opstreelabs.in` rule by itself. If the count stays above 0,
+another ClusterRole still aggregates such a rule into `admin`. List the
+ClusterRoles that aggregate into the built-in roles, and read their rules:
+
+```console
+$ kubectl get clusterrole -l rbac.authorization.k8s.io/aggregate-to-admin=true
+$ kubectl get clusterrole -l rbac.authorization.k8s.io/aggregate-to-edit=true
+$ kubectl get clusterrole -l rbac.authorization.k8s.io/aggregate-to-view=true
+```
+
+A clean `admin` does not prove that a subject lost the rights: another
+binding can grant the same verbs (a legitimate one, or one you did not
+expect). Check a subject with `kubectl auth can-i --as=<subject>`. The
+`can-i` lines above are spot checks. Until now the broad rules hid any call that
 the new roles miss. Restart the operator, let it reconcile every Redis CR,
 and look for `forbidden` in the log:
 
