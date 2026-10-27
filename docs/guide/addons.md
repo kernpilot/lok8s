@@ -1305,10 +1305,12 @@ delete on the Redis CRs, and the status and finalizers grants that the
 operator does not use; pod create, update, delete and watch; patch on
 Services and StatefulSets; PVC create, get, watch and patch; PDB list,
 watch and patch; event get, list, watch, update and delete; every Lease
-verb outside `redis-operator`; CRD reads; get on all non-resource URLs;
-and the copy of its rules into `admin`.
+verb outside `redis-operator`; every `pods/exec` verb except create
+(`get` on `pods/exec` also allows exec over a websocket on older API
+servers); CRD reads; get on all non-resource URLs; and the copy of its
+rules into `admin`.
 
-#### pods/exec: on by default, only a RedisCluster needs it
+#### pods/exec: on by default, for RedisCluster only {#redis-operator-exec}
 
 The addon keeps `pods/exec` create bound by default (ClusterRole and
 ClusterRoleBinding `lok8s-redis-operator-exec`), so that a RedisCluster
@@ -1350,15 +1352,24 @@ change your ejected copy:
 
    ```console
    $ SA=system:serviceaccount:redis-operator:redis-operator
-   $ kubectl auth can-i create pods/exec -n <a namespace with Redis CRs> --as="${SA}"
+   $ NS=<a namespace with Redis CRs>
+   $ kubectl auth can-i create pods --subresource=exec -n "${NS}" --as="${SA}"
    no
    $ kubectl get clusterrolebinding -o json \
-       | jq -r '.items[] | select(any(.subjects[]?; .kind == "ServiceAccount" and .name == "redis-operator" and .namespace == "redis-operator")) | .metadata.name'
+       | jq -r '.items[]
+           | select(any(.subjects[]?; .kind == "ServiceAccount"
+               and .name == "redis-operator"
+               and .namespace == "redis-operator"))
+           | .metadata.name'
    lok8s-redis-operator
    ```
 
-   The second command lists every ClusterRoleBinding of the operator.
-   `lok8s-redis-operator-exec` and `redis-operator` must not be in it.
+   Write the subresource with `--subresource=exec`: kubectl reads
+   `pods/exec` as the pod named `exec`, and then prints `no` while exec
+   is still allowed. The last command lists every ClusterRoleBinding of
+   the operator. `lok8s-redis-operator-exec`, `redis-operator` and
+   `lok8s-redis-operator-chart-rbac` (the opt-in addon) must not be in it:
+   each one grants exec.
 
 Later releases: your edit makes the copy locally modified.
 `lo assets update addons/redis-operator` then refuses and names the file,
@@ -1400,7 +1411,8 @@ $ kubectl auth can-i delete namespaces --as="${SA}"
 no
 $ kubectl auth can-i list secrets -n kube-system --as="${SA}"
 no
-$ kubectl auth can-i update leases/6cab913b.redis.opstreelabs.in -n redis-operator --as="${SA}"
+$ kubectl auth can-i update leases/6cab913b.redis.opstreelabs.in \
+    -n redis-operator --as="${SA}"
 yes
 ```
 
@@ -1410,21 +1422,38 @@ writes the rules of `admin` again, usually within seconds. Until it does,
 `admin` keeps the copied rules. Poll until no copied rule is left:
 
 ```console
+$ Q='[.rules[]
+     | select(((.apiGroups // []) | index("redis.redis.opstreelabs.in"))
+       or (((.resources // []) | index("namespaces"))
+           and (.verbs | index("delete"))))]
+     | length'
 $ for i in $(seq 1 24); do
-    n=$(kubectl get clusterrole admin -o json \
-      | jq '[.rules[] | select(((.apiGroups // []) | index("redis.redis.opstreelabs.in"))
-             or (((.resources // []) | index("namespaces")) and (.verbs | index("delete"))))] | length')
+    n=unknown
+    if json=$(kubectl get clusterrole admin -o json); then
+      n=$(jq "${Q}" <<<"${json}") || n=unknown
+    fi
     echo "admin: ${n} rule(s) left"
     [ "${n}" = 0 ] && break
-    sleep 5
+    [ "${i}" -lt 24 ] && sleep 5
   done
 admin: 0 rule(s) left
+$ [ "${n}" = 0 ] || echo "timeout: admin still has ${n} copied rule(s)" >&2
 ```
+
+`unknown` means the read failed (kubectl or jq), not 0. After 24 tries
+(about 2 minutes) the last line reports the timeout.
 
 The built-in `admin` grants no namespace delete and no
 `redis.redis.opstreelabs.in` rule by itself. If the count stays above 0,
-another ClusterRole still aggregates such a rule into `admin`. List the
-ClusterRoles that aggregate into the built-in roles, and read their rules:
+one of two things holds:
+
+- another ClusterRole still aggregates such a rule into `admin`;
+- the clusterrole-aggregation controller has not run: it is part of
+  kube-controller-manager, so check that kube-controller-manager runs and
+  has a leader, and read its log.
+
+List the ClusterRoles that aggregate into the built-in roles, and read
+their rules:
 
 ```console
 $ kubectl get clusterrole -l rbac.authorization.k8s.io/aggregate-to-admin=true
@@ -1435,9 +1464,9 @@ $ kubectl get clusterrole -l rbac.authorization.k8s.io/aggregate-to-view=true
 A clean `admin` does not prove that a subject lost the rights: another
 binding can grant the same verbs (a legitimate one, or one you did not
 expect). Check a subject with `kubectl auth can-i --as=<subject>`. The
-`can-i` lines above are spot checks. Until now the broad rules hid any call that
-the new roles miss. Restart the operator, let it reconcile every Redis CR,
-and look for `forbidden` in the log:
+`can-i` lines above are spot checks. Until now the broad rules hid any
+call that the new roles miss. Restart the operator, let it reconcile
+every Redis CR, and look for `forbidden` in the log:
 
 ```console
 $ kubectl -n redis-operator rollout restart deployment/redis-operator

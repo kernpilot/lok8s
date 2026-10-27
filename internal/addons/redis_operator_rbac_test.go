@@ -311,12 +311,15 @@ func readRedisFixture(t *testing.T) ([]byte, map[string]object, rbacSubject) {
 
 // boolFlag reads a boolean flag of the operator's command line the way
 // pflag (cobra) does: `--name` sets it, `--name=<bool>` sets the value, the
-// last one wins. It reports whether the flag is set and its value. A value
-// that is not a bool fails the test: the operator would not start.
+// last one wins, and `--` ends the flags (what follows is an argument). It
+// reports whether the flag is set and its value. A value that is not a
+// bool fails the test: the operator would not start.
 func boolFlag(t *testing.T, argv []string, name string) (set, on bool) {
 	t.Helper()
 	for _, a := range argv {
 		switch {
+		case a == "--":
+			return set, on
 		case a == "--"+name:
 			set, on = true, true
 		case strings.HasPrefix(a, "--"+name+"="):
@@ -328,6 +331,29 @@ func boolFlag(t *testing.T, argv []string, name string) (set, on bool) {
 		}
 	}
 	return set, on
+}
+
+// TestRedisOperatorBoolFlag pins boolFlag to the pflag rules it follows.
+func TestRedisOperatorBoolFlag(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		argv    []string
+		set, on bool
+	}{
+		{[]string{"/operator", "manager"}, false, false},
+		{[]string{"--leader-elect"}, true, true},
+		{[]string{"--leader-elect=false"}, true, false},
+		{[]string{"--leader-elect=true"}, true, true},
+		{[]string{"--leader-elect", "--leader-elect=false"}, true, false},
+		{[]string{"--leader-elect=false", "--leader-elect"}, true, true},
+		{[]string{"--leader-elect-x"}, false, false},
+		{[]string{"--", "--leader-elect"}, false, false},
+		{[]string{"--leader-elect", "--", "--leader-elect=false"}, true, true},
+	} {
+		if set, on := boolFlag(t, tc.argv, "leader-elect"); set != tc.set || on != tc.on {
+			t.Errorf("boolFlag(%q) = set %v on %v, want set %v on %v", tc.argv, set, on, tc.set, tc.on)
+		}
+	}
 }
 
 // redisChartRBACObjects returns the chart's ClusterRole and ClusterRoleBinding
