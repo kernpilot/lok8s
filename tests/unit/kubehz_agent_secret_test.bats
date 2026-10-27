@@ -51,6 +51,12 @@ teardown() {
 _build_runner() {
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
+# timeout: the pod's `timeout SECS CMD ARGS`. It runs the command as a shell
+# function, so the kubectl stub below answers it and no real kubectl runs.
+timeout() {
+  shift
+  "$@"
+}
 kubectl() {
   argv_log kubectl "$@"
   case "$*" in
@@ -98,7 +104,7 @@ kubectl() {
     # two-node dump WITH the greedy-sed traps (runtimeHandlers +
     # volumesAttached). cp-1 carries the control-plane label KEY (empty
     # value); worker-1 does not.
-    "get nodes -o json") printf '%s\n' '{"items":[{"metadata":{"name":"cp-1","labels":{"kubernetes.io/hostname":"cp-1","node-role.kubernetes.io/control-plane":"","node.kubernetes.io/instance-type":"cx32"}},"status":{"conditions":[{"type":"Ready","status":"True"}],"runtimeHandlers":[{"name":"runc"},{"name":"crun"}],"volumesAttached":[{"name":"kubernetes.io/csi/csi.hetzner.cloud^0001"}]}},{"metadata":{"name":"worker-1","labels":{"kubernetes.io/hostname":"worker-1","node.kubernetes.io/instance-type":"cpx41"}},"status":{"conditions":[{"type":"Ready","status":"True"}],"runtimeHandlers":[{"name":"runc"}]}}]}' ;;
+    "get --raw /api/v1/nodes") printf '%s\n' '{"items":[{"metadata":{"name":"cp-1","labels":{"kubernetes.io/hostname":"cp-1","node-role.kubernetes.io/control-plane":"","node.kubernetes.io/instance-type":"cx32"}},"status":{"conditions":[{"type":"Ready","status":"True"}],"runtimeHandlers":[{"name":"runc"},{"name":"crun"}],"volumesAttached":[{"name":"kubernetes.io/csi/csi.hetzner.cloud^0001"}]}},{"metadata":{"name":"worker-1","labels":{"kubernetes.io/hostname":"worker-1","node.kubernetes.io/instance-type":"cpx41"}},"status":{"conditions":[{"type":"Ready","status":"True"}],"runtimeHandlers":[{"name":"runc"}]}}]}' ;;
     "get csr -o json") printf '{}\n' ;;
     *"/readyz"*) printf 'ok\n'; return 0 ;;
     "get pods"*) printf ''; return 0 ;;

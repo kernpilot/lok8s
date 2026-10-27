@@ -36,7 +36,8 @@ setup() {
     "${CRONJOB}" > "${HEARTBEAT}"
 
   # Stubs: a realistic TWO-node cluster — a control-plane node "cp-1" and a
-  # worker "worker-1". The `get nodes -o json` fixture carries the modern-k8s
+  # worker "worker-1". The node list fixture (`get --raw /api/v1/nodes`)
+  # carries the modern-k8s
   # traps that made the shipped agent DOA: .status.runtimeHandlers[].name
   # ("runc"/"crun", present on k8s ≳1.27) and .status.volumesAttached[].name (a
   # CSI handle). The script reads the names with jq from .items[].metadata.name;
@@ -44,7 +45,8 @@ setup() {
   # STUB_ITYPE sets cp-1's instance-type label (unset → cx32, empty string →
   # unlabeled). STUB_READY_STATUS sets the Ready condition of both nodes;
   # STUB_READY_MISSING=1 leaves it out. STUB_NODES_FILE serves a generated
-  # node list instead (the B448 tests). STUB_KUBECTL_LOG records every kubectl
+  # node list instead (the B448 tests). STUB_NODES_BODY answers the node list
+  # with exactly that body and exit 0 (an empty or broken answer). STUB_KUBECTL_LOG records every kubectl
   # call, and STUB_KUBECTL_DELAY makes each call sleep (a slow apiserver).
   # curl captures the POSTed heartbeat body (-d) to STUB_PAYLOAD_OUT so the
   # test can assert the wire payload.
@@ -104,8 +106,9 @@ kubectl() {
     # realistic two-node dump WITH the greedy-sed traps (runtimeHandlers +
     # volumesAttached). cp-1 carries the control-plane label KEY with an
     # empty value; worker-1 does not, so absent MUST read as worker.
-    "get nodes -o json")
+    "get --raw /api/v1/nodes")
       [ -z "${STUB_NODES_FAIL:-}" ] || return 1
+      if [ -n "${STUB_NODES_BODY+x}" ]; then printf '%s' "${STUB_NODES_BODY}"; return 0; fi
       if [ -n "${STUB_NODES_FILE:-}" ]; then cat "${STUB_NODES_FILE}"; return 0; fi
       command jq -n --arg ready "${STUB_READY_STATUS-True}" --arg itype "${STUB_ITYPE-cx32}" \
         --arg noready "${STUB_READY_MISSING:-}" '
@@ -248,14 +251,15 @@ _argv_spies() {
 }
 
 # _node_list N: generate a node list of N nodes and serve it as the answer
-# to `kubectl get nodes -o json`. The first three nodes cover each field case:
+# to `kubectl get --raw /api/v1/nodes`. The first three nodes cover each
+# field case:
 #   cp-0      control-plane label key (empty value), Ready True, cx53
 #   master-1  legacy master label key (empty value), Ready False, cpx41
 #   worker-2  no Ready condition, no instance-type label
 # Every other node is a Ready cpx41 worker named worker-<i>.
 # Each node has the shape of a real one, so jq gets real work: ~17 KB per
-# node here, ~23 KB of `kubectl get nodes -o json` on prod, most of it 50
-# status.images entries.
+# node here, ~23 KB of node JSON on prod, most of it 50 status.images
+# entries.
 _node_list() {
   export STUB_NODES_FILE="${BATS_TEST_TMPDIR}/nodes-${1}.json"
   command jq -n --argjson n "$1" '
@@ -418,7 +422,7 @@ teardown() {
 }
 
 # ── Node IDENTITY: names are the metadata names, never the greedy-sed ghosts ─
-# P0 regression guard: on modern k8s `get nodes -o json` also carries
+# P0 regression guard: on modern k8s the node list also carries
 # .status.runtimeHandlers[].name ("runc"/"crun") and .status.volumesAttached[]
 # .name (CSI handles). A greedy sed scraped those as node names, then
 # `kubectl get node runc` NotFounded and `set -e` killed the beat before the
@@ -482,7 +486,7 @@ teardown() {
     run command jq -r '.nodes | length' "${STUB_PAYLOAD_OUT}"
     assert_output "${n}"
     # The node list is ONE call, and no call names a single node.
-    run grep -c '^get nodes -o json$' "${STUB_KUBECTL_LOG}"
+    run grep -c '^get --raw /api/v1/nodes$' "${STUB_KUBECTL_LOG}"
     assert_output "1"
     run grep -c '^get node ' "${STUB_KUBECTL_LOG}"
     assert_output "0"
@@ -540,7 +544,7 @@ teardown() {
 @test "B448: the limits allow a burst; the requests stay low" {
   # At a 200m CPU limit the pod was throttled in 99.8 % of its CFS periods
   # on prod, and each kubectl call (a Go binary start) took ~1.5 s. At the
-  # 500-node cap jq peaks at ~70 MB while the shell holds the node JSON.
+  # 500-node cap jq peaks at ~70 MB (measured on prod nodes).
   run command yq -r '.spec.jobTemplate.spec.template.spec.containers[0].resources | [.limits.cpu, .requests.cpu, .limits.memory, .requests.memory] | join(" ")' "${CRONJOB}"
   assert_success
   assert_output "1000m 50m 256Mi 64Mi"
@@ -856,11 +860,13 @@ teardown() {
   assert_line "5 kubectl get validatingwebhookconfigurations -o json"
   assert_line "5 kubectl get mutatingwebhookconfigurations -o json"
   assert_line "5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name"
+  # The node list has its own bound (B448).
+  assert_line "30 kubectl get --raw /api/v1/nodes"
   # Twelve bounded calls, each in the plain-seconds form that busybox and
   # coreutils both take.
   run grep -c '^5 kubectl get ' "${STUB_TIMEOUT_LOG}"
   assert_output "12"
-  run grep -vc '^5 kubectl get ' "${STUB_TIMEOUT_LOG}"
+  run grep -vcE '^(5 kubectl get |30 kubectl get --raw /api/v1/nodes$)' "${STUB_TIMEOUT_LOG}"
   assert_output "0"
 }
 
@@ -893,6 +899,24 @@ teardown() {
   assert_output --partial "kubehz: assessment deferred: no answer for cpUsage.nodes"
   run command jq -e 'has("assessment") | not' "${STUB_PAYLOAD_OUT}"
   assert_success
+}
+
+@test "B448: an empty, non-JSON or item-less node answer with exit 0 is a failed call" {
+  # kubectl can exit 0 and still answer nothing usable. jq -e then fails,
+  # so the beat sends no nodes and defers the assessment, as for a failed
+  # call. It never reports 0 nodes as a fact.
+  local body
+  for body in '' 'not json' '{}'; do
+    export STUB_NODES_BODY="${body}"
+    rm -f "${STUB_PAYLOAD_OUT}"
+    run bash "${RUNNER}"
+    assert_success
+    assert_output --partial "kubehz: assessment deferred: no answer for cpUsage.nodes"
+    run command jq -c '.nodes' "${STUB_PAYLOAD_OUT}"
+    assert_output '[]'
+    run command jq -e 'has("assessment") | not' "${STUB_PAYLOAD_OUT}"
+    assert_success
+  done
 }
 
 @test "assessment: a missing CAPI CRD (NotFound) reads capiManaged false; the CRD reads true" {
