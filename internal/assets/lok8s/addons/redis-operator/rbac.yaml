@@ -1,0 +1,219 @@
+# The operator's RBAC. It replaces the chart's ClusterRole and
+# ClusterRoleBinding `redis-operator` (the kustomization deletes both from
+# the render).
+#
+# The chart's ClusterRole grants create, delete, get, list, patch, update and
+# watch on namespaces, secrets, pods, pods/exec, configmaps and more in every
+# namespace, plus get on every non-resource URL. It also carries the label
+# rbac.authorization.k8s.io/aggregate-to-admin, so Kubernetes adds all of
+# these rules to the built-in ClusterRole `admin`: a subject with a
+# RoleBinding to `admin` can then delete its own namespace. No object in
+# this addon carries an aggregate-to-* label.
+#
+# Every rule names the call that needs it. The sources are
+# OT-CONTAINER-KIT/redis-operator v0.26.0 (commit ef33adb, the image
+# quay.io/opstree/redis-operator:v0.26.0 that chart 0.26.1 runs) and the
+# libraries at the versions in its go.mod: sigs.k8s.io/controller-runtime
+# v0.17.2 and k8s.io/client-go v0.29.3.
+# internal/addons/redis_operator_rbac_test.go holds the same list of calls,
+# written by hand from that source, and fails when a rule grants more or
+# less than they need.
+#
+# The operator makes no call on namespaces, configmaps, CRDs or
+# non-resource URLs. It reads API discovery through the RESTMapper of
+# controller-runtime; the default ClusterRoleBinding system:discovery gives
+# that to every authenticated user.
+#
+# The chart runs the operator without WATCH_NAMESPACE, so its caches watch
+# every namespace (internal/cmd/manager/cmd.go:213-219) and it handles a
+# Redis CR in any namespace. The rules for the CRs and the objects the
+# operator makes for them are therefore cluster-wide.
+#
+# Every name has the prefix `lok8s-`. The chart uses `redis-operator` for
+# its ClusterRole and ClusterRoleBinding. A binding's roleRef cannot change,
+# so a binding that reused that name would fail to apply on a cluster that
+# still carries the old one.
+#
+# Three parts:
+#   - ClusterRole lok8s-redis-operator: the calls for the Redis CRs in every
+#     namespace.
+#   - ClusterRole lok8s-redis-operator-exec: pods/exec create. Only a
+#     RedisCluster needs it. If you run no RedisCluster, delete the binding
+#     lok8s-redis-operator-exec from your copy of the addon and from the
+#     cluster.
+#   - Role lok8s-redis-operator-leader-election (redis-operator): leader
+#     election.
+#
+# The opt-in addon redis-operator-chart-rbac binds the chart's rules again
+# (without the aggregate-to-admin label). Do not use it unless a newer
+# operator needs a call that this file does not grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lok8s-redis-operator
+rules:
+  # The four CR kinds. Their caches list and watch them
+  # (redis/redis_controller.go:99, rediscluster/rediscluster_controller.go:499,
+  # redisreplication/redisreplication_controller.go:548,
+  # redissentinel/redissentinel_controller.go:170,173). The operator reads a
+  # CR from the cache only (controller-runtime pkg/client/client.go:351-356).
+  # It adds and removes its finalizer with an update of the CR
+  # (controller/common/finalizer.go:14; k8sutils/finalizer.go:31,50,69,83).
+  # The operator never creates, patches or deletes a CR.
+  - apiGroups: [redis.redis.opstreelabs.in]
+    resources: [redis, redisclusters, redisreplications, redissentinels]
+    verbs: [list, watch, update]
+  # The status of a RedisCluster (rediscluster_controller.go:465,478) and of
+  # a RedisReplication (redisreplication_controller.go:542), both through
+  # controller/common/status.go:10. The operator writes no status of a Redis
+  # or a RedisSentinel.
+  - apiGroups: [redis.redis.opstreelabs.in]
+    resources: [redisclusters/status, redisreplications/status]
+    verbs: [update]
+  # The Sentinel Service and StatefulSet of a RedisReplication get an owner
+  # reference with blockOwnerDeletion (controller/common/reconciler/reconciler.go:30;
+  # controller-runtime pkg/controller/controllerutil/controllerutil.go:80).
+  # When the admission plugin OwnerReferencesPermissionEnforcement is on,
+  # the API server allows that only with update on the owner's finalizers
+  # subresource. The other owner references of the operator have no
+  # blockOwnerDeletion (k8sutils/labels.go:53-97).
+  - apiGroups: [redis.redis.opstreelabs.in]
+    resources: [redisreplications/finalizers]
+    verbs: [update]
+  # Password and TLS Secrets, read by name: k8sutils/secrets.go:19,40;
+  # controller/common/redis/heal.go:246, check.go:40;
+  # redisreplication_controller.go:230,289. The operator never lists,
+  # watches or writes a Secret.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+  # The Redis pods. get: k8sutils/redis.go:50,108,794,834,923, pod.go:18;
+  # controller/common/redis/check.go:110; redisreplication_controller.go:207.
+  # list by label: controller/common/redis/heal.go:53,210, check.go:62;
+  # redisreplication_controller.go:274. patch of the role label:
+  # controller/common/redis/heal.go:68.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, patch]
+  # Services. The cache (redis_controller.go:101; reconciler.go:58).
+  # get, create, update: k8sutils/services.go:118,93,104 and
+  # controller/common/reconciler/reconciler.go:50,92. The operator never
+  # deletes a Service, but delete is still needed: an update writes the
+  # owner reference of the CR again (k8sutils/services.go:61,174;
+  # reconciler.go:81-92). When that changes the owner references of an
+  # existing Service (an orphaned or adopted one) and the admission plugin
+  # OwnerReferencesPermissionEnforcement is on, the API server allows the
+  # update only with delete on the Service (kubernetes
+  # plugin/pkg/admission/gc/gc_admission.go:103-118, v1.31.0). A refused
+  # update stops the resources step, and a RedisReplication then gets no
+  # replication setup (redisreplication_controller.go:64-79). StatefulSets
+  # and PodDisruptionBudgets have the same owner-reference updates; their
+  # delete is in their rules below.
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, watch, create, update, delete]
+  # StatefulSets. The cache (redis_controller.go:102,
+  # rediscluster_controller.go:500, redissentinel_controller.go:171;
+  # rediscluster_controller.go:487, reconciler.go:58). get:
+  # k8sutils/statefulset.go:49,82,1126; controller/common/redis/heal.go:201,
+  # check.go:53. create, update: statefulset.go:1087,1098 and
+  # reconciler.go:50,92. delete to recreate one: statefulset.go:1107.
+  - apiGroups: [apps]
+    resources: [statefulsets]
+    verbs: [get, list, watch, create, update, delete]
+  # PVCs. list and update to resize: k8sutils/pvc.go:83,105. delete when a CR
+  # without storage.keepAfterDelete goes away: k8sutils/finalizer.go:107,127,
+  # 142,164.
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [list, update, delete]
+  # PodDisruptionBudgets: k8sutils/poddisruption.go:263 (get), 227 (create),
+  # 238 (update), 249 (delete).
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, create, update, delete]
+  # Events. The RedisCluster recorder writes them in the CR's namespace
+  # (internal/cmd/manager/cmd.go:257, rediscluster_controller.go:91), the
+  # leader election on the Lease in redis-operator (controller-runtime
+  # pkg/leaderelection/leader_election.go:108; client-go
+  # tools/leaderelection/resourcelock/leaselock.go:94). client-go
+  # tools/record/event.go:321 (patch), 327 (create).
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lok8s-redis-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lok8s-redis-operator
+subjects:
+  - kind: ServiceAccount
+    name: redis-operator
+    namespace: redis-operator
+---
+# redis-cli in a RedisCluster pod: create the cluster, add and remove
+# nodes, rebalance (k8sutils/redis.go:762-769, a POST to pods/exec; its
+# callers in redis.go and cluster-scaling.go take a RedisCluster only).
+# With this grant the token can run any command in any container of any
+# pod in the cluster. RBAC cannot limit it to the Redis pods. Without a
+# RedisCluster, delete the ClusterRoleBinding below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lok8s-redis-operator-exec
+rules:
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lok8s-redis-operator-exec
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lok8s-redis-operator-exec
+subjects:
+  - kind: ServiceAccount
+    name: redis-operator
+    namespace: redis-operator
+---
+# Leader election (the chart passes --leader-elect). A Lease named
+# 6cab913b.redis.opstreelabs.in (internal/cmd/manager/cmd.go:205-206) in the
+# operator's namespace (controller-runtime
+# pkg/leaderelection/leader_election.go:65,74-76). client-go
+# tools/leaderelection/resourcelock/leaselock.go: get :42, create :58,
+# update :75. RBAC cannot limit a create to one name. The events of the
+# leader election come from the ClusterRole above.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lok8s-redis-operator-leader-election
+  namespace: redis-operator
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    resourceNames: [6cab913b.redis.opstreelabs.in]
+    verbs: [get, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lok8s-redis-operator-leader-election
+  namespace: redis-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: lok8s-redis-operator-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: redis-operator
+    namespace: redis-operator

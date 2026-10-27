@@ -1,0 +1,37 @@
+# redis-operator-chart-rbac — opt-in, NOT RECOMMENDED. Binds the rules of
+# the redis-operator chart's ClusterRole to the operator's ServiceAccount
+# (redis-operator/redis-operator) again. The `redis-operator` addon deletes
+# the chart's ClusterRole and binding, and grants only what the operator
+# calls (see ../redis-operator/rbac.yaml for the per-rule evidence).
+#
+# Bootstrap this addon only when a newer operator version calls the API in a
+# way that rbac.yaml does not cover yet (the operator logs `forbidden`
+# errors), until the addon follows.
+#
+# With it, the operator's token can create and delete namespaces, read and
+# write every Secret and ConfigMap, and exec into every pod in the cluster
+# again. The label aggregate-to-admin of the chart is NOT restored: these
+# rules do not go into the built-in ClusterRole `admin`.
+#
+#   spec:
+#     bootstrap:
+#       - redis-operator
+#       - redis-operator-chart-rbac:
+#           dependsOn: [redis-operator]
+#
+# To opt out, removing the entry from spec.bootstrap is not enough: the
+# bootstrap applies without prune, so the objects stay. Also run
+# `kubectl delete clusterrolebinding lok8s-redis-operator-chart-rbac` and
+# `kubectl delete clusterrole lok8s-redis-operator-chart-rbac`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - includeSelectors: false
+    pairs:
+      lok8s.dev/name: redis-operator-chart-rbac
+      lok8s.dev/type: system
+      lok8s.dev/category: infrastructure
+
+resources:
+  - rbac.yaml

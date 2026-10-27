@@ -7,6 +7,18 @@
 # lok8s.dev labels are metadata-only (includeSelectors: false): the chart's
 # Deployment carries an immutable selector, so the transformer must not touch it
 # (else in-place re-applies fail).
+#
+# RBAC: the chart's ClusterRole `redis-operator` grants create and delete on
+# namespaces, Secrets, pods/exec and more in every namespace, and its label
+# aggregate-to-admin adds all of that to the built-in ClusterRole `admin`.
+# The patches below delete that ClusterRole and its ClusterRoleBinding from
+# the render, and rbac.yaml grants what the operator calls (the source line
+# of each rule is in its header). internal/addons/redis_operator_rbac_test.go
+# gates the rules against a call list written from the operator source. The
+# bootstrap applies without prune, so a cluster that ran an earlier version
+# of this addon keeps the old ClusterRole and binding until you delete them
+# once (the addons guide, section redis-operator). The opt-in addon
+# redis-operator-chart-rbac binds the chart's rules again (not recommended).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -25,3 +37,26 @@ generators:
 
 resources:
   - namespace.yaml
+  - rbac.yaml
+
+patches:
+  # With a target the delete is a no-op when the object is absent (a render
+  # of the fixture alone); without one kustomize fails on the missing object.
+  - target:
+      kind: ClusterRole
+      name: ^redis-operator$
+    patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: redis-operator
+  - target:
+      kind: ClusterRoleBinding
+      name: ^redis-operator$
+    patch: |-
+      $patch: delete
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: redis-operator
