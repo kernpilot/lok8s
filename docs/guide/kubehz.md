@@ -715,8 +715,11 @@ Properties worth knowing:
   root filesystem, all capabilities dropped.
 
 The snapshot contains the Kubernetes version, node list (name/readiness/
-role/instance type, capped at 20 nodes), certificate expiry, and
-control-plane component health:
+role/instance type), certificate expiry, and control-plane component health.
+The agent reads all nodes with one API call, so the number of calls does not
+grow with the cluster. The list is capped at 500 nodes, the limit of the platform's
+heartbeat API. A larger cluster sends its first 500 nodes, and the agent
+writes the total to its log:
 
 ```json
 {

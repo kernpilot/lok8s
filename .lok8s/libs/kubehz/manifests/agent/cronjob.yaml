@@ -179,69 +179,60 @@ spec:
                   KUBE_VERSION=$(kubectl get --raw /version 2>/dev/null | \
                     sed -n 's/.*"gitVersion": *"\([^"]*\)".*/\1/p' | head -1)
 
-                  # Node NAMES only, via a targeted jsonpath over
-                  # .items[].metadata.name. A greedy `get nodes -o json | sed
-                  # 's/.*"name":"…"/…/'` ALSO scrapes .status.runtimeHandlers[].name
-                  # (e.g. "runc"/"crun", present on k8s ≳1.27) and
-                  # .status.volumesAttached[].name (CSI handles) — the loop then
-                  # runs `kubectl get node runc`, which NotFounds, and `set -e`
-                  # kills the whole heartbeat before it ever POSTs.
-                  # Cap the per-node loop at 20 to bound the beat's runtime; a
-                  # larger cluster reports its first 20 nodes AND logs the
-                  # truncation to stderr (never a silent drop). NODES_OK tells
-                  # an empty answer apart from a failed call: the assessment
-                  # sends cpUsage.nodes only from a call that answered.
+                  # Nodes: ONE list call for all nodes, and jq makes the
+                  # per-node payload (B448). A kubectl call takes ~1.5 s on
+                  # prod. The old loop made 3 calls per node, so at ~18 nodes
+                  # the tick ran past activeDeadlineSeconds (120 s) and the
+                  # job was killed before the POST. The call count must not
+                  # grow with the node count.
+                  # jq reads .items[].metadata.name only. A greedy sed over
+                  # the JSON also scraped .status.runtimeHandlers[].name
+                  # ("runc") and .status.volumesAttached[].name (CSI handles)
+                  # as node names.
+                  # jq builds the JSON, so it escapes every value.
+                  #   status: the RAW Ready condition is True/False/Unknown, but
+                  #     the platform's vocabulary is Ready/NotReady/Unknown
+                  #     (dashboard isNodeReady requires the exact word "Ready";
+                  #     the pilot showed 0/12 Ready on a healthy cluster,
+                  #     2026-08-01). A missing condition reports Unknown.
+                  #   roles: control-plane iff the node has the LABEL KEY
+                  #     node-role.kubernetes.io/control-plane (or the legacy
+                  #     /master). These labels have an EMPTY value, so test the
+                  #     key with has(), never the value. Else worker.
+                  #   instanceType: the node.kubernetes.io/instance-type label
+                  #     (set by the cloud provider, e.g. Hetzner CCM: cx32). It
+                  #     feeds the self-hosted price overview. A missing label
+                  #     (bare metal, kind, no CCM) gives "".
+                  # NODES_OK tells an empty answer apart from a failed call:
+                  # the assessment sends cpUsage.nodes only from a call that
+                  # answered. jq -e fails on no input, so an empty answer
+                  # from kubectl is a failed call too. The script holds the
+                  # kubectl output in a variable, so kubectl exits before jq
+                  # starts.
                   NODES_OK=""
-                  if NODES_ALL=$(kubectl get nodes \
-                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null); then
+                  if NODES_JSON=$(kubectl get nodes -o json 2>/dev/null) \
+                    && NODE_LIST=$(printf '%s' "${NODES_JSON}" | jq -ce '[.items[] |
+                        (.metadata.labels // {}) as $l | {
+                          name: .metadata.name,
+                          status: ([.status.conditions[]? | select(.type == "Ready") | .status][0]
+                            | if . == "True" then "Ready" elif . == "False" then "NotReady" else "Unknown" end),
+                          roles: (if ($l | has("node-role.kubernetes.io/control-plane") or has("node-role.kubernetes.io/master"))
+                            then "control-plane" else "worker" end),
+                          instanceType: ($l["node.kubernetes.io/instance-type"] // "")}]' 2>/dev/null); then
                     NODES_OK=1
                   else
-                    NODES_ALL=""
+                    NODE_LIST="[]"
                   fi
-                  NODES=$(echo "${NODES_ALL}" | head -20)
-                  NODE_TOTAL=$(echo "${NODES_ALL}" | grep -c . || true)
-                  [ "${NODE_TOTAL}" -gt 20 ] && echo "kubehz: heartbeat summarizes the first 20 of ${NODE_TOTAL} nodes" >&2
-
-                  # Per-node payload. instanceType mirrors the well-known
-                  # node.kubernetes.io/instance-type label (set by the cloud
-                  # provider, e.g. Hetzner CCM: cx32/cpx41/…) — it powers the
-                  # self-hosted price overview in the dashboard. Fail-soft: a
-                  # missing label (bare metal, kind, no CCM) yields "" and the
-                  # heartbeat never fails because of it.
-                  NODE_ARRAY="["
-                  first=true
-                  for node in ${NODES}; do
-                    status=$(kubectl get node "${node}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || status=""
-                    # The jsonpath yields the RAW NodeCondition value — literally
-                    # True/False/Unknown — but the platform's vocabulary is
-                    # Ready/NotReady/Unknown (dashboard isNodeReady requires the
-                    # exact word "Ready", case-insensitively — "True" never
-                    # matches; the pilot showed 0/12 Ready on a healthy cluster,
-                    # 2026-08-01). Map here so the wire always carries the
-                    # canonical word; an empty/failed probe reports Unknown.
-                    case "${status}" in
-                      True) status="Ready" ;;
-                      False) status="NotReady" ;;
-                      *) status="Unknown" ;;
-                    esac
-                    # roles: control-plane iff the node carries the
-                    # node-role.kubernetes.io/control-plane (or legacy /master)
-                    # LABEL KEY. Those labels have an EMPTY value, so a per-key
-                    # jsonpath returns "" (exit 0) whether the label is present or
-                    # ABSENT — the old `… && echo control-plane` thus fired for
-                    # EVERY node. Test the key's presence in the rendered labels
-                    # map instead (jsonpath prints it as JSON on the pinned
-                    # kubectl); default worker. Fail-soft under set -e.
-                    labels=$(kubectl get node "${node}" -o jsonpath='{.metadata.labels}' 2>/dev/null) || labels=""
-                    case "${labels}" in
-                      *'"node-role.kubernetes.io/control-plane"'*|*'"node-role.kubernetes.io/master"'*) roles="control-plane" ;;
-                      *) roles="worker" ;;
-                    esac
-                    itype=$(kubectl get node "${node}" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}' 2>/dev/null) || itype=""
-                    if [ "${first}" = "true" ]; then first=false; else NODE_ARRAY="${NODE_ARRAY},"; fi
-                    NODE_ARRAY="${NODE_ARRAY}{\"name\":\"${node}\",\"status\":\"${status}\",\"roles\":\"${roles}\",\"instanceType\":\"${itype}\"}"
-                  done
-                  NODE_ARRAY="${NODE_ARRAY}]"
+                  NODES_JSON=""
+                  # The api's heartbeat schema accepts at most 500 nodes; a
+                  # longer array 400s the WHOLE heartbeat. A larger cluster
+                  # reports its first 500 nodes AND logs the truncation to
+                  # stderr (never a silent drop). NODE_TOTAL stays the true
+                  # count.
+                  NODE_CAP=500
+                  NODE_TOTAL=$(printf '%s' "${NODE_LIST}" | jq 'length' 2>/dev/null) || NODE_TOTAL=0
+                  [ "${NODE_TOTAL}" -gt "${NODE_CAP}" ] && echo "kubehz: heartbeat summarizes the first ${NODE_CAP} of ${NODE_TOTAL} nodes" >&2
+                  NODE_ARRAY=$(printf '%s' "${NODE_LIST}" | jq -c --argjson cap "${NODE_CAP}" '.[:$cap]' 2>/dev/null) || NODE_ARRAY="[]"
 
                   CERT_EXPIRY=$(kubectl get csr -o json 2>/dev/null | \
                     sed -n 's/.*"expirationTimestamp": *"\([^"]*\)".*/\1/p' | \
@@ -838,13 +829,23 @@ spec:
                       name: kubehz-agent-bind
                       key: bind-secret
                       optional: true
+              # The limits are for a short burst (B448); the requests stay
+              # low. CPU: each kubectl call starts a Go binary. At a 200m
+              # limit the pod was throttled in 99.8 % of its CFS periods on
+              # prod, and a call took ~1.5 s. A tick runs for about 10 s
+              # every 5 minutes, so a 1000m limit costs little. Memory: a
+              # real node is ~23 KB of `kubectl get nodes -o json` (50
+              # images). jq peaks at ~32 MB for 200 nodes (4.6 MB of JSON)
+              # and ~70 MB for 500 nodes (11.5 MB), and the shell holds the
+              # JSON at the same time. 128Mi left a thin margin at the
+              # 500-node cap.
               resources:
                 requests:
                   cpu: 50m
                   memory: 64Mi
                 limits:
-                  cpu: 200m
-                  memory: 128Mi
+                  cpu: 1000m
+                  memory: 256Mi
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

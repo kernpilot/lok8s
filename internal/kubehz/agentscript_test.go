@@ -286,3 +286,79 @@ func TestAgentProbesAreBoundedByTimeout(t *testing.T) {
 		t.Errorf("%d assessment probes found, want at least 12", len(probes))
 	}
 }
+
+// loopHead matches the head of a sh loop that ends its line with `do`, also
+// after a pipe (`... | while read -r x; do`). loopEnd matches its `done`.
+var (
+	loopHead = regexp.MustCompile(`(?:^|[|;&(])\s*(for\s+\w+\s+in\s+([^;]*)|while\s[^;]*|until\s[^;]*);\s*do\s*$`)
+	loopEnd  = regexp.MustCompile(`^\s*done\b`)
+)
+
+// runtimeLoops returns the 1-based [first, last] line ranges of the loops in
+// a POSIX sh script whose iteration count is known only at run time: every
+// while or until loop, and every for loop whose word list expands something.
+// A for loop over literal words is fixed. A fixed loop nested in a
+// runtime-sized loop is part of its range.
+func runtimeLoops(script string) [][2]int {
+	var out [][2]int
+	lines := strings.Split(script, "\n")
+	for i, l := range lines {
+		m := loopHead.FindStringSubmatch(l)
+		if m == nil || (strings.HasPrefix(m[1], "for") && !strings.ContainsAny(m[2], "$`")) {
+			continue
+		}
+		depth := 0
+		for j := i; j < len(lines); j++ {
+			if loopHead.MatchString(lines[j]) {
+				depth++
+			} else if loopEnd.MatchString(lines[j]) {
+				depth--
+			}
+			if depth == 0 {
+				out = append(out, [2]int{i + 1, j + 1})
+				break
+			}
+		}
+	}
+	return out
+}
+
+func TestRuntimeLoopsFindsOnlyRuntimeSizedLoops(t *testing.T) {
+	t.Parallel()
+	script := "for comp in a b; do\n  kubectl get pods\ndone\n" +
+		"for node in ${NODES}; do\n  kubectl get node \"${node}\"\ndone\n" +
+		"printf x | while read -r n; do\n  :\ndone\n"
+	got := runtimeLoops(script)
+	if len(got) != 2 || got[0] != [2]int{4, 6} || got[1] != [2]int{7, 9} {
+		t.Fatalf("runtimeLoops = %v, want [[4 6] [7 9]]", got)
+	}
+}
+
+// TestHeartbeatKubectlCallsDoNotGrowWithTheCluster (B448): a kubectl call
+// takes ~1.5 s on prod. The heartbeat made 3 calls per node, so at ~18 nodes
+// the tick ran past activeDeadlineSeconds (120 s) and the job was killed
+// before the POST. The node list must be one call, no call may read a
+// single node, and no kubectl call may sit in a runtime-sized loop.
+func TestHeartbeatKubectlCallsDoNotGrowWithTheCluster(t *testing.T) {
+	t.Parallel()
+	script := heartbeatScript(t)
+	loops := runtimeLoops(script)
+	nodeLists := 0
+	for _, c := range kubectlCalls(script) {
+		joined := strings.Join(c.args, " ")
+		if joined == "get nodes -o json" {
+			nodeLists++
+		}
+		if len(c.args) >= 2 && c.args[0] == "get" && c.args[1] == "node" {
+			t.Errorf("script line %d: kubectl %s reads one node; a call per node grows with the cluster (B448)", c.line, joined)
+		}
+		for _, l := range loops {
+			if c.line >= l[0] && c.line <= l[1] {
+				t.Errorf("script line %d: kubectl %s runs in the loop at lines %d-%d; the call count grows with the cluster (B448)", c.line, joined, l[0], l[1])
+			}
+		}
+	}
+	if nodeLists != 1 {
+		t.Errorf("%d `kubectl get nodes -o json` calls found, want 1", nodeLists)
+	}
+}

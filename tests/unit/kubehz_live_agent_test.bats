@@ -49,8 +49,7 @@ kubectl() {
     *"get secret kubehz-agent"*"claim-code"*)  printf 'khzc_test'   | base64 | tr -d '\n' ;;
     *"get secret kubehz-agent"*) return 0 ;;
     *"/version"*) printf '{"gitVersion":"v1.35.5"}\n' ;;
-    "get nodes -o jsonpath="*) printf 'cp-1\n' ;;
-    "get node "*) printf '' ;;
+    "get nodes -o json") printf '{"items":[{"metadata":{"name":"cp-1"}}]}\n' ;;
     "get csr -o json") printf '{}\n' ;;
     *"/readyz"*) printf 'ok\n'; return 0 ;;
     "get configmap kubehz-agent-config"*) printf '%s' "${STUB_MARKER:-{\}}" ;;

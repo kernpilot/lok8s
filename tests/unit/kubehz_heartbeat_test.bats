@@ -3,9 +3,12 @@
 #
 # Guards the POSIX-sh heartbeat embedded in
 # .lok8s/libs/kubehz/manifests/agent/cronjob.yaml:
-#   - node IDENTITY: names come from a targeted jsonpath, NEVER from a greedy
-#     sed that also scrapes .status.runtimeHandlers[].name ("runc") or
-#     .status.volumesAttached[].name (CSI handles) on modern k8s;
+#   - node IDENTITY: names come from jq over .items[].metadata.name, NEVER
+#     from a greedy sed that also scrapes .status.runtimeHandlers[].name
+#     ("runc") or .status.volumesAttached[].name (CSI handles) on modern k8s;
+#   - B448: ONE node list call for all nodes. The kubectl call count does not
+#     grow with the node count, so a large cluster finishes the tick before
+#     activeDeadlineSeconds (120 s);
 #   - per-node ROLES: control-plane vs worker, derived from the node-role label
 #     KEY presence (an absent label must NOT read as control-plane);
 #   - kubernetesVersion: the SERVER version, not the client/kubectl-image tag;
@@ -36,12 +39,15 @@ setup() {
   # worker "worker-1". The `get nodes -o json` fixture carries the modern-k8s
   # traps that made the shipped agent DOA: .status.runtimeHandlers[].name
   # ("runc"/"crun", present on k8s ≳1.27) and .status.volumesAttached[].name (a
-  # CSI handle). The FIX extracts node names via a targeted jsonpath
-  # (`get nodes -o jsonpath=…`); a regression to the greedy `… -o json | sed
-  # …"name"…` scrapes those ghosts → `get node runc` NotFounds → set -e aborts
-  # (caught by assert_success). STUB_ITYPE sets cp-1's instance-type label
-  # (unset → cx32, empty string → unlabeled). curl captures the POSTed heartbeat
-  # body (-d) to STUB_PAYLOAD_OUT so the test can assert the wire payload.
+  # CSI handle). The script reads the names with jq from .items[].metadata.name;
+  # a greedy sed over the JSON would report those ghosts as nodes.
+  # STUB_ITYPE sets cp-1's instance-type label (unset → cx32, empty string →
+  # unlabeled). STUB_READY_STATUS sets the Ready condition of both nodes;
+  # STUB_READY_MISSING=1 leaves it out. STUB_NODES_FILE serves a generated
+  # node list instead (the B448 tests). STUB_KUBECTL_LOG records every kubectl
+  # call, and STUB_KUBECTL_DELAY makes each call sleep (a slow apiserver).
+  # curl captures the POSTed heartbeat body (-d) to STUB_PAYLOAD_OUT so the
+  # test can assert the wire payload.
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
 # timeout: the pod's `timeout SECS CMD ARGS` (busybox and coreutils take the
@@ -60,6 +66,8 @@ timeout() {
 }
 kubectl() {
   argv_log kubectl "$@"
+  [ -z "${STUB_KUBECTL_LOG:-}" ] || printf '%s\n' "$*" >> "${STUB_KUBECTL_LOG}"
+  [ -z "${STUB_KUBECTL_DELAY:-}" ] || sleep "${STUB_KUBECTL_DELAY}"
   # In the pod, kubectl reads the in-cluster config. A client-config flag
   # makes it skip that config and dial localhost:8080 (B423, proven on prod
   # with alpine/k8s 1.31.4): the stub refuses the same way.
@@ -92,41 +100,29 @@ kubectl() {
     *"/version"*) printf '{"major":"1","minor":"35","gitVersion":"v1.35.5","platform":"linux/amd64"}\n' ;;
     "version -o json") printf '{\n  "clientVersion": { "gitVersion": "v1.31.4" },\n  "serverVersion": { "gitVersion": "v1.35.5" }\n}\n' ;;
 
-    # Node NAMES (the FIX): a targeted jsonpath over .items[].metadata.name.
-    "get nodes -o jsonpath="*)
+    # The node list: ONE call for all nodes (B448). The default fixture is a
+    # realistic two-node dump WITH the greedy-sed traps (runtimeHandlers +
+    # volumesAttached). cp-1 carries the control-plane label KEY with an
+    # empty value; worker-1 does not, so absent MUST read as worker.
+    "get nodes -o json")
       [ -z "${STUB_NODES_FAIL:-}" ] || return 1
-      printf 'cp-1\nworker-1\n' ;;
-    # Realistic multi-node dump WITH the greedy-sed traps (runtimeHandlers +
-    # volumesAttached). Dormant unless the extraction regresses to `-o json`.
-    "get nodes -o json") printf '%s\n' '{"items":[{"metadata":{"name":"cp-1"},"status":{"runtimeHandlers":[{"name":"runc"},{"name":"crun"}],"volumesAttached":[{"name":"kubernetes.io/csi/csi.hetzner.cloud^0001"}]}},{"metadata":{"name":"worker-1"},"status":{"runtimeHandlers":[{"name":"runc"}]}}]}' ;;
-
-    # Per-node queries. A name that isn't a real node (what greedy-sed scrapes)
-    # NotFounds like real kubectl → the old code's unguarded status=$(…) aborts.
-    "get node "*)
-      _n=$3
-      case "${_n}" in
-        cp-1|worker-1) : ;;
-        *) echo "Error from server (NotFound): nodes \"${_n}\" not found" >&2; return 1 ;;
-      esac
-      case "$*" in
-        *"jsonpath={.status.conditions"*)
-          [ -n "${STUB_READY_STATUS_FAIL:-}" ] && return 1
-          printf '%s' "${STUB_READY_STATUS-True}" ;;
-        *"instance-type}"*)
-          [ -n "${STUB_ITYPE_FAIL:-}" ] && return 1
-          if [ "${_n}" = "cp-1" ]; then printf '%s' "${STUB_ITYPE-cx32}"; else printf 'cpx41'; fi
-          return 0 ;;
-        # roles source: the labels map, rendered as JSON by the pinned kubectl
-        # (1.31). cp-1 carries the control-plane label KEY (empty value);
-        # worker-1 does not — so absent MUST read as worker, not control-plane.
-        *"jsonpath={.metadata.labels}"*)
-          if [ "${_n}" = "cp-1" ]; then
-            printf '%s' '{"kubernetes.io/hostname":"cp-1","node-role.kubernetes.io/control-plane":"","node.kubernetes.io/instance-type":"cx32"}'
-          else
-            printf '%s' '{"kubernetes.io/hostname":"worker-1","node.kubernetes.io/instance-type":"cpx41"}'
-          fi ;;
-        *) printf '' ;;
-      esac ;;
+      if [ -n "${STUB_NODES_FILE:-}" ]; then cat "${STUB_NODES_FILE}"; return 0; fi
+      command jq -n --arg ready "${STUB_READY_STATUS-True}" --arg itype "${STUB_ITYPE-cx32}" \
+        --arg noready "${STUB_READY_MISSING:-}" '
+        ([{type: "MemoryPressure", status: "False"}]
+          + (if $noready == "" then [{type: "Ready", status: $ready}] else [] end)) as $cond
+        | {items: [
+            {metadata: {name: "cp-1", labels: ({"kubernetes.io/hostname": "cp-1",
+                "node-role.kubernetes.io/control-plane": ""}
+                + (if $itype == "" then {} else {"node.kubernetes.io/instance-type": $itype} end))},
+             status: {conditions: $cond, runtimeHandlers: [{name: "runc"}, {name: "crun"}],
+               volumesAttached: [{name: "kubernetes.io/csi/csi.hetzner.cloud^0001"}]}},
+            {metadata: {name: "worker-1", labels: {"kubernetes.io/hostname": "worker-1",
+                "node.kubernetes.io/instance-type": "cpx41"}},
+             status: {conditions: $cond, runtimeHandlers: [{name: "runc"}]}}]}' ;;
+    # A call per node is the B448 bug. Answer it like real kubectl, so a
+    # regression fails on the call count, not on a missing stub.
+    "get node "*) printf '' ;;
 
     "get csr -o json") printf '{}\n' ;;
     *"/readyz"*) printf 'ok\n'; return 0 ;;
@@ -251,6 +247,58 @@ _argv_spies() {
   argv_spy "${ARGV_SPY_TOOLS[@]}"
 }
 
+# _node_list N: generate a node list of N nodes and serve it as the answer
+# to `kubectl get nodes -o json`. The first three nodes cover each field case:
+#   cp-0      control-plane label key (empty value), Ready True, cx53
+#   master-1  legacy master label key (empty value), Ready False, cpx41
+#   worker-2  no Ready condition, no instance-type label
+# Every other node is a Ready cpx41 worker named worker-<i>.
+# Each node has the shape of a real one, so jq gets real work: ~17 KB per
+# node here, ~23 KB of `kubectl get nodes -o json` on prod, most of it 50
+# status.images entries.
+_node_list() {
+  export STUB_NODES_FILE="${BATS_TEST_TMPDIR}/nodes-${1}.json"
+  command jq -n --argjson n "$1" '
+    def node($name; $labels; $conds):
+      {apiVersion: "v1", kind: "Node",
+       metadata: {name: $name, uid: "6f1c2a4e-0d3b-4c5a-9e7f-8a9b0c1d2e3f",
+         resourceVersion: "123456789", creationTimestamp: "2026-10-01T00:00:00Z",
+         labels: ({"kubernetes.io/arch": "amd64", "kubernetes.io/os": "linux",
+           "kubernetes.io/hostname": $name, "topology.kubernetes.io/region": "fsn1",
+           "topology.kubernetes.io/zone": "fsn1-dc14"} + $labels),
+         annotations: {"csi.volume.kubernetes.io/nodeid": "{\"csi.hetzner.cloud\":\"12345678\"}",
+           "node.alpha.kubernetes.io/ttl": "0",
+           "volumes.kubernetes.io/controller-managed-attach-detach": "true"}},
+       spec: {podCIDR: "10.244.1.0/24", podCIDRs: ["10.244.1.0/24"], providerID: "hcloud://12345678"},
+       status: {
+         addresses: [{type: "InternalIP", address: "10.0.0.1"}, {type: "Hostname", address: $name}],
+         allocatable: {cpu: "16", memory: "32000000Ki", pods: "110"},
+         capacity: {cpu: "16", memory: "32500000Ki", pods: "110"},
+         conditions: [$conds[] + {lastHeartbeatTime: "2026-10-27T00:00:00Z",
+           lastTransitionTime: "2026-10-01T00:00:00Z", reason: "KubeletReady",
+           message: "kubelet is posting ready status"}],
+         images: [range(50) as $m | {names: [
+           "registry.example.com/library/image-\($m)@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+           "registry.example.com/library/image-\($m):v1.\($m).0"], sizeBytes: 123456789}],
+         nodeInfo: {architecture: "amd64", containerRuntimeVersion: "containerd://1.7.24",
+           kernelVersion: "6.8.0-48-generic", kubeletVersion: "v1.31.4", operatingSystem: "linux",
+           osImage: "Ubuntu 24.04.1 LTS"},
+         runtimeHandlers: [{name: "runc"}],
+         volumesAttached: [{name: "kubernetes.io/csi/csi.hetzner.cloud^0001", devicePath: ""}]}};
+    {apiVersion: "v1", kind: "List", items: [range($n) as $i |
+      if $i == 0 then
+        node("cp-0"; {"node-role.kubernetes.io/control-plane": "",
+          "node.kubernetes.io/instance-type": "cx53"}; [{type: "Ready", status: "True"}])
+      elif $i == 1 then
+        node("master-1"; {"node-role.kubernetes.io/master": "",
+          "node.kubernetes.io/instance-type": "cpx41"}; [{type: "Ready", status: "False"}])
+      elif $i == 2 then
+        node("worker-2"; {}; [{type: "MemoryPressure", status: "False"}])
+      else
+        node("worker-\($i)"; {"node.kubernetes.io/instance-type": "cpx41"}; [{type: "Ready", status: "True"}])
+      end]}' > "${STUB_NODES_FILE}"
+}
+
 teardown() {
   teardown_tmpdir
 }
@@ -269,11 +317,10 @@ teardown() {
   assert_success
   assert_output --partial "kind: CronJob"
   assert_output --partial "name: kubehz-heartbeat"
-  # The per-node field is present in the rendered heartbeat script.
-  assert_output --partial '\"instanceType\":\"'
-  # …sourced from the GA label key, not the deprecated beta alias (pins the key
-  # so a silent swap to beta.kubernetes.io/instance-type fails here).
-  assert_output --partial 'node\.kubernetes\.io/instance-type'
+  # The per-node field is present in the rendered heartbeat script, sourced
+  # from the GA label key, not the deprecated beta alias (pins the key so a
+  # silent swap to beta.kubernetes.io/instance-type fails here).
+  assert_output --partial 'instanceType: ($l["node.kubernetes.io/instance-type"] // "")'
 }
 
 # ── Labeled node → instanceType is the label value ───────
@@ -321,11 +368,19 @@ teardown() {
   assert_output "NotReady"
 }
 
-@test "heartbeat: a failed status probe reports \"Unknown\", never an empty string" {
-  export STUB_READY_STATUS_FAIL=1
+@test "heartbeat: a missing Ready condition reports \"Unknown\", never an empty string" {
+  export STUB_READY_MISSING=1
   run bash "${RUNNER}"
   assert_success
-  # The stub fails the probe for EVERY node — both must land as Unknown.
+  # No node has a Ready condition — both must land as Unknown.
+  run command jq -r '[.nodes[].status] | unique | .[]' "${STUB_PAYLOAD_OUT}"
+  assert_output "Unknown"
+}
+
+@test "heartbeat: a Ready condition of Unknown reports \"Unknown\"" {
+  export STUB_READY_STATUS="Unknown"
+  run bash "${RUNNER}"
+  assert_success
   run command jq -r '[.nodes[].status] | unique | .[]' "${STUB_PAYLOAD_OUT}"
   assert_output "Unknown"
 }
@@ -347,20 +402,19 @@ teardown() {
   assert_output ""
 }
 
-# ── instance-type kubectl error → "" (fail-soft under set -e) ──
+# ── A node with no labels map → worker, instanceType "" (fail-soft) ──
 
-@test "heartbeat: an instance-type kubectl error is fail-soft (instanceType \"\", valid JSON)" {
-  # kubectl returns non-zero for the instance-type lookup — the `|| itype=""`
-  # guard must absorb it so `set -e` does not abort the whole heartbeat.
-  export STUB_ITYPE_FAIL=1
+@test "heartbeat: a node with no labels map reports worker and instanceType \"\"" {
+  # metadata.labels is absent: jq must read it as an empty map, never fail
+  # (a failed jq would drop every node from the beat).
+  export STUB_NODES_FILE="${BATS_TEST_TMPDIR}/nodes.json"
+  printf '%s\n' '{"items":[{"metadata":{"name":"bare-1"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}' \
+    > "${STUB_NODES_FILE}"
   run bash "${RUNNER}"
   assert_success
 
-  run command jq -e . "${STUB_PAYLOAD_OUT}"
-  assert_success
-
-  run command jq -r '.nodes[0].instanceType' "${STUB_PAYLOAD_OUT}"
-  assert_output ""
+  run command jq -rc '.nodes' "${STUB_PAYLOAD_OUT}"
+  assert_output '[{"name":"bare-1","status":"Ready","roles":"worker","instanceType":""}]'
 }
 
 # ── Node IDENTITY: names are the metadata names, never the greedy-sed ghosts ─
@@ -406,6 +460,104 @@ teardown() {
   # BOTH roles must be present — proof the worker is not misread as control-plane.
   run command jq -rc '[.nodes[].roles] | unique' "${STUB_PAYLOAD_OUT}"
   assert_output '["control-plane","worker"]'
+}
+
+# ── B448: ONE node list call; the call count does not grow with nodes ──
+# A kubectl call takes ~1.5 s on prod. The old loop made 3 calls per node,
+# so at ~18 nodes the tick ran past activeDeadlineSeconds (120 s). The job
+# was killed before the POST, and the cluster stopped heart-beating.
+
+@test "B448: the kubectl call count is the same for 3 and 200 nodes" {
+  local n calls3 calls200
+  for n in 3 200; do
+    _node_list "${n}"
+    export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl-${n}.log"
+    : > "${STUB_CURL_LOG}"
+    rm -f "${STUB_PAYLOAD_OUT}"
+    run bash "${RUNNER}"
+    assert_success
+    # The beat went out, with every node.
+    run grep -c '/heartbeat$' "${STUB_CURL_LOG}"
+    assert_output "1"
+    run command jq -r '.nodes | length' "${STUB_PAYLOAD_OUT}"
+    assert_output "${n}"
+    # The node list is ONE call, and no call names a single node.
+    run grep -c '^get nodes -o json$' "${STUB_KUBECTL_LOG}"
+    assert_output "1"
+    run grep -c '^get node ' "${STUB_KUBECTL_LOG}"
+    assert_output "0"
+  done
+  calls3=$(wc -l < "${BATS_TEST_TMPDIR}/kubectl-3.log")
+  calls200=$(wc -l < "${BATS_TEST_TMPDIR}/kubectl-200.log")
+  [ "${calls3}" -gt 0 ] || fail "no kubectl call was recorded"
+  [ "${calls200}" -eq "${calls3}" ] \
+    || fail "kubectl calls: ${calls3} for 3 nodes, ${calls200} for 200 nodes"
+}
+
+@test "B448: the node fields map the Ready condition, the role label keys and the instance type" {
+  _node_list 4
+  run bash "${RUNNER}"
+  assert_success
+  # Exact match: the values AND the field order that the platform reads.
+  run command jq -c '.nodes' "${STUB_PAYLOAD_OUT}"
+  assert_output '[{"name":"cp-0","status":"Ready","roles":"control-plane","instanceType":"cx53"},{"name":"master-1","status":"NotReady","roles":"control-plane","instanceType":"cpx41"},{"name":"worker-2","status":"Unknown","roles":"worker","instanceType":""},{"name":"worker-3","status":"Ready","roles":"worker","instanceType":"cpx41"}]'
+}
+
+@test "B448: a node name that needs JSON escaping keeps the payload valid JSON" {
+  export STUB_NODES_FILE="${BATS_TEST_TMPDIR}/nodes.json"
+  command jq -n '{items: [{metadata: {name: "we\"ird\\node\tx"},
+    status: {conditions: [{type: "Ready", status: "True"}]}}]}' > "${STUB_NODES_FILE}"
+  run bash "${RUNNER}"
+  assert_success
+  run command jq -e . "${STUB_PAYLOAD_OUT}"
+  assert_success
+  run command jq -r '.nodes[0].name' "${STUB_PAYLOAD_OUT}"
+  assert_output $'we"ird\\node\tx'
+}
+
+@test "B448: above 500 nodes (the api's limit) the beat sends the first 500 and logs it" {
+  # At the limit: no truncation.
+  _node_list 500
+  run bash "${RUNNER}"
+  assert_success
+  refute_output --partial "heartbeat summarizes the first"
+  run command jq -r '.nodes | length' "${STUB_PAYLOAD_OUT}"
+  assert_output "500"
+
+  _node_list 503
+  run bash "${RUNNER}"
+  assert_success
+  assert_output --partial "kubehz: heartbeat summarizes the first 500 of 503 nodes"
+  run command jq -r '.nodes | length' "${STUB_PAYLOAD_OUT}"
+  assert_output "500"
+  run command jq -r '.nodes[499].name' "${STUB_PAYLOAD_OUT}"
+  assert_output "worker-499"
+  # The assessment counts every node, not only the nodes that went out.
+  run command jq -r '.assessment.cpUsage.nodes' "${STUB_PAYLOAD_OUT}"
+  assert_output "503"
+}
+
+@test "B448: the limits allow a burst; the requests stay low" {
+  # At a 200m CPU limit the pod was throttled in 99.8 % of its CFS periods
+  # on prod, and each kubectl call (a Go binary start) took ~1.5 s. At the
+  # 500-node cap jq peaks at ~70 MB while the shell holds the node JSON.
+  run command yq -r '.spec.jobTemplate.spec.template.spec.containers[0].resources | [.limits.cpu, .requests.cpu, .limits.memory, .requests.memory] | join(" ")' "${CRONJOB}"
+  assert_success
+  assert_output "1000m 50m 256Mi 64Mi"
+}
+
+@test "B448: 200 nodes at 1 s per kubectl call finish well under the 120 s deadline" {
+  # The stub sleeps 1 s per kubectl call (prod: ~1.5 s), so the run time in
+  # seconds is about the call count. A call per node takes 200 s or more.
+  _node_list 200
+  export STUB_KUBECTL_DELAY=1
+  local start=${SECONDS} took
+  run bash "${RUNNER}"
+  took=$(( SECONDS - start ))
+  assert_success
+  run grep -c '/heartbeat$' "${STUB_CURL_LOG}"
+  assert_output "1"
+  [ "${took}" -lt 60 ] || fail "the 200-node beat took ${took} s at 1 s per kubectl call"
 }
 
 # ── kubernetesVersion is the SERVER version, not the client image tag ──
