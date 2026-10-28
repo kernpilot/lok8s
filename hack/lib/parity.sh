@@ -61,6 +61,15 @@ parity::init() {
   # workflow commands when stdout is not a terminal (documented). The
   # harness proves the plain contract, so it runs without the variable.
   unset GITHUB_ACTIONS
+  # KUBECONFIG names a file that does not exist, and the in-cluster
+  # variables are unset. A kubectl that a harness did not stub then finds no
+  # cluster. With KUBECONFIG unset, kubectl reads ~/.kube/config (a live
+  # cluster on a developer machine) or the in-cluster config of a runner pod.
+  # A missing file keeps both implementations on the path of an unset
+  # KUBECONFIG: bash tests the path with -f, Go with fsutil.FileExists. Not
+  # /dev/null: FileExists is true for a device, -f is false.
+  export KUBECONFIG="${WORK}/kubeconfig.absent"
+  unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
   export LC_ALL=C
 
   failures=0

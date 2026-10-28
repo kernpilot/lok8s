@@ -29,7 +29,7 @@ parity::init "${1:-}"
 # (this repo's memory has the scars) — build parity needs a clean slate plus
 # ONE whitelisted spec var to prove the envsubst pass.
 while read -r v; do unset "${v}"; done < <(compgen -e | grep -E '^(LOK8S|KIND)_' || true)
-unset KUBECONFIG KUSTOMIZE_PLUGIN_HOME || true
+unset KUSTOMIZE_PLUGIN_HOME || true
 export PATH_BASE="${PROJ}" PATH_BIN="${PROJ}/.bin" PATH_LOK8S="${PROJ}/.lok8s" PATH_CLUSTERS="${PROJ}/clusters"
 export LOK8S_SPEC_PARITY_VALUE="rendered-ok"
 
