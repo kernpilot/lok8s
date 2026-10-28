@@ -3,8 +3,9 @@
 Every lok8s project carries a pinned toolchain in `.bin/`. The file that
 declares it is `.bin/b.yaml`, managed by [`b`](https://github.com/fentas/b),
 a binary manager and env-file syncer ([binary.help](https://binary.help)).
-lok8s itself is distributed as a `b` environment: `b` installs the `lo` CLI,
-the `.lok8s/` framework tree, and every tool the framework calls.
+The main way to install `lo` is the release binary (`lo-install.sh`). lok8s
+is also a `b` environment: `b` installs the `lo` CLI, the `.lok8s/`
+framework tree, and every tool the framework calls.
 
 This page documents what `b` does in a lok8s project and the `b.yaml`
 fields lok8s actually uses. For the full `b` feature set, see the

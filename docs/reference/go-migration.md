@@ -369,7 +369,7 @@ The `core` profile's `.bin/b.yaml` declares the binary
 install` fetches it into `.bin/` alongside the rest of the toolchain. The
 glob leaves out the `lo-full-*` archives: b scores both the same, so a
 plain `lo-*.tar.gz` can install `lo-full` under the `lo` alias. The
-[Toolchain](/guide/toolchain#what-b-manages-today-and-what-it-will) page
+[Toolchain](/guide/toolchain#what-b-manages-consumers-vs-contributors) page
 states what `b` still manages today versus the intended end state.
 
 ## What still runs as bash

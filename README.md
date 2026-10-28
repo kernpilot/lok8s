@@ -203,7 +203,7 @@ lo deploy                 # apply built artifacts (CRDs first, then resources, w
 lo lint                   # validate specs, bootstrap entries, and target references
 ```
 
-`lo build`'s output is plain Kubernetes YAML — `kubectl apply -f clusters/<domain>/artifacts.yaml` works against any cluster, with or without the rest of lok8s. With `spec.build.artifacts: split` the build additionally emits committable per-resource files under `clusters/<domain>/artifacts/` (Secrets sops-encrypted) for GitOps consumers — see [specs](https://kernpilot.github.io/lok8s/reference/specs.html).
+`lo build`'s output is plain Kubernetes YAML — `kubectl apply -f clusters/<domain>/artifacts.yaml` works against any cluster, with or without the rest of lok8s. With `spec.build.artifacts: split` the build additionally emits committable per-resource files under `clusters/<domain>/artifacts/` (Secrets sops-encrypted) for GitOps consumers — see [specs](https://lok8s.io/reference/specs).
 
 &nbsp;
 

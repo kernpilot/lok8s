@@ -1,6 +1,6 @@
 # Getting Started
 
-lok8s is a Kubernetes deployment framework distributed as a [b](https://github.com/fentas/b) environment. It gives you a single CLI (`lo`), a single folder convention (`.lok8s/`), and the same workflow from local development to production.
+lok8s is a Kubernetes deployment framework. You install the `lo` release binary with `lo-install.sh`, and each project pins its tools with [b](https://github.com/fentas/b). lok8s gives you a single CLI (`lo`), a single folder convention (`.lok8s/`), and the same workflow from local development to production.
 
 ## Prerequisites
 
@@ -22,7 +22,7 @@ schema.
 
 ## Installation
 
-lok8s is distributed as a `b` environment with five profiles. Pick the one that matches your use case:
+Install the `lo` binary first (step 1). Each project then pins its toolchain with `b` (step 2). The `b` environment has five profiles. Pick the one that matches your use case:
 
 | Profile | Includes | Use case |
 |---------|----------|----------|
@@ -56,7 +56,7 @@ plan, touch nothing).
 `lo` (the default, ~50 MB) is the **core** build: the manifest render runs
 the pinned `kustomize` binary plus the two exec generators (khelm's
 `ChartRenderer`, the `secrets.lok8s.dev` Secret plugin) that
-[`lo toolchain install`](#2-the-project-toolchain) installs with `b`.
+[`lo toolchain install`](#_2-the-project-toolchain) installs with `b`.
 `lo-full` (`--full`, ~120 MB) links the same kustomize API and khelm release
 into the binary and renders in-process; it needs no `kustomize`, `khelm` or
 `.kustomize/`. Both install as `lo`, both render byte-identical output (the
@@ -126,7 +126,7 @@ b install
 ```
 :::
 
-This copies the framework tree (addons, driver templates, provider plugins, the frozen argsh CLI), the kustomize plugins, and (for `local`+) the Tilt extension into your project, and installs each profile's binaries — the `lo` release binary among them (`core` declares it, so `b install` fetches the same `lo-<os>-<arch>.tar.gz` asset into `.bin/`). Each profile ships only the binaries it actually needs; [The Toolchain](/guide/toolchain#what-b-manages-today-and-what-it-will) lists what that is today and what it will shrink to.
+This copies the framework tree (addons, driver templates, provider plugins, the frozen argsh CLI), the kustomize plugins, and (for `local`+) the Tilt extension into your project, and installs each profile's binaries — the `lo` release binary among them (`core` declares it, so `b install` fetches the same `lo-<os>-<arch>.tar.gz` asset into `.bin/`). Each profile ships only the binaries it actually needs; [The Toolchain](/guide/toolchain#what-b-manages-consumers-vs-contributors) lists what that is today and what it will shrink to.
 
 If you join a project that already uses lok8s, the toolchain declaration
 is already in the repo. Clone and run a single command:

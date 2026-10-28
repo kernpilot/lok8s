@@ -570,7 +570,7 @@ lo image list                            # Show what's currently in the cache re
 lo image clean                           # Drop the cache registry volume
 ```
 
-The cache flow runs automatically as part of `lo build` / `lo up` when any service has `build: false` and a resolved `registry.endpoint`. See [Services Configuration → Cache mode](/guide/services#cache-mode-the-lok8scache-registry) for the full pipeline. `registry.parallel` in `services.yaml` controls parallelism (`0` unlimited, `1` sequential default, `N≥2` bounded).
+The cache flow runs automatically as part of `lo build` / `lo up` when any service has `build: false` and a resolved `registry.endpoint`. See [Services Configuration → Cache mode](/guide/services#cache-mode-the-lok8s-cache-registry) for the full pipeline. `registry.parallel` in `services.yaml` controls parallelism (`0` unlimited, `1` sequential default, `N≥2` bounded).
 
 ### lo secrets
 
