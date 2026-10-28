@@ -62,13 +62,19 @@ parity::init() {
   # harness proves the plain contract, so it runs without the variable.
   unset GITHUB_ACTIONS
   # KUBECONFIG names a file that does not exist, and the in-cluster
-  # variables are unset. A kubectl that a harness did not stub then finds no
-  # cluster. With KUBECONFIG unset, kubectl reads ~/.kube/config (a live
-  # cluster on a developer machine) or the in-cluster config of a runner pod.
-  # A missing file keeps both implementations on the path of an unset
-  # KUBECONFIG: bash tests the path with -f, Go with fsutil.FileExists. Not
-  # /dev/null: FileExists is true for a device, -f is false.
-  export KUBECONFIG="${WORK}/kubeconfig.absent"
+  # variables are unset. A kubectl that a harness or a stub starts without a
+  # kubeconfig of its own then dials localhost:8080, not a cluster. With
+  # KUBECONFIG unset, kubectl reads ~/.kube/config (a live cluster on a
+  # developer machine) or the in-cluster config of a runner pod. Both lo
+  # entrypoints set KUBECONFIG to the project's path before they read it
+  # (.lok8s/lo, internal/cli applyMainEnv). If a reader sees this value
+  # anyway, a missing file keeps bash (-f) and Go (fsutil.FileExists) on the
+  # same branch. /dev/null does not: FileExists is true for a device, -f is
+  # false. The bats helper uses /dev/null because it drives bash only
+  # (tests/test_helper.bash, isolate_state_dirs). report fails the run when
+  # a tool creates this file.
+  PARITY_KUBECONFIG="${WORK}/kubeconfig.absent"
+  export KUBECONFIG="${PARITY_KUBECONFIG}"
   unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
   export LC_ALL=C
 
@@ -387,8 +393,13 @@ SH
 
 # ── report ───────────────────────────────────────────────────────────────────
 
-# report: the failure summary; exit 1 on any failure.
+# report: the failure summary; exit 1 on any failure. A kubeconfig at
+# PARITY_KUBECONFIG is a failure too: a tool that the harness did not stub
+# wrote one (kubectl config set-*, kind export kubeconfig).
 report() {
+  if [[ -e "${PARITY_KUBECONFIG:-}" ]]; then
+    fail "a tool wrote ${PARITY_KUBECONFIG}: an unstubbed kubectl or kind ran"
+  fi
   if (( failures )); then
     echo; echo "${failures} parity failure(s)"
     exit 1
