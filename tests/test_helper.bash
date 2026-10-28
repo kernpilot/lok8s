@@ -128,11 +128,12 @@ export FIXTURES_DIR="${_TESTS_DIR}/fixtures"
 # /dev/null, so a kubectl that a test did not stub never reads the developer's
 # ~/.kube/config. KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT are
 # unset: with an empty kubeconfig, kubectl uses the in-cluster config when
-# both are set, and a CI runner pod would then reach its own cluster. An
-# unstubbed kubectl then fails or dials localhost:8080. That happened once: a
-# script change put `timeout 30 kubectl` in front of a stubbed kubectl, and a
-# test file without a timeout() stub ran the real kubectl from PATH (lok8s
-# #317). A test that needs a kubeconfig sets its own path after setup.
+# both are set, and a CI runner pod would then reach its own cluster. With
+# these values, an unstubbed kubectl fails or dials localhost:8080. That
+# happened once: a script change put `timeout 30 kubectl` in front of a
+# stubbed kubectl, and a test file without a timeout() stub ran the real
+# kubectl from PATH (lok8s #317). A test that needs a kubeconfig sets its own
+# path after setup.
 #
 # The call below this function runs for every test that loads this helper.
 # setup_tmpdir calls it again, because setup_tmpdir replaces BATS_TEST_TMPDIR.

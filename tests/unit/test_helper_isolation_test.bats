@@ -4,8 +4,8 @@
 #
 # Only one test calls setup_tmpdir; the others see the state that the call
 # at load sets, as in every test file that does not call setup_tmpdir.
-# Without the call at load, a test in such a file runs against the directories that
-# the calling shell exports, which are the real directories on a developer
+# Without the call at load, a test in such a file runs against the directories
+# that the calling shell exports, which are the real directories on a developer
 # machine.
 
 setup() {
