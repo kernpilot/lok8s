@@ -2,8 +2,8 @@
 # test_helper_isolation_test.bats — the guards for the call of
 # isolate_state_dirs when tests/test_helper.bash loads.
 #
-# This file does NOT call setup_tmpdir, so only the call at load sets the
-# state directories, as in every test file that does not call setup_tmpdir.
+# Only one test calls setup_tmpdir; the others see the state that the call
+# at load sets, as in every test file that does not call setup_tmpdir.
 # Without that call, a test in such a file runs against the directories that
 # the calling shell exports, which are the real directories on a developer
 # machine.
@@ -20,17 +20,25 @@ setup() {
   done
 }
 
-@test "loading test_helper points KUBECONFIG at /dev/null" {
+@test "loading test_helper keeps kubectl away from real clusters" {
   # A kubectl that a test did not stub must not read the developer's
-  # ~/.kube/config or a kubeconfig that the calling shell exports.
+  # ~/.kube/config, a kubeconfig that the calling shell exports, or the
+  # in-cluster config of a CI runner pod.
   [[ "${KUBECONFIG:-}" == /dev/null ]] || fail "KUBECONFIG is '${KUBECONFIG:-}'"
+  [[ -z "${KUBERNETES_SERVICE_HOST+set}" ]] || fail "KUBERNETES_SERVICE_HOST is set: '${KUBERNETES_SERVICE_HOST}'"
+  [[ -z "${KUBERNETES_SERVICE_PORT+set}" ]] || fail "KUBERNETES_SERVICE_PORT is set: '${KUBERNETES_SERVICE_PORT}'"
 }
 
-@test "setup_tmpdir keeps KUBECONFIG at /dev/null" {
+@test "setup_tmpdir keeps kubectl away from real clusters" {
+  local kubeconfig host
   KUBECONFIG=/somewhere/real.yaml
+  KUBERNETES_SERVICE_HOST=10.96.0.1
   setup_tmpdir
-  [[ "${KUBECONFIG}" == /dev/null ]] || fail "KUBECONFIG is '${KUBECONFIG}'"
+  kubeconfig=${KUBECONFIG}
+  host=${KUBERNETES_SERVICE_HOST-<unset>}
   teardown_tmpdir
+  [[ "${kubeconfig}" == /dev/null ]] || fail "KUBECONFIG is '${kubeconfig}'"
+  [[ "${host}" == "<unset>" ]] || fail "KUBERNETES_SERVICE_HOST is '${host}'"
 }
 
 # bats loads a file with `if ! source <file>`, where errexit is off. The
