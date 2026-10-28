@@ -133,7 +133,9 @@ export FIXTURES_DIR="${_TESTS_DIR}/fixtures"
 # happened once: a script change put `timeout 30 kubectl` in front of a
 # stubbed kubectl, and a test file without a timeout() stub ran the real
 # kubectl from PATH (lok8s #317). A test that needs a kubeconfig sets its own
-# path after setup.
+# path after setup. The parity harnesses use a missing file instead
+# (hack/lib/parity.sh, parity::init): they also drive Go, and Go's
+# fsutil.FileExists is true for /dev/null.
 #
 # The call below this function runs for every test that loads this helper.
 # setup_tmpdir calls it again, because setup_tmpdir replaces BATS_TEST_TMPDIR.

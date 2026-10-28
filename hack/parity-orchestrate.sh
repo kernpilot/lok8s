@@ -23,8 +23,9 @@
 # Usage: hack/parity-orchestrate.sh [path-to-go-lo]   (default: bin/lo)
 source "$(dirname "${BASH_SOURCE[0]}")/lib/parity.sh"
 parity::init "${1:-}"
-# KUBECONFIG/creds/CI-ish toggles would change what a child sees.
-unset KUBECONFIG KUSTOMIZE_PLUGIN_HOME LOK8S_NONINTERACTIVE LOK8S_FORCE_RECREATE LOK8S_REMOTE \
+# Creds/CI-ish toggles would change what a child sees (parity::init sets
+# KUBECONFIG to a missing file).
+unset KUSTOMIZE_PLUGIN_HOME LOK8S_NONINTERACTIVE LOK8S_FORCE_RECREATE LOK8S_REMOTE \
   CLOUD_DRY_RUN CLOUD_DRY_RUN_PATH HCLOUD_TOKEN HROBOT_USER HROBOT_PASSWORD \
   KAPPLY_TTY KAPPLY_POLL_INTERVAL SOURCE_DATE_EPOCH CI TILT_PORT \
   LOK8S_REGISTRY_IP_CACHE LOK8S_REGISTRY_JSON KIND_EXPERIMENTAL_DOCKER_NETWORK \
