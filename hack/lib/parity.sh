@@ -67,12 +67,12 @@ parity::init() {
   # KUBECONFIG unset, kubectl reads ~/.kube/config (a live cluster on a
   # developer machine) or the in-cluster config of a runner pod. Both lo
   # entrypoints set KUBECONFIG to the project's path before they read it
-  # (.lok8s/lo, internal/cli applyMainEnv). If a reader sees this value
-  # anyway, a missing file keeps bash (-f) and Go (fsutil.FileExists) on the
-  # same branch. /dev/null does not: FileExists is true for a device, -f is
-  # false. The bats helper uses /dev/null because it drives bash only
-  # (tests/test_helper.bash, isolate_state_dirs). report fails the run when
-  # a tool creates this file.
+  # (.lok8s/lo; Go: applyMainEnv, cmd_build, cmd_kubeconfig). If a reader
+  # sees this value anyway, a missing file keeps bash (-f) and Go
+  # (fsutil.FileExists) on the same branch. /dev/null does not: FileExists
+  # is true for a device, -f is false. The bats helper uses /dev/null
+  # because it drives bash only (tests/test_helper.bash,
+  # isolate_state_dirs). report fails the run when a tool creates this file.
   PARITY_KUBECONFIG="${WORK}/kubeconfig.absent"
   export KUBECONFIG="${PARITY_KUBECONFIG}"
   unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
@@ -394,8 +394,10 @@ SH
 # ── report ───────────────────────────────────────────────────────────────────
 
 # report: the failure summary; exit 1 on any failure. A kubeconfig at
-# PARITY_KUBECONFIG is a failure too: a tool that the harness did not stub
-# wrote one (kubectl config set-*, kind export kubeconfig).
+# PARITY_KUBECONFIG is a failure too: a tool that the harness process started
+# wrote one (kubectl config set-*, kind export kubeconfig). A tool that lo
+# starts writes to the project's kubeconfig instead, because lo sets
+# KUBECONFIG first. So a pass does not prove that no unstubbed tool ran.
 report() {
   if [[ -e "${PARITY_KUBECONFIG:-}" ]]; then
     fail "a tool wrote ${PARITY_KUBECONFIG}: an unstubbed kubectl or kind ran"
