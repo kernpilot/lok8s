@@ -4,7 +4,7 @@
 #
 # Only one test calls setup_tmpdir; the others see the state that the call
 # at load sets, as in every test file that does not call setup_tmpdir.
-# Without that call, a test in such a file runs against the directories that
+# Without the call at load, a test in such a file runs against the directories that
 # the calling shell exports, which are the real directories on a developer
 # machine.
 
@@ -30,15 +30,18 @@ setup() {
 }
 
 @test "setup_tmpdir keeps kubectl away from real clusters" {
-  local kubeconfig host
+  local kubeconfig host port
   KUBECONFIG=/somewhere/real.yaml
   KUBERNETES_SERVICE_HOST=10.96.0.1
+  KUBERNETES_SERVICE_PORT=443
   setup_tmpdir
   kubeconfig=${KUBECONFIG}
   host=${KUBERNETES_SERVICE_HOST-<unset>}
+  port=${KUBERNETES_SERVICE_PORT-<unset>}
   teardown_tmpdir
   [[ "${kubeconfig}" == /dev/null ]] || fail "KUBECONFIG is '${kubeconfig}'"
   [[ "${host}" == "<unset>" ]] || fail "KUBERNETES_SERVICE_HOST is '${host}'"
+  [[ "${port}" == "<unset>" ]] || fail "KUBERNETES_SERVICE_PORT is '${port}'"
 }
 
 # bats loads a file with `if ! source <file>`, where errexit is off. The
