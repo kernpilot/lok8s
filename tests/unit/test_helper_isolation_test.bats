@@ -20,6 +20,19 @@ setup() {
   done
 }
 
+@test "loading test_helper points KUBECONFIG at /dev/null" {
+  # A kubectl that a test did not stub must not read the developer's
+  # ~/.kube/config or a kubeconfig that the calling shell exports.
+  [[ "${KUBECONFIG:-}" == /dev/null ]] || fail "KUBECONFIG is '${KUBECONFIG:-}'"
+}
+
+@test "setup_tmpdir keeps KUBECONFIG at /dev/null" {
+  KUBECONFIG=/somewhere/real.yaml
+  setup_tmpdir
+  [[ "${KUBECONFIG}" == /dev/null ]] || fail "KUBECONFIG is '${KUBECONFIG}'"
+  teardown_tmpdir
+}
+
 # bats loads a file with `if ! source <file>`, where errexit is off. The
 # child shell below loads the helper the same way, without BATS_TEST_TMPDIR.
 @test "loading test_helper without BATS_TEST_TMPDIR fails" {

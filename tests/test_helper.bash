@@ -121,7 +121,12 @@ export FIXTURES_DIR="${_TESTS_DIR}/fixtures"
 #
 # This function sets both variables to directories under BATS_TEST_TMPDIR.
 # It also moves XDG_CACHE_HOME there, because lo keeps the kubehz token cache
-# under it. It replaces the values that the calling shell exports, because
+# under it. It sets KUBECONFIG to /dev/null: a kubectl that a test did not
+# stub then fails on an empty config, and it never reads the developer's
+# ~/.kube/config. That happened once: a script change put `timeout 30 kubectl`
+# in front of a stubbed kubectl, and a test file without a timeout() stub ran
+# the real kubectl from PATH (lok8s #317). A test that needs a kubeconfig sets
+# its own path after setup. It replaces the values that the calling shell exports, because
 # those values point at the real directories. The call below this function
 # runs for every test that loads this helper. setup_tmpdir calls it again,
 # because setup_tmpdir replaces BATS_TEST_TMPDIR. The guards are
@@ -142,6 +147,7 @@ isolate_state_dirs() {
   export XDG_STATE_HOME="${BATS_TEST_TMPDIR}/xdg-state"
   export XDG_CACHE_HOME="${BATS_TEST_TMPDIR}/xdg-cache"
   export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
+  export KUBECONFIG=/dev/null
 }
 isolate_state_dirs || return 1
 
