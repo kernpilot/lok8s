@@ -1,9 +1,19 @@
 # kubehz Platform
 
 lok8s can optionally connect a cluster to [kubehz](https://kubehz.cloud), a
-managed-Kubernetes platform for Hetzner. The integration gives you dashboard
-visibility (node status, control-plane health, certificate expiry) for
-clusters you run on your own Hetzner account.
+managed-Kubernetes platform for Hetzner. lok8s supports two ways to use it:
+
+- **Self-hosted clusters.** You run the whole cluster on your own Hetzner
+  account. The integration gives you dashboard visibility (node status,
+  control-plane health, certificate expiry).
+- **Hosted control planes.** kubehz runs the control plane. You run only the
+  workers, on your own Hetzner account. This needs a kubehz account and a
+  `KUBEHZ_TOKEN` (see [`KUBEHZ_TOKEN`](#kubehz-token-claim-at-provision-time)).
+  The quickest start is `lo init cluster <domain> --driver kubehz-hosted`,
+  which writes a hosted cluster spec (see [`lo init`](../reference/cli.md#lo-init)).
+
+Sign-up, prices and terms are on [kubehz.cloud](https://kubehz.cloud). During
+the launch, sign-up can need an invite code.
 
 ::: tip No lock-in
 The integration is strictly opt-in. lok8s works fully without kubehz: the
@@ -32,7 +42,7 @@ Two independent axes:
 | Axis | Values | Meaning |
 |------|--------|---------|
 | `hosting` | `self` (default) | You provision and own the control plane: the normal lok8s flow. |
-| | `hosted` | kubehz runs the control plane in its infrastructure; you run only workers. Requires `apiUrl`. With `kind: Lo` it additionally requires `spec.runner`. |
+| | `hosted` | kubehz runs the control plane in its infrastructure; you run only workers. Requires `apiUrl` and a kubehz account: `lo provision` creates the cluster with your `KUBEHZ_TOKEN`. With `kind: Lo` it additionally requires `spec.runner`. |
 | | `shared` | kubehz runs a control plane shared by many customers and you get namespaces on it, with nodes you register yourself. Requires `apiUrl` and `kind: Kubehz`. See [Spaces](#spaces). |
 | `access` | `none` (default) | No platform contact whatsoever. |
 | | `registered` | The in-cluster agent registers the cluster and sends authenticated heartbeats: read-only dashboard visibility. |
@@ -57,12 +67,13 @@ A hosted control plane has no plan and no tier. Its **shape** describes it:
 | Value | Range | Default | Meaning |
 |-------|-------|---------|---------|
 | `spec.controlPlane.replicas` | 1 to 3 | 1 | apiserver replicas. `lo provision` sends this count to the platform. |
-| state limit | 1 GB to the datastore maximum | 2 GB | How much cluster state the control plane holds (etcd: up to 8 GB, kine: up to 32 GB). |
+| state limit | 1 GB to the datastore maximum | 2 GB | How much cluster state the control plane holds (etcd: up to 6 GB, kine: up to 32 GB). |
 | auto-grow step and cap | 1 GB steps, up to the datastore maximum | 1 GB, the datastore maximum | The platform raises the limit by one step at 80% use, until the cap. |
 
 The presets in the dashboard (`dev`: one apiserver, `ha`: three) are defaults
-only. The bill is per hour for what runs, with no cap. The state limit, the
-step and the cap live in the dashboard.
+only. The platform bills every started hour of what runs. Each unit is capped
+at 730 hours a month, so the monthly price on the price page is the most a
+unit costs. The state limit, the step and the cap live in the dashboard.
 
 The platform admits a hosted cluster by the shape it asks for. When the pool
 cannot hold one more control plane of that shape, `lo provision` stops with

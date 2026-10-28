@@ -80,9 +80,7 @@ that domain's store (the flag also creates the store on first use):
 lo secrets set --domain app.example.com --name myapp --namespace default API_TOKEN <value>
 # omit the value to read it from a prompt / piped stdin (keeps it out of shell history):
 printf %s "$TOKEN" | lo secrets set --domain app.example.com --name myapp --namespace default API_TOKEN
-# or pass `-` explicitly (POSIX stdin placeholder), e.g. from a file
-# (needs an argsh build including arg-sh/argsh#176 — older parsers
-# reject a bare `-`):
+# or pass `-` explicitly (POSIX stdin placeholder), e.g. from a file:
 lo secrets set --domain app.example.com --name myapp --namespace default API_TOKEN - < token.txt
 ```
 
