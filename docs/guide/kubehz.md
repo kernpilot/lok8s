@@ -7,13 +7,13 @@ managed-Kubernetes platform for Hetzner. lok8s supports two ways to use it:
   account. The integration gives you dashboard visibility (node status,
   control-plane health, certificate expiry).
 - **Hosted control planes.** kubehz runs the control plane. You run only the
-  workers, on your own Hetzner account. This needs a kubehz account and a
-  `KUBEHZ_TOKEN` (see [`KUBEHZ_TOKEN`](#kubehz-token-claim-at-provision-time)).
+  workers, on your own Hetzner account. This needs a kubehz account and an
+  [API token](#kubehz-token-claim-at-provision-time) in `KUBEHZ_TOKEN`.
   The quickest start is `lo init cluster <domain> --driver kubehz-hosted`,
   which writes a hosted cluster spec (see [`lo init`](../reference/cli.md#lo-init)).
 
-Sign-up, prices and terms are on [kubehz.cloud](https://kubehz.cloud). During
-the launch, sign-up can need an invite code.
+Sign-up, prices and terms are on [kubehz.cloud](https://kubehz.cloud). Sign-up
+can need an invite code.
 
 ::: tip No lock-in
 The integration is strictly opt-in. lok8s works fully without kubehz: the
@@ -72,8 +72,9 @@ A hosted control plane has no plan and no tier. Its **shape** describes it:
 
 The presets in the dashboard (`dev`: one apiserver, `ha`: three) are defaults
 only. The platform bills every started hour of what runs. Each unit is capped
-at 730 hours a month, so the monthly price on the price page is the most a
-unit costs. The state limit, the step and the cap live in the dashboard.
+at 730 hours a month, so the monthly price on the
+[price page](https://kubehz.io/pricing) is the most a unit costs. The state
+limit, the step and the cap live in the dashboard.
 
 The platform admits a hosted cluster by the shape it asks for. When the pool
 cannot hold one more control plane of that shape, `lo provision` stops with
@@ -806,7 +807,9 @@ without deleting anything.
 to paste, no fingerprint step. It shows up in your dashboard already owned. Pair
 it with `spec.kubehz.connectHcloudToken: true` to also wire dashboard-driven
 provisioning in the same run. Without `KUBEHZ_TOKEN`, `lo provision` registers
-anonymously and you [claim](#claiming) the cluster afterwards.
+a self-hosted cluster anonymously and you [claim](#claiming) the cluster
+afterwards. A hosted cluster always needs the token: the platform creates it
+for your tenant.
 
 Deregistering deletes the platform cluster record and, when `HCLOUD_TOKEN`
 is set, the `kubehz-claim-<domain>` SSH key from your Hetzner Cloud

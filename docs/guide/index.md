@@ -1,6 +1,6 @@
 # Getting Started
 
-lok8s is a Kubernetes deployment framework. You install the `lo` release binary with `lo-install.sh`; a [b](https://github.com/fentas/b) environment is the second way to install it. It gives you a single CLI (`lo`), a single folder convention (`.lok8s/`), and the same workflow from local development to production.
+lok8s is a Kubernetes deployment framework. You install the `lo` release binary with `lo-install.sh`, and each project pins its tools with [b](https://github.com/fentas/b). lok8s gives you a single CLI (`lo`), a single folder convention (`.lok8s/`), and the same workflow from local development to production.
 
 ## Prerequisites
 
