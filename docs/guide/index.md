@@ -173,6 +173,7 @@ your-project/
   .gitignore                   # lok8s entries appended (lo init project, lo toolchain install)
   mise.toml                    # puts .bin on PATH (lo init project; --env direnv writes .envrc)
   clusters/                    # your cluster definitions
+    .gitkeep                   # keeps the empty directory in git (lo init project)
     .active                    # the active domain (lo use, lo init cluster)
     lok8s.dev/                 # local dev domain
       cluster.lok8s.yaml       # cluster spec (lo init project --cluster, lo init cluster)

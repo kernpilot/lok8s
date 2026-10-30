@@ -175,52 +175,43 @@ both and they disagree, `lo` prints a one-line notice that names which one won.
 
 ## Directory Layout
 
-The top level separates framework and user content: `.lok8s/`
-holds framework code, `clusters/` holds user cluster definitions.
-Override `PATH_CLUSTERS` to point at a different directory (e.g. a
-parallel project tree) without touching the framework.
+The project root holds `lok8s.yaml`, the project marker. `clusters/` holds
+your cluster definitions, one folder per FQDN. `.lok8s/` holds the
+framework assets that `lo` writes on first use. Override `PATH_CLUSTERS` to
+point at a different directory (e.g. a parallel project tree) without
+touching the framework.
+
+The comment on each line names the command that writes it:
 
 ```
-.lok8s/                 # framework (flat tree, all framework-owned)
-  lo                    # CLI entrypoint
-  libs/                 # shared bash libraries (bootstrap, build, deploy, ...)
-  utils/                # helpers (verbose, ip, types, ...)
-  addons/               # framework-level cluster addons (cilium, metallb, ...)
-  drivers/              # cluster-architecture drivers
-    lo/
-      main              #   Lo driver (kind)
-      cluster/          #   runtime templates
-    capi/
-      main              #   CAPI driver
-    kubeone/
-    kkp/
-  providers/            # physical infra providers
-    hetzner/
-  tilt/                 # framework-shipped Tilt extension
-    Tiltfile
-
+lok8s.yaml              # project marker (lo init project)
 clusters/               # user cluster definitions
-  .active               # runtime state: active domain (gitignored)
+  .gitkeep              # (lo init project)
+  .active               # the active domain (lo use, lo init cluster)
   lok8s.dev/            # cluster domain (local dev)
-    cluster.lok8s.yaml  # cluster spec
+    cluster.lok8s.yaml  # cluster spec (lo init project --cluster, lo init cluster)
+    kustomization.yaml  # composes the targets (you write it)
     targets/            # kustomize source directories (the workload plane)
       platform/
         kustomization.yaml
       apps/
         kustomization.yaml
-    artifacts/          # built output (gitignored)
-      platform/
-        artifacts.yaml
-      apps/
-        artifacts.yaml
-      kustomization.yaml  # auto-generated top-level (refs each target)
-    .kubeconfig/        # runtime kubeconfigs (gitignored)
-    .containerd/        # runtime containerd certs.d tree (gitignored)
+    artifacts.yaml      # built output: the whole domain in one file (lo build)
+    artifacts/          # per-resource files (lo build, spec.build.artifacts: split)
+    .containerd/        # containerd registry config for the kind nodes (lo up)
   example.com/          # cluster domain (production)
     cluster.lok8s.yaml
+    kustomization.yaml
     targets/
-    artifacts/
+.kubeconfig/            # cluster kubeconfigs (lo up; gitignored)
+.lok8s/                 # framework assets, written on first use
+  addons/               # cluster addons (cilium, metallb, ...)
+  drivers/lo/cluster/   # Lo driver templates (kind config, CoreDNS, registry)
+  tilt/                 # the Tilt extension
 ```
+
+[Getting Started](/guide/#project-structure) lists the other files that
+`lo init project` and `lo toolchain install` write.
 
 ## Atoms and Molecules
 

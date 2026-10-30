@@ -8,6 +8,14 @@ lok8s integrates with [Tilt](https://tilt.dev/) for local development with live 
 
 ## Quick Start
 
+If `clusters/lok8s.dev/cluster.lok8s.yaml` does not exist, write it first:
+
+```bash
+lo init cluster lok8s.dev
+```
+
+Then select the domain and start the cluster:
+
 ```bash
 lo use lok8s.dev
 lo up
