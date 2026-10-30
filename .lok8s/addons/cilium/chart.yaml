@@ -27,8 +27,12 @@ kubeVersion: "1.35.5"
 # policies). Re-check this trade on every bump: if a flip is not safe to take
 # mid-rollout, pin the OLD behavior in values.yaml for one release instead of
 # setting upgradeCompatibility.
+# 1.20.4 (2026-10-30): 1.20.1 does not start on host kernel 7.2. Its BPF
+# helper probe fails ("FnSetRetval … bpf_set_retval#187: R1 is not a scalar",
+# cilium/cilium#48016, fixed from 1.20.2). A kind cluster runs on the host
+# kernel, so a host update alone broke kubehz-dev.
 repository: https://helm.cilium.io/
 chart: cilium
-version: 1.20.1
+version: 1.20.4
 valueFiles:
   - values.yaml

@@ -16,7 +16,7 @@
       {
         "name": "cilium",
         "source": "addon",
-        "chartVersion": "1.20.1",
+        "chartVersion": "1.20.4",
         "category": "networking"
       },
       {
