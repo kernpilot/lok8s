@@ -1,7 +1,7 @@
 # Local AI: `lo chat`
 
-`lo chat` is a local, streaming assistant for your cluster. It runs
-**read-only by default**. It shows every step: the tool it calls, the tool
+`lo chat` is a local, streaming assistant for your cluster. It runs in the
+`read-only` posture by default. It shows every step: the tool it calls, the tool
 output, then the answer. No data leaves your machine unless you switch to a
 frontier CLI.
 
@@ -24,32 +24,38 @@ runtime by default. Do the steps in [Set up](#set-up) first.
 You need three parts: the argsh runtime, the `lochat` engine and a local
 model runtime. Run the steps in the project directory.
 
-1. Install the `bash` group of the toolchain (argsh with its `argsh.so`
-   builtin, yq, jq and the other tools of the bash tree). In a new project,
-   run this command:
+1. Install the `bash` group of the toolchain: argsh with its `argsh.so`
+   builtin, yq, jq and the other tools of the bash tree. This step uses the
+   network.
+
+   - If `.bin/b.yaml` exists, `lo toolchain install` does not change it.
+     Remove the `# ` in front of the entries of the `bash` group in
+     `.bin/b.yaml`, then run `.bin/b install`.
+   - If `.bin/b.yaml` does not exist, run this command:
+
+     ```bash
+     lo toolchain install --groups core,local,bash
+     ```
+
+2. Download the `lochat` engine of the `lo` you run and the checksums of
+   its release into a temporary directory, then verify the engine. This
+   step uses the network.
 
    ```bash
-   lo toolchain install --groups core,local,bash
+   V="v$(lo version -o json | .bin/jq -r .lok8s)"   # the version of your lo
+   A=lochat-linux-amd64                              # your platform
+   T="$(mktemp -d)"
+   curl -fsSL -o "${T}/${A}" "https://github.com/kernpilot/lok8s/releases/download/${V}/${A}"
+   curl -fsSL -o "${T}/checksums.txt" "https://github.com/kernpilot/lok8s/releases/download/${V}/checksums.txt"
+   (cd "${T}" && sha256sum --ignore-missing -c checksums.txt)   # macOS: shasum -a 256 --ignore-missing -c checksums.txt
    ```
 
-   If `.bin/b.yaml` exists, `lo toolchain install` does not change it. In that
-   case, remove the `# ` in front of the entries of the `bash` group in
-   `.bin/b.yaml`, and run `.bin/b install`.
-
-2. Download the `lochat` engine of your `lo` version (`lo --version`) and
-   its checksums from the [GitHub release](https://github.com/kernpilot/lok8s/releases):
+3. Install the engine into the toolchain directory of the project, then
+   remove the temporary directory:
 
    ```bash
-   V=v0.12.0; A=lochat-linux-amd64              # your tag and platform
-   curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/${A}"
-   curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/checksums.txt"
-   sha256sum --ignore-missing -c checksums.txt  # macOS: shasum -a 256 --ignore-missing -c checksums.txt
-   ```
-
-3. Install the engine into the toolchain directory of the project:
-
-   ```bash
-   install -m 0755 "${A}" .bin/lochat
+   install -m 0755 "${T}/${A}" .bin/lochat
+   rm -rf "${T}"
    ```
 
    `lo chat` looks for `.bin/lochat` first, then for `lochat` on PATH.
