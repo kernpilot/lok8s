@@ -2,33 +2,41 @@
 
 `lo mcp` is the MCP server of lok8s. It serves the `lo` commands as tools
 over the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP). An
-AI agent in your editor can then run `lo status`, `lo lint` or `lo build` and
-read the output.
+AI agent in your editor can then run `lo status`, `lo lint` or `lo audit` and
+read the output. These three are in the default `readonly` tier. A command
+that changes something, such as `lo build`, needs a higher tier.
 
 ## What the server offers
 
-- Each leaf command (a command without subcommands) becomes one tool. The
-  tool name is `lo_` plus the command path with underscores: `lo_status`,
-  `lo_secrets_encrypt`, `lo_registry_up`.
+- Each leaf command (a command without subcommands) of the `lo` command tree
+  becomes one tool. The tool name is `lo_` plus the command path with
+  underscores: `lo_status`, `lo_secrets_encrypt`, `lo_registry_up`.
 - A tool call runs the same `lo` binary as a subprocess. The agent gets the
   stdout, the stderr and the exit code.
 - Three tiers set which tools the agent can see:
 
 | Tier | Flag | Environment form | Adds |
 |------|------|------------------|------|
-| readonly (default) | none | none | `status`, `lint`, `audit`, `secrets list`, `tilt status`, … |
-| mutating | `--allow-mutating` | `LO_MCP_ALLOW=mutating` | `build`, `use`, `init`, `secrets encrypt`, … |
-| destructive | `--allow-destructive` | `LO_MCP_ALLOW=destructive` | `up`, `down`, `deploy`, `destroy`, … and the `--force` flags |
+| `readonly` (default) | none | none | `status`, `lint`, `audit`, `secrets list`, `tilt status`, … |
+| `mutating` | `--allow-mutating` | `LO_MCP_ALLOW=mutating` | `build`, `use`, `init`, `secrets encrypt`, … |
+| `destructive` | `--allow-destructive` | `LO_MCP_ALLOW=destructive` | `up`, `down`, `deploy`, `destroy`, … and the `--force` flags |
 
 The server does not register a tool outside its tier, so the agent cannot
-call it. Some commands are never tools: a command whose output is a
-credential (`kubeconfig`, `secrets print`, `secrets env`, …) and `lo chat`.
+call it. These commands are never tools, in any tier:
+
+- The Go-only top-level commands: `lo toolchain`, `lo assets`, `lo mcp` and
+  `lo operator`.
+- A command whose output is a credential: `kubeconfig`, `secrets print`,
+  `secrets env`, …
+- `lo chat`, because it passes its arguments on unread.
+- The hidden, framework-internal commands.
+
 A flag that carries a credential is never a tool parameter.
 
 To see the tools of a tier, run `lo mcp tools`:
 
 ```bash
-lo mcp tools                    # readonly tier
+lo mcp tools                    # the readonly tier
 lo mcp tools --allow-mutating   # readonly + mutating
 lo mcp tools --json             # full definitions with the input schemas
 ```
@@ -59,7 +67,7 @@ The entry starts `<absolute path of lo> mcp start`. It also sets `PATH`
 server with a small environment and another working directory, so the
 server needs both.
 
-The entry opens the readonly tier. To open a higher tier, add the
+The entry opens the `readonly` tier. To open a higher tier, add the
 environment form:
 
 ```bash
@@ -103,6 +111,6 @@ An agent that reads its own MCP config can start the server directly:
 - `lo mcp serve` serves streamable HTTP on `127.0.0.1:8080` (`--host`,
   `--port`). It has no authentication, so keep it on loopback.
 
-Both take `--allow-mutating` and `--allow-destructive`. A flag wins over
-`LO_MCP_ALLOW`. The [CLI reference](/reference/cli#lo-mcp) shows a
+Both take `--allow-mutating` and `--allow-destructive`. `LO_MCP_ALLOW` adds
+to these flags: the higher of the two tiers applies. The [CLI reference](/reference/cli#lo-mcp) shows a
 `.mcp.json` entry and lists the tool counts of each tier.
