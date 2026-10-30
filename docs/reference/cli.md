@@ -2,7 +2,7 @@
 
 The `lo` CLI is a single static Go binary. Every command below runs natively in it; the [argsh](https://github.com/arg-sh/argsh) implementation it was ported from stays in every project at `.lok8s/lo` as a frozen reference and runs the same command line when the project file routes a command to it (see [Choosing the implementation](#choosing-the-implementation), and [The Go `lo` binary](go-migration.md) for what still calls into that tree, and the catalogue of the few places the two deliberately differ: for example, argument-parse errors exit `1` in the binary where argsh exits `2`, with the same message).
 
-`lo up` runs provision → framework bootstrap (applies `spec.bootstrap` addons via `.lok8s/libs/bootstrap`) → Tilt. `lo build` renders the domain kustomization into one `artifacts.yaml`; `lo deploy` applies that single artifact (CRDs first, then the rest). `lo lint` validates `spec.bootstrap` entries and target kustomizations. See [Concepts](../guide/concepts.md) and [Specs reference](specs.md) for the model.
+`lo up` runs provision → framework bootstrap (applies the `spec.bootstrap` addons) → Tilt. `lo build` renders the domain kustomization into one `artifacts.yaml`; `lo deploy` applies that single artifact (CRDs first, then the rest). `lo lint` validates `spec.bootstrap` entries and target kustomizations. See [Concepts](../guide/concepts.md) and [Specs reference](specs.md) for the model.
 
 The generated [CLI commands](./cli-commands) page lists every command with its flags and examples. `go run ./hack/gen-cli-docs` writes it from the command tree, and `go test ./internal/clidoc/` fails while the committed page is stale. This page explains the commands.
 
@@ -164,7 +164,7 @@ lo up --ci [--timeout|-t <duration>]     # headless: build + deploy + wait, real
 
 Needs `clusters/<domain>/cluster.lok8s.yaml` (or a `deploy.lok8s.yaml` with a `clusterRef`): the provision dispatch reads the spec first and stops with `No cluster.lok8s.yaml or deploy.lok8s.yaml found` when neither exists. There is no spec-less fallback.
 
-Steps: provision cluster, apply `spec.bootstrap` addons in order via the framework bootstrap (`.lok8s/libs/bootstrap`), start Tilt.
+Steps: provision the cluster, apply the `spec.bootstrap` addons in order (the framework bootstrap), start Tilt.
 
 With `spec.registries.tls: true` (the default), the first run of a registry set mints its TLS certificate into the docker volume `<network>-registry-tls`. Every later run reads the certificate from the volume. It mints again only when the registry set changed. See [`lo registry tls`](#lo-registry-tls).
 

@@ -206,7 +206,7 @@ When `lo up` runs, the Lo driver performs these steps:
 7. **Create registry ConfigMap** (`lok8s-registries` in `kube-system`)
 8. **Apply CoreDNS** config and patches, plus any `spec.coredns` from the
    cluster spec (see [Custom in-cluster DNS](#custom-in-cluster-dns))
-9. **Apply bootstrap addons**: framework runs `.lok8s/libs/bootstrap` to apply `spec.bootstrap` addons in order (default: `[cilium]`), waits for health between each
+9. **Apply bootstrap addons**: the framework bootstrap applies the `spec.bootstrap` addons in order (default: `[cilium]`). It waits for each addon to become healthy before the next one.
 10. **Start Tilt** for live development
 
 > The driver does not mint **TLS**. The gateway serves a

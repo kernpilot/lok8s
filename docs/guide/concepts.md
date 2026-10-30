@@ -249,7 +249,7 @@ mechanisms:
 
 Things the cluster itself needs to be usable: CNI, CSI, CCM, MetalLB,
 cert-manager CRDs. You express them in the cluster spec as an ordered
-list of addons. The framework (`.lok8s/libs/bootstrap`) applies them
+list of addons. The framework bootstrap in the `lo` binary applies them
 during provisioning: the **same code path for every driver**, **before**
 Tilt starts and **before** any workloads land.
 

@@ -100,8 +100,12 @@ bash lo-install.sh                            # → ~/.local/bin/lo  (--dir, --v
 
 The installer fetches `lo-<os>-<arch>.tar.gz` **and** `checksums.txt` from the
 release, refuses to extract anything whose SHA-256 does not match, and only
-then installs `lo`. What changed in this release and how to upgrade an
-existing project: [v0.3.0 release notes](docs/releases/v0.3.0.md).
+then installs `lo`. Each release has its notes under
+[docs/releases/](docs/releases/) and on the
+[GitHub release](https://github.com/kernpilot/lok8s/releases) page. To move a
+project from the argsh tree to the binary, follow
+[Upgrade an existing project](docs/releases/v0.3.0.md#upgrade-an-existing-project)
+in the v0.3.0 notes, the release that introduced the binary.
 Prefer no script at all? The same four steps by hand:
 
 ```bash
