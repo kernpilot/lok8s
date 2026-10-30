@@ -2,7 +2,7 @@
 
 The `lo` CLI is a single static Go binary. Every command below runs natively in it; the [argsh](https://github.com/arg-sh/argsh) implementation it was ported from stays in every project at `.lok8s/lo` as a frozen reference and runs the same command line when the project file routes a command to it (see [Choosing the implementation](#choosing-the-implementation), and [The Go `lo` binary](go-migration.md) for what still calls into that tree, and the catalogue of the few places the two deliberately differ: for example, argument-parse errors exit `1` in the binary where argsh exits `2`, with the same message).
 
-`lo up` runs provision → framework bootstrap (applies `spec.bootstrap` addons via `.lok8s/libs/bootstrap`) → Tilt. `lo build` renders the domain kustomization into one `artifacts.yaml`; `lo deploy` applies that single artifact (CRDs first, then the rest). `lo lint` validates `spec.bootstrap` entries and target kustomizations. See [Concepts](../guide/concepts.md) and [Specs reference](specs.md) for the model.
+`lo up` runs provision → framework bootstrap (applies the `spec.bootstrap` addons) → Tilt. `lo build` renders the domain kustomization into one `artifacts.yaml`; `lo deploy` applies that single artifact (CRDs first, then the rest). `lo lint` validates `spec.bootstrap` entries and target kustomizations. See [Concepts](../guide/concepts.md) and [Specs reference](specs.md) for the model.
 
 The generated [CLI commands](./cli-commands) page lists every command with its flags and examples. `go run ./hack/gen-cli-docs` writes it from the command tree, and `go test ./internal/clidoc/` fails while the committed page is stale. This page explains the commands.
 
@@ -164,7 +164,7 @@ lo up --ci [--timeout|-t <duration>]     # headless: build + deploy + wait, real
 
 Needs `clusters/<domain>/cluster.lok8s.yaml` (or a `deploy.lok8s.yaml` with a `clusterRef`): the provision dispatch reads the spec first and stops with `No cluster.lok8s.yaml or deploy.lok8s.yaml found` when neither exists. There is no spec-less fallback.
 
-Steps: provision cluster, apply `spec.bootstrap` addons in order via the framework bootstrap (`.lok8s/libs/bootstrap`), start Tilt.
+Steps: provision the cluster, apply the `spec.bootstrap` addons in order (the framework bootstrap), start Tilt.
 
 With `spec.registries.tls: true` (the default), the first run of a registry set mints its TLS certificate into the docker volume `<network>-registry-tls`. Every later run reads the certificate from the volume. It mints again only when the registry set changed. See [`lo registry tls`](#lo-registry-tls).
 
@@ -597,7 +597,7 @@ and `ssh-to-age` (`b install`).
 
 ### lo mcp
 
-Serve the `lo` commands as MCP ([Model Context Protocol](https://modelcontextprotocol.io/)) tools.
+Serve the `lo` commands as MCP ([Model Context Protocol](https://modelcontextprotocol.io/)) tools. The guide [Connect an AI agent](/guide/mcp) shows how to register the server with an editor.
 
 ```bash
 lo mcp start [--allow-mutating] [--allow-destructive] [--log-level <l>]   # stdio — what editors and agents launch
@@ -606,7 +606,7 @@ lo mcp tools [--allow-mutating] [--allow-destructive]                      # pri
 lo mcp claude|vscode|cursor enable [--env LO_MCP_ALLOW=…]                  # write the editor's MCP config
 ```
 
-Every user-facing leaf subcommand becomes a tool named `lo_<path…>` (`lo_status`, `lo_build`, `lo_secrets_encrypt`, `lo_kubehz_join`, …) — the same scheme the former argsh builtin used. Dispatchers (`tilt`, `gitops`, `kubehz`, …) are traversed, not exposed; framework-internal commands (hidden from `--help`) are never tools, and neither are `mcp` and `operator` themselves.
+Every user-facing leaf subcommand becomes a tool named `lo_<path…>` (`lo_status`, `lo_build`, `lo_secrets_encrypt`, `lo_kubehz_join`, …) — the same scheme the former argsh builtin used. Dispatchers (`tilt`, `gitops`, `kubehz`, …) are traversed, not exposed; framework-internal commands (hidden from `--help`) are never tools, and neither are the Go-only top-level commands `assets`, `mcp`, `operator` and `toolchain`.
 
 **Exposure is structural**: a tool that is not exposed is not registered, so it cannot be called by name either. The tiers follow the usage markers:
 
@@ -617,7 +617,7 @@ Every user-facing leaf subcommand becomes a tool named `lo_<path…>` (`lo_statu
 | `@destructive` | `destructiveHint: true` | with `--allow-destructive` (implies `--allow-mutating`) |
 | `@idempotent` | `idempotentHint: true` | informational |
 
-A command whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`, `kubehz token`, `kubehz claim-code`) is never a tool, in any tier: a tool result lands in the model's transcript. The agent kubeconfig writers `kubehz space kubeconfig` and `kubehz cluster kubeconfig` count as credential output too. A call whose positional argument starts with a dash is refused, and nothing runs: an argument such as `--force` cannot set a flag that the tool does not offer. `chat` is never a tool either, because it passes its arguments on unread. `--print-only` of `kubehz node join` is never exposed either, because it prints the bootstrap token. Flags that carry a credential (`token`, `secret`, `password`, `key`, `nonce`, …) are never exposed; `--force` / `--force-recreate` only with `--allow-destructive`. `LO_MCP_ALLOW=mutating|destructive` is the environment form of the opt-in (flags win), which is what `lo mcp <editor> enable --env LO_MCP_ALLOW=…` writes into the editor config.
+A command whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`, `kubehz token`, `kubehz claim-code`) is never a tool, in any tier: a tool result lands in the model's transcript. The agent kubeconfig writers `kubehz space kubeconfig` and `kubehz cluster kubeconfig` count as credential output too. A call whose positional argument starts with a dash is refused, and nothing runs: an argument such as `--force` cannot set a flag that the tool does not offer. `chat` is never a tool either, because it passes its arguments on unread. `--print-only` of `kubehz node join` is never exposed either, because it prints the bootstrap token. Flags that carry a credential (`token`, `secret`, `password`, `key`, `nonce`, …) are never exposed; `--force` / `--force-recreate` only with `--allow-destructive`. `LO_MCP_ALLOW=mutating|destructive` is the environment form of the opt-in. It adds to the flags, so the higher of the two tiers applies. It is what `lo mcp <editor> enable --env LO_MCP_ALLOW=…` writes into the editor config.
 
 #### MCP server
 
@@ -645,15 +645,15 @@ The server key stays `lok8s`, so the tool names (`lo_status`, `lo_build`, `lo_ti
 
 The server needs no other environment. `PATH_BASE: "."` pins the project root to the directory the editor starts the server in, so a `PATH_BASE` inherited from another project's shell cannot redirect it. Without that line the server takes the root from an exported `PATH_BASE` when set, else from the working directory. For every tool call it prepends the toolchain (`.bin`) and framework (`.lok8s`) directories to PATH.
 
-`LO_MCP_ALLOW=destructive` opens the full surface (95 tools). That is the set the argsh builtin serves, without the six commands whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`, `kubehz claim-code`, `kubehz space kubeconfig`, `kubehz cluster kubeconfig`) and without `chat`, plus the Go-only leaves. Remove the `env` entry for the readonly default (29 tools), or set `mutating` for the middle tier (53 tools). The tiers follow the marker table above. The [agent tools](../guide/kubehz.md#agent-tools) (`lo_kubehz_space_*`, `lo_kubehz_cluster_*`) follow the same tiers. List and get are in the default tier. Create needs `mutating`. Delete and lease need `destructive`.
+`LO_MCP_ALLOW=destructive` opens the full surface (95 tools). The count starts from the 81 tools of the argsh builtin. The Go server drops eight of them: the six commands whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`, `kubehz claim-code`, `kubehz space kubeconfig`, `kubehz cluster kubeconfig`), `chat`, and the single `drivers` tool. It adds 22 leaves that only the Go tree has: `init project`, `init cluster`, and one tool for each of the 20 driver operations (`lo_drivers_lo_provision`, …). 81 − 8 + 22 = 95. The Go-only top-level commands (`assets`, `mcp`, `operator`, `toolchain`) are never tools: the server projects the command tree without them. Remove the `env` entry for the readonly default (29 tools), or set `mutating` for the middle tier (53 tools). The tiers follow the marker table above. The [agent tools](../guide/kubehz.md#agent-tools) (`lo_kubehz_space_*`, `lo_kubehz_cluster_*`) follow the same tiers. List and get are in the default tier. Create needs `mutating`. Delete and lease need `destructive`.
 
 #### Bash variant
 
 The frozen argsh implementation serves the same protocol from the `mcp` builtin in `argsh.so` (`argsh builtins install`). argsh loads it from `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh.so`, `BASH_LOADABLES_PATH` or `LD_LIBRARY_PATH`. The builtin has no tiers: every leaf is a tool (81 tools), and the editor's own approval prompt is the only gate. `lo chat` still drives this server.
 
-The bash server runs when the project's `lok8s.yaml` sets `spec.implementation.default: bash` (planned, WP8). The same block routes single commands: `spec.implementation.bash.commands` lists the commands the binary runs through the bash tree, and `spec.implementation.bash.tree` names that tree (default `.lok8s`). Implementation selection lives in the committed project config, not in the environment.
+The `lok8s.yaml` routing (`spec.implementation`, see [Choosing the implementation](#choosing-the-implementation)) does not select this server. `mcp` is a Go-only command, so no routing applies to it, and `lo mcp start` is always the Go server. In a project with `spec.implementation.default: bash`, each tool call of the Go server runs `lo <cmd> …`, and the routing sends that command to the bash tree.
 
-Until WP8 lands, start the frozen tree directly from a checkout:
+To serve the builtin itself, start the frozen tree directly. The project must hold the tree (a checkout, or a project after `lo assets eject bash`):
 
 ```json
 "lok8s": {
@@ -931,7 +931,7 @@ spec:
 Rules:
 
 - `default: bash` runs every command through `<tree>/lo` with the argv untouched. `default: go` with a `commands` list routes only the listed commands; every other command stays in Go.
-- `commands` takes top-level command names from `lo --help`. An alias (`r`), an unknown name and a Go-only command (`assets`, `mcp`, `operator`, `toolchain`, and `init` for its `project` and `toolchain` subcommands) are errors. There is no `all`: `default: bash` is the whole-tree switch.
+- `commands` takes top-level command names from `lo --help`. An alias (`r`), an unknown name and a Go-only command (`assets`, `mcp`, `operator`, `toolchain`, and `init` for its `cluster`, `project` and `toolchain` subcommands) are errors. There is no `all`: `default: bash` is the whole-tree switch.
 - `tree` is relative to the project and stays inside it: no absolute path, no `..`. The default is `.lok8s`. When the block routes something, the tree directory and its `lo` entrypoint must also resolve inside the project (no symlink out); a project that runs Go may link its `.lok8s` anywhere.
 - A routing needs the tree in the project. The copy the binary extracts into its cache and a checkout named by `PATH_LOK8S` are never routed to. Without the tree, a routed command stops: `lo: implementation bash: the tree <project>/.lok8s/lo is missing. Run "lo assets eject bash", or set spec.implementation.default: go.` The Go-only commands, `lint`, `doctor` and `init` still run, so `lo assets eject bash` can create the tree.
 - No environment variable selects the implementation. The path variables (`PATH_BASE`, `PATH_CLUSTERS`, `PATH_LOK8S`, `PATH_BIN`) select paths for the bash tree. `PATH_BIN` also selects the argsh runtime the tree sources, so a routed command ignores an inherited `PATH_BIN` and puts `<project>/.bin` on the child's PATH and in `PATH_BIN` (the project needs its toolchain there; a link is fine); the remaining trust question (a changed tree) is why a trust layer is planned.

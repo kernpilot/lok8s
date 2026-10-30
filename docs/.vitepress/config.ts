@@ -57,6 +57,7 @@ export default defineConfig({
           text: 'Workflows',
           items: [
             { text: 'Local Dev with Tilt', link: '/guide/local-dev' },
+            { text: 'Connect an AI agent (lo mcp)', link: '/guide/mcp' },
             { text: 'Local AI (lo chat)', link: '/guide/lo-chat' },
             { text: 'Services Configuration', link: '/guide/services' },
             { text: 'Testing', link: '/guide/testing' },

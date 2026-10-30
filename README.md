@@ -100,8 +100,12 @@ bash lo-install.sh                            # → ~/.local/bin/lo  (--dir, --v
 
 The installer fetches `lo-<os>-<arch>.tar.gz` **and** `checksums.txt` from the
 release, refuses to extract anything whose SHA-256 does not match, and only
-then installs `lo`. What changed in this release and how to upgrade an
-existing project: [v0.3.0 release notes](docs/releases/v0.3.0.md).
+then installs `lo`. Each release has its notes under
+[docs/releases/](docs/releases/) and on the
+[GitHub release](https://github.com/kernpilot/lok8s/releases) page. To move a
+project from the argsh tree to the binary, follow
+[Upgrade an existing project](docs/releases/v0.3.0.md#upgrade-an-existing-project)
+in the v0.3.0 notes, the release that introduced the binary.
 Prefer no script at all? The same four steps by hand:
 
 ```bash
@@ -124,6 +128,7 @@ gate, see [the Go binary reference](docs/reference/go-migration.md#core-and-full
 
 Then scaffold a project: `lo init project` writes `clusters/`, `lok8s.yaml`,
 the `.gitignore` entries and a `mise.toml` (files only, no network).
+`--cluster lok8s.dev` also writes the first cluster spec.
 `lo toolchain install` writes `.bin/b.yaml`, installs
 [`b`](https://github.com/fentas/b) itself into `.bin/` (pinned release,
 SHA-256-verified, no `curl | sh`) and runs `b install` for the pinned toolchain
@@ -133,7 +138,7 @@ and ejected into `.lok8s/` on first use:
 
 ```bash
 mkdir my-project && cd my-project
-lo init project                # the project files
+lo init project --cluster lok8s.dev   # the project files + the lok8s.dev cluster spec
 lo toolchain install           # b + the pinned toolchain into .bin/
 lo toolchain doctor            # b, kustomize, khelm and the Secret plugin at the pins
 ```
@@ -177,7 +182,7 @@ existing users. Download and read it before running it:
 | `capi` | `clusterctl`, `hcloud` | Cluster API provisioning |
 | `kubeone` | `kubeone`, `hcloud` | KubeOne provisioning |
 
-Every profile ships a preconfigured `clusters/lok8s.dev/` — a local cluster with working TLS out of the box. Bring your own FQDN later, or use `*.[N].lok8s.dev` for multiple projects.
+A `b` profile does not write `clusters/lok8s.dev/`, and neither does `lo init project` without `--cluster`. `lo init cluster lok8s.dev` writes its spec: a local kind cluster on a Docker bridge. Bring your own FQDN later, or use `*.[N].lok8s.dev` for multiple projects.
 
 **Prerequisites:** Docker, and **bash ≥ 4.3** (macOS ships 3.2 — `brew install bash`). Everything else comes from `b` (or `mise`). Run `lo doctor` to check.
 
@@ -188,7 +193,8 @@ Every profile ships a preconfigured `clusters/lok8s.dev/` — a local cluster wi
 From zero to a running local cluster with a live dev loop:
 
 ```bash
-lo use lok8s.dev          # select the active domain (ships preconfigured)
+lo init cluster lok8s.dev # if lo init project --cluster did not write the spec: write it
+lo use lok8s.dev          # select the active domain
 lo up                     # create the kind cluster, bootstrap infra, start Tilt
                           # → Tilt UI on the URL it prints (per-domain port, 10351–10499)
 lo status                 # Running ✓
@@ -261,12 +267,12 @@ This single convention is what makes the "same workflow everywhere" promise hold
 
 ```
 clusters/
-├── lok8s.dev/                  # local dev cluster (ships with lok8s)
+├── lok8s.dev/                  # local dev cluster (lo init cluster lok8s.dev)
 │   ├── cluster.lok8s.yaml       #   the spec — kind, bootstrap, network, …
 │   ├── targets/                 #   workload plane: one kustomize dir per target
 │   │   ├── platform/
 │   │   └── apps/
-│   ├── artifacts/               #   rendered output (gitignored, rebuilt on demand)
+│   ├── artifacts/               #   per-resource files of the build (lo build, spec.build.artifacts: split)
 │   └── secrets/                 #   per-domain secret store (encrypted, opt-in)
 ├── cluster.example.in.net/     # production cluster (same structure!)
 │   └── cluster.lok8s.yaml

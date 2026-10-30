@@ -572,7 +572,7 @@ Don't define the same zone via both `hosts` and a raw `servers`/`import` block �
 
 The `spec.bootstrap` field is an **ordered list** of addons the framework applies at provision time, *before* Tilt starts and *before* any workloads land. This is the framework's one ordering primitive — each entry is applied, then lok8s waits for Deployments/DaemonSets to become ready before moving to the next.
 
-Implementation lives in `.lok8s/libs/bootstrap` and runs identically across all drivers (Lo, KubeOne, Capi, Kkp).
+The framework bootstrap in the `lo` binary applies the list. It runs the same way for all drivers (Lo, KubeOne, Capi, Kkp).
 
 Use this for anything the cluster needs to be healthy before workloads can run: CNI, CSI, CCM, MetalLB, cert-manager, etc. It is **not** for application workloads — those live under `targets/` and have no framework-level ordering.
 

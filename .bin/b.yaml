@@ -103,7 +103,7 @@ binaries:
 
 profiles:
   core:
-    description: "Framework only: .lok8s/ + default lok8s.dev domain (remote deploy)"
+    description: "Framework only: .lok8s/ (remote deploy)"
     files:
       .lok8s/**:
       .envrc:

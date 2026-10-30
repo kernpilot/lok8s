@@ -1,117 +1,140 @@
 # Driver Contract
 
-The driver contract is lok8s's extensibility mechanism for cluster backends. Each cluster kind is implemented in `.lok8s/drivers/<kind>/main` that exports a set of required functions.
+A driver creates and removes the clusters of one cluster kind. The `kind:`
+field of `cluster.lok8s.yaml` selects the driver: `kind: Lo` selects the `lo`
+driver. This page describes the contract of the Go `lo` binary. The
+[bash contract](#the-frozen-bash-contract) of the frozen tree is at the end.
 
-::: warning This page describes the bash contract
-The built-in drivers (`Lo`, `Capi`, `KubeOne`, `Kkp`, `Kubehz`) are Go packages under `internal/driver/` in the `lo` binary; their bash twins under `.lok8s/drivers/` are frozen. The bash contract below is still honoured, by a `lok8s.yaml` that routes `provision` to bash and by `lo drivers <kind> …`, but the binary's own provision dispatch (`lo up` / `provision` / `destroy` / `status`) resolves `kind:` against the Go registry only and reports a bash-only kind as `Unknown cluster kind`. A Go driver contract is not published yet. See [The Go `lo` binary](/reference/go-migration#what-still-calls-bash).
-:::
+## Built-in drivers
 
-## Contract Functions
+The drivers are Go packages in the `lo` binary. `lo drivers --list` lists them.
 
-Every driver implementation must provide these four functions:
+| `kind:` | Driver | Go package | Clusters |
+|---------|--------|------------|----------|
+| `Lo` | `lo` | `internal/driver/lo` | kind on local Docker, or on a remote VM |
+| `Capi` | `capi` | `internal/driver/capi` | Cluster API |
+| `KubeOne` | `kubeone` | `internal/driver/kubeone` | KubeOne on VMs or bare metal |
+| `Kkp` | `kkp` | `internal/driver/kkp` | Kubermatic (KKP) user clusters |
+| `Kubehz` | `kubehz` | `internal/driver/kubehz` | spaces on the kubehz shared control plane |
 
-| Function | Signature | Purpose |
-|----------|-----------|---------|
-| `driver::provision` | `driver::provision <domain> <cluster_yaml>` | Create and configure the cluster |
-| `driver::destroy` | `driver::destroy <domain> <cluster_yaml>` | Tear down the cluster |
-| `driver::status` | `driver::status <domain> <cluster_yaml>` | Return cluster readiness (stdout) |
-| `driver::kubeconfig` | `driver::kubeconfig <domain>` | Print path to kubeconfig (stdout) |
+Each package registers itself with `driver.Register` (`internal/driver/registry.go`).
+`internal/cli/drivers.go` links all of them into the binary.
 
-### Optional Functions
+## The contract
 
-| Function | Signature | Purpose |
-|----------|-----------|---------|
-| `driver::post_provision` | `driver::post_provision <domain> <cluster_yaml>` | Post-provision hook (runs after `driver::provision`, before framework bootstrap) |
+Every driver implements the `Driver` interface (`internal/driver/driver.go`):
 
-Bootstrap is **not** a driver function — it runs at the framework level
-in `.lok8s/libs/bootstrap` and is identical for every driver. See the
+| Method | Purpose |
+|--------|---------|
+| `Provision(ctx, domain)` | Create or reconcile the cluster |
+| `Destroy(ctx, domain)` | Remove the cluster |
+| `Status(ctx, domain)` | Return one status word, for example `Running` or `NotFound` |
+| `Kubeconfig(ctx, domain)` | Return the path of the kubeconfig under `.kubeconfig/` |
+
+A driver can also implement two optional hooks:
+
+| Interface | Method | Purpose |
+|-----------|--------|---------|
+| `Exporter` | `Export(ctx, domain)` | Set the spec-derived environment (`LOK8S_SPEC_*`) that the `spec.bootstrap` addons read. The dispatch calls it on a full provision and on `--bootstrap`, so it must be idempotent. |
+| `PostProvisioner` | `PostProvision(ctx, domain)` | Side effects that need the provisioned infrastructure. The dispatch calls it on a full provision only. |
+
+Bootstrap is **not** a driver method. The framework bootstrap in the binary
+applies `spec.bootstrap` the same way for every driver. See the
 [Addons guide](/guide/addons).
 
-### Return Codes
+### Errors and exit codes
 
-`driver::provision` may return special exit codes:
+The provision dispatch handles these errors. The exit code is the exit code
+of `lo provision`:
 
-| Code | Meaning |
+| Error | Exit code | Meaning |
+|-------|-----------|---------|
+| `nil` | `0` | Success. The dispatch continues with the next step. |
+| `driver.ErrDeclined` | `3` | The operator declined the confirmation for real infrastructure. |
+| `driver.ErrFullLifecycle` | `0` | Success. The driver did the full lifecycle, so the dispatch skips all later steps and returns success. |
+| any other error | `1`, or the exit code of the failed subprocess | Failure. |
+
+The `lo` driver returns `ErrFullLifecycle` in remote CI mode: the remote VM
+runs the provision and the bootstrap itself. `ErrFullLifecycle` is the Go
+form of the bash return code `100`. `lo drivers <name> provision` calls the
+driver without the dispatch, so there `ErrFullLifecycle` gives exit code
+`100` (`driver.ExitCode`).
+
+## Dispatch
+
+`lo up`, `lo provision`, `lo destroy` and `lo status` use the provision
+dispatch (`internal/provision/dispatch.go`). A provision does these steps:
+
+1. Read `clusters/<domain>/cluster.lok8s.yaml`. A domain with a
+   `deploy.lok8s.yaml` stops here: `lo deploy` serves it.
+2. Read `kind:` and change it to lowercase (`Lo` → `lo`).
+3. Find the driver in the registry. An unknown kind stops with
+   `Unknown cluster kind`.
+4. Show a summary of the real infrastructure and ask for confirmation. A
+   local `lo` cluster and `--force` skip this step.
+5. Load and validate the provider of `spec.provider.name`. The `lo` driver
+   loads it only with `--remote`.
+6. Call `Provision`. On `ErrFullLifecycle`, stop with success.
+7. Call `PostProvision`, if the driver has it.
+8. Call `Export`, if the driver has it.
+9. Register the cluster with kubehz, if `spec.kubehz` asks for it.
+10. Apply the `spec.bootstrap` addons in order.
+11. Publish the cluster inventory. A failure here only gives a warning.
+12. Run the GitOps bootstrap, if `spec.gitops.provider` is set.
+
+`lo provision --bootstrap` skips steps 5 to 7. It needs the kubeconfig of an
+existing cluster, `.kubeconfig/<metadata.name>.yaml`.
+
+`lo drivers <name> <command> <domain>` calls one contract method directly,
+without the dispatch: no confirmation, no provider, no bootstrap. Use it to
+debug a driver.
+
+## Existing implementations
+
+### Lo (`internal/driver/lo`)
+
+Local and remote clusters with Docker and kind. The driver reads its
+templates (kind config, CoreDNS, registry, expose) from the embedded
+`drivers/lo/cluster/` assets. It writes them into `.lok8s/drivers/lo/cluster/`
+on first use.
+
+| File | Content |
 |------|---------|
-| `0` | Success — `libs/provision` continues with bootstrap, kubehz, gitops |
-| `100` | Success, full lifecycle handled — skip all post-provision steps |
-| Other | Failure — propagated to caller |
-
-Return 100 is used by the Lo driver in CI remote mode: the remote VM
-runs provision + bootstrap itself, so the local dispatch must skip them.
-
-## Dispatch Mechanism
-
-The provision system in `.lok8s/libs/provision` handles dispatch:
-
-1. Reads `.kind` from `cluster.lok8s.yaml` (e.g. `Lo`, `Capi`)
-2. Lowercases the value
-3. Sources `.lok8s/drivers/<kind>/main`
-4. If `--remote`: loads `spec.provider`, validates credentials
-5. Calls `driver::provision` → checks return code
-6. If rc=0: runs `driver::post_provision` (if defined), kubehz registration, framework `bootstrap::apply`, gitops
-7. If rc=100: skips all post-provision (driver handled everything)
-
-```bash
-# cluster.lok8s.yaml
-kind: Lo          # -> sources .lok8s/drivers/lo/main
-
-kind: Capi        # -> sources .lok8s/drivers/capi/main
-```
-
-## Existing Implementations
-
-### Lo (`drivers/lo/main`)
-
-Local and remote clusters using Docker + kind.
-
-**Implementation structure** (after refactor):
-```
-drivers/lo/
-  main              driver::* contract + orchestration (~230 lines)
-  utils/
-    defaults.sh     constants (registry image, CIDRs, offsets)
-    config.sh       lo::read_*_config, validators, spec-env export
-    render.sh       kind config YAML rendering
-    network.sh      Docker network lifecycle
-    registries.sh   registry container lifecycle (+ registry TLS cert)
-    services.sh     CoreDNS setup
-    tunnel.sh       SSH tunnel + kubeconfig rewrite
-    expose.sh       nginx reverse proxy
-    remote.sh       remote VM provisioning + CI mode
-  kind              CLI subcommand (lo kind)
-  registry          CLI subcommand (lo registry)
-  cluster/          templates (kind config, coredns, registry, expose)
-```
+| `lo.go` | The contract methods and the provision order |
+| `config.go`, `configregistry.go`, `defaults.go` | Spec reading, validation and defaults |
+| `render.go` | The kind config |
+| `network.go` | The Docker networks |
+| `registries.go`, `registrytls.go`, `registryimage.go` | The registry containers and the registry TLS certificate |
+| `services.go` | CoreDNS and the registry ConfigMaps |
+| `remote.go`, `tunnel.go`, `expose.go` | The remote VM, the kubeconfig tunnel and the nginx reverse proxy |
+| `registrycli.go` | `lo registry` |
 
 **Provision steps (local):**
-1. Read config (`lo::read_config` → network, registries, nodes, LB)
-2. Validate IPs against subnets
-3. Create Docker bridge network + shared registry network
-4. Mint the registry TLS cert via the Secret plugin (`lo::registries_tls_cert`, default; skipped when `registries.tls: false`)
-5. Start registry containers (build, cache, pull-through mirrors)
-6. Write containerd `certs.d/` tree (bind-mounted into kind nodes)
-7. Render + create kind cluster
-8. Connect nodes to shared registry network, at gateway priority `-1` so the cluster network keeps the default route (Docker 28+; an older Docker gets a plain connect and an in-node `ip route replace`, see [The default route](/guide/shared-registries#the-default-route)). Shared or not, every node on that network gets the route check
-9. Extract kubeconfig
-10. Apply local-registry-hosting ConfigMap (KEP-1755)
-11. Apply registry ConfigMap + CoreDNS config (incl. `spec.coredns` →
-    `coredns-custom` ConfigMap; see
-    [Custom in-cluster DNS](/guide/local-dev#custom-in-cluster-dns))
+1. Read the config from the spec (network, registries, nodes, load balancer).
+2. Validate the IPs against the subnets.
+3. Create the Docker network of the project. With shared registries, also create the shared registry network.
+4. Mint the registry TLS certificate with the Secret plugin. `registries.tls: false` skips this step.
+5. Start the registry containers (build, cache, pull-through mirrors).
+6. Write the containerd `certs.d/` tree. The kind nodes bind-mount it.
+7. Write the apiserver authentication config, if `spec.oidc` is set.
+8. Render the kind config, and create the kind cluster if it does not exist.
+9. Connect the nodes to the shared registry network, at gateway priority `-1`, so the cluster network keeps the default route (Docker 28+). An older Docker gets a plain connect and an in-node `ip route replace` (see [The default route](/guide/shared-registries#the-default-route)). Every node on that network gets the route check.
+10. Write the kubeconfig.
+11. Apply the local-registry-hosting ConfigMap (KEP-1755).
+12. Apply the registry ConfigMap and the CoreDNS config, with `spec.coredns` as the `coredns-custom` ConfigMap (see [Custom in-cluster DNS](/guide/local-dev#custom-in-cluster-dns)).
 
 > The application wildcard TLS is **not** a driver step: declare it as a
 > [`cert:` Secret](/reference/kustomize-plugins#development-certificates-cert)
 > in your targets (the gateway serves it), trusted once with `lo trust`.
 
-> Step 4 must precede steps 5 and 6: the registry containers mount the
-> cert, and `certs.d` references the dev root CA. The cert is minted
-> before the containers start.
+> Step 4 must come before steps 5 and 6: the registry containers mount the
+> certificate, and `certs.d` references the dev root CA.
 
 **Provision steps (remote, `--remote` flag):**
-1. Load provider (`spec.provider.name`), provision VM
-2. Wait for SSH, cloud-init, Docker on the remote
-3. **Docker mode**: set `DOCKER_HOST=ssh://<ip>`, run the local steps above against remote Docker
-4. **CI mode**: rsync repo to VM, run `lo provision` on VM via SSH, set up nginx expose + kubeconfig tunnel, return 100
+1. Load the provider (`spec.provider.name`) and provision the VM.
+2. Wait for SSH, cloud-init and Docker on the VM.
+3. **Docker mode**: set `DOCKER_HOST=ssh://<user>@<ip>`, then run the local steps against the remote Docker.
+4. **CI mode**: copy the repo to the VM with rsync, run `lo provision` on the VM over SSH, set up the nginx expose and the kubeconfig tunnel, then return `ErrFullLifecycle`.
 
 **Registry spec fields** (`spec.registries`):
 
@@ -128,15 +151,15 @@ drivers/lo/
 
 **Two registry kinds**: framework-private (`build`, `cache`) live on the project subnet and never move; pull-through mirrors (`io-*`) optionally live on the shared registry network.
 
-**Containerd wiring**: hostname/IP-to-registry mapping is written by `lo::write_certs_d` to `clusters/<domain>/.containerd/certs.d/` BEFORE `kind create cluster`. Each kind node bind-mounts that directory to `/etc/containerd/certs.d/` via `extraMounts`, so containerd reads it at startup. No post-create `docker exec` step. In plain mode each `hosts.toml` uses `server = "http://<ip>"` + `skip_verify = true`; in TLS mode it uses `server = "https://<ip>"` + `ca = "/etc/containerd/certs.d/.ca/rootCA.pem"` (a copy of the dev root CA at CAROOT placed in the bind-mounted tree).
+**Containerd wiring**: the driver writes the hostname/IP-to-registry mapping to `clusters/<domain>/.containerd/certs.d/` BEFORE `kind create cluster`. Each kind node bind-mounts that directory to `/etc/containerd/certs.d/` via `extraMounts`, so containerd reads it at startup. No post-create `docker exec` step. In plain mode each `hosts.toml` uses `server = "http://<ip>"` + `skip_verify = true`; in TLS mode it uses `server = "https://<ip>"` + `ca = "/etc/containerd/certs.d/.ca/rootCA.pem"` (a copy of the dev root CA at CAROOT placed in the bind-mounted tree).
 
-**Destroy behavior:** `driver::destroy` removes only per-project registries (build, cache). Shared pull-through mirror containers and the `lok8s-registries` network are **not** removed, since they may be in use by other projects. Use `lo registry clean --shared` to explicitly remove shared registries.
+**Destroy behavior:** `Destroy` removes only the registries of the project (build, cache). It keeps the shared pull-through mirror containers and the `lok8s-registries` network, because other projects can use them. To remove the shared registries, run `lo registry clean --shared`.
 
 **Status output:** `Running` or `NotFound`
 
-**Kubeconfig:** `.kubeconfig/<cluster-name>.yaml`
+**Kubeconfig:** `.kubeconfig/<metadata.name>.yaml`
 
-### Capi (`drivers/capi/main`)
+### Capi (`internal/driver/capi`)
 
 Production clusters via Cluster API.
 
@@ -150,11 +173,11 @@ Production clusters via Cluster API.
 7. Wait for cluster to become `Provisioned`
 8. Extract work cluster kubeconfig via `clusterctl`
 
-**Status output:** CAPI Cluster phase (`Provisioned`, `Provisioning`, `Failed`, `NotFound`)
+**Status output:** the phase of the CAPI Cluster (for example `Provisioned` or `Provisioning`), `NotFound` or `Unknown`
 
-**Kubeconfig:** `.kubeconfig/<domain>.yaml`
+**Kubeconfig:** `.kubeconfig/<metadata.name>.yaml`
 
-### KubeOne (`drivers/kubeone/main`)
+### KubeOne (`internal/driver/kubeone`)
 
 Production clusters via [KubeOne](https://docs.kubermatic.com/kubeone/). CLI-only (no operator hook).
 
@@ -163,12 +186,11 @@ Production clusters via [KubeOne](https://docs.kubermatic.com/kubeone/). CLI-onl
 2. Run `kubeone apply` with the manifest and Terraform state
 3. Extract kubeconfig
 
-**Status output:** `Ready`, `NotReady`, or `NotFound`
+**Status output:** `Healthy`, `Degraded`, `NotFound`, `Unknown`, or `NotProvisioned` before the first provision
 
-**Kubeconfig:** `.kubeconfig/<domain>.yaml`
+**Kubeconfig:** `.kubeconfig/<metadata.name>.yaml`
 
-
-### Kkp (`drivers/kkp/main`)
+### Kkp (`internal/driver/kkp`)
 
 Production clusters via [Kubermatic Kubernetes Platform](https://github.com/kubermatic/kubermatic) (hosted control planes).
 
@@ -180,46 +202,98 @@ Production clusters via [Kubermatic Kubernetes Platform](https://github.com/kube
 5. Wait for cluster status to become `Running`
 6. Extract kubeconfig via KKP API
 
-**Status output:** KKP cluster phase (`Running`, `Creating`, `Error`, `NotFound`)
+**Status output:** `Running`, `Provisioning`, `NotFound` or `Unknown`
 
-**Kubeconfig:** `.kubeconfig/<domain>.yaml`
+**Kubeconfig:** `.kubeconfig/<metadata.name>.yaml`
 
+## Custom drivers
 
-## Writing a Custom Driver
+The driver registry of the binary is fixed at build time. A Go driver
+contract for drivers outside this repo is not published yet. The Go
+provision dispatch reports a kind without a Go driver as
+`Unknown cluster kind`.
 
-To add a new cluster kind (e.g. `k3s`):
+A custom driver in bash still works in two places:
 
-### 1. Create the script
+- `lo drivers <name> …` runs `drivers/<name>/main` of the bash tree with
+  argv unchanged. Run `lo assets eject bash` to put the tree into the
+  project, then add your driver to it.
+- A project whose `lok8s.yaml` routes `provision` to bash
+  (`spec.implementation`) runs the bash dispatch below. See
+  [Choosing the implementation](/reference/cli#choosing-the-implementation).
+
+## The frozen bash contract
+
+The frozen bash tree keeps the original contract. It applies only to the
+two cases above.
+
+A bash driver is the file `.lok8s/drivers/<kind>/main`. The dispatch
+passes only the domain. A function reads the spec from
+`${PATH_CLUSTERS}/<domain>/cluster.lok8s.yaml` itself.
+
+| Function | Signature | Purpose |
+|----------|-----------|---------|
+| `driver::provision` | `driver::provision <domain>` | Create and configure the cluster |
+| `driver::destroy` | `driver::destroy <domain>` | Tear down the cluster |
+| `driver::status` | `driver::status <domain>` | Print the cluster status word (stdout) |
+| `driver::kubeconfig` | `driver::kubeconfig <domain>` | Print the path of the kubeconfig (stdout) |
+| `driver::export` (optional) | `driver::export <domain>` | Export the spec-derived environment for the `spec.bootstrap` addons. Runs on a full provision and on `--bootstrap`, so it must be idempotent. |
+| `driver::post_provision` (optional) | `driver::post_provision <domain>` | Side effects that need the provisioned infrastructure. Runs after `driver::provision`, on a full provision only. |
+| `main::driver` | argsh `:usage` table | The entry of `lo drivers <name>`. It maps `provision`, `destroy`, `status` and `kubeconfig` to the functions above. |
+
+`driver::provision` returns `0` for success and `100` when the driver did
+the full lifecycle. The bash dispatch then skips all later steps and returns
+`0`. Any other code is a failure.
+
+The bash dispatch (`provision::dispatch` in `.lok8s/libs/provision`) reads
+`kind:`, changes it to lowercase, and sources `.lok8s/drivers/<kind>/main`.
+It then runs the same steps as the Go dispatch.
+
+### Example: a k3s driver that uses the k3d CLI
 
 ```bash
 # .lok8s/drivers/k3s/main
 
+main::driver() {
+  local -a usage=(
+    'provision@destructive'  'Provision a k3s cluster'
+    'destroy@destructive'    'Destroy a k3s cluster'
+    'status@readonly'        'Check cluster status'
+    'kubeconfig'             'Write the kubeconfig and print its path'
+  )
+  :usage "k3s driver" "${@}"
+  "${usage[@]}"
+}
+
 driver::provision() {
-  local domain="$1" cluster_yaml="$2"
+  local domain="$1"
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   local cluster_name
-  cluster_name=$(yq -r '.metadata.name' "$cluster_yaml")
+  cluster_name=$(yq -r '.metadata.name' "$cluster_yaml") || return 1
 
   # Create the cluster
   k3d cluster create "$cluster_name" \
     --api-port 6443 \
-    --servers 1
+    --servers 1 || return 1
 
   # Extract kubeconfig
-  driver::kubeconfig "$domain"
+  driver::kubeconfig "$domain" >/dev/null
 }
 
 driver::destroy() {
-  local domain="$1" cluster_yaml="$2"
+  local domain="$1"
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   local cluster_name
-  cluster_name=$(yq -r '.metadata.name' "$cluster_yaml")
+  cluster_name=$(yq -r '.metadata.name' "$cluster_yaml") || return 1
   k3d cluster delete "$cluster_name"
 }
 
 driver::status() {
-  local domain="$1" cluster_yaml="$2"
+  local domain="$1"
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   local cluster_name
-  cluster_name=$(yq -r '.metadata.name' "$cluster_yaml")
-  if k3d cluster list | grep -q "$cluster_name"; then
+  cluster_name=$(yq -r '.metadata.name' "$cluster_yaml") || return 1
+  if k3d cluster get "$cluster_name" >/dev/null 2>&1; then
     echo "Running"
   else
     echo "NotFound"
@@ -228,16 +302,17 @@ driver::status() {
 
 driver::kubeconfig() {
   local domain="$1"
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   local cluster_name
-  cluster_name=$(yq -r '.metadata.name' "clusters/${domain}/cluster.lok8s.yaml")
+  cluster_name=$(yq -r '.metadata.name' "$cluster_yaml") || return 1
   local kubeconfig_path="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
   mkdir -p "${PATH_BASE}/.kubeconfig"
-  k3d kubeconfig get "$cluster_name" > "$kubeconfig_path"
+  k3d kubeconfig get "$cluster_name" > "$kubeconfig_path" || return 1
   echo "$kubeconfig_path"
 }
 ```
 
-### 2. Create the cluster spec
+The cluster spec selects it with `kind: K3s`:
 
 ```yaml
 # clusters/dev.example.com/cluster.lok8s.yaml
@@ -254,17 +329,13 @@ spec:
     - cilium
 ```
 
-### 3. Provision
+To call it, use `lo drivers k3s provision dev.example.com`, or route
+`provision` to bash and run `lo provision --domain dev.example.com`.
 
-```bash
-lo provision --domain dev.example.com
-```
+### Variables available to a bash driver
 
-The dispatch system sources `drivers/k3s/main` automatically based on `kind: K3s`.
-
-## Variables Available
-
-Driver scripts have access to bash dynamic scoping from the `main()` function in `.lok8s/lo`:
+A bash driver sees the variables of `main()` in `.lok8s/lo` through bash
+dynamic scoping:
 
 | Variable | Source | Description |
 |----------|--------|-------------|
@@ -277,4 +348,5 @@ Driver scripts have access to bash dynamic scoping from the `main()` function in
 | `$PATH_BASE` | Auto-detected | Project root |
 | `$KUBECONFIG` | Set by `main()` | Active kubeconfig path |
 
-Driver scripts can also source shared libraries from `.lok8s/libs/` (they are already loaded via `import` in the main `lo` script).
+The `lo` script imports the bash libraries in `.lok8s/libs/` before it
+sources a driver, so a driver can call their functions.

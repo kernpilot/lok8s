@@ -8,6 +8,14 @@ lok8s integrates with [Tilt](https://tilt.dev/) for local development with live 
 
 ## Quick Start
 
+If `clusters/lok8s.dev/cluster.lok8s.yaml` does not exist, write it first:
+
+```bash
+lo init cluster lok8s.dev
+```
+
+Then select the domain and start the cluster:
+
 ```bash
 lo use lok8s.dev
 lo up
@@ -206,7 +214,7 @@ When `lo up` runs, the Lo driver performs these steps:
 7. **Create registry ConfigMap** (`lok8s-registries` in `kube-system`)
 8. **Apply CoreDNS** config and patches, plus any `spec.coredns` from the
    cluster spec (see [Custom in-cluster DNS](#custom-in-cluster-dns))
-9. **Apply bootstrap addons**: framework runs `.lok8s/libs/bootstrap` to apply `spec.bootstrap` addons in order (default: `[cilium]`), waits for health between each
+9. **Apply bootstrap addons**: the framework bootstrap applies the `spec.bootstrap` addons in order (default: `[cilium]`). It waits for each addon to become healthy before the next one.
 10. **Start Tilt** for live development
 
 > The driver does not mint **TLS**. The gateway serves a
@@ -215,7 +223,7 @@ When `lo up` runs, the Lo driver performs these steps:
 > `CAROOT`, created on first build. Trust it once per machine with
 > [`lo trust`](/guide/secrets) so browsers and `curl` accept `*.<domain>`.
 > (When you set `spec.registries.tls`, registry TLS gets minted the same way
-> at provision time. See the [kind contract](/reference/kind-contract).)
+> at provision time. See the [driver contract](/reference/kind-contract).)
 
 ## Registry Mirrors
 
