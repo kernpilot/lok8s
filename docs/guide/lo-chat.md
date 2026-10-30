@@ -14,7 +14,7 @@ lo chat --check               # system check + guided setup
 ::: warning lo chat needs parts that a default install does not have
 `lo chat` starts a separate engine, `lochat`. The engine gets its tools from
 the MCP server of the frozen bash implementation (the `mcp` builtin of argsh),
-not from the Go [`lo mcp`](/reference/cli#lo-mcp) server. The `lo` binary embeds the
+not from the Go [`lo mcp`](/guide/mcp) server. The `lo` binary embeds the
 bash tree, but `lo toolchain install` does not install the engine or the argsh
 runtime by default. Do the steps in [Set up](#set-up) first.
 :::

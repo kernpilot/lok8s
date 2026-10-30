@@ -597,7 +597,7 @@ and `ssh-to-age` (`b install`).
 
 ### lo mcp
 
-Serve the `lo` commands as MCP ([Model Context Protocol](https://modelcontextprotocol.io/)) tools.
+Serve the `lo` commands as MCP ([Model Context Protocol](https://modelcontextprotocol.io/)) tools. The guide [Connect an AI agent](/guide/mcp) shows how to register the server with an editor.
 
 ```bash
 lo mcp start [--allow-mutating] [--allow-destructive] [--log-level <l>]   # stdio — what editors and agents launch
