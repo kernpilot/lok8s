@@ -44,18 +44,21 @@ applies `spec.bootstrap` the same way for every driver. See the
 
 ### Errors and exit codes
 
-The dispatch maps the error of a driver to the exit code of `lo`
-(`driver.ExitCode`):
+The provision dispatch handles these errors. The exit code is the code of
+`lo up` and `lo provision`:
 
 | Error | Exit code | Meaning |
 |-------|-----------|---------|
 | `nil` | `0` | Success. The dispatch continues with the next step. |
 | `driver.ErrDeclined` | `3` | The operator declined the confirmation for real infrastructure. |
-| `driver.ErrFullLifecycle` | `100` | Success. The driver did the full lifecycle, so the dispatch skips all later steps. |
+| `driver.ErrFullLifecycle` | `0` | Success. The driver did the full lifecycle, so the dispatch skips all later steps and returns success. |
 | any other error | `1`, or the exit code of the failed subprocess | Failure. |
 
 The `lo` driver returns `ErrFullLifecycle` in remote CI mode: the remote VM
-runs the provision and the bootstrap itself.
+runs the provision and the bootstrap itself. `ErrFullLifecycle` is the Go
+form of the bash return code `100`. `lo drivers <name> provision` calls the
+driver without the dispatch, so there `ErrFullLifecycle` gives exit code
+`100` (`driver.ExitCode`).
 
 ## Dispatch
 
@@ -224,56 +227,73 @@ A custom driver in bash still works in two places:
 The frozen bash tree keeps the original contract. It applies only to the
 two cases above.
 
-A bash driver is the file `.lok8s/drivers/<kind>/main`. It defines these
-functions:
+A bash driver is the file `.lok8s/drivers/<kind>/main`. The dispatch
+passes only the domain. A function reads the spec from
+`${PATH_CLUSTERS}/<domain>/cluster.lok8s.yaml` itself.
 
 | Function | Signature | Purpose |
 |----------|-----------|---------|
-| `driver::provision` | `driver::provision <domain> <cluster_yaml>` | Create and configure the cluster |
-| `driver::destroy` | `driver::destroy <domain> <cluster_yaml>` | Tear down the cluster |
-| `driver::status` | `driver::status <domain> <cluster_yaml>` | Print the cluster status word (stdout) |
+| `driver::provision` | `driver::provision <domain>` | Create and configure the cluster |
+| `driver::destroy` | `driver::destroy <domain>` | Tear down the cluster |
+| `driver::status` | `driver::status <domain>` | Print the cluster status word (stdout) |
 | `driver::kubeconfig` | `driver::kubeconfig <domain>` | Print the path of the kubeconfig (stdout) |
-| `driver::post_provision` (optional) | `driver::post_provision <domain> <cluster_yaml>` | Runs after `driver::provision`, before the framework bootstrap |
+| `driver::export` (optional) | `driver::export <domain>` | Export the spec-derived environment for the `spec.bootstrap` addons. Runs on a full provision and on `--bootstrap`, so it must be idempotent. |
+| `driver::post_provision` (optional) | `driver::post_provision <domain>` | Side effects that need the provisioned infrastructure. Runs after `driver::provision`, on a full provision only. |
+| `main::driver` | argsh `:usage` table | The entry of `lo drivers <name>`. It maps `provision`, `destroy`, `status` and `kubeconfig` to the functions above. |
 
-`driver::provision` returns `0` for success, `100` when the driver did the
-full lifecycle, and any other code for a failure. These are the codes of the
-Go table above.
+`driver::provision` returns `0` for success and `100` when the driver did
+the full lifecycle. The bash dispatch then skips all later steps and returns
+`0`. Any other code is a failure.
 
 The bash dispatch (`provision::dispatch` in `.lok8s/libs/provision`) reads
 `kind:`, changes it to lowercase, and sources `.lok8s/drivers/<kind>/main`.
 It then runs the same steps as the Go dispatch.
 
-### Example: a k3d driver
+### Example: a k3s driver that uses the k3d CLI
 
 ```bash
 # .lok8s/drivers/k3s/main
 
+main::driver() {
+  local -a usage=(
+    'provision@destructive'  'Provision a k3s cluster'
+    'destroy@destructive'    'Destroy a k3s cluster'
+    'status@readonly'        'Check cluster status'
+    'kubeconfig'             'Write the kubeconfig and print its path'
+  )
+  :usage "k3s driver" "${@}"
+  "${usage[@]}"
+}
+
 driver::provision() {
-  local domain="$1" cluster_yaml="$2"
+  local domain="$1"
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   local cluster_name
-  cluster_name=$(yq -r '.metadata.name' "$cluster_yaml")
+  cluster_name=$(yq -r '.metadata.name' "$cluster_yaml") || return 1
 
   # Create the cluster
   k3d cluster create "$cluster_name" \
     --api-port 6443 \
-    --servers 1
+    --servers 1 || return 1
 
   # Extract kubeconfig
-  driver::kubeconfig "$domain"
+  driver::kubeconfig "$domain" >/dev/null
 }
 
 driver::destroy() {
-  local domain="$1" cluster_yaml="$2"
+  local domain="$1"
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   local cluster_name
-  cluster_name=$(yq -r '.metadata.name' "$cluster_yaml")
+  cluster_name=$(yq -r '.metadata.name' "$cluster_yaml") || return 1
   k3d cluster delete "$cluster_name"
 }
 
 driver::status() {
-  local domain="$1" cluster_yaml="$2"
+  local domain="$1"
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   local cluster_name
-  cluster_name=$(yq -r '.metadata.name' "$cluster_yaml")
-  if k3d cluster list | grep -q "$cluster_name"; then
+  cluster_name=$(yq -r '.metadata.name' "$cluster_yaml") || return 1
+  if k3d cluster get "$cluster_name" >/dev/null 2>&1; then
     echo "Running"
   else
     echo "NotFound"
@@ -282,11 +302,12 @@ driver::status() {
 
 driver::kubeconfig() {
   local domain="$1"
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
   local cluster_name
-  cluster_name=$(yq -r '.metadata.name' "clusters/${domain}/cluster.lok8s.yaml")
+  cluster_name=$(yq -r '.metadata.name' "$cluster_yaml") || return 1
   local kubeconfig_path="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
   mkdir -p "${PATH_BASE}/.kubeconfig"
-  k3d kubeconfig get "$cluster_name" > "$kubeconfig_path"
+  k3d kubeconfig get "$cluster_name" > "$kubeconfig_path" || return 1
   echo "$kubeconfig_path"
 }
 ```
