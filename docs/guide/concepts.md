@@ -19,12 +19,12 @@ Everything in lok8s is keyed by FQDN (Fully Qualified Domain Name). There are tw
 
 ### The default `lok8s.dev` domain
 
-Every lok8s install ships with `clusters/lok8s.dev/`, a preconfigured
-cluster domain that runs on a local Docker bridge with valid TLS out of
-the box. **You do not need your own domain to get started**:
+`lok8s.dev` is a cluster domain that runs on a local Docker bridge.
+**You do not need your own domain to get started.** A new project does
+not contain `clusters/lok8s.dev/`. One command writes its cluster spec:
 
 ```bash
-lo use lok8s.dev
+lo init cluster lok8s.dev   # clusters/lok8s.dev/cluster.lok8s.yaml; lok8s.dev becomes the active domain
 lo up    # kind cluster on bridge 10.125.0.0/16, *.lok8s.dev dev TLS (cert: generator)
 ```
 
