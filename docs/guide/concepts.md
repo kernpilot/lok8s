@@ -295,7 +295,7 @@ The domain kustomization composes its targets into ONE
 ## Cluster Kinds (Drivers)
 
 The cluster kind determines how lok8s creates a cluster. Each kind is
-a **driver** at `.lok8s/drivers/<kind>/main` that follows
+a **driver**: a Go package in the `lo` binary that follows
 the [driver contract](/reference/kind-contract).
 
 | Kind | Purpose | Runtime |

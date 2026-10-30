@@ -215,7 +215,7 @@ When `lo up` runs, the Lo driver performs these steps:
 > `CAROOT`, created on first build. Trust it once per machine with
 > [`lo trust`](/guide/secrets) so browsers and `curl` accept `*.<domain>`.
 > (When you set `spec.registries.tls`, registry TLS gets minted the same way
-> at provision time. See the [kind contract](/reference/kind-contract).)
+> at provision time. See the [driver contract](/reference/kind-contract).)
 
 ## Registry Mirrors
 

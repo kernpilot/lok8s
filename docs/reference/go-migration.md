@@ -80,8 +80,9 @@ The Go provision dispatch (`lo up` / `provision` / `destroy` / `status` /
 as `.lok8s/drivers/<kind>/main` is reported as `Unknown cluster kind` by the
 binary. It still works through `lo drivers <kind> …` and through a project
 whose `lok8s.yaml` routes `provision` to bash. The [Driver Contract](/reference/kind-contract)
-describes the bash contract that the frozen tree honours; a Go driver
-contract is not published yet.
+describes the Go interface of the built-in drivers and the bash contract of
+the frozen tree. A Go contract for drivers outside this repo is not
+published yet.
 :::
 
 ### Core and full
