@@ -42,7 +42,7 @@ model runtime. Run the steps in the project directory.
    step uses the network.
 
    ```bash
-   V="v$(lo version -o json | .bin/jq -r .lok8s)"   # the version of your lo
+   V="v$(lo version | awk '/^lok8s/{print $2}')"   # the version of your lo
    A=lochat-linux-amd64                              # your platform
    T="$(mktemp -d)"
    curl -fsSL -o "${T}/${A}" "https://github.com/kernpilot/lok8s/releases/download/${V}/${A}"
@@ -50,8 +50,9 @@ model runtime. Run the steps in the project directory.
    (cd "${T}" && sha256sum --ignore-missing -c checksums.txt)   # macOS: shasum -a 256 --ignore-missing -c checksums.txt
    ```
 
-3. Install the engine into the toolchain directory of the project, then
-   remove the temporary directory:
+3. If the check printed `OK` for the engine, install it into the toolchain
+   directory of the project, then remove the temporary directory. Run this
+   in the same shell as step 2, because it uses `T` and `A`:
 
    ```bash
    install -m 0755 "${T}/${A}" .bin/lochat

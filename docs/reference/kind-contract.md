@@ -44,8 +44,8 @@ applies `spec.bootstrap` the same way for every driver. See the
 
 ### Errors and exit codes
 
-The provision dispatch handles these errors. The exit code is the code of
-`lo up` and `lo provision`:
+The provision dispatch handles these errors. The exit code is the exit code
+of `lo provision`:
 
 | Error | Exit code | Meaning |
 |-------|-----------|---------|

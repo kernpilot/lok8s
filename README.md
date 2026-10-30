@@ -193,7 +193,7 @@ A `b` profile does not write `clusters/lok8s.dev/`, and neither does `lo init pr
 From zero to a running local cluster with a live dev loop:
 
 ```bash
-lo init cluster lok8s.dev # write the spec, if lo init project --cluster did not
+lo init cluster lok8s.dev # if lo init project --cluster did not write the spec: write it
 lo use lok8s.dev          # select the active domain
 lo up                     # create the kind cluster, bootstrap infra, start Tilt
                           # → Tilt UI on the URL it prints (per-domain port, 10351–10499)
