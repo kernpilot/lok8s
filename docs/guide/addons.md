@@ -580,7 +580,7 @@ gateway does without changing anything you wrote:
 
 v1.9.3 ships the same Gateway API bundle as v1.9.0, so neither rollback
 block above applies between the two. The upgrade still changes what the
-running gateway does, and three of the items below need work **before**
+running gateway does, and four of the items below need work **before**
 you bump the pin. The [Envoy Gateway v1.9.1 release
 notes](https://gateway.envoyproxy.io/news/releases/notes/v1.9.1/) have the
 details.
