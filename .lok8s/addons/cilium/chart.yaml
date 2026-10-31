@@ -19,9 +19,10 @@ kubeVersion: "1.35.5"
 # not an oversight: lok8s renders are stateless, so every render takes the
 # chart's new-install defaults — each upstream default flip lands silently on
 # the next bump instead of waiting behind a compatibility pin. The 1.20 bump
-# accepted `envoy-xds-mode: ads` this way. 1.20.4 removes that default again
-# (cilium/cilium#48548, agent CPU under identity churn): the render drops the
-# key and the agent uses `split`. Keep it unset; do not pin `ads`. During a
+# accepted `envoy-xds-mode: ads` this way. 1.20.4 drops that default
+# (cilium/cilium#48548, agent CPU under identity churn): the render omits the
+# key and the agent uses `split`. Keep it unset and do not pin `ads`: this
+# flip is safe mid-rollout for the reason below, so it needs no pin. During a
 # rolling upgrade the agent and cilium-envoy DaemonSets roll independently,
 # so a node can briefly pair an envoy and an agent in different xDS modes,
 # and inversely on rollback; envoy retries, the mismatch is per-node and
@@ -33,10 +34,10 @@ kubeVersion: "1.35.5"
 # helper probe fails ("FnSetRetval … bpf_set_retval#187: R1 is not a scalar",
 # cilium/cilium#48016). 1.20.2 has the fix (backport #48213 of #47737). A kind
 # cluster runs on the host kernel, so a host update alone broke kubehz-dev.
-# 1.20.4 rather than 1.20.2 or 1.20.3: it also fixes the 1.20.3 Gateway API
-# BackendTLSPolicy regression and is a security release (Go 1.26.10). Open
-# upstream since 1.20.2: socket-LB fails on kernels without BTF
-# (cilium/cilium#48778). The kubehz-dev host kernel has BTF (checked
+# We take 1.20.4, not 1.20.2 or 1.20.3: it also fixes the 1.20.3 Gateway API
+# BackendTLSPolicy regression, and it is a security release (Go 1.26.10).
+# Since 1.20.2, socket-LB fails on kernels without BTF (cilium/cilium#48778,
+# open on 2026-10-30). The kubehz-dev host kernel has BTF (checked
 # 2026-10-30); check /sys/kernel/btf/vmlinux on any new node kernel.
 repository: https://helm.cilium.io/
 chart: cilium
