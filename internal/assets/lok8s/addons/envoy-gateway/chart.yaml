@@ -26,8 +26,9 @@
 #                                     drops the experimental XListenerSet)
 #   EG v1.9.0 → Gateway API v1.6.1   (TCPRoute/UDPRoute/TLSRoute gain v1 and
 #                                     move their STORAGE version to it)
-#   EG v1.9.3 → Gateway API v1.6.1   (the same bundle; only Envoy Gateway's
-#                                     own CRDs change)
+#   EG v1.9.3 → Gateway API v1.6.1   (the same Gateway API CRDs; Envoy
+#                                     Gateway's own CRDs, RBAC and Deployment
+#                                     templates change)
 # So bumping this pin bumps Gateway API. Before a jump that crosses a Gateway
 # API minor, confirm no CRD's `status.storedVersions` names a version the new
 # bundle stops serving — the apiserver rejects such an update outright:
@@ -38,7 +39,8 @@
 # ── ROLLING BACK FROM v1.9.0 IS BLOCKED — two independent blocks ─────────────
 # Both are real; neither is a caveat. The full procedure (with the safety check
 # that has to pass first) is in docs/guide/addons.md. A rollback inside v1.9.x
-# (v1.9.3 to v1.9.0) hits neither block: both ship Gateway API v1.6.1.
+# (v1.9.3 to v1.9.0) hits neither block: both ship Gateway API v1.6.1. But it
+# changes the SDS configuration back, with the TLS risk described below.
 #
 #   1. storedVersions. After v1.9.0 has reconciled once, tcproutes/udproutes
 #      list `v1` in storedVersions (alongside v1alpha2) and tlsroutes lists
@@ -81,21 +83,28 @@
 #     only (HTTPRoute/GRPCRoute/TCPRoute), rejected on Gateway / Gateway
 #     listener / ListenerSet. That is exactly the sso-gate addon's shape.
 #
-# ── v1.9.0 → v1.9.3: two hazards for the RUNNING proxies ─────────────────────
-#   - v1.9.1 reverts the 0s SDS/RDS initial-fetch timeout of v1.9.0 to Envoy's
-#     15 s default. The new controller reconfigures the running proxies, and
-#     their TLS listeners can go active without the certificate (envoy issue
-#     #47309). Measured on 2026-10-31: about 13 s of failed TLS handshakes on
-#     every host. The proxy log said "initial fetch timed out ... tls.v3.Secret",
-#     and the outage ended when the new proxy pods were Ready. A surge rollout
-#     on your EnvoyProxy (maxSurge 100%, maxUnavailable 0) shortens it; this
-#     addon cannot prevent it. Plan the controller upgrade as a short outage.
-#   - The v1.9.3 default proxy image (distroless-v1.39.5) still trusts the
-#     compromised eMudhra intermediate CAs; envoy v1.39.6 fixes the distroless
-#     base. This addon ships no EnvoyProxy, so pin
-#     `spec.provider.kubernetes.envoyDeployment.container.image` in your own.
-#   - SecurityPolicy `spec.oidc.provider.issuer` must now be an https URL
-#     (CRD pattern `^https://[^/?#@]+(/[^?#]*)?$`).
+# ── Upgrading FROM v1.9.0 (to v1.9.1 or later) ───────────────────────────────
+#   - A short TLS outage. v1.9.1 reverts the 0s SDS/RDS initial-fetch timeout
+#     of v1.9.0 to Envoy's 15 s default. That changes the SDS configuration of
+#     every listener and cluster. The proxies that still run when the new
+#     controller starts hit envoy issue #47309: about 15 s later their TLS
+#     listeners go active without certificates, and TLS backends (the global
+#     rate limit service included) lose theirs. Only a new pod clears it.
+#     Measured on a 2-replica gateway on 2026-10-31: about 13 s of failed TLS
+#     handshakes, until the new proxy pods were Ready. The upstream mitigation
+#     (EG v1.9.1 release notes) is maxSurge 100% / maxUnavailable 0 on your
+#     EnvoyProxy; it does not prevent the outage. Plan this upgrade as one.
+#   - v1.9.1 encrypts OAuth2/OIDC session cookies with AES-256-GCM
+#     (CVE-2026-47775). Every user with an active sso-gate session signs in
+#     again once.
+#   - The v1.9.3 default proxy image (distroless-v1.39.5) still ships the
+#     unpatched CA bundle that trusts the compromised eMudhra intermediate CAs
+#     (envoy v1.39.6 release notes). This addon ships no EnvoyProxy, so pin
+#     distroless-v1.39.6 in
+#     `spec.provider.kubernetes.envoyDeployment.container.image` of your own.
+#   - SecurityPolicy `spec.oidc.provider.issuer` must now match
+#     `^https://[^/?#@]+(/[^?#]*)?$`. A policy with an http issuer fails on its
+#     next apply.
 apiVersion: khelm.mgoltzsche.github.com/v2
 kind: ChartRenderer
 metadata:
