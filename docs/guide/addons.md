@@ -386,7 +386,7 @@ underlying cause.
 
 | Addon | What it installs | Chart |
 |-------|-----------------|-------|
-| `cilium` | Cilium CNI | `cilium/cilium` v1.20.1 |
+| `cilium` | Cilium CNI | `cilium/cilium` v1.20.4 |
 | `metallb` | MetalLB L2 load balancer | `metallb/metallb` v0.16.1 |
 | `cert-manager` | cert-manager controller + CRDs (Issuers, Certificates) | `jetstack/cert-manager` v1.21.1 |
 | `cert-manager-webhook-hetzner` | Hetzner DNS-01 ACME solver webhook. **Opt-in**: bootstrap *after* `cert-manager`. Only clusters that issue via Hetzner DNS-01 (e.g. Let's Encrypt on a public plane) need it; kind/dev clusters serving their Gateway from a `cert:` Secret skip it. | `cert-manager-webhook-hetzner` 0.7.0 |
