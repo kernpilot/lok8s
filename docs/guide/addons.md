@@ -388,9 +388,9 @@ underlying cause.
 |-------|-----------------|-------|
 | `cilium` | Cilium CNI | `cilium/cilium` v1.20.4 |
 | `metallb` | MetalLB L2 load balancer | `metallb/metallb` v0.16.1 |
-| `cert-manager` | cert-manager controller + CRDs (Issuers, Certificates) | `jetstack/cert-manager` v1.21.1 |
+| `cert-manager` | cert-manager controller + CRDs (Issuers, Certificates) | `jetstack/cert-manager` v1.21.3 |
 | `cert-manager-webhook-hetzner` | Hetzner DNS-01 ACME solver webhook. **Opt-in**: bootstrap *after* `cert-manager`. Only clusters that issue via Hetzner DNS-01 (e.g. Let's Encrypt on a public plane) need it; kind/dev clusters serving their Gateway from a `cert:` Secret skip it. | `cert-manager-webhook-hetzner` 0.7.0 |
-| `envoy-gateway` | Envoy Gateway controller **+ the upstream Gateway API CRD bundle**. See [upgrading in place](#envoy-gateway-upgrading-in-place) before you bump the pin | `envoyproxy/gateway-helm` v1.9.0 |
+| `envoy-gateway` | Envoy Gateway controller **+ the upstream Gateway API CRD bundle**. See [upgrading in place](#envoy-gateway-upgrading-in-place) before you bump the pin | `envoyproxy/gateway-helm` v1.9.3 |
 | `rook-ceph` | Rook-Ceph operator + CRDs, and the ceph-csi-operator work orders that yield the RBD `CSIDriver`. The CSI node plugin runs with a [narrowed ClusterRole](#rook-ceph) | `rook-release/rook-ceph` v1.20.6, `ceph-csi-drivers` 1.0.4 |
 | `rook-ceph-csi-kms` | **Opt-in**, after `rook-ceph`: gives the CSI node plugin back the Secret / ServiceAccount-token grants that KMS-encrypted volumes and `mounter: rbd-nbd` need. See [rook-ceph](#rook-ceph) | raw manifests |
 | `redis-operator` | The OT-CONTAINER-KIT Redis operator + CRDs (`Redis`, `RedisReplication`, `RedisSentinel`, `RedisCluster`). It runs with [narrowed RBAC](#redis-operator), and nothing aggregates into the built-in `admin` role. The CRs go in a target | `ot-container-kit/redis-operator` 0.26.1 |
@@ -431,6 +431,7 @@ cluster-wide change, not an image bump. The versions move together:
 | v1.7.1 | v1.4.1 | no `SecurityPolicy.mergeType` |
 | v1.8.3 | v1.5.1 | `mergeType` added; standard `ListenerSet`, experimental `XListenerSet` dropped |
 | v1.9.0 | v1.6.1 | `TCPRoute`/`UDPRoute`/`TLSRoute` gain `v1` **and move their storage version to it** |
+| v1.9.3 | v1.6.1 | the same bundle; read [the v1.9.3 hazards](#envoy-gateway-v1-9-3-hazards) first |
 
 Before any jump that crosses a Gateway API minor, check that no CRD's
 `status.storedVersions` names a version the incoming bundle stops
@@ -574,6 +575,47 @@ gateway does without changing anything you wrote:
   shape [`sso-gate`](#sso-gate) ships, so the addon is unaffected. But a
   hand-written gateway-wide policy that carries `mergeType` must drop the
   field before you can update it again.
+
+#### v1.9.0 → v1.9.3: two hazards for the running proxies {#envoy-gateway-v1-9-3-hazards}
+
+v1.9.3 ships the same Gateway API bundle as v1.9.0, so neither rollback
+block above applies between the two. The upgrade still touches the
+proxies that serve your traffic:
+
+- **A short TLS outage when the new controller starts.** v1.9.1 reverts
+  the `0s` SDS and RDS initial-fetch timeout of v1.9.0 to Envoy's 15 s
+  default. The new controller reconfigures the running proxies, and their
+  TLS listeners can go active without the certificate (envoy issue
+  [#47309](https://github.com/envoyproxy/envoy/issues/47309)). On one
+  production upgrade, every TLS handshake failed for about 13 s. The proxy
+  log showed `initial fetch timed out for
+  type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret`,
+  and the outage ended when the new proxy pods were Ready. A surge rollout
+  makes the new pods Ready sooner, but it cannot prevent the outage:
+
+  ```yaml
+  spec:
+    provider:
+      type: Kubernetes
+      kubernetes:
+        envoyDeployment:
+          strategy:
+            type: RollingUpdate
+            rollingUpdate:
+              maxSurge: 100%
+              maxUnavailable: 0
+  ```
+
+  Plan the controller upgrade as a short outage.
+- **The default proxy image trusts revoked CAs.** The v1.9.3 default,
+  `distroless-v1.39.5`, still has the compromised eMudhra intermediate CAs
+  in its CA bundle. envoy `distroless-v1.39.6` fixes the distroless base.
+  The addon ships no `EnvoyProxy`, so set the image in your own, under
+  `spec.provider.kubernetes.envoyDeployment.container.image` (a tag, or a
+  tag plus `@sha256:` digest). Remove the pin when the default catches up.
+- **`SecurityPolicy` OIDC issuers must be https URLs.** The CRD now
+  checks `spec.oidc.provider.issuer` against
+  `^https://[^/?#@]+(/[^?#]*)?$`.
 
 ### sso-gate — OIDC login in front of any service {#sso-gate}
 

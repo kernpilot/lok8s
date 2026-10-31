@@ -22,7 +22,7 @@
       {
         "name": "cert-manager",
         "source": "addon",
-        "chartVersion": "v1.21.1",
+        "chartVersion": "v1.21.3",
         "category": "infrastructure"
       },
       {
