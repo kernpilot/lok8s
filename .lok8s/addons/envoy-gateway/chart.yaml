@@ -26,6 +26,9 @@
 #                                     drops the experimental XListenerSet)
 #   EG v1.9.0 → Gateway API v1.6.1   (TCPRoute/UDPRoute/TLSRoute gain v1 and
 #                                     move their STORAGE version to it)
+#   EG v1.9.3 → Gateway API v1.6.1   (the same Gateway API CRDs; Envoy
+#                                     Gateway's own CRDs, RBAC and Deployment
+#                                     templates change)
 # So bumping this pin bumps Gateway API. Before a jump that crosses a Gateway
 # API minor, confirm no CRD's `status.storedVersions` names a version the new
 # bundle stops serving — the apiserver rejects such an update outright:
@@ -35,7 +38,9 @@
 #
 # ── ROLLING BACK FROM v1.9.0 IS BLOCKED — two independent blocks ─────────────
 # Both are real; neither is a caveat. The full procedure (with the safety check
-# that has to pass first) is in docs/guide/addons.md.
+# that has to pass first) is in docs/guide/addons.md. A rollback inside v1.9.x
+# (v1.9.3 to v1.9.0) hits neither block: both ship Gateway API v1.6.1. It was
+# not tested on a live gateway; see the SDS item below before you try it.
 #
 #   1. storedVersions. After v1.9.0 has reconciled once, tcproutes/udproutes
 #      list `v1` in storedVersions (alongside v1alpha2) and tlsroutes lists
@@ -77,6 +82,33 @@
 #   - `SecurityPolicy.spec.mergeType` validation got stricter: xRoute targets
 #     only (HTTPRoute/GRPCRoute/TCPRoute), rejected on Gateway / Gateway
 #     listener / ListenerSet. That is exactly the sso-gate addon's shape.
+#
+# ── Upgrading to v1.9.3: do these BEFORE the bump (EG v1.9.1 release notes) ──
+#   - From v1.9.0 only: a short TLS outage. v1.9.1 reverts the 0s SDS/RDS
+#     initial-fetch timeout of v1.9.0 to Envoy's 15 s default. That changes
+#     the SDS configuration of every listener and cluster. The proxies that
+#     still run when the new controller starts hit envoy issue #47309: about
+#     15 s later their TLS listeners go active without certificates, and TLS
+#     backends (the global rate limit service included) lose theirs. A
+#     re-pushed Secret restores what uses it; a new pod restores everything.
+#     Measured on a 2-replica gateway on 2026-10-31: about 13 s of failed TLS
+#     handshakes, until the new proxy pods were Ready. The upstream mitigation
+#     is maxSurge 100% / maxUnavailable 0 on your EnvoyProxy, set before the
+#     upgrade. It does not prevent the outage, so plan a short outage.
+#   - v1.9.1 encrypts OAuth2/OIDC session cookies with AES-256-GCM
+#     (CVE-2026-47775). Every user with an active sso-gate session signs in
+#     again once. An EnvoyProxy whose `spec.bootstrap` is of type Replace (the
+#     default when no type is given) does not get this; the docs name the two
+#     runtime flags to add.
+#   - The v1.9.3 default proxy image (distroless-v1.39.5) still ships the
+#     unpatched CA bundle, which trusts the roots of the compromised eMudhra
+#     intermediate CAs (envoy v1.39.6 release notes). This addon ships no
+#     EnvoyProxy, so pin distroless-v1.39.6 in
+#     `spec.provider.kubernetes.envoyDeployment.container.image` of your own.
+#   - SecurityPolicy `spec.oidc.provider.issuer` must be an https URL. The CRD
+#     rejects any other issuer on the next apply, and the v1.9.3 controller
+#     rejects it when it translates the policy, so the protected routes stop
+#     working as soon as the new controller runs. Fix such issuers first.
 apiVersion: khelm.mgoltzsche.github.com/v2
 kind: ChartRenderer
 metadata:
@@ -84,6 +116,6 @@ metadata:
   namespace: envoy-gateway-system
 repository: oci://docker.io/envoyproxy
 chart: gateway-helm
-version: v1.9.0
+version: v1.9.3
 valueFiles:
   - values.yaml
