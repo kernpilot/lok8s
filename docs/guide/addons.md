@@ -431,7 +431,7 @@ cluster-wide change, not an image bump. The versions move together:
 | v1.7.1 | v1.4.1 | no `SecurityPolicy.mergeType` |
 | v1.8.3 | v1.5.1 | `mergeType` added; standard `ListenerSet`, experimental `XListenerSet` dropped |
 | v1.9.0 | v1.6.1 | `TCPRoute`/`UDPRoute`/`TLSRoute` gain `v1` **and move their storage version to it** |
-| v1.9.3 | v1.6.1 | the same bundle; read [upgrading from v1.9.0](#envoy-gateway-v1-9-3-hazards) first |
+| v1.9.3 | v1.6.1 | the same bundle; read [upgrading to v1.9.3](#envoy-gateway-v1-9-3-hazards) first |
 
 Before any jump that crosses a Gateway API minor, check that no CRD's
 `status.storedVersions` names a version the incoming bundle stops
@@ -576,29 +576,34 @@ gateway does without changing anything you wrote:
   hand-written gateway-wide policy that carries `mergeType` must drop the
   field before you can update it again.
 
-#### Upgrading from v1.9.0 {#envoy-gateway-v1-9-3-hazards}
+#### Upgrading to v1.9.3 {#envoy-gateway-v1-9-3-hazards}
 
 v1.9.3 ships the same Gateway API bundle as v1.9.0, so neither rollback
 block above applies between the two. The upgrade still changes what the
-running gateway does. The [Envoy Gateway v1.9.1 release
+running gateway does, and three of the items below need work **before**
+you bump the pin. The [Envoy Gateway v1.9.1 release
 notes](https://gateway.envoyproxy.io/news/releases/notes/v1.9.1/) have the
 details.
 
-- **A short TLS outage when the new controller starts.** v1.9.1 reverts
-  the `0s` SDS and RDS initial-fetch timeout of v1.9.0 to Envoy's 15 s
-  default. That changes the SDS configuration of every listener and
-  cluster. The proxies that still run when the new controller starts hit
-  envoy issue [#47309](https://github.com/envoyproxy/envoy/issues/47309):
-  about 15 s after the push, their TLS listeners go active without
-  certificates, and TLS backends (the global rate limit service included)
-  lose theirs. The pods still report Ready, and only a new pod clears it.
+- **From v1.9.0 only: a short TLS outage when the new controller
+  starts.** v1.9.1 reverts the `0s` SDS and RDS initial-fetch timeout of
+  v1.9.0 to Envoy's 15 s default. That changes the SDS configuration of
+  every listener and cluster. The proxies that still run when the new
+  controller starts hit envoy issue
+  [#47309](https://github.com/envoyproxy/envoy/issues/47309). About 15 s
+  after the push, their TLS listeners go active without certificates, and
+  TLS backends (the global rate limit service included) lose theirs. The
+  pods still report Ready. A re-pushed Secret (for example, a rotated
+  certificate) restores what uses it; a new pod restores everything.
+
   On one 2-replica gateway, every TLS handshake failed for about 13 s.
   The proxy log showed `initial fetch timed out for
-  type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret`,
-  and the outage ended when the new proxy pods were Ready.
+  type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret`.
+  The outage ended when the new proxy pods were Ready.
 
-  The upstream mitigation replaces all proxy pods at once. It needs room
-  for twice the replicas, and it does not prevent the outage:
+  The upstream mitigation replaces all proxy pods at once. Set it
+  **before** the upgrade, and keep room for twice the replicas. It does
+  not prevent the outage, so plan a short one:
 
   ```yaml
   apiVersion: gateway.envoyproxy.io/v1alpha1
@@ -618,25 +623,28 @@ details.
               maxUnavailable: 0
   ```
 
-  Plan this upgrade as a short outage. A rollback to v1.9.0 changes the
-  SDS configuration back, with the same risk.
 - **[`sso-gate`](#sso-gate) users sign in again once.** v1.9.1 encrypts
   OAuth2/OIDC session cookies with AES-256-GCM (CVE-2026-47775), and
-  sessions from the old proxies are not accepted. An `EnvoyProxy` with a
-  `spec.bootstrap` of type `Replace` does not get this change; the release
-  notes name the two runtime flags to add.
+  sessions from the old proxies are not accepted. The change is in the
+  default bootstrap. An `EnvoyProxy` whose `spec.bootstrap` is of type
+  `Replace` (the default when no type is given) does not get it. For such
+  a proxy, add `envoy.reloadable_features.oauth2_use_gcm_encryption: true`
+  and `envoy.reloadable_features.oauth2_legacy_cbc_decrypt_compat: false`
+  to a `layered_runtime` static layer.
 - **The default proxy image trusts compromised CAs.** The v1.9.3 default,
-  `distroless-v1.39.5`, still ships the unpatched CA bundle that trusts the
-  compromised eMudhra intermediate CAs ([envoy v1.39.6 release
-  notes](https://github.com/envoyproxy/envoy/releases/tag/v1.39.6)). The
-  addon ships no `EnvoyProxy`, so set `distroless-v1.39.6` in your own,
+  `distroless-v1.39.5`, still ships the unpatched CA bundle, which trusts
+  the roots of the compromised eMudhra intermediate CAs ([envoy v1.39.6
+  release notes](https://github.com/envoyproxy/envoy/releases/tag/v1.39.6)).
+  The addon ships no `EnvoyProxy`, so set `distroless-v1.39.6` in your own,
   under `spec.provider.kubernetes.envoyDeployment.container.image` (a tag,
   or a tag plus `@sha256:` digest). Remove the pin when the default
   catches up.
-- **`SecurityPolicy` OIDC issuers must be https URLs.** The CRD now
+- **Fix every non-https OIDC issuer first.** The `SecurityPolicy` CRD now
   checks `spec.oidc.provider.issuer` against
-  `^https://[^/?#@]+(/[^?#]*)?$`. A policy with an http issuer fails on
-  its next apply.
+  `^https://[^/?#@]+(/[^?#]*)?$`, so it rejects any other issuer on the
+  next apply. The v1.9.3 controller also rejects such an issuer when it
+  translates the policy, so the protected routes stop working as soon as
+  the new controller runs.
 
 ### sso-gate — OIDC login in front of any service {#sso-gate}
 
