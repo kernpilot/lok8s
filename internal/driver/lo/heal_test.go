@@ -7,10 +7,10 @@ package lo
 // Like the bats suite, `docker exec` does not fake the repair — it
 // REDIRECTS the node paths onto a per-node fake rootfs and then runs the
 // heal's own generated script with a REAL local bash (no docker, no
-// daemon). So the sed loop, the \b anchors and the /kind/old-ipv4 write
-// under test are the real ones; systemctl and the CNI nudge are logged. A
-// mock that reimplemented the repair would pass no matter what the heal
-// generated.
+// daemon). So the sed loop, the \b anchors, the certificate move and the
+// /kind/old-ipv4 write under test are the real ones; systemctl, kubeadm and
+// the CNI nudge are logged. A mock that reimplemented the repair would pass
+// no matter what the heal generated.
 
 import (
 	"bytes"
@@ -34,6 +34,8 @@ type healFixture struct {
 	rootDir  string
 	calls    []string
 	observed map[string]string // kubectl InternalIP override per node
+	// kubeadmFails makes the in-node kubeadm stub exit 1.
+	kubeadmFails bool
 }
 
 func (h *healFixture) root(node string) string { return filepath.Join(h.rootDir, "root."+node) }
@@ -45,6 +47,22 @@ func (h *healFixture) oldIPPath(node string) string {
 }
 func (h *healFixture) confPath(node string) string {
 	return filepath.Join(h.root(node), "etc/kubernetes/kubelet.conf")
+}
+func (h *healFixture) pkiPath(node string) string {
+	return filepath.Join(h.root(node), "etc/kubernetes/pki")
+}
+func (h *healFixture) kubeadmConfPath(node string) string {
+	return filepath.Join(h.root(node), "kind/kubeadm.conf")
+}
+
+// makeControlPlane gives node the files that only a kind control-plane node
+// has: the apiserver serving pair. Also a kubeadm config that still names the
+// stale address, like every other file the entrypoint rewrote.
+func (h *healFixture) makeControlPlane(node string) {
+	h.t.Helper()
+	testutil.WriteFile(h.t, filepath.Join(h.pkiPath(node), "apiserver.crt"), "old-cert\n")
+	testutil.WriteFile(h.t, filepath.Join(h.pkiPath(node), "apiserver.key"), "old-key\n")
+	testutil.WriteFile(h.t, h.kubeadmConfPath(node), "advertiseAddress: 172.31.0.2\n")
 }
 
 func newHealFixture(t *testing.T) *healFixture {
@@ -115,16 +133,30 @@ func newHealFixture(t *testing.T) *healFixture {
 					return nil
 				}
 				// `docker exec <node> bash -c '<repair script>'` — run the
-				// REAL script against the fake rootfs with a stubbed
-				// systemctl.
+				// REAL script against the fake rootfs with stubbed systemctl
+				// and kubeadm. Both stubs append to one ordered steps log.
+				// The kubeadm line records what kubeadm would see: its
+				// arguments, whether the old pair is still in pki/, the
+				// config file it reads and /kind/old-ipv4.
 				h.calls = append(h.calls, "repair:"+node)
 				script := c.Args[len(c.Args)-1]
 				script = strings.ReplaceAll(script, "/var/lib/kubelet/kubeadm-flags.env", h.flagPath(node))
 				script = strings.ReplaceAll(script, "/etc/kubernetes", filepath.Join(h.root(node), "etc/kubernetes"))
 				script = strings.ReplaceAll(script, "/kind/", filepath.Join(h.root(node), "kind")+"/")
-				wrapped := fmt.Sprintf("systemctl() { echo kubelet-restart:%s >> %s; }\n%s",
-					node, filepath.Join(h.rootDir, "restarts"), script)
-				out, err := exec.Command("bash", "-c", wrapped).CombinedOutput()
+				fail := "false"
+				if h.kubeadmFails {
+					fail = "true"
+				}
+				stubs := fmt.Sprintf(`systemctl() { echo kubelet-restart:%[1]s >> '%[2]s'; }
+kubeadm() {
+  local pki='%[3]s' pair=absent
+  if [ -e "${pki}/apiserver.crt" ] || [ -e "${pki}/apiserver.key" ]; then pair=present; fi
+  echo "kubeadm:%[1]s $* | old-pair=${pair} | conf=$(cat "${@: -1}") | old-ipv4=$(cat '%[4]s')" >> '%[2]s'
+  if %[5]s; then return 1; fi
+  echo renewed > "${pki}/apiserver.crt" && echo renewed > "${pki}/apiserver.key"
+}
+`, node, h.stepsPath(), h.pkiPath(node), h.oldIPPath(node), fail)
+				out, err := exec.Command("bash", "-c", stubs+script).CombinedOutput()
 				if err != nil {
 					return fmt.Errorf("repair script failed: %w\n%s", err, out)
 				}
@@ -151,12 +183,25 @@ func newHealFixture(t *testing.T) *healFixture {
 	return h
 }
 
+func (h *healFixture) stepsPath() string { return filepath.Join(h.rootDir, "steps") }
+
+// steps reads the ordered log of the in-script systemctl and kubeadm stubs.
+func (h *healFixture) steps() []string {
+	raw, err := os.ReadFile(h.stepsPath())
+	if err != nil || len(raw) == 0 {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+}
+
 // restarts reads the kubelet restarts recorded by the in-script systemctl
 // stub PLUS the direct `docker exec … systemctl` calls.
 func (h *healFixture) restarts() []string {
 	var out []string
-	if raw, err := os.ReadFile(filepath.Join(h.rootDir, "restarts")); err == nil {
-		out = append(out, strings.Fields(string(raw))...)
+	for _, s := range h.steps() {
+		if strings.HasPrefix(s, "kubelet-restart:") {
+			out = append(out, s)
+		}
 	}
 	for _, c := range h.calls {
 		if strings.HasPrefix(c, "kubelet-restart:") {
@@ -303,6 +348,98 @@ func TestHealSkipsCNINudgeWithoutKubeconfig(t *testing.T) {
 	}
 	if h.called("cni-restart") {
 		t.Fatal("kubectl was invoked without a kubeconfig")
+	}
+}
+
+func TestHealRenewsAPIServerCertOnControlPlane(t *testing.T) {
+	// On a control-plane node the apiserver serving certificate names the node
+	// address. After the heal, kubelet, controller-manager and scheduler
+	// connect to the new address, so the certificate must name it too. kind
+	// renews it at boot only when /kind/old-ipv4 differs, and the heal writes
+	// the new address there, so the heal must renew it itself.
+	h := newHealFixture(t)
+	h.makeControlPlane("bad")
+
+	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
+		t.Fatal(err)
+	}
+
+	steps := h.steps()
+	renew := slices.IndexFunc(steps, func(s string) bool { return strings.HasPrefix(s, "kubeadm:bad ") })
+	if renew < 0 {
+		t.Fatalf("the apiserver certificate of the control-plane node was not renewed: it still names 172.31.0.2, so every client of https://10.9.0.3:6443 fails TLS. Steps: %q", steps)
+	}
+	got := steps[renew]
+	if want := "kubeadm:bad init phase certs apiserver --config " + h.kubeadmConfPath("bad") + " | "; !strings.HasPrefix(got, want) {
+		t.Fatalf("the kubeadm call is not the one of kind's fix_certificate (kubeadm init phase certs apiserver --config /kind/kubeadm.conf):\n%s", got)
+	}
+	if !strings.Contains(got, " | old-pair=absent | ") {
+		t.Fatalf("the old pair was still in pki/ when kubeadm ran: kubeadm keeps a certificate that has every SAN and fails on one that does not, it never replaces it:\n%s", got)
+	}
+	if !strings.Contains(got, " | conf=advertiseAddress: 10.9.0.3 | ") {
+		t.Fatalf("kubeadm read a config with the old address: the renewal must come AFTER the sed, or the new certificate names the old address again:\n%s", got)
+	}
+	if !strings.HasSuffix(got, " | old-ipv4=172.31.0.2") {
+		t.Fatalf("/kind/old-ipv4 already held the new address when kubeadm ran: write it AFTER the renewal, so that a heal that stops before the renewal leaves kind's boot-time fix_certificate in place:\n%s", got)
+	}
+	if restart := slices.Index(steps, "kubelet-restart:bad"); restart < renew {
+		t.Fatalf("kubelet did not restart after the renewal: steps %q", steps)
+	}
+	if crt := readFileT(t, filepath.Join(h.pkiPath("bad"), "apiserver.crt")); crt != "renewed\n" {
+		t.Fatalf("apiserver.crt after the heal = %q, want the renewed certificate", crt)
+	}
+	if _, err := os.Stat(filepath.Join(h.root("bad"), "kind/heal-pki")); !os.IsNotExist(err) {
+		t.Fatalf("the moved-aside pair stayed in /kind/heal-pki after a good renewal (stat: %v)", err)
+	}
+}
+
+func TestHealWorkerSkipsCertRenewal(t *testing.T) {
+	// A worker runs no apiserver and has no apiserver.crt. The guard keeps
+	// kubeadm off it, and the rest of the repair runs as before.
+	h := newHealFixture(t)
+
+	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range h.steps() {
+		if strings.HasPrefix(s, "kubeadm:") {
+			t.Fatalf("kubeadm ran on a worker, which has no apiserver certificate: %s", s)
+		}
+	}
+	if !slices.Contains(h.restarts(), "kubelet-restart:bad") {
+		t.Fatalf("the worker repair did not finish (no kubelet restart): %q\n%s", h.steps(), h.errBuf.String())
+	}
+	if _, err := os.Stat(filepath.Join(h.root("bad"), "kind/heal-pki")); !os.IsNotExist(err) {
+		t.Fatalf("the heal made /kind/heal-pki on a worker (stat: %v)", err)
+	}
+}
+
+func TestHealCertRenewalFailureKeepsTheOldPair(t *testing.T) {
+	// kind's fix_certificate skips a node without apiserver.crt. So a failed
+	// renewal must put the old pair back, and must leave /kind/old-ipv4 at the
+	// old address, so that the next node boot retries the renewal. It must
+	// also stop before the kubelet restart and report the failure.
+	h := newHealFixture(t)
+	h.makeControlPlane("bad")
+	h.kubeadmFails = true
+
+	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if crt := readFileT(t, filepath.Join(h.pkiPath("bad"), "apiserver.crt")); crt != "old-cert\n" {
+		t.Fatalf("a failed renewal lost apiserver.crt (%q): the apiserver has no serving certificate, and kind's fix_certificate skips a node without one", crt)
+	}
+	if key := readFileT(t, filepath.Join(h.pkiPath("bad"), "apiserver.key")); key != "old-key\n" {
+		t.Fatalf("a failed renewal lost apiserver.key (%q)", key)
+	}
+	if got := readFileT(t, h.oldIPPath("bad")); got != "172.31.0.2" {
+		t.Fatalf("/kind/old-ipv4 = %q after a failed renewal: the next boot sees no address change and does not retry the renewal", got)
+	}
+	if slices.Contains(h.restarts(), "kubelet-restart:bad") {
+		t.Fatal("kubelet restarted after a failed renewal: the script must stop and report")
+	}
+	if !strings.Contains(h.errBuf.String(), "could not repair bad") {
+		t.Fatalf("a failed renewal was not reported:\n%s", h.errBuf.String())
 	}
 }
 

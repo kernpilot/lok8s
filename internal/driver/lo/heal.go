@@ -26,12 +26,13 @@ package lo
 //
 // The repair replicates the entrypoint's OWN update mechanism, but keyed on
 // the cluster-network address instead of DNS luck: sed the stale address
-// across the same files_to_update set the entrypoint maintains, write
-// /kind/old-ipv4 so the next boot's diff is quiet, restart kubelet.
-// Idempotent and silent when everything already agrees. The remediation
-// runs INSIDE the node container (docker exec bash -c <script>) — the
-// generated script is byte-identical to the bash heredoc, \b-anchored sed
-// included.
+// across the same files_to_update set the entrypoint maintains, renew the
+// apiserver serving certificate on a control-plane node (the entrypoint's
+// fix_certificate), write /kind/old-ipv4 so the next boot's diff is quiet,
+// restart kubelet. Idempotent and silent when everything already agrees.
+// The remediation runs INSIDE the node container (docker exec bash -c
+// <script>) — the generated script is byte-identical to the bash heredoc,
+// \b-anchored sed included.
 
 import (
 	"context"
@@ -117,7 +118,8 @@ func (d *Driver) healNodeIPs(ctx context.Context, clusterName, kubeconfig string
 		// Same file set kind's entrypoint updates on an address change
 		// (manifests only exist on control-plane nodes —
 		// existence-guarded). \b-anchored like the entrypoint's own sed, so
-		// 10.125.200.2 can't match inside .200.20.
+		// 10.125.200.2 can't match inside .200.20. On a control-plane node
+		// the script also renews the apiserver certificate (see healScript).
 		ui.WarnTo(errOut, "lo: %s registered --node-ip=%s (wrong network) — repointing to %s on %s", node, have, want, network)
 		script := healScript(have, want)
 		if err := d.deps.Runner.Run(ctx, execx.Cmd{
@@ -153,6 +155,32 @@ func (d *Driver) healNodeIPs(ctx context.Context, clusterName, kubeconfig string
 // double-quoted heredoc, including the escaped-dots sed
 // (`${have//./\\.}` → `10\.125\.200\.2`) and the literal `"${f}"` quoting
 // the bash \-escapes preserved.
+//
+// The certificate step is the entrypoint's fix_certificate. kubeadm puts the
+// node address into the apiserver serving certificate as an IP SAN. After
+// the sed, kubelet, controller-manager and scheduler connect to
+// https://<want>:6443, but the certificate still names <have>, so every one
+// of them fails TLS. kind renews the certificate at boot only when the
+// address in /kind/old-ipv4 differs, and the heal writes <want> there, so
+// without this step the certificate stays wrong after every later boot too.
+//
+//   - Same guard and same kubeadm call as fix_certificate: only a node with
+//     apiserver.crt AND apiserver.key runs kube-apiserver (a worker skips
+//     the step), and the config is /kind/kubeadm.conf, which the sed has
+//     just moved to <want>.
+//   - The old pair must leave pki/ first: kubeadm reuses an existing
+//     certificate only when it already has every SAN, and fails otherwise.
+//   - Moved aside, not removed: fix_certificate skips a node without a
+//     certificate, so a lost pair would never come back. On a kubeadm
+//     failure the script puts the old pair back and exits 1 before
+//     old-ipv4 and the kubelet restart. The caller then warns, and
+//     old-ipv4 still holds <have>, so the next node boot retries the
+//     renewal through fix_certificate.
+//   - Before old-ipv4 for the same reason: a heal that stops before the
+//     renewal leaves that boot-time retry in place.
+//   - No extra apiserver restart: kube-apiserver watches its certificate
+//     files and loads the new pair, and the manifest sed already makes
+//     kubelet create the apiserver static pod again.
 func healScript(have, want string) string {
 	haveEsc := strings.ReplaceAll(have, ".", `\.`)
 	return `
@@ -167,6 +195,15 @@ func healScript(have, want string) string {
                /var/lib/kubelet/kubeadm-flags.env; do
         [ -f "${f}" ] && sed -i 's|\b` + haveEsc + `\b|` + want + `|g' "${f}"
       done
+      if [ -f /etc/kubernetes/pki/apiserver.crt ] && [ -f /etc/kubernetes/pki/apiserver.key ]; then
+        mkdir -p /kind/heal-pki
+        mv -f /etc/kubernetes/pki/apiserver.crt /etc/kubernetes/pki/apiserver.key /kind/heal-pki/
+        kubeadm init phase certs apiserver --config /kind/kubeadm.conf >/dev/null || {
+          mv -f /kind/heal-pki/apiserver.crt /kind/heal-pki/apiserver.key /etc/kubernetes/pki/
+          exit 1
+        }
+        rm -rf /kind/heal-pki
+      fi
       printf '%s' '` + want + `' > /kind/old-ipv4
       systemctl restart kubelet
     `

@@ -47,13 +47,25 @@ teardown() { teardown_tmpdir; }
 # the registry network's (stale) address.
 #
 # `docker exec` does not fake the repair — it REDIRECTS the node paths onto a
-# per-node fake rootfs and then eval's the heal's own script. So the sed loop
-# and the /kind/old-ipv4 write under test are the real ones; systemctl and the
-# CNI nudge are logged to $CALLS. A mock that reimplemented the repair would
-# pass no matter what the heal did.
+# per-node fake rootfs and then eval's the heal's own script. So the sed loop,
+# the certificate move and the /kind/old-ipv4 write under test are the real
+# ones; systemctl, kubeadm and the CNI nudge are logged to $CALLS. A mock that
+# reimplemented the repair would pass no matter what the heal did.
 node_flag()  { echo "${BATS_TEST_TMPDIR}/root.${1}/var/lib/kubelet/kubeadm-flags.env"; }
 node_oldip() { echo "${BATS_TEST_TMPDIR}/root.${1}/kind/old-ipv4"; }
 node_conf()  { echo "${BATS_TEST_TMPDIR}/root.${1}/etc/kubernetes/kubelet.conf"; }
+node_pki()   { echo "${BATS_TEST_TMPDIR}/root.${1}/etc/kubernetes/pki"; }
+node_kconf() { echo "${BATS_TEST_TMPDIR}/root.${1}/kind/kubeadm.conf"; }
+
+# make_control_plane <node> — the files that only a kind control-plane node
+# has: the apiserver serving pair. Also a kubeadm config that still names the
+# stale address, like every other file the entrypoint rewrote.
+make_control_plane() {
+  mkdir -p "$(node_pki "${1}")"
+  echo old-cert > "$(node_pki "${1}")/apiserver.crt"
+  echo old-key  > "$(node_pki "${1}")/apiserver.key"
+  echo 'advertiseAddress: 172.31.0.2' > "$(node_kconf "${1}")"
+}
 
 _load() {
   warn() { echo "warn: ${*}" >&2; }
@@ -114,7 +126,20 @@ _load() {
         script="${script//\/etc\/kubernetes/${BATS_TEST_TMPDIR}/root.${node}/etc/kubernetes}"
         script="${script//\/kind\//${BATS_TEST_TMPDIR}/root.${node}/kind/}"
         systemctl() { echo "kubelet-restart:${node}" >> "${CALLS}"; }
-        eval "${script}"
+        # kubeadm records what it would see: its arguments, whether the old
+        # pair is still in pki/, the config file it reads and /kind/old-ipv4.
+        # KUBEADM_FAIL makes it fail.
+        kubeadm() {
+          local pki pair=absent
+          pki="$(node_pki "${node}")"
+          if [[ -e "${pki}/apiserver.crt" || -e "${pki}/apiserver.key" ]]; then pair=present; fi
+          echo "kubeadm:${node} ${*} | old-pair=${pair} | conf=$(cat "${@: -1}") | old-ipv4=$(cat "$(node_oldip "${node}")")" >> "${CALLS}"
+          [[ -z "${KUBEADM_FAIL:-}" ]] || return 1
+          echo renewed > "${pki}/apiserver.crt" && echo renewed > "${pki}/apiserver.key"
+        }
+        # A subshell, like the real `bash -c`: an `exit` in the script ends
+        # only the script, and its status is the status of `docker exec`.
+        ( eval "${script}" ) || return "$?"
         ;;
     esac
     return 0
@@ -252,6 +277,118 @@ _load() {
   ! grep -q '^cni-restart$' "${CALLS}" || {
     echo "kubectl was invoked without a kubeconfig — it would talk to whatever" >&2
     echo "\$KUBECONFIG/current-context happens to point at: the WRONG cluster." >&2
+    return 1
+  }
+}
+
+@test "heal_node_ips: renews the apiserver certificate on a control-plane node — after the sed, before old-ipv4 and the kubelet restart" {
+  # On a control-plane node the apiserver serving certificate names the node
+  # address. After the heal, kubelet, controller-manager and scheduler connect
+  # to the new address, so the certificate must name it too. kind renews it at
+  # boot only when /kind/old-ipv4 differs, and the heal writes the new address
+  # there, so the heal must renew it itself.
+  _load
+  make_control_plane bad
+
+  lo::heal_node_ips lotest "${BATS_TEST_TMPDIR}/kubeconfig"
+
+  local renew restart
+  renew=$(grep -n '^kubeadm:bad ' "${CALLS}") || {
+    echo "The apiserver certificate of the control-plane node was not renewed: it" >&2
+    echo "still names 172.31.0.2, so every client of https://10.9.0.3:6443 fails TLS." >&2
+    cat "${CALLS}" >&2
+    return 1
+  }
+  [[ "${renew}" == *":kubeadm:bad init phase certs apiserver --config $(node_kconf bad) | "* ]] || {
+    echo "The kubeadm call is not the one of kind's fix_certificate" >&2
+    echo "(kubeadm init phase certs apiserver --config /kind/kubeadm.conf):" >&2
+    echo "${renew}" >&2
+    return 1
+  }
+  [[ "${renew}" == *" | old-pair=absent | "* ]] || {
+    echo "The old pair was still in pki/ when kubeadm ran: kubeadm keeps a" >&2
+    echo "certificate that has every SAN and fails on one that does not, it never" >&2
+    echo "replaces it: ${renew}" >&2
+    return 1
+  }
+  [[ "${renew}" == *" | conf=advertiseAddress: 10.9.0.3 | "* ]] || {
+    echo "kubeadm read a config with the old address: the renewal must come AFTER" >&2
+    echo "the sed, or the new certificate names the old address again: ${renew}" >&2
+    return 1
+  }
+  [[ "${renew}" == *" | old-ipv4=172.31.0.2" ]] || {
+    echo "/kind/old-ipv4 already held the new address when kubeadm ran: write it" >&2
+    echo "AFTER the renewal, so that a heal that stops before the renewal leaves" >&2
+    echo "kind's boot-time fix_certificate in place: ${renew}" >&2
+    return 1
+  }
+  restart=$(grep -n '^kubelet-restart:bad$' "${CALLS}" | cut -d: -f1)
+  [[ -n "${restart}" ]] && (( restart > ${renew%%:*} )) || {
+    echo "kubelet did not restart after the renewal:" >&2
+    cat "${CALLS}" >&2
+    return 1
+  }
+  [ "$(cat "$(node_pki bad)/apiserver.crt")" = renewed ] || {
+    echo "apiserver.crt after the heal is not the renewed certificate." >&2; return 1
+  }
+  [ ! -e "${BATS_TEST_TMPDIR}/root.bad/kind/heal-pki" ] || {
+    echo "The moved-aside pair stayed in /kind/heal-pki after a good renewal." >&2
+    return 1
+  }
+}
+
+@test "heal_node_ips: a worker gets no certificate renewal" {
+  # A worker runs no apiserver and has no apiserver.crt. The guard keeps
+  # kubeadm off it, and the rest of the repair runs as before.
+  _load
+  lo::heal_node_ips lotest "${BATS_TEST_TMPDIR}/kubeconfig"
+
+  ! grep -q '^kubeadm:' "${CALLS}" || {
+    echo "kubeadm ran on a worker, which has no apiserver certificate:" >&2
+    grep '^kubeadm:' "${CALLS}" >&2
+    return 1
+  }
+  grep -q '^kubelet-restart:bad$' "${CALLS}" || {
+    echo "The worker repair did not finish (no kubelet restart)." >&2
+    cat "${CALLS}" >&2
+    return 1
+  }
+  [ ! -e "${BATS_TEST_TMPDIR}/root.bad/kind/heal-pki" ] || {
+    echo "The heal made /kind/heal-pki on a worker." >&2; return 1
+  }
+}
+
+@test "heal_node_ips: a failed renewal keeps the old pair and old-ipv4, skips the kubelet restart and warns" {
+  # kind's fix_certificate skips a node without apiserver.crt. So a failed
+  # renewal must put the old pair back, and must leave /kind/old-ipv4 at the
+  # old address, so that the next node boot retries the renewal. It must also
+  # stop before the kubelet restart and report the failure.
+  _load
+  make_control_plane bad
+  export KUBEADM_FAIL=1
+
+  run lo::heal_node_ips lotest "${BATS_TEST_TMPDIR}/kubeconfig"
+
+  [ "$(cat "$(node_pki bad)/apiserver.crt")" = old-cert ] || {
+    echo "A failed renewal lost apiserver.crt: the apiserver has no serving" >&2
+    echo "certificate, and kind's fix_certificate skips a node without one." >&2
+    return 1
+  }
+  [ "$(cat "$(node_pki bad)/apiserver.key")" = old-key ] || {
+    echo "A failed renewal lost apiserver.key." >&2; return 1
+  }
+  [ "$(cat "$(node_oldip bad)")" = "172.31.0.2" ] || {
+    echo "/kind/old-ipv4 was written after a failed renewal: the next boot sees" >&2
+    echo "no address change and does not retry the renewal." >&2
+    return 1
+  }
+  ! grep -q '^kubelet-restart:bad$' "${CALLS}" || {
+    echo "kubelet restarted after a failed renewal: the script must stop and report." >&2
+    return 1
+  }
+  grep -q 'could not repair bad' <<< "${output}" || {
+    echo "A failed renewal was not reported:" >&2
+    echo "${output}" >&2
     return 1
   }
 }
