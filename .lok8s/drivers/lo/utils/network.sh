@@ -485,9 +485,34 @@ lo::nodes_on_registry_network() {
 #
 # The repair replicates the entrypoint's OWN update mechanism, but keyed on the
 # cluster-network address instead of DNS luck: sed the stale address across the
-# same files_to_update set the entrypoint maintains, write /kind/old-ipv4 so the
-# next boot's diff is quiet, restart kubelet. Idempotent and silent when
-# everything already agrees.
+# same files_to_update set the entrypoint maintains, renew the apiserver serving
+# certificate on a control-plane node (the entrypoint's fix_certificate), write
+# /kind/old-ipv4 so the next boot's diff is quiet, restart kubelet. Idempotent
+# and silent when everything already agrees.
+#
+# The certificate step: kubeadm puts the node address into the apiserver
+# serving certificate as an IP SAN. After the sed, kubelet, controller-manager
+# and scheduler connect to https://<want>:6443, but the certificate still names
+# <have>, so every one of them fails TLS. kind renews the certificate at boot
+# only when the address in /kind/old-ipv4 differs, and the heal writes <want>
+# there, so without this step the certificate stays wrong after every later
+# boot too.
+#   - Same guard and same kubeadm call as fix_certificate: only a node with
+#     apiserver.crt AND apiserver.key runs kube-apiserver (a worker skips the
+#     step), and the config is /kind/kubeadm.conf, which the sed has just moved
+#     to <want>.
+#   - The old pair must leave pki/ first: kubeadm reuses an existing
+#     certificate only when it already has every SAN, and fails otherwise.
+#   - Moved aside, not removed: fix_certificate skips a node without a
+#     certificate, so a lost pair would never come back. On a kubeadm failure
+#     the script puts the old pair back and exits 1 before old-ipv4 and the
+#     kubelet restart. The caller then warns, and old-ipv4 still holds <have>,
+#     so the next node boot retries the renewal through fix_certificate.
+#   - Before old-ipv4 for the same reason: a heal that stops before the renewal
+#     leaves that boot-time retry in place.
+#   - No extra apiserver restart: kube-apiserver watches its certificate files
+#     and loads the new pair, and the manifest sed already makes kubelet create
+#     the apiserver static pod again.
 lo::heal_node_ips() {
   local cluster_name="${1}" kubeconfig="${2:-}"
   local network="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-}"
@@ -533,7 +558,9 @@ lo::heal_node_ips() {
 
     # Same file set kind's entrypoint updates on an address change (manifests
     # only exist on control-plane nodes — existence-guarded). \b-anchored like
-    # the entrypoint's own sed, so 10.125.200.2 can't match inside .200.20.
+    # the entrypoint's own sed, so 10.125.200.2 can't match inside .200.20. On
+    # a control-plane node the script also renews the apiserver certificate
+    # (see the function comment).
     warn "lo: ${node} registered --node-ip=${have} (wrong network) — repointing to ${want} on ${network}"
     docker exec "${node}" bash -c "
       for f in /etc/kubernetes/manifests/etcd.yaml \
@@ -547,6 +574,15 @@ lo::heal_node_ips() {
                /var/lib/kubelet/kubeadm-flags.env; do
         [ -f \"\${f}\" ] && sed -i 's|\b${have//./\\.}\b|${want}|g' \"\${f}\"
       done
+      if [ -f /etc/kubernetes/pki/apiserver.crt ] && [ -f /etc/kubernetes/pki/apiserver.key ]; then
+        mkdir -p /kind/heal-pki
+        mv -f /etc/kubernetes/pki/apiserver.crt /etc/kubernetes/pki/apiserver.key /kind/heal-pki/
+        kubeadm init phase certs apiserver --config /kind/kubeadm.conf >/dev/null || {
+          mv -f /kind/heal-pki/apiserver.crt /kind/heal-pki/apiserver.key /etc/kubernetes/pki/
+          exit 1
+        }
+        rm -rf /kind/heal-pki
+      fi
       printf '%s' '${want}' > /kind/old-ipv4
       systemctl restart kubelet
     " 2>/dev/null || { warn "lo: could not repair ${node} — see 'docker exec ${node} systemctl status kubelet'"; continue; }
