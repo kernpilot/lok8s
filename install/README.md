@@ -26,8 +26,12 @@ chosen release, refuses to extract anything whose SHA-256 does not match, and
 only then copies `lo` into place.
 
 Each request retries a transient failure 3 times, after 1, 2 and 4 s: a
-timeout, a refused connection, or HTTP 408, 429, 500, 502, 503 or 504. A 404
-or another 4xx fails at once, and so does a checksum mismatch.
+network error (no DNS answer, a refused or reset connection, a TLS handshake
+error, an empty or short reply, a timeout) or HTTP 408, 429 or 5xx. A 404 or
+another 4xx fails at once, and so does a TLS certificate error or a checksum
+mismatch. A connect stops after 30 s, and a transfer that stalls for 60 s
+stops. Each retry prints curl's error and then a `retrying … (n/4)` line. If
+a later attempt succeeds, the install is good: the checksum check still runs.
 
 Without the script — the same four steps by hand:
 
@@ -92,6 +96,8 @@ fixture release (a fake `lo` archive + `checksums.txt`): a clean install, a
 checksum mismatch (must install nothing), `--dry-run` (must fetch nothing),
 and argument handling. A `file://` release cannot fail transiently, so
 `internal/toolchain/installer_retry_test.go` runs the script with the real
-curl against a TLS test server: it retries HTTP 502, 503, 500 and 429, it
-stops after 4 attempts, and it does not retry a 404. `hack/lint-shell.sh`
-shellchecks `install/`.
+curl against a TLS test server: it retries HTTP 502, 503, 500 and 429, an
+empty reply, a short body, a connection reset and a refused connection, it
+stops after 4 attempts, and it does not retry a 404 or a TLS certificate
+error. It also checks that each curl call has the connect and stall limits.
+`hack/lint-shell.sh` shellchecks `install/`.

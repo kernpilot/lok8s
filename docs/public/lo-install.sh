@@ -82,24 +82,54 @@ detect_arch() {
 }
 
 # ── fetching ─────────────────────────────────────────────────────────────────
-# get <curl args…> — every request of the installer. https only for real
-# downloads; file:// is allowed so the tests can serve a fixture tree. A
-# redirect may not downgrade to http.
-# One network error must not stop a first install. So curl retries a
-# transient failure 3 times, after 1, 2 and 4 s (or after the server's
-# Retry-After). A transient failure is a timeout, a refused connection or
-# HTTP 408, 429, 500, 502, 503 or 504. A 404 or another 4xx fails at once.
-# --connect-timeout makes a lost connection a timeout, which curl retries.
-# Without it, the kernel stops the connect after about 2 minutes with an
-# error that curl does not retry.
+# get <url> <dest> [curl args…] — every request of the installer. It writes
+# the body to <dest> and prints the URL after all redirects. https only for
+# real downloads; file:// is allowed so the tests can serve a fixture tree.
+# A redirect may not downgrade to http.
+# One network error must not stop a first install. So get retries a
+# transient failure (see transient) 3 times, after 1, 2 and 4 s, and prints
+# one line for each retry. A 404 or another 4xx fails at once.
+# --connect-timeout makes a lost connection a timeout. Without it, the
+# connect stops only when the kernel gives up (about 2 minutes on Linux).
+# --speed-limit with --speed-time stops a transfer that stalls for 60 s.
 get() {
-  curl -fsSL --proto '=https,file' --proto-redir '=https' \
-    --connect-timeout 30 --retry 3 --retry-connrefused "${@}"
+  local url="${1}" dest="${2}"; shift 2
+  local attempt rc out delay
+  for attempt in 1 2 3 4; do
+    rc=0
+    out="$(curl -fsSL --proto '=https,file' --proto-redir '=https' \
+      --connect-timeout 30 --speed-limit 1 --speed-time 60 \
+      -w '%{http_code} %{url_effective}' -o "${dest}" "${@}" "${url}")" || rc="${?}"
+    if (( rc == 0 )); then
+      echo "${out#* }"
+      return 0
+    fi
+    if (( attempt == 4 )) || ! transient "${rc}" "${out%% *}"; then
+      return "${rc}"
+    fi
+    delay=$(( 1 << (attempt - 1) ))
+    warn "retrying ${url} in ${delay} s ($(( attempt + 1 ))/4)"
+    sleep "${delay}"
+  done
+}
+
+# transient <curl exit code> <HTTP status> — true for a failure that another
+# attempt can fix: no DNS answer (6), a failed or refused connect (7), an
+# HTTP/2 error (16, 92), a short body (18), a timeout (28), a TLS handshake
+# error (35), an empty reply (52), a broken send or receive, such as a reset
+# (55, 56), or HTTP 408, 429 or 5xx (22). Any other failure is final: an
+# HTTP 4xx, a TLS certificate error, a refused redirect, a local error.
+transient() {
+  case "${1}" in
+    6|7|16|18|28|35|52|55|56|92) return 0 ;;
+    22) [[ "${2}" == 408 || "${2}" == 429 || "${2}" == 5?? ]] ;;
+    *) return 1 ;;
+  esac
 }
 
 # fetch <url> <dest>
 fetch() {
-  get "${1}" -o "${2}"
+  get "${1}" "${2}" >/dev/null
 }
 
 # resolve_latest — the tag GitHub's releases/latest redirects to. A redirect
@@ -107,7 +137,7 @@ fetch() {
 # unauthenticated and has failed CI runners before; the redirect is not.
 resolve_latest() {
   local effective
-  effective="$(get -I -o /dev/null -w '%{url_effective}' "${LO_INSTALL_BASE_URL}/releases/latest")" \
+  effective="$(get "${LO_INSTALL_BASE_URL}/releases/latest" /dev/null -I)" \
     || die "could not resolve the latest release at ${LO_INSTALL_BASE_URL}/releases/latest (pass --version <tag>)"
   local tag="${effective##*/}"
   [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] \
