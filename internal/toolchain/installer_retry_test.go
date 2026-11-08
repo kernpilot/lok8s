@@ -354,6 +354,50 @@ func TestInstallerGivesUpAfterFourAttempts(t *testing.T) {
 	}
 }
 
+// A timeout (curl exit 28) and no DNS answer (6) are retried, after 1 s and
+// then 2 s. A real timeout takes 30 s and a real DNS failure needs a
+// resolver, so a curl wrapper fails the first two calls with these codes and
+// then runs the real curl.
+func TestInstallerRetriesATimeoutAndNoDNSAnswer(t *testing.T) {
+	t.Parallel()
+	f := newInstallerFixture(t)
+	curl, err := exec.LookPath("curl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.pathDir = filepath.Join(f.home, "wrap")
+	counter := filepath.Join(f.home, "curl-calls")
+	wrapper := fmt.Sprintf(`#!/bin/sh
+n=$(( $(cat '%[1]s' 2>/dev/null || echo 0) + 1 ))
+echo "${n}" > '%[1]s'
+case "${n}" in
+  1) echo 'curl: (28) fake timeout' >&2; exit 28 ;;
+  2) echo 'curl: (6) fake DNS failure' >&2; exit 6 ;;
+esac
+exec '%[2]s' "$@"
+`, counter, curl)
+	if err := os.MkdirAll(f.pathDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.pathDir, "curl"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := f.run(t) // the first call resolves the latest tag
+	if err != nil {
+		t.Fatalf("the installer failed on a timeout and a DNS failure (want: retried, then installed): %v\n%s", err, out)
+	}
+	if got := f.release.count("/releases/latest"); got != 1 {
+		t.Errorf("/releases/latest: %d requests reached the server, want 1 (the two failed calls never left the wrapper)", got)
+	}
+	for _, line := range []string{"in 1 s (2/4)", "in 2 s (3/4)"} {
+		if !strings.Contains(out, line) {
+			t.Errorf("output has no retry line %q (the delay doubles):\n%s", line, out)
+		}
+	}
+	f.checkInstalled(t, out)
+}
+
 func TestInstallerDoesNotRetryANotFound(t *testing.T) {
 	t.Parallel()
 	f := newInstallerFixture(t)

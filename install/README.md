@@ -25,7 +25,7 @@ The script downloads `lo-<os>-<arch>.tar.gz` **and** `checksums.txt` from the
 chosen release, refuses to extract anything whose SHA-256 does not match, and
 only then copies `lo` into place.
 
-Each request retries a transient failure 3 times, after 1, 2 and 4 s: a
+Each request retries a transient failure up to 3 times, after 1, 2 and 4 s: a
 network error (no DNS answer, a refused or reset connection, a TLS handshake
 error, an empty or short reply, a timeout) or HTTP 408, 429 or 5xx. A 404 or
 another 4xx fails at once, and so does a TLS certificate error or a checksum
