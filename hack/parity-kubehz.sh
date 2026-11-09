@@ -7,8 +7,9 @@
 # project and diffs stdout, stderr and exit codes. Every case is
 # cluster-free: config validation refusals, usage/flag errors, `status` with
 # no registration, the hosting-axis routing of every subcommand, the
-# handover bundle checks, and the first kubectl calls of `deploy` (the
-# bind-secret stage) against a stub kubectl. No case reaches a kubeconfig, a
+# handover bundle checks, the first kubectl calls of `deploy` (the
+# bind-secret stage) and its Ready-timeout hint, all against a stub kubectl.
+# No case reaches a kubeconfig, a
 # real kubectl, the platform api or the Hetzner api. Two sections talk to one
 # local https stub (hack/lib/kubehz-api-stub.py, a self-signed certificate
 # that both implementations trust through SSL_CERT_FILE and
@@ -470,6 +471,48 @@ check - kubehz deploy --dry-run --domain reg.dev
 parity::stub_kubectl_fail "${PROJ}"
 check - kubehz deploy --domain bind-cron.dev
 check - kubehz deploy --domain bind-op.dev
+
+# ── deploy: a Ready timeout names an image pull that fails or hangs ─────────
+# A kubectl that answers every call of the operator path, and a rollout wait
+# that times out. The pod read and the events read after it answer from
+# PULL_PODS and PULL_EVENTS (PULL_PODS_FAIL: the pod read fails). Each call
+# goes to PULL_LOG, which joins stdout, so the diff covers the argv of both
+# reads and the hint on stderr.
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub: no live cluster may be reached.
+printf 'kubectl %s\n' "$*" | sed -E 's#[^ =]*/(agent|live-agent)\b#<work>/\1#g' >> "${PULL_LOG}"
+case "$*" in
+  "apply -k "*) exit 0 ;;
+  "-n kubehz-system get pods -l app=kubehz-heartbeat "*) exit 0 ;;
+  "-n kubehz-system get secret kubehz-agent -o name") printf 'secret/kubehz-agent\n'; exit 0 ;;
+  "-n kubehz-system rollout status "*) echo 'error: timed out waiting for the condition' >&2; exit 1 ;;
+  "-n kubehz-system get pods -l app.kubernetes.io/name=kubehz-live-agent "*)
+    [[ -z "${PULL_PODS_FAIL:-}" ]] || exit 1
+    printf '%s' "${PULL_PODS:-}"; exit 0 ;;
+  "-n kubehz-system get events "*) printf '%s' "${PULL_EVENTS:-}"; exit 0 ;;
+esac
+exit 1
+SH
+pull_reset() { : > "${PULL_LOG}"; }
+pull_record() { { echo "--- kubectl"; cat "${PULL_LOG}"; } >> "${WORK}/${1}.out"; }
+pull_check() { PARITY_PRE_EACH=pull_reset PARITY_POST_EACH=pull_record check "$@"; }
+export PULL_LOG="${WORK}/pull-kubectl.log"
+PULL_POD=kubehz-live-agent-6b7c9d8f5-x2k4q
+PULL_IMAGE=ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8ee963b347ae29407895c8a8f51ec6d064aa
+export PULL_PODS="${PULL_POD}|worker-1|ContainerCreating|${PULL_IMAGE}"$'\n' PULL_EVENTS=$'Scheduled\nPulling\n'
+pull_check - kubehz deploy --domain op-reg.dev           # a pull that started and did not finish
+export PULL_EVENTS=$'Scheduled\nPulling\nPulled\nFailedMount\n'
+pull_check - kubehz deploy --domain op-reg.dev           # the pull finished: no pull hint
+export PULL_PODS="${PULL_POD}|worker-1|ImagePullBackOff|registry.example.com:5000/kubehz-agent@sha256:474994f0"$'\n'
+pull_check - kubehz deploy --domain op-reg.dev           # a failed pull; the registry of the pod's image
+export PULL_PODS="${PULL_POD}"$'\e'"[31m|worker-1|ImagePullBackOff|${PULL_IMAGE}"$'\n'
+pull_check - kubehz deploy --domain op-reg.dev           # an escape in a field: no pull hint
+export PULL_PODS_FAIL=1
+pull_check - kubehz deploy --domain op-reg.dev           # the pod read fails: no pull hint
+unset PULL_LOG PULL_PODS PULL_EVENTS PULL_PODS_FAIL PULL_POD PULL_IMAGE
+parity::stub_kubectl_fail "${PROJ}"
+
 check - kubehz re-enroll
 check - kubehz re-enroll --domain shared.dev
 check - kubehz re-enroll --domain hosted-http.dev
