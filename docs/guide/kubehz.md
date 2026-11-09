@@ -206,6 +206,7 @@ mints a single-use join ticket for every machine listed under
 lo provision                  # create/adopt the space + mint join tickets
 lo kubehz join worker-3       # mint another ticket, any time
 lo kubehz status              # space phase, the three numbers, the nodes
+lo kubehz node drain --name worker-3   # cordon a node and evict its pods
 lo kubehz deregister          # remove the space
 ```
 
@@ -248,6 +249,74 @@ A few things worth knowing before you reach for it:
   eager channel moves your space early in a shard's upgrade window, a
   conservative one later, but the platform migrates every space by the
   deadline. There is no opting out.
+
+### Cordon, uncordon and drain a node
+
+A space gives you no rights on the nodes of the shared control plane, so
+`kubectl cordon` and `kubectl drain` are refused there. The platform does
+these three operations for you, one node at a time:
+
+```bash
+lo kubehz node cordon --name worker-1     # the scheduler puts no new pods on it
+lo kubehz node drain --name worker-1      # cordon it, then evict its pods
+lo kubehz node uncordon --name worker-1   # schedulable again
+```
+
+| Flag | Command | What it does |
+|------|---------|--------------|
+| `--name`, `-n` | all three | The node, by the name the space knows. Required. |
+| `--space-id` | all three | The space (`sp-…`). Without it, `lo` finds the space of the domain by its slug in your space list. |
+| `--domain` | all three | The domain whose space to use. Default: the active domain. |
+| `--timeout` | `drain` | How many seconds the platform tries, a whole number from 60 to 3600. Without it, the platform default applies. |
+| `--evict-unmanaged` | `drain` | Also evict the pods that no controller recreates (`kubectl drain --force`). Nothing recreates them. |
+
+- **The change is asynchronous.** The command ends when the platform has
+  accepted the request, not when the node has changed. `lo kubehz status`
+  shows each node with `cordoned` while it is unschedulable, then the last
+  request and its phase, and the reason when the platform gives one:
+
+  ```
+  Nodes:   2/3
+    worker-1  Ready  metal  cordoned  drain Blocked: 2 pods have no controller
+    worker-2  Ready  hcloud  uncordon Done
+  ```
+
+- **One request per node, and the latest wins.** A cordon, an uncordon or a
+  drain replaces the pending request of the same node, and the output says
+  what it replaced. A cordon or an uncordon cancels a pending drain: the pods
+  that the drain did not evict stay on the node. A second drain of the same
+  machine keeps the deadline of the first one.
+- **A pod that no controller recreates stops a drain.** Without
+  `--evict-unmanaged`, the pod stays and the drain waits with the phase
+  `Blocked`. Uncordon the node to cancel, or drain again with
+  `--evict-unmanaged`.
+- **An uncordon removes your cordon only.** A cordon that the platform holds
+  (a migration, a node retirement) stays, and the node line still shows
+  `cordoned`.
+- **A drain does not remove the node.** The node stays in the space and
+  holds its slot. Uncordon it to put it back into service. To deregister
+  the node is a separate step.
+- **The token.** The calls need a `KUBEHZ_TOKEN` with the `clusters:write`
+  scope. The slug lookup also reads your space list, which needs the `read`
+  scope: with `--space-id`, `lo` sends no list request. From a browser
+  session, the platform asks for a fresh two-factor sign-in before a drain.
+  An API token is the approval already, so `lo` gets no such prompt.
+- **Spaces only.** A `hosting: hosted` or `self` cluster has its own API
+  server, and `lo` refuses the three commands there: use `kubectl cordon`,
+  `kubectl uncordon` or `kubectl drain` against that API server.
+- **In `lo mcp`, they are destructive tools** (`lo_kubehz_node_cordon`,
+  `lo_kubehz_node_uncordon`, `lo_kubehz_node_drain`): a server offers them
+  only with `--allow-destructive`, because each one changes a live cluster.
+
+Every refusal says whether something changed:
+
+| Refusal | What it means |
+|---------|---------------|
+| The node has not joined | The space knows the node name, but the platform has not seen the node in the control plane yet. Nothing changed. Wait until `lo kubehz status` shows it `Ready`. |
+| The request did not reach the control plane | Nothing changed. Try again shortly. |
+| The platform cannot record the request | The platform sends no request it cannot audit. Nothing changed. Try again shortly. |
+| The result is unknown | The request can have reached the control plane. Read the phase with `lo kubehz status` before you try again: a drain that you send again can start a new deadline. |
+| The platform knows no such node | The node name or the space is wrong. Check both with `lo kubehz status`. |
 
 ### Limits, and whose problem each one is
 
@@ -405,7 +474,8 @@ cordons the node, then deletes it from your cluster.
 Removal takes the **membership**, never the hardware. The removal does not
 evict pods on the machine first, because the machine is yours and asking for it back is not
 a reason for the platform to move your workloads. Drain the node yourself when
-you want a clean handover. Run `kubeadm reset` on the machine before you join
+you want a clean handover. (`lo kubehz node drain` is for the nodes of a Space;
+on a hosted cluster, use `kubectl drain`). Run `kubeadm reset` on the machine before you join
 it anywhere again.
 
 ::: warning A dark node still holds its slot

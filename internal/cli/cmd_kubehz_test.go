@@ -221,3 +221,49 @@ func TestKubehzCommandsClusterFreePaths(t *testing.T) {
 		t.Fatalf("bogus: %v %s", err, errOut)
 	}
 }
+
+// `lo kubehz node cordon|uncordon|drain`: the paths that end before a request.
+func TestKubehzNodeMaintenanceClusterFreePaths(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("DOMAIN_NAME", "")
+	t.Setenv("KUBEHZ_TOKEN", "")
+	for domain, spec := range map[string]string{
+		"alpha.dev":  "kind: Lo\nmetadata:\n  name: alpha\n",
+		"hosted.dev": "kind: KubeOne\nspec:\n  kubehz:\n    hosting: hosted\n    access: managed\n    apiUrl: https://api.kubehz.example\n",
+		"shared.dev": "kind: Kubehz\nspec:\n  kubehz:\n    hosting: shared\n    apiUrl: https://api.kubehz.example\n",
+	} {
+		_ = os.MkdirAll(filepath.Join(base, "clusters", domain), 0o755)
+		_ = os.WriteFile(filepath.Join(base, "clusters", domain, "cluster.lok8s.yaml"), []byte(spec), 0o644)
+	}
+	_ = os.WriteFile(filepath.Join(base, "clusters", ".active"), []byte("alpha.dev\n"), 0o644)
+
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"kubehz", "node", "cordon"}, "Error: missing required flag: name"},
+		{[]string{"kubehz", "node", "uncordon"}, "Error: missing required flag: name"},
+		{[]string{"kubehz", "node", "drain"}, "Error: missing required flag: name"},
+		// --cluster/-s is refused first, with the hint of a Space verb.
+		{[]string{"kubehz", "node", "cordon", "--cluster", "x"}, "Name the space with:  --space-id sp-xxxxxxxx"},
+		{[]string{"kubehz", "node", "drain", "-sx", "--name", "worker-1"}, "Name the space with:  --space-id sp-xxxxxxxx"},
+		{[]string{"kubehz", "node", "cordon", "--name", "worker-1"}, "'alpha.dev' is hosting: self. This command is for the nodes of a Space."},
+		{[]string{"kubehz", "node", "uncordon", "--name", "worker-1", "--domain", "hosted.dev"}, "Use kubectl cordon, uncordon or drain there."},
+		{[]string{"kubehz", "node", "drain", "--name", "worker-1", "--domain", "shared.dev"}, "KUBEHZ_TOKEN is required to drain a node."},
+		{[]string{"kubehz", "node", "drain", "--name", "worker-1", "--domain", "shared.dev", "--timeout", "30"}, "--timeout takes a whole number of seconds from 60 to 3600."},
+		{[]string{"kubehz", "node", "cordon", "--name", "Worker_1", "--domain", "shared.dev"}, "is not a node name the platform accepts."},
+		{[]string{"kubehz", "node", "cordon", "extra", "--name", "worker-1"}, "Error: unexpected argument: extra"},
+		// An empty --name is given: the name check refuses it, as in argsh.
+		{[]string{"kubehz", "node", "cordon", "--name", "", "--domain", "shared.dev"}, "kubehz: '' is not a node name the platform accepts."},
+	} {
+		_, errOut, err := runKubehzLo(t, base, tc.args...)
+		if !errors.Is(err, ErrHandled) || !strings.Contains(errOut, tc.want) {
+			t.Fatalf("%v: %v\n%s", tc.args, err, errOut)
+		}
+	}
+	// --timeout and --evict-unmanaged belong to drain only.
+	_, errOut, err := runKubehzLo(t, base, "kubehz", "node", "cordon", "--name", "worker-1", "--timeout", "600")
+	if err == nil || !strings.Contains(errOut, "timeout") {
+		t.Fatalf("cordon --timeout: %v\n%s", err, errOut)
+	}
+}

@@ -736,8 +736,39 @@ func (c *Context) SpaceStatus(ctx context.Context, cfg *Config, domain, clusterY
 	c.echo("Nodes:   %s/%s", jstrOr(body, "0", "usage", "nodes"), jstrOr(body, "-", "usage", "maxNodes"))
 	if nodes, ok := jget(body, "nodes").([]any); ok {
 		for _, n := range nodes {
-			c.echo("  %s  %s  %s", jstr(jget(n, "name")), jstrOr(n, "-", "status"), jstrOr(n, "-", "lane"))
+			line := "  " + jstr(jget(n, "name")) + "  " + jstrOr(n, "-", "status") + "  " + jstrOr(n, "-", "lane")
+			// Every line loses its control characters, as the bash pipes
+			// its jq output through tr.
+			c.echo("%s", scrub(line+nodeMaintenanceSuffix(n)))
 		}
 	}
 	return nil
+}
+
+// nodeMaintenanceSuffix is what a Space node line shows after the lane:
+// `cordoned` while the node is unschedulable (any cordon: the tenant's, a
+// platform migration, a node retirement), then the last cordon, uncordon or
+// drain request with its phase, and the platform's reason when it gives one
+// (`drain Blocked: <reason>`, clipped to 256 runes). The bash twin builds the
+// same string in its jq filter (kubehz::space_status).
+func nodeMaintenanceSuffix(n any) string {
+	s := ""
+	if u, ok := jget(n, "unschedulable").(bool); ok && u {
+		s += "  cordoned"
+	}
+	m, ok := jget(n, "maintenance").(map[string]any)
+	if !ok {
+		return s
+	}
+	text := func(v any) string {
+		if t, ok := v.(string); ok {
+			return t
+		}
+		return "-"
+	}
+	s += "  " + text(m["action"]) + " " + text(m["phase"])
+	if r, ok := m["reason"].(string); ok && r != "" {
+		s += ": " + clip(r)
+	}
+	return s
 }

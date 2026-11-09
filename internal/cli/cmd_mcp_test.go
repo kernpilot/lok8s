@@ -792,7 +792,7 @@ func TestMcpTierCountsMatchTheDocs(t *testing.T) {
 	}{
 		{mcpExposure{}, 29},
 		{mcpExposure{mutating: true}, 53},
-		{mcpExposure{destructive: true}, 95},
+		{mcpExposure{destructive: true}, 98},
 	} {
 		if got := len(mcpToolNames(t, tc.x)); got != tc.want {
 			t.Errorf("%+v: %d tools, want %d (update the count here and in docs/reference/cli.md)", tc.x, got, tc.want)

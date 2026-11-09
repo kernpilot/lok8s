@@ -645,11 +645,11 @@ The server key stays `lok8s`, so the tool names (`lo_status`, `lo_build`, `lo_ti
 
 The server needs no other environment. `PATH_BASE: "."` pins the project root to the directory the editor starts the server in, so a `PATH_BASE` inherited from another project's shell cannot redirect it. Without that line the server takes the root from an exported `PATH_BASE` when set, else from the working directory. For every tool call it prepends the toolchain (`.bin`) and framework (`.lok8s`) directories to PATH.
 
-`LO_MCP_ALLOW=destructive` opens the full surface (95 tools). The count starts from the 81 tools of the argsh builtin. The Go server drops eight of them: the six commands whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`, `kubehz claim-code`, `kubehz space kubeconfig`, `kubehz cluster kubeconfig`), `chat`, and the single `drivers` tool. It adds 22 leaves that only the Go tree has: `init project`, `init cluster`, and one tool for each of the 20 driver operations (`lo_drivers_lo_provision`, …). 81 − 8 + 22 = 95. The Go-only top-level commands (`assets`, `mcp`, `operator`, `toolchain`) are never tools: the server projects the command tree without them. Remove the `env` entry for the readonly default (29 tools), or set `mutating` for the middle tier (53 tools). The tiers follow the marker table above. The [agent tools](../guide/kubehz.md#agent-tools) (`lo_kubehz_space_*`, `lo_kubehz_cluster_*`) follow the same tiers. List and get are in the default tier. Create needs `mutating`. Delete and lease need `destructive`.
+`LO_MCP_ALLOW=destructive` opens the full surface (98 tools). The count starts from the 84 tools of the argsh builtin. The Go server drops eight of them: the six commands whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`, `kubehz claim-code`, `kubehz space kubeconfig`, `kubehz cluster kubeconfig`), `chat`, and the single `drivers` tool. It adds 22 leaves that only the Go tree has: `init project`, `init cluster`, and one tool for each of the 20 driver operations (`lo_drivers_lo_provision`, …). 84 − 8 + 22 = 98. The Go-only top-level commands (`assets`, `mcp`, `operator`, `toolchain`) are never tools: the server projects the command tree without them. Remove the `env` entry for the readonly default (29 tools), or set `mutating` for the middle tier (53 tools). The tiers follow the marker table above. The [agent tools](../guide/kubehz.md#agent-tools) (`lo_kubehz_space_*`, `lo_kubehz_cluster_*`) follow the same tiers. List and get are in the default tier. Create needs `mutating`. Delete and lease need `destructive`.
 
 #### Bash variant
 
-The frozen argsh implementation serves the same protocol from the `mcp` builtin in `argsh.so` (`argsh builtins install`). argsh loads it from `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh.so`, `BASH_LOADABLES_PATH` or `LD_LIBRARY_PATH`. The builtin has no tiers: every leaf is a tool (81 tools), and the editor's own approval prompt is the only gate. `lo chat` still drives this server.
+The frozen argsh implementation serves the same protocol from the `mcp` builtin in `argsh.so` (`argsh builtins install`). argsh loads it from `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh.so`, `BASH_LOADABLES_PATH` or `LD_LIBRARY_PATH`. The builtin has no tiers: every leaf is a tool (84 tools), and the editor's own approval prompt is the only gate. `lo chat` still drives this server.
 
 The `lok8s.yaml` routing (`spec.implementation`, see [Choosing the implementation](#choosing-the-implementation)) does not select this server. `mcp` is a Go-only command, so no routing applies to it, and `lo mcp start` is always the Go server. In a project with `spec.implementation.default: bash`, each tool call of the Go server runs `lo <cmd> …`, and the routing sends that command to the bash tree.
 
@@ -798,6 +798,9 @@ lo kubehz handover            # control-plane handover (receive/preseed on the e
 lo kubehz node join           # join THIS machine to a hosted cluster (static pool)
 lo kubehz node status         # the nodes you brought, and the slot count
 lo kubehz node remove --name <n>  # remove one node and free its slot
+lo kubehz node cordon --name <n>  # Space: no new pods on one node
+lo kubehz node drain --name <n>   # Space: cordon one node and evict its pods
+lo kubehz node uncordon --name <n>  # Space: make one node schedulable again
 lo kubehz space list|get|create|delete|lease|kubeconfig   # spaces through the api (agent tools)
 lo kubehz cluster list|get|lease|kubeconfig               # hosted clusters through the api (agent tools)
 ```

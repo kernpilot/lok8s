@@ -13,6 +13,13 @@
 #   remove  take one node out of the cluster and free its slot
 #   status  list the nodes you brought, with the slot count
 #
+# Three more act on one node of a Space (`hosting: shared`). A Space gives you
+# no rights on the nodes of the shared control plane, so the platform makes
+# the change for you (see "Maintenance" below):
+#   cordon    mark the node unschedulable; its pods keep running
+#   uncordon  make the node schedulable again
+#   drain     cordon the node and evict its pods
+#
 # The CLUSTER-level `lo kubehz join` and `lo kubehz deregister` keep their own
 # meaning: they are about a cluster, not a node.
 #
@@ -36,8 +43,11 @@ kubehz::node() {
     'join|j@destructive'    'Join THIS machine to a hosted cluster (runs kubeadm join)'
     'remove|r@destructive'  'Remove one node from a hosted cluster and free its slot'
     'status|s@readonly'     'List the nodes you brought to a hosted cluster'
+    'cordon@destructive'    'Mark one node of a Space unschedulable (its pods keep running)'
+    'uncordon@destructive'  'Make one node of a Space schedulable again'
+    'drain@destructive'     'Cordon one node of a Space and evict its pods'
   )
-  :usage "Nodes you bring to a kubehz-hosted control plane" "${@}"
+  :usage "Nodes you bring to a kubehz control plane" "${@}"
   "${usage[@]}"
 }
 
@@ -201,12 +211,14 @@ node::api_error() {
 
 # Refuse a node name the platform would refuse anyway, and — for `remove` —
 # a name that is not a name at all: the value is pasted into a URL PATH, so a
-# `../` in it would address a different route.
+# `../` in it would address a different route. The refusal repeats the value
+# with each backslash doubled: error() prints through `echo -e`, and a typed
+# \e[2J must print as typed (as the Go twin prints it), not as an escape.
 # Usage: node::assert_node_name <name>
 node::assert_node_name() {
   local name="${1}"
   if [[ ! "${name}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ || "${#name}" -gt 63 ]]; then
-    error "kubehz: '${name}' is not a node name the platform accepts."
+    error "kubehz: '${name//\\/\\\\}' is not a node name the platform accepts."
     echo "  A node name is a DNS label: lowercase letters, digits and dashes, 63 at most." >&2
     echo "  Give one with:  --name <node-name>" >&2
     return 1
@@ -218,9 +230,27 @@ node::assert_node_name() {
 # and is then ignored, because the target here is --cluster-id. That is exactly
 # the two-names-one-meaning trap this file's header refuses. Catch it by name
 # from the raw argv, the same precedent .lok8s/lo uses to spot an explicit
-# --domain. --cluster-id is untouched: it matches neither arm.
+# --domain. --cluster-id and --space-id are untouched: they match neither arm.
 # Usage: node::reject_global_cluster_flag "$@"
 node::reject_global_cluster_flag() {
+  node::global_cluster_flag_given "$@" || return 0
+  error "kubehz: --cluster/-s names the kind cluster lo manages, not the target here."
+  echo "  Name the platform cluster with:  --cluster-id cl-xxxxxxxx" >&2
+  return 1
+}
+
+# The same trap on the verbs that act on a Space: the hint names --space-id.
+# Usage: node::reject_space_cluster_flag "$@"
+node::reject_space_cluster_flag() {
+  node::global_cluster_flag_given "$@" || return 0
+  error "kubehz: --cluster/-s names the kind cluster lo manages, not the target here."
+  echo "  Name the space with:  --space-id sp-xxxxxxxx" >&2
+  return 1
+}
+
+# Whether argv carries the global --cluster/-s in any form.
+# Usage: node::global_cluster_flag_given "$@"
+node::global_cluster_flag_given() {
   local arg
   for arg in "$@"; do
     case "${arg}" in
@@ -228,12 +258,10 @@ node::reject_global_cluster_flag() {
       # as `--cluster=cl-x`, so without it a value bound to the global
       # kind-cluster flag is silently dropped (review round 2, L1). No node
       # short flag starts with `s`, so this cannot swallow a real one.
-      --cluster|--cluster=*|-s|-s?*)
-        error "kubehz: --cluster/-s names the kind cluster lo manages, not the target here."
-        echo "  Name the platform cluster with:  --cluster-id cl-xxxxxxxx" >&2
-        return 1 ;;
+      --cluster|--cluster=*|-s|-s?*) return 0 ;;
     esac
   done
+  return 1
 }
 
 # The node name kubeadm would choose: the short hostname, lowercased.
@@ -615,4 +643,285 @@ node::status() {
     warn "The control plane has not published its join address yet — a join is refused until it does."
     warn "The platform publishes it after the cluster declares its first pool with kind: static."
   fi
+}
+
+# ── Maintenance (one node of a Space) ────────────────────
+
+# Cordon, uncordon and drain act on one node of a Space (`hosting: shared`).
+# The api publishes a request, and the platform's operator acts on it
+# shortly after: the change is asynchronous, and `lo kubehz status` shows the
+# last request of each node with its phase. There is one request per node,
+# and the latest action wins: a cordon, uncordon or drain replaces the
+# pending request of that node, and the answer names the action it replaced.
+#
+# The auth is the one the hosted verbs above use: a KUBEHZ_TOKEN bearer with
+# the clusters:write scope. A drain stops pods, so the platform asks a
+# browser session for a fresh two-factor sign-in; an API token is exempt.
+
+# Everything the three maintenance verbs need before they touch the api: the
+# active domain's kubehz block (hosting: shared), the api URL, the tenant
+# token, and the space id.
+#
+# `space_id` is the caller's own local, read through dynamic scope the way
+# node::preflight reads `cluster_id`: an explicit --space-id wins, and without
+# it the id comes from the space list, by the slug of the domain's spec. The
+# list needs the read scope, so --space-id is also the way for a token that
+# carries clusters:write only.
+# Usage: node::space_preflight <domain> <action>
+# Sets: NODE_SPACE_ID NODE_SPACE_LABEL (and the LOK8S_KUBEHZ_* block)
+node::space_preflight() {
+  local domain="${1}" action="${2}"
+  NODE_SPACE_ID=""
+  NODE_SPACE_LABEL=""
+
+  [[ -n "${domain}" ]] || { error "No active domain. Use: lo use <domain>"; return 1; }
+
+  local cluster_yaml="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${cluster_yaml}" ]] || { error "No cluster.lok8s.yaml for domain: ${domain}"; return 1; }
+
+  kubehz::read_config "${cluster_yaml}" || return 1
+
+  # Only a Space needs the platform for this. A hosted or a self-hosted
+  # cluster has an API server of its own, and kubectl does it there.
+  case "${LOK8S_KUBEHZ_HOSTING}" in
+    shared) ;;
+    hosted)
+      error "kubehz: '${domain}' is hosting: hosted. This command is for the nodes of a Space."
+      echo "  A hosted cluster has its own API server. Use kubectl cordon, uncordon or drain there." >&2
+      return 1 ;;
+    *)
+      error "kubehz: '${domain}' is hosting: ${LOK8S_KUBEHZ_HOSTING}. This command is for the nodes of a Space."
+      echo "  Use kubectl cordon, uncordon or drain against your own API server." >&2
+      return 1 ;;
+  esac
+
+  local api_url="${LOK8S_KUBEHZ_API_URL}"
+  [[ -n "${api_url}" ]] || { error "spec.kubehz.apiUrl is not set for ${domain}"; return 1; }
+  # The tenant bearer travels on this URL: never over plain HTTP.
+  http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+
+  [[ -n "${KUBEHZ_TOKEN:-}" ]] || {
+    error "KUBEHZ_TOKEN is required to ${action}."
+    echo "  Mint a clusters:write API token in the dashboard (Access -> API Tokens)." >&2
+    return 1
+  }
+
+  # The id is pasted into a URL PATH, so its shape is checked here: a `../`
+  # in it would address a different route. The refusal doubles each
+  # backslash for the `echo -e` of error() (see node::assert_node_name).
+  if [[ -n "${space_id:-}" ]]; then
+    if [[ ! "${space_id}" =~ ^[A-Za-z0-9-]+$ ]]; then
+      error "kubehz: '${space_id//\\/\\\\}' is not a space id."
+      echo "  A space id looks like sp-xxxxxxxx. Read yours in the dashboard." >&2
+      return 1
+    fi
+    NODE_SPACE_ID="${space_id}"
+    NODE_SPACE_LABEL="${space_id}"
+    return 0
+  fi
+
+  kubehz::space_config "${domain}" "${cluster_yaml}" || return 1
+  kubehz::space_lookup "${LOK8S_SPACE_SLUG}" || return 1
+  if [[ -z "${KUBEHZ_SPACE_ROW}" ]]; then
+    error "kubehz: no space '${LOK8S_SPACE_SLUG}' found for ${domain}."
+    echo "  Create it with 'lo provision', or name the space with:  --space-id sp-xxxxxxxx" >&2
+    return 1
+  fi
+  # The id of the row goes into the URL too, so it gets the same check.
+  local id
+  id=$(jq -r '.id // empty' <<<"${KUBEHZ_SPACE_ROW}" 2>/dev/null) || id=""
+  if [[ ! "${id}" =~ ^[A-Za-z0-9-]+$ ]]; then
+    error "kubehz: the space row carries no id this CLI can use."
+    return 1
+  fi
+  NODE_SPACE_ID="${id}"
+  NODE_SPACE_LABEL="${LOK8S_SPACE_SLUG}"
+}
+
+# The drain deadline as the api takes it: a whole number of seconds from 60
+# to 3600. Leading zeros are dropped, so 0600 is 600 (never octal), the same
+# number the Go twin sends. The refusal does not repeat the value: error()
+# prints through `echo -e`, and the Go twin would print a backslash as typed.
+# Usage: node::drain_timeout <value>
+# Outputs: the number of seconds to stdout
+node::drain_timeout() {
+  local value="${1}" n
+  if [[ "${value}" =~ ^0*([0-9]{1,4})$ ]]; then
+    n=$(( 10#${BASH_REMATCH[1]} ))
+    if (( n >= 60 && n <= 3600 )); then
+      echo "${n}"
+      return 0
+    fi
+  fi
+  error "kubehz: --timeout takes a whole number of seconds from 60 to 3600."
+  return 1
+}
+
+# Turn a refusal of the maintenance routes into an instruction. Each refusal
+# says whether something changed; the one that cannot know
+# (NODE_MAINTENANCE_OUTCOME_UNKNOWN) says how to find out. The rest prints the
+# api's own words, which are almost always the actionable ones.
+# Usage: node::maintenance_error <action> <name>
+node::maintenance_error() {
+  local action="${1}" name="${2}" code
+  code=$(jq -r '.data.code // .code // empty' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || code=""
+
+  case "${code}" in
+    NODE_NOT_JOINED)
+      error "kubehz: node '${name}' has not joined the space yet."
+      echo "  Nothing changed. Wait until 'lo kubehz status' shows the node Ready, then try again." >&2 ;;
+    NODE_MAINTENANCE_CONFLICT)
+      error "kubehz: a maintenance request of another space holds the request name of node '${name}'."
+      echo "  Nothing changed. Contact kubehz support." >&2 ;;
+    NODE_MAINTENANCE_UNAVAILABLE)
+      error "kubehz: the ${action} request did not reach the control plane."
+      echo "  Nothing changed. Try again shortly." >&2 ;;
+    NODE_MAINTENANCE_AUDIT_UNAVAILABLE)
+      error "kubehz: the platform cannot record the ${action} request, so it did not send it."
+      echo "  Nothing changed. Try again shortly." >&2 ;;
+    NODE_MAINTENANCE_OUTCOME_UNKNOWN)
+      error "kubehz: the result of the ${action} request is unknown. The request can have reached the control plane."
+      echo "  Read the phase of node '${name}' with 'lo kubehz status' before you try again." >&2
+      echo "  A drain that you send again can start a new deadline." >&2 ;;
+    TOKEN_SCOPE_MISSING|STEP_UP_REQUIRED|STEP_UP_MFA_REQUIRED)
+      node::api_error "Failed to ${action} node '${name}'" ;;
+    *)
+      kubehz::space_api_error "Failed to ${action} node '${name}'" ;;
+  esac
+  return 0
+}
+
+# Send one maintenance request and render the answer. A 202 says that the
+# platform took the request, not that the node changed: the output says so,
+# and names where to read the phase. Each <note> is one line that the caller
+# adds after the first line.
+# Usage: node::maintain <action> <name> <json_body|""> [note...]
+node::maintain() {
+  local action="${1}" name="${2}" payload="${3}"
+  shift 3
+
+  local rc=0
+  kubehz::space_api POST "/api/spaces/${NODE_SPACE_ID}/nodes/${name}/${action}" "${payload}" || rc=$?
+  if (( rc != 0 )); then
+    # The api answers 404 for a space it does not know and for a node the
+    # space does not hold; an api older than these routes answers 404 too.
+    if (( rc == 2 )) && [[ "${KUBEHZ_SPACE_API_STATUS}" == "404" ]]; then
+      error "kubehz: the platform knows no node '${name}' in space ${NODE_SPACE_LABEL}."
+      echo "  Check the node name and the space with:  lo kubehz status" >&2
+      return 1
+    fi
+    (( rc == 2 )) && node::maintenance_error "${action}" "${name}"
+    return 1
+  fi
+
+  # Guard the read: a 2xx body is not a promise of JSON. Only the three
+  # actions the api knows are named; anything else reads as no replacement.
+  local replaced
+  replaced=$(jq -r '(.data? // .) | .replaced // empty' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || replaced=""
+
+  echo "kubehz: ${action} of node '${name}' in space ${NODE_SPACE_LABEL} requested."
+  local note
+  for note in "$@"; do
+    echo "${note}"
+  done
+  # The answer names the replaced action only. A drain over a drain keeps
+  # the first deadline for the same machine only: a new machine under the
+  # same node name starts a new one. So the line says both.
+  case "${replaced}" in
+    drain)
+      if [[ "${action}" == "drain" ]]; then
+        echo "  It replaces a pending drain of this node. The first deadline stays if the machine is the same."
+      else
+        echo "  It cancels a pending drain. Pods that the drain did not evict stay on the node."
+      fi ;;
+    cordon|uncordon)
+      echo "  It replaces a pending ${replaced} of this node." ;;
+  esac
+  echo "  The change is asynchronous. Read its phase with:  lo kubehz status"
+}
+
+# Mark one node of a Space unschedulable.
+node::cordon() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local space_id="" name=""
+  local -a args=(
+    'name|n:!'          'Node name to cordon'
+    'space-id|'         'Space id (sp-xxxxxxxx); default: the space of the active domain'
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  node::reject_space_cluster_flag "${@}" || return 1
+  :args "Mark one node of a Space unschedulable (its pods keep running)" "${@}"
+
+  node::assert_node_name "${name}" || return 1
+  node::space_preflight "${domain}" "cordon a node" || return 1
+  node::maintain cordon "${name}" "" \
+    "  The scheduler puts no new pods on the node. The pods on it keep running."
+}
+
+# Make one node of a Space schedulable again.
+node::uncordon() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local space_id="" name=""
+  local -a args=(
+    'name|n:!'          'Node name to uncordon'
+    'space-id|'         'Space id (sp-xxxxxxxx); default: the space of the active domain'
+    'domain|:^~domain'  'Domain to use'
+    "${args[@]:-}"
+  )
+  node::reject_space_cluster_flag "${@}" || return 1
+  :args "Make one node of a Space schedulable again" "${@}"
+
+  node::assert_node_name "${name}" || return 1
+  node::space_preflight "${domain}" "uncordon a node" || return 1
+  node::maintain uncordon "${name}" "" \
+    "  The scheduler can put new pods on the node again. Evicted pods do not move back." \
+    "  A cordon that the platform holds (a migration, a node retirement) stays."
+}
+
+# Cordon one node of a Space and evict its pods. The node stays in the
+# space: an uncordon puts it back into service.
+node::drain() {
+  local domain="${domain:-${DOMAIN_NAME:-}}"
+  local space_id="" name="" timeout="" evict_unmanaged=0
+  local -a args=(
+    'name|n:!'            'Node name to drain'
+    'timeout|'            'Seconds the platform tries, from 60 to 3600; default: the platform default'
+    'evict-unmanaged|:+'  'Also evict the pods that no controller recreates'
+    'space-id|'           'Space id (sp-xxxxxxxx); default: the space of the active domain'
+    'domain|:^~domain'    'Domain to use'
+    "${args[@]:-}"
+  )
+  node::reject_space_cluster_flag "${@}" || return 1
+  :args "Cordon one node of a Space and evict its pods" "${@}"
+
+  node::assert_node_name "${name}" || return 1
+  local seconds=""
+  if [[ -n "${timeout}" ]]; then
+    seconds=$(node::drain_timeout "${timeout}") || return 1
+  fi
+  node::space_preflight "${domain}" "drain a node" || return 1
+
+  # `force` is the api's name (kubectl drain --force). The flag has its own
+  # name here because `lo` owns --force/-f globally.
+  local force=false
+  (( evict_unmanaged )) && force=true
+  local payload
+  payload=$(jq -nc --arg t "${seconds}" --argjson f "${force}" \
+    '(if $t != "" then {timeoutSeconds: ($t | tonumber)} else {} end)
+      + (if $f then {force: true} else {} end)')
+
+  local -a notes=("  The platform cordons the node and evicts its pods.")
+  if [[ -n "${seconds}" ]]; then
+    notes+=("  It tries for at most ${seconds} seconds.")
+  else
+    notes+=("  It tries until the deadline the platform sets by default.")
+  fi
+  if [[ "${force}" == "true" ]]; then
+    notes+=("  It also evicts the pods that no controller recreates. Nothing recreates them.")
+  else
+    notes+=("  A pod that no controller recreates stays, and the drain waits as Blocked."
+      "  To evict such pods too, add:  --evict-unmanaged")
+  fi
+  node::maintain drain "${name}" "${payload}" "${notes[@]}"
 }

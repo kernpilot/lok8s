@@ -644,6 +644,21 @@ kubehz::space_status() {
   count=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '(.data? // .) | .usage.nodes // 0' 2>/dev/null) || count=0
   local max; max=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '(.data? // .) | .usage.maxNodes // "-"' 2>/dev/null) || max='-'
   echo "Nodes:   ${count}/${max}"
+  # After the lane: `cordoned` while the node is unschedulable (any cordon:
+  # yours, a platform migration, a node retirement), then the last cordon,
+  # uncordon or drain request with its phase, and the reason when the
+  # platform gives one (`drain Blocked: <reason>`). The reason is the
+  # platform's own text: clipped to 256 characters here (jq counts code
+  # points, as the Go twin counts runes), and every line loses its control
+  # characters in the tr after it, as node::scrub does.
   echo "${KUBEHZ_SPACE_API_BODY}" \
-    | jq -r '(.data? // .) | .nodes[]? | "  " + .name + "  " + (.status // "-") + "  " + (.lane // "-")' 2>/dev/null || true
+    | jq -r '(.data? // .) | .nodes[]? | "  " + .name + "  " + (.status // "-") + "  " + (.lane // "-")
+        + (if .unschedulable == true then "  cordoned" else "" end)
+        + (if (.maintenance | type) == "object" then
+             "  " + (.maintenance.action | if type == "string" then . else "-" end)
+             + " " + (.maintenance.phase | if type == "string" then . else "-" end)
+             + (.maintenance.reason | if type == "string" and . != ""
+                 then ": " + (if length > 256 then .[0:256] + "…" else . end) else "" end)
+           else "" end)' 2>/dev/null \
+    | tr -d '\000-\010\013-\037\177' || true
 }
