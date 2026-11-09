@@ -20,9 +20,11 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -70,6 +72,19 @@ func (c *Context) request(ctx context.Context, method, url string, auth bearer, 
 		return nil, err
 	}
 	return &httpResult{Status: resp.StatusCode, Body: raw, Header: resp.Header}, nil
+}
+
+// requestSent is request, plus whether the request left this machine: the
+// transport wrote its headers to the connection (httptrace WroteHeaders). A
+// transport error before that point (DNS, connect, the TLS handshake) sent
+// nothing. After it, the server can have acted on the request although no
+// answer came back. The bash twin reads the same from the curl exit code
+// (node::maintain).
+func (c *Context) requestSent(ctx context.Context, method, url string, auth bearer, body []byte) (*httpResult, bool, error) {
+	var sent atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{WroteHeaders: func() { sent.Store(true) }})
+	res, err := c.request(ctx, method, url, auth, body)
+	return res, sent.Load(), err
 }
 
 // fetch is `curl -fsSL`: any status >= 400 is a failure (curl exit 22),

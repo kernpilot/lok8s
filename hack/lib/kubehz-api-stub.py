@@ -10,9 +10,11 @@ One server for the two sections of the harness that need an api:
 - The node maintenance cases: `lo kubehz node cordon|uncordon|drain` on
   the nodes of SPACE (POST /api/spaces/sp-1a2b3c4d/nodes/<name>/<action>,
   answered by the node name: an accepted request, the 202 that names a
-  replaced request, and each refusal code of the three routes), and the
-  node list that `lo kubehz status` reads, with the cordon and maintenance
-  fields. These routes need the minted bearer too (KUBEHZ_TOKEN=parity-jwt).
+  replaced request, each refusal code of the three routes, the answers of a
+  gateway, a 2xx that is not the answer of the route, and a connection that
+  ends with no answer), and the node list that `lo kubehz status` reads,
+  with the cordon and maintenance fields. These routes need the minted
+  bearer too (KUBEHZ_TOKEN=parity-jwt).
 - The register cases: POST /api/clusters/register answers one response that
   fits every register mode and hands out a new bind secret. The Hetzner
   calls of the claim-key mode (/v1/ssh_keys) get an empty key list and a
@@ -154,8 +156,14 @@ SPACE_NODES = {
          "maintenance": {"phase": 7, "since": "2026-10-04T12:12:00.000Z", "reason": "\u00fc" * 300}},
         {"name": "joining-1", "lane": "unknown", "status": "Joining", "joinedAt": None, "lastSeenAt": None,
          "kubeletVersion": None, "unschedulable": False, "maintenance": None},
+        # A newline and a tab in an action and a reason: both become a
+        # space, so the reason cannot print a node line of its own.
+        {"name": "worker-6", "lane": "metal", "status": "Ready", "joinedAt": None, "lastSeenAt": None,
+         "kubeletVersion": "v1.34.1", "unschedulable": False,
+         "maintenance": {"action": "drain\tx", "phase": "Failed", "since": "2026-10-04T12:13:00.000Z",
+                         "reason": "no\n  worker-9  Ready  metal\tforged"}},
     ],
-    "usage": {"nodes": 5, "nodesReady": 3, "maxNodes": 5},
+    "usage": {"nodes": 6, "nodesReady": 4, "maxNodes": 6},
     "kubelet": {"oldest": "v1.34.1", "floor": "v1.32", "belowFloor": False},
 }
 
@@ -163,6 +171,10 @@ SPACE_NODES = {
 def accepted(name, action, replaced=None):
     return 202, ok({"name": name, "action": action, "status": "requested", "replaced": replaced})
 
+
+# DROP: read the request, then close the connection with no answer (a
+# transport error after the send).
+DROP = object()
 
 # POST /api/spaces/sp-1a2b3c4d/nodes/<name>/<action>, by (name, action). A
 # pair that is not here answers 404 NOT_FOUND (no such node).
@@ -173,8 +185,16 @@ MAINTENANCE = {
     ("worker-2", "drain"): accepted("worker-2", "drain", "drain"),
     ("worker-2", "cordon"): accepted("worker-2", "cordon", "drain"),
     ("worker-2", "uncordon"): accepted("worker-2", "uncordon", "cordon"),
-    # A 202 whose body is not JSON: the request stands, nothing is replaced.
+    # A 2xx that is not the answer of the route (not JSON, or no status
+    # "requested"): the result is open.
     ("html-1", "cordon"): (202, "<html>accepted</html>"),
+    ("odd-1", "cordon"): (202, ok({"name": "odd-1", "action": "cordon", "status": "queued", "replaced": None})),
+    # A gateway in front of the api: a timeout, a bad gateway, and a 503
+    # with no code. The result is open.
+    ("worker-10", "drain"): (504, "upstream request timeout"),
+    ("worker-11", "cordon"): (502, ""),
+    ("worker-12", "uncordon"): (503, "no healthy upstream"),
+    ("drop-1", "cordon"): DROP,
     ("joining-1", "cordon"): refusal(409, "NODE_NOT_JOINED", "The node has not joined the space yet",
                                      "Nothing changed. Wait until GET /api/spaces/{id}/nodes shows the node Ready, then retry."),
     ("worker-3", "drain"): refusal(503, "NODE_MAINTENANCE_OUTCOME_UNKNOWN", "The outcome of the node maintenance request is unknown",
@@ -312,8 +332,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.answer(200, KUBECONFIG)
         if self.command == "POST" and path.startswith(MAINTENANCE_PREFIX):
             name, _, action = path[len(MAINTENANCE_PREFIX):].partition("/")
-            return self.answer(*MAINTENANCE.get((name, action), refusal(404, "NOT_FOUND", "Node not found in this space",
-                                                                            "List the nodes with GET /api/spaces/{id}/nodes.")))
+            found = MAINTENANCE.get((name, action), refusal(404, "NOT_FOUND", "Node not found in this space",
+                                                             "List the nodes with GET /api/spaces/{id}/nodes."))
+            if found is DROP:
+                self.close_connection = True
+                return None
+            return self.answer(*found)
         if self.command == "POST" and path == "/api/spaces" and isinstance(body, dict):
             return self.answer(*CREATES.get(body.get("slug"), refusal(400, "BAD_REQUEST", "slug: invalid")))
         return self.answer(*ROUTES.get((self.command, path), refusal(404, "NOT_FOUND", "Not found")))

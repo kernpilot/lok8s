@@ -34,11 +34,15 @@ type NodeOpts struct {
 	PrintOnly      bool
 }
 
-var clusterIDRe = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
+// urlIDRe is the shape of an id that is pasted into a URL PATH (a cluster
+// id, a space id): a `../` in it would address a different route. The bash
+// twin is node::url_id.
+var urlIDRe = regexp.MustCompile(`^[A-Za-z0-9-]+$`)
 
-// nodePreflight ports node::preflight: the active domain's kubehz block, the
-// api URL, the tenant token, and the platform cluster id.
-func (c *Context) nodePreflight(ctx context.Context, domain, action, clusterIDFlag string) (*Config, string, error) {
+// nodeDomainConfig ports node::domain_config, the first half of the two node
+// preflights (nodePreflight, spacePreflight): the active domain, its spec
+// file and its kubehz block. It returns the config and the spec path.
+func (c *Context) nodeDomainConfig(domain string) (*Config, string, error) {
 	if domain == "" {
 		c.errorf("No active domain. Use: lo use <domain>")
 		return nil, "", ErrHandled
@@ -52,33 +56,54 @@ func (c *Context) nodePreflight(ctx context.Context, domain, action, clusterIDFl
 	if err != nil {
 		return nil, "", err
 	}
+	return cfg, cy, nil
+}
+
+// nodeAPIAccess ports node::api_access, the part of the two node preflights
+// after the hosting check: the api URL, over https only (the tenant bearer
+// travels on it), and the tenant token.
+func (c *Context) nodeAPIAccess(cfg *Config, domain, action string) error {
+	if cfg.APIURL == "" {
+		c.errorf("spec.kubehz.apiUrl is not set for %s", domain)
+		return ErrHandled
+	}
+	if err := c.requireHTTPS(cfg.APIURL, "spec.kubehz.apiUrl"); err != nil {
+		return err
+	}
+	if c.getenv("KUBEHZ_TOKEN") == "" {
+		c.errorf("KUBEHZ_TOKEN is required to %s.", action)
+		c.echoErr("  Mint a clusters:write API token in the dashboard (Access -> API Tokens).")
+		return ErrHandled
+	}
+	return nil
+}
+
+// nodePreflight ports node::preflight: the active domain's kubehz block, the
+// api URL, the tenant token, and the platform cluster id.
+func (c *Context) nodePreflight(ctx context.Context, domain, action, clusterIDFlag string) (*Config, string, error) {
+	cfg, _, err := c.nodeDomainConfig(domain)
+	if err != nil {
+		return nil, "", err
+	}
 	switch cfg.Hosting {
 	case "hosted":
 	case "shared":
 		c.errorf("kubehz: '%s' is hosting: shared — its nodes join a Space.", domain)
 		c.echoErr("  Mint a Space join ticket with:  lo kubehz join <node-name>")
+		c.echoErr("  Read the nodes of the Space and their maintenance phase with:  lo kubehz status")
 		return nil, "", ErrHandled
 	default:
 		c.errorf("kubehz: '%s' is hosting: %s — it runs its own control plane.", domain, cfg.Hosting)
 		c.echoErr("  Join nodes with kubeadm against your own API server.")
 		return nil, "", ErrHandled
 	}
-	apiURL := cfg.APIURL
-	if apiURL == "" {
-		c.errorf("spec.kubehz.apiUrl is not set for %s", domain)
-		return nil, "", ErrHandled
-	}
-	if err := c.requireHTTPS(apiURL, "spec.kubehz.apiUrl"); err != nil {
+	if err := c.nodeAPIAccess(cfg, domain, action); err != nil {
 		return nil, "", err
 	}
-	if c.getenv("KUBEHZ_TOKEN") == "" {
-		c.errorf("KUBEHZ_TOKEN is required to %s.", action)
-		c.echoErr("  Mint a clusters:write API token in the dashboard (Access -> API Tokens).")
-		return nil, "", ErrHandled
-	}
+	apiURL := cfg.APIURL
 	// An explicit --cluster-id wins. The value is pasted into a URL PATH.
 	if clusterIDFlag != "" {
-		if !clusterIDRe.MatchString(clusterIDFlag) {
+		if !urlIDRe.MatchString(clusterIDFlag) {
 			c.errorf("kubehz: '%s' is not a cluster id.", clusterIDFlag)
 			c.echoErr("  A cluster id looks like cl-xxxxxxxx. Read yours in the dashboard.")
 			return nil, "", ErrHandled

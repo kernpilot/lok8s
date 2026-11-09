@@ -210,6 +210,8 @@ _stub_all() {
   assert_failure
   assert_output --partial "hosting: shared"
   assert_output --partial "lo kubehz join <node-name>"
+  # The Space verbs point at `lo kubehz status`: `node status` does too.
+  assert_output --partial "  Read the nodes of the Space and their maintenance phase with:  lo kubehz status"
 }
 
 @test "preflight: a plain-HTTP apiUrl is refused before any request" {

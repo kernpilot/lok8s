@@ -253,8 +253,8 @@ A few things worth knowing before you reach for it:
 ### Cordon, uncordon and drain a node
 
 A space gives you no rights on the nodes of the shared control plane, so
-`kubectl cordon` and `kubectl drain` are refused there. The platform does
-these three operations for you, one node at a time:
+the shared control plane refuses `kubectl cordon` and `kubectl drain`. The
+platform does these three operations for you, one node at a time:
 
 ```bash
 lo kubehz node cordon --name worker-1     # the scheduler puts no new pods on it
@@ -270,8 +270,8 @@ lo kubehz node uncordon --name worker-1   # schedulable again
 | `--timeout` | `drain` | How many seconds the platform tries, a whole number from 60 to 3600. Without it, the platform default applies. |
 | `--evict-unmanaged` | `drain` | Also evict the pods that no controller recreates (`kubectl drain --force`). Nothing recreates them. |
 
-- **The change is asynchronous.** The command ends when the platform has
-  accepted the request, not when the node has changed. `lo kubehz status`
+- **The change is asynchronous.** The command ends when the platform accepts
+  the request, not when the node changes. `lo kubehz status`
   shows each node with `cordoned` while it is unschedulable, then the last
   request and its phase, and the reason when the platform gives one:
 
@@ -285,7 +285,8 @@ lo kubehz node uncordon --name worker-1   # schedulable again
   drain replaces the pending request of the same node, and the output says
   what it replaced. A cordon or an uncordon cancels a pending drain: the pods
   that the drain did not evict stay on the node. A second drain of the same
-  machine keeps the deadline of the first one.
+  machine keeps the deadline of the first one and its timeout: a new
+  `--timeout` has no effect then, and the output says so.
 - **A pod that no controller recreates stops a drain.** Without
   `--evict-unmanaged`, the pod stays and the drain waits with the phase
   `Blocked`. Uncordon the node to cancel, or drain again with
@@ -295,7 +296,8 @@ lo kubehz node uncordon --name worker-1   # schedulable again
   `cordoned`.
 - **A drain does not remove the node.** The node stays in the space and
   holds its slot. Uncordon it to put it back into service. To deregister
-  the node is a separate step.
+  the node, use the dashboard or the api route
+  `DELETE /api/spaces/{id}/nodes/{name}`: `lo` has no command for it.
 - **The token.** The calls need a `KUBEHZ_TOKEN` with the `clusters:write`
   scope. The slug lookup also reads your space list, which needs the `read`
   scope: with `--space-id`, `lo` sends no list request. From a browser
@@ -304,9 +306,11 @@ lo kubehz node uncordon --name worker-1   # schedulable again
 - **Spaces only.** A `hosting: hosted` or `self` cluster has its own API
   server, and `lo` refuses the three commands there: use `kubectl cordon`,
   `kubectl uncordon` or `kubectl drain` against that API server.
-- **In `lo mcp`, they are destructive tools** (`lo_kubehz_node_cordon`,
-  `lo_kubehz_node_uncordon`, `lo_kubehz_node_drain`): a server offers them
-  only with `--allow-destructive`, because each one changes a live cluster.
+- **In `lo mcp`, the tier follows the platform's own gate.** A drain evicts
+  pods, so `lo_kubehz_node_drain` is a destructive tool: a server offers it
+  only with `--allow-destructive`. A cordon and an uncordon move no pod and
+  undo each other, so `lo_kubehz_node_cordon` and `lo_kubehz_node_uncordon`
+  are idempotent tools in the `--allow-mutating` tier.
 
 Every refusal says whether something changed:
 
@@ -315,7 +319,7 @@ Every refusal says whether something changed:
 | The node has not joined | The space knows the node name, but the platform has not seen the node in the control plane yet. Nothing changed. Wait until `lo kubehz status` shows it `Ready`. |
 | The request did not reach the control plane | Nothing changed. Try again shortly. |
 | The platform cannot record the request | The platform sends no request it cannot audit. Nothing changed. Try again shortly. |
-| The result is unknown | The request can have reached the control plane. Read the phase with `lo kubehz status` before you try again: a drain that you send again can start a new deadline. |
+| The result is unknown | Possibly, the request got to the control plane. Read the phase with `lo kubehz status` before you try again: a drain that you send again can start a new deadline. `lo` also gives this answer, with the cause in brackets, when the answer of the api does not arrive: a gateway answers for the api (HTTP 502, HTTP 504, or HTTP 503 with no code), the connection ends after `lo` sends the request, or a 2xx answer is not the answer of the route. |
 | The platform knows no such node | The node name or the space is wrong. Check both with `lo kubehz status`. |
 
 ### Limits, and whose problem each one is

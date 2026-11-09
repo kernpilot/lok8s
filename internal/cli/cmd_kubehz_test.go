@@ -208,6 +208,12 @@ func TestKubehzCommandsClusterFreePaths(t *testing.T) {
 	if !errors.Is(err, ErrHandled) || !strings.Contains(errOut, "Error: missing required flag: name") {
 		t.Fatalf("node remove: %v %s", err, errOut)
 	}
+	// An empty --name is given (argsh `:!`): the name check refuses it with
+	// the value, as for cordon, uncordon and drain.
+	_, errOut, err = runKubehzLo(t, base, "kubehz", "node", "remove", "--name", "")
+	if !errors.Is(err, ErrHandled) || !strings.Contains(errOut, "kubehz: '' is not a node name the platform accepts.") {
+		t.Fatalf("node remove --name '': %v %s", err, errOut)
+	}
 	_, errOut, err = runKubehzLo(t, base, "kubehz", "handover", "receive")
 	if !errors.Is(err, ErrHandled) || !strings.Contains(errOut, "Error: missing required flag: bundle") {
 		t.Fatalf("receive: %v %s", err, errOut)
@@ -262,8 +268,13 @@ func TestKubehzNodeMaintenanceClusterFreePaths(t *testing.T) {
 		}
 	}
 	// --timeout and --evict-unmanaged belong to drain only.
-	_, errOut, err := runKubehzLo(t, base, "kubehz", "node", "cordon", "--name", "worker-1", "--timeout", "600")
-	if err == nil || !strings.Contains(errOut, "timeout") {
-		t.Fatalf("cordon --timeout: %v\n%s", err, errOut)
+	for _, args := range [][]string{
+		{"kubehz", "node", "cordon", "--name", "worker-1", "--timeout", "600"},
+		{"kubehz", "node", "uncordon", "--name", "worker-1", "--evict-unmanaged"},
+	} {
+		_, errOut, err := runKubehzLo(t, base, args...)
+		if err == nil || !strings.Contains(errOut, "Error: unknown flag: "+args[5]) {
+			t.Fatalf("%v: %v\n%s", args, err, errOut)
+		}
 	}
 }

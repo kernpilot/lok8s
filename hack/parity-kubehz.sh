@@ -577,7 +577,7 @@ if [[ "$(uname -s)" != Linux ]] || ! command -v python3 >/dev/null 2>&1 || ! com
   if [[ -n "${CI:-}" ]]; then
     fail "the https stub needs Linux, python3 and openssl, and the CI runner has them"
   else
-    echo "skip: the agent tools and the register cases (the https stub needs Linux, python3 and openssl)"
+    echo "skip: the agent tools, the node maintenance cases and the register cases (the https stub needs Linux, python3 and openssl)"
   fi
 elif ! api_stub; then
   fail "the https stub of the api did not start: $(head -c 300 "${WORK}/stub.out")"
@@ -804,6 +804,9 @@ check - kubehz node remove --name Bad_
 check - kubehz node remove --name ../../clusters
 check - kubehz node status --domain hosted-http.dev
 check - kubehz node status --domain alpha.dev
+# A Space: the hint names the Space join and where to read the nodes.
+check - kubehz node status --domain shared.dev
+check - kubehz node remove --name worker-1 --domain shared.dev
 
 # ── node maintenance (a Space): the local refusals, no api reached ──────────
 # cordon, uncordon and drain act on the nodes of a Space only. A missing
@@ -831,6 +834,7 @@ check - kubehz node cordon --name ../../clusters --domain shared.dev
 # bash tree prints through `echo -e`).
 check - kubehz node cordon --name '\e[2J' --domain shared.dev
 check - kubehz node remove --name 'a\\b\e[31m'
+check - kubehz node remove --name ''
 for timeout in 59 3601 0 00000 abc 0x10 6e2 99999 ' 600' '\e[31m'; do
   check - kubehz node drain --name worker-1 --domain shared.dev --timeout "${timeout}"
 done
@@ -855,12 +859,14 @@ check_parse - kubehz handover bogus
 
 # ── node maintenance (a Space) against the https stub ───────────────────────
 # The stub answers POST /api/spaces/sp-1a2b3c4d/nodes/<name>/<action> by the
-# node name: an accepted request, each `replaced` value, a 202 that is not
-# JSON, each refusal code of the three routes, a hostile refusal, and a 404
-# for any other name. acme.dev finds the space by its slug (acme), yes.dev
-# finds the space with the hostile name (slug yes, no maintenance routes),
-# nospace.dev finds none. `lo kubehz status` reads the node list with the
-# cordon and maintenance fields.
+# node name: an accepted request, each `replaced` value, a 2xx that is not
+# the answer of the route, each refusal code of the three routes, the
+# answers of a gateway (504, 502, a 503 with no code), a connection that
+# ends with no answer, a hostile refusal, and a 404 for any other name.
+# acme.dev finds the space by its slug (acme), yes.dev finds the space with
+# the hostile name (slug yes, no maintenance routes), nospace.dev finds none.
+# `lo kubehz status` reads the node list with the cordon and maintenance
+# fields.
 if [[ -n "${STUB_PORT}" ]]; then
   for slug in acme yes nospace; do
     mk "${slug}.dev" <<EOF
@@ -884,6 +890,14 @@ EOF
   check_api - kubehz node cordon --name worker-2 --domain acme.dev
   check_api - kubehz node uncordon --name worker-2 --domain acme.dev
   check_api - kubehz node cordon --name html-1 --domain acme.dev
+  check_api - kubehz node cordon --name odd-1 --domain acme.dev
+  check_api - kubehz node drain --name worker-10 --domain acme.dev
+  check_api - kubehz node cordon --name worker-11 --domain acme.dev
+  check_api - kubehz node uncordon --name worker-12 --domain acme.dev
+  # No answer after the send. curl -sS prints its own line first (its code
+  # and text depend on the curl and TLS versions: 52 "Empty reply from
+  # server", or 56 "unexpected eof"); the Go binary has no such line.
+  check_api '^curl: \([0-9]+\) ' kubehz node cordon --name drop-1 --domain acme.dev
   check_api - kubehz node cordon --name joining-1 --domain acme.dev
   check_api - kubehz node drain --name worker-3 --domain acme.dev
   check_api - kubehz node drain --name worker-4 --domain acme.dev
@@ -904,6 +918,9 @@ EOF
   expect_rc 0 kubehz node cordon --name worker-1 --domain acme.dev
   expect_rc 1 kubehz node cordon --name joining-1 --domain acme.dev
   expect_rc 1 kubehz node drain --name ghost-1 --domain acme.dev
+  expect_rc 1 kubehz node cordon --name html-1 --domain acme.dev
+  expect_rc 1 kubehz node drain --name worker-10 --domain acme.dev
+  expect_rc 1 kubehz node cordon --name drop-1 --domain acme.dev
 
   unset SSL_CERT_FILE CURL_CA_BUNDLE KUBEHZ_TOKEN
 fi

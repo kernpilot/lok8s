@@ -40,7 +40,8 @@ setup() {
 
   # argsh `:args` builtin: absent when a lib is sourced in bats (the stub of
   # kubehz_node_test.bats). A boolean is any --flag whose next token is
-  # another flag or the end of argv.
+  # another flag or the end of argv. An empty next token is a value, as in
+  # argsh: `--name ''` sets name to the empty string.
   :args() {
     shift # description
     while (( $# )); do
@@ -48,7 +49,7 @@ setup() {
         --*)
           local _n="${1#--}"
           _n="${_n//-/_}"
-          if [[ -z "${2:-}" || "${2}" == --* ]]; then
+          if (( $# < 2 )) || [[ "${2}" == --* ]]; then
             printf -v "${_n}" '%s' 1
             shift
           else
@@ -106,7 +107,8 @@ _stub_config() {
 # One curl mock for the routes these verbs touch. The three maintenance
 # routes of worker-1 answer STUB_ACT_CODE/STUB_ACT_BODY; every request line
 # goes to CURL_LOG, and a body to CURL_BODY (a request with no body writes
-# no CURL_BODY).
+# no CURL_BODY). STUB_POST_CURL_RC makes every POST a transport failure:
+# curl prints nothing and exits with that code.
 _stub_curl() {
   curl() {
     local method="GET" url="" body="" want_status=0 ctype=""
@@ -122,6 +124,10 @@ _stub_curl() {
     done
     echo "${method} ${url}${ctype:+ ${ctype}}" >> "${CURL_LOG}"
     [[ -n "${body}" ]] && printf '%s' "${body}" > "${CURL_BODY}"
+    if [[ "${method}" == POST && -n "${STUB_POST_CURL_RC:-}" ]]; then
+      echo "curl: (${STUB_POST_CURL_RC}) stub failure" >&2
+      return "${STUB_POST_CURL_RC}"
+    fi
 
     local answer status
     case "${method} ${url##*api.example.test}" in
@@ -244,6 +250,14 @@ _refusal() {
     assert_output --partial "kubehz: '${id}' is not a space id."
     assert_output --partial "A space id looks like sp-xxxxxxxx. Read yours in the dashboard."
   done
+  [[ ! -s "${CURL_LOG}" ]]
+}
+
+@test "input: an empty --name is given, and the name check refuses it" {
+  _stub_all
+  run node::drain --name '' --timeout 600
+  assert_failure
+  assert_output --partial "kubehz: '' is not a node name the platform accepts."
   [[ ! -s "${CURL_LOG}" ]]
 }
 
@@ -400,28 +414,39 @@ _refusal() {
   _stub_all
   local last="  The change is asynchronous. Read its phase with:  lo kubehz status"
 
-  export STUB_ACT_BODY='{"ok":true,"data":{"replaced":"drain"}}'
+  local keeps="  It replaces a pending drain of this node. The first deadline stays if the machine is the same."
+
+  export STUB_ACT_BODY='{"ok":true,"data":{"status":"requested","replaced":"drain"}}'
   run node::drain --name worker-1
   assert_success
-  [[ "${output}" == *$'\n'"  It replaces a pending drain of this node. The first deadline stays if the machine is the same."$'\n'"${last}" ]]
+  [[ "${output}" == *$'\n'"  To evict such pods too, add:  --evict-unmanaged"$'\n'"${keeps}"$'\n'"${last}" ]]
+  # A drain over a drain keeps the first timeout too: a new --timeout has no
+  # effect, and the output says so.
+  run node::drain --name worker-1 --timeout 0600
+  assert_success
+  [[ "${output}" == *$'\n'"${keeps}"$'\n'"  For the same machine, the first timeout stays too, so --timeout 600 has no effect."$'\n'"${last}" ]]
   run node::cordon --name worker-1
   [[ "${output}" == *$'\n'"  It cancels a pending drain. Pods that the drain did not evict stay on the node."$'\n'"${last}" ]]
   run node::uncordon --name worker-1
   [[ "${output}" == *$'\n'"  It cancels a pending drain. Pods that the drain did not evict stay on the node."$'\n'"${last}" ]]
 
-  export STUB_ACT_BODY='{"ok":true,"data":{"replaced":"cordon"}}'
+  export STUB_ACT_BODY='{"ok":true,"data":{"status":"requested","replaced":"cordon"}}'
   run node::uncordon --name worker-1
+  [[ "${output}" == *$'\n'"  It replaces a pending cordon of this node."$'\n'"${last}" ]]
+  # A drain --timeout over a cordon starts its own deadline: no timeout line.
+  run node::drain --name worker-1 --timeout 600
+  [[ "${output}" == *$'\n'"  It tries for at most 600 seconds."$'\n'* ]]
   [[ "${output}" == *$'\n'"  It replaces a pending cordon of this node."$'\n'"${last}" ]]
 
   # A bare (unenveloped) body reads the same.
-  export STUB_ACT_BODY='{"replaced":"uncordon"}'
+  export STUB_ACT_BODY='{"status":"requested","replaced":"uncordon"}'
   run node::drain --name worker-1
   [[ "${output}" == *$'\n'"  It replaces a pending uncordon of this node."$'\n'"${last}" ]]
 }
 
-@test "answer: nothing replaced, an unknown value, or a body that is not JSON prints no replaced line" {
+@test "answer: nothing replaced, or an unknown value, prints no replaced line" {
   _stub_all
-  for body in '{"ok":true,"data":{"replaced":null}}' '{"ok":true,"data":{"replaced":"reboot"}}' '<html>ok</html>' ''; do
+  for body in '{"ok":true,"data":{"status":"requested","replaced":null}}' '{"ok":true,"data":{"status":"requested","replaced":"reboot"}}' '{"ok":true,"data":{"status":"requested"}}'; do
     export STUB_ACT_BODY="${body}"
     run node::cordon --name worker-1
     assert_success
@@ -469,7 +494,7 @@ _refusal() {
     "kubehz: the platform cannot record the cordon request, so it did not send it." \
     "  Nothing changed. Try again shortly."
   _check drain 503 "$(_refusal NODE_MAINTENANCE_OUTCOME_UNKNOWN)" \
-    "kubehz: the result of the drain request is unknown. The request can have reached the control plane." \
+    "kubehz: the result of the drain request is unknown. Possibly, the request got to the control plane." \
     "  Read the phase of node 'worker-1' with 'lo kubehz status' before you try again." \
     "  A drain that you send again can start a new deadline."
   _check cordon 403 "$(_refusal TOKEN_SCOPE_MISSING)" \
@@ -482,6 +507,77 @@ _refusal() {
   _check uncordon 409 "$(_refusal LEASE_ENDED)" \
     "Failed to uncordon node 'worker-1' (HTTP 409): The lease of this space ended" \
     "  After the end, the api refuses every change except the delete."
+}
+
+# The three lines of an open result, on stderr, with the cause in brackets.
+_unknown_lines() {
+  printf '[error] kubehz: the result of the %s request is unknown (%s). Possibly, the request got to the control plane.\n' "$1" "$2"
+  printf "  Read the phase of node 'worker-1' with 'lo kubehz status' before you try again.\n"
+  printf "  A drain that you send again can start a new deadline."
+}
+
+@test "errors: a gateway answer or a 2xx that is not the route's answer is an open result" {
+  _stub_all
+  _check_unknown() {
+    local verb="$1" code="$2" body="$3" cause="$4"
+    export STUB_ACT_CODE="${code}" STUB_ACT_BODY="${body}"
+    run --separate-stderr "node::${verb}" --name worker-1
+    assert_failure
+    [[ -z "${output}" ]] || { echo "stdout: ${output}"; return 1; }
+    local want; want=$(_unknown_lines "${verb}" "${cause}")
+    [[ "${stderr}" == "${want}" ]] || { echo "stderr: ${stderr}"; echo "want:   ${want}"; return 1; }
+  }
+  _check_unknown cordon 502 '' "HTTP 502"
+  _check_unknown drain 504 'upstream request timeout' "HTTP 504"
+  _check_unknown uncordon 503 'no healthy upstream' "HTTP 503"
+  _check_unknown drain 503 '{"statusCode":503,"data":{"message":"busy"}}' "HTTP 503"
+  _check_unknown cordon 202 '<html>accepted</html>' "HTTP 202 with an answer this CLI cannot read"
+  _check_unknown cordon 202 '' "HTTP 202 with an answer this CLI cannot read"
+  _check_unknown drain 202 '{"ok":true,"data":{"name":"worker-1","status":"queued","replaced":null}}' "HTTP 202 with an answer this CLI cannot read"
+  _check_unknown uncordon 200 '{"ok":true,"data":{"replaced":null}}' "HTTP 200 with an answer this CLI cannot read"
+
+  # A 503 with a code of the route, and a 500, keep their own lines: the
+  # api answered them itself.
+  export STUB_ACT_CODE=503 STUB_ACT_BODY='{"ok":false,"data":{"code":"NODE_MAINTENANCE_UNAVAILABLE"}}'
+  run node::cordon --name worker-1
+  assert_failure
+  assert_output --partial "kubehz: the cordon request did not reach the control plane."
+  refute_output --partial "unknown"
+  export STUB_ACT_CODE=500 STUB_ACT_BODY='{"ok":false,"data":{"message":"Internal error"}}'
+  run node::cordon --name worker-1
+  assert_failure
+  assert_output --partial "Failed to cordon node 'worker-1' (HTTP 500): Internal error"
+  refute_output --partial "unknown"
+}
+
+@test "errors: a transport failure after the send is an open result, one before it is unreachable" {
+  _stub_all
+  local rc
+  # curl -sS prints its own error line first (the stub: "curl: (<rc>) stub
+  # failure"); the Go twin has no such line.
+  # After the send: no reply, a receive failure, a reset of an HTTP/2
+  # stream, and a timeout (curl cannot tell its phase, so it counts here).
+  for rc in 52 56 92 28; do
+    STUB_POST_CURL_RC="${rc}" run --separate-stderr node::drain --name worker-1
+    assert_failure
+    [[ -z "${output}" ]]
+    [[ "${stderr}" == "curl: (${rc}) stub failure"$'\n'"$(_unknown_lines drain "no answer")" ]] || { echo "rc ${rc}: ${stderr}"; return 1; }
+    [[ "${stderr}" != *"unreachable"* ]]
+  done
+  # Before the send: the host name, the connect, the TLS handshake, the
+  # certificate. Nothing reached the api.
+  for rc in 6 7 35 60; do
+    STUB_POST_CURL_RC="${rc}" run --separate-stderr node::cordon --name worker-1
+    assert_failure
+    [[ -z "${output}" ]]
+    [[ "${stderr}" == "curl: (${rc}) stub failure"$'\n'"[error] kubehz API unreachable (POST /api/spaces/sp-5/nodes/worker-1/cordon)" ]] || { echo "rc ${rc}: ${stderr}"; return 1; }
+  done
+  # The token check refuses a token with a control character before curl
+  # runs: its own line, and no second one.
+  KUBEHZ_TOKEN=$'khz_test_token\r' run --separate-stderr node::cordon --name worker-1 --space-id sp-5
+  assert_failure
+  [[ "${stderr}" == *"environment variable KUBEHZ_TOKEN must not contain a control character"* ]]
+  [[ "${stderr}" != *"unreachable"* && "${stderr}" != *"unknown"* ]]
 }
 
 @test "errors: a hostile refusal loses its control characters" {
@@ -507,8 +603,9 @@ _refusal() {
 '{"name":"worker-3","status":"NotReady","lane":"metal","unschedulable":true,"maintenance":null},'\
 '{"name":"worker-4","status":"Ready","lane":"metal","unschedulable":"true","maintenance":{"phase":7,"reason":"'"${long}"'"}},'\
 '{"name":"worker-5","status":"Ready","lane":"metal","maintenance":{"action":"cordon","phase":"Pending","reason":""}},'\
-'{"name":"worker-6","status":"Ready","lane":"metal","maintenance":"drain"}'\
-'],"usage":{"nodes":6,"maxNodes":6}}}'
+'{"name":"worker-6","status":"Ready","lane":"metal","maintenance":"drain"},'\
+'{"name":"worker-7","status":"Ready","lane":"metal","maintenance":{"action":"drain\tx","phase":"Failed","reason":"no\n  worker-9  Ready  metal\tforged"}}'\
+'],"usage":{"nodes":7,"maxNodes":7}}}'
   export LOK8S_KUBEHZ_API_URL="https://api.example.test"
   run kubehz::space_status "acme.example.org" "/dev/null"
   assert_success
@@ -518,14 +615,19 @@ _refusal() {
   assert_line "  worker-4  Ready  metal  - -: ${clipped}…"
   assert_line "  worker-5  Ready  metal  cordon Pending"
   assert_line "  worker-6  Ready  metal"
+  # A newline or a tab in a server string becomes a space: one node, one
+  # line.
+  assert_line "  worker-7  Ready  metal  drain x Failed: no   worker-9  Ready  metal forged"
+  refute_line --regexp '^  worker-9'
+  [[ "${output}" != *$'\t'* ]]
   [[ "${output}" != *$'\e'* ]]
 }
 
 # ── the usage tree ───────────────────────────────────────
 
-@test "usage: the node group lists the three Space verbs as destructive" {
+@test "usage: cordon and uncordon are idempotent, drain is destructive" {
   local src="${_PROJECT_ROOT}/.lok8s/libs/kubehz/node"
-  grep -qE "^\s+'cordon@destructive'\s+'Mark one node of a Space unschedulable \(its pods keep running\)'" "${src}"
-  grep -qE "^\s+'uncordon@destructive'\s+'Make one node of a Space schedulable again'" "${src}"
+  grep -qE "^\s+'cordon@idempotent'\s+'Mark one node of a Space unschedulable \(its pods keep running\)'" "${src}"
+  grep -qE "^\s+'uncordon@idempotent'\s+'Make one node of a Space schedulable again'" "${src}"
   grep -qE "^\s+'drain@destructive'\s+'Cordon one node of a Space and evict its pods'" "${src}"
 }

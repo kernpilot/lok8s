@@ -78,6 +78,9 @@ func TestNodePreflightHostingGate(t *testing.T) {
 	mustErr(t, err)
 	mustContain(t, h.output(), "hosting: shared")
 	mustContain(t, h.output(), "lo kubehz join <node-name>")
+	// The cordon, uncordon and drain lines point at `lo kubehz status`:
+	// `node status` on a Space points there too.
+	mustContain(t, h.output(), "  Read the nodes of the Space and their maintenance phase with:  lo kubehz status")
 }
 
 func TestNodePreflightHTTPSAndToken(t *testing.T) {

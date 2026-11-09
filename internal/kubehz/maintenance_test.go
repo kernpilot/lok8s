@@ -4,6 +4,7 @@ package kubehz
 // `lo kubehz node cordon|uncordon|drain` on the nodes of a Space.
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -255,7 +256,7 @@ func TestNodeMaintenanceSuccessText(t *testing.T) {
 			"  The change is asynchronous. Read its phase with:  lo kubehz status\n"},
 	} {
 		h := maintHarness(t)
-		h.handle("POST /api/spaces/sp-5/nodes/worker-1/"+tc.action, 202, `{"ok":true,"data":{"replaced":null}}`)
+		h.handle("POST /api/spaces/sp-5/nodes/worker-1/"+tc.action, 202, `{"ok":true,"data":{"status":"requested","replaced":null}}`)
 		mustOK(t, maintRun(h, tc.action, tc.o), h.output())
 		if got := h.out.String(); got != tc.want {
 			t.Fatalf("%s %+v stdout:\n%s\nwant:\n%s", tc.action, tc.o, got, tc.want)
@@ -272,22 +273,28 @@ func TestNodeMaintenanceReplacedLine(t *testing.T) {
 	t.Parallel()
 	const (
 		keepsDeadline = "  It replaces a pending drain of this node. The first deadline stays if the machine is the same.\n"
+		keepsTimeout  = "  For the same machine, the first timeout stays too, so --timeout 600 has no effect.\n"
 		cancelsDrain  = "  It cancels a pending drain. Pods that the drain did not evict stay on the node.\n"
 	)
 	for _, tc := range []struct {
-		action, body, want string
+		action, timeout, body, want string
 	}{
-		{"drain", `{"ok":true,"data":{"replaced":"drain"}}`, keepsDeadline},
-		{"cordon", `{"ok":true,"data":{"replaced":"drain"}}`, cancelsDrain},
-		{"uncordon", `{"ok":true,"data":{"replaced":"drain"}}`, cancelsDrain},
-		{"uncordon", `{"ok":true,"data":{"replaced":"cordon"}}`, "  It replaces a pending cordon of this node.\n"},
-		{"drain", `{"ok":true,"data":{"replaced":"uncordon"}}`, "  It replaces a pending uncordon of this node.\n"},
+		{"drain", "", `{"ok":true,"data":{"status":"requested","replaced":"drain"}}`, keepsDeadline},
+		// A drain over a drain keeps the first timeout too: the new one has
+		// no effect, and the output says so.
+		{"drain", "0600", `{"ok":true,"data":{"status":"requested","replaced":"drain"}}`, keepsDeadline + keepsTimeout},
+		{"cordon", "", `{"ok":true,"data":{"status":"requested","replaced":"drain"}}`, cancelsDrain},
+		{"uncordon", "", `{"ok":true,"data":{"status":"requested","replaced":"drain"}}`, cancelsDrain},
+		{"uncordon", "", `{"ok":true,"data":{"status":"requested","replaced":"cordon"}}`, "  It replaces a pending cordon of this node.\n"},
+		{"drain", "", `{"ok":true,"data":{"status":"requested","replaced":"uncordon"}}`, "  It replaces a pending uncordon of this node.\n"},
+		// A drain --timeout over a cordon starts its own deadline: no line.
+		{"drain", "600", `{"ok":true,"data":{"status":"requested","replaced":"cordon"}}`, "  It replaces a pending cordon of this node.\n"},
 		// A bare (unenveloped) body reads the same.
-		{"cordon", `{"replaced":"uncordon"}`, "  It replaces a pending uncordon of this node.\n"},
+		{"cordon", "", `{"status":"requested","replaced":"uncordon"}`, "  It replaces a pending uncordon of this node.\n"},
 	} {
 		h := maintHarness(t)
 		h.handle("POST /api/spaces/sp-5/nodes/worker-1/"+tc.action, 202, tc.body)
-		mustOK(t, maintRun(h, tc.action, MaintenanceOpts{Name: "worker-1"}), h.output())
+		mustOK(t, maintRun(h, tc.action, MaintenanceOpts{Name: "worker-1", Timeout: tc.timeout}), h.output())
 		out := h.out.String()
 		mustContain(t, out, tc.want)
 		// The replaced line comes after the notes and before the last line.
@@ -295,8 +302,8 @@ func TestNodeMaintenanceReplacedLine(t *testing.T) {
 			t.Fatalf("%s replaced line out of place:\n%s", tc.action, out)
 		}
 	}
-	// Nothing replaced, an unknown value, or a body that is not JSON: no line.
-	for _, body := range []string{`{"ok":true,"data":{"replaced":null}}`, `{"ok":true,"data":{"replaced":"reboot"}}`, `<html>ok</html>`, ``} {
+	// Nothing replaced, or an unknown value: no line.
+	for _, body := range []string{`{"ok":true,"data":{"status":"requested","replaced":null}}`, `{"ok":true,"data":{"status":"requested","replaced":"reboot"}}`, `{"ok":true,"data":{"status":"requested"}}`} {
 		h := maintHarness(t)
 		h.handle("POST /api/spaces/sp-5/nodes/worker-1/cordon", 202, body)
 		mustOK(t, h.ctx.NodeCordon(t.Context(), "acme.example.org", MaintenanceOpts{Name: "worker-1"}), h.output())
@@ -339,7 +346,7 @@ func TestNodeMaintenanceErrorCodes(t *testing.T) {
 			"kubehz: the platform cannot record the cordon request, so it did not send it.",
 			"  Nothing changed. Try again shortly."}},
 		{"drain", 503, "NODE_MAINTENANCE_OUTCOME_UNKNOWN", []string{
-			"kubehz: the result of the drain request is unknown. The request can have reached the control plane.",
+			"kubehz: the result of the drain request is unknown. Possibly, the request got to the control plane.",
 			"  Read the phase of node 'worker-1' with 'lo kubehz status' before you try again.",
 			"  A drain that you send again can start a new deadline."}},
 		{"cordon", 403, "TOKEN_SCOPE_MISSING", []string{
@@ -364,6 +371,92 @@ func TestNodeMaintenanceErrorCodes(t *testing.T) {
 		if h.out.Len() != 0 {
 			t.Fatalf("%s: a refusal goes to stderr only, stdout %q", tc.code, h.out.String())
 		}
+	}
+}
+
+// The result is open when the answer did not come from the route: a gateway
+// answered for the api (502, 504, a 503 with no code), or a 2xx is not the
+// answer of the route. Each prints the three lines of
+// NODE_MAINTENANCE_OUTCOME_UNKNOWN with the cause, on stderr only, and the
+// command fails.
+func TestNodeMaintenanceOutcomeUnknownOnTheWay(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		action string
+		status int
+		body   string
+		cause  string
+	}{
+		{"cordon", 502, ``, "HTTP 502"},
+		{"drain", 504, `upstream request timeout`, "HTTP 504"},
+		{"uncordon", 503, `no healthy upstream`, "HTTP 503"},
+		{"drain", 503, `{"statusCode":503,"data":{"message":"busy"}}`, "HTTP 503"},
+		{"cordon", 202, `<html>accepted</html>`, "HTTP 202 with an answer this CLI cannot read"},
+		{"cordon", 202, ``, "HTTP 202 with an answer this CLI cannot read"},
+		{"drain", 202, `{"ok":true,"data":{"name":"worker-1","status":"queued","replaced":null}}`, "HTTP 202 with an answer this CLI cannot read"},
+		{"uncordon", 200, `{"ok":true,"data":{"replaced":null}}`, "HTTP 200 with an answer this CLI cannot read"},
+	} {
+		h := maintHarness(t)
+		h.handle("POST /api/spaces/sp-5/nodes/worker-1/"+tc.action, tc.status, tc.body)
+		mustErr(t, maintRun(h, tc.action, MaintenanceOpts{Name: "worker-1"}))
+		want := "[error] kubehz: the result of the " + tc.action + " request is unknown (" + tc.cause + "). Possibly, the request got to the control plane.\n" +
+			"  Read the phase of node 'worker-1' with 'lo kubehz status' before you try again.\n" +
+			"  A drain that you send again can start a new deadline.\n"
+		if got := h.errOut.String(); got != want {
+			t.Fatalf("%d %q: stderr\n%s\nwant\n%s", tc.status, tc.body, got, want)
+		}
+		if h.out.Len() != 0 {
+			t.Fatalf("%d %q: stdout %q", tc.status, tc.body, h.out.String())
+		}
+	}
+	// A 503 with a code of the route, and a 500, keep their own lines: the
+	// api answered them itself.
+	h := maintHarness(t)
+	h.handle("POST /api/spaces/sp-5/nodes/worker-1/cordon", 503, `{"ok":false,"data":{"code":"NODE_MAINTENANCE_UNAVAILABLE"}}`)
+	mustErr(t, h.ctx.NodeCordon(t.Context(), "acme.example.org", MaintenanceOpts{Name: "worker-1"}))
+	mustContain(t, h.output(), "kubehz: the cordon request did not reach the control plane.")
+	mustNotContain(t, h.output(), "unknown")
+	h = maintHarness(t)
+	h.handle("POST /api/spaces/sp-5/nodes/worker-1/cordon", 500, `{"ok":false,"data":{"message":"Internal error"}}`)
+	mustErr(t, h.ctx.NodeCordon(t.Context(), "acme.example.org", MaintenanceOpts{Name: "worker-1"}))
+	mustContain(t, h.output(), "Failed to cordon node 'worker-1' (HTTP 500): Internal error")
+	mustNotContain(t, h.output(), "unknown")
+}
+
+// A transport error after the send (the connection ends with no answer)
+// leaves the result open. One before the send (nothing listens) is the
+// "unreachable" line of every api call: nothing reached the api.
+func TestNodeMaintenanceTransportErrors(t *testing.T) {
+	t.Parallel()
+	h := maintHarness(t)
+	h.handleFunc("POST /api/spaces/sp-5/nodes/worker-1/drain", func(w http.ResponseWriter, _ *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		_ = conn.Close()
+	})
+	mustErr(t, h.ctx.NodeDrain(t.Context(), "acme.example.org", MaintenanceOpts{Name: "worker-1"}))
+	if !h.anyReq("POST", "/api/spaces/sp-5/nodes/worker-1/drain") {
+		t.Fatalf("the drain did not reach the server: %+v", h.reqs())
+	}
+	want := "[error] kubehz: the result of the drain request is unknown (no answer). Possibly, the request got to the control plane.\n" +
+		"  Read the phase of node 'worker-1' with 'lo kubehz status' before you try again.\n" +
+		"  A drain that you send again can start a new deadline.\n"
+	if got := h.errOut.String(); got != want {
+		t.Fatalf("stderr\n%s\nwant\n%s", got, want)
+	}
+	mustNotContain(t, h.output(), "unreachable")
+
+	// Nothing listens on the closed server's port.
+	h = newHarness(t)
+	addr := h.apiURL()
+	h.srv.Close()
+	h.writeSpec("acme.example.org", "kind: Kubehz\nspec:\n  kubehz:\n    hosting: shared\n    apiUrl: "+addr+"\n")
+	mustErr(t, h.ctx.NodeCordon(t.Context(), "acme.example.org", MaintenanceOpts{Name: "worker-1", SpaceID: "sp-5"}))
+	if got := h.errOut.String(); got != "[error] kubehz API unreachable (POST /api/spaces/sp-5/nodes/worker-1/cordon)\n" {
+		t.Fatalf("stderr %q", got)
 	}
 }
 
@@ -405,8 +498,9 @@ func TestSpaceStatusShowsNodeMaintenance(t *testing.T) {
 		`{"name":"worker-3","status":"NotReady","lane":"metal","unschedulable":true,"maintenance":null},`+
 		`{"name":"worker-4","status":"Ready","lane":"metal","unschedulable":"true","maintenance":{"phase":7,"reason":"`+long+`"}},`+
 		`{"name":"worker-5","status":"Ready","lane":"metal","maintenance":{"action":"cordon","phase":"Pending","reason":""}},`+
-		`{"name":"worker-6","status":"Ready","lane":"metal","maintenance":"drain"}`+
-		`],"usage":{"nodes":6,"maxNodes":6}}}`)
+		`{"name":"worker-6","status":"Ready","lane":"metal","maintenance":"drain"},`+
+		`{"name":"worker-7","status":"Ready","lane":"metal","maintenance":{"action":"drain\tx","phase":"Failed","reason":"no\n  worker-9  Ready  metal\tforged"}}`+
+		`],"usage":{"nodes":7,"maxNodes":7}}}`)
 	mustOK(t, h.ctx.SpaceStatus(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec), h.output())
 	out := h.out.String()
 	for _, want := range []string{
@@ -416,8 +510,14 @@ func TestSpaceStatusShowsNodeMaintenance(t *testing.T) {
 		"  worker-4  Ready  metal  - -: " + strings.Repeat("ü", 256) + "…\n",
 		"  worker-5  Ready  metal  cordon Pending\n",
 		"  worker-6  Ready  metal\n",
+		// A newline or a tab in a server string becomes a space: one node,
+		// one line.
+		"  worker-7  Ready  metal  drain x Failed: no   worker-9  Ready  metal forged\n",
 	} {
 		mustContain(t, out, want)
+	}
+	if strings.Contains(out, "\n  worker-9") || strings.Contains(out, "\t") {
+		t.Fatalf("a server string printed a line of its own:\n%s", out)
 	}
 	mustNotContain(t, out, "\x1b")
 	mustNotContain(t, out, strings.Repeat("ü", 257))

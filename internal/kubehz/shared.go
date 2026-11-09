@@ -737,13 +737,19 @@ func (c *Context) SpaceStatus(ctx context.Context, cfg *Config, domain, clusterY
 	if nodes, ok := jget(body, "nodes").([]any); ok {
 		for _, n := range nodes {
 			line := "  " + jstr(jget(n, "name")) + "  " + jstrOr(n, "-", "status") + "  " + jstrOr(n, "-", "lane")
-			// Every line loses its control characters, as the bash pipes
-			// its jq output through tr.
-			c.echo("%s", scrub(line+nodeMaintenanceSuffix(n)))
+			// One node, one line: a newline or a tab in a server string (a
+			// reason, a name) becomes a space, so it cannot print a second
+			// node line. Then the line loses its control characters, as the
+			// bash pipes its jq output through tr.
+			c.echo("%s", scrub(nodeLineSpaces.Replace(line+nodeMaintenanceSuffix(n))))
 		}
 	}
 	return nil
 }
+
+// nodeLineSpaces turns the two characters that scrub keeps (newline, tab)
+// into a space on a Space node line (the bash twin: split and join in jq).
+var nodeLineSpaces = strings.NewReplacer("\n", " ", "\t", " ")
 
 // nodeMaintenanceSuffix is what a Space node line shows after the lane:
 // `cordoned` while the node is unschedulable (any cordon: the tenant's, a

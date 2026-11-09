@@ -255,12 +255,21 @@ func newKubehzNode(paths *config.Paths) *cobra.Command {
 // (node::cordon, node::uncordon, node::drain). The inherited --cluster/-s is
 // refused first, with the --space-id hint; then a missing --name, in the
 // argsh wording.
+//
+// The MCP tier follows the api's own gate: a drain evicts pods, so it is
+// destructive (the api asks a browser session for a step-up). A cordon and
+// an uncordon move no pod and undo each other, so they are idempotent and
+// in the mutating tier (argsh: @idempotent).
 func newKubehzNodeMaintenance(paths *config.Paths, verb, short, nameHelp string,
 	run func(*kubehz.Context, context.Context, string, kubehz.MaintenanceOpts) error) *cobra.Command {
+	spec := commandSpec{idempotent: true}
+	if verb == "drain" {
+		spec = commandSpec{destructive: true}
+	}
 	c := &cobra.Command{
 		Use:          verb + " --name <node>",
 		Short:        short,
-		Annotations:  commandSpec{destructive: true}.annotations(),
+		Annotations:  spec.annotations(),
 		Args:         secretsArgs(0, 0),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -353,7 +362,9 @@ func newKubehzNodeRemove(paths *config.Paths) *cobra.Command {
 			if err != nil {
 				return kubehzRun(err)
 			}
-			if o.Name == "" {
+			// argsh refuses only an absent --name (`:!`); an empty one
+			// reaches the name check, which refuses it with the value.
+			if !cmd.Flags().Changed("name") {
 				return argshErrorf(cmd.ErrOrStderr(), "missing required flag: name")
 			}
 			d := ambientMainEnv(cmd, paths)
