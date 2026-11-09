@@ -45,19 +45,19 @@ type Release struct {
 	Assets map[string]string
 }
 
-// BRelease is the pinned b. Verified 2026-09-03: v4.18.7 is the latest
-// release (published 2026-08-30); the sums are from its checksums.txt
-// (https://github.com/fentas/b/releases/download/v4.18.7/checksums.txt,
-// GPG-signed by the maintainer as checksums.txt.sig). b ships linux,
-// freebsd and windows builds — no darwin — so only the two linux
-// architectures `lo` itself is released for are listed; macOS users
-// install b by hand (see Bootstrap).
+// BRelease is the pinned b. Verified 2026-11-09: v4.18.8 is the latest
+// release (published 2026-11-09); the sums are from its checksums.txt
+// (https://github.com/fentas/b/releases/download/v4.18.8/checksums.txt,
+// GPG-signed by the maintainer as checksums.txt.sig) and match the
+// downloaded tarballs. b ships linux, freebsd and windows builds — no
+// darwin — so only the two linux architectures `lo` itself is released
+// for are listed; macOS users install b by hand (see Bootstrap).
 var BRelease = Release{
-	Version: "4.18.7",
+	Version: "4.18.8",
 	BaseURL: "https://github.com/fentas/b/releases/download",
 	Assets: map[string]string{
-		"b-linux-amd64.tar.gz": "decfaac19baa348349e568ae620323f95dacb31c1194abefe0ff7f5265f2822a",
-		"b-linux-arm64.tar.gz": "1e70ae1a1f5a6aafa39e3374e2d5824a14e72f78d04eb5b5fe84a666e5599c34",
+		"b-linux-amd64.tar.gz": "297e07f301060480a78380afae066b3c0013c572d704862e2b2f2a4477540aad",
+		"b-linux-arm64.tar.gz": "db041e60a5dcb639ef7e4bf227ef6127477f749ee793740d16aecdd3aef81207",
 	},
 }
 

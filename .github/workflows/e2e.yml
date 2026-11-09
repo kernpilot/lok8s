@@ -247,9 +247,9 @@ jobs:
           # rate-limited runner IP answers without a tag_name. The
           # checksum makes the download verifiable, which resolving
           # "latest" never was.
-          B_VERSION=4.18.6
+          B_VERSION=4.18.8
           curl -fsSL "https://github.com/fentas/b/releases/download/v${B_VERSION}/b-linux-amd64.tar.gz" -o /tmp/b.tar.gz
-          echo "096566667b7f788ff1436c7411b1c2204a231bda9ca1d325b7651e4ccd4e7d94  /tmp/b.tar.gz" | sha256sum -c -
+          echo "297e07f301060480a78380afae066b3c0013c572d704862e2b2f2a4477540aad  /tmp/b.tar.gz" | sha256sum -c -
           mkdir -p "${HOME}/.local/bin"
           tar -xzf /tmp/b.tar.gz -C "${HOME}/.local/bin" b
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
