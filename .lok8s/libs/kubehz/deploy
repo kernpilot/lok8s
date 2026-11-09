@@ -473,9 +473,16 @@ kubehz::deploy_apply() {
 # field the pod does not have yet (no node, no container status) is empty.
 # Every field comes from the cluster and is printed, so the line shape is
 # pinned: DNS names for the pod and the node, letters for the reason, an image
-# reference without spaces, quotes or escapes.
+# reference without spaces, quotes or escapes. LC_ALL=C keeps every class
+# ASCII only: in a UTF-8 locale such as en_US.UTF-8, [A-Za-z] also matches
+# letters like é. The Go twin is ASCII only too.
+#
+# The container name (agent) and the selector are the ones in the vendored
+# live-agent/base/deployment.yaml; a bats test fails when a re-vendor changes
+# either.
 # Usage: kubehz::live_agent_pull_hint
 kubehz::live_agent_pull_hint() {
+  local LC_ALL=C
   local pods line pod node reason image registry
   local re='^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([A-Za-z]{1,64})[|]([A-Za-z0-9][A-Za-z0-9._/:@-]{0,510})$'
   pods=$(kubectl -n kubehz-system get pods -l app.kubernetes.io/name=kubehz-live-agent --request-timeout=10s \
@@ -496,28 +503,34 @@ kubehz::live_agent_pull_hint() {
     esac
     registry=$(kubehz::image_registry "${image}")
     printf '  %s\n' \
-      "A pull that hangs or times out can mean that the IPv6 path from the node to ${registry} is broken: the connection opens but carries no data, and the pull does not try IPv4." \
+      "A pull that hangs or times out can mean that the IPv6 path from the node to ${registry} is broken." \
+      "On that path, the connection opens but carries no data, and the pull does not try IPv4." \
       "To check, run these two commands on node ${node}. If only the IPv6 command times out, the IPv6 path is broken:" \
       "  curl -6 -sS -o /dev/null --max-time 15 https://${registry}/v2/" \
-      "  curl -4 -sS -o /dev/null --max-time 15 https://${registry}/v2/" \
+      "  curl -4 -sS -o /dev/null --max-time 15 https://${registry}/v2/" >&2
+    if [[ "${registry}" == ghcr.io ]]; then
+      printf '  %s\n' "ghcr.io sends the image layers from another host. Run the two commands against https://pkg-containers.githubusercontent.com/ too." >&2
+    fi
+    printf '  %s\n' \
       "To work around it, make the node reach ${registry} over IPv4: repair its IPv6 route, or run the node without IPv6. Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod ${pod}" >&2
     return 0
   done <<< "${pods}"
   return 0
 }
 
-# Whether the kubelet started to pull an image for the pod and has not
-# finished: a Pulling event and no Pulled event. A pod in ContainerCreating
-# can also wait for a volume, and then the events show no pull, or a finished
-# one. An events read that fails answers "no".
+# Whether the kubelet started to pull the agent container's image and has not
+# finished: a Pulling event and no Pulled event, both for that container (the
+# kubelet sets the event's involvedObject.fieldPath to spec.containers{<name>}).
+# A pod in ContainerCreating can also wait for a volume, and then the events
+# show no pull, or a finished one. An events read that fails answers "no".
 # Usage: kubehz::image_pull_in_progress <pod>
 kubehz::image_pull_in_progress() {
   local pod="${1}" events
   events=$(kubectl -n kubehz-system get events \
     --field-selector "involvedObject.kind=Pod,involvedObject.name=${pod}" --request-timeout=10s \
-    -o 'jsonpath={range .items[*]}{.reason}{"\n"}{end}' 2>/dev/null) || return 1
+    -o 'jsonpath={range .items[*]}{.involvedObject.fieldPath}|{.reason}{"\n"}{end}' 2>/dev/null) || return 1
   events=$'\n'"${events}"$'\n'
-  [[ "${events}" == *$'\nPulling\n'* && "${events}" != *$'\nPulled\n'* ]]
+  [[ "${events}" == *$'\nspec.containers{agent}|Pulling\n'* && "${events}" != *$'\nspec.containers{agent}|Pulled\n'* ]]
 }
 
 # The host that the container runtime pulls an image from: the first path

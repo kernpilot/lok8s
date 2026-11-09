@@ -689,17 +689,20 @@ _ready_timeout() {
 AGENT_IMAGE="ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8ee963b347ae29407895c8a8f51ec6d064aa"
 
 @test "ready timeout: a pull that started and did not finish is named, with the IPv6 check and the work-around" {
-  # The first pod has no node yet (not a pull state) and is skipped.
+  # The first pod has no node yet (not a pull state) and is skipped. A
+  # finished pull of another container does not count.
   STUB_PODS="kubehz-live-agent-6b7c9d8f5-q2w4r|||${AGENT_IMAGE}"$'\n'"kubehz-live-agent-6b7c9d8f5-x2k4q|worker-1|ContainerCreating|${AGENT_IMAGE}"$'\n'
-  STUB_EVENTS=$'Scheduled\nPulling\n'
+  STUB_EVENTS=$'|Scheduled\nspec.containers{sidecar}|Pulling\nspec.containers{sidecar}|Pulled\nspec.containers{agent}|Pulling\n'
   _ready_timeout
 
   local want
   want="  Pod kubehz-live-agent-6b7c9d8f5-x2k4q on node worker-1 started to pull its image ${AGENT_IMAGE}, and the pull did not finish.
-  A pull that hangs or times out can mean that the IPv6 path from the node to ghcr.io is broken: the connection opens but carries no data, and the pull does not try IPv4.
+  A pull that hangs or times out can mean that the IPv6 path from the node to ghcr.io is broken.
+  On that path, the connection opens but carries no data, and the pull does not try IPv4.
   To check, run these two commands on node worker-1. If only the IPv6 command times out, the IPv6 path is broken:
     curl -6 -sS -o /dev/null --max-time 15 https://ghcr.io/v2/
     curl -4 -sS -o /dev/null --max-time 15 https://ghcr.io/v2/
+  ghcr.io sends the image layers from another host. Run the two commands against https://pkg-containers.githubusercontent.com/ too.
   To work around it, make the node reach ghcr.io over IPv4: repair its IPv6 route, or run the node without IPv6. Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod kubehz-live-agent-6b7c9d8f5-x2k4q"
   [[ "${output}" == *"${want}" ]] || { echo "output does not end with the pull hint:"; echo "${output}"; false; }
   refute_output --partial "q2w4r on node"
@@ -707,7 +710,7 @@ AGENT_IMAGE="ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8
   # The two reads, argv for argv (the Go binary sends the same).
   run grep -cxF -e '-n kubehz-system get pods -l app.kubernetes.io/name=kubehz-live-agent --request-timeout=10s -o jsonpath={range .items[*]}{.metadata.name}|{.spec.nodeName}|{.status.containerStatuses[?(@.name=="agent")].state.waiting.reason}|{.spec.containers[?(@.name=="agent")].image}{"\n"}{end}' "${STUB_KUBECTL_LOG}"
   assert_output "1"
-  run grep -cxF -e '-n kubehz-system get events --field-selector involvedObject.kind=Pod,involvedObject.name=kubehz-live-agent-6b7c9d8f5-x2k4q --request-timeout=10s -o jsonpath={range .items[*]}{.reason}{"\n"}{end}' "${STUB_KUBECTL_LOG}"
+  run grep -cxF -e '-n kubehz-system get events --field-selector involvedObject.kind=Pod,involvedObject.name=kubehz-live-agent-6b7c9d8f5-x2k4q --request-timeout=10s -o jsonpath={range .items[*]}{.involvedObject.fieldPath}|{.reason}{"\n"}{end}' "${STUB_KUBECTL_LOG}"
   assert_output "1"
   run grep -c "get events" "${STUB_KUBECTL_LOG}"
   assert_output "1"
@@ -721,6 +724,8 @@ AGENT_IMAGE="ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8
     assert_output --partial "  Pod kubehz-live-agent-6b7c9d8f5-x2k4q on node worker-1 cannot pull its image ${image} (${reason}). Read why: kubectl -n kubehz-system describe pod kubehz-live-agent-6b7c9d8f5-x2k4q"
     assert_output --partial "the IPv6 path from the node to registry.example.com:5000 is broken"
     assert_output --partial "    curl -6 -sS -o /dev/null --max-time 15 https://registry.example.com:5000/v2/"
+    # The layer host line belongs to ghcr.io only.
+    refute_output --partial "pkg-containers"
     # A failed pull needs no events read.
     run grep -c "get events" "${STUB_KUBECTL_LOG}"
     assert_output "0"
@@ -728,32 +733,75 @@ AGENT_IMAGE="ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8
 }
 
 @test "ready timeout: no pull hint without a pull that failed or hangs, or without a readable pod state" {
-  local pod="kubehz-live-agent-6b7c9d8f5-x2k4q" creating
+  local pod="kubehz-live-agent-6b7c9d8f5-x2k4q" creating sep=$'\x1f'
   creating="${pod}|worker-1|ContainerCreating|${AGENT_IMAGE}"$'\n'
+  # pods, pods rc, events, events rc, joined by the unit separator 0x1f:
+  # the answers hold '|' and newlines, and an IFS whitespace character
+  # would merge the empty fields.
   local -a cases=(
-    # pods | pods rc | events | events rc
-    "${creating}|0|"$'Scheduled\nPulling\nPulled\nFailedMount\n'"|0"   # the pull finished; a volume wait
-    "${creating}|0|"$'Scheduled\nFailedMount\n'"|0"                      # no pull started
-    "${creating}|0|"$'Pulling\n'"|1"                                     # events unreadable
-    "${creating}|1|"$'Pulling\n'"|0"                                     # pod read fails
-    "${pod}|||${AGENT_IMAGE}"$'\n'"|0||0"                                # not scheduled
-    "${pod}|worker-1||${AGENT_IMAGE}"$'\n'"|0||0"                        # container running
-    "${pod}|worker-1|CrashLoopBackOff|${AGENT_IMAGE}"$'\n'"|0||0"        # another waiting reason
-    "${pod}"$'\e'"[31m|worker-1|ImagePullBackOff|${AGENT_IMAGE}"$'\n'"|0||0"  # an escape in the pod name
-    "${pod}|worker-1|ImagePullBackOff|ghcr.io/x;\$(id)"$'\n'"|0||0"     # shell text in the image
-    "${pod}|worker-1|ImagePullBackOff|${AGENT_IMAGE}|x"$'\n'"|0||0"      # a fifth field
-    "|0||0"                                                              # no pods
+    "${creating}${sep}0${sep}"$'|Scheduled\nspec.containers{agent}|Pulling\nspec.containers{agent}|Pulled\n|FailedMount\n'"${sep}0"  # the pull finished; a volume wait
+    "${creating}${sep}0${sep}"$'|Scheduled\n|FailedMount\n'"${sep}0"                             # no pull started
+    "${creating}${sep}0${sep}"$'|Scheduled\nspec.containers{sidecar}|Pulling\n'"${sep}0"        # another container pulls
+    "${creating}${sep}0${sep}"$'Pulling\n'"${sep}0"                                              # a reason without its container
+    "${creating}${sep}0${sep}"$'spec.containers{agent}|Pulling\n'"${sep}1"                       # events unreadable
+    "${creating}${sep}1${sep}"$'spec.containers{agent}|Pulling\n'"${sep}0"                       # pod read fails
+    "${pod}|||${AGENT_IMAGE}"$'\n'"${sep}0${sep}${sep}0"                                         # not scheduled
+    "${pod}|worker-1||${AGENT_IMAGE}"$'\n'"${sep}0${sep}${sep}0"                                 # container running
+    "${pod}|worker-1|CrashLoopBackOff|${AGENT_IMAGE}"$'\n'"${sep}0${sep}${sep}0"                 # another waiting reason
+    "${pod}"$'\e'"[31m|worker-1|ImagePullBackOff|${AGENT_IMAGE}"$'\n'"${sep}0${sep}${sep}0"      # an escape in the pod name
+    "${pod}|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-agent"$'\e'"[31m@sha256:474994f0"$'\n'"${sep}0${sep}${sep}0"      # an escape in the image
+    "${pod}|worker-1|ImagePullBackOff|ghcr.io/kernpilot/"$'\xe2\x80\xae'"kubehz-agent@sha256:474994f0"$'\n'"${sep}0${sep}${sep}0" # a bidi override (U+202E) in the image
+    "${pod}|worker-1|ImagePullBackOff|ghcr.io/x;\$(id)"$'\n'"${sep}0${sep}${sep}0"              # shell text in the image
+    "${pod}|worker-1|ImagePullBackOff|${AGENT_IMAGE}|x"$'\n'"${sep}0${sep}${sep}0"               # a fifth field
+    "${sep}0${sep}${sep}0"                                                                       # no pods
   )
-  local c rest
+  local c
   for c in "${cases[@]}"; do
-    # Split from the right: the pods answer itself holds '|'.
-    STUB_EVENTS_RC="${c##*|}"; rest="${c%|*}"
-    STUB_EVENTS="${rest##*|}"; rest="${rest%|*}"
-    STUB_PODS_RC="${rest##*|}"; STUB_PODS="${rest%|*}"
+    IFS="${sep}" read -r -d '' STUB_PODS STUB_PODS_RC STUB_EVENTS STUB_EVENTS_RC <<<"${c}" || true
+    STUB_EVENTS_RC="${STUB_EVENTS_RC%$'\n'}"
+    # A case that did not split into four fields would pass for no reason.
+    [[ "${STUB_PODS_RC}" == [01] && "${STUB_EVENTS_RC}" == [01] ]] || { echo "bad case: ${c}"; false; }
     _ready_timeout
     refute_output --partial "IPv6"
     refute_output --partial "  Pod "
   done
+}
+
+@test "ready timeout: a non-ASCII letter in the image is refused in a UTF-8 locale too, as in the Go binary" {
+  # In en_US.UTF-8, bash's [A-Za-z] also matches letters like é; the Go
+  # regexp does not. The hint matches with LC_ALL=C, so both refuse the line.
+  export LC_ALL=en_US.UTF-8
+  local re='^[A-Za-z]+$'
+  [[ $'\xc3\xa9' =~ ${re} ]] || skip "no locale here in which [A-Za-z] matches é: the case would pass without LC_ALL=C"
+  STUB_PODS="kubehz-live-agent-6b7c9d8f5-x2k4q|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-ag"$'\xc3\xa9'"nt@sha256:474994f0"$'\n'
+  _ready_timeout
+  refute_output --partial "IPv6"
+  refute_output --partial "  Pod "
+  # The same line with an ASCII image, in the same locale, gets the hint.
+  STUB_PODS="kubehz-live-agent-6b7c9d8f5-x2k4q|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-agent@sha256:474994f0"$'\n'
+  _ready_timeout
+  assert_output --partial "  Pod kubehz-live-agent-6b7c9d8f5-x2k4q on node worker-1 cannot pull its image"
+}
+
+@test "ready timeout: the hint reads the container and the pods that the vendored Deployment names" {
+  # A re-vendor that renames the container or changes the selector must fail
+  # here, not silently turn the hint off.
+  local deployment="${LIVE_DIR}/base/deployment.yaml" container name
+  container=$(command yq -r '.spec.template.spec.containers[].name' "${deployment}")
+  name=$(command yq -r '.spec.selector.matchLabels["app.kubernetes.io/name"]' "${deployment}")
+  [[ -n "${container}" && "${container}" != *$'\n'* ]] || { echo "want exactly one container, got: ${container}"; false; }
+  [[ -n "${name}" && "${name}" != null ]]
+  run command yq -r '.spec.template.metadata.labels["app.kubernetes.io/name"]' "${deployment}"
+  assert_output "${name}"
+
+  STUB_PODS="kubehz-live-agent-6b7c9d8f5-x2k4q|worker-1|ContainerCreating|${AGENT_IMAGE}"$'\n'
+  STUB_EVENTS="spec.containers{${container}}|Pulling"$'\n'
+  _ready_timeout
+  assert_output --partial "  Pod kubehz-live-agent-6b7c9d8f5-x2k4q on node worker-1 started to pull its image"
+  run grep -c -F -e "get pods -l app.kubernetes.io/name=${name} " "${STUB_KUBECTL_LOG}"
+  assert_output "1"
+  run bash -c 'grep -o -F -e "$1" "$2" | wc -l' _ "@.name==\"${container}\"" "${STUB_KUBECTL_LOG}"
+  assert_output "2"
 }
 
 @test "image registry: the image's host, else Docker Hub" {

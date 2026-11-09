@@ -1129,17 +1129,24 @@ entirely, run `lo kubehz deploy` again.
 
 A pod that stays in `ContainerCreating` with a `Pulling` event and no `Pulled`
 event has an image pull that hangs. On a dual-stack node, a broken IPv6 path to
-the registry can cause this: the connection opens but carries no data, and the
-container runtime does not try IPv4. When its Ready wait times out,
-`lo kubehz deploy` reads the pod and names this case. To check, run on the node:
+the registry can cause this. The connection opens but carries no data, and the
+container runtime does not try IPv4. `lo kubehz deploy` reads the pod and names
+this case when the Ready wait times out.
+
+To check, run these commands on the node. `<registry>` is the registry host of
+the agent image (`ghcr.io` by default):
 
 ```bash
-curl -6 -sS -o /dev/null --max-time 15 https://ghcr.io/v2/
-curl -4 -sS -o /dev/null --max-time 15 https://ghcr.io/v2/
+curl -6 -sS -o /dev/null --max-time 15 https://<registry>/v2/
+curl -4 -sS -o /dev/null --max-time 15 https://<registry>/v2/
 ```
 
-If only the IPv6 command times out, make the node reach the registry over IPv4:
-repair its IPv6 route, or run the node without IPv6. Then delete the pod, so
+The image layers can come from a different host. `ghcr.io` sends them from
+`pkg-containers.githubusercontent.com`, so run the same two commands against
+`https://pkg-containers.githubusercontent.com/` too.
+
+If only the IPv6 command times out, make the node reach the registry over IPv4.
+Repair its IPv6 route, or run the node without IPv6. Then delete the pod, so
 that a new pod pulls the image again.
 
 To confirm the CronJob really has stood down:

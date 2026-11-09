@@ -331,15 +331,26 @@ func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, acces
 	return nil
 }
 
+// The live agent's container name and pod selector in the vendored
+// manifests (live-agent/base/deployment.yaml). The pull hint reads only this
+// container; TestLiveAgentPullHintFollowsTheVendoredDeployment fails when a
+// re-vendor changes either.
+const (
+	liveAgentContainer = "agent"
+	liveAgentSelector  = "app.kubernetes.io/name=kubehz-live-agent"
+)
+
 // The pod read after a Ready timeout: one line per live-agent pod, four
 // fields joined by '|': pod name, node name, the agent container's waiting
 // reason, the agent container's image. A field the pod does not have yet
 // (no node, no container status) is empty.
-const liveAgentPodsJSONPath = `jsonpath={range .items[*]}{.metadata.name}|{.spec.nodeName}|{.status.containerStatuses[?(@.name=="agent")].state.waiting.reason}|{.spec.containers[?(@.name=="agent")].image}{"\n"}{end}`
+const liveAgentPodsJSONPath = `jsonpath={range .items[*]}{.metadata.name}|{.spec.nodeName}|{.status.containerStatuses[?(@.name=="` +
+	liveAgentContainer + `")].state.waiting.reason}|{.spec.containers[?(@.name=="` + liveAgentContainer + `")].image}{"\n"}{end}`
 
 // One line of that read. Every field comes from the cluster and is printed,
 // so the shape is pinned: DNS names for the pod and the node, letters for
-// the reason, an image reference without spaces, quotes or escapes.
+// the reason, an image reference without spaces, quotes or escapes. All
+// classes are ASCII only (the bash twin matches with LC_ALL=C).
 var liveAgentPodLineRe = regexp.MustCompile(`^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([A-Za-z]{1,64})[|]([A-Za-z0-9][A-Za-z0-9._/:@-]{0,510})$`)
 
 // liveAgentPullHint runs after a Ready timeout. It reads the live agent's
@@ -351,7 +362,7 @@ var liveAgentPodLineRe = regexp.MustCompile(`^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9
 // already names the usual causes.
 func (c *Context) liveAgentPullHint(ctx context.Context) {
 	out, err := c.capture(ctx, true, "kubectl", "-n", "kubehz-system", "get", "pods",
-		"-l", "app.kubernetes.io/name=kubehz-live-agent", "--request-timeout=10s", "-o", liveAgentPodsJSONPath)
+		"-l", liveAgentSelector, "--request-timeout=10s", "-o", liveAgentPodsJSONPath)
 	if err != nil {
 		return
 	}
@@ -373,28 +384,35 @@ func (c *Context) liveAgentPullHint(ctx context.Context) {
 			continue
 		}
 		registry := imageRegistry(image)
-		c.echoErr("  A pull that hangs or times out can mean that the IPv6 path from the node to %s is broken: the connection opens but carries no data, and the pull does not try IPv4.", registry)
+		c.echoErr("  A pull that hangs or times out can mean that the IPv6 path from the node to %s is broken.", registry)
+		c.echoErr("  On that path, the connection opens but carries no data, and the pull does not try IPv4.")
 		c.echoErr("  To check, run these two commands on node %s. If only the IPv6 command times out, the IPv6 path is broken:", node)
 		c.echoErr("    curl -6 -sS -o /dev/null --max-time 15 https://%s/v2/", registry)
 		c.echoErr("    curl -4 -sS -o /dev/null --max-time 15 https://%s/v2/", registry)
+		if registry == "ghcr.io" {
+			c.echoErr("  ghcr.io sends the image layers from another host. Run the two commands against https://pkg-containers.githubusercontent.com/ too.")
+		}
 		c.echoErr("  To work around it, make the node reach %s over IPv4: repair its IPv6 route, or run the node without IPv6. Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod %s", registry, pod)
 		return
 	}
 }
 
-// imagePullInProgress reports whether the kubelet started to pull an image
-// for the pod and has not finished: a Pulling event and no Pulled event. A
-// pod in ContainerCreating can also wait for a volume, and then the events
-// show no pull, or a finished one. An events read that fails reports false.
+// imagePullInProgress reports whether the kubelet started to pull the agent
+// container's image and has not finished: a Pulling event and no Pulled
+// event, both for that container (the kubelet sets the event's
+// involvedObject.fieldPath to spec.containers{<name>}). A pod in
+// ContainerCreating can also wait for a volume, and then the events show no
+// pull, or a finished one. An events read that fails reports false.
 func (c *Context) imagePullInProgress(ctx context.Context, pod string) bool {
 	out, err := c.capture(ctx, true, "kubectl", "-n", "kubehz-system", "get", "events",
 		"--field-selector", "involvedObject.kind=Pod,involvedObject.name="+pod,
-		"--request-timeout=10s", "-o", `jsonpath={range .items[*]}{.reason}{"\n"}{end}`)
+		"--request-timeout=10s", "-o", `jsonpath={range .items[*]}{.involvedObject.fieldPath}|{.reason}{"\n"}{end}`)
 	if err != nil {
 		return false
 	}
-	reasons := strings.Split(out, "\n")
-	return slices.Contains(reasons, "Pulling") && !slices.Contains(reasons, "Pulled")
+	events := strings.Split(out, "\n")
+	agent := "spec.containers{" + liveAgentContainer + "}|"
+	return slices.Contains(events, agent+"Pulling") && !slices.Contains(events, agent+"Pulled")
 }
 
 // imageRegistry is the host that the container runtime pulls an image

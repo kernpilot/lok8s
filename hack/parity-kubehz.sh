@@ -500,14 +500,30 @@ pull_check() { PARITY_PRE_EACH=pull_reset PARITY_POST_EACH=pull_record check "$@
 export PULL_LOG="${WORK}/pull-kubectl.log"
 PULL_POD=kubehz-live-agent-6b7c9d8f5-x2k4q
 PULL_IMAGE=ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8ee963b347ae29407895c8a8f51ec6d064aa
-export PULL_PODS="${PULL_POD}|worker-1|ContainerCreating|${PULL_IMAGE}"$'\n' PULL_EVENTS=$'Scheduled\nPulling\n'
+# Events answer <involvedObject.fieldPath>|<reason>; only the agent
+# container's events count.
+export PULL_PODS="${PULL_POD}|worker-1|ContainerCreating|${PULL_IMAGE}"$'\n'
+export PULL_EVENTS=$'|Scheduled\nspec.containers{sidecar}|Pulled\nspec.containers{agent}|Pulling\n'
 pull_check - kubehz deploy --domain op-reg.dev           # a pull that started and did not finish
-export PULL_EVENTS=$'Scheduled\nPulling\nPulled\nFailedMount\n'
+export PULL_EVENTS=$'|Scheduled\nspec.containers{agent}|Pulling\nspec.containers{agent}|Pulled\n|FailedMount\n'
 pull_check - kubehz deploy --domain op-reg.dev           # the pull finished: no pull hint
+export PULL_EVENTS=$'|Scheduled\nspec.containers{sidecar}|Pulling\n'
+pull_check - kubehz deploy --domain op-reg.dev           # another container pulls: no pull hint
 export PULL_PODS="${PULL_POD}|worker-1|ImagePullBackOff|registry.example.com:5000/kubehz-agent@sha256:474994f0"$'\n'
 pull_check - kubehz deploy --domain op-reg.dev           # a failed pull; the registry of the pod's image
 export PULL_PODS="${PULL_POD}"$'\e'"[31m|worker-1|ImagePullBackOff|${PULL_IMAGE}"$'\n'
 pull_check - kubehz deploy --domain op-reg.dev           # an escape in a field: no pull hint
+export PULL_PODS="${PULL_POD}|worker-1|ImagePullBackOff|ghcr.io/kernpilot/"$'\xe2\x80\xae'"kubehz-agent@sha256:474994f0"$'\n'
+pull_check - kubehz deploy --domain op-reg.dev           # a bidi override (U+202E) in the image: no pull hint
+# A non-ASCII letter in the image, in a UTF-8 locale. There bash's [A-Za-z]
+# also matches é, and the Go regexp does not: the bash twin must match with
+# LC_ALL=C. The case needs a locale in which the range widens.
+if LC_ALL=en_US.UTF-8 bash -c 're="^[A-Za-z]+$"; [[ $1 =~ $re ]]' _ $'\xc3\xa9' 2>/dev/null; then
+  export PULL_PODS="${PULL_POD}|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-ag"$'\xc3\xa9'"nt@sha256:474994f0"$'\n'
+  LC_ALL=en_US.UTF-8 pull_check - kubehz deploy --domain op-reg.dev   # no pull hint in either twin
+else
+  echo "skip: the non-ASCII image case needs an en_US.UTF-8 locale in which [A-Za-z] matches é"
+fi
 export PULL_PODS_FAIL=1
 pull_check - kubehz deploy --domain op-reg.dev           # the pod read fails: no pull hint
 unset PULL_LOG PULL_PODS PULL_EVENTS PULL_PODS_FAIL PULL_POD PULL_IMAGE

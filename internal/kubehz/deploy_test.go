@@ -8,6 +8,7 @@ package kubehz
 import (
 	"context"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/testutil"
+	"gopkg.in/yaml.v3"
 )
 
 func renderInto(t *testing.T, h *harness, owner, access string) string {
@@ -570,20 +572,24 @@ func readyTimeout(t *testing.T, pods string, podsErr error, events string, event
 
 const testAgentImage = "ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8ee963b347ae29407895c8a8f51ec6d064aa"
 
-// A pull that started and never finished (a Pulling event, no Pulled event)
-// is named with its pod, node and image, and the hint says how to check the
-// IPv6 path to the registry and how to work around it. A pod that is not in
-// a pull state (no node yet) comes first and is skipped.
+// A pull that started and never finished (a Pulling event, no Pulled event,
+// both for the agent container) is named with its pod, node and image, and
+// the hint says how to check the IPv6 path to the registry and how to work
+// around it. A pod that is not in a pull state (no node yet) comes first and
+// is skipped. A finished pull of another container does not count.
 func TestDeployApplyNeverReadyNamesAStalledPull(t *testing.T) {
 	pods := "kubehz-live-agent-6b7c9d8f5-q2w4r|||" + testAgentImage + "\n" +
 		"kubehz-live-agent-6b7c9d8f5-x2k4q|worker-1|ContainerCreating|" + testAgentImage + "\n"
-	h := readyTimeout(t, pods, nil, "Scheduled\nPulling\n", nil)
+	events := "|Scheduled\nspec.containers{sidecar}|Pulling\nspec.containers{sidecar}|Pulled\nspec.containers{agent}|Pulling\n"
+	h := readyTimeout(t, pods, nil, events, nil)
 	want := "" +
 		"  Pod kubehz-live-agent-6b7c9d8f5-x2k4q on node worker-1 started to pull its image " + testAgentImage + ", and the pull did not finish.\n" +
-		"  A pull that hangs or times out can mean that the IPv6 path from the node to ghcr.io is broken: the connection opens but carries no data, and the pull does not try IPv4.\n" +
+		"  A pull that hangs or times out can mean that the IPv6 path from the node to ghcr.io is broken.\n" +
+		"  On that path, the connection opens but carries no data, and the pull does not try IPv4.\n" +
 		"  To check, run these two commands on node worker-1. If only the IPv6 command times out, the IPv6 path is broken:\n" +
 		"    curl -6 -sS -o /dev/null --max-time 15 https://ghcr.io/v2/\n" +
 		"    curl -4 -sS -o /dev/null --max-time 15 https://ghcr.io/v2/\n" +
+		"  ghcr.io sends the image layers from another host. Run the two commands against https://pkg-containers.githubusercontent.com/ too.\n" +
 		"  To work around it, make the node reach ghcr.io over IPv4: repair its IPv6 route, or run the node without IPv6. Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod kubehz-live-agent-6b7c9d8f5-x2k4q\n"
 	if !strings.HasSuffix(h.errOut.String(), want) {
 		t.Fatalf("stderr does not end with the pull hint:\n%s", h.errOut.String())
@@ -593,7 +599,7 @@ func TestDeployApplyNeverReadyNamesAStalledPull(t *testing.T) {
 	mustContain(t, strings.Join(h.runner.lines(), "\n"),
 		`kubectl -n kubehz-system get pods -l app.kubernetes.io/name=kubehz-live-agent --request-timeout=10s -o jsonpath={range .items[*]}{.metadata.name}|{.spec.nodeName}|{.status.containerStatuses[?(@.name=="agent")].state.waiting.reason}|{.spec.containers[?(@.name=="agent")].image}{"\n"}{end}`)
 	mustContain(t, strings.Join(h.runner.lines(), "\n"),
-		`kubectl -n kubehz-system get events --field-selector involvedObject.kind=Pod,involvedObject.name=kubehz-live-agent-6b7c9d8f5-x2k4q --request-timeout=10s -o jsonpath={range .items[*]}{.reason}{"\n"}{end}`)
+		`kubectl -n kubehz-system get events --field-selector involvedObject.kind=Pod,involvedObject.name=kubehz-live-agent-6b7c9d8f5-x2k4q --request-timeout=10s -o jsonpath={range .items[*]}{.involvedObject.fieldPath}|{.reason}{"\n"}{end}`)
 	if n := h.runner.countCalls("get events"); n != 1 {
 		t.Fatalf("events reads: %d, want 1 (only for the pod in ContainerCreating)", n)
 	}
@@ -610,6 +616,8 @@ func TestDeployApplyNeverReadyNamesAFailedPull(t *testing.T) {
 			mustContain(t, h.errOut.String(), "  Pod kubehz-live-agent-6b7c9d8f5-x2k4q on node worker-1 cannot pull its image "+image+" ("+reason+"). Read why: kubectl -n kubehz-system describe pod kubehz-live-agent-6b7c9d8f5-x2k4q\n")
 			mustContain(t, h.errOut.String(), "the IPv6 path from the node to registry.example.com:5000 is broken")
 			mustContain(t, h.errOut.String(), "    curl -6 -sS -o /dev/null --max-time 15 https://registry.example.com:5000/v2/\n")
+			// The layer host line belongs to ghcr.io only.
+			mustNotContain(t, h.errOut.String(), "pkg-containers")
 			if h.runner.anyCall("get events") {
 				t.Fatal("a failed pull needs no events read")
 			}
@@ -629,14 +637,19 @@ func TestDeployApplyNeverReadyWithoutAPullNamesNoPull(t *testing.T) {
 		events    string
 		eventsErr error
 	}{
-		"pull finished, volume wait": {pods: creating, events: "Scheduled\nPulling\nPulled\nFailedMount\n"},
-		"no pull started":            {pods: creating, events: "Scheduled\nFailedMount\n"},
-		"events unreadable":          {pods: creating, events: "Pulling\n", eventsErr: exitErr(1)},
-		"pod read fails":             {pods: creating, podsErr: exitErr(1), events: "Pulling\n"},
+		"pull finished, volume wait": {pods: creating, events: "|Scheduled\nspec.containers{agent}|Pulling\nspec.containers{agent}|Pulled\n|FailedMount\n"},
+		"no pull started":            {pods: creating, events: "|Scheduled\n|FailedMount\n"},
+		"another container pulling":  {pods: creating, events: "|Scheduled\nspec.containers{sidecar}|Pulling\n"},
+		"a reason without its field": {pods: creating, events: "Pulling\n"},
+		"events unreadable":          {pods: creating, events: "spec.containers{agent}|Pulling\n", eventsErr: exitErr(1)},
+		"pod read fails":             {pods: creating, podsErr: exitErr(1), events: "spec.containers{agent}|Pulling\n"},
 		"not scheduled":              {pods: pod + "|||" + testAgentImage + "\n"},
 		"container running":          {pods: pod + "|worker-1||" + testAgentImage + "\n"},
 		"other waiting reason":       {pods: pod + "|worker-1|CrashLoopBackOff|" + testAgentImage + "\n"},
 		"escape in the pod name":     {pods: pod + "\x1b[31m|worker-1|ImagePullBackOff|" + testAgentImage + "\n"},
+		"escape in the image":        {pods: pod + "|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-agent\x1b[31m@sha256:474994f0\n"},
+		"bidi override in the image": {pods: pod + "|worker-1|ImagePullBackOff|ghcr.io/kernpilot/\u202ekubehz-agent@sha256:474994f0\n"},
+		"non-ASCII letter in image":  {pods: pod + "|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-ag\u00e9nt@sha256:474994f0\n"},
 		"shell text in the image":    {pods: pod + "|worker-1|ImagePullBackOff|ghcr.io/x;$(id)\n"},
 		"a fifth field":              {pods: pod + "|worker-1|ImagePullBackOff|" + testAgentImage + "|x\n"},
 		"no pods":                    {},
@@ -646,6 +659,56 @@ func TestDeployApplyNeverReadyWithoutAPullNamesNoPull(t *testing.T) {
 			mustNotContain(t, h.output(), "IPv6")
 			mustNotContain(t, h.output(), "  Pod ")
 		})
+	}
+}
+
+// The hint reads the agent container of the pods that the Deployment
+// selects. Both come from the vendored manifest: this test reads them from
+// the embedded live-agent/base/deployment.yaml, so a re-vendor that renames
+// the container or changes the selector fails here and does not silently
+// turn the hint off.
+func TestLiveAgentPullHintFollowsTheVendoredDeployment(t *testing.T) {
+	raw, err := fs.ReadFile(Manifests(), "live-agent/base/deployment.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d struct {
+		Spec struct {
+			Selector struct {
+				MatchLabels map[string]string `yaml:"matchLabels"`
+			} `yaml:"selector"`
+			Template struct {
+				Metadata struct {
+					Labels map[string]string `yaml:"labels"`
+				} `yaml:"metadata"`
+				Spec struct {
+					Containers []struct {
+						Name string `yaml:"name"`
+					} `yaml:"containers"`
+				} `yaml:"spec"`
+			} `yaml:"template"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal(raw, &d); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Spec.Template.Spec.Containers) != 1 {
+		t.Fatalf("containers: %d, want 1", len(d.Spec.Template.Spec.Containers))
+	}
+	container := d.Spec.Template.Spec.Containers[0].Name
+	name := d.Spec.Selector.MatchLabels["app.kubernetes.io/name"]
+	if name == "" || d.Spec.Template.Metadata.Labels["app.kubernetes.io/name"] != name {
+		t.Fatalf("selector app.kubernetes.io/name %q does not select the pod template %v", name, d.Spec.Template.Metadata.Labels)
+	}
+
+	pod := "kubehz-live-agent-6b7c9d8f5-x2k4q"
+	h := readyTimeout(t, pod+"|worker-1|ContainerCreating|"+testAgentImage+"\n", nil,
+		"spec.containers{"+container+"}|Pulling\n", nil)
+	mustContain(t, h.errOut.String(), "  Pod "+pod+" on node worker-1 started to pull its image")
+	calls := strings.Join(h.runner.lines(), "\n")
+	mustContain(t, calls, "get pods -l app.kubernetes.io/name="+name+" ")
+	if n := strings.Count(calls, `@.name=="`+container+`"`); n != 2 {
+		t.Fatalf("the pod read names container %q %d times, want 2:\n%s", container, n, calls)
 	}
 }
 
