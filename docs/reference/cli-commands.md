@@ -4173,7 +4173,7 @@ Provision a project's toolchain with b (github.com/fentas/b):
      The bash tree itself is embedded in the binary.
      An existing b.yaml is never overwritten — a diff is printed instead.
   2. .gitignore entries for .bin/ (b.yaml + b.lock stay committed).
-  3. b itself into .bin/b: the pinned release v4.18.7 tarball, downloaded over
+  3. b itself into .bin/b: the pinned release v4.18.8 tarball, downloaded over
      https to a temp file and verified against its published SHA-256 before
      anything is extracted (no curl | sh). GITHUB_TOKEN is passed through if set.
   4. .bin/b install — every binary in b.yaml lands in .bin/ (plugins under .kustomize/).
