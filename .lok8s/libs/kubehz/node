@@ -863,7 +863,7 @@ node::maintain() {
   kubehz::space_api_call POST "${path}" "${payload}" || rc=$?
   if (( rc == 1 )); then
     # A transport failure. Before the send (DNS, connect, TLS), nothing
-    # reached the api. After it, the api can have taken the request: no
+    # reached the api. After it, possibly the api took the request: no
     # answer is not a refusal. No curl exit code: the token check refused
     # the token before curl ran, and said so.
     [[ -n "${KUBEHZ_SPACE_API_CURL_RC}" ]] || return 1

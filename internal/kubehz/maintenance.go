@@ -165,7 +165,7 @@ func (c *Context) maintain(ctx context.Context, cfg *Config, spaceID, label, act
 	res, sent, err := c.requestSent(ctx, "POST", cfg.APIURL+path, withBearer(c.getenv("KUBEHZ_TOKEN")), body)
 	if err != nil {
 		// Before the send (DNS, connect, TLS), nothing reached the api.
-		// After it, the api can have taken the request: no answer is not
+		// After it, possibly the api took the request: no answer is not
 		// a refusal. A Ctrl-C after the send ends here too.
 		if !sent {
 			c.errorf("kubehz API unreachable (POST %s)", path)

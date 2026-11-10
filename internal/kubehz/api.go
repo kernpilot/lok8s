@@ -77,7 +77,7 @@ func (c *Context) request(ctx context.Context, method, url string, auth bearer, 
 // requestSent is request, plus whether the request left this machine: the
 // transport wrote its headers to the connection (httptrace WroteHeaders). A
 // transport error before that point (DNS, connect, the TLS handshake) sent
-// nothing. After it, the server can have acted on the request although no
+// nothing. After it, possibly the server acted on the request although no
 // answer came back. The bash twin reads the same from the curl exit code
 // (node::maintain).
 func (c *Context) requestSent(ctx context.Context, method, url string, auth bearer, body []byte) (*httpResult, bool, error) {
