@@ -2,25 +2,39 @@ package lo
 
 // heal_test.go — port of tests/unit/lo_heal_node_ips_test.bats: a kind node
 // must never stay registered on the WRONG docker network's address (the
-// 2026-08-17 kubehz-dev incident — see heal.go for the full story).
+// 2026-08-17 incident on a dev cluster — see heal.go for the full story).
 //
 // Like the bats suite, `docker exec` does not fake the repair — it
 // REDIRECTS the node paths onto a per-node fake rootfs and then runs the
-// heal's own generated script with a REAL local bash (no docker, no
-// daemon). So the sed loop, the \b anchors, the certificate move and the
-// /kind/old-ipv4 write under test are the real ones; systemctl, kubeadm and
-// the CNI nudge are logged. A mock that reimplemented the repair would pass
-// no matter what the heal generated.
+// heal's own generated scripts (the repair and the certificate probe) with
+// a REAL local shell (no docker, no daemon). So the sed loop, the \b
+// anchors, the certificate moves and the /kind/old-ipv4 write under test
+// are the real ones; systemctl, kubeadm, crictl and the CNI nudge are
+// logged. A
+// mock that reimplemented the repair would pass no matter what the heal
+// generated.
 
 import (
 	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"errors"
 	"fmt"
+	"io"
+	"math/big"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/testutil"
@@ -36,6 +50,9 @@ type healFixture struct {
 	observed map[string]string // kubectl InternalIP override per node
 	// kubeadmFails makes the in-node kubeadm stub exit 1.
 	kubeadmFails bool
+	// readyz holds the answers of the /readyz checks in order (true = ready);
+	// every check after the last answer is ready.
+	readyz []bool
 }
 
 func (h *healFixture) root(node string) string { return filepath.Join(h.rootDir, "root."+node) }
@@ -51,18 +68,150 @@ func (h *healFixture) confPath(node string) string {
 func (h *healFixture) pkiPath(node string) string {
 	return filepath.Join(h.root(node), "etc/kubernetes/pki")
 }
+func (h *healFixture) healPKIPath(node string) string {
+	return filepath.Join(h.root(node), "kind/heal-pki")
+}
 func (h *healFixture) kubeadmConfPath(node string) string {
 	return filepath.Join(h.root(node), "kind/kubeadm.conf")
 }
+func (h *healFixture) certsDir() string { return filepath.Join(h.rootDir, "certs") }
+
+// certPEM is a real serving certificate for the apiserver of node `bad`,
+// with ip among the IP SANs (beside the service and loopback addresses, so
+// a check that reads only one SAN fails). The kubeadm stub copies it from
+// the fixture's certs/ directory.
+func (h *healFixture) certPEM(ip string) string {
+	h.t.Helper()
+	path := filepath.Join(h.certsDir(), ip+".crt")
+	if raw, err := os.ReadFile(path); err == nil {
+		return string(raw)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "kube-apiserver"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		DNSNames:     []string{"lotest-control-plane", "kubernetes", "localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("10.96.0.1"), net.ParseIP(ip), net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	out := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	testutil.WriteFile(h.t, path, out)
+	return out
+}
+
+// writePair puts a matching pair for ip at dir: the certificate names ip,
+// the key file says "key <ip>".
+func (h *healFixture) writePair(dir, ip string) {
+	h.t.Helper()
+	testutil.WriteFile(h.t, filepath.Join(dir, "apiserver.crt"), h.certPEM(ip))
+	testutil.WriteFile(h.t, filepath.Join(dir, "apiserver.key"), "key "+ip+"\n")
+}
 
 // makeControlPlane gives node the files that only a kind control-plane node
-// has: the apiserver serving pair. Also a kubeadm config that still names the
-// stale address, like every other file the entrypoint rewrote.
+// has: the cluster CA and the apiserver serving pair for the stale address.
+// Also a kubeadm config that still names the stale address, like every other
+// file the entrypoint rewrote.
 func (h *healFixture) makeControlPlane(node string) {
 	h.t.Helper()
-	testutil.WriteFile(h.t, filepath.Join(h.pkiPath(node), "apiserver.crt"), "old-cert\n")
-	testutil.WriteFile(h.t, filepath.Join(h.pkiPath(node), "apiserver.key"), "old-key\n")
+	testutil.WriteFile(h.t, filepath.Join(h.pkiPath(node), "ca.crt"), "ca-cert\n")
+	testutil.WriteFile(h.t, filepath.Join(h.pkiPath(node), "ca.key"), "ca-key\n")
+	h.writePair(h.pkiPath(node), "172.31.0.2")
 	testutil.WriteFile(h.t, h.kubeadmConfPath(node), "advertiseAddress: 172.31.0.2\n")
+}
+
+// markRepaired gives node the state the sed leaves: the flag and the kubeadm
+// config on the cluster-network address. /kind/old-ipv4 stays as it is.
+func (h *healFixture) markRepaired(node string) {
+	h.t.Helper()
+	testutil.WriteFile(h.t, h.flagPath(node), `KUBELET_KUBEADM_ARGS="--node-ip=10.9.0.3 --node-labels="`+"\n")
+	testutil.WriteFile(h.t, h.kubeadmConfPath(node), "advertiseAddress: 10.9.0.3\n")
+}
+
+// pairAt reads the pair at dir as the addresses it names: the IP SAN that is
+// not the service or loopback address, and the address in the key file.
+func (h *healFixture) pairAt(dir string) (certIP, keyIP string) {
+	h.t.Helper()
+	if raw, err := os.ReadFile(filepath.Join(dir, "apiserver.crt")); err == nil {
+		block, _ := pem.Decode(raw)
+		if block == nil {
+			return "not-a-pem", ""
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		for _, ip := range cert.IPAddresses {
+			if s := ip.String(); s != "10.96.0.1" && s != "127.0.0.1" {
+				certIP = s
+			}
+		}
+	}
+	if raw, err := os.ReadFile(filepath.Join(dir, "apiserver.key")); err == nil {
+		keyIP = strings.TrimSpace(strings.TrimPrefix(string(raw), "key "))
+	}
+	return certIP, keyIP
+}
+
+// assertPair fails unless pki/ of node holds a matching pair for ip.
+func (h *healFixture) assertPair(node, ip, why string) {
+	h.t.Helper()
+	if c, k := h.pairAt(h.pkiPath(node)); c != ip || k != ip {
+		h.t.Fatalf("%s: pki/ holds a certificate for %q and a key for %q, want both for %q\nsteps %q\n%s", why, c, k, ip, h.steps(), h.errBuf.String())
+	}
+}
+
+func (h *healFixture) assertNoHealPKI(node, why string) {
+	h.t.Helper()
+	if _, err := os.Stat(h.healPKIPath(node)); !os.IsNotExist(err) {
+		h.t.Fatalf("%s: /kind/heal-pki still exists (stat: %v)", why, err)
+	}
+}
+
+// reset forgets what the previous heal run recorded.
+func (h *healFixture) reset() {
+	h.t.Helper()
+	h.calls = nil
+	h.errBuf.Reset()
+	if err := os.Remove(h.stepsPath()); err != nil && !os.IsNotExist(err) {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *healFixture) heal() {
+	h.t.Helper()
+	if err := h.d.healNodeIPs(h.t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// inNode redirects the node paths of an in-node script onto the fake rootfs
+// of node.
+func (h *healFixture) inNode(node, script string) string {
+	script = strings.ReplaceAll(script, "/var/lib/kubelet/kubeadm-flags.env", h.flagPath(node))
+	script = strings.ReplaceAll(script, "/etc/kubernetes", filepath.Join(h.root(node), "etc/kubernetes"))
+	return strings.ReplaceAll(script, "/kind/", filepath.Join(h.root(node), "kind")+"/")
+}
+
+// runInNode runs an in-node script with a real local shell, with the output
+// streams of `docker exec` (c.Stdout, c.Stderr).
+func runInNode(c execx.Cmd, shell, script string) error {
+	cmd := exec.Command(shell, "-c", script)
+	cmd.Stdout, cmd.Stderr = c.Stdout, c.Stderr
+	if cmd.Stdout == nil {
+		cmd.Stdout = io.Discard
+	}
+	if cmd.Stderr == nil {
+		cmd.Stderr = io.Discard
+	}
+	return cmd.Run()
 }
 
 func newHealFixture(t *testing.T) *healFixture {
@@ -132,44 +281,95 @@ func newHealFixture(t *testing.T) *healFixture {
 					h.calls = append(h.calls, "kubelet-restart:"+node)
 					return nil
 				}
+				// `docker exec <node> sh -c '<certificate probe>'` — the REAL
+				// probe against the fake rootfs.
+				if len(c.Args) > 3 && c.Args[2] == "sh" && c.Args[3] == "-c" {
+					return runInNode(c, "sh", h.inNode(node, c.Args[len(c.Args)-1]))
+				}
 				// `docker exec <node> bash -c '<repair script>'` — run the
-				// REAL script against the fake rootfs with stubbed systemctl
-				// and kubeadm. Both stubs append to one ordered steps log.
+				// REAL script against the fake rootfs with stubbed systemctl,
+				// kubeadm and crictl. The stubs append to one ordered steps
+				// log. The crictl stub answers the list of the
+				// controller-manager and scheduler containers, logs each stop
+				// and fails on any other call.
 				// The kubeadm line records what kubeadm would see: its
 				// arguments, whether the old pair is still in pki/, the
-				// config file it reads and /kind/old-ipv4.
+				// config file it reads and /kind/old-ipv4. The stub fails on
+				// any other call than kind's fix_certificate one. Then it
+				// does what kubeadm's certs phase does: it keeps an
+				// apiserver.crt that is in pki/ and does not read its SANs
+				// (exit 0, nothing written), fails on a key without a
+				// certificate, and fails when the cluster CA is not in pki/.
+				// Otherwise it writes the pair for the address in the
+				// config. Its stdout line ("[certs] …", after the stderr
+				// lines on a failure) must reach no warning. A failure writes
+				// six noise lines, a klog error, info and warning line, the
+				// error and kubeadm's --v=5 hint to stderr.
 				h.calls = append(h.calls, "repair:"+node)
-				script := c.Args[len(c.Args)-1]
-				script = strings.ReplaceAll(script, "/var/lib/kubelet/kubeadm-flags.env", h.flagPath(node))
-				script = strings.ReplaceAll(script, "/etc/kubernetes", filepath.Join(h.root(node), "etc/kubernetes"))
-				script = strings.ReplaceAll(script, "/kind/", filepath.Join(h.root(node), "kind")+"/")
 				fail := "false"
 				if h.kubeadmFails {
 					fail = "true"
 				}
 				stubs := fmt.Sprintf(`systemctl() { echo kubelet-restart:%[1]s >> '%[2]s'; }
+crictl() {
+  case "$*" in
+    'ps -q --name kube-controller-manager|kube-scheduler') printf 'cm1\nsched1\n' ;;
+    'stop cm1'|'stop sched1') echo "crictl-stop:%[1]s $2" >> '%[2]s'; echo "$2" ;;
+    *) echo "crictl stub: unexpected call: $*" >&2; return 1 ;;
+  esac
+}
 kubeadm() {
-  local pki='%[3]s' pair=absent
+  local pki='%[3]s' pair=absent addr
   if [ -e "${pki}/apiserver.crt" ] || [ -e "${pki}/apiserver.key" ]; then pair=present; fi
   echo "kubeadm:%[1]s $* | old-pair=${pair} | conf=$(cat "${@: -1}") | old-ipv4=$(cat '%[4]s')" >> '%[2]s'
-  if %[5]s; then return 1; fi
-  echo renewed > "${pki}/apiserver.crt" && echo renewed > "${pki}/apiserver.key"
+  if [ "$*" != 'init phase certs apiserver --config %[6]s' ]; then
+    echo "kubeadm stub: not the call of kind's fix_certificate: $*" >&2; return 1
+  fi
+  if [ -f "${pki}/apiserver.crt" ] && [ -f "${pki}/ca.crt" ]; then
+    echo '[certs] Using existing apiserver certificate and key on disk'
+    return 0
+  fi
+  if [ -f "${pki}/apiserver.key" ]; then
+    echo 'error execution phase certs/apiserver: failure loading apiserver certificate' >&2; return 1
+  fi
+  if [ ! -f "${pki}/ca.crt" ] || [ ! -f "${pki}/ca.key" ]; then
+    echo "kubeadm stub: the cluster CA is not in ${pki}" >&2; return 1
+  fi
+  if %[5]s; then
+    for i in 1 2 3 4 5 6; do echo "kubeadm stub: noise line ${i}" >&2; done
+    echo 'E1110 16:20:03.100000    3243 certs.go:1] kubeadm stub: a klog error' >&2
+    echo 'I1110 16:20:03.110000    3243 version.go:1] kubeadm stub: a klog note' >&2
+    echo 'W1110 16:20:03.113013    3243 initconfiguration.go:363] [config] WARNING: Ignored configuration document with GroupVersionKind kubeadm.k8s.io/v1beta4, Kind=JoinConfiguration' >&2
+    echo 'error execution phase certs/apiserver: test failure' >&2
+    echo 'To see the stack trace of this error execute with --v=5 or higher' >&2
+    echo '[certs] Generating "apiserver" certificate and key'
+    return 1
+  fi
+  echo '[certs] Generating "apiserver" certificate and key'
+  addr=$(sed -n 's/^advertiseAddress: //p' "${@: -1}")
+  cp '%[7]s'/"${addr}.crt" "${pki}/apiserver.crt" && echo "key ${addr}" > "${pki}/apiserver.key"
 }
-`, node, h.stepsPath(), h.pkiPath(node), h.oldIPPath(node), fail)
-				out, err := exec.Command("bash", "-c", stubs+script).CombinedOutput()
-				if err != nil {
-					return fmt.Errorf("repair script failed: %w\n%s", err, out)
-				}
-				return nil
+`, node, h.stepsPath(), h.pkiPath(node), h.oldIPPath(node), fail, h.kubeadmConfPath(node), h.certsDir())
+				return runInNode(c, "bash", stubs+h.inNode(node, c.Args[len(c.Args)-1]))
 			}
 			return nil
 		case "kubectl":
+			if strings.HasSuffix(joined, " get --raw /readyz") {
+				h.calls = append(h.calls, "readyz")
+				if len(h.readyz) > 0 {
+					ready := h.readyz[0]
+					h.readyz = h.readyz[1:]
+					if !ready {
+						return errors.New("exit status 1")
+					}
+				}
+				return nil
+			}
 			if strings.Contains(joined, "get node") {
 				for node, ip := range h.observed {
 					if strings.Contains(joined, " "+node+" ") || strings.HasSuffix(joined, " "+node) ||
 						strings.Contains(joined, "node "+node) {
 						writeOut(c, ip)
-						_ = node
 						break
 					}
 				}
@@ -180,6 +380,9 @@ kubeadm() {
 		}
 		return nil
 	}
+	// The kubeadm stub copies the certificates for both addresses.
+	h.certPEM("172.31.0.2")
+	h.certPEM("10.9.0.3")
 	return h
 }
 
@@ -192,6 +395,17 @@ func (h *healFixture) steps() []string {
 		return nil
 	}
 	return strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+}
+
+// kubeadmSteps returns the kubeadm lines of the steps log.
+func (h *healFixture) kubeadmSteps() []string {
+	var out []string
+	for _, s := range h.steps() {
+		if strings.HasPrefix(s, "kubeadm:") {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // restarts reads the kubelet restarts recorded by the in-script systemctl
@@ -211,15 +425,24 @@ func (h *healFixture) restarts() []string {
 	return out
 }
 
+// stops reads the container stops recorded by the in-script crictl stub.
+func (h *healFixture) stops() []string {
+	var out []string
+	for _, s := range h.steps() {
+		if strings.HasPrefix(s, "crictl-stop:") {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func (h *healFixture) called(marker string) bool {
 	return slices.Contains(h.calls, marker)
 }
 
 func TestHealRepairsOnlyTheDriftedNode(t *testing.T) {
 	h := newHealFixture(t)
-	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
-		t.Fatal(err)
-	}
+	h.heal()
 
 	if !h.called("repair:bad") {
 		t.Fatal("the node pinned to the registry address (172.31.0.2) was NOT repaired — it stays Ready via its lease while every route INTO it is black-holed")
@@ -240,13 +463,7 @@ func TestHealRepairsOnlyTheDriftedNode(t *testing.T) {
 	if got := readFileT(t, h.oldIPPath("bad")); got != "10.9.0.3" {
 		t.Fatalf("/kind/old-ipv4 was not updated (%q) — the entrypoint diffs it against docker DNS on the next container restart and would rewrite the address files all over again", got)
 	}
-	restarted := false
-	for _, r := range h.restarts() {
-		if r == "kubelet-restart:bad" {
-			restarted = true
-		}
-	}
-	if !restarted {
+	if !slices.Contains(h.restarts(), "kubelet-restart:bad") {
 		t.Fatal("kubelet was never restarted — the repaired flag is not read until restart, so the node keeps running on the dead address")
 	}
 	if !h.called("cni-restart") {
@@ -259,9 +476,7 @@ func TestHealHealthyClusterIsSilentNoop(t *testing.T) {
 	// Repair the drifted node up front, so nothing needs healing.
 	testutil.WriteFile(t, h.flagPath("bad"), `KUBELET_KUBEADM_ARGS="--node-ip=10.9.0.3 --node-labels="`+"\n")
 
-	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
-		t.Fatal(err)
-	}
+	h.heal()
 	if len(h.calls) != 0 || len(h.restarts()) != 0 {
 		t.Fatalf("the heal acted on a cluster where every --node-ip already matched: %v — restarting kubelet + the CNI agent on every provision is not free", h.calls)
 	}
@@ -276,9 +491,7 @@ func TestHealLatchUpRestartsKubeletOnly(t *testing.T) {
 	testutil.WriteFile(t, h.flagPath("bad"), `KUBELET_KUBEADM_ARGS="--node-ip=10.9.0.3 --node-labels="`+"\n")
 	h.observed["bad"] = "172.31.0.2"
 
-	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
-		t.Fatal(err)
-	}
+	h.heal()
 	if !h.called("kubelet-restart:bad") {
 		t.Fatal("the half-repaired node was skipped: its flag file matches, so without the Node-InternalIP cross-check the drift is permanently undetectable")
 	}
@@ -302,9 +515,7 @@ func TestHealNonIPAddressNeverReachesTheNode(t *testing.T) {
 		}
 		return orig(c)
 	}
-	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
-		t.Fatal(err)
-	}
+	h.heal()
 	if h.called("repair:bad") {
 		t.Fatal("a non-IP docker answer was spliced into the repair script")
 	}
@@ -323,9 +534,7 @@ func TestHealDualStackWarnedNeverRewritten(t *testing.T) {
 	h := newHealFixture(t)
 	testutil.WriteFile(t, h.flagPath("bad"), `KUBELET_KUBEADM_ARGS="--node-ip=172.31.0.2,fd00::2 --node-labels="`+"\n")
 
-	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
-		t.Fatal(err)
-	}
+	h.heal()
 	if h.called("repair:bad") {
 		t.Fatal("a dual-stack --node-ip was rewritten — the v6 address is now lost")
 	}
@@ -346,35 +555,132 @@ func TestHealSkipsCNINudgeWithoutKubeconfig(t *testing.T) {
 	if !h.called("repair:bad") {
 		t.Fatal("drifted node not repaired")
 	}
-	if h.called("cni-restart") {
-		t.Fatal("kubectl was invoked without a kubeconfig")
+	if h.called("cni-restart") || h.called("readyz") {
+		t.Fatalf("kubectl was invoked without a kubeconfig: %q", h.calls)
+	}
+}
+
+// readyzRun returns the /readyz checks and the CNI nudges of h.calls in
+// order.
+func (h *healFixture) readyzRun() (seq []string) {
+	for _, c := range h.calls {
+		if c == "readyz" || c == "cni-restart" {
+			seq = append(seq, c)
+		}
+	}
+	return seq
+}
+
+// recordSleeps makes the driver record each wait instead of sleeping.
+func (h *healFixture) recordSleeps() *[]time.Duration {
+	var sleeps []time.Duration
+	h.d.sleep = func(ctx context.Context, d time.Duration) error {
+		sleeps = append(sleeps, d)
+		return ctx.Err()
+	}
+	return &sleeps
+}
+
+func TestHealWaitsForASteadyAPIServer(t *testing.T) {
+	// After a repair, kubelet can start etcd again a few seconds after its
+	// own restart, and the API server then refuses the next step of lo up.
+	// The heal waits until /readyz passes five checks in a row, 2 s apart,
+	// after the repair and before the CNI nudge. A good check between bad
+	// ones does not count as steady.
+	h := newHealFixture(t)
+	sleeps := h.recordSleeps()
+	h.readyz = []bool{false, false, true, false, true, true, true, true, true, false}
+	h.heal()
+
+	want := append(slices.Repeat([]string{"readyz"}, 9), "cni-restart")
+	if got := h.readyzRun(); !slices.Equal(got, want) {
+		t.Fatalf("the heal did not wait for five good /readyz checks in a row before the CNI nudge:\n got  %q\n want %q", got, want)
+	}
+	if repair, first := slices.Index(h.calls, "repair:bad"), slices.Index(h.calls, "readyz"); repair < 0 || first < repair {
+		t.Fatalf("the /readyz checks did not come after the repair: %q", h.calls)
+	}
+	if want := slices.Repeat([]time.Duration{2 * time.Second}, 8); !slices.Equal(*sleeps, want) {
+		t.Fatalf("the checks are not 2 s apart (8 waits between 9 checks): %v", *sleeps)
+	}
+	if strings.Contains(h.errBuf.String(), "/readyz") {
+		t.Fatalf("a warning about /readyz, but the API server became steady:\n%s", h.errBuf.String())
+	}
+}
+
+func TestHealWarnsWhenTheAPIServerIsNotSteady(t *testing.T) {
+	// An API server that never passes five checks in a row stops the wait
+	// after 60 checks with a warning. The heal stays advisory: the CNI
+	// nudge still runs, and lo up goes on.
+	h := newHealFixture(t)
+	sleeps := h.recordSleeps()
+	h.readyz = slices.Repeat([]bool{true, true, true, true, false}, 12)
+	h.heal()
+
+	want := append(slices.Repeat([]string{"readyz"}, 60), "cni-restart")
+	if got := h.readyzRun(); !slices.Equal(got, want) {
+		t.Fatalf("the wait did not stop after 60 checks: got %d entries %q", len(got), got)
+	}
+	if len(*sleeps) != 60 {
+		t.Fatalf("%d waits, want 60 (one after each check)", len(*sleeps))
+	}
+	const msg = "[warn] lo: the API server did not pass 5 /readyz checks in a row after the node repair (60 checks, 2 s apart). If a later step fails, run lo up again.\n"
+	if !strings.Contains(h.errBuf.String(), msg) {
+		t.Fatalf("no warning about the API server that is not steady:\n%s", h.errBuf.String())
+	}
+}
+
+func TestHealWaitsAfterAFailedRepair(t *testing.T) {
+	// A failed renewal stops the script after the sed, which has already
+	// changed the static pod manifests, so kubelet starts the API server
+	// again. The heal waits for it, but sends no CNI nudge: no node was
+	// repaired.
+	h := newHealFixture(t)
+	h.makeControlPlane("bad")
+	h.kubeadmFails = true
+	h.heal()
+
+	if !strings.Contains(h.errBuf.String(), "could not repair bad: ") {
+		t.Fatalf("the repair did not fail:\n%s", h.errBuf.String())
+	}
+	want := slices.Repeat([]string{"readyz"}, 5)
+	if got := h.readyzRun(); !slices.Equal(got, want) {
+		t.Fatalf("after a failed repair the heal must wait for the API server and send no CNI nudge:\n got  %q\n want %q", got, want)
+	}
+
+	// The next heal takes the renewal path (the flag agrees, the certificate
+	// does not), and kubeadm fails again: the same wait.
+	h.reset()
+	h.heal()
+	if w := h.errBuf.String(); !strings.Contains(w, "renewing the certificate") || !strings.Contains(w, "could not repair bad: ") {
+		t.Fatalf("the second heal did not fail on the renewal path:\n%s", w)
+	}
+	if got := h.readyzRun(); !slices.Equal(got, want) {
+		t.Fatalf("after a failed renewal the heal must wait for the API server and send no CNI nudge:\n got  %q\n want %q", got, want)
 	}
 }
 
 func TestHealRenewsAPIServerCertOnControlPlane(t *testing.T) {
 	// On a control-plane node the apiserver serving certificate names the node
-	// address. After the heal, kubelet, controller-manager and scheduler
-	// connect to the new address, so the certificate must name it too. kind
+	// address. After the heal, controller-manager and scheduler connect to
+	// the new address, so the certificate must name it too. kind
 	// renews it at boot only when /kind/old-ipv4 differs, and the heal writes
 	// the new address there, so the heal must renew it itself.
 	h := newHealFixture(t)
 	h.makeControlPlane("bad")
 
-	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
-		t.Fatal(err)
-	}
+	h.heal()
 
 	steps := h.steps()
 	renew := slices.IndexFunc(steps, func(s string) bool { return strings.HasPrefix(s, "kubeadm:bad ") })
 	if renew < 0 {
-		t.Fatalf("the apiserver certificate of the control-plane node was not renewed: it still names 172.31.0.2, so every client of https://10.9.0.3:6443 fails TLS. Steps: %q", steps)
+		t.Fatalf("the apiserver certificate of the control-plane node was not renewed: it still names 172.31.0.2, so every client of https://10.9.0.3:6443 fails TLS. Steps: %q\n%s", steps, h.errBuf.String())
 	}
 	got := steps[renew]
 	if want := "kubeadm:bad init phase certs apiserver --config " + h.kubeadmConfPath("bad") + " | "; !strings.HasPrefix(got, want) {
 		t.Fatalf("the kubeadm call is not the one of kind's fix_certificate (kubeadm init phase certs apiserver --config /kind/kubeadm.conf):\n%s", got)
 	}
 	if !strings.Contains(got, " | old-pair=absent | ") {
-		t.Fatalf("the old pair was still in pki/ when kubeadm ran: kubeadm keeps a certificate that has every SAN and fails on one that does not, it never replaces it:\n%s", got)
+		t.Fatalf("the old pair was still in pki/ when kubeadm ran: kubeadm keeps an apiserver.crt that is in pki/ and does not read its SANs, so the stale certificate stays:\n%s", got)
 	}
 	if !strings.Contains(got, " | conf=advertiseAddress: 10.9.0.3 | ") {
 		t.Fatalf("kubeadm read a config with the old address: the renewal must come AFTER the sed, or the new certificate names the old address again:\n%s", got)
@@ -385,92 +691,369 @@ func TestHealRenewsAPIServerCertOnControlPlane(t *testing.T) {
 	if restart := slices.Index(steps, "kubelet-restart:bad"); restart < renew {
 		t.Fatalf("kubelet did not restart after the renewal: steps %q", steps)
 	}
-	if crt := readFileT(t, filepath.Join(h.pkiPath("bad"), "apiserver.crt")); crt != "renewed\n" {
-		t.Fatalf("apiserver.crt after the heal = %q, want the renewed certificate", crt)
+	// controller-manager and scheduler keep the server address of their
+	// kubeconfig from their start. A stop before the renewal starts them
+	// against the old certificate.
+	if want := []string{"crictl-stop:bad cm1", "crictl-stop:bad sched1", "kubelet-restart:bad"}; !slices.Equal(steps[renew+1:], want) {
+		t.Fatalf("after the renewal the script must stop the controller-manager and scheduler containers, then restart kubelet:\n got  %q\n want %q", steps[renew+1:], want)
 	}
-	if _, err := os.Stat(filepath.Join(h.root("bad"), "kind/heal-pki")); !os.IsNotExist(err) {
-		t.Fatalf("the moved-aside pair stayed in /kind/heal-pki after a good renewal (stat: %v)", err)
+	h.assertPair("bad", "10.9.0.3", "after a good renewal")
+	h.assertNoHealPKI("bad", "after a good renewal")
+	if strings.Contains(h.errBuf.String(), "could not repair") || strings.Contains(h.errBuf.String(), "[certs]") {
+		t.Fatalf("a good renewal wrote a failure or kubeadm's stdout:\n%s", h.errBuf.String())
 	}
 }
 
 func TestHealWorkerSkipsCertRenewal(t *testing.T) {
 	// A worker runs no apiserver and has no apiserver.crt. The guard keeps
-	// kubeadm off it, and the rest of the repair runs as before.
-	h := newHealFixture(t)
+	// kubeadm off it, and the rest of the repair runs as before. A node with
+	// only one file of the pair gets no renewal either (kind's
+	// fix_certificate needs both), and its next heal does not try again.
+	for _, tc := range []struct{ name, crt, key string }{
+		{name: "no pki files"},
+		{name: "only apiserver.crt", crt: "172.31.0.2"},
+		{name: "only apiserver.key", key: "172.31.0.2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHealFixture(t)
+			if tc.crt != "" {
+				testutil.WriteFile(t, filepath.Join(h.pkiPath("bad"), "apiserver.crt"), h.certPEM(tc.crt))
+			}
+			if tc.key != "" {
+				testutil.WriteFile(t, filepath.Join(h.pkiPath("bad"), "apiserver.key"), "key "+tc.key+"\n")
+			}
 
-	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
-		t.Fatal(err)
-	}
-	for _, s := range h.steps() {
-		if strings.HasPrefix(s, "kubeadm:") {
-			t.Fatalf("kubeadm ran on a worker, which has no apiserver certificate: %s", s)
-		}
-	}
-	if !slices.Contains(h.restarts(), "kubelet-restart:bad") {
-		t.Fatalf("the worker repair did not finish (no kubelet restart): %q\n%s", h.steps(), h.errBuf.String())
-	}
-	if _, err := os.Stat(filepath.Join(h.root("bad"), "kind/heal-pki")); !os.IsNotExist(err) {
-		t.Fatalf("the heal made /kind/heal-pki on a worker (stat: %v)", err)
+			h.heal()
+			if s := h.kubeadmSteps(); len(s) != 0 {
+				t.Fatalf("kubeadm ran on a node without the whole apiserver pair: %q", s)
+			}
+			if s := h.stops(); len(s) != 0 {
+				t.Fatalf("containers were stopped on a node without the whole apiserver pair: %q", s)
+			}
+			if !slices.Contains(h.restarts(), "kubelet-restart:bad") {
+				t.Fatalf("the worker repair did not finish (no kubelet restart): %q\n%s", h.steps(), h.errBuf.String())
+			}
+			h.assertNoHealPKI("bad", "a node without the whole pair")
+			if c, k := h.pairAt(h.pkiPath("bad")); c != tc.crt || k != tc.key {
+				t.Fatalf("the heal changed the pki/ files of a node without the whole pair: crt %q key %q", c, k)
+			}
+
+			h.reset()
+			h.heal()
+			if h.called("repair:bad") {
+				t.Fatalf("the next heal ran the repair again on a node without the whole pair:\n%s", h.errBuf.String())
+			}
+		})
 	}
 }
 
 func TestHealCertRenewalFailureKeepsTheOldPair(t *testing.T) {
 	// kind's fix_certificate skips a node without apiserver.crt. So a failed
 	// renewal must put the old pair back, and must leave /kind/old-ipv4 at the
-	// old address, so that the next node boot retries the renewal. It must
-	// also stop before the kubelet restart and report the failure.
+	// old address, so that a node boot retries the renewal. It must also stop
+	// before the kubelet restart and report the failure with kubeadm's
+	// reason.
 	h := newHealFixture(t)
 	h.makeControlPlane("bad")
 	h.kubeadmFails = true
 
-	if err := h.d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", h.errBuf); err != nil {
-		t.Fatal(err)
-	}
-	if crt := readFileT(t, filepath.Join(h.pkiPath("bad"), "apiserver.crt")); crt != "old-cert\n" {
-		t.Fatalf("a failed renewal lost apiserver.crt (%q): the apiserver has no serving certificate, and kind's fix_certificate skips a node without one", crt)
-	}
-	if key := readFileT(t, filepath.Join(h.pkiPath("bad"), "apiserver.key")); key != "old-key\n" {
-		t.Fatalf("a failed renewal lost apiserver.key (%q)", key)
-	}
+	h.heal()
+	h.assertPair("bad", "172.31.0.2", "a failed renewal must keep the old pair: without it the apiserver has no serving certificate, and kind's fix_certificate skips the node")
+	h.assertNoHealPKI("bad", "after the old pair came back")
 	if got := readFileT(t, h.oldIPPath("bad")); got != "172.31.0.2" {
-		t.Fatalf("/kind/old-ipv4 = %q after a failed renewal: the next boot sees no address change and does not retry the renewal", got)
+		t.Fatalf("/kind/old-ipv4 = %q after a failed renewal: a node boot sees no address change and does not retry the renewal", got)
 	}
 	if slices.Contains(h.restarts(), "kubelet-restart:bad") {
 		t.Fatal("kubelet restarted after a failed renewal: the script must stop and report")
 	}
-	if !strings.Contains(h.errBuf.String(), "could not repair bad") {
-		t.Fatalf("a failed renewal was not reported:\n%s", h.errBuf.String())
+	if s := h.stops(); len(s) != 0 {
+		t.Fatalf("containers were stopped after a failed renewal: they still connect with the old certificate in place: %q", s)
+	}
+	warning := h.errBuf.String()
+	if !strings.Contains(warning, "could not repair bad: ") {
+		t.Fatalf("a failed renewal was not reported:\n%s", warning)
+	}
+	if !strings.Contains(warning, "could not repair bad: kubeadm stub: noise line 6; E1110 16:20:03.100000    3243 certs.go:1] kubeadm stub: a klog error; error execution phase certs/apiserver: test failure. The next") {
+		t.Fatalf("the warning must carry the last three lines of kubeadm's stderr without klog info and warning lines and without the --v=5 hint:\n%s", warning)
+	}
+	if strings.Contains(warning, "noise line 5") || strings.Contains(warning, "[certs]") {
+		t.Fatalf("the warning is not bounded to the end of kubeadm's stderr, or carries its stdout:\n%s", warning)
+	}
+	if strings.Contains(warning, "systemctl status") || !strings.Contains(warning, "The next lo up tries again.") {
+		t.Fatalf("the warning names the wrong next step:\n%s", warning)
 	}
 }
 
-func TestNodesOnRegistryNetworkGate(t *testing.T) {
-	// The gate for the heal after the shared→per-project default flip: a
-	// cluster provisioned under the OLD default still carries registry NICs
-	// while its spec now reads "not shared" — membership, not the spec,
-	// must decide.
-	d, runner, _, _ := testDriver(t)
-	jsonPath := filepath.Join(t.TempDir(), ".registries.json")
-	testutil.WriteFile(t, jsonPath, `{"shared":false,"tls":false,"port":80,"network":{"name":"lok8s-registries","cidr":"10.125.200.0/24"},"project_network":"lok8s","registries":[]}`)
-	t.Setenv("LOK8S_REGISTRY_JSON", jsonPath)
+func TestHealCertRenewalFailThenRerun(t *testing.T) {
+	// The first heal repairs the files, but kubeadm fails. The flag then
+	// already names the cluster-network address, so the next heal must read
+	// the certificate, find the old address and run the renewal again. A
+	// third heal finds a good certificate and does nothing.
+	h := newHealFixture(t)
+	h.makeControlPlane("bad")
+	h.kubeadmFails = true
+	h.heal()
+	h.assertPair("bad", "172.31.0.2", "after the failed renewal")
 
-	members := "lok8s-registry-io-docker bad "
-	runner.handler = func(c execx.Cmd) error {
-		if c.Name == "docker" {
-			writeOut(c, members+"\n")
-			return nil
+	h.kubeadmFails = false
+	h.reset()
+	h.heal()
+	if !strings.Contains(h.errBuf.String(), "lo: bad has --node-ip=10.9.0.3, but its apiserver certificate does not name that address — renewing the certificate") {
+		t.Fatalf("the second heal did not report the old certificate:\n%s", h.errBuf.String())
+	}
+	s := h.kubeadmSteps()
+	if len(s) != 1 || !strings.Contains(s[0], " | old-pair=absent | conf=advertiseAddress: 10.9.0.3 | ") {
+		t.Fatalf("the second heal did not renew the certificate the way of fix_certificate: %q\n%s", s, h.errBuf.String())
+	}
+	h.assertPair("bad", "10.9.0.3", "after the second heal")
+	h.assertNoHealPKI("bad", "after the second heal")
+	if got := readFileT(t, h.oldIPPath("bad")); got != "10.9.0.3" {
+		t.Fatalf("/kind/old-ipv4 = %q after the renewal, want the cluster-network address", got)
+	}
+	if !slices.Contains(h.restarts(), "kubelet-restart:bad") || !h.called("cni-restart") || len(h.stops()) != 2 {
+		t.Fatalf("the second heal did not finish the repair (container stops, kubelet and CNI restart): steps %q calls %q", h.steps(), h.calls)
+	}
+
+	h.reset()
+	h.heal()
+	if len(h.calls) != 0 || len(h.steps()) != 0 {
+		t.Fatalf("the third heal acted on a node with a good certificate: calls %q steps %q", h.calls, h.steps())
+	}
+}
+
+func TestHealRenewsCertLeftStaleByAnOlderHeal(t *testing.T) {
+	// An older lo repaired the files, wrote old-ipv4 and restarted kubelet,
+	// but did not renew the certificate. Nothing else will ever renew it.
+	h := newHealFixture(t)
+	h.makeControlPlane("bad")
+	h.markRepaired("bad")
+	testutil.WriteFile(t, h.oldIPPath("bad"), "10.9.0.3")
+
+	h.heal()
+	if s := h.kubeadmSteps(); len(s) != 1 {
+		t.Fatalf("the heal did not renew a certificate that names the old address: %q\n%s", s, h.errBuf.String())
+	}
+	h.assertPair("bad", "10.9.0.3", "after the renewal")
+}
+
+func TestHealRestoresAPairStuckInHealPKI(t *testing.T) {
+	// A heal stopped between the mv of the pair and the end of kubeadm (lo
+	// killed, the node stopped). The files are repaired and the pair, or part
+	// of it, is in /kind/heal-pki. The next heal must put the pair back and
+	// renew it. When kubeadm fails, pki/ must hold a pair whose key matches
+	// its certificate.
+	type state struct {
+		name       string
+		healPKI    []string // files of the old pair in /kind/heal-pki
+		pkiOld     []string // files of the old pair left in pki/
+		pkiNew     []string // files of a new pair kubeadm wrote to pki/
+		keptOnFail string   // the address of the pair in pki/ after a failed renewal
+	}
+	states := []state{
+		{name: "after the mv of the certificate", healPKI: []string{"apiserver.crt"}, pkiOld: []string{"apiserver.key"}, keptOnFail: "172.31.0.2"},
+		{name: "after the mv of both files", healPKI: []string{"apiserver.crt", "apiserver.key"}, keptOnFail: "172.31.0.2"},
+		{name: "after kubeadm wrote the new key", healPKI: []string{"apiserver.crt", "apiserver.key"}, pkiNew: []string{"apiserver.key"}, keptOnFail: "172.31.0.2"},
+		{name: "after kubeadm wrote the new pair", healPKI: []string{"apiserver.crt", "apiserver.key"}, pkiNew: []string{"apiserver.crt", "apiserver.key"}, keptOnFail: "10.9.0.3"},
+	}
+	for _, st := range states {
+		for _, fails := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, kubeadm fails=%v", st.name, fails), func(t *testing.T) {
+				h := newHealFixture(t)
+				h.makeControlPlane("bad")
+				h.markRepaired("bad")
+				// Build the pairs in scratch dirs, then place the files.
+				oldDir, newDir := filepath.Join(h.rootDir, "old"), filepath.Join(h.rootDir, "new")
+				h.writePair(oldDir, "172.31.0.2")
+				h.writePair(newDir, "10.9.0.3")
+				for _, f := range []string{"apiserver.crt", "apiserver.key"} {
+					os.Remove(filepath.Join(h.pkiPath("bad"), f))
+				}
+				place := func(files []string, from, to string) {
+					for _, f := range files {
+						testutil.WriteFile(t, filepath.Join(to, f), readFileT(t, filepath.Join(from, f)))
+					}
+				}
+				place(st.healPKI, oldDir, h.healPKIPath("bad"))
+				place(st.pkiOld, oldDir, h.pkiPath("bad"))
+				place(st.pkiNew, newDir, h.pkiPath("bad"))
+				h.kubeadmFails = fails
+
+				h.heal()
+				if !strings.Contains(h.errBuf.String(), "lo: bad has its apiserver key pair in /kind/heal-pki from an interrupted heal — renewing the certificate") {
+					t.Fatalf("the heal did not report the stuck pair:\n%s", h.errBuf.String())
+				}
+				if s := h.kubeadmSteps(); len(s) != 1 || !strings.Contains(s[0], " | old-pair=absent | ") {
+					t.Fatalf("the heal did not renew the restored pair: %q\n%s", s, h.errBuf.String())
+				}
+				h.assertNoHealPKI("bad", "after the heal")
+				if fails {
+					h.assertPair("bad", st.keptOnFail, "a failed renewal after an interrupted heal")
+					if !strings.Contains(h.errBuf.String(), "could not repair bad: ") {
+						t.Fatalf("the failure was not reported:\n%s", h.errBuf.String())
+					}
+					return
+				}
+				h.assertPair("bad", "10.9.0.3", "after the renewal")
+				if got := readFileT(t, h.oldIPPath("bad")); got != "10.9.0.3" {
+					t.Fatalf("/kind/old-ipv4 = %q after the renewal", got)
+				}
+			})
 		}
-		if c.Name == "kind" {
-			writeOut(c, "good\nbad\n")
-		}
+	}
+}
+
+// TestHealScriptMatchesBash holds the two copies of the heal in lockstep. It
+// runs lo::heal_node_ips of the frozen tree with kind, docker and kubectl
+// stubbed, and healNodeIPs with a fake runner that answers the same. Then it
+// compares the repair script that each hands to `docker exec … bash -c`, the
+// certificate probe, and the warnings. Two known differences are
+// normalised: bash removes the `\`-newline continuations of the double-quoted
+// script, and the bash probe runs openssl where Go runs cat (deviation D43).
+// logLines splits a call log of the bash side into its lines (none for an
+// empty or missing file).
+func logLines(raw []byte) []string {
+	if len(raw) == 0 {
 		return nil
 	}
+	return strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+}
 
-	if !d.nodesOnRegistryNetwork(t.Context(), "lotest") {
-		t.Fatal("node 'bad' is attached to the registry network but the gate said no — an already-drifted pre-flip cluster would never be healed")
-	}
+func TestHealScriptMatchesBash(t *testing.T) {
+	root := testutil.RepoRoot(t)
+	locale := bashLocale(t)
+	pemOld := (&healFixture{t: t, rootDir: t.TempDir()}).certPEM("172.31.0.2")
+	sansOld := "X509v3 Subject Alternative Name: \n    DNS:lotest-control-plane, DNS:kubernetes, DNS:localhost, IP Address:10.96.0.1, IP Address:172.31.0.2, IP Address:127.0.0.1"
+	sansNew := strings.ReplaceAll(sansOld, "172.31.0.2", "10.9.0.3")
+	pemNew := (&healFixture{t: t, rootDir: t.TempDir()}).certPEM("10.9.0.3")
+	longLine := strings.Repeat("x", 450)
+	for _, tc := range []struct {
+		name               string
+		flag, want         string
+		goProbe, bashProbe string
+		repairErr          string // stderr of a failing repair
+		notReady           bool   // /readyz never passes
+	}{
+		{name: "drifted node", flag: "172.31.0.2", want: "10.9.0.3"},
+		{name: "drifted node, repair fails", flag: "172.31.0.2", want: "10.9.0.3",
+			repairErr: "line one\n\n   kubeadm stub: noise\nW1110 16:20:03.113013    3243 a.go:1] note\nerror execution phase certs/apiserver: x\r\n  To see the stack trace  \nI1110 16:20:03.2 1 b.go:2] info\n"},
+		{name: "drifted node, klog error line", flag: "172.31.0.2", want: "10.9.0.3",
+			repairErr: "a\nb\nE1110 16:20:03.1 1 c.go:3] an error\nIW1110 not klog\nW110 not klog\n"},
+		{name: "drifted node, only klog notes", flag: "172.31.0.2", want: "10.9.0.3", repairErr: "W1110 1 a.go:1] x\nTo see the stack trace of this error\n"},
+		{name: "drifted node, long stderr", flag: "172.31.0.2", want: "10.9.0.3", repairErr: "a\n" + longLine + "\n"},
+		{name: "drifted node, no stderr", flag: "172.31.0.2", want: "10.9.0.3", repairErr: "\n"},
+		{name: "pair in heal-pki", flag: "10.9.0.3", want: "10.9.0.3", goProbe: "heal-pki", bashProbe: "heal-pki"},
+		{name: "old certificate", flag: "10.9.0.3", want: "10.9.0.3", goProbe: pemOld, bashProbe: sansOld},
+		{name: "old certificate, repair fails", flag: "10.9.0.3", want: "10.9.0.3", goProbe: pemOld, bashProbe: sansOld,
+			repairErr: "error execution phase certs/apiserver: x\n"},
+		{name: "good certificate", flag: "10.9.0.3", want: "10.9.0.3", goProbe: pemNew, bashProbe: sansNew},
+		{name: "worker", flag: "10.9.0.3", want: "10.9.0.3"},
+		{name: "not an IP", flag: "172.31.0.2", want: "10.9.0.3'; touch /tmp/x; echo '"},
+		{name: "API server not steady", flag: "172.31.0.2", want: "10.9.0.3", notReady: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The bash side.
+			out := t.TempDir()
+			script := `import() { :; }; warn() { printf '[warn] %s\n' "$*"; }
+source "$1/.lok8s/utils/ip.sh"; source "$1/.lok8s/drivers/lo/utils/network.sh"
+kind() { echo n1; }
+docker() {
+  case "$1 $3" in
+    "inspect --format") printf '%s\n' "${WANT}" ;;
+    "exec cat") printf 'KUBELET_KUBEADM_ARGS="--node-ip=%s --node-labels="\n' "${FLAG}" ;;
+    "exec sh") printf '%s' "${@: -1}" > "${OUT}/probe"; printf '%s\n' "${PROBE}" ;;
+    "exec bash") printf '%s' "${@: -1}" > "${OUT}/script"
+      if [ -n "${REPAIR_ERR}" ]; then printf '%s' "${REPAIR_ERR}" >&2; return 1; fi ;;
+  esac
+}
+kubectl() {
+  printf '%s\n' "$*" >> "${OUT}/kubectl"
+  if [[ "$*" == *" get --raw /readyz" ]]; then [ -z "${NOT_READY}" ]; return; fi
+  if [[ "$*" == *" get node "* ]]; then printf '%s\n' "${WANT}"; fi
+}
+sleep() { printf '%s\n' "$*" >> "${OUT}/sleep"; }
+lo::heal_node_ips lotest /fake/kubeconfig`
+			cmd := exec.CommandContext(t.Context(), "bash", "-c", script, "bash", root)
+			cmd.Env = append(os.Environ(), "WANT="+tc.want, "FLAG="+tc.flag, "PROBE="+tc.bashProbe,
+				"REPAIR_ERR="+tc.repairErr, "OUT="+out, "KIND_EXPERIMENTAL_DOCKER_NETWORK=lok8s-test")
+			if tc.notReady {
+				cmd.Env = append(cmd.Env, "NOT_READY=1")
+			} else {
+				cmd.Env = append(cmd.Env, "NOT_READY=")
+			}
+			cmd.Env = append(cmd.Env, locale...)
+			var bashErr strings.Builder
+			cmd.Stderr = &bashErr
+			bashOut, err := cmd.Output()
+			if err != nil || bashErr.Len() != 0 {
+				t.Fatalf("the bash heal failed: %v\n%s", err, bashErr.String())
+			}
 
-	members = "lok8s-registry-io-docker "
-	if d.nodesOnRegistryNetwork(t.Context(), "lotest") {
-		t.Fatal("no cluster node is on the registry network, yet the gate fired")
+			// The Go side.
+			d, runner, errBuf, _ := testDriver(t)
+			t.Setenv("KIND_EXPERIMENTAL_DOCKER_NETWORK", "lok8s-test")
+			var goProbe, goScript string
+			var goKubectl, goSleeps []string
+			d.sleep = func(ctx context.Context, dur time.Duration) error {
+				goSleeps = append(goSleeps, fmt.Sprint(dur.Seconds()))
+				return ctx.Err()
+			}
+			runner.handler = func(c execx.Cmd) error {
+				a := append(slices.Clone(c.Args), "", "", "")
+				switch c.Name + " " + a[0] + " " + a[2] {
+				case "kind get --name":
+					writeOut(c, "n1\n")
+				case "docker inspect --format":
+					writeOut(c, tc.want+"\n")
+				case "docker exec cat":
+					writeOut(c, `KUBELET_KUBEADM_ARGS="--node-ip=`+tc.flag+` --node-labels="`+"\n")
+				case "docker exec sh":
+					goProbe = c.Args[len(c.Args)-1]
+					writeOut(c, tc.goProbe+"\n")
+				case "docker exec bash":
+					goScript = c.Args[len(c.Args)-1]
+					if tc.repairErr != "" {
+						writeErr(c, tc.repairErr)
+						return errors.New("exit status 1")
+					}
+				}
+				if c.Name == "kubectl" {
+					goKubectl = append(goKubectl, strings.Join(c.Args, " "))
+					if c.Args[len(c.Args)-1] == "/readyz" {
+						if tc.notReady {
+							return errors.New("exit status 1")
+						}
+						return nil
+					}
+					if slices.Contains(c.Args, "get") {
+						writeOut(c, tc.want+"\n")
+					}
+				}
+				return nil
+			}
+			if err := d.healNodeIPs(t.Context(), "lotest", "/fake/kubeconfig", errBuf); err != nil {
+				t.Fatal(err)
+			}
+
+			if got, want := string(bashOut), errBuf.String(); got != want {
+				t.Errorf("the warnings differ:\n bash %q\n Go   %q", got, want)
+			}
+			bashScript, _ := os.ReadFile(filepath.Join(out, "script"))
+			if got, want := string(bashScript), strings.ReplaceAll(goScript, "\\\n", ""); got != want {
+				t.Errorf("the repair scripts differ:\n--- bash\n%s\n--- Go (continuations removed)\n%s", got, want)
+			}
+			bashKubectl, _ := os.ReadFile(filepath.Join(out, "kubectl"))
+			if got, want := logLines(bashKubectl), goKubectl; !slices.Equal(got, want) {
+				t.Errorf("the kubectl calls differ:\n bash %q\n Go   %q", got, want)
+			}
+			bashSleeps, _ := os.ReadFile(filepath.Join(out, "sleep"))
+			if got, want := logLines(bashSleeps), goSleeps; !slices.Equal(got, want) {
+				t.Errorf("the waits differ:\n bash %q\n Go   %q", got, want)
+			}
+			bashProbe, _ := os.ReadFile(filepath.Join(out, "probe"))
+			openssl := "openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -ext subjectAltName"
+			if got := strings.Replace(string(bashProbe), openssl, "cat /etc/kubernetes/pki/apiserver.crt", 1); got != goProbe {
+				t.Errorf("the certificate probes differ:\n bash %q\n Go   %q", bashProbe, goProbe)
+			}
+		})
 	}
 }
