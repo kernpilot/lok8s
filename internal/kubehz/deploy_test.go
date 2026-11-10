@@ -590,7 +590,8 @@ func TestDeployApplyNeverReadyNamesAStalledPull(t *testing.T) {
 		"    curl -6 -sS -o /dev/null --max-time 15 https://ghcr.io/v2/\n" +
 		"    curl -4 -sS -o /dev/null --max-time 15 https://ghcr.io/v2/\n" +
 		"  ghcr.io sends the image layers from another host. Run the two commands against https://pkg-containers.githubusercontent.com/ too.\n" +
-		"  To work around it, make the node reach ghcr.io over IPv4: repair its IPv6 route, or run the node without IPv6. Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod kubehz-live-agent-6b7c9d8f5-x2k4q\n"
+		"  To work around it, make the node reach ghcr.io over IPv4. Repair its IPv6 route, or run the node without IPv6.\n" +
+		"  Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod kubehz-live-agent-6b7c9d8f5-x2k4q\n"
 	if !strings.HasSuffix(h.errOut.String(), want) {
 		t.Fatalf("stderr does not end with the pull hint:\n%s", h.errOut.String())
 	}
@@ -651,6 +652,8 @@ func TestDeployApplyNeverReadyWithoutAPullNamesNoPull(t *testing.T) {
 		"bidi override in the image": {pods: pod + "|worker-1|ImagePullBackOff|ghcr.io/kernpilot/\u202ekubehz-agent@sha256:474994f0\n"},
 		"non-ASCII letter in image":  {pods: pod + "|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-ag\u00e9nt@sha256:474994f0\n"},
 		"shell text in the image":    {pods: pod + "|worker-1|ImagePullBackOff|ghcr.io/x;$(id)\n"},
+		"NUL in the image":           {pods: pod + "|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-agent\x00@sha256:474994f0\n"},
+		"NUL in the events reason":   {pods: creating, events: "spec.containers{agent}|Pul\x00ling\n"},
 		"a fifth field":              {pods: pod + "|worker-1|ImagePullBackOff|" + testAgentImage + "|x\n"},
 		"no pods":                    {},
 	} {
@@ -660,6 +663,24 @@ func TestDeployApplyNeverReadyWithoutAPullNamesNoPull(t *testing.T) {
 			mustNotContain(t, h.output(), "  Pod ")
 		})
 	}
+}
+
+// The image may be at most liveAgentImageMaxLen bytes: a line with a longer
+// image gets no hint. The bash twin has the same limit as a separate check
+// (a regex bound above 255 does not compile on every libc), and its bats
+// test pins the same boundary.
+func TestDeployApplyNeverReadyImageLengthLimit(t *testing.T) {
+	pod := "kubehz-live-agent-6b7c9d8f5-x2k4q"
+	prefix := "ghcr.io/kernpilot/kubehz-agent:"
+	atMax := prefix + strings.Repeat("a", 511-len(prefix))
+	if len(atMax) != 511 || liveAgentImageMaxLen != 511 {
+		t.Fatalf("image %d bytes, limit %d: the test and the limit disagree", len(atMax), liveAgentImageMaxLen)
+	}
+	h := readyTimeout(t, pod+"|worker-1|ImagePullBackOff|"+atMax+"\n", nil, "", nil)
+	mustContain(t, h.errOut.String(), "  Pod "+pod+" on node worker-1 cannot pull its image "+atMax+" (ImagePullBackOff).")
+	h = readyTimeout(t, pod+"|worker-1|ImagePullBackOff|"+atMax+"a\n", nil, "", nil)
+	mustNotContain(t, h.output(), "IPv6")
+	mustNotContain(t, h.output(), "  Pod ")
 }
 
 // The hint reads the agent container of the pods that the Deployment

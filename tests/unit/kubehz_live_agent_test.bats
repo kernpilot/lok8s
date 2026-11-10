@@ -656,19 +656,25 @@ _stub_kubectl_log() {
 
 # A rollout wait that times out, then the pod read and the events read that
 # name a pull that failed or hangs. STUB_PODS / STUB_EVENTS are the answers,
-# STUB_PODS_RC / STUB_EVENTS_RC their exit codes. Every call lands in
-# STUB_KUBECTL_LOG.
+# STUB_PODS_RC / STUB_EVENTS_RC their exit codes. STUB_PODS_FILE /
+# STUB_EVENTS_FILE, when set, name a file to answer from instead: a variable
+# cannot hold a NUL byte. Every call lands in STUB_KUBECTL_LOG.
 _ready_timeout() {
   _source_deploy
   export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
   : > "${STUB_KUBECTL_LOG}"
   export STUB_PODS="${STUB_PODS:-}" STUB_EVENTS="${STUB_EVENTS:-}"
   export STUB_PODS_RC="${STUB_PODS_RC:-0}" STUB_EVENTS_RC="${STUB_EVENTS_RC:-0}"
+  export STUB_PODS_FILE="${STUB_PODS_FILE:-}" STUB_EVENTS_FILE="${STUB_EVENTS_FILE:-}"
   kubectl() {
     echo "$*" >> "${STUB_KUBECTL_LOG}"
     case "$*" in
-      *"get pods -l app.kubernetes.io/name=kubehz-live-agent "*) printf '%s' "${STUB_PODS}"; return "${STUB_PODS_RC}" ;;
-      *"get events "*) printf '%s' "${STUB_EVENTS}"; return "${STUB_EVENTS_RC}" ;;
+      *"get pods -l app.kubernetes.io/name=kubehz-live-agent "*)
+        if [[ -n "${STUB_PODS_FILE}" ]]; then cat "${STUB_PODS_FILE}"; else printf '%s' "${STUB_PODS}"; fi
+        return "${STUB_PODS_RC}" ;;
+      *"get events "*)
+        if [[ -n "${STUB_EVENTS_FILE}" ]]; then cat "${STUB_EVENTS_FILE}"; else printf '%s' "${STUB_EVENTS}"; fi
+        return "${STUB_EVENTS_RC}" ;;
       *"get pods"*) printf ''; return 0 ;;
       *"rollout status"*) return 1 ;;
     esac
@@ -703,7 +709,8 @@ AGENT_IMAGE="ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8
     curl -6 -sS -o /dev/null --max-time 15 https://ghcr.io/v2/
     curl -4 -sS -o /dev/null --max-time 15 https://ghcr.io/v2/
   ghcr.io sends the image layers from another host. Run the two commands against https://pkg-containers.githubusercontent.com/ too.
-  To work around it, make the node reach ghcr.io over IPv4: repair its IPv6 route, or run the node without IPv6. Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod kubehz-live-agent-6b7c9d8f5-x2k4q"
+  To work around it, make the node reach ghcr.io over IPv4. Repair its IPv6 route, or run the node without IPv6.
+  Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod kubehz-live-agent-6b7c9d8f5-x2k4q"
   [[ "${output}" == *"${want}" ]] || { echo "output does not end with the pull hint:"; echo "${output}"; false; }
   refute_output --partial "q2w4r on node"
 
@@ -781,6 +788,50 @@ AGENT_IMAGE="ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8
   STUB_PODS="kubehz-live-agent-6b7c9d8f5-x2k4q|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-agent@sha256:474994f0"$'\n'
   _ready_timeout
   assert_output --partial "  Pod kubehz-live-agent-6b7c9d8f5-x2k4q on node worker-1 cannot pull its image"
+}
+
+@test "ready timeout: the image may be at most 511 bytes, as in the Go binary" {
+  # The limit is a separate check and not a regex bound: a bound above 255
+  # (RE_DUP_MAX) does not compile on every libc. Go: liveAgentImageMaxLen.
+  local pod="kubehz-live-agent-6b7c9d8f5-x2k4q" prefix="ghcr.io/kernpilot/kubehz-agent:" pad at_max
+  printf -v pad '%*s' $(( 511 - ${#prefix} )) ''
+  at_max="${prefix}${pad// /a}"
+  [[ ${#at_max} -eq 511 ]] || { echo "image is ${#at_max} bytes, want 511"; false; }
+  STUB_PODS="${pod}|worker-1|ImagePullBackOff|${at_max}"$'\n'
+  _ready_timeout
+  assert_output --partial "  Pod ${pod} on node worker-1 cannot pull its image ${at_max} (ImagePullBackOff)."
+  STUB_PODS="${pod}|worker-1|ImagePullBackOff|${at_max}a"$'\n'
+  _ready_timeout
+  refute_output --partial "IPv6"
+  refute_output --partial "  Pod "
+}
+
+@test "ready timeout: a NUL byte in the pod read or the events read gets no hint, as in the Go binary" {
+  # Command substitution drops a NUL byte. Without the change to 0x01, the
+  # lines below would match once the NUL is gone, and the Go binary refuses
+  # them.
+  local pod="kubehz-live-agent-6b7c9d8f5-x2k4q"
+  export STUB_PODS_FILE="${BATS_TEST_TMPDIR}/pods" STUB_EVENTS_FILE="${BATS_TEST_TMPDIR}/events"
+  printf '%s|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-agent\0@sha256:474994f0\n' "${pod}" > "${STUB_PODS_FILE}"
+  : > "${STUB_EVENTS_FILE}"
+  [[ $(tr -dc '\000' < "${STUB_PODS_FILE}" | wc -c) -eq 1 ]] || { echo "the pods file holds no NUL"; false; }
+  _ready_timeout
+  refute_output --partial "IPv6"
+  refute_output --partial "  Pod "
+  refute_output --partial "null byte"
+
+  printf '%s|worker-1|ContainerCreating|%s\n' "${pod}" "${AGENT_IMAGE}" > "${STUB_PODS_FILE}"
+  printf 'spec.containers{agent}|Pul\0ling\n' > "${STUB_EVENTS_FILE}"
+  [[ $(tr -dc '\000' < "${STUB_EVENTS_FILE}" | wc -c) -eq 1 ]] || { echo "the events file holds no NUL"; false; }
+  _ready_timeout
+  refute_output --partial "IPv6"
+  refute_output --partial "  Pod "
+  refute_output --partial "null byte"
+
+  # The same answers without the NUL get the hint, so the stub files work.
+  printf 'spec.containers{agent}|Pulling\n' > "${STUB_EVENTS_FILE}"
+  _ready_timeout
+  assert_output --partial "  Pod ${pod} on node worker-1 started to pull its image"
 }
 
 @test "ready timeout: the hint reads the container and the pods that the vendored Deployment names" {

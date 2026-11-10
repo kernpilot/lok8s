@@ -350,8 +350,16 @@ const liveAgentPodsJSONPath = `jsonpath={range .items[*]}{.metadata.name}|{.spec
 // One line of that read. Every field comes from the cluster and is printed,
 // so the shape is pinned: DNS names for the pod and the node, letters for
 // the reason, an image reference without spaces, quotes or escapes. All
-// classes are ASCII only (the bash twin matches with LC_ALL=C).
-var liveAgentPodLineRe = regexp.MustCompile(`^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([A-Za-z]{1,64})[|]([A-Za-z0-9][A-Za-z0-9._/:@-]{0,510})$`)
+// classes are ASCII only (the bash twin matches with LC_ALL=C). A NUL byte
+// fails the match too. Bash command substitution drops NUL bytes, so the
+// bash twin changes each NUL to a byte that fails its match.
+var liveAgentPodLineRe = regexp.MustCompile(`^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([A-Za-z]{1,64})[|]([A-Za-z0-9][A-Za-z0-9._/:@-]*)$`)
+
+// The longest image reference that the pull hint prints, in bytes. This is
+// a separate check and not a bound in the regexp: POSIX guarantees bounds
+// only up to 255 (RE_DUP_MAX), and the bash twin's regex must compile on
+// every libc.
+const liveAgentImageMaxLen = 511
 
 // liveAgentPullHint runs after a Ready timeout. It reads the live agent's
 // pods and, when one of them failed to pull its image or is still pulling
@@ -372,6 +380,9 @@ func (c *Context) liveAgentPullHint(ctx context.Context) {
 			continue
 		}
 		pod, node, reason, image := m[1], m[3], m[5], m[6]
+		if len(image) > liveAgentImageMaxLen {
+			continue
+		}
 		switch reason {
 		case "ErrImagePull", "ImagePullBackOff":
 			c.echoErr("  Pod %s on node %s cannot pull its image %s (%s). Read why: kubectl -n kubehz-system describe pod %s", pod, node, image, reason, pod)
@@ -392,7 +403,8 @@ func (c *Context) liveAgentPullHint(ctx context.Context) {
 		if registry == "ghcr.io" {
 			c.echoErr("  ghcr.io sends the image layers from another host. Run the two commands against https://pkg-containers.githubusercontent.com/ too.")
 		}
-		c.echoErr("  To work around it, make the node reach %s over IPv4: repair its IPv6 route, or run the node without IPv6. Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod %s", registry, pod)
+		c.echoErr("  To work around it, make the node reach %s over IPv4. Repair its IPv6 route, or run the node without IPv6.", registry)
+		c.echoErr("  Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod %s", pod)
 		return
 	}
 }

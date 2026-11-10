@@ -1130,8 +1130,10 @@ entirely, run `lo kubehz deploy` again.
 A pod that stays in `ContainerCreating` with a `Pulling` event and no `Pulled`
 event has an image pull that hangs. On a dual-stack node, a broken IPv6 path to
 the registry can cause this. The connection opens but carries no data, and the
-container runtime does not try IPv4. `lo kubehz deploy` reads the pod and names
-this case when the Ready wait times out.
+container runtime does not try IPv4. When the Ready wait times out,
+`lo kubehz deploy` reads the pods. It names the first pod with an image pull
+that failed (`ErrImagePull` or `ImagePullBackOff`) or that hangs, and prints
+the checks below.
 
 To check, run these commands on the node. `<registry>` is the registry host of
 the agent image (`ghcr.io` by default):

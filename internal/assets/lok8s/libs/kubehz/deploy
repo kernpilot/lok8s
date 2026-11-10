@@ -477,6 +477,13 @@ kubehz::deploy_apply() {
 # ASCII only: in a UTF-8 locale such as en_US.UTF-8, [A-Za-z] also matches
 # letters like é. The Go twin is ASCII only too.
 #
+# The image is at most 511 bytes (liveAgentImageMaxLen in the Go twin). This
+# is a separate check and not a bound in the regex: POSIX guarantees bounds
+# only up to 255 (RE_DUP_MAX), and a libc can refuse a larger one, which
+# turns off the hint. Command substitution drops NUL bytes, so the read
+# changes each NUL to the byte 0x01: the line then fails the match, as it
+# does in the Go twin.
+#
 # The container name (agent) and the selector are the ones in the vendored
 # live-agent/base/deployment.yaml; a bats test fails when a re-vendor changes
 # either.
@@ -484,13 +491,15 @@ kubehz::deploy_apply() {
 kubehz::live_agent_pull_hint() {
   local LC_ALL=C
   local pods line pod node reason image registry
-  local re='^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([A-Za-z]{1,64})[|]([A-Za-z0-9][A-Za-z0-9._/:@-]{0,510})$'
-  pods=$(kubectl -n kubehz-system get pods -l app.kubernetes.io/name=kubehz-live-agent --request-timeout=10s \
-    -o 'jsonpath={range .items[*]}{.metadata.name}|{.spec.nodeName}|{.status.containerStatuses[?(@.name=="agent")].state.waiting.reason}|{.spec.containers[?(@.name=="agent")].image}{"\n"}{end}' \
-    2>/dev/null) || return 0
+  local re='^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([A-Za-z]{1,64})[|]([A-Za-z0-9][A-Za-z0-9._/:@-]*)$'
+  pods=$(set -o pipefail
+    kubectl -n kubehz-system get pods -l app.kubernetes.io/name=kubehz-live-agent --request-timeout=10s \
+      -o 'jsonpath={range .items[*]}{.metadata.name}|{.spec.nodeName}|{.status.containerStatuses[?(@.name=="agent")].state.waiting.reason}|{.spec.containers[?(@.name=="agent")].image}{"\n"}{end}' \
+      2>/dev/null | LC_ALL=C tr '\000' '\001') || return 0
   while IFS= read -r line; do
     [[ "${line}" =~ ${re} ]] || continue
     pod="${BASH_REMATCH[1]}" node="${BASH_REMATCH[3]}" reason="${BASH_REMATCH[5]}" image="${BASH_REMATCH[6]}"
+    (( ${#image} <= 511 )) || continue
     case "${reason}" in
       ErrImagePull|ImagePullBackOff)
         printf '  %s\n' "Pod ${pod} on node ${node} cannot pull its image ${image} (${reason}). Read why: kubectl -n kubehz-system describe pod ${pod}" >&2
@@ -512,7 +521,8 @@ kubehz::live_agent_pull_hint() {
       printf '  %s\n' "ghcr.io sends the image layers from another host. Run the two commands against https://pkg-containers.githubusercontent.com/ too." >&2
     fi
     printf '  %s\n' \
-      "To work around it, make the node reach ${registry} over IPv4: repair its IPv6 route, or run the node without IPv6. Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod ${pod}" >&2
+      "To work around it, make the node reach ${registry} over IPv4. Repair its IPv6 route, or run the node without IPv6." \
+      "Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod ${pod}" >&2
     return 0
   done <<< "${pods}"
   return 0
@@ -523,12 +533,15 @@ kubehz::live_agent_pull_hint() {
 # kubelet sets the event's involvedObject.fieldPath to spec.containers{<name>}).
 # A pod in ContainerCreating can also wait for a volume, and then the events
 # show no pull, or a finished one. An events read that fails answers "no".
+# Each NUL in the read becomes the byte 0x01, as in the pod read, so that a
+# line with a NUL fails the compare, as it does in the Go twin.
 # Usage: kubehz::image_pull_in_progress <pod>
 kubehz::image_pull_in_progress() {
   local pod="${1}" events
-  events=$(kubectl -n kubehz-system get events \
-    --field-selector "involvedObject.kind=Pod,involvedObject.name=${pod}" --request-timeout=10s \
-    -o 'jsonpath={range .items[*]}{.involvedObject.fieldPath}|{.reason}{"\n"}{end}' 2>/dev/null) || return 1
+  events=$(set -o pipefail
+    kubectl -n kubehz-system get events \
+      --field-selector "involvedObject.kind=Pod,involvedObject.name=${pod}" --request-timeout=10s \
+      -o 'jsonpath={range .items[*]}{.involvedObject.fieldPath}|{.reason}{"\n"}{end}' 2>/dev/null | LC_ALL=C tr '\000' '\001') || return 1
   events=$'\n'"${events}"$'\n'
   [[ "${events}" == *$'\nspec.containers{agent}|Pulling\n'* && "${events}" != *$'\nspec.containers{agent}|Pulled\n'* ]]
 }
