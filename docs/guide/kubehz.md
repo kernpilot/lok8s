@@ -1127,6 +1127,30 @@ and override the registry in the manifest, keeping the digest. A `401` means the
 agent-token was rejected: run `lo kubehz re-enroll`. If the Deployment is missing
 entirely, run `lo kubehz deploy` again.
 
+A pod that stays in `ContainerCreating` with a `Pulling` event and no `Pulled`
+event has an image pull that hangs. On a dual-stack node, a broken IPv6 path to
+the registry can cause this. The connection opens but carries no data, and the
+container runtime does not try IPv4. When the Ready wait times out,
+`lo kubehz deploy` reads the pods. It names the first pod with an image pull
+that failed (`ErrImagePull` or `ImagePullBackOff`) or that hangs, and prints
+the checks below.
+
+To check, run these commands on the node. `<registry>` is the registry host of
+the agent image (`ghcr.io` by default):
+
+```bash
+curl -6 -sS -o /dev/null --max-time 15 https://<registry>/v2/
+curl -4 -sS -o /dev/null --max-time 15 https://<registry>/v2/
+```
+
+The image layers can come from a different host. `ghcr.io` sends them from
+`pkg-containers.githubusercontent.com`, so run the same two commands against
+`https://pkg-containers.githubusercontent.com/` too.
+
+If only the IPv6 command times out, make the node reach the registry over IPv4.
+Repair its IPv6 route, or run the node without IPv6. Then delete the pod, so
+that a new pod pulls the image again.
+
 To confirm the CronJob really has stood down:
 
 ```bash
