@@ -914,6 +914,31 @@ curl_space_refusal() {
   KUBEHZ_TOKEN="${saved}"
 }
 
+@test "space_api: a curl failure is rc 1 with the unreachable line; space_api_call keeps the curl code and prints none" {
+  bats_require_minimum_version 1.5.0
+  curl() { echo "curl: (7) stub failure" >&2; return 7; }
+  export -f curl
+
+  run --separate-stderr kubehz::space_api GET "/api/spaces"
+  [ "$status" -eq 1 ]
+  [[ "${stderr}" == "curl: (7) stub failure"$'\n'"[error] kubehz API unreachable (GET /api/spaces)" ]]
+
+  # The caller that tells "before the send" from "after it" (node::maintain)
+  # reads the curl code and renders the failure itself.
+  local rc=0
+  kubehz::space_api_call POST "/api/spaces" '{}' 2>"${BATS_TEST_TMPDIR}/call.err" || rc=$?
+  [ "${rc}" -eq 1 ]
+  [ "${KUBEHZ_SPACE_API_CURL_RC}" = "7" ]
+  [[ "$(cat "${BATS_TEST_TMPDIR}/call.err")" == "curl: (7) stub failure" ]]
+
+  # The token check refuses before curl runs: no curl code, and space_api
+  # adds no unreachable line to the check's own.
+  KUBEHZ_TOKEN=$'khz_test_token\r' run --separate-stderr kubehz::space_api GET "/api/spaces"
+  [ "$status" -eq 1 ]
+  [[ "${stderr}" == *"must not contain a control character"* ]]
+  [[ "${stderr}" != *"unreachable"* ]]
+}
+
 # ── mutation pins for the round-1/round-2 guards ─────────
 # Each of these fails if its guard is deleted (review round 2: "revert every
 # hunk except the grep/auth-test and the suite stays green" — no longer true).

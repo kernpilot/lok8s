@@ -13,10 +13,11 @@
 # real kubectl, the platform api or the Hetzner api. Two sections talk to one
 # local https stub (hack/lib/kubehz-api-stub.py, a self-signed certificate
 # that both implementations trust through SSL_CERT_FILE and
-# CURL_CA_BUNDLE): the agent tools, and the register request bodies (the
-# last section). There the harness also diffs the requests that each
-# implementation sent. KUBEHZ_TOKEN and HCLOUD_TOKEN are unset except for
-# dummy values in those two sections.
+# CURL_CA_BUNDLE): the agent tools, the node maintenance verbs of a Space
+# (`lo kubehz node cordon|uncordon|drain`, with `lo kubehz status`), and the
+# register request bodies (the last section). There the harness also diffs
+# the requests that each implementation sent. KUBEHZ_TOKEN and HCLOUD_TOKEN
+# are unset except for dummy values in those sections.
 #
 # The provision path renders a SERVER string too (the api's own refusal
 # message, scrubbed, clipped, and in the bash tree escaped for `echo -e`),
@@ -45,7 +46,8 @@
 #     cluster_flag sees argv, so the bash guard (pinned by the bats suite on
 #     a direct node::join call) is dead on dispatch and the flag is silently
 #     ignored. The Go port refuses it as the guard intends — not a parity
-#     case.
+#     case. The same is true for node::reject_space_cluster_flag on
+#     cordon, uncordon and drain.
 #
 # Usage: hack/parity-kubehz.sh [path-to-go-lo]   (default: bin/lo)
 source "$(dirname "${BASH_SOURCE[0]}")/lib/parity.sh"
@@ -100,6 +102,17 @@ spec:
   kubehz:
     hosting: shared
     apiUrl: https://api.kubehz.example
+EOF
+# closed.dev — a Space whose api URL names a closed port: a transport
+# failure before the send.
+mk closed.dev <<'EOF'
+kind: Kubehz
+metadata:
+  name: closed
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://127.0.0.1:1
 EOF
 # space-*.dev — the SHAPE checks lo still makes on the three numbers. The
 # ceiling is the account's and lives on the platform, so lo refuses only what
@@ -657,7 +670,7 @@ if [[ "$(uname -s)" != Linux ]] || ! command -v python3 >/dev/null 2>&1 || ! com
   if [[ -n "${CI:-}" ]]; then
     fail "the https stub needs Linux, python3 and openssl, and the CI runner has them"
   else
-    echo "skip: the agent tools and the register cases (the https stub needs Linux, python3 and openssl)"
+    echo "skip: the agent tools, the node maintenance cases and the register cases (the https stub needs Linux, python3 and openssl)"
   fi
 elif ! api_stub; then
   fail "the https stub of the api did not start: $(head -c 300 "${WORK}/stub.out")"
@@ -884,6 +897,57 @@ check - kubehz node remove --name Bad_
 check - kubehz node remove --name ../../clusters
 check - kubehz node status --domain hosted-http.dev
 check - kubehz node status --domain alpha.dev
+# A Space: the hint names the Space join and where to read the nodes.
+check - kubehz node status --domain shared.dev
+check - kubehz node remove --name worker-1 --domain shared.dev
+
+# ── node maintenance (a Space): the local refusals, no api reached ──────────
+# cordon, uncordon and drain act on the nodes of a Space only. A missing
+# --name is a parse error; a self-hosted or hosted domain, a name or a
+# timeout of the wrong shape, and a missing KUBEHZ_TOKEN stop before a
+# request. A bad --space-id stops before a request too, so it is safe here
+# with a dummy token against an api URL that is not the stub.
+check_parse - kubehz node cordon
+check_parse - kubehz node uncordon
+check_parse - kubehz node drain
+check_parse - kubehz node cordon --name worker-1 --timeout 600
+check_parse - kubehz node uncordon --name worker-1 --evict-unmanaged
+check - kubehz node cordon --name worker-1
+check - kubehz n cordon -n worker-1 --domain alpha.dev
+check - kubehz node uncordon --name worker-1 --domain hosted-http.dev
+check - kubehz node drain --name worker-1 --domain kubehz-self.dev
+check - kubehz node drain --name worker-1 --domain nonexist.dev
+check "${PARSEERR}" kubehz node cordon --name worker-1 --domain broken.dev
+check - kubehz node drain --name worker-1 --domain shared.dev
+check - kubehz node uncordon --name worker-1 --domain shared.dev --space-id sp-1a2b3c4d
+check - kubehz node cordon --name Bad_ --domain shared.dev
+check - kubehz node drain --name '' --domain shared.dev
+check - kubehz node cordon --name ../../clusters --domain shared.dev
+# A backslash that the user types prints as typed in both (error() of the
+# bash tree prints through `echo -e`).
+check - kubehz node cordon --name '\e[2J' --domain shared.dev
+check - kubehz node remove --name 'a\\b\e[31m'
+check - kubehz node remove --name ''
+for timeout in 59 3601 0 00000 abc 0x10 6e2 99999 ' 600' '\e[31m'; do
+  check - kubehz node drain --name worker-1 --domain shared.dev --timeout "${timeout}"
+done
+for id in ../sp-1 sp-1/nodes 'sp 1' 'sp-1?x=1' 'sp-1%2F' '\e[2J'; do
+  KUBEHZ_TOKEN=parity-dummy check - kubehz node cordon --name worker-1 --domain shared.dev --space-id "${id}"
+done
+# The global --force/-f is not `kubectl drain --force`: a drain refuses it
+# at any place in argv, with the --evict-unmanaged hint. A cordon does not.
+check - kubehz node drain --name worker-1 --domain shared.dev --force
+check - kubehz node drain -f --name worker-1 --domain shared.dev --evict-unmanaged
+check - --force kubehz node drain --name worker-1 --domain shared.dev
+check - kubehz node cordon --name worker-1 --domain shared.dev --force
+# A failure before the send (nothing listens on the port): both print the
+# "unreachable" line, and not the lines of an unknown result. curl -sS
+# prints its own line first; the Go binary has no such line.
+for verb in cordon uncordon drain; do
+  KUBEHZ_TOKEN=parity-dummy check '^curl: \([0-9]+\) ' kubehz node "${verb}" --name worker-1 --domain closed.dev --space-id sp-1a2b3c4d
+done
+KUBEHZ_TOKEN=parity-dummy check '^curl: \([0-9]+\) ' kubehz node drain --name worker-1 --domain closed.dev --space-id sp-1a2b3c4d --timeout 600 --evict-unmanaged
+KUBEHZ_TOKEN=parity-dummy check '^curl: \([0-9]+\) ' kubehz node cordon --name worker-1 --domain closed.dev
 
 # ── handover: usage errors and bundle checks (no node touched) ──────────────
 check_parse - kubehz handover receive
@@ -899,6 +963,112 @@ check - kubehz h r -b "${WORK}/notarchive"
 check_parse - kubehz bogus
 check_parse - kubehz node bogus
 check_parse - kubehz handover bogus
+
+# ── node maintenance (a Space) against the https stub ───────────────────────
+# The stub answers POST /api/spaces/sp-1a2b3c4d/nodes/<name>/<action> by the
+# node name: an accepted request, each `replaced` value, a 2xx that is not
+# the answer of the route, each refusal code of the three routes, the
+# answers of a gateway (504, 502, a 503 with no code), a connection that
+# ends with no answer, a hostile refusal, and a 404 for any other name.
+# acme.dev finds the space by its slug (acme), yes.dev finds the space with
+# the hostile name (slug yes, no maintenance routes), nospace.dev finds none.
+# `lo kubehz status` reads the node list with the cordon and maintenance
+# fields.
+if [[ -n "${STUB_PORT}" ]]; then
+  for slug in acme yes nospace; do
+    mk "${slug}.dev" <<EOF
+kind: Kubehz
+metadata:
+  name: ${slug}
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://127.0.0.1:${STUB_PORT}
+EOF
+  done
+  # bslug.dev: a slug with backslashes, as typed (no space has it).
+  # hstub.dev: a hosted cluster on the stub, for the token check of the
+  # hosted node commands.
+  mk bslug.dev <<EOF
+kind: Kubehz
+metadata:
+  name: bslug
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://127.0.0.1:${STUB_PORT}
+    space:
+      slug: 'a\\\\b\e[31m'
+EOF
+  mk hstub.dev <<EOF
+kind: KubeOne
+metadata:
+  name: hstub
+spec:
+  kubehz:
+    hosting: hosted
+    access: managed
+    apiUrl: https://127.0.0.1:${STUB_PORT}
+EOF
+  export SSL_CERT_FILE="${WORK}/stub.pem" CURL_CA_BUNDLE="${WORK}/stub.pem" KUBEHZ_TOKEN=parity-jwt
+
+  check_api - kubehz node cordon --name worker-1 --domain acme.dev
+  check_api - kubehz node uncordon --name worker-1 --domain acme.dev
+  check_api - kubehz node drain --name worker-1 --domain acme.dev
+  check_api - kubehz node drain -n worker-1 --domain acme.dev --timeout 0600 --evict-unmanaged
+  check_api - kubehz node drain --name worker-1 --domain acme.dev --evict-unmanaged
+  check_api - kubehz node drain --name worker-2 --domain acme.dev --timeout 3600
+  check_api - kubehz node cordon --name worker-2 --domain acme.dev
+  check_api - kubehz node uncordon --name worker-2 --domain acme.dev
+  check_api - kubehz node cordon --name html-1 --domain acme.dev
+  check_api - kubehz node cordon --name odd-1 --domain acme.dev
+  check_api - kubehz node drain --name worker-10 --domain acme.dev
+  check_api - kubehz node cordon --name worker-11 --domain acme.dev
+  check_api - kubehz node uncordon --name worker-12 --domain acme.dev
+  # No answer after the send. curl -sS prints its own line first (its code
+  # and text depend on the curl and TLS versions: 52 "Empty reply from
+  # server", or 56 "unexpected eof"); the Go binary has no such line.
+  check_api '^curl: \([0-9]+\) ' kubehz node cordon --name drop-1 --domain acme.dev
+  check_api - kubehz node cordon --name joining-1 --domain acme.dev
+  check_api - kubehz node drain --name worker-3 --domain acme.dev
+  check_api - kubehz node drain --name worker-4 --domain acme.dev
+  for name in worker-5 worker-6 worker-7 worker-9 hostile-1; do
+    check_api - kubehz node cordon --name "${name}" --domain acme.dev
+  done
+  check_api - kubehz node uncordon --name worker-8 --domain acme.dev
+  check_api - kubehz node drain --name ghost-1 --domain acme.dev
+  check_api - kubehz node cordon --name worker-1 --domain yes.dev
+  check_api - kubehz node cordon --name worker-1 --domain nospace.dev
+  check_api - kubehz node cordon --name worker-1 --domain nospace.dev --space-id sp-1a2b3c4d
+  KUBEHZ_TOKEN=wrong check_api - kubehz node cordon --name worker-1 --domain acme.dev
+  KUBEHZ_TOKEN=wrong check_api - kubehz node cordon --name worker-1 --domain acme.dev --space-id sp-1a2b3c4d
+  check_api - kubehz status --domain acme.dev
+  check_api_none - kubehz node drain --name worker-1 --domain acme.dev --timeout 30
+  check_api_none - kubehz node cordon --name worker-1 --domain acme.dev --space-id 'sp-1/../x'
+  # A control character in KUBEHZ_TOKEN (a CR from a file with CRLF line
+  # ends, a tab): both refuse it in the shared node preflight with the same
+  # two lines, and neither sends a request: with --space-id, with the space
+  # list, and on the hosted node commands.
+  for token in $'parity-jwt\r' $'parity\tjwt'; do
+    KUBEHZ_TOKEN="${token}" check_api_none - kubehz node cordon --name worker-1 --domain acme.dev --space-id sp-1a2b3c4d
+    KUBEHZ_TOKEN="${token}" check_api_none - kubehz node drain --name worker-1 --domain acme.dev --space-id sp-1a2b3c4d --timeout 600
+    KUBEHZ_TOKEN="${token}" check_api_none - kubehz node uncordon --name worker-1 --domain acme.dev
+    KUBEHZ_TOKEN="${token}" check_api_none - kubehz node status --domain hstub.dev --cluster-id cl-1a2b3c4d
+    KUBEHZ_TOKEN="${token}" check_api_none - kubehz node status --domain hstub.dev
+  done
+  # A backslash in the slug prints as typed in both (error() of the bash
+  # tree prints through `echo -e`).
+  check_api - kubehz node cordon --name worker-1 --domain bslug.dev
+  # The contract on the Go side alone: 0 on success, 1 on a refusal.
+  expect_rc 0 kubehz node cordon --name worker-1 --domain acme.dev
+  expect_rc 1 kubehz node cordon --name joining-1 --domain acme.dev
+  expect_rc 1 kubehz node drain --name ghost-1 --domain acme.dev
+  expect_rc 1 kubehz node cordon --name html-1 --domain acme.dev
+  expect_rc 1 kubehz node drain --name worker-10 --domain acme.dev
+  expect_rc 1 kubehz node cordon --name drop-1 --domain acme.dev
+
+  unset SSL_CERT_FILE CURL_CA_BUNDLE KUBEHZ_TOKEN
+fi
 
 # ── register: lo sends its stored bind secret (B289) ────────────────────────
 # Every register mode sends the value of .kubehz-bind as bindSecret, so a

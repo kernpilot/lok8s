@@ -1901,7 +1901,7 @@ lo kubehz [flags]
 * [lo kubehz deregister](#lo-kubehz-deregister)	 - Remove cluster from kubehz
 * [lo kubehz handover](#lo-kubehz-handover)	 - Control-plane handover (receive/preseed on the eject target)
 * [lo kubehz join](#lo-kubehz-join)	 - Mint a node join ticket (hosting: shared)
-* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring to a hosted control plane (join/remove/status)
+* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
 * [lo kubehz re-enroll](#lo-kubehz-re-enroll)	 - Re-enroll a regenerated in-cluster agent token with the platform
 * [lo kubehz register](#lo-kubehz-register)	 - Register cluster with kubehz
 * [lo kubehz space](#lo-kubehz-space)	 - Spaces through the kubehz api (agent tools)
@@ -2277,7 +2277,7 @@ lo kubehz join <node> [flags]
 
 ## lo kubehz node
 
-Nodes you bring to a hosted control plane (join/remove/status)
+Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
 
 ```
 lo kubehz node [flags]
@@ -2288,6 +2288,7 @@ lo kubehz node [flags]
 ```
   lo kubehz node join
   lo kubehz node status
+  lo kubehz node drain --name worker-1
 ```
 
 ### Options
@@ -2299,9 +2300,67 @@ lo kubehz node [flags]
 ### SEE ALSO
 
 * [lo kubehz](#lo-kubehz)	 - kubehz platform integration
+* [lo kubehz node cordon](#lo-kubehz-node-cordon)	 - Mark one node of a Space unschedulable (its pods keep running)
+* [lo kubehz node drain](#lo-kubehz-node-drain)	 - Cordon one node of a Space and evict its pods
 * [lo kubehz node join](#lo-kubehz-node-join)	 - Join THIS machine to a hosted cluster (runs kubeadm join)
 * [lo kubehz node remove](#lo-kubehz-node-remove)	 - Remove one node from a hosted cluster and free its slot
 * [lo kubehz node status](#lo-kubehz-node-status)	 - List the nodes you brought to a hosted cluster
+* [lo kubehz node uncordon](#lo-kubehz-node-uncordon)	 - Make one node of a Space schedulable again
+
+## lo kubehz node cordon
+
+Mark one node of a Space unschedulable (its pods keep running)
+
+```
+lo kubehz node cordon --name <node> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz node cordon --name worker-1
+```
+
+### Options
+
+```
+  -h, --help              help for cordon
+  -n, --name string       Node name to cordon
+      --space-id string   Space id (sp-xxxxxxxx); default: the space of the active domain
+```
+
+### SEE ALSO
+
+* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
+
+## lo kubehz node drain
+
+Cordon one node of a Space and evict its pods
+
+```
+lo kubehz node drain --name <node> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz node drain --name worker-1
+  lo kubehz node drain --name worker-1 --timeout 600 --evict-unmanaged
+```
+
+### Options
+
+```
+      --evict-unmanaged   Also evict the pods that no controller recreates
+  -h, --help              help for drain
+  -n, --name string       Node name to drain
+      --space-id string   Space id (sp-xxxxxxxx); default: the space of the active domain
+      --timeout string    Seconds the platform tries, from 60 to 3600; default: the platform default
+```
+
+### SEE ALSO
+
+* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
 
 ## lo kubehz node join
 
@@ -2332,7 +2391,7 @@ lo kubehz node join [flags]
 
 ### SEE ALSO
 
-* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring to a hosted control plane (join/remove/status)
+* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
 
 ## lo kubehz node remove
 
@@ -2358,7 +2417,7 @@ lo kubehz node remove --name <node> [flags]
 
 ### SEE ALSO
 
-* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring to a hosted control plane (join/remove/status)
+* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
 
 ## lo kubehz node status
 
@@ -2383,7 +2442,33 @@ lo kubehz node status [flags]
 
 ### SEE ALSO
 
-* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring to a hosted control plane (join/remove/status)
+* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
+
+## lo kubehz node uncordon
+
+Make one node of a Space schedulable again
+
+```
+lo kubehz node uncordon --name <node> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz node uncordon --name worker-1
+```
+
+### Options
+
+```
+  -h, --help              help for uncordon
+  -n, --name string       Node name to uncordon
+      --space-id string   Space id (sp-xxxxxxxx); default: the space of the active domain
+```
+
+### SEE ALSO
+
+* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
 
 ## lo kubehz re-enroll
 

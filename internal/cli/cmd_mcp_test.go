@@ -242,12 +242,14 @@ func TestMcpToolsDefaultReadonlyOnly(t *testing.T) {
 
 func TestMcpToolsMutatingOptIn(t *testing.T) {
 	tools := mcpToolNames(t, mcpExposure{mutating: true})
-	for _, want := range []string{"lo_build", "lo_use", "lo_secrets_encrypt", "lo_registry_up", "lo_registry_status", "lo_init_service", "lo_init_cluster", "lo_gitops_flux", "lo_version"} {
+	// A cordon and an uncordon move no pod and undo each other (idempotent);
+	// a drain evicts pods (destructive).
+	for _, want := range []string{"lo_build", "lo_use", "lo_secrets_encrypt", "lo_registry_up", "lo_registry_status", "lo_init_service", "lo_init_cluster", "lo_gitops_flux", "lo_version", "lo_kubehz_node_cordon", "lo_kubehz_node_uncordon"} {
 		if tools[want] == nil {
 			t.Errorf("mutating tool %s missing with --allow-mutating", want)
 		}
 	}
-	for _, absent := range []string{"lo_up", "lo_down", "lo_deploy", "lo_secrets_set", "lo_tilt_down", "lo_kubehz_deregister", "lo_image_clean"} {
+	for _, absent := range []string{"lo_up", "lo_down", "lo_deploy", "lo_secrets_set", "lo_tilt_down", "lo_kubehz_deregister", "lo_image_clean", "lo_kubehz_node_drain"} {
 		if tools[absent] != nil {
 			t.Errorf("destructive %s exposed with only --allow-mutating", absent)
 		}
@@ -791,8 +793,8 @@ func TestMcpTierCountsMatchTheDocs(t *testing.T) {
 		want int
 	}{
 		{mcpExposure{}, 29},
-		{mcpExposure{mutating: true}, 53},
-		{mcpExposure{destructive: true}, 95},
+		{mcpExposure{mutating: true}, 55},
+		{mcpExposure{destructive: true}, 98},
 	} {
 		if got := len(mcpToolNames(t, tc.x)); got != tc.want {
 			t.Errorf("%+v: %d tools, want %d (update the count here and in docs/reference/cli.md)", tc.x, got, tc.want)

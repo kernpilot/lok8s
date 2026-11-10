@@ -78,6 +78,9 @@ func TestNodePreflightHostingGate(t *testing.T) {
 	mustErr(t, err)
 	mustContain(t, h.output(), "hosting: shared")
 	mustContain(t, h.output(), "lo kubehz join <node-name>")
+	// The cordon, uncordon and drain lines point at `lo kubehz status`:
+	// `node status` on a Space points there too.
+	mustContain(t, h.output(), "  Read the nodes of the Space and their maintenance phase with:  lo kubehz status")
 }
 
 func TestNodePreflightHTTPSAndToken(t *testing.T) {
@@ -101,6 +104,23 @@ func TestNodePreflightHTTPSAndToken(t *testing.T) {
 	_, _, err = h.ctx.nodePreflight(t.Context(), "", "join a node", "")
 	mustErr(t, err)
 	mustContain(t, h.output(), "No active domain")
+
+	// A control character in the token: the http::credential_ok refusal
+	// alone, before the registry (no second "did not answer" line) and with
+	// --cluster-id.
+	for _, clusterID := range []string{"", "cl-1234abcd"} {
+		h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
+		h.env["KUBEHZ_TOKEN"] = "khz_test_token\r"
+		_, _, err = h.ctx.nodePreflight(t.Context(), "acme.example.org", "list nodes", clusterID)
+		mustErr(t, err)
+		if got := h.output(); got != "[error] environment variable KUBEHZ_TOKEN must not contain a control character\n"+
+			"  A file with CRLF line ends can leave a CR at the end of the value. Remove it, then try again.\n" {
+			t.Fatalf("cluster id %q: %q", clusterID, got)
+		}
+		if len(h.reqs()) != 0 {
+			t.Fatalf("cluster id %q sent %+v", clusterID, h.reqs())
+		}
+	}
 }
 
 func TestNodePreflightClusterID(t *testing.T) {

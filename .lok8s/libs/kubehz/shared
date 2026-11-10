@@ -172,9 +172,25 @@ kubehz::space_config() {
 #   rc 1  → transport failure (already rendered)
 # Usage: kubehz::space_api <method> <path> [json_body]
 kubehz::space_api() {
+  local rc=0
+  kubehz::space_api_call "$@" || rc=$?
+  # A curl failure, not the token check (that one says so itself).
+  if (( rc == 1 )) && [[ -n "${KUBEHZ_SPACE_API_CURL_RC}" ]]; then
+    error "kubehz API unreachable (${1} ${2})"
+  fi
+  return "${rc}"
+}
+
+# kubehz::space_api without the "unreachable" line: a caller that must tell
+# a failure before the send from one after it (node::maintain) reads the
+# curl exit code in KUBEHZ_SPACE_API_CURL_RC (empty when curl did not run or
+# did not fail) and renders the failure itself.
+# Usage: kubehz::space_api_call <method> <path> [json_body]
+kubehz::space_api_call() {
   local method="${1}" path="${2}" body="${3:-}"
   KUBEHZ_SPACE_API_STATUS=""
   KUBEHZ_SPACE_API_BODY=""
+  KUBEHZ_SPACE_API_CURL_RC=""
   http::credential_ok KUBEHZ_TOKEN || return 1
 
   local -a extra=()
@@ -186,7 +202,7 @@ kubehz::space_api() {
     curl -K - -sSL -w $'\n%{http_code}' -X "${method}" \
     "${LOK8S_KUBEHZ_API_URL}${path}" \
     "${extra[@]}") || {
-    error "kubehz API unreachable (${method} ${path})"
+    KUBEHZ_SPACE_API_CURL_RC=$?
     return 1
   }
   KUBEHZ_SPACE_API_STATUS="${raw##*$'\n'}"
@@ -644,6 +660,24 @@ kubehz::space_status() {
   count=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '(.data? // .) | .usage.nodes // 0' 2>/dev/null) || count=0
   local max; max=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '(.data? // .) | .usage.maxNodes // "-"' 2>/dev/null) || max='-'
   echo "Nodes:   ${count}/${max}"
+  # After the lane: `cordoned` while the node is unschedulable (any cordon:
+  # yours, a platform migration, a node retirement), then the last cordon,
+  # uncordon or drain request with its phase, and the reason when the
+  # platform gives one (`drain Blocked: <reason>`). The reason is the
+  # platform's own text: clipped to 256 characters here (jq counts code
+  # points, as the Go twin counts runes). One node is one line: a newline or
+  # a tab in a server string becomes a space, so a reason cannot print a
+  # second node line. Then every line loses its control characters in the tr
+  # after it, as node::scrub does.
   echo "${KUBEHZ_SPACE_API_BODY}" \
-    | jq -r '(.data? // .) | .nodes[]? | "  " + .name + "  " + (.status // "-") + "  " + (.lane // "-")' 2>/dev/null || true
+    | jq -r '(.data? // .) | .nodes[]? | ("  " + .name + "  " + (.status // "-") + "  " + (.lane // "-")
+        + (if .unschedulable == true then "  cordoned" else "" end)
+        + (if (.maintenance | type) == "object" then
+             "  " + (.maintenance.action | if type == "string" then . else "-" end)
+             + " " + (.maintenance.phase | if type == "string" then . else "-" end)
+             + (.maintenance.reason | if type == "string" and . != ""
+                 then ": " + (if length > 256 then .[0:256] + "…" else . end) else "" end)
+           else "" end))
+        | split("\n") | join(" ") | split("\t") | join(" ")' 2>/dev/null \
+    | tr -d '\000-\010\013-\037\177' || true
 }
