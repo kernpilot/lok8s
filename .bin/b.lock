@@ -1,9 +1,9 @@
 {
   "version": 1,
   "tool": {
-    "b": "v4.18.4"
+    "b": "v4.18.8"
   },
-  "timestamp": "2026-10-21T11:16:16Z",
+  "timestamp": "2026-11-09T13:58:07Z",
   "binaries": [
     {
       "name": "argsh",
@@ -109,6 +109,13 @@
       "version": "",
       "sha256": "0a25d354e8154e79cfeecc5443ccf24136efd9d6c903fd03f61858e19a7020c6",
       "source": "github.com/Mic92/ssh-to-age",
+      "preset": true
+    },
+    {
+      "name": "b",
+      "version": "v4.18.8",
+      "sha256": "9ac12154b0532204c9f637b8d63c8460924eb489e54caa5f68bf5a985f1bb0a9",
+      "source": "github.com/fentas/b",
       "preset": true
     }
   ]

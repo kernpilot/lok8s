@@ -416,7 +416,8 @@ kubehz::deploy_apply() {
     #    a handover that an ImagePullBackOff quietly never completed.
     kubectl -n kubehz-system rollout status deployment/kubehz-live-agent \
       --timeout="${KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS}s" || {
-      error "kubehz: the live agent was accepted but never became Ready within ${KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS}s. NOTHING owns the heartbeat right now: the CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent is not running, so this cluster is reporting nothing. Diagnose with 'kubectl -n kubehz-system describe deployment/kubehz-live-agent' (an unpullable image or an untolerated node taint is the usual cause), or set spec.kubehz.agent: cronjob and re-run 'lo kubehz deploy' to hand the beat straight back."
+      error "kubehz: the live agent was accepted but never became Ready within ${KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS}s. NOTHING owns the heartbeat right now: the CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent is not running, so this cluster is reporting nothing. Diagnose with 'kubectl -n kubehz-system describe deployment/kubehz-live-agent' (an image pull that fails or hangs, or an untolerated node taint, is the usual cause), or set spec.kubehz.agent: cronjob and re-run 'lo kubehz deploy' to hand the beat straight back."
+      kubehz::live_agent_pull_hint
       return 1
     }
     return 0
@@ -458,6 +459,103 @@ kubehz::deploy_apply() {
     error "kubehz: could not apply the CronJob agent. The live agent is gone and the marker was not rewritten, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy'."
     return 1
   }
+}
+
+# Runs after a Ready timeout. Reads the live agent's pods and, when one of
+# them failed to pull its image or is still pulling it, says so and names the
+# IPv6 path to the registry as a cause to check: a pull that opens an IPv6
+# connection which then carries no data hangs on that connection and never
+# tries IPv4. Prints nothing when no pod is in such a state, or when the pods
+# cannot be read: the error line before it already names the usual causes.
+#
+# The read gives one line per pod, four fields joined by '|': pod name, node
+# name, the agent container's waiting reason, the agent container's image. A
+# field the pod does not have yet (no node, no container status) is empty.
+# Every field comes from the cluster and is printed, so the line shape is
+# pinned: DNS names for the pod and the node, letters for the reason, an image
+# reference without spaces, quotes or escapes. LC_ALL=C keeps every class
+# ASCII only: in a UTF-8 locale such as en_US.UTF-8, [A-Za-z] also matches
+# letters like é. The Go twin is ASCII only too.
+#
+# The image is at most 511 bytes (liveAgentImageMaxLen in the Go twin). This
+# is a separate check and not a bound in the regex: POSIX guarantees bounds
+# only up to 255 (RE_DUP_MAX), and a libc can refuse a larger one, which
+# turns off the hint. Command substitution drops NUL bytes, so the read
+# changes each NUL to the byte 0x01: the line then fails the match, as it
+# does in the Go twin.
+#
+# The container name (agent) and the selector are the ones in the vendored
+# live-agent/base/deployment.yaml; a bats test fails when a re-vendor changes
+# either.
+# Usage: kubehz::live_agent_pull_hint
+kubehz::live_agent_pull_hint() {
+  local LC_ALL=C
+  local pods line pod node reason image registry
+  local re='^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([A-Za-z]{1,64})[|]([A-Za-z0-9][A-Za-z0-9._/:@-]*)$'
+  pods=$(set -o pipefail
+    kubectl -n kubehz-system get pods -l app.kubernetes.io/name=kubehz-live-agent --request-timeout=10s \
+      -o 'jsonpath={range .items[*]}{.metadata.name}|{.spec.nodeName}|{.status.containerStatuses[?(@.name=="agent")].state.waiting.reason}|{.spec.containers[?(@.name=="agent")].image}{"\n"}{end}' \
+      2>/dev/null | LC_ALL=C tr '\000' '\001') || return 0
+  while IFS= read -r line; do
+    [[ "${line}" =~ ${re} ]] || continue
+    pod="${BASH_REMATCH[1]}" node="${BASH_REMATCH[3]}" reason="${BASH_REMATCH[5]}" image="${BASH_REMATCH[6]}"
+    (( ${#image} <= 511 )) || continue
+    case "${reason}" in
+      ErrImagePull|ImagePullBackOff)
+        printf '  %s\n' "Pod ${pod} on node ${node} cannot pull its image ${image} (${reason}). Read why: kubectl -n kubehz-system describe pod ${pod}" >&2
+        ;;
+      ContainerCreating)
+        kubehz::image_pull_in_progress "${pod}" || continue
+        printf '  %s\n' "Pod ${pod} on node ${node} started to pull its image ${image}, and the pull did not finish." >&2
+        ;;
+      *) continue ;;
+    esac
+    registry=$(kubehz::image_registry "${image}")
+    printf '  %s\n' \
+      "A pull that hangs or times out can mean that the IPv6 path from the node to ${registry} is broken." \
+      "On that path, the connection opens but carries no data, and the pull does not try IPv4." \
+      "To check, run these two commands on node ${node}. If only the IPv6 command times out, the IPv6 path is broken:" \
+      "  curl -6 -sS -o /dev/null --max-time 15 https://${registry}/v2/" \
+      "  curl -4 -sS -o /dev/null --max-time 15 https://${registry}/v2/" >&2
+    if [[ "${registry}" == ghcr.io ]]; then
+      printf '  %s\n' "ghcr.io sends the image layers from another host. Run the two commands against https://pkg-containers.githubusercontent.com/ too." >&2
+    fi
+    printf '  %s\n' \
+      "To work around it, make the node reach ${registry} over IPv4. Repair its IPv6 route, or run the node without IPv6." \
+      "Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod ${pod}" >&2
+    return 0
+  done <<< "${pods}"
+  return 0
+}
+
+# Whether the kubelet started to pull the agent container's image and has not
+# finished: a Pulling event and no Pulled event, both for that container (the
+# kubelet sets the event's involvedObject.fieldPath to spec.containers{<name>}).
+# A pod in ContainerCreating can also wait for a volume, and then the events
+# show no pull, or a finished one. An events read that fails answers "no".
+# Each NUL in the read becomes the byte 0x01, as in the pod read, so that a
+# line with a NUL fails the compare, as it does in the Go twin.
+# Usage: kubehz::image_pull_in_progress <pod>
+kubehz::image_pull_in_progress() {
+  local pod="${1}" events
+  events=$(set -o pipefail
+    kubectl -n kubehz-system get events \
+      --field-selector "involvedObject.kind=Pod,involvedObject.name=${pod}" --request-timeout=10s \
+      -o 'jsonpath={range .items[*]}{.involvedObject.fieldPath}|{.reason}{"\n"}{end}' 2>/dev/null | LC_ALL=C tr '\000' '\001') || return 1
+  events=$'\n'"${events}"$'\n'
+  [[ "${events}" == *$'\nspec.containers{agent}|Pulling\n'* && "${events}" != *$'\nspec.containers{agent}|Pulled\n'* ]]
+}
+
+# The host that the container runtime pulls an image from: the first path
+# component when it names a host (a dot, a port or localhost), else Docker Hub.
+# Usage: kubehz::image_registry <image>
+kubehz::image_registry() {
+  local image="${1}" host="${1%%/*}"
+  if [[ "${image}" != */* || ( "${host}" != *[.:]* && "${host}" != localhost ) || "${host}" == docker.io ]]; then
+    echo "registry-1.docker.io"
+  else
+    echo "${host}"
+  fi
 }
 
 # Put the one-time bind secret (B243) from clusters/<domain>/.kubehz-bind into

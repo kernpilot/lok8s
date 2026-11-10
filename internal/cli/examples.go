@@ -127,11 +127,16 @@ var commandExamples = map[string]string{ // #nosec G101 -- example command lines
 	"kubehz cluster lease":      `  lo kubehz cluster lease cl-1a2b3c4d --hours 4`,
 	"kubehz cluster kubeconfig": `  lo kubehz cluster kubeconfig cl-1a2b3c4d --file agent.yaml`,
 	"kubehz node": `  lo kubehz node join
-  lo kubehz node status`,
+  lo kubehz node status
+  lo kubehz node drain --name worker-1`,
 	"kubehz node join": `  sudo lo kubehz node join
   lo kubehz node join --print-only`,
-	"kubehz node remove": `  lo kubehz node remove --name worker-1`,
-	"kubehz node status": `  lo kubehz node status`,
+	"kubehz node remove":   `  lo kubehz node remove --name worker-1`,
+	"kubehz node status":   `  lo kubehz node status`,
+	"kubehz node cordon":   `  lo kubehz node cordon --name worker-1`,
+	"kubehz node uncordon": `  lo kubehz node uncordon --name worker-1`,
+	"kubehz node drain": `  lo kubehz node drain --name worker-1
+  lo kubehz node drain --name worker-1 --timeout 600 --evict-unmanaged`,
 	"kubehz handover": `  lo kubehz handover receive --bundle handover.tar.gz
   lo kubehz handover preseed --bundle handover.tar.gz --node 10.0.0.12`,
 	"kubehz handover receive": `  lo kubehz handover receive --bundle handover.tar.gz
