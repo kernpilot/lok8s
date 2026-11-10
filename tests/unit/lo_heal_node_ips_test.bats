@@ -50,8 +50,9 @@ teardown() { teardown_tmpdir; }
 # per-node fake rootfs and then eval's the heal's own scripts (the repair and
 # the certificate probe). So the sed loop, the certificate moves and the
 # /kind/old-ipv4 write under test are the real ones; systemctl, kubeadm,
-# crictl, openssl and the CNI nudge are stubs, logged to $CALLS. A mock that
-# reimplemented the repair would pass no matter what the heal did.
+# crictl, openssl and the CNI nudge are stubs, logged to $CALLS, and mv can be
+# made to fail. A mock that reimplemented the repair would pass no matter what
+# the heal did.
 #
 # A fake certificate is the line "cert <ip>" and its key the line "key <ip>":
 # the openssl stub prints <ip> among the SANs, and the kubeadm stub writes the
@@ -195,8 +196,9 @@ _load() {
         # fails on a key without a certificate, and fails when the cluster CA
         # is not in pki/. KUBEADM_FAIL makes it fail: six noise lines, a klog
         # error, info and warning line, the reason and kubeadm's --v=5 hint on
-        # stderr. It writes "[certs] …" on stdout (after the stderr lines on a
-        # failure), which must reach no output of the heal.
+        # stderr. KUBEADM_STALE makes it write the pair for the old address
+        # and exit 0. It writes "[certs] …" on stdout (after the stderr lines
+        # on a failure), which must reach no output of the heal.
         kubeadm() {
           local pki pair=absent addr i
           pki="$(node_pki "${node}")"
@@ -227,11 +229,29 @@ _load() {
           fi
           echo '[certs] Generating "apiserver" certificate and key'
           addr=$(sed -n 's/^advertiseAddress: //p' "${@: -1}")
+          [[ -z "${KUBEADM_STALE:-}" ]] || addr=172.31.0.2
           write_pair "${pki}" "${addr}"
         }
         # A subshell, like the real `bash -c`: an `exit` in the script ends
         # only the script, and its status is the status of `docker exec`.
-        ( eval "${script}" ) || return "$?"
+        # In it, MV_FAIL makes mv fail like mv on the move of the old pair
+        # into /kind/heal-pki: "all" moves nothing, "key" moves the
+        # certificate only. Every other mv is the real one.
+        (
+          mv() {
+            if [[ -n "${MV_FAIL:-}" && "${*: -1}" == "$(node_heal "${node}")/" ]]; then
+              if [[ "${MV_FAIL}" == key ]]; then
+                command mv -f "${2}" "${*: -1}"
+                echo "mv: cannot move '${3}' to '${*: -1}apiserver.key': Permission denied" >&2
+              else
+                echo "mv: cannot move '${2}' to '${*: -1}apiserver.crt': Permission denied" >&2
+              fi
+              return 1
+            fi
+            command mv "${@}"
+          }
+          eval "${script}"
+        ) || return "$?"
         ;;
     esac
     return 0
@@ -239,12 +259,18 @@ _load() {
 
   # `kubectl get --raw /readyz` = a check of the wait for a steady API server
   # (log; READYZ is a space-separated list of answers in order, 0 = ready,
-  # and every check after the list is ready); `kubectl get node` = the
+  # and every check after the list is ready). Only the exact call counts: the
+  # kubeconfig of the cluster (without it kubectl asks the cluster that
+  # $KUBECONFIG names) and a request timeout. `kubectl get node` = the
   # latch-up InternalIP read (answer, don't log); `kubectl delete pod` = the
   # CNI nudge (log). OBSERVED_BAD overrides what node `bad` reports, so tests
   # can simulate a frozen status.
   kubectl() {
-    if [[ "${*}" == *" get --raw /readyz" ]]; then
+    if [[ "${*}" == *"/readyz"* ]]; then
+      [[ "${*}" == "--kubeconfig ${BATS_TEST_TMPDIR}/kubeconfig --request-timeout=5s get --raw /readyz" ]] || {
+        echo "readyz-unexpected: kubectl ${*}" >> "${CALLS}"
+        return 1
+      }
       echo "readyz" >> "${CALLS}"
       local n answer
       n=$(grep -c '^readyz$' "${CALLS}")
@@ -794,6 +820,124 @@ stuck_pair_case() {
   stuck_pair_case new-key    1 172.31.0.2
   stuck_pair_case new-pair   0 10.9.0.3
   stuck_pair_case new-pair   1 10.9.0.3
+}
+
+# move_fail_case <mkdir|all|key> — the move of the old pair into
+# /kind/heal-pki fails: mkdir (a file where the directory must go), a mv that
+# moves nothing, or a mv that moves the certificate only.
+move_fail_case() {
+  local mode="${1}" reason="could not repair bad: mv: cannot move "
+  rm -rf "${BATS_TEST_TMPDIR}/root.good" "${BATS_TEST_TMPDIR}/root.bad"
+  : > "${CALLS}"
+  _load
+  make_control_plane bad
+  if [[ "${mode}" == mkdir ]]; then
+    echo 'not a directory' > "$(node_heal bad)"
+    reason="could not repair bad: mkdir: "
+  else
+    export MV_FAIL="${mode}"
+  fi
+
+  run lo::heal_node_ips lotest "${BATS_TEST_TMPDIR}/kubeconfig"
+  unset MV_FAIL
+
+  grep -qF "${reason}" <<< "${output}" && grep -qF '. The next lo up tries again.' <<< "${output}" || {
+    echo "${mode}: the failure was not reported with its reason (want '${reason}'): ${output}" >&2
+    return 1
+  }
+  ! grep -q '^kubeadm:' "${CALLS}" || {
+    echo "${mode}: kubeadm ran although the old pair did not move aside: it keeps" >&2
+    echo "the old pair and exits 0:" >&2
+    grep '^kubeadm:' "${CALLS}" >&2
+    return 1
+  }
+  [ "$(pair_at "$(node_pki bad)")" = "172.31.0.2/172.31.0.2" ] || {
+    echo "${mode}: pki/ holds $(pair_at "$(node_pki bad)") after the failed move, not the old pair." >&2
+    return 1
+  }
+  [ "$(cat "$(node_oldip bad)")" = "172.31.0.2" ] \
+    && ! grep -qE '^(kubelet-restart|crictl-stop):' "${CALLS}" || {
+    echo "${mode}: the script did not stop (old-ipv4 '$(cat "$(node_oldip bad)")'):" >&2
+    cat "${CALLS}" >&2
+    return 1
+  }
+  if [[ "${mode}" == mkdir ]]; then
+    # The script stopped at the mkdir: it did not go on to the mv and its
+    # clean-up.
+    ! grep -qF 'mv: ' <<< "${output}" && [ "$(cat "$(node_heal bad)")" = 'not a directory' ] || {
+      echo "mkdir: the script went on after the failed mkdir: ${output}" >&2
+      return 1
+    }
+    return 0
+  fi
+  [ ! -e "$(node_heal bad)" ] || {
+    echo "${mode}: /kind/heal-pki stayed after the old pair came back." >&2; return 1
+  }
+}
+
+@test "heal_node_ips: a failed mkdir or mv of the old pair stops the script before kubeadm, with the old pair in pki/" {
+  # kubeadm keeps an apiserver.crt that is still in pki/ and exits 0. So a
+  # mkdir or a mv of the old pair that fails must stop the script before
+  # kubeadm. Else the heal passes, the certificate stays on the old address,
+  # and every later lo up renews it again.
+  move_fail_case mkdir
+  move_fail_case all
+  move_fail_case key
+}
+
+@test "heal_node_ips: a renewal that leaves the old certificate gets a warning, and the next heal renews again" {
+  # The script exits 0, but the certificate still does not name the node
+  # address (here kubeadm writes the pair for the old address). The heal reads
+  # the certificate again, so a renewal that changed nothing does not pass as a
+  # repair. The address part is done, so the CNI nudge still runs.
+  _load
+  make_control_plane bad
+  export KUBEADM_STALE=1
+
+  run lo::heal_node_ips lotest "${BATS_TEST_TMPDIR}/kubeconfig"
+  unset KUBEADM_STALE
+
+  grep -qF 'warn: lo: the certificate renewal on bad did not complete: the node has --node-ip=10.9.0.3, but its apiserver certificate does not name that address. The next lo up tries again.' <<< "${output}" || {
+    echo "A renewal that left the old certificate was not reported: ${output}" >&2
+    return 1
+  }
+  [ "$(grep -c '^kubeadm:bad ' "${CALLS}")" = 1 ] \
+    && grep -q '^kubelet-restart:bad$' "${CALLS}" && grep -q '^cni-restart$' "${CALLS}" || {
+    echo "The renewal or the address repair did not run (kubeadm, kubelet restart, CNI nudge):" >&2
+    cat "${CALLS}" >&2
+    return 1
+  }
+
+  : > "${CALLS}"
+  run lo::heal_node_ips lotest "${BATS_TEST_TMPDIR}/kubeconfig"
+  grep -qF 'renewing the certificate' <<< "${output}" && ! grep -qF 'did not complete' <<< "${output}" \
+    && [ "$(pair_at "$(node_pki bad)")" = "10.9.0.3/10.9.0.3" ] || {
+    echo "The next heal did not renew the certificate ($(pair_at "$(node_pki bad)")): ${output}" >&2
+    return 1
+  }
+}
+
+@test "heal_node_ips: a certificate for a longer address (10.9.0.30 for the node 10.9.0.3) is renewed" {
+  # 10.9.0.3 is the start of 10.9.0.30. A check that compares the SAN text
+  # without the comma bound finds the node address in that SAN and keeps the
+  # wrong certificate.
+  _load
+  make_control_plane bad
+  mark_repaired bad
+  write_pair "$(node_pki bad)" 10.9.0.30
+  printf '%s' "10.9.0.3" > "$(node_oldip bad)"
+
+  run lo::heal_node_ips lotest "${BATS_TEST_TMPDIR}/kubeconfig"
+
+  grep -qF 'lo: bad has --node-ip=10.9.0.3, but its apiserver certificate does not name that address — renewing the certificate' <<< "${output}" || {
+    echo "A certificate for 10.9.0.30 passed as one for 10.9.0.3: ${output}" >&2
+    return 1
+  }
+  [ "$(grep -c '^kubeadm:bad ' "${CALLS}")" = 1 ] && [ "$(pair_at "$(node_pki bad)")" = "10.9.0.3/10.9.0.3" ] || {
+    echo "The heal did not renew the certificate ($(pair_at "$(node_pki bad)")):" >&2
+    cat "${CALLS}" >&2
+    return 1
+  }
 }
 
 @test "nodes_on_registry_network: true only when a cluster node holds a registry NIC" {

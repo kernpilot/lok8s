@@ -54,8 +54,10 @@
 #   • every kind cluster from before must still be there after, except
 #     another run of this proof (<prefix>-*), which removes its own cluster;
 #     this run's cluster must be gone;
-#   • an EXIT trap removes the cluster, every container and volume whose name
-#     has the run's name in it, and both networks.
+#   • an EXIT trap removes the cluster, every container whose name has the
+#     run's name in it with its anonymous volumes, every volume with the run's
+#     name, and both networks. It checks that none of them is left, the
+#     anonymous volumes included.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -129,10 +131,18 @@ indent <<<"${BEFORE}"
 
 STEP="setup"
 teardown() {
-  local rc=$? after left gone c
+  local rc=$? after left gone c v anon
   set +e
   echo
   log "teardown (last step: ${STEP}, rc ${rc})"
+  # The anonymous volumes of this run's containers (for example /var of a kind
+  # node), read before any container goes. They have no name to filter by, so
+  # the name check below does not see them. A name of 64 hex digits is the
+  # name docker gives an anonymous volume; a named volume of another project
+  # never matches.
+  anon="$(docker ps -aq --filter "name=${NAME}" \
+    | xargs -r docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null \
+    | grep -E '^[0-9a-f]{64}$' | sort -u)"
   if [[ -d "${PROJ}" ]]; then
     (cd "${PROJ}" && "${LO_NEW}" down --domain "${DOMAIN}") >"${EVID}/teardown-down.log" 2>&1
     (cd "${PROJ}" && "${LO_NEW}" destroy --domain "${DOMAIN}") >"${EVID}/teardown-destroy.log" 2>&1
@@ -143,8 +153,13 @@ teardown() {
   fi
   # Every container and volume of this run has the run's name in its name
   # (the shared mirror is lok8s-registry-<name>).
-  docker ps -aq --filter "name=${NAME}" | xargs -r docker rm -f >/dev/null 2>&1
+  docker ps -aq --filter "name=${NAME}" | xargs -r docker rm -f -v >/dev/null 2>&1
   docker volume ls -q --filter "name=${NAME}" | xargs -r docker volume rm -f >/dev/null 2>&1
+  # A container that lo or kind removed without -v leaves its anonymous
+  # volumes behind.
+  while IFS= read -r v; do
+    [[ -z "${v}" ]] || docker volume rm -f "${v}" >/dev/null 2>&1
+  done <<<"${anon}"
   docker network rm "${REGNET}" >/dev/null 2>&1
   docker network rm "${NET}" >/dev/null 2>&1
   rm -rf "${WORK}"
@@ -169,8 +184,13 @@ teardown() {
     rc=1
   fi
   left="$(docker ps -aq --filter "name=${NAME}"; docker volume ls -q --filter "name=${NAME}"; docker network ls -q --filter "name=${NAME}")"
+  while IFS= read -r v; do
+    if [[ -n "${v}" ]] && docker volume inspect "${v}" >/dev/null 2>&1; then left+=" ${v}"; fi
+  done <<<"${anon}"
+  log "anonymous volumes of the run's containers: $(wc -w <<<"${anon}"); objects left after the teardown: $(wc -w <<<"${left}")"
   if [[ -n "${left}" ]]; then
-    echo "FAIL: containers, volumes or networks of ${NAME} survived the teardown" >&2
+    left="${left//$'\n'/ }"
+    echo "FAIL: containers, volumes or networks of ${NAME} survived the teardown: ${left# }" >&2
     rc=1
   fi
   if (( rc == 0 )); then
@@ -323,6 +343,11 @@ diag() {
   set -e
 }
 
+# No phase makes a renewal that keeps the old certificate, so the warning of
+# the certificate check after a repair script must never appear.
+renewal_complete() {
+  [[ "${OUT}" != *"did not complete"* ]] || fail "the certificate check after a repair failed: ${OUT}"
+}
 # lo provision with <bin>; the output goes to the evidence directory and to
 # the log. A non-zero exit fails the proof.
 OUT=""
@@ -333,6 +358,7 @@ provision() {
   OUT="$(cat "${EVID}/${STEP}-${tag}.log")"
   indent <<<"${OUT}"
   (( rc == 0 )) || { diag; fail "lo provision exited ${rc}"; }
+  renewal_complete
 }
 # The heal of the bash twin, sourced from the tree and run against the real
 # cluster: lo::heal_node_ips with the real docker, kind and kubectl.
@@ -348,6 +374,7 @@ bash_heal() {
   OUT="$(cat "${EVID}/${STEP}-${tag}.log")"
   indent <<<"${OUT}"
   (( rc == 0 )) || { diag; fail "lo::heal_node_ips returned ${rc}"; }
+  renewal_complete
 }
 # The certificate check of the bash twin on the real node (D43: openssl in
 # the node, not crypto/x509).

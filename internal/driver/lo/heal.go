@@ -172,11 +172,14 @@ func (d *Driver) healNodeIPs(ctx context.Context, clusterName, kubeconfig string
 }
 
 // The API server must pass healReadyInRow /readyz checks in a row,
-// healReadyInterval seconds apart, within healReadyMaxChecks checks.
+// healReadyInterval seconds apart, within healReadyMaxChecks checks. Each
+// check stops after healReadyTimeout: an API server that accepts the
+// connection and does not answer fails the check and does not stop the wait.
 const (
 	healReadyInRow     = 5
 	healReadyInterval  = 2
 	healReadyMaxChecks = 60
+	healReadyTimeout   = "5s"
 )
 
 // waitAPIServer waits after a repair until the API server is steady (bash:
@@ -190,7 +193,7 @@ const (
 func (d *Driver) waitAPIServer(ctx context.Context, kubeconfig string, errOut io.Writer) {
 	inRow := 0
 	for range healReadyMaxChecks {
-		if d.runQuiet(ctx, "kubectl", "--kubeconfig", kubeconfig, "get", "--raw", "/readyz") == nil {
+		if d.runQuiet(ctx, "kubectl", "--kubeconfig", kubeconfig, "--request-timeout="+healReadyTimeout, "get", "--raw", "/readyz") == nil {
 			inRow++
 			if inRow == healReadyInRow {
 				return
@@ -210,13 +213,24 @@ func (d *Driver) waitAPIServer(ctx context.Context, kubeconfig string, errOut io
 // lo::heal_node_repair). The script's stdout is discarded. On a failure the
 // warning carries the end of its stderr (kubeadm writes its reason there),
 // and the function returns false.
+//
+// After a script that exited 0, the function reads the certificate again
+// (certRenewalReason). A renewal that did not change the certificate (for
+// example, a kubeadm that exits 0 and writes a certificate without the node
+// address) gets a warning, and the next lo up tries again. The function
+// still returns true: the script ran to its end, so kubelet runs on the new
+// address, and the CNI agent must register it again. A worker has no
+// certificate and passes the check.
 func (d *Driver) repairNode(ctx context.Context, node, have, want string, errOut io.Writer) bool {
 	stderr, err := d.errOutput(ctx, "docker", "exec", node, "bash", "-c", healScript(have, want))
-	if err == nil {
-		return true
+	if err != nil {
+		ui.WarnTo(errOut, "lo: could not repair %s: %s. The next lo up tries again.", node, healErrTail(stderr))
+		return false
 	}
-	ui.WarnTo(errOut, "lo: could not repair %s: %s. The next lo up tries again.", node, healErrTail(stderr))
-	return false
+	if reason := d.certRenewalReason(ctx, node, want); reason != "" {
+		ui.WarnTo(errOut, "lo: the certificate renewal on %s did not complete: the node %s. The next lo up tries again.", node, reason)
+	}
+	return true
 }
 
 // klogNoteRe matches a klog line of level info or warning ("W1110
@@ -263,9 +277,10 @@ func healErrTail(stderr string) string {
 const certProbe = `if [ -d /kind/heal-pki ]; then echo heal-pki; elif [ -f /etc/kubernetes/pki/apiserver.key ]; then cat /etc/kubernetes/pki/apiserver.crt; fi`
 
 // certRenewalReason tells why a node whose --node-ip already agrees needs
-// the repair script again, or returns "" when it does not. A node that
-// cannot be read, a worker, and a certificate that does not parse return ""
-// (the bash twin skips them the same way).
+// the repair script again, or returns "" when it does not. repairNode also
+// calls it after a script that exited 0. A node that cannot be read, a
+// worker, and a certificate that does not parse return "" (the bash twin
+// skips them the same way).
 func (d *Driver) certRenewalReason(ctx context.Context, node, want string) string {
 	out, _ := d.output(ctx, "docker", "exec", node, "sh", "-c", certProbe)
 	if out == "heal-pki" {
@@ -316,10 +331,13 @@ func (d *Driver) certRenewalReason(ctx context.Context, node, want string) strin
 //     apiserver` keeps an apiserver.crt that the cluster CA signed and does
 //     not read its SANs ("Using existing apiserver certificate and key on
 //     disk", exit 0). With the old pair in pki/, the call changes nothing.
-//   - Moved aside, not removed, for the same reason as the first block. On
-//     a kubeadm failure the script puts the old pair back and exits 1
-//     before old-ipv4 and the kubelet restart. The caller warns with
-//     kubeadm's reason. The next lo up finds the flag already at <want>
+//   - Moved aside, not removed, for the same reason as the first block. A
+//     failed mkdir stops the script before anything moves. On a failure of
+//     the mv or of kubeadm, the script puts back every file of the old pair
+//     that is in /kind/heal-pki and exits 1 before old-ipv4 and the kubelet
+//     restart. Without this check, a mv that moves nothing lets kubeadm keep
+//     the old pair (exit 0), and the heal passes. The caller warns with the
+//     reason from stderr. The next lo up finds the flag already at <want>
 //     and a certificate without <want> (certRenewalReason), and runs the
 //     script again. old-ipv4 still holds <have>, so a node boot that finds
 //     a new address also runs kind's fix_certificate.
@@ -362,10 +380,13 @@ func healScript(have, want string) string {
         [ -f "${f}" ] && sed -i 's|\b` + haveEsc + `\b|` + want + `|g' "${f}"
       done
       if [ -f /etc/kubernetes/pki/apiserver.crt ] && [ -f /etc/kubernetes/pki/apiserver.key ]; then
-        mkdir -p /kind/heal-pki
-        mv -f /etc/kubernetes/pki/apiserver.crt /etc/kubernetes/pki/apiserver.key /kind/heal-pki/
-        kubeadm init phase certs apiserver --config /kind/kubeadm.conf >/dev/null || {
-          mv -f /kind/heal-pki/apiserver.crt /kind/heal-pki/apiserver.key /etc/kubernetes/pki/ && rm -rf /kind/heal-pki
+        mkdir -p /kind/heal-pki || exit 1
+        mv -f /etc/kubernetes/pki/apiserver.crt /etc/kubernetes/pki/apiserver.key /kind/heal-pki/ &&
+          kubeadm init phase certs apiserver --config /kind/kubeadm.conf >/dev/null || {
+          for k in apiserver.crt apiserver.key; do
+            if [ -f "/kind/heal-pki/${k}" ]; then mv -f "/kind/heal-pki/${k}" /etc/kubernetes/pki/ || exit 1; fi
+          done
+          rm -rf /kind/heal-pki
           exit 1
         }
         rm -rf /kind/heal-pki

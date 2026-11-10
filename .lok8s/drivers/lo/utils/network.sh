@@ -628,7 +628,9 @@ lo::heal_node_ips() {
 
 # lo::heal_wait_apiserver <kubeconfig>
 # Wait after a repair until the API server is steady (Go: waitAPIServer): 5
-# /readyz checks in a row, 2 s apart, within 60 checks. A kubelet restart on a
+# /readyz checks in a row, 2 s apart, within 60 checks. Each check stops after
+# 5 s: an API server that accepts the connection and does not answer fails the
+# check and does not stop the wait. A kubelet restart on a
 # control-plane node can make kubelet start etcd and the controller manager
 # again a few seconds later (seen on kindest/node v1.31.12). The API server then
 # refuses requests, and the next step of lo up (the first kubectl apply) fails.
@@ -638,7 +640,7 @@ lo::heal_node_ips() {
 lo::heal_wait_apiserver() {
   local kubeconfig="${1}" in_row=0 i
   for (( i = 0; i < 60; i++ )); do
-    if kubectl --kubeconfig "${kubeconfig}" get --raw /readyz >/dev/null 2>&1; then
+    if kubectl --kubeconfig "${kubeconfig}" --request-timeout=5s get --raw /readyz >/dev/null 2>&1; then
       in_row=$(( in_row + 1 ))
       (( in_row < 5 )) || return 0
     else
@@ -653,8 +655,21 @@ lo::heal_wait_apiserver() {
 # Run the repair script of lo::heal_node_ips in the node (Go: repairNode). The
 # script's stdout is discarded. On a failure the warning carries the end of its
 # stderr (kubeadm writes its reason there), and the function returns 1.
+#
+# After a script that exited 0, the function reads the certificate again
+# (lo::heal_cert_reason). A renewal that did not change the certificate (for
+# example, a kubeadm that exits 0 and writes a certificate without the node
+# address) gets a warning, and the next lo up tries again. The function still
+# returns 0: the script ran to its end, so kubelet runs on the new address, and
+# the CNI agent must register it again. A worker has no certificate and passes
+# the check.
+#
+# A failed mkdir stops the script before anything moves. On a failure of the mv
+# or of kubeadm, the script puts back every file of the old pair that is in
+# /kind/heal-pki and exits 1. Without this check, a mv that moves nothing lets
+# kubeadm keep the old pair (exit 0), and the heal passes.
 lo::heal_node_repair() {
-  local node="${1}" have="${2}" want="${3}" err
+  local node="${1}" have="${2}" want="${3}" err reason
   err=$(docker exec "${node}" bash -c "
       if [ -d /kind/heal-pki ]; then
         if ! { [ -f /etc/kubernetes/pki/apiserver.crt ] && [ -f /etc/kubernetes/pki/apiserver.key ]; }; then
@@ -676,10 +691,13 @@ lo::heal_node_repair() {
         [ -f \"\${f}\" ] && sed -i 's|\b${have//./\\.}\b|${want}|g' \"\${f}\"
       done
       if [ -f /etc/kubernetes/pki/apiserver.crt ] && [ -f /etc/kubernetes/pki/apiserver.key ]; then
-        mkdir -p /kind/heal-pki
-        mv -f /etc/kubernetes/pki/apiserver.crt /etc/kubernetes/pki/apiserver.key /kind/heal-pki/
-        kubeadm init phase certs apiserver --config /kind/kubeadm.conf >/dev/null || {
-          mv -f /kind/heal-pki/apiserver.crt /kind/heal-pki/apiserver.key /etc/kubernetes/pki/ && rm -rf /kind/heal-pki
+        mkdir -p /kind/heal-pki || exit 1
+        mv -f /etc/kubernetes/pki/apiserver.crt /etc/kubernetes/pki/apiserver.key /kind/heal-pki/ &&
+          kubeadm init phase certs apiserver --config /kind/kubeadm.conf >/dev/null || {
+          for k in apiserver.crt apiserver.key; do
+            if [ -f \"/kind/heal-pki/\${k}\" ]; then mv -f \"/kind/heal-pki/\${k}\" /etc/kubernetes/pki/ || exit 1; fi
+          done
+          rm -rf /kind/heal-pki
           exit 1
         }
         rm -rf /kind/heal-pki
@@ -687,9 +705,14 @@ lo::heal_node_repair() {
       fi
       printf '%s' '${want}' > /kind/old-ipv4
       systemctl restart kubelet
-    " 2>&1 >/dev/null) && return 0
-  warn "lo: could not repair ${node}: $(lo::heal_err_tail "${err}"). The next lo up tries again."
-  return 1
+    " 2>&1 >/dev/null) || {
+    warn "lo: could not repair ${node}: $(lo::heal_err_tail "${err}"). The next lo up tries again."
+    return 1
+  }
+  reason=$(lo::heal_cert_reason "${node}" "${want}")
+  [[ -z "${reason}" ]] \
+    || warn "lo: the certificate renewal on ${node} did not complete: the node ${reason}. The next lo up tries again."
+  return 0
 }
 
 # lo::heal_err_tail <stderr>
@@ -712,12 +735,13 @@ lo::heal_err_tail() {
 
 # lo::heal_cert_reason <node> <want>
 # Why a node whose --node-ip already agrees needs the repair script again
-# (Go: certRenewalReason). Prints nothing when it does not. The probe prints
-# heal-pki when an interrupted heal left the pair in /kind/heal-pki. On a node
-# with the whole serving pair (a control-plane node) it prints the SANs of the
-# apiserver certificate, through openssl in the node (kind's node images ship
-# it). On a worker it prints nothing. A node that cannot be read, a worker and
-# a certificate that openssl cannot read print nothing.
+# (Go: certRenewalReason). Prints nothing when it does not. lo::heal_node_repair
+# also calls it after a script that exited 0. The probe prints heal-pki when an
+# interrupted heal left the pair in /kind/heal-pki. On a node with the whole
+# serving pair (a control-plane node) it prints the SANs of the apiserver
+# certificate, through openssl in the node (kind's node images ship it). On a
+# worker it prints nothing. A node that cannot be read, a worker and a
+# certificate that openssl cannot read print nothing.
 # Deviation D43: Go reads the certificate with cat and parses it with
 # crypto/x509, so it needs no openssl in the node.
 lo::heal_cert_reason() {

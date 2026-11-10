@@ -10,9 +10,8 @@ package lo
 // a REAL local shell (no docker, no daemon). So the sed loop, the \b
 // anchors, the certificate moves and the /kind/old-ipv4 write under test
 // are the real ones; systemctl, kubeadm, crictl and the CNI nudge are
-// logged. A
-// mock that reimplemented the repair would pass no matter what the heal
-// generated.
+// logged, and mv can be made to fail. A mock that reimplemented the repair
+// would pass no matter what the heal generated.
 
 import (
 	"bytes"
@@ -50,6 +49,13 @@ type healFixture struct {
 	observed map[string]string // kubectl InternalIP override per node
 	// kubeadmFails makes the in-node kubeadm stub exit 1.
 	kubeadmFails bool
+	// kubeadmStale makes the in-node kubeadm stub write the pair for the old
+	// address 172.31.0.2 and exit 0: a renewal that does not change the
+	// certificate.
+	kubeadmStale bool
+	// mvFails makes the in-node mv fail on the move of the old pair into
+	// /kind/heal-pki: "all" moves nothing, "key" moves the certificate only.
+	mvFails string
 	// readyz holds the answers of the /readyz checks in order (true = ready);
 	// every check after the last answer is ready.
 	readyz []bool
@@ -304,13 +310,32 @@ func newHealFixture(t *testing.T) *healFixture {
 				// config. Its stdout line ("[certs] …", after the stderr
 				// lines on a failure) must reach no warning. A failure writes
 				// six noise lines, a klog error, info and warning line, the
-				// error and kubeadm's --v=5 hint to stderr.
+				// error and kubeadm's --v=5 hint to stderr. kubeadmStale
+				// makes it write the pair for the old address and exit 0.
+				// The mv stub fails like mv on the move of the old pair into
+				// /kind/heal-pki when mvFails is set, and runs the real mv
+				// otherwise.
 				h.calls = append(h.calls, "repair:"+node)
-				fail := "false"
+				fail, stale := "false", "false"
 				if h.kubeadmFails {
 					fail = "true"
 				}
+				if h.kubeadmStale {
+					stale = "true"
+				}
 				stubs := fmt.Sprintf(`systemctl() { echo kubelet-restart:%[1]s >> '%[2]s'; }
+mv() {
+  if [ -n '%[9]s' ] && [ "${*: -1}" = '%[10]s/' ]; then
+    if [ '%[9]s' = key ]; then
+      command mv -f "$2" "${*: -1}"
+      echo "mv: cannot move '$3' to '${*: -1}apiserver.key': Permission denied" >&2
+    else
+      echo "mv: cannot move '$2' to '${*: -1}apiserver.crt': Permission denied" >&2
+    fi
+    return 1
+  fi
+  command mv "$@"
+}
 crictl() {
   case "$*" in
     'ps -q --name kube-controller-manager|kube-scheduler') printf 'cm1\nsched1\n' ;;
@@ -347,14 +372,24 @@ kubeadm() {
   fi
   echo '[certs] Generating "apiserver" certificate and key'
   addr=$(sed -n 's/^advertiseAddress: //p' "${@: -1}")
+  if %[8]s; then addr=172.31.0.2; fi
   cp '%[7]s'/"${addr}.crt" "${pki}/apiserver.crt" && echo "key ${addr}" > "${pki}/apiserver.key"
 }
-`, node, h.stepsPath(), h.pkiPath(node), h.oldIPPath(node), fail, h.kubeadmConfPath(node), h.certsDir())
+`, node, h.stepsPath(), h.pkiPath(node), h.oldIPPath(node), fail, h.kubeadmConfPath(node), h.certsDir(),
+					stale, h.mvFails, h.healPKIPath(node))
 				return runInNode(c, "bash", stubs+h.inNode(node, c.Args[len(c.Args)-1]))
 			}
 			return nil
 		case "kubectl":
-			if strings.HasSuffix(joined, " get --raw /readyz") {
+			if strings.Contains(joined, "/readyz") {
+				// Only the exact call counts: the kubeconfig of the cluster
+				// (without it kubectl asks the cluster that $KUBECONFIG
+				// names) and a request timeout.
+				if joined != "--kubeconfig /fake/kubeconfig --request-timeout=5s get --raw /readyz" {
+					h.t.Errorf("unexpected /readyz call: kubectl %s", joined)
+					h.calls = append(h.calls, "readyz-unexpected")
+					return errors.New("exit status 1")
+				}
 				h.calls = append(h.calls, "readyz")
 				if len(h.readyz) > 0 {
 					ready := h.readyz[0]
@@ -902,13 +937,108 @@ func TestHealRestoresAPairStuckInHealPKI(t *testing.T) {
 	}
 }
 
-// TestHealScriptMatchesBash holds the two copies of the heal in lockstep. It
-// runs lo::heal_node_ips of the frozen tree with kind, docker and kubectl
-// stubbed, and healNodeIPs with a fake runner that answers the same. Then it
-// compares the repair script that each hands to `docker exec … bash -c`, the
-// certificate probe, and the warnings. Two known differences are
-// normalised: bash removes the `\`-newline continuations of the double-quoted
-// script, and the bash probe runs openssl where Go runs cat (deviation D43).
+func TestHealStopsWhenTheOldPairCannotMoveAside(t *testing.T) {
+	// kubeadm keeps an apiserver.crt that is still in pki/ and exits 0. So a
+	// mkdir or a mv of the old pair that fails must stop the script before
+	// kubeadm, with the old pair in pki/, old-ipv4 at the old address and no
+	// kubelet restart. Else the heal passes, the certificate stays on the old
+	// address, and every later lo up renews it again.
+	for _, tc := range []struct{ name, mvFails, reason string }{
+		{name: "mkdir fails", reason: "could not repair bad: mkdir: "},
+		{name: "mv moves nothing", mvFails: "all", reason: "could not repair bad: mv: cannot move "},
+		{name: "mv moves the certificate only", mvFails: "key", reason: "could not repair bad: mv: cannot move "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHealFixture(t)
+			h.makeControlPlane("bad")
+			h.mvFails = tc.mvFails
+			if tc.mvFails == "" {
+				// A file where the directory must go: mkdir -p fails.
+				testutil.WriteFile(t, h.healPKIPath("bad"), "not a directory\n")
+			}
+
+			h.heal()
+			warning := h.errBuf.String()
+			if !strings.Contains(warning, tc.reason) || !strings.Contains(warning, ". The next lo up tries again.") {
+				t.Fatalf("the failure was not reported with its reason (want %q):\n%s", tc.reason, warning)
+			}
+			if s := h.kubeadmSteps(); len(s) != 0 {
+				t.Fatalf("kubeadm ran although the old pair did not move aside: it keeps the old pair and exits 0: %q", s)
+			}
+			h.assertPair("bad", "172.31.0.2", "after a failed move of the old pair")
+			if got := readFileT(t, h.oldIPPath("bad")); got != "172.31.0.2" {
+				t.Fatalf("/kind/old-ipv4 = %q: the script did not stop", got)
+			}
+			if r, s := h.restarts(), h.stops(); len(r) != 0 || len(s) != 0 {
+				t.Fatalf("the script did not stop: kubelet restarts %q, container stops %q", r, s)
+			}
+			if tc.mvFails == "" {
+				// The script stopped at the mkdir: it did not go on to the
+				// mv and its clean-up.
+				if strings.Contains(warning, "mv: ") {
+					t.Fatalf("the script went on after the failed mkdir:\n%s", warning)
+				}
+				if got := readFileT(t, h.healPKIPath("bad")); got != "not a directory\n" {
+					t.Fatalf("the script went on after the failed mkdir: /kind/heal-pki = %q", got)
+				}
+				return
+			}
+			h.assertNoHealPKI("bad", "after the old pair came back")
+		})
+	}
+}
+
+func TestHealWarnsWhenTheRenewalDoesNotTakeEffect(t *testing.T) {
+	// The script exits 0, but the certificate still does not name the node
+	// address (here kubeadm writes the pair for the old address). The heal
+	// reads the certificate again, so a renewal that changed nothing does not
+	// pass as a repair. The address part is done (kubelet runs on the new
+	// address), so the CNI nudge still runs. The next heal renews again.
+	h := newHealFixture(t)
+	h.makeControlPlane("bad")
+	h.kubeadmStale = true
+	h.heal()
+
+	const msg = "[warn] lo: the certificate renewal on bad did not complete: the node has --node-ip=10.9.0.3, but its apiserver certificate does not name that address. The next lo up tries again.\n"
+	if !strings.Contains(h.errBuf.String(), msg) {
+		t.Fatalf("a renewal that left the old certificate was not reported:\n%s", h.errBuf.String())
+	}
+	if s := h.kubeadmSteps(); len(s) != 1 {
+		t.Fatalf("the heal did not run the renewal: %q", s)
+	}
+	if !slices.Contains(h.restarts(), "kubelet-restart:bad") || !h.called("cni-restart") {
+		t.Fatalf("the address repair did not finish (kubelet restart, CNI nudge): steps %q calls %q", h.steps(), h.calls)
+	}
+
+	h.kubeadmStale = false
+	h.reset()
+	h.heal()
+	if w := h.errBuf.String(); !strings.Contains(w, "renewing the certificate") || strings.Contains(w, "did not complete") {
+		t.Fatalf("the next heal did not renew the certificate:\n%s", w)
+	}
+	h.assertPair("bad", "10.9.0.3", "after the next heal")
+}
+
+func TestHealRenewsACertThatNamesALongerAddress(t *testing.T) {
+	// The certificate names 10.9.0.30, and the node address is 10.9.0.3, the
+	// start of 10.9.0.30. A check that compares the text without a bound
+	// finds the node address in that SAN and keeps the wrong certificate.
+	h := newHealFixture(t)
+	h.makeControlPlane("bad")
+	h.markRepaired("bad")
+	h.writePair(h.pkiPath("bad"), "10.9.0.30")
+	testutil.WriteFile(t, h.oldIPPath("bad"), "10.9.0.3")
+
+	h.heal()
+	if !strings.Contains(h.errBuf.String(), "lo: bad has --node-ip=10.9.0.3, but its apiserver certificate does not name that address — renewing the certificate") {
+		t.Fatalf("a certificate for 10.9.0.30 passed as one for 10.9.0.3:\n%s", h.errBuf.String())
+	}
+	if s := h.kubeadmSteps(); len(s) != 1 {
+		t.Fatalf("the heal did not renew the certificate: %q", s)
+	}
+	h.assertPair("bad", "10.9.0.3", "after the renewal")
+}
+
 // logLines splits a call log of the bash side into its lines (none for an
 // empty or missing file).
 func logLines(raw []byte) []string {
@@ -918,6 +1048,14 @@ func logLines(raw []byte) []string {
 	return strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
 }
 
+// TestHealScriptMatchesBash holds the two copies of the heal in lockstep. It
+// runs lo::heal_node_ips of the frozen tree with kind, docker and kubectl
+// stubbed, and healNodeIPs with a fake runner that answers the same. Then it
+// compares the repair script that each hands to `docker exec … bash -c`, the
+// certificate probes (before and after the repair), the warnings, the
+// kubectl calls and the waits. Two known differences are normalised: bash
+// removes the `\`-newline continuations of the double-quoted script, and the
+// bash probe runs openssl where Go runs cat (deviation D43).
 func TestHealScriptMatchesBash(t *testing.T) {
 	root := testutil.RepoRoot(t)
 	locale := bashLocale(t)
@@ -925,11 +1063,14 @@ func TestHealScriptMatchesBash(t *testing.T) {
 	sansOld := "X509v3 Subject Alternative Name: \n    DNS:lotest-control-plane, DNS:kubernetes, DNS:localhost, IP Address:10.96.0.1, IP Address:172.31.0.2, IP Address:127.0.0.1"
 	sansNew := strings.ReplaceAll(sansOld, "172.31.0.2", "10.9.0.3")
 	pemNew := (&healFixture{t: t, rootDir: t.TempDir()}).certPEM("10.9.0.3")
+	sansLonger := strings.ReplaceAll(sansOld, "172.31.0.2", "10.9.0.30")
+	pemLonger := (&healFixture{t: t, rootDir: t.TempDir()}).certPEM("10.9.0.30")
 	longLine := strings.Repeat("x", 450)
 	for _, tc := range []struct {
 		name               string
 		flag, want         string
-		goProbe, bashProbe string
+		goProbe, bashProbe string // the probe answers before the repair script
+		goAfter, bashAfter string // the probe answers after it
 		repairErr          string // stderr of a failing repair
 		notReady           bool   // /readyz never passes
 	}{
@@ -941,10 +1082,20 @@ func TestHealScriptMatchesBash(t *testing.T) {
 		{name: "drifted node, only klog notes", flag: "172.31.0.2", want: "10.9.0.3", repairErr: "W1110 1 a.go:1] x\nTo see the stack trace of this error\n"},
 		{name: "drifted node, long stderr", flag: "172.31.0.2", want: "10.9.0.3", repairErr: "a\n" + longLine + "\n"},
 		{name: "drifted node, no stderr", flag: "172.31.0.2", want: "10.9.0.3", repairErr: "\n"},
-		{name: "pair in heal-pki", flag: "10.9.0.3", want: "10.9.0.3", goProbe: "heal-pki", bashProbe: "heal-pki"},
-		{name: "old certificate", flag: "10.9.0.3", want: "10.9.0.3", goProbe: pemOld, bashProbe: sansOld},
+		{name: "drifted node, renewed", flag: "172.31.0.2", want: "10.9.0.3", goAfter: pemNew, bashAfter: sansNew},
+		{name: "drifted node, renewal without effect", flag: "172.31.0.2", want: "10.9.0.3", goAfter: pemOld, bashAfter: sansOld},
+		{name: "pair in heal-pki", flag: "10.9.0.3", want: "10.9.0.3", goProbe: "heal-pki", bashProbe: "heal-pki",
+			goAfter: pemNew, bashAfter: sansNew},
+		{name: "pair stays in heal-pki", flag: "10.9.0.3", want: "10.9.0.3", goProbe: "heal-pki", bashProbe: "heal-pki",
+			goAfter: "heal-pki", bashAfter: "heal-pki"},
+		{name: "old certificate", flag: "10.9.0.3", want: "10.9.0.3", goProbe: pemOld, bashProbe: sansOld,
+			goAfter: pemNew, bashAfter: sansNew},
+		{name: "old certificate, renewal without effect", flag: "10.9.0.3", want: "10.9.0.3", goProbe: pemOld, bashProbe: sansOld,
+			goAfter: pemOld, bashAfter: sansOld},
 		{name: "old certificate, repair fails", flag: "10.9.0.3", want: "10.9.0.3", goProbe: pemOld, bashProbe: sansOld,
 			repairErr: "error execution phase certs/apiserver: x\n"},
+		{name: "certificate for a longer address", flag: "10.9.0.3", want: "10.9.0.3", goProbe: pemLonger, bashProbe: sansLonger,
+			goAfter: pemNew, bashAfter: sansNew},
 		{name: "good certificate", flag: "10.9.0.3", want: "10.9.0.3", goProbe: pemNew, bashProbe: sansNew},
 		{name: "worker", flag: "10.9.0.3", want: "10.9.0.3"},
 		{name: "not an IP", flag: "172.31.0.2", want: "10.9.0.3'; touch /tmp/x; echo '"},
@@ -960,7 +1111,8 @@ docker() {
   case "$1 $3" in
     "inspect --format") printf '%s\n' "${WANT}" ;;
     "exec cat") printf 'KUBELET_KUBEADM_ARGS="--node-ip=%s --node-labels="\n' "${FLAG}" ;;
-    "exec sh") printf '%s' "${@: -1}" > "${OUT}/probe"; printf '%s\n' "${PROBE}" ;;
+    "exec sh") printf '%s\n' "${@: -1}" >> "${OUT}/probes"
+      if [ -e "${OUT}/script" ]; then printf '%s\n' "${PROBE_AFTER}"; else printf '%s\n' "${PROBE}"; fi ;;
     "exec bash") printf '%s' "${@: -1}" > "${OUT}/script"
       if [ -n "${REPAIR_ERR}" ]; then printf '%s' "${REPAIR_ERR}" >&2; return 1; fi ;;
   esac
@@ -974,7 +1126,8 @@ sleep() { printf '%s\n' "$*" >> "${OUT}/sleep"; }
 lo::heal_node_ips lotest /fake/kubeconfig`
 			cmd := exec.CommandContext(t.Context(), "bash", "-c", script, "bash", root)
 			cmd.Env = append(os.Environ(), "WANT="+tc.want, "FLAG="+tc.flag, "PROBE="+tc.bashProbe,
-				"REPAIR_ERR="+tc.repairErr, "OUT="+out, "KIND_EXPERIMENTAL_DOCKER_NETWORK=lok8s-test")
+				"PROBE_AFTER="+tc.bashAfter, "REPAIR_ERR="+tc.repairErr, "OUT="+out,
+				"KIND_EXPERIMENTAL_DOCKER_NETWORK=lok8s-test")
 			if tc.notReady {
 				cmd.Env = append(cmd.Env, "NOT_READY=1")
 			} else {
@@ -991,8 +1144,8 @@ lo::heal_node_ips lotest /fake/kubeconfig`
 			// The Go side.
 			d, runner, errBuf, _ := testDriver(t)
 			t.Setenv("KIND_EXPERIMENTAL_DOCKER_NETWORK", "lok8s-test")
-			var goProbe, goScript string
-			var goKubectl, goSleeps []string
+			var goScript string
+			var goProbes, goKubectl, goSleeps []string
 			d.sleep = func(ctx context.Context, dur time.Duration) error {
 				goSleeps = append(goSleeps, fmt.Sprint(dur.Seconds()))
 				return ctx.Err()
@@ -1007,8 +1160,12 @@ lo::heal_node_ips lotest /fake/kubeconfig`
 				case "docker exec cat":
 					writeOut(c, `KUBELET_KUBEADM_ARGS="--node-ip=`+tc.flag+` --node-labels="`+"\n")
 				case "docker exec sh":
-					goProbe = c.Args[len(c.Args)-1]
-					writeOut(c, tc.goProbe+"\n")
+					goProbes = append(goProbes, c.Args[len(c.Args)-1])
+					if goScript != "" {
+						writeOut(c, tc.goAfter+"\n")
+					} else {
+						writeOut(c, tc.goProbe+"\n")
+					}
 				case "docker exec bash":
 					goScript = c.Args[len(c.Args)-1]
 					if tc.repairErr != "" {
@@ -1049,10 +1206,11 @@ lo::heal_node_ips lotest /fake/kubeconfig`
 			if got, want := logLines(bashSleeps), goSleeps; !slices.Equal(got, want) {
 				t.Errorf("the waits differ:\n bash %q\n Go   %q", got, want)
 			}
-			bashProbe, _ := os.ReadFile(filepath.Join(out, "probe"))
+			bashProbes, _ := os.ReadFile(filepath.Join(out, "probes"))
 			openssl := "openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -ext subjectAltName"
-			if got := strings.Replace(string(bashProbe), openssl, "cat /etc/kubernetes/pki/apiserver.crt", 1); got != goProbe {
-				t.Errorf("the certificate probes differ:\n bash %q\n Go   %q", bashProbe, goProbe)
+			got := logLines([]byte(strings.ReplaceAll(string(bashProbes), openssl, "cat /etc/kubernetes/pki/apiserver.crt")))
+			if !slices.Equal(got, goProbes) {
+				t.Errorf("the certificate probes differ:\n bash %q\n Go   %q", got, goProbes)
 			}
 		})
 	}
