@@ -26,6 +26,9 @@ type MaintenanceOpts struct {
 	Timeout string
 	// EvictUnmanaged is drain --evict-unmanaged (the api's `force`).
 	EvictUnmanaged bool
+	// GlobalForce is the global --force/-f on a drain, which NodeDrain
+	// refuses: it is not `kubectl drain --force`.
+	GlobalForce bool
 }
 
 // RejectSpaceClusterFlag ports node::reject_space_cluster_flag: the
@@ -253,6 +256,11 @@ func (c *Context) NodeUncordon(ctx context.Context, domain string, o Maintenance
 // NodeDrain ports node::drain: cordon one node of a Space and evict its
 // pods. The node stays in the space: an uncordon puts it back into service.
 func (c *Context) NodeDrain(ctx context.Context, domain string, o MaintenanceOpts) error {
+	// A --force that means `kubectl drain --force` is refused, not ignored.
+	if o.GlobalForce {
+		c.errorf("kubehz: drain does not use the global --force/-f. To also evict the pods that no controller recreates, use --evict-unmanaged.")
+		return ErrHandled
+	}
 	if err := c.assertNodeName(o.Name); err != nil {
 		return err
 	}
@@ -269,7 +277,7 @@ func (c *Context) NodeDrain(ctx context.Context, domain string, o MaintenanceOpt
 		return err
 	}
 	// `force` is the api's name (kubectl drain --force). The flag has its
-	// own name because `lo` owns --force/-f globally.
+	// own name because `lo` owns --force/-f globally (see GlobalForce).
 	var pairs []jsonPair
 	if seconds > 0 {
 		pairs = append(pairs, jsonPair{"timeoutSeconds", seconds})

@@ -236,6 +236,22 @@ _stub_all() {
   assert_output --partial "clusters:write"
 }
 
+@test "preflight: a control character in KUBEHZ_TOKEN is refused once, before any request" {
+  _stub_config
+  _stub_curl
+  local want="[error] environment variable KUBEHZ_TOKEN must not contain a control character"$'\n'"  A file with CRLF line ends can leave a CR at the end of the value. Remove it, then try again."
+  # Without --cluster-id: the refusal alone, and no second line that says
+  # the cluster registry did not answer (the Go twin, nodeAPIAccess, prints
+  # the same two lines).
+  KUBEHZ_TOKEN=$'khz_test_token\r' run node::preflight "acme.example.org" "list nodes"
+  assert_failure
+  assert_output "${want}"
+  cluster_id="cl-explicit" KUBEHZ_TOKEN=$'khz\ttest_token' run node::preflight "acme.example.org" "list nodes"
+  assert_failure
+  assert_output "${want}"
+  [ ! -f "${CURL_LOG}" ]
+}
+
 @test "preflight: with no active domain it says how to set one" {
   _stub_config
 

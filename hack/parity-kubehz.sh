@@ -102,6 +102,17 @@ spec:
     hosting: shared
     apiUrl: https://api.kubehz.example
 EOF
+# closed.dev — a Space whose api URL names a closed port: a transport
+# failure before the send.
+mk closed.dev <<'EOF'
+kind: Kubehz
+metadata:
+  name: closed
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://127.0.0.1:1
+EOF
 # space-*.dev — the SHAPE checks lo still makes on the three numbers. The
 # ceiling is the account's and lives on the platform, so lo refuses only what
 # can never be a ceiling: zero, a negative number, and a value that is not a
@@ -841,6 +852,20 @@ done
 for id in ../sp-1 sp-1/nodes 'sp 1' 'sp-1?x=1' 'sp-1%2F' '\e[2J'; do
   KUBEHZ_TOKEN=parity-dummy check - kubehz node cordon --name worker-1 --domain shared.dev --space-id "${id}"
 done
+# The global --force/-f is not `kubectl drain --force`: a drain refuses it
+# at any place in argv, with the --evict-unmanaged hint. A cordon does not.
+check - kubehz node drain --name worker-1 --domain shared.dev --force
+check - kubehz node drain -f --name worker-1 --domain shared.dev --evict-unmanaged
+check - --force kubehz node drain --name worker-1 --domain shared.dev
+check - kubehz node cordon --name worker-1 --domain shared.dev --force
+# A failure before the send (nothing listens on the port): both print the
+# "unreachable" line, and not the lines of an unknown result. curl -sS
+# prints its own line first; the Go binary has no such line.
+for verb in cordon uncordon drain; do
+  KUBEHZ_TOKEN=parity-dummy check '^curl: \([0-9]+\) ' kubehz node "${verb}" --name worker-1 --domain closed.dev --space-id sp-1a2b3c4d
+done
+KUBEHZ_TOKEN=parity-dummy check '^curl: \([0-9]+\) ' kubehz node drain --name worker-1 --domain closed.dev --space-id sp-1a2b3c4d --timeout 600 --evict-unmanaged
+KUBEHZ_TOKEN=parity-dummy check '^curl: \([0-9]+\) ' kubehz node cordon --name worker-1 --domain closed.dev
 
 # ── handover: usage errors and bundle checks (no node touched) ──────────────
 check_parse - kubehz handover receive
@@ -879,6 +904,30 @@ spec:
     apiUrl: https://127.0.0.1:${STUB_PORT}
 EOF
   done
+  # bslug.dev: a slug with backslashes, as typed (no space has it).
+  # hstub.dev: a hosted cluster on the stub, for the token check of the
+  # hosted node commands.
+  mk bslug.dev <<EOF
+kind: Kubehz
+metadata:
+  name: bslug
+spec:
+  kubehz:
+    hosting: shared
+    apiUrl: https://127.0.0.1:${STUB_PORT}
+    space:
+      slug: 'a\\\\b\e[31m'
+EOF
+  mk hstub.dev <<EOF
+kind: KubeOne
+metadata:
+  name: hstub
+spec:
+  kubehz:
+    hosting: hosted
+    access: managed
+    apiUrl: https://127.0.0.1:${STUB_PORT}
+EOF
   export SSL_CERT_FILE="${WORK}/stub.pem" CURL_CA_BUNDLE="${WORK}/stub.pem" KUBEHZ_TOKEN=parity-jwt
 
   check_api - kubehz node cordon --name worker-1 --domain acme.dev
@@ -914,6 +963,20 @@ EOF
   check_api - kubehz status --domain acme.dev
   check_api_none - kubehz node drain --name worker-1 --domain acme.dev --timeout 30
   check_api_none - kubehz node cordon --name worker-1 --domain acme.dev --space-id 'sp-1/../x'
+  # A control character in KUBEHZ_TOKEN (a CR from a file with CRLF line
+  # ends, a tab): both refuse it in the shared node preflight with the same
+  # two lines, and neither sends a request: with --space-id, with the space
+  # list, and on the hosted node commands.
+  for token in $'parity-jwt\r' $'parity\tjwt'; do
+    KUBEHZ_TOKEN="${token}" check_api_none - kubehz node cordon --name worker-1 --domain acme.dev --space-id sp-1a2b3c4d
+    KUBEHZ_TOKEN="${token}" check_api_none - kubehz node drain --name worker-1 --domain acme.dev --space-id sp-1a2b3c4d --timeout 600
+    KUBEHZ_TOKEN="${token}" check_api_none - kubehz node uncordon --name worker-1 --domain acme.dev
+    KUBEHZ_TOKEN="${token}" check_api_none - kubehz node status --domain hstub.dev --cluster-id cl-1a2b3c4d
+    KUBEHZ_TOKEN="${token}" check_api_none - kubehz node status --domain hstub.dev
+  done
+  # A backslash in the slug prints as typed in both (error() of the bash
+  # tree prints through `echo -e`).
+  check_api - kubehz node cordon --name worker-1 --domain bslug.dev
   # The contract on the Go side alone: 0 on success, 1 on a refusal.
   expect_rc 0 kubehz node cordon --name worker-1 --domain acme.dev
   expect_rc 1 kubehz node cordon --name joining-1 --domain acme.dev

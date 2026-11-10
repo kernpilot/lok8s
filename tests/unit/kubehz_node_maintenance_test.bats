@@ -88,11 +88,13 @@ teardown() {
 
 # yq stub for kubehz::read_config and kubehz::space_config: a Space on an
 # HTTPS api with no space block (the slug is the first label, acme).
+# STUB_SLUG sets spec.kubehz.space.slug, as typed.
 _stub_config() {
   yq() {
     case "$2" in
       '.spec.kubehz.hosting // "self"')           echo "${STUB_HOSTING:-shared}" ;;
       '.spec.kubehz.apiUrl // ""')                echo "${STUB_API_URL:-https://api.example.test}" ;;
+      '.spec.kubehz.space.slug // ""')            printf '%s\n' "${STUB_SLUG:-}" ;;
       '.spec.kubehz.access')                      echo "null" ;;
       '.spec.kubehz.connectHcloudToken // false') echo "false" ;;
       '.spec.kubehz.agent // "cronjob"')          echo "cronjob" ;;
@@ -273,6 +275,40 @@ _refusal() {
   assert_failure
   [[ "${output}" != *$'\e'* ]]
   assert_output --partial "kubehz: '${id}' is not a space id."
+}
+
+@test "input: a backslash in the slug of the spec prints as typed" {
+  local slug='a\\b\e[31m'
+  export STUB_SLUG="${slug}"
+  _stub_all
+  # No space with that slug.
+  run node::cordon --name worker-1
+  assert_failure
+  [[ "${output}" != *$'\e'* ]]
+  assert_output --partial "kubehz: no space '${slug}' found for acme.example.org."
+
+  # The space of that slug knows no such node: the label is the slug.
+  export STUB_SPACES_BODY='{"ok":true,"data":[{"id":"sp-5","slug":"a\\\\b\\e[31m","status":"Active"}]}'
+  run node::drain --name worker-9
+  assert_failure
+  [[ "${output}" != *$'\e'* ]]
+  assert_output --partial "kubehz: the platform knows no node 'worker-9' in space ${slug}."
+}
+
+@test "input: drain refuses the global --force/-f, with the hint, before any request" {
+  _stub_all
+  # The :args stub sets `force` as argsh sets the `force` of main.
+  run --separate-stderr node::drain --name worker-1 --force
+  assert_failure
+  [[ -z "${output}" ]]
+  [[ "${stderr}" == "[error] kubehz: drain does not use the global --force/-f. To also evict the pods that no controller recreates, use --evict-unmanaged." ]]
+  run --separate-stderr node::drain --name worker-1 --evict-unmanaged --force
+  assert_failure
+  [[ "${stderr}" == *"use --evict-unmanaged."* ]]
+  [[ ! -s "${CURL_LOG}" ]]
+  # Cordon and uncordon do not refuse it.
+  run node::cordon --name worker-1 --force
+  assert_success
 }
 
 @test "input: drain --timeout outside 60..3600, or not a whole number, is refused before any request" {

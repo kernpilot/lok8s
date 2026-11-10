@@ -261,6 +261,10 @@ func TestKubehzNodeMaintenanceClusterFreePaths(t *testing.T) {
 		{[]string{"kubehz", "node", "cordon", "extra", "--name", "worker-1"}, "Error: unexpected argument: extra"},
 		// An empty --name is given: the name check refuses it, as in argsh.
 		{[]string{"kubehz", "node", "cordon", "--name", "", "--domain", "shared.dev"}, "kubehz: '' is not a node name the platform accepts."},
+		// The global --force/-f, at any place, is refused on a drain only.
+		{[]string{"kubehz", "node", "drain", "--name", "worker-1", "--force"}, "kubehz: drain does not use the global --force/-f. To also evict the pods that no controller recreates, use --evict-unmanaged."},
+		{[]string{"-f", "kubehz", "node", "drain", "--name", "worker-1", "--domain", "shared.dev"}, "use --evict-unmanaged."},
+		{[]string{"kubehz", "node", "cordon", "--name", "worker-1", "--force", "--domain", "shared.dev"}, "KUBEHZ_TOKEN is required to cordon a node."},
 	} {
 		_, errOut, err := runKubehzLo(t, base, tc.args...)
 		if !errors.Is(err, ErrHandled) || !strings.Contains(errOut, tc.want) {

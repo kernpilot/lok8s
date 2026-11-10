@@ -88,6 +88,33 @@ func TestNodeMaintenancePreflightNeedsDomainSpecHTTPSAndToken(t *testing.T) {
 	}
 }
 
+// A token with a control character (a CR from a file with CRLF line ends,
+// a tab, a DEL) gets the refusal of the bash twin's http::credential_ok,
+// byte for byte, before any request: with --space-id and with the space
+// list. Without the check, Go reports a CR as "unreachable" and sends a tab.
+func TestNodeMaintenanceRefusesAControlCharacterInTheToken(t *testing.T) {
+	t.Parallel()
+	const want = "[error] environment variable KUBEHZ_TOKEN must not contain a control character\n" +
+		"  A file with CRLF line ends can leave a CR at the end of the value. Remove it, then try again.\n"
+	for _, token := range []string{"khz_test_token\r", "khz\ttest_token", "khz_test_token\x7f"} {
+		for _, spaceID := range []string{"sp-5", ""} {
+			for _, action := range []string{"cordon", "uncordon", "drain"} {
+				h := maintHarness(t)
+				h.handle("POST /api/spaces/sp-5/nodes/worker-1/"+action, 202,
+					`{"ok":true,"data":{"name":"worker-1","action":"`+action+`","status":"requested","replaced":null}}`)
+				h.env["KUBEHZ_TOKEN"] = token
+				mustErr(t, maintRun(h, action, MaintenanceOpts{Name: "worker-1", SpaceID: spaceID}))
+				if got := h.errOut.String(); got != want || h.out.Len() != 0 {
+					t.Fatalf("%q %s (space id %q): stdout %q stderr\n%s\nwant\n%s", token, action, spaceID, h.out.String(), got, want)
+				}
+				if len(h.reqs()) != 0 {
+					t.Fatalf("%q %s (space id %q) sent %+v", token, action, spaceID, h.reqs())
+				}
+			}
+		}
+	}
+}
+
 // The node name and the space id are pasted into a URL PATH: each is checked
 // before any request is sent.
 func TestNodeMaintenanceChecksTheNameAndTheSpaceID(t *testing.T) {
@@ -190,6 +217,30 @@ func TestNodeDrainTimeoutBeforePreflight(t *testing.T) {
 	mustErr(t, h.ctx.NodeDrain(t.Context(), "acme.example.org", MaintenanceOpts{Name: "worker-1", Timeout: "10"}))
 	mustContain(t, h.output(), "--timeout takes a whole number")
 	mustNotContain(t, h.output(), "No cluster.lok8s.yaml")
+}
+
+// The global --force/-f is not `kubectl drain --force`: a drain refuses it
+// with one line that names --evict-unmanaged, first and before any request,
+// also with --evict-unmanaged.
+func TestNodeDrainRefusesTheGlobalForce(t *testing.T) {
+	t.Parallel()
+	const want = "[error] kubehz: drain does not use the global --force/-f. To also evict the pods that no controller recreates, use --evict-unmanaged.\n"
+	for _, o := range []MaintenanceOpts{
+		{Name: "worker-1", GlobalForce: true},
+		{Name: "Bad_", Timeout: "10", GlobalForce: true},
+		{Name: "worker-1", EvictUnmanaged: true, GlobalForce: true},
+	} {
+		h := maintHarness(t)
+		h.handle("POST /api/spaces/sp-5/nodes/worker-1/drain", 202,
+			`{"ok":true,"data":{"name":"worker-1","action":"drain","status":"requested","replaced":null}}`)
+		mustErr(t, h.ctx.NodeDrain(t.Context(), "acme.example.org", o))
+		if got := h.errOut.String(); got != want || h.out.Len() != 0 {
+			t.Fatalf("%+v: stdout %q stderr %q", o, h.out.String(), got)
+		}
+		if len(h.reqs()) != 0 {
+			t.Fatalf("%+v sent %+v", o, h.reqs())
+		}
+	}
 }
 
 // ── request ──────────────────────────────────────────────

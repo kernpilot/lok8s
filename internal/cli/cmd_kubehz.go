@@ -254,7 +254,7 @@ func newKubehzNode(paths *config.Paths) *cobra.Command {
 // newKubehzNodeMaintenance builds `lo kubehz node cordon|uncordon|drain`
 // (node::cordon, node::uncordon, node::drain). The inherited --cluster/-s is
 // refused first, with the --space-id hint; then a missing --name, in the
-// argsh wording.
+// argsh wording. A drain refuses the global --force/-f too (NodeDrain).
 //
 // The MCP tier follows the api's own gate: a drain evicts pods, so it is
 // destructive (the api asks a browser session for a step-up). A cordon and
@@ -283,6 +283,9 @@ func newKubehzNodeMaintenance(paths *config.Paths, verb, short, nameHelp string,
 			if verb == "drain" {
 				o.Timeout, _ = cmd.Flags().GetString("timeout")
 				o.EvictUnmanaged, _ = cmd.Flags().GetBool("evict-unmanaged")
+				// The global --force/-f, at any place in argv (argsh parses
+				// it into the `force` of main): NodeDrain refuses it.
+				o.GlobalForce, _ = cmd.Flags().GetBool("force")
 			}
 			// argsh refuses only an absent --name; an empty one reaches the
 			// name check, which refuses it with the value.

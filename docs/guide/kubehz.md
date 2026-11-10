@@ -268,7 +268,7 @@ lo kubehz node uncordon --name worker-1   # schedulable again
 | `--space-id` | all three | The space (`sp-…`). Without it, `lo` finds the space of the domain by its slug in your space list. |
 | `--domain` | all three | The domain whose space to use. Default: the active domain. |
 | `--timeout` | `drain` | How many seconds the platform tries, a whole number from 60 to 3600. Without it, the platform default applies. |
-| `--evict-unmanaged` | `drain` | Also evict the pods that no controller recreates (`kubectl drain --force`). Nothing recreates them. |
+| `--evict-unmanaged` | `drain` | Also evict the pods that no controller recreates (`kubectl drain --force`). Nothing recreates them. The global `--force`/`-f` of `lo` is not this flag: `drain` refuses it. |
 
 - **The change is asynchronous.** The command ends when the platform accepts
   the request, not when the node changes. `lo kubehz status`
@@ -302,7 +302,9 @@ lo kubehz node uncordon --name worker-1   # schedulable again
   scope. The slug lookup also reads your space list, which needs the `read`
   scope: with `--space-id`, `lo` sends no list request. From a browser
   session, the platform asks for a fresh two-factor sign-in before a drain.
-  An API token is the approval already, so `lo` gets no such prompt.
+  An API token is the approval already, so `lo` gets no such prompt. A
+  token with a control character (often a CR from a file with CRLF line
+  ends) is refused before any request.
 - **Spaces only.** A `hosting: hosted` or `self` cluster has its own API
   server, and `lo` refuses the three commands there: use `kubectl cordon`,
   `kubectl uncordon` or `kubectl drain` against that API server.

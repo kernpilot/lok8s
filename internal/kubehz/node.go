@@ -61,7 +61,7 @@ func (c *Context) nodeDomainConfig(domain string) (*Config, string, error) {
 
 // nodeAPIAccess ports node::api_access, the part of the two node preflights
 // after the hosting check: the api URL, over https only (the tenant bearer
-// travels on it), and the tenant token.
+// travels on it), and the tenant token, with no control character in it.
 func (c *Context) nodeAPIAccess(cfg *Config, domain, action string) error {
 	if cfg.APIURL == "" {
 		c.errorf("spec.kubehz.apiUrl is not set for %s", domain)
@@ -70,9 +70,19 @@ func (c *Context) nodeAPIAccess(cfg *Config, domain, action string) error {
 	if err := c.requireHTTPS(cfg.APIURL, "spec.kubehz.apiUrl"); err != nil {
 		return err
 	}
-	if c.getenv("KUBEHZ_TOKEN") == "" {
+	token := c.getenv("KUBEHZ_TOKEN")
+	if token == "" {
 		c.errorf("KUBEHZ_TOKEN is required to %s.", action)
 		c.echoErr("  Mint a clusters:write API token in the dashboard (Access -> API Tokens).")
+		return ErrHandled
+	}
+	// The check of http::credential_ok, before any request. The bash twin
+	// puts the bearer on a curl config line, and a control character ends
+	// that line. The Go client alone fails on a CR as on a transport error
+	// ("unreachable"), and it sends a tab.
+	if hasControl(token) {
+		c.errorf("environment variable KUBEHZ_TOKEN must not contain a control character")
+		c.echoErr("  A file with CRLF line ends can leave a CR at the end of the value. Remove it, then try again.")
 		return ErrHandled
 	}
 	return nil

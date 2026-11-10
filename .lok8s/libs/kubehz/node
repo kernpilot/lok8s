@@ -73,7 +73,8 @@ node::domain_config() {
 }
 
 # The part of the two preflights after the hosting check: the api URL and
-# the tenant token. The Go twin is nodeAPIAccess.
+# the tenant token, with no control character in it. The Go twin is
+# nodeAPIAccess.
 # Usage: node::api_access <domain> <action>
 node::api_access() {
   local domain="${1}" action="${2}"
@@ -88,6 +89,10 @@ node::api_access() {
     echo "  Mint a clusters:write API token in the dashboard (Access -> API Tokens)." >&2
     return 1
   }
+  # The request helpers check the token again, but only after other steps
+  # (the space list, the cluster registry) that can print lines of their
+  # own. Here both twins refuse it at the same point, before any request.
+  http::credential_ok KUBEHZ_TOKEN || return 1
 }
 
 # Whether a value has the shape of an id that is pasted into a URL PATH (a
@@ -739,8 +744,10 @@ node::space_preflight() {
 
   kubehz::space_config "${domain}" "${cluster_yaml}" || return 1
   kubehz::space_lookup "${LOK8S_SPACE_SLUG}" || return 1
+  # The slug is the spec's value as typed, and no check limits its shape:
+  # its backslashes are doubled for the `echo -e` of error().
   if [[ -z "${KUBEHZ_SPACE_ROW}" ]]; then
-    error "kubehz: no space '${LOK8S_SPACE_SLUG}' found for ${domain}."
+    error "kubehz: no space '${LOK8S_SPACE_SLUG//\\/\\\\}' found for ${domain}."
     echo "  Create it with 'lo provision', or name the space with:  --space-id sp-xxxxxxxx" >&2
     return 1
   fi
@@ -877,8 +884,10 @@ node::maintain() {
   if (( rc != 0 )); then
     # The api answers 404 for a space it does not know and for a node the
     # space does not hold; an api older than these routes answers 404 too.
+    # The label can be the slug as typed: its backslashes are doubled for
+    # the `echo -e` of error().
     if [[ "${KUBEHZ_SPACE_API_STATUS}" == "404" ]]; then
-      error "kubehz: the platform knows no node '${name}' in space ${NODE_SPACE_LABEL}."
+      error "kubehz: the platform knows no node '${name}' in space ${NODE_SPACE_LABEL//\\/\\\\}."
       echo "  Check the node name and the space with:  lo kubehz status" >&2
       return 1
     fi
@@ -978,6 +987,14 @@ node::drain() {
   node::reject_space_cluster_flag "${@}" || return 1
   :args "Cordon one node of a Space and evict its pods" "${@}"
 
+  # `force` is the api's name (kubectl drain --force). The flag has its own
+  # name here because `lo` owns --force/-f globally. argsh parses the global
+  # flag at any place in argv into the `force` of main, so a --force that
+  # means `kubectl drain --force` is refused here, not ignored.
+  if (( ${force:-0} )); then
+    error "kubehz: drain does not use the global --force/-f. To also evict the pods that no controller recreates, use --evict-unmanaged."
+    return 1
+  fi
   node::assert_node_name "${name}" || return 1
   local seconds=""
   if [[ -n "${timeout}" ]]; then
@@ -985,12 +1002,10 @@ node::drain() {
   fi
   node::space_preflight "${domain}" "drain a node" || return 1
 
-  # `force` is the api's name (kubectl drain --force). The flag has its own
-  # name here because `lo` owns --force/-f globally.
-  local force=false
-  (( evict_unmanaged )) && force=true
+  local evict=false
+  (( evict_unmanaged )) && evict=true
   local payload
-  payload=$(jq -nc --arg t "${seconds}" --argjson f "${force}" \
+  payload=$(jq -nc --arg t "${seconds}" --argjson f "${evict}" \
     '(if $t != "" then {timeoutSeconds: ($t | tonumber)} else {} end)
       + (if $f then {force: true} else {} end)')
 
@@ -1000,7 +1015,7 @@ node::drain() {
   else
     notes+=("  It tries until the deadline the platform sets by default.")
   fi
-  if [[ "${force}" == "true" ]]; then
+  if [[ "${evict}" == "true" ]]; then
     notes+=("  It also evicts the pods that no controller recreates. Nothing recreates them.")
   else
     notes+=("  A pod that no controller recreates stays, and the drain waits as Blocked."
