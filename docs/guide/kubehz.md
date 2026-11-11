@@ -1,9 +1,19 @@
 # kubehz Platform
 
 lok8s can optionally connect a cluster to [kubehz](https://kubehz.cloud), a
-managed-Kubernetes platform for Hetzner. The integration gives you dashboard
-visibility (node status, control-plane health, certificate expiry) for
-clusters you run on your own Hetzner account.
+managed-Kubernetes platform for Hetzner. lok8s supports two ways to use it:
+
+- **Self-hosted clusters.** You run the whole cluster on your own Hetzner
+  account. The integration gives you dashboard visibility (node status,
+  control-plane health, certificate expiry).
+- **Hosted control planes.** kubehz runs the control plane. You run only the
+  workers, on your own Hetzner account. This needs a kubehz account and an
+  [API token](#kubehz-token-claim-at-provision-time) in `KUBEHZ_TOKEN`.
+  The quickest start is `lo init cluster <domain> --driver kubehz-hosted`,
+  which writes a hosted cluster spec (see [`lo init`](../reference/cli.md#lo-init)).
+
+Sign-up, prices and terms are on [kubehz.cloud](https://kubehz.cloud). Sign-up
+can need an invite code.
 
 ::: tip No lock-in
 The integration is strictly opt-in. lok8s works fully without kubehz: the
@@ -32,7 +42,7 @@ Two independent axes:
 | Axis | Values | Meaning |
 |------|--------|---------|
 | `hosting` | `self` (default) | You provision and own the control plane: the normal lok8s flow. |
-| | `hosted` | kubehz runs the control plane in its infrastructure; you run only workers. Requires `apiUrl`. With `kind: Lo` it additionally requires `spec.runner`. |
+| | `hosted` | kubehz runs the control plane in its infrastructure; you run only workers. Requires `apiUrl` and a kubehz account: `lo provision` creates the cluster with your `KUBEHZ_TOKEN`. With `kind: Lo` it additionally requires `spec.runner`. |
 | | `shared` | kubehz runs a control plane shared by many customers and you get namespaces on it, with nodes you register yourself. Requires `apiUrl` and `kind: Kubehz`. See [Spaces](#spaces). |
 | `access` | `none` (default) | No platform contact whatsoever. |
 | | `registered` | The in-cluster agent registers the cluster and sends authenticated heartbeats: read-only dashboard visibility. |
@@ -57,12 +67,14 @@ A hosted control plane has no plan and no tier. Its **shape** describes it:
 | Value | Range | Default | Meaning |
 |-------|-------|---------|---------|
 | `spec.controlPlane.replicas` | 1 to 3 | 1 | apiserver replicas. `lo provision` sends this count to the platform. |
-| state limit | 1 GB to the datastore maximum | 2 GB | How much cluster state the control plane holds (etcd: up to 8 GB, kine: up to 32 GB). |
+| state limit | 1 GB to the datastore maximum | 2 GB | How much cluster state the control plane holds (etcd: up to 6 GB, kine: up to 32 GB). |
 | auto-grow step and cap | 1 GB steps, up to the datastore maximum | 1 GB, the datastore maximum | The platform raises the limit by one step at 80% use, until the cap. |
 
 The presets in the dashboard (`dev`: one apiserver, `ha`: three) are defaults
-only. The bill is per hour for what runs, with no cap. The state limit, the
-step and the cap live in the dashboard.
+only. The platform bills every started hour of what runs. Each unit is capped
+at 730 hours a month, so the monthly price on the
+[price page](https://kubehz.io/pricing) is the most a unit costs. The state
+limit, the step and the cap live in the dashboard.
 
 The platform admits a hosted cluster by the shape it asks for. When the pool
 cannot hold one more control plane of that shape, `lo provision` stops with
@@ -194,6 +206,7 @@ mints a single-use join ticket for every machine listed under
 lo provision                  # create/adopt the space + mint join tickets
 lo kubehz join worker-3       # mint another ticket, any time
 lo kubehz status              # space phase, the three numbers, the nodes
+lo kubehz node drain --name worker-3   # cordon a node and evict its pods
 lo kubehz deregister          # remove the space
 ```
 
@@ -236,6 +249,80 @@ A few things worth knowing before you reach for it:
   eager channel moves your space early in a shard's upgrade window, a
   conservative one later, but the platform migrates every space by the
   deadline. There is no opting out.
+
+### Cordon, uncordon and drain a node
+
+A space gives you no rights on the nodes of the shared control plane, so
+the shared control plane refuses `kubectl cordon` and `kubectl drain`. The
+platform does these three operations for you, one node at a time:
+
+```bash
+lo kubehz node cordon --name worker-1     # the scheduler puts no new pods on it
+lo kubehz node drain --name worker-1      # cordon it, then evict its pods
+lo kubehz node uncordon --name worker-1   # schedulable again
+```
+
+| Flag | Command | What it does |
+|------|---------|--------------|
+| `--name`, `-n` | all three | The node, by the name the space knows. Required. |
+| `--space-id` | all three | The space (`sp-…`). Without it, `lo` finds the space of the domain by its slug in your space list. |
+| `--domain` | all three | The domain whose space to use. Default: the active domain. |
+| `--timeout` | `drain` | How many seconds the platform tries, a whole number from 60 to 3600. Without it, the platform default applies. |
+| `--evict-unmanaged` | `drain` | Also evict the pods that no controller recreates (`kubectl drain --force`). Nothing recreates them. The global `--force`/`-f` of `lo` is not this flag: `drain` refuses it. |
+
+- **The change is asynchronous.** The command ends when the platform accepts
+  the request, not when the node changes. `lo kubehz status`
+  shows each node with `cordoned` while it is unschedulable, then the last
+  request and its phase, and the reason when the platform gives one:
+
+  ```
+  Nodes:   2/3
+    worker-1  Ready  metal  cordoned  drain Blocked: 2 pods have no controller
+    worker-2  Ready  hcloud  uncordon Done
+  ```
+
+- **One request per node, and the latest wins.** A cordon, an uncordon or a
+  drain replaces the pending request of the same node, and the output says
+  what it replaced. A cordon or an uncordon cancels a pending drain: the pods
+  that the drain did not evict stay on the node. A second drain of the same
+  machine keeps the deadline of the first one and its timeout: a new
+  `--timeout` has no effect then, and the output says so.
+- **A pod that no controller recreates stops a drain.** Without
+  `--evict-unmanaged`, the pod stays and the drain waits with the phase
+  `Blocked`. Uncordon the node to cancel, or drain again with
+  `--evict-unmanaged`.
+- **An uncordon removes your cordon only.** A cordon that the platform holds
+  (a migration, a node retirement) stays, and the node line still shows
+  `cordoned`.
+- **A drain does not remove the node.** The node stays in the space and
+  holds its slot. Uncordon it to put it back into service. To deregister
+  the node, use the dashboard or the api route
+  `DELETE /api/spaces/{id}/nodes/{name}`: `lo` has no command for it.
+- **The token.** The calls need a `KUBEHZ_TOKEN` with the `clusters:write`
+  scope. The slug lookup also reads your space list, which needs the `read`
+  scope: with `--space-id`, `lo` sends no list request. From a browser
+  session, the platform asks for a fresh two-factor sign-in before a drain.
+  An API token is the approval already, so `lo` gets no such prompt. A
+  token with a control character (often a CR from a file with CRLF line
+  ends) is refused before any request.
+- **Spaces only.** A `hosting: hosted` or `self` cluster has its own API
+  server, and `lo` refuses the three commands there: use `kubectl cordon`,
+  `kubectl uncordon` or `kubectl drain` against that API server.
+- **In `lo mcp`, the tier follows the platform's own gate.** A drain evicts
+  pods, so `lo_kubehz_node_drain` is a destructive tool: a server offers it
+  only with `--allow-destructive`. A cordon and an uncordon move no pod and
+  undo each other, so `lo_kubehz_node_cordon` and `lo_kubehz_node_uncordon`
+  are idempotent tools in the `--allow-mutating` tier.
+
+Every refusal says whether something changed:
+
+| Refusal | What it means |
+|---------|---------------|
+| The node has not joined | The space knows the node name, but the platform has not seen the node in the control plane yet. Nothing changed. Wait until `lo kubehz status` shows it `Ready`. |
+| The request did not reach the control plane | Nothing changed. Try again shortly. |
+| The platform cannot record the request | The platform sends no request it cannot audit. Nothing changed. Try again shortly. |
+| The result is unknown | Possibly, the request got to the control plane. Read the phase with `lo kubehz status` before you try again: a drain that you send again can start a new deadline. `lo` also gives this answer, with the cause in brackets, when the answer of the api does not arrive: a gateway answers for the api (HTTP 502, HTTP 504, or HTTP 503 with no code), the connection ends after `lo` sends the request, or a 2xx answer is not the answer of the route. |
+| The platform knows no such node | The node name or the space is wrong. Check both with `lo kubehz status`. |
 
 ### Limits, and whose problem each one is
 
@@ -393,7 +480,8 @@ cordons the node, then deletes it from your cluster.
 Removal takes the **membership**, never the hardware. The removal does not
 evict pods on the machine first, because the machine is yours and asking for it back is not
 a reason for the platform to move your workloads. Drain the node yourself when
-you want a clean handover. Run `kubeadm reset` on the machine before you join
+you want a clean handover. (`lo kubehz node drain` is for the nodes of a Space;
+on a hosted cluster, use `kubectl drain`). Run `kubeadm reset` on the machine before you join
 it anywhere again.
 
 ::: warning A dark node still holds its slot
@@ -444,19 +532,75 @@ and needs no token; if the API is unreachable it warns and provisioning
 continues.
 :::
 
+::: details When the platform is busy: 503 or 429
+The platform can refuse a registration for a short time. Then it answers
+`503` or `429` with a `Retry-After` header and a code, for example
+`REGISTRATION_UNAVAILABLE` or `RATE_LIMITED`. This applies to all three
+register modes: the direct claim with `KUBEHZ_TOKEN`, the claim key with
+`HCLOUD_TOKEN`, and the fingerprint announce.
+
+- lo waits for the time in `Retry-After` and tries again. One register call
+  tries at most 3 times, and one wait is at most 60 seconds. So one call
+  waits at most 2 minutes.
+- Ctrl-C stops the wait at once.
+- If the platform still refuses after the third try, lo stops with an
+  error. The error names the code and the command to run when the platform
+  is available again. lo does not try the next register mode, because the
+  platform gives the same answer to all of them.
+- The command in the error depends on where the registration ran:
+  - After `lo kubehz register`, run `lo kubehz register` again.
+  - After `lo provision`, run `lo provision --bootstrap`. The error stops
+    the provision after the infrastructure is up and before the bootstrap,
+    and the provision exits with status 1. The cluster runs, but it has no
+    `spec.bootstrap` addons and no platform registration. `lo provision
+    --bootstrap` registers the cluster and then applies the bootstrap. It
+    does not provision the infrastructure again.
+- lo does not try a `503` without `Retry-After` again, because the answer
+  gives no time to wait. The registration then continues the same way as
+  when the API does not answer. The warning names the status, for example
+  `(HTTP 503)`.
+- The 2-minute limit applies to each register call. If a call gets two
+  refusals with `Retry-After` and then a different refusal, lo tries the
+  next mode, and that mode can wait again. In that rare case, the waits of
+  the three modes add up to at most 6 minutes.
+:::
+
 ::: details Claim before you deploy: the bind secret
 The pre-agent announce also hands back a one-time **bind secret**.
 `lo kubehz register` stores it at `clusters/<domain>/.kubehz-bind` (mode
 0600). `lo kubehz deploy` stages it into the cluster, and the agent presents
-it on its first `agent-register`. The platform then adopts the row the
-announce created, wherever it sits by then. The row can still be pending, or
-already claimed in the dashboard. Either way the agent binds there instead of
-making a second row, so a cluster you claim before the agent deploys still
-shows its own heartbeats.
+it on its first `agent-register`. The platform then adopts the announced row
+(the row that `lo kubehz register` created), wherever it sits by then. The
+row can still be pending, or already claimed in the dashboard. Either way
+the agent binds there instead of making a second row, so a cluster you
+claim before the agent deploys still shows its own heartbeats.
 
 The secret proves only that the operator who deploys is the operator who
 announced. It rotates on every re-announce and is spent on the first
 adoption. It is a credential: keep `.kubehz-bind` out of version control.
+
+A re-run of `lo kubehz register` sends the stored secret, so the re-run
+keeps the same cluster record and stores the new secret it gets back. lo
+uses the file only when it is readable and holds exactly 64 lowercase hex
+characters, and it never puts the value on a command line.
+
+The platform does not adopt the announced row by its domain alone. An agent
+that registers without the secret gets a separate pending row, and the
+announced row gets no heartbeats. So `lo kubehz deploy` stages the secret
+before it applies the agent:
+
+- The deploy applies the namespace `kubehz-system`, then the Secret
+  `kubehz-agent-bind` with a server-side apply. The kubeconfig needs `patch`
+  on Secrets in `kubehz-system`, and `create` when the Secret is new. It does
+  not need `delete`.
+- If the deploy cannot stage the secret, it stops before it changes an agent.
+- If `.kubehz-bind` is missing (for example, `lo kubehz register` ran on
+  another machine) or holds no valid secret, the deploy warns and continues
+  without the secret.
+
+To deploy without the secret on purpose, remove `.kubehz-bind`. The agent
+then registers a separate pending row. Claim that row with the code from
+`lo kubehz claim-code`. The announced row gets no heartbeats.
 :::
 
 ## Claiming
@@ -659,8 +803,11 @@ Properties worth knowing:
   root filesystem, all capabilities dropped.
 
 The snapshot contains the Kubernetes version, node list (name/readiness/
-role/instance type, capped at 20 nodes), certificate expiry, and
-control-plane component health:
+role/instance type), certificate expiry, and control-plane component health.
+The agent reads all nodes with one API call, so the number of calls does not
+grow with the cluster. It sends at most 500 nodes, the limit of the platform's
+heartbeat API. A larger cluster sends its first 500 nodes, and the agent
+writes the total to its log:
 
 ```json
 {
@@ -736,7 +883,9 @@ without deleting anything.
 to paste, no fingerprint step. It shows up in your dashboard already owned. Pair
 it with `spec.kubehz.connectHcloudToken: true` to also wire dashboard-driven
 provisioning in the same run. Without `KUBEHZ_TOKEN`, `lo provision` registers
-anonymously and you [claim](#claiming) the cluster afterwards.
+a self-hosted cluster anonymously and you [claim](#claiming) the cluster
+afterwards. A hosted cluster always needs the token: the platform creates it
+for your tenant.
 
 Deregistering deletes the platform cluster record and, when `HCLOUD_TOKEN`
 is set, the `kubehz-claim-<domain>` SSH key from your Hetzner Cloud
@@ -818,6 +967,172 @@ The output of this command is a bearer token. Thus the command is hidden
 from `lo kubehz --help`, no `lo mcp` server offers it as a tool, and `lo chat`
 denies it to the model.
 
+## Agent tools
+
+`lo kubehz space` and `lo kubehz cluster` call the kubehz api with an
+[agent key](#agent-keys). They need no project and no cluster spec. `lo mcp`
+turns them into tools, so an AI agent that runs `lo mcp` on your machine can
+create a space for a task, extend its lease, and delete it when the task is
+done.
+
+### The environment
+
+The commands read five values from the environment, never from a flag:
+
+| Variable | Value |
+|----------|-------|
+| `KUBEHZ_API_URL` | The kubehz api, for example `https://api.kubehz.cloud`. HTTPS only. |
+| `KUBEHZ_AGENT_CLIENT_ID` | `clientId` of the key |
+| `KUBEHZ_AGENT_CLIENT_SECRET` | `clientSecret` of the key |
+| `KUBEHZ_AGENT_TOKEN_URL` | `tokenEndpoint` of the key |
+| `KUBEHZ_AGENT_SCOPE` | `tokenScope` of the key |
+
+The answer that created the key holds the last four values. `lo` gets the
+access token the same way `lo kubehz token` does, and uses the same cache.
+Without an agent key, the commands send `KUBEHZ_TOKEN` (an API token from the
+dashboard). When both are set, `lo` uses the agent key.
+
+No flag sets the api URL or the credential. A model that could set the URL
+could send the token to another host.
+
+### Commands
+
+```bash
+lo kubehz space list                          # the spaces the key reaches
+lo kubehz space get sp-1a2b3c4d               # one space: limits, nodes, endpoint, lease
+lo kubehz space create --name "CI run" --slug ci-1234 --lease-hours 3
+lo kubehz space lease sp-1a2b3c4d --hours 6   # the platform deletes the space 6 hours from now
+lo kubehz space delete sp-1a2b3c4d
+lo kubehz space kubeconfig sp-1a2b3c4d --file agent.yaml
+
+lo kubehz cluster list                        # the clusters the key reaches
+lo kubehz cluster get cl-1a2b3c4d
+lo kubehz cluster lease cl-1a2b3c4d --hours 4 # hosted clusters only
+lo kubehz cluster kubeconfig cl-1a2b3c4d --file agent.yaml
+```
+
+`space create` also takes `--nodes`, `--namespaces` and `--object-cap-kib`
+(the [three numbers](#spaces)) and `--region`. A number you leave out is not
+sent, and the platform applies its default.
+
+Every command takes `-o text|json|yaml`. `text` prints a table for a list and
+one line per field for one record. `json` and `yaml` print fixed fields (see
+[Output formats](../reference/cli.md#output-formats)). Use `-o json` in a
+script or an agent: `-o yaml` prints a string such as `yes` without quotes,
+and a YAML 1.1 reader takes it for a boolean
+([#246](https://github.com/kernpilot/lok8s/issues/246)). A field that the api
+leaves out is `null`. Before `lo` prints a string from the api, it removes
+the control characters: C0, DEL, C1 (U+0080 to U+009F), the line and
+paragraph separators (U+2028, U+2029) and the bidi controls (U+202A to
+U+202E, U+2066 to U+2069).
+
+`kubeconfig` writes the agent kubeconfig to the file you name (mode 0600) and
+prints the path. The file holds no secret: its exec stanza runs
+`lo kubehz token`, so kubectl uses the agent key from the environment.
+
+```bash
+lo kubehz space kubeconfig sp-1a2b3c4d --file agent.yaml
+KUBECONFIG=agent.yaml kubectl get pods
+```
+
+The command does not replace a file that exists, so `--file ~/.kube/config`
+cannot remove your other contexts by accident. A file that appears while
+`lo` downloads stays too. Add `--force` (or `-f`) to replace the file. The
+new file belongs to you and has mode 0600. A hard link to the old file keeps
+the old content.
+
+When the path is a link, `--force` replaces the file that the link points
+to, and the link stays. `lo` does this only when you own the link and its
+target. Thus a link that another user puts in a shared directory such as
+`/tmp` cannot make `lo` replace one of your files. A directory, a link to
+one, and a link to nothing are refused.
+
+A path in `/proc` or `/dev` is refused, also when a link in the path points
+there. Some of these paths change with the process that opens them: for
+`lo`, `/proc/self/exe` is the `lo` binary, and `/dev/stdout` is the file
+that its output goes to. `lo` checks the path before it calls the api, and
+again just before it writes.
+
+### What the api enforces
+
+`lo` adds no authority. It checks the shape of an id (`sp-…`, `cl-…`) and of
+a number, then sends the request. The api decides:
+
+- **The role of the key.** A viewer key can read. A create, a lease or a
+  delete answers `403 TOKEN_SCOPE_MISSING`. Use a key with the role editor or
+  admin. With `KUBEHZ_TOKEN`, the same code names the scope that the token
+  does not hold.
+- **The scope of the key.** A key with the scope `resources` reaches only the
+  clusters and spaces it names and the ones it creates. Another space answers
+  `404`, the same as a space that does not exist.
+- **The spend cap.** When the spend of this month on what the key created
+  reaches its cap, a create or a lease extension answers
+  `409 AGENT_KEY_SPEND_CAP`. What already runs keeps running until its lease
+  ends.
+- **The lease.** A space or a hosted cluster that an agent key creates gets a
+  lease: 2 hours, or the hours that `--lease-hours` names (1 to 720). When the
+  lease ends, the platform deletes the resource. `lease --hours N` sets the
+  end to N hours from now. An agent key cannot remove a lease.
+
+A refusal prints the HTTP status, the code and message of the api, and the
+next step.
+
+### As MCP tools
+
+`lo mcp` puts each command in the tier its marker names:
+
+| Tool | Tier |
+|------|------|
+| `lo_kubehz_space_list`, `lo_kubehz_space_get`, `lo_kubehz_cluster_list`, `lo_kubehz_cluster_get` | default (read only) |
+| `lo_kubehz_space_create` | `--allow-mutating` |
+| `lo_kubehz_space_delete`, `lo_kubehz_space_lease`, `lo_kubehz_cluster_lease` | `--allow-destructive` |
+| `lo kubehz space kubeconfig`, `lo kubehz cluster kubeconfig` | never a tool |
+
+`lease` is in the destructive tier because a shorter lease brings the delete
+closer. The two `kubeconfig` commands count as credential output, as
+`lo kubeconfig` does, so no tier offers them. The agent kubeconfig holds no
+secret, but run these two commands yourself, outside the MCP server.
+
+Start the server with the agent key in its environment, not with your own
+credentials:
+
+```json
+{
+  "mcpServers": {
+    "lok8s": {
+      "type": "stdio",
+      "command": "lo",
+      "args": ["mcp", "start"],
+      "env": {
+        "LO_MCP_ALLOW": "mutating",
+        "KUBEHZ_API_URL": "https://api.kubehz.cloud",
+        "KUBEHZ_AGENT_CLIENT_ID": "<clientId>",
+        "KUBEHZ_AGENT_CLIENT_SECRET": "<clientSecret>",
+        "KUBEHZ_AGENT_TOKEN_URL": "<tokenEndpoint>",
+        "KUBEHZ_AGENT_SCOPE": "<tokenScope>"
+      }
+    }
+  }
+}
+```
+
+This file holds the client secret: keep it out of version control. With
+`mutating`, the agent can create spaces. Each space ends when its lease
+ends: after two hours, or after the hours that the create names (720 at
+most). With `destructive`, the agent can also change leases and delete.
+
+`lo mcp` refuses a call when a positional argument starts with a dash, and
+nothing runs. Thus an argument such as `--force` from the model cannot set a
+flag that the tool does not offer. `lo mcp` never offers `lo chat`: it passes
+its arguments on unread, and `--lo <path>` would run any file with the agent
+key in its environment.
+
+`lo chat` cannot run these tools yet. It drives the bash variant of
+`lo mcp` (the argsh builtin), which names a command three levels deep by its
+last two words (`lo_space_list`) and then cannot run it
+([#245](https://github.com/kernpilot/lok8s/issues/245)). The `lo chat`
+defaults deny `lo_space_kubeconfig` and `lo_cluster_kubeconfig`.
+
 ## Assessment and handover
 
 The heartbeat agent also collects a compact **assessment** of the cluster:
@@ -887,6 +1202,30 @@ An `ImagePullBackOff` means the node cannot reach `ghcr.io`. Mirror the image
 and override the registry in the manifest, keeping the digest. A `401` means the
 agent-token was rejected: run `lo kubehz re-enroll`. If the Deployment is missing
 entirely, run `lo kubehz deploy` again.
+
+A pod that stays in `ContainerCreating` with a `Pulling` event and no `Pulled`
+event has an image pull that hangs. On a dual-stack node, a broken IPv6 path to
+the registry can cause this. The connection opens but carries no data, and the
+container runtime does not try IPv4. When the Ready wait times out,
+`lo kubehz deploy` reads the pods. It names the first pod with an image pull
+that failed (`ErrImagePull` or `ImagePullBackOff`) or that hangs, and prints
+the checks below.
+
+To check, run these commands on the node. `<registry>` is the registry host of
+the agent image (`ghcr.io` by default):
+
+```bash
+curl -6 -sS -o /dev/null --max-time 15 https://<registry>/v2/
+curl -4 -sS -o /dev/null --max-time 15 https://<registry>/v2/
+```
+
+The image layers can come from a different host. `ghcr.io` sends them from
+`pkg-containers.githubusercontent.com`, so run the same two commands against
+`https://pkg-containers.githubusercontent.com/` too.
+
+If only the IPv6 command times out, make the node reach the registry over IPv4.
+Repair its IPv6 route, or run the node without IPv6. Then delete the pod, so
+that a new pod pulls the image again.
 
 To confirm the CronJob really has stood down:
 

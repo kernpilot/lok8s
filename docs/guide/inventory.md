@@ -74,14 +74,14 @@ re-running `lo up` / `lo bootstrap` simply refreshes `spec` in place.
 
 ```
 --- Inventory (ClusterInventory/cluster) ---
-  lok8s:      0.7.8
+  lok8s:      0.12.0
   driver:     kubeone · hetzner
   kubernetes: v1.31.10
   specHash:   3fb0c5e02a41…
   renderedAt: 2026-07-06T10:12:03Z
   addons:     4
-    cilium 1.20.1 (networking)
-    cert-manager v1.21.1 (infrastructure)
+    cilium 1.20.4 (networking)
+    cert-manager v1.21.3 (infrastructure)
     ...
 ```
 
@@ -105,8 +105,8 @@ https://lok8s.io/addons-index.json
 {
   "generatedAt": "2026-07-06T10:00:00Z",
   "addons": [
-    { "name": "cilium", "chartVersion": "1.20.1", "category": "networking" },
-    { "name": "cert-manager", "chartVersion": "v1.21.1", "category": "infrastructure" }
+    { "name": "cilium", "chartVersion": "1.20.4", "category": "networking" },
+    { "name": "cert-manager", "chartVersion": "v1.21.3", "category": "infrastructure" }
   ]
 }
 ```

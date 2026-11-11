@@ -336,3 +336,42 @@ func TestArtifactsRenderEnvCarriesKustomizePluginHome(t *testing.T) {
 		t.Errorf("exported in the shell: the child saw KUSTOMIZE_PLUGIN_HOME=%q, want the exported value", got)
 	}
 }
+
+// A domain without its own store in a project that keeps one per domain
+// stops before the render: the flat store would read and generate values in
+// the wrong place (the recreate: a new domain directory). PATH_SECRETS stays
+// as it was, kustomize never runs. A --no-secrets render never reads the
+// store, so it renders.
+func TestArtifactsRefusesADomainWithoutAStore(t *testing.T) {
+	p, _ := artifactsProject(t)
+	writeFileT(t, filepath.Join(p.Clusters, "other.dev", "secrets", ".gitignore"), "*\n")
+	t.Setenv("PATH_SECRETS", "/ambient/flat")
+	log := filepath.Join(p.Base, "kustomize-ran.log")
+	t.Setenv("KUSTOMIZE_STUB_ENVLOG", log)
+	stubRender(t, p, twoDocRender)
+
+	stderr, err := runArtifacts(t, p)
+	if err == nil {
+		t.Fatal("a domain without a store rendered")
+	}
+	if !strings.Contains(stderr, "[error] domain d.dev has no secrets store: "+p.Clusters+"/d.dev/secrets does not exist") {
+		t.Errorf("stderr = %q", stderr)
+	}
+	if got := os.Getenv("PATH_SECRETS"); got != "/ambient/flat" {
+		t.Errorf("PATH_SECRETS = %q", got)
+	}
+	if _, err := os.Stat(log); err == nil {
+		t.Error("kustomize ran")
+	}
+	if _, err := os.Stat(filepath.Join(p.Clusters, "d.dev", "artifacts.yaml")); err == nil {
+		t.Error("artifacts.yaml written")
+	}
+
+	var errBuf bytes.Buffer
+	if err := Artifacts(t.Context(), Options{Paths: p, Domain: "d.dev", SplitOverride: "0", NoSecrets: true, Stderr: &errBuf}); err != nil {
+		t.Fatalf("--no-secrets: %v (%s)", err, errBuf.String())
+	}
+	if _, err := os.Stat(log); err != nil {
+		t.Error("--no-secrets did not render")
+	}
+}

@@ -22,10 +22,10 @@ jobs:
     # The push-to-main gate that used to sit here is the workflow trigger
     # now. No `needs:` on the ci.yml jobs: they run in another workflow.
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Create kind cluster
-        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
         with:
           cluster_name: lok8s-test
 
@@ -206,9 +206,9 @@ jobs:
           - {scenario: no-services, impl: bash}
           - {scenario: cache-mode, impl: go}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
@@ -247,9 +247,9 @@ jobs:
           # rate-limited runner IP answers without a tag_name. The
           # checksum makes the download verifiable, which resolving
           # "latest" never was.
-          B_VERSION=4.18.6
+          B_VERSION=4.18.8
           curl -fsSL "https://github.com/fentas/b/releases/download/v${B_VERSION}/b-linux-amd64.tar.gz" -o /tmp/b.tar.gz
-          echo "096566667b7f788ff1436c7411b1c2204a231bda9ca1d325b7651e4ccd4e7d94  /tmp/b.tar.gz" | sha256sum -c -
+          echo "297e07f301060480a78380afae066b3c0013c572d704862e2b2f2a4477540aad  /tmp/b.tar.gz" | sha256sum -c -
           mkdir -p "${HOME}/.local/bin"
           tar -xzf /tmp/b.tar.gz -C "${HOME}/.local/bin" b
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"

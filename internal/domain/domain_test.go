@@ -90,6 +90,14 @@ func TestSpecDriver(t *testing.T) {
 	if _, err := SpecDriver(spec, "?"); !errors.Is(err, ErrMalformedDriver) {
 		t.Errorf("malformed kind: err = %v, want ErrMalformedDriver", err)
 	}
+
+	// More than one YAML document (SpecLayout): never defaulted either, for
+	// every reader of the driver (kubehz, addons, inventory, status, use,
+	// doctor, recover). Bash twin: domain::spec_driver rc 2.
+	testutil.WriteFile(t, spec, "kind: KubeOne\n---\nkind: Lo\n")
+	if got, err := SpecDriver(spec, "lo"); !errors.Is(err, ErrSpecLayout) || !errors.Is(err, ErrMalformedDriver) || got != "" {
+		t.Errorf("second document: got %q, %v; want ErrSpecLayout (an ErrMalformedDriver)", got, err)
+	}
 }
 
 func TestDriver(t *testing.T) {

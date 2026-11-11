@@ -29,7 +29,7 @@ parity::init "${1:-}"
 # (this repo's memory has the scars) — build parity needs a clean slate plus
 # ONE whitelisted spec var to prove the envsubst pass.
 while read -r v; do unset "${v}"; done < <(compgen -e | grep -E '^(LOK8S|KIND)_' || true)
-unset KUBECONFIG KUSTOMIZE_PLUGIN_HOME || true
+unset KUSTOMIZE_PLUGIN_HOME || true
 export PATH_BASE="${PROJ}" PATH_BIN="${PROJ}/.bin" PATH_LOK8S="${PROJ}/.lok8s" PATH_CLUSTERS="${PROJ}/clusters"
 export LOK8S_SPEC_PARITY_VALUE="rendered-ok"
 
@@ -257,5 +257,23 @@ restore_kustomization
 # Unknown domain: banner + kustomization guard (the argsh ~domain validator
 # does NOT fire here — pre-set local — verified against the bash impl).
 check "unknown domain"                       prep_clean build --domain bogus.dev
+
+# A domain without its own store, in a project that keeps a store per domain,
+# stops before the render: the flat .secrets/ store would read and generate
+# values in the wrong place. --no-secrets never reads the store, so it renders.
+# The fixture store and domain exist for these cases only.
+mkdir -p "${PROJ}/clusters/store.dev/secrets" "${PROJ}/clusters/nostore.dev"
+printf 'kind: Lo\nmetadata:\n  name: nostore\n' > "${PROJ}/clusters/nostore.dev/cluster.lok8s.yaml"
+printf 'resources:\n  - cm.yaml\n' > "${PROJ}/clusters/nostore.dev/kustomization.yaml"
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: nostore\n  namespace: one\n' > "${PROJ}/clusters/nostore.dev/cm.yaml"
+prep_nostore() { rm -f "${PROJ}/clusters/nostore.dev/artifacts.yaml"; }
+check "domain without a store is refused"    prep_nostore build --domain nostore.dev
+if ! grep -qF "[error] domain nostore.dev has no secrets store: PROJ/clusters/nostore.dev/secrets does not exist" "${WORK}/go.err" \
+  || [[ -e "${PROJ}/clusters/nostore.dev/artifacts.yaml" ]]; then
+  fail "domain without a store: no refusal, or an artifact was written"
+fi
+check "domain without a store, --no-secrets" prep_nostore build --domain nostore.dev --no-secrets
+[[ -s "${PROJ}/clusters/nostore.dev/artifacts.yaml" ]] || fail "domain without a store, --no-secrets: no artifact"
+rm -rf "${PROJ}/clusters/store.dev" "${PROJ}/clusters/nostore.dev"
 
 report

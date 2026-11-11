@@ -1,7 +1,9 @@
 # kind cluster config — reference template
 # NOTE: This file is no longer used directly via envsubst.
-# The lo::render_kind_config() function in .lok8s/drivers/lo/main generates
-# the full kind config dynamically from cluster.lok8s.yaml spec fields:
+# The lo::render_kind_config() function in .lok8s/drivers/lo/utils/render.sh
+# (Go: renderKindConfig) generates the full kind config dynamically from
+# cluster.lok8s.yaml spec fields:
+#   - spec.network.dnsSearch -> networking.dnsSearch (default [])
 #   - spec.nodes.controlPlane / spec.nodes.workers -> nodes section
 #   - spec.registries.mirrors[] -> containerdConfigPatches
 #
@@ -14,6 +16,9 @@ networking:
   disableDefaultCNI: true
   podSubnet: "10.244.0.0/16"
   serviceSubnet: "10.96.0.0/12"
+  # The DNS search list of the nodes (kind v0.18.0 and later). [] drops the
+  # host's search domains; see lo::render_kind_config for the reason.
+  dnsSearch: []
 # Nodes are rendered dynamically from spec.nodes
 nodes:
   - role: control-plane

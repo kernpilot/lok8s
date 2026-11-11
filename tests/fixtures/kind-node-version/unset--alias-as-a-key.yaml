@@ -1,0 +1,8 @@
+x: &k version
+kind: Lo
+metadata:
+  name: kver
+spec:
+  runtime: kind
+  kubernetes:
+    *k : v1.31.4

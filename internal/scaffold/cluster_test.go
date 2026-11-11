@@ -226,3 +226,47 @@ func TestProjectWithCluster(t *testing.T) {
 		t.Errorf("bad driver: %v", err)
 	}
 }
+
+// A new domain whose cluster name another domain already uses, as its
+// metadata.name or as the cluster_name of its provider config, is refused
+// and nothing is written. A copied domain that keeps the name shares the
+// kubeconfig, and lo destroy of one can delete the resources of the other.
+func TestWriteClusterSpecRefusesAClusterNameInUse(t *testing.T) {
+	clusters := t.TempDir()
+	var out, stderr bytes.Buffer
+	// demo.dev is written by the scaffold itself: metadata.name demo.
+	if err := WriteClusterSpec(clusters, "demo.dev", "kubeone", false, &out, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	// prod.cloud holds the hetzner descriptor of a cluster named green.
+	if err := os.MkdirAll(filepath.Join(clusters, "prod.cloud"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(clusters, "prod.cloud", "hetzner.json"), []byte(`{"cluster_name": "green"}`), 0o600)
+
+	for _, tc := range []struct{ dom, user string }{
+		{"demo.cloud", "demo.dev"},    // metadata.name
+		{"green.cloud", "prod.cloud"}, // provider cluster_name
+	} {
+		stderr.Reset()
+		err := WriteClusterSpec(clusters, tc.dom, "kubeone", true, &out, &stderr)
+		if !errors.Is(err, ErrHandled) {
+			t.Fatalf("%s: err = %v, want ErrHandled", tc.dom, err)
+		}
+		want := "is already in use by: " + tc.user + ", as metadata.name or as the provider cluster_name."
+		if !strings.Contains(stderr.String(), want) || !strings.Contains(stderr.String(), "Nothing was written.") {
+			t.Errorf("%s: stderr = %s, want %q", tc.dom, stderr.String(), want)
+		}
+		if _, err := os.Stat(filepath.Join(clusters, tc.dom)); err == nil {
+			t.Errorf("%s: the refused domain was written", tc.dom)
+		}
+	}
+
+	// The domain itself (a re-run with --force) and a new name pass.
+	for _, dom := range []string{"demo.dev", "blue.cloud"} {
+		stderr.Reset()
+		if err := WriteClusterSpec(clusters, dom, "kubeone", true, &out, &stderr); err != nil {
+			t.Fatalf("%s: %v (stderr %s)", dom, err, stderr.String())
+		}
+	}
+}

@@ -19,9 +19,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kernpilot/lok8s/internal/execx"
 )
 
 // The four waits, all in seconds, all overridable from the environment.
@@ -121,7 +124,7 @@ func (c *Context) DeployAgent(ctx context.Context, cfg *Config, domain string, d
 		return err
 	}
 	if dryRun {
-		return c.deployPrint(ctx, workdir, owner, access)
+		return c.deployPrint(ctx, workdir, domain, owner, access)
 	}
 	if err := c.deployApply(ctx, workdir, domain, owner, access); err != nil {
 		return err
@@ -236,8 +239,12 @@ func liveAgentOverlay(workdir, access string) string {
 
 // deployPrint ports kubehz::deploy_print: what would be applied, in apply
 // order, rendered with `kubectl kustomize` (the SAME embedded kustomize the
-// apply uses).
-func (c *Context) deployPrint(ctx context.Context, workdir, owner, access string) error {
+// apply uses). The bind Secret goes in first; its line names the file and
+// never prints the value.
+func (c *Context) deployPrint(ctx context.Context, workdir, domain, owner, access string) error {
+	if c.storedBindSecret(domain) != "" {
+		c.echo("# --- Secret kubehz-agent-bind (the bind secret from clusters/%s/.kubehz-bind) — applied first; the value is not printed ---", domain)
+	}
 	c.echo("# --- CronJob agent (kubehz-heartbeat) — identity + enrollment; heartbeat owner: %s ---", owner)
 	if err := c.run(ctx, "kubectl", "kustomize", filepath.Join(workdir, "agent")); err != nil {
 		return err
@@ -260,16 +267,24 @@ func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, acces
 	overlay := liveAgentOverlay(workdir, access)
 	agentDir := filepath.Join(workdir, "agent")
 
+	// 0. The bind secret before anything else, in both directions: every
+	// CronJob pod that starts without it registers without it (B288).
+	staged, err := c.stageBindSecret(ctx, workdir, domain)
+	if err != nil {
+		return err
+	}
+	// What a failure below has changed so far.
+	changed := "nothing else was changed"
+	if staged {
+		changed = "only the bind Secret changed"
+	}
+
 	if owner == "operator" {
 		// 1. The marker first (the CronJob stops beating).
 		if err := c.run(ctx, "kubectl", "apply", "-k", agentDir); err != nil {
-			c.errorf("kubehz: could not apply the CronJob agent (identity bootstrap) — nothing else was changed")
+			c.errorf("kubehz: could not apply the CronJob agent (identity bootstrap) — %s", changed)
 			return ErrHandled
 		}
-		// 1b. Stage the bind secret (B243) so the bootstrap can ADOPT the
-		// announced row. The namespace exists now (step 1 created it), and the
-		// Secret must be present before the bootstrap Job runs (step 2b reads it).
-		c.applyBindSecret(ctx, domain)
 		// 2. Wait out an in-flight heartbeat pod (fail-soft).
 		c.waitHeartbeatIdle(ctx)
 		// 2b. The identity Secret. The live agent mounts kubehz-agent, which only
@@ -288,7 +303,8 @@ func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, acces
 		rollout := c.liveAgentRolloutSeconds()
 		if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "rollout", "status", "deployment/kubehz-live-agent",
 			"--timeout="+strconv.Itoa(rollout)+"s"); err != nil {
-			c.errorf("kubehz: the live agent was accepted but never became Ready within %ds. NOTHING owns the heartbeat right now: the CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent is not running, so this cluster is reporting nothing. Diagnose with 'kubectl -n kubehz-system describe deployment/kubehz-live-agent' (an unpullable image or an untolerated node taint is the usual cause), or set spec.kubehz.agent: cronjob and re-run 'lo kubehz deploy' to hand the beat straight back.", rollout)
+			c.errorf("kubehz: the live agent was accepted but never became Ready within %ds. NOTHING owns the heartbeat right now: the CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent is not running, so this cluster is reporting nothing. Diagnose with 'kubectl -n kubehz-system describe deployment/kubehz-live-agent' (an image pull that fails or hangs, or an untolerated node taint, is the usual cause), or set spec.kubehz.agent: cronjob and re-run 'lo kubehz deploy' to hand the beat straight back.", rollout)
+			c.liveAgentPullHint(ctx)
 			return ErrHandled
 		}
 		return nil
@@ -296,13 +312,13 @@ func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, acces
 
 	// cronjob mode: remove the live agent BEFORE re-arming the CronJob's beat.
 	if err := c.run(ctx, "kubectl", "delete", "-k", filepath.Join(workdir, "live-agent", "managed"), "--ignore-not-found=true"); err != nil {
-		c.errorf("kubehz: could not remove the live agent — nothing else was changed. The CronJob's beat was NOT re-armed, so this cluster still has exactly one producer (the live agent, which keeps reporting) and no data was lost. Usual causes: the kubeconfig lacks delete permission in kubehz-system, or the apiserver is unreachable. Fix that and re-run 'lo kubehz deploy'.")
+		c.errorf("kubehz: could not remove the live agent — %s. The CronJob's beat was NOT re-armed, so this cluster still has exactly one producer (the live agent, which keeps reporting) and no data was lost. Usual causes: the kubeconfig lacks delete permission in kubehz-system, or the apiserver is unreachable. Fix that and re-run 'lo kubehz deploy'.", changed)
 		return ErrHandled
 	}
 	// Sweep the producing object by its semantic label (survives a rename).
 	if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "delete", "deployment",
 		"-l", "app.kubernetes.io/part-of=kubehz,app.kubernetes.io/component=live-view", "--ignore-not-found=true"); err != nil {
-		c.errorf("kubehz: could not sweep live-agent Deployments by label — nothing else was changed. The CronJob's beat was NOT re-armed, so there is still one producer. Fix the delete and re-run 'lo kubehz deploy'.")
+		c.errorf("kubehz: could not sweep live-agent Deployments by label — %s. The CronJob's beat was NOT re-armed, so there is still one producer. Fix the delete and re-run 'lo kubehz deploy'.", changed)
 		return ErrHandled
 	}
 	if err := c.waitLiveAgentGone(ctx); err != nil {
@@ -312,33 +328,166 @@ func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, acces
 		c.errorf("kubehz: could not apply the CronJob agent. The live agent is gone and the marker was not rewritten, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy'.")
 		return ErrHandled
 	}
-	// Stage the bind secret (B243) for the CronJob's next tick to ADOPT with.
-	c.applyBindSecret(ctx, domain)
 	return nil
 }
 
-// applyBindSecret upserts the one-time bind secret (B243) into the Secret
-// kubehz-system/kubehz-agent-bind from clusters/<domain>/.kubehz-bind, when a
-// register wrote one. The CronJob's bootstrap reads it (the optional env
-// BIND_SECRET) and presents it on agent-register to ADOPT the announced row
-// instead of minting a sibling. The value goes in through --from-file, never
-// argv, so it is not visible in `ps`. Delete-then-create so a re-announce's
-// rotated secret replaces the old one. Best-effort: no file is the normal
-// case (no bind secret in play), and a failed upsert only means the agent
-// adopts via the pending-pool path if it can, else the user claims by code.
-func (c *Context) applyBindSecret(ctx context.Context, domain string) {
-	path := c.bindSecretPath(domain)
-	// A REGULAR file only, matching the bash `[[ -f ]]`: a device, socket or
-	// FIFO in this slot is not a bind secret, and `--from-file` on a FIFO would
-	// block the deploy.
-	if fi, err := os.Stat(path); err != nil || !fi.Mode().IsRegular() {
+// The live agent's container name and pod selector in the vendored
+// manifests (live-agent/base/deployment.yaml). The pull hint reads only this
+// container; TestLiveAgentPullHintFollowsTheVendoredDeployment fails when a
+// re-vendor changes either.
+const (
+	liveAgentContainer = "agent"
+	liveAgentSelector  = "app.kubernetes.io/name=kubehz-live-agent"
+)
+
+// The pod read after a Ready timeout: one line per live-agent pod, four
+// fields joined by '|': pod name, node name, the agent container's waiting
+// reason, the agent container's image. A field the pod does not have yet
+// (no node, no container status) is empty.
+const liveAgentPodsJSONPath = `jsonpath={range .items[*]}{.metadata.name}|{.spec.nodeName}|{.status.containerStatuses[?(@.name=="` +
+	liveAgentContainer + `")].state.waiting.reason}|{.spec.containers[?(@.name=="` + liveAgentContainer + `")].image}{"\n"}{end}`
+
+// One line of that read. Every field comes from the cluster and is printed,
+// so the shape is pinned: DNS names for the pod and the node, letters for
+// the reason, an image reference without spaces, quotes or escapes. All
+// classes are ASCII only (the bash twin matches with LC_ALL=C). A NUL byte
+// fails the match too. Bash command substitution drops NUL bytes, so the
+// bash twin changes each NUL to a byte that fails its match.
+var liveAgentPodLineRe = regexp.MustCompile(`^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([A-Za-z]{1,64})[|]([A-Za-z0-9][A-Za-z0-9._/:@-]*)$`)
+
+// The longest image reference that the pull hint prints, in bytes. This is
+// a separate check and not a bound in the regexp: POSIX guarantees bounds
+// only up to 255 (RE_DUP_MAX), and the bash twin's regex must compile on
+// every libc.
+const liveAgentImageMaxLen = 511
+
+// liveAgentPullHint runs after a Ready timeout. It reads the live agent's
+// pods and, when one of them failed to pull its image or is still pulling
+// it, says so and names the IPv6 path to the registry as a cause to check:
+// a pull that opens an IPv6 connection which then carries no data hangs on
+// that connection and never tries IPv4. It prints nothing when no pod is in
+// such a state, or when the pods cannot be read: the error line above
+// already names the usual causes.
+func (c *Context) liveAgentPullHint(ctx context.Context) {
+	out, err := c.capture(ctx, true, "kubectl", "-n", "kubehz-system", "get", "pods",
+		"-l", liveAgentSelector, "--request-timeout=10s", "-o", liveAgentPodsJSONPath)
+	if err != nil {
 		return
 	}
-	_ = c.run(ctx, "kubectl", "-n", "kubehz-system", "delete", "secret", "kubehz-agent-bind", "--ignore-not-found=true")
-	if err := c.run(ctx, "kubectl", "-n", "kubehz-system", "create", "secret", "generic", "kubehz-agent-bind",
-		"--from-file=bind-secret="+path); err != nil {
-		c.warnf("kubehz: could not stage the bind secret (%s). The agent adopts via the pending-pool path if it can, else claim by claim-code.", err)
+	for line := range strings.SplitSeq(out, "\n") {
+		m := liveAgentPodLineRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		pod, node, reason, image := m[1], m[3], m[5], m[6]
+		if len(image) > liveAgentImageMaxLen {
+			continue
+		}
+		switch reason {
+		case "ErrImagePull", "ImagePullBackOff":
+			c.echoErr("  Pod %s on node %s cannot pull its image %s (%s). Read why: kubectl -n kubehz-system describe pod %s", pod, node, image, reason, pod)
+		case "ContainerCreating":
+			if !c.imagePullInProgress(ctx, pod) {
+				continue
+			}
+			c.echoErr("  Pod %s on node %s started to pull its image %s, and the pull did not finish.", pod, node, image)
+		default:
+			continue
+		}
+		registry := imageRegistry(image)
+		c.echoErr("  A pull that hangs or times out can mean that the IPv6 path from the node to %s is broken.", registry)
+		c.echoErr("  On that path, the connection opens but carries no data, and the pull does not try IPv4.")
+		c.echoErr("  To check, run these two commands on node %s. If only the IPv6 command times out, the IPv6 path is broken:", node)
+		c.echoErr("    curl -6 -sS -o /dev/null --max-time 15 https://%s/v2/", registry)
+		c.echoErr("    curl -4 -sS -o /dev/null --max-time 15 https://%s/v2/", registry)
+		if registry == "ghcr.io" {
+			c.echoErr("  ghcr.io sends the image layers from another host. Run the two commands against https://pkg-containers.githubusercontent.com/ too.")
+		}
+		c.echoErr("  To work around it, make the node reach %s over IPv4. Repair its IPv6 route, or run the node without IPv6.", registry)
+		c.echoErr("  Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod %s", pod)
+		return
 	}
+}
+
+// imagePullInProgress reports whether the kubelet started to pull the agent
+// container's image and has not finished: a Pulling event and no Pulled
+// event, both for that container (the kubelet sets the event's
+// involvedObject.fieldPath to spec.containers{<name>}). A pod in
+// ContainerCreating can also wait for a volume, and then the events show no
+// pull, or a finished one. An events read that fails reports false.
+func (c *Context) imagePullInProgress(ctx context.Context, pod string) bool {
+	out, err := c.capture(ctx, true, "kubectl", "-n", "kubehz-system", "get", "events",
+		"--field-selector", "involvedObject.kind=Pod,involvedObject.name="+pod,
+		"--request-timeout=10s", "-o", `jsonpath={range .items[*]}{.involvedObject.fieldPath}|{.reason}{"\n"}{end}`)
+	if err != nil {
+		return false
+	}
+	events := strings.Split(out, "\n")
+	agent := "spec.containers{" + liveAgentContainer + "}|"
+	return slices.Contains(events, agent+"Pulling") && !slices.Contains(events, agent+"Pulled")
+}
+
+// imageRegistry is the host that the container runtime pulls an image
+// from: the first path component when it names a host (a dot, a port or
+// localhost), else Docker Hub.
+func imageRegistry(image string) string {
+	host, _, found := strings.Cut(image, "/")
+	if !found || (!strings.ContainsAny(host, ".:") && host != "localhost") || host == "docker.io" {
+		return "registry-1.docker.io"
+	}
+	return host
+}
+
+// stageBindSecret puts the one-time bind secret (B243) from
+// clusters/<domain>/.kubehz-bind into the Secret
+// kubehz-system/kubehz-agent-bind, and reports whether it did. The CronJob's
+// bootstrap reads it (the optional env BIND_SECRET) and sends it on
+// agent-register. The api adopts the announced row only with this secret
+// (B288): a register without it gets a separate pending row, and every later
+// tick keeps that row. So the Secret must exist before the first CronJob pod
+// starts, and a failed stage stops the deploy before the CronJob agent.
+//
+// No file, or a file that storedBindSecret refuses: the deploy warns and
+// continues without the Secret. A register in another checkout leaves no
+// file here.
+func (c *Context) stageBindSecret(ctx context.Context, workdir, domain string) (bool, error) {
+	// Any stat failure reads as "no file", like the bash `[[ -e ]]`.
+	if _, err := os.Stat(c.bindSecretPath(domain)); err != nil {
+		c.warnf("kubehz: no bind secret at clusters/%s/.kubehz-bind. If 'lo kubehz register' ran in another checkout, the agent registers a separate pending row. The announced row stays as it is and gets no heartbeats. Claim the new row with the code from 'lo kubehz claim-code'.", domain)
+		return false, nil
+	}
+	if c.storedBindSecret(domain) == "" {
+		c.warnf("kubehz: clusters/%s/.kubehz-bind holds no bind secret (a readable file of exactly 64 lowercase hex characters). The deploy does not stage it, so the agent registers a separate pending row. The announced row stays as it is and gets no heartbeats. Claim the new row with the code from 'lo kubehz claim-code'.", domain)
+		return false, nil
+	}
+	if err := c.applyBindSecret(ctx, workdir, c.bindSecretPath(domain)); err != nil {
+		c.errorf("kubehz: could not stage the bind secret from clusters/%s/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind. The deploy stopped before the CronJob agent. Without this Secret, the agent registers a separate pending row, and the announced row gets no heartbeats. The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. To deploy without the secret, remove the file, and claim the new row with the code from 'lo kubehz claim-code'.", domain)
+		return false, ErrHandled
+	}
+	return true, nil
+}
+
+// applyBindSecret applies the namespace (a first deploy has none yet), then
+// upserts the Secret, and stops at the first failure. kubectl writes the
+// reason to stderr. The value goes in through --from-file, never argv, so
+// `ps` does not show it. The server-side apply changes an existing Secret in
+// place (a re-announce rotates the value), so a running CronJob never finds
+// the Secret missing. It writes no last-applied annotation, which `kubectl
+// describe` would show. RBAC: patch on Secrets in kubehz-system, and create
+// when the Secret is new.
+func (c *Context) applyBindSecret(ctx context.Context, workdir, path string) error {
+	if err := c.run(ctx, "kubectl", "apply", "-f", filepath.Join(workdir, "agent", "namespace.yaml")); err != nil {
+		return err
+	}
+	manifest, err := c.capture(ctx, false, "kubectl", "-n", "kubehz-system", "create", "secret", "generic", "kubehz-agent-bind",
+		"--from-file=bind-secret="+path, "--dry-run=client", "-o", "yaml")
+	if err != nil {
+		return err
+	}
+	return c.Runner.Run(ctx, execx.Cmd{
+		Name: "kubectl", Args: []string{"apply", "--server-side", "--force-conflicts", "-f", "-"},
+		Stdin: strings.NewReader(manifest), Stdout: c.out(), Stderr: c.errOut(),
+	})
 }
 
 // podLines keeps only the `pod/<name>` lines of a merged capture — an

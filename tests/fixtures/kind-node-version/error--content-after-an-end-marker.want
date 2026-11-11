@@ -1,0 +1,1 @@
+error spec.kubernetes.version cannot be read: the spec file holds text after the document end marker '...' at line 8. Remove line 9.

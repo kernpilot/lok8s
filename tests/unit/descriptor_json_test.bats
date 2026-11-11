@@ -86,6 +86,8 @@ EOF
 # cluster found").
 
 @test "the cluster-id lookup resolves every body shape without erroring" {
+  # The lookup checks KUBEHZ_TOKEN and writes its curl config (utils/http).
+  source "${_PROJECT_ROOT}/.lok8s/utils/http.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
 
   local body want out rc

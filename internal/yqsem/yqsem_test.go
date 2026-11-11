@@ -213,3 +213,66 @@ func TestDocLoadStates(t *testing.T) {
 		t.Error("LoadNode")
 	}
 }
+
+// LookupMerged walks a path through MapGetMerged (merge.go): merge keys
+// resolve the way yq does with --yaml-fix-merge-anchor-to-spec (pinned
+// against yq v4.53.3 by tests/unit/lo_dns_search_test.bats and the parity
+// harnesses through the spec.network.dnsSearch reader).
+func TestLookupMerged(t *testing.T) {
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(`
+a: &a {k: from-a, only-a: 1}
+b: &b {k: from-b, only-b: 2}
+c: &c {<<: *b}
+self: &self {x: 1}
+one: {<<: *a}
+local: {k: local, <<: *a}
+first: {<<: [*a, *b]}
+nested: {<<: *c}
+quoted: {"<<": *a}
+deep: {<<: *a, sub: {<<: *b}}
+`), &root); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		path []string
+		want string // "" = nil
+	}{
+		{[]string{"one", "k"}, "from-a"},
+		{[]string{"local", "k"}, "local"},
+		{[]string{"first", "k"}, "from-a"},
+		{[]string{"first", "only-b"}, "2"},
+		{[]string{"nested", "k"}, "from-b"},
+		{[]string{"quoted", "k"}, ""},
+		{[]string{"deep", "sub", "only-b"}, "2"},
+		{[]string{"one", "missing"}, ""},
+		{[]string{"self", "x"}, "1"},
+	} {
+		n, err := LookupMerged(&root, tc.path...)
+		if err != nil {
+			t.Fatalf("LookupMerged(%v): %v", tc.path, err)
+		}
+		got := ""
+		if n != nil {
+			got = n.Value
+		}
+		if got != tc.want {
+			t.Errorf("LookupMerged(%v) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+	// Plain Lookup does not merge.
+	if n := Lookup(&root, "one", "k"); n != nil {
+		t.Errorf("Lookup follows merge keys: %q", n.Value)
+	}
+}
+
+// A map that merges itself is MapGetMerged's ErrMergeCycle, not a loop.
+func TestLookupMergedStopsOnAMergeCycle(t *testing.T) {
+	m := &yaml.Node{Kind: yaml.MappingNode}
+	alias := &yaml.Node{Kind: yaml.AliasNode, Alias: m}
+	m.Content = []*yaml.Node{{Kind: yaml.ScalarNode, Tag: "!!merge", Value: "<<"}, alias}
+	root := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{{Kind: yaml.ScalarNode, Tag: "!!str", Value: "m"}, m}}
+	if n, err := LookupMerged(root, "m", "k"); err == nil {
+		t.Fatalf("LookupMerged on a merge cycle = %v, nil error", n)
+	}
+}

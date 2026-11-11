@@ -17,6 +17,9 @@ setup() {
   # (same functions the apply path uses) — the `lo` entrypoint loads it first.
   source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
   source "${_PROJECT_ROOT}/.lok8s/libs/audit"
+  # The Kubernetes support table is dated: pin the audit's day so a fixture
+  # version keeps its verdict after its minor reaches EOL.
+  _AUDIT_TODAY=2026-10-06
 }
 
 teardown() { teardown_tmpdir; }
@@ -1191,6 +1194,52 @@ YAML
   assert_equal "$(_status_of k8s-version-support)" "fail"
 }
 
+@test "the support table is dated: 1.34 passes the day before its EOL and fails on the date" {
+  _spec ver-flip <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.34.8" }
+  bootstrap: []
+YAML
+  _AUDIT_TODAY=2026-10-26
+  audit::run_domain ver-flip
+  assert_equal "$(_status_of k8s-version-support)" "pass"
+  _AUDIT_TODAY=2026-10-27
+  audit::run_domain ver-flip
+  assert_equal "$(_status_of k8s-version-support)" "fail"
+}
+
+@test "audit::_k8s_supported lists the minors still supported, oldest first" {
+  run audit::_k8s_supported 2026-10-06
+  assert_output "1.34 1.35 1.36 1.37"
+  run audit::_k8s_supported 2026-10-27
+  assert_output "1.35 1.36 1.37"
+  run audit::_k8s_supported 2028-01-01
+  assert_output ""
+}
+
+@test "a support table that is all past EOL warns that it is out of date" {
+  _spec ver-stale <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { version: "v1.36.1" }
+  bootstrap: []
+YAML
+  _AUDIT_TODAY=2028-01-01
+  audit::run_domain ver-stale
+  assert_equal "$(_status_of k8s-version-support)" "warn"
+}
+
+@test "a malformed _AUDIT_TODAY falls back to today" {
+  _AUDIT_TODAY=not-a-date
+  run audit::_k8s_today
+  assert_output "$(date -u +%Y-%m-%d)"
+}
+
 @test "a newer-than-known k8s minor warns (stale support list)" {
   _spec ver-new <<'YAML'
 apiVersion: cluster.lok8s.dev/v1beta1
@@ -1202,6 +1251,122 @@ spec:
 YAML
   audit::run_domain ver-new
   assert_equal "$(_status_of k8s-version-support)" "warn"
+}
+
+# A Lo cluster without spec.kubernetes.version uses the default node image of
+# kind (spec::kind_node_version reads it as unset). The audit reports that as a
+# neutral pass, not as a version it could not parse. Go twin:
+# TestCheckK8sVersionLoWithoutVersion in internal/audit.
+@test "a Lo cluster without spec.kubernetes.version is a neutral pass" {
+  local line
+  for line in "" "  kubernetes: {}" "  kubernetes: { version: ~ }" '  kubernetes: { version: "" }' '  kubernetes: { version: "null" }'; do
+    printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata: { name: dev }\nspec:\n  bootstrap: [ cilium ]\n%s\n' "${line}" | _spec ver-unset
+    audit::run_domain ver-unset
+    assert_equal "$(_status_of k8s-version-support)" "pass"
+    assert_equal "$(_sev_of k8s-version-support)" "low"
+    assert_equal "$(_detail_of k8s-version-support)" \
+      "spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release."
+  done
+}
+
+@test "a missing spec.kubernetes.version is still unknown on a non-Lo cluster" {
+  _spec ver-unset-ko <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  bootstrap: []
+YAML
+  audit::run_domain ver-unset-ko
+  assert_equal "$(_status_of k8s-version-support)" "unknown"
+  assert_equal "$(_detail_of k8s-version-support)" "Could not parse spec.kubernetes.version ('<empty>')."
+}
+
+@test "a Lo spec that the version reader refuses is not read as an unset version" {
+  local line
+  for line in "  kubernetes: []" "  kubernetes: v1.31.4"; do
+    printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata: { name: dev }\nspec:\n  bootstrap: [ cilium ]\n%s\n' "${line}" | _spec ver-list
+    audit::run_domain ver-list
+    assert_equal "$(_status_of k8s-version-support)" "unknown"
+  done
+}
+
+# The decision is the reader's own (spec::kind_node_version), not a plain yq
+# path: a plain path skips a merge key of a scalar (null: "not set") and
+# keeps the trailing newline of a block scalar ("null\n": a version).
+@test "a Lo spec reads as unset exactly where the version reader says so" {
+  _spec ver-badmerge <<'YAML'
+s: &s v1.31.4
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata: { name: dev }
+spec:
+  kubernetes: { <<: *s }
+  bootstrap: [ cilium ]
+YAML
+  audit::run_domain ver-badmerge
+  assert_equal "$(_status_of k8s-version-support)" "unknown"
+  _spec ver-blocknull <<'YAML'
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata: { name: dev }
+spec:
+  kubernetes:
+    version: |
+      null
+  bootstrap: [ cilium ]
+YAML
+  audit::run_domain ver-blocknull
+  assert_equal "$(_status_of k8s-version-support)" "pass"
+  assert_equal "$(_detail_of k8s-version-support)" \
+    "spec.kubernetes.version is not set. The Lo cluster uses the default node image of the installed kind release."
+}
+
+# The audit takes the version from the reader (spec::kubernetes_version): a
+# merged version and the last duplicate key get their support verdict, and a
+# spec that the reader refuses names the reader's problem. Go twin:
+# TestCheckK8sVersionLoWithoutVersion.
+@test "a version behind a merge key gets its support verdict" {
+  _spec ver-merge <<'YAML'
+pinned: &pinned { version: "v1.35.5" }
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: Lo
+metadata: { name: dev }
+spec:
+  kubernetes: { <<: *pinned }
+  bootstrap: [ cilium ]
+YAML
+  audit::run_domain ver-merge
+  assert_equal "$(_status_of k8s-version-support)" "pass"
+  assert_equal "$(_detail_of k8s-version-support)" \
+    "Kubernetes 1.35 is within the supported window (1.34, 1.35, 1.36, 1.37)."
+  _spec ver-merge-ko <<'YAML'
+pinned: &pinned { version: "v1.33.2" }
+apiVersion: cluster.lok8s.dev/v1beta1
+kind: KubeOne
+metadata: { name: c }
+spec:
+  kubernetes: { <<: *pinned }
+  bootstrap: []
+YAML
+  audit::run_domain ver-merge-ko
+  assert_equal "$(_status_of k8s-version-support)" "fail"
+}
+
+@test "the last duplicate version key gets the support verdict" {
+  printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: KubeOne\nmetadata: { name: c }\nspec:\n  kubernetes:\n    version: v1.33.2\n    version: v1.35.5\n  bootstrap: []\n' \
+    | _spec ver-dup
+  audit::run_domain ver-dup
+  assert_equal "$(_status_of k8s-version-support)" "pass"
+}
+
+@test "a spec that the version reader refuses names the reader's problem" {
+  printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata: { name: dev }\nspec:\n  kubernetes: []\n  bootstrap: [ cilium ]\n' \
+    | _spec ver-refused
+  audit::run_domain ver-refused
+  assert_equal "$(_status_of k8s-version-support)" "unknown"
+  assert_equal "$(_detail_of k8s-version-support)" \
+    "spec.kubernetes.version cannot be read: spec.kubernetes is a list, not a map. Write spec.kubernetes as a YAML map."
 }
 
 # =============================================================================
@@ -1404,6 +1569,19 @@ metadata: { name: d }
 YAML
   audit::run_domain deployonly
   assert_equal "$(_status_of cluster-spec)" "unknown"
+}
+
+@test "a spec file with a second document yields one unknown and no other check" {
+  # The two implementations would read two different specs, so no check reads
+  # the file. Go twin: TestRunDomainSecondDocument.
+  local spec="${PATH_CLUSTERS}/two/cluster.lok8s.yaml"
+  mkdir -p "${spec%/*}"
+  printf 'kind: Lo\nspec:\n  kubernetes:\n    version: v1.20.0\n---\nkind: KubeOne\n' > "${spec}"
+  audit::run_domain two
+  assert_equal "${#_AUDIT_FINDINGS[@]}" 1
+  assert_equal "$(_status_of cluster-spec)" "unknown"
+  assert_equal "$(_sev_of cluster-spec)" "high"
+  assert_equal "$(_detail_of cluster-spec)" "${spec} holds more than one YAML document. Remove lines 5 to 6 (the '---' at line 5 and everything after it)."
 }
 
 @test "a high/critical unknown caps the grade — couldn't-check is not a perfect score" {

@@ -49,6 +49,7 @@ kubehz::build_cluster_payload() {
 # Usage: kubehz::wait_for_cluster <api_url> <cluster_id> [timeout_seconds]
 kubehz::wait_for_cluster() {
   local api_url="${1}" cluster_id="${2}" timeout="${3:-600}"
+  http::credential_ok KUBEHZ_TOKEN || return 1
   local elapsed=0 status_val
 
   debug "Waiting for hosted cluster ${cluster_id} to become ready (timeout: ${timeout}s)"
@@ -56,8 +57,8 @@ kubehz::wait_for_cluster() {
   while (( elapsed < timeout )); do
     # GET /api/clusters/{id} is an enveloped UI route ({ok,data,traceId}), so the
     # status is at .data.status; the // .status fallback tolerates a bare body.
-    status_val=$(curl -fsSL "${api_url}/api/clusters/${cluster_id}" \
-      -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null \
+    status_val=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
+      curl -K - -fsSL "${api_url}/api/clusters/${cluster_id}" 2>/dev/null \
       | jq -r '.data.status // .status // "Unknown"') || status_val="Unknown"
 
     case "${status_val}" in
@@ -130,6 +131,7 @@ kubehz::render_capacity_rejection() {
 kubehz::provision_hosted() {
   local domain="${1}" cluster_yaml="${2}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
+  http::credential_ok KUBEHZ_TOKEN || return 1
 
   local payload
   payload=$(kubehz::build_cluster_payload "${cluster_yaml}")
@@ -141,9 +143,9 @@ kubehz::provision_hosted() {
   # available to render — the capacity envelope is the whole point. The status is
   # appended on its own trailing line via -w and split off.
   local raw response http_code
-  raw=$(curl -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters" \
+  raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" |
+    curl -K - -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters" \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
     -d "${payload}") || {
     error "Failed to create hosted cluster via kubehz API (network error)"
     return 1
@@ -187,8 +189,8 @@ kubehz::provision_hosted() {
   # Download kubeconfig
   local kubeconfig_path="${PATH_BASE}/.kubeconfig/${domain}.yaml"
   mkdir -p "$(dirname "${kubeconfig_path}")"
-  curl -fsSL "${api_url}/api/clusters/${cluster_id}/kubeconfig" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+  http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" |
+    curl -K - -fsSL "${api_url}/api/clusters/${cluster_id}/kubeconfig" \
     > "${kubeconfig_path}" || {
     error "Failed to download kubeconfig for hosted cluster ${cluster_id}"
     return 1
@@ -226,6 +228,7 @@ kubehz::destroy_hosted() {
   # Same HTTPS guard as every other bearer-carrying kubehz call: a
   # misconfigured http:// apiUrl must not leak KUBEHZ_TOKEN in clear.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+  http::credential_ok KUBEHZ_TOKEN || return 1
 
   # Resolve through kubehz::resolve_cluster_id (client-side domain filter,
   # oldest-first). The old inline lookup GETed /api/clusters?domain=… — a
@@ -250,8 +253,8 @@ kubehz::destroy_hosted() {
     # Status + body captured (the re-enroll idiom): a refused delete must
     # surface with the api's own message, not vanish into `curl -f`.
     local response http_code
-    response=$(curl -sSL -w $'\n%{http_code}' -X DELETE "${api_url}/api/clusters/${cluster_id}" \
-      -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}") || {
+    response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
+      curl -K - -sSL -w $'\n%{http_code}' -X DELETE "${api_url}/api/clusters/${cluster_id}") || {
       error "kubehz: DELETE /api/clusters/${cluster_id} failed (network) — the hosted cluster can still exist and bill. Retry when ${api_url} is reachable."
       return 1
     }

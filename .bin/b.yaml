@@ -42,7 +42,7 @@ binaries:
   github.com/kernpilot/lok8s:
     alias: lo
     asset: lo-[^f]*.tar.gz
-    version: v0.7.8
+    version: v0.12.0
     groups: [core]
 
   # kustomize + khelm: what `lo` CORE execs for every render (the pinned
@@ -51,15 +51,23 @@ binaries:
   # for LO_RENDER=exec. Also the frozen bash implementation (a routed command)
   # and the parity harnesses. The pins consumers get are generated from
   # internal/toolchain/pins.go (kustomize v5.8.1 ↔ api v0.21.1, khelm
-  # v2.8.0 — drift-tested against go.mod); this contributor file floats
-  # them on purpose so the render tests can A/B against whatever b.lock
-  # holds. Keep in step with go.mod when bumping.
+  # v2.8.0, drift-tested against go.mod). This contributor file pins the
+  # same releases: the render byte-parity tests compare these binaries
+  # with the libraries lo-full links. A floating pin installed khelm
+  # v3.0.0 (2026-10-18) and failed TestBuildInProcessMatchesPinnedBinaryChart
+  # on every PR. Bump these two with go.mod and pins.go.
   kustomize:
+    version: v5.8.1
     groups: [kustomize]
   # khelm: kustomize exec plugin discovered via KUSTOMIZE_PLUGIN_HOME.
   # Used for bootstrap addons at .lok8s/addons/{cilium,metallb,...}.
-  # The framework itself never shells out to the helm CLI.
+  # Charts render through khelm, not the helm CLI. One exception: the bash
+  # implementation's dry-run chart gate (`lo bootstrap --dry-run` routed to
+  # bash) runs `helm dependency list` and `helm lint`, read-only, and needs
+  # a helm v3 on PATH. helm is not in this file: install it yourself for
+  # that (CI pins v3.21.2 for the real-helm bats tests).
   github.com/mgoltzsche/khelm:
+    version: v2.8.0
     file: ../.kustomize/khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer
     groups: [kustomize]
 
@@ -95,7 +103,7 @@ binaries:
 
 profiles:
   core:
-    description: "Framework only: .lok8s/ + default lok8s.dev domain (remote deploy)"
+    description: "Framework only: .lok8s/ (remote deploy)"
     files:
       .lok8s/**:
       .envrc:

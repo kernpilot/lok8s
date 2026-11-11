@@ -88,6 +88,19 @@
 #     every not-ready item carries actionable advice. Always returns 0.
 #     `lo doctor` renders this as its "provider / infrastructure" section.
 #
+#   provider::destroy_plan <config_file> <work_dir>
+#     READ-ONLY. What provider::destroy would delete, for a provider that
+#     deletes by a cluster name. Line 1 is `cluster\t<cluster_name>`, then one
+#     `<resource>\t<id>\t<name>` line per resource. Fails when it cannot name
+#     the cluster or list a resource. With this hook `lo destroy` refuses a
+#     cluster_name that another domain also uses, prints the list, and asks
+#     for the cluster_name (or takes --confirm-cluster) instead of the
+#     yes-prompt. --force does not skip it. The confirmed plan reaches
+#     provider::destroy in LOK8S_DESTROY_PLAN; the provider deletes only the
+#     plan's resources that its live list still shows, and refuses a plan
+#     line of an unknown type or with an id that is not a number. Only the
+#     destroy guard sets the variable; lo clears an inherited value.
+#
 # ── Spec shape ──────────────────────────────────────────────────
 #
 #   spec:

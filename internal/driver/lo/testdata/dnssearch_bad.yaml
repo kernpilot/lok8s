@@ -1,0 +1,39 @@
+# One spec.network.dnsSearch entry per failure cause, in the check order.
+# Shared by internal/driver/lo/dnssearch_test.go and
+# tests/unit/lo_dns_search_test.bats; the expected stderr of the read pass is
+# dnssearch_bad.golden (one byte stream for both implementations). The
+# single-quoted 'a\nb.example' holds a backslash, not a newline: no printer
+# may turn it into an escape.
+kind: Lo
+metadata:
+  name: dns
+anchors:
+  one: &one corp.example.com
+spec:
+  network:
+    dnsSearch:
+      - *one
+      - corp_example
+      - ""
+      - ~
+      - example..com
+      - .example
+      - "."
+      - a.example..
+      - -bad.example
+      - bad-.example
+      - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example
+      - aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b
+      - é.example
+      - "corp.example.com other.example"
+      - "a\0b.example"
+      - 'a\nb.example'
+      - "corp.example.com\n"
+      - |
+        blk.example
+      - {name: x}
+      - [a]
+      - 123
+      - true
+      - !custom tagged
+      - Corp.Example.COM.

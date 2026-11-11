@@ -73,3 +73,9 @@ func suppressOutput(env func(string) (string, bool)) (bool, error) {
 
 // quote wraps s in double quotes for error messages without pulling in fmt.
 func quote(s string) string { return `"` + s + `"` }
+
+// Capabilities is what `Secret --capabilities` prints, one word per line:
+// "dry-run" means the plugin honours LOK8S_BOOTSTRAP_DRYRUN (it reads the
+// store, generates a missing value in memory, writes nothing and reports
+// what it generated to LOK8S_BOOTSTRAP_DRYRUN_REPORT).
+const Capabilities = "dry-run"

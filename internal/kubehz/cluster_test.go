@@ -139,17 +139,22 @@ func TestClaimPlacesNonceInOneAnnotateCall(t *testing.T) {
 	mustContain(t, h.output(), "claim nonce placed")
 	mustContain(t, h.output(), "15 minutes")
 	mustNotContain(t, h.output(), nonce)
-	if h.runner.countCalls("annotate") != 1 {
-		t.Fatalf("annotate calls: %v", h.runner.lines())
+	// ONE patch call carries BOTH annotations (the agent clears a stampless
+	// nonce as unsourced). The nonce is a claim ticket: it goes in the
+	// merge patch on stdin, never on argv.
+	if h.runner.countCalls("patch configmap") != 1 {
+		t.Fatalf("patch calls: %v", h.runner.lines())
 	}
-	var ann string
-	for _, l := range h.runner.lines() {
-		if strings.Contains(l, "annotate") {
-			ann = l
+	for i, l := range h.runner.lines() {
+		mustNotContain(t, l, nonce)
+		if !strings.Contains(l, "patch configmap") {
+			continue
 		}
-	}
-	for _, want := range []string{"kubehz.cloud/claim-nonce=" + nonce, "kubehz.cloud/claim-nonce-placed=1700000000", "--overwrite"} {
-		mustContain(t, ann, want)
+		mustContain(t, l, "kubectl -n kubehz-system patch configmap kubehz-agent-config --type merge --patch-file /dev/stdin")
+		want := `{"metadata":{"annotations":{"kubehz.cloud/claim-nonce":"` + nonce + `","kubehz.cloud/claim-nonce-placed":"1700000000"}}}`
+		if got := h.runner.stdins[i]; got != want {
+			t.Fatalf("patch on stdin = %q, want %q", got, want)
+		}
 	}
 }
 

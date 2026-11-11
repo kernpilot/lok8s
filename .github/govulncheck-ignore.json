@@ -1,5 +1,5 @@
 {
-  "_comment": "Reachable govulncheck findings that have NO fixed version and are accepted for now. hack/govulncheck.sh fails on any reachable finding not listed here, and on a listed one once its review_by date has passed. Each entry names the path by which lo reaches the code and why that path is not exploitable in lo. Remove an entry as soon as a fixed version exists (govulncheck prints 'Fixed in').",
+  "_comment": "Reachable govulncheck findings that have NO fixed version and are accepted for now. hack/govulncheck.sh fails on any reachable finding not listed here (an entry matches by id AND module), and on a listed one once its review_by date has passed. Each entry names the path by which lo reaches the code and why that path is not exploitable in lo. Remove an entry as soon as a fixed version exists (govulncheck prints 'Fixed in').",
   "ignore": [
     {
       "id": "GO-2026-5932",
@@ -23,6 +23,12 @@
       "id": "GO-2026-5064",
       "module": "github.com/containerd/containerd",
       "reason": "CRI checkpoint restore (CDI annotation smuggling). Same path as GO-2026-5622; no CRI service in lo.",
+      "review_by": "2026-12-01"
+    },
+    {
+      "id": "GO-2026-6791",
+      "module": "github.com/containerd/containerd",
+      "reason": "CRI checkpoint restore ignores the destination security context. Same path as GO-2026-5622: init-time reachability through helm's OCI client only; no CRI service in lo. No fix in the 1.7 line.",
       "review_by": "2026-12-01"
     }
   ]

@@ -99,6 +99,15 @@ func runDown(ctx context.Context, deps downDeps, domainName, cluster string) err
 	spec := filepath.Join(deps.paths.Clusters, domainName, "cluster.lok8s.yaml")
 	kind := ""
 	if fsutil.FileExists(spec) {
+		// One YAML document (domain.CheckSpecLayout): another layout reads
+		// as two different specs in the two implementations. The [error]
+		// line says which lines to remove; the .kind hint below would be
+		// the wrong next action.
+		if err := domain.CheckSpecLayout(spec, deps.stderr); err != nil {
+			fmt.Fprintf(out, "  \033[31m✗ %s holds more than one YAML document — refusing to tear down\033[0m\n", spec)
+			fmt.Fprintf(out, "  \033[2m  remove the lines that the error names, then run lo down again\033[0m\n")
+			return ErrHandled
+		}
 		k, err := provision.ReadKind(spec, deps.stderr)
 		if err != nil {
 			// ReadKind has already said WHICH way it is wrong (absent vs

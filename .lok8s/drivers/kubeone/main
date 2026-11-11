@@ -57,6 +57,11 @@ driver::provision() {
     return 1
   fi
 
+  # 1b. Check spec.auditLog and its policy file BEFORE the infrastructure step:
+  # a typo must not wait for a full server reconcile. generate_config checks it
+  # again when it merges the block.
+  kubeone::_audit_log_read "${cluster_yaml}" || return 1
+
   # 2. Provision infrastructure via the provider contract
   # || return: without it a failed INFRASTRUCTURE reconcile falls through to the
   # manifest render and `kubeone apply`, i.e. applying against hosts that were

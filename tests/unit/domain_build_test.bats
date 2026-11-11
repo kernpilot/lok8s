@@ -190,6 +190,39 @@ _announce_setup() {
   assert_output --partial "RENDERING"
 }
 
+# ── One YAML document ─────────────────────────────────────────────────────
+# A spec file with more than one YAML document reads as two different specs in
+# the two implementations, so `lo build` stops before the announcement and the
+# render. Go twin: TestBuildRefusesASecondDocument (internal/cli).
+
+@test "lo build refuses a spec file with a second document before it renders" {
+  _announce_setup
+  local domain="${DOMAIN}" spec
+  build::artifacts() { echo "RENDERING"; }
+  for spec in cluster.lok8s.yaml deploy.lok8s.yaml; do
+    rm -f "${DOMAIN_DIR}"/*.lok8s.yaml
+    printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: fixture\n---\n' > "${DOMAIN_DIR}/${spec}"
+    run main::build
+    assert_failure
+    assert_output "[error] ${DOMAIN_DIR}/${spec} holds more than one YAML document. Remove line 5 (a '---' line after the spec)."
+  done
+}
+
+@test "lo build refuses the cluster spec that a deploy spec names when it has a second document" {
+  :args() { :; }
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  local domain="${DOMAIN}"
+  build::artifacts() { echo "RENDERING"; }
+  printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Deploy\nmetadata:\n  name: fixture\nspec:\n  clusterRef:\n    domain: ref.lok8s.dev\n' > "${DOMAIN_DIR}/deploy.lok8s.yaml"
+  local ref="${BATS_TEST_TMPDIR}/clusters/ref.lok8s.dev/cluster.lok8s.yaml"
+  mkdir -p "${ref%/*}"
+  printf 'kind: Lo\n---\n' > "${ref}"
+  run main::build
+  assert_failure
+  assert_output --partial "[error] ${ref} holds more than one YAML document. Remove line 2 (a '---' line after the spec)."
+  refute_output --partial "RENDERING"
+}
+
 # ── An empty render must not replace a good artifact ──────────────────────
 # kustomize exits 0 for an empty result (`resources: []`, a target list that
 # lost its entries, a base that stopped resolving). The atomic promote then

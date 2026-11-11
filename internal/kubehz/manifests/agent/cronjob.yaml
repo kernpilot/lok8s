@@ -78,9 +78,11 @@ spec:
                     NEW_A="khz_agt_$(rand_hex)"
                     NEW_C="khzc_$(rand_hex)"
                     # create-if-absent; tolerate a concurrent creator so we never rotate.
-                    kubectl create secret generic kubehz-agent -n kubehz-system \
-                      --from-literal=agent-token="${NEW_A}" \
-                      --from-literal=claim-code="${NEW_C}" >/dev/null 2>&1 || true
+                    # A and C reach kubectl as an env file on stdin, never on argv: every
+                    # process on the node can read argv (ps, /proc/<pid>/cmdline).
+                    printf 'agent-token=%s\nclaim-code=%s\n' "${NEW_A}" "${NEW_C}" |
+                      kubectl create secret generic kubehz-agent -n kubehz-system \
+                      --from-env-file=/dev/stdin >/dev/null 2>&1 || true
                     NEW_A=""
                     NEW_C=""
                   fi
@@ -108,6 +110,10 @@ spec:
                     # sibling. Sent only when it is exactly 64 hex, so a garbled
                     # value never makes the JSON invalid; the server consumes it
                     # on the first adoption and every later tick is idempotent.
+                    # Absent: the api does not adopt an announced row by
+                    # domain alone (B288), so the register gets a separate
+                    # pending row. That is why the deploy stages the Secret
+                    # before it applies this CronJob.
                     BIND_FIELD=""
                     if [ -n "${BIND_SECRET}" ] \
                       && [ "$(printf %s "${BIND_SECRET}" | wc -l)" -eq 0 ] \
@@ -117,9 +123,12 @@ spec:
                     REGISTER_PAYLOAD=$(printf \
                       '{"domain":"%s","agentTokenHash":"%s","claimCodeHash":"%s"%s}' \
                       "${CLUSTER_ID}" "${AGENT_TOKEN_HASH}" "${CLAIM_CODE_HASH}" "${BIND_FIELD}")
-                    curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/agent-register" \
+                    # The payload (it can carry the bind secret) reaches curl on stdin,
+                    # never on argv.
+                    printf '%s' "${REGISTER_PAYLOAD}" |
+                      curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/agent-register" \
                       -H "Content-Type: application/json" \
-                      -d "${REGISTER_PAYLOAD}" >/dev/null 2>&1 \
+                      --data-binary @- >/dev/null 2>&1 \
                       || echo "kubehz: agent-register attempt failed; retrying next tick" >&2
                   fi
                   # C stayed in memory only to compute its hash above; drop it now.
@@ -170,62 +179,63 @@ spec:
                   KUBE_VERSION=$(kubectl get --raw /version 2>/dev/null | \
                     sed -n 's/.*"gitVersion": *"\([^"]*\)".*/\1/p' | head -1)
 
-                  # Node NAMES only, via a targeted jsonpath over
-                  # .items[].metadata.name. A greedy `get nodes -o json | sed
-                  # 's/.*"name":"…"/…/'` ALSO scrapes .status.runtimeHandlers[].name
-                  # (e.g. "runc"/"crun", present on k8s ≳1.27) and
-                  # .status.volumesAttached[].name (CSI handles) — the loop then
-                  # runs `kubectl get node runc`, which NotFounds, and `set -e`
-                  # kills the whole heartbeat before it ever POSTs.
-                  # Cap the per-node loop at 20 to bound the beat's runtime; a
-                  # larger cluster reports its first 20 nodes AND logs the
-                  # truncation to stderr (never a silent drop).
-                  NODES_ALL=$(kubectl get nodes \
-                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null) || NODES_ALL=""
-                  NODES=$(echo "${NODES_ALL}" | head -20)
-                  NODE_TOTAL=$(echo "${NODES_ALL}" | grep -c . || true)
-                  [ "${NODE_TOTAL}" -gt 20 ] && echo "kubehz: heartbeat summarizes the first 20 of ${NODE_TOTAL} nodes" >&2
-
-                  # Per-node payload. instanceType mirrors the well-known
-                  # node.kubernetes.io/instance-type label (set by the cloud
-                  # provider, e.g. Hetzner CCM: cx32/cpx41/…) — it powers the
-                  # self-hosted price overview in the dashboard. Fail-soft: a
-                  # missing label (bare metal, kind, no CCM) yields "" and the
-                  # heartbeat never fails because of it.
-                  NODE_ARRAY="["
-                  first=true
-                  for node in ${NODES}; do
-                    status=$(kubectl get node "${node}" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || status=""
-                    # The jsonpath yields the RAW NodeCondition value — literally
-                    # True/False/Unknown — but the platform's vocabulary is
-                    # Ready/NotReady/Unknown (dashboard isNodeReady requires the
-                    # exact word "Ready", case-insensitively — "True" never
-                    # matches; the pilot showed 0/12 Ready on a healthy cluster,
-                    # 2026-08-01). Map here so the wire always carries the
-                    # canonical word; an empty/failed probe reports Unknown.
-                    case "${status}" in
-                      True) status="Ready" ;;
-                      False) status="NotReady" ;;
-                      *) status="Unknown" ;;
-                    esac
-                    # roles: control-plane iff the node carries the
-                    # node-role.kubernetes.io/control-plane (or legacy /master)
-                    # LABEL KEY. Those labels have an EMPTY value, so a per-key
-                    # jsonpath returns "" (exit 0) whether the label is present or
-                    # ABSENT — the old `… && echo control-plane` thus fired for
-                    # EVERY node. Test the key's presence in the rendered labels
-                    # map instead (jsonpath prints it as JSON on the pinned
-                    # kubectl); default worker. Fail-soft under set -e.
-                    labels=$(kubectl get node "${node}" -o jsonpath='{.metadata.labels}' 2>/dev/null) || labels=""
-                    case "${labels}" in
-                      *'"node-role.kubernetes.io/control-plane"'*|*'"node-role.kubernetes.io/master"'*) roles="control-plane" ;;
-                      *) roles="worker" ;;
-                    esac
-                    itype=$(kubectl get node "${node}" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}' 2>/dev/null) || itype=""
-                    if [ "${first}" = "true" ]; then first=false; else NODE_ARRAY="${NODE_ARRAY},"; fi
-                    NODE_ARRAY="${NODE_ARRAY}{\"name\":\"${node}\",\"status\":\"${status}\",\"roles\":\"${roles}\",\"instanceType\":\"${itype}\"}"
-                  done
-                  NODE_ARRAY="${NODE_ARRAY}]"
+                  # Nodes: ONE list call for all nodes, and jq makes the
+                  # per-node payload (B448). A kubectl call takes ~1.5 s on
+                  # prod. The old loop made 3 calls per node, so at ~18 nodes
+                  # the tick ran past activeDeadlineSeconds (120 s) and the
+                  # job was killed before the POST. The call count must not
+                  # grow with the node count.
+                  # jq reads .items[].metadata.name only. A greedy sed over
+                  # the JSON also scraped .status.runtimeHandlers[].name
+                  # ("runc") and .status.volumesAttached[].name (CSI handles)
+                  # as node names.
+                  # jq builds the JSON, so it escapes every value.
+                  #   status: the RAW Ready condition is True/False/Unknown, but
+                  #     the platform's vocabulary is Ready/NotReady/Unknown
+                  #     (dashboard isNodeReady requires the exact word "Ready";
+                  #     the pilot showed 0/12 Ready on a healthy cluster,
+                  #     2026-08-01). A missing condition reports Unknown.
+                  #   roles: control-plane only if the node has the LABEL KEY
+                  #     node-role.kubernetes.io/control-plane (or the legacy
+                  #     /master). These labels have an EMPTY value, so test the
+                  #     key with has(), never the value. Else worker.
+                  #   instanceType: the node.kubernetes.io/instance-type label
+                  #     (set by the cloud provider, e.g. Hetzner CCM: cx32). It
+                  #     feeds the self-hosted price overview. A missing label
+                  #     (bare metal, kind, no CCM) gives "".
+                  # NODES_OK tells an empty answer apart from a failed call:
+                  # the assessment sends cpUsage.nodes only from a call that
+                  # answered.
+                  # `get --raw` pipes the API's JSON to jq as it comes:
+                  # kubectl does not decode the list into objects, and the
+                  # shell keeps no copy of it. The script sets no pipefail,
+                  # so the pipe's status is jq's. A failed or empty kubectl
+                  # answer gives jq no input, and jq -e fails on no input; a
+                  # body without .items fails too. `timeout 30` bounds a
+                  # stalled apiserver below the job's 120 s deadline.
+                  NODES_OK=""
+                  if NODE_LIST=$(timeout 30 kubectl get --raw /api/v1/nodes 2>/dev/null | jq -ce '[.items[] |
+                        (.metadata.labels // {}) as $l | {
+                          name: .metadata.name,
+                          status: ([.status.conditions[]? | select(.type == "Ready") | .status][0]
+                            | if . == "True" then "Ready" elif . == "False" then "NotReady" else "Unknown" end),
+                          roles: (if ($l | has("node-role.kubernetes.io/control-plane") or has("node-role.kubernetes.io/master"))
+                            then "control-plane" else "worker" end),
+                          instanceType: ($l["node.kubernetes.io/instance-type"] // "")}]' 2>/dev/null); then
+                    NODES_OK=1
+                  else
+                    NODE_LIST="[]"
+                  fi
+                  # The api's heartbeat schema accepts at most 500 nodes
+                  # (kubehz-api HB_MAX_NODES); a longer array 400s the WHOLE
+                  # heartbeat. Keep this cap at or under the api's. A larger
+                  # cluster reports its first 500 nodes AND logs the
+                  # truncation to stderr (never a silent drop). NODE_TOTAL
+                  # stays the true count.
+                  NODE_CAP=500
+                  NODE_TOTAL=$(printf '%s' "${NODE_LIST}" | jq 'length' 2>/dev/null) || NODE_TOTAL=0
+                  [ "${NODE_TOTAL}" -gt "${NODE_CAP}" ] && echo "kubehz: heartbeat summarizes the first ${NODE_CAP} of ${NODE_TOTAL} nodes" >&2
+                  NODE_ARRAY=$(printf '%s' "${NODE_LIST}" | jq -c --argjson cap "${NODE_CAP}" '.[:$cap]' 2>/dev/null) || NODE_ARRAY="[]"
 
                   CERT_EXPIRY=$(kubectl get csr -o json 2>/dev/null | \
                     sed -n 's/.*"expirationTimestamp": *"\([^"]*\)".*/\1/p' | \
@@ -296,13 +306,23 @@ spec:
                   # kubehz-agent-marker Role. An UNREADABLE marker (old install
                   # without the new RBAC) sends NOTHING — fail-closed beats
                   # spamming a full assessment every 5-minute tick.
+                  #
+                  # B423: `timeout 5` bounds a kubectl call, never a kubectl
+                  # client flag. Any client-config flag (--request-timeout,
+                  # --server, --kubeconfig, --context, --token, ...) makes
+                  # kubectl skip the in-cluster config and dial
+                  # localhost:8080, so the call always fails in this pod.
+                  # The marker read failed like that on every tick: the 24h
+                  # gate, the claim nonce and the desired-state poll were
+                  # off. `timeout 5 CMD` is the busybox syntax and the
+                  # coreutils syntax.
                   NOW_EPOCH=$(date -u +%s)
                   ASSESS_NOW=""
                   ASSESS_REQ=""
                   MARKER_OK=""
                   MARKER=""
-                  if MARKER=$(kubectl get configmap kubehz-agent-config -n kubehz-system \
-                      -o jsonpath='{.metadata.annotations}' --request-timeout=5s 2>/dev/null); then
+                  if MARKER=$(timeout 5 kubectl get configmap kubehz-agent-config -n kubehz-system \
+                      -o jsonpath='{.metadata.annotations}' 2>/dev/null); then
                     MARKER_OK=1
                     LAST_ASSESS=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/last-assessment" // ""' 2>/dev/null) || LAST_ASSESS=""
                     ASSESS_REQ=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/assess-requested" // ""' 2>/dev/null) || ASSESS_REQ=""
@@ -372,16 +392,23 @@ spec:
                     # or a unix socket -> kine); neither pod visible (managed /
                     # external CP) -> "unknown". Reachability falls back to the
                     # /readyz etcd check captured above.
-                    # Every assessment probe carries --request-timeout=5s: a
-                    # stalled apiserver degrades THAT probe (fail-soft empty)
+                    # Every assessment probe runs under `timeout 5` (B423,
+                    # above): a stalled apiserver degrades THAT probe
                     # instead of eating the whole beat (activeDeadlineSeconds
                     # is the backstop, but it kills the beat with it).
-                    APISERVER_ARGS=$(kubectl get pods -n kube-system -l component=kube-apiserver \
-                      -o jsonpath='{.items[*].spec.containers[0].command} {.items[*].spec.containers[0].args}' --request-timeout=5s 2>/dev/null) || APISERVER_ARGS=""
+                    # A field the contract has no "unknown" value for (a count,
+                    # a list, capiManaged) must come from a call that answered:
+                    # a failed or timed-out call is UNKNOWN, never 0 or [].
+                    # UNKNOWN collects those fields. With any of them, this tick
+                    # sends no assessment (the api has no null for them), the
+                    # 24h marker does not move, and the next tick probes again.
+                    UNKNOWN=""
+                    APISERVER_ARGS=$(timeout 5 kubectl get pods -n kube-system -l component=kube-apiserver \
+                      -o jsonpath='{.items[*].spec.containers[0].command} {.items[*].spec.containers[0].args}' 2>/dev/null) || APISERVER_ARGS=""
                     DATASTORE="unknown"
                     ETCD_REACHABLE=false
-                    ETCD_READY=$(kubectl get pods -n kube-system -l component=etcd \
-                      -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{" "}{end}' --request-timeout=5s 2>/dev/null) || ETCD_READY=""
+                    ETCD_READY=$(timeout 5 kubectl get pods -n kube-system -l component=etcd \
+                      -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{" "}{end}' 2>/dev/null) || ETCD_READY=""
                     case "${ETCD_READY}" in
                       *[![:space:]]*)
                         DATASTORE="etcd"
@@ -397,14 +424,21 @@ spec:
                         ;;
                     esac
 
-                    CAPI=false
-                    kubectl get crd clusters.cluster.x-k8s.io --request-timeout=5s >/dev/null 2>&1 && CAPI=true
+                    # capiManaged: the CRD answers -> true; NotFound -> false;
+                    # any other failure (a timeout) -> unknown.
+                    CAPI=""
+                    if CAPI_OUT=$(timeout 5 kubectl get crd clusters.cluster.x-k8s.io -o name 2>&1); then
+                      CAPI=true
+                    else
+                      case "${CAPI_OUT}" in *"(NotFound)"*) CAPI=false ;; esac
+                    fi
+                    [ -n "${CAPI}" ] || UNKNOWN="${UNKNOWN} capiManaged"
 
                     # CNI guess from the kube-system daemonsets; only kube-proxy
                     # present -> "kube-proxy-only" (no CNI daemonset visible).
                     CNI="unknown"
-                    DS_NAMES=$(kubectl get daemonsets -n kube-system \
-                      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' --request-timeout=5s 2>/dev/null) || DS_NAMES=""
+                    DS_NAMES=$(timeout 5 kubectl get daemonsets -n kube-system \
+                      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null) || DS_NAMES=""
                     case "${DS_NAMES}" in
                       *cilium*)     CNI="cilium" ;;
                       *calico*)     CNI="calico" ;;
@@ -417,8 +451,8 @@ spec:
                     # flag for the service half; null when neither is visible.
                     POD_CIDR=""
                     SERVICE_CIDR=""
-                    KUBEADM_CFG=$(kubectl get configmap kubeadm-config -n kube-system \
-                      -o jsonpath='{.data.ClusterConfiguration}' --request-timeout=5s 2>/dev/null) || KUBEADM_CFG=""
+                    KUBEADM_CFG=$(timeout 5 kubectl get configmap kubeadm-config -n kube-system \
+                      -o jsonpath='{.data.ClusterConfiguration}' 2>/dev/null) || KUBEADM_CFG=""
                     if [ -n "${KUBEADM_CFG}" ]; then
                       POD_CIDR=$(printf '%s\n' "${KUBEADM_CFG}" | sed -n 's/^ *podSubnet: *//p' | head -1)
                       SERVICE_CIDR=$(printf '%s\n' "${KUBEADM_CFG}" | sed -n 's/^ *serviceSubnet: *//p' | head -1)
@@ -428,11 +462,12 @@ spec:
                         sed -n 's/.*--service-cluster-ip-range=\([^" ]*\).*/\1/p' | head -1)
                     fi
 
-                    SC_JSON=$(kubectl get storageclasses -o json --request-timeout=5s 2>/dev/null | \
+                    SC_RAW=$(timeout 5 kubectl get storageclasses -o json 2>/dev/null) || SC_RAW=""
+                    SC_JSON=$(printf '%s' "${SC_RAW}" | \
                       jq -c '[.items[] | {name: .metadata.name, provisioner: .provisioner,
                           isDefault: ((.metadata.annotations["storageclass.kubernetes.io/is-default-class"] // "false") == "true")}]' \
                         2>/dev/null) || SC_JSON=""
-                    [ -n "${SC_JSON}" ] || SC_JSON="[]"
+                    [ -n "${SC_JSON}" ] || { UNKNOWN="${UNKNOWN} storageClasses"; SC_JSON="[]"; }
                     # The api's zod schema caps arrays at 50 — an uncapped list
                     # 400s the WHOLE heartbeat. Cap here (first 50, logged, never
                     # a silent drop) so the beat always fits the contract.
@@ -444,9 +479,13 @@ spec:
 
                     # PV summary: jq flattens each PV to "provisioner<TAB>capacity",
                     # awk converts capacities to Gi and groups by provisioner.
-                    PV_LINES=$(kubectl get pv -o json --request-timeout=5s 2>/dev/null | \
-                      jq -r '.items[] | [(.metadata.annotations["pv.kubernetes.io/provisioned-by"] // .spec.csi.driver // "unknown"),
-                          (.spec.capacity.storage // "0")] | @tsv' 2>/dev/null) || PV_LINES=""
+                    PV_RAW=$(timeout 5 kubectl get pv -o json 2>/dev/null) || PV_RAW=""
+                    # `.items |` first: input that is not a PV list fails jq,
+                    # and the summary is unknown instead of zero PVs.
+                    PV_LINES=$(printf '%s' "${PV_RAW}" | \
+                      jq -er '.items | map([(.metadata.annotations["pv.kubernetes.io/provisioned-by"] // .spec.csi.driver // "unknown"),
+                          (.spec.capacity.storage // "0")] | @tsv) | join("\n")' 2>/dev/null) || {
+                      UNKNOWN="${UNKNOWN} pvSummary"; PV_LINES=""; }
                     PV_SUMMARY=$(printf '%s\n' "${PV_LINES}" | awk -F'\t' '
                       function gi(s,  n, u) {
                         n = s + 0; u = s
@@ -476,53 +515,71 @@ spec:
                         printf "}}"
                       }') || PV_SUMMARY='{"count":0,"totalGi":0,"byProvisioner":{}}'
 
-                    LB_COUNT=$(kubectl get services -A -o json --request-timeout=5s 2>/dev/null | \
+                    # The counts: each from a call that answered, else unknown.
+                    # An empty kubectl answer makes jq print nothing.
+                    LB_RAW=$(timeout 5 kubectl get services -A -o json 2>/dev/null) || LB_RAW=""
+                    LB_COUNT=$(printf '%s' "${LB_RAW}" | \
                       jq '[.items[] | select(.spec.type == "LoadBalancer")] | length' 2>/dev/null) || LB_COUNT=""
-                    [ -n "${LB_COUNT}" ] || LB_COUNT=0
-                    VALIDATING=$(kubectl get validatingwebhookconfigurations -o json --request-timeout=5s 2>/dev/null | \
-                      jq '.items | length' 2>/dev/null) || VALIDATING=""
-                    [ -n "${VALIDATING}" ] || VALIDATING=0
-                    MUTATING=$(kubectl get mutatingwebhookconfigurations -o json --request-timeout=5s 2>/dev/null | \
-                      jq '.items | length' 2>/dev/null) || MUTATING=""
-                    [ -n "${MUTATING}" ] || MUTATING=0
+                    [ -n "${LB_COUNT}" ] || UNKNOWN="${UNKNOWN} loadBalancers"
+                    VW_RAW=$(timeout 5 kubectl get validatingwebhookconfigurations -o json 2>/dev/null) || VW_RAW=""
+                    VALIDATING=$(printf '%s' "${VW_RAW}" | jq '.items | length' 2>/dev/null) || VALIDATING=""
+                    [ -n "${VALIDATING}" ] || UNKNOWN="${UNKNOWN} webhooks.validating"
+                    MW_RAW=$(timeout 5 kubectl get mutatingwebhookconfigurations -o json 2>/dev/null) || MW_RAW=""
+                    MUTATING=$(printf '%s' "${MW_RAW}" | jq '.items | length' 2>/dev/null) || MUTATING=""
+                    [ -n "${MUTATING}" ] || UNKNOWN="${UNKNOWN} webhooks.mutating"
 
-                    CP_NODES=$(kubectl get nodes -l node-role.kubernetes.io/control-plane -o name --request-timeout=5s 2>/dev/null | grep -c .) || CP_NODES=0
-                    if [ "${CP_NODES}" = "0" ]; then
-                      CP_NODES=$(kubectl get nodes -l node-role.kubernetes.io/master -o name --request-timeout=5s 2>/dev/null | grep -c .) || CP_NODES=0
+                    # cpNodes: the control-plane label, else the legacy master
+                    # label. `grep -c` prints 0 and exits 1 on no line.
+                    CP_NODES=""
+                    if CP_NAMES=$(timeout 5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name 2>/dev/null); then
+                      CP_NODES=$(printf '%s\n' "${CP_NAMES}" | grep -c .) || CP_NODES=0
+                      if [ "${CP_NODES}" = "0" ]; then
+                        if CP_NAMES=$(timeout 5 kubectl get nodes -l node-role.kubernetes.io/master -o name 2>/dev/null); then
+                          CP_NODES=$(printf '%s\n' "${CP_NAMES}" | grep -c .) || CP_NODES=0
+                        else
+                          CP_NODES=""
+                        fi
+                      fi
                     fi
+                    [ -n "${CP_NODES}" ] || UNKNOWN="${UNKNOWN} cpUsage.cpNodes"
+                    [ -n "${NODES_OK}" ] || UNKNOWN="${UNKNOWN} cpUsage.nodes"
 
                     # etcdDbBytes needs the etcd metrics endpoint (TLS client
                     # certs, CP-local) — unreachable from this pod: null.
                     # Assembled with jq (in the alpine/k8s image) so a probe
                     # value can never break the JSON; any assembly failure
                     # drops the assessment, never the heartbeat.
-                    ASSESSMENT=$(jq -cn \
-                      --arg collectedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                      --arg k8sVersion "${KUBE_VERSION}" \
-                      --arg datastore "${DATASTORE}" \
-                      --argjson etcdReachable "${ETCD_REACHABLE}" \
-                      --argjson capiManaged "${CAPI}" \
-                      --arg cni "${CNI}" \
-                      --arg podCidr "${POD_CIDR}" \
-                      --arg serviceCidr "${SERVICE_CIDR}" \
-                      --argjson storageClasses "${SC_JSON}" \
-                      --argjson pvSummary "${PV_SUMMARY}" \
-                      --argjson loadBalancers "${LB_COUNT}" \
-                      --argjson validating "${VALIDATING}" \
-                      --argjson mutating "${MUTATING}" \
-                      --argjson nodes "${NODE_TOTAL:-0}" \
-                      --argjson cpNodes "${CP_NODES}" \
-                      '{collectedAt: $collectedAt, k8sVersion: $k8sVersion,
-                        datastore: $datastore, etcdReachable: $etcdReachable,
-                        capiManaged: $capiManaged, cni: $cni,
-                        podCidr: (if $podCidr == "" then null else $podCidr end),
-                        serviceCidr: (if $serviceCidr == "" then null else $serviceCidr end),
-                        storageClasses: $storageClasses, pvSummary: $pvSummary,
-                        loadBalancers: $loadBalancers,
-                        webhooks: {validating: $validating, mutating: $mutating},
-                        cpUsage: {nodes: $nodes, cpNodes: $cpNodes, etcdDbBytes: null}}' \
-                      2>/dev/null) || ASSESSMENT=""
-                    [ -n "${ASSESSMENT}" ] || echo "kubehz: assessment assembly failed; heartbeat continues without it" >&2
+                    if [ -n "${UNKNOWN}" ]; then
+                      echo "kubehz: assessment deferred: no answer for${UNKNOWN}; the next tick probes again" >&2
+                    else
+                      ASSESSMENT=$(jq -cn \
+                        --arg collectedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                        --arg k8sVersion "${KUBE_VERSION}" \
+                        --arg datastore "${DATASTORE}" \
+                        --argjson etcdReachable "${ETCD_REACHABLE}" \
+                        --argjson capiManaged "${CAPI}" \
+                        --arg cni "${CNI}" \
+                        --arg podCidr "${POD_CIDR}" \
+                        --arg serviceCidr "${SERVICE_CIDR}" \
+                        --argjson storageClasses "${SC_JSON}" \
+                        --argjson pvSummary "${PV_SUMMARY}" \
+                        --argjson loadBalancers "${LB_COUNT}" \
+                        --argjson validating "${VALIDATING}" \
+                        --argjson mutating "${MUTATING}" \
+                        --argjson nodes "${NODE_TOTAL:-0}" \
+                        --argjson cpNodes "${CP_NODES}" \
+                        '{collectedAt: $collectedAt, k8sVersion: $k8sVersion,
+                          datastore: $datastore, etcdReachable: $etcdReachable,
+                          capiManaged: $capiManaged, cni: $cni,
+                          podCidr: (if $podCidr == "" then null else $podCidr end),
+                          serviceCidr: (if $serviceCidr == "" then null else $serviceCidr end),
+                          storageClasses: $storageClasses, pvSummary: $pvSummary,
+                          loadBalancers: $loadBalancers,
+                          webhooks: {validating: $validating, mutating: $mutating},
+                          cpUsage: {nodes: $nodes, cpNodes: $cpNodes, etcdDbBytes: null}}' \
+                        2>/dev/null) || ASSESSMENT=""
+                      [ -n "${ASSESSMENT}" ] || echo "kubehz: assessment assembly failed; heartbeat continues without it" >&2
+                    fi
                   fi
 
                   ASSESSMENT_FIELD=""
@@ -553,6 +610,18 @@ spec:
                     echo "kubehz: agent-token unavailable; skipping heartbeat (retrying next tick)" >&2
                     exit 0
                   fi
+                  # A goes to curl in a config line (-K), never on argv: every process on
+                  # the node can read argv (ps, /proc/<pid>/cmdline). A quote or a
+                  # backslash would end the quoted value early, and a line break would end
+                  # the line: curl would read the rest as an option. The agent mints
+                  # khz_agt_<hex>, so the guard allows only the characters of such a token
+                  # and of base64, and skips the beat for any other token.
+                  case "${AGENT_TOKEN}" in
+                    *[!A-Za-z0-9_.~+/=-]*)
+                      echo "kubehz: skipping heartbeat: agent-token holds a character that a curl config cannot carry" >&2
+                      exit 0
+                      ;;
+                  esac
                   # The POST is GUARDED (|| rc): an unguarded RESPONSE=$(curl -f …)
                   # under set -e aborts BEFORE the marker write — a rejected
                   # assessment (e.g. an over-cap array 400ing the zod schema)
@@ -561,10 +630,15 @@ spec:
                   # assessment attached, retry ONCE without it so the plain
                   # heartbeat always lands; only then handle the marker.
                   HB_RC=0
-                  RESPONSE=$(curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
+                  # The bearer reaches curl in a config on fd 3 (a here-document), the
+                  # payload (it can carry the claim nonce) on stdin. Neither is on argv.
+                  RESPONSE=$(printf '%s' "${PAYLOAD}" |
+                    curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
                     -H "Content-Type: application/json" \
-                    -H "Authorization: Bearer ${AGENT_TOKEN}" \
-                    -d "${PAYLOAD}") || HB_RC=$?
+                    -K /dev/fd/3 --data-binary @- 3<<AUTH_EOF
+                  header = "Authorization: Bearer ${AGENT_TOKEN}"
+                  AUTH_EOF
+                  ) || HB_RC=$?
                   ASSESS_DELIVERED=""
                   if [ "${HB_RC}" -eq 0 ] && [ -n "${ASSESSMENT}" ]; then
                     ASSESS_DELIVERED=1
@@ -584,10 +658,13 @@ spec:
                   PLAIN_EOF
                   )
                     HB_RC=0
-                    RESPONSE=$(curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
+                    RESPONSE=$(printf '%s' "${PLAIN_PAYLOAD}" |
+                      curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
                       -H "Content-Type: application/json" \
-                      -H "Authorization: Bearer ${AGENT_TOKEN}" \
-                      -d "${PLAIN_PAYLOAD}") || HB_RC=$?
+                      -K /dev/fd/3 --data-binary @- 3<<AUTH_EOF
+                  header = "Authorization: Bearer ${AGENT_TOKEN}"
+                  AUTH_EOF
+                    ) || HB_RC=$?
                     if [ "${HB_RC}" -eq 0 ]; then
                       # The plain beat landed → the assessment itself was the
                       # poison. Move the marker anyway: resending a rejected
@@ -673,10 +750,12 @@ spec:
                     # tick would re-poll and re-log — skip entirely.
                     echo "kubehz: desired-state poll skipped (marker ConfigMap unreadable)" >&2
                   else
-                  set -- -H "Authorization: Bearer ${AGENT_TOKEN}"
-                  [ -z "${DESIRED_ETAG}" ] || set -- "$@" -H "If-None-Match: ${DESIRED_ETAG}"
+                  set --
+                  [ -z "${DESIRED_ETAG}" ] || set -- -H "If-None-Match: ${DESIRED_ETAG}"
                   DES_RC=0
-                  DES_OUT=$(curl -sS -D - -w '\n__code=%{http_code}' "$@" \
+                  # The bearer reaches curl in a config on stdin (-K -), never on argv.
+                  DES_OUT=$(printf 'header = "Authorization: Bearer %s"\n' "${AGENT_TOKEN}" |
+                    curl -sS -D - -w '\n__code=%{http_code}' -K - "$@" \
                     "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/desired" 2>/dev/null) || DES_RC=$?
                   if [ "${DES_RC}" -ne 0 ]; then
                     echo "kubehz: desired-state poll failed (curl rc=${DES_RC}); retrying next tick" >&2
@@ -742,23 +821,35 @@ spec:
                     name: kubehz-agent-config
               env:
                 # The one-time bind secret (B243) `lo kubehz deploy` stages in
-                # kubehz-agent-bind when a register wrote one. Optional: the
-                # Secret is absent on any install with no bind secret in play,
-                # and the bootstrap then registers without it (the pending-pool
-                # adoption, as before).
+                # kubehz-agent-bind, before it applies this CronJob, when a
+                # register wrote one. Optional: the Secret is absent on any
+                # install with no bind secret in play. The bootstrap then
+                # registers without it and gets a separate pending row, which
+                # the user claims by its claim code (B288).
                 - name: BIND_SECRET
                   valueFrom:
                     secretKeyRef:
                       name: kubehz-agent-bind
                       key: bind-secret
                       optional: true
+              # The limits are for a short burst (B448); the requests stay
+              # low. CPU: each kubectl call starts a Go binary. At a 200m
+              # limit the pod was throttled in 99.8 % of its CFS periods on
+              # prod, and a call took ~1.5 s. A tick runs for about 10 s
+              # every 5 minutes, so a 1000m limit costs little. Memory: a
+              # real node is ~23 KB of node JSON (50 images). jq peaks at
+              # ~32 MB for 200 nodes (4.6 MB of JSON) and ~70 MB for 500
+              # nodes (11.5 MB), measured on prod nodes. 128Mi left a thin
+              # margin at the 500-node cap. jq reads the whole list before
+              # the cap, so above about 1,500 nodes 256Mi is possibly not
+              # enough.
               resources:
                 requests:
                   cpu: 50m
                   memory: 64Mi
                 limits:
-                  cpu: 200m
-                  memory: 128Mi
+                  cpu: 1000m
+                  memory: 256Mi
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

@@ -16,6 +16,7 @@ lok8s itself.
 | Assets-drift gate | the embedded mirror `internal/assets/lok8s/**` (canonical) is byte-identical to its `.lok8s/**` twin in both directions — addons, `drivers/*/cluster`, the inventory CRD mirror, `chat/`, `VERSION`; resync with `hack/sync-legacy-assets.sh` (`--from-legacy`, `--check`) | `go-tests` (part of `go test`) | `go test ./internal/assets/ -run TestEmbeddedMirrorMatchesLegacyTree` · `bash hack/sync-legacy-assets.sh --check` |
 | CRD render fixture | `lo crds` output is byte-identical to the committed `operator/crds/*.yaml` | `go-tests` (part of `go test`); `unit-tests` (`lo crds check`) | `go test ./internal/crds/` · `bin/lo crds check` |
 | Render gate | the in-process kustomize render (`internal/render`, the `lo-full` build) is byte-identical to the pinned exec pipeline (what `lo` core runs): `go test -tags inprocess ./internal/render/` byte-compares plain, Secret-generator and khelm local-chart fixtures against `.bin/kustomize` + `.kustomize/*` (skips without them); `hack/parity-build.sh` diffs `lo build` against the bash exec pipeline for both builds; the committed kubehz.dev domain must report `render unchanged` under `bin/lo` (core) and `bin/lo-full` | `go-tests` (`go test`, `parity-build` × 2); the committed-domain run is manual (see below) | `go test -tags inprocess ./internal/render/` · `bash hack/parity-build.sh` · `DEBUG=1 bin/lo build --domain <d>` and the same with `bin/lo-full` |
+| rook-ceph RBAC gate | the least-privilege patch of the `rook-ceph` addon: `internal/addons/rookceph_rbac_test.go` renders the addon's real `patches:` block over committed fixtures of the chart's node plugin and controller plugin ClusterRoles (`testdata/rook-ceph/`) and asserts the effective roles as whole objects, with the role names derived from `csi-drivers.yaml`. `TestRookCephFixturesMatchChart` re-renders the pinned chart through khelm (it downloads the chart) and fails on any drift from the fixture: it runs on CI (`CI` set; fails, never skips, without the toolchain) and locally only with `LOK8S_ONLINE_TESTS=1` | `go-tests` (part of `go test`) | `go test ./internal/addons/ -run TestRookCeph` · `LOK8S_ONLINE_TESTS=1 go test ./internal/addons/ -run TestRookCephFixturesMatchChart` |
 | Parity harnesses (10 × 2 builds) | the binary and the bash tree agree byte-for-byte on stdout, stderr, rc (and written trees) for every covered invocation, for `bin/lo` (core) and `bin/lo-full`. The bash side is the same binary in a synthetic project whose `lok8s.yaml` says `spec.implementation.default: bash`: `hack/lib/parity.sh` writes that file before every run (`parity::implementation`; `PARITY_ROUTE_GO=<cmd>` routes one command on the Go side), and no environment variable selects the implementation. Every harness takes the binary as `$1` (**absolute path**: the harnesses `cd` into a synthetic project) | `go-tests` | `make build build-full && bash hack/parity-<name>.sh "$PWD/bin/lo" && bash hack/parity-<name>.sh "$PWD/bin/lo-full"` |
 | golangci-lint (core + full) | `.golangci.yml` (standard set + misspell, unconvert, gocritic), with and without `--build-tags inprocess` | `go-tests` | `make lint lint-full` |
 | Binary size gate | `bin/lo` (core) stays under 36 MiB (`LO_MAX_BYTES`). sops is the kernpilot age-only fork (`go.mod` `replace`, no cloud SDKs, gRPC or protobuf in the core build: ~15 MB, was ~50 MB); a dependency that drags one of them back in fails here first | `go-tests` | `make size-check` |
@@ -71,6 +72,35 @@ make lint lint-full   # golangci-lint run (needs golangci-lint on PATH), both ta
 go test ./internal/secrets/ -run TestEncrypt -v    # one package / one test
 go test ./internal/inventory/ -update              # rewrite that package's goldens
 ```
+
+The `lo bootstrap --dry-run` boundary is proven against the real pinned
+kustomize: `internal/addons/dryrun_exec_test.go` renders with `.bin/kustomize`
+and this test binary as the Secret plugin and the ChartRenderer gate (a KRM
+exec function never runs, a foreign exec plugin does not resolve, the refusing
+`docker`/`git` stop a container function and a remote base, the refusing `helm
+pull` stops a `helmCharts` chart that is not vendored, the gate refuses a
+local chart whose dependencies are not vendored (a real archive that
+`.helmignore` hides included) and writes nothing into it, the secrets plugin
+and the cert generator write nothing and report what they generated, updated
+or read from another entry of the run, a store miss in an existing store
+directory writes nothing, the plugin configs stay in the boundary), and every
+refusal is checked again with `--allow-generators`, where the fixture's code
+runs. It skips without `.bin/kustomize` and fails under `CI=true`. The
+in-process half (`lo-full`) is `dryrun_inprocess_test.go` (`-tags inprocess`).
+`internal/render/chartgate_test.go` pins the chart gate against Helm's own
+`action.CheckDependencies` and `action.Dependency.List` on real chart
+fixtures; the bats twin (tagged `real-helm`) runs the bash gate against the
+real helm v3 on the same fixtures. Both read one table,
+`internal/render/testdata/chartgate-fixtures.txt` (fixture, verdict, cause
+of a refusal), and fail on a row they cannot build. The bats twin skips
+without helm v3.3+ locally (`bats --filter-tags real-helm tests/unit/` with
+a helm v3.3+ on `PATH` runs every test with that tag). The argsh container
+of `unit-tests` has no helm, so that job runs the tag a second time
+natively, with a pinned helm v3.21.2, where `CI=true` turns a missing helm
+into a failure and the step fails when no test runs or one skips. The dry run prevents accidental side
+effects of legitimate addon code; it is not a security boundary against an
+addon that is made to do harm (see the trust model in
+`docs/guide/deployment.md`), and the tests prove only the first.
 
 Run `go test ./internal/<pkg>/ -update` to rewrite a package's golden files
 under `testdata/` from the current output, then review the diff before you
@@ -135,6 +165,17 @@ The pattern every ported package follows, so a new one reads like the rest:
 4. **Mutation-check the test.** Revert the port (or break one string) and
    watch the test and the harness go red before trusting either. A green
    check whose failure would look like success proves nothing.
+
+## Online tests
+
+`go test ./...` never reaches the network, with one opt-in exception:
+`TestRookCephFixturesMatchChart` (`internal/addons`) downloads
+the pinned `ceph-csi-drivers` chart through khelm to prove that the
+committed fixture is what the chart renders. It runs when `CI` is set (the
+`go-tests` job, after `Install toolchain`) and locally only with
+`LOK8S_ONLINE_TESTS=1`; otherwise it skips and says so. Refresh the fixture
+(its header has the recipe) when the chart pin in
+`internal/assets/lok8s/addons/rook-ceph/csi-drivers.yaml` moves.
 
 ## The parity harnesses
 

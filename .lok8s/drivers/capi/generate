@@ -177,9 +177,34 @@ capi::generate() {
 
 # Create or update the provider credential Secret on the management cluster.
 # Usage: capi::ensure_credentials <cluster_yaml> <provider> <kubeconfig>
+# Print the env file that kubectl --from-env-file reads: one key=value line
+# for each pair of key and variable name. A value with a CR or LF would end
+# its line and start another key, so it is refused with the variable named.
+# The Go twin is credentialEnvFile (internal/driver/capi).
+# Usage: capi::_credential_env_file <key> <variable> [<key> <variable> ...]
+capi::_credential_env_file() {
+  local out="" key name value
+  while (( $# >= 2 )); do
+    key="${1}"
+    name="${2}"
+    shift 2
+    value="${!name:-}"
+    if [[ "${value}" == *[$'\r\n']* ]]; then
+      error "environment variable ${name} must not contain a newline"
+      return 1
+    fi
+    out+="${key}=${value}"$'\n'
+  done
+  printf '%s' "${out}"
+}
+
+# The credentials reach kubectl as an env file on stdin
+# (--from-env-file=/dev/stdin), never as arguments: every local user can
+# read argv (ps, /proc/<pid>/cmdline), and audit tools store it. One stdin
+# carries every key of the Secret. The Go twin is EnsureCredentialsSecret.
 capi::ensure_credentials() {
   local cluster_yaml="${1}" provider="${2}" kubeconfig="${3}"
-  local secret_name namespace
+  local secret_name namespace env_file
   secret_name=$(yq -r '.spec.credentials.secretName // .spec.provider.credentials.secretRef // (.metadata.name + "-credentials")' "${cluster_yaml}")
   namespace=$(yq -r '.spec.cluster.namespace // "default"' "${cluster_yaml}")
 
@@ -187,22 +212,22 @@ capi::ensure_credentials() {
 
   case "${provider}" in
     hetzner)
-      kubectl create secret generic "${secret_name}" \
+      env_file=$(capi::_credential_env_file \
+        hcloud-token HCLOUD_TOKEN robot-user HROBOT_USER robot-password HROBOT_PASSWORD) || return 1
+      printf '%s\n' "${env_file}" | kubectl create secret generic "${secret_name}" \
         --namespace "${namespace}" \
         --kubeconfig "${kubeconfig}" \
-        --from-literal=hcloud-token="${HCLOUD_TOKEN}" \
-        --from-literal=robot-user="${HROBOT_USER:-}" \
-        --from-literal=robot-password="${HROBOT_PASSWORD:-}" \
+        --from-env-file=/dev/stdin \
         --dry-run=client -o yaml | kubectl apply --kubeconfig "${kubeconfig}" -f -
       ;;
     aws)
       : "${AWS_REGION:?AWS_REGION required for AWS provider}"
-      kubectl create secret generic "${secret_name}" \
+      env_file=$(capi::_credential_env_file \
+        access-key-id AWS_ACCESS_KEY_ID secret-access-key AWS_SECRET_ACCESS_KEY region AWS_REGION) || return 1
+      printf '%s\n' "${env_file}" | kubectl create secret generic "${secret_name}" \
         --namespace "${namespace}" \
         --kubeconfig "${kubeconfig}" \
-        --from-literal=access-key-id="${AWS_ACCESS_KEY_ID}" \
-        --from-literal=secret-access-key="${AWS_SECRET_ACCESS_KEY}" \
-        --from-literal=region="${AWS_REGION}" \
+        --from-env-file=/dev/stdin \
         --dry-run=client -o yaml | kubectl apply --kubeconfig "${kubeconfig}" -f -
       ;;
     *)

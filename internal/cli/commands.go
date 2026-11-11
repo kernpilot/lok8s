@@ -32,8 +32,9 @@ type commandSpec struct {
 	idempotent  bool
 	// credentialOutput marks a command that prints a credential (a
 	// kubeconfig with a client key, a secret, a bearer token, a claim
-	// code). `lo mcp` never offers it, whatever the opt-in: a tool result
-	// lands in the model's transcript.
+	// code) or writes a kubeconfig (the agent tools). `lo mcp` never
+	// offers it, whatever the opt-in: a tool result lands in the model's
+	// transcript.
 	credentialOutput bool
 }
 

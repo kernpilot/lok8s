@@ -142,6 +142,7 @@ YAML
     set -euo pipefail
     import() { :; }
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/verbose.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/domain.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/targets.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/template.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/libs/build"
@@ -171,6 +172,7 @@ YAML
     set -euo pipefail
     import() { :; }
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/verbose.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/domain.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/targets.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/template.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/libs/build"

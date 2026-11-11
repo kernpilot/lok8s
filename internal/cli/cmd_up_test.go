@@ -79,6 +79,16 @@ func TestRunHeaderShapes(t *testing.T) {
 	if got := headerOf(t, p, "nokind.dev"); !strings.Contains(got, "\033[2m · 1.31.0\033[0m") {
 		t.Errorf("no-kind header: %q", got)
 	}
+
+	// A spec file with more than one YAML document → no driver and no
+	// version (the two implementations would read different values; the
+	// provision step refuses the file). Bash twin: "_lo_header: a spec file
+	// with a second document shows no driver and no version".
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "two.dev", "cluster.lok8s.yaml"),
+		"kind: Lo\nmetadata:\n  name: clu\nspec:\n  kubernetes:\n    version: v1.31.4\n---\nkind: KubeOne\nspec:\n  kubernetes:\n    version: v1.20.0\n")
+	if got := headerOf(t, p, "two.dev"); !strings.HasPrefix(got, "\n  \033[1;36mtwo.dev\033[0m  \033[2m\033[0m\n") || strings.Contains(got, "registries") {
+		t.Errorf("two-document header: %q", got)
+	}
 }
 
 // rcErr is a subprocess failure with its own exit status (what a real

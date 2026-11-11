@@ -1,9 +1,9 @@
 {
   "version": 1,
   "tool": {
-    "b": "v4.18.4"
+    "b": "v4.18.8"
   },
-  "timestamp": "2026-07-31T12:47:50Z",
+  "timestamp": "2026-11-09T13:58:07Z",
   "binaries": [
     {
       "name": "argsh",
@@ -56,7 +56,7 @@
     },
     {
       "name": "kustomize",
-      "version": "",
+      "version": "v5.8.1",
       "sha256": "f7b1605aa5143e0dcbd754a4d43c47ad7a560c540b1356b064d69fe236164494",
       "source": "github.com/kubernetes-sigs/kustomize",
       "preset": true
@@ -84,8 +84,8 @@
     },
     {
       "name": "khelm",
-      "version": "",
-      "sha256": "65b890dbaed53d5bd29ce1b801047e978966a7d1071aa6d5dbec90473cc982b4",
+      "version": "v2.8.0",
+      "sha256": "f9a36519c147fc846aa69ca5a19f6259cb2c94f88550ae34de2bdb971b39495c",
       "source": "github.com/mgoltzsche/khelm",
       "provider": "github"
     },
@@ -109,6 +109,13 @@
       "version": "",
       "sha256": "0a25d354e8154e79cfeecc5443ccf24136efd9d6c903fd03f61858e19a7020c6",
       "source": "github.com/Mic92/ssh-to-age",
+      "preset": true
+    },
+    {
+      "name": "b",
+      "version": "v4.18.8",
+      "sha256": "9ac12154b0532204c9f637b8d63c8460924eb489e54caa5f68bf5a985f1bb0a9",
+      "source": "github.com/fentas/b",
       "preset": true
     }
   ]

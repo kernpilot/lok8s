@@ -113,13 +113,49 @@ The failure is silent: the node lease keeps renewing, so the node reports `Ready
 
 Since 2026-08 the shared network reserves its upper half (`10.125.200.128/25`) as the only range Docker hands to dynamic attachers. Mirrors keep static addresses below it, so a node can never squat a mirror's IP. A network created before this reservation is recreated automatically on the next `lo up`. The running project's mirrors are rebuilt at the same addresses in the same run. The pull-through cache lives in named volumes and survives. Detached kind nodes (and another project's mirrors) come back on that project's next `lo up`. Until then those nodes pull from upstream directly. The detach is endpoint churn: the node-IP check above guards against its side effects.
 
-`lo up` detects and repairs this on every run: it compares each node's kubelet `--node-ip` with the node's address on the cluster network, rewrites the stale address across the node's kubeadm files, restarts kubelet, and restarts the node's CNI agent. The check runs when the spec opts into shared mode **or** when any node still carries a registry-network attachment, so a cluster provisioned under the old shared default gets healed too. Per-project clusters have one network per node, so they cannot drift.
+`lo up` detects and repairs this on every run: it compares each node's kubelet `--node-ip` with the node's address on the cluster network, rewrites the stale address across the node's kubeadm files, restarts kubelet, and restarts the node's CNI agent. On a control-plane node it also makes a new API server certificate before the kubelet restart, with the same `kubeadm` command that kind uses at boot. The old certificate names the stale address, so the clients that connect to the node address would fail TLS on the repaired address: the controller manager and the scheduler, and kubelet on newer kind node images. After the new certificate, `lo up` stops the controller manager and scheduler containers, and kubelet starts them again: they read the server address only when they start. The check runs when the spec opts into shared mode **or** when any node still carries a registry-network attachment, so a cluster provisioned under the old shared default gets healed too. Per-project clusters have one network per node, so they cannot drift.
+
+After a repair, also a repair that failed, `lo up` waits until the API server passes five `/readyz` checks in a row, 2 seconds apart, before it goes on. Each check stops after 5 seconds. A kubelet restart can make kubelet start etcd and the controller manager again a few seconds later, and a step in that time fails on a refused connection. A failed repair has already changed the static pod manifests, so kubelet starts the API server again. After 60 checks without that result, `lo up` writes a warning and goes on.
+
+If the old certificate cannot move aside, or `kubeadm` fails, `lo up` puts the old certificate back, does not restart kubelet, and writes a warning with the end of the error. The next `lo up` tries again: the `--node-ip` of the node is then correct, but the API server certificate does not name the node address, so `lo up` makes a new certificate and restarts kubelet. `lo up` does the same for a certificate that an older lok8s left on the stale address. If an interrupted `lo up` left the certificate and its key in `/kind/heal-pki` in the node, the next `lo up` puts them back first. After each repair, `lo up` reads the certificate again. If it still does not name the node address, `lo up` writes a warning (`the certificate renewal on <node> did not complete`), and the next `lo up` makes a new certificate again.
+
+If the warning comes back on each `lo up`, read its end: it is the end of the error, usually from `kubeadm`. Correct the cause (for example, a missing `ca.key` in `/etc/kubernetes/pki`), then run `lo up` again. To see which addresses the certificate names now:
+
+```bash
+docker exec <node> openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -ext subjectAltName
+```
+
+Do not run `kubeadm init phase certs apiserver` by hand while the old certificate is in `/etc/kubernetes/pki`. `kubeadm` keeps a certificate that the cluster CA signed and does not read its addresses, so the command changes nothing and reports no error. If you cannot correct the cause, delete the cluster and create it again (`lo down`, then `lo up`). This removes all state of the cluster.
+
+## The default route
+
+The default route of a kind node must go through the cluster network: the node sends all traffic that no other route covers through it, the service network (`10.96.0.0/12`) too. For a container on two networks, Docker takes the default route from the network with the highest gateway priority. Between equal priorities, it takes the network whose name sorts first. Before the fix, both endpoints had the same priority. A cluster network whose name sorts after `lok8s-registries` (for example `ops`) lost the default route to the registry network. Then node-to-service traffic left with the registry address, `rp_filter` dropped part of the replies, and the Cilium agent could not reach the API server at `10.96.0.1`.
+
+`lo up` connects a node to the registry network with `docker network connect --gw-priority -1`. The flag needs Docker 28.0 or later, for the client and for the daemon. The cluster network keeps the default priority 0, so it keeps the default route for every network name, also after a node restart.
+
+With an older Docker, `lo up` connects without the flag. Then it moves the default route in the node: `ip route replace default via <cluster gateway> dev <cluster interface>`. `lo up` reads the cluster gateway from the node's own endpoint on the cluster network (`docker inspect <node>`). It does not use `docker network inspect`. Up to Docker 28.5, that command shows no gateway for a network created without `--gateway`, and lo creates the cluster network that way. If `lo up` finds no gateway, or cannot read the route in the node, it writes a warning. The warning names the node, the network and the value that `lo up` got, and it tells you what to do. A node that does not run gets its own warning: start the node, then run `lo up` again. Then `lo up` continues with the next node.
+
+The route move does not survive a node restart. When the node starts again, Docker sets the default route again from the gateway priorities. Run `lo up` after a node restart: it moves the route again.
+
+`lo up` also examines every node of the cluster that has an endpoint on the registry network, also when `shared.enabled` is `false` or omitted. It does not touch the other members of that network (the registries, the nodes of other clusters). A cluster from the time of the old shared default keeps its attachment (see [Migrating from the old shared default](#migrating-from-the-old-shared-default)). `lo up` moves the default route of such a node. It does the same for a node that an older lok8s attached without a priority. `lo up` does not change the priority of an endpoint that exists. Thus on Docker 28 or later, a node with an endpoint at priority 0 gets only the temporary route move. To make the fix permanent, do one of these steps:
+
+- Detach the node (`docker network disconnect lok8s-registries <node>`), then run `lo up`. A shared cluster attaches the node again, at priority `-1`. A cluster that is not shared leaves it detached.
+- Recreate the cluster.
+
+`lo up` does not examine these containers:
+
+- The load balancer of an HA cluster (`<cluster>-external-load-balancer`). `lo up` attaches it like a node, but its image has no `ip` command. It forwards from the host to the control-plane nodes on the cluster network, so its default route does not matter.
+- On Docker 28 or later, a node whose registry endpoint has a negative gateway priority. That endpoint cannot hold the default route, so the route is correct.
+
+The repair supports only the Docker engine. lok8s reads the network data in the format of `docker inspect` from Docker. lok8s does not support a `docker` command that Podman supplies.
+
+To examine a node, run `docker exec <node> ip route show default`. The gateway must be the gateway of the cluster network.
 
 ## Migrating from the old shared default
 
 Before 2026-08, `shared.enabled` defaulted to `true`. If your spec omits the key, the next `lo up` provisions per-project mirrors at `.103+` on the project subnet. Two consequences:
 
-1. Your kind nodes keep their `lok8s-registries` attachment until the cluster is recreated. This is harmless: the node-IP check above still guards them.
+1. Your kind nodes keep their `lok8s-registries` attachment until the cluster is recreated. This is harmless: the node-IP check and the default-route check above still guard them.
 2. The old shared mirror containers (`lok8s-registry-io-*`) and their volumes stay behind. Remove them with `lo registry clean --shared` when no other project uses them.
 
 To keep the old behavior, set `spec.registries.shared.enabled: true` explicitly.
@@ -225,7 +261,7 @@ This happens when the `lok8s-registries` network already exists with a different
 
 ```bash
 lo registry clean --shared
-lo provision lok8s.dev
+lo provision --domain lok8s.dev
 ```
 
 ### Kind nodes cannot reach shared mirrors
@@ -251,4 +287,4 @@ yq '.spec.network.cidr' clusters/lok8s.dev/cluster.lok8s.yaml
 # → 10.125.125.0/24   (build → .101, cache → .102)
 ```
 
-If the cluster was provisioned with a different `spec.network.cidr` than the running registry containers, clean and re-provision: `lo registry clean && lo provision <domain>`.
+If the cluster was provisioned with a different `spec.network.cidr` than the running registry containers, clean and re-provision: `lo registry clean && lo provision --domain <domain>`.

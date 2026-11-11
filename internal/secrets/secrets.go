@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -85,10 +86,7 @@ func (c *Context) runner() execx.Runner {
 // flatStore resolves the deprecated flat store the way bash does:
 // ${PATH_SECRETS:-${PATH_BASE}/.secrets}.
 func (c *Context) flatStore() string {
-	if c.Paths.SecretsEnv != "" {
-		return c.Paths.SecretsEnv
-	}
-	return c.Paths.Base + "/.secrets"
+	return config.FlatSecretsStore(c.Paths)
 }
 
 // StorePath resolves the secrets store for the current context (bash:
@@ -108,6 +106,20 @@ func (c *Context) StorePath() string {
 		}
 	}
 	return c.flatStore()
+}
+
+// ResolveStore is StorePath for a command (bash: `secrets_dir=$(secrets::path)`,
+// which stops the command under set -e when secrets::path fails). A domain
+// whose directory exists without a store, in a project that keeps a store
+// per domain, does not fall back to the flat store: ResolveStore prints the
+// refusal (domain.CheckSecretsStore) and returns ErrHandled.
+func (c *Context) ResolveStore() (string, error) {
+	if c.Domain == "" || !fsutil.DirExists(c.Paths.Clusters+"/"+c.Domain+"/secrets") {
+		if err := domain.CheckSecretsStore(c.Paths.Clusters, c.Domain, c.flatStore(), c.ErrOut); err != nil {
+			return "", ErrHandled
+		}
+	}
+	return c.StorePath(), nil
 }
 
 // ensureStore scaffolds a domain's per-domain store so a WRITE lands there

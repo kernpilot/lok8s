@@ -194,3 +194,14 @@ const KustomizePluginHomeEnv = "KUSTOMIZE_PLUGIN_HOME"
 func KustomizePluginHome(p *Paths) string {
 	return EnvOr(KustomizePluginHomeEnv, filepath.Join(p.Base, ".kustomize"))
 }
+
+// FlatSecretsStore is the deprecated flat secrets store the way the bash
+// tree resolves it: ${PATH_SECRETS:-${PATH_BASE}/.secrets} (string-joined,
+// as bash interpolates it). The refusal for a domain without a store names
+// this path.
+func FlatSecretsStore(p *Paths) string {
+	if p.SecretsEnv != "" {
+		return p.SecretsEnv
+	}
+	return p.Base + "/.secrets"
+}

@@ -53,3 +53,20 @@ func ExitCode(err error) int {
 	}
 	return 1
 }
+
+// LaunchFailed reports whether err means the process never produced an
+// exit code at all (the binary was not found, the context ended before it
+// started, …) rather than ran and exited non-zero. ExitCode folds this
+// case into a bare 1 for the common "$?" caller; a classifier that needs
+// to tell "launched and differed/erred" apart from "never ran" (dry-run
+// diff classification, review round 2 item F) checks this FIRST.
+func LaunchFailed(err error) bool {
+	if err == nil {
+		return false
+	}
+	if _, ok := errors.AsType[*exec.ExitError](err); ok {
+		return false
+	}
+	var ce interface{ ExitCode() int }
+	return !errors.As(err, &ce)
+}

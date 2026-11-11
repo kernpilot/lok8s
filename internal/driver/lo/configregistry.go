@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
@@ -223,8 +224,18 @@ func configGenerate(clusterYAML string, errOut io.Writer) (string, error) {
 	if err := enc.Encode(doc); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(jsonPath, buf.Bytes(), 0o644); err != nil {
-		return "", err
+	// A bootstrap dry run (LOK8S_BOOTSTRAP_DRYRUN=1) calls Export for the
+	// LOK8S_SPEC_*/LOK8S_REGISTRY_* env addon renders read: it computes the
+	// same document, keeps it in memory for every reader of this process
+	// (regFile) and never writes the file. A real run writes it, and drops
+	// a dry run's document.
+	if os.Getenv("LOK8S_BOOTSTRAP_DRYRUN") == "1" {
+		dryRunRegistry.set(jsonPath, &doc)
+	} else {
+		dryRunRegistry.set("", nil)
+		if err := os.WriteFile(jsonPath, buf.Bytes(), 0o644); err != nil {
+			return "", err
+		}
 	}
 
 	// Export scalars for external consumers (libs/image, Tilt, tests).
@@ -272,7 +283,42 @@ func regFile() (*RegistryFile, error) {
 	if path == "" {
 		return nil, fmt.Errorf("error: .registries.json not found (run registry::config_generate first)")
 	}
+	if doc := dryRunRegistry.get(path); doc != nil {
+		return doc, nil
+	}
 	return loadRegistryFile(path)
+}
+
+// dryRunRegistry is the registry document a dry run computed and did not
+// write (configGenerate). regFile serves it for the same path while the
+// dry-run sentinel is set, so the dry run exports the values a real run
+// would read back from the file.
+var dryRunRegistry registryMem
+
+type registryMem struct {
+	mu   sync.Mutex
+	path string
+	doc  *RegistryFile
+}
+
+func (m *registryMem) set(path string, doc *RegistryFile) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.path, m.doc = path, doc
+}
+
+func (m *registryMem) get(path string) *RegistryFile {
+	if os.Getenv("LOK8S_BOOTSTRAP_DRYRUN") != "1" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.doc == nil || m.path != path {
+		return nil
+	}
+	cp := *m.doc
+	cp.Registries = append([]Registry(nil), m.doc.Registries...)
+	return &cp
 }
 
 // get returns a single field of a named registry (bash: registry::get).

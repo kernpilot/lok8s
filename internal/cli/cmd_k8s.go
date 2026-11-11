@@ -178,6 +178,15 @@ func specClusterDomain(specPath string) string {
 // internal/render) plus a
 // kustomization.yaml listing the artifact when absent.
 func k8sKustomizeArtifact(ctx context.Context, paths *config.Paths, d, src, outDir, file string, stderr io.Writer) error {
+	// The domain's own store, as `lo build` uses it; no silent flat
+	// fallback (bash: domain::export_secrets_store).
+	if err := domain.CheckSecretsStore(paths.Clusters, d, config.FlatSecretsStore(paths), stderr); err != nil {
+		return ErrHandled
+	}
+	env := []string{"KUBECONFIG=" + paths.Base + "/.kubeconfig/secret." + d + ".yaml"}
+	if store := paths.Clusters + "/" + d + "/secrets"; fsutil.DirExists(store) {
+		env = append(env, "PATH_SECRETS="+store)
+	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
@@ -191,7 +200,7 @@ func k8sKustomizeArtifact(ctx context.Context, paths *config.Paths, d, src, outD
 	out, runErr := render.Build(ctx, src, render.Options{
 		Paths:  paths,
 		Runner: newRunner(paths),
-		Env:    []string{"KUBECONFIG=" + paths.Base + "/.kubeconfig/secret." + d + ".yaml"},
+		Env:    env,
 		Stderr: stderr,
 	})
 	if runErr == nil {

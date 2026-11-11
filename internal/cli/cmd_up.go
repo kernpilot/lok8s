@@ -177,8 +177,13 @@ func writeRunHeader(out io.Writer, paths *config.Paths, domainName, kubeconfig s
 		if kind == "lo" {
 			meta += " · kind"
 		}
-		if ver := yqScalar(spec, "", "spec", "kubernetes", "version"); ver != "" && ver != "null" {
-			meta += " · " + strings.SplitN(ver, "@", 2)[0]
+		// A spec file with more than one YAML document (domain.SpecLayout)
+		// shows no version: the two implementations read different values
+		// from it, and the provision step refuses the file.
+		if _, ok := domain.SpecLayout(spec); ok {
+			if ver := yqScalar(spec, "", "spec", "kubernetes", "version"); ver != "" && ver != "null" {
+				meta += " · " + strings.SplitN(ver, "@", 2)[0]
+			}
 		}
 	} else if fsutil.FileExists(deploySpec) {
 		meta = "deploy → " + yqScalar(deploySpec, "?", "spec", "clusterRef", "domain")

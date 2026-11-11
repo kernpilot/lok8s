@@ -7,6 +7,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -559,5 +560,30 @@ func TestRoutingEntrypointSymlinkEscapeRefuses(t *testing.T) {
 	setOSArgs(t, "registry", "up")
 	if _, _, err := runLo(t, NewRoot(q), "registry", "up"); err != nil || len(*recs) != 1 {
 		t.Errorf("inside link: %v %+v", err, *recs)
+	}
+}
+
+// A routed `lo bootstrap --dry-run` / `lo provision --dry-run` that fails
+// before the tree runs (here: the tree is missing) exits 2, like every other
+// dry-run failure outside the per-entry diff; without --dry-run it stays 1.
+func TestRoutedDryRunPreDispatchFailureExitsTwo(t *testing.T) {
+	t.Setenv(assets.EnvCacheHome, t.TempDir())
+	p := routedProject(t, "    default: bash\n", false)
+	recordShim(t)
+	exits := captureExits(t)
+	for _, tc := range []struct {
+		argv []string
+		want string
+	}{
+		{[]string{"bootstrap", "--dry-run", "--domain", "x.dev"}, "[2]"},
+		{[]string{"provision", "--bootstrap", "--dry-run"}, "[2]"},
+		{[]string{"bootstrap", "--domain", "x.dev"}, "[]"},
+	} {
+		*exits = nil
+		setOSArgs(t, tc.argv...)
+		_, stderr, err := runLo(t, NewRoot(p), tc.argv...)
+		if !errors.Is(err, ErrHandled) || fmt.Sprint(*exits) != tc.want || !strings.Contains(stderr, "is missing") {
+			t.Errorf("%v: err=%v exits=%v (want %s) stderr=%q", tc.argv, err, *exits, tc.want, stderr)
+		}
 	}
 }

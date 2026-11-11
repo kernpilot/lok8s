@@ -193,6 +193,45 @@ spec:
     domain: iota.dev
 EOF
 
+# k*.dev — spec.kubernetes.version of a Lo cluster, read by `lo lint` through
+# the one reader of each implementation (lodriver.NodeVersion,
+# spec::kind_node_version). The two readers once disagreed on merge keys,
+# aliases, block scalars and a spec.kubernetes that is not a map. Each case is
+# diffed below and pinned as well. The full shape table is
+# tests/fixtures/kind-node-version/ (TestNodeVersionMatchesBash). A spec with
+# two YAML documents is in that table only: `lo lint` reads the kind of such a
+# spec differently in the two implementations (Go reads the first document)
+# before the reader runs.
+kver_spec() {  # <domain> <spec lines, %b> [<lines before kind:, %b>]
+  mkdir -p "${CL}/${1}"
+  printf '%bkind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: %s\nspec:\n%b  bootstrap: []\n' \
+    "${3:-}" "${1%%.*}" "${2}" > "${CL}/${1}/cluster.lok8s.yaml"
+}
+kver_spec kver.dev    '  kubernetes:\n    version: kindest/node:v1.31.4\n'      # not an image tag
+kver_spec knull.dev   '  kubernetes:\n    version: "null"\n'                    # unset: clean
+kver_spec kmap.dev    '  kubernetes:\n    version: {minor: 31}\n'               # a map: cannot be read
+kver_spec klatest.dev '  kubernetes:\n    version: latest\n'                    # a custom tag: clean
+kver_spec kmerge.dev  '  kubernetes:\n    <<: *v\n' 'x: &v {version: kindest/node:v1.31.4}\n'  # merged value
+kver_spec kalias.dev  '  kubernetes:\n    version: *v\n' 'x: &v kindest/node:v1.31.4\n'        # alias
+kver_spec kblock.dev  '  kubernetes:\n    version: |\n      v1.31.4\n'          # block scalar: clean
+kver_spec klist.dev   '  kubernetes: []\n'                                        # a list: cannot be read
+kver_spec kcycle.dev  '  kubernetes:\n    <<: *k\n    version: v1.31.4\n' 'k: &k\n  <<: *k\n'  # a merge cycle: bounded, refused
+kver_spec knul.dev    '  kubernetes:\n    version: "v1.31.4\\0"\n'          # a NUL byte: refused, never unset
+
+# l*.dev — the document layout of the spec file (domain.SpecLayout,
+# domain::spec_layout). Only one YAML document reads the same in the Go
+# readers (first document) and the bash readers (yq on every document), so
+# `lo lint` refuses every other layout before any other check, in both.
+lay_spec() {  # <domain> <before, %b> <after, %b>
+  mkdir -p "${CL}/${1}"
+  printf '%bkind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: %s\nspec:\n  bootstrap: []\n%b' \
+    "${2}" "${1%%.*}" "${3}" > "${CL}/${1}/cluster.lok8s.yaml"
+}
+lay_spec llead.dev  '---\n'      ''                     # one document after a `---`: clean
+lay_spec ltrail.dev ''           '---\n'                # a trailing `---` (line 7)
+lay_spec lempty.dev '---\n---\n' ''                     # two empty documents, then the spec (line 2)
+lay_spec ltwo.dev   ''           '---\nkind: KubeOne\n' # a second document (line 7)
+
 # sub.alpha.dev — the one-cluster-per-apex violation.
 mkdir -p "${CL}/sub.alpha.dev"
 printf 'kind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: sub\nspec:\n  bootstrap: []\n' \
@@ -316,7 +355,147 @@ check - lint --domain epsilon.app       # clusterRef.domain not found
 check - lint --domain sub.alpha.dev     # apex violation reported repo-globally anyway
 check - lint --domain iota.dev          # fully clean domain
 check - lint --domain nowhere.dev       # no spec at all
+# The version cases are pinned as well: parity alone also passes when both
+# sides drift together.
+kver_pin() {  # <label> <file> <fixed string> [absent]
+  if grep -qF -- "${3}" "${2}"; then
+    if [[ -z "${4:-}" ]]; then echo "ok: ${1}"; else fail "${1} — '${3}' found in ${2}"; fi
+  elif [[ -n "${4:-}" ]]; then echo "ok: ${1}"
+  else fail "${1} — '${3}' not in ${2}"; fi
+}
+kver_problem() {  # <domain> <the problem line, without the indent>
+  check - lint --domain "${1}"
+  for side in bash go; do
+    kver_pin "${side}: ${1} reports the version" "${WORK}/${side}.err" "  ${2}"
+    if grep -qE '^\[error\] *$' "${WORK}/${side}.err"; then fail "${side}: ${1} printed an empty [error] line"; fi
+  done
+}
+kver_clean() {  # <domain>
+  check - lint --domain "${1}"
+  for side in bash go; do
+    kver_pin "${side}: ${1} passes" "${WORK}/${side}.out" "  OK"
+    kver_pin "${side}: ${1} reports no version" "${WORK}/${side}.err" "spec.kubernetes.version" absent
+  done
+}
+kver_hint="Set a kindest/node image tag, for example v1.31.4. To use the default node image of kind, remove the key."
+kver_problem kver.dev   "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. ${kver_hint}"
+kver_clean   knull.dev
+kver_problem kmap.dev   "spec.kubernetes.version cannot be read: the value is a map, not a single value. Write spec.kubernetes.version as a single value."
+kver_clean   klatest.dev
+kver_problem kmerge.dev "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. ${kver_hint}"
+kver_problem kalias.dev "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. ${kver_hint}"
+kver_clean   kblock.dev
+kver_problem klist.dev  "spec.kubernetes.version cannot be read: spec.kubernetes is a list, not a map. Write spec.kubernetes as a YAML map."
+kver_problem kcycle.dev "spec.kubernetes.version cannot be read: the merge keys (<<) on the path to the value form a cycle. Remove the cycle."
+kver_problem knul.dev   "spec.kubernetes.version 'v1.31.4?' contains a control character (shown as '?'). Remove the control character."
+kver_clean   llead.dev
+lay_problem() {  # <domain> <the problem, after the spec path>
+  check - lint --domain "${1}"
+  for side in bash go; do
+    kver_pin "${side}: ${1} reports the layout" "${WORK}/${side}.err" "/clusters/${1}/cluster.lok8s.yaml ${2}"
+    kver_pin "${side}: ${1} runs no other check" "${WORK}/${side}.err" "Missing required field" absent
+  done
+}
+lay_problem ltrail.dev "holds more than one YAML document. Remove line 7 (a '---' line after the spec)."
+lay_problem lempty.dev "holds an empty YAML document before the spec. Remove line 2 (a '---' line)."
+lay_problem ltwo.dev "holds more than one YAML document. Remove lines 7 to 8 (the '---' at line 7 and everything after it)."
 check - --domain iota.dev lint          # global-flag spelling
+# spec.network.dnsSearch through the driver's own check (lint::dns_search /
+# Linter.dnsSearch): an anchored list with aliased entries, any letter case
+# and a trailing dot pass; a spec.network that is not a map has no list;
+# a bad entry behind an alias fails; one entry per failure cause (newlines in the value included) fails with
+# the same lines on both sides.
+mkdir -p "${CL}"/{dnsok.dev,dnsnet.dev,dnsbad.dev,dnsalias.dev,dnsmerge.dev,dnscycle.dev}
+cat > "${CL}/dnsok.dev/cluster.lok8s.yaml" <<'EOF'
+kind: Lo
+apiVersion: lok8s.dev/v1
+metadata:
+  name: dnsok
+anchors:
+  one: &one corp.example.com
+  list: &list [*one, Example.TS.net., *one]
+spec:
+  bootstrap: []
+  network:
+    dnsSearch: *list
+EOF
+printf 'kind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: dnsnet\nspec:\n  bootstrap: []\n  network: dnsnet\n' > "${CL}/dnsnet.dev/cluster.lok8s.yaml"
+# An anchored list with a bad aliased entry: rejected through the alias.
+printf 'kind: Lo\napiVersion: lok8s.dev/v1\nmetadata:\n  name: dnsalias\nbad: &bad corp_example\nlist: &list [*bad, ok.example]\nspec:\n  bootstrap: []\n  network:\n    dnsSearch: *list\n' \
+  > "${CL}/dnsalias.dev/cluster.lok8s.yaml"
+# Merge keys: one in an unrelated field, one on spec.network that supplies a
+# list with a bad entry (resolved the YAML spec way on both sides, no yq
+# merge-key WARN line). Alias cycles: outside spec.network (no cost, a
+# self-merging map and a 9^9-entry anchor tree included), and one inside
+# the list (read one level: "Found a list").
+cat > "${CL}/dnsmerge.dev/cluster.lok8s.yaml" <<'EOF'
+kind: Lo
+apiVersion: lok8s.dev/v1
+metadata:
+  name: dnsmerge
+base: &base {dnsSearch: [ok.example, bad_entry.example]}
+other: {<<: *base, x: 1}
+spec:
+  bootstrap: []
+  network:
+    <<: *base
+EOF
+cat > "${CL}/dnscycle.dev/cluster.lok8s.yaml" <<'EOF'
+kind: Lo
+apiVersion: lok8s.dev/v1
+metadata:
+  name: dnscycle
+outside: &outside [x.example, *outside]
+other: *outside
+inside: &inside [ok.example, *inside]
+selfm: &selfm {<<: *selfm}
+l0: &l0 [x.example, x.example, x.example, x.example, x.example, x.example, x.example, x.example, x.example]
+l1: &l1 [*l0, *l0, *l0, *l0, *l0, *l0, *l0, *l0, *l0]
+l2: &l2 [*l1, *l1, *l1, *l1, *l1, *l1, *l1, *l1, *l1]
+l3: &l3 [*l2, *l2, *l2, *l2, *l2, *l2, *l2, *l2, *l2]
+l4: &l4 [*l3, *l3, *l3, *l3, *l3, *l3, *l3, *l3, *l3]
+l5: &l5 [*l4, *l4, *l4, *l4, *l4, *l4, *l4, *l4, *l4]
+l6: &l6 [*l5, *l5, *l5, *l5, *l5, *l5, *l5, *l5, *l5]
+l7: &l7 [*l6, *l6, *l6, *l6, *l6, *l6, *l6, *l6, *l6]
+l8: &l8 [*l7, *l7, *l7, *l7, *l7, *l7, *l7, *l7, *l7]
+big: *l8
+spec:
+  bootstrap: []
+  network:
+    dnsSearch: *inside
+EOF
+# The shared fixture of the driver tests (one entry per failure cause).
+{ echo 'apiVersion: lok8s.dev/v1'; cat "${ROOT}/internal/driver/lo/testdata/dnssearch_bad.yaml"; } \
+  > "${CL}/dnsbad.dev/cluster.lok8s.yaml"
+check - lint --domain dnsok.dev
+check - lint --domain dnsnet.dev
+check - lint --domain dnsalias.dev
+for side in bash go; do
+  if grep -q "^\[error\]   spec\.network\.dnsSearch\[0\] has a character that is not valid in a DNS name: 'corp_example'\." "${WORK}/${side}.err"; then
+    echo "ok: ${side}: lint rejects the bad entry behind the alias"
+  else fail "${side}: lint does not reject the bad entry behind the alias (see ${WORK}/${side}.err)"; fi
+done
+check - lint --domain dnsmerge.dev
+dns_pin() {  # <label> <regex>: the line on both sides, no yq WARN line
+  local side
+  for side in bash go; do
+    if grep -qE -- "${2}" "${WORK}/${side}.err" && ! grep -q 'yaml-fix-merge-anchor-to-spec' "${WORK}/${side}.err" "${WORK}/${side}.out"; then
+      echo "ok: ${side}: ${1}"
+    else fail "${side}: ${1} (see ${WORK}/${side}.err)"; fi
+  done
+}
+dns_pin "lint resolves the merge key on spec.network, no WARN" "^\[error\]   spec\.network\.dnsSearch\[1\] has a character that is not valid in a DNS name: 'bad_entry\.example'\."
+start=${SECONDS}
+check - lint --domain dnscycle.dev
+dns_pin "lint reads the alias cycle in the list one level" "^\[error\]   spec\.network\.dnsSearch\[1\] must be a DNS name\. Found a list\."
+if (( SECONDS - start < 30 )); then echo "ok: lint --domain dnscycle.dev took $(( SECONDS - start )) s (both sides)"; else fail "lint --domain dnscycle.dev took $(( SECONDS - start )) s"; fi
+check - lint --domain dnsbad.dev
+for side in bash go; do
+  # Anti-vacuity: 22 of the 24 fixture entries are bad, one line each.
+  if [[ "$(grep -c '^\[error\]   spec\.network\.dnsSearch\[' "${WORK}/${side}.err")" == 22 ]]; then
+    echo "ok: ${side}: lint reports the 22 bad dnsSearch entries"
+  else fail "${side}: lint does not report 22 bad dnsSearch entries (see ${WORK}/${side}.err)"; fi
+done
 # Go-only: --notes adds the default-equal advisory and changes nothing
 # else: same exit code, same stderr, stdout equal once the [note] lines
 # are dropped, and the note itself present for a key at its default. Its

@@ -15,8 +15,13 @@
 #                           heartbeat producer alive (see its header)
 #   libs/kubehz/node      — `lo kubehz node join|remove|status`: the machines a
 #                           tenant brings to a kubehz-HOSTED control plane
-#                           (static pools). The CLUSTER-level join/deregister
+#                           (static pools), and `lo kubehz node cordon|
+#                           uncordon|drain`: one node of a Space, through the
+#                           platform. The CLUSTER-level join/deregister
 #                           above keep their own meaning.
+#   libs/kubehz/agent     — `lo kubehz space …` and `lo kubehz cluster …`: the
+#                           kubehz api calls of an agent key (the agent tools
+#                           `lo mcp` offers)
 #
 # TWO in-cluster agents ship as kustomize dirs, and spec.kubehz.agent picks
 # which one owns the heartbeat:
@@ -43,6 +48,7 @@ import ^libs/kubehz/shared
 import ^libs/kubehz/handover
 import ^libs/kubehz/deploy
 import ^libs/kubehz/node
+import ^libs/kubehz/agent
 
 main::kubehz() {
   local -a usage=(
@@ -51,10 +57,12 @@ main::kubehz() {
     'deploy@destructive'        'Deploy the in-cluster agent (spec.kubehz.agent)'
     'status|s@readonly'         'Check kubehz registration status'
     'join|j@destructive'        'Mint a node join ticket (hosting: shared)'
-    'node|n'                    'Nodes you bring to a hosted control plane (join/remove/status)'
+    'node|n'                    'Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)'
     'claim-code|c@readonly'     'Print the one-time claim code to paste into the dashboard'
     'claim@destructive'         'Place a dashboard-minted claim nonce for the agent to echo (mode 3)'
     '#token'                    'Print an access token for the agent key in the environment (kubectl exec plugin)'
+    'space'                     'Spaces through the kubehz api (agent tools)'
+    'cluster'                   'Clusters through the kubehz api (agent tools)'
     're-enroll@destructive'     'Re-enroll a regenerated in-cluster agent token with the platform'
     'assess|a@readonly'         'Show the platform assessment + handover feasibility'
     'handover|h'                'Control-plane handover (receive/preseed on the eject target)'
@@ -84,6 +92,9 @@ kubehz::read_config() {
     error "cannot read cluster spec: ${cluster_yaml:-<empty path>}"
     return 1
   fi
+  # One YAML document (domain::spec_check), for every lo kubehz command and
+  # every driver: yq reads every document, the Go twin the first document.
+  domain::spec_check "${cluster_yaml}" || return 1
 
   # || return on every read: errexit is suppressed in the driver call trees
   # (libs/provision runs `driver::provision || rc=$?`), so a yq parse failure
@@ -326,31 +337,180 @@ kubehz::get_ssh_fingerprint() {
 # replace the hcloud key by name on every run. Fail-soft: any failure returns
 # 1 and the caller falls back to the legacy fingerprint announce.
 # Store the announce's one-time bind secret (B243) at
-# ${PATH_CLUSTERS}/<domain>/.kubehz-bind (0600, no trailing newline — deploy
-# reads it into a Secret whose value must be the exact 64 hex). An empty secret
-# writes nothing (an older api mints none, and the deploy then falls back). A
-# write failure warns but never fails the register: the agent can still adopt
-# via the pending-pool path, or the user can claim by claim-code.
+# ${PATH_CLUSTERS}/<domain>/.kubehz-bind (0600, no trailing newline: the deploy
+# and every later register read the exact 64 hex). An empty secret writes
+# nothing: an api without bind secrets sends none. The write happens in place
+# under the ignored name: rm unlinks the old file (that needs write access to
+# the directory only, so a file that cannot be read is replaced too), then
+# noclobber creates the new one at 0600. No state of the write leaves the
+# secret in a file that .gitignore does not match. A directory, or a link to
+# one, is never replaced. A write failure warns but never fails the register.
+# The deploy then finds no bind secret, and the agent registers a separate
+# pending row that the user claims by its claim code (B288).
+#
+# noclobber refuses an existing regular file, and a link to nothing, but it
+# writes through a link to an existing FIFO or device. A link put in the slot
+# between the rm and the create therefore gets the secret. The check after the
+# create sees that the path is no regular file, removes it and warns.
 # Usage: kubehz::persist_bind_secret <domain> <secret>
 kubehz::persist_bind_secret() {
   local domain="${1}" secret="${2}"
   [[ -n "${secret}" ]] || return 0
   local dir="${PATH_CLUSTERS}/${domain}"
+  local path="${dir}/.kubehz-bind"
   mkdir -p "${dir}" || { warn "kubehz: could not create ${dir} to store the bind secret"; return 0; }
-  ( umask 077; printf %s "${secret}" > "${dir}/.kubehz-bind"; ) ||
+  if [[ -d "${path}" ]]; then
+    warn "kubehz: could not store the bind secret: clusters/${domain}/.kubehz-bind is a directory"
+    return 0
+  fi
+  rm -f "${path}" || { warn "kubehz: could not store the bind secret"; return 0; }
+  if ! ( set -C; umask 077; printf '%s' "${secret}" > "${path}" ) \
+    || [[ ! -f "${path}" || -L "${path}" ]]; then
+    rm -f "${path}"
     warn "kubehz: could not store the bind secret"
+  fi
 }
 
+# Succeed when <path> holds a bind secret: a readable regular file of exactly
+# 64 lowercase hex characters, with no newline. The register calls and the
+# deploy use this one check. The size comes first, so an oversized file is
+# never read.
+# Usage: kubehz::bind_secret_ok <path>
+kubehz::bind_secret_ok() {
+  local path="${1}" size
+  [[ -f "${path}" && -r "${path}" ]] || return 1
+  size=$(wc -c < "${path}") || return 1
+  (( size == 64 )) || return 1
+  grep -Eqx '[0-9a-f]{64}' "${path}"
+}
+
+# Print the JSON body of a register call: the object that <filter> builds
+# from the jq arguments, plus bindSecret when clusters/<domain>/.kubehz-bind
+# passes kubehz::bind_secret_ok. Every register call sends it (B289), so a
+# re-run keeps the same cluster record. Any other file adds nothing: the api
+# refuses a malformed value. jq reads the value from the file (--rawfile) and
+# checks it again where it uses it, and the caller pipes the body into curl
+# (--data-binary @-), so the value never reaches argv.
+# Usage: kubehz::register_body <domain> <filter> [jq args...]
+kubehz::register_body() {
+  local domain="${1}" filter="${2}"
+  shift 2
+  local path="${PATH_CLUSTERS}/${domain}/.kubehz-bind"
+  if kubehz::bind_secret_ok "${path}"; then
+    # shellcheck disable=SC2016  # $bind is jq program text
+    jq -n "${@}" --rawfile bind "${path}" \
+      "${filter}"' + (if $bind | test("\\A[0-9a-f]{64}\\z") then {bindSecret: $bind} else {} end)'
+  else
+    jq -n "${@}" "${filter}"
+  fi
+}
+
+# POST a register body (stdin) to <api_url>/api/clusters/register and print
+# the answer of a status below 400. A 503 or 429 with Retry-After tries
+# again (#312): at most 3 tries, and one wait is at most 60 s, so one call
+# waits at most two minutes. The bound holds for each call, not for the
+# whole registration: if the last answer of a mode is a refusal that lo does
+# not try again (for example a 502 after two 503s), lo falls back to the next
+# mode, and each of the three modes can wait. Ctrl-C ends the wait (sleep), and the EXIT trap of this subshell
+# body removes the header dump. Retry-After counts in its delta-seconds form
+# only (the form the kubehz api sends); a 503 without it gives no time to
+# wait and is not tried again. The Go twin is registerPost
+# (internal/kubehz/api.go): same bound, same lines.
+# curl runs without --fail (--fail-with-body needs curl 7.76): -w prints the
+# status after the body, -D dumps the headers for Retry-After, and a
+# non-zero curl rc is a transport failure only.
+# Returns 0 for a status below 400. Returns 3 when the platform still
+# answers 503 or 429 with Retry-After after the last try: the [error] line,
+# with the code and <next>, is printed here, and the caller must not fall
+# back. Returns 1 on any other failure (the caller falls back as before);
+# for a refusal it prints "HTTP <status>[ <code>]" on stdout, which the
+# caller's fall back warning names. With <auth> "bearer", KUBEHZ_TOKEN goes
+# into a curl config, built again for each try, never on argv. The body
+# stays in a variable and goes to curl through stdin.
+# Usage: <body> | kubehz::register_post <domain> <api_url> <next> [bearer]
+kubehz::register_post() (
+  local domain="${1}" api_url="${2}" next="${3}" auth="${4:-}"
+  local -r tries=3 max_wait=60
+  local body tmp raw rc status out ra code delay try=1
+  body=$(cat)
+  tmp=$(mktemp -d) || return 1
+  trap 'rm -rf "${tmp}"' EXIT
+  while :; do
+    rc=0
+    if [[ "${auth}" == bearer ]]; then
+      raw=$(printf '%s\n' "${body}" |
+        curl -sSL --proto-redir =https -X POST "${api_url}/api/clusters/register" \
+          -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}") \
+          -H "Content-Type: application/json" \
+          -D "${tmp}/headers" -w $'\n%{http_code}' \
+          --data-binary @-) || rc=$?
+    else
+      raw=$(printf '%s\n' "${body}" |
+        curl -sSL --proto-redir =https -X POST "${api_url}/api/clusters/register" \
+          -H "Content-Type: application/json" \
+          -D "${tmp}/headers" -w $'\n%{http_code}' \
+          --data-binary @-) || rc=$?
+    fi
+    # A non-zero rc is a transport failure (curl's own line shows): no answer.
+    (( rc == 0 )) || return 1
+    status="${raw##*$'\n'}" out=""
+    [[ "${raw}" != *$'\n'* ]] || out="${raw%$'\n'*}"
+    [[ "${status}" =~ ^[0-9]{3}$ ]] || return 1
+    if (( 10#${status} < 400 )); then
+      printf '%s\n' "${out}"
+      return 0
+    fi
+    code=$(jq -r '.data.code // .code // empty' <<<"${out}" 2>/dev/null) || code=""
+    # The code comes from the server and goes to the terminal.
+    [[ "${code}" =~ ^[A-Z][A-Z0-9_]{0,63}$ ]] || code=""
+    # The first Retry-After of the LAST answer in the header dump (-L writes
+    # one block for each redirect).
+    ra=$(LC_ALL=C awk '
+      { sub(/\r$/, "") }
+      /^HTTP\// { ra = ""; seen = 0; next }
+      !seen && tolower(substr($0, 1, 12)) == "retry-after:" {
+        ra = substr($0, 13); gsub(/^[ \t]+|[ \t]+$/, "", ra); seen = 1
+      }
+      END { print ra }' "${tmp}/headers" 2>/dev/null) || ra=""
+    if [[ "${status}" != 503 && "${status}" != 429 ]] || [[ ! "${ra}" =~ ^[0-9]+$ ]]; then
+      printf 'HTTP %s%s\n' "${status}" "${code:+ ${code}}"
+      return 1
+    fi
+    if (( try >= tries )); then
+      error "kubehz: the platform did not register ${domain} (HTTP ${status}${code:+ ${code}}, ${try} tries). Run '${next}' when the platform is available again."
+      return 3
+    fi
+    # More than six digits read as 999999 s (no overflow); 10# reads a
+    # leading zero as decimal.
+    (( ${#ra} <= 6 )) || ra=999999
+    delay=$(( 10#${ra} ))
+    (( delay <= max_wait )) || delay=${max_wait}
+    try=$(( try + 1 ))
+    warn "kubehz: the platform answered HTTP ${status}${code:+ ${code}}. Try ${try} of ${tries} in ${delay}s."
+    sleep "${delay}"
+  done
+)
+
+# Usage: kubehz::ensure_claim_key <domain> <api_url> [<next>]
+# <next> is the command the error of an unavailable platform names (see
+# kubehz::register_post). rc 3: that error, no fall back.
 kubehz::ensure_claim_key() {
-  local domain="${1}" api_url="${2}"
+  local domain="${1}" api_url="${2}" next="${3:-lo kubehz register --domain ${1}}"
   local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}"
   # HCLOUD_TOKEN travels on this base below — never over plain HTTP.
   http::require_https "${hcloud_api}" "HCLOUD_API_BASE" || return 1
+  http::credential_ok HCLOUD_TOKEN || return 1
 
-  local response
-  response=$(curl -fsSL -X POST "${api_url}/api/clusters/register" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg d "${domain}" '{domain: $d, claimKey: true}')") || return 1
+  local response rc=0
+  # shellcheck disable=SC2016  # the filter is jq program text
+  response=$(kubehz::register_body "${domain}" '{domain: $d, claimKey: true}' --arg d "${domain}" |
+    kubehz::register_post "${domain}" "${api_url}" "${next}") || rc=$?
+  if (( rc != 0 )); then
+    # "HTTP <status>[ <code>]" for a refusal: the fall back warning of
+    # kubehz::register_cluster names it (its local _kubehz_answer).
+    _kubehz_answer="${response}"
+    return "${rc}"
+  fi
 
   local cluster_id public_key fingerprint key_name
   cluster_id=$(jq -r '.id // empty' <<<"${response}")
@@ -363,18 +523,19 @@ kubehz::ensure_claim_key() {
 
   # Replace-by-name: the API rotates the fingerprint on re-runs, so a stale
   # kubehz-claim key must not linger in the account.
+  # HCLOUD_TOKEN reaches curl in a config (http::curl_config), never on argv.
   local existing_id
-  existing_id=$(curl -fsSL -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+  existing_id=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL \
     "${hcloud_api}/v1/ssh_keys?name=${key_name}" | jq -r '.ssh_keys[0].id // empty') || existing_id=""
   if [[ -n "${existing_id}" ]]; then
-    curl -fsSL -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+    http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL -X DELETE \
       "${hcloud_api}/v1/ssh_keys/${existing_id}" >/dev/null || true
   fi
-  curl -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
-    -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg n "${key_name}" --arg k "${public_key}" '{name: $n, public_key: $k}')" \
-    >/dev/null || return 1
+  jq -n --arg n "${key_name}" --arg k "${public_key}" '{name: $n, public_key: $k}' |
+    curl -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
+      -K <(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}") \
+      -H "Content-Type: application/json" \
+      --data-binary @- >/dev/null || return 1
 
   debug "Cluster registered with kubehz claim key (pending claim): ${cluster_id}"
   echo "kubehz: cluster '${domain}' registered (pending). Claim key '${key_name}' uploaded to your Hetzner Cloud account."
@@ -397,9 +558,12 @@ kubehz::ensure_claim_key() {
 # on the HTTPS API URL and only for THIS opt-in — never printed, never logged.
 #
 # Fail-soft: any failure returns 1 and the caller falls back to the anonymous
-# flow. Usage: kubehz::direct_claim <domain> <cluster_yaml> <api_url>
+# flow. rc 3: the platform stayed unavailable (kubehz::register_post printed
+# the error that names <next>), and the caller must not fall back.
+# Usage: kubehz::direct_claim <domain> <cluster_yaml> <api_url> [<next>]
 kubehz::direct_claim() {
-  local domain="${1}" cluster_yaml="${2}" api_url="${3}"
+  local domain="${1}" cluster_yaml="${2}" api_url="${3}" next="${4:-lo kubehz register --domain ${1}}"
+  http::credential_ok KUBEHZ_TOKEN || return 1
 
   local fingerprint
   fingerprint=$(kubehz::get_ssh_fingerprint "${cluster_yaml}") || {
@@ -408,11 +572,17 @@ kubehz::direct_claim() {
   }
 
   # Direct-attributed register: the bearer proves the tenant; the row lands owned.
-  local response
-  response=$(curl -fsSL -X POST "${api_url}/api/clusters/register" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -n --arg d "${domain}" --arg fp "${fingerprint}" '{domain: $d, fingerprint: $fp}')") || return 1
+  local response rc=0
+  # shellcheck disable=SC2016  # the filter is jq program text
+  response=$(kubehz::register_body "${domain}" '{domain: $d, fingerprint: $fp}' \
+      --arg d "${domain}" --arg fp "${fingerprint}" |
+    kubehz::register_post "${domain}" "${api_url}" "${next}" bearer) || rc=$?
+  if (( rc != 0 )); then
+    # "HTTP <status>[ <code>]" for a refusal: the fall back warning of
+    # kubehz::register_cluster names it (its local _kubehz_answer).
+    _kubehz_answer="${response}"
+    return "${rc}"
+  fi
 
   local cluster_id claimed
   cluster_id=$(jq -r '.id // empty' <<<"${response}")
@@ -433,12 +603,20 @@ kubehz::direct_claim() {
       warn "spec.kubehz.connectHcloudToken is true but HCLOUD_TOKEN is unset — skipping token connect."
       return 0
     fi
+    # The token goes into the body through jq's stdin (-Rs: the whole input
+    # as one string) and the body into curl through stdin. Neither the
+    # token nor the bearer is on argv.
+    if ! http::credential_ok HCLOUD_TOKEN; then
+      warn "kubehz: could not connect the hcloud token (provisioning stays locked until you add it in the dashboard)."
+      return 0
+    fi
     local cred
-    cred=$(curl -fsSL -X POST "${api_url}/api/credentials" \
-      -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -d "$(jq -n --arg v "${HCLOUD_TOKEN}" --arg c "${cluster_id}" \
-        '{type: "hcloud_token", value: $v, validate: true, clusterId: $c}')") || {
+    cred=$(printf '%s' "${HCLOUD_TOKEN}" |
+      jq -Rs --arg c "${cluster_id}" '{type: "hcloud_token", value: ., validate: true, clusterId: $c}' |
+      curl -fsSL --proto-redir =https -X POST "${api_url}/api/credentials" \
+        -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}") \
+        -H "Content-Type: application/json" \
+        --data-binary @-) || {
       warn "kubehz: could not connect the hcloud token (provisioning stays locked until you add it in the dashboard)."
       return 0
     }
@@ -470,10 +648,13 @@ kubehz::direct_claim() {
 # It announces a PENDING cluster (POST /api/clusters/register) with the SSH-key
 # MD5 fingerprint and needs NO bearer/token. Called during provision when
 # access != none. Non-fatal: warns on failure, returns 0 so provisioning
-# continues without kubehz integration.
-# Usage: kubehz::register_cluster <domain> <cluster_yaml>
+# continues without kubehz integration. One failure returns 1 instead (#312):
+# a platform that still answers 503 or 429 with Retry-After after the retry
+# bound (kubehz::register_post). Then no flow falls back, and the error names
+# <next>, the command that registers again (default: lo kubehz register).
+# Usage: kubehz::register_cluster <domain> <cluster_yaml> [<next>]
 kubehz::register_cluster() {
-  local domain="${1}" cluster_yaml="${2}"
+  local domain="${1}" cluster_yaml="${2}" next="${3:-lo kubehz register --domain ${1}}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
 
   # Defense in depth: the fingerprint travels on this URL; never over plain HTTP.
@@ -495,17 +676,25 @@ kubehz::register_cluster() {
   # claimed DIRECTLY at register time — no claim-key mint, no fingerprint hop.
   # Optionally hands the platform the HCLOUD_TOKEN too (spec.kubehz.
   # connectHcloudToken) so the dashboard can drive provisioning.
+  # rc 3 of a mode: the platform stayed unavailable, no fall back.
+  # _kubehz_answer: the refusal a mode got ("HTTP <status>[ <code>]"), set by
+  # direct_claim and ensure_claim_key through bash's dynamic scope.
+  local rc _kubehz_answer
   if [[ -n "${KUBEHZ_TOKEN:-}" ]]; then
-    kubehz::direct_claim "${domain}" "${cluster_yaml}" "${api_url}" && return 0
-    warn "kubehz direct claim failed for ${domain}; falling back to the anonymous registration flow"
+    rc=0 _kubehz_answer=""
+    kubehz::direct_claim "${domain}" "${cluster_yaml}" "${api_url}" "${next}" || rc=$?
+    case "${rc}" in 0) return 0 ;; 3) return 1 ;; esac
+    warn "kubehz direct claim failed for ${domain}${_kubehz_answer:+ (${_kubehz_answer})}; falling back to the anonymous registration flow"
   fi
 
   # SECONDARY (anonymous, hcloud-backed): API-minted claim key — the token is in
   # env during provisioning; a human claims fingerprint-solo in the dashboard.
   # Falls through to the legacy server-key fingerprint announce when unavailable.
   if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
-    kubehz::ensure_claim_key "${domain}" "${api_url}" && return 0
-    warn "kubehz claim-key registration failed for ${domain}; falling back to the legacy fingerprint announce"
+    rc=0 _kubehz_answer=""
+    kubehz::ensure_claim_key "${domain}" "${api_url}" "${next}" || rc=$?
+    case "${rc}" in 0) return 0 ;; 3) return 1 ;; esac
+    warn "kubehz claim-key registration failed for ${domain}${_kubehz_answer:+ (${_kubehz_answer})}; falling back to the legacy fingerprint announce"
   fi
 
   local fingerprint
@@ -514,16 +703,18 @@ kubehz::register_cluster() {
     return 0
   }
 
-  local payload
-  payload=$(jq -n --arg fp "${fingerprint}" --arg d "${domain}" '{domain: $d, fingerprint: $fp}')
-
   local response
-  response=$(curl -fsSL -X POST "${api_url}/api/clusters/register" \
-    -H "Content-Type: application/json" \
-    -d "${payload}") || {
-    warn "kubehz API request failed for ${domain}, cluster will continue without kubehz integration"
+  rc=0
+  # shellcheck disable=SC2016  # the filter is jq program text
+  response=$(kubehz::register_body "${domain}" '{domain: $d, fingerprint: $fp}' \
+      --arg d "${domain}" --arg fp "${fingerprint}" |
+    kubehz::register_post "${domain}" "${api_url}" "${next}") || rc=$?
+  (( rc != 3 )) || return 1
+  if (( rc != 0 )); then
+    # On a refusal, response is "HTTP <status>[ <code>]" (register_post).
+    warn "kubehz API request failed for ${domain}${response:+ (${response})}, cluster will continue without kubehz integration"
     return 0
-  }
+  fi
 
   local cluster_id
   cluster_id=$(echo "${response}" | jq -r '.id // empty')
@@ -565,7 +756,7 @@ kubehz::deregister_cluster() {
   # Bearer tokens travel on these URLs; never over plain HTTP. deregister skips
   # validate_config (reachable standalone via `lo kubehz deregister`), so guard
   # each call by its own URL — mirrors register_cluster's standalone re-assert.
-  if ! http::require_https "${api_url}" "spec.kubehz.apiUrl"; then
+  if ! http::require_https "${api_url}" "spec.kubehz.apiUrl" || ! http::credential_ok KUBEHZ_TOKEN; then
     rc=1
   else
     local cluster_id="" resolve_rc=0
@@ -579,9 +770,9 @@ kubehz::deregister_cluster() {
       # Status + body captured (the re-enroll idiom): a refused delete must
       # surface with the api's own message, not vanish into `curl -f`.
       local response http_code
-      if ! response=$(curl -sSL -w $'\n%{http_code}' -X DELETE \
-        "${api_url}/api/clusters/${cluster_id}" \
-        -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}"); then
+      if ! response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
+        curl -K - -sSL -w $'\n%{http_code}' -X DELETE \
+        "${api_url}/api/clusters/${cluster_id}"); then
         error "kubehz: DELETE /api/clusters/${cluster_id} failed (network) — the registration for ${domain} was not removed. Retry when ${api_url} is reachable."
         rc=1
       else
@@ -603,11 +794,11 @@ kubehz::deregister_cluster() {
   # deregister has no register response to read .claimKey.name from.
   if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
     local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}" key_id
-    if http::require_https "${hcloud_api}" "HCLOUD_API_BASE"; then
-      key_id=$(curl -fsSL -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
+    if http::require_https "${hcloud_api}" "HCLOUD_API_BASE" && http::credential_ok HCLOUD_TOKEN; then
+      key_id=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL \
         "${hcloud_api}/v1/ssh_keys?name=kubehz-claim-${domain}" | jq -r '.ssh_keys[0].id // empty') || key_id=""
-      [[ -z "${key_id}" ]] || curl -fsSL -X DELETE -H "Authorization: Bearer ${HCLOUD_TOKEN}" \
-        "${hcloud_api}/v1/ssh_keys/${key_id}" >/dev/null 2>&1 || true
+      [[ -z "${key_id}" ]] || http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" |
+        curl -K - -fsSL -X DELETE "${hcloud_api}/v1/ssh_keys/${key_id}" >/dev/null 2>&1 || true
     fi
   fi
 
@@ -731,9 +922,10 @@ kubehz::status() {
   local api_url="${LOK8S_KUBEHZ_API_URL}"
   # The KUBEHZ_TOKEN bearer travels on this URL — never over plain HTTP.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+  http::credential_ok KUBEHZ_TOKEN || return 1
   local raw http_code response
-  raw=$(curl -sSL -w $'\n%{http_code}' "${api_url}/api/clusters?perPage=500" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null) || {
+  raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
+    curl -K - -sSL -w $'\n%{http_code}' "${api_url}/api/clusters?perPage=500" 2>/dev/null) || {
     echo "Status:  unknown (API unreachable: ${api_url})"
     return 0
   }
@@ -847,6 +1039,7 @@ kubehz::assess() {
   [[ -n "${api_url}" ]] || { error "spec.kubehz.apiUrl is not set for ${domain}"; return 1; }
   # KUBEHZ_TOKEN travels on this URL — never over plain HTTP.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+  http::credential_ok KUBEHZ_TOKEN || return 1
 
   local cluster_id
   cluster_id=$(kubehz::resolve_cluster_id "${domain}" "${api_url}") || {
@@ -855,8 +1048,8 @@ kubehz::assess() {
   }
 
   local response
-  response=$(curl -fsSL "${api_url}/api/clusters/${cluster_id}/assessment" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}") || {
+  response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
+    curl -K - -fsSL "${api_url}/api/clusters/${cluster_id}/assessment") || {
     error "kubehz: could not fetch the assessment for ${domain} (${cluster_id})"
     return 1
   }
@@ -1003,8 +1196,9 @@ kubehz::claim-code() {
 # Usage: kubehz::resolve_cluster_id <domain> <api_url>
 kubehz::resolve_cluster_id() {
   local domain="${1}" api_url="${2}" response cluster_id
-  response=$(curl -fsSL "${api_url}/api/clusters?perPage=500" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN:-}" 2>/dev/null) || return 1
+  http::credential_ok KUBEHZ_TOKEN || return 1
+  response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
+    curl -K - -fsSL "${api_url}/api/clusters?perPage=500" 2>/dev/null) || return 1
   # perPage=500 (the api's hard cap) + sort_by(createdAt) ascending: the list
   # is served newest-first, but the server binds agent identity (heartbeat,
   # desired) to the OLDEST active row for a domain — picking the newest armed
@@ -1040,8 +1234,10 @@ kubehz::resolve_cluster_id() {
 #
 # The nonce persists as annotations on the kubehz-agent-config ConfigMap (the
 # agent's established marker surface): kubehz.cloud/claim-nonce + the
-# …-placed epoch stamp, written in ONE annotate call so the agent never reads
-# a half-written pair. The write runs with the OPERATOR's ambient kubeconfig
+# …-placed epoch stamp, written in ONE merge patch so the agent never reads a
+# half-written pair. The nonce reaches kubectl in that patch on stdin, never
+# on argv: every local user can read argv (ps, /proc/<pid>/cmdline). The Go
+# twin sends the same patch. The write runs with the OPERATOR's ambient kubeconfig
 # (exported by main from the active domain — switch clusters with
 # `lo use <domain>` first); the agent's own RBAC stays untouched — its marker
 # Role already grants get/patch on this one ConfigMap, which is exactly what
@@ -1049,13 +1245,28 @@ kubehz::resolve_cluster_id() {
 #
 # SECURITY: the nonce is a claim ticket — this command never prints it, and no
 # error message may echo it; only its presence/shape is reported.
+# `--nonce -` reads it from stdin (one line, surrounding whitespace dropped),
+# so it stays out of shell history and argv, as in the Go twin
+# (ClaimNonce). KUBEHZ_CLAIM_NONCE is Go-only (D22).
 kubehz::claim() {
   local nonce
   local -a args=(
-    'nonce|n:!'  'Claim-challenge nonce minted in the dashboard (khzn_…)'
+    'nonce|n:!'  "Claim-challenge nonce minted in the dashboard (khzn_…); '-' reads it from stdin"
     "${args[@]:-}"
   )
   :args "Place a claim-challenge nonce for the heartbeat agent" "${@}"
+
+  if [[ "${nonce}" == "-" ]]; then
+    [[ ! -t 0 ]] || echo "reading the claim nonce from stdin (one line, then Enter)…" >&2
+    nonce=""
+    IFS= read -r -n 4096 nonce || :
+    nonce="${nonce#"${nonce%%[![:space:]]*}"}"
+    nonce="${nonce%"${nonce##*[![:space:]]}"}"
+    if [[ -z "${nonce}" ]]; then
+      error "no claim nonce on stdin (--nonce - reads one line)"
+      return 1
+    fi
+  fi
 
   # Shape check BEFORE any cluster call: the api mints khzn_ + 43 base64url
   # chars and its heartbeat schema bounds the whole value at 20..200 chars —
@@ -1074,9 +1285,12 @@ kubehz::claim() {
   # One call, both annotations: the value and its placement stamp. The agent
   # clears a stampless nonce as unsourced, and expires a stamped one after the
   # api's challenge TTL (15 minutes) so a dead nonce never echoes forever.
-  kubectl -n "${ns}" annotate --overwrite configmap "${cm}" \
-    "kubehz.cloud/claim-nonce=${nonce}" \
-    "kubehz.cloud/claim-nonce-placed=$(date -u +%s)" >/dev/null || {
+  # jq reads the nonce on stdin, kubectl the patch: neither gets it on argv.
+  # shellcheck disable=SC2016  # $t is jq program text
+  printf '%s' "${nonce}" |
+    jq -cRs --arg t "$(date -u +%s)" \
+      '{metadata: {annotations: {"kubehz.cloud/claim-nonce": ., "kubehz.cloud/claim-nonce-placed": $t}}}' |
+    kubectl -n "${ns}" patch configmap "${cm}" --type merge --patch-file /dev/stdin >/dev/null || {
     error "could not annotate configmap/${cm} — check your kubeconfig permissions"
     return 1
   }
@@ -1123,6 +1337,21 @@ kubehz::token() {
     error "token url and scope are required: pass --token-url and --scope, or set KUBEHZ_AGENT_TOKEN_URL and KUBEHZ_AGENT_SCOPE"
     return 1
   fi
+  kubehz::token_access "${token_url}" "${scope}" "${secret_file}" "${no_cache}" || return 1
+  kubehz::token_emit "${format}" "${KUBEHZ_TOKEN_ACCESS}" "${KUBEHZ_TOKEN_EXPIRES}"
+}
+
+# The grant behind `lo kubehz token` and the agent commands (libs/kubehz/agent):
+# the https gate, the key from the environment (or the secret file), the
+# cache, then client_credentials. The caller resolves the token url and the
+# scope. The result travels in globals, never on stdout: a `$(...)` capture
+# would lose a refusal's status. The Go twin is agentAccessToken.
+# Usage: kubehz::token_access <token_url> <scope> <secret_file> <no_cache>
+# Sets: KUBEHZ_TOKEN_ACCESS KUBEHZ_TOKEN_EXPIRES (epoch s)
+kubehz::token_access() {
+  local token_url="${1}" scope="${2}" secret_file="${3}" no_cache="${4}"
+  KUBEHZ_TOKEN_ACCESS=""
+  KUBEHZ_TOKEN_EXPIRES=""
   http::require_https "${token_url}" "Token URL" || return 1
   local client_id="${KUBEHZ_AGENT_CLIENT_ID:-}" secret="${KUBEHZ_AGENT_CLIENT_SECRET:-}"
   if [[ -n "${secret_file}" ]]; then
@@ -1158,20 +1387,20 @@ kubehz::token() {
     access_token=$(jq -r '.access_token' <<<"${entry}")
     expires_at=$(jq -r '.expires_at' <<<"${entry}")
     if (( expires_at - now > 300 )); then
-      kubehz::token_emit "${format}" "${access_token}" "${expires_at}"
-      return
+      KUBEHZ_TOKEN_ACCESS="${access_token}"
+      KUBEHZ_TOKEN_EXPIRES="${expires_at}"
+      return 0
     fi
   fi
 
-  # client_secret_basic. The config line quotes backslashes and quotes, so a
-  # value can never end the string early.
-  local user="${client_id}:${secret}" answer status reason code expires_in msg attempt retry rc
+  # client_secret_basic. http::curl_config quotes backslashes and quotes,
+  # so a value can never end the string early. The control-character check
+  # above refused a line break.
+  local answer status reason code expires_in msg attempt retry rc
   local -a delays=(0.25 0.5 1)
-  user="${user//\\/\\\\}"
-  user="${user//\"/\\\"}"
   for (( attempt = 0; ; attempt++ )); do
     retry=0
-    if answer=$(printf 'user = "%s"\n' "${user}" | curl -q -sS --proto =https \
+    if answer=$(http::curl_config user "${client_id}:${secret}" | curl -q -sS --proto =https \
       --connect-timeout 10 --max-time 30 -K - \
       -H 'Accept: application/json' \
       --data-urlencode 'grant_type=client_credentials' --data-urlencode "scope=${scope}" \
@@ -1220,7 +1449,8 @@ kubehz::token() {
     kubehz::token_cache_write "${cache_file}" "${access_token}" "${expires_at}" \
       || debug "token cache not written: ${cache_file}"
   fi
-  kubehz::token_emit "${format}" "${access_token}" "${expires_at}"
+  KUBEHZ_TOKEN_ACCESS="${access_token}"
+  KUBEHZ_TOKEN_EXPIRES="${expires_at}"
 }
 
 # Whether the string holds a C0 control character or DEL. LC_ALL=C pins the
@@ -1250,7 +1480,8 @@ kubehz::token_cache_write() {
   dir="${file%/*}"
   (umask 077 && mkdir -p "${dir}") || return 1
   tmp=$(mktemp "${dir}/.token-XXXXXX") || return 1
-  if jq -cn --arg t "${2}" --argjson e "${3}" '{access_token:$t,expires_at:$e}' >"${tmp}" \
+  # The token reaches jq on stdin (-Rs), not on argv.
+  if printf '%s' "${2}" | jq -cRs --argjson e "${3}" '{access_token:.,expires_at:$e}' >"${tmp}" \
     && mv -f "${tmp}" "${file}"; then
     return 0
   fi
@@ -1270,8 +1501,9 @@ kubehz::token_emit() {
     client.authentication.k8s.io/v1|client.authentication.k8s.io/v1beta1) ;;
     *) version="client.authentication.k8s.io/v1" ;;
   esac
-  jq -cn --arg v "${version}" --arg t "${token}" --arg e "$(date -u -d "@${exp}" +%Y-%m-%dT%H:%M:%SZ)" \
-    '{apiVersion:$v,kind:"ExecCredential",status:{token:$t,expirationTimestamp:$e}}'
+  # The token reaches jq on stdin (-Rs), not on argv.
+  printf '%s' "${token}" | jq -cRs --arg v "${version}" --arg e "$(date -u -d "@${exp}" +%Y-%m-%dT%H:%M:%SZ)" \
+    '{apiVersion:$v,kind:"ExecCredential",status:{token:.,expirationTimestamp:$e}}'
 }
 
 # ── Agent-token re-enrollment (agent-identity contract R2) ─
@@ -1319,6 +1551,7 @@ kubehz::re-enroll() {
   [[ -n "${api_url}" ]] || { error "spec.kubehz.apiUrl is not set for ${domain}"; return 1; }
   # KUBEHZ_TOKEN + the token hash travel on this URL — never over plain HTTP.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
+  http::credential_ok KUBEHZ_TOKEN || return 1
   [[ -n "${KUBEHZ_TOKEN:-}" ]] || {
     error "KUBEHZ_TOKEN is required to re-enroll (a clusters:write API token from the dashboard's Access -> API Tokens)"
     return 1
@@ -1363,10 +1596,11 @@ kubehz::re-enroll() {
   # fresh token); 404 = not this tenant's cluster (the api answers a uniform
   # 404 cross-tenant).
   local response http_code body
-  response=$(curl -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters/${cluster_id}/agent-token" \
-    -H "Authorization: Bearer ${KUBEHZ_TOKEN}" \
+  response=$(jq -n --arg h "${token_hash}" '{agentTokenHash: $h}' |
+    curl -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters/${cluster_id}/agent-token" \
+    -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}") \
     -H "Content-Type: application/json" \
-    -d "$(jq -n --arg h "${token_hash}" '{agentTokenHash: $h}')") || {
+    --data-binary @-) || {
     error "kubehz: agent-token request failed (network) — retry once ${api_url} is reachable"
     return 1
   }

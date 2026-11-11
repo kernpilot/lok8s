@@ -9,7 +9,9 @@ package cli
 // does not merge the inherited one (the cmd_secrets precedent).
 
 import (
+	"context"
 	"errors"
+	"net/http"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -22,6 +24,10 @@ import (
 
 func init() { registerPorted("kubehz", newKubehzCommand) }
 
+// kubehzHTTP is the platform-api client of the kubehz commands (nil: the
+// library's own). Tests point it at an httptest TLS server.
+var kubehzHTTP *http.Client
+
 // kubehzContext binds the library to the command's streams and paths.
 func kubehzContext(cmd *cobra.Command, paths *config.Paths) *kubehz.Context {
 	return &kubehz.Context{
@@ -29,6 +35,7 @@ func kubehzContext(cmd *cobra.Command, paths *config.Paths) *kubehz.Context {
 		Runner: execx.NewRunner(paths),
 		Out:    cmd.OutOrStdout(),
 		ErrOut: cmd.ErrOrStderr(),
+		HTTP:   kubehzHTTP,
 		IsTTY:  func() bool { return term.IsTerminal(int(os.Stdout.Fd())) },
 	}
 }
@@ -61,6 +68,8 @@ func newKubehzCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		newKubehzClaimCode(paths),
 		newKubehzClaim(paths),
 		newKubehzToken(paths),
+		newKubehzSpace(paths),
+		newKubehzCluster(paths),
 		newKubehzReEnroll(paths),
 		newKubehzAssess(paths),
 		newKubehzHandover(paths),
@@ -221,18 +230,80 @@ func newKubehzToken(paths *config.Paths) *cobra.Command {
 	return c
 }
 
-// ── node: machines you bring to a hosted control plane ────
+// ── node: machines you bring (hosted: join/remove/status; Space: cordon/
+// uncordon/drain) ─────────────────────────────────────────
 
 func newKubehzNode(paths *config.Paths) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "node",
 		Aliases:      []string{"n"},
-		Short:        "Nodes you bring to a hosted control plane (join/remove/status)",
+		Short:        "Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)",
 		SilenceUsage: true,
 		RunE:         argshGroupRunE,
 	}
-	cmd.AddCommand(newKubehzNodeJoin(paths), newKubehzNodeRemove(paths), newKubehzNodeStatus(paths))
+	cmd.AddCommand(newKubehzNodeJoin(paths), newKubehzNodeRemove(paths), newKubehzNodeStatus(paths),
+		newKubehzNodeMaintenance(paths, "cordon", "Mark one node of a Space unschedulable (its pods keep running)",
+			"Node name to cordon", (*kubehz.Context).NodeCordon),
+		newKubehzNodeMaintenance(paths, "uncordon", "Make one node of a Space schedulable again",
+			"Node name to uncordon", (*kubehz.Context).NodeUncordon),
+		newKubehzNodeMaintenance(paths, "drain", "Cordon one node of a Space and evict its pods",
+			"Node name to drain", (*kubehz.Context).NodeDrain))
 	return cmd
+}
+
+// newKubehzNodeMaintenance builds `lo kubehz node cordon|uncordon|drain`
+// (node::cordon, node::uncordon, node::drain). The inherited --cluster/-s is
+// refused first, with the --space-id hint; then a missing --name, in the
+// argsh wording. A drain refuses the global --force/-f too (NodeDrain).
+//
+// The MCP tier follows the api's own gate: a drain evicts pods, so it is
+// destructive (the api asks a browser session for a step-up). A cordon and
+// an uncordon move no pod and undo each other, so they are idempotent and
+// in the mutating tier (argsh: @idempotent).
+func newKubehzNodeMaintenance(paths *config.Paths, verb, short, nameHelp string,
+	run func(*kubehz.Context, context.Context, string, kubehz.MaintenanceOpts) error) *cobra.Command {
+	spec := commandSpec{idempotent: true}
+	if verb == "drain" {
+		spec = commandSpec{destructive: true}
+	}
+	c := &cobra.Command{
+		Use:          verb + " --name <node>",
+		Short:        short,
+		Annotations:  spec.annotations(),
+		Args:         secretsArgs(0, 0),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			kc := kubehzContext(cmd, paths)
+			if f := cmd.Flags().Lookup("cluster"); f != nil && f.Changed {
+				return kubehzRun(kc.RejectSpaceClusterFlag())
+			}
+			var o kubehz.MaintenanceOpts
+			o.Name, _ = cmd.Flags().GetString("name")
+			o.SpaceID, _ = cmd.Flags().GetString("space-id")
+			if verb == "drain" {
+				o.Timeout, _ = cmd.Flags().GetString("timeout")
+				o.EvictUnmanaged, _ = cmd.Flags().GetBool("evict-unmanaged")
+				// The global --force/-f, at any place in argv (argsh parses
+				// it into the `force` of main): NodeDrain refuses it.
+				o.GlobalForce, _ = cmd.Flags().GetBool("force")
+			}
+			// argsh refuses only an absent --name; an empty one reaches the
+			// name check, which refuses it with the value.
+			if !cmd.Flags().Changed("name") {
+				return argshErrorf(cmd.ErrOrStderr(), "missing required flag: name")
+			}
+			d := ambientMainEnv(cmd, paths)
+			return kubehzRun(run(kc, cmd.Context(), d, o))
+		},
+	}
+	f := c.Flags()
+	f.StringP("name", "n", "", nameHelp)
+	if verb == "drain" {
+		f.String("timeout", "", "Seconds the platform tries, from 60 to 3600; default: the platform default")
+		f.Bool("evict-unmanaged", false, "Also evict the pods that no controller recreates")
+	}
+	f.String("space-id", "", "Space id (sp-xxxxxxxx); default: the space of the active domain")
+	return c
 }
 
 // nodeOpts reads the node flags, refusing the inherited --cluster/-s first
@@ -294,7 +365,9 @@ func newKubehzNodeRemove(paths *config.Paths) *cobra.Command {
 			if err != nil {
 				return kubehzRun(err)
 			}
-			if o.Name == "" {
+			// argsh refuses only an absent --name (`:!`); an empty one
+			// reaches the name check, which refuses it with the value.
+			if !cmd.Flags().Changed("name") {
 				return argshErrorf(cmd.ErrOrStderr(), "missing required flag: name")
 			}
 			d := ambientMainEnv(cmd, paths)

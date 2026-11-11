@@ -3,6 +3,42 @@
 lok8s uses YAML spec files to define clusters and deployments. These specs
 double as Kubernetes CRDs when used with the operator.
 
+## One YAML document per spec file {#one-document}
+
+A spec file (`cluster.lok8s.yaml` or `deploy.lok8s.yaml`) holds one YAML
+document. The Go readers of `lo` read only the first document of a file, and
+the bash readers (yq) read every document. Thus a file with more than one
+document gives two different specs, and each command that reads the spec
+refuses the file.
+
+A spec file can have these lines:
+
+- one `---` line before the spec;
+- one `...` line (the document end marker) after the spec;
+- blank lines, comment lines and `%` directives.
+
+`lo` refuses these layouts:
+
+- a `---` line after the spec, also a `---` at the end of the file with
+  nothing after it;
+- empty documents before the spec (two or more `---` lines before it);
+- text after a `...` line.
+
+The error names the spec file and the lines to remove. For example:
+
+```text
+[error] clusters/example.dev/cluster.lok8s.yaml holds more than one YAML document. Remove line 8 (a '---' line after the spec).
+```
+
+These commands refuse such a file before they change something:
+`lo provision`, `lo up`, `lo bootstrap`, `lo destroy`, `lo down`,
+`lo recover`, `lo build`, `lo deploy` (also for the cluster spec that
+`spec.clusterRef` names), the `lo kubehz` commands that read the spec,
+`lo addons` and `lo lint`. `lo status` shows the error in its Cluster
+section. `lo audit` reports the file as one `unknown` finding and runs no
+other check on it. `lo use` and `lo doctor` show the driver of such a domain
+as `?`.
+
 ## cluster.lok8s.yaml
 
 Defines a cluster domain. The `kind` field determines which driver contract
@@ -72,18 +108,18 @@ spec:
 | `apiVersion` | yes | — | Always `cluster.lok8s.dev/v1beta1` |
 | `kind` | yes | — | Driver: `Lo`, `KubeOne`, `Capi`, `Kkp`, `Kubehz` (a kubehz Space — `hosting: shared`) |
 | `metadata.name` | yes | — | Unique cluster name |
-| `spec.kubernetes.version` | yes | — | Kubernetes version |
+| `spec.kubernetes.version` | yes (no for `Lo`) | — (`Lo`: the default node image of the installed kind) | Kubernetes version. For `Lo` it is the tag of the kind node image `kindest/node:<tag>`: any image tag, with an optional `@sha256:<digest>`. See [Kubernetes version (Lo)](#kubernetes-version-lo) |
 | `spec.cluster.domain` | yes | — | Cluster FQDN (folder name convention) |
 | `spec.cluster.namespace` | no | `default` | Default namespace |
 | `spec.provider.name` | no | — | Infrastructure provider |
 | `spec.provider.configRef` | no | — | Provider config file path |
 | `spec.provider.config` | no | — | Inline provider config (mutually exclusive with configRef) |
 | `spec.bootstrap` | no | `[cilium]` | Ordered list of infra addons (default applied by framework bootstrap when omitted) |
-| `spec.kubehz.hosting` | no | `self` | Who runs the control plane: `self` (you provision and own it), `hosted` (kubehz runs it; with `kind: Lo` also requires `spec.runner`), or `shared` (a kubehz Space — namespaces on a shared plane, nodes you register; requires `kind: Kubehz`) |
-| `spec.kubehz.access` | no | `none` | Platform visibility: `none` (no contact), `registered` (announced + heartbeats → dashboard), or `managed` (adds the kubehz operator) |
+| `spec.kubehz.hosting` | no | `self` | Who runs the control plane: `self` (you provision and own it), `hosted` (kubehz runs it; needs a kubehz account, because `lo provision` creates the cluster with `KUBEHZ_TOKEN`; with `kind: Lo` also requires `spec.runner`), or `shared` (a kubehz Space — namespaces on a shared plane, nodes you register; requires `kind: Kubehz`) |
+| `spec.kubehz.access` | no | `none` | Platform visibility: `none` (no contact), `registered` (announced + heartbeats → dashboard), or `managed` (adds the management features driven from the dashboard; acting needs `agent: operator`) |
 | `spec.kubehz.agent` | no | `cronjob` | Which in-cluster agent owns the heartbeat: `cronjob` (the bash CronJob — node status, control-plane health, certificate expiry, every 5 minutes) or `operator` (the Go live agent — live view within seconds, plus worker scaling, self-healing and worker upgrades where your tier allows). Exactly one of them beats; `lo kubehz deploy` applies the one you name. Needs `access: registered` or `managed`, and is not valid with `hosting: shared`. See the [kubehz guide](../guide/kubehz.md#choosing-an-agent) |
 | `spec.kubehz.apiUrl` | conditional | — | kubehz API endpoint; required when `hosting` is `hosted` or `shared`, or `access != none`; must be HTTPS |
-| `spec.controlPlane.replicas` | no | `1` | For `hosting: hosted`: the apiserver replicas of the hosted control plane (1 to 3), the one shape value `lo provision` sends. There is no plan and no tier: the state limit and its auto-grow step and cap live in the dashboard, and the bill is per hour. See the [kubehz guide](../guide/kubehz.md#the-hosted-control-plane-shape) |
+| `spec.controlPlane.replicas` | no | `1` | For `hosting: hosted`: the apiserver replicas of the hosted control plane (1 to 3), the one shape value `lo provision` sends. There is no plan and no tier: the state limit and its auto-grow step and cap live in the dashboard, and the bill is per started hour, each unit capped at 730 hours a month. See the [kubehz guide](../guide/kubehz.md#the-hosted-control-plane-shape) |
 | `spec.kubehz.space.slug` | no | domain's first label | `hosting: shared` — the namespace name for the Space (a DNS label) |
 | `spec.kubehz.space.name` | no | the slug | `hosting: shared` — display name in the dashboard |
 | `spec.kubehz.space.nodes` | no | `[]` | `hosting: shared` — machine names to mint a single-use join ticket for during `lo provision`. A list of names, not a count: the count is `spec.kubehz.space.limits.nodes` |
@@ -203,13 +239,14 @@ metadata:
   name: local
 spec:
   kubernetes:
-    version: "v1.31.4"         # Kubernetes version
+    version: "v1.31.4"         # kind node image tag (default: the node image of the installed kind)
   cluster:
     domain: lok8s.dev           # Cluster FQDN (required)
     namespace: default          # Default namespace
   network:                       # Docker bridge network config
     name: local                  # Bridge network name (default: metadata.name)
     cidr: "10.125.125.0/24"     # /24 slot — slot-derived from domain for *.lok8s.dev
+    dnsSearch: []                # DNS search list of the nodes and pods (default: [] = no host search domains)
   registries:                    # Registry mirror configuration
     tls: true                    # HTTPS registries (cert: generator-minted; default: true)
     shared:
@@ -283,9 +320,11 @@ When a field is missing, the Lo driver fills it in via two layers:
    | `registries.shared.network.name` | `lok8s-registries` |
    | `registries.shared.network.cidr` | `10.125.200.0/24` |
    | `registries.mirrors` | `io-{docker,quay,k8s,ghcr}` on the standard upstream URLs |
+   | `network.dnsSearch` | `[]` (the host's search domains stay out of the cluster) |
    | `nodes.controlPlane` | `1` |
    | `nodes.workers` | `0` |
    | `nodes.maxConcurrentDownloads` | `3` |
+   | `kubernetes.version` | none: the kind config names no node image, so kind uses the default node image of its release (`kind version` in `.bin` names that release) |
    | `runtime` | `kind` |
    | `bootstrap` | `[cilium]` |
 
@@ -306,6 +345,53 @@ Build and cache registries are framework-private — they always live
 on the project subnet at `.101` and `.102` and must not be listed in
 `spec.registries.mirrors`.
 
+#### Kubernetes version (Lo) {#kubernetes-version-lo}
+
+For a `Lo` cluster, `spec.kubernetes.version` is the tag of the kind node
+image: every node of the kind config gets `image: "kindest/node:<tag>"`.
+
+- **Unset**: the key is missing or null (`~`), or the value is `""` or the
+  string `"null"`. The kind config then names no image, and kind uses the
+  default node image of its release.
+- **Valid**: any OCI image tag, 1 to 128 letters, digits, `_`, `.` and `-`,
+  that does not start with `.` or `-`. An optional `@sha256:<64 hex>` digest
+  can follow. Examples: `v1.31.4`, `v1.31.4@sha256:<digest>`, `latest`, or
+  the tag of an image that you built with `kind build node-image`.
+- **Refused**: a value that is not an image tag, for example
+  `kindest/node:v1.31.4` (the full image name).
+
+`lo lint`, `lo provision` and `lo audit` read the version with the same rules
+in both implementations:
+
+- The spec file holds one YAML document
+  ([One YAML document per spec file](#one-document)).
+- YAML aliases and merge keys (`<<: *anchor`) are resolved: a key of the map
+  wins over a merged key, the last duplicate key wins, and in
+  `<<: [*a, *b]` the first map wins. An anchor can be on a key. An alias
+  that is used as a key is not resolved (yq reads it by its own name). The
+  read follows only the path to the value, so an alias bomb or an alias
+  cycle in another part of the file costs nothing. The bash implementation
+  needs yq v4.47.1 or later (the flag `--yaml-fix-merge-anchor-to-spec`);
+  `b install` installs the pinned yq.
+- Trailing newlines of the value (a block scalar) are removed.
+- These shapes are refused, never read as an unset version: a merge key
+  anywhere in the file that does not refer to a map or a list of maps; merge
+  keys on the path to the value that form a cycle, or that need more than
+  10000 map reads (yq reads a merged map again for each merge key that names
+  it); a `spec` or `spec.kubernetes` that is not a map; a version that is a
+  map or a list; a value with a control character (a NUL byte, a tab, an
+  escape sequence, U+0085, U+2028, a bidi override). A problem shows each
+  control character as `?` and at most 80 characters of the value.
+- Each yq call of the bash implementation has a time limit of 10 s and a
+  memory limit of 256 MiB (`ulimit -d`) where the operating system enforces
+  it. The time limit uses a background `sleep`, not GNU `timeout`, so it
+  holds on macOS too. A call that passes a limit is reported with that
+  limit.
+
+`lo provision` refuses before it creates a VM, a docker network or a
+container. `lo audit` reports a refused spec as `unknown` with the same
+problem text.
+
 #### Network Configuration
 
 The `spec.network` section configures the Docker bridge network used
@@ -318,6 +404,7 @@ for the `10.125.0.0/16` slot plan.
 |-------|----------|-------------|
 | `name` | no (for `*.lok8s.dev`) | Docker bridge network name (default: `metadata.name`) |
 | `cidr` | no (for `*.lok8s.dev`) | `/24` CIDR for the cluster's slot (default: `10.125.<slot>.0/24`) |
+| `dnsSearch` | no (default `[]`) | DNS search list of the kind nodes and pods (kind `networking.dnsSearch`, kind v0.18.0 or later). `[]` keeps the host's search domains out of the cluster; a list of at most 32 DNS names (any case, an optional trailing dot) replaces it, as written. `lo lint` checks it. See [Host DNS search domains](/guide/local-dev#host-dns-search-domains). |
 
 Example for an alternate slot:
 
@@ -485,7 +572,7 @@ Don't define the same zone via both `hosts` and a raw `servers`/`import` block �
 
 The `spec.bootstrap` field is an **ordered list** of addons the framework applies at provision time, *before* Tilt starts and *before* any workloads land. This is the framework's one ordering primitive — each entry is applied, then lok8s waits for Deployments/DaemonSets to become ready before moving to the next.
 
-Implementation lives in `.lok8s/libs/bootstrap` and runs identically across all drivers (Lo, KubeOne, Capi, Kkp).
+The framework bootstrap in the `lo` binary applies the list. It runs the same way for all drivers (Lo, KubeOne, Capi, Kkp).
 
 Use this for anything the cluster needs to be healthy before workloads can run: CNI, CSI, CCM, MetalLB, cert-manager, etc. It is **not** for application workloads — those live under `targets/` and have no framework-level ordering.
 
@@ -626,10 +713,28 @@ spec:
   provider:
     name: hetzner
     configRef: hetzner.json
+  auditLog:                          # optional: apiserver audit log
+    policy: audit-policy.yaml        # required in auditLog: relative to this file
+    maxAge: 30                       # optional: days (KubeOne default 30)
+    maxBackup: 10                    # optional: old files to keep (KubeOne default 3)
+    maxSize: 100                     # optional: MB before rotation (KubeOne default 100)
   bootstrap:
     - ./targets/networking
     - ./targets/cnpg-operator
 ```
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `spec.auditLog.policy` | when `auditLog` is set | — | Path of an audit Policy file (`apiVersion: audit.k8s.io/v1`, `kind: Policy`), relative to the cluster file. The driver gives KubeOne the absolute path (`features.staticAuditLog.config.policyFilePath`) |
+| `spec.auditLog.maxAge` | no | KubeOne: `30` | Days to keep old audit log files (`logMaxAge`), a whole number from 1 to 999999999 |
+| `spec.auditLog.maxBackup` | no | KubeOne: `3` | Number of old audit log files to keep (`logMaxBackup`), a whole number from 1 to 999999999 |
+| `spec.auditLog.maxSize` | no | KubeOne: `100` | Size in MB at which the audit log file rotates (`logMaxSize`), a whole number from 1 to 999999999 |
+
+`spec.auditLog` turns on KubeOne's `features.staticAuditLog`. The driver
+checks the spec and the policy file at `lo provision`, before the provider
+creates or changes a server and before it writes the manifest. See [Security: apiserver audit log](../guide/security.md#apiserver-audit-log)
+for the checks, an example policy, and the forced apply that a running
+cluster needs.
 
 **Deprecated fields** (use provider config instead):
 - ~~`spec.ssh`~~ → provider config `sshUser`, `sshPrivateKey`, `sshPublicKey`

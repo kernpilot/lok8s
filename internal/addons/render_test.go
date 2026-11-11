@@ -370,6 +370,141 @@ func TestRenderBuildFailurePropagates(t *testing.T) {
 	}
 }
 
+// An entry's env: may never set lo's own orchestration or safety
+// variables. ProtectedEnvOverride names the first one in byte order.
+func TestProtectedEnvOverride(t *testing.T) {
+	for _, ok := range []string{"LOK8S_USER_FOO", "HOME", "PATH", "XDG_CACHE_HOME", "CAROOT", "LOK8S_SPEC_X", "MY_BOOTSTRAP_X"} {
+		if got := ProtectedEnvOverride(map[string]string{ok: "x"}); got != "" {
+			t.Errorf("%s reported as protected: %q", ok, got)
+		}
+	}
+	for _, bad := range []string{
+		"LOK8S_BOOTSTRAP_DRYRUN", "LOK8S_BOOTSTRAP_ALLOW_GENERATORS", "LOK8S_BOOTSTRAP_DRYRUN_REPORT",
+		"LOK8S_BOOTSTRAP_ONLY", "BOOTSTRAP_PROTECTED_ENV_NAMES", "BOOTSTRAP_PLATFORM_OWNED",
+		"bootstrap_render_dir", "bootstrap_dry_run", "PATH_SECRETS", "KUBECONFIG", "KUSTOMIZE_PLUGIN_HOME", "HELM_PLUGINS",
+	} {
+		if got := ProtectedEnvOverride(map[string]string{"LOK8S_USER_FOO": "x", bad: "y"}); got != bad {
+			t.Errorf("%s: got %q", bad, got)
+		}
+	}
+	// Byte order, so the message is the same on every run.
+	if got := ProtectedEnvOverride(map[string]string{"PATH_SECRETS": "a", "KUBECONFIG": "b"}); got != "KUBECONFIG" {
+		t.Errorf("got %q, want KUBECONFIG (byte order)", got)
+	}
+}
+
+// The render refuses a protected name itself too (the backstop behind the
+// engine's named entry error): kustomize never runs.
+func TestRenderRefusesProtectedEnv(t *testing.T) {
+	dir := writeAddon(t)
+	f := newFakeKustomize(t, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n")
+	var errBuf strings.Builder
+	_, err := Render(t.Context(), testPaths(t), f, &errBuf, dir, "lo", "hetzner", "", map[string]string{"KUSTOMIZE_PLUGIN_HOME": "/tmp/evil"})
+	if err == nil || !strings.Contains(err.Error(), "may not set KUSTOMIZE_PLUGIN_HOME") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("kustomize ran: %v", f.calls)
+	}
+}
+
+// dryBoundary builds a real dry-run boundary for p (the exec pipeline under
+// the fake runner; no Secret plugin in the plugin home, so no probe).
+func dryBoundary(t *testing.T, p *config.Paths) *DryRunBoundary {
+	t.Helper()
+	b, err := NewDryRunBoundary(t.Context(), p, nil)
+	if err != nil {
+		t.Fatalf("NewDryRunBoundary: %v", err)
+	}
+	t.Cleanup(b.Close)
+	return b
+}
+
+// A dry run renders without --enable-exec, with the boundary's plugin home
+// and the refusing stubs first on PATH, and carries the sentinel and the
+// report file — every one of them after the entry's env, so an entry's
+// PATH keeps the stubs in front.
+func TestRenderDryRunBoundaryReachesKustomize(t *testing.T) {
+	dir := writeAddon(t)
+	p := testPaths(t)
+	b := dryBoundary(t, p)
+	f := newFakeKustomize(t, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n")
+	var errBuf strings.Builder
+	if _, err := RenderDryRun(t.Context(), p, f, &errBuf, dir, "lo", "hetzner", "", map[string]string{"PATH": "/entry/bin"}, b, false); err != nil {
+		t.Fatalf("RenderDryRun: %v", err)
+	}
+	if slices.Contains(f.calls[0], "--enable-exec") || !slices.Contains(f.calls[0], "--enable-alpha-plugins") {
+		t.Errorf("argv = %v, want --enable-alpha-plugins without --enable-exec", f.calls[0])
+	}
+	env := f.envs[0]
+	for key, want := range map[string]string{
+		"KUSTOMIZE_PLUGIN_HOME":         b.PluginHome,
+		"PATH":                          b.StubBin + string(os.PathListSeparator) + "/entry/bin",
+		"LOK8S_BOOTSTRAP_DRYRUN":        "1",
+		"LOK8S_BOOTSTRAP_DRYRUN_REPORT": b.Report,
+		"LOK8S_BOOTSTRAP_DRYRUN_STORE":  b.Store,
+		"TMPDIR":                        b.Tmp,
+		"HELM_PLUGINS":                  b.HelmPlugins,
+	} {
+		if got := lastEnvValue(env, key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+	if got := lastEnvValue(env, "LOK8S_BOOTSTRAP_ALLOW_GENERATORS"); got != "" {
+		t.Errorf("LOK8S_BOOTSTRAP_ALLOW_GENERATORS = %q without --allow-generators", got)
+	}
+	for _, name := range []string{"docker", "git", "helm"} {
+		info, err := os.Stat(filepath.Join(b.StubBin, name))
+		if err != nil || info.Mode()&0o111 == 0 {
+			t.Errorf("refusing %s stub missing or not executable: %v", name, err)
+		}
+	}
+}
+
+// --allow-generators keeps the real run's plugin home, flags and PATH: the
+// addon code runs as trusted. lo's own writes stay suppressed (sentinel).
+func TestRenderDryRunAllowGeneratorsIsTheRealRunsRender(t *testing.T) {
+	dir := writeAddon(t)
+	p := testPaths(t)
+	b := dryBoundary(t, p)
+	f := newFakeKustomize(t, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n")
+	var errBuf strings.Builder
+	if _, err := RenderDryRun(t.Context(), p, f, &errBuf, dir, "lo", "hetzner", "", nil, b, true); err != nil {
+		t.Fatalf("RenderDryRun: %v", err)
+	}
+	if !slices.Contains(f.calls[0], "--enable-exec") {
+		t.Errorf("argv = %v, want --enable-exec", f.calls[0])
+	}
+	env := f.envs[0]
+	if got := lastEnvValue(env, "KUSTOMIZE_PLUGIN_HOME"); got != config.KustomizePluginHome(p) {
+		t.Errorf("KUSTOMIZE_PLUGIN_HOME = %q, want the project's", got)
+	}
+	if got := lastEnvValue(env, "PATH"); got != "" {
+		t.Errorf("PATH overlay = %q, want none", got)
+	}
+	if got := lastEnvValue(env, "HELM_PLUGINS"); got != "" {
+		t.Errorf("HELM_PLUGINS overlay = %q, want the operator's (none)", got)
+	}
+	if got := lastEnvValue(env, "TMPDIR"); got != b.Tmp {
+		t.Errorf("TMPDIR = %q, want the boundary's even with --allow-generators", got)
+	}
+	if lastEnvValue(env, "LOK8S_BOOTSTRAP_DRYRUN") != "1" || lastEnvValue(env, "LOK8S_BOOTSTRAP_ALLOW_GENERATORS") != "1" {
+		t.Errorf("sentinels missing: %v", env)
+	}
+}
+
+// lastEnvValue is os/exec's own "last duplicate wins" rule, read back for
+// an assertion.
+func lastEnvValue(env []string, key string) string {
+	val := ""
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			val = v
+		}
+	}
+	return val
+}
+
 func TestRenderPerEntryEnvReachesProcessAndEnvsubst(t *testing.T) {
 	// The per-entry env: overrides join the kustomize process env AND the
 	// envsubst lookup — without touching the shared process environment.
@@ -468,5 +603,140 @@ func TestRenderHandsKustomizePluginHomeToTheChild(t *testing.T) {
 	}
 	if slices.Contains(f.envs[0], want) {
 		t.Errorf("exported in the shell: the default is still in the env: %v", f.envs[0])
+	}
+}
+
+// A dry run copies a stacking addon exactly as the real run does: symlinks
+// stay symlinks (khelm's dependency builds are refused at the ChartRenderer
+// gate, so nothing writes through one).
+func TestRenderDryRunStackedCopyKeepsSymlinks(t *testing.T) {
+	dir := writeAddon(t)
+	outside := filepath.Join(t.TempDir(), "outside.yaml")
+	testutil.WriteFile(t, outside, "linked: true\n")
+	if err := os.Symlink(outside, filepath.Join(dir, "linked.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	p := testPaths(t)
+	b := dryBoundary(t, p)
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
+	var buildDir string
+	probe := &probeRunner{t: t, manifest: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n", check: func(d string) {
+		buildDir = d
+		if fi, err := os.Lstat(filepath.Join(d, "linked.yaml")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("linked.yaml is not a symlink in the copy (the real run keeps it): %v", err)
+		}
+	}}
+	var errBuf strings.Builder
+	if _, err := RenderDryRun(t.Context(), p, probe, &errBuf, dir, "lo", "hetzner", "", nil, b, false); err != nil {
+		t.Fatalf("RenderDryRun: %v\n%s", err, errBuf.String())
+	}
+	if !strings.HasPrefix(buildDir, b.Tmp+string(filepath.Separator)) {
+		t.Errorf("the copy %s is not under the boundary's TMPDIR %s", buildDir, b.Tmp)
+	}
+}
+
+// Review round 6, item 1: a keep-chomped block scalar (`|+`) keeps its
+// trailing newlines as part of the value. When it is the last value of the
+// merged values or of chart.yaml, the staged files must still end with every
+// one of them — in a dry run and in a real run. The wanted bytes are what
+// the pinned yq writes (the bash twin, tests/unit/bootstrap_test.bats pins
+// the same bytes):
+//
+//	yq eval-all '. as $item ireduce ({}; . * $item)' values.yaml values.lo.yaml
+//	yq '.valueFiles = ["values.merged.yaml"]' chart.yaml
+func TestRenderStagingKeepsKeepChompedTrailingNewlines(t *testing.T) {
+	const (
+		chart      = "apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: kept\nvalueFiles:\n  - values.yaml\nnote: |+\n  beta\n\n"
+		wantChart  = "apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: kept\nvalueFiles:\n  - values.merged.yaml\nnote: |+\n  beta\n\n"
+		wantMerged = "base: 1\ndriver: 2\nkeep: |+\n  alpha\n\n\n"
+	)
+	for _, dry := range []bool{false, true} {
+		dir := filepath.Join(t.TempDir(), "addons", "kept")
+		testutil.WriteFile(t, filepath.Join(dir, "chart.yaml"), chart)
+		testutil.WriteFile(t, filepath.Join(dir, "values.yaml"), "base: 1\n")
+		testutil.WriteFile(t, filepath.Join(dir, "values.lo.yaml"), "driver: 2\nkeep: |+\n  alpha\n\n\n")
+		p := testPaths(t)
+		t.Setenv(render.ModeEnv, string(render.ModeExec))
+		var gotChart, gotMerged string
+		probe := &probeRunner{t: t, manifest: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n", check: func(d string) {
+			c, _ := os.ReadFile(filepath.Join(d, "chart.yaml"))
+			m, _ := os.ReadFile(filepath.Join(d, "values.merged.yaml"))
+			gotChart, gotMerged = string(c), string(m)
+		}}
+		var errBuf strings.Builder
+		var err error
+		if dry {
+			_, err = RenderDryRun(t.Context(), p, probe, &errBuf, dir, "lo", "", "", nil, dryBoundary(t, p), false)
+		} else {
+			_, err = Render(t.Context(), p, probe, &errBuf, dir, "lo", "", "", nil)
+		}
+		if err != nil {
+			t.Fatalf("dry=%v: %v\n%s", dry, err, errBuf.String())
+		}
+		if gotMerged != wantMerged {
+			t.Errorf("dry=%v: the staged values.merged.yaml = %q, want %q", dry, gotMerged, wantMerged)
+		}
+		if gotChart != wantChart {
+			t.Errorf("dry=%v: the staged chart.yaml = %q, want %q", dry, gotChart, wantChart)
+		}
+	}
+}
+
+// Review round 5, item 2: the staging copy keeps symlinks, and the files it
+// rewrites (chart.yaml, values.inline.yaml, values.merged.yaml) may be
+// links in the addon: a shared ChartRenderer config, shared values. The
+// staging writes each as a new private regular file in the copy, so the
+// linked originals stay byte-identical — in a dry run and in a real run
+// (the same staging path).
+func TestRenderStagingNeverWritesThroughSymlinks(t *testing.T) {
+	for _, dry := range []bool{false, true} {
+		dir := writeAddon(t)
+		shared := t.TempDir()
+		originals := map[string]string{
+			"chart.yaml":         "apiVersion: khelm.mgoltzsche.github.com/v2\nkind: ChartRenderer\nmetadata:\n  name: shared\nvalueFiles:\n  - values.yaml\n",
+			"values.inline.yaml": "shared_inline: true\n",
+			"values.merged.yaml": "shared_merged: true\n",
+		}
+		for name, content := range originals {
+			target := filepath.Join(shared, name)
+			testutil.WriteFile(t, target, content)
+			_ = os.Remove(filepath.Join(dir, name))
+			if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		p := testPaths(t)
+		t.Setenv(render.ModeEnv, string(render.ModeExec))
+		probe := &probeRunner{t: t, manifest: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n", check: func(d string) {
+			for name := range originals {
+				fi, err := os.Lstat(filepath.Join(d, name))
+				if err != nil || !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 {
+					t.Errorf("dry=%v: %s in the copy is not a private regular file: %v %v", dry, name, fi, err)
+				}
+			}
+			raw, _ := os.ReadFile(filepath.Join(d, "chart.yaml"))
+			if !strings.Contains(string(raw), "values.merged.yaml") || !strings.Contains(string(raw), "name: shared") {
+				t.Errorf("dry=%v: the staged chart.yaml:\n%s", dry, raw)
+			}
+		}}
+		var errBuf strings.Builder
+		var err error
+		if dry {
+			_, err = RenderDryRun(t.Context(), p, probe, &errBuf, dir, "lo", "hetzner", inlineValues, nil, dryBoundary(t, p), false)
+		} else {
+			_, err = Render(t.Context(), p, probe, &errBuf, dir, "lo", "hetzner", inlineValues, nil)
+		}
+		if err != nil {
+			t.Fatalf("dry=%v: %v\n%s", dry, err, errBuf.String())
+		}
+		for name, content := range originals {
+			raw, err := os.ReadFile(filepath.Join(shared, name))
+			if err != nil || string(raw) != content {
+				t.Errorf("dry=%v: the shared %s changed: %q (%v)", dry, name, raw, err)
+			}
+			if fi, err := os.Lstat(filepath.Join(dir, name)); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("dry=%v: the addon's %s is no longer a symlink", dry, name)
+			}
+		}
 	}
 }

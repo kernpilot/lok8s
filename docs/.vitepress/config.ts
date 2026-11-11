@@ -36,7 +36,7 @@ export default defineConfig({
     nav: [
       { text: 'Guide', link: '/guide/' },
       { text: 'Reference', link: '/reference/cli' },
-      { text: 'Releases', link: '/releases/v0.7.8' },
+      { text: 'Releases', link: '/releases/v0.12.0' },
       {
         text: 'GitHub',
         link: 'https://github.com/kernpilot/lok8s',
@@ -57,6 +57,7 @@ export default defineConfig({
           text: 'Workflows',
           items: [
             { text: 'Local Dev with Tilt', link: '/guide/local-dev' },
+            { text: 'Connect an AI agent (lo mcp)', link: '/guide/mcp' },
             { text: 'Local AI (lo chat)', link: '/guide/lo-chat' },
             { text: 'Services Configuration', link: '/guide/services' },
             { text: 'Testing', link: '/guide/testing' },
@@ -100,6 +101,16 @@ export default defineConfig({
         {
           text: 'Releases',
           items: [
+            { text: 'v0.12.0', link: '/releases/v0.12.0' },
+            { text: 'v0.11.1', link: '/releases/v0.11.1' },
+            { text: 'v0.11.0', link: '/releases/v0.11.0' },
+            { text: 'v0.10.1', link: '/releases/v0.10.1' },
+            { text: 'v0.10.0', link: '/releases/v0.10.0' },
+            { text: 'v0.9.2', link: '/releases/v0.9.2' },
+            { text: 'v0.9.1', link: '/releases/v0.9.1' },
+            { text: 'v0.9.0', link: '/releases/v0.9.0' },
+            { text: 'v0.8.0', link: '/releases/v0.8.0' },
+            { text: 'v0.7.9', link: '/releases/v0.7.9' },
             { text: 'v0.7.8', link: '/releases/v0.7.8' },
             { text: 'v0.7.7', link: '/releases/v0.7.7' },
             { text: 'v0.7.6', link: '/releases/v0.7.6' },

@@ -8,6 +8,7 @@ package kubehz
 import (
 	"context"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/testutil"
+	"gopkg.in/yaml.v3"
 )
 
 func renderInto(t *testing.T, h *harness, owner, access string) string {
@@ -120,15 +122,39 @@ func TestDeployPrint(t *testing.T) {
 		io.WriteString(c.Stdout, "kind: Rendered\ndir: "+c.Args[1]+"\n")
 		return nil
 	}
-	mustOK(t, h.ctx.deployPrint(t.Context(), work, "operator", "managed"), h.output())
+	mustOK(t, h.ctx.deployPrint(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
 	mustContain(t, h.output(), "# --- CronJob agent (kubehz-heartbeat) — identity + enrollment; heartbeat owner: operator ---")
+	mustNotContain(t, h.output(), "kubehz-agent-bind")
 	mustContain(t, h.output(), "# --- Live agent (kubehz-live-agent) — managed tier RBAC ---")
 	mustContain(t, h.output(), "dir: "+filepath.Join(work, "live-agent", "managed"))
 
 	h.reset()
-	mustOK(t, h.ctx.deployPrint(t.Context(), work, "cronjob", "registered"), h.output())
+	mustOK(t, h.ctx.deployPrint(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
 	mustContain(t, h.output(), "# The live agent is NOT deployed in cronjob mode; a previous install would be removed.")
 	mustNotContain(t, h.output(), "live-agent")
+}
+
+// F5: with a bind secret on disk, the dry run says first that the Secret goes
+// in first, and never prints the value.
+func TestDeployPrintNamesTheBindSecretFirst(t *testing.T) {
+	h := newHarness(t)
+	work := renderInto(t, h, "cronjob", "registered")
+	writeBindSecret(t, h, "acme.example.com", testBindSecret)
+	h.runner.handler = func(c execx.Cmd, _ string) error {
+		io.WriteString(c.Stdout, "kind: Rendered\n")
+		return nil
+	}
+	mustOK(t, h.ctx.deployPrint(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
+	first, _, _ := strings.Cut(h.output(), "\n")
+	if first != "# --- Secret kubehz-agent-bind (the bind secret from clusters/acme.example.com/.kubehz-bind) — applied first; the value is not printed ---" {
+		t.Fatalf("first dry-run line = %q", first)
+	}
+	mustNotContain(t, h.output(), "9f1c2b3a4d5e6f70")
+	for _, l := range h.runner.lines() {
+		if !strings.HasPrefix(l, "kubectl kustomize ") {
+			t.Fatalf("dry run must apply nothing: %s", l)
+		}
+	}
 }
 
 func TestDeployApplyToOperatorOrder(t *testing.T) {
@@ -163,57 +189,216 @@ func writeBindSecret(t *testing.T, h *harness, domain, secret string) string {
 	return p
 }
 
-// B243: with a bind secret staged, the operator deploy upserts it into
-// kubehz-agent-bind AFTER the CronJob agent apply (the namespace exists) and
-// BEFORE the identity bootstrap reads it. The value goes in via --from-file,
-// never argv.
+const testBindSecret = "9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+
+// bindManifest is what the fake `kubectl create secret … --dry-run=client -o
+// yaml` prints, so a test can follow it to the stdin of the apply.
+const bindManifest = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: kubehz-agent-bind\n  namespace: kubehz-system\ndata:\n  bind-secret: OWYxYw==\n"
+
+// bindStageLogger is kubectlLogger with the dry-run create answering
+// bindManifest; fail names one argv substring that exits 1.
+func bindStageLogger(h *harness, fail string) *[]string {
+	return kubectlLogger(h, func(c execx.Cmd) (bool, error) {
+		line := argvLine(c)
+		if fail != "" && strings.Contains(line, fail) {
+			return true, exitErr(1)
+		}
+		if strings.Contains(line, "create secret generic kubehz-agent-bind") {
+			io.WriteString(c.Stdout, bindManifest)
+		}
+		return false, nil
+	})
+}
+
+// indexOf is the first log line that contains substr, or -1.
+func indexOf(log []string, substr string) int {
+	for i, l := range log {
+		if strings.Contains(l, substr) {
+			return i
+		}
+	}
+	return -1
+}
+
+// assertBindStagedFirst checks the three staging calls and that they come
+// before the first call that changes the agent, in their order. The value
+// goes in through --from-file and stdin, never argv.
+func assertBindStagedFirst(t *testing.T, h *harness, log []string, work, path, firstChange string) {
+	t.Helper()
+	ns := indexOf(log, "apply -f "+filepath.Join(work, "agent", "namespace.yaml"))
+	create := indexOf(log, "-n kubehz-system create secret generic kubehz-agent-bind --from-file=bind-secret="+path+" --dry-run=client -o yaml")
+	ssa := indexOf(log, "apply --server-side --force-conflicts -f -")
+	change := indexOf(log, firstChange)
+	if ns != 0 || create != 1 || ssa != 2 || change != 3 {
+		t.Fatalf("want namespace(0) < dry-run create(1) < server-side apply(2) < %q(3), got %d %d %d %d: %v", firstChange, ns, create, ssa, change, log)
+	}
+	joined := strings.Join(log, "\n")
+	mustNotContain(t, joined, "--from-literal")
+	mustNotContain(t, joined, "9f1c2b3a4d5e6f70")
+	mustNotContain(t, joined, "delete secret kubehz-agent-bind")
+	// The apply reads what the dry run printed, on stdin.
+	got := ""
+	for i, c := range h.runner.calls {
+		if strings.Contains(argvLine(c), "apply --server-side") {
+			got = h.runner.stdins[i]
+		}
+	}
+	if got != bindManifest {
+		t.Fatalf("server-side apply stdin = %q, want the dry-run output", got)
+	}
+}
+
+// B243 + B288: with a bind secret on disk, the operator deploy stages it
+// before the CronJob agent apply, so neither a CronJob tick nor the identity
+// bootstrap Job can register without it.
 func TestDeployApplyStagesTheBindSecretOperator(t *testing.T) {
 	h := newHarness(t)
 	work := renderInto(t, h, "operator", "managed")
-	p := writeBindSecret(t, h, "acme.example.com", "9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70")
-	log := kubectlLogger(h, nil)
+	p := writeBindSecret(t, h, "acme.example.com", testBindSecret)
+	log := bindStageLogger(h, "")
 	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
-	joined := strings.Join(*log, "\n")
-	mustContain(t, joined, "delete secret kubehz-agent-bind --ignore-not-found=true")
-	mustContain(t, joined, "create secret generic kubehz-agent-bind --from-file=bind-secret="+p)
-	// The secret must be read from the file, never handed on the command line.
-	mustNotContain(t, joined, "--from-literal")
-	mustNotContain(t, joined, "9f1c2b3a4d5e6f70")
-	// Ordering: after the CronJob apply, before the identity Secret read.
-	agentApply, createSecret, idRead := -1, -1, -1
-	for i, l := range *log {
-		if agentApply == -1 && strings.Contains(l, "apply -k "+filepath.Join(work, "agent")) {
-			agentApply = i
-		}
-		if strings.Contains(l, "create secret generic kubehz-agent-bind") {
-			createSecret = i
-		}
-		if idRead == -1 && strings.Contains(l, "get secret kubehz-agent ") {
-			idRead = i
-		}
+	assertBindStagedFirst(t, h, *log, work, p, "apply -k "+filepath.Join(work, "agent"))
+	if idRead := indexOf(*log, "get secret kubehz-agent "); idRead != 4 {
+		t.Fatalf("the identity read must follow the CronJob apply: %v", *log)
 	}
-	if agentApply < 0 || createSecret <= agentApply || idRead <= createSecret {
-		t.Fatalf("bind-secret stage out of order (agentApply=%d createSecret=%d idRead=%d): %v", agentApply, createSecret, idRead, *log)
-	}
+	mustNotContain(t, h.output(), "no bind secret")
 }
 
-// B243: cronjob mode stages the bind secret too, after the final agent apply.
+// B243 + B288: cronjob mode stages it before anything else too: before the
+// live agent goes and before the CronJob agent apply.
 func TestDeployApplyStagesTheBindSecretCronjob(t *testing.T) {
 	h := newHarness(t)
 	work := renderInto(t, h, "cronjob", "registered")
-	writeBindSecret(t, h, "acme.example.com", "9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70")
-	log := kubectlLogger(h, nil)
+	p := writeBindSecret(t, h, "acme.example.com", testBindSecret)
+	log := bindStageLogger(h, "")
 	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
-	mustContain(t, strings.Join(*log, "\n"), "create secret generic kubehz-agent-bind --from-file=bind-secret=")
+	assertBindStagedFirst(t, h, *log, work, p, "delete -k "+filepath.Join(work, "live-agent", "managed"))
+	if agent := indexOf(*log, "apply -k "+filepath.Join(work, "agent")); agent != len(*log)-1 {
+		t.Fatalf("the CronJob agent apply must come last: %v", *log)
+	}
 }
 
-// No bind secret staged: the deploy touches kubehz-agent-bind not at all.
-func TestDeployApplyNoBindSecretNoSecretCall(t *testing.T) {
-	h := newHarness(t)
-	work := renderInto(t, h, "operator", "managed")
-	log := kubectlLogger(h, nil)
-	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
-	mustNotContain(t, strings.Join(*log, "\n"), "kubehz-agent-bind")
+// B288: a failed stage with a bind secret on disk stops the deploy before the
+// CronJob agent, in both directions and at each of the three steps. A CronJob
+// without the Secret registers a separate pending row.
+func TestDeployApplyFailedBindStageStopsBeforeTheCronJob(t *testing.T) {
+	for _, mode := range []struct{ owner, access string }{{"operator", "managed"}, {"cronjob", "registered"}} {
+		for _, step := range []string{"namespace.yaml", "--dry-run=client", "apply --server-side"} {
+			t.Run(mode.owner+"/"+step, func(t *testing.T) {
+				h := newHarness(t)
+				work := renderInto(t, h, mode.owner, mode.access)
+				writeBindSecret(t, h, "acme.example.com", testBindSecret)
+				log := bindStageLogger(h, step)
+				mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", mode.owner, mode.access))
+				mustContain(t, h.output(), "could not stage the bind secret from clusters/acme.example.com/.kubehz-bind")
+				mustContain(t, h.output(), "The deploy stopped before the CronJob agent.")
+				mustContain(t, h.output(), "registers a separate pending row, and the announced row gets no heartbeats.")
+				mustContain(t, h.output(), "The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new.")
+				mustContain(t, h.output(), "To deploy without the secret, remove the file")
+				mustNotContain(t, h.output(), "pending-pool")
+				joined := strings.Join(*log, "\n")
+				mustNotContain(t, joined, "apply -k")
+				mustNotContain(t, joined, "delete -k")
+				mustNotContain(t, joined, "create job")
+			})
+		}
+	}
+}
+
+// No bind secret on disk: the deploy touches kubehz-agent-bind not at all,
+// keeps today's order, and warns what a register in another checkout means.
+func TestDeployApplyNoBindSecretWarnsAndContinues(t *testing.T) {
+	for _, mode := range []struct{ owner, access, first string }{
+		{"operator", "managed", "apply -k "}, {"cronjob", "registered", "delete -k "},
+	} {
+		h := newHarness(t)
+		work := renderInto(t, h, mode.owner, mode.access)
+		log := kubectlLogger(h, nil)
+		mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", mode.owner, mode.access), h.output())
+		joined := strings.Join(*log, "\n")
+		mustNotContain(t, joined, "kubehz-agent-bind")
+		mustNotContain(t, joined, "namespace.yaml")
+		mustContain(t, (*log)[0], mode.first)
+		mustContain(t, h.output(), "[warn] kubehz: no bind secret at clusters/acme.example.com/.kubehz-bind.")
+		mustContain(t, h.output(), "the agent registers a separate pending row.")
+		mustContain(t, h.output(), "The announced row stays as it is and gets no heartbeats.")
+		mustContain(t, h.output(), "Claim the new row with the code from 'lo kubehz claim-code'.")
+	}
+}
+
+// F6: a file that is not a bind secret (the register check: a readable
+// regular file of exactly 64 lowercase hex) is never staged. The deploy warns
+// that the file holds no bind secret and keeps today's order.
+func TestDeployApplyMalformedBindSecretIsNotStaged(t *testing.T) {
+	for name, setup := range map[string]func(t *testing.T, path string){
+		"a directory":          func(t *testing.T, p string) { mustMkdir(t, p) },
+		"64 hex and a newline": func(t *testing.T, p string) { mustWrite(t, p, testBindSecret+"\n", 0o600) },
+		"upper-case hex":       func(t *testing.T, p string) { mustWrite(t, p, strings.ToUpper(testBindSecret), 0o600) },
+		"63 hex":               func(t *testing.T, p string) { mustWrite(t, p, testBindSecret[1:], 0o600) },
+		"unreadable": func(t *testing.T, p string) {
+			if os.Geteuid() == 0 {
+				t.Skip("root reads a 0000 file")
+			}
+			mustWrite(t, p, testBindSecret, 0o000)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			work := renderInto(t, h, "cronjob", "registered")
+			path := filepath.Join(h.ctx.Paths.Clusters, "acme.example.com", ".kubehz-bind")
+			mustMkdir(t, filepath.Dir(path))
+			setup(t, path)
+			log := kubectlLogger(h, nil)
+			mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "cronjob", "registered"), h.output())
+			mustNotContain(t, strings.Join(*log, "\n"), "kubehz-agent-bind")
+			mustContain(t, (*log)[0], "delete -k ")
+			mustContain(t, h.output(), "[warn] kubehz: clusters/acme.example.com/.kubehz-bind holds no bind secret (a readable file of exactly 64 lowercase hex characters).")
+			mustContain(t, h.output(), "The announced row stays as it is and gets no heartbeats.")
+		})
+	}
+}
+
+// F2: a failure after the stage names what the deploy changed so far: the
+// bind Secret when one was staged, nothing otherwise.
+func TestDeployApplyFailureNamesWhatChanged(t *testing.T) {
+	for _, tc := range []struct{ owner, access, fail, prefix string }{
+		{"operator", "managed", "apply -k ", "could not apply the CronJob agent (identity bootstrap) — "},
+		{"cronjob", "registered", "delete -k ", "could not remove the live agent — "},
+		{"cronjob", "registered", "delete deployment -l", "could not sweep live-agent Deployments by label — "},
+	} {
+		for _, staged := range []bool{true, false} {
+			h := newHarness(t)
+			work := renderInto(t, h, tc.owner, tc.access)
+			if staged {
+				writeBindSecret(t, h, "acme.example.com", testBindSecret)
+			}
+			bindStageLogger(h, tc.fail)
+			mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", tc.owner, tc.access))
+			want := tc.prefix + "nothing else was changed"
+			if staged {
+				want = tc.prefix + "only the bind Secret changed"
+			}
+			mustContain(t, h.output(), want)
+		}
+	}
+}
+
+func mustMkdir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustWrite(t *testing.T, path, content string, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatal(err)
+	}
+	// WriteFile applies the umask; set the mode the case asks for.
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // B244: a first deploy finds no identity Secret. The deploy runs the
@@ -356,6 +541,213 @@ func TestDeployApplyNeverReadyFails(t *testing.T) {
 	mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"))
 	mustContain(t, h.output(), "never became Ready")
 	mustContain(t, h.output(), "NOTHING owns the heartbeat")
+}
+
+// readyTimeout runs the operator apply with a rollout wait that times out.
+// The pod read after it answers pods (or fails with podsErr), the events
+// read answers events (or fails with eventsErr).
+func readyTimeout(t *testing.T, pods string, podsErr error, events string, eventsErr error) *harness {
+	t.Helper()
+	h := newHarness(t)
+	work := renderInto(t, h, "operator", "managed")
+	kubectlLogger(h, func(c execx.Cmd) (bool, error) {
+		line := argvLine(c)
+		switch {
+		case strings.Contains(line, "rollout status"):
+			return true, exitErr(1)
+		case strings.Contains(line, "get pods -l app.kubernetes.io/name=kubehz-live-agent "):
+			io.WriteString(c.Stdout, pods)
+			return true, podsErr
+		case strings.Contains(line, "get events "):
+			io.WriteString(c.Stdout, events)
+			return true, eventsErr
+		}
+		return false, nil
+	})
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"))
+	mustContain(t, h.output(), "never became Ready")
+	mustContain(t, h.output(), "(an image pull that fails or hangs, or an untolerated node taint, is the usual cause)")
+	return h
+}
+
+const testAgentImage = "ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8ee963b347ae29407895c8a8f51ec6d064aa"
+
+// A pull that started and never finished (a Pulling event, no Pulled event,
+// both for the agent container) is named with its pod, node and image, and
+// the hint says how to check the IPv6 path to the registry and how to work
+// around it. A pod that is not in a pull state (no node yet) comes first and
+// is skipped. A finished pull of another container does not count.
+func TestDeployApplyNeverReadyNamesAStalledPull(t *testing.T) {
+	pods := "kubehz-live-agent-6b7c9d8f5-q2w4r|||" + testAgentImage + "\n" +
+		"kubehz-live-agent-6b7c9d8f5-x2k4q|worker-1|ContainerCreating|" + testAgentImage + "\n"
+	events := "|Scheduled\nspec.containers{sidecar}|Pulling\nspec.containers{sidecar}|Pulled\nspec.containers{agent}|Pulling\n"
+	h := readyTimeout(t, pods, nil, events, nil)
+	want := "" +
+		"  Pod kubehz-live-agent-6b7c9d8f5-x2k4q on node worker-1 started to pull its image " + testAgentImage + ", and the pull did not finish.\n" +
+		"  A pull that hangs or times out can mean that the IPv6 path from the node to ghcr.io is broken.\n" +
+		"  On that path, the connection opens but carries no data, and the pull does not try IPv4.\n" +
+		"  To check, run these two commands on node worker-1. If only the IPv6 command times out, the IPv6 path is broken:\n" +
+		"    curl -6 -sS -o /dev/null --max-time 15 https://ghcr.io/v2/\n" +
+		"    curl -4 -sS -o /dev/null --max-time 15 https://ghcr.io/v2/\n" +
+		"  ghcr.io sends the image layers from another host. Run the two commands against https://pkg-containers.githubusercontent.com/ too.\n" +
+		"  To work around it, make the node reach ghcr.io over IPv4. Repair its IPv6 route, or run the node without IPv6.\n" +
+		"  Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod kubehz-live-agent-6b7c9d8f5-x2k4q\n"
+	if !strings.HasSuffix(h.errOut.String(), want) {
+		t.Fatalf("stderr does not end with the pull hint:\n%s", h.errOut.String())
+	}
+	mustNotContain(t, h.output(), "q2w4r on node")
+	// The two reads, argv for argv (the bash twin sends the same).
+	mustContain(t, strings.Join(h.runner.lines(), "\n"),
+		`kubectl -n kubehz-system get pods -l app.kubernetes.io/name=kubehz-live-agent --request-timeout=10s -o jsonpath={range .items[*]}{.metadata.name}|{.spec.nodeName}|{.status.containerStatuses[?(@.name=="agent")].state.waiting.reason}|{.spec.containers[?(@.name=="agent")].image}{"\n"}{end}`)
+	mustContain(t, strings.Join(h.runner.lines(), "\n"),
+		`kubectl -n kubehz-system get events --field-selector involvedObject.kind=Pod,involvedObject.name=kubehz-live-agent-6b7c9d8f5-x2k4q --request-timeout=10s -o jsonpath={range .items[*]}{.involvedObject.fieldPath}|{.reason}{"\n"}{end}`)
+	if n := h.runner.countCalls("get events"); n != 1 {
+		t.Fatalf("events reads: %d, want 1 (only for the pod in ContainerCreating)", n)
+	}
+}
+
+// A pull that failed (ErrImagePull, ImagePullBackOff) is named from the
+// waiting reason alone, without an events read. The registry comes from the
+// pod's image, so a mirror with a port is the host the commands test.
+func TestDeployApplyNeverReadyNamesAFailedPull(t *testing.T) {
+	for _, reason := range []string{"ErrImagePull", "ImagePullBackOff"} {
+		t.Run(reason, func(t *testing.T) {
+			image := "registry.example.com:5000/kubehz-agent@sha256:474994f0"
+			h := readyTimeout(t, "kubehz-live-agent-6b7c9d8f5-x2k4q|worker-1|"+reason+"|"+image+"\n", nil, "", nil)
+			mustContain(t, h.errOut.String(), "  Pod kubehz-live-agent-6b7c9d8f5-x2k4q on node worker-1 cannot pull its image "+image+" ("+reason+"). Read why: kubectl -n kubehz-system describe pod kubehz-live-agent-6b7c9d8f5-x2k4q\n")
+			mustContain(t, h.errOut.String(), "the IPv6 path from the node to registry.example.com:5000 is broken")
+			mustContain(t, h.errOut.String(), "    curl -6 -sS -o /dev/null --max-time 15 https://registry.example.com:5000/v2/\n")
+			// The layer host line belongs to ghcr.io only.
+			mustNotContain(t, h.errOut.String(), "pkg-containers")
+			if h.runner.anyCall("get events") {
+				t.Fatal("a failed pull needs no events read")
+			}
+		})
+	}
+}
+
+// No pull hint where the pod's state does not show a pull that failed or
+// hangs, and none where the state cannot be read or does not have the
+// expected shape: the hint names only what it read.
+func TestDeployApplyNeverReadyWithoutAPullNamesNoPull(t *testing.T) {
+	pod := "kubehz-live-agent-6b7c9d8f5-x2k4q"
+	creating := pod + "|worker-1|ContainerCreating|" + testAgentImage + "\n"
+	for name, tc := range map[string]struct {
+		pods      string
+		podsErr   error
+		events    string
+		eventsErr error
+	}{
+		"pull finished, volume wait": {pods: creating, events: "|Scheduled\nspec.containers{agent}|Pulling\nspec.containers{agent}|Pulled\n|FailedMount\n"},
+		"no pull started":            {pods: creating, events: "|Scheduled\n|FailedMount\n"},
+		"another container pulling":  {pods: creating, events: "|Scheduled\nspec.containers{sidecar}|Pulling\n"},
+		"a reason without its field": {pods: creating, events: "Pulling\n"},
+		"events unreadable":          {pods: creating, events: "spec.containers{agent}|Pulling\n", eventsErr: exitErr(1)},
+		"pod read fails":             {pods: creating, podsErr: exitErr(1), events: "spec.containers{agent}|Pulling\n"},
+		"not scheduled":              {pods: pod + "|||" + testAgentImage + "\n"},
+		"container running":          {pods: pod + "|worker-1||" + testAgentImage + "\n"},
+		"other waiting reason":       {pods: pod + "|worker-1|CrashLoopBackOff|" + testAgentImage + "\n"},
+		"escape in the pod name":     {pods: pod + "\x1b[31m|worker-1|ImagePullBackOff|" + testAgentImage + "\n"},
+		"escape in the image":        {pods: pod + "|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-agent\x1b[31m@sha256:474994f0\n"},
+		"bidi override in the image": {pods: pod + "|worker-1|ImagePullBackOff|ghcr.io/kernpilot/\u202ekubehz-agent@sha256:474994f0\n"},
+		"non-ASCII letter in image":  {pods: pod + "|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-ag\u00e9nt@sha256:474994f0\n"},
+		"shell text in the image":    {pods: pod + "|worker-1|ImagePullBackOff|ghcr.io/x;$(id)\n"},
+		"NUL in the image":           {pods: pod + "|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-agent\x00@sha256:474994f0\n"},
+		"NUL in the events reason":   {pods: creating, events: "spec.containers{agent}|Pul\x00ling\n"},
+		"a fifth field":              {pods: pod + "|worker-1|ImagePullBackOff|" + testAgentImage + "|x\n"},
+		"no pods":                    {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := readyTimeout(t, tc.pods, tc.podsErr, tc.events, tc.eventsErr)
+			mustNotContain(t, h.output(), "IPv6")
+			mustNotContain(t, h.output(), "  Pod ")
+		})
+	}
+}
+
+// The image may be at most liveAgentImageMaxLen bytes: a line with a longer
+// image gets no hint. The bash twin has the same limit as a separate check
+// (a regex bound above 255 does not compile on every libc), and its bats
+// test pins the same boundary.
+func TestDeployApplyNeverReadyImageLengthLimit(t *testing.T) {
+	pod := "kubehz-live-agent-6b7c9d8f5-x2k4q"
+	prefix := "ghcr.io/kernpilot/kubehz-agent:"
+	atMax := prefix + strings.Repeat("a", 511-len(prefix))
+	if len(atMax) != 511 || liveAgentImageMaxLen != 511 {
+		t.Fatalf("image %d bytes, limit %d: the test and the limit disagree", len(atMax), liveAgentImageMaxLen)
+	}
+	h := readyTimeout(t, pod+"|worker-1|ImagePullBackOff|"+atMax+"\n", nil, "", nil)
+	mustContain(t, h.errOut.String(), "  Pod "+pod+" on node worker-1 cannot pull its image "+atMax+" (ImagePullBackOff).")
+	h = readyTimeout(t, pod+"|worker-1|ImagePullBackOff|"+atMax+"a\n", nil, "", nil)
+	mustNotContain(t, h.output(), "IPv6")
+	mustNotContain(t, h.output(), "  Pod ")
+}
+
+// The hint reads the agent container of the pods that the Deployment
+// selects. Both come from the vendored manifest: this test reads them from
+// the embedded live-agent/base/deployment.yaml, so a re-vendor that renames
+// the container or changes the selector fails here and does not silently
+// turn the hint off.
+func TestLiveAgentPullHintFollowsTheVendoredDeployment(t *testing.T) {
+	raw, err := fs.ReadFile(Manifests(), "live-agent/base/deployment.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d struct {
+		Spec struct {
+			Selector struct {
+				MatchLabels map[string]string `yaml:"matchLabels"`
+			} `yaml:"selector"`
+			Template struct {
+				Metadata struct {
+					Labels map[string]string `yaml:"labels"`
+				} `yaml:"metadata"`
+				Spec struct {
+					Containers []struct {
+						Name string `yaml:"name"`
+					} `yaml:"containers"`
+				} `yaml:"spec"`
+			} `yaml:"template"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal(raw, &d); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Spec.Template.Spec.Containers) != 1 {
+		t.Fatalf("containers: %d, want 1", len(d.Spec.Template.Spec.Containers))
+	}
+	container := d.Spec.Template.Spec.Containers[0].Name
+	name := d.Spec.Selector.MatchLabels["app.kubernetes.io/name"]
+	if name == "" || d.Spec.Template.Metadata.Labels["app.kubernetes.io/name"] != name {
+		t.Fatalf("selector app.kubernetes.io/name %q does not select the pod template %v", name, d.Spec.Template.Metadata.Labels)
+	}
+
+	pod := "kubehz-live-agent-6b7c9d8f5-x2k4q"
+	h := readyTimeout(t, pod+"|worker-1|ContainerCreating|"+testAgentImage+"\n", nil,
+		"spec.containers{"+container+"}|Pulling\n", nil)
+	mustContain(t, h.errOut.String(), "  Pod "+pod+" on node worker-1 started to pull its image")
+	calls := strings.Join(h.runner.lines(), "\n")
+	mustContain(t, calls, "get pods -l app.kubernetes.io/name="+name+" ")
+	if n := strings.Count(calls, `@.name=="`+container+`"`); n != 2 {
+		t.Fatalf("the pod read names container %q %d times, want 2:\n%s", container, n, calls)
+	}
+}
+
+func TestImageRegistry(t *testing.T) {
+	t.Parallel()
+	for image, want := range map[string]string{
+		testAgentImage: "ghcr.io",
+		"registry.example.com:5000/agent@sha256:a": "registry.example.com:5000",
+		"localhost/agent:1":                        "localhost",
+		"mirror:5000/agent:1":                      "mirror:5000",
+		"docker.io/library/busybox:1":              "registry-1.docker.io",
+		"library/busybox:1":                        "registry-1.docker.io",
+		"busybox@sha256:a":                         "registry-1.docker.io",
+	} {
+		if got := imageRegistry(image); got != want {
+			t.Errorf("imageRegistry(%q) = %q, want %q", image, got, want)
+		}
+	}
 }
 
 func TestDeployApplyRolloutTimeoutFromEnv(t *testing.T) {

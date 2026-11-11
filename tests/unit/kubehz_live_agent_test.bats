@@ -43,14 +43,19 @@ teardown() {
 _make_runner() {
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
+# timeout: the pod's `timeout SECS CMD ARGS`. It runs the command as a shell
+# function, so the kubectl stub below answers it and no real kubectl runs.
+timeout() {
+  shift
+  "$@"
+}
 kubectl() {
   case "$*" in
     *"get secret kubehz-agent"*"agent-token"*) printf 'khz_agt_test' | base64 | tr -d '\n' ;;
     *"get secret kubehz-agent"*"claim-code"*)  printf 'khzc_test'   | base64 | tr -d '\n' ;;
     *"get secret kubehz-agent"*) return 0 ;;
     *"/version"*) printf '{"gitVersion":"v1.35.5"}\n' ;;
-    "get nodes -o jsonpath="*) printf 'cp-1\n' ;;
-    "get node "*) printf '' ;;
+    "get --raw /api/v1/nodes") printf '{"items":[{"metadata":{"name":"cp-1"}}]}\n' ;;
     "get csr -o json") printf '{}\n' ;;
     *"/readyz"*) printf 'ok\n'; return 0 ;;
     "get configmap kubehz-agent-config"*) printf '%s' "${STUB_MARKER:-{\}}" ;;
@@ -93,6 +98,9 @@ _source_deploy() {
   export -f import
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/http.sh"
+  # main holds kubehz::bind_secret_ok, the one bind-secret check the deploy
+  # shares with the register calls; lo always loads main before deploy.
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/deploy"
 }
 
@@ -396,7 +404,7 @@ _stub_yq() {
   kustomize() { echo "STANDALONE-KUSTOMIZE-RAN $*"; }
   export -f kustomize
 
-  run kubehz::deploy_print "${work}" operator managed
+  run kubehz::deploy_print "${work}" acme.example.com operator managed
   assert_success
   refute_output --partial "STANDALONE-KUSTOMIZE-RAN"
   assert_output --partial "kind: CronJob"
@@ -411,7 +419,7 @@ _stub_yq() {
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" cronjob registered
 
-  run kubehz::deploy_print "${work}" cronjob registered
+  run kubehz::deploy_print "${work}" acme.example.com cronjob registered
   assert_success
   assert_output --partial "kind: CronJob"
   refute_output --partial "name: kubehz-live-agent"
@@ -644,6 +652,226 @@ _stub_kubectl_log() {
   # not just report a failed command.
   assert_output --partial "never became Ready"
   assert_output --partial "NOTHING owns the heartbeat"
+}
+
+# A rollout wait that times out, then the pod read and the events read that
+# name a pull that failed or hangs. STUB_PODS / STUB_EVENTS are the answers,
+# STUB_PODS_RC / STUB_EVENTS_RC their exit codes. STUB_PODS_FILE /
+# STUB_EVENTS_FILE, when set, name a file to answer from instead: a variable
+# cannot hold a NUL byte. Every call lands in STUB_KUBECTL_LOG.
+_ready_timeout() {
+  _source_deploy
+  export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  : > "${STUB_KUBECTL_LOG}"
+  export STUB_PODS="${STUB_PODS:-}" STUB_EVENTS="${STUB_EVENTS:-}"
+  export STUB_PODS_RC="${STUB_PODS_RC:-0}" STUB_EVENTS_RC="${STUB_EVENTS_RC:-0}"
+  export STUB_PODS_FILE="${STUB_PODS_FILE:-}" STUB_EVENTS_FILE="${STUB_EVENTS_FILE:-}"
+  kubectl() {
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    case "$*" in
+      *"get pods -l app.kubernetes.io/name=kubehz-live-agent "*)
+        if [[ -n "${STUB_PODS_FILE}" ]]; then cat "${STUB_PODS_FILE}"; else printf '%s' "${STUB_PODS}"; fi
+        return "${STUB_PODS_RC}" ;;
+      *"get events "*)
+        if [[ -n "${STUB_EVENTS_FILE}" ]]; then cat "${STUB_EVENTS_FILE}"; else printf '%s' "${STUB_EVENTS}"; fi
+        return "${STUB_EVENTS_RC}" ;;
+      *"get pods"*) printf ''; return 0 ;;
+      *"rollout status"*) return 1 ;;
+    esac
+    return 0
+  }
+  export -f kubectl
+
+  local work="${BATS_TEST_TMPDIR}/a3p"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
+  assert_failure
+  assert_output --partial "never became Ready"
+  assert_output --partial "(an image pull that fails or hangs, or an untolerated node taint, is the usual cause)"
+}
+
+AGENT_IMAGE="ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8ee963b347ae29407895c8a8f51ec6d064aa"
+
+@test "ready timeout: a pull that started and did not finish is named, with the IPv6 check and the work-around" {
+  # The first pod has no node yet (not a pull state) and is skipped. A
+  # finished pull of another container does not count.
+  STUB_PODS="kubehz-live-agent-6b7c9d8f5-q2w4r|||${AGENT_IMAGE}"$'\n'"kubehz-live-agent-6b7c9d8f5-x2k4q|worker-1|ContainerCreating|${AGENT_IMAGE}"$'\n'
+  STUB_EVENTS=$'|Scheduled\nspec.containers{sidecar}|Pulling\nspec.containers{sidecar}|Pulled\nspec.containers{agent}|Pulling\n'
+  _ready_timeout
+
+  local want
+  want="  Pod kubehz-live-agent-6b7c9d8f5-x2k4q on node worker-1 started to pull its image ${AGENT_IMAGE}, and the pull did not finish.
+  A pull that hangs or times out can mean that the IPv6 path from the node to ghcr.io is broken.
+  On that path, the connection opens but carries no data, and the pull does not try IPv4.
+  To check, run these two commands on node worker-1. If only the IPv6 command times out, the IPv6 path is broken:
+    curl -6 -sS -o /dev/null --max-time 15 https://ghcr.io/v2/
+    curl -4 -sS -o /dev/null --max-time 15 https://ghcr.io/v2/
+  ghcr.io sends the image layers from another host. Run the two commands against https://pkg-containers.githubusercontent.com/ too.
+  To work around it, make the node reach ghcr.io over IPv4. Repair its IPv6 route, or run the node without IPv6.
+  Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod kubehz-live-agent-6b7c9d8f5-x2k4q"
+  [[ "${output}" == *"${want}" ]] || { echo "output does not end with the pull hint:"; echo "${output}"; false; }
+  refute_output --partial "q2w4r on node"
+
+  # The two reads, argv for argv (the Go binary sends the same).
+  run grep -cxF -e '-n kubehz-system get pods -l app.kubernetes.io/name=kubehz-live-agent --request-timeout=10s -o jsonpath={range .items[*]}{.metadata.name}|{.spec.nodeName}|{.status.containerStatuses[?(@.name=="agent")].state.waiting.reason}|{.spec.containers[?(@.name=="agent")].image}{"\n"}{end}' "${STUB_KUBECTL_LOG}"
+  assert_output "1"
+  run grep -cxF -e '-n kubehz-system get events --field-selector involvedObject.kind=Pod,involvedObject.name=kubehz-live-agent-6b7c9d8f5-x2k4q --request-timeout=10s -o jsonpath={range .items[*]}{.involvedObject.fieldPath}|{.reason}{"\n"}{end}' "${STUB_KUBECTL_LOG}"
+  assert_output "1"
+  run grep -c "get events" "${STUB_KUBECTL_LOG}"
+  assert_output "1"
+}
+
+@test "ready timeout: a failed pull is named from the waiting reason, and the registry comes from the pod's image" {
+  local reason image="registry.example.com:5000/kubehz-agent@sha256:474994f0"
+  for reason in ErrImagePull ImagePullBackOff; do
+    STUB_PODS="kubehz-live-agent-6b7c9d8f5-x2k4q|worker-1|${reason}|${image}"$'\n'
+    _ready_timeout
+    assert_output --partial "  Pod kubehz-live-agent-6b7c9d8f5-x2k4q on node worker-1 cannot pull its image ${image} (${reason}). Read why: kubectl -n kubehz-system describe pod kubehz-live-agent-6b7c9d8f5-x2k4q"
+    assert_output --partial "the IPv6 path from the node to registry.example.com:5000 is broken"
+    assert_output --partial "    curl -6 -sS -o /dev/null --max-time 15 https://registry.example.com:5000/v2/"
+    # The layer host line belongs to ghcr.io only.
+    refute_output --partial "pkg-containers"
+    # A failed pull needs no events read.
+    run grep -c "get events" "${STUB_KUBECTL_LOG}"
+    assert_output "0"
+  done
+}
+
+@test "ready timeout: no pull hint without a pull that failed or hangs, or without a readable pod state" {
+  local pod="kubehz-live-agent-6b7c9d8f5-x2k4q" creating sep=$'\x1f'
+  creating="${pod}|worker-1|ContainerCreating|${AGENT_IMAGE}"$'\n'
+  # pods, pods rc, events, events rc, joined by the unit separator 0x1f:
+  # the answers hold '|' and newlines, and an IFS whitespace character
+  # would merge the empty fields.
+  local -a cases=(
+    "${creating}${sep}0${sep}"$'|Scheduled\nspec.containers{agent}|Pulling\nspec.containers{agent}|Pulled\n|FailedMount\n'"${sep}0"  # the pull finished; a volume wait
+    "${creating}${sep}0${sep}"$'|Scheduled\n|FailedMount\n'"${sep}0"                             # no pull started
+    "${creating}${sep}0${sep}"$'|Scheduled\nspec.containers{sidecar}|Pulling\n'"${sep}0"        # another container pulls
+    "${creating}${sep}0${sep}"$'Pulling\n'"${sep}0"                                              # a reason without its container
+    "${creating}${sep}0${sep}"$'spec.containers{agent}|Pulling\n'"${sep}1"                       # events unreadable
+    "${creating}${sep}1${sep}"$'spec.containers{agent}|Pulling\n'"${sep}0"                       # pod read fails
+    "${pod}|||${AGENT_IMAGE}"$'\n'"${sep}0${sep}${sep}0"                                         # not scheduled
+    "${pod}|worker-1||${AGENT_IMAGE}"$'\n'"${sep}0${sep}${sep}0"                                 # container running
+    "${pod}|worker-1|CrashLoopBackOff|${AGENT_IMAGE}"$'\n'"${sep}0${sep}${sep}0"                 # another waiting reason
+    "${pod}"$'\e'"[31m|worker-1|ImagePullBackOff|${AGENT_IMAGE}"$'\n'"${sep}0${sep}${sep}0"      # an escape in the pod name
+    "${pod}|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-agent"$'\e'"[31m@sha256:474994f0"$'\n'"${sep}0${sep}${sep}0"      # an escape in the image
+    "${pod}|worker-1|ImagePullBackOff|ghcr.io/kernpilot/"$'\xe2\x80\xae'"kubehz-agent@sha256:474994f0"$'\n'"${sep}0${sep}${sep}0" # a bidi override (U+202E) in the image
+    "${pod}|worker-1|ImagePullBackOff|ghcr.io/x;\$(id)"$'\n'"${sep}0${sep}${sep}0"              # shell text in the image
+    "${pod}|worker-1|ImagePullBackOff|${AGENT_IMAGE}|x"$'\n'"${sep}0${sep}${sep}0"               # a fifth field
+    "${sep}0${sep}${sep}0"                                                                       # no pods
+  )
+  local c
+  for c in "${cases[@]}"; do
+    IFS="${sep}" read -r -d '' STUB_PODS STUB_PODS_RC STUB_EVENTS STUB_EVENTS_RC <<<"${c}" || true
+    STUB_EVENTS_RC="${STUB_EVENTS_RC%$'\n'}"
+    # A case that did not split into four fields would pass for no reason.
+    [[ "${STUB_PODS_RC}" == [01] && "${STUB_EVENTS_RC}" == [01] ]] || { echo "bad case: ${c}"; false; }
+    _ready_timeout
+    refute_output --partial "IPv6"
+    refute_output --partial "  Pod "
+  done
+}
+
+@test "ready timeout: a non-ASCII letter in the image is refused in a UTF-8 locale too, as in the Go binary" {
+  # In en_US.UTF-8, bash's [A-Za-z] also matches letters like é; the Go
+  # regexp does not. The hint matches with LC_ALL=C, so both refuse the line.
+  export LC_ALL=en_US.UTF-8
+  local re='^[A-Za-z]+$'
+  [[ $'\xc3\xa9' =~ ${re} ]] || skip "no locale here in which [A-Za-z] matches é: the case would pass without LC_ALL=C"
+  STUB_PODS="kubehz-live-agent-6b7c9d8f5-x2k4q|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-ag"$'\xc3\xa9'"nt@sha256:474994f0"$'\n'
+  _ready_timeout
+  refute_output --partial "IPv6"
+  refute_output --partial "  Pod "
+  # The same line with an ASCII image, in the same locale, gets the hint.
+  STUB_PODS="kubehz-live-agent-6b7c9d8f5-x2k4q|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-agent@sha256:474994f0"$'\n'
+  _ready_timeout
+  assert_output --partial "  Pod kubehz-live-agent-6b7c9d8f5-x2k4q on node worker-1 cannot pull its image"
+}
+
+@test "ready timeout: the image may be at most 511 bytes, as in the Go binary" {
+  # The limit is a separate check and not a regex bound: a bound above 255
+  # (RE_DUP_MAX) does not compile on every libc. Go: liveAgentImageMaxLen.
+  local pod="kubehz-live-agent-6b7c9d8f5-x2k4q" prefix="ghcr.io/kernpilot/kubehz-agent:" pad at_max
+  printf -v pad '%*s' $(( 511 - ${#prefix} )) ''
+  at_max="${prefix}${pad// /a}"
+  [[ ${#at_max} -eq 511 ]] || { echo "image is ${#at_max} bytes, want 511"; false; }
+  STUB_PODS="${pod}|worker-1|ImagePullBackOff|${at_max}"$'\n'
+  _ready_timeout
+  assert_output --partial "  Pod ${pod} on node worker-1 cannot pull its image ${at_max} (ImagePullBackOff)."
+  STUB_PODS="${pod}|worker-1|ImagePullBackOff|${at_max}a"$'\n'
+  _ready_timeout
+  refute_output --partial "IPv6"
+  refute_output --partial "  Pod "
+}
+
+@test "ready timeout: a NUL byte in the pod read or the events read gets no hint, as in the Go binary" {
+  # Command substitution drops a NUL byte. Without the change to 0x01, the
+  # lines below would match once the NUL is gone, and the Go binary refuses
+  # them.
+  local pod="kubehz-live-agent-6b7c9d8f5-x2k4q"
+  export STUB_PODS_FILE="${BATS_TEST_TMPDIR}/pods" STUB_EVENTS_FILE="${BATS_TEST_TMPDIR}/events"
+  printf '%s|worker-1|ImagePullBackOff|ghcr.io/kernpilot/kubehz-agent\0@sha256:474994f0\n' "${pod}" > "${STUB_PODS_FILE}"
+  : > "${STUB_EVENTS_FILE}"
+  [[ $(tr -dc '\000' < "${STUB_PODS_FILE}" | wc -c) -eq 1 ]] || { echo "the pods file holds no NUL"; false; }
+  _ready_timeout
+  refute_output --partial "IPv6"
+  refute_output --partial "  Pod "
+  refute_output --partial "null byte"
+
+  printf '%s|worker-1|ContainerCreating|%s\n' "${pod}" "${AGENT_IMAGE}" > "${STUB_PODS_FILE}"
+  printf 'spec.containers{agent}|Pul\0ling\n' > "${STUB_EVENTS_FILE}"
+  [[ $(tr -dc '\000' < "${STUB_EVENTS_FILE}" | wc -c) -eq 1 ]] || { echo "the events file holds no NUL"; false; }
+  _ready_timeout
+  refute_output --partial "IPv6"
+  refute_output --partial "  Pod "
+  refute_output --partial "null byte"
+
+  # The same answers without the NUL get the hint, so the stub files work.
+  printf 'spec.containers{agent}|Pulling\n' > "${STUB_EVENTS_FILE}"
+  _ready_timeout
+  assert_output --partial "  Pod ${pod} on node worker-1 started to pull its image"
+}
+
+@test "ready timeout: the hint reads the container and the pods that the vendored Deployment names" {
+  # A re-vendor that renames the container or changes the selector must fail
+  # here, not silently turn the hint off.
+  local deployment="${LIVE_DIR}/base/deployment.yaml" container name
+  container=$(command yq -r '.spec.template.spec.containers[].name' "${deployment}")
+  name=$(command yq -r '.spec.selector.matchLabels["app.kubernetes.io/name"]' "${deployment}")
+  [[ -n "${container}" && "${container}" != *$'\n'* ]] || { echo "want exactly one container, got: ${container}"; false; }
+  [[ -n "${name}" && "${name}" != null ]]
+  run command yq -r '.spec.template.metadata.labels["app.kubernetes.io/name"]' "${deployment}"
+  assert_output "${name}"
+
+  STUB_PODS="kubehz-live-agent-6b7c9d8f5-x2k4q|worker-1|ContainerCreating|${AGENT_IMAGE}"$'\n'
+  STUB_EVENTS="spec.containers{${container}}|Pulling"$'\n'
+  _ready_timeout
+  assert_output --partial "  Pod kubehz-live-agent-6b7c9d8f5-x2k4q on node worker-1 started to pull its image"
+  run grep -c -F -e "get pods -l app.kubernetes.io/name=${name} " "${STUB_KUBECTL_LOG}"
+  assert_output "1"
+  run bash -c 'grep -o -F -e "$1" "$2" | wc -l' _ "@.name==\"${container}\"" "${STUB_KUBECTL_LOG}"
+  assert_output "2"
+}
+
+@test "image registry: the image's host, else Docker Hub" {
+  _source_deploy
+  local -A want=(
+    ["${AGENT_IMAGE}"]="ghcr.io"
+    ["registry.example.com:5000/agent@sha256:a"]="registry.example.com:5000"
+    ["localhost/agent:1"]="localhost"
+    ["mirror:5000/agent:1"]="mirror:5000"
+    ["docker.io/library/busybox:1"]="registry-1.docker.io"
+    ["library/busybox:1"]="registry-1.docker.io"
+    ["busybox@sha256:a"]="registry-1.docker.io"
+  )
+  local image
+  for image in "${!want[@]}"; do
+    run kubehz::image_registry "${image}"
+    assert_success
+    assert_output "${want[${image}]}"
+  done
 }
 
 @test "waits: the rollout timeout comes from the environment, so a slow pull can be given room" {
@@ -1262,51 +1490,224 @@ _podspec() {
   assert_success
 }
 
-# ── apply_bind_secret (B243) ─────────────────────────────
+# ── stage_bind_secret (B243, B288) ───────────────────────
 
-@test "apply_bind_secret: a staged bind secret is upserted into kubehz-agent-bind from the file, never argv" {
-  _source_deploy
-  _stub_kubectl_log
-  local secret="9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+BIND_SECRET_VALUE="9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
+BIND_MANIFEST='kind: Secret
+metadata:
+  name: kubehz-agent-bind
+  namespace: kubehz-system
+data:
+  bind-secret: OWYxYw=='
+
+# _stub_kubectl_bind [fail]: log every call. The dry-run create prints
+# BIND_MANIFEST; the server-side apply saves its stdin; a call whose argv
+# contains <fail> exits 1.
+_stub_kubectl_bind() {
+  export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  export STUB_KUBECTL_FAIL="${1:-}"
+  export STUB_SSA_STDIN="${BATS_TEST_TMPDIR}/ssa.stdin"
+  export BIND_MANIFEST
+  : > "${STUB_KUBECTL_LOG}"
+  kubectl() {
+    case "$*" in
+      *"get pods"*) printf ''; return 0 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    if [[ -n "${STUB_KUBECTL_FAIL}" && "$*" == *"${STUB_KUBECTL_FAIL}"* ]]; then
+      return 1
+    fi
+    case "$*" in
+      *"create secret generic kubehz-agent-bind"*) printf '%s\n' "${BIND_MANIFEST}" ;;
+      *"apply --server-side"*) cat > "${STUB_SSA_STDIN}" ;;
+    esac
+    return 0
+  }
+  export -f kubectl
+}
+
+_write_bind_secret() {
   mkdir -p "${PATH_CLUSTERS}/acme.example.com"
-  printf %s "${secret}" > "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+  printf %s "${BIND_SECRET_VALUE}" > "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+}
 
-  run kubehz::apply_bind_secret "acme.example.com"
-  assert_success
-  run grep -c "delete secret kubehz-agent-bind --ignore-not-found=true" "${STUB_KUBECTL_LOG}"
-  assert_output "1"
-  run grep -c -- "create secret generic kubehz-agent-bind --from-file=bind-secret=${PATH_CLUSTERS}/acme.example.com/.kubehz-bind" "${STUB_KUBECTL_LOG}"
-  assert_output "1"
-  # The secret value is read from the file, never placed on the command line.
-  run grep -c "from-literal" "${STUB_KUBECTL_LOG}"
-  assert_output "0"
-  run grep -c "${secret}" "${STUB_KUBECTL_LOG}"
+# _assert_bind_staged_first <work> <first change>: lines 1-3 stage the Secret
+# (namespace, dry-run create from the file, server-side apply of the dry-run
+# output on stdin), and line 4 is the first call that changes the agent.
+_assert_bind_staged_first() {
+  local work="${1}" first="${2}"
+  run sed -n '1p' "${STUB_KUBECTL_LOG}"
+  assert_output "apply -f ${work}/agent/namespace.yaml"
+  run sed -n '2p' "${STUB_KUBECTL_LOG}"
+  assert_output -- "-n kubehz-system create secret generic kubehz-agent-bind --from-file=bind-secret=${PATH_CLUSTERS}/acme.example.com/.kubehz-bind --dry-run=client -o yaml"
+  run sed -n '3p' "${STUB_KUBECTL_LOG}"
+  assert_output "apply --server-side --force-conflicts -f -"
+  run sed -n '4p' "${STUB_KUBECTL_LOG}"
+  assert_output --partial "${first}"
+  # The apply reads what the dry run printed, on stdin.
+  run cat "${STUB_SSA_STDIN}"
+  assert_output "${BIND_MANIFEST}"
+  # The value comes from the file, never from the command line. An upsert
+  # in place: no delete leaves a running CronJob without the Secret.
+  run grep -c -e "from-literal" -e "${BIND_SECRET_VALUE}" -e "delete secret kubehz-agent-bind" "${STUB_KUBECTL_LOG}"
   assert_output "0"
 }
 
-@test "apply_bind_secret: no staged secret touches kubehz-agent-bind not at all" {
+@test "apply order (to operator): the bind secret is staged BEFORE the CronJob agent and the identity bootstrap (B288)" {
   _source_deploy
-  _stub_kubectl_log
-  run kubehz::apply_bind_secret "acme.example.com"
-  assert_success
-  run grep -c "kubehz-agent-bind" "${STUB_KUBECTL_LOG}"
-  assert_output "0"
-}
-
-@test "apply order (to operator): a staged bind secret is upserted after the CronJob apply, before the identity read" {
-  _source_deploy
-  _stub_kubectl_log
+  _stub_kubectl_bind
   local work="${BATS_TEST_TMPDIR}/bind1"
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
-  mkdir -p "${PATH_CLUSTERS}/acme.example.com"
-  printf %s "9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70" > "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+  _write_bind_secret
 
   run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_success
-  # order: apply agent (1), delete+create the bind Secret (2,3), identity read.
-  run grep -n "apply -k ${work}/agent\|create secret generic kubehz-agent-bind\|get secret kubehz-agent " "${STUB_KUBECTL_LOG}"
-  assert_line --index 0 --partial "apply -k ${work}/agent"
-  assert_line --index 1 --partial "create secret generic kubehz-agent-bind"
-  assert_line --index 2 --partial "get secret kubehz-agent "
+  refute_output --partial "no bind secret"
+  _assert_bind_staged_first "${work}" "apply -k ${work}/agent"
+  run sed -n '5p' "${STUB_KUBECTL_LOG}"
+  assert_output --partial "get secret kubehz-agent "
+}
+
+@test "apply order (to cronjob): the bind secret is staged BEFORE the live agent goes and the CronJob agent returns (B288)" {
+  _source_deploy
+  _stub_kubectl_bind
+  local work="${BATS_TEST_TMPDIR}/bind2"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" cronjob registered
+  _write_bind_secret
+
+  run kubehz::deploy_apply "${work}" acme.example.com cronjob registered
+  assert_success
+  _assert_bind_staged_first "${work}" "delete -k ${work}/live-agent/managed"
+  run tail -1 "${STUB_KUBECTL_LOG}"
+  assert_output --partial "apply -k ${work}/agent"
+}
+
+@test "stage_bind_secret: a failed stage with a bind secret on disk stops before the CronJob agent, in both directions (B288)" {
+  _source_deploy
+  _write_bind_secret
+  local mode owner access step work n=0
+  for mode in "operator managed" "cronjob registered"; do
+    read -r owner access <<< "${mode}"
+    for step in "namespace.yaml" "--dry-run=client" "apply --server-side"; do
+      n=$(( n + 1 ))
+      _stub_kubectl_bind "${step}"
+      work="${BATS_TEST_TMPDIR}/fail${n}"
+      mkdir -p "${work}"
+      kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" "${owner}" "${access}"
+
+      run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
+      assert_failure
+      assert_output --partial "could not stage the bind secret from clusters/acme.example.com/.kubehz-bind"
+      assert_output --partial "The deploy stopped before the CronJob agent."
+      assert_output --partial "registers a separate pending row, and the announced row gets no heartbeats."
+      assert_output --partial "The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new."
+      assert_output --partial "To deploy without the secret, remove the file"
+      refute_output --partial "pending-pool"
+      # Nothing that changes an agent ran: no CronJob, no live-agent delete,
+      # no bootstrap Job.
+      run grep -c -e "apply -k" -e "delete -k" -e "create job" "${STUB_KUBECTL_LOG}"
+      assert_output "0"
+    done
+  done
+}
+
+@test "stage_bind_secret: no bind secret on disk warns, touches no Secret and keeps the order" {
+  _source_deploy
+  _stub_kubectl_log
+  local work="${BATS_TEST_TMPDIR}/bind3"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
+  assert_success
+  assert_output --partial "[warn] kubehz: no bind secret at clusters/acme.example.com/.kubehz-bind."
+  assert_output --partial "the agent registers a separate pending row."
+  assert_output --partial "The announced row stays as it is and gets no heartbeats."
+  assert_output --partial "Claim the new row with the code from 'lo kubehz claim-code'."
+  run grep -c -e "kubehz-agent-bind" -e "namespace.yaml" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+  run head -1 "${STUB_KUBECTL_LOG}"
+  assert_output --partial "apply -k ${work}/agent"
+}
+
+@test "stage_bind_secret: a file that is not a bind secret is never staged, and the deploy says so (F6)" {
+  _source_deploy
+  local fixture work n=0 bind_file="${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+  for fixture in directory newline upper short unreadable; do
+    [[ "${fixture}" != unreadable || "$(id -u)" != 0 ]] || continue  # root reads a 0000 file
+    n=$(( n + 1 ))
+    _stub_kubectl_log
+    rm -rf "${bind_file}"
+    mkdir -p "${PATH_CLUSTERS}/acme.example.com"
+    case "${fixture}" in
+      directory) mkdir -p "${bind_file}" ;;
+      newline) printf '%s\n' "${BIND_SECRET_VALUE}" > "${bind_file}" ;;
+      upper) printf %s "${BIND_SECRET_VALUE^^}" > "${bind_file}" ;;
+      short) printf %s "${BIND_SECRET_VALUE:1}" > "${bind_file}" ;;
+      unreadable) printf %s "${BIND_SECRET_VALUE}" > "${bind_file}"; chmod 000 "${bind_file}" ;;
+    esac
+    work="${BATS_TEST_TMPDIR}/malformed${n}"
+    mkdir -p "${work}"
+    kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" cronjob registered
+
+    run kubehz::deploy_apply "${work}" acme.example.com cronjob registered
+    assert_success
+    assert_output --partial "[warn] kubehz: clusters/acme.example.com/.kubehz-bind holds no bind secret (a readable file of exactly 64 lowercase hex characters)."
+    assert_output --partial "The announced row stays as it is and gets no heartbeats."
+    run grep -c "kubehz-agent-bind" "${STUB_KUBECTL_LOG}"
+    assert_output "0"
+    run head -1 "${STUB_KUBECTL_LOG}"
+    assert_output --partial "delete -k ${work}/live-agent/managed"
+  done
+  chmod -R u+rwx "${PATH_CLUSTERS}" 2>/dev/null || true
+}
+
+@test "deploy_apply: a failure after the stage names what changed so far (F2)" {
+  _source_deploy
+  local spec owner access fail prefix staged work n=0
+  for spec in "operator managed apply|-k could not apply the CronJob agent (identity bootstrap) —" \
+              "cronjob registered delete|-k could not remove the live agent —" \
+              "cronjob registered delete|deployment|-l could not sweep live-agent Deployments by label —"; do
+    read -r owner access fail prefix <<< "${spec}"
+    fail="${fail//|/ }"
+    for staged in 1 0; do
+      n=$(( n + 1 ))
+      rm -f "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+      if (( staged )); then _write_bind_secret; fi
+      _stub_kubectl_bind "${fail}"
+      work="${BATS_TEST_TMPDIR}/changed${n}"
+      mkdir -p "${work}"
+      kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" "${owner}" "${access}"
+
+      run kubehz::deploy_apply "${work}" acme.example.com "${owner}" "${access}"
+      assert_failure
+      if (( staged )); then
+        assert_output --partial "${prefix} only the bind Secret changed"
+      else
+        assert_output --partial "${prefix} nothing else was changed"
+      fi
+    done
+  done
+}
+
+@test "deploy_print: with a bind secret on disk the dry run says first that the Secret goes in first (F5)" {
+  _source_deploy
+  local work="${BATS_TEST_TMPDIR}/print1"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" cronjob registered
+  _write_bind_secret
+  kubectl() { echo "kind: Rendered"; }
+  export -f kubectl
+
+  run kubehz::deploy_print "${work}" acme.example.com cronjob registered
+  assert_success
+  assert_line --index 0 "# --- Secret kubehz-agent-bind (the bind secret from clusters/acme.example.com/.kubehz-bind) — applied first; the value is not printed ---"
+  refute_output --partial "${BIND_SECRET_VALUE}"
+
+  rm -f "${PATH_CLUSTERS}/acme.example.com/.kubehz-bind"
+  run kubehz::deploy_print "${work}" acme.example.com cronjob registered
+  assert_success
+  refute_output --partial "kubehz-agent-bind"
 }

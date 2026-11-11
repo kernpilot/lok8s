@@ -119,6 +119,27 @@ func TestRunDomainMissingSpec(t *testing.T) {
 	}
 }
 
+// A spec file with more than one YAML document is one high `unknown`
+// finding that names the lines to remove, and no other check reads it: the
+// two implementations would read two different specs. Bash twin: "a spec
+// file with a second document yields one unknown and no other check".
+func TestRunDomainSecondDocument(t *testing.T) {
+	a := newFixtureAuditor(t)
+	spec := filepath.Join(a.Paths.Clusters, "two.dev", "cluster.lok8s.yaml")
+	writeFileT(t, spec, "kind: Lo\nspec:\n  kubernetes:\n    version: v1.20.0\n---\nkind: KubeOne\n")
+	findings := a.RunDomain("two.dev")
+	if len(findings) != 1 || findings[0].ID != "cluster-spec" || findings[0].Status != "unknown" || findings[0].Severity != "high" {
+		t.Fatalf("want single high cluster-spec unknown, got %+v", findings)
+	}
+	wantDetail := spec + " holds more than one YAML document. Remove lines 5 to 6 (the '---' at line 5 and everything after it)."
+	if findings[0].Detail != wantDetail {
+		t.Errorf("detail = %q, want %q", findings[0].Detail, wantDetail)
+	}
+	if findings[0].Remediation != "Keep one YAML document in the spec file, then audit again." {
+		t.Errorf("remediation = %q", findings[0].Remediation)
+	}
+}
+
 func TestRunDomainOrderAndCount(t *testing.T) {
 	a := newFixtureAuditor(t)
 	writeFileT(t, filepath.Join(a.Paths.Clusters, "d.dev", "cluster.lok8s.yaml"),

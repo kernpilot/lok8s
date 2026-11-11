@@ -51,7 +51,14 @@ teardown() {
 _build_runner() {
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
+# timeout: the pod's `timeout SECS CMD ARGS`. It runs the command as a shell
+# function, so the kubectl stub below answers it and no real kubectl runs.
+timeout() {
+  shift
+  "$@"
+}
 kubectl() {
+  argv_log kubectl "$@"
   case "$*" in
     "get secret kubehz-agent -n kubehz-system")
       # Existence probe (no -o): present iff the store file exists.
@@ -69,13 +76,20 @@ kubectl() {
       # create-if-absent: mimic kubectl (fails if the Secret already exists),
       # which is what proves the guard never rotates.
       [ -f "${STORE_A}" ] && return 1
+      # A and C come as an env file on stdin (kubectl_env_file), never on
+      # argv.
       _a=""; _c=""
-      for _arg in "$@"; do
-        case "${_arg}" in
-          --from-literal=agent-token=*) _a="${_arg#--from-literal=agent-token=}" ;;
-          --from-literal=claim-code=*)  _c="${_arg#--from-literal=claim-code=}" ;;
+      _env=$(kubectl_env_file "$@")
+      _kv_ifs="${IFS}"
+      IFS='
+'
+      for _kv in ${_env}; do
+        case "${_kv}" in
+          agent-token=*) _a="${_kv#agent-token=}" ;;
+          claim-code=*)  _c="${_kv#claim-code=}" ;;
         esac
       done
+      IFS="${_kv_ifs}"
       printf '%s' "${_a}" > "${STORE_A}"
       printf '%s' "${_c}" > "${STORE_C}"
       return 0
@@ -86,31 +100,11 @@ kubectl() {
     *"/version"*) printf '{"major":"1","minor":"35","gitVersion":"v1.35.5","platform":"linux/amd64"}\n' ;;
     "version -o json") printf '{\n  "clientVersion": { "gitVersion": "v1.31.4" },\n  "serverVersion": { "gitVersion": "v1.35.5" }\n}\n' ;;
 
-    # Node NAMES via a targeted jsonpath (the FIX). The `-o json` fixture is a
-    # realistic two-node dump WITH the greedy-sed traps (runtimeHandlers +
-    # volumesAttached): dormant unless the extraction regresses.
-    "get nodes -o jsonpath="*) printf 'cp-1\nworker-1\n' ;;
-    "get nodes -o json") printf '%s\n' '{"items":[{"metadata":{"name":"cp-1"},"status":{"runtimeHandlers":[{"name":"runc"},{"name":"crun"}],"volumesAttached":[{"name":"kubernetes.io/csi/csi.hetzner.cloud^0001"}]}},{"metadata":{"name":"worker-1"},"status":{"runtimeHandlers":[{"name":"runc"}]}}]}' ;;
-
-    # Per-node queries. An unreal node name (a greedy-sed ghost) NotFounds like
-    # real kubectl → the old code's unguarded status=$(…) aborts under set -e.
-    "get node "*)
-      _n=$3
-      case "${_n}" in
-        cp-1|worker-1) : ;;
-        *) echo "Error from server (NotFound): nodes \"${_n}\" not found" >&2; return 1 ;;
-      esac
-      case "$*" in
-        *"jsonpath={.status.conditions"*) printf 'True' ;;
-        *"instance-type}"*) if [ "${_n}" = "cp-1" ]; then printf 'cx32'; else printf 'cpx41'; fi; return 0 ;;
-        *"jsonpath={.metadata.labels}"*)
-          if [ "${_n}" = "cp-1" ]; then
-            printf '%s' '{"kubernetes.io/hostname":"cp-1","node-role.kubernetes.io/control-plane":"","node.kubernetes.io/instance-type":"cx32"}'
-          else
-            printf '%s' '{"kubernetes.io/hostname":"worker-1","node.kubernetes.io/instance-type":"cpx41"}'
-          fi ;;
-        *) printf '' ;;
-      esac ;;
+    # The node list: ONE call for all nodes (B448), read with jq. A realistic
+    # two-node dump WITH the greedy-sed traps (runtimeHandlers +
+    # volumesAttached). cp-1 carries the control-plane label KEY (empty
+    # value); worker-1 does not.
+    "get --raw /api/v1/nodes") printf '%s\n' '{"items":[{"metadata":{"name":"cp-1","labels":{"kubernetes.io/hostname":"cp-1","node-role.kubernetes.io/control-plane":"","node.kubernetes.io/instance-type":"cx32"}},"status":{"conditions":[{"type":"Ready","status":"True"}],"runtimeHandlers":[{"name":"runc"},{"name":"crun"}],"volumesAttached":[{"name":"kubernetes.io/csi/csi.hetzner.cloud^0001"}]}},{"metadata":{"name":"worker-1","labels":{"kubernetes.io/hostname":"worker-1","node.kubernetes.io/instance-type":"cpx41"}},"status":{"conditions":[{"type":"Ready","status":"True"}],"runtimeHandlers":[{"name":"runc"}]}}]}' ;;
     "get csr -o json") printf '{}\n' ;;
     *"/readyz"*) printf 'ok\n'; return 0 ;;
     "get pods"*) printf ''; return 0 ;;
@@ -118,15 +112,15 @@ kubectl() {
   esac
 }
 curl() {
-  _url=""; _body=""; _hdrs=""
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      -d) _body="$2"; shift ;;
-      -H) _hdrs="${_hdrs} ${2} ;"; shift ;;
-      http://*|https://*) _url="$1" ;;
-    esac
-    shift
-  done
+  # curl_capture reads the call the way curl does: headers from -H and the
+  # config (-K), the body from stdin.
+  curl_capture "$@"
+  _url="${CURL_URL}"; _body="${CURL_BODY}"; _hdrs=""
+  _hdr_ifs="${IFS}"
+  IFS='
+'
+  for _h in ${CURL_HEADERS}; do _hdrs="${_hdrs} ${_h} ;"; done
+  IFS="${_hdr_ifs}"
   case "${_url}" in
     *"/agent-register")
       printf '%s' "${_body}" > "${REGISTER_OUT}"
@@ -140,7 +134,7 @@ curl() {
 STUBS_EOF
 
   RUNNER="${BATS_TEST_TMPDIR}/run.sh"
-  cat "${stubs}" "${HEARTBEAT}" > "${RUNNER}"
+  cat "${_PROJECT_ROOT}/tests/lib/curl_capture.sh" "${stubs}" "${HEARTBEAT}" > "${RUNNER}"
 }
 
 # ── The shipped script stays valid POSIX sh ──────────────
@@ -191,6 +185,31 @@ STUBS_EOF
 }
 
 # ── L2: agent-register carries the two HASHES, never plaintext ─
+
+@test "agent: A, C and the bind secret never reach a command line" {
+  # Every process on the node can read argv (ps, /proc/<pid>/cmdline). The
+  # stubs log the argv of each curl and kubectl call (curl_capture.sh).
+  # Spies for the tools that a filter or redaction step could hand a
+  # secret to (sed, grep, base64, …) log their argv too.
+  export ARGV_LOG="${BATS_TEST_TMPDIR}/argv.log"
+  export BIND_SECRET="5e175e175e175e175e175e175e175e175e175e175e175e175e175e175e175e17"
+  source "${_PROJECT_ROOT}/tests/lib/argv_sentinels.bash"
+  argv_spy "${ARGV_SPY_TOOLS[@]}"
+  _build_runner
+  run sh "${RUNNER}"
+  assert_success
+
+  local a c
+  a="$(cat "${STORE_A}")"
+  c="$(cat "${STORE_C}")"
+  assert_argv_clean "${a}" "${c}" "${BIND_SECRET}"
+  # They still arrive: the bind secret in the register body, A as the
+  # bearer of the beat.
+  run command jq -r '.bindSecret' "${REGISTER_OUT}"
+  assert_output "${BIND_SECRET}"
+  run cat "${HEARTBEAT_HDRS}"
+  assert_output --partial "Authorization: Bearer ${a} ;"
+}
 
 @test "agent: agent-register posts sha256(A)/sha256(C) — never the plaintext secrets" {
   _build_runner

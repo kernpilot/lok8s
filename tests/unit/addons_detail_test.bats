@@ -229,3 +229,17 @@ YAML
   assert_failure
   refute_output --partial "kind=lo"
 }
+
+@test "addons::_driver and addons::detail refuse a spec file with a second document" {
+  # The layout message, not the malformed-kind one: the kind is correct, the
+  # layout is not. Go twin: TestDriverAndDetailRefuseASecondDocument.
+  export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s"
+  printf 'kind: Lo\nspec:\n  bootstrap: []\n---\nkind: KubeOne\n' | _spec two
+  local want="[error] ${PATH_CLUSTERS}/two/cluster.lok8s.yaml holds more than one YAML document. Remove lines 4 to 5 (the '---' at line 4 and everything after it)."
+  run addons::_driver two
+  assert_failure
+  assert_output "${want}"
+  run addons::detail two
+  assert_failure
+  assert_output "${want}"
+}

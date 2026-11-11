@@ -1,9 +1,11 @@
 package toolchain
 
 // pins_test.go — the drift gate. The pins in pins.go must equal what
-// go.mod links (lo-full renders through those modules) and must be what
-// the generated .bin/b.yaml installs (lo core execs those binaries).
-// Bumping any one side alone fails here.
+// go.mod links (lo-full renders through those modules), what the generated
+// .bin/b.yaml installs (lo core execs those binaries) and what the
+// contributor .bin/b.yaml installs (the render byte-parity tests compare
+// those binaries with the linked modules). Bumping any one side alone
+// fails here.
 
 import (
 	"os"
@@ -11,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
@@ -87,4 +91,35 @@ func TestTemplateCarriesThePins(t *testing.T) {
 			t.Errorf("template lacks:\n%s\n--- template:\n%s", s, tpl)
 		}
 	}
+}
+
+// TestContributorBYamlCarriesThePins: the contributor .bin/b.yaml installs
+// the pinned kustomize and khelm releases. A floating entry let CI install
+// khelm v3.0.0 next to the linked v2.8.0 (2026-10-21), and the chart
+// byte-parity test failed on every PR.
+func TestContributorBYamlCarriesThePins(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.Join(testutil.RepoRoot(t), ".bin", "b.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Binaries map[string]struct {
+			Version string `yaml:"version"`
+		} `yaml:"binaries"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	testutil.Drift{
+		Want: testutil.Tree{Name: "pins.go", Files: map[string]string{
+			"kustomize":                   KustomizeCLI,
+			"github.com/mgoltzsche/khelm": "v" + KhelmVersion,
+		}},
+		Got: testutil.Tree{Name: "the contributor .bin/b.yaml", Files: map[string]string{
+			"kustomize":                   doc.Binaries["kustomize"].Version,
+			"github.com/mgoltzsche/khelm": doc.Binaries["github.com/mgoltzsche/khelm"].Version,
+		}},
+		Sync: "bump .bin/b.yaml with internal/toolchain/pins.go, then run b install to refresh .bin/b.lock",
+	}.Check(t)
 }

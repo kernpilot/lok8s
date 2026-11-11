@@ -1,0 +1,137 @@
+# The rules of the ClusterRole `redis-operator` that the redis-operator
+# chart (0.26.1) ships, unchanged, under a name of their own and without the
+# chart's label rbac.authorization.k8s.io/aggregate-to-admin. The
+# redis-operator addon deletes the chart's ClusterRole and binding from its
+# render; this opt-in addon binds the same rules to the operator again.
+# internal/addons/redis_operator_rbac_test.go compares the rules with the
+# chart.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lok8s-redis-operator-chart-rbac
+rules:
+  - apiGroups:
+      - redis.redis.opstreelabs.in
+    resources:
+      - rediss
+      - redisclusters
+      - redisreplications
+      - redis
+      - rediscluster
+      - redissentinel
+      - redissentinels
+      - redisreplication
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - nonResourceURLs:
+      - '*'
+    verbs:
+      - get
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - redis.redis.opstreelabs.in
+    resources:
+      - redis/finalizers
+      - rediscluster/finalizers
+      - redisclusters/finalizers
+      - redissentinel/finalizers
+      - redissentinels/finalizers
+      - redisreplication/finalizers
+      - redisreplications/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - redis.redis.opstreelabs.in
+    resources:
+      - redis/status
+      - rediscluster/status
+      - redisclusters/status
+      - redissentinel/status
+      - redissentinels/status
+      - redisreplication/status
+      - redisreplications/status
+    verbs:
+      - get
+      - patch
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+      - pods/exec
+      - pods
+      - services
+      - configmaps
+      - events
+      - persistentvolumeclaims
+      - namespaces
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - apps
+    resources:
+      - statefulsets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lok8s-redis-operator-chart-rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lok8s-redis-operator-chart-rbac
+subjects:
+  - kind: ServiceAccount
+    name: redis-operator
+    namespace: redis-operator

@@ -128,7 +128,7 @@ func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag
 	if !doctorToolsSection(ctx, r, path, out) {
 		fail = true
 	}
-	if !doctorEnvironmentSection(ctx, paths, path, toolchainFlag, out) {
+	if !doctorEnvironmentSection(ctx, paths, d, path, toolchainFlag, out) {
 		fail = true
 	}
 	doctorTLSSection(ctx, r, path, d, out)
@@ -199,7 +199,7 @@ func doctorToolsSection(ctx context.Context, r execx.Runner, path string, out io
 
 // doctorEnvironmentSection is `--- environment ---` plus the toolchain
 // section it decides on.
-func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, path string, toolchainFlag bool, out io.Writer) bool {
+func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, d, path string, toolchainFlag bool, out io.Writer) bool {
 	fmt.Fprintln(out)
 	ui.Section(out, "environment")
 	doctorDir(out, "PATH_BASE", paths.Base)
@@ -232,12 +232,12 @@ func doctorEnvironmentSection(ctx context.Context, paths *config.Paths, path str
 	}
 	doctorAssets(out, paths)
 	doctorImplementation(out, paths)
-	doctorBashMode(out, paths)
+	ok := doctorBashMode(out, paths, d)
 
 	if toolchainFlag || toolchain.HasMarker(filepath.Join(paths.Bin, "b.yaml")) {
-		return doctorToolchain(ctx, out, paths, pluginHome, path)
+		return doctorToolchain(ctx, out, paths, pluginHome, path) && ok
 	}
-	return true
+	return ok
 }
 
 // doctorTLSSection is `--- dev TLS (cert: CA) ---` (advisory).
@@ -375,23 +375,47 @@ func doctorImplementation(w io.Writer, paths *config.Paths) {
 // doctorBashMode is the bash-mode line (Go-only): whether the bash tree
 // (a routed command) and the provider plugins can run: where the bash tree comes from
 // (assets.FindBashTree, nothing is extracted here) and whether argsh is
-// where the entrypoint sources it (${PATH_BIN}/argsh). The line is OMITTED
+// where the entrypoint sources it (${PATH_BIN}/argsh, the project's own:
+// an argsh elsewhere on PATH does not count). The line is OMITTED
 // in the one layout the frozen implementation can also run in (a local
 // tree and argsh present), so the doctor output stays byte-identical to
 // bash there (parity-configure diffs it strictly); every other state
-// prints it.
-func doctorBashMode(w io.Writer, paths *config.Paths) {
+// prints it. A missing argsh is a failure (false, ✗) when the project
+// needs bash mode: the active domain names a provider (the provider
+// plugins run on argsh: provision, recover, destroy, the provider section
+// below), or lok8s.yaml routes commands to bash. Otherwise it is a warning.
+func doctorBashMode(w io.Writer, paths *config.Paths, d string) bool {
 	tree := assets.FindBashTree(paths)
-	argsh := filepath.Join(paths.Bin, "argsh")
-	haveArgsh := fsutil.FileExists(argsh)
+	argsh, fix, haveArgsh := toolchain.Argsh(paths.Bin)
 	if tree.Source.Local() && haveArgsh {
-		return
+		return true
 	}
 	if !haveArgsh {
-		doctorWarn(w, "bash mode (spec.implementation, provider plugins): not runnable: argsh missing at "+config.RelTo(paths.Base, argsh)+" (fix: uncomment the bash group in .bin/b.yaml, then .bin/b install)")
-		return
+		msg := "bash mode (spec.implementation, provider plugins): not runnable: argsh missing at " + config.RelTo(paths.Base, argsh)
+		if need := bashModeNeeds(paths, d); len(need) > 0 {
+			doctorBad(w, msg+"; "+strings.Join(need, "; ")+" (fix: "+fix+")")
+			return false
+		}
+		doctorWarn(w, msg+" (fix: "+fix+")")
+		return true
 	}
 	doctorOK(w, "bash mode (spec.implementation, provider plugins): runnable (tree "+tree.String()+", argsh "+config.RelTo(paths.Base, argsh)+")")
+	return true
+}
+
+// bashModeNeeds names what in the project runs on the bash tree: the
+// active domain's provider plugin, and a routing to bash in lok8s.yaml.
+func bashModeNeeds(paths *config.Paths, d string) []string {
+	var need []string
+	if d != "" {
+		if pname := specProviderName(filepath.Join(paths.Clusters, d, "cluster.lok8s.yaml")); pname != "" && providerNameRe.MatchString(pname) {
+			need = append(need, d+" uses provider "+pname+", a bash plugin")
+		}
+	}
+	if r := newRouting(paths); r.problem() == nil && r.active() {
+		need = append(need, "lok8s.yaml routes commands to bash")
+	}
+	return need
 }
 
 // doctorToolchain is the pinned-toolchain section (Go-only): b under .bin,
@@ -537,6 +561,12 @@ func doctorProviderSection(ctx context.Context, r execx.Runner, paths *config.Pa
 		return
 	}
 
+	// The bash section sources ${PATH_BIN}/argsh. Without it the child
+	// fails with a raw bash error; the bash-mode line above names the fix.
+	if _, fix, ok := toolchain.Argsh(paths.Bin); !ok {
+		doctorWarn(out, "provider section skipped: argsh missing at "+config.RelTo(paths.Base, filepath.Join(paths.Bin, "argsh"))+" (fix: "+fix+")")
+		return
+	}
 	bash, ok := toolchain.LookPath(path, "bash")
 	if !ok {
 		return // no bash → the bash-side diagnosis cannot run at all

@@ -1,6 +1,6 @@
 # Getting Started
 
-lok8s is a Kubernetes deployment framework distributed as a [b](https://github.com/fentas/b) environment. It gives you a single CLI (`lo`), a single folder convention (`.lok8s/`), and the same workflow from local development to production.
+lok8s is a Kubernetes deployment framework. You install the `lo` release binary with `lo-install.sh`, and each project pins its tools with [b](https://github.com/fentas/b). lok8s gives you a single CLI (`lo`), a single folder convention (`.lok8s/`), and the same workflow from local development to production.
 
 ## Prerequisites
 
@@ -22,11 +22,11 @@ schema.
 
 ## Installation
 
-lok8s is distributed as a `b` environment with five profiles. Pick the one that matches your use case:
+Install the `lo` binary first (step 1). Each project then pins its toolchain with `b` (step 2). The `b` environment has five profiles. Pick the one that matches your use case:
 
 | Profile | Includes | Use case |
 |---------|----------|----------|
-| `core` | (none) | Remote deploy only (framework + `lok8s.dev` default domain, no kind/Tilt) |
+| `core` | (none) | Remote deploy only (framework tree, no kind or Tilt) |
 | `kustomize` | (none) | Kustomize plugins only (standalone build artifacts) |
 | `local` | core + kustomize | **Local dev**: kind + Tilt + mkcert on top of core |
 | `capi` | local | Cluster API provisioning (adds `clusterctl`, `hcloud`) |
@@ -56,7 +56,7 @@ plan, touch nothing).
 `lo` (the default, ~50 MB) is the **core** build: the manifest render runs
 the pinned `kustomize` binary plus the two exec generators (khelm's
 `ChartRenderer`, the `secrets.lok8s.dev` Secret plugin) that
-[`lo toolchain install`](#2-the-project-toolchain) installs with `b`.
+[`lo toolchain install`](#_2-the-project-toolchain) installs with `b`.
 `lo-full` (`--full`, ~120 MB) links the same kustomize API and khelm release
 into the binary and renders in-process; it needs no `kustomize`, `khelm` or
 `.kustomize/`. Both install as `lo`, both render byte-identical output (the
@@ -68,7 +68,7 @@ full when you want the render self-contained. Details:
 Without the script, the same steps by hand:
 
 ```bash
-V=v0.7.8; A=lo-linux-amd64.tar.gz             # your tag and platform
+V=v0.12.0; A=lo-linux-amd64.tar.gz             # your tag and platform
 curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/${A}"
 curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/checksums.txt"
 sha256sum --ignore-missing -c checksums.txt
@@ -85,7 +85,7 @@ kind, Tilt, mkcert, …), managed by [`b`](https://github.com/fentas/b).
 
 ```bash
 mkdir my-project && cd my-project
-lo init project        # clusters/, lok8s.yaml, .gitignore entries, mise.toml (files only)
+lo init project --cluster lok8s.dev   # clusters/lok8s.dev/, lok8s.yaml, .gitignore entries, mise.toml (files only)
 lo toolchain install   # .bin/b.yaml, b into .bin/, b install (the one network step)
 lo toolchain doctor    # b, kustomize, khelm and the Secret plugin verified against the pins
 ```
@@ -126,7 +126,7 @@ b install
 ```
 :::
 
-This copies the framework tree (addons, driver templates, provider plugins, the frozen argsh CLI), the kustomize plugins, and (for `local`+) the Tilt extension into your project, and installs each profile's binaries — the `lo` release binary among them (`core` declares it, so `b install` fetches the same `lo-<os>-<arch>.tar.gz` asset into `.bin/`). Each profile ships only the binaries it actually needs; [The Toolchain](/guide/toolchain#what-b-manages-today-and-what-it-will) lists what that is today and what it will shrink to.
+This copies the framework tree (addons, driver templates, provider plugins, the frozen argsh CLI), the kustomize plugins, and (for `local`+) the Tilt extension into your project, and installs each profile's binaries — the `lo` release binary among them (`core` declares it, so `b install` fetches the same `lo-<os>-<arch>.tar.gz` asset into `.bin/`). Each profile ships only the binaries it actually needs; [The Toolchain](/guide/toolchain#what-b-manages-consumers-vs-contributors) lists what that is today and what it will shrink to.
 
 If you join a project that already uses lok8s, the toolchain declaration
 is already in the repo. Clone and run a single command:
@@ -156,56 +156,75 @@ sh lo-up            # -y: no prompts;  -p <profile>;  -r <git-ref>
 
 ### The default `lok8s.dev` domain
 
-Every profile includes `clusters/lok8s.dev/`, a preconfigured cluster domain that works **out of the box** on a local Docker bridge with TLS. You do not need your own domain to get started: just `lo use lok8s.dev && lo up`.
+`lok8s.dev` is the domain for a local cluster: kind on a local Docker bridge. You do not need your own domain to get started. `lo init project --cluster lok8s.dev` writes its cluster spec, `clusters/lok8s.dev/cluster.lok8s.yaml`. The spec names only the domain and the `cilium` addon. The `lo` driver derives the network and the registries from the domain (see [Default resolution](/reference/specs#default-resolution)).
+
+A bare `lo init project` writes no cluster spec, and neither does a `b` profile. In that case, write it with `lo init cluster lok8s.dev` (see [Your First Cluster](#your-first-cluster)).
 
 You can also bring your own FQDN (`example.com`, `infra.example.net`, etc.) as an additional domain, or run multiple projects on `*.[1-100].lok8s.dev` subdomains. See [Concepts](/guide/concepts) for the FQDN convention.
 
-## Project Structure After Sync
+## Project Structure
 
-Everything lok8s ships lives under `.lok8s/`, a flat framework-owned
-tree synced from upstream. Your cluster definitions live under
-`clusters/`, one folder per FQDN. Your project's own files live at the
-repo root alongside `Tiltfile` and `services.yaml`.
+Your cluster definitions live under `clusters/`, one folder per FQDN.
+The comment on each line names the command that writes it:
 
 ```
 your-project/
-  .bin/                        # pinned toolchain (b) — incl. the lo binary
-  .lok8s/                      # framework (synced via b — don't edit)
-    VERSION                    # what `lo --version` reports
-    lo                         # frozen argsh CLI (lok8s.yaml can route commands to it; the binary is the entrypoint)
-    libs/, utils/              # frozen bash libraries (the reference the binary was ported from)
-    legacy/                    # retired code (the argsh installer, the bash operator hooks)
-    addons/                    # bootstrap addons (cilium, metallb, ...)
-    drivers/                   # driver templates (kind config, CAPI templates) + frozen bash drivers
-    providers/                 # infra providers (hetzner, ...) — bash plugins the binary runs
-    tilt/                      # Tilt extension
-      Tiltfile                 # the lok8s() extension function
+  lok8s.yaml                   # project marker (lo init project)
+  .gitignore                   # lok8s entries appended (lo init project, lo toolchain install)
+  mise.toml                    # puts .bin on PATH (lo init project; --env direnv writes .envrc)
   clusters/                    # your cluster definitions
-    lok8s.dev/                 # local dev domain (template)
-      cluster.lok8s.yaml       # cluster spec
-      targets/                 # kustomize targets
-      artifacts/               # built output (gitignored)
-  .kustomize/                  # kustomize plugin discovery (built binaries)
-  Tiltfile                     # bootstrap: load('./.lok8s/tilt/Tiltfile', 'lok8s')
-  services.yaml                # service definitions (your stuff)
-  .envrc                       # direnv: puts .bin on PATH (or mise.toml; no PATH_* pins)
+    .gitkeep                   # keeps the empty directory in git (lo init project)
+    .active                    # the active domain (lo use, lo init cluster)
+    lok8s.dev/                 # local dev domain
+      cluster.lok8s.yaml       # cluster spec (lo init project --cluster, lo init cluster)
+      .containerd/             # containerd registry config for the kind nodes (lo up)
+  .bin/                        # pinned toolchain: b.yaml, b.lock, b, kubectl, kind, ... (lo toolchain install)
+  .kustomize/                  # the two exec generators of the render (lo toolchain install)
+  .kubeconfig/                 # cluster kubeconfigs (lo up)
+  .lok8s/                      # framework assets, written on first use (addons/, drivers/lo/cluster/, tilt/)
 ```
 
-The `.lok8s/` and `.lok8s/tilt/` directories are framework code that
-`b env-sync` syncs from upstream. To override or extend behavior,
-prefer `services.local.yaml` (gitignored) or wrap the CLI in your
-own script. If you modify the synced files directly, the next sync
-overwrites your changes.
+You add the rest: kustomize targets under `clusters/<domain>/targets/`,
+and `services.yaml` with a `Tiltfile` (`lo init service <name>` writes
+both). `lo build` writes the rendered output under `clusters/<domain>/`.
+
+The `lo` binary embeds the framework assets (addons, driver templates,
+the Tilt extension). It writes an asset into `.lok8s/` the first time a
+command needs it, and it never overwrites that copy. You can edit an
+ejected file. `lo assets diff` shows your change against the embedded
+copy, and `lo assets update` applies a newer embedded copy to an
+unchanged file. See [`lo assets`](/reference/cli#lo-assets).
+
+The `b` profile path (above) syncs the full `.lok8s/` tree instead,
+with the frozen bash implementation. The next sync overwrites a file
+that you changed in that tree.
 
 ## Your First Cluster
 
-### 1. Set the active domain
+Run these steps in the project directory.
+
+### 1. Write the cluster spec
+
+If `clusters/lok8s.dev/cluster.lok8s.yaml` does not exist, write it:
+
+```bash
+lo init cluster lok8s.dev
+```
+
+`lo init cluster` writes the spec with the `lo` driver (kind on local
+Docker). It also makes `lok8s.dev` the active domain. On a terminal, it
+shows its plan and asks before it writes. `--yes` skips the questions.
+
+### 2. Set the active domain
 
 ```bash
 lo use lok8s.dev
 ```
 
-### 2. Start the local cluster
+A command without `--domain` uses the active domain. `lo use` without an
+argument shows the active domain and lists all domains.
+
+### 3. Start the local cluster
 
 ```bash
 lo up
@@ -213,13 +232,13 @@ lo up
 
 This provisions a kind cluster with registry mirrors, CoreDNS, TLS certificates, and the `spec.bootstrap` addons (Cilium by default). Then it starts Tilt for live service development. You build and deploy workload targets with `lo build` and `lo deploy`.
 
-### 3. Check status
+### 4. Check status
 
 ```bash
 lo status
 ```
 
-### 4. Tear it down
+### 5. Tear it down
 
 ```bash
 lo down

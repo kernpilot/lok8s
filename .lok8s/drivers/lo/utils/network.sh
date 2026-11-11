@@ -220,22 +220,225 @@ lo::registry_network() {
   lo::registry_network_create "${network}" "${subnet}" "${dynamic_range}"
 }
 
+# The gateway priority of a kind node's endpoint on the shared registry
+# network. kind creates the node on the project network with the default
+# priority 0. A container on two networks gets its default route from the
+# network with the highest priority; between equal priorities Docker takes the
+# network whose name sorts first. Without a priority, a project network whose
+# name sorts after "lok8s-registries" (for example "ops") lost the default
+# route to the registry network: node-to-service traffic left with the registry
+# address, rp_filter dropped part of the replies, and the Cilium init container
+# hung on https://10.96.0.1:443. With -1 the project network keeps the default
+# route for every name. Go twin: registryGwPriority (internal/driver/lo).
+LO_REGISTRY_GW_PRIORITY=-1
+# The first Docker release whose `docker network connect` accepts
+# --gw-priority (28.0, API 1.48).
+LO_GW_PRIORITY_MIN_MAJOR=28
+
+# lo::gw_priority_supported <versions> — true when `docker version --format
+# '{{.Client.Version}} {{.Server.Version}}'` names a client AND a daemon of
+# Docker 28.0 or later: the client parses the flag, the daemon applies it. A
+# value that does not parse (another engine, no daemon) reads as false.
+lo::gw_priority_supported() {
+  local -a fields
+  read -r -a fields <<<"${1}"
+  (( ${#fields[@]} == 2 )) || return 1
+  local v major
+  for v in "${fields[@]}"; do
+    major="${v%%.*}"
+    [[ "${major}" =~ ^[0-9]+$ ]] || return 1
+    (( 10#${major} >= LO_GW_PRIORITY_MIN_MAJOR )) || return 1
+  done
+}
+
+# lo::docker_gw_priority — lo::gw_priority_supported for the docker on PATH,
+# asked once per process (_LO_DOCKER_GW_PRIORITY caches the answer).
+lo::docker_gw_priority() {
+  if [[ -z "${_LO_DOCKER_GW_PRIORITY:-}" ]]; then
+    local versions
+    versions=$(docker version --format '{{.Client.Version}} {{.Server.Version}}' 2>/dev/null) || versions=""
+    _LO_DOCKER_GW_PRIORITY=0
+    if lo::gw_priority_supported "${versions}"; then _LO_DOCKER_GW_PRIORITY=1; fi
+  fi
+  (( _LO_DOCKER_GW_PRIORITY == 1 ))
+}
+
+# lo::route_field <line> <key> — the word after key in one `ip route` line
+# ("dev", "via"); nothing when the line does not carry it.
+lo::route_field() {
+  local -a f
+  read -r -a f <<<"${1}"
+  local i
+  for (( i = 0; i + 1 < ${#f[@]}; i++ )); do
+    if [[ "${f[${i}]}" == "${2}" ]]; then
+      echo "${f[$(( i + 1 ))]}"
+      return 0
+    fi
+  done
+}
+
+# lo::default_route_repair <current> <route-get> <gw> — decides the default
+# route of a node from two `ip` reads in the node: current is
+# `ip -4 route show default`, route-get is `ip -o -4 route get <gw>` for the
+# gateway of the project network. Prints the device that reaches gw (the
+# project network's interface) and returns 0 when the default route is not
+# `via <gw> dev <dev>` yet; returns 1 when it is; returns 2 when route-get
+# names no device.
+lo::default_route_repair() {
+  local current="${1}" route_get="${2}" gw="${3}" dev first
+  dev=$(lo::route_field "${route_get}" dev)
+  [[ -n "${dev}" ]] || return 2
+  first="${current%%$'\n'*}"
+  if [[ "$(lo::route_field "${first}" via)" == "${gw}" && "$(lo::route_field "${first}" dev)" == "${dev}" ]]; then
+    return 1
+  fi
+  echo "${dev}"
+}
+
+# lo::repair_default_route <node> <network> <registry-network> — moves the
+# default route of a node back to the project network when it goes through
+# another network. It is the fallback for a Docker without --gw-priority, and
+# the repair for a node that an older lok8s attached without a priority. One
+# `docker inspect <node>` reads the kind role label, State.Running, the gateway
+# of the node's own endpoint on the project network and, on Docker 28+ only
+# (lo::docker_gw_priority: an older docker fails the whole template on
+# .GwPriority), the gateway priority of its registry endpoint. Docker fills
+# .Gateway for every connected endpoint of a running container, but up to
+# Docker 28.5 `docker network inspect` reports only a gateway that the create
+# requested, and lo::network creates the project network with --subnet and no
+# --gateway. Docker writes the route again when the node restarts, so on such
+# a Docker the next `lo up` repeats the repair. Skipped without a docker exec:
+# kind's HA load balancer (its envoy image has no `ip`; it forwards from the
+# host to the control-plane nodes on the directly connected project network,
+# so its default route does not matter), and on Docker 28+ a node whose
+# registry endpoint has a negative gateway priority (correct by construction).
+# Advisory: a node that cannot be read or changed gets a warning, never a
+# failure. Go twin: repairDefaultRoute (inspectNodeRoute).
+lo::repair_default_route() {
+  local node="${1}" network="${2}" registry="${3}"
+  local fmt out role running gw prio current route_get observed dev rc=0
+  fmt='{{index .Config.Labels "io.x-k8s.kind.role"}}|{{.State.Running}}|{{with index .NetworkSettings.Networks "'"${network}"'"}}{{.Gateway}}{{end}}'
+  if lo::docker_gw_priority; then
+    fmt+='|{{with index .NetworkSettings.Networks "'"${registry}"'"}}{{.GwPriority}}{{end}}'
+  fi
+  out=$(docker inspect "${node}" --format "${fmt}" 2>/dev/null) || rc=$?
+  if (( rc != 0 )); then
+    warn "lo: ${node}: cannot inspect the node (docker inspect ${node}: exit status ${rc}). lo did not examine the default route. Make sure that the node exists. Then run lo up again."
+    return 0
+  fi
+  IFS='|' read -r role running gw prio <<<"${out}"
+  [[ "${role}" != external-load-balancer ]] || return 0
+  if [[ "${running}" != true ]]; then
+    warn "lo: ${node}: the node is not running (State.Running: \"${running}\"). lo did not examine the default route. Start the node (docker start ${node}). Then run lo up again."
+    return 0
+  fi
+  if [[ "${prio}" =~ ^-[0-9]+$ ]] && (( 10#${prio#-} > 0 )); then
+    return 0
+  fi
+  if ! ip::validate_format "${gw}" 2>/dev/null; then
+    warn "lo: ${node}: found no IPv4 gateway for network ${network} (docker inspect: \"${gw}\"). lo did not examine the default route. Attach the node to ${network} (docker network connect ${network} ${node}). Then run lo up again."
+    return 0
+  fi
+  current=$(docker exec "${node}" ip -4 route show default 2>/dev/null) || rc=$?
+  if (( rc != 0 )); then
+    warn "lo: ${node}: cannot read the default route (docker exec ${node} ip -4 route show default: exit status ${rc}). lo did not change the default route. Make sure that the node has the ip command (iproute2). Then run lo up again."
+    return 0
+  fi
+  route_get=$(docker exec "${node}" ip -o -4 route get "${gw}" 2>/dev/null) || rc=$?
+  observed="ip -o -4 route get ${gw}: \"${route_get}\""
+  if (( rc != 0 )); then
+    route_get=""
+    observed="ip -o -4 route get ${gw}: exit status ${rc}"
+    rc=0
+  fi
+  dev=$(lo::default_route_repair "${current}" "${route_get}" "${gw}") || rc=$?
+  if (( rc == 2 )); then
+    warn "lo: ${node}: found no interface to gateway ${gw} of network ${network} (${observed}). lo did not change the default route. Make sure that the node has an address in the subnet of ${network} (docker exec ${node} ip -4 addr show). Then run lo up again."
+    return 0
+  fi
+  (( rc == 0 )) || return 0
+  docker exec "${node}" ip route replace default via "${gw}" dev "${dev}" &>/dev/null || rc=$?
+  if (( rc != 0 )); then
+    warn "lo: ${node}: could not move the default route to ${network} (ip route replace default via ${gw} dev ${dev}: exit status ${rc}). Move the route by hand (docker exec ${node} ip route replace default via ${gw} dev ${dev}). Then run lo up again."
+    return 0
+  fi
+  warn "lo: ${node}: the default route did not go through ${network} — moved it there (via ${gw} dev ${dev})"
+}
+
+# lo::reconcile_registry_network_nodes <cluster-name> — the step after
+# `kind create`. A shared cluster attaches its nodes to the shared registry
+# network (lo::connect_nodes_to_registry_network). A cluster that is not
+# shared attaches nothing, but its nodes can still be on that network:
+# shared.enabled defaulted to true until 2026-08, and a node keeps its
+# attachment after the default changed. Those nodes get the same route
+# repair. The membership read is the healer's gate too (see
+# lo::nodes_on_registry_network). Advisory when not shared: a registry map
+# that cannot be read is not a reason to fail the provision. Go twin:
+# reconcileRegistryNetworkNodes.
+lo::reconcile_registry_network_nodes() {
+  local cluster_name="${1}"
+  [[ -n "${LOK8S_REGISTRY_JSON:-}" && -f "${LOK8S_REGISTRY_JSON}" ]] || return 0
+  if registry::is_shared; then
+    lo::connect_nodes_to_registry_network "${cluster_name}"
+    return
+  fi
+  _lo_registry_network_nodes "${cluster_name}" repair
+}
+
+# lo::connect_nodes_to_registry_network <cluster-name> — attaches the cluster's
+# kind nodes to the shared registry network. The registry endpoint gets the
+# gateway priority LO_REGISTRY_GW_PRIORITY, so the project network keeps the
+# default route of the node. A Docker without --gw-priority (or a connect that
+# refuses the flag) gets a plain connect, then lo::repair_default_route. An
+# attached node goes through lo::repair_default_route too: it repairs a node
+# that an older lok8s attached without a priority.
 lo::connect_nodes_to_registry_network() {
   local cluster_name="${1}"
-  local registry_network
+  _lo_registry_network_nodes "${cluster_name}" attach
+}
+
+# _lo_registry_network_nodes <cluster-name> <attach|repair> — walks the
+# cluster's kind nodes (`kind get nodes`) against the shared registry network.
+# Other members of that network (the registries, another cluster's nodes) are
+# never touched. A node that is attached goes through lo::repair_default_route.
+# With attach, a node that is not attached is connected (see
+# lo::connect_nodes_to_registry_network); with repair, the node is left alone,
+# and an empty member list ends the walk before `kind get nodes`. A member read
+# that fails counts as empty, whatever it printed: a partial list is not a
+# membership. kind's HA load balancer is attached like a node, as before the
+# gateway priority existed; lo::repair_default_route skips it. Go twin:
+# registryNetworkNodes.
+_lo_registry_network_nodes() {
+  local cluster_name="${1}" mode="${2}"
+  local registry_network project_network repair=1
   registry_network=$(registry::network_name)
+  project_network=$(registry::project_network)
+  [[ -n "${project_network}" && "${project_network}" != "null" && "${project_network}" != "${registry_network}" ]] || repair=0
 
   # Skip nodes that are already attached — a re-run must not error (nor rely
   # on the 2>/dev/null to hide a real failure for the common no-op case).
   local members
   members=$(docker network inspect "${registry_network}" \
-    -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null || true)
+    -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null) || members=""
+  if [[ "${mode}" != attach && -z "${members//[[:space:]]/}" ]]; then
+    return 0
+  fi
 
   local node
   for node in $(kind get nodes --name "${cluster_name}" 2>/dev/null); do
-    [[ " ${members} " == *" ${node} "* ]] && continue
+    if [[ " ${members} " == *" ${node} "* ]]; then
+      if (( repair )); then lo::repair_default_route "${node}" "${project_network}" "${registry_network}"; fi
+      continue
+    fi
+    [[ "${mode}" == attach ]] || continue
+    if lo::docker_gw_priority &&
+        docker network connect --gw-priority "${LO_REGISTRY_GW_PRIORITY}" "${registry_network}" "${node}" 2>/dev/null; then
+      continue
+    fi
     docker network connect "${registry_network}" "${node}" 2>/dev/null || true
+    if (( repair )); then lo::repair_default_route "${node}" "${project_network}" "${registry_network}"; fi
   done
+  return 0
 }
 
 # lo::nodes_on_registry_network <cluster-name>
@@ -275,34 +478,101 @@ lo::nodes_on_registry_network() {
 # a separate path from node status), but kubelet rejects every node-status
 # update ("failed to validate nodeIP") and nothing can reach INTO the node —
 # apiserver→kubelet and every cross-node pod route break. Observed 2026-08-17 on
-# kubehz-dev: cert-manager-webhook lived there, so every webhook-validated apply
-# failed and `lo up` died on `networking` + `cnpg-plugin` after burning all 6 of
-# bootstrap's CRD/webhook retries — retries that can never win, because this is
-# not the transient race they exist for.
+# a dev cluster: cert-manager-webhook lived there, so every webhook-validated
+# apply failed and `lo up` died on `networking` + `cnpg-plugin` after burning
+# all 6 of bootstrap's CRD/webhook retries — retries that can never win,
+# because this is not the transient race they exist for.
 #
 # The repair replicates the entrypoint's OWN update mechanism, but keyed on the
 # cluster-network address instead of DNS luck: sed the stale address across the
-# same files_to_update set the entrypoint maintains, write /kind/old-ipv4 so the
-# next boot's diff is quiet, restart kubelet. Idempotent and silent when
+# same files_to_update set the entrypoint maintains, renew the apiserver serving
+# certificate on a control-plane node (the entrypoint's fix_certificate) and
+# restart the controller manager and the scheduler there, write /kind/old-ipv4
+# so the next boot's diff is quiet, restart kubelet. Idempotent and silent when
 # everything already agrees.
+#
+# The repair script (lo::heal_node_repair) first puts back a pair that an
+# interrupted heal left in /kind/heal-pki (between the mv and the end of
+# kubeadm). kind's fix_certificate skips a node without apiserver.crt, so
+# without this step the pair would never come back. A complete pair in pki/
+# wins: kubeadm wrote a new pair, or the mv did not start. Otherwise every
+# file in /kind/heal-pki comes back, so the key and the certificate always
+# match.
+#
+# The certificate step: kubeadm puts the node address into the apiserver
+# serving certificate as an IP SAN. After the sed, controller-manager and
+# scheduler connect to https://<want>:6443 (their kubeconfigs name the node
+# address), but the certificate still names <have>, so they fail TLS.
+# kubelet.conf names the node address too on newer kind node images (v1.37.0)
+# and <cluster>-control-plane on older ones (v1.31.12), a name that the
+# certificate also has. kind renews the certificate at boot only when the
+# address in /kind/old-ipv4 differs, and the heal writes <want> there, so
+# without this step the certificate stays wrong after every later boot too.
+#   - Same guard and same kubeadm call as fix_certificate: only a node with
+#     apiserver.crt AND apiserver.key runs kube-apiserver (a worker skips the
+#     step), and the config is /kind/kubeadm.conf, which the sed has just moved
+#     to <want>.
+#   - The old pair must leave pki/ first: `kubeadm init phase certs apiserver`
+#     keeps an apiserver.crt that the cluster CA signed and does not read its
+#     SANs ("Using existing apiserver certificate and key on disk", exit 0).
+#     With the old pair in pki/, the call changes nothing.
+#   - Moved aside, not removed, for the same reason as the first block. On a
+#     kubeadm failure the script puts the old pair back and exits 1 before
+#     old-ipv4 and the kubelet restart. The caller warns with kubeadm's reason.
+#     The next lo up finds the flag already at <want> and a certificate
+#     without <want> (lo::heal_cert_reason), and runs the script again.
+#     old-ipv4 still holds <have>, so a node boot that finds a new address
+#     also runs kind's fix_certificate.
+#   - Before old-ipv4 for the same reason: a heal that stops before the renewal
+#     leaves that boot-time renewal in place.
+#   - No extra apiserver restart: kube-apiserver watches its certificate files
+#     and loads the new pair. On the have == want path this is the only reload,
+#     because the sed changes no manifest. On the full path the manifest sed
+#     also makes kubelet create the apiserver static pod again.
+#   - After the renewal the script stops the kube-controller-manager and
+#     kube-scheduler containers, and kubelet starts them again. Their manifests
+#     do not name the node address, so the sed does not restart them, and they
+#     read the server address of their kubeconfig only at start. A process that
+#     still connects to <have> fails TLS on the new certificate until it starts
+#     again (seen with kube-scheduler on kindest/node v1.31.12 after a node
+#     restart: TLS errors for the whole minute after the heal). A failed stop
+#     does not stop the script: the renewal is done.
 lo::heal_node_ips() {
   local cluster_name="${1}" kubeconfig="${2:-}"
   local network="${KIND_EXPERIMENTAL_DOCKER_NETWORK:-}"
   [[ -n "${network}" ]] || return 0
 
-  local node want have observed
+  local node want have observed reason
   local -a healed=()
+  # tried: a repair script ran on a node, also one that failed.
+  local tried=0
   for node in $(kind get nodes --name "${cluster_name}" 2>/dev/null); do
     # The node's address on the CLUSTER network — the only correct --node-ip.
     want=$(docker inspect "${node}" \
       --format "{{with index .NetworkSettings.Networks \"${network}\"}}{{.IPAddress}}{{end}}" 2>/dev/null || true)
     [[ -n "${want}" ]] || continue
+    # The address is spliced into the repair script (sed, printf), so only a
+    # real IP may reach the node. .IPAddress is IPv4 (Go: net.ParseIP).
+    ip::validate_format "${want}" 2>/dev/null || { warn "lo: ${node}: docker reports \"${want}\" on ${network}, not an IP address — not healing"; continue; }
 
     have=$(docker exec "${node}" cat /var/lib/kubelet/kubeadm-flags.env 2>/dev/null \
       | sed -n 's/.*--node-ip=\([^ "]*\).*/\1/p')
     [[ -n "${have}" ]] || continue
 
     if [[ "${have}" == "${want}" ]]; then
+      # The flag agrees, but on a control-plane node the apiserver certificate
+      # can still name the old address: a heal whose renewal failed (the
+      # script puts the old pair back and stops), a heal by an older lo that
+      # did not renew, or a heal that stopped with the pair in /kind/heal-pki.
+      # Run the repair again on such a node. With have == want the sed changes
+      # nothing, and the script restores and renews the pair.
+      reason=$(lo::heal_cert_reason "${node}" "${want}")
+      if [[ -n "${reason}" ]]; then
+        warn "lo: ${node} ${reason} — renewing the certificate"
+        tried=1
+        if lo::heal_node_repair "${node}" "${want}" "${want}"; then healed+=("${node}"); fi
+        continue
+      fi
       # The file agrees — but a prior heal may have died between the sed and
       # the kubelet restart, leaving kubelet running on the dead address while
       # the file (the only thing the drift check reads) looks repaired. The
@@ -330,9 +600,85 @@ lo::heal_node_ips() {
 
     # Same file set kind's entrypoint updates on an address change (manifests
     # only exist on control-plane nodes — existence-guarded). \b-anchored like
-    # the entrypoint's own sed, so 10.125.200.2 can't match inside .200.20.
+    # the entrypoint's own sed, so 10.125.200.2 can't match inside .200.20. On
+    # a control-plane node the script also renews the apiserver certificate
+    # (see the function comment).
     warn "lo: ${node} registered --node-ip=${have} (wrong network) — repointing to ${want} on ${network}"
-    docker exec "${node}" bash -c "
+    tried=1
+    if lo::heal_node_repair "${node}" "${have}" "${want}"; then healed+=("${node}"); fi
+  done
+
+  (( ${#healed[@]} || tried )) || return 0
+  [[ -n "${kubeconfig}" ]] || return 0
+  # Wait also after a repair that failed: on the full path the sed runs before
+  # kubeadm, so a failed renewal has already changed the static pod manifests,
+  # and kubelet starts those pods again.
+  lo::heal_wait_apiserver "${kubeconfig}"
+
+  # The CNI caches the node address too (Cilium mirrors it into CiliumNode and
+  # every peer's tunnel map), so a repaired node keeps routing to the dead IP
+  # until its agent re-registers. Best-effort: on a first provision there is no
+  # CNI yet, and bootstrap installs a fresh one moments later either way.
+  (( ${#healed[@]} )) || return 0
+  for node in "${healed[@]}"; do
+    kubectl --kubeconfig "${kubeconfig}" -n kube-system delete pod \
+      -l k8s-app=cilium --field-selector "spec.nodeName=${node}" 2>/dev/null || true
+  done
+}
+
+# lo::heal_wait_apiserver <kubeconfig>
+# Wait after a repair until the API server is steady (Go: waitAPIServer): 5
+# /readyz checks in a row, 2 s apart, within 60 checks. Each check stops after
+# 5 s: an API server that accepts the connection and does not answer fails the
+# check and does not stop the wait. A kubelet restart on a
+# control-plane node can make kubelet start etcd and the controller manager
+# again a few seconds later (seen on kindest/node v1.31.12). The API server then
+# refuses requests, and the next step of lo up (the first kubectl apply) fails.
+# One good check is not enough, because the restart of etcd can come after it.
+# A server that is not steady after 60 checks gets a warning; the heal stays
+# advisory.
+lo::heal_wait_apiserver() {
+  local kubeconfig="${1}" in_row=0 i
+  for (( i = 0; i < 60; i++ )); do
+    if kubectl --kubeconfig "${kubeconfig}" --request-timeout=5s get --raw /readyz >/dev/null 2>&1; then
+      in_row=$(( in_row + 1 ))
+      (( in_row < 5 )) || return 0
+    else
+      in_row=0
+    fi
+    sleep 2
+  done
+  warn "lo: the API server did not pass 5 /readyz checks in a row after the node repair (60 checks, 2 s apart). If a later step fails, run lo up again."
+}
+
+# lo::heal_node_repair <node> <have> <want>
+# Run the repair script of lo::heal_node_ips in the node (Go: repairNode). The
+# script's stdout is discarded. On a failure the warning carries the end of its
+# stderr (kubeadm writes its reason there), and the function returns 1.
+#
+# After a script that exited 0, the function reads the certificate again
+# (lo::heal_cert_reason). A renewal that did not change the certificate (for
+# example, a kubeadm that exits 0 and writes a certificate without the node
+# address) gets a warning, and the next lo up tries again. The function still
+# returns 0: the script ran to its end, so kubelet runs on the new address, and
+# the CNI agent must register it again. A worker has no certificate and passes
+# the check.
+#
+# A failed mkdir stops the script before anything moves. On a failure of the mv
+# or of kubeadm, the script puts back every file of the old pair that is in
+# /kind/heal-pki and exits 1. Without this check, a mv that moves nothing lets
+# kubeadm keep the old pair (exit 0), and the heal passes.
+lo::heal_node_repair() {
+  local node="${1}" have="${2}" want="${3}" err reason
+  err=$(docker exec "${node}" bash -c "
+      if [ -d /kind/heal-pki ]; then
+        if ! { [ -f /etc/kubernetes/pki/apiserver.crt ] && [ -f /etc/kubernetes/pki/apiserver.key ]; }; then
+          for k in apiserver.crt apiserver.key; do
+            if [ -f \"/kind/heal-pki/\${k}\" ]; then mv -f \"/kind/heal-pki/\${k}\" /etc/kubernetes/pki/ || exit 1; fi
+          done
+        fi
+        rm -rf /kind/heal-pki
+      fi
       for f in /etc/kubernetes/manifests/etcd.yaml \
                /etc/kubernetes/manifests/kube-apiserver.yaml \
                /etc/kubernetes/manifests/kube-controller-manager.yaml \
@@ -344,21 +690,71 @@ lo::heal_node_ips() {
                /var/lib/kubelet/kubeadm-flags.env; do
         [ -f \"\${f}\" ] && sed -i 's|\b${have//./\\.}\b|${want}|g' \"\${f}\"
       done
+      if [ -f /etc/kubernetes/pki/apiserver.crt ] && [ -f /etc/kubernetes/pki/apiserver.key ]; then
+        mkdir -p /kind/heal-pki || exit 1
+        mv -f /etc/kubernetes/pki/apiserver.crt /etc/kubernetes/pki/apiserver.key /kind/heal-pki/ &&
+          kubeadm init phase certs apiserver --config /kind/kubeadm.conf >/dev/null || {
+          for k in apiserver.crt apiserver.key; do
+            if [ -f \"/kind/heal-pki/\${k}\" ]; then mv -f \"/kind/heal-pki/\${k}\" /etc/kubernetes/pki/ || exit 1; fi
+          done
+          rm -rf /kind/heal-pki
+          exit 1
+        }
+        rm -rf /kind/heal-pki
+        for c in \$(crictl ps -q --name 'kube-controller-manager|kube-scheduler'); do crictl stop \"\${c}\" >/dev/null; done
+      fi
       printf '%s' '${want}' > /kind/old-ipv4
       systemctl restart kubelet
-    " 2>/dev/null || { warn "lo: could not repair ${node} — see 'docker exec ${node} systemctl status kubelet'"; continue; }
-    healed+=("${node}")
-  done
+    " 2>&1 >/dev/null) || {
+    warn "lo: could not repair ${node}: $(lo::heal_err_tail "${err}"). The next lo up tries again."
+    return 1
+  }
+  reason=$(lo::heal_cert_reason "${node}" "${want}")
+  [[ -z "${reason}" ]] \
+    || warn "lo: the certificate renewal on ${node} did not complete: the node ${reason}. The next lo up tries again."
+  return 0
+}
 
-  (( ${#healed[@]} )) || return 0
+# lo::heal_err_tail <stderr>
+# The end of the repair script's stderr for a warning (Go: healErrTail): the
+# last three lines, joined with "; ", at most 400 characters. It skips blank
+# lines, klog info and warning lines ("W1110 16:20:03.113013 …"; kubeadm writes
+# one for each document of kind's /kind/kubeadm.conf that the init phase does
+# not read), and kubeadm's hint "To see the stack trace of this error execute
+# with --v=5 or higher", so the error line of kubeadm stays in the warning.
+lo::heal_err_tail() {
+  local tail
+  tail=$(printf '%s\n' "${1}" | awk '
+    { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, "") }
+    $0 == "" || /^[IW][0-9][0-9][0-9][0-9] / || index($0, "To see the stack trace") == 1 { next }
+    { l[++n] = $0 }
+    END { for (i = (n > 3 ? n - 2 : 1); i <= n; i++) printf "%s%s", l[i], (i < n ? "; " : "") }')
+  [[ -n "${tail}" ]] || tail="no error output"
+  printf '%s' "${tail:0:400}"
+}
 
-  # The CNI caches the node address too (Cilium mirrors it into CiliumNode and
-  # every peer's tunnel map), so a repaired node keeps routing to the dead IP
-  # until its agent re-registers. Best-effort: on a first provision there is no
-  # CNI yet, and bootstrap installs a fresh one moments later either way.
-  [[ -n "${kubeconfig}" ]] || return 0
-  for node in "${healed[@]}"; do
-    kubectl --kubeconfig "${kubeconfig}" -n kube-system delete pod \
-      -l k8s-app=cilium --field-selector "spec.nodeName=${node}" 2>/dev/null || true
-  done
+# lo::heal_cert_reason <node> <want>
+# Why a node whose --node-ip already agrees needs the repair script again
+# (Go: certRenewalReason). Prints nothing when it does not. lo::heal_node_repair
+# also calls it after a script that exited 0. The probe prints heal-pki when an
+# interrupted heal left the pair in /kind/heal-pki. On a node with the whole
+# serving pair (a control-plane node) it prints the SANs of the apiserver
+# certificate, through openssl in the node (kind's node images ship it). On a
+# worker it prints nothing. A node that cannot be read, a worker and a
+# certificate that openssl cannot read print nothing.
+# Deviation D43: Go reads the certificate with cat and parses it with
+# crypto/x509, so it needs no openssl in the node.
+lo::heal_cert_reason() {
+  local node="${1}" want="${2}" sans
+  sans=$(docker exec "${node}" sh -c 'if [ -d /kind/heal-pki ]; then echo heal-pki; elif [ -f /etc/kubernetes/pki/apiserver.key ]; then openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -ext subjectAltName; fi' 2>/dev/null || true)
+  if [[ "${sans}" == heal-pki ]]; then
+    echo "has its apiserver key pair in /kind/heal-pki from an interrupted heal"
+    return 0
+  fi
+  [[ -n "${sans}" ]] || return 0
+  # openssl lists the SANs as "DNS:<name>, IP Address:<ip>, …". Without the
+  # blanks and with a comma at the end, every IP SAN reads "IPAddress:<ip>,".
+  sans="${sans//[[:space:]]/},"
+  [[ "${sans}" == *"IPAddress:${want},"* ]] && return 0
+  echo "has --node-ip=${want}, but its apiserver certificate does not name that address"
 }

@@ -40,6 +40,8 @@ func (r *fakeRunner) Run(ctx context.Context, c execx.Cmd) error {
 		_, _ = b.ReadFrom(c.Stdin)
 		stdin = b.String()
 	}
+	// The handler reads stdin again (the curl config, configBody).
+	c.Stdin = strings.NewReader(stdin)
 	r.calls = append(r.calls, c)
 	r.stdins = append(r.stdins, stdin)
 	if r.handler != nil {
@@ -49,6 +51,47 @@ func (r *fakeRunner) Run(ctx context.Context, c execx.Cmd) error {
 }
 
 func argvLine(c execx.Cmd) string { return c.Name + " " + strings.Join(c.Args, " ") }
+
+// configBody returns the request body that the curl config on stdin
+// carries (its `data-raw = "…"` line), with curl's unquoting: \n, \r, \t
+// and \v are the control bytes, a backslash before any other byte is that
+// byte. "" when the config has no body.
+func configBody(c execx.Cmd) string {
+	if c.Stdin == nil {
+		return ""
+	}
+	var b bytes.Buffer
+	_, _ = b.ReadFrom(c.Stdin)
+	for line := range strings.SplitSeq(b.String(), "\n") {
+		v, ok := strings.CutPrefix(line, `data-raw = "`)
+		if !ok || !strings.HasSuffix(v, `"`) {
+			continue
+		}
+		v = strings.TrimSuffix(v, `"`)
+		var out strings.Builder
+		for i := 0; i < len(v); i++ {
+			if v[i] != '\\' || i+1 == len(v) {
+				out.WriteByte(v[i])
+				continue
+			}
+			i++
+			switch v[i] {
+			case 'n':
+				out.WriteByte('\n')
+			case 'r':
+				out.WriteByte('\r')
+			case 't':
+				out.WriteByte('\t')
+			case 'v':
+				out.WriteByte('\v')
+			default:
+				out.WriteByte(v[i])
+			}
+		}
+		return out.String()
+	}
+	return ""
+}
 
 // curlRespond scripts curl's captured stream: body then the write-out line
 // (`\n%{http_code}`), both into the shared 2>&1 buffer.

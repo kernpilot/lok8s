@@ -75,6 +75,25 @@ func Lookup(n *yaml.Node, path ...string) *yaml.Node {
 	return n
 }
 
+// LookupMerged is Lookup through MapGetMerged (merge.go): yq's `.a.b.c`
+// with --yaml-fix-merge-anchor-to-spec on a spec with merge keys. Nil when a
+// key on the path is missing; MapGetMerged's error (a merge cycle, a merge
+// key that names no map) when the walk meets one.
+func LookupMerged(n *yaml.Node, path ...string) (*yaml.Node, error) {
+	n = Deref(n)
+	for _, key := range path {
+		v, found, err := MapGetMerged(n, key)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, nil
+		}
+		n = v
+	}
+	return n, nil
+}
+
 // HasKey reports whether the mapping node carries key (yq: `has("k")`).
 func HasKey(n *yaml.Node, key string) bool {
 	n = Deref(n)

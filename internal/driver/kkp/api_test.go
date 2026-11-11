@@ -412,9 +412,54 @@ func TestCreateClusterReturnsID(t *testing.T) {
 	}
 	line := argvLine(runner.calls[0])
 	if !strings.Contains(line, "--request POST") ||
-		!strings.Contains(line, "https://kkp.test.example.com/api/v2/projects/project-1/clusters") ||
-		!strings.Contains(line, `--data {"cluster":{"name":"test"}}`) {
+		!strings.Contains(line, "https://kkp.test.example.com/api/v2/projects/project-1/clusters") {
 		t.Fatalf("argv = %q", line)
+	}
+	// The body reaches curl in the config on stdin: a cluster create
+	// carries the cloud credentials, and argv is readable by every user.
+	if strings.Contains(line, "cluster") && strings.Contains(line, "--data") {
+		t.Fatalf("the body is on argv: %q", line)
+	}
+	if got := configBody(runner.calls[0]); got != `{"cluster":{"name":"test"}}` {
+		t.Fatalf("body in the curl config = %q", got)
+	}
+}
+
+// A body with line breaks, tabs, quotes and backslashes reaches curl's
+// config with escapes that curl turns back into the same bytes, and the
+// cloud credentials in it never reach argv.
+func TestAPISendsTheBodyInTheConfigNotOnArgv(t *testing.T) {
+	setKKPEnv(t)
+	d, runner, stderr := testDriver(t)
+	runner.handler = curlRespond(`{"id": "c1"}`, "200")
+	body := "{\n  \"cloud\": {\"hetzner\": {\"token\": \"hc-sentinel-7f3a\\\\x\\\"y\"}},\n\t\"k\": \"\\n\"\r\n}"
+	if _, err := d.api(t.Context(), "POST", "/api/v2/projects/p/clusters", body, stderr); err != nil {
+		t.Fatal(err)
+	}
+	if line := argvLine(runner.calls[0]); strings.Contains(line, "hc-sentinel-7f3a") {
+		t.Fatalf("the credential is on argv: %q", line)
+	}
+	if got := configBody(runner.calls[0]); got != body {
+		t.Fatalf("body in the curl config = %q, want %q", got, body)
+	}
+	if strings.Count(runner.stdins[0], "\n") != 2 {
+		t.Fatalf("the config must be two lines (header, data-raw): %q", runner.stdins[0])
+	}
+}
+
+// A control character other than a line feed, a carriage return or a tab
+// cannot be written in a config line: the body is refused, curl never runs.
+func TestAPIRefusesABodyWithAControlCharacter(t *testing.T) {
+	setKKPEnv(t)
+	d, runner, stderr := testDriver(t)
+	if _, err := d.api(t.Context(), "POST", "/x", "{\"a\": \"\x01\"}", stderr); err == nil {
+		t.Fatal("a body with \\x01 was sent")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("curl ran %d times", len(runner.calls))
+	}
+	if !strings.Contains(stderr.String(), "control character") {
+		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
 

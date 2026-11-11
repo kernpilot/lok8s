@@ -1,3 +1,12 @@
 # Defaults are fine: the chart installs the operator controller + the
 # redis.redis.opstreelabs.in CRDs (khelm renders crds/ by default).
 # No cluster-specific config — Redis instances are declared by the consumer.
+#
+# The chart has a value rbac.scope (cluster or namespace), but no value that
+# narrows the rules or drops the label aggregate-to-admin. The addon's
+# kustomization deletes the chart's ClusterRole and binding, and rbac.yaml
+# grants what the operator calls. That call list holds for the arguments and
+# the environment that these defaults give the operator: --leader-elect, no
+# WATCH_NAMESPACE, no webhooks, no --metrics-secure. A change of one of them
+# (here or in an inline override) needs a new read of the operator source
+# and of rbac.yaml.

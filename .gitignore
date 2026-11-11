@@ -96,3 +96,6 @@ docs/public/addons-index.json
 
 # Tilt writes Starlark API stubs here with `tilt dump api-docs`; generated, never committed.
 /api/
+
+# Core dumps hold the full process environment (tokens included); never commit one.
+core.[0-9]*

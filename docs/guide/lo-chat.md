@@ -1,10 +1,9 @@
-# Local AI — `lo chat`
+# Local AI: `lo chat`
 
-`lo chat` is a **fully local**, transparent, streaming assistant for your cluster.
-It talks to your project through the same `lo mcp` tool surface the editor agents
-use, runs **read-only by default**, and streams every step: which tool it calls,
-what came back, then the answer. No data leaves your machine unless you explicitly
-switch to a frontier CLI.
+`lo chat` is a local, streaming assistant for your cluster. It runs in the
+`read-only` posture by default. It shows every step: the tool it calls, the tool
+output, then the answer. No data leaves your machine unless you switch to a
+frontier CLI.
 
 ```bash
 lo chat                       # interactive REPL
@@ -12,10 +11,71 @@ lo chat -p "what's broken?"   # single-shot
 lo chat --check               # system check + guided setup
 ```
 
+::: warning lo chat needs parts that a default install does not have
+`lo chat` starts a separate engine, `lochat`. The engine gets its tools from
+the MCP server of the frozen bash implementation (the `mcp` builtin of argsh),
+not from the Go [`lo mcp`](/guide/mcp) server. The `lo` binary embeds the
+bash tree, but `lo toolchain install` does not install the engine or the argsh
+runtime by default. Do the steps in [Set up](#set-up) first.
+:::
+
+## Set up
+
+You need three parts: the argsh runtime, the `lochat` engine and a local
+model runtime. Run the steps in the project directory.
+
+1. Install the `bash` group of the toolchain: argsh with its `argsh.so`
+   builtin, yq, jq and the other tools of the bash tree. This step uses the
+   network.
+
+   - If `.bin/b.yaml` exists, `lo toolchain install` does not change it.
+     Remove the `# ` in front of the entries of the `bash` group in
+     `.bin/b.yaml`, then run `.bin/b install`.
+   - If `.bin/b.yaml` does not exist, run this command:
+
+     ```bash
+     lo toolchain install --groups core,local,bash
+     ```
+
+2. Download the `lochat` engine of the `lo` you run and the checksums of
+   its release into a temporary directory, then verify the engine. This
+   step uses the network.
+
+   ```bash
+   V="v$(lo version | awk '/^lok8s/{print $2}')"   # the version of your lo
+   A=lochat-linux-amd64                              # your platform
+   T="$(mktemp -d)"
+   curl -fsSL -o "${T}/${A}" "https://github.com/kernpilot/lok8s/releases/download/${V}/${A}"
+   curl -fsSL -o "${T}/checksums.txt" "https://github.com/kernpilot/lok8s/releases/download/${V}/checksums.txt"
+   (cd "${T}" && sha256sum --ignore-missing -c checksums.txt)   # macOS: shasum -a 256 --ignore-missing -c checksums.txt
+   ```
+
+3. If the check printed `OK` for the engine, install it into the toolchain
+   directory of the project, then remove the temporary directory. Run this
+   in the same shell as step 2, because it uses `T` and `A`:
+
+   ```bash
+   install -m 0755 "${T}/${A}" .bin/lochat
+   rm -rf "${T}"
+   ```
+
+   `lo chat` looks for `.bin/lochat` first, then for `lochat` on PATH.
+
+4. Install a local model runtime and pull a model (see
+   [Choosing a model](#choosing-a-model)).
+
+5. Run the system check:
+
+   ```bash
+   lo chat --check
+   ```
+
+   `lo ai check` runs the same check and also shows the skill wiring.
+
 ## How it works
 
-The assistant is a small **conductor** model that routes your question through `lo`
-tools (a flat, "dieted" subset of the full CLI), gathers facts, then streams an
+The assistant is a small **conductor** model. It routes your question through
+`lo` tools (a small, flat subset of the CLI), collects facts, then streams an
 answer. Three properties keep it safe and useful on small local models:
 
 - **Transparent**: it prints every route, every gate decision, and every tool's
@@ -23,9 +83,10 @@ answer. Three properties keep it safe and useful on small local models:
 - **Deterministic safety gate**: the *posture* (not the model) decides what may
   run. In `read-only` (the default) only `[read]` tools execute; the gate blocks
   write tools before they reach the cluster. Models can't talk their way past it.
-- **Schema-in-context**: when you ask it to author config (a `cluster.lok8s.yaml`,
-  an addon chart), it injects the relevant lok8s schema so the output follows the
-  real patterns.
+- **Schema-in-context**: when you ask it to write config (a `cluster.lok8s.yaml`,
+  an addon chart), it adds the lok8s schema to the prompt. It reads the schema
+  from the `schema_files` of the config (the lok8s skills under `skills/`) and
+  skips a file that does not exist.
 
 ## First run: `lo chat --check`
 
@@ -36,7 +97,7 @@ missing, offers to fix it:
 lo chat — system check
 
 bridge
-  ✓ lo mcp                   57 tools available
+  ✓ lo mcp                   <n> tools available
 
 conductor backends
   ✓ local-e2b  (active)      ready (gemma4:e2b, …)
@@ -82,8 +143,8 @@ Two good options:
   ```
 
 - **[llamafile](https://github.com/Mozilla-Ocho/llamafile)**: a single portable
-  APE (the llama.cpp engine), offline, auto-detects CUDA/Metal/ROCm. The engine is
-  a perfect fit for `b`, the lok8s toolchain manager; you bring your own `.gguf`:
+  APE (the llama.cpp engine), offline, auto-detects CUDA/Metal/ROCm. `b`, the
+  lok8s toolchain manager, can install the engine. You bring your own `.gguf`:
 
   ```bash
   b install --asset 'llamafile-*[0-9]' Mozilla-Ocho/llamafile   # the engine (offered by --check)
@@ -158,6 +219,7 @@ defaults), or the path in `$LO_CHAT_CONFIG`. Backends are conductor brains:
   via `base_url`.
 - `type: "cli"` is a frontier handoff.
 
-> `lo chat` is a single static Go binary managed by `b`. It requires the `lo mcp`
-> bridge, which is an `argsh.so` builtin. If a fresh checkout reports
-> *"Invalid command: mcp"*, run `argsh builtins install`.
+> The engine is a separate static Go binary (`lochat`, source in `ai/lochat/`).
+> It drives the `mcp` builtin from `argsh.so`. When `lo chat` reports that
+> `argsh.so` is missing, install the `bash` group of the toolchain (see
+> [Set up](#set-up)) or run `argsh builtins install`.

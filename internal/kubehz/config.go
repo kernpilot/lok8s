@@ -48,6 +48,13 @@ func (c *Context) ReadConfig(clusterYAML string) (*Config, error) {
 		c.errorf("cannot read cluster spec: %s", clusterYAML)
 		return nil, ErrHandled
 	}
+	// One YAML document (domain.SpecLayout), for every lo kubehz command and
+	// every driver: this reader decodes the first document, the bash twin
+	// (yq) every document.
+	if problem, ok := domain.SpecLayout(clusterYAML); !ok {
+		c.errorf("%s %s", clusterYAML, problem)
+		return nil, ErrHandled
+	}
 	doc := loadSpec(clusterYAML)
 	if doc.Err != nil {
 		// bash: yq's own parse error reaches stderr, then `|| return 1`.

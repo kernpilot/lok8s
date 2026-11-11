@@ -70,6 +70,11 @@ func OriginOf(p *config.Paths, name string) string {
 // "lo" hides the crafting.
 func Driver(p *config.Paths, target string, stderr io.Writer) (string, error) {
 	spec := p.Clusters + "/" + target + "/cluster.lok8s.yaml"
+	// One YAML document (domain.CheckSpecLayout), with its own message: the
+	// kind is not malformed, the layout is.
+	if err := domain.CheckSpecLayout(spec, stderr); err != nil {
+		return "", ErrHandled
+	}
 	kind, err := domain.SpecDriver(spec, "lo")
 	if err != nil {
 		ui.ErrorTo(stderr, "cluster spec for '%s' declares a malformed kind (%s) — refusing to assume 'lo'", target, spec)
@@ -337,12 +342,18 @@ var configHints = map[string]string{
 	"monitoring":                   "Prometheus/Grafana scrape + OIDC config via the monitoring target values",
 	"oidc-rbac":                    "spec.oidc.groupsClaim + the oidc group->cluster-role bindings",
 	"promtail":                     "bootstrap AFTER loki (its push target); tolerates all taints so control-plane logs ship too",
-	"redis-operator":               "declare Redis CRs in a target",
+	"redis-operator":               "declare Redis CRs in a target; the operator runs with narrowed RBAC, no aggregation into admin",
+	"redis-operator-chart-rbac":    "opt-in after redis-operator, not recommended: binds the chart's broad ClusterRole rules to the operator again",
 	"reflector":                    "annotate the source Secret/ConfigMap to mirror across namespaces",
 	"rook-ceph":                    "CephCluster/pool/StorageClass in a target: replica count + device filter",
+	"rook-ceph-csi-kms":            "opt-in after rook-ceph: restores the node plugin's Secret + ServiceAccount-token grants (KMS encryption, mounter=rbd-nbd)",
 	"sso-gate":                     "patch issuer/clientID from a target + Secret sso-gate-client; label routes sso.lok8s.dev/protect",
-	"system-upgrade-controller":    "declare upgrade Plans in a target (Rancher SUC)",
+	"system-upgrade-controller":    "declare upgrade Plans in a target (Rancher SUC); the controller runs without cluster-admin",
 	"tempo":                        "configure trace storage/retention via the tempo values",
+
+	// Out of order: gofmt does not align a key longer than 40 columns with
+	// the block above.
+	"system-upgrade-controller-cluster-admin": "opt-in after system-upgrade-controller, not recommended: binds the controller to cluster-admin again",
 }
 
 // ConfigHint is the one-line "how to configure" pointer for a framework
@@ -396,6 +407,9 @@ func detail(p *config.Paths, d string, out, stderr io.Writer, resolve EntryResol
 	}
 	// A malformed kind is reported, never guessed away: it selects the
 	// values.<driver>.yaml overlay and the driver's default entries.
+	if err := domain.CheckSpecLayout(spec, stderr); err != nil {
+		return ErrHandled
+	}
 	kind, err := domain.SpecDriver(spec, "lo")
 	if err != nil {
 		ui.ErrorTo(stderr, "cluster spec for '%s' declares a malformed kind (%s)", d, spec)

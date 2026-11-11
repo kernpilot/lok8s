@@ -1,6 +1,7 @@
 package generator
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,79 @@ func bashCtx(t *testing.T) (*plugin.Context, string) {
 		Env:       func(k string) (string, bool) { return os.LookupEnv(k) },
 		FileRoot:  dir,
 	}, dir
+}
+
+// ── dry-run refusal (lok8s #268 review: a dry run must never EXECUTE a
+// bash: generator, whatever the cache state — it can run kubectl/lo
+// against the live cluster, independent of the rendered diff) ──────────
+
+func TestBash_DryRunRefusesWithoutAllow(t *testing.T) {
+	t.Setenv("LOK8S_BOOTSTRAP_DRYRUN", "1")
+	t.Setenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS", "")
+	ctx, dir := bashCtx(t)
+	g := NewBash(map[string]specpkg.BashEntry{
+		"KEY": {Exec: "touch " + filepath.Join(dir, "ran") + " && echo hello"},
+	})
+	entries, err := g.Generate(ctx)
+	if err == nil {
+		t.Fatal("want an error, got none")
+	}
+	if !strings.Contains(err.Error(), "executable generator not run in dry-run") {
+		t.Errorf("err = %v", err)
+	}
+	if entries != nil {
+		t.Errorf("entries = %v, want nil", entries)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "ran")); statErr == nil {
+		t.Error("the exec: command actually ran")
+	}
+	// No cache write, no .sha, no .bash-allow — refused BEFORE any cache
+	// touch, not merely "refused to persist the result".
+	leftovers, _ := os.ReadDir(dir)
+	for _, f := range leftovers {
+		t.Errorf("dry-run refusal still wrote %s", f.Name())
+	}
+}
+
+func TestBash_DryRunRefusesAnUpdateEntryToo(t *testing.T) {
+	// update: true always re-runs on a real build (bypasses the cache) —
+	// the exact shape that would re-mint a live secret on every preview.
+	t.Setenv("LOK8S_BOOTSTRAP_DRYRUN", "1")
+	ctx, _ := bashCtx(t)
+	g := NewBash(map[string]specpkg.BashEntry{
+		"KEY": {Exec: "echo hello", Update: true},
+	})
+	if _, err := g.Generate(ctx); err == nil || !strings.Contains(err.Error(), "executable generator not run in dry-run") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestBash_DryRunRunsWithAllowGenerators(t *testing.T) {
+	t.Setenv("LOK8S_BOOTSTRAP_DRYRUN", "1")
+	t.Setenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS", "1")
+	ctx, _ := bashCtx(t)
+	g := NewBash(map[string]specpkg.BashEntry{
+		"KEY": {Exec: "echo hello"},
+	})
+	entries, err := g.Generate(ctx)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(entries) != 1 || string(entries[0].Value) != "hello" {
+		t.Errorf("entries = %v", entries)
+	}
+}
+
+// Outside a dry run (the env unset — the default, real-apply state), the
+// generator runs exactly as before.
+func TestBash_RunsNormallyOutsideDryRun(t *testing.T) {
+	ctx, _ := bashCtx(t)
+	g := NewBash(map[string]specpkg.BashEntry{
+		"KEY": {Exec: "echo hello"},
+	})
+	if _, err := g.Generate(ctx); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
 }
 
 // ── shorthand exec ──────────────────────────────────────
@@ -455,5 +529,47 @@ func TestBash_DefaultCachesValue(t *testing.T) {
 		t.Fatal(err)
 	} else if string(e[0].Value) != "v1" {
 		t.Errorf("default must cache: expected v1 (cached), got %q", e[0].Value)
+	}
+}
+
+// With --allow-generators the dry run runs the command (trusted addon code)
+// but lo's own generator still writes no .sha and no .bash-allow.
+func TestBash_DryRunWithAllowWritesNoAllowFiles(t *testing.T) {
+	t.Setenv("LOK8S_BOOTSTRAP_DRYRUN", "1")
+	t.Setenv("LOK8S_BOOTSTRAP_ALLOW_GENERATORS", "1")
+	ctx, dir := bashCtx(t)
+	ctx.DryRun = true
+	if _, err := NewBash(map[string]specpkg.BashEntry{"KEY": {Exec: "echo hello"}}).Generate(ctx); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	for _, name := range []string{shaFileName("test", "default", "KEY"), ".bash-allow"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			t.Errorf("a dry run wrote %s", name)
+		}
+	}
+}
+
+// A committed .sha.enc without its plaintext is an approval that is not
+// decrypted yet (B425). Trust on first use would write a fresh .sha and a
+// fresh .bash-allow for whatever the command is now, so a changed command
+// would run without a review. The generator stops before it runs anything.
+func TestBash_EncryptedShaTwinStops(t *testing.T) {
+	ctx, dir := bashCtx(t)
+	sha := filepath.Join(dir, "Secret.test.default.KEY.sha")
+	if err := os.WriteFile(sha+".enc", []byte(`{"data":"ENC[AES256_GCM,data:fake]","sops":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := NewBash(map[string]specpkg.BashEntry{
+		"KEY": {Exec: "touch " + filepath.Join(dir, "ran") + " && echo hello"},
+	})
+	_, err := g.Generate(ctx)
+	var eo *cache.EncryptedOnlyError
+	if !errors.As(err, &eo) || eo.Name != "Secret.test.default.KEY.sha" {
+		t.Fatalf("err = %v, want *cache.EncryptedOnlyError for the .sha", err)
+	}
+	for _, f := range []string{sha, filepath.Join(dir, ".bash-allow"), filepath.Join(dir, "ran"), filepath.Join(dir, "Secret.test.default.KEY")} {
+		if _, statErr := os.Stat(f); statErr == nil {
+			t.Errorf("%s exists after the refusal", filepath.Base(f))
+		}
 	}
 }

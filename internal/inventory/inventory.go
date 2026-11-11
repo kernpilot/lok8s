@@ -142,7 +142,11 @@ func Build(p *config.Paths, stderr io.Writer, domainName, clusterYAML string) (*
 	// The fallback covers "no kind declared". It must NOT cover a malformed
 	// kind — it is reported into the ClusterInventory CR and read back by
 	// the agent, so defaulting it to "lo" would publish a false driver
-	// identity.
+	// identity. A spec file with more than one YAML document has its own
+	// message (domain.CheckSpecLayout).
+	if err := domain.CheckSpecLayout(clusterYAML, stderr); err != nil {
+		return nil, err
+	}
 	kind, err := domain.SpecDriver(clusterYAML, "lo")
 	if err != nil {
 		ui.ErrorTo(stderr, "inventory: cluster spec declares a malformed kind: %s", clusterYAML)

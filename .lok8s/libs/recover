@@ -23,6 +23,12 @@
 #   • `--dry-run` is genuinely safe: it exports CLOUD_DRY_RUN so provider::rebuild
 #     takes its dry-run branches (prints the plan, reimages NOTHING), then STOPS
 #     before any real provision/verify.
+#   • The consent prompt reads stdin, and nothing reads it first. Every call
+#     before the consent runs with </dev/null: an ssh probe in provider::doctor
+#     without -n reads its stdin to the end, so a piped `yes` never reached the
+#     prompt (kubehz.in.net recreate, 2026-10-23). After the consent, the rebuild
+#     and the provision keep stdin only when it is a terminal
+#     (recover::_tty_or_null).
 #
 # It supersedes hand-rolled per-cluster DR scripts, generalizing their
 # phase-runner + timing shape to any provider-backed cluster whose provider
@@ -205,7 +211,7 @@ recover::_load_provider() {
     error "recover: could not resolve provider config for '${pname}'"
     return 1
   }
-  provider::load "${pname}" || {
+  provider::load "${pname}" </dev/null || {
     error "recover: provider '${pname}' failed to load"
     return 1
   }
@@ -233,7 +239,7 @@ recover::_doctor() {
       '')      : ;;
       *)       printf '    %s\n' "${status}${msg:+ ${msg}}" ;;
     esac
-  done < <(provider::doctor "${_RECOVER_CONFIG}" 2>/dev/null)
+  done < <(provider::doctor "${_RECOVER_CONFIG}" 2>/dev/null </dev/null)
   return 0
 }
 
@@ -242,7 +248,19 @@ recover::_doctor() {
 # DESTRUCTIVE but does not prompt — consent already happened. Under CLOUD_DRY_RUN
 # it reimages nothing.
 recover::_rebuild() {
-  provider::rebuild "${_RECOVER_CONFIG}" "${_RECOVER_WORKDIR}"
+  recover::_tty_or_null provider::rebuild "${_RECOVER_CONFIG}" "${_RECOVER_WORKDIR}"
+}
+
+# recover::_tty_or_null <cmd...>
+# Run cmd with this shell's stdin when it is a terminal (cmd can still ask the
+# operator something), else with </dev/null: a pipe is the consent prompt's
+# input, never a child's.
+recover::_tty_or_null() {
+  if [[ -t 0 ]]; then
+    "${@}"
+  else
+    "${@}" </dev/null
+  fi
 }
 
 # ── phase: provision ─────────────────────────────────────────────────────────
@@ -255,7 +273,7 @@ recover::_provision() {
   # provision::confirm_infra via dynamic scoping (the argsh idiom).
   # shellcheck disable=SC2034
   local force=1
-  provision::dispatch "${_RECOVER_DOMAIN}"
+  recover::_tty_or_null provision::dispatch "${_RECOVER_DOMAIN}"
 }
 
 # ── phase: verify ────────────────────────────────────────────────────────────
@@ -303,7 +321,7 @@ recover::_verify() {
 # provider::rebuild's own atomic preflight is the real enforcement.
 recover::_inventory_count() {
   local inv n
-  inv="$(provider::output "${_RECOVER_CONFIG}" 2>/dev/null)" || return 0
+  inv="$(provider::output "${_RECOVER_CONFIG}" 2>/dev/null </dev/null)" || return 0
   n="$(printf '%s' "${inv}" | jq '(.nodes // []) | length' 2>/dev/null)" || return 0
   echo "${n:-0}"
 }
@@ -317,7 +335,7 @@ recover::_ready_nodes() {
   command -v kubectl &>/dev/null || { echo 0; return 0; }
   [[ -n "${KUBECONFIG:-}" && -f "${KUBECONFIG}" ]] || { echo 0; return 0; }
   local nodes
-  nodes="$(kubectl get nodes --no-headers 2>/dev/null)" || { echo 0; return 0; }
+  nodes="$(kubectl get nodes --no-headers 2>/dev/null </dev/null)" || { echo 0; return 0; }
   local name node_status _rest
   while read -r name node_status _rest; do
     [[ -n "${name}" ]] || continue

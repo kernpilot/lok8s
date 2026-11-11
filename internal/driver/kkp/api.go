@@ -66,9 +66,8 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 	}
 	// curlConfigQuote escapes a backslash and a double quote, the two
 	// characters curl's parser unescapes. A CR or LF ends the config line
-	// instead, so the token is refused before it reaches the config. The
-	// bash passed the token as an argument; deliberate deviation
-	// (catalogue D28).
+	// instead, so the token is refused before it reaches the config
+	// (catalogue D28). The bash twin (kkp::api) refuses it the same way.
 	if err := credentials.NoNewline("KKP_TOKEN", token, stderr); err != nil {
 		return "", err
 	}
@@ -82,12 +81,20 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 	}
 
 	url := apiURL + path
-	// The bearer token reaches curl through its config file on stdin
-	// (`--config -`), never as an argument: argv is readable by every
-	// process on the host (ps, /proc). The bash passed
-	// `--header "Authorization: Bearer ${KKP_TOKEN}"`; this is a deliberate
-	// deviation.
+	// The bearer token and the request body reach curl through its config
+	// file on stdin (`--config -`), never as arguments: argv is readable by
+	// every process on the host (ps, /proc), and audit tools store it. The
+	// body of a cluster create carries the cloud credentials. The bash twin
+	// (kkp::api, http::curl_config) writes the same config.
 	curlConfig := "header = " + curlConfigQuote("Authorization: Bearer "+token) + "\n"
+	if body != "" {
+		data, ok := curlConfigData(body)
+		if !ok {
+			ui.ErrorTo(stderr, "KKP API: the request body holds a control character that a curl config cannot carry")
+			return "", ui.Handled(fmt.Errorf("kkp: request body holds a control character"))
+		}
+		curlConfig += "data-raw = " + data + "\n"
+	}
 	curlArgs := []string{
 		"--silent",
 		"--show-error",
@@ -98,9 +105,6 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 		"--header", "Accept: application/json",
 		"--write-out", "\n%{http_code}",
 		"--request", method,
-	}
-	if body != "" {
-		curlArgs = append(curlArgs, "--data", body)
 	}
 
 	// Optional custom CA for the TLS handshake — needed when KKP serves a
@@ -163,6 +167,38 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 // backslash and a double quote are the two characters the parser unescapes.
 func curlConfigQuote(s string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
+}
+
+// curlConfigData quotes a request body for a `data-raw = "…"` config line.
+// Besides a backslash and a double quote, it escapes a line feed, a
+// carriage return and a tab as \n, \r and \t: curl turns them back into
+// the same bytes, so the body (MarshalIndent output) arrives unchanged.
+// Another control character cannot be written in a config line, so the
+// body is refused (false). The bash twin is http::curl_config.
+func curlConfigData(body string) (string, bool) {
+	var b strings.Builder
+	b.WriteByte('"')
+	for i := 0; i < len(body); i++ {
+		switch c := body[i]; c {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			if c < 0x20 || c == 0x7f {
+				return "", false
+			}
+			b.WriteByte(c)
+		}
+	}
+	b.WriteByte('"')
+	return b.String(), true
 }
 
 // splitHTTPCode mirrors the bash split of curl's output: the LAST line is

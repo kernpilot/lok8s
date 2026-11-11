@@ -17,9 +17,12 @@ Referenced from the cluster spec via `spec.provider.{name: hetzner, configRef: h
 
 Provisioned in a fixed order: `ssh-key` → `floating-ip` → `network` →
 `load-balancer` → `server` → `volume`. Each plain field becomes an
-`hcloud <resource> create --<key> <value>` flag. A **numeric** value cross-references
-another array by index and is replaced with that resource's `.id`
-(`"network": 0` → the created network's id). A leading `~/` expands to `$HOME`.
+`hcloud <resource> create --<key> <value>` flag. On a reference key (`ssh-key`,
+`network`, `server`, `volume`, `placement-group`, `firewall`) a **numeric** value
+cross-references that array by index and is replaced with that resource's `.id`
+(`"network": 0` → the created network's id). A number on any other key is a
+literal and passes verbatim (`"size": 100`, `"image": 12345678`). A leading `~/`
+expands to `$HOME`.
 Idempotent: existing resources are matched by `.name` and skipped; `destroy`
 deletes by label `lok8s.dev/cluster=<cluster_name>`.
 

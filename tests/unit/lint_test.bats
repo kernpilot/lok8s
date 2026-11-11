@@ -29,6 +29,10 @@ setup() {
   # lint::secrets calls secrets::* helpers (check_unencrypted / check_flat_shadows),
   # which the `lo` entrypoint loads in production — source them here too.
   source "${_PROJECT_ROOT}/.lok8s/libs/secrets"
+  # lint::dns_search calls dnssearch::check (and it yqbound::run), which lint
+  # imports (a no-op under the stubbed import above) — source them here too.
+  source "${_PROJECT_ROOT}/.lok8s/utils/yqbound.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/dnssearch.sh"
 
   # Create a minimal domain structure
   local domain_dir="${BATS_TEST_TMPDIR}/clusters/test-domain"
@@ -148,6 +152,10 @@ _mock_yq_valid() {
     esac
   }
   export -f yq
+  # The version reader sends its own yq queries (explode, kind, tag), which
+  # this mock does not answer. Its own tests cover it
+  # (lo_node_version_test.bats). Here the spec has no version.
+  spec::kind_node_version() { :; }
 }
 
 # --- lint tests: spec existence ---
@@ -319,6 +327,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "deploy-domain"
   assert_success
@@ -350,6 +359,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_failure
@@ -390,6 +400,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_failure
@@ -419,6 +430,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_failure
@@ -448,6 +460,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_failure
@@ -495,6 +508,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "deploy-no-ref"
   assert_failure
@@ -528,6 +542,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_success
@@ -568,6 +583,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_failure
@@ -609,6 +625,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_success
@@ -654,6 +671,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "test-domain"
   assert_success
@@ -764,6 +782,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "deploy-bad-ref"
   assert_failure
@@ -824,6 +843,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "deploy-wrong-ref"
   assert_failure
@@ -884,6 +904,7 @@ YAML
     esac
   }
   export -f yq
+  spec::kind_node_version() { :; }  # see _mock_yq_valid
 
   run lint::all "deploy-valid-ref"
   assert_success
@@ -922,4 +943,123 @@ YAML
   _ls() ( set -euo pipefail; domain=""; lint::secrets "$1" )
   run _ls "${dom}"
   assert_success
+}
+
+# --- lint tests: spec.kubernetes.version (Lo) ---
+# `lo lint` reports the version that `lo provision` refuses (the one reader,
+# spec::kind_node_version). An unset version is valid: kind then uses its
+# default node image. Go twin: TestKubernetesVersion in internal/lint.
+
+_kver_spec() {  # <dir> <kind> [version line]
+  mkdir -p "${1}"
+  {
+    printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: %s\nmetadata:\n  name: kver\nspec:\n  bootstrap: []\n' "${2}"
+    if [[ -n "${3:-}" ]]; then printf '  kubernetes:\n    %s\n' "${3}"; fi
+  } > "${1}/cluster.lok8s.yaml"
+}
+
+@test "lint::kubernetes_version reports a Lo version that is not an image tag" {
+  local d="${PATH_CLUSTERS}/kver"
+  _kver_spec "${d}" Lo 'version: kindest/node:v1.31.4'
+  run lint::kubernetes_version "${d}" "${d}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "  spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. Set a kindest/node image tag, for example v1.31.4. To use the default node image of kind, remove the key."
+}
+
+@test "lint::kubernetes_version reports a Lo spec.kubernetes that cannot be read" {
+  local d="${PATH_CLUSTERS}/kver"
+  mkdir -p "${d}"
+  printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: kver\nspec:\n  kubernetes: []\n' > "${d}/cluster.lok8s.yaml"
+  run lint::kubernetes_version "${d}" "${d}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "  spec.kubernetes.version cannot be read: spec.kubernetes is a list, not a map. Write spec.kubernetes as a YAML map."
+}
+
+@test "lint::kubernetes_version resolves a merge key" {
+  local d="${PATH_CLUSTERS}/kver"
+  mkdir -p "${d}"
+  printf 'x: &v {version: kindest/node:v1.31.4}\nkind: Lo\nmetadata:\n  name: kver\nspec:\n  kubernetes:\n    <<: *v\n' > "${d}/cluster.lok8s.yaml"
+  run lint::kubernetes_version "${d}" "${d}/cluster.lok8s.yaml"
+  assert_failure
+  assert_output --partial "  spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag. "
+}
+
+@test "lint::kubernetes_version accepts an unset, a null-string, a valid and a custom Lo version" {
+  local d="${PATH_CLUSTERS}/kver" line
+  for line in "" 'version: "null"' "version: v1.35.0" "version: latest" "version: v1.31.0-custom"; do
+    _kver_spec "${d}" Lo "${line}"
+    run lint::kubernetes_version "${d}" "${d}/cluster.lok8s.yaml"
+    assert_success
+    assert_output ""
+  done
+}
+
+@test "lint::kubernetes_version leaves other drivers alone" {
+  local d="${PATH_CLUSTERS}/kver"
+  _kver_spec "${d}" KubeOne 'version: {minor: 31}'
+  run lint::kubernetes_version "${d}" "${d}/cluster.lok8s.yaml"
+  assert_success
+}
+
+@test "lint::all counts a Lo version that is not an image tag and prints no OK" {
+  local d="${PATH_CLUSTERS}/kver"
+  _kver_spec "${d}" Lo 'version: kindest/node:v1.31.4'
+  run lint::all kver
+  assert_failure
+  assert_output --partial "spec.kubernetes.version 'kindest/node:v1.31.4' is not a valid image tag."
+  refute_output --partial "  OK"
+}
+
+# --- lint::all: one YAML document ---
+# Go twin: TestRunRefusesASecondDocument.
+@test "lint::all refuses a spec file with a second document and runs no other check" {
+  local d="${PATH_CLUSTERS}/twodoc"
+  mkdir -p "${d}"
+  printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: a\nspec:\n  bootstrap: []\n---\n' > "${d}/cluster.lok8s.yaml"
+  run lint::all twodoc
+  assert_failure
+  assert_output --partial "  ${d}/cluster.lok8s.yaml holds more than one YAML document. Remove line 7 (a '---' line after the spec)."
+  assert_output --partial "1 validation error(s)"
+  refute_output --partial "  OK"
+}
+
+# --- spec.network.dnsSearch (lint::dns_search; Go twin: Linter.dnsSearch) ---
+
+@test "lint::dns_search fails a list that the Lo driver rejects, one error per problem" {
+  local spec="${BATS_TEST_TMPDIR}/clusters/test-domain/cluster.lok8s.yaml"
+  printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: d\nspec:\n  network:\n    dnsSearch: [corp.example.com, corp_example, ""]\n' > "${spec}"
+  run lint::dns_search "${spec}"
+  [ "${status}" -eq 2 ]
+  assert_output "[error]   spec.network.dnsSearch[1] has a character that is not valid in a DNS name: 'corp_example'. Use only letters, digits, hyphens and dots.
+[error]   spec.network.dnsSearch[2] is empty. Write a DNS name, or remove the entry."
+}
+
+@test "lint::dns_search passes a valid list, a missing key and the spec of another driver" {
+  local spec="${BATS_TEST_TMPDIR}/clusters/test-domain/cluster.lok8s.yaml" body
+  for body in 'kind: Lo\nspec:\n  network:\n    dnsSearch: [Corp.Example.com., example.ts.net]\n' \
+    'kind: Lo\nspec:\n  network:\n    name: n\n' \
+    'kind: KubeOne\nspec:\n  network:\n    dnsSearch: [corp_example]\n'; do
+    # shellcheck disable=SC2059 # the bodies carry \n escapes on purpose
+    printf "${body}" > "${spec}"
+    run lint::dns_search "${spec}"
+    assert_success
+    assert_output ""
+  done
+}
+
+@test "lint::all counts the dnsSearch problems into the verdict" {
+  local spec="${BATS_TEST_TMPDIR}/clusters/test-domain/cluster.lok8s.yaml"
+  printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: test\nspec:\n  bootstrap: []\n  network:\n    dnsSearch: [-bad.example]\n' > "${spec}"
+  run lint::all "test-domain"
+  assert_failure
+  assert_output --partial "[error]   spec.network.dnsSearch[0] has a label that starts or ends with a hyphen: '-bad.example'. Remove that hyphen."
+  assert_output --partial "[error] 1 validation error(s)"
+}
+
+@test "lint::dns_search prints a backslash in a rejected value as it is (no echo -e escape)" {
+  local spec="${BATS_TEST_TMPDIR}/clusters/test-domain/cluster.lok8s.yaml"
+  printf '%s\n' 'kind: Lo' 'spec:' '  network:' "    dnsSearch: ['a\\nb.example']" > "${spec}"
+  run lint::dns_search "${spec}"
+  [ "${status}" -eq 1 ]
+  assert_output "[error]   spec.network.dnsSearch[0] has a character that is not valid in a DNS name: 'a\\nb.example'. Use only letters, digits, hyphens and dots."
 }

@@ -1,0 +1,9 @@
+a: &a {version: v1.31.4}
+b: &b {version: v1.32.0}
+kind: Lo
+metadata:
+  name: kver
+spec:
+  runtime: kind
+  kubernetes:
+    <<: [*a, *b]

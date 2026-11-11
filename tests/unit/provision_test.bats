@@ -180,6 +180,34 @@ SCRIPT
   [[ "${output}" != *"provision_called"* ]]
 }
 
+@test "provision::dispatch (#312): a failed registration stops before the bootstrap and names lo provision --bootstrap" {
+  yq() {
+    case "$2" in
+      '.kind // ""') echo "Lo" ;;
+      .metadata.name*) echo "test-cluster" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+  mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig"
+  touch "${BATS_TEST_TMPDIR}/.kubeconfig/test-cluster.yaml"
+  cat > "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/main" <<'SCRIPT'
+driver::provision() { :; }
+driver::export() { :; }
+SCRIPT
+  # The platform stayed unavailable: register_cluster returns 1.
+  kubehz::register_cluster() { echo "register_next: $3"; return 1; }
+  bootstrap::apply() { echo "bootstrap_applied: $1"; }
+  export -f kubehz::register_cluster bootstrap::apply
+  export LOK8S_KUBEHZ_ACCESS=registered
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  run provision::dispatch "test.lok8s.dev" 1
+  assert_failure
+  assert_output --partial "register_next: lo provision --bootstrap --domain test.lok8s.dev"
+  refute_output --partial "bootstrap_applied"
+}
+
 @test "provision::dispatch --bootstrap fails when the cluster is not provisioned" {
   yq() {
     case "$2" in
@@ -594,4 +622,150 @@ YAML
 
   provision::load_provider_creds "test.lok8s.dev"
   [ "${HCLOUD_TOKEN}" = "env-token" ]
+}
+
+# --- provision::read_kind: one YAML document ---
+# A cluster spec file with more than one YAML document stops the dispatch
+# before the driver is chosen (domain::spec_check): the Go readers decode the
+# first document and the bash readers every document, so the file reads as two
+# different specs. Go twin: TestReadKindRefusesASecondDocument.
+
+@test "provision::read_kind refuses a spec file with a second document" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  local spec="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml" src want
+  while IFS='|' read -r src want; do
+    printf '%b' "${src}" > "${spec}"
+    run provision::read_kind "${spec}"
+    assert_failure
+    assert_output "[error] ${spec} ${want}"
+  done <<'CASES'
+kind: Lo\nspec: {}\n---\n|holds more than one YAML document. Remove line 3 (a '---' line after the spec).
+---\n---\nkind: Lo\n|holds an empty YAML document before the spec. Remove line 2 (a '---' line).
+kind: Lo\n---\nkind: KubeOne\n|holds more than one YAML document. Remove lines 2 to 3 (the '---' at line 2 and everything after it).
+CASES
+}
+
+@test "provision::read_kind reads one document, also after a ---" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  local spec="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  printf -- '---\nkind: Lo\n' > "${spec}"
+  run provision::read_kind "${spec}"
+  assert_success
+  assert_output "lo"
+}
+
+# --- the one-document rule, command by command ---
+# provision, destroy and status resolve the spec with provision::resolve_spec,
+# deploy and the build kubeconfig follow a clusterRef with
+# provision::resolve_clusterref: each stops before the driver, with one
+# [error] line that names the lines to remove. Go twins:
+# TestDispatchRefusesASecondDocument, TestResolveClusterRefRefusesASecondDocument.
+
+@test "provision::dispatch, dispatch_destroy and dispatch_status refuse a spec file with a second document" {
+  local spec="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml" call
+  printf -- '---\n' >> "${spec}"
+  cat > "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/main" <<'SCRIPT'
+driver::provision() { echo "DRIVER"; }
+driver::destroy() { echo "DRIVER"; }
+driver::status() { echo "DRIVER"; }
+driver::export() { echo "DRIVER"; }
+SCRIPT
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  for call in "provision::dispatch test.lok8s.dev" "provision::dispatch test.lok8s.dev 1" \
+              "provision::dispatch_destroy test.lok8s.dev" "provision::dispatch_status test.lok8s.dev"; do
+    # shellcheck disable=SC2086  # the function name and its arguments
+    run ${call}
+    assert_failure
+    assert_output "[error] ${spec} holds more than one YAML document. Remove line 16 (a '---' line after the spec)."
+  done
+}
+
+@test "provision::dispatch_status and resolve_clusterref refuse a deploy spec, or the cluster spec that it names, with a second document" {
+  local deploy="${BATS_TEST_TMPDIR}/clusters/staging.lok8s.dev/deploy.lok8s.yaml"
+  local cluster="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml" broken want
+  mkdir -p "${deploy%/*}"
+  cat > "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/main" <<'SCRIPT'
+driver::status() { echo "DRIVER"; }
+SCRIPT
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  for broken in "${deploy}" "${cluster}"; do
+    cp "${FIXTURES_DIR}/deploy-domain.lok8s.yaml" "${deploy}"
+    cp "${FIXTURES_DIR}/lo-cluster.lok8s.yaml" "${cluster}"
+    printf -- '---\n' >> "${broken}"
+    want="[error] ${broken} holds more than one YAML document. Remove line $(wc -l < "${broken}") (a '---' line after the spec)."
+    run provision::dispatch_status staging.lok8s.dev
+    assert_failure
+    assert_output "${want}"
+    run provision::resolve_clusterref staging.lok8s.dev
+    assert_failure
+    assert_output "${want}"
+  done
+}
+
+# --- --bootstrap --dry-run: a read-only dispatch ---
+
+@test "provision::dispatch --bootstrap --dry-run skips the gate and every writer" {
+  yq() {
+    case "$2" in
+      '.kind // ""') echo "KubeOne" ;;
+      .metadata.name*) echo "test-cluster" ;;
+      .spec.gitops.provider*) echo "flux" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+  mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig" "${BATS_TEST_TMPDIR}/.lok8s/drivers/kubeone"
+  touch "${BATS_TEST_TMPDIR}/.kubeconfig/test-cluster.yaml"
+  cat > "${BATS_TEST_TMPDIR}/.lok8s/drivers/kubeone/main" <<'SCRIPT'
+driver::provision() { echo "provision_called"; }
+driver::export() { echo "export_called"; }
+SCRIPT
+  bootstrap::apply() { echo "bootstrap_applied: $1"; }
+  inventory::publish() { echo "inventory_published"; }
+  gitops::bootstrap() { echo "gitops_called"; }
+  kubehz::register_cluster() { echo "registered"; }
+  export -f bootstrap::apply inventory::publish gitops::bootstrap kubehz::register_cluster
+  export LOK8S_KUBEHZ_ACCESS=registered
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  # No terminal: the gate would refuse (rc 3) if it ran.
+  provision::_interactive() { return 1; }
+
+  local bootstrap_dry_run=1
+  run provision::dispatch "test.lok8s.dev" 1
+  assert_success
+  assert_output --partial "export_called"
+  assert_output --partial "bootstrap_applied: test.lok8s.dev"
+  refute_output --partial "real infrastructure"
+  refute_output --partial "provision_called"
+  refute_output --partial "registered"
+  refute_output --partial "inventory_published"
+  refute_output --partial "gitops_called"
+
+  # Without --bootstrap the mode is inert: the gate still refuses.
+  run provision::dispatch "test.lok8s.dev" 0
+  [ "${status}" -eq 3 ]
+  assert_output --partial "refusing to reconcile"
+}
+
+@test "provision::dispatch propagates a dry run's exit code (2 = an entry failed)" {
+  yq() {
+    case "$2" in
+      '.kind // ""') echo "Lo" ;;
+      .metadata.name*) echo "test-cluster" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+  mkdir -p "${BATS_TEST_TMPDIR}/.kubeconfig"
+  touch "${BATS_TEST_TMPDIR}/.kubeconfig/test-cluster.yaml"
+  cat > "${BATS_TEST_TMPDIR}/.lok8s/drivers/lo/main" <<'SCRIPT'
+driver::provision() { echo "provision_called"; }
+SCRIPT
+  bootstrap::apply() { return 2; }
+  export -f bootstrap::apply
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  local bootstrap_dry_run=1
+  run provision::dispatch "test.lok8s.dev" 1
+  [ "${status}" -eq 2 ]
 }

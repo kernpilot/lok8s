@@ -10,6 +10,7 @@ import ^utils/verbose
 import ^utils/types
 import ^utils/template
 import ^utils/credentials
+import ^utils/http
 
 : "${CLOUD_HETZNER_JSON:=""}"
 : "${CLOUD_DRY_RUN:=""}"
@@ -143,7 +144,7 @@ provider::provision() {
   # provider::rebuild (one helper, so the two can't drift). CLOUD_PATHD is
   # provision-specific: the whole-cluster module set from .cloudInit.modules
   # (rebuild overrides CLOUD_PATHD per server from each server's #cloud.d).
-  hetzner::_export_cloudinit_env "${config_file}"
+  hetzner::_export_cloudinit_env "${config_file}" || return 1
   local ci_modules
   ci_modules=$(_cfg '.cloudInit.modules // ""' 2>/dev/null || echo "")
   export CLOUD_PATHD="${ci_modules}"
@@ -167,38 +168,169 @@ provider::provision() {
   debug "hetzner provision complete"
 }
 
+# hetzner::_destroy_cluster_name <config_file>
+# The cluster name provider::destroy deletes by: the descriptor's
+# cluster_name, and nothing else. A name guessed from the provision dump or a
+# server name would delete by a label nobody confirmed, and `lo destroy`
+# checks the other domains for the same cluster_name (one name resolution
+# for both).
+hetzner::_destroy_cluster_name() {
+  local config_file="${1}" cluster_name=""
+  cluster_name=$(_cfg '.cluster_name // ""' 2>/dev/null || echo "")
+  [[ -n "${cluster_name}" ]] || {
+    error "hetzner: the descriptor ${config_file} has no cluster_name. The destroy deletes every resource that carries lok8s.dev/cluster=<cluster_name>, so it needs the name. Nothing was deleted. Set cluster_name in the descriptor."
+    return 1
+  }
+  echo "${cluster_name}"
+}
+
+# The resource types provider::destroy deletes, in its delete order.
+_HETZNER_DESTROY_ORDER=(load-balancer server placement-group firewall volume floating-ip ssh-key network)
+
+# hetzner::_destroy_resources <cluster_name>
+# One "<resource>\t<id>\t<name>" line per hcloud resource that carries
+# lok8s.dev/cluster=<cluster_name>, in the order provider::destroy deletes
+# them. READ-ONLY. A list that fails stops it (rc 1): an empty list must
+# mean "no resource", never "hcloud did not answer".
+hetzner::_destroy_resources() {
+  local selector="lok8s.dev/cluster=${1}" resource json
+  for resource in "${_HETZNER_DESTROY_ORDER[@]}"; do
+    if ! json="$(hcloud "${resource}" list -o json -l "${selector}")" ||
+       ! jq -r --arg r "${resource}" '(. // [])[] | [$r, (.id | tostring), (.name // "")] | @tsv' <<<"${json}"; then
+      error "hetzner: could not list the ${resource} resources with ${selector}. Nothing was deleted. Check the hcloud token and the API, then run the destroy again."
+      return 1
+    fi
+  done
+}
+
+# hetzner::_confirmed_rows <cluster_name> <listed>
+# Check LOK8S_DESTROY_PLAN against the live list and set
+# _HETZNER_CONFIRMED_ROWS to the rows to delete: plan ∩ live list, as
+# "<resource>\t<id>\t<name>" lines. A plan line is split at each tab (a
+# double tab is an empty field), a trailing CR is dropped. rc 1, nothing
+# set, when the plan is empty, does not start with the cluster line of
+# <cluster_name>, or has a line whose type is not exactly one of
+# _HETZNER_DESTROY_ORDER or whose id is not a number: one bad line refuses
+# the whole plan.
+hetzner::_confirmed_rows() {
+  local cluster_name="${1}" listed="${2}" line kind rid rname rest planned header=1 t known
+  local -A live=()
+  _HETZNER_CONFIRMED_ROWS=""
+  while IFS=$'\t' read -r kind rid rname; do
+    [[ -n "${kind}" ]] || continue
+    live["${kind}"$'\t'"${rid}"]="${kind}"$'\t'"${rid}"$'\t'"${rname}"
+  done <<<"${listed}"
+
+  local rows="" key
+  local -A planned_keys=()
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    [[ -n "${line}" ]] || continue
+    kind="${line%%$'\t'*}" rest="" rname=""
+    [[ "${line}" != *$'\t'* ]] || rest="${line#*$'\t'}"
+    rid="${rest%%$'\t'*}"
+    [[ "${rest}" != *$'\t'* ]] || rname="${rest#*$'\t'}"
+    if (( header )); then
+      header=0
+      planned="${rid}"
+      if [[ "${kind}" != "cluster" ]]; then
+        error "hetzner: the confirmed destroy plan does not start with its cluster line (it starts with '${line//$'\t'/ }'). Nothing was deleted. Run lo destroy again."
+        return 1
+      fi
+      if [[ "${planned}" != "${cluster_name}" ]]; then
+        error "hetzner: the confirmed destroy plan is for cluster_name '${planned}', but the descriptor has '${cluster_name}'. Nothing was deleted. Run lo destroy again."
+        return 1
+      fi
+      continue
+    fi
+    known=0
+    for t in "${_HETZNER_DESTROY_ORDER[@]}"; do
+      [[ "${kind}" != "${t}" ]] || known=1
+    done
+    if (( ! known )) || [[ ! "${rid}" =~ ^[1-9][0-9]*$ ]]; then
+      error "hetzner: the confirmed destroy plan has a line that lo destroy does not write: '${line//$'\t'/ }' (the type must be one of ${_HETZNER_DESTROY_ORDER[*]}, the id a number). Nothing was deleted. Run lo destroy again."
+      return 1
+    fi
+    key="${kind}"$'\t'"${rid}"
+    planned_keys["${key}"]=1
+    if [[ -n "${live[${key}]:-}" ]]; then
+      rows+="${live[${key}]}"$'\n'
+    else
+      warn "hetzner: skipped ${kind} ${rid} of the confirmed plan: no ${kind} with this id carries lok8s.dev/cluster=${cluster_name} now. It is gone, or it is not of this cluster."
+    fi
+  done <<<"${LOK8S_DESTROY_PLAN}"
+
+  if (( header )); then
+    error "hetzner: the confirmed destroy plan is empty. Nothing was deleted. Run lo destroy again."
+    return 1
+  fi
+
+  while IFS=$'\t' read -r kind rid rname; do
+    [[ -n "${kind}" && -z "${planned_keys[${kind}$'\t'${rid}]:-}" ]] || continue
+    warn "hetzner: kept ${kind} ${rid} ${rname} (lok8s.dev/cluster=${cluster_name}): it is not in the confirmed plan. Delete it by hand, or run lo destroy again."
+  done <<<"${listed}"
+  _HETZNER_CONFIRMED_ROWS="${rows}"
+}
+
 provider::destroy() {
   local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
   local work_dir="${2:-/tmp}"
   export PROVIDER_CONFIG_FILE="${config_file}"
 
-  # Try to read cluster_name from config, fall back to dump state
-  local cluster_name=""
-  cluster_name=$(_cfg '.cluster_name // ""' 2>/dev/null || echo "")
-  if [[ -z "${cluster_name}" ]] && [[ -f "${work_dir}/hetzner.dump.json" ]]; then
-    cluster_name=$(jq -r '.name // .cluster_name // empty' "${work_dir}/hetzner.dump.json" 2>/dev/null || echo "")
-  fi
-
-  # Fall back to reading the name field from the JSON descriptor
-  if [[ -z "${cluster_name}" ]] && [[ -f "${config_file}" ]]; then
-    cluster_name=$(jq -r 'if .server then .server[0].name | split("-") | .[:-2] | join("-") else .cluster_name // empty end' "${config_file}" 2>/dev/null || echo "")
-  fi
-
-  [[ -n "${cluster_name}" ]] || { error "cannot determine cluster name for destroy"; return 1; }
-
-  local selector="lok8s.dev/cluster=${cluster_name}"
+  local cluster_name rows listed
+  cluster_name="$(hetzner::_destroy_cluster_name "${config_file}")" || return 1
   debug "destroying hetzner resources for ${cluster_name}"
 
-  local ids
-  for resource in load-balancer server placement-group firewall volume floating-ip ssh-key network; do
-    ids=$(hcloud "${resource}" list -o json -l "${selector}" | jq -r '.[].id' 2>/dev/null || echo "")
-    for id in ${ids}; do
+  # The live list: what carries lok8s.dev/cluster=<cluster_name> now. Every
+  # delete below is in it. A list that fails stops the destroy.
+  listed="$(hetzner::_destroy_resources "${cluster_name}")" || return 1
+
+  if [[ -n "${LOK8S_DESTROY_PLAN:-}" ]]; then
+    # `lo destroy` showed this plan and the operator confirmed it: delete
+    # these resources and no others. kubeone reset ran in between, so the
+    # live list can differ. The plan is checked line by line, because the
+    # variable comes from the environment: an allowed type and a numeric id
+    # only, else nothing is deleted. A plan id that is not in the live list
+    # is not deleted (it is gone, or it does not carry the label); a live
+    # resource that is not in the plan stays.
+    hetzner::_confirmed_rows "${cluster_name}" "${listed}" || return 1
+    rows="${_HETZNER_CONFIRMED_ROWS}"
+  else
+    rows="${listed}"
+  fi
+
+  local resource id type
+  for type in "${_HETZNER_DESTROY_ORDER[@]}"; do
+    while IFS=$'\t' read -r resource id _; do
+      [[ "${resource}" == "${type}" && -n "${id}" ]] || continue
       debug "deleting ${resource} ${id}"
       hcloud "${resource}" delete "${id}" 2>/dev/null || true
-    done
+    done <<<"${rows}"
   done
 
   debug "hetzner destroy complete for ${cluster_name}"
+}
+
+# ── Optional hook: destroy_plan ──────────────────────────
+#
+# provider::destroy_plan <config_file> <work_dir>
+#   READ-ONLY. What provider::destroy would delete. Line 1 is
+#   "cluster<TAB><cluster_name>", then one "<resource><TAB><id><TAB><name>"
+#   line per resource. provider::destroy deletes EVERY resource in the
+#   token's project that carries lok8s.dev/cluster=<cluster_name>, so
+#   `lo destroy` shows this list, refuses a cluster_name that another domain
+#   also uses, and asks for the cluster_name before it deletes anything. The
+#   confirmed plan comes back to provider::destroy in LOK8S_DESTROY_PLAN.
+#   Fails (rc 1) when the descriptor has no cluster_name or a list fails.
+provider::destroy_plan() {
+  local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
+  export PROVIDER_CONFIG_FILE="${config_file}"
+
+  local cluster_name rows
+  cluster_name="$(hetzner::_destroy_cluster_name "${config_file}")" || return 1
+  rows="$(hetzner::_destroy_resources "${cluster_name}")" || return 1
+  printf 'cluster\t%s\n' "${cluster_name}"
+  [[ -z "${rows}" ]] || printf '%s\n' "${rows}"
 }
 
 # ── Standard output ──────────────────────────────────────
@@ -278,12 +410,17 @@ provider::output() {
     role=$(echo "${server}" | jq -r '.labels["lok8s.dev/role"] // "worker"')
     group=$(echo "${server}" | jq -r '.labels["lok8s.dev/group"] // "default"')
     # Node labels to stamp on the k8s Node (via kubeone labelNodes). Carry every
-    # hcloud server label EXCEPT the lok8s.dev/{cluster,role,group} orchestration
+    # hcloud server label EXCEPT the lok8s.dev/{cluster,group} orchestration
     # keys (those select infra, they are not node taxonomy). This is how the
     # tier.kubehz.cloud/* + capability.* + role.kubehz.cloud/platform taxonomy
     # reaches the Node.
+    # lok8s.dev/role stays: it is the role this inventory gives the node, and
+    # workloads select cloud workers by it (nodeSelector lok8s.dev/role=worker).
+    # A machine-controller worker carries it from its MachineDeployment; a
+    # static cloud worker lost it in the 2026-10-24 rebuild, and the Pods that
+    # select it stayed Pending. The bare-metal path below still drops it.
     local node_labels
-    node_labels=$(echo "${server}" | jq -c '(.labels // {}) | del(.["lok8s.dev/cluster"], .["lok8s.dev/role"], .["lok8s.dev/group"])')
+    node_labels=$(echo "${server}" | jq -c '(.labels // {}) | del(.["lok8s.dev/cluster"], .["lok8s.dev/group"])')
     node_labels=$(_validate_node_labels "${node_labels}" "${name}")
 
     nodes=$(echo "${nodes}" | jq \
@@ -319,6 +456,10 @@ provider::output() {
       # base64 padding, k=a=b) is preserved intact instead of truncated at the
       # first "=". select((.[0]|length) > 0) drops a leading "=" / empty key
       # ("=orphan") which would otherwise emit a "" label key.
+      # lok8s.dev/role stays dropped here, unlike on a cloud VM: a bare-metal
+      # Node never carried it, and a consumer can select cloud workers by
+      # lok8s.dev/role=worker to keep a workload off bare metal. Adding it
+      # would move those workloads onto the bare-metal nodes.
       local node_labels
       node_labels=$(echo "${labels}" | jq -R -c 'split(",") | map(select(length>0) | split("=") | select((.[0]|length) > 0) | {(.[0]): (.[1:]|join("="))}) | add // {}
         | del(.["lok8s.dev/cluster"], .["lok8s.dev/role"], .["lok8s.dev/group"], .["role"])')
@@ -430,7 +571,29 @@ provider::rebuild() {
     # shellcheck source=/dev/null
     source "${cc_script}"
   }
-  hetzner::_export_cloudinit_env "${config_file}"
+  hetzner::_export_cloudinit_env "${config_file}" || return 1
+
+  # The rebuild user-data authorizes the descriptor's sshPublicKey.
+  # `hcloud server rebuild` keeps only the SSH keys the server was created
+  # with: a cloud VM that lok8s did not create (a machine-controller VM the
+  # descriptor adopted) came back with no key lok8s can use (2026-10-24).
+  # cloud-config::generate reads CLOUD_SSH_AUTHORIZED_KEYS. It is local, so a
+  # provision that runs later in the same shell does not inherit it.
+  local CLOUD_SSH_AUTHORIZED_KEYS="" cloud_count pubkey
+  cloud_count="$(echo "${desc}" | jq '[(.server // [])[] | select(.["#cloud.root"] != "true")] | length')"
+  pubkey="$(echo "${desc}" | jq -r '.sshPublicKey // ""')"
+  if (( cloud_count > 0 )); then
+    if [[ -z "${pubkey}" ]]; then
+      warn "rebuild: the descriptor has no sshPublicKey. A rebuilt cloud VM keeps only the SSH keys it was created with, so a VM that lok8s did not create can lose SSH access. Set sshPublicKey to the public key of sshPrivateKey."
+    else
+      CLOUD_SSH_AUTHORIZED_KEYS="$(hetzner::_authorized_key "${pubkey}")" || return 1
+    fi
+  fi
+
+  # The readiness barrier connects with sshPrivateKey after the reimage. A
+  # sshPublicKey of another pair reimages the nodes, and then the barrier
+  # cannot reach them. Check the pair before anything is reimaged.
+  hetzner::_check_key_pair "${pubkey}" "$(echo "${desc}" | jq -r '.sshPrivateKey // ""')" || return 1
 
   # Readiness-barrier SSH command (identity from the descriptor).
   local ssh_key
@@ -478,6 +641,9 @@ provider::rebuild() {
       if [[ -z "${HROBOT_USER:-}" || -z "${HROBOT_PASSWORD:-}" ]]; then
         error "rebuild: bare-metal node '${name}' needs Robot creds (HROBOT_USER/HROBOT_PASSWORD)"; return 1
       fi
+      # Here, not in hetzner::_robot_curl only: the Robot calls below send
+      # their stderr to /dev/null, which would hide the variable's name.
+      http::credential_ok HROBOT_USER HROBOT_PASSWORD || return 1
       if [[ -z "${fingerprint}" ]]; then
         fingerprint="$(hetzner::_rescue_fingerprint "$(echo "${desc}" | jq -r '.sshPublicKey // ""')")" || fingerprint=""
       fi
@@ -560,15 +726,27 @@ provider::rebuild() {
 # both provider::provision and provider::rebuild (they can't drift). CLOUD_PATHD
 # is intentionally NOT set here — each caller owns it (provision: whole-cluster
 # .cloudInit.modules; rebuild: per-server #cloud.d).
+#
+# No cloudInit.path selects the framework default. A cloudInit.path that is not
+# a directory is an error: the old silent fallback to the default gave the
+# nodes a cloud-init the descriptor did not ask for.
 hetzner::_export_cloudinit_env() {
   local config_file="${1}"
-  local ci_path ci_user ci_group ci_pub
-  ci_path="$(_cfg '.cloudInit.path // ""' 2>/dev/null || echo "")"
+  local ci_raw ci_path ci_user ci_group ci_pub
+  ci_raw="$(_cfg '.cloudInit.path // ""' 2>/dev/null || echo "")"
+  ci_path="${ci_raw}"
+  # shellcheck disable=SC2088 # literal "~/" prefix match, expanded via $HOME on the same line
+  [[ "${ci_path}" != "~/"* ]] || ci_path="${HOME}/${ci_path:2}"
   if [[ -n "${ci_path}" && "${ci_path}" != /* ]]; then
     ci_path="$(dirname "${config_file}")/${ci_path}"
   fi
-  if [[ -z "${ci_path}" || ! -d "${ci_path}" ]]; then
+  if [[ -z "${ci_path}" ]]; then
     ci_path="${PATH_LOK8S}/providers/hetzner/cloud-init"
+  elif [[ ! -d "${ci_path}" ]]; then
+    local problem="does not exist"
+    [[ ! -e "${ci_path}" ]] || problem="is not a directory"
+    error "hetzner: cloudInit.path '${ci_raw}' ${problem}: ${ci_path}. A relative path resolves against the directory of ${config_file} (for an inline spec.provider.config, a temporary file: use an absolute path or spec.provider.configRef). Create the directory, correct cloudInit.path, or remove cloudInit.path to use the framework default."
+    return 1
   fi
   export CLOUD_PATH="${ci_path}"
   export CLOUD_PATH_LIB="${PATH_LOK8S}/providers/hetzner/cloud-init"
@@ -618,6 +796,54 @@ hetzner::_rebuild_barrier() {
   return 1
 }
 
+# hetzner::_authorized_key <pubkey_path>
+# Print "<type> <base64>" of the OpenSSH public key in <pubkey_path> for the
+# rebuild user-data (cloud-config::key_line drops the comment). Error when the
+# file cannot be read or holds no key.
+hetzner::_authorized_key() {
+  local path="${1}" file line key
+  file="${path}"
+  # shellcheck disable=SC2088 # literal "~/" prefix match, expanded via $HOME on the same line
+  [[ "${file}" != "~/"* ]] || file="${HOME}/${file:2}"
+  if [[ ! -f "${file}" || ! -r "${file}" ]]; then
+    error "rebuild: cannot read sshPublicKey '${path}' (${file}). The rebuilt cloud VMs need it as an authorized key. Correct sshPublicKey in the descriptor, or create the file."
+    return 1
+  fi
+  line="$(grep -m1 -v -e '^[[:space:]]*$' -e '^#' "${file}" || true)"
+  if ! key="$(cloud-config::key_line "${line}")"; then
+    error "rebuild: sshPublicKey '${path}' holds no OpenSSH public key (expected '<type> <base64>' on the first line). Set sshPublicKey to the .pub file of sshPrivateKey."
+    return 1
+  fi
+  echo "${key}"
+}
+
+# hetzner::_check_key_pair <sshPublicKey> <sshPrivateKey>
+# Error when sshPublicKey is not the public key of sshPrivateKey (`ssh-keygen
+# -y` derives it), or when sshPrivateKey does not exist. Only a warning when
+# ssh-keygen cannot read the private key (it has a passphrase). Nothing to
+# check when one of the two is not set.
+hetzner::_check_key_pair() {
+  local pub="${1}" priv="${2}" file want derived got
+  [[ -n "${pub}" && -n "${priv}" ]] || return 0
+  file="${priv}"
+  # shellcheck disable=SC2088 # literal "~/" prefix match, expanded via $HOME on the same line
+  [[ "${file}" != "~/"* ]] || file="${HOME}/${file:2}"
+  if [[ ! -f "${file}" ]]; then
+    error "rebuild: sshPrivateKey '${priv}' does not exist (${file}). The readiness check connects with it after the reimage, so nothing was reimaged. Correct sshPrivateKey in the descriptor."
+    return 1
+  fi
+  want="$(hetzner::_authorized_key "${pub}")" || return 1
+  if ! derived="$(ssh-keygen -y -P '' -f "${file}" 2>&1)"; then
+    warn "rebuild: cannot check that sshPublicKey '${pub}' is the public key of sshPrivateKey '${priv}': ssh-keygen -y failed (${derived%%$'\n'*}). Make sure that the two keys are one pair."
+    return 0
+  fi
+  got="$(cloud-config::key_line "${derived%%$'\n'*}")" || got=""
+  if [[ "${got}" != "${want}" ]]; then
+    error "rebuild: sshPublicKey '${pub}' is not the public key of sshPrivateKey '${priv}' (ssh-keygen -y gives '${got:-no key}'). The readiness check connects with sshPrivateKey after the reimage, so nothing was reimaged. Set sshPublicKey to the .pub file of sshPrivateKey."
+    return 1
+  fi
+}
+
 # hetzner::_rescue_fingerprint <pubkey_path>
 # MD5 fingerprint (colon-hex, the form Hetzner Robot registers) of a public key.
 hetzner::_rescue_fingerprint() {
@@ -628,6 +854,17 @@ hetzner::_rescue_fingerprint() {
   [[ -f "${pub}" ]] || return 1
   ssh-keygen -l -E md5 -f "${pub}" 2>/dev/null \
     | grep -oE 'MD5:[0-9a-f:]+' | sed 's/^MD5://' | head -1
+}
+
+# hetzner::_robot_curl <curl args...>
+# curl with the Robot user and password in a config on stdin (`-K -`). The
+# password never goes on argv, which every local user can read (ps,
+# /proc/<pid>/cmdline) and audit tools store: it can boot a bare-metal
+# server into rescue and reset it. A user or password with a control
+# character is refused with its name (http::credential_ok), and no call runs.
+hetzner::_robot_curl() {
+  http::credential_ok HROBOT_USER HROBOT_PASSWORD || return 1
+  http::curl_config user "${HROBOT_USER}:${HROBOT_PASSWORD}" | curl -K - "${@}"
 }
 
 # hetzner::_robot_server_number_by_ip <ip> [connect_timeout] [max_time]
@@ -642,8 +879,8 @@ hetzner::_robot_server_number_by_ip() {
   local connect_timeout="${2:-${HROBOT_CONNECT_TIMEOUT}}" max_time="${3:-${HROBOT_MAX_TIME}}"
   [[ -n "${ip}" ]] || return 1
   local json matches count
-  json="$(curl -f -sS --connect-timeout "${connect_timeout}" --max-time "${max_time}" \
-            -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/server" 2>/dev/null)" || return 1
+  json="$(hetzner::_robot_curl -f -sS --connect-timeout "${connect_timeout}" --max-time "${max_time}" \
+            "${HROBOT_API}/server" 2>/dev/null)" || return 1
   matches="$(echo "${json}" | jq -c --arg ip "${ip}" \
               '[.[].server | select(.server_ip==$ip)]' 2>/dev/null)" || return 1
   count="$(echo "${matches}" | jq 'length' 2>/dev/null || echo 0)"
@@ -667,14 +904,14 @@ hetzner::_cloud_server_unique_labeled() {
 hetzner::_robot_rescue() {
   local num="${1}" fingerprint="${2}"
   # Honor dry-run: PRINT the intended activation and issue no POST. Kept as an
-  # explicit branch (not dry-run::cmd) so the Robot user:password on the curl
-  # command line is never teed into the plan log.
+  # explicit branch (not dry-run::cmd): the plan log gets this line, not the
+  # curl call.
   if [[ -n "${CLOUD_DRY_RUN:-}" ]]; then
     _hetzner_print "🧪 [dry-run] would activate Robot rescue on robot#${num} (POST ${HROBOT_API}/boot/${num}/rescue os=linux authorized_key=${fingerprint})"
     return 0
   fi
-  curl -f -sS --connect-timeout "${HROBOT_CONNECT_TIMEOUT}" --max-time "${HROBOT_MAX_TIME}" \
-    -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/boot/${num}/rescue" \
+  hetzner::_robot_curl -f -sS --connect-timeout "${HROBOT_CONNECT_TIMEOUT}" --max-time "${HROBOT_MAX_TIME}" \
+    "${HROBOT_API}/boot/${num}/rescue" \
     -d os=linux --data-urlencode "authorized_key=${fingerprint}" >/dev/null 2>&1 \
     || { error "rebuild: rescue activation failed for robot#${num}"; return 1; }
 }
@@ -686,8 +923,8 @@ hetzner::_robot_reset() {
     _hetzner_print "🧪 [dry-run] would hardware-reset robot#${num} (POST ${HROBOT_API}/reset/${num} type=hw)"
     return 0
   fi
-  curl -f -sS --connect-timeout "${HROBOT_CONNECT_TIMEOUT}" --max-time "${HROBOT_MAX_TIME}" \
-    -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/reset/${num}" \
+  hetzner::_robot_curl -f -sS --connect-timeout "${HROBOT_CONNECT_TIMEOUT}" --max-time "${HROBOT_MAX_TIME}" \
+    "${HROBOT_API}/reset/${num}" \
     -d type=hw >/dev/null 2>&1 \
     || { error "rebuild: hardware reset failed for robot#${num}"; return 1; }
 }
@@ -741,8 +978,10 @@ hetzner::_doctor_checks() {
   local have_robot=0 robot_api_ok=0
   if [[ -n "${HROBOT_USER:-}" && -n "${HROBOT_PASSWORD:-}" ]]; then
     have_robot=1
-    if curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
-         -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/server" >/dev/null 2>&1; then
+    if ! http::credential_ok HROBOT_USER HROBOT_PASSWORD 2>/dev/null; then
+      printf 'warn\tHROBOT_USER or HROBOT_PASSWORD holds a control character (a CR from a file with CRLF line ends?) — remove it\n'
+    elif hetzner::_robot_curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
+         "${HROBOT_API}/server" >/dev/null 2>&1; then
       robot_api_ok=1
       printf 'ok\tRobot API reachable\n'
     else
@@ -773,8 +1012,8 @@ hetzner::_doctor_checks() {
         printf 'warn\tcannot determine rescue key fingerprint (descriptor .sshPublicKey missing/unreadable) — set PROVIDER_ROBOT_RESCUE_FP\n'
       else
         local keys
-        if keys="$(curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
-                      -u "${HROBOT_USER}:${HROBOT_PASSWORD}" "${HROBOT_API}/key" 2>/dev/null)"; then
+        if keys="$(hetzner::_robot_curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
+                      "${HROBOT_API}/key" 2>/dev/null)"; then
           # Exact, whole-value fingerprint match (case-insensitive). A loose
           # substring grep would let a short/truncated fingerprint false-match a
           # longer registered key — compare the /key fingerprint field as a whole.

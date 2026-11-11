@@ -26,11 +26,20 @@ package cli
 //     it is not known to be safe;
 //   - a command whose output is a credential (AnnotationCredentialOutput:
 //     kubeconfig, secrets print, secrets env, kubehz token, kubehz
-//     claim-code) is never exposed;
+//     claim-code, kubehz space|cluster kubeconfig) is never exposed;
 //   - flags that carry a credential (token, secret, password, key, nonce, …)
 //     are never exposed; --force and --force-recreate only with
 //     --allow-destructive; --verbose never (ophis renders a count flag as
-//     `--verbose N`, which cobra would take as a stray positional).
+//     `--verbose N`, which cobra would take as a stray positional);
+//   - a command that parses its own argv (DisableFlagParsing: `lo chat`) is
+//     never exposed: the flag policy cannot see what reaches it, and
+//     `lo chat --lo <path>` would run any file with the server's
+//     environment (an agent key, for one);
+//   - a positional argument that starts with "-" is refused before anything
+//     runs (mcpNoDashArgs). ophis appends the model's arguments after the
+//     flags, so "--force" there would parse as the flag. The schema itself
+//     refuses a flag it does not list (additionalProperties: false,
+//     validated by the MCP SDK).
 //
 // LO_MCP_ALLOW=mutating|destructive is the env form of the opt-in, for the
 // editor configs `lo mcp <editor> enable --env LO_MCP_ALLOW=…` writes.
@@ -232,19 +241,36 @@ func mcpHiddenSubtree(cmd *cobra.Command) bool {
 }
 
 // mcpSelectors is the single ophis selector: leaves only (dispatchers are
-// traversed, not exposed — as in the argsh server), outside hidden subtrees,
-// gated by tier, with the flag policy applied to local and inherited flags
-// alike.
+// traversed, not exposed, as in the argsh server), outside hidden subtrees,
+// never a command that parses its own argv, gated by tier, with the flag
+// policy on local and inherited flags alike, and every call through
+// mcpNoDashArgs.
 func mcpSelectors(x mcpExposure) []ophis.Selector {
 	flagOK := func(f *pflag.Flag) bool { return x.allowsFlag(f.Name) }
 	return []ophis.Selector{{
 		CmdSelector: func(cmd *cobra.Command) bool {
-			return !cmd.HasSubCommands() && !mcpHiddenSubtree(cmd) &&
+			return !cmd.HasSubCommands() && !mcpHiddenSubtree(cmd) && !cmd.DisableFlagParsing &&
 				cmd.Annotations[AnnotationCredentialOutput] != "true" && x.allows(mcpTier(cmd))
 		},
 		LocalFlagSelector:     flagOK,
 		InheritedFlagSelector: flagOK,
+		Middleware:            mcpNoDashArgs,
 	}}
+}
+
+// mcpNoDashArgs refuses a call when one of the model's positional arguments
+// starts with "-". ophis builds the argv as <command path> <flags> <args>
+// without a separator, so "--force" there would parse as a flag that the
+// schema hides. A "--" cannot help: the argsh tree, which a project can
+// route a command to, has no end-of-options marker. The argv of an allowed
+// call does not change.
+func mcpNoDashArgs(ctx context.Context, req *mcp.CallToolRequest, in ophis.ToolInput, next ophis.ExecuteFunc) (*mcp.CallToolResult, ophis.ToolOutput, error) {
+	for _, a := range in.Args {
+		if strings.HasPrefix(a, "-") {
+			return nil, ophis.ToolOutput{}, fmt.Errorf("lo mcp: the argument %q starts with a dash. Set flags in \"flags\", not in \"args\". Nothing ran", a)
+		}
+	}
+	return next(ctx, req, in)
 }
 
 // mcpDefaultEnv is what `lo mcp <editor> enable` records for the launched
@@ -358,8 +384,10 @@ Exposure policy — what an agent can call:
 
 A command without a marker counts as mutating. A command whose output is
 a credential (kubeconfig, secrets print, secrets env, kubehz token, kubehz
-claim-code) is never exposed: a tool result lands in the model's
-transcript. Flags that carry a credential (token, secret, password, key,
+claim-code, kubehz space|cluster kubeconfig) is never exposed: a tool
+result lands in the model's transcript. Neither is chat: it passes its
+arguments on unread. A call whose positional argument starts with "-" is
+refused, and nothing runs. Flags that carry a credential (token, secret, password, key,
 nonce, ...) are never exposed either.
 A command that is not exposed is not registered, so it cannot be called.
 LO_MCP_ALLOW=mutating|destructive is the environment form of the opt-in,

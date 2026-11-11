@@ -26,7 +26,7 @@ provably exists but cannot be proven to encrypt.
 | `encryption-at-rest` | high | Secret encryption at rest (etcd). For KubeOne the authoritative signal is the driver's `features.encryptionProviders.enable`; a `spec.features.encryptionProviders.enable` override wins; a rendered `EncryptionConfiguration` in `lo build` artifacts counts as proof **only when a real provider (`aescbc`/`secretbox`/`kms`) is the write provider for the FIRST resource group covering `secrets`** (apiserver precedence: the first matching group wins; a later wildcard group can't rescue a `secrets → identity` group). An `identity`-only or empty config encrypts nothing and counts as disabled. **Disabled on a prod-intent cluster → fail.** A local `kind` (`kind: Lo`) cluster is **always** not-applicable (pass), even if an encryption config is present. |
 | `cilium-policy-enforcement` | high | Cilium `policyAuditMode` / `policyEnforcementMode` in the **effective** cilium values (base < driver < provider < inline). **Audit mode = insecure** (see below). Values that fail to parse/merge (e.g. a broken inline override) → `unknown`, never a silent pass. |
 | `exposed-endpoints` | medium / low | `NodePort` and `LoadBalancer` Services, `HTTPRoute`s, and whether a default-Deny `SecurityPolicy` (IP-allowlist) carve-out fronts them. |
-| `k8s-version-support` | high / medium | Is `spec.kubernetes.version` a still-supported minor? EOL on a prod-intent cluster is a fail; on a dev cluster it's a warn. |
+| `k8s-version-support` | high / medium | Is `spec.kubernetes.version` a still-supported minor? EOL on a prod-intent cluster is a fail; on a dev cluster it's a warn. A `Lo` cluster without a version uses the default node image of the installed kind: a low pass. The version is read with the rules of `lo provision` ([Kubernetes version](../reference/specs.md#kubernetes-version-lo)): a spec that those rules refuse is `unknown`, with the same problem text. |
 | `privileged-workloads` | medium | `privileged`, `hostNetwork`, or `hostPath` in the cluster's **own targets** (the vetted framework addons are out of scope to avoid noise). |
 | `plaintext-endpoints` | high / medium | A non-HTTPS `spec.oidc.issuer` (fail: the apiserver would trust tokens over cleartext) and `http://` endpoints referenced in targets (warn). |
 
@@ -163,20 +163,31 @@ CI example:
     sarif_file: audit.sarif
 ```
 
-## Kubernetes version support list
+## Kubernetes version support table
 
-The supported-minors list is static (the audit is cluster-free) and lives in
+The audit is cluster-free, so the support table is static. It holds one row
+per minor with the date upstream patch support ends, newest first. The Go
+binary keeps it in `internal/audit/audit.go` (`k8sMinorEOL`), the bash tree in
 `.lok8s/libs/audit`:
 
 ```bash
-_AUDIT_K8S_SUPPORTED_MINORS="1.34 1.35 1.36"
-_AUDIT_K8S_LATEST_MINOR="1.36"
+_AUDIT_K8S_MINOR_EOL="1.37:2027-10-28 1.36:2027-06-28 1.35:2027-02-28 1.34:2026-10-27 1.33:2026-06-28"
 ```
 
-Update it when new minors release or old ones reach End-of-Life. See the
-[Kubernetes releases page](https://kubernetes.io/releases/). The audit reports
-a version newer than `_AUDIT_K8S_LATEST_MINOR` as a low warn ("the support list
-may be stale"), so a bump reminds you to refresh the list.
+A minor is supported while its date is in the future. So a minor reaches
+End-of-Life on its date with no change to the table.
+
+Add a row when a new minor releases (about every four months). The
+[Kubernetes releases page](https://kubernetes.io/releases/) and
+[endoflife.date](https://endoflife.date/kubernetes) give the dates. Edit both
+tables: a test fails when they differ.
+
+The audit reports a version newer than the newest row as a low warn ("the
+support list may be stale"). When every row is past its date, it warns that
+the table is out of date.
+
+`_AUDIT_TODAY` (yyyy-mm-dd) pins the day that the audit compares the table to.
+The tests use it. Leave it unset otherwise.
 
 ## Addon overview (`lo addons --detail`)
 
@@ -195,9 +206,9 @@ Addons deployed by my-cluster.example.com (kind=kubeone)
 
 NAME          CATEGORY        TYPE   VERSION   CONFIGURE
 ----          --------        ----   -------   ---------
-cilium        networking      khelm  1.20.1    encryption + policy mode (policyAuditMode) in cilium inline values / values.<driver>.yaml
+cilium        networking      khelm  1.20.4    encryption + policy mode (policyAuditMode) in cilium inline values / values.<driver>.yaml
 ccm           networking      khelm  1.35.0    spec.bootstrap ccm.values.env: ROBOT_ENABLED / HCLOUD_NETWORK (hcloud CCM)
-cert-manager  infrastructure  khelm  v1.21.1   issue TLS via ClusterIssuer/Certificate CRs in a networking target
+cert-manager  infrastructure  khelm  v1.21.3   issue TLS via ClusterIssuer/Certificate CRs in a networking target
 networking    target          target -         per-cluster glue in clusters/my-cluster.example.com/targets/networking
 ```
 

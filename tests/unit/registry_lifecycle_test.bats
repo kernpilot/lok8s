@@ -15,7 +15,6 @@ setup() {
   setup_tmpdir
 
   export PATH_BASE="${BATS_TEST_TMPDIR}"
-  export LO_REGISTRY_STATE_DIR="${BATS_TEST_TMPDIR}/registry-state"
 
   import() { :; }
   export -f import
@@ -640,6 +639,148 @@ docker() {
   assert_output --partial "registry/lok8s-registry-io-docker unchanged"
 }
 
+# ── The registry image: an explicit pull with a bounded retry ───────────
+
+# The docker pull stderr for a transient network error (the Go tests use
+# the same line: internal/driver/lo/registryimage_test.go).
+PULL_CAUSE='Error response from daemon: Get "https://registry-1.docker.io/v2/": dial tcp: lookup registry-1.docker.io: i/o timeout'
+
+# _pull_script <present 0|1> <failures> — `docker image inspect` finds the
+# image when present is 1; otherwise the first <failures> pulls fail with
+# PULL_CAUSE and the next one succeeds. Every wait is logged to
+# ${BATS_TEST_TMPDIR}/sleeps instead of slept.
+_pull_script() {
+  PULL_PRESENT="${1}" PULL_FAILURES="${2}"
+  PULL_COUNT="${BATS_TEST_TMPDIR}/pulls"
+  : > "${PULL_COUNT}"
+  eval "_real_docker() $(declare -f docker | tail -n +2)"
+  docker() {
+    case "${1} ${2:-}" in
+      "image inspect")
+        echo "docker ${*}" >> "${DOCKER_LOG}"
+        (( PULL_PRESENT )) && return 0
+        echo "Error response from daemon: No such image: registry:2.8.3" >&2
+        return 1
+        ;;
+      "pull "*)
+        echo "docker ${*}" >> "${DOCKER_LOG}"
+        echo x >> "${PULL_COUNT}"
+        if (( $(wc -l < "${PULL_COUNT}") <= PULL_FAILURES )); then
+          printf '%s\n\n' "${PULL_CAUSE}" >&2
+          return 1
+        fi
+        PULL_PRESENT=1
+        return 0
+        ;;
+      *) _real_docker "${@}" ;;
+    esac
+  }
+  sleep() { echo "${1}" >> "${BATS_TEST_TMPDIR}/sleeps"; }
+  : > "${BATS_TEST_TMPDIR}/sleeps"
+}
+
+@test "registries: a local registry image is checked once and not pulled" {
+  _load_driver
+  _pull_script 1 0
+
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_success
+  assert_output --partial "registry/lok8s-registry-build created"
+  run grep -c '^docker image inspect -f {{.Id}} registry:2.8.3$' "${DOCKER_LOG}"
+  assert_output "1"
+  run grep -c '^docker pull ' "${DOCKER_LOG}"
+  assert_output "0"
+  # The check comes before the first container.
+  run grep -m1 -E '^docker (image inspect|run) ' "${DOCKER_LOG}"
+  assert_output --regexp '^docker image inspect '
+}
+
+@test "registries: a failed pull is retried after 2s, then every container starts" {
+  _load_driver
+  _pull_script 0 1
+
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_success
+  assert_output --partial "registry/lok8s-registry-build created"
+  assert_output --partial "registry/lok8s-registry-cache created"
+  assert_output --partial "registry/lok8s-registry-io-docker created"
+  assert_line "[warn] docker pull registry:2.8.3 failed (attempt 1 of 4): ${PULL_CAUSE}. Retrying in 2s."
+  run grep -c '^docker pull registry:2.8.3$' "${DOCKER_LOG}"
+  assert_output "2"
+  run cat "${BATS_TEST_TMPDIR}/sleeps"
+  assert_output "2"
+}
+
+# warn prints with echo -e: a backslash in the cause must print as is, and
+# an escape such as \c must not cut the line.
+@test "registries: a backslash in the pull error prints as is in the [warn] line" {
+  _load_driver
+  _pull_script 0 1
+  PULL_CAUSE='Error response from daemon: open C:\new\cache: \c denied'
+
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_success
+  assert_line '[warn] docker pull registry:2.8.3 failed (attempt 1 of 4): Error response from daemon: open C:\new\cache: \c denied. Retrying in 2s.'
+}
+
+@test "registries: the start error goes through the summary, the --help hint dropped" {
+  _load_driver
+  eval "_real_docker() $(declare -f docker | tail -n +2)"
+  docker() {
+    if [[ "${1} ${2:-}" == "run -d" && "${*}" == *lok8s-registry-build* ]]; then
+      echo "docker ${*}" >> "${DOCKER_LOG}"
+      printf '%s\n' "docker: Error response from daemon: Conflict." "See 'docker run --help'." >&2
+      return 125
+    fi
+    _real_docker "${@}"
+  }
+
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_line "error: registry/lok8s-registry-build: docker: Error response from daemon: Conflict."
+  refute_output --partial "--help"
+}
+
+@test "registries: when every pull fails the error names the cause and no container starts" {
+  _load_driver
+  _pull_script 0 99
+
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_line "error: docker pull registry:2.8.3 failed after 4 attempts: ${PULL_CAUSE}"
+  [ "$(grep -c '^error: docker pull' <<< "${output}")" -eq 1 ]
+  # One pull series for the set: the result is kept for the other registries.
+  run grep -c '^docker pull registry:2.8.3$' "${DOCKER_LOG}"
+  assert_output "4"
+  run grep -c '^docker run ' "${DOCKER_LOG}"
+  assert_output "0"
+  run cat "${BATS_TEST_TMPDIR}/sleeps"
+  assert_output "$(printf '2\n5\n10')"
+}
+
+@test "registries: a failed pull keeps a running container that would be recreated" {
+  _load_driver
+  lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml" > /dev/null
+  sed -i '2s/.*/stale-hash/' "${FAKE_DOCKER}/containers/lok8s-registry-build"
+  LO_REGISTRY_IMAGE_READY=""   # a new process
+  _pull_script 0 99
+  : > "${DOCKER_LOG}"
+
+  run lo::registries "test.lok8s.dev" \
+    "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  assert_failure
+  run sed -n 1p "${FAKE_DOCKER}/containers/lok8s-registry-build"
+  assert_output "running"
+  run grep -c '^docker rm -f lok8s-registry-build$' "${DOCKER_LOG}"
+  assert_output "0"
+}
+
 # ── Cleanup ──────────────────────────────────────────────
 
 @test "cleanup: removes project containers + configs, keeps shared mirrors" {
@@ -686,4 +827,86 @@ docker() {
     echo "loops back into the same squatted-IP failure forever." >&2
     return 1
   }
+}
+
+# ── Review round 2, item D's exposed bug ───────────────────────────────
+#
+# Setting LOK8S_BOOTSTRAP_DRYRUN BEFORE driver::export (instead of only
+# inside bootstrap::apply, which runs after) means registry::config_generate
+# now runs its OWN dry-run gate (a disposable temp write, never the real
+# path) during driver::export too — so LOK8S_REGISTRY_JSON can legitimately
+# name a file that was never written by the time these query helpers are
+# called from driver::export → lo::export_spec_envs on the SAME dry run.
+# They must report "nothing yet" gracefully, not fail loudly with jq's own
+# "Could not open file" error on stderr (which broke the lo/go stderr
+# parity for a fresh domain's first dry run).
+@test "registry::get on a missing LOK8S_REGISTRY_JSON returns gracefully" {
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/config-registry.sh"
+  export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/does-not-exist.json"
+  run registry::get build host
+  assert_success
+  [ -z "${output}" ]
+  refute_output --partial "Could not open file"
+}
+
+@test "registry::is_shared / is_tls / port on a missing file don't error loudly" {
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/config-registry.sh"
+  export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/does-not-exist.json"
+  run registry::is_shared
+  assert_failure
+  refute_output --partial "Could not open file"
+  run registry::is_tls
+  assert_failure
+  refute_output --partial "Could not open file"
+  run registry::port
+  assert_success
+  [ "${output}" = "80" ]
+}
+
+@test "registry::network_name / network_cidr / project_network on a missing file return empty, not an error" {
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/utils/config-registry.sh"
+  export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/does-not-exist.json"
+  for fn in registry::network_name registry::network_cidr registry::project_network; do
+    run "${fn}"
+    assert_success
+    [ -z "${output}" ]
+    refute_output --partial "Could not open file"
+  done
+}
+
+# ── Review round 3: a dry run keeps the registry document in memory ───
+#
+# A bootstrap dry run (LOK8S_BOOTSTRAP_DRYRUN=1) computes the same
+# .registries.json document a real run writes, never writes the file, and
+# the query helpers read the in-memory document — so lo::export_spec_envs
+# exports the registry values a real run reads back from the file (the
+# round-2 dry run exported them empty). A real run writes the file and drops
+# the dry run's document. The Go twin: TestConfigGenerateDryRunKeepsTheDocumentInMemory.
+@test "registry::config_generate under a dry run keeps the document in memory, never writes it" {
+  _write_spec
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  local spec="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  local json="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/.registries.json"
+  export LOK8S_BOOTSTRAP_DRYRUN=1
+  lo::read_network_config "${spec}"
+  [ ! -e "${json}" ]
+  [ "${LOK8S_REGISTRY_JSON}" = "${json}" ]
+  run registry::get build host
+  assert_output "lok8s.local"
+  run registry::get cache host
+  assert_output "lok8s.cache"
+  run registry::network_name
+  assert_output "lok8s-registries"
+  lo::export_spec_envs "${spec}"
+  [ "${LOK8S_SPEC_REGISTRY_BUILD_HOST}" = "lok8s.local" ]
+  [ "${LOK8S_SPEC_REGISTRY_CACHE_HOST}" = "lok8s.cache" ]
+  [ ! -e "${json}" ]
+
+  # The real run writes the same document and drops the dry run's.
+  local mem="${LOK8S_BOOTSTRAP_DRYRUN_REGISTRY}"
+  unset LOK8S_BOOTSTRAP_DRYRUN
+  lo::read_network_config "${spec}"
+  [ -f "${json}" ]
+  [ "$(cat "${json}")" = "${mem}" ]
+  [ -z "${LOK8S_BOOTSTRAP_DRYRUN_REGISTRY:-}" ]
 }

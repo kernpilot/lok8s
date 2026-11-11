@@ -1,0 +1,13 @@
+a0: &a0 {version: v1.31.4}
+a1: &a1 {<<: [*a0, *a0]}
+a2: &a2 {<<: [*a1, *a1]}
+a3: &a3 {<<: [*a2, *a2]}
+a4: &a4 {<<: [*a3, *a3]}
+a5: &a5 {<<: [*a4, *a4]}
+kind: Lo
+metadata:
+  name: kver
+spec:
+  runtime: kind
+  kubernetes:
+    <<: *a5

@@ -884,17 +884,17 @@ curl_space_refusal() {
   # The other mocks in this file ignore -H entirely, so a regression that
   # stops sending Authorization would stay green everywhere else. This one
   # test pins the header contract for the whole client.
+  # The bearer reaches curl in a config on stdin (-K -), never on argv:
+  # curl_capture reads it the way curl does.
+  source "${_PROJECT_ROOT}/tests/lib/curl_capture.sh"
   curl() {
     local auth_seen=""
-    while (( $# )); do
-      case "$1" in
-        # EXACT bearer required (round 2): any-non-empty let a wrong variable
-        # (e.g. HCLOUD_TOKEN) pass. The sentinel is pinned by the test env,
-        # and the empty-token leg cannot match because ?* demands substance.
-        -H) [[ "$2" == "Authorization: Bearer khz_test_token" ]] && auth_seen=1; shift 2 ;;
-        *) shift ;;
-      esac
-    done
+    [[ " $* " != *"khz_test_token"* ]] || { printf '{"error":"bearer on argv"}\n400'; return 0; }
+    curl_capture "$@"
+    # EXACT bearer required (round 2): any-non-empty let a wrong variable
+    # (e.g. HCLOUD_TOKEN) pass. The sentinel is pinned by the test env, and
+    # the empty-token leg cannot match because ?* demands substance.
+    [[ $'\n'"${CURL_HEADERS}" == *$'\n'"Authorization: Bearer khz_test_token"$'\n'* ]] && auth_seen=1
     if [[ -z "${auth_seen}" ]]; then
       printf '{"error":"no bearer"}\n401'
       return 0
@@ -912,6 +912,31 @@ curl_space_refusal() {
   run kubehz::space_api GET "/api/spaces/sp-auth"
   [ "$status" -ne 0 ]
   KUBEHZ_TOKEN="${saved}"
+}
+
+@test "space_api: a curl failure is rc 1 with the unreachable line; space_api_call keeps the curl code and prints none" {
+  bats_require_minimum_version 1.5.0
+  curl() { echo "curl: (7) stub failure" >&2; return 7; }
+  export -f curl
+
+  run --separate-stderr kubehz::space_api GET "/api/spaces"
+  [ "$status" -eq 1 ]
+  [[ "${stderr}" == "curl: (7) stub failure"$'\n'"[error] kubehz API unreachable (GET /api/spaces)" ]]
+
+  # The caller that tells "before the send" from "after it" (node::maintain)
+  # reads the curl code and renders the failure itself.
+  local rc=0
+  kubehz::space_api_call POST "/api/spaces" '{}' 2>"${BATS_TEST_TMPDIR}/call.err" || rc=$?
+  [ "${rc}" -eq 1 ]
+  [ "${KUBEHZ_SPACE_API_CURL_RC}" = "7" ]
+  [[ "$(cat "${BATS_TEST_TMPDIR}/call.err")" == "curl: (7) stub failure" ]]
+
+  # The token check refuses before curl runs: no curl code, and space_api
+  # adds no unreachable line to the check's own.
+  KUBEHZ_TOKEN=$'khz_test_token\r' run --separate-stderr kubehz::space_api GET "/api/spaces"
+  [ "$status" -eq 1 ]
+  [[ "${stderr}" == *"must not contain a control character"* ]]
+  [[ "${stderr}" != *"unreachable"* ]]
 }
 
 # ── mutation pins for the round-1/round-2 guards ─────────

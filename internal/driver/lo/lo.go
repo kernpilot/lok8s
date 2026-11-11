@@ -66,6 +66,21 @@ type Driver struct {
 	// process (registrytls.go); registries() hashes it without a second
 	// read of the volume.
 	tlsCrt []byte
+
+	// registryImage is the result of ensureRegistryImage
+	// (registryimage.go): the image is checked and pulled once per
+	// process, like the bash LO_REGISTRY_IMAGE_READY.
+	registryImage struct {
+		done bool
+		err  error
+	}
+
+	// gwPriority is the result of dockerGwPriority (network.go): docker
+	// version is asked once per process, like the bash
+	// _LO_DOCKER_GW_PRIORITY.
+	gwPriority struct {
+		done, ok bool
+	}
 }
 
 // New builds the driver over its dispatch-provided dependencies.
@@ -119,7 +134,17 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 	}
 
 	clusterName := yqsem.Raw(yqsem.Lookup(root, "metadata", "name"))
-	k8sVersion := yqsem.Raw(yqsem.Lookup(root, "spec", "kubernetes", "version"))
+	// Validate the node version BEFORE the first VM, docker network or
+	// registry container: a version that cannot be read, or that is not an
+	// image tag, must stop the provision here, not at `kind create` after
+	// the networks and the registries exist. An unset version is valid ("":
+	// kind's default node image); the raw yq read rendered it as
+	// kindest/node:null.
+	k8sVersion, err := NodeVersion(cy)
+	if err != nil {
+		ui.ErrorTo(stderr, "%v", err)
+		return ui.Handled(err)
+	}
 
 	// Remote: provision VM, wait for SSH/Docker, set DOCKER_HOST.
 	if d.deps.ProviderName != "" && d.deps.Provider != nil {
@@ -231,10 +256,11 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 
 // createKindCluster renders the kind config and creates the cluster when
 // it does not exist yet, then attaches the nodes to the registry network
-// on a shared cluster. Guarded AND checked for emptiness: this is issue
-// #91's own shape — an unguarded assignment whose failure leaves the
-// variable empty, and the empty value then flows into `kind create
-// --config <(echo "")`.
+// on a shared cluster, and repairs the default route of every node on that
+// network (reconcileRegistryNetworkNodes). Guarded AND checked for
+// emptiness: this is issue #91's own shape — an unguarded assignment whose
+// failure leaves the variable empty, and the empty value then flows into
+// `kind create --config <(echo "")`.
 func (d *Driver) createKindCluster(ctx context.Context, clusterName, k8sVersion, network, cy string, stdout, stderr io.Writer) error {
 	renderedConfig := d.renderKindConfig(clusterName, k8sVersion, network, cy)
 	if strings.TrimSpace(renderedConfig) == "" {
@@ -262,10 +288,7 @@ func (d *Driver) createKindCluster(ctx context.Context, clusterName, k8sVersion,
 			return err
 		}
 	}
-	if d.isShared() {
-		return d.connectNodesToRegistryNetwork(ctx, clusterName)
-	}
-	return nil
+	return d.reconcileRegistryNetworkNodes(ctx, clusterName, stderr)
 }
 
 // clusterServices runs the post-create steps on the cluster: the

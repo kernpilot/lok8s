@@ -1,0 +1,223 @@
+# Fixture for internal/addons/redis_operator_rbac_test.go: the
+# redis-operator chart as the addon renders it BEFORE the addon's RBAC
+# changes, without the Namespace and the four CRDs. The metadata of each
+# object is reduced to the name, the namespace and the labels that start
+# with `rbac.authorization.k8s.io/`. It holds the chart's ServiceAccount, its
+# ClusterRole (with the label aggregate-to-admin), its ClusterRoleBinding and
+# the operator Deployment (the image, the arguments and the environment that
+# the call inventory of the test depends on). The offline test reads the
+# names from here. TestRedisOperatorFixtureMatchesChart re-renders the chart
+# (on CI, or LOK8S_ONLINE_TESTS=1) and fails on any drift from this file.
+#
+# chart: redis-operator 0.26.1
+#
+# Refresh it on every chart bump and on every values change: copy the addon
+# directory, delete `patches:` and the `rbac.yaml` resource from its
+# kustomization.yaml, render it (`KHELM_TRUST_ANY_REPO=true kustomize build
+# --enable-alpha-plugins --enable-exec <copy>`, with KUSTOMIZE_PLUGIN_HOME at
+# .kustomize), then reduce it with
+# `yq 'select(.kind != "Namespace" and .kind != "CustomResourceDefinition") | .metadata = (.metadata | pick(["name","namespace","labels"])) | .metadata.labels = (.metadata.labels // {} | with_entries(select(.key | test("^rbac\.authorization\.k8s\.io/")))) | del(.metadata.labels | select(length == 0))'`.
+# A new operator version also needs a new read of its source: the call
+# inventory in the test is for v0.26.0 only.
+apiVersion: v1
+automountServiceAccountToken: true
+kind: ServiceAccount
+metadata:
+  name: redis-operator
+  namespace: redis-operator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: redis-operator
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups:
+      - redis.redis.opstreelabs.in
+    resources:
+      - rediss
+      - redisclusters
+      - redisreplications
+      - redis
+      - rediscluster
+      - redissentinel
+      - redissentinels
+      - redisreplication
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - nonResourceURLs:
+      - '*'
+    verbs:
+      - get
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - redis.redis.opstreelabs.in
+    resources:
+      - redis/finalizers
+      - rediscluster/finalizers
+      - redisclusters/finalizers
+      - redissentinel/finalizers
+      - redissentinels/finalizers
+      - redisreplication/finalizers
+      - redisreplications/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - redis.redis.opstreelabs.in
+    resources:
+      - redis/status
+      - rediscluster/status
+      - redisclusters/status
+      - redissentinel/status
+      - redissentinels/status
+      - redisreplication/status
+      - redisreplications/status
+    verbs:
+      - get
+      - patch
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+      - pods/exec
+      - pods
+      - services
+      - configmaps
+      - events
+      - persistentvolumeclaims
+      - namespaces
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - apps
+    resources:
+      - statefulsets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: redis-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: redis-operator
+subjects:
+  - kind: ServiceAccount
+    name: redis-operator
+    namespace: redis-operator
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-operator
+  namespace: redis-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: redis-operator
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        name: redis-operator
+    spec:
+      automountServiceAccountToken: true
+      containers:
+        - args:
+            - --leader-elect
+            - --metrics-bind-address=:8080
+            - --kube-client-timeout=60s
+            - --max-concurrent-reconciles=3
+          command:
+            - /operator
+            - manager
+          env:
+            - name: INIT_CONTAINER_IMAGE
+              value: quay.io/opstree/redis-operator:v0.26.0
+            - name: ENABLE_WEBHOOKS
+              value: "false"
+            - name: SERVICE_DNS_DOMAIN
+              value: cluster.local
+          image: quay.io/opstree/redis-operator:v0.26.0
+          imagePullPolicy: Always
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probe
+          name: redis-operator
+          ports:
+            - containerPort: 8081
+              name: probe
+              protocol: TCP
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probe
+          resources:
+            limits:
+              cpu: 500m
+              memory: 500Mi
+            requests:
+              cpu: 500m
+              memory: 500Mi
+          securityContext: {}
+      securityContext: {}
+      serviceAccount: redis-operator
+      serviceAccountName: redis-operator

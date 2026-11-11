@@ -80,9 +80,12 @@ domain::resolve() {
 #          With a fallback given, the fallback is echoed and the rc is 0.
 #   rc 2 — `.kind` is present but is not a bare driver name. NEVER defaulted:
 #          the value reaches a path we source, and quietly replacing a crafted
-#          one with "lo" would hide the crafting.
+#          one with "lo" would hide the crafting. A spec file with more than
+#          one YAML document (domain::spec_layout) is rc 2 too: it reads as two
+#          different specs in the two implementations (Go: ErrSpecLayout).
 domain::spec_driver() {
   local spec="${1}" fallback="${2-}"
+  domain::spec_layout "${spec}" >/dev/null || return 2
   # No `-f` pre-check: a missing file and an unreadable one are the same answer
   # (rc 1, or the fallback), and yq already reports both. No `yq | tr` pipeline
   # either — without pipefail a yq failure would be masked by tr's rc 0 and
@@ -97,6 +100,115 @@ domain::spec_driver() {
   fi
   [[ "${kind}" =~ ^[a-z][a-z0-9]*$ ]] || return 2
   echo "${kind}"
+}
+
+# domain::spec_layout <spec_file> — the document layout of a spec file (Go
+# twin: domain.SpecLayout in internal/domain/layout.go).
+#
+# The two implementations read a spec file in different ways when it has more
+# than one YAML document: the Go readers decode the first document (yaml.v3
+# counts an empty one before it), the bash readers run yq on every document
+# (yq drops empty documents before the first one, keeps the ones after it, and
+# prints one line per document). The same file then reads as two different
+# specs. Only one layout reads the same in both: one document, with an
+# optional `---` before it and an optional `...` after it. Every command that
+# reads a spec refuses every other layout: through domain::spec_check where it
+# resolves the spec file, and through domain::spec_driver.
+#
+# Returns 0 for that layout: one `---` line at most before the content, no
+# `---` line after it, no content after a `...` line (blank lines, comments
+# and `%` directives are not content). Otherwise prints the problem, a text
+# that continues the file name ("<file> <problem>") and says which lines to
+# remove, and returns 1. A file that cannot be read returns 0: the readers
+# report that themselves.
+domain::spec_layout() {
+  local spec="${1}" text rest n=0 last=0 content=0 started=0 end_line=0
+  local -a lines=() extra=()
+  [[ -r "${spec}" ]] || return 0
+  while IFS= read -r text || [[ -n "${text}" ]]; do
+    lines+=("${text%$'\r'}")
+  done < "${spec}"
+  for text in "${lines[@]}"; do
+    n=$(( n + 1 ))
+    domain::_layout_blank "${text}" || last=${n}
+  done
+  n=0
+  for text in "${lines[@]}"; do
+    n=$(( n + 1 ))
+    if [[ "${text}" =~ ^(---|\.\.\.)([[:blank:]](.*))?$ ]]; then
+      if [[ "${BASH_REMATCH[1]}" == "..." ]]; then
+        (( end_line )) || end_line=${n}
+        continue
+      fi
+      rest="${BASH_REMATCH[3]}"
+      if (( content || end_line )); then
+        domain::_layout_after "${n}" "${last}"
+        return 1
+      elif (( started )); then
+        extra+=("${n}")
+      else
+        started=1
+      fi
+      rest="${rest#"${rest%%[![:blank:]]*}"}"
+      if [[ -n "${rest}" && "${rest}" != "#"* ]]; then
+        if (( ${#extra[@]} )); then domain::_layout_leading "${extra[@]}"; return 1; fi
+        content=1
+      fi
+      continue
+    fi
+    domain::_layout_blank "${text}" && continue
+    if (( end_line )); then
+      domain::_layout_end "${end_line}" "${n}" "${last}"
+      return 1
+    fi
+    if (( ${#extra[@]} )); then domain::_layout_leading "${extra[@]}"; return 1; fi
+    content=1
+  done
+  if (( ${#extra[@]} )); then domain::_layout_leading "${extra[@]}"; return 1; fi
+  return 0
+}
+
+# domain::_layout_blank <line> — a line that is not content: blank, a comment
+# or a `%` directive.
+domain::_layout_blank() {
+  local rest="${1#"${1%%[![:blank:]]*}"}"
+  [[ -z "${rest}" || "${rest}" == "#"* || "${1}" == "%"* ]]
+}
+
+# The problems of domain::spec_layout, one per layout case (Go twins:
+# layoutLeading, layoutAfter, layoutEnd).
+domain::_layout_leading() {  # <line>... — `---` lines of empty documents before the spec
+  if (( $# == 1 )); then
+    printf "holds an empty YAML document before the spec. Remove line %s (a '---' line).\n" "${1}"
+    return 0
+  fi
+  local list="${*:1:$#-1}"
+  printf "holds empty YAML documents before the spec. Remove lines %s and %s (the '---' lines).\n" "${list// /, }" "${!#}"
+}
+domain::_layout_after() {  # <line> <last> — a `---` line after the spec
+  if (( ${2} <= ${1} )); then
+    printf "holds more than one YAML document. Remove line %s (a '---' line after the spec).\n" "${1}"
+  else
+    printf "holds more than one YAML document. Remove lines %s to %s (the '---' at line %s and everything after it).\n" "${1}" "${2}" "${1}"
+  fi
+}
+domain::_layout_end() {  # <end line> <line> <last> — content after the `...`
+  if (( ${3} <= ${2} )); then
+    printf "holds text after the document end marker '...' at line %s. Remove line %s.\n" "${1}" "${2}"
+  else
+    printf "holds text after the document end marker '...' at line %s. Remove lines %s to %s.\n" "${1}" "${2}" "${3}"
+  fi
+}
+
+# domain::spec_check <spec_file> — `error "<file> <problem>"` and rc 1 for a
+# spec file whose layout domain::spec_layout refuses (Go twin:
+# domain.CheckSpecLayout). Every command that resolves a spec file calls it
+# before it reads the file.
+domain::spec_check() {
+  local problem
+  problem=$(domain::spec_layout "${1}") && return 0
+  error "${1} ${problem}"
+  return 1
 }
 
 # domain::driver — the driver a domain's cluster spec declares, lowercased
@@ -140,5 +252,47 @@ domain::require_driver() {
     echo "error: domain '${domain}' uses the '${got}' driver — ${what} is a '${want}'-driver (local cluster) feature." >&2
     echo "       Pass --domain <a-${want}-domain> or switch with 'lo use <domain>'." >&2
     return 1
+  fi
+}
+
+# domain::check_secrets_store <domain> — refuse a domain that must not fall
+# back to the flat .secrets/ store. That is the case when the domain
+# directory exists, it has no clusters/<domain>/secrets directory, and the
+# project keeps a store per domain: another clusters/*/secrets directory
+# exists (the first in byte order, LC_ALL=C, is named, as the Go twin does).
+# A project with only the flat store keeps working (returns 0). An explicit
+# PATH_SECRETS does not override the refusal. The silent fallback read and
+# generated values in the wrong store: the first build of a new domain
+# directory generated a new sops-age key and new tokens into the flat store.
+# Prints the refusal and returns 1. Go twin: domain.CheckSecretsStore.
+domain::check_secrets_store() {
+  local domain="${1:-}"
+  local path_clusters="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}"
+  [[ -n "${domain}" && -d "${path_clusters}/${domain}" ]] || return 0
+  [[ ! -d "${path_clusters}/${domain}/secrets" ]] || return 0
+  local d other=""
+  local -a stores=()
+  for d in "${path_clusters}"/*/secrets; do
+    [[ ! -d "${d}" ]] || stores+=("${d}")
+  done
+  (( ${#stores[@]} )) || return 0
+  other="$(printf '%s\n' "${stores[@]}" | LC_ALL=C sort | head -n 1)"
+  local store="${path_clusters}/${domain}/secrets"
+  error "domain ${domain} has no secrets store: ${store} does not exist, and this project keeps a store per domain (${other}). lo does not fall back to ${PATH_SECRETS:-${PATH_BASE:-.}/.secrets}."
+  error "  Create the empty directory ${store} to generate new values for ${domain}."
+  return 1
+}
+
+# domain::export_secrets_store <domain> — the one check-then-export every
+# store reader runs: refuse a domain without a store (check_secrets_store),
+# else point PATH_SECRETS at clusters/<domain>/secrets when it exists. A
+# project with only the flat store keeps its PATH_SECRETS. Returns 1 on the
+# refusal.
+domain::export_secrets_store() {
+  local domain="${1:-}"
+  local path_clusters="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}"
+  domain::check_secrets_store "${domain}" || return 1
+  if [[ -n "${domain}" && -d "${path_clusters}/${domain}/secrets" ]]; then
+    export PATH_SECRETS="${path_clusters}/${domain}/secrets"
   fi
 }

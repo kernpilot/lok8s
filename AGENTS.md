@@ -61,8 +61,9 @@ subprocess pipeline there. Core keeps the imported Secret generator for the
 registry TLS mint only.
 
 The pins that hold the two together live in `internal/toolchain/pins.go`.
-A drift test checks them against `go.mod` and the `.bin/b.yaml` template:
-bump them together. Every gate (build, vet, test, lint, all ten parity
+A drift test checks them against `go.mod`, the `.bin/b.yaml` template and
+the contributor `.bin/b.yaml`: bump them together, then run `b install` to
+refresh `.bin/b.lock`. Every gate (build, vet, test, lint, all ten parity
 harnesses) runs against BOTH builds. The in-process render tests are
 tag-gated (`inprocess_test.go`) or skip via `render.InProcessAvailable()`.
 The byte-parity tests need the pinned `.bin/kustomize` + `.kustomize/`

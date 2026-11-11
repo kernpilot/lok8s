@@ -1,0 +1,46 @@
+# Fixture for internal/addons/suc_rbac_test.go: every RBAC object name that
+# an upstream install of system-upgrade-controller can leave on a cluster.
+# The addon's own RBAC objects must use none of these names: a binding's
+# roleRef cannot change, so a binding with a reused name fails to apply on a
+# cluster that still carries the old object, and a reused role name changes
+# a role that another install owns.
+#
+# Collected on 2026-10-26 from:
+#   - rancher/system-upgrade-controller manifests/*.yaml at every release tag
+#     v0.1.0 .. v0.20.2 (47 tags);
+#   - every version of the Rancher chart system-upgrade-controller in the
+#     charts.rancher.io index (103.0.0+up0.6.0 .. 110.0.0, 14 versions,
+#     each tarball checked against the index digest).
+#
+# TestSystemUpgradeControllerFixtureMatchesChart (on CI, or
+# LOK8S_ONLINE_TESTS=1) fetches the manifests of the controller version the
+# addon pins and fails on a name that is not in this list. Add the names of
+# a new upstream release here.
+names:
+  - kind: ClusterRoleBinding
+    name: system-upgrade
+    source: manifests v0.1.0 .. v0.13.2 (roleRef cluster-admin), v0.13.3 .. v0.20.2 (roleRef system-upgrade-controller)
+  - kind: RoleBinding
+    name: system-upgrade
+    source: manifests v0.13.3 .. v0.20.2
+  - kind: ClusterRoleBinding
+    name: system-upgrade-drainer
+    source: manifests v0.13.3 .. v0.20.2
+  - kind: ClusterRole
+    name: system-upgrade-controller
+    source: manifests v0.13.3 .. v0.20.2
+  - kind: Role
+    name: system-upgrade-controller
+    source: manifests v0.13.3 .. v0.20.2
+  - kind: ClusterRole
+    name: system-upgrade-controller-drainer
+    source: manifests v0.13.3 .. v0.20.2
+  - kind: ClusterRoleBinding
+    name: system-upgrade-controller
+    source: chart 103.0.0+up0.6.0 .. 110.0.0 (roleRef cluster-admin)
+  - kind: ClusterRole
+    name: system-upgrade-controller-psp
+    source: chart 103.0.0+up0.6.0 .. 103.0.2+up0.6.1
+  - kind: ClusterRoleBinding
+    name: system-upgrade-controller-psp
+    source: chart 103.0.0+up0.6.0 .. 103.0.2+up0.6.1

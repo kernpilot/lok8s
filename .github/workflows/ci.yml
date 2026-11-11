@@ -17,7 +17,7 @@ jobs:
     name: ShellCheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Lint shell (shellcheck + argsh-lint)
         # `argsh lint` = full shellcheck (with .shellcheckrc: SC2250 braces +
@@ -31,7 +31,7 @@ jobs:
     name: YAML Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Run yamllint
         uses: ibiqlik/action-yamllint@2576378a8e339169678f9939646ee3ee325e845c # v3.1.1
@@ -52,7 +52,7 @@ jobs:
     name: Bats Unit Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install toolchain (b → argsh, yq)
         env:
@@ -67,9 +67,9 @@ jobs:
           # behind a red gate, having passed on 2026-08-01 with this same pinned
           # URL. Pinning removes the API call; the checksum makes the download
           # verifiable, which resolving "latest" never was.
-          B_VERSION=4.18.6
+          B_VERSION=4.18.8
           curl -fsSL "https://github.com/fentas/b/releases/download/v${B_VERSION}/b-linux-amd64.tar.gz" -o /tmp/b.tar.gz
-          echo "096566667b7f788ff1436c7411b1c2204a231bda9ca1d325b7651e4ccd4e7d94  /tmp/b.tar.gz" | sha256sum -c -
+          echo "297e07f301060480a78380afae066b3c0013c572d704862e2b2f2a4477540aad  /tmp/b.tar.gz" | sha256sum -c -
           mkdir -p "${HOME}/.local/bin"
           tar -xzf /tmp/b.tar.gz -C "${HOME}/.local/bin" b
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
@@ -93,6 +93,48 @@ jobs:
           PATH_BIN: ${{ github.workspace }}/.bin
         run: ./.bin/argsh test tests/unit/
 
+      - name: Real-helm bats tests (native, pinned helm v3)
+        # The argsh container above has no helm and forwards no CI
+        # variable, so the bats tests tagged `real-helm` (the bash dry-run
+        # chart gate against the real helm on real charts), in any file of
+        # tests/unit/, skip there. This step runs them on the runner: helm
+        # v3.21.2 (the helm that khelm v2.8.0 and lo link,
+        # internal/toolchain/pins.go) and bats with its two libraries at the
+        # versions e2e.yml pins, each tarball checksum-verified. CI=true
+        # (Actions sets it) makes a missing helm v3 fail the test; the step
+        # also fails when no test ran or one skipped.
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          HELM_VERSION=3.21.2
+          curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" -o "${tmp}/helm.tar.gz"
+          echo "0a745198de24545d0055cd8414bc8d2ba10363ef5f5d38369ea1b399671cc083  ${tmp}/helm.tar.gz" | sha256sum -c -
+          tar -xzf "${tmp}/helm.tar.gz" -C "${tmp}" linux-amd64/helm
+          install -m 0755 "${tmp}/linux-amd64/helm" "${HOME}/.local/bin/helm"
+          install_tarball() { # <repo> <tag> <sha256> <dest>
+            local repo="$1" tag="$2" sum="$3" dest="$4"
+            curl -fsSL "https://github.com/bats-core/${repo}/archive/refs/tags/${tag}.tar.gz" -o "${tmp}/src.tar.gz"
+            echo "${sum}  ${tmp}/src.tar.gz" | sha256sum -c -
+            mkdir -p "${dest}"
+            tar -xzf "${tmp}/src.tar.gz" -C "${dest}" --strip-components=1
+          }
+          install_tarball bats-core v1.13.0 \
+            a85e12b8828271a152b338ca8109aa23493b57950987c8e6dff97ba492772ff3 "${tmp}/bats-core"
+          "${tmp}/bats-core/install.sh" "${HOME}/.local"
+          # tests/lib/bats_libs.bash looks in ~/.local/lib among others.
+          install_tarball bats-support v0.3.0 \
+            7815237aafeb42ddcc1b8c698fc5808026d33317d8701d5ec2396e9634e2918f "${HOME}/.local/lib/bats-support"
+          install_tarball bats-assert v2.1.0 \
+            98ca3b685f8b8993e48ec057565e6e2abcc541034ed5b0e81f191505682037fd "${HOME}/.local/lib/bats-assert"
+          export PATH="${HOME}/.local/bin:${GITHUB_WORKSPACE}/.bin:${PATH}"
+          helm version --short
+          bats --version
+          echo "CI=${CI:-<unset>}"
+          out="$(bats --filter-tags real-helm tests/unit/)" || { echo "${out}"; exit 1; }
+          echo "${out}"
+          grep -q '^ok ' <<< "${out}" || { echo "::error::no real-helm bats test ran"; exit 1; }
+          if grep -q '# skip' <<< "${out}"; then echo "::error::a real-helm bats test skipped"; exit 1; fi
+
       - name: CRD drift gate (lo crds check)
         # libs/crds calls itself "the CI drift gate" — this is the workflow
         # step that runs it. Fails when any operator/crds/*.yaml (or the
@@ -105,9 +147,9 @@ jobs:
     name: Go Build + Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
@@ -143,9 +185,9 @@ jobs:
           # b installs here. With the install after the tests they skipped
           # silently on every CI run; under CI=true they now FAIL when the
           # toolchain is missing (render_inprocess_test.go: requireToolchain).
-          B_VERSION=4.18.6
+          B_VERSION=4.18.8
           curl -fsSL "https://github.com/fentas/b/releases/download/v${B_VERSION}/b-linux-amd64.tar.gz" -o /tmp/b.tar.gz
-          echo "096566667b7f788ff1436c7411b1c2204a231bda9ca1d325b7651e4ccd4e7d94  /tmp/b.tar.gz" | sha256sum -c -
+          echo "297e07f301060480a78380afae066b3c0013c572d704862e2b2f2a4477540aad  /tmp/b.tar.gz" | sha256sum -c -
           mkdir -p "${HOME}/.local/bin"
           tar -xzf /tmp/b.tar.gz -C "${HOME}/.local/bin" b
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
@@ -156,6 +198,15 @@ jobs:
           # build` runs): the Secret byte-parity test execs it from
           # .kustomize/ next to khelm.
           make -C kustomize build
+
+      - name: Locale en_US.UTF-8 (the bash twin of the version reader)
+        # TestNodeVersionMatchesBash runs spec::kind_node_version in
+        # en_US.UTF-8: there bash matches 'é' with [A-Za-z] (in C.UTF-8 it
+        # does not), so the `local LC_ALL=C` of spec::_is_image_tag is under
+        # test. Under CI=true the test fails when the locale is missing.
+        run: |
+          locale -a | grep -qiE '^en_US\.utf-?8$' || sudo locale-gen en_US.UTF-8
+          locale -a | grep -iE '^en_US\.utf-?8$'
 
       - name: Test (core + full)
         # Includes the tree-drift gate: the cobra command tree must match the
@@ -174,20 +225,20 @@ jobs:
         # root `./...`: kustomize/ (its own module, also imported by the
         # root via the replace directive) and ai/lochat/ (the lo chat
         # engine). Each runs with its own go.mod under the root toolchain
-        # (GOTOOLCHAIN=auto honours a lower `go` directive).
+        # (GOTOOLCHAIN=auto honours a lower or equal `go` directive).
         run: |
           go test -C kustomize ./...
           go test -C ai/lochat ./...
 
       - name: Lint (core)
-        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8.0.0
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           # Pinned (verified on GitHub releases); `latest` moved the gate
           # under us once already. Bump deliberately with .golangci.yml.
           version: v2.13.2
 
       - name: Lint (full)
-        uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8.0.0
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.13.2
           args: --build-tags inprocess
@@ -225,11 +276,11 @@ jobs:
     name: goreleaser snapshot
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
@@ -240,7 +291,7 @@ jobs:
       # sixteen builds — lo, lo-full, kustomize-secret, lochat × 4 platforms
       # — + archives + checksums) without publishing. Same pinned goreleaser
       # as .github/workflows/release.yml.
-      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           distribution: goreleaser
           version: v2.18.0
@@ -268,7 +319,7 @@ jobs:
     name: Bats Operator Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install toolchain (b → argsh, yq)
         env:
@@ -283,16 +334,16 @@ jobs:
           # behind a red gate, having passed on 2026-08-01 with this same pinned
           # URL. Pinning removes the API call; the checksum makes the download
           # verifiable, which resolving "latest" never was.
-          B_VERSION=4.18.6
+          B_VERSION=4.18.8
           curl -fsSL "https://github.com/fentas/b/releases/download/v${B_VERSION}/b-linux-amd64.tar.gz" -o /tmp/b.tar.gz
-          echo "096566667b7f788ff1436c7411b1c2204a231bda9ca1d325b7651e4ccd4e7d94  /tmp/b.tar.gz" | sha256sum -c -
+          echo "297e07f301060480a78380afae066b3c0013c572d704862e2b2f2a4477540aad  /tmp/b.tar.gz" | sha256sum -c -
           mkdir -p "${HOME}/.local/bin"
           tar -xzf /tmp/b.tar.gz -C "${HOME}/.local/bin" b
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
           b install
           ./.bin/argsh builtins install   # argsh.so — bats runtime + builtins
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
@@ -327,9 +378,9 @@ jobs:
     # is well under that (see LOK8S_TILT_TIMEOUT + the outer `timeout` wrap).
     timeout-minutes: 18
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
@@ -357,8 +408,8 @@ jobs:
           printf 'apiVersion: lok8s.dev/v1\nkind: Project\nmetadata:\n  name: e2e\nspec:\n  implementation:\n    default: %s\n' "${IMPLEMENTATION}" > "${BASE}/lok8s.yaml"
           cat "${BASE}/lok8s.yaml"
 
-      - name: Skip host-side verification for the dev registries (10.125.0.0/16)
-        # `lo up` stands up TLS registry containers on the project subnet
+      - name: Configure the Docker daemon (dev registries 10.125.0.0/16, a canary DNS search domain)
+        # 1. `lo up` stands up TLS registry containers on the project subnet
         # (spec.registries.tls: true in the fixture, the default: the cert
         # is minted into the docker volume <network>-registry-tls, which
         # this job proves end to end) and Tilt pushes the locally-built
@@ -369,13 +420,20 @@ jobs:
         # certs.d regardless. This mirrors the range the framework's own
         # Hetzner provider trusts (see
         # .lok8s/providers/hetzner/.../etc/docker/daemon.json).
+        # 2. dns-search puts a known search domain into the resolv.conf of
+        # every container Docker starts, the kind nodes included, so the
+        # pod check after `lo up` can fail: without networking.dnsSearch: []
+        # in the kind config, the pods would get this domain. It is set
+        # before kind creates the nodes, whatever search line the runner
+        # has (often none). `.invalid` never resolves (RFC 6761).
         run: |
           sudo mkdir -p /etc/docker
           # Merge (don't clobber) any existing daemon.json.
           existing='{}'
           [ -f /etc/docker/daemon.json ] && existing="$(cat /etc/docker/daemon.json)"
           echo "${existing}" \
-            | jq '.["insecure-registries"] = (((.["insecure-registries"] // []) + ["10.125.0.0/16"]) | unique)' \
+            | jq '.["insecure-registries"] = (((.["insecure-registries"] // []) + ["10.125.0.0/16"]) | unique)
+                | .["dns-search"] = (((.["dns-search"] // []) + ["lok8s-canary.invalid"]) | unique)' \
             | sudo tee /etc/docker/daemon.json
           sudo systemctl restart docker
           # Wait for the daemon to come back before the toolchain uses it.
@@ -395,9 +453,9 @@ jobs:
           # behind a red gate, having passed on 2026-08-01 with this same pinned
           # URL. Pinning removes the API call; the checksum makes the download
           # verifiable, which resolving "latest" never was.
-          B_VERSION=4.18.6
+          B_VERSION=4.18.8
           curl -fsSL "https://github.com/fentas/b/releases/download/v${B_VERSION}/b-linux-amd64.tar.gz" -o /tmp/b.tar.gz
-          echo "096566667b7f788ff1436c7411b1c2204a231bda9ca1d325b7651e4ccd4e7d94  /tmp/b.tar.gz" | sha256sum -c -
+          echo "297e07f301060480a78380afae066b3c0013c572d704862e2b2f2a4477540aad  /tmp/b.tar.gz" | sha256sum -c -
           mkdir -p "${HOME}/.local/bin"
           tar -xzf /tmp/b.tar.gz -C "${HOME}/.local/bin" b
           echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
@@ -511,6 +569,44 @@ jobs:
           FIXTURE: single-local-build
           CLUSTER: e2e-slb
 
+      - name: Verify the pod search list holds only the cluster domains
+        # The rendered kind config sets networking.dnsSearch: [] (the reason
+        # is at renderKindConfig), so the search domains that Docker gives a
+        # container never reach a pod. The Docker daemon step seeded the
+        # canary lok8s-canary.invalid. First prove that Docker still puts it
+        # into a new container (else this check could pass on nothing),
+        # then require the pod search line to hold the cluster domains only.
+        # Both legs run it: the bash leg renders through the frozen tree.
+        run: |
+          set -euo pipefail
+          export KUBECONFIG="${GITHUB_WORKSPACE}/tests/e2e/${FIXTURE}/.kubeconfig/${CLUSTER}.yaml"
+          canary="lok8s-canary.invalid"
+          # The node image is local after `lo up`; no pull.
+          node_image="$(docker inspect -f '{{.Config.Image}}' "${CLUSTER}-control-plane")"
+          container_search="$(docker run --rm --entrypoint cat "${node_image}" /etc/resolv.conf | awk '/^search/ { $1 = $1; print }')"
+          echo "runner:    $(grep '^search' /etc/resolv.conf || echo '(no search line)')"
+          echo "container: ${container_search:-(no search line)}"
+          case " ${container_search} " in
+            *" ${canary} "*) ;;
+            *)
+              echo "::error::A new container has the search line '${container_search}', without ${canary}." \
+                "The Docker daemon step did not seed the canary, so the pod check would prove nothing."
+              exit 1 ;;
+          esac
+          # Pod name and namespace in one read: two reads can see two pods.
+          read -r ns pod <<<"$(kubectl get pod -l app=app -o jsonpath='{.items[0].metadata.namespace} {.items[0].metadata.name}')"
+          observed="$(kubectl -n "${ns}" exec "${pod}" -- cat /etc/resolv.conf | awk '/^search/ { $1 = $1; print }')"
+          expected="search ${ns}.svc.cluster.local svc.cluster.local cluster.local"
+          echo "pod:       ${observed:-(no search line)}"
+          if [ "${observed}" != "${expected}" ]; then
+            echo "::error::The pod search line is '${observed}', expected '${expected}'." \
+              "The kind nodes kept the search domains of the host. Read networking.dnsSearch in the kind config that lo up rendered."
+            exit 1
+          fi
+        env:
+          FIXTURE: single-local-build
+          CLUSTER: e2e-slb
+
       - name: Diagnostics on failure
         if: failure()
         run: |
@@ -535,7 +631,7 @@ jobs:
     name: lo-up Bundle (byte-exact)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Read .archive/legacy/install/argsh.pin
         id: pin
@@ -556,7 +652,7 @@ jobs:
             esac
           done < .archive/legacy/install/argsh.pin
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: arg-sh/argsh
           ref: ${{ steps.pin.outputs.ref }}

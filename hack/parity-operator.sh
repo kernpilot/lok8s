@@ -19,7 +19,7 @@
 source "$(dirname "${BASH_SOURCE[0]}")/lib/parity.sh"
 parity::init "${1:-}"
 parity::require_tools jq yq
-unset LOK8S_STATE_DIR BINDING_CONTEXT_PATH KUBECONFIG LOK8S_NONINTERACTIVE
+unset LOK8S_STATE_DIR BINDING_CONTEXT_PATH LOK8S_NONINTERACTIVE
 
 # Hook tree: the frozen bash hooks + the CAPI templates where both
 # implementations look for them (${HOOK_DIR}/capi-templates for bash,

@@ -72,6 +72,8 @@ inventory::build_json() {
   # The fallback covers "no kind declared". It must NOT cover rc 2 — a
   # malformed kind is reported into the ClusterInventory CR and read back by
   # the agent, so defaulting it to "lo" would publish a false driver identity.
+  # One YAML document (domain::spec_check), with its own message.
+  domain::spec_check "${cluster_yaml}" || return 1
   kind=$(domain::spec_driver "${cluster_yaml}" lo) || {
     error "inventory: cluster spec declares a malformed kind: ${cluster_yaml}"
     return 1

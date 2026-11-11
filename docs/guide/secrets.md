@@ -26,6 +26,15 @@ safely. You need no external secret store to get started.
   per-domain store is the only secrets store. A flat `.secrets/` at the project
   root is a leftover of releases before v0.4.0 (see
   [Migrating a flat `.secrets/` store](#migrating-a-flat-secrets-store)).
+- **A new domain gets no flat fallback.** When one domain has its own store,
+  a domain directory without `clusters/<domain>/secrets/` stops `lo build`,
+  `lo bootstrap`, `lo provision`, `lo k8s` and `lo secrets` with an error.
+  An explicit `PATH_SECRETS` does not override this refusal. Create the empty
+  directory to generate new values for the domain. (A value the domain must
+  share with another domain is a deliberate manual copy, see
+  [Per-environment isolation](#per-environment-isolation).) `lo build
+  --no-secrets` does not read the store and does not stop. A project with only
+  the flat `.secrets/` store works as before.
 - Plaintext cache files are **gitignored**. To share them, commit them
   **encrypted** with SOPS/age (below).
 
@@ -55,7 +64,9 @@ generators:
 
 `lo build <domain>` generates `SESSION_KEY` into that domain's store
 (`clusters/<domain>/secrets/`), caches it, and emits the `Secret`. To rotate a
-value, delete its cache file and rebuild. (Charset options and how to generate
+value, delete its cache file and its `.enc` twin, then rebuild. A cache file
+that is missing while its `.enc` twin exists stops the build: run
+`lo secrets decrypt --domain <domain>` first. (Charset options and how to generate
 proper cryptographic keys are covered in the
 [reference](/reference/kustomize-plugins#generating-cryptographic-keys).)
 
@@ -70,8 +81,7 @@ lo secrets set --domain app.example.com --name myapp --namespace default API_TOK
 # omit the value to read it from a prompt / piped stdin (keeps it out of shell history):
 printf %s "$TOKEN" | lo secrets set --domain app.example.com --name myapp --namespace default API_TOKEN
 # or pass `-` explicitly (POSIX stdin placeholder), e.g. from a file
-# (needs an argsh build including arg-sh/argsh#176 — older parsers
-# reject a bare `-`):
+# (the frozen bash variant needs an argsh build with arg-sh/argsh#176):
 lo secrets set --domain app.example.com --name myapp --namespace default API_TOKEN - < token.txt
 ```
 
@@ -109,6 +119,13 @@ lo secrets --domain prod set HCLOUD_TOKEN <token> --name hetzner --namespace pro
 # …then, in your provisioning script:
 eval "$(lo secrets --domain prod env --name hetzner --namespace provisioning)"   # exports HCLOUD_TOKEN
 ```
+
+`lo provision` and `lo recover` load `HCLOUD_TOKEN`, `HROBOT_USER` and
+`HROBOT_PASSWORD` from `Secret.hetzner.provisioning.*` in the domain store by
+themselves, when the variable is not set. A fresh checkout holds only the
+`.enc` files: they decrypt them in memory with your age identity
+(`SOPS_AGE_KEY`, `SOPS_AGE_KEY_FILE`, or `LOK8S_SSH_KEY`) and never write the
+plaintext.
 
 `env` emits an `export <key>=<value>` line per key of the named secret, with the
 value shell-quoted (`%q`) so the `eval` is injection-safe. The creds get SOPS

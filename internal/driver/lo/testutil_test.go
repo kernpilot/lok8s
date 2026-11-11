@@ -102,6 +102,7 @@ func testDriver(t *testing.T) (*Driver, *fakeRunner, *bytes.Buffer, *config.Path
 		"LOK8S_REMOTE_SYNC_DEST", "LOK8S_REMOTE_SYNC_EXCLUDE", "LOK8S_REMOTE_TILT",
 		"LOK8S_CP_COUNT", "LOK8S_WORKER_COUNT", "LOK8S_HOST_PORTS",
 		"LOK8S_EXTRA_MOUNTS_COUNT", "LOK8S_MAX_CONCURRENT_DOWNLOADS",
+		"LOK8S_NETWORK_DNS_SEARCH",
 		"LOK8S_SPEC_OIDC_ISSUER", "LOK8S_SPEC_OIDC_CLIENTID", "DOMAIN_NAME",
 		"CAROOT", "PATH_SECRETS", "KUSTOMIZE_PLUGIN_HOME", "DEBUG", "KAPPLY_TTY",
 	} {
@@ -637,9 +638,12 @@ func (f *fakeDocker) disconnectNetwork(_ execx.Cmd, rest []string) error {
 	return nil
 }
 
-// connectNetwork answers `docker network connect NET NAME` with a fixed
-// address in the dynamic range.
+// connectNetwork answers `docker network connect [--gw-priority N] NET NAME`
+// with a fixed address in the dynamic range.
 func (f *fakeDocker) connectNetwork(_ execx.Cmd, rest []string) error {
+	if len(rest) >= 2 && rest[0] == "--gw-priority" {
+		rest = rest[2:]
+	}
 	if len(rest) >= 2 {
 		f.addMember(rest[0], "10.125.200.240/24", rest[1])
 	}

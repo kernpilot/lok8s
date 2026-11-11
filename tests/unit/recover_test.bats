@@ -433,6 +433,52 @@ EOF
   assert_line --partial "rebuild cfg="
 }
 
+# The consent prompt reads stdin, and nothing reads it first. On the
+# kubehz.in.net recreate (2026-10-23) a piped `yes` never reached the prompt:
+# the ssh probes of provider::doctor read stdin to the end. Each fake below
+# reads its stdin to the end and records it, like ssh without -n.
+@test "recover: a piped yes reaches the prompt; no provider call reads the prompt's input" {
+  _fake_resolve_cluster
+  _fake_load_provider
+  force=0
+  unset LOK8S_NONINTERACTIVE
+  provider::doctor() { echo "doctor read: $(cat)" >> "${RECORD}"; printf 'ok\tssh reachable\n'; }
+  provider::output() { echo "output read: $(cat)" >> "${RECORD}"; printf '{"nodes":[{},{},{}]}'; }
+  provider::rebuild() { echo "rebuild read: $(cat)" >> "${RECORD}"; }
+  provision::dispatch() { echo "provision read: $(cat)" >> "${RECORD}"; }
+  export -f provider::doctor provider::output provider::rebuild provision::dispatch
+
+  run recover::_run "test.dom" 0 0 <<<$'yes\nyes\nyes'
+  assert_success
+  refute_output --partial "aborted by operator"
+  assert_output --partial "reset 3 node(s) of cluster test.dom"
+
+  run cat "${RECORD}"
+  assert_line "doctor read: "
+  assert_line "rebuild read: "
+  assert_line "provision read: "
+  refute_line --partial "read: yes"
+  # provider::output ran for the prompt's node count and for the verify.
+  run grep -c '^output read: $' "${RECORD}"
+  assert_output "2"
+}
+
+# The provider load runs before the consent too: a plugin that reads stdin
+# while it loads must not get the prompt's input. The real
+# recover::_load_provider runs here; the test above replaces it.
+@test "recover: the provider load does not read the prompt's input" {
+  _RECOVER_SPEC="${_FAKE_SPEC}" _RECOVER_DOMAIN="test.dom"
+  provider::read_name() { echo "mock"; }
+  provider::write_config() { PROVIDER_CONFIG_FILE="${_FAKE_CFG}"; }
+  provider::load() { echo "load ${1} read: $(cat)" >> "${RECORD}"; }
+
+  recover::_load_provider <<<"yes"
+  [ "${_RECOVER_PROVIDER}" = "mock" ]
+  [ "${_RECOVER_CONFIG}" = "${_FAKE_CFG}" ]
+  run cat "${RECORD}"
+  assert_output "load mock read: "
+}
+
 # ── consent wording ──────────────────────────────────────────────────────────
 
 # The consent count is HONEST about a failed inventory resolution: an empty

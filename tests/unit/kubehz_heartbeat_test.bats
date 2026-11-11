@@ -3,9 +3,12 @@
 #
 # Guards the POSIX-sh heartbeat embedded in
 # .lok8s/libs/kubehz/manifests/agent/cronjob.yaml:
-#   - node IDENTITY: names come from a targeted jsonpath, NEVER from a greedy
-#     sed that also scrapes .status.runtimeHandlers[].name ("runc") or
-#     .status.volumesAttached[].name (CSI handles) on modern k8s;
+#   - node IDENTITY: names come from jq over .items[].metadata.name, NEVER
+#     from a greedy sed that also scrapes .status.runtimeHandlers[].name
+#     ("runc") or .status.volumesAttached[].name (CSI handles) on modern k8s;
+#   - B448: ONE node list call for all nodes. The kubectl call count does not
+#     grow with the node count, so a large cluster finishes the tick before
+#     activeDeadlineSeconds (120 s);
 #   - per-node ROLES: control-plane vs worker, derived from the node-role label
 #     KEY presence (an absent label must NOT read as control-plane);
 #   - kubernetesVersion: the SERVER version, not the client/kubectl-image tag;
@@ -33,25 +36,63 @@ setup() {
     "${CRONJOB}" > "${HEARTBEAT}"
 
   # Stubs: a realistic TWO-node cluster — a control-plane node "cp-1" and a
-  # worker "worker-1". The `get nodes -o json` fixture carries the modern-k8s
+  # worker "worker-1". The node list fixture (`get --raw /api/v1/nodes`)
+  # carries the modern-k8s
   # traps that made the shipped agent DOA: .status.runtimeHandlers[].name
   # ("runc"/"crun", present on k8s ≳1.27) and .status.volumesAttached[].name (a
-  # CSI handle). The FIX extracts node names via a targeted jsonpath
-  # (`get nodes -o jsonpath=…`); a regression to the greedy `… -o json | sed
-  # …"name"…` scrapes those ghosts → `get node runc` NotFounds → set -e aborts
-  # (caught by assert_success). STUB_ITYPE sets cp-1's instance-type label
-  # (unset → cx32, empty string → unlabeled). curl captures the POSTed heartbeat
-  # body (-d) to STUB_PAYLOAD_OUT so the test can assert the wire payload.
+  # CSI handle). The script reads the names with jq from .items[].metadata.name;
+  # a greedy sed over the JSON would report those ghosts as nodes.
+  # STUB_ITYPE sets cp-1's instance-type label (unset → cx32, empty string →
+  # unlabeled). STUB_READY_STATUS sets the Ready condition of both nodes;
+  # STUB_READY_MISSING=1 leaves it out. STUB_NODES_FILE serves a generated
+  # node list instead (the B448 tests). STUB_NODES_BODY answers the node list
+  # with exactly that body and exit 0 (an empty or broken answer). STUB_KUBECTL_LOG records every kubectl
+  # call, and STUB_KUBECTL_DELAY makes each call sleep (a slow apiserver).
+  # curl captures the POSTed heartbeat body (-d) to STUB_PAYLOAD_OUT so the
+  # test can assert the wire payload.
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
+# timeout: the pod's `timeout SECS CMD ARGS` (busybox and coreutils take the
+# same form). It logs the bound and the command, and runs the command as a
+# shell function, so the kubectl stub below answers it. A command that
+# contains STUB_TIMEOUT_MATCH times out instead: busybox kills it with
+# SIGTERM (rc 143), and it prints nothing.
+timeout() {
+  local secs=$1
+  shift
+  printf '%s %s\n' "${secs}" "$*" >> "${STUB_TIMEOUT_LOG}"
+  case "$*" in
+    *"${STUB_TIMEOUT_MATCH:-<none>}"*) return 143 ;;
+  esac
+  "$@"
+}
 kubectl() {
+  argv_log kubectl "$@"
+  [ -z "${STUB_KUBECTL_LOG:-}" ] || printf '%s\n' "$*" >> "${STUB_KUBECTL_LOG}"
+  [ -z "${STUB_KUBECTL_DELAY:-}" ] || sleep "${STUB_KUBECTL_DELAY}"
+  # In the pod, kubectl reads the in-cluster config. A client-config flag
+  # makes it skip that config and dial localhost:8080 (B423, proven on prod
+  # with alpine/k8s 1.31.4): the stub refuses the same way.
+  local arg
+  for arg in "$@"; do
+    case "${arg}" in
+      --request-timeout|--request-timeout=*|--server|--server=*|-s|--kubeconfig|--kubeconfig=*|\
+      --context|--context=*|--cluster|--cluster=*|--user|--user=*|--token|--token=*|\
+      --username|--username=*|--password|--password=*|--certificate-authority|--certificate-authority=*|\
+      --client-certificate|--client-certificate=*|--client-key|--client-key=*|\
+      --insecure-skip-tls-verify|--insecure-skip-tls-verify=*|--tls-server-name|--tls-server-name=*|\
+      --as|--as=*|--as-group|--as-group=*|--as-uid|--as-uid=*|--disable-compression|--disable-compression=*)
+        echo 'The connection to the server localhost:8080 was refused - did you specify the right host or port?' >&2
+        return 1 ;;
+    esac
+  done
   case "$*" in
     # An enrolled agent identity exists: the heartbeat reads its agent-token
     # back and authenticates with it. The empty-token guard skips the POST when
     # no token is readable, so the fixture must supply one for the heartbeat to
     # fire. claim-code is left to the default (empty) → the best-effort
     # self-register stays a no-op here.
-    *"get secret kubehz-agent"*"agent-token"*) printf 'khz_agt_test' | base64 | tr -d '\n' ;;
+    *"get secret kubehz-agent"*"agent-token"*) printf '%s' "${STUB_AGENT_TOKEN:-khz_agt_test}" | base64 | tr -d '\n' ;;
 
     # kubernetesVersion = the SERVER version. The FIX reads the apiserver
     # /version endpoint (a single "gitVersion" → unambiguous). `version -o json`
@@ -61,39 +102,30 @@ kubectl() {
     *"/version"*) printf '{"major":"1","minor":"35","gitVersion":"v1.35.5","platform":"linux/amd64"}\n' ;;
     "version -o json") printf '{\n  "clientVersion": { "gitVersion": "v1.31.4" },\n  "serverVersion": { "gitVersion": "v1.35.5" }\n}\n' ;;
 
-    # Node NAMES (the FIX): a targeted jsonpath over .items[].metadata.name.
-    "get nodes -o jsonpath="*) printf 'cp-1\nworker-1\n' ;;
-    # Realistic multi-node dump WITH the greedy-sed traps (runtimeHandlers +
-    # volumesAttached). Dormant unless the extraction regresses to `-o json`.
-    "get nodes -o json") printf '%s\n' '{"items":[{"metadata":{"name":"cp-1"},"status":{"runtimeHandlers":[{"name":"runc"},{"name":"crun"}],"volumesAttached":[{"name":"kubernetes.io/csi/csi.hetzner.cloud^0001"}]}},{"metadata":{"name":"worker-1"},"status":{"runtimeHandlers":[{"name":"runc"}]}}]}' ;;
-
-    # Per-node queries. A name that isn't a real node (what greedy-sed scrapes)
-    # NotFounds like real kubectl → the old code's unguarded status=$(…) aborts.
-    "get node "*)
-      _n=$3
-      case "${_n}" in
-        cp-1|worker-1) : ;;
-        *) echo "Error from server (NotFound): nodes \"${_n}\" not found" >&2; return 1 ;;
-      esac
-      case "$*" in
-        *"jsonpath={.status.conditions"*)
-          [ -n "${STUB_READY_STATUS_FAIL:-}" ] && return 1
-          printf '%s' "${STUB_READY_STATUS-True}" ;;
-        *"instance-type}"*)
-          [ -n "${STUB_ITYPE_FAIL:-}" ] && return 1
-          if [ "${_n}" = "cp-1" ]; then printf '%s' "${STUB_ITYPE-cx32}"; else printf 'cpx41'; fi
-          return 0 ;;
-        # roles source: the labels map, rendered as JSON by the pinned kubectl
-        # (1.31). cp-1 carries the control-plane label KEY (empty value);
-        # worker-1 does not — so absent MUST read as worker, not control-plane.
-        *"jsonpath={.metadata.labels}"*)
-          if [ "${_n}" = "cp-1" ]; then
-            printf '%s' '{"kubernetes.io/hostname":"cp-1","node-role.kubernetes.io/control-plane":"","node.kubernetes.io/instance-type":"cx32"}'
-          else
-            printf '%s' '{"kubernetes.io/hostname":"worker-1","node.kubernetes.io/instance-type":"cpx41"}'
-          fi ;;
-        *) printf '' ;;
-      esac ;;
+    # The node list: ONE call for all nodes (B448). The default fixture is a
+    # realistic two-node dump WITH the greedy-sed traps (runtimeHandlers +
+    # volumesAttached). cp-1 carries the control-plane label KEY with an
+    # empty value; worker-1 does not, so absent MUST read as worker.
+    "get --raw /api/v1/nodes")
+      [ -z "${STUB_NODES_FAIL:-}" ] || return 1
+      if [ -n "${STUB_NODES_BODY+x}" ]; then printf '%s' "${STUB_NODES_BODY}"; return 0; fi
+      if [ -n "${STUB_NODES_FILE:-}" ]; then cat "${STUB_NODES_FILE}"; return 0; fi
+      command jq -n --arg ready "${STUB_READY_STATUS-True}" --arg itype "${STUB_ITYPE-cx32}" \
+        --arg noready "${STUB_READY_MISSING:-}" '
+        ([{type: "MemoryPressure", status: "False"}]
+          + (if $noready == "" then [{type: "Ready", status: $ready}] else [] end)) as $cond
+        | {items: [
+            {metadata: {name: "cp-1", labels: ({"kubernetes.io/hostname": "cp-1",
+                "node-role.kubernetes.io/control-plane": ""}
+                + (if $itype == "" then {} else {"node.kubernetes.io/instance-type": $itype} end))},
+             status: {conditions: $cond, runtimeHandlers: [{name: "runc"}, {name: "crun"}],
+               volumesAttached: [{name: "kubernetes.io/csi/csi.hetzner.cloud^0001"}]}},
+            {metadata: {name: "worker-1", labels: {"kubernetes.io/hostname": "worker-1",
+                "node.kubernetes.io/instance-type": "cpx41"}},
+             status: {conditions: $cond, runtimeHandlers: [{name: "runc"}]}}]}' ;;
+    # A call per node is the B448 bug. Answer it like real kubectl, so a
+    # regression fails on the call count, not on a missing stub.
+    "get node "*) printf '' ;;
 
     "get csr -o json") printf '{}\n' ;;
     *"/readyz"*) printf 'ok\n'; return 0 ;;
@@ -112,14 +144,20 @@ kubectl() {
     # kube-apiserver pod command+args (jsonpath renders the JSON array);
     # empty = pod not visible (managed CP).
     *"-l component=kube-apiserver"*) printf '%s' "${STUB_APISERVER_PODS-}" ;;
+    # The CRD exists (STUB_CAPI) or the apiserver answers NotFound.
     "get crd clusters.cluster.x-k8s.io"*)
-      [ -n "${STUB_CAPI:-}" ] && return 0 || return 1 ;;
+      if [ -n "${STUB_CAPI:-}" ]; then
+        printf 'customresourcedefinition.apiextensions.k8s.io/clusters.cluster.x-k8s.io\n'
+        return 0
+      fi
+      echo 'Error from server (NotFound): customresourcedefinitions.apiextensions.k8s.io "clusters.cluster.x-k8s.io" not found' >&2
+      return 1 ;;
     "get daemonsets -n kube-system"*)
       if [ -n "${STUB_DAEMONSETS+x}" ]; then printf '%s' "${STUB_DAEMONSETS}"; else printf 'cilium\nkube-proxy\n'; fi ;;
     "get configmap kubeadm-config"*)
       printf '  networking:\n    dnsDomain: cluster.local\n    podSubnet: 10.244.0.0/16\n    serviceSubnet: 10.96.0.0/12\n' ;;
-    # Prefix-glob matches: the assessment probes append --request-timeout=5s
-    # (a stalled apiserver degrades ONE probe, never the whole beat).
+    # The assessment probes run under `timeout 5` (a stalled apiserver
+    # degrades ONE probe, never the whole beat; the timeout stub above).
     # STUB_SC_JSON overrides the StorageClass dump (the >50-cap fixture).
     "get storageclasses -o json"*)
       if [ -n "${STUB_SC_JSON:-}" ]; then printf '%s\n' "${STUB_SC_JSON}"; else
@@ -148,17 +186,20 @@ curl() {
   # format (header dump, blank line, one-line body, __code marker) driven by
   # STUB_DESIRED_CODE/_ETAG/_BODY; the presented If-None-Match lands in
   # STUB_DESIRED_INM_OUT.
-  _body=""
-  _url=""
+  # curl_capture (tests/lib/curl_capture.sh) reads the call the way curl
+  # does: the bearer from the config (-K), the body from stdin.
+  curl_capture "$@"
+  printf '%s' "${CURL_HEADERS}" | grep '^Authorization: ' >> "${STUB_AUTH_LOG}" || :
+  _body="${CURL_BODY}"
+  _url="${CURL_URL}"
   _inm=""
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      -d) _body="$2"; shift ;;
-      -H) case "$2" in "If-None-Match: "*) _inm="${2#If-None-Match: }" ;; esac; shift ;;
-      http*://*) _url="$1" ;;
-    esac
-    shift
+  _hdr_ifs="${IFS}"
+  IFS='
+'
+  for _h in ${CURL_HEADERS}; do
+    case "${_h}" in "If-None-Match: "*) _inm="${_h#If-None-Match: }" ;; esac
   done
+  IFS="${_hdr_ifs}"
   echo "curl ${_url}" >> "${STUB_CURL_LOG}"
   case "${_url}" in
     */desired)
@@ -182,19 +223,84 @@ STUBS_EOF
 
   # Prepend the stubs to the real script → a self-contained, runnable heartbeat.
   RUNNER="${BATS_TEST_TMPDIR}/run.sh"
-  cat "${stubs}" "${HEARTBEAT}" > "${RUNNER}"
+  cat "${_PROJECT_ROOT}/tests/lib/curl_capture.sh" "${stubs}" "${HEARTBEAT}" > "${RUNNER}"
 
   export CLUSTER_ID="test.example.com"
   export KUBEHZ_API_URL="https://api.example.com"
   export STUB_PAYLOAD_OUT="${BATS_TEST_TMPDIR}/payload.json"
   export STUB_ANNOTATE_LOG="${BATS_TEST_TMPDIR}/annotate.log"
   export STUB_CURL_LOG="${BATS_TEST_TMPDIR}/curl.log"
+  # Every `timeout SECS CMD …` call: the bound, then the command.
+  export STUB_TIMEOUT_LOG="${BATS_TEST_TMPDIR}/timeout.log"
+  # The Authorization headers that curl got (from its config).
+  export STUB_AUTH_LOG="${BATS_TEST_TMPDIR}/auth.log"
   # Desired-state poll fixtures: default 304 (unchanged → silent) so the
   # heartbeat-focused tests see no extra output/annotations; the poll tests
   # flip STUB_DESIRED_CODE to 200/401 and assert the report-only behavior.
   export STUB_DESIRED_INM_OUT="${BATS_TEST_TMPDIR}/desired-inm.txt"
   export STUB_DESIRED_ETAG='"7-100"'
   export STUB_DESIRED_BODY='{"revision":7,"kubernetesVersion":null,"workerPools":[],"execution":{"scaling":true,"upgrades":false,"healing":false},"healing":{"enabled":false}}'
+}
+
+# _argv_spies: log the argv of every curl and kubectl stub call and of the
+# tools that a filter or redaction step could hand a secret to.
+_argv_spies() {
+  export ARGV_LOG="${BATS_TEST_TMPDIR}/argv.log"
+  source "${_PROJECT_ROOT}/tests/lib/argv_sentinels.bash"
+  argv_spy "${ARGV_SPY_TOOLS[@]}"
+}
+
+# _node_list N: generate a node list of N nodes and serve it as the answer
+# to `kubectl get --raw /api/v1/nodes`. The first three nodes cover each
+# field case:
+#   cp-0      control-plane label key (empty value), Ready True, cx53
+#   master-1  legacy master label key (empty value), Ready False, cpx41
+#   worker-2  no Ready condition, no instance-type label
+# Every other node is a Ready cpx41 worker named worker-<i>.
+# Each node has the shape of a real one, so jq gets real work: ~17 KB per
+# node here, ~23 KB of node JSON on prod, most of it 50 status.images
+# entries.
+_node_list() {
+  export STUB_NODES_FILE="${BATS_TEST_TMPDIR}/nodes-${1}.json"
+  command jq -n --argjson n "$1" '
+    def node($name; $labels; $conds):
+      {apiVersion: "v1", kind: "Node",
+       metadata: {name: $name, uid: "6f1c2a4e-0d3b-4c5a-9e7f-8a9b0c1d2e3f",
+         resourceVersion: "123456789", creationTimestamp: "2026-10-01T00:00:00Z",
+         labels: ({"kubernetes.io/arch": "amd64", "kubernetes.io/os": "linux",
+           "kubernetes.io/hostname": $name, "topology.kubernetes.io/region": "fsn1",
+           "topology.kubernetes.io/zone": "fsn1-dc14"} + $labels),
+         annotations: {"csi.volume.kubernetes.io/nodeid": "{\"csi.hetzner.cloud\":\"12345678\"}",
+           "node.alpha.kubernetes.io/ttl": "0",
+           "volumes.kubernetes.io/controller-managed-attach-detach": "true"}},
+       spec: {podCIDR: "10.244.1.0/24", podCIDRs: ["10.244.1.0/24"], providerID: "hcloud://12345678"},
+       status: {
+         addresses: [{type: "InternalIP", address: "10.0.0.1"}, {type: "Hostname", address: $name}],
+         allocatable: {cpu: "16", memory: "32000000Ki", pods: "110"},
+         capacity: {cpu: "16", memory: "32500000Ki", pods: "110"},
+         conditions: [$conds[] + {lastHeartbeatTime: "2026-10-27T00:00:00Z",
+           lastTransitionTime: "2026-10-01T00:00:00Z", reason: "KubeletReady",
+           message: "kubelet is posting ready status"}],
+         images: [range(50) as $m | {names: [
+           "registry.example.com/library/image-\($m)@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+           "registry.example.com/library/image-\($m):v1.\($m).0"], sizeBytes: 123456789}],
+         nodeInfo: {architecture: "amd64", containerRuntimeVersion: "containerd://1.7.24",
+           kernelVersion: "6.8.0-48-generic", kubeletVersion: "v1.31.4", operatingSystem: "linux",
+           osImage: "Ubuntu 24.04.1 LTS"},
+         runtimeHandlers: [{name: "runc"}],
+         volumesAttached: [{name: "kubernetes.io/csi/csi.hetzner.cloud^0001", devicePath: ""}]}};
+    {apiVersion: "v1", kind: "List", items: [range($n) as $i |
+      if $i == 0 then
+        node("cp-0"; {"node-role.kubernetes.io/control-plane": "",
+          "node.kubernetes.io/instance-type": "cx53"}; [{type: "Ready", status: "True"}])
+      elif $i == 1 then
+        node("master-1"; {"node-role.kubernetes.io/master": "",
+          "node.kubernetes.io/instance-type": "cpx41"}; [{type: "Ready", status: "False"}])
+      elif $i == 2 then
+        node("worker-2"; {}; [{type: "MemoryPressure", status: "False"}])
+      else
+        node("worker-\($i)"; {"node.kubernetes.io/instance-type": "cpx41"}; [{type: "Ready", status: "True"}])
+      end]}' > "${STUB_NODES_FILE}"
 }
 
 teardown() {
@@ -215,11 +321,10 @@ teardown() {
   assert_success
   assert_output --partial "kind: CronJob"
   assert_output --partial "name: kubehz-heartbeat"
-  # The per-node field is present in the rendered heartbeat script.
-  assert_output --partial '\"instanceType\":\"'
-  # …sourced from the GA label key, not the deprecated beta alias (pins the key
-  # so a silent swap to beta.kubernetes.io/instance-type fails here).
-  assert_output --partial 'node\.kubernetes\.io/instance-type'
+  # The per-node field is present in the rendered heartbeat script, sourced
+  # from the GA label key, not the deprecated beta alias (pins the key so a
+  # silent swap to beta.kubernetes.io/instance-type fails here).
+  assert_output --partial 'instanceType: ($l["node.kubernetes.io/instance-type"] // "")'
 }
 
 # ── Labeled node → instanceType is the label value ───────
@@ -267,11 +372,19 @@ teardown() {
   assert_output "NotReady"
 }
 
-@test "heartbeat: a failed status probe reports \"Unknown\", never an empty string" {
-  export STUB_READY_STATUS_FAIL=1
+@test "heartbeat: a missing Ready condition reports \"Unknown\", never an empty string" {
+  export STUB_READY_MISSING=1
   run bash "${RUNNER}"
   assert_success
-  # The stub fails the probe for EVERY node — both must land as Unknown.
+  # No node has a Ready condition — both must land as Unknown.
+  run command jq -r '[.nodes[].status] | unique | .[]' "${STUB_PAYLOAD_OUT}"
+  assert_output "Unknown"
+}
+
+@test "heartbeat: a Ready condition of Unknown reports \"Unknown\"" {
+  export STUB_READY_STATUS="Unknown"
+  run bash "${RUNNER}"
+  assert_success
   run command jq -r '[.nodes[].status] | unique | .[]' "${STUB_PAYLOAD_OUT}"
   assert_output "Unknown"
 }
@@ -293,24 +406,23 @@ teardown() {
   assert_output ""
 }
 
-# ── instance-type kubectl error → "" (fail-soft under set -e) ──
+# ── A node with no labels map → worker, instanceType "" (fail-soft) ──
 
-@test "heartbeat: an instance-type kubectl error is fail-soft (instanceType \"\", valid JSON)" {
-  # kubectl returns non-zero for the instance-type lookup — the `|| itype=""`
-  # guard must absorb it so `set -e` does not abort the whole heartbeat.
-  export STUB_ITYPE_FAIL=1
+@test "heartbeat: a node with no labels map reports worker and instanceType \"\"" {
+  # metadata.labels is absent: jq must read it as an empty map, never fail
+  # (a failed jq would drop every node from the beat).
+  export STUB_NODES_FILE="${BATS_TEST_TMPDIR}/nodes.json"
+  printf '%s\n' '{"items":[{"metadata":{"name":"bare-1"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}' \
+    > "${STUB_NODES_FILE}"
   run bash "${RUNNER}"
   assert_success
 
-  run command jq -e . "${STUB_PAYLOAD_OUT}"
-  assert_success
-
-  run command jq -r '.nodes[0].instanceType' "${STUB_PAYLOAD_OUT}"
-  assert_output ""
+  run command jq -rc '.nodes' "${STUB_PAYLOAD_OUT}"
+  assert_output '[{"name":"bare-1","status":"Ready","roles":"worker","instanceType":""}]'
 }
 
 # ── Node IDENTITY: names are the metadata names, never the greedy-sed ghosts ─
-# P0 regression guard: on modern k8s `get nodes -o json` also carries
+# P0 regression guard: on modern k8s the node list also carries
 # .status.runtimeHandlers[].name ("runc"/"crun") and .status.volumesAttached[]
 # .name (CSI handles). A greedy sed scraped those as node names, then
 # `kubectl get node runc` NotFounded and `set -e` killed the beat before the
@@ -352,6 +464,104 @@ teardown() {
   # BOTH roles must be present — proof the worker is not misread as control-plane.
   run command jq -rc '[.nodes[].roles] | unique' "${STUB_PAYLOAD_OUT}"
   assert_output '["control-plane","worker"]'
+}
+
+# ── B448: ONE node list call; the call count does not grow with nodes ──
+# A kubectl call takes ~1.5 s on prod. The old loop made 3 calls per node,
+# so at ~18 nodes the tick ran past activeDeadlineSeconds (120 s). The job
+# was killed before the POST, and the cluster stopped heart-beating.
+
+@test "B448: the kubectl call count is the same for 3 and 200 nodes" {
+  local n calls3 calls200
+  for n in 3 200; do
+    _node_list "${n}"
+    export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl-${n}.log"
+    : > "${STUB_CURL_LOG}"
+    rm -f "${STUB_PAYLOAD_OUT}"
+    run bash "${RUNNER}"
+    assert_success
+    # The beat went out, with every node.
+    run grep -c '/heartbeat$' "${STUB_CURL_LOG}"
+    assert_output "1"
+    run command jq -r '.nodes | length' "${STUB_PAYLOAD_OUT}"
+    assert_output "${n}"
+    # The node list is ONE call, and no call names a single node.
+    run grep -c '^get --raw /api/v1/nodes$' "${STUB_KUBECTL_LOG}"
+    assert_output "1"
+    run grep -c '^get node ' "${STUB_KUBECTL_LOG}"
+    assert_output "0"
+  done
+  calls3=$(wc -l < "${BATS_TEST_TMPDIR}/kubectl-3.log")
+  calls200=$(wc -l < "${BATS_TEST_TMPDIR}/kubectl-200.log")
+  [ "${calls3}" -gt 0 ] || fail "no kubectl call was recorded"
+  [ "${calls200}" -eq "${calls3}" ] \
+    || fail "kubectl calls: ${calls3} for 3 nodes, ${calls200} for 200 nodes"
+}
+
+@test "B448: the node fields map the Ready condition, the role label keys and the instance type" {
+  _node_list 4
+  run bash "${RUNNER}"
+  assert_success
+  # Exact match: the values AND the field order that the platform reads.
+  run command jq -c '.nodes' "${STUB_PAYLOAD_OUT}"
+  assert_output '[{"name":"cp-0","status":"Ready","roles":"control-plane","instanceType":"cx53"},{"name":"master-1","status":"NotReady","roles":"control-plane","instanceType":"cpx41"},{"name":"worker-2","status":"Unknown","roles":"worker","instanceType":""},{"name":"worker-3","status":"Ready","roles":"worker","instanceType":"cpx41"}]'
+}
+
+@test "B448: a node name that needs JSON escaping keeps the payload valid JSON" {
+  export STUB_NODES_FILE="${BATS_TEST_TMPDIR}/nodes.json"
+  command jq -n '{items: [{metadata: {name: "we\"ird\\node\tx"},
+    status: {conditions: [{type: "Ready", status: "True"}]}}]}' > "${STUB_NODES_FILE}"
+  run bash "${RUNNER}"
+  assert_success
+  run command jq -e . "${STUB_PAYLOAD_OUT}"
+  assert_success
+  run command jq -r '.nodes[0].name' "${STUB_PAYLOAD_OUT}"
+  assert_output $'we"ird\\node\tx'
+}
+
+@test "B448: above 500 nodes (the api's limit) the beat sends the first 500 and logs it" {
+  # At the limit: no truncation.
+  _node_list 500
+  run bash "${RUNNER}"
+  assert_success
+  refute_output --partial "heartbeat summarizes the first"
+  run command jq -r '.nodes | length' "${STUB_PAYLOAD_OUT}"
+  assert_output "500"
+
+  _node_list 503
+  run bash "${RUNNER}"
+  assert_success
+  assert_output --partial "kubehz: heartbeat summarizes the first 500 of 503 nodes"
+  run command jq -r '.nodes | length' "${STUB_PAYLOAD_OUT}"
+  assert_output "500"
+  run command jq -r '.nodes[499].name' "${STUB_PAYLOAD_OUT}"
+  assert_output "worker-499"
+  # The assessment counts every node, not only the nodes that went out.
+  run command jq -r '.assessment.cpUsage.nodes' "${STUB_PAYLOAD_OUT}"
+  assert_output "503"
+}
+
+@test "B448: the limits allow a burst; the requests stay low" {
+  # At a 200m CPU limit the pod was throttled in 99.8 % of its CFS periods
+  # on prod, and each kubectl call (a Go binary start) took ~1.5 s. At the
+  # 500-node cap jq peaks at ~70 MB (measured on prod nodes).
+  run command yq -r '.spec.jobTemplate.spec.template.spec.containers[0].resources | [.limits.cpu, .requests.cpu, .limits.memory, .requests.memory] | join(" ")' "${CRONJOB}"
+  assert_success
+  assert_output "1000m 50m 256Mi 64Mi"
+}
+
+@test "B448: 200 nodes at 1 s per kubectl call finish well under the 120 s deadline" {
+  # The stub sleeps 1 s per kubectl call (prod: ~1.5 s), so the run time in
+  # seconds is about the call count. A call per node takes 200 s or more.
+  _node_list 200
+  export STUB_KUBECTL_DELAY=1
+  local start=${SECONDS} took
+  run bash "${RUNNER}"
+  took=$(( SECONDS - start ))
+  assert_success
+  run grep -c '/heartbeat$' "${STUB_CURL_LOG}"
+  assert_output "1"
+  [ "${took}" -lt 60 ] || fail "the 200-node beat took ${took} s at 1 s per kubectl call"
 }
 
 # ── kubernetesVersion is the SERVER version, not the client image tag ──
@@ -614,6 +824,114 @@ teardown() {
   assert_output "test.example.com"
 }
 
+# ── B423: in-cluster kubectl takes no client-config flag ──
+# In the pod, a kubectl client-config flag (--request-timeout, --server, …)
+# makes kubectl skip the in-cluster config and dial localhost:8080. The
+# kubectl stub refuses such a call the same way. The marker read carried
+# --request-timeout=5s: it failed on every tick, so the 24h gate, the claim
+# nonce and the desired-state poll were off, and every assessment probe read
+# empty. `timeout 5` bounds the calls now.
+
+@test "B423: the marker read reaches the apiserver: the assessment probes and the desired-state poll run" {
+  run bash "${RUNNER}"
+  assert_success
+  # The marker was readable, so the desired-state poll ran.
+  refute_output --partial "desired-state poll skipped"
+  run grep -F "curl https://api.example.com/api/clusters/test.example.com/desired" "${STUB_CURL_LOG}"
+  assert_success
+  # Each probe got its answer from the apiserver, not an empty fallback.
+  run command jq -r '[.assessment.datastore, .assessment.cni, .assessment.podCidr, (.assessment.storageClasses | length), .assessment.pvSummary.count, .assessment.loadBalancers, .assessment.webhooks.validating, .assessment.cpUsage.cpNodes] | map(tostring) | join(" ")' "${STUB_PAYLOAD_OUT}"
+  assert_output "etcd cilium 10.244.0.0/16 2 3 2 3 1"
+}
+
+@test "B423: the marker read and every assessment probe run under timeout 5; the node list under timeout 30" {
+  run bash "${RUNNER}"
+  assert_success
+  run cat "${STUB_TIMEOUT_LOG}"
+  assert_line "5 kubectl get configmap kubehz-agent-config -n kubehz-system -o jsonpath={.metadata.annotations}"
+  assert_line --partial "5 kubectl get pods -n kube-system -l component=kube-apiserver -o jsonpath="
+  assert_line --partial "5 kubectl get pods -n kube-system -l component=etcd -o jsonpath="
+  assert_line "5 kubectl get crd clusters.cluster.x-k8s.io -o name"
+  assert_line --partial "5 kubectl get daemonsets -n kube-system -o jsonpath="
+  assert_line "5 kubectl get configmap kubeadm-config -n kube-system -o jsonpath={.data.ClusterConfiguration}"
+  assert_line "5 kubectl get storageclasses -o json"
+  assert_line "5 kubectl get pv -o json"
+  assert_line "5 kubectl get services -A -o json"
+  assert_line "5 kubectl get validatingwebhookconfigurations -o json"
+  assert_line "5 kubectl get mutatingwebhookconfigurations -o json"
+  assert_line "5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name"
+  # The node list has its own bound (B448).
+  assert_line "30 kubectl get --raw /api/v1/nodes"
+  # Twelve bounded calls, each in the plain-seconds form that busybox and
+  # coreutils both take.
+  run grep -c '^5 kubectl get ' "${STUB_TIMEOUT_LOG}"
+  assert_output "12"
+  run grep -vcE '^(5 kubectl get |30 kubectl get --raw /api/v1/nodes$)' "${STUB_TIMEOUT_LOG}"
+  assert_output "0"
+}
+
+# A probe for a field the contract has no "unknown" value for (a count, a
+# list, capiManaged) that times out is unknown, never 0 or []: the tick sends
+# no assessment, the heartbeat still goes out, and the 24h marker does not
+# move, so the next tick probes again.
+@test "assessment: a timed-out probe defers the assessment, never a 0" {
+  local match
+  for match in "get services -A" "get validatingwebhookconfigurations" "get mutatingwebhookconfigurations" \
+      "node-role.kubernetes.io/control-plane" "get storageclasses" "get pv " "get crd clusters.cluster.x-k8s.io"; do
+    export STUB_TIMEOUT_MATCH="${match}"
+    rm -f "${STUB_PAYLOAD_OUT}" "${STUB_ANNOTATE_LOG}"
+    run bash "${RUNNER}"
+    assert_success
+    assert_output --partial "kubehz: assessment deferred: no answer for "
+    run command jq -e 'has("assessment") | not' "${STUB_PAYLOAD_OUT}"
+    assert_success
+    run command jq -r '.clusterId' "${STUB_PAYLOAD_OUT}"
+    assert_output "test.example.com"
+    run grep -F "kubehz.cloud/last-assessment=" "${STUB_ANNOTATE_LOG}"
+    assert_failure
+  done
+}
+
+@test "assessment: a failed node list leaves cpUsage.nodes unknown, never 0" {
+  export STUB_NODES_FAIL=1
+  run bash "${RUNNER}"
+  assert_success
+  assert_output --partial "kubehz: assessment deferred: no answer for cpUsage.nodes"
+  run command jq -e 'has("assessment") | not' "${STUB_PAYLOAD_OUT}"
+  assert_success
+}
+
+@test "B448: an empty, cut, non-JSON or item-less node answer is a failed call" {
+  # kubectl can exit 0 and still answer nothing usable, and a timeout can
+  # cut the answer. jq -e then fails, so the beat sends no nodes and defers
+  # the assessment, as for a failed call. The assessment never reports 0
+  # nodes as a fact.
+  local body
+  for body in '' '{"items":[{"metadata":' '{"items":[{"metadata":{"name":"a"}},' 'not json' '{}'; do
+    export STUB_NODES_BODY="${body}"
+    rm -f "${STUB_PAYLOAD_OUT}"
+    run bash "${RUNNER}"
+    assert_success
+    assert_output --partial "kubehz: assessment deferred: no answer for cpUsage.nodes"
+    run command jq -c '.nodes' "${STUB_PAYLOAD_OUT}"
+    assert_output '[]'
+    run command jq -e 'has("assessment") | not' "${STUB_PAYLOAD_OUT}"
+    assert_success
+  done
+}
+
+@test "assessment: a missing CAPI CRD (NotFound) reads capiManaged false; the CRD reads true" {
+  run bash "${RUNNER}"
+  assert_success
+  run command jq -r '.assessment.capiManaged' "${STUB_PAYLOAD_OUT}"
+  assert_output "false"
+  export STUB_CAPI=1
+  run bash "${RUNNER}"
+  assert_success
+  run command jq -r '.assessment.capiManaged' "${STUB_PAYLOAD_OUT}"
+  assert_output "true"
+}
+
 # ── Assessment: RBAC ships with the kustomization ────────
 
 @test "assessment: the agent kustomization renders the probe RBAC + marker Role" {
@@ -654,6 +972,53 @@ teardown() {
   # Not cleared: the stub response carried no claim.verified cue.
   run grep -F "kubehz.cloud/claim-nonce-" "${STUB_ANNOTATE_LOG}"
   assert_failure
+}
+
+@test "claim: the nonce and the agent token never reach a command line" {
+  # Every process on the node can read argv (ps, /proc/<pid>/cmdline). The
+  # stubs log the argv of each curl and kubectl call (curl_capture.sh).
+  local now nonce
+  now=$(date -u +%s)
+  nonce="khzn_SENTINEL_n0ncE_43charsBase64urlValue00"
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"'"${nonce}"'","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'"}'
+  _argv_spies
+
+  run bash "${RUNNER}"
+  assert_success
+  assert_argv_clean "${nonce}" khz_agt_test
+  # Both still arrive: the nonce in the body, the token as the bearer of
+  # the beat and of the desired-state poll.
+  run command jq -r '.claim.nonce' "${STUB_PAYLOAD_OUT}"
+  assert_output "${nonce}"
+  [ "$(ARGV_LOG="" grep -c "^Authorization: Bearer khz_agt_test$" "${STUB_AUTH_LOG}")" = 2 ]
+}
+
+@test "heartbeat: the plain retry after a rejected assessment keeps the token off argv too" {
+  export STUB_CURL_FAIL_ASSESS=1
+  _argv_spies
+
+  run bash "${RUNNER}"
+  assert_success
+  assert_output --partial "retrying once without it"
+  assert_argv_clean khz_agt_test
+  # The beat with the assessment, the plain retry and the desired-state
+  # poll: each carries the bearer from its config.
+  [ "$(ARGV_LOG="" grep -c '/heartbeat$' "${STUB_CURL_LOG}")" = 2 ]
+  [ "$(ARGV_LOG="" grep -c "^Authorization: Bearer khz_agt_test$" "${STUB_AUTH_LOG}")" = 3 ]
+}
+
+@test "heartbeat: a token that a curl config line cannot carry skips the beat" {
+  # A quote, a backslash or a line break would break the config line, and
+  # the guard allows no space either. The agent never mints such a token.
+  local tok
+  for tok in 'khz_agt_a"b' 'khz_agt_a\b' 'khz_agt_a b' $'khz_agt_a\nurl = https://x'; do
+    : > "${STUB_CURL_LOG}"
+    STUB_AGENT_TOKEN="${tok}" run bash "${RUNNER}"
+    assert_success
+    assert_output --partial "kubehz: skipping heartbeat: agent-token holds a character that a curl config cannot carry"
+    run grep -c "/heartbeat" "${STUB_CURL_LOG}"
+    assert_output 0
+  done
 }
 
 @test "claim: no nonce annotation means no claim key on the wire" {

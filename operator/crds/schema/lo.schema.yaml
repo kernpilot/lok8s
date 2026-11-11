@@ -75,6 +75,25 @@ spec:
             CIDR block for the docker bridge network — typically a /24 from
             the 10.125.<slot>.0/24 plan. See docs/reference/specs.md for the
             slot allocation.
+        dnsSearch:
+          type: array
+          maxItems: 32
+          description: |
+            DNS search list of the kind nodes (kind networking.dnsSearch,
+            kind v0.18.0 and later). Default []: the nodes and pods do not
+            get the search domains of the host. A list replaces it. Each
+            entry is a DNS name (any letter case, an optional trailing dot,
+            at most 253 characters without that dot); at most 32 entries,
+            the Kubernetes limit for the search list of a pod.
+          items:
+            type: string
+            # The CLI rule (CheckDNSSearch): at most 253 characters without
+            # the trailing dot, so 254 only with it.
+            anyOf:
+              - maxLength: 253
+                pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
+              - maxLength: 254
+                pattern: '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.$'
     registries:
       type: object
       description: |

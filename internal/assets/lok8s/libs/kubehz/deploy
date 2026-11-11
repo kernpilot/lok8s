@@ -64,6 +64,10 @@
 #                returns when the objects are gone, not when the pods are —
 #                then write the marker that lets the CronJob beat again.
 #
+# Before either direction starts, the deploy stages the bind secret (when a
+# register stored one), so no CronJob pod starts without it
+# (kubehz::stage_bind_secret).
+#
 # Every step that could arm a second producer FAILS the command rather than
 # continuing — including a probe that cannot SEE whether the live agent is gone,
 # because "no pods" and "cannot read pods" are the same output and only one of
@@ -202,7 +206,7 @@ kubehz::deploy_agent() {
   kubehz::render_agent "${workdir}" "${domain}" "${api_url}" "${owner}" "${access}" || return 1
 
   if (( dry_run )); then
-    kubehz::deploy_print "${workdir}" "${owner}" "${access}"
+    kubehz::deploy_print "${workdir}" "${domain}" "${owner}" "${access}"
     return $?
   fi
 
@@ -346,10 +350,15 @@ kubehz::live_agent_overlay() {
 # because the apply below is `kubectl apply -k` — the same embedded kustomize,
 # at the same version. A dry run whose renderer can differ from the applier's
 # is a dry run you cannot trust for exactly the cases you would use it for.
-# Usage: kubehz::deploy_print <workdir> <owner> <access>
+# The bind Secret goes in first; its line names the file and never prints the
+# value.
+# Usage: kubehz::deploy_print <workdir> <domain> <owner> <access>
 kubehz::deploy_print() {
-  local workdir="${1}" owner="${2}" access="${3}"
+  local workdir="${1}" domain="${2}" owner="${3}" access="${4}"
 
+  if kubehz::bind_secret_ok "${PATH_CLUSTERS}/${domain}/.kubehz-bind"; then
+    echo "# --- Secret kubehz-agent-bind (the bind secret from clusters/${domain}/.kubehz-bind) — applied first; the value is not printed ---"
+  fi
   echo "# --- CronJob agent (kubehz-heartbeat) — identity + enrollment; heartbeat owner: ${owner} ---"
   kubectl kustomize "${workdir}/agent" || return 1
   if [[ "${owner}" == "operator" ]]; then
@@ -370,18 +379,24 @@ kubehz::deploy_apply() {
   local overlay
   overlay=$(kubehz::live_agent_overlay "${workdir}" "${access}")
 
+  # 0. The bind secret before anything else, in both directions: every
+  #    CronJob pod that starts without it registers without it (B288).
+  kubehz::stage_bind_secret "${workdir}" "${domain}" || return 1
+  # What a failure below has changed so far: a stage that returned 0 on a
+  # valid file put the Secret in.
+  local changed="nothing else was changed"
+  if kubehz::bind_secret_ok "${PATH_CLUSTERS}/${domain}/.kubehz-bind"; then
+    changed="only the bind Secret changed"
+  fi
+
   if [[ "${owner}" == "operator" ]]; then
     # 1. The marker first. From the CronJob's next tick on it bootstraps and
     #    enrolls but does not beat, so the beat is unowned rather than
     #    contested while we start the live agent.
     kubectl apply -k "${workdir}/agent" || {
-      error "kubehz: could not apply the CronJob agent (identity bootstrap) — nothing else was changed"
+      error "kubehz: could not apply the CronJob agent (identity bootstrap) — ${changed}"
       return 1
     }
-    # 1b. Stage the bind secret (B243) so the bootstrap can ADOPT the announced
-    #     row. The namespace exists now (step 1 created it), and the Secret must
-    #     be present before the bootstrap Job runs (step 2b reads it).
-    kubehz::apply_bind_secret "${domain}"
     # 2. A pod that started BEFORE the marker landed is already past the guard
     #    and will still POST once. Wait it out, so the live agent's first beat
     #    cannot overlap it.
@@ -401,7 +416,8 @@ kubehz::deploy_apply() {
     #    a handover that an ImagePullBackOff quietly never completed.
     kubectl -n kubehz-system rollout status deployment/kubehz-live-agent \
       --timeout="${KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS}s" || {
-      error "kubehz: the live agent was accepted but never became Ready within ${KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS}s. NOTHING owns the heartbeat right now: the CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent is not running, so this cluster is reporting nothing. Diagnose with 'kubectl -n kubehz-system describe deployment/kubehz-live-agent' (an unpullable image or an untolerated node taint is the usual cause), or set spec.kubehz.agent: cronjob and re-run 'lo kubehz deploy' to hand the beat straight back."
+      error "kubehz: the live agent was accepted but never became Ready within ${KUBEHZ_LIVE_AGENT_ROLLOUT_SECONDS}s. NOTHING owns the heartbeat right now: the CronJob no longer beats (KUBEHZ_HEARTBEAT_OWNER=operator) and the live agent is not running, so this cluster is reporting nothing. Diagnose with 'kubectl -n kubehz-system describe deployment/kubehz-live-agent' (an image pull that fails or hangs, or an untolerated node taint, is the usual cause), or set spec.kubehz.agent: cronjob and re-run 'lo kubehz deploy' to hand the beat straight back."
+      kubehz::live_agent_pull_hint
       return 1
     }
     return 0
@@ -420,7 +436,7 @@ kubehz::deploy_apply() {
   # apply below would re-arm the CronJob's beat next to a live agent that is
   # still beating: the double-producer state this command exists to prevent.
   kubectl delete -k "${workdir}/live-agent/managed" --ignore-not-found=true || {
-    error "kubehz: could not remove the live agent — nothing else was changed. The CronJob's beat was NOT re-armed, so this cluster still has exactly one producer (the live agent, which keeps reporting) and no data was lost. Usual causes: the kubeconfig lacks delete permission in kubehz-system, or the apiserver is unreachable. Fix that and re-run 'lo kubehz deploy'."
+    error "kubehz: could not remove the live agent — ${changed}. The CronJob's beat was NOT re-armed, so this cluster still has exactly one producer (the live agent, which keeps reporting) and no data was lost. Usual causes: the kubeconfig lacks delete permission in kubehz-system, or the apiserver is unreachable. Fix that and re-run 'lo kubehz deploy'."
     return 1
   }
   # The delete above is NAME-based, from the rendered tree. A Deployment that an
@@ -432,7 +448,7 @@ kubehz::deploy_apply() {
   kubectl -n kubehz-system delete deployment \
     -l app.kubernetes.io/part-of=kubehz,app.kubernetes.io/component=live-view \
     --ignore-not-found=true || {
-    error "kubehz: could not sweep live-agent Deployments by label — nothing else was changed. The CronJob's beat was NOT re-armed, so there is still one producer. Fix the delete and re-run 'lo kubehz deploy'."
+    error "kubehz: could not sweep live-agent Deployments by label — ${changed}. The CronJob's beat was NOT re-armed, so there is still one producer. Fix the delete and re-run 'lo kubehz deploy'."
     return 1
   }
   # kubectl delete returns when the OBJECTS are gone; the pods are reaped in the
@@ -443,29 +459,148 @@ kubehz::deploy_apply() {
     error "kubehz: could not apply the CronJob agent. The live agent is gone and the marker was not rewritten, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy'."
     return 1
   }
-  # Stage the bind secret (B243) for the CronJob's next tick to ADOPT with.
-  kubehz::apply_bind_secret "${domain}"
 }
 
-# Upsert the one-time bind secret (B243) into the Secret
-# kubehz-system/kubehz-agent-bind from clusters/<domain>/.kubehz-bind, when a
-# register wrote one. The CronJob's bootstrap reads it (the optional env
-# BIND_SECRET) and presents it on agent-register to ADOPT the announced row
-# instead of minting a sibling. The value goes in through --from-file, never
-# argv, so it is not visible in `ps`. Delete-then-create so a re-announce's
-# rotated secret replaces the old one. Best-effort: no file is the normal case
-# (no bind secret in play), and a failed upsert only means the agent adopts via
-# the pending-pool path if it can, else the user claims by claim-code.
-# Usage: kubehz::apply_bind_secret <domain>
-kubehz::apply_bind_secret() {
-  local domain="${1}"
+# Runs after a Ready timeout. Reads the live agent's pods and, when one of
+# them failed to pull its image or is still pulling it, says so and names the
+# IPv6 path to the registry as a cause to check: a pull that opens an IPv6
+# connection which then carries no data hangs on that connection and never
+# tries IPv4. Prints nothing when no pod is in such a state, or when the pods
+# cannot be read: the error line before it already names the usual causes.
+#
+# The read gives one line per pod, four fields joined by '|': pod name, node
+# name, the agent container's waiting reason, the agent container's image. A
+# field the pod does not have yet (no node, no container status) is empty.
+# Every field comes from the cluster and is printed, so the line shape is
+# pinned: DNS names for the pod and the node, letters for the reason, an image
+# reference without spaces, quotes or escapes. LC_ALL=C keeps every class
+# ASCII only: in a UTF-8 locale such as en_US.UTF-8, [A-Za-z] also matches
+# letters like é. The Go twin is ASCII only too.
+#
+# The image is at most 511 bytes (liveAgentImageMaxLen in the Go twin). This
+# is a separate check and not a bound in the regex: POSIX guarantees bounds
+# only up to 255 (RE_DUP_MAX), and a libc can refuse a larger one, which
+# turns off the hint. Command substitution drops NUL bytes, so the read
+# changes each NUL to the byte 0x01: the line then fails the match, as it
+# does in the Go twin.
+#
+# The container name (agent) and the selector are the ones in the vendored
+# live-agent/base/deployment.yaml; a bats test fails when a re-vendor changes
+# either.
+# Usage: kubehz::live_agent_pull_hint
+kubehz::live_agent_pull_hint() {
+  local LC_ALL=C
+  local pods line pod node reason image registry
+  local re='^([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?)[|]([A-Za-z]{1,64})[|]([A-Za-z0-9][A-Za-z0-9._/:@-]*)$'
+  pods=$(set -o pipefail
+    kubectl -n kubehz-system get pods -l app.kubernetes.io/name=kubehz-live-agent --request-timeout=10s \
+      -o 'jsonpath={range .items[*]}{.metadata.name}|{.spec.nodeName}|{.status.containerStatuses[?(@.name=="agent")].state.waiting.reason}|{.spec.containers[?(@.name=="agent")].image}{"\n"}{end}' \
+      2>/dev/null | LC_ALL=C tr '\000' '\001') || return 0
+  while IFS= read -r line; do
+    [[ "${line}" =~ ${re} ]] || continue
+    pod="${BASH_REMATCH[1]}" node="${BASH_REMATCH[3]}" reason="${BASH_REMATCH[5]}" image="${BASH_REMATCH[6]}"
+    (( ${#image} <= 511 )) || continue
+    case "${reason}" in
+      ErrImagePull|ImagePullBackOff)
+        printf '  %s\n' "Pod ${pod} on node ${node} cannot pull its image ${image} (${reason}). Read why: kubectl -n kubehz-system describe pod ${pod}" >&2
+        ;;
+      ContainerCreating)
+        kubehz::image_pull_in_progress "${pod}" || continue
+        printf '  %s\n' "Pod ${pod} on node ${node} started to pull its image ${image}, and the pull did not finish." >&2
+        ;;
+      *) continue ;;
+    esac
+    registry=$(kubehz::image_registry "${image}")
+    printf '  %s\n' \
+      "A pull that hangs or times out can mean that the IPv6 path from the node to ${registry} is broken." \
+      "On that path, the connection opens but carries no data, and the pull does not try IPv4." \
+      "To check, run these two commands on node ${node}. If only the IPv6 command times out, the IPv6 path is broken:" \
+      "  curl -6 -sS -o /dev/null --max-time 15 https://${registry}/v2/" \
+      "  curl -4 -sS -o /dev/null --max-time 15 https://${registry}/v2/" >&2
+    if [[ "${registry}" == ghcr.io ]]; then
+      printf '  %s\n' "ghcr.io sends the image layers from another host. Run the two commands against https://pkg-containers.githubusercontent.com/ too." >&2
+    fi
+    printf '  %s\n' \
+      "To work around it, make the node reach ${registry} over IPv4. Repair its IPv6 route, or run the node without IPv6." \
+      "Then delete the pod, so that a new pod pulls the image again: kubectl -n kubehz-system delete pod ${pod}" >&2
+    return 0
+  done <<< "${pods}"
+  return 0
+}
+
+# Whether the kubelet started to pull the agent container's image and has not
+# finished: a Pulling event and no Pulled event, both for that container (the
+# kubelet sets the event's involvedObject.fieldPath to spec.containers{<name>}).
+# A pod in ContainerCreating can also wait for a volume, and then the events
+# show no pull, or a finished one. An events read that fails answers "no".
+# Each NUL in the read becomes the byte 0x01, as in the pod read, so that a
+# line with a NUL fails the compare, as it does in the Go twin.
+# Usage: kubehz::image_pull_in_progress <pod>
+kubehz::image_pull_in_progress() {
+  local pod="${1}" events
+  events=$(set -o pipefail
+    kubectl -n kubehz-system get events \
+      --field-selector "involvedObject.kind=Pod,involvedObject.name=${pod}" --request-timeout=10s \
+      -o 'jsonpath={range .items[*]}{.involvedObject.fieldPath}|{.reason}{"\n"}{end}' 2>/dev/null | LC_ALL=C tr '\000' '\001') || return 1
+  events=$'\n'"${events}"$'\n'
+  [[ "${events}" == *$'\nspec.containers{agent}|Pulling\n'* && "${events}" != *$'\nspec.containers{agent}|Pulled\n'* ]]
+}
+
+# The host that the container runtime pulls an image from: the first path
+# component when it names a host (a dot, a port or localhost), else Docker Hub.
+# Usage: kubehz::image_registry <image>
+kubehz::image_registry() {
+  local image="${1}" host="${1%%/*}"
+  if [[ "${image}" != */* || ( "${host}" != *[.:]* && "${host}" != localhost ) || "${host}" == docker.io ]]; then
+    echo "registry-1.docker.io"
+  else
+    echo "${host}"
+  fi
+}
+
+# Put the one-time bind secret (B243) from clusters/<domain>/.kubehz-bind into
+# the Secret kubehz-system/kubehz-agent-bind. The CronJob's bootstrap reads it
+# (the optional env BIND_SECRET) and sends it on agent-register. The api adopts
+# the announced row only with this secret (B288): a register without it gets a
+# separate pending row, and every later tick keeps that row. So the Secret must
+# exist before the first CronJob pod starts, and a failed stage stops the
+# deploy before the CronJob agent.
+#
+# No file, or a file that kubehz::bind_secret_ok refuses: the deploy warns and
+# continues without the Secret. A register in another checkout leaves no file
+# here.
+# Usage: kubehz::stage_bind_secret <workdir> <domain>
+kubehz::stage_bind_secret() {
+  local workdir="${1}" domain="${2}"
   local path="${PATH_CLUSTERS}/${domain}/.kubehz-bind"
-  [[ -f "${path}" ]] || return 0
-  kubectl -n kubehz-system delete secret kubehz-agent-bind --ignore-not-found=true
-  kubectl -n kubehz-system create secret generic kubehz-agent-bind \
-    --from-file=bind-secret="${path}" || {
-    warn "kubehz: could not stage the bind secret. The agent adopts via the pending-pool path if it can, else claim by claim-code."
+  if [[ ! -e "${path}" ]]; then
+    warn "kubehz: no bind secret at clusters/${domain}/.kubehz-bind. If 'lo kubehz register' ran in another checkout, the agent registers a separate pending row. The announced row stays as it is and gets no heartbeats. Claim the new row with the code from 'lo kubehz claim-code'."
+    return 0
+  fi
+  if ! kubehz::bind_secret_ok "${path}"; then
+    warn "kubehz: clusters/${domain}/.kubehz-bind holds no bind secret (a readable file of exactly 64 lowercase hex characters). The deploy does not stage it, so the agent registers a separate pending row. The announced row stays as it is and gets no heartbeats. Claim the new row with the code from 'lo kubehz claim-code'."
+    return 0
+  fi
+  kubehz::apply_bind_secret "${workdir}" "${path}" || {
+    error "kubehz: could not stage the bind secret from clusters/${domain}/.kubehz-bind into Secret kubehz-system/kubehz-agent-bind. The deploy stopped before the CronJob agent. Without this Secret, the agent registers a separate pending row, and the announced row gets no heartbeats. The kubeconfig needs patch on Secrets in kubehz-system, and create when the Secret is new. Fix the kubeconfig or the RBAC, then run 'lo kubehz deploy' again. To deploy without the secret, remove the file, and claim the new row with the code from 'lo kubehz claim-code'."
+    return 1
   }
+}
+
+# Apply the namespace (a first deploy has none yet), then upsert the Secret,
+# and stop at the first failure. kubectl writes the reason to stderr. The value
+# goes in through --from-file, never argv, so `ps` does not show it. The
+# server-side apply changes an existing Secret in place (a re-announce rotates
+# the value), so a running CronJob never finds the Secret missing. It writes
+# no last-applied annotation, which `kubectl describe` would show. RBAC: patch
+# on Secrets in kubehz-system, and create when the Secret is new.
+# Usage: kubehz::apply_bind_secret <workdir> <path>
+kubehz::apply_bind_secret() {
+  local workdir="${1}" path="${2}" manifest
+  kubectl apply -f "${workdir}/agent/namespace.yaml" || return 1
+  manifest=$(kubectl -n kubehz-system create secret generic kubehz-agent-bind \
+    --from-file=bind-secret="${path}" --dry-run=client -o yaml) || return 1
+  printf '%s\n' "${manifest}" | kubectl apply --server-side --force-conflicts -f -
 }
 
 # Run the CronJob's bootstrap once when the identity Secret kubehz-agent is

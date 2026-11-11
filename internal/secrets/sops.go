@@ -9,6 +9,7 @@ package secrets
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,6 +24,8 @@ import (
 	"github.com/getsops/sops/v3/keyservice"
 	sopsjson "github.com/getsops/sops/v3/stores/json"
 	"github.com/getsops/sops/v3/version"
+
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // binaryStore is the store the sops CLI uses for --input-type/--output-type
@@ -141,6 +144,55 @@ func (d ageDecryptor) Decrypt(ctx context.Context, req *keyservice.DecryptReques
 	return &keyservice.DecryptResponse{Plaintext: plaintext}, nil
 }
 
+// The causes DecryptEntry reports, so a caller can name the class without
+// printing a library error (which never carries key material, but is noise).
+var (
+	// ErrNoIdentity: no age identity in the decrypt chain.
+	ErrNoIdentity = errors.New("no age identity")
+	// ErrReadEnc: the .enc file cannot be read.
+	ErrReadEnc = errors.New("the .enc cannot be read")
+	// ErrDecryptEnc: the .enc does not decrypt with the identity (another
+	// identity, or a damaged file).
+	ErrDecryptEnc = errors.New("the .enc does not decrypt")
+)
+
+// DecryptEntry decrypts one binary-mode .enc store entry in memory and
+// returns the plaintext; nothing reaches the disk (bash:
+// secrets::decrypt_entry). The age identity comes from the chain `lo secrets
+// decrypt` uses: SOPS_AGE_KEY, the SOPS key file, then the identity derived
+// from the SSH private key (LOK8S_SSH_KEY, default ~/.ssh/id_ed25519). The
+// error is ErrNoIdentity, ErrReadEnc or ErrDecryptEnc (wrapping the cause),
+// checked in that order; a failed derivation counts as no identity.
+func DecryptEntry(encPath string) ([]byte, error) {
+	ageKey := os.Getenv("SOPS_AGE_KEY")
+	if ageKey == "" {
+		ageKey = keysFileIdentity()
+	}
+	if ageKey == "" {
+		sshKey := os.Getenv("LOK8S_SSH_KEY")
+		if sshKey == "" {
+			sshKey = os.Getenv("HOME") + "/.ssh/id_ed25519"
+		}
+		if fsutil.IsRegular(sshKey) {
+			if derived, err := deriveAgePrivateKey(sshKey); err == nil {
+				ageKey = derived
+			}
+		}
+	}
+	if ageKey == "" {
+		return nil, ErrNoIdentity
+	}
+	raw, err := os.ReadFile(encPath)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrReadEnc, err)
+	}
+	dec, err := sopsDecryptData(raw, ageKey)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrDecryptEnc, err)
+	}
+	return dec, nil
+}
+
 // sopsDecryptData decrypts a binary-mode .enc payload with the given age
 // identity (decrypt.Data with the identity injected instead of read from
 // SOPS_AGE_KEY). Decrypt does NOT consult .sops.yaml (recipients live in
@@ -170,7 +222,13 @@ func sopsDecryptData(encBytes []byte, ageKey string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to decrypt original mac: %w", err)
 	}
 	if originalMac != mac {
-		return nil, fmt.Errorf("failed to verify data integrity. expected mac %q, got %q", originalMac, mac)
+		// Never the two MACs: they are unkeyed SHA-512 digests of the
+		// plaintext, and the callers print this error.
+		return nil, errMACMismatch
 	}
 	return store.EmitPlainFile(tree.Branches)
 }
+
+// errMACMismatch: the decrypted values do not match the file's MAC (a
+// changed or damaged .enc).
+var errMACMismatch = errors.New("failed to verify data integrity: the MAC of the file does not match its values")

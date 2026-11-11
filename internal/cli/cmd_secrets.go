@@ -281,7 +281,11 @@ func newSecretsPath(paths *config.Paths) *cobra.Command {
 		Args:         secretsArgs(0, 0),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintln(cmd.OutOrStdout(), secretsContext(cmd, paths, "", "").StorePath())
+			dir, err := secretsContext(cmd, paths, "", "").ResolveStore()
+			if err != nil {
+				return secretsRun(err)
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), dir)
 			return nil
 		},
 	}

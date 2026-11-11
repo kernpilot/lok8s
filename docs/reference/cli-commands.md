@@ -432,13 +432,21 @@ lo bootstrap [flags]
 
 ```
   lo bootstrap
-  lo bootstrap --domain kubehz.dev
+  lo bootstrap --dry-run --render-dir /tmp/bootstrap
+  lo bootstrap --only cert-manager,envoy-gateway
 ```
 
 ### Options
 
 ```
-  -h, --help   help for bootstrap
+      --allow-generators          Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)
+      --dry-run                   Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
+  -h, --help                      help for bootstrap
+      --ignore-nondeterministic   Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)
+      --no-diff                   Dry run without the kubectl diff: render only, no cluster access
+      --only strings              Apply (or dry-run) only these spec.bootstrap entries, comma-separated. A value selects every entry whose name (name:, else the last path element), key as written in spec.bootstrap (./targets/flux) or directory name (of an addon or a target) is equal to it: --only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster. dependsOn is not expanded
+      --render-dir string         Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
+      --with-restore              With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
 ```
 
 ### SEE ALSO
@@ -780,8 +788,9 @@ lo destroy [flags]
 ### Options
 
 ```
-  -h, --help   help for destroy
-  -y, --yes    Answer the confirmation on a terminal (off a terminal there is none)
+      --confirm-cluster string   The provider's cluster_name, to confirm the destroy off a terminal (--force does not replace it)
+  -h, --help                     help for destroy
+  -y, --yes                      Answer the confirmation on a terminal (off a terminal there is none)
 ```
 
 ### SEE ALSO
@@ -1887,13 +1896,15 @@ lo kubehz [flags]
 * [lo kubehz assess](#lo-kubehz-assess)	 - Show the platform assessment + handover feasibility
 * [lo kubehz claim](#lo-kubehz-claim)	 - Place a dashboard-minted claim nonce for the agent to echo (mode 3)
 * [lo kubehz claim-code](#lo-kubehz-claim-code)	 - Print the one-time claim code to paste into the dashboard
+* [lo kubehz cluster](#lo-kubehz-cluster)	 - Clusters through the kubehz api (agent tools)
 * [lo kubehz deploy](#lo-kubehz-deploy)	 - Deploy the in-cluster agent (spec.kubehz.agent)
 * [lo kubehz deregister](#lo-kubehz-deregister)	 - Remove cluster from kubehz
 * [lo kubehz handover](#lo-kubehz-handover)	 - Control-plane handover (receive/preseed on the eject target)
 * [lo kubehz join](#lo-kubehz-join)	 - Mint a node join ticket (hosting: shared)
-* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring to a hosted control plane (join/remove/status)
+* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
 * [lo kubehz re-enroll](#lo-kubehz-re-enroll)	 - Re-enroll a regenerated in-cluster agent token with the platform
 * [lo kubehz register](#lo-kubehz-register)	 - Register cluster with kubehz
+* [lo kubehz space](#lo-kubehz-space)	 - Spaces through the kubehz api (agent tools)
 * [lo kubehz status](#lo-kubehz-status)	 - Check kubehz registration status
 
 ## lo kubehz assess
@@ -1969,6 +1980,138 @@ lo kubehz claim-code [flags]
 ### SEE ALSO
 
 * [lo kubehz](#lo-kubehz)	 - kubehz platform integration
+
+## lo kubehz cluster
+
+Clusters through the kubehz api (agent tools)
+
+```
+lo kubehz cluster [flags]
+```
+
+### Examples
+
+```
+  lo kubehz cluster list
+  lo kubehz cluster lease cl-1a2b3c4d --hours 4
+```
+
+### Options
+
+```
+  -h, --help   help for cluster
+```
+
+### SEE ALSO
+
+* [lo kubehz](#lo-kubehz)	 - kubehz platform integration
+* [lo kubehz cluster get](#lo-kubehz-cluster-get)	 - Show one cluster
+* [lo kubehz cluster kubeconfig](#lo-kubehz-cluster-kubeconfig)	 - Write the agent kubeconfig of a hosted cluster to a file
+* [lo kubehz cluster lease](#lo-kubehz-cluster-lease)	 - Set the hours until the platform deletes a hosted cluster
+* [lo kubehz cluster list](#lo-kubehz-cluster-list)	 - List the clusters the credential reaches
+
+## lo kubehz cluster get
+
+Show one cluster
+
+```
+lo kubehz cluster get <id> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz cluster get cl-1a2b3c4d -o json
+```
+
+### Options
+
+```
+  -h, --help            help for get
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz cluster](#lo-kubehz-cluster)	 - Clusters through the kubehz api (agent tools)
+
+## lo kubehz cluster kubeconfig
+
+Write the agent kubeconfig of a hosted cluster to a file
+
+```
+lo kubehz cluster kubeconfig <id> --file <path> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz cluster kubeconfig cl-1a2b3c4d --file agent.yaml
+```
+
+### Options
+
+```
+      --file string     Write the kubeconfig to this file (mode 0600) and print the path; a file that exists needs --force
+  -h, --help            help for kubeconfig
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz cluster](#lo-kubehz-cluster)	 - Clusters through the kubehz api (agent tools)
+
+## lo kubehz cluster lease
+
+Set the hours until the platform deletes a hosted cluster
+
+```
+lo kubehz cluster lease <id> --hours <n> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz cluster lease cl-1a2b3c4d --hours 4
+```
+
+### Options
+
+```
+  -h, --help            help for lease
+      --hours string    Hours from now until the platform deletes it (1 to 720)
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz cluster](#lo-kubehz-cluster)	 - Clusters through the kubehz api (agent tools)
+
+## lo kubehz cluster list
+
+List the clusters the credential reaches
+
+```
+lo kubehz cluster list [flags]
+```
+
+### Examples
+
+```
+  lo kubehz cluster list
+  lo kubehz cluster list -o yaml
+```
+
+### Options
+
+```
+  -h, --help            help for list
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz cluster](#lo-kubehz-cluster)	 - Clusters through the kubehz api (agent tools)
 
 ## lo kubehz deploy
 
@@ -2134,7 +2277,7 @@ lo kubehz join <node> [flags]
 
 ## lo kubehz node
 
-Nodes you bring to a hosted control plane (join/remove/status)
+Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
 
 ```
 lo kubehz node [flags]
@@ -2145,6 +2288,7 @@ lo kubehz node [flags]
 ```
   lo kubehz node join
   lo kubehz node status
+  lo kubehz node drain --name worker-1
 ```
 
 ### Options
@@ -2156,9 +2300,67 @@ lo kubehz node [flags]
 ### SEE ALSO
 
 * [lo kubehz](#lo-kubehz)	 - kubehz platform integration
+* [lo kubehz node cordon](#lo-kubehz-node-cordon)	 - Mark one node of a Space unschedulable (its pods keep running)
+* [lo kubehz node drain](#lo-kubehz-node-drain)	 - Cordon one node of a Space and evict its pods
 * [lo kubehz node join](#lo-kubehz-node-join)	 - Join THIS machine to a hosted cluster (runs kubeadm join)
 * [lo kubehz node remove](#lo-kubehz-node-remove)	 - Remove one node from a hosted cluster and free its slot
 * [lo kubehz node status](#lo-kubehz-node-status)	 - List the nodes you brought to a hosted cluster
+* [lo kubehz node uncordon](#lo-kubehz-node-uncordon)	 - Make one node of a Space schedulable again
+
+## lo kubehz node cordon
+
+Mark one node of a Space unschedulable (its pods keep running)
+
+```
+lo kubehz node cordon --name <node> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz node cordon --name worker-1
+```
+
+### Options
+
+```
+  -h, --help              help for cordon
+  -n, --name string       Node name to cordon
+      --space-id string   Space id (sp-xxxxxxxx); default: the space of the active domain
+```
+
+### SEE ALSO
+
+* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
+
+## lo kubehz node drain
+
+Cordon one node of a Space and evict its pods
+
+```
+lo kubehz node drain --name <node> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz node drain --name worker-1
+  lo kubehz node drain --name worker-1 --timeout 600 --evict-unmanaged
+```
+
+### Options
+
+```
+      --evict-unmanaged   Also evict the pods that no controller recreates
+  -h, --help              help for drain
+  -n, --name string       Node name to drain
+      --space-id string   Space id (sp-xxxxxxxx); default: the space of the active domain
+      --timeout string    Seconds the platform tries, from 60 to 3600; default: the platform default
+```
+
+### SEE ALSO
+
+* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
 
 ## lo kubehz node join
 
@@ -2189,7 +2391,7 @@ lo kubehz node join [flags]
 
 ### SEE ALSO
 
-* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring to a hosted control plane (join/remove/status)
+* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
 
 ## lo kubehz node remove
 
@@ -2215,7 +2417,7 @@ lo kubehz node remove --name <node> [flags]
 
 ### SEE ALSO
 
-* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring to a hosted control plane (join/remove/status)
+* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
 
 ## lo kubehz node status
 
@@ -2240,7 +2442,33 @@ lo kubehz node status [flags]
 
 ### SEE ALSO
 
-* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring to a hosted control plane (join/remove/status)
+* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
+
+## lo kubehz node uncordon
+
+Make one node of a Space schedulable again
+
+```
+lo kubehz node uncordon --name <node> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz node uncordon --name worker-1
+```
+
+### Options
+
+```
+  -h, --help              help for uncordon
+  -n, --name string       Node name to uncordon
+      --space-id string   Space id (sp-xxxxxxxx); default: the space of the active domain
+```
+
+### SEE ALSO
+
+* [lo kubehz node](#lo-kubehz-node)	 - Nodes you bring (hosted: join/remove/status; Space: cordon/uncordon/drain)
 
 ## lo kubehz re-enroll
 
@@ -2289,6 +2517,199 @@ lo kubehz register [flags]
 ### SEE ALSO
 
 * [lo kubehz](#lo-kubehz)	 - kubehz platform integration
+
+## lo kubehz space
+
+Spaces through the kubehz api (agent tools)
+
+```
+lo kubehz space [flags]
+```
+
+### Examples
+
+```
+  lo kubehz space list
+  lo kubehz space create --name "CI run" --slug ci-1234 --lease-hours 3
+```
+
+### Options
+
+```
+  -h, --help   help for space
+```
+
+### SEE ALSO
+
+* [lo kubehz](#lo-kubehz)	 - kubehz platform integration
+* [lo kubehz space create](#lo-kubehz-space-create)	 - Create a space (an agent key sets a lease)
+* [lo kubehz space delete](#lo-kubehz-space-delete)	 - Delete a space
+* [lo kubehz space get](#lo-kubehz-space-get)	 - Show one space
+* [lo kubehz space kubeconfig](#lo-kubehz-space-kubeconfig)	 - Write the agent kubeconfig of a space to a file
+* [lo kubehz space lease](#lo-kubehz-space-lease)	 - Set the hours until the platform deletes a space
+* [lo kubehz space list](#lo-kubehz-space-list)	 - List the spaces the credential reaches
+
+## lo kubehz space create
+
+Create a space (an agent key sets a lease)
+
+```
+lo kubehz space create --name <name> --slug <slug> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz space create --name "CI run" --slug ci-1234
+  lo kubehz space create --name Demo --slug demo --nodes 2 --lease-hours 24 -o json
+```
+
+### Options
+
+```
+  -h, --help                    help for create
+      --lease-hours string      Hours until the platform deletes the space (1 to 720); an agent key gets 2 without it
+      --name string             Display name of the space
+      --namespaces string       Namespace limit; default: the platform's
+      --nodes string            Node limit; default: the platform's
+      --object-cap-kib string   Size cap of one Secret or ConfigMap in KiB; default: the platform's
+  -o, --output string           Output format: text, json or yaml (default "text")
+      --region string           Region to place the space in; default: the platform's choice
+      --slug string             DNS label of the space, unique on the platform (the namespace name)
+```
+
+### SEE ALSO
+
+* [lo kubehz space](#lo-kubehz-space)	 - Spaces through the kubehz api (agent tools)
+
+## lo kubehz space delete
+
+Delete a space
+
+```
+lo kubehz space delete <id> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz space delete sp-1a2b3c4d
+```
+
+### Options
+
+```
+  -h, --help            help for delete
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz space](#lo-kubehz-space)	 - Spaces through the kubehz api (agent tools)
+
+## lo kubehz space get
+
+Show one space
+
+```
+lo kubehz space get <id> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz space get sp-1a2b3c4d
+  lo kubehz space get sp-1a2b3c4d -o yaml
+```
+
+### Options
+
+```
+  -h, --help            help for get
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz space](#lo-kubehz-space)	 - Spaces through the kubehz api (agent tools)
+
+## lo kubehz space kubeconfig
+
+Write the agent kubeconfig of a space to a file
+
+```
+lo kubehz space kubeconfig <id> --file <path> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz space kubeconfig sp-1a2b3c4d --file agent.yaml
+```
+
+### Options
+
+```
+      --file string     Write the kubeconfig to this file (mode 0600) and print the path; a file that exists needs --force
+  -h, --help            help for kubeconfig
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz space](#lo-kubehz-space)	 - Spaces through the kubehz api (agent tools)
+
+## lo kubehz space lease
+
+Set the hours until the platform deletes a space
+
+```
+lo kubehz space lease <id> --hours <n> [flags]
+```
+
+### Examples
+
+```
+  lo kubehz space lease sp-1a2b3c4d --hours 6
+```
+
+### Options
+
+```
+  -h, --help            help for lease
+      --hours string    Hours from now until the platform deletes it (1 to 720)
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz space](#lo-kubehz-space)	 - Spaces through the kubehz api (agent tools)
+
+## lo kubehz space list
+
+List the spaces the credential reaches
+
+```
+lo kubehz space list [flags]
+```
+
+### Examples
+
+```
+  lo kubehz space list
+  lo kubehz space list -o json
+```
+
+### Options
+
+```
+  -h, --help            help for list
+  -o, --output string   Output format: text, json or yaml (default "text")
+```
+
+### SEE ALSO
+
+* [lo kubehz space](#lo-kubehz-space)	 - Spaces through the kubehz api (agent tools)
 
 ## lo kubehz status
 
@@ -2492,8 +2913,10 @@ Exposure policy — what an agent can call:
 
 A command without a marker counts as mutating. A command whose output is
 a credential (kubeconfig, secrets print, secrets env, kubehz token, kubehz
-claim-code) is never exposed: a tool result lands in the model's
-transcript. Flags that carry a credential (token, secret, password, key,
+claim-code, kubehz space|cluster kubeconfig) is never exposed: a tool
+result lands in the model's transcript. Neither is chat: it passes its
+arguments on unread. A call whose positional argument starts with "-" is
+refused, and nothing runs. Flags that carry a credential (token, secret, password, key,
 nonce, ...) are never exposed either.
 A command that is not exposed is not registered, so it cannot be called.
 LO_MCP_ALLOW=mutating|destructive is the environment form of the opt-in,
@@ -3000,14 +3423,21 @@ lo provision [flags]
 ```
   lo provision
   lo provision --domain kubehz.in.net --force
-  lo provision --bootstrap
+  lo provision --bootstrap --dry-run --render-dir /tmp/bootstrap
 ```
 
 ### Options
 
 ```
-  -b, --bootstrap   Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)
-  -h, --help        help for provision
+      --allow-generators          Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)
+  -b, --bootstrap                 Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)
+      --dry-run                   Render every entry and apply nothing: diff each one against the cluster (exit 0 unchanged, 1 changes, 2 error)
+  -h, --help                      help for provision
+      --ignore-nondeterministic   Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)
+      --no-diff                   Dry run without the kubectl diff: render only, no cluster access
+      --only strings              Apply (or dry-run) only these spec.bootstrap entries, comma-separated. A value selects every entry whose name (name:, else the last path element), key as written in spec.bootstrap (./targets/flux) or directory name (of an addon or a target) is equal to it: --only rook-ceph also selects ./targets/rook-ceph named rook-ceph-cluster. dependsOn is not expanded
+      --render-dir string         Write the dry run's manifests (NN-<entry>.yaml) and diffs (NN-<entry>.diff) into this directory
+      --with-restore              With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)
 ```
 
 ### SEE ALSO
@@ -3828,7 +4258,7 @@ Provision a project's toolchain with b (github.com/fentas/b):
      The bash tree itself is embedded in the binary.
      An existing b.yaml is never overwritten — a diff is printed instead.
   2. .gitignore entries for .bin/ (b.yaml + b.lock stay committed).
-  3. b itself into .bin/b: the pinned release v4.18.7 tarball, downloaded over
+  3. b itself into .bin/b: the pinned release v4.18.8 tarball, downloaded over
      https to a temp file and verified against its published SHA-256 before
      anything is extracted (no curl | sh). GITHUB_TOKEN is passed through if set.
   4. .bin/b install — every binary in b.yaml lands in .bin/ (plugins under .kustomize/).

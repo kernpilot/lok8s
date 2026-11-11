@@ -19,7 +19,9 @@ import (
 
 // RegisterHook is provision.Hooks.KubehzRegister. Any error aborts the
 // dispatch (each bash step is `|| return 1`); register_cluster itself is
-// non-fatal by contract.
+// non-fatal by contract, except for a platform that stays unavailable
+// (#312). That stop names `lo provision --bootstrap`: the dispatch stops
+// before its bootstrap, and that command registers and then bootstraps.
 func (c *Context) RegisterHook() func(ctx context.Context, domain, clusterYAML string) error {
 	return func(ctx context.Context, domain, clusterYAML string) error {
 		cfg, err := c.ReadConfig(clusterYAML)
@@ -30,7 +32,7 @@ func (c *Context) RegisterHook() func(ctx context.Context, domain, clusterYAML s
 			return err
 		}
 		if cfg.Access != "none" {
-			return c.RegisterCluster(ctx, cfg, domain, clusterYAML)
+			return c.registerCluster(ctx, cfg, domain, clusterYAML, "provision --bootstrap --domain "+domain)
 		}
 		return nil
 	}

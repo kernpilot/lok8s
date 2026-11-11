@@ -1,0 +1,6 @@
+kind: Lo
+metadata:
+  name: kver
+spec:
+  runtime: kind
+  kubernetes: []

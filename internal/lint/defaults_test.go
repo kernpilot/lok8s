@@ -15,6 +15,8 @@ metadata:
 spec:
   cluster:
     domain: demo.dev
+  network:
+    dnsSearch: []
   registries:
     mirrors:
       - name: io-docker
@@ -50,7 +52,8 @@ func TestNotesDefaultEqualKeys(t *testing.T) {
 	l.notes(spec)
 	want := "[note] clusters/demo.dev/cluster.lok8s.yaml: spec.nodes.controlPlane equals the default (1); you can drop it\n" +
 		"[note] clusters/demo.dev/cluster.lok8s.yaml: spec.runtime equals the default (kind); you can drop it\n" +
-		"[note] clusters/demo.dev/cluster.lok8s.yaml: spec.registries.mirrors equals the default (io-docker, io-quay, io-k8s, io-ghcr on the standard upstream URLs); you can drop it\n"
+		"[note] clusters/demo.dev/cluster.lok8s.yaml: spec.registries.mirrors equals the default (io-docker, io-quay, io-k8s, io-ghcr on the standard upstream URLs); you can drop it\n" +
+		"[note] clusters/demo.dev/cluster.lok8s.yaml: spec.network.dnsSearch equals the default ([]); you can drop it\n"
 	if out.String() != want {
 		t.Errorf("notes:\n%s\nwant:\n%s", out.String(), want)
 	}
@@ -73,7 +76,8 @@ func TestNotesSilentWhenNotDefault(t *testing.T) {
 	cases := map[string]string{
 		"other values":     "kind: Lo\nspec:\n  nodes:\n    controlPlane: 3\n  runtime: k3s\n",
 		"absent keys":      "apiVersion: v1\nkind: Lo\nmetadata:\n  name: x\nspec:\n  cluster:\n    domain: x.dev\n",
-		"null keys":        "kind: Lo\nspec:\n  nodes:\n    controlPlane: ~\n  runtime: null\n  registries:\n    mirrors: []\n",
+		"null keys":        "kind: Lo\nspec:\n  nodes:\n    controlPlane: ~\n  runtime: null\n  registries:\n    mirrors: []\n  network:\n    dnsSearch: ~\n",
+		"dnsSearch names":  "kind: Lo\nspec:\n  network:\n    dnsSearch: [corp.example.com]\n",
 		"one mirror":       "kind: Lo\nspec:\n  registries:\n    mirrors:\n      - name: io-docker\n        url: https://registry-1.docker.io\n",
 		"extra mirror":     mirrors("      - name: mine\n        url: https://r.example\n"),
 		"mirror url":       strings.Replace(mirrors(""), "https://quay.io", "https://mirror.example/quay", 1),

@@ -285,6 +285,16 @@ func topLevelName(cmd *cobra.Command) string {
 	return c.Name()
 }
 
+// dryRunPreDispatchExit ends a `lo bootstrap --dry-run` / `lo provision
+// --dry-run` that failed before the routed tree ran (a missing tree, no
+// bash) with rc 2: a dry run's every failure outside the per-entry diff is
+// rc 2 (cmd_provision.go), the routed path included.
+func dryRunPreDispatchExit(use string) {
+	if (use == "bootstrap" || use == "provision") && argvAsksDryRun(os.Args[1:]) {
+		exitNow(2)
+	}
+}
+
 // newShimCommand registers a command that runs in the argsh tree at
 // treeDir (the project's tree: routing never targets the cache). Flag
 // parsing is disabled and the ORIGINAL argv is passed through, so alias
@@ -304,10 +314,17 @@ func newShimCommand(paths *config.Paths, spec commandSpec, treeDir string, treeE
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if treeErr != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "lo: %v\n", treeErr)
+				dryRunPreDispatchExit(spec.use)
 				return ErrHandled
 			}
 			tree := assets.Tree{Dir: treeDir, Source: assets.TreeProject}
-			return execShim(paths, tree, os.Args[1:])
+			err := execShim(paths, tree, os.Args[1:])
+			if err != nil && (spec.use == "bootstrap" || spec.use == "provision") && argvAsksDryRun(os.Args[1:]) {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err) // as main prints it
+				exitNow(2)
+				return ErrHandled
+			}
+			return err
 		},
 	}
 }

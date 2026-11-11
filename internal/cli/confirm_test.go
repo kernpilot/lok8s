@@ -46,6 +46,15 @@ func runConfirm(t *testing.T, root *cobra.Command, stdinTTY, stderrTTY bool, ans
 	t.Helper()
 	t.Setenv("DOMAIN_NAME", "") // ambientMainEnv exports it; each run resolves afresh
 	t.Setenv("LOK8S_CLUSTER_NAME", "")
+	// ambientMainEnv/applyMainEnv only defaults KIND_EXPERIMENTAL_DOCKER_NETWORK
+	// to "lok8s" when it reads EMPTY (bash parity: "${KIND_EXPERIMENTAL_DOCKER_NETWORK:-lok8s}",
+	// an intentional pass-through of a real operator's exported override) —
+	// so a prior run in this process that resolved a domain with
+	// spec.network.name set (any test exercising ambientMainEnv) leaves it
+	// non-empty for every run after, in or out of this test. Reset it here
+	// too, so each run starts from the same "nothing exported yet" state the
+	// production default assumes.
+	t.Setenv("KIND_EXPERIMENTAL_DOCKER_NETWORK", "")
 	prevTTY, prevIn := confirmTerminals, confirmIn
 	confirmTerminals = func() (bool, bool) { return stdinTTY, stderrTTY }
 	confirmIn = strings.NewReader(answer)
