@@ -5,11 +5,41 @@ package assets
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
+
+// The operator image builds lo from this tree with GOTOOLCHAIN=local, so its
+// golang tag must equal the root go.mod `go` line. An older tag cannot build
+// the module. A newer one tests another Go than CI and the release, which
+// read go.mod. Dependabot does not follow this tag.
+func TestOperatorImageGoMatchesGoMod(t *testing.T) {
+	t.Parallel()
+	root := testutil.RepoRoot(t)
+	read := func(rel string) string {
+		raw, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	mod := regexp.MustCompile(`(?m)^go (\S+)$`).FindStringSubmatch(read("go.mod"))
+	img := regexp.MustCompile(`(?m)^FROM golang:([0-9][^-@ ]*)`).FindAllStringSubmatch(read("operator/Dockerfile"), -1)
+	if mod == nil {
+		t.Fatal("go.mod has no `go` line")
+	}
+	if len(img) == 0 {
+		t.Fatal("operator/Dockerfile has no `FROM golang:<version>` line")
+	}
+	for _, m := range img {
+		if m[1] != mod[1] {
+			t.Errorf("operator/Dockerfile uses golang:%s, go.mod says go %s", m[1], mod[1])
+		}
+	}
+}
 
 func TestVersionFallsBackToEmbedded(t *testing.T) {
 	prev := BuildVersion
