@@ -3,8 +3,10 @@
 # bodies are Go (internal/operator). Built here from the same tree the image
 # copies, stamped from the embedded mirror's VERSION with the Makefile's
 # -ldflags (internal/assets.BuildVersion; the assets version test pins the
-# flag across the Makefile, goreleaser and this file).
-FROM golang:1.26.10-alpine AS lo-build
+# flag across the Makefile, goreleaser and this file). The golang tag
+# equals the root go.mod `go` line: the image sets GOTOOLCHAIN=local, so an
+# older tag cannot build the module (the same test pins this).
+FROM golang:1.26.11-alpine AS lo-build
 WORKDIR /src
 COPY go.mod go.sum ./
 # The root module replaces github.com/kernpilot/lok8s/kustomize with the
