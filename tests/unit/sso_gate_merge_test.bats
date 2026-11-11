@@ -197,6 +197,59 @@ YAML
     || fail "spec.mergeType is '${got}', expected exactly 'StrategicMerge' (the CRD accepts StrategicMerge and JSONMerge; 'Replace' and any typo are rejected)"
 }
 
+@test "the sso-gate policy asks for a refresh token and leaves the refresh on" {
+  local policy scopes refresh tag
+  # Envoy Gateway renews an expired session with the refresh token. Some
+  # issuers (ZITADEL, for one) issue a refresh token only for
+  # offline_access. Without it, the session ends every time the access
+  # token expires.
+  policy="$(_render)" || fail "the sso-gate addon did not render"
+  scopes="$(yq eval -N '.spec.oidc.scopes[]' - <<<"${policy}")"
+  grep -qx 'offline_access' <<<"${scopes}" \
+    || fail "spec.oidc.scopes is [${scopes//$'\n'/, }], expected it to hold offline_access"
+  # The removal patch in the kustomization.yaml header names index 3. If the
+  # scope moves, that patch fails in every consumer that copied it.
+  [ "$(yq eval -N '.spec.oidc.scopes[3]' - <<<"${policy}")" = "offline_access" ] \
+    || fail "spec.oidc.scopes is [${scopes//$'\n'/, }], expected offline_access at index 3 (the removal patch in kustomization.yaml names /spec/oidc/scopes/3; update it with the list)"
+  # refreshToken is true by default (Envoy Gateway v1.9.3, the chart pin).
+  # An explicit false turns the refresh off, even with a refresh token. The
+  # tag check refuses the string "true": the CRD field is a boolean, and
+  # yq prints the string and the boolean the same way.
+  refresh="$(yq eval -N '.spec.oidc.refreshToken' - <<<"${policy}")"
+  tag="$(yq eval -N '.spec.oidc.refreshToken | tag' - <<<"${policy}")"
+  case "${tag} ${refresh}" in
+    '!!null null' | '!!bool true') ;;
+    *) fail "spec.oidc.refreshToken is '${refresh}' (${tag}), expected unset (the default, true) or the boolean true" ;;
+  esac
+}
+
+@test "the removal patch in the kustomization.yaml header removes only offline_access" {
+  # Users copy this patch from the header, so run the header's own text, not
+  # a copy of it in this file. Take the `patches:` block of the "Refresh
+  # tokens" section up to the next empty comment line, and strip the "#   "
+  # prefix. Then layer it over a copy of the addon (kustomize refuses an
+  # absolute path in `resources`).
+  local layer="${BATS_TEST_TMPDIR}/unscoped" patch scopes
+  patch="$(awk '/── Refresh tokens/ { s = 1 }
+    s && /^#   patches:/ { p = 1 }
+    p && /^#$/ { exit }
+    p { print substr($0, 5) }' "${_SSO_DIR}/kustomization.yaml")"
+  grep -q 'op: remove' <<<"${patch}" \
+    || fail "no removal patch found in the Refresh tokens section of kustomization.yaml: [${patch}]"
+  mkdir -p "${layer}/base"
+  cp "${_SSO_DIR}"/*.yaml "${layer}/base/"
+  printf '%s\n' \
+    'apiVersion: kustomize.config.k8s.io/v1beta1' \
+    'kind: Kustomization' \
+    'resources:' \
+    '  - base' \
+    "${patch}" >"${layer}/kustomization.yaml"
+  _SSO_DIR="${layer}"
+  scopes="$(_render | yq eval -N '.spec.oidc.scopes | join(",")' -)"
+  [ "${scopes}" = "openid,email,groups" ] \
+    || fail "the header's removal patch gives scopes [${scopes}], expected [openid,email,groups]: it must remove offline_access and nothing else"
+}
+
 @test "every sso-gate target selects the labeled HTTPRoutes, group and labels included" {
   local line group kind labels fields n=0
   while IFS='|' read -r group kind labels fields; do

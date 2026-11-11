@@ -687,8 +687,51 @@ copy-paste patches):
    consuming target.
 2. **Client secret**: a Secret `sso-gate-client` (key `client-secret`)
    in the policy's namespace, e.g. via the secrets plugin.
-3. **Redirect URI**: register `https://<each-protected-host>/oauth2/callback`
-   at your issuer.
+3. **Redirect URIs**: register `https://<each-protected-host>/oauth2/callback`
+   at your issuer. If your issuer publishes an `end_session_endpoint`, also
+   register `https://<each-protected-host>/` as a post-logout redirect URI
+   (see `/logout` below).
+
+The policy asks for the `offline_access` scope. The issuer then returns a
+refresh token, and Envoy Gateway renews the session with it when the access
+token expires (`refreshToken` is on by default). Without a refresh token,
+the session ends with the access token, and the next request goes to the
+issuer to sign in again. If the user still has a session at the issuer,
+this redirect is silent. But an API call from the page (`fetch`) or a form
+POST at that moment can fail.
+
+A refresh token makes the gateway session last longer. Envoy Gateway keeps
+the refresh token in a cookie for `defaultRefreshTokenTTL` (one week by
+default, when the refresh token is not a JWT with an `exp` claim). It
+renews the session until the issuer refuses the refresh token. A sign-out
+at the issuer does not end the gateway session. To end it:
+
+- Sign out at `/logout` on each protected host (the default logout path
+  of Envoy Gateway; the labeled route must match that path). This clears
+  the gateway cookies for that host. If the issuer publishes an
+  `end_session_endpoint`, Envoy Gateway then sends the browser there, and
+  the issuer session ends too. The issuer must know `https://<host>/` as
+  a post-logout redirect URI, or the user sees its error page. Without
+  that endpoint, the browser goes back to `https://<host>/`, and a live
+  issuer session signs the user in again without a prompt.
+- Revoke the refresh token at the issuer. The session then ends at the
+  next refresh, at most one access-token lifetime later. A live issuer
+  session can sign the user in again at that point.
+
+Removing the scope does not end a session either: a browser that holds a
+refresh token keeps it until its cookie expires. Some issuers also keep a
+refresh token for offline access after a sign-out (Keycloak does).
+
+Before you deploy, check two things at your issuer:
+
+1. The client has the refresh-token grant. ZITADEL, Okta and Ory Hydra,
+   for example, issue no refresh token without it.
+2. The issuer accepts the scope. Some issuers show a consent page for
+   `offline_access` (Keycloak with consent on). Some ignore the scope and
+   return no refresh token. A strict issuer refuses it: the sign-in then
+   fails, on the issuer's error page or at the callback, while the policy
+   still shows `Accepted`. To remove the scope, use the `test` and `remove`
+   patch in the header of `.lok8s/addons/sso-gate/kustomization.yaml`.
 
 One sharp edge: `targetSelectors` matches routes in the **same namespace**
 as the policy. That is the selector's default behavior, and this addon ships
