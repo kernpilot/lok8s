@@ -71,9 +71,9 @@
 # The policy asks for `offline_access`, so the issuer returns a refresh token
 # and Envoy Gateway renews the session with it (docs/guide/addons.md). The
 # client needs the refresh-token grant at the issuer. If your issuer refuses
-# the scope, the sign-in fails at the callback. Remove the scope from the
-# consuming target. The `test` op fails the build if a later version moves
-# the scope, so the patch never removes another scope:
+# the scope, the sign-in fails while the policy still shows Accepted. Remove
+# the scope from the consuming target. The `test` op fails the build if a
+# later version moves the scope, so the patch never removes another scope:
 #
 #   patches:
 #     - target: { kind: SecurityPolicy, name: sso-gate }

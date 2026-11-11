@@ -207,6 +207,10 @@ YAML
   scopes="$(yq eval -N '.spec.oidc.scopes[]' - <<<"${policy}")"
   grep -qx 'offline_access' <<<"${scopes}" \
     || fail "spec.oidc.scopes is [${scopes//$'\n'/, }], expected it to hold offline_access"
+  # The removal patch in the kustomization.yaml header names index 3. If the
+  # scope moves, that patch fails in every consumer that copied it.
+  [ "$(yq eval -N '.spec.oidc.scopes[3]' - <<<"${policy}")" = "offline_access" ] \
+    || fail "spec.oidc.scopes is [${scopes//$'\n'/, }], expected offline_access at index 3 (the removal patch in kustomization.yaml names /spec/oidc/scopes/3; update it with the list)"
   # refreshToken is true by default (Envoy Gateway v1.9.3, the chart pin).
   # An explicit false turns the refresh off, even with a refresh token. The
   # tag check refuses the string "true": the CRD field is a boolean, and
