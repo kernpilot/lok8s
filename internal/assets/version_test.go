@@ -1,6 +1,7 @@
 package assets
 
-// version_test.go covers the version fallback to the embedded VERSION.
+// version_test.go covers the version fallback to the embedded VERSION, the
+// BuildVersion stamp of every build, and the Go version of the operator image.
 
 import (
 	"os"
@@ -19,33 +20,37 @@ import (
 func TestOperatorImageGoMatchesGoMod(t *testing.T) {
 	t.Parallel()
 	root := testutil.RepoRoot(t)
+	// CRLF endings and backslash line continuations are folded first, so a
+	// FROM instruction is always one line.
 	read := func(rel string) string {
 		raw, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
 			t.Fatal(err)
 		}
-		return string(raw)
+		s := strings.ReplaceAll(string(raw), "\r\n", "\n")
+		return regexp.MustCompile(`\\\n[ \t]*`).ReplaceAllString(s, " ")
 	}
 	mod := regexp.MustCompile(`(?m)^go (\S+)$`).FindStringSubmatch(read("go.mod"))
 	if mod == nil {
 		t.Fatal("go.mod has no `go` line")
 	}
-	// Every FROM line that names the golang image, in any form: lower case,
-	// indented, with --platform, or with a registry prefix. The tag is read
-	// up to the first character that is not a digit or a dot.
-	from := regexp.MustCompile(`(?mi)^[ \t]*FROM[ \t]+(?:--platform=\S+[ \t]+)?(?:\S+/)?golang:(\S*)`)
+	// Each FROM instruction whose image is golang: in any case, indented, with
+	// --platform or a registry prefix, with a tag, a digest or neither. The
+	// version is the tag up to the first character that is not a digit or a
+	// dot; an image without a readable version fails.
+	from := regexp.MustCompile(`(?mi)^[ \t]*FROM[ \t]+(?:--platform=\S+[ \t]+)?(?:\S+/)?golang((?:[:@]\S*)?)(?:[ \t]|$)`)
 	img := from.FindAllStringSubmatch(read("operator/Dockerfile"), -1)
 	if len(img) == 0 {
-		t.Fatal("operator/Dockerfile has no `FROM golang:<version>` line")
+		t.Fatal("operator/Dockerfile has no `FROM golang` line")
 	}
-	ver := regexp.MustCompile(`^[0-9][0-9.]*`)
+	ver := regexp.MustCompile(`^:([0-9][0-9.]*)`)
 	for _, m := range img {
-		v := ver.FindString(m[1])
+		v := ver.FindStringSubmatch(m[1])
 		switch {
-		case v == "":
-			t.Errorf("operator/Dockerfile uses golang:%s, which names no version this test can read (an ARG?); go.mod says go %s", m[1], mod[1])
-		case v != mod[1]:
-			t.Errorf("operator/Dockerfile uses golang:%s, go.mod says go %s", v, mod[1])
+		case v == nil:
+			t.Errorf("operator/Dockerfile uses golang%s, which has no Go version tag this test can read (an ARG, latest, a digest or no tag); go.mod says go %s", m[1], mod[1])
+		case v[1] != mod[1]:
+			t.Errorf("operator/Dockerfile uses golang:%s, go.mod says go %s", v[1], mod[1])
 		}
 	}
 }
