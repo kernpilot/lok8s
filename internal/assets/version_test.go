@@ -27,16 +27,25 @@ func TestOperatorImageGoMatchesGoMod(t *testing.T) {
 		return string(raw)
 	}
 	mod := regexp.MustCompile(`(?m)^go (\S+)$`).FindStringSubmatch(read("go.mod"))
-	img := regexp.MustCompile(`(?m)^FROM golang:([0-9][^-@ ]*)`).FindAllStringSubmatch(read("operator/Dockerfile"), -1)
 	if mod == nil {
 		t.Fatal("go.mod has no `go` line")
 	}
+	// Every FROM line that names the golang image, in any form: lower case,
+	// indented, with --platform, or with a registry prefix. The tag is read
+	// up to the first character that is not a digit or a dot.
+	from := regexp.MustCompile(`(?mi)^[ \t]*FROM[ \t]+(?:--platform=\S+[ \t]+)?(?:\S+/)?golang:(\S*)`)
+	img := from.FindAllStringSubmatch(read("operator/Dockerfile"), -1)
 	if len(img) == 0 {
 		t.Fatal("operator/Dockerfile has no `FROM golang:<version>` line")
 	}
+	ver := regexp.MustCompile(`^[0-9][0-9.]*`)
 	for _, m := range img {
-		if m[1] != mod[1] {
-			t.Errorf("operator/Dockerfile uses golang:%s, go.mod says go %s", m[1], mod[1])
+		v := ver.FindString(m[1])
+		switch {
+		case v == "":
+			t.Errorf("operator/Dockerfile uses golang:%s, which names no version this test can read (an ARG?); go.mod says go %s", m[1], mod[1])
+		case v != mod[1]:
+			t.Errorf("operator/Dockerfile uses golang:%s, go.mod says go %s", v, mod[1])
 		}
 	}
 }
