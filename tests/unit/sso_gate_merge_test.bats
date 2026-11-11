@@ -223,6 +223,33 @@ YAML
   esac
 }
 
+@test "the removal patch in the kustomization.yaml header removes only offline_access" {
+  # Users copy this patch from the header, so run the header's own text, not
+  # a copy of it in this file. Take the `patches:` block of the "Refresh
+  # tokens" section up to the next empty comment line, and strip the "#   "
+  # prefix. Then layer it over a copy of the addon (kustomize refuses an
+  # absolute path in `resources`).
+  local layer="${BATS_TEST_TMPDIR}/unscoped" patch scopes
+  patch="$(awk '/── Refresh tokens/ { s = 1 }
+    s && /^#   patches:/ { p = 1 }
+    p && /^#$/ { exit }
+    p { print substr($0, 5) }' "${_SSO_DIR}/kustomization.yaml")"
+  grep -q 'op: remove' <<<"${patch}" \
+    || fail "no removal patch found in the Refresh tokens section of kustomization.yaml: [${patch}]"
+  mkdir -p "${layer}/base"
+  cp "${_SSO_DIR}"/*.yaml "${layer}/base/"
+  printf '%s\n' \
+    'apiVersion: kustomize.config.k8s.io/v1beta1' \
+    'kind: Kustomization' \
+    'resources:' \
+    '  - base' \
+    "${patch}" >"${layer}/kustomization.yaml"
+  _SSO_DIR="${layer}"
+  scopes="$(_render | yq eval -N '.spec.oidc.scopes | join(",")' -)"
+  [ "${scopes}" = "openid,email,groups" ] \
+    || fail "the header's removal patch gives scopes [${scopes}], expected [openid,email,groups]: it must remove offline_access and nothing else"
+}
+
 @test "every sso-gate target selects the labeled HTTPRoutes, group and labels included" {
   local line group kind labels fields n=0
   while IFS='|' read -r group kind labels fields; do

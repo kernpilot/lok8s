@@ -687,8 +687,10 @@ copy-paste patches):
    consuming target.
 2. **Client secret**: a Secret `sso-gate-client` (key `client-secret`)
    in the policy's namespace, e.g. via the secrets plugin.
-3. **Redirect URI**: register `https://<each-protected-host>/oauth2/callback`
-   at your issuer.
+3. **Redirect URIs**: register `https://<each-protected-host>/oauth2/callback`
+   at your issuer. If your issuer publishes an `end_session_endpoint`, also
+   register `https://<each-protected-host>/` as a post-logout redirect URI
+   (see `/logout` below).
 
 The policy asks for the `offline_access` scope. The issuer then returns a
 refresh token, and Envoy Gateway renews the session with it when the access
@@ -704,10 +706,17 @@ default, when the refresh token is not a JWT with an `exp` claim). It
 renews the session until the issuer refuses the refresh token. A sign-out
 at the issuer does not end the gateway session. To end it:
 
-- Sign out on the protected host at `/logout` (the default logout path of
-  Envoy Gateway). This clears the gateway cookies in that browser.
+- Sign out at `/logout` on each protected host (the default logout path
+  of Envoy Gateway; the labeled route must match that path). This clears
+  the gateway cookies for that host. If the issuer publishes an
+  `end_session_endpoint`, Envoy Gateway then sends the browser there, and
+  the issuer session ends too. The issuer must know `https://<host>/` as
+  a post-logout redirect URI, or the user sees its error page. Without
+  that endpoint, the browser goes back to `https://<host>/`, and a live
+  issuer session signs the user in again without a prompt.
 - Revoke the refresh token at the issuer. The session then ends at the
-  next refresh, at most one access-token lifetime later.
+  next refresh, at most one access-token lifetime later. A live issuer
+  session can sign the user in again at that point.
 
 Removing the scope does not end a session either: a browser that holds a
 refresh token keeps it until its cookie expires. Some issuers also keep a

@@ -56,5 +56,7 @@ spec:
       # the consuming target (kustomization.yaml header), not here.
       - offline_access
     # redirectURL/logoutPath deliberately NOT set: Envoy Gateway defaults to
-    # https://<host>/oauth2/callback and /logout — register that callback at
-    # the issuer for every protected host.
+    # https://<host>/oauth2/callback and /logout. Register that callback at
+    # the issuer for every protected host. When the issuer publishes an
+    # end_session_endpoint, /logout also ends the issuer session: register
+    # https://<host>/ there as a post-logout redirect URI too.
