@@ -691,12 +691,30 @@ copy-paste patches):
    at your issuer.
 
 The policy asks for the `offline_access` scope. The issuer then returns a
-refresh token, and Envoy renews the session with it when the access token
-expires (`refreshToken` is on by default).
+refresh token, and Envoy Gateway renews the session with it when the access
+token expires (`refreshToken` is on by default). Without a refresh token,
+the session ends with the access token, and the next request takes a
+sign-in redirect. If the user still has a session at the issuer, the
+redirect is silent. But an API call from the page (`fetch`) or a form POST
+at that moment can fail.
 
-Without a refresh token, the session ends with the access token, and the
-user signs in again. If your issuer refuses the scope, patch `scopes` from
-your consuming target, as you do for the issuer.
+A refresh token makes the gateway session last longer. Envoy Gateway keeps
+the refresh token in a cookie for `defaultRefreshTokenTTL` (one week by
+default, when the refresh token is not a JWT with an `exp` claim). It
+renews the session until the issuer refuses the refresh token. A sign-out
+at the issuer does not end the gateway session: revoke the refresh token at
+the issuer to end it. Some issuers keep an offline token after a single
+sign-out (Keycloak does).
+
+Before you deploy, check two things at your issuer:
+
+1. The client has the refresh-token grant. ZITADEL, Okta and Ory Hydra,
+   for example, issue no refresh token without it.
+2. The issuer accepts the scope. Some issuers show a consent page for
+   `offline_access` (Keycloak with consent on). If the issuer refuses the
+   scope, the sign-in fails at the callback, while the policy still shows
+   `Accepted`. To remove the scope, use the `test` and `remove` patch in
+   the header of `.lok8s/addons/sso-gate/kustomization.yaml`.
 
 One sharp edge: `targetSelectors` matches routes in the **same namespace**
 as the policy. That is the selector's default behavior, and this addon ships
