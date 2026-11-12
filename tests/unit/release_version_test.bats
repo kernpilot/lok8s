@@ -34,10 +34,11 @@ step_block() {
 
 GUARD_RUN='        run: bash hack/check-release-version.sh "${GITHUB_REF_NAME}"'
 
-# same_job FILE FROM TO: no job key (2-space indent) between two line numbers,
-# so a guard moved into a job of its own (no `needs:`) cannot pass.
+# same_job FILE FROM TO: no line at the job-key indent (2 spaces, not a
+# comment) between two line numbers, so a guard moved into a job of its own
+# (no `needs:`) cannot pass, also when the job key carries a comment.
 same_job() {
-  ! sed -n "${2},${3}p" "$1" | grep -qE '^  [A-Za-z0-9_-]+:[[:space:]]*$'
+  ! sed -n "${2},${3}p" "$1" | grep -qE '^  [^ #]'
 }
 
 versions() { # versions <mirror> <tree>
