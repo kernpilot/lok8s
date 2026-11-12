@@ -245,3 +245,115 @@ YAML
   assert_output --partial "../artifacts.yaml"
   refute_output --partial "name: lok8s.local"
 }
+
+# --- env::generate_patches ---
+
+# _patches_setup <services-yaml>: env::services answers <services-yaml>; the
+# domain artifact holds two objects of `web` and one of `api`.
+_patches_setup() {
+  build::artifacts() { :; }
+  export -f build::artifacts
+  if ! command -v yq &>/dev/null; then
+    skip "yq not available"
+  fi
+  export DOMAIN_NAME="test.example"
+  mkdir -p "${BATS_TEST_TMPDIR}/clusters/test.example"
+  cat > "${BATS_TEST_TMPDIR}/clusters/test.example/artifacts.yaml" <<'YAML'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web.app
+  namespace: ns1
+  labels:
+    lok8s.dev/name: web
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  labels:
+    lok8s.dev/name: web
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  labels:
+    lok8s.dev/name: api
+YAML
+  printf '%s\n' "${1}" > "${BATS_TEST_TMPDIR}/services.merged.yaml"
+  env::services() { cat "${BATS_TEST_TMPDIR}/services.merged.yaml"; }
+  export -f env::services
+  envsubst() { cat; }
+  export -f envsubst
+}
+
+@test "env::kustomization emits a service's patches, label-scoped with dots escaped" {
+  _patches_setup "$(cat <<'YAML'
+services:
+  web:
+    patches:
+      - target: {name: web.app, kind: Deployment, group: apps}
+        patch: |
+          - op: add
+            path: /metadata/annotations
+            value: {patched: "yes"}
+  api:
+    enabled: false
+    patches:
+      - target: {kind: Deployment, name: not-checked}
+        patch: x
+YAML
+)"
+
+  env::kustomization --no-build
+
+  run cat "${BATS_TEST_TMPDIR}/clusters/test.example/artifacts/kustomization.yaml"
+  assert_success
+  assert_output --partial "$(cat <<'YAML'
+patches:
+  - target:
+      group: 'apps'
+      kind: 'Deployment'
+      name: 'web\.app'
+      labelSelector: 'lok8s.dev/name=web'
+    patch: |2-
+      - op: add
+        path: /metadata/annotations
+        value: {patched: "yes"}
+YAML
+)"
+  refute_output --partial "not-checked"
+}
+
+@test "env::kustomization fails on a patch that matches none of its service's objects" {
+  _patches_setup "$(cat <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: api}
+        patch: x
+YAML
+)"
+
+  run env::kustomization --no-build
+  assert_failure
+  assert_output --partial "services.web.patches[0]: target Deployment/api matches no object labelled lok8s.dev/name=web in the test.example artifacts"
+  [ ! -e "${BATS_TEST_TMPDIR}/clusters/test.example/artifacts/kustomization.yaml" ]
+  [ ! -e "${BATS_TEST_TMPDIR}/clusters/test.example/artifacts/.cache-queue" ]
+}
+
+@test "env::kustomization rejects a target field it cannot match exactly" {
+  _patches_setup "$(cat <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: "web.*"}
+        patch: x
+YAML
+)"
+
+  run env::kustomization --no-build
+  assert_failure
+  assert_output --partial "services.web.patches[0].target.name must match [A-Za-z0-9.-]+"
+}

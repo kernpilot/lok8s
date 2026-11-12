@@ -70,6 +70,7 @@ The service catalog. Each entry describes one service.
 | `watch` | string[] | `[]` | Additional files to watch for Tiltfile reload. Paths relative to the service directory. |
 | `registry` | object | _(unset)_ | Per-service registry override. Same fields as the top-level `registry` block. Per-service keys win over global, key-by-key. **Mutually exclusive with `image`.** |
 | `image` | string | _(unset)_ | Pin to a specific image ref. Accepts `repo:tag`, `repo@sha256:digest`, or bare `repo`. **Mutually exclusive with `registry`.** Implies `build: false` (you can't build a service whose image is externally pinned). |
+| `patches` | list | _(unset)_ | Kustomize patches for the service's objects, applied in the Tilt overlay only. Each entry is `{target: {kind, name, group?, version?, namespace?}, patch: <string>}`. See [Patching a service's manifests from a profile](/guide/services#patching-a-service-s-manifests-from-a-profile). |
 
 **Validation**:
 
@@ -81,6 +82,12 @@ The service catalog. Each entry describes one service.
 - `registry` must be a mapping with valid keys (`endpoint`, `branch`, `tag`, `prefix`)
 - `image` must be a string
 - `image` and `registry` cannot both be set
+- `patches` must be a list. `lo env kustomization` checks each entry: the
+  keys are `patch` (a non-empty string without control characters other
+  than tab and newline) and `target` (a mapping with `kind` and `name`,
+  optional `group`, `version` and `namespace`, each matching
+  `[A-Za-z0-9.-]+`). A target must match an object of the service in the
+  domain artifact. Any failure stops the run before the overlay is written.
 
 ### Per-service `registry.parallel`
 

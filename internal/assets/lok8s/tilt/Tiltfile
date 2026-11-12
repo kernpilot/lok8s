@@ -206,7 +206,7 @@ def _validate_services_yaml(env):
     if 'build' in env['defaults'] and type(env['defaults']['build']) != 'bool':
       fail("services.yaml: defaults.build must be a bool, got %s" % type(env['defaults']['build']))
 
-  _svc_allowed = ['enabled', 'build', 'path', 'namespace', 'dockerfile', 'watch', 'registry', 'image']
+  _svc_allowed = ['enabled', 'build', 'path', 'namespace', 'dockerfile', 'watch', 'registry', 'image', 'patches']
   for name in env.get('services', {}):
     svc = env['services'][name]
     if type(svc) != 'dict':
@@ -218,6 +218,10 @@ def _validate_services_yaml(env):
       fail("services.yaml: services.%s.dockerfile must be 'service' or 'production', got '%s'" % (name, svc['dockerfile']))
     if 'watch' in svc and type(svc['watch']) != 'list':
       fail("services.yaml: services.%s.watch must be a list" % name)
+    # patches: applied by `lo env kustomization` (it validates each entry and
+    # fails the render on a bad one); here only the shape.
+    if 'patches' in svc and svc['patches'] != None and type(svc['patches']) != 'list':
+      fail("services.yaml: services.%s.patches must be a list" % name)
     if 'build' in svc and type(svc['build']) != 'bool':
       fail("services.yaml: services.%s.build must be a bool, got %s" % (name, type(svc['build'])))
     if 'registry' in svc:

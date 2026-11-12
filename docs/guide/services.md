@@ -230,6 +230,61 @@ tweaks. Resolution order is: `services.yaml` → committed profile →
 machinery picks **one** `LOK8S_SERVICE_CONFIG` at a time. For
 multi-layer overrides, see the upstream doc on the merge mechanics).
 
+### Patching a service's manifests from a profile
+
+A profile can change more than the image. `services.<name>.patches` is a
+list of kustomize patches for that service's rendered objects. `lo env
+kustomization` adds them to the generated Tilt overlay
+(`clusters/<domain>/artifacts/kustomization.yaml`), so they apply only in a
+Tilt session that uses the profile. `lo build` and the committed manifests
+do not change.
+
+Use it when a profile runs a different process than your default build: for
+example, a dev server with hot reload that writes to its root filesystem and
+needs more memory.
+
+```yaml
+# services.hot.yaml — committed; use with LOK8S_SERVICE_CONFIG=hot
+services:
+  web:
+    dockerfile: service          # build lok8s.Dockerfile (the dev server)
+    patches:
+      - target:
+          kind: Deployment
+          name: web
+        patch: |
+          - op: replace
+            path: /spec/template/spec/containers/0/securityContext/readOnlyRootFilesystem
+            value: false
+          - op: replace
+            path: /spec/template/spec/containers/0/resources/limits/memory
+            value: 2Gi
+```
+
+Each entry has two keys:
+
+| Key | Description |
+|---|---|
+| `target` | The object to patch. `kind` and `name` are required; `group`, `version` and `namespace` are optional (an unset field matches any value). Each value is matched exactly. |
+| `patch` | The patch as a string: a JSON patch (RFC 6902) or a strategic merge patch, as kustomize reads it. |
+
+The rules:
+
+- A patch applies only to objects of the service it is declared under.
+  `lo env kustomization` adds the label selector `lok8s.dev/name=<service>`
+  to the target, so the service name must be a valid label value. A
+  multi-image service (`components`) labels its objects with the component
+  names, so its patches do not reach them.
+- A patch whose target matches no object of that service fails the run with
+  an error that names the patch. `lo env kustomization` checks this against
+  the domain artifact before it writes anything, and the Tilt session stops.
+- A service with `enabled: false` gets no patches.
+- The merge replaces lists: a `patches` list in a profile replaces the list
+  of the same service in `services.yaml`.
+- The patch text goes through `envsubst`, as every value of the merged
+  config does.
+- Without `patches`, the overlay is the same as before.
+
 ### Why default `build: true` then?
 
 The framework default is `build: true` because **most projects start small**.
