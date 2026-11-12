@@ -206,7 +206,7 @@ def _validate_services_yaml(env):
     if 'build' in env['defaults'] and type(env['defaults']['build']) != 'bool':
       fail("services.yaml: defaults.build must be a bool, got %s" % type(env['defaults']['build']))
 
-  _svc_allowed = ['enabled', 'build', 'path', 'namespace', 'dockerfile', 'watch', 'registry', 'image']
+  _svc_allowed = ['enabled', 'build', 'path', 'namespace', 'dockerfile', 'watch', 'registry', 'image', 'patches']
   for name in env.get('services', {}):
     svc = env['services'][name]
     if type(svc) != 'dict':

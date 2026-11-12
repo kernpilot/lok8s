@@ -134,6 +134,378 @@ for state in clusters/alpha.dev/artifacts/kustomization.yaml clusters/alpha.dev/
 done
 parity::record "${envk_ok}" "lo env kustomization --no-build (state)"
 
+# ── lo env kustomization — services.<name>.patches (per-impl clones) ─────────
+# Every case gets fresh clones with the same services.yaml (stdin) and the
+# same domain artifact (ENVP_ART). A passing case writes the same overlay in
+# both; a failing case prints the same [error] line and writes NO overlay and
+# NO cache queue in either (the check runs before anything is written).
+
+ENVP_ARTIFACT='apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web.app
+  namespace: ns1
+  labels:
+    lok8s.dev/name: web
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webXapp
+  namespace: ns1
+  labels:
+    lok8s.dev/name: web
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: ns1
+  labels:
+    lok8s.dev/name: web
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: ns1
+  labels:
+    lok8s.dev/name: api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web.app
+  namespace: ns2
+  labels:
+    lok8s.dev/name: api'
+
+# envp_case <label> <want-rc>: services.yaml on stdin. ENVP_ALLOW: an
+# allow-diff regex for lines outside this feature.
+envp_case() {
+  local label="${1}" want_rc="${2}" services impl ok=1 state
+  services="$(cat)"
+  for impl in go bash; do
+    rm -rf "${WORK}/envp-${impl}"
+    mkproj "${WORK}/envp-${impl}"
+    printf '%s\n' "${services}" > "${WORK}/envp-${impl}/services.yaml"
+    printf '%s\n' "${ENVP_ART:-${ENVP_ARTIFACT}}" > "${WORK}/envp-${impl}/clusters/alpha.dev/artifacts.yaml"
+  done
+  PARITY_DIR_GO="${WORK}/envp-go" PARITY_DIR_BASH="${WORK}/envp-bash" \
+    parity::run_pair --domain alpha.dev env kustomization --no-build
+  parity::compare "env kustomization patches (${label})" "${ENVP_ALLOW:--}" || ok=0
+  # shellcheck disable=SC2154 # go_rc: set by parity::run_pair (hack/lib/parity.sh)
+  if (( go_rc != want_rc )); then
+    echo "FAIL: env kustomization patches (${label}) — rc ${go_rc}, want ${want_rc}"
+    ok=0
+  fi
+  for state in kustomization.yaml .cache-queue; do
+    local fgo="${WORK}/envp-go/clusters/alpha.dev/artifacts/${state}"
+    local fbash="${WORK}/envp-bash/clusters/alpha.dev/artifacts/${state}"
+    if (( want_rc != 0 )); then
+      if [[ -e "${fgo}" || -e "${fbash}" ]]; then
+        echo "FAIL: env kustomization patches (${label}) — ${state} written on a failed run"
+        ok=0
+      fi
+    else
+      parity::state_same "${fbash}" "${fgo}" "patches (${label}) ${state}" || ok=0
+    fi
+  done
+  parity::record "${ok}" "lo env kustomization --no-build (patches: ${label})"
+}
+
+# The first line of the Service patch starts with two spaces (|2: the
+# content indentation is the key's plus two), and the patch holds an empty
+# line: the emit must keep both. Without the emit's own indentation
+# indicator, that first line would set the block's indentation and the
+# lines after it would end the block: the render check below would fail.
+envp_case "emit" 0 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app, group: apps}
+        patch: |
+          - op: add
+            path: /metadata/annotations
+            value: {patched: "yes"}
+      - target: {version: v1, kind: Service, name: web, namespace: ns1}
+        patch: |2
+            # an indented first line
+          - op: add
+            path: /metadata/labels/extra
+            value: "1"
+
+          # the end
+  api:
+    enabled: false
+    patches:
+      - target: {kind: Deployment, name: not-checked}
+        patch: x
+  worker:
+    patches: []
+YAML
+
+# The overlay must RENDER, and the patches must land on exactly the named
+# objects: web.app in ns1 (not webXapp, which an unescaped dot would match,
+# and not api's web.app in ns2, which a target without the label selector
+# would match) and the web Service; api stays untouched.
+envp_render_ok=1
+if envp_render="$("${ROOT}/.bin/kustomize" build --load-restrictor=LoadRestrictionsNone \
+    "${WORK}/envp-go/clusters/alpha.dev/artifacts" 2>&1)"; then
+  # kustomize sorts its output: compare the sorted lines.
+  envp_got="$(printf '%s\n' "${envp_render}" | "${ROOT}/.bin/yq" -r '.metadata.namespace + "/" + .metadata.name + " " + (.metadata.annotations.patched // "-") + " " + (.metadata.labels.extra // "-")' | grep -v '^---$' | LC_ALL=C sort)"
+  envp_want="$(printf '%s\n' 'ns1/api - -' 'ns1/web - 1' 'ns1/web.app yes -' 'ns1/webXapp - -' 'ns2/web.app - -')"
+  if [[ "${envp_got}" != "${envp_want}" ]]; then
+    echo "FAIL: env kustomization patches (render) — got:"
+    printf '%s\n' "${envp_got}" | sed 's/^/  /'
+    envp_render_ok=0
+  fi
+else
+  echo "FAIL: env kustomization patches (render) — kustomize build failed:"
+  printf '%s\n' "${envp_render}" | head -10 | sed 's/^/  /'
+  envp_render_ok=0
+fi
+parity::record "${envp_render_ok}" "lo env kustomization --no-build (patches: the overlay renders, exact targets)"
+
+# A domain artifact document that is not a mapping is skipped, not an error.
+ENVP_ART="${ENVP_ARTIFACT}"$'\n---\n- not\n- a mapping' envp_case "non-mapping document" 0 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app}
+        patch: x
+YAML
+# kustomize matches a target namespace against the effective one (an object
+# without a namespace is in "default"), and a colon (RBAC names) is a plain
+# character. Both must pass the check AND be patched by kustomize.
+ENVP_NONS='apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nons
+  labels:
+    lok8s.dev/name: web
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: system:web
+  labels:
+    lok8s.dev/name: web'
+ENVP_ART="${ENVP_ARTIFACT}"$'\n---\n'"${ENVP_NONS}" envp_case "default namespace and a colon" 0 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: nons, namespace: default}
+        patch: |
+          - op: add
+            path: /metadata/annotations
+            value: {patched: "yes"}
+      - target: {kind: ClusterRole, name: "system:web"}
+        patch: |
+          - op: add
+            path: /metadata/annotations
+            value: {patched: "yes"}
+YAML
+envp_ns_ok=1
+if envp_render="$("${ROOT}/.bin/kustomize" build --load-restrictor=LoadRestrictionsNone \
+    "${WORK}/envp-go/clusters/alpha.dev/artifacts" 2>&1)"; then
+  envp_got="$(printf '%s\n' "${envp_render}" | "${ROOT}/.bin/yq" -r 'select(.metadata.name == "nons" or .metadata.name == "system:web") | .metadata.name + " " + (.metadata.annotations.patched // "-")' | grep -v '^---$' | LC_ALL=C sort)"
+  if [[ "${envp_got}" != "$(printf '%s\n' 'nons yes' 'system:web yes')" ]]; then
+    echo "FAIL: env kustomization patches (default namespace render) — got:"
+    printf '%s\n' "${envp_got}" | sed 's/^/  /'
+    envp_ns_ok=0
+  fi
+else
+  echo "FAIL: env kustomization patches (default namespace render) — kustomize build failed:"
+  printf '%s\n' "${envp_render}" | head -10 | sed 's/^/  /'
+  envp_ns_ok=0
+fi
+parity::record "${envp_ns_ok}" "lo env kustomization --no-build (patches: kustomize patches the default-namespace and colon targets)"
+ENVP_ART="${ENVP_ARTIFACT}"$'\n---\n'"${ENVP_NONS}" envp_case "other namespace on an unset one" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: nons, namespace: ns1}
+        patch: x
+YAML
+# A malformed services config has no patches; the run is not failed here
+# (lint and the Tilt extension refuse it). The image-swap half differs on it
+# before this feature: the bash reads `build` of a non-mapping as "" (a
+# swallowed yq error) and warns, the binary reads "null" and does not.
+ENVP_ALLOW="^warn: service '[^']*' has build:false" envp_case "service not a mapping" 0 <<'YAML'
+services:
+  web: just-a-string
+YAML
+ENVP_ALLOW="^warn: service '[^']*' has build:false" envp_case "services a list" 0 <<'YAML'
+services:
+  - web
+YAML
+ENVP_ALLOW="^Error: cannot get keys of" envp_case "services a string" 0 <<'YAML'
+services: web
+YAML
+envp_case "not a list" 1 <<'YAML'
+services:
+  web:
+    patches: {kind: Deployment}
+YAML
+envp_case "not a label value" 1 <<'YAML'
+services:
+  web_:
+    patches:
+      - target: {kind: Deployment, name: web.app}
+        patch: x
+YAML
+envp_case "entry not a mapping" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - just a string
+YAML
+envp_case "unknown entry key" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app}
+        patch: x
+        path: ./p.yaml
+YAML
+envp_case "patch not a string" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app}
+        patch: {op: add}
+YAML
+envp_case "patch empty" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app}
+        patch: "\n\n"
+YAML
+envp_case "patch control character" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app}
+        patch: "a\rb"
+YAML
+# Characters a YAML 1.1 reader breaks a line at, and a NUL: rejected before
+# the bash side reads the patch into a variable.
+envp_case "patch line separator" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app}
+        patch: "- op: add\u2028  path: /x"
+YAML
+envp_case "patch next line" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app}
+        patch: "a\x85b"
+YAML
+envp_case "patch NUL" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app}
+        patch: "a\0b"
+YAML
+envp_case "patch only whitespace" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app}
+        patch: "  \t\n  \n"
+YAML
+envp_case "target value with a trailing newline" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: "web.app\n"}
+        patch: x
+YAML
+# An integer target value is read as its text ("1"); it fails here because
+# no object has version 1, in both implementations alike.
+envp_case "integer target value, no match" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app, version: 1}
+        patch: x
+YAML
+envp_case "target missing" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - patch: x
+YAML
+envp_case "unknown target key" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app, labelSelector: a=b}
+        patch: x
+YAML
+envp_case "name required" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: null}
+        patch: x
+YAML
+envp_case "regex in name" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: "web.*"}
+        patch: x
+YAML
+envp_case "null optional field" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app, namespace: ~}
+        patch: x
+YAML
+envp_case "no match" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: webYapp}
+        patch: x
+YAML
+envp_case "other service's object" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: api}
+        patch: x
+YAML
+envp_case "wrong group" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app, group: batch}
+        patch: x
+YAML
+envp_case "wrong namespace" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app, namespace: ns2}
+        patch: x
+YAML
+envp_case "wrong version" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Service, name: web, version: v2}
+        patch: x
+YAML
+
 # ── lo hooks — validation + no-match paths (cluster-free) ────────────────────
 
 check - hooks recreate                                  # missing --selector

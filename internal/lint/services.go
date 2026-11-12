@@ -44,7 +44,7 @@ var (
 	lintServicesTop          = []string{"apiVersion", "kind", "metadata", "registry", "defaults", "services"}
 	lintServicesRegistry     = []string{"endpoint", "branch", "tag", "prefix", "parallel"}
 	lintServicesDefaults     = []string{"build", "dockerfile"}
-	lintServiceEntry         = []string{"enabled", "build", "path", "namespace", "dockerfile", "watch", "registry", "image"}
+	lintServiceEntry         = []string{"enabled", "build", "path", "namespace", "dockerfile", "watch", "registry", "image", "patches"}
 	lintServiceEntryRegistry = []string{"endpoint", "branch", "tag", "prefix"}
 
 	// per-service lok8s.yaml — top-level + components-entry allow-lists.

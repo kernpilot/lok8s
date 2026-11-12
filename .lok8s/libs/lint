@@ -72,7 +72,7 @@ main::lint() {
 _LINT_SERVICES_TOP=(apiVersion kind metadata registry defaults services)
 _LINT_SERVICES_REGISTRY=(endpoint branch tag prefix parallel)
 _LINT_SERVICES_DEFAULTS=(build dockerfile)
-_LINT_SERVICE_ENTRY=(enabled build path namespace dockerfile watch registry image)
+_LINT_SERVICE_ENTRY=(enabled build path namespace dockerfile watch registry image patches)
 _LINT_SERVICE_ENTRY_REGISTRY=(endpoint branch tag prefix)
 
 # per-service lok8s.yaml — top-level + components-entry allow-lists.
