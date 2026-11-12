@@ -147,8 +147,9 @@ env::kustomization() {
   # Write the Tilt overlay kustomization into the domain's artifacts/ directory.
   # It wraps the SINGLE domain artifact (clusters/<domain>/artifacts.yaml, built
   # by build::artifacts above from the domain kustomization) and layers the
-  # services.yaml image swaps and the services.<name>.patches on top. Tilt builds this dir into one pool it
-  # partitions via filter_yaml() (see .lok8s/tilt/Tiltfile).
+  # services.yaml image swaps and the services.<name>.patches on top. Tilt
+  # builds this dir into one pool it partitions via filter_yaml() (see
+  # .lok8s/tilt/Tiltfile).
   local out_file="${artifacts_dir}/kustomization.yaml"
 
   {
@@ -288,6 +289,10 @@ env::generate_patches() {
   local label="lok8s.dev/name"
   local re_label='^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$'
   local re_value='^[A-Za-z0-9.-]+$'
+  # A character the emitted block scalar cannot carry (the Go port's
+  # patchControlRE): a C0 or C1 control other than tab and newline, a line or
+  # paragraph separator, a byte-order mark, a noncharacter.
+  local re_unsafe='[\x{00}-\x{08}\x{0B}-\x{1F}\x{7F}-\x{9F}\x{2028}\x{2029}\x{FEFF}\x{FFFE}\x{FFFF}]'
 
   local svc_names svc
   svc_names=$(echo "${merged}" | yq -r '.services // {} | keys | .[]')
@@ -335,17 +340,21 @@ env::generate_patches() {
         fi
       done < <(S="${svc}" I="${i}" yq -r "${q}"' | keys | .[] | "k:" + (. | tostring)' <<< "${merged}")
 
-      local patch=""
-      if [[ "$(S="${svc}" I="${i}" yq -r "${q}.patch | type" <<< "${merged}")" == "!!str" ]]; then
-        patch=$(S="${svc}" I="${i}" yq -r "${q}.patch" <<< "${merged}")
-      fi
-      if [[ -z "${patch}" ]]; then
+      if [[ "$(S="${svc}" I="${i}" yq -r "${q}.patch | type" <<< "${merged}")" != "!!str" ]]; then
         error "${where}.patch must be a non-empty string"
         return 1
       fi
-      # The same expression as the Go port, on the same regex engine (yq's).
-      if [[ "$(S="${svc}" I="${i}" yq -r "${q}"'.patch | test("[\x{00}-\x{08}\x{0B}-\x{1F}\x{7F}]")' <<< "${merged}")" == "true" ]]; then
-        error "${where}.patch contains a control character (only tab and newline are allowed)"
+      # Checked BEFORE the patch is read into a variable (a NUL would not
+      # survive the read). The same expression as the Go port, on the same
+      # regex engine (yq's).
+      if [[ "$(S="${svc}" I="${i}" R="${re_unsafe}" yq -r "${q}"'.patch | test(strenv(R))' <<< "${merged}")" == "true" ]]; then
+        error "${where}.patch contains a control or line-separator character (only tab and newline are allowed)"
+        return 1
+      fi
+      local patch
+      patch=$(S="${svc}" I="${i}" yq -r "${q}.patch" <<< "${merged}")
+      if [[ -z "${patch//[$' \t\n']/}" ]]; then
+        error "${where}.patch must be a non-empty string"
         return 1
       fi
 
@@ -372,11 +381,20 @@ env::generate_patches() {
       local -A target=()
       for key in group version kind name namespace; do
         [[ "$(S="${svc}" I="${i}" F="${key}" yq -r "${q}"'.target | has(strenv(F))' <<< "${merged}")" == "true" ]] || continue
+        # The match runs in yq, on the whole value: a command substitution
+        # would strip a trailing newline that the Go port rejects.
         case "$(S="${svc}" I="${i}" F="${key}" yq -r "${q}"'.target[strenv(F)] | type' <<< "${merged}")" in
           '!!map'|'!!seq'|'!!null') value="" ;;
-          *) value=$(S="${svc}" I="${i}" F="${key}" yq -r "${q}"'.target[strenv(F)]' <<< "${merged}") ;;
+          *)
+            if [[ "$(S="${svc}" I="${i}" F="${key}" R="${re_value}" \
+                  yq -r "${q}"'.target[strenv(F)] | tostring | test(strenv(R))' <<< "${merged}")" == "true" ]]; then
+              value=$(S="${svc}" I="${i}" F="${key}" yq -r "${q}"'.target[strenv(F)]' <<< "${merged}")
+            else
+              value=""
+            fi
+            ;;
         esac
-        if [[ ! "${value}" =~ ${re_value} ]]; then
+        if [[ -z "${value}" ]]; then
           error "${where}.target.${key} must match [A-Za-z0-9.-]+"
           return 1
         fi

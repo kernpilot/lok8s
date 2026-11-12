@@ -321,6 +321,50 @@ services:
       - target: {kind: Deployment, name: web.app}
         patch: "a\rb"
 YAML
+# Characters a YAML 1.1 reader breaks a line at, and a NUL: rejected before
+# the bash side reads the patch into a variable.
+envp_case "patch line separator" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app}
+        patch: "- op: add\u2028  path: /x"
+YAML
+envp_case "patch next line" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app}
+        patch: "a\x85b"
+YAML
+envp_case "patch NUL" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app}
+        patch: "a\0b"
+YAML
+envp_case "patch only whitespace" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app}
+        patch: "  \t\n  \n"
+YAML
+envp_case "target value with a trailing newline" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: "web.app\n"}
+        patch: x
+YAML
+envp_case "target value an integer" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: web.app, version: 1}
+        patch: x
+YAML
 envp_case "target missing" 1 <<'YAML'
 services:
   web:

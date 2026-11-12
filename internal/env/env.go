@@ -136,8 +136,9 @@ func (c *Context) yq(ctx context.Context, stdin string, errOut io.Writer, args .
 // Kustomization generates clusters/<domain>/artifacts/kustomization.yaml
 // (bash: env::kustomization) — the Tilt overlay that wraps the SINGLE domain
 // artifact (clusters/<domain>/artifacts.yaml, built by build.Artifacts) and
-// layers the services.yaml image swaps and the services.<name>.patches on top. Tilt builds this dir into one
-// pool it partitions via filter_yaml() (see .lok8s/tilt/Tiltfile). NOTE it
+// layers the services.yaml image swaps and the services.<name>.patches on
+// top. Tilt builds this dir into one pool it partitions via filter_yaml()
+// (see .lok8s/tilt/Tiltfile). NOTE it
 // deliberately writes INTO the artifacts/ directory the split emit
 // preserves (env's overlay kustomization.yaml, capi.yaml and .cache-queue
 // live as files directly under artifacts/ — see build.Artifacts'

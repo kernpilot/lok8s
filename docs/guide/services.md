@@ -274,7 +274,8 @@ The rules:
   `lo env kustomization` adds the label selector `lok8s.dev/name=<service>`
   to the target, so the service name must be a valid label value. A
   multi-image service (`components`) labels its objects with the component
-  names, so its patches do not reach them.
+  names, so a patch declared under the service name matches none of them
+  and fails the run.
 - A patch whose target matches no object of that service fails the run with
   an error that names the patch. `lo env kustomization` checks this against
   the domain artifact before it writes anything, and the Tilt session stops.
@@ -282,7 +283,11 @@ The rules:
 - The merge replaces lists: a `patches` list in a profile replaces the list
   of the same service in `services.yaml`.
 - The patch text goes through `envsubst`, as every value of the merged
-  config does.
+  config does. `envsubst` has no escape for `$`, so it also replaces the
+  strategic-merge directives (`$patch`, `$setElementOrder`, `$retainKeys`,
+  `$deleteFromPrimitiveList`). To delete or reorder, write a JSON patch.
+- The patch must not hold a control character other than tab and newline,
+  or a line or paragraph separator.
 - Without `patches`, the overlay is the same as before.
 
 ### Why default `build: true` then?

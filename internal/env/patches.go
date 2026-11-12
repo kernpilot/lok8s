@@ -35,10 +35,12 @@ var (
 	targetValueRE = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
 	// labelValueRE is the Kubernetes label-value syntax (the selector value).
 	labelValueRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$`)
-	// patchControlRE finds a control character other than tab and newline
-	// (the block scalar of the emit cannot carry one). Bash runs the same
-	// expression through yq's test(), on the same regex engine.
-	patchControlRE = regexp.MustCompile(`[\x{00}-\x{08}\x{0B}-\x{1F}\x{7F}]`)
+	// patchControlRE finds a character the block scalar of the emit cannot
+	// carry: a C0 or C1 control other than tab and newline, a line or
+	// paragraph separator (YAML parsers that read YAML 1.1 break the line
+	// there, as at NEL), a byte-order mark, or a noncharacter. Bash runs the
+	// same expression through yq's test(), on the same regex engine.
+	patchControlRE = regexp.MustCompile(`[\x{00}-\x{08}\x{0B}-\x{1F}\x{7F}-\x{9F}\x{2028}\x{2029}\x{FEFF}\x{FFFE}\x{FFFF}]`)
 )
 
 // artifactObject is the part of a rendered object that a patch target is
@@ -124,11 +126,14 @@ func (c *Context) validatePatch(where string, item *yaml.Node) (string, map[stri
 	}
 
 	pn := yqsem.Deref(yqsem.MapGet(item, "patch"))
-	if pn == nil || pn.Kind != yaml.ScalarNode || pn.Tag != "!!str" || strings.TrimRight(pn.Value, "\n") == "" {
+	if pn == nil || pn.Kind != yaml.ScalarNode || pn.Tag != "!!str" {
 		return "", nil, c.patchError("%s.patch must be a non-empty string", where)
 	}
 	if patchControlRE.MatchString(pn.Value) {
-		return "", nil, c.patchError("%s.patch contains a control character (only tab and newline are allowed)", where)
+		return "", nil, c.patchError("%s.patch contains a control or line-separator character (only tab and newline are allowed)", where)
+	}
+	if strings.Trim(pn.Value, " \t\n") == "" {
+		return "", nil, c.patchError("%s.patch must be a non-empty string", where)
 	}
 
 	tn := yqsem.Deref(yqsem.MapGet(item, "target"))
@@ -212,7 +217,8 @@ func readArtifactObjects(path string) ([]artifactObject, error) {
 			service:   scalarValue(yqsem.Lookup(root, "metadata", "labels", serviceLabel)),
 		}
 		// The group is the part of apiVersion before the first slash, the
-		// version the part after the last (bash: split("/")).
+		// version the part after the last (bash: split("/")). For a valid
+		// apiVersion ("v1" or "<group>/<version>") that is kustomize's split.
 		parts := strings.Split(scalarValue(yqsem.MapGet(root, "apiVersion")), "/")
 		o.version = parts[len(parts)-1]
 		if len(parts) > 1 {
