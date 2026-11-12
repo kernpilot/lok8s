@@ -21,6 +21,11 @@ jobs:
           # goreleaser derives the version and the changelog from tags.
           fetch-depth: 0
 
+      # The tag must equal both VERSION files before anything is built:
+      # v0.14.0 was tagged before its bump, and its bash tree reported 0.13.0.
+      - name: The tag equals the VERSION files
+        run: bash hack/check-release-version.sh "${GITHUB_REF_NAME}"
+
       # setup-go installs the Go version from the root go.mod. goreleaser
       # runs `go build` in each `dir` (root, kustomize, lochat) with that
       # toolchain.
@@ -49,3 +54,6 @@ jobs:
           args: release --clean ${{ steps.notes.outputs.args }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Release the tag that the guard checked, also when a commit has
+          # two tags (goreleaser picks one of its own otherwise).
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
