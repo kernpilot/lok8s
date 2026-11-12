@@ -17,6 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # On a tag, the tag must equal both VERSION files before the image is
+      # built: operator/Dockerfile stamps lo's version from VERSION, so the
+      # v0.14.0 image (tagged before its bump) reports 0.13.0.
+      - name: The tag equals the VERSION files
+        if: startsWith(github.ref, 'refs/tags/')
+        run: bash hack/check-release-version.sh "${GITHUB_REF_NAME}"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
