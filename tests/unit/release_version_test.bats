@@ -13,7 +13,7 @@
 setup() {
   load "../test_helper"
   SCRIPT="${BATS_TEST_DIRNAME}/../../hack/check-release-version.sh"
-  WORKFLOW="${BATS_TEST_DIRNAME}/../../.github/workflows/release.yml"
+  WORKFLOWS="${BATS_TEST_DIRNAME}/../../.github/workflows"
   T="$(mktemp -d)"
   mkdir -p "${T}/hack" "${T}/internal/assets/lok8s" "${T}/.lok8s"
   cp "${SCRIPT}" "${T}/hack/check-release-version.sh"
@@ -22,6 +22,17 @@ setup() {
 teardown() {
   rm -rf "${T}"
 }
+
+# step_block FILE NAME: the lines of the step `- name: NAME` (6-space step
+# indent, as in both workflows), up to the next step or the end of the job.
+step_block() {
+  awk -v n="      - name: $2" '
+    $0 == n { on = 1; print; next }
+    on && (/^      - / || /^[^ ]/) { exit }
+    on { print }' "$1"
+}
+
+GUARD_RUN='        run: bash hack/check-release-version.sh "${GITHUB_REF_NAME}"'
 
 versions() { # versions <mirror> <tree>
   printf '%s\n' "$1" > "${T}/internal/assets/lok8s/VERSION"
@@ -75,6 +86,13 @@ versions() { # versions <mirror> <tree>
   [ "$status" -eq 1 ]
 }
 
+@test "files with a pre-release suffix that the tag lacks: red" {
+  versions 0.15.0-rc.1 0.15.0-rc.1
+  run bash "${T}/hack/check-release-version.sh" v0.15.0
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"reads '0.15.0-rc.1', the tag v0.15.0 needs '0.15.0'"* ]]
+}
+
 @test "a name that is not a release tag is refused" {
   versions 0.14.1 0.14.1
   for t in 0.14.1 v0.14 main v0.14.1/x; do
@@ -84,9 +102,29 @@ versions() { # versions <mirror> <tree>
   done
 }
 
-@test "the release workflow runs the guard on the tag before goreleaser" {
-  guard="$(grep -n 'bash hack/check-release-version.sh "${GITHUB_REF_NAME}"' "${WORKFLOW}" | cut -d: -f1)"
-  build="$(grep -n 'uses: goreleaser/goreleaser-action@' "${WORKFLOW}" | cut -d: -f1)"
+@test "the release workflow runs the guard on every tag, before goreleaser, and fails on it" {
+  f="${WORKFLOWS}/release.yml"
+  block="$(step_block "$f" "The tag equals the VERSION files")"
+  [ -n "$block" ]
+  grep -qxF "${GUARD_RUN}" <<< "$block"
+  # (a bare `! cmd` never fails a bats test: test the match and fail on it)
+  if grep -qE 'continue-on-error|^ +if:|\|\| *true' <<< "$block"; then echo "the guard step can pass on a failure: $block"; return 1; fi
+  guard="$(grep -nxF "${GUARD_RUN}" "$f" | cut -d: -f1)"
+  build="$(grep -n '^ *- uses: goreleaser/goreleaser-action@' "$f" | cut -d: -f1)"
+  [ -n "$guard" ]
+  [ -n "$build" ]
+  [ "$guard" -lt "$build" ]
+}
+
+@test "the image workflow runs the guard on a tag, before the image build, and fails on it" {
+  f="${WORKFLOWS}/docker.yml"
+  block="$(step_block "$f" "The tag equals the VERSION files")"
+  [ -n "$block" ]
+  grep -qxF "${GUARD_RUN}" <<< "$block"
+  grep -qxF "        if: startsWith(github.ref, 'refs/tags/')" <<< "$block"
+  if grep -qE 'continue-on-error|\|\| *true' <<< "$block"; then echo "the guard step can pass on a failure: $block"; return 1; fi
+  guard="$(grep -nxF "${GUARD_RUN}" "$f" | cut -d: -f1)"
+  build="$(grep -n '^      - name: Build and push$' "$f" | cut -d: -f1)"
   [ -n "$guard" ]
   [ -n "$build" ]
   [ "$guard" -lt "$build" ]
