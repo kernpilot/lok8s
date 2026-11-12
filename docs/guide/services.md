@@ -265,20 +265,27 @@ Each entry has two keys:
 
 | Key | Description |
 |---|---|
-| `target` | The object to patch. `kind` and `name` are required; `group`, `version` and `namespace` are optional (an unset field matches any value). Each value is matched exactly. |
+| `target` | The object to patch. `kind` and `name` are required; `group`, `version` and `namespace` are optional (an unset field matches any value). Each value must match `[A-Za-z0-9.:-]+` and is matched exactly. An object without a namespace counts as `default`, as in kustomize. |
 | `patch` | The patch as a string: a JSON patch (RFC 6902) or a strategic merge patch, as kustomize reads it. |
 
 The rules:
 
 - A patch applies only to objects of the service it is declared under.
   `lo env kustomization` adds the label selector `lok8s.dev/name=<service>`
-  to the target, so the service name must be a valid label value. A
+  to the target, so the service name must be a valid label value. The label
+  is fixed: a Tilt extension set up with another `label_prefix` finds no
+  object for a patch, and the run fails. A
   multi-image service (`components`) labels its objects with the component
   names, so a patch declared under the service name matches none of them
   and fails the run.
 - A patch whose target matches no object of that service fails the run with
   an error that names the patch. `lo env kustomization` checks this against
   the domain artifact before it writes anything, and the Tilt session stops.
+- Do not set `namespace` in the target of a cluster-scoped object (a
+  ClusterRole, a Namespace). kustomize never matches a namespace there, and
+  `lo env kustomization` cannot tell which kinds are cluster-scoped, so a
+  stray namespace on such an object would let the patch pass the check and
+  do nothing.
 - A service with `enabled: false` gets no patches.
 - The merge replaces lists: a `patches` list in a profile replaces the list
   of the same service in `services.yaml`.

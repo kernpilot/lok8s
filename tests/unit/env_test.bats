@@ -355,5 +355,17 @@ YAML
 
   run env::kustomization --no-build
   assert_failure
-  assert_output --partial "services.web.patches[0].target.name must match [A-Za-z0-9.-]+"
+  assert_output --partial "services.web.patches[0].target.name must match [A-Za-z0-9.:-]+"
+}
+
+@test "env::generate_patches ignores a services value that is not a mapping" {
+  if ! command -v yq &>/dev/null; then
+    skip "yq not available"
+  fi
+  run env::generate_patches $'services: web\n' "${BATS_TEST_TMPDIR}/none.yaml" test.example
+  assert_success
+  assert_output ""
+  run env::generate_patches $'services:\n  web: just-a-string\n' "${BATS_TEST_TMPDIR}/none.yaml" test.example
+  assert_success
+  assert_output ""
 }

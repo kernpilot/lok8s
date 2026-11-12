@@ -132,9 +132,9 @@ env::kustomization() {
   mkdir -p "${artifacts_dir}"
   local domain_artifact="${PATH_CLUSTERS}/${domain}/artifacts.yaml"
 
-  # services.<name>.patches, checked against the domain artifact BEFORE
-  # anything is written: a patch that matches none of its service's objects
-  # fails the run and leaves the queue and the overlay as they were.
+  # services.<name>.patches, checked against the domain artifact before the
+  # cache queue and the overlay are written: a patch that matches none of its
+  # service's objects fails the run and leaves both as they were.
   local patches
   patches=$(env::generate_patches "${merged}" "${domain_artifact}" "${domain}") || return 1
 
@@ -288,18 +288,21 @@ env::generate_patches() {
   local LC_ALL=C
   local label="lok8s.dev/name"
   local re_label='^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$'
-  local re_value='^[A-Za-z0-9.-]+$'
+  local re_value='^[A-Za-z0-9.:-]+$'
   # A character the emitted block scalar cannot carry (the Go port's
   # patchControlRE): a C0 or C1 control other than tab and newline, a line or
   # paragraph separator, a byte-order mark, a noncharacter.
   local re_unsafe='[\x{00}-\x{08}\x{0B}-\x{1F}\x{7F}-\x{9F}\x{2028}\x{2029}\x{FEFF}\x{FFFE}\x{FFFF}]'
 
   local svc_names svc
-  svc_names=$(echo "${merged}" | yq -r '.services // {} | keys | .[]')
+  [[ "$(echo "${merged}" | yq -r '.services | type')" == "!!map" ]] || return 0
+  svc_names=$(echo "${merged}" | yq -r '.services | keys | .[]')
   [[ -z "${svc_names}" ]] && return 0
 
   while IFS= read -r svc; do
     [[ -z "${svc}" ]] && continue
+    # A service entry that is not a mapping has no patches.
+    [[ "$(S="${svc}" yq -r '.services[strenv(S)] | type' <<< "${merged}")" == "!!map" ]] || continue
 
     # A disabled service gets no patches, as it gets no image swap.
     local enabled
@@ -395,7 +398,7 @@ env::generate_patches() {
             ;;
         esac
         if [[ -z "${value}" ]]; then
-          error "${where}.target.${key} must match [A-Za-z0-9.-]+"
+          error "${where}.target.${key} must match [A-Za-z0-9.:-]+"
           return 1
         fi
         target[${key}]="${value}"
@@ -403,6 +406,7 @@ env::generate_patches() {
 
       # An unset target field matches any value. The group is the part of
       # apiVersion before the first slash, the version the part after the last.
+      # An object without a namespace is in "default", as in kustomize.
       local matches=0
       if [[ -f "${domain_artifact}" ]]; then
         matches=$(K="${target[kind]}" N="${target[name]}" NS="${target[namespace]:-}" \
@@ -410,7 +414,8 @@ env::generate_patches() {
           [select(tag == "!!map") | select(
             .kind == strenv(K) and .metadata.name == strenv(N) and
             .metadata.labels[strenv(L)] == strenv(S) and
-            (strenv(NS) == "" or .metadata.namespace == strenv(NS)) and
+            (strenv(NS) == "" or .metadata.namespace == strenv(NS) or
+              ((.metadata.namespace // "") == "" and strenv(NS) == "default")) and
             (strenv(G) == "" or ((.apiVersion // "") | (contains("/") and ((split("/") | .[0]) == strenv(G))))) and
             (strenv(V) == "" or ((.apiVersion // "") | split("/") | .[-1]) == strenv(V))
           )] | length' "${domain_artifact}" 2>/dev/null) || {

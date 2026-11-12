@@ -28,11 +28,11 @@ var (
 	patchKeys = []string{"patch", "target"}
 	// patchTargetKeys is also the emit order of the target fields.
 	patchTargetKeys = []string{"group", "version", "kind", "name", "namespace"}
-	// targetValueRE admits the characters a Kubernetes kind, name, namespace,
-	// group or version can hold. The dot is the only regex metacharacter in
-	// it, and the emit escapes it: kustomize reads these fields as anchored
-	// regular expressions.
-	targetValueRE = regexp.MustCompile(`^[A-Za-z0-9.-]+$`)
+	// targetValueRE admits the characters of a DNS-subdomain name, plus the
+	// colon of RBAC names (system:...). The dot is the only regex
+	// metacharacter in it, and the emit escapes it: kustomize reads these
+	// fields as anchored regular expressions.
+	targetValueRE = regexp.MustCompile(`^[A-Za-z0-9.:-]+$`)
 	// labelValueRE is the Kubernetes label-value syntax (the selector value).
 	labelValueRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$`)
 	// patchControlRE finds a character the block scalar of the emit cannot
@@ -155,7 +155,7 @@ func (c *Context) validatePatch(where string, item *yaml.Node) (string, map[stri
 			continue
 		}
 		if v.Kind != yaml.ScalarNode || v.Tag == "!!null" || !targetValueRE.MatchString(v.Value) {
-			return "", nil, c.patchError("%s.target.%s must match [A-Za-z0-9.-]+", where, k)
+			return "", nil, c.patchError("%s.target.%s must match [A-Za-z0-9.:-]+", where, k)
 		}
 		target[k] = v.Value
 	}
@@ -235,7 +235,9 @@ func matchesAny(objects []artifactObject, target map[string]string, svc string) 
 		if o.service != svc || o.kind != target["kind"] || o.name != target["name"] {
 			continue
 		}
-		if ns, ok := target["namespace"]; ok && o.namespace != ns {
+		// kustomize compares the effective namespace: an object without one
+		// is in "default" (kyaml resid.EffectiveNamespace).
+		if ns, ok := target["namespace"]; ok && o.namespace != ns && (o.namespace != "" || ns != "default") {
 			continue
 		}
 		if g, ok := target["group"]; ok && o.group != g {

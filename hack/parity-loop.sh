@@ -180,7 +180,8 @@ metadata:
   labels:
     lok8s.dev/name: api'
 
-# envp_case <label> <want-rc>: services.yaml on stdin.
+# envp_case <label> <want-rc>: services.yaml on stdin. ENVP_ALLOW: an
+# allow-diff regex for lines outside this feature.
 envp_case() {
   local label="${1}" want_rc="${2}" services impl ok=1 state
   services="$(cat)"
@@ -192,7 +193,7 @@ envp_case() {
   done
   PARITY_DIR_GO="${WORK}/envp-go" PARITY_DIR_BASH="${WORK}/envp-bash" \
     parity::run_pair --domain alpha.dev env kustomization --no-build
-  parity::compare "env kustomization patches (${label})" || ok=0
+  parity::compare "env kustomization patches (${label})" "${ENVP_ALLOW:--}" || ok=0
   # shellcheck disable=SC2154 # go_rc: set by parity::run_pair (hack/lib/parity.sh)
   if (( go_rc != want_rc )); then
     echo "FAIL: env kustomization patches (${label}) — rc ${go_rc}, want ${want_rc}"
@@ -273,6 +274,74 @@ services:
     patches:
       - target: {kind: Deployment, name: web.app}
         patch: x
+YAML
+# kustomize matches a target namespace against the effective one (an object
+# without a namespace is in "default"), and a colon (RBAC names) is a plain
+# character. Both must pass the check AND be patched by kustomize.
+ENVP_NONS='apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nons
+  labels:
+    lok8s.dev/name: web
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: system:web
+  labels:
+    lok8s.dev/name: web'
+ENVP_ART="${ENVP_ARTIFACT}"$'\n---\n'"${ENVP_NONS}" envp_case "default namespace and a colon" 0 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: nons, namespace: default}
+        patch: |
+          - op: add
+            path: /metadata/annotations
+            value: {patched: "yes"}
+      - target: {kind: ClusterRole, name: "system:web"}
+        patch: |
+          - op: add
+            path: /metadata/annotations
+            value: {patched: "yes"}
+YAML
+envp_ns_ok=1
+if envp_render="$("${ROOT}/.bin/kustomize" build --load-restrictor=LoadRestrictionsNone \
+    "${WORK}/envp-go/clusters/alpha.dev/artifacts" 2>&1)"; then
+  envp_got="$(printf '%s\n' "${envp_render}" | "${ROOT}/.bin/yq" -r 'select(.metadata.name == "nons" or .metadata.name == "system:web") | .metadata.name + " " + (.metadata.annotations.patched // "-")' | grep -v '^---$' | LC_ALL=C sort)"
+  if [[ "${envp_got}" != "$(printf '%s\n' 'nons yes' 'system:web yes')" ]]; then
+    echo "FAIL: env kustomization patches (default namespace render) — got:"
+    printf '%s\n' "${envp_got}" | sed 's/^/  /'
+    envp_ns_ok=0
+  fi
+else
+  echo "FAIL: env kustomization patches (default namespace render) — kustomize build failed:"
+  printf '%s\n' "${envp_render}" | head -10 | sed 's/^/  /'
+  envp_ns_ok=0
+fi
+parity::record "${envp_ns_ok}" "lo env kustomization --no-build (patches: kustomize patches the default-namespace and colon targets)"
+ENVP_ART="${ENVP_ARTIFACT}"$'\n---\n'"${ENVP_NONS}" envp_case "other namespace on an unset one" 1 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: nons, namespace: ns1}
+        patch: x
+YAML
+# A malformed services config has no patches; the run is not failed here
+# (lint and the Tilt extension refuse it). The image-swap half differs on it
+# before this feature: the bash reads `build` of a non-mapping as "" (a
+# swallowed yq error) and warns, the binary reads "null" and does not.
+ENVP_ALLOW="^warn: service '[^']*' has build:false" envp_case "service not a mapping" 0 <<'YAML'
+services:
+  web: just-a-string
+YAML
+ENVP_ALLOW="^warn: service '[^']*' has build:false" envp_case "services a list" 0 <<'YAML'
+services:
+  - web
+YAML
+ENVP_ALLOW="^Error: cannot get keys of" envp_case "services a string" 0 <<'YAML'
+services: web
 YAML
 envp_case "not a list" 1 <<'YAML'
 services:

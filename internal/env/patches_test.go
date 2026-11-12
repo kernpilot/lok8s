@@ -101,7 +101,7 @@ func TestKustomizationEmitsPatches(t *testing.T) {
     patches:
       - target: {kind: Deployment, name: not-checked}
         patch: x
-  worker:
+  web_:
     patches: []
 `)
 	if err := c.Kustomization(t.Context(), true, false); err != nil {
@@ -162,12 +162,20 @@ func TestKustomizationPatchErrors(t *testing.T) {
 			"services.web.patches[0].patch contains a control or line-separator character (only tab and newline are allowed)"},
 		{"patch next line", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"a\\x85b\"}",
 			"services.web.patches[0].patch contains a control or line-separator character (only tab and newline are allowed)"},
+		{"patch paragraph separator", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"a\\u2029b\"}",
+			"services.web.patches[0].patch contains a control or line-separator character (only tab and newline are allowed)"},
+		{"patch byte-order mark", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"a\\ufeffb\"}",
+			"services.web.patches[0].patch contains a control or line-separator character (only tab and newline are allowed)"},
+		{"patch noncharacter", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"a\\ufffeb\"}",
+			"services.web.patches[0].patch contains a control or line-separator character (only tab and newline are allowed)"},
+		{"patch DEL", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"a\\x7fb\"}",
+			"services.web.patches[0].patch contains a control or line-separator character (only tab and newline are allowed)"},
 		{"patch NUL", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"a\\0b\"}",
 			"services.web.patches[0].patch contains a control or line-separator character (only tab and newline are allowed)"},
 		{"patch only whitespace", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"  \\t\\n \"}",
 			"services.web.patches[0].patch must be a non-empty string"},
 		{"target value with a trailing newline", "patches:\n      - {target: {kind: Deployment, name: \"web.app\\n\"}, patch: x}",
-			"services.web.patches[0].target.name must match [A-Za-z0-9.-]+"},
+			"services.web.patches[0].target.name must match [A-Za-z0-9.:-]+"},
 		{"target missing", "patches:\n      - {patch: x}",
 			"services.web.patches[0].target must be a mapping"},
 		{"unknown target key", "patches:\n      - {target: {kind: Deployment, name: web.app, labelSelector: a=b}, patch: x}",
@@ -177,9 +185,9 @@ func TestKustomizationPatchErrors(t *testing.T) {
 		{"name null", "patches:\n      - {target: {kind: Deployment, name: null}, patch: x}",
 			"services.web.patches[0].target.kind and services.web.patches[0].target.name are required"},
 		{"regex in name", "patches:\n      - {target: {kind: Deployment, name: \"web.*\"}, patch: x}",
-			"services.web.patches[0].target.name must match [A-Za-z0-9.-]+"},
+			"services.web.patches[0].target.name must match [A-Za-z0-9.:-]+"},
 		{"null optional field", "patches:\n      - {target: {kind: Deployment, name: web.app, namespace: ~}, patch: x}",
-			"services.web.patches[0].target.namespace must match [A-Za-z0-9.-]+"},
+			"services.web.patches[0].target.namespace must match [A-Za-z0-9.:-]+"},
 		{"no match", "patches:\n      - {target: {kind: Deployment, name: webXapp}, patch: x}",
 			"services.web.patches[0]: target Deployment/webXapp matches no object labelled lok8s.dev/name=web in the test.example artifacts"},
 		{"other service's object", "patches:\n      - {target: {kind: Deployment, name: api}, patch: x}",
@@ -245,5 +253,67 @@ func TestKustomizationPatchUnreadableArtifactFails(t *testing.T) {
 	}
 	if want := "[error] cannot read the test.example artifacts\n"; errOut.String() != want {
 		t.Errorf("stderr = %q", errOut)
+	}
+}
+
+// kustomize matches a target namespace against the effective namespace: an
+// object without one is in "default". A colon (RBAC names) is a plain
+// character in a target value.
+func TestKustomizationPatchDefaultNamespaceAndColon(t *testing.T) {
+	c, domainDir, errOut := patchesCtx(t, `services:
+  web:
+    patches:
+      - target: {kind: Deployment, name: nons, namespace: default}
+        patch: x
+      - target: {kind: ClusterRole, name: "system:web"}
+        patch: y
+`)
+	os.WriteFile(filepath.Join(domainDir, "artifacts.yaml"), []byte(patchesArtifact+`---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nons
+  labels:
+    lok8s.dev/name: web
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: system:web
+  labels:
+    lok8s.dev/name: web
+`), 0o644)
+	if err := c.Kustomization(t.Context(), true, false); err != nil {
+		t.Fatalf("%v: %s", err, errOut)
+	}
+	raw, _ := os.ReadFile(filepath.Join(domainDir, "artifacts", "kustomization.yaml"))
+	for _, want := range []string{"      name: 'nons'\n      namespace: 'default'\n", "      name: 'system:web'\n"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("overlay misses %q:\n%s", want, raw)
+		}
+	}
+}
+
+// A namespace other than "default" does not match an object without one.
+func TestKustomizationPatchOtherNamespaceDoesNotMatchUnset(t *testing.T) {
+	c, domainDir, errOut := patchesCtx(t, "services:\n  web:\n    patches:\n      - {target: {kind: Deployment, name: nons, namespace: ns1}, patch: x}\n")
+	os.WriteFile(filepath.Join(domainDir, "artifacts.yaml"), []byte("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: nons\n  labels:\n    lok8s.dev/name: web\n"), 0o644)
+	if err := c.Kustomization(t.Context(), true, false); !errors.Is(err, ErrHandled) {
+		t.Fatalf("err = %v, want ErrHandled", err)
+	}
+	if !strings.Contains(errOut.String(), "target Deployment/nons matches no object") {
+		t.Errorf("stderr = %q", errOut)
+	}
+}
+
+// A malformed services entry (not a mapping) has no patches: the run goes on.
+func TestKustomizationPatchesSkipANonMappingService(t *testing.T) {
+	c, domainDir, errOut := patchesCtx(t, "services:\n  web: just-a-string\n")
+	if err := c.Kustomization(t.Context(), true, false); err != nil {
+		t.Fatalf("%v: %s", err, errOut)
+	}
+	raw, _ := os.ReadFile(filepath.Join(domainDir, "artifacts", "kustomization.yaml"))
+	if strings.Contains(string(raw), "patches:") {
+		t.Errorf("overlay has patches:\n%s", raw)
 	}
 }

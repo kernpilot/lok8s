@@ -196,9 +196,9 @@ func (c *Context) Kustomization(ctx context.Context, noBuild, pull bool) error {
 	}
 	domainArtifact := c.Paths.Clusters + "/" + c.Domain + "/artifacts.yaml"
 
-	// services.<name>.patches, checked against the domain artifact BEFORE
-	// anything is written: a patch that matches none of its service's
-	// objects fails the run and leaves the queue and the overlay as they were.
+	// services.<name>.patches, checked against the domain artifact before the
+	// cache queue and the overlay are written: a patch that matches none of
+	// its service's objects fails the run and leaves both as they were.
 	patches, err := c.generatePatches(&doc, domainArtifact)
 	if err != nil {
 		return err

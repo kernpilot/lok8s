@@ -86,7 +86,7 @@ The service catalog. Each entry describes one service.
   keys are `patch` (a non-empty string without control or line-separator
   characters; tab and newline are allowed) and `target` (a mapping with `kind` and `name`,
   optional `group`, `version` and `namespace`, each matching
-  `[A-Za-z0-9.-]+`). A target must match an object of the service in the
+  `[A-Za-z0-9.:-]+`). A target must match an object of the service in the
   domain artifact. Any failure stops the run before the overlay is written.
 
 ### Per-service `registry.parallel`
