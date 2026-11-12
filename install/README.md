@@ -36,7 +36,7 @@ a later attempt succeeds, the install is good: the checksum check still runs.
 Without the script — the same four steps by hand:
 
 ```sh
-V=v0.14.0; A=lo-linux-amd64.tar.gz        # pick your tag and platform
+V=v0.14.1; A=lo-linux-amd64.tar.gz        # pick your tag and platform
 curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/${A}"
 curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/checksums.txt"
 sha256sum --ignore-missing -c checksums.txt

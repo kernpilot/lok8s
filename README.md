@@ -109,7 +109,7 @@ in the v0.3.0 notes, the release that introduced the binary.
 Prefer no script at all? The same four steps by hand:
 
 ```bash
-V=v0.14.0; A=lo-linux-amd64.tar.gz             # your tag and platform
+V=v0.14.1; A=lo-linux-amd64.tar.gz             # your tag and platform
 curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/${A}"
 curl -fsSLO "https://github.com/kernpilot/lok8s/releases/download/${V}/checksums.txt"
 sha256sum --ignore-missing -c checksums.txt
