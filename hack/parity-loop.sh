@@ -427,7 +427,9 @@ services:
       - target: {kind: Deployment, name: "web.app\n"}
         patch: x
 YAML
-envp_case "target value an integer" 1 <<'YAML'
+# An integer target value is read as its text ("1"); it fails here because
+# no object has version 1, in both implementations alike.
+envp_case "integer target value, no match" 1 <<'YAML'
 services:
   web:
     patches:

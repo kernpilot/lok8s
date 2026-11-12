@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 const patchesArtifact = `apiVersion: apps/v1
@@ -46,7 +48,7 @@ metadata:
 func patchesCtx(t *testing.T, merged string) (*Context, string, *bytes.Buffer) {
 	t.Helper()
 	c, domainDir := kustomizationCtx(t, merged)
-	os.WriteFile(filepath.Join(domainDir, "artifacts.yaml"), []byte(patchesArtifact), 0o644)
+	testutil.WriteFile(t, filepath.Join(domainDir, "artifacts.yaml"), patchesArtifact)
 	return c, domainDir, c.ErrOut.(*bytes.Buffer)
 }
 
@@ -157,21 +159,21 @@ func TestKustomizationPatchErrors(t *testing.T) {
 		{"patch only newlines", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"\\n\\n\"}",
 			"services.web.patches[0].patch must be a non-empty string"},
 		{"patch control character", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"a\\rb\"}",
-			"services.web.patches[0].patch contains a control or line-separator character (only tab and newline are allowed)"},
+			"services.web.patches[0].patch contains a character the overlay cannot carry (only printable characters, tab and newline are allowed)"},
 		{"patch line separator", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"a\\u2028b\"}",
-			"services.web.patches[0].patch contains a control or line-separator character (only tab and newline are allowed)"},
+			"services.web.patches[0].patch contains a character the overlay cannot carry (only printable characters, tab and newline are allowed)"},
 		{"patch next line", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"a\\x85b\"}",
-			"services.web.patches[0].patch contains a control or line-separator character (only tab and newline are allowed)"},
+			"services.web.patches[0].patch contains a character the overlay cannot carry (only printable characters, tab and newline are allowed)"},
 		{"patch paragraph separator", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"a\\u2029b\"}",
-			"services.web.patches[0].patch contains a control or line-separator character (only tab and newline are allowed)"},
+			"services.web.patches[0].patch contains a character the overlay cannot carry (only printable characters, tab and newline are allowed)"},
 		{"patch byte-order mark", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"a\\ufeffb\"}",
-			"services.web.patches[0].patch contains a control or line-separator character (only tab and newline are allowed)"},
+			"services.web.patches[0].patch contains a character the overlay cannot carry (only printable characters, tab and newline are allowed)"},
 		{"patch noncharacter", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"a\\ufffeb\"}",
-			"services.web.patches[0].patch contains a control or line-separator character (only tab and newline are allowed)"},
+			"services.web.patches[0].patch contains a character the overlay cannot carry (only printable characters, tab and newline are allowed)"},
 		{"patch DEL", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"a\\x7fb\"}",
-			"services.web.patches[0].patch contains a control or line-separator character (only tab and newline are allowed)"},
+			"services.web.patches[0].patch contains a character the overlay cannot carry (only printable characters, tab and newline are allowed)"},
 		{"patch NUL", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"a\\0b\"}",
-			"services.web.patches[0].patch contains a control or line-separator character (only tab and newline are allowed)"},
+			"services.web.patches[0].patch contains a character the overlay cannot carry (only printable characters, tab and newline are allowed)"},
 		{"patch only whitespace", "patches:\n      - {target: {kind: Deployment, name: web.app}, patch: \"  \\t\\n \"}",
 			"services.web.patches[0].patch must be a non-empty string"},
 		{"target value with a trailing newline", "patches:\n      - {target: {kind: Deployment, name: \"web.app\\n\"}, patch: x}",
@@ -247,7 +249,7 @@ func TestKustomizationPatchWithoutDomainArtifactFails(t *testing.T) {
 
 func TestKustomizationPatchUnreadableArtifactFails(t *testing.T) {
 	c, domainDir, errOut := patchesCtx(t, "services:\n  web:\n    patches:\n      - {target: {kind: Deployment, name: web.app}, patch: x}\n")
-	os.WriteFile(filepath.Join(domainDir, "artifacts.yaml"), []byte("a: [unclosed\n"), 0o644)
+	testutil.WriteFile(t, filepath.Join(domainDir, "artifacts.yaml"), "a: [unclosed\n")
 	if err := c.Kustomization(t.Context(), true, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v, want ErrHandled", err)
 	}
@@ -268,7 +270,7 @@ func TestKustomizationPatchDefaultNamespaceAndColon(t *testing.T) {
       - target: {kind: ClusterRole, name: "system:web"}
         patch: y
 `)
-	os.WriteFile(filepath.Join(domainDir, "artifacts.yaml"), []byte(patchesArtifact+`---
+	testutil.WriteFile(t, filepath.Join(domainDir, "artifacts.yaml"), patchesArtifact+`---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -282,7 +284,7 @@ metadata:
   name: system:web
   labels:
     lok8s.dev/name: web
-`), 0o644)
+`)
 	if err := c.Kustomization(t.Context(), true, false); err != nil {
 		t.Fatalf("%v: %s", err, errOut)
 	}
@@ -297,7 +299,7 @@ metadata:
 // A namespace other than "default" does not match an object without one.
 func TestKustomizationPatchOtherNamespaceDoesNotMatchUnset(t *testing.T) {
 	c, domainDir, errOut := patchesCtx(t, "services:\n  web:\n    patches:\n      - {target: {kind: Deployment, name: nons, namespace: ns1}, patch: x}\n")
-	os.WriteFile(filepath.Join(domainDir, "artifacts.yaml"), []byte("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: nons\n  labels:\n    lok8s.dev/name: web\n"), 0o644)
+	testutil.WriteFile(t, filepath.Join(domainDir, "artifacts.yaml"), "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: nons\n  labels:\n    lok8s.dev/name: web\n")
 	if err := c.Kustomization(t.Context(), true, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v, want ErrHandled", err)
 	}

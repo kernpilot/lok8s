@@ -291,7 +291,7 @@ env::generate_patches() {
   local re_value='^[A-Za-z0-9.:-]+$'
   # A character the emitted block scalar cannot carry (the Go port's
   # patchControlRE): a C0 or C1 control other than tab and newline, a line or
-  # paragraph separator, a byte-order mark, a noncharacter.
+  # paragraph separator, a byte-order mark, U+FFFE or U+FFFF.
   local re_unsafe='[\x{00}-\x{08}\x{0B}-\x{1F}\x{7F}-\x{9F}\x{2028}\x{2029}\x{FEFF}\x{FFFE}\x{FFFF}]'
 
   local svc_names svc
@@ -351,7 +351,7 @@ env::generate_patches() {
       # survive the read). The same expression as the Go port, on the same
       # regex engine (yq's).
       if [[ "$(S="${svc}" I="${i}" R="${re_unsafe}" yq -r "${q}"'.patch | test(strenv(R))' <<< "${merged}")" == "true" ]]; then
-        error "${where}.patch contains a control or line-separator character (only tab and newline are allowed)"
+        error "${where}.patch contains a character the overlay cannot carry (only printable characters, tab and newline are allowed)"
         return 1
       fi
       local patch

@@ -244,7 +244,8 @@ example, a dev server with hot reload that writes to its root filesystem and
 needs more memory.
 
 ```yaml
-# services.hot.yaml — committed; use with LOK8S_SERVICE_CONFIG=hot
+# services.hot.yaml — committed; use with LOK8S_SERVICE_CONFIG=hot.
+# services.yaml sets `dockerfile: production` for web (the default build).
 services:
   web:
     dockerfile: service          # build lok8s.Dockerfile (the dev server)
@@ -280,7 +281,8 @@ The rules:
   and fails the run.
 - A patch whose target matches no object of that service fails the run with
   an error that names the patch. `lo env kustomization` checks this against
-  the domain artifact before it writes anything, and the Tilt session stops.
+  the domain artifact before it writes the overlay and the cache queue, and
+  the Tilt session stops.
 - Do not set `namespace` in the target of a cluster-scoped object (a
   ClusterRole, a Namespace). kustomize never matches a namespace there, and
   `lo env kustomization` cannot tell which kinds are cluster-scoped, so a
@@ -293,9 +295,10 @@ The rules:
   config does. `envsubst` has no escape for `$`, so it also replaces the
   strategic-merge directives (`$patch`, `$setElementOrder`, `$retainKeys`,
   `$deleteFromPrimitiveList`). To delete or reorder, write a JSON patch.
-- The patch must not hold a control character other than tab and newline,
-  or a line or paragraph separator.
-- Without `patches`, the overlay is the same as before.
+- The patch must hold only printable characters, tabs and newlines: no
+  other control character, no line or paragraph separator, no byte-order
+  mark, no U+FFFE or U+FFFF.
+- A service without `patches` adds nothing to the overlay.
 
 ### Why default `build: true` then?
 

@@ -1,6 +1,6 @@
 package env
 
-// patches.go — services.<name>.patches: kustomize patches that a services
+// patches.go — services.<name>.patches: kustomize patches that a service
 // profile declares for one service (bash: env::generate_patches). Each patch
 // is checked against the domain artifact, then emitted into the Tilt overlay
 // with a label selector that keeps it on that service's objects.
@@ -38,7 +38,8 @@ var (
 	// patchControlRE finds a character the block scalar of the emit cannot
 	// carry: a C0 or C1 control other than tab and newline, a line or
 	// paragraph separator (YAML parsers that read YAML 1.1 break the line
-	// there, as at NEL), a byte-order mark, or a noncharacter. Bash runs the
+	// there, as at NEL), a byte-order mark, or U+FFFE/U+FFFF (outside YAML's
+	// printable set; the other noncharacters are printable there). Bash runs the
 	// same expression through yq's test(), on the same regex engine.
 	patchControlRE = regexp.MustCompile(`[\x{00}-\x{08}\x{0B}-\x{1F}\x{7F}-\x{9F}\x{2028}\x{2029}\x{FEFF}\x{FFFE}\x{FFFF}]`)
 )
@@ -130,7 +131,7 @@ func (c *Context) validatePatch(where string, item *yaml.Node) (string, map[stri
 		return "", nil, c.patchError("%s.patch must be a non-empty string", where)
 	}
 	if patchControlRE.MatchString(pn.Value) {
-		return "", nil, c.patchError("%s.patch contains a control or line-separator character (only tab and newline are allowed)", where)
+		return "", nil, c.patchError("%s.patch contains a character the overlay cannot carry (only printable characters, tab and newline are allowed)", where)
 	}
 	if strings.Trim(pn.Value, " \t\n") == "" {
 		return "", nil, c.patchError("%s.patch must be a non-empty string", where)

@@ -83,8 +83,8 @@ The service catalog. Each entry describes one service.
 - `image` must be a string
 - `image` and `registry` cannot both be set
 - `patches` must be a list. `lo env kustomization` checks each entry: the
-  keys are `patch` (a non-empty string without control or line-separator
-  characters; tab and newline are allowed) and `target` (a mapping with `kind` and `name`,
+  keys are `patch` (a non-empty string of printable characters, tabs and
+  newlines) and `target` (a mapping with `kind` and `name`,
   optional `group`, `version` and `namespace`, each matching
   `[A-Za-z0-9.:-]+`). A target must match an object of the service in the
   domain artifact. Any failure stops the run before the overlay is written.
