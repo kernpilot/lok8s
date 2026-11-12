@@ -34,6 +34,12 @@ step_block() {
 
 GUARD_RUN='        run: bash hack/check-release-version.sh "${GITHUB_REF_NAME}"'
 
+# same_job FILE FROM TO: no job key (2-space indent) between two line numbers,
+# so a guard moved into a job of its own (no `needs:`) cannot pass.
+same_job() {
+  ! sed -n "${2},${3}p" "$1" | grep -qE '^  [A-Za-z0-9_-]+:[[:space:]]*$'
+}
+
 versions() { # versions <mirror> <tree>
   printf '%s\n' "$1" > "${T}/internal/assets/lok8s/VERSION"
   printf '%s\n' "$2" > "${T}/.lok8s/VERSION"
@@ -114,6 +120,11 @@ versions() { # versions <mirror> <tree>
   [ -n "$guard" ]
   [ -n "$build" ]
   [ "$guard" -lt "$build" ]
+  same_job "$f" "$guard" "$build"
+  # the build step itself has no `if:` (an `if: always()` there would run it past a red guard)
+  if awk -v b="$build" 'NR > b && /^      - / { exit } NR > b && /^ +if:/ { found = 1 } END { exit !found }' "$f"; then
+    echo "the goreleaser step has an if:"; return 1
+  fi
 }
 
 @test "the image workflow runs the guard on a tag, before the image build, and fails on it" {
@@ -128,6 +139,8 @@ versions() { # versions <mirror> <tree>
   [ -n "$guard" ]
   [ -n "$build" ]
   [ "$guard" -lt "$build" ]
+  same_job "$f" "$guard" "$build"
+  if step_block "$f" "Build and push" | grep -qE '^ +if:'; then echo "the image build step has an if:"; return 1; fi
 }
 
 @test "the repo's own VERSION files agree" {

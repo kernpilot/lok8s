@@ -54,3 +54,6 @@ jobs:
           args: release --clean ${{ steps.notes.outputs.args }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Release the tag that the guard checked, also when a commit has
+          # two tags (goreleaser picks one of its own otherwise).
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
