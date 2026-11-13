@@ -50,40 +50,14 @@ keysonly::has_marker() {
   return 1
 }
 
-# keysonly::refuse_artifact <domain> <artifact> [-]: the apply guard on a
-# domain artifact (Go: build.RefuseKeysOnlyArtifact): lo deploy reads the
-# artifact through it. It prints why the artifact must not be applied and
-# returns 1 when the artifact holds an object with the keys-only marker (a
-# Secret with key names and empty values only, from lo build --keys-only:
-# applied, it would replace each value in the cluster with an empty one),
-# or when it cannot be read or checked. `lo build` never writes such an
-# artifact; the guard catches a file written in another way. Returns 0
-# when the artifact may be applied. With -, it checks the copy of the
-# artifact on stdin (keysonly::read_checked_artifact).
-keysonly::refuse_artifact() {
-  local domain="${1}" artifact="${2}" marker=0
-  if [[ "${3:-}" != - && ! -r "${artifact}" ]]; then
-    error "refusing to apply ${domain}: ${artifact} cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
-    return 1
-  fi
-  keysonly::has_marker "${3:-${artifact}}" || marker=$?
-  case "${marker}" in
-    1) return 0 ;;
-    2) error "refusing to apply ${domain}: ${artifact} does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)" ;;
-    3) error "refusing to apply ${domain}: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): $(keysonly::yq_cause)" ;;
-    *) error "refusing to apply ${domain}: ${artifact} holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one — run 'lo build' again" ;;
-  esac
-  return 1
-}
-
 # keysonly::refuse_stream <prefix> <what> <file|->: the apply guard on a
 # rendered stream (Go: build.RefuseKeysOnlyStream): the bootstrap applies
 # each entry's render, and each decrypted restore.d manifest, through it.
 # keysonly::read_checked_file reads the Tilt manifest, a restore.d working
 # copy and the KubeOne addons once and checks them in the same way.
 # <what> names the stream in the message, after "<prefix>: refusing to
-# apply ". It refuses as keysonly::refuse_artifact does: a stream with the
-# keys-only marker, and a stream that cannot be checked.
+# apply ". It refuses as keysonly::read_checked_artifact does: a stream with
+# the keys-only marker, and a stream that cannot be checked.
 keysonly::refuse_stream() {
   local prefix="${1}" what="${2}" marker=0
   keysonly::has_marker "${3}" || marker=$?
@@ -96,19 +70,31 @@ keysonly::refuse_stream() {
   return 1
 }
 
-# keysonly::read_checked_artifact <domain> <artifact>: print the artifact,
-# read once and checked as keysonly::refuse_artifact does (Go:
-# build.ReadCheckedArtifact). lo hooks uses the printed copy, not the
-# file, which can change after the check. Returns 1, and prints nothing on
-# stdout, when the guard refuses the artifact.
+# keysonly::read_checked_artifact <domain> <artifact>: the apply guard on a
+# domain artifact (Go: build.ReadCheckedArtifact): lo deploy and lo hooks
+# read the artifact through it. It reads the artifact once and checks that
+# copy. It prints why the artifact must not be applied and returns 1, with
+# nothing on stdout, when the artifact holds an object with the keys-only
+# marker (a Secret with key names and empty values only, from lo build
+# --keys-only: applied, it would replace each value in the cluster with an
+# empty one), or when it cannot be read or checked. `lo build` never writes
+# such an artifact; the guard catches a file written in another way. Else it
+# prints the copy that passed the check: the caller uses it, not the file,
+# which can change after the check.
 keysonly::read_checked_artifact() {
-  local domain="${1}" artifact="${2}" content
+  local domain="${1}" artifact="${2}" content marker=0
   if ! content="$(cat -- "${artifact}" 2>/dev/null)"; then
     error "refusing to apply ${domain}: ${artifact} cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
     return 1
   fi
-  keysonly::refuse_artifact "${domain}" "${artifact}" - <<< "${content}" || return 1
-  printf '%s\n' "${content}"
+  keysonly::has_marker - <<< "${content}" || marker=$?
+  case "${marker}" in
+    1) printf '%s\n' "${content}"; return 0 ;;
+    2) error "refusing to apply ${domain}: ${artifact} does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)" ;;
+    3) error "refusing to apply ${domain}: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): $(keysonly::yq_cause)" ;;
+    *) error "refusing to apply ${domain}: ${artifact} holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one — run 'lo build' again" ;;
+  esac
+  return 1
 }
 
 # keysonly::read_checked_file <prefix> <what> <file|->: print <file> (-

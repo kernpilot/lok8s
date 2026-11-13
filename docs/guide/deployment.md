@@ -204,9 +204,10 @@ annotation into `artifacts.yaml` or the split directory. These commands do
 not apply a manifest that holds one:
 
 - `lo deploy` and `lo hooks` (the hooks of the Tilt extension) refuse an
-  `artifacts.yaml` with the annotation, and one that they cannot read.
-  `lo hooks` reads the artifact once and selects its objects from the copy
-  that it checked.
+  `artifacts.yaml` with the annotation, and one that they cannot read. Each
+  reads the artifact once and uses the copy that it checked: `lo deploy`
+  applies that copy (also the subset of `-l key=value`), and `lo hooks`
+  selects its objects from it.
 - The bootstrap (`lo up`, `lo provision`, `lo bootstrap`) refuses an entry
   whose render holds the annotation, for example keys-only output saved as
   an addon resource. The dry run applies nothing and has no such check.

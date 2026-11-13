@@ -112,25 +112,18 @@ func HasKeysOnlyMarker(data []byte) (bool, error) {
 	return false, nil
 }
 
-// RefuseKeysOnlyArtifact is the apply guard on a domain artifact (bash:
-// keysonly::refuse_artifact): lo deploy reads the artifact through it, and
-// lo hooks through ReadCheckedArtifact. It prints why the artifact must not be applied and returns
-// ui.ErrHandled when the artifact holds an object with the keys-only
-// marker (a Secret with key names and empty values only, from lo build
-// --keys-only: applied, it would replace each value in the cluster with
-// an empty one), or when it cannot be read or does not parse, so that it
-// cannot be checked. `lo build` never writes such an artifact; the guard
-// catches a file written in another way. Nil when the artifact may be
-// applied.
-func RefuseKeysOnlyArtifact(stderr io.Writer, domainName, artifact string) error {
-	_, err := ReadCheckedArtifact(stderr, domainName, artifact)
-	return err
-}
-
-// ReadCheckedArtifact reads the artifact once and checks that copy as
-// RefuseKeysOnlyArtifact does (bash: keysonly::read_checked_artifact). It
-// returns the bytes that passed the check: the caller uses them, not the
-// file, which can change after the check.
+// ReadCheckedArtifact is the apply guard on a domain artifact (bash:
+// keysonly::read_checked_artifact): lo deploy and lo hooks read the
+// artifact through it. It reads the artifact once and checks that copy. It
+// prints why the artifact must not be applied and returns ui.ErrHandled
+// when the artifact holds an object with the keys-only marker (a Secret
+// with key names and empty values only, from lo build --keys-only:
+// applied, it would replace each value in the cluster with an empty one),
+// or when it cannot be read or does not parse, so that it cannot be
+// checked. `lo build` never writes such an artifact; the guard catches a
+// file written in another way. Else it returns the bytes that passed the
+// check: the caller uses them, not the file, which can change after the
+// check.
 func ReadCheckedArtifact(stderr io.Writer, domainName, artifact string) ([]byte, error) {
 	raw, err := os.ReadFile(artifact)
 	if err != nil {
@@ -155,8 +148,8 @@ func ReadCheckedArtifact(stderr io.Writer, domainName, artifact string) ([]byte,
 // ReadCheckedFile read the Tilt manifest, a restore.d working copy and the
 // KubeOne addons once and check them in the same way. what names the
 // stream in the message, after "<prefix>: refusing to apply ". It refuses
-// as RefuseKeysOnlyArtifact does: a stream with the keys-only marker, and
-// a stream that does not parse.
+// as ReadCheckedArtifact does: a stream with the keys-only marker, and a
+// stream that does not parse.
 func RefuseKeysOnlyStream(stderr io.Writer, prefix, what string, data []byte) error {
 	marked, err := HasKeysOnlyMarker(data)
 	switch {

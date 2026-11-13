@@ -202,15 +202,86 @@ YAML
   refute_output --partial "does not parse"
   refute_output --partial "applied"
 
-  # No yq on the PATH: the message names that, not an old yq.
+  # No yq on the PATH: the message names that, not an old yq. The PATH
+  # keeps cat, which reads the artifact.
   unset -f yq
   mkdir -p "${BATS_TEST_TMPDIR}/no-yq"
+  ln -s "$(command -v cat)" "${BATS_TEST_TMPDIR}/no-yq/cat"
   _deploy_without_yq() { local PATH="${BATS_TEST_TMPDIR}/no-yq"; deploy::apply "$@"; }
   run _deploy_without_yq "test.lok8s.dev"
   assert_failure
   assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): yq is not installed. Install yq v4.47.1 or later (b install installs the pinned yq)."
   refute_output --partial "does not know the flag"
   refute_output --partial "applied"
+}
+
+# lo deploy reads the artifact once, checks that copy and applies that copy,
+# on both routes. The yq spy writes a keys-only artifact over the file at the
+# first yq call of the check, after the read: a second read of the file (for
+# the apply) would get it. kubectl logs every call; a marked artifact and one
+# that does not parse get no kubectl call at all. Go:
+# TestApplyAppliesTheCopyThatPassedTheCheck, TestApplyRefusesAKeysOnlyArtifact.
+@test "deploy::apply and deploy::apply_filtered apply the copy that passed the check" {
+  local artifact="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
+  local clean="${BATS_TEST_TMPDIR}/clean.yaml"
+  cp "${artifact}" "${clean}"
+  export DEPLOY_LOG="${BATS_TEST_TMPDIR}/kubectl.log" DEPLOY_SWAP=""
+  kubectl() {
+    echo "kubectl $*" >> "${DEPLOY_LOG}"
+    case "$1" in
+      apply) cat >> "${DEPLOY_LOG}"; echo "applied" ;;
+      wait)  echo "waited" ;;
+    esac
+  }
+  yq() {
+    local a
+    for a in "$@"; do
+      if [[ "${a}" == --yaml-fix-merge-anchor-to-spec && -n "${DEPLOY_SWAP}" && ! -e "${DEPLOY_SWAP}" ]]; then
+        : > "${DEPLOY_SWAP}"
+        printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: swapped\n  labels:\n    lok8s.dev/type: platform\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\ndata:\n  TOKEN: ""\n' > "${artifact}"
+        break
+      fi
+    done
+    command yq "$@"
+  }
+
+  local route
+  for route in apply filtered; do
+    cp "${clean}" "${artifact}"
+    rm -f "${DEPLOY_LOG}"
+    DEPLOY_SWAP="${BATS_TEST_TMPDIR}/swapped.${route}"
+    if [[ "${route}" == apply ]]; then
+      run deploy::apply "test.lok8s.dev"
+    else
+      run deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "platform"
+    fi
+    assert_success
+    [[ -e "${DEPLOY_SWAP}" ]]
+    run cat "${DEPLOY_LOG}"
+    assert_output --partial "kubectl apply"
+    assert_output --partial "name: test-app"
+    refute_output --partial "swapped"
+    refute_output --partial "keys-only"
+  done
+  DEPLOY_SWAP=""
+
+  local bad
+  for bad in marker parse; do
+    if [[ "${bad}" == marker ]]; then
+      { cat "${clean}"; printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\n'; } > "${artifact}"
+    else
+      printf 'apiVersion: v1\nkind: ConfigMap\ndata: [x\n' > "${artifact}"
+    fi
+    rm -f "${DEPLOY_LOG}"
+    run deploy::apply "test.lok8s.dev"
+    assert_failure
+    assert_output --partial "refusing to apply test.lok8s.dev"
+    [[ ! -e "${DEPLOY_LOG}" ]]
+    run deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "platform"
+    assert_failure
+    assert_output --partial "refusing to apply test.lok8s.dev"
+    [[ ! -e "${DEPLOY_LOG}" ]]
+  done
 }
 
 # --- deploy::apply_filtered ---

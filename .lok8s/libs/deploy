@@ -82,10 +82,12 @@ deploy::_has_objects() {
   grep -qE '^kind:[[:space:]]+[A-Za-z]'
 }
 
-# deploy::_apply <label> <file>
-#   Apply a manifest FILE in two phases: CRDs first, then everything. The file is
-#   STREAMED (via stdin redirect), never slurped into a bash string — large
-#   artifacts stay off the argv/heredoc path. Empty streams are a graceful no-op.
+# deploy::_apply <label> <manifest>
+#   Apply a manifest in two phases: CRDs first, then everything. The caller
+#   gives the copy of the artifact that passed the keys-only check
+#   (keysonly::read_checked_artifact), or the subset of that copy; no phase
+#   reads the file. Each phase gets the copy on stdin. Empty streams are a
+#   graceful no-op.
 #
 #   Phase 1: extract + apply CustomResourceDefinitions, then wait for them to
 #            become Established. Server-side apply — large CRDs (CNPG, CAPI)
@@ -96,29 +98,34 @@ deploy::_has_objects() {
 #            StatefulSets to become ready (scoped to the manifest, not the whole
 #            cluster). Best-effort — a readiness timeout is a ⚠, never fatal.
 deploy::_apply() {
-  local label="${1}" file="${2}"
+  local label="${1}" manifest="${2}"
 
-  if ! deploy::_has_objects < "${file}"; then
+  if ! deploy::_has_objects <<< "${manifest}"; then
     debug "No objects for ${label}, skipping apply"
     return 0
   fi
 
   # Phase 1: CRDs first (subset small enough to stay a string).
   local crds
-  crds=$(yq 'select(.kind == "CustomResourceDefinition")' "${file}" 2>/dev/null || true)
+  crds=$(yq 'select(.kind == "CustomResourceDefinition")' - <<< "${manifest}" 2>/dev/null || true)
   if deploy::_has_objects <<< "${crds}"; then
     debug "Applying CRDs for ${label}"
     echo "${crds}" | kapply::apply --label "${label} crds"
     deploy::wait_crds "${crds}"
   fi
 
-  # Phase 2: apply the rest + scoped wait-ready — both stream from the file.
+  # Phase 2: apply the rest + scoped wait-ready — both from the manifest.
   debug "Applying resources for ${label}"
-  kapply::apply --label "${label}" < "${file}"
-  kapply::wait_ready "${label}" 120 < "${file}"
+  kapply::apply --label "${label}" <<< "${manifest}"
+  kapply::wait_ready "${label}" 120 <<< "${manifest}"
 }
 
-# Apply the domain's single artifact (clusters/<domain>/artifacts.yaml).
+# Apply the domain's single artifact (clusters/<domain>/artifacts.yaml). It
+# reads the artifact once and checks that copy for the keys-only marker
+# (keysonly::read_checked_artifact; Go: Deployer.Apply): an artifact with the
+# marker, or one that cannot be read or checked, is refused before kubectl
+# runs. Both phases apply the copy that passed the check, not the file, which
+# can change after the check.
 # Usage: deploy::apply <domain>
 deploy::apply() {
   local domain="${1:-"${DOMAIN_NAME:-lok8s.dev}"}"
@@ -129,24 +136,18 @@ deploy::apply() {
     return 1
   fi
 
-  deploy::_refuse_keys_only "${domain}" "${artifact}" || return 1
+  local content
+  content="$(keysonly::read_checked_artifact "${domain}" "${artifact}")" || return 1
   debug "Deploying ${domain} from ${artifact}"
-  deploy::_apply "${domain}" "${artifact}"
-}
-
-# deploy::_refuse_keys_only <domain> <artifact>: refuse an artifact that
-# holds an object with the keys-only marker, and one that cannot be read or
-# checked (Go: Deployer.refuseKeysOnly; the guard is
-# keysonly::refuse_artifact).
-deploy::_refuse_keys_only() {
-  keysonly::refuse_artifact "${1}" "${2}"
+  deploy::_apply "${domain}" "${content}"
 }
 
 # Apply only the resources in the domain artifact carrying <label_key>=<label_value>.
 # The key is used verbatim: it may be a bare key (app) or a namespaced one
 # (lok8s.dev/name). Selective deploy is user opt-in — it requires the user to
 # have set kustomize `labels:` (or metadata.labels) on the targets they want to
-# address.
+# address. The artifact is read once and checked as deploy::apply checks it;
+# the subset comes from the copy that passed the check.
 # Usage: deploy::apply_filtered <domain> <label_key> <label_value>
 deploy::apply_filtered() {
   local domain="${1}" label_key="${2}" label_value="${3}"
@@ -163,25 +164,19 @@ deploy::apply_filtered() {
     error "no artifact for ${domain}: ${artifact} — run 'lo build' first"
     return 1
   fi
-  deploy::_refuse_keys_only "${domain}" "${artifact}" || return 1
+  local content subset
+  content="$(keysonly::read_checked_artifact "${domain}" "${artifact}")" || return 1
 
-  # Filter the single domain artifact by the (full) label key = value into a temp
-  # file — deploy::_apply streams from a file, and the artifact can be large.
-  # Explicit cleanup on EVERY return path (a `trap … RETURN` would leak to the
-  # caller frame and, under set -u, abort main::deploy on an unbound ${tmp}).
-  local tmp
-  tmp=$(mktemp)
-  yq "select(.metadata.labels.\"${label_key}\" == \"${label_value}\")" "${artifact}" > "${tmp}" 2>/dev/null || true
-  if ! deploy::_has_objects < "${tmp}"; then
+  # Filter the checked copy by the (full) label key = value.
+  subset=$(yq "select(.metadata.labels.\"${label_key}\" == \"${label_value}\")" - <<< "${content}" 2>/dev/null || true)
+  if ! deploy::_has_objects <<< "${subset}"; then
     warn "no objects match ${label_key}=${label_value} in ${artifact}"
-    rm -f "${tmp}"
     return 0
   fi
 
   debug "Deploying ${domain} subset (${label_key}=${label_value})"
   local rc=0
-  deploy::_apply "${domain} (${label_key}=${label_value})" "${tmp}" || rc=$?
-  rm -f "${tmp}"
+  deploy::_apply "${domain} (${label_key}=${label_value})" "${subset}" || rc=$?
   return "${rc}"
 }
 

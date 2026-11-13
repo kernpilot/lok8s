@@ -14,7 +14,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/clock"
@@ -367,6 +369,81 @@ func TestApplyRefusesKeysOnlyOutput(t *testing.T) {
 		if len(f.calls) != 0 {
 			t.Errorf("filtered=%v: kubectl must not run: %v", filtered, f.calls)
 		}
+	}
+}
+
+// bats: "deploy::apply and deploy::apply_filtered apply the copy that passed the check"
+// lo deploy reads the artifact once, checks that copy and applies that copy,
+// on both routes. The artifact here is a FIFO: the one read that it serves
+// gets the clean artifact, and before that read ends the path is replaced
+// by a keys-only artifact. A second read of the path (for the apply) would
+// get the keys-only artifact, which must never reach kubectl.
+func TestApplyAppliesTheCopyThatPassedTheCheck(t *testing.T) {
+	for _, filtered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("filtered=%v", filtered), func(t *testing.T) {
+			f := &fakeRunner{}
+			d, _, errBuf, domainDir := newDeployer(t, f, "")
+			artifact := filepath.Join(domainDir, "artifacts.yaml")
+			if err := syscall.Mkfifo(artifact, 0o600); err != nil {
+				t.Skipf("mkfifo: %v", err)
+			}
+			swapped := filepath.Join(domainDir, "swapped.yaml")
+			if err := os.WriteFile(swapped, []byte(keysOnlyArtifact), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			served := make(chan error, 1)
+			go func() {
+				// The open waits for the read of lo deploy.
+				w, err := os.OpenFile(artifact, os.O_WRONLY, 0)
+				if err != nil {
+					served <- err
+					return
+				}
+				// The path now holds the keys-only artifact; the open read
+				// still gets the clean one.
+				err = os.Rename(swapped, artifact)
+				if err == nil {
+					_, err = w.WriteString(artifactYAML)
+				}
+				if cerr := w.Close(); err == nil {
+					err = cerr
+				}
+				served <- err
+			}()
+			var err error
+			if filtered {
+				err = d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "platform")
+			} else {
+				err = d.Apply(t.Context(), "test.lok8s.dev")
+			}
+			select {
+			case serr := <-served:
+				if serr != nil {
+					t.Fatal(serr)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("lo deploy did not read the artifact")
+			}
+			if err != nil {
+				t.Fatalf("err = %v, stderr = %q", err, errBuf.String())
+			}
+			if len(f.applied) == 0 {
+				t.Fatalf("nothing applied: calls = %v", f.calls)
+			}
+			for _, m := range f.applied {
+				if strings.Contains(m, "keys-only") {
+					t.Errorf("applied a manifest that was not checked: %q", m)
+				}
+			}
+			last := f.applied[len(f.applied)-1]
+			if filtered {
+				if !strings.Contains(last, "name: test-app") || strings.Contains(last, "kind: Namespace") {
+					t.Errorf("subset manifest = %q", last)
+				}
+			} else if last != artifactYAML {
+				t.Errorf("phase-2 manifest = %q, want the checked copy", last)
+			}
+		})
 	}
 }
 

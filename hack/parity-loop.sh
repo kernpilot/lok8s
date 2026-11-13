@@ -562,6 +562,74 @@ for hk_case in marker no-yaml; do
     parity::record "${hk_ok}" "${hk_label}"
   done
 done
+
+# lo deploy reads artifacts.yaml once, checks that copy and applies that copy
+# (the full apply and -l key=value). The kubectl stub logs its argv and
+# prints a digest of each manifest that it gets: for a clean artifact both
+# implementations apply the same manifests; a marked artifact and one that
+# does not parse are refused (rc 1, the same message) before any kubectl
+# call.
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub: log the argv, print a digest of an applied manifest (its
+# trailing newlines aside), answer a get with no objects (no live cluster
+# may be reached).
+echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
+case " $* " in
+  *" apply "*) m="$(cat)"; printf 'parity-stub applied %s\n' "$(printf '%s\n' "${m}" | sha256sum | cut -d' ' -f1)" ;;
+  *" get "*) printf '{"items":[]}' ;;
+esac
+exit 0
+SH
+export LOK8S_NONINTERACTIVE=1
+for dp_case in clean marker no-yaml; do
+  case "${dp_case}" in
+    clean)
+      printf 'apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.test.lok8s.dev\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: system\n  labels: {lok8s.dev/type: system}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: platform\n  labels: {lok8s.dev/type: platform}\n' \
+        > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
+      dp_want='' ;;
+    marker)
+      printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: platform\n  labels: {lok8s.dev/type: platform}\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  labels: {lok8s.dev/type: platform}\n  annotations: {secrets.lok8s.dev/keys-only: "true"}\ndata:\n  PASSWORD: ""\n' \
+        > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
+      dp_want='holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one' ;;
+    no-yaml)
+      printf 'kind: ConfigMap\nmetadata: [a\n' > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
+      dp_want='does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)' ;;
+  esac
+  for dp_route in full filtered; do
+    dp_label="lo deploy (${dp_route}) refuses an artifact (${dp_case})"
+    [[ -n "${dp_want}" ]] || dp_label="lo deploy (${dp_route}) applies the checked copy"
+    # The full apply has two phases (the CRDs, then all), the subset one.
+    dp_args=(deploy --domain lok8s.dev) dp_n=2
+    [[ "${dp_route}" == full ]] || { dp_args+=(-l lok8s.dev/type=platform); dp_n=1; }
+    rm -f "${PARITY_KUBECTL_LOG}"
+    parity::run_pair "${dp_args[@]}"
+    dp_ok=1
+    parity::compare "${dp_label}" - || dp_ok=0
+    if [[ -z "${dp_want}" ]]; then
+      dp_applied=$(grep -c '^parity-stub applied ' "${WORK}/go.out")
+      if (( go_rc != 0 || dp_applied != dp_n )); then
+        echo "FAIL: ${dp_label} — rc go=${go_rc}, ${dp_applied} manifest(s) applied, stdout:"
+        indent < "${WORK}/go.out"
+        dp_ok=0
+      fi
+    else
+      if (( go_rc != 1 || bash_rc != 1 )) \
+          || ! grep -qF "refusing to apply lok8s.dev: PROJ/clusters/lok8s.dev/artifacts.yaml ${dp_want}" "${WORK}/go.err"; then
+        echo "FAIL: ${dp_label} — rc go=${go_rc} bash=${bash_rc}, stderr:"
+        indent < "${WORK}/go.err"
+        dp_ok=0
+      fi
+      if [[ -s "${PARITY_KUBECTL_LOG}" ]]; then
+        echo "FAIL: ${dp_label} — kubectl ran:"
+        indent < "${PARITY_KUBECTL_LOG}"
+        dp_ok=0
+      fi
+    fi
+    parity::record "${dp_ok}" "${dp_label}"
+  done
+done
+unset LOK8S_NONINTERACTIVE
 unset PARITY_KUBECTL_LOG
 parity::stub_kubectl_fail "${PROJ}"
 rm -rf "${PROJ}/clusters/lok8s.dev"

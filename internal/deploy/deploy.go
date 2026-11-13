@@ -102,6 +102,12 @@ func ParseLabel(stderr io.Writer, label string) (key, value string, err error) {
 // Apply applies the domain's single artifact (bash: deploy::apply). Bash's
 // errexit is ACTIVE on this path: the first failing kubectl apply exits the
 // whole `lo` with kubectl's status — returned here as *ExitError.
+//
+// It reads the artifact once and checks that copy for the keys-only marker
+// (build.ReadCheckedArtifact): an artifact with the marker, or one that
+// cannot be read or does not parse, is refused before kubectl runs. Both
+// phases apply the copy that passed the check, not the file, which can
+// change after the check.
 func (d *Deployer) Apply(ctx context.Context, domain string) error {
 	if domain == "" {
 		domain = os.Getenv("DOMAIN_NAME")
@@ -114,25 +120,21 @@ func (d *Deployer) Apply(ctx context.Context, domain string) error {
 		ui.ErrorTo(d.stderr(), "no artifact for %s: %s — run 'lo build' first", domain, artifact)
 		return ErrHandled
 	}
-	if err := d.refuseKeysOnly(domain, artifact); err != nil {
+	raw, err := build.ReadCheckedArtifact(d.stderr(), domain, artifact)
+	if err != nil {
 		return err
 	}
 	ui.DebugTo(d.stderr(), "Deploying %s from %s", domain, artifact)
-	return d.applyFile(ctx, domain, artifact, true)
-}
-
-// refuseKeysOnly refuses an artifact that holds an object with the
-// keys-only marker, and one that cannot be read or does not parse (bash:
-// deploy::_refuse_keys_only; the guard is build.RefuseKeysOnlyArtifact).
-func (d *Deployer) refuseKeysOnly(domain, artifact string) error {
-	return build.RefuseKeysOnlyArtifact(d.stderr(), domain, artifact)
+	return d.applyManifest(ctx, domain, string(raw), true)
 }
 
 // ApplyFiltered applies only the resources in the domain artifact carrying
 // <labelKey>=<labelValue> (bash: deploy::apply_filtered). The key is used
 // verbatim: a bare key (app) or a namespaced one (lok8s.dev/name).
 // Selective deploy is user opt-in — it requires kustomize `labels:` (or
-// metadata.labels) on the targets to address.
+// metadata.labels) on the targets to address. The artifact is read once and
+// checked as Apply checks it; the subset comes from the copy that passed
+// the check.
 //
 // Bash runs the subset apply as `deploy::_apply … || rc=$?`, which SUSPENDS
 // errexit inside it: a failing kubectl apply there is logged and the phase
@@ -150,18 +152,12 @@ func (d *Deployer) ApplyFiltered(ctx context.Context, domain, labelKey, labelVal
 		ui.ErrorTo(d.stderr(), "no artifact for %s: %s — run 'lo build' first", domain, artifact)
 		return ErrHandled
 	}
-	if err := d.refuseKeysOnly(domain, artifact); err != nil {
+	raw, err := build.ReadCheckedArtifact(d.stderr(), domain, artifact)
+	if err != nil {
 		return err
 	}
 
-	// Filter the single domain artifact by the (full) label key = value into
-	// a temp file — the apply streams from a file, and the artifact can be
-	// large. Cleanup on every return path.
-	raw, err := os.ReadFile(artifact)
-	if err != nil {
-		ui.WarnTo(d.stderr(), "no objects match %s=%s in %s", labelKey, labelValue, artifact)
-		return nil
-	}
+	// Filter the checked copy by the (full) label key = value.
 	subset := selectDocs(string(raw), func(doc *yaml.Node) bool {
 		lbl := yqsem.MapGet(yqsem.MapGet(yqsem.MapGet(doc, "metadata"), "labels"), labelKey)
 		// yq `==` compares a scalar's TEXT: an unquoted `true` or `1` label
@@ -172,25 +168,14 @@ func (d *Deployer) ApplyFiltered(ctx context.Context, domain, labelKey, labelVal
 		ui.WarnTo(d.stderr(), "no objects match %s=%s in %s", labelKey, labelValue, artifact)
 		return nil
 	}
-	tmp, err := os.CreateTemp("", "lok8s-deploy-")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if _, err := tmp.WriteString(subset); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-
 	ui.DebugTo(d.stderr(), "Deploying %s subset (%s=%s)", domain, labelKey, labelValue)
-	return d.applyFile(ctx, fmt.Sprintf("%s (%s=%s)", domain, labelKey, labelValue), tmp.Name(), false)
+	return d.applyManifest(ctx, fmt.Sprintf("%s (%s=%s)", domain, labelKey, labelValue), subset, false)
 }
 
-// applyFile applies a manifest FILE in two phases (bash: deploy::_apply).
-// Empty streams are a graceful no-op.
+// applyManifest applies a manifest in two phases (bash: deploy::_apply).
+// The caller gives the copy of the artifact that passed the keys-only
+// check (or the subset of that copy); no phase reads the file. Empty
+// streams are a graceful no-op.
 //
 //	Phase 1: extract + apply CustomResourceDefinitions, then wait for them
 //	         to become Established. Server-side apply — large CRDs (CNPG,
@@ -203,12 +188,7 @@ func (d *Deployer) ApplyFiltered(ctx context.Context, domain, labelKey, labelVal
 // abortOnError is the errexit state of the calling bash path: active on
 // deploy::apply (a failing apply exits with kubectl's status), suspended on
 // deploy::apply_filtered (failures are logged, the sequence continues).
-func (d *Deployer) applyFile(ctx context.Context, label, file string, abortOnError bool) error {
-	raw, err := os.ReadFile(file)
-	if err != nil {
-		return err
-	}
-	manifest := string(raw)
+func (d *Deployer) applyManifest(ctx context.Context, label, manifest string, abortOnError bool) error {
 	if !HasObjects(manifest) {
 		ui.DebugTo(d.stderr(), "No objects for %s, skipping apply", label)
 		return nil
@@ -227,7 +207,7 @@ func (d *Deployer) applyFile(ctx context.Context, label, file string, abortOnErr
 		d.waitCRDs(ctx, crds)
 	}
 
-	// Phase 2: apply the rest + scoped wait-ready — both from the file.
+	// Phase 2: apply the rest + scoped wait-ready — both from the manifest.
 	ui.DebugTo(d.stderr(), "Applying resources for %s", label)
 	if _, rc := d.Applier.Apply(ctx, label, manifest); rc != 0 && abortOnError {
 		return &ExitError{Code: rc}
