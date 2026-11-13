@@ -665,6 +665,7 @@ kubeone::_render_manifest() {
 # the manifest names no addons directory (kubeone.yaml runs as it is). An
 # addons path that is not a directory gets no copy, and kubeone reports it.
 kubeone::_stage_run() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the addons hold Secret values (utils/keysonly.sh)
   local work_dir="${1}" manifest path src run
   if ! manifest="$(cat -- "${work_dir}/kubeone.yaml" 2>/dev/null && printf .)"; then
@@ -712,6 +713,7 @@ kubeone::_shown_path() {
 # guard's message. A directory that cannot be read is refused as a file
 # that cannot be read (Go: copyCheckedAddons).
 kubeone::_copy_checked() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the addons hold Secret values (utils/keysonly.sh)
   local src="${1}" shown="${2}" dst="${3}" entry rel content
   if [[ ! -r "${src}" || ! -x "${src}" ]]; then
@@ -736,6 +738,7 @@ kubeone::_copy_checked() {
 }
 
 kubeone::apply() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the Robot credentials (utils/keysonly.sh)
   local work_dir="${1}" cluster_yaml="${2:-}"
 
@@ -855,6 +858,7 @@ kubeone::_clean_reinstalled_workers() {
 # envsubst) — so what kubeone applies == what bootstrap later reconciles.
 # Usage: kubeone::render_addons <work_dir> [cluster_yaml]
 kubeone::render_addons() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the credentials and the renders (utils/keysonly.sh)
   local work_dir="${1}" cluster_yaml="${2:-}"
   local manifest="${work_dir}/kubeone.yaml"

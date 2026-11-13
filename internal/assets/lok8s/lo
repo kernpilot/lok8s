@@ -91,6 +91,12 @@ import ^utils/targets
 import ^utils/http
 import ^utils/credentials
 import ^drivers/lo/libs/registry
+import ^utils/keysonly
+
+# The functions that hold Secret values keep them out of a trace with
+# `local -` (the rules at the top of utils/keysonly.sh), which bash 4.3
+# does not know: with tracing on, bash 4.3 stops here.
+keysonly::check_trace_support "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" "$-" || exit 1
 
 main() {
   local verbose=0 force=0 force_recreate=0 remote=0 kubernetes cluster config domain domain_sans

@@ -8,11 +8,22 @@
 # Rendered and decrypted bytes (a render, an artifact, a decrypted
 # manifest) can hold Secret values. Each function that holds them follows
 # three rules (Go needs none of them):
-#   - Tracing off: `[[ $- != *x* ]] || { local -; set +x; }` first. Under
-#     `bash -x` (or BASH_XTRACEFD) the trace would print each assignment and
-#     each argument. `local -` sets the options back on return, and no child
-#     inherits the tracing. The line runs `local -` only when tracing is on,
-#     because bash 4.3 does not know `local -`.
+#   - Tracing off: two lines first. Under `bash -x` (or BASH_XTRACEFD) the
+#     trace would print each assignment and each argument.
+#       [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; ...; }
+#       [[ $- != *x* ]] || { local -; set +x; }
+#     The second line turns tracing off; `local -` sets the options back on
+#     return, and no child inherits the tracing. The first line comes into
+#     play when functrace (set -T) or errtrace (set -E) is on: then the
+#     function inherits the DEBUG, RETURN and ERR traps of its caller, and
+#     such a trap (`trap 'set -x' RETURN`) could turn tracing on again in
+#     the middle of the function. The line saves the three traps and
+#     clears them, turns off xtrace, functrace and errtrace, and runs the
+#     function again with the same arguments; when that run returns, it
+#     sets the traps back and returns its exit status. The lines run
+#     `local -` only when one of these options is on, because bash 4.3 does
+#     not know `local -`: with one of them on, bash 4.3 stops at the start
+#     of lo (keysonly::check_trace_support).
 #   - Exact bytes: a capture keeps the final newlines with a sentinel
 #     (`x="$(cmd && printf .)"; x="${x%.}"`), and the bytes go on with
 #     `printf '%s'`. A plain $(...) strips each final newline, which changes
@@ -21,6 +32,19 @@
 #     when cmd must run in this shell. A here-string larger than the pipe
 #     buffer goes into a file in TMPDIR (bash 5.1 and later), which a kill
 #     can leave behind.
+
+# keysonly::check_trace_support <major> <minor> <flags>: stop when this bash
+# cannot keep Secret values out of a trace. <major>.<minor> is the bash
+# version and <flags> the options ($-). The tracing rules above need
+# `local -` (bash 4.4) when xtrace, functrace or errtrace is on: with an
+# older bash, the guard would fail at the point that holds the value, so lo
+# stops at its start instead (.lok8s/lo).
+keysonly::check_trace_support() {
+  (( ${1} > 4 || (${1} == 4 && ${2} >= 4) )) && return 0
+  [[ ${3} != *[xTE]* ]] && return 0
+  error "lo: bash ${1}.${2} cannot keep Secret values out of a trace: run lo without set -x, set -T and set -E, or use bash 4.4 or later"
+  return 1
+}
 
 # The causes when yq cannot run the check (exit status 3 of
 # keysonly::has_marker): an installed yq before v4.47.1 (the words of the
@@ -108,6 +132,7 @@ keysonly::refusal() {
 # not the file, which can change after the check, and captures it with a
 # sentinel (see the rules at the top).
 keysonly::read_checked_artifact() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }
   local domain="${1}" artifact="${2}" content marker=0
   if ! content="$(cat -- "${artifact}" 2>/dev/null && printf .)"; then
@@ -132,6 +157,7 @@ keysonly::read_checked_artifact() {
 # for byte), not the file. Returns 1, and prints nothing on stdout, when
 # the guard refuses the input.
 keysonly::read_checked_file() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }
   local prefix="${1}" what="${2}" content
   if ! content="$(cat -- "${3}" 2>/dev/null && printf .)"; then

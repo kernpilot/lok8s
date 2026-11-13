@@ -210,6 +210,7 @@ build::_encrypt_mode() {
 #
 # Usage: printf '%s' "<fresh yaml>" | build::_secret_unchanged <prior_file>
 build::_secret_unchanged() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the fresh and the decrypted Secret (utils/keysonly.sh)
   local prior_file="${1}"
   # No prior, empty, or not sops-encrypted ⇒ cannot be "unchanged".
@@ -580,6 +581,7 @@ build::_keys_only_capable() {
 # yq is withheld, as it can quote an input value: a failure prints one
 # fixed line (_KEYSONLY_WITHHELD) and returns 1.
 build::keys_only() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local domain="${1}"
   local domain_dir="${PATH_CLUSTERS}/${domain}"
@@ -697,6 +699,7 @@ build::keys_only() {
 #
 # Usage: build::split <domain>   (honors LOK8S_BUILD_NO_SECRETS)
 build::split() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the Secrets of the render (utils/keysonly.sh)
   local domain="${1}"
   local domain_dir="${PATH_CLUSTERS}/${domain}"

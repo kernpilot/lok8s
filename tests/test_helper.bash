@@ -106,28 +106,61 @@ assert_pattern_matches() {
   return 1
 }
 
-# assert_no_trace_leak <canary> <command> [args...] — run the command twice
-# in a subshell with tracing on, and fail when <canary> (a Secret value of
-# the input) is in its stdout, its stderr or its trace.
+# assert_no_trace_leak <canary> <command> [args...] — run the command five
+# times in a subshell with tracing on, and fail when <canary> (a Secret
+# value of the input) is in its stdout, its stderr or its trace.
 #
-# The first run traces to stderr (bash -x), the second to a file through
-# BASH_XTRACEFD. Both runs must succeed, and each trace must show the call
-# of the command: a run that did not trace, or that failed before it held
-# the value, would pass the absence check without measuring anything. The
-# caller proves that the value was in flight (a stub that records it).
-# Each run starts with the shell options of bats' run (set +eET): with
-# functrace on, a RETURN trap of the command also fires in the functions
-# that it calls, which lo never does.
+# Each run starts with the options of .lok8s/lo (set -euo pipefail, without
+# the errtrace and functrace of a bats test body) and set -x. The runs:
+#   x    the trace goes to stderr (bash -x);
+#   fd   the trace goes to a file through BASH_XTRACEFD;
+#   ret  functrace on and `trap 'set -x' RETURN`: each function inherits
+#        the trap, and the return of a helper turns tracing on again;
+#   dbg  functrace on and `trap 'set -x' DEBUG`: the trap turns tracing on
+#        again before each command;
+#   err  errtrace on and `trap 'set -x' ERR`.
+# Each run must succeed, and each trace must show the call of the command:
+# a run that did not trace, or that failed before it held the value, would
+# pass the absence check without measuring anything. The caller proves
+# that the value was in flight (a stub that records it). After the
+# command, the ret, dbg and err runs must still have their option and
+# their trap: the command sets them back.
 assert_no_trace_leak() {
   local canary="${1}"; shift
-  local d rc=0
+  local d mode rc want_opt want_trap
   d="$(mktemp -d "${BATS_TEST_TMPDIR}/trace.XXXXXX")"
-  ( set +eET; set -x; "$@" ) >"${d}/stdout.x" 2>"${d}/stderr.x" || rc=$?
-  (( rc == 0 )) || { echo "${1} failed under set -x (rc ${rc}):" >&2; cat "${d}/stderr.x" >&2; return 1; }
-  ( set +eET; exec 9>"${d}/trace.fd"; BASH_XTRACEFD=9; set -x; "$@" ) >"${d}/stdout.fd" 2>"${d}/stderr.fd" || rc=$?
-  (( rc == 0 )) || { echo "${1} failed with BASH_XTRACEFD (rc ${rc}):" >&2; cat "${d}/stderr.fd" >&2; return 1; }
+  for mode in x fd ret dbg err; do
+    rc=0
+    (
+      set +eET; set -euo pipefail
+      case "${mode}" in
+        fd) exec 9>"${d}/trace.fd"; BASH_XTRACEFD=9 ;;
+        ret) set -T; trap 'set -x' RETURN ;;
+        dbg) set -T; trap 'set -x' DEBUG ;;
+        err) set -E; trap 'set -x' ERR ;;
+      esac
+      set -x
+      "$@"
+      { set +x; } 2>/dev/null
+      printf '%s\n' "$-" "$(trap -p DEBUG RETURN ERR)" > "${d}/after.${mode}"
+    ) >"${d}/stdout.${mode}" 2>"${d}/stderr.${mode}" || rc=$?
+    (( rc == 0 )) || { echo "${1} failed in the ${mode} run (rc ${rc}):" >&2; cat "${d}/stderr.${mode}" >&2; return 1; }
+  done
   grep -qF -- "+ ${1}" "${d}/stderr.x" || { echo "no trace of ${1} on stderr" >&2; return 1; }
   grep -qF -- "+ ${1}" "${d}/trace.fd" || { echo "no trace of ${1} in BASH_XTRACEFD" >&2; return 1; }
+  for mode in ret dbg err; do
+    grep -qF -- "+ ${1}" "${d}/stderr.${mode}" || { echo "no trace of ${1} in the ${mode} run" >&2; return 1; }
+    case "${mode}" in
+      ret) want_opt=T want_trap="trap -- 'set -x' RETURN" ;;
+      dbg) want_opt=T want_trap="trap -- 'set -x' DEBUG" ;;
+      err) want_opt=E want_trap="trap -- 'set -x' ERR" ;;
+    esac
+    if [[ "$(head -n 1 "${d}/after.${mode}")" != *"${want_opt}"* ]] || ! grep -qxF -- "${want_trap}" "${d}/after.${mode}"; then
+      echo "${1} did not set the option ${want_opt} and its trap back in the ${mode} run:" >&2
+      cat "${d}/after.${mode}" >&2
+      return 1
+    fi
+  done
   if grep -lF -- "${canary}" "${d}"/* >&2; then
     echo "the value of the input is in the files above" >&2
     return 1

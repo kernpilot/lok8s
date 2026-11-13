@@ -374,18 +374,29 @@ YAML
 }
 
 # kubeone::apply and render_addons hold the Hetzner credentials with
-# tracing off (the rules at the top of utils/keysonly.sh): under bash -x,
-# and with BASH_XTRACEFD on a file, neither HCLOUD_TOKEN nor
-# HROBOT_PASSWORD is in stdout, stderr or the trace. The kubeone stub shows
-# that the Robot password reached kubeone.
+# tracing off (the rules at the top of utils/keysonly.sh): in each run of
+# assert_no_trace_leak (bash -x, BASH_XTRACEFD, and the RETURN, DEBUG and
+# ERR traps), neither HCLOUD_TOKEN nor HROBOT_PASSWORD is in stdout,
+# stderr or the trace. The manifest names an addons directory, so the run
+# copy (kubeone::_stage_run, kubeone::_copy_dir) holds the CCM render with
+# the token under the trace too. The kubeone stub shows that the Robot
+# password and the token in the copied CCM render reached kubeone.
 @test "kubeone::apply and render_addons trace no credential" {
   local cy; cy=$(_cluster_yaml '')
+  yq -i '.addons.enable = true | .addons.path = "./addons"' "${work_dir}/kubeone.yaml"
   export HCLOUD_TOKEN="xtrace-canary-kubeone-hcloud" HROBOT_USER="robot" HROBOT_PASSWORD="xtrace-canary-kubeone-robot"
   export KCALLS="${BATS_TEST_TMPDIR}/kubeone.calls"
   kubeone::_clean_reinstalled_workers() { :; }
   kubeone::_name_robot_workers() { :; }
-  kubeone() { printf '%s\n' "${ROBOT_PASSWORD:-}" >> "${KCALLS}"; }
+  addons::render() { printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: hcloud\nstringData:\n  token: %s\n' "${HCLOUD_TOKEN}"; }
+  kubeone() {
+    local manifest="" prev="" a
+    for a in "$@"; do [[ "${prev}" != --manifest ]] || manifest="${a}"; prev="${a}"; done
+    { printf '%s\n' "${ROBOT_PASSWORD:-}"
+      yq -r '.stringData.token' "$(yq -r '.addons.path' "${manifest}")/ccm-hetzner/ccm.yaml"
+    } >> "${KCALLS}" 2>&1
+  }
   assert_no_trace_leak xtrace-canary-kubeone kubeone::apply "${work_dir}" "${cy}"
-  [ "$(sort -u "${KCALLS}")" = "xtrace-canary-kubeone-robot" ]
+  [ "$(sort -u "${KCALLS}")" = $'xtrace-canary-kubeone-hcloud\nxtrace-canary-kubeone-robot' ]
   assert_no_trace_leak xtrace-canary-kubeone kubeone::render_addons "${work_dir}" "${cy}"
 }

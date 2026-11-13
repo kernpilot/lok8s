@@ -168,6 +168,7 @@ kapply::run() {
 #   terminal it stays quiet (verbose `debug`s each poll). Best-effort: a timeout
 #   is a ⚠, never fatal — the caller decides whether to care.
 kapply::wait_ready() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   local label="${1}" timeout="${2:-180}"; shift 2
   local -a kubectl_flags=("${@}")
@@ -232,6 +233,7 @@ kapply::wait_ready() {
 # re-apply, so the re-apply renders the same named progress block (never
 # escapes as raw output).
 kapply::_apply_pass() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   local label="${1}" manifest="${2}"; shift 2
   local -a kubectl_flags=("${@}")
@@ -257,11 +259,13 @@ kapply::_apply_pass() {
 # (utils/keysonly.sh). grep reads to the end (no -q), so pipefail sees no
 # SIGPIPE from printf.
 kapply::output_matches() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }
   printf '%s\n' "${2}" | grep -E "${1}" >/dev/null
 }
 
 kapply::apply() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   # A leading `--label <phase>` names the progress block (the addon/target);
   # everything else is passed through to kubectl.
@@ -414,6 +418,7 @@ kapply::_progress() {
 # (core resources have no `.<group>`). We recreate by kind+name from the same
 # manifest — `replace --force` = delete + create, which bypasses immutability.
 kapply::_heal_immutable() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   local manifest="${1}" out="${2}"; shift 2
   local -a kubectl_flags=("${@}")
@@ -495,6 +500,7 @@ kapply::terminating_namespaces() {
 # cascade-delete every CR of that kind cluster-wide; the CRD-settle retry in
 # the caller handles that race instead.
 kapply::_heal_terminating() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   local manifest="${1}" out="${2}"; shift 2
   local -a kubectl_flags=("${@}")
@@ -549,6 +555,7 @@ kapply::_heal_terminating() {
 #   warn; always returns 0 so a preflight can never brick the deploy it
 #   protects.
 kapply::preflight() {
+  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   local age="${KAPPLY_PREFLIGHT_AGE:-30}"
   local crds="${KAPPLY_PREFLIGHT_CRDS:-drain}" crd_allow=""

@@ -5,7 +5,8 @@
 # (Go: cmd/lo/main.go). Only `lo build --keys-only` turns it on, for its own
 # render. The render pins of build::artifacts and addons::render, and
 # build::keys_only itself, are tested in build_test.bats and
-# bootstrap_test.bats.
+# bootstrap_test.bats. The last test is the bash version check of the
+# tracing rules in utils/keysonly.sh.
 
 setup() {
   load "../test_helper"
@@ -152,4 +153,40 @@ _run_lo_stubbed() {
   refute_output --partial "kustomize"
   run cat "${PLUGIN_LOG}"
   assert_output "plugin --capabilities"
+}
+
+# The tracing rules of utils/keysonly.sh need `local -` (bash 4.4) when
+# xtrace, functrace or errtrace is on. lo states bash 4.3 as its minimum:
+# bash 4.3 with one of these options on stops at the start of lo, with a
+# message, and not at the point that holds a Secret value. Without them,
+# and with bash 4.4 or later, lo goes on.
+@test "keysonly::check_trace_support stops bash 4.3 under a trace, at the start of lo" {
+  error() { printf '%s\n' "$*" >&2; }
+  # shellcheck source=/dev/null
+  source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
+  local flags version
+  for flags in himxB hiTB hiEB ehuxTE; do
+    run keysonly::check_trace_support 4 3 "${flags}"
+    assert_failure 1
+    assert_output "lo: bash 4.3 cannot keep Secret values out of a trace: run lo without set -x, set -T and set -E, or use bash 4.4 or later"
+  done
+  run keysonly::check_trace_support 3 2 x
+  assert_failure 1
+  assert_output --partial "lo: bash 3.2 cannot keep Secret values out of a trace"
+  run keysonly::check_trace_support 4 3 ehuBH
+  assert_success
+  assert_output ""
+  for version in "4 4" "4 10" "5 0" "5 3" "6 0"; do
+    # shellcheck disable=SC2086 # the major and the minor version
+    run keysonly::check_trace_support ${version} ehuxTE
+    assert_success
+    assert_output ""
+  done
+  # The lo entry calls it with the version and the options of its bash,
+  # before main runs.
+  local call main
+  call="$(grep -nF 'keysonly::check_trace_support "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" "$-" || exit 1' "${_PROJECT_ROOT}/.lok8s/lo" | cut -d: -f1)"
+  main="$(grep -n '^main() {' "${_PROJECT_ROOT}/.lok8s/lo" | cut -d: -f1)"
+  [ -n "${call}" ] && [ -n "${main}" ] && [ "${call}" -lt "${main}" ]
+  [[ "$(sed -n "${call}p" "${_PROJECT_ROOT}/.lok8s/lo")" == keysonly::* ]]
 }
