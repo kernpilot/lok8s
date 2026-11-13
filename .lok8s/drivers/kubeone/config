@@ -646,6 +646,95 @@ kubeone::_render_manifest() {
 # cluster_yaml (optional): the cluster's lok8s spec — its inline bootstrap
 # values ride the rendered addons (issue #157); omitted = framework stack only.
 # Expects: kubeone.yaml + output.json in work_dir
+# kubeone::_stage_run <work_dir>: make the copy of the run that KubeOne
+# reads (Go: stageRun in internal/driver/kubeone). KubeOne applies each
+# file in the addons directory of the manifest (addons.path, relative to
+# the manifest) at its "ensure custom addons" step, and it reads the files
+# then. The files in the work dir are shared: another lo run, or another
+# writer, can replace them after lo checked them. So lo reads each file
+# once, checks it with the keys-only apply guard, and writes the checked
+# bytes into a new private run directory <work_dir>/.kubeone-run-<random>
+# (mode 0700, files 0600). A file with a keys-only Secret, or one that
+# cannot be read or does not parse, stops the apply. The manifest copy
+# <run>.yaml (0600) is the manifest that lo read once, with addons.path set
+# to the run's addons directory. It is beside the run directory, in the
+# work dir, because KubeOne resolves the other relative paths of the
+# manifest (the CA file, the audit and node-selector files, the PKI backup
+# <cluster>.tar.gz) against the directory of the manifest: these do not
+# change. Prints the absolute path of the run directory, or nothing when
+# the manifest names no addons directory (kubeone.yaml runs as it is). An
+# addons path that is not a directory gets no copy, and kubeone reports it.
+kubeone::_stage_run() {
+  [[ $- != *x* ]] || { local -; set +x; }  # the addons hold Secret values (utils/keysonly.sh)
+  local work_dir="${1}" manifest path src run
+  if ! manifest="$(cat -- "${work_dir}/kubeone.yaml" 2>/dev/null && printf .)"; then
+    error "kubeone: cannot read ${work_dir}/kubeone.yaml"
+    return 1
+  fi
+  manifest="${manifest%.}"
+  if ! path="$(printf '%s' "${manifest}" | yq -r 'explode(.) | .addons.path // ""' - 2>/dev/null)"; then
+    error "kubeone: ${work_dir}/kubeone.yaml does not parse as YAML"
+    return 1
+  fi
+  [[ -n "${path}" ]] || return 0
+  if [[ "${path}" == /* ]]; then src="${path}"; else src="${work_dir}/${path}"; fi
+  if ! run="$(mktemp -d "${work_dir}/.kubeone-run-XXXXXX")" || ! run="$(cd -- "${run}" && pwd)"; then
+    error "kubeone: cannot make a run directory in ${work_dir}"
+    return 1
+  fi
+  if [[ -d "${src}" ]] && ! kubeone::_copy_checked "${src}" "$(kubeone::_shown_path "${path}")" "${run}/addons"; then
+    rm -rf -- "${run}"
+    return 1
+  fi
+  if ! ( umask 077; set -C
+         printf '%s' "${manifest}" \
+           | KUBEONE_RUN_ADDONS="${run}/addons" yq 'explode(.) | .addons.path = strenv(KUBEONE_RUN_ADDONS)' - > "${run}.yaml" ); then
+    rm -rf -- "${run}" "${run}.yaml"
+    error "kubeone: cannot write the manifest copy ${run}.yaml"
+    return 1
+  fi
+  printf '%s\n' "${run}"
+}
+
+# kubeone::_shown_path <path>: the addons path of the manifest as the
+# guard's messages name it: without a leading ./ and a trailing / (Go:
+# filepath.Clean).
+kubeone::_shown_path() {
+  local shown="${1#./}"
+  printf '%s' "${shown%/}"
+}
+
+# kubeone::_copy_checked <src> <shown> <dst>: copy the directory <src>
+# into the new directory <dst>: each directory with mode 0700, and each
+# file with the bytes that passed the keys-only apply guard
+# (keysonly::read_checked_file), with mode 0600. A symbolic link is read as
+# the file that it points at. <shown>/<path in src> names a file in the
+# guard's message. A directory that cannot be read is refused as a file
+# that cannot be read (Go: copyCheckedAddons).
+kubeone::_copy_checked() {
+  [[ $- != *x* ]] || { local -; set +x; }  # the addons hold Secret values (utils/keysonly.sh)
+  local src="${1}" shown="${2}" dst="${3}" entry rel content
+  if [[ ! -r "${src}" || ! -x "${src}" ]]; then
+    keysonly::read_checked_file kubeone "${shown}" "${src}" >/dev/null || return 1
+  fi
+  mkdir -m 700 -- "${dst}" || return 1
+  while IFS= read -r -d '' entry; do
+    rel="${entry#"${src}/"}"
+    if [[ -d "${entry}" && ! -L "${entry}" ]]; then
+      if [[ ! -r "${entry}" || ! -x "${entry}" ]]; then
+        keysonly::read_checked_file kubeone "${shown}/${rel}" "${entry}" >/dev/null || return 1
+      fi
+      mkdir -m 700 -- "${dst}/${rel}" || return 1
+      continue
+    fi
+    content="$(keysonly::read_checked_file kubeone "${shown}/${rel}" "${entry}" && printf .)" || return 1
+    if ! ( umask 077; set -C; printf '%s' "${content%.}" > "${dst}/${rel}" ); then
+      error "kubeone: cannot write the run copy of ${shown}/${rel}"
+      return 1
+    fi
+  done < <(find -H "${src}" -mindepth 1 -print0 2>/dev/null | LC_ALL=C sort -z)
+}
+
 kubeone::apply() {
   [[ $- != *x* ]] || { local -; set +x; }  # the Robot credentials (utils/keysonly.sh)
   local work_dir="${1}" cluster_yaml="${2:-}"
@@ -655,15 +744,8 @@ kubeone::apply() {
     return 1
   fi
 
-  local -a kubeone_args=(
-    apply
-    --manifest kubeone.yaml
-    --auto-approve
-  )
-
-  if [[ -f "${work_dir}/output.json" ]]; then
-    kubeone_args+=(--tfjson output.json)
-  fi
+  local tfjson=0
+  [[ ! -f "${work_dir}/output.json" ]] || tfjson=1
 
   # A reinstalled static worker leaves a stale not-Ready node object that
   # trips kubeone's "broken host" preflight (apply aborts). Remove it first —
@@ -686,16 +768,33 @@ kubeone::apply() {
   kubeone::_name_robot_workers "${work_dir}/kubeone.yaml" || return 1
   kubeone::render_addons "${work_dir}" "${cluster_yaml}" || return 1
 
+  # KubeOne reads the addons from a private copy of the bytes that passed
+  # the keys-only apply guard, not from the shared files.
+  local run manifest=kubeone.yaml
+  run="$(kubeone::_stage_run "${work_dir}")" || return 1
+  [[ -z "${run}" ]] || manifest="${run##*/}.yaml"
+  local -a kubeone_args=(
+    apply
+    --manifest "${manifest}"
+    --auto-approve
+  )
+  (( ! tfjson )) || kubeone_args+=(--tfjson output.json)
+
   debug "Running (in ${work_dir}): kubeone ${kubeone_args[*]}"
   # Subshell cd: kubeone writes <cluster>-kubeconfig into the CWD (no output
   # flag) — run inside the work dir so artifacts land there. Hetzner Robot
-  # credentials ride along for the CCM.
+  # credentials ride along for the CCM. The EXIT trap removes the run copy
+  # when kubeone ends, on a signal too.
+  local rc=0
   (
+    [[ -z "${run}" ]] || trap 'rm -rf -- "${run}" "${run}.yaml"' EXIT
     cd "${work_dir}" || exit 1
     [[ -z "${HROBOT_USER:-}" ]]     || export ROBOT_USER="${HROBOT_USER}" HETZNER_ROBOT_USER="${HROBOT_USER}"
     [[ -z "${HROBOT_PASSWORD:-}" ]] || export ROBOT_PASSWORD="${HROBOT_PASSWORD}" HETZNER_ROBOT_PASSWORD="${HROBOT_PASSWORD}"
     kubeone "${kubeone_args[@]}"
-  )
+  ) || rc=$?
+  [[ -z "${run}" ]] || rm -rf -- "${run}" "${run}.yaml"
+  return "${rc}"
 }
 
 # Remove stale not-Ready node objects for static workers whose host has been
@@ -906,8 +1005,9 @@ kubeone::render_addons() {
     > "${addons_dir}/ccm-hetzner/ccm.yaml" || { error "render ccm addon failed"; return 1; }
 
   # KubeOne applies the two renders itself, at its "ensure custom addons"
-  # step: they pass the keys-only apply guard first (Go: the guard on each
-  # file under <work_dir>/addons in the kubeone driver). A render with a
+  # step: they pass the keys-only apply guard here, and each file of the
+  # addons directory passes it again when kubeone::apply copies it into
+  # the private run directory (kubeone::_stage_run). A render with a
   # keys-only Secret, or one that cannot be read or does not parse, stops
   # the apply before kubeone runs.
   local addon

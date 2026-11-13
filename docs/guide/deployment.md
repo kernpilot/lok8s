@@ -219,9 +219,18 @@ not apply a manifest that holds one:
   `.sops.yaml` file of that entry: remove or replace the working copy. A
   working copy that cannot be read, or that does not parse as YAML, gets
   a warning, and lo uses the `.sops.yaml` file, which it checks too.
-- The KubeOne driver checks the cilium and CCM renders that KubeOne
-  applies itself (`<work dir>/addons/`) before it runs `kubeone apply`. A
-  render with the annotation stops the apply.
+- The KubeOne driver checks each file of the addons directory of the
+  manifest (`addons.path`, for Hetzner the cilium and CCM renders in
+  `<work dir>/addons/`) before it runs `kubeone apply`. A file with the
+  annotation, one that does not parse, or a directory that cannot be read
+  stops the apply. KubeOne reads the addons later, at its addons step,
+  and the work dir is shared. So lo writes the bytes that it checked into
+  a new private run directory (`<work dir>/.kubeone-run-<random>/`, mode
+  0700, files 0600), and KubeOne reads a copy of the manifest
+  (`<work dir>/.kubeone-run-<random>.yaml`) whose `addons.path` names it.
+  The copy is beside `kubeone.yaml`, so the other paths of the manifest
+  are the same. lo removes both when `kubeone apply` ends. A manifest
+  without `addons.path` runs as it is.
 - The Tilt extension runs `lo tilt preflight` on its manifest (the domain
   artifact and the service overlays on it) before it applies anything, on
   every load. A manifest with the annotation, or one that cannot be read

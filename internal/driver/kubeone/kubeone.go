@@ -19,12 +19,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -271,18 +269,17 @@ func (d *Driver) Kubeconfig(ctx context.Context, domain string) (string, error) 
 
 // Apply runs kubeone apply (bash: kubeone::apply). The process runs WITH
 // ITS CWD SET INTO the work dir — kubeone writes <cluster>-kubeconfig into
-// the CWD (no output flag) — using the RELATIVE --manifest kubeone.yaml,
-// --auto-approve, and --tfjson output.json when that file exists. Hetzner
-// Robot credentials ride along in the environment for the CCM.
+// the CWD (no output flag) — using a RELATIVE --manifest (kubeone.yaml, or
+// the manifest copy of stageRun when the manifest names an addons
+// directory), --auto-approve, and --tfjson output.json when that file
+// exists. Hetzner Robot credentials ride along in the environment for the
+// CCM.
 func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
 	if !fsutil.FileExists(filepath.Join(workDir, "kubeone.yaml")) {
 		ui.ErrorTo(d.stderr(), "kubeone.yaml not found in %s", workDir)
 		return ui.Handled(fmt.Errorf("kubeone: kubeone.yaml not found in %s", workDir))
 	}
-	args := []string{"apply", "--manifest", "kubeone.yaml", "--auto-approve"}
-	if fsutil.FileExists(filepath.Join(workDir, "output.json")) {
-		args = append(args, "--tfjson", "output.json")
-	}
+	tfjson := fsutil.FileExists(filepath.Join(workDir, "output.json"))
 
 	// Pre-apply steps (stale-worker cleanup, Robot naming, addon render) —
 	// injectable, ports with the addon engine.
@@ -291,8 +288,16 @@ func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
 			return err
 		}
 	}
-	if err := refuseKeysOnlyAddons(d.stderr(), workDir); err != nil {
+	// KubeOne reads the addons from a private copy of the bytes that
+	// passed the keys-only apply guard, not from the shared files.
+	manifest, cleanup, err := stageRun(d.stderr(), workDir)
+	if err != nil {
 		return err
+	}
+	defer cleanup()
+	args := []string{"apply", "--manifest", manifest, "--auto-approve"}
+	if tfjson {
+		args = append(args, "--tfjson", "output.json")
 	}
 
 	ui.DebugTo(d.stderr(), "Running (in %s): kubeone %s", workDir, strings.Join(args, " "))
@@ -302,42 +307,6 @@ func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
 		Dir:  workDir,
 		Env:  robotEnv(),
 	})
-}
-
-// refuseKeysOnlyAddons runs the keys-only apply guard on each file under
-// <workDir>/addons (build.ReadCheckedFile): KubeOne applies these files
-// itself, at its "ensure custom addons" step, so lo checks them before
-// kubeone runs (bash: the end of kubeone::render_addons, which checks the
-// two files that it writes into a new addons directory). A file with a
-// keys-only Secret, or one that cannot be read or does not parse, stops
-// the apply. No addons directory is nothing to check.
-func refuseKeysOnlyAddons(stderr io.Writer, workDir string) error {
-	root := filepath.Join(workDir, "addons")
-	var files []string
-	err := filepath.WalkDir(root, func(path string, de fs.DirEntry, err error) error {
-		switch {
-		case err != nil && path == root && errors.Is(err, fs.ErrNotExist):
-			return fs.SkipAll
-		case err != nil || !de.IsDir():
-			// A directory that cannot be read is a file that cannot
-			// be read: the guard refuses it.
-			files = append(files, path)
-			if de != nil && de.IsDir() {
-				return fs.SkipDir
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	for _, f := range files {
-		rel, _ := filepath.Rel(workDir, f)
-		if _, err := build.ReadCheckedFile(stderr, "kubeone", rel, f); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // Reset runs kubeone reset (bash: kubeone::reset) — ABSOLUTE paths, no CWD
