@@ -321,13 +321,31 @@ func TestKeysOnly_RefusesLikeARealRun(t *testing.T) {
 // TestKeysOnly_SpecErrorWithoutValue: a malformed value fails the run, in
 // keys-only mode and in a real run, with an error (what the plugin prints
 // to stderr) that names the section and key and holds no part of the
-// value; the run emits nothing.
+// value; the run emits nothing. One case for each section of the spec and
+// for both forms in which yaml.v3 quotes a value (the spec package tests
+// each validator).
 func TestKeysOnly_SpecErrorWithoutValue(t *testing.T) {
 	head := "apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata: {name: a, namespace: n}\n"
 	for name, tc := range map[string]struct{ body, path string }{
-		"passwd shorthand": {"passwd:\n  PASSWORD: Zq7-actual-password\n", "passwd.PASSWORD"},
-		"passwd length":    {"passwd:\n  PASSWORD: {length: Zq7-actual-password}\n", "passwd.PASSWORD"},
-		"bytes shorthand":  {"template:\n  DSN:\n    pattern: \"{K}\"\n    bytes:\n      K: Zq7-actual-bytes\n", "template.DSN"},
+		"passwd shorthand":        {"passwd:\n  PASSWORD: Zq7-actual-password\n", "passwd.PASSWORD"},
+		"passwd length":           {"passwd:\n  PASSWORD: {length: Zq7-actual-password}\n", "passwd.PASSWORD"},
+		"passwd length newline":   {"passwd:\n  PASSWORD: {length: \"Zq7\\nabc\"}\n", "passwd.PASSWORD"},
+		"passwd tagged length":    {"passwd:\n  PASSWORD: {length: !!int Zq7-actual-password}\n", "passwd.PASSWORD"},
+		"bytes shorthand":         {"template:\n  DSN:\n    pattern: \"{K}\"\n    bytes:\n      K: Zq7-actual-bytes\n", "template.DSN"},
+		"template operator":       {"template:\n  DSN:\n    pattern: \"{K:Zq7}\"\n    literals: {K: v}\n", "template.DSN"},
+		"key algorithm":           {"key:\n  PRIVATE: Zq7-actual-password\n", "key.PRIVATE"},
+		"secretRef shorthand":     {"secretRef:\n  R: Zq7-actual-password\n", "secretRef.R"},
+		"file mode":               {"file:\n  F: {path: f.txt, mode: Zq7-mode}\n", "file.F"},
+		"bash output":             {"bash:\n  B: {exec: \"true\", output: Zq7-out}\n", "bash.B"},
+		"env":                     {"env:\n  E: {optional: Zq7-bool}\n", "env.E"},
+		"htpasswd":                {"htpasswd:\n  H: {username: {length: Zq7pw}, password: x}\n", "htpasswd.H"},
+		"cert":                    {"cert: {ca: Zq7-bool}\n", "cert.ca"},
+		"validate":                {"validate: Zq7-actual\nliterals: {A: b}\n", "validate"},
+		"literal tagged":          {"literals:\n  A: !!int Zq7-actual-password\n", ""},
+		"b64":                     {"b64:\n  A: {x: Zq7}\n", "b64.A"},
+		"passwd require":          {"passwd:\n  PASSWORD: {length: 8, require: [Zq7-class]}\n", "passwd.PASSWORD"},
+		"template secretRef":      {"template:\n  DSN:\n    pattern: \"{R}\"\n    secretRef: {R: a/b/c/Zq7}\n", "template.DSN"},
+		"template field encoding": {"template:\n  DSN:\n    pattern: \"{K}\"\n    fields:\n      K: {bytes: 16, encoding: Zq7-enc}\n", "template.DSN"},
 	} {
 		for mode, env := range map[string]map[string]string{
 			"keys-only": keysOnlyEnv(nil),
@@ -341,7 +359,7 @@ func TestKeysOnly_SpecErrorWithoutValue(t *testing.T) {
 				if strings.Contains(err.Error(), "Zq7") || strings.Contains(out, "Zq7") {
 					t.Errorf("the value is in the output or the error: %v\n%s", err, out)
 				}
-				if !strings.Contains(err.Error(), "line ") || !strings.Contains(err.Error(), " "+tc.path+": ") {
+				if tc.path != "" && (!strings.Contains(err.Error(), "line ") || !strings.Contains(err.Error(), " "+tc.path+": ")) {
 					t.Errorf("error %v names no line or no %s", err, tc.path)
 				}
 				if out != "" {

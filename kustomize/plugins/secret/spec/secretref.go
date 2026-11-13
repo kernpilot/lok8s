@@ -52,7 +52,7 @@ func (r *SecretRefEntry) UnmarshalYAML(node *yaml.Node) error {
 			r.Namespace = parts[1]
 			r.Key = parts[2]
 		default:
-			return kyaml.NodeErrf(node, "secretRef shorthand must be \"secret/key\" or \"secret/namespace/key\", got %q", s)
+			return kyaml.NodeErrf(node, "secretRef shorthand must be \"secret/key\" or \"secret/namespace/key\"")
 		}
 		return r.validateFields(node)
 	case yaml.MappingNode:

@@ -57,7 +57,7 @@ func Resolve(spec string) (string, error) {
 	}
 	chars, ok := charsetData[spec]
 	if !ok {
-		return "", fmt.Errorf("charset: unknown name %q (valid: alphanum, alphanum+symbols, hex, base64url, custom:<chars>)", spec)
+		return "", fmt.Errorf("charset: unknown name (valid: alphanum, alphanum+symbols, hex, base64url, custom:<chars>)")
 	}
 	return chars, nil
 }
@@ -96,7 +96,7 @@ func ParseClass(s string) (Class, error) {
 	case ClassUpper, ClassLower, ClassDigit, ClassSymbol:
 		return Class(s), nil
 	default:
-		return "", fmt.Errorf("charset: unknown class %q (valid: upper, lower, digit, symbol)", s)
+		return "", fmt.Errorf("charset: unknown class (valid: upper, lower, digit, symbol)")
 	}
 }
 

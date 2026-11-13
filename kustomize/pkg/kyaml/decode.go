@@ -76,9 +76,10 @@ func wrapDecodeErr(err error) error {
 		return nil
 	}
 	// yaml.v3 returns the error of a custom UnmarshalYAML as it is: keep
-	// its line, column and message.
-	var existing *errs.Error
-	if errors.As(err, &existing) {
+	// its line and column. Its message can hold a yaml.v3 error of an inner
+	// decode, so the value goes out of it too.
+	if existing, ok := errors.AsType[*errs.Error](err); ok {
+		redactErr(existing)
 		return existing
 	}
 	msg := firstDecodeError(err.Error())
@@ -87,28 +88,48 @@ func wrapDecodeErr(err error) error {
 }
 
 // firstDecodeError is the first error of a yaml.v3 message, without the
-// "yaml:" / "unmarshal errors" preamble and without the input value that
-// yaml.v3 quotes in a type error.
+// "yaml:" / "unmarshal errors" preamble and without the input values that
+// yaml.v3 quotes. The values go out first: a value can hold a newline, and
+// the message is split at its newlines.
 func firstDecodeError(msg string) string {
-	msg = strings.TrimPrefix(msg, "yaml: ")
+	msg = strings.TrimPrefix(RedactValue(msg), "yaml: ")
 	// Multi-line "unmarshal errors" form: take the first inner line.
 	if strings.HasPrefix(msg, "unmarshal errors:\n") {
 		lines := strings.SplitN(msg[len("unmarshal errors:\n"):], "\n", 2)
 		msg = strings.TrimLeft(lines[0], " \t")
 	}
-	return RedactValue(msg)
+	return msg
 }
 
-// quotedValue is the input value that yaml.v3 quotes in a type error:
-// "cannot unmarshal !!str `<value>` into int" (the first 7 characters and
-// "..." for a value of more than 10).
-var quotedValue = regexp.MustCompile("(cannot unmarshal \\S+) `.*` into ")
+// unmarshalValue is the input value that yaml.v3 quotes in a type error:
+// "cannot unmarshal !!str `<value>` into int". yaml.v3 shows at most 10
+// bytes of it (the first 7 and "..." for a longer value), and they can hold
+// a backtick or a newline.
+var unmarshalValue = regexp.MustCompile("(?s)(cannot unmarshal \\S+) `.{0,10}` into ")
 
-// RedactValue removes the input value from a yaml.v3 type error. A spec
-// value can be a secret, so an error names the field and the YAML tag,
-// never the value.
+// decodeValue is the input value that yaml.v3 quotes when a tagged scalar
+// does not resolve to its tag: "cannot decode !!str `<value>` as a !!int".
+// yaml.v3 shows the whole value, and it ends the decode, so the message
+// holds this one error.
+var decodeValue = regexp.MustCompile("(?s)(cannot decode \\S+) `.*` as a ")
+
+// RedactValue removes the input values from a yaml.v3 error. A spec value
+// can be a secret, so an error names the field and the YAML tag, never the
+// value.
 func RedactValue(msg string) string {
-	return quotedValue.ReplaceAllString(msg, "$1 value into ")
+	msg = unmarshalValue.ReplaceAllString(msg, "$1 value into ")
+	return decodeValue.ReplaceAllString(msg, "$1 value as a ")
+}
+
+// redactErr removes the input values from the message of e and from the
+// error that e wraps (errs.Error prints both when they differ).
+func redactErr(e *errs.Error) {
+	e.Msg = RedactValue(e.Msg)
+	if e.Err != nil {
+		if r := RedactValue(e.Err.Error()); r != e.Err.Error() {
+			e.Err = errors.New(r)
+		}
+	}
 }
 
 // parseLinePrefix detects a leading "line N: " marker in *msg, strips it,
@@ -141,10 +162,10 @@ func wrapNodeErr(node *yaml.Node, err error) error {
 	}
 	// A line in err is a line of the re-marshalled node, not of the input:
 	// the position is the node's.
-	var existing *errs.Error
-	if errors.As(err, &existing) {
+	if existing, ok := errors.AsType[*errs.Error](err); ok {
 		existing.Line = node.Line
 		existing.Col = node.Column
+		redactErr(existing)
 		return existing
 	}
 	msg := firstDecodeError(err.Error())

@@ -488,28 +488,85 @@ file:
 	}
 }
 
-// errorCanary is the start of each malformed value below. A spec value
-// can be a secret, so no decode error may hold it.
-const errorCanary = "Zq7"
+// errorCanary is the start of each malformed string value below, and
+// numberCanary the digits of each malformed number. A spec value can be a
+// secret, so no decode error may hold it.
+const (
+	errorCanary  = "Zq7"
+	numberCanary = "1773"
+)
+
+// specHead is the start of each malformed spec below that has no head of
+// its own.
+const specHead = "apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: app\n"
+
+// malformedSpecs holds one malformed value for each validator of each
+// section, and for both forms in which yaml.v3 quotes a value: a type error
+// (also with a newline in the value) and a tagged scalar that does not
+// resolve. path is the section and key that the error names; "" for an
+// error that has no position (the head, and a tagged scalar outside an
+// entry: yaml.v3 gives no line for it). full marks a spec with its own head.
+var malformedSpecs = map[string]struct {
+	body, path, canary string
+	full               bool
+}{
+	"passwd shorthand":           {body: "passwd:\n  PASSWORD: Zq7-actual-password\n", path: "passwd.PASSWORD"},
+	"passwd shorthand length":    {body: "passwd:\n  PASSWORD: -1773\n", path: "passwd.PASSWORD", canary: numberCanary},
+	"passwd short length":        {body: "passwd:\n  PASSWORD: {length: Zq7pw}\n", path: "passwd.PASSWORD"},
+	"passwd negative length":     {body: "passwd:\n  PASSWORD: {length: -1773}\n", path: "passwd.PASSWORD", canary: numberCanary},
+	"passwd long length":         {body: "passwd:\n  OTHER: 8\n  PASSWORD:\n    length: Zq7-actual-password\n", path: "passwd.PASSWORD"},
+	"passwd length with newline": {body: "passwd:\n  PASSWORD:\n    length: \"Zq7\\nabc\"\n", path: "passwd.PASSWORD"},
+	"passwd tagged length":       {body: "passwd:\n  PASSWORD: {length: !!int Zq7-actual-password}\n", path: "passwd.PASSWORD"},
+	"passwd require":             {body: "passwd:\n  PASSWORD: {length: 8, require: [Zq7-class]}\n", path: "passwd.PASSWORD"},
+	"template bytes shorthand":   {body: "template:\n  DSN:\n    pattern: \"{K}\"\n    bytes:\n      K: Zq7-actual-bytes\n", path: "template.DSN"},
+	"template bytes count":       {body: "template:\n  DSN:\n    pattern: \"{K}\"\n    bytes:\n      K: 17730000\n", path: "template.DSN", canary: numberCanary},
+	"template bytes encoding":    {body: "template:\n  DSN:\n    pattern: \"{K}\"\n    bytes:\n      K: {bytes: 16, encoding: Zq7-enc}\n", path: "template.DSN"},
+	"template field charset":     {body: "template:\n  DSN:\n    pattern: \"{K}\"\n    fields:\n      K: {length: 8, chars: Zq7-name}\n", path: "template.DSN"},
+	"template field encoding":    {body: "template:\n  DSN:\n    pattern: \"{K}\"\n    fields:\n      K: {bytes: 16, encoding: Zq7-enc}\n", path: "template.DSN"},
+	"template field bytes":       {body: "template:\n  DSN:\n    pattern: \"{K}\"\n    fields:\n      K: {bytes: 17730000}\n", path: "template.DSN", canary: numberCanary},
+	"template operator":          {body: "template:\n  DSN:\n    pattern: \"{K:Zq7}\"\n    literals: {K: v}\n", path: "template.DSN"},
+	"template replace operator":  {body: "template:\n  DSN:\n    pattern: \"{K/Zq7}\"\n    literals: {K: v}\n", path: "template.DSN"},
+	"template secretRef":         {body: "template:\n  DSN:\n    pattern: \"{R}\"\n    secretRef: {R: a/b/c/Zq7}\n", path: "template.DSN"},
+	"key shorthand":              {body: "key:\n  PRIVATE: Zq7-actual-password\n", path: "key.PRIVATE"},
+	"key encoding":               {body: "key:\n  PRIVATE: {algorithm: rsa, encoding: Zq7-enc}\n", path: "key.PRIVATE"},
+	"key rsa bits":               {body: "key:\n  PRIVATE: {algorithm: rsa, bits: 1773}\n", path: "key.PRIVATE", canary: numberCanary},
+	"key ed25519 bits":           {body: "key:\n  PRIVATE: {algorithm: ed25519, bits: 1773}\n", path: "key.PRIVATE", canary: numberCanary},
+	"secretRef shorthand":        {body: "secretRef:\n  R: Zq7-actual-password\n", path: "secretRef.R"},
+	"file mode":                  {body: "file:\n  F: {path: f.txt, mode: Zq7-mode}\n", path: "file.F"},
+	"bash output":                {body: "bash:\n  B: {exec: \"true\", output: Zq7-out}\n", path: "bash.B"},
+	"bash newline":               {body: "bash:\n  B: {exec: \"true\", newline: Zq7-nl}\n", path: "bash.B"},
+	"bash encode":                {body: "bash:\n  B: {exec: \"true\", encode: Zq7-enc}\n", path: "bash.B"},
+	"env":                        {body: "env:\n  E: {optional: Zq7-bool}\n", path: "env.E"},
+	"htpasswd":                   {body: "htpasswd:\n  H: {username: {length: Zq7pw}, password: x}\n", path: "htpasswd.H"},
+	"cert":                       {body: "cert: {ca: Zq7-bool}\n", path: "cert.ca"},
+	"validate":                   {body: "validate: Zq7-actual\nliterals: {A: b}\n", path: "validate"},
+	"literal tagged":             {body: "literals:\n  A: !!int Zq7-actual-password\n"},
+	"apiVersion":                 {body: "apiVersion: Zq7-version\nkind: Secret\nmetadata: {name: app}\n", full: true},
+	"kind":                       {body: "apiVersion: secrets.lok8s.dev/v1\nkind: Zq7-kind\nmetadata: {name: app}\n", full: true},
+}
 
 // TestDecodeBytes_ErrorNamesThePathNotTheValue: a malformed value gives an
 // error with the line, the section and the key, and without the value.
 func TestDecodeBytes_ErrorNamesThePathNotTheValue(t *testing.T) {
-	head := "apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: app\n"
-	for name, tc := range map[string]struct{ body, path string }{
-		"passwd shorthand":    {"passwd:\n  PASSWORD: Zq7-actual-password\n", "passwd.PASSWORD"},
-		"passwd short length": {"passwd:\n  PASSWORD: {length: Zq7pw}\n", "passwd.PASSWORD"},
-		"passwd long length":  {"passwd:\n  OTHER: 8\n  PASSWORD:\n    length: Zq7-actual-password\n", "passwd.PASSWORD"},
-		"bytes shorthand":     {"template:\n  DSN:\n    pattern: \"{K}\"\n    bytes:\n      K: Zq7-actual-bytes\n", "template.DSN"},
-		"validate":            {"validate: Zq7-actual\nliterals: {A: b}\n", "validate"},
-	} {
+	for name, tc := range malformedSpecs {
 		t.Run(name, func(t *testing.T) {
-			_, err := DecodeBytes([]byte(head + tc.body))
+			in := specHead + tc.body
+			if tc.full {
+				in = tc.body
+			}
+			canary := tc.canary
+			if canary == "" {
+				canary = errorCanary
+			}
+			_, err := DecodeBytes([]byte(in))
 			if err == nil {
 				t.Fatal("the malformed spec decoded")
 			}
-			if strings.Contains(err.Error(), errorCanary) {
+			if strings.Contains(err.Error(), canary) {
 				t.Errorf("the error holds the value: %v", err)
+			}
+			if tc.path == "" {
+				return
 			}
 			var e *errs.Error
 			if !errors.As(err, &e) || e.Path != tc.path || e.Line == 0 {

@@ -45,11 +45,11 @@ func parsePlaceholders(pattern string) ([]placeholderRef, error) {
 				return nil, fmt.Errorf("empty placeholder {} at offset %d", i)
 			}
 			if strings.ContainsAny(body, "{") {
-				return nil, fmt.Errorf("placeholder %q at offset %d must not contain '{'", body, i)
+				return nil, fmt.Errorf("the placeholder at offset %d must not contain '{'", i)
 			}
 			ref, err := splitPlaceholder(body)
 			if err != nil {
-				return nil, fmt.Errorf("placeholder {%s} at offset %d: %v", body, i, err)
+				return nil, fmt.Errorf("the placeholder at offset %d: %v", i, err)
 			}
 			refs = append(refs, ref)
 			i += 1 + end + 1
@@ -77,7 +77,7 @@ func splitPlaceholder(body string) (placeholderRef, error) {
 	name := body[:cut]
 	op := body[cut:]
 	if name == "" {
-		return placeholderRef{}, fmt.Errorf("empty field name before operator %q", op)
+		return placeholderRef{}, fmt.Errorf("empty field name before the operator")
 	}
 	// Validate the operator's SHAPE eagerly (value-independent). The range checks
 	// in applySubstring are deferred to Substitute (they need the actual value).
@@ -101,7 +101,7 @@ func validateOperatorShape(op string) error {
 		// Must be exactly the sig once or twice.
 		sig := string(op[0])
 		if op != sig && op != sig+sig {
-			return fmt.Errorf("case operator %q must be %q or %q", op, sig, sig+sig)
+			return fmt.Errorf("case operator must be %q or %q", sig, sig+sig)
 		}
 		return nil
 	case '%':
@@ -118,7 +118,7 @@ func validateOperatorShape(op string) error {
 	case ':':
 		return validateSubstringShape(op)
 	default:
-		return fmt.Errorf("unknown operator %q", op)
+		return fmt.Errorf("unknown operator")
 	}
 }
 
@@ -136,18 +136,18 @@ func validateSubstringShape(op string) error {
 	}
 	off, err := strconv.Atoi(strings.TrimSpace(offStr))
 	if err != nil {
-		return fmt.Errorf("substring operator %q: offset must be an integer", op)
+		return fmt.Errorf("substring operator: offset must be an integer")
 	}
 	if off < 0 {
-		return fmt.Errorf("substring operator %q: offset must be >= 0", op)
+		return fmt.Errorf("substring operator: offset must be >= 0")
 	}
 	if hasLen {
 		n, err := strconv.Atoi(strings.TrimSpace(lenStr))
 		if err != nil {
-			return fmt.Errorf("substring operator %q: length must be an integer", op)
+			return fmt.Errorf("substring operator: length must be an integer")
 		}
 		if n < 0 {
-			return fmt.Errorf("substring operator %q: length must be >= 0", op)
+			return fmt.Errorf("substring operator: length must be >= 0")
 		}
 	}
 	return nil
@@ -184,7 +184,7 @@ func applyOperator(value, op string) (string, error) {
 	case ':':
 		return applySubstring(value, op)
 	default:
-		return "", fmt.Errorf("unknown operator %q", op)
+		return "", fmt.Errorf("unknown operator")
 	}
 }
 
@@ -203,7 +203,7 @@ func applyCaseOp(value, op string, transform func(string) string) (string, error
 		_, w := utf8.DecodeRuneInString(value)
 		return transform(value[:w]) + value[w:], nil
 	default:
-		return "", fmt.Errorf("case operator %q must be %q or %q", op, sig, sig+sig)
+		return "", fmt.Errorf("case operator must be %q or %q", sig, sig+sig)
 	}
 }
 
@@ -232,7 +232,7 @@ func applyStripPrefix(value, op string) (string, error) {
 // after one or two leading sig bytes. A bare sig (e.g. "%") strips nothing.
 func operatorArg(op string, sig byte) (string, error) {
 	if op[0] != sig {
-		return "", fmt.Errorf("internal: operator %q does not start with %q", op, string(sig))
+		return "", fmt.Errorf("internal: the operator does not start with %q", string(sig))
 	}
 	n := 1
 	if len(op) >= 2 && op[1] == sig {
@@ -240,7 +240,7 @@ func operatorArg(op string, sig byte) (string, error) {
 	}
 	// A THIRD leading sig would be a malformed operator (e.g. "%%%").
 	if len(op) > n && op[n] == sig {
-		return "", fmt.Errorf("malformed operator %q (too many %q)", op, string(sig))
+		return "", fmt.Errorf("malformed operator (too many %q)", string(sig))
 	}
 	return op[n:], nil
 }
@@ -259,12 +259,12 @@ func applyReplace(value, op string) (string, error) {
 	// rest is "old/new". Split on the FIRST '/'.
 	sep := strings.IndexByte(rest, '/')
 	if sep < 0 {
-		return "", fmt.Errorf("replace operator %q must be /old/new or //old/new", op)
+		return "", fmt.Errorf("replace operator must be /old/new or //old/new")
 	}
 	search := rest[:sep]
 	repl := rest[sep+1:]
 	if search == "" {
-		return "", fmt.Errorf("replace operator %q has an empty search string", op)
+		return "", fmt.Errorf("replace operator has an empty search string")
 	}
 	if all {
 		return strings.ReplaceAll(value, search, repl), nil
@@ -288,10 +288,10 @@ func applySubstring(value, op string) (string, error) {
 	}
 	off, err := strconv.Atoi(strings.TrimSpace(offStr))
 	if err != nil {
-		return "", fmt.Errorf("substring operator %q: offset must be an integer", op)
+		return "", fmt.Errorf("substring operator: offset must be an integer")
 	}
 	if off < 0 || off > len(value) {
-		return "", fmt.Errorf("substring operator %q: offset %d out of range for value of length %d", op, off, len(value))
+		return "", fmt.Errorf("substring operator: offset %d is out of range for the value", off)
 	}
 	// No colon → substring to end. A colon with a missing length (`:off:`) is
 	// malformed — kept in lockstep with validateSubstringShape, which rejects it
@@ -301,10 +301,10 @@ func applySubstring(value, op string) (string, error) {
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(lenStr))
 	if err != nil {
-		return "", fmt.Errorf("substring operator %q: length must be an integer", op)
+		return "", fmt.Errorf("substring operator: length must be an integer")
 	}
 	if n < 0 || off+n > len(value) {
-		return "", fmt.Errorf("substring operator %q: length %d out of range at offset %d for value of length %d", op, n, off, len(value))
+		return "", fmt.Errorf("substring operator: length %d at offset %d is out of range for the value", n, off)
 	}
 	return value[off : off+n], nil
 }
@@ -337,7 +337,7 @@ func (t TemplateEntry) Substitute(values map[string]string) (string, error) {
 			body := t.Pattern[i+1 : i+1+end]
 			ref, err := splitPlaceholder(body)
 			if err != nil {
-				return "", fmt.Errorf("internal: placeholder {%s}: %v", body, err)
+				return "", fmt.Errorf("internal: the placeholder at offset %d: %v", i, err)
 			}
 			v, ok := values[ref.name]
 			if !ok {

@@ -123,7 +123,7 @@ func (r *TemplateSecretRef) UnmarshalYAML(node *yaml.Node) error {
 			r.Namespace = parts[1]
 			r.Key = parts[2]
 		default:
-			return kyaml.NodeErrf(node, "secretRef shorthand must be \"key\", \"secret/key\", or \"secret/namespace/key\", got %q", s)
+			return kyaml.NodeErrf(node, "secretRef shorthand must be \"key\", \"secret/key\", or \"secret/namespace/key\"")
 		}
 	case yaml.MappingNode:
 		var raw SecretRefEntry
@@ -282,10 +282,10 @@ func (f TemplateField) validate() error {
 		return fmt.Errorf("must set either a charset field (length + optional chars/require) or a bytes field (bytes + optional encoding)")
 	case bytesMode:
 		if f.Bytes <= 0 {
-			return fmt.Errorf("bytes must be > 0, got %d", f.Bytes)
+			return fmt.Errorf("bytes must be > 0")
 		}
 		if f.Bytes > MaxFieldBytes {
-			return fmt.Errorf("bytes must be <= %d, got %d (a secret this large is almost certainly a typo)", MaxFieldBytes, f.Bytes)
+			return fmt.Errorf("bytes must be <= %d (a secret this large is almost certainly a typo)", MaxFieldBytes)
 		}
 		if _, err := validateEncoding(f.EffectiveEncoding()); err != nil {
 			return err
@@ -311,7 +311,7 @@ func (f TemplateField) validate() error {
 		}
 		for _, c := range req {
 			if !charset.PoolContains(chars, c) {
-				return fmt.Errorf("charset %q has no %q characters to satisfy require", f.EffectiveChars(), c)
+				return fmt.Errorf("the charset has no %q characters to satisfy require", c)
 			}
 		}
 		return nil
@@ -364,7 +364,7 @@ func validateEncoding(enc string) (string, error) {
 	case EncBase64, EncBase64URL, EncBase64Unpadded, EncBase64URLUnpadds, EncHex:
 		return enc, nil
 	default:
-		return "", fmt.Errorf("unknown encoding %q (valid: base64, base64url, base64-unpadded, base64url-unpadded, hex)", enc)
+		return "", fmt.Errorf("unknown encoding (valid: base64, base64url, base64-unpadded, base64url-unpadded, hex)")
 	}
 }
 

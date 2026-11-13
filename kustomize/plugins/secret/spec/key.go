@@ -81,17 +81,17 @@ func (k KeyEntry) validate() error {
 	switch k.EffectiveAlgorithm() {
 	case KeyAlgoRSA:
 		if k.Bits != 0 && k.Bits < MinRSABits {
-			return fmt.Errorf("rsa bits must be >= %d, got %d", MinRSABits, k.Bits)
+			return fmt.Errorf("rsa bits must be >= %d", MinRSABits)
 		}
 	case KeyAlgoEd25519:
 		if k.Bits != 0 {
-			return fmt.Errorf("ed25519 has a fixed key size — remove bits (got %d)", k.Bits)
+			return fmt.Errorf("ed25519 has a fixed key size — remove bits")
 		}
 	default:
-		return fmt.Errorf("unknown algorithm %q (valid: rsa, ed25519)", k.Algorithm)
+		return fmt.Errorf("unknown algorithm (valid: rsa, ed25519)")
 	}
 	if enc := k.EffectiveEncoding(); enc != KeyEncPKCS8 {
-		return fmt.Errorf("unknown encoding %q (only pkcs8 is supported)", enc)
+		return fmt.Errorf("unknown encoding (only pkcs8 is supported)")
 	}
 	return nil
 }

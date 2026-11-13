@@ -232,7 +232,7 @@ func generateCharsetField(f specpkg.TemplateField) (string, error) {
 	}
 	for _, c := range required {
 		if !charset.PoolContains(chars, c) {
-			return "", fmt.Errorf("charset %q has no %q characters to satisfy require", f.EffectiveChars(), c)
+			return "", fmt.Errorf("the charset has no %q characters to satisfy require", c)
 		}
 	}
 	if len(required) == 0 {
@@ -276,7 +276,7 @@ func encodeBytes(b []byte, enc string) (string, error) {
 	case specpkg.EncHex:
 		return hex.EncodeToString(b), nil
 	default:
-		return "", fmt.Errorf("unknown encoding %q", enc)
+		return "", fmt.Errorf("unknown encoding")
 	}
 }
 

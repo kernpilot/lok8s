@@ -717,11 +717,18 @@ Trade-offs to know:
 
 ### Error messages
 
-Errors are reported with line numbers from the source CRD:
+An error names the line and column, the section and the key, and the YAML
+type of a value. It never prints the value: a spec value can be a secret
+(for example a password put where a length or an algorithm name goes).
 
 ```
-secret plugin: line 14: passwd.NUXT_SESSION_PASSWORD: length must be > 0, got 0
+secret plugin: line 14:13: passwd.NUXT_SESSION_PASSWORD: passwd length must be > 0
+secret plugin: line 6:13: passwd.PASSWORD: cannot unmarshal !!str value into int
 ```
+
+kustomize writes the generator config again before the plugin reads it, so
+the line is a line of that copy. The section and the key say where the
+error is in the source.
 
 ## Helm Charts via khelm
 

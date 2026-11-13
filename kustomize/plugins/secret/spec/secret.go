@@ -156,10 +156,10 @@ func keyAt(m *yaml.Node, line, col int) (string, *yaml.Node) {
 // generator runs).
 func (s *Secret) validate() error {
 	if s.APIVersion != APIVersion {
-		return errs.Newf("apiVersion must be %q, got %q", APIVersion, s.APIVersion)
+		return errs.Newf("apiVersion must be %q", APIVersion)
 	}
 	if s.Kind != Kind {
-		return errs.Newf("kind must be %q, got %q", Kind, s.Kind)
+		return errs.Newf("kind must be %q", Kind)
 	}
 	if s.Metadata.Name == "" {
 		return errs.New("metadata.name is required")
