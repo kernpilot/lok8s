@@ -76,7 +76,11 @@ func keysOnlyProject(t *testing.T) (*config.Paths, string, string) {
 func keysOnlyExecProject(t *testing.T) (*config.Paths, string) {
 	t.Helper()
 	p, domainDir := artifactsProject(t)
-	t.Setenv(config.KustomizePluginHomeEnv, filepath.Join(p.Base, ".kustomize"))
+	home := filepath.Join(p.Base, ".kustomize")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.KustomizePluginHomeEnv, home)
 	return p, domainDir
 }
 
@@ -680,6 +684,99 @@ func TestKeysOnlyProbesThePlugin(t *testing.T) {
 			}
 			if left := dirEntries(t, tmp); len(left) != 0 {
 				t.Errorf("the probe left %v in TMPDIR", left)
+			}
+		})
+	}
+}
+
+// kustomize takes the first plugin home that exists, so an absent home
+// would let it load a plugin from XDG_CONFIG_HOME or HOME that lo did not
+// check. --keys-only refuses an absent home before the render. The old
+// plugin there would write a canary; it never runs. bats: "build::keys_only
+// refuses an absent plugin home"; parity-build runs the real kustomize.
+func TestKeysOnlyRefusesAnAbsentPluginHome(t *testing.T) {
+	p, _ := keysOnlyExecProject(t)
+	stubRender(t, p, twoDocRender)
+	home := filepath.Join(p.Base, ".kustomize")
+	if err := os.Remove(home); err != nil {
+		t.Fatal(err)
+	}
+	xdg := filepath.Join(p.Base, "xdg")
+	canary := filepath.Join(p.Base, "old-plugin-ran")
+	old := filepath.Join(xdg, "kustomize", "plugin", "secrets.lok8s.dev", "v1", "secret", "Secret")
+	writeFileT(t, old, "#!/bin/sh\ntouch '"+canary+"'\necho keys-only\n")
+	if err := os.Chmod(old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	klog := filepath.Join(p.Base, "kustomize-keys.log")
+	t.Setenv("KUSTOMIZE_STUB_KEYSLOG", klog)
+	var stdout, stderr bytes.Buffer
+	if err := KeysOnly(t.Context(), Options{Paths: p, Domain: "d.dev", Stderr: &stderr}, &stdout); !errors.Is(err, ErrHandled) {
+		t.Fatalf("KeysOnly = %v, want ErrHandled\n%s", err, stderr.String())
+	}
+	want := "[error] lo build --keys-only: the kustomize plugin home .kustomize does not exist, so kustomize would load plugins from other directories that lo does not check — run 'lo toolchain install' to install the plugin of this lo\n"
+	if stderr.String() != want {
+		t.Errorf("stderr = %q\nwant %q", stderr.String(), want)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing", stdout.String())
+	}
+	for _, f := range []string{klog, canary} {
+		if _, err := os.Stat(f); err == nil {
+			t.Errorf("%s exists: the render or the old plugin ran", f)
+		}
+	}
+}
+
+// kustomize gets the plugin home that lo checked, as KUSTOMIZE_PLUGIN_HOME.
+func TestKeysOnlyGivesKustomizeTheCheckedHome(t *testing.T) {
+	p, _, _ := keysOnlyProject(t)
+	stubRender(t, p, twoDocRender)
+	stubSecretPlugin(t, p, "printf 'dry-run\\nkeys-only\\n'")
+	envlog := filepath.Join(p.Base, "kustomize-env.log")
+	t.Setenv("KUSTOMIZE_STUB_ENVLOG", envlog)
+	var stdout, stderr bytes.Buffer
+	if err := KeysOnly(t.Context(), Options{Paths: p, Domain: "d.dev", Stderr: &stderr}, &stdout); err != nil {
+		t.Fatalf("KeysOnly: %v\n%s", err, stderr.String())
+	}
+	raw, err := os.ReadFile(envlog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(raw)), filepath.Join(p.Base, ".kustomize"); got != want {
+		t.Errorf("kustomize got KUSTOMIZE_PLUGIN_HOME %q, want %q", got, want)
+	}
+}
+
+// A probe that cannot start or that a signal stops has its own message:
+// it is not a plugin without the keys-only run.
+func TestKeysOnlyProbeFailureMessages(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, tmpdir, want string
+	}{
+		{"no temporary directory", "printf 'keys-only\\n'", "no-such-dir", "[error] lo build --keys-only: cannot make a temporary directory for the check of the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret: "},
+		{"stopped by a signal", "kill -TERM $$", "", "[error] lo build --keys-only: the check of the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret was interrupted\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _, _ := keysOnlyProject(t)
+			stubRender(t, p, twoDocRender)
+			stubSecretPlugin(t, p, tc.body)
+			if tc.tmpdir != "" {
+				t.Setenv("TMPDIR", filepath.Join(p.Base, tc.tmpdir))
+			}
+			var stdout, stderr bytes.Buffer
+			if err := KeysOnly(t.Context(), Options{Paths: p, Domain: "d.dev", Stderr: &stderr}, &stdout); !errors.Is(err, ErrHandled) {
+				t.Fatalf("KeysOnly = %v, want ErrHandled\n%s", err, stderr.String())
+			}
+			if !strings.HasPrefix(stderr.String(), tc.want) {
+				t.Errorf("stderr = %q\nwant the prefix %q", stderr.String(), tc.want)
+			}
+			if strings.Contains(stderr.String(), "does not have the keys-only run") {
+				t.Errorf("stderr names a plugin without the keys-only run: %q", stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Errorf("stdout = %q, want nothing", stdout.String())
 			}
 		})
 	}

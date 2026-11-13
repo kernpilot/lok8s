@@ -204,25 +204,43 @@ func keysOnlyUnparsed(stderr io.Writer, domainName, artifactPath string) {
 // know the flag stops on the store-free switch and prints nothing. A
 // plugin before v0.2.0 opens "--capabilities" as its spec file, which does
 // not exist, and fails. hack/proof-secrets-keys-only-skew.sh runs the
-// probe on every release. A project without the plugin file renders no
-// secrets.lok8s.dev Secret (the render fails on such a generator), so
-// there is nothing to check.
+// probe on every release.
+//
+// The plugin home must exist. kustomize takes the first plugin home that
+// exists: KUSTOMIZE_PLUGIN_HOME, then directories under XDG_CONFIG_HOME
+// and HOME. With an absent home it would load a plugin that lo did not
+// check. The home that lo checked goes to kustomize as
+// KUSTOMIZE_PLUGIN_HOME (o.pluginHome). A home without the plugin file
+// renders no secrets.lok8s.dev Secret (the render fails on such a
+// generator), so there is no plugin to check.
+//
+// The probe is a compatibility check, not isolation or attestation: a
+// plugin that lies about its capabilities, or a file that is changed
+// after the probe, gets through.
 func checkKeysOnlyPlugin(ctx context.Context, o *Options, stderr io.Writer) error {
 	if mode, err := render.CurrentMode(); err == nil && mode == render.ModeInProcess {
 		return nil
 	}
-	plugin := filepath.Join(config.KustomizePluginHome(o.Paths), filepath.FromSlash(toolchain.SecretPluginRel))
+	home := config.KustomizePluginHome(o.Paths)
+	if !fsutil.DirExists(home) {
+		ui.ErrorTo(stderr, "lo build --keys-only: the kustomize plugin home %s does not exist, so kustomize would load plugins from other directories that lo does not check — run 'lo toolchain install' to install the plugin of this lo",
+			config.RelTo(o.Paths.Base, home))
+		return ErrHandled
+	}
+	o.pluginHome = home
+	plugin := filepath.Join(home, filepath.FromSlash(toolchain.SecretPluginRel))
 	if !fsutil.FileExists(plugin) {
 		return nil
 	}
+	rel := config.RelTo(o.Paths.Base, plugin)
 	refuse := func() error {
-		ui.ErrorTo(stderr, "the Secret plugin %s does not have the keys-only run (an older plugin would read the secrets store) — run 'lo toolchain install' to install the plugin of this lo",
-			config.RelTo(o.Paths.Base, plugin))
+		ui.ErrorTo(stderr, "the Secret plugin %s does not have the keys-only run (an older plugin would read the secrets store) — run 'lo toolchain install' to install the plugin of this lo", rel)
 		return ErrHandled
 	}
 	dir, err := os.MkdirTemp("", "lok8s-keys-only-")
 	if err != nil {
-		return refuse()
+		ui.ErrorTo(stderr, "lo build --keys-only: cannot make a temporary directory for the check of the Secret plugin %s: %v", rel, err)
+		return ErrHandled
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 	var out strings.Builder
@@ -245,6 +263,10 @@ func checkKeysOnlyPlugin(ctx context.Context, o *Options, stderr io.Writer) erro
 				return nil
 			}
 		}
+	}
+	if ctx.Err() != nil || execx.ExitCode(err) > 128 {
+		ui.ErrorTo(stderr, "lo build --keys-only: the check of the Secret plugin %s was interrupted", rel)
+		return ErrHandled
 	}
 	return refuse()
 }

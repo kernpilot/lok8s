@@ -46,6 +46,10 @@ type Options struct {
 	// Runner runs the split's yq and sops subprocesses. nil =
 	// execx.NewRunner(Paths); tests install a fake.
 	Runner execx.Runner
+	// pluginHome is the plugin home that checkKeysOnlyPlugin checked (the
+	// keys-only exec render only). runKustomize gives it to kustomize as
+	// KUSTOMIZE_PLUGIN_HOME.
+	pluginHome string
 }
 
 func (o *Options) stderr() io.Writer {
@@ -312,9 +316,13 @@ func runKustomize(ctx context.Context, o Options, domainDir, kubeconfig string, 
 	// render.Build writes the Secret plugin's keys-only setting on every
 	// render, from o.KeysOnly: 0 unless this is lo build --keys-only,
 	// whatever the process environment holds.
+	env := kustomizeEnv(o.Paths, kubeconfig, secretsDisable)
+	if o.pluginHome != "" {
+		env = append(env, config.KustomizePluginHomeEnv+"="+o.pluginHome)
+	}
 	return render.Build(ctx, domainDir, render.Options{
 		Paths:    o.Paths,
-		Env:      kustomizeEnv(o.Paths, kubeconfig, secretsDisable),
+		Env:      env,
 		KeysOnly: o.KeysOnly,
 		Stderr:   stderr,
 	})

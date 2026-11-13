@@ -24,7 +24,8 @@ _run_stubbed() {
   local entry="${1}"
   shift
   local proj="${BATS_TEST_TMPDIR}/proj" stub="${BATS_TEST_TMPDIR}/stub" tool
-  mkdir -p "${proj}/clusters/d.dev" "${stub}"
+  # .kustomize: the plugin home, which --keys-only requires.
+  mkdir -p "${proj}/clusters/d.dev" "${proj}/.kustomize" "${stub}"
   printf 'kind: Lo\nmetadata:\n  name: d\n' > "${proj}/clusters/d.dev/cluster.lok8s.yaml"
   printf 'resources:\n  - cm.yaml\n' > "${proj}/clusters/d.dev/kustomization.yaml"
   for tool in kubectl kind tilt docker kustomize; do

@@ -11,6 +11,10 @@ setup() {
   setup_tmpdir
 
   export PATH_BASE="${BATS_TEST_TMPDIR}"
+  # The plugin home of the project: --keys-only refuses a project without
+  # one (kustomize would look for plugins elsewhere).
+  unset KUSTOMIZE_PLUGIN_HOME
+  mkdir -p "${PATH_BASE}/.kustomize"
 
   # Stub import
   import() { :; }
@@ -516,6 +520,57 @@ YAML
   done
   run ls -A "${TMPDIR}"
   assert_output ""
+}
+
+# kustomize takes the first plugin home that exists, so an absent home
+# would let it load a plugin from XDG_CONFIG_HOME or HOME that lo did not
+# check. --keys-only refuses an absent home before the render; the old
+# plugin there would write a canary and never runs. kustomize gets the home
+# that lo checked. Go: TestKeysOnlyRefusesAnAbsentPluginHome,
+# TestKeysOnlyGivesKustomizeTheCheckedHome.
+@test "build::keys_only refuses an absent plugin home" {
+  export KENV="${BATS_TEST_TMPDIR}/kenv"
+  kustomize() { echo "home=${KUSTOMIZE_PLUGIN_HOME-<unset>}" > "${KENV}"; printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
+  export -f kustomize
+  rm -rf "${BATS_TEST_TMPDIR}/.kustomize"
+  export XDG_CONFIG_HOME="${BATS_TEST_TMPDIR}/xdg"
+  local old="${XDG_CONFIG_HOME}/kustomize/plugin/secrets.lok8s.dev/v1/secret/Secret"
+  mkdir -p "${old%/*}"
+  printf '#!/usr/bin/env bash\ntouch "%s"\necho keys-only\n' "${BATS_TEST_TMPDIR}/old-plugin-ran" > "${old}"
+  chmod +x "${old}"
+  run build::keys_only "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "[error] lo build --keys-only: the kustomize plugin home .kustomize does not exist, so kustomize would load plugins from other directories that lo does not check — run 'lo toolchain install' to install the plugin of this lo"
+  refute_output --partial "kind: ConfigMap"
+  [[ ! -e "${KENV}" && ! -e "${BATS_TEST_TMPDIR}/old-plugin-ran" ]] || { echo "the render or the old plugin ran"; return 1; }
+
+  mkdir -p "${BATS_TEST_TMPDIR}/.kustomize"
+  run build::keys_only "test.lok8s.dev"
+  assert_success
+  [ "$(cat "${KENV}")" = "home=${BATS_TEST_TMPDIR}/.kustomize" ]
+}
+
+# A probe that cannot start or that a signal stops has its own message: it
+# is not a plugin without the keys-only run. Go:
+# TestKeysOnlyProbeFailureMessages.
+@test "build::keys_only names a probe that cannot start or is interrupted" {
+  kustomize() { printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
+  export -f kustomize
+  _secret_plugin 'keys-only\n' 0
+  TMPDIR="${BATS_TEST_TMPDIR}/no-such-dir" run build::keys_only "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "[error] lo build --keys-only: cannot make a temporary directory for the check of the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret"
+  refute_output --partial "does not have the keys-only run"
+  refute_output --partial "kind: ConfigMap"
+
+  printf '#!/usr/bin/env bash\nkill -TERM $$\n' > "${BATS_TEST_TMPDIR}/.kustomize/secrets.lok8s.dev/v1/secret/Secret"
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  run build::keys_only "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "[error] lo build --keys-only: the check of the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret was interrupted"
+  refute_output --partial "does not have the keys-only run"
+  refute_output --partial "kind: ConfigMap"
 }
 
 # The probe can do nothing with any plugin version: it runs in an empty

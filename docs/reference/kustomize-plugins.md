@@ -467,6 +467,11 @@ execs the plugin, and refuses a plugin that does not print `keys-only`. lo
 runs the check so that an older plugin can do nothing with it: in an empty
 temporary directory, with an empty stdin, `PATH_SECRETS` at a path that does
 not exist, `LOK8S_SECRETS_DISABLE=1` and `LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0`.
+The check is a compatibility check. It is not isolation and not
+attestation: a plugin that prints `keys-only` but does not have the run, or
+a plugin file that is replaced after the check (for example through a
+symlink), gets through. Install the plugin of your `lo` from a source that
+you trust.
 
 **Precedence:** `LOK8S_SECRETS_DISABLE` wins over `LOK8S_SECRETS_OUTPUT` — disable
 means "do nothing at all", so the store is never consulted even if

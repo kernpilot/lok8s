@@ -78,6 +78,8 @@ func mainFixture(t *testing.T) (proj, log string) {
 		"clusters/patch.dev/plain.yaml":         "apiVersion: v1\nkind: Secret\nmetadata:\n  name: plain\n  namespace: demo\ndata:\n  TOKEN: dG9rZW4=\n",
 		"clusters/patch.dev/secret.yaml":        "apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: demo\nliterals:\n  USER: alice\n",
 		"clusters/patch.dev/secrets/.gitignore": "*\n",
+		// The plugin home: --keys-only refuses a project without one.
+		".kustomize/.keep": "",
 	}
 	for name, content := range files {
 		path := filepath.Join(proj, filepath.FromSlash(name))

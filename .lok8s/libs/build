@@ -511,22 +511,41 @@ build::_render_kubeconfig() {
 # capabilities. A plugin from v0.2.0 on that does not know the flag stops
 # on the store-free switch and prints nothing. A plugin before v0.2.0 opens
 # "--capabilities" as its spec file, which does not exist, and fails.
-# hack/proof-secrets-keys-only-skew.sh runs the probe on every release. A
-# project without the plugin file renders no secrets.lok8s.dev Secret (the
-# render fails on such a generator), so there is nothing to check.
+# hack/proof-secrets-keys-only-skew.sh runs the probe on every release.
+#
+# The plugin home must exist. kustomize takes the first plugin home that
+# exists: KUSTOMIZE_PLUGIN_HOME, then directories under XDG_CONFIG_HOME and
+# HOME. With an absent home it would load a plugin that lo did not check.
+# A home without the plugin file renders no secrets.lok8s.dev Secret (the
+# render fails on such a generator), so there is no plugin to check. The
+# probe is a compatibility check, not isolation or attestation: a plugin
+# that lies about its capabilities, or a file that is changed after the
+# probe, gets through.
 build::_keys_only_capable() {
-  local plugin="${1}/secrets.lok8s.dev/v1/secret/Secret" caps=""
+  local home="${1}" plugin="${1}/secrets.lok8s.dev/v1/secret/Secret" caps="" rc=0
+  if [[ ! -d "${home}" ]]; then
+    error "lo build --keys-only: the kustomize plugin home ${home#"${PATH_BASE}/"} does not exist, so kustomize would load plugins from other directories that lo does not check — run 'lo toolchain install' to install the plugin of this lo"
+    return 1
+  fi
   [[ -f "${plugin}" ]] || return 0
   caps=$(
-    probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/lok8s-keys-only-XXXXXX") || exit 1
+    probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/lok8s-keys-only-XXXXXX") || { echo "lok8s:no-probe-dir"; exit 1; }
     trap 'rm -rf "${probe_dir}"' EXIT
-    cd "${probe_dir}" || exit 1
+    cd "${probe_dir}" || { echo "lok8s:no-probe-dir"; exit 1; }
     PATH_SECRETS="${probe_dir}/store" \
     LOK8S_SECRETS_DISABLE=1 \
     LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0 \
       "${plugin}" --capabilities </dev/null 2>/dev/null
-  ) || caps=""
-  [[ $'\n'"${caps}"$'\n' == *$'\nkeys-only\n'* ]] && return 0
+  ) || rc=$?
+  if [[ "${caps}" == "lok8s:no-probe-dir" ]]; then
+    error "lo build --keys-only: cannot make a temporary directory for the check of the Secret plugin ${plugin#"${PATH_BASE}/"}"
+    return 1
+  fi
+  (( rc == 0 )) && [[ $'\n'"${caps}"$'\n' == *$'\nkeys-only\n'* ]] && return 0
+  if (( rc > 128 )); then
+    error "lo build --keys-only: the check of the Secret plugin ${plugin#"${PATH_BASE}/"} was interrupted"
+    return 1
+  fi
   error "the Secret plugin ${plugin#"${PATH_BASE}/"} does not have the keys-only run (an older plugin would read the secrets store) — run 'lo toolchain install' to install the plugin of this lo"
   return 1
 }

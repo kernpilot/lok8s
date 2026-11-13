@@ -498,6 +498,27 @@ grep -qF "[error] the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secre
   || fail "build --keys-only refuses an older plugin — the plugin got more than the probe: $(cat "${WORK}/old-plugin.log")"
 mv "${WORK}/Secret.built" "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret/Secret"
 
+# An absent plugin home is refused before the render: the real kustomize
+# takes the first plugin home that exists, so it would load the old plugin
+# under XDG_CONFIG_HOME, which lo did not check. That plugin writes a
+# canary; it must not run. LO_RENDER=exec as above.
+mv "${PROJ}/.kustomize" "${WORK}/kustomize-home"
+mkdir -p "${WORK}/xdg/kustomize/plugin/secrets.lok8s.dev/v1/secret"
+cat > "${WORK}/xdg/kustomize/plugin/secrets.lok8s.dev/v1/secret/Secret" <<EOF
+#!/usr/bin/env bash
+touch "${WORK}/xdg-plugin-ran"
+printf 'dry-run\nkeys-only\n'
+EOF
+chmod +x "${WORK}/xdg/kustomize/plugin/secrets.lok8s.dev/v1/secret/Secret"
+export LO_RENDER=exec XDG_CONFIG_HOME="${WORK}/xdg"
+check "build --keys-only refuses an absent plugin home"  : build --domain blank.dev --keys-only
+unset LO_RENDER XDG_CONFIG_HOME
+grep -qF "[error] lo build --keys-only: the kustomize plugin home .kustomize does not exist" "${WORK}/go.err" \
+  || fail "build --keys-only refuses an absent plugin home — no refusal on stderr"
+[[ ! -s "${WORK}/go.out" && ! -s "${WORK}/bash.out" ]] || fail "build --keys-only refuses an absent plugin home — stdout is not empty"
+[[ ! -e "${WORK}/xdg-plugin-ran" ]] || fail "build --keys-only refuses an absent plugin home — the plugin under XDG_CONFIG_HOME ran"
+mv "${WORK}/kustomize-home" "${PROJ}/.kustomize"
+
 # The output guard: a render that holds an object with the keys-only marker
 # (here a plain Secret resource that carries the annotation) is never written
 # into the domain's artifacts. Both sides refuse with the same message and

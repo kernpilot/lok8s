@@ -180,6 +180,17 @@ stops with an error and renders nothing. Run `lo toolchain install` to
 install the plugin of your `lo`. `lo-full` renders with its own plugin and
 needs no check.
 
+The plugin home (`KUSTOMIZE_PLUGIN_HOME`, else `<project>/.kustomize`) must
+exist. kustomize uses the first plugin home that exists, and without the
+project's home it would load plugins from directories under
+`XDG_CONFIG_HOME` or `HOME` that `lo` does not check. `lo` gives kustomize
+the home that it checked.
+
+The check is a compatibility check. It is not isolation and not
+attestation: a plugin that prints `keys-only` but does not have the run, or
+a plugin file that is replaced after the check, gets through. Install the
+plugin of your `lo` from a source that you trust.
+
 `lo build` never writes an object with the `secrets.lok8s.dev/keys-only`
 annotation into `artifacts.yaml` or the split directory, and `lo deploy`
 does not apply an artifact that holds one. Both commands parse the YAML, so
