@@ -19,6 +19,7 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -58,8 +59,9 @@ var (
 	// of an object (bash: deploy::_has_objects). Robust enough for
 	// kustomize output, which always emits a `kind:` field per doc.
 	hasObjectsRe = regexp.MustCompile(`(?m)^kind:[ \t\v\f\r]+[A-Za-z]`)
-	// docSepRe splits a kustomize stream on its `---` document separators.
-	docSepRe = regexp.MustCompile(`(?m)^---[ \t]*$`)
+	// docSepRe splits a kustomize stream on its `---` document separators,
+	// with a LF or a CRLF line end.
+	docSepRe = regexp.MustCompile(`(?m)^---[ \t]*\r?$`)
 )
 
 // Deployer runs the apply phases. Applier carries the runner + writers.
@@ -158,12 +160,16 @@ func (d *Deployer) ApplyFiltered(ctx context.Context, domain, labelKey, labelVal
 	}
 
 	// Filter the checked copy by the (full) label key = value.
-	subset := selectDocs(string(raw), func(doc *yaml.Node) bool {
+	subset, err := selectDocs(string(raw), func(doc *yaml.Node) bool {
 		lbl := yqsem.MapGet(yqsem.MapGet(yqsem.MapGet(doc, "metadata"), "labels"), labelKey)
 		// yq `==` compares a scalar's TEXT: an unquoted `true` or `1` label
 		// matches "true"/"1" (verified against yq v4.53).
 		return lbl != nil && lbl.Kind == yaml.ScalarNode && lbl.Tag != "!!null" && lbl.Value == labelValue
 	})
+	if err != nil {
+		ui.ErrorTo(d.stderr(), "cannot select the objects of %s: %v", artifact, err)
+		return ErrHandled
+	}
 	if !HasObjects(subset) {
 		ui.WarnTo(d.stderr(), "no objects match %s=%s in %s", labelKey, labelValue, artifact)
 		return nil
@@ -195,9 +201,13 @@ func (d *Deployer) applyManifest(ctx context.Context, label, manifest string, ab
 	}
 
 	// Phase 1: CRDs first (subset small enough to stay a string).
-	crds := selectDocs(manifest, func(doc *yaml.Node) bool {
+	crds, err := selectDocs(manifest, func(doc *yaml.Node) bool {
 		return yqsem.OrNull(yqsem.MapGet(doc, "kind"), "") == "CustomResourceDefinition"
 	})
+	if err != nil {
+		ui.ErrorTo(d.stderr(), "cannot select the CRDs of %s: %v", label, err)
+		return ErrHandled
+	}
 	if HasObjects(crds) {
 		ui.DebugTo(d.stderr(), "Applying CRDs for %s", label)
 		if _, rc := d.Applier.Apply(ctx, label+" crds", crds); rc != 0 && abortOnError {
@@ -256,25 +266,34 @@ func splitDocs(stream string) []string {
 }
 
 // selectDocs is `yq 'select(<pred>)'` over the stream: the RAW text of every
-// document whose parsed root satisfies pred, joined by `---` separators,
-// with a final newline as yq writes it. Raw text (not a re-marshal) so the
-// applied bytes are the artifact's own: each document keeps its final
-// newlines, so a last `|+` block scalar keeps its value.
-func selectDocs(stream string, pred func(doc *yaml.Node) bool) string {
+// document whose parsed root satisfies pred, joined by `---` lines. Raw
+// text (not a re-marshal) so the applied bytes are the artifact's own: each
+// document keeps its bytes up to the next separator, and lo adds only the
+// separator lines. A document that is followed by a separator ends in a
+// newline; the last one of the stream keeps its end as it is (with no
+// final newline, a last `|+` block scalar has no final newline either).
+//
+// A part between two separators that holds more than one YAML document (a
+// `---` line with more text on it, such as `--- # note`) is an error: its
+// raw text would carry the documents after the first one, which pred did
+// not see.
+func selectDocs(stream string, pred func(doc *yaml.Node) bool) (string, error) {
 	var kept []string
-	for _, doc := range splitDocs(stream) {
+	for i, doc := range splitDocs(stream) {
+		dec := yaml.NewDecoder(strings.NewReader(doc))
 		var n yaml.Node
-		if yaml.Unmarshal([]byte(doc), &n) != nil {
+		if dec.Decode(&n) != nil {
 			continue
+		}
+		var more yaml.Node
+		if err := dec.Decode(&more); !errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("part %d of the stream holds more than one YAML document (a \"---\" line with more text on it): lo splits a stream only at the lines that are \"---\"", i+1)
 		}
 		root := yqsem.Deref(&n)
 		if root == nil || !pred(root) {
 			continue
 		}
-		kept = append(kept, strings.TrimSuffix(strings.TrimPrefix(doc, "\n"), "\n"))
+		kept = append(kept, strings.TrimPrefix(doc, "\n"))
 	}
-	if len(kept) == 0 {
-		return ""
-	}
-	return strings.Join(kept, "\n---\n") + "\n"
+	return strings.Join(kept, "---\n"), nil
 }

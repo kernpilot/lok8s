@@ -329,6 +329,38 @@ YAML
   [ ! -e "${CALLS}.2" ]
 }
 
+# yq parses the artifact (Go: TestApplySplitsAtCRLFSeparators and
+# TestApplyKeepsTheEndOfTheLastDocument). With CRLF line ends, the label
+# subset holds the selected document only, and not the documents after it.
+# A last `|+` value with no final newline ("abc") keeps its value: no
+# newline is added to it.
+@test "deploy::apply_filtered splits at CRLF separators and keeps a last value at the end of the file" {
+  local artifact="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
+  export CALLS="${BATS_TEST_TMPDIR}/apply"
+  kapply::apply() { local n=1; while [[ -e "${CALLS}.${n}" ]]; do n=$(( n + 1 )); done; cat > "${CALLS}.${n}"; }
+  deploy::wait_crds() { :; }
+  printf 'apiVersion: v1\r\nkind: ConfigMap\r\nmetadata:\r\n  name: a\r\n  labels:\r\n    lok8s.dev/type: platform\r\n---\r\napiVersion: v1\r\nkind: ConfigMap\r\nmetadata:\r\n  name: b\r\n  labels:\r\n    lok8s.dev/type: other\r\n' > "${artifact}"
+  local label want
+  for label in platform other; do
+    want=a; [[ "${label}" == platform ]] || want=b
+    rm -f "${CALLS}".*
+    run deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "${label}"
+    assert_success
+    [ "$(yq ea -r '[.metadata.name] | join(",")' "${CALLS}.1")" = "${want}" ]
+    [ ! -e "${CALLS}.2" ]
+  done
+  printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n  labels:\n    lok8s.dev/type: platform\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: s\n  labels:\n    lok8s.dev/type: platform\nstringData:\n  password: |+\n    abc' > "${artifact}"
+  rm -f "${CALLS}".*
+  run deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "platform"
+  assert_success
+  [ "$(yq ea -r '[.metadata.name] | join(",")' "${CALLS}.1")" = "a,s" ]
+  [ "$(yq -o json 'select(.kind == "Secret") | .stringData.password' "${CALLS}.1")" = '"abc"' ]
+  rm -f "${CALLS}".*
+  run deploy::apply "test.lok8s.dev"
+  assert_success
+  cmp "${CALLS}.1" "${artifact}"
+}
+
 # lo deploy hands the artifact to yq and kubectl through pipes, not
 # here-strings: bash puts a here-string larger than a pipe buffer (64 KiB)
 # into a file in TMPDIR, which a kill can leave behind. A deploy of a large

@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
@@ -226,6 +228,125 @@ func TestApplyKeepsALastKeepChompedValue(t *testing.T) {
 	}
 	if len(f.applied) != 1 || f.applied[0] != cm {
 		t.Errorf("subset apply: kubectl stdin = %q, want %q", f.applied, cm)
+	}
+}
+
+// bats: "deploy::apply_filtered splits at CRLF separators and keeps a last
+// value at the end of the file".
+// The last document of the artifact ends in a `|+` block scalar with no
+// final newline (its value is "abc"): the CRD subset, the artifact and the
+// label subset reach kubectl with the bytes of the artifact. lo adds only
+// the `---` lines between the selected documents, no newline at the end.
+func TestApplyKeepsTheEndOfTheLastDocument(t *testing.T) {
+	const cm = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n  labels:\n    lok8s.dev/type: platform\n"
+	const ns = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: other\n"
+	const crd = "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.test.lok8s.dev\n  annotations:\n    note: |+\n      crd"
+	const secret = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: s\n  labels:\n    lok8s.dev/type: platform\nstringData:\n  password: |+\n    abc"
+	for _, tc := range []struct {
+		name, artifact, label, crds, subset string
+	}{
+		{"label subset", cm + "---\n" + ns + "---\n" + secret, "platform", "", cm + "---\n" + secret},
+		{"CRD subset", cm + "---\n" + crd, "none", crd, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{}
+			d, _, _, _ := newDeployer(t, f, tc.artifact)
+			if err := d.Apply(t.Context(), "test.lok8s.dev"); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{tc.artifact}
+			if tc.crds != "" {
+				want = []string{tc.crds, tc.artifact}
+			}
+			if strings.Join(f.applied, "\x00") != strings.Join(want, "\x00") {
+				t.Errorf("full apply: kubectl stdin = %q, want %q", f.applied, want)
+			}
+			f.applied = nil
+			if err := d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", tc.label); err != nil {
+				t.Fatal(err)
+			}
+			if tc.subset == "" {
+				if len(f.applied) != 0 {
+					t.Errorf("subset apply: kubectl stdin = %q, want no apply", f.applied)
+				}
+				return
+			}
+			if len(f.applied) != 1 || f.applied[0] != tc.subset {
+				t.Fatalf("subset apply: kubectl stdin = %q, want %q", f.applied, tc.subset)
+			}
+			password := "<none>"
+			dec := yaml.NewDecoder(strings.NewReader(f.applied[0]))
+			for {
+				var doc struct {
+					StringData map[string]string `yaml:"stringData"`
+				}
+				if dec.Decode(&doc) != nil {
+					break
+				}
+				if v, ok := doc.StringData["password"]; ok {
+					password = v
+				}
+			}
+			if password != "abc" {
+				t.Errorf("subset apply: password = %q, want %q", password, "abc")
+			}
+		})
+	}
+}
+
+// bats: "deploy::apply_filtered splits at CRLF separators and keeps a last
+// value at the end of the file".
+// An artifact with CRLF line ends: each `---\r\n` line is a separator, so
+// a selected document does not carry the documents after it.
+func TestApplySplitsAtCRLFSeparators(t *testing.T) {
+	const a = "apiVersion: v1\r\nkind: ConfigMap\r\nmetadata:\r\n  name: a\r\n  labels:\r\n    lok8s.dev/type: platform\r\n"
+	const b = "apiVersion: v1\r\nkind: ConfigMap\r\nmetadata:\r\n  name: b\r\n  labels:\r\n    lok8s.dev/type: other\r\n"
+	const crd = "apiVersion: apiextensions.k8s.io/v1\r\nkind: CustomResourceDefinition\r\nmetadata:\r\n  name: widgets.test.lok8s.dev\r\n"
+	const artifact = a + "---\r\n" + crd + "--- \t\r\n" + b
+	for label, want := range map[string]string{"platform": a, "other": b} {
+		f := &fakeRunner{}
+		d, _, _, _ := newDeployer(t, f, artifact)
+		if err := d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", label); err != nil {
+			t.Fatal(err)
+		}
+		if len(f.applied) != 1 || f.applied[0] != want {
+			t.Errorf("%s: kubectl stdin = %q, want %q", label, f.applied, want)
+		}
+	}
+	f := &fakeRunner{}
+	d, _, _, _ := newDeployer(t, f, artifact)
+	if err := d.Apply(t.Context(), "test.lok8s.dev"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.applied) != 2 || f.applied[0] != crd || f.applied[1] != artifact {
+		t.Errorf("full apply: kubectl stdin = %q, want %q", f.applied, []string{crd, artifact})
+	}
+}
+
+// Go only: yq (bash) parses the stream, so it has no split to get wrong.
+// A part between two separators that holds two documents (a `---` line
+// with more text on it) stops the apply before kubectl runs: its raw text
+// would carry the second document, which the selection did not see.
+func TestApplyRefusesAStreamThatItCannotSplit(t *testing.T) {
+	const artifact = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n  labels:\n    lok8s.dev/type: platform\n--- # b\napiVersion: v1\nkind: Secret\nmetadata:\n  name: b\n"
+	for _, filtered := range []bool{false, true} {
+		f := &fakeRunner{}
+		d, _, errBuf, _ := newDeployer(t, f, artifact)
+		var err error
+		if filtered {
+			err = d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "platform")
+		} else {
+			err = d.Apply(t.Context(), "test.lok8s.dev")
+		}
+		if !errors.Is(err, ErrHandled) {
+			t.Fatalf("filtered=%v: err = %v, want ErrHandled", filtered, err)
+		}
+		if len(f.calls) != 0 {
+			t.Errorf("filtered=%v: kubectl ran: %v", filtered, f.calls)
+		}
+		if !strings.Contains(errBuf.String(), "part 1 of the stream holds more than one YAML document") {
+			t.Errorf("filtered=%v: stderr = %q", filtered, errBuf.String())
+		}
 	}
 }
 
