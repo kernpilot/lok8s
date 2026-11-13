@@ -2,6 +2,7 @@ package spec
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -571,6 +572,11 @@ func TestDecodeBytes_ErrorNamesThePathNotTheValue(t *testing.T) {
 			var e *errs.Error
 			if !errors.As(err, &e) || e.Path != tc.path || e.Line == 0 {
 				t.Errorf("error %v (%#v), want line and path %s", err, e, tc.path)
+			}
+			// The message follows the position once: a custom decoder's
+			// error is not read again as a message ("line 6: 13: ...").
+			if !regexp.MustCompile(`^line [0-9]+(:[0-9]+)?: ` + regexp.QuoteMeta(tc.path) + `: [^0-9]`).MatchString(err.Error()) {
+				t.Errorf("error %q, want \"line N[:M]: %s: <message>\"", err, tc.path)
 			}
 		})
 	}
