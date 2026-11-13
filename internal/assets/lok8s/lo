@@ -9,6 +9,13 @@
 # vim: set syntax=bash:
 set -euo pipefail
 
+# The keys-only setting of the Secret plugin is internal to lo: only
+# `lo build --keys-only` turns it on, for its own render. A value inherited
+# from the caller's environment must not reach any child (kustomize, a
+# plugin, tilt, the registry TLS mint), so it is 0 from here on (Go: run in
+# cmd/lo/main.go). The calls that render pin it again.
+export LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0
+
 : "${PATH_BASE:="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}"
 : "${PATH_BIN:="${PATH_BASE}/.bin"}"
 : "${PATH_SECRETS:="${PATH_BASE}/.secrets"}"

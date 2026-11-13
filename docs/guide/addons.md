@@ -91,8 +91,9 @@ build of chart dependencies, a helm plugin, a `bash:` secrets generator) is
 refused unless you pass `--allow-generators`, which runs it as trusted, with
 the side effects of a real run. Helm caches may be populated. An entry's
 `env:` goes only to the render and cannot set lo's own variables
-(`LOK8S_BOOTSTRAP_*`, `BOOTSTRAP_*`, `bootstrap_*`, `PATH_SECRETS`,
-`KUBECONFIG`, `KUSTOMIZE_PLUGIN_HOME`, `HELM_PLUGINS`). `--render-dir` holds
+(`LOK8S_BOOTSTRAP_*`, `LOK8S_INTERNAL_*`, `BOOTSTRAP_*`, `bootstrap_*`,
+`PATH_SECRETS`, `KUBECONFIG`, `KUSTOMIZE_PLUGIN_HOME`, `HELM_PLUGINS`).
+`--render-dir` holds
 the rendered manifests and diffs, Secrets in plaintext (mode 0700).
 `--only` leaves `restore.d` out unless you add `--with-restore`. The full
 description, with the table of what a dry run refuses and what it does not

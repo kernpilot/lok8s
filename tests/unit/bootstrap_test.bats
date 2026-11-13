@@ -571,6 +571,28 @@ YAML
 
 # --- env wiring: env: {…} → exported around addons::render --------------------
 
+# The Secret plugin's keys-only setting is internal to `lo build --keys-only`:
+# an addon render pins it to 0 on the kustomize child, after the entry's env
+# and whatever the shell exported (Go: render.Build).
+@test "addons::render pins the Secret plugin's keys-only setting to 0" {
+  export KENV="${BATS_TEST_TMPDIR}/kenv"
+  kustomize() {
+    printf 'keys-only=%s\n' "${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}" > "${KENV}"
+    echo "apiVersion: v1"; echo "kind: ConfigMap"; echo "metadata:"; echo "  name: x"
+  }
+  export -f kustomize
+  export LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1 LOK8S_SECRETS_DISABLE=1
+  run addons::render "${ADDON_DIR}" "lo" "hetzner" ""
+  assert_success
+  [ "$(cat "${KENV}")" = "keys-only=0" ]
+  # An entry env line that names it (the engine refuses that before the
+  # render; this is the render's own backstop) loses to the pin too.
+  rm -f "${KENV}"
+  run addons::render "${ADDON_DIR}" "lo" "hetzner" "" "LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1"
+  assert_success
+  [ "$(cat "${KENV}")" = "keys-only=0" ]
+}
+
 @test "bootstrap::apply passes env: overrides to the render only, never the orchestration shell" {
   # The entry's `env:` reaches the render's processes (kustomize, envsubst:
   # render's envsubst whitelist picks up LOK8S_USER_*/LOK8S_SPEC_* names) and
@@ -3172,7 +3194,8 @@ rook-ceph-cluster"
   local name
   for name in LOK8S_BOOTSTRAP_DRYRUN LOK8S_BOOTSTRAP_ALLOW_GENERATORS LOK8S_BOOTSTRAP_DRYRUN_REPORT \
               BOOTSTRAP_PROTECTED_ENV_NAMES bootstrap_render_dir bootstrap_dry_run \
-              PATH_SECRETS KUBECONFIG KUSTOMIZE_PLUGIN_HOME HELM_PLUGINS; do
+              PATH_SECRETS KUBECONFIG KUSTOMIZE_PLUGIN_HOME HELM_PLUGINS \
+              LOK8S_INTERNAL_SECRETS_KEYS_ONLY LOK8S_INTERNAL_X; do
     write_cluster_spec "testcni:
       env:
         LOK8S_USER_OK: fine

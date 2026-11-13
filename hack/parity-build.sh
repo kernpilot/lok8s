@@ -12,6 +12,8 @@
 # The synthetic domains deliberately avoid the secrets.lok8s.dev generator and
 # khelm so the render is hermetic (no store, no network); plugin parity is
 # covered by both implementations exec'ing the identical pinned kustomize.
+# One exception at the end: gen.dev runs the generator built from this tree
+# (literals only, a fixture store) for the keys-only setting cases.
 #
 # Each implementation starts from an identically-prepared domain state
 # (promote-on-change and the split carry-forward depend on prior state, so
@@ -161,6 +163,8 @@ capture_state() { # <impl> — snapshot generated outputs for cross-impl compare
     && cp "${PROJ}/clusters/split.dev/artifacts.yaml" "${sdir}/split.artifacts.yaml"
   [[ -f "${PROJ}/clusters/single.dev/artifacts.yaml" ]] \
     && cp "${PROJ}/clusters/single.dev/artifacts.yaml" "${sdir}/single.artifacts.yaml"
+  [[ -f "${PROJ}/clusters/gen.dev/artifacts.yaml" ]] \
+    && cp "${PROJ}/clusters/gen.dev/artifacts.yaml" "${sdir}/gen.artifacts.yaml"
   local d
   for d in split.dev single.dev; do
     if [[ -d "${PROJ}/clusters/${d}/artifacts" ]]; then
@@ -275,5 +279,41 @@ fi
 check "domain without a store, --no-secrets" prep_nostore build --domain nostore.dev --no-secrets
 [[ -s "${PROJ}/clusters/nostore.dev/artifacts.yaml" ]] || fail "domain without a store, --no-secrets: no artifact"
 rm -rf "${PROJ}/clusters/store.dev" "${PROJ}/clusters/nostore.dev"
+
+# The Secret plugin's keys-only setting (LOK8S_INTERNAL_SECRETS_KEYS_ONLY) is
+# internal to lo: only `lo build --keys-only` turns it on. Here the caller
+# exports it as 1, with the store-free switch as 1. Both implementations pin
+# it to 0 on the render: a plain build writes the generator's real value, a
+# --no-secrets build writes no Secret, and no output carries the keys-only
+# marker. The one domain that runs the real secrets.lok8s.dev generator
+# (literals only: no store value is read or minted) uses a fixture store of
+# its own; the plugin is built from this tree into the project's plugin
+# home (the bash side runs it from there, lo-full serves the same package).
+make -s -C "${ROOT}/kustomize" build BIN_ROOT="${PROJ}/.kustomize" >/dev/null
+mkdir -p "${PROJ}/clusters/gen.dev/secrets"
+printf 'kind: Lo\nmetadata:\n  name: gen\n' > "${PROJ}/clusters/gen.dev/cluster.lok8s.yaml"
+printf 'resources:\n  - cm.yaml\ngenerators:\n  - secret.yaml\n' > "${PROJ}/clusters/gen.dev/kustomization.yaml"
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: gen\n  namespace: one\n' > "${PROJ}/clusters/gen.dev/cm.yaml"
+printf 'apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: one\nliterals:\n  USER: alice\n' \
+  > "${PROJ}/clusters/gen.dev/secret.yaml"
+prep_gen() { rm -rf "${PROJ}/clusters/gen.dev/artifacts.yaml" "${PROJ}/clusters/gen.dev/artifacts"; }
+export LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1 LOK8S_SECRETS_DISABLE=1
+check "keys-only setting inherited: build"               prep_gen build --domain gen.dev
+for impl in bash go; do
+  f="${WORK}/state.${impl}/gen.artifacts.yaml"
+  grep -q 'USER: YWxpY2U=' "${f}" 2>/dev/null \
+    || fail "keys-only setting inherited: build (${impl}) — the generator did not write its real value"
+  ! grep -q 'secrets.lok8s.dev/keys-only' "${f}" 2>/dev/null \
+    || fail "keys-only setting inherited: build (${impl}) — the output carries the keys-only marker"
+done
+check "keys-only setting inherited: build --no-secrets"  prep_gen build --domain gen.dev --no-secrets
+for impl in bash go; do
+  f="${WORK}/state.${impl}/gen.artifacts.yaml"
+  [[ -s "${f}" ]] || fail "keys-only setting inherited: build --no-secrets (${impl}) — no artifact"
+  ! grep -qE '^kind: Secret|secrets.lok8s.dev/keys-only' "${f}" 2>/dev/null \
+    || fail "keys-only setting inherited: build --no-secrets (${impl}) — the output carries a Secret"
+done
+unset LOK8S_INTERNAL_SECRETS_KEYS_ONLY LOK8S_SECRETS_DISABLE
+rm -rf "${PROJ}/clusters/gen.dev" "${PROJ}/.kustomize"
 
 report

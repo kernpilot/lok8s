@@ -77,6 +77,26 @@ teardown() {
   assert_output --partial "kind: ConfigMap"
 }
 
+# The Secret plugin's keys-only setting is internal to `lo build --keys-only`:
+# a value the shell exported never reaches the render of a plain build or a
+# --no-secrets build (Go: render.Build).
+@test "build::artifacts pins the Secret plugin's keys-only setting to 0" {
+  export KENV="${BATS_TEST_TMPDIR}/kenv"
+  kustomize() {
+    printf 'keys-only=%s disable=%s\n' "${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}" "${LOK8S_SECRETS_DISABLE-<unset>}" > "${KENV}"
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test-cm\n'
+  }
+  export -f kustomize
+  export LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1 LOK8S_SECRETS_DISABLE=1
+
+  build::artifacts "test.lok8s.dev"
+  [ "$(cat "${KENV}")" = "keys-only=0 disable=0" ]
+
+  rm -f "${KENV}"
+  LOK8S_BUILD_NO_SECRETS=1 build::artifacts "test.lok8s.dev"
+  [ "$(cat "${KENV}")" = "keys-only=0 disable=1" ]
+}
+
 @test "build::artifacts defaults to \$DOMAIN_NAME when no domain arg is given" {
   export DOMAIN_NAME="test.lok8s.dev"
   kustomize() { printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }

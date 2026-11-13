@@ -424,9 +424,10 @@ cert:
 EOF
 )
 
-  # The scratch store rides on the child's env only (never exported here).
+  # The scratch store rides on the child's env only (never exported here),
+  # and so does the keys-only pin: the mint writes real material.
   local out
-  out=$(printf '%s\n' "${manifest}" | PATH_SECRETS="${scratch}" "${plugin_bin}") || {
+  out=$(printf '%s\n' "${manifest}" | PATH_SECRETS="${scratch}" LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0 "${plugin_bin}") || {
     echo "error: the Secret plugin failed to mint the registry TLS cert" >&2
     return 1
   }

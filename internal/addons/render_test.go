@@ -32,6 +32,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/testutil"
+	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 	"gopkg.in/yaml.v3"
 )
 
@@ -370,6 +371,33 @@ func TestRenderBuildFailurePropagates(t *testing.T) {
 	}
 }
 
+// The Secret plugin's keys-only setting is internal to `lo build
+// --keys-only`: an addon render pins it to 0 on the kustomize child,
+// whatever the process environment holds, so a value the caller
+// exported never turns a generator in an addon into a keys-only run.
+func TestRenderPinsKeysOnlyOff(t *testing.T) {
+	dir := writeAddon(t)
+	f := newFakeKustomize(t, kustomizeManifest)
+	t.Setenv(secret.KeysOnlyEnv, "1")
+	t.Setenv(secret.DisableEnv, "1")
+	var errBuf strings.Builder
+	if _, err := Render(t.Context(), testPaths(t), f, &errBuf, dir, "lo", "hetzner", "", nil); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if len(f.envs) != 1 {
+		t.Fatalf("kustomize ran %d times, want 1", len(f.envs))
+	}
+	var vals []string
+	for _, kv := range f.envs[0] {
+		if v, ok := strings.CutPrefix(kv, secret.KeysOnlyEnv+"="); ok {
+			vals = append(vals, v)
+		}
+	}
+	if len(vals) == 0 || vals[len(vals)-1] != "0" {
+		t.Fatalf("kustomize child env %q: %s values %q, want the last one 0", f.envs[0], secret.KeysOnlyEnv, vals)
+	}
+}
+
 // An entry's env: may never set lo's own orchestration or safety
 // variables. ProtectedEnvOverride names the first one in byte order.
 func TestProtectedEnvOverride(t *testing.T) {
@@ -382,6 +410,7 @@ func TestProtectedEnvOverride(t *testing.T) {
 		"LOK8S_BOOTSTRAP_DRYRUN", "LOK8S_BOOTSTRAP_ALLOW_GENERATORS", "LOK8S_BOOTSTRAP_DRYRUN_REPORT",
 		"LOK8S_BOOTSTRAP_ONLY", "BOOTSTRAP_PROTECTED_ENV_NAMES", "BOOTSTRAP_PLATFORM_OWNED",
 		"bootstrap_render_dir", "bootstrap_dry_run", "PATH_SECRETS", "KUBECONFIG", "KUSTOMIZE_PLUGIN_HOME", "HELM_PLUGINS",
+		"LOK8S_INTERNAL_OTHER", secret.KeysOnlyEnv,
 	} {
 		if got := ProtectedEnvOverride(map[string]string{"LOK8S_USER_FOO": "x", bad: "y"}); got != bad {
 			t.Errorf("%s: got %q", bad, got)

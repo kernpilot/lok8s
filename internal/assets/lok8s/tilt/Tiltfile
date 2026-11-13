@@ -4,6 +4,12 @@
 
 load('ext://namespace', 'namespace_inject')
 
+# The Secret plugin's keys-only setting is internal to `lo build
+# --keys-only`. A value exported in the shell that started Tilt must not
+# reach a child of this extension (lo, kustomize, a plugin), so it is 0
+# for every process Tilt starts from here on (lo: the process start).
+os.putenv('LOK8S_INTERNAL_SECRETS_KEYS_ONLY', '0')
+
 # live_update function ordering
 _live_update_keys = ['fall_back_on', 'sync', 'run', 'restart_container']
 

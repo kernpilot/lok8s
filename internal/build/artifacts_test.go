@@ -9,12 +9,15 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/render"
+	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 )
 
 // stubKustomize installs a fake kustomize into p.Bin that cats the file
 // named by KUSTOMIZE_STUB_OUTPUT (empty output when unset), writes the
 // KUSTOMIZE_PLUGIN_HOME it was given to the file named by
-// KUSTOMIZE_STUB_ENVLOG (when set) and exits with KUSTOMIZE_STUB_RC — and
+// KUSTOMIZE_STUB_ENVLOG (when set), the Secret plugin's keys-only and
+// store-free settings to KUSTOMIZE_STUB_KEYSLOG (when set), and exits
+// with KUSTOMIZE_STUB_RC — and
 // pins the render to the exec pipeline (LO_RENDER=exec) so the stub is
 // what runs. The promote/guard logic under test is pipeline-agnostic;
 // TestArtifactsInProcessRender covers the default in-process pipeline over
@@ -28,6 +31,7 @@ func stubKustomize(t *testing.T, p *config.Paths) {
 	script := "#!/bin/sh\n" +
 		"[ -n \"${KUSTOMIZE_STUB_OUTPUT:-}\" ] && cat \"${KUSTOMIZE_STUB_OUTPUT}\"\n" +
 		"[ -n \"${KUSTOMIZE_STUB_ENVLOG:-}\" ] && printf '%s\\n' \"${KUSTOMIZE_PLUGIN_HOME:-<unset>}\" > \"${KUSTOMIZE_STUB_ENVLOG}\"\n" +
+		"[ -n \"${KUSTOMIZE_STUB_KEYSLOG:-}\" ] && printf 'keys-only=%s disable=%s\\n' \"${" + secret.KeysOnlyEnv + "-<unset>}\" \"${LOK8S_SECRETS_DISABLE-<unset>}\" > \"${KUSTOMIZE_STUB_KEYSLOG}\"\n" +
 		"exit \"${KUSTOMIZE_STUB_RC:-0}\"\n"
 	if err := os.WriteFile(filepath.Join(p.Bin, "kustomize"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -334,6 +338,38 @@ func TestArtifactsRenderEnvCarriesKustomizePluginHome(t *testing.T) {
 	}
 	if got := readLog(); got != "/elsewhere/plugins" {
 		t.Errorf("exported in the shell: the child saw KUSTOMIZE_PLUGIN_HOME=%q, want the exported value", got)
+	}
+}
+
+// The Secret plugin's keys-only setting is internal to `lo build
+// --keys-only`: a value inherited from the caller's environment never
+// reaches the render of a plain build or a --no-secrets build, where the
+// child sees 0 (with the store-free switch the plugin then emits
+// nothing, as before).
+func TestArtifactsRenderPinsKeysOnlyOff(t *testing.T) {
+	p, _ := artifactsProject(t)
+	stubRender(t, p, twoDocRender)
+	writeFileT(t, filepath.Join(p.Clusters, "d.dev", "secrets", ".gitignore"), "*\n")
+	log := filepath.Join(p.Base, "kustomize-keys.log")
+	t.Setenv("KUSTOMIZE_STUB_KEYSLOG", log)
+	t.Setenv(secret.KeysOnlyEnv, "1")
+	t.Setenv(secret.DisableEnv, "1")
+	for _, tc := range []struct {
+		noSecrets bool
+		want      string
+	}{{false, "keys-only=0 disable=0"}, {true, "keys-only=0 disable=1"}} {
+		os.Remove(log)
+		var errBuf bytes.Buffer
+		if err := Artifacts(t.Context(), Options{Paths: p, Domain: "d.dev", SplitOverride: "0", NoSecrets: tc.noSecrets, Stderr: &errBuf}); err != nil {
+			t.Fatalf("no-secrets=%v: %v\n%s", tc.noSecrets, err, errBuf.String())
+		}
+		raw, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatalf("no-secrets=%v: the stub wrote no log: %v", tc.noSecrets, err)
+		}
+		if got := strings.TrimSpace(string(raw)); got != tc.want {
+			t.Errorf("no-secrets=%v: the kustomize child saw %q, want %q", tc.noSecrets, got, tc.want)
+		}
 	}
 }
 

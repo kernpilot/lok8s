@@ -25,6 +25,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/testutil"
+	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 )
 
 const (
@@ -191,6 +192,53 @@ func TestRegistriesTLSCertMintsIntoTheVolume(t *testing.T) {
 			t.Fatalf("docker log lacks %q after position %d:\n%s", want, pos, strings.Join(fd.log, "\n"))
 		}
 		pos += i + 1
+	}
+}
+
+// The mint writes real material, never a keys-only run: a keys-only
+// setting inherited from the caller's environment is pinned to 0 on the
+// exec'd plugin child (the overlay is appended after the inherited env,
+// so its value wins).
+func TestRegistriesTLSMintPinsKeysOnlyOffExec(t *testing.T) {
+	d, runner, _, errBuf, p, _ := tlsDriver(t, "true")
+	_, rec := stubSecretPlugin(t, runner, p.Base)
+	t.Setenv(secret.KeysOnlyEnv, "1")
+	t.Setenv(secret.DisableEnv, "1")
+
+	if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err != nil {
+		t.Fatalf("registriesTLSCert: %v\n%s", err, errBuf.String())
+	}
+	var last string
+	found := false
+	for _, kv := range rec.Env {
+		if v, ok := strings.CutPrefix(kv, secret.KeysOnlyEnv+"="); ok {
+			last, found = v, true
+		}
+	}
+	if !found || last != "0" {
+		t.Fatalf("plugin child env %q: %s = %q (set %v), want 0", rec.Env, secret.KeysOnlyEnv, last, found)
+	}
+}
+
+// The in-process mint answers the keys-only setting with 0 whatever the
+// process environment holds: with an inherited 1 (and no disable) the
+// real generator would refuse the run; pinned, it mints a real pair.
+func TestRegistriesTLSMintPinsKeysOnlyOffInProcess(t *testing.T) {
+	d, _, fd, errBuf, p, _ := tlsDriver(t, "true")
+	t.Setenv(render.ModeEnv, "")
+	t.Setenv("CAROOT", filepath.Join(p.Base, "caroot"))
+	t.Setenv(secret.KeysOnlyEnv, "1")
+
+	if err := d.registriesTLSCert(t.Context(), tlsDomain, errBuf); err != nil {
+		t.Fatalf("registriesTLSCert: %v\n%s", err, errBuf.String())
+	}
+	crtPEM, _ := fd.volumeFile(tlsVol, "tls.crt")
+	keyPEM, _ := fd.volumeFile(tlsVol, "tls.key")
+	if _, err := tls.X509KeyPair([]byte(crtPEM), []byte(keyPEM)); err != nil {
+		t.Fatalf("the volume holds no real pair: %v", err)
+	}
+	if v, ok := mintEnv("/scratch")(secret.KeysOnlyEnv); !ok || v != "0" {
+		t.Fatalf("mintEnv(%s) = %q, %v; want 0, true", secret.KeysOnlyEnv, v, ok)
 	}
 }
 

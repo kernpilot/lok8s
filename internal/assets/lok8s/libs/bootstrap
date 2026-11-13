@@ -9,7 +9,8 @@ BOOTSTRAP_PLATFORM_OWNED="cilium ccm"
 #
 # An entry's `env:` may not set lo's own orchestration or safety variables:
 # LOK8S_BOOTSTRAP_*, BOOTSTRAP_*, bootstrap_* (every name this engine and
-# the dry run keep their state in), PATH_SECRETS, KUBECONFIG,
+# the dry run keep their state in), LOK8S_INTERNAL_* (lo's internal
+# contracts with its plugins), PATH_SECRETS, KUBECONFIG,
 # KUSTOMIZE_PLUGIN_HOME and HELM_PLUGINS — see bootstrap::_reserved_env_name.
 # The entry's env reaches only its render subprocesses (addons::render),
 # never this shell.
@@ -1450,7 +1451,7 @@ bootstrap::_reserved_env_name() {
   (( ${#_names[@]} )) || return 1
   while IFS= read -r _k; do
     case "${_k}" in
-      LOK8S_BOOTSTRAP_*|BOOTSTRAP_*|bootstrap_*|PATH_SECRETS|KUBECONFIG|KUSTOMIZE_PLUGIN_HOME|HELM_PLUGINS)
+      LOK8S_BOOTSTRAP_*|LOK8S_INTERNAL_*|BOOTSTRAP_*|bootstrap_*|PATH_SECRETS|KUBECONFIG|KUSTOMIZE_PLUGIN_HOME|HELM_PLUGINS)
         echo "${_k}"
         return 0 ;;
     esac

@@ -41,6 +41,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 )
 
 // ModeEnv selects the render pipeline. lo-full: unset/"inprocess" (the
@@ -152,6 +153,12 @@ type Options struct {
 	// goroutine that reads the environment or starts a child meanwhile
 	// sees nothing of it.
 	Env []string
+	// KeysOnly asks the Secret plugin for its keys-only run
+	// (secret.KeysOnlyEnv=1: each key with an empty value, no store read).
+	// Only `lo build --keys-only` sets it. Build writes the variable into
+	// the overlay on EVERY render, 1 here and 0 otherwise, over any value
+	// that the overlay or the process environment holds.
+	KeysOnly bool
 	// Stderr receives what the kustomize child wrote to its stderr: in
 	// exec mode the child's stream, in-process the `Error: …` line the
 	// kustomize CLI prints on failure. Nil = os.Stderr.
@@ -171,6 +178,7 @@ func (o *Options) stderr() io.Writer {
 // `Error: <msg>` cobra line) and the error is returned for the caller's
 // own reporting — callers print their own [error] lines exactly as before.
 func Build(ctx context.Context, dir string, o Options) ([]byte, error) {
+	o.Env = PinKeysOnly(o.Env, o.KeysOnly)
 	mode, err := CurrentMode()
 	if err != nil {
 		// Callers report a failed render generically ("kustomize build
@@ -226,6 +234,25 @@ func buildExec(ctx context.Context, dir string, o Options) ([]byte, error) {
 		return nil, err
 	}
 	return out.Bytes(), nil
+}
+
+// PinKeysOnly returns env without any secret.KeysOnlyEnv entry, plus that
+// variable set to 1 when on and to 0 otherwise. The keys-only setting is
+// internal to lo: a render gets it from Options.KeysOnly only, never from
+// an overlay entry or the process environment (an overlay entry is
+// appended after the inherited environment, so it wins in the child).
+func PinKeysOnly(env []string, on bool) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if k, _, _ := strings.Cut(kv, "="); k != secret.KeysOnlyEnv {
+			out = append(out, kv)
+		}
+	}
+	v := "0"
+	if on {
+		v = "1"
+	}
+	return append(out, secret.KeysOnlyEnv+"="+v)
 }
 
 func hasKey(env []string, key string) bool {

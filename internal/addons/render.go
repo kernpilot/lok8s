@@ -34,8 +34,10 @@ import (
 // ProtectedEnvOverride reports the first variable (in byte order) an
 // entry's `env:` may not set, or "" when there is none. These are lo's
 // orchestration and safety variables: LOK8S_BOOTSTRAP_*, BOOTSTRAP_*,
-// bootstrap_* (the bash engine's own names), PATH_SECRETS, KUBECONFIG,
-// KUSTOMIZE_PLUGIN_HOME and HELM_PLUGINS. An entry that names one is an
+// bootstrap_* (the bash engine's own names), LOK8S_INTERNAL_* (lo's
+// internal contracts with its plugins, such as the Secret plugin's
+// keys-only setting), PATH_SECRETS, KUBECONFIG, KUSTOMIZE_PLUGIN_HOME and
+// HELM_PLUGINS. An entry that names one is an
 // entry error on a real run and on a dry run alike (bash:
 // bootstrap::_reserved_env_name).
 func ProtectedEnvOverride(env map[string]string) string {
@@ -54,7 +56,7 @@ func ProtectedEnvOverride(env map[string]string) string {
 
 // IsProtectedEnv reports whether an entry's `env:` may not set name.
 func IsProtectedEnv(name string) bool {
-	for _, p := range []string{"LOK8S_BOOTSTRAP_", "BOOTSTRAP_", "bootstrap_"} {
+	for _, p := range []string{"LOK8S_BOOTSTRAP_", "LOK8S_INTERNAL_", "BOOTSTRAP_", "bootstrap_"} {
 		if strings.HasPrefix(name, p) {
 			return true
 		}

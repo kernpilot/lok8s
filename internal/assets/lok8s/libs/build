@@ -367,11 +367,14 @@ build::artifacts() {
   # NB: this bash gate is numeric-truthy (LOK8S_BUILD_NO_SECRETS=1); the Go
   # plugin's LOK8S_SECRETS_DISABLE also accepts "true". `lo build --no-secrets`
   # always passes 1, so the two layers agree in practice.
+  # The Secret plugin's keys-only setting is explicit on every render: 0
+  # here, whatever the environment holds (Go: render.Build).
   local secrets_disable=0
   (( ${LOK8S_BUILD_NO_SECRETS:-0} )) && secrets_disable=1
   if KUBECONFIG="${kubeconfig}" \
      KHELM_TRUST_ANY_REPO=true \
      LOK8S_SECRETS_DISABLE="${secrets_disable}" \
+     LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0 \
        kustomize build --enable-alpha-plugins "${domain_dir}" \
        | template::envsubst "${envsubst_whitelist}" \
        > "${tmp}"; then

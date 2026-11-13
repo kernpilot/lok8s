@@ -288,6 +288,8 @@ func runKustomize(ctx context.Context, o Options, domainDir, kubeconfig string, 
 	if o.NoSecrets {
 		secretsDisable = "1"
 	}
+	// render.Build writes the Secret plugin's keys-only setting on every
+	// render: 0 here, whatever the process environment holds.
 	return render.Build(ctx, domainDir, render.Options{
 		Paths:  o.Paths,
 		Env:    kustomizeEnv(o.Paths, kubeconfig, secretsDisable),

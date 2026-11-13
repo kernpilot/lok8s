@@ -665,7 +665,10 @@ addons::render() {
   # gives every kustomize child (config.KustomizePluginHome). Read raw, an
   # unset variable failed the KubeOne addon render with "unable to find plugin
   # root" in a shell without the project .envrc. A dry run overrides it below.
-  local -a _kenv=(KHELM_TRUST_ANY_REPO=true "KUSTOMIZE_PLUGIN_HOME=${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}")
+  # The Secret plugin's keys-only setting is 0 on every addon render, after
+  # the entry's env, whatever the environment holds (Go: render.Build).
+  local -a _kenv=(KHELM_TRUST_ANY_REPO=true "KUSTOMIZE_PLUGIN_HOME=${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}"
+    LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0)
   local -a _kflags=(--enable-alpha-plugins --enable-exec)
   if (( _dry )); then
     _kenv+=(LOK8S_BOOTSTRAP_DRYRUN=1 "LOK8S_BOOTSTRAP_DRYRUN_REPORT=${bootstrap_dry_boundary}/report"

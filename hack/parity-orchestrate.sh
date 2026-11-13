@@ -631,6 +631,7 @@ cat > "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret/Secret" <<'SH'
 if [[ "${1:-}" == "--capabilities" ]]; then echo dry-run; exit 0; fi
 [[ -t 0 ]] || cat >/dev/null
 echo "PATH_SECRETS=${PATH_SECRETS:-<unset>}" >> "${PARITY_PLUGIN_LOG}"
+echo "KEYS_ONLY=${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}" >> "${PARITY_PLUGIN_LOG}"
 printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: registries-tls\n  namespace: lok8s-system\ntype: kubernetes.io/tls\ndata:\n  tls.crt: RkFLRUNSVA==\n  tls.key: RkFLRUtFWQ==\n'
 SH
 chmod +x "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret/Secret"
@@ -666,6 +667,9 @@ exit 0
 SH
 export PARITY_DOCKER_LOG="${WORK}/docker.log" PARITY_PLUGIN_LOG="${WORK}/plugin.log"
 export CAROOT="${WORK}/caroot"
+# The Secret plugin's keys-only setting is internal to `lo build --keys-only`.
+# Exported here as 1, it must reach the mint as 0 on both sides.
+export LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1
 tls_pre() {
   reset_fixtures
   rm -rf "${PROJ}/.secrets" "${PROJ}/clusters/mint.dev/.registries.json"
@@ -702,6 +706,8 @@ tls_absent() {  # <label> <file> <regex>
 }
 for side in bash go; do
   tls_pin    "${side}: plugin store = a scratch under the domain dir"  "${WORK}/plugin.${side}.log" "^PATH_SECRETS=PROJ/clusters/mint\.dev/\.registry-tls-tmp\.X$"
+  tls_pin    "${side}: the mint pins the keys-only setting to 0"       "${WORK}/plugin.${side}.log" "^KEYS_ONLY=0$"
+  tls_absent "${side}: no other keys-only value reaches the mint"      "${WORK}/plugin.${side}.log" "^KEYS_ONLY=[^0]"
   tls_pin    "${side}: the volume is created"                          "${WORK}/docker.${side}.log" "^docker volume create mintnet-registry-tls$"
   tls_pin    "${side}: volume populated through the io container"      "${WORK}/docker.${side}.log" "^docker container create --name mintnet-registry-tls-io --volume mintnet-registry-tls:/etc/registry/certs registry:2\.8\.3$"
   tls_pin    "${side}: tls.key copied into the volume"                 "${WORK}/docker.${side}.log" "^docker cp PROJ/clusters/mint\.dev/\.registry-tls-tmp\.X/tls\.key mintnet-registry-tls-io:/etc/registry/certs/tls\.key$"
@@ -771,7 +777,7 @@ tls_check - registry tls renew --domain mint.dev
 parity::state_same "${WORK}/docker.bash.log" "${WORK}/docker.go.log" "docker argv of lo registry tls renew" || failures=$((failures + 1))
 tls_check - registry tls renew --domain alpha.dev         # tls: false, refuses
 check_parse registry tls bogus
-unset CAROOT PARITY_DOCKER_LOG PARITY_PLUGIN_LOG
+unset CAROOT PARITY_DOCKER_LOG PARITY_PLUGIN_LOG LOK8S_INTERNAL_SECRETS_KEYS_ONLY
 
 # ── lo bootstrap — the render's plugin home ──────────────────────────────────
 # A shell that exports only PATH (KUSTOMIZE_PLUGIN_HOME is unset above): the
@@ -803,6 +809,7 @@ parity::stub "${PROJ}" kustomize <<'SH'
 # Parity stub kustomize: log the plugin home the render handed over, then
 # fail the build (the case stops at the render).
 echo "KUSTOMIZE_PLUGIN_HOME=${KUSTOMIZE_PLUGIN_HOME:-<unset>}" >> "${PARITY_KUSTOMIZE_LOG}"
+echo "KEYS_ONLY=${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}" >> "${PARITY_KUSTOMIZE_LOG}"
 echo "Error: parity stub: no render" >&2
 exit 1
 SH
@@ -816,10 +823,14 @@ boot_post() {  # <impl>: keep the log per side (normalized)
     : > "${WORK}/kustomize.${1}.log"
   fi
 }
-PARITY_PRE_EACH=boot_pre PARITY_POST_EACH=boot_post check - bootstrap --domain boot.dev
+# The Secret plugin's keys-only setting, exported as 1, reaches the addon
+# render as 0 on both sides.
+LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1 PARITY_PRE_EACH=boot_pre PARITY_POST_EACH=boot_post check - bootstrap --domain boot.dev
 parity::state_same "${WORK}/kustomize.bash.log" "${WORK}/kustomize.go.log" "plugin home of the bootstrap render" || failures=$((failures + 1))
 for side in bash go; do
   tls_pin "${side}: the render's kustomize child has the project plugin home" "${WORK}/kustomize.${side}.log" "^KUSTOMIZE_PLUGIN_HOME=PROJ/\.kustomize$"
+  tls_pin "${side}: the addon render pins the keys-only setting to 0" "${WORK}/kustomize.${side}.log" "^KEYS_ONLY=0$"
+  tls_absent "${side}: no other keys-only value reaches the addon render" "${WORK}/kustomize.${side}.log" "^KEYS_ONLY=[^0]"
 done
 
 # ── lo bootstrap — a domain without its own secrets store ────────────────────

@@ -489,7 +489,7 @@ trees.
 | Gate | Surface | Notes |
 |---|---|---|
 | `hack/parity-test.sh` | `use`, `version`, `secrets`, and the general ported set | the original harness; `lo version` intentionally drops the `bash` row (allow-listed) |
-| `hack/parity-build.sh` | `lo build` | artifacts bytes, split-dir file list, non-Secret split bytes; Secret twins compared by presence + `sops:` marker (sops mints a fresh data key per encrypt) |
+| `hack/parity-build.sh` | `lo build` | artifacts bytes, split-dir file list, non-Secret split bytes; Secret twins compared by presence + `sops:` marker (sops mints a fresh data key per encrypt); one domain runs the Secret plugin built from the tree with the internal keys-only setting exported as 1, and both sides render it as 0 (`build` writes the real value, `build --no-secrets` writes no Secret) |
 | `hack/parity-configure.sh` | `lint`, `kubeconfig`, `doctor` | isolated `HOME`; doctor's environment-driven lines must match since both run in the same environment |
 | `hack/parity-audit.sh` | `lo audit` | human, `--json`, `--sarif` for every check family |
 | `hack/parity-loop.sh` | `tilt`, `image`, `env`, `hooks` | read-only / error paths; stub `tilt`/`kubectl`/`docker`/`kind` in the synthetic `.bin` |
