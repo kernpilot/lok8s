@@ -442,16 +442,19 @@ YAML
 }
 
 # A failed check refuses too. Go: TestKeysOnlyLastAppliedCheckFails.
-# A failed check refuses too. Go: TestKeysOnlyLastAppliedCheckFails.
+# The stderr of that yq is withheld too (it can quote the render). Go:
+# TestKeysOnlyLastAppliedCheckFails.
 @test "build::keys_only refuses the render when the last-applied check fails" {
+  local withheld="in keys-only mode lo does not print its stderr, which can quote a value: run the build without --keys-only to see it"
   kustomize() { printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
-  yq() { [[ "${1}" != -N ]] || return 1; command yq "$@"; }
+  yq() { [[ "${1}" != -N ]] || { echo "Error: a value Zq7-yq-canary" >&2; return 1; }; command yq "$@"; }
   export -f kustomize yq
   _keys_only_to_file() { build::keys_only "test.lok8s.dev" > "${BATS_TEST_TMPDIR}/out"; }
   run _keys_only_to_file
   assert_failure
   [[ ! -s "${BATS_TEST_TMPDIR}/out" ]] || { echo "stdout: $(cat "${BATS_TEST_TMPDIR}/out")"; return 1; }
-  assert_output --partial "[error] lo build --keys-only: yq could not check test.lok8s.dev's render for the annotation kubectl.kubernetes.io/last-applied-configuration"
+  assert_output --partial "[error] lo build --keys-only: yq could not check test.lok8s.dev's render for the annotation kubectl.kubernetes.io/last-applied-configuration (${withheld})"
+  refute_output --partial "Zq7-yq-canary"
   refute_output --partial "rendered"
 }
 

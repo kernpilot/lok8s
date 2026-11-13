@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/config"
+	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/testutil"
 	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 )
@@ -472,13 +473,14 @@ func TestKeysOnlyRefusesTheLastAppliedAnnotation(t *testing.T) {
 
 // A failed check refuses too: it does not let the render through.
 func TestKeysOnlyLastAppliedCheckFails(t *testing.T) {
+	const canary = "Zq7-yq-canary"
 	p, _, _ := keysOnlyProject(t)
 	stubRender(t, p, twoDocRender)
 	yq := filepath.Join(p.Bin, "yq")
 	if err := os.Remove(yq); err != nil {
 		t.Fatal(err)
 	}
-	writeFileT(t, yq, "#!/bin/sh\n[ \"$1\" = -N ] && exit 1\nexec '"+pinnedYq(t)+"' \"$@\"\n")
+	writeFileT(t, yq, "#!/bin/sh\n[ \"$1\" = -N ] && { echo 'Error: a value "+canary+"' >&2; exit 1; }\nexec '"+pinnedYq(t)+"' \"$@\"\n")
 	if err := os.Chmod(yq, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -489,8 +491,62 @@ func TestKeysOnlyLastAppliedCheckFails(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Errorf("stdout = %q, want nothing", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "[error] lo build --keys-only: yq could not check d.dev's render for the annotation kubectl.kubernetes.io/last-applied-configuration") {
+	if !strings.Contains(stderr.String(), "[error] lo build --keys-only: yq could not check d.dev's render for the annotation kubectl.kubernetes.io/last-applied-configuration ("+keysOnlyWithheld+")") {
 		t.Errorf("stderr = %q", stderr.String())
+	}
+	// The stderr of this yq is withheld too: it can quote an input value.
+	if strings.Contains(stderr.String(), canary) {
+		t.Errorf("the stderr of the last-applied check is printed: %q", stderr.String())
+	}
+}
+
+// The in-process render (lo with the in-process renderer) prints its error
+// line to the render's stderr (render/inprocess.go), and keys-only mode
+// withholds it too: an error can quote an input value (here a duplicate
+// object id names the object). The control renders the same domain with a
+// stderr that keeps the line: it holds the value.
+func TestKeysOnlyInProcessWithholdsTheRenderError(t *testing.T) {
+	if !render.InProcessAvailable() {
+		t.Skip("lo core: no in-process renderer (go test -tags inprocess)")
+	}
+	const canary = "zq7-inproc-canary"
+	p, domainDir, _ := keysOnlyProject(t)
+	t.Setenv(render.ModeEnv, "")
+	cm := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: " + canary + "\n"
+	writeFileT(t, filepath.Join(domainDir, "kustomization.yaml"), "resources:\n  - a.yaml\n  - b.yaml\n")
+	writeFileT(t, filepath.Join(domainDir, "a.yaml"), cm)
+	writeFileT(t, filepath.Join(domainDir, "b.yaml"), cm)
+
+	// The process stderr too: a write that bypasses the render's stderr
+	// lands there.
+	procErr, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = procErr
+	var stdout, stderr bytes.Buffer
+	err = KeysOnly(t.Context(), Options{Paths: p, Domain: "d.dev", Stderr: &stderr}, &stdout)
+	os.Stderr = saved
+	if !errors.Is(err, ErrHandled) {
+		t.Fatalf("KeysOnly = %v, want ErrHandled\n%s", err, stderr.String())
+	}
+	if want := "[error] kustomize build failed for d.dev (" + keysOnlyWithheld + ")"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want %q", stderr.String(), want)
+	}
+	raw, _ := os.ReadFile(procErr.Name())
+	for where, got := range map[string]string{"stdout": stdout.String(), "stderr": stderr.String(), "the process stderr": string(raw)} {
+		if strings.Contains(got, canary) {
+			t.Errorf("the render error is in %s: %q", where, got)
+		}
+	}
+
+	var ctl bytes.Buffer
+	if _, err := render.Build(t.Context(), domainDir, render.Options{Paths: p, Stderr: &ctl}); err == nil {
+		t.Fatal("control: the render succeeded")
+	}
+	if !strings.Contains(ctl.String(), canary) {
+		t.Errorf("control: the render error does not name the object: %q", ctl.String())
 	}
 }
 

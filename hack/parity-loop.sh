@@ -563,6 +563,52 @@ for hk_case in marker no-yaml; do
   done
 done
 
+# The positive control: a clean artifact, a selector that matches. Each
+# verb reaches kubectl in both implementations. The stub prints, for each
+# manifest on stdin, the digest of its canonical form (yq, keys sorted):
+# the Go stream is yaml.v3's and the bash stream is yq's, so the bytes can
+# differ, and the values cannot. A last |+ block scalar keeps its final
+# newlines in both.
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub: log the argv, print the canonical digest of a manifest on
+# stdin, answer a get with "not found" (no live cluster may be reached).
+echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
+case " $* " in
+  *" -f - "*) printf 'parity-stub -f %s\n' "$(yq -o=json -I=0 'sort_keys(..)' - | sha256sum | cut -d' ' -f1)" ;;
+  *" get "*) exit 1 ;;
+esac
+exit 0
+SH
+printf 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  namespace: default\n  labels: {lok8s.dev/role: seed}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n  labels: {lok8s.dev/role: seed}\ndata:\n  tail: |+\n    x\n\n\n' \
+  > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
+for hk_verb in recreate apply restart; do
+  hk_label="lo hooks ${hk_verb} reaches kubectl with the selected objects"
+  rm -f "${PARITY_KUBECTL_LOG}"
+  parity::run_pair hooks "${hk_verb}" --selector lok8s.dev/role=seed
+  hk_ok=1
+  parity::compare "${hk_label}" - || hk_ok=0
+  case "${hk_verb}" in
+    restart) hk_want=' rollout restart deployment/web' ;;
+    *)       hk_want=' apply --server-side --force-conflicts -f -' ;;
+  esac
+  # The log holds the calls of both runs (Go first): each verb reached kubectl.
+  if (( go_rc != 0 )) || [[ "$(grep -cF -- "${hk_want}" "${PARITY_KUBECTL_LOG}" 2>/dev/null)" != 2 ]]; then
+    echo "FAIL: ${hk_label} — rc go=${go_rc}, kubectl calls:"
+    indent < "${PARITY_KUBECTL_LOG}"
+    hk_ok=0
+  fi
+  if [[ "${hk_verb}" != restart ]]; then
+    hk_digest="$(yq -o=json -I=0 'sort_keys(..)' "${PROJ}/clusters/lok8s.dev/artifacts.yaml" | sha256sum | cut -d' ' -f1)"
+    if ! grep -qF -- "parity-stub -f ${hk_digest}" "${WORK}/go.out"; then
+      echo "FAIL: ${hk_label} — the applied objects are not the artifact's (digest ${hk_digest}):"
+      indent < "${WORK}/go.out"
+      hk_ok=0
+    fi
+  fi
+  parity::record "${hk_ok}" "${hk_label}"
+done
+
 # lo deploy reads artifacts.yaml once, checks that copy and applies that copy
 # (the full apply and -l key=value). The kubectl stub logs its argv and
 # prints a digest of each manifest that it gets: for a clean artifact both
