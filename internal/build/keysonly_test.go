@@ -554,7 +554,7 @@ func TestKeysOnlyProbesThePlugin(t *testing.T) {
 				t.Fatalf("the probe did not run: %v", err)
 			}
 			got := map[string]string{}
-			for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+			for line := range strings.SplitSeq(strings.TrimSuffix(string(raw), "\n"), "\n") {
 				k, v, _ := strings.Cut(line, "=")
 				got[k] = v
 			}

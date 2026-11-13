@@ -36,8 +36,8 @@ func sectionNames(t *testing.T) []string {
 func TestKeysOnly_EverySpecSectionHasKeys(t *testing.T) {
 	var sections []string
 	typ := reflect.TypeFor[spec.Secret]()
-	for i := range typ.NumField() {
-		name, _, _ := strings.Cut(typ.Field(i).Tag.Get("yaml"), ",")
+	for field := range typ.Fields() {
+		name, _, _ := strings.Cut(field.Tag.Get("yaml"), ",")
 		if !specMetaFields[name] {
 			sections = append(sections, name)
 		}

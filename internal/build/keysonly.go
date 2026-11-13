@@ -79,7 +79,7 @@ func HasKeysOnlyMarker(data []byte) (bool, error) {
 			break
 		}
 		if err != nil {
-			return false, fmt.Errorf("%w: %v", errNoYAML, err)
+			return false, fmt.Errorf("%w: %w", errNoYAML, err)
 		}
 		docs = append(docs, doc)
 	}
