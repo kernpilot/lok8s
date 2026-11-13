@@ -518,18 +518,24 @@ build::_render_kubeconfig() {
 # The plugin home must exist. kustomize takes the first plugin home that
 # exists: KUSTOMIZE_PLUGIN_HOME, then directories under XDG_CONFIG_HOME and
 # HOME. With an absent home it would load a plugin that lo did not check.
-# A home without the plugin file renders no secrets.lok8s.dev Secret (the
-# render fails on such a generator), so there is no plugin to check. The
-# probe is a compatibility check, not isolation or attestation: a plugin
-# that lies about its capabilities, or a file that is changed after the
-# probe, gets through.
+# The Secret executable must be in the home too: without it, a kustomize
+# built with Go plugin support loads the Go plugin (Secret.so) of the same
+# generator, which lo cannot probe. A probe that a signal stops (an exit
+# status of 129 to 192) is reported as interrupted; any other failure, exit
+# status 255 too, is a plugin without the keys-only run. The probe is a
+# compatibility check, not isolation or attestation: a plugin that lies
+# about its capabilities, or a file that is changed after the probe, gets
+# through.
 build::_keys_only_capable() {
   local home="${1}" plugin="${1}/secrets.lok8s.dev/v1/secret/Secret" caps="" rc=0
   if [[ ! -d "${home}" ]]; then
     error "lo build --keys-only: the kustomize plugin home ${home#"${PATH_BASE}/"} does not exist, so kustomize would load plugins from other directories that lo does not check — run 'lo toolchain install' to install the plugin of this lo"
     return 1
   fi
-  [[ -f "${plugin}" ]] || return 0
+  if [[ ! -f "${plugin}" ]]; then
+    error "lo build --keys-only: the Secret plugin ${plugin#"${PATH_BASE}/"} does not exist, so kustomize could load another form of the plugin (a Go plugin, Secret.so) that lo does not check — run 'lo toolchain install' to install the plugin of this lo"
+    return 1
+  fi
   caps=$(
     probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/lok8s-keys-only-XXXXXX") || { echo "lok8s:no-probe-dir"; exit 1; }
     trap 'rm -rf "${probe_dir}"' EXIT
@@ -544,7 +550,7 @@ build::_keys_only_capable() {
     return 1
   fi
   (( rc == 0 )) && [[ $'\n'"${caps}"$'\n' == *$'\nkeys-only\n'* ]] && return 0
-  if (( rc > 128 )); then
+  if (( rc > 128 && rc <= 192 )); then
     error "lo build --keys-only: the check of the Secret plugin ${plugin#"${PATH_BASE}/"} was interrupted"
     return 1
   fi

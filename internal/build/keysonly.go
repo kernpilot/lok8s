@@ -69,6 +69,11 @@ const KeysOnlyLastAppliedExpr = `explode(.) | ((.. | select(kind == "map") | sel
 // run: lo does not print their stderr, as it can quote an input value.
 const keysOnlyWithheld = "in keys-only mode lo does not print its stderr, which can quote a value: run the build without --keys-only to see it"
 
+// maxSignal is the highest signal number (Linux: SIGRTMAX). A child that a
+// signal stops exits with 128 plus its number; a higher exit status, such
+// as 255, is the child's own.
+const maxSignal = 64
+
 // keysOnlyCapability is the line that `Secret --capabilities` prints when
 // the plugin has the keys-only run.
 const keysOnlyCapability = "keys-only"
@@ -261,9 +266,12 @@ func keysOnlyUnparsed(stderr io.Writer, domainName, artifactPath string) {
 // exists: KUSTOMIZE_PLUGIN_HOME, then directories under XDG_CONFIG_HOME
 // and HOME. With an absent home it would load a plugin that lo did not
 // check. The home that lo checked goes to kustomize as
-// KUSTOMIZE_PLUGIN_HOME (o.pluginHome). A home without the plugin file
-// renders no secrets.lok8s.dev Secret (the render fails on such a
-// generator), so there is no plugin to check.
+// KUSTOMIZE_PLUGIN_HOME (o.pluginHome). The Secret executable must be in
+// the home too: without it, a kustomize built with Go plugin support
+// loads the Go plugin (Secret.so) of the same generator, which lo cannot
+// probe. A probe that a signal stops (an exit status of 129 to 192) or a
+// cancelled context is reported as interrupted; any other failure, exit
+// status 255 too, is a plugin without the keys-only run.
 //
 // The probe is a compatibility check, not isolation or attestation: a
 // plugin that lies about its capabilities, or a file that is changed
@@ -280,10 +288,11 @@ func checkKeysOnlyPlugin(ctx context.Context, o *Options, stderr io.Writer) erro
 	}
 	o.pluginHome = home
 	plugin := filepath.Join(home, filepath.FromSlash(toolchain.SecretPluginRel))
-	if !fsutil.FileExists(plugin) {
-		return nil
-	}
 	rel := config.RelTo(o.Paths.Base, plugin)
+	if !fsutil.FileExists(plugin) {
+		ui.ErrorTo(stderr, "lo build --keys-only: the Secret plugin %s does not exist, so kustomize could load another form of the plugin (a Go plugin, Secret.so) that lo does not check — run 'lo toolchain install' to install the plugin of this lo", rel)
+		return ErrHandled
+	}
 	refuse := func() error {
 		ui.ErrorTo(stderr, "the Secret plugin %s does not have the keys-only run (an older plugin would read the secrets store) — run 'lo toolchain install' to install the plugin of this lo", rel)
 		return ErrHandled
@@ -315,7 +324,7 @@ func checkKeysOnlyPlugin(ctx context.Context, o *Options, stderr io.Writer) erro
 			}
 		}
 	}
-	if ctx.Err() != nil || execx.ExitCode(err) > 128 {
+	if rc := execx.ExitCode(err); ctx.Err() != nil || (rc > 128 && rc <= 128+maxSignal) {
 		ui.ErrorTo(stderr, "lo build --keys-only: the check of the Secret plugin %s was interrupted", rel)
 		return ErrHandled
 	}

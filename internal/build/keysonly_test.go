@@ -71,14 +71,17 @@ func keysOnlyProject(t *testing.T) (*config.Paths, string, string) {
 }
 
 // keysOnlyExecProject is artifactsProject with the plugin home of the
-// exec pipeline, the project's .kustomize. An in-process render in the
-// same test binary sets KUSTOMIZE_PLUGIN_HOME for the whole process (its
-// self-exec home); a real exec-pipeline run of lo never makes one.
+// exec pipeline, the project's .kustomize, and a Secret plugin in it that
+// has the keys-only run. An in-process render in the same test binary sets
+// KUSTOMIZE_PLUGIN_HOME for the whole process (its self-exec home); a real
+// exec-pipeline run of lo never makes one.
 func keysOnlyExecProject(t *testing.T) (*config.Paths, string) {
 	t.Helper()
 	p, domainDir := artifactsProject(t)
 	home := filepath.Join(p.Base, ".kustomize")
-	if err := os.MkdirAll(home, 0o755); err != nil {
+	plugin := filepath.Join(home, "secrets.lok8s.dev", "v1", "secret", "Secret")
+	writeFileT(t, plugin, "#!/bin/sh\n[ \"$1\" = --capabilities ] && { printf 'dry-run\\nkeys-only\\n'; exit 0; }\nexit 1\n")
+	if err := os.Chmod(plugin, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(config.KustomizePluginHomeEnv, home)
@@ -734,7 +737,7 @@ func TestKeysOnlyRefusesAnAbsentPluginHome(t *testing.T) {
 	p, _ := keysOnlyExecProject(t)
 	stubRender(t, p, twoDocRender)
 	home := filepath.Join(p.Base, ".kustomize")
-	if err := os.Remove(home); err != nil {
+	if err := os.RemoveAll(home); err != nil {
 		t.Fatal(err)
 	}
 	xdg := filepath.Join(p.Base, "xdg")
@@ -762,6 +765,37 @@ func TestKeysOnlyRefusesAnAbsentPluginHome(t *testing.T) {
 		if _, err := os.Stat(f); err == nil {
 			t.Errorf("%s exists: the render or the old plugin ran", f)
 		}
+	}
+}
+
+// A plugin home without the Secret executable is refused before the
+// render: a kustomize built with Go plugin support would load the Go
+// plugin of the same generator (Secret.so), which the probe cannot check.
+// bats: "build::keys_only refuses a plugin home without the Secret
+// executable".
+func TestKeysOnlyRefusesAHomeWithoutTheSecretExecutable(t *testing.T) {
+	p, _ := keysOnlyExecProject(t)
+	stubRender(t, p, twoDocRender)
+	dir := filepath.Join(p.Base, ".kustomize", "secrets.lok8s.dev", "v1", "secret")
+	if err := os.Remove(filepath.Join(dir, "Secret")); err != nil {
+		t.Fatal(err)
+	}
+	writeFileT(t, filepath.Join(dir, "Secret.so"), "a Go plugin\n")
+	klog := filepath.Join(p.Base, "kustomize-keys.log")
+	t.Setenv("KUSTOMIZE_STUB_KEYSLOG", klog)
+	var stdout, stderr bytes.Buffer
+	if err := KeysOnly(t.Context(), Options{Paths: p, Domain: "d.dev", Stderr: &stderr}, &stdout); !errors.Is(err, ErrHandled) {
+		t.Fatalf("KeysOnly = %v, want ErrHandled\n%s", err, stderr.String())
+	}
+	want := "[error] lo build --keys-only: the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not exist, so kustomize could load another form of the plugin (a Go plugin, Secret.so) that lo does not check — run 'lo toolchain install' to install the plugin of this lo\n"
+	if stderr.String() != want {
+		t.Errorf("stderr = %q\nwant %q", stderr.String(), want)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing", stdout.String())
+	}
+	if _, err := os.Stat(klog); err == nil {
+		t.Error("kustomize ran")
 	}
 }
 
@@ -819,13 +853,15 @@ func TestKeysOnlyPluginHomeReachesKustomize(t *testing.T) {
 }
 
 // A probe that cannot start or that a signal stops has its own message:
-// it is not a plugin without the keys-only run.
+// it is not a plugin without the keys-only run. An exit status above the
+// signal range (255) is the plugin's own: a plugin without the run.
 func TestKeysOnlyProbeFailureMessages(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, tmpdir, want string
 	}{
 		{"no temporary directory", "printf 'keys-only\\n'", "no-such-dir", "[error] lo build --keys-only: cannot make a temporary directory for the check of the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret: "},
 		{"stopped by a signal", "kill -TERM $$", "", "[error] lo build --keys-only: the check of the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret was interrupted\n"},
+		{"exit status 255", "exit 255", "", "[error] the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not have the keys-only run (an older plugin would read the secrets store) — run 'lo toolchain install' to install the plugin of this lo\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, _, _ := keysOnlyProject(t)
@@ -841,7 +877,7 @@ func TestKeysOnlyProbeFailureMessages(t *testing.T) {
 			if !strings.HasPrefix(stderr.String(), tc.want) {
 				t.Errorf("stderr = %q\nwant the prefix %q", stderr.String(), tc.want)
 			}
-			if strings.Contains(stderr.String(), "does not have the keys-only run") {
+			if !strings.Contains(tc.want, "does not have the keys-only run") && strings.Contains(stderr.String(), "does not have the keys-only run") {
 				t.Errorf("stderr names a plugin without the keys-only run: %q", stderr.String())
 			}
 			if stdout.Len() != 0 {

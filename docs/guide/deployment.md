@@ -189,7 +189,10 @@ The plugin home (`KUSTOMIZE_PLUGIN_HOME`, else `<project>/.kustomize`) must
 exist. kustomize uses the first plugin home that exists, and without the
 project's home it would load plugins from directories under
 `XDG_CONFIG_HOME` or `HOME` that `lo` does not check. `lo` gives kustomize
-the home that it checked.
+the home that it checked. The Secret plugin
+(`secrets.lok8s.dev/v1/secret/Secret`) must be in the home too, also when the
+domain has no `secrets.lok8s.dev` Secret: without it, a kustomize that has Go
+plugin support would load a Go plugin (`Secret.so`) that `lo` cannot check.
 
 The check is a compatibility check. It is not isolation and not
 attestation: a plugin that prints `keys-only` but does not have the run, or

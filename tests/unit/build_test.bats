@@ -11,10 +11,11 @@ setup() {
   setup_tmpdir
 
   export PATH_BASE="${BATS_TEST_TMPDIR}"
-  # The plugin home of the project: --keys-only refuses a project without
-  # one (kustomize would look for plugins elsewhere).
+  # The plugin home of the project with a Secret plugin that has the
+  # keys-only run: --keys-only refuses a project without one (kustomize
+  # would look for plugins elsewhere).
   unset KUSTOMIZE_PLUGIN_HOME
-  mkdir -p "${PATH_BASE}/.kustomize"
+  _secret_plugin 'dry-run\nkeys-only\n'
 
   # Stub import
   import() { :; }
@@ -568,14 +569,33 @@ YAML
   refute_output --partial "kind: ConfigMap"
   [[ ! -e "${KENV}" && ! -e "${BATS_TEST_TMPDIR}/old-plugin-ran" ]] || { echo "the render or the old plugin ran"; return 1; }
 
-  mkdir -p "${BATS_TEST_TMPDIR}/.kustomize"
+  _secret_plugin 'keys-only\n'
   run build::keys_only "test.lok8s.dev"
   assert_success
   [ "$(cat "${KENV}")" = "home=${BATS_TEST_TMPDIR}/.kustomize" ]
 }
 
+# A plugin home without the Secret executable is refused before the
+# render: a kustomize built with Go plugin support would load the Go plugin
+# of the same generator (Secret.so), which the probe cannot check. Go:
+# TestKeysOnlyRefusesAHomeWithoutTheSecretExecutable.
+@test "build::keys_only refuses a plugin home without the Secret executable" {
+  export KENV="${BATS_TEST_TMPDIR}/kenv"
+  kustomize() { echo "ran" > "${KENV}"; printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
+  export -f kustomize
+  local dir="${BATS_TEST_TMPDIR}/.kustomize/secrets.lok8s.dev/v1/secret"
+  rm -f "${dir}/Secret"
+  echo "a Go plugin" > "${dir}/Secret.so"
+  run build::keys_only "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "[error] lo build --keys-only: the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not exist, so kustomize could load another form of the plugin (a Go plugin, Secret.so) that lo does not check — run 'lo toolchain install' to install the plugin of this lo"
+  refute_output --partial "kind: ConfigMap"
+  [ ! -e "${KENV}" ] || { echo "kustomize ran"; return 1; }
+}
+
 # A probe that cannot start or that a signal stops has its own message: it
-# is not a plugin without the keys-only run. Go:
+# is not a plugin without the keys-only run. An exit status above the
+# signal range (255) is the plugin's own: a plugin without the run. Go:
 # TestKeysOnlyProbeFailureMessages.
 @test "build::keys_only names a probe that cannot start or is interrupted" {
   kustomize() { printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
@@ -595,6 +615,12 @@ YAML
   assert_output --partial "[error] lo build --keys-only: the check of the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret was interrupted"
   refute_output --partial "does not have the keys-only run"
   refute_output --partial "kind: ConfigMap"
+
+  _secret_plugin '' 255
+  run build::keys_only "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "[error] the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not have the keys-only run"
+  refute_output --partial "was interrupted"
 }
 
 # The probe can do nothing with any plugin version: it runs in an empty

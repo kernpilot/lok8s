@@ -55,6 +55,10 @@ esac
 `
 
 // mainFixture lays out a Go project with one domain and a .bin of stubs.
+// capableSecretPlugin is a Secret plugin that answers the keys-only probe
+// (Secret --capabilities) with the keys-only run.
+const capableSecretPlugin = "#!/bin/sh\n[ \"$1\" = --capabilities ] && { printf 'dry-run\\nkeys-only\\n'; exit 0; }\nexit 1\n"
+
 func mainFixture(t *testing.T) (proj, log string) {
 	t.Helper()
 	proj = t.TempDir()
@@ -78,8 +82,6 @@ func mainFixture(t *testing.T) (proj, log string) {
 		"clusters/patch.dev/plain.yaml":         "apiVersion: v1\nkind: Secret\nmetadata:\n  name: plain\n  namespace: demo\ndata:\n  TOKEN: dG9rZW4=\n",
 		"clusters/patch.dev/secret.yaml":        "apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: demo\nliterals:\n  USER: alice\n",
 		"clusters/patch.dev/secrets/.gitignore": "*\n",
-		// The plugin home: --keys-only refuses a project without one.
-		".kustomize/.keep": "",
 	}
 	for name, content := range files {
 		path := filepath.Join(proj, filepath.FromSlash(name))
@@ -89,6 +91,15 @@ func mainFixture(t *testing.T) (proj, log string) {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// The plugin home with a Secret plugin that has the keys-only run:
+	// --keys-only refuses a project without one.
+	plugin := filepath.Join(proj, ".kustomize", "secrets.lok8s.dev", "v1", "secret", "Secret")
+	if err := os.MkdirAll(filepath.Dir(plugin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plugin, []byte(capableSecretPlugin), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	bin := filepath.Join(proj, ".bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
