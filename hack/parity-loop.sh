@@ -557,6 +557,55 @@ check_stdin 'kind: ConfigMap' tilt preflight --domain alpha.dev    # kill switch
 unset LOK8S_PREFLIGHT
 check_stdin 'kind: ConfigMap' tilt preflight --domain alpha.dev    # sweep, nothing stuck
 
+# A service overlay that adds the keys-only marker to a Secret of the domain
+# artifact. The Tiltfile renders the overlay (kustomize build of the
+# artifacts dir) and pipes the render to lo tilt preflight on every load;
+# both implementations refuse it (rc 1, the same message) on the sweep path,
+# with the kill switch that the Tiltfile sets for preflight = False, and on
+# a non-kind domain. The refusal fails the load, so no k8s_yaml runs.
+ENVP_ART='apiVersion: v1
+kind: Secret
+metadata:
+  name: app
+  namespace: ns1
+  labels:
+    lok8s.dev/name: web
+data:
+  PASSWORD: cGFzcw==' envp_case "a keys-only marker" 0 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {version: v1, kind: Secret, name: app}
+        patch: |
+          - op: add
+            path: /metadata/annotations
+            value: {secrets.lok8s.dev/keys-only: "true"}
+YAML
+if ko_render="$("${ROOT}/.bin/kustomize" build --load-restrictor=LoadRestrictionsNone \
+    "${WORK}/envp-go/clusters/alpha.dev/artifacts" 2>&1)" \
+    && grep -q 'secrets.lok8s.dev/keys-only' <<<"${ko_render}"; then
+  for ko_case in sweep kill-switch non-kind; do
+    ko_domain=alpha.dev
+    [[ "${ko_case}" != kill-switch ]] || export LOK8S_PREFLIGHT=0
+    [[ "${ko_case}" != non-kind ]] || ko_domain=beta.cloud
+    ko_label="lo tilt preflight refuses a keys-only service overlay (${ko_case})"
+    PARITY_STDIN="${ko_render}" parity::run_pair tilt preflight --domain "${ko_domain}"
+    ko_ok=1
+    parity::compare "${ko_label}" - || ko_ok=0
+    # shellcheck disable=SC2154 # go_rc, bash_rc: set by parity::run_pair (hack/lib/parity.sh)
+    if (( go_rc != 1 || bash_rc != 1 )) \
+        || ! grep -qF 'preflight: refusing to apply the Tilt manifest: it holds a keys-only Secret (secrets.lok8s.dev/keys-only)' "${WORK}/go.err"; then
+      echo "FAIL: ${ko_label} — rc go=${go_rc} bash=${bash_rc}, stderr:"
+      indent < "${WORK}/go.err"
+      ko_ok=0
+    fi
+    parity::record "${ko_ok}" "${ko_label}"
+    unset LOK8S_PREFLIGHT
+  done
+else
+  fail "lo tilt preflight refuses a keys-only service overlay — the overlay does not render with the marker: ${ko_render}"
+fi
+
 # ── lo image — gates, error paths, catalog listing ───────────────────────────
 
 check - image cache svc --domain beta.cloud             # non-lo driver gate

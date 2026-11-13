@@ -5,18 +5,71 @@
 # its key names and empty values only. Such a Secret never goes into a
 # domain's artifacts and is never applied.
 
-# keysonly::has_marker <file>: look for an object with the keys-only marker
-# in the YAML stream <file> (Go: build.HasKeysOnlyMarker). The marker is a
-# mapping, at any depth of any document (a List item too), whose
-# metadata.annotations has the key secrets.lok8s.dev/keys-only. yq parses
-# the stream, so a quoted, escaped or flow-style key is the same key;
-# explode(.) resolves the aliases and merge keys first. Exit status:
+# The cause when the installed yq cannot run the check (the words of the
+# spec reader, spec::_kver_read).
+_KEYSONLY_OLD_YQ='the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (b install installs the pinned yq).'
+
+# keysonly::has_marker <file|->: look for an object with the keys-only
+# marker in the YAML stream <file> (- reads stdin; Go:
+# build.HasKeysOnlyMarker). The marker is a mapping, at any depth of any
+# document (a List item too), whose metadata.annotations has the key
+# secrets.lok8s.dev/keys-only. yq parses the stream, so a quoted, escaped
+# or flow-style key is the same key; explode(.) resolves the aliases and
+# merge keys first. The yq version is checked first: a yq before v4.47.1
+# fails on the flag --yaml-fix-merge-anchor-to-spec, and that failure is
+# not a stream that does not parse. The Go twin parses without yq. Exit
+# status:
 #   0  the stream holds the marker.
 #   1  it does not.
 #   2  it does not parse as YAML (yq failed): it cannot be checked.
+#   3  the installed yq cannot run the check (no yq, or one before v4.47.1).
 keysonly::has_marker() {
   local out
+  yq --yaml-fix-merge-anchor-to-spec --version >/dev/null 2>&1 || return 3
   out=$(yq --yaml-fix-merge-anchor-to-spec '[explode(.) | .. | select(kind == "map") | .metadata | select(kind == "map") | .annotations | select(kind == "map") | has("secrets.lok8s.dev/keys-only")] | any' "${1}" 2>/dev/null) || return 2
   [[ $'\n'"${out}"$'\n' == *$'\ntrue\n'* ]] && return 0
+  return 1
+}
+
+# keysonly::refuse_artifact <domain> <artifact>: the apply guard on a domain
+# artifact (Go: build.RefuseKeysOnlyArtifact): lo deploy and lo hooks read
+# the artifact through it. It prints why the artifact must not be applied
+# and returns 1 when the artifact holds an object with the keys-only marker
+# (a Secret with key names and empty values only, from lo build
+# --keys-only: applied, it would replace each value in the cluster with an
+# empty one), or when it cannot be read or checked. `lo build` never
+# writes such an artifact; the guard catches a file written in another
+# way. Returns 0 when the artifact may be applied.
+keysonly::refuse_artifact() {
+  local domain="${1}" artifact="${2}" marker=0
+  if [[ ! -r "${artifact}" ]]; then
+    error "refusing to apply ${domain}: ${artifact} cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
+    return 1
+  fi
+  keysonly::has_marker "${artifact}" || marker=$?
+  case "${marker}" in
+    1) return 0 ;;
+    2) error "refusing to apply ${domain}: ${artifact} does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)" ;;
+    3) error "refusing to apply ${domain}: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): ${_KEYSONLY_OLD_YQ}" ;;
+    *) error "refusing to apply ${domain}: ${artifact} holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one — run 'lo build' again" ;;
+  esac
+  return 1
+}
+
+# keysonly::refuse_stream <prefix> <what> <file|->: the apply guard on a
+# rendered stream (Go: build.RefuseKeysOnlyStream): the bootstrap applies
+# each entry's render, and the Tilt extension its manifest, through it.
+# <what> names the stream in the message, after "<prefix>: refusing to
+# apply ". It refuses as keysonly::refuse_artifact does: a stream with the
+# keys-only marker, and a stream that cannot be checked.
+keysonly::refuse_stream() {
+  local prefix="${1}" what="${2}" marker=0
+  keysonly::has_marker "${3}" || marker=$?
+  case "${marker}" in
+    1) return 0 ;;
+    2) error "${prefix}: refusing to apply ${what}: it does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)" ;;
+    3) error "${prefix}: refusing to apply ${what}: it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): ${_KEYSONLY_OLD_YQ}" ;;
+    *) error "${prefix}: refusing to apply ${what}: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one" ;;
+  esac
   return 1
 }

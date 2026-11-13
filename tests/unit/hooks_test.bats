@@ -17,6 +17,7 @@ setup() {
   :args() { shift; }; export -f :args
 
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/hooks"
 }
 
@@ -72,6 +73,41 @@ YAML
   assert_success
   assert_output --partial 'zitadel-provision'
   refute_output --partial 'zitadel-setup'
+}
+
+# The hooks read the domain artifact through the apply guard of lo deploy:
+# an artifact with a keys-only Secret (lo build --keys-only output) is
+# refused, even when the selector matches only other objects; so is one
+# that does not parse. recreate, apply and restart all select through
+# hooks::_select. Go: TestHooksRefuseAKeysOnlyArtifact.
+@test "_select: refuses an artifact with a keys-only Secret, and one that does not parse" {
+  mkdir -p "${PATH_CLUSTERS}/d.dev"
+  local artifact="${PATH_CLUSTERS}/d.dev/artifacts.yaml"
+  cat > "${artifact}" <<'YAML'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: provision
+  labels:
+    lok8s.dev/role: seed
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app
+  annotations:
+    secrets.lok8s.dev/keys-only: "true"
+data:
+  PASSWORD: ""
+YAML
+  run hooks::_select d.dev 'lok8s.dev/role=seed'
+  assert_failure
+  assert_output --partial "refusing to apply d.dev: ${artifact} holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one — run 'lo build' again"
+  refute_output --partial 'name: provision'
+  printf 'kind: Job\nmetadata: [a\n' > "${artifact}"
+  run hooks::_select d.dev 'lok8s.dev/role=seed'
+  assert_failure
+  assert_output --partial "refusing to apply d.dev: ${artifact} does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
 }
 
 @test "_select: empty when nothing matches" {

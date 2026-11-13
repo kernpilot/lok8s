@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/addons"
+	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -57,6 +58,14 @@ func (e *Engine) applyOne(ctx context.Context, job Job, stdout, stderr io.Writer
 	rendered, err := addons.Render(ctx, e.Paths, e.Runner, stderr, job.Dir, job.Kind, job.Provider, job.Inline, env)
 	if err != nil {
 		ui.ErrorTo(stderr, "bootstrap: render failed for %s", job.Name)
+		return 1
+	}
+	// The apply guard: a render with a keys-only Secret (lo build
+	// --keys-only output saved as an addon resource, or a marker that the
+	// entry adds) is not applied: each value in the cluster would become
+	// empty. Every apply of the bootstrap (lo up, lo provision, lo
+	// bootstrap) passes here.
+	if build.RefuseKeysOnlyStream(stderr, "bootstrap", job.Name, []byte(rendered)) != nil {
 		return 1
 	}
 

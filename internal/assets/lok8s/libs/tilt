@@ -8,6 +8,7 @@ import ^utils/types
 import ^utils/verbose
 import ^utils/domain
 import ^utils/kapply
+import ^utils/keysonly
 
 main::tilt() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
@@ -21,7 +22,7 @@ main::tilt() {
     'down|d@destructive'     'Spin down tilt'
     'status|s@readonly'      'Check tilt status'
     'restart|r@destructive'  'Restart tilt'
-    'preflight@destructive'  'Force-clear stuck-Terminating objects in the manifest on stdin'
+    'preflight@destructive'  'Refuse a keys-only Secret, then force-clear stuck-Terminating objects in the manifest on stdin'
   )
   :usage "Manage tilt environment" "${@}"
   "${usage[@]}"
@@ -227,9 +228,16 @@ tilt::preflight() {
     'crd-allow|' 'Comma-separated CRD names the force policy may strip (empty = all)'
     "${args[@]:-}"
   )
-  :args "Force-clear stuck-Terminating manifest objects (manifest on stdin)" "${@}"
+  :args "Refuse a keys-only Secret, then force-clear stuck-Terminating manifest objects (manifest on stdin)" "${@}"
+  # The apply guard first, with every switch below (Go: Context.Preflight):
+  # a manifest with a keys-only Secret is refused, and the refusal fails
+  # the Tiltfile load before any k8s_yaml. kapply::preflight reads the
+  # manifest from the variable after that (it strips the trailing newlines
+  # itself).
+  local manifest
+  manifest="$(cat)"
+  keysonly::refuse_stream preflight "the Tilt manifest" - <<< "${manifest}" || return 1
   if [[ "${LOK8S_PREFLIGHT:-1}" =~ ^(0|false)$ ]]; then
-    cat >/dev/null
     return 0
   fi
   local resolved driver
@@ -237,14 +245,12 @@ tilt::preflight() {
   driver=$(domain::driver "${resolved}") || driver=""
   if [[ "${driver}" != "lo" && -z "${LOK8S_FORCE_CLEAR_TERMINATING:-}" ]]; then
     warn "preflight: '${resolved}' uses the '${driver:-unknown}' driver — not force-clearing stuck objects on a non-kind cluster (set LOK8S_FORCE_CLEAR_TERMINATING=1 to override)"
-    cat >/dev/null
     return 0
   fi
 
   local enabled spec_age spec_crds spec_allow
   IFS=$'\t' read -r enabled spec_age spec_crds spec_allow < <(tilt::preflight_config "${resolved}")
   if [[ "${enabled}" =~ ^(false|0)$ ]]; then
-    cat >/dev/null
     return 0
   fi
 
@@ -260,7 +266,7 @@ tilt::preflight() {
   [[ -n "${age}" ]] && sweep+=(--age "${age}")
   [[ -n "${crds}" ]] && sweep+=(--crds "${crds}")
   [[ -n "${crd_allow}" ]] && sweep+=(--crd-allow "${crd_allow}")
-  kapply::preflight "${sweep[@]}"
+  kapply::preflight "${sweep[@]}" <<< "${manifest}"
 }
 
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::tilt "${@}"

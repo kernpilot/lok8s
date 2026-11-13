@@ -50,3 +50,50 @@ func TestTiltfilePinsKeysOnlyOff(t *testing.T) {
 		}
 	}
 }
+
+// The extension runs `lo tilt preflight` (its apply guard refuses a
+// manifest with a keys-only Secret) on every load: not under an if, right
+// after the render of the overlay (the domain artifact and the service
+// overlays on it), with that render on stdin, and before the first
+// k8s_yaml. The preflight setting turns off only the sweep
+// (LOK8S_PREFLIGHT=0). Tilt is never run here: a text check of the
+// extension as shipped; the guard itself is TestPreflightRefusesAKeysOnlyManifest.
+func TestTiltfileGuardsEveryApply(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(testutil.RepoRoot(t), "internal", "assets", "lok8s", "tilt", "Tiltfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const render = "  artifacts = local('kustomize build --load-restrictor=LoadRestrictionsNone %s' % _artifacts_dir, True, '', True, {})"
+	const guard = "  local('%s tilt preflight' % lo_bin, stdin = artifacts, env = {} if preflight else {'LOK8S_PREFLIGHT': '0'})"
+	renderAt, guardAt, firstApply := -1, -1, -1
+	var code []int // lines that are not comments or blank, after the render
+	for i, ln := range strings.Split(string(raw), "\n") {
+		trimmed := strings.TrimSpace(ln)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		switch {
+		case ln == render:
+			renderAt = i
+		case ln == guard:
+			guardAt = i
+		case strings.HasPrefix(trimmed, "k8s_yaml(") && firstApply < 0:
+			firstApply = i
+		}
+		if renderAt >= 0 && i > renderAt {
+			code = append(code, i)
+		}
+	}
+	if renderAt < 0 || guardAt < 0 {
+		t.Fatalf("the Tiltfile has no render (%d) or no guard call (%d)", renderAt+1, guardAt+1)
+	}
+	if len(code) == 0 || code[0] != guardAt {
+		t.Errorf("the guard (line %d) is not the first statement after the render (line %d)", guardAt+1, renderAt+1)
+	}
+	if firstApply < 0 || firstApply < guardAt {
+		t.Errorf("a k8s_yaml (line %d) comes before the guard (line %d)", firstApply+1, guardAt+1)
+	}
+	if strings.Count(string(raw), "tilt preflight' % lo_bin") != 1 {
+		t.Error("the Tiltfile calls lo tilt preflight more than once, or in another form")
+	}
+}

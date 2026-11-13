@@ -192,11 +192,24 @@ a plugin file that is replaced after the check, gets through. Install the
 plugin of your `lo` from a source that you trust.
 
 `lo build` never writes an object with the `secrets.lok8s.dev/keys-only`
-annotation into `artifacts.yaml` or the split directory, and `lo deploy`
-does not apply an artifact that holds one. Both commands parse the YAML, so
-a quoted key, a flow-style map and a `List` item count. A render or an
-artifact that does not parse as YAML also stops with an error. The existing
-artifacts do not change.
+annotation into `artifacts.yaml` or the split directory. These commands do
+not apply a manifest that holds one:
+
+- `lo deploy` and `lo hooks` (the hooks of the Tilt extension) refuse an
+  `artifacts.yaml` with the annotation, and one that they cannot read.
+- The bootstrap (`lo up`, `lo provision`, `lo bootstrap`) refuses an entry
+  whose render holds the annotation, for example keys-only output saved as
+  an addon resource. The dry run applies nothing and has no such check.
+- The Tilt extension runs `lo tilt preflight` on its manifest (the domain
+  artifact and the service overlays on it) before it applies anything, on
+  every load. A manifest with the annotation stops the load. The
+  `preflight` setting and `LOK8S_PREFLIGHT=0` turn off only the cleanup of
+  stuck objects, not this check.
+
+Each check parses the YAML, so a quoted key, a flow-style map and a `List`
+item count. A render or an artifact that does not parse as YAML also stops
+with an error. The existing artifacts do not change. The bash tree checks
+with `yq`, so it also stops when the installed `yq` is older than v4.47.1.
 
 The flag is the only way to start a keys-only render. lo controls the
 plugin setting that it uses (see the

@@ -383,6 +383,8 @@ build::artifacts() {
       rm -f "${tmp}"
       if (( marker == 2 )); then
         error "refusing to write ${domain}'s render to ${domain_dir}/artifacts.yaml: it does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
+      elif (( marker == 3 )); then
+        error "refusing to write ${domain}'s render to ${domain_dir}/artifacts.yaml: it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): ${_KEYSONLY_OLD_YQ}"
       else
         error "refusing to write ${domain}'s render to ${domain_dir}/artifacts.yaml: it holds a keys-only Secret (secrets.lok8s.dev/keys-only); keys-only output goes to stdout only (lo build --keys-only)"
       fi

@@ -16,6 +16,7 @@ setup() {
   export -f import
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
 
   # Minimal :args shim (same rationale as tilt_ci_test.bats: argsh builtins
   # are not loaded when a lib is sourced in bats): populate age/crds/
@@ -49,6 +50,42 @@ setup() {
 }
 
 teardown() { teardown_tmpdir; }
+
+# The apply guard runs before every switch: with the kill switch (the
+# Tiltfile sets it for preflight = False), on a non-kind driver, with the
+# spec's preflight off, and on a sweep run. A manifest with a keys-only
+# Secret (from the domain artifact or a service overlay) fails the call, so
+# the Tiltfile load stops before any k8s_yaml; the sweep does not run. Go:
+# TestPreflightRefusesAKeysOnlyManifest.
+@test "tilt::preflight refuses a manifest with a keys-only Secret" {
+  local marked
+  marked=$'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\ndata:\n  PASSWORD: ""'
+  local want="preflight: refusing to apply the Tilt manifest: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one"
+  local case
+  for case in sweep kill non-kind spec-off; do
+    unset LOK8S_PREFLIGHT
+    export DOMAIN_NAME=dev.test
+    echo 'kind: Lo' > "${PATH_CLUSTERS}/dev.test/cluster.lok8s.yaml"
+    case "${case}" in
+      kill) export LOK8S_PREFLIGHT=0 ;;
+      non-kind) export DOMAIN_NAME=prod.test ;;
+      spec-off) printf 'kind: Lo\nspec:\n  tilt:\n    preflight: false\n' > "${PATH_CLUSTERS}/dev.test/cluster.lok8s.yaml" ;;
+    esac
+    run tilt::preflight <<< "${marked}"
+    assert_failure
+    assert_output --partial "${want}"
+    [[ ! -s "${SWEEP_LOG}" ]] || { echo "${case}: the sweep ran"; return 1; }
+  done
+  # The sweep gets the manifest once the guard passes.
+  unset LOK8S_PREFLIGHT
+  export DOMAIN_NAME=dev.test
+  echo 'kind: Lo' > "${PATH_CLUSTERS}/dev.test/cluster.lok8s.yaml"
+  kapply::preflight() { echo "kapply::preflight $*" >> "${SWEEP_LOG}"; cat >> "${SWEEP_LOG}"; }
+  run tilt::preflight <<< $'kind: ConfigMap\nmetadata:\n  name: swept'
+  assert_success
+  run cat "${SWEEP_LOG}"
+  assert_output --partial "name: swept"
+}
 
 @test "preflight gate: LOK8S_PREFLIGHT=0 disables the sweep entirely" {
   export DOMAIN_NAME=dev.test LOK8S_PREFLIGHT=0

@@ -373,18 +373,29 @@ func TestApplyRefusesKeysOnlyOutput(t *testing.T) {
 // bats: "deploy::apply and deploy::apply_filtered refuse a keys-only artifact"
 // An artifact with the keys-only marker (a quoted key too: the check parses
 // the file) is never applied, filtered or not; neither is one that does not
-// parse. kubectl does not run.
+// parse, nor one that cannot be read (its own message: it is not a parse
+// error). kubectl does not run.
 func TestApplyRefusesAKeysOnlyArtifact(t *testing.T) {
 	for _, tc := range []struct {
 		name, artifact, want string
+		unreadable           bool
 	}{
-		{"marker", keysOnlyArtifact, "holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one — run 'lo build' again\n"},
-		{"no YAML", "kind: ConfigMap\nmetadata: [a\n", "does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)\n"},
+		{"marker", keysOnlyArtifact, "holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one — run 'lo build' again\n", false},
+		{"no YAML", "kind: ConfigMap\nmetadata: [a\n", "does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)\n", false},
+		{"unreadable", "kind: ConfigMap\n", "cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)\n", true},
 	} {
 		for _, filtered := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/filtered=%v", tc.name, filtered), func(t *testing.T) {
 				f := &fakeRunner{}
 				d, _, errBuf, domainDir := newDeployer(t, f, tc.artifact)
+				if tc.unreadable {
+					if os.Geteuid() == 0 {
+						t.Skip("root reads a file without read permission")
+					}
+					if err := os.Chmod(filepath.Join(domainDir, "artifacts.yaml"), 0); err != nil {
+						t.Fatal(err)
+					}
+				}
 				var err error
 				if filtered {
 					err = d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "platform")

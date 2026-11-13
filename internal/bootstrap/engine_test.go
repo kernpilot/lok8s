@@ -787,6 +787,40 @@ func TestFlushDebugVerbatimNeverCollapsed(t *testing.T) {
 	}
 }
 
+// --- the keys-only apply guard ----------------------------------------------
+
+// bats: "bootstrap::_apply_one refuses a render with a keys-only Secret".
+// An entry whose render holds a keys-only Secret (lo build --keys-only
+// output saved as an addon resource) is refused before kubectl runs: every
+// value in the cluster would become empty. lo up, lo provision and lo
+// bootstrap all apply through applyOne. (A render that does not parse
+// fails in addons.Render already.)
+func TestApplyOneRefusesAKeysOnlySecret(t *testing.T) {
+	for name, tc := range map[string]struct{ manifest, want string }{
+		"document": {"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  annotations: {\"secrets.lok8s.dev/keys-only\": \"true\"}\ndata:\n  PASSWORD: \"\"\n",
+			"[error] bootstrap: refusing to apply testcni: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one\n"},
+		"list item": {"apiVersion: v1\nkind: List\nitems:\n- apiVersion: v1\n  kind: Secret\n  metadata:\n    name: app\n    annotations:\n      secrets.lok8s.dev/keys-only: \"true\"\n",
+			"[error] bootstrap: refusing to apply testcni: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e, f, _, _, p := testEngine(t)
+			writeStackAddon(t, p)
+			f.manifest = tc.manifest
+			job := Job{Name: "testcni", Dir: filepath.Join(p.Lok8s, "addons", "testcni"), Kubeconfig: writeKubeconfig(t, p)}
+			rc, out := applyOneDirect(t, e, job)
+			if rc != 1 {
+				t.Fatalf("rc = %d, want 1:\n%s", rc, out)
+			}
+			if !strings.HasSuffix(out, tc.want) {
+				t.Errorf("output = %q\nwant the suffix %q", out, tc.want)
+			}
+			if strings.Contains(f.log(), "kubectl") {
+				t.Errorf("kubectl ran:\n%s", f.log())
+			}
+		})
+	}
+}
+
 // --- hosted platform-owned skip ---------------------------------------------
 
 func applyOneDirect(t *testing.T, e *Engine, job Job) (int, string) {

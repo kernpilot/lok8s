@@ -511,8 +511,9 @@ lo tilt status    # Run tilt doctor
 lo tilt restart   # Stop + start
 lo tilt ci [--timeout|-t <duration>]    # Headless build + deploy + wait-ready (tilt ci); exits with its status
 lo tilt preflight [--age|-a <seconds>] [--crds|-c drain|skip|force] [--crd-allow <names>]
-                  # Force-clear stuck-Terminating objects in the manifest read from stdin
-                  # (what the Tiltfile runs before an apply; LOK8S_PREFLIGHT=0 disables it)
+                  # Refuse a manifest (read from stdin) with a keys-only Secret, then
+                  # force-clear its stuck-Terminating objects (what the Tiltfile runs
+                  # before an apply; LOK8S_PREFLIGHT=0 disables the sweep, not the refusal)
 ```
 
 ### lo registry

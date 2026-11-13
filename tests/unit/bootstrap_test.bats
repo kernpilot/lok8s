@@ -125,6 +125,7 @@ YAML
   export KUSTOMIZE_PLUGIN_HOME="${BATS_TEST_TMPDIR}/.kustomize"
 
   source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
 }
 
@@ -180,6 +181,26 @@ YAML
   [ "$(yq -r '.nested.from_driver' "${merged}")" = "true" ]
   [ "$(yq -r '.nested.from_provider' "${merged}")" = "true" ]
   [ "$(yq -r '.nested.overridden' "${merged}")" = "provider" ]
+}
+
+# An entry whose render holds a keys-only Secret (lo build --keys-only
+# output saved as an addon resource) is refused before kubectl runs: every
+# value in the cluster would become empty. lo up, lo provision and lo
+# bootstrap all apply through bootstrap::_apply_one. Go:
+# TestApplyOneRefusesAKeysOnlySecret.
+@test "bootstrap::_apply_one refuses a render with a keys-only Secret" {
+  write_cluster_spec "testcni"
+  kustomize() {
+    printf 'apiVersion: v1\nkind: List\nitems:\n- apiVersion: v1\n  kind: Secret\n  metadata:\n    name: app\n    annotations:\n      secrets.lok8s.dev/keys-only: "true"\n  data:\n    PASSWORD: ""\n'
+  }
+  kubectl() { echo "kubectl $*" >> "${BATS_TEST_TMPDIR}/kubectl.log"; }
+  export -f kustomize kubectl
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  assert_failure
+  assert_output --partial "bootstrap: refusing to apply testcni: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one"
+  if grep -q ' apply' "${BATS_TEST_TMPDIR}/kubectl.log" 2>/dev/null; then
+    echo "kubectl applied:"; cat "${BATS_TEST_TMPDIR}/kubectl.log"; return 1
+  fi
 }
 
 @test "bootstrap::apply inline overrides beat provider, driver, and base values" {

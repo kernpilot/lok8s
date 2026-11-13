@@ -429,6 +429,40 @@ metadata:
 	}
 }
 
+// bats: "hooks recreate, apply and restart refuse a keys-only artifact".
+// The hooks read the domain artifact through the apply guard of lo deploy:
+// an artifact with a keys-only Secret (lo build --keys-only output) is
+// refused before anything runs, for each verb, even when the selector
+// matches only other objects. So is one that does not parse.
+func TestHooksRefuseAKeysOnlyArtifact(t *testing.T) {
+	marked := twoJobs + "---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  annotations:\n    secrets.lok8s.dev/keys-only: \"true\"\ndata:\n  PASSWORD: \"\"\n"
+	for name, tc := range map[string]struct{ artifact, want string }{
+		"marker":  {marked, "holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one — run 'lo build' again\n"},
+		"no YAML": {"kind: Job\nmetadata: [a\n", "does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)\n"},
+	} {
+		for verb, run := range map[string]func(*Context) error{
+			"recreate": func(c *Context) error { return c.Recreate(t.Context(), "lok8s.dev/role=seed") },
+			"apply":    func(c *Context) error { return c.Apply(t.Context(), "lok8s.dev/role=seed") },
+			"restart":  func(c *Context) error { return c.Restart(t.Context(), "lok8s.dev/role=seed") },
+		} {
+			t.Run(name+"/"+verb, func(t *testing.T) {
+				c, runner, _, errOut := testCtx(t)
+				writeArtifact(t, c, tc.artifact)
+				if err := run(c); !errors.Is(err, ErrHandled) {
+					t.Fatalf("err = %v", err)
+				}
+				want := "[error] refusing to apply d.dev: " + filepath.Join(c.Paths.Clusters, "d.dev", "artifacts.yaml") + " " + tc.want
+				if errOut.String() != want {
+					t.Errorf("stderr = %q\nwant %q", errOut.String(), want)
+				}
+				if len(runner.calls) != 0 {
+					t.Errorf("a command ran: %v", runner.calls)
+				}
+			})
+		}
+	}
+}
+
 func TestApplyNoDeleteJustKapply(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
 	writeArtifact(t, c, twoJobs)

@@ -135,21 +135,11 @@ deploy::apply() {
 }
 
 # deploy::_refuse_keys_only <domain> <artifact>: refuse an artifact that
-# holds an object with the keys-only marker (Go: Deployer.refuseKeysOnly).
-# Such a Secret has its key names and empty values only (lo build
-# --keys-only): applied, it would replace each value in the cluster with an
-# empty one. `lo build` never writes one into artifacts.yaml; this catches
-# a file written in another way. The check parses the artifact
-# (keysonly::has_marker), and an artifact that does not parse is refused too.
+# holds an object with the keys-only marker, and one that cannot be read or
+# checked (Go: Deployer.refuseKeysOnly; the guard is
+# keysonly::refuse_artifact).
 deploy::_refuse_keys_only() {
-  local domain="${1}" artifact="${2}" marker=0
-  keysonly::has_marker "${artifact}" || marker=$?
-  case "${marker}" in
-    1) return 0 ;;
-    2) error "refusing to apply ${domain}: ${artifact} does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)" ;;
-    *) error "refusing to apply ${domain}: ${artifact} holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one — run 'lo build' again" ;;
-  esac
-  return 1
+  keysonly::refuse_artifact "${1}" "${2}"
 }
 
 # Apply only the resources in the domain artifact carrying <label_key>=<label_value>.

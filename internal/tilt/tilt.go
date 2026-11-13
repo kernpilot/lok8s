@@ -19,6 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/assets"
+	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -454,13 +455,24 @@ func scalarValue(n *yaml.Node) string {
 //   - stuck-CRD policy (drain/skip/force + allowlist) comes from the spec
 //     unless flags override.
 //
-// Always returns nil — a preflight must never brick the `tilt up` it
-// protects.
+// Before all of that, and with every switch above, the apply guard
+// (build.RefuseKeysOnlyStream) refuses a manifest with a keys-only Secret
+// (lo build --keys-only output, from the domain artifact or a service
+// overlay on it): applied, each value in the cluster would become empty.
+// The extension calls preflight on every load, also with preflight =
+// False (it then sets LOK8S_PREFLIGHT=0), so a refusal fails the load and
+// no k8s_yaml applies anything. Otherwise it returns nil — a preflight
+// must never brick the `tilt up` it protects.
 func (c *Context) Preflight(ctx context.Context, domainArg, age, crds, crdAllow string) error {
-	drain := func() { _, _ = io.Copy(io.Discard, c.Stdin) }
+	var manifest []byte
+	if c.Stdin != nil {
+		manifest, _ = io.ReadAll(c.Stdin)
+	}
+	if err := build.RefuseKeysOnlyStream(c.ErrOut, "preflight", "the Tilt manifest", manifest); err != nil {
+		return err
+	}
 
 	if v := os.Getenv("LOK8S_PREFLIGHT"); v == "0" || v == "false" {
-		drain()
 		return nil
 	}
 	resolved := domain.Resolve(domainArg, c.Paths.Clusters, c.ErrOut)
@@ -474,13 +486,11 @@ func (c *Context) Preflight(ctx context.Context, domainArg, age, crds, crdAllow 
 			label = "unknown"
 		}
 		ui.WarnTo(c.ErrOut, "preflight: '%s' uses the '%s' driver — not force-clearing stuck objects on a non-kind cluster (set LOK8S_FORCE_CLEAR_TERMINATING=1 to override)", resolved, label)
-		drain()
 		return nil
 	}
 
 	enabled, specAge, specCrds, specAllow := c.PreflightConfig(resolved)
 	if enabled == "false" || enabled == "0" {
-		drain()
 		return nil
 	}
 
@@ -514,6 +524,5 @@ func (c *Context) Preflight(ctx context.Context, domainArg, age, crds, crdAllow 
 	if crdAllow != "" {
 		sweep = append(sweep, "--crd-allow", crdAllow)
 	}
-	manifest, _ := io.ReadAll(c.Stdin)
 	return c.preflight(ctx, string(manifest), sweep...)
 }

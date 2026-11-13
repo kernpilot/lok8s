@@ -4026,7 +4026,7 @@ lo tilt [flags]
 * [lo](#lo)	 - lok8s - local dev orchestration
 * [lo tilt ci](#lo-tilt-ci)	 - Headless build+deploy+wait-ready (tilt ci), exits with real status
 * [lo tilt down](#lo-tilt-down)	 - Spin down tilt
-* [lo tilt preflight](#lo-tilt-preflight)	 - Force-clear stuck-Terminating objects in the manifest on stdin
+* [lo tilt preflight](#lo-tilt-preflight)	 - Refuse a keys-only Secret, then force-clear stuck-Terminating objects in the manifest on stdin
 * [lo tilt restart](#lo-tilt-restart)	 - Restart tilt
 * [lo tilt status](#lo-tilt-status)	 - Check tilt status
 * [lo tilt up](#lo-tilt-up)	 - Spin up tilt (interactive, backgrounded)
@@ -4083,7 +4083,7 @@ lo tilt down [flags]
 
 ## lo tilt preflight
 
-Force-clear stuck-Terminating objects in the manifest on stdin
+Refuse a keys-only Secret, then force-clear stuck-Terminating objects in the manifest on stdin
 
 ```
 lo tilt preflight [flags]

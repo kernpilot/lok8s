@@ -103,6 +103,53 @@ func HasKeysOnlyMarker(data []byte) (bool, error) {
 	return false, nil
 }
 
+// RefuseKeysOnlyArtifact is the apply guard on a domain artifact (bash:
+// keysonly::refuse_artifact): lo deploy and lo hooks read the artifact
+// through it. It prints why the artifact must not be applied and returns
+// ui.ErrHandled when the artifact holds an object with the keys-only
+// marker (a Secret with key names and empty values only, from lo build
+// --keys-only: applied, it would replace each value in the cluster with
+// an empty one), or when it cannot be read or does not parse, so that it
+// cannot be checked. `lo build` never writes such an artifact; the guard
+// catches a file written in another way. Nil when the artifact may be
+// applied.
+func RefuseKeysOnlyArtifact(stderr io.Writer, domainName, artifact string) error {
+	raw, err := os.ReadFile(artifact)
+	if err != nil {
+		ui.ErrorTo(stderr, "refusing to apply %s: %s cannot be read, so it cannot be checked for a keys-only Secret (%s)", domainName, artifact, secret.KeysOnlyAnnotation)
+		return ui.ErrHandled
+	}
+	marked, err := HasKeysOnlyMarker(raw)
+	switch {
+	case err != nil:
+		ui.ErrorTo(stderr, "refusing to apply %s: %s does not parse as YAML, so it cannot be checked for a keys-only Secret (%s)", domainName, artifact, secret.KeysOnlyAnnotation)
+		return ui.ErrHandled
+	case marked:
+		ui.ErrorTo(stderr, "refusing to apply %s: %s holds a keys-only Secret (%s), which would replace each value with an empty one — run 'lo build' again", domainName, artifact, secret.KeysOnlyAnnotation)
+		return ui.ErrHandled
+	}
+	return nil
+}
+
+// RefuseKeysOnlyStream is the apply guard on a rendered stream (bash:
+// keysonly::refuse_stream): the bootstrap applies each entry's render, and
+// the Tilt extension its manifest, through it. what names the stream in
+// the message, after "<prefix>: refusing to apply ". It refuses as
+// RefuseKeysOnlyArtifact does: a stream with the keys-only marker, and a
+// stream that does not parse.
+func RefuseKeysOnlyStream(stderr io.Writer, prefix, what string, data []byte) error {
+	marked, err := HasKeysOnlyMarker(data)
+	switch {
+	case err != nil:
+		ui.ErrorTo(stderr, "%s: refusing to apply %s: it does not parse as YAML, so it cannot be checked for a keys-only Secret (%s)", prefix, what, secret.KeysOnlyAnnotation)
+		return ui.ErrHandled
+	case marked:
+		ui.ErrorTo(stderr, "%s: refusing to apply %s: it holds a keys-only Secret (%s), which would replace each value with an empty one", prefix, what, secret.KeysOnlyAnnotation)
+		return ui.ErrHandled
+	}
+	return nil
+}
+
 // markerIn walks every node under n (aliases resolved, each node once)
 // and reports whether a mapping has the marker in metadata.annotations.
 func markerIn(n *yaml.Node, seen map[*yaml.Node]bool) bool {

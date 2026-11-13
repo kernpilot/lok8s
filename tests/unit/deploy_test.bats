@@ -169,6 +169,40 @@ YAML
   refute_output --partial "applied"
 }
 
+# An artifact that cannot be read, and a yq that cannot run the check (one
+# before v4.47.1 does not know --yaml-fix-merge-anchor-to-spec), each get
+# their own message: neither is an artifact that does not parse. Go:
+# TestApplyRefusesAKeysOnlyArtifact (the unreadable case; the Go check runs
+# without yq).
+@test "deploy::apply names an unreadable artifact and an old yq, not a parse error" {
+  local artifact="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
+  if (( EUID != 0 )); then
+    chmod 000 "${artifact}"
+    run deploy::apply "test.lok8s.dev"
+    chmod 644 "${artifact}"
+    assert_failure
+    assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
+    refute_output --partial "does not parse"
+    refute_output --partial "applied"
+  fi
+
+  yq() {
+    local a
+    for a in "$@"; do
+      if [[ "${a}" == --yaml-fix-merge-anchor-to-spec ]]; then
+        echo "Error: unknown flag: --yaml-fix-merge-anchor-to-spec" >&2
+        return 1
+      fi
+    done
+    command yq "$@"
+  }
+  run deploy::apply "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (b install installs the pinned yq)."
+  refute_output --partial "does not parse"
+  refute_output --partial "applied"
+}
+
 # --- deploy::apply_filtered ---
 
 @test "deploy::apply_filtered applies only the matching subset (full label key)" {

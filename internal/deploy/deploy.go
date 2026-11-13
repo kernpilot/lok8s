@@ -35,7 +35,6 @@ import (
 	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
-	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 )
 
 // ErrHandled marks a failure whose [error] line was already printed.
@@ -123,27 +122,10 @@ func (d *Deployer) Apply(ctx context.Context, domain string) error {
 }
 
 // refuseKeysOnly refuses an artifact that holds an object with the
-// keys-only marker (bash: deploy::_refuse_keys_only). Such a Secret has
-// its key names and empty values only (lo build --keys-only): applied, it
-// would replace each value in the cluster with an empty one. `lo build`
-// never writes one into artifacts.yaml; this catches a file written in
-// another way. The check parses the artifact (build.HasKeysOnlyMarker),
-// and an artifact that does not parse is refused too.
+// keys-only marker, and one that cannot be read or does not parse (bash:
+// deploy::_refuse_keys_only; the guard is build.RefuseKeysOnlyArtifact).
 func (d *Deployer) refuseKeysOnly(domain, artifact string) error {
-	raw, err := os.ReadFile(artifact)
-	marked := false
-	if err == nil {
-		marked, err = build.HasKeysOnlyMarker(raw)
-	}
-	switch {
-	case err != nil:
-		ui.ErrorTo(d.stderr(), "refusing to apply %s: %s does not parse as YAML, so it cannot be checked for a keys-only Secret (%s)", domain, artifact, secret.KeysOnlyAnnotation)
-		return ErrHandled
-	case marked:
-		ui.ErrorTo(d.stderr(), "refusing to apply %s: %s holds a keys-only Secret (%s), which would replace each value with an empty one — run 'lo build' again", domain, artifact, secret.KeysOnlyAnnotation)
-		return ErrHandled
-	}
-	return nil
+	return build.RefuseKeysOnlyArtifact(d.stderr(), domain, artifact)
 }
 
 // ApplyFiltered applies only the resources in the domain artifact carrying

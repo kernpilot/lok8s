@@ -25,8 +25,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/tilt"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -157,14 +159,23 @@ func (d doc) matches(pairs []selectorPair) bool {
 // domain's rendered artifact (bash: hooks::_select). This is the same single
 // clusters/<domain>/artifacts.yaml `lo deploy` applies; the Tilt reload
 // keeps the upstream ConfigMaps current, so a recreated Job mounts the
-// edited content. A missing artifact selects nothing; unreadable YAML too
-// (bash: `yq … 2>/dev/null || true`).
+// edited content. A missing artifact selects nothing. The artifact passes
+// the apply guard of lo deploy first (build.RefuseKeysOnlyArtifact): one
+// with a keys-only Secret, or one that cannot be read or does not parse,
+// is refused.
 func (c *Context) selectObjects(domainName, selector string) ([]doc, error) {
 	pairs, err := c.parseSelector(selector)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(c.Paths.Clusters + "/" + domainName + "/artifacts.yaml")
+	artifact := c.Paths.Clusters + "/" + domainName + "/artifacts.yaml"
+	if !fsutil.FileExists(artifact) {
+		return nil, nil
+	}
+	if err := build.RefuseKeysOnlyArtifact(c.ErrOut, domainName, artifact); err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(artifact)
 	if err != nil {
 		return nil, nil
 	}

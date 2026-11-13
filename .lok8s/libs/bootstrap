@@ -41,6 +41,7 @@ import ^utils/domain
 import ^utils/verbose
 import ^utils/kapply
 import ^libs/addons
+import ^utils/keysonly
 
 # ── CLI entry point ──────────────────────────────────────
 
@@ -704,6 +705,11 @@ bootstrap::_apply_one() {
     error "bootstrap: render failed for ${addon_name}"
     return 1
   fi
+  # The apply guard: a render with a keys-only Secret (lo build --keys-only
+  # output saved as an addon resource, or a marker that the entry adds) is
+  # not applied: each value in the cluster would become empty. Every apply
+  # of the bootstrap (lo up, lo provision, lo bootstrap) passes here.
+  keysonly::refuse_stream bootstrap "${addon_name}" - <<< "${rendered}" || return 1
 
   # Apply with server-side + CRD retry. kapply::apply renders its own
   # (collapsed-on-a-tty) progress, heals immutable / stuck-Terminating conflicts
