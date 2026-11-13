@@ -678,14 +678,18 @@ _apply_within() {
   [ ! -e "${FIXED}" ] || { chmod 700 "${FIXED}"; echo "the run directory is left"; return 1; }
 }
 
-# The Go twin is TestApplyRemovesTheRunCopyOnASIGHUP. The subshell that
-# makes the run directory owns it from the start: a SIGTERM while lo
-# copies the addons (after the first copied file) ends the subshell, its
-# EXIT trap removes the run copy, and kubeone does not run.
+# The Go twins are TestApplyRemovesTheRunCopyOnASIGHUP and
+# TestApplyHangupEndsLoAfterTheOuterCleanup. The subshell that makes the
+# run directory owns it from the start: a SIGTERM, a SIGHUP or a SIGINT
+# while lo copies the addons (after the first copied file) ends the
+# subshell with the signal, its EXIT trap removes the run copy, and kubeone
+# does not run. A terminal sends its SIGINT (Ctrl-C) to each process of
+# the group: here the process that reads the file ends with it too, as
+# bash then ends with the SIGINT of its child.
 @test "kubeone::apply: a signal after the first copied file removes the run copy" {
   local cy; cy=$(_cluster_yaml '')
   yq -i '.addons.enable = true | .addons.path = "./addons"' "${work_dir}/kubeone.yaml"
-  export KCALLS="${BATS_TEST_TMPDIR}/kubeone.calls" READS="${BATS_TEST_TMPDIR}/reads" COPIED="${BATS_TEST_TMPDIR}/copied"
+  export KCALLS="${BATS_TEST_TMPDIR}/kubeone.calls" READS="${BATS_TEST_TMPDIR}/reads" COPIED="${BATS_TEST_TMPDIR}/copied" SIG
   kubeone::_clean_reinstalled_workers() { :; }
   kubeone::_name_robot_workers() { :; }
   kubeone() { echo "kubeone $*" >> "${KCALLS}"; }
@@ -702,17 +706,23 @@ _apply_within() {
       # This runs in the command substitution of kubeone::_copy_dir: its
       # parent is the subshell of kubeone::apply that owns the run.
       local me="${BASHPID}"
-      kill -TERM "$(ps -o ppid= -p "${me}" | tr -d ' ')"
+      kill "-${SIG}" "$(ps -o ppid= -p "${me}" | tr -d ' ')"
+      [[ "${SIG}" != INT ]] || kill -INT "${me}"
     fi
     _test_read_checked_file "$@"
   }
-  run kubeone::apply "${work_dir}" "${cy}"
-  [ "${status}" -eq 143 ] || { echo "status ${status}: ${output}"; return 1; }
-  [ "$(cat "${READS}")" = $'addons/a/x.yaml\naddons/b/y.yaml' ]
-  [ -s "${COPIED}" ]
-  [ ! -f "${KCALLS}" ]
-  run ls -A "${work_dir}"
-  refute_output --partial ".kubeone-run-"
+  local want
+  for SIG in TERM HUP INT; do
+    rm -f "${READS}" "${COPIED}"
+    case "${SIG}" in TERM) want=143 ;; HUP) want=129 ;; INT) want=130 ;; esac
+    run kubeone::apply "${work_dir}" "${cy}"
+    [ "${status}" -eq "${want}" ] || { echo "${SIG}: status ${status}: ${output}"; return 1; }
+    [ "$(cat "${READS}")" = $'addons/a/x.yaml\naddons/b/y.yaml' ] || { echo "${SIG}: reads $(cat "${READS}")"; return 1; }
+    [ -s "${COPIED}" ] || { echo "${SIG}: no file was copied"; return 1; }
+    [ ! -f "${KCALLS}" ] || { echo "${SIG}: kubeone ran"; return 1; }
+    run ls -A "${work_dir}"
+    refute_output --partial ".kubeone-run-"
+  done
 }
 
 # kubeone::apply and render_addons hold the Hetzner credentials with

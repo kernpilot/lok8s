@@ -207,7 +207,10 @@ not apply a manifest that holds one:
   `artifacts.yaml` with the annotation, and one that they cannot read. Each
   reads the artifact once and uses the copy that it checked: `lo deploy`
   applies that copy (also the subset of `-l key=value`), and `lo hooks`
-  selects its objects from it.
+  selects its objects from it. To select the CRDs and the subset of `-l`,
+  `lo deploy` splits the copy at its `---` lines. It stops with an error
+  on a `---` line with more text on it (`--- # note`), which kustomize
+  does not write. The bash tree reads such a line as a separator.
 - The bootstrap (`lo up`, `lo provision`, `lo bootstrap`) refuses an entry
   whose render holds the annotation, for example keys-only output saved as
   an addon resource. The dry run applies nothing and has no such check.
@@ -233,13 +236,33 @@ not apply a manifest that holds one:
   (`<work dir>/.kubeone-run-<random>/`, mode 0700, files 0600), and the
   copy of the manifest names it in `addons.path`, with the aliases and
   merge keys (`<<`) of the manifest resolved. `./addons`, `./addons/`
-  and `addons` name the same directory. The copy is beside
-  `kubeone.yaml`, so the other paths of the manifest are the same. lo
-  removes both when `kubeone apply` ends, and when lo stops on a signal
-  that it can catch (SIGINT, SIGTERM, SIGHUP). A SIGKILL, or a second
-  signal while lo removes them, can leave them in the work dir, with the
-  CCM render (and its Hetzner token) in plaintext: remove
-  `.kubeone-run-*` by hand after such a stop.
+  and `addons` name the same directory. lo removes a `..` in
+  `addons.path` by its name, as Go's `filepath.Clean` does: `a/../addons`
+  is `addons`, also when `a` is a symbolic link. A `..` or an absolute
+  path can name a directory outside the work dir: lo copies and checks
+  it in the same way. A `kubeone.yaml` with more than one YAML document
+  (a `---` line after the spec starts a second one), and an `addons.path`
+  that is not a string (`false`, a number, a mapping, a list), stop the
+  apply. lo removes the run directory and the copy of the manifest when
+  `kubeone apply` ends, and when lo stops on a signal that it can catch
+  (SIGINT, SIGTERM, SIGHUP; under `nohup`, lo ignores a SIGHUP). On a
+  SIGHUP, the Go `lo` stops `kubeone`, removes the copy and its other
+  temporary files (the provider config of `lo provision`), and then ends
+  with the SIGHUP. A SIGKILL, or a second signal while lo removes them, can leave
+  them in the work dir, with the CCM render (and its Hetzner token) in
+  plaintext: remove `.kubeone-run-*` by hand after such a stop. When a
+  write of the copy fails (a full disk), lo removes the part that it
+  wrote.
+
+  The copy of the manifest is beside `kubeone.yaml`, so the other paths
+  of the manifest (the CA file, the audit and node-selector files) are
+  the same, and KubeOne reads these from the work dir, not from a copy.
+  So a writer who can create or rename files in the work dir can also
+  replace these files: keep the work dir writable only by you. lo does
+  not write over a file that is at the path of the copy already, and it
+  stops the apply. The two trees differ when a file appears at that path
+  after lo checked it: the Go `lo` keeps that file, and the bash tree
+  removes it when the apply ends.
 - The Tilt extension runs `lo tilt preflight` on its manifest (the domain
   artifact and the service overlays on it) before it applies anything, on
   every load. A manifest with the annotation, or one that cannot be read
