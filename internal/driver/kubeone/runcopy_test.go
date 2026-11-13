@@ -80,7 +80,9 @@ func readRunSpec(t *testing.T, c execx.Cmd) runSpec {
 }
 
 // assertExploded fails when the manifest copy raw holds an alias, an
-// anchor or a merge key (<<), which lo resolves (explode).
+// anchor or a merge key (<<), which lo resolves (explode). It finds a
+// merge key with its own check, a plain << key, and not with isMergeKey:
+// a fault in isMergeKey would also hide the key from the test.
 func assertExploded(t *testing.T, raw []byte) {
 	t.Helper()
 	var doc yaml.Node
@@ -94,7 +96,9 @@ func assertExploded(t *testing.T, raw []byte) {
 			return
 		}
 		for i, c := range n.Content {
-			if n.Kind == yaml.MappingNode && i%2 == 0 && isMergeKey(c) {
+			plainMerge := c.Kind == yaml.ScalarNode && c.Value == "<<" &&
+				c.Style&(yaml.TaggedStyle|yaml.SingleQuotedStyle|yaml.DoubleQuotedStyle) == 0
+			if n.Kind == yaml.MappingNode && i%2 == 0 && plainMerge {
 				t.Errorf("the manifest copy holds a merge key:\n%s", raw)
 				return
 			}
