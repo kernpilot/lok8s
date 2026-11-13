@@ -221,6 +221,7 @@ tilt::preflight_config() {
 #     unless flags override — see kapply::_preflight_crd for the semantics.
 # Always exits 0 — a preflight must never brick the `tilt up` it protects.
 tilt::preflight() {
+  [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   local age crds crd_allow
   local -a args=(
     'age|a'      'Only clear objects terminating longer than this many seconds (default 30)'
@@ -233,10 +234,10 @@ tilt::preflight() {
   # a manifest with a keys-only Secret is refused, and the refusal fails
   # the Tiltfile load before any k8s_yaml. A manifest that cannot be read
   # from stdin, or does not parse, is refused too. kapply::preflight reads
-  # the checked manifest from the variable after that (it strips the
-  # trailing newlines itself).
+  # the checked manifest from the variable after that, through a pipe.
   local manifest
-  manifest="$(keysonly::read_checked_file preflight "the Tilt manifest" -)" || return 1
+  manifest="$(keysonly::read_checked_file preflight "the Tilt manifest" - && printf .)" || return 1
+  manifest="${manifest%.}"
   if [[ "${LOK8S_PREFLIGHT:-1}" =~ ^(0|false)$ ]]; then
     return 0
   fi
@@ -266,7 +267,7 @@ tilt::preflight() {
   [[ -n "${age}" ]] && sweep+=(--age "${age}")
   [[ -n "${crds}" ]] && sweep+=(--crds "${crds}")
   [[ -n "${crd_allow}" ]] && sweep+=(--crd-allow "${crd_allow}")
-  kapply::preflight "${sweep[@]}" <<< "${manifest}"
+  printf '%s' "${manifest}" | kapply::preflight "${sweep[@]}"
 }
 
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::tilt "${@}"

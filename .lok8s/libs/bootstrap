@@ -678,6 +678,7 @@ bootstrap::_skip_reason() {
 # convention the addons reference; other names reach the render but are not
 # whitelisted.
 bootstrap::_apply_one() {
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local addon_name="${1}" addon_dir="${2}" kind="${3}" provider_name="${4}"
   local kubeconfig="${5}" inline_values="${6}" do_wait="${7}" env_lines="${8:-}"
 
@@ -701,29 +702,31 @@ bootstrap::_apply_one() {
   # envsubst) — the SAME addons::render the KubeOne driver stages addons with.
   debug "bootstrap: rendering ${addon_name}"
   local rendered
-  if ! rendered=$(addons::render "${addon_dir}" "${kind}" "${provider_name}" "${inline_values}" "${env_lines}"); then
+  if ! rendered=$(addons::render "${addon_dir}" "${kind}" "${provider_name}" "${inline_values}" "${env_lines}" && printf .); then
     error "bootstrap: render failed for ${addon_name}"
     return 1
   fi
+  rendered="${rendered%.}"
   # The apply guard: a render with a keys-only Secret (lo build --keys-only
   # output saved as an addon resource, or a marker that the entry adds) is
   # not applied: each value in the cluster would become empty. Every apply
   # of the bootstrap (lo up, lo provision, lo bootstrap) passes here.
-  keysonly::refuse_stream bootstrap "${addon_name}" - <<< "${rendered}" || return 1
+  printf '%s' "${rendered}" | keysonly::refuse_stream bootstrap "${addon_name}" - || return 1
 
   # Apply with server-side + CRD retry. kapply::apply renders its own
   # (collapsed-on-a-tty) progress, heals immutable / stuck-Terminating conflicts
   # (interactive prompt, or --force-recreate), and passes CRD-not-installed /
   # webhook-not-ready errors through unchanged so the transient-race retry below
-  # still fires. A herestring (not a pipe) keeps kapply in this shell so
-  # KAPPLY_LAST_OUTPUT is readable here.
+  # still fires. A process substitution (not a pipe) keeps kapply in this
+  # shell so KAPPLY_LAST_OUTPUT is readable here; it is not a here-string,
+  # which can put the render in a file (utils/keysonly.sh).
   local fp_rc=0
-  kapply::apply --label "${addon_name}" --kubeconfig "${kubeconfig}" <<< "${rendered}" || fp_rc=$?
+  kapply::apply --label "${addon_name}" --kubeconfig "${kubeconfig}" < <(printf '%s' "${rendered}") || fp_rc=$?
 
   # Unrecoverable conflict that wasn't healed (declined the prompt, or
   # non-interactive without --force-recreate) — fail fast rather than
   # "succeeding" and letting the next `lo up` / Tilt loop hit the same wall.
-  if (( fp_rc != 0 )) && grep -qE 'field is immutable|object is being deleted|because it is being terminated' <<< "${KAPPLY_LAST_OUTPUT}"; then
+  if (( fp_rc != 0 )) && kapply::output_matches 'field is immutable|object is being deleted|because it is being terminated' "${KAPPLY_LAST_OUTPUT}"; then
     error "bootstrap: ${addon_name} has objects blocked by an immutable/terminating conflict — see above (try: lo up --force-recreate)"
     return 1
   fi
@@ -739,12 +742,12 @@ bootstrap::_apply_one() {
   # NEITHER an immutable/terminating conflict (handled above) NOR the transient
   # CRD/webhook race (retried below). Fail rather than silently "succeeding" and
   # letting the next `lo up` / Tilt loop hit the same wall.
-  if (( fp_rc != 0 )) && ! grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
+  if (( fp_rc != 0 )) && ! kapply::output_matches "${_race}" "${KAPPLY_LAST_OUTPUT}"; then
     error "bootstrap: ${addon_name} apply failed (rc=${fp_rc}) — see above"
     return 1
   fi
 
-  if grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
+  if kapply::output_matches "${_race}" "${KAPPLY_LAST_OUTPUT}"; then
     debug "bootstrap: ${addon_name} hit a CRD/webhook race — settling deps before retry"
     # (1) CRDs must be Established before their CRs resolve.
     kapply::run "CRDs established" kubectl --kubeconfig "${kubeconfig}" wait \
@@ -752,21 +755,21 @@ bootstrap::_apply_one() {
     # (2) The KEY wait the old single-retry skipped: this addon's own
     #     webhook/controller Deployments must be Available before the resources
     #     they validate will apply. Wait on THIS addon's rendered workloads.
-    kapply::wait_ready "${addon_name}" 120 --kubeconfig "${kubeconfig}" <<< "${rendered}" || true
+    kapply::wait_ready "${addon_name}" 120 --kubeconfig "${kubeconfig}" < <(printf '%s' "${rendered}") || true
     # (3) Retry with backoff to absorb the brief gap between a webhook
     #     Deployment going Available and its Service endpoints being Ready.
     local _attempt _rc=1 _max=6 _delay=3
     for (( _attempt = 1; _attempt <= _max; _attempt++ )); do
       _rc=0
       kapply::apply --label "${addon_name} (retry ${_attempt}/${_max})" \
-        --kubeconfig "${kubeconfig}" <<< "${rendered}" || _rc=$?
-      if (( _rc == 0 )) && ! grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
+        --kubeconfig "${kubeconfig}" < <(printf '%s' "${rendered}") || _rc=$?
+      if (( _rc == 0 )) && ! kapply::output_matches "${_race}" "${KAPPLY_LAST_OUTPUT}"; then
         break
       fi
       sleep "${_delay}"
       (( _delay < 15 )) && _delay=$(( _delay + 3 ))
     done
-    if (( _rc != 0 )) || grep -qE "${_race}" <<< "${KAPPLY_LAST_OUTPUT}"; then
+    if (( _rc != 0 )) || kapply::output_matches "${_race}" "${KAPPLY_LAST_OUTPUT}"; then
       error "bootstrap: ${addon_name} still failing after ${_max} retries — CRDs/webhook not ready (see above)"
       return 1
     fi
@@ -781,7 +784,7 @@ bootstrap::_apply_one() {
   # decides whether to care.
   if [[ -n "${do_wait}" ]]; then
     debug "bootstrap: waiting for ${addon_name} workloads to become ready"
-    kapply::wait_ready "${addon_name}" 180 --kubeconfig "${kubeconfig}" <<< "${rendered}"
+    kapply::wait_ready "${addon_name}" 180 --kubeconfig "${kubeconfig}" < <(printf '%s' "${rendered}")
   fi
   return 0
 }
@@ -1173,12 +1176,15 @@ bootstrap::_resolve_parked() {
 # re-issues) is the pre-restore.d behavior. Always returns 0.
 #
 # Each input passes the keys-only apply guard before its apply: lo reads the
-# working copy once and applies the copy that it checked, and checks the
+# working copy once and applies the bytes that it checked, and checks the
 # decrypted manifest (keysonly::read_checked_file, keysonly::refuse_stream).
 # A refused input is skipped: a refused working copy does not fall back to
 # the .sops.yaml file, so a keys-only Secret in the store stops the restore
-# of that entry and the operator sees why.
+# of that entry and the operator sees why. The manifest goes to kubectl
+# byte for byte, and tracing is off (the rules at the top of
+# utils/keysonly.sh).
 bootstrap::_restore_d() {
+  [[ $- != *x* ]] || { local -; set +x; }
   local domain="${1}" kubeconfig="${2}"
   local rdir="${PATH_CLUSTERS}/${domain}/restore.d"
   [[ -d "${rdir}" ]] || return 0
@@ -1198,28 +1204,31 @@ bootstrap::_restore_d() {
     plain="${PATH_CLUSTERS}/${domain}/secrets/restore.d/${base}.yaml"
     if [[ -f "${plain}" ]]; then
       local _doc
-      if ! _doc="$(keysonly::read_checked_file "bootstrap: restore.d" "${base} (store working copy)" "${plain}")"; then
+      if ! _doc="$(keysonly::read_checked_file "bootstrap: restore.d" "${base} (store working copy)" "${plain}" && printf .)"; then
         skipped=$(( skipped + 1 ))
         warn "bootstrap: restore.d skips ${base} — lo does not fall back to ${base}.sops.yaml after it refuses the store working copy"
         continue
       fi
-      if _err="$(printf '%s\n' "${_doc}" \
+      _doc="${_doc%.}"
+      if _err="$(printf '%s' "${_doc}" \
         | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - 2>&1 >/dev/null)"; then
         applied=$(( applied + 1 ))
         debug "bootstrap: restore.d applied ${base} (store working copy)"
         continue
       fi
       debug "bootstrap: restore.d ${base} store-copy apply failed: ${_err%%$'\n'*}"
+      _doc=""
     fi
     # Decrypt and apply as SEPARATE steps with separate stderr: piping
     # `sops 2>&1 | kubectl` would inject sops warnings into kubectl's stdin
     # (corrupting the YAML) and _err would only ever see kubectl's stderr.
     local _dec="" _serr
     _serr="$(mktemp)"
-    if _dec="$(sops -d "${f}" 2>"${_serr}")"; then
-      if ! keysonly::refuse_stream "bootstrap: restore.d" "${base} (sops)" - <<< "${_dec}"; then
+    if _dec="$(sops -d "${f}" 2>"${_serr}" && printf .)"; then
+      _dec="${_dec%.}"
+      if ! printf '%s' "${_dec}" | keysonly::refuse_stream "bootstrap: restore.d" "${base} (sops)" -; then
         skipped=$(( skipped + 1 ))
-      elif _err="$(printf '%s\n' "${_dec}" \
+      elif _err="$(printf '%s' "${_dec}" \
         | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - 2>&1 >/dev/null)"; then
         applied=$(( applied + 1 ))
         debug "bootstrap: restore.d applied ${base} (sops)"
@@ -1496,6 +1505,7 @@ bootstrap::_reserved_env_name() {
 # unchanged). Runs in a subshell (`$( … )` in _run_dry). Always returns 0;
 # the status is the result. The Go twin: Engine.dryRunOne.
 bootstrap::_dry_run_one() {
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local addon_name="${1}" addon_dir="${2}" kind="${3}" provider_name="${4}"
   local kubeconfig="${5}" inline_values="${6}" env_lines="${7:-}" stem="${8}"
 
@@ -1675,14 +1685,15 @@ bootstrap::_path_under() {
 # `<apiVersion> <kind> <name>` for a cluster-scoped object) — the Go twin:
 # splitObjects and objectLabel.
 bootstrap::_object_lines() {
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local -a _rc
-  yq -o=json -I=0 'select(. != null and tag == "!!map")' <<< "${1}" | jq -S -c '.' | jq -r '
+  printf '%s\n' "${1}" | yq -o=json -I=0 'select(. != null and tag == "!!map")' | jq -S -c '.' | jq -r '
     def str: if type == "string" then . else "" end;
     (.metadata | if type == "object" then . else {} end) as $m
     | ($m.namespace | str) as $ns
     | "\(.apiVersion | str) \(.kind | str) \(if $ns != "" then $ns + "/" else "" end)\($m.name | str)\t\(tojson)"'
   _rc=("${PIPESTATUS[@]}")
-  (( _rc[0] == 0 && _rc[1] == 0 && _rc[2] == 0 ))
+  (( _rc[0] == 0 && _rc[1] == 0 && _rc[2] == 0 && _rc[3] == 0 ))
 }
 
 # bootstrap::_nd_objects <render-a> <render-b>
@@ -1691,6 +1702,7 @@ bootstrap::_object_lines() {
 # render's order, then the objects only the second render has (in its
 # order) — the Go twin: nondeterministicObjects.
 bootstrap::_nd_objects() {
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local _a _b
   _a="$(bootstrap::_object_lines "${1}")" || return 1
   _b="$(bootstrap::_object_lines "${2}")" || return 1
@@ -1708,13 +1720,14 @@ bootstrap::_nd_objects() {
 # The rendered stream without the named objects (what
 # --ignore-nondeterministic diffs). Empty when nothing is left.
 bootstrap::_without_objects() {
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local _stream="${1}"; shift
   local _kept
   _kept="$(bootstrap::_object_lines "${_stream}" | awk -F'\t' -v drop="$(printf '%s\n' "${@}")" '
     BEGIN { n = split(drop, d, "\n"); for (i = 1; i <= n; i++) if (d[i] != "") skip[d[i]] = 1 }
     !($1 in skip) { print substr($0, length($1) + 2) }')"
   [[ -n "${_kept}" ]] || return 0
-  yq -p=json -o=yaml '.' <<< "${_kept}"
+  printf '%s\n' "${_kept}" | yq -p=json -o=yaml '.'
 }
 
 # bootstrap::_diff_manifest <rendered> <stem> <kubeconfig> <label> [diff-input]
@@ -1726,6 +1739,7 @@ bootstrap::_without_objects() {
 # restore.d pseudo-entry). Prints the status word (and only that) on
 # stdout; always returns 0.
 bootstrap::_diff_manifest() {
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local rendered="${1}" stem="${2}" kubeconfig="${3}" label="${4}"
   local diff_input="${5-${1}}"
   # umask 077 for the duration of the writes below: these are RENDERED
@@ -1799,7 +1813,7 @@ bootstrap::_diff_manifest() {
   #     own "command not found" convention already reports that as rc
   #     127, well above 1) → a genuine kubectl/diff error.
   local _race='ensure CRDs are installed first|failed calling webhook|no matches for kind|resource mapping not found'
-  if grep -qE "${_race}" <<<"${_emsg}"; then
+  if kapply::output_matches "${_race}" "${_emsg}"; then
     echo "inconclusive (needs-crd)"
     return 0
   fi
@@ -1813,8 +1827,8 @@ bootstrap::_diff_manifest() {
       # (KUBECTL_EXTERNAL_DIFF) may print neither — still "differs",
       # just uncounted.
       local _headers _new _chg
-      _headers=$(grep -c '^--- ' <<<"${_diff}" || true)
-      _new=$(grep -c '^@@ -0,0 ' <<<"${_diff}" || true)
+      _headers=$(printf '%s\n' "${_diff}" | grep -c '^--- ' || true)
+      _new=$(printf '%s\n' "${_diff}" | grep -c '^@@ -0,0 ' || true)
       if (( _headers == 0 )); then
         echo differs
         return 0
@@ -1840,6 +1854,7 @@ bootstrap::_diff_manifest() {
 # nothing under restore.d to report — the caller then skips the line
 # entirely, same as a real run skipping an empty restore.d.
 bootstrap::_dry_run_restore_d() {
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local domain="${1}" kubeconfig="${2}"
   local rdir="${PATH_CLUSTERS}/${domain}/restore.d"
   [[ -d "${rdir}" ]] || return 0

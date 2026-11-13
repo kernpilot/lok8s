@@ -883,9 +883,11 @@ metadata:
 data:
   PASSWORD: ""'
 ko_pre() { boot_pre; rm -f "${PARITY_KUBECTL_LOG}"; }
-ko_post() {  # <impl>: boot_post, and the kubectl log per side
+ko_post() {  # <impl>: boot_post, and the kubectl log (and stdin) per side
   boot_post "${1}"
   if [[ -f "${PARITY_KUBECTL_LOG}" ]]; then mv "${PARITY_KUBECTL_LOG}" "${WORK}/kubectl.${1}.log"; else : > "${WORK}/kubectl.${1}.log"; fi
+  rm -f "${WORK}/kubectl.${1}.stdin"
+  [[ ! -f "${PARITY_KUBECTL_LOG}.stdin" ]] || mv "${PARITY_KUBECTL_LOG}.stdin" "${WORK}/kubectl.${1}.stdin"
 }
 # ko_case <label> <want>: the last bootstrap pair refused with <want> (rc 1
 # on both sides; an entry's lines go to stdout in its collapsed block, the
@@ -920,6 +922,28 @@ if grep -qF "lo does not fall back to tls-a.sops.yaml" "${WORK}/go.err" && ! gre
 else
   fail "go: the refused working copy fell back to the sops file, or no warning names it"
 fi
+# The working copy reaches kubectl byte for byte: its last literal scalar
+# (|+) ends in several newlines. A kubectl that applies, and keeps what it
+# gets on stdin, per side.
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub: log the argv, keep a manifest on stdin, apply (exit 0).
+echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
+[[ " $* " != *" -f - "* ]] || cat >> "${PARITY_KUBECTL_LOG}.stdin"
+exit 0
+SH
+printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls-a\nstringData:\n  tls.crt: |+\n    cert\n\n\n' \
+  > "${PROJ}/clusters/boot.dev/secrets/restore.d/tls-a.yaml"
+PARITY_KUSTOMIZE_OUT="${ko_marked}" PARITY_PRE_EACH=ko_pre PARITY_POST_EACH=ko_post check - bootstrap --domain boot.dev
+ko_exact=1
+for ko_side in bash go; do
+  if ! cmp -s "${PROJ}/clusters/boot.dev/secrets/restore.d/tls-a.yaml" "${WORK}/kubectl.${ko_side}.stdin"; then
+    echo "FAIL: ${ko_side}: kubectl did not get the restore.d working copy byte for byte:"
+    od -c "${WORK}/kubectl.${ko_side}.stdin" 2>&1 | tail -n 4 | sed 's/^/  /'
+    ko_exact=0
+  fi
+done
+parity::record "${ko_exact}" "lo bootstrap applies the restore.d working copy byte for byte"
 rm -rf "${PROJ}/clusters/boot.dev/restore.d" "${PROJ}/clusters/boot.dev/secrets"
 unset PARITY_KUBECTL_LOG
 parity::stub_kubectl_fail "${PROJ}"

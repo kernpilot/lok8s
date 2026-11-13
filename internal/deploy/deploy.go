@@ -200,8 +200,7 @@ func (d *Deployer) applyManifest(ctx context.Context, label, manifest string, ab
 	})
 	if HasObjects(crds) {
 		ui.DebugTo(d.stderr(), "Applying CRDs for %s", label)
-		// bash: `echo "${crds}" | kapply::apply` — echo appends a newline.
-		if _, rc := d.Applier.Apply(ctx, label+" crds", crds+"\n"); rc != 0 && abortOnError {
+		if _, rc := d.Applier.Apply(ctx, label+" crds", crds); rc != 0 && abortOnError {
 			return &ExitError{Code: rc}
 		}
 		d.waitCRDs(ctx, crds)
@@ -257,8 +256,10 @@ func splitDocs(stream string) []string {
 }
 
 // selectDocs is `yq 'select(<pred>)'` over the stream: the RAW text of every
-// document whose parsed root satisfies pred, joined by `---` separators.
-// Raw text (not a re-marshal) so the applied bytes are the artifact's own.
+// document whose parsed root satisfies pred, joined by `---` separators,
+// with a final newline as yq writes it. Raw text (not a re-marshal) so the
+// applied bytes are the artifact's own: each document keeps its final
+// newlines, so a last `|+` block scalar keeps its value.
 func selectDocs(stream string, pred func(doc *yaml.Node) bool) string {
 	var kept []string
 	for _, doc := range splitDocs(stream) {
@@ -275,5 +276,5 @@ func selectDocs(stream string, pred func(doc *yaml.Node) bool) string {
 	if len(kept) == 0 {
 		return ""
 	}
-	return strings.Join(kept, "\n---\n")
+	return strings.Join(kept, "\n---\n") + "\n"
 }

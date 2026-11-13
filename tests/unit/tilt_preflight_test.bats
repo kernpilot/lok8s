@@ -105,6 +105,19 @@ teardown() { teardown_tmpdir; }
   assert_output --partial "${want}"
 }
 
+# tilt::preflight holds the manifest with tracing off (the rules at the top
+# of utils/keysonly.sh): under bash -x, and with BASH_XTRACEFD on a file, no
+# Secret value of the manifest is in stdout, stderr or the trace. The sweep
+# stub shows that the value reached the sweep.
+@test "tilt::preflight traces no Secret value of the manifest" {
+  export DOMAIN_NAME=dev.test MANIFEST="${BATS_TEST_TMPDIR}/manifest.yaml"
+  printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: app\nstringData:\n  PASSWORD: xtrace-canary-tilt\n' > "${MANIFEST}"
+  kapply::preflight() { cat >> "${SWEEP_LOG}"; }
+  _preflight_from_file() { tilt::preflight < "${MANIFEST}"; }
+  assert_no_trace_leak xtrace-canary-tilt _preflight_from_file
+  grep -qF xtrace-canary-tilt "${SWEEP_LOG}"
+}
+
 @test "preflight gate: LOK8S_PREFLIGHT=0 disables the sweep entirely" {
   export DOMAIN_NAME=dev.test LOK8S_PREFLIGHT=0
   run tilt::preflight <<< 'kind: ConfigMap'

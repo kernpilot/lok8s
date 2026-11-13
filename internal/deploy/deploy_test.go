@@ -203,6 +203,32 @@ func TestApplyFilteredSubset(t *testing.T) {
 	}
 }
 
+// bats: "deploy::apply and deploy::apply_filtered keep the final newlines
+// of a |+ value".
+// The last literal scalar (|+) of the CRD subset, of the label subset and
+// of the artifact ends in several newlines: each manifest reaches kubectl
+// with them, and no newline is added.
+func TestApplyKeepsALastKeepChompedValue(t *testing.T) {
+	const crd = "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.test.lok8s.dev\n  annotations:\n    note: |+\n      crd\n\n\n"
+	const cm = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: platform\n  labels:\n    lok8s.dev/type: platform\ndata:\n  tail: |+\n    x\n\n\n"
+	const artifact = crd + "---\n" + cm
+	f := &fakeRunner{}
+	d, _, _, _ := newDeployer(t, f, artifact)
+	if err := d.Apply(t.Context(), "test.lok8s.dev"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.applied) != 2 || f.applied[0] != crd || f.applied[1] != artifact {
+		t.Errorf("full apply: kubectl stdin = %q, want %q", f.applied, []string{crd, artifact})
+	}
+	f.applied = nil
+	if err := d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "platform"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.applied) != 1 || f.applied[0] != cm {
+		t.Errorf("subset apply: kubectl stdin = %q, want %q", f.applied, cm)
+	}
+}
+
 // yq's `==` compares scalar text: an unquoted `flag: true` matches "true".
 func TestApplyFilteredUnquotedScalarMatches(t *testing.T) {
 	f := &fakeRunner{}

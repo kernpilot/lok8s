@@ -210,6 +210,7 @@ build::_encrypt_mode() {
 #
 # Usage: printf '%s' "<fresh yaml>" | build::_secret_unchanged <prior_file>
 build::_secret_unchanged() {
+  [[ $- != *x* ]] || { local -; set +x; }  # the fresh and the decrypted Secret (utils/keysonly.sh)
   local prior_file="${1}"
   # No prior, empty, or not sops-encrypted ⇒ cannot be "unchanged".
   [[ -s "${prior_file}" ]] && grep -q '^sops:' "${prior_file}" || return 1
@@ -229,8 +230,8 @@ build::_secret_unchanged() {
 
   # Canonicalize BOTH sides identically. sort_keys(..) recurses; -P forces block
   # style. A yq parse failure on either side ⇒ treat as changed (re-encrypt).
-  canon_prior=$(yq -P 'sort_keys(..)' <<<"${decrypted}" 2>/dev/null) || return 1
-  canon_fresh=$(yq -P 'sort_keys(..)' <<<"${fresh}" 2>/dev/null) || return 1
+  canon_prior=$(printf '%s\n' "${decrypted}" | yq -P 'sort_keys(..)' 2>/dev/null) || return 1
+  canon_fresh=$(printf '%s\n' "${fresh}" | yq -P 'sort_keys(..)' 2>/dev/null) || return 1
   [[ "${canon_prior}" == "${canon_fresh}" ]]
 }
 
@@ -579,6 +580,7 @@ build::_keys_only_capable() {
 # yq is withheld, as it can quote an input value: a failure prints one
 # fixed line (_KEYSONLY_WITHHELD) and returns 1.
 build::keys_only() {
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local domain="${1}"
   local domain_dir="${PATH_CLUSTERS}/${domain}"
   if ! _has_kustomization "${domain_dir}"; then
@@ -638,7 +640,7 @@ build::keys_only() {
     done <<<"${last_applied}"
     return 1
   fi
-  docs=$(grep -c '^kind:' <<<"${blanked}") || true
+  docs=$(printf '%s\n' "${blanked}" | grep -c '^kind:') || true
   (( docs > 0 )) || warn "${domain} rendered 0 documents — is its kustomization.yaml composing any targets?"
   if ! printf '%s' "${blanked}"; then
     error "lo build --keys-only: writing ${domain}'s render to stdout failed"
@@ -695,6 +697,7 @@ build::keys_only() {
 #
 # Usage: build::split <domain>   (honors LOK8S_BUILD_NO_SECRETS)
 build::split() {
+  [[ $- != *x* ]] || { local -; set +x; }  # the Secrets of the render (utils/keysonly.sh)
   local domain="${1}"
   local domain_dir="${PATH_CLUSTERS}/${domain}"
   local artifact="${domain_dir}/artifacts.yaml"

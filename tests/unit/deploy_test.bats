@@ -284,6 +284,83 @@ YAML
   done
 }
 
+# Tracing is off where lo holds the bytes of the artifact (the rules at the
+# top of utils/keysonly.sh): under bash -x, and with BASH_XTRACEFD on a
+# file, no Secret value of the artifact is in stdout, stderr or the trace.
+# The kubectl stub shows that the value was applied.
+@test "deploy::apply and deploy::apply_filtered trace no Secret value" {
+  local artifact="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
+  printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  labels:\n    lok8s.dev/type: platform\nstringData:\n  TOKEN: xtrace-canary-deploy\n' >> "${artifact}"
+  export DEPLOY_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  kubectl() {
+    case "$1" in
+      apply) cat >> "${DEPLOY_LOG}"; echo "applied" ;;
+      wait)  echo "waited" ;;
+    esac
+  }
+  assert_no_trace_leak xtrace-canary-deploy deploy::apply "test.lok8s.dev"
+  grep -qF xtrace-canary-deploy "${DEPLOY_LOG}"
+  rm -f "${DEPLOY_LOG}"
+  assert_no_trace_leak xtrace-canary-deploy deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "platform"
+  grep -qF xtrace-canary-deploy "${DEPLOY_LOG}"
+}
+
+# The last value of each document is a `|+` block scalar that ends in
+# newlines: kubectl gets the CRDs, the artifact and the subset byte for
+# byte, with the newlines (Go: TestApplyKeepsALastKeepChompedValue).
+@test "deploy::apply and deploy::apply_filtered keep the final newlines of a |+ value" {
+  local artifact="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
+  local crd=$'apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.test.lok8s.dev\n  annotations:\n    note: |+\n      x\n\n'
+  local cm=$'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n  labels:\n    lok8s.dev/type: platform\ndata:\n  tail: |+\n    y\n\n\n'
+  printf '%s---\n%s' "${crd}" "${cm}" > "${artifact}"
+  export CALLS="${BATS_TEST_TMPDIR}/apply"
+  # kapply::apply runs in a pipeline (a subshell): one file per call.
+  kapply::apply() { local n=1; while [[ -e "${CALLS}.${n}" ]]; do n=$(( n + 1 )); done; cat > "${CALLS}.${n}"; }
+  deploy::wait_crds() { :; }
+  run deploy::apply "test.lok8s.dev"
+  assert_success
+  cmp "${CALLS}.1" <(printf '%s' "${crd}")
+  cmp "${CALLS}.2" "${artifact}"
+  [ ! -e "${CALLS}.3" ]
+  rm -f "${CALLS}".*
+  run deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "platform"
+  assert_success
+  cmp "${CALLS}.1" <(printf '%s' "${cm}")
+  [ ! -e "${CALLS}.2" ]
+}
+
+# lo deploy hands the artifact to yq and kubectl through pipes, not
+# here-strings: bash puts a here-string larger than a pipe buffer (64 KiB)
+# into a file in TMPDIR, which a kill can leave behind. A deploy of a large
+# artifact creates no file in TMPDIR: the mtime of the directory stays.
+# The control shows that a here-string of the same artifact changes it.
+@test "deploy::apply and deploy::apply_filtered put no copy of a large artifact in TMPDIR" {
+  local artifact="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
+  { printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: big\n  labels:\n    lok8s.dev/type: platform\nstringData:\n  BLOB: '
+    head -c 98304 /dev/zero | tr '\0' 'a'
+    printf '\n'
+  } >> "${artifact}"
+  [ "$(stat -c %s "${artifact}")" -gt 98304 ]
+  export TMPDIR="${BATS_TEST_TMPDIR}/private-tmp" APPLIED="${BATS_TEST_TMPDIR}/applied"
+  mkdir -m 700 "${TMPDIR}"
+  # kapply::apply keeps its exit status in a mktemp file: it is not under test.
+  kapply::apply() { wc -c >> "${APPLIED}"; }
+  deploy::wait_crds() { :; }
+  local before after
+  before="$(stat -c %y "${TMPDIR}")"
+  run deploy::apply "test.lok8s.dev"
+  assert_success
+  run deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "platform"
+  assert_success
+  after="$(stat -c %y "${TMPDIR}")"
+  [ "${before}" = "${after}" ] || { echo "TMPDIR changed: ${before} -> ${after}"; return 1; }
+  [ "$(sort -n "${APPLIED}" | tail -1)" -gt 98304 ]
+  # Control: a here-string of the artifact goes through TMPDIR.
+  local big; big="$(cat "${artifact}")"
+  cat <<< "${big}" > /dev/null
+  [ "$(stat -c %y "${TMPDIR}")" != "${after}" ]
+}
+
 # --- deploy::apply_filtered ---
 
 @test "deploy::apply_filtered applies only the matching subset (full label key)" {

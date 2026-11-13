@@ -168,6 +168,7 @@ kapply::run() {
 #   terminal it stays quiet (verbose `debug`s each poll). Best-effort: a timeout
 #   is a ⚠, never fatal — the caller decides whether to care.
 kapply::wait_ready() {
+  [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   local label="${1}" timeout="${2:-180}"; shift 2
   local -a kubectl_flags=("${@}")
   local manifest; manifest=$(cat)
@@ -231,6 +232,7 @@ kapply::wait_ready() {
 # re-apply, so the re-apply renders the same named progress block (never
 # escapes as raw output).
 kapply::_apply_pass() {
+  [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   local label="${1}" manifest="${2}"; shift 2
   local -a kubectl_flags=("${@}")
   local out rc rc_file; rc_file=$(mktemp)
@@ -245,11 +247,22 @@ kapply::_apply_pass() {
   fi
   rc=$(cat "${rc_file}"); rm -f "${rc_file}"
   KAPPLY_LAST_OUTPUT="${out}"
-  (( rc == 0 )) || { kapply::_tty && grep -vE "${_KAPPLY_OK}" <<<"${out}" | kapply::_aggregate >&2 || true; }
+  (( rc == 0 )) || { kapply::_tty && printf '%s\n' "${out}" | grep -vE "${_KAPPLY_OK}" | kapply::_aggregate >&2 || true; }
   return "${rc}"
 }
 
+# kapply::output_matches <ere> <output>: whether kubectl's <output>
+# (KAPPLY_LAST_OUTPUT) matches the extended regex <ere>. The output can
+# quote the manifest, so it goes to grep through a pipe, not a here-string
+# (utils/keysonly.sh). grep reads to the end (no -q), so pipefail sees no
+# SIGPIPE from printf.
+kapply::output_matches() {
+  [[ $- != *x* ]] || { local -; set +x; }
+  printf '%s\n' "${2}" | grep -E "${1}" >/dev/null
+}
+
 kapply::apply() {
+  [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   # A leading `--label <phase>` names the progress block (the addon/target);
   # everything else is passed through to kubectl.
   local label="resources"
@@ -260,7 +273,9 @@ kapply::apply() {
       *)       kubectl_flags+=("${1}"); shift ;;
     esac
   done
-  local manifest; manifest=$(cat)
+  # The sentinel keeps the final newlines: kubectl gets the bytes of stdin
+  # (a last `|+` block scalar keeps its value).
+  local manifest; manifest="$(cat; printf .)"; manifest="${manifest%.}"
 
   kapply::_apply_pass "${label}" "${manifest}" "${kubectl_flags[@]}"
   local rc=$?
@@ -268,8 +283,8 @@ kapply::apply() {
 
   local out="${KAPPLY_LAST_OUTPUT}"
   local immutable=0 terminating=0
-  grep -qE "${_KAPPLY_IMMUTABLE_RE}" <<<"${out}" && immutable=1
-  grep -qE "${_KAPPLY_TERMINATING_RE}" <<<"${out}" && terminating=1
+  kapply::output_matches "${_KAPPLY_IMMUTABLE_RE}" "${out}" && immutable=1
+  kapply::output_matches "${_KAPPLY_TERMINATING_RE}" "${out}" && terminating=1
   (( immutable || terminating )) || return "${rc}"
 
   kapply::_confirm_heal || return "${rc}"
@@ -399,6 +414,7 @@ kapply::_progress() {
 # (core resources have no `.<group>`). We recreate by kind+name from the same
 # manifest — `replace --force` = delete + create, which bypasses immutability.
 kapply::_heal_immutable() {
+  [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   local manifest="${1}" out="${2}"; shift 2
   local -a kubectl_flags=("${@}")
   local kind name
@@ -421,7 +437,7 @@ kapply::_heal_immutable() {
       | yq "select(.kind == \"${kind}\" and .metadata.name == \"${name}\")" \
       | kubectl "${kubectl_flags[@]}" replace --force -f - >/dev/null 2>&1 \
       || warn "  could not recreate ${kind}/${name}"
-  done < <(grep -oE '[A-Z][A-Za-z]+(\.[a-z0-9.-]+)? "[^"]+" is invalid' <<<"${out}" \
+  done < <(printf '%s\n' "${out}" | grep -oE '[A-Z][A-Za-z]+(\.[a-z0-9.-]+)? "[^"]+" is invalid' \
             | sed -E 's/(\.[a-z0-9.-]+)? "/ /; s/" is invalid$//' | sort -u)
 }
 
@@ -479,6 +495,7 @@ kapply::terminating_namespaces() {
 # cascade-delete every CR of that kind cluster-wide; the CRD-settle retry in
 # the caller handles that race instead.
 kapply::_heal_terminating() {
+  [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   local manifest="${1}" out="${2}"; shift 2
   local -a kubectl_flags=("${@}")
 
@@ -487,7 +504,7 @@ kapply::_heal_terminating() {
   while read -r nsname; do
     [[ -n "${nsname}" ]] || continue
     kapply::_finalize_namespace "${nsname}" "${kubectl_flags[@]}"
-  done < <(kapply::terminating_namespaces <<<"${out}")
+  done < <(printf '%s\n' "${out}" | kapply::terminating_namespaces)
 
   # (b) manifest objects carrying their own stuck deletionTimestamp
   local kind name ns
@@ -532,6 +549,7 @@ kapply::_heal_terminating() {
 #   warn; always returns 0 so a preflight can never brick the deploy it
 #   protects.
 kapply::preflight() {
+  [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   local age="${KAPPLY_PREFLIGHT_AGE:-30}"
   local crds="${KAPPLY_PREFLIGHT_CRDS:-drain}" crd_allow=""
   local -a kubectl_flags=()

@@ -246,7 +246,7 @@ _allowed_kind_reads() {
 .lok8s/libs/crds|kind=$(yq -r '.kind | downcase' "${schema}")
 .lok8s/libs/addons|kind=$(yq -r '.kind // ""' "${dir}/chart.yaml"
 .lok8s/libs/build|doc_count=$(yq -N '.kind' "${artifact}"
-.lok8s/libs/hooks|kind="$(yq -r '.kind // ""' <<< "${doc}")"
+.lok8s/libs/hooks|kind="$(printf '%s' "${doc}" | yq -r '.kind // ""')"
 .lok8s/libs/lint|spec_kind=$(yq -r '.kind // ""' "${spec_file}")
 .lok8s/libs/lint|spec_runtime=$(yq -r '.spec.kind // .kind // ""' "${spec_file}")
 .lok8s/libs/kubehz/hosted|kind=$(yq -r '.kind' "${cluster_yaml}")

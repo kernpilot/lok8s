@@ -227,6 +227,14 @@ not apply a manifest that holds one:
   `LOK8S_PREFLIGHT=0` turn off only the cleanup of stuck objects, not this
   check.
 
+These commands pass on the bytes that they checked, with no change: the
+final newlines of a last `|+` block scalar stay. The bash tree keeps
+these bytes out of its trace: with `bash -x` or `BASH_XTRACEFD`, the
+functions that hold a render, an artifact or a decrypted manifest turn
+tracing off until they return. It sends them to `kubectl` and `yq`
+through pipes, not here-strings, which bash can write to a file in
+`TMPDIR`.
+
 Each check parses the YAML, so a quoted key, a flow-style map and a `List`
 item count. The annotation counts at any depth of an object, so a custom
 resource that holds a Secret template with the annotation is refused too.

@@ -463,6 +463,44 @@ func TestHooksRefuseAKeysOnlyArtifact(t *testing.T) {
 	}
 }
 
+// bats: "recreate and apply keep the final newlines of a |+ value". The
+// objects reach kubectl delete and apply with each value as it is: the
+// last literal scalar (|+) of the artifact ends in several newlines, and
+// no newline is added.
+func TestHooksKeepALastKeepChompedValue(t *testing.T) {
+	const artifact = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n  labels:\n    run: cfg\ndata:\n  tail: |+\n    x\n\n\n"
+	for verb, run := range map[string]func(*Context) error{
+		"recreate": func(c *Context) error { return c.Recreate(t.Context(), "run=cfg") },
+		"apply":    func(c *Context) error { return c.Apply(t.Context(), "run=cfg") },
+	} {
+		t.Run(verb, func(t *testing.T) {
+			c, runner, _, _ := testCtx(t)
+			writeArtifact(t, c, artifact)
+			runner.handler = func(cmd execx.Cmd, _ string) error {
+				if cmd.Name == "tilt" || (cmd.Name == "kubectl" && cmd.Args[0] == "get") {
+					return &fakeExit{1} // no session, no live object
+				}
+				return nil
+			}
+			if err := run(c); err != nil {
+				t.Fatal(err)
+			}
+			n := 0
+			for i, call := range runner.calls {
+				if strings.HasSuffix(call, " -f -") {
+					n++
+					if runner.stdins[i] != artifact {
+						t.Errorf("%s: stdin = %q, want %q", call, runner.stdins[i], artifact)
+					}
+				}
+			}
+			if want := map[string]int{"recreate": 2, "apply": 1}[verb]; n != want {
+				t.Errorf("%d manifest(s) on stdin, want %d: %v", n, want, runner.calls)
+			}
+		})
+	}
+}
+
 func TestApplyNoDeleteJustKapply(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
 	writeArtifact(t, c, twoJobs)

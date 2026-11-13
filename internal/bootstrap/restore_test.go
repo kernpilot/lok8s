@@ -72,7 +72,7 @@ func TestRestoreDSopsFallbackDecryptsInMemory(t *testing.T) {
 	var decrypted string
 	e.SopsDecrypt = func(path string) ([]byte, error) {
 		decrypted = path
-		return []byte("kind: Secret"), nil
+		return []byte("kind: Secret\n"), nil
 	}
 	var gotStdin, gotArgs string
 	e.Runner = runnerFunc(func(ctx context.Context, c execx.Cmd) error {
@@ -91,7 +91,7 @@ func TestRestoreDSopsFallbackDecryptsInMemory(t *testing.T) {
 		t.Errorf("apply args = %q", gotArgs)
 	}
 	// The plaintext reaches kubectl EXACTLY — no sops warnings, no pipe
-	// contamination (the bash round-1 regression).
+	// contamination (the bash round-1 regression), no added newline.
 	if gotStdin != "kind: Secret\n" {
 		t.Errorf("kubectl stdin = %q, want the pure payload", gotStdin)
 	}
@@ -176,7 +176,7 @@ func TestRestoreDRefusesTheWorkingCopyWithoutAFallback(t *testing.T) {
 			var decrypted []string
 			e.SopsDecrypt = func(path string) ([]byte, error) {
 				decrypted = append(decrypted, filepath.Base(path))
-				return []byte("kind: Secret"), nil
+				return []byte("kind: Secret\n"), nil
 			}
 			var applied []string
 			f.handler = func(c execx.Cmd) error {
@@ -195,6 +195,37 @@ func TestRestoreDRefusesTheWorkingCopyWithoutAFallback(t *testing.T) {
 				if !strings.Contains(errOut.String(), want) {
 					t.Errorf("stderr misses %q:\n%s", want, errOut.String())
 				}
+			}
+		})
+	}
+}
+
+// bats: "restore_d: kubectl gets the exact bytes of the working copy and
+// of the decrypted manifest". The last literal scalar (|+) of each ends in
+// several newlines; kubectl gets each byte, and no newline is added.
+func TestRestoreDAppliesTheExactBytes(t *testing.T) {
+	const doc = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\nstringData:\n  tls.crt: |+\n    cert\n\n\n"
+	for _, route := range []string{"store working copy", "sops"} {
+		t.Run(route, func(t *testing.T) {
+			e, f, _, errOut, p := testEngine(t)
+			d := filepath.Join(p.Clusters, "test.lok8s.dev")
+			testutil.WriteFile(t, filepath.Join(d, "restore.d", "tls.sops.yaml"), "cipher\n")
+			if route == "store working copy" {
+				testutil.WriteFile(t, filepath.Join(d, "secrets", "restore.d", "tls.yaml"), doc)
+			}
+			e.SopsDecrypt = func(path string) ([]byte, error) { return []byte(doc), nil }
+			var applied []string
+			f.handler = func(c execx.Cmd) error {
+				raw, _ := io.ReadAll(c.Stdin)
+				applied = append(applied, string(raw))
+				return nil
+			}
+			e.restoreD(t.Context(), "test.lok8s.dev", "/kc")
+			if len(applied) != 1 || applied[0] != doc {
+				t.Errorf("kubectl stdin = %q, want %q", applied, doc)
+			}
+			if !strings.Contains(errOut.String(), "restore.d — 1 applied, 0 skipped") {
+				t.Errorf("stderr misses the summary:\n%s", errOut.String())
 			}
 		})
 	}

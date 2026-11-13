@@ -106,6 +106,34 @@ assert_pattern_matches() {
   return 1
 }
 
+# assert_no_trace_leak <canary> <command> [args...] — run the command twice
+# in a subshell with tracing on, and fail when <canary> (a Secret value of
+# the input) is in its stdout, its stderr or its trace.
+#
+# The first run traces to stderr (bash -x), the second to a file through
+# BASH_XTRACEFD. Both runs must succeed, and each trace must show the call
+# of the command: a run that did not trace, or that failed before it held
+# the value, would pass the absence check without measuring anything. The
+# caller proves that the value was in flight (a stub that records it).
+# Each run starts with the shell options of bats' run (set +eET): with
+# functrace on, a RETURN trap of the command also fires in the functions
+# that it calls, which lo never does.
+assert_no_trace_leak() {
+  local canary="${1}"; shift
+  local d rc=0
+  d="$(mktemp -d "${BATS_TEST_TMPDIR}/trace.XXXXXX")"
+  ( set +eET; set -x; "$@" ) >"${d}/stdout.x" 2>"${d}/stderr.x" || rc=$?
+  (( rc == 0 )) || { echo "${1} failed under set -x (rc ${rc}):" >&2; cat "${d}/stderr.x" >&2; return 1; }
+  ( set +eET; exec 9>"${d}/trace.fd"; BASH_XTRACEFD=9; set -x; "$@" ) >"${d}/stdout.fd" 2>"${d}/stderr.fd" || rc=$?
+  (( rc == 0 )) || { echo "${1} failed with BASH_XTRACEFD (rc ${rc}):" >&2; cat "${d}/stderr.fd" >&2; return 1; }
+  grep -qF -- "+ ${1}" "${d}/stderr.x" || { echo "no trace of ${1} on stderr" >&2; return 1; }
+  grep -qF -- "+ ${1}" "${d}/trace.fd" || { echo "no trace of ${1} in BASH_XTRACEFD" >&2; return 1; }
+  if grep -lF -- "${canary}" "${d}"/* >&2; then
+    echo "the value of the input is in the files above" >&2
+    return 1
+  fi
+}
+
 # Fixture directory
 export FIXTURES_DIR="${_TESTS_DIR}/fixtures"
 

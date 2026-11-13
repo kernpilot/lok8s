@@ -571,21 +571,26 @@ done
 # call.
 parity::stub "${PROJ}" kubectl <<'SH'
 #!/usr/bin/env bash
-# Parity stub: log the argv, print a digest of an applied manifest (its
-# trailing newlines aside), answer a get with no objects (no live cluster
-# may be reached).
+# Parity stub: log the argv, print the digest of the bytes of an applied
+# manifest, answer a get with no objects (no live cluster may be reached).
 echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
 case " $* " in
-  *" apply "*) m="$(cat)"; printf 'parity-stub applied %s\n' "$(printf '%s\n' "${m}" | sha256sum | cut -d' ' -f1)" ;;
+  *" apply "*) printf 'parity-stub applied %s\n' "$(sha256sum | cut -d' ' -f1)" ;;
   *" get "*) printf '{"items":[]}' ;;
 esac
 exit 0
 SH
 export LOK8S_NONINTERACTIVE=1
-for dp_case in clean marker no-yaml; do
+for dp_case in clean plus marker no-yaml; do
   case "${dp_case}" in
     clean)
       printf 'apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.test.lok8s.dev\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: system\n  labels: {lok8s.dev/type: system}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: platform\n  labels: {lok8s.dev/type: platform}\n' \
+        > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
+      dp_want='' ;;
+    plus)
+      # The last literal scalar (|+) of the CRD subset, of the label subset
+      # and of the artifact ends in several newlines: kubectl gets them.
+      printf 'apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.test.lok8s.dev\n  annotations:\n    note: |+\n      crd\n\n\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: platform\n  labels: {lok8s.dev/type: platform}\ndata:\n  tail: |+\n    x\n\n\n' \
         > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
       dp_want='' ;;
     marker)
@@ -598,7 +603,7 @@ for dp_case in clean marker no-yaml; do
   esac
   for dp_route in full filtered; do
     dp_label="lo deploy (${dp_route}) refuses an artifact (${dp_case})"
-    [[ -n "${dp_want}" ]] || dp_label="lo deploy (${dp_route}) applies the checked copy"
+    [[ -n "${dp_want}" ]] || dp_label="lo deploy (${dp_route}) applies the checked copy (${dp_case})"
     # The full apply has two phases (the CRDs, then all), the subset one.
     dp_args=(deploy --domain lok8s.dev) dp_n=2
     [[ "${dp_route}" == full ]] || { dp_args+=(-l lok8s.dev/type=platform); dp_n=1; }
@@ -610,6 +615,13 @@ for dp_case in clean marker no-yaml; do
       dp_applied=$(grep -c '^parity-stub applied ' "${WORK}/go.out")
       if (( go_rc != 0 || dp_applied != dp_n )); then
         echo "FAIL: ${dp_label} — rc go=${go_rc}, ${dp_applied} manifest(s) applied, stdout:"
+        indent < "${WORK}/go.out"
+        dp_ok=0
+      fi
+      # The full apply gives kubectl the bytes of the artifact.
+      dp_digest="$(sha256sum < "${PROJ}/clusters/lok8s.dev/artifacts.yaml" | cut -d' ' -f1)"
+      if [[ "${dp_route}" == full ]] && ! grep -qF "parity-stub applied ${dp_digest}" "${WORK}/go.out"; then
+        echo "FAIL: ${dp_label} — kubectl did not get the bytes of the artifact (digest ${dp_digest}):"
         indent < "${WORK}/go.out"
         dp_ok=0
       fi

@@ -29,7 +29,8 @@ import (
 // the decrypted manifest (build.ReadCheckedFile, build.RefuseKeysOnlyStream).
 // A refused input is skipped: a refused working copy does not fall back to
 // the .sops.yaml file, so a keys-only Secret in the store stops the
-// restore of that entry and the operator sees why.
+// restore of that entry and the operator sees why. kubectl gets the bytes
+// exactly.
 func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 	stderr := e.stderr()
 	rdir := e.Paths.Clusters + "/" + domain + "/restore.d"
@@ -85,7 +86,7 @@ func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 			skipped++
 			continue
 		}
-		errOut, rc := e.restoreApply(ctx, kubeconfig, append(dec, '\n'))
+		errOut, rc := e.restoreApply(ctx, kubeconfig, dec)
 		if rc == 0 {
 			applied++
 			ui.DebugTo(stderr, "bootstrap: restore.d applied %s (sops)", base)
@@ -106,8 +107,8 @@ func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 const restoreGuard = "bootstrap: restore.d"
 
 // restoreApply runs one server-side apply for restore.d of the checked
-// manifest on stdin, stdout discarded and stderr captured (bash:
-// `_err="$(printf '%s\n' "${doc}" | kubectl … -f - 2>&1 >/dev/null)"`).
+// manifest on stdin, byte for byte, stdout discarded and stderr captured
+// (bash: `_err="$(printf '%s' "${doc}" | kubectl … -f - 2>&1 >/dev/null)"`).
 func (e *Engine) restoreApply(ctx context.Context, kubeconfig string, doc []byte) (string, int) {
 	var errBuf strings.Builder
 	c := execx.Cmd{

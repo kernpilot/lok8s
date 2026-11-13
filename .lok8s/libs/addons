@@ -586,6 +586,7 @@ addons::_with_env() {
 # empty HELM_PLUGINS, the run store, the report file and TMPDIR.
 # Usage: addons::render <addon_dir> <kind> <provider_name> [inline_values] [env-lines]
 addons::render() {
+  [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local addon_dir="${1}" kind="${2}" provider_name="${3:-}" inline_values="${4:-}" env_lines="${5:-}"
   local _dry=0 _tmp_root="${TMPDIR:-/tmp}"
   if (( ${bootstrap_dry_run:-0} )); then

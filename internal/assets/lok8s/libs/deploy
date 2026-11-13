@@ -75,19 +75,23 @@ main::destroy() {
 # evidence of an object. Robust enough for kustomize output (which
 # always emits a `kind:` field at the top of each doc).
 #
+# It reads its whole input (no grep -q): a pipe into it never ends with
+# SIGPIPE, which pipefail would report as "no objects".
+#
 # Usage:
-#   if deploy::_has_objects <<< "${stream}"; then ...
+#   if printf '%s' "${stream}" | deploy::_has_objects; then ...
 #   if deploy::_has_objects < some_file.yaml; then ...
 deploy::_has_objects() {
-  grep -qE '^kind:[[:space:]]+[A-Za-z]'
+  grep -E '^kind:[[:space:]]+[A-Za-z]' >/dev/null
 }
 
 # deploy::_apply <label> <manifest>
 #   Apply a manifest in two phases: CRDs first, then everything. The caller
 #   gives the copy of the artifact that passed the keys-only check
 #   (keysonly::read_checked_artifact), or the subset of that copy; no phase
-#   reads the file. Each phase gets the copy on stdin. Empty streams are a
-#   graceful no-op.
+#   reads the file. Each phase gets the copy on stdin through a pipe, byte
+#   for byte (the rules at the top of utils/keysonly.sh). Empty streams are
+#   a graceful no-op.
 #
 #   Phase 1: extract + apply CustomResourceDefinitions, then wait for them to
 #            become Established. Server-side apply — large CRDs (CNPG, CAPI)
@@ -98,26 +102,29 @@ deploy::_has_objects() {
 #            StatefulSets to become ready (scoped to the manifest, not the whole
 #            cluster). Best-effort — a readiness timeout is a ⚠, never fatal.
 deploy::_apply() {
+  [[ $- != *x* ]] || { local -; set +x; }
   local label="${1}" manifest="${2}"
 
-  if ! deploy::_has_objects <<< "${manifest}"; then
+  if ! printf '%s' "${manifest}" | deploy::_has_objects; then
     debug "No objects for ${label}, skipping apply"
     return 0
   fi
 
-  # Phase 1: CRDs first (subset small enough to stay a string).
+  # Phase 1: CRDs first (subset small enough to stay a string). The
+  # sentinel keeps the final newlines of yq's output (utils/keysonly.sh).
   local crds
-  crds=$(yq 'select(.kind == "CustomResourceDefinition")' - <<< "${manifest}" 2>/dev/null || true)
-  if deploy::_has_objects <<< "${crds}"; then
+  crds="$( { printf '%s' "${manifest}" | yq 'select(.kind == "CustomResourceDefinition")' - 2>/dev/null || true; }; printf . )"
+  crds="${crds%.}"
+  if printf '%s' "${crds}" | deploy::_has_objects; then
     debug "Applying CRDs for ${label}"
-    echo "${crds}" | kapply::apply --label "${label} crds"
+    printf '%s' "${crds}" | kapply::apply --label "${label} crds"
     deploy::wait_crds "${crds}"
   fi
 
   # Phase 2: apply the rest + scoped wait-ready — both from the manifest.
   debug "Applying resources for ${label}"
-  kapply::apply --label "${label}" <<< "${manifest}"
-  kapply::wait_ready "${label}" 120 <<< "${manifest}"
+  printf '%s' "${manifest}" | kapply::apply --label "${label}"
+  printf '%s' "${manifest}" | kapply::wait_ready "${label}" 120
 }
 
 # Apply the domain's single artifact (clusters/<domain>/artifacts.yaml). It
@@ -128,6 +135,7 @@ deploy::_apply() {
 # can change after the check.
 # Usage: deploy::apply <domain>
 deploy::apply() {
+  [[ $- != *x* ]] || { local -; set +x; }
   local domain="${1:-"${DOMAIN_NAME:-lok8s.dev}"}"
   local artifact="${PATH_CLUSTERS}/${domain}/artifacts.yaml"
 
@@ -137,7 +145,8 @@ deploy::apply() {
   fi
 
   local content
-  content="$(keysonly::read_checked_artifact "${domain}" "${artifact}")" || return 1
+  content="$(keysonly::read_checked_artifact "${domain}" "${artifact}" && printf .)" || return 1
+  content="${content%.}"
   debug "Deploying ${domain} from ${artifact}"
   deploy::_apply "${domain}" "${content}"
 }
@@ -150,6 +159,7 @@ deploy::apply() {
 # the subset comes from the copy that passed the check.
 # Usage: deploy::apply_filtered <domain> <label_key> <label_value>
 deploy::apply_filtered() {
+  [[ $- != *x* ]] || { local -; set +x; }
   local domain="${1}" label_key="${2}" label_value="${3}"
   local artifact="${PATH_CLUSTERS}/${domain}/artifacts.yaml"
 
@@ -165,11 +175,13 @@ deploy::apply_filtered() {
     return 1
   fi
   local content subset
-  content="$(keysonly::read_checked_artifact "${domain}" "${artifact}")" || return 1
+  content="$(keysonly::read_checked_artifact "${domain}" "${artifact}" && printf .)" || return 1
+  content="${content%.}"
 
   # Filter the checked copy by the (full) label key = value.
-  subset=$(yq "select(.metadata.labels.\"${label_key}\" == \"${label_value}\")" - <<< "${content}" 2>/dev/null || true)
-  if ! deploy::_has_objects <<< "${subset}"; then
+  subset="$( { printf '%s' "${content}" | yq "select(.metadata.labels.\"${label_key}\" == \"${label_value}\")" - 2>/dev/null || true; }; printf . )"
+  subset="${subset%.}"
+  if ! printf '%s' "${subset}" | deploy::_has_objects; then
     warn "no objects match ${label_key}=${label_value} in ${artifact}"
     return 0
   fi

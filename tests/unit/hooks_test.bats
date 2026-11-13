@@ -150,6 +150,52 @@ metadata:
   done
 }
 
+# The three verbs hold the selected objects with tracing off (the rules at
+# the top of utils/keysonly.sh): under bash -x, and with BASH_XTRACEFD on a
+# file, no Secret value of the artifact is in stdout, stderr or the trace.
+# The stubs show that the value reached kubectl.
+@test "recreate, apply and restart trace no Secret value" {
+  mkdir -p "${PATH_CLUSTERS}/d.dev"
+  export ARTIFACT="${PATH_CLUSTERS}/d.dev/artifacts.yaml" CALLS="${BATS_TEST_TMPDIR}/calls"
+  printf 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  labels:\n    lok8s.dev/role: seed\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  labels:\n    lok8s.dev/role: seed\nstringData:\n  PASSWORD: xtrace-canary-hooks\n' > "${ARTIFACT}"
+  :args() { shift; while (( $# )); do [[ "$1" != --selector ]] || { selector="$2"; shift; }; shift; done; }
+  _resolve_kubeconfig_for_domain() { :; }
+  deploy::_has_objects() { grep -E 'kind:' >/dev/null; }
+  kubectl() { [[ " $* " != *" -f - "* ]] || cat >> "${CALLS}"; }
+  kapply::apply() { cat >> "${CALLS}"; }
+  hooks::_live_images() { printf '[]'; }
+  local verb domain=d.dev
+  for verb in recreate apply restart; do
+    rm -f "${CALLS}"
+    assert_no_trace_leak xtrace-canary-hooks "hooks::${verb}" --selector lok8s.dev/role=seed
+    [[ "${verb}" == restart ]] || grep -qF xtrace-canary-hooks "${CALLS}" || { echo "${verb}: the value did not reach kubectl"; return 1; }
+  done
+}
+
+# The last value of the artifact is a `|+` block scalar that ends in three
+# newlines: kubectl gets the selected objects byte for byte, with the
+# newlines (Go: TestHooksKeepALastKeepChompedValue).
+@test "recreate and apply keep the final newlines of a |+ value" {
+  mkdir -p "${PATH_CLUSTERS}/d.dev"
+  export ARTIFACT="${PATH_CLUSTERS}/d.dev/artifacts.yaml" CALLS="${BATS_TEST_TMPDIR}/calls"
+  printf 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  labels:\n    lok8s.dev/role: seed\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n  labels:\n    lok8s.dev/role: seed\ndata:\n  tail: |+\n    x\n\n\n' > "${ARTIFACT}"
+  :args() { shift; while (( $# )); do [[ "$1" != --selector ]] || { selector="$2"; shift; }; shift; done; }
+  _resolve_kubeconfig_for_domain() { :; }
+  deploy::_has_objects() { grep -E 'kind:' >/dev/null; }
+  # The stubs run in pipelines (subshells): one file per call.
+  kubectl() { [[ " $* " != *" -f - "* ]] || cat > "${CALLS}.kubectl"; }
+  kapply::apply() { cat > "${CALLS}.kapply"; }
+  hooks::_live_images() { printf '[]'; }
+  local domain=d.dev
+  hooks::recreate --selector lok8s.dev/role=seed
+  cmp "${ARTIFACT}" "${CALLS}.kubectl"
+  cmp "${ARTIFACT}" "${CALLS}.kapply"
+  rm -f "${CALLS}".*
+  hooks::apply --selector lok8s.dev/role=seed
+  [ ! -e "${CALLS}.kubectl" ]
+  cmp "${ARTIFACT}" "${CALLS}.kapply"
+}
+
 @test "_select: empty when nothing matches" {
   mkdir -p "${PATH_CLUSTERS}/d.dev"
   printf 'kind: Job\nmetadata:\n  name: x\n  labels: {lok8s.dev/name: other}\n' \

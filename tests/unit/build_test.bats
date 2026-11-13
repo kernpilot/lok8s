@@ -442,6 +442,7 @@ YAML
 }
 
 # A failed check refuses too. Go: TestKeysOnlyLastAppliedCheckFails.
+# A failed check refuses too. Go: TestKeysOnlyLastAppliedCheckFails.
 @test "build::keys_only refuses the render when the last-applied check fails" {
   kustomize() { printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
   yq() { [[ "${1}" != -N ]] || return 1; command yq "$@"; }
@@ -452,6 +453,19 @@ YAML
   [[ ! -s "${BATS_TEST_TMPDIR}/out" ]] || { echo "stdout: $(cat "${BATS_TEST_TMPDIR}/out")"; return 1; }
   assert_output --partial "[error] lo build --keys-only: yq could not check test.lok8s.dev's render for the annotation kubectl.kubernetes.io/last-applied-configuration"
   refute_output --partial "rendered"
+}
+
+# build::keys_only holds the render with tracing off (the rules at the top
+# of utils/keysonly.sh): under bash -x, and with BASH_XTRACEFD on a file,
+# no Secret value of the render is in stdout, stderr or the trace. The
+# output shows that the Secret was in the render.
+@test "build::keys_only traces no Secret value of the render" {
+  kustomize() { printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: app\nstringData:\n  PASSWORD: xtrace-canary-keys-only\n'; }
+  export -f kustomize
+  assert_no_trace_leak xtrace-canary-keys-only build::keys_only "test.lok8s.dev"
+  run build::keys_only "test.lok8s.dev"
+  assert_success
+  assert_output --partial 'PASSWORD: ""'
 }
 
 # The stderr of the render and of yq is withheld in keys-only mode: it can

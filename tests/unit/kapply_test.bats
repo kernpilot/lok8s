@@ -70,6 +70,17 @@ _kapply() { printf '%s' "$1" | kapply::apply; }       # pipe manifest → kapply
   refute_output --partial 'replace --force'
 }
 
+# The last value of the manifest is a `|+` block scalar that ends in three
+# newlines: kubectl gets the bytes of stdin, with the newlines.
+@test "apply: kubectl gets the manifest byte for byte" {
+  export STDIN_COPY="${BATS_TEST_TMPDIR}/kubectl.stdin" WANT="${BATS_TEST_TMPDIR}/want.yaml"
+  printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\ndata:\n  tail: |+\n    x\n\n\n' > "${WANT}"
+  kubectl() { cat > "${STDIN_COPY}"; }
+  run kapply::apply --label cfg < "${WANT}"
+  assert_success
+  cmp "${WANT}" "${STDIN_COPY}"
+}
+
 @test "immutable WITHOUT --force-recreate: fails fast with a hint, no recreate" {
   export APPLY_RC=1
   export APPLY_OUT='Error from server (Invalid): Deployment.apps "web" is invalid: spec.selector: field is immutable'

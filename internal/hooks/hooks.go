@@ -187,7 +187,8 @@ func (c *Context) selectObjects(domainName, selector string) ([]doc, error) {
 
 // marshalDocs renders documents back to a `---`-separated stream (feeds
 // kubectl delete/apply; the exact byte shape is yq-adjacent, the semantics
-// identical).
+// identical). The stream ends with the final newline of its last document,
+// and kubectl gets it as it is: a last `|+` block scalar keeps its value.
 func marshalDocs(docs []doc) string {
 	var buf strings.Builder
 	for i, d := range docs {
@@ -379,11 +380,11 @@ func (c *Context) Recreate(ctx context.Context, selector string) error {
 	applied := marshalDocs(docs)
 	if err := c.Runner.Run(ctx, execx.Cmd{
 		Name: "kubectl", Args: []string{"delete", "--ignore-not-found", "-f", "-"},
-		Stdin: strings.NewReader(objs + "\n"), Stdout: c.Out, Stderr: c.ErrOut,
+		Stdin: strings.NewReader(objs), Stdout: c.Out, Stderr: c.ErrOut,
 	}); err != nil {
 		return ErrHandled
 	}
-	if _, rc := c.applier().Apply(ctx, "hook recreate "+selector, applied+"\n"); rc != 0 {
+	if _, rc := c.applier().Apply(ctx, "hook recreate "+selector, applied); rc != 0 {
 		return ErrHandled
 	}
 	ui.DebugTo(c.ErrOut, "hooks: recreated objects matching '%s'", selector)
@@ -401,7 +402,7 @@ func (c *Context) Apply(ctx context.Context, selector string) error {
 		ui.WarnTo(c.ErrOut, "hooks apply: no objects match '%s'", selector)
 		return nil
 	}
-	if _, rc := c.applier().Apply(ctx, "hook apply "+selector, objs+"\n"); rc != 0 {
+	if _, rc := c.applier().Apply(ctx, "hook apply "+selector, objs); rc != 0 {
 		return ErrHandled
 	}
 	ui.DebugTo(c.ErrOut, "hooks: applied objects matching '%s'", selector)

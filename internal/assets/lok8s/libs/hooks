@@ -71,15 +71,17 @@ hooks::_yq_filter() {
 # copy passes the apply guard of lo deploy (keysonly::read_checked_artifact):
 # one with a keys-only Secret, or one that cannot be read or checked, is
 # refused. yq selects from the copy that passed the check, not from a second
-# read of the file.
+# read of the file; the copy reaches yq byte for byte through a pipe.
 hooks::_select() {
+  [[ $- != *x* ]] || { local -; set +x; }   # the objects can hold Secret values (utils/keysonly.sh)
   local domain="${1}" selector="${2}"
   local filter; filter="$(hooks::_yq_filter "${selector}")" || return 1
   local artifact="${PATH_CLUSTERS}/${domain}/artifacts.yaml"
   [[ -f "${artifact}" ]] || return 0
   local content
-  content="$(keysonly::read_checked_artifact "${domain}" "${artifact}")" || return 1
-  yq "${filter}" - <<< "${content}" 2>/dev/null || true
+  content="$(keysonly::read_checked_artifact "${domain}" "${artifact}" && printf .)" || return 1
+  content="${content%.}"
+  printf '%s' "${content}" | yq "${filter}" - 2>/dev/null || true
 }
 
 # hooks::_overlay_images <live-images-json> — read ONE rendered object on stdin,
@@ -99,6 +101,7 @@ hooks::_select() {
 #
 # Pure: the caller does the cluster lookup, so this half is unit-testable.
 hooks::_overlay_images() {
+  [[ $- != *x* ]] || { local -; set +x; }   # the objects can hold Secret values (utils/keysonly.sh)
   local live="${1:-[]}"
   # $live below is a YQ variable, bound by `as $live` inside the program — not a
   # shell expansion. The single quotes are load-bearing: the shell must not touch
@@ -116,45 +119,48 @@ hooks::_overlay_images() {
 # images as a JSON array of {name, image}. Empty array when the object does not
 # exist yet (a first-ever apply has nothing to preserve).
 hooks::_live_images() {
+  [[ $- != *x* ]] || { local -; set +x; }   # the objects can hold Secret values (utils/keysonly.sh)
   local kind="${1}" name="${2}" ns="${3}" live
   [[ -n "${kind}" && -n "${name}" ]] || { printf '[]'; return 0; }
   live="$(kubectl get "${kind}" "${name}" ${ns:+-n "${ns}"} -o json 2>/dev/null)" || { printf '[]'; return 0; }
   [[ -n "${live}" ]] || { printf '[]'; return 0; }
-  yq -p=json -o=json -I=0 '
+  printf '%s\n' "${live}" | yq -p=json -o=json -I=0 '
     [ (.spec.template.spec.containers[]?, .spec.template.spec.initContainers[]?)
       | {"name": .name, "image": .image} ]
-  ' <<< "${live}" 2>/dev/null || printf '[]'
+  ' 2>/dev/null || printf '[]'
 }
 
 # hooks::_preserve_images — read the selected objects on stdin, emit them with
 # live image refs overlaid (see hooks::_overlay_images).
 hooks::_preserve_images() {
-  local objs; objs="$(cat)"
-  local -a idx; mapfile -t idx < <(yq 'documentIndex' <<< "${objs}" 2>/dev/null)
-  [[ ${#idx[@]} -gt 0 ]] || { printf '%s\n' "${objs}"; return 0; }
+  [[ $- != *x* ]] || { local -; set +x; }   # the objects can hold Secret values (utils/keysonly.sh)
+  local objs; objs="$(cat && printf .)"; objs="${objs%.}"
+  local -a idx; mapfile -t idx < <(printf '%s' "${objs}" | yq 'documentIndex' 2>/dev/null)
+  [[ ${#idx[@]} -gt 0 ]] || { printf '%s' "${objs}"; return 0; }
   local i doc kind name ns imgs first=1
   for i in "${idx[@]}"; do
-    doc="$(yq "select(documentIndex == ${i})" <<< "${objs}")"
-    kind="$(yq -r '.kind // ""' <<< "${doc}")"
-    name="$(yq -r '.metadata.name // ""' <<< "${doc}")"
-    ns="$(yq -r '.metadata.namespace // ""' <<< "${doc}")"
+    doc="$(printf '%s' "${objs}" | yq "select(documentIndex == ${i})" && printf .)"; doc="${doc%.}"
+    kind="$(printf '%s' "${doc}" | yq -r '.kind // ""')"
+    name="$(printf '%s' "${doc}" | yq -r '.metadata.name // ""')"
+    ns="$(printf '%s' "${doc}" | yq -r '.metadata.namespace // ""')"
     imgs="$(hooks::_live_images "${kind}" "${name}" "${ns}")"
     if [[ "${imgs}" != '[]' ]]; then
-      doc="$(hooks::_overlay_images "${imgs}" <<< "${doc}")"
+      doc="$(printf '%s' "${doc}" | hooks::_overlay_images "${imgs}" && printf .)"; doc="${doc%.}"
     fi
     (( first )) || printf -- '---\n'
     first=0
-    printf '%s\n' "${doc}"
+    printf '%s' "${doc}"
   done
 }
 
 # hooks::_object_names — the metadata.name of every selected object, one per line.
 hooks::_object_names() {
+  [[ $- != *x* ]] || { local -; set +x; }   # the objects can hold Secret values (utils/keysonly.sh)
   # yq prints a `---` between documents; left in, it becomes a bogus name, every
   # tilt::has_resource lookup for it fails, and _tilt_can_recreate silently says
   # "Tilt does not own this" for EVERY multi-object selection — disabling the
   # Tilt path exactly where it matters most. Caught by the unit test below.
-  yq -r '.metadata.name // ""' <<< "${1}" 2>/dev/null | grep -vE '^(---)?$' || true
+  printf '%s\n' "${1}" | yq -r '.metadata.name // ""' 2>/dev/null | grep -vE '^(---)?$' || true
 }
 
 # hooks::_tilt_can_recreate — does the running Tilt session own EVERY selected
@@ -162,6 +168,7 @@ hooks::_object_names() {
 # through kubectl would leave the two halves on different image refs, which is a
 # subtler version of the bug this exists to avoid.
 hooks::_tilt_can_recreate() {
+  [[ $- != *x* ]] || { local -; set +x; }   # the objects can hold Secret values (utils/keysonly.sh)
   local objs="${1}" name any=0
   declare -F tilt::has_resource >/dev/null || return 1
   for name in $(hooks::_object_names "${objs}"); do
@@ -172,6 +179,7 @@ hooks::_tilt_can_recreate() {
 }
 
 hooks::recreate() {
+  [[ $- != *x* ]] || { local -; set +x; }   # the objects can hold Secret values (utils/keysonly.sh)
   local selector=''
   local -a args=(
     'selector|'  'Label selector (k=v,k2=v2)'
@@ -179,8 +187,9 @@ hooks::recreate() {
   )
   :args "Delete + apply selected objects (immutable Jobs re-run)" "${@}"
   _resolve_kubeconfig_for_domain
-  local objs; objs="$(hooks::_select "${domain}" "${selector}")" || return 1
-  if ! deploy::_has_objects <<< "${objs}"; then
+  local objs; objs="$(hooks::_select "${domain}" "${selector}" && printf .)" || return 1
+  objs="${objs%.}"
+  if ! printf '%s' "${objs}" | deploy::_has_objects; then
     warn "hooks recreate: no objects match '${selector}'"; return 0
   fi
   # Atomic-ish recreate: delete (tolerating not-found) THEN apply — chained with
@@ -214,13 +223,15 @@ hooks::recreate() {
 
   # No Tilt session (or it does not own these objects): fall back to delete +
   # apply, carrying over the live image refs where an object is still running.
-  local applied; applied="$(printf '%s\n' "${objs}" | hooks::_preserve_images)"
-  printf '%s\n' "${objs}" | kubectl delete --ignore-not-found -f - \
-    && printf '%s\n' "${applied}" | kapply::apply --label "hook recreate ${selector}"
+  local applied; applied="$(printf '%s' "${objs}" | hooks::_preserve_images && printf .)"
+  applied="${applied%.}"
+  printf '%s' "${objs}" | kubectl delete --ignore-not-found -f - \
+    && printf '%s' "${applied}" | kapply::apply --label "hook recreate ${selector}"
   debug "hooks: recreated objects matching '${selector}'"
 }
 
 hooks::apply() {
+  [[ $- != *x* ]] || { local -; set +x; }   # the objects can hold Secret values (utils/keysonly.sh)
   local selector=''
   local -a args=(
     'selector|'  'Label selector (k=v,k2=v2)'
@@ -228,15 +239,17 @@ hooks::apply() {
   )
   :args "Re-apply selected objects" "${@}"
   _resolve_kubeconfig_for_domain
-  local objs; objs="$(hooks::_select "${domain}" "${selector}")" || return 1
-  if ! deploy::_has_objects <<< "${objs}"; then
+  local objs; objs="$(hooks::_select "${domain}" "${selector}" && printf .)" || return 1
+  objs="${objs%.}"
+  if ! printf '%s' "${objs}" | deploy::_has_objects; then
     warn "hooks apply: no objects match '${selector}'"; return 0
   fi
-  printf '%s\n' "${objs}" | kapply::apply --label "hook apply ${selector}"
+  printf '%s' "${objs}" | kapply::apply --label "hook apply ${selector}"
   debug "hooks: applied objects matching '${selector}'"
 }
 
 hooks::restart() {
+  [[ $- != *x* ]] || { local -; set +x; }   # the objects can hold Secret values (utils/keysonly.sh)
   local selector=''
   local -a args=(
     'selector|'  'Label selector (k=v,k2=v2)'
@@ -244,8 +257,9 @@ hooks::restart() {
   )
   :args "Rollout restart selected workloads" "${@}"
   _resolve_kubeconfig_for_domain
-  local objs; objs="$(hooks::_select "${domain}" "${selector}")" || return 1
-  if ! deploy::_has_objects <<< "${objs}"; then
+  local objs; objs="$(hooks::_select "${domain}" "${selector}" && printf .)" || return 1
+  objs="${objs%.}"
+  if ! printf '%s' "${objs}" | deploy::_has_objects; then
     warn "hooks restart: no workloads match '${selector}'"; return 0
   fi
   # Rollout-restart each matched Deployment/StatefulSet/DaemonSet by kind/name+ns.

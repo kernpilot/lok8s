@@ -203,6 +203,21 @@ YAML
   fi
 }
 
+# Tracing is off where lo holds the render of an entry (the rules at the
+# top of utils/keysonly.sh): under bash -x, and with BASH_XTRACEFD on a
+# file, no Secret value of the render is in stdout, stderr or the trace.
+# The kubectl stub shows that the value was applied.
+@test "bootstrap::_apply_one traces no Secret value of the render" {
+  write_cluster_spec "testcni"
+  kustomize() {
+    printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: app\nstringData:\n  PASSWORD: xtrace-canary-apply-one\n'
+  }
+  export APPLY_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  kubectl() { [[ "$*" != *" apply "* ]] || cat >> "${APPLY_LOG}"; }
+  assert_no_trace_leak xtrace-canary-apply-one bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  grep -qF xtrace-canary-apply-one "${APPLY_LOG}"
+}
+
 @test "bootstrap::apply inline overrides beat provider, driver, and base values" {
   # Inline override uses the map form: "- name: {key: value}"
   write_cluster_spec "testcni: {shared_all: inline, nested: {overridden: inline, from_inline: true}}"
@@ -2328,6 +2343,54 @@ YAML
   done
 }
 
+# The Go twin is TestRestoreDAppliesTheExactBytes. The last value of the
+# manifest is a `|+` block scalar that ends in three newlines: kubectl gets
+# the bytes of the working copy, and of the decrypted manifest, byte for
+# byte.
+@test "restore_d: kubectl gets the exact bytes of the working copy and of the decrypted manifest" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  unset PATH_SECRETS
+  local d="${PATH_CLUSTERS}/test.lok8s.dev"
+  export DOC="${BATS_TEST_TMPDIR}/doc.yaml"
+  printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\nstringData:\n  tls.crt: |+\n    cert\n\n\n' > "${DOC}"
+  mkdir -p "${d}/restore.d" "${d}/secrets/restore.d"
+  echo "cipher" > "${d}/restore.d/tls-a.sops.yaml"
+  kubectl() { cat > "${BATS_TEST_TMPDIR}/kubectl.stdin"; }
+  sops() { cat "${DOC}"; }
+  cp "${DOC}" "${d}/secrets/restore.d/tls-a.yaml"
+  run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
+  [ "$status" -eq 0 ]
+  assert_output --partial "restore.d — 1 applied, 0 skipped"
+  cmp "${DOC}" "${BATS_TEST_TMPDIR}/kubectl.stdin"
+  rm -f "${d}/secrets/restore.d/tls-a.yaml" "${BATS_TEST_TMPDIR}/kubectl.stdin"
+  run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
+  [ "$status" -eq 0 ]
+  assert_output --partial "restore.d — 1 applied, 0 skipped"
+  cmp "${DOC}" "${BATS_TEST_TMPDIR}/kubectl.stdin"
+}
+
+# Tracing is off where lo holds a restore manifest (the rules at the top of
+# utils/keysonly.sh): under bash -x, and with BASH_XTRACEFD on a file, no
+# value of the working copy or of the decrypted manifest is in stdout,
+# stderr or the trace. The kubectl stub shows that both were applied.
+@test "restore_d: the restore traces no Secret value" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  unset PATH_SECRETS
+  local d="${PATH_CLUSTERS}/test.lok8s.dev"
+  mkdir -p "${d}/restore.d" "${d}/secrets/restore.d"
+  echo "cipher" > "${d}/restore.d/tls-a.sops.yaml"
+  echo "cipher" > "${d}/restore.d/tls-b.sops.yaml"
+  printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: a\nstringData:\n  tls.key: xtrace-canary-restore-copy\n' > "${d}/secrets/restore.d/tls-a.yaml"
+  export RESTORE_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  kubectl() { cat >> "${RESTORE_LOG}"; }
+  sops() { printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: b\nstringData:\n  tls.key: xtrace-canary-restore-sops\n'; }
+  assert_no_trace_leak xtrace-canary-restore bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
+  grep -qF xtrace-canary-restore-copy "${RESTORE_LOG}"
+  grep -qF xtrace-canary-restore-sops "${RESTORE_LOG}"
+}
+
 # The Go twin is TestRestoreDRefusesTheDecryptedManifest. Without a working
 # copy, the guard checks the decrypted manifest: one with a keys-only
 # Secret, or one that does not parse, is skipped.
@@ -2983,6 +3046,29 @@ YAML
   grep -q '^bootstrap dry-run: testcni: unchanged$' "${out}"
   grep -q '^bootstrap dry-run: entries=2 unchanged=1 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0 nondeterministic=0$' "${out}"
   ! grep -qE ' (apply|replace|patch) ' "${KLOG}"
+}
+
+# The dry run holds the renders and the decrypted restore.d manifests with
+# tracing off (the rules at the top of utils/keysonly.sh): under bash -x,
+# and with BASH_XTRACEFD on a file, no Secret value is in stdout, stderr or
+# the trace. The kubectl stub shows that both reached the diff.
+@test "bootstrap::apply --dry-run traces no Secret value" {
+  write_cluster_spec "testcni"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/tls.sops.yaml"
+  sops() { printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\nstringData:\n  tls.key: xtrace-canary-dry-sops\n'; }
+  kustomize() { printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: app\nstringData:\n  PASSWORD: xtrace-canary-dry-render\n'; }
+  _dry_kubectl_stub 0 0
+  export DRY_STDIN="${BATS_TEST_TMPDIR}/diff.stdin"
+  kubectl() {
+    echo "kubectl $*" >> "${KLOG}"
+    [[ " $* " == *" diff "* ]] || return 9
+    cat >> "${DRY_STDIN}"
+  }
+  local bootstrap_dry_run=1
+  assert_no_trace_leak xtrace-canary-dry bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  grep -qF xtrace-canary-dry-sops "${DRY_STDIN}"
+  grep -qF xtrace-canary-dry-render "${DRY_STDIN}"
 }
 
 # --only takes restore.d out of scope entirely — never applied, never

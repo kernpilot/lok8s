@@ -5,6 +5,23 @@
 # its key names and empty values only. Such a Secret never goes into a
 # domain's artifacts and is never applied.
 
+# Rendered and decrypted bytes (a render, an artifact, a decrypted
+# manifest) can hold Secret values. Each function that holds them follows
+# three rules (Go needs none of them):
+#   - Tracing off: `[[ $- != *x* ]] || { local -; set +x; }` first. Under
+#     `bash -x` (or BASH_XTRACEFD) the trace would print each assignment and
+#     each argument. `local -` sets the options back on return, and no child
+#     inherits the tracing. The line runs `local -` only when tracing is on,
+#     because bash 4.3 does not know `local -`.
+#   - Exact bytes: a capture keeps the final newlines with a sentinel
+#     (`x="$(cmd && printf .)"; x="${x%.}"`), and the bytes go on with
+#     `printf '%s'`. A plain $(...) strips each final newline, which changes
+#     the value of a last block scalar such as `|+`.
+#   - No here-string: `printf '%s' "${x}" | cmd`, or `cmd < <(printf ...)`
+#     when cmd must run in this shell. A here-string larger than the pipe
+#     buffer goes into a file in TMPDIR (bash 5.1 and later), which a kill
+#     can leave behind.
+
 # The causes when yq cannot run the check (exit status 3 of
 # keysonly::has_marker): an installed yq before v4.47.1 (the words of the
 # spec reader, spec::_kver_read), and no yq. keysonly::yq_cause prints the
@@ -79,17 +96,20 @@ keysonly::refuse_stream() {
 # --keys-only: applied, it would replace each value in the cluster with an
 # empty one), or when it cannot be read or checked. `lo build` never writes
 # such an artifact; the guard catches a file written in another way. Else it
-# prints the copy that passed the check: the caller uses it, not the file,
-# which can change after the check.
+# prints the copy that passed the check, byte for byte: the caller uses it,
+# not the file, which can change after the check, and captures it with a
+# sentinel (see the rules at the top).
 keysonly::read_checked_artifact() {
+  [[ $- != *x* ]] || { local -; set +x; }
   local domain="${1}" artifact="${2}" content marker=0
-  if ! content="$(cat -- "${artifact}" 2>/dev/null)"; then
+  if ! content="$(cat -- "${artifact}" 2>/dev/null && printf .)"; then
     error "refusing to apply ${domain}: ${artifact} cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
     return 1
   fi
-  keysonly::has_marker - <<< "${content}" || marker=$?
+  content="${content%.}"
+  printf '%s' "${content}" | keysonly::has_marker - || marker=$?
   case "${marker}" in
-    1) printf '%s\n' "${content}"; return 0 ;;
+    1) printf '%s' "${content}"; return 0 ;;
     2) error "refusing to apply ${domain}: ${artifact} does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)" ;;
     3) error "refusing to apply ${domain}: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): $(keysonly::yq_cause)" ;;
     *) error "refusing to apply ${domain}: ${artifact} holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one — run 'lo build' again" ;;
@@ -100,15 +120,17 @@ keysonly::read_checked_artifact() {
 # keysonly::read_checked_file <prefix> <what> <file|->: print <file> (-
 # reads stdin), read once and checked as keysonly::refuse_stream does (Go:
 # build.ReadCheckedFile, build.ReadCheckedStream); a file or a stdin that
-# cannot be read is refused too. The caller applies the printed copy, not
-# the file. Returns 1, and prints nothing on stdout, when the guard
-# refuses the input.
+# cannot be read is refused too. The caller applies the printed copy (byte
+# for byte), not the file. Returns 1, and prints nothing on stdout, when
+# the guard refuses the input.
 keysonly::read_checked_file() {
+  [[ $- != *x* ]] || { local -; set +x; }
   local prefix="${1}" what="${2}" content
-  if ! content="$(cat -- "${3}" 2>/dev/null)"; then
+  if ! content="$(cat -- "${3}" 2>/dev/null && printf .)"; then
     error "${prefix}: refusing to apply ${what}: it cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
     return 1
   fi
-  keysonly::refuse_stream "${prefix}" "${what}" - <<< "${content}" || return 1
-  printf '%s\n' "${content}"
+  content="${content%.}"
+  printf '%s' "${content}" | keysonly::refuse_stream "${prefix}" "${what}" - || return 1
+  printf '%s' "${content}"
 }

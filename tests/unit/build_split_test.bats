@@ -142,6 +142,31 @@ EOF
   grep -qF -- '--config' "${SOPS_STUB_LOG}"
 }
 
+# build::split holds the fresh Secrets and the decrypted twins with tracing
+# off (the rules at the top of utils/keysonly.sh): under bash -x, and with
+# BASH_XTRACEFD on a file, no value of a fresh or of a decrypted Secret is
+# in stdout, stderr or the trace. The second run decrypts the twin that the
+# first run wrote. The sops stub shows that the value was encrypted.
+@test "split: the split traces no Secret value" {
+  write_spec "$(printf '  gitops:\n    provider: flux\n    age: [age1testkey]')"
+  printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: creds\n  namespace: app\nstringData:\n  token: xtrace-canary-split\n' > "${DOMAIN_DIR}/artifacts.yaml"
+  export SPLIT_LOG="${BATS_TEST_TMPDIR}/sops.stdin" DECRYPTS="${BATS_TEST_TMPDIR}/decrypts"
+  sops() {
+    if [[ "${1}" == decrypt ]]; then
+      echo decrypt >> "${DECRYPTS}"
+      printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: creds\n  namespace: app\nstringData:\n  token: xtrace-canary-split-prior\n'
+      return 0
+    fi
+    local a prev="" out=""
+    for a in "$@"; do [[ "${prev}" != --output ]] || out="${a}"; prev="${a}"; done
+    cat >> "${SPLIT_LOG}"
+    printf 'sops: {stubbed: true}\n' > "${out}"
+  }
+  assert_no_trace_leak xtrace-canary-split build::split "${DOMAIN}"
+  [ "$(grep -c xtrace-canary-split "${SPLIT_LOG}")" -eq 2 ]
+  [ "$(cat "${DECRYPTS}")" = decrypt ]
+}
+
 @test "split: Secret without spec.gitops.age recipients hard-fails, writes nothing" {
   write_spec "  build: { artifacts: split }"
   write_artifact

@@ -254,3 +254,20 @@ YAML
   [ "${status}" -eq 0 ]
   grep -q "^kubeone apply --manifest kubeone.yaml" "${KCALLS}"
 }
+
+# kubeone::apply and render_addons hold the Hetzner credentials with
+# tracing off (the rules at the top of utils/keysonly.sh): under bash -x,
+# and with BASH_XTRACEFD on a file, neither HCLOUD_TOKEN nor
+# HROBOT_PASSWORD is in stdout, stderr or the trace. The kubeone stub shows
+# that the Robot password reached kubeone.
+@test "kubeone::apply and render_addons trace no credential" {
+  local cy; cy=$(_cluster_yaml '')
+  export HCLOUD_TOKEN="xtrace-canary-kubeone-hcloud" HROBOT_USER="robot" HROBOT_PASSWORD="xtrace-canary-kubeone-robot"
+  export KCALLS="${BATS_TEST_TMPDIR}/kubeone.calls"
+  kubeone::_clean_reinstalled_workers() { :; }
+  kubeone::_name_robot_workers() { :; }
+  kubeone() { printf '%s\n' "${ROBOT_PASSWORD:-}" >> "${KCALLS}"; }
+  assert_no_trace_leak xtrace-canary-kubeone kubeone::apply "${work_dir}" "${cy}"
+  [ "$(sort -u "${KCALLS}")" = "xtrace-canary-kubeone-robot" ]
+  assert_no_trace_leak xtrace-canary-kubeone kubeone::render_addons "${work_dir}" "${cy}"
+}
