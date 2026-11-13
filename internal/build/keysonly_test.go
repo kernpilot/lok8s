@@ -9,6 +9,7 @@ package build
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -746,6 +747,39 @@ func TestKeysOnlyGivesKustomizeTheCheckedHome(t *testing.T) {
 	}
 	if got, want := strings.TrimSpace(string(raw)), filepath.Join(p.Base, ".kustomize"); got != want {
 		t.Errorf("kustomize got KUSTOMIZE_PLUGIN_HOME %q, want %q", got, want)
+	}
+}
+
+// The check keeps the home that it checked, and the render gives exactly
+// that home to kustomize, also when the home that render.Build would pick
+// on its own is another one.
+func TestKeysOnlyPluginHomeReachesKustomize(t *testing.T) {
+	p, _, _ := keysOnlyProject(t)
+	stubRender(t, p, twoDocRender)
+	stubSecretPlugin(t, p, "printf 'dry-run\\nkeys-only\\n'")
+	o := Options{Paths: p, Domain: "d.dev"}
+	if err := checkKeysOnlyPlugin(t.Context(), &o, io.Discard); err != nil {
+		t.Fatalf("checkKeysOnlyPlugin: %v", err)
+	}
+	if want := filepath.Join(p.Base, ".kustomize"); o.pluginHome != want {
+		t.Fatalf("the check kept the home %q, want %q", o.pluginHome, want)
+	}
+	other := filepath.Join(p.Base, "checked-home")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o.pluginHome = other
+	envlog := filepath.Join(p.Base, "kustomize-env.log")
+	t.Setenv("KUSTOMIZE_STUB_ENVLOG", envlog)
+	if _, err := runKustomize(t.Context(), o, filepath.Join(p.Clusters, "d.dev"), "", io.Discard); err != nil {
+		t.Fatalf("runKustomize: %v", err)
+	}
+	raw, err := os.ReadFile(envlog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(raw)); got != other {
+		t.Errorf("kustomize got KUSTOMIZE_PLUGIN_HOME %q, want the checked home %q", got, other)
 	}
 }
 
