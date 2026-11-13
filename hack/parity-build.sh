@@ -480,6 +480,7 @@ done
 mkdir -p "${PROJ}/clusters/qguard.dev/secrets"
 printf 'kind: Lo\nmetadata:\n  name: qguard\n' > "${PROJ}/clusters/qguard.dev/cluster.lok8s.yaml"
 printf 'resources:\n  - secret.yaml\n' > "${PROJ}/clusters/qguard.dev/kustomization.yaml"
+# shellcheck disable=SC2016 # the build's envsubst expands the marker, not the shell
 printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: one\n  annotations:\n    ${LOK8S_SPEC_PARITY_MARKER}: "true"\ndata:\n  USER: ""\n' \
   > "${PROJ}/clusters/qguard.dev/secret.yaml"
 export LOK8S_SPEC_PARITY_MARKER='"secrets.lok8s.dev/keys-only"'

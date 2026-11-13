@@ -174,8 +174,9 @@ keys_only_call() {
 check_refused() {
   local tag="${1}" side="${2}" rc="${3}" out="${4}" builds="${5}" st="${6}" calls
   calls="$(paste -sd, "${work}/plugin.log")"
-  [[ "${rc}" != 0 ]] && grep -qF "${refusal}" "${work}/lo.err" \
-    || fail "${tag}: lo (${side}) did not refuse the plugin: rc ${rc}: $(cat "${work}/lo.err")"
+  if [[ "${rc}" == 0 ]] || ! grep -qF "${refusal}" "${work}/lo.err"; then
+    fail "${tag}: lo (${side}) did not refuse the plugin: rc ${rc}: $(cat "${work}/lo.err")"
+  fi
   [[ "${out}" == 0 ]] || fail "${tag}: lo (${side}) printed something on stdout"
   [[ "${calls}" == "plugin --capabilities" ]] || fail "${tag}: lo (${side}) ran the plugin as: ${calls:-<never>}"
   [[ "${builds}" == 0 ]] || fail "${tag}: lo (${side}) started the kustomize build"

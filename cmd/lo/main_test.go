@@ -41,14 +41,15 @@ func TestMain(m *testing.M) {
 
 // stubTool is the fixture .bin entry for every external tool: it logs
 // "<tool> keys-only=<inherited value>" and answers like the tool would
-// for `version` and `build` (one ConfigMap). The yq program of `lo build
-// --keys-only` goes to the pinned yq (REAL_YQ).
+// for `version` and `build` (one ConfigMap). The two yq programs of `lo
+// build --keys-only` (the values, then the last-applied check with -N) go
+// to the pinned yq (REAL_YQ).
 const stubTool = `#!/bin/sh
 tool="$(basename "$0")"
 printf '%s keys-only=%s disable=%s\n' "${tool}" "${` + secret.KeysOnlyEnv + `-<unset>}" "${LOK8S_SECRETS_DISABLE-<unset>}" >> "${STUB_LOG}"
 case "${tool} ${1:-}" in
   "kustomize build") printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: stub\n  namespace: demo\ndata:\n  a: b\n' ;;
-  "yq --yaml-fix-merge-anchor-to-spec") exec "${REAL_YQ}" "$@" ;;
+  "yq --yaml-fix-merge-anchor-to-spec"|"yq -N") exec "${REAL_YQ}" "$@" ;;
   *) echo "${tool} v1.2.3" ;;
 esac
 `
