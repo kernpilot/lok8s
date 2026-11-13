@@ -48,7 +48,9 @@ func main() {
 	// line. `lo bootstrap --dry-run` requires "dry-run" before it renders
 	// (the plugin reads the store, generates in memory, never writes); an
 	// older build reads the flag as a config path and fails, so lo refuses
-	// it rather than let it write the secrets store.
+	// it rather than let it write the secrets store. `lo build --keys-only`
+	// requires "keys-only" in the exec pipeline: an older build does not
+	// know the keys-only setting.
 	if len(os.Args) == 2 && os.Args[1] == "--capabilities" {
 		fmt.Println(secret.Capabilities)
 		return

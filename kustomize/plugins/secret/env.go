@@ -113,5 +113,7 @@ func quote(s string) string { return `"` + s + `"` }
 // Capabilities is what `Secret --capabilities` prints, one word per line:
 // "dry-run" means the plugin honours LOK8S_BOOTSTRAP_DRYRUN (it reads the
 // store, generates a missing value in memory, writes nothing and reports
-// what it generated to LOK8S_BOOTSTRAP_DRYRUN_REPORT).
-const Capabilities = "dry-run"
+// what it generated to LOK8S_BOOTSTRAP_DRYRUN_REPORT). "keys-only" means
+// the plugin has the keys-only run (KeysOnlyEnv with DisableEnv): `lo build
+// --keys-only` refuses a plugin without it in the exec pipeline.
+const Capabilities = "dry-run\nkeys-only"

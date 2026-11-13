@@ -48,20 +48,32 @@ func runKeysOnly(argv []string, stdin io.Reader, stdout io.Writer) error {
 // same names in the same order, so the registry reports a key collision
 // and a cert error exactly as in a real run.
 func (p *Plugin) keyRegistry() *plugin.Registry {
-	s := p.spec
 	r := plugin.NewRegistry()
-	r.Add(keyNames{"literals", fixed(sortedKeys(s.Literals))})
-	r.Add(keyNames{"env", fixed(sortedKeys(s.Env))})
-	r.Add(keyNames{"b64", fixed(sortedKeys(s.B64))})
-	r.Add(keyNames{"file", fixed(sortedKeys(s.File))})
-	r.Add(keyNames{"passwd", fixed(sortedKeys(s.Passwd))})
-	r.Add(keyNames{"key", fixed(sortedKeys(s.Key))})
-	r.Add(keyNames{"template", fixed(sortedKeys(s.Template))})
-	r.Add(keyNames{"bash", fixed(sortedKeys(s.Bash))})
-	r.Add(keyNames{"secretRef", fixed(sortedKeys(s.SecretRef))})
-	r.Add(keyNames{"htpasswd", fixed(sortedKeys(s.Htpasswd))})
-	r.Add(keyNames{"cert", func() ([]string, error) { return generator.CertKeys(s.Cert) }})
+	for _, g := range p.keySections() {
+		r.Add(g)
+	}
 	return r
+}
+
+// keySections is the section list of Build, one key generator for each.
+// TestKeysOnly_EverySpecSectionHasKeys checks that it names every section
+// of the spec, and TestKeysOnly_KeySetMatchesARealRun that a real run of a
+// spec that fills every section emits the same keys.
+func (p *Plugin) keySections() []keyNames {
+	s := p.spec
+	return []keyNames{
+		{"literals", fixed(sortedKeys(s.Literals))},
+		{"env", fixed(sortedKeys(s.Env))},
+		{"b64", fixed(sortedKeys(s.B64))},
+		{"file", fixed(sortedKeys(s.File))},
+		{"passwd", fixed(sortedKeys(s.Passwd))},
+		{"key", fixed(sortedKeys(s.Key))},
+		{"template", fixed(sortedKeys(s.Template))},
+		{"bash", fixed(sortedKeys(s.Bash))},
+		{"secretRef", fixed(sortedKeys(s.SecretRef))},
+		{"htpasswd", fixed(sortedKeys(s.Htpasswd))},
+		{"cert", func() ([]string, error) { return generator.CertKeys(s.Cert) }},
+	}
 }
 
 // fixed returns a key source with no error.
