@@ -139,7 +139,9 @@ Secret value: each Secret in the final render shows its key names with
 empty values. This applies to every Secret, not only to the Secrets of the
 `secrets.lok8s.dev` generator: a plain Secret manifest, a kustomize
 `secretGenerator`, a Helm chart's Secret, a value that a patch adds, and a
-Secret in a `List`. The build does not read, decrypt or mint a secrets
+Secret in a `List`. In each Secret, lo also empties the values of the
+labels and annotations (the keys stay) and removes the comments. The build
+does not read, decrypt or mint a secrets
 store, so it needs no store and no age key. Use it to compare the keys that
 a generator makes with the keys that a consumer expects, for example in CI.
 
@@ -147,20 +149,26 @@ a generator makes with the keys that a consumer expects, for example in CI.
 lo build --keys-only --domain example.com > keys.yaml
 ```
 
-Each Secret from the generator gets the annotation
-`secrets.lok8s.dev/keys-only: "true"`. The other resources render as in a
-normal build. lo empties the values with `yq` after the kustomize build and
+Each Secret in the output gets the annotation
+`secrets.lok8s.dev/keys-only: "true"`, so `lo build` and `lo deploy` refuse
+the output (see below). `--keys-only` empties Secrets only. Every other kind
+prints as it is rendered: a value in a `ConfigMap`, for example, prints. lo
+empties the values with `yq` after the kustomize build and
 the variable substitution, so the build needs the pinned `yq`. `yq` writes
 the stream: its layout (for example, the indent of lists) can be different
 from `artifacts.yaml`.
 
-lo empties only the `data` and `stringData` values, not the annotations. The
-annotation `kubectl.kubernetes.io/last-applied-configuration`, which
-`kubectl apply` writes, can hold the values of a Secret. Thus `lo build
+The annotation `kubectl.kubernetes.io/last-applied-configuration`, which
+`kubectl apply` writes, can hold the values of a Secret. `lo build
 --keys-only` refuses a Secret that has this annotation: it prints an error
 that names each such Secret (`Secret <namespace>/<name>`), prints nothing to
 stdout and exits with an error. Remove the annotation from the source
-manifest. Other annotations print as they are.
+manifest.
+
+`--keys-only` prints no value, but it prints the hashes of values that the
+render already holds. For example, a kustomize `secretGenerator` Secret has
+a hash of its values in its name (`<name>-<hash>`), and a Helm chart can
+put a checksum of a Secret in an annotation of a pod template.
 
 `--keys-only` writes no file. It does not change `artifacts.yaml` or the split
 directory. You cannot use it with `--split` or `--single`.

@@ -214,8 +214,10 @@ spec:
 `
 
 // The contract: lo build --keys-only prints no Secret value, for every
-// Secret in the final stream. The key names stay; the objects that are
-// not Secrets keep their values; a reference to a Secret stays as it is.
+// Secret in the final stream. The key names stay and each Secret gets the
+// keys-only marker; the objects that are not Secrets keep their values; a
+// reference to a Secret stays as it is. The aliased Secret's label (the
+// source of the alias) is a Secret value too.
 func TestKeysOnlyBlanksEverySecret(t *testing.T) {
 	p, _, _ := keysOnlyProject(t)
 	stubRender(t, p, transformedRender)
@@ -224,7 +226,7 @@ func TestKeysOnlyBlanksEverySecret(t *testing.T) {
 		t.Fatalf("KeysOnly: %v\n%s", err, stderr.String())
 	}
 	out := stdout.String()
-	for _, value := range []string{"YWxpY2U=", "patched-plain", "cGxhaW4tdmFsdWU=", "listed-plain", "a2luZGxlc3M="} {
+	for _, value := range []string{"YWxpY2U=", "patched-plain", "cGxhaW4tdmFsdWU=", "listed-plain", "a2luZGxlc3M=", "alias-plain"} {
 		if strings.Contains(out, value) {
 			t.Errorf("stdout holds the Secret value %q:\n%s", value, out)
 		}
@@ -234,7 +236,7 @@ func TestKeysOnlyBlanksEverySecret(t *testing.T) {
 			t.Errorf("stdout lacks the key %q:\n%s", key, out)
 		}
 	}
-	for _, kept := range []string{"VISIBLE: list-config", "VISIBLE: plain-config", "ALIASED: alias-plain", "- kind: Secret\n", "name: tls\n"} {
+	for _, kept := range []string{"VISIBLE: list-config", "VISIBLE: plain-config", "- kind: Secret\n", "name: tls\n"} {
 		if !strings.Contains(out, kept) {
 			t.Errorf("stdout lost %q:\n%s", kept, out)
 		}
@@ -244,6 +246,108 @@ func TestKeysOnlyBlanksEverySecret(t *testing.T) {
 	}
 	if n := len(regexp.MustCompile(`(?m)^\s*(?:- )?(?:data|stringData):`).FindAllString(out, -1)); n != 8 {
 		t.Errorf("stdout has %d data/stringData keys, want the 8 of the render:\n%s", n, out)
+	}
+	// patched, plain, listed, kindless and aliased; not the reference.
+	if n := strings.Count(out, "secrets.lok8s.dev/keys-only: \"true\"\n"); n != 5 {
+		t.Errorf("stdout has %d keys-only markers, want one per Secret (5):\n%s", n, out)
+	}
+}
+
+// secretMetadataRender has Secret values in the places that are not data:
+// label and annotation values (a nested one too), and comments (a head
+// comment of the document, a line comment, a head comment of a key and a
+// foot comment). A ConfigMap keeps its labels and comments.
+const secretMetadataRender = `# head-canary-doc
+apiVersion: v1
+kind: Secret
+metadata:
+  name: meta # line-canary-name
+  labels:
+    copied: label-canary
+    nested: {deep: nested-canary}
+  annotations:
+    note: annotation-canary
+stringData:
+  # head-canary-key
+  KEY: string-canary # line-canary-value
+  # foot-canary-key
+---
+apiVersion: v1
+kind: List
+items:
+# head-canary-item
+- apiVersion: v1
+  kind: Secret
+  metadata:
+    name: listed
+    annotations: {copied: item-canary}
+  data:
+    K: bGlzdGVk
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: cm
+    labels: {visible: label-kept} # comment-kept
+  data:
+    V: kept
+`
+
+// Label and annotation values and comments of a Secret are emptied too:
+// the keys stay, the marker is "true", no comment is left. A ConfigMap
+// prints as it is rendered.
+func TestKeysOnlyEmptiesSecretMetadataAndComments(t *testing.T) {
+	p, _, _ := keysOnlyProject(t)
+	stubRender(t, p, secretMetadataRender)
+	var stdout, stderr bytes.Buffer
+	if err := KeysOnly(t.Context(), Options{Paths: p, Domain: "d.dev", Stderr: &stderr}, &stdout); err != nil {
+		t.Fatalf("KeysOnly: %v\n%s", err, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, "canary") || strings.Contains(out, "bGlzdGVk") || strings.Contains(stderr.String(), "canary") {
+		t.Errorf("the output holds a Secret value or comment:\n%s\nstderr: %s", out, stderr.String())
+	}
+	for _, key := range []string{"copied: \"\"", "nested: {deep: \"\"}", "note: \"\"", "KEY: \"\"", "K: \"\""} {
+		if !strings.Contains(out, key) {
+			t.Errorf("stdout lacks %q:\n%s", key, out)
+		}
+	}
+	if n := strings.Count(out, "secrets.lok8s.dev/keys-only: \"true\""); n != 2 {
+		t.Errorf("stdout has %d keys-only markers, want 2:\n%s", n, out)
+	}
+	for _, kept := range []string{"labels: {visible: label-kept} # comment-kept", "V: kept"} {
+		if !strings.Contains(out, kept) {
+			t.Errorf("stdout lost %q of the ConfigMap:\n%s", kept, out)
+		}
+	}
+}
+
+// plainSecretRender is a domain with only a plain Secret manifest: the
+// keys-only run of the plugin adds no marker to it.
+const plainSecretRender = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: only\n  namespace: one\ndata:\n  PLAIN: cGxhaW4tdmFsdWU=\n"
+
+// The keys-only output of a domain with only a plain Secret carries the
+// marker, so it cannot go back into a domain's artifacts: the build guard
+// refuses it (lo deploy: TestApplyRefusesKeysOnlyOutput).
+func TestKeysOnlyOutputIsRefusedByTheGuard(t *testing.T) {
+	p, domainDir, _ := keysOnlyProject(t)
+	stubRender(t, p, plainSecretRender)
+	var stdout, stderr bytes.Buffer
+	if err := KeysOnly(t.Context(), Options{Paths: p, Domain: "d.dev", Stderr: &stderr}, &stdout); err != nil {
+		t.Fatalf("KeysOnly: %v\n%s", err, stderr.String())
+	}
+	if marked, err := HasKeysOnlyMarker(stdout.Bytes()); err != nil || !marked {
+		t.Fatalf("HasKeysOnlyMarker(keys-only output) = %v, %v; want true:\n%s", marked, err, stdout.String())
+	}
+	stubRender(t, p, stdout.String())
+	stderr.Reset()
+	if err := Artifacts(t.Context(), Options{Paths: p, Domain: "d.dev", Stderr: &stderr}); err == nil {
+		t.Fatal("Artifacts wrote the keys-only output")
+	}
+	if !strings.Contains(stderr.String(), "it holds a keys-only Secret (secrets.lok8s.dev/keys-only)") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(domainDir, "artifacts.yaml")); err == nil {
+		t.Error("artifacts.yaml was written")
 	}
 }
 

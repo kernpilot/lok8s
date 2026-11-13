@@ -22,17 +22,27 @@ import (
 )
 
 // KeysOnlyBlankExpr is the yq program that `lo build --keys-only` runs on
-// the final stream, after the transformations and envsubst. It sets every
-// scalar under data and stringData to "" (the key names stay) in each
-// mapping whose kind is Secret, at any depth of each document (a Secret
-// document, a List item, a Secret that another object holds), and in each
-// item of a SecretList (an item can omit its kind). It touches only the
-// data and stringData keys that exist, so a reference such as
-// `{kind: Secret, name: tls}` stays as it is. explode(.) first resolves
-// the aliases and merge keys, so no value comes back through an alias.
-// The bash tree runs the same program (build::keys_only);
+// the final stream, after the transformations and envsubst. It changes
+// each Secret: a mapping whose kind is Secret, at any depth of each
+// document (a Secret document, a List item, a Secret that another object
+// holds), that has metadata, data or stringData, and each item of a
+// SecretList (an item can omit its kind). In each Secret it:
+//
+//   - sets every scalar under data and stringData to "" (the key names
+//     stay),
+//   - sets every value of metadata.labels and metadata.annotations to ""
+//     (the keys stay),
+//   - sets the keys-only marker (secrets.lok8s.dev/keys-only: "true"), so
+//     that the build guard and lo deploy refuse the output, and
+//   - removes every comment of the Secret.
+//
+// It touches only the keys that exist, except the marker, so a reference
+// such as `{kind: Secret, name: tls}` (no metadata, no data) stays as it
+// is. explode(.) first resolves the aliases and merge keys, so no value
+// comes back through an alias. Objects that are not Secrets print as they
+// are rendered. The bash tree runs the same program (build::keys_only);
 // TestKeysOnlyBlankExprMatchesBash checks the text.
-const KeysOnlyBlankExpr = `explode(.) | (.. | select(kind == "map") | select(.kind == "Secret")) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "") | (.. | select(kind == "map") | select(.kind == "SecretList") | .[] | select(key == "items") | select(kind == "seq") | .[] | select(kind == "map")) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "")`
+const KeysOnlyBlankExpr = `explode(.) | (.. | select(kind == "map") | select(.kind == "Secret") | select(has("metadata") or has("data") or has("stringData"))) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "" | ((.[] | select(key == "metadata") | select(kind == "map") | .[] | select(key == "labels" or key == "annotations") | select(kind == "map")) | .. | select(kind == "scalar" and tag != "!!null")) = "" | .metadata.annotations["secrets.lok8s.dev/keys-only"] = "true" | ... comments = "") | (.. | select(kind == "map") | select(.kind == "SecretList") | .[] | select(key == "items") | select(kind == "seq") | .[] | select(kind == "map")) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "" | ((.[] | select(key == "metadata") | select(kind == "map") | .[] | select(key == "labels" or key == "annotations") | select(kind == "map")) | .. | select(kind == "scalar" and tag != "!!null")) = "" | .metadata.annotations["secrets.lok8s.dev/keys-only"] = "true" | ... comments = "")`
 
 // lastAppliedAnnotation is the annotation that `kubectl apply` writes. It
 // holds the object as it was applied, so on a Secret it can hold the
@@ -43,13 +53,15 @@ const lastAppliedAnnotation = "kubectl.kubernetes.io/last-applied-configuration"
 // --keys-only` runs on the emptied stream. It prints one line,
 // "Secret <namespace>/<name>", for each Secret that has the annotation
 // kubectl.kubernetes.io/last-applied-configuration in metadata.annotations:
-// the same Secrets that KeysOnlyBlankExpr empties (a mapping whose kind is
-// Secret at any depth, an item of a SecretList). It prints nothing for a
-// stream without such a Secret and fails on a stream that does not parse.
-// A namespace or a name that is not a scalar is left out of the line. The
-// keys-only run does not empty annotations, so KeysOnly refuses the
-// render when there is a line: the output must not look complete when it
-// is not. The bash tree runs the same program (build::keys_only);
+// a mapping whose kind is Secret at any depth, or an item of a SecretList.
+// It prints nothing for a stream without such a Secret and fails on a
+// stream that does not parse. A namespace or a name that is not a scalar
+// is left out of the line. KeysOnlyBlankExpr empties the value of the
+// annotation but keeps its key, so this program still finds it. KeysOnly
+// refuses the render when there is a line, and does not only empty it:
+// the source of such a Secret holds its values, and the output must not
+// look complete when it is not. The bash tree runs the same program
+// (build::keys_only);
 // TestKeysOnlyLastAppliedExprMatchesBash checks the text.
 const KeysOnlyLastAppliedExpr = `explode(.) | ((.. | select(kind == "map") | select(.kind == "Secret")), (.. | select(kind == "map") | select(.kind == "SecretList") | .[] | select(key == "items") | select(kind == "seq") | .[] | select(kind == "map") | select(.kind != "Secret"))) | select(.metadata | kind == "map") | select(.metadata.annotations | kind == "map") | select(.metadata.annotations | has("kubectl.kubernetes.io/last-applied-configuration")) | .metadata | pick(["namespace", "name"]) | with_entries(select((.value | kind) == "scalar" and (.value | tag) != "!!null")) | to_entries | map(.value) | join("/") | sub("^", "Secret ")`
 

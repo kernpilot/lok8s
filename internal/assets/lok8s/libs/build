@@ -20,7 +20,7 @@ main::build() {
     'split|:+'           'Also emit per-resource files under artifacts/ (debug override; declare it in spec.build.artifacts instead)'
     'single|:+'          'Skip the split emit even when the spec declares it (debug override)'
     'no-secrets|:+'      'Split ONLY non-Secret resources; never render, re-encrypt, prune, or even read committed Secret.*.sops.yaml (CI render path — no store/key needed)'
-    'keys-only|:+'       'Print the render to stdout with the values of every Secret emptied (key names kept); reads no store, writes no file'
+    'keys-only|:+'       'Print the render to stdout with every Secret emptied: its values, label and annotation values and comments (key names kept; other kinds as rendered); reads no store, writes no file'
     "${args[@]:-}"
   )
   :args "Build the domain kustomization into one artifacts.yaml" "${@}"
@@ -536,10 +536,12 @@ build::_keys_only_capable() {
 # build.KeysOnly). The contract: it prints no Secret value. The plugin emits
 # each secrets.lok8s.dev Secret with its key names, empty values and the
 # keys-only marker annotation. Then the yq program below (Go:
-# KeysOnlyBlankExpr, the same text) empties every value of every Secret in
-# the final stream (after the transformations and envsubst): a patch, a
-# plain Secret manifest, a kustomize secretGenerator or a Helm chart's
-# Secret prints its key names only. Store-free like --no-secrets (the
+# KeysOnlyBlankExpr, the same text) changes every Secret in the final
+# stream (after the transformations and envsubst): it empties the data and
+# stringData values and the label and annotation values, sets the
+# keys-only marker and removes the comments. A patch, a plain Secret
+# manifest, a kustomize secretGenerator or a Helm chart's Secret prints its
+# key names only. Other kinds print as they are rendered. Store-free like --no-secrets (the
 # plugin's store-free switch is on: no store is read, decrypted or minted)
 # and no file is written: no artifacts.yaml, no split, no prune of the
 # artifacts dir. The plugin must have the keys-only run
@@ -567,7 +569,7 @@ build::keys_only() {
   local kubeconfig envsubst_whitelist rendered blanked last_applied line docs=0
   kubeconfig=$(build::_render_kubeconfig "${domain}")
   envsubst_whitelist=$(template::envsubst_whitelist)
-  local expr='explode(.) | (.. | select(kind == "map") | select(.kind == "Secret")) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "") | (.. | select(kind == "map") | select(.kind == "SecretList") | .[] | select(key == "items") | select(kind == "seq") | .[] | select(kind == "map")) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "")'
+  local expr='explode(.) | (.. | select(kind == "map") | select(.kind == "Secret") | select(has("metadata") or has("data") or has("stringData"))) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "" | ((.[] | select(key == "metadata") | select(kind == "map") | .[] | select(key == "labels" or key == "annotations") | select(kind == "map")) | .. | select(kind == "scalar" and tag != "!!null")) = "" | .metadata.annotations["secrets.lok8s.dev/keys-only"] = "true" | ... comments = "") | (.. | select(kind == "map") | select(.kind == "SecretList") | .[] | select(key == "items") | select(kind == "seq") | .[] | select(kind == "map")) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "" | ((.[] | select(key == "metadata") | select(kind == "map") | .[] | select(key == "labels" or key == "annotations") | select(kind == "map")) | .. | select(kind == "scalar" and tag != "!!null")) = "" | .metadata.annotations["secrets.lok8s.dev/keys-only"] = "true" | ... comments = "")'
   if ! rendered=$(
     set -o pipefail
     KUBECONFIG="${kubeconfig}" \
@@ -589,8 +591,8 @@ build::keys_only() {
     return 1
   fi
   blanked="${blanked%.}"
-  # The keys-only run does not empty annotations: refuse a Secret with
-  # the annotation that kubectl apply writes (it can hold the values).
+  # Refuse a Secret with the annotation that kubectl apply writes (it can
+  # hold the values). The blanking emptied its value and kept the key.
   # The same program as KeysOnlyLastAppliedExpr in internal/build.
   local last_applied_expr='explode(.) | ((.. | select(kind == "map") | select(.kind == "Secret")), (.. | select(kind == "map") | select(.kind == "SecretList") | .[] | select(key == "items") | select(kind == "seq") | .[] | select(kind == "map") | select(.kind != "Secret"))) | select(.metadata | kind == "map") | select(.metadata.annotations | kind == "map") | select(.metadata.annotations | has("kubectl.kubernetes.io/last-applied-configuration")) | .metadata | pick(["namespace", "name"]) | with_entries(select((.value | kind) == "scalar" and (.value | tag) != "!!null")) | to_entries | map(.value) | join("/") | sub("^", "Secret ")'
   if ! last_applied=$(

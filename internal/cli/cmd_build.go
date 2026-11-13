@@ -166,6 +166,6 @@ func newBuildCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	f.BoolVar(&splitFlag, "split", false, "Also emit per-resource files under artifacts/ (debug override; declare it in spec.build.artifacts instead)")
 	f.BoolVar(&singleFlag, "single", false, "Skip the split emit even when the spec declares it (debug override)")
 	f.BoolVar(&noSecretsFlag, "no-secrets", false, "Split ONLY non-Secret resources; never render, re-encrypt, prune, or even read committed Secret.*.sops.yaml (CI render path — no store/key needed)")
-	f.BoolVar(&keysOnlyFlag, "keys-only", false, "Print the render to stdout with the values of every Secret emptied (key names kept); reads no store, writes no file")
+	f.BoolVar(&keysOnlyFlag, "keys-only", false, "Print the render to stdout with every Secret emptied: its values, label and annotation values and comments (key names kept; other kinds as rendered); reads no store, writes no file")
 	return cmd
 }

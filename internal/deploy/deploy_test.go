@@ -11,14 +11,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/kapply"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 const artifactYAML = `apiVersion: apiextensions.k8s.io/v1
@@ -327,6 +330,45 @@ func TestHasObjects(t *testing.T) {
 // keysOnlyArtifact holds a Secret of `lo build --keys-only`: its key names
 // with empty values and the keys-only marker.
 const keysOnlyArtifact = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n  labels:\n    lok8s.dev/type: platform\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  labels:\n    lok8s.dev/type: platform\n  annotations:\n    \"secrets.lok8s.dev/keys-only\": \"true\"\ndata:\n  USER: \"\"\n"
+
+// The keys-only output of a domain with only a plain Secret (no Secret of
+// the plugin, so no marker from the plugin) is refused: the blanking sets
+// the marker on every Secret. The output comes from the pinned yq and the
+// real program. Build side: TestKeysOnlyOutputIsRefusedByTheGuard; bats:
+// "deploy::apply refuses the keys-only output of a plain Secret".
+func TestApplyRefusesKeysOnlyOutput(t *testing.T) {
+	yq := filepath.Join(testutil.RepoRoot(t), ".bin", "yq")
+	if _, err := os.Stat(yq); err != nil {
+		if os.Getenv("CI") == "true" {
+			t.Fatalf("the pinned yq is missing under CI: %v", err)
+		}
+		t.Skip("no .bin/yq (b install)")
+	}
+	cmd := exec.Command(yq, "--yaml-fix-merge-anchor-to-spec", build.KeysOnlyBlankExpr, "-")
+	cmd.Stdin = strings.NewReader("apiVersion: v1\nkind: Secret\nmetadata:\n  name: only\n  namespace: one\n  labels:\n    lok8s.dev/type: platform\ndata:\n  PLAIN: cGxhaW4tdmFsdWU=\n")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("yq: %v", err)
+	}
+	for _, filtered := range []bool{false, true} {
+		f := &fakeRunner{}
+		d, _, errBuf, _ := newDeployer(t, f, string(out))
+		if filtered {
+			err = d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "platform")
+		} else {
+			err = d.Apply(t.Context(), "test.lok8s.dev")
+		}
+		if !errors.Is(err, ErrHandled) {
+			t.Fatalf("filtered=%v: err = %v\n%s", filtered, err, out)
+		}
+		if !strings.Contains(errBuf.String(), "holds a keys-only Secret (secrets.lok8s.dev/keys-only)") {
+			t.Errorf("filtered=%v: stderr = %q", filtered, errBuf.String())
+		}
+		if len(f.calls) != 0 {
+			t.Errorf("filtered=%v: kubectl must not run: %v", filtered, f.calls)
+		}
+	}
+}
 
 // bats: "deploy::apply and deploy::apply_filtered refuse a keys-only artifact"
 // An artifact with the keys-only marker (a quoted key too: the check parses

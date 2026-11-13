@@ -165,6 +165,8 @@ capture_state() { # <impl> — snapshot generated outputs for cross-impl compare
     && cp "${PROJ}/clusters/single.dev/artifacts.yaml" "${sdir}/single.artifacts.yaml"
   [[ -f "${PROJ}/clusters/gen.dev/artifacts.yaml" ]] \
     && cp "${PROJ}/clusters/gen.dev/artifacts.yaml" "${sdir}/gen.artifacts.yaml"
+  [[ -f "${PROJ}/clusters/reuse.dev/artifacts.yaml" ]] \
+    && cp "${PROJ}/clusters/reuse.dev/artifacts.yaml" "${sdir}/reuse.artifacts.yaml"
   local g
   for g in guard.dev qguard.dev; do
     [[ -d "${PROJ}/clusters/${g}" ]] || continue
@@ -346,6 +348,7 @@ cat > "${PROJ}/clusters/blank.dev/kustomization.yaml" <<'EOF'
 resources:
   - plain.yaml
   - list.yaml
+  - commented.yaml
 generators:
   - secret.yaml
 secretGenerator:
@@ -369,14 +372,59 @@ printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: plain\n  namespace: one
   > "${PROJ}/clusters/blank.dev/plain.yaml"
 printf 'apiVersion: v1\nkind: List\nitems:\n- apiVersion: v1\n  kind: Secret\n  metadata:\n    name: listed\n    namespace: one\n  stringData:\n    KEY: listed-plain\n' \
   > "${PROJ}/clusters/blank.dev/list.yaml"
+# A Secret with values in its labels, annotations and comments.
+cat > "${PROJ}/clusters/blank.dev/commented.yaml" <<'EOF'
+# head-canary-doc
+apiVersion: v1
+kind: Secret
+metadata:
+  name: commented
+  namespace: one
+  labels:
+    copied: label-canary
+  annotations:
+    note: annotation-canary
+stringData:
+  # head-canary-key
+  NOTE: string-canary # line-canary
+  # foot-canary
+EOF
 check "build --keys-only empties every Secret"           : build --domain blank.dev --keys-only
 for impl in bash go; do
   for v in YWxpY2U= cGF0Y2hlZA== extra-plain dG9rZW4= listed-plain YnVpbHRpbi1wbGFpbg==; do
     ! grep -qF -- "${v}" "${WORK}/${impl}.out" || fail "build --keys-only empties every Secret (${impl}) — stdout carries ${v}"
   done
-  for k in 'USER: ""' 'PATCHED: ""' 'EXTRA: ""' 'TOKEN: ""' 'KEY: ""' 'PASS: ""' 'VISIBLE: plain-config'; do
+  for k in 'USER: ""' 'PATCHED: ""' 'EXTRA: ""' 'TOKEN: ""' 'KEY: ""' 'PASS: ""' 'NOTE: ""' 'copied: ""' 'note: ""' 'VISIBLE: plain-config'; do
     grep -qF -- "${k}" "${WORK}/${impl}.out" || fail "build --keys-only empties every Secret (${impl}) — stdout lacks ${k}"
   done
+  ! grep -q canary "${WORK}/${impl}.out" "${WORK}/${impl}.err" \
+    || fail "build --keys-only empties every Secret (${impl}) — a label, annotation or comment value is left: $(grep canary "${WORK}/${impl}.out" "${WORK}/${impl}.err")"
+  # app, builtin, plain, listed and commented: one marker each.
+  [[ "$(grep -c 'secrets.lok8s.dev/keys-only: "true"' "${WORK}/${impl}.out")" == 5 ]] \
+    || fail "build --keys-only empties every Secret (${impl}) — not one keys-only marker per Secret"
+done
+
+# The keys-only output of a domain with only a plain Secret carries the
+# marker, so a normal build that takes it as a resource is refused (the
+# output guard), and nothing is written.
+mkdir -p "${PROJ}/clusters/plainonly.dev" "${PROJ}/clusters/reuse.dev"
+printf 'kind: Lo\nmetadata:\n  name: plainonly\n' > "${PROJ}/clusters/plainonly.dev/cluster.lok8s.yaml"
+printf 'resources:\n  - plain.yaml\n' > "${PROJ}/clusters/plainonly.dev/kustomization.yaml"
+printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: only\n  namespace: one\ndata:\n  PLAIN: cGxhaW4tdmFsdWU=\n' \
+  > "${PROJ}/clusters/plainonly.dev/plain.yaml"
+check "build --keys-only marks a plain Secret"           : build --domain plainonly.dev --keys-only
+for impl in bash go; do
+  grep -q 'secrets.lok8s.dev/keys-only: "true"' "${WORK}/${impl}.out" \
+    || fail "build --keys-only marks a plain Secret (${impl}) — no keys-only marker"
+done
+printf 'kind: Lo\nmetadata:\n  name: reuse\n' > "${PROJ}/clusters/reuse.dev/cluster.lok8s.yaml"
+printf 'resources:\n  - keys.yaml\n' > "${PROJ}/clusters/reuse.dev/kustomization.yaml"
+cp "${WORK}/go.out" "${PROJ}/clusters/reuse.dev/keys.yaml"
+check "build refuses the keys-only output as a resource"  : build --domain reuse.dev
+for impl in bash go; do
+  grep -qF "it holds a keys-only Secret (secrets.lok8s.dev/keys-only)" "${WORK}/${impl}.err" \
+    || fail "build refuses the keys-only output as a resource (${impl}) — no refusal"
+  [[ ! -e "${WORK}/state.${impl}/reuse.artifacts.yaml" ]] || fail "build refuses the keys-only output as a resource (${impl}) — artifacts.yaml was written"
 done
 
 # The keys-only run does not empty annotations, so a Secret with the
@@ -495,6 +543,6 @@ for impl in bash go; do
   ! grep -qx './artifacts.yaml' "${WORK}/state.${impl}/qguard.dev.tree" \
     || fail "output guard, quoted marker (${impl}) — artifacts.yaml was written"
 done
-rm -rf "${PROJ}/clusters/gen.dev" "${PROJ}/clusters/blank.dev" "${PROJ}/clusters/applied.dev" "${PROJ}/clusters/guard.dev" "${PROJ}/clusters/qguard.dev" "${PROJ}/.kustomize"
+rm -rf "${PROJ}/clusters/gen.dev" "${PROJ}/clusters/blank.dev" "${PROJ}/clusters/applied.dev" "${PROJ}/clusters/plainonly.dev" "${PROJ}/clusters/reuse.dev" "${PROJ}/clusters/guard.dev" "${PROJ}/clusters/qguard.dev" "${PROJ}/.kustomize"
 
 report

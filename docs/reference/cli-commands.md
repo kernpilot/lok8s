@@ -473,7 +473,7 @@ lo build [flags]
 ```
       --cluster-override string   Override cluster domain for kubeconfig resolution
   -h, --help                      help for build
-      --keys-only                 Print the render to stdout with the values of every Secret emptied (key names kept); reads no store, writes no file
+      --keys-only                 Print the render to stdout with every Secret emptied: its values, label and annotation values and comments (key names kept; other kinds as rendered); reads no store, writes no file
       --no-secrets                Split ONLY non-Secret resources; never render, re-encrypt, prune, or even read committed Secret.*.sops.yaml (CI render path — no store/key needed)
       --single                    Skip the split emit even when the spec declares it (debug override)
       --split                     Also emit per-resource files under artifacts/ (debug override; declare it in spec.build.artifacts instead)

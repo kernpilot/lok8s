@@ -162,7 +162,8 @@ EOF
 }
 
 # The contract of --keys-only: it prints no Secret value. Every Secret in
-# the final stream has its values emptied and keeps its key names: a
+# the final stream has its values emptied, keeps its key names and gets
+# the keys-only marker: a
 # plugin Secret that a patch gave a value, a plain Secret, a List item, a
 # SecretList item without a kind and a Secret whose data is an alias. A
 # ConfigMap keeps its values, and a reference to a Secret stays as it is
@@ -247,15 +248,104 @@ YAML
 
   local out value
   out=$(cat "${BATS_TEST_TMPDIR}/out")
-  for value in YWxpY2U= patched-plain cGxhaW4tdmFsdWU= listed-plain a2luZGxlc3M=; do
+  for value in YWxpY2U= patched-plain cGxhaW4tdmFsdWU= listed-plain a2luZGxlc3M= alias-plain; do
     [[ "${out}" != *"${value}"* ]] || { echo "stdout holds the Secret value ${value}: ${out}"; return 1; }
   done
   for value in 'USER: ""' 'PASSWORD: ""' 'PLAIN: ""' 'KEY: ""' 'NESTED: ""' 'ALIASED: ""' \
-               'VISIBLE: list-config' 'VISIBLE: plain-config' 'ALIASED: alias-plain' '- kind: Secret' 'name: tls'; do
+               'VISIBLE: list-config' 'VISIBLE: plain-config' '- kind: Secret' 'name: tls'; do
     [[ "${out}" == *"${value}"* ]] || { echo "stdout lacks ${value}: ${out}"; return 1; }
   done
   run grep -cE '^[[:blank:]]*(- )?(data|stringData):' "${BATS_TEST_TMPDIR}/out"
   assert_output "8"
+  # patched, plain, listed, kindless and aliased; not the reference.
+  run grep -c 'secrets.lok8s.dev/keys-only: "true"' "${BATS_TEST_TMPDIR}/out"
+  assert_output "5"
+}
+
+# Label and annotation values and comments of a Secret are emptied too:
+# the keys stay, the marker is "true", no comment is left. A ConfigMap
+# prints as it is rendered. Go: TestKeysOnlyEmptiesSecretMetadataAndComments.
+@test "build::keys_only empties the labels, annotations and comments of every Secret" {
+  cat > "${BATS_TEST_TMPDIR}/render.yaml" <<'YAML'
+# head-canary-doc
+apiVersion: v1
+kind: Secret
+metadata:
+  name: meta # line-canary-name
+  labels:
+    copied: label-canary
+    nested: {deep: nested-canary}
+  annotations:
+    note: annotation-canary
+stringData:
+  # head-canary-key
+  KEY: string-canary # line-canary-value
+  # foot-canary-key
+---
+apiVersion: v1
+kind: List
+items:
+# head-canary-item
+- apiVersion: v1
+  kind: Secret
+  metadata:
+    name: listed
+    annotations: {copied: item-canary}
+  data:
+    K: bGlzdGVk
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: cm
+    labels: {visible: label-kept} # comment-kept
+  data:
+    V: kept
+YAML
+  export RENDER="${BATS_TEST_TMPDIR}/render.yaml"
+  kustomize() { cat "${RENDER}"; }
+  export -f kustomize
+  _keys_only_to_file() { build::keys_only "test.lok8s.dev" > "${BATS_TEST_TMPDIR}/out"; }
+  run _keys_only_to_file
+  assert_success
+  refute_output --partial "canary"
+  local out value
+  out=$(cat "${BATS_TEST_TMPDIR}/out")
+  [[ "${out}" != *canary* && "${out}" != *bGlzdGVk* ]] || { echo "stdout holds a Secret value or comment: ${out}"; return 1; }
+  for value in 'copied: ""' 'nested: {deep: ""}' 'note: ""' 'KEY: ""' 'K: ""' \
+               'labels: {visible: label-kept} # comment-kept' 'V: kept'; do
+    [[ "${out}" == *"${value}"* ]] || { echo "stdout lacks ${value}: ${out}"; return 1; }
+  done
+  run grep -o 'secrets.lok8s.dev/keys-only: "true"' "${BATS_TEST_TMPDIR}/out"
+  assert_equal "${#lines[@]}" 2
+}
+
+# The keys-only output of a domain with only a plain Secret carries the
+# marker: the build guard and lo deploy refuse it. Go:
+# TestKeysOnlyOutputIsRefusedByTheGuard, TestApplyRefusesKeysOnlyOutput.
+@test "build::keys_only output of a plain Secret is refused by the guard and by deploy::apply" {
+  kustomize() { printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: only\n  namespace: one\ndata:\n  PLAIN: cGxhaW4tdmFsdWU=\n'; }
+  export -f kustomize
+  build::keys_only "test.lok8s.dev" > "${BATS_TEST_TMPDIR}/keys.yaml"
+  grep -q 'secrets.lok8s.dev/keys-only: "true"' "${BATS_TEST_TMPDIR}/keys.yaml"
+
+  export KEYS="${BATS_TEST_TMPDIR}/keys.yaml"
+  kustomize() { cat "${KEYS}"; }
+  export -f kustomize
+  run build::artifacts "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "it holds a keys-only Secret (secrets.lok8s.dev/keys-only)"
+  local artifact="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
+  [[ ! -e "${artifact}" ]]
+
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
+  source "${_PROJECT_ROOT}/.lok8s/libs/deploy"
+  kubectl() { echo "kubectl $*"; }
+  export -f kubectl
+  cp "${KEYS}" "${artifact}"
+  run deploy::apply "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} holds a keys-only Secret (secrets.lok8s.dev/keys-only)"
+  refute_output --partial "kubectl"
 }
 
 # The keys-only run does not empty annotations, so a Secret with the
