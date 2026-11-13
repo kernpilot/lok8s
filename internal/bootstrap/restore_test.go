@@ -240,18 +240,23 @@ func TestRestoreDFallsBackFromAWorkingCopyThatCannotBeChecked(t *testing.T) {
 
 // bats: "restore_d: kubectl gets the exact bytes of the working copy and
 // of the decrypted manifest". The last literal scalar (|+) of each ends in
-// several newlines; kubectl gets each byte, and no newline is added.
+// several newlines; kubectl gets each byte, and no newline is added. The
+// decrypted manifest differs from the working copy, so a restore that used
+// the decrypted manifest in place of the working copy fails.
 func TestRestoreDAppliesTheExactBytes(t *testing.T) {
-	const doc = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\nstringData:\n  tls.crt: |+\n    cert\n\n\n"
+	const copyDoc = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\nstringData:\n  tls.crt: |+\n    cert\n\n\n"
+	const sopsDoc = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls-from-sops\nstringData:\n  tls.crt: |+\n    sops-cert\n\n"
 	for _, route := range []string{"store working copy", "sops"} {
 		t.Run(route, func(t *testing.T) {
 			e, f, _, errOut, p := testEngine(t)
 			d := filepath.Join(p.Clusters, "test.lok8s.dev")
 			testutil.WriteFile(t, filepath.Join(d, "restore.d", "tls.sops.yaml"), "cipher\n")
+			doc := sopsDoc
 			if route == "store working copy" {
-				testutil.WriteFile(t, filepath.Join(d, "secrets", "restore.d", "tls.yaml"), doc)
+				testutil.WriteFile(t, filepath.Join(d, "secrets", "restore.d", "tls.yaml"), copyDoc)
+				doc = copyDoc
 			}
-			e.SopsDecrypt = func(path string) ([]byte, error) { return []byte(doc), nil }
+			e.SopsDecrypt = func(path string) ([]byte, error) { return []byte(sopsDoc), nil }
 			var applied []string
 			f.handler = func(c execx.Cmd) error {
 				raw, _ := io.ReadAll(c.Stdin)

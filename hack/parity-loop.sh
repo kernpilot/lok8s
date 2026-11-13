@@ -598,13 +598,17 @@ for hk_verb in recreate apply restart; do
     indent < "${PARITY_KUBECTL_LOG}"
     hk_ok=0
   fi
+  # Each implementation applies the objects of the artifact: the digest is
+  # in the stdout of both runs.
   if [[ "${hk_verb}" != restart ]]; then
     hk_digest="$(yq -o=json -I=0 'sort_keys(..)' "${PROJ}/clusters/lok8s.dev/artifacts.yaml" | sha256sum | cut -d' ' -f1)"
-    if ! grep -qF -- "parity-stub -f ${hk_digest}" "${WORK}/go.out"; then
-      echo "FAIL: ${hk_label} — the applied objects are not the artifact's (digest ${hk_digest}):"
-      indent < "${WORK}/go.out"
-      hk_ok=0
-    fi
+    for hk_impl in go bash; do
+      if ! grep -qF -- "parity-stub -f ${hk_digest}" "${WORK}/${hk_impl}.out"; then
+        echo "FAIL: ${hk_label} — the objects that ${hk_impl} applied are not the artifact's (digest ${hk_digest}):"
+        indent < "${WORK}/${hk_impl}.out"
+        hk_ok=0
+      fi
+    done
   fi
   parity::record "${hk_ok}" "${hk_label}"
 done
@@ -658,19 +662,25 @@ for dp_case in clean plus marker no-yaml; do
     dp_ok=1
     parity::compare "${dp_label}" - || dp_ok=0
     if [[ -z "${dp_want}" ]]; then
-      dp_applied=$(grep -c '^parity-stub applied ' "${WORK}/go.out")
-      if (( go_rc != 0 || dp_applied != dp_n )); then
-        echo "FAIL: ${dp_label} — rc go=${go_rc}, ${dp_applied} manifest(s) applied, stdout:"
-        indent < "${WORK}/go.out"
-        dp_ok=0
-      fi
-      # The full apply gives kubectl the bytes of the artifact.
+      # Each implementation applies dp_n manifests, and the full apply gives
+      # kubectl the bytes of the artifact: the digest is in the stdout of
+      # both runs.
       dp_digest="$(sha256sum < "${PROJ}/clusters/lok8s.dev/artifacts.yaml" | cut -d' ' -f1)"
-      if [[ "${dp_route}" == full ]] && ! grep -qF "parity-stub applied ${dp_digest}" "${WORK}/go.out"; then
-        echo "FAIL: ${dp_label} — kubectl did not get the bytes of the artifact (digest ${dp_digest}):"
-        indent < "${WORK}/go.out"
-        dp_ok=0
-      fi
+      for dp_impl in go bash; do
+        dp_rc="${go_rc}"
+        [[ "${dp_impl}" == go ]] || dp_rc="${bash_rc}"
+        dp_applied=$(grep -c '^parity-stub applied ' "${WORK}/${dp_impl}.out" || true)
+        if (( dp_rc != 0 || dp_applied != dp_n )); then
+          echo "FAIL: ${dp_label} — ${dp_impl}: rc=${dp_rc}, ${dp_applied} manifest(s) applied, stdout:"
+          indent < "${WORK}/${dp_impl}.out"
+          dp_ok=0
+        fi
+        if [[ "${dp_route}" == full ]] && ! grep -qF "parity-stub applied ${dp_digest}" "${WORK}/${dp_impl}.out"; then
+          echo "FAIL: ${dp_label} — ${dp_impl}: kubectl did not get the bytes of the artifact (digest ${dp_digest}):"
+          indent < "${WORK}/${dp_impl}.out"
+          dp_ok=0
+        fi
+      done
     else
       if (( go_rc != 1 || bash_rc != 1 )) \
           || ! grep -qF "refusing to apply lok8s.dev: PROJ/clusters/lok8s.dev/artifacts.yaml ${dp_want}" "${WORK}/go.err"; then

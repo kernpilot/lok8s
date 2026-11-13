@@ -2368,21 +2368,50 @@ YAML
   done
 }
 
-# The Go twin is TestRestoreDAppliesTheExactBytes. The last value of the
-# manifest is a `|+` block scalar that ends in three newlines: kubectl gets
-# the bytes of the working copy, and of the decrypted manifest, byte for
-# byte.
+# No Go twin: the Go check parses without yq. Without yq, lo cannot check
+# the store working copy: it says why and uses the .sops.yaml file, and the
+# guard refuses the decrypted manifest too, as it cannot check that either.
+# Nothing is applied. The PATH keeps the tools of the restore (cat,
+# mktemp, basename, head, rm); sops and kubectl are stubs.
+@test "restore_d: without yq, neither the working copy nor the decrypted manifest is applied" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  unset PATH_SECRETS
+  local d="${PATH_CLUSTERS}/test.lok8s.dev" tool
+  mkdir -p "${d}/restore.d" "${d}/secrets/restore.d" "${BATS_TEST_TMPDIR}/no-yq"
+  echo "cipher" > "${d}/restore.d/tls-a.sops.yaml"
+  printf 'kind: Secret\nmetadata:\n  name: from-the-copy\n' > "${d}/secrets/restore.d/tls-a.yaml"
+  for tool in cat mktemp basename head rm; do ln -s "$(command -v "${tool}")" "${BATS_TEST_TMPDIR}/no-yq/${tool}"; done
+  kubectl() { echo "$*" >> "${BATS_TEST_TMPDIR}/kubectl.log"; }
+  sops() { echo "${2##*/}" >> "${BATS_TEST_TMPDIR}/sops.log"; printf 'kind: Secret\nmetadata:\n  name: from-sops\n'; }
+  _restore_without_yq() { local PATH="${BATS_TEST_TMPDIR}/no-yq"; bootstrap::_restore_d "$@"; }
+  run _restore_without_yq "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
+  assert_success
+  assert_output --partial "bootstrap: restore.d: tls-a (store working copy) cannot be checked for a keys-only Secret: yq is not installed. Install yq v4.47.1 or later (b install installs the pinned yq). lo uses tls-a.sops.yaml"
+  assert_output --partial "bootstrap: restore.d: refusing to apply tls-a (sops): it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): yq is not installed."
+  assert_output --partial "restore.d — 0 applied, 1 skipped"
+  [ "$(cat "${BATS_TEST_TMPDIR}/sops.log")" = "tls-a.sops.yaml" ]
+  [ ! -e "${BATS_TEST_TMPDIR}/kubectl.log" ]
+}
+
+# The Go twin is TestRestoreDAppliesTheExactBytes. The last value of each
+# manifest is a `|+` block scalar that ends in newlines: kubectl gets the
+# bytes of the working copy, and of the decrypted manifest, byte for byte.
+# The decrypted manifest differs from the working copy, so a restore that
+# used the decrypted manifest in place of the working copy fails the first
+# check.
 @test "restore_d: kubectl gets the exact bytes of the working copy and of the decrypted manifest" {
   source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
   export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
   unset PATH_SECRETS
   local d="${PATH_CLUSTERS}/test.lok8s.dev"
-  export DOC="${BATS_TEST_TMPDIR}/doc.yaml"
+  export DOC="${BATS_TEST_TMPDIR}/doc.yaml" SOPS_DOC="${BATS_TEST_TMPDIR}/sops-doc.yaml"
   printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\nstringData:\n  tls.crt: |+\n    cert\n\n\n' > "${DOC}"
+  printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls-from-sops\nstringData:\n  tls.crt: |+\n    sops-cert\n\n' > "${SOPS_DOC}"
   mkdir -p "${d}/restore.d" "${d}/secrets/restore.d"
   echo "cipher" > "${d}/restore.d/tls-a.sops.yaml"
   kubectl() { cat > "${BATS_TEST_TMPDIR}/kubectl.stdin"; }
-  sops() { cat "${DOC}"; }
+  sops() { cat "${SOPS_DOC}"; }
   cp "${DOC}" "${d}/secrets/restore.d/tls-a.yaml"
   run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
   [ "$status" -eq 0 ]
@@ -2392,7 +2421,7 @@ YAML
   run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
   [ "$status" -eq 0 ]
   assert_output --partial "restore.d — 1 applied, 0 skipped"
-  cmp "${DOC}" "${BATS_TEST_TMPDIR}/kubectl.stdin"
+  cmp "${SOPS_DOC}" "${BATS_TEST_TMPDIR}/kubectl.stdin"
 }
 
 # Tracing is off where lo holds a restore manifest (the rules at the top of
