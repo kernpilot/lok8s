@@ -19,10 +19,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -289,6 +291,9 @@ func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
 			return err
 		}
 	}
+	if err := refuseKeysOnlyAddons(d.stderr(), workDir); err != nil {
+		return err
+	}
 
 	ui.DebugTo(d.stderr(), "Running (in %s): kubeone %s", workDir, strings.Join(args, " "))
 	return d.deps.Runner.Run(ctx, execx.Cmd{
@@ -297,6 +302,42 @@ func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
 		Dir:  workDir,
 		Env:  robotEnv(),
 	})
+}
+
+// refuseKeysOnlyAddons runs the keys-only apply guard on each file under
+// <workDir>/addons (build.ReadCheckedFile): KubeOne applies these files
+// itself, at its "ensure custom addons" step, so lo checks them before
+// kubeone runs (bash: the end of kubeone::render_addons, which checks the
+// two files that it writes into a new addons directory). A file with a
+// keys-only Secret, or one that cannot be read or does not parse, stops
+// the apply. No addons directory is nothing to check.
+func refuseKeysOnlyAddons(stderr io.Writer, workDir string) error {
+	root := filepath.Join(workDir, "addons")
+	var files []string
+	err := filepath.WalkDir(root, func(path string, de fs.DirEntry, err error) error {
+		switch {
+		case err != nil && path == root && errors.Is(err, fs.ErrNotExist):
+			return fs.SkipAll
+		case err != nil || !de.IsDir():
+			// A directory that cannot be read is a file that cannot
+			// be read: the guard refuses it.
+			files = append(files, path)
+			if de != nil && de.IsDir() {
+				return fs.SkipDir
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		rel, _ := filepath.Rel(workDir, f)
+		if _, err := build.ReadCheckedFile(stderr, "kubeone", rel, f); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Reset runs kubeone reset (bash: kubeone::reset) — ABSOLUTE paths, no CWD

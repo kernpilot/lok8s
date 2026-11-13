@@ -113,8 +113,8 @@ func HasKeysOnlyMarker(data []byte) (bool, error) {
 }
 
 // RefuseKeysOnlyArtifact is the apply guard on a domain artifact (bash:
-// keysonly::refuse_artifact): lo deploy and lo hooks read the artifact
-// through it. It prints why the artifact must not be applied and returns
+// keysonly::refuse_artifact): lo deploy reads the artifact through it, and
+// lo hooks through ReadCheckedArtifact. It prints why the artifact must not be applied and returns
 // ui.ErrHandled when the artifact holds an object with the keys-only
 // marker (a Secret with key names and empty values only, from lo build
 // --keys-only: applied, it would replace each value in the cluster with
@@ -123,29 +123,40 @@ func HasKeysOnlyMarker(data []byte) (bool, error) {
 // catches a file written in another way. Nil when the artifact may be
 // applied.
 func RefuseKeysOnlyArtifact(stderr io.Writer, domainName, artifact string) error {
+	_, err := ReadCheckedArtifact(stderr, domainName, artifact)
+	return err
+}
+
+// ReadCheckedArtifact reads the artifact once and checks that copy as
+// RefuseKeysOnlyArtifact does (bash: keysonly::read_checked_artifact). It
+// returns the bytes that passed the check: the caller uses them, not the
+// file, which can change after the check.
+func ReadCheckedArtifact(stderr io.Writer, domainName, artifact string) ([]byte, error) {
 	raw, err := os.ReadFile(artifact)
 	if err != nil {
 		ui.ErrorTo(stderr, "refusing to apply %s: %s cannot be read, so it cannot be checked for a keys-only Secret (%s)", domainName, artifact, secret.KeysOnlyAnnotation)
-		return ui.ErrHandled
+		return nil, ui.ErrHandled
 	}
 	marked, err := HasKeysOnlyMarker(raw)
 	switch {
 	case err != nil:
 		ui.ErrorTo(stderr, "refusing to apply %s: %s does not parse as YAML, so it cannot be checked for a keys-only Secret (%s)", domainName, artifact, secret.KeysOnlyAnnotation)
-		return ui.ErrHandled
+		return nil, ui.ErrHandled
 	case marked:
 		ui.ErrorTo(stderr, "refusing to apply %s: %s holds a keys-only Secret (%s), which would replace each value with an empty one — run 'lo build' again", domainName, artifact, secret.KeysOnlyAnnotation)
-		return ui.ErrHandled
+		return nil, ui.ErrHandled
 	}
-	return nil
+	return raw, nil
 }
 
 // RefuseKeysOnlyStream is the apply guard on a rendered stream (bash:
 // keysonly::refuse_stream): the bootstrap applies each entry's render, and
-// the Tilt extension its manifest, through it. what names the stream in
-// the message, after "<prefix>: refusing to apply ". It refuses as
-// RefuseKeysOnlyArtifact does: a stream with the keys-only marker, and a
-// stream that does not parse.
+// each decrypted restore.d manifest, through it. ReadCheckedStream and
+// ReadCheckedFile read the Tilt manifest, a restore.d working copy and the
+// KubeOne addons once and check them in the same way. what names the
+// stream in the message, after "<prefix>: refusing to apply ". It refuses
+// as RefuseKeysOnlyArtifact does: a stream with the keys-only marker, and
+// a stream that does not parse.
 func RefuseKeysOnlyStream(stderr io.Writer, prefix, what string, data []byte) error {
 	marked, err := HasKeysOnlyMarker(data)
 	switch {
@@ -157,6 +168,40 @@ func RefuseKeysOnlyStream(stderr io.Writer, prefix, what string, data []byte) er
 		return ui.ErrHandled
 	}
 	return nil
+}
+
+// ReadCheckedFile reads the file at path once and checks that copy as
+// ReadCheckedStream does (bash: keysonly::read_checked_file); a file that
+// cannot be read is refused too. It returns the bytes that passed the
+// check: the caller applies them, not the file.
+func ReadCheckedFile(stderr io.Writer, prefix, what, path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, refuseUnreadable(stderr, prefix, what)
+	}
+	defer func() { _ = f.Close() }()
+	return ReadCheckedStream(stderr, prefix, what, f)
+}
+
+// ReadCheckedStream reads r to its end once and checks that copy as
+// RefuseKeysOnlyStream does (bash: keysonly::read_checked_file -); a read
+// error is refused too, as a stream that cannot be read cannot be checked.
+// It returns the bytes that passed the check.
+func ReadCheckedStream(stderr io.Writer, prefix, what string, r io.Reader) ([]byte, error) {
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return nil, refuseUnreadable(stderr, prefix, what)
+	}
+	if err := RefuseKeysOnlyStream(stderr, prefix, what, raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// refuseUnreadable prints why lo refuses a stream that it cannot read.
+func refuseUnreadable(stderr io.Writer, prefix, what string) error {
+	ui.ErrorTo(stderr, "%s: refusing to apply %s: it cannot be read, so it cannot be checked for a keys-only Secret (%s)", prefix, what, secret.KeysOnlyAnnotation)
+	return ui.ErrHandled
 }
 
 // markerIn walks every node under n (aliases resolved, each node once)

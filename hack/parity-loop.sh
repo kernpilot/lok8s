@@ -518,6 +518,52 @@ mkdir -p "${PROJ}/clusters/lok8s.dev"
 printf 'kind: Job\nmetadata:\n  name: j1\n  labels: {app: other}\n' \
   > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
 check - hooks restart --selector app=nomatch            # artifact present, no match
+
+# An artifact with a keys-only Secret (lo build --keys-only output), and one
+# that does not parse: the three verbs refuse it in both implementations
+# (rc 1, the same message), also when the selector matches only another
+# object. A kubectl that logs its argv shows that no verb reaches kubectl.
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub: log the argv, drain a manifest on stdin, fail (no live
+# cluster may be reached).
+echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
+[[ " $* " != *" -f - "* ]] || cat > /dev/null
+exit 1
+SH
+export PARITY_KUBECTL_LOG="${WORK}/kubectl.log"
+for hk_case in marker no-yaml; do
+  if [[ "${hk_case}" == marker ]]; then
+    printf 'kind: Job\nmetadata:\n  name: j1\n  labels: {lok8s.dev/role: seed}\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  annotations: {secrets.lok8s.dev/keys-only: "true"}\ndata:\n  PASSWORD: ""\n' \
+      > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
+    hk_want='holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one'
+  else
+    printf 'kind: Job\nmetadata: [a\n' > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
+    hk_want='does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)'
+  fi
+  for hk_verb in recreate apply restart; do
+    hk_label="lo hooks ${hk_verb} refuses an artifact (${hk_case})"
+    rm -f "${PARITY_KUBECTL_LOG}"
+    parity::run_pair hooks "${hk_verb}" --selector lok8s.dev/role=seed
+    hk_ok=1
+    parity::compare "${hk_label}" - || hk_ok=0
+    # shellcheck disable=SC2154 # go_rc, bash_rc: set by parity::run_pair (hack/lib/parity.sh)
+    if (( go_rc != 1 || bash_rc != 1 )) \
+        || ! grep -qF "refusing to apply lok8s.dev: PROJ/clusters/lok8s.dev/artifacts.yaml ${hk_want}" "${WORK}/go.err"; then
+      echo "FAIL: ${hk_label} — rc go=${go_rc} bash=${bash_rc}, stderr:"
+      indent < "${WORK}/go.err"
+      hk_ok=0
+    fi
+    if [[ -s "${PARITY_KUBECTL_LOG}" ]]; then
+      echo "FAIL: ${hk_label} — kubectl ran:"
+      indent < "${PARITY_KUBECTL_LOG}"
+      hk_ok=0
+    fi
+    parity::record "${hk_ok}" "${hk_label}"
+  done
+done
+unset PARITY_KUBECTL_LOG
+parity::stub_kubectl_fail "${PROJ}"
 rm -rf "${PROJ}/clusters/lok8s.dev"
 
 # ── lo tilt — stub-backed lifecycle + preflight gates ────────────────────────

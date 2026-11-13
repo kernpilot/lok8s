@@ -36,22 +36,23 @@ keysonly::has_marker() {
   return 1
 }
 
-# keysonly::refuse_artifact <domain> <artifact>: the apply guard on a domain
-# artifact (Go: build.RefuseKeysOnlyArtifact): lo deploy and lo hooks read
-# the artifact through it. It prints why the artifact must not be applied
-# and returns 1 when the artifact holds an object with the keys-only marker
-# (a Secret with key names and empty values only, from lo build
-# --keys-only: applied, it would replace each value in the cluster with an
-# empty one), or when it cannot be read or checked. `lo build` never
-# writes such an artifact; the guard catches a file written in another
-# way. Returns 0 when the artifact may be applied.
+# keysonly::refuse_artifact <domain> <artifact> [-]: the apply guard on a
+# domain artifact (Go: build.RefuseKeysOnlyArtifact): lo deploy reads the
+# artifact through it. It prints why the artifact must not be applied and
+# returns 1 when the artifact holds an object with the keys-only marker (a
+# Secret with key names and empty values only, from lo build --keys-only:
+# applied, it would replace each value in the cluster with an empty one),
+# or when it cannot be read or checked. `lo build` never writes such an
+# artifact; the guard catches a file written in another way. Returns 0
+# when the artifact may be applied. With -, it checks the copy of the
+# artifact on stdin (keysonly::read_checked_artifact).
 keysonly::refuse_artifact() {
   local domain="${1}" artifact="${2}" marker=0
-  if [[ ! -r "${artifact}" ]]; then
+  if [[ "${3:-}" != - && ! -r "${artifact}" ]]; then
     error "refusing to apply ${domain}: ${artifact} cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
     return 1
   fi
-  keysonly::has_marker "${artifact}" || marker=$?
+  keysonly::has_marker "${3:-${artifact}}" || marker=$?
   case "${marker}" in
     1) return 0 ;;
     2) error "refusing to apply ${domain}: ${artifact} does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)" ;;
@@ -63,7 +64,9 @@ keysonly::refuse_artifact() {
 
 # keysonly::refuse_stream <prefix> <what> <file|->: the apply guard on a
 # rendered stream (Go: build.RefuseKeysOnlyStream): the bootstrap applies
-# each entry's render, and the Tilt extension its manifest, through it.
+# each entry's render, and each decrypted restore.d manifest, through it.
+# keysonly::read_checked_file reads the Tilt manifest, a restore.d working
+# copy and the KubeOne addons once and checks them in the same way.
 # <what> names the stream in the message, after "<prefix>: refusing to
 # apply ". It refuses as keysonly::refuse_artifact does: a stream with the
 # keys-only marker, and a stream that cannot be checked.
@@ -77,4 +80,35 @@ keysonly::refuse_stream() {
     *) error "${prefix}: refusing to apply ${what}: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one" ;;
   esac
   return 1
+}
+
+# keysonly::read_checked_artifact <domain> <artifact>: print the artifact,
+# read once and checked as keysonly::refuse_artifact does (Go:
+# build.ReadCheckedArtifact). lo hooks uses the printed copy, not the
+# file, which can change after the check. Returns 1, and prints nothing on
+# stdout, when the guard refuses the artifact.
+keysonly::read_checked_artifact() {
+  local domain="${1}" artifact="${2}" content
+  if ! content="$(cat -- "${artifact}" 2>/dev/null)"; then
+    error "refusing to apply ${domain}: ${artifact} cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
+    return 1
+  fi
+  keysonly::refuse_artifact "${domain}" "${artifact}" - <<< "${content}" || return 1
+  printf '%s\n' "${content}"
+}
+
+# keysonly::read_checked_file <prefix> <what> <file|->: print <file> (-
+# reads stdin), read once and checked as keysonly::refuse_stream does (Go:
+# build.ReadCheckedFile, build.ReadCheckedStream); a file or a stdin that
+# cannot be read is refused too. The caller applies the printed copy, not
+# the file. Returns 1, and prints nothing on stdout, when the guard
+# refuses the input.
+keysonly::read_checked_file() {
+  local prefix="${1}" what="${2}" content
+  if ! content="$(cat -- "${3}" 2>/dev/null)"; then
+    error "${prefix}: refusing to apply ${what}: it cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
+    return 1
+  fi
+  keysonly::refuse_stream "${prefix}" "${what}" - <<< "${content}" || return 1
+  printf '%s\n' "${content}"
 }

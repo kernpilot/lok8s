@@ -231,12 +231,12 @@ tilt::preflight() {
   :args "Refuse a keys-only Secret, then force-clear stuck-Terminating manifest objects (manifest on stdin)" "${@}"
   # The apply guard first, with every switch below (Go: Context.Preflight):
   # a manifest with a keys-only Secret is refused, and the refusal fails
-  # the Tiltfile load before any k8s_yaml. kapply::preflight reads the
-  # manifest from the variable after that (it strips the trailing newlines
-  # itself).
+  # the Tiltfile load before any k8s_yaml. A manifest that cannot be read
+  # from stdin, or does not parse, is refused too. kapply::preflight reads
+  # the checked manifest from the variable after that (it strips the
+  # trailing newlines itself).
   local manifest
-  manifest="$(cat)"
-  keysonly::refuse_stream preflight "the Tilt manifest" - <<< "${manifest}" || return 1
+  manifest="$(keysonly::read_checked_file preflight "the Tilt manifest" -)" || return 1
   if [[ "${LOK8S_PREFLIGHT:-1}" =~ ^(0|false)$ ]]; then
     return 0
   fi

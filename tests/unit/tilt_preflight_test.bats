@@ -87,6 +87,24 @@ teardown() { teardown_tmpdir; }
   assert_output --partial "name: swept"
 }
 
+# A manifest that cannot be read from stdin cannot be checked: the guard
+# refuses it, also with the kill switch. A directory on stdin opens and
+# fails each read. (A closed stdin is no test: the pipe of the command
+# substitution takes descriptor 0, and cat reads its own output.) Go:
+# TestPreflightRefusesAManifestThatCannotBeRead.
+@test "tilt::preflight refuses a manifest that cannot be read from stdin" {
+  local want="preflight: refusing to apply the Tilt manifest: it cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
+  export DOMAIN_NAME=dev.test
+  run tilt::preflight < "${BATS_TEST_TMPDIR}"
+  assert_failure
+  assert_output --partial "${want}"
+  [[ ! -s "${SWEEP_LOG}" ]]
+  export LOK8S_PREFLIGHT=0
+  run tilt::preflight < "${BATS_TEST_TMPDIR}"
+  assert_failure
+  assert_output --partial "${want}"
+}
+
 @test "preflight gate: LOK8S_PREFLIGHT=0 disables the sweep entirely" {
   export DOMAIN_NAME=dev.test LOK8S_PREFLIGHT=0
   run tilt::preflight <<< 'kind: ConfigMap'

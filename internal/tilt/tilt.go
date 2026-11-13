@@ -456,19 +456,22 @@ func scalarValue(n *yaml.Node) string {
 //     unless flags override.
 //
 // Before all of that, and with every switch above, the apply guard
-// (build.RefuseKeysOnlyStream) refuses a manifest with a keys-only Secret
+// (build.ReadCheckedStream) refuses a manifest with a keys-only Secret
 // (lo build --keys-only output, from the domain artifact or a service
 // overlay on it): applied, each value in the cluster would become empty.
+// A manifest that cannot be read from stdin, or does not parse, is refused
+// too: it cannot be checked.
 // The extension calls preflight on every load, also with preflight =
 // False (it then sets LOK8S_PREFLIGHT=0), so a refusal fails the load and
 // no k8s_yaml applies anything. Otherwise it returns nil — a preflight
 // must never brick the `tilt up` it protects.
 func (c *Context) Preflight(ctx context.Context, domainArg, age, crds, crdAllow string) error {
-	var manifest []byte
-	if c.Stdin != nil {
-		manifest, _ = io.ReadAll(c.Stdin)
+	stdin := c.Stdin
+	if stdin == nil {
+		stdin = strings.NewReader("")
 	}
-	if err := build.RefuseKeysOnlyStream(c.ErrOut, "preflight", "the Tilt manifest", manifest); err != nil {
+	manifest, err := build.ReadCheckedStream(c.ErrOut, "preflight", "the Tilt manifest", stdin)
+	if err != nil {
 		return err
 	}
 

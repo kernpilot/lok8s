@@ -19,7 +19,6 @@ package hooks
 import (
 	"context"
 	"io"
-	"os"
 	"regexp"
 	"strings"
 
@@ -159,10 +158,11 @@ func (d doc) matches(pairs []selectorPair) bool {
 // domain's rendered artifact (bash: hooks::_select). This is the same single
 // clusters/<domain>/artifacts.yaml `lo deploy` applies; the Tilt reload
 // keeps the upstream ConfigMaps current, so a recreated Job mounts the
-// edited content. A missing artifact selects nothing. The artifact passes
-// the apply guard of lo deploy first (build.RefuseKeysOnlyArtifact): one
-// with a keys-only Secret, or one that cannot be read or does not parse,
-// is refused.
+// edited content. A missing artifact selects nothing. lo reads the
+// artifact once, and that copy passes the apply guard of lo deploy
+// (build.ReadCheckedArtifact): one with a keys-only Secret, or one that
+// cannot be read or does not parse, is refused. The objects come from
+// the copy that passed the check, not from a second read of the file.
 func (c *Context) selectObjects(domainName, selector string) ([]doc, error) {
 	pairs, err := c.parseSelector(selector)
 	if err != nil {
@@ -172,12 +172,9 @@ func (c *Context) selectObjects(domainName, selector string) ([]doc, error) {
 	if !fsutil.FileExists(artifact) {
 		return nil, nil
 	}
-	if err := build.RefuseKeysOnlyArtifact(c.ErrOut, domainName, artifact); err != nil {
-		return nil, err
-	}
-	raw, err := os.ReadFile(artifact)
+	raw, err := build.ReadCheckedArtifact(c.ErrOut, domainName, artifact)
 	if err != nil {
-		return nil, nil
+		return nil, err
 	}
 	var out []doc
 	for _, d := range parseDocs(raw) {

@@ -1171,6 +1171,13 @@ bootstrap::_resolve_parked() {
 # instead of re-issuing). Per-file failures WARN and continue — DR must not
 # wedge on a missing age key; the fallback (the owner controller re-creates /
 # re-issues) is the pre-restore.d behavior. Always returns 0.
+#
+# Each input passes the keys-only apply guard before its apply: lo reads the
+# working copy once and applies the copy that it checked, and checks the
+# decrypted manifest (keysonly::read_checked_file, keysonly::refuse_stream).
+# A refused input is skipped: a refused working copy does not fall back to
+# the .sops.yaml file, so a keys-only Secret in the store stops the restore
+# of that entry and the operator sees why.
 bootstrap::_restore_d() {
   local domain="${1}" kubeconfig="${2}"
   local rdir="${PATH_CLUSTERS}/${domain}/restore.d"
@@ -1190,7 +1197,14 @@ bootstrap::_restore_d() {
     # which may still point at a different domain's store from an earlier build.
     plain="${PATH_CLUSTERS}/${domain}/secrets/restore.d/${base}.yaml"
     if [[ -f "${plain}" ]]; then
-      if _err="$(kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f "${plain}" 2>&1 >/dev/null)"; then
+      local _doc
+      if ! _doc="$(keysonly::read_checked_file "bootstrap: restore.d" "${base} (store working copy)" "${plain}")"; then
+        skipped=$(( skipped + 1 ))
+        warn "bootstrap: restore.d skips ${base} — lo does not fall back to ${base}.sops.yaml after it refuses the store working copy"
+        continue
+      fi
+      if _err="$(printf '%s\n' "${_doc}" \
+        | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - 2>&1 >/dev/null)"; then
         applied=$(( applied + 1 ))
         debug "bootstrap: restore.d applied ${base} (store working copy)"
         continue
@@ -1203,7 +1217,9 @@ bootstrap::_restore_d() {
     local _dec="" _serr
     _serr="$(mktemp)"
     if _dec="$(sops -d "${f}" 2>"${_serr}")"; then
-      if _err="$(printf '%s\n' "${_dec}" \
+      if ! keysonly::refuse_stream "bootstrap: restore.d" "${base} (sops)" - <<< "${_dec}"; then
+        skipped=$(( skipped + 1 ))
+      elif _err="$(printf '%s\n' "${_dec}" \
         | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - 2>&1 >/dev/null)"; then
         applied=$(( applied + 1 ))
         debug "bootstrap: restore.d applied ${base} (sops)"

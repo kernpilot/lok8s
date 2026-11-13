@@ -205,19 +205,36 @@ not apply a manifest that holds one:
 
 - `lo deploy` and `lo hooks` (the hooks of the Tilt extension) refuse an
   `artifacts.yaml` with the annotation, and one that they cannot read.
+  `lo hooks` reads the artifact once and selects its objects from the copy
+  that it checked.
 - The bootstrap (`lo up`, `lo provision`, `lo bootstrap`) refuses an entry
   whose render holds the annotation, for example keys-only output saved as
   an addon resource. The dry run applies nothing and has no such check.
+- The bootstrap checks each `restore.d` entry before it applies it: the
+  working copy in the store (`secrets/restore.d/<name>.yaml`), which it
+  reads once and applies from that copy, and else the decrypted
+  `<name>.sops.yaml`. An entry with the annotation is skipped with an
+  error. When lo refuses the working copy, it does not use the
+  `.sops.yaml` file of that entry: remove or replace the working copy.
+- The KubeOne driver checks the cilium and CCM renders that KubeOne
+  applies itself (`<work dir>/addons/`) before it runs `kubeone apply`. A
+  render with the annotation stops the apply.
 - The Tilt extension runs `lo tilt preflight` on its manifest (the domain
   artifact and the service overlays on it) before it applies anything, on
-  every load. A manifest with the annotation stops the load. The
-  `preflight` setting and `LOK8S_PREFLIGHT=0` turn off only the cleanup of
-  stuck objects, not this check.
+  every load. A manifest with the annotation, or one that cannot be read
+  from stdin, stops the load. The `preflight` setting and
+  `LOK8S_PREFLIGHT=0` turn off only the cleanup of stuck objects, not this
+  check.
 
 Each check parses the YAML, so a quoted key, a flow-style map and a `List`
-item count. A render or an artifact that does not parse as YAML also stops
-with an error. The existing artifacts do not change. The bash tree checks
-with `yq`, so it also stops when the installed `yq` is older than v4.47.1.
+item count. The annotation counts at any depth of an object, so a custom
+resource that holds a Secret template with the annotation is refused too.
+So is a resource that names the annotation as a key under a nested
+`metadata.annotations`, for example an admission policy whose pattern
+forbids it; a rule that names the key in a CEL expression is not a match.
+A render or an artifact that does not parse as YAML also stops with an
+error. The existing artifacts do not change. The bash tree checks with
+`yq`, so it also stops when the installed `yq` is older than v4.47.1.
 
 The flag is the only way to start a keys-only render. lo controls the
 plugin setting that it uses (see the

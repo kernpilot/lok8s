@@ -32,6 +32,7 @@ setup() {
   export -f provider::detect addons::render
   source "${_PROJECT_ROOT}/.lok8s/utils/oidc.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/kubeone/config"
 
   export HCLOUD_TOKEN="test-token"
@@ -214,4 +215,42 @@ YAML
   [ "${status}" -eq 0 ]
   [ "$(yq -r '.kubeProxyReplacement' <<<"${output}")" = "false" ] # values: wins
   [ "$(yq -r '.tunnel' <<<"${output}")" = "disabled" ]            # file survives
+}
+
+# The Go twin is TestApplyRefusesAKeysOnlySecretInAnAddon. KubeOne applies
+# the two renders itself: a render with a keys-only Secret (lo build
+# --keys-only), or one that does not parse, stops the apply before kubeone
+# runs. Clean renders run kubeone.
+@test "render_addons: a render with a keys-only Secret stops the apply before kubeone runs" {
+  local cy; cy=$(_cluster_yaml '')
+  export KCALLS="${BATS_TEST_TMPDIR}/kubeone.calls"
+  kubeone() { echo "kubeone $*" >> "${KCALLS}"; }
+  kubeone::_clean_reinstalled_workers() { :; }
+  kubeone::_name_robot_workers() { :; }
+  export -f kubeone
+  addons::render() {
+    case "${1##*/}:${BAD_ADDON:-}" in
+      cilium:cilium-marked|ccm:ccm-marked)
+        printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: hcloud\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\ndata:\n  token: ""\n' ;;
+      ccm:ccm-not-yaml) printf 'kind: [Secret\n' ;;
+      *) echo "# stub addon" ;;
+    esac
+  }
+  local bad want
+  for bad in cilium-marked ccm-marked ccm-not-yaml; do
+    rm -f "${KCALLS}"
+    case "${bad}" in
+      cilium-marked) want="kubeone: refusing to apply addons/cilium/cilium.yaml: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one" ;;
+      ccm-marked)    want="kubeone: refusing to apply addons/ccm-hetzner/ccm.yaml: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one" ;;
+      *)             want="kubeone: refusing to apply addons/ccm-hetzner/ccm.yaml: it does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)" ;;
+    esac
+    BAD_ADDON="${bad}" run kubeone::apply "${work_dir}" "${cy}"
+    [ "${status}" -ne 0 ] || { echo "${bad}: status 0"; return 1; }
+    [[ "${output}" == *"${want}"* ]] || { echo "${bad}: ${output}"; return 1; }
+    [ ! -f "${KCALLS}" ] || { echo "${bad}: kubeone ran: $(cat "${KCALLS}")"; return 1; }
+  done
+  # Control: clean renders run kubeone.
+  BAD_ADDON="" run kubeone::apply "${work_dir}" "${cy}"
+  [ "${status}" -eq 0 ]
+  grep -q "^kubeone apply --manifest kubeone.yaml" "${KCALLS}"
 }

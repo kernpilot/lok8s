@@ -110,6 +110,46 @@ YAML
   assert_output --partial "refusing to apply d.dev: ${artifact} does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
 }
 
+# The three verbs refuse such an artifact before any kubectl call; with a
+# clean artifact each one reaches kubectl. lo reads the artifact once: yq
+# selects from the copy that passed the check and never reads the file
+# itself. Go: TestHooksRefuseAKeysOnlyArtifact.
+@test "recreate, apply and restart refuse an artifact with a keys-only Secret" {
+  mkdir -p "${PATH_CLUSTERS}/d.dev"
+  export ARTIFACT="${PATH_CLUSTERS}/d.dev/artifacts.yaml" CALLS="${BATS_TEST_TMPDIR}/calls"
+  local workload='apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  labels:
+    lok8s.dev/role: seed'
+  printf '%s\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\ndata:\n  PASSWORD: ""\n' "${workload}" > "${ARTIFACT}"
+  :args() { shift; while (( $# )); do [[ "$1" != --selector ]] || { selector="$2"; shift; }; shift; done; }
+  _resolve_kubeconfig_for_domain() { :; }
+  deploy::_has_objects() { grep -q 'kind:'; }
+  kubectl() { echo "kubectl $*" >> "${CALLS}"; [[ " $* " != *" -f - "* ]] || cat > /dev/null; }
+  kapply::apply() { echo "kapply $*" >> "${CALLS}"; cat > /dev/null; }
+  hooks::_preserve_images() { cat; }
+  yq() { [[ " $* " != *" ${ARTIFACT} "* ]] || echo "yq read ${ARTIFACT}" >> "${CALLS}"; command yq "$@"; }
+  local verb domain=d.dev
+  for verb in recreate apply restart; do
+    rm -f "${CALLS}"
+    run "hooks::${verb}" --selector lok8s.dev/role=seed
+    [ "${status}" -ne 0 ] || { echo "${verb}: status 0"; return 1; }
+    [[ "${output}" == *"refusing to apply d.dev: ${ARTIFACT} holds a keys-only Secret (secrets.lok8s.dev/keys-only)"* ]] || { echo "${verb}: ${output}"; return 1; }
+    [ ! -f "${CALLS}" ] || { echo "${verb}: $(cat "${CALLS}")"; return 1; }
+  done
+  printf '%s\n' "${workload}" > "${ARTIFACT}"
+  for verb in recreate apply restart; do
+    rm -f "${CALLS}"
+    run "hooks::${verb}" --selector lok8s.dev/role=seed
+    [ "${status}" -eq 0 ] || { echo "${verb}: ${output}"; return 1; }
+    grep -q '^kubectl\|^kapply' "${CALLS}" || { echo "${verb}: no kubectl call"; return 1; }
+    run grep -q "^yq read" "${CALLS}"
+    [ "${status}" -ne 0 ] || { echo "${verb}: yq read the artifact file"; return 1; }
+  done
+}
+
 @test "_select: empty when nothing matches" {
   mkdir -p "${PATH_CLUSTERS}/d.dev"
   printf 'kind: Job\nmetadata:\n  name: x\n  labels: {lok8s.dev/name: other}\n' \

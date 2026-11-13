@@ -200,6 +200,7 @@ _render_addons_setup() {
   }
   export -f provider::detect addons::render
   source "${_PROJECT_ROOT}/.lok8s/utils/oidc.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
   source "${_PROJECT_ROOT}/.lok8s/drivers/kubeone/config"
   export HCLOUD_TOKEN="test-token"

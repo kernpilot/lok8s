@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
@@ -601,6 +602,32 @@ func preflightCtx(t *testing.T) (*Context, *sweepRecorder, *strings.Builder) {
 	return c, rec, &errOut
 }
 
+// bats: "tilt::preflight refuses a manifest that cannot be read from
+// stdin". A manifest that cannot be read cannot be checked: the guard
+// refuses it, also with the kill switch, and the sweep does not run.
+func TestPreflightRefusesAManifestThatCannotBeRead(t *testing.T) {
+	for name, killSwitch := range map[string]bool{"sweep": false, "kill switch": true} {
+		t.Run(name, func(t *testing.T) {
+			c, rec, errOut := preflightCtx(t)
+			t.Setenv("DOMAIN_NAME", "dev.test")
+			if killSwitch {
+				t.Setenv("LOK8S_PREFLIGHT", "0")
+			}
+			c.Stdin = iotest.ErrReader(errors.New("read error"))
+			if err := c.Preflight(t.Context(), "", "", "", ""); !errors.Is(err, ErrHandled) {
+				t.Fatalf("err = %v", err)
+			}
+			const want = "[error] preflight: refusing to apply the Tilt manifest: it cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)\n"
+			if errOut.String() != want {
+				t.Errorf("stderr = %q\nwant %q", errOut.String(), want)
+			}
+			if len(rec.calls) != 0 {
+				t.Errorf("sweep ran: %v", rec.calls)
+			}
+		})
+	}
+}
+
 // bats: "tilt::preflight refuses a manifest with a keys-only Secret".
 // The apply guard runs before every switch: with the kill switch, on a
 // non-kind driver, with the spec's preflight off, and on a sweep run. A
@@ -615,7 +642,9 @@ func TestPreflightRefusesAKeysOnlyManifest(t *testing.T) {
 		"non-kind":    func(t *testing.T, c *Context) { t.Setenv("DOMAIN_NAME", "prod.test") },
 		"spec off": func(t *testing.T, c *Context) {
 			t.Setenv("DOMAIN_NAME", "dev.test")
-			os.WriteFile(filepath.Join(c.Paths.Clusters, "dev.test", "cluster.lok8s.yaml"), []byte("kind: Lo\nspec:\n  tilt:\n    preflight: false\n"), 0o644)
+			if err := os.WriteFile(filepath.Join(c.Paths.Clusters, "dev.test", "cluster.lok8s.yaml"), []byte("kind: Lo\nspec:\n  tilt:\n    preflight: false\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

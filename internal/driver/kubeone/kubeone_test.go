@@ -513,3 +513,48 @@ func TestKubeconfigPath(t *testing.T) {
 		t.Fatalf("kubeconfig = %s", got)
 	}
 }
+
+// ── the keys-only apply guard on the addons ───────────────
+
+// bats (kubeone_addon_values_test.bats): "render_addons: a render with a
+// keys-only Secret stops the apply before kubeone runs". KubeOne applies
+// the files under <workDir>/addons itself: a file with a keys-only Secret
+// (lo build --keys-only), or one that does not parse, stops the apply
+// before kubeone runs. Clean renders run kubeone.
+func TestApplyRefusesAKeysOnlySecretInAnAddon(t *testing.T) {
+	const clean = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n"
+	const marked = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: hcloud\n  annotations:\n    secrets.lok8s.dev/keys-only: \"true\"\ndata:\n  token: \"\"\n"
+	for name, tc := range map[string]struct {
+		cilium, ccm, want string
+	}{
+		"clean":        {cilium: clean, ccm: clean},
+		"cilium":       {cilium: marked, ccm: clean, want: "[error] kubeone: refusing to apply addons/cilium/cilium.yaml: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one\n"},
+		"ccm":          {cilium: clean, ccm: "---\n" + clean + "---\n" + marked, want: "[error] kubeone: refusing to apply addons/ccm-hetzner/ccm.yaml: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one\n"},
+		"ccm not YAML": {cilium: clean, ccm: "kind: [Secret\n", want: "[error] kubeone: refusing to apply addons/ccm-hetzner/ccm.yaml: it does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearVarEnv(t)
+			d, runner, errBuf, p := testDriver(t, nil)
+			wd := filepath.Join(p.Clusters, "test.lok8s.dev", ".kubeone")
+			testutil.WriteFile(t, filepath.Join(wd, "kubeone.yaml"), "name: test-prod\n")
+			d.Hooks.PrepareApply = func(ctx context.Context, workDir, clusterYAML string) error {
+				testutil.WriteFile(t, filepath.Join(workDir, "addons", "cilium", "cilium.yaml"), tc.cilium)
+				testutil.WriteFile(t, filepath.Join(workDir, "addons", "ccm-hetzner", "ccm.yaml"), tc.ccm)
+				return os.MkdirAll(filepath.Join(workDir, "addons", "csi-hetzner"), 0o755)
+			}
+			err := d.Apply(t.Context(), wd, "")
+			if tc.want == "" {
+				if err != nil || len(runner.calls) != 1 || runner.calls[0].Name != "kubeone" {
+					t.Fatalf("clean addons: err %v, calls %v", err, runner.calls)
+				}
+				return
+			}
+			if err == nil || len(runner.calls) != 0 {
+				t.Fatalf("err %v, calls %v: kubeone must not run", err, runner.calls)
+			}
+			if errBuf.String() != tc.want {
+				t.Errorf("stderr = %q, want %q", errBuf.String(), tc.want)
+			}
+		})
+	}
+}

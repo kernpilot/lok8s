@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/secrets"
@@ -21,6 +23,13 @@ import (
 // re-issuing). Per-file failures WARN and continue — DR must not wedge on a
 // missing age key; the fallback (the owner controller re-creates /
 // re-issues) is the pre-restore.d behavior. Never fails the run.
+//
+// Each input passes the keys-only apply guard before its apply: lo reads
+// the working copy once and applies the bytes that it checked, and checks
+// the decrypted manifest (build.ReadCheckedFile, build.RefuseKeysOnlyStream).
+// A refused input is skipped: a refused working copy does not fall back to
+// the .sops.yaml file, so a keys-only Secret in the store stops the
+// restore of that entry and the operator sees why.
 func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 	stderr := e.stderr()
 	rdir := e.Paths.Clusters + "/" + domain + "/restore.d"
@@ -47,7 +56,13 @@ func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 		// earlier build.
 		plain := e.Paths.Clusters + "/" + domain + "/secrets/restore.d/" + base + ".yaml"
 		if fsutil.FileExists(plain) {
-			errOut, rc := e.restoreApply(ctx, kubeconfig, "", plain)
+			doc, err := build.ReadCheckedFile(stderr, restoreGuard, base+" (store working copy)", plain)
+			if err != nil {
+				skipped++
+				ui.WarnTo(stderr, "bootstrap: restore.d skips %s — lo does not fall back to %s.sops.yaml after it refuses the store working copy", base, base)
+				continue
+			}
+			errOut, rc := e.restoreApply(ctx, kubeconfig, doc)
 			if rc == 0 {
 				applied++
 				ui.DebugTo(stderr, "bootstrap: restore.d applied %s (store working copy)", base)
@@ -66,7 +81,11 @@ func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 			ui.WarnTo(stderr, "bootstrap: restore.d could not decrypt/apply %s — skipping (its owner will re-create/re-issue)", base)
 			continue
 		}
-		errOut, rc := e.restoreApply(ctx, kubeconfig, string(dec)+"\n", "-")
+		if build.RefuseKeysOnlyStream(stderr, restoreGuard, base+" (sops)", dec) != nil {
+			skipped++
+			continue
+		}
+		errOut, rc := e.restoreApply(ctx, kubeconfig, append(dec, '\n'))
 		if rc == 0 {
 			applied++
 			ui.DebugTo(stderr, "bootstrap: restore.d applied %s (sops)", base)
@@ -82,18 +101,21 @@ func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 	}
 }
 
-// restoreApply runs one server-side apply for restore.d, stdout discarded
-// and stderr captured (bash: `_err="$(kubectl … 2>&1 >/dev/null)"`).
-func (e *Engine) restoreApply(ctx context.Context, kubeconfig, stdin, file string) (string, int) {
+// restoreGuard is the prefix of the keys-only guard's messages in
+// restore.d.
+const restoreGuard = "bootstrap: restore.d"
+
+// restoreApply runs one server-side apply for restore.d of the checked
+// manifest on stdin, stdout discarded and stderr captured (bash:
+// `_err="$(printf '%s\n' "${doc}" | kubectl … -f - 2>&1 >/dev/null)"`).
+func (e *Engine) restoreApply(ctx context.Context, kubeconfig string, doc []byte) (string, int) {
 	var errBuf strings.Builder
 	c := execx.Cmd{
 		Name:   "kubectl",
-		Args:   []string{"--kubeconfig", kubeconfig, "apply", "--server-side", "--force-conflicts", "-f", file},
+		Args:   []string{"--kubeconfig", kubeconfig, "apply", "--server-side", "--force-conflicts", "-f", "-"},
+		Stdin:  bytes.NewReader(doc),
 		Stdout: io.Discard,
 		Stderr: &errBuf,
-	}
-	if stdin != "" {
-		c.Stdin = strings.NewReader(stdin)
 	}
 	err := e.Runner.Run(ctx, c)
 	rc := 0

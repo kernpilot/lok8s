@@ -17,6 +17,7 @@ import ^utils/spec
 import ^utils/credentials
 import ^utils/http
 import ^libs/bootstrap
+import ^utils/keysonly
 
 # ── Provider detection ──────────────────────────────────
 
@@ -901,6 +902,16 @@ kubeone::render_addons() {
   fi
   addons::render "${PATH_LOK8S}/addons/ccm" kubeone hetzner "${inline}" \
     > "${addons_dir}/ccm-hetzner/ccm.yaml" || { error "render ccm addon failed"; return 1; }
+
+  # KubeOne applies the two renders itself, at its "ensure custom addons"
+  # step: they pass the keys-only apply guard first (Go: the guard on each
+  # file under <work_dir>/addons in the kubeone driver). A render with a
+  # keys-only Secret, or one that cannot be read or does not parse, stops
+  # the apply before kubeone runs.
+  local addon
+  for addon in cilium/cilium.yaml ccm-hetzner/ccm.yaml; do
+    keysonly::read_checked_file kubeone "addons/${addon}" "${addons_dir}/${addon}" >/dev/null || return 1
+  done
 
   debug "render_addons: cilium + ccm-hetzner overrides (incl. hcloud secret); csi=${CSI_PLUGIN:-external} -> ${addons_dir}"
 }

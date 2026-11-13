@@ -810,6 +810,11 @@ parity::stub "${PROJ}" kustomize <<'SH'
 # fail the build (the case stops at the render).
 echo "KUSTOMIZE_PLUGIN_HOME=${KUSTOMIZE_PLUGIN_HOME:-<unset>}" >> "${PARITY_KUSTOMIZE_LOG}"
 echo "KEYS_ONLY=${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}" >> "${PARITY_KUSTOMIZE_LOG}"
+# PARITY_KUSTOMIZE_OUT: the render to emit instead (the keys-only guard case).
+if [[ -n "${PARITY_KUSTOMIZE_OUT:-}" ]]; then
+  printf '%s\n' "${PARITY_KUSTOMIZE_OUT}"
+  exit 0
+fi
 echo "Error: parity stub: no render" >&2
 exit 1
 SH
@@ -853,6 +858,71 @@ else
   fail "go: no bootstrap refusal for a domain without a store"
 fi
 rm -rf "${PROJ}/clusters/storeholder.dev"
+
+# ── lo bootstrap — the keys-only apply guard ─────────────────────────────────
+# An entry render with a keys-only Secret (lo build --keys-only output) is
+# refused before its apply. A restore.d store working copy with one is
+# refused before its apply too, and does not fall back to the .sops.yaml
+# file. Both sides print the same refusal; a kubectl that logs its argv
+# shows that nothing is applied.
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub: log the argv, drain a manifest on stdin, fail (no live
+# cluster may be reached).
+echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
+[[ " $* " != *" -f - "* ]] || cat > /dev/null
+exit 1
+SH
+export PARITY_KUBECTL_LOG="${WORK}/kubectl.log"
+ko_marked='apiVersion: v1
+kind: Secret
+metadata:
+  name: app
+  annotations:
+    secrets.lok8s.dev/keys-only: "true"
+data:
+  PASSWORD: ""'
+ko_pre() { boot_pre; rm -f "${PARITY_KUBECTL_LOG}"; }
+ko_post() {  # <impl>: boot_post, and the kubectl log per side
+  boot_post "${1}"
+  if [[ -f "${PARITY_KUBECTL_LOG}" ]]; then mv "${PARITY_KUBECTL_LOG}" "${WORK}/kubectl.${1}.log"; else : > "${WORK}/kubectl.${1}.log"; fi
+}
+# ko_case <label> <want>: the last bootstrap pair refused with <want> (rc 1
+# on both sides; an entry's lines go to stdout in its collapsed block, the
+# restore.d lines to stderr) and applied nothing.
+ko_case() {
+  local ok=1 side
+  # shellcheck disable=SC2154 # go_rc, bash_rc: set by parity::run_pair (hack/lib/parity.sh)
+  if (( go_rc != 1 || bash_rc != 1 )) || ! grep -qF -- "${2}" "${WORK}/go.out" "${WORK}/go.err"; then
+    echo "FAIL: ${1} — rc go=${go_rc} bash=${bash_rc}, stdout and stderr:"; sed 's/^/  /' "${WORK}/go.out" "${WORK}/go.err"
+    ok=0
+  fi
+  for side in bash go; do
+    if grep -q ' apply ' "${WORK}/kubectl.${side}.log"; then
+      echo "FAIL: ${1} — ${side}: kubectl apply ran:"; sed 's/^/  /' "${WORK}/kubectl.${side}.log"
+      ok=0
+    fi
+  done
+  parity::record "${ok}" "${1}"
+}
+mkdir -p "${PROJ}/clusters/boot.dev/secrets"
+PARITY_KUSTOMIZE_OUT="${ko_marked}" PARITY_PRE_EACH=ko_pre PARITY_POST_EACH=ko_post check - bootstrap --domain boot.dev
+ko_case "lo bootstrap refuses an entry render with a keys-only Secret" \
+  "[error] bootstrap: refusing to apply cilium: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one"
+mkdir -p "${PROJ}/clusters/boot.dev/restore.d" "${PROJ}/clusters/boot.dev/secrets/restore.d"
+printf 'cipher\n' > "${PROJ}/clusters/boot.dev/restore.d/tls-a.sops.yaml"
+printf '%s\n' "${ko_marked}" > "${PROJ}/clusters/boot.dev/secrets/restore.d/tls-a.yaml"
+PARITY_PRE_EACH=ko_pre PARITY_POST_EACH=ko_post check - bootstrap --domain boot.dev
+ko_case "lo bootstrap refuses a restore.d working copy with a keys-only Secret" \
+  "[error] bootstrap: restore.d: refusing to apply tls-a (store working copy): it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one"
+if grep -qF "lo does not fall back to tls-a.sops.yaml" "${WORK}/go.err" && ! grep -qF "could not decrypt/apply tls-a" "${WORK}/go.err"; then
+  echo "ok: go: the refused working copy does not fall back to the sops file"
+else
+  fail "go: the refused working copy fell back to the sops file, or no warning names it"
+fi
+rm -rf "${PROJ}/clusters/boot.dev/restore.d" "${PROJ}/clusters/boot.dev/secrets"
+unset PARITY_KUBECTL_LOG
+parity::stub_kubectl_fail "${PROJ}"
 unset PARITY_KUSTOMIZE_LOG
 
 # ── lo bootstrap — the staged values, byte for byte ──────────────────────────
