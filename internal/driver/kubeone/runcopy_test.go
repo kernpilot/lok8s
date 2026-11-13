@@ -79,6 +79,31 @@ func readRunSpec(t *testing.T, c execx.Cmd) runSpec {
 	return spec
 }
 
+// assertExploded fails when the manifest copy raw holds an alias, an
+// anchor or a merge key (<<), which lo resolves (explode).
+func assertExploded(t *testing.T, raw []byte) {
+	t.Helper()
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("the manifest copy does not parse: %v", err)
+	}
+	var walk func(n *yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n.Kind == yaml.AliasNode || n.Anchor != "" {
+			t.Errorf("the manifest copy holds an alias or an anchor:\n%s", raw)
+			return
+		}
+		for i, c := range n.Content {
+			if n.Kind == yaml.MappingNode && i%2 == 0 && isMergeKey(c) {
+				t.Errorf("the manifest copy holds a merge key:\n%s", raw)
+				return
+			}
+			walk(c)
+		}
+	}
+	walk(&doc)
+}
+
 func assertNoRunCopy(t *testing.T, wd string) {
 	t.Helper()
 	if left, _ := filepath.Glob(filepath.Join(wd, runPrefix+"*")); len(left) != 0 {
@@ -92,7 +117,9 @@ func assertNoRunCopy(t *testing.T, wd string) {
 // key (<<) or an alias gives (enable), with addons.path set to the run's
 // addons directory. A trailing slash and a leading ./ name the same
 // directory: the copy holds its files, and a refusal names them as
-// addons/<file>.
+// addons/<file>. The manifest copy has no alias, anchor or merge key left
+// (assertExploded): yaml.Unmarshal into runSpec resolves a merge key
+// itself, so the settings alone do not show that lo resolved it.
 func TestApplyRunCopyKeepsMergedSettingsAndPathForms(t *testing.T) {
 	for name, manifest := range map[string]string{
 		"plain":            "name: test-prod\naddons:\n  enable: true\n  path: ./addons\n",
@@ -108,15 +135,17 @@ func TestApplyRunCopyKeepsMergedSettingsAndPathForms(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			d, runner, _, wd := rcDriver(t, manifest, map[string]string{"ccm-hetzner/ccm.yaml": rcClean})
 			var spec runSpec
-			var ccm []byte
+			var ccm, raw []byte
 			runner.handler = func(c execx.Cmd) error {
 				spec = readRunSpec(t, c)
 				ccm, _ = os.ReadFile(filepath.Join(spec.Addons.Path, "ccm-hetzner", "ccm.yaml"))
+				raw, _ = os.ReadFile(filepath.Join(c.Dir, c.Args[2]))
 				return nil
 			}
 			if err := d.Apply(t.Context(), wd, ""); err != nil {
 				t.Fatal(err)
 			}
+			assertExploded(t, raw)
 			if spec.Name != "test-prod" || !spec.Addons.Enable {
 				t.Errorf("the manifest copy lost a setting: %+v", spec)
 			}
@@ -237,6 +266,92 @@ func TestApplyRunCopyRefusesAnExistingManifestCopy(t *testing.T) {
 		if fi, err := os.Lstat(run + ".yaml"); err != nil || fi.Mode()&os.ModeNamedPipe == 0 {
 			t.Errorf("the FIFO that was there is gone or changed: %v %v", fi, err)
 		}
+	}
+}
+
+// A write that fails after writeExclusive made the file (a full disk)
+// stops the apply, and no part of the copy stays: writeExclusive removes
+// the file that it made, the cleanup removes the run directory. The
+// manifest copy is beside the run directory, so only writeExclusive
+// removes a part of it. bash writes each file with set -C and removes the
+// run copy in the EXIT trap of the apply (_kubeone_copy is set before the
+// write).
+func TestApplyRunCopyRemovesAPartOfACopyThatItCouldNotWrite(t *testing.T) {
+	for name, c := range map[string]struct{ manifest, want string }{
+		"the manifest copy": {"name: test-prod\n", "[error] kubeone: cannot write the manifest copy "},
+		"an addon file":     {kubeoneAddonsManifest, "[error] kubeone: cannot write the run copy of addons/ccm-hetzner/ccm.yaml\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d, runner, errBuf, wd := rcDriver(t, c.manifest, map[string]string{"ccm-hetzner/ccm.yaml": rcClean})
+			orig := writeData
+			writeData = func(f *os.File, data []byte) (int, error) {
+				n, _ := f.Write(data[:len(data)/2])
+				return n, syscall.ENOSPC
+			}
+			err := d.Apply(t.Context(), wd, "")
+			writeData = orig
+			if err == nil || len(runner.calls) != 0 {
+				t.Fatalf("err %v, calls %v: kubeone must not run", err, runner.calls)
+			}
+			if !errors.Is(err, syscall.ENOSPC) {
+				t.Errorf("err = %v, want the write error", err)
+			}
+			if !strings.HasPrefix(errBuf.String(), c.want) {
+				t.Errorf("stderr = %q, want %q...", errBuf.String(), c.want)
+			}
+			assertNoRunCopy(t, wd)
+		})
+	}
+}
+
+// bats: "kubeone::apply: a manifest with more than one document, or an
+// addons.path that is not a string, stops the apply". lo reads the first
+// document of kubeone.yaml, and yq in bash reads each one: so both refuse
+// a manifest with more than one document (a last --- starts an empty
+// one). An addons.path that is not a string is refused too, also one that
+// a merge key gives. A first ---, an addons that is not a mapping, and a
+// null or empty addons.path are no addons path: kubeone runs.
+func TestApplyRunCopyRefusesAManifestItCannotStage(t *testing.T) {
+	const (
+		docs   = "holds more than one YAML document"
+		notStr = "is not a string"
+	)
+	for name, c := range map[string]struct{ manifest, want string }{
+		"two documents":  {"name: test-prod\n---\nname: other\naddons:\n  enable: true\n  path: ./addons\n", docs},
+		"a last ---":     {kubeoneAddonsManifest + "---\n", docs},
+		"path false":     {"name: test-prod\naddons:\n  enable: true\n  path: false\n", notStr},
+		"path a number":  {"name: test-prod\naddons:\n  enable: true\n  path: 5\n", notStr},
+		"path a mapping": {"name: test-prod\naddons:\n  enable: true\n  path: {dir: ./addons}\n", notStr},
+		"path a list":    {"name: test-prod\naddons:\n  enable: true\n  path: [./addons]\n", notStr},
+		"a merged false": {"d: &d {path: false}\nname: test-prod\naddons:\n  <<: *d\n  enable: true\n", notStr},
+		"a first ---":    {"---\n" + kubeoneAddonsManifest, ""},
+		"addons false":   {"name: test-prod\naddons: false\n", ""},
+		"addons a list":  {"name: test-prod\naddons: [./addons]\n", ""},
+		"a null path":    {"name: test-prod\naddons:\n  enable: true\n  path: ~\n", ""},
+		"an empty path":  {"name: test-prod\naddons:\n  enable: true\n  path: \"\"\n", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d, runner, errBuf, wd := rcDriver(t, c.manifest, map[string]string{"ccm-hetzner/ccm.yaml": rcClean})
+			err := d.Apply(t.Context(), wd, "")
+			if c.want == "" {
+				if err != nil || len(runner.calls) != 1 || errBuf.Len() != 0 {
+					t.Fatalf("err %v, calls %d, stderr %q: want one kubeone run", err, len(runner.calls), errBuf.String())
+				}
+				assertNoRunCopy(t, wd)
+				return
+			}
+			if err == nil || len(runner.calls) != 0 {
+				t.Fatalf("err %v, calls %v: kubeone must not run", err, runner.calls)
+			}
+			want := "[error] kubeone: " + filepath.Join(wd, "kubeone.yaml") + " " + c.want + "\n"
+			if c.want == notStr {
+				want = "[error] kubeone: addons.path in " + filepath.Join(wd, "kubeone.yaml") + " " + c.want + "\n"
+			}
+			if errBuf.String() != want {
+				t.Errorf("stderr = %q, want %q", errBuf.String(), want)
+			}
+			assertNoRunCopy(t, wd)
+		})
 	}
 }
 

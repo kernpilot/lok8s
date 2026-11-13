@@ -562,6 +562,79 @@ _apply_within() {
   [[ "$(ls -A "${work_dir}")" != *".kubeone-run-"* ]]
 }
 
+# The Go twin is the "a parent without search permission" case of
+# TestApplyRunCopyRefusesWhatItCannotRead (Go refuses a directory that
+# WalkDir cannot read). A find that fails while it lists a directory (here
+# after it listed each entry) stops the apply: the copy never holds a part
+# of the addons directory.
+@test "kubeone::apply: a listing of the addons directory that fails stops the apply" {
+  local cy; cy=$(_cluster_yaml '')
+  yq -i '.addons.enable = true | .addons.path = "./addons"' "${work_dir}/kubeone.yaml"
+  export KCALLS="${BATS_TEST_TMPDIR}/kubeone.calls"
+  kubeone::_clean_reinstalled_workers() { :; }
+  kubeone::_name_robot_workers() { :; }
+  kubeone::render_addons() { mkdir -p "${1}/addons/sub"; printf 'kind: ConfigMap\n' > "${1}/addons/a.yaml"; printf 'kind: ConfigMap\n' > "${1}/addons/sub/b.yaml"; }
+  kubeone() { echo "kubeone $*" >> "${KCALLS}"; }
+  find() { command find "$@"; [[ "${2-}" != */addons/sub ]] || return 1; }
+  run kubeone::apply "${work_dir}" "${cy}"
+  assert_failure
+  assert_output --partial "kubeone: refusing to apply addons/sub: it cannot be read, so it cannot be checked for a keys-only Secret"
+  [ ! -f "${KCALLS}" ]
+  [[ "$(ls -A "${work_dir}")" != *".kubeone-run-"* ]]
+}
+
+# The Go twin is TestApplyRunCopyRefusesAManifestItCannotStage. Go reads
+# the first document of kubeone.yaml, and yq here reads each one: so both
+# refuse a manifest with more than one document (a last --- starts an
+# empty one). An addons.path that is not a string is refused too, also one
+# that a merge key gives. A first ---, an addons that is not a mapping,
+# and a null or empty addons.path are no addons path: kubeone runs.
+@test "kubeone::apply: a manifest with more than one document, or an addons.path that is not a string, stops the apply" {
+  local cy; cy=$(_cluster_yaml '')
+  export KCALLS="${BATS_TEST_TMPDIR}/kubeone.calls"
+  kubeone::_clean_reinstalled_workers() { :; }
+  kubeone::_name_robot_workers() { :; }
+  kubeone::render_addons() { mkdir -p "${1}/addons/ccm-hetzner"; printf 'kind: ConfigMap\n' > "${1}/addons/ccm-hetzner/ccm.yaml"; }
+  kubeone() { echo "kubeone $*" >> "${KCALLS}"; }
+  local docs="kubeone: ${work_dir}/kubeone.yaml holds more than one YAML document"
+  local not_str="kubeone: addons.path in ${work_dir}/kubeone.yaml is not a string"
+  local plain=$'name: test-prod\naddons:\n  enable: true\n  path: ./addons\n'
+  local -A manifests=(
+    [two-documents]=$'name: test-prod\n---\nname: other\naddons:\n  enable: true\n  path: ./addons\n'
+    [a-last-separator]="${plain}"$'---\n'
+    [path-false]=$'name: test-prod\naddons:\n  enable: true\n  path: false\n'
+    [path-a-number]=$'name: test-prod\naddons:\n  enable: true\n  path: 5\n'
+    [path-a-mapping]=$'name: test-prod\naddons:\n  enable: true\n  path: {dir: ./addons}\n'
+    [path-a-list]=$'name: test-prod\naddons:\n  enable: true\n  path: [./addons]\n'
+    [a-merged-false]=$'d: &d {path: false}\nname: test-prod\naddons:\n  <<: *d\n  enable: true\n'
+    [a-first-separator]=$'---\n'"${plain}"
+    [addons-false]=$'name: test-prod\naddons: false\n'
+    [addons-a-list]=$'name: test-prod\naddons: [./addons]\n'
+    [a-null-path]=$'name: test-prod\naddons:\n  enable: true\n  path: ~\n'
+    [an-empty-path]=$'name: test-prod\naddons:\n  enable: true\n  path: ""\n'
+  )
+  local -A want=(
+    [two-documents]="${docs}" [a-last-separator]="${docs}"
+    [path-false]="${not_str}" [path-a-number]="${not_str}" [path-a-mapping]="${not_str}"
+    [path-a-list]="${not_str}" [a-merged-false]="${not_str}"
+  )
+  local name
+  for name in "${!manifests[@]}"; do
+    printf '%s' "${manifests[${name}]}" > "${work_dir}/kubeone.yaml"
+    rm -f "${KCALLS}"
+    run kubeone::apply "${work_dir}" "${cy}"
+    if [[ -z "${want[${name}]-}" ]]; then
+      [ "${status}" -eq 0 ] || { echo "${name}: ${output}"; return 1; }
+      [ "$(wc -l < "${KCALLS}")" -eq 1 ] || { echo "${name}: kubeone did not run once"; return 1; }
+    else
+      [ "${status}" -ne 0 ] || { echo "${name}: status 0"; return 1; }
+      [[ "${output}" == *"${want[${name}]}"* ]] || { echo "${name}: ${output}"; return 1; }
+      [ ! -f "${KCALLS}" ] || { echo "${name}: kubeone ran"; return 1; }
+    fi
+    [[ "$(ls -A "${work_dir}")" != *".kubeone-run-"* ]] || { echo "${name}: the run copy is left"; return 1; }
+  done
+}
+
 # The Go twin is TestApplyRunCopyRefusesAnExistingManifestCopy. lo writes
 # the manifest copy as a new file: a FIFO that is at its path already
 # (made after lo named the run directory, here by a mktemp stub) gets no

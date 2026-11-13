@@ -660,7 +660,9 @@ kubeone::_render_manifest() {
 # with a keys-only Secret, one that cannot be read or does not parse, and
 # an addons path that cannot be read stop the apply. An addons path that
 # does not exist, or that is not a directory, gets no copy: kubeone
-# reports it.
+# reports it. A manifest with more than one YAML document, and an
+# addons.path that is not a string (false, a number, a mapping, a list),
+# stop the apply too (Go: the same).
 #
 # The manifest copy is beside the run directory, in the work dir, because
 # KubeOne resolves the other relative paths of the manifest (the CA file,
@@ -685,10 +687,32 @@ kubeone::_stage_run() {
     error "kubeone: $(keysonly::yq_cause)"
     return 1
   fi
-  if ! path="$(printf '%s' "${manifest}" | yq --yaml-fix-merge-anchor-to-spec -r 'explode(.) | .addons.path // ""' - 2>/dev/null)"; then
+  # One line for each document: its index and the type of addons.path
+  # ("" when the document or its addons is not a mapping: Go reads no path
+  # then, and yq cannot index a list).
+  local info
+  if ! info="$(printf '%s' "${manifest}" | yq --yaml-fix-merge-anchor-to-spec -r 'explode(.) | (document_index | tostring) + " " + ((select(tag == "!!map") | .addons | select(tag == "!!map") | .path | type) // "")' - 2>/dev/null)"; then
     error "kubeone: ${work_dir}/kubeone.yaml does not parse as YAML"
     return 1
   fi
+  if [[ "${info}" == *$'\n'* ]]; then
+    error "kubeone: ${work_dir}/kubeone.yaml holds more than one YAML document"
+    return 1
+  fi
+  path=""
+  case "${info#* }" in
+    '' | '!!null') ;;
+    '!!str')
+      if ! path="$(printf '%s' "${manifest}" | yq --yaml-fix-merge-anchor-to-spec -r 'explode(.) | .addons.path' - 2>/dev/null)"; then
+        error "kubeone: ${work_dir}/kubeone.yaml does not parse as YAML"
+        return 1
+      fi
+      ;;
+    *)
+      error "kubeone: addons.path in ${work_dir}/kubeone.yaml is not a string"
+      return 1
+      ;;
+  esac
   if ! made="$(mktemp -d "${work_dir}/.kubeone-run-XXXXXX")"; then
     error "kubeone: cannot make a run directory in ${work_dir}"
     return 1
@@ -818,15 +842,27 @@ kubeone::_copy_dir() {
     keysonly::refuse_unreadable kubeone "${shown}"
     return 1
   fi
+  # The listing ends with the record "listed" when find succeeded: a find
+  # that fails (an entry that it cannot read, an I/O error) stops the copy,
+  # as Go refuses a directory that it cannot read, and the copy never holds
+  # a part of the directory. Each entry starts with "${dir}/".
+  local listed=0
   while IFS= read -r -d '' entry; do
-    entries+=("${entry}")
-  done < <(find -H "${dir}" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | LC_ALL=C sort -z)
-  for entry in "${entries[@]}"; do
+    if [[ "${entry}" == "${dir}/"* ]]; then entries+=("${entry}"); elif [[ "${entry}" == listed ]]; then listed=1; fi
+  done < <(find -H "${dir}" -mindepth 1 -maxdepth 1 -print0 2>/dev/null | LC_ALL=C sort -z; (( PIPESTATUS[0] == 0 )) && printf 'listed\0')
+  if (( ! listed )); then
+    keysonly::refuse_unreadable kubeone "${shown}"
+    return 1
+  fi
+  for entry in "${entries[@]+"${entries[@]}"}"; do
     name="${entry##*/}"
     if [[ -d "${entry}" && ! -L "${entry}" ]]; then
       kubeone::_copy_dir "${entry}" "${shown}/${name}" "${dst}/${name}" || return 1
       continue
     fi
+    # The window stays: a FIFO or a device that replaces the file after
+    # this check makes the read below wait or not end (Go opens the file
+    # without blocking and checks the open file).
     if [[ ! -f "${entry}" ]]; then
       keysonly::refuse_unreadable kubeone "${shown}/${name}"
       return 1

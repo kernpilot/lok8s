@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"gopkg.in/yaml.v3"
 
@@ -44,7 +45,9 @@ const explodeBudget = 1 << 20
 // addons.path set to <run>/addons. A file with a keys-only Secret, one that
 // cannot be read or does not parse, and an addons path that cannot be
 // read stop the apply. An addons path that does not exist, or that is not
-// a directory, gets no copy: kubeone reports it.
+// a directory, gets no copy: kubeone reports it. A manifest with more than
+// one YAML document, and an addons.path that is not a string (false, a
+// number, a mapping, a list), stop the apply too (bash: the same).
 //
 // The manifest copy is beside the run directory, in the work dir, because
 // KubeOne resolves the other relative paths of the manifest (the CA file,
@@ -53,8 +56,9 @@ const explodeBudget = 1 << 20
 //
 // It returns the manifest for kubeone (relative to workDir) and the
 // cleanup that removes the run directory and the manifest copy. On an
-// error, it removes the run directory itself; a file that was at the path
-// of the manifest copy already (it refuses to write there) stays.
+// error, it removes the run directory itself, and a manifest copy that it
+// began to write (writeExclusive); a file that was at the path of the
+// manifest copy already (it refuses to write there) stays.
 func stageRun(stderr io.Writer, workDir string) (string, func(), error) {
 	noop := func() {}
 	manifest := filepath.Join(workDir, "kubeone.yaml")
@@ -63,18 +67,29 @@ func stageRun(stderr io.Writer, workDir string) (string, func(), error) {
 		ui.ErrorTo(stderr, "kubeone: cannot read %s", manifest)
 		return "", noop, ui.Handled(fmt.Errorf("kubeone: read %s: %w", manifest, err))
 	}
-	doc, err := parseYAMLDoc(raw)
+	docs, err := countDocs(raw)
 	var root *yaml.Node
 	if err == nil {
-		budget := explodeBudget
-		root, err = explode(doc, &budget)
+		var doc *yaml.Node
+		if doc, err = parseYAMLDoc(raw); err == nil {
+			budget := explodeBudget
+			root, err = explode(doc, &budget)
+		}
 	}
 	if err != nil {
 		ui.ErrorTo(stderr, "kubeone: %s does not parse as YAML", manifest)
 		return "", noop, ui.Handled(fmt.Errorf("kubeone: parse %s: %w", manifest, err))
 	}
+	if docs > 1 {
+		ui.ErrorTo(stderr, "kubeone: %s holds more than one YAML document", manifest)
+		return "", noop, ui.Handled(fmt.Errorf("kubeone: %s: %d documents", manifest, docs))
+	}
 	path := ""
-	if p := mapValue(mapValue(root, "addons"), "path"); p != nil && p.Kind == yaml.ScalarNode && p.ShortTag() != "!!null" {
+	if p := mapValue(mapValue(root, "addons"), "path"); p != nil && (p.Kind != yaml.ScalarNode || p.ShortTag() != "!!null") {
+		if p.Kind != yaml.ScalarNode || p.ShortTag() != "!!str" {
+			ui.ErrorTo(stderr, "kubeone: addons.path in %s is not a string", manifest)
+			return "", noop, ui.Handled(fmt.Errorf("kubeone: addons.path in %s: %s", manifest, p.ShortTag()))
+		}
 		path = p.Value
 	}
 
@@ -117,7 +132,8 @@ func stageRun(stderr io.Writer, workDir string) (string, func(), error) {
 		}
 	}
 	if err := writeExclusive(run+".yaml", copyBytes); err != nil {
-		// Not ours: a file that was there already stays.
+		// A file that was there already stays; writeExclusive removed a
+		// copy that it made and could not write to its end.
 		cleanup()
 		ui.ErrorTo(stderr, "kubeone: cannot write the manifest copy %s.yaml", run)
 		return "", noop, ui.Handled(fmt.Errorf("kubeone: manifest copy: %w", err))
@@ -135,9 +151,9 @@ func stageRun(stderr io.Writer, workDir string) (string, func(), error) {
 // manifest) joined with the path of the file in src. A file that is not a
 // regular file (a FIFO, a device, a symbolic link to a directory) and a
 // directory that cannot be read are refused as a file that cannot be
-// read. A src that does not exist or is not a directory gets no copy; a
-// src that cannot be read (a stat error other than "does not exist") is
-// refused.
+// read (readCheckedRegular). A src that does not exist or is not a
+// directory gets no copy; a src that cannot be read (a stat error other
+// than "does not exist") is refused.
 func copyCheckedAddons(stderr io.Writer, src, shown, dst string) error {
 	fi, err := os.Stat(src)
 	switch {
@@ -162,13 +178,11 @@ func copyCheckedAddons(stderr io.Writer, src, shown, dst string) error {
 			return os.Mkdir(target, 0o700)
 		}
 		// A file (a symbolic link too: lo reads what it points at), or a
-		// directory that cannot be read: the guard refuses the latter, and
-		// each entry that is not a regular file, which a read could block
-		// on (a FIFO) or never end (a device).
-		if fi, serr := os.Stat(path); err != nil || serr != nil || !fi.Mode().IsRegular() {
+		// directory that cannot be read: the guard refuses the latter.
+		if err != nil {
 			return build.RefuseUnreadable(stderr, "kubeone", what)
 		}
-		checked, cerr := build.ReadCheckedFile(stderr, "kubeone", what, path)
+		checked, cerr := readCheckedRegular(stderr, what, path)
 		if cerr != nil {
 			return cerr
 		}
@@ -178,6 +192,43 @@ func copyCheckedAddons(stderr io.Writer, src, shown, dst string) error {
 		}
 		return nil
 	})
+}
+
+// readCheckedRegular reads the regular file at path once and checks the
+// bytes with the keys-only apply guard (build.ReadCheckedStream). It opens
+// the file without blocking (O_NONBLOCK) and checks the open file, not the
+// path: an entry that is not a regular file is refused as a file that
+// cannot be read, also one that replaced the file after the walk listed
+// it. The open does not wait for a writer of a FIFO, and lo does not read
+// a FIFO or a device, as a read could wait or never end.
+func readCheckedRegular(stderr io.Writer, what, path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, build.RefuseUnreadable(stderr, "kubeone", what)
+	}
+	defer func() { _ = f.Close() }()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil, build.RefuseUnreadable(stderr, "kubeone", what)
+	}
+	return build.ReadCheckedStream(stderr, "kubeone", what, f)
+}
+
+// countDocs returns the number of YAML documents in raw (yq counts the
+// same: an empty document after a last --- is one too).
+func countDocs(raw []byte) (int, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	n := 0
+	for {
+		var doc yaml.Node
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			return n, nil
+		}
+		if err != nil {
+			return n, err
+		}
+		n++
+	}
 }
 
 // explode returns a copy of the tree under n with each alias replaced by a
@@ -273,18 +324,28 @@ func isMergeKey(k *yaml.Node) bool {
 }
 
 // writeExclusive writes data to a new file with mode 0600: it fails when
-// the path exists, whatever is there (a file, a FIFO, a symbolic link).
+// the path exists, whatever is there (a file, a FIFO, a symbolic link),
+// and that stays. When it made the file but cannot write it to its end
+// (a full disk, a failed close), it removes the file: a part of a copy
+// can hold credentials.
 func writeExclusive(path string, data []byte) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		return err
+	_, err = writeData(f, data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
 	}
-	return f.Close()
+	if err != nil {
+		_ = os.Remove(path)
+	}
+	return err
 }
+
+// writeData writes the bytes of a new file of writeExclusive (a variable,
+// so a test can make the write fail after the file exists).
+var writeData = func(f *os.File, data []byte) (int, error) { return f.Write(data) }
 
 // encodeYAML is the encoding of saveYAMLDoc (2-space indent) into bytes.
 func encodeYAML(root *yaml.Node) ([]byte, error) {
