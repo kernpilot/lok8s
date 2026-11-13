@@ -2304,22 +2304,47 @@ YAML
   [ ! -f "${BATS_TEST_TMPDIR}/sops.log" ]
 }
 
-# The Go twin is TestRestoreDRefusesTheWorkingCopyWithoutAFallback. The
-# guard refuses a working copy with a keys-only Secret, and one that does
-# not parse or cannot be read; lo applies nothing for that entry and does
-# not decrypt its .sops.yaml. The next entry still restores.
-@test "restore_d: a refused store working copy is not applied and does not fall back to sops" {
+# The Go twin is TestRestoreDRefusesAMarkedWorkingCopyWithoutAFallback.
+# The guard refuses a working copy with a keys-only Secret: lo applies
+# nothing for that entry and does not decrypt its .sops.yaml. The next
+# entry still restores.
+@test "restore_d: a store working copy with a keys-only Secret is not applied and does not fall back to sops" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  unset PATH_SECRETS
+  local d="${PATH_CLUSTERS}/test.lok8s.dev"
+  mkdir -p "${d}/restore.d" "${d}/secrets/restore.d"
+  echo "cipher" > "${d}/restore.d/tls-a.sops.yaml"
+  echo "cipher" > "${d}/restore.d/tls-b.sops.yaml"
+  printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\ndata:\n  tls.key: ""\n' > "${d}/secrets/restore.d/tls-a.yaml"
+  kubectl() { echo "$*" >> "${BATS_TEST_TMPDIR}/kubectl.log"; cat >> "${BATS_TEST_TMPDIR}/kubectl.stdin"; }
+  sops() { echo "${2##*/}" >> "${BATS_TEST_TMPDIR}/sops.log"; echo "kind: Secret"; }
+  run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
+  [ "$status" -eq 0 ]
+  assert_output --partial "bootstrap: restore.d: refusing to apply tls-a (store working copy): it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one"
+  assert_output --partial "bootstrap: restore.d skips tls-a — lo does not fall back to tls-a.sops.yaml after it finds a keys-only Secret in the store working copy"
+  assert_output --partial "restore.d — 1 applied, 1 skipped"
+  # Only tls-b is decrypted and applied.
+  [ "$(cat "${BATS_TEST_TMPDIR}/sops.log")" = "tls-b.sops.yaml" ]
+  [ "$(wc -l < "${BATS_TEST_TMPDIR}/kubectl.log")" -eq 1 ]
+  [ "$(cat "${BATS_TEST_TMPDIR}/kubectl.stdin")" = "kind: Secret" ]
+}
+
+# The Go twin is TestRestoreDFallsBackFromAWorkingCopyThatCannotBeChecked.
+# A working copy that does not parse, or that cannot be read, is not
+# applied. lo uses the .sops.yaml file, as after a failed apply: the guard
+# checks the decrypted manifest too.
+@test "restore_d: a store working copy that cannot be checked falls back to sops" {
   source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
   export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
   unset PATH_SECRETS
   local d="${PATH_CLUSTERS}/test.lok8s.dev" copy want
   local -a cases=(
-    'keys-only Secret|apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\ndata:\n  tls.key: ""\n|it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one'
-    'not YAML|kind: [Secret\n|it does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)'
-    'unreadable|kind: Secret\n|it cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)'
+    'not YAML|kind: [Secret\n|does not parse as YAML'
+    'unreadable|kind: Secret\nmetadata:\n  name: from-the-copy\n|cannot be read'
   )
   kubectl() { echo "$*" >> "${BATS_TEST_TMPDIR}/kubectl.log"; cat >> "${BATS_TEST_TMPDIR}/kubectl.stdin"; }
-  sops() { echo "${2##*/}" >> "${BATS_TEST_TMPDIR}/sops.log"; echo "kind: Secret"; }
+  sops() { echo "${2##*/}" >> "${BATS_TEST_TMPDIR}/sops.log"; printf 'kind: Secret\nmetadata:\n  name: from-%s\n' "${2##*/}"; }
   local c name
   for c in "${cases[@]}"; do
     IFS='|' read -r name copy want <<< "${c}"
@@ -2331,15 +2356,15 @@ YAML
     printf '%b' "${copy}" > "${d}/secrets/restore.d/tls-a.yaml"
     [[ "${name}" != unreadable ]] || chmod 0 "${d}/secrets/restore.d/tls-a.yaml"
     run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
-    [ "$status" -eq 0 ] || { echo "${name}: status ${status}"; return 1; }
-    [[ "$output" == *"bootstrap: restore.d: refusing to apply tls-a (store working copy): ${want}"* ]] || { echo "${name}: ${output}"; return 1; }
-    [[ "$output" == *"lo does not fall back to tls-a.sops.yaml"* ]] || { echo "${name}: ${output}"; return 1; }
-    [[ "$output" == *"restore.d — 1 applied, 1 skipped"* ]] || { echo "${name}: ${output}"; return 1; }
-    # Only tls-b is decrypted and applied.
-    [ "$(cat "${BATS_TEST_TMPDIR}/sops.log")" = "tls-b.sops.yaml" ] || { echo "${name}: sops $(cat "${BATS_TEST_TMPDIR}/sops.log")"; return 1; }
-    [ "$(wc -l < "${BATS_TEST_TMPDIR}/kubectl.log")" -eq 1 ] || { echo "${name}: $(cat "${BATS_TEST_TMPDIR}/kubectl.log")"; return 1; }
-    [ "$(cat "${BATS_TEST_TMPDIR}/kubectl.stdin")" = "kind: Secret" ] || { echo "${name}: stdin $(cat "${BATS_TEST_TMPDIR}/kubectl.stdin")"; return 1; }
     chmod 0644 "${d}/secrets/restore.d/tls-a.yaml"
+    [ "$status" -eq 0 ] || { echo "${name}: status ${status}"; return 1; }
+    [[ "$output" == *"bootstrap: restore.d: tls-a (store working copy) ${want}; lo uses tls-a.sops.yaml"* ]] || { echo "${name}: ${output}"; return 1; }
+    [[ "$output" != *"refusing to apply tls-a"* ]] || { echo "${name}: ${output}"; return 1; }
+    [[ "$output" == *"restore.d — 2 applied, 0 skipped"* ]] || { echo "${name}: ${output}"; return 1; }
+    # Both entries are decrypted, and kubectl gets the decrypted manifests.
+    [ "$(cat "${BATS_TEST_TMPDIR}/sops.log")" = $'tls-a.sops.yaml\ntls-b.sops.yaml' ] || { echo "${name}: sops $(cat "${BATS_TEST_TMPDIR}/sops.log")"; return 1; }
+    [ "$(wc -l < "${BATS_TEST_TMPDIR}/kubectl.log")" -eq 2 ] || { echo "${name}: $(cat "${BATS_TEST_TMPDIR}/kubectl.log")"; return 1; }
+    [ "$(cat "${BATS_TEST_TMPDIR}/kubectl.stdin")" = $'kind: Secret\nmetadata:\n  name: from-tls-a.sops.yaml\nkind: Secret\nmetadata:\n  name: from-tls-b.sops.yaml' ] || { echo "${name}: stdin $(cat "${BATS_TEST_TMPDIR}/kubectl.stdin")"; return 1; }
   done
 }
 

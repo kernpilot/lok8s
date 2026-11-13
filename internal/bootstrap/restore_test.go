@@ -144,19 +144,55 @@ func TestRestoreDApplyFailureFallsThroughStoreCopyToSops(t *testing.T) {
 // empty values, and the keys-only marker.
 const restoreMarked = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\n  annotations:\n    secrets.lok8s.dev/keys-only: \"true\"\ndata:\n  tls.key: \"\"\n"
 
-// bats: "restore_d: a refused store working copy is not applied and does
-// not fall back to sops". The guard refuses a working copy with a keys-only
-// Secret, and one that does not parse or cannot be read; lo applies
-// nothing for that entry and does not decrypt its .sops.yaml. The next
-// entry still restores.
-func TestRestoreDRefusesTheWorkingCopyWithoutAFallback(t *testing.T) {
+// bats: "restore_d: a store working copy with a keys-only Secret is not
+// applied and does not fall back to sops". lo applies nothing for that
+// entry and does not decrypt its .sops.yaml. The next entry still restores.
+func TestRestoreDRefusesAMarkedWorkingCopyWithoutAFallback(t *testing.T) {
+	e, f, _, errOut, p := testEngine(t)
+	d := filepath.Join(p.Clusters, "test.lok8s.dev")
+	testutil.WriteFile(t, filepath.Join(d, "restore.d", "tls-a.sops.yaml"), "cipher\n")
+	testutil.WriteFile(t, filepath.Join(d, "restore.d", "tls-b.sops.yaml"), "cipher\n")
+	testutil.WriteFile(t, filepath.Join(d, "secrets", "restore.d", "tls-a.yaml"), restoreMarked)
+	var decrypted []string
+	e.SopsDecrypt = func(path string) ([]byte, error) {
+		decrypted = append(decrypted, filepath.Base(path))
+		return []byte("kind: Secret\n"), nil
+	}
+	var applied []string
+	f.handler = func(c execx.Cmd) error {
+		raw, _ := io.ReadAll(c.Stdin)
+		applied = append(applied, string(raw))
+		return nil
+	}
+	e.restoreD(t.Context(), "test.lok8s.dev", "/kc")
+	if len(decrypted) != 1 || decrypted[0] != "tls-b.sops.yaml" {
+		t.Errorf("decrypted %v, want only tls-b.sops.yaml", decrypted)
+	}
+	if len(applied) != 1 || applied[0] != "kind: Secret\n" {
+		t.Errorf("applied %q, want only the manifest of tls-b", applied)
+	}
+	for _, want := range []string{
+		"[error] bootstrap: restore.d: refusing to apply tls-a (store working copy): it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one\n",
+		"lo does not fall back to tls-a.sops.yaml after it finds a keys-only Secret in the store working copy",
+		"restore.d — 1 applied, 1 skipped",
+	} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("stderr misses %q:\n%s", want, errOut.String())
+		}
+	}
+}
+
+// bats: "restore_d: a store working copy that cannot be checked falls
+// back to sops". A copy that cannot be read or does not parse is not
+// applied; lo uses the .sops.yaml file, as after a failed apply, and checks
+// the decrypted manifest. The decrypted manifest is applied.
+func TestRestoreDFallsBackFromAWorkingCopyThatCannotBeChecked(t *testing.T) {
 	for name, tc := range map[string]struct {
 		copy, want string
 		unreadable bool
 	}{
-		"keys-only Secret": {copy: restoreMarked, want: "[error] bootstrap: restore.d: refusing to apply tls-a (store working copy): it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one\n"},
-		"not YAML":         {copy: "kind: [Secret\n", want: "[error] bootstrap: restore.d: refusing to apply tls-a (store working copy): it does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)\n"},
-		"unreadable":       {copy: "kind: Secret\n", unreadable: true, want: "[error] bootstrap: restore.d: refusing to apply tls-a (store working copy): it cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)\n"},
+		"not YAML":   {copy: "kind: [Secret\n", want: "[warn] bootstrap: restore.d: tls-a (store working copy) does not parse as YAML; lo uses tls-a.sops.yaml\n"},
+		"unreadable": {copy: "kind: Secret\n", unreadable: true, want: "[warn] bootstrap: restore.d: tls-a (store working copy) cannot be read; lo uses tls-a.sops.yaml\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if tc.unreadable && os.Geteuid() == 0 {
@@ -165,7 +201,6 @@ func TestRestoreDRefusesTheWorkingCopyWithoutAFallback(t *testing.T) {
 			e, f, _, errOut, p := testEngine(t)
 			d := filepath.Join(p.Clusters, "test.lok8s.dev")
 			testutil.WriteFile(t, filepath.Join(d, "restore.d", "tls-a.sops.yaml"), "cipher\n")
-			testutil.WriteFile(t, filepath.Join(d, "restore.d", "tls-b.sops.yaml"), "cipher\n")
 			plain := filepath.Join(d, "secrets", "restore.d", "tls-a.yaml")
 			testutil.WriteFile(t, plain, tc.copy)
 			if tc.unreadable {
@@ -176,7 +211,7 @@ func TestRestoreDRefusesTheWorkingCopyWithoutAFallback(t *testing.T) {
 			var decrypted []string
 			e.SopsDecrypt = func(path string) ([]byte, error) {
 				decrypted = append(decrypted, filepath.Base(path))
-				return []byte("kind: Secret\n"), nil
+				return []byte("kind: Secret\nmetadata:\n  name: from-sops\n"), nil
 			}
 			var applied []string
 			f.handler = func(c execx.Cmd) error {
@@ -185,16 +220,19 @@ func TestRestoreDRefusesTheWorkingCopyWithoutAFallback(t *testing.T) {
 				return nil
 			}
 			e.restoreD(t.Context(), "test.lok8s.dev", "/kc")
-			if len(decrypted) != 1 || decrypted[0] != "tls-b.sops.yaml" {
-				t.Errorf("decrypted %v, want only tls-b.sops.yaml", decrypted)
+			if len(decrypted) != 1 || decrypted[0] != "tls-a.sops.yaml" {
+				t.Errorf("decrypted %v, want tls-a.sops.yaml", decrypted)
 			}
-			if len(applied) != 1 || applied[0] != "kind: Secret\n" {
-				t.Errorf("applied %q, want only the manifest of tls-b", applied)
+			if len(applied) != 1 || applied[0] != "kind: Secret\nmetadata:\n  name: from-sops\n" {
+				t.Errorf("applied %q, want only the decrypted manifest", applied)
 			}
-			for _, want := range []string{tc.want, "lo does not fall back to tls-a.sops.yaml", "restore.d — 1 applied, 1 skipped"} {
+			for _, want := range []string{tc.want, "restore.d — 1 applied, 0 skipped"} {
 				if !strings.Contains(errOut.String(), want) {
 					t.Errorf("stderr misses %q:\n%s", want, errOut.String())
 				}
+			}
+			if strings.Contains(errOut.String(), "refusing to apply") {
+				t.Errorf("a copy that falls back is refused:\n%s", errOut.String())
 			}
 		})
 	}

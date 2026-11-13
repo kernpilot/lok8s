@@ -76,15 +76,23 @@ keysonly::has_marker() {
 # apply ". It refuses as keysonly::read_checked_artifact does: a stream with
 # the keys-only marker, and a stream that cannot be checked.
 keysonly::refuse_stream() {
-  local prefix="${1}" what="${2}" marker=0
+  local marker=0
   keysonly::has_marker "${3}" || marker=$?
-  case "${marker}" in
-    1) return 0 ;;
+  (( marker == 1 )) && return 0
+  keysonly::refusal "${1}" "${2}" "${marker}"
+  return 1
+}
+
+# keysonly::refusal <prefix> <what> <status>: print why lo refuses to apply
+# the stream <what>, for an exit status of keysonly::has_marker other than
+# 1 (the messages of keysonly::refuse_stream).
+keysonly::refusal() {
+  local prefix="${1}" what="${2}"
+  case "${3}" in
     2) error "${prefix}: refusing to apply ${what}: it does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)" ;;
     3) error "${prefix}: refusing to apply ${what}: it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): $(keysonly::yq_cause)" ;;
     *) error "${prefix}: refusing to apply ${what}: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one" ;;
   esac
-  return 1
 }
 
 # keysonly::read_checked_artifact <domain> <artifact>: the apply guard on a

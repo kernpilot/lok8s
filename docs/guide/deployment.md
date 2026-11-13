@@ -215,8 +215,10 @@ not apply a manifest that holds one:
   working copy in the store (`secrets/restore.d/<name>.yaml`), which it
   reads once and applies from that copy, and else the decrypted
   `<name>.sops.yaml`. An entry with the annotation is skipped with an
-  error. When lo refuses the working copy, it does not use the
-  `.sops.yaml` file of that entry: remove or replace the working copy.
+  error. When the working copy holds the annotation, lo does not use the
+  `.sops.yaml` file of that entry: remove or replace the working copy. A
+  working copy that cannot be read, or that does not parse as YAML, gets
+  a warning, and lo uses the `.sops.yaml` file, which it checks too.
 - The KubeOne driver checks the cilium and CCM renders that KubeOne
   applies itself (`<work dir>/addons/`) before it runs `kubeone apply`. A
   render with the annotation stops the apply.

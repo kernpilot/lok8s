@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -26,11 +27,13 @@ import (
 //
 // Each input passes the keys-only apply guard before its apply: lo reads
 // the working copy once and applies the bytes that it checked, and checks
-// the decrypted manifest (build.ReadCheckedFile, build.RefuseKeysOnlyStream).
-// A refused input is skipped: a refused working copy does not fall back to
-// the .sops.yaml file, so a keys-only Secret in the store stops the
-// restore of that entry and the operator sees why. kubectl gets the bytes
-// exactly.
+// the decrypted manifest (build.HasKeysOnlyMarker,
+// build.RefuseKeysOnlyStream). A working copy with a keys-only Secret is
+// skipped, and lo does not fall back to the .sops.yaml file: a keys-only
+// Secret in the store stops the restore of that entry, and the operator
+// sees why. A working copy that cannot be read or does not parse falls
+// back to the .sops.yaml file, as a failed apply does, because lo checks
+// the decrypted manifest too. kubectl gets the bytes exactly.
 func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 	stderr := e.stderr()
 	rdir := e.Paths.Clusters + "/" + domain + "/restore.d"
@@ -57,19 +60,33 @@ func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 		// earlier build.
 		plain := e.Paths.Clusters + "/" + domain + "/secrets/restore.d/" + base + ".yaml"
 		if fsutil.FileExists(plain) {
-			doc, err := build.ReadCheckedFile(stderr, restoreGuard, base+" (store working copy)", plain)
-			if err != nil {
+			what := base + " (store working copy)"
+			doc, rerr := os.ReadFile(plain)
+			var marked bool
+			var perr error
+			if rerr == nil {
+				marked, perr = build.HasKeysOnlyMarker(doc)
+			}
+			switch {
+			case rerr != nil:
+				ui.WarnTo(stderr, "%s: %s cannot be read; lo uses %s.sops.yaml", restoreGuard, what, base)
+			case perr != nil:
+				ui.WarnTo(stderr, "%s: %s does not parse as YAML; lo uses %s.sops.yaml", restoreGuard, what, base)
+			case marked:
+				// The message of the guard (the stream holds the marker).
+				_ = build.RefuseKeysOnlyStream(stderr, restoreGuard, what, doc)
 				skipped++
-				ui.WarnTo(stderr, "bootstrap: restore.d skips %s — lo does not fall back to %s.sops.yaml after it refuses the store working copy", base, base)
+				ui.WarnTo(stderr, "bootstrap: restore.d skips %s — lo does not fall back to %s.sops.yaml after it finds a keys-only Secret in the store working copy", base, base)
 				continue
+			default:
+				errOut, rc := e.restoreApply(ctx, kubeconfig, doc)
+				if rc == 0 {
+					applied++
+					ui.DebugTo(stderr, "bootstrap: restore.d applied %s (store working copy)", base)
+					continue
+				}
+				ui.DebugTo(stderr, "bootstrap: restore.d %s store-copy apply failed: %s", base, firstLine(errOut))
 			}
-			errOut, rc := e.restoreApply(ctx, kubeconfig, doc)
-			if rc == 0 {
-				applied++
-				ui.DebugTo(stderr, "bootstrap: restore.d applied %s (store working copy)", base)
-				continue
-			}
-			ui.DebugTo(stderr, "bootstrap: restore.d %s store-copy apply failed: %s", base, firstLine(errOut))
 		}
 		// Decrypt and apply as SEPARATE steps with separate stderr: piping
 		// `sops 2>&1 | kubectl` would inject sops warnings into kubectl's

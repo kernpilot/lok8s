@@ -922,6 +922,18 @@ if grep -qF "lo does not fall back to tls-a.sops.yaml" "${WORK}/go.err" && ! gre
 else
   fail "go: the refused working copy fell back to the sops file, or no warning names it"
 fi
+# A working copy that does not parse falls back to the .sops.yaml file, as
+# a failed apply does (lo checks the decrypted manifest too). The fixture
+# does not decrypt, so both sides warn and skip it. The entry render is
+# refused, so the run ends with rc 1 before any apply of an entry.
+printf 'kind: [Secret\n' > "${PROJ}/clusters/boot.dev/secrets/restore.d/tls-a.yaml"
+PARITY_KUSTOMIZE_OUT="${ko_marked}" PARITY_PRE_EACH=ko_pre PARITY_POST_EACH=ko_post check - bootstrap --domain boot.dev
+if grep -qF "bootstrap: restore.d: tls-a (store working copy) does not parse as YAML; lo uses tls-a.sops.yaml" "${WORK}/go.err" \
+    && grep -qF "could not decrypt/apply tls-a" "${WORK}/go.err"; then
+  echo "ok: go: a working copy that does not parse falls back to the sops file"
+else
+  fail "go: a working copy that does not parse did not fall back to the sops file"
+fi
 # The working copy reaches kubectl byte for byte: its last literal scalar
 # (|+) ends in several newlines. A kubectl that applies, and keeps what it
 # gets on stdin, per side.

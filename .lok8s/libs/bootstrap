@@ -1177,12 +1177,14 @@ bootstrap::_resolve_parked() {
 #
 # Each input passes the keys-only apply guard before its apply: lo reads the
 # working copy once and applies the bytes that it checked, and checks the
-# decrypted manifest (keysonly::read_checked_file, keysonly::refuse_stream).
-# A refused input is skipped: a refused working copy does not fall back to
-# the .sops.yaml file, so a keys-only Secret in the store stops the restore
-# of that entry and the operator sees why. The manifest goes to kubectl
-# byte for byte, and tracing is off (the rules at the top of
-# utils/keysonly.sh).
+# decrypted manifest (keysonly::has_marker, keysonly::refuse_stream). A
+# working copy with a keys-only Secret is skipped, and lo does not fall
+# back to the .sops.yaml file: a keys-only Secret in the store stops the
+# restore of that entry, and the operator sees why. A working copy that
+# cannot be read or does not parse falls back to the .sops.yaml file, as a
+# failed apply does, because lo checks the decrypted manifest too. The
+# manifest goes to kubectl byte for byte, and tracing is off (the rules at
+# the top of utils/keysonly.sh).
 bootstrap::_restore_d() {
   [[ $- != *x* ]] || { local -; set +x; }
   local domain="${1}" kubeconfig="${2}"
@@ -1203,20 +1205,33 @@ bootstrap::_restore_d() {
     # which may still point at a different domain's store from an earlier build.
     plain="${PATH_CLUSTERS}/${domain}/secrets/restore.d/${base}.yaml"
     if [[ -f "${plain}" ]]; then
-      local _doc
-      if ! _doc="$(keysonly::read_checked_file "bootstrap: restore.d" "${base} (store working copy)" "${plain}" && printf .)"; then
-        skipped=$(( skipped + 1 ))
-        warn "bootstrap: restore.d skips ${base} — lo does not fall back to ${base}.sops.yaml after it refuses the store working copy"
-        continue
+      local _doc _marker=0 _what="${base} (store working copy)"
+      if _doc="$(cat -- "${plain}" 2>/dev/null && printf .)"; then
+        _doc="${_doc%.}"
+        printf '%s' "${_doc}" | keysonly::has_marker - || _marker=$?
+      else
+        _marker=unreadable
       fi
-      _doc="${_doc%.}"
-      if _err="$(printf '%s' "${_doc}" \
-        | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - 2>&1 >/dev/null)"; then
-        applied=$(( applied + 1 ))
-        debug "bootstrap: restore.d applied ${base} (store working copy)"
-        continue
-      fi
-      debug "bootstrap: restore.d ${base} store-copy apply failed: ${_err%%$'\n'*}"
+      case "${_marker}" in
+        0)
+          keysonly::refusal "bootstrap: restore.d" "${_what}" 0
+          skipped=$(( skipped + 1 ))
+          warn "bootstrap: restore.d skips ${base} — lo does not fall back to ${base}.sops.yaml after it finds a keys-only Secret in the store working copy"
+          continue
+          ;;
+        1)
+          if _err="$(printf '%s' "${_doc}" \
+            | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - 2>&1 >/dev/null)"; then
+            applied=$(( applied + 1 ))
+            debug "bootstrap: restore.d applied ${base} (store working copy)"
+            continue
+          fi
+          debug "bootstrap: restore.d ${base} store-copy apply failed: ${_err%%$'\n'*}"
+          ;;
+        unreadable) warn "bootstrap: restore.d: ${_what} cannot be read; lo uses ${base}.sops.yaml" ;;
+        2) warn "bootstrap: restore.d: ${_what} does not parse as YAML; lo uses ${base}.sops.yaml" ;;
+        *) warn "bootstrap: restore.d: ${_what} cannot be checked for a keys-only Secret: $(keysonly::yq_cause) lo uses ${base}.sops.yaml" ;;
+      esac
       _doc=""
     fi
     # Decrypt and apply as SEPARATE steps with separate stderr: piping
