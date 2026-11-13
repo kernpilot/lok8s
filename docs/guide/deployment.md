@@ -234,7 +234,7 @@ So is a resource that names the annotation as a key under a nested
 forbids it; a rule that names the key in a CEL expression is not a match.
 A render or an artifact that does not parse as YAML also stops with an
 error. The existing artifacts do not change. The bash tree checks with
-`yq`, so it also stops when the installed `yq` is older than v4.47.1.
+`yq`, so it also stops when `yq` is not installed or is older than v4.47.1.
 
 The flag is the only way to start a keys-only render. lo controls the
 plugin setting that it uses (see the

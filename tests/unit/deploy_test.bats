@@ -170,11 +170,11 @@ YAML
 }
 
 # An artifact that cannot be read, and a yq that cannot run the check (one
-# before v4.47.1 does not know --yaml-fix-merge-anchor-to-spec), each get
-# their own message: neither is an artifact that does not parse. Go:
+# before v4.47.1 does not know --yaml-fix-merge-anchor-to-spec, or no yq),
+# each get their own message: none is an artifact that does not parse. Go:
 # TestApplyRefusesAKeysOnlyArtifact (the unreadable case; the Go check runs
 # without yq).
-@test "deploy::apply names an unreadable artifact and an old yq, not a parse error" {
+@test "deploy::apply names an unreadable artifact, an old yq and no yq, not a parse error" {
   local artifact="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
   if (( EUID != 0 )); then
     chmod 000 "${artifact}"
@@ -200,6 +200,16 @@ YAML
   assert_failure
   assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (b install installs the pinned yq)."
   refute_output --partial "does not parse"
+  refute_output --partial "applied"
+
+  # No yq on the PATH: the message names that, not an old yq.
+  unset -f yq
+  mkdir -p "${BATS_TEST_TMPDIR}/no-yq"
+  _deploy_without_yq() { local PATH="${BATS_TEST_TMPDIR}/no-yq"; deploy::apply "$@"; }
+  run _deploy_without_yq "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): yq is not installed. Install yq v4.47.1 or later (b install installs the pinned yq)."
+  refute_output --partial "does not know the flag"
   refute_output --partial "applied"
 }
 

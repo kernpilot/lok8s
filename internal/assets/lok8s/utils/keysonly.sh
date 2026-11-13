@@ -5,14 +5,27 @@
 # its key names and empty values only. Such a Secret never goes into a
 # domain's artifacts and is never applied.
 
-# The cause when the installed yq cannot run the check (the words of the
-# spec reader, spec::_kver_read).
+# The causes when yq cannot run the check (exit status 3 of
+# keysonly::has_marker): an installed yq before v4.47.1 (the words of the
+# spec reader, spec::_kver_read), and no yq. keysonly::yq_cause prints the
+# one that applies.
 _KEYSONLY_OLD_YQ='the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (b install installs the pinned yq).'
+_KEYSONLY_NO_YQ='yq is not installed. Install yq v4.47.1 or later (b install installs the pinned yq).'
 
 # The end of the message of a failed keys-only render or yq run (Go:
 # keysOnlyWithheld): lo does not print their stderr, as it can quote an
 # input value.
 _KEYSONLY_WITHHELD='in keys-only mode lo does not print its stderr, which can quote a value: run the build without --keys-only to see it'
+
+# keysonly::yq_cause: print why yq cannot run the check, after exit status
+# 3 of keysonly::has_marker: no yq, or one before v4.47.1.
+keysonly::yq_cause() {
+  if command -v yq >/dev/null 2>&1; then
+    printf '%s' "${_KEYSONLY_OLD_YQ}"
+  else
+    printf '%s' "${_KEYSONLY_NO_YQ}"
+  fi
+}
 
 # keysonly::has_marker <file|->: look for an object with the keys-only
 # marker in the YAML stream <file> (- reads stdin; Go:
@@ -27,7 +40,8 @@ _KEYSONLY_WITHHELD='in keys-only mode lo does not print its stderr, which can qu
 #   0  the stream holds the marker.
 #   1  it does not.
 #   2  it does not parse as YAML (yq failed): it cannot be checked.
-#   3  the installed yq cannot run the check (no yq, or one before v4.47.1).
+#   3  yq cannot run the check: no yq, or one before v4.47.1
+#      (keysonly::yq_cause prints which).
 keysonly::has_marker() {
   local out
   yq --yaml-fix-merge-anchor-to-spec --version >/dev/null 2>&1 || return 3
@@ -56,7 +70,7 @@ keysonly::refuse_artifact() {
   case "${marker}" in
     1) return 0 ;;
     2) error "refusing to apply ${domain}: ${artifact} does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)" ;;
-    3) error "refusing to apply ${domain}: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): ${_KEYSONLY_OLD_YQ}" ;;
+    3) error "refusing to apply ${domain}: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): $(keysonly::yq_cause)" ;;
     *) error "refusing to apply ${domain}: ${artifact} holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one — run 'lo build' again" ;;
   esac
   return 1
@@ -76,7 +90,7 @@ keysonly::refuse_stream() {
   case "${marker}" in
     1) return 0 ;;
     2) error "${prefix}: refusing to apply ${what}: it does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)" ;;
-    3) error "${prefix}: refusing to apply ${what}: it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): ${_KEYSONLY_OLD_YQ}" ;;
+    3) error "${prefix}: refusing to apply ${what}: it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): $(keysonly::yq_cause)" ;;
     *) error "${prefix}: refusing to apply ${what}: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one" ;;
   esac
   return 1
