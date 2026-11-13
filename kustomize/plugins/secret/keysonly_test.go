@@ -113,7 +113,8 @@ cert:
 // TestKeysOnly_EmitsEveryKeyEmpty is the keys-only contract: every key that
 // the spec names, an empty value for each, the annotation, the metadata
 // kept; and nothing read but the spec. The store holds an .enc-only entry
-// (a real run refuses it before anything else, B425) and a plaintext
+// (a real run refuses it before anything else: it does not generate a
+// value over an entry that has only its encrypted twin) and a plaintext
 // canary for another key, so a run that opens, reads or mints the store
 // fails, emits the canary or adds a file. The bash script would leave a
 // marker; CAROOT is an empty directory that a CA load would fill.
