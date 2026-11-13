@@ -890,9 +890,12 @@ func TestArtifactsPrunesOnlyAfterTheChecks(t *testing.T) {
 
 // markerCases are streams with and without the keys-only marker. want is
 // whether the guard refuses the stream. unparsed marks the one stream that
-// Go refuses as "does not parse" while the pinned yq parses it and finds
-// the marker: the YAML 1.2 escape \/ (the Go YAML libraries do not know
-// it). Both implementations refuse it; only the message differs.
+// the Go guard refuses as "does not parse": the YAML 1.2 escape \/ in a
+// quoted key, which yaml.v3 does not know (kustomize rejects it too, so
+// only a file written by hand has it). The pinned yq parses it, and the
+// bash guard refuses it as "holds a keys-only Secret"; a yq that rejects
+// the escape refuses it as "does not parse". Both implementations refuse
+// it; only the message can differ.
 var markerCases = []struct {
 	name, in string
 	want     bool
@@ -966,17 +969,22 @@ func TestHasKeysOnlyMarkerMatchesYq(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "case.yaml")
 	for i, tc := range markerCases {
+		marked, goErr := HasKeysOnlyMarker([]byte(tc.in))
+		if goRefuses := marked || goErr != nil; goRefuses != tc.want {
+			t.Errorf("%s: the Go guard refuses = %v, the case says %v", tc.name, goRefuses, tc.want)
+		}
 		writeFileT(t, path, tc.in)
 		out, err := exec.CommandContext(t.Context(), yq, "--yaml-fix-merge-anchor-to-spec", expr, path).Output()
+		if err != nil && tc.unparsed {
+			// This yq build rejects the YAML 1.2 escape \/: the bash guard
+			// refuses the stream as "does not parse", as the Go guard does.
+			continue
+		}
 		if err != nil {
 			t.Fatalf("case %d (%s): yq: %v", i, tc.name, err)
 		}
 		if bash := strings.Contains("\n"+string(out), "\ntrue\n"); bash != tc.want {
 			t.Errorf("%s: the bash guard says %v, the case says %v", tc.name, bash, tc.want)
-		}
-		marked, goErr := HasKeysOnlyMarker([]byte(tc.in))
-		if goRefuses := marked || goErr != nil; goRefuses != tc.want {
-			t.Errorf("%s: the Go guard refuses = %v, the bash guard = %v", tc.name, goRefuses, tc.want)
 		}
 	}
 	for _, in := range unparsedCases {
