@@ -92,7 +92,7 @@ func mainFixture(t *testing.T) (proj, log string) {
 // runLo runs the test binary as lo in proj with a minimal environment
 // that inherits the keys-only setting as 1 (and the store-free switch as
 // 1). mode is the LO_RENDER value ("" = the build's default).
-func runLo(t *testing.T, proj, log, mode string, args ...string) (string, error) {
+func runLo(t *testing.T, proj, log, mode string, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
@@ -113,11 +113,11 @@ func runLo(t *testing.T, proj, log, mode string, args ...string) (string, error)
 		secret.KeysOnlyEnv + "=1",
 		secret.DisableEnv + "=1",
 	}
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
 	err = cmd.Run()
-	return out.String(), err
+	return outBuf.String(), errBuf.String(), err
 }
 
 func readLog(t *testing.T, log string) []string {
@@ -134,8 +134,8 @@ func readLog(t *testing.T, log string) []string {
 // environment. An inherited 1 is 0 there.
 func TestKeysOnlyPinnedAtProcessStart(t *testing.T) {
 	proj, log := mainFixture(t)
-	if out, err := runLo(t, proj, log, "", "version"); err != nil {
-		t.Fatalf("lo version: %v\n%s", err, out)
+	if out, errOut, err := runLo(t, proj, log, "", "version"); err != nil {
+		t.Fatalf("lo version: %v\n%s%s", err, out, errOut)
 	}
 	lines := readLog(t, log)
 	if len(lines) != 7 {
@@ -150,7 +150,8 @@ func TestKeysOnlyPinnedAtProcessStart(t *testing.T) {
 
 // `lo build` and `lo build --no-secrets` with the setting inherited as 1:
 // the kustomize child (exec pipeline) sees 0, and so does the Secret
-// plugin under it.
+// plugin under it. Only `lo build --keys-only` gives it 1, with the
+// store-free switch on.
 func TestKeysOnlyPinnedForBuildExec(t *testing.T) {
 	for _, tc := range []struct {
 		args []string
@@ -158,10 +159,11 @@ func TestKeysOnlyPinnedForBuildExec(t *testing.T) {
 	}{
 		{[]string{"build", "--domain", "d.dev"}, "kustomize keys-only=0 disable=0"},
 		{[]string{"build", "--domain", "d.dev", "--no-secrets"}, "kustomize keys-only=0 disable=1"},
+		{[]string{"build", "--domain", "d.dev", "--keys-only"}, "kustomize keys-only=1 disable=1"},
 	} {
 		proj, log := mainFixture(t)
-		if out, err := runLo(t, proj, log, string(render.ModeExec), tc.args...); err != nil {
-			t.Fatalf("lo %v: %v\n%s", tc.args, err, out)
+		if out, errOut, err := runLo(t, proj, log, string(render.ModeExec), tc.args...); err != nil {
+			t.Fatalf("lo %v: %v\n%s%s", tc.args, err, out, errOut)
 		}
 		var builds []string
 		for _, ln := range readLog(t, log) {
@@ -192,8 +194,8 @@ func TestKeysOnlyPinnedForBuildInProcess(t *testing.T) {
 		{[]string{"build", "--domain", "gen.dev", "--no-secrets"}, false, []string{secret.KeysOnlyAnnotation, "kind: Secret"}},
 	} {
 		proj, log := mainFixture(t)
-		if out, err := runLo(t, proj, log, "", tc.args...); err != nil {
-			t.Fatalf("lo %v: %v\n%s", tc.args, err, out)
+		if out, errOut, err := runLo(t, proj, log, "", tc.args...); err != nil {
+			t.Fatalf("lo %v: %v\n%s%s", tc.args, err, out, errOut)
 		}
 		raw, err := os.ReadFile(filepath.Join(proj, "clusters", "gen.dev", "artifacts.yaml"))
 		if err != nil {
@@ -208,5 +210,34 @@ func TestKeysOnlyPinnedForBuildInProcess(t *testing.T) {
 				t.Errorf("lo %v: artifacts.yaml carries %q:\n%s", tc.args, s, got)
 			}
 		}
+	}
+}
+
+// `lo build --keys-only` with the setting inherited as 1 and in-process
+// (lo-full): the plugin child runs the keys-only run because the build
+// asked for it. stdout holds the Secret with its key and an empty value
+// plus the marker, never the value; no artifacts.yaml is written.
+func TestKeysOnlyBuildInProcess(t *testing.T) {
+	if !render.InProcessAvailable() {
+		t.Skip("lo core: the exec pipeline is the only one (TestKeysOnlyPinnedForBuildExec)")
+	}
+	proj, log := mainFixture(t)
+	out, errOut, err := runLo(t, proj, log, "", "build", "--domain", "gen.dev", "--keys-only")
+	if err != nil {
+		t.Fatalf("lo build --keys-only: %v\n%s%s", err, out, errOut)
+	}
+	for _, s := range []string{"kind: Secret", "name: app", secret.KeysOnlyAnnotation + `: "true"`, `USER: ""`, "kind: ConfigMap"} {
+		if !strings.Contains(out, s) {
+			t.Errorf("stdout lacks %q:\n%s", s, out)
+		}
+	}
+	if strings.Contains(out, "YWxpY2U=") {
+		t.Errorf("stdout carries the value:\n%s", out)
+	}
+	if !strings.Contains(errOut, "lo build: gen.dev rendered 2 document(s) -> stdout (keys only)") {
+		t.Errorf("stderr = %q", errOut)
+	}
+	if _, err := os.Stat(filepath.Join(proj, "clusters", "gen.dev", "artifacts.yaml")); err == nil {
+		t.Error("--keys-only wrote artifacts.yaml")
 	}
 }

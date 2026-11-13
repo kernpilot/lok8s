@@ -451,16 +451,19 @@ preserving the username/password.
 
 Beyond `$PATH_SECRETS` (the cache directory), two env vars shape a run. A
 caller — chiefly the `lo build` pipeline — sets them on the `kustomize build`
-invocation to steer the generator without editing any Secret CRD.
+invocation to steer the generator without editing any Secret CRD. A third
+variable is internal to lo (the last row): do not set it.
 
 | Env var | Value | Effect |
 |---|---|---|
 | `LOK8S_SECRETS_DISABLE` | `1` / `true` (case-insensitive) | **Store-free OFF switch.** The plugin emits **nothing** and short-circuits before any store access: it never reads `$PATH_SECRETS`, never touches or mints the cache, and never runs a generator. Returns success with empty output — kustomize accepts a generator that yields zero resources. Any other value (incl. unset, `0`) is off. |
 | `LOK8S_SECRETS_OUTPUT` | `none` | **Run-but-suppress.** Runs the **full** pipeline — generators run, so store reads/mints and type validation still happen (side effects intact) — but suppresses the final output write, so zero resources are rendered. Use case: prime or validate the cache without rendering. An empty/unset value is a normal emit; any other non-empty value is **rejected** (fail closed) so a typo can't silently emit secrets. |
+| `LOK8S_INTERNAL_SECRETS_KEYS_ONLY` | `1` / `true`, `0` / `false` | **Internal to lo. Do not export it.** Only [`lo build --keys-only`](../guide/deployment.md#list-the-keys-of-the-generated-secrets-keys-only) sets it to `1`, for its own render. lo sets it to `0` on every other kustomize and plugin call, and an addon entry's `env:` cannot set it. With `1` and `LOK8S_SECRETS_DISABLE=1`, the plugin emits each Secret with its key names and empty values, plus the annotation `secrets.lok8s.dev/keys-only: "true"`. It reads only the Secret spec: it does not read, decrypt or mint the store, and it runs no generator. With `1` but without `LOK8S_SECRETS_DISABLE=1`, the run fails before it reads anything. An unknown value fails. A plugin that is older than this variable sees only `LOK8S_SECRETS_DISABLE=1` and emits nothing. |
 
 **Precedence:** `LOK8S_SECRETS_DISABLE` wins over `LOK8S_SECRETS_OUTPUT` — disable
 means "do nothing at all", so the store is never consulted even if
-`LOK8S_SECRETS_OUTPUT=none` is also set.
+`LOK8S_SECRETS_OUTPUT=none` is also set. The keys-only run also ignores
+`LOK8S_SECRETS_OUTPUT`.
 
 `LOK8S_SECRETS_DISABLE=1` is what [`lo build --no-secrets`](../guide/deployment.md#ci-render-without-secrets-no-secrets)
 exports to make a CI render **store-free**: the split shaping alone leaves the

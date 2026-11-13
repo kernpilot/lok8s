@@ -132,6 +132,34 @@ Secret, and a pruning reconciler would then delete them from the cluster). A
 non-Secret resource dropped from the render is still pruned as usual.
 `--no-secrets` cannot be combined with `--single` (it shapes the split emit).
 
+### List the keys of the generated Secrets (`--keys-only`)
+
+`lo build --keys-only` prints the render of a domain to stdout. Each
+`secrets.lok8s.dev` Secret shows its key names with empty values. The build
+does not read, decrypt or mint a secrets store, so it needs no store and no
+age key. Use it to compare the keys that a generator makes with the keys
+that a consumer expects, for example in CI.
+
+```bash
+lo build --keys-only --domain example.com > keys.yaml
+```
+
+Each Secret from the generator gets the annotation
+`secrets.lok8s.dev/keys-only: "true"`. The other resources render as in a
+normal build.
+
+`--keys-only` writes no file. It does not change `artifacts.yaml` or the split
+directory. You cannot use it with `--split` or `--single`.
+
+`lo build` never writes an object with the `secrets.lok8s.dev/keys-only`
+annotation into `artifacts.yaml` or the split directory. A render that
+contains one stops with an error, and the existing artifacts do not change.
+
+The flag is the only way to start a keys-only render. lo controls the
+plugin setting that it uses (see the
+[env contract](../reference/kustomize-plugins.md#env-contract)). Do not
+export that variable.
+
 ## Deploy
 
 ```bash

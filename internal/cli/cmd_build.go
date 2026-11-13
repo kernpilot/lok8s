@@ -24,11 +24,12 @@ func init() { registerPorted("build", newBuildCommand) }
 // buildOpts are `lo build`'s flags after the parse.
 type buildOpts struct {
 	domainFlag, clusterFlag, clusterOverride string
-	split, single, noSecrets                 bool
+	split, single, noSecrets, keysOnly       bool
 }
 
-// runBuild is main::build after the flag parse.
-func runBuild(ctx context.Context, paths *config.Paths, o buildOpts, stderr io.Writer) error {
+// runBuild is main::build after the flag parse. stdout receives the
+// render of --keys-only; every other build writes files only.
+func runBuild(ctx context.Context, paths *config.Paths, o buildOpts, stdout, stderr io.Writer) error {
 	// Domain: the canonical precedence chain (--domain flag > DOMAIN_NAME
 	// env > clusters/.active > lok8s.dev). NOTE the argsh `~domain`
 	// validator does NOT run here — argsh skips type validation for pre-set
@@ -40,6 +41,12 @@ func runBuild(ctx context.Context, paths *config.Paths, o buildOpts, stderr io.W
 
 	if o.split && o.single {
 		ui.ErrorTo(stderr, "--split and --single are mutually exclusive")
+		return ErrHandled
+	}
+	// --keys-only writes the render to stdout and no file, so the flags
+	// that shape the file output contradict it.
+	if o.keysOnly && (o.split || o.single) {
+		ui.ErrorTo(stderr, "--keys-only and --split/--single are mutually exclusive (--keys-only writes no file)")
 		return ErrHandled
 	}
 	// --no-secrets is a split-time modifier: it only makes sense when a
@@ -102,6 +109,16 @@ func runBuild(ctx context.Context, paths *config.Paths, o buildOpts, stderr io.W
 		return ErrHandled
 	}
 
+	// --keys-only: the render goes to stdout, each secrets.lok8s.dev
+	// Secret with its keys only. The keys-only run is passed explicitly
+	// (build.KeysOnly), never through the environment.
+	if o.keysOnly {
+		if err := build.KeysOnly(ctx, build.Options{Paths: paths, Domain: d, Stderr: stderr}, stdout); err != nil {
+			return ErrHandled
+		}
+		return nil
+	}
+
 	// --no-secrets rides through independent of the split trigger — it
 	// only shapes WHAT a split emits.
 	err := build.Artifacts(ctx, build.Options{
@@ -123,6 +140,7 @@ func newBuildCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 		splitFlag       bool
 		singleFlag      bool
 		noSecretsFlag   bool
+		keysOnlyFlag    bool
 	)
 	cmd := &cobra.Command{
 		Use:          "build",
@@ -139,8 +157,8 @@ func newBuildCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 			clusterFlag, _ := cmd.Flags().GetString("cluster")
 			return runBuild(cmd.Context(), paths, buildOpts{
 				domainFlag: domainFlag, clusterFlag: clusterFlag, clusterOverride: clusterOverride,
-				split: splitFlag, single: singleFlag, noSecrets: noSecretsFlag,
-			}, cmd.ErrOrStderr())
+				split: splitFlag, single: singleFlag, noSecrets: noSecretsFlag, keysOnly: keysOnlyFlag,
+			}, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		},
 	}
 	f := cmd.Flags()
@@ -148,5 +166,6 @@ func newBuildCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	f.BoolVar(&splitFlag, "split", false, "Also emit per-resource files under artifacts/ (debug override; declare it in spec.build.artifacts instead)")
 	f.BoolVar(&singleFlag, "single", false, "Skip the split emit even when the spec declares it (debug override)")
 	f.BoolVar(&noSecretsFlag, "no-secrets", false, "Split ONLY non-Secret resources; never render, re-encrypt, prune, or even read committed Secret.*.sops.yaml (CI render path — no store/key needed)")
+	f.BoolVar(&keysOnlyFlag, "keys-only", false, "Print the render to stdout, each secrets.lok8s.dev Secret with its keys only (empty values); reads no store, writes no file")
 	return cmd
 }

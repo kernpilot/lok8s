@@ -35,6 +35,11 @@ type Options struct {
 	// touches the secrets store and the split leaves committed
 	// Secret.*.sops.yaml wholly inert.
 	NoSecrets bool
+	// KeysOnly asks the Secret plugin for its keys-only run (each key with
+	// an empty value plus the keys-only marker; no store read). Only
+	// KeysOnly (lo build --keys-only) sets it; Artifacts refuses a render
+	// that carries the marker.
+	KeysOnly bool
 	// Stderr receives the human-facing stream (banner, [error]/[warn]/
 	// [debug] lines). Defaults to os.Stderr.
 	Stderr io.Writer
@@ -143,6 +148,15 @@ func Artifacts(ctx context.Context, o Options) error {
 		return ErrHandled
 	}
 	rendered = Envsubst(rendered, whitelist)
+	// The output guard: an object with the keys-only marker never goes
+	// into the domain's artifacts (artifacts.yaml, and the split made from
+	// it). Keys-only output goes to stdout only (lo build --keys-only).
+	artifactPath := filepath.Join(domainDir, "artifacts.yaml")
+	if hasKeysOnlyMarker(rendered) {
+		_ = os.Remove(tmpPath)
+		keysOnlyRefusal(stderr, o.Domain, artifactPath)
+		return ErrHandled
+	}
 	if err := os.WriteFile(tmpPath, rendered, 0o600); err != nil {
 		_ = os.Remove(tmpPath)
 		ui.ErrorTo(stderr, "kustomize build failed for %s", o.Domain)
@@ -163,7 +177,6 @@ func Artifacts(ctx context.Context, o Options) error {
 	// Refuse only where it would DESTROY something. An empty render over an
 	// empty/absent artifact is a new or genuinely empty domain — warn, but
 	// nothing is lost.
-	artifactPath := filepath.Join(domainDir, "artifacts.yaml")
 	docs := countKindLines(rendered)
 	prior := 0
 	existing, existingErr := os.ReadFile(artifactPath)
@@ -289,11 +302,13 @@ func runKustomize(ctx context.Context, o Options, domainDir, kubeconfig string, 
 		secretsDisable = "1"
 	}
 	// render.Build writes the Secret plugin's keys-only setting on every
-	// render: 0 here, whatever the process environment holds.
+	// render, from o.KeysOnly: 0 unless this is lo build --keys-only,
+	// whatever the process environment holds.
 	return render.Build(ctx, domainDir, render.Options{
-		Paths:  o.Paths,
-		Env:    kustomizeEnv(o.Paths, kubeconfig, secretsDisable),
-		Stderr: stderr,
+		Paths:    o.Paths,
+		Env:      kustomizeEnv(o.Paths, kubeconfig, secretsDisable),
+		KeysOnly: o.KeysOnly,
+		Stderr:   stderr,
 	})
 }
 

@@ -12,19 +12,26 @@ import ^utils/template
 
 main::build() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
-  local cluster_override split single no_secrets
+  local cluster_override split single no_secrets keys_only
   local -a args=(
     'domain|:^~domain'   'Domain to use'
     'cluster-override|'  'Override cluster domain for kubeconfig resolution'
     'split|:+'           'Also emit per-resource files under artifacts/ (debug override; declare it in spec.build.artifacts instead)'
     'single|:+'          'Skip the split emit even when the spec declares it (debug override)'
     'no-secrets|:+'      'Split ONLY non-Secret resources; never render, re-encrypt, prune, or even read committed Secret.*.sops.yaml (CI render path — no store/key needed)'
+    'keys-only|:+'       'Print the render to stdout, each secrets.lok8s.dev Secret with its keys only (empty values); reads no store, writes no file'
     "${args[@]:-}"
   )
   :args "Build the domain kustomization into one artifacts.yaml" "${@}"
 
   if (( ${split:-0} && ${single:-0} )); then
     error "--split and --single are mutually exclusive"
+    return 1
+  fi
+  # --keys-only writes the render to stdout and no file, so the flags that
+  # shape the file output contradict it.
+  if (( ${keys_only:-0} && ( ${split:-0} || ${single:-0} ) )); then
+    error "--keys-only and --split/--single are mutually exclusive (--keys-only writes no file)"
     return 1
   fi
   # --no-secrets is a split-time modifier: it only makes sense when a split is
@@ -70,6 +77,13 @@ main::build() {
   echo "lo build: domain ${domain}" >&2
 
   _resolve_kubeconfig_for_domain || return 1
+  # --keys-only: the render goes to stdout, each secrets.lok8s.dev Secret with
+  # its keys only. The keys-only run is its own function (build::keys_only),
+  # never selected through the environment.
+  if (( ${keys_only:-0} )); then
+    build::keys_only "${domain}"
+    return
+  fi
   # --no-secrets rides through to build::split via the env, independent of the
   # split trigger (spec- or flag-driven) — it only shapes WHAT a split emits.
   LOK8S_BUILD_SPLIT="${override}" \
@@ -313,17 +327,8 @@ build::artifacts() {
 
   # Resolve kubeconfig (some targets need it for cluster-aware kustomize
   # plugins like the khelm ChartRenderer kubeVersion check).
-  local kubeconfig="${PATH_BASE}/.kubeconfig/secret.${domain}.yaml"
-  if [[ ! -f "${kubeconfig}" ]]; then
-    local cluster_spec="${domain_dir}/cluster.lok8s.yaml"
-    if [[ -f "${cluster_spec}" ]] && command -v yq &>/dev/null; then
-      local cluster_name
-      cluster_name=$(yq -r '.metadata.name // ""' "${cluster_spec}" 2>/dev/null)
-      if [[ -n "${cluster_name}" ]] && [[ -f "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml" ]]; then
-        kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
-      fi
-    fi
-  fi
+  local kubeconfig
+  kubeconfig=$(build::_render_kubeconfig "${domain}")
 
   # envsubst whitelist: rebuilt on every call so new LOK8S_SPEC_* vars in
   # lo::export_spec_envs are automatically picked up.
@@ -378,6 +383,15 @@ build::artifacts() {
        kustomize build --enable-alpha-plugins "${domain_dir}" \
        | template::envsubst "${envsubst_whitelist}" \
        > "${tmp}"; then
+    # The output guard: an object with the keys-only marker never goes into
+    # the domain's artifacts (artifacts.yaml, and the split made from it).
+    # Keys-only output goes to stdout only (lo build --keys-only). A line
+    # rule, like the document count (Go: hasKeysOnlyMarker).
+    if grep -qE '^[[:blank:]]+secrets\.lok8s\.dev/keys-only:' "${tmp}"; then
+      rm -f "${tmp}"
+      error "refusing to write ${domain}'s render to ${domain_dir}/artifacts.yaml: it holds a keys-only Secret (secrets.lok8s.dev/keys-only); keys-only output goes to stdout only (lo build --keys-only)"
+      return 1
+    fi
     # A render that produced NOTHING must not replace a good artifact.
     #
     # kustomize exits 0 for an empty result — `resources: []`, a target list
@@ -450,6 +464,66 @@ build::artifacts() {
   fi
   if (( split_mode )); then
     build::split "${domain}" || return 1
+  fi
+}
+
+# build::_render_kubeconfig <domain>: echo the kubeconfig the render hands
+# to cluster-aware plugins (kubeconfig pass B; Go: renderKubeconfig):
+# .kubeconfig/secret.<domain>.yaml, else .kubeconfig/<metadata.name>.yaml
+# of the domain's cluster spec when that file exists, else the first path.
+build::_render_kubeconfig() {
+  local domain="${1}"
+  local kubeconfig="${PATH_BASE}/.kubeconfig/secret.${domain}.yaml"
+  if [[ ! -f "${kubeconfig}" ]]; then
+    local cluster_spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+    if [[ -f "${cluster_spec}" ]] && command -v yq &>/dev/null; then
+      local cluster_name
+      cluster_name=$(yq -r '.metadata.name // ""' "${cluster_spec}" 2>/dev/null)
+      if [[ -n "${cluster_name}" ]] && [[ -f "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml" ]]; then
+        kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
+      fi
+    fi
+  fi
+  echo "${kubeconfig}"
+}
+
+# build::keys_only <domain>: render the domain kustomization with the Secret
+# plugin's keys-only run and print it on stdout (lo build --keys-only; Go:
+# build.KeysOnly). Each secrets.lok8s.dev Secret comes out with its key names
+# and empty values, plus the keys-only marker annotation. Store-free like
+# --no-secrets (the plugin's store-free switch is on: no store is read,
+# decrypted or minted) and no file is written: no artifacts.yaml, no split,
+# no prune of the artifacts dir. The render is buffered in a temp file
+# outside the domain dir, so a failed render prints nothing on stdout.
+build::keys_only() {
+  local domain="${1}"
+  local domain_dir="${PATH_CLUSTERS}/${domain}"
+  if ! _has_kustomization "${domain_dir}"; then
+    error "domain ${domain} has no kustomization.yaml — compose its targets there, e.g. resources: [./targets/foo, ../../.targets/bar]"
+    return 1
+  fi
+  build::_export_secrets_path "${domain_dir}"
+  build::_resolve_api "${domain_dir}"
+  local kubeconfig envsubst_whitelist tmp docs=0
+  kubeconfig=$(build::_render_kubeconfig "${domain}")
+  envsubst_whitelist=$(template::envsubst_whitelist)
+  tmp=$(mktemp)
+  if KUBECONFIG="${kubeconfig}" \
+     KHELM_TRUST_ANY_REPO=true \
+     LOK8S_SECRETS_DISABLE=1 \
+     LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1 \
+       kustomize build --enable-alpha-plugins "${domain_dir}" \
+       | template::envsubst "${envsubst_whitelist}" \
+       > "${tmp}"; then
+    docs=$(grep -c '^kind:' "${tmp}" 2>/dev/null) || true
+    (( docs > 0 )) || warn "${domain} rendered 0 documents — is its kustomization.yaml composing any targets?"
+    cat "${tmp}"
+    rm -f "${tmp}"
+    echo "lo build: ${domain} rendered ${docs} document(s) -> stdout (keys only)" >&2
+  else
+    rm -f "${tmp}"
+    error "kustomize build failed for ${domain}"
+    return 1
   fi
 }
 

@@ -6,6 +6,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,7 +47,7 @@ func TestBuildRefusesASecondDocument(t *testing.T) {
 			}
 			testutil.WriteFile(t, filepath.Join(p.Clusters, "a.dev", "kustomization.yaml"), "resources: []\n")
 			var stderr bytes.Buffer
-			err := runBuild(t.Context(), p, buildOpts{domainFlag: "a.dev"}, &stderr)
+			err := runBuild(t.Context(), p, buildOpts{domainFlag: "a.dev"}, io.Discard, &stderr)
 			if !errors.Is(err, ErrHandled) {
 				t.Fatalf("err = %v", err)
 			}
@@ -61,5 +62,33 @@ func TestBuildRefusesASecondDocument(t *testing.T) {
 				t.Errorf("the build wrote artifacts.yaml (stat: %v)", err)
 			}
 		})
+	}
+}
+
+// --keys-only writes the render to stdout and no file, so --split and
+// --single contradict it: the build stops before the domain banner and
+// writes nothing.
+func TestBuildKeysOnlyExcludesSplitAndSingle(t *testing.T) {
+	t.Setenv("DOMAIN_NAME", "")
+	t.Setenv("KUBECONFIG", "")
+	for _, o := range []buildOpts{
+		{domainFlag: "a.dev", keysOnly: true, split: true},
+		{domainFlag: "a.dev", keysOnly: true, single: true},
+	} {
+		p := synthProject(t)
+		testutil.WriteFile(t, filepath.Join(p.Clusters, "a.dev", "kustomization.yaml"), "resources: []\n")
+		var stdout, stderr bytes.Buffer
+		if err := runBuild(t.Context(), p, o, &stdout, &stderr); !errors.Is(err, ErrHandled) {
+			t.Fatalf("%+v: err = %v", o, err)
+		}
+		if want := "[error] --keys-only and --split/--single are mutually exclusive (--keys-only writes no file)\n"; stderr.String() != want {
+			t.Errorf("%+v: stderr = %q, want %q", o, stderr.String(), want)
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("%+v: stdout = %q", o, stdout.String())
+		}
+		if _, err := os.Stat(filepath.Join(p.Clusters, "a.dev", "artifacts.yaml")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%+v: the build wrote artifacts.yaml (stat: %v)", o, err)
+		}
 	}
 }

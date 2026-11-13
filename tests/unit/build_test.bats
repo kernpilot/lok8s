@@ -97,6 +97,78 @@ teardown() {
   [ "$(cat "${KENV}")" = "keys-only=0 disable=1" ]
 }
 
+# lo build --keys-only (build::keys_only): the render runs with the keys-only
+# run and the store-free switch on, goes to stdout, and nothing is written to
+# the domain dir: a prior artifacts.yaml and a pre-domain per-target dir stay.
+@test "build::keys_only prints the keys-only render on stdout and writes no file" {
+  export KENV="${BATS_TEST_TMPDIR}/kenv"
+  kustomize() {
+    printf 'keys-only=%s disable=%s\n' "${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}" "${LOK8S_SECRETS_DISABLE-<unset>}" > "${KENV}"
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test-cm\n'
+  }
+  export -f kustomize
+  export LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0 LOK8S_SECRETS_DISABLE=0
+  local domain_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
+  echo "kind: Prior" > "${domain_dir}/artifacts.yaml"
+  mkdir -p "${domain_dir}/artifacts/old"
+  echo "kind: Old" > "${domain_dir}/artifacts/old/artifacts.yaml"
+
+  build::keys_only "test.lok8s.dev" > "${BATS_TEST_TMPDIR}/out" 2> "${BATS_TEST_TMPDIR}/err"
+
+  [ "$(cat "${KENV}")" = "keys-only=1 disable=1" ]
+  [ "$(cat "${BATS_TEST_TMPDIR}/out")" = "$(printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test-cm')" ]
+  run cat "${BATS_TEST_TMPDIR}/err"
+  assert_output --partial "lo build: test.lok8s.dev rendered 1 document(s) -> stdout (keys only)"
+  [ "$(cat "${domain_dir}/artifacts.yaml")" = "kind: Prior" ]
+  [ "$(cat "${domain_dir}/artifacts/old/artifacts.yaml")" = "kind: Old" ]
+  run bash -c "ls '${domain_dir}' | grep -c '^tmp\.'"
+  assert_output "0"
+}
+
+@test "build::keys_only prints nothing on stdout when the render fails" {
+  # Under the real errexit+pipefail of the lo entry.
+  run bash -c '
+    set -euo pipefail
+    import() { :; }
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/verbose.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/domain.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/targets.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/template.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/libs/build"
+    export PATH_BASE="'"${BATS_TEST_TMPDIR}"'"
+    export PATH_CLUSTERS="'"${BATS_TEST_TMPDIR}"'/clusters"
+    template::envsubst_whitelist() { echo ""; }
+    kustomize() { echo "apiVersion: v1"; echo "kind: ConfigMap"; return 1; }   # a partial render, then a failure
+    export -f template::envsubst_whitelist kustomize
+    build::keys_only "test.lok8s.dev"
+  '
+  assert_failure
+  refute_output --partial "kind: ConfigMap"
+  assert_output --partial "kustomize build failed for test.lok8s.dev"
+}
+
+# The output guard: a render that holds an object with the keys-only marker
+# is never written into the domain's artifacts (Go: hasKeysOnlyMarker). The
+# prior artifacts.yaml stays, no split is made, no temp file is left.
+@test "build::artifacts refuses a render that holds the keys-only marker" {
+  kustomize() {
+    printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\n  name: app\n'
+  }
+  export -f kustomize
+  local domain_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
+  local split
+  for split in 0 1; do
+    echo "kind: Prior" > "${domain_dir}/artifacts.yaml"
+    LOK8S_BUILD_SPLIT="${split}" LOK8S_BUILD_NO_SECRETS=1 run build::artifacts "test.lok8s.dev"
+    assert_failure
+    assert_output --partial "refusing to write test.lok8s.dev's render to ${domain_dir}/artifacts.yaml: it holds a keys-only Secret (secrets.lok8s.dev/keys-only); keys-only output goes to stdout only (lo build --keys-only)"
+    [ "$(cat "${domain_dir}/artifacts.yaml")" = "kind: Prior" ]
+    [ ! -d "${domain_dir}/artifacts" ]
+    run bash -c "ls '${domain_dir}' | grep -c '^tmp\.'"
+    assert_output "0"
+  done
+}
+
 @test "build::artifacts defaults to \$DOMAIN_NAME when no domain arg is given" {
   export DOMAIN_NAME="test.lok8s.dev"
   kustomize() { printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }

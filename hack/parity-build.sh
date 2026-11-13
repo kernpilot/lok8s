@@ -313,7 +313,36 @@ for impl in bash go; do
   ! grep -qE '^kind: Secret|secrets.lok8s.dev/keys-only' "${f}" 2>/dev/null \
     || fail "keys-only setting inherited: build --no-secrets (${impl}) — the output carries a Secret"
 done
+# --keys-only: the build itself turns the setting on. The render goes to
+# stdout (diffed across the sides), each secrets.lok8s.dev Secret with its
+# key and an empty value plus the keys-only marker, never the value, and no
+# artifacts.yaml is written. --split and --single contradict it.
+check "build --keys-only"                                prep_gen build --domain gen.dev --keys-only
+for impl in bash go; do
+  if ! grep -q 'secrets.lok8s.dev/keys-only: "true"' "${WORK}/${impl}.out" || ! grep -q 'USER: ""' "${WORK}/${impl}.out"; then
+    fail "build --keys-only (${impl}) — stdout lacks the keys-only Secret"
+  fi
+  ! grep -q 'YWxpY2U=' "${WORK}/${impl}.out" || fail "build --keys-only (${impl}) — stdout carries the value"
+  [[ ! -e "${WORK}/state.${impl}/gen.artifacts.yaml" ]] || fail "build --keys-only (${impl}) — artifacts.yaml was written"
+done
+check "--keys-only/--split exclusion"                    prep_gen build --domain gen.dev --keys-only --split
+check "--keys-only/--single exclusion"                   prep_gen build --domain gen.dev --keys-only --single
 unset LOK8S_INTERNAL_SECRETS_KEYS_ONLY LOK8S_SECRETS_DISABLE
-rm -rf "${PROJ}/clusters/gen.dev" "${PROJ}/.kustomize"
+
+# The output guard: a render that holds an object with the keys-only marker
+# (here a plain Secret resource that carries the annotation) is never written
+# into the domain's artifacts. Both sides refuse with the same message and
+# write nothing.
+mkdir -p "${PROJ}/clusters/guard.dev/secrets"
+printf 'kind: Lo\nmetadata:\n  name: guard\n' > "${PROJ}/clusters/guard.dev/cluster.lok8s.yaml"
+printf 'resources:\n  - secret.yaml\n' > "${PROJ}/clusters/guard.dev/kustomization.yaml"
+printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: one\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\ndata:\n  USER: ""\n' \
+  > "${PROJ}/clusters/guard.dev/secret.yaml"
+prep_guard() { rm -rf "${PROJ}/clusters/guard.dev/artifacts.yaml" "${PROJ}/clusters/guard.dev/artifacts"; }
+check "output guard: keys-only marker refused"           prep_guard build --domain guard.dev
+grep -qF "[error] refusing to write guard.dev's render to PROJ/clusters/guard.dev/artifacts.yaml: it holds a keys-only Secret" "${WORK}/go.err" \
+  || fail "output guard — no refusal on stderr"
+[[ ! -e "${PROJ}/clusters/guard.dev/artifacts.yaml" ]] || fail "output guard — artifacts.yaml was written"
+rm -rf "${PROJ}/clusters/gen.dev" "${PROJ}/clusters/guard.dev" "${PROJ}/.kustomize"
 
 report
