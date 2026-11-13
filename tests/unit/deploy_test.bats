@@ -23,8 +23,11 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/libs/deploy"
 
   # These tests exercise apply/filter logic, not readiness polling — stub the
-  # scoped wait so it doesn't loop on the fake kubectl.
-  kapply::wait_ready() { :; }
+  # scoped wait so it doesn't loop on the fake kubectl. The stub reads the
+  # manifest, as the real one does: deploy pipes the manifest into it, and
+  # under pipefail a stub that ends before printf writes makes printf fail
+  # with SIGPIPE (rc 141), at random.
+  kapply::wait_ready() { cat >/dev/null; }
   export -f kapply::wait_ready
 
   # Mock kubectl: consume the piped manifest, record verbs on stdout.
