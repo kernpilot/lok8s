@@ -10,7 +10,7 @@
 # three rules (Go needs none of them):
 #   - Tracing off: two lines first. Under `bash -x` (or BASH_XTRACEFD) the
 #     trace would print each assignment and each argument.
-#       [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; ...; }
+#       [[ $- != *[TE]* || ${_ko_in-} == ... ]] || { local - _ko_traps ...; }
 #       [[ $- != *x* ]] || { local -; set +x; }
 #     The second line turns tracing off; `local -` sets the options back on
 #     return, and no child inherits the tracing. The first line comes into
@@ -18,12 +18,26 @@
 #     function inherits the DEBUG, RETURN and ERR traps of its caller, and
 #     such a trap (`trap 'set -x' RETURN`) could turn tracing on again in
 #     the middle of the function. The line saves the three traps and
-#     clears them, turns off xtrace, functrace and errtrace, and runs the
-#     function again with the same arguments; when that run returns, it
-#     sets the traps back and returns its exit status. The lines run
-#     `local -` only when one of these options is on, because bash 4.3 does
-#     not know `local -`: with one of them on, bash 4.3 stops at the start
-#     of lo (keysonly::check_trace_support).
+#     clears them, turns off xtrace and functrace, and runs the function
+#     again with the same arguments (_ko_in marks that run, which does not
+#     do this again). When that run returns, the line sets the traps back
+#     and returns its exit status.
+#     In that run, errtrace is on with an ERR trap of the line, which keeps
+#     errexit (set -e) safe: a failed command does not end the shell in the
+#     middle of the function, where the traps of the caller are not set
+#     back and its ERR trap does not run. The function stops at the failed
+#     command, as under errexit, and the trap returns from each function
+#     with the status of that command, up to the line. The line sets the
+#     traps back and returns the status: the caller fails as for each
+#     failed command (its ERR trap runs, then errexit ends the shell), and
+#     the values of the function are out of scope then. Without errexit,
+#     or where bash ignores it (an `if` condition, a `||` list, a command
+#     substitution), the trap does nothing. A function that sets an ERR
+#     trap of its own cannot use the line. Each copy of the line is the
+#     same; tests/unit/secrets_keys_only_test.bats compares them.
+#     The lines run `local -` only when one of these options is on,
+#     because bash 4.3 does not know `local -`: with one of them on, bash
+#     4.3 stops at the start of lo (keysonly::check_trace_support).
 #   - Exact bytes: a capture keeps the final newlines with a sentinel
 #     (`x="$(cmd && printf .)"; x="${x%.}"`), and the bytes go on with
 #     `printf '%s'`. A plain $(...) strips each final newline, which changes
@@ -132,7 +146,7 @@ keysonly::refusal() {
 # not the file, which can change after the check, and captures it with a
 # sentinel (see the rules at the top).
 keysonly::read_checked_artifact() {
-  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[TE]* || ${_ko_in-} == "${#FUNCNAME[@]}${FUNCNAME[0]}" ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}" _ko_in="$(( ${#FUNCNAME[@]} + 1 ))${FUNCNAME[0]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }
   local domain="${1}" artifact="${2}" content marker=0
   if ! content="$(cat -- "${artifact}" 2>/dev/null && printf .)"; then
@@ -163,7 +177,7 @@ keysonly::refuse_unreadable() {
 # for byte), not the file. Returns 1, and prints nothing on stdout, when
 # the guard refuses the input.
 keysonly::read_checked_file() {
-  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[TE]* || ${_ko_in-} == "${#FUNCNAME[@]}${FUNCNAME[0]}" ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}" _ko_in="$(( ${#FUNCNAME[@]} + 1 ))${FUNCNAME[0]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }
   local prefix="${1}" what="${2}" content
   if ! content="$(cat -- "${3}" 2>/dev/null && printf .)"; then

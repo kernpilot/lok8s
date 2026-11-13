@@ -678,7 +678,7 @@ bootstrap::_skip_reason() {
 # convention the addons reference; other names reach the render but are not
 # whitelisted.
 bootstrap::_apply_one() {
-  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[TE]* || ${_ko_in-} == "${#FUNCNAME[@]}${FUNCNAME[0]}" ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}" _ko_in="$(( ${#FUNCNAME[@]} + 1 ))${FUNCNAME[0]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local addon_name="${1}" addon_dir="${2}" kind="${3}" provider_name="${4}"
   local kubeconfig="${5}" inline_values="${6}" do_wait="${7}" env_lines="${8:-}"
@@ -1187,7 +1187,7 @@ bootstrap::_resolve_parked() {
 # manifest goes to kubectl byte for byte, and tracing is off (the rules at
 # the top of utils/keysonly.sh).
 bootstrap::_restore_d() {
-  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[TE]* || ${_ko_in-} == "${#FUNCNAME[@]}${FUNCNAME[0]}" ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}" _ko_in="$(( ${#FUNCNAME[@]} + 1 ))${FUNCNAME[0]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }
   local domain="${1}" kubeconfig="${2}"
   local rdir="${PATH_CLUSTERS}/${domain}/restore.d"
@@ -1522,7 +1522,7 @@ bootstrap::_reserved_env_name() {
 # unchanged). Runs in a subshell (`$( … )` in _run_dry). Always returns 0;
 # the status is the result. The Go twin: Engine.dryRunOne.
 bootstrap::_dry_run_one() {
-  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[TE]* || ${_ko_in-} == "${#FUNCNAME[@]}${FUNCNAME[0]}" ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}" _ko_in="$(( ${#FUNCNAME[@]} + 1 ))${FUNCNAME[0]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local addon_name="${1}" addon_dir="${2}" kind="${3}" provider_name="${4}"
   local kubeconfig="${5}" inline_values="${6}" env_lines="${7:-}" stem="${8}"
@@ -1703,7 +1703,7 @@ bootstrap::_path_under() {
 # `<apiVersion> <kind> <name>` for a cluster-scoped object) — the Go twin:
 # splitObjects and objectLabel.
 bootstrap::_object_lines() {
-  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[TE]* || ${_ko_in-} == "${#FUNCNAME[@]}${FUNCNAME[0]}" ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}" _ko_in="$(( ${#FUNCNAME[@]} + 1 ))${FUNCNAME[0]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local -a _rc
   printf '%s\n' "${1}" | yq -o=json -I=0 'select(. != null and tag == "!!map")' | jq -S -c '.' | jq -r '
@@ -1721,7 +1721,7 @@ bootstrap::_object_lines() {
 # render's order, then the objects only the second render has (in its
 # order) — the Go twin: nondeterministicObjects.
 bootstrap::_nd_objects() {
-  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[TE]* || ${_ko_in-} == "${#FUNCNAME[@]}${FUNCNAME[0]}" ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}" _ko_in="$(( ${#FUNCNAME[@]} + 1 ))${FUNCNAME[0]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local _a _b
   _a="$(bootstrap::_object_lines "${1}")" || return 1
@@ -1740,7 +1740,7 @@ bootstrap::_nd_objects() {
 # The rendered stream without the named objects (what
 # --ignore-nondeterministic diffs). Empty when nothing is left.
 bootstrap::_without_objects() {
-  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[TE]* || ${_ko_in-} == "${#FUNCNAME[@]}${FUNCNAME[0]}" ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}" _ko_in="$(( ${#FUNCNAME[@]} + 1 ))${FUNCNAME[0]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local _stream="${1}"; shift
   local _kept
@@ -1760,7 +1760,7 @@ bootstrap::_without_objects() {
 # restore.d pseudo-entry). Prints the status word (and only that) on
 # stdout; always returns 0.
 bootstrap::_diff_manifest() {
-  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[TE]* || ${_ko_in-} == "${#FUNCNAME[@]}${FUNCNAME[0]}" ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}" _ko_in="$(( ${#FUNCNAME[@]} + 1 ))${FUNCNAME[0]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local rendered="${1}" stem="${2}" kubeconfig="${3}" label="${4}"
   local diff_input="${5-${1}}"
@@ -1876,7 +1876,7 @@ bootstrap::_diff_manifest() {
 # nothing under restore.d to report — the caller then skips the line
 # entirely, same as a real run skipping an empty restore.d.
 bootstrap::_dry_run_restore_d() {
-  [[ $- != *[TE]* ]] || { local - _ko_traps _ko_rc; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xTE; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[TE]* || ${_ko_in-} == "${#FUNCNAME[@]}${FUNCNAME[0]}" ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}" _ko_in="$(( ${#FUNCNAME[@]} + 1 ))${FUNCNAME[0]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local domain="${1}" kubeconfig="${2}"
   local rdir="${PATH_CLUSTERS}/${domain}/restore.d"

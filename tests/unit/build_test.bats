@@ -461,10 +461,13 @@ YAML
 # build::keys_only holds the render with tracing off (the rules at the top
 # of utils/keysonly.sh): under bash -x, and with BASH_XTRACEFD on a file,
 # no Secret value of the render is in stdout, stderr or the trace. The
-# output shows that the Secret was in the render.
+# output shows that the Secret was in the render. A domain without a
+# kustomization stops it: under errexit and errtrace, it returns that
+# failure to its caller (trace_fail of assert_no_trace_leak).
 @test "build::keys_only traces no Secret value of the render" {
   kustomize() { printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: app\nstringData:\n  PASSWORD: xtrace-canary-keys-only\n'; }
   export -f kustomize
+  local -a trace_fail=(build::keys_only "missing.lok8s.dev")
   assert_no_trace_leak xtrace-canary-keys-only build::keys_only "test.lok8s.dev"
   run build::keys_only "test.lok8s.dev"
   assert_success

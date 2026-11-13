@@ -5,8 +5,9 @@
 # (Go: cmd/lo/main.go). Only `lo build --keys-only` turns it on, for its own
 # render. The render pins of build::artifacts and addons::render, and
 # build::keys_only itself, are tested in build_test.bats and
-# bootstrap_test.bats. The last test is the bash version check of the
-# tracing rules in utils/keysonly.sh.
+# bootstrap_test.bats. The last tests are the bash version check of the
+# tracing rules in utils/keysonly.sh, the trace guard under errexit, and
+# the pin of the copies of that guard.
 
 setup() {
   load "../test_helper"
@@ -189,4 +190,69 @@ _run_lo_stubbed() {
   main="$(grep -n '^main() {' "${_PROJECT_ROOT}/.lok8s/lo" | cut -d: -f1)"
   [ -n "${call}" ] && [ -n "${main}" ] && [ "${call}" -lt "${main}" ]
   [[ "$(sed -n "${call}p" "${_PROJECT_ROOT}/.lok8s/lo")" == keysonly::* ]]
+}
+
+# The trace guard (the first of the two tracing lines of utils/keysonly.sh),
+# in a new bash with the options of lo and errtrace and functrace on: a
+# command that fails in a function that the guarded function calls, after
+# the guarded function holds a value, ends both functions there. The
+# guarded function returns the status to its caller, the ERR trap of the
+# caller runs once in the caller (main), with errtrace, functrace and the
+# RETURN trap of the caller back, and errexit then ends the shell. The ERR
+# trap turns tracing on: the value is in no trace. Without errexit, and in
+# an `if` condition (where bash ignores errexit), the function goes on after
+# the failed command, as bash does without the guard, and the ERR trap of
+# the caller does not run in the function.
+@test "the trace guard returns a failure to its caller under set -eE" {
+  local guard dir="${BATS_TEST_TMPDIR}/unwind" opts
+  guard="$(sed -n '/^keysonly::read_checked_file() {$/{n;p;q;}' "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh")"
+  [[ "${guard}" == '  [[ $- != *[TE]* '* ]] || { echo "no trace guard: ${guard}"; return 1; }
+  mkdir -p "${dir}"
+  {
+    printf 'probe() {\n%s\n' "${guard}"
+    # shellcheck disable=SC2016 # the lines of the probe
+    printf '%s\n' '  [[ $- != *x* ]] || { local -; set +x; }' \
+      '  local value="unwind-canary"' \
+      '  probe_step "${value}"' \
+      '  echo "probe went on" >> "${UNWIND_DIR}/after"' \
+      '}' \
+      'probe_step() { false; echo "step went on" >> "${UNWIND_DIR}/after"; }' \
+      'on_err() { printf "%s E=%s T=%s %s\n" "${FUNCNAME[1]-main}" "${1//[^E]/}" "${1//[^T]/}" "$(trap -p RETURN)" >> "${UNWIND_DIR}/err"; }'
+  } > "${dir}/probe.sh"
+  export UNWIND_DIR="${dir}"
+  for opts in -eE -E if; do
+    rm -f "${dir}/after" "${dir}/err"
+    # shellcheck disable=SC2016 # the script of the new bash
+    run bash -c '
+      set -uo pipefail -E -T
+      [[ "$1" == -E ]] || set -e
+      source "$2"
+      trap "on_err \"\$-\"; set -x" ERR
+      trap ":" RETURN
+      set -x
+      if [[ "$1" == if ]]; then if probe; then echo "probe returned 0" >> "${UNWIND_DIR}/after"; fi; else probe; fi
+      echo "caller went on" >> "${UNWIND_DIR}/after"' _ "${opts}" "${dir}/probe.sh"
+    refute_output --partial "unwind-canary"
+    if [[ "${opts}" == -eE ]]; then
+      assert_failure 1
+      [ ! -e "${dir}/after" ] || { echo "-eE: $(cat "${dir}/after")"; return 1; }
+      [ "$(cat "${dir}/err")" = "main E=E T=T trap -- ':' RETURN" ] || { echo "-eE: the ERR trap wrote: $(cat "${dir}/err" 2>/dev/null)"; return 1; }
+    else
+      assert_success
+      [ ! -e "${dir}/err" ] || { echo "${opts}: the ERR trap ran: $(cat "${dir}/err")"; return 1; }
+      local want=$'step went on\nprobe went on\ncaller went on'
+      [[ "${opts}" != if ]] || want=$'step went on\nprobe went on\nprobe returned 0\ncaller went on'
+      [ "$(cat "${dir}/after")" = "${want}" ] || { echo "${opts}: $(cat "${dir}/after")"; return 1; }
+    fi
+  done
+}
+
+# Each copy of the trace guard in the bash tree is the same line, so the
+# test above holds for each of them (utils/keysonly.sh).
+@test "each copy of the trace guard is the same line" {
+  local -a copies
+  mapfile -t copies < <(grep -rh '_ko_traps="' "${_PROJECT_ROOT}/.lok8s" | sed 's/^ *//' | sort | uniq -c)
+  [ "${#copies[@]}" -eq 1 ] || { printf '%s\n' "${copies[@]}"; return 1; }
+  [[ "${copies[0]}" =~ ^\ *([0-9]+)\ \[\[\ \$-\ !=\ \*\[TE\]\*\  ]] || { echo "${copies[0]}"; return 1; }
+  (( BASH_REMATCH[1] >= 38 )) || { echo "${BASH_REMATCH[1]} copies"; return 1; }
 }

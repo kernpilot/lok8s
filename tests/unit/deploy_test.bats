@@ -287,7 +287,9 @@ YAML
 # Tracing is off where lo holds the bytes of the artifact (the rules at the
 # top of utils/keysonly.sh): under bash -x, and with BASH_XTRACEFD on a
 # file, no Secret value of the artifact is in stdout, stderr or the trace.
-# The kubectl stub shows that the value was applied.
+# The kubectl stub shows that the value was applied. A domain without an
+# artifact stops each of them: under errexit and errtrace, it returns that
+# failure to its caller (trace_fail of assert_no_trace_leak).
 @test "deploy::apply and deploy::apply_filtered trace no Secret value" {
   local artifact="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
   printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  labels:\n    lok8s.dev/type: platform\nstringData:\n  TOKEN: xtrace-canary-deploy\n' >> "${artifact}"
@@ -298,9 +300,11 @@ YAML
       wait)  echo "waited" ;;
     esac
   }
+  local -a trace_fail=(deploy::apply "missing.lok8s.dev")
   assert_no_trace_leak xtrace-canary-deploy deploy::apply "test.lok8s.dev"
   grep -qF xtrace-canary-deploy "${DEPLOY_LOG}"
   rm -f "${DEPLOY_LOG}"
+  trace_fail=(deploy::apply_filtered "missing.lok8s.dev" "lok8s.dev/type" "platform")
   assert_no_trace_leak xtrace-canary-deploy deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "platform"
   grep -qF xtrace-canary-deploy "${DEPLOY_LOG}"
 }

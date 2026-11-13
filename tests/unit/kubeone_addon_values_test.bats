@@ -649,7 +649,10 @@ _apply_within() {
 # stderr or the trace. The manifest names an addons directory, so the run
 # copy (kubeone::_stage_run, kubeone::_copy_dir) holds the CCM render with
 # the token under the trace too. The kubeone stub shows that the Robot
-# password and the token in the copied CCM render reached kubeone.
+# password and the token in the copied CCM render reached kubeone. A work
+# dir without kubeone.yaml stops kubeone::apply: under errexit and
+# errtrace, it returns that failure to its caller (trace_fail of
+# assert_no_trace_leak).
 @test "kubeone::apply and render_addons trace no credential" {
   local cy; cy=$(_cluster_yaml '')
   yq -i '.addons.enable = true | .addons.path = "./addons"' "${work_dir}/kubeone.yaml"
@@ -665,7 +668,12 @@ _apply_within() {
       yq -r '.stringData.token' "$(yq -r '.addons.path' "${manifest}")/ccm-hetzner/ccm.yaml"
     } >> "${KCALLS}" 2>&1
   }
+  local -a trace_fail=(kubeone::apply "${BATS_TEST_TMPDIR}/no-work-dir" "${cy}")
   assert_no_trace_leak xtrace-canary-kubeone kubeone::apply "${work_dir}" "${cy}"
-  [ "$(sort -u "${KCALLS}")" = $'xtrace-canary-kubeone-hcloud\nxtrace-canary-kubeone-robot' ]
+  unset trace_fail
+  # Each of the five runs reached kubeone with both values.
+  [ "$(grep -c '^xtrace-canary-kubeone-robot$' "${KCALLS}")" -eq 5 ] || { cat "${KCALLS}"; return 1; }
+  [ "$(grep -c '^xtrace-canary-kubeone-hcloud$' "${KCALLS}")" -eq 5 ] || { cat "${KCALLS}"; return 1; }
+  [ "$(wc -l < "${KCALLS}")" -eq 10 ] || { cat "${KCALLS}"; return 1; }
   assert_no_trace_leak xtrace-canary-kubeone kubeone::render_addons "${work_dir}" "${cy}"
 }
