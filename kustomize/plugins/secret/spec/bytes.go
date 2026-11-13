@@ -39,7 +39,7 @@ func (b *BytesEntry) UnmarshalYAML(node *yaml.Node) error {
 	case yaml.ScalarNode:
 		var n int
 		if err := node.Decode(&n); err != nil {
-			return kyaml.NodeErrf(node, "bytes shorthand must be an integer byte count, got %q", node.Value)
+			return kyaml.NodeErrf(node, "bytes shorthand must be an integer byte count, got a %s value", node.ShortTag())
 		}
 		b.Bytes = n
 	case yaml.MappingNode:

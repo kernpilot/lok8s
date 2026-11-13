@@ -167,6 +167,8 @@ capture_state() { # <impl> — snapshot generated outputs for cross-impl compare
     && cp "${PROJ}/clusters/gen.dev/artifacts.yaml" "${sdir}/gen.artifacts.yaml"
   [[ -f "${PROJ}/clusters/reuse.dev/artifacts.yaml" ]] \
     && cp "${PROJ}/clusters/reuse.dev/artifacts.yaml" "${sdir}/reuse.artifacts.yaml"
+  [[ -f "${PROJ}/clusters/specerr.dev/artifacts.yaml" ]] \
+    && cp "${PROJ}/clusters/specerr.dev/artifacts.yaml" "${sdir}/specerr.artifacts.yaml"
   local g
   for g in guard.dev qguard.dev; do
     [[ -d "${PROJ}/clusters/${g}" ]] || continue
@@ -192,6 +194,11 @@ capture_state() { # <impl> — snapshot generated outputs for cross-impl compare
       done
     fi
   done
+}
+
+# kustomize names the temporary config file of a failed plugin in its error.
+parity_normalize() {
+  sed -i -E 's/kust-plugin-config-[0-9]+/kust-plugin-config-N/g' "$@"
 }
 
 # check <name> <prep-fn> <argv...>: the prep runs before EACH implementation,
@@ -407,7 +414,7 @@ done
 # The keys-only output of a domain with only a plain Secret carries the
 # marker, so a normal build that takes it as a resource is refused (the
 # output guard), and nothing is written.
-mkdir -p "${PROJ}/clusters/plainonly.dev" "${PROJ}/clusters/reuse.dev"
+mkdir -p "${PROJ}/clusters/plainonly.dev" "${PROJ}/clusters/reuse.dev/secrets"
 printf 'kind: Lo\nmetadata:\n  name: plainonly\n' > "${PROJ}/clusters/plainonly.dev/cluster.lok8s.yaml"
 printf 'resources:\n  - plain.yaml\n' > "${PROJ}/clusters/plainonly.dev/kustomization.yaml"
 printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: only\n  namespace: one\ndata:\n  PLAIN: cGxhaW4tdmFsdWU=\n' \
@@ -427,10 +434,32 @@ for impl in bash go; do
   [[ ! -e "${WORK}/state.${impl}/reuse.artifacts.yaml" ]] || fail "build refuses the keys-only output as a resource (${impl}) — artifacts.yaml was written"
 done
 
-# The keys-only run does not empty annotations, so a Secret with the
-# last-applied annotation (it can hold the values) is refused through the
-# real kustomize: the same message on both sides, one line per Secret,
-# nothing on stdout and no value on stderr.
+# A malformed value in a Secret spec fails the build, normal and keys-only,
+# with an error that names the section and the key: no part of the value is
+# on stdout or stderr. One malformed entry per spec (kustomize hands the
+# plugin its config with sorted keys, and the first error stops it): a
+# string as the passwd shorthand, and a string as a passwd length.
+mkdir -p "${PROJ}/clusters/specerr.dev/secrets"
+printf 'kind: Lo\nmetadata:\n  name: specerr\n' > "${PROJ}/clusters/specerr.dev/cluster.lok8s.yaml"
+printf 'generators:\n  - secret.yaml\n' > "${PROJ}/clusters/specerr.dev/kustomization.yaml"
+for entry in 'shorthand=Zq7-actual-password' 'length={length: Zq7-actual-length}'; do
+  printf 'apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: one\npasswd:\n  PASSWORD: %s\n' "${entry#*=}" \
+    > "${PROJ}/clusters/specerr.dev/secret.yaml"
+  for mode in "" --keys-only; do
+    name="build ${mode:+${mode} }names the key of a malformed spec value, not the value (${entry%%=*})"
+    check "${name}" : build --domain specerr.dev ${mode:+"${mode}"}
+    for impl in bash go; do
+      ! grep -q Zq7 "${WORK}/${impl}.out" "${WORK}/${impl}.err" || fail "${name} (${impl}) — the value is printed"
+      grep -qF 'passwd.PASSWORD: ' "${WORK}/${impl}.err" || fail "${name} (${impl}) — the error names no key"
+      [[ ! -e "${WORK}/state.${impl}/specerr.artifacts.yaml" ]] || fail "${name} (${impl}) — artifacts.yaml was written"
+    done
+  done
+done
+
+# The keys-only run empties the value of each Secret annotation, but a
+# Secret with the last-applied annotation (it can hold the values) is
+# refused all the same, through the real kustomize: the same message on both
+# sides, one line per Secret, nothing on stdout and no value on stderr.
 mkdir -p "${PROJ}/clusters/applied.dev"
 printf 'kind: Lo\nmetadata:\n  name: applied\n' > "${PROJ}/clusters/applied.dev/cluster.lok8s.yaml"
 printf 'resources:\n  - applied.yaml\n' > "${PROJ}/clusters/applied.dev/kustomization.yaml"
@@ -564,6 +593,6 @@ for impl in bash go; do
   ! grep -qx './artifacts.yaml' "${WORK}/state.${impl}/qguard.dev.tree" \
     || fail "output guard, quoted marker (${impl}) — artifacts.yaml was written"
 done
-rm -rf "${PROJ}/clusters/gen.dev" "${PROJ}/clusters/blank.dev" "${PROJ}/clusters/applied.dev" "${PROJ}/clusters/plainonly.dev" "${PROJ}/clusters/reuse.dev" "${PROJ}/clusters/guard.dev" "${PROJ}/clusters/qguard.dev" "${PROJ}/.kustomize"
+rm -rf "${PROJ}/clusters/gen.dev" "${PROJ}/clusters/blank.dev" "${PROJ}/clusters/applied.dev" "${PROJ}/clusters/plainonly.dev" "${PROJ}/clusters/reuse.dev" "${PROJ}/clusters/specerr.dev" "${PROJ}/clusters/guard.dev" "${PROJ}/clusters/qguard.dev" "${PROJ}/.kustomize"
 
 report

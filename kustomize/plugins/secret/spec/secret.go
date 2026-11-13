@@ -9,6 +9,7 @@
 package spec
 
 import (
+	"errors"
 	"io"
 	"sort"
 
@@ -86,11 +87,22 @@ func (s *Secret) ValidationEnabled() bool {
 }
 
 // Decode reads a Secret from r with strict field checking. Returns a
-// structured *errs.Error on parse failures (with line numbers).
+// structured *errs.Error on parse failures (with line numbers and, for an
+// error in a section, the path <section>.<key>). An error never holds a
+// value of the spec: a value can be a secret.
 func Decode(r io.Reader) (*Secret, error) {
-	var s Secret
-	if err := kyaml.DecodeStrict(r, &s); err != nil {
+	data, err := io.ReadAll(r)
+	if err != nil {
 		return nil, err
+	}
+	return DecodeBytes(data)
+}
+
+// DecodeBytes is the []byte form of Decode.
+func DecodeBytes(data []byte) (*Secret, error) {
+	var s Secret
+	if err := kyaml.DecodeStrictBytes(data, &s); err != nil {
+		return nil, withSpecPath(data, err)
 	}
 	if err := s.validate(); err != nil {
 		return nil, err
@@ -98,16 +110,45 @@ func Decode(r io.Reader) (*Secret, error) {
 	return &s, nil
 }
 
-// DecodeBytes is the []byte form of Decode.
-func DecodeBytes(data []byte) (*Secret, error) {
-	var s Secret
-	if err := kyaml.DecodeStrictBytes(data, &s); err != nil {
-		return nil, err
+// withSpecPath sets the path of a decode error from its position: the
+// top-level key that holds the position and, in a mapping, the key of the
+// entry (passwd.PASSWORD). A section can hold a secret value, so the
+// path, not the value, says where the error is.
+func withSpecPath(data []byte, err error) error {
+	var e *errs.Error
+	if !errors.As(err, &e) || e.Line == 0 || e.Path != "" {
+		return err
 	}
-	if err := s.validate(); err != nil {
-		return nil, err
+	var doc yaml.Node
+	if yaml.Unmarshal(data, &doc) != nil || len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return err
 	}
-	return &s, nil
+	section, value := keyAt(doc.Content[0], e.Line, e.Col)
+	if section == "" {
+		return err
+	}
+	e.Path = section
+	if value.Kind == yaml.MappingNode {
+		if key, _ := keyAt(value, e.Line, e.Col); key != "" {
+			e.Path = section + "." + key
+		}
+	}
+	return err
+}
+
+// keyAt returns the last key of the mapping m (and its value) that starts
+// at or before line:col (col 0: anywhere on the line), or "" when the
+// position is before the first key.
+func keyAt(m *yaml.Node, line, col int) (string, *yaml.Node) {
+	key, value := "", (*yaml.Node)(nil)
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		k := m.Content[i]
+		if k.Line > line || (k.Line == line && col > 0 && k.Column > col) {
+			break
+		}
+		key, value = k.Value, m.Content[i+1]
+	}
+	return key, value
 }
 
 // validate checks the structural invariants of a decoded Secret. It

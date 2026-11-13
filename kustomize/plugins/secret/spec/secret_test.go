@@ -1,8 +1,11 @@
 package spec
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/kernpilot/lok8s/kustomize/pkg/errs"
 )
 
 func TestDecodeBytes_Minimal(t *testing.T) {
@@ -482,5 +485,36 @@ file:
 	_, err := DecodeBytes(in)
 	if err == nil || !strings.Contains(err.Error(), "path") {
 		t.Errorf("expected path error, got %v", err)
+	}
+}
+
+// errorCanary is the start of each malformed value below. A spec value
+// can be a secret, so no decode error may hold it.
+const errorCanary = "Zq7"
+
+// TestDecodeBytes_ErrorNamesThePathNotTheValue: a malformed value gives an
+// error with the line, the section and the key, and without the value.
+func TestDecodeBytes_ErrorNamesThePathNotTheValue(t *testing.T) {
+	head := "apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: app\n"
+	for name, tc := range map[string]struct{ body, path string }{
+		"passwd shorthand":    {"passwd:\n  PASSWORD: Zq7-actual-password\n", "passwd.PASSWORD"},
+		"passwd short length": {"passwd:\n  PASSWORD: {length: Zq7pw}\n", "passwd.PASSWORD"},
+		"passwd long length":  {"passwd:\n  OTHER: 8\n  PASSWORD:\n    length: Zq7-actual-password\n", "passwd.PASSWORD"},
+		"bytes shorthand":     {"template:\n  DSN:\n    pattern: \"{K}\"\n    bytes:\n      K: Zq7-actual-bytes\n", "template.DSN"},
+		"validate":            {"validate: Zq7-actual\nliterals: {A: b}\n", "validate"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := DecodeBytes([]byte(head + tc.body))
+			if err == nil {
+				t.Fatal("the malformed spec decoded")
+			}
+			if strings.Contains(err.Error(), errorCanary) {
+				t.Errorf("the error holds the value: %v", err)
+			}
+			var e *errs.Error
+			if !errors.As(err, &e) || e.Path != tc.path || e.Line == 0 {
+				t.Errorf("error %v (%#v), want line and path %s", err, e, tc.path)
+			}
+		})
 	}
 }

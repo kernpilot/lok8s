@@ -352,9 +352,10 @@ YAML
   refute_output --partial "kubectl"
 }
 
-# The keys-only run does not empty annotations, so a Secret with the
-# last-applied annotation (kubectl apply writes it; it can hold the
-# values) is refused: the output must not look complete when it is not.
+# The keys-only run empties the value of each Secret annotation, but a
+# Secret with the last-applied annotation (kubectl apply writes it; it can
+# hold the values) is refused all the same: the output must not look
+# complete when it is not.
 # A Secret document, one without a namespace (flow style, a quoted key), a
 # List item, a SecretList item without a kind and a merge key; not a
 # ConfigMap, not another annotation. Go:

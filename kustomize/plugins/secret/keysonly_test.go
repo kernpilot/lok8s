@@ -318,6 +318,40 @@ func TestKeysOnly_RefusesLikeARealRun(t *testing.T) {
 	}
 }
 
+// TestKeysOnly_SpecErrorWithoutValue: a malformed value fails the run, in
+// keys-only mode and in a real run, with an error (what the plugin prints
+// to stderr) that names the section and key and holds no part of the
+// value; the run emits nothing.
+func TestKeysOnly_SpecErrorWithoutValue(t *testing.T) {
+	head := "apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata: {name: a, namespace: n}\n"
+	for name, tc := range map[string]struct{ body, path string }{
+		"passwd shorthand": {"passwd:\n  PASSWORD: Zq7-actual-password\n", "passwd.PASSWORD"},
+		"passwd length":    {"passwd:\n  PASSWORD: {length: Zq7-actual-password}\n", "passwd.PASSWORD"},
+		"bytes shorthand":  {"template:\n  DSN:\n    pattern: \"{K}\"\n    bytes:\n      K: Zq7-actual-bytes\n", "template.DSN"},
+	} {
+		for mode, env := range map[string]map[string]string{
+			"keys-only": keysOnlyEnv(nil),
+			"real":      {PathSecretsEnv: t.TempDir()},
+		} {
+			t.Run(name+"/"+mode, func(t *testing.T) {
+				out, err := runEntry(t, []byte(head+tc.body), env)
+				if err == nil {
+					t.Fatalf("the malformed spec passed:\n%s", out)
+				}
+				if strings.Contains(err.Error(), "Zq7") || strings.Contains(out, "Zq7") {
+					t.Errorf("the value is in the output or the error: %v\n%s", err, out)
+				}
+				if !strings.Contains(err.Error(), "line ") || !strings.Contains(err.Error(), " "+tc.path+": ") {
+					t.Errorf("error %v names no line or no %s", err, tc.path)
+				}
+				if out != "" {
+					t.Errorf("emitted:\n%s", out)
+				}
+			})
+		}
+	}
+}
+
 // TestKeysOnly_CertKeys: each cert shape gives the keys of a real run.
 func TestKeysOnly_CertKeys(t *testing.T) {
 	for body, want := range map[string][]string{

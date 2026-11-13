@@ -176,3 +176,34 @@ func TestDecodeNodeStrict_UnknownField(t *testing.T) {
 		t.Errorf("error should mention bar: %q", err.Error())
 	}
 }
+
+// TestDecodeStrictBytes_TypeErrorWithoutValue: yaml.v3 quotes the input
+// value in a type error (all of it up to 10 characters, else the first 7).
+// The decode error names the tag and keeps the line, not the value.
+func TestDecodeStrictBytes_TypeErrorWithoutValue(t *testing.T) {
+	for _, v := range []string{"Zq7pw", "Zq7-a-long-value"} {
+		var s sample
+		err := DecodeStrictBytes([]byte("name: alice\nage: "+v+"\n"), &s)
+		var e *errs.Error
+		if !errors.As(err, &e) || e.Line != 2 {
+			t.Fatalf("%s: want an error on line 2, got %v", v, err)
+		}
+		if strings.Contains(err.Error(), "Zq7") || !strings.Contains(e.Msg, "cannot unmarshal !!str value into int") {
+			t.Errorf("%s: error %q", v, err)
+		}
+	}
+}
+
+// TestRedactValue: only the quoted value of a type error goes.
+func TestRedactValue(t *testing.T) {
+	for in, want := range map[string]string{
+		"cannot unmarshal !!str `hunter2` into int":     "cannot unmarshal !!str value into int",
+		"cannot unmarshal !!str `hunter2...` into bool": "cannot unmarshal !!str value into bool",
+		"cannot unmarshal !!map into string":            "cannot unmarshal !!map into string",
+		"field email not found in type kyaml.sample":    "field email not found in type kyaml.sample",
+	} {
+		if got := RedactValue(in); got != want {
+			t.Errorf("RedactValue(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

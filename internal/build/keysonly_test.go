@@ -433,9 +433,9 @@ metadata:
     other: "{}"
 `
 
-// The keys-only run does not empty annotations, so a Secret with the
-// last-applied annotation is refused: the output must not look complete
-// when it is not. The message names each Secret and no value; nothing
+// The keys-only run empties the value of each Secret annotation, but a
+// Secret with the last-applied annotation is refused all the same: the
+// output must not look complete when it is not. The message names each Secret and no value; nothing
 // goes to stdout.
 func TestKeysOnlyRefusesTheLastAppliedAnnotation(t *testing.T) {
 	p, _, _ := keysOnlyProject(t)

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -74,14 +75,40 @@ func wrapDecodeErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	msg := strings.TrimPrefix(err.Error(), "yaml: ")
+	// yaml.v3 returns the error of a custom UnmarshalYAML as it is: keep
+	// its line, column and message.
+	var existing *errs.Error
+	if errors.As(err, &existing) {
+		return existing
+	}
+	msg := firstDecodeError(err.Error())
+	line := parseLinePrefix(&msg)
+	return errs.At(line, 0, msg)
+}
+
+// firstDecodeError is the first error of a yaml.v3 message, without the
+// "yaml:" / "unmarshal errors" preamble and without the input value that
+// yaml.v3 quotes in a type error.
+func firstDecodeError(msg string) string {
+	msg = strings.TrimPrefix(msg, "yaml: ")
 	// Multi-line "unmarshal errors" form: take the first inner line.
 	if strings.HasPrefix(msg, "unmarshal errors:\n") {
 		lines := strings.SplitN(msg[len("unmarshal errors:\n"):], "\n", 2)
 		msg = strings.TrimLeft(lines[0], " \t")
 	}
-	line := parseLinePrefix(&msg)
-	return errs.At(line, 0, msg)
+	return RedactValue(msg)
+}
+
+// quotedValue is the input value that yaml.v3 quotes in a type error:
+// "cannot unmarshal !!str `<value>` into int" (the first 7 characters and
+// "..." for a value of more than 10).
+var quotedValue = regexp.MustCompile("(cannot unmarshal \\S+) `.*` into ")
+
+// RedactValue removes the input value from a yaml.v3 type error. A spec
+// value can be a secret, so an error names the field and the YAML tag,
+// never the value.
+func RedactValue(msg string) string {
+	return quotedValue.ReplaceAllString(msg, "$1 value into ")
 }
 
 // parseLinePrefix detects a leading "line N: " marker in *msg, strips it,
@@ -112,15 +139,15 @@ func wrapNodeErr(node *yaml.Node, err error) error {
 	if err == nil {
 		return nil
 	}
+	// A line in err is a line of the re-marshalled node, not of the input:
+	// the position is the node's.
 	var existing *errs.Error
 	if errors.As(err, &existing) {
-		// Already structured — preserve, but if it has no line, use the node's.
-		if existing.Line == 0 {
-			existing.Line = node.Line
-			existing.Col = node.Column
-		}
+		existing.Line = node.Line
+		existing.Col = node.Column
 		return existing
 	}
-	msg := strings.TrimPrefix(err.Error(), "yaml: ")
+	msg := firstDecodeError(err.Error())
+	_ = parseLinePrefix(&msg)
 	return errs.At(node.Line, node.Column, msg)
 }
