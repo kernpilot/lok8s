@@ -453,6 +453,29 @@ YAML
   refute_output --partial "rendered"
 }
 
+# The stderr of the render and of yq is withheld in keys-only mode: it can
+# quote an input value. A failure gets one fixed line. Go:
+# TestKeysOnlyWithholdsTheRenderStderr, TestKeysOnlyUnparsedRenderPrintsNothing.
+@test "build::keys_only withholds the stderr of the render and of yq" {
+  local withheld="in keys-only mode lo does not print its stderr, which can quote a value: run the build without --keys-only to see it"
+  kustomize() { echo "Error: a value Zq7-stderr-canary" >&2; return "${STUB_RC}"; }
+  export -f kustomize
+  _keys_only_quiet() { build::keys_only "test.lok8s.dev" > "${BATS_TEST_TMPDIR}/out"; }
+  STUB_RC=1 run _keys_only_quiet
+  assert_failure
+  refute_output --partial "Zq7-stderr-canary"
+  assert_output --partial "[error] kustomize build failed for test.lok8s.dev (${withheld})"
+  STUB_RC=0 run _keys_only_quiet
+  assert_success
+  refute_output --partial "Zq7-stderr-canary"
+  kustomize() { printf 'a: [b\n'; }
+  export -f kustomize
+  run _keys_only_quiet
+  assert_failure
+  assert_output --partial "[error] lo build --keys-only: yq could not empty the Secret values of test.lok8s.dev's render (${withheld})"
+  refute_output --partial "Error:"
+}
+
 @test "build::keys_only prints nothing on stdout when the render fails" {
   # Under the real errexit+pipefail of the lo entry.
   run bash -c '

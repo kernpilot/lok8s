@@ -569,7 +569,9 @@ build::_keys_only_capable() {
 # (build::_keys_only_capable). The render is held in variables, not in a
 # file, so an interrupt leaves nothing behind and a failed render prints
 # nothing on stdout. The trailing "." keeps the final newlines that $(...)
-# would strip.
+# would strip. The stderr of the render (kustomize and its plugins) and of
+# yq is withheld, as it can quote an input value: a failure prints one
+# fixed line (_KEYSONLY_WITHHELD) and returns 1.
 build::keys_only() {
   local domain="${1}"
   local domain_dir="${PATH_CLUSTERS}/${domain}"
@@ -592,6 +594,7 @@ build::keys_only() {
   envsubst_whitelist=$(template::envsubst_whitelist)
   local expr='explode(.) | (.. | select(kind == "map") | select(.kind == "Secret") | select(has("metadata") or has("data") or has("stringData"))) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "" | ((.[] | select(key == "metadata") | select(kind == "map") | .[] | select(key == "labels" or key == "annotations") | select(kind == "map")) | .. | select(kind == "scalar" and tag != "!!null")) = "" | .metadata.annotations["secrets.lok8s.dev/keys-only"] = "true" | ... comments = "") | (.. | select(kind == "map") | select(.kind == "SecretList") | .[] | select(key == "items") | select(kind == "seq") | .[] | select(kind == "map")) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "" | ((.[] | select(key == "metadata") | select(kind == "map") | .[] | select(key == "labels" or key == "annotations") | select(kind == "map")) | .. | select(kind == "scalar" and tag != "!!null")) = "" | .metadata.annotations["secrets.lok8s.dev/keys-only"] = "true" | ... comments = "")'
   if ! rendered=$(
+    exec 2>/dev/null
     set -o pipefail
     KUBECONFIG="${kubeconfig}" \
     KUSTOMIZE_PLUGIN_HOME="${plugin_home}" \
@@ -601,14 +604,14 @@ build::keys_only() {
       kustomize build --enable-alpha-plugins "${domain_dir}" \
       | template::envsubst "${envsubst_whitelist}" && printf '.'
   ); then
-    error "kustomize build failed for ${domain}"
+    error "kustomize build failed for ${domain} (${_KEYSONLY_WITHHELD})"
     return 1
   fi
   if ! blanked=$(
     set -o pipefail
-    printf '%s' "${rendered%.}" | yq --yaml-fix-merge-anchor-to-spec "${expr}" - && printf '.'
+    printf '%s' "${rendered%.}" | yq --yaml-fix-merge-anchor-to-spec "${expr}" - 2>/dev/null && printf '.'
   ); then
-    error "lo build --keys-only: yq could not empty the Secret values of ${domain}'s render"
+    error "lo build --keys-only: yq could not empty the Secret values of ${domain}'s render (${_KEYSONLY_WITHHELD})"
     return 1
   fi
   blanked="${blanked%.}"
@@ -618,9 +621,9 @@ build::keys_only() {
   local last_applied_expr='explode(.) | ((.. | select(kind == "map") | select(.kind == "Secret")), (.. | select(kind == "map") | select(.kind == "SecretList") | .[] | select(key == "items") | select(kind == "seq") | .[] | select(kind == "map") | select(.kind != "Secret"))) | select(.metadata | kind == "map") | select(.metadata.annotations | kind == "map") | select(.metadata.annotations | has("kubectl.kubernetes.io/last-applied-configuration")) | .metadata | pick(["namespace", "name"]) | with_entries(select((.value | kind) == "scalar" and (.value | tag) != "!!null")) | to_entries | map(.value) | join("/") | sub("^", "Secret ")'
   if ! last_applied=$(
     set -o pipefail
-    printf '%s' "${blanked}" | yq -N --yaml-fix-merge-anchor-to-spec "${last_applied_expr}" -
+    printf '%s' "${blanked}" | yq -N --yaml-fix-merge-anchor-to-spec "${last_applied_expr}" - 2>/dev/null
   ); then
-    error "lo build --keys-only: yq could not check ${domain}'s render for the annotation kubectl.kubernetes.io/last-applied-configuration"
+    error "lo build --keys-only: yq could not check ${domain}'s render for the annotation kubectl.kubernetes.io/last-applied-configuration (${_KEYSONLY_WITHHELD})"
     return 1
   fi
   if [[ -n "${last_applied}" ]]; then

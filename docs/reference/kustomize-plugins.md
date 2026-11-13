@@ -728,7 +728,10 @@ secret plugin: line 6:13: passwd.PASSWORD: cannot unmarshal !!str value into int
 
 kustomize writes the generator config again before the plugin reads it, so
 the line is a line of that copy. The section and the key say where the
-error is in the source.
+error is in the source. kustomize parses the config first: a value with an
+explicit YAML tag that does not resolve (for example `!!int` on a string)
+stops kustomize before the plugin runs, and the error of kustomize quotes
+the value. `lo build --keys-only` does not print the stderr of the render.
 
 ## Helm Charts via khelm
 

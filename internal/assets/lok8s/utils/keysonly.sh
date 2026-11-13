@@ -9,6 +9,11 @@
 # spec reader, spec::_kver_read).
 _KEYSONLY_OLD_YQ='the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (b install installs the pinned yq).'
 
+# The end of the message of a failed keys-only render or yq run (Go:
+# keysOnlyWithheld): lo does not print their stderr, as it can quote an
+# input value.
+_KEYSONLY_WITHHELD='in keys-only mode lo does not print its stderr, which can quote a value: run the build without --keys-only to see it'
+
 # keysonly::has_marker <file|->: look for an object with the keys-only
 # marker in the YAML stream <file> (- reads stdin; Go:
 # build.HasKeysOnlyMarker). The marker is a mapping, at any depth of any

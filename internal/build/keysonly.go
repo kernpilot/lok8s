@@ -65,6 +65,10 @@ const lastAppliedAnnotation = "kubectl.kubernetes.io/last-applied-configuration"
 // TestKeysOnlyLastAppliedExprMatchesBash checks the text.
 const KeysOnlyLastAppliedExpr = `explode(.) | ((.. | select(kind == "map") | select(.kind == "Secret")), (.. | select(kind == "map") | select(.kind == "SecretList") | .[] | select(key == "items") | select(kind == "seq") | .[] | select(kind == "map") | select(.kind != "Secret"))) | select(.metadata | kind == "map") | select(.metadata.annotations | kind == "map") | select(.metadata.annotations | has("kubectl.kubernetes.io/last-applied-configuration")) | .metadata | pick(["namespace", "name"]) | with_entries(select((.value | kind) == "scalar" and (.value | tag) != "!!null")) | to_entries | map(.value) | join("/") | sub("^", "Secret ")`
 
+// keysOnlyWithheld ends the message of a failed keys-only render or yq
+// run: lo does not print their stderr, as it can quote an input value.
+const keysOnlyWithheld = "in keys-only mode lo does not print its stderr, which can quote a value: run the build without --keys-only to see it"
+
 // keysOnlyCapability is the line that `Secret --capabilities` prints when
 // the plugin has the keys-only run.
 const keysOnlyCapability = "keys-only"
@@ -334,7 +338,9 @@ func checkKeysOnlyPlugin(ctx context.Context, o *Options, stderr io.Writer) erro
 // pipeline the Secret plugin must have the keys-only run
 // (checkKeysOnlyPlugin). The other generators and resources render as in
 // a normal build; yq writes the stream, so its layout can differ from
-// artifacts.yaml.
+// artifacts.yaml. The stderr of the render (kustomize and its plugins) and
+// of yq is withheld, as it can quote an input value: a failure prints one
+// fixed line (keysOnlyWithheld) and returns ErrHandled.
 func KeysOnly(ctx context.Context, o Options, out io.Writer) error {
 	stderr := o.stderr()
 	domainDir := filepath.Join(o.Paths.Clusters, o.Domain)
@@ -357,9 +363,12 @@ func KeysOnly(ctx context.Context, o Options, out io.Writer) error {
 
 	o.NoSecrets = true
 	o.KeysOnly = true
-	rendered, err := runKustomize(ctx, o, domainDir, kubeconfig, stderr)
+	// The stderr of the render and of yq is withheld: kustomize, its
+	// plugins and yq can quote an input value in an error. A failure gets
+	// one fixed line; the exit status stays.
+	rendered, err := runKustomize(ctx, o, domainDir, kubeconfig, io.Discard)
 	if err != nil {
-		ui.ErrorTo(stderr, "kustomize build failed for %s", o.Domain)
+		ui.ErrorTo(stderr, "kustomize build failed for %s (%s)", o.Domain, keysOnlyWithheld)
 		return ErrHandled
 	}
 	rendered = Envsubst(rendered, whitelist)
@@ -369,9 +378,9 @@ func KeysOnly(ctx context.Context, o Options, out io.Writer) error {
 		Args:   []string{"--yaml-fix-merge-anchor-to-spec", KeysOnlyBlankExpr, "-"},
 		Stdin:  bytes.NewReader(rendered),
 		Stdout: &blanked,
-		Stderr: stderr,
+		Stderr: io.Discard,
 	}); err != nil {
-		ui.ErrorTo(stderr, "lo build --keys-only: yq could not empty the Secret values of %s's render", o.Domain)
+		ui.ErrorTo(stderr, "lo build --keys-only: yq could not empty the Secret values of %s's render (%s)", o.Domain, keysOnlyWithheld)
 		return ErrHandled
 	}
 	var lastApplied bytes.Buffer
@@ -380,9 +389,9 @@ func KeysOnly(ctx context.Context, o Options, out io.Writer) error {
 		Args:   []string{"-N", "--yaml-fix-merge-anchor-to-spec", KeysOnlyLastAppliedExpr, "-"},
 		Stdin:  bytes.NewReader(blanked.Bytes()),
 		Stdout: &lastApplied,
-		Stderr: stderr,
+		Stderr: io.Discard,
 	}); err != nil {
-		ui.ErrorTo(stderr, "lo build --keys-only: yq could not check %s's render for the annotation %s", o.Domain, lastAppliedAnnotation)
+		ui.ErrorTo(stderr, "lo build --keys-only: yq could not check %s's render for the annotation %s (%s)", o.Domain, lastAppliedAnnotation, keysOnlyWithheld)
 		return ErrHandled
 	}
 	if found := strings.TrimRight(lastApplied.String(), "\n"); found != "" {

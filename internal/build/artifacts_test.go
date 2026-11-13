@@ -16,8 +16,9 @@ import (
 // named by KUSTOMIZE_STUB_OUTPUT (empty output when unset), writes the
 // KUSTOMIZE_PLUGIN_HOME it was given to the file named by
 // KUSTOMIZE_STUB_ENVLOG (when set), the Secret plugin's keys-only and
-// store-free settings to KUSTOMIZE_STUB_KEYSLOG (when set), and exits
-// with KUSTOMIZE_STUB_RC — and
+// store-free settings to KUSTOMIZE_STUB_KEYSLOG (when set), writes
+// KUSTOMIZE_STUB_STDERR to its stderr (when set), and exits with
+// KUSTOMIZE_STUB_RC — and
 // pins the render to the exec pipeline (LO_RENDER=exec) so the stub is
 // what runs. The promote/guard logic under test is pipeline-agnostic;
 // TestArtifactsInProcessRender covers the default in-process pipeline over
@@ -32,6 +33,7 @@ func stubKustomize(t *testing.T, p *config.Paths) {
 		"[ -n \"${KUSTOMIZE_STUB_OUTPUT:-}\" ] && cat \"${KUSTOMIZE_STUB_OUTPUT}\"\n" +
 		"[ -n \"${KUSTOMIZE_STUB_ENVLOG:-}\" ] && printf '%s\\n' \"${KUSTOMIZE_PLUGIN_HOME:-<unset>}\" > \"${KUSTOMIZE_STUB_ENVLOG}\"\n" +
 		"[ -n \"${KUSTOMIZE_STUB_KEYSLOG:-}\" ] && printf 'keys-only=%s disable=%s\\n' \"${" + secret.KeysOnlyEnv + "-<unset>}\" \"${LOK8S_SECRETS_DISABLE-<unset>}\" > \"${KUSTOMIZE_STUB_KEYSLOG}\"\n" +
+		"[ -n \"${KUSTOMIZE_STUB_STDERR:-}\" ] && printf '%s\\n' \"${KUSTOMIZE_STUB_STDERR}\" >&2\n" +
 		"exit \"${KUSTOMIZE_STUB_RC:-0}\"\n"
 	if err := os.WriteFile(filepath.Join(p.Bin, "kustomize"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)

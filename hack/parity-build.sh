@@ -435,22 +435,42 @@ for impl in bash go; do
 done
 
 # A malformed value in a Secret spec fails the build, normal and keys-only,
-# with an error that names the section and the key: no part of the value is
-# on stdout or stderr. One malformed entry per spec (kustomize hands the
-# plugin its config with sorted keys, and the first error stops it): a
-# string as the passwd shorthand, and a string as a passwd length.
+# and no part of the value is on stdout or stderr. A normal build prints the
+# plugin's error, which names the section and the key; a keys-only build
+# withholds the stderr of the render and prints one fixed line. One
+# malformed entry per spec (kustomize hands the plugin its config with
+# sorted keys, and the first error stops it): a string as the passwd
+# shorthand, as a passwd length and as a tagged length (both forms in which
+# yaml.v3 quotes a value), and as a key algorithm. kustomize itself stops on
+# the tagged length when it loads the generator config, before the plugin
+# runs, and its error quotes the value: only the keys-only build, which
+# withholds that stderr, runs that case.
 mkdir -p "${PROJ}/clusters/specerr.dev/secrets"
 printf 'kind: Lo\nmetadata:\n  name: specerr\n' > "${PROJ}/clusters/specerr.dev/cluster.lok8s.yaml"
 printf 'generators:\n  - secret.yaml\n' > "${PROJ}/clusters/specerr.dev/kustomization.yaml"
-for entry in 'shorthand=Zq7-actual-password' 'length={length: Zq7-actual-length}'; do
-  printf 'apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: one\npasswd:\n  PASSWORD: %s\n' "${entry#*=}" \
+specerr_cases=(
+  'shorthand|passwd.PASSWORD|both|passwd:\n  PASSWORD: Zq7-actual-password\n'
+  'length|passwd.PASSWORD|both|passwd:\n  PASSWORD: {length: Zq7-actual-length}\n'
+  'tagged length|passwd.PASSWORD|keys-only|passwd:\n  PASSWORD: {length: !!int Zq7-actual-length}\n'
+  'algorithm|key.PRIVATE|both|key:\n  PRIVATE: Zq7-actual-password\n'
+)
+for c in "${specerr_cases[@]}"; do
+  IFS='|' read -r label path modes body <<<"${c}"
+  printf 'apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: one\n%b' "${body}" \
     > "${PROJ}/clusters/specerr.dev/secret.yaml"
   for mode in "" --keys-only; do
-    name="build ${mode:+${mode} }names the key of a malformed spec value, not the value (${entry%%=*})"
+    [[ -n "${mode}" || "${modes}" == both ]] || continue
+    name="build ${mode:+${mode} }prints no part of a malformed spec value (${label})"
     check "${name}" : build --domain specerr.dev ${mode:+"${mode}"}
     for impl in bash go; do
       ! grep -q Zq7 "${WORK}/${impl}.out" "${WORK}/${impl}.err" || fail "${name} (${impl}) — the value is printed"
-      grep -qF 'passwd.PASSWORD: ' "${WORK}/${impl}.err" || fail "${name} (${impl}) — the error names no key"
+      if [[ -z "${mode}" ]]; then
+        grep -qF "${path}: " "${WORK}/${impl}.err" || fail "${name} (${impl}) — the error names no key"
+      else
+        grep -qF 'kustomize build failed for specerr.dev (in keys-only mode lo does not print its stderr, which can quote a value: run the build without --keys-only to see it)' "${WORK}/${impl}.err" \
+          || fail "${name} (${impl}) — no withheld-stderr line"
+        ! grep -qF "${path}: " "${WORK}/${impl}.err" || fail "${name} (${impl}) — the render's stderr is printed"
+      fi
       [[ ! -e "${WORK}/state.${impl}/specerr.artifacts.yaml" ]] || fail "${name} (${impl}) — artifacts.yaml was written"
     done
   done

@@ -173,6 +173,11 @@ put a checksum of a Secret in an annotation of a pod template.
 `--keys-only` writes no file. It does not change `artifacts.yaml` or the split
 directory. You cannot use it with `--split` or `--single`.
 
+`--keys-only` does not print the stderr of the render (kustomize and its
+plugins) and of `yq`, because an error can quote an input value. When the
+render fails, `lo` prints one line that says so and exits with an error. To
+see the cause, run the build without `--keys-only`.
+
 Before the render, `lo` checks the installed Secret plugin: the plugin must
 have the keys-only run (`Secret --capabilities` prints the line
 `keys-only`). An older plugin does not know the keys-only setting, so `lo`

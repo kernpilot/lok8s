@@ -538,6 +538,38 @@ func TestKeysOnlyFailedRenderPrintsNothing(t *testing.T) {
 	}
 }
 
+// The stderr of the render is withheld in keys-only mode: kustomize and
+// its plugins can quote an input value in an error. A failed render gets
+// one fixed line; a render that succeeds prints its result line only.
+func TestKeysOnlyWithholdsTheRenderStderr(t *testing.T) {
+	const canary = "Zq7-stderr-canary"
+	for name, rc := range map[string]string{"failed": "1", "succeeded": "0"} {
+		t.Run(name, func(t *testing.T) {
+			p, _, _ := keysOnlyProject(t)
+			stubRender(t, p, twoDocRender)
+			t.Setenv("KUSTOMIZE_STUB_RC", rc)
+			t.Setenv("KUSTOMIZE_STUB_STDERR", "Error: a value "+canary)
+			var stdout, stderr bytes.Buffer
+			err := KeysOnly(t.Context(), Options{Paths: p, Domain: "d.dev", Stderr: &stderr}, &stdout)
+			if strings.Contains(stderr.String(), canary) || strings.Contains(stdout.String(), canary) {
+				t.Errorf("the render's stderr is printed:\nstdout: %s\nstderr: %s", stdout.String(), stderr.String())
+			}
+			if rc == "0" {
+				if err != nil {
+					t.Fatalf("KeysOnly: %v\n%s", err, stderr.String())
+				}
+				return
+			}
+			if !errors.Is(err, ErrHandled) {
+				t.Fatalf("KeysOnly = %v, want ErrHandled", err)
+			}
+			if want := "[error] kustomize build failed for d.dev (" + keysOnlyWithheld + ")"; !strings.Contains(stderr.String(), want) {
+				t.Errorf("stderr = %q, want %q", stderr.String(), want)
+			}
+		})
+	}
+}
+
 // A render that yq cannot read prints nothing on stdout.
 func TestKeysOnlyUnparsedRenderPrintsNothing(t *testing.T) {
 	p, _, _ := keysOnlyProject(t)
@@ -549,8 +581,11 @@ func TestKeysOnlyUnparsedRenderPrintsNothing(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Errorf("stdout = %q, want nothing", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "[error] lo build --keys-only: yq could not empty the Secret values of d.dev's render") {
+	if !strings.Contains(stderr.String(), "[error] lo build --keys-only: yq could not empty the Secret values of d.dev's render ("+keysOnlyWithheld+")") {
 		t.Errorf("stderr = %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "Error:") {
+		t.Errorf("the stderr of yq is printed: %q", stderr.String())
 	}
 }
 
