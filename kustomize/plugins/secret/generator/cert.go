@@ -48,10 +48,12 @@ func (g *Cert) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 	if ctx.Cache == nil {
 		return nil, errs.New("cert generator requires PATH_SECRETS to be set")
 	}
-	if g.spec.CARoot {
-		if g.spec.CA || len(g.spec.Hosts) > 0 || g.spec.CARef != "" {
-			return nil, errs.New("cert: `caRoot: true` (emit the shared CAROOT CA cert) takes no other field except `includeKey`")
-		}
+	shape, err := certShapeOf(g.spec)
+	if err != nil {
+		return nil, err
+	}
+	switch shape {
+	case certCARoot:
 		caCrt, caKey, err := caRootCA(ctx) // load-or-create at CAROOT
 		if err != nil {
 			return nil, err
@@ -60,24 +62,68 @@ func (g *Cert) Generate(ctx *plugin.Context) ([]plugin.Entry, error) {
 			return caIssuerEntries(caCrt, caKey)
 		}
 		return []plugin.Entry{{Key: "ca.crt", Value: caCrt}}, nil
-	}
-	if g.spec.CA && len(g.spec.Hosts) > 0 {
-		return nil, errs.New("cert: set either `ca: true` or `hosts:` (a leaf), not both")
-	}
-	if g.spec.CA {
-		if g.spec.CARef != "" {
-			return nil, errs.New("cert: `ca: true` and `caRef` are mutually exclusive")
-		}
+	case certCA:
 		// An own CA, in THIS Secret's store cache.
 		return caEntries(ctx, ctx.Cache, g.spec.IncludeKey)
+	default:
+		return g.leafEntries(ctx)
 	}
-	if g.spec.IncludeKey {
-		return nil, errs.New("cert: `includeKey` is for CA Secrets (`ca: true` or `caRoot: true`) — a leaf always emits its key")
+}
+
+// certShape is what a cert spec makes: the shared CAROOT CA, an own CA, or
+// a leaf.
+type certShape int
+
+const (
+	certCARoot certShape = iota
+	certCA
+	certLeaf
+)
+
+// certShapeOf checks the fields of a cert spec and tells its shape. Generate
+// and CertKeys both use it, so a keys-only run refuses exactly the specs
+// that a real run refuses, with the same message.
+func certShapeOf(spec *specpkg.CertSpec) (certShape, error) {
+	if spec.CARoot {
+		if spec.CA || len(spec.Hosts) > 0 || spec.CARef != "" {
+			return 0, errs.New("cert: `caRoot: true` (emit the shared CAROOT CA cert) takes no other field except `includeKey`")
+		}
+		return certCARoot, nil
 	}
-	if len(g.spec.Hosts) == 0 {
-		return nil, errs.New("cert: a leaf needs `hosts:` (or set `ca: true`)")
+	if spec.CA && len(spec.Hosts) > 0 {
+		return 0, errs.New("cert: set either `ca: true` or `hosts:` (a leaf), not both")
 	}
-	return g.leafEntries(ctx)
+	if spec.CA {
+		if spec.CARef != "" {
+			return 0, errs.New("cert: `ca: true` and `caRef` are mutually exclusive")
+		}
+		return certCA, nil
+	}
+	if spec.IncludeKey {
+		return 0, errs.New("cert: `includeKey` is for CA Secrets (`ca: true` or `caRoot: true`) — a leaf always emits its key")
+	}
+	if len(spec.Hosts) == 0 {
+		return 0, errs.New("cert: a leaf needs `hosts:` (or set `ca: true`)")
+	}
+	return certLeaf, nil
+}
+
+// CertKeys returns the data keys that Generate emits for spec, in the order
+// it emits them, without a store, a CA or a key: a CA emits ca.crt (with
+// includeKey the CA pair as tls.crt and tls.key), a leaf tls.crt and
+// tls.key. A nil spec emits nothing. The keys-only run uses it.
+func CertKeys(spec *specpkg.CertSpec) ([]string, error) {
+	if spec == nil {
+		return nil, nil
+	}
+	shape, err := certShapeOf(spec)
+	if err != nil {
+		return nil, err
+	}
+	if shape == certLeaf || spec.IncludeKey {
+		return []string{"tls.crt", "tls.key"}, nil
+	}
+	return []string{"ca.crt"}, nil
 }
 
 // caEntries loads-or-creates a CA (key + self-signed cert) in store c. By

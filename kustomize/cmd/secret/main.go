@@ -15,6 +15,11 @@
 //   - LOK8S_SECRETS_OUTPUT=none — run the full pipeline (store reads/mints
 //     and validation intact) but suppress the emit write.
 //
+// One more variable is internal to lo, never a user setting:
+// LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1 together with LOK8S_SECRETS_DISABLE=1
+// emits each key with an empty value and reads nothing but the spec (`lo
+// build --keys-only`). Without DISABLE it is an error.
+//
 // See ../../plugins/secret for the plugin assembly and
 // ../../pkg/plugin for the runtime contract.
 package main
