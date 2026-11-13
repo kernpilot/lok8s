@@ -129,6 +129,14 @@ metadata:
 YAML
 }
 artifact_empty() { printf '# just a comment\n---\n' > "${PROJ}/clusters/alpha.dev/artifacts.yaml"; }
+# The full artifact plus a Secret with the keys-only marker (a quoted key),
+# and an artifact that does not parse as YAML: lo deploy refuses both.
+artifact_keys_only() {
+  artifact_full
+  printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: default\n  labels:\n    lok8s.dev/type: platform\n  annotations:\n    "secrets.lok8s.dev/keys-only": "true"\ndata:\n  TOKEN: ""\n' \
+    >> "${PROJ}/clusters/alpha.dev/artifacts.yaml"
+}
+artifact_unparsed() { printf 'apiVersion: v1\nkind: ConfigMap\ndata: [x\n' > "${PROJ}/clusters/alpha.dev/artifacts.yaml"; }
 artifact_none()  { rm -f "${PROJ}/clusters/alpha.dev/artifacts.yaml"; }
 
 # check <stdin|-> <argv...> — run both impls in the shared project, diff.
@@ -186,6 +194,19 @@ check - deploy --domain alpha.dev -l app=x extra
 export PARITY_KUBECTL_APPLY_RC=1
 check - deploy --domain alpha.dev -l lok8s.dev/type=platform
 unset PARITY_KUBECTL_APPLY_RC
+# An artifact with the keys-only marker, and one that does not parse: both
+# routes refuse before kubectl runs (the stub kubectl prints its verbs).
+for artifact in artifact_keys_only artifact_unparsed; do
+  "${artifact}"
+  check - deploy --domain alpha.dev
+  grep -qF "[error] refusing to apply alpha.dev: PROJ/clusters/alpha.dev/artifacts.yaml" "${WORK}/go.err" \
+    || fail "deploy (${artifact}): no refusal on stderr"
+  ! grep -qE 'serverside-applied|condition met' "${WORK}/go.out" "${WORK}/go.err" || fail "deploy (${artifact}): kubectl ran"
+  check - deploy --domain alpha.dev -l lok8s.dev/type=platform
+  grep -qF "[error] refusing to apply alpha.dev: PROJ/clusters/alpha.dev/artifacts.yaml" "${WORK}/go.err" \
+    || fail "deploy -l (${artifact}): no refusal on stderr"
+  ! grep -qE 'serverside-applied|condition met' "${WORK}/go.out" "${WORK}/go.err" || fail "deploy -l (${artifact}): kubectl ran"
+done
 unset LOK8S_NONINTERACTIVE   # recover below treats it as CONSENT
 
 # ── lo gitops ────────────────────────────────────────────────────────────────

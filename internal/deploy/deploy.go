@@ -28,12 +28,14 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
+	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 )
 
 // ErrHandled marks a failure whose [error] line was already printed.
@@ -113,8 +115,35 @@ func (d *Deployer) Apply(ctx context.Context, domain string) error {
 		ui.ErrorTo(d.stderr(), "no artifact for %s: %s — run 'lo build' first", domain, artifact)
 		return ErrHandled
 	}
+	if err := d.refuseKeysOnly(domain, artifact); err != nil {
+		return err
+	}
 	ui.DebugTo(d.stderr(), "Deploying %s from %s", domain, artifact)
 	return d.applyFile(ctx, domain, artifact, true)
+}
+
+// refuseKeysOnly refuses an artifact that holds an object with the
+// keys-only marker (bash: deploy::_refuse_keys_only). Such a Secret has
+// its key names and empty values only (lo build --keys-only): applied, it
+// would replace each value in the cluster with an empty one. `lo build`
+// never writes one into artifacts.yaml; this catches a file written in
+// another way. The check parses the artifact (build.HasKeysOnlyMarker),
+// and an artifact that does not parse is refused too.
+func (d *Deployer) refuseKeysOnly(domain, artifact string) error {
+	raw, err := os.ReadFile(artifact)
+	marked := false
+	if err == nil {
+		marked, err = build.HasKeysOnlyMarker(raw)
+	}
+	switch {
+	case err != nil:
+		ui.ErrorTo(d.stderr(), "refusing to apply %s: %s does not parse as YAML, so it cannot be checked for a keys-only Secret (%s)", domain, artifact, secret.KeysOnlyAnnotation)
+		return ErrHandled
+	case marked:
+		ui.ErrorTo(d.stderr(), "refusing to apply %s: %s holds a keys-only Secret (%s), which would replace each value with an empty one — run 'lo build' again", domain, artifact, secret.KeysOnlyAnnotation)
+		return ErrHandled
+	}
+	return nil
 }
 
 // ApplyFiltered applies only the resources in the domain artifact carrying
@@ -138,6 +167,9 @@ func (d *Deployer) ApplyFiltered(ctx context.Context, domain, labelKey, labelVal
 	if !fsutil.FileExists(artifact) {
 		ui.ErrorTo(d.stderr(), "no artifact for %s: %s — run 'lo build' first", domain, artifact)
 		return ErrHandled
+	}
+	if err := d.refuseKeysOnly(domain, artifact); err != nil {
+		return err
 	}
 
 	// Filter the single domain artifact by the (full) label key = value into

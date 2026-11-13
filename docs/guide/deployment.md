@@ -165,9 +165,10 @@ install the plugin of your `lo`. `lo-full` renders with its own plugin and
 needs no check.
 
 `lo build` never writes an object with the `secrets.lok8s.dev/keys-only`
-annotation into `artifacts.yaml` or the split directory. It parses the
-YAML, so a quoted key, a flow-style map and a `List` item count. A render
-that does not parse as YAML also stops with an error. The existing
+annotation into `artifacts.yaml` or the split directory, and `lo deploy`
+does not apply an artifact that holds one. Both commands parse the YAML, so
+a quoted key, a flow-style map and a `List` item count. A render or an
+artifact that does not parse as YAML also stops with an error. The existing
 artifacts do not change.
 
 The flag is the only way to start a keys-only render. lo controls the

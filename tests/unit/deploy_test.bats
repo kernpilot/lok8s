@@ -19,6 +19,7 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/targets.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/deploy"
 
   # These tests exercise apply/filter logic, not readiness polling — stub the
@@ -124,6 +125,47 @@ _shim_main_deploy() {
   printf '# just a comment\n---\n' > "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
   run deploy::apply "test.lok8s.dev"
   assert_success
+  refute_output --partial "applied"
+}
+
+# lo deploy refuses an artifact with the keys-only marker (a Secret with
+# key names and empty values, from lo build --keys-only): applied, it would
+# empty each value in the cluster. The check parses the artifact, so a
+# quoted marker key is the same marker, and an artifact that does not parse
+# is refused too. Nothing reaches kubectl. Go: TestApplyRefusesAKeysOnlyArtifact.
+@test "deploy::apply and deploy::apply_filtered refuse a keys-only artifact" {
+  local artifact="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
+  cat >> "${artifact}" <<'YAML'
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app
+  labels:
+    lok8s.dev/type: platform
+  annotations:
+    "secrets.lok8s.dev/keys-only": "true"
+data:
+  TOKEN: ""
+YAML
+  run deploy::apply "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one — run 'lo build' again"
+  refute_output --partial "applied"
+  refute_output --partial "waited"
+  run deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "platform"
+  assert_failure
+  assert_output --partial "holds a keys-only Secret (secrets.lok8s.dev/keys-only)"
+  refute_output --partial "applied"
+
+  printf 'apiVersion: v1\nkind: ConfigMap\ndata: [x\n' > "${artifact}"
+  run deploy::apply "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
+  refute_output --partial "applied"
+  run deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "platform"
+  assert_failure
+  assert_output --partial "does not parse as YAML"
   refute_output --partial "applied"
 }
 
