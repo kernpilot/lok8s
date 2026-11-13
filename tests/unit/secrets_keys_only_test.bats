@@ -16,10 +16,13 @@ teardown() {
   teardown_tmpdir
 }
 
-# The real `lo` against a throwaway project dir, with stub tools first on
-# PATH. Each stub logs the keys-only value it inherited. The caller's
-# environment carries the setting as 1 (and the store-free switch as 1).
-_run_lo_stubbed() {
+# _run_stubbed <entry> <args...>: run an entry of the bash tree against a
+# throwaway project dir, with stub tools first on PATH. Each stub logs the
+# keys-only value it inherited. The caller's environment carries the
+# setting as 1 (and the store-free switch as 1).
+_run_stubbed() {
+  local entry="${1}"
+  shift
   local proj="${BATS_TEST_TMPDIR}/proj" stub="${BATS_TEST_TMPDIR}/stub" tool
   mkdir -p "${proj}/clusters/d.dev" "${stub}"
   printf 'kind: Lo\nmetadata:\n  name: d\n' > "${proj}/clusters/d.dev/cluster.lok8s.yaml"
@@ -37,7 +40,7 @@ EOF
   done
   export STUB_LOG="${BATS_TEST_TMPDIR}/stub.log"
   : > "${STUB_LOG}"
-  run env -C "${proj}" \
+  run env -C "${proj}" -u KUSTOMIZE_PLUGIN_HOME \
     PATH_BASE="${proj}" \
     PATH_BIN="${_PROJECT_ROOT}/.bin" \
     PATH_LOK8S="${_PROJECT_ROOT}/.lok8s" \
@@ -46,7 +49,12 @@ EOF
     PATH="${stub}:${_PROJECT_ROOT}/.bin:${_PROJECT_ROOT}/.lok8s:${PATH}" \
     LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1 \
     LOK8S_SECRETS_DISABLE=1 \
-    "${_PROJECT_ROOT}/.lok8s/lo" "${@}"
+    "${entry}" "${@}"
+}
+
+# _run_lo_stubbed <args...>: the lo entry, run as _run_stubbed runs it.
+_run_lo_stubbed() {
+  _run_stubbed "${_PROJECT_ROOT}/.lok8s/lo" "${@}"
 }
 
 # `lo version` starts the toolchain with no render overlay of its own: what
@@ -98,4 +106,42 @@ EOF
     assert_output --partial "--keys-only and --split/--single are mutually exclusive (--keys-only writes no file)"
     [ ! -e "${BATS_TEST_TMPDIR}/proj/clusters/d.dev/artifacts.yaml" ]
   done
+}
+
+# The k8s lib is also an entry of its own (`.lok8s/libs/k8s infrastructure`),
+# without the lo entry and its pin. Its two renders hand kustomize the
+# keys-only setting 0 when the caller exported 1.
+@test "the k8s entry's renders pin the keys-only setting to 0" {
+  [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
+  local proj="${BATS_TEST_TMPDIR}/proj" cmd
+  mkdir -p "${proj}/clusters/d.dev/targets" "${proj}/clusters/d.dev/secrets" "${proj}/.k8s/overlays/d.dev"
+  echo '*' > "${proj}/clusters/d.dev/secrets/.gitignore"
+  for cmd in infrastructure platform; do
+    _run_stubbed "${_PROJECT_ROOT}/.lok8s/libs/k8s" "${cmd}" --domain d.dev </dev/null
+    assert_success
+    run cat "${STUB_LOG}"
+    assert_output "kustomize keys-only=0 disable=1"
+  done
+  [ -s "${proj}/clusters/d.dev/artifacts/infrastructure.yaml" ]
+  [ -s "${proj}/.k8s/overlays/d.dev/artifacts/platform.yaml" ]
+}
+
+# Through the lo entry: `lo build --keys-only` refuses an installed Secret
+# plugin without the keys-only run (one that prints only dry-run for
+# --capabilities), before kustomize runs. The plugin gets the probe only.
+@test "lo build --keys-only refuses an older Secret plugin" {
+  [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
+  local plugin="${BATS_TEST_TMPDIR}/proj/.kustomize/secrets.lok8s.dev/v1/secret/Secret"
+  mkdir -p "${plugin%/*}"
+  export PLUGIN_LOG="${BATS_TEST_TMPDIR}/plugin.log"
+  printf '#!/bin/sh\necho "plugin $*" >> "${PLUGIN_LOG}"\necho dry-run\n' > "${plugin}"
+  chmod +x "${plugin}"
+  _run_lo_stubbed build --domain d.dev --keys-only </dev/null
+  assert_failure
+  assert_output --partial "the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not have the keys-only run"
+  refute_output --partial "kind: ConfigMap"
+  run cat "${STUB_LOG}"
+  refute_output --partial "kustomize"
+  run cat "${PLUGIN_LOG}"
+  assert_output "plugin --capabilities"
 }

@@ -9,6 +9,7 @@ import ^utils/types
 import ^utils/domain
 import ^utils/verbose
 import ^utils/template
+import ^utils/keysonly
 
 main::build() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
@@ -19,7 +20,7 @@ main::build() {
     'split|:+'           'Also emit per-resource files under artifacts/ (debug override; declare it in spec.build.artifacts instead)'
     'single|:+'          'Skip the split emit even when the spec declares it (debug override)'
     'no-secrets|:+'      'Split ONLY non-Secret resources; never render, re-encrypt, prune, or even read committed Secret.*.sops.yaml (CI render path — no store/key needed)'
-    'keys-only|:+'       'Print the render to stdout, each secrets.lok8s.dev Secret with its keys only (empty values); reads no store, writes no file'
+    'keys-only|:+'       'Print the render to stdout with the values of every Secret emptied (key names kept); reads no store, writes no file'
     "${args[@]:-}"
   )
   :args "Build the domain kustomization into one artifacts.yaml" "${@}"
@@ -77,9 +78,9 @@ main::build() {
   echo "lo build: domain ${domain}" >&2
 
   _resolve_kubeconfig_for_domain || return 1
-  # --keys-only: the render goes to stdout, each secrets.lok8s.dev Secret with
-  # its keys only. The keys-only run is its own function (build::keys_only),
-  # never selected through the environment.
+  # --keys-only: the render goes to stdout with the values of every Secret
+  # emptied. The keys-only run is its own function (build::keys_only), never
+  # selected through the environment.
   if (( ${keys_only:-0} )); then
     build::keys_only "${domain}"
     return
@@ -335,18 +336,6 @@ build::artifacts() {
   local envsubst_whitelist
   envsubst_whitelist=$(template::envsubst_whitelist)
 
-  # Clean stale per-target artifact dirs from the pre-domain-build era so
-  # `lo status`/hooks don't read phantom outputs. Only framework-generated
-  # subdirs (each held an artifacts.yaml) are removed; env's overlay
-  # kustomization.yaml, capi.yaml and .cache-queue live as files directly
-  # under artifacts/ and are preserved.
-  if [[ -d "${domain_dir}/artifacts" ]]; then
-    local sd
-    for sd in "${domain_dir}"/artifacts/*/; do
-      [[ -d "${sd}" && -f "${sd}artifacts.yaml" ]] && rm -rf "${sd}"
-    done
-  fi
-
   # Render the whole domain (all composed targets) into one artifact. Directory
   # bases outside the domain root (../../.targets/*) are kustomize bases, allowed
   # under the default load restrictor; only raw-file refs would need relaxing.
@@ -385,11 +374,18 @@ build::artifacts() {
        > "${tmp}"; then
     # The output guard: an object with the keys-only marker never goes into
     # the domain's artifacts (artifacts.yaml, and the split made from it).
-    # Keys-only output goes to stdout only (lo build --keys-only). A line
-    # rule, like the document count (Go: hasKeysOnlyMarker).
-    if grep -qE '^[[:blank:]]+secrets\.lok8s\.dev/keys-only:' "${tmp}"; then
+    # Keys-only output goes to stdout only (lo build --keys-only). The guard
+    # parses the stream (keysonly::has_marker; Go: HasKeysOnlyMarker); a
+    # render that does not parse cannot be checked, so it is refused too.
+    local marker=0
+    keysonly::has_marker "${tmp}" || marker=$?
+    if (( marker != 1 )); then
       rm -f "${tmp}"
-      error "refusing to write ${domain}'s render to ${domain_dir}/artifacts.yaml: it holds a keys-only Secret (secrets.lok8s.dev/keys-only); keys-only output goes to stdout only (lo build --keys-only)"
+      if (( marker == 2 )); then
+        error "refusing to write ${domain}'s render to ${domain_dir}/artifacts.yaml: it does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
+      else
+        error "refusing to write ${domain}'s render to ${domain_dir}/artifacts.yaml: it holds a keys-only Secret (secrets.lok8s.dev/keys-only); keys-only output goes to stdout only (lo build --keys-only)"
+      fi
       return 1
     fi
     # A render that produced NOTHING must not replace a good artifact.
@@ -429,6 +425,20 @@ build::artifacts() {
       return 1
     fi
     (( docs > 0 )) || warn "${domain} rendered 0 documents (no prior artifact, so nothing was lost) — is its kustomization.yaml composing any targets?"
+
+    # Clean stale per-target artifact dirs from the pre-domain-build era so
+    # `lo status`/hooks don't read phantom outputs. Only framework-generated
+    # subdirs (each held an artifacts.yaml) are removed; env's overlay
+    # kustomization.yaml, capi.yaml and .cache-queue live as files directly
+    # under artifacts/ and are preserved. The prune runs only after the
+    # render passed every check above: a failed or refused render changes
+    # nothing in the domain dir.
+    if [[ -d "${domain_dir}/artifacts" ]]; then
+      local sd
+      for sd in "${domain_dir}"/artifacts/*/; do
+        [[ -d "${sd}" && -f "${sd}artifacts.yaml" ]] && rm -rf "${sd}"
+      done
+    fi
 
     # Promote ONLY when the content changed. An unconditional mv refreshes the
     # mtime of a byte-identical artifact, and everything that WATCHES the file
@@ -487,14 +497,56 @@ build::_render_kubeconfig() {
   echo "${kubeconfig}"
 }
 
+# build::_keys_only_capable <plugin home>: refuse a Secret plugin that does
+# not have the keys-only run (Go: checkKeysOnlyPlugin). The bash tree always
+# runs the plugin binary in the plugin home, and build::keys_only gives
+# kustomize the same home, so the probe checks the plugin that the render
+# runs. A plugin older than the keys-only run does not know the setting, and
+# a plugin older than v0.2.0 does not know the store-free switch either: it
+# would read the store and run the generators. The probe is `Secret --capabilities`, run so that no
+# plugin version can do anything with it: in an empty temporary directory
+# (a subshell removes it on exit), with an empty stdin, PATH_SECRETS at a
+# path in that directory that does not exist, the store-free switch on and
+# the keys-only setting off. A plugin that knows the flag prints its
+# capabilities. A plugin from v0.2.0 on that does not know the flag stops
+# on the store-free switch and prints nothing. A plugin before v0.2.0 opens
+# "--capabilities" as its spec file, which does not exist, and fails.
+# hack/proof-secrets-keys-only-skew.sh runs the probe on every release. A
+# project without the plugin file renders no secrets.lok8s.dev Secret (the
+# render fails on such a generator), so there is nothing to check.
+build::_keys_only_capable() {
+  local plugin="${1}/secrets.lok8s.dev/v1/secret/Secret" caps=""
+  [[ -f "${plugin}" ]] || return 0
+  caps=$(
+    probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/lok8s-keys-only-XXXXXX") || exit 1
+    trap 'rm -rf "${probe_dir}"' EXIT
+    cd "${probe_dir}" || exit 1
+    PATH_SECRETS="${probe_dir}/store" \
+    LOK8S_SECRETS_DISABLE=1 \
+    LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0 \
+      "${plugin}" --capabilities </dev/null 2>/dev/null
+  ) || caps=""
+  [[ $'\n'"${caps}"$'\n' == *$'\nkeys-only\n'* ]] && return 0
+  error "the Secret plugin ${plugin#"${PATH_BASE}/"} does not have the keys-only run (an older plugin would read the secrets store) — run 'lo toolchain install' to install the plugin of this lo"
+  return 1
+}
+
 # build::keys_only <domain>: render the domain kustomization with the Secret
 # plugin's keys-only run and print it on stdout (lo build --keys-only; Go:
-# build.KeysOnly). Each secrets.lok8s.dev Secret comes out with its key names
-# and empty values, plus the keys-only marker annotation. Store-free like
-# --no-secrets (the plugin's store-free switch is on: no store is read,
-# decrypted or minted) and no file is written: no artifacts.yaml, no split,
-# no prune of the artifacts dir. The render is buffered in a temp file
-# outside the domain dir, so a failed render prints nothing on stdout.
+# build.KeysOnly). The contract: it prints no Secret value. The plugin emits
+# each secrets.lok8s.dev Secret with its key names, empty values and the
+# keys-only marker annotation. Then the yq program below (Go:
+# KeysOnlyBlankExpr, the same text) empties every value of every Secret in
+# the final stream (after the transformations and envsubst): a patch, a
+# plain Secret manifest, a kustomize secretGenerator or a Helm chart's
+# Secret prints its key names only. Store-free like --no-secrets (the
+# plugin's store-free switch is on: no store is read, decrypted or minted)
+# and no file is written: no artifacts.yaml, no split, no prune of the
+# artifacts dir. The plugin must have the keys-only run
+# (build::_keys_only_capable). The render is held in variables, not in a
+# file, so an interrupt leaves nothing behind and a failed render prints
+# nothing on stdout. The trailing "." keeps the final newlines that $(...)
+# would strip.
 build::keys_only() {
   local domain="${1}"
   local domain_dir="${PATH_CLUSTERS}/${domain}"
@@ -502,29 +554,48 @@ build::keys_only() {
     error "domain ${domain} has no kustomization.yaml — compose its targets there, e.g. resources: [./targets/foo, ../../.targets/bar]"
     return 1
   fi
+  # The plugin home as the Go render sets it (config.KustomizePluginHome):
+  # the probe and kustomize use the same one.
+  local plugin_home="${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}"
+  build::_keys_only_capable "${plugin_home}" || return 1
+  if ! command -v yq &>/dev/null; then
+    error "lo build --keys-only: yq not found — install the pinned toolchain (b install)"
+    return 1
+  fi
   build::_export_secrets_path "${domain_dir}"
   build::_resolve_api "${domain_dir}"
-  local kubeconfig envsubst_whitelist tmp docs=0
+  local kubeconfig envsubst_whitelist rendered blanked docs=0
   kubeconfig=$(build::_render_kubeconfig "${domain}")
   envsubst_whitelist=$(template::envsubst_whitelist)
-  tmp=$(mktemp)
-  if KUBECONFIG="${kubeconfig}" \
-     KHELM_TRUST_ANY_REPO=true \
-     LOK8S_SECRETS_DISABLE=1 \
-     LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1 \
-       kustomize build --enable-alpha-plugins "${domain_dir}" \
-       | template::envsubst "${envsubst_whitelist}" \
-       > "${tmp}"; then
-    docs=$(grep -c '^kind:' "${tmp}" 2>/dev/null) || true
-    (( docs > 0 )) || warn "${domain} rendered 0 documents — is its kustomization.yaml composing any targets?"
-    cat "${tmp}"
-    rm -f "${tmp}"
-    echo "lo build: ${domain} rendered ${docs} document(s) -> stdout (keys only)" >&2
-  else
-    rm -f "${tmp}"
+  local expr='explode(.) | (.. | select(kind == "map") | select(.kind == "Secret")) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "") | (.. | select(kind == "map") | select(.kind == "SecretList") | .[] | select(key == "items") | select(kind == "seq") | .[] | select(kind == "map")) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "")'
+  if ! rendered=$(
+    set -o pipefail
+    KUBECONFIG="${kubeconfig}" \
+    KUSTOMIZE_PLUGIN_HOME="${plugin_home}" \
+    KHELM_TRUST_ANY_REPO=true \
+    LOK8S_SECRETS_DISABLE=1 \
+    LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1 \
+      kustomize build --enable-alpha-plugins "${domain_dir}" \
+      | template::envsubst "${envsubst_whitelist}" && printf '.'
+  ); then
     error "kustomize build failed for ${domain}"
     return 1
   fi
+  if ! blanked=$(
+    set -o pipefail
+    printf '%s' "${rendered%.}" | yq --yaml-fix-merge-anchor-to-spec "${expr}" - && printf '.'
+  ); then
+    error "lo build --keys-only: yq could not empty the Secret values of ${domain}'s render"
+    return 1
+  fi
+  blanked="${blanked%.}"
+  docs=$(grep -c '^kind:' <<<"${blanked}") || true
+  (( docs > 0 )) || warn "${domain} rendered 0 documents — is its kustomization.yaml composing any targets?"
+  if ! printf '%s' "${blanked}"; then
+    error "lo build --keys-only: writing ${domain}'s render to stdout failed"
+    return 1
+  fi
+  echo "lo build: ${domain} rendered ${docs} document(s) -> stdout (keys only)" >&2
 }
 
 # Split the built artifacts.yaml into per-resource files under

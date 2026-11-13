@@ -41,12 +41,14 @@ func TestMain(m *testing.M) {
 
 // stubTool is the fixture .bin entry for every external tool: it logs
 // "<tool> keys-only=<inherited value>" and answers like the tool would
-// for `version` and `build` (one ConfigMap).
+// for `version` and `build` (one ConfigMap). The yq program of `lo build
+// --keys-only` goes to the pinned yq (REAL_YQ).
 const stubTool = `#!/bin/sh
 tool="$(basename "$0")"
 printf '%s keys-only=%s disable=%s\n' "${tool}" "${` + secret.KeysOnlyEnv + `-<unset>}" "${LOK8S_SECRETS_DISABLE-<unset>}" >> "${STUB_LOG}"
 case "${tool} ${1:-}" in
   "kustomize build") printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: stub\n  namespace: demo\ndata:\n  a: b\n' ;;
+  "yq --yaml-fix-merge-anchor-to-spec") exec "${REAL_YQ}" "$@" ;;
   *) echo "${tool} v1.2.3" ;;
 esac
 `
@@ -67,6 +69,14 @@ func mainFixture(t *testing.T) (proj, log string) {
 		"clusters/gen.dev/cm.yaml":            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  namespace: demo\ndata:\n  a: b\n",
 		"clusters/gen.dev/secret.yaml":        "apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: demo\nliterals:\n  USER: alice\n",
 		"clusters/gen.dev/secrets/.gitignore": "*\n",
+		// patch.dev: a patch puts a real value back on the generated
+		// Secret, and a plain Secret manifest carries its own value.
+		"clusters/patch.dev/cluster.lok8s.yaml": "kind: Lo\nmetadata:\n  name: patch\n",
+		"clusters/patch.dev/kustomization.yaml": "resources:\n  - plain.yaml\ngenerators:\n  - secret.yaml\npatches:\n  - target: {kind: Secret, name: app}\n" +
+			"    patch: |-\n      - op: add\n        path: /data/PATCHED\n        value: cGF0Y2hlZA==\n      - op: add\n        path: /stringData\n        value: {EXTRA: extra-plain}\n",
+		"clusters/patch.dev/plain.yaml":         "apiVersion: v1\nkind: Secret\nmetadata:\n  name: plain\n  namespace: demo\ndata:\n  TOKEN: dG9rZW4=\n",
+		"clusters/patch.dev/secret.yaml":        "apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: demo\nliterals:\n  USER: alice\n",
+		"clusters/patch.dev/secrets/.gitignore": "*\n",
 	}
 	for name, content := range files {
 		path := filepath.Join(proj, filepath.FromSlash(name))
@@ -109,6 +119,7 @@ func runLo(t *testing.T, proj, log, mode string, args ...string) (stdout, stderr
 		"TMPDIR=" + t.TempDir(),
 		"KUBECONFIG=" + filepath.Join(home, "no-such-kubeconfig"),
 		"STUB_LOG=" + log,
+		"REAL_YQ=" + pinnedYq(t),
 		render.ModeEnv + "=" + mode,
 		secret.KeysOnlyEnv + "=1",
 		secret.DisableEnv + "=1",
@@ -118,6 +129,38 @@ func runLo(t *testing.T, proj, log, mode string, args ...string) (stdout, stderr
 	cmd.Stderr = &errBuf
 	err = cmd.Run()
 	return outBuf.String(), errBuf.String(), err
+}
+
+// pinnedYq is the repository's pinned yq. A missing one skips the test,
+// except under CI.
+func pinnedYq(t *testing.T) string {
+	t.Helper()
+	yq, err := filepath.Abs(filepath.Join("..", "..", ".bin", "yq"))
+	if err == nil {
+		_, err = os.Stat(yq)
+	}
+	if err != nil {
+		if os.Getenv("CI") == "true" {
+			t.Fatalf("the pinned yq is missing under CI: %v", err)
+		}
+		t.Skip("no .bin/yq (b install)")
+	}
+	return yq
+}
+
+// oldSecretPlugin puts a Secret plugin into the project's plugin home that
+// knows --capabilities but not the keys-only run (it prints "dry-run"),
+// and that logs every call.
+func oldSecretPlugin(t *testing.T, proj string) {
+	t.Helper()
+	path := filepath.Join(proj, ".kustomize", "secrets.lok8s.dev", "v1", "secret", "Secret")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\nprintf 'plugin %s\\n' \"$*\" >> \"${STUB_LOG}\"\necho dry-run\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func readLog(t *testing.T, log string) []string {
@@ -239,5 +282,67 @@ func TestKeysOnlyBuildInProcess(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(proj, "clusters", "gen.dev", "artifacts.yaml")); err == nil {
 		t.Error("--keys-only wrote artifacts.yaml")
+	}
+}
+
+// In-process (lo-full), --keys-only prints no Secret value after the
+// transformations either: a patch that puts a value and a stringData key
+// back on the generated Secret, and a plain Secret manifest, print their
+// key names only. The project's own plugin file is not used in process,
+// so an old one there is no reason to refuse.
+func TestKeysOnlyBuildInProcessBlanksEverySecret(t *testing.T) {
+	if !render.InProcessAvailable() {
+		t.Skip("lo core: the exec pipeline is the only one (TestKeysOnlyPinnedForBuildExec)")
+	}
+	proj, log := mainFixture(t)
+	oldSecretPlugin(t, proj)
+	out, errOut, err := runLo(t, proj, log, "", "build", "--domain", "patch.dev", "--keys-only")
+	if err != nil {
+		t.Fatalf("lo build --keys-only: %v\n%s%s", err, out, errOut)
+	}
+	for _, value := range []string{"YWxpY2U=", "cGF0Y2hlZA==", "extra-plain", "dG9rZW4="} {
+		if strings.Contains(out, value) {
+			t.Errorf("stdout carries the value %q:\n%s", value, out)
+		}
+	}
+	for _, key := range []string{`USER: ""`, `PATCHED: ""`, `EXTRA: ""`, `TOKEN: ""`} {
+		if !strings.Contains(out, key) {
+			t.Errorf("stdout lacks %q:\n%s", key, out)
+		}
+	}
+	for _, ln := range readLog(t, log) {
+		if strings.HasPrefix(ln, "plugin ") {
+			t.Errorf("the project's plugin file ran in process: %q", ln)
+		}
+	}
+}
+
+// In the exec pipeline, --keys-only refuses a Secret plugin without the
+// keys-only run before the render: kustomize does not run and stdout is
+// empty. The plugin got the probe only.
+func TestKeysOnlyRefusesAnOldPluginExec(t *testing.T) {
+	proj, log := mainFixture(t)
+	oldSecretPlugin(t, proj)
+	out, errOut, err := runLo(t, proj, log, string(render.ModeExec), "build", "--domain", "gen.dev", "--keys-only")
+	if err == nil {
+		t.Fatalf("lo build --keys-only used an old plugin:\n%s%s", out, errOut)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing", out)
+	}
+	if !strings.Contains(errOut, "the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not have the keys-only run") {
+		t.Errorf("stderr = %q", errOut)
+	}
+	var plugin []string
+	for _, ln := range readLog(t, log) {
+		if strings.HasPrefix(ln, "kustomize ") {
+			t.Errorf("the render ran: %q", ln)
+		}
+		if strings.HasPrefix(ln, "plugin ") {
+			plugin = append(plugin, ln)
+		}
+	}
+	if len(plugin) != 1 || plugin[0] != "plugin --capabilities" {
+		t.Errorf("the plugin got %q, want the probe only", plugin)
 	}
 }

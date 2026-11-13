@@ -20,6 +20,7 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/targets.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/build"
 
   # build::artifacts calls template::envsubst_whitelist for its envsubst pass. In
@@ -97,17 +98,49 @@ teardown() {
   [ "$(cat "${KENV}")" = "keys-only=0 disable=1" ]
 }
 
+# _secret_plugin <capabilities> [rc]: install a stub Secret plugin in the
+# project's plugin home. The stub answers `--capabilities` with the text
+# <capabilities> (printf %b) and exit status [rc], and logs what it got:
+# its arguments, its working directory and the entries in it, the store
+# path, the two plugin settings and its stdin.
+_secret_plugin() {
+  local home="${BATS_TEST_TMPDIR}/.kustomize"
+  mkdir -p "${home}/secrets.lok8s.dev/v1/secret"
+  export PROBE_LOG="${BATS_TEST_TMPDIR}/probe.log"
+  cat > "${home}/secrets.lok8s.dev/v1/secret/Secret" <<EOF
+#!/usr/bin/env bash
+{
+  echo "args=\$*"
+  echo "cwd=\${PWD}"
+  echo "entries=\$(ls -A)"
+  echo "secrets=\${PATH_SECRETS-<unset>}"
+  echo "disable=\${LOK8S_SECRETS_DISABLE-<unset>}"
+  echo "keys-only=\${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}"
+  echo "stdin=\$(cat)"
+} >> "\${PROBE_LOG}"
+printf '%b' '${1}'
+exit ${2:-0}
+EOF
+  chmod +x "${home}/secrets.lok8s.dev/v1/secret/Secret"
+}
+
 # lo build --keys-only (build::keys_only): the render runs with the keys-only
 # run and the store-free switch on, goes to stdout, and nothing is written to
 # the domain dir: a prior artifacts.yaml and a pre-domain per-target dir stay.
+# The plugin probe leaves nothing in the temp dir. KUSTOMIZE_PLUGIN_HOME is
+# unset, so the probe and kustomize both get <project>/.kustomize.
 @test "build::keys_only prints the keys-only render on stdout and writes no file" {
   export KENV="${BATS_TEST_TMPDIR}/kenv"
   kustomize() {
-    printf 'keys-only=%s disable=%s\n' "${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}" "${LOK8S_SECRETS_DISABLE-<unset>}" > "${KENV}"
+    printf 'keys-only=%s disable=%s home=%s\n' "${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}" "${LOK8S_SECRETS_DISABLE-<unset>}" "${KUSTOMIZE_PLUGIN_HOME-<unset>}" > "${KENV}"
     printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test-cm\n'
   }
   export -f kustomize
   export LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0 LOK8S_SECRETS_DISABLE=0
+  unset KUSTOMIZE_PLUGIN_HOME
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  _secret_plugin 'dry-run\nkeys-only\n'
   local domain_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
   echo "kind: Prior" > "${domain_dir}/artifacts.yaml"
   mkdir -p "${domain_dir}/artifacts/old"
@@ -115,14 +148,114 @@ teardown() {
 
   build::keys_only "test.lok8s.dev" > "${BATS_TEST_TMPDIR}/out" 2> "${BATS_TEST_TMPDIR}/err"
 
-  [ "$(cat "${KENV}")" = "keys-only=1 disable=1" ]
+  [ "$(cat "${KENV}")" = "keys-only=1 disable=1 home=${BATS_TEST_TMPDIR}/.kustomize" ]
   [ "$(cat "${BATS_TEST_TMPDIR}/out")" = "$(printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test-cm')" ]
   run cat "${BATS_TEST_TMPDIR}/err"
   assert_output --partial "lo build: test.lok8s.dev rendered 1 document(s) -> stdout (keys only)"
   [ "$(cat "${domain_dir}/artifacts.yaml")" = "kind: Prior" ]
   [ "$(cat "${domain_dir}/artifacts/old/artifacts.yaml")" = "kind: Old" ]
-  run bash -c "ls '${domain_dir}' | grep -c '^tmp\.'"
+  [ -s "${PROBE_LOG}" ]
+  run ls -A "${TMPDIR}"
+  assert_output ""
+  run bash -c "ls -A '${domain_dir}' | grep -c '^tmp\.'"
   assert_output "0"
+}
+
+# The contract of --keys-only: it prints no Secret value. Every Secret in
+# the final stream has its values emptied and keeps its key names: a
+# plugin Secret that a patch gave a value, a plain Secret, a List item, a
+# SecretList item without a kind and a Secret whose data is an alias. A
+# ConfigMap keeps its values, and a reference to a Secret stays as it is
+# (no data key is added to it). Go: TestKeysOnlyBlanksEverySecret.
+@test "build::keys_only empties every Secret value in the final stream" {
+  cat > "${BATS_TEST_TMPDIR}/render.yaml" <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  annotations:
+    secrets.lok8s.dev/keys-only: "true"
+  name: patched
+data:
+  USER: YWxpY2U=
+stringData:
+  PASSWORD: patched-plain
+type: Opaque
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: plain
+data:
+  PLAIN: cGxhaW4tdmFsdWU=
+---
+apiVersion: v1
+kind: List
+items:
+- apiVersion: v1
+  kind: Secret
+  metadata:
+    name: listed
+  stringData:
+    KEY: listed-plain
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: listed-cm
+  data:
+    VISIBLE: list-config
+---
+apiVersion: v1
+kind: SecretList
+items:
+- metadata:
+    name: kindless
+  data:
+    NESTED: a2luZGxlc3M=
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aliased
+  labels: &values
+    ALIASED: alias-plain
+data: *values
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm
+data:
+  VISIBLE: plain-config
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: gw
+spec:
+  listeners:
+  - name: https
+    tls:
+      certificateRefs:
+      - kind: Secret
+        name: tls
+YAML
+  export RENDER="${BATS_TEST_TMPDIR}/render.yaml"
+  kustomize() { cat "${RENDER}"; }
+  export -f kustomize
+
+  build::keys_only "test.lok8s.dev" > "${BATS_TEST_TMPDIR}/out"
+
+  local out value
+  out=$(cat "${BATS_TEST_TMPDIR}/out")
+  for value in YWxpY2U= patched-plain cGxhaW4tdmFsdWU= listed-plain a2luZGxlc3M=; do
+    [[ "${out}" != *"${value}"* ]] || { echo "stdout holds the Secret value ${value}: ${out}"; return 1; }
+  done
+  for value in 'USER: ""' 'PASSWORD: ""' 'PLAIN: ""' 'KEY: ""' 'NESTED: ""' 'ALIASED: ""' \
+               'VISIBLE: list-config' 'VISIBLE: plain-config' 'ALIASED: alias-plain' '- kind: Secret' 'name: tls'; do
+    [[ "${out}" == *"${value}"* ]] || { echo "stdout lacks ${value}: ${out}"; return 1; }
+  done
+  run grep -cE '^[[:blank:]]*(- )?(data|stringData):' "${BATS_TEST_TMPDIR}/out"
+  assert_output "8"
 }
 
 @test "build::keys_only prints nothing on stdout when the render fails" {
@@ -134,6 +267,7 @@ teardown() {
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/domain.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/targets.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/template.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/keysonly.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/libs/build"
     export PATH_BASE="'"${BATS_TEST_TMPDIR}"'"
     export PATH_CLUSTERS="'"${BATS_TEST_TMPDIR}"'/clusters"
@@ -145,6 +279,115 @@ teardown() {
   assert_failure
   refute_output --partial "kind: ConfigMap"
   assert_output --partial "kustomize build failed for test.lok8s.dev"
+}
+
+# A failed write of the render to stdout gets its own message, not the
+# render's. Go: TestKeysOnlyStdoutWriteFails.
+@test "build::keys_only reports a failed write to stdout" {
+  [ -w /dev/full ] || skip "no /dev/full"
+  kustomize() { printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
+  export -f kustomize
+  _keys_only_to_full() { build::keys_only "test.lok8s.dev" > /dev/full; }
+  run _keys_only_to_full
+  assert_failure
+  assert_output --partial "lo build --keys-only: writing test.lok8s.dev's render to stdout failed"
+  refute_output --partial "kustomize build failed"
+  refute_output --partial "rendered 1 document(s) -> stdout"
+}
+
+# A Secret plugin without the keys-only run is refused before the render:
+# an older plugin does not know the keys-only setting (and one before
+# v0.2.0 not the store-free switch either). The probe is
+# `Secret --capabilities`; only a plugin that exits 0 and prints the line
+# keys-only passes. Go: TestKeysOnlyProbesThePlugin.
+@test "build::keys_only refuses a Secret plugin without the keys-only run" {
+  export KENV="${BATS_TEST_TMPDIR}/kenv"
+  kustomize() { echo "ran" > "${KENV}"; printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
+  export -f kustomize
+  export KUSTOMIZE_PLUGIN_HOME="${BATS_TEST_TMPDIR}/.kustomize"
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  local tc caps rc
+  for tc in 'dry-run\n|0' '|0' '|1' 'keys-only\n|1' 'keys-only-not\ndry-run\n|0'; do
+    caps="${tc%|*}" rc="${tc#*|}"
+    _secret_plugin "${caps}" "${rc}"
+    rm -f "${KENV}"
+    run build::keys_only "test.lok8s.dev"
+    assert_failure
+    assert_output --partial "the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not have the keys-only run (an older plugin would read the secrets store) — run 'lo toolchain install' to install the plugin of this lo"
+    refute_output --partial "kind: ConfigMap"
+    [ ! -e "${KENV}" ] || { echo "kustomize ran for the plugin answer '${tc}'"; return 1; }
+  done
+  for caps in 'dry-run\nkeys-only\n' 'keys-only'; do
+    _secret_plugin "${caps}" 0
+    run build::keys_only "test.lok8s.dev"
+    assert_success
+    assert_output --partial "kind: ConfigMap"
+  done
+  run ls -A "${TMPDIR}"
+  assert_output ""
+}
+
+# The probe can do nothing with any plugin version: it runs in an empty
+# temp dir (removed after), with an empty stdin, PATH_SECRETS at a path in
+# that dir that does not exist, the store-free switch on and the keys-only
+# setting off, whatever the caller exported. Go: TestKeysOnlyProbesThePlugin.
+@test "build::keys_only probes the plugin in an empty dir with no store and no input" {
+  kustomize() { printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
+  export -f kustomize
+  export KUSTOMIZE_PLUGIN_HOME="${BATS_TEST_TMPDIR}/.kustomize"
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}" "${BATS_TEST_TMPDIR}/store"
+  export PATH_SECRETS="${BATS_TEST_TMPDIR}/store" LOK8S_SECRETS_DISABLE=0 LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1
+  _secret_plugin 'keys-only\n'
+
+  build::keys_only "test.lok8s.dev" <<<"input on the caller's stdin" >/dev/null
+
+  run cat "${PROBE_LOG}"
+  [ "${#lines[@]}" -eq 7 ] || { echo "want one probe (7 lines), got: ${output}"; return 1; }
+  local cwd="${lines[1]#cwd=}"
+  [[ "${cwd}" == "${TMPDIR}/lok8s-keys-only-"* ]] || { echo "probe cwd ${cwd}"; return 1; }
+  assert_line --index 0 "args=--capabilities"
+  assert_line --index 2 "entries="
+  assert_line --index 3 "secrets=${cwd}/store"
+  assert_line --index 4 "disable=1"
+  assert_line --index 5 "keys-only=0"
+  assert_line --index 6 "stdin="
+  [ ! -e "${cwd}" ]
+  run ls -A "${TMPDIR}"
+  assert_output ""
+}
+
+# An interrupt during the probe leaves no temp dir: the probe's subshell
+# removes it on exit, and SIGINT ends that subshell through its exit trap.
+# Job control (set -m) gives the probe its own process group with the
+# default SIGINT action, as a terminal's Ctrl-C finds it.
+@test "build::keys_only leaves no probe dir after a SIGINT" {
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp" PROBE_PID="${BATS_TEST_TMPDIR}/probe.pid"
+  mkdir -p "${TMPDIR}" "${BATS_TEST_TMPDIR}/.kustomize/secrets.lok8s.dev/v1/secret"
+  printf '#!/usr/bin/env bash\necho $$ > "${PROBE_PID}"\nexec sleep 30\n' > "${BATS_TEST_TMPDIR}/.kustomize/secrets.lok8s.dev/v1/secret/Secret"
+  chmod +x "${BATS_TEST_TMPDIR}/.kustomize/secrets.lok8s.dev/v1/secret/Secret"
+  run bash -c '
+    set -m
+    import() { :; }
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/verbose.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/libs/build"
+    export PATH_BASE="'"${BATS_TEST_TMPDIR}"'"
+    unset KUSTOMIZE_PLUGIN_HOME
+    build::_keys_only_capable "${PATH_BASE}/.kustomize" &
+    job=$!
+    for _ in $(seq 100); do [[ -s "${PROBE_PID}" ]] && break; sleep 0.1; done
+    [[ -s "${PROBE_PID}" ]] || { echo "the probe did not start"; exit 1; }
+    ls -A "${TMPDIR}"
+    kill -INT -- "-${job}"
+    wait "${job}"
+    echo "rc=$?"
+  '
+  assert_success
+  assert_line --index 0 --regexp '^lok8s-keys-only-'
+  refute_line "rc=0"
+  run ls -A "${TMPDIR}"
+  assert_output ""
 }
 
 # The output guard: a render that holds an object with the keys-only marker
@@ -166,6 +409,77 @@ teardown() {
     [ ! -d "${domain_dir}/artifacts" ]
     run bash -c "ls '${domain_dir}' | grep -c '^tmp\.'"
     assert_output "0"
+  done
+}
+
+# The guard parses the final stream, after envsubst: a marker key that
+# envsubst writes quoted, a flow-style annotations map and a List item are
+# the same marker. A line rule finds none of the three. Go:
+# TestArtifactsGuardParsesTheFinalStream.
+@test "build::artifacts finds the keys-only marker in the parsed final stream" {
+  template::envsubst_whitelist() { echo '${LOK8S_USER_MARKER}'; }
+  export -f template::envsubst_whitelist
+  export LOK8S_USER_MARKER='"secrets.lok8s.dev/keys-only"'
+  local domain_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
+  local render
+  for render in \
+    'apiVersion: v1\nkind: Secret\nmetadata:\n  annotations:\n    ${LOK8S_USER_MARKER}: "true"\n  name: app\n' \
+    'apiVersion: v1\nkind: Secret\nmetadata: {name: app, annotations: {secrets.lok8s.dev/keys-only: "true"}}\n' \
+    'apiVersion: v1\nkind: List\nitems:\n- kind: Secret\n  metadata:\n    name: app\n    annotations:\n      secrets.lok8s.dev/keys-only: "true"\n'; do
+    export RENDER="${render}"
+    kustomize() { printf '%b' "${RENDER}"; }
+    export -f kustomize
+    echo "kind: Prior" > "${domain_dir}/artifacts.yaml"
+    run build::artifacts "test.lok8s.dev"
+    assert_failure
+    assert_output --partial "it holds a keys-only Secret (secrets.lok8s.dev/keys-only)"
+    [ "$(cat "${domain_dir}/artifacts.yaml")" = "kind: Prior" ]
+  done
+}
+
+# A render that does not parse as YAML cannot be checked for the marker,
+# so the guard refuses it too.
+@test "build::artifacts refuses a render that does not parse as YAML" {
+  kustomize() { printf 'apiVersion: v1\nkind: ConfigMap\ndata: [x\n'; }
+  export -f kustomize
+  local domain_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
+  echo "kind: Prior" > "${domain_dir}/artifacts.yaml"
+  run build::artifacts "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "refusing to write test.lok8s.dev's render to ${domain_dir}/artifacts.yaml: it does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
+  [ "$(cat "${domain_dir}/artifacts.yaml")" = "kind: Prior" ]
+  run bash -c "ls -A '${domain_dir}' | grep -c '^tmp\.'"
+  assert_output "0"
+}
+
+# The prune of the pre-domain per-target dirs runs after every check: a
+# render that the guard refuses, an empty render over a prior artifact and
+# a failed render keep artifacts/old/; a good render removes it. Go:
+# TestArtifactsPrunesOnlyAfterTheChecks.
+@test "build::artifacts prunes the per-target dirs only after the checks" {
+  set -o pipefail
+  local domain_dir="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
+  local tc
+  for tc in \
+    'apiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\n|0|kept' \
+    '|0|kept' \
+    'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n|1|kept' \
+    'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n|0|pruned'; do
+    export RENDER="${tc%%|*}" RENDER_RC
+    RENDER_RC="${tc#*|}" RENDER_RC="${RENDER_RC%|*}"
+    kustomize() { printf '%b' "${RENDER}"; return "${RENDER_RC}"; }
+    export -f kustomize
+    echo "kind: Prior" > "${domain_dir}/artifacts.yaml"
+    mkdir -p "${domain_dir}/artifacts/old"
+    echo "kind: Old" > "${domain_dir}/artifacts/old/artifacts.yaml"
+    run build::artifacts "test.lok8s.dev"
+    if [[ "${tc##*|}" == kept ]]; then
+      assert_failure
+      [ -f "${domain_dir}/artifacts/old/artifacts.yaml" ] || { echo "the case '${tc}' removed artifacts/old"; return 1; }
+    else
+      assert_success
+      [ ! -e "${domain_dir}/artifacts/old" ] || { echo "a good render kept artifacts/old"; return 1; }
+    fi
   done
 }
 
@@ -237,6 +551,7 @@ YAML
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/domain.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/targets.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/template.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/keysonly.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/libs/build"
     export PATH_BASE="'"${BATS_TEST_TMPDIR}"'"
     export PATH_CLUSTERS="'"${BATS_TEST_TMPDIR}"'/clusters"
@@ -267,6 +582,7 @@ YAML
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/domain.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/targets.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/utils/template.sh"
+    source "'"${_PROJECT_ROOT}"'/.lok8s/utils/keysonly.sh"
     source "'"${_PROJECT_ROOT}"'/.lok8s/libs/build"
     export PATH_BASE="'"${BATS_TEST_TMPDIR}"'"
     export PATH_CLUSTERS="'"${BATS_TEST_TMPDIR}"'/clusters"

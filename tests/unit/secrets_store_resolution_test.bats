@@ -140,6 +140,7 @@ _refusal() { echo "[error] domain new.dev has no secrets store: ${PATH_CLUSTERS}
 _build_setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/targets.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/build"
   template::envsubst_whitelist() { echo ""; }
   export KCALLED="${BATS_TEST_TMPDIR}/kustomize.called"

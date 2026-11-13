@@ -109,9 +109,9 @@ func runBuild(ctx context.Context, paths *config.Paths, o buildOpts, stdout, std
 		return ErrHandled
 	}
 
-	// --keys-only: the render goes to stdout, each secrets.lok8s.dev
-	// Secret with its keys only. The keys-only run is passed explicitly
-	// (build.KeysOnly), never through the environment.
+	// --keys-only: the render goes to stdout with the values of every
+	// Secret emptied (build.KeysOnly). The keys-only run is passed
+	// explicitly, never through the environment.
 	if o.keysOnly {
 		if err := build.KeysOnly(ctx, build.Options{Paths: paths, Domain: d, Stderr: stderr}, stdout); err != nil {
 			return ErrHandled
@@ -166,6 +166,6 @@ func newBuildCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	f.BoolVar(&splitFlag, "split", false, "Also emit per-resource files under artifacts/ (debug override; declare it in spec.build.artifacts instead)")
 	f.BoolVar(&singleFlag, "single", false, "Skip the split emit even when the spec declares it (debug override)")
 	f.BoolVar(&noSecretsFlag, "no-secrets", false, "Split ONLY non-Secret resources; never render, re-encrypt, prune, or even read committed Secret.*.sops.yaml (CI render path — no store/key needed)")
-	f.BoolVar(&keysOnlyFlag, "keys-only", false, "Print the render to stdout, each secrets.lok8s.dev Secret with its keys only (empty values); reads no store, writes no file")
+	f.BoolVar(&keysOnlyFlag, "keys-only", false, "Print the render to stdout with the values of every Secret emptied (key names kept); reads no store, writes no file")
 	return cmd
 }

@@ -116,13 +116,6 @@ func Artifacts(ctx context.Context, o Options) error {
 	// lo::export_spec_envs are automatically picked up.
 	whitelist := EnvsubstWhitelist()
 
-	// Clean stale per-target artifact dirs from the pre-domain-build era so
-	// `lo status`/hooks don't read phantom outputs. Only framework-generated
-	// subdirs (each held an artifacts.yaml) are removed; env's overlay
-	// kustomization.yaml, capi.yaml and .cache-queue live as files directly
-	// under artifacts/ and are preserved.
-	pruneStaleArtifactDirs(filepath.Join(domainDir, "artifacts"))
-
 	ui.DebugTo(stderr, "Building domain kustomization: %s", filepath.Join(domainDir, "kustomization.yaml"))
 
 	// Render to a temp file first, then promote on success. A direct write
@@ -150,11 +143,17 @@ func Artifacts(ctx context.Context, o Options) error {
 	rendered = Envsubst(rendered, whitelist)
 	// The output guard: an object with the keys-only marker never goes
 	// into the domain's artifacts (artifacts.yaml, and the split made from
-	// it). Keys-only output goes to stdout only (lo build --keys-only).
+	// it). Keys-only output goes to stdout only (lo build --keys-only). The
+	// guard parses the stream (HasKeysOnlyMarker); a render that does not
+	// parse cannot be checked, so it is refused too.
 	artifactPath := filepath.Join(domainDir, "artifacts.yaml")
-	if hasKeysOnlyMarker(rendered) {
+	if marked, err := HasKeysOnlyMarker(rendered); err != nil || marked {
 		_ = os.Remove(tmpPath)
-		keysOnlyRefusal(stderr, o.Domain, artifactPath)
+		if err != nil {
+			keysOnlyUnparsed(stderr, o.Domain, artifactPath)
+		} else {
+			keysOnlyRefusal(stderr, o.Domain, artifactPath)
+		}
 		return ErrHandled
 	}
 	if err := os.WriteFile(tmpPath, rendered, 0o600); err != nil {
@@ -205,6 +204,15 @@ func Artifacts(ctx context.Context, o Options) error {
 	if docs == 0 {
 		ui.WarnTo(stderr, "%s rendered 0 documents (no prior artifact, so nothing was lost) — is its kustomization.yaml composing any targets?", o.Domain)
 	}
+
+	// Clean stale per-target artifact dirs from the pre-domain-build era so
+	// `lo status`/hooks don't read phantom outputs. Only framework-generated
+	// subdirs (each held an artifacts.yaml) are removed; env's overlay
+	// kustomization.yaml, capi.yaml and .cache-queue live as files directly
+	// under artifacts/ and are preserved. The prune runs only after the
+	// render passed every check above: a failed or refused render changes
+	// nothing in the domain dir.
+	pruneStaleArtifactDirs(filepath.Join(domainDir, "artifacts"))
 
 	// Promote ONLY when the content changed. An unconditional move refreshes
 	// the mtime of a byte-identical artifact, and everything that WATCHES

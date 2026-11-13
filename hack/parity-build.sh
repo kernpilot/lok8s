@@ -165,6 +165,11 @@ capture_state() { # <impl> — snapshot generated outputs for cross-impl compare
     && cp "${PROJ}/clusters/single.dev/artifacts.yaml" "${sdir}/single.artifacts.yaml"
   [[ -f "${PROJ}/clusters/gen.dev/artifacts.yaml" ]] \
     && cp "${PROJ}/clusters/gen.dev/artifacts.yaml" "${sdir}/gen.artifacts.yaml"
+  local g
+  for g in guard.dev qguard.dev; do
+    [[ -d "${PROJ}/clusters/${g}" ]] || continue
+    (cd "${PROJ}/clusters/${g}" && find . -path ./secrets -prune -o -print | sort) > "${sdir}/${g}.tree"
+  done
   local d
   for d in split.dev single.dev; do
     if [[ -d "${PROJ}/clusters/${d}/artifacts" ]]; then
@@ -329,6 +334,73 @@ check "--keys-only/--split exclusion"                    prep_gen build --domain
 check "--keys-only/--single exclusion"                   prep_gen build --domain gen.dev --keys-only --single
 unset LOK8S_INTERNAL_SECRETS_KEYS_ONLY LOK8S_SECRETS_DISABLE
 
+# The contract of --keys-only: it prints no Secret value, for every Secret
+# in the final stream, through the real kustomize. blank.dev has the
+# generator's Secret with a patch that adds a data value and stringData, a
+# plain Secret manifest, a Secret in a List, and a kustomize
+# secretGenerator. Both sides print the same stream (the same yq program
+# empties the values), with every key name and no value.
+mkdir -p "${PROJ}/clusters/blank.dev"
+printf 'kind: Lo\nmetadata:\n  name: blank\n' > "${PROJ}/clusters/blank.dev/cluster.lok8s.yaml"
+cat > "${PROJ}/clusters/blank.dev/kustomization.yaml" <<'EOF'
+resources:
+  - plain.yaml
+  - list.yaml
+generators:
+  - secret.yaml
+secretGenerator:
+  - name: builtin
+    namespace: one
+    literals:
+      - PASS=builtin-plain
+patches:
+  - target: {kind: Secret, name: app}
+    patch: |-
+      - op: add
+        path: /data/PATCHED
+        value: cGF0Y2hlZA==
+      - op: add
+        path: /stringData
+        value: {EXTRA: extra-plain}
+EOF
+printf 'apiVersion: secrets.lok8s.dev/v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: one\nliterals:\n  USER: alice\n' \
+  > "${PROJ}/clusters/blank.dev/secret.yaml"
+printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: plain\n  namespace: one\ndata:\n  TOKEN: dG9rZW4=\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: visible\n  namespace: one\ndata:\n  VISIBLE: plain-config\n' \
+  > "${PROJ}/clusters/blank.dev/plain.yaml"
+printf 'apiVersion: v1\nkind: List\nitems:\n- apiVersion: v1\n  kind: Secret\n  metadata:\n    name: listed\n    namespace: one\n  stringData:\n    KEY: listed-plain\n' \
+  > "${PROJ}/clusters/blank.dev/list.yaml"
+check "build --keys-only empties every Secret"           : build --domain blank.dev --keys-only
+for impl in bash go; do
+  for v in YWxpY2U= cGF0Y2hlZA== extra-plain dG9rZW4= listed-plain YnVpbHRpbi1wbGFpbg==; do
+    ! grep -qF -- "${v}" "${WORK}/${impl}.out" || fail "build --keys-only empties every Secret (${impl}) — stdout carries ${v}"
+  done
+  for k in 'USER: ""' 'PATCHED: ""' 'EXTRA: ""' 'TOKEN: ""' 'KEY: ""' 'PASS: ""' 'VISIBLE: plain-config'; do
+    grep -qF -- "${k}" "${WORK}/${impl}.out" || fail "build --keys-only empties every Secret (${impl}) — stdout lacks ${k}"
+  done
+done
+
+# A Secret plugin without the keys-only run is refused before the render.
+# The stub answers --capabilities as an older plugin does (dry-run only) and
+# logs each call. LO_RENDER=exec: lo-full renders with its own plugin and
+# does not check the file, so both Go builds run the exec pipeline here
+# (the bash tree always does; it ignores LO_RENDER).
+mv "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret/Secret" "${WORK}/Secret.built"
+cat > "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret/Secret" <<EOF
+#!/usr/bin/env bash
+echo "plugin \$*" >> "${WORK}/old-plugin.log"
+echo dry-run
+EOF
+chmod +x "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret/Secret"
+export LO_RENDER=exec
+check "build --keys-only refuses an older plugin"        : build --domain blank.dev --keys-only
+unset LO_RENDER
+grep -qF "[error] the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret does not have the keys-only run" "${WORK}/go.err" \
+  || fail "build --keys-only refuses an older plugin — no refusal on stderr"
+[[ ! -s "${WORK}/go.out" && ! -s "${WORK}/bash.out" ]] || fail "build --keys-only refuses an older plugin — stdout is not empty"
+[[ "$(cat "${WORK}/old-plugin.log")" == "$(printf 'plugin --capabilities\nplugin --capabilities')" ]] \
+  || fail "build --keys-only refuses an older plugin — the plugin got more than the probe: $(cat "${WORK}/old-plugin.log")"
+mv "${WORK}/Secret.built" "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret/Secret"
+
 # The output guard: a render that holds an object with the keys-only marker
 # (here a plain Secret resource that carries the annotation) is never written
 # into the domain's artifacts. Both sides refuse with the same message and
@@ -338,11 +410,41 @@ printf 'kind: Lo\nmetadata:\n  name: guard\n' > "${PROJ}/clusters/guard.dev/clus
 printf 'resources:\n  - secret.yaml\n' > "${PROJ}/clusters/guard.dev/kustomization.yaml"
 printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: one\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\ndata:\n  USER: ""\n' \
   > "${PROJ}/clusters/guard.dev/secret.yaml"
-prep_guard() { rm -rf "${PROJ}/clusters/guard.dev/artifacts.yaml" "${PROJ}/clusters/guard.dev/artifacts"; }
-check "output guard: keys-only marker refused"           prep_guard build --domain guard.dev
+# A pre-domain per-target dir (artifacts/old/) stays: the prune runs only
+# after the checks.
+prep_guard() { # <domain>
+  rm -rf "${PROJ}/clusters/${1}/artifacts.yaml" "${PROJ}/clusters/${1}/artifacts"
+  mkdir -p "${PROJ}/clusters/${1}/artifacts/old"
+  echo "kind: Old" > "${PROJ}/clusters/${1}/artifacts/old/artifacts.yaml"
+}
+prep_guard_plain() { prep_guard guard.dev; }
+check "output guard: keys-only marker refused"           prep_guard_plain build --domain guard.dev
 grep -qF "[error] refusing to write guard.dev's render to PROJ/clusters/guard.dev/artifacts.yaml: it holds a keys-only Secret" "${WORK}/go.err" \
   || fail "output guard — no refusal on stderr"
 [[ ! -e "${PROJ}/clusters/guard.dev/artifacts.yaml" ]] || fail "output guard — artifacts.yaml was written"
-rm -rf "${PROJ}/clusters/gen.dev" "${PROJ}/clusters/guard.dev" "${PROJ}/.kustomize"
+for impl in bash go; do
+  grep -qx './artifacts/old/artifacts.yaml' "${WORK}/state.${impl}/guard.dev.tree" \
+    || fail "output guard (${impl}) — the refused render pruned artifacts/old"
+done
+# The guard parses the stream after envsubst: here envsubst writes the
+# marker key quoted (a line rule does not see it).
+mkdir -p "${PROJ}/clusters/qguard.dev/secrets"
+printf 'kind: Lo\nmetadata:\n  name: qguard\n' > "${PROJ}/clusters/qguard.dev/cluster.lok8s.yaml"
+printf 'resources:\n  - secret.yaml\n' > "${PROJ}/clusters/qguard.dev/kustomization.yaml"
+printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  namespace: one\n  annotations:\n    ${LOK8S_SPEC_PARITY_MARKER}: "true"\ndata:\n  USER: ""\n' \
+  > "${PROJ}/clusters/qguard.dev/secret.yaml"
+export LOK8S_SPEC_PARITY_MARKER='"secrets.lok8s.dev/keys-only"'
+prep_guard_quoted() { prep_guard qguard.dev; }
+check "output guard: quoted marker after envsubst"       prep_guard_quoted build --domain qguard.dev
+unset LOK8S_SPEC_PARITY_MARKER
+grep -qF "[error] refusing to write qguard.dev's render to PROJ/clusters/qguard.dev/artifacts.yaml: it holds a keys-only Secret" "${WORK}/go.err" \
+  || fail "output guard, quoted marker — no refusal on stderr"
+for impl in bash go; do
+  grep -qx './artifacts/old/artifacts.yaml' "${WORK}/state.${impl}/qguard.dev.tree" \
+    || fail "output guard, quoted marker (${impl}) — the refused render pruned artifacts/old"
+  ! grep -qx './artifacts.yaml' "${WORK}/state.${impl}/qguard.dev.tree" \
+    || fail "output guard, quoted marker (${impl}) — artifacts.yaml was written"
+done
+rm -rf "${PROJ}/clusters/gen.dev" "${PROJ}/clusters/blank.dev" "${PROJ}/clusters/guard.dev" "${PROJ}/clusters/qguard.dev" "${PROJ}/.kustomize"
 
 report
