@@ -247,6 +247,49 @@ _run_lo_stubbed() {
   done
 }
 
+# The trace guard in a function that a guarded function calls, under
+# functrace and a RETURN trap of the caller (as build::split calls
+# build::_secret_unchanged): the outer function sets a RETURN trap (its
+# cleanup) and calls the inner one in a pipeline, in a command substitution
+# and as a plain command. While the outer guard runs, the inner guard does
+# not run again: it would set the RETURN trap of the outer function back in
+# its own frame, and bash would run that cleanup when the inner function
+# returns. The cleanup runs once, when the outer function returns.
+@test "the trace guard does not run again in a function that a guarded function calls" {
+  local guard dir="${BATS_TEST_TMPDIR}/nested"
+  guard="$(sed -n '/^keysonly::read_checked_file() {$/{n;p;q;}' "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh")"
+  [[ "${guard}" == '  [[ $- != *[TE]* '* ]] || { echo "no trace guard: ${guard}"; return 1; }
+  mkdir -p "${dir}"
+  {
+    printf 'outer() {\n%s\n' "${guard}"
+    # shellcheck disable=SC2016 # the lines of the probe
+    printf '%s\n' '  [[ $- != *x* ]] || { local -; set +x; }' \
+      '  trap '\''echo cleanup >> "${NESTED_DIR}/log"'\'' RETURN' \
+      '  echo in | inner pipe' \
+      '  local got; got="$(inner comsub < /dev/null)"; echo "${got}" >> "${NESTED_DIR}/log"' \
+      '  inner plain < /dev/null' \
+      '  echo "outer went on" >> "${NESTED_DIR}/log"' \
+      '}'
+    printf 'inner() {\n%s\n' "${guard}"
+    # shellcheck disable=SC2016 # the lines of the probe
+    printf '%s\n' '  [[ $- != *x* ]] || { local -; set +x; }' \
+      '  cat > /dev/null' \
+      '  [[ "${1}" == comsub ]] && echo "inner ${1}" || echo "inner ${1}" >> "${NESTED_DIR}/log"' \
+      '}'
+  } > "${dir}/probe.sh"
+  export NESTED_DIR="${dir}"
+  # shellcheck disable=SC2016 # the script of the new bash
+  run bash -c '
+    set -euo pipefail -E -T
+    source "$1"
+    trap ":" RETURN
+    outer
+    echo "caller went on" >> "${NESTED_DIR}/log"' _ "${dir}/probe.sh"
+  assert_success
+  [ "$(cat "${dir}/log")" = $'inner pipe\ninner comsub\ninner plain\nouter went on\ncleanup\ncaller went on' ] \
+    || { cat "${dir}/log"; return 1; }
+}
+
 # Each copy of the trace guard in the bash tree is the same line, so the
 # test above holds for each of them (utils/keysonly.sh).
 @test "each copy of the trace guard is the same line" {

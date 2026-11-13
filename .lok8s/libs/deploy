@@ -102,7 +102,7 @@ deploy::_has_objects() {
 #            StatefulSets to become ready (scoped to the manifest, not the whole
 #            cluster). Best-effort — a readiness timeout is a ⚠, never fatal.
 deploy::_apply() {
-  [[ $- != *[TE]* || ${_ko_in-} == "${#FUNCNAME[@]}${FUNCNAME[0]}" ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}" _ko_in="$(( ${#FUNCNAME[@]} + 1 ))${FUNCNAME[0]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }
   local label="${1}" manifest="${2}"
 
@@ -136,7 +136,7 @@ deploy::_apply() {
 # can change after the check.
 # Usage: deploy::apply <domain>
 deploy::apply() {
-  [[ $- != *[TE]* || ${_ko_in-} == "${#FUNCNAME[@]}${FUNCNAME[0]}" ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}" _ko_in="$(( ${#FUNCNAME[@]} + 1 ))${FUNCNAME[0]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }
   local domain="${1:-"${DOMAIN_NAME:-lok8s.dev}"}"
   local artifact="${PATH_CLUSTERS}/${domain}/artifacts.yaml"
@@ -161,7 +161,7 @@ deploy::apply() {
 # the subset comes from the copy that passed the check.
 # Usage: deploy::apply_filtered <domain> <label_key> <label_value>
 deploy::apply_filtered() {
-  [[ $- != *[TE]* || ${_ko_in-} == "${#FUNCNAME[@]}${FUNCNAME[0]}" ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}" _ko_in="$(( ${#FUNCNAME[@]} + 1 ))${FUNCNAME[0]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }
   local domain="${1}" label_key="${2}" label_value="${3}"
   local artifact="${PATH_CLUSTERS}/${domain}/artifacts.yaml"

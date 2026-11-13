@@ -10,7 +10,7 @@
 # three rules (Go needs none of them):
 #   - Tracing off: two lines first. Under `bash -x` (or BASH_XTRACEFD) the
 #     trace would print each assignment and each argument.
-#       [[ $- != *[TE]* || ${_ko_in-} == ... ]] || { local - _ko_traps ...; }
+#       [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps ...; }
 #       [[ $- != *x* ]] || { local -; set +x; }
 #     The second line turns tracing off; `local -` sets the options back on
 #     return, and no child inherits the tracing. The first line comes into
@@ -19,9 +19,13 @@
 #     such a trap (`trap 'set -x' RETURN`) could turn tracing on again in
 #     the middle of the function. The line saves the three traps and
 #     clears them, turns off xtrace and functrace, and runs the function
-#     again with the same arguments (_ko_in marks that run, which does not
-#     do this again). When that run returns, the line sets the traps back
-#     and returns its exit status.
+#     again with the same arguments. When that run returns, the line sets
+#     the traps back and returns its exit status. While the line runs, its
+#     _ko_at is set: that run, and each function that it calls, does not do
+#     this again (they have no trap of the caller to clear). A second line
+#     would set the RETURN trap of the function that called it back in its
+#     own frame, and bash would then run that trap (a cleanup) when the
+#     second function returns, in a pipeline or a command substitution.
 #     In that run, errtrace is on with an ERR trap of the line, which keeps
 #     errexit (set -e) safe: a failed command does not end the shell in the
 #     middle of the function, where the traps of the caller are not set
@@ -146,7 +150,7 @@ keysonly::refusal() {
 # not the file, which can change after the check, and captures it with a
 # sentinel (see the rules at the top).
 keysonly::read_checked_artifact() {
-  [[ $- != *[TE]* || ${_ko_in-} == "${#FUNCNAME[@]}${FUNCNAME[0]}" ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}" _ko_in="$(( ${#FUNCNAME[@]} + 1 ))${FUNCNAME[0]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }
   local domain="${1}" artifact="${2}" content marker=0
   if ! content="$(cat -- "${artifact}" 2>/dev/null && printf .)"; then
@@ -177,7 +181,7 @@ keysonly::refuse_unreadable() {
 # for byte), not the file. Returns 1, and prints nothing on stdout, when
 # the guard refuses the input.
 keysonly::read_checked_file() {
-  [[ $- != *[TE]* || ${_ko_in-} == "${#FUNCNAME[@]}${FUNCNAME[0]}" ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}" _ko_in="$(( ${#FUNCNAME[@]} + 1 ))${FUNCNAME[0]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }
   local prefix="${1}" what="${2}" content
   if ! content="$(cat -- "${3}" 2>/dev/null && printf .)"; then
