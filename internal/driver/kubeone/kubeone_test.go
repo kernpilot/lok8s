@@ -40,10 +40,12 @@ spec:
 type fakeRunner struct {
 	calls   []execx.Cmd
 	handler func(c execx.Cmd) error
+	ctx     context.Context // the context of the last call
 }
 
 func (r *fakeRunner) Run(ctx context.Context, c execx.Cmd) error {
 	r.calls = append(r.calls, c)
+	r.ctx = ctx
 	if r.handler != nil {
 		return r.handler(c)
 	}
@@ -167,13 +169,55 @@ func TestApplyRunsInWorkDirWithRelativeManifest(t *testing.T) {
 		t.Errorf("tool = %s", c.Name)
 	}
 	// kubeone writes <name>-kubeconfig to CWD — the run MUST be CD'd into
-	// the work dir with the RELATIVE manifest path.
+	// the work dir with the RELATIVE manifest path (the manifest copy of
+	// the run, beside kubeone.yaml).
 	if c.Dir != wd {
 		t.Errorf("Dir = %q, want %q", c.Dir, wd)
 	}
-	want := []string{"apply", "--manifest", "kubeone.yaml", "--auto-approve"}
-	if strings.Join(c.Args, " ") != strings.Join(want, " ") {
-		t.Errorf("args = %v, want %v", c.Args, want)
+	if len(c.Args) != 4 || c.Args[0] != "apply" || c.Args[1] != "--manifest" || c.Args[3] != "--auto-approve" ||
+		filepath.Base(c.Args[2]) != c.Args[2] || !strings.HasPrefix(c.Args[2], runPrefix) || !strings.HasSuffix(c.Args[2], ".yaml") {
+		t.Errorf("args = %v, want apply --manifest %s<random>.yaml --auto-approve", c.Args, runPrefix)
+	}
+}
+
+// bats: "kubeone::apply: kubeone reads a copy of a manifest without an
+// addons path". KubeOne reads the manifest when it starts, after lo read
+// it, and the work dir is shared: lo gives kubeone a private copy of the
+// bytes that it read, also when the manifest names no addons directory.
+// The fake kubeone replaces the shared kubeone.yaml (with one that names
+// an addons directory with a keys-only Secret) before it reads its
+// manifest: it reads the bytes that lo read, unchanged, and nothing of
+// the run is left.
+func TestApplyKubeOneReadsACopyOfAManifestWithoutAddons(t *testing.T) {
+	const manifest = "name: test-prod\n# no addons path\nversions:\n  kubernetes: \"1.31.0\"\n"
+	clearVarEnv(t)
+	d, runner, _, p := testDriver(t, nil)
+	wd := filepath.Join(p.Clusters, "test.lok8s.dev", ".kubeone")
+	testutil.WriteFile(t, filepath.Join(wd, "kubeone.yaml"), manifest)
+	var read string
+	runner.handler = func(c execx.Cmd) error {
+		testutil.WriteFile(t, filepath.Join(wd, "kubeone.yaml"), kubeoneAddonsManifest)
+		testutil.WriteFile(t, filepath.Join(wd, "addons", "ccm-hetzner", "ccm.yaml"),
+			"apiVersion: v1\nkind: Secret\nmetadata:\n  name: hcloud\n  annotations:\n    secrets.lok8s.dev/keys-only: \"true\"\n")
+		path := filepath.Join(c.Dir, c.Args[2])
+		if fi, err := os.Stat(path); err != nil || fi.Mode() != 0o600 {
+			t.Errorf("%s: %v (%v), want mode 0600", path, fi, err)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		read = string(b)
+		return nil
+	}
+	if err := d.Apply(t.Context(), wd, ""); err != nil {
+		t.Fatal(err)
+	}
+	if read != manifest {
+		t.Errorf("kubeone read %q, want the bytes that lo read %q", read, manifest)
+	}
+	if left, _ := filepath.Glob(filepath.Join(wd, runPrefix+"*")); len(left) != 0 {
+		t.Errorf("the run copy is left after the run: %v", left)
 	}
 }
 

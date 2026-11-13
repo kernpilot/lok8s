@@ -269,10 +269,9 @@ func (d *Driver) Kubeconfig(ctx context.Context, domain string) (string, error) 
 
 // Apply runs kubeone apply (bash: kubeone::apply). The process runs WITH
 // ITS CWD SET INTO the work dir — kubeone writes <cluster>-kubeconfig into
-// the CWD (no output flag) — using a RELATIVE --manifest (kubeone.yaml, or
-// the manifest copy of stageRun when the manifest names an addons
-// directory), --auto-approve, and --tfjson output.json when that file
-// exists. Hetzner Robot credentials ride along in the environment for the
+// the CWD (no output flag) — using a RELATIVE --manifest (the manifest
+// copy of stageRun, beside kubeone.yaml), --auto-approve, and --tfjson
+// output.json when that file exists. Hetzner Robot credentials ride along in the environment for the
 // CCM.
 func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
 	if !fsutil.FileExists(filepath.Join(workDir, "kubeone.yaml")) {
@@ -288,8 +287,20 @@ func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
 			return err
 		}
 	}
-	// KubeOne reads the addons from a private copy of the bytes that
-	// passed the keys-only apply guard, not from the shared files.
+	// KubeOne reads the manifest and the addons from a private copy of the
+	// bytes that lo read and checked, not from the shared files. The copy
+	// can hold the CCM token: the deferred cleanup removes it when the run
+	// ends, on the first SIGINT or SIGTERM too (cli.WatchInterrupt cancels
+	// ctx, so kubeone stops and Apply returns). For a SIGHUP, which
+	// WatchInterrupt does not catch, Apply catches it while the copy
+	// exists: kubeone stops, the copy goes, and lo then ends with the
+	// SIGHUP. A SIGKILL, or a second signal, can leave the copy.
+	ctx, hangup := watchHangup(ctx)
+	defer func() {
+		if hangup() {
+			raiseHangup()
+		}
+	}()
 	manifest, cleanup, err := stageRun(d.stderr(), workDir)
 	if err != nil {
 		return err

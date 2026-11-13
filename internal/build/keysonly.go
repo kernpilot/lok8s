@@ -170,7 +170,7 @@ func RefuseKeysOnlyStream(stderr io.Writer, prefix, what string, data []byte) er
 func ReadCheckedFile(stderr io.Writer, prefix, what, path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, refuseUnreadable(stderr, prefix, what)
+		return nil, RefuseUnreadable(stderr, prefix, what)
 	}
 	defer func() { _ = f.Close() }()
 	return ReadCheckedStream(stderr, prefix, what, f)
@@ -183,7 +183,7 @@ func ReadCheckedFile(stderr io.Writer, prefix, what, path string) ([]byte, error
 func ReadCheckedStream(stderr io.Writer, prefix, what string, r io.Reader) ([]byte, error) {
 	raw, err := io.ReadAll(r)
 	if err != nil {
-		return nil, refuseUnreadable(stderr, prefix, what)
+		return nil, RefuseUnreadable(stderr, prefix, what)
 	}
 	if err := RefuseKeysOnlyStream(stderr, prefix, what, raw); err != nil {
 		return nil, err
@@ -191,8 +191,9 @@ func ReadCheckedStream(stderr io.Writer, prefix, what string, r io.Reader) ([]by
 	return raw, nil
 }
 
-// refuseUnreadable prints why lo refuses a stream that it cannot read.
-func refuseUnreadable(stderr io.Writer, prefix, what string) error {
+// RefuseUnreadable prints why lo refuses a stream that it cannot read
+// (bash: keysonly::refuse_unreadable), and returns ui.ErrHandled.
+func RefuseUnreadable(stderr io.Writer, prefix, what string) error {
 	ui.ErrorTo(stderr, "%s: refusing to apply %s: it cannot be read, so it cannot be checked for a keys-only Secret (%s)", prefix, what, secret.KeysOnlyAnnotation)
 	return ui.ErrHandled
 }

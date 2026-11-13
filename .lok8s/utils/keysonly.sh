@@ -150,6 +150,12 @@ keysonly::read_checked_artifact() {
   return 1
 }
 
+# keysonly::refuse_unreadable <prefix> <what>: print why lo refuses to apply
+# <what>, which it cannot read (Go: build.RefuseUnreadable).
+keysonly::refuse_unreadable() {
+  error "${1}: refusing to apply ${2}: it cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
+}
+
 # keysonly::read_checked_file <prefix> <what> <file|->: print <file> (-
 # reads stdin), read once and checked as keysonly::refuse_stream does (Go:
 # build.ReadCheckedFile, build.ReadCheckedStream); a file or a stdin that
@@ -161,7 +167,7 @@ keysonly::read_checked_file() {
   [[ $- != *x* ]] || { local -; set +x; }
   local prefix="${1}" what="${2}" content
   if ! content="$(cat -- "${3}" 2>/dev/null && printf .)"; then
-    error "${prefix}: refusing to apply ${what}: it cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
+    keysonly::refuse_unreadable "${prefix}" "${what}"
     return 1
   fi
   content="${content%.}"

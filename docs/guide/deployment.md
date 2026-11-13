@@ -222,15 +222,24 @@ not apply a manifest that holds one:
 - The KubeOne driver checks each file of the addons directory of the
   manifest (`addons.path`, for Hetzner the cilium and CCM renders in
   `<work dir>/addons/`) before it runs `kubeone apply`. A file with the
-  annotation, one that does not parse, or a directory that cannot be read
-  stops the apply. KubeOne reads the addons later, at its addons step,
-  and the work dir is shared. So lo writes the bytes that it checked into
-  a new private run directory (`<work dir>/.kubeone-run-<random>/`, mode
-  0700, files 0600), and KubeOne reads a copy of the manifest
-  (`<work dir>/.kubeone-run-<random>.yaml`) whose `addons.path` names it.
-  The copy is beside `kubeone.yaml`, so the other paths of the manifest
-  are the same. lo removes both when `kubeone apply` ends. A manifest
-  without `addons.path` runs as it is.
+  annotation, one that does not parse, one that is not a regular file (a
+  FIFO, a device), or a directory that cannot be read stops the apply.
+  KubeOne reads its manifest when it starts and the addons later, at its
+  addons step, and the work dir is shared. So lo reads `kubeone.yaml`
+  once, and KubeOne reads a copy of those bytes
+  (`<work dir>/.kubeone-run-<random>.yaml`, mode 0600), also when the
+  manifest has no `addons.path`. With an addons path, lo writes the bytes
+  that it checked into a new private run directory
+  (`<work dir>/.kubeone-run-<random>/`, mode 0700, files 0600), and the
+  copy of the manifest names it in `addons.path`, with the aliases and
+  merge keys (`<<`) of the manifest resolved. `./addons`, `./addons/`
+  and `addons` name the same directory. The copy is beside
+  `kubeone.yaml`, so the other paths of the manifest are the same. lo
+  removes both when `kubeone apply` ends, and when lo stops on a signal
+  that it can catch (SIGINT, SIGTERM, SIGHUP). A SIGKILL, or a second
+  signal while lo removes them, can leave them in the work dir, with the
+  CCM render (and its Hetzner token) in plaintext: remove
+  `.kubeone-run-*` by hand after such a stop.
 - The Tilt extension runs `lo tilt preflight` on its manifest (the domain
   artifact and the service overlays on it) before it applies anything, on
   every load. A manifest with the annotation, or one that cannot be read

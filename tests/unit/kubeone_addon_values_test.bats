@@ -252,7 +252,7 @@ YAML
   # Control: clean renders run kubeone.
   BAD_ADDON="" run kubeone::apply "${work_dir}" "${cy}"
   [ "${status}" -eq 0 ]
-  grep -q "^kubeone apply --manifest kubeone.yaml" "${KCALLS}"
+  grep -qE '^kubeone apply --manifest \.kubeone-run-[A-Za-z0-9]+\.yaml' "${KCALLS}"
 }
 
 # The Go twin is TestApplyKubeOneReadsTheCheckedCopyOfTheAddons. KubeOne
@@ -357,19 +357,288 @@ YAML
   grep -qE '^kubeone apply --manifest \.kubeone-run-[A-Za-z0-9]+\.yaml --auto-approve$' "${KCALLS}"
 }
 
-# The private run directory does not change a manifest without an addons
-# path: kubeone reads kubeone.yaml itself, and no run copy is made (the
-# control of the keys-only test above runs that way too).
-@test "kubeone::apply: a manifest without an addons path runs as it is" {
+# The Go twin is TestApplyKubeOneReadsACopyOfAManifestWithoutAddons.
+# KubeOne reads its manifest when it starts, after lo read it, and the
+# work dir is shared: lo gives kubeone a private copy of the bytes that it
+# read, also when the manifest names no addons directory. The kubeone stub
+# replaces the shared kubeone.yaml (with one that names an addons
+# directory with a keys-only Secret) before it reads its manifest: it
+# reads the bytes that lo read, unchanged, and nothing of the run is left.
+@test "kubeone::apply: kubeone reads a copy of a manifest without an addons path" {
+  local cy; cy=$(_cluster_yaml '')
+  printf '# no addons path\n' >> "${work_dir}/kubeone.yaml"
+  cp "${work_dir}/kubeone.yaml" "${BATS_TEST_TMPDIR}/lo-read.yaml"
+  export KCALLS="${BATS_TEST_TMPDIR}/kubeone.calls" SEEN="${BATS_TEST_TMPDIR}/seen.yaml"
+  kubeone::_clean_reinstalled_workers() { :; }
+  kubeone::_name_robot_workers() { :; }
+  kubeone() {
+    local manifest="" prev="" a
+    for a in "$@"; do [[ "${prev}" != --manifest ]] || manifest="${a}"; prev="${a}"; done
+    echo "kubeone $*" >> "${KCALLS}"
+    printf 'addons:\n  enable: true\n  path: ./addons\n' > kubeone.yaml
+    printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: hcloud\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\n' > addons/ccm-hetzner/ccm.yaml
+    stat -c '%a' "${manifest}" >> "${KCALLS}"
+    cp "${manifest}" "${SEEN}"
+  }
+  run kubeone::apply "${work_dir}" "${cy}"
+  assert_success
+  run cat "${KCALLS}"
+  assert_line --index 0 --regexp '^kubeone apply --manifest \.kubeone-run-[A-Za-z0-9]+\.yaml --auto-approve$'
+  assert_line --index 1 600
+  cmp "${SEEN}" "${BATS_TEST_TMPDIR}/lo-read.yaml"
+  run ls -A "${work_dir}"
+  refute_output --partial ".kubeone-run-"
+}
+
+# _run_copy_spec <manifest copy>: the name, addons.enable and addons.path
+# that kubeone reads, one per line.
+_run_copy_spec() {
+  yq -r '.name, .addons.enable, .addons.path' "${1}"
+}
+
+# The Go twin is TestApplyRunCopyKeepsMergedSettingsAndPathForms. KubeOne
+# resolves the aliases and merge keys of its manifest: the manifest copy
+# keeps the addon settings that a merge key (<<) or an alias gives
+# (enable), with addons.path set to the run's addons directory. A trailing
+# slash and a leading ./ name the same directory: the copy holds its
+# files, and a refusal names them as addons/<file>.
+@test "kubeone::apply: the run copy keeps the merged settings and each form of the addons path" {
+  local cy; cy=$(_cluster_yaml '')
+  export KCALLS="${BATS_TEST_TMPDIR}/kubeone.calls" SEEN="${BATS_TEST_TMPDIR}/seen" BAD=""
+  kubeone::_clean_reinstalled_workers() { :; }
+  kubeone::_name_robot_workers() { :; }
+  kubeone::render_addons() {
+    mkdir -p "${1}/addons/ccm-hetzner"
+    if [[ -n "${BAD}" ]]; then
+      printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: x\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\n' > "${1}/addons/ccm-hetzner/ccm.yaml"
+    else
+      printf 'kind: ConfigMap\n' > "${1}/addons/ccm-hetzner/ccm.yaml"
+    fi
+  }
+  kubeone() {
+    local manifest="" prev="" a
+    for a in "$@"; do [[ "${prev}" != --manifest ]] || manifest="${a}"; prev="${a}"; done
+    _run_copy_spec "${manifest}" > "${SEEN}"
+    cp "$(yq -r '.addons.path' "${manifest}")/ccm-hetzner/ccm.yaml" "${SEEN}.ccm"
+  }
+  local -A manifests=(
+    [plain]=$'name: test-prod\naddons:\n  enable: true\n  path: ./addons\n'
+    [trailing-slash]=$'name: test-prod\naddons:\n  enable: true\n  path: ./addons/\n'
+    [no-leading-dot]=$'name: test-prod\naddons:\n  enable: true\n  path: addons\n'
+    [root-merge-key]=$'name: test-prod\n<<: {addons: {enable: true, path: ./addons}}\n'
+    [merge-in-addons]=$'defaults: &d {enable: true, path: ./elsewhere}\nname: test-prod\naddons:\n  <<: *d\n  path: ./addons/\n'
+    [alias-of-addons]=$'base: &a {enable: true, path: ./addons}\nname: test-prod\naddons: *a\n'
+    [merge-sequence]=$'a: &a {enable: true}\nb: &b {enable: false, path: ./addons}\nname: test-prod\naddons:\n  <<: [*a, *b]\n'
+    [first-merge-wins]=$'a: &a {enable: true, path: ./addons}\nb: &b {enable: false, path: ./elsewhere}\nname: test-prod\naddons:\n  <<: [*a, *b]\n'
+    [root-merge-alias]=$'x: &x {addons: {enable: true, path: ./addons/}}\nname: test-prod\n<<: *x\n'
+  )
+  local name spec
+  for name in "${!manifests[@]}"; do
+    printf '%s' "${manifests[${name}]}" > "${work_dir}/kubeone.yaml"
+    rm -f "${SEEN}" "${SEEN}.ccm"
+    run kubeone::apply "${work_dir}" "${cy}"
+    [ "${status}" -eq 0 ] || { echo "${name}: ${output}"; return 1; }
+    spec="$(cat "${SEEN}")"
+    [[ "${spec}" =~ ^test-prod$'\n'true$'\n'"${work_dir}"/\.kubeone-run-[A-Za-z0-9]+/addons$ ]] || { echo "${name}: ${spec}"; return 1; }
+    [ "$(cat "${SEEN}.ccm")" = "kind: ConfigMap" ] || { echo "${name}: the run copy holds $(cat "${SEEN}.ccm")"; return 1; }
+    [[ "$(ls -A "${work_dir}")" != *".kubeone-run-"* ]] || { echo "${name}: the run copy is left"; return 1; }
+  done
+  local path
+  for path in ./addons/ addons .//addons//; do
+    printf 'name: test-prod\naddons:\n  enable: true\n  path: %s\n' "${path}" > "${work_dir}/kubeone.yaml"
+    BAD=1 run kubeone::apply "${work_dir}" "${cy}"
+    [ "${status}" -ne 0 ] || { echo "${path}: status 0"; return 1; }
+    [[ "${output}" == *"kubeone: refusing to apply addons/ccm-hetzner/ccm.yaml: it holds a keys-only Secret"* ]] || { echo "${path}: ${output}"; return 1; }
+    [[ "$(ls -A "${work_dir}")" != *".kubeone-run-"* ]] || { echo "${path}: the run copy is left"; return 1; }
+  done
+}
+
+# The Go twin is TestApplyRunCopyOrder. The copy walks the addons
+# directory as Go's filepath.WalkDir does: directory by directory, the
+# names sorted by bytes. a/ comes before a-c.yaml ("a" is a prefix of
+# "a-c.yaml"), so a/b.yaml is the first file that the guard refuses,
+# although "a-c.yaml" < "a/b.yaml" as whole paths.
+@test "kubeone::apply: both implementations refuse the same first file" {
+  local cy; cy=$(_cluster_yaml '')
+  yq -i '.addons.enable = true | .addons.path = "./addons"' "${work_dir}/kubeone.yaml"
+  kubeone::_clean_reinstalled_workers() { :; }
+  kubeone::_name_robot_workers() { :; }
+  kubeone() { echo "kubeone ran" >&2; }
+  kubeone::render_addons() {
+    local marked='apiVersion: v1\nkind: Secret\nmetadata:\n  name: x\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\n'
+    mkdir -p "${1}/addons/a"
+    printf "${marked}" > "${1}/addons/a/b.yaml"
+    printf "${marked}" > "${1}/addons/a-c.yaml"
+  }
+  run kubeone::apply "${work_dir}" "${cy}"
+  assert_failure
+  assert_output --partial "kubeone: refusing to apply addons/a/b.yaml: it holds a keys-only Secret"
+  refute_output --partial "a-c.yaml"
+  refute_output --partial "kubeone ran"
+}
+
+# The Go twin is TestApplyWithAMissingAddonsDirectory. An addons path that
+# does not exist gets no copy, and it is not refused: the manifest copy
+# names the run's addons directory, which does not exist, and KubeOne
+# reports a missing addons directory as it did before.
+@test "kubeone::apply: an addons path that does not exist gets no copy" {
+  local cy; cy=$(_cluster_yaml '')
+  yq -i '.addons.enable = true | .addons.path = "./missing"' "${work_dir}/kubeone.yaml"
+  export KCALLS="${BATS_TEST_TMPDIR}/kubeone.calls"
+  kubeone::_clean_reinstalled_workers() { :; }
+  kubeone::_name_robot_workers() { :; }
+  kubeone::render_addons() { :; }
+  kubeone() {
+    local manifest="" prev="" a addons
+    for a in "$@"; do [[ "${prev}" != --manifest ]] || manifest="${a}"; prev="${a}"; done
+    addons="$(yq -r '.addons.path' "${manifest}")"
+    [[ "${addons}" == "${work_dir}"/.kubeone-run-*/addons && ! -e "${addons}" ]] && echo "no addons directory" >> "${KCALLS}"
+  }
+  run kubeone::apply "${work_dir}" "${cy}"
+  assert_success
+  refute_output --partial "refusing"
+  [ "$(cat "${KCALLS}")" = "no addons directory" ]
+  run ls -A "${work_dir}"
+  refute_output --partial ".kubeone-run-"
+}
+
+# _tree <pid>: <pid> and each process under it, the deepest first.
+_tree() {
+  local c
+  for c in $(pgrep -P "${1}" 2>/dev/null); do _tree "${c}"; done
+  echo "${1}"
+}
+
+# _apply_within <seconds> <args>: run kubeone::apply in the background and
+# fail when it does not end in time (a read or a write that waits on a
+# FIFO). Then each process of the run is stopped, so none holds the output
+# of bats open. Sets status and output as bats' run does.
+_apply_within() {
+  local limit="${1}" i pid; shift
+  kubeone::apply "$@" > "${BATS_TEST_TMPDIR}/apply.out" 2>&1 &
+  pid=$!
+  for (( i = 0; i < limit * 10; i++ )); do
+    kill -0 "${pid}" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "${pid}" 2>/dev/null; then
+    # shellcheck disable=SC2046 # one pid per word
+    kill $(_tree "${pid}") 2>/dev/null || true
+    echo "kubeone::apply did not end within ${limit}s" >&2
+    return 1
+  fi
+  status=0
+  wait "${pid}" || status=$?
+  output="$(cat "${BATS_TEST_TMPDIR}/apply.out")"
+}
+
+# The Go twin is TestApplyRunCopyRefusesWhatItCannotRead. A part of the
+# addons path that lo cannot search is not "no addons directory": lo
+# refuses the path. A FIFO in the addons directory is refused as a file
+# that cannot be read: lo does not open it (an open would wait for a
+# writer).
+@test "kubeone::apply: an addons path that cannot be read, or a file of it that is not a regular file, stops the apply" {
   local cy; cy=$(_cluster_yaml '')
   export KCALLS="${BATS_TEST_TMPDIR}/kubeone.calls"
   kubeone::_clean_reinstalled_workers() { :; }
   kubeone::_name_robot_workers() { :; }
-  kubeone() { echo "kubeone $*" >> "${KCALLS}"; ls -A >> "${KCALLS}"; }
+  kubeone() { echo "kubeone $*" >> "${KCALLS}"; }
+  if [[ "$(id -u)" -ne 0 ]]; then
+    kubeone::render_addons() { mkdir -p "${1}/locked/addons"; printf 'kind: ConfigMap\n' > "${1}/locked/addons/ccm.yaml"; chmod 0 "${1}/locked"; }
+    yq -i '.addons.enable = true | .addons.path = "./locked/addons"' "${work_dir}/kubeone.yaml"
+    _apply_within 20 "${work_dir}" "${cy}"
+    chmod 755 "${work_dir}/locked"
+    [ "${status}" -ne 0 ]
+    [[ "${output}" == *"kubeone: refusing to apply locked/addons: it cannot be read, so it cannot be checked for a keys-only Secret"* ]] || { echo "${output}"; return 1; }
+    [ ! -f "${KCALLS}" ]
+    [[ "$(ls -A "${work_dir}")" != *".kubeone-run-"* ]]
+  fi
+  kubeone::render_addons() { mkdir -p "${1}/addons/ccm-hetzner"; printf 'kind: ConfigMap\n' > "${1}/addons/ccm-hetzner/ccm.yaml"; mkfifo "${1}/addons/ccm-hetzner/fifo.yaml"; }
+  yq -i '.addons.path = "./addons"' "${work_dir}/kubeone.yaml"
+  _apply_within 20 "${work_dir}" "${cy}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"kubeone: refusing to apply addons/ccm-hetzner/fifo.yaml: it cannot be read, so it cannot be checked for a keys-only Secret"* ]] || { echo "${output}"; return 1; }
+  [ ! -f "${KCALLS}" ]
+  [[ "$(ls -A "${work_dir}")" != *".kubeone-run-"* ]]
+}
+
+# The Go twin is TestApplyRunCopyRefusesAnExistingManifestCopy. lo writes
+# the manifest copy as a new file: a FIFO that is at its path already
+# (made after lo named the run directory, here by a mktemp stub) gets no
+# byte, the apply stops, the run directory goes, and the FIFO stays.
+@test "kubeone::apply: a file at the path of the manifest copy stops the apply" {
+  local cy; cy=$(_cluster_yaml '')
+  export KCALLS="${BATS_TEST_TMPDIR}/kubeone.calls" FIXED="${work_dir}/.kubeone-run-fixed"
+  kubeone::_clean_reinstalled_workers() { :; }
+  kubeone::_name_robot_workers() { :; }
+  kubeone() { echo "kubeone $*" >> "${KCALLS}"; }
+  mktemp() { mkdir -m 700 "${FIXED}" && mkfifo "${FIXED}.yaml" && printf '%s\n' "${FIXED}"; }
+  local with
+  for with in none addons; do
+    [[ "${with}" == none ]] || yq -i '.addons.enable = true | .addons.path = "./addons"' "${work_dir}/kubeone.yaml"
+    _apply_within 20 "${work_dir}" "${cy}"
+    [ "${status}" -ne 0 ] || { echo "${with}: status 0"; return 1; }
+    [[ "${output}" == *"kubeone: cannot write the manifest copy ${FIXED}.yaml"* ]] || { echo "${with}: ${output}"; return 1; }
+    [ ! -f "${KCALLS}" ]
+    [ ! -e "${FIXED}" ] || { echo "${with}: the run directory is left"; return 1; }
+    [ -p "${FIXED}.yaml" ] || { echo "${with}: the FIFO that was there is gone"; return 1; }
+    rm -f "${FIXED}.yaml"
+  done
+}
+
+# No Go twin: Go does not enter the run directory. lo names the run
+# directory for the cleanup as soon as mktemp made it: a directory that lo
+# then cannot enter (here a mktemp stub makes it with mode 0) stops the
+# apply, and the cleanup removes it.
+@test "kubeone::apply: a run directory that lo cannot enter is removed" {
+  [[ "$(id -u)" -ne 0 ]] || skip "root can enter a directory with mode 0"
+  local cy; cy=$(_cluster_yaml '')
+  export KCALLS="${BATS_TEST_TMPDIR}/kubeone.calls" FIXED="${work_dir}/.kubeone-run-fixed"
+  kubeone::_clean_reinstalled_workers() { :; }
+  kubeone::_name_robot_workers() { :; }
+  kubeone() { echo "kubeone $*" >> "${KCALLS}"; }
+  mktemp() { mkdir -m 0 "${FIXED}" && printf '%s\n' "${FIXED}"; }
   run kubeone::apply "${work_dir}" "${cy}"
-  assert_success
-  run cat "${KCALLS}"
-  assert_line --index 0 "kubeone apply --manifest kubeone.yaml --auto-approve"
+  assert_failure
+  assert_output --partial "kubeone: cannot make a run directory in ${work_dir}"
+  [ ! -f "${KCALLS}" ]
+  [ ! -e "${FIXED}" ] || { chmod 700 "${FIXED}"; echo "the run directory is left"; return 1; }
+}
+
+# The Go twin is TestApplyRemovesTheRunCopyOnASIGHUP. The subshell that
+# makes the run directory owns it from the start: a SIGTERM while lo
+# copies the addons (after the first copied file) ends the subshell, its
+# EXIT trap removes the run copy, and kubeone does not run.
+@test "kubeone::apply: a signal after the first copied file removes the run copy" {
+  local cy; cy=$(_cluster_yaml '')
+  yq -i '.addons.enable = true | .addons.path = "./addons"' "${work_dir}/kubeone.yaml"
+  export KCALLS="${BATS_TEST_TMPDIR}/kubeone.calls" READS="${BATS_TEST_TMPDIR}/reads" COPIED="${BATS_TEST_TMPDIR}/copied"
+  kubeone::_clean_reinstalled_workers() { :; }
+  kubeone::_name_robot_workers() { :; }
+  kubeone() { echo "kubeone $*" >> "${KCALLS}"; }
+  kubeone::render_addons() {
+    mkdir -p "${1}/addons/a" "${1}/addons/b"
+    printf 'kind: ConfigMap\n' > "${1}/addons/a/x.yaml"
+    printf 'kind: ConfigMap\n' > "${1}/addons/b/y.yaml"
+  }
+  eval "$(declare -f keysonly::read_checked_file | sed '1s/^keysonly::read_checked_file/_test_read_checked_file/')"
+  keysonly::read_checked_file() {
+    echo "${2}" >> "${READS}"
+    if [[ "${2}" == addons/b/y.yaml ]]; then
+      find "${work_dir}" -path '*/.kubeone-run-*/addons/a/x.yaml' > "${COPIED}"
+      # This runs in the command substitution of kubeone::_copy_dir: its
+      # parent is the subshell of kubeone::apply that owns the run.
+      local me="${BASHPID}"
+      kill -TERM "$(ps -o ppid= -p "${me}" | tr -d ' ')"
+    fi
+    _test_read_checked_file "$@"
+  }
+  run kubeone::apply "${work_dir}" "${cy}"
+  [ "${status}" -eq 143 ] || { echo "status ${status}: ${output}"; return 1; }
+  [ "$(cat "${READS}")" = $'addons/a/x.yaml\naddons/b/y.yaml' ]
+  [ -s "${COPIED}" ]
+  [ ! -f "${KCALLS}" ]
+  run ls -A "${work_dir}"
   refute_output --partial ".kubeone-run-"
 }
 
