@@ -2,8 +2,11 @@ package kubeone
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,13 +19,15 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/interrupt"
+	"github.com/kernpilot/lok8s/internal/provision"
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // runcopy_test.go pins the run copy of Apply (stageRun) beyond the main
 // snapshot test in kubeone_test.go: the forms of addons.path, the merged
 // settings, the reads that it refuses, the order of the copy, the path of
-// the manifest copy, and the cleanup on a SIGHUP.
+// the manifest copy, and the cleanup on a SIGHUP, before lo ends with it.
 
 const (
 	rcClean  = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n"
@@ -236,12 +241,15 @@ func TestApplyRunCopyRefusesAnExistingManifestCopy(t *testing.T) {
 }
 
 // bats: "kubeone::apply: a signal after the first copied file removes the
-// run copy". A SIGHUP while kubeone runs stops kubeone (Apply cancels its
-// context), removes the run copy, and then ends lo with the SIGHUP
-// (raiseHangup, recorded here). A SIGHUP during the staging (once the run
-// directory exists, before the first copied file) does the same: kubeone
-// gets a cancelled context, so exec does not start it. The test keeps a
-// SIGHUP handler of its own, so the signal never ends the test binary.
+// run copy". A SIGHUP while kubeone runs stops kubeone (it cancels the
+// command context of interrupt.Watch, so the context of kubeone ends),
+// removes the run copy, and Apply returns: the SIGHUP maps to 129 for
+// main, which ends lo with it after the cleanup of each caller
+// (TestApplyHangupEndsLoAfterTheOuterCleanup). A SIGHUP during the staging
+// (once the run directory exists, before the first copied file) does the
+// same: kubeone gets a cancelled context, so exec does not start it. The
+// test keeps a SIGHUP handler of its own, so the signal never ends the
+// test binary.
 func TestApplyRemovesTheRunCopyOnASIGHUP(t *testing.T) {
 	if signal.Ignored(syscall.SIGHUP) {
 		t.Skip("SIGHUP is ignored")
@@ -250,17 +258,8 @@ func TestApplyRemovesTheRunCopyOnASIGHUP(t *testing.T) {
 	signal.Notify(keep, syscall.SIGHUP)
 	defer signal.Stop(keep)
 	d, runner, _, wd := rcDriver(t, kubeoneAddonsManifest, map[string]string{"ccm-hetzner/ccm.yaml": rcClean})
-	// raiseHangup ends lo: the run copy must be gone before it.
-	raised := 0
-	orig := raiseHangup
-	raiseHangup = func() {
-		raised++
-		if left, _ := filepath.Glob(filepath.Join(wd, runPrefix+"*")); len(left) != 0 {
-			t.Errorf("raiseHangup before the cleanup: %v", left)
-		}
-	}
-	defer func() { raiseHangup = orig }()
 
+	ctx, exitCode := interrupt.Watch(t.Context())
 	stopped := false
 	runner.handler = func(c execx.Cmd) error {
 		if left, _ := filepath.Glob(filepath.Join(wd, runPrefix+"*")); len(left) != 2 {
@@ -277,15 +276,18 @@ func TestApplyRemovesTheRunCopyOnASIGHUP(t *testing.T) {
 			return errors.New("kubeone was not stopped")
 		}
 	}
-	if err := d.Apply(t.Context(), wd, ""); err == nil {
+	if err := d.Apply(ctx, wd, ""); err == nil {
 		t.Error("Apply = nil after the SIGHUP")
 	}
-	if !stopped || raised != 1 {
-		t.Errorf("kubeone stopped %v, raiseHangup calls %d: want true, 1", stopped, raised)
+	if !stopped || ctx.Err() == nil {
+		t.Errorf("kubeone stopped %v, command context %v: want true, cancelled", stopped, ctx.Err())
 	}
 	assertNoRunCopy(t, wd)
+	if got := exitCode(); got != 129 {
+		t.Errorf("exit code = %d, want 129", got)
+	}
 
-	raised = 0
+	ctx, exitCode = interrupt.Watch(t.Context())
 	origMkdirTemp := mkdirTemp
 	defer func() { mkdirTemp = origMkdirTemp }()
 	mkdirTemp = func(dir, pattern string) (string, error) {
@@ -305,22 +307,129 @@ func TestApplyRemovesTheRunCopyOnASIGHUP(t *testing.T) {
 			return errors.New("the context of kubeone was not cancelled")
 		}
 	}
-	if err := d.Apply(t.Context(), wd, ""); err == nil {
+	if err := d.Apply(ctx, wd, ""); err == nil {
 		t.Error("Apply = nil after a SIGHUP during the staging")
 	}
-	if !cancelled || raised != 1 {
-		t.Errorf("staging: kubeone context cancelled %v, raiseHangup calls %d: want true, 1", cancelled, raised)
+	if !cancelled || ctx.Err() == nil {
+		t.Errorf("staging: kubeone context cancelled %v, command context %v: want true, cancelled", cancelled, ctx.Err())
 	}
 	assertNoRunCopy(t, wd)
+	if got := exitCode(); got != 129 {
+		t.Errorf("staging: exit code = %d, want 129", got)
+	}
 	mkdirTemp = origMkdirTemp
 
 	// Without a SIGHUP, the run ends as it did.
-	raised = 0
+	ctx, exitCode = interrupt.Watch(t.Context())
 	runner.handler = nil
-	if err := d.Apply(t.Context(), wd, ""); err != nil || raised != 0 {
-		t.Errorf("Apply = %v, raiseHangup calls %d: want nil, 0", err, raised)
+	if err := d.Apply(ctx, wd, ""); err != nil || ctx.Err() != nil {
+		t.Errorf("Apply = %v, command context %v: want nil, nil", err, ctx.Err())
 	}
 	assertNoRunCopy(t, wd)
+	if got := exitCode(); got != 0 {
+		t.Errorf("exit code without a signal = %d, want 0", got)
+	}
+}
+
+// A SIGHUP while kubeone runs ends lo with the SIGHUP after the cleanup of
+// each caller of Apply, not in Apply: here the temporary provider config
+// of lo provision (provision.WriteProviderConfig), which a deferred
+// cleanup of the provision dispatch removes. The test runs a child of the
+// test binary as lo runs (interrupt.Watch, the command, interrupt.Exit),
+// sends it a real SIGHUP while kubeone runs, and checks that the child
+// ended with the SIGHUP and that neither the provider config nor the run
+// copy is left.
+func TestApplyHangupEndsLoAfterTheOuterCleanup(t *testing.T) {
+	if dir := os.Getenv("LOK8S_TEST_HANGUP_DIR"); dir != "" {
+		hangupChild(t, dir)
+		return
+	}
+	if signal.Ignored(syscall.SIGHUP) {
+		t.Skip("SIGHUP is ignored")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	cmd := exec.Command(exe, "-test.run=^TestApplyHangupEndsLoAfterTheOuterCleanup$", "-test.count=1")
+	cmd.Env = append(os.Environ(), "LOK8S_TEST_HANGUP_DIR="+dir, "TMPDIR="+dir)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "kubeone-runs")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			t.Fatalf("kubeone did not start in the child:\n%s", out.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() || ws.Signal() != syscall.SIGHUP {
+		t.Errorf("the child ended with %v, want the signal SIGHUP:\n%s", cmd.ProcessState, out.String())
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "lok8s-provider-config.*.yaml")); len(left) != 0 {
+		t.Errorf("the cleanup of the caller did not run, the provider config is left: %v", left)
+	}
+	var left []string
+	_ = filepath.WalkDir(dir, func(path string, _ fs.DirEntry, err error) error {
+		if err == nil && strings.HasPrefix(filepath.Base(path), runPrefix) {
+			left = append(left, path)
+		}
+		return nil
+	})
+	if len(left) != 0 {
+		t.Errorf("the run copy is left: %v", left)
+	}
+	if strings.Contains(out.String(), "--- FAIL") {
+		t.Errorf("the child failed:\n%s", out.String())
+	}
+}
+
+// hangupChild is the child of TestApplyHangupEndsLoAfterTheOuterCleanup: a
+// caller with a deferred cleanup runs Apply, in the order of main (Watch,
+// the command, the exit code, Exit). Its temporary files go in dir
+// (TMPDIR).
+func hangupChild(t *testing.T, dir string) {
+	ctx, exitCode := interrupt.Watch(context.Background())
+	rc := func() int {
+		spec := filepath.Join(dir, "cluster.lok8s.yaml")
+		testutil.WriteFile(t, spec, "spec:\n  provider:\n    name: hetzner\n    config:\n      location: fsn1\n")
+		_, cleanup, err := provision.WriteProviderConfig(spec, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		d, runner, _, wd := rcDriver(t, kubeoneAddonsManifest, map[string]string{"ccm-hetzner/ccm.yaml": rcClean})
+		runner.handler = func(c execx.Cmd) error {
+			testutil.WriteFile(t, filepath.Join(dir, "kubeone-runs"), "")
+			select {
+			case <-runner.ctx.Done():
+				return runner.ctx.Err()
+			case <-time.After(20 * time.Second):
+				return errors.New("kubeone was not stopped")
+			}
+		}
+		if err := d.Apply(ctx, wd, ""); err == nil {
+			return 3
+		}
+		return 1
+	}()
+	if c := exitCode(); c != 0 {
+		rc = c
+	}
+	interrupt.Exit(rc)
 }
 
 // explode resolves aliases and merge keys as yq's explode(.) does with
@@ -371,44 +480,6 @@ func TestExplode(t *testing.T) {
 	budget := explodeBudget
 	if _, err := explode(doc, &budget); err == nil {
 		t.Error("an alias bomb exploded without an error")
-	}
-}
-
-// With SIGHUP ignored (nohup lo ...), watchHangup leaves the ignore in
-// place: it does not call signal.Notify, which would undo it, and the
-// context is the parent's. The test runs again in a child that starts
-// with SIGHUP ignored, as under nohup: an ignore made in this process
-// could not be undone for the tests after it.
-func TestWatchHangupKeepsAnIgnoredSIGHUP(t *testing.T) {
-	if os.Getenv("LOK8S_TEST_SIGHUP_IGNORED") != "1" {
-		exe, err := os.Executable()
-		if err != nil {
-			t.Fatal(err)
-		}
-		cmd := exec.Command("/bin/sh", "-c", `trap "" HUP; exec "$0" -test.run='^TestWatchHangupKeepsAnIgnoredSIGHUP$' -test.count=1 -test.v`, exe)
-		cmd.Env = append(os.Environ(), "LOK8S_TEST_SIGHUP_IGNORED=1")
-		out, err := cmd.CombinedOutput()
-		if err != nil || !strings.Contains(string(out), "--- PASS: TestWatchHangupKeepsAnIgnoredSIGHUP") {
-			t.Fatalf("the child with SIGHUP ignored: %v\n%s", err, out)
-		}
-		return
-	}
-	if !signal.Ignored(syscall.SIGHUP) {
-		t.Fatal("the child does not start with SIGHUP ignored")
-	}
-	parent := t.Context()
-	ctx, stop := watchHangup(parent)
-	if !signal.Ignored(syscall.SIGHUP) {
-		t.Error("watchHangup undid the ignore of SIGHUP")
-	}
-	if ctx != parent {
-		t.Error("watchHangup made a new context, want the parent")
-	}
-	if stop() {
-		t.Error("stop reported a SIGHUP")
-	}
-	if !signal.Ignored(syscall.SIGHUP) {
-		t.Error("the ignore of SIGHUP is gone after the watch")
 	}
 }
 

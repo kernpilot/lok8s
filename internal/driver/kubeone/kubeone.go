@@ -26,6 +26,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/interrupt"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -291,16 +292,15 @@ func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
 	// bytes that lo read and checked, not from the shared files. The copy
 	// can hold the CCM token: the deferred cleanup removes it when the run
 	// ends, on the first SIGINT or SIGTERM too (cli.WatchInterrupt cancels
-	// ctx, so kubeone stops and Apply returns). For a SIGHUP, which
-	// WatchInterrupt does not catch, Apply catches it while the copy
-	// exists: kubeone stops, the copy goes, and lo then ends with the
-	// SIGHUP. A SIGKILL, or a second signal, can leave the copy.
-	ctx, hangup := watchHangup(ctx)
-	defer func() {
-		if hangup() {
-			raiseHangup()
-		}
-	}()
+	// ctx, so kubeone stops and Apply returns). A SIGHUP, which
+	// WatchInterrupt does not catch, Apply catches while the copy exists
+	// (interrupt.CatchHangup): it cancels the command context, so kubeone
+	// stops, Apply removes the copy and returns, and each caller returns
+	// and runs its cleanup (the temporary provider config of lo
+	// provision). main then ends lo with the SIGHUP (interrupt.Exit). A
+	// SIGKILL, or a second signal, can leave the copy.
+	ctx, stopHangup := interrupt.CatchHangup(ctx)
+	defer stopHangup()
 	manifest, cleanup, err := stageRun(d.stderr(), workDir)
 	if err != nil {
 		return err
