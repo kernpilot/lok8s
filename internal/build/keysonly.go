@@ -34,6 +34,25 @@ import (
 // TestKeysOnlyBlankExprMatchesBash checks the text.
 const KeysOnlyBlankExpr = `explode(.) | (.. | select(kind == "map") | select(.kind == "Secret")) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "") | (.. | select(kind == "map") | select(.kind == "SecretList") | .[] | select(key == "items") | select(kind == "seq") | .[] | select(kind == "map")) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "")`
 
+// lastAppliedAnnotation is the annotation that `kubectl apply` writes. It
+// holds the object as it was applied, so on a Secret it can hold the
+// Secret's values.
+const lastAppliedAnnotation = "kubectl.kubernetes.io/last-applied-configuration"
+
+// KeysOnlyLastAppliedExpr is the yq program (run with -N) that `lo build
+// --keys-only` runs on the emptied stream. It prints one line,
+// "Secret <namespace>/<name>", for each Secret that has the annotation
+// kubectl.kubernetes.io/last-applied-configuration in metadata.annotations:
+// the same Secrets that KeysOnlyBlankExpr empties (a mapping whose kind is
+// Secret at any depth, an item of a SecretList). It prints nothing for a
+// stream without such a Secret and fails on a stream that does not parse.
+// A namespace or a name that is not a scalar is left out of the line. The
+// keys-only run does not empty annotations, so KeysOnly refuses the
+// render when there is a line: the output must not look complete when it
+// is not. The bash tree runs the same program (build::keys_only);
+// TestKeysOnlyLastAppliedExprMatchesBash checks the text.
+const KeysOnlyLastAppliedExpr = `explode(.) | ((.. | select(kind == "map") | select(.kind == "Secret")), (.. | select(kind == "map") | select(.kind == "SecretList") | .[] | select(key == "items") | select(kind == "seq") | .[] | select(kind == "map") | select(.kind != "Secret"))) | select(.metadata | kind == "map") | select(.metadata.annotations | kind == "map") | select(.metadata.annotations | has("kubectl.kubernetes.io/last-applied-configuration")) | .metadata | pick(["namespace", "name"]) | with_entries(select((.value | kind) == "scalar" and (.value | tag) != "!!null")) | to_entries | map(.value) | join("/") | sub("^", "Secret ")`
+
 // keysOnlyCapability is the line that `Secret --capabilities` prints when
 // the plugin has the keys-only run.
 const keysOnlyCapability = "keys-only"
@@ -225,8 +244,10 @@ func checkKeysOnlyPlugin(ctx context.Context, o *Options, stderr io.Writer) erro
 // keys-only marker annotation. Then KeysOnlyBlankExpr empties every value
 // of every Secret in the final stream (after the transformations and
 // envsubst): a patch, a plain Secret manifest, a kustomize
-// secretGenerator or a Helm chart's Secret prints its key names only. It
-// is store-free like --no-secrets (the plugin's store-free switch is on,
+// secretGenerator or a Helm chart's Secret prints its key names only. A
+// Secret with the annotation kubectl.kubernetes.io/last-applied-configuration
+// is refused (KeysOnlyLastAppliedExpr): the annotation can hold the values,
+// and nothing goes to stdout. It is store-free like --no-secrets (the plugin's store-free switch is on,
 // so no store is read, decrypted or minted) and writes no file: no
 // artifacts.yaml, no split, no prune of the artifacts dir. In the exec
 // pipeline the Secret plugin must have the keys-only run
@@ -270,6 +291,24 @@ func KeysOnly(ctx context.Context, o Options, out io.Writer) error {
 		Stderr: stderr,
 	}); err != nil {
 		ui.ErrorTo(stderr, "lo build --keys-only: yq could not empty the Secret values of %s's render", o.Domain)
+		return ErrHandled
+	}
+	var lastApplied bytes.Buffer
+	if err := o.runner().Run(ctx, execx.Cmd{
+		Name:   yq,
+		Args:   []string{"-N", "--yaml-fix-merge-anchor-to-spec", KeysOnlyLastAppliedExpr, "-"},
+		Stdin:  bytes.NewReader(blanked.Bytes()),
+		Stdout: &lastApplied,
+		Stderr: stderr,
+	}); err != nil {
+		ui.ErrorTo(stderr, "lo build --keys-only: yq could not check %s's render for the annotation %s", o.Domain, lastAppliedAnnotation)
+		return ErrHandled
+	}
+	if found := strings.TrimRight(lastApplied.String(), "\n"); found != "" {
+		for line := range strings.SplitSeq(found, "\n") {
+			ui.ErrorTo(stderr, "lo build --keys-only: refusing %s's render: %s has the annotation %s, which can hold the Secret's values",
+				o.Domain, line, lastAppliedAnnotation)
+		}
 		return ErrHandled
 	}
 	docs := countKindLines(blanked.Bytes())

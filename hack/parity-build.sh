@@ -379,6 +379,55 @@ for impl in bash go; do
   done
 done
 
+# The keys-only run does not empty annotations, so a Secret with the
+# last-applied annotation (it can hold the values) is refused through the
+# real kustomize: the same message on both sides, one line per Secret,
+# nothing on stdout and no value on stderr.
+mkdir -p "${PROJ}/clusters/applied.dev"
+printf 'kind: Lo\nmetadata:\n  name: applied\n' > "${PROJ}/clusters/applied.dev/cluster.lok8s.yaml"
+printf 'resources:\n  - applied.yaml\n' > "${PROJ}/clusters/applied.dev/kustomization.yaml"
+cat > "${PROJ}/clusters/applied.dev/applied.yaml" <<'EOF'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app
+  namespace: one
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: '{"kind":"Secret","stringData":{"KEY":"applied-plain"}}'
+stringData:
+  KEY: applied-plain
+---
+apiVersion: v1
+kind: List
+items:
+- apiVersion: v1
+  kind: Secret
+  metadata:
+    name: listed
+    namespace: two
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: '{}'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: visible
+  namespace: one
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: '{}'
+EOF
+check "build --keys-only refuses the last-applied annotation" : build --domain applied.dev --keys-only
+for impl in bash go; do
+  [[ ! -s "${WORK}/${impl}.out" ]] || fail "build --keys-only refuses the last-applied annotation (${impl}) — stdout is not empty"
+  ! grep -qF applied-plain "${WORK}/${impl}.err" || fail "build --keys-only refuses the last-applied annotation (${impl}) — stderr carries the value"
+  [[ "$(grep -c "refusing applied.dev's render" "${WORK}/${impl}.err")" == 2 ]] \
+    || fail "build --keys-only refuses the last-applied annotation (${impl}) — not one refusal per Secret: $(cat "${WORK}/${impl}.err")"
+  for s in one/app two/listed; do
+    grep -qF "[error] lo build --keys-only: refusing applied.dev's render: Secret ${s} has the annotation kubectl.kubernetes.io/last-applied-configuration, which can hold the Secret's values" "${WORK}/${impl}.err" \
+      || fail "build --keys-only refuses the last-applied annotation (${impl}) — no refusal for ${s}"
+  done
+done
+
 # A Secret plugin without the keys-only run is refused before the render.
 # The stub answers --capabilities as an older plugin does (dry-run only) and
 # logs each call. LO_RENDER=exec: lo-full renders with its own plugin and
@@ -445,6 +494,6 @@ for impl in bash go; do
   ! grep -qx './artifacts.yaml' "${WORK}/state.${impl}/qguard.dev.tree" \
     || fail "output guard, quoted marker (${impl}) — artifacts.yaml was written"
 done
-rm -rf "${PROJ}/clusters/gen.dev" "${PROJ}/clusters/blank.dev" "${PROJ}/clusters/guard.dev" "${PROJ}/clusters/qguard.dev" "${PROJ}/.kustomize"
+rm -rf "${PROJ}/clusters/gen.dev" "${PROJ}/clusters/blank.dev" "${PROJ}/clusters/applied.dev" "${PROJ}/clusters/guard.dev" "${PROJ}/clusters/qguard.dev" "${PROJ}/.kustomize"
 
 report

@@ -564,7 +564,7 @@ build::keys_only() {
   fi
   build::_export_secrets_path "${domain_dir}"
   build::_resolve_api "${domain_dir}"
-  local kubeconfig envsubst_whitelist rendered blanked docs=0
+  local kubeconfig envsubst_whitelist rendered blanked last_applied line docs=0
   kubeconfig=$(build::_render_kubeconfig "${domain}")
   envsubst_whitelist=$(template::envsubst_whitelist)
   local expr='explode(.) | (.. | select(kind == "map") | select(.kind == "Secret")) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "") | (.. | select(kind == "map") | select(.kind == "SecretList") | .[] | select(key == "items") | select(kind == "seq") | .[] | select(kind == "map")) |= (((.[] | select(key == "data" or key == "stringData")) | .. | select(kind == "scalar" and tag != "!!null")) = "")'
@@ -589,6 +589,23 @@ build::keys_only() {
     return 1
   fi
   blanked="${blanked%.}"
+  # The keys-only run does not empty annotations: refuse a Secret with
+  # the annotation that kubectl apply writes (it can hold the values).
+  # The same program as KeysOnlyLastAppliedExpr in internal/build.
+  local last_applied_expr='explode(.) | ((.. | select(kind == "map") | select(.kind == "Secret")), (.. | select(kind == "map") | select(.kind == "SecretList") | .[] | select(key == "items") | select(kind == "seq") | .[] | select(kind == "map") | select(.kind != "Secret"))) | select(.metadata | kind == "map") | select(.metadata.annotations | kind == "map") | select(.metadata.annotations | has("kubectl.kubernetes.io/last-applied-configuration")) | .metadata | pick(["namespace", "name"]) | with_entries(select((.value | kind) == "scalar" and (.value | tag) != "!!null")) | to_entries | map(.value) | join("/") | sub("^", "Secret ")'
+  if ! last_applied=$(
+    set -o pipefail
+    printf '%s' "${blanked}" | yq -N --yaml-fix-merge-anchor-to-spec "${last_applied_expr}" -
+  ); then
+    error "lo build --keys-only: yq could not check ${domain}'s render for the annotation kubectl.kubernetes.io/last-applied-configuration"
+    return 1
+  fi
+  if [[ -n "${last_applied}" ]]; then
+    while IFS= read -r line; do
+      error "lo build --keys-only: refusing ${domain}'s render: ${line} has the annotation kubectl.kubernetes.io/last-applied-configuration, which can hold the Secret's values"
+    done <<<"${last_applied}"
+    return 1
+  fi
   docs=$(grep -c '^kind:' <<<"${blanked}") || true
   (( docs > 0 )) || warn "${domain} rendered 0 documents — is its kustomization.yaml composing any targets?"
   if ! printf '%s' "${blanked}"; then

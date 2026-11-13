@@ -258,6 +258,106 @@ YAML
   assert_output "8"
 }
 
+# The keys-only run does not empty annotations, so a Secret with the
+# last-applied annotation (kubectl apply writes it; it can hold the
+# values) is refused: the output must not look complete when it is not.
+# A Secret document, one without a namespace (flow style, a quoted key), a
+# List item, a SecretList item without a kind and a merge key; not a
+# ConfigMap, not another annotation. Go:
+# TestKeysOnlyRefusesTheLastAppliedAnnotation.
+@test "build::keys_only refuses a Secret with the last-applied annotation" {
+  cat > "${BATS_TEST_TMPDIR}/render.yaml" <<'YAML'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app
+  namespace: one
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"v1","kind":"Secret","stringData":{"PLAIN":"applied-canary"}}
+stringData:
+  PLAIN: data-canary
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nons
+  annotations: {"kubectl.kubernetes.io/last-applied-configuration": "{}"}
+data:
+  PLAIN: ZGF0YS1jYW5hcnk=
+---
+apiVersion: v1
+kind: List
+items:
+- apiVersion: v1
+  kind: Secret
+  metadata:
+    name: listed
+    namespace: two
+    annotations:
+      "kubectl.kubernetes.io/last-applied-configuration": "{}"
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: cm
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: "{}"
+---
+apiVersion: v1
+kind: SecretList
+items:
+- metadata:
+    name: kindless
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: "{}"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: merged
+  labels: &ann
+    kubectl.kubernetes.io/last-applied-configuration: "{}"
+  annotations:
+    <<: *ann
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: plain
+  annotations:
+    other: "{}"
+YAML
+  export RENDER="${BATS_TEST_TMPDIR}/render.yaml"
+  kustomize() { cat "${RENDER}"; }
+  export -f kustomize
+  _keys_only_to_file() { build::keys_only "test.lok8s.dev" > "${BATS_TEST_TMPDIR}/out"; }
+  run _keys_only_to_file
+  assert_failure
+  [[ ! -s "${BATS_TEST_TMPDIR}/out" ]] || { echo "stdout: $(cat "${BATS_TEST_TMPDIR}/out")"; return 1; }
+  local name named=()
+  for name in one/app nons two/listed kindless merged; do
+    assert_output --partial "[error] lo build --keys-only: refusing test.lok8s.dev's render: Secret ${name} has the annotation kubectl.kubernetes.io/last-applied-configuration, which can hold the Secret's values"
+  done
+  while read -r _ _ _ _ _ _ _ _ name _; do named+=("${name}"); done <<<"${output}"
+  [[ "${named[*]}" == "one/app nons two/listed kindless merged" ]] || { echo "refused: ${named[*]}"; return 1; }
+  for name in applied-canary data-canary ZGF0YS1jYW5hcnk= "rendered"; do
+    refute_output --partial "${name}"
+  done
+}
+
+# A failed check refuses too. Go: TestKeysOnlyLastAppliedCheckFails.
+@test "build::keys_only refuses the render when the last-applied check fails" {
+  kustomize() { printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n'; }
+  yq() { [[ "${1}" != -N ]] || return 1; command yq "$@"; }
+  export -f kustomize yq
+  _keys_only_to_file() { build::keys_only "test.lok8s.dev" > "${BATS_TEST_TMPDIR}/out"; }
+  run _keys_only_to_file
+  assert_failure
+  [[ ! -s "${BATS_TEST_TMPDIR}/out" ]] || { echo "stdout: $(cat "${BATS_TEST_TMPDIR}/out")"; return 1; }
+  assert_output --partial "[error] lo build --keys-only: yq could not check test.lok8s.dev's render for the annotation kubectl.kubernetes.io/last-applied-configuration"
+  refute_output --partial "rendered"
+}
+
 @test "build::keys_only prints nothing on stdout when the render fails" {
   # Under the real errexit+pipefail of the lo entry.
   run bash -c '

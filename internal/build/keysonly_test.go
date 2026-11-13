@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -255,6 +256,141 @@ func TestKeysOnlyBlankExprMatchesBash(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "  local expr='"+KeysOnlyBlankExpr+"'\n") {
 		t.Error("libs/build (build::keys_only) does not run KeysOnlyBlankExpr")
+	}
+}
+
+// lastAppliedRender has Secrets with the annotation that kubectl apply
+// writes: a Secret document, a Secret without a namespace (flow style, a
+// quoted key), a List item, a SecretList item without a kind and a Secret
+// that gets the annotation through a merge key. A ConfigMap with the
+// annotation and a Secret with another annotation are not refused.
+const lastAppliedRender = `apiVersion: v1
+kind: Secret
+metadata:
+  name: app
+  namespace: one
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"v1","kind":"Secret","stringData":{"PLAIN":"applied-canary"}}
+stringData:
+  PLAIN: data-canary
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nons
+  annotations: {"kubectl.kubernetes.io/last-applied-configuration": "{}"}
+data:
+  PLAIN: ZGF0YS1jYW5hcnk=
+---
+apiVersion: v1
+kind: List
+items:
+- apiVersion: v1
+  kind: Secret
+  metadata:
+    name: listed
+    namespace: two
+    annotations:
+      "kubectl.kubernetes.io/last-applied-configuration": "{}"
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: cm
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: "{}"
+---
+apiVersion: v1
+kind: SecretList
+items:
+- metadata:
+    name: kindless
+    annotations:
+      kubectl.kubernetes.io/last-applied-configuration: "{}"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: merged
+  labels: &ann
+    kubectl.kubernetes.io/last-applied-configuration: "{}"
+  annotations:
+    <<: *ann
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: plain
+  annotations:
+    other: "{}"
+`
+
+// The keys-only run does not empty annotations, so a Secret with the
+// last-applied annotation is refused: the output must not look complete
+// when it is not. The message names each Secret and no value; nothing
+// goes to stdout.
+func TestKeysOnlyRefusesTheLastAppliedAnnotation(t *testing.T) {
+	p, _, _ := keysOnlyProject(t)
+	stubRender(t, p, lastAppliedRender)
+	var stdout, stderr bytes.Buffer
+	if err := KeysOnly(t.Context(), Options{Paths: p, Domain: "d.dev", Stderr: &stderr}, &stdout); !errors.Is(err, ErrHandled) {
+		t.Fatalf("KeysOnly = %v, want ErrHandled\n%s", err, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing", stdout.String())
+	}
+	var refused []string
+	for line := range strings.SplitSeq(strings.TrimRight(stderr.String(), "\n"), "\n") {
+		refused = append(refused, line)
+	}
+	var want []string
+	for _, name := range []string{"one/app", "nons", "two/listed", "kindless", "merged"} {
+		want = append(want, "[error] lo build --keys-only: refusing d.dev's render: Secret "+name+
+			" has the annotation kubectl.kubernetes.io/last-applied-configuration, which can hold the Secret's values")
+	}
+	if !slices.Equal(refused, want) {
+		t.Errorf("stderr =\n%s\nwant =\n%s", strings.Join(refused, "\n"), strings.Join(want, "\n"))
+	}
+	for _, value := range []string{"applied-canary", "data-canary", "ZGF0YS1jYW5hcnk="} {
+		if strings.Contains(stderr.String(), value) {
+			t.Errorf("stderr holds the value %q", value)
+		}
+	}
+}
+
+// A failed check refuses too: it does not let the render through.
+func TestKeysOnlyLastAppliedCheckFails(t *testing.T) {
+	p, _, _ := keysOnlyProject(t)
+	stubRender(t, p, twoDocRender)
+	yq := filepath.Join(p.Bin, "yq")
+	if err := os.Remove(yq); err != nil {
+		t.Fatal(err)
+	}
+	writeFileT(t, yq, "#!/bin/sh\n[ \"$1\" = -N ] && exit 1\nexec '"+pinnedYq(t)+"' \"$@\"\n")
+	if err := os.Chmod(yq, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := KeysOnly(t.Context(), Options{Paths: p, Domain: "d.dev", Stderr: &stderr}, &stdout); !errors.Is(err, ErrHandled) {
+		t.Fatalf("KeysOnly = %v, want ErrHandled\n%s", err, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "[error] lo build --keys-only: yq could not check d.dev's render for the annotation kubectl.kubernetes.io/last-applied-configuration") {
+		t.Errorf("stderr = %q", stderr.String())
+	}
+}
+
+// The Go program is the bash program: the two implementations refuse the
+// same Secrets.
+func TestKeysOnlyLastAppliedExprMatchesBash(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(testutil.RepoRoot(t), "internal", "assets", "lok8s", "libs", "build"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "  local last_applied_expr='"+KeysOnlyLastAppliedExpr+"'\n") {
+		t.Error("libs/build (build::keys_only) does not run KeysOnlyLastAppliedExpr")
 	}
 }
 

@@ -154,6 +154,14 @@ the variable substitution, so the build needs the pinned `yq`. `yq` writes
 the stream: its layout (for example, the indent of lists) can be different
 from `artifacts.yaml`.
 
+lo empties only the `data` and `stringData` values, not the annotations. The
+annotation `kubectl.kubernetes.io/last-applied-configuration`, which
+`kubectl apply` writes, can hold the values of a Secret. Thus `lo build
+--keys-only` refuses a Secret that has this annotation: it prints an error
+that names each such Secret (`Secret <namespace>/<name>`), prints nothing to
+stdout and exits with an error. Remove the annotation from the source
+manifest. Other annotations print as they are.
+
 `--keys-only` writes no file. It does not change `artifacts.yaml` or the split
 directory. You cannot use it with `--split` or `--single`.
 
