@@ -15,19 +15,28 @@ import (
 // The shell-operator base image names its vendor's own apk mirror, over
 // plain HTTP. The final stage must write exactly Alpine's CDN over HTTPS
 // (main and community) to /etc/apk/repositories, before its first apk
-// call. The test is an allow list: one fixed write, no other mention of
-// /etc/apk or repositories, no SSL_NO_VERIFY or APK_CONFIG, and apk calls
-// only as `apk upgrade --no-cache` and `apk add --no-cache <packages>`
-// (names from the index, not .apk files). Any other form fails (also a
-// quoted path, a tee, a redirect after apk, a heredoc, an escape directive
-// or an ARG in the final FROM), so a change to the image's package setup
-// changes this test with it. It reads text, not the shell. These can still
-// get past it: a call through a variable or by a path outside a bin
-// directory (such as ./apk), a write by a glob or a relative path (cd /etc,
-// then ap*/repo*), a file that COPY or ADD brings in (also a binary that
-// an earlier stage built with its own apk sources, by COPY --from), a CA
-// or a proxy that the build adds, and another tool or a fetched script
-// that writes the file (such as setup-apkrepos).
+// call. The test is an allow list:
+//   - one fixed write, and no other mention of /etc/apk or repositories;
+//   - no SSL_NO_VERIFY or APK_CONFIG;
+//   - apk calls only as `apk upgrade --no-cache` and
+//     `apk add --no-cache <packages>` (names from the index, not .apk
+//     files).
+//
+// Any other form fails (also a quoted path, a tee, a redirect after apk, a
+// heredoc, an escape directive or an ARG in the final FROM), so a change to
+// the image's package setup changes this test with it.
+//
+// The test reads text, not the shell. These can still get past it:
+//   - a call through a variable, or by a path outside a bin directory
+//     (such as ./apk);
+//   - a write by a glob or a relative path (cd /etc, then ap*/repo*);
+//   - a file that COPY or ADD brings in, also a binary that an earlier
+//     stage built with its own apk sources (COPY --from);
+//   - a CA or a proxy that the build adds;
+//   - another tool or a fetched script that writes the file (such as
+//     setup-apkrepos);
+//   - a base image that ships its own /etc/apk/repositories.d/*.list
+//     files, which apk also reads. Check for them when the base changes.
 func TestOperatorImageApkUsesAlpineHTTPS(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile(filepath.Join(testutil.RepoRoot(t), "operator/Dockerfile"))
@@ -122,7 +131,7 @@ func TestOperatorImageApkUsesAlpineHTTPS(t *testing.T) {
 		case c[0] < w:
 			t.Errorf("the final stage of operator/Dockerfile calls or names apk before it writes /etc/apk/repositories: apk %s", args)
 		case strings.Contains(args, ".apk"):
-			t.Errorf("the final stage of operator/Dockerfile installs a local .apk file, which skips the index: apk %s", args)
+			t.Errorf("the final stage of operator/Dockerfile names an .apk file, which apk reads as a local file, not from the index: apk %s", args)
 		case !allowed.MatchString(args):
 			t.Errorf("the final stage of operator/Dockerfile calls apk in a form this test does not allow (only upgrade --no-cache and add --no-cache <packages>): apk %s", args)
 		}
