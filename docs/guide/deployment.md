@@ -210,7 +210,8 @@ not apply a manifest that holds one:
   selects its objects from it. To select the CRDs and the subset of `-l`,
   `lo deploy` splits the copy at its `---` lines. It stops with an error
   on a `---` line with more text on it (`--- # note`), which kustomize
-  does not write. The bash tree reads such a line as a separator.
+  does not write. The bash implementation reads such a line as a
+  separator.
 - The bootstrap (`lo up`, `lo provision`, `lo bootstrap`) refuses an entry
   whose render holds the annotation, for example keys-only output saved as
   an addon resource. The dry run applies nothing and has no such check.
@@ -236,8 +237,8 @@ not apply a manifest that holds one:
   (`<work dir>/.kubeone-run-<random>/`, mode 0700, files 0600), and the
   copy of the manifest names it in `addons.path`, with the aliases and
   merge keys (`<<`) of the manifest resolved. `./addons`, `./addons/`
-  and `addons` name the same directory. lo removes a `..` in
-  `addons.path` by its name, as Go's `filepath.Clean` does: `a/../addons`
+  and `addons` name the same directory. lo reads a `..` in `addons.path`
+  as a step back in the text of the path, not on the disk: `a/../addons`
   is `addons`, also when `a` is a symbolic link. A `..` or an absolute
   path can name a directory outside the work dir: lo copies and checks
   it in the same way. A `kubeone.yaml` with more than one YAML document
@@ -248,11 +249,11 @@ not apply a manifest that holds one:
   (SIGINT, SIGTERM, SIGHUP; under `nohup`, lo ignores a SIGHUP). On a
   SIGHUP, the Go `lo` stops `kubeone`, removes the copy and its other
   temporary files (the provider config of `lo provision`), and then ends
-  with the SIGHUP. A SIGKILL, or a second signal while lo removes them, can leave
-  them in the work dir, with the CCM render (and its Hetzner token) in
-  plaintext: remove `.kubeone-run-*` by hand after such a stop. When a
-  write of the copy fails (a full disk), lo removes the part that it
-  wrote.
+  with the SIGHUP. A SIGKILL can leave the copies in the work dir. A
+  second signal while lo removes them can also leave them. The copies
+  hold the CCM render, with its Hetzner token, in plaintext. After such a
+  stop, remove `.kubeone-run-*` by hand. When a write of the copy fails
+  (a full disk), lo removes the part that it wrote.
 
   The copy of the manifest is beside `kubeone.yaml`, so the other paths
   of the manifest (the CA file, the audit and node-selector files) are
@@ -261,8 +262,8 @@ not apply a manifest that holds one:
   replace these files: keep the work dir writable only by you. lo does
   not write over a file that is at the path of the copy already, and it
   stops the apply. The two trees differ when a file appears at that path
-  after lo checked it: the Go `lo` keeps that file, and the bash tree
-  removes it when the apply ends.
+  after lo checked it: the Go `lo` keeps that file, and the bash
+  implementation removes it when the apply ends.
 - The Tilt extension runs `lo tilt preflight` on its manifest (the domain
   artifact and the service overlays on it) before it applies anything, on
   every load. A manifest with the annotation, or one that cannot be read
@@ -271,8 +272,8 @@ not apply a manifest that holds one:
   check.
 
 These commands pass on the bytes that they checked, with no change: the
-final newlines of a last `|+` block scalar stay. The bash tree keeps
-these bytes out of its trace: with `bash -x` or `BASH_XTRACEFD`, the
+final newlines of a last `|+` block scalar stay. The bash implementation
+keeps these bytes out of its trace: with `bash -x` or `BASH_XTRACEFD`, the
 functions that hold a render, an artifact or a decrypted manifest turn
 tracing off until they return. It sends them to `kubectl` and `yq`
 through pipes, not here-strings, which bash can write to a file in
@@ -285,8 +286,9 @@ So is a resource that names the annotation as a key under a nested
 `metadata.annotations`, for example an admission policy whose pattern
 forbids it; a rule that names the key in a CEL expression is not a match.
 A render or an artifact that does not parse as YAML also stops with an
-error. The existing artifacts do not change. The bash tree checks with
-`yq`, so it also stops when `yq` is not installed or is older than v4.47.1.
+error. The existing artifacts do not change. The bash implementation
+checks with `yq`, so it also stops when `yq` is not installed or is older
+than v4.47.1.
 
 The flag is the only way to start a keys-only render. lo controls the
 plugin setting that it uses (see the

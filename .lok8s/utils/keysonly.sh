@@ -21,23 +21,24 @@
 #     clears them, turns off xtrace and functrace, and runs the function
 #     again with the same arguments. When that run returns, the line sets
 #     the traps back and returns its exit status. While the line runs, its
-#     _ko_at is set: that run, and each function that it calls, does not do
-#     this again (they have no trap of the caller to clear). A second line
-#     would set the RETURN trap of the function that called it back in its
-#     own frame, and bash would then run that trap (a cleanup) when the
-#     second function returns, in a pipeline or a command substitution.
-#     In that run, errtrace is on with an ERR trap of the line, which keeps
-#     errexit (set -e) safe: a failed command does not end the shell in the
-#     middle of the function, where the traps of the caller are not set
-#     back and its ERR trap does not run. The function stops at the failed
-#     command, as under errexit, and the trap returns from each function
-#     with the status of that command, up to the line. The line sets the
-#     traps back and returns the status: the caller fails as for each
-#     failed command (its ERR trap runs, then errexit ends the shell), and
-#     the values of the function are out of scope then. Without errexit,
-#     or where bash ignores it (an `if` condition, a `||` list, a command
-#     substitution), the trap does nothing. A function that sets an ERR
-#     trap of its own cannot use the line. Each copy of the line is the
+#     _ko_at is set: in that run, and in each function that it calls, the
+#     line does nothing, because the traps of the caller are clear already.
+#     If the line ran again in a called function, it would set the RETURN
+#     trap of the outer function back in the frame of the called function.
+#     Bash would then run that trap (a cleanup) when the called function
+#     returns, in a pipeline or a command substitution.
+#     In that run, errtrace is on, and the line sets an ERR trap of its own
+#     for errexit (set -e). Without that trap, a failed command would end
+#     the shell in the middle of the function: the traps of the caller
+#     would not be set back, and its ERR trap would not run. The function
+#     stops at the failed command, as under errexit, and the trap returns
+#     from each function with the status of that command, up to the line.
+#     The line sets the traps back and returns the status: the caller fails
+#     as for each failed command (its ERR trap runs, then errexit ends the
+#     shell), and the values of the function are out of scope then. Without
+#     errexit, or where bash ignores it (an `if` condition, a `||` list, a
+#     command substitution), the trap does nothing. A function that sets an
+#     ERR trap of its own cannot use the line. Each copy of the line is the
 #     same; tests/unit/secrets_keys_only_test.bats compares them.
 #     The lines run `local -` only when one of these options is on,
 #     because bash 4.3 does not know `local -`: with one of them on, bash
