@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -120,8 +121,10 @@ func TestCatchHangupCancelsTheCommandContext(t *testing.T) {
 // thread, after the kill returns: so the test waits for the SIGHUP on a
 // channel of its own before it calls stop. signal sends a SIGHUP to each
 // channel in one step, under the lock that signal.Stop takes, so the
-// SIGHUP is then in the channel of the catch too. The test runs in a
-// child: a SIGHUP that no catch holds ends the child, not the test
+// SIGHUP is then in the channel of the catch too. stop must also wait
+// for the goroutine: the hook marks the end of its wait a little after
+// stop runs, and the mark must be set when stop returns. The test runs in
+// a child: a SIGHUP that no catch holds ends the child, not the test
 // binary.
 func TestCatchHangupActsOnASIGHUPBeforeStop(t *testing.T) {
 	const name = "TestCatchHangupActsOnASIGHUPBeforeStop"
@@ -132,12 +135,18 @@ func TestCatchHangupActsOnASIGHUPBeforeStop(t *testing.T) {
 		}
 		return
 	}
-	beforeCatchWait = func(stopped <-chan struct{}) { <-stopped }
+	var held atomic.Bool
+	beforeCatchWait = func(stopped <-chan struct{}) {
+		<-stopped
+		time.Sleep(time.Millisecond)
+		held.Store(true)
+	}
 	defer func() { beforeCatchWait = func(<-chan struct{}) {} }()
 	seen := make(chan os.Signal, 1)
 	signal.Notify(seen, syscall.SIGHUP)
 	defer signal.Stop(seen)
 	for round := range 64 {
+		held.Store(false)
 		root, exitCode := Watch(t.Context())
 		ctx, stop := CatchHangup(root)
 		if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
@@ -150,6 +159,9 @@ func TestCatchHangupActsOnASIGHUPBeforeStop(t *testing.T) {
 		}
 		if !stop() {
 			t.Fatalf("round %d: stop did not report the SIGHUP that came before it", round)
+		}
+		if !held.Load() {
+			t.Fatalf("round %d: stop returned before the goroutine of the catch ended", round)
 		}
 		if root.Err() == nil || ctx.Err() == nil {
 			t.Fatalf("round %d: the SIGHUP before stop did not cancel the contexts", round)
