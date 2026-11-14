@@ -298,23 +298,37 @@ func TestApplyRunCopyRefusesAnExistingManifestCopy(t *testing.T) {
 // stops the apply, and no part of the copy stays: writeExclusive removes
 // the file that it made, the cleanup removes the run directory. The
 // manifest copy is beside the run directory, so only writeExclusive
-// removes a part of it. bash writes each file with set -C and removes the
-// run copy in the EXIT trap of the apply (_kubeone_copy is set before the
-// write).
+// removes a part of it. An addon file is in the run directory, which the
+// cleanup removes too: so the test also sees each remove of
+// writeExclusive (removeFile) and the file that it removed. bash writes
+// each file with set -C and removes the run copy in the EXIT trap of the
+// apply (_kubeone_copy is set before the write).
 func TestApplyRunCopyRemovesAPartOfACopyThatItCouldNotWrite(t *testing.T) {
-	for name, c := range map[string]struct{ manifest, want string }{
-		"the manifest copy": {"name: test-prod\n", "[error] kubeone: cannot write the manifest copy "},
-		"an addon file":     {kubeoneAddonsManifest, "[error] kubeone: cannot write the run copy of addons/ccm-hetzner/ccm.yaml\n"},
+	for name, c := range map[string]struct{ manifest, want, removed string }{
+		"the manifest copy": {"name: test-prod\n", "[error] kubeone: cannot write the manifest copy ", ".yaml"},
+		"an addon file":     {kubeoneAddonsManifest, "[error] kubeone: cannot write the run copy of addons/ccm-hetzner/ccm.yaml\n", "/addons/ccm-hetzner/ccm.yaml"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			d, runner, errBuf, wd := rcDriver(t, c.manifest, map[string]string{"ccm-hetzner/ccm.yaml": rcClean})
-			orig := writeData
+			origWrite, origRemove := writeData, removeFile
 			writeData = func(f *os.File, data []byte) (int, error) {
 				n, _ := f.Write(data[:len(data)/2])
 				return n, syscall.ENOSPC
 			}
+			var removed []string
+			removeFile = func(name string) error {
+				err := os.Remove(name)
+				if _, serr := os.Lstat(name); err == nil && errors.Is(serr, fs.ErrNotExist) {
+					removed = append(removed, name)
+				}
+				return err
+			}
 			err := d.Apply(t.Context(), wd, "")
-			writeData = orig
+			writeData, removeFile = origWrite, origRemove
+			// writeExclusive removed the part itself, before the cleanup.
+			if len(removed) != 1 || !strings.HasPrefix(filepath.Base(strings.TrimSuffix(removed[0], c.removed)), runPrefix) {
+				t.Errorf("writeExclusive removed %v, want the part <run>%s", removed, c.removed)
+			}
 			if err == nil || len(runner.calls) != 0 {
 				t.Fatalf("err %v, calls %v: kubeone must not run", err, runner.calls)
 			}
