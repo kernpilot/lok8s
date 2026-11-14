@@ -23,6 +23,7 @@ setup() {
 
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/build"
 
   command -v yq &>/dev/null || skip "yq not available"
@@ -139,6 +140,32 @@ EOF
   # dedicated sops config (not the repo's .sops.yaml) carries the recipients
   grep -qF -- '--encrypted-regex ^(data|stringData)$' "${SOPS_STUB_LOG}"
   grep -qF -- '--config' "${SOPS_STUB_LOG}"
+}
+
+# build::split holds the fresh Secrets and the decrypted twins with tracing
+# off (the rules at the top of utils/keysonly.sh): under bash -x, and with
+# BASH_XTRACEFD on a file, no value of a fresh or of a decrypted Secret is
+# in stdout, stderr or the trace. assert_no_trace_leak runs the split five
+# times: each run after the first decrypts the twin that the run before it
+# wrote. The sops stub shows that the value was encrypted.
+@test "split: the split traces no Secret value" {
+  write_spec "$(printf '  gitops:\n    provider: flux\n    age: [age1testkey]')"
+  printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: creds\n  namespace: app\nstringData:\n  token: xtrace-canary-split\n' > "${DOMAIN_DIR}/artifacts.yaml"
+  export SPLIT_LOG="${BATS_TEST_TMPDIR}/sops.stdin" DECRYPTS="${BATS_TEST_TMPDIR}/decrypts"
+  sops() {
+    if [[ "${1}" == decrypt ]]; then
+      echo decrypt >> "${DECRYPTS}"
+      printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: creds\n  namespace: app\nstringData:\n  token: xtrace-canary-split-prior\n'
+      return 0
+    fi
+    local a prev="" out=""
+    for a in "$@"; do [[ "${prev}" != --output ]] || out="${a}"; prev="${a}"; done
+    cat >> "${SPLIT_LOG}"
+    printf 'sops: {stubbed: true}\n' > "${out}"
+  }
+  assert_no_trace_leak xtrace-canary-split build::split "${DOMAIN}"
+  [ "$(grep -c xtrace-canary-split "${SPLIT_LOG}")" -eq 5 ]
+  [ "$(grep -c '^decrypt$' "${DECRYPTS}")" -eq 4 ]
 }
 
 @test "split: Secret without spec.gitops.age recipients hard-fails, writes nothing" {

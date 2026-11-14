@@ -39,8 +39,9 @@ const EncSuffix = ".enc"
 // EncryptedOnlyError reports a store entry that has its encrypted twin but
 // no plaintext. The store holds a value, and the plugin cannot read it until
 // `lo secrets decrypt` writes the plaintext. The plugin does not generate a
-// new value over it: in a fresh worktree that silently replaced every
-// committed value of the store (B425). It is not os.ErrNotExist, so
+// new value over it: in a fresh worktree, where only the encrypted twins
+// exist, that would replace every committed value of the store. It is not
+// os.ErrNotExist, so
 // GetOrCreate returns it and does not generate.
 type EncryptedOnlyError struct {
 	Dir  string // the store directory

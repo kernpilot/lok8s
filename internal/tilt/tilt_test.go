@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
@@ -599,6 +600,81 @@ func preflightCtx(t *testing.T) (*Context, *sweepRecorder, *strings.Builder) {
 	os.WriteFile(filepath.Join(c.Paths.Clusters, "dev.test", "cluster.lok8s.yaml"), []byte("kind: Lo\n"), 0o644)
 	os.WriteFile(filepath.Join(c.Paths.Clusters, "prod.test", "cluster.lok8s.yaml"), []byte("kind: KubeOne\n"), 0o644)
 	return c, rec, &errOut
+}
+
+// bats: "tilt::preflight refuses a manifest that cannot be read from
+// stdin". A manifest that cannot be read cannot be checked: the guard
+// refuses it, also with the kill switch, and the sweep does not run.
+func TestPreflightRefusesAManifestThatCannotBeRead(t *testing.T) {
+	for name, killSwitch := range map[string]bool{"sweep": false, "kill switch": true} {
+		t.Run(name, func(t *testing.T) {
+			c, rec, errOut := preflightCtx(t)
+			t.Setenv("DOMAIN_NAME", "dev.test")
+			if killSwitch {
+				t.Setenv("LOK8S_PREFLIGHT", "0")
+			}
+			c.Stdin = iotest.ErrReader(errors.New("read error"))
+			if err := c.Preflight(t.Context(), "", "", "", ""); !errors.Is(err, ErrHandled) {
+				t.Fatalf("err = %v", err)
+			}
+			const want = "[error] preflight: refusing to apply the Tilt manifest: it cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)\n"
+			if errOut.String() != want {
+				t.Errorf("stderr = %q\nwant %q", errOut.String(), want)
+			}
+			if len(rec.calls) != 0 {
+				t.Errorf("sweep ran: %v", rec.calls)
+			}
+		})
+	}
+}
+
+// bats: "tilt::preflight refuses a manifest with a keys-only Secret".
+// The apply guard runs before every switch: with the kill switch, on a
+// non-kind driver, with the spec's preflight off, and on a sweep run. A
+// manifest with a keys-only Secret (from the domain artifact or a service
+// overlay) fails the call, so the Tiltfile load stops before any k8s_yaml;
+// the sweep does not run.
+func TestPreflightRefusesAKeysOnlyManifest(t *testing.T) {
+	const marked = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  annotations:\n    secrets.lok8s.dev/keys-only: \"true\"\ndata:\n  PASSWORD: \"\"\n"
+	for name, setup := range map[string]func(t *testing.T, c *Context){
+		"sweep":       func(t *testing.T, c *Context) { t.Setenv("DOMAIN_NAME", "dev.test") },
+		"kill switch": func(t *testing.T, c *Context) { t.Setenv("DOMAIN_NAME", "dev.test"); t.Setenv("LOK8S_PREFLIGHT", "0") },
+		"non-kind":    func(t *testing.T, c *Context) { t.Setenv("DOMAIN_NAME", "prod.test") },
+		"spec off": func(t *testing.T, c *Context) {
+			t.Setenv("DOMAIN_NAME", "dev.test")
+			if err := os.WriteFile(filepath.Join(c.Paths.Clusters, "dev.test", "cluster.lok8s.yaml"), []byte("kind: Lo\nspec:\n  tilt:\n    preflight: false\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, rec, errOut := preflightCtx(t)
+			setup(t, c)
+			c.Stdin = strings.NewReader(marked)
+			if err := c.Preflight(t.Context(), "", "", "", ""); !errors.Is(err, ErrHandled) {
+				t.Fatalf("err = %v", err)
+			}
+			const want = "[error] preflight: refusing to apply the Tilt manifest: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one\n"
+			if errOut.String() != want {
+				t.Errorf("stderr = %q\nwant %q", errOut.String(), want)
+			}
+			if len(rec.calls) != 0 {
+				t.Errorf("sweep ran: %v", rec.calls)
+			}
+		})
+	}
+	// The sweep gets the whole manifest once the guard passes.
+	c, rec, _ := preflightCtx(t)
+	t.Setenv("DOMAIN_NAME", "dev.test")
+	var got string
+	c.Preflighter = func(_ context.Context, manifest string, args ...string) error {
+		got = manifest
+		return rec.preflight(t.Context(), manifest, args...)
+	}
+	c.Stdin = strings.NewReader("kind: ConfigMap\nmetadata:\n  name: a\n")
+	if err := c.Preflight(t.Context(), "", "", "", ""); err != nil || got != "kind: ConfigMap\nmetadata:\n  name: a\n" {
+		t.Errorf("err = %v, the sweep got %q", err, got)
+	}
 }
 
 func TestPreflightKillSwitchZeroDisables(t *testing.T) {

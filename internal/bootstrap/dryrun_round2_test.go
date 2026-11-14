@@ -9,8 +9,10 @@ package bootstrap
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -222,19 +224,37 @@ func TestRenderDirClearingNeverFollowsAnOwnedSymlink(t *testing.T) {
 
 // ── Item H: restore.d stays out of --only unless --with-restore ───────
 
+// restoreCopy is the store working copy of the restore.d entry tls-a in
+// the --only tests; lo applies it on the stdin of kubectl.
+const restoreCopy = "kind: Secret\nmetadata:\n  name: restore-tls-a\n"
+
+// appliedStdin records the stdin of each kubectl call of f.
+func appliedStdin(f *fakeRunner) *[]string {
+	var got []string
+	f.handler = func(c execx.Cmd) error {
+		if c.Stdin != nil {
+			raw, _ := io.ReadAll(c.Stdin)
+			got = append(got, string(raw))
+		}
+		return nil
+	}
+	return &got
+}
+
 func TestOnlyRealRunSkipsRestoreDAndWarnsLoudly(t *testing.T) {
 	e, f, _, _, p := testEngine(t)
 	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "restore.d", "tls-a.sops.yaml"), "cipher\n")
-	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "secrets", "restore.d", "tls-a.yaml"), "kind: Secret\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "secrets", "restore.d", "tls-a.yaml"), restoreCopy)
 	writeStackAddon(t, p)
 	spec := writeClusterSpec(t, p, "testcni")
 	kc := writeKubeconfig(t, p)
 	e.Options.Only = []string{"testcni"}
+	stdin := appliedStdin(f)
 
 	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if strings.Contains(f.log(), "restore.d/tls-a.yaml") {
+	if slices.Contains(*stdin, restoreCopy) {
 		t.Errorf("restore.d was applied despite --only without --with-restore:\n%s", f.log())
 	}
 	errOut := e.Stderr.(interface{ String() string }).String()
@@ -246,19 +266,19 @@ func TestOnlyRealRunSkipsRestoreDAndWarnsLoudly(t *testing.T) {
 func TestOnlyWithRestoreAppliesRestoreDBeforeTheSelectedEntry(t *testing.T) {
 	e, f, _, _, p := testEngine(t)
 	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "restore.d", "tls-a.sops.yaml"), "cipher\n")
-	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "secrets", "restore.d", "tls-a.yaml"), "kind: Secret\n")
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "secrets", "restore.d", "tls-a.yaml"), restoreCopy)
 	writeStackAddon(t, p)
 	spec := writeClusterSpec(t, p, "testcni")
 	kc := writeKubeconfig(t, p)
 	e.Options.Only = []string{"testcni"}
 	e.Options.WithRestore = true
+	stdin := appliedStdin(f)
 
 	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	log := f.log()
-	if !strings.Contains(log, "restore.d/tls-a.yaml") {
-		t.Fatalf("restore.d was not applied with --with-restore:\n%s", log)
+	if len(*stdin) == 0 || (*stdin)[0] != restoreCopy {
+		t.Fatalf("restore.d was not applied first with --with-restore: %q\n%s", *stdin, f.log())
 	}
 }
 

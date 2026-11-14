@@ -21,6 +21,7 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/targets.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/build"
   source "${_PROJECT_ROOT}/.lok8s/libs/deploy"
 

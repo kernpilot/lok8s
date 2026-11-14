@@ -16,6 +16,7 @@ package secret
 
 import (
 	"io"
+	"maps"
 	"os"
 	"sort"
 
@@ -38,6 +39,8 @@ const PathSecretsEnv = "PATH_SECRETS"
 // Construct via New().
 type Plugin struct {
 	spec *specpkg.Secret
+	// keysOnly marks the keys-only run: Emit adds KeysOnlyAnnotation.
+	keysOnly bool
 }
 
 // New returns a new Plugin instance.
@@ -221,8 +224,13 @@ func (p *Plugin) Emit(entries []plugin.Entry, w io.Writer) error {
 	if len(p.spec.Metadata.Labels) > 0 {
 		b.Labels = p.spec.Metadata.Labels
 	}
-	if len(p.spec.Metadata.Annotations) > 0 {
-		b.Annotations = p.spec.Metadata.Annotations
+	if len(p.spec.Metadata.Annotations) > 0 || p.keysOnly {
+		// A copy: the keys-only annotation must not change the spec.
+		b.Annotations = make(map[string]string, len(p.spec.Metadata.Annotations)+1)
+		maps.Copy(b.Annotations, p.spec.Metadata.Annotations)
+		if p.keysOnly {
+			b.Annotations[KeysOnlyAnnotation] = "true"
+		}
 	}
 	b.Immutable = p.spec.Immutable
 	for _, e := range entries {

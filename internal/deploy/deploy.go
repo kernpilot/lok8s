@@ -19,6 +19,7 @@ package deploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,6 +29,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -57,8 +59,9 @@ var (
 	// of an object (bash: deploy::_has_objects). Robust enough for
 	// kustomize output, which always emits a `kind:` field per doc.
 	hasObjectsRe = regexp.MustCompile(`(?m)^kind:[ \t\v\f\r]+[A-Za-z]`)
-	// docSepRe splits a kustomize stream on its `---` document separators.
-	docSepRe = regexp.MustCompile(`(?m)^---[ \t]*$`)
+	// docSepRe splits a kustomize stream on its `---` document separators,
+	// with a LF or a CRLF line end.
+	docSepRe = regexp.MustCompile(`(?m)^---[ \t]*\r?$`)
 )
 
 // Deployer runs the apply phases. Applier carries the runner + writers.
@@ -101,6 +104,12 @@ func ParseLabel(stderr io.Writer, label string) (key, value string, err error) {
 // Apply applies the domain's single artifact (bash: deploy::apply). Bash's
 // errexit is ACTIVE on this path: the first failing kubectl apply exits the
 // whole `lo` with kubectl's status — returned here as *ExitError.
+//
+// It reads the artifact once and checks that copy for the keys-only marker
+// (build.ReadCheckedArtifact): an artifact with the marker, or one that
+// cannot be read or does not parse, is refused before kubectl runs. Both
+// phases apply the copy that passed the check, not the file, which can
+// change after the check.
 func (d *Deployer) Apply(ctx context.Context, domain string) error {
 	if domain == "" {
 		domain = os.Getenv("DOMAIN_NAME")
@@ -113,15 +122,21 @@ func (d *Deployer) Apply(ctx context.Context, domain string) error {
 		ui.ErrorTo(d.stderr(), "no artifact for %s: %s — run 'lo build' first", domain, artifact)
 		return ErrHandled
 	}
+	raw, err := build.ReadCheckedArtifact(d.stderr(), domain, artifact)
+	if err != nil {
+		return err
+	}
 	ui.DebugTo(d.stderr(), "Deploying %s from %s", domain, artifact)
-	return d.applyFile(ctx, domain, artifact, true)
+	return d.applyManifest(ctx, domain, string(raw), true)
 }
 
 // ApplyFiltered applies only the resources in the domain artifact carrying
 // <labelKey>=<labelValue> (bash: deploy::apply_filtered). The key is used
 // verbatim: a bare key (app) or a namespaced one (lok8s.dev/name).
 // Selective deploy is user opt-in — it requires kustomize `labels:` (or
-// metadata.labels) on the targets to address.
+// metadata.labels) on the targets to address. The artifact is read once and
+// checked as Apply checks it; the subset comes from the copy that passed
+// the check.
 //
 // Bash runs the subset apply as `deploy::_apply … || rc=$?`, which SUSPENDS
 // errexit inside it: a failing kubectl apply there is logged and the phase
@@ -139,44 +154,34 @@ func (d *Deployer) ApplyFiltered(ctx context.Context, domain, labelKey, labelVal
 		ui.ErrorTo(d.stderr(), "no artifact for %s: %s — run 'lo build' first", domain, artifact)
 		return ErrHandled
 	}
-
-	// Filter the single domain artifact by the (full) label key = value into
-	// a temp file — the apply streams from a file, and the artifact can be
-	// large. Cleanup on every return path.
-	raw, err := os.ReadFile(artifact)
+	raw, err := build.ReadCheckedArtifact(d.stderr(), domain, artifact)
 	if err != nil {
-		ui.WarnTo(d.stderr(), "no objects match %s=%s in %s", labelKey, labelValue, artifact)
-		return nil
+		return err
 	}
-	subset := selectDocs(string(raw), func(doc *yaml.Node) bool {
+
+	// Filter the checked copy by the (full) label key = value.
+	subset, err := selectDocs(string(raw), func(doc *yaml.Node) bool {
 		lbl := yqsem.MapGet(yqsem.MapGet(yqsem.MapGet(doc, "metadata"), "labels"), labelKey)
 		// yq `==` compares a scalar's TEXT: an unquoted `true` or `1` label
 		// matches "true"/"1" (verified against yq v4.53).
 		return lbl != nil && lbl.Kind == yaml.ScalarNode && lbl.Tag != "!!null" && lbl.Value == labelValue
 	})
+	if err != nil {
+		ui.ErrorTo(d.stderr(), "cannot select the objects of %s: %v", artifact, err)
+		return ErrHandled
+	}
 	if !HasObjects(subset) {
 		ui.WarnTo(d.stderr(), "no objects match %s=%s in %s", labelKey, labelValue, artifact)
 		return nil
 	}
-	tmp, err := os.CreateTemp("", "lok8s-deploy-")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if _, err := tmp.WriteString(subset); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-
 	ui.DebugTo(d.stderr(), "Deploying %s subset (%s=%s)", domain, labelKey, labelValue)
-	return d.applyFile(ctx, fmt.Sprintf("%s (%s=%s)", domain, labelKey, labelValue), tmp.Name(), false)
+	return d.applyManifest(ctx, fmt.Sprintf("%s (%s=%s)", domain, labelKey, labelValue), subset, false)
 }
 
-// applyFile applies a manifest FILE in two phases (bash: deploy::_apply).
-// Empty streams are a graceful no-op.
+// applyManifest applies a manifest in two phases (bash: deploy::_apply).
+// The caller gives the copy of the artifact that passed the keys-only
+// check (or the subset of that copy); no phase reads the file. Empty
+// streams are a graceful no-op.
 //
 //	Phase 1: extract + apply CustomResourceDefinitions, then wait for them
 //	         to become Established. Server-side apply — large CRDs (CNPG,
@@ -189,31 +194,29 @@ func (d *Deployer) ApplyFiltered(ctx context.Context, domain, labelKey, labelVal
 // abortOnError is the errexit state of the calling bash path: active on
 // deploy::apply (a failing apply exits with kubectl's status), suspended on
 // deploy::apply_filtered (failures are logged, the sequence continues).
-func (d *Deployer) applyFile(ctx context.Context, label, file string, abortOnError bool) error {
-	raw, err := os.ReadFile(file)
-	if err != nil {
-		return err
-	}
-	manifest := string(raw)
+func (d *Deployer) applyManifest(ctx context.Context, label, manifest string, abortOnError bool) error {
 	if !HasObjects(manifest) {
 		ui.DebugTo(d.stderr(), "No objects for %s, skipping apply", label)
 		return nil
 	}
 
 	// Phase 1: CRDs first (subset small enough to stay a string).
-	crds := selectDocs(manifest, func(doc *yaml.Node) bool {
+	crds, err := selectDocs(manifest, func(doc *yaml.Node) bool {
 		return yqsem.OrNull(yqsem.MapGet(doc, "kind"), "") == "CustomResourceDefinition"
 	})
+	if err != nil {
+		ui.ErrorTo(d.stderr(), "cannot select the CRDs of %s: %v", label, err)
+		return ErrHandled
+	}
 	if HasObjects(crds) {
 		ui.DebugTo(d.stderr(), "Applying CRDs for %s", label)
-		// bash: `echo "${crds}" | kapply::apply` — echo appends a newline.
-		if _, rc := d.Applier.Apply(ctx, label+" crds", crds+"\n"); rc != 0 && abortOnError {
+		if _, rc := d.Applier.Apply(ctx, label+" crds", crds); rc != 0 && abortOnError {
 			return &ExitError{Code: rc}
 		}
 		d.waitCRDs(ctx, crds)
 	}
 
-	// Phase 2: apply the rest + scoped wait-ready — both from the file.
+	// Phase 2: apply the rest + scoped wait-ready — both from the manifest.
 	ui.DebugTo(d.stderr(), "Applying resources for %s", label)
 	if _, rc := d.Applier.Apply(ctx, label, manifest); rc != 0 && abortOnError {
 		return &ExitError{Code: rc}
@@ -263,23 +266,34 @@ func splitDocs(stream string) []string {
 }
 
 // selectDocs is `yq 'select(<pred>)'` over the stream: the RAW text of every
-// document whose parsed root satisfies pred, joined by `---` separators.
-// Raw text (not a re-marshal) so the applied bytes are the artifact's own.
-func selectDocs(stream string, pred func(doc *yaml.Node) bool) string {
+// document whose parsed root satisfies pred, joined by `---` lines. Raw
+// text (not a re-marshal) so the applied bytes are the artifact's own: each
+// document keeps its bytes up to the next separator, and lo adds only the
+// separator lines. A document that is followed by a separator ends in a
+// newline; the last one of the stream keeps its end as it is (with no
+// final newline, a last `|+` block scalar has no final newline either).
+//
+// A part between two separators that holds more than one YAML document (a
+// `---` line with more text on it, such as `--- # note`) is an error: its
+// raw text would carry the documents after the first one, which pred did
+// not see.
+func selectDocs(stream string, pred func(doc *yaml.Node) bool) (string, error) {
 	var kept []string
-	for _, doc := range splitDocs(stream) {
+	for i, doc := range splitDocs(stream) {
+		dec := yaml.NewDecoder(strings.NewReader(doc))
 		var n yaml.Node
-		if yaml.Unmarshal([]byte(doc), &n) != nil {
+		if dec.Decode(&n) != nil {
 			continue
+		}
+		var more yaml.Node
+		if err := dec.Decode(&more); !errors.Is(err, io.EOF) {
+			return "", fmt.Errorf("part %d of the stream holds more than one YAML document (a \"---\" line with more text on it): lo splits a stream only at the lines that are \"---\"", i+1)
 		}
 		root := yqsem.Deref(&n)
 		if root == nil || !pred(root) {
 			continue
 		}
-		kept = append(kept, strings.TrimSuffix(strings.TrimPrefix(doc, "\n"), "\n"))
+		kept = append(kept, strings.TrimPrefix(doc, "\n"))
 	}
-	if len(kept) == 0 {
-		return ""
-	}
-	return strings.Join(kept, "\n---\n")
+	return strings.Join(kept, "---\n"), nil
 }

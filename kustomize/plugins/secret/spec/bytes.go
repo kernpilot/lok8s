@@ -39,7 +39,7 @@ func (b *BytesEntry) UnmarshalYAML(node *yaml.Node) error {
 	case yaml.ScalarNode:
 		var n int
 		if err := node.Decode(&n); err != nil {
-			return kyaml.NodeErrf(node, "bytes shorthand must be an integer byte count, got %q", node.Value)
+			return kyaml.NodeErrf(node, "bytes shorthand must be an integer byte count, got a %s value", node.ShortTag())
 		}
 		b.Bytes = n
 	case yaml.MappingNode:
@@ -61,10 +61,10 @@ func (b *BytesEntry) UnmarshalYAML(node *yaml.Node) error {
 // field's bytes-mode constraints (positive count, ≤ cap, known encoding).
 func (b BytesEntry) validate() error {
 	if b.Bytes <= 0 {
-		return fmt.Errorf("bytes must be > 0, got %d", b.Bytes)
+		return fmt.Errorf("bytes must be > 0")
 	}
 	if b.Bytes > MaxFieldBytes {
-		return fmt.Errorf("bytes must be <= %d, got %d (a secret this large is almost certainly a typo)", MaxFieldBytes, b.Bytes)
+		return fmt.Errorf("bytes must be <= %d (a secret this large is almost certainly a typo)", MaxFieldBytes)
 	}
 	if _, err := validateEncoding(b.EffectiveEncoding()); err != nil {
 		return err

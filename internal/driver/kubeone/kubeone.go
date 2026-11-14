@@ -26,6 +26,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/interrupt"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -269,18 +270,16 @@ func (d *Driver) Kubeconfig(ctx context.Context, domain string) (string, error) 
 
 // Apply runs kubeone apply (bash: kubeone::apply). The process runs WITH
 // ITS CWD SET INTO the work dir — kubeone writes <cluster>-kubeconfig into
-// the CWD (no output flag) — using the RELATIVE --manifest kubeone.yaml,
-// --auto-approve, and --tfjson output.json when that file exists. Hetzner
-// Robot credentials ride along in the environment for the CCM.
+// the CWD (no output flag) — using a RELATIVE --manifest (the manifest
+// copy of stageRun, beside kubeone.yaml), --auto-approve, and --tfjson
+// output.json when that file exists. Hetzner Robot credentials ride along in the environment for the
+// CCM.
 func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
 	if !fsutil.FileExists(filepath.Join(workDir, "kubeone.yaml")) {
 		ui.ErrorTo(d.stderr(), "kubeone.yaml not found in %s", workDir)
 		return ui.Handled(fmt.Errorf("kubeone: kubeone.yaml not found in %s", workDir))
 	}
-	args := []string{"apply", "--manifest", "kubeone.yaml", "--auto-approve"}
-	if fsutil.FileExists(filepath.Join(workDir, "output.json")) {
-		args = append(args, "--tfjson", "output.json")
-	}
+	tfjson := fsutil.FileExists(filepath.Join(workDir, "output.json"))
 
 	// Pre-apply steps (stale-worker cleanup, Robot naming, addon render) —
 	// injectable, ports with the addon engine.
@@ -288,6 +287,30 @@ func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
 		if err := d.Hooks.PrepareApply(ctx, workDir, clusterYAML); err != nil {
 			return err
 		}
+	}
+	// KubeOne reads the manifest and the addons from a private copy of the
+	// bytes that lo read and checked, not from the shared files. The copy
+	// can hold the CCM token: the deferred cleanup removes it when the run
+	// ends, on the first SIGINT or SIGTERM too (cli.WatchInterrupt cancels
+	// ctx, so kubeone stops and Apply returns). A SIGHUP, which
+	// WatchInterrupt does not catch, Apply catches while the copy exists
+	// (interrupt.CatchHangup): it cancels the command context, so kubeone
+	// stops, Apply removes the copy and returns, and each caller returns
+	// and runs its cleanup (the temporary provider config of lo
+	// provision). main then ends lo with the SIGHUP (interrupt.Exit). A
+	// SIGKILL, or a second signal, can leave the copy.
+	ctx, stopHangup := interrupt.CatchHangup(ctx)
+	// Apply ignores the bool of stop on purpose: after a SIGHUP, main ends
+	// lo with 129, and the bash implementation ends after its EXIT trap.
+	defer stopHangup()
+	manifest, cleanup, err := stageRun(d.stderr(), workDir)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	args := []string{"apply", "--manifest", manifest, "--auto-approve"}
+	if tfjson {
+		args = append(args, "--tfjson", "output.json")
 	}
 
 	ui.DebugTo(d.stderr(), "Running (in %s): kubeone %s", workDir, strings.Join(args, " "))

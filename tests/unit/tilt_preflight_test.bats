@@ -16,6 +16,7 @@ setup() {
   export -f import
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
 
   # Minimal :args shim (same rationale as tilt_ci_test.bats: argsh builtins
   # are not loaded when a lib is sourced in bats): populate age/crds/
@@ -49,6 +50,73 @@ setup() {
 }
 
 teardown() { teardown_tmpdir; }
+
+# The apply guard runs before every switch: with the kill switch (the
+# Tiltfile sets it for preflight = False), on a non-kind driver, with the
+# spec's preflight off, and on a sweep run. A manifest with a keys-only
+# Secret (from the domain artifact or a service overlay) fails the call, so
+# the Tiltfile load stops before any k8s_yaml; the sweep does not run. Go:
+# TestPreflightRefusesAKeysOnlyManifest.
+@test "tilt::preflight refuses a manifest with a keys-only Secret" {
+  local marked
+  marked=$'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\ndata:\n  PASSWORD: ""'
+  local want="preflight: refusing to apply the Tilt manifest: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one"
+  local case
+  for case in sweep kill non-kind spec-off; do
+    unset LOK8S_PREFLIGHT
+    export DOMAIN_NAME=dev.test
+    echo 'kind: Lo' > "${PATH_CLUSTERS}/dev.test/cluster.lok8s.yaml"
+    case "${case}" in
+      kill) export LOK8S_PREFLIGHT=0 ;;
+      non-kind) export DOMAIN_NAME=prod.test ;;
+      spec-off) printf 'kind: Lo\nspec:\n  tilt:\n    preflight: false\n' > "${PATH_CLUSTERS}/dev.test/cluster.lok8s.yaml" ;;
+    esac
+    run tilt::preflight <<< "${marked}"
+    assert_failure
+    assert_output --partial "${want}"
+    [[ ! -s "${SWEEP_LOG}" ]] || { echo "${case}: the sweep ran"; return 1; }
+  done
+  # The sweep gets the manifest once the guard passes.
+  unset LOK8S_PREFLIGHT
+  export DOMAIN_NAME=dev.test
+  echo 'kind: Lo' > "${PATH_CLUSTERS}/dev.test/cluster.lok8s.yaml"
+  kapply::preflight() { echo "kapply::preflight $*" >> "${SWEEP_LOG}"; cat >> "${SWEEP_LOG}"; }
+  run tilt::preflight <<< $'kind: ConfigMap\nmetadata:\n  name: swept'
+  assert_success
+  run cat "${SWEEP_LOG}"
+  assert_output --partial "name: swept"
+}
+
+# A manifest that cannot be read from stdin cannot be checked: the guard
+# refuses it, also with the kill switch. A directory on stdin opens and
+# fails each read. (A closed stdin is no test: the pipe of the command
+# substitution takes descriptor 0, and cat reads its own output.) Go:
+# TestPreflightRefusesAManifestThatCannotBeRead.
+@test "tilt::preflight refuses a manifest that cannot be read from stdin" {
+  local want="preflight: refusing to apply the Tilt manifest: it cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
+  export DOMAIN_NAME=dev.test
+  run tilt::preflight < "${BATS_TEST_TMPDIR}"
+  assert_failure
+  assert_output --partial "${want}"
+  [[ ! -s "${SWEEP_LOG}" ]]
+  export LOK8S_PREFLIGHT=0
+  run tilt::preflight < "${BATS_TEST_TMPDIR}"
+  assert_failure
+  assert_output --partial "${want}"
+}
+
+# tilt::preflight holds the manifest with tracing off (the rules at the top
+# of utils/keysonly.sh): under bash -x, and with BASH_XTRACEFD on a file, no
+# Secret value of the manifest is in stdout, stderr or the trace. The sweep
+# stub shows that the value reached the sweep.
+@test "tilt::preflight traces no Secret value of the manifest" {
+  export DOMAIN_NAME=dev.test MANIFEST="${BATS_TEST_TMPDIR}/manifest.yaml"
+  printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: app\nstringData:\n  PASSWORD: xtrace-canary-tilt\n' > "${MANIFEST}"
+  kapply::preflight() { cat >> "${SWEEP_LOG}"; }
+  _preflight_from_file() { tilt::preflight < "${MANIFEST}"; }
+  assert_no_trace_leak xtrace-canary-tilt _preflight_from_file
+  grep -qF xtrace-canary-tilt "${SWEEP_LOG}"
+}
 
 @test "preflight gate: LOK8S_PREFLIGHT=0 disables the sweep entirely" {
   export DOMAIN_NAME=dev.test LOK8S_PREFLIGHT=0

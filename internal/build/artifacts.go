@@ -35,12 +35,21 @@ type Options struct {
 	// touches the secrets store and the split leaves committed
 	// Secret.*.sops.yaml wholly inert.
 	NoSecrets bool
+	// KeysOnly asks the Secret plugin for its keys-only run (each key with
+	// an empty value plus the keys-only marker; no store read). Only
+	// KeysOnly (lo build --keys-only) sets it; Artifacts refuses a render
+	// that carries the marker.
+	KeysOnly bool
 	// Stderr receives the human-facing stream (banner, [error]/[warn]/
 	// [debug] lines). Defaults to os.Stderr.
 	Stderr io.Writer
 	// Runner runs the split's yq and sops subprocesses. nil =
 	// execx.NewRunner(Paths); tests install a fake.
 	Runner execx.Runner
+	// pluginHome is the plugin home that checkKeysOnlyPlugin checked (the
+	// keys-only exec render only). runKustomize gives it to kustomize as
+	// KUSTOMIZE_PLUGIN_HOME.
+	pluginHome string
 }
 
 func (o *Options) stderr() io.Writer {
@@ -111,13 +120,6 @@ func Artifacts(ctx context.Context, o Options) error {
 	// lo::export_spec_envs are automatically picked up.
 	whitelist := EnvsubstWhitelist()
 
-	// Clean stale per-target artifact dirs from the pre-domain-build era so
-	// `lo status`/hooks don't read phantom outputs. Only framework-generated
-	// subdirs (each held an artifacts.yaml) are removed; env's overlay
-	// kustomization.yaml, capi.yaml and .cache-queue live as files directly
-	// under artifacts/ and are preserved.
-	pruneStaleArtifactDirs(filepath.Join(domainDir, "artifacts"))
-
 	ui.DebugTo(stderr, "Building domain kustomization: %s", filepath.Join(domainDir, "kustomization.yaml"))
 
 	// Render to a temp file first, then promote on success. A direct write
@@ -143,6 +145,21 @@ func Artifacts(ctx context.Context, o Options) error {
 		return ErrHandled
 	}
 	rendered = Envsubst(rendered, whitelist)
+	// The output guard: an object with the keys-only marker never goes
+	// into the domain's artifacts (artifacts.yaml, and the split made from
+	// it). Keys-only output goes to stdout only (lo build --keys-only). The
+	// guard parses the stream (HasKeysOnlyMarker); a render that does not
+	// parse cannot be checked, so it is refused too.
+	artifactPath := filepath.Join(domainDir, "artifacts.yaml")
+	if marked, err := HasKeysOnlyMarker(rendered); err != nil || marked {
+		_ = os.Remove(tmpPath)
+		if err != nil {
+			keysOnlyUnparsed(stderr, o.Domain, artifactPath)
+		} else {
+			keysOnlyRefusal(stderr, o.Domain, artifactPath)
+		}
+		return ErrHandled
+	}
 	if err := os.WriteFile(tmpPath, rendered, 0o600); err != nil {
 		_ = os.Remove(tmpPath)
 		ui.ErrorTo(stderr, "kustomize build failed for %s", o.Domain)
@@ -163,7 +180,6 @@ func Artifacts(ctx context.Context, o Options) error {
 	// Refuse only where it would DESTROY something. An empty render over an
 	// empty/absent artifact is a new or genuinely empty domain — warn, but
 	// nothing is lost.
-	artifactPath := filepath.Join(domainDir, "artifacts.yaml")
 	docs := countKindLines(rendered)
 	prior := 0
 	existing, existingErr := os.ReadFile(artifactPath)
@@ -192,6 +208,15 @@ func Artifacts(ctx context.Context, o Options) error {
 	if docs == 0 {
 		ui.WarnTo(stderr, "%s rendered 0 documents (no prior artifact, so nothing was lost) — is its kustomization.yaml composing any targets?", o.Domain)
 	}
+
+	// Clean stale per-target artifact dirs from the pre-domain-build era so
+	// `lo status`/hooks don't read phantom outputs. Only framework-generated
+	// subdirs (each held an artifacts.yaml) are removed; env's overlay
+	// kustomization.yaml, capi.yaml and .cache-queue live as files directly
+	// under artifacts/ and are preserved. The prune runs only after the
+	// render passed every check above: a failed or refused render changes
+	// nothing in the domain dir.
+	pruneStaleArtifactDirs(filepath.Join(domainDir, "artifacts"))
 
 	// Promote ONLY when the content changed. An unconditional move refreshes
 	// the mtime of a byte-identical artifact, and everything that WATCHES
@@ -288,10 +313,18 @@ func runKustomize(ctx context.Context, o Options, domainDir, kubeconfig string, 
 	if o.NoSecrets {
 		secretsDisable = "1"
 	}
+	// render.Build writes the Secret plugin's keys-only setting on every
+	// render, from o.KeysOnly: 0 unless this is lo build --keys-only,
+	// whatever the process environment holds.
+	env := kustomizeEnv(o.Paths, kubeconfig, secretsDisable)
+	if o.pluginHome != "" {
+		env = append(env, config.KustomizePluginHomeEnv+"="+o.pluginHome)
+	}
 	return render.Build(ctx, domainDir, render.Options{
-		Paths:  o.Paths,
-		Env:    kustomizeEnv(o.Paths, kubeconfig, secretsDisable),
-		Stderr: stderr,
+		Paths:    o.Paths,
+		Env:      env,
+		KeysOnly: o.KeysOnly,
+		Stderr:   stderr,
 	})
 }
 

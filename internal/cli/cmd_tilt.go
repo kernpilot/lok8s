@@ -234,7 +234,7 @@ func newTiltRestart(paths *config.Paths) *cobra.Command {
 func newTiltPreflight(paths *config.Paths) *cobra.Command {
 	c := &cobra.Command{
 		Use:          "preflight",
-		Short:        "Force-clear stuck-Terminating objects in the manifest on stdin",
+		Short:        "Refuse a keys-only Secret, then force-clear stuck-Terminating objects in the manifest on stdin",
 		Annotations:  commandSpec{destructive: true}.annotations(),
 		Args:         secretsArgs(0, 0),
 		SilenceUsage: true,

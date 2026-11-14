@@ -19,14 +19,15 @@ package hooks
 import (
 	"context"
 	"io"
-	"os"
 	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/kapply"
 	"github.com/kernpilot/lok8s/internal/tilt"
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -157,16 +158,23 @@ func (d doc) matches(pairs []selectorPair) bool {
 // domain's rendered artifact (bash: hooks::_select). This is the same single
 // clusters/<domain>/artifacts.yaml `lo deploy` applies; the Tilt reload
 // keeps the upstream ConfigMaps current, so a recreated Job mounts the
-// edited content. A missing artifact selects nothing; unreadable YAML too
-// (bash: `yq … 2>/dev/null || true`).
+// edited content. A missing artifact selects nothing. lo reads the
+// artifact once, and that copy passes the apply guard of lo deploy
+// (build.ReadCheckedArtifact): one with a keys-only Secret, or one that
+// cannot be read or does not parse, is refused. The objects come from
+// the copy that passed the check, not from a second read of the file.
 func (c *Context) selectObjects(domainName, selector string) ([]doc, error) {
 	pairs, err := c.parseSelector(selector)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(c.Paths.Clusters + "/" + domainName + "/artifacts.yaml")
-	if err != nil {
+	artifact := c.Paths.Clusters + "/" + domainName + "/artifacts.yaml"
+	if !fsutil.FileExists(artifact) {
 		return nil, nil
+	}
+	raw, err := build.ReadCheckedArtifact(c.ErrOut, domainName, artifact)
+	if err != nil {
+		return nil, err
 	}
 	var out []doc
 	for _, d := range parseDocs(raw) {
@@ -179,7 +187,8 @@ func (c *Context) selectObjects(domainName, selector string) ([]doc, error) {
 
 // marshalDocs renders documents back to a `---`-separated stream (feeds
 // kubectl delete/apply; the exact byte shape is yq-adjacent, the semantics
-// identical).
+// identical). The stream ends with the final newline of its last document,
+// and kubectl gets it as it is: a last `|+` block scalar keeps its value.
 func marshalDocs(docs []doc) string {
 	var buf strings.Builder
 	for i, d := range docs {
@@ -371,11 +380,11 @@ func (c *Context) Recreate(ctx context.Context, selector string) error {
 	applied := marshalDocs(docs)
 	if err := c.Runner.Run(ctx, execx.Cmd{
 		Name: "kubectl", Args: []string{"delete", "--ignore-not-found", "-f", "-"},
-		Stdin: strings.NewReader(objs + "\n"), Stdout: c.Out, Stderr: c.ErrOut,
+		Stdin: strings.NewReader(objs), Stdout: c.Out, Stderr: c.ErrOut,
 	}); err != nil {
 		return ErrHandled
 	}
-	if _, rc := c.applier().Apply(ctx, "hook recreate "+selector, applied+"\n"); rc != 0 {
+	if _, rc := c.applier().Apply(ctx, "hook recreate "+selector, applied); rc != 0 {
 		return ErrHandled
 	}
 	ui.DebugTo(c.ErrOut, "hooks: recreated objects matching '%s'", selector)
@@ -393,7 +402,7 @@ func (c *Context) Apply(ctx context.Context, selector string) error {
 		ui.WarnTo(c.ErrOut, "hooks apply: no objects match '%s'", selector)
 		return nil
 	}
-	if _, rc := c.applier().Apply(ctx, "hook apply "+selector, objs+"\n"); rc != 0 {
+	if _, rc := c.applier().Apply(ctx, "hook apply "+selector, objs); rc != 0 {
 		return ErrHandled
 	}
 	ui.DebugTo(c.ErrOut, "hooks: applied objects matching '%s'", selector)

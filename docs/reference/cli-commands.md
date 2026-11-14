@@ -473,6 +473,7 @@ lo build [flags]
 ```
       --cluster-override string   Override cluster domain for kubeconfig resolution
   -h, --help                      help for build
+      --keys-only                 Print the render to stdout with every Secret emptied: its values, label and annotation values and comments (key names kept; other kinds as rendered); reads no store, writes no file
       --no-secrets                Split ONLY non-Secret resources; never render, re-encrypt, prune, or even read committed Secret.*.sops.yaml (CI render path — no store/key needed)
       --single                    Skip the split emit even when the spec declares it (debug override)
       --split                     Also emit per-resource files under artifacts/ (debug override; declare it in spec.build.artifacts instead)
@@ -4025,7 +4026,7 @@ lo tilt [flags]
 * [lo](#lo)	 - lok8s - local dev orchestration
 * [lo tilt ci](#lo-tilt-ci)	 - Headless build+deploy+wait-ready (tilt ci), exits with real status
 * [lo tilt down](#lo-tilt-down)	 - Spin down tilt
-* [lo tilt preflight](#lo-tilt-preflight)	 - Force-clear stuck-Terminating objects in the manifest on stdin
+* [lo tilt preflight](#lo-tilt-preflight)	 - Refuse a keys-only Secret, then force-clear stuck-Terminating objects in the manifest on stdin
 * [lo tilt restart](#lo-tilt-restart)	 - Restart tilt
 * [lo tilt status](#lo-tilt-status)	 - Check tilt status
 * [lo tilt up](#lo-tilt-up)	 - Spin up tilt (interactive, backgrounded)
@@ -4082,7 +4083,7 @@ lo tilt down [flags]
 
 ## lo tilt preflight
 
-Force-clear stuck-Terminating objects in the manifest on stdin
+Refuse a keys-only Secret, then force-clear stuck-Terminating objects in the manifest on stdin
 
 ```
 lo tilt preflight [flags]

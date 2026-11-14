@@ -12,10 +12,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
@@ -37,10 +40,12 @@ spec:
 type fakeRunner struct {
 	calls   []execx.Cmd
 	handler func(c execx.Cmd) error
+	ctx     context.Context // the context of the last call
 }
 
 func (r *fakeRunner) Run(ctx context.Context, c execx.Cmd) error {
 	r.calls = append(r.calls, c)
+	r.ctx = ctx
 	if r.handler != nil {
 		return r.handler(c)
 	}
@@ -164,13 +169,55 @@ func TestApplyRunsInWorkDirWithRelativeManifest(t *testing.T) {
 		t.Errorf("tool = %s", c.Name)
 	}
 	// kubeone writes <name>-kubeconfig to CWD — the run MUST be CD'd into
-	// the work dir with the RELATIVE manifest path.
+	// the work dir with the RELATIVE manifest path (the manifest copy of
+	// the run, beside kubeone.yaml).
 	if c.Dir != wd {
 		t.Errorf("Dir = %q, want %q", c.Dir, wd)
 	}
-	want := []string{"apply", "--manifest", "kubeone.yaml", "--auto-approve"}
-	if strings.Join(c.Args, " ") != strings.Join(want, " ") {
-		t.Errorf("args = %v, want %v", c.Args, want)
+	if len(c.Args) != 4 || c.Args[0] != "apply" || c.Args[1] != "--manifest" || c.Args[3] != "--auto-approve" ||
+		filepath.Base(c.Args[2]) != c.Args[2] || !strings.HasPrefix(c.Args[2], runPrefix) || !strings.HasSuffix(c.Args[2], ".yaml") {
+		t.Errorf("args = %v, want apply --manifest %s<random>.yaml --auto-approve", c.Args, runPrefix)
+	}
+}
+
+// bats: "kubeone::apply: kubeone reads a copy of a manifest without an
+// addons path". KubeOne reads the manifest when it starts, after lo read
+// it, and the work dir is shared: lo gives kubeone a private copy of the
+// bytes that it read, also when the manifest names no addons directory.
+// The fake kubeone replaces the shared kubeone.yaml (with one that names
+// an addons directory with a keys-only Secret) before it reads its
+// manifest: it reads the bytes that lo read, unchanged, and nothing of
+// the run is left.
+func TestApplyKubeOneReadsACopyOfAManifestWithoutAddons(t *testing.T) {
+	const manifest = "name: test-prod\n# no addons path\nversions:\n  kubernetes: \"1.31.0\"\n"
+	clearVarEnv(t)
+	d, runner, _, p := testDriver(t, nil)
+	wd := filepath.Join(p.Clusters, "test.lok8s.dev", ".kubeone")
+	testutil.WriteFile(t, filepath.Join(wd, "kubeone.yaml"), manifest)
+	var read string
+	runner.handler = func(c execx.Cmd) error {
+		testutil.WriteFile(t, filepath.Join(wd, "kubeone.yaml"), kubeoneAddonsManifest)
+		testutil.WriteFile(t, filepath.Join(wd, "addons", "ccm-hetzner", "ccm.yaml"),
+			"apiVersion: v1\nkind: Secret\nmetadata:\n  name: hcloud\n  annotations:\n    secrets.lok8s.dev/keys-only: \"true\"\n")
+		path := filepath.Join(c.Dir, c.Args[2])
+		if fi, err := os.Stat(path); err != nil || fi.Mode() != 0o600 {
+			t.Errorf("%s: %v (%v), want mode 0600", path, fi, err)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		read = string(b)
+		return nil
+	}
+	if err := d.Apply(t.Context(), wd, ""); err != nil {
+		t.Fatal(err)
+	}
+	if read != manifest {
+		t.Errorf("kubeone read %q, want the bytes that lo read %q", read, manifest)
+	}
+	if left, _ := filepath.Glob(filepath.Join(wd, runPrefix+"*")); len(left) != 0 {
+		t.Errorf("the run copy is left after the run: %v", left)
 	}
 }
 
@@ -511,5 +558,211 @@ func TestKubeconfigPath(t *testing.T) {
 	}
 	if got != filepath.Join(p.Base, ".kubeconfig", "test-prod.yaml") {
 		t.Fatalf("kubeconfig = %s", got)
+	}
+}
+
+// ── the keys-only apply guard on the addons ───────────────
+
+// kubeoneAddonsManifest is a manifest with the addons directory that lo
+// writes for Hetzner (_append_inventory).
+const kubeoneAddonsManifest = "name: test-prod\naddons:\n  enable: true\n  path: ./addons\n"
+
+// bats (kubeone_addon_values_test.bats): "render_addons: a render with a
+// keys-only Secret stops the apply before kubeone runs" and
+// "kubeone::apply: every file of the addons directory passes the guard".
+// KubeOne applies the files of the addons directory of the manifest
+// itself: a file with a keys-only Secret (lo build --keys-only), one that
+// does not parse, or a directory that cannot be read stops the apply
+// before kubeone runs. Each file of the directory passes the guard, not
+// only the two renders. Clean files run kubeone.
+func TestApplyRefusesAKeysOnlySecretInAnAddon(t *testing.T) {
+	const clean = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n"
+	const marked = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: hcloud\n  annotations:\n    secrets.lok8s.dev/keys-only: \"true\"\ndata:\n  token: \"\"\n"
+	for name, tc := range map[string]struct {
+		cilium, ccm, extra, want string
+		lockExtra                bool
+	}{
+		"clean":        {cilium: clean, ccm: clean, extra: clean},
+		"cilium":       {cilium: marked, ccm: clean, want: "[error] kubeone: refusing to apply addons/cilium/cilium.yaml: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one\n"},
+		"ccm":          {cilium: clean, ccm: "---\n" + clean + "---\n" + marked, want: "[error] kubeone: refusing to apply addons/ccm-hetzner/ccm.yaml: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one\n"},
+		"ccm not YAML": {cilium: clean, ccm: "kind: [Secret\n", want: "[error] kubeone: refusing to apply addons/ccm-hetzner/ccm.yaml: it does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)\n"},
+		// Each file of the addons directory, not only the two renders
+		// (bats: "kubeone::apply: every file of the addons directory
+		// passes the guard").
+		"another file":           {cilium: clean, ccm: clean, extra: marked, want: "[error] kubeone: refusing to apply addons/extra/deep/x.yaml: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one\n"},
+		"another file not YAML":  {cilium: clean, ccm: clean, extra: "kind: [Secret\n", want: "[error] kubeone: refusing to apply addons/extra/deep/x.yaml: it does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)\n"},
+		"a directory unreadable": {cilium: clean, ccm: clean, extra: clean, lockExtra: true, want: "[error] kubeone: refusing to apply addons/extra/deep: it cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if tc.lockExtra && os.Geteuid() == 0 {
+				t.Skip("root reads a directory with mode 0")
+			}
+			clearVarEnv(t)
+			d, runner, errBuf, p := testDriver(t, nil)
+			wd := filepath.Join(p.Clusters, "test.lok8s.dev", ".kubeone")
+			testutil.WriteFile(t, filepath.Join(wd, "kubeone.yaml"), kubeoneAddonsManifest)
+			deep := filepath.Join(wd, "addons", "extra", "deep")
+			d.Hooks.PrepareApply = func(ctx context.Context, workDir, clusterYAML string) error {
+				testutil.WriteFile(t, filepath.Join(workDir, "addons", "cilium", "cilium.yaml"), tc.cilium)
+				testutil.WriteFile(t, filepath.Join(workDir, "addons", "ccm-hetzner", "ccm.yaml"), tc.ccm)
+				if tc.extra != "" {
+					testutil.WriteFile(t, filepath.Join(deep, "x.yaml"), tc.extra)
+				}
+				if tc.lockExtra {
+					if err := os.Chmod(deep, 0); err != nil {
+						return err
+					}
+					t.Cleanup(func() { _ = os.Chmod(deep, 0o755) })
+				}
+				return os.MkdirAll(filepath.Join(workDir, "addons", "csi-hetzner"), 0o755)
+			}
+			err := d.Apply(t.Context(), wd, "")
+			if tc.want == "" {
+				if err != nil || len(runner.calls) != 1 || runner.calls[0].Name != "kubeone" {
+					t.Fatalf("clean addons: err %v, calls %v", err, runner.calls)
+				}
+				return
+			}
+			if err == nil || len(runner.calls) != 0 {
+				t.Fatalf("err %v, calls %v: kubeone must not run", err, runner.calls)
+			}
+			if errBuf.String() != tc.want {
+				t.Errorf("stderr = %q, want %q", errBuf.String(), tc.want)
+			}
+			if left, _ := filepath.Glob(filepath.Join(wd, runPrefix+"*")); len(left) != 0 {
+				t.Errorf("a refused apply left the run copy: %v", left)
+			}
+		})
+	}
+}
+
+// bats: "kubeone::apply: kubeone reads the checked copy of the addons, not
+// the shared files". The recipe of the review: a KubeOne that pauses
+// before it reads the addons; meanwhile the shared files in the work dir
+// get a keys-only Secret; then it reads. It reads the checked bytes: lo
+// copied them into a private run directory (0700, files 0600, the empty
+// csi-hetzner shadow too), and the manifest copy beside it, in the work
+// dir, names that directory. The run copy is gone after the run, also when
+// kubeone fails.
+func TestApplyKubeOneReadsTheCheckedCopyOfTheAddons(t *testing.T) {
+	const cilium = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cilium\ndata:\n  v: |+\n    x\n\n\n"
+	const ccm = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: hcloud\nstringData:\n  token: abc\n"
+	const marked = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: hcloud\n  annotations:\n    secrets.lok8s.dev/keys-only: \"true\"\ndata:\n  token: \"\"\n"
+	for _, kubeoneFails := range []bool{false, true} {
+		clearVarEnv(t)
+		d, runner, _, p := testDriver(t, nil)
+		wd := filepath.Join(p.Clusters, "test.lok8s.dev", ".kubeone")
+		testutil.WriteFile(t, filepath.Join(wd, "kubeone.yaml"), kubeoneAddonsManifest)
+		d.Hooks.PrepareApply = func(ctx context.Context, workDir, clusterYAML string) error {
+			testutil.WriteFile(t, filepath.Join(workDir, "addons", "cilium", "cilium.yaml"), cilium)
+			testutil.WriteFile(t, filepath.Join(workDir, "addons", "ccm-hetzner", "ccm.yaml"), ccm)
+			return os.MkdirAll(filepath.Join(workDir, "addons", "csi-hetzner"), 0o755)
+		}
+		read := map[string]string{}
+		runner.handler = func(c execx.Cmd) error {
+			if len(c.Args) < 3 || c.Args[1] != "--manifest" {
+				t.Fatalf("args = %v", c.Args)
+			}
+			// The manifest copy is in the work dir: KubeOne resolves the
+			// other relative paths (the PKI backup) against its directory.
+			manifest := filepath.Join(c.Dir, c.Args[2])
+			if filepath.Dir(manifest) != wd || !strings.HasPrefix(filepath.Base(manifest), runPrefix) {
+				t.Errorf("manifest = %s, want a run copy in %s", manifest, wd)
+			}
+			raw, err := os.ReadFile(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var spec struct {
+				Name   string `yaml:"name"`
+				Addons struct {
+					Enable bool   `yaml:"enable"`
+					Path   string `yaml:"path"`
+				} `yaml:"addons"`
+			}
+			if err := yaml.Unmarshal(raw, &spec); err != nil {
+				t.Fatal(err)
+			}
+			if spec.Name != "test-prod" || !spec.Addons.Enable {
+				t.Errorf("the manifest copy lost a key: %+v", spec)
+			}
+			addons := spec.Addons.Path
+			if filepath.Dir(addons) != strings.TrimSuffix(manifest, ".yaml") {
+				t.Errorf("addons.path = %s, want the run directory of %s", addons, manifest)
+			}
+			for path, want := range map[string]os.FileMode{manifest: 0o600, filepath.Dir(addons): 0o700 | os.ModeDir, addons: 0o700 | os.ModeDir} {
+				if fi, err := os.Stat(path); err != nil || fi.Mode() != want {
+					t.Errorf("%s: mode %v (%v), want %v", path, fi.Mode(), err, want)
+				}
+			}
+			// Meanwhile: the shared files change.
+			for _, f := range []string{"cilium/cilium.yaml", "ccm-hetzner/ccm.yaml"} {
+				testutil.WriteFile(t, filepath.Join(wd, "addons", f), marked)
+			}
+			// Resumed: KubeOne reads the addons directory of its manifest.
+			_ = filepath.WalkDir(addons, func(path string, de fs.DirEntry, err error) error {
+				rel, _ := filepath.Rel(addons, path)
+				if err != nil || de.IsDir() {
+					read[rel+"/"] = ""
+					return err
+				}
+				fi, _ := de.Info()
+				if fi.Mode() != 0o600 {
+					t.Errorf("%s: mode %v, want 0600", rel, fi.Mode())
+				}
+				b, _ := os.ReadFile(path)
+				read[rel] = string(b)
+				return nil
+			})
+			if kubeoneFails {
+				return errors.New("kubeone failed")
+			}
+			return nil
+		}
+		err := d.Apply(t.Context(), wd, "")
+		if (err != nil) != kubeoneFails {
+			t.Fatalf("Apply = %v (kubeone fails: %v)", err, kubeoneFails)
+		}
+		want := map[string]string{"./": "", "cilium/": "", "ccm-hetzner/": "", "csi-hetzner/": "", "cilium/cilium.yaml": cilium, "ccm-hetzner/ccm.yaml": ccm}
+		if fmt.Sprint(read) != fmt.Sprint(want) {
+			t.Errorf("kubeone read %q, want the checked bytes %q", read, want)
+		}
+		if left, _ := filepath.Glob(filepath.Join(wd, runPrefix+"*")); len(left) != 0 {
+			t.Errorf("the run copy is left after the run: %v", left)
+		}
+	}
+}
+
+// A manifest whose addons path is not a directory gets no copy of it: the
+// manifest copy names the run's addons directory, which does not exist,
+// and KubeOne reports a missing addons directory as it did before.
+func TestApplyWithAMissingAddonsDirectory(t *testing.T) {
+	clearVarEnv(t)
+	d, runner, _, p := testDriver(t, nil)
+	wd := filepath.Join(p.Clusters, "test.lok8s.dev", ".kubeone")
+	testutil.WriteFile(t, filepath.Join(wd, "kubeone.yaml"), kubeoneAddonsManifest)
+	runner.handler = func(c execx.Cmd) error {
+		raw, err := os.ReadFile(filepath.Join(c.Dir, c.Args[2]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var spec struct {
+			Addons struct {
+				Path string `yaml:"path"`
+			} `yaml:"addons"`
+		}
+		if err := yaml.Unmarshal(raw, &spec); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(spec.Addons.Path); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("addons.path %s: %v, want no directory", spec.Addons.Path, err)
+		}
+		return nil
+	}
+	if err := d.Apply(t.Context(), wd, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls = %v", runner.calls)
 	}
 }

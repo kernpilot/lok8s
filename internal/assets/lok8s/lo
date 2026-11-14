@@ -9,6 +9,18 @@
 # vim: set syntax=bash:
 set -euo pipefail
 
+# The keys-only setting of the Secret plugin is internal to lo: only
+# `lo build --keys-only` turns it on, for its own render. A value inherited
+# from the caller's environment must not reach any child (kustomize, a
+# plugin, tilt, the registry TLS mint), so it is 0 from here on (Go: run in
+# cmd/lo/main.go). The calls that render pin it again.
+export LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0
+# _ko_at is the mark of a trace guard that runs (utils/keysonly.sh): the
+# first line of each guard does nothing while it is set. It is not a
+# setting, so a value inherited from the caller's environment must not
+# turn the guards off.
+unset _ko_at
+
 : "${PATH_BASE:="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}"
 : "${PATH_BIN:="${PATH_BASE}/.bin"}"
 : "${PATH_SECRETS:="${PATH_BASE}/.secrets"}"
@@ -84,6 +96,12 @@ import ^utils/targets
 import ^utils/http
 import ^utils/credentials
 import ^drivers/lo/libs/registry
+import ^utils/keysonly
+
+# The functions that hold Secret values keep them out of a trace with
+# `local -` (the rules at the top of utils/keysonly.sh), which bash 4.3
+# does not know: with tracing on, bash 4.3 stops here.
+keysonly::check_trace_support "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}" "$-" || exit 1
 
 main() {
   local verbose=0 force=0 force_recreate=0 remote=0 kubernetes cluster config domain domain_sans

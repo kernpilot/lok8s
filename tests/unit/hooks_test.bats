@@ -17,6 +17,7 @@ setup() {
   :args() { shift; }; export -f :args
 
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/hooks"
 }
 
@@ -72,6 +73,127 @@ YAML
   assert_success
   assert_output --partial 'zitadel-provision'
   refute_output --partial 'zitadel-setup'
+}
+
+# The hooks read the domain artifact through the apply guard of lo deploy:
+# an artifact with a keys-only Secret (lo build --keys-only output) is
+# refused, even when the selector matches only other objects; so is one
+# that does not parse. recreate, apply and restart all select through
+# hooks::_select. Go: TestHooksRefuseAKeysOnlyArtifact.
+@test "_select: refuses an artifact with a keys-only Secret, and one that does not parse" {
+  mkdir -p "${PATH_CLUSTERS}/d.dev"
+  local artifact="${PATH_CLUSTERS}/d.dev/artifacts.yaml"
+  cat > "${artifact}" <<'YAML'
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: provision
+  labels:
+    lok8s.dev/role: seed
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app
+  annotations:
+    secrets.lok8s.dev/keys-only: "true"
+data:
+  PASSWORD: ""
+YAML
+  run hooks::_select d.dev 'lok8s.dev/role=seed'
+  assert_failure
+  assert_output --partial "refusing to apply d.dev: ${artifact} holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one — run 'lo build' again"
+  refute_output --partial 'name: provision'
+  printf 'kind: Job\nmetadata: [a\n' > "${artifact}"
+  run hooks::_select d.dev 'lok8s.dev/role=seed'
+  assert_failure
+  assert_output --partial "refusing to apply d.dev: ${artifact} does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
+}
+
+# The three verbs refuse such an artifact before any kubectl call; with a
+# clean artifact each one reaches kubectl. lo reads the artifact once: yq
+# selects from the copy that passed the check and never reads the file
+# itself. Go: TestHooksRefuseAKeysOnlyArtifact.
+@test "recreate, apply and restart refuse an artifact with a keys-only Secret" {
+  mkdir -p "${PATH_CLUSTERS}/d.dev"
+  export ARTIFACT="${PATH_CLUSTERS}/d.dev/artifacts.yaml" CALLS="${BATS_TEST_TMPDIR}/calls"
+  local workload='apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  labels:
+    lok8s.dev/role: seed'
+  printf '%s\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  annotations:\n    secrets.lok8s.dev/keys-only: "true"\ndata:\n  PASSWORD: ""\n' "${workload}" > "${ARTIFACT}"
+  :args() { shift; while (( $# )); do [[ "$1" != --selector ]] || { selector="$2"; shift; }; shift; done; }
+  _resolve_kubeconfig_for_domain() { :; }
+  deploy::_has_objects() { grep -q 'kind:'; }
+  kubectl() { echo "kubectl $*" >> "${CALLS}"; [[ " $* " != *" -f - "* ]] || cat > /dev/null; }
+  kapply::apply() { echo "kapply $*" >> "${CALLS}"; cat > /dev/null; }
+  hooks::_preserve_images() { cat; }
+  yq() { [[ " $* " != *" ${ARTIFACT} "* ]] || echo "yq read ${ARTIFACT}" >> "${CALLS}"; command yq "$@"; }
+  local verb domain=d.dev
+  for verb in recreate apply restart; do
+    rm -f "${CALLS}"
+    run "hooks::${verb}" --selector lok8s.dev/role=seed
+    [ "${status}" -ne 0 ] || { echo "${verb}: status 0"; return 1; }
+    [[ "${output}" == *"refusing to apply d.dev: ${ARTIFACT} holds a keys-only Secret (secrets.lok8s.dev/keys-only)"* ]] || { echo "${verb}: ${output}"; return 1; }
+    [ ! -f "${CALLS}" ] || { echo "${verb}: $(cat "${CALLS}")"; return 1; }
+  done
+  printf '%s\n' "${workload}" > "${ARTIFACT}"
+  for verb in recreate apply restart; do
+    rm -f "${CALLS}"
+    run "hooks::${verb}" --selector lok8s.dev/role=seed
+    [ "${status}" -eq 0 ] || { echo "${verb}: ${output}"; return 1; }
+    grep -q '^kubectl\|^kapply' "${CALLS}" || { echo "${verb}: no kubectl call"; return 1; }
+    run grep -q "^yq read" "${CALLS}"
+    [ "${status}" -ne 0 ] || { echo "${verb}: yq read the artifact file"; return 1; }
+  done
+}
+
+# The three verbs hold the selected objects with tracing off (the rules at
+# the top of utils/keysonly.sh): under bash -x, and with BASH_XTRACEFD on a
+# file, no Secret value of the artifact is in stdout, stderr or the trace.
+# The stubs show that the value reached kubectl.
+@test "recreate, apply and restart trace no Secret value" {
+  mkdir -p "${PATH_CLUSTERS}/d.dev"
+  export ARTIFACT="${PATH_CLUSTERS}/d.dev/artifacts.yaml" CALLS="${BATS_TEST_TMPDIR}/calls"
+  printf 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  labels:\n    lok8s.dev/role: seed\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  labels:\n    lok8s.dev/role: seed\nstringData:\n  PASSWORD: xtrace-canary-hooks\n' > "${ARTIFACT}"
+  :args() { shift; while (( $# )); do [[ "$1" != --selector ]] || { selector="$2"; shift; }; shift; done; }
+  _resolve_kubeconfig_for_domain() { :; }
+  deploy::_has_objects() { grep -E 'kind:' >/dev/null; }
+  kubectl() { [[ " $* " != *" -f - "* ]] || cat >> "${CALLS}"; }
+  kapply::apply() { cat >> "${CALLS}"; }
+  hooks::_live_images() { printf '[]'; }
+  local verb domain=d.dev
+  for verb in recreate apply restart; do
+    rm -f "${CALLS}"
+    assert_no_trace_leak xtrace-canary-hooks "hooks::${verb}" --selector lok8s.dev/role=seed
+    [[ "${verb}" == restart ]] || grep -qF xtrace-canary-hooks "${CALLS}" || { echo "${verb}: the value did not reach kubectl"; return 1; }
+  done
+}
+
+# The last value of the artifact is a `|+` block scalar that ends in three
+# newlines: kubectl gets the selected objects byte for byte, with the
+# newlines (Go: TestHooksKeepALastKeepChompedValue).
+@test "recreate and apply keep the final newlines of a |+ value" {
+  mkdir -p "${PATH_CLUSTERS}/d.dev"
+  export ARTIFACT="${PATH_CLUSTERS}/d.dev/artifacts.yaml" CALLS="${BATS_TEST_TMPDIR}/calls"
+  printf 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  labels:\n    lok8s.dev/role: seed\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n  labels:\n    lok8s.dev/role: seed\ndata:\n  tail: |+\n    x\n\n\n' > "${ARTIFACT}"
+  :args() { shift; while (( $# )); do [[ "$1" != --selector ]] || { selector="$2"; shift; }; shift; done; }
+  _resolve_kubeconfig_for_domain() { :; }
+  deploy::_has_objects() { grep -E 'kind:' >/dev/null; }
+  # The stubs run in pipelines (subshells): one file per call.
+  kubectl() { [[ " $* " != *" -f - "* ]] || cat > "${CALLS}.kubectl"; }
+  kapply::apply() { cat > "${CALLS}.kapply"; }
+  hooks::_live_images() { printf '[]'; }
+  local domain=d.dev
+  hooks::recreate --selector lok8s.dev/role=seed
+  cmp "${ARTIFACT}" "${CALLS}.kubectl"
+  cmp "${ARTIFACT}" "${CALLS}.kapply"
+  rm -f "${CALLS}".*
+  hooks::apply --selector lok8s.dev/role=seed
+  [ ! -e "${CALLS}.kubectl" ]
+  cmp "${ARTIFACT}" "${CALLS}.kapply"
 }
 
 @test "_select: empty when nothing matches" {

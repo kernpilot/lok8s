@@ -92,7 +92,11 @@ k8s::infrastructure() {
   # The domain's own store, as `lo build` uses it; no silent flat fallback.
   domain::export_secrets_store "${domain}" || return 1
   mkdir -p "${out_dir}"
+  # The Secret plugin's keys-only setting is explicit: 0, whatever the
+  # environment holds. This lib also runs as its own entry, without the
+  # pin of the lo entry (Go: render.Build pins it on every render).
   KUBECONFIG="${PATH_BASE}/.kubeconfig/secret.${domain}.yaml" \
+  LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0 \
     kustomize build --enable-alpha-plugins "${PATH_CLUSTERS}/${domain}/targets" > "${out_dir}/infrastructure.yaml"
   local kustomization_file="${out_dir}/kustomization.yaml"
   if [[ ! -f "${kustomization_file}" ]]; then
@@ -117,7 +121,9 @@ k8s::platform() {
   fi
   domain::export_secrets_store "${domain}" || return 1
   mkdir -p "${out_dir}"
+  # The keys-only setting is explicit here too (see k8s::infrastructure).
   KUBECONFIG="${PATH_BASE}/.kubeconfig/secret.${domain}.yaml" \
+  LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0 \
     kustomize build --enable-alpha-plugins "${overlay}" > "${out_dir}/platform.yaml"
   local kustomization_file="${out_dir}/kustomization.yaml"
   if [[ ! -f "${kustomization_file}" ]]; then

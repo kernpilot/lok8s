@@ -32,6 +32,7 @@ _load_kubeone_config() {
   addons::render() { echo "# stub addon"; }
   export -f provider::detect addons::render
   source "${_PROJECT_ROOT}/.lok8s/utils/oidc.sh"
+  source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
   source "${_PROJECT_ROOT}/.lok8s/drivers/kubeone/config"
 }
 

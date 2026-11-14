@@ -96,15 +96,29 @@ func registryTLSSANs(rf *RegistryFile) []string {
 }
 
 // mintEnv is the in-process generator's env lookup: PATH_SECRETS answers
-// with the scratch store the mint chose, every other key comes from the
-// process environment (plugin.DefaultEnv), exactly what the exec'd child
-// sees with the one entry appended to its inherited env.
+// with the scratch store the mint chose and the keys-only setting with 0
+// (the mint writes real material, never a keys-only run), every other
+// key comes from the process environment (plugin.DefaultEnv), exactly
+// what the exec'd child sees with mintChildEnv appended to its inherited
+// env.
 func mintEnv(pathSecrets string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
-		if key == secret.PathSecretsEnv {
+		switch key {
+		case secret.PathSecretsEnv:
 			return pathSecrets, true
+		case secret.KeysOnlyEnv:
+			return "0", true
 		}
 		return plugin.DefaultEnv(key)
+	}
+}
+
+// mintChildEnv is the env overlay of the exec'd mint plugin: the scratch
+// store and the keys-only setting pinned to 0.
+func mintChildEnv(pathSecrets string) []string {
+	return []string{
+		secret.PathSecretsEnv + "=" + pathSecrets,
+		secret.KeysOnlyEnv + "=0",
 	}
 }
 
@@ -269,12 +283,12 @@ cert:
 
 	var out strings.Builder
 	if execPlugin {
-		// The scratch store rides on the child's env (appended after the
-		// inherited environment, so it wins over an inherited
-		// PATH_SECRETS); CAROOT and the rest are inherited as before.
+		// The scratch store and the keys-only pin ride on the child's env
+		// (appended after the inherited environment, so they win over an
+		// inherited value); CAROOT and the rest are inherited as before.
 		err = d.deps.Runner.Run(ctx, execx.Cmd{
 			Name:   pluginBin, // absolute path — used as-is by the runner
-			Env:    []string{secret.PathSecretsEnv + "=" + scratch},
+			Env:    mintChildEnv(scratch),
 			Stdin:  strings.NewReader(manifest),
 			Stdout: &out,
 			Stderr: d.stderr(),

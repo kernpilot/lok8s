@@ -93,17 +93,17 @@ func (b *BashEntry) UnmarshalYAML(node *yaml.Node) error {
 		switch b.EffectiveOutput() {
 		case "stdout", "stderr", "combined":
 		default:
-			return kyaml.NodeErrf(node, "bash output must be stdout, stderr, or combined; got %q", b.Output)
+			return kyaml.NodeErrf(node, "bash output must be stdout, stderr, or combined")
 		}
 		switch b.EffectiveNewline() {
 		case "strip", "keep", "ensure":
 		default:
-			return kyaml.NodeErrf(node, "bash newline must be strip, keep, or ensure; got %q", b.Newline)
+			return kyaml.NodeErrf(node, "bash newline must be strip, keep, or ensure")
 		}
 		switch b.EffectiveEncode() {
 		case "", "base64", "hex":
 		default:
-			return kyaml.NodeErrf(node, "bash encode must be base64, hex, or empty; got %q", b.Encode)
+			return kyaml.NodeErrf(node, "bash encode must be base64, hex, or empty")
 		}
 		return nil
 	default:

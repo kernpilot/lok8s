@@ -31,7 +31,7 @@ func Run(argv []string, stdin io.Reader, stdout io.Writer, p Plugin) error {
 // thread a controlled environment into Build/generators instead of the
 // process env. Run is the thin wrapper that passes DefaultEnv.
 func RunEnv(argv []string, stdin io.Reader, stdout io.Writer, env func(string) (string, bool), p Plugin) error {
-	src, closer, err := openSpec(argv, stdin)
+	src, closer, err := OpenSpec(argv, stdin)
 	if err != nil {
 		return err
 	}
@@ -56,10 +56,12 @@ func RunEnv(argv []string, stdin io.Reader, stdout io.Writer, env func(string) (
 	return p.Emit(entries, stdout)
 }
 
-// openSpec selects the spec source: argv[1] file if present, else stdin.
+// OpenSpec selects the spec source: argv[1] file if present, else stdin.
+// RunEnv uses it, and so does a plugin run that does not build generators
+// (the keys-only run of the Secret plugin).
 // Returns the reader, an optional cleanup func (nil if reader is stdin),
 // and any error.
-func openSpec(argv []string, stdin io.Reader) (io.Reader, func(), error) {
+func OpenSpec(argv []string, stdin io.Reader) (io.Reader, func(), error) {
 	if len(argv) >= 2 && argv[1] != "" {
 		f, err := os.Open(argv[1])
 		if err != nil {

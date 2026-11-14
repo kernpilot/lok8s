@@ -57,8 +57,8 @@ func (f *FileEntry) UnmarshalYAML(node *yaml.Node) error {
 			f.Mode = FileModeRaw
 		}
 		if f.Mode != FileModeRaw && f.Mode != FileModePassthrough {
-			return kyaml.NodeErrf(node, "file.mode must be %q or %q, got %q",
-				FileModeRaw, FileModePassthrough, f.Mode)
+			return kyaml.NodeErrf(node, "file.mode must be %q or %q",
+				FileModeRaw, FileModePassthrough)
 		}
 		return nil
 	default:

@@ -83,7 +83,7 @@ func (e *EnvEntry) UnmarshalYAML(node *yaml.Node) error {
 		// Plain string → set Var.
 		var s string
 		if err := node.Decode(&s); err != nil {
-			return kyaml.NodeErrf(node, "env shorthand must be a string or null, got %q", node.Value)
+			return kyaml.NodeErrf(node, "env shorthand must be a string or null, got a %s value", node.ShortTag())
 		}
 		e.Var = s
 		return nil

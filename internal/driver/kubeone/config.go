@@ -164,8 +164,9 @@ func (d *Driver) GenerateConfig(ctx context.Context, clusterYAML, provider, outp
 	// (cli.WatchInterrupt) and this function still returns, so the defer
 	// runs then too. A SIGHUP or a second signal ends lo at once and can
 	// leave the file: WatchInterrupt does not catch SIGHUP, because
-	// signal.Notify would undo the SIGHUP ignore of `nohup lo …`. (The
-	// bash removes the file on INT, TERM and HUP.)
+	// signal.Notify would undo the SIGHUP ignore of `nohup lo …` (only
+	// Apply catches it, while its run copy exists: interrupt.CatchHangup).
+	// (The bash removes the file on INT, TERM and HUP.)
 	work := tmp.Name()
 	defer func() {
 		if work != "" {

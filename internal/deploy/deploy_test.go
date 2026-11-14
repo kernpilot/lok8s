@@ -11,14 +11,21 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
+	"gopkg.in/yaml.v3"
+
+	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/kapply"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 const artifactYAML = `apiVersion: apiextensions.k8s.io/v1
@@ -198,6 +205,151 @@ func TestApplyFilteredSubset(t *testing.T) {
 	}
 }
 
+// bats: "deploy::apply and deploy::apply_filtered keep the final newlines
+// of a |+ value".
+// The last literal scalar (|+) of the CRD subset, of the label subset and
+// of the artifact ends in several newlines: each manifest reaches kubectl
+// with them, and no newline is added.
+func TestApplyKeepsALastKeepChompedValue(t *testing.T) {
+	const crd = "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.test.lok8s.dev\n  annotations:\n    note: |+\n      crd\n\n\n"
+	const cm = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: platform\n  labels:\n    lok8s.dev/type: platform\ndata:\n  tail: |+\n    x\n\n\n"
+	const artifact = crd + "---\n" + cm
+	f := &fakeRunner{}
+	d, _, _, _ := newDeployer(t, f, artifact)
+	if err := d.Apply(t.Context(), "test.lok8s.dev"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.applied) != 2 || f.applied[0] != crd || f.applied[1] != artifact {
+		t.Errorf("full apply: kubectl stdin = %q, want %q", f.applied, []string{crd, artifact})
+	}
+	f.applied = nil
+	if err := d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "platform"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.applied) != 1 || f.applied[0] != cm {
+		t.Errorf("subset apply: kubectl stdin = %q, want %q", f.applied, cm)
+	}
+}
+
+// bats: "deploy::apply_filtered splits at CRLF separators and keeps a last
+// value at the end of the file".
+// The last document of the artifact ends in a `|+` block scalar with no
+// final newline (its value is "abc"): the CRD subset, the artifact and the
+// label subset reach kubectl with the bytes of the artifact. lo adds only
+// the `---` lines between the selected documents, no newline at the end.
+func TestApplyKeepsTheEndOfTheLastDocument(t *testing.T) {
+	const cm = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n  labels:\n    lok8s.dev/type: platform\n"
+	const ns = "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: other\n"
+	const crd = "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.test.lok8s.dev\n  annotations:\n    note: |+\n      crd"
+	const secret = "apiVersion: v1\nkind: Secret\nmetadata:\n  name: s\n  labels:\n    lok8s.dev/type: platform\nstringData:\n  password: |+\n    abc"
+	for _, tc := range []struct {
+		name, artifact, label, crds, subset string
+	}{
+		{"label subset", cm + "---\n" + ns + "---\n" + secret, "platform", "", cm + "---\n" + secret},
+		{"CRD subset", cm + "---\n" + crd, "none", crd, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRunner{}
+			d, _, _, _ := newDeployer(t, f, tc.artifact)
+			if err := d.Apply(t.Context(), "test.lok8s.dev"); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{tc.artifact}
+			if tc.crds != "" {
+				want = []string{tc.crds, tc.artifact}
+			}
+			if strings.Join(f.applied, "\x00") != strings.Join(want, "\x00") {
+				t.Errorf("full apply: kubectl stdin = %q, want %q", f.applied, want)
+			}
+			f.applied = nil
+			if err := d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", tc.label); err != nil {
+				t.Fatal(err)
+			}
+			if tc.subset == "" {
+				if len(f.applied) != 0 {
+					t.Errorf("subset apply: kubectl stdin = %q, want no apply", f.applied)
+				}
+				return
+			}
+			if len(f.applied) != 1 || f.applied[0] != tc.subset {
+				t.Fatalf("subset apply: kubectl stdin = %q, want %q", f.applied, tc.subset)
+			}
+			password := "<none>"
+			dec := yaml.NewDecoder(strings.NewReader(f.applied[0]))
+			for {
+				var doc struct {
+					StringData map[string]string `yaml:"stringData"`
+				}
+				if dec.Decode(&doc) != nil {
+					break
+				}
+				if v, ok := doc.StringData["password"]; ok {
+					password = v
+				}
+			}
+			if password != "abc" {
+				t.Errorf("subset apply: password = %q, want %q", password, "abc")
+			}
+		})
+	}
+}
+
+// bats: "deploy::apply_filtered splits at CRLF separators and keeps a last
+// value at the end of the file".
+// An artifact with CRLF line ends: each `---\r\n` line is a separator, so
+// a selected document does not carry the documents after it.
+func TestApplySplitsAtCRLFSeparators(t *testing.T) {
+	const a = "apiVersion: v1\r\nkind: ConfigMap\r\nmetadata:\r\n  name: a\r\n  labels:\r\n    lok8s.dev/type: platform\r\n"
+	const b = "apiVersion: v1\r\nkind: ConfigMap\r\nmetadata:\r\n  name: b\r\n  labels:\r\n    lok8s.dev/type: other\r\n"
+	const crd = "apiVersion: apiextensions.k8s.io/v1\r\nkind: CustomResourceDefinition\r\nmetadata:\r\n  name: widgets.test.lok8s.dev\r\n"
+	const artifact = a + "---\r\n" + crd + "--- \t\r\n" + b
+	for label, want := range map[string]string{"platform": a, "other": b} {
+		f := &fakeRunner{}
+		d, _, _, _ := newDeployer(t, f, artifact)
+		if err := d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", label); err != nil {
+			t.Fatal(err)
+		}
+		if len(f.applied) != 1 || f.applied[0] != want {
+			t.Errorf("%s: kubectl stdin = %q, want %q", label, f.applied, want)
+		}
+	}
+	f := &fakeRunner{}
+	d, _, _, _ := newDeployer(t, f, artifact)
+	if err := d.Apply(t.Context(), "test.lok8s.dev"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.applied) != 2 || f.applied[0] != crd || f.applied[1] != artifact {
+		t.Errorf("full apply: kubectl stdin = %q, want %q", f.applied, []string{crd, artifact})
+	}
+}
+
+// Go only: yq (bash) parses the stream, so it has no split to get wrong.
+// A part between two separators that holds two documents (a `---` line
+// with more text on it) stops the apply before kubectl runs: its raw text
+// would carry the second document, which the selection did not see.
+func TestApplyRefusesAStreamThatItCannotSplit(t *testing.T) {
+	const artifact = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n  labels:\n    lok8s.dev/type: platform\n--- # b\napiVersion: v1\nkind: Secret\nmetadata:\n  name: b\n"
+	for _, filtered := range []bool{false, true} {
+		f := &fakeRunner{}
+		d, _, errBuf, _ := newDeployer(t, f, artifact)
+		var err error
+		if filtered {
+			err = d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "platform")
+		} else {
+			err = d.Apply(t.Context(), "test.lok8s.dev")
+		}
+		if !errors.Is(err, ErrHandled) {
+			t.Fatalf("filtered=%v: err = %v, want ErrHandled", filtered, err)
+		}
+		if len(f.calls) != 0 {
+			t.Errorf("filtered=%v: kubectl ran: %v", filtered, f.calls)
+		}
+		if !strings.Contains(errBuf.String(), "part 1 of the stream holds more than one YAML document") {
+			t.Errorf("filtered=%v: stderr = %q", filtered, errBuf.String())
+		}
+	}
+}
+
 // yq's `==` compares scalar text: an unquoted `flag: true` matches "true".
 func TestApplyFilteredUnquotedScalarMatches(t *testing.T) {
 	f := &fakeRunner{}
@@ -320,6 +472,171 @@ func TestHasObjects(t *testing.T) {
 	} {
 		if got := HasObjects(s); got != want {
 			t.Errorf("HasObjects(%q) = %v", s, got)
+		}
+	}
+}
+
+// keysOnlyArtifact holds a Secret of `lo build --keys-only`: its key names
+// with empty values and the keys-only marker.
+const keysOnlyArtifact = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n  labels:\n    lok8s.dev/type: platform\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  labels:\n    lok8s.dev/type: platform\n  annotations:\n    \"secrets.lok8s.dev/keys-only\": \"true\"\ndata:\n  USER: \"\"\n"
+
+// The keys-only output of a domain with only a plain Secret (no Secret of
+// the plugin, so no marker from the plugin) is refused: the blanking sets
+// the marker on every Secret. The output comes from the pinned yq and the
+// real program. Build side: TestKeysOnlyOutputIsRefusedByTheGuard; bats:
+// "deploy::apply refuses the keys-only output of a plain Secret".
+func TestApplyRefusesKeysOnlyOutput(t *testing.T) {
+	yq := filepath.Join(testutil.RepoRoot(t), ".bin", "yq")
+	if _, err := os.Stat(yq); err != nil {
+		if os.Getenv("CI") == "true" {
+			t.Fatalf("the pinned yq is missing under CI: %v", err)
+		}
+		t.Skip("no .bin/yq (b install)")
+	}
+	cmd := exec.Command(yq, "--yaml-fix-merge-anchor-to-spec", build.KeysOnlyBlankExpr, "-")
+	cmd.Stdin = strings.NewReader("apiVersion: v1\nkind: Secret\nmetadata:\n  name: only\n  namespace: one\n  labels:\n    lok8s.dev/type: platform\ndata:\n  PLAIN: cGxhaW4tdmFsdWU=\n")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("yq: %v", err)
+	}
+	for _, filtered := range []bool{false, true} {
+		f := &fakeRunner{}
+		d, _, errBuf, _ := newDeployer(t, f, string(out))
+		if filtered {
+			err = d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "platform")
+		} else {
+			err = d.Apply(t.Context(), "test.lok8s.dev")
+		}
+		if !errors.Is(err, ErrHandled) {
+			t.Fatalf("filtered=%v: err = %v\n%s", filtered, err, out)
+		}
+		if !strings.Contains(errBuf.String(), "holds a keys-only Secret (secrets.lok8s.dev/keys-only)") {
+			t.Errorf("filtered=%v: stderr = %q", filtered, errBuf.String())
+		}
+		if len(f.calls) != 0 {
+			t.Errorf("filtered=%v: kubectl must not run: %v", filtered, f.calls)
+		}
+	}
+}
+
+// bats: "deploy::apply and deploy::apply_filtered apply the copy that passed the check"
+// lo deploy reads the artifact once, checks that copy and applies that copy,
+// on both routes. The artifact here is a FIFO: the one read that it serves
+// gets the clean artifact, and before that read ends the path is replaced
+// by a keys-only artifact. A second read of the path (for the apply) would
+// get the keys-only artifact, which must never reach kubectl.
+func TestApplyAppliesTheCopyThatPassedTheCheck(t *testing.T) {
+	for _, filtered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("filtered=%v", filtered), func(t *testing.T) {
+			f := &fakeRunner{}
+			d, _, errBuf, domainDir := newDeployer(t, f, "")
+			artifact := filepath.Join(domainDir, "artifacts.yaml")
+			if err := syscall.Mkfifo(artifact, 0o600); err != nil {
+				t.Skipf("mkfifo: %v", err)
+			}
+			swapped := filepath.Join(domainDir, "swapped.yaml")
+			if err := os.WriteFile(swapped, []byte(keysOnlyArtifact), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			served := make(chan error, 1)
+			go func() {
+				// The open waits for the read of lo deploy.
+				w, err := os.OpenFile(artifact, os.O_WRONLY, 0)
+				if err != nil {
+					served <- err
+					return
+				}
+				// The path now holds the keys-only artifact; the open read
+				// still gets the clean one.
+				err = os.Rename(swapped, artifact)
+				if err == nil {
+					_, err = w.WriteString(artifactYAML)
+				}
+				if cerr := w.Close(); err == nil {
+					err = cerr
+				}
+				served <- err
+			}()
+			var err error
+			if filtered {
+				err = d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "platform")
+			} else {
+				err = d.Apply(t.Context(), "test.lok8s.dev")
+			}
+			select {
+			case serr := <-served:
+				if serr != nil {
+					t.Fatal(serr)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("lo deploy did not read the artifact")
+			}
+			if err != nil {
+				t.Fatalf("err = %v, stderr = %q", err, errBuf.String())
+			}
+			if len(f.applied) == 0 {
+				t.Fatalf("nothing applied: calls = %v", f.calls)
+			}
+			for _, m := range f.applied {
+				if strings.Contains(m, "keys-only") {
+					t.Errorf("applied a manifest that was not checked: %q", m)
+				}
+			}
+			last := f.applied[len(f.applied)-1]
+			if filtered {
+				if !strings.Contains(last, "name: test-app") || strings.Contains(last, "kind: Namespace") {
+					t.Errorf("subset manifest = %q", last)
+				}
+			} else if last != artifactYAML {
+				t.Errorf("phase-2 manifest = %q, want the checked copy", last)
+			}
+		})
+	}
+}
+
+// bats: "deploy::apply and deploy::apply_filtered refuse a keys-only artifact"
+// An artifact with the keys-only marker (a quoted key too: the check parses
+// the file) is never applied, filtered or not; neither is one that does not
+// parse, nor one that cannot be read (its own message: it is not a parse
+// error). kubectl does not run.
+func TestApplyRefusesAKeysOnlyArtifact(t *testing.T) {
+	for _, tc := range []struct {
+		name, artifact, want string
+		unreadable           bool
+	}{
+		{"marker", keysOnlyArtifact, "holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one — run 'lo build' again\n", false},
+		{"no YAML", "kind: ConfigMap\nmetadata: [a\n", "does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)\n", false},
+		{"unreadable", "kind: ConfigMap\n", "cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)\n", true},
+	} {
+		for _, filtered := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/filtered=%v", tc.name, filtered), func(t *testing.T) {
+				f := &fakeRunner{}
+				d, _, errBuf, domainDir := newDeployer(t, f, tc.artifact)
+				if tc.unreadable {
+					if os.Geteuid() == 0 {
+						t.Skip("root reads a file without read permission")
+					}
+					if err := os.Chmod(filepath.Join(domainDir, "artifacts.yaml"), 0); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var err error
+				if filtered {
+					err = d.ApplyFiltered(t.Context(), "test.lok8s.dev", "lok8s.dev/type", "platform")
+				} else {
+					err = d.Apply(t.Context(), "test.lok8s.dev")
+				}
+				if !errors.Is(err, ErrHandled) {
+					t.Fatalf("err = %v", err)
+				}
+				want := "[error] refusing to apply test.lok8s.dev: " + filepath.Join(domainDir, "artifacts.yaml") + " " + tc.want
+				if errBuf.String() != want {
+					t.Errorf("stderr = %q\nwant %q", errBuf.String(), want)
+				}
+				if len(f.calls) != 0 {
+					t.Errorf("kubectl must not run: %v", f.calls)
+				}
+			})
 		}
 	}
 }

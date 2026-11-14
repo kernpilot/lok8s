@@ -176,3 +176,80 @@ func TestDecodeNodeStrict_UnknownField(t *testing.T) {
 		t.Errorf("error should mention bar: %q", err.Error())
 	}
 }
+
+// TestDecodeStrictBytes_TypeErrorWithoutValue: yaml.v3 quotes the input
+// value in a type error (all of it up to 10 characters, else the first 7).
+// The decode error names the tag and keeps the line, not the value.
+func TestDecodeStrictBytes_TypeErrorWithoutValue(t *testing.T) {
+	for in, want := range map[string]string{
+		"age: Zq7pw\n":                  "cannot unmarshal !!str value into int",
+		"age: Zq7-a-long-value\n":       "cannot unmarshal !!str value into int",
+		"age: \"Zq7\\nabc\"\n":          "cannot unmarshal !!str value into int",
+		"age: \"Zq7`x\"\n":              "cannot unmarshal !!str value into int",
+		"age: Zq7pw\nname: [Zq7a]\n":    "cannot unmarshal !!str value into int",
+		"age: !!int Zq7-actual-value\n": "cannot decode !!str value as a !!int",
+	} {
+		var s sample
+		err := DecodeStrictBytes([]byte(in), &s)
+		var e *errs.Error
+		if !errors.As(err, &e) {
+			t.Fatalf("%q: want an *errs.Error, got %v", in, err)
+		}
+		if strings.Contains(err.Error(), "Zq7") || e.Msg != want {
+			t.Errorf("%q: error %q, want %q", in, err, want)
+		}
+	}
+}
+
+// TestDecodeNodeStrict_ErrorWithoutValue: an error of a custom decoder
+// (an *errs.Error, also one that wraps a yaml.v3 error) loses the value
+// too, and gets the position of the node.
+func TestDecodeNodeStrict_ErrorWithoutValue(t *testing.T) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte("x:\n  age: Zq7pw\n"), &doc); err != nil {
+		t.Fatal(err)
+	}
+	node := doc.Content[0].Content[1]
+	var s sample
+	err := DecodeNodeStrict(node, &s)
+	if err == nil || strings.Contains(err.Error(), "Zq7") {
+		t.Errorf("node decode: error %v", err)
+	}
+	// Each case makes a new error: the wrappers change the error in place.
+	inner := "yaml: line 1: cannot unmarshal !!str `Zq7pw` into int"
+	for name, custom := range map[string]func() error{
+		"message": func() error { return &errs.Error{Msg: inner} },
+		"wrapped": func() error { return errs.Wrap("age", errors.New(inner)) },
+	} {
+		got := wrapNodeErr(node, custom())
+		if strings.Contains(got.Error(), "Zq7") || !strings.Contains(got.Error(), "cannot unmarshal !!str value into int") {
+			t.Errorf("wrapNodeErr, %s: %q", name, got)
+		}
+		if ge, ok := errors.AsType[*errs.Error](got); !ok || ge.Line != node.Line || ge.Col != node.Column {
+			t.Errorf("wrapNodeErr, %s: error %#v, want the position %d:%d", name, got, node.Line, node.Column)
+		}
+		if got := wrapDecodeErr(custom()); strings.Contains(got.Error(), "Zq7") || !strings.Contains(got.Error(), "cannot unmarshal !!str value into int") {
+			t.Errorf("wrapDecodeErr, %s: %q", name, got)
+		}
+	}
+}
+
+// TestRedactValue: only the quoted values go, in both forms in which
+// yaml.v3 quotes one.
+func TestRedactValue(t *testing.T) {
+	for in, want := range map[string]string{
+		"cannot unmarshal !!str `hunter2` into int":                                        "cannot unmarshal !!str value into int",
+		"cannot unmarshal !!str `hunter2...` into bool":                                    "cannot unmarshal !!str value into bool",
+		"cannot unmarshal !!str `hu\nter2` into int":                                       "cannot unmarshal !!str value into int",
+		"cannot unmarshal !!str `hu`ter2` into int":                                        "cannot unmarshal !!str value into int",
+		"unmarshal errors:\n  line 1: cannot unmarshal !!str `a\nb` into int\n  line 2: x": "unmarshal errors:\n  line 1: cannot unmarshal !!str value into int\n  line 2: x",
+		"cannot decode !!str `hunter2` as a !!int":                                         "cannot decode !!str value as a !!int",
+		"cannot decode !!str `a long value with ` and\n a newline` as a !!float":           "cannot decode !!str value as a !!float",
+		"cannot unmarshal !!map into string":                                               "cannot unmarshal !!map into string",
+		"field email not found in type kyaml.sample":                                       "field email not found in type kyaml.sample",
+	} {
+		if got := RedactValue(in); got != want {
+			t.Errorf("RedactValue(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

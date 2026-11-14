@@ -15,7 +15,11 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 )
+
+// keysOff is the pin every render without Options.KeysOnly writes.
+const keysOff = secret.KeysOnlyEnv + "=0"
 
 func TestMain(m *testing.M) {
 	// lo-full: the self-exec plugin home points at THIS binary — when
@@ -118,7 +122,9 @@ func TestBuildExecModeUsesRunnerAndDefaultsPluginHome(t *testing.T) {
 	if r.cmd.Name != "kustomize" || strings.Join(r.cmd.Args, " ") != "build --enable-alpha-plugins --enable-exec /some/dir" {
 		t.Fatalf("argv = %s %v", r.cmd.Name, r.cmd.Args)
 	}
-	wantEnv := []string{"KHELM_TRUST_ANY_REPO=true", "KUSTOMIZE_PLUGIN_HOME=" + filepath.Join(base, ".kustomize")}
+	// Every render pins the Secret plugin's keys-only setting (0 unless
+	// Options.KeysOnly), after the caller's overlay.
+	wantEnv := []string{"KHELM_TRUST_ANY_REPO=true", keysOff, "KUSTOMIZE_PLUGIN_HOME=" + filepath.Join(base, ".kustomize")}
 	if strings.Join(r.cmd.Env, "\n") != strings.Join(wantEnv, "\n") {
 		t.Fatalf("env = %v, want %v", r.cmd.Env, wantEnv)
 	}
@@ -129,7 +135,7 @@ func TestBuildExecModeUsesRunnerAndDefaultsPluginHome(t *testing.T) {
 	if _, err := Build(t.Context(), "/some/dir", Options{Paths: p, Runner: r}); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(r.cmd.Env, "\n") != "KUSTOMIZE_PLUGIN_HOME=/elsewhere/plugins" {
+	if strings.Join(r.cmd.Env, "\n") != keysOff+"\nKUSTOMIZE_PLUGIN_HOME=/elsewhere/plugins" {
 		t.Fatalf("env with the variable exported = %v", r.cmd.Env)
 	}
 
@@ -138,7 +144,7 @@ func TestBuildExecModeUsesRunnerAndDefaultsPluginHome(t *testing.T) {
 	if _, err := Build(t.Context(), "/some/dir", Options{Paths: p, Runner: r, Env: []string{"KUSTOMIZE_PLUGIN_HOME=/overlay"}}); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(r.cmd.Env, "\n") != "KUSTOMIZE_PLUGIN_HOME=/overlay" {
+	if strings.Join(r.cmd.Env, "\n") != "KUSTOMIZE_PLUGIN_HOME=/overlay\n"+keysOff {
 		t.Fatalf("env with the key in the overlay = %v", r.cmd.Env)
 	}
 	t.Setenv("KUSTOMIZE_PLUGIN_HOME", "")
@@ -150,7 +156,7 @@ func TestBuildExecModeUsesRunnerAndDefaultsPluginHome(t *testing.T) {
 	if _, err := Build(t.Context(), "/d", Options{Runner: r}); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.cmd.Env) != 0 || strings.Join(r.cmd.Args, " ") != "build --enable-alpha-plugins /d" {
+	if strings.Join(r.cmd.Env, "\n") != keysOff || strings.Join(r.cmd.Args, " ") != "build --enable-alpha-plugins /d" {
 		t.Fatalf("addon-shape exec: args=%v env=%v", r.cmd.Args, r.cmd.Env)
 	}
 
@@ -161,6 +167,57 @@ func TestBuildExecModeUsesRunnerAndDefaultsPluginHome(t *testing.T) {
 	}
 	if strings.Join(r.cmd.Args, " ") != "build --enable-alpha-plugins --load-restrictor LoadRestrictionsNone /d" {
 		t.Fatalf("load-restrictor argv: %v", r.cmd.Args)
+	}
+}
+
+// PinKeysOnly drops every keys-only entry of the overlay and appends the
+// one value the render wants; the other entries keep their order.
+func TestPinKeysOnly(t *testing.T) {
+	in := []string{"A=1", secret.KeysOnlyEnv + "=1", "B=2", secret.KeysOnlyEnv + "=true", secret.KeysOnlyEnv}
+	for _, tc := range []struct {
+		on   bool
+		want string
+	}{{false, "A=1\nB=2\n" + keysOff}, {true, "A=1\nB=2\n" + secret.KeysOnlyEnv + "=1"}} {
+		got := PinKeysOnly(append([]string(nil), in...), tc.on)
+		if strings.Join(got, "\n") != tc.want {
+			t.Errorf("PinKeysOnly(on=%v) = %q, want %q", tc.on, got, tc.want)
+		}
+	}
+	if got := PinKeysOnly(nil, false); strings.Join(got, "\n") != keysOff {
+		t.Errorf("PinKeysOnly(nil) = %q", got)
+	}
+}
+
+// The exec render pins the keys-only setting on the kustomize child: an
+// inherited 1 and a 1 in the caller's overlay both lose to 0 unless the
+// render itself asks for keys-only (only `lo build --keys-only` does).
+func TestBuildExecPinsKeysOnly(t *testing.T) {
+	t.Setenv(ModeEnv, "exec")
+	t.Setenv(secret.KeysOnlyEnv, "1")
+	t.Setenv(secret.DisableEnv, "1")
+	for _, tc := range []struct {
+		name string
+		opts Options
+		want string
+	}{
+		{"inherited", Options{}, "0"},
+		{"overlay", Options{Env: []string{secret.KeysOnlyEnv + "=1"}}, "0"},
+		{"keys-only render", Options{KeysOnly: true, Env: []string{secret.KeysOnlyEnv + "=0"}}, "1"},
+	} {
+		r := &recordingRunner{}
+		tc.opts.Runner = r
+		if _, err := Build(t.Context(), "/d", tc.opts); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		var vals []string
+		for _, kv := range r.cmd.Env {
+			if v, ok := strings.CutPrefix(kv, secret.KeysOnlyEnv+"="); ok {
+				vals = append(vals, v)
+			}
+		}
+		if strings.Join(vals, ",") != tc.want {
+			t.Errorf("%s: child %s values %q, want exactly %q", tc.name, secret.KeysOnlyEnv, vals, tc.want)
+		}
 	}
 }
 

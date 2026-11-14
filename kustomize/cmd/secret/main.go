@@ -15,6 +15,11 @@
 //   - LOK8S_SECRETS_OUTPUT=none — run the full pipeline (store reads/mints
 //     and validation intact) but suppress the emit write.
 //
+// One more variable is internal to lo, never a user setting:
+// LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1 together with LOK8S_SECRETS_DISABLE=1
+// emits each key with an empty value and reads nothing but the spec (`lo
+// build --keys-only`). Without DISABLE it is an error.
+//
 // See ../../plugins/secret for the plugin assembly and
 // ../../pkg/plugin for the runtime contract.
 package main
@@ -43,7 +48,9 @@ func main() {
 	// line. `lo bootstrap --dry-run` requires "dry-run" before it renders
 	// (the plugin reads the store, generates in memory, never writes); an
 	// older build reads the flag as a config path and fails, so lo refuses
-	// it rather than let it write the secrets store.
+	// it rather than let it write the secrets store. `lo build --keys-only`
+	// requires "keys-only" in the exec pipeline: an older build does not
+	// know the keys-only setting.
 	if len(os.Args) == 2 && os.Args[1] == "--capabilities" {
 		fmt.Println(secret.Capabilities)
 		return

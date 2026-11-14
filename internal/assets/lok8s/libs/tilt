@@ -8,6 +8,7 @@ import ^utils/types
 import ^utils/verbose
 import ^utils/domain
 import ^utils/kapply
+import ^utils/keysonly
 
 main::tilt() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
@@ -21,7 +22,7 @@ main::tilt() {
     'down|d@destructive'     'Spin down tilt'
     'status|s@readonly'      'Check tilt status'
     'restart|r@destructive'  'Restart tilt'
-    'preflight@destructive'  'Force-clear stuck-Terminating objects in the manifest on stdin'
+    'preflight@destructive'  'Refuse a keys-only Secret, then force-clear stuck-Terminating objects in the manifest on stdin'
   )
   :usage "Manage tilt environment" "${@}"
   "${usage[@]}"
@@ -220,6 +221,8 @@ tilt::preflight_config() {
 #     unless flags override — see kapply::_preflight_crd for the semantics.
 # Always exits 0 — a preflight must never brick the `tilt up` it protects.
 tilt::preflight() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   local age crds crd_allow
   local -a args=(
     'age|a'      'Only clear objects terminating longer than this many seconds (default 30)'
@@ -227,9 +230,16 @@ tilt::preflight() {
     'crd-allow|' 'Comma-separated CRD names the force policy may strip (empty = all)'
     "${args[@]:-}"
   )
-  :args "Force-clear stuck-Terminating manifest objects (manifest on stdin)" "${@}"
+  :args "Refuse a keys-only Secret, then force-clear stuck-Terminating manifest objects (manifest on stdin)" "${@}"
+  # The apply guard first, with every switch below (Go: Context.Preflight):
+  # a manifest with a keys-only Secret is refused, and the refusal fails
+  # the Tiltfile load before any k8s_yaml. A manifest that cannot be read
+  # from stdin, or does not parse, is refused too. kapply::preflight reads
+  # the checked manifest from the variable after that, through a pipe.
+  local manifest
+  manifest="$(keysonly::read_checked_file preflight "the Tilt manifest" - && printf .)" || return 1
+  manifest="${manifest%.}"
   if [[ "${LOK8S_PREFLIGHT:-1}" =~ ^(0|false)$ ]]; then
-    cat >/dev/null
     return 0
   fi
   local resolved driver
@@ -237,14 +247,12 @@ tilt::preflight() {
   driver=$(domain::driver "${resolved}") || driver=""
   if [[ "${driver}" != "lo" && -z "${LOK8S_FORCE_CLEAR_TERMINATING:-}" ]]; then
     warn "preflight: '${resolved}' uses the '${driver:-unknown}' driver — not force-clearing stuck objects on a non-kind cluster (set LOK8S_FORCE_CLEAR_TERMINATING=1 to override)"
-    cat >/dev/null
     return 0
   fi
 
   local enabled spec_age spec_crds spec_allow
   IFS=$'\t' read -r enabled spec_age spec_crds spec_allow < <(tilt::preflight_config "${resolved}")
   if [[ "${enabled}" =~ ^(false|0)$ ]]; then
-    cat >/dev/null
     return 0
   fi
 
@@ -260,7 +268,7 @@ tilt::preflight() {
   [[ -n "${age}" ]] && sweep+=(--age "${age}")
   [[ -n "${crds}" ]] && sweep+=(--crds "${crds}")
   [[ -n "${crd_allow}" ]] && sweep+=(--crd-allow "${crd_allow}")
-  kapply::preflight "${sweep[@]}"
+  printf '%s' "${manifest}" | kapply::preflight "${sweep[@]}"
 }
 
 [[ "${0}" != "${BASH_SOURCE[0]}" && "${ARGSH_SOURCE:-}" != "${BASH_SOURCE[0]}" ]] || main::tilt "${@}"

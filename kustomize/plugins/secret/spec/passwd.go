@@ -44,10 +44,10 @@ func (p *PasswdEntry) UnmarshalYAML(node *yaml.Node) error {
 	case yaml.ScalarNode:
 		var n int
 		if err := node.Decode(&n); err != nil {
-			return kyaml.NodeErrf(node, "passwd shorthand must be an integer length, got %q", node.Value)
+			return kyaml.NodeErrf(node, "passwd shorthand must be an integer length, got a %s value", node.ShortTag())
 		}
 		if n <= 0 {
-			return kyaml.NodeErrf(node, "passwd length must be > 0, got %d", n)
+			return kyaml.NodeErrf(node, "passwd length must be > 0")
 		}
 		p.Length = n
 		return nil
@@ -58,7 +58,7 @@ func (p *PasswdEntry) UnmarshalYAML(node *yaml.Node) error {
 		}
 		*p = PasswdEntry(raw)
 		if p.Length < 0 {
-			return kyaml.NodeErrf(node, "passwd length must be >= 0, got %d", p.Length)
+			return kyaml.NodeErrf(node, "passwd length must be >= 0")
 		}
 		for _, r := range p.Require {
 			if _, err := charset.ParseClass(r); err != nil {

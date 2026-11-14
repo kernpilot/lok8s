@@ -631,6 +631,7 @@ cat > "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret/Secret" <<'SH'
 if [[ "${1:-}" == "--capabilities" ]]; then echo dry-run; exit 0; fi
 [[ -t 0 ]] || cat >/dev/null
 echo "PATH_SECRETS=${PATH_SECRETS:-<unset>}" >> "${PARITY_PLUGIN_LOG}"
+echo "KEYS_ONLY=${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}" >> "${PARITY_PLUGIN_LOG}"
 printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: registries-tls\n  namespace: lok8s-system\ntype: kubernetes.io/tls\ndata:\n  tls.crt: RkFLRUNSVA==\n  tls.key: RkFLRUtFWQ==\n'
 SH
 chmod +x "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret/Secret"
@@ -666,6 +667,9 @@ exit 0
 SH
 export PARITY_DOCKER_LOG="${WORK}/docker.log" PARITY_PLUGIN_LOG="${WORK}/plugin.log"
 export CAROOT="${WORK}/caroot"
+# The Secret plugin's keys-only setting is internal to `lo build --keys-only`.
+# Exported here as 1, it must reach the mint as 0 on both sides.
+export LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1
 tls_pre() {
   reset_fixtures
   rm -rf "${PROJ}/.secrets" "${PROJ}/clusters/mint.dev/.registries.json"
@@ -702,6 +706,8 @@ tls_absent() {  # <label> <file> <regex>
 }
 for side in bash go; do
   tls_pin    "${side}: plugin store = a scratch under the domain dir"  "${WORK}/plugin.${side}.log" "^PATH_SECRETS=PROJ/clusters/mint\.dev/\.registry-tls-tmp\.X$"
+  tls_pin    "${side}: the mint pins the keys-only setting to 0"       "${WORK}/plugin.${side}.log" "^KEYS_ONLY=0$"
+  tls_absent "${side}: no other keys-only value reaches the mint"      "${WORK}/plugin.${side}.log" "^KEYS_ONLY=[^0]"
   tls_pin    "${side}: the volume is created"                          "${WORK}/docker.${side}.log" "^docker volume create mintnet-registry-tls$"
   tls_pin    "${side}: volume populated through the io container"      "${WORK}/docker.${side}.log" "^docker container create --name mintnet-registry-tls-io --volume mintnet-registry-tls:/etc/registry/certs registry:2\.8\.3$"
   tls_pin    "${side}: tls.key copied into the volume"                 "${WORK}/docker.${side}.log" "^docker cp PROJ/clusters/mint\.dev/\.registry-tls-tmp\.X/tls\.key mintnet-registry-tls-io:/etc/registry/certs/tls\.key$"
@@ -771,7 +777,7 @@ tls_check - registry tls renew --domain mint.dev
 parity::state_same "${WORK}/docker.bash.log" "${WORK}/docker.go.log" "docker argv of lo registry tls renew" || failures=$((failures + 1))
 tls_check - registry tls renew --domain alpha.dev         # tls: false, refuses
 check_parse registry tls bogus
-unset CAROOT PARITY_DOCKER_LOG PARITY_PLUGIN_LOG
+unset CAROOT PARITY_DOCKER_LOG PARITY_PLUGIN_LOG LOK8S_INTERNAL_SECRETS_KEYS_ONLY
 
 # ── lo bootstrap — the render's plugin home ──────────────────────────────────
 # A shell that exports only PATH (KUSTOMIZE_PLUGIN_HOME is unset above): the
@@ -803,6 +809,12 @@ parity::stub "${PROJ}" kustomize <<'SH'
 # Parity stub kustomize: log the plugin home the render handed over, then
 # fail the build (the case stops at the render).
 echo "KUSTOMIZE_PLUGIN_HOME=${KUSTOMIZE_PLUGIN_HOME:-<unset>}" >> "${PARITY_KUSTOMIZE_LOG}"
+echo "KEYS_ONLY=${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}" >> "${PARITY_KUSTOMIZE_LOG}"
+# PARITY_KUSTOMIZE_OUT: the render to emit instead (the keys-only guard case).
+if [[ -n "${PARITY_KUSTOMIZE_OUT:-}" ]]; then
+  printf '%s\n' "${PARITY_KUSTOMIZE_OUT}"
+  exit 0
+fi
 echo "Error: parity stub: no render" >&2
 exit 1
 SH
@@ -816,10 +828,14 @@ boot_post() {  # <impl>: keep the log per side (normalized)
     : > "${WORK}/kustomize.${1}.log"
   fi
 }
-PARITY_PRE_EACH=boot_pre PARITY_POST_EACH=boot_post check - bootstrap --domain boot.dev
+# The Secret plugin's keys-only setting, exported as 1, reaches the addon
+# render as 0 on both sides.
+LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1 PARITY_PRE_EACH=boot_pre PARITY_POST_EACH=boot_post check - bootstrap --domain boot.dev
 parity::state_same "${WORK}/kustomize.bash.log" "${WORK}/kustomize.go.log" "plugin home of the bootstrap render" || failures=$((failures + 1))
 for side in bash go; do
   tls_pin "${side}: the render's kustomize child has the project plugin home" "${WORK}/kustomize.${side}.log" "^KUSTOMIZE_PLUGIN_HOME=PROJ/\.kustomize$"
+  tls_pin "${side}: the addon render pins the keys-only setting to 0" "${WORK}/kustomize.${side}.log" "^KEYS_ONLY=0$"
+  tls_absent "${side}: no other keys-only value reaches the addon render" "${WORK}/kustomize.${side}.log" "^KEYS_ONLY=[^0]"
 done
 
 # ── lo bootstrap — a domain without its own secrets store ────────────────────
@@ -842,6 +858,107 @@ else
   fail "go: no bootstrap refusal for a domain without a store"
 fi
 rm -rf "${PROJ}/clusters/storeholder.dev"
+
+# ── lo bootstrap — the keys-only apply guard ─────────────────────────────────
+# An entry render with a keys-only Secret (lo build --keys-only output) is
+# refused before its apply. A restore.d store working copy with one is
+# refused before its apply too, and does not fall back to the .sops.yaml
+# file. Both sides print the same refusal; a kubectl that logs its argv
+# shows that nothing is applied.
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub: log the argv, drain a manifest on stdin, fail (no live
+# cluster may be reached).
+echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
+[[ " $* " != *" -f - "* ]] || cat > /dev/null
+exit 1
+SH
+export PARITY_KUBECTL_LOG="${WORK}/kubectl.log"
+ko_marked='apiVersion: v1
+kind: Secret
+metadata:
+  name: app
+  annotations:
+    secrets.lok8s.dev/keys-only: "true"
+data:
+  PASSWORD: ""'
+ko_pre() { boot_pre; rm -f "${PARITY_KUBECTL_LOG}"; }
+ko_post() {  # <impl>: boot_post, and the kubectl log (and stdin) per side
+  boot_post "${1}"
+  if [[ -f "${PARITY_KUBECTL_LOG}" ]]; then mv "${PARITY_KUBECTL_LOG}" "${WORK}/kubectl.${1}.log"; else : > "${WORK}/kubectl.${1}.log"; fi
+  rm -f "${WORK}/kubectl.${1}.stdin"
+  [[ ! -f "${PARITY_KUBECTL_LOG}.stdin" ]] || mv "${PARITY_KUBECTL_LOG}.stdin" "${WORK}/kubectl.${1}.stdin"
+}
+# ko_case <label> <want>: the last bootstrap pair refused with <want> (rc 1
+# on both sides; an entry's lines go to stdout in its collapsed block, the
+# restore.d lines to stderr) and applied nothing.
+ko_case() {
+  local ok=1 side
+  # shellcheck disable=SC2154 # go_rc, bash_rc: set by parity::run_pair (hack/lib/parity.sh)
+  if (( go_rc != 1 || bash_rc != 1 )) || ! grep -qF -- "${2}" "${WORK}/go.out" "${WORK}/go.err"; then
+    echo "FAIL: ${1} — rc go=${go_rc} bash=${bash_rc}, stdout and stderr:"; sed 's/^/  /' "${WORK}/go.out" "${WORK}/go.err"
+    ok=0
+  fi
+  for side in bash go; do
+    if grep -q ' apply ' "${WORK}/kubectl.${side}.log"; then
+      echo "FAIL: ${1} — ${side}: kubectl apply ran:"; sed 's/^/  /' "${WORK}/kubectl.${side}.log"
+      ok=0
+    fi
+  done
+  parity::record "${ok}" "${1}"
+}
+mkdir -p "${PROJ}/clusters/boot.dev/secrets"
+PARITY_KUSTOMIZE_OUT="${ko_marked}" PARITY_PRE_EACH=ko_pre PARITY_POST_EACH=ko_post check - bootstrap --domain boot.dev
+ko_case "lo bootstrap refuses an entry render with a keys-only Secret" \
+  "[error] bootstrap: refusing to apply cilium: it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one"
+mkdir -p "${PROJ}/clusters/boot.dev/restore.d" "${PROJ}/clusters/boot.dev/secrets/restore.d"
+printf 'cipher\n' > "${PROJ}/clusters/boot.dev/restore.d/tls-a.sops.yaml"
+printf '%s\n' "${ko_marked}" > "${PROJ}/clusters/boot.dev/secrets/restore.d/tls-a.yaml"
+PARITY_PRE_EACH=ko_pre PARITY_POST_EACH=ko_post check - bootstrap --domain boot.dev
+ko_case "lo bootstrap refuses a restore.d working copy with a keys-only Secret" \
+  "[error] bootstrap: restore.d: refusing to apply tls-a (store working copy): it holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one"
+if grep -qF "lo does not fall back to tls-a.sops.yaml" "${WORK}/go.err" && ! grep -qF "could not decrypt/apply tls-a" "${WORK}/go.err"; then
+  echo "ok: go: the refused working copy does not fall back to the sops file"
+else
+  fail "go: the refused working copy fell back to the sops file, or no warning names it"
+fi
+# A working copy that does not parse falls back to the .sops.yaml file, as
+# a failed apply does (lo checks the decrypted manifest too). The fixture
+# does not decrypt, so both sides warn and skip it. The entry render is
+# refused, so the run ends with rc 1 before any apply of an entry.
+printf 'kind: [Secret\n' > "${PROJ}/clusters/boot.dev/secrets/restore.d/tls-a.yaml"
+PARITY_KUSTOMIZE_OUT="${ko_marked}" PARITY_PRE_EACH=ko_pre PARITY_POST_EACH=ko_post check - bootstrap --domain boot.dev
+if grep -qF "bootstrap: restore.d: tls-a (store working copy) does not parse as YAML; lo uses tls-a.sops.yaml" "${WORK}/go.err" \
+    && grep -qF "could not decrypt/apply tls-a" "${WORK}/go.err"; then
+  echo "ok: go: a working copy that does not parse falls back to the sops file"
+else
+  fail "go: a working copy that does not parse did not fall back to the sops file"
+fi
+# The working copy reaches kubectl byte for byte: its last literal scalar
+# (|+) ends in several newlines. A kubectl that applies, and keeps what it
+# gets on stdin, per side.
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub: log the argv, keep a manifest on stdin, apply (exit 0).
+echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
+[[ " $* " != *" -f - "* ]] || cat >> "${PARITY_KUBECTL_LOG}.stdin"
+exit 0
+SH
+printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls-a\nstringData:\n  tls.crt: |+\n    cert\n\n\n' \
+  > "${PROJ}/clusters/boot.dev/secrets/restore.d/tls-a.yaml"
+PARITY_KUSTOMIZE_OUT="${ko_marked}" PARITY_PRE_EACH=ko_pre PARITY_POST_EACH=ko_post check - bootstrap --domain boot.dev
+ko_exact=1
+for ko_side in bash go; do
+  if ! cmp -s "${PROJ}/clusters/boot.dev/secrets/restore.d/tls-a.yaml" "${WORK}/kubectl.${ko_side}.stdin"; then
+    echo "FAIL: ${ko_side}: kubectl did not get the restore.d working copy byte for byte:"
+    od -c "${WORK}/kubectl.${ko_side}.stdin" 2>&1 | tail -n 4 | sed 's/^/  /'
+    ko_exact=0
+  fi
+done
+parity::record "${ko_exact}" "lo bootstrap applies the restore.d working copy byte for byte"
+rm -rf "${PROJ}/clusters/boot.dev/restore.d" "${PROJ}/clusters/boot.dev/secrets"
+unset PARITY_KUBECTL_LOG
+parity::stub_kubectl_fail "${PROJ}"
 unset PARITY_KUSTOMIZE_LOG
 
 # ── lo bootstrap — the staged values, byte for byte ──────────────────────────

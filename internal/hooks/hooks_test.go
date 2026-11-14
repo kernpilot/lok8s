@@ -429,6 +429,78 @@ metadata:
 	}
 }
 
+// bats: "hooks recreate, apply and restart refuse a keys-only artifact".
+// The hooks read the domain artifact through the apply guard of lo deploy:
+// an artifact with a keys-only Secret (lo build --keys-only output) is
+// refused before anything runs, for each verb, even when the selector
+// matches only other objects. So is one that does not parse.
+func TestHooksRefuseAKeysOnlyArtifact(t *testing.T) {
+	marked := twoJobs + "---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  annotations:\n    secrets.lok8s.dev/keys-only: \"true\"\ndata:\n  PASSWORD: \"\"\n"
+	for name, tc := range map[string]struct{ artifact, want string }{
+		"marker":  {marked, "holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one — run 'lo build' again\n"},
+		"no YAML": {"kind: Job\nmetadata: [a\n", "does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)\n"},
+	} {
+		for verb, run := range map[string]func(*Context) error{
+			"recreate": func(c *Context) error { return c.Recreate(t.Context(), "lok8s.dev/role=seed") },
+			"apply":    func(c *Context) error { return c.Apply(t.Context(), "lok8s.dev/role=seed") },
+			"restart":  func(c *Context) error { return c.Restart(t.Context(), "lok8s.dev/role=seed") },
+		} {
+			t.Run(name+"/"+verb, func(t *testing.T) {
+				c, runner, _, errOut := testCtx(t)
+				writeArtifact(t, c, tc.artifact)
+				if err := run(c); !errors.Is(err, ErrHandled) {
+					t.Fatalf("err = %v", err)
+				}
+				want := "[error] refusing to apply d.dev: " + filepath.Join(c.Paths.Clusters, "d.dev", "artifacts.yaml") + " " + tc.want
+				if errOut.String() != want {
+					t.Errorf("stderr = %q\nwant %q", errOut.String(), want)
+				}
+				if len(runner.calls) != 0 {
+					t.Errorf("a command ran: %v", runner.calls)
+				}
+			})
+		}
+	}
+}
+
+// bats: "recreate and apply keep the final newlines of a |+ value". The
+// objects reach kubectl delete and apply with each value as it is: the
+// last literal scalar (|+) of the artifact ends in several newlines, and
+// no newline is added.
+func TestHooksKeepALastKeepChompedValue(t *testing.T) {
+	const artifact = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n  labels:\n    run: cfg\ndata:\n  tail: |+\n    x\n\n\n"
+	for verb, run := range map[string]func(*Context) error{
+		"recreate": func(c *Context) error { return c.Recreate(t.Context(), "run=cfg") },
+		"apply":    func(c *Context) error { return c.Apply(t.Context(), "run=cfg") },
+	} {
+		t.Run(verb, func(t *testing.T) {
+			c, runner, _, _ := testCtx(t)
+			writeArtifact(t, c, artifact)
+			runner.handler = func(cmd execx.Cmd, _ string) error {
+				if cmd.Name == "tilt" || (cmd.Name == "kubectl" && cmd.Args[0] == "get") {
+					return &fakeExit{1} // no session, no live object
+				}
+				return nil
+			}
+			if err := run(c); err != nil {
+				t.Fatal(err)
+			}
+			n := 0
+			for i, call := range runner.calls {
+				if strings.HasSuffix(call, " -f -") {
+					n++
+					if runner.stdins[i] != artifact {
+						t.Errorf("%s: stdin = %q, want %q", call, runner.stdins[i], artifact)
+					}
+				}
+			}
+			if want := map[string]int{"recreate": 2, "apply": 1}[verb]; n != want {
+				t.Errorf("%d manifest(s) on stdin, want %d: %v", n, want, runner.calls)
+			}
+		})
+	}
+}
+
 func TestApplyNoDeleteJustKapply(t *testing.T) {
 	c, runner, _, _ := testCtx(t)
 	writeArtifact(t, c, twoJobs)

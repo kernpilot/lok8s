@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/testutil"
+	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 )
 
 // missingToolchain is how the byte-parity tests react to an absent pinned
@@ -285,6 +286,45 @@ func TestBuildEnvOverlayReachesPluginAndIsRestored(t *testing.T) {
 	}
 	if os.Getenv("RENDER_TEST_VALUE") != "parent" {
 		t.Fatalf("overlay not restored: RENDER_TEST_VALUE=%q", os.Getenv("RENDER_TEST_VALUE"))
+	}
+}
+
+// The keys-only pin reaches the self-exec plugin child through the
+// render's overlay: an inherited 1 is 0 there (with the store-free
+// switch the generator emits nothing), and only a keys-only render
+// (Options.KeysOnly) turns it on: every key with an empty value plus the
+// marker annotation, no value.
+func TestBuildInProcessPinsKeysOnly(t *testing.T) {
+	t.Setenv(ModeEnv, "")
+	t.Setenv("PATH_SECRETS", t.TempDir())
+	t.Setenv("RENDER_TEST_VALUE", "never-in-the-output")
+	t.Setenv(secret.KeysOnlyEnv, "1")
+	dir := secretFixture(t)
+	disable := []string{secret.DisableEnv + "=1"}
+
+	out, err := Build(t.Context(), dir, Options{Env: disable})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("an inherited keys-only setting reached the plugin:\n%s", out)
+	}
+	out, err = Build(t.Context(), dir, Options{Env: disable, KeysOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"kind: Secret", "name: app", secret.KeysOnlyAnnotation + `: "true"`, "USER: \"\"", "FROM_ENV: \"\""} {
+		if !strings.Contains(string(out), s) {
+			t.Errorf("keys-only render: missing %q in:\n%s", s, out)
+		}
+	}
+	for _, s := range []string{"YWxpY2U=", base64.StdEncoding.EncodeToString([]byte("never-in-the-output"))} {
+		if strings.Contains(string(out), s) {
+			t.Errorf("keys-only render carries a value %q:\n%s", s, out)
+		}
+	}
+	if v := os.Getenv(secret.KeysOnlyEnv); v != "1" {
+		t.Fatalf("the render did not restore the process value: %q", v)
 	}
 }
 

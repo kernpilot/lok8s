@@ -4,6 +4,12 @@
 
 load('ext://namespace', 'namespace_inject')
 
+# The Secret plugin's keys-only setting is internal to `lo build
+# --keys-only`. A value exported in the shell that started Tilt must not
+# reach a child of this extension (lo, kustomize, a plugin), so it is 0
+# for every process Tilt starts from here on (lo: the process start).
+os.putenv('LOK8S_INTERNAL_SECRETS_KEYS_ONLY', '0')
+
 # live_update function ordering
 _live_update_keys = ['fall_back_on', 'sync', 'run', 'restart_container']
 
@@ -816,6 +822,10 @@ def lok8s(
       sweep too) — stuck CRDs default to `drain`: instance finalizers
       are cleared so customresourcecleanup completes naturally; the CRD's
       own finalizer is only stripped under `force`. Default: True.
+      With preflight = False, `lo tilt preflight` still runs (with
+      LOK8S_PREFLIGHT=0) for its apply guard, which no setting turns off:
+      it refuses a manifest with a keys-only Secret (lo build --keys-only
+      output), and the refusal stops the load before any k8s_yaml.
   """
   if strict_unlabeled and apply_unlabeled:
     fail("lok8s(): strict_unlabeled and apply_unlabeled are mutually exclusive — pick one")
@@ -909,15 +919,21 @@ def lok8s(
 
   artifacts = local('kustomize build --load-restrictor=LoadRestrictionsNone %s' % _artifacts_dir, True, '', True, {})
 
-  # Preflight BEFORE any k8s_yaml: force-clear rendered objects stuck
-  # Terminating, or Tilt's apply retries "currently being deleted" until its
-  # upsert timeout and fails the build (the restart deadlock: a PVC held by
-  # pvc-protection while its replacement pod waits on that same PVC, a CNPG
-  # Database whose Cluster is gone, …). Runs on every Tiltfile execution, so
-  # mid-session reloads are covered too. Driver gating + kill switch live in
-  # `lo tilt preflight` — on a non-kind cluster it is a warn-and-skip no-op.
-  if preflight:
-    local('%s tilt preflight' % lo_bin, stdin = artifacts)
+  # Preflight BEFORE any k8s_yaml, on every Tiltfile execution (so
+  # mid-session reloads are covered too). First the apply guard, always:
+  # `lo tilt preflight` refuses a manifest with a keys-only Secret (lo build
+  # --keys-only output: key names and empty values only; applied, each value
+  # in the cluster would become empty), from the domain artifact or from a
+  # service overlay on it. The refusal fails this local() and so the load:
+  # no k8s_yaml below runs. Then the sweep: force-clear rendered objects
+  # stuck Terminating, or Tilt's apply retries "currently being deleted"
+  # until its upsert timeout and fails the build (the restart deadlock: a
+  # PVC held by pvc-protection while its replacement pod waits on that same
+  # PVC, a CNPG Database whose Cluster is gone, …). Driver gating + kill
+  # switch live in `lo tilt preflight` — on a non-kind cluster the sweep is
+  # a warn-and-skip no-op; preflight = False turns it off here with
+  # LOK8S_PREFLIGHT=0, and the guard still runs.
+  local('%s tilt preflight' % lo_bin, stdin = artifacts, env = {} if preflight else {'LOK8S_PREFLIGHT': '0'})
 
   # Apply infrastructure components (lok8s.dev/type: system).
   #

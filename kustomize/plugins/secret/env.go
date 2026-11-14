@@ -35,7 +35,43 @@ const (
 
 	// OutputNone is the sole recognized OutputEnv value.
 	OutputNone = "none"
+
+	// KeysOnlyEnv is an INTERNAL contract between lo and this plugin, not
+	// a user setting: lo sets it to 1 only for `lo build --keys-only` and
+	// to 0 for every other call, and nobody exports it. When it is on, and
+	// DisableEnv is on too, the plugin decodes the spec and emits the
+	// Secret with every key that the spec names and an empty value for
+	// each, plus the KeysOnlyAnnotation. It reads nothing but the spec: no
+	// store, no file, no environment variable, no script, no CA.
+	//
+	// On = "1" or "true", off = unset, "", "0" or "false" (case-insensitive,
+	// trimmed). Any other value is an error (a value of spaces only too),
+	// and on without DisableEnv on is an error: a typo or a missing
+	// DisableEnv never falls through to a run that reads the store.
+	KeysOnlyEnv = "LOK8S_INTERNAL_SECRETS_KEYS_ONLY"
+
+	// KeysOnlyAnnotation marks each Secret of a keys-only run. Its values
+	// are empty, so it must never be applied to a cluster.
+	KeysOnlyAnnotation = "secrets.lok8s.dev/keys-only"
 )
+
+// keysOnly reports whether KeysOnlyEnv is on. It fails closed: a value
+// that is not one of the on or off values is an error, a value of spaces
+// only too (like OutputEnv).
+func keysOnly(env func(string) (string, bool)) (bool, error) {
+	v, ok := env(KeysOnlyEnv)
+	if !ok || v == "" {
+		return false, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true":
+		return true, nil
+	case "0", "false":
+		return false, nil
+	default:
+		return false, errs.New(KeysOnlyEnv + `: unknown value ` + quote(v) + ` (want "1", "0" or unset)`)
+	}
+}
 
 // disabled reports whether the store-free OFF switch is set. Truthy values
 // are "1" and "true" (case-insensitive); everything else (incl. unset and
@@ -77,5 +113,7 @@ func quote(s string) string { return `"` + s + `"` }
 // Capabilities is what `Secret --capabilities` prints, one word per line:
 // "dry-run" means the plugin honours LOK8S_BOOTSTRAP_DRYRUN (it reads the
 // store, generates a missing value in memory, writes nothing and reports
-// what it generated to LOK8S_BOOTSTRAP_DRYRUN_REPORT).
-const Capabilities = "dry-run"
+// what it generated to LOK8S_BOOTSTRAP_DRYRUN_REPORT). "keys-only" means
+// the plugin has the keys-only run (KeysOnlyEnv with DisableEnv): `lo build
+// --keys-only` refuses a plugin without it in the exec pipeline.
+const Capabilities = "dry-run\nkeys-only"

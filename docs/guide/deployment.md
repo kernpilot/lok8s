@@ -132,6 +132,176 @@ Secret, and a pruning reconciler would then delete them from the cluster). A
 non-Secret resource dropped from the render is still pruned as usual.
 `--no-secrets` cannot be combined with `--single` (it shapes the split emit).
 
+### List the keys of the Secrets (`--keys-only`)
+
+`lo build --keys-only` prints the render of a domain to stdout. It prints no
+Secret value: each Secret in the final render shows its key names with
+empty values. This applies to every Secret, not only to the Secrets of the
+`secrets.lok8s.dev` generator: a plain Secret manifest, a kustomize
+`secretGenerator`, a Helm chart's Secret, a value that a patch adds, and a
+Secret in a `List`. In each Secret, lo also empties the values of the
+labels and annotations (the keys stay) and removes the comments. The build
+does not read, decrypt or mint a secrets
+store, so it needs no store and no age key. Use it to compare the keys that
+a generator makes with the keys that a consumer expects, for example in CI.
+
+```bash
+lo build --keys-only --domain example.com > keys.yaml
+```
+
+Each Secret in the output gets the annotation
+`secrets.lok8s.dev/keys-only: "true"`, so `lo build` and `lo deploy` refuse
+the output (see below). `--keys-only` empties Secrets only. Every other kind
+prints as it is rendered: a value in a `ConfigMap`, for example, prints. lo
+empties the values with `yq` after the kustomize build and
+the variable substitution, so the build needs the pinned `yq`. `yq` writes
+the stream: its layout (for example, the indent of lists) can be different
+from `artifacts.yaml`.
+
+The annotation `kubectl.kubernetes.io/last-applied-configuration`, which
+`kubectl apply` writes, can hold the values of a Secret. `lo build
+--keys-only` refuses a Secret that has this annotation: it prints an error
+that names each such Secret (`Secret <namespace>/<name>`), prints nothing to
+stdout and exits with an error. Remove the annotation from the source
+manifest.
+
+`--keys-only` prints no value, but it prints the hashes of values that the
+render already holds. For example, a kustomize `secretGenerator` Secret has
+a hash of its values in its name (`<name>-<hash>`), and a Helm chart can
+put a checksum of a Secret in an annotation of a pod template.
+
+`--keys-only` writes no file. It does not change `artifacts.yaml` or the split
+directory. You cannot use it with `--split` or `--single`.
+
+`--keys-only` does not print the stderr of the render (kustomize and its
+plugins) and of `yq`, because an error can quote an input value. When the
+render fails, `lo` prints one line that says so and exits with an error. To
+see the cause, run the build without `--keys-only`.
+
+Before the render, `lo` checks the installed Secret plugin: the plugin must
+have the keys-only run (`Secret --capabilities` prints the line
+`keys-only`). An older plugin does not know the keys-only setting, so `lo`
+stops with an error and renders nothing. Run `lo toolchain install` to
+install the plugin of your `lo`. `lo-full` renders with its own plugin and
+needs no check.
+
+The plugin home (`KUSTOMIZE_PLUGIN_HOME`, else `<project>/.kustomize`) must
+exist. kustomize uses the first plugin home that exists, and without the
+project's home it would load plugins from directories under
+`XDG_CONFIG_HOME` or `HOME` that `lo` does not check. `lo` gives kustomize
+the home that it checked. The Secret plugin
+(`secrets.lok8s.dev/v1/secret/Secret`) must be in the home too, also when the
+domain has no `secrets.lok8s.dev` Secret: without it, a kustomize that has Go
+plugin support would load a Go plugin (`Secret.so`) that `lo` cannot check.
+
+The check is a compatibility check. It is not isolation and not
+attestation: a plugin that prints `keys-only` but does not have the run, or
+a plugin file that is replaced after the check, gets through. Install the
+plugin of your `lo` from a source that you trust.
+
+`lo build` never writes an object with the `secrets.lok8s.dev/keys-only`
+annotation into `artifacts.yaml` or the split directory. These commands do
+not apply a manifest that holds one:
+
+- `lo deploy` and `lo hooks` (the hooks of the Tilt extension) refuse an
+  `artifacts.yaml` with the annotation, and one that they cannot read. Each
+  reads the artifact once and uses the copy that it checked: `lo deploy`
+  applies that copy (also the subset of `-l key=value`), and `lo hooks`
+  selects its objects from it. To select the CRDs and the subset of `-l`,
+  `lo deploy` splits the copy at its `---` lines. It stops with an error
+  on a `---` line with more text on it (`--- # note`), which kustomize
+  does not write. The bash implementation reads such a line as a
+  separator.
+- The bootstrap (`lo up`, `lo provision`, `lo bootstrap`) refuses an entry
+  whose render holds the annotation, for example keys-only output saved as
+  an addon resource. The dry run applies nothing and has no such check.
+- The bootstrap checks each `restore.d` entry before it applies it: the
+  working copy in the store (`secrets/restore.d/<name>.yaml`), which it
+  reads once and applies from that copy, and else the decrypted
+  `<name>.sops.yaml`. An entry with the annotation is skipped with an
+  error. When the working copy holds the annotation, lo does not use the
+  `.sops.yaml` file of that entry: remove or replace the working copy. A
+  working copy that cannot be read, or that does not parse as YAML, gets
+  a warning, and lo uses the `.sops.yaml` file, which it checks too.
+- The KubeOne driver checks each file of the addons directory of the
+  manifest (`addons.path`, for Hetzner the cilium and CCM renders in
+  `<work dir>/addons/`) before it runs `kubeone apply`. A file with the
+  annotation, one that does not parse, one that is not a regular file (a
+  FIFO, a device), or a directory that cannot be read stops the apply.
+  KubeOne reads its manifest when it starts and the addons later, at its
+  addons step, and the work dir is shared. So lo reads `kubeone.yaml`
+  once, and KubeOne reads a copy of those bytes
+  (`<work dir>/.kubeone-run-<random>.yaml`, mode 0600), also when the
+  manifest has no `addons.path`. With an addons path, lo writes the bytes
+  that it checked into a new private run directory
+  (`<work dir>/.kubeone-run-<random>/`, mode 0700, files 0600), and the
+  copy of the manifest names it in `addons.path`, with the aliases and
+  merge keys (`<<`) of the manifest resolved. `./addons`, `./addons/`
+  and `addons` name the same directory. lo reads a `..` in `addons.path`
+  as a step back in the text of the path, not on the disk: `a/../addons`
+  is `addons`, also when `a` is a symbolic link. A `..` or an absolute
+  path can name a directory outside the work dir: lo copies and checks
+  it in the same way. A `kubeone.yaml` with more than one YAML document
+  (a `---` line after the spec starts a second one), and an `addons.path`
+  that is not a string (`false`, a number, a mapping, a list), stop the
+  apply. lo removes the run directory and the copy of the manifest when
+  `kubeone apply` ends, and when lo stops on a signal that it can catch
+  (SIGINT, SIGTERM, SIGHUP; under `nohup`, lo ignores a SIGHUP). On a
+  SIGHUP, the Go `lo` stops `kubeone`, removes the copy and its other
+  temporary files (the provider config of `lo provision`), and then ends
+  with the SIGHUP. A SIGKILL can leave the copies in the work dir. A
+  second signal while lo removes them can also leave them. The copies
+  hold the CCM render, with its Hetzner token, in plaintext. After such a
+  stop, remove `.kubeone-run-*` by hand. When a write of the copy fails
+  (a full disk), lo removes the part that it wrote. When the Go `lo`
+  cannot remove that part, it shows the path of the file: remove that
+  file by hand. If lo cannot remove the run directory or the copy of the
+  manifest after the run, lo shows the path. For example, this occurs
+  when the work dir is not writable. The bash implementation shows the
+  message of `rm`. Remove the path by hand.
+
+  The copy of the manifest is beside `kubeone.yaml`, so the other paths
+  of the manifest (the CA file, the audit and node-selector files) are
+  the same, and KubeOne reads these from the work dir, not from a copy.
+  So a writer who can create or rename files in the work dir can also
+  replace these files: keep the work dir writable only by you. lo does
+  not write over a file that is at the path of the copy already, and it
+  stops the apply. The two implementations differ when a file appears at
+  that path after lo checked it: the Go `lo` keeps that file, and the
+  bash implementation removes it when the apply ends.
+- The Tilt extension runs `lo tilt preflight` on its manifest (the domain
+  artifact and the service overlays on it) before it applies anything, on
+  every load. A manifest with the annotation, or one that cannot be read
+  from stdin, stops the load. The `preflight` setting and
+  `LOK8S_PREFLIGHT=0` turn off only the cleanup of stuck objects, not this
+  check.
+
+These commands pass on the bytes that they checked, with no change: the
+final newlines of a last `|+` block scalar stay. The bash implementation
+keeps these bytes out of its trace: with `bash -x` or `BASH_XTRACEFD`, the
+functions that hold a render, an artifact or a decrypted manifest turn
+tracing off until they return. It sends them to `kubectl` and `yq`
+through pipes, not here-strings, which bash can write to a file in
+`TMPDIR`.
+
+Each check parses the YAML, so a quoted key, a flow-style map and a `List`
+item count. The annotation counts at any depth of an object, so a custom
+resource that holds a Secret template with the annotation is refused too.
+So is a resource that names the annotation as a key under a nested
+`metadata.annotations`, for example an admission policy whose pattern
+forbids it; a rule that names the key in a CEL expression is not a match.
+A render or an artifact that does not parse as YAML also stops with an
+error. The existing artifacts do not change. The bash implementation
+checks with `yq`, so it also stops when `yq` is not installed or is older
+than v4.47.1.
+
+The flag is the only way to start a keys-only render. lo controls the
+plugin setting that it uses (see the
+[env contract](../reference/kustomize-plugins.md#env-contract)). Do not
+export that variable. An older `lo` does not have the checks above. A
+repository can refuse the annotation in its committed artifacts, for
+example with a CI check.
+
 ## Deploy
 
 ```bash
@@ -381,8 +551,8 @@ refuses it (`lo toolchain install` installs the plugin of your `lo`).
 
 An entry's `env:` goes only to the render (kustomize and envsubst), never to
 lo itself. It cannot set lo's own variables (`LOK8S_BOOTSTRAP_*`,
-`BOOTSTRAP_*`, `bootstrap_*`, `PATH_SECRETS`, `KUBECONFIG`,
-`KUSTOMIZE_PLUGIN_HOME`, `HELM_PLUGINS`). Such an entry is an error, on a dry
+`LOK8S_INTERNAL_*`, `BOOTSTRAP_*`, `bootstrap_*`, `PATH_SECRETS`,
+`KUBECONFIG`, `KUSTOMIZE_PLUGIN_HOME`, `HELM_PLUGINS`). Such an entry is an error, on a dry
 run and on a real run, and lo names the variable. lo does this check after
 the skips of the real run: an entry that the run skips is `skipped`, not an
 error.

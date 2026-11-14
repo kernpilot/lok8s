@@ -518,6 +518,188 @@ mkdir -p "${PROJ}/clusters/lok8s.dev"
 printf 'kind: Job\nmetadata:\n  name: j1\n  labels: {app: other}\n' \
   > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
 check - hooks restart --selector app=nomatch            # artifact present, no match
+
+# An artifact with a keys-only Secret (lo build --keys-only output), and one
+# that does not parse: the three verbs refuse it in both implementations
+# (rc 1, the same message), also when the selector matches only another
+# object. A kubectl that logs its argv shows that no verb reaches kubectl.
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub: log the argv, drain a manifest on stdin, fail (no live
+# cluster may be reached).
+echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
+[[ " $* " != *" -f - "* ]] || cat > /dev/null
+exit 1
+SH
+export PARITY_KUBECTL_LOG="${WORK}/kubectl.log"
+for hk_case in marker no-yaml; do
+  if [[ "${hk_case}" == marker ]]; then
+    printf 'kind: Job\nmetadata:\n  name: j1\n  labels: {lok8s.dev/role: seed}\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  annotations: {secrets.lok8s.dev/keys-only: "true"}\ndata:\n  PASSWORD: ""\n' \
+      > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
+    hk_want='holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one'
+  else
+    printf 'kind: Job\nmetadata: [a\n' > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
+    hk_want='does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)'
+  fi
+  for hk_verb in recreate apply restart; do
+    hk_label="lo hooks ${hk_verb} refuses an artifact (${hk_case})"
+    rm -f "${PARITY_KUBECTL_LOG}"
+    parity::run_pair hooks "${hk_verb}" --selector lok8s.dev/role=seed
+    hk_ok=1
+    parity::compare "${hk_label}" - || hk_ok=0
+    # shellcheck disable=SC2154 # go_rc, bash_rc: set by parity::run_pair (hack/lib/parity.sh)
+    if (( go_rc != 1 || bash_rc != 1 )) \
+        || ! grep -qF "refusing to apply lok8s.dev: PROJ/clusters/lok8s.dev/artifacts.yaml ${hk_want}" "${WORK}/go.err"; then
+      echo "FAIL: ${hk_label} — rc go=${go_rc} bash=${bash_rc}, stderr:"
+      indent < "${WORK}/go.err"
+      hk_ok=0
+    fi
+    if [[ -s "${PARITY_KUBECTL_LOG}" ]]; then
+      echo "FAIL: ${hk_label} — kubectl ran:"
+      indent < "${PARITY_KUBECTL_LOG}"
+      hk_ok=0
+    fi
+    parity::record "${hk_ok}" "${hk_label}"
+  done
+done
+
+# The positive control: a clean artifact, a selector that matches. Each
+# verb reaches kubectl in both implementations. The stub prints, for each
+# manifest on stdin, the digest of its canonical form (yq, keys sorted):
+# the Go stream is yaml.v3's and the bash stream is yq's, so the bytes can
+# differ, and the values cannot. A last |+ block scalar keeps its final
+# newlines in both.
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub: log the argv, print the canonical digest of a manifest on
+# stdin, answer a get with "not found" (no live cluster may be reached).
+echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
+case " $* " in
+  *" -f - "*) printf 'parity-stub -f %s\n' "$(yq -o=json -I=0 'sort_keys(..)' - | sha256sum | cut -d' ' -f1)" ;;
+  *" get "*) exit 1 ;;
+esac
+exit 0
+SH
+printf 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  namespace: default\n  labels: {lok8s.dev/role: seed}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n  labels: {lok8s.dev/role: seed}\ndata:\n  tail: |+\n    x\n\n\n' \
+  > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
+for hk_verb in recreate apply restart; do
+  hk_label="lo hooks ${hk_verb} reaches kubectl with the selected objects"
+  rm -f "${PARITY_KUBECTL_LOG}"
+  parity::run_pair hooks "${hk_verb}" --selector lok8s.dev/role=seed
+  hk_ok=1
+  parity::compare "${hk_label}" - || hk_ok=0
+  case "${hk_verb}" in
+    restart) hk_want=' rollout restart deployment/web' ;;
+    *)       hk_want=' apply --server-side --force-conflicts -f -' ;;
+  esac
+  # The log holds the calls of both runs (Go first): each verb reached kubectl.
+  if (( go_rc != 0 )) || [[ "$(grep -cF -- "${hk_want}" "${PARITY_KUBECTL_LOG}" 2>/dev/null)" != 2 ]]; then
+    echo "FAIL: ${hk_label} — rc go=${go_rc}, kubectl calls:"
+    indent < "${PARITY_KUBECTL_LOG}"
+    hk_ok=0
+  fi
+  # Each implementation applies the objects of the artifact: the digest is
+  # in the stdout of both runs.
+  if [[ "${hk_verb}" != restart ]]; then
+    hk_digest="$(yq -o=json -I=0 'sort_keys(..)' "${PROJ}/clusters/lok8s.dev/artifacts.yaml" | sha256sum | cut -d' ' -f1)"
+    for hk_impl in go bash; do
+      if ! grep -qF -- "parity-stub -f ${hk_digest}" "${WORK}/${hk_impl}.out"; then
+        echo "FAIL: ${hk_label} — the objects that ${hk_impl} applied are not the artifact's (digest ${hk_digest}):"
+        indent < "${WORK}/${hk_impl}.out"
+        hk_ok=0
+      fi
+    done
+  fi
+  parity::record "${hk_ok}" "${hk_label}"
+done
+
+# lo deploy reads artifacts.yaml once, checks that copy and applies that copy
+# (the full apply and -l key=value). The kubectl stub logs its argv and
+# prints a digest of each manifest that it gets: for a clean artifact both
+# implementations apply the same manifests; a marked artifact and one that
+# does not parse are refused (rc 1, the same message) before any kubectl
+# call.
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub: log the argv, print the digest of the bytes of an applied
+# manifest, answer a get with no objects (no live cluster may be reached).
+echo "kubectl $*" >> "${PARITY_KUBECTL_LOG}"
+case " $* " in
+  *" apply "*) printf 'parity-stub applied %s\n' "$(sha256sum | cut -d' ' -f1)" ;;
+  *" get "*) printf '{"items":[]}' ;;
+esac
+exit 0
+SH
+export LOK8S_NONINTERACTIVE=1
+for dp_case in clean plus marker no-yaml; do
+  case "${dp_case}" in
+    clean)
+      printf 'apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.test.lok8s.dev\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: system\n  labels: {lok8s.dev/type: system}\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: platform\n  labels: {lok8s.dev/type: platform}\n' \
+        > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
+      dp_want='' ;;
+    plus)
+      # The last literal scalar (|+) of the CRD subset, of the label subset
+      # and of the artifact ends in several newlines: kubectl gets them.
+      printf 'apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: widgets.test.lok8s.dev\n  annotations:\n    note: |+\n      crd\n\n\n---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: platform\n  labels: {lok8s.dev/type: platform}\ndata:\n  tail: |+\n    x\n\n\n' \
+        > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
+      dp_want='' ;;
+    marker)
+      printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: platform\n  labels: {lok8s.dev/type: platform}\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  labels: {lok8s.dev/type: platform}\n  annotations: {secrets.lok8s.dev/keys-only: "true"}\ndata:\n  PASSWORD: ""\n' \
+        > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
+      dp_want='holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one' ;;
+    no-yaml)
+      printf 'kind: ConfigMap\nmetadata: [a\n' > "${PROJ}/clusters/lok8s.dev/artifacts.yaml"
+      dp_want='does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)' ;;
+  esac
+  for dp_route in full filtered; do
+    dp_label="lo deploy (${dp_route}) refuses an artifact (${dp_case})"
+    [[ -n "${dp_want}" ]] || dp_label="lo deploy (${dp_route}) applies the checked copy (${dp_case})"
+    # The full apply has two phases (the CRDs, then all), the subset one.
+    dp_args=(deploy --domain lok8s.dev) dp_n=2
+    [[ "${dp_route}" == full ]] || { dp_args+=(-l lok8s.dev/type=platform); dp_n=1; }
+    rm -f "${PARITY_KUBECTL_LOG}"
+    parity::run_pair "${dp_args[@]}"
+    dp_ok=1
+    parity::compare "${dp_label}" - || dp_ok=0
+    if [[ -z "${dp_want}" ]]; then
+      # Each implementation applies dp_n manifests, and the full apply gives
+      # kubectl the bytes of the artifact: the digest is in the stdout of
+      # both runs.
+      dp_digest="$(sha256sum < "${PROJ}/clusters/lok8s.dev/artifacts.yaml" | cut -d' ' -f1)"
+      for dp_impl in go bash; do
+        dp_rc="${go_rc}"
+        [[ "${dp_impl}" == go ]] || dp_rc="${bash_rc}"
+        dp_applied=$(grep -c '^parity-stub applied ' "${WORK}/${dp_impl}.out" || true)
+        if (( dp_rc != 0 || dp_applied != dp_n )); then
+          echo "FAIL: ${dp_label} — ${dp_impl}: rc=${dp_rc}, ${dp_applied} manifest(s) applied, stdout:"
+          indent < "${WORK}/${dp_impl}.out"
+          dp_ok=0
+        fi
+        if [[ "${dp_route}" == full ]] && ! grep -qF "parity-stub applied ${dp_digest}" "${WORK}/${dp_impl}.out"; then
+          echo "FAIL: ${dp_label} — ${dp_impl}: kubectl did not get the bytes of the artifact (digest ${dp_digest}):"
+          indent < "${WORK}/${dp_impl}.out"
+          dp_ok=0
+        fi
+      done
+    else
+      if (( go_rc != 1 || bash_rc != 1 )) \
+          || ! grep -qF "refusing to apply lok8s.dev: PROJ/clusters/lok8s.dev/artifacts.yaml ${dp_want}" "${WORK}/go.err"; then
+        echo "FAIL: ${dp_label} — rc go=${go_rc} bash=${bash_rc}, stderr:"
+        indent < "${WORK}/go.err"
+        dp_ok=0
+      fi
+      if [[ -s "${PARITY_KUBECTL_LOG}" ]]; then
+        echo "FAIL: ${dp_label} — kubectl ran:"
+        indent < "${PARITY_KUBECTL_LOG}"
+        dp_ok=0
+      fi
+    fi
+    parity::record "${dp_ok}" "${dp_label}"
+  done
+done
+unset LOK8S_NONINTERACTIVE
+unset PARITY_KUBECTL_LOG
+parity::stub_kubectl_fail "${PROJ}"
 rm -rf "${PROJ}/clusters/lok8s.dev"
 
 # ── lo tilt — stub-backed lifecycle + preflight gates ────────────────────────
@@ -556,6 +738,55 @@ export LOK8S_PREFLIGHT=0
 check_stdin 'kind: ConfigMap' tilt preflight --domain alpha.dev    # kill switch
 unset LOK8S_PREFLIGHT
 check_stdin 'kind: ConfigMap' tilt preflight --domain alpha.dev    # sweep, nothing stuck
+
+# A service overlay that adds the keys-only marker to a Secret of the domain
+# artifact. The Tiltfile renders the overlay (kustomize build of the
+# artifacts dir) and pipes the render to lo tilt preflight on every load;
+# both implementations refuse it (rc 1, the same message) on the sweep path,
+# with the kill switch that the Tiltfile sets for preflight = False, and on
+# a non-kind domain. The refusal fails the load, so no k8s_yaml runs.
+ENVP_ART='apiVersion: v1
+kind: Secret
+metadata:
+  name: app
+  namespace: ns1
+  labels:
+    lok8s.dev/name: web
+data:
+  PASSWORD: cGFzcw==' envp_case "a keys-only marker" 0 <<'YAML'
+services:
+  web:
+    patches:
+      - target: {version: v1, kind: Secret, name: app}
+        patch: |
+          - op: add
+            path: /metadata/annotations
+            value: {secrets.lok8s.dev/keys-only: "true"}
+YAML
+if ko_render="$("${ROOT}/.bin/kustomize" build --load-restrictor=LoadRestrictionsNone \
+    "${WORK}/envp-go/clusters/alpha.dev/artifacts" 2>&1)" \
+    && grep -q 'secrets.lok8s.dev/keys-only' <<<"${ko_render}"; then
+  for ko_case in sweep kill-switch non-kind; do
+    ko_domain=alpha.dev
+    [[ "${ko_case}" != kill-switch ]] || export LOK8S_PREFLIGHT=0
+    [[ "${ko_case}" != non-kind ]] || ko_domain=beta.cloud
+    ko_label="lo tilt preflight refuses a keys-only service overlay (${ko_case})"
+    PARITY_STDIN="${ko_render}" parity::run_pair tilt preflight --domain "${ko_domain}"
+    ko_ok=1
+    parity::compare "${ko_label}" - || ko_ok=0
+    # shellcheck disable=SC2154 # go_rc, bash_rc: set by parity::run_pair (hack/lib/parity.sh)
+    if (( go_rc != 1 || bash_rc != 1 )) \
+        || ! grep -qF 'preflight: refusing to apply the Tilt manifest: it holds a keys-only Secret (secrets.lok8s.dev/keys-only)' "${WORK}/go.err"; then
+      echo "FAIL: ${ko_label} — rc go=${go_rc} bash=${bash_rc}, stderr:"
+      indent < "${WORK}/go.err"
+      ko_ok=0
+    fi
+    parity::record "${ko_ok}" "${ko_label}"
+    unset LOK8S_PREFLIGHT
+  done
+else
+  fail "lo tilt preflight refuses a keys-only service overlay — the overlay does not render with the marker: ${ko_render}"
+fi
 
 # ── lo image — gates, error paths, catalog listing ───────────────────────────
 

@@ -18,7 +18,9 @@ import (
 	"github.com/kernpilot/lok8s/internal/cli"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
+	"github.com/kernpilot/lok8s/internal/interrupt"
 	"github.com/kernpilot/lok8s/internal/render"
+	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 )
 
 func main() {
@@ -36,7 +38,9 @@ func main() {
 		}
 		os.Exit(rc)
 	}
-	os.Exit(run(ctx, interrupted))
+	// After a SIGHUP that a driver caught (interrupt.CatchHangup), lo ends
+	// with that SIGHUP here, when every deferred cleanup of run ran.
+	interrupt.Exit(run(ctx, interrupted))
 }
 
 // run is main without os.Exit, so the deferred cleanup of the per-run
@@ -52,15 +56,25 @@ func run(ctx context.Context, interrupted func() int) int {
 	// caller's environment must not reach a provider through any path,
 	// a command routed to the bash tree included.
 	os.Unsetenv(driver.DestroyPlanEnv)
+	// The keys-only setting of the Secret plugin is internal to lo: only
+	// `lo build --keys-only` turns it on, for its own render. A value
+	// inherited from the caller's environment must not reach any child
+	// (kustomize, a plugin, Tilt, a command routed to the bash tree, the
+	// registry TLS mint), so it is 0 from here on. This runs AFTER the
+	// plugin dispatch in main (a self-exec plugin child reads the value
+	// its render set) and BEFORE anything else reads the environment or
+	// starts a child.
+	os.Setenv(secret.KeysOnlyEnv, "0")
 	paths, err := config.ResolvePaths()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "lo: %v\n", err)
 		return 1
 	}
 
-	// SIGINT/SIGTERM cancel the command context (every Runner child and
-	// wait loop reads it) and map to the exit code the bash entrypoint
-	// died with, 128+n, with nothing printed on top.
+	// SIGINT/SIGTERM (and a SIGHUP that a driver catches) cancel the
+	// command context (every Runner child and wait loop reads it) and map
+	// to the exit code the bash entrypoint died with, 128+n, with nothing
+	// printed on top.
 	root := cli.NewRoot(paths)
 	err = root.ExecuteContext(ctx)
 	if rc := interrupted(); rc != 0 {

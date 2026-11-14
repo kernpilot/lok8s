@@ -85,7 +85,7 @@ func passwdDraw(entry specpkg.PasswdEntry) ([]byte, error) {
 	}
 	for _, c := range required {
 		if !charset.PoolContains(chars, c) {
-			return nil, fmt.Errorf("charset %q has no %q characters to satisfy require", entry.EffectiveChars(), c)
+			return nil, fmt.Errorf("the charset has no %q characters to satisfy require", c)
 		}
 	}
 	if len(required) == 0 {

@@ -106,6 +106,103 @@ assert_pattern_matches() {
   return 1
 }
 
+# assert_no_trace_leak <canary> <command> [args...] — run the command five
+# times in a subshell with tracing on, and fail when <canary> (a Secret
+# value of the input) is in its stdout, its stderr or its trace.
+#
+# Each run starts with the options of .lok8s/lo (set -euo pipefail, without
+# the errtrace and functrace of a bats test body) and set -x. The runs:
+#   x    the trace goes to stderr (bash -x);
+#   fd   the trace goes to a file through BASH_XTRACEFD;
+#   ret  functrace on and `trap 'set -x' RETURN`: each function inherits
+#        the trap, and the return of a helper turns tracing on again;
+#   dbg  functrace on and `trap 'set -x' DEBUG`: the trap turns tracing on
+#        again before each command;
+#   err  errtrace on and `trap 'set -x' ERR`.
+# Each run must succeed, and each trace must show the call of the command:
+# a run that did not trace, or that failed before it held the value, would
+# pass the absence check without measuring anything. The caller proves
+# that the value was in flight (a stub that records it). After the
+# command, the ret, dbg and err runs must still have their option and
+# their trap: the command sets them back.
+#
+# The subshell of a run is a job that the helper waits for (`( … ) &` and
+# `wait`), not the left side of `||`: bash ignores errexit in all of a
+# command on the left of `||`, and it does not run the ERR trap there, so
+# such a run would not have the errexit of lo.
+#
+# A caller that sets the array trace_fail to a command that fails (the
+# command itself, with an input that stops it) gets a sixth run, after the
+# err run: errexit and errtrace on, an ERR trap that writes a line (its
+# function and its options) and turns tracing on, and set -x. That run
+# must fail, and the ERR trap must run once, in the frame that called the
+# command (this helper), with errtrace on again: the command returns its
+# failure to its caller (the trace guard of utils/keysonly.sh) and does not
+# end the shell in the middle of a function that holds the value.
+assert_no_trace_leak() {
+  local canary="${1}"; shift
+  local d mode rc want_opt want_trap
+  d="$(mktemp -d "${BATS_TEST_TMPDIR}/trace.XXXXXX")"
+  for mode in x fd ret dbg err; do
+    rc=0
+    (
+      set +eET; trap - DEBUG RETURN ERR; set -euo pipefail
+      case "${mode}" in
+        fd) exec 9>"${d}/trace.fd"; BASH_XTRACEFD=9 ;;
+        ret) set -T; trap 'set -x' RETURN ;;
+        dbg) set -T; trap 'set -x' DEBUG ;;
+        err) set -E; trap 'set -x' ERR ;;
+      esac
+      set -x
+      "$@"
+      { set +x; } 2>/dev/null
+      printf '%s\n' "$-" "$(trap -p DEBUG RETURN ERR)" > "${d}/after.${mode}"
+    ) <&0 >"${d}/stdout.${mode}" 2>"${d}/stderr.${mode}" &
+    wait "$!" || rc=$?
+    (( rc == 0 )) || { echo "${1} failed in the ${mode} run (rc ${rc}):" >&2; cat "${d}/stderr.${mode}" >&2; return 1; }
+  done
+  grep -qF -- "+ ${1}" "${d}/stderr.x" || { echo "no trace of ${1} on stderr" >&2; return 1; }
+  grep -qF -- "+ ${1}" "${d}/trace.fd" || { echo "no trace of ${1} in BASH_XTRACEFD" >&2; return 1; }
+  for mode in ret dbg err; do
+    grep -qF -- "+ ${1}" "${d}/stderr.${mode}" || { echo "no trace of ${1} in the ${mode} run" >&2; return 1; }
+    case "${mode}" in
+      ret) want_opt=T want_trap="trap -- 'set -x' RETURN" ;;
+      dbg) want_opt=T want_trap="trap -- 'set -x' DEBUG" ;;
+      err) want_opt=E want_trap="trap -- 'set -x' ERR" ;;
+    esac
+    if [[ "$(head -n 1 "${d}/after.${mode}")" != *"${want_opt}"* ]] || ! grep -qxF -- "${want_trap}" "${d}/after.${mode}"; then
+      echo "${1} did not set the option ${want_opt} and its trap back in the ${mode} run:" >&2
+      cat "${d}/after.${mode}" >&2
+      return 1
+    fi
+  done
+  if [[ -n "${trace_fail[*]+set}" ]]; then
+    rc=0
+    (
+      set +eET; trap - DEBUG RETURN ERR; set -euo pipefail; set -E
+      # shellcheck disable=SC2064 # the path of the record goes in now
+      trap "printf '%s %s\\n' \"\${FUNCNAME[0]-}\" \"\$-\" >> $(printf %q "${d}/errfail.trap"); set -x" ERR
+      set -x
+      "${trace_fail[@]}"
+      { set +x; } 2>/dev/null
+      echo "the command returned 0" >> "${d}/errfail.trap"
+    ) <&0 >"${d}/stdout.errfail" 2>"${d}/stderr.errfail" &
+    wait "$!" || rc=$?
+    local fired
+    fired="$(cat "${d}/errfail.trap" 2>/dev/null || true)"
+    if (( rc == 0 )) || [[ "${fired}" != "assert_no_trace_leak "*E* || "${fired}" == *$'\n'* ]]; then
+      echo "${trace_fail[0]} under errexit and errtrace (rc ${rc}): want a failure, and the ERR trap once in the caller, with errtrace; the trap wrote:" >&2
+      printf '%s\n' "${fired:-(nothing)}" >&2
+      cat "${d}/stderr.errfail" >&2
+      return 1
+    fi
+  fi
+  if grep -lF -- "${canary}" "${d}"/* >&2; then
+    echo "the value of the input is in the files above" >&2
+    return 1
+  fi
+}
+
 # Fixture directory
 export FIXTURES_DIR="${_TESTS_DIR}/fixtures"
 
@@ -211,4 +308,29 @@ mock_yq_value() {
   local value="$1"
   yq() { echo "${value}"; }
   export -f yq
+}
+
+# _ppid <pid> / _children <pid> — from /proc where it exists (the CI bats
+# container has no ps), else from ps (macOS).
+_ppid() {
+  if [[ -r "/proc/${1}/stat" ]]; then
+    local stat ppid
+    stat="$(< "/proc/${1}/stat")" || return 1
+    stat="${stat##*) }"
+    # The state field comes first.
+    read -r _ ppid _ <<< "${stat}"
+    echo "${ppid}"
+  else
+    ps -o ppid= -p "${1}" | tr -d ' '
+  fi
+}
+_children() {
+  if [[ -d /proc/self ]]; then
+    local dir
+    for dir in /proc/[0-9]*; do
+      [[ "$(_ppid "${dir#/proc/}" 2>/dev/null)" != "${1}" ]] || echo "${dir#/proc/}"
+    done
+  else
+    ps -A -o pid=,ppid= | awk -v p="${1}" '$2 == p { print $1 }'
+  fi
 }

@@ -159,30 +159,6 @@ after" ]
   _clean
 }
 
-# _ppid <pid> / _children <pid> — from /proc where it exists (the CI bats
-# container has no ps), else from ps (macOS).
-_ppid() {
-  if [[ -r "/proc/${1}/stat" ]]; then
-    local stat state ppid
-    stat="$(< "/proc/${1}/stat")" || return 1
-    stat="${stat##*) }"
-    read -r state ppid _ <<< "${stat}"
-    echo "${ppid}"
-  else
-    ps -o ppid= -p "${1}" | tr -d ' '
-  fi
-}
-_children() {
-  if [[ -d /proc/self ]]; then
-    local dir
-    for dir in /proc/[0-9]*; do
-      [[ "$(_ppid "${dir#/proc/}" 2>/dev/null)" != "${1}" ]] || echo "${dir#/proc/}"
-    done
-  else
-    ps -A -o pid=,ppid= | awk -v p="${1}" '$2 == p { print $1 }'
-  fi
-}
-
 # _interrupt <signal> <status> — send <signal> to the body of yqbound::run (the
 # subshell with the traps) while yq runs: yq AND the watchdog stop, the
 # temporary directory goes, the status is <status>.

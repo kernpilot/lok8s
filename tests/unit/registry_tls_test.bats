@@ -280,6 +280,7 @@ _stub_secret_plugin() {
   cat > "${plugin_home}/secrets.lok8s.dev/v1/secret/Secret" <<STUB
 #!/usr/bin/env bash
 cat > "${BATS_TEST_TMPDIR}/plugin-manifest.yaml"
+printf 'keys-only=%s\n' "\${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}" > "${BATS_TEST_TMPDIR}/plugin-env"
 printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: registries-tls\n  namespace: lok8s-system\ntype: kubernetes.io/tls\ndata:\n  tls.crt: %s\n  tls.key: %s\n' "\$(printf -- '-----BEGIN CERTIFICATE-----\n%s\n-----END CERTIFICATE-----\n' "\$(printf FAKECRT | base64)" | base64 -w0)" "\$(printf -- '-----BEGIN PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----\n' "\$(printf FAKEKEY | base64)" | base64 -w0)"
 STUB
   chmod +x "${plugin_home}/secrets.lok8s.dev/v1/secret/Secret"
@@ -423,6 +424,22 @@ _pem() { printf -- '-----BEGIN %s-----\n%s\n-----END %s-----\n' "${1}" "$(printf
   # The scratch store under the domain dir is gone.
   run bash -c "ls -d '${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev'/.registry-tls-tmp.* 2>/dev/null"
   assert_output ""
+}
+
+# The mint writes real material, never a keys-only run: the Secret plugin's
+# keys-only setting, exported as 1, reaches the plugin as 0 (Go: mintChildEnv).
+@test "registries_tls_cert: the mint pins the Secret plugin's keys-only setting to 0" {
+  _write_tls_spec true
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  lo::read_network_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  _stub_secret_plugin
+  _stub_docker
+  export LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1 LOK8S_SECRETS_DISABLE=1
+
+  run lo::registries_tls_cert test.lok8s.dev
+  assert_success
+  run cat "${BATS_TEST_TMPDIR}/plugin-env"
+  assert_output "keys-only=0"
 }
 
 @test "registries_tls_cert: re-mint is skipped when the SAN set is unchanged; the key is never read out" {

@@ -451,16 +451,32 @@ preserving the username/password.
 
 Beyond `$PATH_SECRETS` (the cache directory), two env vars shape a run. A
 caller — chiefly the `lo build` pipeline — sets them on the `kustomize build`
-invocation to steer the generator without editing any Secret CRD.
+invocation to steer the generator without editing any Secret CRD. A third
+variable is internal to lo (the last row): do not set it.
 
 | Env var | Value | Effect |
 |---|---|---|
 | `LOK8S_SECRETS_DISABLE` | `1` / `true` (case-insensitive) | **Store-free OFF switch.** The plugin emits **nothing** and short-circuits before any store access: it never reads `$PATH_SECRETS`, never touches or mints the cache, and never runs a generator. Returns success with empty output — kustomize accepts a generator that yields zero resources. Any other value (incl. unset, `0`) is off. |
 | `LOK8S_SECRETS_OUTPUT` | `none` | **Run-but-suppress.** Runs the **full** pipeline — generators run, so store reads/mints and type validation still happen (side effects intact) — but suppresses the final output write, so zero resources are rendered. Use case: prime or validate the cache without rendering. An empty/unset value is a normal emit; any other non-empty value is **rejected** (fail closed) so a typo can't silently emit secrets. |
+| `LOK8S_INTERNAL_SECRETS_KEYS_ONLY` | `1` / `true`, `0` / `false` | **Internal to lo. Do not export it.** Only [`lo build --keys-only`](../guide/deployment.md#list-the-keys-of-the-secrets-keys-only) sets it to `1`, for its own render. lo sets it to `0` on every other kustomize and plugin call, and an addon entry's `env:` cannot set it. With `1` and `LOK8S_SECRETS_DISABLE=1`, the plugin emits each Secret with its key names and empty values, plus the annotation `secrets.lok8s.dev/keys-only: "true"`. It reads only the Secret spec: it does not read, decrypt or mint the store, and it runs no generator. With `1` but without `LOK8S_SECRETS_DISABLE=1`, the run fails before it reads anything. An unknown value fails. A plugin that is older than this variable sees only `LOK8S_SECRETS_DISABLE=1` and emits nothing, and a plugin older than v0.2.0 does not know that switch either: lo checks the plugin before it sets `1` (see `--capabilities` below). |
+
+**`--capabilities`:** `Secret --capabilities` prints the runs that the
+plugin has, one per line: `dry-run` and `keys-only`. It reads no spec and no
+store, and it writes nothing else. lo runs it before a keys-only render that
+execs the plugin, and refuses a plugin that does not print `keys-only`. lo
+runs the check so that an older plugin can do nothing with it: in an empty
+temporary directory, with an empty stdin, `PATH_SECRETS` at a path that does
+not exist, `LOK8S_SECRETS_DISABLE=1` and `LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0`.
+The check is a compatibility check. It is not isolation and not
+attestation: a plugin that prints `keys-only` but does not have the run, or
+a plugin file that is replaced after the check (for example through a
+symlink), gets through. Install the plugin of your `lo` from a source that
+you trust.
 
 **Precedence:** `LOK8S_SECRETS_DISABLE` wins over `LOK8S_SECRETS_OUTPUT` — disable
 means "do nothing at all", so the store is never consulted even if
-`LOK8S_SECRETS_OUTPUT=none` is also set.
+`LOK8S_SECRETS_OUTPUT=none` is also set. The keys-only run also ignores
+`LOK8S_SECRETS_OUTPUT`.
 
 `LOK8S_SECRETS_DISABLE=1` is what [`lo build --no-secrets`](../guide/deployment.md#ci-render-without-secrets-no-secrets)
 exports to make a CI render **store-free**: the split shaping alone leaves the
@@ -701,11 +717,21 @@ Trade-offs to know:
 
 ### Error messages
 
-Errors are reported with line numbers from the source CRD:
+An error names the line and column, the section and the key, and the YAML
+type of a value. It never prints the value: a spec value can be a secret
+(for example a password put where a length or an algorithm name goes).
 
 ```
-secret plugin: line 14: passwd.NUXT_SESSION_PASSWORD: length must be > 0, got 0
+secret plugin: line 14:13: passwd.NUXT_SESSION_PASSWORD: passwd length must be > 0
+secret plugin: line 6:13: passwd.PASSWORD: cannot unmarshal !!str value into int
 ```
+
+kustomize writes the generator config again before the plugin reads it, so
+the line is a line of that copy. The section and the key say where the
+error is in the source. kustomize parses the config first: a value with an
+explicit YAML tag that does not resolve (for example `!!int` on a string)
+stops kustomize before the plugin runs, and the error of kustomize quotes
+the value. `lo build --keys-only` does not print the stderr of the render.
 
 ## Helm Charts via khelm
 
