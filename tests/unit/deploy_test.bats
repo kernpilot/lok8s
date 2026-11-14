@@ -292,18 +292,34 @@ YAML
 # file, no Secret value of the artifact is in stdout, stderr or the trace.
 # The kubectl stub shows that the value was applied. A domain without an
 # artifact stops each of them: under errexit and errtrace, it returns that
-# failure to its caller (trace_fail of assert_no_trace_leak).
+# failure to its caller (trace_fail of assert_no_trace_leak). In the
+# domain fail.lok8s.dev, kubectl apply fails: the failure is in a function
+# that deploy::apply calls (kapply::apply), while deploy::apply holds the
+# value. Each function on the way back returns the failure, and only the
+# guard of deploy::apply sets the ERR trap of its caller back.
 @test "deploy::apply and deploy::apply_filtered trace no Secret value" {
   local artifact="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
   printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  labels:\n    lok8s.dev/type: platform\nstringData:\n  TOKEN: xtrace-canary-deploy\n' >> "${artifact}"
+  mkdir -p "${BATS_TEST_TMPDIR}/clusters/fail.lok8s.dev"
+  printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: apply-fails\nstringData:\n  TOKEN: xtrace-canary-deploy\n' > "${BATS_TEST_TMPDIR}/clusters/fail.lok8s.dev/artifacts.yaml"
   export DEPLOY_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
   kubectl() {
+    local in
     case "$1" in
-      apply) cat >> "${DEPLOY_LOG}"; echo "applied" ;;
+      apply)
+        in="$(cat; printf .)"
+        [[ "${in}" != *"name: apply-fails"* ]] || return 1
+        printf '%s' "${in%.}" >> "${DEPLOY_LOG}"
+        echo "applied"
+        ;;
       wait)  echo "waited" ;;
     esac
   }
   local -a trace_fail=(deploy::apply "missing.lok8s.dev")
+  assert_no_trace_leak xtrace-canary-deploy deploy::apply "test.lok8s.dev"
+  grep -qF xtrace-canary-deploy "${DEPLOY_LOG}"
+  rm -f "${DEPLOY_LOG}"
+  trace_fail=(deploy::apply "fail.lok8s.dev")
   assert_no_trace_leak xtrace-canary-deploy deploy::apply "test.lok8s.dev"
   grep -qF xtrace-canary-deploy "${DEPLOY_LOG}"
   rm -f "${DEPLOY_LOG}"
