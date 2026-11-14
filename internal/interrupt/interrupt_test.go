@@ -1,6 +1,7 @@
 package interrupt
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -9,6 +10,33 @@ import (
 	"testing"
 	"time"
 )
+
+// childEnv names the test that runs as a child of the test binary.
+const childEnv = "LOK8S_TEST_SIGHUP_CHILD"
+
+// runChild runs the test name again in a child of the test binary, with
+// SIGHUP at its default action and no handler of the test: a SIGHUP that
+// no catch holds ends the child, not the test binary. It returns the
+// output and the wait status of the child.
+func runChild(t *testing.T, name string) (string, syscall.WaitStatus) {
+	t.Helper()
+	if signal.Ignored(syscall.SIGHUP) {
+		t.Skip("SIGHUP is ignored")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.CommandContext(t.Context(), exe, "-test.run=^"+name+"$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), childEnv+"="+name)
+	out, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	if err != nil && !errors.As(err, &exitErr) {
+		t.Fatalf("the child did not run: %v\n%s", err, out)
+	}
+	status, _ := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	return string(out), status
+}
 
 // A SIGHUP while CatchHangup catches it cancels the context of CatchHangup
 // and the command context of Watch, and maps to the exit code 129. stop
@@ -61,6 +89,45 @@ func TestCatchHangupCancelsTheCommandContext(t *testing.T) {
 	}
 	if got := exitCode(); got != 0 {
 		t.Errorf("exit code after the catch = %d, want 0", got)
+	}
+}
+
+// A SIGHUP that came before stop counts, also when it is still in the
+// channel as stop runs. The hook holds the goroutine of the catch until
+// stop runs: the SIGHUP is then in the channel, and the goroutine sees
+// both the SIGHUP and stop. Its select picks one of the two at random, so
+// the test runs 64 rounds: stop must report the SIGHUP and cancel the
+// contexts in each round. The test runs in a child: a SIGHUP that no
+// catch holds ends the child, not the test binary.
+func TestCatchHangupActsOnASIGHUPBeforeStop(t *testing.T) {
+	const name = "TestCatchHangupActsOnASIGHUPBeforeStop"
+	if os.Getenv(childEnv) != name {
+		out, status := runChild(t, name)
+		if status.Signaled() || status.ExitStatus() != 0 || !strings.Contains(out, "--- PASS: "+name) {
+			t.Fatalf("the child failed (%v):\n%s", status, out)
+		}
+		return
+	}
+	beforeCatchWait = func(stopped <-chan struct{}) { <-stopped }
+	defer func() { beforeCatchWait = func(<-chan struct{}) {} }()
+	for round := range 64 {
+		root, exitCode := Watch(t.Context())
+		ctx, stop := CatchHangup(root)
+		if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
+			t.Fatal(err)
+		}
+		if !stop() {
+			t.Fatalf("round %d: stop did not report the SIGHUP that came before it", round)
+		}
+		if root.Err() == nil || ctx.Err() == nil {
+			t.Fatalf("round %d: the SIGHUP before stop did not cancel the contexts", round)
+		}
+		if got := exitCode(); got != 129 {
+			t.Fatalf("round %d: exit code = %d, want 129", round, got)
+		}
+	}
+	if !hungUp.Load() {
+		t.Error("Exit would not end lo with the SIGHUP")
 	}
 }
 

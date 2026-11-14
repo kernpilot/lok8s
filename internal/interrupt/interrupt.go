@@ -83,6 +83,10 @@ func Watch(parent context.Context) (ctx context.Context, exitCode func() int) {
 // does nothing when SIGHUP is ignored (nohup lo …): signal.Notify would
 // undo the ignore. The catch ends with the first SIGHUP: a second one
 // takes the default action again. stop reports whether a SIGHUP came.
+//
+// A SIGHUP that came before stop counts, also when it is still in the
+// channel as stop runs: stop acts on it as on any caught SIGHUP. A SIGHUP
+// after stop takes the default action.
 func CatchHangup(ctx context.Context) (context.Context, func() bool) {
 	if signal.Ignored(syscall.SIGHUP) {
 		return ctx, func() bool { return false }
@@ -91,30 +95,53 @@ func CatchHangup(ctx context.Context) (context.Context, func() bool) {
 	ctx, cancel := context.WithCancel(ctx)
 	ch := make(chan os.Signal, 1)
 	done := make(chan struct{})
+	finished := make(chan struct{})
 	var got atomic.Bool
+	hangup := func() {
+		got.Store(true)
+		if w != nil {
+			if w.got.CompareAndSwap(0, int32(syscall.SIGHUP)) {
+				hungUp.Store(true)
+			}
+			w.cancel()
+		}
+		cancel()
+	}
 	signal.Notify(ch, syscall.SIGHUP)
 	go func() {
+		defer close(finished)
+		beforeCatchWait(done)
 		select {
 		case <-ch:
 			signal.Stop(ch)
-			got.Store(true)
-			if w != nil {
-				if w.got.CompareAndSwap(0, int32(syscall.SIGHUP)) {
-					hungUp.Store(true)
-				}
-				w.cancel()
-			}
-			cancel()
+			hangup()
 		case <-done:
 		}
 	}()
 	return ctx, func() bool {
+		// After signal.Stop, a SIGHUP that came before it is in ch (or
+		// the goroutine has it): no SIGHUP is delivered to ch after
+		// that. select picks done or ch at random when both are ready,
+		// so the goroutine can end without the SIGHUP: stop waits for
+		// the goroutine, then takes a SIGHUP that is still in ch.
 		signal.Stop(ch)
 		close(done)
+		<-finished
+		select {
+		case <-ch:
+			hangup()
+		default:
+		}
 		cancel()
 		return got.Load()
 	}
 }
+
+// beforeCatchWait runs in the goroutine of CatchHangup before it waits for
+// a SIGHUP or for stop. Its argument closes when stop runs. A test sets it
+// to hold the goroutine until stop runs, so that a SIGHUP is still in the
+// channel then.
+var beforeCatchWait = func(<-chan struct{}) {}
 
 // Exit ends lo with code. When a SIGHUP was the first signal of the run
 // (CatchHangup), it ends lo with that SIGHUP instead: with the handler
