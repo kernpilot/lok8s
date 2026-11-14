@@ -41,7 +41,8 @@ func runChild(t *testing.T, name string) (string, syscall.WaitStatus) {
 
 // A SIGHUP while CatchHangup catches it cancels the context of CatchHangup
 // and the command context of Watch, and maps to the exit code 129. stop
-// reports it. After stop, a SIGHUP takes the default action again: it ends
+// reports it. Without a Watch in the context, the SIGHUP cancels the
+// context of CatchHangup. After stop, a SIGHUP takes the default action again: it ends
 // the child that the test runs in, as no handler of the test holds it.
 func TestCatchHangupCancelsTheCommandContext(t *testing.T) {
 	const name = "TestCatchHangupCancelsTheCommandContext"
@@ -77,6 +78,20 @@ func TestCatchHangupCancelsTheCommandContext(t *testing.T) {
 	}
 	if got := exitCode(); got != 129 {
 		t.Fatalf("exit code = %d, want 129", got)
+	}
+
+	// Without a Watch, the catch cancels its own context.
+	ctx, stop = CatchHangup(t.Context())
+	if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("without a Watch, SIGHUP did not cancel the context of CatchHangup")
+	}
+	if !stop() {
+		t.Fatal("without a Watch, stop did not report the SIGHUP")
 	}
 
 	// A catch without a SIGHUP reports none, and leaves the default action.
