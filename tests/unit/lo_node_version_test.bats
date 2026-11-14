@@ -188,11 +188,12 @@ _yq_stub() {
 
 # _gone <pattern> — true when no process matches <pattern> (_pgrep_f of
 # test_helper: the CI bats container has no pgrep) within 2 s. A process
-# that a signal stops can stay visible for a moment.
+# that a signal stops can stay visible for a moment. Status 2 (with a
+# message): _pgrep_f failed, so nothing is known.
 _gone() {
   local i found
   for i in $(seq 1 20); do
-    found=$(_pgrep_f "${1}") || return 2
+    found=$(_pgrep_f "${1}") || { echo "_gone: _pgrep_f failed for '${1}'" >&2; return 2; }
     [[ -n "${found}" ]] || return 0
     sleep 0.1
   done
@@ -234,7 +235,10 @@ _kill_left() {
 # The CI bats container has no ps and no pgrep: a test that calls one sees
 # "command not found", and a check built on it passes without checking. The
 # /proc helpers of test_helper (_ppid, _children, _pgrep_f) call them only
-# where /proc does not exist.
+# where /proc does not exist. The guard reads lines, not the shell: it
+# misses a call in a quoted string (bash -c 'pgrep -f x'), a quoted name
+# ("pgrep"), `ps ax` or a bare `ps`, a one-line @test, and a call in a
+# heredoc line that starts with #. It finds none of these in the tree today.
 @test "the unit tests call ps and pgrep only in the fallbacks of test_helper" {
   run grep -rnE "(^|[^[:alnum:]_.'-])((pgrep|pkill|pidof|killall)[[:space:]]+[^[:space:]]|ps[[:space:]]+(-|aux))" \
     "${_PROJECT_ROOT}/tests/unit" "${_PROJECT_ROOT}/tests/operator" "${_PROJECT_ROOT}/tests/lib" \
@@ -263,16 +267,20 @@ _kill_left() {
   local limit pid found="" i
   # A duration that no other process uses.
   limit=$(( 6000 + RANDOM % 1000 ))
-  sleep "${limit}" &
+  # 3>&-: a sleep left behind must not hold bats' output open.
+  sleep "${limit}" 3>&- &
   pid=$!
   # Until the child has run exec, its command line is the shell's: wait for
   # it, as _gone waits for an end. The kill runs on every path.
+  local rc=0
   for i in $(seq 1 20); do
-    found=$(_pgrep_f "^sleep ${limit}\$") || :
-    [[ -z "${found}" ]] || break
+    rc=0
+    found=$(_pgrep_f "^sleep ${limit}\$") || rc=$?
+    [[ -z "${found}" && "${rc}" -eq 0 ]] || break
     sleep 0.1
   done
   kill "${pid}" 2>/dev/null || :
+  [ "${rc}" -eq 0 ] || { echo "_pgrep_f failed with status ${rc}" >&2; return 1; }
   [ "${found}" = "${pid}" ] || { echo "_pgrep_f gave '${found}', want '${pid}'" >&2; return 1; }
 }
 
