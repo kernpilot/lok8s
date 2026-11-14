@@ -101,8 +101,13 @@ func TestCatchHangupCancelsTheCommandContext(t *testing.T) {
 // stop runs: the SIGHUP is then in the channel, and the goroutine sees
 // both the SIGHUP and stop. Its select picks one of the two at random, so
 // the test runs 64 rounds: stop must report the SIGHUP and cancel the
-// contexts in each round. The test runs in a child: a SIGHUP that no
-// catch holds ends the child, not the test binary.
+// contexts in each round. The kernel can give the SIGHUP to another
+// thread, after the kill returns: so the test waits for the SIGHUP on a
+// channel of its own before it calls stop. signal sends a SIGHUP to each
+// channel in one step, under the lock that signal.Stop takes, so the
+// SIGHUP is then in the channel of the catch too. The test runs in a
+// child: a SIGHUP that no catch holds ends the child, not the test
+// binary.
 func TestCatchHangupActsOnASIGHUPBeforeStop(t *testing.T) {
 	const name = "TestCatchHangupActsOnASIGHUPBeforeStop"
 	if os.Getenv(childEnv) != name {
@@ -114,11 +119,19 @@ func TestCatchHangupActsOnASIGHUPBeforeStop(t *testing.T) {
 	}
 	beforeCatchWait = func(stopped <-chan struct{}) { <-stopped }
 	defer func() { beforeCatchWait = func(<-chan struct{}) {} }()
+	seen := make(chan os.Signal, 1)
+	signal.Notify(seen, syscall.SIGHUP)
+	defer signal.Stop(seen)
 	for round := range 64 {
 		root, exitCode := Watch(t.Context())
 		ctx, stop := CatchHangup(root)
 		if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
 			t.Fatal(err)
+		}
+		select {
+		case <-seen:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("round %d: the SIGHUP did not come", round)
 		}
 		if !stop() {
 			t.Fatalf("round %d: stop did not report the SIGHUP that came before it", round)
