@@ -48,6 +48,9 @@ func rcUnreadable(what string) string {
 func rcDriver(t *testing.T, manifest string, addons map[string]string) (*Driver, *fakeRunner, *bytes.Buffer, string) {
 	t.Helper()
 	clearVarEnv(t)
+	// DEBUG adds [debug] lines to stderr (ui.DebugTo), and the tests of
+	// the run copy compare stderr exactly.
+	t.Setenv("DEBUG", "")
 	d, runner, errBuf, p := testDriver(t, nil)
 	wd := filepath.Join(p.Clusters, "test.lok8s.dev", ".kubeone")
 	testutil.WriteFile(t, filepath.Join(wd, "kubeone.yaml"), manifest)
