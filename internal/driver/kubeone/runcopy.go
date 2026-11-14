@@ -110,7 +110,7 @@ func stageRun(stderr io.Writer, workDir string) (string, func(), error) {
 	// token: the cleanup names it (bash: rm names it in the EXIT trap).
 	cleanup := func() {
 		if err := removeAll(run); err != nil {
-			reportLeft(stderr, run, "the run copy", err)
+			reportLeft(stderr, run, "the run directory", err)
 		}
 		if wrote {
 			if err := removeFile(run + ".yaml"); err != nil {
@@ -400,9 +400,9 @@ func reportPartLeft(stderr io.Writer, err error) {
 	}
 }
 
-// reportLeft tells the user about a file or a directory of the run copy
-// (what) that lo could not remove (cause) and that is still there: it can
-// hold credentials. It names the path and the cause, never the content.
+// reportLeft tells the user about the run directory, the manifest copy or
+// a part of a copy (what) that lo could not remove (cause) and that is
+// still there: it can hold credentials. It names the path and the cause, never the content.
 func reportLeft(stderr io.Writer, path, what string, cause error) {
 	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
 		return

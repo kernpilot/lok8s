@@ -438,7 +438,7 @@ func TestApplyNamesARunCopyThatItCannotRemove(t *testing.T) {
 				removeAll = denied
 				t.Cleanup(func() { removeAll = orig })
 			},
-			want: func(run string) string { return msg(run, "the run copy") },
+			want: func(run string) string { return msg(run, "the run directory") },
 		},
 		"the manifest copy": {
 			hook: func(t *testing.T, _ string) {
@@ -468,7 +468,7 @@ func TestApplyNamesARunCopyThatItCannotRemove(t *testing.T) {
 				}
 				t.Cleanup(func() { _ = os.Chmod(wd, 0o700) })
 			},
-			want: func(run string) string { return msg(run, "the run copy") + msg(run+".yaml", "the manifest copy") },
+			want: func(run string) string { return msg(run, "the run directory") + msg(run+".yaml", "the manifest copy") },
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
