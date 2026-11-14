@@ -722,6 +722,8 @@ func TestKeysOnlyProbesThePlugin(t *testing.T) {
 		{"dry-run only", "echo dry-run", false},
 		{"no flag, store-free switch", "exit 0", false},
 		{"no flag, a missing spec file", "echo 'secret plugin: open spec \"--capabilities\": no such file' >&2; exit 1", false},
+		{"keys-only, then a failure", "printf 'dry-run\\nkeys-only\\n'; exit 1", false},
+		{"a longer line only", "printf 'keys-only-not\\ndry-run\\n'", false},
 		{"keys-only", "printf 'dry-run\\nkeys-only\\n'", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
