@@ -15,6 +15,11 @@ set -euo pipefail
 # plugin, tilt, the registry TLS mint), so it is 0 from here on (Go: run in
 # cmd/lo/main.go). The calls that render pin it again.
 export LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0
+# _ko_at is the mark of a trace guard that runs (utils/keysonly.sh): the
+# first line of each guard does nothing while it is set. It is not a
+# setting, so a value inherited from the caller's environment must not
+# turn the guards off.
+unset _ko_at
 
 : "${PATH_BASE:="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"}"
 : "${PATH_BIN:="${PATH_BASE}/.bin"}"

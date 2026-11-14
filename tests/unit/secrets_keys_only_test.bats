@@ -40,7 +40,7 @@ _run_stubbed() {
   for tool in kubectl kind tilt docker kustomize; do
     cat > "${stub}/${tool}" <<'EOF'
 #!/bin/sh
-printf '%s keys-only=%s disable=%s\n' "$(basename "$0")" "${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}" "${LOK8S_SECRETS_DISABLE-<unset>}" >> "${STUB_LOG}"
+printf '%s keys-only=%s disable=%s%s\n' "$(basename "$0")" "${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}" "${LOK8S_SECRETS_DISABLE-<unset>}" "${_ko_at+ _ko_at=${_ko_at}}" >> "${STUB_LOG}"
 case "$(basename "$0") ${1:-}" in
   "kustomize build") printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: stub\n' ;;
   *) echo "v1.2.3" ;;
@@ -71,6 +71,24 @@ _run_lo_stubbed() {
 # the stubs see is what the entry left in the environment.
 @test "the lo entry pins the keys-only setting to 0 for every child" {
   [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
+  _run_lo_stubbed version </dev/null
+  assert_success
+  run cat "${STUB_LOG}"
+  [ "${#lines[@]}" -eq 5 ] || { echo "want 5 stub lines, got: ${output}"; return 1; }
+  assert_line "kubectl keys-only=0 disable=1"
+  assert_line "kind keys-only=0 disable=1"
+  assert_line "kustomize keys-only=0 disable=1"
+  assert_line "tilt keys-only=0 disable=1"
+  assert_line "docker keys-only=0 disable=1"
+}
+
+# _ko_at is the mark of a trace guard that runs (utils/keysonly.sh): while
+# it is set, the first line of each guard does nothing. The lo entry
+# unsets a value inherited from the caller, so the guards of lo work and
+# no child gets it. Each stub logs _ko_at when it has one.
+@test "the lo entry unsets an inherited _ko_at" {
+  [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
+  export _ko_at=1
   _run_lo_stubbed version </dev/null
   assert_success
   run cat "${STUB_LOG}"
