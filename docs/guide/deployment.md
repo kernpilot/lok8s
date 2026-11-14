@@ -255,7 +255,10 @@ not apply a manifest that holds one:
   stop, remove `.kubeone-run-*` by hand. When a write of the copy fails
   (a full disk), lo removes the part that it wrote. When the Go `lo`
   cannot remove that part, it shows the path of the file: remove that
-  file by hand.
+  file by hand. When lo cannot remove the run directory or the copy of
+  the manifest after the run (for example, the work dir is not
+  writable), it shows the path too (bash: the message of `rm`): remove
+  it by hand.
 
   The copy of the manifest is beside `kubeone.yaml`, so the other paths
   of the manifest (the CA file, the audit and node-selector files) are
