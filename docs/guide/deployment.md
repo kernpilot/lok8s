@@ -253,7 +253,9 @@ not apply a manifest that holds one:
   second signal while lo removes them can also leave them. The copies
   hold the CCM render, with its Hetzner token, in plaintext. After such a
   stop, remove `.kubeone-run-*` by hand. When a write of the copy fails
-  (a full disk), lo removes the part that it wrote.
+  (a full disk), lo removes the part that it wrote. When the Go `lo`
+  cannot remove that part, it shows the path of the file: remove that
+  file by hand.
 
   The copy of the manifest is beside `kubeone.yaml`, so the other paths
   of the manifest (the CA file, the audit and node-selector files) are
