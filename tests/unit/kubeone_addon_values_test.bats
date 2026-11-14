@@ -747,11 +747,12 @@ _apply_within() {
   chmod 700 "${work_dir}"
   assert_failure
   [ ! -f "${KCALLS}" ]
+  # The first line of each: no rm line may come before the cause.
   local line n=0 cause=0 left=0
   while IFS= read -r line; do
     n=$((n + 1))
-    [[ "${line}" != *"kubeone: cannot write the manifest copy ${FIXED}.yaml"* ]] || cause=${n}
-    [[ "${line}" != *"cannot remove '${FIXED}'"* ]] || left=${n}
+    [[ "${line}" != *"kubeone: cannot write the manifest copy ${FIXED}.yaml"* ]] || (( cause )) || cause=${n}
+    [[ "${line}" != *"cannot remove '${FIXED}'"* ]] || (( left )) || left=${n}
   done <<< "${output}"
   (( cause > 0 && left > cause )) || { echo "the cause (line ${cause}) must come before the run directory (line ${left}): ${output}"; return 1; }
   refute_output --partial "cause-first-canary"
