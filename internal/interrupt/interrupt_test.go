@@ -148,7 +148,7 @@ func TestCatchHangupActsOnASIGHUPBeforeStop(t *testing.T) {
 	for round := range 64 {
 		held.Store(false)
 		root, exitCode := Watch(t.Context())
-		ctx, stop := CatchHangup(root)
+		_, stop := CatchHangup(root)
 		if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
 			t.Fatal(err)
 		}
@@ -163,8 +163,10 @@ func TestCatchHangupActsOnASIGHUPBeforeStop(t *testing.T) {
 		if !held.Load() {
 			t.Fatalf("round %d: stop returned before the goroutine of the catch ended", round)
 		}
-		if root.Err() == nil || ctx.Err() == nil {
-			t.Fatalf("round %d: the SIGHUP before stop did not cancel the contexts", round)
+		// stop cancels the context of the catch itself, so only the
+		// command context shows that the SIGHUP was acted on.
+		if root.Err() == nil {
+			t.Fatalf("round %d: the SIGHUP before stop did not cancel the command context", round)
 		}
 		if got := exitCode(); got != 129 {
 			t.Fatalf("round %d: exit code = %d, want 129", round, got)
