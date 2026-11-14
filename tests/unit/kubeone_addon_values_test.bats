@@ -741,6 +741,7 @@ _apply_within() {
   printf 'name: test-prod\ntoken: cause-first-canary\n' > "${work_dir}/kubeone.yaml"
   kubeone::_clean_reinstalled_workers() { :; }
   kubeone::_name_robot_workers() { :; }
+  kubeone::render_addons() { :; }
   kubeone() { echo "kubeone $*" >> "${KCALLS}"; }
   mktemp() { mkdir -m 700 "${FIXED}" && chmod 500 "${work_dir}" && printf '%s\n' "${FIXED}"; }
   run kubeone::apply "${work_dir}" "${cy}"
