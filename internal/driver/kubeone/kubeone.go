@@ -300,6 +300,8 @@ func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
 	// provision). main then ends lo with the SIGHUP (interrupt.Exit). A
 	// SIGKILL, or a second signal, can leave the copy.
 	ctx, stopHangup := interrupt.CatchHangup(ctx)
+	// Apply ignores the bool of stop on purpose: after a SIGHUP, main ends
+	// lo with 129, and the bash implementation ends after its EXIT trap.
 	defer stopHangup()
 	manifest, cleanup, err := stageRun(d.stderr(), workDir)
 	if err != nil {

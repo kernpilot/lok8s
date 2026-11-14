@@ -263,9 +263,9 @@ not apply a manifest that holds one:
   So a writer who can create or rename files in the work dir can also
   replace these files: keep the work dir writable only by you. lo does
   not write over a file that is at the path of the copy already, and it
-  stops the apply. The two trees differ when a file appears at that path
-  after lo checked it: the Go `lo` keeps that file, and the bash
-  implementation removes it when the apply ends.
+  stops the apply. The two implementations differ when a file appears at
+  that path after lo checked it: the Go `lo` keeps that file, and the
+  bash implementation removes it when the apply ends.
 - The Tilt extension runs `lo tilt preflight` on its manifest (the domain
   artifact and the service overlays on it) before it applies anything, on
   every load. A manifest with the annotation, or one that cannot be read

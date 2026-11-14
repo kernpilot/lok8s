@@ -84,9 +84,10 @@ _run_lo_stubbed() {
 
 # _ko_at is the mark of a trace guard that runs (utils/keysonly.sh): while
 # it is set, the first line of each guard does nothing. The lo entry
-# unsets a value inherited from the caller, so the guards of lo work and
-# no child gets it. Each stub logs _ko_at when it has one.
-@test "the lo entry unsets an inherited _ko_at" {
+# unsets a value inherited from the caller, so the guards of lo work. The
+# test measures the result: no child of lo gets _ko_at. Each stub logs
+# _ko_at when it has one.
+@test "no child of the lo entry gets an inherited _ko_at" {
   [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
   export _ko_at=1
   _run_lo_stubbed version </dev/null
