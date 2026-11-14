@@ -186,12 +186,15 @@ _yq_stub() {
   assert_output "spec.kubernetes.version cannot be read: yq stopped at the memory limit of 256 MiB, or a signal stopped it. Simplify the spec file."
 }
 
-# _gone <pattern> — true when no process matches <pattern> (pgrep -f) within
-# 2 s. A process that a signal stops can stay visible for a moment.
+# _gone <pattern> — true when no process matches <pattern> (_pgrep_f of
+# test_helper: the CI bats container has no pgrep) within 2 s. A process
+# that a signal stops can stay visible for a moment. Status 2 (with a
+# message): _pgrep_f failed, so nothing is known.
 _gone() {
-  local i
+  local i found
   for i in $(seq 1 20); do
-    pgrep -f "${1}" >/dev/null || return 0
+    found=$(_pgrep_f "${1}") || { echo "_gone: _pgrep_f failed for '${1}'" >&2; return 2; }
+    [[ -n "${found}" ]] || return 0
     sleep 0.1
   done
   return 1
@@ -200,7 +203,7 @@ _gone() {
 # _kill_left <pattern> — stop the processes that a failed test left behind.
 _kill_left() {
   local p
-  for p in $(pgrep -f "${1}"); do kill "${p}" 2>/dev/null || :; done
+  for p in $(_pgrep_f "${1}"); do kill "${p}" 2>/dev/null || :; done
 }
 
 @test "spec::_kver_yq: the watchdog does not stop a read that ends before the time limit" {
@@ -218,7 +221,7 @@ _kill_left() {
 
 @test "spec::_kver_yq: a read that ends in time leaves no watchdog sleep behind" {
   _spec "version: v1.31.4"
-  # A time limit that no other process uses, so pgrep finds only this sleep.
+  # A time limit that no other process uses, so _gone finds only this sleep.
   _SPEC_KVER_TIMEOUT=$(( 7000 + RANDOM % 1000 ))
   run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
   assert_success
@@ -227,6 +230,58 @@ _kill_left() {
     _kill_left "^sleep ${_SPEC_KVER_TIMEOUT}\$"
     echo "the watchdog left 'sleep ${_SPEC_KVER_TIMEOUT}' running" >&2; return 1
   }
+}
+
+# The CI bats container has no ps and no pgrep: a test that calls one sees
+# "command not found", and a check built on it passes without checking. The
+# /proc helpers of test_helper (_ppid, _children, _pgrep_f) call them only
+# where /proc does not exist. The guard reads lines, not the shell: it
+# misses a call in a quoted string (bash -c 'pgrep -f x'), a quoted name
+# ("pgrep"), `ps ax` or a bare `ps`, a one-line @test, and a call in a
+# heredoc line that starts with #. It finds none of these in the tree today.
+@test "the unit tests call ps and pgrep only in the fallbacks of test_helper" {
+  run grep -rnE "(^|[^[:alnum:]_.'-])((pgrep|pkill|pidof|killall)[[:space:]]+[^[:space:]]|ps[[:space:]]+(-|aux))" \
+    "${_PROJECT_ROOT}/tests/unit" "${_PROJECT_ROOT}/tests/operator" "${_PROJECT_ROOT}/tests/lib" \
+    "${_PROJECT_ROOT}/tests/test_helper.bash"
+  # A comment or a test name can name the tools: only code lines count.
+  local line text bad="" n=0 skip='^[[:space:]]*(#|@test[[:space:]])'
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    text="${line#*:*:}"
+    [[ ! "${text}" =~ ${skip} ]] || continue
+    if [[ "${line}" == "${_PROJECT_ROOT}/tests/test_helper.bash:"* ]]; then
+      n=$(( n + 1 ))
+    else
+      bad+="${line}"$'\n'
+    fi
+  done <<< "${output}"
+  [ -z "${bad}" ] || { echo "calls outside the fallbacks: ${bad}" >&2; return 1; }
+  # The three fallbacks (_ppid, _children, _pgrep_f). A count of 0 means that
+  # the grep itself failed.
+  [ "${n}" -eq 3 ] || { echo "test_helper has ${n} calls, want 3: ${output}" >&2; return 1; }
+}
+
+# _pgrep_f must find a process, not only report none: every other caller
+# checks only that a process is gone.
+@test "_pgrep_f finds a running process by its command line" {
+  local limit pid found="" i
+  # A duration that no other process uses.
+  limit=$(( 6000 + RANDOM % 1000 ))
+  # 3>&-: a sleep left behind must not hold bats' output open.
+  sleep "${limit}" 3>&- &
+  pid=$!
+  # Until the child has run exec, its command line is the shell's: wait for
+  # it, as _gone waits for an end. The kill runs on every path.
+  local rc=0
+  for i in $(seq 1 20); do
+    rc=0
+    found=$(_pgrep_f "^sleep ${limit}\$") || rc=$?
+    [[ -z "${found}" && "${rc}" -eq 0 ]] || break
+    sleep 0.1
+  done
+  kill "${pid}" 2>/dev/null || :
+  [ "${rc}" -eq 0 ] || { echo "_pgrep_f failed with status ${rc}" >&2; return 1; }
+  [ "${found}" = "${pid}" ] || { echo "_pgrep_f gave '${found}', want '${pid}'" >&2; return 1; }
 }
 
 # A `read -t N` on a process substitution opened read-write (`<> <(:)`)
@@ -248,7 +303,7 @@ _kill_left() {
   for sig in TERM INT; do
     want=143
     [[ "${sig}" == INT ]] && want=130
-    # Durations that no other process uses, so pgrep finds only these.
+    # Durations that no other process uses, so _gone finds only these.
     limit=$(( 8000 + RANDOM % 1000 ))
     stub_sleep=$(( 9000 + RANDOM % 1000 ))
     # The yq stub stops the read it runs in (its parent) with the signal, as

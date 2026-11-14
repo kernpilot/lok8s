@@ -334,3 +334,30 @@ _children() {
     ps -A -o pid=,ppid= | awk -v p="${1}" '$2 == p { print $1 }'
   fi
 }
+
+# _pgrep_f <ERE> — the pids whose command line (its arguments joined by
+# spaces) matches <ERE>, as pgrep's full-command mode gives them, leaving
+# out the shell that scans. From /proc where it exists (the CI bats
+# container has no pgrep), else from pgrep (macOS). No match is status 0
+# on both; any other status is an error.
+_pgrep_f() {
+  if [[ -d /proc/self ]]; then
+    # mapfile -d needs bash 4.4. An older bash would find no process.
+    if (( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] < 404 )); then
+      echo "_pgrep_f: bash ${BASH_VERSION} has no mapfile -d (4.4 or later)" >&2
+      return 2
+    fi
+    local dir cmd IFS=' '
+    local -a args
+    for dir in /proc/[0-9]*; do
+      [[ "${dir#/proc/}" != "${BASHPID}" ]] || continue
+      # A builtin read, no fork per process. The braces also catch the
+      # error of a process that ended during the scan.
+      { mapfile -t -d '' args < "${dir}/cmdline"; } 2>/dev/null || continue
+      cmd="${args[*]}"
+      if [[ -n "${cmd}" && "${cmd}" =~ ${1} ]]; then echo "${dir#/proc/}"; fi
+    done
+  else
+    pgrep -f "${1}" || (( $? == 1 ))
+  fi
+}
