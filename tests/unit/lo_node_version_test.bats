@@ -235,13 +235,30 @@ _kill_left() {
 # /proc helpers of test_helper (_ppid, _children, _pgrep_f) call them only
 # where /proc does not exist.
 @test "the unit tests call ps and pgrep only in the fallbacks of test_helper" {
-  run grep -rnE "(^|[^[:alnum:]_.'-])(ps|pgrep|pkill|pidof) +-" "${_PROJECT_ROOT}/tests/unit" "${_PROJECT_ROOT}/tests/test_helper.bash"
-  local line bad=""
+  run grep -rnE "(^|[^[:alnum:]_.'-])((ps|pgrep|pkill)[[:space:]]+-|pidof[[:space:]])" \
+    "${_PROJECT_ROOT}/tests/unit" "${_PROJECT_ROOT}/tests/operator" "${_PROJECT_ROOT}/tests/test_helper.bash"
+  local line bad="" n
   while IFS= read -r line; do
     [[ -z "${line}" || "${line}" == "${_PROJECT_ROOT}/tests/test_helper.bash:"* ]] || bad+="${line}"$'\n'
   done <<< "${output}"
   [ -z "${bad}" ] || { echo "calls outside the fallbacks: ${bad}" >&2; return 1; }
-  [ "$(grep -c "${_PROJECT_ROOT}/tests/test_helper.bash:" <<< "${output}")" -eq 3 ]
+  # The three fallbacks (_ppid, _children, _pgrep_f). A count of 0 means that
+  # the grep itself failed.
+  n=$(grep -c "${_PROJECT_ROOT}/tests/test_helper.bash:" <<< "${output}")
+  [ "${n}" -eq 3 ] || { echo "test_helper has ${n} matching lines, want 3: ${output}" >&2; return 1; }
+}
+
+# _pgrep_f must find a process, not only report none: every other caller
+# checks only that a process is gone.
+@test "_pgrep_f finds a running process by its command line" {
+  local limit pid found
+  # A duration that no other process uses.
+  limit=$(( 6000 + RANDOM % 1000 ))
+  sleep "${limit}" &
+  pid=$!
+  found=$(_pgrep_f "^sleep ${limit}\$")
+  kill "${pid}" 2>/dev/null || :
+  [ "${found}" = "${pid}" ] || { echo "_pgrep_f gave '${found}', want '${pid}'" >&2; return 1; }
 }
 
 # A `read -t N` on a process substitution opened read-write (`<> <(:)`)

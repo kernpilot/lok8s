@@ -341,11 +341,14 @@ _children() {
 # container has no pgrep), else from pgrep (macOS).
 _pgrep_f() {
   if [[ -d /proc/self ]]; then
-    local dir cmd
+    local dir cmd IFS=' '
+    local -a args
     for dir in /proc/[0-9]*; do
       [[ "${dir#/proc/}" != "${BASHPID}" ]] || continue
-      cmd="$(tr '\0' ' ' < "${dir}/cmdline" 2>/dev/null)" || continue
-      cmd="${cmd% }"
+      # A builtin read, no fork per process. The braces also catch the
+      # error of a process that ended during the scan.
+      { mapfile -t -d '' args < "${dir}/cmdline"; } 2>/dev/null || continue
+      cmd="${args[*]}"
       if [[ -n "${cmd}" && "${cmd}" =~ ${1} ]]; then echo "${dir#/proc/}"; fi
     done
   else
