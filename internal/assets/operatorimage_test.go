@@ -16,14 +16,16 @@ import (
 // plain HTTP. The final stage must write exactly Alpine's CDN over HTTPS
 // (main and community) to /etc/apk/repositories, before its first apk
 // call. The test is an allow list: one fixed write, no other mention of
-// /etc/apk or repositories, and apk calls only as `apk upgrade --no-cache`
-// and `apk add --no-cache <packages>`. Any other form fails (also a quoted
-// path, a tee, a heredoc, an escape directive or an ARG in the final
-// FROM), so a change to the image's package setup changes this test with
-// it. It reads text, not the shell. These can still get past it: a call
-// through a variable or from a path outside a bin directory, a relative
-// path from another directory, a file that COPY or ADD brings in, and
-// another tool that writes the file (such as setup-apkrepos).
+// /etc/apk or repositories, no SSL_NO_VERIFY or APK_CONFIG, and apk calls
+// only as `apk upgrade --no-cache` and `apk add --no-cache <packages>`
+// (names from the index, not .apk files). Any other form fails (also a
+// quoted path, a tee, a redirect after apk, a heredoc, an escape directive
+// or an ARG in the final FROM), so a change to the image's package setup
+// changes this test with it. It reads text, not the shell. These can still
+// get past it: a call through a variable or by a path outside a bin
+// directory (such as ./apk), a write by a glob or a relative path (cd /etc,
+// then ap*/repo*), a file that COPY or ADD brings in, and another tool or
+// a fetched script that writes the file (such as setup-apkrepos).
 func TestOperatorImageApkUsesAlpineHTTPS(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile(filepath.Join(testutil.RepoRoot(t), "operator/Dockerfile"))
@@ -36,15 +38,16 @@ func TestOperatorImageApkUsesAlpineHTTPS(t *testing.T) {
 	}
 	// Comment lines are removed first (a comment may name apk), then the
 	// backslash line continuations are folded, so an instruction is one
-	// line. Each run of blanks becomes one space (the write's quoted text
-	// has no blank).
+	// line. A blank line inside a continuation does not end it (BuildKit
+	// skips it). Each run of blanks becomes one space (the write's quoted
+	// text has no blank).
 	var code []string
 	for line := range strings.SplitSeq(text, "\n") {
 		if !strings.HasPrefix(strings.TrimSpace(line), "#") {
 			code = append(code, line)
 		}
 	}
-	s := regexp.MustCompile(`[ \t]*\\[ \t]*\n[ \t]*`).ReplaceAllString(strings.Join(code, "\n"), " ")
+	s := regexp.MustCompile(`[ \t]*\\[ \t]*\n(?:[ \t]*\n)*[ \t]*`).ReplaceAllString(strings.Join(code, "\n"), " ")
 	s = regexp.MustCompile(`[ \t]+`).ReplaceAllString(s, " ")
 	// A heredoc body line can start with "from" and read as a stage.
 	if strings.Contains(s, "<<") {
@@ -82,14 +85,22 @@ func TestOperatorImageApkUsesAlpineHTTPS(t *testing.T) {
 	rest := stage[:w] + stage[w+len(write):]
 	for _, word := range []string{"/etc/apk", "apk/", "repositories"} {
 		if strings.Contains(rest, word) {
-			t.Errorf("the final stage of operator/Dockerfile names %s outside the one write: only that write may name the apk configuration", word)
+			t.Errorf("the final stage of operator/Dockerfile names %s outside the one write: this test allows no other path with that name", word)
+		}
+	}
+	// These change how apk checks TLS, or which options file it reads.
+	for _, word := range []string{"SSL_NO_VERIFY", "APK_CONFIG"} {
+		if strings.Contains(stage, word) {
+			t.Errorf("the final stage of operator/Dockerfile names %s: it changes how apk fetches", word)
 		}
 	}
 
 	// Each apk call: the word apk (also /sbin/apk or apk.static) after a
-	// separator or a quote. Its arguments run to the next shell operator.
-	call := regexp.MustCompile("(?:^|[\\s;&|(\"'\\[,`])(?:\\S*/s?bin/)?apk(?:\\.static)?(?:[\\s\"',\\]`]|$)")
-	end := regexp.MustCompile("[;|&\n)<>`]")
+	// separator, a quote or a backslash. Its arguments run to the next
+	// command separator: a redirect is part of them, so options after it
+	// count.
+	call := regexp.MustCompile("(?:^|[\\s;&|(\"'\\[,`\\\\])(?:\\S*/s?bin/)?apk(?:\\.static)?(?:[\\s\"',\\]`]|$)")
+	end := regexp.MustCompile("[;|&\n)`]")
 	allowed := regexp.MustCompile(`^(upgrade --no-cache|add --no-cache( [a-z0-9][a-z0-9._+-]*([=~][a-z0-9._+-]+)?)+)$`)
 	calls := call.FindAllStringIndex(stage, -1)
 	if len(calls) == 0 {
@@ -108,7 +119,7 @@ func TestOperatorImageApkUsesAlpineHTTPS(t *testing.T) {
 		switch {
 		case c[0] < w:
 			t.Errorf("the final stage of operator/Dockerfile calls apk before it writes /etc/apk/repositories: apk %s", args)
-		case !allowed.MatchString(args):
+		case !allowed.MatchString(args), strings.Contains(args, ".apk"):
 			t.Errorf("the final stage of operator/Dockerfile calls apk in a form this test does not allow (only upgrade --no-cache and add --no-cache <packages>): apk %s", args)
 		}
 	}
