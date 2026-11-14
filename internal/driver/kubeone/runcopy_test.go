@@ -137,6 +137,8 @@ func TestApplyRunCopyKeepsMergedSettingsAndPathForms(t *testing.T) {
 		"merge sequence":   "a: &a {enable: true}\nb: &b {enable: false, path: ./addons}\nname: test-prod\naddons:\n  <<: [*a, *b]\n",
 		"first merge wins": "a: &a {enable: true, path: ./addons}\nb: &b {enable: false, path: ./elsewhere}\nname: test-prod\naddons:\n  <<: [*a, *b]\n",
 		"root merge alias": "x: &x {addons: {enable: true, path: ./addons/}}\nname: test-prod\n<<: *x\n",
+		"tagged addons":    "name: test-prod\naddons: !foo {enable: true, path: ./addons}\n",
+		"tagged root":      "!foo\nname: test-prod\naddons:\n  enable: true\n  path: ./addons\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			d, runner, _, wd := rcDriver(t, manifest, map[string]string{"ccm-hetzner/ccm.yaml": rcClean})
@@ -168,6 +170,23 @@ func TestApplyRunCopyKeepsMergedSettingsAndPathForms(t *testing.T) {
 		t.Run("refusal with "+path, func(t *testing.T) {
 			d, runner, errBuf, wd := rcDriver(t, "name: test-prod\naddons:\n  enable: true\n  path: "+path+"\n",
 				map[string]string{"ccm-hetzner/ccm.yaml": rcMarked})
+			if err := d.Apply(t.Context(), wd, ""); err == nil || len(runner.calls) != 0 {
+				t.Fatalf("err %v, calls %v: kubeone must not run", err, runner.calls)
+			}
+			if want := rcRefusal("addons/ccm-hetzner/ccm.yaml"); errBuf.String() != want {
+				t.Errorf("stderr = %q, want %q", errBuf.String(), want)
+			}
+			assertNoRunCopy(t, wd)
+		})
+	}
+	// A tag on the addons mapping or on the root does not change what the
+	// node is: the guard checks the files of a tagged addons.path too.
+	for name, manifest := range map[string]string{
+		"tagged addons": "name: test-prod\naddons: !foo {enable: true, path: ./addons}\n",
+		"tagged root":   "!foo\nname: test-prod\naddons:\n  enable: true\n  path: ./addons\n",
+	} {
+		t.Run("refusal with "+name, func(t *testing.T) {
+			d, runner, errBuf, wd := rcDriver(t, manifest, map[string]string{"ccm-hetzner/ccm.yaml": rcMarked})
 			if err := d.Apply(t.Context(), wd, ""); err == nil || len(runner.calls) != 0 {
 				t.Fatalf("err %v, calls %v: kubeone must not run", err, runner.calls)
 			}

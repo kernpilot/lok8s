@@ -431,6 +431,8 @@ _run_copy_spec() {
     [merge-sequence]=$'a: &a {enable: true}\nb: &b {enable: false, path: ./addons}\nname: test-prod\naddons:\n  <<: [*a, *b]\n'
     [first-merge-wins]=$'a: &a {enable: true, path: ./addons}\nb: &b {enable: false, path: ./elsewhere}\nname: test-prod\naddons:\n  <<: [*a, *b]\n'
     [root-merge-alias]=$'x: &x {addons: {enable: true, path: ./addons/}}\nname: test-prod\n<<: *x\n'
+    [tagged-addons]=$'name: test-prod\naddons: !foo {enable: true, path: ./addons}\n'
+    [tagged-root]=$'!foo\nname: test-prod\naddons:\n  enable: true\n  path: ./addons\n'
   )
   local name spec
   for name in "${!manifests[@]}"; do
@@ -450,6 +452,15 @@ _run_copy_spec() {
     [ "${status}" -ne 0 ] || { echo "${path}: status 0"; return 1; }
     [[ "${output}" == *"kubeone: refusing to apply addons/ccm-hetzner/ccm.yaml: it holds a keys-only Secret"* ]] || { echo "${path}: ${output}"; return 1; }
     [[ "$(ls -A "${work_dir}")" != *".kubeone-run-"* ]] || { echo "${path}: the run copy is left"; return 1; }
+  done
+  # A tag on the addons mapping or on the root does not change what the
+  # node is: the guard checks the files of a tagged addons.path too.
+  for name in tagged-addons tagged-root; do
+    printf '%s' "${manifests[${name}]}" > "${work_dir}/kubeone.yaml"
+    BAD=1 run kubeone::apply "${work_dir}" "${cy}"
+    [ "${status}" -ne 0 ] || { echo "${name}: status 0"; return 1; }
+    [[ "${output}" == *"kubeone: refusing to apply addons/ccm-hetzner/ccm.yaml: it holds a keys-only Secret"* ]] || { echo "${name}: ${output}"; return 1; }
+    [[ "$(ls -A "${work_dir}")" != *".kubeone-run-"* ]] || { echo "${name}: the run copy is left"; return 1; }
   done
 }
 

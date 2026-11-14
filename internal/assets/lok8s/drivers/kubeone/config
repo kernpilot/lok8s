@@ -689,9 +689,10 @@ kubeone::_stage_run() {
   fi
   # One line for each document: its index and the type of addons.path
   # ("" when the document or its addons is not a mapping: Go reads no path
-  # then, and yq cannot index a list).
+  # then, and yq cannot index a list). The check is on the node kind, as
+  # in Go: a tag (!foo) on a mapping does not change what the node is.
   local info
-  if ! info="$(printf '%s' "${manifest}" | yq --yaml-fix-merge-anchor-to-spec -r 'explode(.) | (document_index | tostring) + " " + ((select(tag == "!!map") | .addons | select(tag == "!!map") | .path | type) // "")' - 2>/dev/null)"; then
+  if ! info="$(printf '%s' "${manifest}" | yq --yaml-fix-merge-anchor-to-spec -r 'explode(.) | (document_index | tostring) + " " + ((select(kind == "map") | .addons | select(kind == "map") | .path | type) // "")' - 2>/dev/null)"; then
     error "kubeone: ${work_dir}/kubeone.yaml does not parse as YAML"
     return 1
   fi
