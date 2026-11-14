@@ -692,9 +692,11 @@ _apply_within() {
 # The Go twin is TestApplyNamesARunCopyThatItCannotRemove. kubeone makes
 # the work dir read-only while it runs: the EXIT trap cannot remove the
 # run directory and the manifest copy, and rm names both. The apply
-# succeeds, as in Go. The output holds no value of the run copy.
+# succeeds, as in Go. The output holds no value of the run copy. LC_ALL=C:
+# rm writes its message in English.
 @test "kubeone::apply: a run copy that the EXIT trap cannot remove is named" {
   [[ "$(id -u)" -ne 0 ]] || skip "root removes files in a directory without write permission"
+  export LC_ALL=C
   local cy; cy=$(_cluster_yaml '')
   printf 'name: test-prod\ntoken: left-copy-canary\naddons:\n  enable: true\n  path: ./addons\n' > "${work_dir}/kubeone.yaml"
   export SEEN="${BATS_TEST_TMPDIR}/seen"
@@ -715,7 +717,7 @@ _apply_within() {
   assert_success
   local made; made="$(cat "${SEEN}")"
   [[ "${made}" == "${work_dir}"/.kubeone-run-* ]] || { echo "run directory: ${made}"; return 1; }
-  # rm quotes the path in the style of the locale: match it without the quotes.
+  # The match leaves out the quotes around the path.
   local line dir=0 copy=0
   while IFS= read -r line; do
     [[ "${line}" == *"cannot remove"* ]] || continue
