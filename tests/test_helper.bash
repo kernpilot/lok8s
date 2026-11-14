@@ -334,3 +334,21 @@ _children() {
     ps -A -o pid=,ppid= | awk -v p="${1}" '$2 == p { print $1 }'
   fi
 }
+
+# _pgrep_f <ERE> — the pids whose command line (its arguments joined by
+# spaces) matches <ERE>, as pgrep's full-command mode gives them, leaving
+# out the shell that scans. From /proc where it exists (the CI bats
+# container has no pgrep), else from pgrep (macOS).
+_pgrep_f() {
+  if [[ -d /proc/self ]]; then
+    local dir cmd
+    for dir in /proc/[0-9]*; do
+      [[ "${dir#/proc/}" != "${BASHPID}" ]] || continue
+      cmd="$(tr '\0' ' ' < "${dir}/cmdline" 2>/dev/null)" || continue
+      cmd="${cmd% }"
+      if [[ -n "${cmd}" && "${cmd}" =~ ${1} ]]; then echo "${dir#/proc/}"; fi
+    done
+  else
+    pgrep -f "${1}"
+  fi
+}

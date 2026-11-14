@@ -186,12 +186,13 @@ _yq_stub() {
   assert_output "spec.kubernetes.version cannot be read: yq stopped at the memory limit of 256 MiB, or a signal stopped it. Simplify the spec file."
 }
 
-# _gone <pattern> — true when no process matches <pattern> (pgrep -f) within
-# 2 s. A process that a signal stops can stay visible for a moment.
+# _gone <pattern> — true when no process matches <pattern> (_pgrep_f of
+# test_helper: the CI bats container has no pgrep) within 2 s. A process
+# that a signal stops can stay visible for a moment.
 _gone() {
   local i
   for i in $(seq 1 20); do
-    pgrep -f "${1}" >/dev/null || return 0
+    [[ -n "$(_pgrep_f "${1}")" ]] || return 0
     sleep 0.1
   done
   return 1
@@ -200,7 +201,7 @@ _gone() {
 # _kill_left <pattern> — stop the processes that a failed test left behind.
 _kill_left() {
   local p
-  for p in $(pgrep -f "${1}"); do kill "${p}" 2>/dev/null || :; done
+  for p in $(_pgrep_f "${1}"); do kill "${p}" 2>/dev/null || :; done
 }
 
 @test "spec::_kver_yq: the watchdog does not stop a read that ends before the time limit" {
@@ -218,7 +219,7 @@ _kill_left() {
 
 @test "spec::_kver_yq: a read that ends in time leaves no watchdog sleep behind" {
   _spec "version: v1.31.4"
-  # A time limit that no other process uses, so pgrep finds only this sleep.
+  # A time limit that no other process uses, so _gone finds only this sleep.
   _SPEC_KVER_TIMEOUT=$(( 7000 + RANDOM % 1000 ))
   run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
   assert_success
@@ -227,6 +228,20 @@ _kill_left() {
     _kill_left "^sleep ${_SPEC_KVER_TIMEOUT}\$"
     echo "the watchdog left 'sleep ${_SPEC_KVER_TIMEOUT}' running" >&2; return 1
   }
+}
+
+# The CI bats container has no ps and no pgrep: a test that calls one sees
+# "command not found", and a check built on it passes without checking. The
+# /proc helpers of test_helper (_ppid, _children, _pgrep_f) call them only
+# where /proc does not exist.
+@test "the unit tests call ps and pgrep only in the fallbacks of test_helper" {
+  run grep -rnE "(^|[^[:alnum:]_.'-])(ps|pgrep|pkill|pidof) +-" "${_PROJECT_ROOT}/tests/unit" "${_PROJECT_ROOT}/tests/test_helper.bash"
+  local line bad=""
+  while IFS= read -r line; do
+    [[ -z "${line}" || "${line}" == "${_PROJECT_ROOT}/tests/test_helper.bash:"* ]] || bad+="${line}"$'\n'
+  done <<< "${output}"
+  [ -z "${bad}" ] || { echo "calls outside the fallbacks: ${bad}" >&2; return 1; }
+  [ "$(grep -c "${_PROJECT_ROOT}/tests/test_helper.bash:" <<< "${output}")" -eq 3 ]
 }
 
 # A `read -t N` on a process substitution opened read-write (`<> <(:)`)
@@ -248,7 +263,7 @@ _kill_left() {
   for sig in TERM INT; do
     want=143
     [[ "${sig}" == INT ]] && want=130
-    # Durations that no other process uses, so pgrep finds only these.
+    # Durations that no other process uses, so _gone finds only these.
     limit=$(( 8000 + RANDOM % 1000 ))
     stub_sleep=$(( 9000 + RANDOM % 1000 ))
     # The yq stub stops the read it runs in (its parent) with the signal, as
