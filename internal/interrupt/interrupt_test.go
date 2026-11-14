@@ -2,6 +2,7 @@ package interrupt
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -40,15 +41,20 @@ func runChild(t *testing.T, name string) (string, syscall.WaitStatus) {
 
 // A SIGHUP while CatchHangup catches it cancels the context of CatchHangup
 // and the command context of Watch, and maps to the exit code 129. stop
-// reports it. The test keeps a SIGHUP handler of its own, so the signal
-// never ends the test binary.
+// reports it. After stop, a SIGHUP takes the default action again: it ends
+// the child that the test runs in, as no handler of the test holds it.
 func TestCatchHangupCancelsTheCommandContext(t *testing.T) {
-	if signal.Ignored(syscall.SIGHUP) {
-		t.Skip("SIGHUP is ignored")
+	const name = "TestCatchHangupCancelsTheCommandContext"
+	if os.Getenv(childEnv) != name {
+		out, status := runChild(t, name)
+		if !strings.Contains(out, "the catch held the first SIGHUP") {
+			t.Fatalf("the child failed before the second SIGHUP (%v):\n%s", status, out)
+		}
+		if !status.Signaled() || status.Signal() != syscall.SIGHUP {
+			t.Fatalf("the SIGHUP after stop did not end the child (%v):\n%s", status, out)
+		}
+		return
 	}
-	keep := make(chan os.Signal, 1)
-	signal.Notify(keep, syscall.SIGHUP)
-	defer signal.Stop(keep)
 	root, exitCode := Watch(t.Context())
 	ctx, stop := CatchHangup(root)
 	if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
@@ -60,36 +66,30 @@ func TestCatchHangupCancelsTheCommandContext(t *testing.T) {
 		t.Fatal("SIGHUP did not cancel the command context")
 	}
 	if ctx.Err() == nil {
-		t.Error("SIGHUP did not cancel the context of CatchHangup")
+		t.Fatal("SIGHUP did not cancel the context of CatchHangup")
 	}
 	if !stop() {
-		t.Error("stop did not report the SIGHUP")
+		t.Fatal("stop did not report the SIGHUP")
 	}
 	if got := exitCode(); got != 129 {
-		t.Errorf("exit code = %d, want 129", got)
+		t.Fatalf("exit code = %d, want 129", got)
 	}
-	<-keep
 
-	// After the catch, a SIGHUP is not caught.
+	// A catch without a SIGHUP reports none, and leaves the default action.
 	root, exitCode = Watch(t.Context())
 	_, stop = CatchHangup(root)
 	if stop() {
-		t.Error("stop reported a SIGHUP that did not come")
+		t.Fatal("stop reported a SIGHUP that did not come")
 	}
+	if got := exitCode(); got != 0 {
+		t.Fatalf("exit code after the catch = %d, want 0", got)
+	}
+	fmt.Println("the catch held the first SIGHUP")
 	if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-keep:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the SIGHUP did not come")
-	}
-	if root.Err() != nil {
-		t.Errorf("a SIGHUP after the catch cancelled the command context: %v", root.Err())
-	}
-	if got := exitCode(); got != 0 {
-		t.Errorf("exit code after the catch = %d, want 0", got)
-	}
+	time.Sleep(5 * time.Second)
+	t.Fatal("a SIGHUP after stop did not end the process")
 }
 
 // A SIGHUP that came before stop counts, also when it is still in the
