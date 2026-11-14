@@ -34,7 +34,14 @@ FROM ghcr.io/flant/shell-operator:v1.19.5
 #   envsubst — template rendering (part of gettext; the Go hooks render
 #     natively, the legacy bash reference under /hooks/legacy still needs it)
 #   khelm — kustomize exec plugin inflating bootstrap addon charts
-RUN apk upgrade --no-cache \
+# The base image's /etc/apk/repositories names its vendor's own mirror,
+# over plain HTTP. Use Alpine's CDN over HTTPS, for the base's Alpine
+# release. The packages are signed with Alpine's keys either way, but a
+# mirror can give an old index, and a build fails when the mirror is down.
+RUN v="$(cut -d. -f1,2 /etc/alpine-release)" \
+    && printf 'https://dl-cdn.alpinelinux.org/alpine/v%s/main\nhttps://dl-cdn.alpinelinux.org/alpine/v%s/community\n' \
+      "${v}" "${v}" > /etc/apk/repositories \
+    && apk upgrade --no-cache \
     && apk add --no-cache \
       kustomize \
       yq \
