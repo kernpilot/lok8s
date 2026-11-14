@@ -412,6 +412,92 @@ func TestWriteExclusiveNamesAPartThatItCannotRemove(t *testing.T) {
 	})
 }
 
+// bats: "kubeone::apply: a run copy that the EXIT trap cannot remove is
+// named". The cleanup at the end of the run names a run directory or a
+// manifest copy that it cannot remove and that is still there: it can
+// hold the CCM token. The message names the path and the cause, never the
+// content. The apply itself succeeds, as in bash (rm in the EXIT trap
+// does not change the exit status). The hooks make one remove fail; the
+// last case makes the work dir read-only while kubeone runs, as the bats
+// twin does, so both removes fail for real.
+func TestApplyNamesARunCopyThatItCannotRemove(t *testing.T) {
+	const canary = "left-copy-canary"
+	manifest := "name: test-prod\ntoken: " + canary + "\naddons:\n  enable: true\n  path: ./addons\n"
+	addon := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\ndata:\n  token: " + canary + "\n"
+	denied := func(name string) error { return &fs.PathError{Op: "unlinkat", Path: name, Err: syscall.EACCES} }
+	msg := func(path, what string) string {
+		return "[error] kubeone: cannot remove " + path + " (permission denied). It is " + what + " and can hold credentials: remove it.\n"
+	}
+	for name, c := range map[string]struct {
+		hook func(t *testing.T, wd string)
+		want func(run string) string
+	}{
+		"the run directory": {
+			hook: func(t *testing.T, _ string) {
+				orig := removeAll
+				removeAll = denied
+				t.Cleanup(func() { removeAll = orig })
+			},
+			want: func(run string) string { return msg(run, "the run copy") },
+		},
+		"the manifest copy": {
+			hook: func(t *testing.T, _ string) {
+				orig := removeFile
+				removeFile = func(name string) error {
+					if strings.HasSuffix(name, ".yaml") && strings.HasPrefix(filepath.Base(name), runPrefix) {
+						return denied(name)
+					}
+					return os.Remove(name)
+				}
+				t.Cleanup(func() { removeFile = orig })
+			},
+			want: func(run string) string { return msg(run+".yaml", "the manifest copy") },
+		},
+		"a run directory that the remove took": {
+			hook: func(t *testing.T, _ string) {
+				orig := removeAll
+				removeAll = func(name string) error { _ = os.RemoveAll(name); return denied(name) }
+				t.Cleanup(func() { removeAll = orig })
+			},
+			want: func(string) string { return "" },
+		},
+		"a work dir that is not writable": {
+			hook: func(t *testing.T, wd string) {
+				if os.Geteuid() == 0 {
+					t.Skip("root removes files in a directory without write permission")
+				}
+				t.Cleanup(func() { _ = os.Chmod(wd, 0o700) })
+			},
+			want: func(run string) string { return msg(run, "the run copy") + msg(run+".yaml", "the manifest copy") },
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d, runner, errBuf, wd := rcDriver(t, manifest, map[string]string{"ccm-hetzner/ccm.yaml": addon})
+			c.hook(t, wd)
+			var run string
+			runner.handler = func(cmd execx.Cmd) error {
+				run = filepath.Join(cmd.Dir, strings.TrimSuffix(cmd.Args[2], ".yaml"))
+				if name == "a work dir that is not writable" {
+					return os.Chmod(wd, 0o500)
+				}
+				return nil
+			}
+			if err := d.Apply(t.Context(), wd, ""); err != nil {
+				t.Fatalf("the apply failed: %v", err)
+			}
+			if run == "" {
+				t.Fatal("kubeone did not run")
+			}
+			if got, want := errBuf.String(), c.want(run); got != want {
+				t.Errorf("stderr = %q, want %q", got, want)
+			}
+			if strings.Contains(errBuf.String(), canary) {
+				t.Errorf("stderr holds the content: %q", errBuf.String())
+			}
+		})
+	}
+}
+
 // bats: "kubeone::apply: a manifest with more than one document, or an
 // addons.path that is not a string, stops the apply". lo reads the first
 // document of kubeone.yaml, and yq in bash reads each one: so both refuse

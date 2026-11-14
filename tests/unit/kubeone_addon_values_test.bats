@@ -689,6 +689,42 @@ _apply_within() {
   [ ! -e "${FIXED}" ] || { chmod 700 "${FIXED}"; echo "the run directory is left"; return 1; }
 }
 
+# The Go twin is TestApplyNamesARunCopyThatItCannotRemove. kubeone makes
+# the work dir read-only while it runs: the EXIT trap cannot remove the
+# run directory and the manifest copy, and rm names both. The apply
+# succeeds, as in Go. The output holds no value of the run copy.
+@test "kubeone::apply: a run copy that the EXIT trap cannot remove is named" {
+  [[ "$(id -u)" -ne 0 ]] || skip "root removes files in a directory without write permission"
+  local cy; cy=$(_cluster_yaml '')
+  printf 'name: test-prod\ntoken: left-copy-canary\naddons:\n  enable: true\n  path: ./addons\n' > "${work_dir}/kubeone.yaml"
+  export SEEN="${BATS_TEST_TMPDIR}/seen"
+  kubeone::_clean_reinstalled_workers() { :; }
+  kubeone::_name_robot_workers() { :; }
+  kubeone::render_addons() {
+    mkdir -p "${1}/addons/ccm-hetzner"
+    printf 'kind: ConfigMap\ndata:\n  token: left-copy-canary\n' > "${1}/addons/ccm-hetzner/ccm.yaml"
+  }
+  kubeone() {
+    local manifest="" prev="" a
+    for a in "$@"; do [[ "${prev}" != --manifest ]] || manifest="${a}"; prev="${a}"; done
+    printf '%s\n' "${PWD}/${manifest%.yaml}" > "${SEEN}"
+    chmod 500 "${PWD}"
+  }
+  run kubeone::apply "${work_dir}" "${cy}"
+  chmod 700 "${work_dir}"
+  assert_success
+  local made; made="$(cat "${SEEN}")"
+  [[ "${made}" == "${work_dir}"/.kubeone-run-* ]] || { echo "run directory: ${made}"; return 1; }
+  # rm quotes the path in the style of the locale: match it without the quotes.
+  local line dir=0 copy=0
+  while IFS= read -r line; do
+    [[ "${line}" == *"cannot remove"* ]] || continue
+    if [[ "${line}" == *"${made}.yaml"* ]]; then copy=1; elif [[ "${line}" == *"${made}"* ]]; then dir=1; fi
+  done <<< "${output}"
+  (( dir && copy )) || { echo "rm did not name the run directory (${dir}) and the manifest copy (${copy}): ${output}"; return 1; }
+  refute_output --partial "left-copy-canary"
+}
+
 # The Go twins are TestApplyRemovesTheRunCopyOnASIGHUP and
 # TestApplyHangupEndsLoAfterTheOuterCleanup. The subshell that makes the
 # run directory owns it from the start: a SIGTERM, a SIGHUP or a SIGINT

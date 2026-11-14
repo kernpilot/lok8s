@@ -59,7 +59,8 @@ const explodeBudget = 1 << 20
 // error, it removes the run directory itself, and a manifest copy that it
 // began to write (writeExclusive); a file that was at the path of the
 // manifest copy already (it refuses to write there) stays. A part of a
-// copy that it cannot remove, it names on stderr (reportPartLeft).
+// copy that it cannot remove, it names on stderr (reportPartLeft), and so
+// does the cleanup for a run directory or a manifest copy (reportLeft).
 func stageRun(stderr io.Writer, workDir string) (string, func(), error) {
 	noop := func() {}
 	manifest := filepath.Join(workDir, "kubeone.yaml")
@@ -105,10 +106,16 @@ func stageRun(stderr io.Writer, workDir string) (string, func(), error) {
 		return "", noop, fmt.Errorf("kubeone: run directory: %w", err)
 	}
 	wrote := false
+	// A run directory or a manifest copy that stays can hold the CCM
+	// token: the cleanup names it (bash: rm names it in the EXIT trap).
 	cleanup := func() {
-		_ = os.RemoveAll(run)
+		if err := removeAll(run); err != nil {
+			reportLeft(stderr, run, "the run copy", err)
+		}
 		if wrote {
-			_ = os.Remove(run + ".yaml")
+			if err := removeFile(run + ".yaml"); err != nil {
+				reportLeft(stderr, run+".yaml", "the manifest copy", err)
+			}
 		}
 	}
 	copyBytes := raw
@@ -354,9 +361,14 @@ func writeExclusive(path string, data []byte) error {
 // so a test can make the write fail after the file exists).
 var writeData = func(f *os.File, data []byte) (int, error) { return f.Write(data) }
 
-// removeFile removes a file that writeExclusive made and could not write
-// to its end (a variable, so a test can see the remove or make it fail).
+// removeFile removes a file of the run copy: one that writeExclusive made
+// and could not write to its end, and the manifest copy at the end of the
+// run (a variable, so a test can see the remove or make it fail).
 var removeFile = os.Remove
+
+// removeAll removes the run directory at the end of the run (a variable,
+// so a test can make the remove fail).
+var removeAll = os.RemoveAll
 
 // partLeftError is the error of writeExclusive when it cannot remove a
 // part of a file that it wrote. It names the file, never its content.
@@ -366,32 +378,36 @@ type partLeftError struct {
 }
 
 func (e *partLeftError) Error() string {
-	return fmt.Sprintf("cannot remove %s, a part of a copy: %v", e.path, e.cause())
+	return fmt.Sprintf("cannot remove %s, a part of a copy: %v", e.path, pathCause(e.err))
 }
 
 func (e *partLeftError) Unwrap() error { return e.err }
 
-// cause is the error of the remove without the path that it names again.
-func (e *partLeftError) cause() error {
-	if pathErr, ok := errors.AsType[*fs.PathError](e.err); ok {
+// pathCause is err without the path that a *fs.PathError names again.
+func pathCause(err error) error {
+	if pathErr, ok := errors.AsType[*fs.PathError](err); ok {
 		return pathErr.Err
 	}
-	return e.err
+	return err
 }
 
 // reportPartLeft tells the user about a part of a copy that writeExclusive
 // could not remove (err holds a *partLeftError) and that is still there
-// after the cleanup: it can hold credentials. It names the file, never
-// its content.
+// after the cleanup (reportLeft).
 func reportPartLeft(stderr io.Writer, err error) {
-	left, ok := errors.AsType[*partLeftError](err)
-	if !ok {
+	if left, ok := errors.AsType[*partLeftError](err); ok {
+		reportLeft(stderr, left.path, "a part of a copy", left.err)
+	}
+}
+
+// reportLeft tells the user about a file or a directory of the run copy
+// (what) that lo could not remove (cause) and that is still there: it can
+// hold credentials. It names the path and the cause, never the content.
+func reportLeft(stderr io.Writer, path, what string, cause error) {
+	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
 		return
 	}
-	if _, serr := os.Lstat(left.path); errors.Is(serr, fs.ErrNotExist) {
-		return
-	}
-	ui.ErrorTo(stderr, "kubeone: cannot remove %s (%v). It is a part of a copy and can hold credentials: remove it.", left.path, left.cause())
+	ui.ErrorTo(stderr, "kubeone: cannot remove %s (%v). It is %s and can hold credentials: remove it.", path, pathCause(cause), what)
 }
 
 // encodeYAML is the encoding of saveYAMLDoc (2-space indent) into bytes.
