@@ -329,6 +329,75 @@ func TestApplyRunCopyRemovesAPartOfACopyThatItCouldNotWrite(t *testing.T) {
 	}
 }
 
+// When writeExclusive cannot remove the part of a file that it wrote, its
+// error says so and names the file, never the content, and the apply
+// tells the user to remove that file. The test makes the write fail after
+// half the bytes (a full disk) and the remove fail (permission denied).
+// A part in the run directory, which the cleanup then removes, gets no
+// message.
+func TestWriteExclusiveNamesAPartThatItCannotRemove(t *testing.T) {
+	const canary = "part-left-canary"
+	failWriteAndRemove := func(t *testing.T) {
+		origWrite, origRemove := writeData, removeFile
+		writeData = func(f *os.File, data []byte) (int, error) {
+			n, _ := f.Write(data[:len(data)/2])
+			return n, syscall.ENOSPC
+		}
+		removeFile = func(name string) error {
+			return &fs.PathError{Op: "remove", Path: name, Err: syscall.EACCES}
+		}
+		t.Cleanup(func() { writeData, removeFile = origWrite, origRemove })
+	}
+	t.Run("writeExclusive", func(t *testing.T) {
+		failWriteAndRemove(t)
+		path := filepath.Join(t.TempDir(), "copy.yaml")
+		err := writeExclusive(path, []byte("token: "+canary+"\ntoken2: "+canary+"\n"))
+		var left *partLeftError
+		if !errors.Is(err, syscall.ENOSPC) || !errors.Is(err, syscall.EACCES) || !errors.As(err, &left) {
+			t.Fatalf("err = %v, want the write error and the remove error", err)
+		}
+		if left.path != path || !strings.Contains(err.Error(), path) {
+			t.Errorf("err = %q, want it to name %s", err, path)
+		}
+		if strings.Contains(err.Error(), canary) {
+			t.Errorf("err = %q holds the content", err)
+		}
+		if _, serr := os.Lstat(path); serr != nil {
+			t.Errorf("the part is gone, but the remove failed: %v", serr)
+		}
+	})
+	t.Run("the manifest copy", func(t *testing.T) {
+		failWriteAndRemove(t)
+		d, runner, errBuf, wd := rcDriver(t, "name: test-prod\ntoken: "+canary+"\n", nil)
+		err := d.Apply(t.Context(), wd, "")
+		if err == nil || len(runner.calls) != 0 {
+			t.Fatalf("err %v, calls %v: kubeone must not run", err, runner.calls)
+		}
+		parts, _ := filepath.Glob(filepath.Join(wd, runPrefix+"*.yaml"))
+		if len(parts) != 1 {
+			t.Fatalf("want the part of the manifest copy that the remove left, got %v", parts)
+		}
+		want := "[error] kubeone: cannot remove " + parts[0] + " (permission denied). It is a part of a copy and can hold credentials: remove it.\n"
+		if !strings.HasSuffix(errBuf.String(), want) {
+			t.Errorf("stderr = %q, want it to end with %q", errBuf.String(), want)
+		}
+		if strings.Contains(errBuf.String(), canary) || strings.Contains(err.Error(), canary) {
+			t.Errorf("stderr %q or err %q holds the content", errBuf.String(), err)
+		}
+	})
+	t.Run("an addon file that the cleanup removes", func(t *testing.T) {
+		failWriteAndRemove(t)
+		d, _, errBuf, wd := rcDriver(t, kubeoneAddonsManifest, map[string]string{"ccm-hetzner/ccm.yaml": rcClean})
+		if err := d.Apply(t.Context(), wd, ""); err == nil {
+			t.Fatal("the apply went on after a failed write")
+		}
+		if want := "[error] kubeone: cannot write the run copy of addons/ccm-hetzner/ccm.yaml\n"; errBuf.String() != want {
+			t.Errorf("stderr = %q, want %q", errBuf.String(), want)
+		}
+		assertNoRunCopy(t, wd)
+	})
+}
+
 // bats: "kubeone::apply: a manifest with more than one document, or an
 // addons.path that is not a string, stops the apply". lo reads the first
 // document of kubeone.yaml, and yq in bash reads each one: so both refuse
