@@ -1,6 +1,7 @@
 package interrupt
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -59,13 +60,17 @@ func TestCatchHangupCancelsTheCommandContext(t *testing.T) {
 	if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-root.Done():
-	case <-time.After(5 * time.Second):
-		t.Fatal("SIGHUP did not cancel the command context")
-	}
-	if ctx.Err() == nil {
-		t.Fatal("SIGHUP did not cancel the context of CatchHangup")
+	// The catch cancels the command context first and its own context
+	// after it, so the test waits for each of the two.
+	for _, c := range []struct {
+		name string
+		ctx  context.Context
+	}{{"the command context", root}, {"the context of CatchHangup", ctx}} {
+		select {
+		case <-c.ctx.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatalf("SIGHUP did not cancel %s", c.name)
+		}
 	}
 	if !stop() {
 		t.Fatal("stop did not report the SIGHUP")
