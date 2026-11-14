@@ -725,6 +725,36 @@ _apply_within() {
   refute_output --partial "left-copy-canary"
 }
 
+# The Go twin is TestApplyNamesTheCauseBeforeARunDirectoryThatItCannotRemove.
+# A mktemp stub makes the work dir read-only after it made the run
+# directory: the write of the manifest copy fails, and then the EXIT trap
+# cannot remove the run directory. lo shows the cause first, then rm
+# names the run directory, as in Go. LC_ALL=C: rm writes its message in
+# English.
+@test "kubeone::apply: the cause comes before a run directory that the EXIT trap cannot remove" {
+  [[ "$(id -u)" -ne 0 ]] || skip "root writes in a directory without write permission"
+  export LC_ALL=C
+  local cy; cy=$(_cluster_yaml '')
+  export KCALLS="${BATS_TEST_TMPDIR}/kubeone.calls" FIXED="${work_dir}/.kubeone-run-fixed"
+  printf 'name: test-prod\ntoken: cause-first-canary\n' > "${work_dir}/kubeone.yaml"
+  kubeone::_clean_reinstalled_workers() { :; }
+  kubeone::_name_robot_workers() { :; }
+  kubeone() { echo "kubeone $*" >> "${KCALLS}"; }
+  mktemp() { mkdir -m 700 "${FIXED}" && chmod 500 "${work_dir}" && printf '%s\n' "${FIXED}"; }
+  run kubeone::apply "${work_dir}" "${cy}"
+  chmod 700 "${work_dir}"
+  assert_failure
+  [ ! -f "${KCALLS}" ]
+  local line n=0 cause=0 left=0
+  while IFS= read -r line; do
+    n=$((n + 1))
+    [[ "${line}" != *"kubeone: cannot write the manifest copy ${FIXED}.yaml"* ]] || cause=${n}
+    [[ "${line}" != *"cannot remove '${FIXED}'"* ]] || left=${n}
+  done <<< "${output}"
+  (( cause > 0 && left > cause )) || { echo "the cause (line ${cause}) must come before the run directory (line ${left}): ${output}"; return 1; }
+  refute_output --partial "cause-first-canary"
+}
+
 # The Go twins are TestApplyRemovesTheRunCopyOnASIGHUP and
 # TestApplyHangupEndsLoAfterTheOuterCleanup. The subshell that makes the
 # run directory owns it from the start: a SIGTERM, a SIGHUP or a SIGINT

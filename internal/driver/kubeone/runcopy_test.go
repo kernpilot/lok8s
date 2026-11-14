@@ -498,6 +498,48 @@ func TestApplyNamesARunCopyThatItCannotRemove(t *testing.T) {
 	}
 }
 
+// bats: "kubeone::apply: the cause comes before a run directory that the
+// EXIT trap cannot remove". When the write of the manifest copy fails and
+// the cleanup then cannot remove the run directory, lo shows the cause
+// first and then the path, as bash does (error, then rm in the EXIT
+// trap). The mkdirTemp hook makes the work dir read-only after it made
+// the run directory, so the write and the remove fail for real.
+func TestApplyNamesTheCauseBeforeARunDirectoryThatItCannotRemove(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes in a directory without write permission")
+	}
+	const canary = "cause-first-canary"
+	d, runner, errBuf, wd := rcDriver(t, "name: test-prod\ntoken: "+canary+"\n", nil)
+	orig := mkdirTemp
+	var run string
+	mkdirTemp = func(dir, pattern string) (string, error) {
+		made, err := orig(dir, pattern)
+		if err != nil {
+			return made, err
+		}
+		if run, err = filepath.Abs(made); err != nil {
+			return made, err
+		}
+		return made, os.Chmod(dir, 0o500)
+	}
+	t.Cleanup(func() {
+		mkdirTemp = orig
+		_ = os.Chmod(wd, 0o700)
+	})
+	err := d.Apply(t.Context(), wd, "")
+	if err == nil || len(runner.calls) != 0 {
+		t.Fatalf("err %v, calls %v: kubeone must not run", err, runner.calls)
+	}
+	want := "[error] kubeone: cannot write the manifest copy " + run + ".yaml\n" +
+		"[error] kubeone: cannot remove " + run + " (permission denied). It is the run directory and can hold credentials: remove it.\n"
+	if got := errBuf.String(); got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+	if strings.Contains(errBuf.String(), canary) {
+		t.Errorf("stderr holds the content: %q", errBuf.String())
+	}
+}
+
 // bats: "kubeone::apply: a manifest with more than one document, or an
 // addons.path that is not a string, stops the apply". lo reads the first
 // document of kubeone.yaml, and yq in bash reads each one: so both refuse

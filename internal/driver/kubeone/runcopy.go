@@ -20,7 +20,8 @@ import (
 // (and of the manifest copy beside it).
 const runPrefix = ".kubeone-run-"
 
-// mkdirTemp makes the run directory (a variable, so a test can name it).
+// mkdirTemp makes the run directory (a variable, so a test can name it or
+// change the work dir after it).
 var mkdirTemp = os.MkdirTemp
 
 // explodeBudget bounds the nodes of an exploded manifest: an alias that
@@ -143,9 +144,11 @@ func stageRun(stderr io.Writer, workDir string) (string, func(), error) {
 	if err := writeExclusive(run+".yaml", copyBytes); err != nil {
 		// A file that was there already stays; writeExclusive removed a
 		// copy that it made and could not write to its end, or its error
-		// names that copy (reportPartLeft).
-		cleanup()
+		// names that copy (reportPartLeft). The cause comes first, then
+		// what the cleanup cannot remove, as in bash (error, then rm in
+		// the EXIT trap).
 		ui.ErrorTo(stderr, "kubeone: cannot write the manifest copy %s.yaml", run)
+		cleanup()
 		reportPartLeft(stderr, err)
 		return "", noop, ui.Handled(fmt.Errorf("kubeone: manifest copy: %w", err))
 	}
