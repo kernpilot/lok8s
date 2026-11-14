@@ -24,8 +24,10 @@ import (
 // changes this test with it. It reads text, not the shell. These can still
 // get past it: a call through a variable or by a path outside a bin
 // directory (such as ./apk), a write by a glob or a relative path (cd /etc,
-// then ap*/repo*), a file that COPY or ADD brings in, and another tool or
-// a fetched script that writes the file (such as setup-apkrepos).
+// then ap*/repo*), a file that COPY or ADD brings in (also a binary that
+// an earlier stage built with its own apk sources, by COPY --from), a CA
+// or a proxy that the build adds, and another tool or a fetched script
+// that writes the file (such as setup-apkrepos).
 func TestOperatorImageApkUsesAlpineHTTPS(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile(filepath.Join(testutil.RepoRoot(t), "operator/Dockerfile"))
@@ -99,7 +101,7 @@ func TestOperatorImageApkUsesAlpineHTTPS(t *testing.T) {
 	// separator, a quote or a backslash. Its arguments run to the next
 	// command separator: a redirect is part of them, so options after it
 	// count.
-	call := regexp.MustCompile("(?:^|[\\s;&|(\"'\\[,`\\\\])(?:\\S*/s?bin/)?apk(?:\\.static)?(?:[\\s\"',\\]`]|$)")
+	call := regexp.MustCompile("(?:[\\s;&|(\"'\\[,`\\\\])(?:\\S*/s?bin/)?apk(?:\\.static)?(?:[\\s\"',\\]`]|$)")
 	end := regexp.MustCompile("[;|&\n)`]")
 	allowed := regexp.MustCompile(`^(upgrade --no-cache|add --no-cache( [a-z0-9][a-z0-9._+-]*([=~][a-z0-9._+-]+)?)+)$`)
 	calls := call.FindAllStringIndex(stage, -1)
@@ -118,8 +120,10 @@ func TestOperatorImageApkUsesAlpineHTTPS(t *testing.T) {
 		args = strings.Join(strings.Fields(args), " ")
 		switch {
 		case c[0] < w:
-			t.Errorf("the final stage of operator/Dockerfile calls apk before it writes /etc/apk/repositories: apk %s", args)
-		case !allowed.MatchString(args), strings.Contains(args, ".apk"):
+			t.Errorf("the final stage of operator/Dockerfile calls or names apk before it writes /etc/apk/repositories: apk %s", args)
+		case strings.Contains(args, ".apk"):
+			t.Errorf("the final stage of operator/Dockerfile installs a local .apk file, which skips the index: apk %s", args)
+		case !allowed.MatchString(args):
 			t.Errorf("the final stage of operator/Dockerfile calls apk in a form this test does not allow (only upgrade --no-cache and add --no-cache <packages>): apk %s", args)
 		}
 	}
