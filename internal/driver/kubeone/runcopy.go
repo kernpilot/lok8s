@@ -373,8 +373,7 @@ func (e *partLeftError) Unwrap() error { return e.err }
 
 // cause is the error of the remove without the path that it names again.
 func (e *partLeftError) cause() error {
-	var pathErr *fs.PathError
-	if errors.As(e.err, &pathErr) {
+	if pathErr, ok := errors.AsType[*fs.PathError](e.err); ok {
 		return pathErr.Err
 	}
 	return e.err
@@ -385,8 +384,8 @@ func (e *partLeftError) cause() error {
 // after the cleanup: it can hold credentials. It names the file, never
 // its content.
 func reportPartLeft(stderr io.Writer, err error) {
-	var left *partLeftError
-	if !errors.As(err, &left) {
+	left, ok := errors.AsType[*partLeftError](err)
+	if !ok {
 		return
 	}
 	if _, serr := os.Lstat(left.path); errors.Is(serr, fs.ErrNotExist) {

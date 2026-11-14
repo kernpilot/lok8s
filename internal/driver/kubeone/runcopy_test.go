@@ -366,8 +366,8 @@ func TestWriteExclusiveNamesAPartThatItCannotRemove(t *testing.T) {
 		failWriteAndRemove(t)
 		path := filepath.Join(t.TempDir(), "copy.yaml")
 		err := writeExclusive(path, []byte("token: "+canary+"\ntoken2: "+canary+"\n"))
-		var left *partLeftError
-		if !errors.Is(err, syscall.ENOSPC) || !errors.Is(err, syscall.EACCES) || !errors.As(err, &left) {
+		left, isLeft := errors.AsType[*partLeftError](err)
+		if !errors.Is(err, syscall.ENOSPC) || !errors.Is(err, syscall.EACCES) || !isLeft {
 			t.Fatalf("err = %v, want the write error and the remove error", err)
 		}
 		if left.path != path || !strings.Contains(err.Error(), path) {

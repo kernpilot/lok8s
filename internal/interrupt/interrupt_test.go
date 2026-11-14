@@ -31,8 +31,7 @@ func runChild(t *testing.T, name string) (string, syscall.WaitStatus) {
 	cmd := exec.CommandContext(t.Context(), exe, "-test.run=^"+name+"$", "-test.count=1", "-test.v")
 	cmd.Env = append(os.Environ(), childEnv+"="+name)
 	out, err := cmd.CombinedOutput()
-	var exitErr *exec.ExitError
-	if err != nil && !errors.As(err, &exitErr) {
+	if _, exited := errors.AsType[*exec.ExitError](err); err != nil && !exited {
 		t.Fatalf("the child did not run: %v\n%s", err, out)
 	}
 	status, _ := cmd.ProcessState.Sys().(syscall.WaitStatus)
