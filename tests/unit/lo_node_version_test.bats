@@ -190,9 +190,10 @@ _yq_stub() {
 # test_helper: the CI bats container has no pgrep) within 2 s. A process
 # that a signal stops can stay visible for a moment.
 _gone() {
-  local i
+  local i found
   for i in $(seq 1 20); do
-    [[ -n "$(_pgrep_f "${1}")" ]] || return 0
+    found=$(_pgrep_f "${1}") || return 2
+    [[ -n "${found}" ]] || return 0
     sleep 0.1
   done
   return 1
@@ -235,28 +236,42 @@ _kill_left() {
 # /proc helpers of test_helper (_ppid, _children, _pgrep_f) call them only
 # where /proc does not exist.
 @test "the unit tests call ps and pgrep only in the fallbacks of test_helper" {
-  run grep -rnE "(^|[^[:alnum:]_.'-])((ps|pgrep|pkill)[[:space:]]+-|pidof[[:space:]])" \
-    "${_PROJECT_ROOT}/tests/unit" "${_PROJECT_ROOT}/tests/operator" "${_PROJECT_ROOT}/tests/test_helper.bash"
-  local line bad="" n
+  run grep -rnE "(^|[^[:alnum:]_.'-])((pgrep|pkill|pidof|killall)[[:space:]]+[^[:space:]]|ps[[:space:]]+(-|aux))" \
+    "${_PROJECT_ROOT}/tests/unit" "${_PROJECT_ROOT}/tests/operator" "${_PROJECT_ROOT}/tests/lib" \
+    "${_PROJECT_ROOT}/tests/test_helper.bash"
+  # A comment or a test name can name the tools: only code lines count.
+  local line text bad="" n=0 skip='^[[:space:]]*(#|@test[[:space:]])'
   while IFS= read -r line; do
-    [[ -z "${line}" || "${line}" == "${_PROJECT_ROOT}/tests/test_helper.bash:"* ]] || bad+="${line}"$'\n'
+    [[ -n "${line}" ]] || continue
+    text="${line#*:*:}"
+    [[ ! "${text}" =~ ${skip} ]] || continue
+    if [[ "${line}" == "${_PROJECT_ROOT}/tests/test_helper.bash:"* ]]; then
+      n=$(( n + 1 ))
+    else
+      bad+="${line}"$'\n'
+    fi
   done <<< "${output}"
   [ -z "${bad}" ] || { echo "calls outside the fallbacks: ${bad}" >&2; return 1; }
   # The three fallbacks (_ppid, _children, _pgrep_f). A count of 0 means that
   # the grep itself failed.
-  n=$(grep -c "${_PROJECT_ROOT}/tests/test_helper.bash:" <<< "${output}")
-  [ "${n}" -eq 3 ] || { echo "test_helper has ${n} matching lines, want 3: ${output}" >&2; return 1; }
+  [ "${n}" -eq 3 ] || { echo "test_helper has ${n} calls, want 3: ${output}" >&2; return 1; }
 }
 
 # _pgrep_f must find a process, not only report none: every other caller
 # checks only that a process is gone.
 @test "_pgrep_f finds a running process by its command line" {
-  local limit pid found
+  local limit pid found="" i
   # A duration that no other process uses.
   limit=$(( 6000 + RANDOM % 1000 ))
   sleep "${limit}" &
   pid=$!
-  found=$(_pgrep_f "^sleep ${limit}\$")
+  # Until the child has run exec, its command line is the shell's: wait for
+  # it, as _gone waits for an end. The kill runs on every path.
+  for i in $(seq 1 20); do
+    found=$(_pgrep_f "^sleep ${limit}\$") || :
+    [[ -z "${found}" ]] || break
+    sleep 0.1
+  done
   kill "${pid}" 2>/dev/null || :
   [ "${found}" = "${pid}" ] || { echo "_pgrep_f gave '${found}', want '${pid}'" >&2; return 1; }
 }
