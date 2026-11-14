@@ -513,10 +513,11 @@ _run_copy_spec() {
   refute_output --partial ".kubeone-run-"
 }
 
-# _tree <pid>: <pid> and each process under it, the deepest first.
+# _tree <pid>: <pid> and each process under it, the deepest first
+# (_children of test_helper: the CI bats container has no pgrep).
 _tree() {
   local c
-  for c in $(pgrep -P "${1}" 2>/dev/null); do _tree "${c}"; done
+  for c in $(_children "${1}"); do _tree "${c}"; done
   echo "${1}"
 }
 
@@ -787,11 +788,14 @@ _apply_within() {
       # This runs in the command substitution of kubeone::_copy_dir: its
       # parent is the subshell of kubeone::apply that owns the run.
       local me="${BASHPID}"
-      kill "-${SIG}" "$(ps -o ppid= -p "${me}" | tr -d ' ')"
+      kill "-${SIG}" "$(_ppid "${me}")"
       [[ "${SIG}" != INT ]] || kill -INT "${me}"
     fi
     _test_read_checked_file "$@"
   }
+  # With /proc (Linux), as in the CI bats container: no ps. Without /proc
+  # (macOS), _ppid needs the real ps.
+  [[ ! -d /proc/self ]] || ps() { echo "ps ran" >&2; return 127; }
   local want
   for SIG in TERM HUP INT; do
     rm -f "${READS}" "${COPIED}"

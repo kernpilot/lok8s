@@ -309,3 +309,28 @@ mock_yq_value() {
   yq() { echo "${value}"; }
   export -f yq
 }
+
+# _ppid <pid> / _children <pid> — from /proc where it exists (the CI bats
+# container has no ps), else from ps (macOS).
+_ppid() {
+  if [[ -r "/proc/${1}/stat" ]]; then
+    local stat ppid
+    stat="$(< "/proc/${1}/stat")" || return 1
+    stat="${stat##*) }"
+    # The state field comes first.
+    read -r _ ppid _ <<< "${stat}"
+    echo "${ppid}"
+  else
+    ps -o ppid= -p "${1}" | tr -d ' '
+  fi
+}
+_children() {
+  if [[ -d /proc/self ]]; then
+    local dir
+    for dir in /proc/[0-9]*; do
+      [[ "$(_ppid "${dir#/proc/}" 2>/dev/null)" != "${1}" ]] || echo "${dir#/proc/}"
+    done
+  else
+    ps -A -o pid=,ppid= | awk -v p="${1}" '$2 == p { print $1 }'
+  fi
+}
