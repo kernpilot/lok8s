@@ -296,19 +296,21 @@ YAML
 # domain fail.lok8s.dev, kubectl apply fails: the failure is in a function
 # that deploy::apply calls (kapply::apply), while deploy::apply holds the
 # value. Each function on the way back returns the failure, and only the
-# guard of deploy::apply sets the ERR trap of its caller back.
+# guard of deploy::apply sets the ERR trap of its caller back. The failing
+# branch of the kubectl stub leaves a mark: the case fails if deploy::apply
+# stopped before kubectl.
 @test "deploy::apply and deploy::apply_filtered trace no Secret value" {
   local artifact="${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
   printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: app\n  labels:\n    lok8s.dev/type: platform\nstringData:\n  TOKEN: xtrace-canary-deploy\n' >> "${artifact}"
   mkdir -p "${BATS_TEST_TMPDIR}/clusters/fail.lok8s.dev"
   printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: apply-fails\nstringData:\n  TOKEN: xtrace-canary-deploy\n' > "${BATS_TEST_TMPDIR}/clusters/fail.lok8s.dev/artifacts.yaml"
-  export DEPLOY_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  export DEPLOY_LOG="${BATS_TEST_TMPDIR}/kubectl.log" APPLY_FAILED="${BATS_TEST_TMPDIR}/apply-failed"
   kubectl() {
     local in
     case "$1" in
       apply)
         in="$(cat; printf .)"
-        [[ "${in}" != *"name: apply-fails"* ]] || return 1
+        [[ "${in}" != *"name: apply-fails"* ]] || { : > "${APPLY_FAILED}"; return 1; }
         printf '%s' "${in%.}" >> "${DEPLOY_LOG}"
         echo "applied"
         ;;
@@ -322,6 +324,7 @@ YAML
   trace_fail=(deploy::apply "fail.lok8s.dev")
   assert_no_trace_leak xtrace-canary-deploy deploy::apply "test.lok8s.dev"
   grep -qF xtrace-canary-deploy "${DEPLOY_LOG}"
+  [ -e "${APPLY_FAILED}" ] || { echo "deploy::apply fail.lok8s.dev stopped before kubectl apply"; return 1; }
   rm -f "${DEPLOY_LOG}"
   trace_fail=(deploy::apply_filtered "missing.lok8s.dev" "lok8s.dev/type" "platform")
   assert_no_trace_leak xtrace-canary-deploy deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "platform"
