@@ -1253,6 +1253,18 @@ main::hetzner() {
     return 1
   fi
 
+  # The owner mark of the parts is keyed on the domain (hetzner::owner_mark).
+  # lo sets PROVIDER_DOMAIN in provider::write_config; this command takes it
+  # from --domain, with the same rules (provider::_spec_domain on the path
+  # of the cluster spec). A descriptor path alone does not tell the domain.
+  if [[ -z "${domain:-}" ]]; then
+    error "hetzner: --domain is missing. lok8s needs the domain of the cluster for the owner mark ${_HETZNER_OWNER_KEY} of its parts, and --hetzner-json does not give it. Add --domain <domain> (the directory name under clusters/). Nothing was created or changed."
+    return 1
+  fi
+  declare -F provider::_spec_domain >/dev/null || import ^utils/provider
+  PROVIDER_DOMAIN="$(provider::_spec_domain "${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml")"
+  export PROVIDER_DOMAIN
+
   [[ -f "${CLOUD_HETZNER_JSON_PATH}" ]] || {
     error "No such file: ${CLOUD_HETZNER_JSON_PATH}"
     return 1

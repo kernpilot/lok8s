@@ -1457,3 +1457,25 @@ volume delete 24"
   run cat "${HCLOUD_LOG}"
   assert_output ""
 }
+
+# ── the standalone hetzner command ───────────────────────
+
+@test "standalone: the hetzner command takes the domain of the mark from --domain, and refuses --hetzner-json alone" {
+  source "${_PROJECT_ROOT}/.lok8s/utils/provider.sh"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
+  provider::validate() { return 0; }
+  provider::provision() { printf 'provision %s %s\n' "${PROVIDER_DOMAIN:-}" "${1}" >> "${BATS_TEST_TMPDIR}/calls"; }
+  unset PROVIDER_DOMAIN
+
+  :args() { hetzner_json="${DESC}"; dry_run=0; }
+  run main::hetzner
+  assert_failure
+  assert_output --partial "hetzner: --domain is missing. lok8s needs the domain of the cluster for the owner mark lok8s.dev/owner of its parts, and --hetzner-json does not give it."
+  [ ! -e "${BATS_TEST_TMPDIR}/calls" ]
+
+  :args() { domain="prod.example.test"; dry_run=0; }
+  run main::hetzner
+  assert_success
+  run cat "${BATS_TEST_TMPDIR}/calls"
+  assert_output "provision prod.example.test ${DESC}"
+}
