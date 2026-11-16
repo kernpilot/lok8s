@@ -10,7 +10,8 @@
 #
 # Front matter is a first line `---` and the next line `---` that closes it.
 # The block and the blank lines after it are removed. A file without a first
-# line `---`, or with no closing `---`, is printed unchanged.
+# line `---`, or with no closing `---`, is printed unchanged. A UTF-8 byte
+# order mark before the first `---` does not hide the block.
 #
 #   hack/release-header.sh docs/releases/v0.14.1.md > "${RUNNER_TEMP}/release-header.md"
 set -euo pipefail
@@ -22,6 +23,7 @@ notes="${1:?usage: release-header.sh <notes file, e.g. docs/releases/v0.14.1.md>
 delimiter() { [[ "${1}" =~ ^---[[:space:]]*$ ]]; }
 
 mapfile -t lines < "${notes}"
+(( ${#lines[@]} == 0 )) || lines[0]="${lines[0]#$'\xef\xbb\xbf'}"
 start=0
 if (( ${#lines[@]} > 0 )) && delimiter "${lines[0]}"; then
   for (( i = 1; i < ${#lines[@]}; i++ )); do

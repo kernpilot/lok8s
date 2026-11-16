@@ -70,6 +70,14 @@ step_block() {
   assert_output "$(printf 'Body.\r')"
 }
 
+@test "a UTF-8 byte order mark before the front matter does not hide it" {
+  printf '\xef\xbb\xbf' > "${T}/notes.md"
+  printf '%s\n' '---' 'title: x' '---' '' 'Body.' >> "${T}/notes.md"
+  run bash "${SCRIPT}" "${T}/notes.md"
+  assert_success
+  assert_output "Body."
+}
+
 @test "a missing notes file fails and names the file" {
   run bash "${SCRIPT}" "${T}/nope.md"
   assert_failure
@@ -87,7 +95,7 @@ step_block() {
   refute_line --partial "title: lok8s v0.14.1"
 }
 
-@test "no committed notes file gives a header that starts with front matter" {
+@test "every committed notes file gives a header without front matter" {
   local f first
   for f in "${RELEASES}"/v*.md; do
     first="$(bash "${SCRIPT}" "${f}" | head -1)"
