@@ -334,8 +334,10 @@ kubehz::get_ssh_fingerprint() {
 # clusters:write token) — no cluster access, no CLI, no local openssh.
 #
 # Re-runs ROTATE server-side (same pending row, fresh fingerprint), so we
-# replace the hcloud key by name on every run. Fail-soft: any failure returns
-# 1 and the caller falls back to the legacy fingerprint announce.
+# replace the hcloud key by name on every run, but only a key with this
+# cluster's label lok8s.dev/kubehz-claim (kubehz::claim_key_own). Fail-soft:
+# any failure returns 1 and the caller falls back to the legacy fingerprint
+# announce.
 # Store the announce's one-time bind secret (B243) at
 # ${PATH_CLUSTERS}/<domain>/.kubehz-bind (0600, no trailing newline: the deploy
 # and every later register read the exact 64 hex). An empty secret writes
@@ -491,6 +493,70 @@ kubehz::register_post() (
   done
 )
 
+# The Hetzner label on a claim key that lo made (Go: claimKeyLabel). Its
+# value is kubehz::claim_key_mark of the domain.
+_KUBEHZ_CLAIM_LABEL="lok8s.dev/kubehz-claim"
+
+# kubehz::claim_key_mark <domain> — the value of the label
+# _KUBEHZ_CLAIM_LABEL on the claim key that lo made for <domain>: the first
+# 32 hex characters of the SHA-256 of the domain. A Hetzner label value has at
+# most 63 characters and starts and ends with a letter or a digit; a domain
+# can break both rules, its hash cannot. The mark comes from the domain alone
+# (the --domain flag, the active domain or the folder under clusters/), so a
+# re-run of register on another machine finds its own key without local
+# state. The domain counts exactly as given: another spelling (letter case,
+# for example) gives another mark, and lo then leaves the key alone. rc 1,
+# with no output, when neither sha256sum nor shasum gives a hash; a tool
+# that is not there is not run, so no "command not found" reaches stderr.
+kubehz::claim_key_mark() {
+  local sum=""
+  if command -v sha256sum &>/dev/null; then
+    sum=$(printf '%s' "${1}" | sha256sum) || sum=""
+  elif command -v shasum &>/dev/null; then
+    sum=$(printf '%s' "${1}" | shasum -a 256) || sum=""
+  fi
+  [[ "${sum}" =~ ^[0-9a-f]{32} ]] || return 1
+  printf '%s' "${sum:0:32}"
+}
+
+# kubehz::claim_key_no_mark <name> — the warning when lo cannot mark the
+# claim key <name> (no sha256sum or shasum). lo then leaves the key alone:
+# without a mark, no key is ours. warn() prints through `echo -e`, so the
+# backslashes of the name are doubled.
+kubehz::claim_key_no_mark() {
+  warn "kubehz: lo needs sha256sum or shasum to mark the claim key '${1//\\/\\\\}', so it does not change the key in your Hetzner Cloud project."
+}
+
+# kubehz::claim_key_own <keys json> <domain> <verb> <name> — rc 0 when the
+# first key of a GET /v1/ssh_keys?name=<name> answer carries the label
+# _KUBEHZ_CLAIM_LABEL of <domain>: register replaces, and deregister deletes,
+# only such a key. A Hetzner project can be shared, and a key of the same
+# name that a person or another cluster made must stay: for any other key it
+# warns why lo leaves it alone (<verb>: "replace" or "delete") and returns 1.
+# Call it only when the answer holds a key id. Without a mark (no sha256sum
+# or shasum) no key is ours (kubehz::claim_key_no_mark).
+kubehz::claim_key_own() {
+  local keys="${1}" domain="${2}" verb="${3}" name="${4}" label mark next head esc_domain
+  if ! mark=$(kubehz::claim_key_mark "${domain}"); then
+    kubehz::claim_key_no_mark "${name}"
+    return 1
+  fi
+  label=$(jq -r --arg l "${_KUBEHZ_CLAIM_LABEL}" '.ssh_keys[0].labels[$l] // empty' <<<"${keys}" 2>/dev/null) || label=""
+  [[ "${label}" != "${mark}" ]] || return 0
+  # warn() prints through `echo -e`: double the backslashes of the name and
+  # of the domain.
+  esc_domain="${domain//\\/\\\\}"
+  head="kubehz: lo does not ${verb} the SSH key '${name//\\/\\\\}' in your Hetzner Cloud project: "
+  if [[ -z "${label}" ]]; then
+    next="delete it (Hetzner Console -> Security -> SSH keys), then run 'lo kubehz register --domain ${esc_domain}' again"
+    [[ "${verb}" != delete ]] || next="delete it by hand (Hetzner Console -> Security -> SSH keys)"
+    warn "${head}it has no label ${_KUBEHZ_CLAIM_LABEL}, so a person or an older lo made it. If an older lo made it for ${esc_domain}, ${next}."
+  else
+    warn "${head}its label ${_KUBEHZ_CLAIM_LABEL} does not match ${esc_domain}, so another cluster made it."
+  fi
+  return 1
+}
+
 # Usage: kubehz::ensure_claim_key <domain> <api_url> [<next>]
 # <next> is the command the error of an unavailable platform names (see
 # kubehz::register_post). rc 3: that error, no fall back.
@@ -521,17 +587,25 @@ kubehz::ensure_claim_key() {
   # The announce hands out a one-time bind secret (B243); keep it for the deploy.
   kubehz::persist_bind_secret "${domain}" "$(jq -r '.bindSecret // empty' <<<"${response}")"
 
-  # Replace-by-name: the API rotates the fingerprint on re-runs, so a stale
-  # kubehz-claim key must not linger in the account.
+  # Replace by name, but only our own key: the API rotates the fingerprint on
+  # re-runs, so a stale claim key of this cluster must not linger, and a key
+  # that someone else made stays (kubehz::claim_key_own).
   # HCLOUD_TOKEN reaches curl in a config (http::curl_config), never on argv.
-  local existing_id
-  existing_id=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL \
-    "${hcloud_api}/v1/ssh_keys?name=${key_name}" | jq -r '.ssh_keys[0].id // empty') || existing_id=""
+  local mark keys existing_id
+  if ! mark=$(kubehz::claim_key_mark "${domain}"); then
+    kubehz::claim_key_no_mark "${key_name}"
+    return 1
+  fi
+  keys=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL \
+    "${hcloud_api}/v1/ssh_keys?name=${key_name}") || keys=""
+  existing_id=$(jq -r '.ssh_keys[0].id // empty' <<<"${keys}" 2>/dev/null) || existing_id=""
   if [[ -n "${existing_id}" ]]; then
+    kubehz::claim_key_own "${keys}" "${domain}" replace "${key_name}" || return 1
     http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL -X DELETE \
       "${hcloud_api}/v1/ssh_keys/${existing_id}" >/dev/null || true
   fi
-  jq -n --arg n "${key_name}" --arg k "${public_key}" '{name: $n, public_key: $k}' |
+  jq -n --arg n "${key_name}" --arg k "${public_key}" --arg l "${_KUBEHZ_CLAIM_LABEL}" --arg m "${mark}" \
+    '{name: $n, public_key: $k, labels: {($l): $m}}' |
     curl -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
       -K <(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}") \
       -H "Content-Type: application/json" \
@@ -791,14 +865,19 @@ kubehz::deregister_cluster() {
 
   # Best-effort: retire the kubehz claim key from the hcloud account. The name
   # mirrors the API's minted convention (kubehz-claim-<domain>, see header) —
-  # deregister has no register response to read .claimKey.name from.
+  # deregister has no register response to read .claimKey.name from. Only a
+  # key with this cluster's label goes (kubehz::claim_key_own); a refused key
+  # leaves the return code as it is.
   if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
-    local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}" key_id
+    local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}" keys key_id
     if http::require_https "${hcloud_api}" "HCLOUD_API_BASE" && http::credential_ok HCLOUD_TOKEN; then
-      key_id=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL \
-        "${hcloud_api}/v1/ssh_keys?name=kubehz-claim-${domain}" | jq -r '.ssh_keys[0].id // empty') || key_id=""
-      [[ -z "${key_id}" ]] || http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" |
-        curl -K - -fsSL -X DELETE "${hcloud_api}/v1/ssh_keys/${key_id}" >/dev/null 2>&1 || true
+      keys=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL \
+        "${hcloud_api}/v1/ssh_keys?name=kubehz-claim-${domain}") || keys=""
+      key_id=$(jq -r '.ssh_keys[0].id // empty' <<<"${keys}" 2>/dev/null) || key_id=""
+      if [[ -n "${key_id}" ]] && kubehz::claim_key_own "${keys}" "${domain}" delete "kubehz-claim-${domain}"; then
+        http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" |
+          curl -K - -fsSL -X DELETE "${hcloud_api}/v1/ssh_keys/${key_id}" >/dev/null 2>&1 || true
+      fi
     fi
   fi
 

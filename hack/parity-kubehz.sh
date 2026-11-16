@@ -1179,6 +1179,39 @@ EOF
   export HCLOUD_TOKEN=hc_parity HCLOUD_API_BASE="https://127.0.0.1:${STUB_PORT}"
   unav_check "${UNBOUND}" kubehz register --domain busy-reg.dev            # claim key
   unset HCLOUD_TOKEN HCLOUD_API_BASE UNAV_DOMAIN
+
+  # ── register / deregister: the claim key in a shared Hetzner project ────
+  # register replaces, and deregister deletes, only the claim key that lo
+  # made for the cluster (the label lok8s.dev/kubehz-claim); a key without
+  # the label (a person's, or one of an older lo) and a key of another
+  # cluster stay, with a warning. The stub answers the key list by the key
+  # name (SSH_KEYS). The request log joins stdout. Each run starts with no
+  # .kubehz-bind: the claim-key answer hands out a bind secret, and the run
+  # of the other implementation must not send it.
+  for KEY_DOMAIN in own-key.dev legacy-key.dev other-key.dev; do
+    mk "${KEY_DOMAIN}" <<EOF
+kind: Lo
+metadata:
+  name: ${KEY_DOMAIN%%.*}
+spec:
+  cluster:
+    domain: ${KEY_DOMAIN}
+  kubehz:
+    access: registered
+    apiUrl: https://127.0.0.1:${STUB_PORT}
+EOF
+  done
+  key_reset() { rm -f "${CL}/${KEY_DOMAIN}/.kubehz-bind"; : > "${STUB_LOG}"; }
+  key_check() { PARITY_PRE_EACH=key_reset PARITY_POST_EACH=unav_record check "$@"; }
+  export HCLOUD_TOKEN=hc_parity HCLOUD_API_BASE="https://127.0.0.1:${STUB_PORT}"
+  for KEY_DOMAIN in own-key.dev legacy-key.dev other-key.dev; do
+    key_check "${UNBOUND}" kubehz register --domain "${KEY_DOMAIN}"
+  done
+  export KUBEHZ_TOKEN=parity-jwt
+  for KEY_DOMAIN in own-key.dev legacy-key.dev other-key.dev; do
+    key_check - kubehz deregister --domain "${KEY_DOMAIN}"
+  done
+  unset KUBEHZ_TOKEN HCLOUD_TOKEN HCLOUD_API_BASE KEY_DOMAIN
   unset SSL_CERT_FILE CURL_CA_BUNDLE BIND_FIXTURE BIND_FIXTURES
 fi
 

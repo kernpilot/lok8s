@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -477,7 +478,7 @@ func TestEnsureClaimKeyUploadsAndReplaces(t *testing.T) {
 	h.env["HCLOUD_TOKEN"] = "hc_test"
 	h.env["HCLOUD_API_BASE"] = h.apiURL()
 	h.handle("POST /api/clusters/register", 200, `{"id":"cl-5","claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"aa:bb","name":"kubehz-claim-test.kubehz.dev"}}`)
-	h.handle("GET /v1/ssh_keys", 200, `{"ssh_keys":[{"id":42}]}`)
+	h.handle("GET /v1/ssh_keys", 200, claimKeys(claimOwnLabels))
 	h.handle("DELETE /v1/ssh_keys/42", 204, ``)
 	h.handle("POST /v1/ssh_keys", 201, `{"ssh_key":{"id":43}}`)
 	mustOK(t, h.ctx.ensureClaimKey(t.Context(), "test.kubehz.dev", h.apiURL()), h.output())
@@ -486,13 +487,29 @@ func TestEnsureClaimKeyUploadsAndReplaces(t *testing.T) {
 	if !h.anyReq("DELETE", "/v1/ssh_keys/42") || !h.anyReq("POST", "/v1/ssh_keys") {
 		t.Fatalf("replace-by-name sequence missing: %+v", h.reqs())
 	}
-	if r := h.lastReq("POST", "/v1/ssh_keys"); r.Auth != "Bearer hc_test" || r.Body != `{"name":"kubehz-claim-test.kubehz.dev","public_key":"ssh-ed25519 AAAA k"}` {
+	if r := h.lastReq("POST", "/v1/ssh_keys"); r.Auth != "Bearer hc_test" || r.Body != claimUpload {
 		t.Fatalf("upload: %+v", r)
 	}
 	if r := h.lastReq("POST", "/api/clusters/register"); r.Auth != "" || r.Body != `{"domain":"test.kubehz.dev","claimKey":true}` {
 		t.Fatalf("mint: %+v", r)
 	}
 	mustNotContain(t, h.output(), "hc_test")
+}
+
+// The label value is the first 32 hex characters of the domain's SHA-256:
+// a valid Hetzner label value for every domain, also one longer than 63
+// characters or one that ends in "-".
+func TestClaimKeyMark(t *testing.T) {
+	t.Parallel()
+	if got := claimKeyMark("test.kubehz.dev"); got != testClaimMark {
+		t.Fatalf("claimKeyMark = %q, want %q", got, testClaimMark)
+	}
+	valid := regexp.MustCompile(`^[0-9a-f]{32}$`)
+	for _, d := range []string{"a", "end-", strings.Repeat("long.", 30) + "dev"} {
+		if got := claimKeyMark(d); !valid.MatchString(got) {
+			t.Errorf("claimKeyMark(%q) = %q, not 32 hex characters", d, got)
+		}
+	}
 }
 
 func TestEnsureClaimKeyRefusesPlainHTTPHcloudBase(t *testing.T) {
@@ -575,7 +592,7 @@ func TestDeregisterRetiresHcloudClaimKey(t *testing.T) {
 	h.env["HCLOUD_TOKEN"], h.env["HCLOUD_API_BASE"] = "hc_test", h.apiURL()
 	h.handle("GET /api/clusters", 200, registryListFixture)
 	h.handle("DELETE /api/clusters/cl-old", 200, `{"ok":true}`)
-	h.handle("GET /v1/ssh_keys", 200, `{"ssh_keys":[{"id":7}]}`)
+	h.handle("GET /v1/ssh_keys", 200, `{"ssh_keys":[{"id":7,"labels":`+claimOwnLabels+`}]}`)
 	h.handle("DELETE /v1/ssh_keys/7", 204, ``)
 	mustOK(t, h.ctx.DeregisterCluster(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", ""), h.output())
 	if r := h.lastReq("GET", "/v1/ssh_keys"); r == nil || r.Query != "name=kubehz-claim-test.kubehz.dev" {
