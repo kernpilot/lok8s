@@ -79,7 +79,8 @@ spec:
     policy: audit-policy.yaml              # REQUIRED in auditLog; relative to the cluster file; must be
                                            #   apiVersion audit.k8s.io/v1, kind Policy, a non-empty rules list,
                                            #   plain YAML (no %directive / &anchor / *alias / << / duplicate key,
-                                           #   no empty first document); needs yq v4.30+ on the bash side;
+                                           #   no empty first document); needs yq v4.54.3 or later
+                                           #   (the pinned yq) on the bash side;
                                            #   checked BEFORE provider provision and again at render
     maxAge: 30                             # optional ints 1..999999999 → logMaxAge / logMaxBackup / logMaxSize;
     maxBackup: 10                          #   unset = KubeOne default (30 / 3 / 100). Unknown keys are refused.

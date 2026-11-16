@@ -27,8 +27,9 @@ KUSTOMIZE_VERSION="v5.8.1"
 curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_${ARCH}.tar.gz" \
   | tar xz -C /usr/local/bin kustomize
 
-# yq
-YQ_VERSION="v4.44.6"
+# yq — the version the project pins (.bin/b.yaml, internal/toolchain
+# YQVersion): the bash readers need it.
+YQ_VERSION="v4.54.3"
 curl -fLo /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${ARCH}"
 chmod +x /usr/local/bin/yq
 

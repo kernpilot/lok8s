@@ -32,6 +32,14 @@ const (
 	HelmVersion = "3.21.2"
 )
 
+// YQVersion is the yq release the bash implementation is tested with: the
+// contributor .bin/b.yaml and the consumer template pin it, and it is the
+// minimum the bash messages and the docs name. An older release can stop on
+// the bash version reader (v4.52.5 panics on its expressions). The drift
+// tests check it against .bin/b.yaml, the template, the cloud-init fallback
+// and every "yq v… or later" statement.
+const YQVersion = "v4.54.3"
+
 // kustomizeAPIToCLI maps the kustomize API module version to the CLI
 // release it ships in (sigs.k8s.io/kustomize tags `kustomize/v5.x.y` next
 // to `api/v0.x.y`; the pairs are read off the kustomize release notes).

@@ -69,8 +69,8 @@ keysonly::check_trace_support() {
 # keysonly::has_marker): an installed yq before v4.47.1 (the words of the
 # spec reader, spec::_kver_read), and no yq. keysonly::yq_cause prints the
 # one that applies.
-_KEYSONLY_OLD_YQ='the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (b install installs the pinned yq).'
-_KEYSONLY_NO_YQ='yq is not installed. Install yq v4.47.1 or later (b install installs the pinned yq).'
+_KEYSONLY_OLD_YQ='the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.54.3 or later (b install installs the pinned yq).'
+_KEYSONLY_NO_YQ='yq is not installed. Install yq v4.54.3 or later (b install installs the pinned yq).'
 
 # The end of the message of a failed keys-only render or yq run (Go:
 # keysOnlyWithheld): lo does not print their stderr, as it can quote an

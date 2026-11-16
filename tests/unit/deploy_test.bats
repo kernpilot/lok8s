@@ -201,7 +201,7 @@ YAML
   }
   run deploy::apply "test.lok8s.dev"
   assert_failure
-  assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (b install installs the pinned yq)."
+  assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.54.3 or later (b install installs the pinned yq)."
   refute_output --partial "does not parse"
   refute_output --partial "applied"
 
@@ -213,7 +213,7 @@ YAML
   _deploy_without_yq() { local PATH="${BATS_TEST_TMPDIR}/no-yq"; deploy::apply "$@"; }
   run _deploy_without_yq "test.lok8s.dev"
   assert_failure
-  assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): yq is not installed. Install yq v4.47.1 or later (b install installs the pinned yq)."
+  assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): yq is not installed. Install yq v4.54.3 or later (b install installs the pinned yq)."
   refute_output --partial "does not know the flag"
   refute_output --partial "applied"
 }

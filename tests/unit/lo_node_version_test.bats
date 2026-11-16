@@ -144,7 +144,18 @@ _yq_stub() {
   _yq_stub 'echo "Error: unknown flag: --yaml-fix-merge-anchor-to-spec" >&2; exit 1'
   run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
   assert_failure
-  assert_output "spec.kubernetes.version cannot be read: the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (b install installs the pinned yq)."
+  assert_output "spec.kubernetes.version cannot be read: the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.54.3 or later (b install installs the pinned yq)."
+}
+
+@test "spec::kind_node_version: a yq that panics on the reader names its version, not the spec file" {
+  _spec "version: v1.31.4"
+  # yq v4.52.5 stops on the reader's expressions with this panic (exit 2).
+  _yq_stub 'if [[ "${1:-}" == --version ]]; then echo "yq (https://github.com/mikefarah/yq/) version v4.52.5"; exit 0; fi
+printf "panic: runtime error: index out of range [-1]\n\ngoroutine 1 [running]:\n" >&2
+exit 2'
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_output "spec.kubernetes.version cannot be read: the installed yq (v4.52.5) failed on the version reader (panic: runtime error: index out of range [-1]). Install yq v4.54.3 or later (b install installs the pinned yq)."
 }
 
 @test "spec::kind_node_version: a read past the time limit is named, without timeout(1)" {

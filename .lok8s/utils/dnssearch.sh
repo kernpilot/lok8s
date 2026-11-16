@@ -155,7 +155,7 @@ dnssearch::_stop() {
         cause="lo cannot create a temporary directory or a FIFO in ${tmpdir}. Set TMPDIR to a local directory."
       fi
       ;;
-    5) cause="the installed yq ($(dnssearch::_yq_version)) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later." ;;
+    5) cause="the installed yq ($(dnssearch::_yq_version)) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.54.3 or later." ;;
     *)
       if (( rc > 64 && rc < 128 )); then
         cause="the signal SIG$(kill -l $(( rc - 64 )) 2>/dev/null || echo $(( rc - 64 ))) stopped yq. Run the command again."

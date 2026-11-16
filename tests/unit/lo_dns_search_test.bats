@@ -247,7 +247,7 @@ _limit_line() {
   # An old yq (before v4.47.1): the version it reports is in the line.
   _limit_line 'if [[ "${1:-}" == --version ]]; then echo "yq (https://github.com/mikefarah/yq/) version v4.46.1"; exit 0; fi
 echo "Error: unknown flag: --yaml-fix-merge-anchor-to-spec" >&2; echo "Usage:" >&2; exit 1' \
-    "${prefix} the installed yq (v4.46.1) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later."
+    "${prefix} the installed yq (v4.46.1) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.54.3 or later."
   ( TMPDIR="${BATS_TEST_TMPDIR}/no-such-dir"
     _limit_line 'echo unused' "${prefix} the temporary directory ${BATS_TEST_TMPDIR}/no-such-dir does not exist. Set TMPDIR to a directory that exists." )
   mkdir -p "${BATS_TEST_TMPDIR}/read-only"
@@ -301,7 +301,7 @@ exec "'"${real}"'" "$@"'
     # shellcheck disable=SC2059 # the bodies carry \n escapes on purpose
     ( _old_yq
       rc=0; lo::read_dns_search_config "$(_spec "$(printf "${body}")")" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
-      [ "${rc}" -ne 0 ] && [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "error: spec.network.dnsSearch could not be read: the installed yq (v4.46.1) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later." ] ) || {
+      [ "${rc}" -ne 0 ] && [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "error: spec.network.dnsSearch could not be read: the installed yq (v4.46.1) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.54.3 or later." ] ) || {
       echo "body ${body}:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1
     }
   done

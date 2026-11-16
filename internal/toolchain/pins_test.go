@@ -8,6 +8,8 @@ package toolchain
 // fails here.
 
 import (
+	"bytes"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -77,6 +79,7 @@ func TestTemplateCarriesThePins(t *testing.T) {
 			"kustomize":                   KustomizeCLI,
 			"github.com/mgoltzsche/khelm": "v" + KhelmVersion,
 			"github.com/kernpilot/lok8s":  "v0.3.0",
+			"yq":                          YQVersion,
 		}},
 		Got:    testutil.Tree{Name: "the b.yaml template", Files: PinnedEntries("0.3.0")},
 		Sync:   "bump internal/toolchain/pins.go and template.go together",
@@ -115,11 +118,87 @@ func TestContributorBYamlCarriesThePins(t *testing.T) {
 		Want: testutil.Tree{Name: "pins.go", Files: map[string]string{
 			"kustomize":                   KustomizeCLI,
 			"github.com/mgoltzsche/khelm": "v" + KhelmVersion,
+			"yq":                          YQVersion,
 		}},
 		Got: testutil.Tree{Name: "the contributor .bin/b.yaml", Files: map[string]string{
 			"kustomize":                   doc.Binaries["kustomize"].Version,
 			"github.com/mgoltzsche/khelm": doc.Binaries["github.com/mgoltzsche/khelm"].Version,
+			"yq":                          doc.Binaries["yq"].Version,
 		}},
 		Sync: "bump .bin/b.yaml with internal/toolchain/pins.go, then run b install to refresh .bin/b.lock",
 	}.Check(t)
+}
+
+// TestYQFallbacksInstallThePin: the other places that install yq install
+// the pinned release: the cloud-init fallback of a bare CI VM and mise.toml.
+func TestYQFallbacksInstallThePin(t *testing.T) {
+	t.Parallel()
+	root := testutil.RepoRoot(t)
+	for _, tc := range []struct{ file, pattern, prefix string }{
+		{"internal/assets/lok8s/providers/hetzner/cloud-init/cloud.d/ci/write_files/bootstrap/install-tools.sh", `(?m)^YQ_VERSION="([^"]+)"$`, ""},
+		{"mise.toml", `(?m)^yq\s*=\s*"([^"]+)"`, "v"},
+	} {
+		raw, err := os.ReadFile(filepath.Join(root, tc.file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := regexp.MustCompile(tc.pattern).FindAllSubmatch(raw, -1)
+		if len(m) != 1 {
+			t.Errorf("%s: %d yq versions, want one", tc.file, len(m))
+			continue
+		}
+		if got := tc.prefix + string(m[0][1]); got != YQVersion {
+			t.Errorf("%s installs yq %s, want the pin %s (internal/toolchain YQVersion)", tc.file, got, YQVersion)
+		}
+	}
+}
+
+// yqMinimumRE finds a statement of the yq minimum: "v4.x.y or later" or
+// "v4.x+". yq is the only tool lok8s documents on a v4 line. A statement of
+// fact such as "a yq before v4.47.1" (when a flag came) does not match.
+var yqMinimumRE = regexp.MustCompile(`v4\.[0-9]+(\.[0-9]+)?(\+| or later)`)
+
+// TestYQMinimumIsThePin: every yq minimum in the bash tree (its messages),
+// the docs (not the release notes, which record their own release) and the
+// skills names the pinned release, so the documented minimum is the version
+// lok8s installs and tests.
+func TestYQMinimumIsThePin(t *testing.T) {
+	t.Parallel()
+	root := testutil.RepoRoot(t)
+	want := YQVersion + " or later"
+	found := 0
+	for _, dir := range []string{"internal/assets/lok8s", "docs", "skills"} {
+		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			rel, _ := filepath.Rel(root, path)
+			if d.IsDir() {
+				switch d.Name() {
+				case "node_modules", "releases", "dist", "cache":
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil || bytes.IndexByte(raw, 0) >= 0 {
+				return err
+			}
+			for i, line := range strings.Split(string(raw), "\n") {
+				for _, m := range yqMinimumRE.FindAllString(line, -1) {
+					found++
+					if m != want {
+						t.Errorf("%s:%d names the yq minimum %q, want %q (internal/toolchain YQVersion)", rel, i+1, m, want)
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if found < 6 {
+		t.Errorf("found %d yq minimum statements, want at least 6: the scan no longer reads the messages and docs", found)
+	}
 }
