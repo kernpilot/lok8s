@@ -6,7 +6,7 @@ fits `b`'s binary model): the transparent, streaming, read-only lok8s assistant.
 binary with a JSON config and dynamic flags. The frozen bash implementation
 does the same from `.lok8s/libs/chat`.
 
-The architecture was chosen by the benchmark (internal design note, kubehz-cluster `docs/internal/lok8s-local-ai-plan.md`):
+The architecture was chosen by a benchmark of the options:
 flat diet tools · schema-in-context authoring · doctor-tree debug · a
 **deterministic** read-only posture gate (models can't self-police — proven).
 
