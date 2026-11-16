@@ -28,7 +28,7 @@
     },
     {
       "name": "yq",
-      "version": "",
+      "version": "v4.52.5",
       "sha256": "75d893a0d5940d1019cb7cdc60001d9e876623852c31cfc6267047bc31149fa9",
       "source": "github.com/mikefarah/yq",
       "preset": true
