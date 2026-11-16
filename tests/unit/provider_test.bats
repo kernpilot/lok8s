@@ -240,6 +240,25 @@ YAML
   assert_output "/"
 }
 
+# One case table for bash and Go (internal/provision/testdata/
+# spec-domain-cases.txt; the Go twin is TestWriteProviderConfigDomainCases):
+# ".", "..", "/", a trailing slash, "a/../b" and more.
+@test "provider::_spec_domain gives the domain of each row of the shared case table" {
+  local table="${_PROJECT_ROOT}/internal/provision/testdata/spec-domain-cases.txt" line spec want rows=0
+  [ -f "${table}" ]
+  while IFS= read -r line; do
+    [[ -n "${line}" && "${line}" != "#"* ]] || continue
+    spec="${line%%$'\t'*}" want="${line#*$'\t'}"
+    [[ "${line}" == *$'\t'* && -n "${spec}" && -n "${want}" && "${want}" != *$'\t'* ]] \
+      || fail "bad row '${line}': want <spec path> TAB <domain>"
+    rows=$(( rows + 1 ))
+    run provider::_spec_domain "${spec}"
+    assert_success
+    [ "${output}" = "${want}" ] || fail "'${spec}': got '${output}', want '${want}'"
+  done < "${table}"
+  (( rows >= 10 )) || fail "the case table has ${rows} rows, want at least 10"
+}
+
 @test "provider::write_config fails for missing configRef" {
   mkdir -p "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
   cat > "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml" <<'YAML'
