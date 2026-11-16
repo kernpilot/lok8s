@@ -12,15 +12,18 @@ hetzner::floating-ip() {
 }
 
 hetzner::network() {
-  # The hook reads the network by its verified id (rid), never by its name.
+  # The hook reads the network by its verified id (rid), never by its name,
+  # and checks its owner mark right before each add-subnet (a failed check
+  # stops the step).
   hetzner::create::after() {
-    local x network_zone type ip_range
+    local x network_zone type ip_range live
     local -a subargs=()
 
     while IFS=',' read -r x network_zone type ip_range vswitch_id; do
       _hetzner_print "   ⭐ add \033[3msubnet\033[0m ${ip_range}"
 
-      if hcloud network describe "${rid}" | grep -q "${ip_range}"; then
+      live="$(hetzner::_still_ours network "${rid}" "${mark}" "${name}")" || return 1
+      if jq -e --arg r "${ip_range}" 'any(.subnets[]?; .ip_range == $r)' >/dev/null 2>&1 <<<"${live}"; then
         _hetzner_print "   🦗 skip \033[3msubnet\033[0m \033[1m${ip_range}\033[0m"
         continue
       fi
@@ -38,6 +41,7 @@ hetzner::network() {
         2>/dev/null
     )
     unset IFS
+    return 0
   }
 
   hetzner::create 'network'
@@ -257,7 +261,8 @@ hetzner::wipe-devices() {
 
 hetzner::server() {
   # Assign the floating IP by the verified ids of the IP and the server
-  # (rid), never by a name.
+  # (rid), never by a name. Both are read by id and checked right before the
+  # assign (a failed check stops the step).
   hetzner::create::after() {
     local findex fid
     findex="$(hetzner::json -r ".server[${i}][\"#floating-ip\"]")"
@@ -270,7 +275,11 @@ hetzner::server() {
       warn "hetzner: server ${name}: did not assign floating-ip ${findex}. The floating IP or the server has no id of this cluster (a bare-metal server cannot get a floating IP)."
       return 0
     fi
-    dry-run::cmd hcloud floating-ip assign "${fid}" "${rid}"
+    hetzner::_still_ours floating-ip "${fid}" "${mark}" >/dev/null || return 1
+    hetzner::_still_ours server "${rid}" "${mark}" "${name}" >/dev/null || return 1
+    dry-run::cmd hcloud floating-ip assign "${fid}" "${rid}" ||
+      warn "hetzner: server ${name}: could not assign floating-ip ${fid} (the message of hcloud is above)."
+    return 0
   }
 
   # Per-server cloud-init: reads #cloud.d from each server entry,
@@ -495,6 +504,55 @@ hetzner::_owned_selector() {
   printf '%s\n' "${selector}"
 }
 
+# hetzner::_lb_audit <lb-id> <lb-name> <mark>
+# After the target reconcile: reads the load balancer by its id again and
+# removes EVERY target that can route to a server of another owner: a label
+# selector that does not hold exactly lok8s.dev/owner=<mark> (also one that
+# the descriptor no longer has), and a server target whose server does not
+# have the mark. An ip target stays: lok8s cannot know whose address it is.
+# This fails closed: when the add of the selector with the mark failed, the
+# old selector is removed all the same, and the load balancer routes to
+# fewer servers until the next run. rc 1 when the read or a removal fails;
+# the message names the target.
+hetzner::_lb_audit() {
+  local lb="${1}" lbname="${2}" mark="${3}" live servers type value owned err rc=0
+  local -a rm_flags=()
+  live="$(hetzner::_still_ours load-balancer "${lb}" "${mark}" "${lbname}")" || return 1
+  servers='[]'
+  if jq -e 'any((.targets // [])[]; .type == "server")' >/dev/null 2>&1 <<<"${live}"; then
+    if ! servers="$(hcloud server list -o json)" ||
+       ! jq -e 'type == "array" or type == "null"' >/dev/null 2>&1 <<<"${servers}"; then
+      error "lb ${lbname}: could not list the servers ('hcloud server list'), so the server targets of the load balancer are not checked."
+      return 1
+    fi
+  fi
+  while IFS=$'\x1f' read -r type value; do
+    [[ -n "${type}" ]] || continue
+    case "${type}" in
+      label_selector)
+        if owned="$(hetzner::_owned_selector "${value}" "${mark}")" && [[ "${owned}" == "${value}" ]]; then
+          continue
+        fi
+        _hetzner_print "   ♻️  remove \033[3mtarget\033[0m label-selector: ${value} (it does not hold ${_HETZNER_OWNER_KEY}=${mark}, so it can select a server of another owner)"
+        rm_flags=(--label-selector "${value}") ;;
+      server)
+        if jq -e --arg id "${value}" --arg key "${_HETZNER_OWNER_KEY}" --arg mark "${mark}" \
+             'any((. // [])[]; (.id | tostring) == $id and (.labels // {})[$key] == $mark)' >/dev/null 2>&1 <<<"${servers}"; then
+          continue
+        fi
+        _hetzner_print "   ♻️  remove \033[3mtarget\033[0m server: ${value} (the server does not have the owner mark of this cluster)"
+        rm_flags=(--server "${value}") ;;
+      *) continue ;;
+    esac
+    if ! err=$(dry-run::cmd hcloud load-balancer remove-target "${lb}" "${rm_flags[@]}" 2>&1); then
+      error "lb ${lbname}: could not remove the target ${type} '${value}': ${err}. It can route to a server of another owner. Remove it with 'hcloud load-balancer remove-target ${lbname} ${rm_flags[*]}', then run the provision again."
+      rc=1
+    fi
+  done < <(jq -r '(.targets // [])[]
+    | [ (.type // ""), (.label_selector.selector // (.server.id // "" | tostring)) ] | join("\u001f")' <<<"${live}" 2>/dev/null)
+  return "${rc}"
+}
+
 hetzner::load-balancer() {
   # Set by the create::after hook below when a reconcile call fails. The
   # create loop does not check the status of its hook, so this step does.
@@ -502,10 +560,11 @@ hetzner::load-balancer() {
 
   # Every hcloud call of the hook goes to the load balancer by its verified
   # id (rid) and to the network and servers by their verified ids, never by
-  # a name: a name can be another cluster's part.
+  # a name: a name can be another cluster's part. Right before a write, the
+  # parts are read by id and their owner mark is checked again.
   hetzner::create::after() {
     # Attach the LB to the first descriptor network — required before
-    # use-private-ip targets can be added.
+    # use-private-ip targets can be added. Both ends are checked first.
     local net_name net_ref err
     net_name="$(hetzner::json -r '.network[0].name // ""')"
     net_ref="$(hetzner::json -r '.network[0].id // "" | tostring')"
@@ -513,6 +572,11 @@ hetzner::load-balancer() {
     if [[ -n "${net_name}" && -z "${net_ref}" ]]; then
       warn "lb ${name}: did not attach the load balancer to network '${net_name}': the network has no id of this cluster."
     elif [[ -n "${net_name}" ]]; then
+      if ! hetzner::_still_ours load-balancer "${rid}" "${mark}" "${name}" >/dev/null ||
+         ! hetzner::_still_ours network "${net_ref}" "${mark}" "${net_name}" >/dev/null; then
+        _HETZNER_LB_FAILED=1
+        return 0
+      fi
       if ! err=$(dry-run::cmd hcloud load-balancer attach-to-network "${rid}" \
           --network "${net_ref}" 2>&1); then
         # idempotent re-runs: already attached is fine
@@ -527,26 +591,21 @@ hetzner::load-balancer() {
     # the descriptor dropped use-private-ip. Read the live LB once and compare.
     # `hcloud ... -o json` prints the API schema: targets[].type is server,
     # label_selector or ip, with use_private_ip; services[] carry protocol,
-    # listen_port and destination_port. A new LB, or one hcloud cannot
-    # describe, reads as empty: every target and service is added.
+    # listen_port and destination_port. The read checks the owner mark too:
+    # an LB that cannot be read and checked gets no change. A dry run of a
+    # new LB reads as empty: every target and service is added.
     local live
-    if ! live="$(hcloud load-balancer describe "${rid}" -o json 2>&1)" ||
-       ! jq -e 'type == "object"' >/dev/null 2>&1 <<<"${live}"; then
-      # An adopted LB (it had an id before this run) that hcloud cannot
-      # describe keeps what it has: say so.
-      [[ -z "${id}" ]] ||
-        warn "lb ${name}: could not read the load balancer (hcloud load-balancer describe: ${live:0:200}). Its targets and services are added, not compared: a stale use-private-ip or port stays. Check them with 'hcloud load-balancer describe ${name}', then run the provision again."
-      live='{}'
+    if ! live="$(hetzner::_still_ours load-balancer "${rid}" "${mark}" "${name}")"; then
+      error "lb ${name}: did not change the targets and services of the load balancer: lok8s could not read it and check its owner mark (the message above)."
+      _HETZNER_LB_FAILED=1
+      return 0
     fi
 
     # NOTE: rows are read as JSON objects (jq -c), NOT csv — label
     # selectors legitimately contain commas and csv-splitting mangled
     # them (and the resulting hcloud errors were silently swallowed).
     local row target_type target_value use_private_ip want_private live_private
-    local api_type match_value line server_name owned stale_sel
-    # The descriptor selectors whose target without the owner mark is
-    # removed after the loop, once the target with the mark is in place.
-    local -a stale=()
+    local api_type match_value line server_name owned
     # shellcheck disable=SC2031  # i is the create-loop index. Only the server hook's subshell reuses i (SC2030); this hook runs in the current shell
     while IFS= read -r row; do
       [[ -n "${row}" ]] || continue
@@ -559,7 +618,7 @@ hetzner::load-balancer() {
 
       local -a target_args=()
       match_value="${target_value}"
-      stale_sel=""
+      server_name=""
       case "${target_type}" in
         server)
           # A server of the descriptor only (an index or its name), by its
@@ -592,7 +651,6 @@ hetzner::load-balancer() {
             _HETZNER_LB_FAILED=1
             continue
           fi
-          [[ "${owned}" == "${target_value}" ]] || stale_sel="${target_value}"
           target_value="${owned}"
           match_value="${owned}"
           target_args+=("--label-selector" "${owned}")
@@ -624,7 +682,15 @@ hetzner::load-balancer() {
 
       if [[ "${live_private}" == "${want_private}" ]]; then
         _hetzner_print "   🦗 keep \033[3mtarget\033[0m ${target_type}: ${target_value}"
-        [[ -z "${stale_sel}" ]] || stale+=("${stale_sel}")
+        continue
+      fi
+
+      # A write for a server target follows: read both ends by id and check
+      # their owner mark right before it.
+      if [[ "${api_type}" == "server" ]] &&
+         { ! hetzner::_still_ours load-balancer "${rid}" "${mark}" "${name}" >/dev/null ||
+           ! hetzner::_still_ours server "${target_value}" "${mark}" "${server_name}" >/dev/null; }; then
+        _HETZNER_LB_FAILED=1
         continue
       fi
 
@@ -654,8 +720,6 @@ hetzner::load-balancer() {
           (( ${#private_arg[@]} == 0 )) || hint+=" ${private_arg[*]}"
           error "lb ${name}: removed target ${target_type} '${target_value}', but could not add it again with use-private-ip ${want_private} in ${HETZNER_LB_ADD_TRIES:-4} attempts: ${err}. The load balancer does not route to this target now. Add it with '${hint}', or run the provision again."
           _HETZNER_LB_FAILED=1
-        else
-          [[ -z "${stale_sel}" ]] || stale+=("${stale_sel}")
         fi
         if [[ -z "${CLOUD_DRY_RUN:-}" ]]; then
           local after
@@ -669,29 +733,16 @@ hetzner::load-balancer() {
       if ! err=$(dry-run::cmd hcloud load-balancer add-target "${rid}" \
           "${target_args[@]}" "${private_arg[@]}" 2>&1) &&
          [[ "${err}" != *"already"* ]]; then
-        warn "lb ${name}: add-target failed: ${err}"
+        error "lb ${name}: could not add target ${target_type} '${target_value}': ${err}. Run the provision again."
+        _HETZNER_LB_FAILED=1
         continue
       fi
-      [[ -z "${stale_sel}" ]] || stale+=("${stale_sel}")
     done < <(hetzner::json -c ".[\"load-balancer\"][${i}][\"#targets\"][]?" 2>/dev/null)
 
-    # A target of a descriptor selector WITHOUT the owner mark (made by an
-    # older lok8s) can select a server of another cluster. The target with
-    # the mark is in place now, so remove the old one. Its servers are in the
-    # new target: the lookup stops the provision while a declared server has
-    # no owner mark.
-    local sel
-    for sel in "${stale[@]+"${stale[@]}"}"; do
-      jq -e --arg s "${sel}" '[ (.targets // [])[]
-        | select(.type == "label_selector" and (.label_selector.selector // "") == $s) ]
-        | length > 0' >/dev/null 2>&1 <<<"${live}" || continue
-      _hetzner_print "   ♻️  remove \033[3mtarget\033[0m label-selector: ${sel} (no owner mark; the target with ${_HETZNER_OWNER_KEY} replaces it)"
-      if ! err=$(dry-run::cmd hcloud load-balancer remove-target "${rid}" \
-          --label-selector "${sel}" 2>&1); then
-        error "lb ${name}: could not remove the old target label-selector '${sel}': ${err}. It can select servers of another cluster. Remove it with 'hcloud load-balancer remove-target ${name} --label-selector ${sel}', then run the provision again."
-        _HETZNER_LB_FAILED=1
-      fi
-    done
+    # Every target that can route to a server of another owner goes: an old
+    # selector without the owner mark (an older lok8s made it), a selector
+    # that the descriptor dropped, a server target without the mark.
+    hetzner::_lb_audit "${rid}" "${name}" "${mark}" || _HETZNER_LB_FAILED=1
 
     local protocol listen_port dest_port live_service live_protocol live_dest
     # shellcheck disable=SC2031  # i is the create-loop index. Only the server hook's subshell reuses i (SC2030); this hook runs in the current shell
@@ -735,6 +786,7 @@ hetzner::load-balancer() {
           warn "lb ${name}: add-service failed: ${err}"
       fi
     done < <(hetzner::json -c ".[\"load-balancer\"][${i}][\"#services\"][]?" 2>/dev/null)
+    return 0
   }
 
   hetzner::create 'load-balancer' || return 1

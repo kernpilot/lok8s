@@ -63,15 +63,43 @@ _part() {
   mv "${f}.new" "${f}"
 }
 
+# The fake keeps the parts of each kind in ${STORE}/<kind>.json: `create`
+# adds a part with the labels of its --label flags, `list` prints the store,
+# `describe` prints the part with that id, and `add-target`/`remove-target`
+# change the targets of a load balancer. Other writes succeed. Switches:
+#   HCLOUD_FAIL=<regex>   a command that matches fails (nothing is done)
+#   HCLOUD_LOST=<regex>   a command that matches is done, but fails (a lost answer)
+#   LIST_FAILS_AFTER_CREATE=<kind>  after a create of <kind>, its list fails
+#   RELABEL_AFTER_LIST="<kind> <id> <value> [<n>]"  after the n-th (default:
+#                         first) list of <kind>, the owner label of that part
+#                         changes (another actor)
 _fake_hcloud() {
   hcloud() {
     printf '%s\n' "$*" >> "${HCLOUD_LOG}"
-    local kind="${1}" verb="${2}"
+    if [[ -n "${HCLOUD_FAIL:-}" && "$*" =~ ${HCLOUD_FAIL} ]]; then
+      echo "hcloud: ${1} ${2} failed (server_error)" >&2
+      return 1
+    fi
+    local kind="${1}" verb="${2}" lost=0
+    [[ -z "${HCLOUD_LOST:-}" || ! "$*" =~ ${HCLOUD_LOST} ]] || lost=1
     shift 2
     local f="${STORE}/${kind}.json"
     [[ -f "${f}" ]] || echo '[]' > "${f}"
     case "${verb}" in
-      list) cat "${f}" ;;
+      list)
+        if [[ -f "${STORE}/list-fails-${kind}" ]]; then
+          echo "hcloud: ${kind} list failed (server_error)" >&2
+          return 1
+        fi
+        cat "${f}"
+        echo "${kind}" >> "${STORE}/lists"
+        local rk rid rv rn
+        read -r rk rid rv rn <<<"${RELABEL_AFTER_LIST:-}"
+        if [[ "${rk}" == "${kind}" && "$(grep -cx -- "${kind}" "${STORE}/lists")" == "${rn:-1}" ]]; then
+          jq -c --arg id "${rid}" --arg v "${rv}" \
+            'map(if (.id | tostring) == $id then .labels["lok8s.dev/owner"] = $v else . end)' "${f}" > "${f}.new"
+          mv "${f}.new" "${f}"
+        fi ;;
       create)
         local name="" labels='{}' id
         while (( $# )); do
@@ -85,12 +113,36 @@ _fake_hcloud() {
           esac
         done
         id=$(( 100 + $(cat "${STORE}"/*.json | jq -s 'map(length) | add') ))
-        _part "${kind}" "${id}" "${name}" "${labels}" ;;
+        _part "${kind}" "${id}" "${name}" "${labels}"
+        [[ "${LIST_FAILS_AFTER_CREATE:-}" != "${kind}" ]] || : > "${STORE}/list-fails-${kind}" ;;
       describe)
-        jq -c --arg r "${1}" 'first(.[] | select((.id | tostring) == $r)) // error("not found")' "${f}" ||
+        jq -c --arg r "${1}" 'first(.[] | select((.id | tostring) == $r)) // error("not found")' "${f}" 2>/dev/null ||
           { echo "hcloud: ${kind} not found: ${1}" >&2; return 1; } ;;
-      *) return 0 ;;
+      add-target|remove-target)
+        local lb="${1}" t=""
+        shift
+        while (( $# )); do
+          case "${1}" in
+            --label-selector) t="$(jq -cn --arg s "${2}" '{type: "label_selector", label_selector: {selector: $s}}')"; shift 2 ;;
+            --server) t="$(jq -cn --argjson s "${2}" '{type: "server", server: {id: $s}}')"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        if [[ "${verb}" == "add-target" ]]; then
+          jq -c --arg lb "${lb}" --argjson t "${t}" \
+            'map(if (.id | tostring) == $lb then .targets = ((.targets // []) + [$t + {use_private_ip: false}]) else . end)' "${f}" > "${f}.new"
+        else
+          jq -c --arg lb "${lb}" --argjson t "${t}" \
+            'map(if (.id | tostring) == $lb then .targets = [ (.targets // [])[] | select((del(.use_private_ip)) != $t) ] else . end)' "${f}" > "${f}.new"
+        fi
+        mv "${f}.new" "${f}" ;;
+      *) : ;;
     esac
+    if (( lost )); then
+      echo "hcloud: timeout awaiting response headers" >&2
+      return 1
+    fi
+    return 0
   }
   export -f hcloud
 }
@@ -121,13 +173,11 @@ _write_descriptor() {
 JSON
 }
 
-# _provision: the steps of provider::provision, in its order.
+# _provision: the steps of provider::provision (hetzner::_run_steps), without
+# the cloud-init setup.
 _provision() {
   CLOUD_HETZNER_JSON="$(template::descriptor_json "${DESC}")" || return 1
-  local step
-  for step in lookup ssh-key floating-ip network load-balancer server volume; do
-    "hetzner::${step}" || { error "hetzner ${step} failed"; return 1; }
-  done
+  hetzner::_run_steps
 }
 
 # _writes: the hcloud calls that change something (all but list/describe).
@@ -187,6 +237,8 @@ _refused() {
   assert_failure
   assert_output --partial "refused ${1} '${3}' (id ${2}): it exists, but it does not have the owner mark of this cluster (lok8s.dev/owner=${MARK})"
   assert_output --partial "hcloud ${1} add-label ${2} lok8s.dev/owner=${MARK}"
+  # The lookup found the part by its name only: the user checks the id first.
+  assert_output --partial "first make sure that id ${2} is yours ('hcloud ${1} describe ${2}')"
   assert_output --partial "Nothing was created or changed"
   run _writes
   assert_output ""
@@ -458,4 +510,358 @@ cp-0"
   assert_output --partial "kubeone inventory: provider::output failed"
   run yq -r '.apiEndpoint // "none"' "${manifest}"
   assert_output "none"
+}
+
+@test "owner mark: '.' and '..' are not a domain" {
+  PROVIDER_DOMAIN=".." run hetzner::owner_mark prod
+  assert_failure
+  assert_output --partial "the domain of the cluster is '..', which is not a domain name"
+  PROVIDER_DOMAIN="." run hetzner::owner_mark prod
+  assert_failure
+  assert_output --partial "the domain of the cluster is '.', which is not a domain name"
+}
+
+# ── references at create: only verified ids of marked parts ─
+
+# _foreign_parts: one part of each kind that a create can refer to, without
+# the owner mark (another person's parts in the same project).
+_foreign_parts() {
+  _part ssh-key 71 their-key '{}'
+  _part network 72 their-net '{}'
+  _part volume 73 their-vol '{}'
+  _part firewall 74 their-fw '{}'
+  _part placement-group 75 their-pg '{}'
+  _part primary-ip 76 their-ip4 '{}'
+  _part primary-ip 77 their-ip6 '{}'
+  _part server 78 their-cp '{"lok8s.dev/cluster":"prod"}'
+}
+
+# _refused_refs: the provision stops in the refs step: no write at all.
+_refused_refs() {
+  run _provision
+  assert_failure
+  assert_output --partial "reference(s) of the descriptor are refused. Nothing was created or changed."
+  local out="${output}"
+  run _writes
+  assert_output ""
+  output="${out}"
+}
+
+@test "refs: every server reference to a foreign part, by name, by id or by id string, is refused before any create" {
+  _foreign_parts
+  yq -i -o json '.server[0] += {"ssh-key": ["their-key"], "network": "72", "volume": ["their-vol"],
+    "firewall": ["their-fw"], "placement-group": "75", "primary-ipv4": 76, "primary-ipv6": "their-ip6"}' "${DESC}"
+  _refused_refs
+  assert_output --partial "7 reference(s) of the descriptor are refused"
+  assert_output --partial "refused server 'cp-0': ssh-key: ssh-key 'their-key' (id 71) does not have the owner mark of this cluster (lok8s.dev/owner=${MARK})"
+  assert_output --partial "first make sure that id 71 is yours ('hcloud ssh-key describe 71'), then mark it one time: hcloud ssh-key add-label 71 lok8s.dev/owner=${MARK}"
+  assert_output --partial "refused server 'cp-0': network: network 'their-net' (id 72) does not have the owner mark"
+  assert_output --partial "refused server 'cp-0': volume: volume 'their-vol' (id 73) does not have the owner mark"
+  assert_output --partial "refused server 'cp-0': firewall: firewall 'their-fw' (id 74) does not have the owner mark"
+  assert_output --partial "refused server 'cp-0': placement-group: placement-group 'their-pg' (id 75) does not have the owner mark"
+  assert_output --partial "refused server 'cp-0': primary-ipv4: primary-ip 'their-ip4' (id 76) does not have the owner mark"
+  assert_output --partial "hcloud primary-ip add-label 76 lok8s.dev/owner=${MARK}"
+  assert_output --partial "refused server 'cp-0': primary-ipv6: primary-ip 'their-ip6' (id 77) does not have the owner mark"
+}
+
+@test "refs: the volume server, floating-ip server and load-balancer network by name are refused when foreign" {
+  _foreign_parts
+  yq -i -o json '.volume[0].server = "their-cp" | .["floating-ip"][0].server = "their-cp"
+    | .["load-balancer"][0].network = "their-net" | .["load-balancer"][0]["primary-ipv4"] = "their-ip4"' "${DESC}"
+  _refused_refs
+  assert_output --partial "refused volume 'prod-data': server: server 'their-cp' (id 78) does not have the owner mark"
+  assert_output --partial "refused floating-ip 'prod-ip': server: server 'their-cp' (id 78) does not have the owner mark"
+  assert_output --partial "refused load-balancer 'prod-api': network: network 'their-net' (id 72) does not have the owner mark"
+  assert_output --partial "refused load-balancer 'prod-api': primary-ipv4: primary-ip 'their-ip4' (id 76) does not have the owner mark"
+}
+
+@test "refs: a key with a #suffix goes through the same check, as a string and as a number" {
+  _foreign_parts
+  _part server 999 also-theirs '{}'
+  yq -i -o json 'del(.volume[0].server) | .volume[0]["server#ref"] = "78" | .volume[0]["server#two"] = 999
+    | .["floating-ip"][0]["server#x"] = "their-cp"
+    | .["load-balancer"][0]["network#x"] = "their-net"
+    | .server[0]["ssh-key#2"] = ["their-key"]' "${DESC}"
+  _refused_refs
+  assert_output --partial "refused volume 'prod-data': server: server 'their-cp' (id 78) does not have the owner mark"
+  # A number on a reference key is an index into the descriptor, also with a suffix.
+  assert_output --partial "refused volume 'prod-data': server: the descriptor has no server with the index 999."
+  assert_output --partial "refused floating-ip 'prod-ip': server: server 'their-cp' (id 78)"
+  assert_output --partial "refused load-balancer 'prod-api': network: network 'their-net' (id 72)"
+  assert_output --partial "refused server 'cp-0': ssh-key: ssh-key 'their-key' (id 71)"
+}
+
+@test "refs: a reference to a part with the mark of another cluster is refused" {
+  _part firewall 74 their-fw "{\"lok8s.dev/owner\":\"${OTHER}\"}"
+  yq -i -o json '.server[0].firewall = ["their-fw"]' "${DESC}"
+  _refused_refs
+  assert_output --partial "refused server 'cp-0': firewall: firewall 'their-fw' (id 74) has the owner mark of another cluster (lok8s.dev/owner=${OTHER}; this cluster: ${MARK})"
+}
+
+@test "refs: a value that is no index, id or name is refused (true, null, an empty list, a list on a one-part flag)" {
+  _part server 81 a "{\"lok8s.dev/owner\":\"${MARK}\"}"
+  _part server 82 b "{\"lok8s.dev/owner\":\"${MARK}\"}"
+  yq -i -o json '.server[0].network = true | .server[0].firewall = null | .server[0]["ssh-key"] = []
+    | .volume[0].server = ["a", "b"] | .["floating-ip"][0].server = "a,b"' "${DESC}"
+  _refused_refs
+  assert_output --partial "refused server 'cp-0': network: true is a boolean."
+  assert_output --partial "refused server 'cp-0': firewall: null is a null."
+  assert_output --partial "refused server 'cp-0': ssh-key is empty."
+  assert_output --partial "refused volume 'prod-data': server: hcloud volume create takes one server, and the descriptor names 2."
+  assert_output --partial "refused floating-ip 'prod-ip': server: 'a,b' is not one id or name."
+}
+
+@test "refs: a reference to a part that lok8s creates in a later step is refused before any create" {
+  yq -i -o json '.["floating-ip"][0].server = 0' "${DESC}"
+  _refused_refs
+  assert_output --partial "refused floating-ip 'prod-ip': server: server 'cp-0' of the descriptor does not exist yet, and lok8s creates the server parts after the floating-ip parts."
+}
+
+@test "refs: a name of a descriptor part, and a marked part outside the descriptor (also on a #suffix key), reach hcloud as verified ids" {
+  _part firewall 74 our-fw "{\"lok8s.dev/owner\":\"${MARK}\"}"
+  _part primary-ip 76 our-ip4 "{\"lok8s.dev/owner\":\"${MARK}\"}"
+  _part primary-ip 77 our-ip6 "{\"lok8s.dev/owner\":\"${MARK}\"}"
+  yq -i -o json '.server[0]["ssh-key"] = ["prod-key"] | .server[0].network = "prod-net"
+    | .server[0].firewall = ["our-fw"] | .server[0]["primary-ipv4"] = 76
+    | .server[0]["primary-ipv6#v6"] = "our-ip6"' "${DESC}"
+  run _provision
+  assert_success
+  # ids of the fake: ssh-key 103, network 105 (three parts exist before the run).
+  run grep -E '^server create ' "${HCLOUD_LOG}"
+  assert_output --regexp ' --ssh-key 103 '
+  assert_output --regexp ' --network 105 '
+  assert_output --regexp ' --firewall 74 '
+  assert_output --regexp ' --primary-ipv4 76 '
+  assert_output --regexp ' --primary-ipv6 77 '
+  refute_output --regexp ' (prod-key|prod-net|our-fw|our-ip6)( |$)'
+}
+
+# The conversion of the descriptor reads a reference key without its
+# "#..." suffix too: a number is the id of that descriptor part. (The
+# bare-metal hooks get these values.)
+@test "conversion: a number on a reference key with a #suffix is the id of that descriptor part, as without the suffix" {
+  CLOUD_HETZNER_JSON='{"server":[{"name":"a","id":41},{"name":"b","id":42}],"volume":[{"name":"v","server":1,"server#ref":1,"size":10}]}'
+  # shellcheck disable=SC2016
+  run hetzner::json -rc --argjson refs "${_HETZNER_REF_KEYS}" "${_HETZNER_JQ_VALUE}"' . as $root
+    | .volume[0] | to_entries[] | "--" + .key, hcloud_value($root; $refs)'
+  assert_success
+  assert_output "--name
+v
+--server
+42
+--server#ref
+42
+--size
+10"
+}
+
+@test "refs: the create resolves a reference again right before it, and stops when the part changed" {
+  _part firewall 74 our-fw "{\"lok8s.dev/owner\":\"${MARK}\"}"
+  yq -i -o json '.server[0].firewall = ["our-fw"]' "${DESC}"
+  # The refs step lists the firewalls (the first list); then another actor
+  # gives the firewall another owner mark.
+  export RELABEL_AFTER_LIST="firewall 74 ${OTHER}"
+  run _provision
+  assert_failure
+  assert_output --partial "refused server 'cp-0': firewall: firewall 'our-fw' (id 74) has the owner mark of another cluster"
+  assert_output --partial "did not create server 'cp-0'"
+  run grep -E '^server create ' "${HCLOUD_LOG}"
+  assert_output ""
+}
+
+@test "refs: a snapshot image id needs the owner mark; a system image id and an image name pass" {
+  _part image 4711 "" '{}' '{"type":"snapshot"}'
+  _part image 5 ubuntu-24.04 '{}' '{"type":"system"}'
+  yq -i -o json '.server[0].image = 4711' "${DESC}"
+  _refused_refs
+  assert_output --partial "refused server 'cp-0': image: image 4711 (a snapshot) does not have the owner mark of this cluster"
+  assert_output --partial "hcloud image add-label 4711 lok8s.dev/owner=${MARK}"
+  yq -i -o json '.server[0].image = 5' "${DESC}"
+  : > "${HCLOUD_LOG}"
+  run _provision
+  assert_success
+  run grep -E '^server create ' "${HCLOUD_LOG}"
+  assert_output --regexp ' --image 5 '
+}
+
+# ── a part that changes between the check and the write ──
+
+@test "recheck: a network that loses the mark after the lookup gets no add-subnet" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  export RELABEL_AFTER_LIST="network 13 ${OTHER}"
+  run _provision
+  assert_failure
+  assert_output --partial "did not change network 13: it does not have the owner mark of this cluster now (lok8s.dev/owner=${OTHER}; this cluster: ${MARK})"
+  run _writes
+  refute_output --partial "add-subnet"
+}
+
+@test "recheck: a floating IP that loses the mark after the lookup is not assigned" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  # The second list is the lookup at the end of the floating-ip step; the
+  # assign comes in the server step after it.
+  export RELABEL_AFTER_LIST="floating-ip 12 ${OTHER} 2"
+  run _provision
+  assert_failure
+  assert_output --partial "did not change floating-ip 12: it does not have the owner mark of this cluster now"
+  run _writes
+  refute_output --partial "floating-ip assign"
+}
+
+@test "recheck: a server that loses the mark after the lookup gets no floating IP" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  # No load balancer: its server target would check the server first.
+  yq -i -o json 'del(.["load-balancer"])' "${DESC}"
+  export RELABEL_AFTER_LIST="server 15 ${OTHER}"
+  run _provision
+  assert_failure
+  local out="${output}"
+  run _writes
+  refute_output --partial "floating-ip assign"
+  output="${out}"
+  assert_output --partial "did not change server 15: it does not have the owner mark of this cluster now"
+}
+
+@test "recheck: a network that loses the mark before the LB step: no attach and no target" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  # The second network list is the lookup at the end of the network step.
+  export RELABEL_AFTER_LIST="network 13 ${OTHER} 2"
+  run _provision
+  assert_failure
+  assert_output --partial "did not change network 13: it does not have the owner mark of this cluster now"
+  run _writes
+  assert_output --partial "network add-subnet 13 "
+  refute_output --partial "attach-to-network"
+  refute_output --partial "add-target"
+}
+
+@test "recheck: a load balancer that loses the mark after the lookup gets no change" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  export RELABEL_AFTER_LIST="load-balancer 14 ${OTHER}"
+  run _provision
+  assert_failure
+  assert_output --partial "did not change load-balancer 14: it does not have the owner mark of this cluster now"
+  run _writes
+  refute_output --partial "load-balancer"
+}
+
+@test "recheck: a load balancer with no network to attach that loses the mark after the lookup gets no target and no service" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  # No descriptor network: no attach (and no check before it), so the read
+  # before the targets is the first check of the load balancer.
+  yq -i -o json 'del(.network)' "${DESC}"
+  export RELABEL_AFTER_LIST="load-balancer 14 ${OTHER}"
+  run _provision
+  assert_failure
+  local out="${output}"
+  run _writes
+  refute_output --partial "load-balancer"
+  output="${out}"
+  assert_output --partial "did not change load-balancer 14: it does not have the owner mark of this cluster now"
+}
+
+@test "recheck: a server that loses the mark after the lookup is not added as an LB target" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  export RELABEL_AFTER_LIST="server 15 ${OTHER}"
+  run _provision
+  assert_failure
+  assert_output --partial "did not change server 15: it does not have the owner mark of this cluster now"
+  run _writes
+  refute_output --partial "add-target 14 --server"
+}
+
+# ── load balancer targets: the audit ─────────────────────
+
+# _lb_targets <targets-json>: the LB 14 (with the mark) has these targets.
+_lb_targets() {
+  jq -c --argjson t "${1}" '.[0] += {private_net: [{network: 13, ip: "10.0.0.2"}], targets: $t}' \
+    "${STORE}/load-balancer.json" > "${STORE}/lb.new"
+  mv "${STORE}/lb.new" "${STORE}/load-balancer.json"
+}
+
+@test "lb: a failed add of the selector with the mark fails the run, and the old selector goes all the same" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  local old="lok8s.dev/cluster=prod,lok8s.dev/role=control-plane"
+  _lb_targets "[{\"type\":\"label_selector\",\"label_selector\":{\"selector\":\"${old}\"},\"use_private_ip\":false}]"
+  export HCLOUD_FAIL='^load-balancer add-target 14 --label-selector'
+  run _provision
+  assert_failure
+  assert_output --partial "lb prod-api: could not add target label-selector '${old},lok8s.dev/owner=${MARK}'"
+  assert_output --partial "hetzner: the load balancer does not match the descriptor"
+  run grep -E '^load-balancer remove-target 14 ' "${HCLOUD_LOG}"
+  assert_output "load-balancer remove-target 14 --label-selector ${old}"
+  # Left: the descriptor's server target (cp-0 has the mark). No selector.
+  run jq -c '[.[0].targets[] | .label_selector.selector // .server.id]' "${STORE}/load-balancer.json"
+  assert_output "[15]"
+}
+
+@test "lb: the audit removes a dropped selector without the mark and a foreign server target, and keeps the rest" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  _part server 77 their-cp '{"lok8s.dev/cluster":"prod","lok8s.dev/role":"control-plane"}'
+  local dropped="lok8s.dev/cluster=prod,lok8s.dev/role=old-role"
+  local owned_old="lok8s.dev/role=worker,lok8s.dev/owner=${MARK}"
+  _lb_targets "[{\"type\":\"label_selector\",\"label_selector\":{\"selector\":\"${dropped}\"},\"use_private_ip\":false},
+    {\"type\":\"server\",\"server\":{\"id\":77},\"use_private_ip\":false},
+    {\"type\":\"label_selector\",\"label_selector\":{\"selector\":\"${owned_old}\"},\"use_private_ip\":false},
+    {\"type\":\"ip\",\"ip\":{\"ip\":\"203.0.113.9\"},\"use_private_ip\":false}]"
+  run _provision
+  assert_success
+  run grep -E '^load-balancer remove-target 14 ' "${HCLOUD_LOG}"
+  assert_output "load-balancer remove-target 14 --label-selector ${dropped}
+load-balancer remove-target 14 --server 77"
+  run jq -c '[.[0].targets[] | .label_selector.selector // .server.id // .ip.ip]' "${STORE}/load-balancer.json"
+  assert_output "[\"${owned_old}\",\"203.0.113.9\",15,\"lok8s.dev/cluster=prod,lok8s.dev/role=control-plane,lok8s.dev/owner=${MARK}\"]"
+}
+
+@test "lb: a failed removal of an unsafe target fails the run and names the target" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  local old="lok8s.dev/cluster=prod,lok8s.dev/role=control-plane"
+  _lb_targets "[{\"type\":\"label_selector\",\"label_selector\":{\"selector\":\"${old}\"},\"use_private_ip\":false}]"
+  export HCLOUD_FAIL='^load-balancer remove-target'
+  run _provision
+  assert_failure
+  assert_output --partial "lb prod-api: could not remove the target label_selector '${old}'"
+  assert_output --partial "It can route to a server of another owner. Remove it with 'hcloud load-balancer remove-target prod-api --label-selector ${old}'"
+}
+
+# ── the outcome after a failure ──────────────────────────
+
+# _provision_real: provider::provision itself (it writes the state dump).
+_provision_real() {
+  provider::provision "${DESC}" "${BATS_TEST_TMPDIR}/work"
+}
+
+@test "outcome: a failed list after a network create reports the partial result, not 'Nothing was created or changed'" {
+  export LIST_FAILS_AFTER_CREATE=network
+  run _provision_real
+  assert_failure
+  assert_output --partial "hetzner: could not list the network parts ('hcloud network list'). This run made changes before it stopped"
+  refute_output --partial "Nothing was created or changed"
+  assert_output --partial "the provision stopped after it made changes, so the result is partial"
+  # ids of the fake: ssh-key 100, floating-ip 101, network 102.
+  assert_output --partial "created ssh-key prod-key (id 100)"
+  assert_output --partial "created floating-ip prod-ip (id 101)"
+  assert_output --partial "created network prod-net (id not known yet)"
+  assert_output --partial "the ids that this run knows are in ${BATS_TEST_TMPDIR}/work/hetzner.dump.json"
+  run jq -c '[.["ssh-key"][0].id, .["floating-ip"][0].id]' "${BATS_TEST_TMPDIR}/work/hetzner.dump.json"
+  assert_output "[100,101]"
+}
+
+@test "outcome: a create whose answer is lost is reported as not confirmed, and the next run adopts the part" {
+  export HCLOUD_LOST='^network create'
+  run _provision_real
+  assert_failure
+  assert_output --partial "could not create network 'prod-net', or Hetzner did not confirm it"
+  assert_output --partial "not confirmed: created network prod-net? hcloud exit 1"
+  refute_output --partial "Nothing was created or changed"
+  [[ -f "${BATS_TEST_TMPDIR}/work/hetzner.dump.json" ]]
+  # The network exists with the mark: the next run adopts it and adds the subnet.
+  unset HCLOUD_LOST
+  : > "${HCLOUD_LOG}"
+  run _provision_real
+  assert_success
+  run grep -cE '^network create ' "${HCLOUD_LOG}"
+  assert_output "0"
+  run grep -E '^network add-subnet ' "${HCLOUD_LOG}"
+  assert_output --regexp '^network add-subnet 102 '
 }

@@ -406,10 +406,18 @@ whose part it is, so lok8s marks its own parts.
 **The mark.** lok8s puts the label `lok8s.dev/owner=<mark>` on each part
 that it creates: servers, SSH keys, networks, load balancers, floating IPs
 and volumes. The mark is the first 32 hex characters of the SHA-256 of the
-domain (`clusters/<domain>/`) and the descriptor's `cluster_name`. Two
-clusters with the same `cluster_name` in two domains get two marks. Do not
-put two clusters with the same domain and the same `cluster_name` in one
-Hetzner project: they get the same mark.
+domain (`clusters/<domain>/`) and the descriptor's `cluster_name`, each
+followed by a newline:
+
+```bash
+printf '%s\n%s\n' <domain> <cluster_name> | sha256sum | cut -c1-32
+```
+
+Two clusters with the same `cluster_name` in two domains get two marks. Do
+not put two clusters with the same domain and the same `cluster_name` in one
+Hetzner project: they get the same mark. Keep the cluster spec at
+`clusters/<domain>/cluster.lok8s.yaml`: lok8s refuses `.` and `..` as a
+domain.
 
 **What lok8s does with an existing part.** lok8s uses or changes an
 existing part only when it has the mark of this cluster:
@@ -417,37 +425,83 @@ existing part only when it has the mark of this cluster:
 - A part with a descriptor name and no mark, or with the mark of another
   cluster, stops the provision. lok8s stops before it creates or changes
   anything, and it shows each part with its kind, name and id.
-- lok8s does not create placement groups and firewalls. To use one, put
-  the mark on it yourself (see the command below).
-- After lok8s finds or creates a part, it changes the part by its id, not
-  by its name.
+- A reference to another part (the `ssh-key`, `network`, `volume`,
+  `firewall`, `placement-group`, `primary-ipv4` and `primary-ipv6` of a
+  server; the `server` of a volume or a floating IP; the `network` and
+  primary IPs of a load balancer) must name a part with the mark. lok8s
+  checks every reference before the first create and shows all refusals at
+  once. It checks each reference again right before its create, and it gives
+  `hcloud` only the id of the part, never a name. A key with a suffix
+  (`"server#2"`) is the same reference. A number on `ssh-key`, `network`,
+  `server`, `volume`, `firewall` or `placement-group` is an index into the
+  descriptor list of that kind; a string is the name of a descriptor part,
+  or an id or a name of a part outside the descriptor.
+- lok8s does not create firewalls, placement groups and primary IPs. To use
+  one, put the mark on it yourself (see the steps below). This is also true
+  for a snapshot or a backup that you give as the `image` of a server by its
+  id. An image name (`ubuntu-24.04`) is a public image and needs no mark.
+- Right before each change (a subnet, a floating IP assignment, a load
+  balancer network or target), lok8s reads the parts by id again and checks
+  their mark. A part that changed stops the step.
 - A `label-selector` target of a load balancer gets the term
   `lok8s.dev/owner=<mark>`, so the load balancer sends traffic only to the
-  servers of this cluster. lok8s replaces a target without this term (from
-  an older lok8s): first it adds the new target, then it removes the old
-  one. A `server` target must be a server of the descriptor. A server that
-  lok8s did not create (for example, a machine-controller worker) has no
-  mark, so a selector target does not select it.
+  servers of this cluster. A `server` target must be a server of the
+  descriptor. After the targets are set, lok8s removes each target that can
+  send traffic to a server of another owner: a selector without the term
+  (from an older lok8s, or one that the descriptor no longer has), and a
+  server target whose server has no mark. lok8s removes such a target also
+  when it could not add the new target: then the load balancer sends traffic
+  to fewer servers until the next `lo provision`. A server that lok8s did not
+  create (for example, a machine-controller worker) has no mark, so a
+  selector target does not select it.
 - The inventory for KubeOne (API endpoint, hosts, the private network of the
   cloud controller manager) contains only parts with the mark.
+- `lo recover` reimages a cloud server by the id that it checked, and it
+  reads the server by that id again right before the reimage. A server that
+  has another name or no mark at that time is not reimaged.
+
+**Limits.** A check and the change after it are two API calls. The Hetzner
+API cannot make a change depend on a label, so another person or run can
+change a part between the two calls. When a part with the id that lok8s
+gives `hcloud` is deleted in that time, `hcloud` looks for a part with that
+id as its name. The inventory shows the parts at the time of the
+`lo provision`. An `ip` target of a load balancer is an address: lok8s
+cannot know whose address it is.
+
+**When a provision stops after it made changes.** lok8s shows each change
+of the run: the parts that it created (with their ids), and each other
+change with its result. A change that `hcloud` did not confirm can be done
+all the same (the answer can be lost). The ids that lok8s knows are in
+`hetzner.dump.json` in the work directory. Each part that lok8s created has
+the mark, so the next `lo provision` adopts it and does the rest.
 
 **After an upgrade from an older lok8s (one time).** The parts of an
 existing cluster have no mark. The first `lo provision` stops and shows one
 command for each part:
 
 ```text
-[error] hetzner: refused network 'prod-net' (id 1234567): it exists, but it does not have the owner mark of this cluster (lok8s.dev/owner=<mark>). [...] mark it one time: hcloud network add-label 1234567 lok8s.dev/owner=<mark>. [...]
+[error] hetzner: refused network 'prod-net' (id 1234567): it exists, but it does not have the owner mark of this cluster (lok8s.dev/owner=<mark>). [...] first make sure that id 1234567 is yours ('hcloud network describe 1234567'), then mark it one time: hcloud network add-label 1234567 lok8s.dev/owner=<mark>. [...]
 ```
 
-1. Read the list. Make sure that each part is a part of this cluster.
-2. Run the `hcloud ... add-label` command for each part.
-3. Run `lo provision` again.
+lok8s found each of these parts by its name only, and a name does not tell
+whose part it is. Do not run the commands without a check:
+
+1. For each part, run `hcloud <kind> describe <id>`. Make sure that the
+   part is a part of this cluster (its labels, its servers, its addresses).
+2. Run the `hcloud ... add-label` command for each part that is yours.
+3. If a part is not yours, give the part in the descriptor another name.
+4. Run `lo provision` again.
+
+Mark a primary IP, a firewall, a placement group or a snapshot image the
+same way: `hcloud primary-ip add-label <id> lok8s.dev/owner=<mark>`.
 
 lok8s does not adopt an unmarked part by itself, and it has no flag for
-that. If a part is not yours, give the part in the descriptor another name.
-If you rename the domain, the mark changes: put the new mark on each part
-with `hcloud <kind> add-label --overwrite <id> lok8s.dev/owner=<mark>`
-(the error shows this command).
+that. If you rename the domain, the mark changes. A part with the mark of
+another cluster stops the provision too. Use
+`hcloud <kind> add-label --overwrite <id> lok8s.dev/owner=<mark>` only when
+you know that the old mark is yours: calculate the mark of the old domain
+with the command above and compare it with the label of the part.
+`--overwrite` removes the protection of the old mark.
 
 ### Re-applying bootstrap only (`-b`)
 

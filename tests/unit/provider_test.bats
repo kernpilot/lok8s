@@ -217,6 +217,29 @@ YAML
   [ "${PROVIDER_DOMAIN}" = "inline.lok8s.dev" ]
 }
 
+# A spec path with "." or ".." parts gives the same domain as in Go
+# (filepath.Clean): the owner mark of one cluster never depends on how the
+# path is written, and ".." is never the domain. (The configRef mode sets no
+# EXIT trap, so a failed check here is reported.)
+@test "provider::write_config cleans the spec path like Go: ./ and child/.. parts give the domain" {
+  mkdir -p "${BATS_TEST_TMPDIR}/clusters/prod.lok8s.dev/child"
+  printf 'cluster_name: prod\n' > "${BATS_TEST_TMPDIR}/clusters/prod.lok8s.dev/hetzner.yaml"
+  printf 'spec:\n  provider:\n    name: hetzner\n    configRef: hetzner.yaml\n' \
+    > "${BATS_TEST_TMPDIR}/clusters/prod.lok8s.dev/cluster.lok8s.yaml"
+  local p
+  for p in "clusters/prod.lok8s.dev/./cluster.lok8s.yaml" "clusters/prod.lok8s.dev/child/../cluster.lok8s.yaml"; do
+    unset PROVIDER_DOMAIN
+    provider::write_config "${BATS_TEST_TMPDIR}/${p}"
+    [ "${PROVIDER_DOMAIN}" = "prod.lok8s.dev" ]
+  done
+  run provider::_spec_domain "cluster.lok8s.yaml"
+  assert_output "."
+  run provider::_spec_domain "../cluster.lok8s.yaml"
+  assert_output ".."
+  run provider::_spec_domain "/../cluster.lok8s.yaml"
+  assert_output "/"
+}
+
 @test "provider::write_config fails for missing configRef" {
   mkdir -p "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
   cat > "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml" <<'YAML'

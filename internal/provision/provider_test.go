@@ -26,9 +26,17 @@ func TestWriteProviderConfigExportsTheDomain(t *testing.T) {
 	inlineSpec := filepath.Join(dir, "clusters", "inline.example.test", "cluster.lok8s.yaml")
 	testutil.WriteFile(t, inlineSpec, "spec:\n  provider:\n    name: hetzner\n    config:\n      cluster_name: inline\n")
 
+	// A path with "." or ".." parts: the domain of the cleaned path, the
+	// same as bash provider::_spec_domain.
+	testutil.WriteFile(t, filepath.Join(dir, "clusters", "inline.example.test", "child", ".keep"), "")
+	dotSpec := filepath.Join(dir, "clusters", "inline.example.test") + "/./cluster.lok8s.yaml"
+	upSpec := filepath.Join(dir, "clusters", "inline.example.test") + "/child/../cluster.lok8s.yaml"
+
 	for _, c := range []struct{ spec, want string }{
 		{refSpec, "ref.example.test"},
 		{inlineSpec, "inline.example.test"},
+		{dotSpec, "inline.example.test"},
+		{upSpec, "inline.example.test"},
 	} {
 		_, cleanup, err := WriteProviderConfig(c.spec, &bytes.Buffer{})
 		if err != nil {

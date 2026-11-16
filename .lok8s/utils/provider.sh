@@ -150,6 +150,40 @@ provider::_cleanup_configs() {
   done
 }
 
+# provider::_spec_domain <cluster_yaml>
+# The name of the directory of <cluster_yaml>, after a lexical clean of the
+# path with the rules of Go's filepath.Clean ("." parts and repeated "/" are
+# dropped, "dir/.." goes away, ".." at the root stays the root). So bash and
+# Go (provision.WriteProviderConfig) give the same domain for one path:
+# "clusters/prod/./x.yaml" and "clusters/prod/sub/../x.yaml" are "prod". A
+# path without a directory gives "." (or "/"); a path that leaves its start
+# gives "..". The hetzner provider refuses those as a domain.
+provider::_spec_domain() {
+  local path="${1}" part rooted=""
+  local -a parts=() out=()
+  [[ "${path}" != /* ]] || rooted="/"
+  IFS='/' read -r -a parts <<<"${path}"
+  for part in "${parts[@]}"; do
+    case "${part}" in
+      ""|.) ;;
+      ..)
+        if (( ${#out[@]} > 0 )) && [[ "${out[-1]}" != ".." ]]; then
+          unset 'out[-1]'
+        elif [[ -z "${rooted}" ]]; then
+          out+=("..")
+        fi ;;
+      *) out+=("${part}") ;;
+    esac
+  done
+  if (( ${#out[@]} >= 2 )); then
+    printf '%s\n' "${out[${#out[@]}-2]}"
+  elif [[ -n "${rooted}" ]]; then
+    printf '/\n'
+  else
+    printf '.\n'
+  fi
+}
+
 # provider::write_config <cluster_yaml>
 # Resolve provider config to PROVIDER_CONFIG_FILE.
 #
@@ -160,12 +194,12 @@ provider::_cleanup_configs() {
 # The result is always a temp file (or the ref file directly) exported
 # as PROVIDER_CONFIG_FILE. Drivers and provider functions read from it.
 # PROVIDER_DOMAIN is the domain of the cluster: the name of the directory of
-# <cluster_yaml> (clusters/<domain>/). The hetzner provider keys the owner
-# mark of the cluster's parts on it.
+# <cluster_yaml> (clusters/<domain>/), see provider::_spec_domain. The hetzner
+# provider keys the owner mark of the cluster's parts on it.
 provider::write_config() {
   local cluster_yaml="${1}"
 
-  PROVIDER_DOMAIN="$(basename -- "$(dirname -- "${cluster_yaml}")")"
+  PROVIDER_DOMAIN="$(provider::_spec_domain "${cluster_yaml}")"
   export PROVIDER_DOMAIN
 
   # Check for configRef first (file mode)

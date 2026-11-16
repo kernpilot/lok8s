@@ -158,13 +158,17 @@ provider::provision() {
   # gated explicitly: callers invoke provision under `|| return 1`, which
   # turns errexit OFF inside this body — unguarded, a failed `hcloud create`
   # is swallowed and provision reports success.
-  local step
-  for step in lookup ssh-key floating-ip network load-balancer server volume; do
-    "hetzner::${step}" || { error "hetzner ${step} failed"; return 1; }
-  done
+  local rc=0
+  hetzner::_run_steps || rc=1
 
-  # Dump result state (destroy's fallback name source — a failed dump is an error)
+  # Dump the state: the descriptor with the ids that this run knows. Also
+  # after a failed step: it holds the ids known so far. A failed dump is an
+  # error.
   hetzner::json '.' > "${work_dir}/hetzner.dump.json" || { error "hetzner state dump failed"; return 1; }
+  if (( rc != 0 )); then
+    error "hetzner: the ids that this run knows are in ${work_dir}/hetzner.dump.json."
+    return 1
+  fi
   debug "hetzner provision complete"
 }
 
@@ -643,12 +647,14 @@ provider::rebuild() {
   # ── Phase 1 — ATOMIC PREFLIGHT (read-only) ──────────────────────────────
   # Resolve and validate EVERY node before touching anything: name sanity, a
   # resolvable public IP, and the destructive target itself — cloud VMs must
-  # resolve to exactly one server carrying the cluster label; bare-metal nodes
-  # to exactly one Robot server whose IP equals the descriptor #external-ip
-  # (NOT its non-unique free-text server_name). Any failure aborts here with
-  # NOTHING reimaged/reset — no partial recovery, no acting on a foreign box.
+  # resolve to exactly one server with the cluster label and the owner mark
+  # (its id goes into the plan: the reimage acts on that id, never on a
+  # name); bare-metal nodes to exactly one Robot server whose IP equals the
+  # descriptor #external-ip (NOT its non-unique free-text server_name). Any
+  # failure aborts here with NOTHING reimaged/reset — no partial recovery, no
+  # acting on a foreign box.
   local -a plan=() cloud_ips=() metal_ips=()
-  local idx server name is_root pub image cloud_d ci num ext_ip
+  local idx server name is_root pub image cloud_d ci num ext_ip sid
   for (( idx=0; idx<count; idx++ )); do
     server="$(echo "${desc}" | jq -c ".server[${idx}]")"
     name="$(echo "${server}" | jq -r '.name // ""')"
@@ -686,10 +692,17 @@ provider::rebuild() {
       plan+=("metal"$'\t'"${name}"$'\t'"${num}"$'\t'"${fingerprint}")
       metal_ips+=("${pub}")
     else
-      # ── Cloud VM: name must uniquely carry the cluster label ──
-      hetzner::_cloud_server_unique_labeled "${name}" "${selector}" || {
+      # ── Cloud VM: name must resolve to ONE server with the cluster label
+      # and the owner mark; the plan keeps its id ──
+      sid="$(hetzner::_cloud_server_id "${name}" "${selector}" "${mark}" "${cluster_name}")" || {
         error "rebuild: cloud node '${name}' does not resolve to exactly one server carrying ${selector} — refusing to reimage"; return 1; }
       image="$(echo "${server}" | jq -r '.image // "ubuntu-24.04"')"
+      # An image id of a snapshot or backup needs the owner mark too.
+      _HETZNER_REFUSED=()
+      _HETZNER_LISTS=()
+      hetzner::_image_ok server "${name}" "${image}" "${mark}" || {
+        hetzner::_print_refused
+        error "rebuild: nothing was reimaged."; return 1; }
       cloud_d="$(echo "${server}" | jq -r '.["#cloud.d"] // ""')"
       declare -F cloud-config::generate &>/dev/null || {
         error "rebuild: cloud-config generator unavailable"; return 1; }
@@ -697,7 +710,7 @@ provider::rebuild() {
       export CLOUD_PATHD="${cloud_d}"
       cloud-config::generate > "${ci}" 2>>"${CLOUD_LOG_FILE}" || {
         error "rebuild: cloud-init generation failed for '${name}'"; return 1; }
-      plan+=("cloud"$'\t'"${name}"$'\t'"${image}"$'\t'"${ci}")
+      plan+=("cloud"$'\t'"${name}"$'\t'"${sid}"$'\t'"${image}"$'\t'"${ci}")
       cloud_ips+=("${pub}")
     fi
   done
@@ -713,9 +726,9 @@ provider::rebuild() {
   # Robot rescue+reset via the dry-run branch inside each helper. A failure names
   # the offending node so the operator knows WHICH one failed (and that the
   # cluster may be left partially reimaged).
-  local rc=0 entry kind pname pa pb
+  local rc=0 entry kind pname pa pb pc
   for entry in "${plan[@]}"; do
-    IFS=$'\t' read -r kind pname pa pb <<<"${entry}"
+    IFS=$'\t' read -r kind pname pa pb pc <<<"${entry}"
     if [[ "${kind}" == "metal" ]]; then
       _hetzner_print "🔧 rescue+reset \033[1m${pname}\033[0m (robot#${pa})"
       hetzner::_robot_rescue "${pa}" "${pb}" || {
@@ -723,9 +736,14 @@ provider::rebuild() {
       hetzner::_robot_reset  "${pa}" || {
         error "rebuild: node '${pname}' (robot#${pa}) hardware reset failed — cluster may be partially reimaged"; rc=1; continue; }
     else
-      _hetzner_print "📦 rebuild \033[1m${pname}\033[0m (image ${pa})"
-      dry-run::cmd hcloud server rebuild "${pname}" --image "${pa}" --user-data-from-file "${pb}" || {
-        error "rebuild: node '${pname}' reimage failed ('hcloud server rebuild ${pname}') — cluster may be partially reimaged"; rc=1; continue; }
+      # The checked id only. Right before the reimage, read the server by
+      # that id again: a server renamed, relabelled or replaced after the
+      # preflight is refused (a node before it can be reimaged already).
+      _hetzner_print "📦 rebuild \033[1m${pname}\033[0m (id ${pa}, image ${pb})"
+      hetzner::_still_ours server "${pa}" "${mark}" "${pname}" >/dev/null || {
+        error "rebuild: node '${pname}' (id ${pa}) was not reimaged: it changed after the check (the message above) — cluster may be partially reimaged"; rc=1; continue; }
+      dry-run::cmd hcloud server rebuild "${pa}" --image "${pb}" --user-data-from-file "${pc}" || {
+        error "rebuild: node '${pname}' reimage failed ('hcloud server rebuild ${pa}') — cluster may be partially reimaged"; rc=1; continue; }
     fi
   done
 
@@ -916,16 +934,23 @@ hetzner::_robot_server_number_by_ip() {
   echo "${matches}" | jq -r '.[0].server_number'
 }
 
-# hetzner::_cloud_server_unique_labeled <name> <selector>
-# Succeed only if EXACTLY ONE hcloud server named <name> carries the cluster
-# label — the same scoping destroy/output use — so a rebuild can never reimage a
-# name collision, a stale, or a foreign (unlabeled) server.
-hetzner::_cloud_server_unique_labeled() {
-  local name="${1:-}" selector="${2:-}" n
-  [[ -n "${name}" && -n "${selector}" ]] || return 1
-  n="$(hcloud server list -o json -l "${selector}" 2>/dev/null \
-        | jq --arg n "${name}" '[.[] | select(.name==$n)] | length' 2>/dev/null || echo 0)"
-  [[ "${n}" == "1" ]]
+# hetzner::_cloud_server_id <name> <selector> <mark> <cluster_name>
+# The id of the ONE server named <name> that carries <selector> (the cluster
+# label and the owner mark), checked again in jq. rc 1 when no server or
+# more than one matches. The rebuild acts on this id, never on the name: an
+# all-digit name ("900") is an id to hcloud, and a name can move to another
+# server after the check.
+hetzner::_cloud_server_id() {
+  local name="${1:-}" selector="${2:-}" mark="${3:-}" cluster="${4:-}" sid
+  [[ -n "${name}" && -n "${selector}" && -n "${mark}" && -n "${cluster}" ]] || return 1
+  sid="$(hcloud server list -o json -l "${selector}" 2>/dev/null | jq -r \
+    --arg n "${name}" --arg key "${_HETZNER_OWNER_KEY}" --arg mark "${mark}" --arg c "${cluster}" '
+    [ (. // [])[]
+      | select(.name == $n and (.labels // {})[$key] == $mark and (.labels // {})["lok8s.dev/cluster"] == $c)
+      | .id | tostring ]
+    | if length == 1 then .[0] else empty end' 2>/dev/null)" || return 1
+  [[ "${sid}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "${sid}"
 }
 
 # hetzner::_robot_rescue <number> <key_fingerprint>

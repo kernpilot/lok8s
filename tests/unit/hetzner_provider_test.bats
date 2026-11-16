@@ -24,7 +24,7 @@ setup() {
   # `import` is stubbed above, so anything the provider imports must be sourced
   # here explicitly. utils/template supplies template::descriptor_json, which
   # replaced the envsubst/yq BINARY calls the provider used to make — a shell
-  # function needs loading where a binary did not (AUDIT.md r329).
+  # function needs loading where a binary did not.
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
   # The Robot calls write their config with http::curl_config.
   source "${_PROJECT_ROOT}/.lok8s/utils/http.sh"
@@ -68,7 +68,14 @@ _install_fakes() {
     printf '%s\n' "$*" >> "${HCLOUD_LOG}"
     case "$1 $2" in
       "server list")
-        echo '[{"name":"cp-0","status":"running","public_net":{"ipv4":{"ip":"192.0.2.10"}},"private_net":[{"ip":"10.0.0.3"}],"labels":{"lok8s.dev/cluster":"test-cluster","lok8s.dev/role":"control-plane","lok8s.dev/group":"cp","lok8s.dev/owner":"'"${MARK}"'"}}]' ;;
+        echo '[{"id":10,"name":"cp-0","status":"running","public_net":{"ipv4":{"ip":"192.0.2.10"}},"private_net":[{"ip":"10.0.0.3"}],"labels":{"lok8s.dev/cluster":"test-cluster","lok8s.dev/role":"control-plane","lok8s.dev/group":"cp","lok8s.dev/owner":"'"${MARK}"'"}}]' ;;
+      # The rebuild reads the server by its id right before the reimage.
+      "server describe")
+        if [[ -n "${SERVER_DESCRIBE:-}" ]]; then
+          echo "${SERVER_DESCRIBE}"
+        else
+          echo '{"id":10,"name":"cp-0","labels":{"lok8s.dev/cluster":"test-cluster","lok8s.dev/owner":"'"${MARK}"'"}}'
+        fi ;;
       "load-balancer list") echo '[]' ;;
       "network list")       echo '[]' ;;
       "server-type list")   return 0 ;;
@@ -166,7 +173,8 @@ JSON
 
   # Cloud CP → hcloud server rebuild with the descriptor's image.
   run cat "${HCLOUD_LOG}"
-  assert_output --partial "server rebuild cp-0 --image ubuntu-24.04 --user-data-from-file"
+  # By the checked id of cp-0 (10), never by its name.
+  assert_output --partial "server rebuild 10 --image ubuntu-24.04 --user-data-from-file"
   # The bare-metal worker is NOT rebuilt via hcloud.
   refute_output --partial "rebuild worker-0"
 
@@ -186,7 +194,7 @@ JSON
   run provider::rebuild "${DESC}" "${WORK}"
   assert_success
   run cat "${HCLOUD_LOG}"
-  assert_output --partial "server rebuild cp-0 --image debian-12"
+  assert_output --partial "server rebuild 10 --image debian-12"
 
   # A real cloud-init file was generated and handed to hcloud.
   [ -f "${WORK}/rebuild-cp-0.cloud-init.yaml" ]
@@ -239,8 +247,8 @@ JSON
   run provider::rebuild "${DESC}" "${WORK}"
   assert_success
   # The retry actually re-issued the cloud reimage (it did not skip / error on
-  # stale state) — the accumulating log holds one 'server rebuild cp-0' per run.
-  run grep -c 'server rebuild cp-0' "${HCLOUD_LOG}"
+  # stale state) — the accumulating log holds one 'server rebuild 10' per run.
+  run grep -c 'server rebuild 10 ' "${HCLOUD_LOG}"
   assert_output "2"
 }
 
@@ -252,7 +260,7 @@ JSON
 
   # The full plan is logged (what WOULD happen): the cloud reimage command, the
   # bare-metal rescue+reset, and an explicit dry-run marker.
-  assert_output --partial "hcloud server rebuild cp-0 --image ubuntu-24.04"
+  assert_output --partial "hcloud server rebuild 10 --image ubuntu-24.04"
   assert_output --partial "dry-run"
   assert_output --partial "would activate Robot rescue on robot#12345"
   assert_output --partial "would hardware-reset robot#12345"
@@ -451,10 +459,10 @@ JSON
   refute_output --partial "installimage -a"
 }
 
-# ── B248: a failed create stops the provision with Hetzner's reason ────────────
-# crowd hour72 (2026-09-24): `hcloud server create` answered "error during
-# placement (resource_unavailable)", the exit status was dropped, and the run
-# walked on into the KubeOne inventory, which then blamed name drift.
+# ── a failed create stops the provision with Hetzner's reason ────────────────
+# `hcloud server create` answered "error during placement
+# (resource_unavailable)", the exit status was dropped, and the run walked on
+# into the KubeOne inventory, which then blamed name drift.
 
 @test "hetzner::create stops on a failed create, names the resource, and never runs the lookup" {
   export CLOUD_HETZNER_JSON='{"cluster_name":"test-cluster","server":[{"name":"cp-0","type":"cx33","location":"fsn1"}]}'
@@ -495,7 +503,7 @@ JSON
   assert_output "1"
 }
 
-# ── boolean descriptor keys (B263, 2026-09-30) ───────────────────
+# ── boolean descriptor keys ──────────────────────────────────────
 # A boolean value is a bare hcloud switch. `without-ipv6: true` used to become
 # `--without-ipv6 true`, which hcloud read as a stray argument; it is one
 # `--without-ipv6=true` token now, and `false` stays explicit.
@@ -523,7 +531,7 @@ JSON
   assert_output --partial '--image ubuntu-24.04'
 }
 
-# ── the kubehz.in.net in-place recreate (2026-10-23/24) ──────────────────────
+# ── an in-place recreate over existing parts ─────────────────────────────────
 
 # _load_descriptor <json>: CLOUD_HETZNER_JSON as provider::provision builds it:
 # template::descriptor_json on a hetzner.json, then the lookup that writes the
@@ -546,6 +554,7 @@ _lookup_hcloud() {
       "network list") echo '[{"id":9,"name":"kubernetes","ip_range":"10.0.0.0/16","labels":{"lok8s.dev/owner":"'"${MARK}"'"}}]' ;;
       "server list")  echo '[{"id":42,"name":"cp-0","status":"running","labels":{"lok8s.dev/owner":"'"${MARK}"'"}}]' ;;
       "volume list")  echo '[]' ;;
+      "image list")   echo '[{"id":12345678,"type":"snapshot","labels":{"lok8s.dev/owner":"'"${MARK}"'"}}]' ;;
       *) return 0 ;;
     esac
   }
@@ -616,7 +625,7 @@ _descriptor_pubkey() {
   assert_success
   assert_output 'ssh-ed25519 AAAAC3NzaDescriptorKey'
   run cat "${HCLOUD_LOG}"
-  assert_output --partial "server rebuild cp-0 --image ubuntu-24.04 --user-data-from-file ${WORK}/rebuild-cp-0.cloud-init.yaml"
+  assert_output --partial "server rebuild 10 --image ubuntu-24.04 --user-data-from-file ${WORK}/rebuild-cp-0.cloud-init.yaml"
 }
 
 @test "provider::rebuild gives a dedicated access user the descriptor sshPublicKey" {
@@ -717,6 +726,10 @@ _lb_hcloud() {
           echo "${LB_LIST:-${LB_ADOPTED}}"
         fi ;;
       "load-balancer describe")
+        if [[ -f "${BATS_TEST_TMPDIR}/lb-created" ]]; then
+          echo '{"id":6,"name":"api-lb","labels":{"lok8s.dev/owner":"'"${MARK}"'"},"targets":[],"services":[]}'
+          return 0
+        fi
         [[ -n "${LIVE_LB:-}" ]] || { echo "hcloud: load balancer not found: ${3}" >&2; return 1; }
         if [[ -n "${LIVE_LB_AFTER:-}" && -f "${BATS_TEST_TMPDIR}/lb-changed" ]]; then echo "${LIVE_LB_AFTER}"; else echo "${LIVE_LB}"; fi ;;
       "load-balancer add-target")
@@ -726,6 +739,7 @@ _lb_hcloud() {
         [[ "${LB_FAIL:-}" != "add-target" ]] || { echo "hcloud: add-target failed (server_error)" >&2; return 1; }
         : > "${BATS_TEST_TMPDIR}/lb-changed" ;;
       "server list")            echo '[{"id":42,"name":"cp-0","status":"running","labels":{"lok8s.dev/owner":"'"${MARK}"'"}}]' ;;
+      "server describe")        echo '{"id":42,"name":"cp-0","labels":{"lok8s.dev/owner":"'"${MARK}"'"}}' ;;
       "load-balancer "*)
         [[ "${LB_FAIL:-}" != "$2" ]] || { echo "hcloud: ${2} failed (server_error)" >&2; return 1; } ;;
     esac
@@ -739,7 +753,7 @@ _lb_hcloud() {
 _live_lb() {
   local net='[{"network":9,"ip":"10.0.0.2"}]'
   [[ -z "${LB_NO_NET:-}" ]] || net='[]'
-  LIVE_LB='{"id":5,"name":"api-lb","private_net":'"${net}"',
+  LIVE_LB='{"id":5,"name":"api-lb","labels":{"lok8s.dev/owner":"'"${MARK}"'"},"private_net":'"${net}"',
     "targets":['"${1}"'],
     "services":[{"protocol":"tcp","listen_port":6443,"destination_port":6443,"proxyprotocol":false,
                  "health_check":{"protocol":"tcp","port":6443,"interval":15,"timeout":10,"retries":3}}]}'
@@ -871,7 +885,7 @@ load-balancer add-service 6 --protocol tcp --listen-port 6443 --destination-port
   _lb_hcloud
   export LB_ADD_FAILS=1 HETZNER_LB_ADD_TRIES=3 HETZNER_LB_ADD_DELAY=0
   _live_lb '{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane'"${OWN}"'"},"use_private_ip":true}'
-  export LIVE_LB_AFTER='{"id":5,"name":"api-lb","targets":[{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane'"${OWN}"'"},"use_private_ip":false}]}'
+  export LIVE_LB_AFTER='{"id":5,"name":"api-lb","labels":{"lok8s.dev/owner":"'"${MARK}"'"},"targets":[{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane'"${OWN}"'"},"use_private_ip":false}]}'
   _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane" }'
   run hetzner::load-balancer
   assert_success
@@ -893,13 +907,18 @@ load-balancer add-service 6 --protocol tcp --listen-port 6443 --destination-port
   assert_output "0"
 }
 
-@test "hetzner::load-balancer warns when it cannot describe an adopted load balancer" {
+# lok8s changes a load balancer only after it read it by id and checked its
+# owner mark: one that it cannot read gets no change, and the step fails.
+@test "hetzner::load-balancer changes nothing on an adopted load balancer that it cannot read" {
   _lb_hcloud
   unset LIVE_LB
   _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane" }'
   run hetzner::load-balancer
-  assert_success
-  assert_output --partial "lb api-lb: could not read the load balancer (hcloud load-balancer describe: hcloud: load balancer not found: 5). Its targets and services are added, not compared"
+  assert_failure
+  assert_output --partial "hetzner: did not change load-balancer 5: could not read it right before the change ('hcloud load-balancer describe 5')."
+  assert_output --partial "lb api-lb: did not change the targets and services of the load balancer"
+  run grep -cE '^load-balancer (add|remove)-(target|service)' "${HCLOUD_LOG}"
+  assert_output "0"
 }
 
 # The readiness barrier connects with sshPrivateKey after the reimage: a
@@ -924,7 +943,7 @@ load-balancer add-service 6 --protocol tcp --listen-port 6443 --destination-port
   run provider::rebuild "${DESC}" "${WORK}"
   assert_success
   assert_output --partial "[warn] rebuild: cannot check that sshPublicKey '${CFGDIR}/pub/id.pub' is the public key of sshPrivateKey '${BATS_TEST_TMPDIR}/id_key': ssh-keygen -y failed (Load key"
-  run grep -c 'server rebuild cp-0' "${HCLOUD_LOG}"
+  run grep -c 'server rebuild 10 ' "${HCLOUD_LOG}"
   assert_output "1"
 }
 
@@ -967,4 +986,110 @@ load-balancer add-service 6 --protocol tcp --listen-port 6443 --destination-port
   refute_output --partial "server rebuild"
   run cat "${CURL_LOG}"
   refute_output --partial "/reset/"
+}
+
+# The preflight id: the one server with the name, the cluster label and the
+# owner mark of this cluster (not only the name and the cluster label).
+@test "hetzner::_cloud_server_id takes only the one server with the name, the cluster label and the owner mark" {
+  hcloud() { printf '%s\n' "$*" >> "${HCLOUD_LOG}"; printf '%s\n' "${SERVERS}"; }
+  local own="\"lok8s.dev/owner\":\"${MARK}\""
+  SERVERS='[{"id":61,"name":"cp-0","labels":{"lok8s.dev/cluster":"test-cluster"}}]'
+  run hetzner::_cloud_server_id cp-0 lok8s.dev/cluster=test-cluster "${MARK}" test-cluster
+  assert_failure
+  assert_output ""
+  SERVERS='[{"id":62,"name":"cp-0","labels":{"lok8s.dev/cluster":"other",'"${own}"'}}]'
+  run hetzner::_cloud_server_id cp-0 lok8s.dev/cluster=test-cluster "${MARK}" test-cluster
+  assert_failure
+  SERVERS='[{"id":61,"name":"cp-0","labels":{"lok8s.dev/cluster":"test-cluster"}},
+    {"id":63,"name":"cp-0","labels":{"lok8s.dev/cluster":"test-cluster",'"${own}"'}}]'
+  run hetzner::_cloud_server_id cp-0 lok8s.dev/cluster=test-cluster "${MARK}" test-cluster
+  assert_success
+  assert_output "63"
+}
+
+# The rebuild acts on the server id that the preflight checked, never on a
+# name: hcloud reads an all-digit name as an id, and a name can move to
+# another server between the preflight and the reimage.
+_rebuild_ids_hcloud() {
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    local own='{"lok8s.dev/cluster":"test-cluster","lok8s.dev/role":"control-plane","lok8s.dev/owner":"'"${MARK}"'"}'
+    case "$1 $2" in
+      "server list")
+        echo '[{"id":42,"name":"900","status":"running","public_net":{"ipv4":{"ip":"192.0.2.42"}},"private_net":[{"ip":"10.0.0.42"}],"labels":'"${own}"'},
+               {"id":900,"name":"foreign","status":"running","public_net":{"ipv4":{"ip":"198.51.100.9"}},"labels":{"lok8s.dev/cluster":"test-cluster"}}]' ;;
+      "server describe")
+        case "$3" in
+          42)
+            if [[ -n "${DESCRIBE_42:-}" ]]; then
+              echo "${DESCRIBE_42}"
+            else
+              echo '{"id":42,"name":"900","labels":'"${own}"'}'
+            fi ;;
+          900) echo '{"id":900,"name":"foreign","labels":{"lok8s.dev/cluster":"test-cluster"}}' ;;
+          *)   echo "hcloud: server not found: $3" >&2; return 1 ;;
+        esac ;;
+      *"list") echo '[]' ;;
+    esac
+    return 0
+  }
+  export -f hcloud
+  yq -i -o json '.server[0].name = "900"' "${DESC}"
+}
+
+@test "provider::rebuild reimages the checked id 42 of a server named 900, never the server with the id 900" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  _rebuild_ids_hcloud
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_success
+  run grep -E '^server (rebuild|describe) ' "${HCLOUD_LOG}"
+  assert_output --regexp '^server describe 42 -o json'
+  assert_output --partial "server rebuild 42 --image ubuntu-24.04 "
+  refute_output --regexp 'server (rebuild|describe) 900( |$)'
+}
+
+@test "provider::rebuild refuses a server that was renamed between the preflight and the reimage" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  _rebuild_ids_hcloud
+  export DESCRIBE_42='{"id":42,"name":"900-renamed","labels":{"lok8s.dev/cluster":"test-cluster","lok8s.dev/owner":"'"${MARK}"'"}}'
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "hetzner: did not change server 42: its name is 900-renamed now, not 900."
+  assert_output --partial "rebuild: node '900' (id 42) was not reimaged"
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
+}
+
+@test "provider::rebuild refuses a server that lost the owner mark between the preflight and the reimage" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  _rebuild_ids_hcloud
+  export DESCRIBE_42='{"id":42,"name":"900","labels":{"lok8s.dev/cluster":"test-cluster"}}'
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "hetzner: did not change server 42: it does not have the owner mark of this cluster now"
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
+}
+
+@test "provider::rebuild refuses a snapshot image without the owner mark before any reimage" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  yq -i -o json '.server[0].image = 4711' "${DESC}"
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    case "$1 $2" in
+      "server list")
+        echo '[{"id":10,"name":"cp-0","status":"running","public_net":{"ipv4":{"ip":"192.0.2.10"}},"labels":{"lok8s.dev/cluster":"test-cluster","lok8s.dev/owner":"'"${MARK}"'"}}]' ;;
+      "image list") echo '[{"id":4711,"type":"snapshot","labels":{}}]' ;;
+      *"list") echo '[]' ;;
+    esac
+    return 0
+  }
+  export -f hcloud
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "image 4711 (a snapshot) does not have the owner mark of this cluster"
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
+  run cat "${CURL_LOG}"
+  refute_output --partial "/rescue"
 }
