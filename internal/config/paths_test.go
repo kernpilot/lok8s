@@ -176,7 +176,7 @@ func TestResolvePathsLok8sTreeIsNotAMarker(t *testing.T) {
 	}
 }
 
-// A SERVICE's lok8s.yaml (kind: Service — every kubehz-cluster submodule
+// A SERVICE's lok8s.yaml (kind: Service — every service submodule
 // carries one) is not a project marker: `cd <service> && lo …` must keep
 // walking up to the umbrella project instead of resolving Base to the
 // service directory.

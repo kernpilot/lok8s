@@ -224,8 +224,8 @@ metadata:
 # image ref. Under Tilt the running object carries Tilt's built-and-pushed ref —
 # injection happens on Tilt's deploy path, not in the YAML — so re-applying the
 # declared ref points the workload at an image nobody pushed. Measured on a
-# DB migration Job: the re-apply after the hook fired pointed the Job at an
-# image nobody pushed, and the migration stayed blocked.
+# DB migration Job: after the hook fired, the re-apply pointed the Job at
+# that image, and the migration stayed blocked.
 
 @test "_overlay_images: replaces the declared ref with the live one, by container name" {
   run hooks::_overlay_images '[{"name":"migrate","image":"reg/lok8s.local_kubehz-api-migrate:tilt-abc"}]' <<'YAML'

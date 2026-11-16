@@ -358,9 +358,8 @@ YAML
 # --- per-driver default policy (bootstrap::_resolve_entries) -----------------
 # The default for an ABSENT spec.bootstrap is per-driver, not one-size-fits-all:
 # only `lo` (kind) ships without a CNI. KubeOne deploys its own cilium during
-# apply; Capi/Kkp bring their CNI from the management cluster. (FRICTION
-# 2026-06-12: the blanket [cilium] default caused stray cilium applies on
-# managed clusters.)
+# apply; Capi/Kkp bring their CNI from the management cluster. (A blanket
+# [cilium] default caused stray cilium applies on managed clusters.)
 
 @test "_resolve_entries: explicit non-empty list returns entries in order" {
   cat > "${CLUSTER_YAML}" <<'YAML'
@@ -3226,7 +3225,7 @@ b wait="
   [ -s "${dir}/01-second.yaml" ]
 }
 
-# The kubehz-cluster spec writes `- ./targets/flux: { dependsOn: [fluxcd] }`.
+# A project spec can write `- ./targets/flux: { dependsOn: [fluxcd] }`.
 # `--only ./targets/flux` (the key as written) selects that entry, the same
 # as its name `flux`.
 @test "bootstrap::apply --only accepts the key as written in spec.bootstrap" {

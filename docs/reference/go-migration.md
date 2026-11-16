@@ -164,9 +164,9 @@ goal.
 
 | Piece | In the binary | Pinned to |
 |---|---|---|
-| `kustomize build --enable-alpha-plugins [--enable-exec] <dir>` | `sigs.k8s.io/kustomize/api/krusty`, driven option-for-option like the kustomize CLI's build command (`Reorder` unspecified, `EnabledPluginConfig(BploUseStaticallyLinked)`, the builtin helm inflator enabled with the default `helm` command, `KUSTOMIZE_ENABLE_MANAGEDBY_LABEL` honoured, `ResMap.AsYaml()` as the bytes) | `api v0.21.1` + `kyaml v0.21.1` — the modules behind the **kustomize v5.8.1** binary the repo pins in `.bin/b.yaml` (kubehz-cluster pins `v5.8.1` explicitly) |
+| `kustomize build --enable-alpha-plugins [--enable-exec] <dir>` | `sigs.k8s.io/kustomize/api/krusty`, driven option-for-option like the kustomize CLI's build command (`Reorder` unspecified, `EnabledPluginConfig(BploUseStaticallyLinked)`, the builtin helm inflator enabled with the default `helm` command, `KUSTOMIZE_ENABLE_MANAGEDBY_LABEL` honoured, `ResMap.AsYaml()` as the bytes) | `api v0.21.1` + `kyaml v0.21.1` — the modules behind the **kustomize v5.8.1** binary the repo pins in `.bin/b.yaml` (a downstream project pins `v5.8.1` explicitly) |
 | `secrets.lok8s.dev/v1/Secret` | `kustomize/plugins/secret` **imported** (go.mod: `replace github.com/kernpilot/lok8s/kustomize => ./kustomize`) — the same `secret.Run` the standalone `kustomize-secret` binary's `main` calls; the nested module keeps building on its own for the release assets and the bash path | the repo's own module, one source tree |
-| `khelm.mgoltzsche.github.com/v2/ChartRenderer` | `github.com/mgoltzsche/khelm/v2/pkg/{config,helm}` as a **library**, replicating khelm's kustomize-plugin `main` (config from `KUSTOMIZE_PLUGIN_CONFIG_STRING`, `helm.NewHelm()` from the helm `cli.New()` settings, `KHELM_TRUST_ANY_REPO`/`KHELM_DEBUG`/`HELM_DEBUG`, `ReadGeneratorConfig`, `Render`, then khelm's `output.Marshal` — the kyaml encoder, one `Encode` per RNode document — repeated verbatim because that package is internal to khelm) | **khelm v2.8.0** — the exact release the repo pins as the `ChartRenderer` binary (kubehz-cluster: "the pair PROVEN to reproduce the committed artifacts byte-for-byte"); its go.mod requires **helm.sh/helm/v3 v3.21.2**, pinned in the root go.mod as well, so the chart inflation is the same helm code the binary was built from |
+| `khelm.mgoltzsche.github.com/v2/ChartRenderer` | `github.com/mgoltzsche/khelm/v2/pkg/{config,helm}` as a **library**, replicating khelm's kustomize-plugin `main` (config from `KUSTOMIZE_PLUGIN_CONFIG_STRING`, `helm.NewHelm()` from the helm `cli.New()` settings, `KHELM_TRUST_ANY_REPO`/`KHELM_DEBUG`/`HELM_DEBUG`, `ReadGeneratorConfig`, `Render`, then khelm's `output.Marshal` — the kyaml encoder, one `Encode` per RNode document — repeated verbatim because that package is internal to khelm) | **khelm v2.8.0** — the exact release the repo pins as the `ChartRenderer` binary (a downstream project pins it as the pair proven to reproduce its committed artifacts byte for byte); its go.mod requires **helm.sh/helm/v3 v3.21.2**, pinned in the root go.mod as well, so the chart inflation is the same helm code the binary was built from |
 
 **The self-exec plugin home.** kustomize's exec-plugin protocol is a
 subprocess: `<pluginhome>/<group>/<version>/<kind>/<Kind> <cfgfile>` run in
@@ -223,8 +223,8 @@ settings is the proof. An unknown value is rejected (`LO_RENDER: unknown
 value`).
 
 **The gate** (all held at the switch, 2026-09-03): `hack/parity-build.sh`
-green (bash exec vs Go in-process, byte-diffed); kubehz-cluster's committed
-`kubehz.dev` (244 documents, the Secret generator cache-first, 20+ khelm
+green (bash exec vs Go in-process, byte-diffed); a downstream project's
+committed dev domain (244 documents, the Secret generator cache-first, 20+ khelm
 charts, envsubst) `render unchanged` with identical SHA-256 under the
 default and under `LO_RENDER=exec`, and still `render unchanged` with
 `KUSTOMIZE_PLUGIN_HOME=/nonexistent` (where the exec pipeline fails to find
@@ -333,8 +333,8 @@ the [CLI reference](/reference/cli#lo-assets).
 
 **Project marker.** `config.ResolvePaths` recognizes a project by
 `clusters/` or a `kind: Project` `lok8s.yaml` (what `lo init project`
-writes). A service's `lok8s.yaml` (`kind: Service`, one per submodule in
-kubehz-cluster) is not a marker: from inside a service directory the
+writes). A service's `lok8s.yaml` (`kind: Service`, one per service
+submodule of an umbrella project) is not a marker: from inside a service directory the
 walk-up continues to the umbrella project. `.lok8s/lo` is not a marker
 either (D30): `.lok8s/` holds the ejected assets and, when a project wants
 one, the bash tree. `config.FindProjectRoot` applies the same rules from an

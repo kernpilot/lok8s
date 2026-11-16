@@ -109,8 +109,8 @@ func TestResolveEntriesAbsentDefaultsToCiliumForLo(t *testing.T) {
 func TestResolveEntriesAbsentIsEmptyForManagedDrivers(t *testing.T) {
 	t.Parallel()
 	// KubeOne deploys its own cilium during apply; Capi/Kkp bring their CNI
-	// from the management cluster (FRICTION 2026-06-12: the blanket default
-	// caused stray cilium applies on managed clusters).
+	// from the management cluster (a blanket default caused stray cilium
+	// applies on managed clusters).
 	for _, kind := range []string{"kubeone", "capi", "kkp"} {
 		if got := resolveFromSpec(t, "kind: X\nspec:\n  provider: {name: hetzner}\n", kind); len(got) != 0 {
 			t.Errorf("kind %s: got %v, want empty", kind, got)

@@ -80,7 +80,7 @@ clean:  ## remove built binaries
 # Asset naming is a CONTRACT: kustomize-secret-<os>-<arch> is what release
 # consumers address via `b` (asset: "kustomize-secret-*"), so the release
 # workflow attaches these files verbatim. Don't rename without bumping the
-# consumers (kubehz-cluster/.bin/b.yaml + b.ci.yaml).
+# downstream b.yaml entries that address the asset.
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 dist:  ## build cross-platform release binaries (kustomize-secret-<os>-<arch>)
 	@for p in $(PLATFORMS); do \

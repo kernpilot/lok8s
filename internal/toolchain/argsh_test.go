@@ -14,7 +14,7 @@ import (
 var argshFixtures = []struct {
 	name, byaml, fix string
 }{
-	{"kubehz-cluster preset", "binaries:\n  argsh: {}\n  kubectl: {}\n", ArgshFixInstall},
+	{"umbrella project preset", "binaries:\n  argsh: {}\n  kubectl: {}\n", ArgshFixInstall},
 	{"github key", "binaries:\n  github.com/arg-sh/argsh:\n    asset: argsh\n", ArgshFixInstall},
 	{"alias", "binaries:\n  github.com/example/runtime:\n    alias: argsh\n", ArgshFixInstall},
 	{"commented out", Marker + "\nbinaries:\n  # github.com/arg-sh/argsh:\n  #   asset: argsh\n  kubectl: {}\n", ArgshFixAdd},
