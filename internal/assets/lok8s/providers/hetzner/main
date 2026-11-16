@@ -482,7 +482,7 @@ provider::output() {
     # select it stayed Pending. The bare-metal path below still drops it.
     local node_labels
     # The owner mark selects the part too; it is no Node label.
-    node_labels=$(echo "${server}" | jq -c '(.labels // {}) | del(.["lok8s.dev/cluster"], .["lok8s.dev/group"], .["lok8s.dev/owner"])')
+    node_labels=$(echo "${server}" | jq -c --arg key "${_HETZNER_OWNER_KEY}" '(.labels // {}) | del(.["lok8s.dev/cluster"], .["lok8s.dev/group"], .[$key])')
     node_labels=$(_validate_node_labels "${node_labels}" "${name}")
 
     nodes=$(echo "${nodes}" | jq \
