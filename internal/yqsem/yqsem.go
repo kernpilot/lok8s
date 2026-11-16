@@ -10,7 +10,7 @@
 // agree, and each call site is parity-pinned to the one it had:
 //
 //   - Or is yq's `//`: null AND boolean false (false/False/FALSE — the
-//     pinned yq v4.53 treats every spelling as falsy) fall through to the
+//     pinned yq treats every spelling as falsy) fall through to the
 //     default.
 //   - OrNull fires on null only; a false passes through as its text.
 //   - OrLiteralFalse fires on null and the lowercase `false` bool only

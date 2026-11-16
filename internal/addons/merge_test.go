@@ -84,8 +84,8 @@ func TestMergeNodesEmptyOverlayKeepsBase(t *testing.T) {
 }
 
 // mergeCase is one `yq eval-all '. as $item ireduce ({}; . * $item)'` run
-// over the given streams, with the result the pinned .bin/yq (v4.53.3)
-// printed for it. want is compared as YAML data (yq and yaml.v3 format the
+// over the given streams, with the result that the pinned yq (.bin/b.yaml)
+// prints for it. want is compared as YAML data (yq and yaml.v3 format the
 // same data differently); wantErr is yq's own error line.
 type mergeCase struct {
 	name    string

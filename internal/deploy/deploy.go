@@ -163,7 +163,7 @@ func (d *Deployer) ApplyFiltered(ctx context.Context, domain, labelKey, labelVal
 	subset, err := selectDocs(string(raw), func(doc *yaml.Node) bool {
 		lbl := yqsem.MapGet(yqsem.MapGet(yqsem.MapGet(doc, "metadata"), "labels"), labelKey)
 		// yq `==` compares a scalar's TEXT: an unquoted `true` or `1` label
-		// matches "true"/"1" (verified against yq v4.53).
+		// matches "true"/"1" (verified against the pinned yq of .bin/b.yaml).
 		return lbl != nil && lbl.Kind == yaml.ScalarNode && lbl.Tag != "!!null" && lbl.Value == labelValue
 	})
 	if err != nil {

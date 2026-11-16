@@ -216,8 +216,8 @@ func TestDocLoadStates(t *testing.T) {
 
 // LookupMerged walks a path through MapGetMerged (merge.go): merge keys
 // resolve the way yq does with --yaml-fix-merge-anchor-to-spec (pinned
-// against yq v4.53.3 by tests/unit/lo_dns_search_test.bats and the parity
-// harnesses through the spec.network.dnsSearch reader).
+// against the yq of .bin/b.yaml by tests/unit/lo_dns_search_test.bats and
+// the parity harnesses through the spec.network.dnsSearch reader).
 func TestLookupMerged(t *testing.T) {
 	var root yaml.Node
 	if err := yaml.Unmarshal([]byte(`

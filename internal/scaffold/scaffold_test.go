@@ -98,10 +98,11 @@ func TestScaffoldLokYAMLNoClobberWithoutForce(t *testing.T) {
 	}
 }
 
-// yqMergedTemplate is what the bash `yq -i` (mikefarah yq v4.53) emits for the
-// fresh services.yaml template plus `services.foo.path = ./foo`. Captured
-// from the bash implementation; the Go round-trip must match it byte for
-// byte (hack/parity-leaves.sh re-checks against the live yq).
+// yqMergedTemplate is what the bash `yq -i` (mikefarah yq, pinned in
+// .bin/b.yaml) emits for the fresh services.yaml template plus
+// `services.foo.path = ./foo`. Captured from the bash implementation; the Go
+// round-trip must match it byte for byte (hack/parity-leaves.sh re-checks
+// against the live yq).
 const yqMergedTemplate = `# lok8s service definitions — committed.
 # Personal overrides go in services.local.yaml (gitignored, loaded via
 # LOK8S_SERVICE_CONFIG=local). See docs/guide/services.md for the full schema.

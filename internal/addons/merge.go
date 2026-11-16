@@ -70,7 +70,7 @@ func mergeStream(acc *yaml.Node, raw []byte) (*yaml.Node, error) {
 }
 
 // MergeDocument is one `. * $item` step of the ireduce, over whole
-// documents. yq v4.53.3 (the pinned .bin/yq) at this level:
+// documents. The pinned yq (.bin/b.yaml) at this level:
 //
 //   - a null document (`null`, `~`, an empty `---`) on either side is a
 //     no-op: the other side comes through unchanged;
