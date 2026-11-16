@@ -149,13 +149,34 @@ _yq_stub() {
 
 @test "spec::kind_node_version: a yq that panics on the reader names its version, not the spec file" {
   _spec "version: v1.31.4"
-  # yq v4.52.5 stops on the reader's expressions with this panic (exit 2).
-  _yq_stub 'if [[ "${1:-}" == --version ]]; then echo "yq (https://github.com/mikefarah/yq/) version v4.52.5"; exit 0; fi
+  # The panic of yq v4.52.5 on the reader's expressions (exit 2), from a yq
+  # that reports another version: the message reads the version.
+  _yq_stub 'if [[ "${1:-}" == --version ]]; then echo "yq (https://github.com/mikefarah/yq/) version v4.50.1"; exit 0; fi
 printf "panic: runtime error: index out of range [-1]\n\ngoroutine 1 [running]:\n" >&2
 exit 2'
   run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
   assert_failure
-  assert_output "spec.kubernetes.version cannot be read: the installed yq (v4.52.5) failed on the version reader (panic: runtime error: index out of range [-1]). Install yq v4.54.3 or later (b install installs the pinned yq)."
+  assert_output "spec.kubernetes.version cannot be read: the installed yq (v4.50.1) failed on the version reader (panic: runtime error: index out of range [-1]). Install yq v4.54.3 or later (b install installs the pinned yq)."
+}
+
+@test "spec::kind_node_version: a nil pointer panic of yq (it prints [signal SIGSEGV) names the yq, not the memory limit" {
+  _spec "version: v1.31.4"
+  _yq_stub 'if [[ "${1:-}" == --version ]]; then echo "yq (https://github.com/mikefarah/yq/) version v4.50.1"; exit 0; fi
+printf "panic: runtime error: invalid memory address or nil pointer dereference\n[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x0]\n\ngoroutine 1 [running]:\n" >&2
+exit 2'
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_output "spec.kubernetes.version cannot be read: the installed yq (v4.50.1) failed on the version reader (panic: runtime error: invalid memory address or nil pointer dereference). Install yq v4.54.3 or later (b install installs the pinned yq)."
+}
+
+@test "spec::kind_node_version: a panicking yq whose --version fails is named as of an unknown version" {
+  _spec "version: v1.31.4"
+  _yq_stub 'if [[ "${1:-}" == --version ]]; then exit 1; fi
+printf "panic: runtime error: index out of range [-1]\n" >&2
+exit 2'
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_output "spec.kubernetes.version cannot be read: the installed yq (version unknown) failed on the version reader (panic: runtime error: index out of range [-1]). Install yq v4.54.3 or later (b install installs the pinned yq)."
 }
 
 @test "spec::kind_node_version: a read past the time limit is named, without timeout(1)" {

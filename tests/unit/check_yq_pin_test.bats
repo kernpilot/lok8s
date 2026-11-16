@@ -65,3 +65,39 @@ _yq_fake() {
   run bash "${_PROJECT_ROOT}/hack/check-yq-pin.sh" "${BIN}"
   assert_failure
 }
+
+@test "check-yq-pin: a yq that differs from the pin only in the patch number fails" {
+  local other="${PIN%.*}.$(( ${PIN##*.} + 1 ))"
+  _yq_fake "${other}"
+  run bash "${_PROJECT_ROOT}/hack/check-yq-pin.sh" "${BIN}"
+  assert_failure
+  assert_output "::error::${BIN}/yq is ${other}, but ${BIN}/b.yaml pins ${PIN}: b install did not install the pinned yq"
+}
+
+@test "check-yq-pin: a pre-release of the pinned version is not the pin" {
+  _yq_fake "${PIN}-rc1"
+  run bash "${_PROJECT_ROOT}/hack/check-yq-pin.sh" "${BIN}"
+  assert_failure
+  assert_output "::error::${BIN}/yq is ${PIN}-rc1, but ${BIN}/b.yaml pins ${PIN}: b install did not install the pinned yq"
+}
+
+@test "check-yq-pin: a pin without the leading v matches" {
+  printf 'binaries:\n  yq:\n    version: %s\n' "${PIN#v}" > "${BIN}/b.yaml"
+  _yq_fake "${PIN}"
+  run bash "${_PROJECT_ROOT}/hack/check-yq-pin.sh" "${BIN}"
+  assert_success
+}
+
+@test "check-yq-pin: without an argument it reads the .bin of its repository, as CI runs it" {
+  local repo="${BATS_TEST_TMPDIR}/repo"
+  mkdir -p "${repo}/hack" "${repo}/.bin"
+  cp "${_PROJECT_ROOT}/hack/check-yq-pin.sh" "${repo}/hack/"
+  cp "${_PROJECT_ROOT}/.bin/b.yaml" "${repo}/.bin/b.yaml"
+  BIN="${repo}/.bin" _yq_fake "${PIN}"
+  run bash "${repo}/hack/check-yq-pin.sh"
+  assert_success
+  assert_output "yq ${PIN} in ${repo}/.bin is the pinned release"
+  BIN="${repo}/.bin" _yq_fake v4.0.0
+  run bash "${repo}/hack/check-yq-pin.sh"
+  assert_failure
+}

@@ -126,22 +126,23 @@ var mergeCases = []mergeCase{
 	{name: "nested scalar replaces", streams: []string{mergeBase, "a: 5\n"}, want: "a: 5\nc: [1, 2]\n"},
 }
 
-// yamlData decodes YAML into plain data for a formatting-independent
-// comparison.
-// yqVersion is the version that `yq --version` reports (vX.Y.Z), or a
-// description of why there is none.
+// yqVersion is the version that `yq --version` reports (vX.Y.Z, with a
+// pre-release suffix when it has one), or a description of why there is
+// none.
 func yqVersion(yq string) string {
 	out, err := exec.Command(yq, "--version").Output()
 	if err != nil {
 		return "a yq whose --version failed (" + err.Error() + ")"
 	}
-	m := regexp.MustCompile(`version v?([0-9]+\.[0-9]+\.[0-9]+)`).FindStringSubmatch(string(out))
+	m := regexp.MustCompile(`version v?([0-9]+\.[0-9]+\.[0-9]+\S*)`).FindStringSubmatch(string(out))
 	if m == nil {
 		return "a yq of an unknown version"
 	}
 	return "v" + m[1]
 }
 
+// yamlData decodes YAML into plain data for a formatting-independent
+// comparison.
 func yamlData(t *testing.T, raw []byte) any {
 	t.Helper()
 	var v any

@@ -154,8 +154,10 @@ func TestYQFallbacksInstallThePin(t *testing.T) {
 }
 
 // yqMinimumRE finds a statement of the yq minimum: "v4.x.y or later" or
-// "v4.x+". yq is the only tool lok8s documents on a v4 line. A statement of
-// fact such as "a yq before v4.47.1" (when a flag came) does not match.
+// "v4.x+". Other tools are on a v4 line too (b is v4.18), but the scanned
+// trees state no other minimum in these two forms: a match that is not about
+// yq fails the test and must be excluded here. A statement of fact such as
+// "a yq before v4.47.1" (when a flag came) does not match.
 var yqMinimumRE = regexp.MustCompile(`v4\.[0-9]+(\.[0-9]+)?(\+| or later)`)
 
 // TestYQMinimumIsThePin: every yq minimum in the bash tree (its messages),
@@ -166,8 +168,15 @@ func TestYQMinimumIsThePin(t *testing.T) {
 	t.Parallel()
 	root := testutil.RepoRoot(t)
 	want := YQVersion + " or later"
-	found := 0
-	for _, dir := range []string{"internal/assets/lok8s", "docs", "skills"} {
+	// The statements each tree holds today: the bash messages, the docs and
+	// the cluster-spec skill. A tree that the scan no longer reads, or that
+	// loses its statements, fails here.
+	for _, tree := range []struct {
+		dir string
+		min int
+	}{{"internal/assets/lok8s", 5}, {"docs", 4}, {"skills", 1}} {
+		found := 0
+		dir := tree.dir
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -197,8 +206,8 @@ func TestYQMinimumIsThePin(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	if found < 6 {
-		t.Errorf("found %d yq minimum statements, want at least 6: the scan no longer reads the messages and docs", found)
+		if found < tree.min {
+			t.Errorf("%s: %d yq minimum statements, want at least %d: the scan no longer reads them", dir, found, tree.min)
+		}
 	}
 }

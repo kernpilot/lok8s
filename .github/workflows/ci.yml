@@ -205,8 +205,9 @@ jobs:
           make -C kustomize build
 
       - name: The installed yq is the pinned release
-        # b exits 0 when a binary fails to install, and the bats container
-        # then runs its own yq: check .bin/yq against the pin in .bin/b.yaml.
+        # b exits 0 when a binary fails to install: the Go tests
+        # (TestMergeMatchesPinnedYQ) and the parity harnesses run .bin/yq, so
+        # check it against the pin in .bin/b.yaml.
         run: bash hack/check-yq-pin.sh
 
       - name: Locale en_US.UTF-8 (the bash twin of the version reader)
@@ -487,8 +488,8 @@ jobs:
           echo "${GITHUB_WORKSPACE}/.bin" >> "${GITHUB_PATH}"
 
       - name: The installed yq is the pinned release
-        # b exits 0 when a binary fails to install, and the bats container
-        # then runs its own yq: check .bin/yq against the pin in .bin/b.yaml.
+        # b exits 0 when a binary fails to install: the bash leg of lo up runs
+        # .bin/yq, so check it against the pin in .bin/b.yaml.
         run: bash hack/check-yq-pin.sh
 
       - name: Build the Secret plugin (the bash leg mints the registry cert through it)

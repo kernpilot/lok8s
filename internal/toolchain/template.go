@@ -96,7 +96,7 @@ func entries(loVersion, pluginFileDir string) []entry {
 			comment: "argsh: the runtime the bash tree sources (${PATH_BIN}/argsh); onPost installs the\nnative builtin (argsh.so) beside it.",
 			fields:  []string{"asset: argsh", `onPost: "${B_BIN} builtin ${B_EVENT}"`}},
 		{key: "yq", group: GroupBash,
-			comment: "yq: the bash readers need this release or a later one (YQVersion); an older one can\nstop on the spec version reader.",
+			comment: "yq: the bash readers need this release or a later one; an older one can stop on\nthe spec version reader.",
 			fields:  []string{"version: " + YQVersion}},
 		{key: "jq", group: GroupBash},
 		{key: "renvsubst", group: GroupBash, fields: []string{"alias: envsubst"}},

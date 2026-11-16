@@ -34,10 +34,13 @@ pinned=$(awk '
   }
 ' "${b_yaml}")
 [[ -n "${pinned}" ]] || fail "${b_yaml} pins no yq version (binaries.yq.version)"
+pinned="v${pinned#v}" # b matches 4.54.3 and v4.54.3 alike
 
 [[ -x "${yq}" ]] || fail "${yq} is not installed: b install did not install yq (b exits 0 when a binary fails)"
 out=$("${yq}" --version 2>&1) || fail "${yq} --version failed: ${out}"
-re='version v?([0-9]+\.[0-9]+\.[0-9]+)'
+# The whole version token, so that a pre-release (v4.54.3-rc1) is not the
+# release v4.54.3.
+re='version v?([0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*)'
 [[ "${out}" =~ ${re} ]] || fail "${yq} --version names no version: ${out}"
 installed="v${BASH_REMATCH[1]}"
 
