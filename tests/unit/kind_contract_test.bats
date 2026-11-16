@@ -228,6 +228,53 @@ _provision_shared() {
   assert_success
 }
 
+# _remote_destroy_stubs: kind, docker and provider::destroy record each call
+# in ${CALLS}; the cluster is test-local on the provider hetzner.
+_remote_destroy_stubs() {
+  export CALLS="${BATS_TEST_TMPDIR}/calls"
+  yq() {
+    case "$2" in
+      '.metadata.name') echo "test-local" ;;
+      *) echo "" ;;
+    esac
+  }
+  kind() { echo "kind $*" >> "${CALLS}"; }
+  docker() { echo "docker $*" >> "${CALLS}"; }
+  export -f yq kind docker
+  source "${_PROJECT_ROOT}/.lok8s/drivers/lo/main"
+  provider::destroy() { echo "provider::destroy" >> "${CALLS}"; }
+  export PROVIDER_NAME="hetzner"
+  unset DOCKER_HOST
+}
+
+# Without DOCKER_HOST the cleanup acts on the LOCAL docker: a failed
+# provider output must stop the destroy before it (Go twin:
+# TestDestroyFailedProviderOutputStopsBeforeTheLocalDocker).
+@test "lo.sh driver::destroy: a failed provider output stops before the local docker" {
+  _remote_destroy_stubs
+  provider::output() { echo "[error] hetzner: the domain of the cluster is not known" >&2; return 1; }
+
+  run driver::destroy "test.lok8s.dev"
+  assert_failure
+  assert_output --partial "[error] hetzner: the domain of the cluster is not known"
+  assert_output --partial "lo destroy: provider::output of provider 'hetzner' failed (its message is above), so the remote docker host of cluster test-local is not known. Nothing was deleted: the cleanup does not fall back to the local docker."
+  [ ! -e "${CALLS}" ] || fail "the destroy ran after the failed output: $(cat "${CALLS}")"
+}
+
+# Anti-vacuity companion: a good output with no node is the local fallback
+# of the provision, so the local cleanup and the provider destroy run.
+@test "lo.sh driver::destroy: a provider output with no node cleans up locally" {
+  _remote_destroy_stubs
+  provider::output() { echo '{"nodes":[]}'; }
+
+  run driver::destroy "test.lok8s.dev"
+  assert_success
+  run grep -c '^kind delete cluster --name test-local$' "${CALLS}"
+  assert_output "1"
+  run grep -cx 'provider::destroy' "${CALLS}"
+  assert_output "1"
+}
+
 @test "lo.sh driver::status returns Running for existing cluster" {
   yq() {
     case "$2" in

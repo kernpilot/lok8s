@@ -1146,16 +1146,33 @@ hetzner::_doctor_checks() {
     fi
   fi
 
-  # 4) Inventory sanity (control-plane count).
-  local inv
-  inv="$(provider::output "${config_file}" 2>/dev/null || echo '{}')"
-  local cp_count
-  cp_count="$(echo "${inv}" | jq '[(.nodes // [])[] | select(.role=="control-plane")] | length' 2>/dev/null || echo 0)"
-  if [[ "${cp_count}" =~ ^[0-9]+$ ]] && (( cp_count > 0 )); then
-    printf 'ok\tinventory: %s control-plane node(s) resolved\n' "${cp_count}"
+  # 4) Inventory sanity (control-plane count). A failed provider::output is
+  #    one warn line with its reason (its first error line: for example no
+  #    domain for the owner mark, or a failed list). The checks go on with
+  #    an empty inventory.
+  local inv inv_err="" reason="" line last=""
+  inv_err="$(mktemp 2>/dev/null)" || inv_err=""
+  if inv="$(provider::output "${config_file}" 2>"${inv_err:-/dev/null}")"; then
+    local cp_count
+    cp_count="$(echo "${inv}" | jq '[(.nodes // [])[] | select(.role=="control-plane")] | length' 2>/dev/null || echo 0)"
+    if [[ "${cp_count}" =~ ^[0-9]+$ ]] && (( cp_count > 0 )); then
+      printf 'ok\tinventory: %s control-plane node(s) resolved\n' "${cp_count}"
+    else
+      printf 'warn\tinventory: no control-plane nodes resolved — check descriptor labels / hcloud state\n'
+    fi
   else
-    printf 'warn\tinventory: no control-plane nodes resolved — check descriptor labels / hcloud state\n'
+    inv='{}'
+    if [[ -n "${inv_err}" ]]; then
+      while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line%$'\r'}" line="${line//$'\t'/ }"
+        [[ -n "${line}" ]] || continue
+        last="${line}"
+        [[ -n "${reason}" || "${line}" != "[error] "* ]] || reason="${line#"[error] "}"
+      done < "${inv_err}"
+    fi
+    printf 'warn\tinventory: provider::output failed, so no node is known: %s\n' "${reason:-${last:-it printed no reason}}"
   fi
+  [[ -z "${inv_err}" ]] || rm -f "${inv_err}" || true
 
   # SSH identity for read-only node probes.
   local key

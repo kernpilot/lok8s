@@ -438,6 +438,19 @@ JSON
   refute_output --partial "NOT registered in Robot"
 }
 
+# A failed provider::output is no "no control-plane node": the doctor goes
+# on and shows the first error line of the output as the reason.
+@test "provider::doctor shows why provider::output failed, and goes on" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef" ROBOT_REG_FP="de:ad:be:ef" SSH_RESCUE=1
+  unset PROVIDER_DOMAIN
+  run provider::doctor "${DESC}"
+  assert_success
+  assert_output --partial $'warn\tinventory: provider::output failed, so no node is known: hetzner: the domain of the cluster is not known (PROVIDER_DOMAIN is empty).'
+  refute_output --partial "no control-plane nodes resolved"
+  assert_output --partial "worker worker-0 resolvable in Robot"
+  assert_output --partial $'summary\t'
+}
+
 @test "provider::doctor is strictly read-only (no destructive command)" {
   export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef" ROBOT_REG_FP="de:ad:be:ef"
   run provider::doctor "${DESC}"

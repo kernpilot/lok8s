@@ -467,6 +467,59 @@ func TestProvisionUnhappyTLSNudgeCannotFailAGoodProvision(t *testing.T) {
 	}
 }
 
+// A failed provider output stops the remote destroy before any docker or
+// provider call: without DOCKER_HOST, the cleanup would act on the LOCAL
+// docker (bats: "lo.sh driver::destroy: a failed provider output stops
+// before the local docker").
+func TestDestroyFailedProviderOutputStopsBeforeTheLocalDocker(t *testing.T) {
+	d, runner, errBuf, p := testDriver(t)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"),
+		"metadata:\n  name: test-local\n")
+	t.Setenv("DOCKER_HOST", "")
+	os.Unsetenv("DOCKER_HOST")
+	prov := &fakeLoProvider{} // no output: Output fails
+	d.deps.ProviderName = "hetzner"
+	d.deps.Provider = prov
+
+	if err := d.Destroy(t.Context(), "test.lok8s.dev"); err == nil {
+		t.Fatal("Destroy returned success although the provider output failed")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("the destroy ran commands against the local docker: %q", runner.calls)
+	}
+	if prov.destroyed {
+		t.Fatal("the provider destroy ran after the provider output failed")
+	}
+	if !strings.Contains(errBuf.String(), "lo destroy: provider::output of provider 'hetzner' failed (no output)") ||
+		!strings.Contains(errBuf.String(), "the cleanup does not fall back to the local docker") {
+		t.Fatalf("the error does not name the cause:\n%s", errBuf.String())
+	}
+}
+
+// Anti-vacuity companion: a good output with no node is the local fallback
+// of the provision, so the destroy cleans up the local docker and runs the
+// provider destroy.
+func TestDestroyProviderWithNoNodesCleansUpLocally(t *testing.T) {
+	d, runner, errBuf, p := testDriver(t)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"),
+		"metadata:\n  name: test-local\n")
+	t.Setenv("DOCKER_HOST", "")
+	os.Unsetenv("DOCKER_HOST")
+	prov := &fakeLoProvider{output: []byte(`{"nodes":[]}`)}
+	d.deps.ProviderName = "hetzner"
+	d.deps.Provider = prov
+
+	if err := d.Destroy(t.Context(), "test.lok8s.dev"); err != nil {
+		t.Fatalf("Destroy: %v\nstderr:\n%s", err, errBuf.String())
+	}
+	if len(runner.callsMatching("kind delete cluster --name test-local")) != 1 {
+		t.Fatalf("the local kind delete did not run: %q", runner.calls)
+	}
+	if !prov.destroyed {
+		t.Fatal("the provider destroy did not run")
+	}
+}
+
 func TestProvisionUnsupportedRuntimeFails(t *testing.T) {
 	d, _, errBuf, p := testDriver(t)
 	cy := filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml")
@@ -483,6 +536,7 @@ func TestProvisionUnsupportedRuntimeFails(t *testing.T) {
 type fakeLoProvider struct {
 	provisionErr error
 	output       []byte
+	destroyed    bool
 }
 
 func (p *fakeLoProvider) Validate(ctx context.Context, configFile string) error { return nil }
@@ -495,7 +549,10 @@ func (p *fakeLoProvider) Provision(ctx context.Context, configFile, workDir stri
 	return p.provisionErr
 }
 
-func (p *fakeLoProvider) Destroy(ctx context.Context, configFile, workDir string) error { return nil }
+func (p *fakeLoProvider) Destroy(ctx context.Context, configFile, workDir string) error {
+	p.destroyed = true
+	return nil
+}
 
 func (p *fakeLoProvider) Output(ctx context.Context, configFile string) ([]byte, error) {
 	if p.output == nil {

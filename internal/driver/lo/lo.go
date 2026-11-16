@@ -376,12 +376,19 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 		clusterName = ""
 	}
 
-	// Remote mode: reconnect DOCKER_HOST.
+	// Remote mode: reconnect DOCKER_HOST. A failed provider output stops the
+	// destroy: without DOCKER_HOST, the cleanup below acts on the LOCAL
+	// docker (a local kind cluster with the same name). "No node" in a good
+	// output is the local fallback of the provision (provisionRemote) and
+	// stays (bash: driver::destroy).
 	if d.deps.ProviderName != "" && d.deps.Provider != nil {
-		if providerOutput, err := d.deps.Provider.Output(ctx, d.deps.ProviderConfigFile); err == nil {
-			if remoteIP, remoteUser := providerNode0(providerOutput); remoteIP != "" {
-				os.Setenv("DOCKER_HOST", "ssh://"+remoteUser+"@"+remoteIP)
-			}
+		providerOutput, err := d.deps.Provider.Output(ctx, d.deps.ProviderConfigFile)
+		if err != nil {
+			ui.ErrorTo(d.stderr(), "lo destroy: provider::output of provider '%s' failed (%v), so the remote docker host of cluster %s is not known. Nothing was deleted: the cleanup does not fall back to the local docker. Fix the cause, then run lo destroy again.", d.deps.ProviderName, err, clusterName)
+			return ui.Handled(fmt.Errorf("provider output failed: %w", err))
+		}
+		if remoteIP, remoteUser := providerNode0(providerOutput); remoteIP != "" {
+			os.Setenv("DOCKER_HOST", "ssh://"+remoteUser+"@"+remoteIP)
 		}
 	}
 
