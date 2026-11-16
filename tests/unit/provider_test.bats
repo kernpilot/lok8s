@@ -196,6 +196,27 @@ YAML
   assert_output --partial "cluster_name: test-ref"
 }
 
+# The hetzner provider keys the owner mark of the cluster's parts on the
+# domain: write_config exports it in both modes (Go twin:
+# provision.WriteProviderConfig).
+@test "provider::write_config exports PROVIDER_DOMAIN, the directory of the spec, in both modes" {
+  mkdir -p "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev" "${BATS_TEST_TMPDIR}/clusters/inline.lok8s.dev"
+  printf 'cluster_name: test-ref\n' > "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/hetzner.yaml"
+  printf 'spec:\n  provider:\n    name: hetzner\n    configRef: hetzner.yaml\n' \
+    > "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  printf 'spec:\n  provider:\n    name: hetzner\n    config:\n      cluster_name: inline\n' \
+    > "${BATS_TEST_TMPDIR}/clusters/inline.lok8s.dev/cluster.lok8s.yaml"
+
+  unset PROVIDER_DOMAIN
+  provider::write_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  [ "${PROVIDER_DOMAIN}" = "test.lok8s.dev" ]
+  run bash -c 'printf "%s" "${PROVIDER_DOMAIN}"'
+  assert_output "test.lok8s.dev"
+
+  provider::write_config "${BATS_TEST_TMPDIR}/clusters/inline.lok8s.dev/cluster.lok8s.yaml"
+  [ "${PROVIDER_DOMAIN}" = "inline.lok8s.dev" ]
+}
+
 @test "provider::write_config fails for missing configRef" {
   mkdir -p "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
   cat > "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml" <<'YAML'

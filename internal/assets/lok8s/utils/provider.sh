@@ -159,8 +159,14 @@ provider::_cleanup_configs() {
 #
 # The result is always a temp file (or the ref file directly) exported
 # as PROVIDER_CONFIG_FILE. Drivers and provider functions read from it.
+# PROVIDER_DOMAIN is the domain of the cluster: the name of the directory of
+# <cluster_yaml> (clusters/<domain>/). The hetzner provider keys the owner
+# mark of the cluster's parts on it.
 provider::write_config() {
   local cluster_yaml="${1}"
+
+  PROVIDER_DOMAIN="$(basename -- "$(dirname -- "${cluster_yaml}")")"
+  export PROVIDER_DOMAIN
 
   # Check for configRef first (file mode)
   local config_ref

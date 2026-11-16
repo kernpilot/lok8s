@@ -396,6 +396,59 @@ lo provision --domain example.com
 
 `lo deploy` (headless/CI) or Tilt (local dev) handles workload deployment separately: it is not part of `provision`.
 
+### Hetzner: the owner mark {#hetzner-owner-mark}
+
+A Hetzner Cloud project can hold the parts of more than one cluster, or
+parts of other persons. The Hetzner provider finds the parts of the
+descriptor (`hetzner.json`) by their names. A name alone does not tell
+whose part it is, so lok8s marks its own parts.
+
+**The mark.** lok8s puts the label `lok8s.dev/owner=<mark>` on each part
+that it creates: servers, SSH keys, networks, load balancers, floating IPs
+and volumes. The mark is the first 32 hex characters of the SHA-256 of the
+domain (`clusters/<domain>/`) and the descriptor's `cluster_name`. Two
+clusters with the same `cluster_name` in two domains get two marks. Do not
+put two clusters with the same domain and the same `cluster_name` in one
+Hetzner project: they get the same mark.
+
+**What lok8s does with an existing part.** lok8s uses or changes an
+existing part only when it has the mark of this cluster:
+
+- A part with a descriptor name and no mark, or with the mark of another
+  cluster, stops the provision. lok8s stops before it creates or changes
+  anything, and it shows each part with its kind, name and id.
+- lok8s does not create placement groups and firewalls. To use one, put
+  the mark on it yourself (see the command below).
+- After lok8s finds or creates a part, it changes the part by its id, not
+  by its name.
+- A `label-selector` target of a load balancer gets the term
+  `lok8s.dev/owner=<mark>`, so the load balancer sends traffic only to the
+  servers of this cluster. lok8s replaces a target without this term (from
+  an older lok8s): first it adds the new target, then it removes the old
+  one. A `server` target must be a server of the descriptor. A server that
+  lok8s did not create (for example, a machine-controller worker) has no
+  mark, so a selector target does not select it.
+- The inventory for KubeOne (API endpoint, hosts, the private network of the
+  cloud controller manager) contains only parts with the mark.
+
+**After an upgrade from an older lok8s (one time).** The parts of an
+existing cluster have no mark. The first `lo provision` stops and shows one
+command for each part:
+
+```text
+[error] hetzner: refused network 'prod-net' (id 1234567): it exists, but it does not have the owner mark of this cluster (lok8s.dev/owner=<mark>). [...] mark it one time: hcloud network add-label 1234567 lok8s.dev/owner=<mark>. [...]
+```
+
+1. Read the list. Make sure that each part is a part of this cluster.
+2. Run the `hcloud ... add-label` command for each part.
+3. Run `lo provision` again.
+
+lok8s does not adopt an unmarked part by itself, and it has no flag for
+that. If a part is not yours, give the part in the descriptor another name.
+If you rename the domain, the mark changes: put the new mark on each part
+with `hcloud <kind> add-label --overwrite <id> lok8s.dev/owner=<mark>`
+(the error shows this command).
+
 ### Re-applying bootstrap only (`-b`)
 
 The last step of `lo provision` applies the `spec.bootstrap` addons (Cilium,

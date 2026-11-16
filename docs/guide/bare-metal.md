@@ -30,6 +30,10 @@ The provider handles both types in the same JSON descriptor:
 }
 ```
 
+lok8s uses or changes an existing cloud part of the descriptor only when it
+has the owner mark of this cluster. See
+[Hetzner: the owner mark](./deployment.md#hetzner-owner-mark).
+
 ### `#`-prefixed fields
 
 Fields that start with `#` are **metadata**: they do not pass to the

@@ -54,7 +54,12 @@ func ReadProviderName(specFile string) string {
 // The path is also exported as PROVIDER_CONFIG_FILE (bash parity — drivers
 // and provider functions read it). cleanup removes the temp file (nil in
 // configRef mode); the bash used a process-exit trap, the Go caller defers.
+//
+// PROVIDER_DOMAIN is exported too, in both modes: the name of the spec's
+// directory (clusters/<domain>/). The hetzner provider keys the owner mark
+// of the cluster's parts on it (bash: provider::write_config).
 func WriteProviderConfig(specFile string, stderr io.Writer) (configFile string, cleanup func(), err error) {
+	os.Setenv("PROVIDER_DOMAIN", filepath.Base(filepath.Dir(specFile)))
 	info, _ := readSpecInfo(specFile)
 
 	if ref := info.Spec.Provider.ConfigRef; ref != "" {

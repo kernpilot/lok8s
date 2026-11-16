@@ -339,24 +339,48 @@ provider::output() {
   local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
   export PROVIDER_CONFIG_FILE="${config_file}"
 
-  local cluster_name ssh_user
-  cluster_name=$(_cfg '.cluster_name // ""')
+  # The envsubst'd descriptor: the cluster_name that the create loop used for
+  # the owner mark (the raw file can hold a ${VAR}).
+  local desc cluster_name ssh_user mark
+  desc="$(template::descriptor_json "${config_file}")" || return 1
+  cluster_name="$(jq -r '.cluster_name // ""' <<<"${desc}")"
+  mark="$(hetzner::owner_mark "${cluster_name}")" || return 1
   ssh_user=$(_cfg '.sshUser // .cloudInit.user // "root"')
 
-  local selector="lok8s.dev/cluster=${cluster_name}"
-
-  local servers_json lb_json net_json
-  servers_json=$(hcloud server list -o json -l "${selector}")
-  lb_json=$(hcloud load-balancer list -o json -l "${selector}")
-  # Networks aren't created with the cluster label, so the label lookup
-  # returns nothing → the CCM never gets the network ID → node init hangs.
-  # Look the network up by its descriptor NAME instead (unique per project).
-  local net_name_desc
-  net_name_desc=$(_cfg '.network[0].name // ""' 2>/dev/null || echo "")
-  net_json=$(hcloud network list -o json -l "${selector}")
-  if [[ "$(echo "${net_json}" | jq 'length' 2>/dev/null || echo 0)" == "0" && -n "${net_name_desc}" ]]; then
-    net_json=$(hcloud network list -o json | jq --arg n "${net_name_desc}" '[.[] | select(.name == $n)]')
+  # The inventory holds only the parts with the owner mark of this cluster.
+  # The cluster label alone is not enough: a part of another person or
+  # cluster can carry it, and it would become the API endpoint, the private
+  # network of the CCM or a host. Each list is checked again in jq.
+  local key="${_HETZNER_OWNER_KEY}" cluster_sel="lok8s.dev/cluster=${cluster_name}"
+  local servers_json lb_json net_json declared_json
+  if ! servers_json=$(hcloud server list -o json -l "${cluster_sel}") ||
+     ! lb_json=$(hcloud load-balancer list -o json -l "${cluster_sel},${key}=${mark}") ||
+     ! net_json=$(hcloud network list -o json -l "${key}=${mark}"); then
+    error "hetzner: could not list the servers, load balancers or networks of cluster ${cluster_name}. Check the hcloud token and the API."
+    return 1
   fi
+  declared_json="$(jq -c '[(.server // [])[].name // empty]' <<<"${desc}")"
+  # A declared server with the cluster label and without the mark: left out.
+  local unmarked unmarked_id
+  while IFS=$'\t' read -r unmarked unmarked_id; do
+    [[ -n "${unmarked}" ]] || continue
+    warn "hetzner: server ${unmarked} is left out of the inventory: it does not have the owner mark of this cluster (${key}=${mark}). If it is a server of this cluster (an older lok8s made it), mark it one time: hcloud server add-label ${unmarked_id} ${key}=${mark}"
+  done < <(jq -r --arg key "${key}" --arg mark "${mark}" --argjson declared "${declared_json}" '
+    (. // [])[] | select((.labels // {})[$key] != $mark)
+    | select(.name as $n | any($declared[]; . == $n)) | [.name, (.id | tostring)] | @tsv' <<<"${servers_json}")
+  servers_json="$(jq -c --arg key "${key}" --arg mark "${mark}" --arg c "${cluster_name}" '
+    [ (. // [])[] | select((.labels // {})[$key] == $mark and (.labels // {})["lok8s.dev/cluster"] == $c) ]' <<<"${servers_json}")" || return 1
+  lb_json="$(jq -c --arg key "${key}" --arg mark "${mark}" --arg c "${cluster_name}" '
+    [ (. // [])[] | select((.labels // {})[$key] == $mark and (.labels // {})["lok8s.dev/cluster"] == $c) ]' <<<"${lb_json}")" || return 1
+  # The network: the descriptor's network[0] by name when it names one, else
+  # the one with the cluster label. Both only with the owner mark (lok8s sets
+  # the mark at create; a network has no cluster label unless the descriptor
+  # gives it one).
+  local net_name_desc
+  net_name_desc="$(jq -r '.network[0].name // ""' <<<"${desc}")"
+  net_json="$(jq -c --arg key "${key}" --arg mark "${mark}" --arg n "${net_name_desc}" --arg c "${cluster_name}" '
+    [ (. // [])[] | select((.labels // {})[$key] == $mark)
+      | select(if $n != "" then .name == $n else (.labels // {})["lok8s.dev/cluster"] == $c end) ]' <<<"${net_json}")" || return 1
 
   local lb_address lb_private
   lb_address=$(echo "${lb_json}" | jq -r '.[0].public_net.ipv4.ip // empty' 2>/dev/null || echo "")
@@ -420,7 +444,8 @@ provider::output() {
     # static cloud worker lost it in the 2026-10-24 rebuild, and the Pods that
     # select it stayed Pending. The bare-metal path below still drops it.
     local node_labels
-    node_labels=$(echo "${server}" | jq -c '(.labels // {}) | del(.["lok8s.dev/cluster"], .["lok8s.dev/group"])')
+    # The owner mark selects the part too; it is no Node label.
+    node_labels=$(echo "${server}" | jq -c '(.labels // {}) | del(.["lok8s.dev/cluster"], .["lok8s.dev/group"], .["lok8s.dev/owner"])')
     node_labels=$(_validate_node_labels "${node_labels}" "${name}")
 
     nodes=$(echo "${nodes}" | jq \
@@ -558,7 +583,10 @@ provider::rebuild() {
   cluster_name="$(echo "${desc}" | jq -r '.cluster_name // ""')"
   [[ -n "${cluster_name}" ]] || {
     error "rebuild: descriptor has no cluster_name — refusing to act"; return 1; }
-  selector="lok8s.dev/cluster=${cluster_name}"
+  # Only a server with the owner mark of this cluster is reimaged.
+  local mark
+  mark="$(hetzner::owner_mark "${cluster_name}")" || return 1
+  selector="lok8s.dev/cluster=${cluster_name},${_HETZNER_OWNER_KEY}=${mark}"
 
   # Resolved inventory (descriptor + live cloud state) → per-node public IPs.
   local inv

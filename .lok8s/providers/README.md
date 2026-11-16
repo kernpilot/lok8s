@@ -80,7 +80,10 @@ spec:
 ```
 
 `config` and `configRef` are the same format — just inline vs file.
-The provider reads from `PROVIDER_CONFIG_FILE` either way.
+The provider reads from `PROVIDER_CONFIG_FILE` either way. `lo` also exports
+`PROVIDER_DOMAIN`, the domain of the cluster (the name of the
+`clusters/<domain>/` directory). The hetzner provider keys the owner mark of
+the cluster's parts on it ([owner mark](https://kernpilot.github.io/lok8s/guide/deployment#hetzner-owner-mark)).
 
 ## Adding a new provider
 

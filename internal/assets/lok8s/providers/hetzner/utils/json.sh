@@ -84,27 +84,121 @@ hetzner::json::loop() {
   hetzner::json -r "${what} | keys[] as \$i | .[\$i] | [\$i, ${fields}] | @csv" | tr -d '"'
 }
 
+# ── Owner mark ───────────────────────────────────────────
+
+# The label that marks a part as made by lok8s for ONE cluster. hetzner::create
+# sets it on every part it creates. lok8s adopts, changes or uses an existing
+# part only when the part has this label with the value of this cluster
+# (hetzner::owner_mark). A part with the same name and no mark, or the mark of
+# another cluster, can belong to another person or cluster in the same Hetzner
+# project: the lookup refuses it.
+_HETZNER_OWNER_KEY='lok8s.dev/owner'
+
+# hetzner::_sha256: the hex sha256 of stdin.
+hetzner::_sha256() {
+  local sum
+  if command -v sha256sum >/dev/null 2>&1; then
+    sum="$(sha256sum)" || return 1
+  elif command -v shasum >/dev/null 2>&1; then
+    sum="$(shasum -a 256)" || return 1
+  else
+    return 1
+  fi
+  printf '%s\n' "${sum%% *}"
+}
+
+# hetzner::owner_mark [<cluster_name>]
+# The owner mark value of this cluster: the first 32 hex characters of the
+# sha256 of "<domain>\n<cluster_name>\n". The domain (PROVIDER_DOMAIN, set by
+# provider::write_config) separates two projects that use the same cluster
+# name in one Hetzner project. The cluster name separates two specs of one
+# domain. 32 lowercase hex characters are a valid Hetzner label value (at most
+# 63 characters, first and last alphanumeric). Without an argument, the
+# cluster name is .cluster_name of CLOUD_HETZNER_JSON.
+hetzner::owner_mark() {
+  local cluster="${1-}" domain="${PROVIDER_DOMAIN:-}" sum
+  [[ -n "${cluster}" ]] ||
+    cluster="$(hetzner::json -r '.cluster_name // ""' 2>/dev/null)" || cluster=""
+  if [[ -z "${domain}" || "${domain}" == "." || "${domain}" == "/" ]]; then
+    error "hetzner: the domain of the cluster is not known (PROVIDER_DOMAIN is empty). lok8s needs it for the owner mark ${_HETZNER_OWNER_KEY}. Run the provider through lo (lo provision, lo recover): lo sets it."
+    return 1
+  fi
+  if [[ -z "${cluster}" ]]; then
+    error "hetzner: the descriptor has no cluster_name. lok8s needs it for the owner mark ${_HETZNER_OWNER_KEY}. Set cluster_name in the descriptor."
+    return 1
+  fi
+  sum="$(printf '%s\n%s\n' "${domain}" "${cluster}" | hetzner::_sha256)" || sum=""
+  if [[ ! "${sum}" =~ ^[0-9a-f]{64}$ ]]; then
+    error "hetzner: cannot calculate the owner mark: no sha256sum or shasum found. Install coreutils."
+    return 1
+  fi
+  printf '%s\n' "${sum:0:32}"
+}
+
 # ── Lookup ───────────────────────────────────────────────
 
+# hetzner::lookup [<kind>]
+# Writes into the descriptor the hcloud id of each existing part that has a
+# descriptor name AND the owner mark of this cluster. A part with a descriptor
+# name and no mark (or another cluster's mark) is refused: the lookup reports
+# every such part of all kinds, with the one-time command that marks it, and
+# fails before anything is created or changed. An id that the descriptor
+# itself carries is dropped: only a verified id stays.
 hetzner::lookup() {
   local resources="${1-}"
   [[ -n "${resources}" ]] ||
     mapfile -t resources < <(hetzner::json -r '[to_entries[] | select(.value | type == "array") | .key] | .[]')
 
+  local mark
+  mark="$(hetzner::owner_mark)" || return 1
+
+  local resource remote rows rid rname rmark
+  local -a refused=()
   for resource in "${resources[@]}"; do
     _hetzner_print "☁️  fetching \033[3m${resource}\033[0m..."
 
+    # A list that fails must not read as "no part exists".
+    if ! remote="$(hcloud "${resource}" list -o json)" ||
+       ! jq -e 'type == "array" or type == "null"' >/dev/null 2>&1 <<<"${remote}"; then
+      error "hetzner: could not list the ${resource} parts ('hcloud ${resource} list'). Nothing was created or changed. Check the hcloud token and the API, then run the provision again."
+      return 1
+    fi
+
+    # The parts with a descriptor name and without this cluster's mark.
     # shellcheck disable=2016
-    hetzner::json::edit -r \
-      --argjson remote "$(hcloud "${resource}" list -o json)" \
-      --arg field "${resource}" 'if $remote == null then . else
-        .[$field] = [ .[$field][] | .name as $name |
-          . + reduce $remote[] as $item ({};
-            if $item.name == $name then $item | {id} else . end
-          )
-        ]
-      end'
+    rows="$(hetzner::json -r --argjson remote "${remote}" --arg field "${resource}" \
+      --arg key "${_HETZNER_OWNER_KEY}" --arg mark "${mark}" '
+      [ .[$field][]? | .name ] as $names
+      | ($remote // [])[]
+      | select(.name as $n | any($names[]; . == $n))
+      | select((.labels // {})[$key] != $mark)
+      | [ (.id | tostring), .name, ((.labels // {})[$key] // "") ] | @tsv')" || return 1
+    while IFS=$'\t' read -r rid rname rmark; do
+      [[ -n "${rid}" ]] || continue
+      refused+=("${resource}"$'\t'"${rid}"$'\t'"${rname}"$'\t'"${rmark}")
+    done <<<"${rows}"
+
+    # The id of the part with the name and this cluster's mark; no other id.
+    # shellcheck disable=2016
+    hetzner::json::edit --argjson remote "${remote}" --arg field "${resource}" \
+      --arg key "${_HETZNER_OWNER_KEY}" --arg mark "${mark}" '
+      .[$field] = [ .[$field][] | .name as $name | del(.id)
+        + (first(($remote // [])[]
+            | select(.name == $name and (.labels // {})[$key] == $mark) | {id}) // {}) ]' || return 1
   done
+
+  (( ${#refused[@]} > 0 )) || return 0
+  local row kind
+  for row in "${refused[@]}"; do
+    IFS=$'\t' read -r kind rid rname rmark <<<"${row}"
+    if [[ -z "${rmark}" ]]; then
+      error "hetzner: refused ${kind} '${rname}' (id ${rid}): it exists, but it does not have the owner mark of this cluster (${_HETZNER_OWNER_KEY}=${mark}). lok8s does not use or change a part that can belong to another person or cluster. If this ${kind} is a part of this cluster (an older lok8s made it), mark it one time: hcloud ${kind} add-label ${rid} ${_HETZNER_OWNER_KEY}=${mark}. If it is not, give the ${kind} another name in the descriptor."
+    else
+      error "hetzner: refused ${kind} '${rname}' (id ${rid}): it has the owner mark of another cluster (${_HETZNER_OWNER_KEY}=${rmark}; this cluster: ${mark}). Give the ${kind} another name in the descriptor. Only if it is a part of this cluster (for example, after you renamed the domain), mark it again: hcloud ${kind} add-label --overwrite ${rid} ${_HETZNER_OWNER_KEY}=${mark}."
+    fi
+  done
+  error "hetzner: ${#refused[@]} existing part(s) do not have the owner mark of this cluster. Nothing was created or changed. Do the step above for each part, then run the provision again."
+  return 1
 }
 
 # ── Generic create loop ─────────────────────────────────
@@ -123,7 +217,14 @@ hetzner::create() {
   local -r create_after="$(type -t hetzner::create::after)"
   local -r create_hook="$(type -t hetzner::create::hook)"
 
-  local i id name
+  # Every create gets the owner mark of this cluster. The hooks read `mark`.
+  local mark
+  mark="$(hetzner::owner_mark)" || return 1
+
+  # `id` is the verified id the part had before this run (empty: created
+  # now). `rid` is the verified id of the part, for every hcloud call of the
+  # hooks: they never act by name (a name can be another cluster's part).
+  local i id name rid
   # Read the server stream on a DEDICATED fd (9), not stdin: the bare-metal
   # create::hook runs `ssh` (installimage), and ssh reads stdin — on stdin that
   # would SWALLOW the remaining loop rows, so only the FIRST bare-metal server
@@ -131,6 +232,7 @@ hetzner::create() {
   # `sudo: command not found`). Feeding the loop via fd 9 makes it immune to any
   # stdin-reading body command.
   while IFS=',' read -r i id name <&9; do
+    rid="${id}"
     # Check for #cloud.root (bare metal / pre-existing server)
     local is_root
     is_root=$(hetzner::json -r --arg w "${what}" --argjson i "${i}" '.[$w][$i]["#cloud.root"] // ""')
@@ -230,8 +332,11 @@ hetzner::create() {
       args+=("${fields[x]/%#*}" "${val}")
     done
 
-    # check for create hook
-    cmd=( 'dry-run::cmd' 'hcloud' "${what}" 'create' "${args[@]}" "${@}" )
+    # check for create hook. The owner mark comes after the descriptor's own
+    # --label: hcloud merges repeated --label flags and the last value of a
+    # key wins, so a descriptor cannot set another owner value.
+    cmd=( 'dry-run::cmd' 'hcloud' "${what}" 'create' "${args[@]}"
+          '--label' "${_HETZNER_OWNER_KEY}=${mark}" "${@}" )
     [[ -z "${create_hook-}" ]] ||
       cmd=( "hetzner::create::hook" "${cmd[@]}" )
 
@@ -249,8 +354,22 @@ hetzner::create() {
       return 1
     fi
 
-    [[ -z "${create_after-}" ]] ||
+    if [[ -n "${create_after-}" ]]; then
+      # The hook changes the new part by its id. The id comes from the
+      # lookup, which accepts only a part with this cluster's mark. A dry
+      # run created nothing: the printed plan shows the name.
+      if [[ -n "${CLOUD_DRY_RUN:-}" ]]; then
+        rid="${name}"
+      else
+        hetzner::lookup "${what}" >/dev/null || return 1
+        rid="$(hetzner::json -r --arg w "${what}" --argjson i "${i}" '.[$w][$i].id // "" | tostring')"
+        if [[ -z "${rid}" ]]; then
+          error "hetzner: created ${what} '${name}', but found no ${what} with this name and the owner mark ${_HETZNER_OWNER_KEY}=${mark}. Nothing else was changed on it. Check it with 'hcloud ${what} describe ${name}', then run the provision again."
+          return 1
+        fi
+      fi
       hetzner::create::after
+    fi
   done 9< <(hetzner::json::loop "${what}")
   unset IFS
 

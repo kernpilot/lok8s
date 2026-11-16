@@ -23,8 +23,12 @@ cross-references that array by index and is replaced with that resource's `.id`
 (`"network": 0` → the created network's id). A number on any other key is a
 literal and passes verbatim (`"size": 100`, `"image": 12345678`). A leading `~/`
 expands to `$HOME`.
-Idempotent: existing resources are matched by `.name` and skipped; `destroy`
-deletes by label `lok8s.dev/cluster=<cluster_name>`.
+Idempotent: an existing resource is matched by `.name` AND the owner mark
+`lok8s.dev/owner=<mark>` (lok8s sets it at create; the mark is a hash of the
+domain and `cluster_name`), then skipped. A resource with the name and no mark,
+or another cluster's mark, stops the provision before any change; the error
+gives the one-time `hcloud <kind> add-label <id> lok8s.dev/owner=<mark>`.
+`destroy` deletes by label `lok8s.dev/cluster=<cluster_name>`.
 
 ```json
 {
