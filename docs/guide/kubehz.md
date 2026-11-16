@@ -569,9 +569,12 @@ register modes: the direct claim with `KUBEHZ_TOKEN`, the claim key with
 With `HCLOUD_TOKEN`, the claim key mode uploads the public key that the
 platform mints into your Hetzner Cloud project as `kubehz-claim-<domain>`.
 lo gives the key the label `lok8s.dev/kubehz-claim`. Its value is the first
-32 hex characters of the SHA-256 of the domain.
+32 hex characters of the SHA-256 of the domain. The value comes from the
+domain exactly as you give it, so another spelling of the domain (letter
+case, for example) gives another value. lo then refuses the key; it never
+deletes the wrong one.
 
-- A next `lo kubehz register` replaces the key, because the platform mints
+- The next `lo kubehz register` replaces the key, because the platform mints
   a new one each time. `lo kubehz deregister` deletes it.
 - Both commands act only on a key with this label and this value. A Hetzner
   project can be shared, so a key of the same name that a person or another

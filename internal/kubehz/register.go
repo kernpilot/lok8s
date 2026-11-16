@@ -37,38 +37,44 @@ var errClaimKeyNotOwn = errors.New("kubehz: the hcloud SSH key of that name is n
 // claimKeyMark is the claimKeyLabel value of a domain: the first 32 hex
 // characters of its SHA-256. A Hetzner label value has at most 63
 // characters and starts and ends with a letter or a digit; a domain can
-// break both rules, its hash cannot. The domain is in the spec, so a re-run
-// of register on another machine finds its own key.
+// break both rules, its hash cannot. The mark comes from the domain alone
+// (the --domain flag, the active domain or the folder under clusters/), so
+// a re-run of register on another machine finds its own key without local
+// state. The domain counts exactly as given: another spelling (letter case,
+// for example) gives another mark, and lo then leaves the key alone.
 func claimKeyMark(domain string) string {
 	sum := sha256.Sum256([]byte(domain))
 	return hex.EncodeToString(sum[:])[:32]
 }
 
-// findOwnClaimKey reads the hcloud SSH key called name. A key with the
-// claimKeyLabel of domain returns its id. Any other key of that name is
-// left alone: findOwnClaimKey says why (verb is what lo does not do to
-// it: "replace" or "delete") and returns own false. No key, or a list that
-// fails or does not parse, returns "" and own true: nothing to delete.
-func (c *Context) findOwnClaimKey(ctx context.Context, hcloudAPI string, auth bearer, name, domain, verb string) (id string, own bool) {
+// findOwnClaimKey reads the hcloud SSH key called name and judges the
+// first key of the answer. Three results:
+//   - our key (claimKeyLabel with the mark of domain): its id, foreign false;
+//   - nothing to act on (no key, a key without an id, or a list that fails
+//     or does not parse): "", foreign false;
+//   - a key that lo did not make for this cluster: "", foreign true. Then
+//     findOwnClaimKey says why lo leaves it alone (verb is what lo does not
+//     do to it: "replace" or "delete").
+func (c *Context) findOwnClaimKey(ctx context.Context, hcloudAPI string, auth bearer, name, domain, verb string) (id string, foreign bool) {
 	raw, err := c.fetch(ctx, "GET", hcloudAPI+"/v1/ssh_keys?name="+url.QueryEscape(name), auth, nil)
 	if err != nil {
-		return "", true
+		return "", false
 	}
 	lv, ok := parseJSON(raw)
 	if !ok {
-		return "", true
+		return "", false
 	}
 	keys, _ := jget(lv, "ssh_keys").([]any)
 	if len(keys) == 0 {
-		return "", true
+		return "", false
 	}
 	if id = jstrOr(keys[0], "", "id"); id == "" {
-		return "", true
+		return "", false
 	}
 	head := fmt.Sprintf("kubehz: lo does not %s the SSH key '%s' in your Hetzner Cloud project: ", verb, name)
 	switch jstrOr(keys[0], "", "labels", claimKeyLabel) {
 	case claimKeyMark(domain):
-		return id, true
+		return id, false
 	case "":
 		next := fmt.Sprintf("delete it (Hetzner Console -> Security -> SSH keys), then run 'lo kubehz register --domain %s' again", domain)
 		if verb == "delete" {
@@ -78,7 +84,7 @@ func (c *Context) findOwnClaimKey(ctx context.Context, hcloudAPI string, auth be
 	default:
 		c.warnf("%sits label %s does not match %s, so another cluster made it.", head, claimKeyLabel, domain)
 	}
-	return "", false
+	return "", true
 }
 
 // ensureClaimKey ports kubehz::ensure_claim_key — the PRIMARY registration
@@ -114,8 +120,8 @@ func (c *Context) ensureClaimKey(ctx context.Context, domain, apiURL string) err
 	hcloudAuth := withBearer(c.getenv("HCLOUD_TOKEN"))
 	// Replace by name, but only our own key: a stale claim key of this
 	// cluster must not linger, and a key that someone else made stays.
-	existingID, own := c.findOwnClaimKey(ctx, hcloudAPI, hcloudAuth, keyName, domain, "replace")
-	if !own {
+	existingID, foreign := c.findOwnClaimKey(ctx, hcloudAPI, hcloudAuth, keyName, domain, "replace")
+	if foreign {
 		return errClaimKeyNotOwn
 	}
 	if existingID != "" {

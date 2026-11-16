@@ -1332,6 +1332,32 @@ _claim_keys() {
   fi
 }
 
+# _claim_key <id> [<labels json>]: one key of a GET /v1/ssh_keys?name=
+# answer (an empty id leaves the id out).
+_claim_key() {
+  local key='"name":"kubehz-claim-test.kubehz.dev"'
+  [[ -z "${1}" ]] || key="\"id\":${1},${key}"
+  [[ -z "${2:-}" ]] || key="${key},\"labels\":${2}"
+  printf '{%s}' "${key}"
+}
+_CLAIM_OWN="{\"lok8s.dev/kubehz-claim\":\"${_CLAIM_MARK}\"}"
+_CLAIM_DELETE42="DELETE https://hc.example/v1/ssh_keys/42"
+_CLAIM_NO_MARK="[warn] kubehz: lo needs sha256sum or shasum to mark the claim key 'kubehz-claim-test.kubehz.dev', so it does not change the key in your Hetzner Cloud project."
+
+# _claim_no_sha256: neither sha256sum nor shasum is installed. command -v
+# finds neither, and a call of either prints what bash prints for a missing
+# command, so a code path that calls one anyway shows in the output.
+_claim_no_sha256() {
+  command() {
+    if [[ "${1:-}" == -v && ( "${2:-}" == sha256sum || "${2:-}" == shasum ) ]]; then
+      return 1
+    fi
+    builtin command "$@"
+  }
+  sha256sum() { echo "bash: sha256sum: command not found" >&2; return 127; }
+  shasum() { echo "bash: shasum: command not found" >&2; return 127; }
+}
+
 # _claim_sandbox <keys json>: the api mints the claim key of test.kubehz.dev
 # and lists the registry; GET /v1/ssh_keys?name= answers <keys json>. Each
 # Hetzner Cloud call goes to CLAIM_CALLS as "<method> <url>[ <body>]", the
@@ -1351,7 +1377,12 @@ _claim_sandbox() {
         local body=""
         [[ -z "${CURL_BODY}" ]] || body=" $(jq -c . <<<"${CURL_BODY}")"
         printf '%s %s%s\n' "${CURL_METHOD:-GET}" "${CURL_URL}" "${body}" >> "${CLAIM_CALLS}"
-        [[ -n "${CURL_METHOD}" ]] || printf '%s' "${CLAIM_KEYS}"
+        if [[ -z "${CURL_METHOD}" ]]; then
+          # CLAIM_GET_RC: the list fails the way `curl -f` does (22 on an
+          # HTTP error), with no answer.
+          [[ -z "${CLAIM_GET_RC:-}" ]] || return "${CLAIM_GET_RC}"
+          printf '%s' "${CLAIM_KEYS}"
+        fi
         ;;
       */api/clusters\?perPage=500) _deregister_list_fixture ;;
       */api/clusters/*) printf '{"ok":true}\n200' ;;
@@ -1416,9 +1447,11 @@ ${_CLAIM_UPLOAD}"
 
 @test "claim key: register without a SHA-256 tool sends nothing to Hetzner Cloud" {
   _claim_sandbox '{"ssh_keys":[]}'
-  sha256sum() { return 1; }
+  _claim_no_sha256
   run kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev
   assert_failure
+  assert_line "${_CLAIM_NO_MARK}"
+  refute_output --partial "command not found"
   run cat "${CLAIM_CALLS}"
   assert_output ""
 }
@@ -1456,9 +1489,108 @@ DELETE https://hc.example/v1/ssh_keys/42"
 
 @test "claim key: deregister without a SHA-256 tool deletes no key" {
   _claim_sandbox "$(_claim_keys)"
-  sha256sum() { return 1; }
+  _claim_no_sha256
+  run kubehz::deregister_cluster test.kubehz.dev "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  assert_line "${_CLAIM_NO_MARK}"
+  refute_output --partial "command not found"
+  refute_output --partial "no label"
+  run cat "${CLAIM_CALLS}"
+  assert_output "${_CLAIM_GET}"
+}
+
+# Nothing to act on (the list fails, the answer does not parse, the key has
+# no id): lo deletes nothing. register uploads: a key of that name that the
+# list did not show makes the upload fail, and register falls back.
+
+@test "claim key: register uploads when the key list fails, and deletes nothing" {
+  _claim_sandbox ''
+  export CLAIM_GET_RC=22
+  run kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev
+  assert_success
+  run cat "${CLAIM_CALLS}"
+  assert_output "${_CLAIM_GET}
+${_CLAIM_UPLOAD}"
+}
+
+@test "claim key: register uploads when the key list does not parse, and deletes nothing" {
+  _claim_sandbox '<html>'
+  run kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev
+  assert_success
+  run cat "${CLAIM_CALLS}"
+  assert_output "${_CLAIM_GET}
+${_CLAIM_UPLOAD}"
+}
+
+@test "claim key: register uploads next to a key without an id, and deletes nothing" {
+  _claim_sandbox "{\"ssh_keys\":[$(_claim_key '' "${_CLAIM_OWN}")]}"
+  run kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev
+  assert_success
+  run cat "${CLAIM_CALLS}"
+  assert_output "${_CLAIM_GET}
+${_CLAIM_UPLOAD}"
+}
+
+# Only the first key of the answer counts.
+
+@test "claim key: register judges the first of two keys: a foreign first key stays, and so does the second" {
+  _claim_sandbox "{\"ssh_keys\":[$(_claim_key 42),$(_claim_key 43 "${_CLAIM_OWN}")]}"
+  run kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev
+  assert_failure
+  assert_line "${_CLAIM_LEGACY_REGISTER}"
+  run cat "${CLAIM_CALLS}"
+  assert_output "${_CLAIM_GET}"
+}
+
+@test "claim key: register judges the first of two keys: an own first key is replaced, the second stays" {
+  _claim_sandbox "{\"ssh_keys\":[$(_claim_key 42 "${_CLAIM_OWN}"),$(_claim_key 43)]}"
+  run kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev
+  assert_success
+  run cat "${CLAIM_CALLS}"
+  assert_output "${_CLAIM_GET}
+${_CLAIM_DELETE42}
+${_CLAIM_UPLOAD}"
+}
+
+@test "claim key: deregister deletes nothing when the key list fails" {
+  _claim_sandbox ''
+  export CLAIM_GET_RC=22
   run kubehz::deregister_cluster test.kubehz.dev "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
   assert_success
   run cat "${CLAIM_CALLS}"
   assert_output "${_CLAIM_GET}"
+}
+
+@test "claim key: deregister deletes nothing when the key list does not parse" {
+  _claim_sandbox '<html>'
+  run kubehz::deregister_cluster test.kubehz.dev "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  run cat "${CLAIM_CALLS}"
+  assert_output "${_CLAIM_GET}"
+}
+
+@test "claim key: deregister deletes nothing for a key without an id" {
+  _claim_sandbox "{\"ssh_keys\":[$(_claim_key '' "${_CLAIM_OWN}")]}"
+  run kubehz::deregister_cluster test.kubehz.dev "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  run cat "${CLAIM_CALLS}"
+  assert_output "${_CLAIM_GET}"
+}
+
+@test "claim key: deregister judges the first of two keys: a foreign first key stays, and so does the second" {
+  _claim_sandbox "{\"ssh_keys\":[$(_claim_key 42),$(_claim_key 43 "${_CLAIM_OWN}")]}"
+  run kubehz::deregister_cluster test.kubehz.dev "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  assert_line "${_CLAIM_LEGACY_DEREGISTER}"
+  run cat "${CLAIM_CALLS}"
+  assert_output "${_CLAIM_GET}"
+}
+
+@test "claim key: deregister judges the first of two keys: an own first key goes, the second stays" {
+  _claim_sandbox "{\"ssh_keys\":[$(_claim_key 42 "${_CLAIM_OWN}"),$(_claim_key 43)]}"
+  run kubehz::deregister_cluster test.kubehz.dev "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  assert_success
+  run cat "${CLAIM_CALLS}"
+  assert_output "${_CLAIM_GET}
+${_CLAIM_DELETE42}"
 }

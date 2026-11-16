@@ -1,6 +1,9 @@
 package kubehz
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // A Hetzner project can be shared: register replaces, and deregister
 // deletes, only a claim key that lo made for this cluster, the key with
@@ -24,30 +27,71 @@ const (
 	claimOtherDeregister  = "kubehz: lo does not delete the SSH key 'kubehz-claim-test.kubehz.dev' in your Hetzner Cloud project: its label lok8s.dev/kubehz-claim does not match test.kubehz.dev, so another cluster made it."
 )
 
+// claimKey is one key of a GET /v1/ssh_keys?name= answer, with the given
+// id and labels JSON ("" leaves the field out).
+func claimKey(id, labels string) string {
+	k := `"name":"kubehz-claim-test.kubehz.dev"`
+	if id != "" {
+		k = `"id":` + id + `,` + k
+	}
+	if labels != "" {
+		k += `,"labels":` + labels
+	}
+	return "{" + k + "}"
+}
+
 // claimKeys is a GET /v1/ssh_keys?name= answer with the key 42 and the
 // given labels JSON ("" leaves the labels field out).
-func claimKeys(labels string) string {
-	if labels == "" {
-		return `{"ssh_keys":[{"id":42,"name":"kubehz-claim-test.kubehz.dev"}]}`
-	}
-	return `{"ssh_keys":[{"id":42,"name":"kubehz-claim-test.kubehz.dev","labels":` + labels + `}]}`
-}
+func claimKeys(labels string) string { return `{"ssh_keys":[` + claimKey("42", labels) + `]}` }
 
 // claimKeyCase is one hcloud answer and what lo must do with it.
 type claimKeyCase struct {
-	name   string
-	keys   string // the GET /v1/ssh_keys?name= answer
-	delete bool   // DELETE /v1/ssh_keys/42
-	warn   string // the refusal; "" = none
+	name    string
+	status  int    // the status of the GET; 0 = 200
+	keys    string // the GET /v1/ssh_keys?name= answer
+	deleted string // the key id lo deletes; "" = none
+	warn    string // the refusal; "" = none
 }
 
 var claimKeyCases = []claimKeyCase{
-	{"own key", claimKeys(claimOwnLabels), true, ""},
-	{"no key", `{"ssh_keys":[]}`, false, ""},
-	{"legacy key without labels", claimKeys(""), false, "legacy"},
-	{"key with empty labels", claimKeys(`{}`), false, "legacy"},
-	{"foreign key with another label", claimKeys(`{"owner":"alice"}`), false, "legacy"},
-	{"key of another cluster", claimKeys(claimOtherLabels), false, "other"},
+	{"own key", 0, claimKeys(claimOwnLabels), "42", ""},
+	{"no key", 0, `{"ssh_keys":[]}`, "", ""},
+	{"legacy key without labels", 0, claimKeys(""), "", "legacy"},
+	{"key with empty labels", 0, claimKeys(`{}`), "", "legacy"},
+	{"foreign key with another label", 0, claimKeys(`{"owner":"alice"}`), "", "legacy"},
+	{"key of another cluster", 0, claimKeys(claimOtherLabels), "", "other"},
+	// Nothing to act on: lo deletes nothing. register uploads: a key of
+	// that name that the list did not show makes the upload fail, and
+	// register falls back.
+	{"list fails", 500, `{"error":{"code":"server_error"}}`, "", ""},
+	{"answer does not parse", 0, `<html>`, "", ""},
+	{"key without an id", 0, `{"ssh_keys":[` + claimKey("", claimOwnLabels) + `]}`, "", ""},
+	// Only the first key counts. A foreign first key is never deleted, and
+	// neither is the key after it.
+	{"two keys, foreign first", 0, `{"ssh_keys":[` + claimKey("42", "") + `,` + claimKey("43", claimOwnLabels) + `]}`, "", "legacy"},
+	{"two keys, own first", 0, `{"ssh_keys":[` + claimKey("42", claimOwnLabels) + `,` + claimKey("43", "") + `]}`, "42", ""},
+}
+
+// claimKeyDeletes is the ids of the hcloud key DELETEs, in order.
+func claimKeyDeletes(h *harness) string {
+	ids := ""
+	for _, r := range h.reqs() {
+		if r.Method == "DELETE" && strings.HasPrefix(r.Path, "/v1/ssh_keys/") {
+			ids += strings.TrimPrefix(r.Path, "/v1/ssh_keys/")
+		}
+	}
+	return ids
+}
+
+// serveClaimKeys answers the key list of tc and every key DELETE.
+func serveClaimKeys(h *harness, tc claimKeyCase) {
+	status := tc.status
+	if status == 0 {
+		status = 200
+	}
+	h.handle("GET /v1/ssh_keys", status, tc.keys)
+	h.handle("DELETE /v1/ssh_keys/42", 204, ``)
+	h.handle("DELETE /v1/ssh_keys/43", 204, ``)
 }
 
 func TestClaimKeyOwnershipRegister(t *testing.T) {
@@ -58,13 +102,15 @@ func TestClaimKeyOwnershipRegister(t *testing.T) {
 			h := newHarness(t)
 			h.env["HCLOUD_TOKEN"], h.env["HCLOUD_API_BASE"] = "hc_test", h.apiURL()
 			h.handle("POST /api/clusters/register", 200, claimRegisterAnswer)
-			h.handle("GET /v1/ssh_keys", 200, tc.keys)
-			h.handle("DELETE /v1/ssh_keys/42", 204, ``)
+			serveClaimKeys(h, tc)
 			h.handle("POST /v1/ssh_keys", 201, `{"ssh_key":{"id":43}}`)
 			err := h.ctx.ensureClaimKey(t.Context(), "test.kubehz.dev", h.apiURL())
 			upload := h.lastReq("POST", "/v1/ssh_keys")
-			if got := h.anyReq("DELETE", "/v1/ssh_keys/42"); got != tc.delete {
-				t.Errorf("DELETE of the key sent = %v, want %v", got, tc.delete)
+			if r := h.lastReq("GET", "/v1/ssh_keys"); r == nil || r.Query != "name=kubehz-claim-test.kubehz.dev" {
+				t.Fatalf("key lookup: %+v", r)
+			}
+			if got := claimKeyDeletes(h); got != tc.deleted {
+				t.Errorf("deleted keys = %q, want %q", got, tc.deleted)
 			}
 			switch tc.warn {
 			case "":
@@ -74,7 +120,7 @@ func TestClaimKeyOwnershipRegister(t *testing.T) {
 				if upload == nil || upload.Body != claimUpload {
 					t.Fatalf("upload = %+v, want the body %s", upload, claimUpload)
 				}
-				if tc.delete {
+				if tc.deleted != "" {
 					order := ""
 					for _, r := range h.reqs() {
 						if r.Method == "DELETE" || r.Method == "POST" && r.Path == "/v1/ssh_keys" {
@@ -107,16 +153,15 @@ func TestClaimKeyOwnershipDeregister(t *testing.T) {
 			h.env["HCLOUD_TOKEN"], h.env["HCLOUD_API_BASE"] = "hc_test", h.apiURL()
 			h.handle("GET /api/clusters", 200, registryListFixture)
 			h.handle("DELETE /api/clusters/cl-old", 200, `{"ok":true}`)
-			h.handle("GET /v1/ssh_keys", 200, tc.keys)
-			h.handle("DELETE /v1/ssh_keys/42", 204, ``)
+			serveClaimKeys(h, tc)
 			// The key step is best-effort: a refused key leaves the result
 			// of the platform removal as it is.
 			mustOK(t, h.ctx.DeregisterCluster(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", ""), h.output())
 			if r := h.lastReq("GET", "/v1/ssh_keys"); r == nil || r.Query != "name=kubehz-claim-test.kubehz.dev" {
 				t.Fatalf("key lookup: %+v", r)
 			}
-			if got := h.anyReq("DELETE", "/v1/ssh_keys/42"); got != tc.delete {
-				t.Errorf("DELETE of the key sent = %v, want %v", got, tc.delete)
+			if got := claimKeyDeletes(h); got != tc.deleted {
+				t.Errorf("deleted keys = %q, want %q", got, tc.deleted)
 			}
 			switch tc.warn {
 			case "":

@@ -60,7 +60,6 @@ REGISTERED = {"id": "cl-parity", "registered": True, "claimed": True, "bindSecre
                            "name": "kubehz-claim-bind-reg.dev"}}
 
 
-
 def claim_mark(domain):
     """The value of the label lok8s.dev/kubehz-claim on the claim key that lo
     made for a domain: the first 32 hex characters of its SHA-256."""

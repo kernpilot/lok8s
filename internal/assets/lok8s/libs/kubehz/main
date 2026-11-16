@@ -493,44 +493,66 @@ kubehz::register_post() (
   done
 )
 
+# The Hetzner label on a claim key that lo made (Go: claimKeyLabel). Its
+# value is kubehz::claim_key_mark of the domain.
+_KUBEHZ_CLAIM_LABEL="lok8s.dev/kubehz-claim"
+
 # kubehz::claim_key_mark <domain> — the value of the label
-# lok8s.dev/kubehz-claim on the claim key that lo made for <domain>: the
-# first 32 hex characters of the SHA-256 of the domain. A Hetzner label value
-# has at most 63 characters and starts and ends with a letter or a digit; a
-# domain can break both rules, its hash cannot. The domain is in the spec, so
-# a re-run of register on another machine finds its own key.
+# _KUBEHZ_CLAIM_LABEL on the claim key that lo made for <domain>: the first
+# 32 hex characters of the SHA-256 of the domain. A Hetzner label value has at
+# most 63 characters and starts and ends with a letter or a digit; a domain
+# can break both rules, its hash cannot. The mark comes from the domain alone
+# (the --domain flag, the active domain or the folder under clusters/), so a
+# re-run of register on another machine finds its own key without local
+# state. The domain counts exactly as given: another spelling (letter case,
+# for example) gives another mark, and lo then leaves the key alone. rc 1,
+# with no output, when neither sha256sum nor shasum gives a hash; a tool
+# that is not there is not run, so no "command not found" reaches stderr.
 kubehz::claim_key_mark() {
-  local sum
+  local sum=""
   if command -v sha256sum &>/dev/null; then
-    sum=$(printf '%s' "${1}" | sha256sum)
-  else
-    sum=$(printf '%s' "${1}" | shasum -a 256)
+    sum=$(printf '%s' "${1}" | sha256sum) || sum=""
+  elif command -v shasum &>/dev/null; then
+    sum=$(printf '%s' "${1}" | shasum -a 256) || sum=""
   fi
   [[ "${sum}" =~ ^[0-9a-f]{32} ]] || return 1
   printf '%s' "${sum:0:32}"
 }
 
+# kubehz::claim_key_no_mark <name> — the warning when lo cannot mark the
+# claim key <name> (no sha256sum or shasum). lo then leaves the key alone:
+# without a mark, no key is ours. warn() prints through `echo -e`, so the
+# backslashes of the name are doubled.
+kubehz::claim_key_no_mark() {
+  warn "kubehz: lo needs sha256sum or shasum to mark the claim key '${1//\\/\\\\}', so it does not change the key in your Hetzner Cloud project."
+}
+
 # kubehz::claim_key_own <keys json> <domain> <verb> <name> — rc 0 when the
 # first key of a GET /v1/ssh_keys?name=<name> answer carries the label
-# lok8s.dev/kubehz-claim of <domain>: register replaces, and deregister
-# deletes, only such a key. A Hetzner project can be shared, and a key of the
-# same name that a person or another cluster made must stay: for any other
-# key it warns why lo leaves it alone (<verb>: "replace" or "delete") and
-# returns 1. Call it only when the answer holds a key id. Without a mark (no
-# sha256sum or shasum) no key is ours.
+# _KUBEHZ_CLAIM_LABEL of <domain>: register replaces, and deregister deletes,
+# only such a key. A Hetzner project can be shared, and a key of the same
+# name that a person or another cluster made must stay: for any other key it
+# warns why lo leaves it alone (<verb>: "replace" or "delete") and returns 1.
+# Call it only when the answer holds a key id. Without a mark (no sha256sum
+# or shasum) no key is ours (kubehz::claim_key_no_mark).
 kubehz::claim_key_own() {
-  local keys="${1}" domain="${2}" verb="${3}" name="${4}" label mark next head
-  label=$(jq -r '.ssh_keys[0].labels["lok8s.dev/kubehz-claim"] // empty' <<<"${keys}" 2>/dev/null) || label=""
-  mark=$(kubehz::claim_key_mark "${domain}") || mark=""
-  [[ -z "${mark}" || "${label}" != "${mark}" ]] || return 0
-  # warn() prints through `echo -e`: double the backslashes of the name.
+  local keys="${1}" domain="${2}" verb="${3}" name="${4}" label mark next head esc_domain
+  if ! mark=$(kubehz::claim_key_mark "${domain}"); then
+    kubehz::claim_key_no_mark "${name}"
+    return 1
+  fi
+  label=$(jq -r --arg l "${_KUBEHZ_CLAIM_LABEL}" '.ssh_keys[0].labels[$l] // empty' <<<"${keys}" 2>/dev/null) || label=""
+  [[ "${label}" != "${mark}" ]] || return 0
+  # warn() prints through `echo -e`: double the backslashes of the name and
+  # of the domain.
+  esc_domain="${domain//\\/\\\\}"
   head="kubehz: lo does not ${verb} the SSH key '${name//\\/\\\\}' in your Hetzner Cloud project: "
   if [[ -z "${label}" ]]; then
-    next="delete it (Hetzner Console -> Security -> SSH keys), then run 'lo kubehz register --domain ${domain}' again"
+    next="delete it (Hetzner Console -> Security -> SSH keys), then run 'lo kubehz register --domain ${esc_domain}' again"
     [[ "${verb}" != delete ]] || next="delete it by hand (Hetzner Console -> Security -> SSH keys)"
-    warn "${head}it has no label lok8s.dev/kubehz-claim, so a person or an older lo made it. If an older lo made it for ${domain}, ${next}."
+    warn "${head}it has no label ${_KUBEHZ_CLAIM_LABEL}, so a person or an older lo made it. If an older lo made it for ${esc_domain}, ${next}."
   else
-    warn "${head}its label lok8s.dev/kubehz-claim does not match ${domain}, so another cluster made it."
+    warn "${head}its label ${_KUBEHZ_CLAIM_LABEL} does not match ${esc_domain}, so another cluster made it."
   fi
   return 1
 }
@@ -570,7 +592,10 @@ kubehz::ensure_claim_key() {
   # that someone else made stays (kubehz::claim_key_own).
   # HCLOUD_TOKEN reaches curl in a config (http::curl_config), never on argv.
   local mark keys existing_id
-  mark=$(kubehz::claim_key_mark "${domain}") || return 1
+  if ! mark=$(kubehz::claim_key_mark "${domain}"); then
+    kubehz::claim_key_no_mark "${key_name}"
+    return 1
+  fi
   keys=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL \
     "${hcloud_api}/v1/ssh_keys?name=${key_name}") || keys=""
   existing_id=$(jq -r '.ssh_keys[0].id // empty' <<<"${keys}" 2>/dev/null) || existing_id=""
@@ -579,8 +604,8 @@ kubehz::ensure_claim_key() {
     http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL -X DELETE \
       "${hcloud_api}/v1/ssh_keys/${existing_id}" >/dev/null || true
   fi
-  jq -n --arg n "${key_name}" --arg k "${public_key}" --arg m "${mark}" \
-    '{name: $n, public_key: $k, labels: {"lok8s.dev/kubehz-claim": $m}}' |
+  jq -n --arg n "${key_name}" --arg k "${public_key}" --arg l "${_KUBEHZ_CLAIM_LABEL}" --arg m "${mark}" \
+    '{name: $n, public_key: $k, labels: {($l): $m}}' |
     curl -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
       -K <(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}") \
       -H "Content-Type: application/json" \
