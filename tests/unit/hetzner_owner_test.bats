@@ -75,6 +75,8 @@ _part() {
 # - The image is found as hcloud-go finds it: a value that strconv.ParseInt
 #   reads is an id ("+4711" and "04711" are 4711); any other value is the
 #   name of an image in the store.
+# The flags are read as pflag reads them (_fake_is_bool): "--quiet
+# --network=999" is quiet=true and network=999.
 # The writes add-target, remove-target, add-subnet, attach-to-network,
 # add-service, update-service and assign change the part. Other writes
 # succeed. Switches:
@@ -140,17 +142,35 @@ _fake_hcloud() {
       create)
         local -a fl=()
         local k v id name labels extra='{}' keys image
+        # As pflag reads them: "--flag=value"; a bool flag without "=" is
+        # true and reads no value; any other flag takes the next token as
+        # its value, also one that starts with "-".
         while (( $# )); do
           case "${1}" in
-            --*=*) k="${1%%=*}"; v="${1#*=}"; shift ;;
-            --*) k="${1}"; v="${2-}"; shift; (( $# == 0 )) || shift ;;
-            *) shift; continue ;;
+            --*=*) k="${1%%=*}"; k="${k#--}"; v="${1#*=}"; shift ;;
+            --*)
+              k="${1#--}"
+              shift
+              if _fake_is_bool "${kind}" "${k}"; then
+                v=true
+              elif (( $# )); then
+                v="${1}"
+                shift
+              else
+                echo "hcloud: flag needs an argument: --${k}" >&2
+                return 1
+              fi ;;
+            *)
+              echo "hcloud: ${kind} create takes no argument: ${1}" >&2
+              return 1 ;;
           esac
-          fl+=("${k#--}" "${v}")
+          fl+=("${k}" "${v}")
         done
-        jq -cn --arg kind "${kind}" '$ARGS.positional as $a
+        # NUL-separated on stdin: after --args, jq reads a value that
+        # starts with "-" as an option of its own and records nothing.
+        printf '%s\0' "${fl[@]}" | jq -cRs --arg kind "${kind}" '(split("\u0000") | .[:-1]) as $a
           | {kind: $kind, flags: [range(0; $a | length; 2) as $j | [$a[$j], $a[$j + 1]]]}' \
-          --args "${fl[@]}" >> "${STORE}/creates.jsonl"
+          >> "${STORE}/creates.jsonl" || return 1
         name="$(tail -n1 "${STORE}/creates.jsonl" | jq -r '[.flags[] | select(.[0] == "name") | .[1]] | last // ""')"
         labels="$(tail -n1 "${STORE}/creates.jsonl" | jq -c '[.flags[] | select(.[0] == "label") | .[1]
           | split(",")[] | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {}')"
@@ -233,7 +253,20 @@ _fake_hcloud() {
     fi
     return 0
   }
-  export -f hcloud _fake_set _fake_hcloud_call
+  # _fake_is_bool <kind> <flag>: a bool flag of 'hcloud <kind> create'
+  # (hcloud v1.70.2): the bool options of the root command
+  # (internal/state/config/options.go: debug, no-experimental-warnings,
+  # quiet), the help flag of cobra and the Bool flags of
+  # internal/cmd/<kind>/create.go.
+  _fake_is_bool() {
+    local -A b=(
+      [server]="start-after-create automount allow-deprecated-image without-ipv4 without-ipv6 enable-backup"
+      [volume]="automount"
+      [network]="expose-routes-to-vswitch"
+    )
+    [[ " debug quiet no-experimental-warnings help ${b[${1}]:-} " == *" ${2} "* ]]
+  }
+  export -f hcloud _fake_set _fake_hcloud_call _fake_is_bool
 }
 
 # One part of every kind the provision makes. cp-0 uses the key, the
@@ -396,7 +429,7 @@ _refused() {
   assert_success
   run _writes
   refute_output --regexp ' 91( |$)'
-  assert_output --partial "network create --name prod-net --ip-range 10.0.0.0/16 --label lok8s.dev/owner=${MARK}"
+  assert_output --partial "network create --name=prod-net --ip-range=10.0.0.0/16 --label=lok8s.dev/owner=${MARK}"
 }
 
 # ── adopted: a re-run over parts with this cluster's mark ─
@@ -429,11 +462,11 @@ _refused() {
   for kind in ssh-key floating-ip network load-balancer server volume; do
     run grep -E "^${kind} create " "${HCLOUD_LOG}"
     assert_success
-    assert_output --regexp "--label lok8s.dev/owner=${MARK}( |$)"
+    assert_output --regexp "--label=lok8s.dev/owner=${MARK}( |$)"
   done
   # The mark comes last: hcloud keeps the last value of a key.
   run grep -E '^network create ' "${HCLOUD_LOG}"
-  assert_output --partial "--label lok8s.dev/owner=someone-else --label lok8s.dev/owner=${MARK}"
+  assert_output --partial "--label=lok8s.dev/owner=someone-else --label=lok8s.dev/owner=${MARK}"
   run jq -r '.[0].labels["lok8s.dev/owner"]' "${STORE}/network.json"
   assert_output "${MARK}"
 }
@@ -726,12 +759,12 @@ _refused_refs() {
   assert_success
   # ids of the fake: ssh-key 103, network 105 (three parts exist before the run).
   run grep -E '^server create ' "${HCLOUD_LOG}"
-  assert_output --regexp ' --ssh-key 103 '
-  assert_output --regexp ' --network 105 '
-  assert_output --regexp ' --firewall 74 '
-  assert_output --regexp ' --primary-ipv4 76 '
-  assert_output --regexp ' --primary-ipv6 77 '
-  refute_output --regexp ' (prod-key|prod-net|our-fw|our-ip6)( |$)'
+  assert_output --regexp ' --ssh-key=103 '
+  assert_output --regexp ' --network=105 '
+  assert_output --regexp ' --firewall=74 '
+  assert_output --regexp ' --primary-ipv4=76 '
+  assert_output --regexp ' --primary-ipv6=77 '
+  refute_output --regexp '[ =](prod-key|prod-net|our-fw|our-ip6)( |$)'
 }
 
 # The conversion of the descriptor reads a reference key without its
@@ -779,7 +812,7 @@ v
   run _provision
   assert_success
   run grep -E '^server create ' "${HCLOUD_LOG}"
-  assert_output --regexp ' --image 5 '
+  assert_output --regexp ' --image=5 '
 }
 
 # ── the form of the keys and values ──────────────────────
@@ -803,6 +836,100 @@ v
   assert_output --partial "refused server 'cp-0': the key \"network=999\" is not the name of an hcloud flag."
   assert_output --partial "refused server 'cp-0': the key \"image=4711\" is not the name of an hcloud flag."
   assert_output --partial "the descriptor has 2 refused key(s) or reference(s). Nothing was created or changed."
+}
+
+# _desc_set <jq-filter>: changes the descriptor with jq (a JSON escape such
+# as "\t" in the filter is the control character).
+_desc_set() {
+  jq "${1}" "${DESC}" > "${DESC}.new" && mv "${DESC}.new" "${DESC}"
+}
+
+@test "keys: a flag of the hcloud command (quiet, debug) is refused, and its value never becomes a flag" {
+  _part network 999 their-net '{}'
+  _part ssh-key 777 their-key '{}'
+  _desc_set '.server[0].quiet = "--network=999" | .server[0].debug = "--ssh-key=777"'
+  run _provision
+  local out="${output}" rc="${status}"
+  # pflag reads --quiet and --debug as switches with no value: then
+  # "--network=999" and "--ssh-key=777" are flags of their own.
+  run _created server network
+  refute_output --partial "999"
+  run _created server ssh-key
+  refute_output --partial "777"
+  run _writes
+  assert_output ""
+  output="${out}" status="${rc}"
+  assert_failure
+  assert_output --partial "refused server 'cp-0': the key \"quiet\" is not a flag of 'hcloud server create' (hcloud v1.70.2)."
+  assert_output --partial "refused server 'cp-0': the key \"debug\" is not a flag of 'hcloud server create' (hcloud v1.70.2)."
+  assert_output --partial "the descriptor has 2 refused key(s) or reference(s). Nothing was created or changed."
+}
+
+@test "fake: hcloud create reads the flags as pflag does (--quiet --network=999 is quiet=true and network=999)" {
+  run hcloud server create --name=fx --quiet --network=999 --debug --ssh-key=777 --type -x --without-ipv6
+  run _created server quiet
+  assert_output "true"
+  run _created server network
+  assert_output "999"
+  run _created server debug
+  assert_output "true"
+  run _created server ssh-key
+  assert_output "777"
+  run _created server type
+  assert_output "-x"
+  run _created server without-ipv6
+  assert_output "true"
+}
+
+@test "keys: a connection flag (context, config, endpoint) is refused on each kind, and no create runs" {
+  _desc_set '.server[0].context = "other-project" | .volume[0].config = "/tmp/other-cli.toml"
+    | .["load-balancer"][0].endpoint = "https://api.example.test/v1"'
+  run _provision
+  local out="${output}" rc="${status}"
+  run _created server context
+  assert_output ""
+  run _created volume config
+  assert_output ""
+  run _created load-balancer endpoint
+  assert_output ""
+  run _writes
+  assert_output ""
+  output="${out}" status="${rc}"
+  assert_failure
+  assert_output --partial "refused server 'cp-0': the key \"context\" is not a flag of 'hcloud server create'"
+  assert_output --partial "refused volume 'prod-data': the key \"config\" is not a flag of 'hcloud volume create'"
+  assert_output --partial "refused load-balancer 'prod-api': the key \"endpoint\" is not a flag of 'hcloud load-balancer create'"
+}
+
+@test "values: a control character in a value or a hook note, and a name with a space at an end, are refused before any create" {
+  _desc_set '.network[0].name = " prod-net" | .server[0].location = "fsn1\n"
+    | .["load-balancer"][0]["#targets"][1].value = "lok8s.dev/cluster=prod\tx"'
+  run _provision
+  local out="${output}" rc="${status}"
+  run _writes
+  assert_output ""
+  output="${out}" status="${rc}"
+  assert_failure
+  assert_output --partial "refused network ' prod-net': name: \" prod-net\" has a space at the start or the end."
+  assert_output --partial "refused server 'cp-0': location: \"fsn1\\n\" has a control character (U+0000 to U+001F or U+007F)."
+  assert_output --partial "refused load-balancer 'prod-api': #targets: "
+  assert_output --partial "lok8s.dev/cluster=prod\\tx"
+  assert_output --partial "the descriptor has 3 refused key(s) or reference(s)."
+}
+
+@test "image: a control character or a space at an end (\"4711\\t\", \"4711 \", \"\\t4711\", \"47\\t11\") is refused before any create" {
+  _part image 4711 "" '{}' '{"type":"snapshot"}'
+  local v out rc
+  for v in '"4711\t"' '"4711 "' '"\t4711"' '"47\t11"'; do
+    _desc_set ".server[0].image = ${v}"
+    run _provision
+    out="${output}" rc="${status}"
+    run _writes
+    assert_output ""
+    output="${out}" status="${rc}"
+    assert_failure
+    assert_output --partial "refused server 'cp-0': image: ${v} has a"
+  done
 }
 
 @test "image: a signed or zero-padded id of a foreign snapshot (+4711, 04711) is refused before any create" {
@@ -1081,7 +1208,26 @@ load-balancer remove-target 14 --server 77"
   assert_output ""
   output="${out}" status="${rc}"
   assert_failure
-  assert_output --partial "removed target server '15', and did not add it again: the load balancer changed"
+  assert_output --partial "removed target server '15', and did not add it again: the load balancer or the server changed"
+}
+
+@test "lb: each retry of a target add reads the server too: a server that loses the mark stops the retries" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  # The live target 15 has use-private-ip true; the descriptor wants false:
+  # remove, then add with retries. Each add fails; after the first one the
+  # server 15 gets another owner mark.
+  _lb_targets '[{"type":"server","server":{"id":15},"use_private_ip":true}]'
+  export HETZNER_LB_ADD_DELAY=0
+  export HCLOUD_FAIL='^load-balancer add-target 14 --server'
+  export RELABEL_AFTER_CALL="server 15 ${OTHER} ^load-balancer add-target 14 --server"
+  run _provision
+  local out="${output}" rc="${status}"
+  run grep -cE '^load-balancer add-target 14 --server' "${HCLOUD_LOG}"
+  assert_output "1"
+  output="${out}" status="${rc}"
+  assert_failure
+  assert_output --partial "did not change server 15: it does not have the owner mark of this cluster now"
+  assert_output --partial "removed target server '15', and did not add it again: the load balancer or the server changed"
 }
 
 # ── the outcome after a failure ──────────────────────────

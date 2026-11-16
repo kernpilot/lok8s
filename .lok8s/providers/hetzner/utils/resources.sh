@@ -488,17 +488,22 @@ hetzner::_lb_targets() {
   printf '%s\n' "${out:-(no target)}"
 }
 
-# hetzner::_lb_add_target <lb> <lb-name> <mark> <add-target args...>
+# hetzner::_lb_add_target <lb> <lb-name> <mark> <server-id> <server-name> <add-target args...>
 # add-target with retries: HETZNER_LB_ADD_TRIES attempts (default 4); the
 # wait starts at HETZNER_LB_ADD_DELAY seconds (default 2) and doubles. Right
-# before each attempt it reads the load balancer by id and checks its owner
-# mark. rc 1 with the last hcloud error on stdout; rc 2 when the read or the
-# check failed (the message is on stderr): then the caller stops.
+# before each attempt it reads both ends by id and checks their owner mark:
+# the load balancer, and the server of a server target (<server-id>; empty
+# for a selector or an ip target). rc 1 with the last hcloud error on
+# stdout; rc 2 when a read or a check failed (the message is on stderr):
+# then the caller stops.
 hetzner::_lb_add_target() {
-  local lb="${1}" lbname="${2}" mark="${3}"; shift 3
+  local lb="${1}" lbname="${2}" mark="${3}" sid="${4}" sname="${5}"; shift 5
   local tries="${HETZNER_LB_ADD_TRIES:-4}" delay="${HETZNER_LB_ADD_DELAY:-2}" n err=""
   for (( n = 1; n <= tries; n++ )); do
     hetzner::_still_ours load-balancer "${lb}" "${mark}" "${lbname}" >/dev/null || return 2
+    if [[ -n "${sid}" ]]; then
+      hetzner::_still_ours server "${sid}" "${mark}" "${sname}" >/dev/null || return 2
+    fi
     err="$(dry-run::cmd hcloud load-balancer add-target "${lb}" "${@}" 2>&1)" && return 0
     _hetzner_log "lb ${lb}: add-target attempt ${n}/${tries} failed: ${err}"
     (( n == tries )) || sleep "${delay}"
@@ -770,9 +775,12 @@ hetzner::load-balancer() {
           continue
         fi
         arc=0
-        err=$(hetzner::_lb_add_target "${rid}" "${name}" "${mark}" "${target_args[@]}" "${private_arg[@]}") || arc=$?
+        local add_sid=""
+        [[ "${api_type}" != "server" ]] || add_sid="${target_value}"
+        err=$(hetzner::_lb_add_target "${rid}" "${name}" "${mark}" "${add_sid}" "${server_name}" \
+          "${target_args[@]}" "${private_arg[@]}") || arc=$?
         if (( arc == 2 )); then
-          error "lb ${name}: removed target ${target_type} '${target_value}', and did not add it again: the load balancer changed (the message above). The load balancer does not route to this target now."
+          error "lb ${name}: removed target ${target_type} '${target_value}', and did not add it again: the load balancer or the server changed (the message above). The load balancer does not route to this target now."
           _HETZNER_LB_FAILED=1
           return 0
         fi

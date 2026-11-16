@@ -653,7 +653,10 @@ provider::rebuild() {
   # descriptor #external-ip (NOT its non-unique free-text server_name). Any
   # failure aborts here with NOTHING reimaged/reset — no partial recovery, no
   # acting on a foreign box.
+  # Each plan entry is one JSON object: its fields come back byte for byte
+  # (a tab-separated line lost a tab at the end of a value).
   local -a plan=() cloud_ips=() metal_ips=()
+  local -A checked_image=()
   local idx server name is_root pub image cloud_d ci num ext_ip sid
   for (( idx=0; idx<count; idx++ )); do
     server="$(echo "${desc}" | jq -c ".server[${idx}]")"
@@ -689,7 +692,8 @@ provider::rebuild() {
       num="$(hetzner::_robot_server_number_by_ip "${ext_ip}")" || num=""
       [[ -n "${num}" ]] || {
         error "rebuild: bare-metal node '${name}' (${ext_ip}) did not resolve to exactly one Robot server by IP — refusing to rescue/reset (name/IP collision, no match, or Robot API error)"; return 1; }
-      plan+=("metal"$'\t'"${name}"$'\t'"${num}"$'\t'"${fingerprint}")
+      plan+=("$(jq -cn --arg name "${name}" --arg num "${num}" --arg fp "${fingerprint}" \
+        '{kind: "metal", name: $name, a: $num, b: $fp}')")
       metal_ips+=("${pub}")
     else
       # ── Cloud VM: name must resolve to ONE server with the cluster label
@@ -697,9 +701,10 @@ provider::rebuild() {
       sid="$(hetzner::_cloud_server_id "${name}" "${selector}" "${mark}" "${cluster_name}")" || {
         error "rebuild: cloud node '${name}' does not resolve to exactly one server carrying ${selector} — refusing to reimage"; return 1; }
       # The image, checked as for a create (hetzner::_image_ok): an id must
-      # be plain digits (hcloud reads "+4711" and "04711" as the id 4711),
-      # and a snapshot or backup id needs the owner mark. The reimage gets
-      # the value that the check passed.
+      # be plain digits (hcloud reads "+4711" and "04711" as the id 4711), a
+      # control character or a space at an end is refused, and a snapshot
+      # or backup id needs the owner mark. The reimage gets the value that
+      # the check passed, byte for byte (compared at the reimage).
       _HETZNER_REFUSED=()
       _HETZNER_LISTS=()
       hetzner::_image_ok server "${name}" "$(echo "${server}" | jq -c '.image // "ubuntu-24.04"')" "${mark}" || {
@@ -713,7 +718,9 @@ provider::rebuild() {
       export CLOUD_PATHD="${cloud_d}"
       cloud-config::generate > "${ci}" 2>>"${CLOUD_LOG_FILE}" || {
         error "rebuild: cloud-init generation failed for '${name}'"; return 1; }
-      plan+=("cloud"$'\t'"${name}"$'\t'"${sid}"$'\t'"${image}"$'\t'"${ci}")
+      plan+=("$(jq -cn --arg name "${name}" --arg sid "${sid}" --arg image "${image}" --arg ci "${ci}" \
+        '{kind: "cloud", name: $name, a: $sid, b: $image, c: $ci}')")
+      checked_image["${sid}"]="${image}"
       cloud_ips+=("${pub}")
     fi
   done
@@ -731,7 +738,11 @@ provider::rebuild() {
   # cluster may be left partially reimaged).
   local rc=0 entry kind pname pa pb pc
   for entry in "${plan[@]}"; do
-    IFS=$'\t' read -r kind pname pa pb pc <<<"${entry}"
+    hetzner::_plan_field "${entry}" kind; kind="${REPLY}"
+    hetzner::_plan_field "${entry}" name; pname="${REPLY}"
+    hetzner::_plan_field "${entry}" a; pa="${REPLY}"
+    hetzner::_plan_field "${entry}" b; pb="${REPLY}"
+    hetzner::_plan_field "${entry}" c; pc="${REPLY}"
     if [[ "${kind}" == "metal" ]]; then
       _hetzner_print "🔧 rescue+reset \033[1m${pname}\033[0m (robot#${pa})"
       hetzner::_robot_rescue "${pa}" "${pb}" || {
@@ -745,7 +756,10 @@ provider::rebuild() {
       _hetzner_print "📦 rebuild \033[1m${pname}\033[0m (id ${pa}, image ${pb})"
       hetzner::_still_ours server "${pa}" "${mark}" "${pname}" >/dev/null || {
         error "rebuild: node '${pname}' (id ${pa}) was not reimaged: it changed after the check (the message above) — cluster may be partially reimaged"; rc=1; continue; }
-      dry-run::cmd hcloud server rebuild "${pa}" --image "${pb}" --user-data-from-file "${pc}" || {
+      if [[ -z "${checked_image[${pa}]+set}" || "${pb}" != "${checked_image[${pa}]}" ]]; then
+        error "rebuild: node '${pname}' (id ${pa}) was not reimaged: the image of the plan is not the image that lok8s checked — cluster may be partially reimaged"; rc=1; continue
+      fi
+      dry-run::cmd hcloud server rebuild "${pa}" "--image=${pb}" "--user-data-from-file=${pc}" || {
         error "rebuild: node '${pname}' reimage failed ('hcloud server rebuild ${pa}') — cluster may be partially reimaged"; rc=1; continue; }
     fi
   done
@@ -935,6 +949,14 @@ hetzner::_robot_server_number_by_ip() {
   count="$(echo "${matches}" | jq 'length' 2>/dev/null || echo 0)"
   [[ "${count}" == "1" ]] || return 1
   echo "${matches}" | jq -r '.[0].server_number'
+}
+
+# hetzner::_plan_field <entry-json> <field>
+# REPLY: the string <field> of a rebuild plan entry, byte for byte (the
+# command substitution does not cut a newline at its end).
+hetzner::_plan_field() {
+  REPLY="$(jq -j --arg f "${2}" '.[$f] // ""' <<<"${1}"; printf x)"
+  REPLY="${REPLY%x}"
 }
 
 # hetzner::_cloud_server_id <name> <selector> <mark> <cluster_name>

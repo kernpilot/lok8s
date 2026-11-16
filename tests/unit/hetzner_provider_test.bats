@@ -174,7 +174,7 @@ JSON
   # Cloud CP → hcloud server rebuild with the descriptor's image.
   run cat "${HCLOUD_LOG}"
   # By the checked id of cp-0 (10), never by its name.
-  assert_output --partial "server rebuild 10 --image ubuntu-24.04 --user-data-from-file"
+  assert_output --partial "server rebuild 10 --image=ubuntu-24.04 --user-data-from-file="
   # The bare-metal worker is NOT rebuilt via hcloud.
   refute_output --partial "rebuild worker-0"
 
@@ -194,7 +194,7 @@ JSON
   run provider::rebuild "${DESC}" "${WORK}"
   assert_success
   run cat "${HCLOUD_LOG}"
-  assert_output --partial "server rebuild 10 --image debian-12"
+  assert_output --partial "server rebuild 10 --image=debian-12 "
 
   # A real cloud-init file was generated and handed to hcloud.
   [ -f "${WORK}/rebuild-cp-0.cloud-init.yaml" ]
@@ -260,7 +260,7 @@ JSON
 
   # The full plan is logged (what WOULD happen): the cloud reimage command, the
   # bare-metal rescue+reset, and an explicit dry-run marker.
-  assert_output --partial "hcloud server rebuild 10 --image ubuntu-24.04"
+  assert_output --partial "hcloud server rebuild 10 --image=ubuntu-24.04 "
   assert_output --partial "dry-run"
   assert_output --partial "would activate Robot rescue on robot#12345"
   assert_output --partial "would hardware-reset robot#12345"
@@ -505,21 +505,21 @@ JSON
 
 # ── boolean descriptor keys ──────────────────────────────────────
 # A boolean value is a bare hcloud switch. `without-ipv6: true` used to become
-# `--without-ipv6 true`, which hcloud read as a stray argument; it is one
-# `--without-ipv6=true` token now, and `false` stays explicit.
-@test "hetzner::create passes a boolean key as one --key=value token, never a stray value" {
+# `--without-ipv6 true`, which hcloud read as a stray argument; it is the one
+# token `--without-ipv6` now, and `false` stays explicit (`--without-ipv6=false`).
+@test "hetzner::create passes a boolean key as one token, never a stray value" {
   export CLOUD_HETZNER_JSON='{"cluster_name":"test-cluster","server":[{"name":"w-1","type":"cx23","image":"ubuntu-24.04","without-ipv6":true,"label":"lok8s.dev/cluster=t"}]}'
   run hetzner::create 'server'
   assert_success
   run grep -E '^server create' "${HCLOUD_LOG}"
   assert_success
-  assert_output --partial '--without-ipv6=true'
+  assert_output --partial ' --without-ipv6 '
   refute_output --partial '--without-ipv6 true'
-  refute_output --regexp 'without-ipv6=true +(true|"")'
+  refute_output --regexp 'without-ipv6 +(true|"")'
   # Adjacency: the next flag follows the switch directly — no placeholder
   # reached hcloud and no pair shifted (a swallowed --label would show here).
-  assert_output --partial '--without-ipv6=true --label lok8s.dev/cluster=t'
-  assert_output --partial '--type cx23'
+  assert_output --partial '--without-ipv6 --label=lok8s.dev/cluster=t'
+  assert_output --partial '--type=cx23'
 }
 
 @test "hetzner::create keeps a false boolean explicit (--key=false) and other values verbatim" {
@@ -528,7 +528,7 @@ JSON
   assert_success
   run grep -E '^server create' "${HCLOUD_LOG}"
   assert_output --partial '--without-ipv6=false'
-  assert_output --partial '--image ubuntu-24.04'
+  assert_output --partial '--image=ubuntu-24.04'
 }
 
 # ── an in-place recreate over existing parts ─────────────────────────────────
@@ -582,10 +582,10 @@ _lookup_hcloud() {
 
   # A snapshot image id is a literal; ssh-key and network are references.
   run grep -E '^server create' "${HCLOUD_LOG}"
-  assert_output "server create --name cp-1 --type cx43 --image 12345678 --ssh-key 7 --network 9 --label lok8s.dev/owner=${MARK}"
+  assert_output "server create --name=cp-1 --type=cx43 --image=12345678 --ssh-key=7 --network=9 --label=lok8s.dev/owner=${MARK}"
   # The size is a literal; the server is a reference (cp-0 has the id 42).
   run grep -E '^volume create' "${HCLOUD_LOG}"
-  assert_output "volume create --name data-0 --size 100 --server 42 --label lok8s.dev/cluster=t --label lok8s.dev/owner=${MARK}"
+  assert_output "volume create --name=data-0 --size=100 --server=42 --label=lok8s.dev/cluster=t --label=lok8s.dev/owner=${MARK}"
 }
 
 @test "hetzner::create gives a bare-metal hook a literal number verbatim and a reference as its id" {
@@ -625,7 +625,7 @@ _descriptor_pubkey() {
   assert_success
   assert_output 'ssh-ed25519 AAAAC3NzaDescriptorKey'
   run cat "${HCLOUD_LOG}"
-  assert_output --partial "server rebuild 10 --image ubuntu-24.04 --user-data-from-file ${WORK}/rebuild-cp-0.cloud-init.yaml"
+  assert_output --partial "server rebuild 10 --image=ubuntu-24.04 --user-data-from-file=${WORK}/rebuild-cp-0.cloud-init.yaml"
 }
 
 @test "provider::rebuild gives a dedicated access user the descriptor sshPublicKey" {
@@ -831,7 +831,7 @@ load-balancer add-target 5 --server 42 --use-private-ip"
   refute_output --partial "could not read the load balancer"
   run grep -E '^load-balancer (create|remove-target|add-target|add-service)' "${HCLOUD_LOG}"
   # The create sets the owner mark; the hook acts on the new LB by its id (6).
-  assert_output "load-balancer create --name api-lb --type lb11 --location fsn1 --label lok8s.dev/cluster=t --label lok8s.dev/owner=${MARK}
+  assert_output "load-balancer create --name=api-lb --type=lb11 --location=fsn1 --label=lok8s.dev/cluster=t --label=lok8s.dev/owner=${MARK}
 load-balancer add-target 6 --label-selector lok8s.dev/role=control-plane${OWN} --use-private-ip
 load-balancer add-service 6 --protocol tcp --listen-port 6443 --destination-port 6443"
 }
@@ -1062,7 +1062,7 @@ _rebuild_ids_hcloud() {
   assert_success
   run grep -E '^server (rebuild|describe) ' "${HCLOUD_LOG}"
   assert_output --regexp '^server describe 42 -o json'
-  assert_output --partial "server rebuild 42 --image ubuntu-24.04 "
+  assert_output --partial "server rebuild 42 --image=ubuntu-24.04 "
   refute_output --regexp 'server (rebuild|describe) 900( |$)'
 }
 
@@ -1139,6 +1139,37 @@ _rebuild_ids_hcloud() {
     output="${out}" status="${rc}"
     assert_failure
     assert_output --partial "image: '${v}' is an image id for hcloud (it has a sign or a leading zero). Write the id as plain digits, for example 4711."
+    assert_output --partial "rebuild: nothing was reimaged."
+  done
+}
+
+@test "provider::rebuild refuses an image with a control character or a space at an end, and never reimages from the id 4711" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    local own='{"lok8s.dev/cluster":"test-cluster","lok8s.dev/owner":"'"${MARK}"'"}'
+    case "$1 $2" in
+      "server list")
+        echo '[{"id":10,"name":"cp-0","status":"running","public_net":{"ipv4":{"ip":"192.0.2.10"}},"labels":'"${own}"'}]' ;;
+      "server describe") echo '{"id":10,"name":"cp-0","labels":'"${own}"'}' ;;
+      "image list") echo '[{"id":4711,"type":"snapshot","labels":{}}]' ;;
+      *"list") echo '[]' ;;
+    esac
+    return 0
+  }
+  export -f hcloud
+  local v out rc
+  for v in '"4711\t"' '"4711 "' '"\t4711"' '"47\t11"'; do
+    : > "${HCLOUD_LOG}"
+    jq ".server[0].image = ${v}" "${DESC}" > "${DESC}.new" && mv "${DESC}.new" "${DESC}"
+    run provider::rebuild "${DESC}" "${WORK}"
+    out="${output}" rc="${status}"
+    # A tab-separated plan cut the tab: the reimage got the id 4711.
+    run grep -E '^server rebuild ' "${HCLOUD_LOG}"
+    assert_output ""
+    output="${out}" status="${rc}"
+    assert_failure
+    assert_output --partial "image: ${v} has a"
     assert_output --partial "rebuild: nothing was reimaged."
   done
 }

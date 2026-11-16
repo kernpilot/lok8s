@@ -447,11 +447,20 @@ existing part only when it has the mark of this cluster:
   Write an image id as plain digits (`4711`): `hcloud` reads `+4711` and
   `04711` as the id 4711 too, so lok8s refuses these forms. An image is one
   value, not a list.
-- Each key of a part is the name of a flag of `hcloud <kind> create`
-  (`a-z`, `0-9` and `-`), with an optional suffix (`"server#2"`). lok8s
-  refuses each other key, for example `"network=999"`, before the first
-  create. A switch of `hcloud` (for example `start-after-create`,
-  `automount`, `without-ipv4`) takes `true` or `false`.
+- Each key of a part is a flag of `hcloud <kind> create` for the kind of
+  the part, with an optional suffix (`"server#2"`). A flag of the `hcloud`
+  command itself is never a key: `context`, `config` and `endpoint` select
+  another project or API, and a switch such as `quiet` or `debug` reads no
+  value, so its value became a flag of its own. lok8s refuses such a key,
+  and each other key that is not on the list of the kind (for example
+  `"network=999"`), before the first create, and shows all refusals at
+  once. A switch of the kind (for example `start-after-create`,
+  `automount`, `without-ipv4`) takes `true` or `false`. lok8s gives
+  `hcloud` each value as one token (`--location=fsn1`), so a value never
+  becomes a flag.
+- A value must not have a control character (U+0000 to U+001F, U+007F).
+  This is also true for the values in `#subnets`, `#targets` and
+  `#services`. A name and an image must not start or end with a space.
 - A server without `ssh-key` in the descriptor gets no SSH key from
   Hetzner. lok8s gives `hcloud server create` the flag `--ssh-key=` with no
   value, so `hcloud` does not add the keys of its option
@@ -459,7 +468,9 @@ existing part only when it has the mark of this cluster:
   key that a server must have in `ssh-key`.
 - Right before each change (a subnet, a floating IP assignment, a load
   balancer network, target or service, each retry, each removal), lok8s
-  reads the parts by id again and checks their mark. A part that changed,
+  reads the parts by id again and checks their mark. Before a load balancer
+  target is added (also at each retry), lok8s reads the load balancer and
+  the server of the target. A part that changed,
   or a read that failed, stops the step: no change of that part follows.
 - A change that fails stops its step, and the provision fails. An answer
   that the thing exists already is accepted only when a new read shows it.
@@ -480,7 +491,11 @@ existing part only when it has the mark of this cluster:
   reads the server by that id again right before the reimage. A server that
   has another name or no mark at that time is not reimaged.
 
-**Limits.** A check and the change after it are two API calls. The Hetzner
+**Limits.** lok8s checked these rules against hcloud v1.70.2: the flag
+lists of each kind, the switches, and how `--ssh-key=` turns off
+`default-ssh-keys`. Another `hcloud` version can have other flags or
+defaults, and lok8s does not check the version. A check and the change
+after it are two API calls. The Hetzner
 API cannot make a change depend on a label, so another person or run can
 change a part between the two calls. When a part with the id that lok8s
 gives `hcloud` is deleted in that time, `hcloud` looks for a part with that
