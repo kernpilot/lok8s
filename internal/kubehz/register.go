@@ -6,6 +6,8 @@ package kubehz
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,11 +24,69 @@ func (c *Context) hcloudAPIBase() string {
 	return "https://api.hetzner.cloud"
 }
 
+// claimKeyLabel is the Hetzner label on a claim key that lo made. Its value
+// is claimKeyMark(domain). register replaces, and deregister deletes, only a
+// key with this label and value: a Hetzner project can be shared, and a key
+// of the same name that a person or another cluster made must stay.
+const claimKeyLabel = "lok8s.dev/kubehz-claim"
+
+// errClaimKeyNotOwn: a key with the claim key's name exists, and lo did not
+// make it for this cluster (claimKeyLabel).
+var errClaimKeyNotOwn = errors.New("kubehz: the hcloud SSH key of that name is not this cluster's claim key")
+
+// claimKeyMark is the claimKeyLabel value of a domain: the first 32 hex
+// characters of its SHA-256. A Hetzner label value has at most 63
+// characters and starts and ends with a letter or a digit; a domain can
+// break both rules, its hash cannot. The domain is in the spec, so a re-run
+// of register on another machine finds its own key.
+func claimKeyMark(domain string) string {
+	sum := sha256.Sum256([]byte(domain))
+	return hex.EncodeToString(sum[:])[:32]
+}
+
+// findOwnClaimKey reads the hcloud SSH key called name. A key with the
+// claimKeyLabel of domain returns its id. Any other key of that name is
+// left alone: findOwnClaimKey says why (verb is what lo does not do to
+// it: "replace" or "delete") and returns own false. No key, or a list that
+// fails or does not parse, returns "" and own true: nothing to delete.
+func (c *Context) findOwnClaimKey(ctx context.Context, hcloudAPI string, auth bearer, name, domain, verb string) (id string, own bool) {
+	raw, err := c.fetch(ctx, "GET", hcloudAPI+"/v1/ssh_keys?name="+url.QueryEscape(name), auth, nil)
+	if err != nil {
+		return "", true
+	}
+	lv, ok := parseJSON(raw)
+	if !ok {
+		return "", true
+	}
+	keys, _ := jget(lv, "ssh_keys").([]any)
+	if len(keys) == 0 {
+		return "", true
+	}
+	if id = jstrOr(keys[0], "", "id"); id == "" {
+		return "", true
+	}
+	head := fmt.Sprintf("kubehz: lo does not %s the SSH key '%s' in your Hetzner Cloud project: ", verb, name)
+	switch jstrOr(keys[0], "", "labels", claimKeyLabel) {
+	case claimKeyMark(domain):
+		return id, true
+	case "":
+		next := fmt.Sprintf("delete it (Hetzner Console -> Security -> SSH keys), then run 'lo kubehz register --domain %s' again", domain)
+		if verb == "delete" {
+			next = "delete it by hand (Hetzner Console -> Security -> SSH keys)"
+		}
+		c.warnf("%sit has no label %s, so a person or an older lo made it. If an older lo made it for %s, %s.", head, claimKeyLabel, domain, next)
+	default:
+		c.warnf("%sits label %s does not match %s, so another cluster made it.", head, claimKeyLabel, domain)
+	}
+	return "", false
+}
+
 // ensureClaimKey ports kubehz::ensure_claim_key — the PRIMARY registration
 // for hcloud-backed clusters: the api mints the claim key SERVER-SIDE
 // ({domain, claimKey: true}) and we upload the returned PUBLIC key into the
-// owner's Hetzner Cloud account under kubehz-claim-<domain>. Re-runs ROTATE
-// server-side, so the hcloud key is replaced by name on every run.
+// owner's Hetzner Cloud account under kubehz-claim-<domain>, with the
+// claimKeyLabel of the domain. Re-runs ROTATE server-side, so a re-run
+// replaces the key, but only a key with that label (findOwnClaimKey).
 // Fail-soft: any failure returns an error and the caller falls back.
 func (c *Context) ensureClaimKey(ctx context.Context, domain, apiURL string) error {
 	hcloudAPI := c.hcloudAPIBase()
@@ -52,20 +112,18 @@ func (c *Context) ensureClaimKey(ctx context.Context, domain, apiURL string) err
 	c.persistBindSecret(domain, jstrOr(v, "", "bindSecret"))
 
 	hcloudAuth := withBearer(c.getenv("HCLOUD_TOKEN"))
-	// Replace-by-name: a stale kubehz-claim key must not linger.
-	existingID := ""
-	if raw, err := c.fetch(ctx, "GET", hcloudAPI+"/v1/ssh_keys?name="+url.QueryEscape(keyName), hcloudAuth, nil); err == nil {
-		if lv, ok := parseJSON(raw); ok {
-			if keys, ok := jget(lv, "ssh_keys").([]any); ok && len(keys) > 0 {
-				existingID = jstrOr(keys[0], "", "id")
-			}
-		}
+	// Replace by name, but only our own key: a stale claim key of this
+	// cluster must not linger, and a key that someone else made stays.
+	existingID, own := c.findOwnClaimKey(ctx, hcloudAPI, hcloudAuth, keyName, domain, "replace")
+	if !own {
+		return errClaimKeyNotOwn
 	}
 	if existingID != "" {
 		_, _ = c.fetch(ctx, "DELETE", hcloudAPI+"/v1/ssh_keys/"+existingID, hcloudAuth, nil)
 	}
 	if _, err := c.fetch(ctx, "POST", hcloudAPI+"/v1/ssh_keys", hcloudAuth,
-		compactJSON(jsonPair{"name", keyName}, jsonPair{"public_key", publicKey})); err != nil {
+		compactJSON(jsonPair{"name", keyName}, jsonPair{"public_key", publicKey},
+			jsonPair{"labels", map[string]string{claimKeyLabel: claimKeyMark(domain)}})); err != nil {
 		return err
 	}
 
@@ -332,19 +390,14 @@ func (c *Context) DeregisterCluster(ctx context.Context, cfg *Config, domain, cl
 	}
 
 	// Best-effort: retire the kubehz claim key from the hcloud account. The
-	// name mirrors the api's minted convention (kubehz-claim-<domain>).
+	// name mirrors the api's minted convention (kubehz-claim-<domain>). Only
+	// a key with this cluster's claimKeyLabel goes; a refused key leaves the
+	// result as it is.
 	if hcloudToken := c.getenv("HCLOUD_TOKEN"); hcloudToken != "" {
 		hcloudAPI := c.hcloudAPIBase()
 		if err := c.requireHTTPS(hcloudAPI, "HCLOUD_API_BASE"); err == nil {
 			auth := withBearer(hcloudToken)
-			keyID := ""
-			if raw, err := c.fetch(ctx, "GET", hcloudAPI+"/v1/ssh_keys?name="+url.QueryEscape("kubehz-claim-"+domain), auth, nil); err == nil {
-				if lv, ok := parseJSON(raw); ok {
-					if keys, ok := jget(lv, "ssh_keys").([]any); ok && len(keys) > 0 {
-						keyID = jstrOr(keys[0], "", "id")
-					}
-				}
-			}
+			keyID, _ := c.findOwnClaimKey(ctx, hcloudAPI, auth, "kubehz-claim-"+domain, domain, "delete")
 			if keyID != "" {
 				_, _ = c.fetch(ctx, "DELETE", hcloudAPI+"/v1/ssh_keys/"+keyID, auth, nil)
 			}

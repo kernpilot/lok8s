@@ -88,7 +88,10 @@ curl_respond() {
     */key) out='[{"key":{"fingerprint":"de:ad:be:ef"}}]' ;;
     */api/clusters/register)
       out='{"id":"cl-1","registered":true,"claimed":true,"claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"aa:bb","name":"kubehz-claim-d.example"}}' ;;
-    */v1/ssh_keys\?name=*) out='{"ssh_keys":[{"id":7}]}' ;;
+    # The claim key of d.example (lok8s.dev/kubehz-claim: the first 32 hex
+    # characters of the domain's SHA-256): register replaces it, deregister
+    # deletes it.
+    */v1/ssh_keys\?name=*) out='{"ssh_keys":[{"id":7,"labels":{"lok8s.dev/kubehz-claim":"4832b62ed035fb411ffefd346ab61e77"}}]}' ;;
     */api/credentials) out='{"data":{"validation":{"writable":true}}}' ;;
     */api/clusters\?perPage=500)
       out='{"ok":true,"data":[{"id":"cl-1","domain":"d.example","createdAt":"2026-01-01T00:00:00Z","status":"active","connected":true}]}' ;;

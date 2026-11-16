@@ -565,6 +565,26 @@ register modes: the direct claim with `KUBEHZ_TOKEN`, the claim key with
   the three modes add up to at most 6 minutes.
 :::
 
+::: details The claim key in a shared Hetzner project
+With `HCLOUD_TOKEN`, the claim key mode uploads the public key that the
+platform mints into your Hetzner Cloud project as `kubehz-claim-<domain>`.
+lo gives the key the label `lok8s.dev/kubehz-claim`. Its value is the first
+32 hex characters of the SHA-256 of the domain.
+
+- A next `lo kubehz register` replaces the key, because the platform mints
+  a new one each time. `lo kubehz deregister` deletes it.
+- Both commands act only on a key with this label and this value. A Hetzner
+  project can be shared, so a key of the same name that a person or another
+  cluster made stays. lo prints a warning that names the key. The register
+  then continues with the fingerprint announce.
+- An older lo uploaded the key without the label. lo cannot tell that key
+  from a key that a person made, so it does not replace or delete it. If an
+  older lo made the key for this cluster, delete it in the Hetzner Console
+  (**Security → SSH keys**), then run `lo kubehz register` again. The old
+  key has no use: the platform does not accept its fingerprint after the
+  next register.
+:::
+
 ::: details Claim before you deploy: the bind secret
 The pre-agent announce also hands back a one-time **bind secret**.
 `lo kubehz register` stores it at `clusters/<domain>/.kubehz-bind` (mode
@@ -888,8 +908,10 @@ afterwards. A hosted cluster always needs the token: the platform creates it
 for your tenant.
 
 Deregistering deletes the platform cluster record and, when `HCLOUD_TOKEN`
-is set, the `kubehz-claim-<domain>` SSH key from your Hetzner Cloud
-account. The in-cluster agents survive. To remove them as well:
+is set, the `kubehz-claim-<domain>` SSH key that lo made for the cluster
+from your Hetzner Cloud project (see
+[the claim key in a shared Hetzner project](#registration)). The in-cluster
+agents survive. To remove them as well:
 
 ```bash
 kubectl delete namespace kubehz-system

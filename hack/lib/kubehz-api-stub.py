@@ -16,9 +16,11 @@ One server for the two sections of the harness that need an api:
   with the cordon and maintenance fields. These routes need the minted
   bearer too (KUBEHZ_TOKEN=parity-jwt).
 - The register cases: POST /api/clusters/register answers one response that
-  fits every register mode and hands out a new bind secret. The Hetzner
-  calls of the claim-key mode (/v1/ssh_keys) get an empty key list and a
-  created key. These routes take any credential. A register body for a
+  fits every register mode and hands out a new bind secret; its claim key
+  name is kubehz-claim-<domain of the body>. The Hetzner calls of the
+  claim-key mode and of deregister (/v1/ssh_keys) get the key that SSH_KEYS
+  holds for the name (none for any other name), a created key, and a
+  deleted key. These routes take any credential. A register body for a
   domain in UNAVAILABLE gets that refusal instead, every time (#312): 503 or
   429 with a Retry-After of zero seconds (so the retries do not wait; "00"
   checks that a leading zero reads as decimal), a 503 without Retry-After,
@@ -41,11 +43,13 @@ Usage: kubehz-api-stub.py <cert.pem> <key.pem> <port-file> <request-log>
 It binds 127.0.0.1 on a free port and writes the port to <port-file>.
 """
 
+import hashlib
 import http.server
 import json
 import os
 import ssl
 import sys
+import urllib.parse
 
 CERT, KEY, PORT_FILE, LOG = sys.argv[1:5]
 TOKEN = "parity-jwt"
@@ -54,6 +58,25 @@ NEXT_BIND = "009c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
 REGISTERED = {"id": "cl-parity", "registered": True, "claimed": True, "bindSecret": NEXT_BIND,
               "claimKey": {"publicKey": "ssh-ed25519 AAAA k", "fingerprint": "aa:bb",
                            "name": "kubehz-claim-bind-reg.dev"}}
+
+
+
+def claim_mark(domain):
+    """The value of the label lok8s.dev/kubehz-claim on the claim key that lo
+    made for a domain: the first 32 hex characters of its SHA-256."""
+    return hashlib.sha256(domain.encode()).hexdigest()[:32]
+
+
+# GET /v1/ssh_keys?name= answers by the key name: the key that lo made for
+# own-key.dev, a key without labels (a person's, or one of an older lo),
+# and a key with the label of another cluster.
+SSH_KEYS = {
+    "kubehz-claim-own-key.dev": {"id": 42, "name": "kubehz-claim-own-key.dev",
+                                 "labels": {"lok8s.dev/kubehz-claim": claim_mark("own-key.dev")}},
+    "kubehz-claim-legacy-key.dev": {"id": 42, "name": "kubehz-claim-legacy-key.dev"},
+    "kubehz-claim-other-key.dev": {"id": 42, "name": "kubehz-claim-other-key.dev",
+                                   "labels": {"lok8s.dev/kubehz-claim": claim_mark("own-key.dev")}},
+}
 
 # POST /api/clusters/register refusals by the domain of the body (#312):
 # (status, Retry-After or None, code).
@@ -318,11 +341,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 status, retry_after, code = busy
                 return self.answer(*refusal(status, code, "The registration limiter is not available"),
                                    {"Retry-After": retry_after} if retry_after is not None else None)
-            return self.answer(200, REGISTERED)
+            domain = body.get("domain") if isinstance(body, dict) else None
+            claim = dict(REGISTERED["claimKey"], name="kubehz-claim-" + str(domain))
+            return self.answer(200, dict(REGISTERED, claimKey=claim))
         if path == "/v1/ssh_keys":
             if self.command == "POST":
                 return self.answer(201, {"ssh_key": {"id": 43}})
-            return self.answer(200, {"ssh_keys": []})
+            name = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("name", [""])[0]
+            key = SSH_KEYS.get(name)
+            return self.answer(200, {"ssh_keys": [key] if key else []})
+        if self.command == "DELETE" and path.startswith("/v1/ssh_keys/"):
+            return self.answer(200, {})
         if auth != "Bearer " + TOKEN:
             return self.answer(*refusal(401, "UNAUTHORIZED", "Invalid or expired agent key",
                                         "The agent key is revoked or expired. Create a new one under Settings -> Agent keys."))
