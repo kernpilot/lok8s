@@ -190,8 +190,8 @@ hetzner::create() {
     # `--without-ipv6=true`, the form cobra takes with no value token). It
     # travels as one "--key=value" token plus an empty placeholder that the
     # consumer below drops. Before this, `true` became `--without-ipv6 true`
-    # and hcloud read the value as a stray argument (2026-09-30, B263: the
-    # crowd's KubeOne workers needed IPv4-only image pulls).
+    # and hcloud read the value as a stray argument. The switch matters for
+    # an IPv4-only server, e.g. a KubeOne worker that pulls images over IPv4.
     # shellcheck disable=2016
     mapfile -t fields < <(hetzner::json -rc \
       --arg what "${what}" \
@@ -241,9 +241,9 @@ hetzner::create() {
     # on the line above. The exit status used to be dropped: a capacity
     # refusal ("error during placement (resource_unavailable)") printed one
     # line and the run walked on into the KubeOne inventory, which reported
-    # ZERO control-plane hosts and hinted at name drift (B248, 2026-09-24,
-    # crowd hour72). Nothing is rolled back: a re-run keeps what exists (the
-    # id check above) and creates the rest.
+    # ZERO control-plane hosts and hinted at name drift. Nothing is rolled
+    # back: a re-run keeps what exists (the id check above) and creates the
+    # rest.
     if ! "${cmd[@]}"; then
       error "hetzner: could not create ${what} '${name}'. Hetzner refused or failed the request; its message is above. For a placement refusal (resource_unavailable), choose another server type or location in the descriptor, or retry later. A re-run keeps what exists and creates the rest."
       return 1

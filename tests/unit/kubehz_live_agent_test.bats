@@ -458,7 +458,7 @@ _stub_kubectl_log() {
   # live agent would beat while the CronJob still did.
   run head -1 "${STUB_KUBECTL_LOG}"
   assert_output --partial "apply -k ${work}/agent"
-  # Line 2 reads the identity Secret (B244); present here, so no bootstrap
+  # Line 2 reads the identity Secret; present here, so no bootstrap
   # job runs and line 3 starts the live agent.
   run sed -n '2p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "get secret kubehz-agent"
@@ -473,7 +473,7 @@ _stub_kubectl_log() {
   assert_output --partial "rollout status deployment/kubehz-live-agent"
 }
 
-@test "apply order (to operator): a first deploy runs the CronJob's bootstrap once and waits for its Job to complete (B244)" {
+@test "apply order (to operator): a first deploy runs the CronJob's bootstrap once and waits for its Job to complete" {
   _source_deploy
   _stub_kubectl_log
   local work="${BATS_TEST_TMPDIR}/a1b"
@@ -521,7 +521,7 @@ _stub_kubectl_log() {
   assert_output "1"
 }
 
-@test "apply order (to operator): an identity Secret that never appears FAILS the deploy before the live agent (B244)" {
+@test "apply order (to operator): an identity Secret that never appears FAILS the deploy before the live agent" {
   _source_deploy
   _stub_kubectl_log
   local work="${BATS_TEST_TMPDIR}/a1c"
@@ -549,7 +549,7 @@ _stub_kubectl_log() {
   assert_output "0"
 }
 
-@test "apply order (to operator): a Secret probe that exits without output names the exit status (B244)" {
+@test "apply order (to operator): a Secret probe that exits without output names the exit status" {
   _source_deploy
   _stub_kubectl_log
   local work="${BATS_TEST_TMPDIR}/a1f"
@@ -572,7 +572,7 @@ _stub_kubectl_log() {
   assert_output "0"
 }
 
-@test "apply order (to operator): a Secret read that fails for any reason but NotFound STOPS the deploy without a bootstrap (B244)" {
+@test "apply order (to operator): a Secret read that fails for any reason but NotFound STOPS the deploy without a bootstrap" {
   _source_deploy
   _stub_kubectl_log
   local work="${BATS_TEST_TMPDIR}/a1d"
@@ -599,7 +599,7 @@ _stub_kubectl_log() {
   assert_output "0"
 }
 
-@test "apply order (to operator): a NotFound behind a warning line still runs the bootstrap (B244)" {
+@test "apply order (to operator): a NotFound behind a warning line still runs the bootstrap" {
   _source_deploy
   _stub_kubectl_log
   local work="${BATS_TEST_TMPDIR}/a1e"
@@ -1038,7 +1038,7 @@ AGENT_IMAGE="ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8
   run kubehz::deploy_apply "${work}" acme.example.com operator managed
   assert_success
   assert_output --partial "could not check for an in-flight heartbeat pod"
-  # Line 2 reads the identity Secret (B244); the live agent follows on line 3.
+  # Line 2 reads the identity Secret; the live agent follows on line 3.
   run sed -n '3p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "apply -k ${work}/live-agent/managed"
 }
@@ -1431,7 +1431,7 @@ _podspec() {
     assert_line "containers.0.resources.limits.cpu=200m"
     assert_line "containers.0.resources.limits.memory=256Mi"
 
-    # Scheduling (B242): a control-plane-only cluster runs the agent on its
+    # Scheduling: a control-plane-only cluster runs the agent on its
     # control plane; with workers present the agent prefers one of them.
     assert_line "tolerations.0.key=node-role.kubernetes.io/control-plane"
     assert_line "tolerations.0.operator=Exists"
@@ -1490,7 +1490,7 @@ _podspec() {
   assert_success
 }
 
-# ── stage_bind_secret (B243, B288) ───────────────────────
+# ── stage_bind_secret ────────────────────────────────────
 
 BIND_SECRET_VALUE="9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
 BIND_MANIFEST='kind: Secret
@@ -1553,7 +1553,7 @@ _assert_bind_staged_first() {
   assert_output "0"
 }
 
-@test "apply order (to operator): the bind secret is staged BEFORE the CronJob agent and the identity bootstrap (B288)" {
+@test "apply order (to operator): the bind secret is staged BEFORE the CronJob agent and the identity bootstrap" {
   _source_deploy
   _stub_kubectl_bind
   local work="${BATS_TEST_TMPDIR}/bind1"
@@ -1569,7 +1569,7 @@ _assert_bind_staged_first() {
   assert_output --partial "get secret kubehz-agent "
 }
 
-@test "apply order (to cronjob): the bind secret is staged BEFORE the live agent goes and the CronJob agent returns (B288)" {
+@test "apply order (to cronjob): the bind secret is staged BEFORE the live agent goes and the CronJob agent returns" {
   _source_deploy
   _stub_kubectl_bind
   local work="${BATS_TEST_TMPDIR}/bind2"
@@ -1584,7 +1584,7 @@ _assert_bind_staged_first() {
   assert_output --partial "apply -k ${work}/agent"
 }
 
-@test "stage_bind_secret: a failed stage with a bind secret on disk stops before the CronJob agent, in both directions (B288)" {
+@test "stage_bind_secret: a failed stage with a bind secret on disk stops before the CronJob agent, in both directions" {
   _source_deploy
   _write_bind_secret
   local mode owner access step work n=0

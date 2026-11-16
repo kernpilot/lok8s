@@ -263,8 +263,8 @@ func refuseNonHTTPSRedirect(req *http.Request, via []*http.Request) error {
 // tarball is ~5 MB; the binary inside ~15 MB). A var so a test can lower it.
 var maxTarballBytes int64 = 256 << 20
 
-// The download retries a transient failure (B410: one dial timeout on a
-// fresh VM failed a whole `lo toolchain install`). downloadBackoff is the
+// The download retries a transient failure (one dial timeout on a fresh VM
+// must not fail a whole `lo toolchain install`). downloadBackoff is the
 // wait before each retry, so there are len(downloadBackoff)+1 attempts.
 var downloadBackoff = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
 

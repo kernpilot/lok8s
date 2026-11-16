@@ -338,7 +338,7 @@ kubehz::get_ssh_fingerprint() {
 # cluster's label lok8s.dev/kubehz-claim (kubehz::claim_key_own). Fail-soft:
 # any failure returns 1 and the caller falls back to the legacy fingerprint
 # announce.
-# Store the announce's one-time bind secret (B243) at
+# Store the announce's one-time bind secret at
 # ${PATH_CLUSTERS}/<domain>/.kubehz-bind (0600, no trailing newline: the deploy
 # and every later register read the exact 64 hex). An empty secret writes
 # nothing: an api without bind secrets sends none. The write happens in place
@@ -348,7 +348,7 @@ kubehz::get_ssh_fingerprint() {
 # secret in a file that .gitignore does not match. A directory, or a link to
 # one, is never replaced. A write failure warns but never fails the register.
 # The deploy then finds no bind secret, and the agent registers a separate
-# pending row that the user claims by its claim code (B288).
+# pending row that the user claims by its claim code.
 #
 # noclobber refuses an existing regular file, and a link to nothing, but it
 # writes through a link to an existing FIFO or device. A link put in the slot
@@ -388,7 +388,7 @@ kubehz::bind_secret_ok() {
 
 # Print the JSON body of a register call: the object that <filter> builds
 # from the jq arguments, plus bindSecret when clusters/<domain>/.kubehz-bind
-# passes kubehz::bind_secret_ok. Every register call sends it (B289), so a
+# passes kubehz::bind_secret_ok. Every register call sends it, so a
 # re-run keeps the same cluster record. Any other file adds nothing: the api
 # refuses a malformed value. jq reads the value from the file (--rawfile) and
 # checks it again where it uses it, and the caller pipes the body into curl
@@ -584,7 +584,8 @@ kubehz::ensure_claim_key() {
   fingerprint=$(jq -r '.claimKey.fingerprint // empty' <<<"${response}")
   key_name=$(jq -r '.claimKey.name // empty' <<<"${response}")
   [[ -n "${cluster_id}" && -n "${public_key}" && -n "${fingerprint}" && -n "${key_name}" ]] || return 1
-  # The announce hands out a one-time bind secret (B243); keep it for the deploy.
+  # The announce hands out a one-time bind secret; keep it for the deploy.
+  # The agent sends it on its register, so the api adopts this row.
   kubehz::persist_bind_secret "${domain}" "$(jq -r '.bindSecret // empty' <<<"${response}")"
 
   # Replace by name, but only our own key: the API rotates the fingerprint on
@@ -667,7 +668,8 @@ kubehz::direct_claim() {
     warn "kubehz register did not attribute ${domain} to your tenant (is KUBEHZ_TOKEN a clusters:write token?)"
     return 1
   fi
-  # The announce hands out a one-time bind secret (B243); keep it for the deploy.
+  # The announce hands out a one-time bind secret; keep it for the deploy.
+  # The agent sends it on its register, so the api adopts this row.
   kubehz::persist_bind_secret "${domain}" "$(jq -r '.bindSecret // empty' <<<"${response}")"
   echo "kubehz: cluster '${domain}' registered and claimed to your account (${cluster_id})."
 
@@ -796,7 +798,8 @@ kubehz::register_cluster() {
     warn "kubehz registration returned no cluster id, cluster will continue without kubehz integration"
     return 0
   fi
-  # The announce hands out a one-time bind secret (B243); keep it for the deploy.
+  # The announce hands out a one-time bind secret; keep it for the deploy.
+  # The agent sends it on its register, so the api adopts this row.
   kubehz::persist_bind_secret "${domain}" "$(jq -r '.bindSecret // empty' <<<"${response}")"
 
   debug "Cluster registered with kubehz (pending claim): ${cluster_id}"

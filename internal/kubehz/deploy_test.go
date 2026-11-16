@@ -166,8 +166,8 @@ func TestDeployApplyToOperatorOrder(t *testing.T) {
 		t.Fatalf("calls: %v", *log)
 	}
 	mustContain(t, (*log)[0], "apply -k "+filepath.Join(work, "agent"))
-	// The identity Secret is read between the two applies (B244): present
-	// here, so no bootstrap job runs.
+	// The identity Secret is read between the two applies (the live agent
+	// mounts it): present here, so no bootstrap job runs.
 	mustContain(t, (*log)[1], "get secret kubehz-agent")
 	mustContain(t, (*log)[2], "apply -k "+filepath.Join(work, "live-agent", "managed"))
 	mustContain(t, (*log)[3], "rollout status deployment/kubehz-live-agent")
@@ -248,7 +248,7 @@ func assertBindStagedFirst(t *testing.T, h *harness, log []string, work, path, f
 	}
 }
 
-// B243 + B288: with a bind secret on disk, the operator deploy stages it
+// With a bind secret on disk, the operator deploy stages it
 // before the CronJob agent apply, so neither a CronJob tick nor the identity
 // bootstrap Job can register without it.
 func TestDeployApplyStagesTheBindSecretOperator(t *testing.T) {
@@ -264,7 +264,7 @@ func TestDeployApplyStagesTheBindSecretOperator(t *testing.T) {
 	mustNotContain(t, h.output(), "no bind secret")
 }
 
-// B243 + B288: cronjob mode stages it before anything else too: before the
+// Cronjob mode stages it before anything else too: before the
 // live agent goes and before the CronJob agent apply.
 func TestDeployApplyStagesTheBindSecretCronjob(t *testing.T) {
 	h := newHarness(t)
@@ -278,7 +278,7 @@ func TestDeployApplyStagesTheBindSecretCronjob(t *testing.T) {
 	}
 }
 
-// B288: a failed stage with a bind secret on disk stops the deploy before the
+// A failed stage with a bind secret on disk stops the deploy before the
 // CronJob agent, in both directions and at each of the three steps. A CronJob
 // without the Secret registers a separate pending row.
 func TestDeployApplyFailedBindStageStopsBeforeTheCronJob(t *testing.T) {
@@ -401,7 +401,7 @@ func mustWrite(t *testing.T, path, content string, mode os.FileMode) {
 	}
 }
 
-// B244: a first deploy finds no identity Secret. The deploy runs the
+// A first deploy finds no identity Secret. The deploy runs the
 // CronJob's bootstrap once, waits for its Job to complete, removes the one-off job,
 // and only then applies the live agent.
 func TestDeployApplyBootstrapsTheIdentitySecret(t *testing.T) {

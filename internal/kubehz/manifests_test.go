@@ -98,7 +98,7 @@ func contains(s, sub string) bool {
 	return false
 }
 
-// B242: a self-hosted cluster can be control-plane-only, or its workers can
+// A self-hosted cluster can be control-plane-only, or its workers can
 // join after the deploy; both agent pods must tolerate the control-plane
 // taint or the cluster reports nothing. The manifests are parsed and the
 // tolerations read at the pod spec, so a block that is commented out, or

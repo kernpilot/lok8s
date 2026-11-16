@@ -109,7 +109,7 @@ func TestDirectClaimNonClaimedFails(t *testing.T) {
 	mustErr(t, h.ctx.directClaim(t.Context(), &Config{}, "test.kubehz.dev", loSpec(h), h.apiURL()))
 }
 
-// ── bind secret (B243) ───────────────────────────────────
+// ── bind secret ──────────────────────────────────────────
 
 const bindSecretFixture = "9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
 
@@ -340,7 +340,7 @@ func TestStoredBindSecretIgnoresAFIFO(t *testing.T) {
 	}
 }
 
-// B289: every register mode sends the stored bind secret, so a re-run keeps
+// Every register mode sends the stored bind secret, so a re-run keeps
 // the same cluster record, and stores the one the response hands out.
 func TestRegisterModesSendTheStoredBindSecret(t *testing.T) {
 	next := "00" + bindSecretFixture[2:]
@@ -362,7 +362,7 @@ func TestRegisterModesSendTheStoredBindSecret(t *testing.T) {
 	}
 }
 
-// B289: a missing, irregular or malformed stored value adds no bindSecret
+// A missing, irregular or malformed stored value adds no bindSecret
 // (the api refuses a malformed one).
 func TestRegisterModesOmitAnUnusableBindSecret(t *testing.T) {
 	stored := map[string]string{

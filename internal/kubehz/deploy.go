@@ -268,7 +268,7 @@ func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, acces
 	agentDir := filepath.Join(workdir, "agent")
 
 	// 0. The bind secret before anything else, in both directions: every
-	// CronJob pod that starts without it registers without it (B288).
+	// CronJob pod that starts without it registers a separate pending row.
 	staged, err := c.stageBindSecret(ctx, workdir, domain)
 	if err != nil {
 		return err
@@ -290,7 +290,7 @@ func (c *Context) deployApply(ctx context.Context, workdir, domain, owner, acces
 		// 2b. The identity Secret. The live agent mounts kubehz-agent, which only
 		// the CronJob's bootstrap creates, on its next five-minute tick; a first
 		// deploy that waits for the rollout alone loses that race about half
-		// the time (B244). Run the bootstrap now and wait for its Job to complete.
+		// the time. Run the bootstrap now and wait for its Job to complete.
 		if err := c.ensureIdentitySecret(ctx); err != nil {
 			return err
 		}
@@ -438,12 +438,12 @@ func imageRegistry(image string) string {
 	return host
 }
 
-// stageBindSecret puts the one-time bind secret (B243) from
+// stageBindSecret puts the one-time bind secret from
 // clusters/<domain>/.kubehz-bind into the Secret
 // kubehz-system/kubehz-agent-bind, and reports whether it did. The CronJob's
 // bootstrap reads it (the optional env BIND_SECRET) and sends it on
-// agent-register. The api adopts the announced row only with this secret
-// (B288): a register without it gets a separate pending row, and every later
+// agent-register. The api adopts the announced row only with this secret:
+// a register without it gets a separate pending row, and every later
 // tick keeps that row. So the Secret must exist before the first CronJob pod
 // starts, and a failed stage stops the deploy before the CronJob agent.
 //

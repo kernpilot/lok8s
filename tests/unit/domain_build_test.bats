@@ -278,7 +278,7 @@ YAML
   # artifacts.yaml. Counting only the single file waved the empty render
   # through: artifacts.yaml got zeroed, artifacts/ was left stale disagreeing
   # with it, and the build then failed downstream with "build first" —
-  # immediately after a build (AUDIT.md r303).
+  # immediately after a build.
   mkdir -p "${DOMAIN_DIR}/artifacts"
   cat > "${DOMAIN_DIR}/artifacts/Namespace.keep-me.yaml" <<'YAML'
 apiVersion: v1

@@ -259,21 +259,20 @@ func (c *Context) clusterYAMLPath(domain string) string {
 }
 
 // bindSecretPath is ${PATH_CLUSTERS}/<domain>/.kubehz-bind — the one-time
-// bind secret (B243) a register wrote, that `lo kubehz deploy` hands to the
+// bind secret a register wrote, that `lo kubehz deploy` hands to the
 // in-cluster agent to ADOPT the announced row instead of minting a sibling.
 func (c *Context) bindSecretPath(domain string) string {
 	return c.Paths.Clusters + "/" + domain + "/.kubehz-bind"
 }
 
-// persistBindSecret stores the announce's one-time bind secret (B243) at
+// persistBindSecret stores the announce's one-time bind secret at
 // bindSecretPath, mode 0600, with NO trailing newline (the deploy and every
 // later register read the exact 64 hex). An empty secret writes nothing: an
 // api without bind secrets sends none. The write happens in place under the
 // ignored name (createBindSecret), so no state of the write leaves the secret
 // in a file that .gitignore does not match. A write failure warns but never
 // fails the register. The deploy then finds no bind secret, and the agent
-// registers a separate pending row that the user claims by its claim code
-// (B288).
+// registers a separate pending row that the user claims by its claim code.
 func (c *Context) persistBindSecret(domain, secret string) {
 	if secret == "" {
 		return
@@ -329,7 +328,7 @@ var bindSecretRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // storedBindSecret is the bind secret a previous register stored at
 // bindSecretPath: a readable regular file of exactly 64 lowercase hex
 // characters. A missing, unreadable, irregular or malformed file gives "".
-// Every register call sends the value as bindSecret (B289), so a re-run
+// Every register call sends the value as bindSecret, so a re-run
 // keeps the same cluster record, and the deploy stages only this value. The
 // api refuses a malformed value, so lo never sends one.
 //

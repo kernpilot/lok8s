@@ -223,9 +223,8 @@ metadata:
 # `recreate` re-applies from the rendered artifact, which carries the DECLARED
 # image ref. Under Tilt the running object carries Tilt's built-and-pushed ref —
 # injection happens on Tilt's deploy path, not in the YAML — so re-applying the
-# declared ref points the workload at an image nobody pushed. Measured on
-# kubehz-api-migrate, whose DB migration had been blocked since the hook last
-# fired (visual-audit r251).
+# declared ref points the workload at an image nobody pushed. Measured on a
+# DB migration Job: after the hook fired, the migration stayed blocked.
 
 @test "_overlay_images: replaces the declared ref with the live one, by container name" {
   run hooks::_overlay_images '[{"name":"migrate","image":"reg/lok8s.local_kubehz-api-migrate:tilt-abc"}]' <<'YAML'
@@ -313,8 +312,8 @@ YAML
 
 # ── Tilt owns the recreate when Tilt owns the objects ────────────────────────
 # Preserving live image refs only helps while something is running; a completed,
-# cleaned-up Job has nothing to preserve and the raw ref ships anyway (measured,
-# kubehz-cluster AUDIT.md r260). Tilt knows the real ref in both cases.
+# cleaned-up Job has nothing to preserve and the raw ref ships anyway
+# (measured). Tilt knows the real ref in both cases.
 
 @test "_object_names: one metadata.name per document" {
   run hooks::_object_names "$(cat <<'YAML'

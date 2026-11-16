@@ -356,7 +356,8 @@ spec:
     apiUrl: https://api.kubehz.example
 EOF
 # bind-cron.dev / bind-op.dev — a register stored a bind secret: the deploy
-# stages it before it changes an agent, in both directions (B288).
+# stages it before it changes an agent, in both directions, so no agent
+# registers without it.
 mk bind-cron.dev <<'EOF'
 kind: KubeOne
 spec:
@@ -455,7 +456,7 @@ check - kubehz deploy --domain lo-hosted.dev
 check - kubehz deploy --domain kubehz-self.dev
 check "${PARSEERR}" kubehz deploy --domain broken.dev
 
-# ── deploy: the bind secret goes in before an agent changes (B288) ──────────
+# ── deploy: the bind secret goes in before an agent changes ────────────────
 # A kubectl that names each call on stderr, answers the three staging calls
 # and the dry-run render, and fails the first call after them. The diff then
 # covers the staging calls, the stdin of the server-side apply and the first
@@ -1070,7 +1071,7 @@ EOF
   unset SSL_CERT_FILE CURL_CA_BUNDLE KUBEHZ_TOKEN
 fi
 
-# ── register: lo sends its stored bind secret (B289) ────────────────────────
+# ── register: lo sends its stored bind secret ──────────────────────────────
 # Every register mode sends the value of .kubehz-bind as bindSecret, so a
 # re-run keeps the same cluster record. These cases need an api, so they run
 # against the https stub (see its section above). After each run, the

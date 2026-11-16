@@ -741,7 +741,7 @@ EOF
   assert_output --partial "READ-ONLY"
 }
 
-# ── register_cluster: stores the announce's bind secret (B243) ───────────
+# ── register_cluster: stores the announce's bind secret ──────────────────
 
 @test "register_cluster: stores the announce bind secret at clusters/<domain>/.kubehz-bind (0600, no newline)" {
   yq() {
@@ -816,7 +816,7 @@ EOF
   assert [ ! -f "${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind" ]
 }
 
-# ── register: sends the stored bind secret (B289) ───────────────────────
+# ── register: sends the stored bind secret ──────────────────────────────
 
 BIND_STORED="9f1c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
 BIND_NEXT="009c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
@@ -879,7 +879,7 @@ _register_base() {
   esac
 }
 
-@test "register: every mode sends the stored bind secret in the body, never on argv, and stores the new one (B289)" {
+@test "register: every mode sends the stored bind secret in the body, never on argv, and stores the new one" {
   local mode bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
   for mode in legacy bearer claim-key; do
     _register_sandbox "${BIND_NEXT}"
@@ -902,7 +902,7 @@ ${STUB_JQ_ARGV}:0"
   done
 }
 
-@test "register: a missing, irregular or malformed stored bind secret adds no bindSecret (B289)" {
+@test "register: a missing, irregular or malformed stored bind secret adds no bindSecret" {
   local mode stored bind_file="${PATH_CLUSTERS}/test.kubehz.dev/.kubehz-bind"
   for mode in legacy bearer claim-key; do
     for stored in missing directory unreadable upper short short-newline newline not-hex oversized; do

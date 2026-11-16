@@ -1,7 +1,7 @@
 package kubehz
 
-// agentscript_test.go: B423. The heartbeat CronJob runs kubectl in its pod
-// on the in-cluster config. A kubectl client-config flag (--request-timeout,
+// agentscript_test.go: the heartbeat CronJob runs kubectl in its pod on the
+// in-cluster config. A kubectl client-config flag (--request-timeout,
 // --server, --kubeconfig, --context, --token, ...) makes kubectl skip that
 // config and dial localhost:8080, so the call always fails in the pod. This
 // was proven on prod with the same image, service account and labels. The
@@ -227,8 +227,7 @@ func TestKubectlCallsSeesAFlagOnAContinuedLine(t *testing.T) {
 }
 
 // TestAgentKubectlCallsCarryNoClientConfigFlag: no kubectl call in any
-// container script of the embedded manifests sets a client-config flag
-// (B423).
+// container script of the embedded manifests sets a client-config flag.
 func TestAgentKubectlCallsCarryNoClientConfigFlag(t *testing.T) {
 	t.Parallel()
 	total := 0
@@ -237,7 +236,7 @@ func TestAgentKubectlCallsCarryNoClientConfigFlag(t *testing.T) {
 			total++
 			for _, a := range c.args {
 				if f := clientConfigFlag(a); f != "" {
-					t.Errorf("%s: script line %d: kubectl %s sets %s. In the pod that skips the in-cluster config and dials localhost:8080; bound the call with `timeout 5 kubectl ...` (B423)",
+					t.Errorf("%s: script line %d: kubectl %s sets %s. In the pod that skips the in-cluster config and dials localhost:8080; bound the call with `timeout 5 kubectl ...`",
 						file, c.line, strings.Join(c.args, " "), f)
 				}
 			}
@@ -252,7 +251,7 @@ func TestAgentKubectlCallsCarryNoClientConfigFlag(t *testing.T) {
 
 // TestAgentProbesAreBoundedByTimeout: the marker read and every assessment
 // probe stay bounded in time, with `timeout <seconds>` (the syntax that
-// busybox and coreutils both accept), not with a kubectl flag (B423).
+// busybox and coreutils both accept), not with a kubectl flag.
 func TestAgentProbesAreBoundedByTimeout(t *testing.T) {
 	t.Parallel()
 	script := heartbeatScript(t)
@@ -343,7 +342,7 @@ func TestRuntimeLoopsFindsOnlyRuntimeSizedLoops(t *testing.T) {
 	}
 }
 
-// TestHeartbeatKubectlCallsDoNotGrowWithTheCluster (B448): a kubectl call
+// TestHeartbeatKubectlCallsDoNotGrowWithTheCluster: a kubectl call
 // takes ~1.5 s on prod. The heartbeat made 3 calls per node, so at ~18 nodes
 // the tick ran past activeDeadlineSeconds (120 s) and the job was killed
 // before the POST. The node list must be one call, no call may read a
@@ -359,11 +358,11 @@ func TestHeartbeatKubectlCallsDoNotGrowWithTheCluster(t *testing.T) {
 			nodeLists++
 		}
 		if readsOneNode(c.args) {
-			t.Errorf("script line %d: kubectl %s reads one node; a call per node grows with the cluster (B448)", c.line, joined)
+			t.Errorf("script line %d: kubectl %s reads one node; a call per node grows with the cluster", c.line, joined)
 		}
 		for _, l := range loops {
 			if c.line >= l[0] && c.line <= l[1] {
-				t.Errorf("script line %d: kubectl %s runs in the loop at lines %d-%d; the call count grows with the cluster (B448)", c.line, joined, l[0], l[1])
+				t.Errorf("script line %d: kubectl %s runs in the loop at lines %d-%d; the call count grows with the cluster", c.line, joined, l[0], l[1])
 			}
 		}
 	}

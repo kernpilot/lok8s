@@ -24,7 +24,7 @@ setup() {
   # `import` is stubbed above, so anything the provider imports must be sourced
   # here explicitly. utils/template supplies template::descriptor_json, which
   # replaced the envsubst/yq BINARY calls the provider used to make — a shell
-  # function needs loading where a binary did not (AUDIT.md r329).
+  # function needs loading where a binary did not.
   source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
   # The Robot calls write their config with http::curl_config.
   source "${_PROJECT_ROOT}/.lok8s/utils/http.sh"
@@ -444,8 +444,8 @@ JSON
   refute_output --partial "installimage -a"
 }
 
-# ── B248: a failed create stops the provision with Hetzner's reason ────────────
-# crowd hour72 (2026-09-24): `hcloud server create` answered "error during
+# ── a failed create stops the provision with Hetzner's reason ──────────────────
+# A capacity refusal: `hcloud server create` answered "error during
 # placement (resource_unavailable)", the exit status was dropped, and the run
 # walked on into the KubeOne inventory, which then blamed name drift.
 
@@ -488,7 +488,7 @@ JSON
   assert_output "1"
 }
 
-# ── boolean descriptor keys (B263, 2026-09-30) ───────────────────
+# ── boolean descriptor keys ───────────────────────────────────────
 # A boolean value is a bare hcloud switch. `without-ipv6: true` used to become
 # `--without-ipv6 true`, which hcloud read as a stray argument; it is one
 # `--without-ipv6=true` token now, and `false` stays explicit.
