@@ -158,13 +158,17 @@ provider::provision() {
   # gated explicitly: callers invoke provision under `|| return 1`, which
   # turns errexit OFF inside this body — unguarded, a failed `hcloud create`
   # is swallowed and provision reports success.
-  local step
-  for step in lookup ssh-key floating-ip network load-balancer server volume; do
-    "hetzner::${step}" || { error "hetzner ${step} failed"; return 1; }
-  done
+  local rc=0
+  hetzner::_run_steps || rc=1
 
-  # Dump result state (destroy's fallback name source — a failed dump is an error)
+  # Dump the state: the descriptor with the ids that this run knows. Also
+  # after a failed step: it holds the ids known so far. A failed dump is an
+  # error.
   hetzner::json '.' > "${work_dir}/hetzner.dump.json" || { error "hetzner state dump failed"; return 1; }
+  if (( rc != 0 )); then
+    error "hetzner: the ids that this run knows are in ${work_dir}/hetzner.dump.json."
+    return 1
+  fi
   debug "hetzner provision complete"
 }
 
@@ -178,7 +182,7 @@ hetzner::_destroy_cluster_name() {
   local config_file="${1}" cluster_name=""
   cluster_name=$(_cfg '.cluster_name // ""' 2>/dev/null || echo "")
   [[ -n "${cluster_name}" ]] || {
-    error "hetzner: the descriptor ${config_file} has no cluster_name. The destroy deletes every resource that carries lok8s.dev/cluster=<cluster_name>, so it needs the name. Nothing was deleted. Set cluster_name in the descriptor."
+    error "hetzner: the descriptor ${config_file} has no cluster_name. The destroy finds its resources by lok8s.dev/cluster=<cluster_name> and the owner mark, so it needs the name. Nothing was deleted. Set cluster_name in the descriptor."
     return 1
   }
   echo "${cluster_name}"
@@ -189,17 +193,45 @@ _HETZNER_DESTROY_ORDER=(load-balancer server placement-group firewall volume flo
 
 # hetzner::_destroy_resources <cluster_name>
 # One "<resource>\t<id>\t<name>" line per hcloud resource that carries
-# lok8s.dev/cluster=<cluster_name>, in the order provider::destroy deletes
-# them. READ-ONLY. A list that fails stops it (rc 1): an empty list must
-# mean "no resource", never "hcloud did not answer".
+# lok8s.dev/cluster=<cluster_name> AND the owner mark of this cluster
+# (hetzner::owner_mark), in the order provider::destroy deletes them.
+# READ-ONLY. A resource with the cluster label and no mark, or the mark of
+# another cluster, is not listed: a warning on stderr names it, says why and
+# gives the one-time command that marks it. Two domains with the same
+# cluster_name in one Hetzner project have two marks, so the destroy of one
+# never lists the parts of the other. A list that fails, or a mark that
+# cannot be calculated, stops it (rc 1): an empty list must mean "no
+# resource", never "hcloud did not answer".
 hetzner::_destroy_resources() {
-  local selector="lok8s.dev/cluster=${1}" resource json
+  local cluster="${1}" key="${_HETZNER_OWNER_KEY}" selector="lok8s.dev/cluster=${1}"
+  local mark resource json kept skipped line rid rmark rname
+  mark="$(hetzner::owner_mark "${cluster}")" || return 1
   for resource in "${_HETZNER_DESTROY_ORDER[@]}"; do
+    # Two passes over one list: the parts with the mark, and the others as
+    # "<id>\t<mark>\t<name>" (the mark is empty when the part has none).
     if ! json="$(hcloud "${resource}" list -o json -l "${selector}")" ||
-       ! jq -r --arg r "${resource}" '(. // [])[] | [$r, (.id | tostring), (.name // "")] | @tsv' <<<"${json}"; then
+       ! kept="$(jq -r --arg r "${resource}" --arg key "${key}" --arg mark "${mark}" '
+           (. // [])[] | select(((.labels // {})[$key] // "") == $mark)
+           | [$r, (.id | tostring), (.name // "")] | @tsv' <<<"${json}")" ||
+       ! skipped="$(jq -r --arg key "${key}" --arg mark "${mark}" '
+           (. // [])[] | ((.labels // {})[$key] // "") as $m | select($m != $mark)
+           | [(.id | tostring), $m, (.name // "")] | @tsv' <<<"${json}")"; then
       error "hetzner: could not list the ${resource} resources with ${selector}. Nothing was deleted. Check the hcloud token and the API, then run the destroy again."
       return 1
     fi
+    [[ -z "${kept}" ]] || printf '%s\n' "${kept}"
+    # Split at each tab by hand: `IFS=$'\t' read` joins two tabs, and an
+    # empty mark would shift the name into it.
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      rid="${line%%$'\t'*}" line="${line#*$'\t'}"
+      rmark="${line%%$'\t'*}" rname="${line#*$'\t'}"
+      if [[ -z "${rmark}" ]]; then
+        warn "hetzner: skipped ${resource} ${rid} ${rname}: it has lok8s.dev/cluster=${cluster}, but not the owner mark of this cluster (${key}=${mark}). lok8s does not delete a part that can belong to another person or cluster. If it is a part of this cluster (an older lok8s made it), first make sure that id ${rid} is yours ('hcloud ${resource} describe ${rid}'), then mark it one time: hcloud ${resource} add-label ${rid} ${key}=${mark}. Then run lo destroy again, or delete it yourself."
+      else
+        warn "hetzner: skipped ${resource} ${rid} ${rname}: it has lok8s.dev/cluster=${cluster}, but the owner mark of another cluster (${key}=${rmark}; this cluster: ${mark}). lok8s does not delete it. Replace the mark only when you know that the mark ${rmark} is yours (for example, the mark of this cluster under its old domain; the guide shows how to calculate it): hcloud ${resource} add-label --overwrite ${rid} ${key}=${mark}."
+      fi
+    done <<<"${skipped}"
   done
 }
 
@@ -256,7 +288,7 @@ hetzner::_confirmed_rows() {
     if [[ -n "${live[${key}]:-}" ]]; then
       rows+="${live[${key}]}"$'\n'
     else
-      warn "hetzner: skipped ${kind} ${rid} of the confirmed plan: no ${kind} with this id carries lok8s.dev/cluster=${cluster_name} now. It is gone, or it is not of this cluster."
+      warn "hetzner: skipped ${kind} ${rid} of the confirmed plan: no ${kind} with this id carries lok8s.dev/cluster=${cluster_name} and the owner mark of this cluster now. It is gone, or it is not of this cluster."
     fi
   done <<<"${LOK8S_DESTROY_PLAN}"
 
@@ -281,8 +313,9 @@ provider::destroy() {
   cluster_name="$(hetzner::_destroy_cluster_name "${config_file}")" || return 1
   debug "destroying hetzner resources for ${cluster_name}"
 
-  # The live list: what carries lok8s.dev/cluster=<cluster_name> now. Every
-  # delete below is in it. A list that fails stops the destroy.
+  # The live list: what carries lok8s.dev/cluster=<cluster_name> and the
+  # owner mark of this cluster now. Every delete below is in it. A list that
+  # fails, or a mark that cannot be calculated, stops the destroy.
   listed="$(hetzner::_destroy_resources "${cluster_name}")" || return 1
 
   if [[ -n "${LOK8S_DESTROY_PLAN:-}" ]]; then
@@ -291,7 +324,7 @@ provider::destroy() {
     # live list can differ. The plan is checked line by line, because the
     # variable comes from the environment: an allowed type and a numeric id
     # only, else nothing is deleted. A plan id that is not in the live list
-    # is not deleted (it is gone, or it does not carry the label); a live
+    # is not deleted (it is gone, or it lost the label or the mark); a live
     # resource that is not in the plan stays.
     hetzner::_confirmed_rows "${cluster_name}" "${listed}" || return 1
     rows="${_HETZNER_CONFIRMED_ROWS}"
@@ -316,12 +349,16 @@ provider::destroy() {
 # provider::destroy_plan <config_file> <work_dir>
 #   READ-ONLY. What provider::destroy would delete. Line 1 is
 #   "cluster<TAB><cluster_name>", then one "<resource><TAB><id><TAB><name>"
-#   line per resource. provider::destroy deletes EVERY resource in the
-#   token's project that carries lok8s.dev/cluster=<cluster_name>, so
-#   `lo destroy` shows this list, refuses a cluster_name that another domain
-#   also uses, and asks for the cluster_name before it deletes anything. The
+#   line per resource. provider::destroy deletes each resource in the
+#   token's project that carries lok8s.dev/cluster=<cluster_name> and the
+#   owner mark of this cluster, so `lo destroy` shows this list, refuses a
+#   cluster_name that another domain also uses, and asks for the
+#   cluster_name before it deletes anything. A resource with the cluster
+#   label and without this mark is not in the list: a warning on stderr
+#   shows it as skipped, with the reason and the command that marks it. The
 #   confirmed plan comes back to provider::destroy in LOK8S_DESTROY_PLAN.
-#   Fails (rc 1) when the descriptor has no cluster_name or a list fails.
+#   Fails (rc 1) when the descriptor has no cluster_name, the mark cannot be
+#   calculated or a list fails.
 provider::destroy_plan() {
   local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
   export PROVIDER_CONFIG_FILE="${config_file}"
@@ -339,24 +376,48 @@ provider::output() {
   local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
   export PROVIDER_CONFIG_FILE="${config_file}"
 
-  local cluster_name ssh_user
-  cluster_name=$(_cfg '.cluster_name // ""')
+  # The envsubst'd descriptor: the cluster_name that the create loop used for
+  # the owner mark (the raw file can hold a ${VAR}).
+  local desc cluster_name ssh_user mark
+  desc="$(template::descriptor_json "${config_file}")" || return 1
+  cluster_name="$(jq -r '.cluster_name // ""' <<<"${desc}")"
+  mark="$(hetzner::owner_mark "${cluster_name}")" || return 1
   ssh_user=$(_cfg '.sshUser // .cloudInit.user // "root"')
 
-  local selector="lok8s.dev/cluster=${cluster_name}"
-
-  local servers_json lb_json net_json
-  servers_json=$(hcloud server list -o json -l "${selector}")
-  lb_json=$(hcloud load-balancer list -o json -l "${selector}")
-  # Networks aren't created with the cluster label, so the label lookup
-  # returns nothing → the CCM never gets the network ID → node init hangs.
-  # Look the network up by its descriptor NAME instead (unique per project).
-  local net_name_desc
-  net_name_desc=$(_cfg '.network[0].name // ""' 2>/dev/null || echo "")
-  net_json=$(hcloud network list -o json -l "${selector}")
-  if [[ "$(echo "${net_json}" | jq 'length' 2>/dev/null || echo 0)" == "0" && -n "${net_name_desc}" ]]; then
-    net_json=$(hcloud network list -o json | jq --arg n "${net_name_desc}" '[.[] | select(.name == $n)]')
+  # The inventory holds only the parts with the owner mark of this cluster.
+  # The cluster label alone is not enough: a part of another person or
+  # cluster can carry it, and it would become the API endpoint, the private
+  # network of the CCM or a host. Each list is checked again in jq.
+  local key="${_HETZNER_OWNER_KEY}" cluster_sel="lok8s.dev/cluster=${cluster_name}"
+  local servers_json lb_json net_json declared_json
+  if ! servers_json=$(hcloud server list -o json -l "${cluster_sel}") ||
+     ! lb_json=$(hcloud load-balancer list -o json -l "${cluster_sel},${key}=${mark}") ||
+     ! net_json=$(hcloud network list -o json -l "${key}=${mark}"); then
+    error "hetzner: could not list the servers, load balancers or networks of cluster ${cluster_name}. Check the hcloud token and the API."
+    return 1
   fi
+  declared_json="$(jq -c '[(.server // [])[].name // empty]' <<<"${desc}")"
+  # A declared server with the cluster label and without the mark: left out.
+  local unmarked unmarked_id
+  while IFS=$'\t' read -r unmarked unmarked_id; do
+    [[ -n "${unmarked}" ]] || continue
+    warn "hetzner: server ${unmarked} is left out of the inventory: it does not have the owner mark of this cluster (${key}=${mark}). If it is a server of this cluster (an older lok8s made it), mark it one time: hcloud server add-label ${unmarked_id} ${key}=${mark}"
+  done < <(jq -r --arg key "${key}" --arg mark "${mark}" --argjson declared "${declared_json}" '
+    (. // [])[] | select((.labels // {})[$key] != $mark)
+    | select(.name as $n | any($declared[]; . == $n)) | [.name, (.id | tostring)] | @tsv' <<<"${servers_json}")
+  servers_json="$(jq -c --arg key "${key}" --arg mark "${mark}" --arg c "${cluster_name}" '
+    [ (. // [])[] | select((.labels // {})[$key] == $mark and (.labels // {})["lok8s.dev/cluster"] == $c) ]' <<<"${servers_json}")" || return 1
+  lb_json="$(jq -c --arg key "${key}" --arg mark "${mark}" --arg c "${cluster_name}" '
+    [ (. // [])[] | select((.labels // {})[$key] == $mark and (.labels // {})["lok8s.dev/cluster"] == $c) ]' <<<"${lb_json}")" || return 1
+  # The network: the descriptor's network[0] by name when it names one, else
+  # the one with the cluster label. Both only with the owner mark (lok8s sets
+  # the mark at create; a network has no cluster label unless the descriptor
+  # gives it one).
+  local net_name_desc
+  net_name_desc="$(jq -r '.network[0].name // ""' <<<"${desc}")"
+  net_json="$(jq -c --arg key "${key}" --arg mark "${mark}" --arg n "${net_name_desc}" --arg c "${cluster_name}" '
+    [ (. // [])[] | select((.labels // {})[$key] == $mark)
+      | select(if $n != "" then .name == $n else (.labels // {})["lok8s.dev/cluster"] == $c end) ]' <<<"${net_json}")" || return 1
 
   local lb_address lb_private
   lb_address=$(echo "${lb_json}" | jq -r '.[0].public_net.ipv4.ip // empty' 2>/dev/null || echo "")
@@ -420,7 +481,8 @@ provider::output() {
     # static cloud worker lost it in the 2026-10-24 rebuild, and the Pods that
     # select it stayed Pending. The bare-metal path below still drops it.
     local node_labels
-    node_labels=$(echo "${server}" | jq -c '(.labels // {}) | del(.["lok8s.dev/cluster"], .["lok8s.dev/group"])')
+    # The owner mark selects the part too; it is no Node label.
+    node_labels=$(echo "${server}" | jq -c --arg key "${_HETZNER_OWNER_KEY}" '(.labels // {}) | del(.["lok8s.dev/cluster"], .["lok8s.dev/group"], .[$key])')
     node_labels=$(_validate_node_labels "${node_labels}" "${name}")
 
     nodes=$(echo "${nodes}" | jq \
@@ -558,7 +620,10 @@ provider::rebuild() {
   cluster_name="$(echo "${desc}" | jq -r '.cluster_name // ""')"
   [[ -n "${cluster_name}" ]] || {
     error "rebuild: descriptor has no cluster_name — refusing to act"; return 1; }
-  selector="lok8s.dev/cluster=${cluster_name}"
+  # Only a server with the owner mark of this cluster is reimaged.
+  local mark
+  mark="$(hetzner::owner_mark "${cluster_name}")" || return 1
+  selector="lok8s.dev/cluster=${cluster_name},${_HETZNER_OWNER_KEY}=${mark}"
 
   # Resolved inventory (descriptor + live cloud state) → per-node public IPs.
   local inv
@@ -615,12 +680,17 @@ provider::rebuild() {
   # ── Phase 1 — ATOMIC PREFLIGHT (read-only) ──────────────────────────────
   # Resolve and validate EVERY node before touching anything: name sanity, a
   # resolvable public IP, and the destructive target itself — cloud VMs must
-  # resolve to exactly one server carrying the cluster label; bare-metal nodes
-  # to exactly one Robot server whose IP equals the descriptor #external-ip
-  # (NOT its non-unique free-text server_name). Any failure aborts here with
-  # NOTHING reimaged/reset — no partial recovery, no acting on a foreign box.
+  # resolve to exactly one server with the cluster label and the owner mark
+  # (its id goes into the plan: the reimage acts on that id, never on a
+  # name); bare-metal nodes to exactly one Robot server whose IP equals the
+  # descriptor #external-ip (NOT its non-unique free-text server_name). Any
+  # failure aborts here with NOTHING reimaged/reset — no partial recovery, no
+  # acting on a foreign box.
+  # Each plan entry is one JSON object: its fields come back byte for byte
+  # (a tab-separated line lost a tab at the end of a value).
   local -a plan=() cloud_ips=() metal_ips=()
-  local idx server name is_root pub image cloud_d ci num ext_ip
+  local -A checked_image=()
+  local idx server name is_root pub image cloud_d ci num ext_ip sid
   for (( idx=0; idx<count; idx++ )); do
     server="$(echo "${desc}" | jq -c ".server[${idx}]")"
     name="$(echo "${server}" | jq -r '.name // ""')"
@@ -655,13 +725,25 @@ provider::rebuild() {
       num="$(hetzner::_robot_server_number_by_ip "${ext_ip}")" || num=""
       [[ -n "${num}" ]] || {
         error "rebuild: bare-metal node '${name}' (${ext_ip}) did not resolve to exactly one Robot server by IP — refusing to rescue/reset (name/IP collision, no match, or Robot API error)"; return 1; }
-      plan+=("metal"$'\t'"${name}"$'\t'"${num}"$'\t'"${fingerprint}")
+      plan+=("$(jq -cn --arg name "${name}" --arg num "${num}" --arg fp "${fingerprint}" \
+        '{kind: "metal", name: $name, a: $num, b: $fp}')")
       metal_ips+=("${pub}")
     else
-      # ── Cloud VM: name must uniquely carry the cluster label ──
-      hetzner::_cloud_server_unique_labeled "${name}" "${selector}" || {
+      # ── Cloud VM: name must resolve to ONE server with the cluster label
+      # and the owner mark; the plan keeps its id ──
+      sid="$(hetzner::_cloud_server_id "${name}" "${selector}" "${mark}" "${cluster_name}")" || {
         error "rebuild: cloud node '${name}' does not resolve to exactly one server carrying ${selector} — refusing to reimage"; return 1; }
-      image="$(echo "${server}" | jq -r '.image // "ubuntu-24.04"')"
+      # The image, checked as for a create (hetzner::_image_ok): an id must
+      # be plain digits (hcloud reads "+4711" and "04711" as the id 4711), a
+      # control character or a space at an end is refused, and a snapshot
+      # or backup id needs the owner mark. The reimage gets the value that
+      # the check passed, byte for byte (compared at the reimage).
+      _HETZNER_REFUSED=()
+      _HETZNER_LISTS=()
+      hetzner::_image_ok server "${name}" "$(echo "${server}" | jq -c '.image // "ubuntu-24.04"')" "${mark}" || {
+        hetzner::_print_refused
+        error "rebuild: nothing was reimaged."; return 1; }
+      image="${REPLY}"
       cloud_d="$(echo "${server}" | jq -r '.["#cloud.d"] // ""')"
       declare -F cloud-config::generate &>/dev/null || {
         error "rebuild: cloud-config generator unavailable"; return 1; }
@@ -669,7 +751,9 @@ provider::rebuild() {
       export CLOUD_PATHD="${cloud_d}"
       cloud-config::generate > "${ci}" 2>>"${CLOUD_LOG_FILE}" || {
         error "rebuild: cloud-init generation failed for '${name}'"; return 1; }
-      plan+=("cloud"$'\t'"${name}"$'\t'"${image}"$'\t'"${ci}")
+      plan+=("$(jq -cn --arg name "${name}" --arg sid "${sid}" --arg image "${image}" --arg ci "${ci}" \
+        '{kind: "cloud", name: $name, a: $sid, b: $image, c: $ci}')")
+      checked_image["${sid}"]="${image}"
       cloud_ips+=("${pub}")
     fi
   done
@@ -685,9 +769,13 @@ provider::rebuild() {
   # Robot rescue+reset via the dry-run branch inside each helper. A failure names
   # the offending node so the operator knows WHICH one failed (and that the
   # cluster may be left partially reimaged).
-  local rc=0 entry kind pname pa pb
+  local rc=0 entry kind pname pa pb pc
   for entry in "${plan[@]}"; do
-    IFS=$'\t' read -r kind pname pa pb <<<"${entry}"
+    hetzner::_plan_field "${entry}" kind; kind="${REPLY}"
+    hetzner::_plan_field "${entry}" name; pname="${REPLY}"
+    hetzner::_plan_field "${entry}" a; pa="${REPLY}"
+    hetzner::_plan_field "${entry}" b; pb="${REPLY}"
+    hetzner::_plan_field "${entry}" c; pc="${REPLY}"
     if [[ "${kind}" == "metal" ]]; then
       _hetzner_print "🔧 rescue+reset \033[1m${pname}\033[0m (robot#${pa})"
       hetzner::_robot_rescue "${pa}" "${pb}" || {
@@ -695,9 +783,17 @@ provider::rebuild() {
       hetzner::_robot_reset  "${pa}" || {
         error "rebuild: node '${pname}' (robot#${pa}) hardware reset failed — cluster may be partially reimaged"; rc=1; continue; }
     else
-      _hetzner_print "📦 rebuild \033[1m${pname}\033[0m (image ${pa})"
-      dry-run::cmd hcloud server rebuild "${pname}" --image "${pa}" --user-data-from-file "${pb}" || {
-        error "rebuild: node '${pname}' reimage failed ('hcloud server rebuild ${pname}') — cluster may be partially reimaged"; rc=1; continue; }
+      # The checked id only. Right before the reimage, read the server by
+      # that id again: a server renamed, relabelled or replaced after the
+      # preflight is refused (a node before it can be reimaged already).
+      _hetzner_print "📦 rebuild \033[1m${pname}\033[0m (id ${pa}, image ${pb})"
+      hetzner::_still_ours server "${pa}" "${mark}" "${pname}" >/dev/null || {
+        error "rebuild: node '${pname}' (id ${pa}) was not reimaged: it changed after the check (the message above) — cluster may be partially reimaged"; rc=1; continue; }
+      if [[ -z "${checked_image[${pa}]+set}" || "${pb}" != "${checked_image[${pa}]}" ]]; then
+        error "rebuild: node '${pname}' (id ${pa}) was not reimaged: the image of the plan is not the image that lok8s checked — cluster may be partially reimaged"; rc=1; continue
+      fi
+      dry-run::cmd hcloud server rebuild "${pa}" "--image=${pb}" "--user-data-from-file=${pc}" || {
+        error "rebuild: node '${pname}' reimage failed ('hcloud server rebuild ${pa}') — cluster may be partially reimaged"; rc=1; continue; }
     fi
   done
 
@@ -888,16 +984,35 @@ hetzner::_robot_server_number_by_ip() {
   echo "${matches}" | jq -r '.[0].server_number'
 }
 
-# hetzner::_cloud_server_unique_labeled <name> <selector>
-# Succeed only if EXACTLY ONE hcloud server named <name> carries the cluster
-# label — the same scoping destroy/output use — so a rebuild can never reimage a
-# name collision, a stale, or a foreign (unlabeled) server.
-hetzner::_cloud_server_unique_labeled() {
-  local name="${1:-}" selector="${2:-}" n
-  [[ -n "${name}" && -n "${selector}" ]] || return 1
-  n="$(hcloud server list -o json -l "${selector}" 2>/dev/null \
-        | jq --arg n "${name}" '[.[] | select(.name==$n)] | length' 2>/dev/null || echo 0)"
-  [[ "${n}" == "1" ]]
+# hetzner::_plan_field <entry-json> <field>
+# REPLY: the string <field> of a rebuild plan entry, byte for byte (the
+# command substitution does not cut a newline at its end).
+hetzner::_plan_field() {
+  REPLY="$(jq -j --arg f "${2}" '.[$f] // ""' <<<"${1}"; printf x)"
+  REPLY="${REPLY%x}"
+}
+
+# hetzner::_cloud_server_id <name> <selector> <mark> <cluster_name>
+# The id of the ONE server named <name> that carries <selector> (the cluster
+# label and the owner mark), checked again in jq. rc 1 when no server or
+# more than one matches. The rebuild acts on this id, never on the name: an
+# all-digit name ("900") is an id to hcloud, and a name can move to another
+# server after the check.
+hetzner::_cloud_server_id() {
+  local name="${1:-}" selector="${2:-}" mark="${3:-}" cluster="${4:-}" sid out
+  [[ -n "${name}" && -n "${selector}" && -n "${mark}" && -n "${cluster}" ]] || return 1
+  # The exit code of hcloud is checked on its own (not through a pipe): a
+  # failed list is no answer, also when it printed a list.
+  out="$(hcloud server list -o json -l "${selector}" 2>/dev/null)" || return 1
+  jq -e 'type == "array" or type == "null"' >/dev/null 2>&1 <<<"${out}" || return 1
+  sid="$(jq -r \
+    --arg n "${name}" --arg key "${_HETZNER_OWNER_KEY}" --arg mark "${mark}" --arg c "${cluster}" '
+    [ (. // [])[]
+      | select(.name == $n and (.labels // {})[$key] == $mark and (.labels // {})["lok8s.dev/cluster"] == $c)
+      | .id | tostring ]
+    | if length == 1 then .[0] else empty end' <<<"${out}" 2>/dev/null)" || return 1
+  [[ "${sid}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "${sid}"
 }
 
 # hetzner::_robot_rescue <number> <key_fingerprint>
@@ -1031,16 +1146,33 @@ hetzner::_doctor_checks() {
     fi
   fi
 
-  # 4) Inventory sanity (control-plane count).
-  local inv
-  inv="$(provider::output "${config_file}" 2>/dev/null || echo '{}')"
-  local cp_count
-  cp_count="$(echo "${inv}" | jq '[(.nodes // [])[] | select(.role=="control-plane")] | length' 2>/dev/null || echo 0)"
-  if [[ "${cp_count}" =~ ^[0-9]+$ ]] && (( cp_count > 0 )); then
-    printf 'ok\tinventory: %s control-plane node(s) resolved\n' "${cp_count}"
+  # 4) Inventory sanity (control-plane count). A failed provider::output is
+  #    one warn line with its reason (its first error line: for example no
+  #    domain for the owner mark, or a failed list). The checks go on with
+  #    an empty inventory.
+  local inv inv_err="" reason="" line last=""
+  inv_err="$(mktemp 2>/dev/null)" || inv_err=""
+  if inv="$(provider::output "${config_file}" 2>"${inv_err:-/dev/null}")"; then
+    local cp_count
+    cp_count="$(echo "${inv}" | jq '[(.nodes // [])[] | select(.role=="control-plane")] | length' 2>/dev/null || echo 0)"
+    if [[ "${cp_count}" =~ ^[0-9]+$ ]] && (( cp_count > 0 )); then
+      printf 'ok\tinventory: %s control-plane node(s) resolved\n' "${cp_count}"
+    else
+      printf 'warn\tinventory: no control-plane nodes resolved — check descriptor labels / hcloud state\n'
+    fi
   else
-    printf 'warn\tinventory: no control-plane nodes resolved — check descriptor labels / hcloud state\n'
+    inv='{}'
+    if [[ -n "${inv_err}" ]]; then
+      while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line%$'\r'}" line="${line//$'\t'/ }"
+        [[ -n "${line}" ]] || continue
+        last="${line}"
+        [[ -n "${reason}" || "${line}" != "[error] "* ]] || reason="${line#"[error] "}"
+      done < "${inv_err}"
+    fi
+    printf 'warn\tinventory: provider::output failed, so no node is known: %s\n' "${reason:-${last:-it printed no reason}}"
   fi
+  [[ -z "${inv_err}" ]] || rm -f "${inv_err}" || true
 
   # SSH identity for read-only node probes.
   local key
@@ -1120,6 +1252,18 @@ main::hetzner() {
     error "Either --hetzner-json or --domain required"
     return 1
   fi
+
+  # The owner mark of the parts is keyed on the domain (hetzner::owner_mark).
+  # lo sets PROVIDER_DOMAIN in provider::write_config; this command takes it
+  # from --domain, with the same rules (provider::_spec_domain on the path
+  # of the cluster spec). A descriptor path alone does not tell the domain.
+  if [[ -z "${domain:-}" ]]; then
+    error "hetzner: --domain is missing. lok8s needs the domain of the cluster for the owner mark ${_HETZNER_OWNER_KEY} of its parts, and --hetzner-json does not give it. Add --domain <domain> (the directory name under clusters/). Nothing was created or changed."
+    return 1
+  fi
+  declare -F provider::_spec_domain >/dev/null || import ^utils/provider
+  PROVIDER_DOMAIN="$(provider::_spec_domain "${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml")"
+  export PROVIDER_DOMAIN
 
   [[ -f "${CLOUD_HETZNER_JSON_PATH}" ]] || {
     error "No such file: ${CLOUD_HETZNER_JSON_PATH}"

@@ -238,10 +238,16 @@ driver::destroy() {
   local cluster_name
   cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
 
-  # Remote mode: reconnect DOCKER_HOST
+  # Remote mode: reconnect DOCKER_HOST. A failed provider::output stops the
+  # destroy: without DOCKER_HOST, the cleanup below acts on the LOCAL docker
+  # (a local kind cluster with the same name). "No node" in a good output is
+  # the local fallback of the provision (lo::provision_remote) and stays.
   if [[ -n "${PROVIDER_NAME:-}" ]] && declare -F provider::output &>/dev/null; then
     local provider_output remote_ip remote_user
-    provider_output=$(provider::output "${PROVIDER_CONFIG_FILE:-}" 2>/dev/null) || true
+    provider_output=$(provider::output "${PROVIDER_CONFIG_FILE:-}") || {
+      error "lo destroy: provider::output of provider '${PROVIDER_NAME}' failed (its message is above), so the remote docker host of cluster ${cluster_name} is not known. Nothing was deleted: the cleanup does not fall back to the local docker. Fix the cause, then run lo destroy again."
+      return 1
+    }
     remote_ip=$(echo "${provider_output}" | jq -r '.nodes[0].public_ip // empty' 2>/dev/null || echo "")
     remote_user=$(echo "${provider_output}" | jq -r '.nodes[0].ssh_user // "root"' 2>/dev/null || echo "")
     if [[ -n "${remote_ip}" ]]; then

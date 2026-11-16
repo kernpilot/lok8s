@@ -196,6 +196,69 @@ YAML
   assert_output --partial "cluster_name: test-ref"
 }
 
+# The hetzner provider keys the owner mark of the cluster's parts on the
+# domain: write_config exports it in both modes (Go twin:
+# provision.WriteProviderConfig).
+@test "provider::write_config exports PROVIDER_DOMAIN, the directory of the spec, in both modes" {
+  mkdir -p "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev" "${BATS_TEST_TMPDIR}/clusters/inline.lok8s.dev"
+  printf 'cluster_name: test-ref\n' > "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/hetzner.yaml"
+  printf 'spec:\n  provider:\n    name: hetzner\n    configRef: hetzner.yaml\n' \
+    > "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  printf 'spec:\n  provider:\n    name: hetzner\n    config:\n      cluster_name: inline\n' \
+    > "${BATS_TEST_TMPDIR}/clusters/inline.lok8s.dev/cluster.lok8s.yaml"
+
+  unset PROVIDER_DOMAIN
+  provider::write_config "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
+  [ "${PROVIDER_DOMAIN}" = "test.lok8s.dev" ]
+  run bash -c 'printf "%s" "${PROVIDER_DOMAIN}"'
+  assert_output "test.lok8s.dev"
+
+  provider::write_config "${BATS_TEST_TMPDIR}/clusters/inline.lok8s.dev/cluster.lok8s.yaml"
+  [ "${PROVIDER_DOMAIN}" = "inline.lok8s.dev" ]
+}
+
+# A spec path with "." or ".." parts gives the same domain as in Go
+# (filepath.Clean): the owner mark of one cluster never depends on how the
+# path is written, and ".." is never the domain. (The configRef mode sets no
+# EXIT trap, so a failed check here is reported.)
+@test "provider::write_config cleans the spec path like Go: ./ and child/.. parts give the domain" {
+  mkdir -p "${BATS_TEST_TMPDIR}/clusters/prod.lok8s.dev/child"
+  printf 'cluster_name: prod\n' > "${BATS_TEST_TMPDIR}/clusters/prod.lok8s.dev/hetzner.yaml"
+  printf 'spec:\n  provider:\n    name: hetzner\n    configRef: hetzner.yaml\n' \
+    > "${BATS_TEST_TMPDIR}/clusters/prod.lok8s.dev/cluster.lok8s.yaml"
+  local p
+  for p in "clusters/prod.lok8s.dev/./cluster.lok8s.yaml" "clusters/prod.lok8s.dev/child/../cluster.lok8s.yaml"; do
+    unset PROVIDER_DOMAIN
+    provider::write_config "${BATS_TEST_TMPDIR}/${p}"
+    [ "${PROVIDER_DOMAIN}" = "prod.lok8s.dev" ]
+  done
+  run provider::_spec_domain "cluster.lok8s.yaml"
+  assert_output "."
+  run provider::_spec_domain "../cluster.lok8s.yaml"
+  assert_output ".."
+  run provider::_spec_domain "/../cluster.lok8s.yaml"
+  assert_output "/"
+}
+
+# One case table for bash and Go (internal/provision/testdata/
+# spec-domain-cases.txt; the Go twin is TestWriteProviderConfigDomainCases):
+# ".", "..", "/", a trailing slash, "a/../b" and more.
+@test "provider::_spec_domain gives the domain of each row of the shared case table" {
+  local table="${_PROJECT_ROOT}/internal/provision/testdata/spec-domain-cases.txt" line spec want rows=0
+  [ -f "${table}" ]
+  while IFS= read -r line; do
+    [[ -n "${line}" && "${line}" != "#"* ]] || continue
+    spec="${line%%$'\t'*}" want="${line#*$'\t'}"
+    [[ "${line}" == *$'\t'* && -n "${spec}" && -n "${want}" && "${want}" != *$'\t'* ]] \
+      || fail "bad row '${line}': want <spec path> TAB <domain>"
+    rows=$(( rows + 1 ))
+    run provider::_spec_domain "${spec}"
+    assert_success
+    [ "${output}" = "${want}" ] || fail "'${spec}': got '${output}', want '${want}'"
+  done < "${table}"
+  (( rows >= 10 )) || fail "the case table has ${rows} rows, want at least 10"
+}
+
 @test "provider::write_config fails for missing configRef" {
   mkdir -p "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev"
   cat > "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml" <<'YAML'

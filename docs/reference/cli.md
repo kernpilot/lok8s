@@ -280,8 +280,10 @@ lo destroy [--domain <domain>] [--confirm-cluster <cluster_name>]
 Calls `driver::destroy` from the appropriate driver contract.
 
 With `--remote`, a provider that deletes by a cluster name (the hetzner
-provider deletes every resource in the token's project that carries
-`lok8s.dev/cluster=<cluster_name>`) gets a guard before anything is deleted:
+provider deletes each resource in the token's project that carries
+`lok8s.dev/cluster=<cluster_name>` and the owner mark of the cluster, see
+[the owner mark](../guide/deployment.md#hetzner-owner-mark)) gets a guard
+before anything is deleted:
 
 1. When another domain under `clusters/` has the same `cluster_name`
    (`hetzner.json`, the `spec.provider.configRef` file or an inline
@@ -295,7 +297,7 @@ provider deletes every resource in the token's project that carries
    it with `--confirm-cluster <cluster_name>`. `--force` does not replace
    it. A refusal exits `3` and deletes nothing.
 4. The provider then deletes only the listed resources that still carry the
-   label. A resource that is new since the confirmation stays, with a
+   label and the mark. A resource that is new since the confirmation stays, with a
    warning. `LOK8S_DESTROY_PLAN` carries the list to the provider; only this
    guard sets it, and `lo` clears an inherited value.
 

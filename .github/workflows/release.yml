@@ -35,13 +35,18 @@ jobs:
 
       # Hand-written notes for the tag, when the repo carries them
       # (docs/releases/<tag>.md, also a docs page). They head the release
-      # body; the github-native changelog (.goreleaser.yaml) follows.
+      # body; the github-native changelog (.goreleaser.yaml) follows. The
+      # docs page starts with a YAML front matter block, which the release
+      # body must not show: hack/release-header.sh removes it, and its
+      # output is the header.
       - name: Release notes for this tag
         id: notes
         run: |
           notes="docs/releases/${GITHUB_REF_NAME}.md"
           if [ -f "${notes}" ]; then
-            echo "args=--release-header ${notes}" >> "${GITHUB_OUTPUT}"
+            header="${RUNNER_TEMP}/release-header.md"
+            bash hack/release-header.sh "${notes}" > "${header}"
+            echo "args=--release-header ${header}" >> "${GITHUB_OUTPUT}"
           else
             echo "::notice::no ${notes}; the release body is the changelog only"
             echo "args=" >> "${GITHUB_OUTPUT}"
