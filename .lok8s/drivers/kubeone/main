@@ -228,7 +228,10 @@ _append_inventory() {
   local config_file="${1}" manifest="${2}"
 
   local output
-  output=$(provider::output "${config_file}")
+  output=$(provider::output "${config_file}") || {
+    error "kubeone inventory: provider::output failed (its message is above). No host inventory was written."
+    return 1
+  }
 
   local ssh_key
   ssh_key=$(echo "${output}" | jq -r '.access[0].privateKey // ""')

@@ -3,9 +3,11 @@
 # provider::destroy_plan of the hetzner provider. Both find the resources
 # the same way (hetzner::_destroy_cluster_name, hetzner::_destroy_resources):
 # every hcloud resource in the token's project that carries
-# lok8s.dev/cluster=<cluster_name>. `lo destroy` shows the plan and guards on
-# its cluster_name (destroy_guard_test.bats). hcloud is a recording fake that
-# answers `<resource> list -o json` in the API shape (id, name).
+# lok8s.dev/cluster=<cluster_name> and the owner mark of this cluster.
+# `lo destroy` shows the plan and guards on its cluster_name
+# (destroy_guard_test.bats). hcloud is a recording fake that answers
+# `<resource> list -o json` in the API shape (id, name, labels); each part
+# has the mark. The parts without it are in hetzner_owner_test.bats.
 
 setup() {
   load "../test_helper"
@@ -20,15 +22,20 @@ setup() {
 
   export HCLOUD_LOG="${BATS_TEST_TMPDIR}/hcloud.log"
   : > "${HCLOUD_LOG}"
+  # The domain lo exports (provider::write_config) and the owner mark of
+  # prod-a in it: sha256("<domain>\n<cluster_name>\n"), the first 32 hex chars.
+  export PROVIDER_DOMAIN="prod.cloud"
+  OWN="{\"lok8s.dev/cluster\":\"prod-a\",\"lok8s.dev/owner\":\"$(printf '%s\n%s\n' "${PROVIDER_DOMAIN}" prod-a | sha256sum | cut -c1-32)\"}"
+  export OWN
   hcloud() {
     printf '%s\n' "$*" >> "${HCLOUD_LOG}"
     [[ "$2" == "list" ]] || return 0
     [[ "$1" != "${LIST_FAIL:-}" ]] || { echo "hcloud: server error (service_error)" >&2; return 1; }
     case "$1" in
-      load-balancer) echo '[{"id":11,"name":"api-lb","labels":{"lok8s.dev/cluster":"prod-a"}}]' ;;
-      server)        echo '[{"id":42,"name":"cp-0"},{"id":43,"name":"cp-1"}]' ;;
-      volume)        echo '[{"id":7,"name":"data-0"}]' ;;
-      network)       echo '[{"id":9,"name":"net"}]' ;;
+      load-balancer) echo "[{\"id\":11,\"name\":\"api-lb\",\"labels\":${OWN}}]" ;;
+      server)        echo "[{\"id\":42,\"name\":\"cp-0\",\"labels\":${OWN}},{\"id\":43,\"name\":\"cp-1\",\"labels\":${OWN}}]" ;;
+      volume)        echo "[{\"id\":7,\"name\":\"data-0\",\"labels\":${OWN}}]" ;;
+      network)       echo "[{\"id\":9,\"name\":\"net\",\"labels\":${OWN}}]" ;;
       *)             echo '[]' ;;
     esac
   }
@@ -75,7 +82,7 @@ network delete 9"
   printf '{"cluster_name": "from-dump"}\n' > "${WORK}/hetzner.dump.json"
   run provider::destroy_plan "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: the descriptor ${DESC} has no cluster_name. The destroy deletes every resource that carries lok8s.dev/cluster=<cluster_name>, so it needs the name. Nothing was deleted."
+  assert_output --partial "hetzner: the descriptor ${DESC} has no cluster_name. The destroy finds its resources by lok8s.dev/cluster=<cluster_name> and the owner mark, so it needs the name. Nothing was deleted."
   refute_output --partial "cluster	"
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
@@ -146,7 +153,7 @@ network delete 9"
   export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0\nserver\t77\tforeign-0\nvolume\t7\tdata-0'
   run provider::destroy "${DESC}" "${WORK}"
   assert_success
-  assert_output --partial "hetzner: skipped server 77 of the confirmed plan: no server with this id carries lok8s.dev/cluster=prod-a now. It is gone, or it is not of this cluster."
+  assert_output --partial "hetzner: skipped server 77 of the confirmed plan: no server with this id carries lok8s.dev/cluster=prod-a and the owner mark of this cluster now. It is gone, or it is not of this cluster."
   run grep ' delete ' "${HCLOUD_LOG}"
   assert_output "server delete 42
 volume delete 7"

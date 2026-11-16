@@ -1,0 +1,26 @@
+# The domain of a cluster spec path: the name of the directory of the path
+# after a lexical clean (Go filepath.Clean). ONE table for both suites, so
+# they cannot drift: internal/provision/provider_test.go
+# (TestWriteProviderConfigDomainCases, Go WriteProviderConfig) and
+# tests/unit/provider_test.bats ("provider::_spec_domain gives the domain of
+# each row of the shared case table", bash provider::_spec_domain). The
+# expected values come from the bash function. The hetzner provider refuses
+# ".", ".." and "/" as a domain.
+#
+# Columns, separated by one TAB: <spec path> <domain>
+.	.
+..	.
+/	/
+clusters/prod.example.test/	clusters
+a/../b	.
+clusters/prod.example.test/cluster.lok8s.yaml	prod.example.test
+clusters/prod.example.test/./cluster.lok8s.yaml	prod.example.test
+clusters/prod.example.test/child/../cluster.lok8s.yaml	prod.example.test
+clusters/prod.example.test/cluster.lok8s.yaml/	prod.example.test
+//clusters//prod.example.test//cluster.lok8s.yaml	prod.example.test
+cluster.lok8s.yaml	.
+../cluster.lok8s.yaml	..
+/../cluster.lok8s.yaml	/
+/cluster.lok8s.yaml	/
+a/b/../../..	.
+../../x/cluster.lok8s.yaml	x

@@ -80,7 +80,18 @@ spec:
 ```
 
 `config` and `configRef` are the same format — just inline vs file.
-The provider reads from `PROVIDER_CONFIG_FILE` either way.
+The provider reads from `PROVIDER_CONFIG_FILE` either way. `lo` also exports
+`PROVIDER_DOMAIN`, the domain of the cluster (the name of the
+`clusters/<domain>/` directory, after a clean of `.` and `..` parts as in
+Go's `filepath.Clean`). The hetzner provider keys the owner mark of the
+cluster's parts on it ([owner mark](https://kernpilot.github.io/lok8s/guide/deployment#hetzner-owner-mark)).
+
+The hetzner provider reads a part by its id and checks its owner mark right
+before each change, and it gives `hcloud` only ids. The check and the change
+are two API calls: the Hetzner API has no condition on labels, so another
+actor can change the part between them, and `hcloud` looks for a deleted id
+as a name. The inventory (`provider::output`) shows the parts at the time
+of the call.
 
 ## Adding a new provider
 
