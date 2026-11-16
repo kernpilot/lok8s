@@ -76,6 +76,11 @@ jobs:
           b install
           ./.bin/argsh builtins install   # argsh.so — bats runtime + builtins
 
+      - name: The installed yq is the pinned release
+        # b exits 0 when a binary fails to install, and the bats container
+        # then runs its own yq: check .bin/yq against the pin in .bin/b.yaml.
+        run: bash hack/check-yq-pin.sh
+
       - name: Vendored argsh runtime is in sync with the lockfile
         run: |
           # `b install` just rewrote .bin/argsh from b.lock; if that differs
@@ -198,6 +203,11 @@ jobs:
           # build` runs): the Secret byte-parity test execs it from
           # .kustomize/ next to khelm.
           make -C kustomize build
+
+      - name: The installed yq is the pinned release
+        # b exits 0 when a binary fails to install, and the bats container
+        # then runs its own yq: check .bin/yq against the pin in .bin/b.yaml.
+        run: bash hack/check-yq-pin.sh
 
       - name: Locale en_US.UTF-8 (the bash twin of the version reader)
         # TestNodeVersionMatchesBash runs spec::kind_node_version in
@@ -344,6 +354,11 @@ jobs:
           b install
           ./.bin/argsh builtins install   # argsh.so — bats runtime + builtins
 
+      - name: The installed yq is the pinned release
+        # b exits 0 when a binary fails to install, and the bats container
+        # then runs its own yq: check .bin/yq against the pin in .bin/b.yaml.
+        run: bash hack/check-yq-pin.sh
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -470,6 +485,11 @@ jobs:
           # PATH so the later verify/diagnostics steps get kubectl/kind/tilt, and
           # `lo` (which shells out to them) finds them without a per-step export.
           echo "${GITHUB_WORKSPACE}/.bin" >> "${GITHUB_PATH}"
+
+      - name: The installed yq is the pinned release
+        # b exits 0 when a binary fails to install, and the bats container
+        # then runs its own yq: check .bin/yq against the pin in .bin/b.yaml.
+        run: bash hack/check-yq-pin.sh
 
       - name: Build the Secret plugin (the bash leg mints the registry cert through it)
         # The bash implementation execs .kustomize/secrets.lok8s.dev/v1/secret/Secret

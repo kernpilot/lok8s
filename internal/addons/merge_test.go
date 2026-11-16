@@ -10,12 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/testutil"
+	"github.com/kernpilot/lok8s/internal/toolchain"
 )
 
 func TestMergeNodesListsReplace(t *testing.T) {
@@ -126,6 +128,20 @@ var mergeCases = []mergeCase{
 
 // yamlData decodes YAML into plain data for a formatting-independent
 // comparison.
+// yqVersion is the version that `yq --version` reports (vX.Y.Z), or a
+// description of why there is none.
+func yqVersion(yq string) string {
+	out, err := exec.Command(yq, "--version").Output()
+	if err != nil {
+		return "a yq whose --version failed (" + err.Error() + ")"
+	}
+	m := regexp.MustCompile(`version v?([0-9]+\.[0-9]+\.[0-9]+)`).FindStringSubmatch(string(out))
+	if m == nil {
+		return "a yq of an unknown version"
+	}
+	return "v" + m[1]
+}
+
 func yamlData(t *testing.T, raw []byte) any {
 	t.Helper()
 	var v any
@@ -138,7 +154,8 @@ func yamlData(t *testing.T, raw []byte) any {
 // TestMergeMatchesPinnedYQ pins the document-level rules of the yq merge
 // idiom: a null document is a no-op, a non-map document is an error, every
 // document of a stream takes part. The results are the pinned yq's; with
-// the toolchain installed the same runs go through .bin/yq as well.
+// the toolchain installed the same runs go through .bin/yq as well, when it
+// is the pinned release (toolchain.YQVersion).
 func TestMergeMatchesPinnedYQ(t *testing.T) {
 	t.Parallel()
 	yq := filepath.Join(testutil.RepoRoot(t), ".bin", "yq")
@@ -147,6 +164,12 @@ func TestMergeMatchesPinnedYQ(t *testing.T) {
 			t.Fatal(".bin/yq is not installed; on CI the toolchain must be installed before the Go tests")
 		}
 		t.Log(".bin/yq is not installed (b install); the pinned results stand alone")
+		yq = ""
+	} else if got := yqVersion(yq); got != toolchain.YQVersion {
+		if os.Getenv("CI") != "" {
+			t.Fatalf(".bin/yq is %s, not the pinned %s (.bin/b.yaml); b install did not install the pin", got, toolchain.YQVersion)
+		}
+		t.Logf(".bin/yq is %s, not the pinned %s (b install); the pinned results stand alone", got, toolchain.YQVersion)
 		yq = ""
 	}
 	for _, tc := range mergeCases {
