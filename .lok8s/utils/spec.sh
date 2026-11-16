@@ -164,16 +164,37 @@ spec::_kver_yq() (
   fi
   if [[ -e "${tmp}/timeout" ]]; then
     printf '%s yq did not finish in %s s. Simplify the spec file.\n' "${unreadable}" "${_SPEC_KVER_TIMEOUT}"
+  elif (( rc <= 128 )) && grep -q '^panic: ' "${tmp}/err"; then
+    # A Go panic is a fault of the yq release, not of the spec file (yq
+    # v4.52.5 stops with "index out of range [-1]" on these expressions).
+    # It comes before the memory case: a nil pointer panic also prints
+    # "[signal SIGSEGV". A process that a signal killed (rc > 128), and the
+    # Go runtime's out-of-memory and stack-overflow errors print no
+    # "panic: " line.
+    printf '%s the installed yq (%s) failed on the version reader (%s). Install yq v4.54.3 or later (b install installs the pinned yq).\n' \
+      "${unreadable}" "$(spec::_yq_version)" "$(grep -m 1 '^panic: ' "${tmp}/err")"
   elif (( rc > 128 )) || grep -qE 'out of memory|cannot allocate memory|stack overflow|goroutine stack exceeds|SIGSEGV' "${tmp}/err"; then
     printf '%s yq stopped at the memory limit of %s MiB, or a signal stopped it. Simplify the spec file.\n' "${unreadable}" "$(( _SPEC_KVER_MAX_KB / 1024 ))"
   elif grep -q 'unknown flag: --yaml-fix-merge-anchor-to-spec' "${tmp}/err"; then
-    printf '%s the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.47.1 or later (b install installs the pinned yq).\n' "${unreadable}"
+    printf '%s the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.54.3 or later (b install installs the pinned yq).\n' "${unreadable}"
   else
     first=$(head -n 1 "${tmp}/err")
     printf '%s %s. Correct the spec file.\n' "${unreadable}" "${first#Error: }"
   fi
   exit 1
 )
+
+# spec::_yq_version — the version of the yq on PATH (vX.Y.Z), or "version
+# unknown".
+spec::_yq_version() {
+  local version
+  version="$(yq --version 2>/dev/null)" || version=""
+  if [[ "${version}" =~ v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+    printf 'v%s' "${BASH_REMATCH[1]}"
+  else
+    printf 'version unknown'
+  fi
+}
 
 # The yq expressions of the reader, all on a file with one YAML document
 # (domain::spec_layout), bound to $root.

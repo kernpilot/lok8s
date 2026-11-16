@@ -45,7 +45,7 @@ func TestTemplateGroupsAndMarker(t *testing.T) {
 		}
 	}
 	// The bash runtime is carried commented out by default (opt-in).
-	for _, off := range []string{"  # yq:\n  #   groups: [bash]\n", "  # jq:\n  #   groups: [bash]\n", "  # sops:\n  #   groups: [bash]\n", "  # ssh-to-age:\n  #   groups: [bash]\n", "  # renvsubst:\n  #   alias: envsubst\n  #   groups: [bash]\n", "  # github.com/arg-sh/argsh:\n  #   asset: argsh\n  #   onPost: \"${B_BIN} builtin ${B_EVENT}\"\n  #   groups: [bash]\n"} {
+	for _, off := range []string{"  # yq:\n  #   version: " + YQVersion + "\n  #   groups: [bash]\n", "  # jq:\n  #   groups: [bash]\n", "  # sops:\n  #   groups: [bash]\n", "  # ssh-to-age:\n  #   groups: [bash]\n", "  # renvsubst:\n  #   alias: envsubst\n  #   groups: [bash]\n", "  # github.com/arg-sh/argsh:\n  #   asset: argsh\n  #   onPost: \"${B_BIN} builtin ${B_EVENT}\"\n  #   groups: [bash]\n"} {
 		if !strings.Contains(tpl, off) {
 			t.Errorf("bash entry not commented out: %q", off)
 		}
@@ -61,7 +61,7 @@ func TestTemplateGroupsAndMarker(t *testing.T) {
 	withBash := mustTemplate(t, TemplateOptions{Name: "demo", LoVersion: "0.3.0", Variant: "core", Groups: []string{"core", "local", "bash"}})
 	for _, on := range []string{
 		"  github.com/arg-sh/argsh:\n    asset: argsh\n    onPost: \"${B_BIN} builtin ${B_EVENT}\"\n    groups: [bash]\n",
-		"  yq:\n    groups: [bash]\n",
+		"  yq:\n    version: " + YQVersion + "\n    groups: [bash]\n",
 		"  jq:\n    groups: [bash]\n",
 		"  renvsubst:\n    alias: envsubst\n    groups: [bash]\n",
 		"  sops:\n    groups: [bash]\n",

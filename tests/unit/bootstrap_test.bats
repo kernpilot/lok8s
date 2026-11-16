@@ -2386,7 +2386,7 @@ YAML
   _restore_without_yq() { local PATH="${BATS_TEST_TMPDIR}/no-yq"; bootstrap::_restore_d "$@"; }
   run _restore_without_yq "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
   assert_success
-  assert_output --partial "bootstrap: restore.d: tls-a (store working copy) cannot be checked for a keys-only Secret: yq is not installed. Install yq v4.47.1 or later (b install installs the pinned yq). lo uses tls-a.sops.yaml"
+  assert_output --partial "bootstrap: restore.d: tls-a (store working copy) cannot be checked for a keys-only Secret: yq is not installed. Install yq v4.54.3 or later (b install installs the pinned yq). lo uses tls-a.sops.yaml"
   assert_output --partial "bootstrap: restore.d: refusing to apply tls-a (sops): it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): yq is not installed."
   assert_output --partial "restore.d — 0 applied, 1 skipped"
   [ "$(cat "${BATS_TEST_TMPDIR}/sops.log")" = "tls-a.sops.yaml" ]

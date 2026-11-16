@@ -72,7 +72,7 @@ func TestToolchainInstallBashGroupThroughGroups(t *testing.T) {
 		t.Errorf("bash group not selected:\n%s", stdout)
 	}
 	tpl, err := toolchainTemplate(project, "p", []string{"core", "local", "bash"})
-	if err != nil || !strings.Contains(tpl, "  github.com/arg-sh/argsh:\n    asset: argsh\n") || !strings.Contains(tpl, "  yq:\n    groups: [bash]\n") {
+	if err != nil || !strings.Contains(tpl, "  github.com/arg-sh/argsh:\n    asset: argsh\n") || !strings.Contains(tpl, "  yq:\n    version: "+toolchain.YQVersion+"\n    groups: [bash]\n") {
 		t.Errorf("template without the active bash entries: %v\n%s", err, tpl)
 	}
 	plain, _ := toolchainTemplate(project, "p", nil)

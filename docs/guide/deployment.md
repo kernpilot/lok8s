@@ -293,7 +293,8 @@ forbids it; a rule that names the key in a CEL expression is not a match.
 A render or an artifact that does not parse as YAML also stops with an
 error. The existing artifacts do not change. The bash implementation
 checks with `yq`, so it also stops when `yq` is not installed or is older
-than v4.47.1.
+than v4.47.1 (no `--yaml-fix-merge-anchor-to-spec`). Use yq v4.54.3 or later,
+the pinned release.
 
 The flag is the only way to start a keys-only render. lo controls the
 plugin setting that it uses (see the

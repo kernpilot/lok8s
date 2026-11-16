@@ -371,8 +371,9 @@ in both implementations:
   that is used as a key is not resolved (yq reads it by its own name). The
   read follows only the path to the value, so an alias bomb or an alias
   cycle in another part of the file costs nothing. The bash implementation
-  needs yq v4.47.1 or later (the flag `--yaml-fix-merge-anchor-to-spec`);
-  `b install` installs the pinned yq.
+  needs yq v4.54.3 or later, the release lok8s pins and tests (yq v4.47.1
+  added the flag `--yaml-fix-merge-anchor-to-spec`, and v4.52.5 stops on the
+  reader with a panic); `b install` installs the pinned yq.
 - Trailing newlines of the value (a block scalar) are removed.
 - These shapes are refused, never read as an unset version: a merge key
   anywhere in the file that does not refer to a map or a list of maps; merge
