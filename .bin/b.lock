@@ -28,8 +28,8 @@
     },
     {
       "name": "yq",
-      "version": "",
-      "sha256": "75d893a0d5940d1019cb7cdc60001d9e876623852c31cfc6267047bc31149fa9",
+      "version": "v4.54.3",
+      "sha256": "129534601871538efe0ba4c5e62a34fb1d5f469bcb975c4fddeb467d82974973",
       "source": "github.com/mikefarah/yq",
       "preset": true
     },

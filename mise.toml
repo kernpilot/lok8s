@@ -13,7 +13,7 @@
 [tools]
 # ── core (framework + remote deploy) ────────────────────────────
 kubectl    = "1.31.0"
-yq         = "4.53.3"
+yq         = "4.54.3"
 jq         = "1.7"
 kustomize  = "5.8.1"
 sops       = "3.9"

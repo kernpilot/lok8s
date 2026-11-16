@@ -2,10 +2,10 @@ package yqsem
 
 // merge.go — YAML merge keys (`<<: *anchor`) the way the pinned yq reads a
 // path under --yaml-fix-merge-anchor-to-spec (pkg/yqlib/operator_traverse_
-// path.go, doTraverseMap and traverseMergeAnchor, yq v4.53.3). A plain path
-// read in yq resolves aliases and merge keys one key at a time and never
-// expands the rest of the document, so an alias bomb or an alias cycle off
-// the path costs nothing.
+// path.go, doTraverseMap and traverseMergeAnchor; the pin is in .bin/b.yaml).
+// A plain path read in yq resolves aliases and merge keys one key at a time
+// and never expands the rest of the document, so an alias bomb or an alias
+// cycle off the path costs nothing.
 //
 // Lookup and MapGet do not resolve merge keys, but yq does, in every read.
 // A reader that must never see a merged value as missing uses MapGetMerged

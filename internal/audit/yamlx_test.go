@@ -53,7 +53,7 @@ func TestMergeYAMLDocsSemantics(t *testing.T) {
 }
 
 // TestMergeYAMLDocsAliasKeepsItsOwnValue pins the merge to the shared
-// addons.MergeDocument. The pinned yq (v4.53.3) merges an overlay of `x`
+// addons.MergeDocument. The pinned yq (.bin/b.yaml) merges an overlay of `x`
 // into a NEW node: `y: *a`, an alias of the same anchored value, keeps its
 // own content (`.y.q` is null after the merge). A merge that writes into
 // the accumulator's existing value node in place, as the former

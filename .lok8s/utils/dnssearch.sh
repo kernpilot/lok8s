@@ -177,7 +177,7 @@ dnssearch::_unset_without_flag() {
   [[ -z "${tag}" || "${tag}" == '!!null' ]]
 }
 
-# dnssearch::_yq_version — the version of the yq on PATH (v4.53.3), or
+# dnssearch::_yq_version — the version of the yq on PATH (vX.Y.Z), or
 # "version unknown".
 dnssearch::_yq_version() {
   local version

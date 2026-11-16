@@ -5,7 +5,7 @@ package audit
 // the bash gets from yq. `policyAuditMode: True` must stay "True" (≠ "true" →
 // the unknown branch), `~` must stay "~", `1.0` must stay "1.0"; a decoded
 // bool/float would silently canonicalize all three (verified against the
-// pinned yq v4.53: it preserves scalar style even through a merge).
+// pinned yq of .bin/b.yaml: it preserves scalar style even through a merge).
 
 import (
 	"errors"

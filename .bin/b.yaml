@@ -15,7 +15,17 @@ binaries:
     groups: [core]
   jq:
     groups: [core]
+  # yq is PINNED: without a version, `b install` resolved the latest
+  # release and rewrote the tracked b.lock. The pinned version is the
+  # release that CI installed while yq was unpinned. The release that b.lock
+  # recorded before the pin, v4.52.5, panics on the expressions of the bash
+  # version reader (.lok8s/utils/spec.sh: "index out of range [-1]"). Bump
+  # the version, the lock and mise.toml together. `b install` (all, as CI
+  # runs it) and `b install yq@<version>` honour the pin. A bare
+  # `b install yq` does not: b v4.18.8 takes its built-in yq preset, not
+  # this entry, for a named install, so it gets the latest release.
   yq:
+    version: v4.54.3
     groups: [core]
   renvsubst:
     alias: envsubst
