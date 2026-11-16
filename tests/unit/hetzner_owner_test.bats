@@ -63,21 +63,60 @@ _part() {
   mv "${f}.new" "${f}"
 }
 
-# The fake keeps the parts of each kind in ${STORE}/<kind>.json: `create`
-# adds a part with the labels of its --label flags, `list` prints the store,
-# `describe` prints the part with that id, and `add-target`/`remove-target`
-# change the targets of a load balancer. Other writes succeed. Switches:
+# The fake keeps the parts of each kind in ${STORE}/<kind>.json. `list`
+# prints the store, `describe` prints the part with that id. `create` reads
+# its flags as hcloud does ("--flag value" and "--flag=value"), writes them
+# to ${STORE}/creates.jsonl ({"kind": ..., "flags": [[flag, value], ...]})
+# and adds a part with the labels of its --label flags. A server create
+# models two parts of hcloud:
+# - With no --ssh-key flag at all, the server gets the keys of
+#   FAKE_DEFAULT_SSH_KEYS (comma-separated ids: the option default-ssh-keys
+#   of the hcloud configuration). "--ssh-key=" sets the flag with no key.
+# - The image is found as hcloud-go finds it: a value that strconv.ParseInt
+#   reads is an id ("+4711" and "04711" are 4711); any other value is the
+#   name of an image in the store.
+# The writes add-target, remove-target, add-subnet, attach-to-network,
+# add-service, update-service and assign change the part. Other writes
+# succeed. Switches:
 #   HCLOUD_FAIL=<regex>   a command that matches fails (nothing is done)
+#   HCLOUD_FAIL_AFTER=<regex>  HCLOUD_FAIL applies only after a command that
+#                         matches this one
 #   HCLOUD_LOST=<regex>   a command that matches is done, but fails (a lost answer)
+#   HCLOUD_ERR=<text>     the error text of a command that fails
 #   LIST_FAILS_AFTER_CREATE=<kind>  after a create of <kind>, its list fails
 #   RELABEL_AFTER_LIST="<kind> <id> <value> [<n>]"  after the n-th (default:
 #                         first) list of <kind>, the owner label of that part
 #                         changes (another actor)
+#   RELABEL_AFTER_CALL="<kind> <id> <value> <regex>"  after the first command
+#                         that matches <regex> (done or failed), the owner
+#                         label of that part changes (another actor)
 _fake_hcloud() {
   hcloud() {
+    local rc=0 rk rid rv rre
     printf '%s\n' "$*" >> "${HCLOUD_LOG}"
-    if [[ -n "${HCLOUD_FAIL:-}" && "$*" =~ ${HCLOUD_FAIL} ]]; then
-      echo "hcloud: ${1} ${2} failed (server_error)" >&2
+    _fake_hcloud_call "$@" || rc=$?
+    if [[ -n "${HCLOUD_FAIL_AFTER:-}" && "$*" =~ ${HCLOUD_FAIL_AFTER} ]]; then
+      : > "${STORE}/fail-armed"
+    fi
+    read -r rk rid rv rre <<<"${RELABEL_AFTER_CALL:-}"
+    if [[ -n "${rre}" && ! -f "${STORE}/relabel-done" && "$*" =~ ${rre} ]]; then
+      : > "${STORE}/relabel-done"
+      _fake_set "${rk}" "${rid}" '.labels["lok8s.dev/owner"] = $v' --arg v "${rv}"
+    fi
+    return "${rc}"
+  }
+  # _fake_set <kind> <id> <jq-update> [jq args...]: changes the part <id>.
+  _fake_set() {
+    local f="${STORE}/${1}.json" id="${2}" upd="${3}"
+    shift 3
+    [[ -f "${f}" ]] || echo '[]' > "${f}"
+    jq -c --arg id "${id}" "$@" "map(if (.id | tostring) == \$id then ${upd} else . end)" "${f}" > "${f}.new"
+    mv "${f}.new" "${f}"
+  }
+  _fake_hcloud_call() {
+    if [[ -n "${HCLOUD_FAIL:-}" && "$*" =~ ${HCLOUD_FAIL} ]] &&
+       [[ -z "${HCLOUD_FAIL_AFTER:-}" || -f "${STORE}/fail-armed" ]]; then
+      echo "${HCLOUD_ERR:-hcloud: ${1} ${2} failed (server_error)}" >&2
       return 1
     fi
     local kind="${1}" verb="${2}" lost=0
@@ -96,24 +135,43 @@ _fake_hcloud() {
         local rk rid rv rn
         read -r rk rid rv rn <<<"${RELABEL_AFTER_LIST:-}"
         if [[ "${rk}" == "${kind}" && "$(grep -cx -- "${kind}" "${STORE}/lists")" == "${rn:-1}" ]]; then
-          jq -c --arg id "${rid}" --arg v "${rv}" \
-            'map(if (.id | tostring) == $id then .labels["lok8s.dev/owner"] = $v else . end)' "${f}" > "${f}.new"
-          mv "${f}.new" "${f}"
+          _fake_set "${kind}" "${rid}" '.labels["lok8s.dev/owner"] = $v' --arg v "${rv}"
         fi ;;
       create)
-        local name="" labels='{}' id
+        local -a fl=()
+        local k v id name labels extra='{}' keys image
         while (( $# )); do
           case "${1}" in
-            --name) name="${2}"; shift 2 ;;
-            --label)
-              labels="$(jq -c --arg kv "${2}" '. + ($kv | split(",")
-                | map(split("=") | {(.[0]): (.[1:] | join("="))}) | add)' <<<"${labels}")"
-              shift 2 ;;
-            *) shift ;;
+            --*=*) k="${1%%=*}"; v="${1#*=}"; shift ;;
+            --*) k="${1}"; v="${2-}"; shift; (( $# == 0 )) || shift ;;
+            *) shift; continue ;;
           esac
+          fl+=("${k#--}" "${v}")
         done
+        jq -cn --arg kind "${kind}" '$ARGS.positional as $a
+          | {kind: $kind, flags: [range(0; $a | length; 2) as $j | [$a[$j], $a[$j + 1]]]}' \
+          --args "${fl[@]}" >> "${STORE}/creates.jsonl"
+        name="$(tail -n1 "${STORE}/creates.jsonl" | jq -r '[.flags[] | select(.[0] == "name") | .[1]] | last // ""')"
+        labels="$(tail -n1 "${STORE}/creates.jsonl" | jq -c '[.flags[] | select(.[0] == "label") | .[1]
+          | split(",")[] | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {}')"
+        if [[ "${kind}" == "server" ]]; then
+          keys="$(tail -n1 "${STORE}/creates.jsonl" | jq -c --arg d "${FAKE_DEFAULT_SSH_KEYS:-}" '
+            [.flags[] | select(.[0] == "ssh-key") | .[1]] as $s
+            | if ($s | length) == 0 then ($d | split(",") | map(select(. != "")))
+              else [$s[] | split(",")[] | select(. != "")] end')"
+          image="$(tail -n1 "${STORE}/creates.jsonl" | jq -r '[.flags[] | select(.[0] == "image") | .[1]] | last // ""')"
+          if [[ "${image}" =~ ^[+-]?[0-9]+$ ]]; then
+            v="${image#[+-]}"
+            v=$(( 10#${v} ))
+            [[ "${image}" != -* ]] || v=$(( -v ))
+          else
+            v="$(jq -r --arg n "${image}" 'first(.[] | select(.name == $n) | .id) // "null"' "${STORE}/image.json" 2>/dev/null)" || v=null
+            [[ -n "${v}" ]] || v=null
+          fi
+          extra="$(jq -cn --argjson k "${keys}" --argjson img "${v}" '{ssh_keys: $k, image: {id: $img}}')"
+        fi
         id=$(( 100 + $(cat "${STORE}"/*.json | jq -s 'map(length) | add') ))
-        _part "${kind}" "${id}" "${name}" "${labels}"
+        _part "${kind}" "${id}" "${name}" "${labels}" "${extra}"
         [[ "${LIST_FAILS_AFTER_CREATE:-}" != "${kind}" ]] || : > "${STORE}/list-fails-${kind}" ;;
       describe)
         jq -c --arg r "${1}" 'first(.[] | select((.id | tostring) == $r)) // error("not found")' "${f}" 2>/dev/null ||
@@ -129,22 +187,53 @@ _fake_hcloud() {
           esac
         done
         if [[ "${verb}" == "add-target" ]]; then
-          jq -c --arg lb "${lb}" --argjson t "${t}" \
-            'map(if (.id | tostring) == $lb then .targets = ((.targets // []) + [$t + {use_private_ip: false}]) else . end)' "${f}" > "${f}.new"
+          _fake_set "${kind}" "${lb}" '.targets = ((.targets // []) + [$t + {use_private_ip: false}])' --argjson t "${t}"
         else
-          jq -c --arg lb "${lb}" --argjson t "${t}" \
-            'map(if (.id | tostring) == $lb then .targets = [ (.targets // [])[] | select((del(.use_private_ip)) != $t) ] else . end)' "${f}" > "${f}.new"
+          _fake_set "${kind}" "${lb}" '.targets = [ (.targets // [])[] | select((del(.use_private_ip)) != $t) ]' --argjson t "${t}"
+        fi ;;
+      add-subnet)
+        local net="${1}" r=""
+        while (( $# )); do
+          [[ "${1}" != "--ip-range" ]] || r="${2}"
+          shift
+        done
+        _fake_set "${kind}" "${net}" '.subnets = ((.subnets // []) + [{ip_range: $r}])' --arg r "${r}" ;;
+      attach-to-network)
+        local lb="${1}" n=""
+        while (( $# )); do
+          [[ "${1}" != "--network" ]] || n="${2}"
+          shift
+        done
+        if jq -e --arg lb "${lb}" --arg n "${n}" 'any(.[]; (.id | tostring) == $lb
+             and any((.private_net // [])[]; (.network | tostring) == $n))' "${f}" >/dev/null; then
+          echo "hcloud: load balancer is already attached to the network (load_balancer_already_attached)" >&2
+          return 1
         fi
-        mv "${f}.new" "${f}" ;;
+        _fake_set "${kind}" "${lb}" '.private_net = ((.private_net // []) + [{network: ($n | tonumber)}])' --arg n "${n}" ;;
+      add-service|update-service)
+        local lb="${1}" p="" lp="" dp=""
+        while (( $# )); do
+          case "${1}" in
+            --protocol) p="${2}" ;;
+            --listen-port) lp="${2}" ;;
+            --destination-port) dp="${2}" ;;
+          esac
+          shift
+        done
+        _fake_set "${kind}" "${lb}" '.services = ([ (.services // [])[] | select((.listen_port | tostring) != $lp) ]
+          + [{protocol: $p, listen_port: ($lp | tonumber), destination_port: ($dp | tonumber)}])' \
+          --arg p "${p}" --arg lp "${lp}" --arg dp "${dp}" ;;
+      assign)
+        _fake_set "${kind}" "${1}" '.server = ($s | tonumber)' --arg s "${2}" ;;
       *) : ;;
     esac
     if (( lost )); then
-      echo "hcloud: timeout awaiting response headers" >&2
+      echo "${HCLOUD_ERR:-hcloud: timeout awaiting response headers}" >&2
       return 1
     fi
     return 0
   }
-  export -f hcloud
+  export -f hcloud _fake_set _fake_hcloud_call
 }
 
 # One part of every kind the provision makes. cp-0 uses the key, the
@@ -183,6 +272,14 @@ _provision() {
 # _writes: the hcloud calls that change something (all but list/describe).
 _writes() {
   grep -vE '^[a-z-]+ (list|describe)( |$)' "${HCLOUD_LOG}" || true
+}
+
+# _created <kind> <flag>: the values of <flag> in each create of <kind>, as
+# the fake read them (one line per value).
+_created() {
+  [[ -f "${STORE}/creates.jsonl" ]] || return 0
+  jq -r --arg k "${1}" --arg f "${2}" 'select(.kind == $k) | .flags[] | select(.[0] == $f) | .[1]' \
+    "${STORE}/creates.jsonl"
 }
 
 # _all_parts <labels-json>: every descriptor part exists with these labels.
@@ -536,15 +633,16 @@ _foreign_parts() {
   _part server 78 their-cp '{"lok8s.dev/cluster":"prod"}'
 }
 
-# _refused_refs: the provision stops in the refs step: no write at all.
+# _refused_refs: the provision stops in the refs step: no write at all
+# (checked first), then the summary.
 _refused_refs() {
   run _provision
-  assert_failure
-  assert_output --partial "reference(s) of the descriptor are refused. Nothing was created or changed."
-  local out="${output}"
+  local out="${output}" rc="${status}"
   run _writes
   assert_output ""
-  output="${out}"
+  output="${out}" status="${rc}"
+  assert_failure
+  assert_output --partial "refused key(s) or reference(s). Nothing was created or changed."
 }
 
 @test "refs: every server reference to a foreign part, by name, by id or by id string, is refused before any create" {
@@ -552,7 +650,7 @@ _refused_refs() {
   yq -i -o json '.server[0] += {"ssh-key": ["their-key"], "network": "72", "volume": ["their-vol"],
     "firewall": ["their-fw"], "placement-group": "75", "primary-ipv4": 76, "primary-ipv6": "their-ip6"}' "${DESC}"
   _refused_refs
-  assert_output --partial "7 reference(s) of the descriptor are refused"
+  assert_output --partial "the descriptor has 7 refused key(s) or reference(s)."
   assert_output --partial "refused server 'cp-0': ssh-key: ssh-key 'their-key' (id 71) does not have the owner mark of this cluster (lok8s.dev/owner=${MARK})"
   assert_output --partial "first make sure that id 71 is yours ('hcloud ssh-key describe 71'), then mark it one time: hcloud ssh-key add-label 71 lok8s.dev/owner=${MARK}"
   assert_output --partial "refused server 'cp-0': network: network 'their-net' (id 72) does not have the owner mark"
@@ -577,15 +675,15 @@ _refused_refs() {
 
 @test "refs: a key with a #suffix goes through the same check, as a string and as a number" {
   _foreign_parts
-  _part server 999 also-theirs '{}'
-  yq -i -o json 'del(.volume[0].server) | .volume[0]["server#ref"] = "78" | .volume[0]["server#two"] = 999
+  _part ssh-key 999 also-theirs '{}'
+  yq -i -o json 'del(.volume[0].server) | .volume[0]["server#ref"] = "78"
     | .["floating-ip"][0]["server#x"] = "their-cp"
     | .["load-balancer"][0]["network#x"] = "their-net"
-    | .server[0]["ssh-key#2"] = ["their-key"]' "${DESC}"
+    | .server[0]["ssh-key#2"] = ["their-key"] | .server[0]["ssh-key#3"] = [999]' "${DESC}"
   _refused_refs
   assert_output --partial "refused volume 'prod-data': server: server 'their-cp' (id 78) does not have the owner mark"
   # A number on a reference key is an index into the descriptor, also with a suffix.
-  assert_output --partial "refused volume 'prod-data': server: the descriptor has no server with the index 999."
+  assert_output --partial "refused server 'cp-0': ssh-key: the descriptor has no ssh-key with the index 999."
   assert_output --partial "refused floating-ip 'prod-ip': server: server 'their-cp' (id 78)"
   assert_output --partial "refused load-balancer 'prod-api': network: network 'their-net' (id 72)"
   assert_output --partial "refused server 'cp-0': ssh-key: ssh-key 'their-key' (id 71)"
@@ -607,7 +705,7 @@ _refused_refs() {
   assert_output --partial "refused server 'cp-0': network: true is a boolean."
   assert_output --partial "refused server 'cp-0': firewall: null is a null."
   assert_output --partial "refused server 'cp-0': ssh-key is empty."
-  assert_output --partial "refused volume 'prod-data': server: hcloud volume create takes one server, and the descriptor names 2."
+  assert_output --partial "refused volume 'prod-data': server: hcloud volume create takes one server, not a list."
   assert_output --partial "refused floating-ip 'prod-ip': server: 'a,b' is not one id or name."
 }
 
@@ -682,6 +780,79 @@ v
   assert_success
   run grep -E '^server create ' "${HCLOUD_LOG}"
   assert_output --regexp ' --image 5 '
+}
+
+# ── the form of the keys and values ──────────────────────
+
+@test "keys: a key that is not a flag name (network=999, image=4711) is refused, and no create runs" {
+  _part network 999 their-net '{}'
+  _part image 4711 "" '{}' '{"type":"snapshot"}'
+  yq -i -o json '.server[0]["network=999"] = "unused" | .server[0]["image=4711"] = "ubuntu-24.04"' "${DESC}"
+  run _provision
+  local out="${output}" rc="${status}"
+  # hcloud reads "--network=999" as the network 999 and "--image=4711" as
+  # the image 4711: no create gets them.
+  run _created server network
+  refute_output --partial "999"
+  run _created server image
+  refute_output --partial "4711"
+  run _writes
+  assert_output ""
+  output="${out}" status="${rc}"
+  assert_failure
+  assert_output --partial "refused server 'cp-0': the key \"network=999\" is not the name of an hcloud flag."
+  assert_output --partial "refused server 'cp-0': the key \"image=4711\" is not the name of an hcloud flag."
+  assert_output --partial "the descriptor has 2 refused key(s) or reference(s). Nothing was created or changed."
+}
+
+@test "image: a signed or zero-padded id of a foreign snapshot (+4711, 04711) is refused before any create" {
+  _part image 4711 "" '{}' '{"type":"snapshot"}'
+  local v out rc
+  for v in "+4711" "04711"; do
+    yq -i -o json ".server[0].image = \"${v}\"" "${DESC}"
+    run _provision
+    out="${output}" rc="${status}"
+    # hcloud reads both as the image id 4711 (strconv.ParseInt).
+    run jq -c '[.[] | .image.id // empty]' "${STORE}/server.json"
+    assert_output "[]"
+    run _writes
+    assert_output ""
+    output="${out}" status="${rc}"
+    assert_failure
+    assert_output --partial "refused server 'cp-0': image: '${v}' is an image id for hcloud (it has a sign or a leading zero). Write the id as plain digits, for example 4711."
+  done
+}
+
+@test "ssh-key: a server without ssh-key gets no default key of the hcloud configuration" {
+  _part ssh-key 71 their-key '{}'
+  # The option default-ssh-keys of the hcloud configuration names the key
+  # 71 (no owner mark): hcloud adds it when the create has no --ssh-key.
+  export FAKE_DEFAULT_SSH_KEYS=71
+  yq -i -o json 'del(.server[0]["ssh-key"])' "${DESC}"
+  run _provision
+  local out="${output}" rc="${status}"
+  run jq -c '[.[] | select(.name == "cp-0") | .ssh_keys]' "${STORE}/server.json"
+  assert_output '[[]]'
+  run jq -c 'select(.kind == "server") | [.flags[] | select(.[0] == "ssh-key")]' "${STORE}/creates.jsonl"
+  assert_output '[["ssh-key",""]]'
+  output="${out}" status="${rc}"
+  assert_success
+}
+
+@test "refs: a list on a one-part flag, an image list and a bare-metal server are refused before any create, also when the part comes later" {
+  _part image 4711 "" '{}' '{"type":"snapshot"}'
+  # cp-0 and cp-1 are made in this run, before the volumes; metal-0 is a
+  # bare-metal server (no Cloud part).
+  yq -i -o json '.server += [{"name": "cp-1", "type": "cx23", "image": "ubuntu-24.04", "location": "fsn1", "ssh-key": [0]},
+      {"name": "metal-0", "#cloud.root": "true"}]
+    | .volume[0].server = [0, 1]
+    | .volume += [{"name": "metal-data", "size": 10, "server": 2}]
+    | .server[0].image = [4711]' "${DESC}"
+  _refused_refs
+  assert_output --partial "refused volume 'prod-data': server: hcloud volume create takes one server, not a list. Write one index, id or name."
+  assert_output --partial "refused server 'cp-0': image: [4711] is not one image. Write one image name or id."
+  assert_output --partial "refused volume 'metal-data': server: server 'metal-0' of the descriptor is a bare-metal server (#cloud.root)."
+  assert_output --partial "the descriptor has 3 refused key(s) or reference(s)."
 }
 
 # ── a part that changes between the check and the write ──
@@ -824,6 +995,95 @@ load-balancer remove-target 14 --server 77"
   assert_output --partial "It can route to a server of another owner. Remove it with 'hcloud load-balancer remove-target prod-api --label-selector ${old}'"
 }
 
+# ── load balancer: a failed check stops the hook ─────────
+
+@test "lb: the audit read reports another owner: no service write after it" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  # Another actor gives the LB another owner mark right after the selector
+  # add: the next read is the read of the audit.
+  export RELABEL_AFTER_CALL="load-balancer 14 ${OTHER} ^load-balancer add-target 14 --label-selector"
+  run _provision
+  local out="${output}" rc="${status}"
+  run grep -E '^load-balancer (add|update)-service ' "${HCLOUD_LOG}"
+  assert_output ""
+  output="${out}" status="${rc}"
+  assert_failure
+  assert_output --partial "did not change load-balancer 14: it does not have the owner mark of this cluster now"
+}
+
+@test "lb: a failed server list of the audit: no service write after it" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  export HCLOUD_FAIL='^server list -o json$' HCLOUD_FAIL_AFTER='^load-balancer add-target 14 --label-selector'
+  run _provision
+  local out="${output}" rc="${status}"
+  run grep -E '^load-balancer (add|update)-service ' "${HCLOUD_LOG}"
+  assert_output ""
+  output="${out}" status="${rc}"
+  assert_failure
+  assert_output --partial "lb prod-api: could not list the servers ('hcloud server list')"
+}
+
+@test "lb: each service write reads the load balancer first: a changed owner stops the next one" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  yq -i -o json '.["load-balancer"][0]["#services"] += [{"protocol": "tcp", "listen-port": "80", "destination-port": "80"}]' "${DESC}"
+  export RELABEL_AFTER_CALL="load-balancer 14 ${OTHER} ^load-balancer add-service 14"
+  run _provision
+  local out="${output}" rc="${status}"
+  run grep -E '^load-balancer (add|update)-service ' "${HCLOUD_LOG}"
+  assert_output "load-balancer add-service 14 --protocol tcp --listen-port 6443 --destination-port 6443"
+  output="${out}" status="${rc}"
+  assert_failure
+  assert_output --partial "did not change load-balancer 14: it does not have the owner mark of this cluster now"
+}
+
+@test "lb: the selector add reads the load balancer first: a changed owner stops it" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  export RELABEL_AFTER_CALL="load-balancer 14 ${OTHER} ^load-balancer add-target 14 --server"
+  run _provision
+  local out="${output}" rc="${status}"
+  run grep -E '^load-balancer (add-target|remove-target|add-service|update-service) ' "${HCLOUD_LOG}"
+  assert_output "load-balancer add-target 14 --server 15"
+  output="${out}" status="${rc}"
+  assert_failure
+  assert_output --partial "did not change load-balancer 14: it does not have the owner mark of this cluster now"
+}
+
+@test "lb: each removal of the audit reads the load balancer first: a changed owner stops the next one" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  _part server 77 their-cp '{"lok8s.dev/cluster":"prod","lok8s.dev/role":"control-plane"}'
+  local dropped="lok8s.dev/cluster=prod,lok8s.dev/role=old-role"
+  _lb_targets "[{\"type\":\"label_selector\",\"label_selector\":{\"selector\":\"${dropped}\"},\"use_private_ip\":false},
+    {\"type\":\"server\",\"server\":{\"id\":77},\"use_private_ip\":false}]"
+  export RELABEL_AFTER_CALL="load-balancer 14 ${OTHER} ^load-balancer remove-target 14"
+  run _provision
+  local out="${output}" rc="${status}"
+  run grep -E '^load-balancer (remove-target|add-service|update-service) ' "${HCLOUD_LOG}"
+  assert_output "load-balancer remove-target 14 --label-selector ${dropped}"
+  output="${out}" status="${rc}"
+  assert_failure
+  assert_output --partial "did not change load-balancer 14: it does not have the owner mark of this cluster now"
+}
+
+@test "lb: each retry of a target add reads the load balancer first: a changed owner stops the retries" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  # The live target 15 has use-private-ip true; the descriptor wants false:
+  # remove, then add with retries. Each add fails; after the first one the
+  # LB gets another owner mark.
+  _lb_targets '[{"type":"server","server":{"id":15},"use_private_ip":true}]'
+  export HETZNER_LB_ADD_DELAY=0
+  export HCLOUD_FAIL='^load-balancer add-target 14 --server'
+  export RELABEL_AFTER_CALL="load-balancer 14 ${OTHER} ^load-balancer add-target 14 --server"
+  run _provision
+  local out="${output}" rc="${status}"
+  run grep -cE '^load-balancer add-target 14 --server' "${HCLOUD_LOG}"
+  assert_output "1"
+  run grep -E '^load-balancer (add-target 14 --label-selector|add-service|update-service)' "${HCLOUD_LOG}"
+  assert_output ""
+  output="${out}" status="${rc}"
+  assert_failure
+  assert_output --partial "removed target server '15', and did not add it again: the load balancer changed"
+}
+
 # ── the outcome after a failure ──────────────────────────
 
 # _provision_real: provider::provision itself (it writes the state dump).
@@ -864,4 +1124,89 @@ _provision_real() {
   assert_output "0"
   run grep -E '^network add-subnet ' "${HCLOUD_LOG}"
   assert_output --regexp '^network add-subnet 102 '
+}
+
+# ── a failed write fails its step ────────────────────────
+
+@test "write: a failed add-subnet fails the network step, and the changes are listed" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  export HCLOUD_FAIL='^network add-subnet'
+  run _provision
+  assert_failure
+  assert_output --partial "hetzner: network prod-net: could not add the subnet 10.0.1.0/24: hcloud: network add-subnet failed (server_error)"
+  assert_output --partial "hetzner network failed"
+  assert_output --partial "the provision stopped after it made changes, so the result is partial"
+  assert_output --partial "not confirmed (hcloud exit 1; it can be done or not): hcloud network add-subnet 13 "
+  run _writes
+  refute_output --partial "load-balancer"
+}
+
+@test "write: a failed floating-IP assign fails the server step, and the changes are listed" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  export HCLOUD_FAIL='^floating-ip assign'
+  run _provision
+  assert_failure
+  assert_output --partial "hetzner: server cp-0: could not assign floating-ip 12: hcloud: floating-ip assign failed (server_error)"
+  assert_output --partial "hetzner server failed"
+  assert_output --partial "not confirmed (hcloud exit 1; it can be done or not): hcloud floating-ip assign 12 15"
+}
+
+@test "write: a failed LB attach fails the load-balancer step before any target, and the changes are listed" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  export HCLOUD_FAIL='^load-balancer attach-to-network'
+  run _provision
+  local out="${output}" rc="${status}"
+  run _writes
+  refute_output --partial "add-target"
+  refute_output --partial "add-service"
+  output="${out}" status="${rc}"
+  assert_failure
+  assert_output --partial "lb prod-api: could not attach the load balancer to network 'prod-net' (id 13)"
+  assert_output --partial "hetzner load-balancer failed"
+  assert_output --partial "not confirmed (hcloud exit 1; it can be done or not): hcloud load-balancer attach-to-network 14 --network 13"
+}
+
+@test "write: a lost answer of the LB attach fails the step too: only an answer that it exists is checked by a new read" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  # The attach is done, but hcloud fails (no answer): a new read shows the
+  # network, and the step fails all the same.
+  export HCLOUD_LOST='^load-balancer attach-to-network'
+  run _provision
+  local out="${output}" rc="${status}"
+  run _writes
+  refute_output --partial "add-target"
+  refute_output --partial "add-service"
+  output="${out}" status="${rc}"
+  assert_failure
+  assert_output --partial "lb prod-api: could not attach the load balancer to network 'prod-net' (id 13): hcloud: timeout awaiting response headers"
+  refute_output --partial "A new read does not show the network"
+}
+
+@test "write: a failed add-service fails the load-balancer step, and the changes are listed" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  export HCLOUD_FAIL='^load-balancer add-service'
+  run _provision
+  assert_failure
+  assert_output --partial "lb prod-api: could not add service tcp:6443 -> 6443: hcloud: load-balancer add-service failed (server_error)"
+  assert_output --partial "hetzner load-balancer failed"
+  assert_output --partial "not confirmed (hcloud exit 1; it can be done or not): hcloud load-balancer add-service 14 "
+}
+
+@test "write: an answer that the subnet exists is accepted only when a new read shows the subnet" {
+  _all_parts "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  export HCLOUD_ERR='hcloud: the subnet already exists (conflict)'
+  # The add fails with "already", and the network has no such subnet.
+  export HCLOUD_FAIL='^network add-subnet'
+  run _provision
+  assert_failure
+  assert_output --partial "hetzner: network prod-net: could not add the subnet 10.0.1.0/24: hcloud: the subnet already exists (conflict)"
+  # The add is done, the answer says "already": a new read shows the subnet.
+  unset HCLOUD_FAIL
+  export HCLOUD_LOST='^network add-subnet'
+  : > "${HCLOUD_LOG}"
+  run _provision
+  assert_success
+  assert_output --partial "10.0.1.0/24"$'\033[0m (it exists)'
+  run jq -c '.[0].subnets' "${STORE}/network.json"
+  assert_output '[{"ip_range":"10.0.1.0/24"}]'
 }

@@ -1007,6 +1007,24 @@ load-balancer add-service 6 --protocol tcp --listen-port 6443 --destination-port
   assert_output "63"
 }
 
+# A failed list is no answer, also when hcloud printed a list before it
+# failed, and also in a shell without pipefail.
+_cloud_server_id_no_pipefail() {
+  set +o pipefail
+  hetzner::_cloud_server_id "$@"
+}
+
+@test "hetzner::_cloud_server_id: a failed server list gives no id, also when it printed a list" {
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    echo '[{"id":42,"name":"cp-0","labels":{"lok8s.dev/cluster":"test-cluster","lok8s.dev/owner":"'"${MARK}"'"}}]'
+    return 1
+  }
+  run _cloud_server_id_no_pipefail cp-0 lok8s.dev/cluster=test-cluster "${MARK}" test-cluster
+  assert_output ""
+  assert_failure
+}
+
 # The rebuild acts on the server id that the preflight checked, never on a
 # name: hcloud reads an all-digit name as an id, and a name can move to
 # another server between the preflight and the reimage.
@@ -1092,4 +1110,35 @@ _rebuild_ids_hcloud() {
   refute_output --partial "server rebuild"
   run cat "${CURL_LOG}"
   refute_output --partial "/rescue"
+}
+
+@test "provider::rebuild refuses a signed or zero-padded id of a foreign snapshot (+4711, 04711) before any reimage" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    local own='{"lok8s.dev/cluster":"test-cluster","lok8s.dev/owner":"'"${MARK}"'"}'
+    case "$1 $2" in
+      "server list")
+        echo '[{"id":10,"name":"cp-0","status":"running","public_net":{"ipv4":{"ip":"192.0.2.10"}},"labels":'"${own}"'}]' ;;
+      "server describe") echo '{"id":10,"name":"cp-0","labels":'"${own}"'}' ;;
+      "image list") echo '[{"id":4711,"type":"snapshot","labels":{}}]' ;;
+      *"list") echo '[]' ;;
+    esac
+    return 0
+  }
+  export -f hcloud
+  local v out rc
+  for v in "+4711" "04711"; do
+    : > "${HCLOUD_LOG}"
+    yq -i -o json ".server[0].image = \"${v}\"" "${DESC}"
+    run provider::rebuild "${DESC}" "${WORK}"
+    out="${output}" rc="${status}"
+    # hcloud reads both as the image id 4711 (strconv.ParseInt).
+    run grep -E '^server rebuild ' "${HCLOUD_LOG}"
+    assert_output ""
+    output="${out}" status="${rc}"
+    assert_failure
+    assert_output --partial "image: '${v}' is an image id for hcloud (it has a sign or a leading zero). Write the id as plain digits, for example 4711."
+    assert_output --partial "rebuild: nothing was reimaged."
+  done
 }

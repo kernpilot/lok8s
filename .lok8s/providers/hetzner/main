@@ -696,13 +696,16 @@ provider::rebuild() {
       # and the owner mark; the plan keeps its id ──
       sid="$(hetzner::_cloud_server_id "${name}" "${selector}" "${mark}" "${cluster_name}")" || {
         error "rebuild: cloud node '${name}' does not resolve to exactly one server carrying ${selector} — refusing to reimage"; return 1; }
-      image="$(echo "${server}" | jq -r '.image // "ubuntu-24.04"')"
-      # An image id of a snapshot or backup needs the owner mark too.
+      # The image, checked as for a create (hetzner::_image_ok): an id must
+      # be plain digits (hcloud reads "+4711" and "04711" as the id 4711),
+      # and a snapshot or backup id needs the owner mark. The reimage gets
+      # the value that the check passed.
       _HETZNER_REFUSED=()
       _HETZNER_LISTS=()
-      hetzner::_image_ok server "${name}" "${image}" "${mark}" || {
+      hetzner::_image_ok server "${name}" "$(echo "${server}" | jq -c '.image // "ubuntu-24.04"')" "${mark}" || {
         hetzner::_print_refused
         error "rebuild: nothing was reimaged."; return 1; }
+      image="${REPLY}"
       cloud_d="$(echo "${server}" | jq -r '.["#cloud.d"] // ""')"
       declare -F cloud-config::generate &>/dev/null || {
         error "rebuild: cloud-config generator unavailable"; return 1; }
@@ -941,14 +944,18 @@ hetzner::_robot_server_number_by_ip() {
 # all-digit name ("900") is an id to hcloud, and a name can move to another
 # server after the check.
 hetzner::_cloud_server_id() {
-  local name="${1:-}" selector="${2:-}" mark="${3:-}" cluster="${4:-}" sid
+  local name="${1:-}" selector="${2:-}" mark="${3:-}" cluster="${4:-}" sid out
   [[ -n "${name}" && -n "${selector}" && -n "${mark}" && -n "${cluster}" ]] || return 1
-  sid="$(hcloud server list -o json -l "${selector}" 2>/dev/null | jq -r \
+  # The exit code of hcloud is checked on its own (not through a pipe): a
+  # failed list is no answer, also when it printed a list.
+  out="$(hcloud server list -o json -l "${selector}" 2>/dev/null)" || return 1
+  jq -e 'type == "array" or type == "null"' >/dev/null 2>&1 <<<"${out}" || return 1
+  sid="$(jq -r \
     --arg n "${name}" --arg key "${_HETZNER_OWNER_KEY}" --arg mark "${mark}" --arg c "${cluster}" '
     [ (. // [])[]
       | select(.name == $n and (.labels // {})[$key] == $mark and (.labels // {})["lok8s.dev/cluster"] == $c)
       | .id | tostring ]
-    | if length == 1 then .[0] else empty end' 2>/dev/null)" || return 1
+    | if length == 1 then .[0] else empty end' <<<"${out}" 2>/dev/null)" || return 1
   [[ "${sid}" =~ ^[0-9]+$ ]] || return 1
   printf '%s\n' "${sid}"
 }

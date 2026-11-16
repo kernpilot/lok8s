@@ -436,13 +436,33 @@ existing part only when it has the mark of this cluster:
   `server`, `volume`, `firewall` or `placement-group` is an index into the
   descriptor list of that kind; a string is the name of a descriptor part,
   or an id or a name of a part outside the descriptor.
+- A reference that `hcloud` takes for one part only (the `server` of a
+  volume or a floating IP, the `network` of a load balancer) takes one
+  index, id or name, not a list. A reference to a bare-metal server
+  (`#cloud.root`) is refused: it is not a Hetzner Cloud part.
 - lok8s does not create firewalls, placement groups and primary IPs. To use
   one, put the mark on it yourself (see the steps below). This is also true
   for a snapshot or a backup that you give as the `image` of a server by its
   id. An image name (`ubuntu-24.04`) is a public image and needs no mark.
+  Write an image id as plain digits (`4711`): `hcloud` reads `+4711` and
+  `04711` as the id 4711 too, so lok8s refuses these forms. An image is one
+  value, not a list.
+- Each key of a part is the name of a flag of `hcloud <kind> create`
+  (`a-z`, `0-9` and `-`), with an optional suffix (`"server#2"`). lok8s
+  refuses each other key, for example `"network=999"`, before the first
+  create. A switch of `hcloud` (for example `start-after-create`,
+  `automount`, `without-ipv4`) takes `true` or `false`.
+- A server without `ssh-key` in the descriptor gets no SSH key from
+  Hetzner. lok8s gives `hcloud server create` the flag `--ssh-key=` with no
+  value, so `hcloud` does not add the keys of its option
+  `default-ssh-keys`: lok8s cannot check the mark of these keys. Write each
+  key that a server must have in `ssh-key`.
 - Right before each change (a subnet, a floating IP assignment, a load
-  balancer network or target), lok8s reads the parts by id again and checks
-  their mark. A part that changed stops the step.
+  balancer network, target or service, each retry, each removal), lok8s
+  reads the parts by id again and checks their mark. A part that changed,
+  or a read that failed, stops the step: no change of that part follows.
+- A change that fails stops its step, and the provision fails. An answer
+  that the thing exists already is accepted only when a new read shows it.
 - A `label-selector` target of a load balancer gets the term
   `lok8s.dev/owner=<mark>`, so the load balancer sends traffic only to the
   servers of this cluster. A `server` target must be a server of the
@@ -493,7 +513,14 @@ whose part it is. Do not run the commands without a check:
 4. Run `lo provision` again.
 
 Mark a primary IP, a firewall, a placement group or a snapshot image the
-same way: `hcloud primary-ip add-label <id> lok8s.dev/owner=<mark>`.
+same way, with the command of its kind:
+
+```bash
+hcloud primary-ip add-label <id> lok8s.dev/owner=<mark>
+hcloud firewall add-label <id> lok8s.dev/owner=<mark>
+hcloud placement-group add-label <id> lok8s.dev/owner=<mark>
+hcloud image add-label <id> lok8s.dev/owner=<mark>
+```
 
 lok8s does not adopt an unmarked part by itself, and it has no flag for
 that. If you rename the domain, the mark changes. A part with the mark of

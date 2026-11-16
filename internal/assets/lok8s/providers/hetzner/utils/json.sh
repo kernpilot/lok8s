@@ -74,6 +74,28 @@ _HETZNER_REF_KEYS='["ssh-key","network","server","volume","placement-group","fir
 # The kinds that the provision creates, in the order of its steps.
 _HETZNER_CREATE_KINDS=(ssh-key floating-ip network load-balancer server volume)
 
+# The form of a descriptor key that becomes an hcloud flag: the flag name
+# (a-z, 0-9 and "-"), with an optional suffix "#..." that only makes the key
+# unique ("server#2" is --server). Any other key is refused: a key such as
+# "network=999" reached hcloud as "--network=999", with a value that no check
+# saw. A key that starts with "#" is a note for the hooks, not a flag.
+_HETZNER_KEY_RE='^[a-z0-9][a-z0-9-]*(#[A-Za-z0-9._-]*)?$'
+
+# The boolean switches of each create command (hcloud CLI v1.70.2,
+# internal/cmd/<kind>/create.go, the Bool flags). Only these keys take true
+# or false, as one "--key=<bool>" token: cobra reads no value token after a
+# switch. Any other key with true or false is refused.
+declare -gA _HETZNER_SWITCHES=(
+  [server]="start-after-create automount allow-deprecated-image without-ipv4 without-ipv6 enable-backup"
+  [volume]="automount"
+  [network]="expose-routes-to-vswitch"
+)
+
+# The flags of one create, made by hetzner::_part_args from the values that
+# its checks passed, and the checked value of each descriptor key.
+_HETZNER_ARGS=()
+declare -gA _HETZNER_ARGVAL=()
+
 # jq definition: the hcloud value of one descriptor entry (.key, .value).
 # $root is the whole descriptor, $refs is _HETZNER_REF_KEYS. The key is read
 # without its "#..." suffix. A list on a reference key becomes the
@@ -249,15 +271,6 @@ hetzner::_changes_note() {
   fi
 }
 
-# hetzner::_ref_kinds_json: _HETZNER_REF_KIND as a JSON object, for jq.
-hetzner::_ref_kinds_json() {
-  local k out=""
-  for k in "${!_HETZNER_REF_KIND[@]}"; do
-    out+="${out:+,}\"${k}\":\"${_HETZNER_REF_KIND[${k}]}\""
-  done
-  printf '{%s}\n' "${out}"
-}
-
 # hetzner::_create_order <kind>: the step number of <kind> in the provision.
 # rc 1 when the provision does not create that kind.
 hetzner::_create_order() {
@@ -330,7 +343,7 @@ hetzner::_ref_match() {
 # not refused and not in REPLY (the create loop resolves it after that create).
 hetzner::_ref_ids() {
   local what="${1}" i="${2}" key="${3}" raw="${4}" mark="${5}" later="${6-}"
-  local kind="${_HETZNER_REF_KIND[${key}]}" pname where el type value idx tid tname row
+  local kind="${_HETZNER_REF_KIND[${key}]}" pname where el type value idx tid tname troot row
   local one=1 bad=0 n_what n_kind
   local -a ids=() els=()
   REPLY=""
@@ -344,6 +357,12 @@ hetzner::_ref_ids() {
   mapfile -t els < <(jq -c 'if type == "array" then .[] else . end' <<<"${raw}" 2>/dev/null)
   if (( ${#els[@]} == 0 )); then
     _HETZNER_REFUSED+=("${where} is empty. Write an index, an id or a name, or remove the key.")
+    return 1
+  fi
+  # The form comes first, before any part is resolved: also a reference to a
+  # part that this run creates later is checked here.
+  if (( one )) && [[ "$(jq -r 'type' <<<"${raw}" 2>/dev/null)" == "array" ]]; then
+    _HETZNER_REFUSED+=("${where}: hcloud ${what} create takes one ${kind}, not a list. Write one index, id or name.")
     return 1
   fi
   for el in "${els[@]}"; do
@@ -376,16 +395,29 @@ hetzner::_ref_ids() {
     if [[ -n "${idx}" ]]; then
       row="$(hetzner::json -r --arg k "${kind}" --argjson n "${idx}" '
         (.[$k] // [])[$n] // null
-        | if . == null then "missing" else [ (.id // "" | tostring), (.name // "") ] | join("\u001f") end')"
+        | if . == null then "missing"
+          else [ (.id // "" | tostring), (.name // ""), ((.["#cloud.root"] // "") | tostring) ] | join("\u001f") end')"
       if [[ "${row}" == "missing" ]]; then
         _HETZNER_REFUSED+=("${where}: the descriptor has no ${kind} with the index ${idx}.")
         bad=1; continue
       fi
-      IFS=$'\x1f' read -r tid tname <<<"${row}"
+      IFS=$'\x1f' read -r tid tname troot <<<"${row}"
+      # A bare-metal server is not a Cloud part: hcloud has no id for it.
+      if [[ "${troot}" == "true" ]]; then
+        _HETZNER_REFUSED+=("${where}: ${kind} '${tname}' of the descriptor is a bare-metal server (#cloud.root). It is not a Hetzner Cloud part, so hcloud ${what} create cannot use it.")
+        bad=1; continue
+      fi
       if [[ -z "${tid}" ]]; then
         n_what="$(hetzner::_create_order "${what}")" || n_what=""
         if n_kind="$(hetzner::_create_order "${kind}")"; then
+          # A part that this run creates in an earlier step: the refs step
+          # checks the form only; the create resolves it after that create.
           if [[ -n "${later}" && -n "${n_what}" ]] && (( n_kind < n_what )); then
+            continue
+          fi
+          # A dry run created nothing: the plan shows the name of the part.
+          if [[ -n "${CLOUD_DRY_RUN:-}" && -n "${n_what}" ]] && (( n_kind < n_what )); then
+            ids+=("${tname}")
             continue
           fi
           if [[ -n "${n_what}" ]] && (( n_kind < n_what )); then
@@ -420,15 +452,45 @@ hetzner::_ref_ids() {
   REPLY="${ids[*]}"
 }
 
-# hetzner::_image_ok <what> <name> <image> <mark>
-# An image that is not all digits is a name: hcloud resolves a name only
-# among the public system and app images (a snapshot has no name), so it is
-# not checked. An all-digit image is an id: a system or app image passes; a
-# snapshot or a backup is a part of the project and needs this cluster's
-# owner mark. A refusal is added to _HETZNER_REFUSED; rc 1.
+# hetzner::_image_ok <what> <name> <image-json> <mark>
+# REPLY: the image value for hcloud. <image-json> is the descriptor value as
+# JSON. hcloud reads an image value as an id when strconv.ParseInt(v, 10, 64)
+# accepts it, and only then as a name: hcloud CLI v1.70.2
+# internal/cmd/server/create.go:297 and internal/cmd/server/rebuild.go:49 call
+# Image().GetForArchitecture; hcloud-go v2.53.0 hcloud/image.go:139 calls
+# getByIDOrName, hcloud/client_helper.go:73:
+#     if id, err := strconv.ParseInt(idOrName, 10, 64); err == nil {
+# ParseInt takes a sign and leading zeros: "+4711" and "04711" are the id
+# 4711. So:
+# - Digits with a sign or a leading zero are refused: write an id as plain
+#   digits.
+# - Plain digits are an id. A system or app image passes; a snapshot or a
+#   backup is a part of the project and needs this cluster's owner mark.
+# - Any other string is a name. hcloud finds a name only among the system and
+#   app images (a snapshot has no name), so it is not checked.
+# A value that is not one string or number (a list, true, null) is refused.
+# A refusal is added to _HETZNER_REFUSED; rc 1.
 hetzner::_image_ok() {
-  local what="${1}" pname="${2}" image="${3}" mark="${4}" row type m msg
-  [[ "${image}" =~ ^[0-9]+$ ]] || return 0
+  local what="${1}" pname="${2}" raw="${3}" mark="${4}" image row type m msg
+  REPLY=""
+  case "$(jq -r 'type' <<<"${raw}" 2>/dev/null)" in
+    string|number) image="$(jq -r 'tostring' <<<"${raw}")" ;;
+    *)
+      _HETZNER_REFUSED+=("${what} '${pname}': image: ${raw} is not one image. Write one image name or id.")
+      return 1 ;;
+  esac
+  if [[ -z "${image}" ]]; then
+    _HETZNER_REFUSED+=("${what} '${pname}': image is empty. Write one image name or id.")
+    return 1
+  fi
+  if [[ "${image}" =~ ^[+-]?[0-9]+$ && ! "${image}" =~ ^[1-9][0-9]*$ ]]; then
+    _HETZNER_REFUSED+=("${what} '${pname}': image: '${image}' is an image id for hcloud (it has a sign or a leading zero). Write the id as plain digits, for example 4711.")
+    return 1
+  fi
+  if [[ ! "${image}" =~ ^[0-9]+$ ]]; then
+    REPLY="${image}"
+    return 0
+  fi
   if ! hetzner::_list image; then
     _HETZNER_REFUSED+=("${what} '${pname}': image ${image}: could not list the images ('hcloud image list'). Check the hcloud token and the API.")
     return 1
@@ -438,19 +500,126 @@ hetzner::_image_ok() {
     | if . == null then "none" else [ (.type // ""), ((.labels // {})[$key] // "") ] | join("\u001f") end' <<<"${REPLY}" 2>/dev/null)" || row=""
   IFS=$'\x1f' read -r type m <<<"${row}"
   case "${type}" in
-    system|app) return 0 ;;
+    system|app) REPLY="${image}"; return 0 ;;
     none) msg="no image has the id ${image}" ;;
     "") msg="could not read the image list" ;;
     *)
-      [[ "${m}" != "${mark}" ]] || return 0
+      if [[ "${m}" == "${mark}" ]]; then
+        REPLY="${image}"
+        return 0
+      fi
       if [[ -z "${m}" ]]; then
         msg="image ${image} (a ${type}) does not have the owner mark of this cluster (${_HETZNER_OWNER_KEY}=${mark}). If it is yours, first make sure with 'hcloud image describe ${image}', then mark it one time: hcloud image add-label ${image} ${_HETZNER_OWNER_KEY}=${mark}"
       else
         msg="image ${image} (a ${type}) has the owner mark of another cluster (${_HETZNER_OWNER_KEY}=${m}; this cluster: ${mark})"
       fi ;;
   esac
+  REPLY=""
   _HETZNER_REFUSED+=("${what} '${pname}': image: ${msg}.")
   return 1
+}
+
+# hetzner::_part_args <what> <i> <mark> [later]
+# Checks every key and value of the descriptor part <what>[<i>] that becomes
+# a flag of 'hcloud <what> create', and puts the flags into _HETZNER_ARGS.
+# Each flag is made from the exact key (without its "#..." suffix) and the
+# value that the check passed. _HETZNER_ARGVAL[<key>] is the checked value
+# of each key (the server hook exports them). Each refusal is added to
+# _HETZNER_REFUSED; rc 1. A key that starts with "#" is a note for the hooks,
+# not a flag; "id" is the verified id that the lookup wrote.
+# - A key must have the form _HETZNER_KEY_RE.
+# - A reference key: hetzner::_ref_ids (the ids of parts with the mark only).
+#   A one-part reference flag and image can be in a part one time only.
+# - image: hetzner::_image_ok.
+# - A switch of _HETZNER_SWITCHES takes true or false: one "--key=<bool>".
+# - Any other key takes a string, a number or a list of these (a list is
+#   comma-separated, as hcloud reads it). true, false, null and an object
+#   are refused.
+# A server create gets "--ssh-key=" when the part has no ssh-key: then hcloud
+# adds no SSH key from its own configuration (the option default-ssh-keys,
+# which lok8s cannot check). hcloud CLI v1.70.2
+# internal/cmd/server/create.go:364 adds the default keys only when the flag
+# is not set:
+#     if !flags.Changed("ssh-key") && config.OptionDefaultSSHKeys.Changed(s.Config()) {
+# An empty value sets the flag with no key (pflag v1.0.10 string_slice.go:23
+# reads "" as an empty list).
+# With "later" (the refs step), a reference to a part that this run creates
+# in an earlier step is checked for its form only (hetzner::_ref_ids).
+hetzner::_part_args() {
+  local what="${1}" i="${2}" mark="${3}" later="${4-}"
+  local pname key nk raw type val k has_key=0 n0="${#_HETZNER_REFUSED[@]}"
+  local -A seen=()
+  _HETZNER_ARGS=()
+  _HETZNER_ARGVAL=()
+  pname="$(hetzner::json -r --arg w "${what}" --argjson i "${i}" '.[$w][$i].name // ""')"
+  # The form of each key first. A key that is not a flag name is shown as
+  # JSON (it can hold any character); no other check runs on the part.
+  while IFS= read -r k; do
+    [[ -n "${k}" ]] || continue
+    _HETZNER_REFUSED+=("${what} '${pname}': the key ${k} is not the name of an hcloud flag. A key is a flag name (a-z, 0-9 and -), with an optional suffix (#...). Write the value as the value of the key.")
+  done < <(hetzner::json -r --arg w "${what}" --argjson i "${i}" --arg re "${_HETZNER_KEY_RE}" '
+    .[$w][$i] | keys_unsorted[] | select(startswith("#") | not) | select(. != "id")
+    | select(test($re) | not) | @json')
+  (( ${#_HETZNER_REFUSED[@]} == n0 )) || return 1
+  while IFS= read -r key; do
+    [[ -n "${key}" ]] || continue
+    nk="${key%%#*}"
+    raw="$(hetzner::json -c --arg w "${what}" --argjson i "${i}" --arg k "${key}" '.[$w][$i][$k]')"
+    type="$(jq -r 'type' <<<"${raw}")"
+    [[ "${nk}" != "ssh-key" ]] || has_key=1
+    # A one-part reference flag or image: one key only (hcloud takes the
+    # last of two, so two keys are a list too).
+    if [[ "${nk}" == "image" ]] ||
+       { [[ -n "${_HETZNER_REF_KIND[${nk}]:-}" ]] &&
+         ! { [[ "${what}" == "server" ]] && [[ " ssh-key network volume firewall " == *" ${nk} "* ]]; }; }; then
+      if [[ -n "${seen[${nk}]:-}" ]]; then
+        _HETZNER_REFUSED+=("${what} '${pname}': ${nk}: the keys ${seen[${nk}]} and ${key} both give it, and hcloud ${what} create takes one. Keep one key.")
+        continue
+      fi
+      seen["${nk}"]="${key}"
+    fi
+    if [[ -n "${_HETZNER_REF_KIND[${nk}]:-}" ]]; then
+      hetzner::_ref_ids "${what}" "${i}" "${nk}" "${raw}" "${mark}" "${later}" || continue
+      val="${REPLY}"
+      # Only a reference that the refs step checks later has no id yet.
+      [[ -n "${val}" ]] || continue
+    elif [[ "${nk}" == "image" ]]; then
+      hetzner::_image_ok "${what}" "${pname}" "${raw}" "${mark}" || continue
+      val="${REPLY}"
+    elif [[ " ${_HETZNER_SWITCHES[${what}]:-} " == *" ${nk} "* ]]; then
+      if [[ "${type}" != "boolean" ]]; then
+        _HETZNER_REFUSED+=("${what} '${pname}': ${key}: ${raw} is not true or false. --${nk} is a switch of hcloud ${what} create.")
+        continue
+      fi
+      _HETZNER_ARGS+=("--${nk}=${raw}")
+      _HETZNER_ARGVAL["${key}"]="${raw}"
+      continue
+    else
+      case "${type}" in
+        string|number) val="$(jq -r 'tostring' <<<"${raw}")" ;;
+        array)
+          if ! val="$(jq -er 'select(length > 0 and all(.[]; type == "string" or type == "number"))
+              | map(tostring) | join(",")' <<<"${raw}")"; then
+            _HETZNER_REFUSED+=("${what} '${pname}': ${key}: ${raw} is not a list of values. Write a value or a list of strings and numbers.")
+            continue
+          fi ;;
+        *)
+          _HETZNER_REFUSED+=("${what} '${pname}': ${key}: ${raw} is a ${type}. Write a value (true and false only for a switch of hcloud ${what} create).")
+          continue ;;
+      esac
+      # hcloud receives values verbatim: expand a leading ~ (for example
+      # public-key-from-file: ~/.ssh/...).
+      # shellcheck disable=SC2088 # literal "~/" prefix match, expanded via $HOME on the same line
+      [[ "${val}" != "~/"* ]] || val="${HOME}/${val:2}"
+    fi
+    _HETZNER_ARGS+=("--${nk}" "${val}")
+    _HETZNER_ARGVAL["${key}"]="${val}"
+  done < <(hetzner::json -r --arg w "${what}" --argjson i "${i}" '
+    .[$w][$i] | keys_unsorted[] | select(startswith("#") | not) | select(. != "id")')
+  if [[ "${what}" == "server" ]] && (( ! has_key )); then
+    _HETZNER_ARGS+=("--ssh-key=")
+  fi
+  (( ${#_HETZNER_REFUSED[@]} == n0 ))
 }
 
 # hetzner::_print_refused: one error per entry of _HETZNER_REFUSED.
@@ -462,38 +631,29 @@ hetzner::_print_refused() {
 }
 
 # hetzner::refs
-# The step before the first create: checks every reference and every image
-# id of every part that this run creates (a part with no id that is not
-# #cloud.root). It reports all refusals and stops (rc 1) before anything is
-# created. The create loop resolves each reference again, right before its
-# create, and gives hcloud only the verified ids.
+# The step before the first create: checks every key and value of every part
+# that this run creates (a part with no id that is not #cloud.root), with
+# hetzner::_part_args: the key form, the references, the images, the
+# switches. It reports all refusals and stops (rc 1) before anything is
+# created. The create loop checks each part again right before its create,
+# and gives hcloud only the flags that the check made.
 hetzner::refs() {
-  local mark what i okey nk raw pname
+  local mark what i kinds
   mark="$(hetzner::owner_mark)" || return 1
   _HETZNER_REFUSED=()
   _HETZNER_LISTS=()
-  local kinds
   kinds="$(printf '"%s",' "${_HETZNER_CREATE_KINDS[@]}")"
-  while IFS=$'\x1f' read -r what i okey; do
+  while IFS=$'\x1f' read -r what i; do
     [[ -n "${what}" ]] || continue
-    nk="${okey%%#*}"
-    raw="$(hetzner::json -c --arg w "${what}" --argjson i "${i}" --arg k "${okey}" '.[$w][$i][$k]')"
-    if [[ "${nk}" == "image" ]]; then
-      pname="$(hetzner::json -r --arg w "${what}" --argjson i "${i}" '.[$w][$i].name // ""')"
-      hetzner::_image_ok "${what}" "${pname}" "$(jq -r 'tostring' <<<"${raw}")" "${mark}" || true
-    else
-      hetzner::_ref_ids "${what}" "${i}" "${nk}" "${raw}" "${mark}" later || true
-    fi
-  done < <(hetzner::json -r --argjson kinds "$(hetzner::_ref_kinds_json)" --argjson ws "[${kinds%,}]" '
+    hetzner::_part_args "${what}" "${i}" "${mark}" later || true
+  done < <(hetzner::json -r --argjson ws "[${kinds%,}]" '
     . as $root | $ws[] as $w
     | ($root[$w] // []) | to_entries[] | .key as $i | .value
     | select(type == "object" and .id == null and ((.["#cloud.root"] // "") | tostring) != "true")
-    | keys_unsorted[]
-    | select((sub("#.*$"; "")) as $nk | $kinds[$nk] != null or $nk == "image")
-    | [$w, ($i | tostring), .] | join("\u001f")')
+    | [$w, ($i | tostring)] | join("\u001f")')
   (( ${#_HETZNER_REFUSED[@]} > 0 )) || return 0
   hetzner::_print_refused
-  error "hetzner: ${#_HETZNER_REFUSED[@]} reference(s) of the descriptor are refused. $(hetzner::_changes_note) Correct the descriptor, or mark your part as the message says, then run the provision again."
+  error "hetzner: the descriptor has ${#_HETZNER_REFUSED[@]} refused key(s) or reference(s). $(hetzner::_changes_note) Correct the descriptor, or mark your part as the message says, then run the provision again."
   return 1
 }
 
@@ -700,50 +860,29 @@ hetzner::create() {
     fi
     mapfile -t fields <<<"${out}"
 
-    # filter args from fields (skip #-prefixed). Each reference (a key of
-    # _HETZNER_REF_KIND, read without its "#..." suffix) is resolved again
-    # here, right before the create, from fresh lists: hcloud gets only the
-    # ids of parts with this cluster's owner mark, never a name. The fields
-    # get the ids too (the server hook exports them to cloud-init).
-    local field val okey nk raw
+    # The flags of the create: every key and value of the part is checked
+    # again here, right before the create, and the flags are made from
+    # exactly what the check passed (hetzner::_part_args): a key of another
+    # form is refused, a reference is resolved from fresh lists to the ids of
+    # parts with this cluster's owner mark (never a name), an image id must
+    # be plain digits. The hooks get the checked values (the server hook
+    # exports the fields to cloud-init).
+    local x okey
     local -a cmd=() args=()
     _HETZNER_REFUSED=()
     _HETZNER_LISTS=()
-    for (( x=0; x < ${#fields[@]}; x=x+2 )); do
-      [[ "${fields[x]:2:1}" != "#" ]] ||
-        continue
-
-      okey="${fields[x]#--}"
-      okey="${okey%%=*}"
-      nk="${okey%%#*}"
-      if [[ -n "${_HETZNER_REF_KIND[${nk}]:-}" ]]; then
-        raw="$(hetzner::json -c --arg w "${what}" --argjson i "${i}" --arg k "${okey}" '.[$w][$i][$k]')"
-        hetzner::_ref_ids "${what}" "${i}" "${nk}" "${raw}" "${mark}" || continue
-        fields[x + 1]="${REPLY}"
-      elif [[ "${nk}" == "image" ]]; then
-        hetzner::_image_ok "${what}" "${name}" "${fields[x + 1]}" "${mark}" || continue
-      fi
-
-      # A boolean switch is one "--key=value" token; its placeholder is dropped
-      # (the hook-suffix strip below applies to it like to any other key).
-      if [[ "${fields[x]}" == --*=* ]]; then
-        args+=("${fields[x]/%#*}")
-        continue
-      fi
-
-      val="${fields[x + 1]}"
-      # hcloud receives values verbatim — expand a leading ~ ourselves
-      # (e.g. ssh-key public-key-from-file: ~/.ssh/...)
-      # shellcheck disable=SC2088 # literal "~/" prefix match — expanded via $HOME on the same line, not meant to tilde-expand
-      [[ "${val}" != "~/"* ]] || val="${HOME}/${val:2}"
-      args+=("${fields[x]/%#*}" "${val}")
-    done
-
+    hetzner::_part_args "${what}" "${i}" "${mark}" || true
     if (( ${#_HETZNER_REFUSED[@]} > 0 )); then
       hetzner::_print_refused
-      error "hetzner: did not create ${what} '${name}': ${#_HETZNER_REFUSED[@]} of its references are refused (above). $(hetzner::_changes_note)"
+      error "hetzner: did not create ${what} '${name}': ${#_HETZNER_REFUSED[@]} of its keys or references are refused (above). $(hetzner::_changes_note)"
       return 1
     fi
+    args=("${_HETZNER_ARGS[@]}")
+    for (( x=0; x < ${#fields[@]}; x=x+2 )); do
+      okey="${fields[x]#--}"
+      okey="${okey%%=*}"
+      [[ -z "${_HETZNER_ARGVAL[${okey}]+set}" ]] || fields[x + 1]="${_HETZNER_ARGVAL[${okey}]}"
+    done
 
     # check for create hook. The owner mark comes after the descriptor's own
     # --label: hcloud merges repeated --label flags and the last value of a
