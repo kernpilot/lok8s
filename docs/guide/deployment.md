@@ -487,6 +487,14 @@ existing part only when it has the mark of this cluster:
   selector target does not select it.
 - The inventory for KubeOne (API endpoint, hosts, the private network of the
   cloud controller manager) contains only parts with the mark.
+- `lo destroy` deletes only the parts that have the label
+  `lok8s.dev/cluster=<cluster_name>` and the mark of this cluster. A part
+  with the cluster label and no mark, or with the mark of another cluster,
+  is not deleted. The destroy plan shows each such part as skipped, with the
+  reason and the `hcloud <kind> add-label` command that marks it. Two domains
+  with the same `cluster_name` in one Hetzner project have two marks, so the
+  destroy of one domain does not delete the parts of the other domain. When
+  a list of parts fails, the destroy stops and deletes nothing.
 - `lo recover` reimages a cloud server by the id that it checked, and it
   reads the server by that id again right before the reimage. A server that
   has another name or no mark at that time is not reimaged.
@@ -519,7 +527,9 @@ command for each part:
 ```
 
 lok8s found each of these parts by its name only, and a name does not tell
-whose part it is. Do not run the commands without a check:
+whose part it is. `lo destroy` does not delete a part without the mark:
+mark the parts first, or delete them yourself. Do not run the commands
+without a check:
 
 1. For each part, run `hcloud <kind> describe <id>`. Make sure that the
    part is a part of this cluster (its labels, its servers, its addresses).

@@ -132,7 +132,22 @@ _fake_hcloud() {
           echo "hcloud: ${kind} list failed (server_error)" >&2
           return 1
         fi
-        cat "${f}"
+        # -l <selector>: only the parts that have each "<key>=<value>" term
+        # (a comma is AND). A term of another form fails the list, so a
+        # broken selector fails the test that runs it.
+        local sel=""
+        while (( $# )); do
+          case "${1}" in
+            -l|--selector) sel="${2-}"; shift; (( $# )) && shift ;;
+            --selector=*) sel="${1#*=}"; shift ;;
+            *) shift ;;
+          esac
+        done
+        jq -c --arg sel "${sel}" '
+          [ $sel | select(. != "") | split(",")[]
+            | if test("^[^=!,() ]+=[^=!,() ]*$") then {k: .[:index("=")], v: .[index("=") + 1:]}
+              else error("fake hcloud: unsupported selector term: \(.)") end ] as $terms
+          | map(select(. as $p | all($terms[]; (($p.labels // {})[.k] // null) == .v)))' "${f}" || return 1
         echo "${kind}" >> "${STORE}/lists"
         local rk rid rv rn
         read -r rk rid rv rn <<<"${RELABEL_AFTER_LIST:-}"
@@ -1355,4 +1370,90 @@ _provision_real() {
   assert_output --partial "10.0.1.0/24"$'\033[0m (it exists)'
   run jq -c '.[0].subnets' "${STORE}/network.json"
   assert_output '[{"ip_range":"10.0.1.0/24"}]'
+}
+
+# ── the fake's label selector ────────────────────────────
+
+@test "fake: hcloud list takes only the parts with each term of -l (a comma is AND), and fails on another form" {
+  _part server 31 a '{"lok8s.dev/cluster":"prod","lok8s.dev/role":"control-plane"}'
+  _part server 32 b '{"lok8s.dev/cluster":"prod"}'
+  _part server 33 c '{"lok8s.dev/cluster":"other","lok8s.dev/role":"control-plane"}'
+  run hcloud server list -o json
+  assert_output --partial '"id":33'
+  run hcloud server list -o json -l lok8s.dev/cluster=prod
+  assert_success
+  assert_output "$(jq -c '[.[] | select(.id == 31 or .id == 32)]' "${STORE}/server.json")"
+  run hcloud server list -o json -l lok8s.dev/cluster=prod,lok8s.dev/role=control-plane
+  assert_success
+  assert_output "$(jq -c '[.[] | select(.id == 31)]' "${STORE}/server.json")"
+  run hcloud server list -o json -l 'lok8s.dev/cluster!=prod'
+  assert_failure
+  assert_output --partial "fake hcloud: unsupported selector term"
+}
+
+# ── destroy ──────────────────────────────────────────────
+
+# _destroy_parts: two parts with the cluster label and this mark, one with
+# the cluster label and the mark of the same cluster_name in another domain,
+# one with the cluster label and no mark, and one with this mark and another
+# cluster label (only a broken selector lists it).
+_destroy_parts() {
+  _part server 21 cp-0 "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  _part server 22 cp-0 "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${OTHER}\"}"
+  _part server 23 old-0 '{"lok8s.dev/cluster":"prod"}'
+  _part volume 24 prod-data "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  _part volume 25 other-data "{\"lok8s.dev/cluster\":\"other\",\"lok8s.dev/owner\":\"${MARK}\"}"
+}
+
+@test "destroy: the plan and the destroy take only the parts with the cluster label and this mark; the others are skipped with the reason" {
+  _destroy_parts
+  local plan
+  plan="$(provider::destroy_plan "${DESC}" "${BATS_TEST_TMPDIR}" 2>"${BATS_TEST_TMPDIR}/plan.err")"
+  [ "${plan}" = "$(printf 'cluster\tprod\nserver\t21\tcp-0\nvolume\t24\tprod-data')" ]
+  run cat "${BATS_TEST_TMPDIR}/plan.err"
+  assert_output --partial "hetzner: skipped server 22 cp-0: it has lok8s.dev/cluster=prod, but the owner mark of another cluster (lok8s.dev/owner=${OTHER}; this cluster: ${MARK}). lok8s does not delete it."
+  assert_output --partial "hcloud server add-label --overwrite 22 lok8s.dev/owner=${MARK}"
+  assert_output --partial "hetzner: skipped server 23 old-0: it has lok8s.dev/cluster=prod, but not the owner mark of this cluster (lok8s.dev/owner=${MARK}). lok8s does not delete a part that can belong to another person or cluster."
+  assert_output --partial "('hcloud server describe 23'), then mark it one time: hcloud server add-label 23 lok8s.dev/owner=${MARK}."
+  refute_output --partial "skipped server 21"
+  refute_output --partial "skipped volume 24"
+  refute_output --partial " 25 "
+  # Every list is scoped to the cluster label; the plan deletes nothing.
+  run grep -vc -- ' list -o json -l lok8s.dev/cluster=prod$' "${HCLOUD_LOG}"
+  assert_output "0"
+
+  : > "${HCLOUD_LOG}"
+  run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
+  assert_success
+  assert_output --partial "hetzner: skipped server 22 cp-0"
+  assert_output --partial "hetzner: skipped server 23 old-0"
+  run _writes
+  assert_output "server delete 21
+volume delete 24"
+}
+
+@test "destroy: a confirmed plan that names a part of another domain or an unmarked part deletes only the marked part" {
+  _destroy_parts
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod\nserver\t21\tcp-0\nserver\t22\tcp-0\nserver\t23\told-0\nvolume\t25\tother-data'
+  run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
+  assert_success
+  assert_output --partial "hetzner: skipped server 22 of the confirmed plan: no server with this id carries lok8s.dev/cluster=prod and the owner mark of this cluster now."
+  assert_output --partial "hetzner: skipped server 23 of the confirmed plan"
+  assert_output --partial "hetzner: skipped volume 25 of the confirmed plan"
+  assert_output --partial "hetzner: kept volume 24 prod-data (lok8s.dev/cluster=prod): it is not in the confirmed plan."
+  run _writes
+  assert_output "server delete 21"
+}
+
+@test "destroy: no domain for the mark stops the plan and the destroy before any hcloud call" {
+  _destroy_parts
+  unset PROVIDER_DOMAIN
+  run provider::destroy_plan "${DESC}" "${BATS_TEST_TMPDIR}"
+  assert_failure
+  assert_output --partial "PROVIDER_DOMAIN is empty"
+  refute_output --partial "cluster	prod"
+  run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
+  assert_failure
+  run cat "${HCLOUD_LOG}"
+  assert_output ""
 }

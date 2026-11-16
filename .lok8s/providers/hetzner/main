@@ -182,7 +182,7 @@ hetzner::_destroy_cluster_name() {
   local config_file="${1}" cluster_name=""
   cluster_name=$(_cfg '.cluster_name // ""' 2>/dev/null || echo "")
   [[ -n "${cluster_name}" ]] || {
-    error "hetzner: the descriptor ${config_file} has no cluster_name. The destroy deletes every resource that carries lok8s.dev/cluster=<cluster_name>, so it needs the name. Nothing was deleted. Set cluster_name in the descriptor."
+    error "hetzner: the descriptor ${config_file} has no cluster_name. The destroy finds its resources by lok8s.dev/cluster=<cluster_name> and the owner mark, so it needs the name. Nothing was deleted. Set cluster_name in the descriptor."
     return 1
   }
   echo "${cluster_name}"
@@ -193,17 +193,45 @@ _HETZNER_DESTROY_ORDER=(load-balancer server placement-group firewall volume flo
 
 # hetzner::_destroy_resources <cluster_name>
 # One "<resource>\t<id>\t<name>" line per hcloud resource that carries
-# lok8s.dev/cluster=<cluster_name>, in the order provider::destroy deletes
-# them. READ-ONLY. A list that fails stops it (rc 1): an empty list must
-# mean "no resource", never "hcloud did not answer".
+# lok8s.dev/cluster=<cluster_name> AND the owner mark of this cluster
+# (hetzner::owner_mark), in the order provider::destroy deletes them.
+# READ-ONLY. A resource with the cluster label and no mark, or the mark of
+# another cluster, is not listed: a warning on stderr names it, says why and
+# gives the one-time command that marks it. Two domains with the same
+# cluster_name in one Hetzner project have two marks, so the destroy of one
+# never lists the parts of the other. A list that fails, or a mark that
+# cannot be calculated, stops it (rc 1): an empty list must mean "no
+# resource", never "hcloud did not answer".
 hetzner::_destroy_resources() {
-  local selector="lok8s.dev/cluster=${1}" resource json
+  local cluster="${1}" key="${_HETZNER_OWNER_KEY}" selector="lok8s.dev/cluster=${1}"
+  local mark resource json kept skipped line rid rmark rname
+  mark="$(hetzner::owner_mark "${cluster}")" || return 1
   for resource in "${_HETZNER_DESTROY_ORDER[@]}"; do
+    # Two passes over one list: the parts with the mark, and the others as
+    # "<id>\t<mark>\t<name>" (the mark is empty when the part has none).
     if ! json="$(hcloud "${resource}" list -o json -l "${selector}")" ||
-       ! jq -r --arg r "${resource}" '(. // [])[] | [$r, (.id | tostring), (.name // "")] | @tsv' <<<"${json}"; then
+       ! kept="$(jq -r --arg r "${resource}" --arg key "${key}" --arg mark "${mark}" '
+           (. // [])[] | select(((.labels // {})[$key] // "") == $mark)
+           | [$r, (.id | tostring), (.name // "")] | @tsv' <<<"${json}")" ||
+       ! skipped="$(jq -r --arg key "${key}" --arg mark "${mark}" '
+           (. // [])[] | ((.labels // {})[$key] // "") as $m | select($m != $mark)
+           | [(.id | tostring), $m, (.name // "")] | @tsv' <<<"${json}")"; then
       error "hetzner: could not list the ${resource} resources with ${selector}. Nothing was deleted. Check the hcloud token and the API, then run the destroy again."
       return 1
     fi
+    [[ -z "${kept}" ]] || printf '%s\n' "${kept}"
+    # Split at each tab by hand: `IFS=$'\t' read` joins two tabs, and an
+    # empty mark would shift the name into it.
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      rid="${line%%$'\t'*}" line="${line#*$'\t'}"
+      rmark="${line%%$'\t'*}" rname="${line#*$'\t'}"
+      if [[ -z "${rmark}" ]]; then
+        warn "hetzner: skipped ${resource} ${rid} ${rname}: it has lok8s.dev/cluster=${cluster}, but not the owner mark of this cluster (${key}=${mark}). lok8s does not delete a part that can belong to another person or cluster. If it is a part of this cluster (an older lok8s made it), first make sure that id ${rid} is yours ('hcloud ${resource} describe ${rid}'), then mark it one time: hcloud ${resource} add-label ${rid} ${key}=${mark}. Then run lo destroy again, or delete it yourself."
+      else
+        warn "hetzner: skipped ${resource} ${rid} ${rname}: it has lok8s.dev/cluster=${cluster}, but the owner mark of another cluster (${key}=${rmark}; this cluster: ${mark}). lok8s does not delete it. Replace the mark only when you know that the mark ${rmark} is yours (for example, the mark of this cluster under its old domain; the guide shows how to calculate it): hcloud ${resource} add-label --overwrite ${rid} ${key}=${mark}."
+      fi
+    done <<<"${skipped}"
   done
 }
 
@@ -260,7 +288,7 @@ hetzner::_confirmed_rows() {
     if [[ -n "${live[${key}]:-}" ]]; then
       rows+="${live[${key}]}"$'\n'
     else
-      warn "hetzner: skipped ${kind} ${rid} of the confirmed plan: no ${kind} with this id carries lok8s.dev/cluster=${cluster_name} now. It is gone, or it is not of this cluster."
+      warn "hetzner: skipped ${kind} ${rid} of the confirmed plan: no ${kind} with this id carries lok8s.dev/cluster=${cluster_name} and the owner mark of this cluster now. It is gone, or it is not of this cluster."
     fi
   done <<<"${LOK8S_DESTROY_PLAN}"
 
@@ -285,8 +313,9 @@ provider::destroy() {
   cluster_name="$(hetzner::_destroy_cluster_name "${config_file}")" || return 1
   debug "destroying hetzner resources for ${cluster_name}"
 
-  # The live list: what carries lok8s.dev/cluster=<cluster_name> now. Every
-  # delete below is in it. A list that fails stops the destroy.
+  # The live list: what carries lok8s.dev/cluster=<cluster_name> and the
+  # owner mark of this cluster now. Every delete below is in it. A list that
+  # fails, or a mark that cannot be calculated, stops the destroy.
   listed="$(hetzner::_destroy_resources "${cluster_name}")" || return 1
 
   if [[ -n "${LOK8S_DESTROY_PLAN:-}" ]]; then
@@ -295,7 +324,7 @@ provider::destroy() {
     # live list can differ. The plan is checked line by line, because the
     # variable comes from the environment: an allowed type and a numeric id
     # only, else nothing is deleted. A plan id that is not in the live list
-    # is not deleted (it is gone, or it does not carry the label); a live
+    # is not deleted (it is gone, or it lost the label or the mark); a live
     # resource that is not in the plan stays.
     hetzner::_confirmed_rows "${cluster_name}" "${listed}" || return 1
     rows="${_HETZNER_CONFIRMED_ROWS}"
@@ -320,12 +349,16 @@ provider::destroy() {
 # provider::destroy_plan <config_file> <work_dir>
 #   READ-ONLY. What provider::destroy would delete. Line 1 is
 #   "cluster<TAB><cluster_name>", then one "<resource><TAB><id><TAB><name>"
-#   line per resource. provider::destroy deletes EVERY resource in the
-#   token's project that carries lok8s.dev/cluster=<cluster_name>, so
-#   `lo destroy` shows this list, refuses a cluster_name that another domain
-#   also uses, and asks for the cluster_name before it deletes anything. The
+#   line per resource. provider::destroy deletes each resource in the
+#   token's project that carries lok8s.dev/cluster=<cluster_name> and the
+#   owner mark of this cluster, so `lo destroy` shows this list, refuses a
+#   cluster_name that another domain also uses, and asks for the
+#   cluster_name before it deletes anything. A resource with the cluster
+#   label and without this mark is not in the list: a warning on stderr
+#   shows it as skipped, with the reason and the command that marks it. The
 #   confirmed plan comes back to provider::destroy in LOK8S_DESTROY_PLAN.
-#   Fails (rc 1) when the descriptor has no cluster_name or a list fails.
+#   Fails (rc 1) when the descriptor has no cluster_name, the mark cannot be
+#   calculated or a list fails.
 provider::destroy_plan() {
   local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
   export PROVIDER_CONFIG_FILE="${config_file}"

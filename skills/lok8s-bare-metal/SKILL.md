@@ -32,7 +32,9 @@ the id with `hcloud <kind> describe <id>` first: the match was by name only).
 Every reference (the keys above, also with a `#suffix`, plus `primary-ipv4`,
 `primary-ipv6` and a snapshot `image` id) must resolve to a resource with the
 mark, else the provision stops before the first create; `hcloud` gets ids only.
-`destroy` deletes by label `lok8s.dev/cluster=<cluster_name>`.
+`destroy` deletes by label `lok8s.dev/cluster=<cluster_name>`, and only the
+resources with the owner mark; it shows each other one as skipped, with the
+`add-label` command.
 
 ```json
 {
