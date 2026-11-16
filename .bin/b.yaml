@@ -16,14 +16,16 @@ binaries:
   jq:
     groups: [core]
   # yq is PINNED: without a version, `b install` resolved the latest
-  # release and rewrote the tracked b.lock. v4.52.5 is the release whose
-  # yq_linux_amd64 sha256 b.lock has held since 2026-06. Bump the version
-  # and the lock together. `b install` (all, as CI runs it) and
-  # `b install yq@v4.52.5` honour the pin. A bare `b install yq` does not:
+  # release and rewrote the tracked b.lock. v4.54.3 is the release that CI
+  # installed while yq was unpinned. The release that b.lock recorded,
+  # v4.52.5, panics on the expressions of the bash version reader
+  # (.lok8s/utils/spec.sh: "index out of range [-1]"). Bump the version and
+  # the lock together. `b install` (all, as CI runs it) and
+  # `b install yq@v4.54.3` honour the pin. A bare `b install yq` does not:
   # b v4.18.8 takes its built-in yq preset, not this entry, for a named
   # install, so it gets the latest release.
   yq:
-    version: v4.52.5
+    version: v4.54.3
     groups: [core]
   renvsubst:
     alias: envsubst
