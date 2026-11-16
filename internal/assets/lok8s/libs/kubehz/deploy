@@ -380,7 +380,7 @@ kubehz::deploy_apply() {
   overlay=$(kubehz::live_agent_overlay "${workdir}" "${access}")
 
   # 0. The bind secret before anything else, in both directions: every
-  #    CronJob pod that starts without it registers without it (B288).
+  #    CronJob pod that starts without it registers a separate pending row.
   kubehz::stage_bind_secret "${workdir}" "${domain}" || return 1
   # What a failure below has changed so far: a stage that returned 0 on a
   # valid file put the Secret in.
@@ -404,7 +404,7 @@ kubehz::deploy_apply() {
     # 2b. The identity Secret. The live agent mounts kubehz-agent, which only
     #     the CronJob's bootstrap creates, on its next five-minute tick; a
     #     first deploy that waits for the rollout alone loses that race about
-    #     half the time (B244). Run the bootstrap now and wait for its Job to complete.
+    #     half the time. Run the bootstrap now and wait for its Job to complete.
     kubehz::ensure_identity_secret || return 1
     # 3. Now the live agent, which becomes the only producer.
     kubectl apply -k "${overlay}" || {
@@ -558,10 +558,10 @@ kubehz::image_registry() {
   fi
 }
 
-# Put the one-time bind secret (B243) from clusters/<domain>/.kubehz-bind into
+# Put the one-time bind secret from clusters/<domain>/.kubehz-bind into
 # the Secret kubehz-system/kubehz-agent-bind. The CronJob's bootstrap reads it
 # (the optional env BIND_SECRET) and sends it on agent-register. The api adopts
-# the announced row only with this secret (B288): a register without it gets a
+# the announced row only with this secret: a register without it gets a
 # separate pending row, and every later tick keeps that row. So the Secret must
 # exist before the first CronJob pod starts, and a failed stage stops the
 # deploy before the CronJob agent.

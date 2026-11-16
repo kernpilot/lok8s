@@ -24,8 +24,8 @@ spec:
         spec:
           serviceAccountName: kubehz-agent
           restartPolicy: Never
-          # The heartbeat runs on a control-plane-only cluster too (B242): the
-          # same tolerations as the live agent's Deployment.
+          # The heartbeat runs on a control-plane-only cluster too (all nodes
+          # tainted): the same tolerations as the live agent's Deployment.
           tolerations:
             - key: node-role.kubernetes.io/control-plane
               operator: Exists
@@ -103,7 +103,7 @@ spec:
                   if [ -n "${AGENT_TOKEN}" ] && [ -n "${CLAIM_CODE}" ]; then
                     AGENT_TOKEN_HASH=$(printf %s "${AGENT_TOKEN}" | sha256_hex)
                     CLAIM_CODE_HASH=$(printf %s "${CLAIM_CODE}" | sha256_hex)
-                    # BIND_SECRET (B243): the one-time secret `lo kubehz deploy`
+                    # BIND_SECRET: the one-time secret `lo kubehz deploy`
                     # staged (optional env from kubehz-agent-bind). Present: the
                     # register ADOPTS the announced row wherever it lives now
                     # (pending, claimed or attributed) instead of minting a
@@ -111,7 +111,7 @@ spec:
                     # value never makes the JSON invalid; the server consumes it
                     # on the first adoption and every later tick is idempotent.
                     # Absent: the api does not adopt an announced row by
-                    # domain alone (B288), so the register gets a separate
+                    # domain alone, so the register gets a separate
                     # pending row. That is why the deploy stages the Secret
                     # before it applies this CronJob.
                     BIND_FIELD=""
@@ -180,7 +180,7 @@ spec:
                     sed -n 's/.*"gitVersion": *"\([^"]*\)".*/\1/p' | head -1)
 
                   # Nodes: ONE list call for all nodes, and jq makes the
-                  # per-node payload (B448). A kubectl call takes ~1.5 s on
+                  # per-node payload. A kubectl call takes ~1.5 s on
                   # prod. The old loop made 3 calls per node, so at ~18 nodes
                   # the tick ran past activeDeadlineSeconds (120 s) and the
                   # job was killed before the POST. The call count must not
@@ -307,7 +307,7 @@ spec:
                   # without the new RBAC) sends NOTHING — fail-closed beats
                   # spamming a full assessment every 5-minute tick.
                   #
-                  # B423: `timeout 5` bounds a kubectl call, never a kubectl
+                  # `timeout 5` bounds a kubectl call, never a kubectl
                   # client flag. Any client-config flag (--request-timeout,
                   # --server, --kubeconfig, --context, --token, ...) makes
                   # kubectl skip the in-cluster config and dial
@@ -392,8 +392,8 @@ spec:
                     # or a unix socket -> kine); neither pod visible (managed /
                     # external CP) -> "unknown". Reachability falls back to the
                     # /readyz etcd check captured above.
-                    # Every assessment probe runs under `timeout 5` (B423,
-                    # above): a stalled apiserver degrades THAT probe
+                    # Every assessment probe runs under `timeout 5` (see the
+                    # marker read above): a stalled apiserver degrades THAT probe
                     # instead of eating the whole beat (activeDeadlineSeconds
                     # is the backstop, but it kills the beat with it).
                     # A field the contract has no "unknown" value for (a count,
@@ -820,19 +820,19 @@ spec:
                 - configMapRef:
                     name: kubehz-agent-config
               env:
-                # The one-time bind secret (B243) `lo kubehz deploy` stages in
+                # The one-time bind secret `lo kubehz deploy` stages in
                 # kubehz-agent-bind, before it applies this CronJob, when a
                 # register wrote one. Optional: the Secret is absent on any
                 # install with no bind secret in play. The bootstrap then
                 # registers without it and gets a separate pending row, which
-                # the user claims by its claim code (B288).
+                # the user claims by its claim code.
                 - name: BIND_SECRET
                   valueFrom:
                     secretKeyRef:
                       name: kubehz-agent-bind
                       key: bind-secret
                       optional: true
-              # The limits are for a short burst (B448); the requests stay
+              # The limits are for a short burst; the requests stay
               # low. CPU: each kubectl call starts a Go binary. At a 200m
               # limit the pod was throttled in 99.8 % of its CFS periods on
               # prod, and a call took ~1.5 s. A tick runs for about 10 s

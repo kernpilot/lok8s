@@ -33,9 +33,9 @@ spec:
       automountServiceAccountToken: true
       # A self-hosted cluster can be control-plane-only, or its workers can
       # join after this deploy: without these tolerations the pod stays
-      # Pending on the tainted control plane and the cluster reports nothing
-      # (kubehz-cluster B242, 2026-09-23). The agent reads and heartbeats; a
-      # control-plane node is a valid node for it.
+      # Pending on the tainted control plane and the cluster reports nothing.
+      # The agent reads and heartbeats; a control-plane node is a valid node
+      # for it.
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists

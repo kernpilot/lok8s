@@ -19,8 +19,7 @@ _load_bats_libs() {
   # ${_PROJECT_ROOT}/.bin/lib therefore resolves to a real directory that is
   # missing the libraries, and every test dies in setup() with
   # "Could not find library 'bats-support'" — 1156 failures, 0 passes, which
-  # reads like a catastrophically broken branch rather than a missing path
-  # (AUDIT.md r830/r834/r835 lost time to exactly this three times).
+  # reads like a catastrophically broken branch rather than a missing path.
   #
   # `--git-common-dir` is the resolver: in a worktree it points at the main
   # repo's .git, in a normal checkout at ./.git, so the same expression covers

@@ -149,7 +149,7 @@ _provision_shared() {
   # "the Secret plugin is not built at …". Unguarded, that error was swallowed in
   # BOTH environments and nobody could tell the difference. Guarded, the driver
   # correctly aborts — and the test only fails where the plugin is absent, which
-  # is exactly the local-green/CI-red split that hid it (AUDIT.md r834).
+  # is exactly the local-green/CI-red split that hid it.
   #
   # Reproduce the CI condition locally with:
   #   KUSTOMIZE_PLUGIN_HOME=$(mktemp -d) ./.bin/argsh test tests/unit/kind_contract_test.bats

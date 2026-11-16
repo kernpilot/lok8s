@@ -459,7 +459,7 @@ func TestOnlyDryRunNumbersTheSelectionsFiles(t *testing.T) {
 	}
 }
 
-// The kubehz-cluster spec writes `- ./targets/flux: { dependsOn: [fluxcd] }`.
+// A project spec can write `- ./targets/flux: { dependsOn: [fluxcd] }`.
 // --only takes the key as written, the same as the entry name `flux`.
 func TestOnlyMatchesTheKeyAsWritten(t *testing.T) {
 	e, log, spec, kc, p := schedEngine(t, "fluxcd", "./targets/flux: {dependsOn: [fluxcd]}")

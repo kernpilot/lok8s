@@ -53,7 +53,7 @@ import urllib.parse
 
 CERT, KEY, PORT_FILE, LOG = sys.argv[1:5]
 TOKEN = "parity-jwt"
-# The bind secret that a register hands out (B289).
+# The bind secret that a register hands out; lo sends it on the next register.
 NEXT_BIND = "009c2b3a4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70"
 REGISTERED = {"id": "cl-parity", "registered": True, "claimed": True, "bindSecret": NEXT_BIND,
               "claimKey": {"publicKey": "ssh-ed25519 AAAA k", "fingerprint": "aa:bb",

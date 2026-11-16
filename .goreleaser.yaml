@@ -8,7 +8,7 @@
 #                                  linked in (lo-install.sh --full)
 #   kustomize-secret-<os>-<arch>   secrets.lok8s.dev/v1/Secret exec plugin
 #                                  — ASSET-NAME CONTRACT: consumed by
-#                                  kubehz-cluster/.bin/b.yaml (asset:
+#                                  downstream b.yaml entries (asset:
 #                                  kustomize-secret-*); see kustomize/Makefile
 #   lochat-<os>-<arch>             the `lo chat` engine (ai/lochat)
 #   lok8s-<tag>.tar.gz             framework tree (.lok8s/, operator/crds+deploy,

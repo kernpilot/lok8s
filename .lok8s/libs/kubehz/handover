@@ -2,8 +2,7 @@
 # shellcheck shell=bash disable=SC2034
 # vim: set syntax=bash:
 # kubehz-handover — eject TARGET side of a control-plane handover
-# (the cross-repo handover contract, §4 lok8s scope — kept verbatim with
-# kubehz-cluster/docs/internal/handover-implementation.md).
+# (the receive side of the control-plane handover contract).
 #
 # `lo kubehz handover receive --bundle <path>` restores an exported hosted
 # control plane onto THE NODE IT RUNS ON (kubeadm driver path): seed the

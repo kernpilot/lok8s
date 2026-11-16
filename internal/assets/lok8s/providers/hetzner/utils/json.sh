@@ -954,8 +954,8 @@ hetzner::create() {
     # `--without-ipv6=true`, the form cobra takes with no value token). It
     # travels as one "--key=value" token plus an empty placeholder that the
     # consumer below drops. Before this, `true` became `--without-ipv6 true`
-    # and hcloud read the value as a stray argument, so a server could not be
-    # created without IPv6.
+    # and hcloud read the value as a stray argument. The switch matters for
+    # an IPv4-only server, e.g. a KubeOne worker that pulls images over IPv4.
     # A conversion that fails stops here: a cut field list would shift every
     # key and value after it, and hcloud would get the wrong flags.
     # shellcheck disable=2016

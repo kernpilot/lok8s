@@ -22,10 +22,10 @@ import (
 // The khelm pin. github.com/mgoltzsche/khelm/v2 v2.8.0 is the SAME release
 // the toolchain pins as the ChartRenderer binary (internal/toolchain
 // pins.go — drift-tested against go.mod and the generated .bin/b.yaml;
-// kubehz-cluster pins v2.8.0 explicitly — "the pair PROVEN to reproduce
-// the committed artifacts byte-for-byte"). Its go.mod requires
-// helm.sh/helm/v3 v3.21.2, which the root go.mod pins as well: the chart
-// inflation is the same helm code the binary was built from. The version
+// a downstream project pins v2.8.0 with kustomize v5.8.1 as the pair
+// proven to reproduce its committed artifacts byte for byte). Its go.mod
+// requires helm.sh/helm/v3 v3.21.2, which the root go.mod pins as well:
+// the chart inflation is the same helm code the binary was built from. The version
 // strings only feed the "Running khelm …" log line the binary prints
 // (stderr, swallowed by kustomize unless the plugin fails).
 const (

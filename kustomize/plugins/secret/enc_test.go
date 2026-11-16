@@ -2,7 +2,7 @@ package secret
 
 // enc_test.go: the plugin run end to end (secret.Run, the entry point
 // cmd/secret and the in-process render call) against a store that holds a
-// committed .enc but not its plaintext (B425). It must stop and name the
+// committed .enc but not its plaintext. It must stop and name the
 // entry, never generate a new value over the encrypted one.
 
 import (

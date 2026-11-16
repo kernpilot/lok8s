@@ -11,9 +11,8 @@
 #
 # Verified against the pinned binary, not assumed (2026-08-06): feeding it a file
 # containing a canary string and capturing stderr reproduces the canary verbatim.
-# That is how an SSH private key blob reached session transcripts on 2026-06-26
-# and 2026-07-12/13 (FRICTION 2026-07-15; scrubbed, and the key was
-# passphrase-encrypted).
+# So the content of a file passed this way can reach a terminal log or a CI
+# transcript.
 #
 # lok8s already gets this right — `secrets::decrypt` redirects that stderr — and
 # the same measurement proves the redirect is what does it: with `2>/dev/null`

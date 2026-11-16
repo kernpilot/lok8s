@@ -4,7 +4,7 @@ package addons
 // RBAC that replaces the chart's ClusterRole `redis-operator`. That
 // ClusterRole grants create and delete on namespaces, Secrets, pods/exec and
 // more in every namespace, and its label aggregate-to-admin adds those rules
-// to the built-in ClusterRole `admin` (B446).
+// to the built-in ClusterRole `admin`, so every namespace admin gets them.
 //
 // The RBAC check is static, like suc_rbac_test.go, and it uses the same
 // evaluation helpers (rbac_helpers_test.go: rbacCall, rbacGrant,

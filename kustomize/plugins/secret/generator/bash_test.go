@@ -550,7 +550,7 @@ func TestBash_DryRunWithAllowWritesNoAllowFiles(t *testing.T) {
 }
 
 // A committed .sha.enc without its plaintext is an approval that is not
-// decrypted yet (B425). Trust on first use would write a fresh .sha and a
+// decrypted yet. Trust on first use would write a fresh .sha and a
 // fresh .bash-allow for whatever the command is now, so a changed command
 // would run without a review. The generator stops before it runs anything.
 func TestBash_EncryptedShaTwinStops(t *testing.T) {

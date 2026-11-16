@@ -51,7 +51,7 @@ secret_bin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret"
 [[ -x "${secret_bin}" ]] || make -C "${repo}/kustomize" build BIN_ROOT="${KUSTOMIZE_PLUGIN_HOME}" >/dev/null
 
 # kapply's progress UI writes to /dev/tty, so wrap provisioning in a PTY for
-# headless runs (see FRICTION.md / GOLIVE-TODO 0.2).
+# headless runs.
 run() { script -qec "$*" /dev/null; }
 
 # ── teardown (runs on every exit: success, failure, or interrupt) ─────────

@@ -122,9 +122,10 @@ func (p *Plugin) Build(env func(string) (string, bool), fileRoot string) (*plugi
 }
 
 // preflight refuses the run before any generator reads or writes the store
-// when an entry the Secret uses has its .enc but no plaintext (B425). A
-// refusal in the middle of the run (an earlier key generated, a later key
-// refused) would leave the store half-written. It checks the exact entries
+// when an entry the Secret uses has its .enc but no plaintext: a generator
+// would write a new value over the committed one. A refusal in the middle
+// of the run (an earlier key generated, a later key refused) would leave
+// the store half-written. It checks the exact entries
 // (usedEntries), never a name prefix: a prefix also matched another Secret
 // (Secret a.b in namespace c shares "Secret.a.b." with Secret a in b) and
 // stale .enc files of keys the spec no longer has.

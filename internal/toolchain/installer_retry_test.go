@@ -264,8 +264,8 @@ func (f *installerFixture) checkInstalled(t *testing.T, out string) {
 	}
 }
 
-// A refused connection (curl exit 7) is retried. B410 was a connect that
-// failed on a new machine.
+// A refused connection (curl exit 7) is retried: the first connect on a new
+// machine can fail.
 func TestInstallerRetriesARefusedConnection(t *testing.T) {
 	t.Parallel()
 	f := newInstallerFixture(t)

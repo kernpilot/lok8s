@@ -1,7 +1,7 @@
 package cache
 
 // enc_test.go: an entry whose plaintext is missing while its encrypted twin
-// (<entry>.enc) exists is not a miss (B425). A `lo build` in a fresh
+// (<entry>.enc) exists is not a miss. A `lo build` in a fresh
 // worktree before `lo secrets decrypt` generated 32 new values over the
 // committed ones, and a raw kustomize build generated 2 database passwords
 // into a shared store.

@@ -6,7 +6,7 @@
 #   - node IDENTITY: names come from jq over .items[].metadata.name, NEVER
 #     from a greedy sed that also scrapes .status.runtimeHandlers[].name
 #     ("runc") or .status.volumesAttached[].name (CSI handles) on modern k8s;
-#   - B448: ONE node list call for all nodes. The kubectl call count does not
+#   - ONE node list call for all nodes. The kubectl call count does not
 #     grow with the node count, so a large cluster finishes the tick before
 #     activeDeadlineSeconds (120 s);
 #   - per-node ROLES: control-plane vs worker, derived from the node-role label
@@ -45,7 +45,7 @@ setup() {
   # STUB_ITYPE sets cp-1's instance-type label (unset → cx32, empty string →
   # unlabeled). STUB_READY_STATUS sets the Ready condition of both nodes;
   # STUB_READY_MISSING=1 leaves it out. STUB_NODES_FILE serves a generated
-  # node list instead (the B448 tests). STUB_NODES_BODY answers the node list
+  # node list instead (the node-list tests). STUB_NODES_BODY answers the node list
   # with exactly that body and exit 0 (an empty or broken answer). STUB_KUBECTL_LOG records every kubectl
   # call, and STUB_KUBECTL_DELAY makes each call sleep (a slow apiserver).
   # curl captures the POSTed heartbeat body (-d) to STUB_PAYLOAD_OUT so the
@@ -71,7 +71,7 @@ kubectl() {
   [ -z "${STUB_KUBECTL_LOG:-}" ] || printf '%s\n' "$*" >> "${STUB_KUBECTL_LOG}"
   [ -z "${STUB_KUBECTL_DELAY:-}" ] || sleep "${STUB_KUBECTL_DELAY}"
   # In the pod, kubectl reads the in-cluster config. A client-config flag
-  # makes it skip that config and dial localhost:8080 (B423, proven on prod
+  # makes it skip that config and dial localhost:8080 (proven in a pod
   # with alpine/k8s 1.31.4): the stub refuses the same way.
   local arg
   for arg in "$@"; do
@@ -102,7 +102,7 @@ kubectl() {
     *"/version"*) printf '{"major":"1","minor":"35","gitVersion":"v1.35.5","platform":"linux/amd64"}\n' ;;
     "version -o json") printf '{\n  "clientVersion": { "gitVersion": "v1.31.4" },\n  "serverVersion": { "gitVersion": "v1.35.5" }\n}\n' ;;
 
-    # The node list: ONE call for all nodes (B448). The default fixture is a
+    # The node list: ONE call for all nodes. The default fixture is a
     # realistic two-node dump WITH the greedy-sed traps (runtimeHandlers +
     # volumesAttached). cp-1 carries the control-plane label KEY with an
     # empty value; worker-1 does not, so absent MUST read as worker.
@@ -123,8 +123,9 @@ kubectl() {
             {metadata: {name: "worker-1", labels: {"kubernetes.io/hostname": "worker-1",
                 "node.kubernetes.io/instance-type": "cpx41"}},
              status: {conditions: $cond, runtimeHandlers: [{name: "runc"}]}}]}' ;;
-    # A call per node is the B448 bug. Answer it like real kubectl, so a
-    # regression fails on the call count, not on a missing stub.
+    # A call per node is the bug the node-list tests catch. Answer it like
+    # real kubectl, so a regression fails on the call count, not on a
+    # missing stub.
     "get node "*) printf '' ;;
 
     "get csr -o json") printf '{}\n' ;;
@@ -466,12 +467,12 @@ teardown() {
   assert_output '["control-plane","worker"]'
 }
 
-# ── B448: ONE node list call; the call count does not grow with nodes ──
+# ── ONE node list call; the call count does not grow with nodes ──
 # A kubectl call takes ~1.5 s on prod. The old loop made 3 calls per node,
 # so at ~18 nodes the tick ran past activeDeadlineSeconds (120 s). The job
 # was killed before the POST, and the cluster stopped heart-beating.
 
-@test "B448: the kubectl call count is the same for 3 and 200 nodes" {
+@test "node list: the kubectl call count is the same for 3 and 200 nodes" {
   local n calls3 calls200
   for n in 3 200; do
     _node_list "${n}"
@@ -498,7 +499,7 @@ teardown() {
     || fail "kubectl calls: ${calls3} for 3 nodes, ${calls200} for 200 nodes"
 }
 
-@test "B448: the node fields map the Ready condition, the role label keys and the instance type" {
+@test "node list: the node fields map the Ready condition, the role label keys and the instance type" {
   _node_list 4
   run bash "${RUNNER}"
   assert_success
@@ -507,7 +508,7 @@ teardown() {
   assert_output '[{"name":"cp-0","status":"Ready","roles":"control-plane","instanceType":"cx53"},{"name":"master-1","status":"NotReady","roles":"control-plane","instanceType":"cpx41"},{"name":"worker-2","status":"Unknown","roles":"worker","instanceType":""},{"name":"worker-3","status":"Ready","roles":"worker","instanceType":"cpx41"}]'
 }
 
-@test "B448: a node name that needs JSON escaping keeps the payload valid JSON" {
+@test "node list: a node name that needs JSON escaping keeps the payload valid JSON" {
   export STUB_NODES_FILE="${BATS_TEST_TMPDIR}/nodes.json"
   command jq -n '{items: [{metadata: {name: "we\"ird\\node\tx"},
     status: {conditions: [{type: "Ready", status: "True"}]}}]}' > "${STUB_NODES_FILE}"
@@ -519,7 +520,7 @@ teardown() {
   assert_output $'we"ird\\node\tx'
 }
 
-@test "B448: above 500 nodes (the api's limit) the beat sends the first 500 and logs it" {
+@test "node list: above 500 nodes (the api's limit) the beat sends the first 500 and logs it" {
   # At the limit: no truncation.
   _node_list 500
   run bash "${RUNNER}"
@@ -541,7 +542,7 @@ teardown() {
   assert_output "503"
 }
 
-@test "B448: the limits allow a burst; the requests stay low" {
+@test "node list: the limits allow a burst; the requests stay low" {
   # At a 200m CPU limit the pod was throttled in 99.8 % of its CFS periods
   # on prod, and each kubectl call (a Go binary start) took ~1.5 s. At the
   # 500-node cap jq peaks at ~70 MB (measured on prod nodes).
@@ -550,7 +551,7 @@ teardown() {
   assert_output "1000m 50m 256Mi 64Mi"
 }
 
-@test "B448: 200 nodes at 1 s per kubectl call finish well under the 120 s deadline" {
+@test "node list: 200 nodes at 1 s per kubectl call finish well under the 120 s deadline" {
   # The stub sleeps 1 s per kubectl call (prod: ~1.5 s), so the run time in
   # seconds is about the call count. A call per node takes 200 s or more.
   _node_list 200
@@ -824,7 +825,7 @@ teardown() {
   assert_output "test.example.com"
 }
 
-# ── B423: in-cluster kubectl takes no client-config flag ──
+# ── in-cluster kubectl takes no client-config flag ──
 # In the pod, a kubectl client-config flag (--request-timeout, --server, …)
 # makes kubectl skip the in-cluster config and dial localhost:8080. The
 # kubectl stub refuses such a call the same way. The marker read carried
@@ -832,7 +833,7 @@ teardown() {
 # nonce and the desired-state poll were off, and every assessment probe read
 # empty. `timeout 5` bounds the calls now.
 
-@test "B423: the marker read reaches the apiserver: the assessment probes and the desired-state poll run" {
+@test "in-cluster kubectl: the marker read reaches the apiserver: the assessment probes and the desired-state poll run" {
   run bash "${RUNNER}"
   assert_success
   # The marker was readable, so the desired-state poll ran.
@@ -844,7 +845,7 @@ teardown() {
   assert_output "etcd cilium 10.244.0.0/16 2 3 2 3 1"
 }
 
-@test "B423: the marker read and every assessment probe run under timeout 5; the node list under timeout 30" {
+@test "in-cluster kubectl: the marker read and every assessment probe run under timeout 5; the node list under timeout 30" {
   run bash "${RUNNER}"
   assert_success
   run cat "${STUB_TIMEOUT_LOG}"
@@ -860,7 +861,7 @@ teardown() {
   assert_line "5 kubectl get validatingwebhookconfigurations -o json"
   assert_line "5 kubectl get mutatingwebhookconfigurations -o json"
   assert_line "5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name"
-  # The node list has its own bound (B448).
+  # The node list has its own bound.
   assert_line "30 kubectl get --raw /api/v1/nodes"
   # Twelve bounded calls, each in the plain-seconds form that busybox and
   # coreutils both take.
@@ -901,7 +902,7 @@ teardown() {
   assert_success
 }
 
-@test "B448: an empty, cut, non-JSON or item-less node answer is a failed call" {
+@test "node list: an empty, cut, non-JSON or item-less node answer is a failed call" {
   # kubectl can exit 0 and still answer nothing usable, and a timeout can
   # cut the answer. jq -e then fails, so the beat sends no nodes and defers
   # the assessment, as for a failed call. The assessment never reports 0

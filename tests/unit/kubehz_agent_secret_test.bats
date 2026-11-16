@@ -100,7 +100,7 @@ kubectl() {
     *"/version"*) printf '{"major":"1","minor":"35","gitVersion":"v1.35.5","platform":"linux/amd64"}\n' ;;
     "version -o json") printf '{\n  "clientVersion": { "gitVersion": "v1.31.4" },\n  "serverVersion": { "gitVersion": "v1.35.5" }\n}\n' ;;
 
-    # The node list: ONE call for all nodes (B448), read with jq. A realistic
+    # The node list: ONE call for all nodes, read with jq. A realistic
     # two-node dump WITH the greedy-sed traps (runtimeHandlers +
     # volumesAttached). cp-1 carries the control-plane label KEY (empty
     # value); worker-1 does not.

@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-// B410: the b download is retried on a transient failure, and only then.
+// The b download is retried on a transient failure, and only then.
 
 // recorder is a BootstrapOptions.Sleep that records the waits and returns
 // at once, so the tests run instantly and can assert the waits.
@@ -79,7 +79,7 @@ func assertNoLeftovers(t *testing.T, bin string) {
 	}
 }
 
-// The crowd's case (B410): two dial timeouts, then the release answers.
+// A fresh VM on a slow network: two dial timeouts, then the release answers.
 func TestBootstrapRetriesATransientDialFailure(t *testing.T) {
 	rec := &recorder{}
 	tb := fakeTarball(t, map[string]string{"b": "#!/bin/sh\n"})

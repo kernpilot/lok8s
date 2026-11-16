@@ -124,9 +124,9 @@ func findBase(dir string) string {
 // a `lok8s.yaml` that IS the project file `lo init project` writes (`kind:
 // Project`) — a project no longer needs a synced .lok8s tree since the
 // eject model. A service's `lok8s.yaml` (`kind: Service`, one per
-// deployable service directory) is NOT a marker: every kubehz-cluster
-// submodule carries one, and `cd <service> && lo …` must keep walking up
-// to the umbrella project. `.lok8s/lo` is not a marker either (WP9; it
+// deployable service directory) is NOT a marker: every service
+// submodule of an umbrella project carries one, and
+// `cd <service> && lo …` must keep walking up to the umbrella project. `.lok8s/lo` is not a marker either (WP9; it
 // was one during the coexistence period): a project that keeps its
 // clusters elsewhere via PATH_CLUSTERS writes a `kind: Project`
 // lok8s.yaml. Deliberate deviation from bash, which derives PATH_BASE

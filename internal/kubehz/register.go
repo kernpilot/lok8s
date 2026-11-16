@@ -114,7 +114,8 @@ func (c *Context) ensureClaimKey(ctx context.Context, domain, apiURL string) err
 	if clusterID == "" || publicKey == "" || fingerprint == "" || keyName == "" {
 		return errors.New("kubehz: incomplete claim-key response")
 	}
-	// The announce hands out a one-time bind secret (B243); keep it for the deploy.
+	// The announce hands out a one-time bind secret; keep it for the deploy.
+	// The agent sends it on its register, so the api adopts this row.
 	c.persistBindSecret(domain, jstrOr(v, "", "bindSecret"))
 
 	hcloudAuth := withBearer(c.getenv("HCLOUD_TOKEN"))
@@ -170,7 +171,8 @@ func (c *Context) directClaim(ctx context.Context, cfg *Config, domain, clusterY
 		c.warnf("kubehz register did not attribute %s to your tenant (is KUBEHZ_TOKEN a clusters:write token?)", domain)
 		return ErrHandled
 	}
-	// The announce hands out a one-time bind secret (B243); keep it for the deploy.
+	// The announce hands out a one-time bind secret; keep it for the deploy.
+	// The agent sends it on its register, so the api adopts this row.
 	c.persistBindSecret(domain, jstrOr(v, "", "bindSecret"))
 	c.echo("kubehz: cluster '%s' registered and claimed to your account (%s).", domain, clusterID)
 
@@ -307,7 +309,8 @@ func (c *Context) registerCluster(ctx context.Context, cfg *Config, domain, clus
 		c.warnf("kubehz registration returned no cluster id, cluster will continue without kubehz integration")
 		return nil
 	}
-	// The announce hands out a one-time bind secret (B243); keep it for the deploy.
+	// The announce hands out a one-time bind secret; keep it for the deploy.
+	// The agent sends it on its register, so the api adopts this row.
 	c.persistBindSecret(domain, jstrOr(v, "", "bindSecret"))
 
 	c.debugf("Cluster registered with kubehz (pending claim): %s", clusterID)
