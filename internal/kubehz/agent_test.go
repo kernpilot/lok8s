@@ -133,6 +133,49 @@ func TestAgentRecordsDropEveryControlCharacterInEveryFormat(t *testing.T) {
 	}
 }
 
+// cleanText drops each character that ui.Shown shows as '?' (ui.Unshown),
+// but keeps a backslash. For each case of the shared table
+// (internal/ui/testdata/shown.json), the input without each character that
+// the case's result shows as '?' is what cleanText gives. The bash twin is
+// the test "clean: drops each character ..." in kubehz_agent_test.bats.
+func TestCleanTextDropsEachUnshownCharacter(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "ui", "testdata", "shown.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct{ Case, In, Want string }
+	if err := json.Unmarshal(raw, &cases); err != nil {
+		t.Fatal(err)
+	}
+	dropped := 0
+	for _, c := range cases {
+		in, shown := []rune(c.In), []rune(c.Want)
+		if len(in) != len(shown) {
+			t.Fatalf("%s: in and want differ in length", c.Case)
+		}
+		var want []rune
+		for i, r := range in {
+			if shown[i] != '?' || r == '?' || r == '\\' {
+				want = append(want, r)
+			}
+		}
+		got := cleanText(c.In)
+		if got != c.In {
+			dropped++
+		}
+		if got != string(want) {
+			t.Errorf("%s: cleanText(%q) = %q, want %q", c.Case, c.In, got, string(want))
+		}
+	}
+	// The table drops something: else the test proves nothing.
+	if dropped < 15 {
+		t.Fatalf("cleanText changed %d cases of the table, want 15 or more", dropped)
+	}
+	if got := cleanText(`a\b`); got != `a\b` {
+		t.Errorf("cleanText dropped the backslash: %q", got)
+	}
+}
+
 func TestAgentListWarnsWhenTheApiHoldsMoreThanOnePage(t *testing.T) {
 	h := agentHarness(t)
 	h.handle("GET /api/clusters", 200, `{"ok":true,"data":[`+clusterRow+`],"meta":{"pagination":{"total":612}}}`)

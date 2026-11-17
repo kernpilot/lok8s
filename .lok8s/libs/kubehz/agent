@@ -23,8 +23,9 @@
 #
 # OUTPUT: -o text prints a table for a list and label lines for one record.
 # json and yaml print fixed lowerCamel fields. The records are projections, so
-# a new api field changes no output. Every string from the api loses its
-# control characters (the jq `clean`) in every format.
+# a new api field changes no output. Every string from the api loses each
+# character of the unshown list (utils/verbose.sh) in every format (the jq
+# `clean`).
 #
 # The two `kubeconfig` leaves count as credential output. The Go `lo mcp`
 # never offers them. The `lo chat` defaults deny them under the names that
@@ -231,10 +232,12 @@ kubehz::cluster::kubeconfig() {
 # The jq definitions of the records and their text forms. SpaceRecord,
 # SpaceDetail and ClusterRecord in the Go twin carry the same fields in the
 # same order. `clean` is cleanText there, `cell` is textCell, `field` is
-# writeLabels and `table` is writeTable (widths in code points).
-KUBEHZ_AGENT_JQ='
-def clean: explode | map(select(. >= 32 and (. < 127 or . > 159) and . != 8232 and . != 8233
-  and (. < 8234 or . > 8238) and (. < 8294 or . > 8297))) | implode;
+# writeLabels and `table` is writeTable (widths in code points). `clean`
+# drops each code point of unshown (VERBOSE_JQ_UNSHOWN, utils/verbose.sh):
+# the explicit list of characters that shown_name shows as '?'. A backslash
+# stays: it is data, and json and yaml escape it.
+KUBEHZ_AGENT_JQ="${VERBOSE_JQ_UNSHOWN}"'
+def clean: explode | map(select(unshown | not)) | implode;
 def clip: if length > 256 then .[0:256] + "…" else . end;
 def said($f): [(.data? | objects | .[$f]), (objects | .[$f])] | map(strings) | first // empty
   | clean | clip;
@@ -302,7 +305,7 @@ kubehz::agent_match() {
 }
 
 # A user value or a server string as the Go twin prints it:
-# clip(cleanText(s)). The jq `clean` drops the control characters. Then
+# clip(cleanText(s)). The jq `clean` drops the characters of unshown. Then
 # `clip` keeps 256 code points and adds an ellipsis. jq counts code points
 # in any locale.
 # Usage: kubehz::agent_clean <string>

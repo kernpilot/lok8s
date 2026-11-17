@@ -1047,9 +1047,15 @@ script or an agent: `-o yaml` prints a string such as `yes` without quotes,
 and a YAML 1.1 reader takes it for a boolean
 ([#246](https://github.com/kernpilot/lok8s/issues/246)). A field that the api
 leaves out is `null`. Before `lo` prints a string from the api, it removes
-the control characters: C0, DEL, C1 (U+0080 to U+009F), the line and
-paragraph separators (U+2028, U+2029) and the bidi controls (U+202A to
-U+202E, U+2066 to U+2069).
+these characters: C0, DEL, C1 (U+0080 to U+009F), the line and paragraph
+separators (U+2028, U+2029), these bidi, zero-width and invisible format
+characters (U+00AD, U+061C, U+200B to U+200F, U+202A to U+202E, U+2060 to
+U+2064, U+2066 to U+2069, U+206A to U+206F, U+FEFF), the Hangul fillers
+(U+115F, U+1160, U+3164, U+FFA0), the variation selectors (U+180B to U+180F,
+U+FE00 to U+FE0F, U+E0100 to U+E01EF) and the tag characters (U+E0000 to
+U+E007F). The list is explicit: other invisible characters stay. The destroy
+plan shows the same characters as `?`, and a backslash too, which these
+records keep.
 
 `kubeconfig` writes the agent kubeconfig to the file you name (mode 0600) and
 prints the path. The file holds no secret: its exec stanza runs

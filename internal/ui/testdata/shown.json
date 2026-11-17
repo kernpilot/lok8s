@@ -13,7 +13,17 @@
   {"case": "U+061C (Arabic letter mark)", "in": "a\u061cb", "want": "a?b"},
   {"case": "U+2060 to U+2064 (word joiner, invisible operators)", "in": "x\u2060\u2061\u2062\u2063\u2064y", "want": "x?????y"},
   {"case": "U+FEFF (zero-width no-break space)", "in": "\ufeffa", "want": "?a"},
-  {"case": "the characters next to the ranges stay", "in": " ~\u00a0\u061b\u061d\u200a\u2010\u2027\u202f\u205f\u2065\u206a\ufefe\uff00", "want": " ~\u00a0\u061b\u061d\u200a\u2010\u2027\u202f\u205f\u2065\u206a\ufefe\uff00"},
+  {"case": "U+00AD (soft hyphen)", "in": "a\u00adb", "want": "a?b"},
+  {"case": "U+115F and U+1160 (Hangul choseong and jungseong filler)", "in": "\u115fa\u1160", "want": "?a?"},
+  {"case": "U+180B to U+180F (Mongolian variation selectors and vowel separator)", "in": "a\u180b\u180c\u180d\u180e\u180fb", "want": "a?????b"},
+  {"case": "U+206A to U+206F (deprecated format characters)", "in": "x\u206a\u206b\u206c\u206d\u206e\u206fy", "want": "x??????y"},
+  {"case": "U+3164 (Hangul filler)", "in": "a\u3164b", "want": "a?b"},
+  {"case": "U+FE00 to U+FE0F (variation selectors), also after an emoji", "in": "\u2601\ufe0f-lb \ufe00x", "want": "\u2601?-lb ?x"},
+  {"case": "U+FFA0 (halfwidth Hangul filler)", "in": "a\uffa0b", "want": "a?b"},
+  {"case": "U+E0000 to U+E007F (tag characters)", "in": "a\udb40\udc00\udb40\udc01\udb40\udc7fb", "want": "a???b"},
+  {"case": "U+E0100 to U+E01EF (variation selectors supplement)", "in": "a\udb40\udd00\udb40\uddefb", "want": "a??b"},
+  {"case": "the characters next to the ranges stay", "in": " ~\u00a0\u00ac\u00ae\u061b\u061d\u115e\u1161\u180a\u1810\u200a\u2010\u2027\u202f\u205f\u2065\u2070\u3163\u3165\ufdff\ufe10\ufefe\uff00\uff9f\uffa1\udb3f\udfff\udb40\udc80\udb40\udcff\udb40\uddf0", "want": " ~\u00a0\u00ac\u00ae\u061b\u061d\u115e\u1161\u180a\u1810\u200a\u2010\u2027\u202f\u205f\u2065\u2070\u3163\u3165\ufdff\ufe10\ufefe\uff00\uff9f\uffa1\udb3f\udfff\udb40\udc80\udb40\udcff\udb40\uddf0"},
+  {"case": "invisible characters outside the explicit list stay", "in": "a\u034fb\u17b4c\u17b5d\ud82f\udca0e\ud834\udd73f", "want": "a\u034fb\u17b4c\u17b5d\ud82f\udca0e\ud834\udd73f"},
   {"case": "quotes and other printable ASCII stay", "in": "a b'c\"d[e]{f}$g", "want": "a b'c\"d[e]{f}$g"},
   {"case": "an empty name", "in": "", "want": ""}
 ]

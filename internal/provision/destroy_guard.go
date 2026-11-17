@@ -38,31 +38,37 @@ type destroyResource struct{ kind, id, name string }
 
 // parseDestroyPlan reads the provider::destroy_plan text: the
 // "cluster\t<name>" line and one "<resource>\t<id>\t<name>" line per
-// resource (bash: `IFS=$'\t' read -r kind id name`).
+// resource (bash: `IFS=$'\t' read -r kind id name`, readPlanLine).
 func parseDestroyPlan(text string) (string, []destroyResource) {
 	var name string
 	var res []destroyResource
 	for line := range strings.SplitSeq(text, "\n") {
-		f := strings.FieldsFunc(line, func(r rune) bool { return r == '\t' })
-		if len(f) == 0 {
+		if strings.Trim(line, "\t") == "" {
 			continue
 		}
-		if f[0] == "cluster" && name == "" && len(res) == 0 {
-			if len(f) > 1 {
-				name = strings.Join(f[1:], "\t")
+		kind, id, rest := readPlanLine(line)
+		if kind == "cluster" && name == "" && len(res) == 0 {
+			name = id
+			if rest != "" {
+				name += "\t" + rest
 			}
 			continue
 		}
-		r := destroyResource{kind: f[0]}
-		if len(f) > 1 {
-			r.id = f[1]
-		}
-		if len(f) > 2 {
-			r.name = strings.Join(f[2:], "\t")
-		}
-		res = append(res, r)
+		res = append(res, destroyResource{kind: kind, id: id, name: rest})
 	}
 	return name, res
+}
+
+// readPlanLine splits a plan line as bash's `IFS=$'\t' read -r kind id
+// rest` does. A tab is IFS white space: the tabs at the start and at the end
+// go, and a run of tabs after the kind and after the id is one separator.
+// rest keeps the tabs in it, so a name with two tabs in a row shows two '?',
+// as in bash.
+func readPlanLine(line string) (kind, id, rest string) {
+	rest = strings.Trim(line, "\t")
+	kind, rest, _ = strings.Cut(rest, "\t")
+	id, rest, _ = strings.Cut(strings.TrimLeft(rest, "\t"), "\t")
+	return kind, id, strings.TrimLeft(rest, "\t")
 }
 
 // providerWorkDir is the work dir the driver hands provider::destroy: the
@@ -133,12 +139,13 @@ func (d *Dispatcher) guardDestroy(ctx context.Context, domainName, kind, cluster
 	if len(res) == 0 {
 		fmt.Fprintf(w, "    (no resource found)\n")
 	}
-	// Each name as ui.Shown shows it: a name comes from the provider's API,
-	// and a control, separator, bidi or invisible character in it would
-	// reach the terminal, split or turn the line around, or hide in the
-	// name. The confirmed plan below stays as the provider gave it.
+	// Each kind, name and id as ui.Shown shows it: they come from the
+	// provider (a third-party provider too) and its API, and a control,
+	// separator, bidi or invisible character in them would reach the
+	// terminal, split or turn the line around, or hide in the line. The
+	// confirmed plan below stays as the provider gave it.
 	for _, r := range res {
-		fmt.Fprintf(w, "    %s %s (%s)\n", r.kind, ui.Shown(r.name), r.id)
+		fmt.Fprintf(w, "    %s %s (%s)\n", ui.Shown(r.kind), ui.Shown(r.name), ui.Shown(r.id))
 	}
 
 	switch {

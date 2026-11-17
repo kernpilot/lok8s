@@ -504,12 +504,16 @@ existing part only when it has the mark of this cluster:
   names it. In the destroy plan, in the warnings and in the last lines of
   the destroy, these characters of a name show as `?`: each control
   character (C0, DEL and C1), each backslash, the line and paragraph
-  separators (U+2028, U+2029), and these bidi, zero-width and invisible
-  format characters (U+061C, U+200B to U+200F, U+202A to U+202E, U+2060 to
-  U+2064, U+2066 to U+2069, U+FEFF). Other characters, also multibyte ones
-  such as `ö-測試`, stay. Thus a name cannot split a line, send a control
-  character to the terminal, turn the text around or hide one of these
-  characters. The id identifies the part exactly.
+  separators (U+2028, U+2029), these bidi, zero-width and invisible format
+  characters (U+00AD, U+061C, U+200B to U+200F, U+202A to U+202E, U+2060 to
+  U+2064, U+2066 to U+2069, U+206A to U+206F, U+FEFF), the Hangul fillers
+  (U+115F, U+1160, U+3164, U+FFA0), the variation selectors (U+180B to
+  U+180F, U+FE00 to U+FE0F, U+E0100 to U+E01EF) and the tag characters
+  (U+E0000 to U+E007F). Thus an emoji with a variation selector shows a
+  `?` after it. Other characters, also multibyte ones such as `ö-測試`,
+  stay. As a result, a name cannot split a line, send a control character to the
+  terminal, turn the text around or hide one of these characters. The id
+  identifies the part exactly.
 - The destroy lists the parts with `hcloud <kind> list -l
   lok8s.dev/cluster=<cluster_name>`, and the Hetzner API applies this
   selector. Thus a part with another cluster label is usually not in the

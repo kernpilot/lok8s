@@ -22,7 +22,7 @@ package kubehz
 // OUTPUT: -o text prints a table for a list and label lines for one
 // record. json and yaml (internal/cli writeOutput) print fixed lowerCamel
 // fields. The records are projections, so a new api field changes no
-// output. Every string from the api loses its control characters
+// output. Every string from the api loses the characters of ui.Unshown
 // (cleanText) in every format.
 //
 // The bash twin is libs/kubehz/agent. Both print the same bytes:
@@ -321,16 +321,14 @@ func (c *Context) leaseHours(action, flag, s string) (int64, error) {
 
 // ── records ──────────────────────────────────────────────
 
-// cleanText drops the characters that can move a terminal, end a line or
-// turn text around. These are the C0 controls, DEL, the C1 controls
-// (U+0080 to U+009F), U+2028 and U+2029. The bidi controls go too (U+202A
-// to U+202E, U+2066 to U+2069). The jq `clean` of the bash twin drops the
-// same set.
+// cleanText drops each character of ui.Unshown: the explicit list of
+// characters that can move a terminal, end a line, turn text around or
+// hide in a name, which ui.Shown shows as '?'. A backslash stays: it is
+// data, and json and yaml escape it. The jq `clean` of the bash twin drops
+// the same set (the def unshown, utils/verbose.sh).
 func cleanText(s string) string {
 	return strings.Map(func(r rune) rune {
-		switch {
-		case r < 0x20, r >= 0x7f && r <= 0x9f, r == 0x2028, r == 0x2029,
-			r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+		if ui.Unshown(r) {
 			return -1
 		}
 		return r
