@@ -3948,13 +3948,14 @@ _dry_window_open() {
 # An INT or TERM that stops the check is the interrupt, not a plugin
 # without the dry run: the check names the signal and returns 128+n, the
 # code that lo ends with (Go: TestDryRunBoundaryNamesTheInterrupt). An INT
-# goes to the process group of lo's shell, as a terminal sends Ctrl-C. A
-# TERM goes to lo's shell only (kill <pid of lo>; lo's shell then sends
-# TERM to the check), or to the check's subshell only. The signal comes in
-# the check's wait, and in each window before lo's shell keeps the pid of
-# the check, or before the check keeps the pid of the plugin or of the
-# watchdog (the test-only delays): there it is noted, and sent again once
-# the pids are kept. The plugin ends on TERM.
+# goes to the process group of lo's shell, as a terminal sends Ctrl-C, or
+# to lo's shell only. A TERM goes to lo's shell only (kill <pid of lo>), or
+# to the check's subshell only. A signal to lo's shell only reaches the
+# check as a TERM from lo's shell, and the line still names lo's own
+# signal. The signal comes in the check's wait, and in each window before
+# lo's shell keeps the pid of the check, or before the check keeps the pid
+# of the plugin or of the watchdog (the test-only delays): there it is
+# noted, and sent again once the pids are kept. The plugin ends on TERM.
 #
 # Each case proves where the signal came. In a window, the window's delay
 # (a `sleep 1.2` of the shell that owns the window) still runs just before
@@ -3966,7 +3967,7 @@ _dry_window_open() {
 @test "the dry run's plugin check names an INT or TERM that stops it and returns 128+n" {
   local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" how sig to window m b log job sub rc want sent took i
   _ADDONS_DRYRUN_CHECK_GRACE=1
-  for how in "INT group" "TERM lo" "TERM check"; do
+  for how in "INT group" "INT lo" "TERM lo" "TERM check"; do
     sig="${how% *}" to="${how#* }"
     want=$(( 128 + $(kill -l "${sig}") ))
     for window in wait check plugin watchdog; do
