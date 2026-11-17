@@ -361,17 +361,48 @@ addons::detail() {
 _ADDONS_DRYRUN_CHECK_TIMEOUT=30
 _ADDONS_DRYRUN_CHECK_GRACE=5
 
+# Test only (tests/unit/bootstrap_test.bats): a delay, in seconds, in the
+# check between the start of the plugin (_PLUGIN) or of the watchdog
+# (_WATCHDOG) and the line that keeps its pid, so that a test can send a
+# signal in that window. Empty in a normal run. Shell variables, set here,
+# so the environment cannot set them.
+_ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN=""
+_ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG=""
+
+# addons::_running_job <pid>
+# True while <pid> is a running job of the calling shell. The shell reaps a
+# job that ends (in its SIGCHLD handler), and after that the pid can be
+# another process's. So the check sends a signal to a job of its own only
+# after this test.
+addons::_running_job() {
+  local _job
+  for _job in $(jobs -rp); do
+    [[ "${_job}" != "${1}" ]] || return 0
+  done
+  return 1
+}
+
 # addons::_check_stop <pid> <watchdog>
 # Stops the Secret plugin check of addons::dry_run_boundary on INT or TERM
 # (Go: the runner's interrupt, then WaitDelay): TERM to the watchdog and to
 # the plugin, then KILL to the plugin if it still runs after
 # _ADDONS_DRYRUN_CHECK_GRACE seconds. It runs in the check's subshell,
-# which started both, so it can wait for the plugin.
+# which started both, so it can wait for the plugin. A job that ended gets
+# no signal (addons::_running_job): after the check's wait, the plugin's
+# pid can be another process's. The grace timer and the watchdog are other
+# processes and cannot read the check's jobs: if the plugin ends at the
+# moment that their time runs out, their signal can still reach its pid.
+#
+# It runs in a trap, and set -e applies there again (the `||` of the check
+# does not reach a trap). So each command that can fail ends in `|| :`:
+# else the stop ends at the first one, for example at the wait for a plugin
+# that fails after TERM, and the grace timer then sends KILL to a pid that
+# is no longer the plugin's.
 addons::_check_stop() {
   local _pid="${1}" _watchdog="${2}" _killer
-  [[ -z "${_watchdog}" ]] || kill -TERM "${_watchdog}" 2>/dev/null
-  if [[ -n "${_pid}" ]]; then
-    kill -TERM "${_pid}" 2>/dev/null
+  ! addons::_running_job "${_watchdog}" || kill -TERM "${_watchdog}" 2>/dev/null || :
+  if addons::_running_job "${_pid}"; then
+    kill -TERM "${_pid}" 2>/dev/null || :
     (
       trap 'kill -TERM $(jobs -p) 2>/dev/null; exit 0' TERM
       sleep "${_ADDONS_DRYRUN_CHECK_GRACE}" &
@@ -379,11 +410,13 @@ addons::_check_stop() {
       kill -KILL "${_pid}" 2>/dev/null
     ) >/dev/null 2>&1 &
     _killer=$!
-    wait "${_pid}" 2>/dev/null
-    kill -TERM "${_killer}" 2>/dev/null
-    wait "${_killer}" 2>/dev/null
+    # A signal that comes during the stop ends a wait early (its trap does
+    # nothing now), so wait again while the plugin runs.
+    while addons::_running_job "${_pid}"; do wait "${_pid}" 2>/dev/null || :; done
+    ! addons::_running_job "${_killer}" || kill -TERM "${_killer}" 2>/dev/null || :
+    wait "${_killer}" 2>/dev/null || :
   fi
-  [[ -z "${_watchdog}" ]] || wait "${_watchdog}" 2>/dev/null
+  [[ -z "${_watchdog}" ]] || wait "${_watchdog}" 2>/dev/null || :
   return 0
 }
 
@@ -470,10 +503,20 @@ addons::dry_run_boundary() {
   # grace. Its stdout goes to a file outside the probe directory: a $(...)
   # would wait for every process that holds the pipe. INT and TERM stop the
   # watchdog, and the plugin the same way (addons::_check_stop).
+  #
+  # Until the pids of the plugin and of the watchdog are kept, INT and TERM
+  # are only noted: a stop between a start and its `$!` would not know that
+  # pid and would leave the plugin or the watchdog running. Then the stop
+  # traps come, and a noted signal is sent again, so it stops the check as a
+  # later one does. A stop first sets INT and TERM to do nothing: a second
+  # signal would start a second stop inside the first (bash runs its trap
+  # between the commands of the first). It still ends a wait early, so the
+  # stop waits for the plugin again (addons::_check_stop).
   (
     cd "${_probe}" || exit 1
-    trap 'addons::_check_stop "${_pid:-}" "${_watchdog:-}"; exit 130' INT
-    trap 'addons::_check_stop "${_pid:-}" "${_watchdog:-}"; exit 143' TERM
+    _sig=""
+    trap '_sig="${_sig:-INT}"' INT
+    trap '_sig="${_sig:-TERM}"' TERM
     LOK8S_BOOTSTRAP_DRYRUN=1 \
     LOK8S_BOOTSTRAP_DRYRUN_REPORT="${_dir}/report" \
     LOK8S_BOOTSTRAP_DRYRUN_STORE="${_dir}/store" \
@@ -485,6 +528,7 @@ addons::dry_run_boundary() {
     LOK8S_SECRETS_DISABLE=1 \
     LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0 \
       "${_plugin}" --capabilities </dev/null >"${_out}" 2>/dev/null &
+    [[ -z "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN}" ]] || sleep "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN}"
     _pid=$!
     (
       trap 'kill -TERM $(jobs -p) 2>/dev/null; exit 0' TERM
@@ -496,10 +540,14 @@ addons::dry_run_boundary() {
       wait "$!" || exit 0
       kill -KILL "${_pid}" 2>/dev/null
     ) >/dev/null 2>&1 &
+    [[ -z "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG}" ]] || sleep "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG}"
     _watchdog=$!
+    trap 'trap : INT TERM; addons::_check_stop "${_pid}" "${_watchdog}"; exit 130' INT
+    trap 'trap : INT TERM; addons::_check_stop "${_pid}" "${_watchdog}"; exit 143' TERM
+    [[ -z "${_sig}" ]] || kill -"${_sig}" "${BASHPID}"
     _rc=0
     wait "${_pid}" 2>/dev/null || _rc=$?
-    kill -TERM "${_watchdog}" 2>/dev/null
+    ! addons::_running_job "${_watchdog}" || kill -TERM "${_watchdog}" 2>/dev/null
     wait "${_watchdog}" 2>/dev/null
     exit "${_rc}"
   ) || _rc=$?

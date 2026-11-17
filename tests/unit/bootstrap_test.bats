@@ -3778,6 +3778,146 @@ _dry_plugin_stopped() {
   done
 }
 
+# A signal that comes before the check keeps the pid of the plugin, or of
+# the watchdog, is only noted until it keeps both. Then it stops the check
+# as at any other time, so neither runs on. A forced delay holds each
+# window open (_ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN, _WATCHDOG; empty in
+# a normal run). A watchdog that ran on would write its time-limit mark
+# into the boundary after _ADDONS_DRYRUN_CHECK_TIMEOUT (3 s), and the test
+# looks after 4.5 s. Go has no such window: exec.Cmd.Start returns with the
+# process.
+@test "the dry run's plugin check stops the plugin and the watchdog on a TERM before it keeps their pids" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" window m b start sent took job rc i
+  _ADDONS_DRYRUN_CHECK_TIMEOUT=3
+  _ADDONS_DRYRUN_CHECK_GRACE=1
+  for window in plugin watchdog; do
+    m="${BATS_TEST_TMPDIR}/m-${window}" b="${BATS_TEST_TMPDIR}/b-${window}"
+    mkdir -p "${m}" "${b}"
+    if [[ "${window}" == plugin ]]; then
+      _ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN=1.5 _ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG=""
+    else
+      _ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN="" _ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG=1.5
+    fi
+    _dry_slow_plugin "${plugin}" "${m}" ""
+    start=$(_dry_now_ms)
+    addons::dry_run_boundary "${b}" >"${b}.out" 2>&1 3>&- &
+    job=$!
+    for (( i = 0; i < 100; i++ )); do [[ -s "${m}/ppid" ]] && break; sleep 0.05; done
+    [[ -s "${m}/ppid" ]] || { echo "${window}: the plugin did not start"; return 1; }
+    # 0.3 s into the delay of 1.5 s: the window is open.
+    sleep 0.3
+    kill -TERM "$(<"${m}/ppid")"
+    sent=$(_dry_now_ms)
+    rc=0
+    wait "${job}" 2>/dev/null || rc=$?
+    took=$(( $(_dry_now_ms) - sent ))
+    (( rc != 0 )) || { echo "${window}: the check passed after TERM: $(<"${b}.out")"; return 1; }
+    # The rest of the delay, then the grace (the plugin ignores TERM).
+    (( took >= 900 && took <= 3500 )) || { echo "${window}: the check took ${took} ms after TERM, want the rest of the delay and then the grace (about 2200)"; return 1; }
+    _dry_plugin_stopped "${m}" "${start}" || { echo "(TERM in the ${window} window)"; return 1; }
+    [ -z "$(ls -A "${b}" | grep -E '^(probe|check)-')" ] || { echo "${window}: a file of the check is in the boundary (a watchdog ran on): $(ls -A "${b}")"; return 1; }
+  done
+}
+
+# After the check's wait the plugin is reaped, and its pid can be another
+# process's: a stop sends no signal to a job of the check that has ended,
+# waited for or not (addons::_running_job). A job that runs gets TERM. The
+# stops run with set -e on, as in a trap of the check. They run in a job of
+# their own (set -m) with a time limit: a stop that does not return fails
+# the test, and a KILL to the job's group leaves no process behind.
+@test "the dry run's plugin check sends no signal to a job of its own that has ended" {
+  local log="${BATS_TEST_TMPDIR}/kills" sub i
+  _ADDONS_DRYRUN_CHECK_GRACE=1
+  : > "${log}"
+  set -m
+  (
+    kill() { printf '%s\n' "$*" >> "${log}"; builtin kill "$@"; }
+    sleep 0.1 3>&- &
+    waited=$!
+    sleep 0.1 3>&- &
+    ended=$!
+    wait "${waited}"
+    # The shell reaps the other one when it ends, with no wait.
+    sleep 0.5
+    addons::_check_stop "${waited}" "${ended}"
+    [[ ! -s "${log}" ]] || { echo "a stop sent a signal to a job that had ended: $(<"${log}")"; exit 1; }
+    sleep 5 3>&- &
+    running=$!
+    addons::_check_stop "" "${running}"
+    [[ "$(<"${log}")" == "-TERM ${running}" ]] || { echo "a stop did not send TERM to the running job ${running}: $(<"${log}")"; exit 1; }
+  ) 3>&- &
+  sub=$!
+  set +m
+  for (( i = 0; i < 100; i++ )); do kill -0 "${sub}" 2>/dev/null || break; sleep 0.1; done
+  if kill -0 "${sub}" 2>/dev/null; then
+    kill -KILL -- -"${sub}" 2>/dev/null || true
+    wait "${sub}" 2>/dev/null || true
+    echo "a stop did not return in 10 s; signals from the stops: $(tr '\n' ' ' < "${log}")"
+    return 1
+  fi
+  wait "${sub}" || return 1
+}
+
+# The stop runs in a trap, where set -e applies (as in lo: set -euo
+# pipefail). A plugin that fails after TERM (here: exit 1, 0.3 s later)
+# makes the stop's wait fail. The stop must still stop its grace timer, or
+# the timer sends KILL to the plugin's pid after the grace, when the pid is
+# no longer the plugin's. A plugin that TERM ends at once ("-": the default
+# action) gets no KILL either.
+@test "the dry run's plugin check stops its grace timer when the plugin ends on TERM" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" on m b log job rc i p n=0
+  _ADDONS_DRYRUN_CHECK_GRACE=1
+  for on in "-" "sleep 0.3; exit 1"; do
+    n=$(( n + 1 )) m="${BATS_TEST_TMPDIR}/m${n}" b="${BATS_TEST_TMPDIR}/b${n}" log="${BATS_TEST_TMPDIR}/kills${n}"
+    mkdir -p "${m}" "${b}"
+    : > "${log}"
+    _dry_slow_plugin "${plugin}" "${m}" "${on}"
+    kill() { printf '%s\n' "$*" >> "${log}"; builtin kill "$@"; }
+    addons::dry_run_boundary "${b}" >"${b}.out" 2>&1 3>&- &
+    job=$!
+    for (( i = 0; i < 100; i++ )); do [[ -s "${m}/ppid" ]] && break; sleep 0.05; done
+    [[ -s "${m}/ppid" ]] || { unset -f kill; echo "the plugin did not start (on TERM: ${on})"; return 1; }
+    builtin kill -TERM "$(<"${m}/ppid")"
+    rc=0
+    wait "${job}" 2>/dev/null || rc=$?
+    # Past the grace: a timer that ran on has sent its KILL by now.
+    sleep 1.5
+    unset -f kill
+    (( rc != 0 )) || { echo "the check passed after TERM (on TERM: ${on})"; return 1; }
+    p=$(<"${m}/pid")
+    grep -qx -- "-TERM ${p}" "${log}" || { echo "the plugin got no TERM (on TERM: ${on}): $(tr '\n' ' ' < "${log}")"; return 1; }
+    ! grep -qx -- "-KILL ${p}" "${log}" || { echo "the grace timer sent KILL to ${p} after the plugin ended (on TERM: ${on}): $(tr '\n' ' ' < "${log}")"; return 1; }
+  done
+}
+
+# A second signal during a stop does nothing: the stop that runs ends the
+# check within the grace. Without that, bash runs a second stop inside the
+# first (between its commands), and the plugin gets TERM twice.
+@test "the dry run's plugin check runs one stop when a second signal comes during it" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m" b="${BATS_TEST_TMPDIR}/b" log="${BATS_TEST_TMPDIR}/kills" start job rc sub n i
+  _ADDONS_DRYRUN_CHECK_GRACE=1
+  mkdir -p "${m}" "${b}"
+  : > "${log}"
+  _dry_slow_plugin "${plugin}" "${m}" ""
+  kill() { printf '%s\n' "$*" >> "${log}"; builtin kill "$@"; }
+  start=$(_dry_now_ms)
+  addons::dry_run_boundary "${b}" >"${b}.out" 2>&1 3>&- &
+  job=$!
+  for (( i = 0; i < 100; i++ )); do [[ -s "${m}/ppid" ]] && break; sleep 0.05; done
+  [[ -s "${m}/ppid" ]] || { unset -f kill; echo "the plugin did not start"; return 1; }
+  sub=$(<"${m}/ppid")
+  builtin kill -TERM "${sub}"
+  sleep 0.3
+  builtin kill -TERM "${sub}"
+  rc=0
+  wait "${job}" 2>/dev/null || rc=$?
+  unset -f kill
+  (( rc != 0 )) || { echo "the check passed after TERM"; return 1; }
+  n=$(grep -cx -- "-TERM $(<"${m}/pid")" "${log}" || true)
+  [[ "${n}" == 1 ]] || { echo "the plugin got TERM ${n} times from the check, want once: $(tr '\n' ' ' < "${log}")"; return 1; }
+  _dry_plugin_stopped "${m}" "${start}" || { echo "check rc ${rc}; the plugin is $(<"${m}/pid"); signals from the check: $(tr '\n' ' ' < "${log}")"; return 1; }
+}
+
 # The plugin's stdout is a file: a plugin that prints the line, exits 0 and
 # leaves a child that keeps its stdout open passes at once (Go:
 # TestDryRunBoundaryDoesNotWaitForAChildOfThePlugin).
