@@ -5,8 +5,11 @@
 # -ldflags (internal/assets.BuildVersion; the assets version test pins the
 # flag across the Makefile, goreleaser and this file). The golang tag
 # equals the root go.mod `go` line: the image sets GOTOOLCHAIN=local, so an
-# older tag cannot build the module (the same test pins this).
-FROM golang:1.26.11-alpine AS lo-build
+# older tag cannot build the module (the same test pins this). The tag, and
+# the digest of its multi-arch index (it has linux/amd64 and linux/arm64,
+# the platforms docker.yml builds): this stage builds the lo binary that the
+# final image runs. A bump changes both.
+FROM golang:1.26.11-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS lo-build
 WORKDIR /src
 COPY go.mod go.sum ./
 # The root module replaces github.com/kernpilot/lok8s/kustomize with the
