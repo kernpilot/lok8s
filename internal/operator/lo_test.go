@@ -144,6 +144,16 @@ func TestLoRunningClusterSkipsProvision(t *testing.T) {
 	assertHas(t, f.log, `"phase":"Provisioned"`, "create secret generic test-lo-kubeconfig")
 }
 
+// A status is one word, then an optional detail in parentheses: the word
+// decides.
+func TestLoRunningClusterWithADetailSkipsProvision(t *testing.T) {
+	f := newLoFixture(t)
+	f.drv.status = "Running (1 of 2 servers without the owner mark of this cluster)"
+	f.hook.Reconcile(t.Context(), []byte(loCR))
+	refuteHas(t, f.log, "driver::provision")
+	assertHas(t, f.log, `"phase":"Provisioned"`, "create secret generic test-lo-kubeconfig")
+}
+
 // A kubeconfig already on disk is published without driver::kubeconfig.
 func TestLoPublishReusesExistingKubeconfig(t *testing.T) {
 	f := newLoFixture(t)

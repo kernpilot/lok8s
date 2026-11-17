@@ -71,7 +71,9 @@
 #
 # Optional:
 #   provider::status <config_file>
-#     Check infrastructure status. Output: Running | Partial | NotFound
+#     Check infrastructure status. Output: one word (Running | Partial |
+#     NotFound), then an optional detail in parentheses, for example
+#     "Partial (1/2 running)". A caller that decides on it reads the word.
 #
 #   provider::rebuild <config_file> <work_dir>
 #     Reset the descriptor's EXISTING nodes to the state provider::provision

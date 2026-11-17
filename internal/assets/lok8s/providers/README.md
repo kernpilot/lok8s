@@ -24,7 +24,7 @@ Every provider implements five functions:
 
 | Function | Purpose |
 |----------|---------|
-| `provider::status` | Infrastructure status (Running / Partial / NotFound) |
+| `provider::status` | Infrastructure status: one word (Running / Partial / NotFound), then an optional detail in parentheses, for example `Partial (1/2 running)` |
 | `provider::rebuild` | Reset the descriptor's **existing** nodes to a fresh-install state **in place** (no recreate — IPs/network/LB preserved). Same signature as `provision`/`destroy`. Descriptor-driven, DESTRUCTIVE (reimages nodes) but does not prompt — consent belongs to the caller. Powers cluster recovery. |
 | `provider::doctor` | READ-ONLY, advisory infrastructure diagnosis. Never dies, never mutates. Emits `<status>⇥<message>` lines (`ok`/`warn`) + a `summary` line; `lo doctor` renders these as its **provider / infrastructure** section (see [`lo doctor`](../../docs/guide/bare-metal.md#diagnose-infrastructure-lo-doctor)). |
 

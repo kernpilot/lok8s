@@ -328,10 +328,11 @@ func (t *tailBuffer) lines(keep int) string {
 	return strings.Join(all, "\n")
 }
 
-// ProviderStatus is the optional provider::status hook (Running | Partial |
-// NotFound). A plugin without it fails the call — the bash driver only
-// calls it after a `declare -F` probe; callers here should do the same via
-// the returned error.
+// ProviderStatus is the optional provider::status hook: one word (Running |
+// Partial | NotFound), then an optional detail in parentheses. A plugin
+// without it fails the call — the bash driver only calls it after a
+// `declare -F` probe; callers here should do the same via the returned
+// error.
 func (p *Provider) ProviderStatus(ctx context.Context, configFile string) (string, error) {
 	var out strings.Builder
 	if err := p.l.call(ctx, p.name, "provider::status", &out, p.l.errOut(), configFile); err != nil {
