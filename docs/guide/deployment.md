@@ -501,10 +501,13 @@ existing part only when it has the mark of this cluster:
   server, 1 network): server 23 'old-0', network 26 'old-net'`. It names at
   most 10 parts, then `and <n> more`. A part without the mark that appears
   after the plan gets no `hetzner: skipped` warning. Only the last line
-  names it. In the `hetzner: skipped` warnings and in the last lines of the
-  destroy, each control character and each backslash of a name shows as
-  `?`. Thus a name cannot split a line or send a control character to the
-  terminal. The id identifies the part exactly.
+  names it. In the destroy plan, in the warnings and in the last lines of
+  the destroy, each control character (C0, DEL and C1), each backslash and
+  each bidi or zero-width format character (U+200B to U+200F, U+202A to
+  U+202E, U+2066 to U+2069) of a name shows as `?`. Other characters, also
+  multibyte ones such as `ö-測試`, stay. Thus a name cannot split a line,
+  send a control character to the terminal or turn the text around. The id
+  identifies the part exactly.
 - The destroy lists the parts with `hcloud <kind> list -l
   lok8s.dev/cluster=<cluster_name>`, and the Hetzner API applies this
   selector. Thus a part with another cluster label is usually not in the

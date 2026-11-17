@@ -263,13 +263,32 @@ provision::_destroy_guard() {
     return 3
   fi
 
+  # Each name as the plan shows it (verbose::shown_names): a name comes
+  # from the provider's API, and a control, bidi or zero-width character in
+  # it would reach the terminal or turn the line around. The confirmed plan
+  # (LOK8S_DESTROY_PLAN) stays as the provider gave it. One jq for all
+  # names, one line each; an empty last name, which the command
+  # substitution drops, shows as empty.
+  local row names
+  local -a shown=()
+  if (( ${#rows[@]} )); then
+    if ! names="$(for row in "${rows[@]}"; do
+        IFS=$'\t' read -r _ _ rname <<<"${row}"
+        printf '%s\n' "${rname}"
+      done | verbose::shown_names)"; then
+      error "could not show the names of the destroy plan of '${domain}'. Nothing was deleted. Check that jq runs, then run lo destroy again."
+      return 1
+    fi
+    mapfile -t shown <<<"${names}"
+  fi
+
   {
     printf '\n  \033[1;33m⚠ %s\033[0m \033[2m·\033[0m destroy deletes these resources of cluster_name \033[1m%s\033[0m:\n' "${domain}" "${name}"
     (( ${#rows[@]} )) || printf '    (no resource found)\n'
-    local row
-    for row in "${rows[@]}"; do
-      IFS=$'\t' read -r rkind rid rname <<<"${row}"
-      printf '    %s %s (%s)\n' "${rkind}" "${rname}" "${rid}"
+    local i
+    for i in "${!rows[@]}"; do
+      IFS=$'\t' read -r rkind rid _ <<<"${rows[i]}"
+      printf '    %s %s (%s)\n' "${rkind}" "${shown[i]:-}" "${rid}"
     done
   } >&2
 

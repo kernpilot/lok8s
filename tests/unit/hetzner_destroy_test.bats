@@ -631,3 +631,87 @@ volume delete 7"
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
 }
+
+# The plan and each message of the destroy show a name through shown_name
+# (utils/verbose.sh): each control character (C0, DEL, C1), each backslash
+# and each bidi or zero-width character is '?', and a multibyte UTF-8 name
+# stays. Parts 70 to 74 have this cluster's mark (the plan lists them);
+# parts 80 to 82 have the cluster label and no mark (kept); part 83 has
+# another cluster label (skipped). The deletes go by id.
+@test "destroy: the plan and each message show a name safely, and a multibyte name stays" {
+  unset LOK8S_DESTROY_PLAN
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    [[ "$2" == "list" ]] || return 0
+    if [[ "$1" == server ]]; then
+      printf '%s\n' "[{\"id\":70,\"name\":\"ö-測試\",\"labels\":${OWN}},{\"id\":71,\"name\":\"a\\u007fb\\u0085c\",\"labels\":${OWN}},{\"id\":72,\"name\":\"\\\\\",\"labels\":${OWN}},{\"id\":73,\"name\":\"x\\u202ey\\u200bz\",\"labels\":${OWN}},{\"id\":74,\"name\":\"e\\u001b[31mvil\",\"labels\":${OWN}},"'{"id":80,"name":"ö-測試","labels":{"lok8s.dev/cluster":"prod-a"}},{"id":81,"name":"\\","labels":{"lok8s.dev/cluster":"prod-a"}},{"id":82,"name":"a\u007fb\u0085c","labels":{"lok8s.dev/cluster":"prod-a"}},{"id":83,"name":"x\u202ey\u200bz","labels":{"lok8s.dev/cluster":"prod-b"}}]'
+    else
+      echo '[]'
+    fi
+  }
+  export -f hcloud
+
+  local plan
+  plan="$(provider::destroy_plan "${DESC}" "${WORK}" 2>"${BATS_TEST_TMPDIR}/plan.err")"
+  [ "${plan}" = "$(printf 'cluster\tprod-a\nserver\t70\tö-測試\nserver\t71\ta?b?c\nserver\t72\t?\nserver\t73\tx?y?z\nserver\t74\te?[31mvil')" ]
+  run cat "${BATS_TEST_TMPDIR}/plan.err"
+  [ "${#lines[@]}" -eq 4 ]
+  assert_line "[warn] hetzner: skipped server 83 x?y?z: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=prod-b. lok8s does not delete a part of another cluster."
+  assert_line --partial "[warn] hetzner: skipped server 80 ö-測試: it has lok8s.dev/cluster=prod-a, but not the owner mark of this cluster"
+  assert_line --partial "[warn] hetzner: skipped server 81 ?: it has lok8s.dev/cluster=prod-a, but not the owner mark of this cluster"
+  assert_line --partial "[warn] hetzner: skipped server 82 a?b?c: it has lok8s.dev/cluster=prod-a, but not the owner mark of this cluster"
+
+  : > "${HCLOUD_LOG}"
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  [ "${lines[${#lines[@]}-2]}" = "[warn] lo destroy: skipped server 83 x?y?z: it has lok8s.dev/cluster=prod-b, not lok8s.dev/cluster=prod-a. lok8s did not delete it." ]
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod-a that do not have the owner mark of this cluster (3 servers): server 80 'ö-測試', server 81 '?', server 82 'a?b?c'. Delete them by hand only if they are yours and you want them gone." ]
+  refute_output --partial $'\xe2\x80\xae'
+  refute_output --partial $'\xe2\x80\x8b'
+  refute_output --partial $'\x7f'
+  refute_output --partial $'\xc2\x85'
+  run grep ' delete ' "${HCLOUD_LOG}"
+  assert_output "server delete 70
+server delete 71
+server delete 72
+server delete 73
+server delete 74"
+}
+
+# The plan saw part 42. After it, part 90 of this cluster (with the mark)
+# appears, with an ESC sequence and a newline in its name. The destroy with
+# the confirmed plan keeps it and warns: one line, the ESC and the newline
+# as '?'. Before shown_name, @tsv gave the newline as '\n', and the
+# `echo -e` of warn turned it back into a newline.
+@test "destroy: with a confirmed plan, the warning for a kept part that is not in the plan shows its name on one line" {
+  unset LOK8S_DESTROY_PLAN
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    [[ "$2" == "list" ]] || return 0
+    if [[ "$1" == server ]]; then
+      local now=""
+      [[ ! -f "${BATS_TEST_TMPDIR}/after-plan" ]] || now=1
+      if [[ -z "${now}" ]]; then
+        echo "[{\"id\":42,\"name\":\"cp-0\",\"labels\":${OWN}}]"
+      else
+        echo "[{\"id\":42,\"name\":\"cp-0\",\"labels\":${OWN}},{\"id\":90,\"name\":\"e\\u001b[31mvil\\nX\",\"labels\":${OWN}}]"
+      fi
+    else
+      echo '[]'
+    fi
+  }
+  export -f hcloud
+  local plan
+  plan="$(provider::destroy_plan "${DESC}" "${WORK}")"
+  [ "${plan}" = "$(printf 'cluster\tprod-a\nserver\t42\tcp-0')" ]
+
+  touch "${BATS_TEST_TMPDIR}/after-plan"
+  : > "${HCLOUD_LOG}"
+  export LOK8S_DESTROY_PLAN="${plan}"
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  assert_output "[warn] hetzner: kept server 90 e?[31mvil?X (lok8s.dev/cluster=prod-a): it is not in the confirmed plan. Delete it by hand, or run lo destroy again."
+  [ -z "$(tr -d '[:print:]\n' <<<"${output}")" ]
+  run grep ' delete ' "${HCLOUD_LOG}"
+  assert_output "server delete 42"
+}

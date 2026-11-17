@@ -135,6 +135,35 @@ func TestDestroyGuardListsTheResourcesAndRefusesOffATerminal(t *testing.T) {
 	refuteContains(t, out, "type yes to continue")
 }
 
+// A name in the plan comes from the provider's API. The plan shows it as
+// ui.Shown gives it: each control character (C0, DEL, C1), each backslash
+// and each bidi or zero-width character is '?', and a multibyte name
+// stays. The confirmed plan that the driver gets stays as the provider gave
+// it (the provider checks it by kind and id). The bash twin is the test
+// "destroy guard: the plan shows each name ..." in destroy_guard_test.bats.
+func TestDestroyGuardShowsEachNameOfThePlanSafely(t *testing.T) {
+	d, errBuf, log, prov := guardHarness(t, "", false)
+	prov.plan = "cluster\tprod-a\n" +
+		"server\t70\tö-測試\n" +
+		"server\t71\ta\x7fb\u0085c\n" +
+		"server\t72\t\\\n" +
+		"server\t73\tx\u202ey\u200bz\n" +
+		"server\t74\te\x1b[31mvil\n"
+	d.ConfirmCluster = "prod-a"
+	if err := d.DispatchDestroy(t.Context(), "test.prod"); err != nil {
+		t.Fatal(err)
+	}
+	assertContains(t, errBuf.String(), "destroy deletes these resources of cluster_name \033[1mprod-a\033[0m:\n"+
+		"    server ö-測試 (70)\n"+
+		"    server a?b?c (71)\n"+
+		"    server ? (72)\n"+
+		"    server x?y?z (73)\n"+
+		"    server e?[31mvil (74)\n")
+	refuteContains(t, errBuf.String(), "\x1b[31m")
+	refuteContains(t, errBuf.String(), "\u202e")
+	assertContains(t, strings.Join(*log, "\n"), "plan-env:cluster prod-a\nserver 70 ö-測試\nserver 71 a\x7fb\u0085c\nserver 72 \\\nserver 73 x\u202ey\u200bz\nserver 74 e\x1b[31mvil")
+}
+
 func TestDestroyGuardRefusesAConfirmClusterThatDoesNotMatch(t *testing.T) {
 	d, errBuf, log, _ := guardHarness(t, "", false)
 	d.ConfirmCluster = "prod-b"

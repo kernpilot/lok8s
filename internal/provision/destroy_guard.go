@@ -133,8 +133,12 @@ func (d *Dispatcher) guardDestroy(ctx context.Context, domainName, kind, cluster
 	if len(res) == 0 {
 		fmt.Fprintf(w, "    (no resource found)\n")
 	}
+	// Each name as ui.Shown shows it: a name comes from the provider's API,
+	// and a control, bidi or zero-width character in it would reach the
+	// terminal or turn the line around. The confirmed plan below stays as
+	// the provider gave it.
 	for _, r := range res {
-		fmt.Fprintf(w, "    %s %s (%s)\n", r.kind, r.name, r.id)
+		fmt.Fprintf(w, "    %s %s (%s)\n", r.kind, ui.Shown(r.name), r.id)
 	}
 
 	switch {
