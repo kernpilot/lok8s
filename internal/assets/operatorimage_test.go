@@ -250,8 +250,7 @@ func TestOperatorImageDownloadsAreChecked(t *testing.T) {
 func TestOperatorImageDownloadCheckFindsEachHole(t *testing.T) {
 	t.Parallel()
 	base := readOperatorDockerfile(t)
-	// re (a regexp, with $1 in new) or old (a literal) names the text.
-	type edit struct{ re, old, new string }
+	type edit = dockerfileEdit
 	const (
 		modDownload    = "RUN go mod download\n"
 		copyLo         = "COPY --from=lo-build /out/lo /usr/local/bin/lo\n"
@@ -378,22 +377,7 @@ func TestOperatorImageDownloadCheckFindsEachHole(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			text := base
-			for _, e := range c.edits {
-				if e.re != "" {
-					rx := regexp.MustCompile(e.re)
-					if n := len(rx.FindAllStringIndex(text, -1)); n != 1 {
-						t.Fatalf("the edit %s matches operator/Dockerfile %d times, want once: change this case with the image", e.re, n)
-					}
-					text = rx.ReplaceAllString(text, e.new)
-					continue
-				}
-				if n := strings.Count(text, e.old); n != 1 {
-					t.Fatalf("operator/Dockerfile has %d copies of %q, want one: change this case with the image", n, e.old)
-				}
-				text = strings.Replace(text, e.old, e.new, 1)
-			}
-			problems := operatorDownloadProblems(text)
+			problems := operatorDownloadProblems(editOperatorDockerfile(t, base, c.edits))
 			for _, p := range problems {
 				if strings.Contains(p, c.want) {
 					return
@@ -402,6 +386,32 @@ func TestOperatorImageDownloadCheckFindsEachHole(t *testing.T) {
 			t.Errorf("the check lets this hole pass, want a problem with %q; it found %q", c.want, problems)
 		})
 	}
+}
+
+// dockerfileEdit is one edit of a hole case: re (a regexp, with $1 in new)
+// or old (a literal) names the text, which must occur once.
+type dockerfileEdit struct{ re, old, new string }
+
+// editOperatorDockerfile applies the edits to text in order. A text that
+// an edit does not match exactly once stops the test: the case then has to
+// change with the image.
+func editOperatorDockerfile(t *testing.T, text string, edits []dockerfileEdit) string {
+	t.Helper()
+	for _, e := range edits {
+		if e.re != "" {
+			rx := regexp.MustCompile(e.re)
+			if n := len(rx.FindAllStringIndex(text, -1)); n != 1 {
+				t.Fatalf("the edit %s matches operator/Dockerfile %d times, want once: change this case with the image", e.re, n)
+			}
+			text = rx.ReplaceAllString(text, e.new)
+			continue
+		}
+		if n := strings.Count(text, e.old); n != 1 {
+			t.Fatalf("operator/Dockerfile has %d copies of %q, want one: change this case with the image", n, e.old)
+		}
+		text = strings.Replace(text, e.old, e.new, 1)
+	}
+	return text
 }
 
 // operatorDownloadProblems returns what breaks the rules of
