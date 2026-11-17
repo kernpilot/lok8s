@@ -326,13 +326,13 @@ exec "'"${real}"'" "$@"'
   rc=0
   dnssearch::_stop 6 || rc=$?
   [ "${rc}" -eq 1 ] && [ "${#DNSSEARCH_PROBLEMS[@]}" -eq 1 ]
-  [ "${DNSSEARCH_PROBLEMS[0]}" == "spec.network.dnsSearch could not be read: yq ended, but its output file in ${tmpdir} is gone. Make sure that no other process removes files from ${tmpdir}, then run the command again." ] || {
+  [ "${DNSSEARCH_PROBLEMS[0]}" == "spec.network.dnsSearch could not be read: yq ended, but its output file in ${tmpdir} does not exist. Make sure that no other process removes files from ${tmpdir}, then run the command again." ] || {
     echo "got: ${DNSSEARCH_PROBLEMS[0]}" >&2; return 1
   }
   rc=0
   dnssearch::_stop 7 || rc=$?
   [ "${rc}" -eq 1 ] && [ "${#DNSSEARCH_PROBLEMS[@]}" -eq 1 ]
-  [ "${DNSSEARCH_PROBLEMS[0]}" == "spec.network.dnsSearch could not be read: yq did not start, or its files in ${tmpdir} are gone. Make sure that no other process removes files from ${tmpdir}, then run the command again." ] || {
+  [ "${DNSSEARCH_PROBLEMS[0]}" == "spec.network.dnsSearch could not be read: yq did not start, or its files in ${tmpdir} do not exist. Make sure that ${tmpdir} is writable and has free space, and that no other process removes files from it. Then run the command again." ] || {
     echo "got: ${DNSSEARCH_PROBLEMS[0]}" >&2; return 1
   }
 }

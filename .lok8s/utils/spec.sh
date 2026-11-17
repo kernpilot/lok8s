@@ -151,7 +151,8 @@ spec::_kver_stop() {
 # process (<owner>, its BASHPID). A job of the read (the watchdog) that gets
 # TERM before its own trap is set can run the read's EXIT trap as it ends
 # (bash 5.2 does). Then it removed the directory while the read still needed
-# it, and a yq that had ended well gave no output.
+# it, and a yq that had ended well gave no output. yqbound.sh has its own
+# copy (yqbound::_cleanup).
 spec::_kver_cleanup() {
   [[ "${BASHPID}" != "${1}" ]] || rm -rf "${2}"
 }
@@ -240,7 +241,7 @@ spec::_kver_yq() (
     if [[ -f "${tmp}/out" ]] && cat "${tmp}/out" 2>/dev/null; then
       exit 0
     fi
-    printf '%s yq ended, but its output file %s is gone. Make sure that no other process removes files from %s, then run the command again.\n' \
+    printf '%s yq ended, but its output file %s does not exist. Make sure that no other process removes files from %s, then run the command again.\n' \
       "${unreadable}" "${tmp}/out" "${TMPDIR:-/tmp}"
     exit 1
   fi
@@ -249,7 +250,7 @@ spec::_kver_yq() (
   elif (( rc <= 128 )) && [[ ! -f "${tmp}/err" ]]; then
     # No stderr file of yq: its redirect failed (yq did not start), or the
     # files are gone. Not a yq error of the spec file.
-    printf '%s yq did not start, or its files in %s are gone. Make sure that no other process removes files from %s, then run the command again.\n' \
+    printf '%s yq did not start, or its files in %s do not exist. Make sure that %s is writable and has free space, and that no other process removes files from it. Then run the command again.\n' \
       "${unreadable}" "${tmp}" "${TMPDIR:-/tmp}"
   elif (( rc <= 128 )) && grep -q '^panic: ' "${tmp}/err"; then
     # A Go panic is a fault of the yq release, not of the spec file (yq

@@ -244,7 +244,7 @@ exit 2'
 case \"\$*\" in *'kind + \" \" + tag'*) rm -f \"\${TMPDIR}\"/lo-kver.*/out ;; esac"
   run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
   assert_failure
-  [[ "${output}" == "spec.kubernetes.version cannot be read: yq ended, but its output file ${TMPDIR}/lo-kver."??????"/out is gone. Make sure that no other process removes files from ${TMPDIR}, then run the command again." ]] || {
+  [[ "${output}" == "spec.kubernetes.version cannot be read: yq ended, but its output file ${TMPDIR}/lo-kver."??????"/out does not exist. Make sure that no other process removes files from ${TMPDIR}, then run the command again." ]] || {
     echo "got: ${output}" >&2; return 1
   }
   [ -z "$(ls -A "${TMPDIR}")" ] || { echo "left in TMPDIR: $(ls -A "${TMPDIR}")" >&2; return 1; }
@@ -260,7 +260,7 @@ case \"\$*\" in *'kind + \" \" + tag'*) rm -f \"\${TMPDIR}\"/lo-kver.*/out ;; es
   _yq_stub 'rm -f "${TMPDIR}"/lo-kver.*/out "${TMPDIR}"/lo-kver.*/err; exit 1'
   run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
   assert_failure
-  [[ "${output}" == "spec.kubernetes.version cannot be read: yq did not start, or its files in ${TMPDIR}/lo-kver."??????" are gone. Make sure that no other process removes files from ${TMPDIR}, then run the command again." ]] || {
+  [[ "${output}" == "spec.kubernetes.version cannot be read: yq did not start, or its files in ${TMPDIR}/lo-kver."??????" do not exist. Make sure that ${TMPDIR} is writable and has free space, and that no other process removes files from it. Then run the command again." ]] || {
     echo "got: ${output}" >&2; return 1
   }
   [ -z "$(ls -A "${TMPDIR}")" ] || { echo "left in TMPDIR: $(ls -A "${TMPDIR}")" >&2; return 1; }
@@ -298,6 +298,29 @@ case \"\$*\" in *'kind + \" \" + tag'*) rm -f \"\${TMPDIR}\"/lo-kver.*/out ;; es
     [[ "${pid}" != "${own}" ]] || n=$(( n + 1 ))
   done < "${BATS_TEST_TMPDIR}/cleanups"
   (( n > 0 )) || { echo "no read removed its directory through spec::_kver_cleanup" >&2; return 1; }
+  [ -z "$(ls -A "${TMPDIR}")" ] || { echo "left in TMPDIR: $(ls -A "${TMPDIR}")" >&2; return 1; }
+}
+
+# bash 5.2 can run the read's EXIT trap in the watchdog as the watchdog
+# ends. Here a child process runs the trap string at once, when the read
+# sets it, as the watchdog can. The read must keep its directory and give
+# the version. A trap that removes the directory directly, or that reads
+# the pid only when it runs, fails here.
+@test "spec::kind_node_version: a job that runs the read's EXIT trap leaves the read its directory and its answer" {
+  _spec "version: v1.31.4"
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  trap() {
+    if [[ $# -eq 2 && "${2}" == EXIT ]]; then
+      ( eval "${1}" )
+    fi
+    # shellcheck disable=SC2064 # "$@" passes the caller's own trap string on.
+    builtin trap "$@"
+  }
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  unset -f trap
+  assert_success
+  assert_output "v1.31.4"
   [ -z "$(ls -A "${TMPDIR}")" ] || { echo "left in TMPDIR: $(ls -A "${TMPDIR}")" >&2; return 1; }
 }
 

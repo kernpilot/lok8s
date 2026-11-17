@@ -147,7 +147,8 @@ yqbound::run() (
   # answer (6): an empty stdout would read as an empty value.
   if (( rc == 0 )); then
     [[ -f "${tmp}/out" ]] && cat "${tmp}/out" 2>/dev/null || exit 6
-    cat "${tmp}/err" >&2
+    # yq's notes, if any: a lost stderr file costs only the notes.
+    cat "${tmp}/err" >&2 2>/dev/null || :
     exit 0
   fi
   [[ ! -e "${tmp}/timeout" ]] || exit 2

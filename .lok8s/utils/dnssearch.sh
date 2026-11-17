@@ -157,8 +157,8 @@ dnssearch::_stop() {
       fi
       ;;
     5) cause="the installed yq ($(dnssearch::_yq_version)) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.54.3 or later." ;;
-    6) cause="yq ended, but its output file in ${tmpdir} is gone. Make sure that no other process removes files from ${tmpdir}, then run the command again." ;;
-    7) cause="yq did not start, or its files in ${tmpdir} are gone. Make sure that no other process removes files from ${tmpdir}, then run the command again." ;;
+    6) cause="yq ended, but its output file in ${tmpdir} does not exist. Make sure that no other process removes files from ${tmpdir}, then run the command again." ;;
+    7) cause="yq did not start, or its files in ${tmpdir} do not exist. Make sure that ${tmpdir} is writable and has free space, and that no other process removes files from it. Then run the command again." ;;
     *)
       if (( rc > 64 && rc < 128 )); then
         cause="the signal SIG$(kill -l $(( rc - 64 )) 2>/dev/null || echo $(( rc - 64 ))) stopped yq. Run the command again."

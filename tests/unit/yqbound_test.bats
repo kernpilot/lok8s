@@ -178,6 +178,17 @@ args: -r .a ${BATS_TEST_TMPDIR}/in.yaml" ]
   _clean
 }
 
+# yq ends well, and only its stderr file is gone: the answer stands (0).
+# The lost file costs yq's notes, and the call writes no error of its own.
+@test "yqbound::run: a yq that ends well but whose stderr file is gone is 0, with no error line" {
+  _yq 'printf "1\n"; rm -f "${TMPDIR}"/lo-yq.*/err'
+  _run_bound 5
+  [ "${rc}" -eq 0 ] || { echo "rc ${rc}" >&2; return 1; }
+  [ "$(cat "${BATS_TEST_TMPDIR}/out")" == "1" ]
+  [ ! -s "${BATS_TEST_TMPDIR}/err" ] || { echo "stderr:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1; }
+  _clean
+}
+
 # yq did not end well, and its files are gone (its redirect failed, or a
 # process removed them): 7, not 1, which a caller reads as yq's own verdict
 # on the file (dnssearch: "no list").
@@ -219,6 +230,27 @@ args: -r .a ${BATS_TEST_TMPDIR}/in.yaml" ]
     [[ "${pid}" != "${own}" ]] || n=$(( n + 1 ))
   done < "${BATS_TEST_TMPDIR}/cleanups"
   (( n == 1 )) || { echo "${n} cleanups in the call's own process, want 1" >&2; return 1; }
+  _clean
+}
+
+# bash 5.2 can run the call's EXIT trap in the watchdog as the watchdog
+# ends. Here a child process runs the trap string at once, when the call
+# sets it, as the watchdog can. The call must keep its directory and give
+# yq's output. A trap that removes the directory directly, or that reads
+# the pid only when it runs, fails here.
+@test "yqbound::run: a job that runs the call's EXIT trap leaves the call its directory and its output" {
+  _yq 'printf "1\n"'
+  trap() {
+    if [[ $# -eq 2 && "${2}" == EXIT ]]; then
+      ( eval "${1}" )
+    fi
+    # shellcheck disable=SC2064 # "$@" passes the caller's own trap string on.
+    builtin trap "$@"
+  }
+  _run_bound 5
+  unset -f trap
+  [ "${rc}" -eq 0 ] || { echo "rc=${rc}: $(cat "${BATS_TEST_TMPDIR}/err")" >&2; return 1; }
+  [ "$(cat "${BATS_TEST_TMPDIR}/out")" == "1" ]
   _clean
 }
 
