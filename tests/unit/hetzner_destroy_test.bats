@@ -250,3 +250,46 @@ volume delete 7"
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
 }
+
+# The list query selects lok8s.dev/cluster=<cluster_name>, but the destroy
+# does not trust it alone: each part's cluster label is checked again. This
+# fake gives two foreign parts in the server list (a list that does not
+# apply its selector): one with another cluster label and one with none,
+# both with the owner mark of this cluster. Neither is in the plan or
+# deleted, also when a confirmed plan names them, and a warning names each.
+@test "destroy: a listed part without the cluster label of this cluster is never deleted, also with the owner mark" {
+  local mark
+  mark="$(printf '%s\n%s\n' "${PROVIDER_DOMAIN}" prod-a | sha256sum | cut -c1-32)"
+  export FOREIGN="[{\"id\":44,\"name\":\"other-0\",\"labels\":{\"lok8s.dev/cluster\":\"prod-b\",\"lok8s.dev/owner\":\"${mark}\"}},{\"id\":45,\"name\":\"bare-0\",\"labels\":{\"lok8s.dev/owner\":\"${mark}\"}}]"
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    [[ "$2" == "list" ]] || return 0
+    if [[ "$1" == server ]]; then
+      jq -c --argjson f "${FOREIGN}" '. + $f' <<<"[{\"id\":42,\"name\":\"cp-0\",\"labels\":${OWN}}]"
+    else
+      echo '[]'
+    fi
+  }
+  export -f hcloud
+
+  local plan
+  plan="$(provider::destroy_plan "${DESC}" "${WORK}" 2>"${BATS_TEST_TMPDIR}/plan.err")"
+  [ "${plan}" = "$(printf 'cluster\tprod-a\nserver\t42\tcp-0')" ]
+  run cat "${BATS_TEST_TMPDIR}/plan.err"
+  assert_output --partial "hetzner: skipped server 44 other-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=prod-b. lok8s does not delete a part of another cluster."
+  assert_output --partial "hetzner: skipped server 45 bare-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=<none>."
+
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  # Not a kept part of this cluster: the summary does not count it.
+  refute_output --partial "lo destroy: kept"
+  run grep ' delete ' "${HCLOUD_LOG}"
+  assert_output "server delete 42"
+
+  : > "${HCLOUD_LOG}"
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0\nserver\t44\tother-0\nserver\t45\tbare-0'
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  run grep ' delete ' "${HCLOUD_LOG}"
+  assert_output "server delete 42"
+}

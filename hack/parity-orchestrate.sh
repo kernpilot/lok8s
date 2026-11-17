@@ -1788,7 +1788,9 @@ rm -rf "${PROJ}/clusters"/{dupa,dupb,solo}.cloud "${PROJ}/.lok8s/providers/mockp
 # The real hetzner provider of the project's bash tree runs in both CLIs (the
 # Go one through the bridge). hcloud is a stub: its lists hold one server
 # with the owner mark of kept.cloud, one server and one network with the
-# cluster label and no mark, and it logs each call. The destroy deletes the
+# cluster label and no mark, and one server with the mark and another
+# cluster label (the stub does not apply the selector, so the destroy must
+# check the label itself). It logs each call. The destroy deletes the
 # marked server only and exits 0; its last line counts the 2 kept parts by
 # kind. HCLOUD_CONFIG names no file: an hcloud that is not the stub has no
 # context and no token.
@@ -1801,7 +1803,7 @@ parity::stub "${PROJ}" hcloud <<'SH'
 echo "$*" >> "${PARITY_HCLOUD_LOG}"
 case "${1:-} ${2:-}" in
   "server list")
-    printf '[{"id":42,"name":"kept-name-cp-0","labels":{"lok8s.dev/cluster":"kept-name","lok8s.dev/owner":"%s"}},{"id":43,"name":"old-0","labels":{"lok8s.dev/cluster":"kept-name"}}]\n' "${PARITY_HCLOUD_MARK}" ;;
+    printf '[{"id":42,"name":"kept-name-cp-0","labels":{"lok8s.dev/cluster":"kept-name","lok8s.dev/owner":"%s"}},{"id":43,"name":"old-0","labels":{"lok8s.dev/cluster":"kept-name"}},{"id":44,"name":"other-0","labels":{"lok8s.dev/cluster":"other-name","lok8s.dev/owner":"%s"}}]\n' "${PARITY_HCLOUD_MARK}" "${PARITY_HCLOUD_MARK}" ;;
   "network list") echo '[{"id":9,"name":"old-net","labels":{"lok8s.dev/cluster":"kept-name"}}]' ;;
   *" list") echo '[]' ;;
   *" delete") ;;

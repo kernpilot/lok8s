@@ -202,26 +202,43 @@ _HETZNER_DESTROY_ORDER=(load-balancer server placement-group firewall volume flo
 # the same cluster_name in one Hetzner project have two marks, so the destroy
 # of one never lists the parts of the other. A list that fails, or a mark
 # that cannot be calculated, stops it (rc 1): an empty list must mean "no
-# resource", never "hcloud did not answer". Globals, not stdout: the caller
-# needs both lists, and a command substitution keeps no variable.
+# resource", never "hcloud did not answer". The cluster label of each part
+# is checked again, not only by the list query: a part that the list gives
+# with another cluster label, or none, is in neither list (a warning names
+# it), also when it has the mark of this cluster. Globals, not stdout: the
+# caller needs both lists, and a command substitution keeps no variable.
 hetzner::_destroy_resources() {
   local cluster="${1}" key="${_HETZNER_OWNER_KEY}" selector="lok8s.dev/cluster=${1}"
-  local mark resource json marked skipped line rid rmark rname
+  local mark resource json marked skipped foreign line rid rmark rname
   _HETZNER_DESTROY_ROWS="" _HETZNER_DESTROY_KEPT=""
   mark="$(hetzner::owner_mark "${cluster}")" || return 1
   for resource in "${_HETZNER_DESTROY_ORDER[@]}"; do
-    # Two passes over one list: the parts with the mark, and the others as
-    # "<id>\t<mark>\t<name>" (the mark is empty when the part has none).
+    # Three passes over one list: the parts with the cluster label and the
+    # mark; the parts with the cluster label and another mark or none, as
+    # "<id>\t<mark>\t<name>" (the mark is empty when the part has none); and
+    # the parts with another cluster label or none, as
+    # "<id>\t<cluster label>\t<name>".
     if ! json="$(hcloud "${resource}" list -o json -l "${selector}")" ||
-       ! marked="$(jq -r --arg r "${resource}" --arg key "${key}" --arg mark "${mark}" '
-           (. // [])[] | select(((.labels // {})[$key] // "") == $mark)
+       ! marked="$(jq -r --arg r "${resource}" --arg key "${key}" --arg mark "${mark}" --arg c "${cluster}" '
+           (. // [])[] | select(((.labels // {})["lok8s.dev/cluster"] // "") == $c)
+           | select(((.labels // {})[$key] // "") == $mark)
            | [$r, (.id | tostring), (.name // "")] | @tsv' <<<"${json}")" ||
-       ! skipped="$(jq -r --arg key "${key}" --arg mark "${mark}" '
-           (. // [])[] | ((.labels // {})[$key] // "") as $m | select($m != $mark)
-           | [(.id | tostring), $m, (.name // "")] | @tsv' <<<"${json}")"; then
+       ! skipped="$(jq -r --arg key "${key}" --arg mark "${mark}" --arg c "${cluster}" '
+           (. // [])[] | select(((.labels // {})["lok8s.dev/cluster"] // "") == $c)
+           | ((.labels // {})[$key] // "") as $m | select($m != $mark)
+           | [(.id | tostring), $m, (.name // "")] | @tsv' <<<"${json}")" ||
+       ! foreign="$(jq -r --arg c "${cluster}" '
+           (. // [])[] | ((.labels // {})["lok8s.dev/cluster"] // "") as $l | select($l != $c)
+           | [(.id | tostring), $l, (.name // "")] | @tsv' <<<"${json}")"; then
       error "hetzner: could not list the ${resource} resources with ${selector}. Nothing was deleted. Check the hcloud token and the API, then run the destroy again."
       return 1
     fi
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      rid="${line%%$'\t'*}" line="${line#*$'\t'}"
+      rmark="${line%%$'\t'*}" rname="${line#*$'\t'}"
+      warn "hetzner: skipped ${resource} ${rid} ${rname}: the list of the parts with ${selector} gave it, but it has lok8s.dev/cluster=${rmark:-<none>}. lok8s does not delete a part of another cluster."
+    done <<<"${foreign}"
     [[ -z "${marked}" ]] || _HETZNER_DESTROY_ROWS+="${marked}"$'\n'
     # Split at each tab by hand: `IFS=$'\t' read` joins two tabs, and an
     # empty mark would shift the name into it.
@@ -593,6 +610,13 @@ provider::output() {
     }'
 }
 
+# provider::status <config_file>
+# Running | Partial (<n>/<total> running) | NotFound, over the servers with
+# lok8s.dev/cluster=<cluster_name> (the label is checked again, not only by
+# the list query). When some of them do not have the owner mark of this
+# cluster, the status says how many: lo destroy keeps such a server, and
+# the inventory leaves it out. When the mark cannot be calculated (no
+# PROVIDER_DOMAIN), the status says that the mark is not known.
 provider::status() {
   local config_file="${1:-${PROVIDER_CONFIG_FILE:-}}"
   export PROVIDER_CONFIG_FILE="${config_file}"
@@ -600,14 +624,26 @@ provider::status() {
   local cluster_name
   cluster_name=$(_cfg '.cluster_name // ""')
 
-  local servers_json running total
+  local servers_json running total mark unmarked marks=""
   servers_json=$(hcloud server list -o json -l "lok8s.dev/cluster=${cluster_name}")
+  servers_json=$(jq -c --arg c "${cluster_name}" \
+    '[(. // [])[] | select(((.labels // {})["lok8s.dev/cluster"] // "") == $c)]' <<<"${servers_json}")
   total=$(echo "${servers_json}" | jq 'length')
   running=$(echo "${servers_json}" | jq '[.[] | select(.status == "running")] | length')
 
+  if (( total > 0 )); then
+    if mark="$(hetzner::owner_mark "${cluster_name}" 2>/dev/null)"; then
+      unmarked=$(jq --arg key "${_HETZNER_OWNER_KEY}" --arg mark "${mark}" \
+        '[.[] | select(((.labels // {})[$key] // "") != $mark)] | length' <<<"${servers_json}")
+      (( unmarked == 0 )) || marks="${unmarked} of ${total} servers without the owner mark of this cluster"
+    else
+      marks="the owner mark of this cluster is not known"
+    fi
+  fi
+
   if (( total == 0 )); then echo "NotFound"
-  elif (( running == total )); then echo "Running"
-  else echo "Partial (${running}/${total} running)"; fi
+  elif (( running == total )); then echo "Running${marks:+ (${marks})}"
+  else echo "Partial (${running}/${total} running${marks:+; ${marks}})"; fi
 }
 
 # ── Optional hook: rebuild ───────────────────────────────

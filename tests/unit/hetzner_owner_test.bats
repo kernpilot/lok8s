@@ -1485,6 +1485,32 @@ volume delete 24"
   assert_output ""
 }
 
+# provider::status counts the servers with the cluster label, and says how
+# many of them do not have the owner mark of this cluster: lo destroy keeps
+# those, and the inventory leaves them out.
+@test "status: the status says how many servers do not have the owner mark of this cluster" {
+  _part server 21 cp-0 "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}" '{"status":"running"}'
+  run provider::status "${DESC}"
+  assert_success
+  assert_output "Running"
+
+  _part server 22 cp-1 "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${OTHER}\"}" '{"status":"running"}'
+  _part server 23 old-0 '{"lok8s.dev/cluster":"prod"}' '{"status":"off"}'
+  run provider::status "${DESC}"
+  assert_success
+  assert_output "Partial (2/3 running; 2 of 3 servers without the owner mark of this cluster)"
+
+  _fake_set server 23 '.status = "running"'
+  run provider::status "${DESC}"
+  assert_output "Running (2 of 3 servers without the owner mark of this cluster)"
+
+  # No domain: the mark is not known, and the status says so.
+  unset PROVIDER_DOMAIN
+  run provider::status "${DESC}"
+  assert_success
+  assert_output "Running (the owner mark of this cluster is not known)"
+}
+
 # ── the standalone hetzner command ───────────────────────
 
 @test "standalone: the hetzner command takes the domain of the mark from --domain, and refuses --hetzner-json alone" {
