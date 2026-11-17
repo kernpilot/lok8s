@@ -264,6 +264,20 @@ exit 2'
   (( bad == 0 ))
 }
 
+# With no free file descriptor for errfd (ulimit -n 10: errfd takes the
+# lowest free one from 10 up), the read stops before yq and names the cause.
+@test "spec::_kver_yq: no free file descriptor for errfd is a read error, and yq does not run" {
+  _spec "version: v1.31.4"
+  local rc=0
+  _yq_stub 'echo ran > "'"${BATS_TEST_TMPDIR}"'/ran"; echo v1.31.4'
+  bash -c 'import() { :; }; source "$1/domain.sh"; source "$1/spec.sh"; ulimit -n 10; spec::_kver_yq "$2" -r .kind' \
+    bash "${_PROJECT_ROOT}/.lok8s/utils" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" \
+    > "${BATS_TEST_TMPDIR}/out" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+  [ "${rc}" -eq 1 ]
+  [ "$(<"${BATS_TEST_TMPDIR}/out")" = "spec.kubernetes.version cannot be read: lo cannot open a file descriptor. Raise the open-file limit (ulimit -n)." ]
+  [ ! -e "${BATS_TEST_TMPDIR}/ran" ]
+}
+
 @test "spec::kind_node_version: a yq that a signal stops after a panic line is named as stopped, not as a fault of the yq release" {
   _spec "version: v1.31.4"
   # A status above 128 is a signal (SIGKILL: 137), also when yq wrote a

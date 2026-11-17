@@ -3,7 +3,7 @@
 # time limit that always holds (pure bash, no timeout(1)) and a data-memory
 # cap (ulimit -d, best effort), and an exit status per outcome: 0 success,
 # 1 a yq error of its own, 2 the time limit, 3 the memory cap, 4 no
-# temporary directory or FIFO, 5 an unknown flag (an old yq), 64+N the
+# temporary directory, FIFO or free file descriptor, 5 an unknown flag (an old yq), 64+N the
 # signal N.
 
 setup() {
@@ -106,7 +106,7 @@ args: -r .a ${BATS_TEST_TMPDIR}/in.yaml" ]
 # and so is each DEBUG trap. The call runs in a new bash, so the case does
 # not depend on the traps of bats.
 @test "yqbound::run: bash puts no report of a yq that a signal stopped on the caller's stderr" {
-  local sig want trace bad=0
+  local sig want trace rc bad=0
   for sig in SEGV KILL; do
     want=75
     [[ "${sig}" == KILL ]] && want=73
@@ -131,6 +131,20 @@ args: -r .a ${BATS_TEST_TMPDIR}/in.yaml" ]
     echo "a stub left a core file" >&2; bad=1
   fi
   (( bad == 0 ))
+  _clean
+}
+
+# With no free file descriptor for errfd (ulimit -n 10: errfd takes the
+# lowest free one from 10 up), the call stops before yq with 4.
+@test "yqbound::run: no free file descriptor for errfd is 4, and yq does not run" {
+  local rc=0
+  _yq 'echo ran > "'"${BATS_TEST_TMPDIR}"'/ran"; echo 1'
+  bash -c 'source "$1"; ulimit -n 10; yqbound::run 5 262144 "$2" -r .a' \
+    bash "${_PROJECT_ROOT}/.lok8s/utils/yqbound.sh" "${BATS_TEST_TMPDIR}/in.yaml" \
+    > "${BATS_TEST_TMPDIR}/out" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+  [ "${rc}" -eq 4 ]
+  [ ! -s "${BATS_TEST_TMPDIR}/out" ]
+  [ ! -e "${BATS_TEST_TMPDIR}/ran" ]
   _clean
 }
 

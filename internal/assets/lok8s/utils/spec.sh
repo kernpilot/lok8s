@@ -182,7 +182,7 @@ spec::_kver_yq() (
   trap 'sig="${sig:-TERM}"' TERM
   # A job that a signal stopped (yq on SIGSEGV or SIGKILL) gets a report
   # from bash on stderr ("line N: PID Segmentation fault ( ulimit -d … )"),
-  # at the next notify point (after a command, after a DEBUG trap) until a
+  # at the next notify point (after a DEBUG trap; bash 4.3: a command too) until a
   # `wait` collects the job. The read writes its own line for that cause,
   # so from the start of yq to the wait for the watchdog, stderr goes to
   # /dev/null (a set -x trace of these lines too). errfd keeps the caller's
@@ -190,7 +190,10 @@ spec::_kver_yq() (
   # hold a caller's $(...) pipe open. Not a `{ ...; } 2>/dev/null` group:
   # bash keeps the caller's stderr in a copy that the watchdog would get.
   # yqbound::run (utils/yqbound.sh) does the same.
-  exec {errfd}>&2 2>/dev/null
+  exec {errfd}>&2 2>/dev/null || {
+    printf '%s lo cannot open a file descriptor. Raise the open-file limit (ulimit -n).\n' "${unreadable}"
+    exit 1
+  }
   (
     ulimit -d "${_SPEC_KVER_MAX_KB}" 2>/dev/null
     exec yq --yaml-fix-merge-anchor-to-spec "${@}" "${cluster_yaml}" >"${tmp}/out" 2>"${tmp}/err"
