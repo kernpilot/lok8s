@@ -17,6 +17,44 @@
 # the watchdog, INT/QUIT/TERM traps that stop both, and a temporary
 # directory removed on exit.
 
+# Test only (tests/unit/yqbound_test.bats): a delay, in seconds, in
+# yqbound::run between the start of yq (_YQ) or of the watchdog (_WATCHDOG)
+# and the line that keeps its pid, so that a test can send a signal in that
+# window. Empty in a normal run. Shell variables, set here, so the
+# environment cannot set them.
+_YQBOUND_TEST_DELAY_YQ=""
+_YQBOUND_TEST_DELAY_WATCHDOG=""
+
+# yqbound::_running_job <pid> — true while <pid> is a running job of the
+# calling shell. The shell reaps a job that ends (in its SIGCHLD handler),
+# and after that the pid can be another process's. So yqbound::run sends a
+# signal to a job of its own only after this test. spec.sh has its own copy
+# (spec::_running_job): it does not import this file.
+yqbound::_running_job() {
+  local job
+  for job in $(jobs -rp); do
+    [[ "${job}" != "${1}" ]] || return 0
+  done
+  return 1
+}
+
+# yqbound::_stop <pid> <watchdog> — the stop of yqbound::run on INT, QUIT or
+# TERM: TERM to the watchdog and to yq, then a wait for both. A job that
+# ended gets no signal (yqbound::_running_job): after the wait of
+# yqbound::run, the pid of yq can be another process's. The trap sets INT,
+# QUIT and TERM to do nothing before the stop, and a signal that comes
+# during the stop ends a wait early: so the stop waits again while the job
+# runs. It runs in a trap, where set -e applies again: each command that
+# can fail ends in `|| :`.
+yqbound::_stop() {
+  local pid="${1}" watchdog="${2}"
+  ! yqbound::_running_job "${watchdog}" || kill -TERM "${watchdog}" 2>/dev/null || :
+  ! yqbound::_running_job "${pid}" || kill -TERM "${pid}" 2>/dev/null || :
+  while yqbound::_running_job "${pid}"; do wait "${pid}" 2>/dev/null || :; done
+  while yqbound::_running_job "${watchdog}"; do wait "${watchdog}" 2>/dev/null || :; done
+  return 0
+}
+
 # yqbound::run <seconds> <kib> <file> <yq argument>... — run
 # `yq <yq argument>... <file>` with the time limit <seconds> and the data
 # memory cap <kib> KiB. Exit status:
@@ -38,15 +76,24 @@ yqbound::run() (
   shift 3
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/lo-yq.XXXXXX" 2>/dev/null) || exit 4
   trap 'rm -rf "${tmp}"' EXIT
-  # On an interrupt: stop yq and the watchdog, then the EXIT trap removes tmp.
-  trap 'kill -TERM ${pid:-} ${watchdog:-} 2>/dev/null; exit 130' INT
-  trap 'kill -TERM ${pid:-} ${watchdog:-} 2>/dev/null; exit 131' QUIT
-  trap 'kill -TERM ${pid:-} ${watchdog:-} 2>/dev/null; exit 143' TERM
+  # On an interrupt: stop yq and the watchdog (yqbound::_stop), then the
+  # EXIT trap removes tmp. Until the pids of yq and of the watchdog are
+  # kept, INT, QUIT and TERM are only noted: a stop between a start and its
+  # `$!` would not know that pid and would leave yq or the watchdog
+  # running. Then the stop traps come, and a noted signal is sent again, so
+  # it stops the call as a later one does. A stop first sets the three
+  # signals to do nothing: a second signal would start a second stop inside
+  # the first (bash runs its trap between the commands of the first).
+  sig=""
+  trap 'sig="${sig:-INT}"' INT
+  trap 'sig="${sig:-QUIT}"' QUIT
+  trap 'sig="${sig:-TERM}"' TERM
   mkfifo "${tmp}/tick" 2>/dev/null || exit 4
   (
     ulimit -d "${kib}" 2>/dev/null
     exec yq "${@}" "${file}" >"${tmp}/out" 2>"${tmp}/err"
   ) &
+  [[ -z "${_YQBOUND_TEST_DELAY_YQ}" ]] || sleep "${_YQBOUND_TEST_DELAY_YQ}"
   pid=$!
   # The watchdog's stdout and stderr go to /dev/null: if the body dies (a
   # SIGKILL), the watchdog must not hold the caller's $(…) pipe open until
@@ -56,12 +103,17 @@ yqbound::run() (
     : >"${tmp}/timeout"
     kill -TERM "${pid}" 2>/dev/null
   ) >/dev/null 2>&1 &
+  [[ -z "${_YQBOUND_TEST_DELAY_WATCHDOG}" ]] || sleep "${_YQBOUND_TEST_DELAY_WATCHDOG}"
   watchdog=$!
+  trap 'trap : INT QUIT TERM; yqbound::_stop "${pid}" "${watchdog}"; exit 130' INT
+  trap 'trap : INT QUIT TERM; yqbound::_stop "${pid}" "${watchdog}"; exit 131' QUIT
+  trap 'trap : INT QUIT TERM; yqbound::_stop "${pid}" "${watchdog}"; exit 143' TERM
+  [[ -z "${sig}" ]] || kill -"${sig}" "${BASHPID}"
   rc=0
   wait "${pid}" 2>/dev/null || rc=$?
   # `|| :` on both: the watchdog may be gone already, and a caller under
   # `set -e` must not stop here after a successful yq.
-  kill -TERM "${watchdog}" 2>/dev/null || :
+  ! yqbound::_running_job "${watchdog}" || kill -TERM "${watchdog}" 2>/dev/null || :
   wait "${watchdog}" 2>/dev/null || :
   if (( rc == 0 )); then
     cat "${tmp}/out"

@@ -218,3 +218,164 @@ _interrupt() {
   [ -e "${BATS_TEST_TMPDIR}/done" ] || { echo "the caller's \$(…) did not return within 6 s" >&2; return 1; }
   (( took < 4 )) || { echo "the caller's \$(…) returned after ${took} s" >&2; return 1; }
 }
+
+# _now_ms — the wall clock in milliseconds (bash 5 EPOCHREALTIME: no fork,
+# and macOS date has no %N).
+_now_ms() {
+  local t="${EPOCHREALTIME/[.,]/}"
+  echo $(( 10#${t} / 1000 ))
+}
+
+# _gone <ERE> — true when no process matches <ERE> (_pgrep_f of test_helper)
+# within 2 s: a process that a signal stops can stay visible for a moment.
+# The 2 s are a time, not a count of scans: under bats, one scan of /proc
+# can take more than a second on a host with many processes, and a process
+# that runs on until a time limit must still run when the check ends.
+# Status 2 (with a message): _pgrep_f failed, so nothing is known.
+_gone() {
+  local found end=$(( $(_now_ms) + 2000 ))
+  while :; do
+    found=$(_pgrep_f "${1}") || { echo "_gone: _pgrep_f failed for '${1}'" >&2; return 2; }
+    [[ -n "${found}" ]] || return 0
+    (( $(_now_ms) < end )) || return 1
+    sleep 0.1
+  done
+}
+
+# _kill_left <ERE> — stop the processes that a failed test left behind.
+_kill_left() {
+  local p
+  for p in $(_pgrep_f "${1}"); do kill "${p}" 2>/dev/null || :; done
+}
+
+# A signal that comes before yqbound::run keeps the pid of yq, or of the
+# watchdog, is only noted until it keeps both. Then it stops the call as at
+# any other time, so neither runs on. A forced delay of 1.5 s holds each
+# window open (_YQBOUND_TEST_DELAY_YQ, _WATCHDOG; empty in a normal run).
+# The yq stub sends the signal to the call (its parent): at once in the yq
+# window, after 0.5 s in the watchdog window. The call runs in a new bash
+# whose $0 is a mark: the watchdog is a subshell of it and has the same
+# command line, so the mark finds a watchdog that runs on. The Go readers
+# have no such window: they read the spec in their own process
+# (internal/yqsem), with no yq.
+@test "yqbound::run: a signal before it keeps the pids of yq and the watchdog stops both" {
+  local window sig want rc mark stub_sleep pre dyq dwd start took bad=0
+  for window in yq watchdog; do
+    for sig in INT QUIT TERM; do
+      case "${sig}" in
+        INT) want=130 ;;
+        QUIT) want=131 ;;
+        TERM) want=143 ;;
+      esac
+      mark="yqbound-window-${RANDOM}${RANDOM}"
+      # A stub sleep that no other process uses, so _gone finds only it.
+      stub_sleep=$(( 9000 + RANDOM % 1000 ))
+      if [[ "${window}" == yq ]]; then
+        dyq=1.5 dwd="" pre=""
+      else
+        dyq="" dwd=1.5 pre="sleep 0.5; "
+      fi
+      _yq "${pre}kill -${sig} \"\${PPID}\"; exec sleep ${stub_sleep}"
+      rc=0
+      start=$(_now_ms)
+      # The time limit (20 s) also ends a call whose stop does not run. It
+      # is long: a watchdog that runs on must still run when the checks
+      # below end (each scan of /proc can take a second or more).
+      bash -c 'source "$1"; _YQBOUND_TEST_DELAY_YQ=$3 _YQBOUND_TEST_DELAY_WATCHDOG=$4; yqbound::run 20 262144 "$2" -r .a' \
+        "${mark}" "${_PROJECT_ROOT}/.lok8s/utils/yqbound.sh" "${BATS_TEST_TMPDIR}/in.yaml" "${dyq}" "${dwd}" \
+        > "${BATS_TEST_TMPDIR}/out" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+      took=$(( $(_now_ms) - start ))
+      if (( rc != want )); then
+        echo "${window} window, ${sig}: status ${rc}, want ${want}: $(<"${BATS_TEST_TMPDIR}/err")" >&2; bad=1
+      fi
+      # The floor: the call ends after the delay (the signal waits for the
+      # end of the delay's sleep), so the window was open. The ceiling is
+      # far below the time limit: the stop, not the watchdog, ended the call.
+      if (( took < 1400 || took > 8000 )); then
+        echo "${window} window, ${sig}: the call took ${took} ms, want the delay of 1500 ms and the stop" >&2; bad=1
+      fi
+      if ! _gone "^sleep ${stub_sleep}\$"; then
+        echo "${window} window, ${sig}: yq runs on after the call" >&2; bad=1
+        _kill_left "^sleep ${stub_sleep}\$"
+      fi
+      if ! _gone "${mark}"; then
+        echo "${window} window, ${sig}: the watchdog runs on after the call" >&2; bad=1
+        _kill_left "${mark}"
+      fi
+      if [[ -n "$(ls -A "${TMPDIR}")" ]]; then
+        echo "${window} window, ${sig}: temporary files remain: $(ls -A "${TMPDIR}")" >&2; bad=1
+      fi
+      rm -rf "${TMPDIR:?}"/*
+    done
+  done
+  (( bad == 0 ))
+  _clean
+}
+
+# After the wait of yqbound::run, yq is reaped, and its pid can be another
+# process's: a stop sends no signal to a job of the call that has ended,
+# waited for or not (yqbound::_running_job). A job that runs gets TERM, and
+# the stop returns after the job ends. The stops run in a job of their own
+# (set -m) with a time limit: a stop that does not return fails the test,
+# and a KILL to the job's group leaves no process behind.
+@test "yqbound::run: a stop sends no signal to a job of the call that has ended" {
+  local log="${BATS_TEST_TMPDIR}/kills" sub i
+  : > "${log}"
+  set -m
+  (
+    kill() { printf '%s\n' "$*" >> "${log}"; builtin kill "$@"; }
+    sleep 0.1 3>&- &
+    waited=$!
+    sleep 0.1 3>&- &
+    ended=$!
+    wait "${waited}"
+    # The shell reaps the other one when it ends, with no wait.
+    sleep 0.5
+    yqbound::_stop "${waited}" "${ended}"
+    [[ ! -s "${log}" ]] || { echo "a stop sent a signal to a job that had ended: $(<"${log}")"; exit 1; }
+    sleep 5 3>&- &
+    running=$!
+    yqbound::_stop "${running}" ""
+    [[ "$(<"${log}")" == "-TERM ${running}" ]] || { echo "a stop did not send TERM to the running job ${running}: $(<"${log}")"; exit 1; }
+    ! builtin kill -0 "${running}" 2>/dev/null || { echo "the stop returned while the job ${running} ran"; exit 1; }
+  ) 3>&- &
+  sub=$!
+  set +m
+  for (( i = 0; i < 100; i++ )); do kill -0 "${sub}" 2>/dev/null || break; sleep 0.1; done
+  if kill -0 "${sub}" 2>/dev/null; then
+    kill -KILL -- -"${sub}" 2>/dev/null || true
+    wait "${sub}" 2>/dev/null || true
+    echo "a stop did not return in 10 s; signals from the stops: $(tr '\n' ' ' < "${log}")"
+    return 1
+  fi
+  wait "${sub}" || return 1
+}
+
+# A second signal during a stop does nothing: the stop that runs sends yq
+# one TERM and returns after yq ends. Without that, bash runs a second stop
+# inside the first (between its commands), and yq gets TERM twice; or the
+# second signal ends the stop's wait, and the call returns while yq runs.
+# The yq stub ends 1 s after its TERM. A helper of the stub sends two TERMs
+# to the call (the stub's parent), 0.3 s apart.
+@test "yqbound::run: a second signal during a stop does not start a second stop" {
+  local log="${BATS_TEST_TMPDIR}/kills" m="${BATS_TEST_TMPDIR}/m" rc=0 yq n
+  mkdir -p "${m}"
+  : > "${log}"
+  _yq "echo \$\$ > '${m}/pid'
+trap 'sleep 1; exit 1' TERM
+( sleep 0.2; kill -TERM \"\${PPID}\"; sleep 0.3; kill -TERM \"\${PPID}\" ) &
+while :; do sleep 0.1; done"
+  bash -c 'log=$3; kill() { printf "%s\n" "$*" >> "${log}"; builtin kill "$@"; }; source "$1"; yqbound::run 20 262144 "$2" -r .a' \
+    _ "${_PROJECT_ROOT}/.lok8s/utils/yqbound.sh" "${BATS_TEST_TMPDIR}/in.yaml" "${log}" \
+    > "${BATS_TEST_TMPDIR}/out" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+  yq=$(<"${m}/pid")
+  if kill -0 "${yq}" 2>/dev/null; then
+    kill -KILL "${yq}" 2>/dev/null || :
+    echo "the call returned while yq (${yq}) ran; signals from the call: $(tr '\n' ' ' < "${log}")" >&2
+    return 1
+  fi
+  [ "${rc}" -eq 143 ] || { echo "status ${rc}, want 143: $(<"${BATS_TEST_TMPDIR}/err")" >&2; return 1; }
+  n=$(grep -cx -- "-TERM ${yq}" "${log}" || true)
+  [ "${n}" = 1 ] || { echo "yq got TERM ${n} times from the call, want once: $(tr '\n' ' ' < "${log}")" >&2; return 1; }
+  _clean
+}

@@ -109,6 +109,43 @@ _SPEC_KVER_TIMEOUT=10
 _SPEC_KVER_MAX_KB=262144
 _SPEC_KVER_MAX_READS=10000
 
+# Test only (tests/unit/lo_node_version_test.bats): a delay, in seconds, in
+# spec::_kver_yq between the start of yq (_YQ) or of the watchdog
+# (_WATCHDOG) and the line that keeps its pid, so that a test can send a
+# signal in that window. Empty in a normal run. Shell variables, set here,
+# so the environment cannot set them.
+_SPEC_KVER_TEST_DELAY_YQ=""
+_SPEC_KVER_TEST_DELAY_WATCHDOG=""
+
+# spec::_running_job <pid> — true while <pid> is a running job of the
+# calling shell. The shell reaps a job that ends (in its SIGCHLD handler),
+# and after that the pid can be another process's. So spec::_kver_yq sends
+# a signal to a job of its own only after this test. yqbound::run has its
+# own copy (yqbound::_running_job): spec.sh does not import yqbound.sh.
+spec::_running_job() {
+  local job
+  for job in $(jobs -rp); do
+    [[ "${job}" != "${1}" ]] || return 0
+  done
+  return 1
+}
+
+# spec::_kver_stop <pid> <watchdog> — the stop of spec::_kver_yq on INT or
+# TERM: TERM to the watchdog and to yq, then a wait for both. A job that
+# ended gets no signal (spec::_running_job): after the read's wait, the pid
+# of yq can be another process's. The trap sets INT and TERM to do nothing
+# before the stop, and a signal that comes during the stop ends a wait
+# early: so the stop waits again while the job runs. It runs in a trap,
+# where set -e applies again: each command that can fail ends in `|| :`.
+spec::_kver_stop() {
+  local pid="${1}" watchdog="${2}"
+  ! spec::_running_job "${watchdog}" || kill -TERM "${watchdog}" 2>/dev/null || :
+  ! spec::_running_job "${pid}" || kill -TERM "${pid}" 2>/dev/null || :
+  while spec::_running_job "${pid}"; do wait "${pid}" 2>/dev/null || :; done
+  while spec::_running_job "${watchdog}"; do wait "${watchdog}" 2>/dev/null || :; done
+  return 0
+}
+
 # spec::_kver_yq <cluster_yaml> <yq argument>... — one bounded yq read
 # (--yaml-fix-merge-anchor-to-spec). Prints the yq output. On a failure it
 # prints the problem and returns 1. The yq stderr goes to a file and never
@@ -132,13 +169,22 @@ spec::_kver_yq() (
     exit 1
   }
   trap 'rm -rf "${tmp}"' EXIT
-  # On an interrupt: stop yq and the watchdog, then the EXIT trap removes tmp.
-  trap 'kill -TERM ${pid:-} ${watchdog:-} 2>/dev/null; exit 130' INT
-  trap 'kill -TERM ${pid:-} ${watchdog:-} 2>/dev/null; exit 143' TERM
+  # On an interrupt: stop yq and the watchdog (spec::_kver_stop), then the
+  # EXIT trap removes tmp. Until the pids of yq and of the watchdog are
+  # kept, INT and TERM are only noted: a stop between a start and its `$!`
+  # would not know that pid and would leave yq or the watchdog running.
+  # Then the stop traps come, and a noted signal is sent again, so it stops
+  # the read as a later one does. A stop first sets INT and TERM to do
+  # nothing: a second signal would start a second stop inside the first
+  # (bash runs its trap between the commands of the first).
+  sig=""
+  trap 'sig="${sig:-INT}"' INT
+  trap 'sig="${sig:-TERM}"' TERM
   (
     ulimit -d "${_SPEC_KVER_MAX_KB}" 2>/dev/null
     exec yq --yaml-fix-merge-anchor-to-spec "${@}" "${cluster_yaml}" >"${tmp}/out" 2>"${tmp}/err"
   ) &
+  [[ -z "${_SPEC_KVER_TEST_DELAY_YQ}" ]] || sleep "${_SPEC_KVER_TEST_DELAY_YQ}"
   pid=$!
   # The watchdog: a background sleep and a wait for it (portable, see above).
   # A TERM (the read is done) interrupts the wait; the trap stops the sleep.
@@ -153,10 +199,14 @@ spec::_kver_yq() (
     : >"${tmp}/timeout"
     kill -TERM "${pid}" 2>/dev/null
   ) >/dev/null 2>&1 &
+  [[ -z "${_SPEC_KVER_TEST_DELAY_WATCHDOG}" ]] || sleep "${_SPEC_KVER_TEST_DELAY_WATCHDOG}"
   watchdog=$!
+  trap 'trap : INT TERM; spec::_kver_stop "${pid}" "${watchdog}"; exit 130' INT
+  trap 'trap : INT TERM; spec::_kver_stop "${pid}" "${watchdog}"; exit 143' TERM
+  [[ -z "${sig}" ]] || kill -"${sig}" "${BASHPID}"
   rc=0
   wait "${pid}" 2>/dev/null || rc=$?
-  kill -TERM "${watchdog}" 2>/dev/null
+  ! spec::_running_job "${watchdog}" || kill -TERM "${watchdog}" 2>/dev/null
   wait "${watchdog}" 2>/dev/null
   if (( rc == 0 )); then
     cat "${tmp}/out"
