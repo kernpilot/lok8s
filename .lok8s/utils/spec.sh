@@ -180,10 +180,24 @@ spec::_kver_yq() (
   sig=""
   trap 'sig="${sig:-INT}"' INT
   trap 'sig="${sig:-TERM}"' TERM
+  # A job that a signal stopped (yq on SIGSEGV or SIGKILL) gets a report
+  # from bash on stderr ("line N: PID Segmentation fault ( ulimit -d … )"),
+  # at the next notify point (after a DEBUG trap; bash 4.3: a command too) until a
+  # `wait` collects the job. The read writes its own line for that cause,
+  # so from the start of yq to the wait for the watchdog, stderr goes to
+  # /dev/null (a set -x trace of these lines too). errfd keeps the caller's
+  # stderr until then, and each job closes it: a job that kept a copy would
+  # hold a caller's $(...) pipe open. Not a `{ ...; } 2>/dev/null` group:
+  # bash keeps the caller's stderr in a copy that the watchdog would get.
+  # yqbound::run (utils/yqbound.sh) does the same.
+  exec {errfd}>&2 2>/dev/null || {
+    printf '%s lo cannot open a file descriptor. Raise the open-file limit (ulimit -n).\n' "${unreadable}"
+    exit 1
+  }
   (
     ulimit -d "${_SPEC_KVER_MAX_KB}" 2>/dev/null
     exec yq --yaml-fix-merge-anchor-to-spec "${@}" "${cluster_yaml}" >"${tmp}/out" 2>"${tmp}/err"
-  ) &
+  ) {errfd}>&- &
   [[ -z "${_SPEC_KVER_TEST_DELAY_YQ}" ]] || sleep "${_SPEC_KVER_TEST_DELAY_YQ}"
   pid=$!
   # The watchdog: a background sleep and a wait for it (portable, see above).
@@ -198,7 +212,7 @@ spec::_kver_yq() (
     wait "$!" || exit 0
     : >"${tmp}/timeout"
     kill -TERM "${pid}" 2>/dev/null
-  ) >/dev/null 2>&1 &
+  ) >/dev/null 2>&1 {errfd}>&- &
   [[ -z "${_SPEC_KVER_TEST_DELAY_WATCHDOG}" ]] || sleep "${_SPEC_KVER_TEST_DELAY_WATCHDOG}"
   watchdog=$!
   trap 'trap : INT TERM; spec::_kver_stop "${pid}" "${watchdog}"; exit 130' INT
@@ -208,6 +222,7 @@ spec::_kver_yq() (
   wait "${pid}" 2>/dev/null || rc=$?
   ! spec::_running_job "${watchdog}" || kill -TERM "${watchdog}" 2>/dev/null
   wait "${watchdog}" 2>/dev/null
+  exec 2>&"${errfd}" {errfd}>&-
   if (( rc == 0 )); then
     cat "${tmp}/out"
     exit 0

@@ -65,7 +65,8 @@ yqbound::_stop() {
 #   2    the time limit stopped yq.
 #   3    the memory cap stopped yq: a Go allocation failure or stack limit
 #        on its stderr.
-#   4    no temporary directory or FIFO in ${TMPDIR:-/tmp} (yq did not run).
+#   4    no temporary directory or FIFO in ${TMPDIR:-/tmp}, or no free file
+#        descriptor (yq did not run).
 #   5    yq does not know a flag that it got (an old yq).
 #   64+N the signal N stopped yq (SIGSEGV: 75, SIGKILL: 73).
 #   130, 131, 143: yqbound::run itself got INT, QUIT or TERM.
@@ -89,10 +90,20 @@ yqbound::run() (
   trap 'sig="${sig:-QUIT}"' QUIT
   trap 'sig="${sig:-TERM}"' TERM
   mkfifo "${tmp}/tick" 2>/dev/null || exit 4
+  # A job that a signal stopped (yq on SIGSEGV or SIGKILL) gets a report
+  # from bash on stderr ("line N: PID Segmentation fault ( ulimit -d … )"),
+  # at the next notify point (after a DEBUG trap; bash 4.3: a command too) until a
+  # `wait` collects the job. The caller writes its own line for that cause,
+  # so from the start of yq to the wait for the watchdog, stderr goes to
+  # /dev/null (a set -x trace of these lines too). errfd keeps the caller's
+  # stderr until then, and each job closes it: a job that kept a copy would
+  # hold a caller's $(…) pipe open. Not a `{ …; } 2>/dev/null` group: bash
+  # keeps the caller's stderr in a copy that the watchdog would get.
+  exec {errfd}>&2 2>/dev/null || exit 4
   (
     ulimit -d "${kib}" 2>/dev/null
     exec yq "${@}" "${file}" >"${tmp}/out" 2>"${tmp}/err"
-  ) &
+  ) {errfd}>&- &
   [[ -z "${_YQBOUND_TEST_DELAY_YQ}" ]] || sleep "${_YQBOUND_TEST_DELAY_YQ}"
   pid=$!
   # The watchdog's stdout and stderr go to /dev/null: if the body dies (a
@@ -102,7 +113,7 @@ yqbound::run() (
     read -r -t "${seconds}" <>"${tmp}/tick" || :
     : >"${tmp}/timeout"
     kill -TERM "${pid}" 2>/dev/null
-  ) >/dev/null 2>&1 &
+  ) >/dev/null 2>&1 {errfd}>&- &
   [[ -z "${_YQBOUND_TEST_DELAY_WATCHDOG}" ]] || sleep "${_YQBOUND_TEST_DELAY_WATCHDOG}"
   watchdog=$!
   trap 'trap : INT QUIT TERM; yqbound::_stop "${pid}" "${watchdog}"; exit 130' INT
@@ -115,6 +126,7 @@ yqbound::run() (
   # `set -e` must not stop here after a successful yq.
   ! yqbound::_running_job "${watchdog}" || kill -TERM "${watchdog}" 2>/dev/null || :
   wait "${watchdog}" 2>/dev/null || :
+  exec 2>&"${errfd}" {errfd}>&-
   if (( rc == 0 )); then
     cat "${tmp}/out"
     cat "${tmp}/err" >&2
