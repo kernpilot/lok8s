@@ -3701,7 +3701,22 @@ _dry_slow_plugin() {
   chmod +x "${1}"
 }
 
-_dry_now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+# _dry_now_ms: the time in ms, from EPOCHREALTIME (bash 5: seconds and
+# microseconds), else from date +%s%N (GNU date). BSD date (macOS) has no
+# %N: a test that reads the time starts with _dry_need_clock, which skips
+# it where neither gives the time.
+_dry_now_ms() {
+  if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    local _t="${EPOCHREALTIME//[!0-9]/}"
+    echo $(( _t / 1000 ))
+  else
+    echo $(( $(date +%s%N) / 1000000 ))
+  fi
+}
+_dry_need_clock() {
+  [[ -n "${EPOCHREALTIME:-}" || "$(date +%N)" =~ ^[0-9]+$ ]] \
+    || skip "no clock in ms: this test needs bash 5 (EPOCHREALTIME) or a date with %N"
+}
 
 # _dry_plugin_stopped <dir> <start-ms>: fails if the plugin of
 # _dry_slow_plugin still runs, or if it ran to its end. It waits until the
@@ -3725,6 +3740,7 @@ _dry_plugin_stopped() {
 # plugin that ignores TERM gets KILL at the end of the grace, not before.
 # In both cases the plugin does not run on after the check.
 @test "the dry run's plugin check has a time limit: TERM, the grace, then KILL" {
+  _dry_need_clock
   local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m1" start took
   _ADDONS_DRYRUN_CHECK_TIMEOUT=1
   _ADDONS_DRYRUN_CHECK_GRACE=1
@@ -3756,6 +3772,7 @@ _dry_plugin_stopped() {
 # to the process group of lo's shell, as a terminal sends Ctrl-C; the TERM
 # goes to lo's shell only (kill <pid of lo>), which sends TERM to the check.
 @test "the dry run's plugin check stops a plugin that ignores TERM when lo gets INT or TERM" {
+  _dry_need_clock
   local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" sig m b start sent took job to i
   _ADDONS_DRYRUN_CHECK_GRACE=1
   for sig in INT TERM; do
@@ -3791,6 +3808,7 @@ _dry_plugin_stopped() {
 # looks after 4.5 s. Go has no such window: exec.Cmd.Start returns with the
 # process.
 @test "the dry run's plugin check stops the plugin and the watchdog on a TERM before it keeps their pids" {
+  _dry_need_clock
   local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" window m b start sent took job rc i
   _ADDONS_DRYRUN_CHECK_TIMEOUT=3
   _ADDONS_DRYRUN_CHECK_GRACE=1
@@ -3900,6 +3918,7 @@ _dry_plugin_stopped() {
 # check within the grace. Without that, bash runs a second stop inside the
 # first (between its commands), and the plugin gets TERM twice.
 @test "the dry run's plugin check runs one stop when a second signal comes during it" {
+  _dry_need_clock
   local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m" b="${BATS_TEST_TMPDIR}/b" log="${BATS_TEST_TMPDIR}/kills" start job rc sub n i
   _ADDONS_DRYRUN_CHECK_GRACE=1
   mkdir -p "${m}" "${b}"
@@ -3959,6 +3978,7 @@ _dry_window_open() {
 # ends at most 2.5 s after the signal, at the end of the window, and does
 # not wait until the plugin ends by itself (about 4 s).
 @test "the dry run's plugin check names an INT or TERM that stops it and returns 128+n" {
+  _dry_need_clock
   local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" how sig to window m b log job sub rc want sent took i
   _ADDONS_DRYRUN_CHECK_GRACE=1
   for how in "INT group" "INT lo" "TERM lo" "TERM check"; do
@@ -4197,6 +4217,7 @@ EOF
 # leaves a child that keeps its stdout open passes at once (Go:
 # TestDryRunBoundaryDoesNotWaitForAChildOfThePlugin).
 @test "the dry run's plugin check does not wait for a child of the plugin" {
+  _dry_need_clock
   local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" start took
   mkdir -p "$(dirname "${plugin}")" "${BATS_TEST_TMPDIR}/b"
   printf '#!/bin/sh\necho dry-run\nsleep 6 3>&- &\nexit 0\n' > "${plugin}"
