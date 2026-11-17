@@ -6,14 +6,17 @@ import "strings"
 // shows it. These characters become '?', as ls shows a name on a terminal:
 //   - each control character (C0, DEL and C1) and each backslash;
 //   - the line and paragraph separators (U+2028, U+2029);
-//   - each bidi, zero-width or invisible format character: U+061C, U+200B
-//     to U+200F, U+202A to U+202E, U+2060 to U+2064, U+2066 to U+2069 and
-//     U+FEFF.
+//   - these bidi, zero-width and invisible format characters: U+061C,
+//     U+200B to U+200F, U+202A to U+202E, U+2060 to U+2064, U+2066 to
+//     U+2069 and U+FEFF. The list is explicit: other invisible characters
+//     (for example U+00AD or U+206A to U+206F) stay.
 //
 // A newline or a separator would split a line, an ESC would reach the
 // terminal, a bidi character would turn the text after it around, and an
-// invisible one would hide in the name. Other characters stay, also
-// multibyte ones. A byte that is not UTF-8 becomes U+FFFD, as jq reads it.
+// invisible one of the list would hide in the name. Other characters stay, also
+// multibyte ones. Each byte that is not UTF-8 becomes U+FFFD. jq can make
+// one U+FFFD of a longer invalid sequence, so only the number of U+FFFD
+// shown can differ.
 // The bash twin is the jq def shown_name (VERBOSE_JQ_SHOWN_NAME,
 // .lok8s/utils/verbose.sh). Each range is a case of its own.
 func Shown(s string) string {
