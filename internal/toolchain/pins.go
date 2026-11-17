@@ -40,6 +40,34 @@ const (
 // and every "yq v… or later" statement.
 const YQVersion = "v4.54.3"
 
+// The cluster tools of the template. The kind release picks the default
+// node image, which is the cluster's Kubernetes when spec.kubernetes.version
+// is not set, and the node images that it supports: kind v0.32.0 defaults to
+// kindest/node v1.36.1 and supports v1.33 to v1.36. kubectl must stay within
+// one minor of that Kubernetes (the kubectl version skew policy). The
+// operator image downloads the same two releases, and a test in
+// internal/assets checks it: bump a pin, the image URL and its sums together.
+const (
+	KubectlVersion = "v1.36.2"
+	KindVersion    = "v0.32.0"
+)
+
+// floatingEntries are the template entries that carry no version, each with
+// the reason: b installs the latest release of each. Every other entry is
+// pinned. A test fails on an entry that is neither pinned nor named here, so
+// a new tool cannot float without a reason in this list.
+var floatingEntries = map[string]string{
+	"tilt":                          "the watcher and UI of the dev loop (local group); it renders no manifest",
+	"mkcert":                        "makes the local CA for `lo trust` (local group); it renders no manifest",
+	"github.com/kubermatic/kubeone": "an opt-in driver (cloud group); lok8s holds no KubeOne release to pin it to",
+	"hcloud":                        "the Hetzner CLI of the opt-in cloud group; it renders no manifest",
+	"github.com/arg-sh/argsh":       "the runtime of the opt-in bash group; its onPost installs the builtin of the same release",
+	"jq":                            "a tool of the opt-in bash group (the frozen bash implementation)",
+	"renvsubst":                     "a tool of the opt-in bash group (the frozen bash implementation)",
+	"sops":                          "a tool of the opt-in bash group (the frozen bash implementation)",
+	"ssh-to-age":                    "a tool of the opt-in bash group (the frozen bash implementation)",
+}
+
 // kustomizeAPIToCLI maps the kustomize API module version to the CLI
 // release it ships in (sigs.k8s.io/kustomize tags `kustomize/v5.x.y` next
 // to `api/v0.x.y`; the pairs are read off the kustomize release notes).
