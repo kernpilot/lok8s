@@ -377,6 +377,104 @@ func TestDryRunBoundaryRefusesAnOldSecretPlugin(t *testing.T) {
 	}
 }
 
+// The check of the Secret plugin runs the plugin that the render runs (in
+// the boundary's plugin home), with the environment of a dry-run render, and
+// so that no plugin version can do anything with it: in an empty directory
+// of the boundary that is removed after, with an empty stdin, PATH_SECRETS at
+// a path that does not exist, the store-free switch on and the keys-only
+// setting off. The caller's directory, stdin, store and settings do not reach
+// it.
+func TestDryRunBoundaryChecksThePluginAsTheRenderRunsIt(t *testing.T) {
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
+	base := t.TempDir()
+	p := &config.Paths{Base: base, Bin: filepath.Join(base, ".bin")}
+	t.Setenv(KustomizePluginHomeEnv, "")
+	os.Unsetenv(KustomizePluginHomeEnv)
+	// The caller: its own directory, a store, the settings and stdin data.
+	caller := filepath.Join(base, "caller")
+	testutil.WriteFile(t, filepath.Join(caller, "spec.yaml"), "kind: x\n")
+	t.Chdir(caller)
+	t.Setenv("PATH_SECRETS", filepath.Join(base, "caller-store"))
+	t.Setenv(secret.DisableEnv, "")
+	t.Setenv(secret.KeysOnlyEnv, "1")
+	testutil.WriteFile(t, filepath.Join(base, "stdin"), "caller input\n")
+	in, err := os.Open(filepath.Join(base, "stdin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	stdin := os.Stdin
+	os.Stdin = in
+	defer func() { os.Stdin = stdin }()
+
+	log := filepath.Join(base, "probe.log")
+	plugin := filepath.Join(base, ".kustomize", filepath.FromSlash(toolchain.SecretPluginRel))
+	script := "#!/bin/sh\n{\n" +
+		"  echo \"self=$0\"\n" +
+		"  echo \"pwd=$(pwd -P)\"\n" +
+		"  echo \"entries=$(ls -A | wc -l | tr -d ' ')\"\n" +
+		"  echo \"stdin=$(wc -c | tr -d ' ')\"\n" +
+		"  echo \"PATH_SECRETS=${PATH_SECRETS-<unset>}\"\n" +
+		"  if [ -e \"${PATH_SECRETS:-/nonexistent-store}\" ]; then echo store=exists; else echo store=absent; fi\n" +
+		"  echo \"DISABLE=${" + secret.DisableEnv + "-<unset>}\"\n" +
+		"  echo \"KEYS_ONLY=${" + secret.KeysOnlyEnv + "-<unset>}\"\n" +
+		"  echo \"DRYRUN=${" + DryRunEnv + "-<unset>}\"\n" +
+		"  echo \"HOME=${" + KustomizePluginHomeEnv + "-<unset>}\"\n" +
+		"  echo \"PATH0=${PATH%%:*}\"\n" +
+		"  echo \"TMPDIR=${TMPDIR-<unset>}\"\n" +
+		"  echo \"STORE=${" + DryRunStoreEnv + "-<unset>}\"\n" +
+		"} > '" + log + "'\necho dry-run\n"
+	testutil.WriteFile(t, plugin, script)
+	if err := os.Chmod(plugin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := NewDryRunBoundary(t.Context(), p, execx.NewRunner(p))
+	if err != nil {
+		t.Fatalf("NewDryRunBoundary: %v", err)
+	}
+	defer b.Close()
+	raw, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("the plugin was not run: %v", err)
+	}
+	got := map[string]string{}
+	for line := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n") {
+		k, v, _ := strings.Cut(line, "=")
+		got[k] = v
+	}
+	boundary, err := filepath.EvalSymlinks(b.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := got["pwd"]
+	if filepath.Dir(probe) != boundary || !strings.HasPrefix(filepath.Base(probe), "probe-") {
+		t.Errorf("the check ran in %s, want a probe- directory of the boundary %s", probe, boundary)
+	}
+	want := map[string]string{
+		"self":         filepath.Join(b.PluginHome, filepath.FromSlash(toolchain.SecretPluginRel)),
+		"entries":      "0",
+		"stdin":        "0",
+		"PATH_SECRETS": filepath.Join(b.Dir, filepath.Base(probe), "store"),
+		"store":        "absent",
+		"DISABLE":      "1",
+		"KEYS_ONLY":    "0",
+		"DRYRUN":       "1",
+		"HOME":         b.PluginHome,
+		"PATH0":        b.StubBin,
+		"TMPDIR":       b.Tmp,
+		"STORE":        b.Store,
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("the check saw %s=%q, want %q", k, got[k], v)
+		}
+	}
+	if fsutil.DirExists(probe) {
+		t.Errorf("the check left its directory %s", probe)
+	}
+}
+
 // hashDir lists every file of dir with its content.
 func hashDir(t *testing.T, dir string) string {
 	t.Helper()
