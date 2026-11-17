@@ -1,7 +1,8 @@
 package execx
 
 // runner_test.go covers the default Runner: env merge, Dir, a name with a
-// path separator, an unresolvable tool, and the interrupt on cancel.
+// path separator, an unresolvable tool, the interrupt on cancel, and the
+// wait after it (WaitDelay).
 
 import (
 	"bytes"
@@ -120,5 +121,69 @@ func TestRunCancelSendsInterruptToTheChild(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("child did not stop after the cancel")
+	}
+}
+
+// startAndCancel runs script with the given WaitDelay, cancels the context
+// once the child printed "up", and returns the output, the time from the
+// cancel to the return, and the result.
+func startAndCancel(t *testing.T, script string, delay time.Duration) (string, time.Duration, error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var out lockedBuffer
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- NewRunner(nil).Run(ctx, Cmd{
+			Name:      "/bin/sh",
+			Args:      []string{"-c", script},
+			Stdout:    &out,
+			Stderr:    &out,
+			WaitDelay: delay,
+		})
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(out.String(), "up") {
+		if time.Now().After(deadline) {
+			t.Fatal("child did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	start := time.Now()
+	select {
+	case err := <-errCh:
+		return out.String(), time.Since(start), err
+	case <-time.After(20 * time.Second):
+		t.Fatal("Run did not return in 20 s after the cancel")
+	}
+	return "", 0, nil
+}
+
+// A Cmd without a WaitDelay keeps the default: after the interrupt the
+// runner waits for the child's own cleanup, however long, and reports the
+// child's exit code. Every caller except the dry run's plugin check sets
+// none.
+func TestRunWithoutWaitDelayWaitsForTheChildsCleanup(t *testing.T) {
+	out, took, err := startAndCancel(t,
+		`trap 'echo caught; i=0; while [ "$i" -lt 30 ]; do sleep 0.05; i=$((i + 1)); done; echo done; exit 3' INT; echo up; while :; do sleep 0.05; done`, 0)
+	if ExitCode(err) != 3 || !strings.Contains(out, "done") {
+		t.Errorf("the child's cleanup did not finish: rc=%d err=%v out=%q", ExitCode(err), err, out)
+	}
+	if took < time.Second {
+		t.Errorf("Run returned %s after the cancel, before the child's cleanup (about 1.5 s) ended", took)
+	}
+}
+
+// A Cmd with a WaitDelay bounds the wait: a child that ignores the
+// interrupt is killed after the delay.
+func TestRunWithWaitDelayKillsAChildThatIgnoresTheInterrupt(t *testing.T) {
+	out, took, err := startAndCancel(t,
+		`trap '' INT; echo up; i=0; while [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done; echo done`, 300*time.Millisecond)
+	if err == nil || strings.Contains(out, "done") {
+		t.Errorf("the child was not stopped: err=%v out=%q", err, out)
+	}
+	if took > 3*time.Second {
+		t.Errorf("Run returned %s after the cancel, want about the delay (300ms)", took)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/config"
 )
@@ -28,6 +29,11 @@ type Cmd struct {
 	Stdin  io.Reader
 	Stdout io.Writer
 	Stderr io.Writer
+	// WaitDelay bounds the wait for a child after its context ends, and
+	// for its output pipes after it exits (exec.Cmd.WaitDelay): a child
+	// that still runs then is killed, and the pipes close. Zero keeps the
+	// default: the parent waits for the child to end.
+	WaitDelay time.Duration
 }
 
 // Runner runs external commands. The single seam that lets driver code run
@@ -72,11 +78,13 @@ func (r *osRunner) Run(ctx context.Context, c Cmd) error {
 	// exec.CommandContext sends by default: a Ctrl-C already delivered it
 	// to the whole foreground process group, and the child (kubeone,
 	// terraform, kubectl) finishes its own cleanup the way it did under
-	// the bash entrypoint, which waited for it. No WaitDelay: like bash,
-	// the parent waits for the child to end. On SIGTERM this is a
+	// the bash entrypoint, which waited for it. No WaitDelay unless the
+	// Cmd sets one: like bash, the parent waits for the child to end. A
+	// Cmd with a WaitDelay gets a SIGKILL after it. On SIGTERM this is a
 	// deliberate deviation: the bash shell died and left the child
 	// running, the binary interrupts it and waits (catalogue D26).
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = c.WaitDelay
 	cmd.Dir = c.Dir
 	if len(c.Env) > 0 {
 		cmd.Env = append(os.Environ(), c.Env...)

@@ -1304,6 +1304,15 @@ dry_check - provision --domain dry.dev --bootstrap --dry-run --with-restore
 dry_expect_rc 2 provision --domain dry.dev --bootstrap --dry-run --with-restore
 dry_check - bootstrap --domain dry.dev --ignore-nondeterministic
 dry_expect_rc 1 bootstrap --domain dry.dev --ignore-nondeterministic
+
+# A relative plugin home: the boundary's links to its plugins would not
+# resolve, so both sides refuse the dry run before the plugin check, with
+# one message.
+KUSTOMIZE_PLUGIN_HOME=.kustomize dry_check - bootstrap --domain dry.dev --dry-run --only cilium
+KUSTOMIZE_PLUGIN_HOME=.kustomize dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --only cilium
+for side in bash go; do
+  tls_pin "${side}: a relative plugin home is refused" "${WORK}/${side}.err" "bootstrap dry-run: the kustomize plugin home \.kustomize is a relative path, so the dry run's links to its plugins would not resolve — set KUSTOMIZE_PLUGIN_HOME to an absolute path$"
+done
 dry_check - provision --domain dry.dev --dry-run --ignore-nondeterministic
 dry_expect_rc 2 provision --domain dry.dev --dry-run --ignore-nondeterministic
 
