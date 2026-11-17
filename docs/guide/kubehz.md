@@ -1053,8 +1053,9 @@ characters (U+00AD, U+061C, U+200B to U+200F, U+202A to U+202E, U+2060 to
 U+2064, U+2066 to U+2069, U+206A to U+206F, U+FEFF), the Hangul fillers
 (U+115F, U+1160, U+3164, U+FFA0), the variation selectors (U+180B to U+180F,
 U+FE00 to U+FE0F, U+E0100 to U+E01EF) and the tag characters (U+E0000 to
-U+E007F). The list is explicit: other invisible characters stay. It is the
-list of characters that the destroy plan shows as `?`.
+U+E007F). The list is explicit: other invisible characters stay. The destroy
+plan shows the same characters as `?`, and a backslash too, which these
+records keep.
 
 `kubeconfig` writes the agent kubeconfig to the file you name (mode 0600) and
 prints the path. The file holds no secret: its exec stanza runs

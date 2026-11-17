@@ -511,7 +511,7 @@ existing part only when it has the mark of this cluster:
   U+180F, U+FE00 to U+FE0F, U+E0100 to U+E01EF) and the tag characters
   (U+E0000 to U+E007F). Thus an emoji with a variation selector shows a
   `?` after it. Other characters, also multibyte ones such as `ö-測試`,
-  stay. Thus a name cannot split a line, send a control character to the
+  stay. As a result, a name cannot split a line, send a control character to the
   terminal, turn the text around or hide one of these characters. The id
   identifies the part exactly.
 - The destroy lists the parts with `hcloud <kind> list -l

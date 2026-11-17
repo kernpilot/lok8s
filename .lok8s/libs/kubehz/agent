@@ -23,8 +23,9 @@
 #
 # OUTPUT: -o text prints a table for a list and label lines for one record.
 # json and yaml print fixed lowerCamel fields. The records are projections, so
-# a new api field changes no output. Every string from the api loses its
-# control characters (the jq `clean`) in every format.
+# a new api field changes no output. Every string from the api loses each
+# character of the unshown list (utils/verbose.sh) in every format (the jq
+# `clean`).
 #
 # The two `kubeconfig` leaves count as credential output. The Go `lo mcp`
 # never offers them. The `lo chat` defaults deny them under the names that
