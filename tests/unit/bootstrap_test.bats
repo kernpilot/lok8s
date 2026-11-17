@@ -4109,6 +4109,34 @@ _dry_window_open() {
   done
 }
 
+# Each run of lo bootstrap and of lo provision starts without a mark of an
+# interrupt (main::bootstrap and main::provision reset it). A mark that an
+# earlier run in the same shell left (bootstrap::apply sets it when an INT
+# or TERM stops the check of the Secret plugin) must not keep the code of a
+# later failure that is not an interrupt: here 137, a child that a signal
+# ended. With the mark the dry run would end with 137; without it, with 2.
+# A mark that the run itself sets still keeps its 128+n. The run is
+# stubbed at the command boundary: argsh's :args only sets --dry-run, the
+# mode check passes, and the dispatch returns the code of the case.
+@test "lo bootstrap and lo provision reset the mark of an interrupt at the start of a run" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  :args() { dry_run=1; }
+  bootstrap::mode_check() { return 0; }
+  local cmd
+  for cmd in bootstrap provision; do
+    bootstrap::dispatch() { return 137; }
+    provision::dispatch() { return 137; }
+    _BOOTSTRAP_DRY_INTERRUPTED=1
+    run "main::${cmd}"
+    [ "${status}" -eq 2 ] || { echo "lo ${cmd}: the mark of an earlier run kept rc ${status}, want 2: ${output}"; return 1; }
+    bootstrap::dispatch() { _BOOTSTRAP_DRY_INTERRUPTED=1; return 143; }
+    provision::dispatch() { _BOOTSTRAP_DRY_INTERRUPTED=1; return 143; }
+    _BOOTSTRAP_DRY_INTERRUPTED=0
+    run "main::${cmd}"
+    [ "${status}" -eq 143 ] || { echo "lo ${cmd}: an interrupt in the run ended with rc ${status}, want 143: ${output}"; return 1; }
+  done
+}
+
 # The plugin's stdout is a file: a plugin that prints the line, exits 0 and
 # leaves a child that keeps its stdout open passes at once (Go:
 # TestDryRunBoundaryDoesNotWaitForAChildOfThePlugin).
