@@ -179,6 +179,18 @@ exit 2'
   assert_output "spec.kubernetes.version cannot be read: the installed yq (version unknown) failed on the version reader (panic: runtime error: index out of range [-1]). Install yq v4.54.3 or later (b install installs the pinned yq)."
 }
 
+@test "spec::kind_node_version: a panicking pre-release of the minimum is named with its suffix, so the advice is not the yq it has" {
+  _spec "version: v1.31.4"
+  # v4.54.3-rc1 is older than v4.54.3. Without the suffix the message would
+  # read "the installed yq (v4.54.3) ... Install yq v4.54.3 or later".
+  _yq_stub 'if [[ "${1:-}" == --version ]]; then echo "yq (https://github.com/mikefarah/yq/) version v4.54.3-rc1"; exit 0; fi
+printf "panic: runtime error: index out of range [-1]\n" >&2
+exit 2'
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_output "spec.kubernetes.version cannot be read: the installed yq (v4.54.3-rc1) failed on the version reader (panic: runtime error: index out of range [-1]). Install yq v4.54.3 or later (b install installs the pinned yq)."
+}
+
 @test "spec::kind_node_version: a read past the time limit is named, without timeout(1)" {
   _spec "version: v1.31.4"
   # The time limit needs no GNU timeout (macOS has none): a timeout(1) call

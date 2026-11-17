@@ -318,6 +318,16 @@ exec "'"${real}"'" "$@"'
   [ "${rc}" -eq 0 ] && [ "${#DNSSEARCH_PROBLEMS[@]}" -eq 0 ]
 }
 
+@test "dnssearch::_stop: the yq version in the line keeps its pre-release suffix (as spec::_yq_version)" {
+  _slow_yq 'echo "yq (https://github.com/mikefarah/yq/) version v4.46.1-rc1"'
+  local rc=0
+  dnssearch::_stop 5 || rc=$?
+  [ "${rc}" -eq 1 ]
+  [ "${DNSSEARCH_PROBLEMS[0]}" == "spec.network.dnsSearch could not be read: the installed yq (v4.46.1-rc1) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.54.3 or later." ] || {
+    echo "got: ${DNSSEARCH_PROBLEMS[0]}" >&2; return 1
+  }
+}
+
 # LOK8S_TEST_BASH: a bash < 4.4 to run the set -u case in (there an empty
 # "${a[@]}" is an unbound variable); the default bash runs it too.
 @test "read_dns_search_config under set -u: no list, an empty list and a list export without an unbound variable" {

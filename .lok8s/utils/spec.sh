@@ -234,12 +234,14 @@ spec::_kver_yq() (
   exit 1
 )
 
-# spec::_yq_version — the version of the yq on PATH (vX.Y.Z), or "version
-# unknown".
+# spec::_yq_version — the version of the yq on PATH (vX.Y.Z, with its
+# pre-release suffix), or "version unknown". The suffix stays: v4.54.3-rc1 is
+# older than the release v4.54.3, and without the suffix the message would
+# name the release that it tells the user to install.
 spec::_yq_version() {
   local version
   version="$(yq --version 2>/dev/null)" || version=""
-  if [[ "${version}" =~ v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+  if [[ "${version}" =~ v?([0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*) ]]; then
     printf 'v%s' "${BASH_REMATCH[1]}"
   else
     printf 'version unknown'
