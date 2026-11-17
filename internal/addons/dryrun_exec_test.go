@@ -717,29 +717,62 @@ func TestDryRunBoundaryBoundsTheCheck(t *testing.T) {
 }
 
 // A cancel of the caller (Ctrl-C) stops the check the same way: the
-// interrupt, then a kill at the end of the grace (bash: addons::_check_stop
-// on INT and TERM).
+// interrupt, then a kill at the end of the whole grace. A plugin that cleans
+// up in the grace finishes its cleanup (bash: addons::_check_stop on INT
+// and TERM).
 func TestDryRunBoundaryStopsThePluginOnACancel(t *testing.T) {
 	grace := secretCheckGrace
 	secretCheckGrace = time.Second
 	t.Cleanup(func() { secretCheckGrace = grace })
-	p, marks := slowProject(t, "")
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	start := time.Now()
-	go func() {
-		for !fsutil.FileExists(filepath.Join(marks, "pid")) {
-			time.Sleep(20 * time.Millisecond)
-		}
-		cancel()
-	}()
-	if err := boundaryIn(t, ctx, p); err == nil {
-		t.Error("the cancelled check passed")
+	cases := []struct {
+		name   string
+		cleans bool
+	}{
+		{"a plugin that ignores the interrupt", false},
+		{"a plugin that cleans up after the interrupt", true},
 	}
-	if took := time.Since(start); took > 2600*time.Millisecond {
-		t.Errorf("the check took %s after the start, want about 1 s (the grace)", took)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, marks := slowProject(t, "")
+			cleaned := filepath.Join(marks, "cleaned")
+			if c.cleans {
+				slowPlugin(t, filepath.Join(p.Base, ".kustomize", filepath.FromSlash(toolchain.SecretPluginRel)), marks,
+					`sleep 0.2; touch "`+cleaned+`"; echo dry-run; exit 0`)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			start := time.Now()
+			sent := make(chan time.Time, 1)
+			go func() {
+				for !fsutil.FileExists(filepath.Join(marks, "pid")) {
+					if ctx.Err() != nil {
+						return
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+				sent <- time.Now()
+				cancel()
+			}()
+			if err := boundaryIn(t, ctx, p); err == nil {
+				t.Error("the cancelled check passed")
+			}
+			var at time.Time
+			select {
+			case at = <-sent:
+			case <-time.After(time.Second):
+				t.Fatal("the plugin did not start, so the test sent no cancel")
+			}
+			took := time.Since(at)
+			if c.cleans {
+				if !fsutil.FileExists(cleaned) {
+					t.Error("the plugin did not finish its cleanup: it got no grace")
+				}
+			} else if took < 800*time.Millisecond || took > 2200*time.Millisecond {
+				t.Errorf("the check took %s after the cancel, want about 1 s (the whole grace, then the kill)", took)
+			}
+			pluginStopped(t, marks, start)
+		})
 	}
-	pluginStopped(t, marks, start)
 }
 
 // The plugin's stdout is a file, as in bash: a plugin that prints the line,
@@ -764,23 +797,69 @@ func TestDryRunBoundaryDoesNotWaitForAChildOfThePlugin(t *testing.T) {
 	}
 }
 
-// The check makes a new file for the plugin's output. If the name is
-// already there (here a link to a file elsewhere), it writes nothing
-// through it and stops with its own message, the same as in bash.
+// The check makes a new file for the plugin's output (os.CreateTemp). A
+// file that it cannot make stops the check with its own message, the same
+// as in bash.
 func TestDryRunBoundaryNamesAnOutputFileItCannotMake(t *testing.T) {
 	p, b, home, rel := boundaryWithPlugin(t)
-	target := filepath.Join(t.TempDir(), "elsewhere")
-	testutil.WriteFile(t, target, "keep\n")
-	if err := os.Symlink(target, filepath.Join(b.Dir, "check.out")); err != nil {
-		t.Fatal(err)
-	}
+	orig := checkOutputTemp
+	checkOutputTemp = func(string, string) (*os.File, error) { return nil, errors.New("no room for it") }
+	t.Cleanup(func() { checkOutputTemp = orig })
 	err := b.checkSecretPlugin(t.Context(), p, nil, home)
-	want := "cannot make a file for the output of the check of the Secret plugin " + rel + ": "
-	if err == nil || !strings.HasPrefix(err.Error(), want) {
-		t.Fatalf("err = %v, want a message that starts with %q", err, want)
+	if want := "cannot make a file for the output of the check of the Secret plugin " + rel + ": no room for it"; err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
 	}
-	if raw, err := os.ReadFile(target); err != nil || string(raw) != "keep\n" {
-		t.Errorf("the check wrote through the link: %q (%v)", raw, err)
+}
+
+// The check never opens a name that is already in the boundary: a link to
+// a file (written through), a link to /dev/null (the output lost) and a FIFO
+// (an open that waits for a reader) all leave it as it is (bash: the same
+// test).
+func TestDryRunBoundaryOpensNoNameThatIsThere(t *testing.T) {
+	cases := []struct {
+		name  string
+		plant func(t *testing.T, path string)
+	}{
+		{"a link to a file", func(t *testing.T, path string) {
+			target := filepath.Join(t.TempDir(), "elsewhere")
+			testutil.WriteFile(t, target, "keep\n")
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if raw, err := os.ReadFile(target); err != nil || string(raw) != "keep\n" {
+					t.Errorf("the check wrote through the link: %q (%v)", raw, err)
+				}
+			})
+		}},
+		{"a link to /dev/null", func(t *testing.T, path string) {
+			if err := os.Symlink(os.DevNull, path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a FIFO", func(t *testing.T, path string) {
+			if err := syscall.Mkfifo(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, b, home, _ := boundaryWithPlugin(t)
+			for _, name := range []string{"check.out", "check.timeout"} {
+				c.plant(t, filepath.Join(b.Dir, name))
+			}
+			done := make(chan error, 1)
+			go func() { done <- b.checkSecretPlugin(t.Context(), p, nil, home) }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("the check failed: %v", err)
+				}
+			case <-time.After(20 * time.Second):
+				t.Fatal("the check did not end in 20 s")
+			}
+		})
 	}
 }
 

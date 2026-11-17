@@ -3737,7 +3737,7 @@ _dry_plugin_stopped() {
   assert_output --partial "/secrets.lok8s.dev/v1/secret/Secret did not end in 1 s"
   (( took >= 1800 && took <= 3500 )) || { echo "the check took ${took} ms, want about 2000 (the limit, then the whole grace)"; return 1; }
   _dry_plugin_stopped "${m}" "${start}"
-  [ ! -e "${BATS_TEST_TMPDIR}/b1/check.out" ] && [ ! -e "${BATS_TEST_TMPDIR}/b1/check.timeout" ]
+  [ -z "$(ls -A "${BATS_TEST_TMPDIR}/b1" | grep -E '^(probe|check)-')" ] || { echo "files of the check are left: $(ls -A "${BATS_TEST_TMPDIR}/b1")"; return 1; }
 
   m="${BATS_TEST_TMPDIR}/m2"
   mkdir -p "${m}" "${BATS_TEST_TMPDIR}/b2"
@@ -3793,23 +3793,71 @@ _dry_plugin_stopped() {
   (( took <= 2000 )) || { echo "the check took ${took} ms: it waited for the plugin's child"; return 1; }
 }
 
-# The check makes a new file for the plugin's output. If the name is
-# already there (here a link to a file elsewhere), it writes nothing through
-# it and stops with its own message, the same as in Go
-# (TestDryRunBoundaryNamesAnOutputFileItCannotMake).
+# A file for the check that it cannot make stops the check with its own
+# message, the same as in Go (TestDryRunBoundaryNamesAnOutputFileItCannotMake),
+# and leaves no file of the check behind.
 @test "the dry run names an output file that it cannot make" {
-  local b="${BATS_TEST_TMPDIR}/boundary" plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" target="${BATS_TEST_TMPDIR}/elsewhere"
-  mkdir -p "${b}" "$(dirname "${plugin}")"
-  printf 'keep\n' > "${target}"
-  ln -s "${target}" "${b}/check.out"
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" b which _dry_fail
+  mkdir -p "$(dirname "${plugin}")"
   printf '#!/bin/sh\necho dry-run\n' > "${plugin}"
   chmod +x "${plugin}"
-  run addons::dry_run_boundary "${b}"
-  assert_failure
-  assert_output --partial "bootstrap dry-run: cannot make a file for the output of the check of the Secret plugin "
-  assert_output --partial "/secrets.lok8s.dev/v1/secret/Secret: "
+  mktemp() {
+    if [[ "${*: -1}" == ${_dry_fail} ]]; then echo "mktemp: no room for it" >&2; return 1; fi
+    command mktemp "$@"
+  }
+  for which in out late; do
+    b="${BATS_TEST_TMPDIR}/boundary-${which}"
+    mkdir -p "${b}"
+    _dry_fail="*/check-${which}-XXXXXX"
+    run addons::dry_run_boundary "${b}"
+    assert_failure
+    assert_output --partial "bootstrap dry-run: cannot make a file for the output of the check of the Secret plugin "
+    assert_output --partial "/secrets.lok8s.dev/v1/secret/Secret: mktemp: no room for it"
+    refute_output --partial "does not support a dry run"
+    [ -z "$(ls -A "${b}" | grep -E '^(probe|check)-')" ] || { echo "${which}: files of the check are left: $(ls -A "${b}")"; return 1; }
+  done
+  unset -f mktemp
+}
+
+# The check never opens a name that is already in the boundary: a link to a
+# file (written through), a link to /dev/null (the output lost) and a FIFO
+# (an open that waits for a reader) all leave it as it is. Each case has its
+# own time limit, so a check that hangs fails the test and does not block it
+# (Go: TestDryRunBoundaryOpensNoNameThatIsThere).
+@test "the dry run's plugin check opens no name that is already there" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" target="${BATS_TEST_TMPDIR}/elsewhere" kind b name job i rc
+  mkdir -p "$(dirname "${plugin}")"
+  printf '#!/bin/sh\necho dry-run\n' > "${plugin}"
+  chmod +x "${plugin}"
+  printf 'keep\n' > "${target}"
+  for kind in fifo null file; do
+    b="${BATS_TEST_TMPDIR}/b-${kind}"
+    mkdir -p "${b}"
+    for name in check.out check.timeout; do
+      case "${kind}" in
+        file) ln -s "${target}" "${b}/${name}" ;;
+        null) ln -s /dev/null "${b}/${name}" ;;
+        fifo) mkfifo "${b}/${name}" ;;
+      esac
+    done
+    # Job control on: the job gets a process group of its own, so a check
+    # that hangs can be killed as a whole.
+    set -m
+    addons::dry_run_boundary "${b}" >"${b}.out" 2>&1 3>&- &
+    job=$!
+    set +m
+    for (( i = 0; i < 100; i++ )); do kill -0 "${job}" 2>/dev/null || break; sleep 0.1; done
+    if kill -0 "${job}" 2>/dev/null; then
+      kill -KILL -- "-${job}" 2>/dev/null
+      wait "${job}" 2>/dev/null || true
+      echo "${kind}: the check did not end in 10 s"
+      return 1
+    fi
+    rc=0
+    wait "${job}" || rc=$?
+    (( rc == 0 )) || { echo "${kind}: the check failed (rc ${rc}): $(<"${b}.out")"; return 1; }
+  done
   [ "$(<"${target}")" = keep ] || { echo "the check wrote through the link"; return 1; }
-  [ -z "$(ls -A "${b}" | grep '^probe-')" ]
 }
 
 # _fake_helm: a helm v3 stand-in first on PATH (the boundary's helm stub

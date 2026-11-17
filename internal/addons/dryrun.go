@@ -80,12 +80,16 @@ const (
 // The time limit of the Secret plugin check (bash:
 // _ADDONS_DRYRUN_CHECK_TIMEOUT and _ADDONS_DRYRUN_CHECK_GRACE). At the
 // limit the plugin gets an interrupt (the runner's cancel); a plugin that
-// still runs after the grace is killed, and its output pipes close.
-// Variables, so a test can make them short.
+// still runs after the grace is killed (exec.Cmd.WaitDelay). Variables, so
+// a test can make them short.
 var (
 	secretCheckTimeout = 30 * time.Second
 	secretCheckGrace   = 5 * time.Second
 )
+
+// checkOutputTemp makes the file for the output of the Secret plugin check
+// (bash: mktemp). A variable, so a test can make it fail.
+var checkOutputTemp = os.CreateTemp
 
 // DryRunBoundary is the per-run state of a dry run: a 0700 temp directory
 // holding the restricted plugin home, the refusing stubs, an empty helm
@@ -223,8 +227,8 @@ func (b *DryRunBoundary) link(src, rel string) error {
 //
 // The check passes only on a plugin that exits 0 and prints the line
 // "dry-run" exactly (as the keys-only probe reads "keys-only"). Its stdout
-// goes to a file of the boundary, as in bash: a child that keeps it open
-// does not keep the check waiting. A plugin that does not end within
+// goes to a new file of the boundary, as in bash: a child that keeps it
+// open does not keep the check waiting. A plugin that does not end within
 // secretCheckTimeout is refused. Without a
 // Secret plugin in the project there is nothing to check (as in a real
 // run, the render then has none); with one, a link of the boundary that
@@ -256,12 +260,14 @@ func (b *DryRunBoundary) checkSecretPlugin(ctx context.Context, paths *config.Pa
 		secret.KeysOnlyEnv+"=0",
 	)
 	// Files, not pipes: exec waits for a pipe until every process that
-	// holds it closes it (or WaitDelay ends), but not for a file.
-	outPath := filepath.Join(b.Dir, "check.out")
-	out, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	// holds it closes it (or WaitDelay ends), but not for a file. The
+	// output file gets a new name, so a name that is already there (a
+	// link, a FIFO) is never opened.
+	out, err := checkOutputTemp(b.Dir, "check-out-")
 	if err != nil {
 		return fmt.Errorf("cannot make a file for the output of the check of the Secret plugin %s: %w", rel, err)
 	}
+	outPath := out.Name()
 	defer func() { _ = os.Remove(outPath) }()
 	defer func() { _ = out.Close() }()
 	null, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
