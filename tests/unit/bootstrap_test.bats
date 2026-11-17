@@ -4099,26 +4099,34 @@ _dry_window_open() {
 
 # After the check, lo's shell has its own INT and TERM traps back, and no
 # trap of the check: those name its local _check, which is gone when the
-# check returns. lo runs the check at the top level of its shell, where the
-# check keeps the shell's traps (in a subshell, as bats runs a test, it
-# keeps none), so a shell of its own runs it here: with a TERM trap of its
-# own, and no INT trap.
+# check returns, and a TERM trap of the check that stays would only note a
+# later TERM to lo. lo runs the check at the top level of its shell, where
+# the check keeps the shell's traps (in a subshell, as bats runs a test, it
+# keeps none), so a shell of its own runs it here: once with a TERM trap of
+# its own and no INT trap, and once with no trap, as lo runs it.
 @test "the dry run's plugin check gives lo's shell its own INT and TERM traps back" {
-  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" top="${BATS_TEST_TMPDIR}/top.sh"
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" top="${BATS_TEST_TMPDIR}/top.sh" before n=0
   mkdir -p "$(dirname "${plugin}")"
   printf '#!/bin/sh\necho dry-run\n' > "${plugin}"
   chmod +x "${plugin}"
-  cat > "${top}" <<EOF
+  for before in "trap 'echo earlier' TERM" ""; do
+    n=$(( n + 1 ))
+    cat > "${top}" <<EOF
 import() { :; }
 source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
 source "${_PROJECT_ROOT}/.lok8s/libs/addons"
-trap 'echo earlier' TERM
-addons::dry_run_boundary "${BATS_TEST_TMPDIR}/b" || exit 1
+${before}
+addons::dry_run_boundary "${BATS_TEST_TMPDIR}/b-${n}" || exit 1
 trap -p INT TERM
 EOF
-  run bash "${top}"
-  assert_success
-  assert_output "trap -- 'echo earlier' SIGTERM"
+    run bash "${top}"
+    assert_success
+    if [[ -n "${before}" ]]; then
+      assert_output "trap -- 'echo earlier' SIGTERM"
+    else
+      [ -z "${output}" ] || { echo "a shell with no trap has traps after the check: ${output}"; return 1; }
+    fi
+  done
 }
 
 # The command boundary keeps the 128+n of that interrupt, and only of that:
