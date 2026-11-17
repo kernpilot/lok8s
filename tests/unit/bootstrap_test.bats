@@ -3924,6 +3924,27 @@ _dry_plugin_stopped() {
   _dry_plugin_stopped "${m}" "${start}" || { echo "check rc ${rc}; the plugin is $(<"${m}/pid"); signals from the check: $(tr '\n' ' ' < "${log}")"; return 1; }
 }
 
+# _dry_window_open <pid> <seconds>: true while <pid> runs the test-only
+# delay of a window of the check (a child `sleep <seconds>`). It reads
+# /proc (Linux) in a shell of its own: bats runs a DEBUG trap before each
+# command of the test's shell, and with it a loop over every process can
+# take longer than the window.
+_dry_window_open() {
+  bash -c '
+    for stat in /proc/[0-9]*/stat; do
+      read -r line 2>/dev/null < "${stat}" || continue
+      [[ "${line}" == *" (sleep) "* ]] || continue
+      # After the name: the state, then the pid of the parent.
+      line="${line##*) }"
+      line="${line#* }"
+      [[ "${line%% *}" == "${1}" ]] || continue
+      arg=$(tr "\\0" " " 2>/dev/null < "${stat%/stat}/cmdline") || continue
+      [[ "${arg}" != "sleep ${2} " ]] || exit 0
+    done
+    exit 1
+  ' _ "${1}" "${2}"
+}
+
 # An INT or TERM that stops the check is the interrupt, not a plugin
 # without the dry run: the check names the signal and returns 128+n, the
 # code that lo ends with (Go: TestDryRunBoundaryNamesTheInterrupt). An INT
@@ -3934,8 +3955,16 @@ _dry_plugin_stopped() {
 # the check, or before the check keeps the pid of the plugin or of the
 # watchdog (the test-only delays): there it is noted, and sent again once
 # the pids are kept. The plugin ends on TERM.
+#
+# Each case proves where the signal came. In a window, the window's delay
+# (a `sleep 1.2` of the shell that owns the window) still runs just before
+# the signal, and the log of the check's kills then has the owner's kill
+# of itself: a shell sends a signal to itself again only when it noted the
+# signal in a window. In the wait, no shell does. The ceiling: the check
+# ends at most 2.5 s after the signal, at the end of the window, and does
+# not wait until the plugin ends by itself (about 4 s).
 @test "the dry run's plugin check names an INT or TERM that stops it and returns 128+n" {
-  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" how sig to window m b job rc want i
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" how sig to window m b log job sub rc want sent took i
   _ADDONS_DRYRUN_CHECK_GRACE=1
   for how in "INT group" "TERM lo" "TERM check"; do
     sig="${how% *}" to="${how#* }"
@@ -3945,36 +3974,67 @@ _dry_plugin_stopped() {
       # meets it.
       [[ "${to} ${window}" != "check check" ]] || continue
       m="${BATS_TEST_TMPDIR}/m-${sig}-${to}-${window}" b="${BATS_TEST_TMPDIR}/b-${sig}-${to}-${window}"
+      log="${BATS_TEST_TMPDIR}/kills-${sig}-${to}-${window}"
       mkdir -p "${m}" "${b}"
+      : > "${log}"
       _ADDONS_DRYRUN_CHECK_TEST_DELAY_CHECK="" _ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN="" _ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG=""
-      [[ "${window}" != check ]] || _ADDONS_DRYRUN_CHECK_TEST_DELAY_CHECK=1
-      [[ "${window}" != plugin ]] || _ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN=1
-      [[ "${window}" != watchdog ]] || _ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG=1
+      [[ "${window}" != check ]] || _ADDONS_DRYRUN_CHECK_TEST_DELAY_CHECK=1.2
+      [[ "${window}" != plugin ]] || _ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN=1.2
+      [[ "${window}" != watchdog ]] || _ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG=1.2
       _dry_slow_plugin "${plugin}" "${m}" "exit 1"
       # Job control on: without it, a background job of a script ignores INT.
-      # The job is lo's shell, in a process group of its own.
+      # The job is lo's shell, in a process group of its own. Its kill logs
+      # each signal of the check with the pid of the shell that sends it.
       set -m
-      addons::dry_run_boundary "${b}" >"${b}.out" 2>&1 3>&- &
+      {
+        kill() { printf '%s %s\n' "${BASHPID}" "$*" >> "${log}"; builtin kill "$@"; }
+        addons::dry_run_boundary "${b}"
+      } >"${b}.out" 2>&1 3>&- &
       job=$!
       set +m
       for (( i = 0; i < 100; i++ )); do [[ -s "${m}/ppid" ]] && break; sleep 0.05; done
       [[ -s "${m}/ppid" ]] || { echo "${how} (${window}): the plugin did not start"; return 1; }
-      # In a window: 0.3 s into its delay of 1 s.
-      [[ "${window}" == wait ]] || sleep 0.3
+      # The plugin's parent is the check's subshell.
+      sub=$(<"${m}/ppid")
+      # In a window: 0.3 s into its delay of 1.2 s, while the delay runs.
+      if [[ "${window}" != wait ]]; then
+        sleep 0.3
+        if [[ "${window}" == check ]]; then
+          _dry_window_open "${job}" 1.2 || { echo "${how} (${window}): the window of lo's shell closed before the signal"; return 1; }
+        else
+          _dry_window_open "${sub}" 1.2 || { echo "${how} (${window}): the ${window} window of the check closed before the signal"; return 1; }
+        fi
+      fi
       case "${to}" in
         group) kill -"${sig}" -- "-${job}" ;;
         lo) kill -"${sig}" "${job}" ;;
-        # The plugin's parent is the check's subshell.
-        check) kill -"${sig}" "$(<"${m}/ppid")" ;;
+        check) kill -"${sig}" "${sub}" ;;
       esac
+      sent=$(_dry_now_ms)
       rc=0
       wait "${job}" 2>/dev/null || rc=$?
+      took=$(( $(_dry_now_ms) - sent ))
       (( rc == want )) || { echo "${how} (${window}): the check returned ${rc}, want ${want}: $(<"${b}.out")"; return 1; }
       grep -qF "bootstrap dry-run: the check of the Secret plugin " "${b}.out" \
         && grep -qF "/secrets.lok8s.dev/v1/secret/Secret was interrupted (SIG${sig})" "${b}.out" \
         || { echo "${how} (${window}): the check does not name the interrupt: $(<"${b}.out")"; return 1; }
       ! grep -qF "does not support a dry run" "${b}.out" || { echo "${how} (${window}): the check blames the plugin: $(<"${b}.out")"; return 1; }
       [ -z "$(ls -A "${b}" | grep -E '^(probe|check)-')" ] || { echo "${how} (${window}): files of the check are left: $(ls -A "${b}")"; return 1; }
+      (( took <= 2500 )) || { echo "${how} (${window}): the check ended ${took} ms after the signal, want at most 2500 (the rest of the window)"; return 1; }
+      case "${window}" in
+        wait)
+          ! grep -qE "^(${job} -[A-Z]+ ${job}|${sub} -[A-Z]+ ${sub})\$" "${log}" \
+            || { echo "${how} (${window}): a shell sent the signal to itself again, so it came in a window: $(tr '\n' ' ' < "${log}")"; return 1; } ;;
+        check)
+          grep -qx -- "${job} -${sig} ${job}" "${log}" \
+            || { echo "${how} (${window}): lo's shell did not note the signal in its window: $(tr '\n' ' ' < "${log}")"; return 1; } ;;
+        *)
+          # The check notes the signal it gets first: the INT of the group
+          # (bash 5.3 traps INT in a background job), else the TERM of lo's
+          # shell.
+          grep -qE "^${sub} -(INT|TERM) ${sub}\$" "${log}" \
+            || { echo "${how} (${window}): the check did not note the signal in its ${window} window: $(tr '\n' ' ' < "${log}")"; return 1; } ;;
+      esac
     done
   done
 }
