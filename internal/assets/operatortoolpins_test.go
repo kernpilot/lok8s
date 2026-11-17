@@ -1,23 +1,27 @@
 package assets
 
 // operatortoolpins_test.go ties the tools that operator/Dockerfile
-// downloads to the pins in the Go code: the khelm release and the path of
-// its plugin, and the two spellings of the flux release.
+// downloads to the pins in lok8s: the khelm release and the path of its
+// plugin to the Go code, and the flux release to the fluxcd addon.
 
 import (
 	"fmt"
+	"io/fs"
 	"path"
 	"regexp"
 	"strings"
 	"testing"
+	"testing/fstest"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/operator"
 	"github.com/kernpilot/lok8s/internal/toolchain"
 )
 
-// operatorToolPins are the values in the Go code that the image's
-// downloads follow.
+// operatorToolPins are the values in lok8s that the image's downloads
+// follow.
 type operatorToolPins struct {
 	// khelm is the khelm release, with no "v" (toolchain.KhelmVersion).
 	khelm string
@@ -27,14 +31,72 @@ type operatorToolPins struct {
 	// chartRenderer is where `lo operator` runs the khelm plugin from in
 	// the image: its plugin home, then the plugin's path under it.
 	chartRenderer string
+	// flux is the Flux release that the fluxcd addon installs, with no "v"
+	// (fluxAddonRelease).
+	flux string
 }
 
-func goToolPins() operatorToolPins {
+func toolPins(t *testing.T) operatorToolPins {
+	t.Helper()
+	flux, err := fluxAddonRelease(FS())
+	if err != nil {
+		t.Fatal(err)
+	}
 	return operatorToolPins{
 		khelm:         toolchain.KhelmVersion,
 		pluginHome:    operator.DefaultKustomizePluginHome,
 		chartRenderer: path.Join(operator.DefaultKustomizePluginHome, toolchain.ChartRendererPluginRel),
+		flux:          flux,
 	}
+}
+
+// The fluxcd addon is the one source of the Flux release in lok8s.
+// Its chart.yaml pins the chart (flux2 of fluxcd-community), and the first
+// line of its values.yaml names that chart and the chart's appVersion: the
+// Flux release whose controllers and CRDs the chart installs. A khelm
+// chart.yaml has no field for the appVersion, and a test does not ask the
+// chart repository, so that line is the record. Its chart must be the one
+// that chart.yaml pins: a chart bump then cannot leave the line behind.
+// The test cannot see a line whose appVersion is not the chart's.
+const (
+	fluxAddonChart  = "addons/fluxcd/chart.yaml"
+	fluxAddonValues = "addons/fluxcd/values.yaml"
+	fluxChartRepo   = "https://fluxcd-community.github.io/helm-charts"
+)
+
+var fluxAddonLine = regexp.MustCompile(`^# Flux CD \(fluxcd-community/flux2 chart ([^,\s]+), appVersion ([^)\s]+)\)`)
+
+// fluxAddonRelease returns the Flux release of the fluxcd addon in fsys
+// (the tree of .lok8s), or why the addon does not name one.
+func fluxAddonRelease(fsys fs.FS) (string, error) {
+	raw, err := fs.ReadFile(fsys, fluxAddonChart)
+	if err != nil {
+		return "", err
+	}
+	var chart struct {
+		Repository string `yaml:"repository"`
+		Chart      string `yaml:"chart"`
+		Version    string `yaml:"version"`
+	}
+	if err := yaml.Unmarshal(raw, &chart); err != nil {
+		return "", fmt.Errorf("%s: %w", fluxAddonChart, err)
+	}
+	if chart.Repository != fluxChartRepo || chart.Chart != "flux2" {
+		return "", fmt.Errorf("%s pins the chart %q of %q, not flux2 of %s: change this test with the addon", fluxAddonChart, chart.Chart, chart.Repository, fluxChartRepo)
+	}
+	raw, err = fs.ReadFile(fsys, fluxAddonValues)
+	if err != nil {
+		return "", err
+	}
+	first, _, _ := strings.Cut(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+	m := fluxAddonLine.FindStringSubmatch(first)
+	switch {
+	case m == nil:
+		return "", fmt.Errorf("the first line of %s is %q, want \"# Flux CD (fluxcd-community/flux2 chart <chart>, appVersion <release>)\": the flux of the operator image follows that appVersion", fluxAddonValues, first)
+	case m[1] != chart.Version:
+		return "", fmt.Errorf("the first line of %s names the chart %s, but %s pins %s: write the appVersion of chart %s on that line, and move the flux of the operator image (URL and sums) with it", fluxAddonValues, m[1], fluxAddonChart, chart.Version, chart.Version)
+	}
+	return m[2], nil
 }
 
 // The image's khelm is the release that lok8s pins, and it lands where
@@ -53,9 +115,11 @@ func goToolPins() operatorToolPins {
 //     would then look for its plugins in another place.
 //
 // The image's flux URL names the release twice (the tag and the file
-// name), and the two are the same. The Go code pins no flux: lo does not
-// run the flux CLI (`lo gitops flux` is deferred), so the image's flux
-// follows only its own URL.
+// name), and the two are the same release as the Flux that the fluxcd addon
+// installs (fluxAddonRelease). lo does not run the flux CLI today (`lo
+// gitops flux` is deferred), but the image ships it for a GitOps
+// bootstrap: `flux bootstrap` applies the controllers and CRDs of the CLI's
+// own release, so a CLI of another release would replace the addon's.
 //
 // No RUN has a # at the start of a word (runInlineComments): the shell
 // reads the rest of the RUN as a comment, so an install after it would
@@ -67,7 +131,7 @@ func goToolPins() operatorToolPins {
 // COPY --from=<stage> / /).
 func TestOperatorImageToolsFollowThePins(t *testing.T) {
 	t.Parallel()
-	if problems := operatorToolPinProblems(readOperatorDockerfile(t), goToolPins()); len(problems) > 0 {
+	if problems := operatorToolPinProblems(readOperatorDockerfile(t), toolPins(t)); len(problems) > 0 {
 		t.Errorf("operator/Dockerfile:\n  %s", strings.Join(problems, "\n  "))
 	}
 }
@@ -82,10 +146,12 @@ func TestOperatorImageToolPinCheckFindsEachHole(t *testing.T) {
 		copyLo      = "COPY --from=lo-build /out/lo /usr/local/bin/lo\n"
 		lastCommand = "    && rm -rf /tmp/dl\n"
 	)
-	pins := goToolPins()
-	moved := goToolPins()
+	pins := toolPins(t)
+	moved := pins
 	moved.khelm = "9.9.9"
-	elsewhere := goToolPins()
+	fluxMoved := pins
+	fluxMoved.flux = "9.9.9"
+	elsewhere := pins
 	elsewhere.pluginHome = "/opt/plugins"
 	elsewhere.chartRenderer = path.Join(elsewhere.pluginHome, toolchain.ChartRendererPluginRel)
 	cases := []struct {
@@ -147,6 +213,11 @@ func TestOperatorImageToolPinCheckFindsEachHole(t *testing.T) {
 		{"flux by another URL form",
 			[]dockerfileEdit{{re: `(flux_[^_/"]+_linux_)\$\{ARCH\}`, new: "${1}amd64"}},
 			pins, "has 0 flux downloads of the form"},
+		{"flux from another release than the addon",
+			[]dockerfileEdit{{re: `(fluxcd/flux2/releases/download/v)[^/"]+/flux_[^_/"]+_`, new: "${1}9.9.9/flux_9.9.9_"}},
+			pins, "downloads flux v9.9.9, but the fluxcd addon installs Flux " + pins.flux},
+		{"the addon's Flux moves and the image does not",
+			nil, fluxMoved, "but the fluxcd addon installs Flux 9.9.9"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -230,6 +301,71 @@ func operatorToolPinProblems(text string, pins operatorToolPins) []string {
 		bad(`operator/Dockerfile has %d flux downloads of the form "https://github.com/fluxcd/flux2/releases/download/v<version>/flux_<version>_linux_${ARCH}.tar.gz", want one: change this test with the image`, len(flux))
 	case flux[0][1] != flux[0][2]:
 		bad("the URL in operator/Dockerfile names two flux releases: the tag v%s and the file flux_%s_linux_${ARCH}.tar.gz; make them the same", flux[0][1], flux[0][2])
+	case flux[0][1] != pins.flux:
+		bad("operator/Dockerfile downloads flux v%s, but the fluxcd addon installs Flux %s (the appVersion on the first line of %s): change the URL and the sums of the image with the addon", flux[0][1], pins.flux, fluxAddonValues)
 	}
 	return problems
+}
+
+// Each rule of fluxAddonRelease fails on an edit of the real addon.
+func TestFluxAddonReleaseFindsEachHole(t *testing.T) {
+	t.Parallel()
+	read := func(name string) string {
+		raw, err := fs.ReadFile(FS(), name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	chart, values := read(fluxAddonChart), read(fluxAddonValues)
+	// edit replaces the one match of re in text; a text that re does not
+	// match once stops the test (the case has to change with the addon).
+	edit := func(text, re, new string) string {
+		t.Helper()
+		rx := regexp.MustCompile(re)
+		if n := len(rx.FindAllStringIndex(text, -1)); n != 1 {
+			t.Fatalf("the edit %s matches %d times, want once: change this case with the addon", re, n)
+		}
+		return rx.ReplaceAllString(text, new)
+	}
+	release := func(chart, values string) (string, error) {
+		return fluxAddonRelease(fstest.MapFS{
+			fluxAddonChart:  {Data: []byte(chart)},
+			fluxAddonValues: {Data: []byte(values)},
+		})
+	}
+	if got, err := release(chart, values); err != nil || got == "" {
+		t.Fatalf("the unedited addon: release %q, error %v", got, err)
+	}
+	cases := []struct {
+		name, chart, values, want string
+	}{
+		{"a chart bump that leaves the appVersion line behind",
+			edit(chart, `(?m)^version: \S+$`, "version: 9.9.9"), values,
+			"but " + fluxAddonChart + " pins 9.9.9"},
+		{"the line names another chart",
+			chart, edit(values, `^(# Flux CD \(fluxcd-community/flux2 chart )[^,]+,`, "${1}9.9.9,"),
+			"names the chart 9.9.9, but"},
+		{"the line is not the first",
+			chart, "# values of the fluxcd addon\n" + values,
+			"the first line of " + fluxAddonValues + " is"},
+		{"the line names no appVersion",
+			chart, edit(values, `^(# Flux CD \(fluxcd-community/flux2 chart [^,]+), appVersion [^)]+\)`, "${1})"),
+			"the first line of " + fluxAddonValues + " is"},
+		{"another chart",
+			edit(chart, `(?m)^chart: flux2$`, "chart: flux-operator"), values,
+			`pins the chart "flux-operator"`},
+		{"another chart repository",
+			edit(chart, `(?m)^repository: \S+$`, "repository: https://charts.example.com"), values,
+			`of "https://charts.example.com", not flux2`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := release(c.chart, c.values)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("the check lets this hole pass, want an error with %q; it returned %q, %v", c.want, got, err)
+			}
+		})
+	}
 }
