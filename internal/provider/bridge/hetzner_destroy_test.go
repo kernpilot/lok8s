@@ -48,8 +48,8 @@ func requireTool(t *testing.T, path string) {
 // the -l selector. The plan names server 46 with the cluster label of this
 // cluster. At the destroy, the list gives 46 with another label. The
 // destroy does not delete 46, and the last lines name it with the reason,
-// before the line that counts the kept parts (47 has no owner mark), which
-// stays the last line. These lines go to stderr, not to stdout.
+// before the line that counts and names the kept parts (47 has no owner
+// mark), which stays the last line. These lines go to stderr, not to stdout.
 // hack/parity-orchestrate.sh runs the same case in both CLIs.
 func TestHetznerDestroyNamesAPartOfThePlanThatTheListGivesWithAnotherClusterLabel(t *testing.T) {
 	root := testutil.RepoRoot(t)
@@ -128,7 +128,7 @@ func TestHetznerDestroyNamesAPartOfThePlanThatTheListGivesWithAnotherClusterLabe
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
 	want := []string{
 		"[warn] lo destroy: skipped server 46 moved-0: the plan named it, and now it has lok8s.dev/cluster=prod-b, not lok8s.dev/cluster=prod-a. lok8s did not delete it.",
-		"[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server). A 'hetzner: skipped' warning above names each one. Delete them by hand only if they are yours and you want them gone.",
+		"[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server): server 47 old-0. Delete them by hand only if they are yours and you want them gone.",
 	}
 	if len(lines) < 2 || lines[len(lines)-2] != want[0] || lines[len(lines)-1] != want[1] {
 		t.Errorf("the last lines of stderr are not the skipped part and then the kept line:\n%s", out)

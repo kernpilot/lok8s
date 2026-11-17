@@ -214,7 +214,11 @@ _HETZNER_DESTROY_ORDER=(load-balancer server placement-group firewall volume flo
 # confirmed plan (the destroy after `lo destroy` showed the plan and its
 # warnings), the list does not repeat a warning that the plan showed: it
 # warns only for a kept or foreign part that the plan names as a part to
-# delete (the plan showed no warning for it). For a foreign part that the
+# delete (the plan showed no warning for it). It does not warn for a kept
+# or foreign part that the plan does not name: the plan warned for it when
+# its list gave the part. A part that is new since the plan thus gets no
+# warning; the last lines of the destroy name it all the same (a kept part
+# in the line that counts the kept parts). For a foreign part that the
 # plan names, the reason says that the plan named it: the provider knows
 # the plan and the label now, not when or whether the label changed.
 # Globals, not stdout: the caller needs the lists, and a command
@@ -294,16 +298,17 @@ hetzner::_destroy_resources() {
 # "<resource>\t<id>\t<name>\t<reason>" lines of _HETZNER_DESTROY_SKIPPED):
 # its kind, id, name and reason. Then, last, the line of a destroy that kept
 # parts: how many parts with lok8s.dev/cluster=<cluster_name> it did not
-# delete because they do not have the owner mark of this cluster, and of
-# which kinds (<kept>: the "<resource>\t<id>\t<name>" lines of
-# _HETZNER_DESTROY_KEPT). That line points to the "hetzner: skipped"
-# warnings (of this destroy or of its plan), not to the skipped lines
-# directly above it: those name other parts. Nothing when it skipped and
-# kept none; when it skipped parts and kept none, a skipped line is the
-# last line. The destroy leaves these parts on purpose, so it still exits
-# 0; the lines say that they exist.
+# delete because they do not have the owner mark of this cluster, of which
+# kinds, and each part with its kind, id and name (<kept>: the
+# "<resource>\t<id>\t<name>" lines of _HETZNER_DESTROY_KEPT). That line
+# names the kept parts itself: a part that is new since the plan got no
+# "hetzner: skipped" warning, and the skipped lines directly above it name
+# other parts. With <skipped> and <kept> both empty, it prints nothing.
+# With only <kept> empty, the last skipped line is the last line. The
+# destroy leaves these parts on purpose, so it still exits 0; the lines say
+# that they exist.
 hetzner::_kept_summary() {
-  local cluster_name="${1}" kept="${2}" skipped="${3:-}" kind t n total=0 kinds="" line rid rname
+  local cluster_name="${1}" kept="${2}" skipped="${3:-}" kind t n total=0 kinds="" names="" line rid rname
   local -A count=()
   # Split at each tab by hand: an empty name would shift the reason.
   while IFS= read -r line; do
@@ -313,10 +318,12 @@ hetzner::_kept_summary() {
     rname="${line%%$'\t'*}"
     warn "lo destroy: skipped ${kind} ${rid}${rname:+ ${rname}}: ${line#*$'\t'}. lok8s did not delete it."
   done <<<"${skipped}"
-  while IFS=$'\t' read -r kind _; do
+  # The name is the last field, so a read at the tabs cannot shift it.
+  while IFS=$'\t' read -r kind rid rname; do
     [[ -n "${kind}" ]] || continue
     count["${kind}"]=$(( ${count["${kind}"]:-0} + 1 ))
     total=$(( total + 1 ))
+    names+="${names:+, }${kind} ${rid}${rname:+ ${rname}}"
   done <<<"${kept}"
   (( total > 0 )) || return 0
   for t in "${_HETZNER_DESTROY_ORDER[@]}"; do
@@ -327,7 +334,7 @@ hetzner::_kept_summary() {
   done
   local noun="resources" verb="do"
   (( total > 1 )) || noun="resource" verb="does"
-  warn "lo destroy: kept ${total} ${noun} with lok8s.dev/cluster=${cluster_name} that ${verb} not have the owner mark of this cluster (${kinds}). A 'hetzner: skipped' warning above names each one. Delete them by hand only if they are yours and you want them gone."
+  warn "lo destroy: kept ${total} ${noun} with lok8s.dev/cluster=${cluster_name} that ${verb} not have the owner mark of this cluster (${kinds}): ${names}. Delete them by hand only if they are yours and you want them gone."
 }
 
 # hetzner::_confirmed_rows <cluster_name> <listed> [<kept>] [<skipped>]
@@ -418,14 +425,15 @@ provider::destroy() {
   # owner mark of this cluster now. Every delete below is in it. A list that
   # fails, or a mark that cannot be calculated, stops the destroy. The parts
   # with the cluster label and without this mark stay (kept); the last line
-  # of the destroy counts them. With a confirmed plan, `lo destroy` showed
-  # the plan and a warning for each such part: this list does not repeat
-  # them, but it warns for a part of the plan that lost its mark since. A
-  # part that the list gives with another cluster label (the list did not
-  # apply its selector) is skipped; the last lines of the destroy name each
-  # one, with the reason. A part of the plan that the list does not give
-  # (it is gone, or its cluster label changed) gets the warning of
-  # hetzner::_confirmed_rows.
+  # of the destroy counts and names them. With a confirmed plan, `lo
+  # destroy` showed the plan and a warning for each such part that its list
+  # gave: this list does not repeat them, and a part that is new since the
+  # plan gets no warning. It warns for a part of the plan that lost its
+  # mark since. A part that the list gives with another cluster label (the
+  # list did not apply its selector) is skipped; the last lines of the
+  # destroy name each one, with the reason. A part of the plan that the
+  # list does not give (it is gone, or its cluster label changed) gets the
+  # warning of hetzner::_confirmed_rows.
   local kept skipped
   hetzner::_destroy_resources "${cluster_name}" "${LOK8S_DESTROY_PLAN:-}" || return 1
   listed="${_HETZNER_DESTROY_ROWS}" kept="${_HETZNER_DESTROY_KEPT}" skipped="${_HETZNER_DESTROY_SKIPPED}"
