@@ -1432,22 +1432,47 @@ _destroy_parts() {
 volume delete 24"
 }
 
-@test "destroy: a confirmed plan that names a part of another domain or an unmarked part deletes only the marked part" {
+@test "destroy: a confirmed plan that names a part of another domain or of another cluster deletes only the marked part" {
   _destroy_parts
-  export LOK8S_DESTROY_PLAN=$'cluster\tprod\nserver\t21\tcp-0\nserver\t22\tcp-0\nserver\t23\told-0\nvolume\t25\tother-data'
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod\nserver\t21\tcp-0\nserver\t22\tcp-0\nvolume\t25\tother-data'
   run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
   assert_success
-  assert_output --partial "hetzner: skipped server 22 of the confirmed plan: no server with this id carries lok8s.dev/cluster=prod and the owner mark of this cluster now."
-  assert_output --partial "hetzner: skipped server 23 of the confirmed plan"
-  assert_output --partial "hetzner: skipped volume 25 of the confirmed plan"
+  # The plan names 22 as a part to delete, but 22 has the mark of another
+  # domain: it is kept, and one warning names it with the reason.
+  assert_output --partial "hetzner: skipped server 22 cp-0: it has lok8s.dev/cluster=prod, but the owner mark of another cluster (lok8s.dev/owner=${OTHER}; this cluster: ${MARK}). lok8s does not delete it."
+  [ "$(grep -c 'skipped server 22' <<<"${output}")" -eq 1 ]
+  assert_output --partial "hetzner: skipped volume 25 of the confirmed plan: no volume with this id carries lok8s.dev/cluster=prod and the owner mark of this cluster now."
   assert_output --partial "hetzner: kept volume 24 prod-data (lok8s.dev/cluster=prod): it is not in the confirmed plan."
   # The plan showed a warning for each part without the mark: the destroy
-  # of the confirmed plan does not repeat it, and its last line counts them.
-  refute_output --partial "hetzner: skipped server 22 cp-0: it has lok8s.dev/cluster=prod"
-  refute_output --partial "hetzner: skipped server 23 old-0: it has lok8s.dev/cluster=prod"
+  # of the confirmed plan does not repeat it for a part that the plan did
+  # not name (23), and its last line counts them.
+  refute_output --partial "skipped server 23"
   assert_output --partial "[warn] lo destroy: kept 2 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers)."
   run _writes
   assert_output "server delete 21"
+}
+
+# A part that lost its mark after the plan was shown in the plan as a part
+# to delete, not as a kept part: the destroy keeps it, and a warning names
+# it, so the last line is true when it says that the warnings name the kept
+# parts.
+@test "destroy: a part of the confirmed plan that lost its mark after the plan is kept, and a warning names it" {
+  _destroy_parts
+  local plan
+  plan="$(provider::destroy_plan "${DESC}" "${BATS_TEST_TMPDIR}" 2>/dev/null)"
+  [ "${plan}" = "$(printf 'cluster\tprod\nserver\t21\tcp-0\nvolume\t24\tprod-data')" ]
+  _fake_set server 21 '.labels |= del(."lok8s.dev/owner")'
+  export LOK8S_DESTROY_PLAN="${plan}"
+  run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
+  assert_success
+  assert_output --partial "hetzner: skipped server 21 cp-0: it has lok8s.dev/cluster=prod, but not the owner mark of this cluster (lok8s.dev/owner=${MARK})."
+  [ "$(grep -c 'skipped server 21' <<<"${output}")" -eq 1 ]
+  # The plan showed 22 and 23 as kept parts: no repeat.
+  refute_output --partial "skipped server 22"
+  refute_output --partial "skipped server 23"
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (3 servers). The warnings above name them. Delete them by hand only if they are yours and you want them gone." ]
+  run _writes
+  assert_output "volume delete 24"
 }
 
 # A destroy that keeps parts (the cluster label, no mark or the mark of

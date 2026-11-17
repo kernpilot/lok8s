@@ -191,7 +191,7 @@ hetzner::_destroy_cluster_name() {
 # The resource types provider::destroy deletes, in its delete order.
 _HETZNER_DESTROY_ORDER=(load-balancer server placement-group firewall volume floating-ip ssh-key network)
 
-# hetzner::_destroy_resources <cluster_name> [quiet]
+# hetzner::_destroy_resources <cluster_name> [<confirmed plan>]
 # Sets _HETZNER_DESTROY_ROWS: one "<resource>\t<id>\t<name>" line per hcloud
 # resource that carries lok8s.dev/cluster=<cluster_name> AND the owner mark
 # of this cluster (hetzner::owner_mark), in the order provider::destroy
@@ -205,14 +205,26 @@ _HETZNER_DESTROY_ORDER=(load-balancer server placement-group firewall volume flo
 # resource", never "hcloud did not answer". The cluster label of each part
 # is checked again, not only by the list query: a part that the list gives
 # with another cluster label, or none, is in neither list (a warning names
-# it), also when it has the mark of this cluster. With "quiet", no warning
-# for a part that it leaves out: the destroy of a confirmed plan lists again,
-# and the plan showed them. Globals, not stdout: the caller needs both
+# it), also when it has the mark of this cluster. With a confirmed plan
+# (the destroy after `lo destroy` showed the plan and its warnings), the
+# list does not repeat a warning that the plan showed: it warns only for a
+# kept part that the plan names as a part to delete (the part lost its mark
+# after the plan). A foreign part that the plan names gets the warning of
+# hetzner::_confirmed_rows. Globals, not stdout: the caller needs both
 # lists, and a command substitution keeps no variable.
 hetzner::_destroy_resources() {
-  local cluster="${1}" quiet="${2:-}" key="${_HETZNER_OWNER_KEY}" selector="lok8s.dev/cluster=${1}"
+  local cluster="${1}" plan="${2:-}" key="${_HETZNER_OWNER_KEY}" selector="lok8s.dev/cluster=${1}"
   local mark resource json marked skipped foreign line rid rmark rname
+  local -A shown=()
   _HETZNER_DESTROY_ROWS="" _HETZNER_DESTROY_KEPT=""
+  # The "<resource>\t<id>" of each line of the plan (split at each tab, a
+  # trailing CR dropped, as hetzner::_confirmed_rows reads it).
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    [[ "${line}" == *$'\t'* ]] || continue
+    rid="${line#*$'\t'}"
+    shown["${line%%$'\t'*}"$'\t'"${rid%%$'\t'*}"]=1
+  done <<<"${plan}"
   mark="$(hetzner::owner_mark "${cluster}")" || return 1
   for resource in "${_HETZNER_DESTROY_ORDER[@]}"; do
     # Three passes over one list: the parts with the cluster label and the
@@ -239,7 +251,7 @@ hetzner::_destroy_resources() {
       [[ -n "${line}" ]] || continue
       rid="${line%%$'\t'*}" line="${line#*$'\t'}"
       rmark="${line%%$'\t'*}" rname="${line#*$'\t'}"
-      [[ -z "${quiet}" ]] || continue
+      [[ -z "${plan}" ]] || continue
       warn "hetzner: skipped ${resource} ${rid} ${rname}: the list of the parts with ${selector} gave it, but it has lok8s.dev/cluster=${rmark:-<none>}. lok8s does not delete a part of another cluster."
     done <<<"${foreign}"
     [[ -z "${marked}" ]] || _HETZNER_DESTROY_ROWS+="${marked}"$'\n'
@@ -250,7 +262,7 @@ hetzner::_destroy_resources() {
       rid="${line%%$'\t'*}" line="${line#*$'\t'}"
       rmark="${line%%$'\t'*}" rname="${line#*$'\t'}"
       _HETZNER_DESTROY_KEPT+="${resource}"$'\t'"${rid}"$'\t'"${rname}"$'\n'
-      [[ -z "${quiet}" ]] || continue
+      [[ -z "${plan}" || -n "${shown["${resource}"$'\t'"${rid}"]:-}" ]] || continue
       if [[ -z "${rmark}" ]]; then
         warn "hetzner: skipped ${resource} ${rid} ${rname}: it has lok8s.dev/cluster=${cluster}, but not the owner mark of this cluster (${key}=${mark}). lok8s does not delete a part that can belong to another person or cluster. If it is a part of this cluster (an older lok8s made it), first make sure that id ${rid} is yours ('hcloud ${resource} describe ${rid}'), then mark it one time: hcloud ${resource} add-label ${rid} ${key}=${mark}. Then run lo destroy again, or delete it yourself."
       else
@@ -289,7 +301,7 @@ hetzner::_kept_summary() {
   warn "lo destroy: kept ${total} ${noun} with lok8s.dev/cluster=${cluster_name} that ${verb} not have the owner mark of this cluster (${kinds}). The warnings above name them. Delete them by hand only if they are yours and you want them gone."
 }
 
-# hetzner::_confirmed_rows <cluster_name> <listed>
+# hetzner::_confirmed_rows <cluster_name> <listed> [<kept>]
 # Check LOK8S_DESTROY_PLAN against the live list and set
 # _HETZNER_CONFIRMED_ROWS to the rows to delete: plan ∩ live list, as
 # "<resource>\t<id>\t<name>" lines. A plan line is split at each tab (a
@@ -297,15 +309,19 @@ hetzner::_kept_summary() {
 # set, when the plan is empty, does not start with the cluster line of
 # <cluster_name>, or has a line whose type is not exactly one of
 # _HETZNER_DESTROY_ORDER or whose id is not a number: one bad line refuses
-# the whole plan.
+# the whole plan. A plan row that is not live gets a warning, except a row
+# in <kept> (the lines of _HETZNER_DESTROY_KEPT): the list warned for it.
 hetzner::_confirmed_rows() {
-  local cluster_name="${1}" listed="${2}" line kind rid rname rest planned header=1 t known
-  local -A live=()
+  local cluster_name="${1}" listed="${2}" kept="${3:-}" line kind rid rname rest planned header=1 t known
+  local -A live=() was_kept=()
   _HETZNER_CONFIRMED_ROWS=""
   while IFS=$'\t' read -r kind rid rname; do
     [[ -n "${kind}" ]] || continue
     live["${kind}"$'\t'"${rid}"]="${kind}"$'\t'"${rid}"$'\t'"${rname}"
   done <<<"${listed}"
+  while IFS=$'\t' read -r kind rid _; do
+    [[ -z "${kind}" ]] || was_kept["${kind}"$'\t'"${rid}"]=1
+  done <<<"${kept}"
 
   local rows="" key
   local -A planned_keys=()
@@ -341,7 +357,7 @@ hetzner::_confirmed_rows() {
     planned_keys["${key}"]=1
     if [[ -n "${live[${key}]:-}" ]]; then
       rows+="${live[${key}]}"$'\n'
-    else
+    elif [[ -z "${was_kept[${key}]:-}" ]]; then
       warn "hetzner: skipped ${kind} ${rid} of the confirmed plan: no ${kind} with this id carries lok8s.dev/cluster=${cluster_name} and the owner mark of this cluster now. It is gone, or it is not of this cluster."
     fi
   done <<<"${LOK8S_DESTROY_PLAN}"
@@ -373,10 +389,9 @@ provider::destroy() {
   # with the cluster label and without this mark stay (kept); the last line
   # of the destroy counts them. With a confirmed plan, `lo destroy` showed
   # the plan and a warning for each such part: this list does not repeat
-  # them (quiet).
-  local kept quiet=""
-  [[ -z "${LOK8S_DESTROY_PLAN:-}" ]] || quiet=quiet
-  hetzner::_destroy_resources "${cluster_name}" "${quiet}" || return 1
+  # them, but it warns for a part of the plan that lost its mark since.
+  local kept
+  hetzner::_destroy_resources "${cluster_name}" "${LOK8S_DESTROY_PLAN:-}" || return 1
   listed="${_HETZNER_DESTROY_ROWS}" kept="${_HETZNER_DESTROY_KEPT}"
 
   if [[ -n "${LOK8S_DESTROY_PLAN:-}" ]]; then
@@ -387,7 +402,7 @@ provider::destroy() {
     # only, else nothing is deleted. A plan id that is not in the live list
     # is not deleted (it is gone, or it lost the label or the mark); a live
     # resource that is not in the plan stays.
-    hetzner::_confirmed_rows "${cluster_name}" "${listed}" || return 1
+    hetzner::_confirmed_rows "${cluster_name}" "${listed}" "${kept}" || return 1
     rows="${_HETZNER_CONFIRMED_ROWS}"
   else
     rows="${listed}"
