@@ -215,7 +215,9 @@ func TestOperatorImageApkUsesAlpineHTTPS(t *testing.T) {
 //     its status, or wrap it in a command whose own status counts;
 //   - each <NAME> is set to 64 hex digits in the amd64 and the arm64 branch
 //     (the platforms docker.yml builds) of the one `case "${ARCH}" in`, and
-//     nowhere else; the case ends with a `*)` branch that exits 1;
+//     nowhere else; the case ends with a `*)` branch that exits 1. No two
+//     sums in the case are the same (a copy slip would else show only in
+//     the arm64 build);
 //   - each download has its own path and its own <NAME>;
 //   - no curl and no ADD (each fetches with no check).
 //
@@ -227,7 +229,11 @@ func TestOperatorImageApkUsesAlpineHTTPS(t *testing.T) {
 //   - a <NAME> that the shell sets in another form (export, read, a loop);
 //   - a change to the file between its check and its use (cp, mv);
 //   - a shell option or a trap that changes how a failed command ends the
-//     RUN.
+//     RUN;
+//   - another sha256sum: a shell function of that name, a symlink, or a
+//     PATH directory in front of it;
+//   - a tag change without the digest change: the test cannot tell which
+//     digest a tag has, and the digest alone picks the image.
 //
 // The Go modules of the build stage are checked by go.sum, not by this test.
 func TestOperatorImageDownloadsAreChecked(t *testing.T) {
@@ -255,6 +261,7 @@ func TestOperatorImageDownloadCheckFindsEachHole(t *testing.T) {
 		kindCheck      = `    && echo "${KIND_SHA256}  /tmp/dl/kind" | sha256sum -c - \` + "\n"
 		fluxCheck      = `    && echo "${FLUX_SHA256}  /tmp/dl/flux.tar.gz" | sha256sum -c - \` + "\n"
 		khelmGet       = "    && wget -qO /tmp/dl/khelm \\\n"
+		mkdirDL        = "    && mkdir -p /tmp/dl \\\n"
 		lastCommand    = "    && rm -rf /tmp/dl\n"
 	)
 	// kubectl downloaded, installed and run before its check.
@@ -329,6 +336,44 @@ func TestOperatorImageDownloadCheckFindsEachHole(t *testing.T) {
 		{"a & at the end of the RUN",
 			[]edit{{old: lastCommand, new: "    && rm -rf /tmp/dl &\n"}},
 			"after the check of /tmp/dl/khelm"},
+		// The table of sums and the names of the checks.
+		{"no download at all",
+			[]edit{{re: `(?s)    && mkdir -p /tmp/dl \\\n.*?    && rm -rf /tmp/dl\n`, new: "    && true\n"}},
+			"has no wget download"},
+		{"the check names another path than the download",
+			[]edit{{old: kindCheck, new: strings.Replace(kindCheck, "/tmp/dl/kind", "/tmp/dl/khelm", 1)}},
+			"the download to /tmp/dl/kind is checked as /tmp/dl/khelm"},
+		{"two tools share a sum name",
+			[]edit{{old: kindCheck, new: strings.Replace(kindCheck, "KIND_SHA256", "KHELM_SHA256", 1)}},
+			"shares its path or its sum"},
+		{"the arm64 sum of a tool is missing",
+			[]edit{{re: `(arm64\) \\\n(?:\s+[A-Z0-9_]+=[0-9a-f]{64} \\\n)*?)\s+KIND_SHA256=[0-9a-f]{64} \\\n`, new: "$1"}},
+			"is checked against ${KIND_SHA256}, which the ARCH case does not set for both amd64 and arm64"},
+		{"a sum set a third time",
+			[]edit{{old: mkdirDL, new: "    && KUBECTL_SHA256=" + strings.Repeat("0", 64) + " \\\n" + mkdirDL}},
+			"${KUBECTL_SHA256} is set 3 times"},
+		{"two sums with the same value",
+			[]edit{{re: `(KIND_SHA256=)[0-9a-f]{64}( \\\n\s+KHELM_SHA256=)[0-9a-f]{64}( ;; \\\n\s+arm64\))`,
+				new: "${1}" + strings.Repeat("1", 64) + "${2}" + strings.Repeat("1", 64) + "${3}"}},
+			"sets the same sum for KIND_SHA256 (amd64) and KHELM_SHA256 (amd64)"},
+		{"a *) branch that exits 0",
+			[]edit{{old: "exit 1 ;; \\\n", new: "exit 0 ;; \\\n"}},
+			"must end with exit 1"},
+		{"a second ARCH case",
+			[]edit{{old: mkdirDL, new: "    && case \"${ARCH}\" in amd64) ;; esac \\\n" + mkdirDL}},
+			"has 2 `case"},
+		{"a branch body that is not NAME=<64 hex>",
+			[]edit{{old: "      amd64) \\\n", new: "      amd64) \\\n        export GOARCH=amd64 \\\n"}},
+			"branch of the ARCH case may only set NAME=<64 hex>, got: export"},
+		{"a branch for another architecture",
+			[]edit{{old: "      *) echo", new: "      riscv64) ;; \\\n      *) echo"}},
+			"has the branch riscv64)"},
+		{"a branch with no label",
+			[]edit{{old: "      *) echo", new: "      oops ;; \\\n      *) echo"}},
+			"has a branch this test cannot read: oops"},
+		{"no arm64 branch",
+			[]edit{{re: `(?s)      arm64\) \\\n.*?;; \\\n`, new: ""}},
+			"has no arm64) branch"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -444,6 +489,7 @@ func operatorDownloadProblems(text string) []string {
 		cases = [][]string{{"", ""}}
 	}
 	seen := map[string]bool{}
+	values := map[string]string{} // a sum -> "NAME (arch)" that set it first
 	assign := regexp.MustCompile(`^([A-Z][A-Z0-9_]*)=([0-9a-f]{64})$`)
 	for part := range strings.SplitSeq(cases[0][1], ";;") {
 		part = strings.TrimSpace(part)
@@ -463,6 +509,11 @@ func operatorDownloadProblems(text string) []string {
 					bad("the %s branch of the ARCH case may only set NAME=<64 hex>, got: %s", label, f)
 					continue
 				}
+				use := m[1] + " (" + label + ")"
+				if first, dup := values[m[2]]; dup {
+					bad("the ARCH case sets the same sum for %s and %s: each tool and architecture has its own sum (a copy slip?)", first, use)
+				}
+				values[m[2]] = use
 				if sums[m[1]] == nil {
 					sums[m[1]] = map[string]bool{}
 				}

@@ -5,10 +5,16 @@
 # -ldflags (internal/assets.BuildVersion; the assets version test pins the
 # flag across the Makefile, goreleaser and this file). The golang tag
 # equals the root go.mod `go` line: the image sets GOTOOLCHAIN=local, so an
-# older tag cannot build the module (the same test pins this). The tag, and
-# the digest of its multi-arch index (it has linux/amd64 and linux/arm64,
-# the platforms docker.yml builds): this stage builds the lo binary that the
-# final image runs. A bump changes both.
+# older tag cannot build the module (the same test pins this).
+# The base is pinned by its tag and by the digest of its multi-arch index
+# (it has linux/amd64 and linux/arm64, the platforms docker.yml builds),
+# because this stage builds the lo binary that the final image runs. A bump
+# changes the tag and the digest in the same edit: with a digest, the tag
+# alone does not change the image, and no test sees it. Take the index
+# digest from the "Digest:" line of
+# `docker buildx imagetools inspect golang:<tag>`, never the digest of one
+# platform's manifest: the arm64 build would then get the amd64 image, and
+# nothing would fail.
 FROM golang:1.26.11-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS lo-build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -25,8 +31,15 @@ RUN CGO_ENABLED=0 go build -trimpath \
       -o /out/lo ./cmd/lo
 
 # ── stage 2: shell-operator + tools + hooks ─────────────────────────────
-# The tag, and the digest of its multi-arch index (linux/amd64 and
-# linux/arm64 are the platforms docker.yml builds). A bump changes both.
+# The base is pinned by its tag and by the digest of its multi-arch index
+# (linux/amd64 and linux/arm64 are the platforms docker.yml builds). A bump
+# changes the tag and the digest in the same edit: with a digest, the tag
+# alone does not change the image, and no test sees it. Take the index
+# digest from the "Digest:" line of
+# `docker buildx imagetools inspect ghcr.io/flant/shell-operator:<tag>`,
+# never the digest of one platform's manifest: the arm64 build would then
+# get the amd64 base, `uname -m` below would pick the amd64 tools, and
+# nothing would fail.
 FROM ghcr.io/flant/shell-operator:v1.19.5@sha256:2b1127a267538899bcf62e1ae6cf03035a0ad7480058c4d6f911f3640b46c914
 
 # Install dependencies:
