@@ -13,12 +13,16 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -480,7 +484,6 @@ func TestDryRunBoundaryChecksThePluginAsTheRenderRunsIt(t *testing.T) {
 	}
 }
 
-// hashDir lists every file of dir with its content.
 // The check passes only on a plugin that exits 0 and prints the line
 // "dry-run" exactly, as the keys-only probe reads its line (bash: the same
 // cases in tests/unit/bootstrap_test.bats).
@@ -603,61 +606,185 @@ func TestDryRunBoundaryNamesAProbeDirectoryItCannotMake(t *testing.T) {
 	}
 }
 
-// The check has a time limit. At secretCheckTimeout the plugin gets an
-// interrupt; a plugin that ignores it is killed after secretCheckGrace,
-// a child that holds the plugin's stdout does not keep the check waiting,
-// and a plugin that prints the line only after the interrupt is refused
-// (bash: _ADDONS_DRYRUN_CHECK_TIMEOUT and _GRACE). Each plugin
-// stops by itself after some seconds, so a check without the limit fails
-// on the time it took and leaves no process behind.
-func TestDryRunBoundaryBoundsTheCheck(t *testing.T) {
-	timeout, grace := secretCheckTimeout, secretCheckGrace
-	secretCheckTimeout, secretCheckGrace = 500*time.Millisecond, 500*time.Millisecond
-	t.Cleanup(func() { secretCheckTimeout, secretCheckGrace = timeout, grace })
-	cases := []struct{ name, script string }{
-		{"a plugin that ignores the interrupt",
-			"#!/bin/sh\ntrap '' INT TERM\ni=0\nwhile [ \"$i\" -lt 80 ]; do sleep 0.1; i=$((i + 1)); done\necho dry-run\n"},
-		{"a child that holds the plugin's stdout",
-			"#!/bin/sh\nsleep 8 &\nwait\necho dry-run\n"},
-		{"a plugin that answers only after the interrupt",
-			"#!/bin/sh\ntrap 'echo dry-run; exit 0' INT TERM\ni=0\nwhile [ \"$i\" -lt 80 ]; do sleep 0.1; i=$((i + 1)); done\necho dry-run\n"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			t.Setenv(render.ModeEnv, string(render.ModeExec))
-			base := t.TempDir()
-			p := &config.Paths{Base: base, Bin: filepath.Join(base, ".bin")}
-			t.Setenv(KustomizePluginHomeEnv, "")
-			os.Unsetenv(KustomizePluginHomeEnv)
-			plugin := filepath.Join(base, ".kustomize", filepath.FromSlash(toolchain.SecretPluginRel))
-			testutil.WriteFile(t, plugin, c.script)
-			if err := os.Chmod(plugin, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			start := time.Now()
-			done := make(chan error, 1)
-			go func() {
-				b, err := NewDryRunBoundary(t.Context(), p, execx.NewRunner(p))
-				if b != nil {
-					b.Close()
-				}
-				done <- err
-			}()
-			select {
-			case err := <-done:
-				if err == nil || !strings.Contains(err.Error(), "did not end in 0.5 s") {
-					t.Errorf("err = %v, want the time limit", err)
-				}
-				if took := time.Since(start); took > 4*time.Second {
-					t.Errorf("the check took %s, want about 1 s (the limit and the grace)", took)
-				}
-			case <-time.After(30 * time.Second):
-				t.Fatal("the check did not end in 30 s")
-			}
-		})
+// slowPlugin writes a Secret plugin that records its pid in dir/pid, then
+// runs for about 3 s and touches dir/ended: a plugin that the check stopped
+// never does. onSignal is its INT and TERM trap ("" ignores them).
+func slowPlugin(t *testing.T, plugin, dir, onSignal string) {
+	t.Helper()
+	testutil.WriteFile(t, plugin, "#!/bin/sh\ntrap '"+onSignal+"' INT TERM\necho $$ > \""+dir+"/pid\"\n"+
+		"i=0\nwhile [ \"$i\" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done\ntouch \""+dir+"/ended\"\necho dry-run\n")
+	if err := os.Chmod(plugin, 0o700); err != nil {
+		t.Fatal(err)
 	}
 }
 
+// pluginStopped fails the test if the plugin of slowPlugin still runs, or
+// if it ran to its end. It waits until the plugin would have ended (3.5 s
+// after start).
+func pluginStopped(t *testing.T, dir string, start time.Time) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "pid"))
+	if err != nil {
+		t.Fatalf("the plugin did not start: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Errorf("the plugin (pid %d) still runs after the check returned (kill -0: %v)", pid, err)
+	}
+	time.Sleep(time.Until(start.Add(3500 * time.Millisecond)))
+	if fsutil.FileExists(filepath.Join(dir, "ended")) {
+		t.Error("the plugin ran to its end: the check did not stop it")
+	}
+}
+
+// slowProject is a project whose Secret plugin is slowPlugin, with its
+// markers in a directory of their own.
+func slowProject(t *testing.T, onSignal string) (*config.Paths, string) {
+	t.Helper()
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
+	base := t.TempDir()
+	p := &config.Paths{Base: base, Bin: filepath.Join(base, ".bin")}
+	t.Setenv(KustomizePluginHomeEnv, "")
+	os.Unsetenv(KustomizePluginHomeEnv)
+	marks := t.TempDir()
+	slowPlugin(t, filepath.Join(base, ".kustomize", filepath.FromSlash(toolchain.SecretPluginRel)), marks, onSignal)
+	return p, marks
+}
+
+// boundaryIn builds the boundary in a goroutine and returns its error, or
+// fails the test after 20 s.
+func boundaryIn(t *testing.T, ctx context.Context, p *config.Paths) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		b, err := NewDryRunBoundary(ctx, p, execx.NewRunner(p))
+		if b != nil {
+			b.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(20 * time.Second):
+		t.Fatal("the check did not end in 20 s")
+	}
+	return nil
+}
+
+// The check has a time limit (bash: _ADDONS_DRYRUN_CHECK_TIMEOUT and
+// _GRACE). At secretCheckTimeout the plugin gets an interrupt and has
+// secretCheckGrace to end: a plugin that cleans up in that time finishes
+// its cleanup, and is still refused (it did not end in time). A plugin that
+// ignores the interrupt is killed at the end of the grace, not before. In
+// both cases the plugin does not run on after the check.
+func TestDryRunBoundaryBoundsTheCheck(t *testing.T) {
+	timeout, grace := secretCheckTimeout, secretCheckGrace
+	secretCheckTimeout, secretCheckGrace = 500*time.Millisecond, time.Second
+	t.Cleanup(func() { secretCheckTimeout, secretCheckGrace = timeout, grace })
+
+	t.Run("a plugin that ignores the interrupt", func(t *testing.T) {
+		p, marks := slowProject(t, "")
+		start := time.Now()
+		err := boundaryIn(t, t.Context(), p)
+		took := time.Since(start)
+		if err == nil || !strings.Contains(err.Error(), "did not end in 0.5 s") {
+			t.Errorf("err = %v, want the time limit", err)
+		}
+		if took < 1300*time.Millisecond || took > 2600*time.Millisecond {
+			t.Errorf("the check took %s, want about 1.5 s (the limit, then the whole grace)", took)
+		}
+		pluginStopped(t, marks, start)
+	})
+	t.Run("a plugin that cleans up after the interrupt", func(t *testing.T) {
+		p, marks := slowProject(t, "")
+		cleaned := filepath.Join(marks, "cleaned")
+		slowPlugin(t, filepath.Join(p.Base, ".kustomize", filepath.FromSlash(toolchain.SecretPluginRel)), marks,
+			`sleep 0.2; touch "`+cleaned+`"; echo dry-run; exit 0`)
+		start := time.Now()
+		err := boundaryIn(t, t.Context(), p)
+		if err == nil || !strings.Contains(err.Error(), "did not end in 0.5 s") {
+			t.Errorf("err = %v, want the time limit", err)
+		}
+		if !fsutil.FileExists(cleaned) {
+			t.Error("the plugin did not finish its cleanup: it got no grace")
+		}
+		pluginStopped(t, marks, start)
+	})
+}
+
+// A cancel of the caller (Ctrl-C) stops the check the same way: the
+// interrupt, then a kill at the end of the grace (bash: addons::_check_stop
+// on INT and TERM).
+func TestDryRunBoundaryStopsThePluginOnACancel(t *testing.T) {
+	grace := secretCheckGrace
+	secretCheckGrace = time.Second
+	t.Cleanup(func() { secretCheckGrace = grace })
+	p, marks := slowProject(t, "")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	start := time.Now()
+	go func() {
+		for !fsutil.FileExists(filepath.Join(marks, "pid")) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		cancel()
+	}()
+	if err := boundaryIn(t, ctx, p); err == nil {
+		t.Error("the cancelled check passed")
+	}
+	if took := time.Since(start); took > 2600*time.Millisecond {
+		t.Errorf("the check took %s after the start, want about 1 s (the grace)", took)
+	}
+	pluginStopped(t, marks, start)
+}
+
+// The plugin's stdout is a file, as in bash: a plugin that prints the line,
+// exits 0 and leaves a child that keeps its stdout open passes at once.
+func TestDryRunBoundaryDoesNotWaitForAChildOfThePlugin(t *testing.T) {
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
+	base := t.TempDir()
+	p := &config.Paths{Base: base, Bin: filepath.Join(base, ".bin")}
+	t.Setenv(KustomizePluginHomeEnv, "")
+	os.Unsetenv(KustomizePluginHomeEnv)
+	plugin := filepath.Join(base, ".kustomize", filepath.FromSlash(toolchain.SecretPluginRel))
+	testutil.WriteFile(t, plugin, "#!/bin/sh\necho dry-run\nsleep 6 &\nexit 0\n")
+	if err := os.Chmod(plugin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if err := boundaryIn(t, t.Context(), p); err != nil {
+		t.Errorf("the plugin was refused: %v", err)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Errorf("the check took %s: it waited for the plugin's child", took)
+	}
+}
+
+// The check makes a new file for the plugin's output. If the name is
+// already there (here a link to a file elsewhere), it writes nothing
+// through it and stops with its own message, the same as in bash.
+func TestDryRunBoundaryNamesAnOutputFileItCannotMake(t *testing.T) {
+	p, b, home, rel := boundaryWithPlugin(t)
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	testutil.WriteFile(t, target, "keep\n")
+	if err := os.Symlink(target, filepath.Join(b.Dir, "check.out")); err != nil {
+		t.Fatal(err)
+	}
+	err := b.checkSecretPlugin(t.Context(), p, nil, home)
+	want := "cannot make a file for the output of the check of the Secret plugin " + rel + ": "
+	if err == nil || !strings.HasPrefix(err.Error(), want) {
+		t.Fatalf("err = %v, want a message that starts with %q", err, want)
+	}
+	if raw, err := os.ReadFile(target); err != nil || string(raw) != "keep\n" {
+		t.Errorf("the check wrote through the link: %q (%v)", raw, err)
+	}
+}
+
+// hashDir lists every file of dir with its content.
 func hashDir(t *testing.T, dir string) string {
 	t.Helper()
 	var b strings.Builder

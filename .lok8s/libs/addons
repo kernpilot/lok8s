@@ -361,6 +361,32 @@ addons::detail() {
 _ADDONS_DRYRUN_CHECK_TIMEOUT=30
 _ADDONS_DRYRUN_CHECK_GRACE=5
 
+# addons::_check_stop <pid> <watchdog>
+# Stops the Secret plugin check of addons::dry_run_boundary on INT or TERM
+# (Go: the runner's interrupt, then WaitDelay): TERM to the watchdog and to
+# the plugin, then KILL to the plugin if it still runs after
+# _ADDONS_DRYRUN_CHECK_GRACE seconds. It runs in the check's subshell,
+# which started both, so it can wait for the plugin.
+addons::_check_stop() {
+  local _pid="${1}" _watchdog="${2}" _killer
+  [[ -z "${_watchdog}" ]] || kill -TERM "${_watchdog}" 2>/dev/null
+  if [[ -n "${_pid}" ]]; then
+    kill -TERM "${_pid}" 2>/dev/null
+    (
+      trap 'kill -TERM $(jobs -p) 2>/dev/null; exit 0' TERM
+      sleep "${_ADDONS_DRYRUN_CHECK_GRACE}" &
+      wait "$!" || exit 0
+      kill -KILL "${_pid}" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    _killer=$!
+    wait "${_pid}" 2>/dev/null
+    kill -TERM "${_killer}" 2>/dev/null
+    wait "${_killer}" 2>/dev/null
+  fi
+  [[ -z "${_watchdog}" ]] || wait "${_watchdog}" 2>/dev/null
+  return 0
+}
+
 # addons::dry_run_boundary <dir>
 # Builds the boundary of one dry run in <dir> (a fresh directory the caller
 # owns and removes): plugins/ links the project's Secret plugin and holds the
@@ -415,7 +441,7 @@ addons::dry_run_boundary() {
   addons::_helm_stub "${_dir}/bin" > "${_dir}/bin/helm" || return 1
   chmod 700 "${_dir}/bin/docker" "${_dir}/bin/git" "${_dir}/bin/helm" || return 1
   ( umask 077; : > "${_dir}/report" ) || return 1
-  local _plugin="${_dir}/plugins/${_secret}" _rel="${_home#"${PATH_BASE}/"}/${_secret}" _probe _caps="" _rc=0
+  local _plugin="${_dir}/plugins/${_secret}" _rel="${_home#"${PATH_BASE}/"}/${_secret}" _probe _caps="" _rc=0 _pid _watchdog
   [[ -f "${_home}/${_secret}" ]] || return 0
   if [[ ! -f "${_plugin}" ]]; then
     error "bootstrap dry-run: the dry run's link to the Secret plugin ${_rel} does not resolve, so the dry run cannot check the plugin"
@@ -425,16 +451,22 @@ addons::dry_run_boundary() {
     error "bootstrap dry-run: cannot make a directory for the check of the Secret plugin ${_rel}: ${_probe}"
     return 1
   fi
+  if ! _caps=$( { ( set -C; umask 077; : >"${_dir}/check.out" ); } 2>&1 ); then
+    rm -rf -- "${_probe}"
+    error "bootstrap dry-run: cannot make a file for the output of the check of the Secret plugin ${_rel}: ${_caps}"
+    return 1
+  fi
+  _caps=""
   # The plugin runs in the background with a watchdog (the pattern of
   # spec::_kver_yq): at the time limit it gets TERM (a background job
   # ignores INT, so not the interrupt that Go sends), and KILL after the
   # grace. Its stdout goes to a file outside the probe directory: a $(...)
   # would wait for every process that holds the pipe. INT and TERM stop the
-  # plugin and the watchdog.
+  # watchdog, and the plugin the same way (addons::_check_stop).
   (
     cd "${_probe}" || exit 1
-    trap 'kill -TERM ${_pid:-} ${_watchdog:-} 2>/dev/null; exit 130' INT
-    trap 'kill -TERM ${_pid:-} ${_watchdog:-} 2>/dev/null; exit 143' TERM
+    trap 'addons::_check_stop "${_pid:-}" "${_watchdog:-}"; exit 130' INT
+    trap 'addons::_check_stop "${_pid:-}" "${_watchdog:-}"; exit 143' TERM
     LOK8S_BOOTSTRAP_DRYRUN=1 \
     LOK8S_BOOTSTRAP_DRYRUN_REPORT="${_dir}/report" \
     LOK8S_BOOTSTRAP_DRYRUN_STORE="${_dir}/store" \

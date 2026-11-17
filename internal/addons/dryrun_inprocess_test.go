@@ -160,3 +160,35 @@ func TestDryRunInProcessChartGate(t *testing.T) {
 		t.Fatalf("a chart without dependencies did not render in-process: %v\n%s", err, stderr)
 	}
 }
+
+// The in-process render does not read the kustomize plugin home, so a
+// relative KUSTOMIZE_PLUGIN_HOME does not stop its dry run. The exec
+// render of the same binary still refuses it, before the plugin runs
+// (dryrun_exec_test.go: TestDryRunBoundaryRefusesARelativePluginHome).
+func TestDryRunInProcessTakesARelativePluginHome(t *testing.T) {
+	base := t.TempDir()
+	p := &config.Paths{Base: base, Bin: filepath.Join(base, ".bin"), Lok8s: filepath.Join(base, ".lok8s"), Clusters: filepath.Join(base, "clusters")}
+	marker := filepath.Join(t.TempDir(), "ran")
+	spyScript(t, filepath.Join(base, "rel", ".kustomize", "secrets.lok8s.dev", "v1", "secret", "Secret"), marker, "dry-run\n", 0)
+	t.Chdir(base)
+	t.Setenv(KustomizePluginHomeEnv, "rel/.kustomize")
+
+	t.Setenv(render.ModeEnv, "")
+	b, err := NewDryRunBoundary(t.Context(), p, nil)
+	if err != nil {
+		t.Fatalf("the in-process dry run refused a relative plugin home: %v", err)
+	}
+	b.Close()
+
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
+	b, err = NewDryRunBoundary(t.Context(), p, nil)
+	if b != nil {
+		b.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "the kustomize plugin home rel/.kustomize is a relative path") {
+		t.Errorf("exec render: err = %v, want the refusal", err)
+	}
+	if fsutil.FileExists(marker) {
+		t.Error("the plugin ran")
+	}
+}

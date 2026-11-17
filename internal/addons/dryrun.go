@@ -39,7 +39,6 @@ package addons
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,9 +135,10 @@ func NewDryRunBoundary(ctx context.Context, paths *config.Paths, runner execx.Ru
 func (b *DryRunBoundary) build(ctx context.Context, paths *config.Paths, runner execx.Runner) error {
 	// The boundary links the plugins of the home by their path. A relative
 	// link target resolves from the link's own directory, so such a link
-	// would not resolve.
+	// would not resolve. Only the exec render runs the plugins of the home:
+	// the in-process render (lo-full's default) does not read it.
 	home := config.KustomizePluginHome(paths)
-	if !filepath.IsAbs(home) {
+	if mode, err := render.CurrentMode(); err == nil && mode == render.ModeExec && !filepath.IsAbs(home) {
 		return fmt.Errorf("the kustomize plugin home %s is a relative path, so the dry run's links to its plugins would not resolve — set KUSTOMIZE_PLUGIN_HOME to an absolute path", home)
 	}
 	for _, d := range []string{b.PluginHome, b.StubBin, b.HelmPlugins, b.Store, b.Tmp} {
@@ -214,16 +214,18 @@ func (b *DryRunBoundary) link(src, rel string) error {
 // plugin home, with the environment of a dry-run render (renderEnv, without
 // --allow-generators). Like the keys-only probe (internal/build/keysonly.go),
 // it runs so that no plugin version can do anything with it: in an empty
-// directory of the boundary (removed after), with an empty stdin,
-// PATH_SECRETS at a path in that directory that does not exist, the
+// directory of the boundary (removed after), with stdin and stderr on
+// /dev/null, PATH_SECRETS at a path in that directory that does not exist, the
 // store-free switch on and the keys-only setting off. The caller's
 // directory, stdin and store do not reach it (a plugin that does not
 // know the flag would read the caller's store). Its environment is the
 // caller's with these settings on top: a variable they do not set passes.
 //
 // The check passes only on a plugin that exits 0 and prints the line
-// "dry-run" exactly (as the keys-only probe reads "keys-only"). A plugin
-// that does not end within secretCheckTimeout is refused. Without a
+// "dry-run" exactly (as the keys-only probe reads "keys-only"). Its stdout
+// goes to a file of the boundary, as in bash: a child that keeps it open
+// does not keep the check waiting. A plugin that does not end within
+// secretCheckTimeout is refused. Without a
 // Secret plugin in the project there is nothing to check (as in a real
 // run, the render then has none); with one, a link of the boundary that
 // does not resolve is refused, not skipped.
@@ -253,17 +255,30 @@ func (b *DryRunBoundary) checkSecretPlugin(ctx context.Context, paths *config.Pa
 		secret.DisableEnv+"=1",
 		secret.KeysOnlyEnv+"=0",
 	)
+	// Files, not pipes: exec waits for a pipe until every process that
+	// holds it closes it (or WaitDelay ends), but not for a file.
+	outPath := filepath.Join(b.Dir, "check.out")
+	out, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("cannot make a file for the output of the check of the Secret plugin %s: %w", rel, err)
+	}
+	defer func() { _ = os.Remove(outPath) }()
+	defer func() { _ = out.Close() }()
+	null, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("cannot open %s for the check of the Secret plugin %s: %w", os.DevNull, rel, err)
+	}
+	defer func() { _ = null.Close() }()
 	limit, cancel := context.WithTimeout(ctx, secretCheckTimeout)
 	defer cancel()
-	var out strings.Builder
 	err = runner.Run(limit, execx.Cmd{
 		Name:      plugin,
 		Args:      []string{"--capabilities"},
 		Dir:       dir,
 		Env:       env,
-		Stdin:     strings.NewReader(""),
-		Stdout:    &out,
-		Stderr:    io.Discard,
+		Stdin:     null,
+		Stdout:    out,
+		Stderr:    null,
 		WaitDelay: secretCheckGrace,
 	})
 	// The time limit first, as in bash: a plugin that answers only after
@@ -272,7 +287,11 @@ func (b *DryRunBoundary) checkSecretPlugin(ctx context.Context, paths *config.Pa
 		return fmt.Errorf("the check of the Secret plugin %s did not end in %g s — run 'lo toolchain install' to install the plugin of this lo", rel, secretCheckTimeout.Seconds())
 	}
 	if err == nil {
-		for line := range strings.SplitSeq(out.String(), "\n") {
+		caps, rerr := os.ReadFile(outPath)
+		if rerr != nil {
+			return fmt.Errorf("cannot read the output of the check of the Secret plugin %s: %w", rel, rerr)
+		}
+		for line := range strings.SplitSeq(string(caps), "\n") {
 			if line == "dry-run" {
 				return nil
 			}
