@@ -495,11 +495,16 @@ existing part only when it has the mark of this cluster:
   reason and the `hcloud <kind> add-label` command that marks it. A part
   that loses its mark after the plan is kept too, and the destroy shows
   the same warning for it. The destroy keeps these parts on purpose, so it
-  exits `0`. Its last line counts them by kind and names each one, for
-  example `lo destroy: kept 2 resources with lok8s.dev/cluster=prod that do
-  not have the owner mark of this cluster (1 server, 1 network): server 23
-  old-0, network 26 old-net`. A part without the mark that appears after
-  the plan gets no `hetzner: skipped` warning. Only the last line names it.
+  exits `0`. Its last line counts them by kind and names each one in the
+  delete order, for example `lo destroy: kept 2 resources with
+  lok8s.dev/cluster=prod that do not have the owner mark of this cluster (1
+  server, 1 network): server 23 'old-0', network 26 'old-net'`. It names at
+  most 10 parts, then `and <n> more`. A part without the mark that appears
+  after the plan gets no `hetzner: skipped` warning. Only the last line
+  names it. In the `hetzner: skipped` warnings and in the last lines of the
+  destroy, each control character and each backslash of a name shows as
+  `?`. Thus a name cannot split a line or send a control character to the
+  terminal. The id identifies the part exactly.
 - The destroy lists the parts with `hcloud <kind> list -l
   lok8s.dev/cluster=<cluster_name>`, and the Hetzner API applies this
   selector. Thus a part with another cluster label is usually not in the
@@ -509,11 +514,12 @@ existing part only when it has the mark of this cluster:
   and it says that the part is gone or is not of this cluster.
 - The destroy also checks the cluster label of each listed part again.
   This check finds a part only when a list did not apply its selector. Such
-  a list can give a part with another cluster label or with none. The
-  destroy does not delete such a part. The plan shows a `hetzner: skipped`
-  warning for each such part that its list gives. The destroy shows this
-  warning only for such a part that the plan names. The last lines of the
-  destroy name each such part with its kind, id, name and reason. They also
+  a list can give a part with another cluster label or with no cluster
+  label. The destroy does not delete such a part. The plan shows a
+  `hetzner: skipped` warning for each such part that its list gives. The
+  destroy shows this warning only for such a part that the plan names. The
+  last lines of the destroy name each such part with its kind, id, name
+  and reason. They also
   name a part that appears after the plan. For example: `lo destroy: skipped
   server 44 other-0: it has lok8s.dev/cluster=other, not
   lok8s.dev/cluster=prod`. When the plan named the part, the reason starts

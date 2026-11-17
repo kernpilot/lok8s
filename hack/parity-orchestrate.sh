@@ -1919,7 +1919,7 @@ for side in bash go; do
     || fail "${side}: a destroy that kept parts without the mark did not exit 0"
   [[ "$(grep ' delete ' "${PARITY_HCLOUD_LOG}")" == "server delete 42" ]] \
     || fail "${side}: the destroy did not delete exactly the marked server: $(grep ' delete ' "${PARITY_HCLOUD_LOG}" | tr '\n' ';')"
-  [[ "$(tail -n 1 "${WORK}/${side}.err")" == "[warn] lo destroy: kept 2 resources with lok8s.dev/cluster=kept-name that do not have the owner mark of this cluster (1 server, 1 network): server 43 old-0, network 9 old-net. Delete them by hand only if they are yours and you want them gone." ]] \
+  [[ "$(tail -n 1 "${WORK}/${side}.err")" == "[warn] lo destroy: kept 2 resources with lok8s.dev/cluster=kept-name that do not have the owner mark of this cluster (1 server, 1 network): server 43 'old-0', network 9 'old-net'. Delete them by hand only if they are yours and you want them gone." ]] \
     || fail "${side}: the last line of the destroy does not count and name the kept parts: $(tail -n 1 "${WORK}/${side}.err")"
   [[ "$(tail -n 3 "${WORK}/${side}.err" | head -n 2)" == "[warn] lo destroy: skipped server 44 other-0: it has lok8s.dev/cluster=other-name, not lok8s.dev/cluster=kept-name. lok8s did not delete it."$'\n'"[warn] lo destroy: skipped server 45 moved-0: the plan named it, and now it has lok8s.dev/cluster=other-name, not lok8s.dev/cluster=kept-name. lok8s did not delete it." ]] \
     || fail "${side}: the last lines of the destroy do not name the servers that the label check skipped: $(tail -n 3 "${WORK}/${side}.err" | head -n 2 | tr '\n' ';')"

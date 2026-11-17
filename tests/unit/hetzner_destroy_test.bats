@@ -348,7 +348,7 @@ volume delete 7"
   run provider::destroy "${DESC}" "${WORK}"
   assert_success
   [ "${lines[${#lines[@]}-2]}" = "[warn] lo destroy: skipped server 46 moved-0: the plan named it, and now it has lok8s.dev/cluster=prod-b, not lok8s.dev/cluster=prod-a. lok8s did not delete it." ]
-  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server): server 47 old-0. Delete them by hand only if they are yours and you want them gone." ]
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server): server 47 'old-0'. Delete it by hand only if it is yours and you want it gone." ]
   # Two lines name part 46: the warning that the list gave it, and the
   # skipped line. Not the vague line of a plan row that is not live.
   [ "$(grep -c 'server 46' <<<"${output}")" -eq 2 ]
@@ -438,7 +438,7 @@ volume delete 7"
   provider::destroy "${DESC}" "${WORK}" 2>"${BATS_TEST_TMPDIR}/second.err"
   run tail -n 2 "${BATS_TEST_TMPDIR}/second.err"
   assert_output "[warn] lo destroy: skipped server 44 other-0: it has lok8s.dev/cluster=prod-b, not lok8s.dev/cluster=prod-a. lok8s did not delete it.
-[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server): server 47 old-0. Delete them by hand only if they are yours and you want them gone."
+[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server): server 47 'old-0'. Delete it by hand only if it is yours and you want it gone."
   run cat "${BATS_TEST_TMPDIR}/second.err"
   assert_output "$(cat "${BATS_TEST_TMPDIR}/first.err")"
   run grep -c ' delete ' "${HCLOUD_LOG}"
@@ -478,12 +478,14 @@ volume delete 7"
 }
 
 # The plan sees part 42 of this cluster and the kept part 47 (no owner
-# mark). After the plan, a foreign part 49, a kept part 50 and a kept
-# network 51 without a name appear (the list does not apply its selector,
-# so it gives 49). None of them gets a 'hetzner: skipped' warning: the plan
-# did not see them, and the destroy does not warn for a part that the plan
-# does not name. The last lines name them all the same: 49 in a skipped
-# line, 50 and 51 in the kept line, after 47, in the delete order.
+# mark). After the plan, a foreign part 49, a kept part 50, a kept network
+# 51 without a name and a kept load balancer 53 appear (the list does not
+# apply its selector, so it gives 49). None of them gets a 'hetzner:
+# skipped' warning: the plan did not see them, and the destroy does not
+# warn for a part that the plan does not name. The last lines name them all
+# the same: 49 in a skipped line, the others in the kept line, in the
+# delete order. The load balancer has the highest id and comes first: a
+# sort by id would put it last.
 @test "destroy: a foreign part and kept parts that appear after the plan are named in the last lines" {
   unset LOK8S_DESTROY_PLAN
   hcloud() {
@@ -500,6 +502,8 @@ volume delete 7"
         fi ;;
       network)
         if [[ -z "${now}" ]]; then echo '[]'; else echo '[{"id":51,"name":"","labels":{"lok8s.dev/cluster":"prod-a"}}]'; fi ;;
+      load-balancer)
+        if [[ -z "${now}" ]]; then echo '[]'; else echo '[{"id":53,"name":"new-lb","labels":{"lok8s.dev/cluster":"prod-a"}}]'; fi ;;
       *) echo '[]' ;;
     esac
   }
@@ -513,13 +517,14 @@ volume delete 7"
   refute_output --partial " 49 "
   refute_output --partial " 50 "
   refute_output --partial " 51"
+  refute_output --partial " 53 "
 
   : > "${HCLOUD_LOG}"
   export LOK8S_DESTROY_PLAN="${plan}"
   run provider::destroy "${DESC}" "${WORK}"
   assert_success
   assert_output "[warn] lo destroy: skipped server 49 new-foreign: it has lok8s.dev/cluster=prod-b, not lok8s.dev/cluster=prod-a. lok8s did not delete it.
-[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod-a that do not have the owner mark of this cluster (2 servers, 1 network): server 47 old-0, server 50 new-kept, network 51. Delete them by hand only if they are yours and you want them gone."
+[warn] lo destroy: kept 4 resources with lok8s.dev/cluster=prod-a that do not have the owner mark of this cluster (1 load-balancer, 2 servers, 1 network): load-balancer 53 'new-lb', server 47 'old-0', server 50 'new-kept', network 51. Delete them by hand only if they are yours and you want them gone."
   run grep ' delete ' "${HCLOUD_LOG}"
   assert_output "server delete 42"
 }
@@ -547,17 +552,82 @@ volume delete 7"
   provider::destroy "${DESC}" "${WORK}" 2>"${BATS_TEST_TMPDIR}/first.err"
   run tail -n 2 "${BATS_TEST_TMPDIR}/first.err"
   assert_output "[warn] lo destroy: skipped server 44 other-0: it has lok8s.dev/cluster=prod-b, not lok8s.dev/cluster=prod-a. lok8s did not delete it.
-[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server): server 47 old-0. Delete them by hand only if they are yours and you want them gone."
+[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server): server 47 'old-0'. Delete it by hand only if it is yours and you want it gone."
 
   LIST_RUN=second
   provider::destroy "${DESC}" "${WORK}" 2>"${BATS_TEST_TMPDIR}/second.err"
   run tail -n 2 "${BATS_TEST_TMPDIR}/second.err"
   assert_output "[warn] lo destroy: skipped server 48 other-1: it has lok8s.dev/cluster=prod-c, not lok8s.dev/cluster=prod-a. lok8s did not delete it.
-[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server): server 52 old-1. Delete them by hand only if they are yours and you want them gone."
+[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server): server 52 'old-1'. Delete it by hand only if it is yours and you want it gone."
   run cat "${BATS_TEST_TMPDIR}/second.err"
   [ "$(grep -c 'lo destroy: skipped' <<<"${output}")" -eq 1 ]
   refute_output --partial "server 44"
   refute_output --partial "server 47"
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "1"
+}
+
+# A name can hold any character. warn prints with `echo -e`, so a newline
+# in a name split the line, an ESC reached the terminal, and a backslash
+# sequence became a control character. Each control character and each
+# backslash of a name now shows as '?': each message is one line. Part 60
+# has a newline in its name, part 61 a backslash and an 'n', part 62 an
+# ESC, a CR and a tab.
+@test "destroy: a control character or a backslash in a name shows as '?', one line for each message" {
+  unset LOK8S_DESTROY_PLAN
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    [[ "$2" == "list" ]] || return 0
+    if [[ "$1" == server ]]; then
+      printf '%s\n' "[{\"id\":42,\"name\":\"cp-0\",\"labels\":${OWN}},"'{"id":60,"name":"a\nb","labels":{"lok8s.dev/cluster":"prod-a"}},{"id":61,"name":"a\\nb","labels":{"lok8s.dev/cluster":"prod-a"}},{"id":62,"name":"x\u001b[2Ky\r\tz","labels":{"lok8s.dev/cluster":"prod-b"}}]'
+    else
+      echo '[]'
+    fi
+  }
+  export -f hcloud
+
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  # Five messages, five lines: three warnings of the list, the skipped
+  # line and the kept line. No control character is in the output.
+  [ "$(printf '%s\n' "${output}" | wc -l)" -eq 5 ]
+  [ "$(grep -c '^\[warn\] ' <<<"${output}")" -eq 5 ]
+  [ -z "$(tr -d '[:print:]\n' <<<"${output}")" ]
+  assert_line "[warn] hetzner: skipped server 62 x?[2Ky??z: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=prod-b. lok8s does not delete a part of another cluster."
+  assert_line --partial "[warn] hetzner: skipped server 60 a?b: it has lok8s.dev/cluster=prod-a, but not the owner mark of this cluster"
+  assert_line --partial "[warn] hetzner: skipped server 61 a?nb: it has lok8s.dev/cluster=prod-a, but not the owner mark of this cluster"
+  [ "${lines[3]}" = "[warn] lo destroy: skipped server 62 x?[2Ky??z: it has lok8s.dev/cluster=prod-b, not lok8s.dev/cluster=prod-a. lok8s did not delete it." ]
+  [ "${lines[4]}" = "[warn] lo destroy: kept 2 resources with lok8s.dev/cluster=prod-a that do not have the owner mark of this cluster (2 servers): server 60 'a?b', server 61 'a?nb'. Delete them by hand only if they are yours and you want them gone." ]
+  run grep ' delete ' "${HCLOUD_LOG}"
+  assert_output "server delete 42"
+}
+
+# The kept line names at most 10 parts, in the delete order, and then
+# counts the others. The count by kind includes all of them.
+@test "destroy: the kept line names at most 10 parts, then the number of the others" {
+  unset LOK8S_DESTROY_PLAN
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    [[ "$2" == "list" ]] || return 0
+    local i json=""
+    if [[ "$1" == server ]]; then
+      for (( i = 0; i < KEPT_N; i++ )); do
+        json+="${json:+,}{\"id\":$(( 70 + i )),\"name\":\"old-${i}\",\"labels\":{\"lok8s.dev/cluster\":\"prod-a\"}}"
+      done
+    fi
+    printf '[%s]\n' "${json}"
+  }
+  export -f hcloud
+
+  export KEPT_N=10
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 10 resources with lok8s.dev/cluster=prod-a that do not have the owner mark of this cluster (10 servers): server 70 'old-0', server 71 'old-1', server 72 'old-2', server 73 'old-3', server 74 'old-4', server 75 'old-5', server 76 'old-6', server 77 'old-7', server 78 'old-8', server 79 'old-9'. Delete them by hand only if they are yours and you want them gone." ]
+
+  export KEPT_N=12
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 12 resources with lok8s.dev/cluster=prod-a that do not have the owner mark of this cluster (12 servers): server 70 'old-0', server 71 'old-1', server 72 'old-2', server 73 'old-3', server 74 'old-4', server 75 'old-5', server 76 'old-6', server 77 'old-7', server 78 'old-8', server 79 'old-9', and 2 more. Delete them by hand only if they are yours and you want them gone." ]
+  run grep -c ' delete ' "${HCLOUD_LOG}"
+  assert_output "0"
 }
