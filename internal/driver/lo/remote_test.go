@@ -7,14 +7,41 @@ package lo
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/provider/bridge"
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
+
+// A failed provider output stops the remote provision: the provider's
+// message (its stderr, through the real bridge) shows above the error line,
+// and the provision does not fall back to a local kind.
+func TestProvisionRemoteFailedOutputShowsTheProviderMessage(t *testing.T) {
+	d, _, errBuf, p := testDriver(t)
+	stub := &stubProviderRunner{fn: "provider::output", stderr: "hetzner: hcloud server list failed: unable to authenticate (unauthorized)\n"}
+	prov, err := (&bridge.Loader{Paths: p, Runner: stub, Stdout: io.Discard, Stderr: errBuf}).Load(t.Context(), "stub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.deps.ProviderName, d.deps.Provider = "stub", prov
+
+	if err := d.provisionRemote(t.Context(), "test.lok8s.dev", "spec.yaml", errBuf); err == nil {
+		t.Fatal("a failed provider output reported success")
+	}
+	want := "hetzner: hcloud server list failed: unable to authenticate (unauthorized)\n" +
+		"[error] provider output failed — refusing to treat it as 'no nodes'\n"
+	if !strings.Contains(errBuf.String(), want) {
+		t.Fatalf("the provider's message is not above the error line:\n%s", errBuf.String())
+	}
+	if strings.Contains(errBuf.String(), "running kind locally") {
+		t.Fatalf("the provision fell back to a local kind:\n%s", errBuf.String())
+	}
+}
 
 func TestProvisionRemoteNoNodesFallsBackWithWarning(t *testing.T) {
 	d, _, errBuf, _ := testDriver(t)

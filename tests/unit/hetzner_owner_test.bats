@@ -1432,17 +1432,73 @@ _destroy_parts() {
 volume delete 24"
 }
 
-@test "destroy: a confirmed plan that names a part of another domain or an unmarked part deletes only the marked part" {
+@test "destroy: a confirmed plan that names a part of another domain or of another cluster deletes only the marked part" {
   _destroy_parts
-  export LOK8S_DESTROY_PLAN=$'cluster\tprod\nserver\t21\tcp-0\nserver\t22\tcp-0\nserver\t23\told-0\nvolume\t25\tother-data'
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod\nserver\t21\tcp-0\nserver\t22\tcp-0\nvolume\t25\tother-data'
   run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
   assert_success
-  assert_output --partial "hetzner: skipped server 22 of the confirmed plan: no server with this id carries lok8s.dev/cluster=prod and the owner mark of this cluster now."
-  assert_output --partial "hetzner: skipped server 23 of the confirmed plan"
-  assert_output --partial "hetzner: skipped volume 25 of the confirmed plan"
+  # The plan names 22 as a part to delete, but 22 has the mark of another
+  # domain: it is kept, and one warning names it with the reason.
+  assert_output --partial "hetzner: skipped server 22 cp-0: it has lok8s.dev/cluster=prod, but the owner mark of another cluster (lok8s.dev/owner=${OTHER}; this cluster: ${MARK}). lok8s does not delete it."
+  [ "$(grep -c 'skipped server 22' <<<"${output}")" -eq 1 ]
+  assert_output --partial "hetzner: skipped volume 25 of the confirmed plan: no volume with this id carries lok8s.dev/cluster=prod and the owner mark of this cluster now."
   assert_output --partial "hetzner: kept volume 24 prod-data (lok8s.dev/cluster=prod): it is not in the confirmed plan."
+  # The plan showed a warning for each part without the mark: the destroy
+  # of the confirmed plan does not repeat it for a part that the plan did
+  # not name (23), and its last line counts them.
+  refute_output --partial "skipped server 23"
+  assert_output --partial "[warn] lo destroy: kept 2 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers)."
   run _writes
   assert_output "server delete 21"
+}
+
+# A part that lost its mark after the plan was shown in the plan as a part
+# to delete, not as a kept part: the destroy keeps it, and a warning names
+# it, so the last line is true when it says that the warnings name the kept
+# parts.
+@test "destroy: a part of the confirmed plan that lost its mark after the plan is kept, and a warning names it" {
+  _destroy_parts
+  local plan
+  plan="$(provider::destroy_plan "${DESC}" "${BATS_TEST_TMPDIR}" 2>/dev/null)"
+  [ "${plan}" = "$(printf 'cluster\tprod\nserver\t21\tcp-0\nvolume\t24\tprod-data')" ]
+  _fake_set server 21 '.labels |= del(."lok8s.dev/owner")'
+  export LOK8S_DESTROY_PLAN="${plan}"
+  run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
+  assert_success
+  assert_output --partial "hetzner: skipped server 21 cp-0: it has lok8s.dev/cluster=prod, but not the owner mark of this cluster (lok8s.dev/owner=${MARK})."
+  [ "$(grep -c 'skipped server 21' <<<"${output}")" -eq 1 ]
+  # The plan showed 22 and 23 as kept parts: no repeat.
+  refute_output --partial "skipped server 22"
+  refute_output --partial "skipped server 23"
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (3 servers). The warnings above name them. Delete them by hand only if they are yours and you want them gone." ]
+  run _writes
+  assert_output "volume delete 24"
+}
+
+# A destroy that keeps parts (the cluster label, no mark or the mark of
+# another cluster) succeeds: the skip is the safety feature. Its last line
+# says how many parts it kept and of which kinds, in the delete order.
+@test "destroy: the last line counts the kept parts by kind, and the destroy exits 0" {
+  _destroy_parts
+  _part network 26 old-net '{"lok8s.dev/cluster":"prod"}'
+  run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
+  assert_success
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers, 1 network). The warnings above name them. Delete them by hand only if they are yours and you want them gone." ]
+  [ "$(grep -c 'lo destroy: kept' <<<"${output}")" -eq 1 ]
+  run _writes
+  assert_output "server delete 21
+volume delete 24"
+
+  # One kept part: the singular. The plan prints no summary (it deletes
+  # nothing).
+  echo '[]' > "${STORE}/server.json"
+  echo '[]' > "${STORE}/volume.json"
+  run provider::destroy_plan "${DESC}" "${BATS_TEST_TMPDIR}"
+  assert_success
+  refute_output --partial "lo destroy: kept"
+  run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
+  assert_success
+  assert_output --partial "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod that does not have the owner mark of this cluster (1 network)."
 }
 
 @test "destroy: no domain for the mark stops the plan and the destroy before any hcloud call" {
@@ -1458,24 +1514,86 @@ volume delete 24"
   assert_output ""
 }
 
+# provider::status counts the servers with the cluster label, and says how
+# many of them do not have the owner mark of this cluster: lo destroy keeps
+# those, and the inventory leaves them out.
+@test "status: the status says how many servers do not have the owner mark of this cluster" {
+  _part server 21 cp-0 "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}" '{"status":"running"}'
+  run provider::status "${DESC}"
+  assert_success
+  assert_output "Running"
+
+  # One server without the mark: the singular.
+  _fake_set server 21 '.labels |= del(."lok8s.dev/owner")'
+  run provider::status "${DESC}"
+  assert_output "Running (1 of 1 server without the owner mark of this cluster)"
+  _fake_set server 21 ".labels.\"lok8s.dev/owner\" = \"${MARK}\""
+
+  _part server 22 cp-1 "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${OTHER}\"}" '{"status":"running"}'
+  _part server 23 old-0 '{"lok8s.dev/cluster":"prod"}' '{"status":"off"}'
+  run provider::status "${DESC}"
+  assert_success
+  assert_output "Partial (2/3 running; 2 of 3 servers without the owner mark of this cluster)"
+
+  _fake_set server 23 '.status = "running"'
+  run provider::status "${DESC}"
+  assert_output "Running (2 of 3 servers without the owner mark of this cluster)"
+
+  # No domain: the mark is not known, and the status says so.
+  unset PROVIDER_DOMAIN
+  run provider::status "${DESC}"
+  assert_success
+  assert_output "Running (the owner mark of this cluster is not known)"
+
+  # A list that does not apply its selector gives a server of another
+  # cluster too: the status counts only the servers with the cluster label
+  # of this cluster.
+  export PROVIDER_DOMAIN="prod.example.test"
+  hcloud() {
+    [[ "$1 $2" == "server list" ]] || return 1
+    printf '%s\n' "[{\"id\":23,\"name\":\"old-0\",\"status\":\"running\",\"labels\":{\"lok8s.dev/cluster\":\"prod\"}},{\"id\":31,\"name\":\"other-0\",\"status\":\"off\",\"labels\":{\"lok8s.dev/cluster\":\"other\",\"lok8s.dev/owner\":\"${MARK}\"}}]"
+  }
+  run provider::status "${DESC}"
+  assert_success
+  assert_output "Running (1 of 1 server without the owner mark of this cluster)"
+}
+
 # ── the standalone hetzner command ───────────────────────
 
+# The command runs through the real argsh parser, with its flags: a stub of
+# :args would set the variables itself, so it would test none of the flag
+# table of main::hetzner (an earlier table could not parse --domain). The
+# --domain flag has the type domain, so the domain needs its cluster spec.
+# provider::validate and provider::provision are stubs; hcloud must not run.
 @test "standalone: the hetzner command takes the domain of the mark from --domain, and refuses --hetzner-json alone" {
-  source "${_PROJECT_ROOT}/.lok8s/utils/provider.sh"
+  [ -x "${_PROJECT_ROOT}/.bin/argsh" ] ||
+    skip "needs the argsh binary at .bin/argsh (install it with b); this test does not download it"
   export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
-  provider::validate() { return 0; }
-  provider::provision() { printf 'provision %s %s\n' "${PROVIDER_DOMAIN:-}" "${1}" >> "${BATS_TEST_TMPDIR}/calls"; }
-  unset PROVIDER_DOMAIN
+  printf 'kind: KubeOne\nmetadata:\n  name: prod\n' > "${PATH_CLUSTERS}/prod.example.test/cluster.lok8s.yaml"
+  local calls="${BATS_TEST_TMPDIR}/calls" script='
+    source "${PATH_BIN}/argsh"
+    source "${PATH_LOK8S}/providers/hetzner/main"
+    hcloud() { echo "hcloud must not run: $*" >&2; return 1; }
+    provider::validate() { return 0; }
+    provider::provision() { printf "provision %s %s\n" "${PROVIDER_DOMAIN:-}" "${1}" >> "${CALLS}"; }
+    main::hetzner "$@"'
 
-  :args() { hetzner_json="${DESC}"; dry_run=0; }
-  run main::hetzner
+  run env -u PROVIDER_DOMAIN PATH_BIN="${_PROJECT_ROOT}/.bin" CALLS="${calls}" \
+    bash -c "${script}" hetzner --hetzner-json "${DESC}"
   assert_failure
   assert_output --partial "hetzner: --domain is missing. lok8s needs the domain of the cluster for the owner mark lok8s.dev/owner of its parts, and --hetzner-json does not give it."
-  [ ! -e "${BATS_TEST_TMPDIR}/calls" ]
+  [ ! -e "${calls}" ]
 
-  :args() { domain="prod.example.test"; dry_run=0; }
-  run main::hetzner
+  run env -u PROVIDER_DOMAIN PATH_BIN="${_PROJECT_ROOT}/.bin" CALLS="${calls}" \
+    bash -c "${script}" hetzner --domain prod.example.test
   assert_success
-  run cat "${BATS_TEST_TMPDIR}/calls"
+  run cat "${calls}"
   assert_output "provision prod.example.test ${DESC}"
+
+  # A flag that the table does not have is refused by the parser.
+  rm -f "${calls}"
+  run env -u PROVIDER_DOMAIN PATH_BIN="${_PROJECT_ROOT}/.bin" CALLS="${calls}" \
+    bash -c "${script}" hetzner --domian prod.example.test
+  assert_failure
+  [ ! -e "${calls}" ]
 }

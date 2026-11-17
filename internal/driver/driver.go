@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -47,9 +48,11 @@ var (
 // Driver is the required contract (bash: driver::provision, driver::destroy,
 // driver::status, driver::kubeconfig).
 //
-// Status returns the single status word the bash contract printed to stdout
-// ("Running", "NotFound", "Healthy", "Degraded", "NotProvisioned",
-// "Unknown", …) — the dispatch prints it.
+// Status returns the status the bash contract printed to stdout: one word
+// first ("Running", "NotFound", "Healthy", "Degraded", "NotProvisioned",
+// "Unknown", …), then an optional detail in parentheses (a provider
+// status: "Partial (1/2 running)"). The dispatch prints it; a caller that
+// decides on it reads the word (StatusWord).
 //
 // Kubeconfig returns the path of the cluster's kubeconfig under
 // .kubeconfig/ (materializing it first when the driver can).
@@ -92,8 +95,43 @@ type Provider interface {
 	Output(ctx context.Context, configFile string) ([]byte, error)
 }
 
-// ProviderStatuser is the optional provider::status hook
-// (Running | Partial | NotFound). The bash also documents optional
+// ProviderCallError is a failed provider call that captured its own
+// stderr instead of streaming it: Stderr holds the end of what the
+// provider printed (its message, the cause of the failure). Error() is
+// the error of the call only, so a caller that does not show the message
+// prints what it printed before. The bash callers that run the call
+// without `2>/dev/null` show the message above their own error line; a Go
+// caller does the same with ProviderMessage.
+type ProviderCallError struct {
+	Err    error
+	Stderr string
+}
+
+func (e *ProviderCallError) Error() string { return e.Err.Error() }
+
+func (e *ProviderCallError) Unwrap() error { return e.Err }
+
+// ProviderMessage is the stderr that a failed provider call captured
+// (ProviderCallError), without trailing newlines; "" when err has none.
+func ProviderMessage(err error) string {
+	var pe *ProviderCallError
+	if !errors.As(err, &pe) {
+		return ""
+	}
+	return strings.TrimRight(pe.Stderr, "\n")
+}
+
+// StatusWord is the first word of a status (Driver.Status,
+// ProviderStatuser): "Running" for "Running (1 of 2 servers without the
+// owner mark of this cluster)".
+func StatusWord(status string) string {
+	word, _, _ := strings.Cut(strings.TrimSpace(status), " ")
+	return word
+}
+
+// ProviderStatuser is the optional provider::status hook: one word
+// (Running | Partial | NotFound), then an optional detail in parentheses,
+// for example "Partial (1/2 running)". The bash also documents optional
 // provider::rebuild and provider::doctor hooks — those belong to the
 // recover/doctor port, not this layer.
 type ProviderStatuser interface {

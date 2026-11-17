@@ -257,7 +257,7 @@ _remote_destroy_stubs() {
   run driver::destroy "test.lok8s.dev"
   assert_failure
   assert_output --partial "[error] hetzner: the domain of the cluster is not known"
-  assert_output --partial "lo destroy: provider::output of provider 'hetzner' failed (its message is above), so the remote docker host of cluster test-local is not known. Nothing was deleted: the cleanup does not fall back to the local docker."
+  assert_output --partial "lo destroy: provider::output of provider 'hetzner' failed (its message is above), so the remote docker host of cluster test-local is not known. No container and no cloud resource was deleted: the cleanup does not fall back to the local docker."
   [ ! -e "${CALLS}" ] || fail "the destroy ran after the failed output: $(cat "${CALLS}")"
 }
 

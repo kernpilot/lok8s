@@ -287,9 +287,11 @@ before anything is deleted:
 
 1. When another domain under `clusters/` has the same `cluster_name`
    (`hetzner.json`, the `spec.provider.configRef` file or an inline
-   `spec.provider.config`), the destroy stops. A domain that was copied
-   from another one and kept the name would delete the other cluster too.
-   The provider deletes by that key only: a descriptor without
+   `spec.provider.config`), the destroy stops. The resources of both
+   domains carry the same cluster label, and only the owner mark keeps them
+   apart: a resource of the other domain with a wrong mark (for example,
+   from an `add-label` command that was run for the wrong domain) would be
+   deleted. The provider finds its resources by that key: a descriptor without
    `cluster_name` is refused.
 2. The destroy lists the resources that the provider would delete. When a
    list fails, the destroy stops.

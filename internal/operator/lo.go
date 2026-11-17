@@ -314,7 +314,8 @@ func (h *LoHook) Reconcile(ctx context.Context, object []byte) error {
 			state = s
 		}
 	}
-	if state == "Running" {
+	// The word decides: a status can carry a detail ("Running (…)").
+	if driver.StatusWord(state) == "Running" {
 		_ = h.publishKubeconfig(ctx, name, namespace, domain)
 		k.patchStatus(ctx, "lo", name, namespace,
 			`{"status":{"phase":"Provisioned","ready":true,"conditions":[{"type":"Ready","status":"True","reason":"Provisioned","message":"Cluster is ready"}]}}`)

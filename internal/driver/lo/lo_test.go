@@ -24,10 +24,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/provider/bridge"
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
@@ -494,6 +496,52 @@ func TestDestroyFailedProviderOutputStopsBeforeTheLocalDocker(t *testing.T) {
 		!strings.Contains(errBuf.String(), "the cleanup does not fall back to the local docker") {
 		t.Fatalf("the error does not name the cause:\n%s", errBuf.String())
 	}
+}
+
+// The provider's message is the cause of a failed provider output. The bash
+// destroy runs provider::output without `2>/dev/null`, so the message shows
+// above its error line; the Go destroy shows it too. The provider is a stub
+// behind the real bridge: its child writes the cause to stderr and exits 1.
+func TestDestroyShowsTheMessageOfAFailedProviderOutput(t *testing.T) {
+	d, runner, errBuf, p := testDriver(t)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "cluster.lok8s.yaml"),
+		"metadata:\n  name: test-local\n")
+	testutil.WriteFile(t, filepath.Join(p.Lok8s, "lo"), "#!/usr/bin/env bash\n")
+	t.Setenv("DOCKER_HOST", "")
+	os.Unsetenv("DOCKER_HOST")
+	stub := &stubProviderRunner{fn: "provider::output", stderr: "noise 1\nhetzner: hcloud server list failed: unable to authenticate (unauthorized)\n"}
+	prov, err := (&bridge.Loader{Paths: p, Runner: stub, Stdout: io.Discard, Stderr: errBuf}).Load(t.Context(), "stub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.deps.ProviderName, d.deps.Provider = "stub", prov
+
+	if err := d.Destroy(t.Context(), "test.lok8s.dev"); err == nil {
+		t.Fatal("Destroy returned success although the provider output failed")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("the destroy ran commands against the local docker: %q", runner.calls)
+	}
+	want := "noise 1\nhetzner: hcloud server list failed: unable to authenticate (unauthorized)\n" +
+		"[error] lo destroy: provider::output of provider 'stub' failed (its message is above), so the remote docker host of cluster test-local is not known. " +
+		"No container and no cloud resource was deleted: the cleanup does not fall back to the local docker. Fix the cause, then run lo destroy again.\n"
+	if !strings.Contains(errBuf.String(), want) {
+		t.Fatalf("the error output does not show the provider's message above the error line:\n%s", errBuf.String())
+	}
+}
+
+// stubProviderRunner is the child of a bridged provider: the probe
+// succeeds, the call of fn writes stderr and exits 1.
+type stubProviderRunner struct {
+	fn, stderr string
+}
+
+func (r *stubProviderRunner) Run(ctx context.Context, c execx.Cmd) error {
+	if len(c.Args) > 4 && c.Args[4] == r.fn {
+		io.WriteString(c.Stderr, r.stderr)
+		return errors.New("exit status 1")
+	}
+	return nil
 }
 
 // Anti-vacuity companion: a good output with no node is the local fallback

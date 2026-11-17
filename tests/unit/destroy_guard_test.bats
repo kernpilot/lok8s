@@ -2,10 +2,12 @@
 # destroy_guard_test.bats — the cluster_name guard of `lo destroy`
 # (provision::_destroy_guard, Go twin: internal/provision/destroy_guard.go).
 #
-# A provider with the provider::destroy_plan hook deletes by a name: the
-# hetzner provider deletes every resource in the token's project that
-# carries lok8s.dev/cluster=<cluster_name>. A domain copied from another one
-# that kept the cluster_name and the token would delete the other cluster.
+# A provider with the provider::destroy_plan hook finds its resources by the
+# cluster_name: the hetzner provider deletes the resources in the token's
+# project that carry lok8s.dev/cluster=<cluster_name> and the owner mark of
+# the domain. A domain copied from another one that kept the cluster_name
+# and the token labels its resources the same way; only the mark keeps the
+# two apart.
 # The guard refuses a cluster_name that another domain uses, prints the
 # plan, and needs the cluster_name: typed on a terminal, or --confirm-cluster
 # (`confirm_cluster`, dynamic scoping from main::destroy). --force does not
@@ -97,7 +99,8 @@ _nothing_ran() {
   local force=1 confirm_cluster=prod-a
   run provision::dispatch_destroy test.prod < /dev/null
   [ "${status}" -eq 3 ]
-  assert_output --partial "cluster_name 'prod-a' of 'test.prod' is also the cluster_name of: copy.prod. The provider deletes every resource of a cluster_name"
+  assert_output --partial "cluster_name 'prod-a' of 'test.prod' is also the cluster_name of: copy.prod. The provider deletes only the resources with this cluster_name and the owner mark of 'test.prod'. The resources of those domains have the same cluster label, so only the mark keeps them apart: a resource of another domain with a wrong mark would be deleted."
+  refute_output --partial "deletes every resource"
   assert_output --partial "Nothing was deleted. Give each domain its own cluster_name, then run lo destroy again."
   _nothing_ran
 }

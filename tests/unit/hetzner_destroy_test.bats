@@ -66,6 +66,8 @@ teardown() { teardown_tmpdir; }
 @test "provider::destroy deletes exactly the resources of the plan, in its order" {
   run provider::destroy "${DESC}" "${WORK}"
   assert_success
+  # Each part has the mark: the destroy kept none, so no summary line.
+  refute_output --partial "lo destroy: kept"
   run grep ' delete ' "${HCLOUD_LOG}"
   assert_output "load-balancer delete 11
 server delete 42
@@ -82,7 +84,7 @@ network delete 9"
   printf '{"cluster_name": "from-dump"}\n' > "${WORK}/hetzner.dump.json"
   run provider::destroy_plan "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: the descriptor ${DESC} has no cluster_name. The destroy finds its resources by lok8s.dev/cluster=<cluster_name> and the owner mark, so it needs the name. Nothing was deleted."
+  assert_output --partial "hetzner: the descriptor ${DESC} has no cluster_name. The destroy finds its resources by lok8s.dev/cluster=<cluster_name> and the owner mark, so it needs the name. The hetzner provider deleted no resource in this step."
   refute_output --partial "cluster	"
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
@@ -95,7 +97,7 @@ network delete 9"
   export LIST_FAIL=volume
   run provider::destroy_plan "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: could not list the volume resources with lok8s.dev/cluster=prod-a. Nothing was deleted."
+  assert_output --partial "hetzner: could not list the volume resources with lok8s.dev/cluster=prod-a. The hetzner provider deleted no resource in this step."
   refute_output --partial "cluster	prod-a"
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
@@ -121,7 +123,7 @@ network delete 9"
   export LOK8S_DESTROY_PLAN=$'cluster\tprod-b\nserver\t42\tcp-0'
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: the confirmed destroy plan is for cluster_name 'prod-b', but the descriptor has 'prod-a'. Nothing was deleted."
+  assert_output --partial "hetzner: the confirmed destroy plan is for cluster_name 'prod-b', but the descriptor has 'prod-a'. The hetzner provider deleted no resource in this step."
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
 }
@@ -134,7 +136,7 @@ network delete 9"
   export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0\ncertificate\t5\tapi-cert'
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: the confirmed destroy plan has a line that lo destroy does not write: 'certificate 5 api-cert' (the type must be one of load-balancer server placement-group firewall volume floating-ip ssh-key network, the id a number). Nothing was deleted."
+  assert_output --partial "hetzner: the confirmed destroy plan has a line that lo destroy does not write: 'certificate 5 api-cert' (the type must be one of load-balancer server placement-group firewall volume floating-ip ssh-key network, the id a number). The hetzner provider deleted no resource in this step."
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
 }
@@ -164,7 +166,7 @@ volume delete 7"
   export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0'
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: could not list the network resources with lok8s.dev/cluster=prod-a. Nothing was deleted."
+  assert_output --partial "hetzner: could not list the network resources with lok8s.dev/cluster=prod-a. The hetzner provider deleted no resource in this step."
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
 }
@@ -173,7 +175,7 @@ volume delete 7"
   export LOK8S_DESTROY_PLAN=$'server\t42\tcp-0'
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: the confirmed destroy plan does not start with its cluster line (it starts with 'server 42 cp-0'). Nothing was deleted."
+  assert_output --partial "hetzner: the confirmed destroy plan does not start with its cluster line (it starts with 'server 42 cp-0'). The hetzner provider deleted no resource in this step."
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
 }
@@ -194,7 +196,7 @@ volume delete 7"
   export LOK8S_DESTROY_PLAN=$'\n\n'
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: the confirmed destroy plan is empty. Nothing was deleted. Run lo destroy again."
+  assert_output --partial "hetzner: the confirmed destroy plan is empty. The hetzner provider deleted no resource in this step. Run lo destroy again."
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
 }
@@ -244,7 +246,58 @@ volume delete 7"
   export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0'
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: could not list the server resources with lok8s.dev/cluster=prod-a. Nothing was deleted."
+  assert_output --partial "hetzner: could not list the server resources with lok8s.dev/cluster=prod-a. The hetzner provider deleted no resource in this step."
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
+}
+
+# The list query selects lok8s.dev/cluster=<cluster_name>, but the destroy
+# does not trust it alone: each part's cluster label is checked again. This
+# fake gives two foreign parts in the server list (a list that does not
+# apply its selector): one with another cluster label and one with none,
+# both with the owner mark of this cluster. Neither is in the plan or
+# deleted, also when a confirmed plan names them, and a warning names each.
+@test "destroy: a listed part without the cluster label of this cluster is never deleted, also with the owner mark" {
+  local mark
+  mark="$(printf '%s\n%s\n' "${PROVIDER_DOMAIN}" prod-a | sha256sum | cut -c1-32)"
+  export FOREIGN="[{\"id\":44,\"name\":\"other-0\",\"labels\":{\"lok8s.dev/cluster\":\"prod-b\",\"lok8s.dev/owner\":\"${mark}\"}},{\"id\":45,\"name\":\"bare-0\",\"labels\":{\"lok8s.dev/owner\":\"${mark}\"}}]"
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    [[ "$2" == "list" ]] || return 0
+    if [[ "$1" == server ]]; then
+      jq -c --argjson f "${FOREIGN}" '. + $f' <<<"[{\"id\":42,\"name\":\"cp-0\",\"labels\":${OWN}}]"
+    else
+      echo '[]'
+    fi
+  }
+  export -f hcloud
+
+  local plan
+  plan="$(provider::destroy_plan "${DESC}" "${WORK}" 2>"${BATS_TEST_TMPDIR}/plan.err")"
+  [ "${plan}" = "$(printf 'cluster\tprod-a\nserver\t42\tcp-0')" ]
+  run cat "${BATS_TEST_TMPDIR}/plan.err"
+  assert_output --partial "hetzner: skipped server 44 other-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=prod-b. lok8s does not delete a part of another cluster."
+  assert_output --partial "hetzner: skipped server 45 bare-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=<none>."
+  # The part of this cluster is not a foreign part.
+  refute_output --partial "skipped server 42"
+
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  assert_output --partial "hetzner: skipped server 44 other-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=prod-b."
+  assert_output --partial "hetzner: skipped server 45 bare-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=<none>."
+  refute_output --partial "skipped server 42"
+  # Not a kept part of this cluster: the summary does not count it.
+  refute_output --partial "lo destroy: kept"
+  run grep ' delete ' "${HCLOUD_LOG}"
+  assert_output "server delete 42"
+
+  : > "${HCLOUD_LOG}"
+  export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0\nserver\t44\tother-0\nserver\t45\tbare-0'
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  assert_output --partial "hetzner: skipped server 44 of the confirmed plan: no server with this id carries lok8s.dev/cluster=prod-a and the owner mark of this cluster now."
+  assert_output --partial "hetzner: skipped server 45 of the confirmed plan"
+  refute_output --partial "skipped server 42"
+  run grep ' delete ' "${HCLOUD_LOG}"
+  assert_output "server delete 42"
 }

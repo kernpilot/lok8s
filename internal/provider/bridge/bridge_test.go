@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -120,6 +121,97 @@ func TestCredentialDataAndOutputCaptureStdout(t *testing.T) {
 		t.Errorf("status = %q err=%v", st, err)
 	}
 	var _ driver.ProviderStatuser = p
+}
+
+// A failed provider::output gives its stderr back to the caller (bash shows
+// it), bounded to the last stderrTailLines lines; the error text stays the
+// error of the call. A call that succeeds drops its stderr (above).
+func TestFailedOutputCarriesTheEndOfItsStderr(t *testing.T) {
+	l, r, errBuf := testLoader(t)
+	var lines []string
+	for i := 1; i <= stderrTailLines+5; i++ {
+		lines = append(lines, "line "+strconv.Itoa(i))
+	}
+	r.handler = func(c execx.Cmd) error {
+		io.WriteString(c.Stderr, strings.Join(lines, "\n")+"\n")
+		return errors.New("exit status 1")
+	}
+	p := &Provider{l: l, name: "hetzner"}
+	_, err := p.Output(t.Context(), "/cfg")
+	if err == nil || err.Error() != "exit status 1" {
+		t.Fatalf("err = %v, want the error of the call", err)
+	}
+	want := "[...]\n" + strings.Join(lines[5:], "\n")
+	if got := driver.ProviderMessage(err); got != want {
+		t.Errorf("message = %q, want the last %d lines %q", got, stderrTailLines, want)
+	}
+	if errBuf.Len() != 0 {
+		t.Errorf("the message was streamed too: %q", errBuf.String())
+	}
+
+	// One short line: no cut mark.
+	r.handler = func(c execx.Cmd) error {
+		io.WriteString(c.Stderr, "hcloud: unauthorized\n")
+		return errors.New("exit status 1")
+	}
+	if _, err := p.Output(t.Context(), "/cfg"); driver.ProviderMessage(err) != "hcloud: unauthorized" {
+		t.Errorf("message = %q", driver.ProviderMessage(err))
+	}
+}
+
+// provider::destroy streams: the lines it prints reach the Go CLI as they
+// reach the bash one. The hetzner destroy ends with the line that counts
+// the parts it kept (no owner mark of this cluster) and exits 0; that line
+// must not be lost (hack/parity-orchestrate.sh runs it in both CLIs).
+func TestDestroyStreamsTheProviderOutput(t *testing.T) {
+	l, r, errBuf := testLoader(t)
+	var out strings.Builder
+	l.Stdout = &out
+	const kept = "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod that does not have the owner mark of this cluster (1 network).\n"
+	r.handler = func(c execx.Cmd) error {
+		if c.Args[4] == "provider::destroy" {
+			io.WriteString(c.Stdout, "stdout line\n")
+			io.WriteString(c.Stderr, kept)
+		}
+		return nil
+	}
+	p := &Provider{l: l, name: "hetzner"}
+	if err := p.Destroy(t.Context(), "/cfg", "/work"); err != nil {
+		t.Fatal(err)
+	}
+	if errBuf.String() != kept || out.String() != "stdout line\n" {
+		t.Errorf("stderr = %q, stdout = %q: the destroy output did not pass through", errBuf.String(), out.String())
+	}
+}
+
+// The tail keeps at most stderrTailBytes bytes, also from one large write,
+// and marks the cut.
+func TestTailBufferIsBounded(t *testing.T) {
+	var tb tailBuffer
+	// Write takes every byte (an io.Writer that returns less fails the
+	// copy of the child's stderr), also the bytes that it drops.
+	big := []byte(strings.Repeat("x", 3*stderrTailBytes) + "\nlast\n")
+	if n, err := tb.Write(big); n != len(big) || err != nil {
+		t.Fatalf("Write = %d, %v; want %d, nil", n, err, len(big))
+	}
+	if len(tb.b) > stderrTailBytes {
+		t.Fatalf("kept %d bytes, want at most %d", len(tb.b), stderrTailBytes)
+	}
+	if got := tb.lines(stderrTailLines); got != "[...]\nlast" {
+		t.Errorf("lines = %q", got)
+	}
+	tb = tailBuffer{}
+	for range 2 * stderrTailBytes / 10 {
+		if n, err := tb.Write([]byte("123456789\n")); n != 10 || err != nil {
+			t.Fatalf("Write = %d, %v; want 10, nil", n, err)
+		}
+	}
+	if len(tb.b) > stderrTailBytes {
+		t.Fatalf("kept %d bytes, want at most %d", len(tb.b), stderrTailBytes)
+	}
+	if got := tb.lines(2); got != "[...]\n123456789\n123456789" {
+		t.Errorf("lines = %q", got)
+	}
 }
 
 func TestKubeoneSeamsBindTheProviderAtConstruction(t *testing.T) {

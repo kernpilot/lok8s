@@ -1,11 +1,14 @@
 package provision
 
 // destroy_guard.go: the cluster_name guard of `lo destroy` (bash:
-// provision::_destroy_guard). A provider with the destroy_plan hook deletes
-// by a name, not by a list: the hetzner provider deletes EVERY resource in
-// the token's project that carries lok8s.dev/cluster=<cluster_name>. A
+// provision::_destroy_guard). A provider with the destroy_plan hook finds
+// its resources by the cluster_name: the hetzner provider deletes the
+// resources in the token's project that carry
+// lok8s.dev/cluster=<cluster_name> AND the owner mark of this domain. A
 // domain copied from another one that kept the cluster_name and the token
-// would delete the other cluster too. So before anything is deleted:
+// labels its resources the same way, and only the mark keeps the two apart:
+// a resource of the other domain with a wrong mark would be deleted. So
+// before anything is deleted:
 //
 //  1. another domain under clusters/ with the same cluster_name: refuse;
 //  2. print what the provider would delete;
@@ -122,7 +125,7 @@ func (d *Dispatcher) guardDestroy(ctx context.Context, domainName, kind, cluster
 	}
 
 	if users := domain.ProviderClusterNameUsers(d.Paths.Clusters, domainName, name); len(users) > 0 {
-		ui.ErrorTo(w, "cluster_name '%s' of '%s' is also the cluster_name of: %s. The provider deletes every resource of a cluster_name, so this destroy would delete the resources of those domains too. Nothing was deleted. Give each domain its own cluster_name, then run lo destroy again.", name, domainName, strings.Join(users, ", "))
+		ui.ErrorTo(w, "cluster_name '%s' of '%s' is also the cluster_name of: %s. The provider deletes only the resources with this cluster_name and the owner mark of '%s'. The resources of those domains have the same cluster label, so only the mark keeps them apart: a resource of another domain with a wrong mark would be deleted. Nothing was deleted. Give each domain its own cluster_name, then run lo destroy again.", name, domainName, strings.Join(users, ", "), domainName)
 		return true, "", driver.ErrDeclined
 	}
 
