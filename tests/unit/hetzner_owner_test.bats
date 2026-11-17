@@ -1470,7 +1470,7 @@ volume delete 24"
   # The plan showed 22 and 23 as kept parts: no repeat.
   refute_output --partial "skipped server 22"
   refute_output --partial "skipped server 23"
-  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (3 servers). The warnings above name them. Delete them by hand only if they are yours and you want them gone." ]
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (3 servers). A 'hetzner: skipped' warning above names each one. Delete them by hand only if they are yours and you want them gone." ]
   run _writes
   assert_output "volume delete 24"
 }
@@ -1483,7 +1483,7 @@ volume delete 24"
   _part network 26 old-net '{"lok8s.dev/cluster":"prod"}'
   run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
   assert_success
-  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers, 1 network). The warnings above name them. Delete them by hand only if they are yours and you want them gone." ]
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers, 1 network). A 'hetzner: skipped' warning above names each one. Delete them by hand only if they are yours and you want them gone." ]
   [ "$(grep -c 'lo destroy: kept' <<<"${output}")" -eq 1 ]
   run _writes
   assert_output "server delete 21

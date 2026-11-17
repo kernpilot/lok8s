@@ -44,13 +44,14 @@ func requireTool(t *testing.T, path string) {
 }
 
 // The Go CLI runs the hetzner destroy through the bridge: the real bash
-// provider of the embedded tree, with a stub hcloud. The plan names
-// server 46 with the cluster label of this cluster. At the destroy, the
-// label of 46 is another one (it changed after the plan). The destroy does
-// not delete 46, and the last lines name it with the reason, before the
-// line that counts the kept parts (47 has no owner mark), which stays the
-// last line. hack/parity-orchestrate.sh runs the same case in both CLIs.
-func TestHetznerDestroyNamesAPartWhoseClusterLabelChangedAfterThePlan(t *testing.T) {
+// provider of the embedded tree, with a stub hcloud that does not apply
+// the -l selector. The plan names server 46 with the cluster label of this
+// cluster. At the destroy, the list gives 46 with another label. The
+// destroy does not delete 46, and the last lines name it with the reason,
+// before the line that counts the kept parts (47 has no owner mark), which
+// stays the last line. These lines go to stderr, not to stdout.
+// hack/parity-orchestrate.sh runs the same case in both CLIs.
+func TestHetznerDestroyNamesAPartOfThePlanThatTheListGivesWithAnotherClusterLabel(t *testing.T) {
 	root := testutil.RepoRoot(t)
 	yq := filepath.Join(root, ".bin", "yq")
 	for _, tool := range []string{"bash", "jq", "sha256sum", yq} {
@@ -99,8 +100,8 @@ func TestHetznerDestroyNamesAPartWhoseClusterLabelChangedAfterThePlan(t *testing
 		testutil.WriteFile(t, filepath.Join(stubDir, "calls.log"), "")
 	}
 
-	var errBuf strings.Builder
-	l := &Loader{Paths: p, Stdout: &errBuf, Stderr: &errBuf}
+	var outBuf, errBuf strings.Builder
+	l := &Loader{Paths: p, Stdout: &outBuf, Stderr: &errBuf}
 	loaded, err := l.Load(t.Context(), "hetzner")
 	if err != nil {
 		t.Fatalf("load: %v\n%s", err, errBuf.String())
@@ -118,6 +119,7 @@ func TestHetznerDestroyNamesAPartWhoseClusterLabelChangedAfterThePlan(t *testing
 
 	servers("prod-b")
 	t.Setenv("LOK8S_DESTROY_PLAN", strings.TrimSuffix(plan, "\n"))
+	outBuf.Reset()
 	errBuf.Reset()
 	if err := prov.Destroy(t.Context(), cfg, work); err != nil {
 		t.Fatalf("destroy: %v\n%s", err, errBuf.String())
@@ -125,16 +127,23 @@ func TestHetznerDestroyNamesAPartWhoseClusterLabelChangedAfterThePlan(t *testing
 	out := errBuf.String()
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
 	want := []string{
-		"[warn] lo destroy: skipped server 46 moved-0: its cluster label changed after the plan (it has lok8s.dev/cluster=prod-b now, not lok8s.dev/cluster=prod-a). lok8s did not delete it.",
-		"[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server). The warnings above name them. Delete them by hand only if they are yours and you want them gone.",
+		"[warn] lo destroy: skipped server 46 moved-0: the plan named it, and now it has lok8s.dev/cluster=prod-b, not lok8s.dev/cluster=prod-a. lok8s did not delete it.",
+		"[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server). A 'hetzner: skipped' warning above names each one. Delete them by hand only if they are yours and you want them gone.",
 	}
 	if len(lines) < 2 || lines[len(lines)-2] != want[0] || lines[len(lines)-1] != want[1] {
-		t.Errorf("the last lines of the destroy are not the skipped part and then the kept line:\n%s", out)
+		t.Errorf("the last lines of stderr are not the skipped part and then the kept line:\n%s", out)
 	}
-	// One line names part 46: the line of a plan row that is not live is
-	// not printed for it.
-	if n := strings.Count(out, "server 46"); n != 1 {
-		t.Errorf("server 46 is named %d times, want 1:\n%s", n, out)
+	if strings.Contains(outBuf.String(), "lo destroy:") {
+		t.Errorf("the skipped or the kept line is on stdout, want stderr only:\n%s", outBuf.String())
+	}
+	// Two lines name part 46: the warning that the list gave it (the plan
+	// named 46, so it showed no warning for it) and the skipped line. Not
+	// the line of a plan row that is not live.
+	if n := strings.Count(out, "server 46"); n != 2 {
+		t.Errorf("server 46 is named %d times, want 2:\n%s", n, out)
+	}
+	if n := strings.Count(out, "[warn] hetzner: skipped server 46 moved-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=prod-b."); n != 1 {
+		t.Errorf("the warning that the list gave server 46 is printed %d times, want 1:\n%s", n, out)
 	}
 	calls, err := os.ReadFile(filepath.Join(stubDir, "calls.log"))
 	if err != nil {
