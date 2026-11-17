@@ -262,14 +262,70 @@ func (p *Provider) Destroy(ctx context.Context, configFile, workDir string) erro
 	return p.l.call(ctx, p.name, "provider::destroy", p.l.out(), p.l.errOut(), configFile, workDir)
 }
 
-// Output is provider::output <config> — the inventory JSON on stdout
-// (bash callers run it `2>/dev/null`).
+// Output is provider::output <config> — the inventory JSON on stdout. Some
+// bash callers run it `2>/dev/null`, others show its stderr (the lo
+// driver's destroy and remote provision), so the stderr is not streamed:
+// its last stderrTailLines lines come back in a driver.ProviderCallError
+// when the call fails, and the caller decides (driver.ProviderMessage). A
+// call that succeeds drops it, as before.
 func (p *Provider) Output(ctx context.Context, configFile string) ([]byte, error) {
 	var out strings.Builder
-	if err := p.l.call(ctx, p.name, "provider::output", &out, io.Discard, configFile); err != nil {
-		return nil, err
+	var errTail tailBuffer
+	if err := p.l.call(ctx, p.name, "provider::output", &out, &errTail, configFile); err != nil {
+		return nil, &driver.ProviderCallError{Err: err, Stderr: errTail.lines(stderrTailLines)}
 	}
 	return []byte(out.String()), nil
+}
+
+// The bound of the stderr that a failed provider::output gives back: the
+// last stderrTailLines lines, read from at most the last stderrTailBytes
+// bytes (a provider that prints a lot cannot fill the memory).
+const (
+	stderrTailLines = 20
+	stderrTailBytes = 16 << 10
+)
+
+// tailBuffer is an io.Writer that keeps only the last stderrTailBytes
+// bytes written to it.
+type tailBuffer struct {
+	b   []byte
+	cut bool // bytes before b were dropped
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if len(p) >= stderrTailBytes {
+		t.cut = t.cut || len(t.b) > 0 || len(p) > stderrTailBytes
+		t.b = append(t.b[:0], p[len(p)-stderrTailBytes:]...)
+		return n, nil
+	}
+	if over := len(t.b) + len(p) - stderrTailBytes; over > 0 {
+		t.cut = true
+		t.b = append(t.b[:0], t.b[over:]...)
+	}
+	t.b = append(t.b, p...)
+	return n, nil
+}
+
+// lines is the end of the text: its last keep lines, without trailing
+// newlines. A first line of "[...]" says that earlier text is left out.
+func (t *tailBuffer) lines(keep int) string {
+	text := strings.TrimRight(string(t.b), "\n")
+	if text == "" {
+		return ""
+	}
+	all := strings.Split(text, "\n")
+	cut := t.cut
+	if cut && len(all) > 1 {
+		all = all[1:] // the first line can be a part of a line
+	}
+	if len(all) > keep {
+		all, cut = all[len(all)-keep:], true
+	}
+	if cut {
+		all = append([]string{"[...]"}, all...)
+	}
+	return strings.Join(all, "\n")
 }
 
 // ProviderStatus is the optional provider::status hook (Running | Partial |

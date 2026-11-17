@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -90,6 +91,32 @@ type Provider interface {
 	Provision(ctx context.Context, configFile, workDir string) error
 	Destroy(ctx context.Context, configFile, workDir string) error
 	Output(ctx context.Context, configFile string) ([]byte, error)
+}
+
+// ProviderCallError is a failed provider call that captured its own
+// stderr instead of streaming it: Stderr holds the end of what the
+// provider printed (its message, the cause of the failure). Error() is
+// the error of the call only, so a caller that does not show the message
+// prints what it printed before. The bash callers that run the call
+// without `2>/dev/null` show the message above their own error line; a Go
+// caller does the same with ProviderMessage.
+type ProviderCallError struct {
+	Err    error
+	Stderr string
+}
+
+func (e *ProviderCallError) Error() string { return e.Err.Error() }
+
+func (e *ProviderCallError) Unwrap() error { return e.Err }
+
+// ProviderMessage is the stderr that a failed provider call captured
+// (ProviderCallError), without trailing newlines; "" when err has none.
+func ProviderMessage(err error) string {
+	var pe *ProviderCallError
+	if !errors.As(err, &pe) {
+		return ""
+	}
+	return strings.TrimRight(pe.Stderr, "\n")
 }
 
 // ProviderStatuser is the optional provider::status hook

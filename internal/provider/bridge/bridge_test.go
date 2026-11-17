@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -120,6 +121,65 @@ func TestCredentialDataAndOutputCaptureStdout(t *testing.T) {
 		t.Errorf("status = %q err=%v", st, err)
 	}
 	var _ driver.ProviderStatuser = p
+}
+
+// A failed provider::output gives its stderr back to the caller (bash shows
+// it), bounded to the last stderrTailLines lines; the error text stays the
+// error of the call. A call that succeeds drops its stderr (above).
+func TestFailedOutputCarriesTheEndOfItsStderr(t *testing.T) {
+	l, r, errBuf := testLoader(t)
+	var lines []string
+	for i := 1; i <= stderrTailLines+5; i++ {
+		lines = append(lines, "line "+strconv.Itoa(i))
+	}
+	r.handler = func(c execx.Cmd) error {
+		io.WriteString(c.Stderr, strings.Join(lines, "\n")+"\n")
+		return errors.New("exit status 1")
+	}
+	p := &Provider{l: l, name: "hetzner"}
+	_, err := p.Output(t.Context(), "/cfg")
+	if err == nil || err.Error() != "exit status 1" {
+		t.Fatalf("err = %v, want the error of the call", err)
+	}
+	want := "[...]\n" + strings.Join(lines[5:], "\n")
+	if got := driver.ProviderMessage(err); got != want {
+		t.Errorf("message = %q, want the last %d lines %q", got, stderrTailLines, want)
+	}
+	if errBuf.Len() != 0 {
+		t.Errorf("the message was streamed too: %q", errBuf.String())
+	}
+
+	// One short line: no cut mark.
+	r.handler = func(c execx.Cmd) error {
+		io.WriteString(c.Stderr, "hcloud: unauthorized\n")
+		return errors.New("exit status 1")
+	}
+	if _, err := p.Output(t.Context(), "/cfg"); driver.ProviderMessage(err) != "hcloud: unauthorized" {
+		t.Errorf("message = %q", driver.ProviderMessage(err))
+	}
+}
+
+// The tail keeps at most stderrTailBytes bytes, also from one large write,
+// and marks the cut.
+func TestTailBufferIsBounded(t *testing.T) {
+	var tb tailBuffer
+	tb.Write([]byte(strings.Repeat("x", 3*stderrTailBytes) + "\nlast\n"))
+	if len(tb.b) > stderrTailBytes {
+		t.Fatalf("kept %d bytes, want at most %d", len(tb.b), stderrTailBytes)
+	}
+	if got := tb.lines(stderrTailLines); got != "[...]\nlast" {
+		t.Errorf("lines = %q", got)
+	}
+	tb = tailBuffer{}
+	for range 2 * stderrTailBytes / 10 {
+		tb.Write([]byte("123456789\n"))
+	}
+	if len(tb.b) > stderrTailBytes {
+		t.Fatalf("kept %d bytes, want at most %d", len(tb.b), stderrTailBytes)
+	}
+	if got := tb.lines(2); got != "[...]\n123456789\n123456789" {
+		t.Errorf("lines = %q", got)
+	}
 }
 
 func TestKubeoneSeamsBindTheProviderAtConstruction(t *testing.T) {

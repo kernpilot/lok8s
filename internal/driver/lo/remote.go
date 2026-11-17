@@ -12,10 +12,24 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
+
+// showProviderMessage writes the message of a failed provider call to w,
+// where the bash caller shows it: above its own error line (the call runs
+// without `2>/dev/null` there). It returns the cause for that error line:
+// "its message is above" when there is a message, else the error text.
+func showProviderMessage(w io.Writer, err error) string {
+	msg := driver.ProviderMessage(err)
+	if msg == "" {
+		return err.Error()
+	}
+	fmt.Fprintln(w, msg)
+	return "its message is above"
+}
 
 // provisionRemote waits for SSH, cloud-init, and Docker on a freshly
 // provisioned VM (bash: lo::provision_remote). Sets LOK8S_REMOTE_IP,
@@ -39,6 +53,7 @@ func (d *Driver) provisionRemote(ctx context.Context, domain, clusterYAML string
 
 	providerOutput, err := d.deps.Provider.Output(ctx, d.deps.ProviderConfigFile)
 	if err != nil {
+		showProviderMessage(errOut, err)
 		ui.ErrorTo(errOut, "provider output failed — refusing to treat it as 'no nodes'")
 		return ui.Handled(fmt.Errorf("provider output failed: %w", err))
 	}
