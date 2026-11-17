@@ -1447,15 +1447,14 @@ volume delete 24"
   # of the confirmed plan does not repeat it for a part that the plan did
   # not name (23), and its last line counts them.
   refute_output --partial "skipped server 23"
-  assert_output --partial "[warn] lo destroy: kept 2 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers)."
+  assert_output --partial "[warn] lo destroy: kept 2 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers): server 22 'cp-0', server 23 'old-0'."
   run _writes
   assert_output "server delete 21"
 }
 
 # A part that lost its mark after the plan was shown in the plan as a part
-# to delete, not as a kept part: the destroy keeps it, and a warning names
-# it, so the last line is true when it says that the warnings name the kept
-# parts.
+# to delete, not as a kept part: the destroy keeps it, a warning names it
+# with the reason, and the last line names it with the other kept parts.
 @test "destroy: a part of the confirmed plan that lost its mark after the plan is kept, and a warning names it" {
   _destroy_parts
   local plan
@@ -1470,20 +1469,21 @@ volume delete 24"
   # The plan showed 22 and 23 as kept parts: no repeat.
   refute_output --partial "skipped server 22"
   refute_output --partial "skipped server 23"
-  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (3 servers). The warnings above name them. Delete them by hand only if they are yours and you want them gone." ]
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (3 servers): server 21 'cp-0', server 22 'cp-0', server 23 'old-0'. Delete them by hand only if they are yours and you want them gone." ]
   run _writes
   assert_output "volume delete 24"
 }
 
 # A destroy that keeps parts (the cluster label, no mark or the mark of
 # another cluster) succeeds: the skip is the safety feature. Its last line
-# says how many parts it kept and of which kinds, in the delete order.
-@test "destroy: the last line counts the kept parts by kind, and the destroy exits 0" {
+# says how many parts it kept and of which kinds, and names each part, in
+# the delete order.
+@test "destroy: the last line counts the kept parts by kind and names each one, and the destroy exits 0" {
   _destroy_parts
   _part network 26 old-net '{"lok8s.dev/cluster":"prod"}'
   run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
   assert_success
-  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers, 1 network). The warnings above name them. Delete them by hand only if they are yours and you want them gone." ]
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers, 1 network): server 22 'cp-0', server 23 'old-0', network 26 'old-net'. Delete them by hand only if they are yours and you want them gone." ]
   [ "$(grep -c 'lo destroy: kept' <<<"${output}")" -eq 1 ]
   run _writes
   assert_output "server delete 21
@@ -1498,7 +1498,7 @@ volume delete 24"
   refute_output --partial "lo destroy: kept"
   run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
   assert_success
-  assert_output --partial "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod that does not have the owner mark of this cluster (1 network)."
+  assert_output --partial "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod that does not have the owner mark of this cluster (1 network): network 26 'old-net'. Delete it by hand only if it is yours and you want it gone."
 }
 
 @test "destroy: no domain for the mark stops the plan and the destroy before any hcloud call" {

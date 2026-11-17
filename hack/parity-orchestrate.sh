@@ -634,10 +634,24 @@ if [[ "${1:-}" == "--capabilities" ]]; then
   if [[ -n "${PARITY_PROBE_LOG:-}" ]]; then
     echo "SELF=$0 PWD=$(pwd -P) ENTRIES=$(ls -A | wc -l | tr -d ' ') STDIN=$(wc -c | tr -d ' ') PATH_SECRETS=${PATH_SECRETS:-<unset>} DISABLE=${LOK8S_SECRETS_DISABLE:-<unset>} KEYS_ONLY=${LOK8S_INTERNAL_SECRETS_KEYS_ONLY:-<unset>} DRYRUN=${LOK8S_BOOTSTRAP_DRYRUN:-<unset>} HOME=${KUSTOMIZE_PLUGIN_HOME:-<unset>} PATH0=${PATH%%:*} TMP=${TMPDIR:-<unset>} STORE=${LOK8S_BOOTSTRAP_DRYRUN_STORE:-<unset>} REPORT=${LOK8S_BOOTSTRAP_DRYRUN_REPORT:-<unset>} HELMP=${HELM_PLUGINS:-<unset>}" >> "${PARITY_PROBE_LOG}"
   fi
-  # A slow check, to interrupt the dry run in the middle of it.
+  # A slow check, to interrupt the dry run in the middle of it. The mark
+  # holds the plugin's pid. The plugin stops on INT or TERM, as the real
+  # plugin does (with `sleep` in the foreground, bash would first let it
+  # end), and marks a run to its end (<mark>.ended). It first moves to a
+  # session of its own (setsid execs in place: the pid stays), so a Ctrl-C
+  # to lo's process group does not reach it: only lo's stop ends it (bash:
+  # the check's TERM; Go: the runner's SIGINT). Without setsid, the Ctrl-C
+  # case does not prove Go's stop; the TERM case still does.
   if [[ -n "${PARITY_CAPS_SLOW_MARK:-}" ]]; then
-    : > "${PARITY_CAPS_SLOW_MARK}"
-    sleep 5
+    if [[ -z "${PARITY_CAPS_OWN_SESSION:-}" ]] && command -v setsid >/dev/null; then
+      PARITY_CAPS_OWN_SESSION=1 exec setsid "$0" "$@"
+    fi
+    trap 'kill "${slow}" 2>/dev/null; exit 1' INT TERM
+    sleep 5 &
+    slow=$!
+    echo "$$" > "${PARITY_CAPS_SLOW_MARK}"
+    wait "${slow}"
+    : > "${PARITY_CAPS_SLOW_MARK}.ended"
   fi
   echo dry-run; exit 0
 fi
@@ -1362,13 +1376,29 @@ done
 unset PARITY_SLOW_MARK sig_tmp sig_pid
 
 # Ctrl-C in the dry run's check of the Secret plugin: both sides name the
-# interrupt, not a plugin without the dry run, end with 130 and leave no
-# temp file. The INT goes to the process group of the run, as a terminal
-# sends it (set -m: the run is a group of its own).
+# interrupt, not a plugin without the dry run, end with 130, stop the
+# plugin and leave no temp file. The INT goes to the process group of the
+# run, as a terminal sends it (set -m: the run is a group of its own).
 export PARITY_CAPS_SLOW_MARK="${WORK}/caps.started"
+# caps_plugin_stopped <side> <what>: lo stopped the slow Secret plugin (its
+# pid is in the mark): when lo has ended, the plugin no longer runs (after
+# at most 1.5 s), and it did not run to its end (5 s).
+caps_plugin_stopped() {
+  local pid i
+  pid=$(cat "${PARITY_CAPS_SLOW_MARK}" 2>/dev/null)
+  if [[ ! "${pid}" =~ ^[0-9]+$ ]]; then fail "${1}: ${2} in the check: the mark holds no pid of the Secret plugin"; return; fi
+  for (( i = 0; i < 15; i++ )); do kill -0 "${pid}" 2>/dev/null || break; sleep 0.1; done
+  if kill -0 "${pid}" 2>/dev/null; then
+    fail "${1}: ${2} in the check left the Secret plugin running"
+  elif [[ -e "${PARITY_CAPS_SLOW_MARK}.ended" ]]; then
+    fail "${1}: ${2} in the check let the Secret plugin run to its end"
+  else
+    echo "ok: ${1}: ${2} in the check stopped the Secret plugin"
+  fi
+}
 for side in bash go; do
   caps_tmp="${WORK}/caps-tmp.${side}"
-  rm -rf "${caps_tmp}" "${PARITY_CAPS_SLOW_MARK}"; mkdir -p "${caps_tmp}"
+  rm -rf "${caps_tmp}" "${PARITY_CAPS_SLOW_MARK}" "${PARITY_CAPS_SLOW_MARK}.ended"; mkdir -p "${caps_tmp}"
   parity::select "${PROJ}" "${side}"
   set -m
   ( cd "${PROJ}" && TMPDIR="${caps_tmp}" exec "${LO_BIN}" bootstrap --domain dry.dev --dry-run --only cilium </dev/null >"${WORK}/caps-int.${side}.out" 2>"${WORK}/caps-int.${side}.err" ) &
@@ -1383,10 +1413,38 @@ for side in bash go; do
   tls_pin "${side}: Ctrl-C in the check names the interrupt" "${WORK}/caps-int.${side}.err" "bootstrap dry-run: the check of the Secret plugin \.kustomize/secrets\.lok8s\.dev/v1/secret/Secret was interrupted \(SIGINT\)$"
   if grep -qF "does not support a dry run" "${WORK}/caps-int.${side}.err"; then fail "${side}: Ctrl-C in the check blames the plugin"; else echo "ok: ${side}: Ctrl-C in the check does not blame the plugin"; fi
   if [[ -z "$(ls -A "${caps_tmp}")" ]]; then echo "ok: ${side}: Ctrl-C in the check left no temp file"; else fail "${side}: Ctrl-C in the check left $(ls -A "${caps_tmp}")"; fi
+  caps_plugin_stopped "${side}" "Ctrl-C"
 done
 parity::state_same "${WORK}/caps-int.bash.out" "${WORK}/caps-int.go.out" "stdout of Ctrl-C in the check of lo bootstrap --dry-run" || failures=$((failures + 1))
 parity::state_same "${WORK}/caps-int.bash.err" "${WORK}/caps-int.go.err" "stderr of Ctrl-C in the check of lo bootstrap --dry-run" || failures=$((failures + 1))
+
+# A TERM to lo itself (kill <pid of lo>, not its process group) in the dry
+# run's check of the Secret plugin: both sides name the interrupt, not a
+# plugin without the dry run, end with 143, stop the plugin and leave no
+# temp file. Only lo gets the signal, so lo stops the check itself (bash:
+# lo's shell sends TERM to the check's subshell; Go: the cancelled
+# context).
+for side in bash go; do
+  caps_tmp="${WORK}/caps-term-tmp.${side}"
+  rm -rf "${caps_tmp}" "${PARITY_CAPS_SLOW_MARK}" "${PARITY_CAPS_SLOW_MARK}.ended"; mkdir -p "${caps_tmp}"
+  parity::select "${PROJ}" "${side}"
+  ( cd "${PROJ}" && TMPDIR="${caps_tmp}" exec "${LO_BIN}" bootstrap --domain dry.dev --dry-run --only cilium </dev/null >"${WORK}/caps-term.${side}.out" 2>"${WORK}/caps-term.${side}.err" ) &
+  caps_pid=$!
+  for (( i = 0; i < 100; i++ )); do [[ -e "${PARITY_CAPS_SLOW_MARK}" ]] && break; sleep 0.1; done
+  if [[ -e "${PARITY_CAPS_SLOW_MARK}" ]]; then echo "ok: ${side}: the dry run reached the check of the Secret plugin (TERM)"; else fail "${side}: the dry run never reached the check of the Secret plugin (TERM)"; fi
+  kill -TERM "${caps_pid}" 2>/dev/null || true
+  caps_rc=0
+  wait "${caps_pid}" 2>/dev/null || caps_rc=$?
+  if (( caps_rc == 143 )); then echo "ok: ${side}: TERM to lo in the check exits 143"; else fail "${side}: TERM to lo in the check exited ${caps_rc}, want 143"; fi
+  tls_pin "${side}: TERM to lo in the check names the interrupt" "${WORK}/caps-term.${side}.err" "bootstrap dry-run: the check of the Secret plugin \.kustomize/secrets\.lok8s\.dev/v1/secret/Secret was interrupted \(SIGTERM\)$"
+  if grep -qF "does not support a dry run" "${WORK}/caps-term.${side}.err"; then fail "${side}: TERM to lo in the check blames the plugin"; else echo "ok: ${side}: TERM to lo in the check does not blame the plugin"; fi
+  if [[ -z "$(ls -A "${caps_tmp}")" ]]; then echo "ok: ${side}: TERM to lo in the check left no temp file"; else fail "${side}: TERM to lo in the check left $(ls -A "${caps_tmp}")"; fi
+  caps_plugin_stopped "${side}" "TERM to lo"
+done
+parity::state_same "${WORK}/caps-term.bash.out" "${WORK}/caps-term.go.out" "stdout of TERM to lo in the check of lo bootstrap --dry-run" || failures=$((failures + 1))
+parity::state_same "${WORK}/caps-term.bash.err" "${WORK}/caps-term.go.err" "stderr of TERM to lo in the check of lo bootstrap --dry-run" || failures=$((failures + 1))
 unset PARITY_CAPS_SLOW_MARK caps_tmp caps_pid caps_rc
+unset -f caps_plugin_stopped
 chmod 755 "${PROJ}/locked"
 rm -rf "${PROJ}/locked" "${PROJ}/dangling" "${PROJ}/.cache/core"
 unset PARITY_KUBECTL_LOG
@@ -1822,9 +1880,14 @@ rm -rf "${PROJ}/clusters"/{dupa,dupb,solo}.cloud "${PROJ}/.lok8s/providers/mockp
 # with the owner mark of kept.cloud, one server and one network with the
 # cluster label and no mark, and one server with the mark and another
 # cluster label (the stub does not apply the selector, so the destroy must
-# check the label itself). It logs each call. The destroy deletes the
-# marked server only and exits 0; its last line counts the 2 kept parts by
-# kind. HCLOUD_CONFIG names no file: an hcloud that is not the stub has no
+# check the label itself). Server 45 has the mark, and the cluster label of
+# kept-name for the plan; for the destroy (LOK8S_DESTROY_PLAN is set) it has
+# another one, and the list still gives it. It logs each call. The destroy
+# deletes the marked server 42 only and exits 0. Its last lines name the
+# two servers that the label check skipped, with the reason (for 45: the
+# plan named it), and the last line counts the 2 kept parts by kind and
+# names each one.
+# HCLOUD_CONFIG names no file: an hcloud that is not the stub has no
 # context and no token.
 export PARITY_HCLOUD_LOG="${WORK}/hcloud.log" HCLOUD_CONFIG="${WORK}/no-hcloud-config.toml"
 PARITY_HCLOUD_MARK="$(printf '%s\n%s\n' kept.cloud kept-name | sha256sum | cut -c1-32)"
@@ -1835,7 +1898,9 @@ parity::stub "${PROJ}" hcloud <<'SH'
 echo "$*" >> "${PARITY_HCLOUD_LOG}"
 case "${1:-} ${2:-}" in
   "server list")
-    printf '[{"id":42,"name":"kept-name-cp-0","labels":{"lok8s.dev/cluster":"kept-name","lok8s.dev/owner":"%s"}},{"id":43,"name":"old-0","labels":{"lok8s.dev/cluster":"kept-name"}},{"id":44,"name":"other-0","labels":{"lok8s.dev/cluster":"other-name","lok8s.dev/owner":"%s"}}]\n' "${PARITY_HCLOUD_MARK}" "${PARITY_HCLOUD_MARK}" ;;
+    label45=kept-name
+    [[ -z "${LOK8S_DESTROY_PLAN:-}" ]] || label45=other-name
+    printf '[{"id":42,"name":"kept-name-cp-0","labels":{"lok8s.dev/cluster":"kept-name","lok8s.dev/owner":"%s"}},{"id":43,"name":"old-0","labels":{"lok8s.dev/cluster":"kept-name"}},{"id":44,"name":"other-0","labels":{"lok8s.dev/cluster":"other-name","lok8s.dev/owner":"%s"}},{"id":45,"name":"moved-0","labels":{"lok8s.dev/cluster":"%s","lok8s.dev/owner":"%s"}}]\n' "${PARITY_HCLOUD_MARK}" "${PARITY_HCLOUD_MARK}" "${label45}" "${PARITY_HCLOUD_MARK}" ;;
   "network list") echo '[{"id":9,"name":"old-net","labels":{"lok8s.dev/cluster":"kept-name"}}]' ;;
   *" list") echo '[]' ;;
   *" delete") ;;
@@ -1846,7 +1911,7 @@ mkdir -p "${PROJ}/clusters/kept.cloud"
 printf '{"cluster_name": "kept-name"}\n' > "${PROJ}/clusters/kept.cloud/hetzner.json"
 printf 'kind: KubeOne\nmetadata:\n  name: kept\nspec:\n  kubernetes:\n    version: "1.31.0"\n  provider:\n    name: hetzner\n    configRef: hetzner.json\n' \
   > "${PROJ}/clusters/kept.cloud/cluster.lok8s.yaml"
-check - destroy --domain kept.cloud -r --confirm-cluster kept-name   # deletes the marked server; the last line counts the kept parts
+check - destroy --domain kept.cloud -r --confirm-cluster kept-name   # deletes the marked server; the last lines name the skipped servers and count the kept parts
 expect_rc 0 destroy --domain kept.cloud -r --confirm-cluster kept-name
 for side in bash go; do
   : > "${PARITY_HCLOUD_LOG}"
@@ -1854,11 +1919,15 @@ for side in bash go; do
     || fail "${side}: a destroy that kept parts without the mark did not exit 0"
   [[ "$(grep ' delete ' "${PARITY_HCLOUD_LOG}")" == "server delete 42" ]] \
     || fail "${side}: the destroy did not delete exactly the marked server: $(grep ' delete ' "${PARITY_HCLOUD_LOG}" | tr '\n' ';')"
-  [[ "$(tail -n 1 "${WORK}/${side}.err")" == "[warn] lo destroy: kept 2 resources with lok8s.dev/cluster=kept-name that do not have the owner mark of this cluster (1 server, 1 network). The warnings above name them. Delete them by hand only if they are yours and you want them gone." ]] \
-    || fail "${side}: the last line of the destroy does not count the kept parts: $(tail -n 1 "${WORK}/${side}.err")"
+  [[ "$(tail -n 1 "${WORK}/${side}.err")" == "[warn] lo destroy: kept 2 resources with lok8s.dev/cluster=kept-name that do not have the owner mark of this cluster (1 server, 1 network): server 43 'old-0', network 9 'old-net'. Delete them by hand only if they are yours and you want them gone." ]] \
+    || fail "${side}: the last line of the destroy does not count and name the kept parts: $(tail -n 1 "${WORK}/${side}.err")"
+  [[ "$(tail -n 3 "${WORK}/${side}.err" | head -n 2)" == "[warn] lo destroy: skipped server 44 other-0: it has lok8s.dev/cluster=other-name, not lok8s.dev/cluster=kept-name. lok8s did not delete it."$'\n'"[warn] lo destroy: skipped server 45 moved-0: the plan named it, and now it has lok8s.dev/cluster=other-name, not lok8s.dev/cluster=kept-name. lok8s did not delete it." ]] \
+    || fail "${side}: the last lines of the destroy do not name the servers that the label check skipped: $(tail -n 3 "${WORK}/${side}.err" | head -n 2 | tr '\n' ';')"
   # The plan warns once for each part that it leaves out; the destroy of
-  # the confirmed plan lists again, but does not repeat the warnings.
-  [[ "$(grep -c 'hetzner: skipped server 43 old-0' "${WORK}/${side}.err")" == 1 && "$(grep -c 'hetzner: skipped server 44 other-0' "${WORK}/${side}.err")" == 1 ]] \
+  # the confirmed plan lists again, but does not repeat the warnings. The
+  # plan named 45, so it showed no warning for it: the destroy warns once
+  # that the list gave it, and one skipped line names it.
+  [[ "$(grep -c 'hetzner: skipped server 43 old-0' "${WORK}/${side}.err")" == 1 && "$(grep -c 'hetzner: skipped server 44 other-0' "${WORK}/${side}.err")" == 1 && "$(grep -c 'hetzner: skipped server 45 moved-0: the list of the parts with lok8s.dev/cluster=kept-name gave it' "${WORK}/${side}.err")" == 1 && "$(grep -c 'server 45' "${WORK}/${side}.err")" == 2 ]] \
     || fail "${side}: a skip warning was not printed exactly once"
 done
 rm -rf "${PROJ}/clusters/kept.cloud"
