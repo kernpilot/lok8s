@@ -75,7 +75,6 @@ writes the project files only and prints this command as the next step):
 binaries:
   # ── core: what `lo` execs on every path
   kubectl:
-    version: v1.36.2
     groups: [core]
   kustomize:
     version: v5.8.1
@@ -115,11 +114,15 @@ binaries:
   `go.mod` or the template disagrees. The exec render (core) and the
   in-process render (full) stay byte-identical because the numbers cannot
   drift apart.
-- **kind and kubectl are pinned too.** The kind release picks the default
-  node image, which is the cluster's Kubernetes when
-  `spec.kubernetes.version` is not set (kind `v0.32.0`: `kindest/node`
-  `v1.36.1`), and kubectl must stay within one minor of it. The operator
-  image ships the same two releases, and `go test` fails when it does not.
+- **kind is pinned too.** The kind release picks the default node image,
+  which is the cluster's Kubernetes when `spec.kubernetes.version` is not
+  set (kind `v0.32.0`: `kindest/node` `v1.36.1`). The operator image ships
+  the same release, and `go test` fails when it does not.
+- **kubectl floats for now.** kubectl must stay within one minor of the
+  cluster's Kubernetes, but b's kubectl recipe downloads from a release
+  bucket that stopped at `v1.31.0`: `b` installs that release today and
+  cannot install a pin of a current one. kubectl gets its pin when b reads
+  `dl.k8s.io`.
 - **The other entries float**: `b update` installs their latest release.
   `internal/toolchain/pins.go` names each one with the reason, and `go
   test` fails on an entry that is neither pinned nor named there.
@@ -129,8 +132,9 @@ binaries:
   commented out: uncomment and `.bin/b install`.
 - **Never overwritten.** An existing `.bin/b.yaml` stays byte-for-byte;
   `lo toolchain install` prints a unified diff against the template and
-  the instructions, and `lo toolchain doctor` reports which installed tool
-  differs from a pin.
+  the instructions. `lo toolchain doctor` checks only the render tools
+  (kustomize, the khelm `ChartRenderer`, the Secret plugin) against their
+  pins, not kind, kubectl or yq.
 - **Not in the consumer file:** `argsh`, `yq`, `jq`, `envsubst`, `sops`,
   `ssh-to-age`. The Go binary links or reimplements them (sops and
   ssh-to-age as libraries; the split-mode `yq`/`sops` subprocesses are
@@ -157,7 +161,7 @@ side.
 
 | Binary (group) | Consumer (`lo toolchain install`) | Contributor / profiles | Who needs it |
 |---|---|---|---|
-| `kubectl` **v1.36.2** (`core`) | yes, pinned | yes | `lo` execs it for apply/wait |
+| `kubectl` (`core`) | yes | yes | `lo` execs it for apply/wait |
 | `kustomize` **v5.8.1** (`core`) | yes, pinned | yes | `lo` core: every render. `lo-full`: only `LO_RENDER=exec`; the bash side always |
 | `khelm` `ChartRenderer` **v2.8.0** (`core`) | yes, pinned, under `.kustomize/` | yes | the addons' Helm charts (core execs it; lo-full links the same release) |
 | `secrets.lok8s.dev` `Secret` plugin at **lo's version** (`core`) | yes, pinned, under `.kustomize/` | built from source (`lo kustomize build`) | every render on core and the bash side; lo-full serves it itself |

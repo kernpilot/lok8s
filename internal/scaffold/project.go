@@ -301,7 +301,7 @@ func WriteBYAML(bin, content string, dryRun bool, out io.Writer) error {
 			fmt.Fprintf(out, "    %s\n", line)
 		}
 		fmt.Fprintln(out, "  To adopt the template: move the file aside and re-run `lo toolchain install`.")
-		fmt.Fprintln(out, "  To keep yours: merge the pins by hand — `lo doctor` reports what differs from the pins.")
+		fmt.Fprintln(out, "  To keep yours: merge the pins by hand. `lo toolchain doctor` checks only the render tools against their pins.")
 	case dryRun:
 		fmt.Fprintf(out, "would write %s\n", res.Path)
 	}

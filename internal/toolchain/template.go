@@ -77,7 +77,7 @@ func entries(loVersion, pluginFileDir string) []entry {
 		pluginFileDir = DefaultPluginFileDir
 	}
 	return []entry{
-		{key: "kubectl", group: GroupCore, fields: []string{"version: " + KubectlVersion}},
+		{key: "kubectl", group: GroupCore, fields: nil},
 		{key: "kustomize", group: GroupCore,
 			comment: "The renderer. lo core execs it (lo build, the addon render); lo-full carries the\nsame release in-process and only needs it for LO_RENDER=exec.",
 			fields:  []string{"version: " + KustomizeCLI}},
@@ -201,9 +201,8 @@ func Template(o TemplateOptions) (string, error) {
 	b.WriteString("# releases this lo was built and byte-parity-tested against (lo core execs them;\n")
 	b.WriteString("# lo-full links the same releases). Bump them together and re-render afterwards:\n")
 	b.WriteString("# `lo build` promotes artifacts.yaml only when the bytes change, so a bump that\n")
-	b.WriteString("# moves nothing reports \"render unchanged\". kind and kubectl are pinned too: the kind\n")
-	b.WriteString("# release picks the cluster's default Kubernetes, and kubectl must stay within one\n")
-	b.WriteString("# minor of it. An entry with no version floats (b update).\n")
+	b.WriteString("# moves nothing reports \"render unchanged\". kind is pinned too: its release picks\n")
+	b.WriteString("# the cluster's default Kubernetes. An entry with no version floats (b update).\n")
 	b.WriteString("#\n")
 	b.WriteString("# Groups are a lok8s convention (b ignores the key): core = what every lo path\n")
 	b.WriteString("# execs; local = the kind + Tilt dev loop; cloud = the provisioning drivers;\n")
@@ -261,8 +260,8 @@ func HasMarker(path string) bool {
 	return false
 }
 
-// PinnedEntries lists the "key → version" pairs the template pins, for
-// tests and for doctor's expectation table.
+// PinnedEntries lists the "key → version" pairs that the template pins.
+// The tests compare it with pins.go; lo doctor does not use it.
 func PinnedEntries(loVersion string) map[string]string {
 	out := map[string]string{}
 	for _, e := range entries(loVersion, "") {

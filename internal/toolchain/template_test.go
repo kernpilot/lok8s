@@ -34,7 +34,7 @@ func TestTemplateGroupsAndMarker(t *testing.T) {
 		t.Fatalf("header: %q", strings.SplitN(tpl, "\n", 2)[0])
 	}
 	// Default groups: core + local active, cloud commented out.
-	for _, active := range []string{"  kubectl:\n    version: " + KubectlVersion + "\n    groups: [core]\n", "  kind:\n    version: " + KindVersion + "\n    groups: [local]\n", "  tilt:\n    groups: [local]\n", "  mkcert:\n    groups: [local]\n"} {
+	for _, active := range []string{"  kubectl:\n    groups: [core]\n", "  kind:\n    version: " + KindVersion + "\n    groups: [local]\n", "  tilt:\n    groups: [local]\n", "  mkcert:\n    groups: [local]\n"} {
 		if !strings.Contains(tpl, active) {
 			t.Errorf("missing active entry %q", active)
 		}

@@ -40,13 +40,17 @@ const (
 // and every "yq v… or later" statement.
 const YQVersion = "v4.54.3"
 
-// The cluster tools of the template. The kind release picks the default
-// node image, which is the cluster's Kubernetes when spec.kubernetes.version
-// is not set, and the node images that it supports: kind v0.32.0 defaults to
-// kindest/node v1.36.1 and supports v1.33 to v1.36. kubectl must stay within
-// one minor of that Kubernetes (the kubectl version skew policy). The
-// operator image downloads the same two releases, and a test in
-// internal/assets checks it: bump a pin, the image URL and its sums together.
+// The cluster tools. The kind release picks the default node image, which
+// is the cluster's Kubernetes when spec.kubernetes.version is not set, and
+// the node images that it supports: kind v0.32.0 defaults to kindest/node
+// v1.36.1 and supports v1.33 to v1.36. kubectl must stay within one minor
+// of that Kubernetes (the kubectl version skew policy).
+//
+// The b.yaml template pins KindVersion. KubectlVersion is the kubectl of the
+// operator image only: the template's kubectl floats (see floatingEntries)
+// until b installs kubectl from dl.k8s.io. A test in internal/assets ties
+// the image's kind and kubectl downloads to these two: bump a pin, the image
+// URL and its sums together.
 const (
 	KubectlVersion = "v1.36.2"
 	KindVersion    = "v0.32.0"
@@ -57,6 +61,7 @@ const (
 // pinned. A test fails on an entry that is neither pinned nor named here, so
 // a new tool cannot float without a reason in this list.
 var floatingEntries = map[string]string{
+	"kubectl":                       "b's kubectl recipe downloads from a release bucket that stopped at v1.31.0, so a pin of a current release cannot install; pin it to KubectlVersion once b reads dl.k8s.io",
 	"tilt":                          "the watcher and UI of the dev loop (local group); it renders no manifest",
 	"mkcert":                        "makes the local CA for `lo trust` (local group); it renders no manifest",
 	"github.com/kubermatic/kubeone": "an opt-in driver (cloud group); lok8s holds no KubeOne release to pin it to",

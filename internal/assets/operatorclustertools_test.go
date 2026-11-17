@@ -1,8 +1,8 @@
 package assets
 
 // operatorclustertools_test.go ties the kubectl and kind that
-// operator/Dockerfile downloads to the releases that the b.yaml template
-// pins (toolchain.KubectlVersion, toolchain.KindVersion).
+// operator/Dockerfile downloads to the lok8s pins (toolchain.KubectlVersion,
+// toolchain.KindVersion), and checks where the image installs them.
 
 import (
 	"fmt"
@@ -19,30 +19,44 @@ type clusterTool struct {
 	// host is the start of every release URL of the tool: the image must
 	// name it once (the one download).
 	host string
-	// url matches the download in the final stage; its group 1 is the
-	// release, with its v.
+	// url matches the download in the final stage: group 1 is the file
+	// that wget writes, group 2 the release, with its v.
 	url *regexp.Regexp
-	// form is the URL form for the messages.
+	// form is the download form for the messages.
 	form string
 	// pin names the pin in the messages.
 	pin string
+	// bin is where the image installs the tool. It is on PATH, and the
+	// image runs the tool by name (lo operator execs kubectl).
+	bin string
 }
 
 var clusterTools = []clusterTool{
 	{name: "kubectl", host: "dl.k8s.io/release/",
-		url:  regexp.MustCompile(`"https://dl\.k8s\.io/release/(v[^/"\s]+)/bin/linux/\$\{ARCH\}/kubectl"`),
-		form: `"https://dl.k8s.io/release/<version>/bin/linux/${ARCH}/kubectl"`, pin: "toolchain.KubectlVersion"},
+		url:  regexp.MustCompile(`wget -qO (/\S+) "https://dl\.k8s\.io/release/(v[^/"\s]+)/bin/linux/\$\{ARCH\}/kubectl"`),
+		form: `wget -qO <path> "https://dl.k8s.io/release/<version>/bin/linux/${ARCH}/kubectl"`,
+		pin:  "toolchain.KubectlVersion", bin: "/usr/local/bin/kubectl"},
 	{name: "kind", host: "github.com/kubernetes-sigs/kind/releases/",
-		url:  regexp.MustCompile(`"https://github\.com/kubernetes-sigs/kind/releases/download/(v[^/"\s]+)/kind-linux-\$\{ARCH\}"`),
-		form: `"https://github.com/kubernetes-sigs/kind/releases/download/<version>/kind-linux-${ARCH}"`, pin: "toolchain.KindVersion"},
+		url:  regexp.MustCompile(`wget -qO (/\S+) "https://github\.com/kubernetes-sigs/kind/releases/download/(v[^/"\s]+)/kind-linux-\$\{ARCH\}"`),
+		form: `wget -qO <path> "https://github.com/kubernetes-sigs/kind/releases/download/<version>/kind-linux-${ARCH}"`,
+		pin:  "toolchain.KindVersion", bin: "/usr/local/bin/kind"},
 }
 
-// The image's kubectl and kind are the releases that the b.yaml template
-// pins, so the operator and a project run the same cluster tools: the kind
-// release picks the default node image (the cluster's Kubernetes), and
-// kubectl must stay within one minor of it. Each tool has one release URL
-// in the image, in the final stage, at the pinned release. The test reads
-// text, not the shell: a download from a mirror can get past it.
+// The image's kubectl and kind are the releases that lok8s pins, and they
+// land where the image runs them:
+//   - kind is toolchain.KindVersion, the release that the b.yaml template
+//     pins, so the operator and a project run the same kind. Its release
+//     picks the default node image (the cluster's Kubernetes).
+//   - kubectl is toolchain.KubectlVersion. It must stay within one minor of
+//     that Kubernetes. The template's kubectl floats until b installs
+//     kubectl from dl.k8s.io, so today this pin is the image's only.
+//   - Each tool has one release URL in the image, the download is in the
+//     final stage, and one install puts it at /usr/local/bin/<tool>, on
+//     PATH. Nothing else names that path, so a later copy cannot replace
+//     the download.
+//
+// The test reads text, not the shell: a download from a mirror can get
+// past it.
 func TestOperatorImageClusterToolsFollowThePins(t *testing.T) {
 	t.Parallel()
 	pins := map[string]string{"kubectl": toolchain.KubectlVersion, "kind": toolchain.KindVersion}
@@ -59,6 +73,7 @@ func TestOperatorImageClusterToolCheckFindsEachHole(t *testing.T) {
 	const (
 		modDownload = "RUN go mod download\n"
 		lastCommand = "    && rm -rf /tmp/dl\n"
+		copyLo      = "COPY --from=lo-build /out/lo /usr/local/bin/lo\n"
 	)
 	pins := map[string]string{"kubectl": toolchain.KubectlVersion, "kind": toolchain.KindVersion}
 	moved := func(name string) map[string]string {
@@ -74,26 +89,50 @@ func TestOperatorImageClusterToolCheckFindsEachHole(t *testing.T) {
 	}{
 		{"kubectl from another release than the pin",
 			[]dockerfileEdit{{re: `(dl\.k8s\.io/release/)v[^/"]+/`, new: "${1}v9.9.9/"}},
-			pins, "downloads kubectl v9.9.9, but the b.yaml template pins kubectl " + toolchain.KubectlVersion},
+			pins, "downloads kubectl v9.9.9, but lok8s pins kubectl " + toolchain.KubectlVersion},
 		{"the kubectl pin moves and the image does not",
-			nil, moved("kubectl"), "but the b.yaml template pins kubectl v9.9.9"},
+			nil, moved("kubectl"), "but lok8s pins kubectl v9.9.9"},
 		{"a second kubectl release",
 			[]dockerfileEdit{{old: lastCommand, new: "    && echo https://dl.k8s.io/release/v9.9.9/bin/linux/amd64/kubectl \\\n" + lastCommand}},
 			pins, "names 2 kubectl releases"},
 		{"kubectl by another URL form",
 			[]dockerfileEdit{{re: `(/bin/linux/)\$\{ARCH\}(/kubectl")`, new: "${1}amd64${2}"}},
 			pins, "has 0 kubectl downloads of the form"},
+		{"kubectl installed in another place",
+			[]dockerfileEdit{{re: `(install -m 0755 /tmp/dl/kubectl )\S+`, new: "${1}/opt/kubectl"}},
+			pins, "installs kubectl at /opt/kubectl, want /usr/local/bin/kubectl"},
+		{"the kubectl download is not installed",
+			[]dockerfileEdit{{re: `    && install -m 0755 /tmp/dl/kubectl \S+ \\\n`, new: ""}},
+			pins, "installs the kubectl download /tmp/dl/kubectl 0 times"},
+		{"the kubectl download installed twice",
+			[]dockerfileEdit{{re: `(    && install -m 0755 /tmp/dl/kubectl \S+ \\\n)`, new: "${1}${1}"}},
+			pins, "installs the kubectl download /tmp/dl/kubectl 2 times"},
+		{"a later copy onto kubectl",
+			[]dockerfileEdit{{old: copyLo, new: copyLo + "COPY --from=lo-build /out/lo /usr/local/bin/kubectl\n"}},
+			pins, "names /usr/local/bin/kubectl 2 times"},
 		{"kind from another release than the pin",
 			[]dockerfileEdit{{re: `(kubernetes-sigs/kind/releases/download/)v[^/"]+/`, new: "${1}v9.9.9/"}},
-			pins, "downloads kind v9.9.9, but the b.yaml template pins kind " + toolchain.KindVersion},
+			pins, "downloads kind v9.9.9, but lok8s pins kind " + toolchain.KindVersion},
 		{"the kind pin moves and the image does not",
-			nil, moved("kind"), "but the b.yaml template pins kind v9.9.9"},
+			nil, moved("kind"), "but lok8s pins kind v9.9.9"},
 		{"a second kind release",
 			[]dockerfileEdit{{old: lastCommand, new: "    && echo https://github.com/kubernetes-sigs/kind/releases/download/v9.9.9/kind-linux-amd64 \\\n" + lastCommand}},
 			pins, "names 2 kind releases"},
 		{"kind by another URL form",
 			[]dockerfileEdit{{re: `kind-linux-\$\{ARCH\}"`, new: `kind-linux-amd64"`}},
 			pins, "has 0 kind downloads of the form"},
+		{"kind installed in another place",
+			[]dockerfileEdit{{re: `(install -m 0755 /tmp/dl/kind )\S+`, new: "${1}/opt/kind"}},
+			pins, "installs kind at /opt/kind, want /usr/local/bin/kind"},
+		{"the kind download is not installed",
+			[]dockerfileEdit{{re: `    && install -m 0755 /tmp/dl/kind \S+ \\\n`, new: ""}},
+			pins, "installs the kind download /tmp/dl/kind 0 times"},
+		{"the kind download installed twice",
+			[]dockerfileEdit{{re: `(    && install -m 0755 /tmp/dl/kind \S+ \\\n)`, new: "${1}${1}"}},
+			pins, "installs the kind download /tmp/dl/kind 2 times"},
+		{"a later copy onto kind",
+			[]dockerfileEdit{{old: copyLo, new: copyLo + "COPY --from=lo-build /out/lo /usr/local/bin/kind\n"}},
+			pins, "names /usr/local/bin/kind 2 times"},
 		{"kind downloaded in an earlier stage only",
 			[]dockerfileEdit{
 				{re: `(?m)^    && wget -qO /tmp/dl/kind \\\n(?:.*\n){3}`, new: ""},
@@ -141,8 +180,19 @@ func clusterToolProblems(text string, pins map[string]string) []string {
 			bad("the final stage of operator/Dockerfile has %d %s downloads of the form %s, want one: change this test with the image", len(got), tool.name, tool.form)
 			continue
 		}
-		if got[0][1] != pins[tool.name] {
-			bad("operator/Dockerfile downloads %s %s, but the b.yaml template pins %s %s (%s): change the URL and the sums of the image with the pin", tool.name, got[0][1], tool.name, pins[tool.name], tool.pin)
+		dl, version := got[0][1], got[0][2]
+		if version != pins[tool.name] {
+			bad("operator/Dockerfile downloads %s %s, but lok8s pins %s %s (%s): change the URL and the sums of the image with the pin", tool.name, version, tool.name, pins[tool.name], tool.pin)
+		}
+		dest := regexp.MustCompile(`(?:^|\s)install -m 0755 `+regexp.QuoteMeta(dl)+` (\S+)(?:\s|$)`).FindAllStringSubmatch(final, -1)
+		switch {
+		case len(dest) != 1:
+			bad("the final stage of operator/Dockerfile installs the %s download %s %d times (install -m 0755 %s <path>), want once", tool.name, dl, len(dest), dl)
+		case dest[0][1] != tool.bin:
+			bad("operator/Dockerfile installs %s at %s, want %s (on PATH, where the image runs it by name)", tool.name, dest[0][1], tool.bin)
+		}
+		if n := strings.Count(s, tool.bin); n != 1 {
+			bad("operator/Dockerfile names %s %d times, want once (the install): a later copy onto it would replace the %s download", tool.bin, n, tool.name)
 		}
 	}
 	return problems
