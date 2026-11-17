@@ -200,8 +200,9 @@ func (b *DryRunBoundary) link(src, rel string) error {
 // directory of the boundary (removed after), with an empty stdin,
 // PATH_SECRETS at a path in that directory that does not exist, the
 // store-free switch on and the keys-only setting off. The caller's
-// directory, stdin, store and environment do not reach it: a plugin that
-// does not know the flag would read the caller's store.
+// directory, stdin and store do not reach it (a plugin that does not
+// know the flag would read the caller's store). Its environment is the
+// caller's with these settings on top: a variable they do not set passes.
 func (b *DryRunBoundary) checkSecretPlugin(ctx context.Context, paths *config.Paths, runner execx.Runner, home string) error {
 	if mode, err := render.CurrentMode(); err != nil || mode != render.ModeExec {
 		return nil

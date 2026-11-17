@@ -371,8 +371,9 @@ addons::detail() {
 # directory of the boundary (a subshell removes it on exit), with an empty
 # stdin, PATH_SECRETS at a path in that directory that does not exist, the
 # store-free switch on and the keys-only setting off. The caller's
-# directory, stdin, store and environment do not reach it: a plugin that
-# does not know the flag would read the caller's store.
+# directory, stdin and store do not reach it (a plugin that does not
+# know the flag would read the caller's store). Its environment is the
+# caller's with these settings on top: a variable they do not set passes.
 addons::dry_run_boundary() {
   local _dir="${1}" _home="${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}" _d
   for _d in plugins bin helm-plugins store tmp; do
