@@ -122,7 +122,8 @@ dnssearch::check() {
 # unreadable or unparsable file: its stderr goes to stderr as is, the other
 # readers report the file); 2 at the time limit; 3 at the memory cap; 4
 # without a temporary directory or FIFO; 5 when yq does not know a flag (a
-# yq before v4.47.1); 64+N when the signal N stopped yq.
+# yq before v4.47.1); 6 when yq ended, but its output file is gone; 7 when
+# yq did not start, or its files are gone; 64+N when the signal N stopped yq.
 dnssearch::_read() {
   local out rc=0
   local -a flags=(--yaml-fix-merge-anchor-to-spec)
@@ -156,6 +157,8 @@ dnssearch::_stop() {
       fi
       ;;
     5) cause="the installed yq ($(dnssearch::_yq_version)) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.54.3 or later." ;;
+    6) cause="yq ended, but its output file in ${tmpdir} does not exist. Make sure that no other process removes files from ${tmpdir}, then run the command again." ;;
+    7) cause="yq did not start, or its files in ${tmpdir} do not exist. Make sure that ${tmpdir} is writable and has free space, and that no other process removes files from it. Then run the command again." ;;
     *)
       if (( rc > 64 && rc < 128 )); then
         cause="the signal SIG$(kill -l $(( rc - 64 )) 2>/dev/null || echo $(( rc - 64 ))) stopped yq. Run the command again."

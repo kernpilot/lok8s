@@ -55,6 +55,17 @@ yqbound::_stop() {
   return 0
 }
 
+# yqbound::_cleanup <owner> <dir> — the EXIT trap of yqbound::run: remove
+# <dir>, the call's temporary directory, but only in the call's own process
+# (<owner>, its BASHPID). A job of the call (the watchdog) that gets TERM
+# before it can take the signal can run the call's EXIT trap as it ends
+# (bash 5.2 does). Then it removed the directory while the call still
+# needed it, and a yq that had ended well gave no output. spec.sh has its
+# own copy (spec::_kver_cleanup).
+yqbound::_cleanup() {
+  [[ "${BASHPID}" != "${1}" ]] || rm -rf "${2}"
+}
+
 # yqbound::run <seconds> <kib> <file> <yq argument>... — run
 # `yq <yq argument>... <file>` with the time limit <seconds> and the data
 # memory cap <kib> KiB. Exit status:
@@ -68,15 +79,20 @@ yqbound::_stop() {
 #   4    no temporary directory or FIFO in ${TMPDIR:-/tmp}, or no free file
 #        descriptor (yq did not run).
 #   5    yq does not know a flag that it got (an old yq).
+#   6    yq ended well, but its output file is gone (a process removed it
+#        from ${TMPDIR:-/tmp}): nothing to stdout.
+#   7    yq did not start, or its files are gone: yq's stderr file is
+#        missing.
 #   64+N the signal N stopped yq (SIGSEGV: 75, SIGKILL: 73).
 #   130, 131, 143: yqbound::run itself got INT, QUIT or TERM.
-# For 2 to 5 and 64+N, yq's stderr (a usage text or a Go runtime dump) is
+# For 2 to 7 and 64+N, yq's stderr (a usage text or a Go runtime dump) is
 # dropped; the caller writes the message.
 yqbound::run() (
   seconds="${1}" kib="${2}" file="${3}"
   shift 3
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/lo-yq.XXXXXX" 2>/dev/null) || exit 4
-  trap 'rm -rf "${tmp}"' EXIT
+  owner="${BASHPID}"
+  trap 'yqbound::_cleanup "${owner}" "${tmp}"' EXIT
   # On an interrupt: stop yq and the watchdog (yqbound::_stop), then the
   # EXIT trap removes tmp. Until the pids of yq and of the watchdog are
   # kept, INT, QUIT and TERM are only noted: a stop between a start and its
@@ -127,13 +143,20 @@ yqbound::run() (
   ! yqbound::_running_job "${watchdog}" || kill -TERM "${watchdog}" 2>/dev/null || :
   wait "${watchdog}" 2>/dev/null || :
   exec 2>&"${errfd}" {errfd}>&-
+  # yq ended well: its output is the answer. A missing output file is no
+  # answer (6): an empty stdout would read as an empty value.
   if (( rc == 0 )); then
-    cat "${tmp}/out"
-    cat "${tmp}/err" >&2
+    [[ -f "${tmp}/out" ]] && cat "${tmp}/out" 2>/dev/null || exit 6
+    # yq's notes, if any: a lost stderr file costs only the notes.
+    cat "${tmp}/err" >&2 2>/dev/null || :
     exit 0
   fi
   [[ ! -e "${tmp}/timeout" ]] || exit 2
   (( rc <= 128 )) || exit $(( rc - 128 + 64 ))
+  # No stderr file of yq: its redirect failed (yq did not start), or the
+  # files are gone (7). Not 1: a caller reads 1 as yq's own verdict on the
+  # file.
+  [[ -f "${tmp}/err" ]] || exit 7
   if grep -qE 'out of memory|cannot allocate memory|stack overflow|goroutine stack exceeds' "${tmp}/err"; then
     exit 3
   fi

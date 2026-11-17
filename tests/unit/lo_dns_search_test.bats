@@ -318,6 +318,25 @@ exec "'"${real}"'" "$@"'
   [ "${rc}" -eq 0 ] && [ "${#DNSSEARCH_PROBLEMS[@]}" -eq 0 ]
 }
 
+# A lost output (6) and a yq that did not start (7) are failures with their
+# cause. Before, yqbound::run gave 0 with no output or 1 for them, which read
+# as an empty value or as "no list".
+@test "dnssearch::_stop: a lost yq output (6) and a yq that did not start (7) are failures with their cause" {
+  local rc tmpdir="${TMPDIR:-/tmp}"
+  rc=0
+  dnssearch::_stop 6 || rc=$?
+  [ "${rc}" -eq 1 ] && [ "${#DNSSEARCH_PROBLEMS[@]}" -eq 1 ]
+  [ "${DNSSEARCH_PROBLEMS[0]}" == "spec.network.dnsSearch could not be read: yq ended, but its output file in ${tmpdir} does not exist. Make sure that no other process removes files from ${tmpdir}, then run the command again." ] || {
+    echo "got: ${DNSSEARCH_PROBLEMS[0]}" >&2; return 1
+  }
+  rc=0
+  dnssearch::_stop 7 || rc=$?
+  [ "${rc}" -eq 1 ] && [ "${#DNSSEARCH_PROBLEMS[@]}" -eq 1 ]
+  [ "${DNSSEARCH_PROBLEMS[0]}" == "spec.network.dnsSearch could not be read: yq did not start, or its files in ${tmpdir} do not exist. Make sure that ${tmpdir} is writable and has free space, and that no other process removes files from it. Then run the command again." ] || {
+    echo "got: ${DNSSEARCH_PROBLEMS[0]}" >&2; return 1
+  }
+}
+
 @test "dnssearch::_stop: the yq version in the line keeps its pre-release suffix (as spec::_yq_version)" {
   _slow_yq 'echo "yq (https://github.com/mikefarah/yq/) version v4.46.1-rc1"'
   local rc=0

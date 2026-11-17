@@ -146,6 +146,17 @@ spec::_kver_stop() {
   return 0
 }
 
+# spec::_kver_cleanup <owner> <dir> — the EXIT trap of spec::_kver_yq:
+# remove <dir>, the read's temporary directory, but only in the read's own
+# process (<owner>, its BASHPID). A job of the read (the watchdog) that gets
+# TERM before its own trap is set can run the read's EXIT trap as it ends
+# (bash 5.2 does). Then it removed the directory while the read still needed
+# it, and a yq that had ended well gave no output. yqbound.sh has its own
+# copy (yqbound::_cleanup).
+spec::_kver_cleanup() {
+  [[ "${BASHPID}" != "${1}" ]] || rm -rf "${2}"
+}
+
 # spec::_kver_yq <cluster_yaml> <yq argument>... — one bounded yq read
 # (--yaml-fix-merge-anchor-to-spec). Prints the yq output. On a failure it
 # prints the problem and returns 1. The yq stderr goes to a file and never
@@ -168,7 +179,8 @@ spec::_kver_yq() (
     printf '%s lo cannot create a temporary directory in %s. Correct TMPDIR.\n' "${unreadable}" "${TMPDIR:-/tmp}"
     exit 1
   }
-  trap 'rm -rf "${tmp}"' EXIT
+  owner="${BASHPID}"
+  trap 'spec::_kver_cleanup "${owner}" "${tmp}"' EXIT
   # On an interrupt: stop yq and the watchdog (spec::_kver_stop), then the
   # EXIT trap removes tmp. Until the pids of yq and of the watchdog are
   # kept, INT and TERM are only noted: a stop between a start and its `$!`
@@ -223,12 +235,23 @@ spec::_kver_yq() (
   ! spec::_running_job "${watchdog}" || kill -TERM "${watchdog}" 2>/dev/null
   wait "${watchdog}" 2>/dev/null
   exec 2>&"${errfd}" {errfd}>&-
+  # yq ended well: its output is the answer. A missing output file is no
+  # answer: an empty output read as "spec is ..., not a map".
   if (( rc == 0 )); then
-    cat "${tmp}/out"
-    exit 0
+    if [[ -f "${tmp}/out" ]] && cat "${tmp}/out" 2>/dev/null; then
+      exit 0
+    fi
+    printf '%s yq ended, but its output file %s does not exist. Make sure that no other process removes files from %s, then run the command again.\n' \
+      "${unreadable}" "${tmp}/out" "${TMPDIR:-/tmp}"
+    exit 1
   fi
   if [[ -e "${tmp}/timeout" ]]; then
     printf '%s yq did not finish in %s s. Simplify the spec file.\n' "${unreadable}" "${_SPEC_KVER_TIMEOUT}"
+  elif (( rc <= 128 )) && [[ ! -f "${tmp}/err" ]]; then
+    # No stderr file of yq: its redirect failed (yq did not start), or the
+    # files are gone. Not a yq error of the spec file.
+    printf '%s yq did not start, or its files in %s do not exist. Make sure that %s is writable and has free space, and that no other process removes files from it. Then run the command again.\n' \
+      "${unreadable}" "${tmp}" "${TMPDIR:-/tmp}"
   elif (( rc <= 128 )) && grep -q '^panic: ' "${tmp}/err"; then
     # A Go panic is a fault of the yq release, not of the spec file (yq
     # v4.52.5 stops with "index out of range [-1]" on these expressions).
