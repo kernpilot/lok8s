@@ -3,8 +3,9 @@
 # time limit that always holds (pure bash, no timeout(1)) and a data-memory
 # cap (ulimit -d, best effort), and an exit status per outcome: 0 success,
 # 1 a yq error of its own, 2 the time limit, 3 the memory cap, 4 no
-# temporary directory, FIFO or free file descriptor, 5 an unknown flag (an old yq), 64+N the
-# signal N.
+# temporary directory, FIFO or free file descriptor, 5 an unknown flag (an old yq), 6 yq
+# ended but its output file is gone, 7 yq did not start or its files are
+# gone, 64+N the signal N.
 
 setup() {
   load "../test_helper"
@@ -162,6 +163,62 @@ args: -r .a ${BATS_TEST_TMPDIR}/in.yaml" ]
   [ "${rc}" -eq 1 ]
   [ "$(cat "${BATS_TEST_TMPDIR}/err")" == "Error: bad file" ]
   [ ! -s "${BATS_TEST_TMPDIR}/out" ]
+  _clean
+}
+
+# yq ends well, but its output file is gone when the call collects it (a
+# process removed it from TMPDIR). That is no answer (6): an empty stdout
+# with 0 would read as an empty value.
+@test "yqbound::run: a yq that ends well but whose output file is gone is 6, never an empty success" {
+  _yq 'printf "1\n"; rm -f "${TMPDIR}"/lo-yq.*/out'
+  _run_bound 5
+  [ "${rc}" -eq 6 ] || { echo "rc ${rc}" >&2; return 1; }
+  [ ! -s "${BATS_TEST_TMPDIR}/out" ]
+  [ ! -s "${BATS_TEST_TMPDIR}/err" ] || { echo "stderr:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1; }
+  _clean
+}
+
+# yq did not end well, and its files are gone (its redirect failed, or a
+# process removed them): 7, not 1, which a caller reads as yq's own verdict
+# on the file (dnssearch: "no list").
+@test "yqbound::run: a yq whose files are gone, and that did not end well, is 7, not a yq error of its own" {
+  _yq 'rm -f "${TMPDIR}"/lo-yq.*/out "${TMPDIR}"/lo-yq.*/err; exit 1'
+  _run_bound 5
+  [ "${rc}" -eq 7 ] || { echo "rc ${rc}" >&2; return 1; }
+  [ ! -s "${BATS_TEST_TMPDIR}/out" ]
+  [ ! -s "${BATS_TEST_TMPDIR}/err" ] || { echo "stderr:" >&2; cat "${BATS_TEST_TMPDIR}/err" >&2; return 1; }
+  _clean
+}
+
+# The call removes its temporary directory in its EXIT trap, through
+# yqbound::_cleanup, and only in its own process. A job of the call (the
+# watchdog) that runs the call's EXIT trap as it ends must leave the
+# directory to the call: bash 5.2 runs it there when the job gets TERM
+# before it can take the signal, and the call then lost the output of a yq
+# that had ended well.
+@test "yqbound::_cleanup: the call's EXIT trap removes its directory in the call's own process only" {
+  local d="${BATS_TEST_TMPDIR}/yqb" owner="${BASHPID}" pid own dir n=0
+  mkdir -p "${d}"
+  : > "${d}/out"
+  ( yqbound::_cleanup "${owner}" "${d}" )
+  [ -e "${d}/out" ] || { echo "a job of the call removed the call's directory" >&2; return 1; }
+  yqbound::_cleanup "${owner}" "${d}"
+  [ ! -e "${d}" ] || { echo "the call did not remove its directory" >&2; return 1; }
+  # The call's EXIT trap calls it with the call's own pid and directory.
+  eval "_orig_$(declare -f yqbound::_cleanup)"
+  yqbound::_cleanup() {
+    printf '%s %s %s\n' "${BASHPID}" "${1}" "${2}" >> "${BATS_TEST_TMPDIR}/cleanups"
+    _orig_yqbound::_cleanup "$@"
+  }
+  : > "${BATS_TEST_TMPDIR}/cleanups"
+  _yq 'printf "1\n"'
+  _run_bound 5
+  [ "${rc}" -eq 0 ] && [ "$(cat "${BATS_TEST_TMPDIR}/out")" == "1" ]
+  while read -r pid own dir; do
+    [[ "${dir}" == "${TMPDIR}/lo-yq."?????? ]] || { echo "a cleanup of ${dir}" >&2; return 1; }
+    [[ "${pid}" != "${own}" ]] || n=$(( n + 1 ))
+  done < "${BATS_TEST_TMPDIR}/cleanups"
+  (( n == 1 )) || { echo "${n} cleanups in the call's own process, want 1" >&2; return 1; }
   _clean
 }
 
