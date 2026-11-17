@@ -362,10 +362,13 @@ _ADDONS_DRYRUN_CHECK_TIMEOUT=30
 _ADDONS_DRYRUN_CHECK_GRACE=5
 
 # Test only (tests/unit/bootstrap_test.bats): a delay, in seconds, in the
-# check between the start of the plugin (_PLUGIN) or of the watchdog
-# (_WATCHDOG) and the line that keeps its pid, so that a test can send a
-# signal in that window. Empty in a normal run. Shell variables, set here,
-# so the environment cannot set them.
+# check between the start of the check's subshell (_CHECK), of the plugin
+# (_PLUGIN) or of the watchdog (_WATCHDOG) and the line that keeps its pid,
+# so that a test can send a signal in that window. Empty in a normal run.
+# A signal that ends a delay early (a Ctrl-C also reaches the sleep) does
+# not end the shell under set -e. Shell variables, set here, so the
+# environment cannot set them.
+_ADDONS_DRYRUN_CHECK_TEST_DELAY_CHECK=""
 _ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN=""
 _ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG=""
 
@@ -448,7 +451,9 @@ addons::_check_stop() {
 # that does not end within _ADDONS_DRYRUN_CHECK_TIMEOUT seconds is refused.
 # An INT or TERM that stops the check is reported as the interrupt, not as
 # a plugin without the dry run, and the check returns 128+n (130, 143): lo
-# ends with that code, as the Go binary does after an interrupt.
+# ends with that code, as the Go binary does after an interrupt. This is
+# also true for a signal to lo's own shell only (kill <pid of lo>), not
+# only for one to its process group (Ctrl-C).
 # Without a Secret plugin in the project there is nothing to check (as in a
 # real run, the render then has none); with one, a link of the boundary that
 # does not resolve is refused, not skipped. The plugin home must be an
@@ -479,7 +484,7 @@ addons::dry_run_boundary() {
   addons::_helm_stub "${_dir}/bin" > "${_dir}/bin/helm" || return 1
   chmod 700 "${_dir}/bin/docker" "${_dir}/bin/git" "${_dir}/bin/helm" || return 1
   ( umask 077; : > "${_dir}/report" ) || return 1
-  local _plugin="${_dir}/plugins/${_secret}" _rel="${_home#"${PATH_BASE}/"}/${_secret}" _probe _out _late _stop _stopped _caps="" _rc=0 _pid _watchdog
+  local _plugin="${_dir}/plugins/${_secret}" _rel="${_home#"${PATH_BASE}/"}/${_secret}" _probe _out _late _stop _stopped _caps="" _rc=0 _pid _watchdog _check _lo_sig="" _traps=""
   [[ -f "${_home}/${_secret}" ]] || return 0
   if [[ ! -f "${_plugin}" ]]; then
     error "bootstrap dry-run: the dry run's link to the Secret plugin ${_rel} does not resolve, so the dry run cannot check the plugin"
@@ -490,8 +495,9 @@ addons::dry_run_boundary() {
     return 1
   fi
   # The check's own files get new names (mktemp), so a name that is already
-  # there (a link, a FIFO) is never opened: the plugin's stdout, and the
-  # mark that the watchdog writes when the time limit ends the check.
+  # there (a link, a FIFO) is never opened: the plugin's stdout, the mark
+  # that the watchdog writes when the time limit ends the check, and the
+  # mark of an INT or TERM that stops it.
   if ! _out=$(mktemp "${_dir}/check-out-XXXXXX" 2>&1); then
     rm -rf -- "${_probe}"
     error "bootstrap dry-run: cannot make a file for the output of the check of the Secret plugin ${_rel}: ${_out}"
@@ -499,12 +505,12 @@ addons::dry_run_boundary() {
   fi
   if ! _late=$(mktemp "${_dir}/check-late-XXXXXX" 2>&1); then
     rm -rf -- "${_probe}" "${_out}"
-    error "bootstrap dry-run: cannot make a file for the output of the check of the Secret plugin ${_rel}: ${_late}"
+    error "bootstrap dry-run: cannot make a file for the time-limit mark of the check of the Secret plugin ${_rel}: ${_late}"
     return 1
   fi
   if ! _stop=$(mktemp "${_dir}/check-stop-XXXXXX" 2>&1); then
     rm -rf -- "${_probe}" "${_out}" "${_late}"
-    error "bootstrap dry-run: cannot make a file for the output of the check of the Secret plugin ${_rel}: ${_stop}"
+    error "bootstrap dry-run: cannot make a file for the interrupt mark of the check of the Secret plugin ${_rel}: ${_stop}"
     return 1
   fi
   # The plugin runs in the background with a watchdog (the pattern of
@@ -526,6 +532,21 @@ addons::dry_run_boundary() {
   # A stop first writes the name of its signal into a mark of its own: the
   # check then reports the interrupt, not a plugin without the dry run. The
   # exit code of the subshell cannot tell: a plugin can exit 130 or 143.
+  #
+  # lo's own shell runs the check's subshell in the background and waits
+  # for it with `wait`, which a trapped signal ends at once (bash holds a
+  # trap until a subshell in the foreground ends). So an INT or TERM to lo
+  # itself also stops the check: lo's shell sends TERM to the check and
+  # notes its own signal, which the report then names. It sends TERM for
+  # an INT too: a background job of a script ignores INT, and bash before
+  # 5.3 cannot trap INT there. Until the pid of the check is kept, lo's
+  # shell only notes a signal, as the check does. After the check, the
+  # shell's INT and TERM traps come back. In a subshell, `trap -p` shows the
+  # parent's traps, which do not run there (bootstrap::_dry_run_trap), so a
+  # subshell only resets INT and TERM.
+  (( BASHPID != $$ )) || _traps=$(trap -p INT TERM)
+  trap '_lo_sig="${_lo_sig:-INT}"' INT
+  trap '_lo_sig="${_lo_sig:-TERM}"' TERM
   (
     cd "${_probe}" || exit 1
     _sig=""
@@ -542,7 +563,7 @@ addons::dry_run_boundary() {
     LOK8S_SECRETS_DISABLE=1 \
     LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0 \
       "${_plugin}" --capabilities </dev/null >"${_out}" 2>/dev/null &
-    [[ -z "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN}" ]] || sleep "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN}"
+    [[ -z "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN}" ]] || sleep "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN}" || :
     _pid=$!
     (
       trap 'kill -TERM $(jobs -p) 2>/dev/null; exit 0' TERM
@@ -554,7 +575,7 @@ addons::dry_run_boundary() {
       wait "$!" || exit 0
       kill -KILL "${_pid}" 2>/dev/null
     ) >/dev/null 2>&1 &
-    [[ -z "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG}" ]] || sleep "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG}"
+    [[ -z "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG}" ]] || sleep "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG}" || :
     _watchdog=$!
     trap 'trap : INT TERM; echo SIGINT > "${_stop}" || :; addons::_check_stop "${_pid}" "${_watchdog}"; exit 130' INT
     trap 'trap : INT TERM; echo SIGTERM > "${_stop}" || :; addons::_check_stop "${_pid}" "${_watchdog}"; exit 143' TERM
@@ -564,10 +585,36 @@ addons::dry_run_boundary() {
     ! addons::_running_job "${_watchdog}" || kill -TERM "${_watchdog}" 2>/dev/null
     wait "${_watchdog}" 2>/dev/null
     exit "${_rc}"
-  ) || _rc=$?
+  ) &
+  [[ -z "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_CHECK}" ]] || sleep "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_CHECK}" || :
+  _check=$!
+  trap '_lo_sig="${_lo_sig:-INT}"; ! addons::_running_job "${_check}" || kill -TERM "${_check}" 2>/dev/null || :' INT
+  trap '_lo_sig="${_lo_sig:-TERM}"; ! addons::_running_job "${_check}" || kill -TERM "${_check}" 2>/dev/null || :' TERM
+  [[ -z "${_lo_sig}" ]] || kill -"${_lo_sig}" "${BASHPID}"
+  wait "${_check}" 2>/dev/null || _rc=$?
+  # A trapped signal ends a wait early with 128+n while the check runs on
+  # (after an INT or TERM, the check stops the plugin): wait again until
+  # the check ends. The code is that of the last wait, the check's own: a
+  # signal that only a trap of the caller catches does not blame the plugin.
+  while addons::_running_job "${_check}"; do
+    _rc=0
+    wait "${_check}" 2>/dev/null || _rc=$?
+  done
+  # A trap that takes time (a caller's) can run while the check ends: the
+  # last wait then gave 128+n, and the check had ended before the loop
+  # looked. One more wait reads the check's own code: bash keeps the code
+  # of a job that ended. A code that a wait already gave is not read again.
+  if (( _rc > 128 )); then
+    _rc=0
+    wait "${_check}" 2>/dev/null || _rc=$?
+  fi
+  trap - INT TERM
+  [[ -z "${_traps}" ]] || eval "${_traps}"
   rm -rf -- "${_probe}"
   _caps=$(<"${_out}")
   _stopped=$(<"${_stop}")
+  # lo's own signal names the stop: for an INT, lo's shell sent TERM.
+  [[ -z "${_lo_sig}" ]] || _stopped="SIG${_lo_sig}"
   # The interrupt first, as in Go: the check did not fail, it was stopped.
   if [[ -n "${_stopped}" ]]; then
     rm -f -- "${_out}" "${_late}" "${_stop}"

@@ -3701,7 +3701,22 @@ _dry_slow_plugin() {
   chmod +x "${1}"
 }
 
-_dry_now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+# _dry_now_ms: the time in ms, from EPOCHREALTIME (bash 5: seconds and
+# microseconds), else from date +%s%N (GNU date). BSD date (macOS) has no
+# %N: a test that reads the time starts with _dry_need_clock, which skips
+# it where neither gives the time.
+_dry_now_ms() {
+  if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    local _t="${EPOCHREALTIME//[!0-9]/}"
+    echo $(( _t / 1000 ))
+  else
+    echo $(( $(date +%s%N) / 1000000 ))
+  fi
+}
+_dry_need_clock() {
+  [[ -n "${EPOCHREALTIME:-}" || "$(date +%N)" =~ ^[0-9]+$ ]] \
+    || skip "no clock in ms: this test needs bash 5 (EPOCHREALTIME) or a date with %N"
+}
 
 # _dry_plugin_stopped <dir> <start-ms>: fails if the plugin of
 # _dry_slow_plugin still runs, or if it ran to its end. It waits until the
@@ -3725,6 +3740,7 @@ _dry_plugin_stopped() {
 # plugin that ignores TERM gets KILL at the end of the grace, not before.
 # In both cases the plugin does not run on after the check.
 @test "the dry run's plugin check has a time limit: TERM, the grace, then KILL" {
+  _dry_need_clock
   local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m1" start took
   _ADDONS_DRYRUN_CHECK_TIMEOUT=1
   _ADDONS_DRYRUN_CHECK_GRACE=1
@@ -3750,11 +3766,14 @@ _dry_plugin_stopped() {
   _dry_plugin_stopped "${m}" "${start}"
 }
 
-# On INT (Ctrl-C) or TERM the check stops the plugin as at the time limit:
-# TERM, then KILL after the grace (addons::_check_stop; Go: a cancel of the
-# caller, TestDryRunBoundaryStopsThePluginOnACancel).
-@test "the dry run's plugin check stops a plugin that ignores TERM when the check gets INT or TERM" {
-  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" sig m b start sent took job i
+# On INT (Ctrl-C) or TERM to lo the check stops the plugin as at the time
+# limit: TERM, then KILL after the grace (addons::_check_stop; Go: a cancel
+# of the caller, TestDryRunBoundaryStopsThePluginOnACancel). The INT goes
+# to the process group of lo's shell, as a terminal sends Ctrl-C; the TERM
+# goes to lo's shell only (kill <pid of lo>), which sends TERM to the check.
+@test "the dry run's plugin check stops a plugin that ignores TERM when lo gets INT or TERM" {
+  _dry_need_clock
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" sig m b start sent took job to i
   _ADDONS_DRYRUN_CHECK_GRACE=1
   for sig in INT TERM; do
     m="${BATS_TEST_TMPDIR}/m-${sig}" b="${BATS_TEST_TMPDIR}/b-${sig}"
@@ -3762,14 +3781,16 @@ _dry_plugin_stopped() {
     _dry_slow_plugin "${plugin}" "${m}" ""
     start=$(_dry_now_ms)
     # Job control on: without it, a background job of a script ignores INT.
+    # The job is lo's shell, in a process group of its own.
     set -m
     addons::dry_run_boundary "${b}" >"${b}.out" 2>&1 3>&- &
     job=$!
     set +m
     for (( i = 0; i < 100; i++ )); do [[ -s "${m}/ppid" ]] && break; sleep 0.05; done
     [[ -s "${m}/ppid" ]] || { echo "${sig}: the plugin did not start"; return 1; }
-    # The plugin's parent is the subshell of the check.
-    kill -"${sig}" "$(<"${m}/ppid")"
+    to="${job}"
+    [[ "${sig}" != INT ]] || to="-${job}"
+    kill -"${sig}" -- "${to}"
     sent=$(_dry_now_ms)
     wait "${job}" || true
     took=$(( $(_dry_now_ms) - sent ))
@@ -3787,6 +3808,7 @@ _dry_plugin_stopped() {
 # looks after 4.5 s. Go has no such window: exec.Cmd.Start returns with the
 # process.
 @test "the dry run's plugin check stops the plugin and the watchdog on a TERM before it keeps their pids" {
+  _dry_need_clock
   local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" window m b start sent took job rc i
   _ADDONS_DRYRUN_CHECK_TIMEOUT=3
   _ADDONS_DRYRUN_CHECK_GRACE=1
@@ -3896,6 +3918,7 @@ _dry_plugin_stopped() {
 # check within the grace. Without that, bash runs a second stop inside the
 # first (between its commands), and the plugin gets TERM twice.
 @test "the dry run's plugin check runs one stop when a second signal comes during it" {
+  _dry_need_clock
   local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m" b="${BATS_TEST_TMPDIR}/b" log="${BATS_TEST_TMPDIR}/kills" start job rc sub n i
   _ADDONS_DRYRUN_CHECK_GRACE=1
   mkdir -p "${m}" "${b}"
@@ -3920,43 +3943,113 @@ _dry_plugin_stopped() {
   _dry_plugin_stopped "${m}" "${start}" || { echo "check rc ${rc}; the plugin is $(<"${m}/pid"); signals from the check: $(tr '\n' ' ' < "${log}")"; return 1; }
 }
 
+# _dry_window_open <pid> <seconds>: true while <pid> runs the test-only
+# delay of a window of the check (a child `sleep <seconds>`). It uses the
+# process helpers of test_helper (_pgrep_f and _ppid: /proc, else pgrep and
+# ps), in a shell of its own: bats runs a DEBUG trap before each command of
+# the test's shell, and with it a scan of every process can take longer
+# than the window.
+_dry_window_open() {
+  bash -c "$(declare -f _pgrep_f _ppid)"'
+    for pid in $(_pgrep_f "${2}"); do
+      [[ "$(_ppid "${pid}")" != "${1}" ]] || exit 0
+    done
+    exit 1
+  ' _ "${1}" "^sleep ${2//./[.]}\$"
+}
+
 # An INT or TERM that stops the check is the interrupt, not a plugin
 # without the dry run: the check names the signal and returns 128+n, the
-# code that lo ends with (Go: TestDryRunBoundaryNamesTheInterrupt). The
-# signal comes in the check's wait, and in each window before the check
-# keeps the pid of the plugin or of the watchdog (the test-only delays):
-# there it is noted, and sent again once both pids are kept. The plugin
-# ends on TERM.
+# code that lo ends with (Go: TestDryRunBoundaryNamesTheInterrupt). An INT
+# goes to the process group of lo's shell, as a terminal sends Ctrl-C, or
+# to lo's shell only. A TERM goes to lo's shell only (kill <pid of lo>), or
+# to the check's subshell only. A signal to lo's shell only reaches the
+# check as a TERM from lo's shell, and the line still names lo's own
+# signal. The signal comes in the check's wait, and in each window before
+# lo's shell keeps the pid of the check, or before the check keeps the pid
+# of the plugin or of the watchdog (the test-only delays): there it is
+# noted, and sent again once the pids are kept. The plugin ends on TERM.
+#
+# Each case proves where the signal came. In a window, the window's delay
+# (a `sleep 1.2` of the shell that owns the window) still runs just before
+# the signal, and the log of the check's kills then has the owner's kill
+# of itself: a shell sends a signal to itself again only when it noted the
+# signal in a window. In the wait, no shell does. The ceiling: the check
+# ends at most 2.5 s after the signal, at the end of the window, and does
+# not wait until the plugin ends by itself (about 4 s).
 @test "the dry run's plugin check names an INT or TERM that stops it and returns 128+n" {
-  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" sig window m b job rc want i
+  _dry_need_clock
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" how sig to window m b log job sub rc want sent took i
   _ADDONS_DRYRUN_CHECK_GRACE=1
-  for sig in INT TERM; do
+  for how in "INT group" "INT lo" "TERM lo" "TERM check"; do
+    sig="${how% *}" to="${how#* }"
     want=$(( 128 + $(kill -l "${sig}") ))
-    for window in wait plugin watchdog; do
-      m="${BATS_TEST_TMPDIR}/m-${sig}-${window}" b="${BATS_TEST_TMPDIR}/b-${sig}-${window}"
+    for window in wait check plugin watchdog; do
+      # The window of lo's shell: a signal to the check's subshell never
+      # meets it.
+      [[ "${to} ${window}" != "check check" ]] || continue
+      m="${BATS_TEST_TMPDIR}/m-${sig}-${to}-${window}" b="${BATS_TEST_TMPDIR}/b-${sig}-${to}-${window}"
+      log="${BATS_TEST_TMPDIR}/kills-${sig}-${to}-${window}"
       mkdir -p "${m}" "${b}"
-      _ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN="" _ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG=""
-      [[ "${window}" != plugin ]] || _ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN=1
-      [[ "${window}" != watchdog ]] || _ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG=1
+      : > "${log}"
+      _ADDONS_DRYRUN_CHECK_TEST_DELAY_CHECK="" _ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN="" _ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG=""
+      [[ "${window}" != check ]] || _ADDONS_DRYRUN_CHECK_TEST_DELAY_CHECK=1.2
+      [[ "${window}" != plugin ]] || _ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN=1.2
+      [[ "${window}" != watchdog ]] || _ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG=1.2
       _dry_slow_plugin "${plugin}" "${m}" "exit 1"
       # Job control on: without it, a background job of a script ignores INT.
+      # The job is lo's shell, in a process group of its own. Its kill logs
+      # each signal of the check with the pid of the shell that sends it.
       set -m
-      addons::dry_run_boundary "${b}" >"${b}.out" 2>&1 3>&- &
+      {
+        kill() { printf '%s %s\n' "${BASHPID}" "$*" >> "${log}"; builtin kill "$@"; }
+        addons::dry_run_boundary "${b}"
+      } >"${b}.out" 2>&1 3>&- &
       job=$!
       set +m
       for (( i = 0; i < 100; i++ )); do [[ -s "${m}/ppid" ]] && break; sleep 0.05; done
-      [[ -s "${m}/ppid" ]] || { echo "${sig} (${window}): the plugin did not start"; return 1; }
-      # In a window: 0.3 s into its delay of 1 s.
-      [[ "${window}" == wait ]] || sleep 0.3
-      kill -"${sig}" "$(<"${m}/ppid")"
+      [[ -s "${m}/ppid" ]] || { echo "${how} (${window}): the plugin did not start"; return 1; }
+      # The plugin's parent is the check's subshell.
+      sub=$(<"${m}/ppid")
+      # In a window: 0.3 s into its delay of 1.2 s, while the delay runs.
+      if [[ "${window}" != wait ]]; then
+        sleep 0.3
+        if [[ "${window}" == check ]]; then
+          _dry_window_open "${job}" 1.2 || { echo "${how} (${window}): the window of lo's shell closed before the signal"; return 1; }
+        else
+          _dry_window_open "${sub}" 1.2 || { echo "${how} (${window}): the ${window} window of the check closed before the signal"; return 1; }
+        fi
+      fi
+      case "${to}" in
+        group) kill -"${sig}" -- "-${job}" ;;
+        lo) kill -"${sig}" "${job}" ;;
+        check) kill -"${sig}" "${sub}" ;;
+      esac
+      sent=$(_dry_now_ms)
       rc=0
       wait "${job}" 2>/dev/null || rc=$?
-      (( rc == want )) || { echo "${sig} (${window}): the check returned ${rc}, want ${want}: $(<"${b}.out")"; return 1; }
+      took=$(( $(_dry_now_ms) - sent ))
+      (( rc == want )) || { echo "${how} (${window}): the check returned ${rc}, want ${want}: $(<"${b}.out")"; return 1; }
       grep -qF "bootstrap dry-run: the check of the Secret plugin " "${b}.out" \
         && grep -qF "/secrets.lok8s.dev/v1/secret/Secret was interrupted (SIG${sig})" "${b}.out" \
-        || { echo "${sig} (${window}): the check does not name the interrupt: $(<"${b}.out")"; return 1; }
-      ! grep -qF "does not support a dry run" "${b}.out" || { echo "${sig} (${window}): the check blames the plugin: $(<"${b}.out")"; return 1; }
-      [ -z "$(ls -A "${b}" | grep -E '^(probe|check)-')" ] || { echo "${sig} (${window}): files of the check are left: $(ls -A "${b}")"; return 1; }
+        || { echo "${how} (${window}): the check does not name the interrupt: $(<"${b}.out")"; return 1; }
+      ! grep -qF "does not support a dry run" "${b}.out" || { echo "${how} (${window}): the check blames the plugin: $(<"${b}.out")"; return 1; }
+      [ -z "$(ls -A "${b}" | grep -E '^(probe|check)-')" ] || { echo "${how} (${window}): files of the check are left: $(ls -A "${b}")"; return 1; }
+      (( took <= 2500 )) || { echo "${how} (${window}): the check ended ${took} ms after the signal, want at most 2500 (the rest of the window)"; return 1; }
+      case "${window}" in
+        wait)
+          ! grep -qE "^(${job} -[A-Z]+ ${job}|${sub} -[A-Z]+ ${sub})\$" "${log}" \
+            || { echo "${how} (${window}): a shell sent the signal to itself again, so it came in a window: $(tr '\n' ' ' < "${log}")"; return 1; } ;;
+        check)
+          grep -qx -- "${job} -${sig} ${job}" "${log}" \
+            || { echo "${how} (${window}): lo's shell did not note the signal in its window: $(tr '\n' ' ' < "${log}")"; return 1; } ;;
+        *)
+          # The check notes the signal it gets first: the INT of the group
+          # (bash 5.3 traps INT in a background job), else the TERM of lo's
+          # shell.
+          grep -qE "^${sub} -(INT|TERM) ${sub}\$" "${log}" \
+            || { echo "${how} (${window}): the check did not note the signal in its ${window} window: $(tr '\n' ' ' < "${log}")"; return 1; } ;;
+      esac
     done
   done
 }
@@ -3964,11 +4057,12 @@ _dry_plugin_stopped() {
 # The caller keeps that code: bootstrap::apply returns 128+n, not the 2 of
 # a refused plugin, renders nothing, and sets the mark that
 # bootstrap::_dry_run_exit reads (lo then ends with 128+n, as the Go binary
-# does).
+# does). The INT goes to the process group of lo's shell (Ctrl-C), the TERM
+# to lo's shell only.
 @test "bootstrap::apply --dry-run returns 128+n when an INT or TERM stops the check of the Secret plugin" {
   write_cluster_spec "testcni"
   _dry_kubectl_stub 0
-  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" sig m job rc want i
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" sig m job to rc want i
   local bootstrap_dry_run=1
   _ADDONS_DRYRUN_CHECK_GRACE=1
   for sig in INT TERM; do
@@ -3988,7 +4082,9 @@ _dry_plugin_stopped() {
     set +m
     for (( i = 0; i < 100; i++ )); do [[ -s "${m}/ppid" ]] && break; sleep 0.05; done
     [[ -s "${m}/ppid" ]] || { echo "${sig}: the plugin did not start: $(<"${m}.out")"; return 1; }
-    kill -"${sig}" "$(<"${m}/ppid")"
+    to="${job}"
+    [[ "${sig}" != INT ]] || to="-${job}"
+    kill -"${sig}" -- "${to}"
     rc=0
     wait "${job}" 2>/dev/null || rc=$?
     (( rc == want )) || { echo "${sig}: bootstrap::apply returned ${rc}, want ${want}: $(<"${m}.out")"; return 1; }
@@ -3996,6 +4092,67 @@ _dry_plugin_stopped() {
     ! grep -qF "does not support a dry run" "${m}.out" || { echo "${sig}: the plugin is blamed: $(<"${m}.out")"; return 1; }
     ! grep -qF "testcni" "${m}.out" || { echo "${sig}: an entry was rendered after the interrupt: $(<"${m}.out")"; return 1; }
     [[ "$(<"${m}.mark")" == 1 ]] || { echo "${sig}: bootstrap::apply did not set the mark of the interrupt"; return 1; }
+  done
+}
+
+# A signal that lo's shell traps but that does not stop the check (here a
+# caller's USR1 trap) ends the shell's wait for the check early, with
+# 128+n. The shell waits again, and the check's own code counts: a plugin
+# that supports the dry run still passes, and is not blamed. The trap takes
+# 1.5 s, so the check (1 s) ends while it runs: the last wait of the loop
+# then gave 128+n, and only one more wait reads the check's code. The trap
+# keeps the command that the signal stopped: the wait for the check.
+@test "the dry run's plugin check takes its code from its last wait, not from one that a signal ended" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m" b="${BATS_TEST_TMPDIR}/b" job rc i
+  mkdir -p "$(dirname "${plugin}")" "${m}" "${b}"
+  printf '#!/bin/sh\nexec 3>&-\necho $$ > "%s/pid"\nsleep 1\necho dry-run\n' "${m}" > "${plugin}"
+  chmod +x "${plugin}"
+  {
+    trap 'printf "%s\n" "${BASH_COMMAND}" > "${m}/usr1"; sleep 1.5' USR1
+    addons::dry_run_boundary "${b}"
+  } >"${b}.out" 2>&1 3>&- &
+  job=$!
+  for (( i = 0; i < 100; i++ )); do [[ -s "${m}/pid" ]] && break; sleep 0.05; done
+  [[ -s "${m}/pid" ]] || { echo "the plugin did not start"; return 1; }
+  # lo's shell is in its wait for the check by now.
+  sleep 0.2
+  kill -USR1 "${job}"
+  rc=0
+  wait "${job}" 2>/dev/null || rc=$?
+  [[ "$(<"${m}/usr1")" == 'wait "${_check}"'* ]] || { echo "the USR1 did not come in the wait for the check: $(<"${m}/usr1")"; return 1; }
+  (( rc == 0 )) || { echo "the check returned ${rc}, want 0: $(<"${b}.out")"; return 1; }
+  ! grep -qF "does not support a dry run" "${b}.out" || { echo "the check blames the plugin: $(<"${b}.out")"; return 1; }
+}
+
+# After the check, lo's shell has its own INT and TERM traps back, and no
+# trap of the check: those name its local _check, which is gone when the
+# check returns, and a TERM trap of the check that stays would only note a
+# later TERM to lo. lo runs the check at the top level of its shell, where
+# the check keeps the shell's traps (in a subshell, as bats runs a test, it
+# keeps none), so a shell of its own runs it here: once with a TERM trap of
+# its own and no INT trap, and once with no trap, as lo runs it.
+@test "the dry run's plugin check gives lo's shell its own INT and TERM traps back" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" top="${BATS_TEST_TMPDIR}/top.sh" before n=0
+  mkdir -p "$(dirname "${plugin}")"
+  printf '#!/bin/sh\necho dry-run\n' > "${plugin}"
+  chmod +x "${plugin}"
+  for before in "trap 'echo earlier' TERM" ""; do
+    n=$(( n + 1 ))
+    cat > "${top}" <<EOF
+import() { :; }
+source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+source "${_PROJECT_ROOT}/.lok8s/libs/addons"
+${before}
+addons::dry_run_boundary "${BATS_TEST_TMPDIR}/b-${n}" || exit 1
+trap -p INT TERM
+EOF
+    run bash "${top}"
+    assert_success
+    if [[ -n "${before}" ]]; then
+      assert_output "trap -- 'echo earlier' SIGTERM"
+    else
+      [ -z "${output}" ] || { echo "a shell with no trap has traps after the check: ${output}"; return 1; }
+    fi
   done
 }
 
@@ -4028,10 +4185,39 @@ _dry_plugin_stopped() {
   done
 }
 
+# Each run of lo bootstrap and of lo provision starts without a mark of an
+# interrupt (main::bootstrap and main::provision reset it). A mark that an
+# earlier run in the same shell left (bootstrap::apply sets it when an INT
+# or TERM stops the check of the Secret plugin) must not keep the code of a
+# later failure that is not an interrupt: here 137, a child that a signal
+# ended. With the mark the dry run would end with 137; without it, with 2.
+# A mark that the run itself sets still keeps its 128+n. The run is
+# stubbed at the command boundary: argsh's :args only sets --dry-run, the
+# mode check passes, and the dispatch returns the code of the case.
+@test "lo bootstrap and lo provision reset the mark of an interrupt at the start of a run" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  :args() { dry_run=1; }
+  bootstrap::mode_check() { return 0; }
+  local cmd
+  for cmd in bootstrap provision; do
+    bootstrap::dispatch() { return 137; }
+    provision::dispatch() { return 137; }
+    _BOOTSTRAP_DRY_INTERRUPTED=1
+    run "main::${cmd}"
+    [ "${status}" -eq 2 ] || { echo "lo ${cmd}: the mark of an earlier run kept rc ${status}, want 2: ${output}"; return 1; }
+    bootstrap::dispatch() { _BOOTSTRAP_DRY_INTERRUPTED=1; return 143; }
+    provision::dispatch() { _BOOTSTRAP_DRY_INTERRUPTED=1; return 143; }
+    _BOOTSTRAP_DRY_INTERRUPTED=0
+    run "main::${cmd}"
+    [ "${status}" -eq 143 ] || { echo "lo ${cmd}: an interrupt in the run ended with rc ${status}, want 143: ${output}"; return 1; }
+  done
+}
+
 # The plugin's stdout is a file: a plugin that prints the line, exits 0 and
 # leaves a child that keeps its stdout open passes at once (Go:
 # TestDryRunBoundaryDoesNotWaitForAChildOfThePlugin).
 @test "the dry run's plugin check does not wait for a child of the plugin" {
+  _dry_need_clock
   local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" start took
   mkdir -p "$(dirname "${plugin}")" "${BATS_TEST_TMPDIR}/b"
   printf '#!/bin/sh\necho dry-run\nsleep 6 3>&- &\nexit 0\n' > "${plugin}"
@@ -4044,10 +4230,12 @@ _dry_plugin_stopped() {
 }
 
 # A file for the check that it cannot make stops the check with its own
-# message, the same as in Go (TestDryRunBoundaryNamesAnOutputFileItCannotMake),
-# and leaves no file of the check behind.
-@test "the dry run names an output file that it cannot make" {
-  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" b which _dry_fail
+# message, which names the file, and leaves no file of the check behind.
+# The output file is the same as in Go
+# (TestDryRunBoundaryNamesAnOutputFileItCannotMake); the binary has no
+# file for the time-limit mark or for the interrupt mark.
+@test "the dry run names a file of the check that it cannot make" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" b which name _dry_fail
   mkdir -p "$(dirname "${plugin}")"
   printf '#!/bin/sh\necho dry-run\n' > "${plugin}"
   chmod +x "${plugin}"
@@ -4055,13 +4243,14 @@ _dry_plugin_stopped() {
     if [[ "${*: -1}" == ${_dry_fail} ]]; then echo "mktemp: no room for it" >&2; return 1; fi
     command mktemp "$@"
   }
-  for which in out late stop; do
+  for which in "out:output" "late:time-limit mark" "stop:interrupt mark"; do
+    name="${which#*:}" which="${which%%:*}"
     b="${BATS_TEST_TMPDIR}/boundary-${which}"
     mkdir -p "${b}"
     _dry_fail="*/check-${which}-XXXXXX"
     run addons::dry_run_boundary "${b}"
     assert_failure
-    assert_output --partial "bootstrap dry-run: cannot make a file for the output of the check of the Secret plugin "
+    assert_output --partial "bootstrap dry-run: cannot make a file for the ${name} of the check of the Secret plugin "
     assert_output --partial "/secrets.lok8s.dev/v1/secret/Secret: mktemp: no room for it"
     refute_output --partial "does not support a dry run"
     [ -z "$(ls -A "${b}" | grep -E '^(probe|check)-')" ] || { echo "${which}: files of the check are left: $(ls -A "${b}")"; return 1; }
