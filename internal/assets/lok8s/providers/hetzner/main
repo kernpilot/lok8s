@@ -192,12 +192,12 @@ hetzner::_destroy_cluster_name() {
 _HETZNER_DESTROY_ORDER=(load-balancer server placement-group firewall volume floating-ip ssh-key network)
 
 # A jq def: the name of a part as the destroy plan and the warnings of the
-# destroy show it (VERBOSE_JQ_SHOWN_NAME, utils/verbose.sh: each control
-# character, each backslash, each line or paragraph separator and each
-# bidi, zero-width or invisible format character becomes '?'). warn prints
-# with `echo -e`: a newline in a name would split the line, an ESC would
-# reach the terminal, and a backslash sequence would become a control
-# character. The id names the part exactly.
+# destroy show it (VERBOSE_JQ_SHOWN_NAME, utils/verbose.sh: each backslash
+# and each character of its explicit list becomes '?', such as a control
+# character, a line separator, or a bidi, zero-width or invisible format
+# character). warn prints with `echo -e`: a newline in a name would split
+# the line, an ESC would reach the terminal, and a backslash sequence would
+# become a control character. The id names the part exactly.
 _HETZNER_JQ_SHOWN_NAME="${VERBOSE_JQ_SHOWN_NAME}"
 
 # hetzner::_destroy_resources <cluster_name> [<confirmed plan>]
@@ -491,9 +491,10 @@ provider::destroy() {
 # provider::destroy_plan <config_file> <work_dir>
 #   READ-ONLY. What provider::destroy would delete. Line 1 is
 #   "cluster<TAB><cluster_name>", then one "<resource><TAB><id><TAB><name>"
-#   line per resource (the name as shown_name gives it: no control
-#   character, backslash, separator, bidi, zero-width or invisible format
-#   character). provider::destroy deletes each resource in the token's
+#   line per resource (the name as shown_name gives it: no backslash and
+#   no character of its explicit list, such as a control character, a
+#   separator, or a bidi, zero-width or invisible format character).
+#   provider::destroy deletes each resource in the token's
 #   project that carries lok8s.dev/cluster=<cluster_name> and the
 #   owner mark of this cluster, so `lo destroy` shows this list, refuses a
 #   cluster_name that another domain also uses, and asks for the

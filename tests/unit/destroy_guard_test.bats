@@ -150,6 +150,38 @@ _nothing_ran() {
   assert_output --partial $'plan-env:cluster prod-a\nserver 70 ö-測試\nserver 71 a\x7fb\xc2\x85c\nserver 72 \\\nserver 73 x\xe2\x80\xaey\xe2\x80\x8bz\nserver 74 e\x1b[31mvil'
 }
 
+# The kind and the id of a plan line come from the provider too (a
+# third-party provider can give any text), so the plan shows them through
+# verbose::shown_names as well. A last row without a name shows an empty
+# name. The confirmed plan stays as the provider gave it. The Go twin is
+# TestDestroyGuardShowsEachKindAndIDSafely.
+@test "destroy guard: the plan shows each kind and id safely too" {
+  _assume_no_tty
+  local confirm_cluster=prod-a
+  PLAN='cluster\tprod-a\nser\x1b[2Kver\t7\xe2\x80\xae6\tcp-0\nnetwork\t9\n'
+  export PLAN
+  run provision::dispatch_destroy test.prod < /dev/null
+  assert_success
+  assert_output --partial $'cluster_name \033[1mprod-a\033[0m:\n    ser?[2Kver cp-0 (7?6)\n    network  (9)'
+  refute_output --partial $'\x1b[2K'
+  refute_output --partial $'\xe2\x80\xae'
+  run cat "${CALLS}"
+  assert_output --partial $'plan-env:cluster prod-a\nser\x1b[2Kver 7\xe2\x80\xae6 cp-0\nnetwork 9'
+}
+
+# bash reads a plan line with `IFS=$'\t' read -r kind id name`: the name
+# keeps the tabs in it, so two tabs in a row show as two '?'. The Go twin
+# reads the line the same way (TestDestroyGuardShowsANameWithTwoTabsAsBashReadsIt).
+@test "destroy guard: a name with two tabs in a row shows two '?'" {
+  _assume_no_tty
+  local confirm_cluster=prod-a
+  PLAN='cluster\tprod-a\n\tserver\t\t75\t\ta\t\tb\t\n'
+  export PLAN
+  run provision::dispatch_destroy test.prod < /dev/null
+  assert_success
+  assert_output --partial $'cluster_name \033[1mprod-a\033[0m:\n    server a??b (75)'
+}
+
 # A jq that fails stops the plan display: nothing runs.
 @test "destroy guard: a plan whose names cannot be shown stops the destroy" {
   _assume_no_tty

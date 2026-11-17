@@ -164,6 +164,39 @@ func TestDestroyGuardShowsEachNameOfThePlanSafely(t *testing.T) {
 	assertContains(t, strings.Join(*log, "\n"), "plan-env:cluster prod-a\nserver 70 ö-測試\nserver 71 a\x7fb\u0085c\nserver 72 \\\nserver 73 x\u202ey\u200bz\nserver 74 e\x1b[31mvil")
 }
 
+// The kind and the id of a plan line come from the provider too (a
+// third-party provider can give any text), so the plan shows them through
+// ui.Shown as well. A last row without a name shows an empty name. The
+// confirmed plan stays as the provider gave it. The bash twin is the test
+// "destroy guard: the plan shows each kind and id safely too".
+func TestDestroyGuardShowsEachKindAndIDSafely(t *testing.T) {
+	d, errBuf, log, prov := guardHarness(t, "", false)
+	prov.plan = "cluster\tprod-a\nser\x1b[2Kver\t7\u202e6\tcp-0\nnetwork\t9\n"
+	d.ConfirmCluster = "prod-a"
+	if err := d.DispatchDestroy(t.Context(), "test.prod"); err != nil {
+		t.Fatal(err)
+	}
+	assertContains(t, errBuf.String(), "cluster_name \033[1mprod-a\033[0m:\n"+
+		"    ser?[2Kver cp-0 (7?6)\n"+
+		"    network  (9)\n")
+	refuteContains(t, errBuf.String(), "\x1b[2K")
+	refuteContains(t, errBuf.String(), "\u202e")
+	assertContains(t, strings.Join(*log, "\n"), "plan-env:cluster prod-a\nser\x1b[2Kver 7\u202e6 cp-0\nnetwork 9")
+}
+
+// bash reads a plan line with `IFS=$'\t' read -r kind id name`: the name
+// keeps the tabs in it, so two tabs in a row show as two '?'. The bash twin
+// is the test "destroy guard: a name with two tabs in a row shows two '?'".
+func TestDestroyGuardShowsANameWithTwoTabsAsBashReadsIt(t *testing.T) {
+	d, errBuf, _, prov := guardHarness(t, "", false)
+	prov.plan = "cluster\tprod-a\n\tserver\t\t75\t\ta\t\tb\t\n"
+	d.ConfirmCluster = "prod-a"
+	if err := d.DispatchDestroy(t.Context(), "test.prod"); err != nil {
+		t.Fatal(err)
+	}
+	assertContains(t, errBuf.String(), "cluster_name \033[1mprod-a\033[0m:\n    server a??b (75)\n")
+}
+
 func TestDestroyGuardRefusesAConfirmClusterThatDoesNotMatch(t *testing.T) {
 	d, errBuf, log, _ := guardHarness(t, "", false)
 	d.ConfirmCluster = "prod-b"
@@ -264,6 +297,29 @@ func TestParseDestroyPlan(t *testing.T) {
 	// A cluster line after a resource is a resource, not the name.
 	if name, _ := parseDestroyPlan("server\t42\tcp-0\ncluster\tx\n"); name != "" {
 		t.Errorf("late cluster line read as the name: %q", name)
+	}
+}
+
+// readPlanLine splits a line as bash's `IFS=$'\t' read -r kind id rest`
+// does (each want is what bash 5 gives for the line).
+func TestReadPlanLineAsBashRead(t *testing.T) {
+	for _, c := range []struct{ line, kind, id, rest string }{
+		{"server\t7\ta\t\tb", "server", "7", "a\t\tb"},
+		{"\t\tserver\t\t7\t\ta\t\t\tb\t", "server", "7", "a\t\t\tb"},
+		{"x\ty\tz\tw\t\t", "x", "y", "z\tw"},
+		{"server", "server", "", ""},
+		{"server\t\t", "server", "", ""},
+		{"volume\t7\t", "volume", "7", ""},
+		{" a \t b \t c ", " a ", " b ", " c "},
+	} {
+		kind, id, rest := readPlanLine(c.line)
+		if kind != c.kind || id != c.id || rest != c.rest {
+			t.Errorf("readPlanLine(%q) = %q, %q, %q, want %q, %q, %q", c.line, kind, id, rest, c.kind, c.id, c.rest)
+		}
+	}
+	// The cluster line keeps the tabs of the name too: id, one tab, rest.
+	if name, _ := parseDestroyPlan("cluster\tp\t\tx\t\ty\n"); name != "p\tx\t\ty" {
+		t.Errorf("cluster name = %q, want %q", name, "p\tx\t\ty")
 	}
 }
 

@@ -160,6 +160,29 @@ sp-9z9z9z9z  yes   Ev[2Jil \\ name ü  Pending  0/1    -"
 }'
 }
 
+# clean drops each character that shown_name shows as '?' (the def
+# unshown, utils/verbose.sh), but keeps a backslash. For each case of the
+# shared table (internal/ui/testdata/shown.json), the input without each
+# character that the case's result shows as '?' is what clean gives. The
+# Go twin is TestCleanTextDropsEachUnshownCharacter.
+@test "clean: drops each character that shown_name shows as '?', keeps a backslash" {
+  CASES="${_PROJECT_ROOT}/internal/ui/testdata/shown.json"
+  run jq -r "${KUBEHZ_AGENT_JQ}"' .[]
+    | ([(.in | explode), (.want | explode)] | transpose
+       | map(select(.[1] != 63 or .[0] == 63 or .[0] == 92) | .[0]) | implode) as $want
+    | (.in | clean) as $got | select($got != $want)
+    | "\(.case): \($got | @json), want \($want | @json)"' "${CASES}"
+  assert_success
+  assert_output ""
+  # The table drops something, and clean keeps a backslash: else the test
+  # proves nothing.
+  run jq -r "${KUBEHZ_AGENT_JQ}"' [.[] | select((.in | clean) != .in)] | length' "${CASES}"
+  assert_success
+  (( output >= 15 ))
+  run jq -r "${KUBEHZ_AGENT_JQ}"' "a\\b" | clean' -n
+  assert_output 'a\b'
+}
+
 @test "cluster list: a short page gets the warning, the table the Go twin's columns" {
   route GET /api/clusters 200 '{"ok":true,"data":['"${CLUSTER}"'],"meta":{"pagination":{"total":612}}}'
   run kubehz::agent_list cluster text

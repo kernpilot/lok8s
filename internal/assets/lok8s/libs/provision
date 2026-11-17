@@ -263,19 +263,19 @@ provision::_destroy_guard() {
     return 3
   fi
 
-  # Each name as the plan shows it (verbose::shown_names): a name comes
-  # from the provider's API, and a control, separator, bidi or invisible
-  # character in it would reach the terminal, split or turn the line around,
-  # or hide in the name. The confirmed plan
-  # (LOK8S_DESTROY_PLAN) stays as the provider gave it. One jq for all
-  # names, one line each; an empty last name, which the command
-  # substitution drops, shows as empty.
+  # Each kind, id and name as the plan shows it (verbose::shown_names):
+  # they come from the provider (a third-party provider too) and its API,
+  # and a control, separator, bidi or invisible character in them would
+  # reach the terminal, split or turn the line around, or hide in the line.
+  # The confirmed plan (LOK8S_DESTROY_PLAN) stays as the provider gave it.
+  # One jq for all of them: three lines per row (kind, id, name). Empty
+  # last lines, which the command substitution drops, show as empty.
   local row names
   local -a shown=()
   if (( ${#rows[@]} )); then
     if ! names="$(for row in "${rows[@]}"; do
-        IFS=$'\t' read -r _ _ rname <<<"${row}"
-        printf '%s\n' "${rname}"
+        IFS=$'\t' read -r rkind rid rname <<<"${row}"
+        printf '%s\n' "${rkind}" "${rid}" "${rname}"
       done | verbose::shown_names)"; then
       error "could not show the names of the destroy plan of '${domain}'. Nothing was deleted. Check that jq runs, then run lo destroy again."
       return 1
@@ -288,8 +288,7 @@ provision::_destroy_guard() {
     (( ${#rows[@]} )) || printf '    (no resource found)\n'
     local i
     for i in "${!rows[@]}"; do
-      IFS=$'\t' read -r rkind rid _ <<<"${rows[i]}"
-      printf '    %s %s (%s)\n' "${rkind}" "${shown[i]:-}" "${rid}"
+      printf '    %s %s (%s)\n' "${shown[3*i]:-}" "${shown[3*i+2]:-}" "${shown[3*i+1]:-}"
     done
   } >&2
 
