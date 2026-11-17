@@ -592,10 +592,14 @@ addons::dry_run_boundary() {
   trap '_lo_sig="${_lo_sig:-TERM}"; ! addons::_running_job "${_check}" || kill -TERM "${_check}" 2>/dev/null || :' TERM
   [[ -z "${_lo_sig}" ]] || kill -"${_lo_sig}" "${BASHPID}"
   wait "${_check}" 2>/dev/null || _rc=$?
-  # A signal ends the wait early: wait again while the check runs (it then
-  # stops the plugin). The code of that wait does not count: lo's signal
-  # is noted, and it names the stop.
-  while addons::_running_job "${_check}"; do wait "${_check}" 2>/dev/null || :; done
+  # A trapped signal ends a wait early with 128+n while the check runs on
+  # (after an INT or TERM, the check stops the plugin): wait again until
+  # the check ends. The code is that of the last wait, the check's own: a
+  # signal that only a trap of the caller catches does not blame the plugin.
+  while addons::_running_job "${_check}"; do
+    _rc=0
+    wait "${_check}" 2>/dev/null || _rc=$?
+  done
   trap - INT TERM
   [[ -z "${_traps}" ]] || eval "${_traps}"
   rm -rf -- "${_probe}"

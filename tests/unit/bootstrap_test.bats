@@ -4080,6 +4080,28 @@ _dry_window_open() {
   done
 }
 
+# A signal that lo's shell traps but that does not stop the check (here a
+# caller's USR1 trap) ends the shell's wait for the check early, with
+# 128+n. The shell waits again, and the code of that last wait counts: a
+# plugin that supports the dry run still passes, and is not blamed.
+@test "the dry run's plugin check takes its code from its last wait, not from one that a signal ended" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m" b="${BATS_TEST_TMPDIR}/b" job rc i
+  mkdir -p "$(dirname "${plugin}")" "${m}" "${b}"
+  printf '#!/bin/sh\nexec 3>&-\necho $$ > "%s/pid"\nsleep 1\necho dry-run\n' "${m}" > "${plugin}"
+  chmod +x "${plugin}"
+  { trap ':' USR1; addons::dry_run_boundary "${b}"; } >"${b}.out" 2>&1 3>&- &
+  job=$!
+  for (( i = 0; i < 100; i++ )); do [[ -s "${m}/pid" ]] && break; sleep 0.05; done
+  [[ -s "${m}/pid" ]] || { echo "the plugin did not start"; return 1; }
+  # lo's shell is in its wait for the check by now.
+  sleep 0.2
+  kill -USR1 "${job}"
+  rc=0
+  wait "${job}" 2>/dev/null || rc=$?
+  (( rc == 0 )) || { echo "the check returned ${rc}, want 0: $(<"${b}.out")"; return 1; }
+  ! grep -qF "does not support a dry run" "${b}.out" || { echo "the check blames the plugin: $(<"${b}.out")"; return 1; }
+}
+
 # The command boundary keeps the 128+n of that interrupt, and only of that:
 # any other failure of a dry run is still 2, also a code above 128 (a child
 # that a signal ended, without an interrupt of lo). A real run's code passes
