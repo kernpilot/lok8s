@@ -3812,8 +3812,10 @@ _dry_plugin_stopped() {
     wait "${job}" 2>/dev/null || rc=$?
     took=$(( $(_dry_now_ms) - sent ))
     (( rc != 0 )) || { echo "${window}: the check passed after TERM: $(<"${b}.out")"; return 1; }
-    # The rest of the delay, then the grace (the plugin ignores TERM).
-    (( took >= 900 && took <= 3500 )) || { echo "${window}: the check took ${took} ms after TERM, want the rest of the delay and then the grace (about 2200)"; return 1; }
+    # The rest of the delay, then the grace (the plugin ignores TERM). The
+    # floor is above the grace alone (about 1000 ms): a stop that does not
+    # wait for the end of the window takes only the grace.
+    (( took >= 1600 && took <= 3500 )) || { echo "${window}: the check took ${took} ms after TERM, want the rest of the delay and then the grace (about 2200)"; return 1; }
     _dry_plugin_stopped "${m}" "${start}" || { echo "(TERM in the ${window} window)"; return 1; }
     [ -z "$(ls -A "${b}" | grep -E '^(probe|check)-')" ] || { echo "${window}: a file of the check is in the boundary (a watchdog ran on): $(ls -A "${b}")"; return 1; }
   done

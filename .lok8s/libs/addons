@@ -392,6 +392,8 @@ addons::_running_job() {
 # pid can be another process's. The grace timer and the watchdog are other
 # processes and cannot read the check's jobs: if the plugin ends at the
 # moment that their time runs out, their signal can still reach its pid.
+# The same is true, for some microseconds, between the job test and the
+# kill of the check itself (bash reaps a job in its SIGCHLD handler).
 #
 # It runs in a trap, and set -e applies there again (the `||` of the check
 # does not reach a trap). So each command that can fail ends in `|| :`:
