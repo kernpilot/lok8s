@@ -1,7 +1,9 @@
 #!/usr/bin/env bats
 # check_yq_pin_test.bats — hack/check-yq-pin.sh, the CI check that the
-# installed yq is the release .bin/b.yaml pins (b install exits 0 when a
-# binary fails, and the bats container then runs its own yq).
+# installed yq is the release .bin/b.yaml pins. b install exits 0 when a
+# binary fails, and the later steps then run another yq from PATH, or none.
+# The cases use a fake yq in a temporary bin directory, so they run the same
+# in the argsh container and on a host bats.
 
 setup() {
   load "../test_helper"
