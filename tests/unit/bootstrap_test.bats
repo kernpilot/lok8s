@@ -3925,11 +3925,16 @@ _dry_plugin_stopped() {
 }
 
 # _dry_window_open <pid> <seconds>: true while <pid> runs the test-only
-# delay of a window of the check (a child `sleep <seconds>`). It reads
-# /proc (Linux) in a shell of its own: bats runs a DEBUG trap before each
-# command of the test's shell, and with it a loop over every process can
-# take longer than the window.
+# delay of a window of the check (a child `sleep <seconds>`). With /proc
+# (Linux, as in the CI bats container, which has no ps) it reads /proc in a
+# shell of its own: bats runs a DEBUG trap before each command of the
+# test's shell, and with it a loop over every process can take longer than
+# the window. Without /proc (macOS) it reads the list of ps.
 _dry_window_open() {
+  if [[ ! -d /proc/self ]]; then
+    ps -A -o ppid= -o command= | awk -v p="${1}" -v c="sleep ${2}" '$1 == p { $1 = ""; sub(/^ +/, ""); if ($0 == c) f = 1 } END { exit !f }'
+    return
+  fi
   bash -c '
     for stat in /proc/[0-9]*/stat; do
       read -r line 2>/dev/null < "${stat}" || continue
