@@ -182,7 +182,7 @@ hetzner::_destroy_cluster_name() {
   local config_file="${1}" cluster_name=""
   cluster_name=$(_cfg '.cluster_name // ""' 2>/dev/null || echo "")
   [[ -n "${cluster_name}" ]] || {
-    error "hetzner: the descriptor ${config_file} has no cluster_name. The destroy finds its resources by lok8s.dev/cluster=<cluster_name> and the owner mark, so it needs the name. Nothing was deleted. Set cluster_name in the descriptor."
+    error "hetzner: the descriptor ${config_file} has no cluster_name. The destroy finds its resources by lok8s.dev/cluster=<cluster_name> and the owner mark, so it needs the name. No Hetzner resource was deleted. Set cluster_name in the descriptor."
     return 1
   }
   echo "${cluster_name}"
@@ -191,7 +191,7 @@ hetzner::_destroy_cluster_name() {
 # The resource types provider::destroy deletes, in its delete order.
 _HETZNER_DESTROY_ORDER=(load-balancer server placement-group firewall volume floating-ip ssh-key network)
 
-# hetzner::_destroy_resources <cluster_name>
+# hetzner::_destroy_resources <cluster_name> [quiet]
 # Sets _HETZNER_DESTROY_ROWS: one "<resource>\t<id>\t<name>" line per hcloud
 # resource that carries lok8s.dev/cluster=<cluster_name> AND the owner mark
 # of this cluster (hetzner::owner_mark), in the order provider::destroy
@@ -205,10 +205,12 @@ _HETZNER_DESTROY_ORDER=(load-balancer server placement-group firewall volume flo
 # resource", never "hcloud did not answer". The cluster label of each part
 # is checked again, not only by the list query: a part that the list gives
 # with another cluster label, or none, is in neither list (a warning names
-# it), also when it has the mark of this cluster. Globals, not stdout: the
-# caller needs both lists, and a command substitution keeps no variable.
+# it), also when it has the mark of this cluster. With "quiet", no warning
+# for a part that it leaves out: the destroy of a confirmed plan lists again,
+# and the plan showed them. Globals, not stdout: the caller needs both
+# lists, and a command substitution keeps no variable.
 hetzner::_destroy_resources() {
-  local cluster="${1}" key="${_HETZNER_OWNER_KEY}" selector="lok8s.dev/cluster=${1}"
+  local cluster="${1}" quiet="${2:-}" key="${_HETZNER_OWNER_KEY}" selector="lok8s.dev/cluster=${1}"
   local mark resource json marked skipped foreign line rid rmark rname
   _HETZNER_DESTROY_ROWS="" _HETZNER_DESTROY_KEPT=""
   mark="$(hetzner::owner_mark "${cluster}")" || return 1
@@ -230,13 +232,14 @@ hetzner::_destroy_resources() {
        ! foreign="$(jq -r --arg c "${cluster}" '
            (. // [])[] | ((.labels // {})["lok8s.dev/cluster"] // "") as $l | select($l != $c)
            | [(.id | tostring), $l, (.name // "")] | @tsv' <<<"${json}")"; then
-      error "hetzner: could not list the ${resource} resources with ${selector}. Nothing was deleted. Check the hcloud token and the API, then run the destroy again."
+      error "hetzner: could not list the ${resource} resources with ${selector}. No Hetzner resource was deleted. Check the hcloud token and the API, then run the destroy again."
       return 1
     fi
     while IFS= read -r line; do
       [[ -n "${line}" ]] || continue
       rid="${line%%$'\t'*}" line="${line#*$'\t'}"
       rmark="${line%%$'\t'*}" rname="${line#*$'\t'}"
+      [[ -z "${quiet}" ]] || continue
       warn "hetzner: skipped ${resource} ${rid} ${rname}: the list of the parts with ${selector} gave it, but it has lok8s.dev/cluster=${rmark:-<none>}. lok8s does not delete a part of another cluster."
     done <<<"${foreign}"
     [[ -z "${marked}" ]] || _HETZNER_DESTROY_ROWS+="${marked}"$'\n'
@@ -247,6 +250,7 @@ hetzner::_destroy_resources() {
       rid="${line%%$'\t'*}" line="${line#*$'\t'}"
       rmark="${line%%$'\t'*}" rname="${line#*$'\t'}"
       _HETZNER_DESTROY_KEPT+="${resource}"$'\t'"${rid}"$'\t'"${rname}"$'\n'
+      [[ -z "${quiet}" ]] || continue
       if [[ -z "${rmark}" ]]; then
         warn "hetzner: skipped ${resource} ${rid} ${rname}: it has lok8s.dev/cluster=${cluster}, but not the owner mark of this cluster (${key}=${mark}). lok8s does not delete a part that can belong to another person or cluster. If it is a part of this cluster (an older lok8s made it), first make sure that id ${rid} is yours ('hcloud ${resource} describe ${rid}'), then mark it one time: hcloud ${resource} add-label ${rid} ${key}=${mark}. Then run lo destroy again, or delete it yourself."
       else
@@ -316,11 +320,11 @@ hetzner::_confirmed_rows() {
       header=0
       planned="${rid}"
       if [[ "${kind}" != "cluster" ]]; then
-        error "hetzner: the confirmed destroy plan does not start with its cluster line (it starts with '${line//$'\t'/ }'). Nothing was deleted. Run lo destroy again."
+        error "hetzner: the confirmed destroy plan does not start with its cluster line (it starts with '${line//$'\t'/ }'). No Hetzner resource was deleted. Run lo destroy again."
         return 1
       fi
       if [[ "${planned}" != "${cluster_name}" ]]; then
-        error "hetzner: the confirmed destroy plan is for cluster_name '${planned}', but the descriptor has '${cluster_name}'. Nothing was deleted. Run lo destroy again."
+        error "hetzner: the confirmed destroy plan is for cluster_name '${planned}', but the descriptor has '${cluster_name}'. No Hetzner resource was deleted. Run lo destroy again."
         return 1
       fi
       continue
@@ -330,7 +334,7 @@ hetzner::_confirmed_rows() {
       [[ "${kind}" != "${t}" ]] || known=1
     done
     if (( ! known )) || [[ ! "${rid}" =~ ^[1-9][0-9]*$ ]]; then
-      error "hetzner: the confirmed destroy plan has a line that lo destroy does not write: '${line//$'\t'/ }' (the type must be one of ${_HETZNER_DESTROY_ORDER[*]}, the id a number). Nothing was deleted. Run lo destroy again."
+      error "hetzner: the confirmed destroy plan has a line that lo destroy does not write: '${line//$'\t'/ }' (the type must be one of ${_HETZNER_DESTROY_ORDER[*]}, the id a number). No Hetzner resource was deleted. Run lo destroy again."
       return 1
     fi
     key="${kind}"$'\t'"${rid}"
@@ -343,7 +347,7 @@ hetzner::_confirmed_rows() {
   done <<<"${LOK8S_DESTROY_PLAN}"
 
   if (( header )); then
-    error "hetzner: the confirmed destroy plan is empty. Nothing was deleted. Run lo destroy again."
+    error "hetzner: the confirmed destroy plan is empty. No Hetzner resource was deleted. Run lo destroy again."
     return 1
   fi
 
@@ -367,9 +371,12 @@ provider::destroy() {
   # owner mark of this cluster now. Every delete below is in it. A list that
   # fails, or a mark that cannot be calculated, stops the destroy. The parts
   # with the cluster label and without this mark stay (kept); the last line
-  # of the destroy counts them.
-  local kept
-  hetzner::_destroy_resources "${cluster_name}" || return 1
+  # of the destroy counts them. With a confirmed plan, `lo destroy` showed
+  # the plan and a warning for each such part: this list does not repeat
+  # them (quiet).
+  local kept quiet=""
+  [[ -z "${LOK8S_DESTROY_PLAN:-}" ]] || quiet=quiet
+  hetzner::_destroy_resources "${cluster_name}" "${quiet}" || return 1
   listed="${_HETZNER_DESTROY_ROWS}" kept="${_HETZNER_DESTROY_KEPT}"
 
   if [[ -n "${LOK8S_DESTROY_PLAN:-}" ]]; then

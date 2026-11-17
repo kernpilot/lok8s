@@ -1824,6 +1824,10 @@ for side in bash go; do
     || fail "${side}: the destroy did not delete exactly the marked server: $(grep ' delete ' "${PARITY_HCLOUD_LOG}" | tr '\n' ';')"
   [[ "$(tail -n 1 "${WORK}/${side}.err")" == "[warn] lo destroy: kept 2 resources with lok8s.dev/cluster=kept-name that do not have the owner mark of this cluster (1 server, 1 network). The warnings above name them. Delete them by hand only if they are yours and you want them gone." ]] \
     || fail "${side}: the last line of the destroy does not count the kept parts: $(tail -n 1 "${WORK}/${side}.err")"
+  # The plan warns once for each part that it leaves out; the destroy of
+  # the confirmed plan lists again, but does not repeat the warnings.
+  [[ "$(grep -c 'hetzner: skipped server 43 old-0' "${WORK}/${side}.err")" == 1 && "$(grep -c 'hetzner: skipped server 44 other-0' "${WORK}/${side}.err")" == 1 ]] \
+    || fail "${side}: a skip warning was not printed exactly once"
 done
 rm -rf "${PROJ}/clusters/kept.cloud"
 rm -f "${PROJ}/.bin/hcloud"

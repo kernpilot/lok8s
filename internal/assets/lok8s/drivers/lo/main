@@ -245,7 +245,7 @@ driver::destroy() {
   if [[ -n "${PROVIDER_NAME:-}" ]] && declare -F provider::output &>/dev/null; then
     local provider_output remote_ip remote_user
     provider_output=$(provider::output "${PROVIDER_CONFIG_FILE:-}") || {
-      error "lo destroy: provider::output of provider '${PROVIDER_NAME}' failed (its message is above), so the remote docker host of cluster ${cluster_name} is not known. Nothing was deleted: the cleanup does not fall back to the local docker. Fix the cause, then run lo destroy again."
+      error "lo destroy: provider::output of provider '${PROVIDER_NAME}' failed (its message is above), so the remote docker host of cluster ${cluster_name} is not known. No container and no cloud resource was deleted: the cleanup does not fall back to the local docker. Fix the cause, then run lo destroy again."
       return 1
     }
     remote_ip=$(echo "${provider_output}" | jq -r '.nodes[0].public_ip // empty' 2>/dev/null || echo "")

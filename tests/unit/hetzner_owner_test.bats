@@ -1441,6 +1441,10 @@ volume delete 24"
   assert_output --partial "hetzner: skipped server 23 of the confirmed plan"
   assert_output --partial "hetzner: skipped volume 25 of the confirmed plan"
   assert_output --partial "hetzner: kept volume 24 prod-data (lok8s.dev/cluster=prod): it is not in the confirmed plan."
+  # The plan showed a warning for each part without the mark: the destroy
+  # of the confirmed plan does not repeat it, and its last line counts them.
+  refute_output --partial "hetzner: skipped server 22 cp-0: it has lok8s.dev/cluster=prod"
+  refute_output --partial "hetzner: skipped server 23 old-0: it has lok8s.dev/cluster=prod"
   assert_output --partial "[warn] lo destroy: kept 2 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers)."
   run _writes
   assert_output "server delete 21"
@@ -1513,22 +1517,39 @@ volume delete 24"
 
 # ── the standalone hetzner command ───────────────────────
 
+# The command runs through the real argsh parser, with its flags: a stub of
+# :args would set the variables itself, so it would test none of the flag
+# table of main::hetzner (an earlier table could not parse --domain). The
+# --domain flag has the type domain, so the domain needs its cluster spec.
+# provider::validate and provider::provision are stubs; hcloud must not run.
 @test "standalone: the hetzner command takes the domain of the mark from --domain, and refuses --hetzner-json alone" {
-  source "${_PROJECT_ROOT}/.lok8s/utils/provider.sh"
+  [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
   export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
-  provider::validate() { return 0; }
-  provider::provision() { printf 'provision %s %s\n' "${PROVIDER_DOMAIN:-}" "${1}" >> "${BATS_TEST_TMPDIR}/calls"; }
-  unset PROVIDER_DOMAIN
+  printf 'kind: KubeOne\nmetadata:\n  name: prod\n' > "${PATH_CLUSTERS}/prod.example.test/cluster.lok8s.yaml"
+  local calls="${BATS_TEST_TMPDIR}/calls" script='
+    source "${PATH_BIN}/argsh"
+    source "${PATH_LOK8S}/providers/hetzner/main"
+    hcloud() { echo "hcloud must not run: $*" >&2; return 1; }
+    provider::validate() { return 0; }
+    provider::provision() { printf "provision %s %s\n" "${PROVIDER_DOMAIN:-}" "${1}" >> "${CALLS}"; }
+    main::hetzner "$@"'
 
-  :args() { hetzner_json="${DESC}"; dry_run=0; }
-  run main::hetzner
+  run env -u PROVIDER_DOMAIN PATH_BIN="${_PROJECT_ROOT}/.bin" CALLS="${calls}" \
+    bash -c "${script}" hetzner --hetzner-json "${DESC}"
   assert_failure
   assert_output --partial "hetzner: --domain is missing. lok8s needs the domain of the cluster for the owner mark lok8s.dev/owner of its parts, and --hetzner-json does not give it."
-  [ ! -e "${BATS_TEST_TMPDIR}/calls" ]
+  [ ! -e "${calls}" ]
 
-  :args() { domain="prod.example.test"; dry_run=0; }
-  run main::hetzner
+  run env -u PROVIDER_DOMAIN PATH_BIN="${_PROJECT_ROOT}/.bin" CALLS="${calls}" \
+    bash -c "${script}" hetzner --domain prod.example.test
   assert_success
-  run cat "${BATS_TEST_TMPDIR}/calls"
+  run cat "${calls}"
   assert_output "provision prod.example.test ${DESC}"
+
+  # A flag that the table does not have is refused by the parser.
+  rm -f "${calls}"
+  run env -u PROVIDER_DOMAIN PATH_BIN="${_PROJECT_ROOT}/.bin" CALLS="${calls}" \
+    bash -c "${script}" hetzner --domian prod.example.test
+  assert_failure
+  [ ! -e "${calls}" ]
 }

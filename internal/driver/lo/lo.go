@@ -385,7 +385,7 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 		providerOutput, err := d.deps.Provider.Output(ctx, d.deps.ProviderConfigFile)
 		if err != nil {
 			cause := showProviderMessage(d.stderr(), err)
-			ui.ErrorTo(d.stderr(), "lo destroy: provider::output of provider '%s' failed (%s), so the remote docker host of cluster %s is not known. Nothing was deleted: the cleanup does not fall back to the local docker. Fix the cause, then run lo destroy again.", d.deps.ProviderName, cause, clusterName)
+			ui.ErrorTo(d.stderr(), "lo destroy: provider::output of provider '%s' failed (%s), so the remote docker host of cluster %s is not known. No container and no cloud resource was deleted: the cleanup does not fall back to the local docker. Fix the cause, then run lo destroy again.", d.deps.ProviderName, cause, clusterName)
 			return ui.Handled(fmt.Errorf("provider output failed: %w", err))
 		}
 		if remoteIP, remoteUser := providerNode0(providerOutput); remoteIP != "" {

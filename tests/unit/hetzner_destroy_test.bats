@@ -84,7 +84,7 @@ network delete 9"
   printf '{"cluster_name": "from-dump"}\n' > "${WORK}/hetzner.dump.json"
   run provider::destroy_plan "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: the descriptor ${DESC} has no cluster_name. The destroy finds its resources by lok8s.dev/cluster=<cluster_name> and the owner mark, so it needs the name. Nothing was deleted."
+  assert_output --partial "hetzner: the descriptor ${DESC} has no cluster_name. The destroy finds its resources by lok8s.dev/cluster=<cluster_name> and the owner mark, so it needs the name. No Hetzner resource was deleted."
   refute_output --partial "cluster	"
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
@@ -97,7 +97,7 @@ network delete 9"
   export LIST_FAIL=volume
   run provider::destroy_plan "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: could not list the volume resources with lok8s.dev/cluster=prod-a. Nothing was deleted."
+  assert_output --partial "hetzner: could not list the volume resources with lok8s.dev/cluster=prod-a. No Hetzner resource was deleted."
   refute_output --partial "cluster	prod-a"
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
@@ -123,7 +123,7 @@ network delete 9"
   export LOK8S_DESTROY_PLAN=$'cluster\tprod-b\nserver\t42\tcp-0'
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: the confirmed destroy plan is for cluster_name 'prod-b', but the descriptor has 'prod-a'. Nothing was deleted."
+  assert_output --partial "hetzner: the confirmed destroy plan is for cluster_name 'prod-b', but the descriptor has 'prod-a'. No Hetzner resource was deleted."
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
 }
@@ -136,7 +136,7 @@ network delete 9"
   export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0\ncertificate\t5\tapi-cert'
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: the confirmed destroy plan has a line that lo destroy does not write: 'certificate 5 api-cert' (the type must be one of load-balancer server placement-group firewall volume floating-ip ssh-key network, the id a number). Nothing was deleted."
+  assert_output --partial "hetzner: the confirmed destroy plan has a line that lo destroy does not write: 'certificate 5 api-cert' (the type must be one of load-balancer server placement-group firewall volume floating-ip ssh-key network, the id a number). No Hetzner resource was deleted."
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
 }
@@ -166,7 +166,7 @@ volume delete 7"
   export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0'
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: could not list the network resources with lok8s.dev/cluster=prod-a. Nothing was deleted."
+  assert_output --partial "hetzner: could not list the network resources with lok8s.dev/cluster=prod-a. No Hetzner resource was deleted."
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
 }
@@ -175,7 +175,7 @@ volume delete 7"
   export LOK8S_DESTROY_PLAN=$'server\t42\tcp-0'
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: the confirmed destroy plan does not start with its cluster line (it starts with 'server 42 cp-0'). Nothing was deleted."
+  assert_output --partial "hetzner: the confirmed destroy plan does not start with its cluster line (it starts with 'server 42 cp-0'). No Hetzner resource was deleted."
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
 }
@@ -196,7 +196,7 @@ volume delete 7"
   export LOK8S_DESTROY_PLAN=$'\n\n'
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: the confirmed destroy plan is empty. Nothing was deleted. Run lo destroy again."
+  assert_output --partial "hetzner: the confirmed destroy plan is empty. No Hetzner resource was deleted. Run lo destroy again."
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
 }
@@ -246,7 +246,7 @@ volume delete 7"
   export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0'
   run provider::destroy "${DESC}" "${WORK}"
   assert_failure
-  assert_output --partial "hetzner: could not list the server resources with lok8s.dev/cluster=prod-a. Nothing was deleted."
+  assert_output --partial "hetzner: could not list the server resources with lok8s.dev/cluster=prod-a. No Hetzner resource was deleted."
   run grep -c ' delete ' "${HCLOUD_LOG}"
   assert_output "0"
 }

@@ -240,6 +240,25 @@ YAML
   assert_output "/"
 }
 
+# _case_rows <file>: the rows of a case table, one per line, without the
+# empty lines and the "#" comments. A last row without a trailing newline
+# counts too: `read` fails on it, but it sets the line (the Go twin splits
+# the file at "\n", which keeps such a row).
+_case_rows() {
+  local line
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    [[ -n "${line}" && "${line}" != "#"* ]] || continue
+    printf '%s\n' "${line}"
+  done < "${1}"
+}
+
+@test "the case table reader keeps a last row without a trailing newline" {
+  printf '# a comment\na/cluster.lok8s.yaml\ta\n\nb/cluster.lok8s.yaml\tb' > "${BATS_TEST_TMPDIR}/cases.txt"
+  run _case_rows "${BATS_TEST_TMPDIR}/cases.txt"
+  assert_success
+  assert_output "$(printf 'a/cluster.lok8s.yaml\ta\nb/cluster.lok8s.yaml\tb')"
+}
+
 # One case table for bash and Go (internal/provision/testdata/
 # spec-domain-cases.txt; the Go twin is TestWriteProviderConfigDomainCases):
 # ".", "..", "/", a trailing slash, "a/../b" and more.
@@ -247,7 +266,6 @@ YAML
   local table="${_PROJECT_ROOT}/internal/provision/testdata/spec-domain-cases.txt" line spec want rows=0
   [ -f "${table}" ]
   while IFS= read -r line; do
-    [[ -n "${line}" && "${line}" != "#"* ]] || continue
     spec="${line%%$'\t'*}" want="${line#*$'\t'}"
     [[ "${line}" == *$'\t'* && -n "${spec}" && -n "${want}" && "${want}" != *$'\t'* ]] \
       || fail "bad row '${line}': want <spec path> TAB <domain>"
@@ -255,7 +273,7 @@ YAML
     run provider::_spec_domain "${spec}"
     assert_success
     [ "${output}" = "${want}" ] || fail "'${spec}': got '${output}', want '${want}'"
-  done < "${table}"
+  done < <(_case_rows "${table}")
   (( rows >= 10 )) || fail "the case table has ${rows} rows, want at least 10"
 }
 
