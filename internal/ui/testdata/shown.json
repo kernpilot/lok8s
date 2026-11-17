@@ -9,7 +9,11 @@
   {"case": "U+202E (right-to-left override)", "in": "abc\u202edef", "want": "abc?def"},
   {"case": "U+200B (zero-width space)", "in": "a\u200bb", "want": "a?b"},
   {"case": "the bounds of the bidi and zero-width ranges", "in": "\u200b\u200f\u202a\u202e\u2066\u2069", "want": "??????"},
-  {"case": "the characters next to the ranges stay", "in": " ~\u00a0\u200a\u2010\u2029\u202f\u2065\u206a", "want": " ~\u00a0\u200a\u2010\u2029\u202f\u2065\u206a"},
+  {"case": "the line and paragraph separators", "in": "a\u2028b\u2029c", "want": "a?b?c"},
+  {"case": "U+061C (Arabic letter mark)", "in": "a\u061cb", "want": "a?b"},
+  {"case": "U+2060 to U+2064 (word joiner, invisible operators)", "in": "x\u2060\u2061\u2062\u2063\u2064y", "want": "x?????y"},
+  {"case": "U+FEFF (zero-width no-break space)", "in": "\ufeffa", "want": "?a"},
+  {"case": "the characters next to the ranges stay", "in": " ~\u00a0\u061b\u061d\u200a\u2010\u2027\u202f\u205f\u2065\u206a\ufefe\uff00", "want": " ~\u00a0\u061b\u061d\u200a\u2010\u2027\u202f\u205f\u2065\u206a\ufefe\uff00"},
   {"case": "quotes and other printable ASCII stay", "in": "a b'c\"d[e]{f}$g", "want": "a b'c\"d[e]{f}$g"},
   {"case": "an empty name", "in": "", "want": ""}
 ]

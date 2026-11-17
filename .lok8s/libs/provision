@@ -264,8 +264,9 @@ provision::_destroy_guard() {
   fi
 
   # Each name as the plan shows it (verbose::shown_names): a name comes
-  # from the provider's API, and a control, bidi or zero-width character in
-  # it would reach the terminal or turn the line around. The confirmed plan
+  # from the provider's API, and a control, separator, bidi or invisible
+  # character in it would reach the terminal, split or turn the line around,
+  # or hide in the name. The confirmed plan
   # (LOK8S_DESTROY_PLAN) stays as the provider gave it. One jq for all
   # names, one line each; an empty last name, which the command
   # substitution drops, shows as empty.
