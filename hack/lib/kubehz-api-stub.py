@@ -61,9 +61,11 @@ REGISTERED = {"id": "cl-parity", "registered": True, "claimed": True, "bindSecre
 
 # The value of the label lok8s.dev/kubehz-claim on the claim key that lo
 # made for own-key.dev: the first 32 hex characters of the SHA-256 of the
-# domain, `printf %s own-key.dev | sha256sum | cut -c1-32`. A literal, not a
-# hash that the stub calculates: a change in how lo calculates the mark must
-# not change the stub the same way.
+# domain, `printf %s own-key.dev | sha256sum | cut -c1-32`. A literal, so a
+# reader can check the value. The literal cases of the bats and Go unit
+# tests pin the mark itself. This harness compares the bash implementation
+# with the Go implementation only: when both calculate the mark another way,
+# own-key.dev is a foreign key for both, and the harness does not see it.
 OWN_MARK = "303972d926cdaf0cc2869d244c134014"
 
 

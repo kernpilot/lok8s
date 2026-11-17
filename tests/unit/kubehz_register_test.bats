@@ -1368,8 +1368,13 @@ _CLAIM_SHA256=8c1fa30c717e3eab81f42edf29128ca31f73084c4b2fbd1c2dfa6deb2b6e8205
 # none), so shasum is a stub: it prints the shasum format of _CLAIM_SHA256,
 # and only for the arguments -a 256 and the exact input test.kubehz.dev (no
 # newline) on stdin. Any other call fails, so a fall back that hashes
-# another way gives no mark or another mark.
+# another way gives no mark or another mark. Each call of the stub adds
+# "shasum <arguments>" to CLAIM_SHASUM_CALLS: a fall back that gets the
+# hash from sha256sum on another path (command sha256sum, env sha256sum,
+# /usr/bin/sha256sum) gives the same mark, but adds no line.
 _claim_shasum_only() {
+  export CLAIM_SHASUM_CALLS="${BATS_TEST_TMPDIR}/shasum.calls"
+  : > "${CLAIM_SHASUM_CALLS}"
   command() {
     if [[ "${1:-}" == -v && "${2:-}" == sha256sum ]]; then
       return 1
@@ -1379,6 +1384,7 @@ _claim_shasum_only() {
   sha256sum() { echo "bash: sha256sum: command not found" >&2; return 127; }
   shasum() {
     local input
+    printf 'shasum %s\n' "$*" >> "${CLAIM_SHASUM_CALLS}"
     input=$(cat; printf x)
     [[ "$*" == "-a 256" && "${input%x}" == test.kubehz.dev ]] || return 2
     printf '%s  -\n' "${_CLAIM_SHA256}"
@@ -1481,8 +1487,13 @@ ${_CLAIM_UPLOAD}"
   run kubehz::claim_key_mark test.kubehz.dev
   assert_success
   assert_output "${with_sha256sum}"
+  # The mark came from shasum: one call, with -a 256.
+  run cat "${CLAIM_SHASUM_CALLS}"
+  assert_output "shasum -a 256"
   # register finds its own key by this mark, deletes it, and gives the new
-  # key the same mark.
+  # key the same mark. It calculates the mark two times: for the label of
+  # the new key, and to judge the key that it found.
+  : > "${CLAIM_SHASUM_CALLS}"
   run kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev
   assert_success
   refute_output --partial "command not found"
@@ -1491,6 +1502,9 @@ ${_CLAIM_UPLOAD}"
   assert_output "${_CLAIM_GET}
 ${_CLAIM_DELETE42}
 ${_CLAIM_UPLOAD}"
+  run cat "${CLAIM_SHASUM_CALLS}"
+  assert_output "shasum -a 256
+shasum -a 256"
 }
 
 @test "claim key: register without a SHA-256 tool sends nothing to Hetzner Cloud" {
