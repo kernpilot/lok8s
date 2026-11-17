@@ -38,9 +38,10 @@ type operatorToolPins struct {
 
 func toolPins(t *testing.T) operatorToolPins {
 	t.Helper()
+	// Errorf, not Fatal: the khelm cases do not need the addon and still run.
 	flux, err := fluxAddonRelease(FS())
 	if err != nil {
-		t.Fatal(err)
+		t.Errorf("the flux pin: %v", err)
 	}
 	return operatorToolPins{
 		khelm:         toolchain.KhelmVersion,
@@ -69,7 +70,14 @@ var fluxAddonLine = regexp.MustCompile(`^# Flux CD \(fluxcd-community/flux2 char
 // fluxAddonRelease returns the Flux release of the fluxcd addon in fsys
 // (the tree of .lok8s), or why the addon does not name one.
 func fluxAddonRelease(fsys fs.FS) (string, error) {
-	raw, err := fs.ReadFile(fsys, fluxAddonChart)
+	read := func(name string) ([]byte, error) {
+		raw, err := fs.ReadFile(fsys, name)
+		if err != nil {
+			return nil, fmt.Errorf("%w: if the fluxcd addon moved, point fluxAddonChart and fluxAddonValues at its new files", err)
+		}
+		return raw, nil
+	}
+	raw, err := read(fluxAddonChart)
 	if err != nil {
 		return "", err
 	}
@@ -84,15 +92,22 @@ func fluxAddonRelease(fsys fs.FS) (string, error) {
 	if chart.Repository != fluxChartRepo || chart.Chart != "flux2" {
 		return "", fmt.Errorf("%s pins the chart %q of %q, not flux2 of %s: change this test with the addon", fluxAddonChart, chart.Chart, chart.Repository, fluxChartRepo)
 	}
-	raw, err = fs.ReadFile(fsys, fluxAddonValues)
+	if chart.Version == "" {
+		return "", fmt.Errorf("%s has no version: pin the flux2 chart release there", fluxAddonChart)
+	}
+	raw, err = read(fluxAddonValues)
 	if err != nil {
 		return "", err
 	}
-	first, _, _ := strings.Cut(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+	// The pattern is not anchored at the end of the line, so the \r of a
+	// CRLF file does not change the match.
+	first, _, _ := strings.Cut(string(raw), "\n")
 	m := fluxAddonLine.FindStringSubmatch(first)
 	switch {
 	case m == nil:
 		return "", fmt.Errorf("the first line of %s is %q, want \"# Flux CD (fluxcd-community/flux2 chart <chart>, appVersion <release>)\": the flux of the operator image follows that appVersion", fluxAddonValues, first)
+	case strings.HasPrefix(m[2], "v"):
+		return "", fmt.Errorf("the first line of %s writes the appVersion as %s: write it as the chart does, with no v (the image URL adds the v)", fluxAddonValues, m[2])
 	case m[1] != chart.Version:
 		return "", fmt.Errorf("the first line of %s names the chart %s, but %s pins %s: write the appVersion of chart %s on that line, and move the flux of the operator image (URL and sums) with it", fluxAddonValues, m[1], fluxAddonChart, chart.Version, chart.Version)
 	}
@@ -337,6 +352,45 @@ func TestFluxAddonReleaseFindsEachHole(t *testing.T) {
 	if got, err := release(chart, values); err != nil || got == "" {
 		t.Fatalf("the unedited addon: release %q, error %v", got, err)
 	}
+
+	// The release is the one on the line, and the image rule then follows
+	// it: a check that returned a fixed release would pass every hole below.
+	nine := edit(values, `^(# Flux CD \(fluxcd-community/flux2 chart [^,]+, appVersion )[^)]+\)`, "${1}9.9.9)")
+	t.Run("the release is read from the line", func(t *testing.T) {
+		t.Parallel()
+		got, err := release(chart, nine)
+		if err != nil || got != "9.9.9" {
+			t.Fatalf("an appVersion of 9.9.9: release %q, error %v; want 9.9.9", got, err)
+		}
+		pins := operatorToolPins{khelm: toolchain.KhelmVersion, pluginHome: operator.DefaultKustomizePluginHome,
+			chartRenderer: path.Join(operator.DefaultKustomizePluginHome, toolchain.ChartRendererPluginRel), flux: got}
+		want := "but the fluxcd addon installs Flux 9.9.9"
+		problems := operatorToolPinProblems(readOperatorDockerfile(t), pins)
+		for _, p := range problems {
+			if strings.Contains(p, want) {
+				return
+			}
+		}
+		t.Errorf("the image rule does not follow the release on the line, want a problem with %q; it found %q", want, problems)
+	})
+	t.Run("a CRLF file gives the same release", func(t *testing.T) {
+		t.Parallel()
+		want, _ := release(chart, values)
+		if got, err := release(chart, strings.ReplaceAll(values, "\n", "\r\n")); err != nil || got != want {
+			t.Errorf("CRLF values.yaml: release %q, error %v; want %q", got, err, want)
+		}
+	})
+	for _, missing := range []string{fluxAddonChart, fluxAddonValues} {
+		t.Run("no "+missing, func(t *testing.T) {
+			t.Parallel()
+			fsys := fstest.MapFS{fluxAddonChart: {Data: []byte(chart)}, fluxAddonValues: {Data: []byte(values)}}
+			delete(fsys, missing)
+			_, err := fluxAddonRelease(fsys)
+			if err == nil || !strings.Contains(err.Error(), "point fluxAddonChart and fluxAddonValues at its new files") {
+				t.Errorf("a missing %s: error %v, want the next action", missing, err)
+			}
+		})
+	}
 	cases := []struct {
 		name, chart, values, want string
 	}{
@@ -358,6 +412,12 @@ func TestFluxAddonReleaseFindsEachHole(t *testing.T) {
 		{"another chart repository",
 			edit(chart, `(?m)^repository: \S+$`, "repository: https://charts.example.com"), values,
 			`of "https://charts.example.com", not flux2`},
+		{"no chart version",
+			edit(chart, `(?m)^version: \S+\n`, ""), values,
+			fluxAddonChart + " has no version"},
+		{"an appVersion with a v",
+			chart, edit(values, `^(# Flux CD \(fluxcd-community/flux2 chart [^,]+, appVersion )([^)]+)\)`, "${1}v${2})"),
+			"writes the appVersion as v"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
