@@ -1780,4 +1780,47 @@ for side in bash go; do
 done
 rm -rf "${PROJ}/clusters"/{dupa,dupb,solo}.cloud "${PROJ}/.lok8s/providers/mockplan"
 
+# ── lo destroy --remote — the hetzner provider keeps the parts without its mark
+# The real hetzner provider of the project's bash tree runs in both CLIs (the
+# Go one through the bridge). hcloud is a stub: its lists hold one server
+# with the owner mark of kept.cloud, one server and one network with the
+# cluster label and no mark, and it logs each call. The destroy deletes the
+# marked server only and exits 0; its last line counts the 2 kept parts by
+# kind. HCLOUD_CONFIG names no file: an hcloud that is not the stub has no
+# context and no token.
+export PARITY_HCLOUD_LOG="${WORK}/hcloud.log" HCLOUD_CONFIG="${WORK}/no-hcloud-config.toml"
+PARITY_HCLOUD_MARK="$(printf '%s\n%s\n' kept.cloud kept-name | sha256sum | cut -c1-32)"
+export PARITY_HCLOUD_MARK
+parity::stub "${PROJ}" hcloud <<'SH'
+#!/usr/bin/env bash
+# Parity stub: the parts of cluster_name kept-name. Lists and deletes only.
+echo "$*" >> "${PARITY_HCLOUD_LOG}"
+case "${1:-} ${2:-}" in
+  "server list")
+    printf '[{"id":42,"name":"kept-name-cp-0","labels":{"lok8s.dev/cluster":"kept-name","lok8s.dev/owner":"%s"}},{"id":43,"name":"old-0","labels":{"lok8s.dev/cluster":"kept-name"}}]\n' "${PARITY_HCLOUD_MARK}" ;;
+  "network list") echo '[{"id":9,"name":"old-net","labels":{"lok8s.dev/cluster":"kept-name"}}]' ;;
+  *" list") echo '[]' ;;
+  *" delete") ;;
+  *) echo "parity stub: hcloud $* is not expected" >&2; exit 1 ;;
+esac
+SH
+mkdir -p "${PROJ}/clusters/kept.cloud"
+printf '{"cluster_name": "kept-name"}\n' > "${PROJ}/clusters/kept.cloud/hetzner.json"
+printf 'kind: KubeOne\nmetadata:\n  name: kept\nspec:\n  kubernetes:\n    version: "1.31.0"\n  provider:\n    name: hetzner\n    configRef: hetzner.json\n' \
+  > "${PROJ}/clusters/kept.cloud/cluster.lok8s.yaml"
+check - destroy --domain kept.cloud -r --confirm-cluster kept-name   # deletes the marked server; the last line counts the kept parts
+expect_rc 0 destroy --domain kept.cloud -r --confirm-cluster kept-name
+for side in bash go; do
+  : > "${PARITY_HCLOUD_LOG}"
+  parity::run "${side}" "${PROJ}" destroy --domain kept.cloud -r --confirm-cluster kept-name \
+    || fail "${side}: a destroy that kept parts without the mark did not exit 0"
+  [[ "$(grep ' delete ' "${PARITY_HCLOUD_LOG}")" == "server delete 42" ]] \
+    || fail "${side}: the destroy did not delete exactly the marked server: $(grep ' delete ' "${PARITY_HCLOUD_LOG}" | tr '\n' ';')"
+  [[ "$(tail -n 1 "${WORK}/${side}.err")" == "[warn] lo destroy: kept 2 resources with lok8s.dev/cluster=kept-name that do not have the owner mark of this cluster (1 server, 1 network). The warnings above name them. Delete them by hand only if they are yours and you want them gone." ]] \
+    || fail "${side}: the last line of the destroy does not count the kept parts: $(tail -n 1 "${WORK}/${side}.err")"
+done
+rm -rf "${PROJ}/clusters/kept.cloud"
+rm -f "${PROJ}/.bin/hcloud"
+unset PARITY_HCLOUD_LOG PARITY_HCLOUD_MARK HCLOUD_CONFIG
+
 report

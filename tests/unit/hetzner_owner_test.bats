@@ -1441,8 +1441,35 @@ volume delete 24"
   assert_output --partial "hetzner: skipped server 23 of the confirmed plan"
   assert_output --partial "hetzner: skipped volume 25 of the confirmed plan"
   assert_output --partial "hetzner: kept volume 24 prod-data (lok8s.dev/cluster=prod): it is not in the confirmed plan."
+  assert_output --partial "[warn] lo destroy: kept 2 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers)."
   run _writes
   assert_output "server delete 21"
+}
+
+# A destroy that keeps parts (the cluster label, no mark or the mark of
+# another cluster) succeeds: the skip is the safety feature. Its last line
+# says how many parts it kept and of which kinds, in the delete order.
+@test "destroy: the last line counts the kept parts by kind, and the destroy exits 0" {
+  _destroy_parts
+  _part network 26 old-net '{"lok8s.dev/cluster":"prod"}'
+  run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
+  assert_success
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers, 1 network). The warnings above name them. Delete them by hand only if they are yours and you want them gone." ]
+  [ "$(grep -c 'lo destroy: kept' <<<"${output}")" -eq 1 ]
+  run _writes
+  assert_output "server delete 21
+volume delete 24"
+
+  # One kept part: the singular. The plan prints no summary (it deletes
+  # nothing).
+  echo '[]' > "${STORE}/server.json"
+  echo '[]' > "${STORE}/volume.json"
+  run provider::destroy_plan "${DESC}" "${BATS_TEST_TMPDIR}"
+  assert_success
+  refute_output --partial "lo destroy: kept"
+  run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
+  assert_success
+  assert_output --partial "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (1 network)."
 }
 
 @test "destroy: no domain for the mark stops the plan and the destroy before any hcloud call" {

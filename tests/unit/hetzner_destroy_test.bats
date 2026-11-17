@@ -66,6 +66,8 @@ teardown() { teardown_tmpdir; }
 @test "provider::destroy deletes exactly the resources of the plan, in its order" {
   run provider::destroy "${DESC}" "${WORK}"
   assert_success
+  # Each part has the mark: the destroy kept none, so no summary line.
+  refute_output --partial "lo destroy: kept"
   run grep ' delete ' "${HCLOUD_LOG}"
   assert_output "load-balancer delete 11
 server delete 42

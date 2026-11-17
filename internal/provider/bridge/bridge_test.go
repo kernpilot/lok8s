@@ -159,6 +159,31 @@ func TestFailedOutputCarriesTheEndOfItsStderr(t *testing.T) {
 	}
 }
 
+// provider::destroy streams: the lines it prints reach the Go CLI as they
+// reach the bash one. The hetzner destroy ends with the line that counts
+// the parts it kept (no owner mark of this cluster) and exits 0; that line
+// must not be lost (hack/parity-orchestrate.sh runs it in both CLIs).
+func TestDestroyStreamsTheProviderOutput(t *testing.T) {
+	l, r, errBuf := testLoader(t)
+	var out strings.Builder
+	l.Stdout = &out
+	const kept = "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (1 network).\n"
+	r.handler = func(c execx.Cmd) error {
+		if c.Args[4] == "provider::destroy" {
+			io.WriteString(c.Stdout, "stdout line\n")
+			io.WriteString(c.Stderr, kept)
+		}
+		return nil
+	}
+	p := &Provider{l: l, name: "hetzner"}
+	if err := p.Destroy(t.Context(), "/cfg", "/work"); err != nil {
+		t.Fatal(err)
+	}
+	if errBuf.String() != kept || out.String() != "stdout line\n" {
+		t.Errorf("stderr = %q, stdout = %q: the destroy output did not pass through", errBuf.String(), out.String())
+	}
+}
+
 // The tail keeps at most stderrTailBytes bytes, also from one large write,
 // and marks the cut.
 func TestTailBufferIsBounded(t *testing.T) {

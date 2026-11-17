@@ -192,25 +192,28 @@ hetzner::_destroy_cluster_name() {
 _HETZNER_DESTROY_ORDER=(load-balancer server placement-group firewall volume floating-ip ssh-key network)
 
 # hetzner::_destroy_resources <cluster_name>
-# One "<resource>\t<id>\t<name>" line per hcloud resource that carries
-# lok8s.dev/cluster=<cluster_name> AND the owner mark of this cluster
-# (hetzner::owner_mark), in the order provider::destroy deletes them.
-# READ-ONLY. A resource with the cluster label and no mark, or the mark of
-# another cluster, is not listed: a warning on stderr names it, says why and
-# gives the one-time command that marks it. Two domains with the same
-# cluster_name in one Hetzner project have two marks, so the destroy of one
-# never lists the parts of the other. A list that fails, or a mark that
-# cannot be calculated, stops it (rc 1): an empty list must mean "no
-# resource", never "hcloud did not answer".
+# Sets _HETZNER_DESTROY_ROWS: one "<resource>\t<id>\t<name>" line per hcloud
+# resource that carries lok8s.dev/cluster=<cluster_name> AND the owner mark
+# of this cluster (hetzner::owner_mark), in the order provider::destroy
+# deletes them. READ-ONLY. A resource with the cluster label and no mark, or
+# the mark of another cluster, is not in it: it goes to
+# _HETZNER_DESTROY_KEPT (the same line format), and a warning on stderr names
+# it, says why and gives the one-time command that marks it. Two domains with
+# the same cluster_name in one Hetzner project have two marks, so the destroy
+# of one never lists the parts of the other. A list that fails, or a mark
+# that cannot be calculated, stops it (rc 1): an empty list must mean "no
+# resource", never "hcloud did not answer". Globals, not stdout: the caller
+# needs both lists, and a command substitution keeps no variable.
 hetzner::_destroy_resources() {
   local cluster="${1}" key="${_HETZNER_OWNER_KEY}" selector="lok8s.dev/cluster=${1}"
-  local mark resource json kept skipped line rid rmark rname
+  local mark resource json marked skipped line rid rmark rname
+  _HETZNER_DESTROY_ROWS="" _HETZNER_DESTROY_KEPT=""
   mark="$(hetzner::owner_mark "${cluster}")" || return 1
   for resource in "${_HETZNER_DESTROY_ORDER[@]}"; do
     # Two passes over one list: the parts with the mark, and the others as
     # "<id>\t<mark>\t<name>" (the mark is empty when the part has none).
     if ! json="$(hcloud "${resource}" list -o json -l "${selector}")" ||
-       ! kept="$(jq -r --arg r "${resource}" --arg key "${key}" --arg mark "${mark}" '
+       ! marked="$(jq -r --arg r "${resource}" --arg key "${key}" --arg mark "${mark}" '
            (. // [])[] | select(((.labels // {})[$key] // "") == $mark)
            | [$r, (.id | tostring), (.name // "")] | @tsv' <<<"${json}")" ||
        ! skipped="$(jq -r --arg key "${key}" --arg mark "${mark}" '
@@ -219,13 +222,14 @@ hetzner::_destroy_resources() {
       error "hetzner: could not list the ${resource} resources with ${selector}. Nothing was deleted. Check the hcloud token and the API, then run the destroy again."
       return 1
     fi
-    [[ -z "${kept}" ]] || printf '%s\n' "${kept}"
+    [[ -z "${marked}" ]] || _HETZNER_DESTROY_ROWS+="${marked}"$'\n'
     # Split at each tab by hand: `IFS=$'\t' read` joins two tabs, and an
     # empty mark would shift the name into it.
     while IFS= read -r line; do
       [[ -n "${line}" ]] || continue
       rid="${line%%$'\t'*}" line="${line#*$'\t'}"
       rmark="${line%%$'\t'*}" rname="${line#*$'\t'}"
+      _HETZNER_DESTROY_KEPT+="${resource}"$'\t'"${rid}"$'\t'"${rname}"$'\n'
       if [[ -z "${rmark}" ]]; then
         warn "hetzner: skipped ${resource} ${rid} ${rname}: it has lok8s.dev/cluster=${cluster}, but not the owner mark of this cluster (${key}=${mark}). lok8s does not delete a part that can belong to another person or cluster. If it is a part of this cluster (an older lok8s made it), first make sure that id ${rid} is yours ('hcloud ${resource} describe ${rid}'), then mark it one time: hcloud ${resource} add-label ${rid} ${key}=${mark}. Then run lo destroy again, or delete it yourself."
       else
@@ -233,6 +237,35 @@ hetzner::_destroy_resources() {
       fi
     done <<<"${skipped}"
   done
+  _HETZNER_DESTROY_ROWS="${_HETZNER_DESTROY_ROWS%$'\n'}"
+  _HETZNER_DESTROY_KEPT="${_HETZNER_DESTROY_KEPT%$'\n'}"
+}
+
+# hetzner::_kept_summary <cluster_name> <kept>
+# The last line of a destroy that kept parts: how many parts with
+# lok8s.dev/cluster=<cluster_name> it did not delete because they do not have
+# the owner mark of this cluster, and of which kinds (<kept>: the
+# "<resource>\t<id>\t<name>" lines of _HETZNER_DESTROY_KEPT). Nothing when it
+# kept none. The destroy keeps them on purpose, so it still exits 0; this
+# line says that they exist.
+hetzner::_kept_summary() {
+  local cluster_name="${1}" kept="${2}" kind t n total=0 kinds=""
+  local -A count=()
+  while IFS=$'\t' read -r kind _; do
+    [[ -n "${kind}" ]] || continue
+    count["${kind}"]=$(( ${count["${kind}"]:-0} + 1 ))
+    total=$(( total + 1 ))
+  done <<<"${kept}"
+  (( total > 0 )) || return 0
+  for t in "${_HETZNER_DESTROY_ORDER[@]}"; do
+    n="${count["${t}"]:-0}"
+    (( n > 0 )) || continue
+    kinds+="${kinds:+, }${n} ${t}"
+    (( n == 1 )) || kinds+="s"
+  done
+  local noun="resources"
+  (( total > 1 )) || noun="resource"
+  warn "lo destroy: kept ${total} ${noun} with lok8s.dev/cluster=${cluster_name} that do not have the owner mark of this cluster (${kinds}). The warnings above name them. Delete them by hand only if they are yours and you want them gone."
 }
 
 # hetzner::_confirmed_rows <cluster_name> <listed>
@@ -315,8 +348,12 @@ provider::destroy() {
 
   # The live list: what carries lok8s.dev/cluster=<cluster_name> and the
   # owner mark of this cluster now. Every delete below is in it. A list that
-  # fails, or a mark that cannot be calculated, stops the destroy.
-  listed="$(hetzner::_destroy_resources "${cluster_name}")" || return 1
+  # fails, or a mark that cannot be calculated, stops the destroy. The parts
+  # with the cluster label and without this mark stay (kept); the last line
+  # of the destroy counts them.
+  local kept
+  hetzner::_destroy_resources "${cluster_name}" || return 1
+  listed="${_HETZNER_DESTROY_ROWS}" kept="${_HETZNER_DESTROY_KEPT}"
 
   if [[ -n "${LOK8S_DESTROY_PLAN:-}" ]]; then
     # `lo destroy` showed this plan and the operator confirmed it: delete
@@ -342,6 +379,7 @@ provider::destroy() {
   done
 
   debug "hetzner destroy complete for ${cluster_name}"
+  hetzner::_kept_summary "${cluster_name}" "${kept}"
 }
 
 # ── Optional hook: destroy_plan ──────────────────────────
@@ -365,7 +403,8 @@ provider::destroy_plan() {
 
   local cluster_name rows
   cluster_name="$(hetzner::_destroy_cluster_name "${config_file}")" || return 1
-  rows="$(hetzner::_destroy_resources "${cluster_name}")" || return 1
+  hetzner::_destroy_resources "${cluster_name}" || return 1
+  rows="${_HETZNER_DESTROY_ROWS}"
   printf 'cluster\t%s\n' "${cluster_name}"
   [[ -z "${rows}" ]] || printf '%s\n' "${rows}"
 }

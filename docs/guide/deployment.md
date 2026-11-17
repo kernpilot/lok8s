@@ -492,7 +492,11 @@ existing part only when it has the mark of this cluster:
   `lok8s.dev/cluster=<cluster_name>` and the mark of this cluster. A part
   with the cluster label and no mark, or with the mark of another cluster,
   is not deleted. The destroy plan shows each such part as skipped, with the
-  reason and the `hcloud <kind> add-label` command that marks it. Two domains
+  reason and the `hcloud <kind> add-label` command that marks it. The
+  destroy keeps these parts on purpose, so it exits `0`; its last line
+  counts them by kind, for example `lo destroy: kept 2 resources with
+  lok8s.dev/cluster=prod that do not have the owner mark of this cluster
+  (1 server, 1 network)`. Two domains
   with the same `cluster_name` in one Hetzner project have two marks, so the
   destroy of one domain does not delete the parts of the other domain. When
   a list of parts fails, the destroy stops and deletes nothing.
