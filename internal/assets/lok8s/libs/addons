@@ -495,8 +495,9 @@ addons::dry_run_boundary() {
     return 1
   fi
   # The check's own files get new names (mktemp), so a name that is already
-  # there (a link, a FIFO) is never opened: the plugin's stdout, and the
-  # mark that the watchdog writes when the time limit ends the check.
+  # there (a link, a FIFO) is never opened: the plugin's stdout, the mark
+  # that the watchdog writes when the time limit ends the check, and the
+  # mark of an INT or TERM that stops it.
   if ! _out=$(mktemp "${_dir}/check-out-XXXXXX" 2>&1); then
     rm -rf -- "${_probe}"
     error "bootstrap dry-run: cannot make a file for the output of the check of the Secret plugin ${_rel}: ${_out}"
@@ -504,12 +505,12 @@ addons::dry_run_boundary() {
   fi
   if ! _late=$(mktemp "${_dir}/check-late-XXXXXX" 2>&1); then
     rm -rf -- "${_probe}" "${_out}"
-    error "bootstrap dry-run: cannot make a file for the output of the check of the Secret plugin ${_rel}: ${_late}"
+    error "bootstrap dry-run: cannot make a file for the time-limit mark of the check of the Secret plugin ${_rel}: ${_late}"
     return 1
   fi
   if ! _stop=$(mktemp "${_dir}/check-stop-XXXXXX" 2>&1); then
     rm -rf -- "${_probe}" "${_out}" "${_late}"
-    error "bootstrap dry-run: cannot make a file for the output of the check of the Secret plugin ${_rel}: ${_stop}"
+    error "bootstrap dry-run: cannot make a file for the interrupt mark of the check of the Secret plugin ${_rel}: ${_stop}"
     return 1
   fi
   # The plugin runs in the background with a watchdog (the pattern of

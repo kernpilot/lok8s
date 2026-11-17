@@ -4153,10 +4153,12 @@ _dry_window_open() {
 }
 
 # A file for the check that it cannot make stops the check with its own
-# message, the same as in Go (TestDryRunBoundaryNamesAnOutputFileItCannotMake),
-# and leaves no file of the check behind.
-@test "the dry run names an output file that it cannot make" {
-  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" b which _dry_fail
+# message, which names the file, and leaves no file of the check behind.
+# The output file is the same as in Go
+# (TestDryRunBoundaryNamesAnOutputFileItCannotMake); the binary has no
+# file for the time-limit mark or for the interrupt mark.
+@test "the dry run names a file of the check that it cannot make" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" b which name _dry_fail
   mkdir -p "$(dirname "${plugin}")"
   printf '#!/bin/sh\necho dry-run\n' > "${plugin}"
   chmod +x "${plugin}"
@@ -4164,13 +4166,14 @@ _dry_window_open() {
     if [[ "${*: -1}" == ${_dry_fail} ]]; then echo "mktemp: no room for it" >&2; return 1; fi
     command mktemp "$@"
   }
-  for which in out late stop; do
+  for which in "out:output" "late:time-limit mark" "stop:interrupt mark"; do
+    name="${which#*:}" which="${which%%:*}"
     b="${BATS_TEST_TMPDIR}/boundary-${which}"
     mkdir -p "${b}"
     _dry_fail="*/check-${which}-XXXXXX"
     run addons::dry_run_boundary "${b}"
     assert_failure
-    assert_output --partial "bootstrap dry-run: cannot make a file for the output of the check of the Secret plugin "
+    assert_output --partial "bootstrap dry-run: cannot make a file for the ${name} of the check of the Secret plugin "
     assert_output --partial "/secrets.lok8s.dev/v1/secret/Secret: mktemp: no room for it"
     refute_output --partial "does not support a dry run"
     [ -z "$(ls -A "${b}" | grep -E '^(probe|check)-')" ] || { echo "${which}: files of the check are left: $(ls -A "${b}")"; return 1; }
