@@ -1386,6 +1386,30 @@ for side in bash go; do
 done
 parity::state_same "${WORK}/caps-int.bash.out" "${WORK}/caps-int.go.out" "stdout of Ctrl-C in the check of lo bootstrap --dry-run" || failures=$((failures + 1))
 parity::state_same "${WORK}/caps-int.bash.err" "${WORK}/caps-int.go.err" "stderr of Ctrl-C in the check of lo bootstrap --dry-run" || failures=$((failures + 1))
+
+# A TERM to lo itself (kill <pid of lo>, not its process group) in the dry
+# run's check of the Secret plugin: both sides name the interrupt, not a
+# plugin without the dry run, end with 143 and leave no temp file. Only lo
+# gets the signal, so lo stops the check itself (bash: lo's shell sends TERM
+# to the check's subshell; Go: the cancelled context).
+for side in bash go; do
+  caps_tmp="${WORK}/caps-term-tmp.${side}"
+  rm -rf "${caps_tmp}" "${PARITY_CAPS_SLOW_MARK}"; mkdir -p "${caps_tmp}"
+  parity::select "${PROJ}" "${side}"
+  ( cd "${PROJ}" && TMPDIR="${caps_tmp}" exec "${LO_BIN}" bootstrap --domain dry.dev --dry-run --only cilium </dev/null >"${WORK}/caps-term.${side}.out" 2>"${WORK}/caps-term.${side}.err" ) &
+  caps_pid=$!
+  for (( i = 0; i < 100; i++ )); do [[ -e "${PARITY_CAPS_SLOW_MARK}" ]] && break; sleep 0.1; done
+  if [[ -e "${PARITY_CAPS_SLOW_MARK}" ]]; then echo "ok: ${side}: the dry run reached the check of the Secret plugin (TERM)"; else fail "${side}: the dry run never reached the check of the Secret plugin (TERM)"; fi
+  kill -TERM "${caps_pid}" 2>/dev/null || true
+  caps_rc=0
+  wait "${caps_pid}" 2>/dev/null || caps_rc=$?
+  if (( caps_rc == 143 )); then echo "ok: ${side}: TERM to lo in the check exits 143"; else fail "${side}: TERM to lo in the check exited ${caps_rc}, want 143"; fi
+  tls_pin "${side}: TERM to lo in the check names the interrupt" "${WORK}/caps-term.${side}.err" "bootstrap dry-run: the check of the Secret plugin \.kustomize/secrets\.lok8s\.dev/v1/secret/Secret was interrupted \(SIGTERM\)$"
+  if grep -qF "does not support a dry run" "${WORK}/caps-term.${side}.err"; then fail "${side}: TERM to lo in the check blames the plugin"; else echo "ok: ${side}: TERM to lo in the check does not blame the plugin"; fi
+  if [[ -z "$(ls -A "${caps_tmp}")" ]]; then echo "ok: ${side}: TERM to lo in the check left no temp file"; else fail "${side}: TERM to lo in the check left $(ls -A "${caps_tmp}")"; fi
+done
+parity::state_same "${WORK}/caps-term.bash.out" "${WORK}/caps-term.go.out" "stdout of TERM to lo in the check of lo bootstrap --dry-run" || failures=$((failures + 1))
+parity::state_same "${WORK}/caps-term.bash.err" "${WORK}/caps-term.go.err" "stderr of TERM to lo in the check of lo bootstrap --dry-run" || failures=$((failures + 1))
 unset PARITY_CAPS_SLOW_MARK caps_tmp caps_pid caps_rc
 chmod 755 "${PROJ}/locked"
 rm -rf "${PROJ}/locked" "${PROJ}/dangling" "${PROJ}/.cache/core"
