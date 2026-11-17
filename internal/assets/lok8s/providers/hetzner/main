@@ -191,19 +191,20 @@ hetzner::_destroy_cluster_name() {
 # The resource types provider::destroy deletes, in its delete order.
 _HETZNER_DESTROY_ORDER=(load-balancer server placement-group firewall volume floating-ip ssh-key network)
 
-# A jq def: the name of a part as the warnings of the destroy show it. Each
-# control character and each backslash becomes '?', as ls shows a name on
-# a terminal. warn prints with `echo -e`: a newline in a name would split
-# the line, an ESC would reach the terminal, and a backslash sequence would
-# become a control character. The id names the part exactly.
-_HETZNER_JQ_SHOWN_NAME='def shown_name: tostring | explode
-  | map(if . < 32 or (. >= 127 and . < 160) or . == 92 then 63 else . end) | implode;'
+# A jq def: the name of a part as the destroy plan and the warnings of the
+# destroy show it (VERBOSE_JQ_SHOWN_NAME, utils/verbose.sh: each control
+# character, each backslash, each line or paragraph separator and each
+# bidi, zero-width or invisible format character becomes '?'). warn prints
+# with `echo -e`: a newline in a name would split the line, an ESC would
+# reach the terminal, and a backslash sequence would become a control
+# character. The id names the part exactly.
+_HETZNER_JQ_SHOWN_NAME="${VERBOSE_JQ_SHOWN_NAME}"
 
 # hetzner::_destroy_resources <cluster_name> [<confirmed plan>]
-# Sets _HETZNER_DESTROY_ROWS: one "<resource>\t<id>\t<name>" line per hcloud
-# resource that carries lok8s.dev/cluster=<cluster_name> AND the owner mark
-# of this cluster (hetzner::owner_mark), in the order provider::destroy
-# deletes them. READ-ONLY. A resource with the cluster label and no mark, or
+# Sets _HETZNER_DESTROY_ROWS: one "<resource>\t<id>\t<name>" line (the name
+# as shown_name gives it) per hcloud resource that carries
+# lok8s.dev/cluster=<cluster_name> AND the owner mark of this cluster
+# (hetzner::owner_mark), in the order provider::destroy deletes them. READ-ONLY. A resource with the cluster label and no mark, or
 # the mark of another cluster, is not in it: it goes to
 # _HETZNER_DESTROY_KEPT (the same line format), and a warning on stderr names
 # it, says why and gives the one-time command that marks it. Two domains with
@@ -250,14 +251,15 @@ hetzner::_destroy_resources() {
     # mark; the parts with the cluster label and another mark or none, as
     # "<id>\t<mark>\t<name>" (the mark is empty when the part has none); and
     # the parts with another cluster label or none, as
-    # "<id>\t<cluster label>\t<name>". The last two passes give the name as
-    # the warnings show it (shown_name): the destroy uses these names only
-    # in its warnings.
+    # "<id>\t<cluster label>\t<name>". Each pass gives the name as the plan
+    # and the warnings show it (shown_name): the destroy and its plan use
+    # the names only to show them (a delete and the check of a confirmed
+    # plan use the kind and the id).
     if ! json="$(hcloud "${resource}" list -o json -l "${selector}")" ||
-       ! marked="$(jq -r --arg r "${resource}" --arg key "${key}" --arg mark "${mark}" --arg c "${cluster}" '
+       ! marked="$(jq -r --arg r "${resource}" --arg key "${key}" --arg mark "${mark}" --arg c "${cluster}" "${_HETZNER_JQ_SHOWN_NAME}"'
            (. // [])[] | select(((.labels // {})["lok8s.dev/cluster"] // "") == $c)
            | select(((.labels // {})[$key] // "") == $mark)
-           | [$r, (.id | tostring), (.name // "")] | @tsv' <<<"${json}")" ||
+           | [$r, (.id | tostring), (.name // "" | shown_name)] | @tsv' <<<"${json}")" ||
        ! skipped="$(jq -r --arg key "${key}" --arg mark "${mark}" --arg c "${cluster}" "${_HETZNER_JQ_SHOWN_NAME}"'
            (. // [])[] | select(((.labels // {})["lok8s.dev/cluster"] // "") == $c)
            | ((.labels // {})[$key] // "") as $m | select($m != $mark)
@@ -318,8 +320,8 @@ hetzner::_destroy_resources() {
 # With only <kept> empty, the last skipped line is the last line. The
 # destroy leaves these parts on purpose, so it still exits 0; the lines say
 # that they exist. hetzner::_destroy_resources gives each name through
-# shown_name, so no name can split a line or send a control character to
-# the terminal.
+# shown_name, so no name can split a line, send a control character to the
+# terminal or turn the text around.
 hetzner::_kept_summary() {
   local cluster_name="${1}" kept="${2}" skipped="${3:-}" kind t n total=0 kinds="" names="" line rid rname
   local max=10
@@ -365,7 +367,9 @@ hetzner::_kept_summary() {
 # the whole plan. A plan row that is not live gets a warning, except a row
 # in <kept> (the lines of _HETZNER_DESTROY_KEPT: the list warned for it) or
 # in <skipped> (the lines of _HETZNER_DESTROY_SKIPPED: the last lines of the
-# destroy name it, with the reason).
+# destroy name it, with the reason). A live row that is not in the plan
+# gets the warning that it is kept, with its name from <listed>
+# (hetzner::_destroy_resources gives it through shown_name).
 hetzner::_confirmed_rows() {
   local cluster_name="${1}" listed="${2}" kept="${3:-}" skipped="${4:-}" line kind rid rname rest planned header=1 t known
   local -A live=() was_kept=()
@@ -487,8 +491,10 @@ provider::destroy() {
 # provider::destroy_plan <config_file> <work_dir>
 #   READ-ONLY. What provider::destroy would delete. Line 1 is
 #   "cluster<TAB><cluster_name>", then one "<resource><TAB><id><TAB><name>"
-#   line per resource. provider::destroy deletes each resource in the
-#   token's project that carries lok8s.dev/cluster=<cluster_name> and the
+#   line per resource (the name as shown_name gives it: no control
+#   character, backslash, separator, bidi, zero-width or invisible format
+#   character). provider::destroy deletes each resource in the token's
+#   project that carries lok8s.dev/cluster=<cluster_name> and the
 #   owner mark of this cluster, so `lo destroy` shows this list, refuses a
 #   cluster_name that another domain also uses, and asks for the
 #   cluster_name before it deletes anything. A resource with the cluster

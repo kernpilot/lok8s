@@ -1,0 +1,19 @@
+[
+  {"case": "a multibyte UTF-8 name stays", "in": "ö-測試", "want": "ö-測試"},
+  {"case": "DEL", "in": "a\u007fb", "want": "a?b"},
+  {"case": "a C1 character (NEL)", "in": "a\u0085b", "want": "a?b"},
+  {"case": "a C1 character (CSI) and the first and last C1", "in": "\u0080a\u009b2K\u009f", "want": "?a?2K?"},
+  {"case": "only a backslash", "in": "\\", "want": "?"},
+  {"case": "a backslash sequence", "in": "a\\nb\\e", "want": "a?nb?e"},
+  {"case": "C0: NUL, newline, CR, tab, ESC, unit separator", "in": "\u0000x\u001b[2Ky\r\tz\nw\u001f", "want": "?x?[2Ky??z?w?"},
+  {"case": "U+202E (right-to-left override)", "in": "abc\u202edef", "want": "abc?def"},
+  {"case": "U+200B (zero-width space)", "in": "a\u200bb", "want": "a?b"},
+  {"case": "the bounds of the bidi and zero-width ranges", "in": "\u200b\u200f\u202a\u202e\u2066\u2069", "want": "??????"},
+  {"case": "the line and paragraph separators", "in": "a\u2028b\u2029c", "want": "a?b?c"},
+  {"case": "U+061C (Arabic letter mark)", "in": "a\u061cb", "want": "a?b"},
+  {"case": "U+2060 to U+2064 (word joiner, invisible operators)", "in": "x\u2060\u2061\u2062\u2063\u2064y", "want": "x?????y"},
+  {"case": "U+FEFF (zero-width no-break space)", "in": "\ufeffa", "want": "?a"},
+  {"case": "the characters next to the ranges stay", "in": " ~\u00a0\u061b\u061d\u200a\u2010\u2027\u202f\u205f\u2065\u206a\ufefe\uff00", "want": " ~\u00a0\u061b\u061d\u200a\u2010\u2027\u202f\u205f\u2065\u206a\ufefe\uff00"},
+  {"case": "quotes and other printable ASCII stay", "in": "a b'c\"d[e]{f}$g", "want": "a b'c\"d[e]{f}$g"},
+  {"case": "an empty name", "in": "", "want": ""}
+]

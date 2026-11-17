@@ -1432,6 +1432,23 @@ _destroy_parts() {
 volume delete 24"
 }
 
+# The warning for a part with the owner mark of another cluster shows its
+# name through shown_name, as the other warnings do: the ESC, the BEL and
+# the U+202E (right-to-left override) of the name are '?', so the name
+# cannot set the terminal title or turn the rest of the line around. The
+# kept line shows the same name.
+@test "destroy: the warning for a part with the mark of another cluster shows its name safely" {
+  _part server 21 cp-0 "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${MARK}\"}"
+  _part server 22 $'cp\e]0;x\a-\xe2\x80\xae0' "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${OTHER}\"}"
+  run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
+  assert_success
+  assert_line --partial "[warn] hetzner: skipped server 22 cp?]0;x?-?0: it has lok8s.dev/cluster=prod, but the owner mark of another cluster (lok8s.dev/owner=${OTHER}; this cluster: ${MARK}). lok8s does not delete it."
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod that does not have the owner mark of this cluster (1 server): server 22 'cp?]0;x?-?0'. Delete it by hand only if it is yours and you want it gone." ]
+  [ -z "$(tr -d '[:print:]\n' <<<"${output}")" ]
+  run _writes
+  assert_output "server delete 21"
+}
+
 @test "destroy: a confirmed plan that names a part of another domain or of another cluster deletes only the marked part" {
   _destroy_parts
   export LOK8S_DESTROY_PLAN=$'cluster\tprod\nserver\t21\tcp-0\nserver\t22\tcp-0\nvolume\t25\tother-data'
