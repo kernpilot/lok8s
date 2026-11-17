@@ -182,7 +182,7 @@ hetzner::_destroy_cluster_name() {
   local config_file="${1}" cluster_name=""
   cluster_name=$(_cfg '.cluster_name // ""' 2>/dev/null || echo "")
   [[ -n "${cluster_name}" ]] || {
-    error "hetzner: the descriptor ${config_file} has no cluster_name. The destroy finds its resources by lok8s.dev/cluster=<cluster_name> and the owner mark, so it needs the name. No Hetzner resource was deleted. Set cluster_name in the descriptor."
+    error "hetzner: the descriptor ${config_file} has no cluster_name. The destroy finds its resources by lok8s.dev/cluster=<cluster_name> and the owner mark, so it needs the name. The hetzner provider deleted no resource in this step. Set cluster_name in the descriptor."
     return 1
   }
   echo "${cluster_name}"
@@ -232,7 +232,7 @@ hetzner::_destroy_resources() {
        ! foreign="$(jq -r --arg c "${cluster}" '
            (. // [])[] | ((.labels // {})["lok8s.dev/cluster"] // "") as $l | select($l != $c)
            | [(.id | tostring), $l, (.name // "")] | @tsv' <<<"${json}")"; then
-      error "hetzner: could not list the ${resource} resources with ${selector}. No Hetzner resource was deleted. Check the hcloud token and the API, then run the destroy again."
+      error "hetzner: could not list the ${resource} resources with ${selector}. The hetzner provider deleted no resource in this step. Check the hcloud token and the API, then run the destroy again."
       return 1
     fi
     while IFS= read -r line; do
@@ -320,11 +320,11 @@ hetzner::_confirmed_rows() {
       header=0
       planned="${rid}"
       if [[ "${kind}" != "cluster" ]]; then
-        error "hetzner: the confirmed destroy plan does not start with its cluster line (it starts with '${line//$'\t'/ }'). No Hetzner resource was deleted. Run lo destroy again."
+        error "hetzner: the confirmed destroy plan does not start with its cluster line (it starts with '${line//$'\t'/ }'). The hetzner provider deleted no resource in this step. Run lo destroy again."
         return 1
       fi
       if [[ "${planned}" != "${cluster_name}" ]]; then
-        error "hetzner: the confirmed destroy plan is for cluster_name '${planned}', but the descriptor has '${cluster_name}'. No Hetzner resource was deleted. Run lo destroy again."
+        error "hetzner: the confirmed destroy plan is for cluster_name '${planned}', but the descriptor has '${cluster_name}'. The hetzner provider deleted no resource in this step. Run lo destroy again."
         return 1
       fi
       continue
@@ -334,7 +334,7 @@ hetzner::_confirmed_rows() {
       [[ "${kind}" != "${t}" ]] || known=1
     done
     if (( ! known )) || [[ ! "${rid}" =~ ^[1-9][0-9]*$ ]]; then
-      error "hetzner: the confirmed destroy plan has a line that lo destroy does not write: '${line//$'\t'/ }' (the type must be one of ${_HETZNER_DESTROY_ORDER[*]}, the id a number). No Hetzner resource was deleted. Run lo destroy again."
+      error "hetzner: the confirmed destroy plan has a line that lo destroy does not write: '${line//$'\t'/ }' (the type must be one of ${_HETZNER_DESTROY_ORDER[*]}, the id a number). The hetzner provider deleted no resource in this step. Run lo destroy again."
       return 1
     fi
     key="${kind}"$'\t'"${rid}"
@@ -347,7 +347,7 @@ hetzner::_confirmed_rows() {
   done <<<"${LOK8S_DESTROY_PLAN}"
 
   if (( header )); then
-    error "hetzner: the confirmed destroy plan is empty. No Hetzner resource was deleted. Run lo destroy again."
+    error "hetzner: the confirmed destroy plan is empty. The hetzner provider deleted no resource in this step. Run lo destroy again."
     return 1
   fi
 
