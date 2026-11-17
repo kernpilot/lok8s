@@ -634,6 +634,11 @@ if [[ "${1:-}" == "--capabilities" ]]; then
   if [[ -n "${PARITY_PROBE_LOG:-}" ]]; then
     echo "SELF=$0 PWD=$(pwd -P) ENTRIES=$(ls -A | wc -l | tr -d ' ') STDIN=$(wc -c | tr -d ' ') PATH_SECRETS=${PATH_SECRETS:-<unset>} DISABLE=${LOK8S_SECRETS_DISABLE:-<unset>} KEYS_ONLY=${LOK8S_INTERNAL_SECRETS_KEYS_ONLY:-<unset>} DRYRUN=${LOK8S_BOOTSTRAP_DRYRUN:-<unset>} HOME=${KUSTOMIZE_PLUGIN_HOME:-<unset>} PATH0=${PATH%%:*} TMP=${TMPDIR:-<unset>} STORE=${LOK8S_BOOTSTRAP_DRYRUN_STORE:-<unset>} REPORT=${LOK8S_BOOTSTRAP_DRYRUN_REPORT:-<unset>} HELMP=${HELM_PLUGINS:-<unset>}" >> "${PARITY_PROBE_LOG}"
   fi
+  # A slow check, to interrupt the dry run in the middle of it.
+  if [[ -n "${PARITY_CAPS_SLOW_MARK:-}" ]]; then
+    : > "${PARITY_CAPS_SLOW_MARK}"
+    sleep 5
+  fi
   echo dry-run; exit 0
 fi
 [[ -t 0 ]] || cat >/dev/null
@@ -1355,6 +1360,33 @@ for side in bash go; do
   if [[ -z "$(ls -A "${sig_tmp}")" ]]; then echo "ok: ${side}: SIGTERM mid-render left no temp file"; else fail "${side}: SIGTERM left $(ls -A "${sig_tmp}")"; fi
 done
 unset PARITY_SLOW_MARK sig_tmp sig_pid
+
+# Ctrl-C in the dry run's check of the Secret plugin: both sides name the
+# interrupt, not a plugin without the dry run, end with 130 and leave no
+# temp file. The INT goes to the process group of the run, as a terminal
+# sends it (set -m: the run is a group of its own).
+export PARITY_CAPS_SLOW_MARK="${WORK}/caps.started"
+for side in bash go; do
+  caps_tmp="${WORK}/caps-tmp.${side}"
+  rm -rf "${caps_tmp}" "${PARITY_CAPS_SLOW_MARK}"; mkdir -p "${caps_tmp}"
+  parity::select "${PROJ}" "${side}"
+  set -m
+  ( cd "${PROJ}" && TMPDIR="${caps_tmp}" exec "${LO_BIN}" bootstrap --domain dry.dev --dry-run --only cilium </dev/null >"${WORK}/caps-int.${side}.out" 2>"${WORK}/caps-int.${side}.err" ) &
+  caps_pid=$!
+  set +m
+  for (( i = 0; i < 100; i++ )); do [[ -e "${PARITY_CAPS_SLOW_MARK}" ]] && break; sleep 0.1; done
+  if [[ -e "${PARITY_CAPS_SLOW_MARK}" ]]; then echo "ok: ${side}: the dry run reached the check of the Secret plugin"; else fail "${side}: the dry run never reached the check of the Secret plugin"; fi
+  kill -INT -- "-${caps_pid}" 2>/dev/null || true
+  caps_rc=0
+  wait "${caps_pid}" 2>/dev/null || caps_rc=$?
+  if (( caps_rc == 130 )); then echo "ok: ${side}: Ctrl-C in the check exits 130"; else fail "${side}: Ctrl-C in the check exited ${caps_rc}, want 130"; fi
+  tls_pin "${side}: Ctrl-C in the check names the interrupt" "${WORK}/caps-int.${side}.err" "bootstrap dry-run: the check of the Secret plugin \.kustomize/secrets\.lok8s\.dev/v1/secret/Secret was interrupted \(SIGINT\)$"
+  if grep -qF "does not support a dry run" "${WORK}/caps-int.${side}.err"; then fail "${side}: Ctrl-C in the check blames the plugin"; else echo "ok: ${side}: Ctrl-C in the check does not blame the plugin"; fi
+  if [[ -z "$(ls -A "${caps_tmp}")" ]]; then echo "ok: ${side}: Ctrl-C in the check left no temp file"; else fail "${side}: Ctrl-C in the check left $(ls -A "${caps_tmp}")"; fi
+done
+parity::state_same "${WORK}/caps-int.bash.out" "${WORK}/caps-int.go.out" "stdout of Ctrl-C in the check of lo bootstrap --dry-run" || failures=$((failures + 1))
+parity::state_same "${WORK}/caps-int.bash.err" "${WORK}/caps-int.go.err" "stderr of Ctrl-C in the check of lo bootstrap --dry-run" || failures=$((failures + 1))
+unset PARITY_CAPS_SLOW_MARK caps_tmp caps_pid caps_rc
 chmod 755 "${PROJ}/locked"
 rm -rf "${PROJ}/locked" "${PROJ}/dangling" "${PROJ}/.cache/core"
 unset PARITY_KUBECTL_LOG

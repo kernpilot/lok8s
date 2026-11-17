@@ -446,6 +446,9 @@ addons::_check_stop() {
 # The check passes only on a plugin that exits 0 and prints the line
 # "dry-run" exactly (as the keys-only probe reads "keys-only"). A plugin
 # that does not end within _ADDONS_DRYRUN_CHECK_TIMEOUT seconds is refused.
+# An INT or TERM that stops the check is reported as the interrupt, not as
+# a plugin without the dry run, and the check returns 128+n (130, 143): lo
+# ends with that code, as the Go binary does after an interrupt.
 # Without a Secret plugin in the project there is nothing to check (as in a
 # real run, the render then has none); with one, a link of the boundary that
 # does not resolve is refused, not skipped. The plugin home must be an
@@ -476,7 +479,7 @@ addons::dry_run_boundary() {
   addons::_helm_stub "${_dir}/bin" > "${_dir}/bin/helm" || return 1
   chmod 700 "${_dir}/bin/docker" "${_dir}/bin/git" "${_dir}/bin/helm" || return 1
   ( umask 077; : > "${_dir}/report" ) || return 1
-  local _plugin="${_dir}/plugins/${_secret}" _rel="${_home#"${PATH_BASE}/"}/${_secret}" _probe _out _late _caps="" _rc=0 _pid _watchdog
+  local _plugin="${_dir}/plugins/${_secret}" _rel="${_home#"${PATH_BASE}/"}/${_secret}" _probe _out _late _stop _stopped _caps="" _rc=0 _pid _watchdog
   [[ -f "${_home}/${_secret}" ]] || return 0
   if [[ ! -f "${_plugin}" ]]; then
     error "bootstrap dry-run: the dry run's link to the Secret plugin ${_rel} does not resolve, so the dry run cannot check the plugin"
@@ -499,6 +502,11 @@ addons::dry_run_boundary() {
     error "bootstrap dry-run: cannot make a file for the output of the check of the Secret plugin ${_rel}: ${_late}"
     return 1
   fi
+  if ! _stop=$(mktemp "${_dir}/check-stop-XXXXXX" 2>&1); then
+    rm -rf -- "${_probe}" "${_out}" "${_late}"
+    error "bootstrap dry-run: cannot make a file for the output of the check of the Secret plugin ${_rel}: ${_stop}"
+    return 1
+  fi
   # The plugin runs in the background with a watchdog (the pattern of
   # spec::_kver_yq): at the time limit it gets TERM (a background job
   # ignores INT, so not the interrupt that Go sends), and KILL after the
@@ -514,6 +522,10 @@ addons::dry_run_boundary() {
   # signal would start a second stop inside the first (bash runs its trap
   # between the commands of the first). It still ends a wait early, so the
   # stop waits for the plugin again (addons::_check_stop).
+  #
+  # A stop first writes the name of its signal into a mark of its own: the
+  # check then reports the interrupt, not a plugin without the dry run. The
+  # exit code of the subshell cannot tell: a plugin can exit 130 or 143.
   (
     cd "${_probe}" || exit 1
     _sig=""
@@ -544,8 +556,8 @@ addons::dry_run_boundary() {
     ) >/dev/null 2>&1 &
     [[ -z "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG}" ]] || sleep "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG}"
     _watchdog=$!
-    trap 'trap : INT TERM; addons::_check_stop "${_pid}" "${_watchdog}"; exit 130' INT
-    trap 'trap : INT TERM; addons::_check_stop "${_pid}" "${_watchdog}"; exit 143' TERM
+    trap 'trap : INT TERM; echo SIGINT > "${_stop}" || :; addons::_check_stop "${_pid}" "${_watchdog}"; exit 130' INT
+    trap 'trap : INT TERM; echo SIGTERM > "${_stop}" || :; addons::_check_stop "${_pid}" "${_watchdog}"; exit 143' TERM
     [[ -z "${_sig}" ]] || kill -"${_sig}" "${BASHPID}"
     _rc=0
     wait "${_pid}" 2>/dev/null || _rc=$?
@@ -555,12 +567,22 @@ addons::dry_run_boundary() {
   ) || _rc=$?
   rm -rf -- "${_probe}"
   _caps=$(<"${_out}")
+  _stopped=$(<"${_stop}")
+  # The interrupt first, as in Go: the check did not fail, it was stopped.
+  if [[ -n "${_stopped}" ]]; then
+    rm -f -- "${_out}" "${_late}" "${_stop}"
+    error "bootstrap dry-run: the check of the Secret plugin ${_rel} was interrupted (${_stopped})"
+    case "${_stopped}" in
+      SIGINT) return 130 ;;
+      *) return 143 ;;
+    esac
+  fi
   if [[ -s "${_late}" ]]; then
-    rm -f -- "${_out}" "${_late}"
+    rm -f -- "${_out}" "${_late}" "${_stop}"
     error "bootstrap dry-run: the check of the Secret plugin ${_rel} did not end in ${_ADDONS_DRYRUN_CHECK_TIMEOUT} s — run 'lo toolchain install' to install the plugin of this lo"
     return 1
   fi
-  rm -f -- "${_out}" "${_late}"
+  rm -f -- "${_out}" "${_late}" "${_stop}"
   if (( _rc != 0 )) || [[ $'\n'"${_caps}"$'\n' != *$'\ndry-run\n'* ]]; then
     error "bootstrap dry-run: the Secret plugin ${_rel} does not support a dry run (it would write the secrets store) — run 'lo toolchain install' to install the plugin of this lo"
     return 1

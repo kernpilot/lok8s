@@ -77,6 +77,9 @@ func TestCatchHangupCancelsTheCommandContext(t *testing.T) {
 	if !stop() {
 		t.Fatal("stop did not report the SIGHUP")
 	}
+	if got := Signal(root); got != "SIGHUP" {
+		t.Fatalf("Signal = %q, want SIGHUP", got)
+	}
 	if got := exitCode(); got != 129 {
 		t.Fatalf("exit code = %d, want 129", got)
 	}
@@ -110,6 +113,50 @@ func TestCatchHangupCancelsTheCommandContext(t *testing.T) {
 	}
 	time.Sleep(5 * time.Second)
 	t.Fatal("a SIGHUP after stop did not end the process")
+}
+
+// Signal names the first signal of the Watch once the Watch cancelled its
+// context, also in a context derived from it: "SIGINT" or "SIGTERM" here
+// (SIGHUP: TestCatchHangupCancelsTheCommandContext). It is "" before a
+// signal, and for a context without a Watch. The signal goes to the test
+// binary: the Watch catches it.
+func TestSignalNamesTheSignalOfTheWatch(t *testing.T) {
+	if got := Signal(t.Context()); got != "" {
+		t.Fatalf("Signal without a Watch = %q, want \"\"", got)
+	}
+	cases := []struct {
+		sig  syscall.Signal
+		name string
+		rc   int
+	}{
+		{syscall.SIGINT, "SIGINT", 130},
+		{syscall.SIGTERM, "SIGTERM", 143},
+	}
+	for _, c := range cases {
+		root, exitCode := Watch(t.Context())
+		ctx, cancel := context.WithCancel(root)
+		if got := Signal(ctx); got != "" {
+			cancel()
+			exitCode()
+			t.Fatalf("Signal before a signal = %q, want \"\"", got)
+		}
+		if err := syscall.Kill(os.Getpid(), c.sig); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not cancel the context", c.name)
+		}
+		got := Signal(ctx)
+		cancel()
+		if rc := exitCode(); rc != c.rc {
+			t.Errorf("%s: exit code = %d, want %d", c.name, rc, c.rc)
+		}
+		if got != c.name {
+			t.Errorf("Signal after %s = %q, want %q", c.name, got, c.name)
+		}
+	}
 }
 
 // A SIGHUP that came before stop counts, also when it is still in the

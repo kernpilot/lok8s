@@ -2340,14 +2340,18 @@ bootstrap::apply() {
   # every copy and temp file of the run. Built once, after the plan is valid
   # and before anything is written or reported; removed on EXIT, chained in
   # front of the caller's own EXIT trap (bootstrap::_dry_run_trap).
-  local bootstrap_dry_boundary=""
+  local bootstrap_dry_boundary="" bootstrap_dry_rc=0
   if (( ${bootstrap_dry_run:-0} )); then
     bootstrap_dry_boundary="$(mktemp -d "${TMPDIR:-/tmp}/lok8s-dryrun-XXXXXXXX")" \
       || { error "bootstrap dry-run: cannot create the render boundary"; return 2; }
     bootstrap::_dry_run_trap "${bootstrap_dry_boundary}"
-    if ! addons::dry_run_boundary "${bootstrap_dry_boundary}"; then
+    addons::dry_run_boundary "${bootstrap_dry_boundary}" || bootstrap_dry_rc=$?
+    if (( bootstrap_dry_rc != 0 )); then
       bootstrap::_dry_run_untrap "${bootstrap_dry_boundary}"
-      return 2
+      # An interrupt of the check keeps its 128+n (130, 143), and lo ends
+      # with it, as the Go binary does. Any other refusal is 2.
+      (( bootstrap_dry_rc > 128 )) || bootstrap_dry_rc=2
+      return "${bootstrap_dry_rc}"
     fi
   fi
 

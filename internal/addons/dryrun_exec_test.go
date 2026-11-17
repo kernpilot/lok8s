@@ -29,6 +29,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/interrupt"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/testutil"
 	"github.com/kernpilot/lok8s/internal/toolchain"
@@ -771,6 +772,55 @@ func TestDryRunBoundaryStopsThePluginOnACancel(t *testing.T) {
 				t.Errorf("the check took %s after the cancel, want about 1 s (the whole grace, then the kill)", took)
 			}
 			pluginStopped(t, marks, start)
+		})
+	}
+}
+
+// An interrupt of lo (Ctrl-C, or TERM) during the check is reported as the
+// interrupt, with the signal's name, not as a plugin without the dry run,
+// and lo ends with 128+n (bash: the stop traps of addons::dry_run_boundary
+// mark the signal). The signal goes to the test binary: the Watch catches
+// it, as it does in lo. The plugin ends on its TERM.
+func TestDryRunBoundaryNamesTheInterrupt(t *testing.T) {
+	cases := []struct {
+		sig  syscall.Signal
+		name string
+		rc   int
+	}{
+		{syscall.SIGINT, "SIGINT", 130},
+		{syscall.SIGTERM, "SIGTERM", 143},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, marks := slowProject(t, "exit 1")
+			ctx, exitCode := interrupt.Watch(t.Context())
+			sent := make(chan bool, 1)
+			go func() {
+				deadline := time.Now().Add(10 * time.Second)
+				for !fsutil.FileExists(filepath.Join(marks, "pid")) {
+					if ctx.Err() != nil || time.Now().After(deadline) {
+						sent <- false
+						return
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+				sent <- syscall.Kill(os.Getpid(), c.sig) == nil
+			}()
+			err := boundaryIn(t, ctx, p)
+			// The Watch catches the signal until exitCode: so the test
+			// waits for the goroutine first.
+			ok := <-sent
+			rc := exitCode()
+			if !ok {
+				t.Fatal("the plugin did not start, so the test sent no signal")
+			}
+			want := "the check of the Secret plugin .kustomize/secrets.lok8s.dev/v1/secret/Secret was interrupted (" + c.name + ")"
+			if err == nil || err.Error() != want {
+				t.Errorf("err = %v, want %q", err, want)
+			}
+			if rc != c.rc {
+				t.Errorf("exit code = %d, want %d", rc, c.rc)
+			}
 		})
 	}
 }
