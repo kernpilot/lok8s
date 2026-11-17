@@ -131,6 +131,36 @@ _nothing_ran() {
   _nothing_ran
 }
 
+# A name in the plan comes from the provider's API. The plan shows it
+# through verbose::shown_names: each control character (C0, DEL, C1), each
+# backslash and each bidi or zero-width character is '?', and a multibyte
+# name stays. The confirmed plan that the driver gets stays as the provider
+# gave it. The Go twin is TestDestroyGuardShowsEachNameOfThePlanSafely.
+@test "destroy guard: the plan shows each name safely, and the confirmed plan stays as the provider gave it" {
+  _assume_no_tty
+  local confirm_cluster=prod-a
+  PLAN='cluster\tprod-a\nserver\t70\tö-測試\nserver\t71\ta\x7fb\xc2\x85c\nserver\t72\t\\\nserver\t73\tx\xe2\x80\xaey\xe2\x80\x8bz\nserver\t74\te\x1b[31mvil\n'
+  export PLAN
+  run provision::dispatch_destroy test.prod < /dev/null
+  assert_success
+  assert_output --partial $'destroy deletes these resources of cluster_name \033[1mprod-a\033[0m:\n    server ö-測試 (70)\n    server a?b?c (71)\n    server ? (72)\n    server x?y?z (73)\n    server e?[31mvil (74)'
+  refute_output --partial $'\x1b[31m'
+  refute_output --partial $'\xe2\x80\xae'
+  run cat "${CALLS}"
+  assert_output --partial $'plan-env:cluster prod-a\nserver 70 ö-測試\nserver 71 a\x7fb\xc2\x85c\nserver 72 \\\nserver 73 x\xe2\x80\xaey\xe2\x80\x8bz\nserver 74 e\x1b[31mvil'
+}
+
+# A jq that fails stops the plan display: nothing runs.
+@test "destroy guard: a plan whose names cannot be shown stops the destroy" {
+  _assume_no_tty
+  local confirm_cluster=prod-a
+  verbose::shown_names() { return 5; }
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 1 ]
+  assert_output --partial "could not show the names of the destroy plan of 'test.prod'. Nothing was deleted. Check that jq runs, then run lo destroy again."
+  _nothing_ran
+}
+
 @test "destroy guard: a --confirm-cluster that does not match is refused" {
   _assume_no_tty
   local confirm_cluster=prod-b
