@@ -1473,7 +1473,7 @@ volume delete 24"
   refute_output --partial "lo destroy: kept"
   run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
   assert_success
-  assert_output --partial "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (1 network)."
+  assert_output --partial "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod that does not have the owner mark of this cluster (1 network)."
 }
 
 @test "destroy: no domain for the mark stops the plan and the destroy before any hcloud call" {
@@ -1497,6 +1497,12 @@ volume delete 24"
   run provider::status "${DESC}"
   assert_success
   assert_output "Running"
+
+  # One server without the mark: the singular.
+  _fake_set server 21 '.labels |= del(."lok8s.dev/owner")'
+  run provider::status "${DESC}"
+  assert_output "Running (1 of 1 server without the owner mark of this cluster)"
+  _fake_set server 21 ".labels.\"lok8s.dev/owner\" = \"${MARK}\""
 
   _part server 22 cp-1 "{\"lok8s.dev/cluster\":\"prod\",\"lok8s.dev/owner\":\"${OTHER}\"}" '{"status":"running"}'
   _part server 23 old-0 '{"lok8s.dev/cluster":"prod"}' '{"status":"off"}'

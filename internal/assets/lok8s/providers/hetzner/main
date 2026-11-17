@@ -284,9 +284,9 @@ hetzner::_kept_summary() {
     kinds+="${kinds:+, }${n} ${t}"
     (( n == 1 )) || kinds+="s"
   done
-  local noun="resources"
-  (( total > 1 )) || noun="resource"
-  warn "lo destroy: kept ${total} ${noun} with lok8s.dev/cluster=${cluster_name} that do not have the owner mark of this cluster (${kinds}). The warnings above name them. Delete them by hand only if they are yours and you want them gone."
+  local noun="resources" verb="do"
+  (( total > 1 )) || noun="resource" verb="does"
+  warn "lo destroy: kept ${total} ${noun} with lok8s.dev/cluster=${cluster_name} that ${verb} not have the owner mark of this cluster (${kinds}). The warnings above name them. Delete them by hand only if they are yours and you want them gone."
 }
 
 # hetzner::_confirmed_rows <cluster_name> <listed>
@@ -642,7 +642,9 @@ provider::status() {
     if mark="$(hetzner::owner_mark "${cluster_name}" 2>/dev/null)"; then
       unmarked=$(jq --arg key "${_HETZNER_OWNER_KEY}" --arg mark "${mark}" \
         '[.[] | select(((.labels // {})[$key] // "") != $mark)] | length' <<<"${servers_json}")
-      (( unmarked == 0 )) || marks="${unmarked} of ${total} servers without the owner mark of this cluster"
+      local servers="servers"
+      (( total > 1 )) || servers="server"
+      (( unmarked == 0 )) || marks="${unmarked} of ${total} ${servers} without the owner mark of this cluster"
     else
       marks="the owner mark of this cluster is not known"
     fi
