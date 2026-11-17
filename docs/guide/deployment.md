@@ -498,7 +498,12 @@ existing part only when it has the mark of this cluster:
   exits `0`; its last line
   counts them by kind, for example `lo destroy: kept 2 resources with
   lok8s.dev/cluster=prod that do not have the owner mark of this cluster
-  (1 server, 1 network)`. Two domains
+  (1 server, 1 network)`. The list of the parts selects the cluster label,
+  and the destroy checks the label of each listed part again. A listed part
+  with another cluster label is not deleted either. The lines before the
+  last line name each such part with its kind, id, name and reason. For a
+  part of the plan, the reason is `its cluster label changed after the
+  plan`. Two domains
   with the same `cluster_name` in one Hetzner project have two marks, so the
   destroy of one domain does not delete the parts of the other domain. When
   a list of parts fails, the hetzner provider stops before it deletes a
