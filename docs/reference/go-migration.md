@@ -598,8 +598,11 @@ reach these paths (they stop at the local refusals, tokens unset).
 
 ### Process model
 
-How the binary starts and stops children. The bash entrypoint set no
-trap and waited on every foreground child; the binary cancels a context.
+How the binary starts and stops children. The bash tree waits for most
+children in the foreground. Its traps clean up (they remove temporary
+files, or note an interrupted step), or stop a child that it runs in the
+background: the dry run's check of the Secret plugin (D26) and the bounded
+yq calls. The binary cancels a context.
 
 | # | Deviation | Where |
 |---|---|---|
