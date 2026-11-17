@@ -230,6 +230,40 @@ exit 2'
   assert_output "spec.kubernetes.version cannot be read: yq stopped at the memory limit of 256 MiB, or a signal stopped it. Simplify the spec file."
 }
 
+# bash reports a job that a signal stopped on stderr ("line N: PID
+# Segmentation fault ( ulimit -d ... )") at its next notify point: after a
+# command, and after a DEBUG trap (bats sets one, with functrace). The read
+# writes its own line for that cause, so its stderr stays empty. The
+# watchdog delay (_SPEC_KVER_TEST_DELAY_WATCHDOG) holds the window open
+# after the stub died. The read runs in a new bash, so the case does not
+# depend on the traps of bats.
+@test "spec::_kver_yq: bash puts no report of a yq that a signal stopped on the caller's stderr" {
+  _spec "version: v1.31.4"
+  local sig trace rc bad=0
+  for sig in SEGV KILL; do
+    _yq_stub 'ulimit -c 0; cd "'"${BATS_TEST_TMPDIR}"'" && kill -'"${sig}"' $$'
+    for trace in none debug; do
+      rc=0
+      bash -c 'import() { :; }; source "$1/domain.sh"; source "$1/spec.sh"; _SPEC_KVER_TEST_DELAY_WATCHDOG=1
+        [[ "$3" == none ]] || { set -T; trap ":" DEBUG; }
+        spec::_kver_yq "$2" -r .kind' \
+        bash "${_PROJECT_ROOT}/.lok8s/utils" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" "${trace}" \
+        > "${BATS_TEST_TMPDIR}/out" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+      if (( rc != 1 )) || [[ "$(<"${BATS_TEST_TMPDIR}/out")" != "spec.kubernetes.version cannot be read: yq stopped at the memory limit of 256 MiB, or a signal stopped it. Simplify the spec file." ]]; then
+        echo "SIG${sig}, DEBUG trap ${trace}: status ${rc}, want 1, with: $(<"${BATS_TEST_TMPDIR}/out")" >&2; bad=1
+      fi
+      if [ -s "${BATS_TEST_TMPDIR}/err" ]; then
+        echo "SIG${sig}, DEBUG trap ${trace}: the caller's stderr is not empty:" >&2
+        cat "${BATS_TEST_TMPDIR}/err" >&2; bad=1
+      fi
+    done
+  done
+  if compgen -G "${BATS_TEST_TMPDIR}/core*" >/dev/null; then
+    echo "a stub left a core file" >&2; bad=1
+  fi
+  (( bad == 0 ))
+}
+
 @test "spec::kind_node_version: a yq that a signal stops after a panic line is named as stopped, not as a fault of the yq release" {
   _spec "version: v1.31.4"
   # A status above 128 is a signal (SIGKILL: 137), also when yq wrote a
@@ -296,6 +330,47 @@ _kill_left() {
     _kill_left "^sleep ${_SPEC_KVER_TIMEOUT}\$"
     echo "the watchdog left 'sleep ${_SPEC_KVER_TIMEOUT}' running" >&2; return 1
   }
+}
+
+# The read's body dies (SIGKILL) while yq runs. The caller's $(...) must
+# return then, not at the time limit: no job of the read may hold its pipe.
+# The second case reads stderr in the $(...) too: while yq runs, the read
+# keeps the caller's stderr in errfd, and no job may keep that copy.
+@test "spec::_kver_yq: a SIGKILLed read does not hold the caller's \$(...) open until the time limit" {
+  _spec "version: v1.31.4"
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  local reads caller i yq body start took limit
+  # A time limit that no other process uses, so _kill_left finds only this
+  # watchdog's sleep.
+  limit="8.$(printf '%04d' $(( RANDOM % 10000 )))"
+  for reads in stdout stderr; do
+    rm -f "${BATS_TEST_TMPDIR}/yq.pid" "${BATS_TEST_TMPDIR}/done"
+    _yq_stub 'echo $$ > "'"${BATS_TEST_TMPDIR}"'/yq.pid"; exec sleep 30'
+    # `|| :`: the killed body ends the $(...) with 137, and bats runs with set -e.
+    if [[ "${reads}" == stdout ]]; then
+      ( _SPEC_KVER_TIMEOUT=${limit}; out="$(spec::_kver_yq "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" -r .kind)" || :
+        : "${out}"; echo done > "${BATS_TEST_TMPDIR}/done" ) &
+    else
+      ( _SPEC_KVER_TIMEOUT=${limit}; out="$(spec::_kver_yq "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" -r .kind 2>&1)" || :
+        : "${out}"; echo done > "${BATS_TEST_TMPDIR}/done" ) &
+    fi
+    caller=$!
+    for (( i = 0; i < 50; i++ )); do [ -s "${BATS_TEST_TMPDIR}/yq.pid" ] && break; sleep 0.1; done
+    [ -s "${BATS_TEST_TMPDIR}/yq.pid" ]
+    yq="$(cat "${BATS_TEST_TMPDIR}/yq.pid")"
+    body="$(_ppid "${yq}")"
+    [ -n "${body}" ]
+    start=${SECONDS}
+    kill -KILL "${body}"
+    for (( i = 0; i < 60; i++ )); do [ -e "${BATS_TEST_TMPDIR}/done" ] && break; sleep 0.1; done
+    took=$(( SECONDS - start ))
+    kill -TERM "${yq}" 2>/dev/null || :
+    _kill_left "^sleep ${limit//./\\.}\$"
+    wait "${caller}" 2>/dev/null || :
+    [ -e "${BATS_TEST_TMPDIR}/done" ] || { echo "${reads}: the caller's \$(...) did not return within 6 s" >&2; return 1; }
+    (( took < 4 )) || { echo "${reads}: the caller's \$(...) returned after ${took} s" >&2; return 1; }
+  done
 }
 
 # The CI bats container has no ps and no pgrep: a test that calls one sees

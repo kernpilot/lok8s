@@ -97,6 +97,43 @@ args: -r .a ${BATS_TEST_TMPDIR}/in.yaml" ]
   _clean
 }
 
+# bash reports a job that a signal stopped on stderr ("line N: PID
+# Segmentation fault ( ulimit -d … )") at its next notify point: after a
+# command, and after a DEBUG trap (bats sets one, with functrace). The
+# caller writes its own line for that cause, so the report must not reach
+# the caller's stderr. The watchdog delay (_YQBOUND_TEST_DELAY_WATCHDOG)
+# holds the window open after the stub died: its sleep is a notify point,
+# and so is each DEBUG trap. The call runs in a new bash, so the case does
+# not depend on the traps of bats.
+@test "yqbound::run: bash puts no report of a yq that a signal stopped on the caller's stderr" {
+  local sig want trace bad=0
+  for sig in SEGV KILL; do
+    want=75
+    [[ "${sig}" == KILL ]] && want=73
+    _yq 'ulimit -c 0; cd "'"${BATS_TEST_TMPDIR}"'" && kill -'"${sig}"' $$'
+    for trace in none debug; do
+      rc=0
+      bash -c 'source "$1"; _YQBOUND_TEST_DELAY_WATCHDOG=1
+        [[ "$2" == none ]] || { set -T; trap ":" DEBUG; }
+        yqbound::run 5 262144 "$3" -r .a' \
+        bash "${_PROJECT_ROOT}/.lok8s/utils/yqbound.sh" "${trace}" "${BATS_TEST_TMPDIR}/in.yaml" \
+        > "${BATS_TEST_TMPDIR}/out" 2> "${BATS_TEST_TMPDIR}/err" || rc=$?
+      if (( rc != want )); then
+        echo "SIG${sig}, DEBUG trap ${trace}: status ${rc}, want ${want}" >&2; bad=1
+      fi
+      if [ -s "${BATS_TEST_TMPDIR}/err" ]; then
+        echo "SIG${sig}, DEBUG trap ${trace}: the caller's stderr is not empty:" >&2
+        cat "${BATS_TEST_TMPDIR}/err" >&2; bad=1
+      fi
+    done
+  done
+  if compgen -G "${BATS_TEST_TMPDIR}/core*" >/dev/null; then
+    echo "a stub left a core file" >&2; bad=1
+  fi
+  (( bad == 0 ))
+  _clean
+}
+
 @test "yqbound::run: an unknown flag (an old yq) is its own status, the usage text dropped" {
   _yq 'echo "Error: unknown flag: --yaml-fix-merge-anchor-to-spec" >&2; echo "Usage:" >&2; exit 1'
   _run_bound 5
@@ -197,26 +234,34 @@ _interrupt() {
   _clean
 }
 
+# The second case reads stderr in the $(…) too: while yq runs, the call
+# keeps the caller's stderr in errfd, and no job may keep that copy.
 @test "yqbound::run: a SIGKILLed body does not hold the caller's \$(…) open until the time limit" {
-  rm -f "${BATS_TEST_TMPDIR}/yq.pid" "${BATS_TEST_TMPDIR}/done"
-  _yq 'echo $$ > "'"${BATS_TEST_TMPDIR}"'/yq.pid"; exec sleep 30'
-  # `|| :`: the killed body ends the $(…) with 137, and bats runs with set -e.
-  ( out="$(yqbound::run 8 262144 "${BATS_TEST_TMPDIR}/in.yaml" '.a')" || :; : "${out}"; echo done > "${BATS_TEST_TMPDIR}/done" ) &
-  local caller=$! i
-  for (( i = 0; i < 50; i++ )); do [ -s "${BATS_TEST_TMPDIR}/yq.pid" ] && break; sleep 0.1; done
-  [ -s "${BATS_TEST_TMPDIR}/yq.pid" ]
-  local yq body start
-  yq="$(cat "${BATS_TEST_TMPDIR}/yq.pid")"
-  body="$(_ppid "${yq}")"
-  [ -n "${body}" ]
-  start=${SECONDS}
-  kill -KILL "${body}"
-  for (( i = 0; i < 60; i++ )); do [ -e "${BATS_TEST_TMPDIR}/done" ] && break; sleep 0.1; done
-  local took=$(( SECONDS - start ))
-  kill -TERM "${yq}" 2>/dev/null || :
-  wait "${caller}" 2>/dev/null || :
-  [ -e "${BATS_TEST_TMPDIR}/done" ] || { echo "the caller's \$(…) did not return within 6 s" >&2; return 1; }
-  (( took < 4 )) || { echo "the caller's \$(…) returned after ${took} s" >&2; return 1; }
+  local reads caller i yq body start took
+  for reads in stdout stderr; do
+    rm -f "${BATS_TEST_TMPDIR}/yq.pid" "${BATS_TEST_TMPDIR}/done"
+    _yq 'echo $$ > "'"${BATS_TEST_TMPDIR}"'/yq.pid"; exec sleep 30'
+    # `|| :`: the killed body ends the $(…) with 137, and bats runs with set -e.
+    if [[ "${reads}" == stdout ]]; then
+      ( out="$(yqbound::run 8 262144 "${BATS_TEST_TMPDIR}/in.yaml" '.a')" || :; : "${out}"; echo done > "${BATS_TEST_TMPDIR}/done" ) &
+    else
+      ( out="$(yqbound::run 8 262144 "${BATS_TEST_TMPDIR}/in.yaml" '.a' 2>&1)" || :; : "${out}"; echo done > "${BATS_TEST_TMPDIR}/done" ) &
+    fi
+    caller=$!
+    for (( i = 0; i < 50; i++ )); do [ -s "${BATS_TEST_TMPDIR}/yq.pid" ] && break; sleep 0.1; done
+    [ -s "${BATS_TEST_TMPDIR}/yq.pid" ]
+    yq="$(cat "${BATS_TEST_TMPDIR}/yq.pid")"
+    body="$(_ppid "${yq}")"
+    [ -n "${body}" ]
+    start=${SECONDS}
+    kill -KILL "${body}"
+    for (( i = 0; i < 60; i++ )); do [ -e "${BATS_TEST_TMPDIR}/done" ] && break; sleep 0.1; done
+    took=$(( SECONDS - start ))
+    kill -TERM "${yq}" 2>/dev/null || :
+    wait "${caller}" 2>/dev/null || :
+    [ -e "${BATS_TEST_TMPDIR}/done" ] || { echo "${reads}: the caller's \$(…) did not return within 6 s" >&2; return 1; }
+    (( took < 4 )) || { echo "${reads}: the caller's \$(…) returned after ${took} s" >&2; return 1; }
+  done
 }
 
 # _now_ms — the wall clock in milliseconds (bash 5 EPOCHREALTIME: no fork,
