@@ -6,7 +6,16 @@
 # flag across the Makefile, goreleaser and this file). The golang tag
 # equals the root go.mod `go` line: the image sets GOTOOLCHAIN=local, so an
 # older tag cannot build the module (the same test pins this).
-FROM golang:1.26.11-alpine AS lo-build
+# The base is pinned by its tag and by the digest of its multi-arch index
+# (it has linux/amd64 and linux/arm64, the platforms docker.yml builds),
+# because this stage builds the lo binary that the final image runs. A bump
+# changes the tag and the digest in the same edit: with a digest, the tag
+# alone does not change the image, and no test sees it. Take the index
+# digest from the "Digest:" line of
+# `docker buildx imagetools inspect golang:<tag>`, never the digest of one
+# platform's manifest: the arm64 build would then get the amd64 image, and
+# nothing would fail.
+FROM golang:1.26.11-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS lo-build
 WORKDIR /src
 COPY go.mod go.sum ./
 # The root module replaces github.com/kernpilot/lok8s/kustomize with the
@@ -22,7 +31,16 @@ RUN CGO_ENABLED=0 go build -trimpath \
       -o /out/lo ./cmd/lo
 
 # ── stage 2: shell-operator + tools + hooks ─────────────────────────────
-FROM ghcr.io/flant/shell-operator:v1.19.5
+# The base is pinned by its tag and by the digest of its multi-arch index
+# (linux/amd64 and linux/arm64 are the platforms docker.yml builds). A bump
+# changes the tag and the digest in the same edit: with a digest, the tag
+# alone does not change the image, and no test sees it. Take the index
+# digest from the "Digest:" line of
+# `docker buildx imagetools inspect ghcr.io/flant/shell-operator:<tag>`,
+# never the digest of one platform's manifest: the arm64 build would then
+# get the amd64 base, `uname -m` below would pick the amd64 tools, and
+# nothing would fail.
+FROM ghcr.io/flant/shell-operator:v1.19.5@sha256:2b1127a267538899bcf62e1ae6cf03035a0ad7480058c4d6f911f3640b46c914
 
 # Install dependencies:
 #   kustomize, yq, jq — core k8s ops (kubectl is pinned from dl.k8s.io below —
@@ -34,6 +52,18 @@ FROM ghcr.io/flant/shell-operator:v1.19.5
 #   envsubst — template rendering (part of gettext; the Go hooks render
 #     natively, the legacy bash reference under /hooks/legacy still needs it)
 #   khelm — kustomize exec plugin inflating bootstrap addon charts
+# The tools that are not Alpine packages come from their upstream releases.
+# Each download goes to /tmp/dl, and `sha256sum -c` checks it against the
+# sum below for its architecture before it is installed: a mismatch, or an
+# architecture with no sums, fails the build. The sums are the ones the
+# upstreams publish for these exact versions:
+#   kubectl     dl.k8s.io/release/<version>/bin/linux/<arch>/kubectl.sha256
+#   clusterctl  the asset digest that GitHub shows for the release asset
+#               (cluster-api publishes no checksums file)
+#   flux        flux_<version>_checksums.txt of the release
+#   kind        kind-linux-<arch>.sha256sum of the release
+#   khelm       checksums.txt of the release
+# A version bump changes the URL and both sums of that tool.
 # The base image's /etc/apk/repositories names its vendor's own mirror,
 # over plain HTTP. Use Alpine's CDN over HTTPS, for the base's Alpine
 # release. The packages are signed with Alpine's keys either way, but a
@@ -51,25 +81,46 @@ RUN v="$(cut -d. -f1,2 /etc/alpine-release)" \
       gettext \
       docker-cli \
     && ARCH="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
-    && wget -qO /usr/local/bin/kubectl \
+    && case "${ARCH}" in \
+      amd64) \
+        KUBECTL_SHA256=1e9045ec32bea85da43de85f0065358529ea7c7a152eca78154fba5b58c27d82 \
+        CLUSTERCTL_SHA256=a6b94e0da68df254191480b11c0b50019a7a5df87560d6f70a76d3453116f21e \
+        FLUX_SHA256=3791d8fbb73b967ada021186f7b46686a2b180ce206d3c279c3f2ad183877a7f \
+        KIND_SHA256=50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54 \
+        KHELM_SHA256=f9a36519c147fc846aa69ca5a19f6259cb2c94f88550ae34de2bdb971b39495c ;; \
+      arm64) \
+        KUBECTL_SHA256=c957eb8c4bea27a3bb35b269edd9082e27f027f7b76b20b5bf4afebc726c6d3e \
+        CLUSTERCTL_SHA256=a9b32e0179cdbb66ba67ebdb45be818c983dedcc827f6d31bca72277250df52c \
+        FLUX_SHA256=738604ab040055ace69777988a24def98ada1aff14ae4726e733089dc8cc5e12 \
+        KIND_SHA256=b92cd615e97585de8ddade28ed5cd7feb4248d717c233eea5b03c37298900f5d \
+        KHELM_SHA256=40da3b53961b5a1b91a5713c536533899f3fc580d8ae31803d9c31aacda8f2e0 ;; \
+      *) echo "operator image: no download checksums for ${ARCH}" >&2; exit 1 ;; \
+    esac \
+    && mkdir -p /tmp/dl \
+    && wget -qO /tmp/dl/kubectl \
       "https://dl.k8s.io/release/v1.36.2/bin/linux/${ARCH}/kubectl" \
-    && chmod +x /usr/local/bin/kubectl \
+    && echo "${KUBECTL_SHA256}  /tmp/dl/kubectl" | sha256sum -c - \
+    && install -m 0755 /tmp/dl/kubectl /usr/local/bin/kubectl \
     && rm -f /bin/kubectl /usr/bin/kubectl \
-    && wget -qO /usr/local/bin/clusterctl \
+    && wget -qO /tmp/dl/clusterctl \
       "https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.13.3/clusterctl-linux-${ARCH}" \
-    && chmod +x /usr/local/bin/clusterctl \
-    && wget -qO /tmp/flux.tar.gz \
+    && echo "${CLUSTERCTL_SHA256}  /tmp/dl/clusterctl" | sha256sum -c - \
+    && install -m 0755 /tmp/dl/clusterctl /usr/local/bin/clusterctl \
+    && wget -qO /tmp/dl/flux.tar.gz \
       "https://github.com/fluxcd/flux2/releases/download/v2.8.8/flux_2.8.8_linux_${ARCH}.tar.gz" \
-    && tar -xzf /tmp/flux.tar.gz -C /usr/local/bin flux \
-    && rm -f /tmp/flux.tar.gz \
+    && echo "${FLUX_SHA256}  /tmp/dl/flux.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/dl/flux.tar.gz -C /usr/local/bin flux \
     && chmod +x /usr/local/bin/flux \
-    && wget -qO /usr/local/bin/kind \
+    && wget -qO /tmp/dl/kind \
       "https://github.com/kubernetes-sigs/kind/releases/download/v0.32.0/kind-linux-${ARCH}" \
-    && chmod +x /usr/local/bin/kind \
-    && mkdir -p /usr/local/kustomize-plugins/khelm.mgoltzsche.github.com/v2/chartrenderer \
-    && wget -qO /usr/local/kustomize-plugins/khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer \
+    && echo "${KIND_SHA256}  /tmp/dl/kind" | sha256sum -c - \
+    && install -m 0755 /tmp/dl/kind /usr/local/bin/kind \
+    && wget -qO /tmp/dl/khelm \
       "https://github.com/mgoltzsche/khelm/releases/download/v2.8.0/khelm-linux-${ARCH}" \
-    && chmod +x /usr/local/kustomize-plugins/khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer
+    && echo "${KHELM_SHA256}  /tmp/dl/khelm" | sha256sum -c - \
+    && mkdir -p /usr/local/kustomize-plugins/khelm.mgoltzsche.github.com/v2/chartrenderer \
+    && install -m 0755 /tmp/dl/khelm /usr/local/kustomize-plugins/khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer \
+    && rm -rf /tmp/dl
 
 # The lo binary the hook shims exec (`lo operator <hook>`). On PATH for the
 # shims; `lo operator` derives its runtime layout from LOK8S_STATE_DIR /
