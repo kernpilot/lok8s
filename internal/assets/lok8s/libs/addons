@@ -362,7 +362,17 @@ addons::detail() {
 # the refusing docker, git and helm; helm-plugins/ is empty; store/ is the run
 # store; tmp/ is the render's TMPDIR; report is the report file. A Secret
 # plugin without the dry-run capability (`Secret --capabilities`) would write
-# the secrets store: refused.
+# the secrets store: refused (Go: DryRunBoundary.checkSecretPlugin).
+#
+# The check runs the plugin that the render runs (plugins/ of the boundary),
+# with the environment of a dry-run render (addons::render, without
+# --allow-generators). Like the keys-only probe (build::_keys_only_capable),
+# it runs so that no plugin version can do anything with it: in an empty
+# directory of the boundary (a subshell removes it on exit), with an empty
+# stdin, PATH_SECRETS at a path in that directory that does not exist, the
+# store-free switch on and the keys-only setting off. The caller's
+# directory, stdin, store and environment do not reach it: a plugin that
+# does not know the flag would read the caller's store.
 addons::dry_run_boundary() {
   local _dir="${1}" _home="${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}" _d
   for _d in plugins bin helm-plugins store tmp; do
@@ -384,9 +394,26 @@ addons::dry_run_boundary() {
   addons::_helm_stub "${_dir}/bin" > "${_dir}/bin/helm" || return 1
   chmod 700 "${_dir}/bin/docker" "${_dir}/bin/git" "${_dir}/bin/helm" || return 1
   ( umask 077; : > "${_dir}/report" ) || return 1
-  local _plugin="${_home}/${_secret}"
-  if [[ -f "${_plugin}" ]] && ! "${_plugin}" --capabilities 2>/dev/null </dev/null | grep -qx 'dry-run'; then
-    error "bootstrap dry-run: the Secret plugin ${_plugin#"${PATH_BASE}/"} does not support a dry run (it would write the secrets store) — run 'lo toolchain install' to install the plugin of this lo"
+  local _plugin="${_dir}/plugins/${_secret}" _caps="" _rc=0
+  [[ -f "${_plugin}" ]] || return 0
+  _caps=$(
+    _probe=$(mktemp -d "${_dir}/probe-XXXXXX") || exit 1
+    trap 'rm -rf "${_probe}"' EXIT
+    cd "${_probe}" || exit 1
+    LOK8S_BOOTSTRAP_DRYRUN=1 \
+    LOK8S_BOOTSTRAP_DRYRUN_REPORT="${_dir}/report" \
+    LOK8S_BOOTSTRAP_DRYRUN_STORE="${_dir}/store" \
+    TMPDIR="${_dir}/tmp" \
+    KUSTOMIZE_PLUGIN_HOME="${_dir}/plugins" \
+    PATH="${_dir}/bin:${PATH}" \
+    HELM_PLUGINS="${_dir}/helm-plugins" \
+    PATH_SECRETS="${_probe}/store" \
+    LOK8S_SECRETS_DISABLE=1 \
+    LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0 \
+      "${_plugin}" --capabilities </dev/null 2>/dev/null
+  ) || _rc=$?
+  if (( _rc != 0 )) || [[ $'\n'"${_caps}"$'\n' != *$'\ndry-run\n'* ]]; then
+    error "bootstrap dry-run: the Secret plugin ${_home#"${PATH_BASE}/"}/${_secret} does not support a dry run (it would write the secrets store) — run 'lo toolchain install' to install the plugin of this lo"
     return 1
   fi
   return 0

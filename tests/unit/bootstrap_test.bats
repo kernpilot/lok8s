@@ -3548,6 +3548,62 @@ rook-ceph-cluster"
   assert_output --partial "testcni: unchanged"
 }
 
+# The check of the Secret plugin runs the plugin that the render runs (the
+# boundary's plugins/), with the environment of a dry-run render, and so that
+# no plugin version can do anything with it: in an empty directory of the
+# boundary that is removed after, with an empty stdin, PATH_SECRETS at a path
+# that does not exist, the store-free switch on and the keys-only setting off
+# (Go: TestDryRunBoundaryChecksThePluginAsTheRenderRunsIt). The caller's
+# directory, stdin, store and settings do not reach it.
+@test "the dry run checks the Secret plugin as the render runs it, not in the caller's directory" {
+  local b="${BATS_TEST_TMPDIR}/boundary" caller="${BATS_TEST_TMPDIR}/caller"
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" probe
+  export PROBE_LOG="${BATS_TEST_TMPDIR}/probe.log"
+  mkdir -p "${b}" "${caller}" "$(dirname "${plugin}")"
+  : > "${caller}/spec.yaml"
+  cat > "${plugin}" <<'SH'
+#!/bin/sh
+{
+  echo "self=$0"
+  echo "pwd=$(pwd -P)"
+  echo "entries=$(ls -A | wc -l | tr -d ' ')"
+  echo "stdin=$(wc -c | tr -d ' ')"
+  echo "PATH_SECRETS=${PATH_SECRETS-<unset>}"
+  if [ -e "${PATH_SECRETS:-/nonexistent-store}" ]; then echo store=exists; else echo store=absent; fi
+  echo "DISABLE=${LOK8S_SECRETS_DISABLE-<unset>}"
+  echo "KEYS_ONLY=${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}"
+  echo "DRYRUN=${LOK8S_BOOTSTRAP_DRYRUN-<unset>}"
+  echo "HOME=${KUSTOMIZE_PLUGIN_HOME-<unset>}"
+  echo "PATH0=${PATH%%:*}"
+  echo "TMPDIR=${TMPDIR-<unset>}"
+  echo "STORE=${LOK8S_BOOTSTRAP_DRYRUN_STORE-<unset>}"
+} > "${PROBE_LOG}"
+echo dry-run
+SH
+  chmod +x "${plugin}"
+  mkdir -p "${BATS_TEST_TMPDIR}/caller-store"
+  cd "${caller}"
+  PATH_SECRETS="${BATS_TEST_TMPDIR}/caller-store" LOK8S_SECRETS_DISABLE= LOK8S_INTERNAL_SECRETS_KEYS_ONLY=1 \
+    run addons::dry_run_boundary "${b}" <<<"caller input"
+  assert_success
+  probe="$(sed -n 's/^pwd=//p' "${PROBE_LOG}")"
+  [[ "$(dirname "${probe}")" == "$(cd "${b}" && pwd -P)" && "$(basename "${probe}")" == probe-* ]]
+  [ ! -e "${probe}" ]
+  run cat "${PROBE_LOG}"
+  assert_line "self=${b}/plugins/secrets.lok8s.dev/v1/secret/Secret"
+  assert_line "entries=0"
+  assert_line "stdin=0"
+  assert_line "PATH_SECRETS=${b}/$(basename "${probe}")/store"
+  assert_line "store=absent"
+  assert_line "DISABLE=1"
+  assert_line "KEYS_ONLY=0"
+  assert_line "DRYRUN=1"
+  assert_line "HOME=${b}/plugins"
+  assert_line "PATH0=${b}/bin"
+  assert_line "TMPDIR=${b}/tmp"
+  assert_line "STORE=${b}/store"
+}
+
 # _fake_helm: a helm v3 stand-in first on PATH (the boundary's helm stub
 # execs it). Its answers come from files under ${FAKE_HELM}: version,
 # deplist (the rows of `helm dependency list`), deplist.rc, lint (a line

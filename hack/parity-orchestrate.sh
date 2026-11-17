@@ -628,7 +628,14 @@ cat > "${PROJ}/.kustomize/secrets.lok8s.dev/v1/secret/Secret" <<'SH'
 # Parity stub Secret plugin: log the store it was handed, answer a fake pair
 # (base64 FAKECRT / FAKEKEY). It is the plugin of THIS lok8s: `--capabilities`
 # lists the dry run (lo bootstrap --dry-run probes it before rendering).
-if [[ "${1:-}" == "--capabilities" ]]; then echo dry-run; exit 0; fi
+# What the probe saw goes to PARITY_PROBE_LOG: its own path, its directory,
+# stdin and environment.
+if [[ "${1:-}" == "--capabilities" ]]; then
+  if [[ -n "${PARITY_PROBE_LOG:-}" ]]; then
+    echo "SELF=$0 PWD=$(pwd -P) ENTRIES=$(ls -A | wc -l | tr -d ' ') STDIN=$(wc -c | tr -d ' ') PATH_SECRETS=${PATH_SECRETS:-<unset>} DISABLE=${LOK8S_SECRETS_DISABLE:-<unset>} KEYS_ONLY=${LOK8S_INTERNAL_SECRETS_KEYS_ONLY:-<unset>} DRYRUN=${LOK8S_BOOTSTRAP_DRYRUN:-<unset>} HOME=${KUSTOMIZE_PLUGIN_HOME:-<unset>} PATH0=${PATH%%:*} TMP=${TMPDIR:-<unset>} STORE=${LOK8S_BOOTSTRAP_DRYRUN_STORE:-<unset>} REPORT=${LOK8S_BOOTSTRAP_DRYRUN_REPORT:-<unset>} HELMP=${HELM_PLUGINS:-<unset>}" >> "${PARITY_PROBE_LOG}"
+  fi
+  echo dry-run; exit 0
+fi
 [[ -t 0 ]] || cat >/dev/null
 echo "PATH_SECRETS=${PATH_SECRETS:-<unset>}" >> "${PARITY_PLUGIN_LOG}"
 echo "KEYS_ONLY=${LOK8S_INTERNAL_SECRETS_KEYS_ONLY-<unset>}" >> "${PARITY_PLUGIN_LOG}"
@@ -1193,26 +1200,33 @@ dry_expect_rc 2 provision --domain beta.cloud --bootstrap --dry-run
 # cache directory: the dry run never walks the project, never writes into it
 # (no .registries.json either), and still exports the registry values a real
 # run reads back from that file. The stub kustomize logs what the render saw
-# (the boundary's temp path normalized to BOUNDARY).
+# (the boundary's temp path normalized to BOUNDARY). The stub Secret plugin
+# logs what the plugin check saw: the plugin of the boundary's plugin home,
+# run in an empty directory of the boundary (PROBE) with an empty stdin, the
+# dry-run render's environment, PATH_SECRETS in that directory, the
+# store-free switch on and the keys-only setting off. Not the caller's
+# directory, store or settings.
 ln -s /nonexistent/lok8s-parity-target "${PROJ}/dangling"
 mkdir -p "${PROJ}/locked" "${PROJ}/.cache"
 echo x > "${PROJ}/locked/secret"
 chmod 000 "${PROJ}/locked"
 truncate -s 8G "${PROJ}/.cache/core"
-export PARITY_RENDER_LOG="${WORK}/render.log"
+export PARITY_RENDER_LOG="${WORK}/render.log" PARITY_PROBE_LOG="${WORK}/probe.log"
 tree_snapshot() {  # the project tree without the files every run rewrites
   find "${PROJ}" -path "${PROJ}/locked" -prune -o ! -name lok8s.yaml -printf '%P %y %s %T@\n' 2>/dev/null | sort
 }
-r3_pre() { dry_pre; rm -f "${PARITY_RENDER_LOG}"; tree_snapshot > "${WORK}/tree.before"; }
+r3_pre() { dry_pre; rm -f "${PARITY_RENDER_LOG}" "${PARITY_PROBE_LOG}"; tree_snapshot > "${WORK}/tree.before"; }
 r3_post() {  # <impl>
   dry_post "${1}"
   tree_snapshot > "${WORK}/tree.after"
   if diff -q "${WORK}/tree.before" "${WORK}/tree.after" >/dev/null; then : > "${WORK}/tree.${1}.diff"; else diff "${WORK}/tree.before" "${WORK}/tree.after" > "${WORK}/tree.${1}.diff"; fi
   if [[ -e "${PROJ}/clusters/dry.dev/.registries.json" ]]; then echo present > "${WORK}/registries.${1}"; else echo absent > "${WORK}/registries.${1}"; fi
   sed -E 's#lok8s-dryrun-[A-Za-z0-9]+#BOUNDARY#g; s#lok8s-(addon|chart)-[A-Za-z0-9]+#COPY#g' "${PARITY_RENDER_LOG}" > "${WORK}/render.${1}.log" 2>/dev/null || : > "${WORK}/render.${1}.log"
+  sed -E 's#lok8s-dryrun-[A-Za-z0-9]+#BOUNDARY#g; s#/probe-[A-Za-z0-9]+#/PROBE#g' "${PARITY_PROBE_LOG}" > "${WORK}/probe.${1}.log" 2>/dev/null || : > "${WORK}/probe.${1}.log"
 }
 PARITY_PRE_EACH=r3_pre PARITY_POST_EACH=r3_post check - bootstrap --domain dry.dev --dry-run --only cilium
 parity::state_same "${WORK}/render.bash.log" "${WORK}/render.go.log" "what the dry run's render saw" || failures=$((failures + 1))
+parity::state_same "${WORK}/probe.bash.log" "${WORK}/probe.go.log" "what the dry run's plugin check saw" || failures=$((failures + 1))
 for side in bash go; do
   if [[ ! -s "${WORK}/tree.${side}.diff" ]]; then echo "ok: ${side}: the dry run changed nothing in the project tree"; else fail "${side}: the dry run changed the project tree: $(head -5 "${WORK}/tree.${side}.diff")"; fi
   if [[ "$(cat "${WORK}/registries.${side}")" == absent ]]; then echo "ok: ${side}: no .registries.json written"; else fail "${side}: the dry run wrote .registries.json"; fi
@@ -1221,9 +1235,12 @@ for side in bash go; do
   tls_pin    "${side}: a dry run renders with --enable-alpha-plugins" "${WORK}/render.${side}.log" " ARGS=build --enable-alpha-plugins /[^ ]*BOUNDARY/tmp/COPY$"
   tls_absent "${side}: no --enable-exec in a dry run (absent)"    "${WORK}/render.${side}.log" "--enable-exec"
   tls_pin    "${side}: the boundary's helm plugins, TMPDIR and run store" "${WORK}/render.${side}.log" " HELMP=[^ ]*/BOUNDARY/helm-plugins TMP=[^ ]*/BOUNDARY/tmp STORE=[^ ]*/BOUNDARY/store "
+  tls_pin    "${side}: the plugin check runs once, as the render runs the plugin, in an empty probe directory" "${WORK}/probe.${side}.log" \
+    "^SELF=[^ ]*/BOUNDARY/plugins/secrets\.lok8s\.dev/v1/secret/Secret PWD=[^ ]*/BOUNDARY/PROBE ENTRIES=0 STDIN=0 PATH_SECRETS=[^ ]*/BOUNDARY/PROBE/store DISABLE=1 KEYS_ONLY=0 DRYRUN=1 HOME=[^ ]*/BOUNDARY/plugins PATH0=[^ ]*/BOUNDARY/bin TMP=[^ ]*/BOUNDARY/tmp STORE=[^ ]*/BOUNDARY/store REPORT=[^ ]*/BOUNDARY/report HELMP=[^ ]*/BOUNDARY/helm-plugins$"
+  if [[ "$(grep -c . "${WORK}/probe.${side}.log")" == 1 ]]; then echo "ok: ${side}: one plugin check per dry run"; else fail "${side}: $(grep -c . "${WORK}/probe.${side}.log") plugin checks in one dry run, want 1"; fi
 done
 dry_expect_rc 0 bootstrap --domain dry.dev --dry-run --only cilium
-unset PARITY_RENDER_LOG
+unset PARITY_RENDER_LOG PARITY_PROBE_LOG
 
 # An entry's env: may not set lo's own variables — checked before anything
 # of it is exported: an entry error (dry run rc 2, real run rc 1), and the

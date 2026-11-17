@@ -49,6 +49,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/toolchain"
+	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 	"gopkg.in/yaml.v3"
 )
 
@@ -190,20 +191,49 @@ func (b *DryRunBoundary) link(src, rel string) error {
 
 // checkSecretPlugin refuses a Secret plugin that predates the dry run. The
 // in-process render serves the plugin from this binary, so only the exec
-// pipeline needs the check.
+// pipeline needs the check (bash: addons::dry_run_boundary).
+//
+// The check runs the plugin that the render runs: the one in the boundary's
+// plugin home, with the environment of a dry-run render (renderEnv, without
+// --allow-generators). Like the keys-only probe (internal/build/keysonly.go),
+// it runs so that no plugin version can do anything with it: in an empty
+// directory of the boundary (removed after), with an empty stdin,
+// PATH_SECRETS at a path in that directory that does not exist, the
+// store-free switch on and the keys-only setting off. The caller's
+// directory, stdin, store and environment do not reach it: a plugin that
+// does not know the flag would read the caller's store.
 func (b *DryRunBoundary) checkSecretPlugin(ctx context.Context, paths *config.Paths, runner execx.Runner, home string) error {
 	if mode, err := render.CurrentMode(); err != nil || mode != render.ModeExec {
 		return nil
 	}
-	plugin := filepath.Join(home, filepath.FromSlash(toolchain.SecretPluginRel))
+	rel := config.RelTo(paths.Base, filepath.Join(home, filepath.FromSlash(toolchain.SecretPluginRel)))
+	plugin := filepath.Join(b.PluginHome, filepath.FromSlash(toolchain.SecretPluginRel))
 	if !fsutil.FileExists(plugin) {
 		return nil
 	}
 	if runner == nil {
 		runner = execx.NewRunner(paths)
 	}
+	dir, err := os.MkdirTemp(b.Dir, "probe-")
+	if err != nil {
+		return fmt.Errorf("dry-run boundary: cannot make a directory for the check of the Secret plugin %s: %w", rel, err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	env := append(b.renderEnv(false, ""),
+		"PATH_SECRETS="+filepath.Join(dir, "store"),
+		secret.DisableEnv+"=1",
+		secret.KeysOnlyEnv+"=0",
+	)
 	var out strings.Builder
-	err := runner.Run(ctx, execx.Cmd{Name: plugin, Args: []string{"--capabilities"}, Stdout: &out, Stderr: io.Discard})
+	err = runner.Run(ctx, execx.Cmd{
+		Name:   plugin,
+		Args:   []string{"--capabilities"},
+		Dir:    dir,
+		Env:    env,
+		Stdin:  strings.NewReader(""),
+		Stdout: &out,
+		Stderr: io.Discard,
+	})
 	if err == nil {
 		for line := range strings.SplitSeq(out.String(), "\n") {
 			if strings.TrimSpace(line) == "dry-run" {
@@ -211,7 +241,7 @@ func (b *DryRunBoundary) checkSecretPlugin(ctx context.Context, paths *config.Pa
 			}
 		}
 	}
-	return fmt.Errorf("the Secret plugin %s does not support a dry run (it would write the secrets store) — run 'lo toolchain install' to install the plugin of this lo", config.RelTo(paths.Base, plugin))
+	return fmt.Errorf("the Secret plugin %s does not support a dry run (it would write the secrets store) — run 'lo toolchain install' to install the plugin of this lo", rel)
 }
 
 // Close removes the boundary directory and everything in it.
