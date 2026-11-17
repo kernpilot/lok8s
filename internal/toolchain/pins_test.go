@@ -9,12 +9,14 @@ package toolchain
 
 import (
 	"bytes"
+	"cmp"
 	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -171,14 +173,16 @@ func TestYQMinimumIsThePin(t *testing.T) {
 	t.Parallel()
 	root := testutil.RepoRoot(t)
 	want := YQVersion + " or later"
-	// The statements each tree holds today: the bash messages, the docs and
-	// the cluster-spec skill. A tree that the scan no longer reads, or that
-	// loses its statements, fails here.
+	// min is the number of statements each tree holds today: the bash
+	// messages, the docs and the cluster-spec skill. It is a floor, so a new
+	// statement needs no change here. A tree with fewer statements fails: one
+	// was removed or reworded, or the walk skips its file. Without the floor a
+	// minimum written in another form would not be checked at all.
 	for _, tree := range []struct {
 		dir string
 		min int
 	}{{"internal/assets/lok8s", 5}, {"docs", 4}, {"skills", 1}} {
-		found := 0
+		var found []string
 		dir := tree.dir
 		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -198,7 +202,7 @@ func TestYQMinimumIsThePin(t *testing.T) {
 			}
 			for i, line := range strings.Split(string(raw), "\n") {
 				for _, m := range yqMinimumRE.FindAllString(line, -1) {
-					found++
+					found = append(found, rel+":"+strconv.Itoa(i+1))
 					if m != want {
 						t.Errorf("%s:%d names the yq minimum %q, want %q (internal/toolchain YQVersion)", rel, i+1, m, want)
 					}
@@ -209,8 +213,11 @@ func TestYQMinimumIsThePin(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if found < tree.min {
-			t.Errorf("%s: %d yq minimum statements, want at least %d: the scan no longer reads them", dir, found, tree.min)
+		if len(found) < tree.min {
+			t.Errorf("%s: %d yq minimum statements (found: %s), want at least %d. "+
+				"A statement was removed, or reworded so that yqMinimumRE does not find it (write each yq minimum as %q), "+
+				"or the walk skips its file. If a statement was removed on purpose, lower the minimum of %s in this test to %d",
+				dir, len(found), cmp.Or(strings.Join(found, ", "), "none"), tree.min, want, dir, len(found))
 		}
 	}
 }
