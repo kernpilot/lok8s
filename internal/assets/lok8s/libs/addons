@@ -600,6 +600,14 @@ addons::dry_run_boundary() {
     _rc=0
     wait "${_check}" 2>/dev/null || _rc=$?
   done
+  # A trap that takes time (a caller's) can run while the check ends: the
+  # last wait then gave 128+n, and the check had ended before the loop
+  # looked. One more wait reads the check's own code: bash keeps the code
+  # of a job that ended. A code that a wait already gave is not read again.
+  if (( _rc > 128 )); then
+    _rc=0
+    wait "${_check}" 2>/dev/null || _rc=$?
+  fi
   trap - INT TERM
   [[ -z "${_traps}" ]] || eval "${_traps}"
   rm -rf -- "${_probe}"
