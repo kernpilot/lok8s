@@ -220,10 +220,12 @@ provision::_destroy_guard_skip() {
 # provision::_destroy_guard <domain> <kind>
 # The cluster_name guard of `lo destroy`, for a provider with the
 # provider::destroy_plan hook (Go twin: destroy_guard.go). Such a provider
-# deletes by a name, not by a list: the hetzner provider deletes EVERY
-# resource in the token's project that carries lok8s.dev/cluster=<cluster_name>.
-# A domain copied from another one that kept the cluster_name and the token
-# would delete the other cluster too. So: refuse a cluster_name another
+# finds its resources by the cluster_name: the hetzner provider deletes the
+# resources in the token's project that carry lok8s.dev/cluster=<cluster_name>
+# AND the owner mark of this domain. A domain copied from another one that
+# kept the cluster_name and the token labels its resources the same way, and
+# only the mark keeps the two apart: a resource of the other domain with a
+# wrong mark would be deleted. So: refuse a cluster_name another
 # domain uses, print what would be deleted, and take the cluster_name typed
 # on a terminal or from --confirm-cluster (`confirm_cluster`, dynamic
 # scoping from main::destroy). `force` does not skip it. The confirmed plan
@@ -257,7 +259,7 @@ provision::_destroy_guard() {
   local users
   users="$(provision::_cluster_name_users "${domain}" "${name}")"
   if [[ -n "${users}" ]]; then
-    error "cluster_name '${name}' of '${domain}' is also the cluster_name of: ${users//$'\n'/, }. The provider deletes every resource of a cluster_name, so this destroy would delete the resources of those domains too. Nothing was deleted. Give each domain its own cluster_name, then run lo destroy again."
+    error "cluster_name '${name}' of '${domain}' is also the cluster_name of: ${users//$'\n'/, }. The provider deletes only the resources with this cluster_name and the owner mark of '${domain}'. The resources of those domains have the same cluster label, so only the mark keeps them apart: a resource of another domain with a wrong mark would be deleted. Nothing was deleted. Give each domain its own cluster_name, then run lo destroy again."
     return 3
   fi
 
@@ -713,8 +715,9 @@ provision::dispatch_destroy() {
 
   # Real-infrastructure gate — destroying a cloud cluster deprovisions
   # servers/LBs/volumes; confirm before deregistration or the driver run.
-  # A provider that deletes by cluster_name gets the cluster_name guard
-  # instead (provision::_destroy_guard).
+  # A provider with a destroy plan (it finds its resources by the
+  # cluster_name) gets the cluster_name guard instead
+  # (provision::_destroy_guard).
   # `|| return $?`: a decline propagates its sentinel rc 3 to the caller.
   local guard_skip
   guard_skip="$(provision::_destroy_guard_skip "${kind}" "${cluster_yaml}" "${provider_name}")"

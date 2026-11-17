@@ -119,7 +119,8 @@ func TestDestroyGuardRefusesAClusterNameAnotherDomainUses(t *testing.T) {
 	d.Force, d.ConfirmCluster = true, "prod-a"
 	err := d.DispatchDestroy(t.Context(), "test.prod")
 	assertDeclinedNothingRan(t, err, log)
-	assertContains(t, errBuf.String(), "cluster_name 'prod-a' of 'test.prod' is also the cluster_name of: copy.prod. The provider deletes every resource of a cluster_name")
+	assertContains(t, errBuf.String(), "cluster_name 'prod-a' of 'test.prod' is also the cluster_name of: copy.prod. The provider deletes only the resources with this cluster_name and the owner mark of 'test.prod'. The resources of those domains have the same cluster label, so only the mark keeps them apart: a resource of another domain with a wrong mark would be deleted.")
+	refuteContains(t, errBuf.String(), "deletes every resource")
 	assertContains(t, errBuf.String(), "Nothing was deleted. Give each domain its own cluster_name, then run lo destroy again.")
 }
 

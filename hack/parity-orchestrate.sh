@@ -1723,13 +1723,15 @@ done
 unset PARITY_DOCKER_LOG PARITY_DOCKER_VERSION PARITY_ATTACHED PARITY_HA
 
 # ── lo destroy --remote — the cluster_name guard ─────────────────────────────
-# A provider with the destroy_plan hook (mockplan) deletes by cluster_name:
-# the hetzner provider deletes every resource that carries
-# lok8s.dev/cluster=<cluster_name>. dupa.cloud and dupb.cloud share one
-# cluster_name, solo.cloud has its own. The guard refuses the shared name,
-# lists the plan and needs the cluster_name: off a terminal (stdin closed)
-# only --confirm-cluster gets past it, --force does not. The matching name
-# runs the driver's destroy, which calls the provider's destroy.
+# A provider with the destroy_plan hook (mockplan) finds its resources by
+# the cluster_name: the hetzner provider deletes the resources that carry
+# lok8s.dev/cluster=<cluster_name> and the owner mark of the domain, so only
+# the mark keeps two domains with one cluster_name apart. dupa.cloud and
+# dupb.cloud share one cluster_name, solo.cloud has its own. The guard
+# refuses the shared name, lists the plan and needs the cluster_name: off a
+# terminal (stdin closed) only --confirm-cluster gets past it, --force does
+# not. The matching name runs the driver's destroy, which calls the
+# provider's destroy.
 mkdir -p "${PROJ}/.lok8s/providers/mockplan"
 cat > "${PROJ}/.lok8s/providers/mockplan/main" <<'SH'
 #!/usr/bin/env argsh
@@ -1777,6 +1779,8 @@ for side in bash go; do
   parity::run "${side}" "${PROJ}" destroy --domain dupa.cloud -r --confirm-cluster shared-name || true
   grep -q "cluster_name 'shared-name' of 'dupa.cloud' is also the cluster_name of: dupb.cloud." "${WORK}/${side}.err" \
     || fail "${side}: the shared cluster_name was not refused"
+  grep -qF "The provider deletes only the resources with this cluster_name and the owner mark of 'dupa.cloud'." "${WORK}/${side}.err" \
+    || fail "${side}: the refusal of a shared cluster_name does not say what the provider deletes"
 done
 rm -rf "${PROJ}/clusters"/{dupa,dupb,solo}.cloud "${PROJ}/.lok8s/providers/mockplan"
 

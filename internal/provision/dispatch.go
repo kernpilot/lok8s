@@ -429,8 +429,8 @@ func (d *Dispatcher) DispatchDestroy(ctx context.Context, domainName string) err
 
 	// Real-infrastructure gate — destroying a cloud cluster deprovisions
 	// servers/LBs/volumes; confirm BEFORE deregistration or the driver run.
-	// A provider that deletes by cluster_name gets the cluster_name guard
-	// instead (destroy_guard.go).
+	// A provider with a destroy plan (it finds its resources by the
+	// cluster_name) gets the cluster_name guard instead (destroy_guard.go).
 	guarded, skip, err := d.guardDestroy(ctx, domainName, kind, clusterYAML, deps)
 	defer os.Unsetenv(driver.DestroyPlanEnv)
 	if err != nil {

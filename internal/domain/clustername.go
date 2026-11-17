@@ -2,9 +2,10 @@ package domain
 
 // clustername.go: which other domain in the project already uses a cluster
 // name. Two names identify a cluster: the cluster_name of the provider
-// config, by which the hetzner provider deletes (`lo destroy` deletes every
-// resource in the token's project that carries
-// lok8s.dev/cluster=<cluster_name>), and the spec's metadata.name (the
+// config, by which the hetzner provider finds what it deletes (`lo destroy`
+// deletes the resources in the token's project that carry
+// lok8s.dev/cluster=<cluster_name> and the owner mark of the domain), and
+// the spec's metadata.name (the
 // kubeconfig file, the kind cluster). A domain copied from another one keeps
 // both. `lo destroy` refuses a provider cluster_name that another domain
 // uses (ProviderClusterNameUsers; bash twin: provision::_cluster_name_users);
