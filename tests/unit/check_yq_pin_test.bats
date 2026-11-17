@@ -1,7 +1,9 @@
 #!/usr/bin/env bats
 # check_yq_pin_test.bats — hack/check-yq-pin.sh, the CI check that the
-# installed yq is the release .bin/b.yaml pins (b install exits 0 when a
-# binary fails, and the bats container then runs its own yq).
+# installed yq is the release .bin/b.yaml pins. b install exits 0 when a
+# binary fails, and the later steps then run another yq from PATH, or none.
+# The cases use a fake yq in a temporary bin directory, so they run the same
+# in the argsh container and on a host bats.
 
 setup() {
   load "../test_helper"
@@ -81,11 +83,12 @@ _yq_fake() {
   assert_output "::error::${BIN}/yq is ${PIN}-rc1, but ${BIN}/b.yaml pins ${PIN}: b install did not install the pinned yq"
 }
 
-@test "check-yq-pin: a pin without the leading v matches" {
+@test "check-yq-pin: a pin without the leading v fails (b uses the pin as the release tag, and the yq tags start with v)" {
   printf 'binaries:\n  yq:\n    version: %s\n' "${PIN#v}" > "${BIN}/b.yaml"
   _yq_fake "${PIN}"
   run bash "${_PROJECT_ROOT}/hack/check-yq-pin.sh" "${BIN}"
-  assert_success
+  assert_failure
+  assert_output "::error::${BIN}/yq is ${PIN}, but ${BIN}/b.yaml pins ${PIN#v}: b install did not install the pinned yq"
 }
 
 @test "check-yq-pin: without an argument it reads the .bin of its repository, as CI runs it" {

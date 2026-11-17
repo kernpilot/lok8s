@@ -177,12 +177,12 @@ dnssearch::_unset_without_flag() {
   [[ -z "${tag}" || "${tag}" == '!!null' ]]
 }
 
-# dnssearch::_yq_version — the version of the yq on PATH (vX.Y.Z), or
-# "version unknown".
+# dnssearch::_yq_version — the version of the yq on PATH (vX.Y.Z, with its
+# pre-release suffix, as spec::_yq_version), or "version unknown".
 dnssearch::_yq_version() {
   local version
   version="$(yq --version 2>/dev/null)" || version=""
-  if [[ "${version}" =~ v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+  if [[ "${version}" =~ v?([0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*) ]]; then
     printf 'v%s' "${BASH_REMATCH[1]}"
   else
     printf 'version unknown'
