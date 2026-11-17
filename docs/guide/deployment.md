@@ -498,12 +498,31 @@ existing part only when it has the mark of this cluster:
   exits `0`; its last line
   counts them by kind, for example `lo destroy: kept 2 resources with
   lok8s.dev/cluster=prod that do not have the owner mark of this cluster
-  (1 server, 1 network)`. Two domains
-  with the same `cluster_name` in one Hetzner project have two marks, so the
-  destroy of one domain does not delete the parts of the other domain. When
-  a list of parts fails, the hetzner provider stops before it deletes a
-  part. (With KubeOne, `kubeone reset` runs before this step and can have
-  deleted the dynamic workers.)
+  (1 server, 1 network)`. A `hetzner: skipped` warning above that line
+  names each kept part.
+- The destroy lists the parts with `hcloud <kind> list -l
+  lok8s.dev/cluster=<cluster_name>`, and the Hetzner API applies this
+  selector. Thus a part with another cluster label is usually not in the
+  list. A part of the plan that is not in the list at the destroy (it was
+  deleted, or its cluster label changed after the plan) is not deleted. The
+  warning for it is `hetzner: skipped <kind> <id> of the confirmed plan`,
+  and it says that the part is gone or is not of this cluster.
+- The destroy also checks the cluster label of each listed part again.
+  This check finds a part only when a list gives a part with another
+  cluster label or none (a list that did not apply its selector). The
+  destroy does not delete such a part, and a warning of the plan or of the
+  destroy says that the list gave it. The last lines of the destroy name
+  each such part with its kind, id, name and reason, for example
+  `lo destroy: skipped server 44 other-0: it has lok8s.dev/cluster=other,
+  not lok8s.dev/cluster=prod`. When the plan named the part, the reason
+  starts with `the plan named it, and now it has`. When the destroy also
+  kept parts, the line that counts them comes after these lines; else a
+  `lo destroy: skipped` line is the last line.
+- Two domains with the same `cluster_name` in one Hetzner project have two
+  marks, so the destroy of one domain does not delete the parts of the
+  other domain. When a list of parts fails, the hetzner provider stops
+  before it deletes a part. (With KubeOne, `kubeone reset` runs before this
+  step and can have deleted the dynamic workers.)
 - `lo recover` reimages a cloud server by the id that it checked, and it
   reads the server by that id again right before the reimage. A server that
   has another name or no mark at that time is not reimaged.

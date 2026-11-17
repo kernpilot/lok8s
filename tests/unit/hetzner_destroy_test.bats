@@ -256,7 +256,12 @@ volume delete 7"
 # fake gives two foreign parts in the server list (a list that does not
 # apply its selector): one with another cluster label and one with none,
 # both with the owner mark of this cluster. Neither is in the plan or
-# deleted, also when a confirmed plan names them, and a warning names each.
+# deleted, also when a confirmed plan names them. A warning names each, and
+# so do the last lines of the destroy, with the reason. The confirmed plan
+# below is made by hand (no label changes): with a plan that names them,
+# the reason says only what the provider knows, that the plan named them,
+# and the warning that the list gave them comes again (the plan did not
+# show it for a part that it names).
 @test "destroy: a listed part without the cluster label of this cluster is never deleted, also with the owner mark" {
   local mark
   mark="$(printf '%s\n%s\n' "${PROVIDER_DOMAIN}" prod-a | sha256sum | cut -c1-32)"
@@ -286,6 +291,8 @@ volume delete 7"
   assert_output --partial "hetzner: skipped server 44 other-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=prod-b."
   assert_output --partial "hetzner: skipped server 45 bare-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=<none>."
   refute_output --partial "skipped server 42"
+  assert_output --partial "[warn] lo destroy: skipped server 44 other-0: it has lok8s.dev/cluster=prod-b, not lok8s.dev/cluster=prod-a. lok8s did not delete it."
+  assert_output --partial "[warn] lo destroy: skipped server 45 bare-0: it has lok8s.dev/cluster=<none>, not lok8s.dev/cluster=prod-a. lok8s did not delete it."
   # Not a kept part of this cluster: the summary does not count it.
   refute_output --partial "lo destroy: kept"
   run grep ' delete ' "${HCLOUD_LOG}"
@@ -295,9 +302,145 @@ volume delete 7"
   export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0\nserver\t44\tother-0\nserver\t45\tbare-0'
   run provider::destroy "${DESC}" "${WORK}"
   assert_success
-  assert_output --partial "hetzner: skipped server 44 of the confirmed plan: no server with this id carries lok8s.dev/cluster=prod-a and the owner mark of this cluster now."
-  assert_output --partial "hetzner: skipped server 45 of the confirmed plan"
+  assert_line "[warn] lo destroy: skipped server 44 other-0: the plan named it, and now it has lok8s.dev/cluster=prod-b, not lok8s.dev/cluster=prod-a. lok8s did not delete it."
+  assert_line "[warn] lo destroy: skipped server 45 bare-0: the plan named it, and now it has lok8s.dev/cluster=<none>, not lok8s.dev/cluster=prod-a. lok8s did not delete it."
+  # The plan named them, so it showed no warning for them: the list warns
+  # once for each that it gave a part outside its selector.
+  [ "$(grep -c 'hetzner: skipped server 44 other-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=prod-b.' <<<"${output}")" -eq 1 ]
+  [ "$(grep -c 'hetzner: skipped server 45 bare-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=<none>.' <<<"${output}")" -eq 1 ]
+  # Not also the line of a plan row that is not live.
+  refute_output --partial "skipped server 44 of the confirmed plan"
+  refute_output --partial "skipped server 45 of the confirmed plan"
   refute_output --partial "skipped server 42"
   run grep ' delete ' "${HCLOUD_LOG}"
   assert_output "server delete 42"
+}
+
+# The plan names part 46 with the cluster label of this cluster, and at the
+# destroy the list gives it with another one. This fake does not apply the
+# selector (a real hcloud list leaves such a part out: see the next test).
+# The destroy does not delete it, and the last lines name it with the
+# reason, before the line that counts the kept parts (47 has no owner
+# mark), which stays the last line.
+@test "destroy: a part of the plan that the list gives with another cluster label is named in the last lines, and the kept line stays last" {
+  unset LOK8S_DESTROY_PLAN
+  MARK="$(printf '%s\n%s\n' "${PROVIDER_DOMAIN}" prod-a | sha256sum | cut -c1-32)"
+  export MARK
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    [[ "$2" == "list" ]] || return 0
+    local label=prod-a
+    [[ -z "${LOK8S_DESTROY_PLAN:-}" ]] || label=prod-b
+    if [[ "$1" == server ]]; then
+      echo "[{\"id\":42,\"name\":\"cp-0\",\"labels\":${OWN}},{\"id\":46,\"name\":\"moved-0\",\"labels\":{\"lok8s.dev/cluster\":\"${label}\",\"lok8s.dev/owner\":\"${MARK}\"}},{\"id\":47,\"name\":\"old-0\",\"labels\":{\"lok8s.dev/cluster\":\"prod-a\"}}]"
+    else
+      echo '[]'
+    fi
+  }
+  export -f hcloud
+
+  local plan
+  plan="$(provider::destroy_plan "${DESC}" "${WORK}" 2>/dev/null)"
+  [ "${plan}" = "$(printf 'cluster\tprod-a\nserver\t42\tcp-0\nserver\t46\tmoved-0')" ]
+
+  : > "${HCLOUD_LOG}"
+  export LOK8S_DESTROY_PLAN="${plan}"
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  [ "${lines[${#lines[@]}-2]}" = "[warn] lo destroy: skipped server 46 moved-0: the plan named it, and now it has lok8s.dev/cluster=prod-b, not lok8s.dev/cluster=prod-a. lok8s did not delete it." ]
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server). A 'hetzner: skipped' warning above names each one. Delete them by hand only if they are yours and you want them gone." ]
+  # Two lines name part 46: the warning that the list gave it, and the
+  # skipped line. Not the vague line of a plan row that is not live.
+  [ "$(grep -c 'server 46' <<<"${output}")" -eq 2 ]
+  [ "$(grep -c 'hetzner: skipped server 46 moved-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=prod-b.' <<<"${output}")" -eq 1 ]
+  refute_output --partial "skipped server 46 of the confirmed plan"
+  run grep ' delete ' "${HCLOUD_LOG}"
+  assert_output "server delete 42"
+}
+
+# The common case: the list applies its selector, as the Hetzner API does.
+# The plan names part 46, and at the destroy 46 has another cluster label,
+# so the list does not give it at all. The destroy does not delete it; the
+# warning of a plan row that is not live names it, and no skipped line
+# does (the label check sees only the parts of the list).
+@test "destroy: a part of the plan whose label changed is left out by a list that applies its selector" {
+  unset LOK8S_DESTROY_PLAN
+  MARK="$(printf '%s\n%s\n' "${PROVIDER_DOMAIN}" prod-a | sha256sum | cut -c1-32)"
+  export MARK
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    [[ "$2" == "list" ]] || return 0
+    # The selector is the last argument: -l lok8s.dev/cluster=<name>.
+    local label=prod-a sel="${*: -1}"
+    [[ -z "${LOK8S_DESTROY_PLAN:-}" ]] || label=prod-b
+    if [[ "$1" == server ]]; then
+      jq -c --arg c "${sel#lok8s.dev/cluster=}" '[.[] | select(.labels["lok8s.dev/cluster"] == $c)]' \
+        <<<"[{\"id\":42,\"name\":\"cp-0\",\"labels\":${OWN}},{\"id\":46,\"name\":\"moved-0\",\"labels\":{\"lok8s.dev/cluster\":\"${label}\",\"lok8s.dev/owner\":\"${MARK}\"}}]"
+    else
+      echo '[]'
+    fi
+  }
+  export -f hcloud
+
+  local plan
+  plan="$(provider::destroy_plan "${DESC}" "${WORK}" 2>/dev/null)"
+  [ "${plan}" = "$(printf 'cluster\tprod-a\nserver\t42\tcp-0\nserver\t46\tmoved-0')" ]
+
+  : > "${HCLOUD_LOG}"
+  export LOK8S_DESTROY_PLAN="${plan}"
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  assert_output "[warn] hetzner: skipped server 46 of the confirmed plan: no server with this id carries lok8s.dev/cluster=prod-a and the owner mark of this cluster now. It is gone, or it is not of this cluster."
+  run grep ' delete ' "${HCLOUD_LOG}"
+  assert_output "server delete 42"
+}
+
+# A part without a name: its skipped line has the kind, the id and the
+# reason, and no empty field shifts the reason into the name.
+@test "destroy: the skipped line of a part without a name keeps its reason" {
+  unset LOK8S_DESTROY_PLAN
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    [[ "$2" == "list" ]] || return 0
+    if [[ "$1" == server ]]; then
+      echo "[{\"id\":42,\"name\":\"cp-0\",\"labels\":${OWN}},{\"id\":48,\"name\":\"\",\"labels\":{\"lok8s.dev/cluster\":\"prod-b\"}}]"
+    else
+      echo '[]'
+    fi
+  }
+  export -f hcloud
+
+  run provider::destroy "${DESC}" "${WORK}"
+  assert_success
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: skipped server 48: it has lok8s.dev/cluster=prod-b, not lok8s.dev/cluster=prod-a. lok8s did not delete it." ]
+  run grep ' delete ' "${HCLOUD_LOG}"
+  assert_output "server delete 42"
+}
+
+# Two destroys in one shell: each starts with empty lists, so the second
+# names each skipped part once, as the first does, and counts the same
+# kept parts.
+@test "destroy: a second destroy in the same shell does not repeat the skipped parts of the first" {
+  unset LOK8S_DESTROY_PLAN
+  hcloud() {
+    printf '%s\n' "$*" >> "${HCLOUD_LOG}"
+    [[ "$2" == "list" ]] || return 0
+    if [[ "$1" == server ]]; then
+      echo "[{\"id\":42,\"name\":\"cp-0\",\"labels\":${OWN}},{\"id\":44,\"name\":\"other-0\",\"labels\":{\"lok8s.dev/cluster\":\"prod-b\"}},{\"id\":47,\"name\":\"old-0\",\"labels\":{\"lok8s.dev/cluster\":\"prod-a\"}}]"
+    else
+      echo '[]'
+    fi
+  }
+  export -f hcloud
+
+  # Not `run`: a subshell would drop the globals of the first destroy.
+  provider::destroy "${DESC}" "${WORK}" 2>"${BATS_TEST_TMPDIR}/first.err"
+  provider::destroy "${DESC}" "${WORK}" 2>"${BATS_TEST_TMPDIR}/second.err"
+  run tail -n 2 "${BATS_TEST_TMPDIR}/second.err"
+  assert_output "[warn] lo destroy: skipped server 44 other-0: it has lok8s.dev/cluster=prod-b, not lok8s.dev/cluster=prod-a. lok8s did not delete it.
+[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server). A 'hetzner: skipped' warning above names each one. Delete them by hand only if they are yours and you want them gone."
+  run cat "${BATS_TEST_TMPDIR}/second.err"
+  assert_output "$(cat "${BATS_TEST_TMPDIR}/first.err")"
+  run grep -c ' delete ' "${HCLOUD_LOG}"
+  assert_output "2"
 }
