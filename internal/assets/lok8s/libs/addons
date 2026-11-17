@@ -354,6 +354,13 @@ addons::detail() {
 # real run. Every security-relevant name below carries the bootstrap_ prefix an
 # entry's env: may not set.
 
+# _ADDONS_DRYRUN_CHECK_TIMEOUT / _ADDONS_DRYRUN_CHECK_GRACE: the time limit
+# of the Secret plugin check in addons::dry_run_boundary, in seconds (Go:
+# secretCheckTimeout and secretCheckGrace). Shell variables, set here, so
+# the environment cannot change them; tests make them short.
+_ADDONS_DRYRUN_CHECK_TIMEOUT=30
+_ADDONS_DRYRUN_CHECK_GRACE=5
+
 # addons::dry_run_boundary <dir>
 # Builds the boundary of one dry run in <dir> (a fresh directory the caller
 # owns and removes): plugins/ links the project's Secret plugin and holds the
@@ -374,8 +381,21 @@ addons::detail() {
 # directory, stdin and store do not reach it (a plugin that does not
 # know the flag would read the caller's store). Its environment is the
 # caller's with these settings on top: a variable they do not set passes.
+#
+# The check passes only on a plugin that exits 0 and prints the line
+# "dry-run" exactly (as the keys-only probe reads "keys-only"). A plugin
+# that does not end within _ADDONS_DRYRUN_CHECK_TIMEOUT seconds is refused.
+# Without a Secret plugin in the project there is nothing to check (as in a
+# real run, the render then has none); with one, a link of the boundary that
+# does not resolve is refused, not skipped. The plugin home must be an
+# absolute path: a relative link target resolves from the link's own
+# directory, so the links would not resolve.
 addons::dry_run_boundary() {
   local _dir="${1}" _home="${KUSTOMIZE_PLUGIN_HOME:-${PATH_BASE}/.kustomize}" _d
+  if [[ "${_home}" != /* ]]; then
+    error "bootstrap dry-run: the kustomize plugin home ${_home} is a relative path, so the dry run's links to its plugins would not resolve — set KUSTOMIZE_PLUGIN_HOME to an absolute path"
+    return 1
+  fi
   for _d in plugins bin helm-plugins store tmp; do
     mkdir -p "${_dir}/${_d}" && chmod 700 "${_dir}/${_d}" || return 1
   done
@@ -395,12 +415,26 @@ addons::dry_run_boundary() {
   addons::_helm_stub "${_dir}/bin" > "${_dir}/bin/helm" || return 1
   chmod 700 "${_dir}/bin/docker" "${_dir}/bin/git" "${_dir}/bin/helm" || return 1
   ( umask 077; : > "${_dir}/report" ) || return 1
-  local _plugin="${_dir}/plugins/${_secret}" _caps="" _rc=0
-  [[ -f "${_plugin}" ]] || return 0
-  _caps=$(
-    _probe=$(mktemp -d "${_dir}/probe-XXXXXX") || exit 1
-    trap 'rm -rf "${_probe}"' EXIT
+  local _plugin="${_dir}/plugins/${_secret}" _rel="${_home#"${PATH_BASE}/"}/${_secret}" _probe _caps="" _rc=0
+  [[ -f "${_home}/${_secret}" ]] || return 0
+  if [[ ! -f "${_plugin}" ]]; then
+    error "bootstrap dry-run: the dry run's link to the Secret plugin ${_rel} does not resolve, so the dry run cannot check the plugin"
+    return 1
+  fi
+  if ! _probe=$(mktemp -d "${_dir}/probe-XXXXXX" 2>&1); then
+    error "bootstrap dry-run: cannot make a directory for the check of the Secret plugin ${_rel}: ${_probe}"
+    return 1
+  fi
+  # The plugin runs in the background with a watchdog (the pattern of
+  # spec::_kver_yq): at the time limit it gets TERM (a background job
+  # ignores INT, so not the interrupt that Go sends), and KILL after the
+  # grace. Its stdout goes to a file outside the probe directory: a $(...)
+  # would wait for every process that holds the pipe. INT and TERM stop the
+  # plugin and the watchdog.
+  (
     cd "${_probe}" || exit 1
+    trap 'kill -TERM ${_pid:-} ${_watchdog:-} 2>/dev/null; exit 130' INT
+    trap 'kill -TERM ${_pid:-} ${_watchdog:-} 2>/dev/null; exit 143' TERM
     LOK8S_BOOTSTRAP_DRYRUN=1 \
     LOK8S_BOOTSTRAP_DRYRUN_REPORT="${_dir}/report" \
     LOK8S_BOOTSTRAP_DRYRUN_STORE="${_dir}/store" \
@@ -411,10 +445,35 @@ addons::dry_run_boundary() {
     PATH_SECRETS="${_probe}/store" \
     LOK8S_SECRETS_DISABLE=1 \
     LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0 \
-      "${_plugin}" --capabilities </dev/null 2>/dev/null
+      "${_plugin}" --capabilities </dev/null >"${_dir}/check.out" 2>/dev/null &
+    _pid=$!
+    (
+      trap 'kill -TERM $(jobs -p) 2>/dev/null; exit 0' TERM
+      sleep "${_ADDONS_DRYRUN_CHECK_TIMEOUT}" &
+      wait "$!" || exit 0
+      : > "${_dir}/check.timeout"
+      kill -TERM "${_pid}" 2>/dev/null
+      sleep "${_ADDONS_DRYRUN_CHECK_GRACE}" &
+      wait "$!" || exit 0
+      kill -KILL "${_pid}" 2>/dev/null
+    ) >/dev/null 2>&1 &
+    _watchdog=$!
+    _rc=0
+    wait "${_pid}" 2>/dev/null || _rc=$?
+    kill -TERM "${_watchdog}" 2>/dev/null
+    wait "${_watchdog}" 2>/dev/null
+    exit "${_rc}"
   ) || _rc=$?
+  rm -rf -- "${_probe}"
+  [[ ! -f "${_dir}/check.out" ]] || _caps=$(<"${_dir}/check.out")
+  rm -f -- "${_dir}/check.out"
+  if [[ -e "${_dir}/check.timeout" ]]; then
+    rm -f -- "${_dir}/check.timeout"
+    error "bootstrap dry-run: the check of the Secret plugin ${_rel} did not end in ${_ADDONS_DRYRUN_CHECK_TIMEOUT} s — run 'lo toolchain install' to install the plugin of this lo"
+    return 1
+  fi
   if (( _rc != 0 )) || [[ $'\n'"${_caps}"$'\n' != *$'\ndry-run\n'* ]]; then
-    error "bootstrap dry-run: the Secret plugin ${_home#"${PATH_BASE}/"}/${_secret} does not support a dry run (it would write the secrets store) — run 'lo toolchain install' to install the plugin of this lo"
+    error "bootstrap dry-run: the Secret plugin ${_rel} does not support a dry run (it would write the secrets store) — run 'lo toolchain install' to install the plugin of this lo"
     return 1
   fi
   return 0

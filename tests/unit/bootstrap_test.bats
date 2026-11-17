@@ -3576,6 +3576,8 @@ rook-ceph-cluster"
   echo "PATH0=${PATH%%:*}"
   echo "TMPDIR=${TMPDIR-<unset>}"
   echo "STORE=${LOK8S_BOOTSTRAP_DRYRUN_STORE-<unset>}"
+  echo "HELMP=${HELM_PLUGINS-<unset>}"
+  echo "REPORT=${LOK8S_BOOTSTRAP_DRYRUN_REPORT-<unset>}"
 } > "${PROBE_LOG}"
 echo dry-run
 SH
@@ -3601,6 +3603,121 @@ SH
   assert_line "PATH0=${b}/bin"
   assert_line "TMPDIR=${b}/tmp"
   assert_line "STORE=${b}/store"
+  assert_line "HELMP=${b}/helm-plugins"
+  assert_line "REPORT=${b}/report"
+}
+
+# The check passes only on a plugin that exits 0 and prints the line
+# "dry-run" exactly, as the keys-only probe reads its line (Go:
+# TestDryRunBoundaryReadsTheCapabilityLineExactly, the same cases).
+@test "the dry run's plugin check reads the dry-run line exactly and needs exit 0" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" n=0 out rc want
+  mkdir -p "$(dirname "${plugin}")"
+  while IFS='|' read -r out rc want; do
+    n=$(( n + 1 ))
+    printf '#!/bin/sh\nprintf '"'"'%s'"'"'\nexit %s\n' "${out}" "${rc}" > "${plugin}"
+    chmod +x "${plugin}"
+    mkdir -p "${BATS_TEST_TMPDIR}/b${n}"
+    run addons::dry_run_boundary "${BATS_TEST_TMPDIR}/b${n}"
+    case "${want}" in
+      ok) [ "${status}" -eq 0 ] || { echo "case [${out}] exit ${rc}: refused: ${output}"; return 1; } ;;
+      *) [[ "${status}" -eq 1 && "${output}" == *"does not support a dry run"* ]] || {
+           echo "case [${out}] exit ${rc}: status ${status}, want the refusal: ${output}"; return 1; } ;;
+    esac
+  done <<'CASES'
+dry-run\n|0|ok
+keys-only\ndry-run\nother\n|0|ok
+dry-run\n|1|refused
+dry-run \n|0|refused
+ dry-run\n|0|refused
+dry-run\r\n|0|refused
+dry-runs\n|0|refused
+no dry-run\n|0|refused
+|0|refused
+CASES
+  [ "${n}" -eq 9 ]
+}
+
+# A relative plugin home would make the boundary's links not resolve, and
+# the check would not run: the dry run refuses the home first, before the
+# plugin runs (Go: TestDryRunBoundaryRefusesARelativePluginHome).
+@test "the dry run refuses a relative plugin home before it runs the plugin" {
+  local b="${BATS_TEST_TMPDIR}/boundary" home="${BATS_TEST_TMPDIR}/rel/.kustomize"
+  mkdir -p "${b}" "${home}/secrets.lok8s.dev/v1/secret"
+  printf '#!/bin/sh\ntouch "%s"\necho dry-run\n' "${BATS_TEST_TMPDIR}/ran" > "${home}/secrets.lok8s.dev/v1/secret/Secret"
+  chmod +x "${home}/secrets.lok8s.dev/v1/secret/Secret"
+  cd "${BATS_TEST_TMPDIR}"
+  KUSTOMIZE_PLUGIN_HOME="rel/.kustomize" run addons::dry_run_boundary "${b}"
+  assert_failure
+  assert_output --partial "bootstrap dry-run: the kustomize plugin home rel/.kustomize is a relative path, so the dry run's links to its plugins would not resolve — set KUSTOMIZE_PLUGIN_HOME to an absolute path"
+  [ ! -e "${BATS_TEST_TMPDIR}/ran" ]
+}
+
+# With a Secret plugin in the project, a link of the boundary that does not
+# resolve is refused, not skipped (Go:
+# TestDryRunBoundaryRefusesAPluginLinkThatDoesNotResolve).
+@test "the dry run refuses a link to the Secret plugin that does not resolve" {
+  local b="${BATS_TEST_TMPDIR}/boundary" plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret"
+  mkdir -p "${b}" "$(dirname "${plugin}")"
+  printf '#!/bin/sh\necho dry-run\n' > "${plugin}"
+  chmod +x "${plugin}"
+  ln() { command ln -s "${BATS_TEST_TMPDIR}/gone" "${@: -1}"; }
+  run addons::dry_run_boundary "${b}"
+  unset -f ln
+  assert_failure
+  assert_output --partial "bootstrap dry-run: the dry run's link to the Secret plugin "
+  assert_output --partial "/secrets.lok8s.dev/v1/secret/Secret does not resolve, so the dry run cannot check the plugin"
+  refute_output --partial "does not support a dry run"
+}
+
+# A probe directory that cannot be made has its own message, the same as in
+# Go (TestDryRunBoundaryNamesAProbeDirectoryItCannotMake).
+@test "the dry run names a probe directory that it cannot make" {
+  local b="${BATS_TEST_TMPDIR}/boundary" plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret"
+  mkdir -p "${b}" "$(dirname "${plugin}")"
+  printf '#!/bin/sh\necho dry-run\n' > "${plugin}"
+  chmod +x "${plugin}"
+  mktemp() {
+    if [[ "${*: -1}" == */probe-XXXXXX ]]; then echo "mktemp: no room for it" >&2; return 1; fi
+    command mktemp "$@"
+  }
+  run addons::dry_run_boundary "${b}"
+  unset -f mktemp
+  assert_failure
+  assert_output --partial "bootstrap dry-run: cannot make a directory for the check of the Secret plugin "
+  assert_output --partial "/secrets.lok8s.dev/v1/secret/Secret: mktemp: no room for it"
+  refute_output --partial "does not support a dry run"
+}
+
+# The check has a time limit (Go: TestDryRunBoundaryBoundsTheCheck). At
+# _ADDONS_DRYRUN_CHECK_TIMEOUT the plugin gets TERM; a plugin that ignores
+# it gets KILL after _ADDONS_DRYRUN_CHECK_GRACE, a child that holds the
+# plugin's stdout does not keep the check waiting, and a plugin that prints
+# the line only after TERM is refused. Each plugin stops by
+# itself after some seconds, so a check without the limit fails on the time
+# it took and leaves no process behind. The child closes fd 3: bats waits
+# for every process that holds it.
+@test "the dry run's plugin check has a time limit, also for a plugin that ignores TERM" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" n=0 script took
+  mkdir -p "$(dirname "${plugin}")"
+  _ADDONS_DRYRUN_CHECK_TIMEOUT=1
+  _ADDONS_DRYRUN_CHECK_GRACE=1
+  for script in \
+    $'#!/bin/sh\ntrap \'\' INT TERM\ni=0\nwhile [ "$i" -lt 80 ]; do sleep 0.1; i=$((i + 1)); done\necho dry-run\n' \
+    $'#!/bin/sh\nsleep 6 3>&- &\nwait\necho dry-run\n' \
+    $'#!/bin/sh\ntrap \'echo dry-run; exit 0\' INT TERM\ni=0\nwhile [ "$i" -lt 80 ]; do sleep 0.1; i=$((i + 1)); done\necho dry-run\n'; do
+    n=$(( n + 1 ))
+    printf '%s' "${script}" > "${plugin}"
+    chmod +x "${plugin}"
+    mkdir -p "${BATS_TEST_TMPDIR}/b${n}"
+    SECONDS=0
+    run addons::dry_run_boundary "${BATS_TEST_TMPDIR}/b${n}"
+    took="${SECONDS}"
+    assert_failure
+    assert_output --partial "/secrets.lok8s.dev/v1/secret/Secret did not end in 1 s"
+    (( took <= 5 )) || { echo "plugin ${n}: the check took ${took} s, want about 2"; return 1; }
+    [ ! -e "${BATS_TEST_TMPDIR}/b${n}/check.out" ] && [ ! -e "${BATS_TEST_TMPDIR}/b${n}/check.timeout" ]
+  done
 }
 
 # _fake_helm: a helm v3 stand-in first on PATH (the boundary's helm stub

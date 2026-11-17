@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -423,6 +424,8 @@ func TestDryRunBoundaryChecksThePluginAsTheRenderRunsIt(t *testing.T) {
 		"  echo \"PATH0=${PATH%%:*}\"\n" +
 		"  echo \"TMPDIR=${TMPDIR-<unset>}\"\n" +
 		"  echo \"STORE=${" + DryRunStoreEnv + "-<unset>}\"\n" +
+		"  echo \"HELMP=${" + HelmPluginsEnv + "-<unset>}\"\n" +
+		"  echo \"REPORT=${" + DryRunReportEnv + "-<unset>}\"\n" +
 		"} > '" + log + "'\necho dry-run\n"
 	testutil.WriteFile(t, plugin, script)
 	if err := os.Chmod(plugin, 0o700); err != nil {
@@ -464,6 +467,8 @@ func TestDryRunBoundaryChecksThePluginAsTheRenderRunsIt(t *testing.T) {
 		"PATH0":        b.StubBin,
 		"TMPDIR":       b.Tmp,
 		"STORE":        b.Store,
+		"HELMP":        b.HelmPlugins,
+		"REPORT":       b.Report,
 	}
 	for k, v := range want {
 		if got[k] != v {
@@ -476,6 +481,183 @@ func TestDryRunBoundaryChecksThePluginAsTheRenderRunsIt(t *testing.T) {
 }
 
 // hashDir lists every file of dir with its content.
+// The check passes only on a plugin that exits 0 and prints the line
+// "dry-run" exactly, as the keys-only probe reads its line (bash: the same
+// cases in tests/unit/bootstrap_test.bats).
+func TestDryRunBoundaryReadsTheCapabilityLineExactly(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		rc   int
+		ok   bool
+	}{
+		{"the line alone", "dry-run\n", 0, true},
+		{"the line among others", "keys-only\ndry-run\nother\n", 0, true},
+		{"the line and a non-zero exit", "dry-run\n", 1, false},
+		{"a blank after the word", "dry-run \n", 0, false},
+		{"a blank before the word", " dry-run\n", 0, false},
+		{"a carriage return after the word", "dry-run\r\n", 0, false},
+		{"a longer word", "dry-runs\n", 0, false},
+		{"the word inside a line", "no dry-run\n", 0, false},
+		{"no output", "", 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(render.ModeEnv, string(render.ModeExec))
+			base := t.TempDir()
+			p := &config.Paths{Base: base, Bin: filepath.Join(base, ".bin")}
+			t.Setenv(KustomizePluginHomeEnv, "")
+			os.Unsetenv(KustomizePluginHomeEnv)
+			plugin := filepath.Join(base, ".kustomize", filepath.FromSlash(toolchain.SecretPluginRel))
+			spyScript(t, plugin, filepath.Join(base, "ran"), c.out, c.rc)
+			b, err := NewDryRunBoundary(t.Context(), p, execx.NewRunner(p))
+			if b != nil {
+				b.Close()
+			}
+			if !fsutil.FileExists(filepath.Join(base, "ran")) {
+				t.Fatal("the plugin was not run")
+			}
+			switch {
+			case c.ok && err != nil:
+				t.Errorf("the plugin (%q, exit %d) was refused: %v", c.out, c.rc, err)
+			case !c.ok && (err == nil || !strings.Contains(err.Error(), "does not support a dry run")):
+				t.Errorf("the plugin (%q, exit %d): err = %v, want the refusal", c.out, c.rc, err)
+			}
+		})
+	}
+}
+
+// A relative plugin home would make the boundary's links not resolve, and
+// the check would not run: the dry run refuses the home first, before the
+// plugin runs (bash: the same test).
+func TestDryRunBoundaryRefusesARelativePluginHome(t *testing.T) {
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
+	base := t.TempDir()
+	p := &config.Paths{Base: base, Bin: filepath.Join(base, ".bin")}
+	plugin := filepath.Join(base, "rel", ".kustomize", filepath.FromSlash(toolchain.SecretPluginRel))
+	spyScript(t, plugin, filepath.Join(base, "ran"), "dry-run\n", 0)
+	t.Chdir(base)
+	t.Setenv(KustomizePluginHomeEnv, "rel/.kustomize")
+	b, err := NewDryRunBoundary(t.Context(), p, execx.NewRunner(p))
+	if b != nil {
+		b.Close()
+	}
+	want := "the kustomize plugin home rel/.kustomize is a relative path, so the dry run's links to its plugins would not resolve — set KUSTOMIZE_PLUGIN_HOME to an absolute path"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+	if fsutil.FileExists(filepath.Join(base, "ran")) {
+		t.Error("the plugin ran")
+	}
+}
+
+// boundaryWithPlugin builds the boundary of a project whose Secret plugin
+// prints "dry-run", and returns the plugin home and the plugin's project
+// path.
+func boundaryWithPlugin(t *testing.T) (*config.Paths, *DryRunBoundary, string, string) {
+	t.Helper()
+	t.Setenv(render.ModeEnv, string(render.ModeExec))
+	base := t.TempDir()
+	p := &config.Paths{Base: base, Bin: filepath.Join(base, ".bin")}
+	t.Setenv(KustomizePluginHomeEnv, "")
+	os.Unsetenv(KustomizePluginHomeEnv)
+	home := filepath.Join(base, ".kustomize")
+	plugin := filepath.Join(home, filepath.FromSlash(toolchain.SecretPluginRel))
+	spyScript(t, plugin, filepath.Join(base, "ran"), "dry-run\n", 0)
+	b, err := NewDryRunBoundary(t.Context(), p, execx.NewRunner(p))
+	if err != nil {
+		t.Fatalf("NewDryRunBoundary: %v", err)
+	}
+	t.Cleanup(b.Close)
+	return p, b, home, config.RelTo(base, plugin)
+}
+
+// With a Secret plugin in the project, a link of the boundary that does not
+// resolve is refused, not skipped (bash: the same test).
+func TestDryRunBoundaryRefusesAPluginLinkThatDoesNotResolve(t *testing.T) {
+	p, b, home, rel := boundaryWithPlugin(t)
+	link := filepath.Join(b.PluginHome, filepath.FromSlash(toolchain.SecretPluginRel))
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(p.Base, "gone"), link); err != nil {
+		t.Fatal(err)
+	}
+	err := b.checkSecretPlugin(t.Context(), p, nil, home)
+	want := "the dry run's link to the Secret plugin " + rel + " does not resolve, so the dry run cannot check the plugin"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+}
+
+// A probe directory that cannot be made has its own message, the same as
+// in bash ("bootstrap dry-run: " is the engine's prefix on both sides).
+func TestDryRunBoundaryNamesAProbeDirectoryItCannotMake(t *testing.T) {
+	p, b, home, rel := boundaryWithPlugin(t)
+	gone := *b
+	gone.Dir = filepath.Join(p.Base, "gone")
+	err := gone.checkSecretPlugin(t.Context(), p, nil, home)
+	want := "cannot make a directory for the check of the Secret plugin " + rel + ": "
+	if err == nil || !strings.HasPrefix(err.Error(), want) {
+		t.Fatalf("err = %v, want a message that starts with %q", err, want)
+	}
+}
+
+// The check has a time limit. At secretCheckTimeout the plugin gets an
+// interrupt; a plugin that ignores it is killed after secretCheckGrace,
+// a child that holds the plugin's stdout does not keep the check waiting,
+// and a plugin that prints the line only after the interrupt is refused
+// (bash: _ADDONS_DRYRUN_CHECK_TIMEOUT and _GRACE). Each plugin
+// stops by itself after some seconds, so a check without the limit fails
+// on the time it took and leaves no process behind.
+func TestDryRunBoundaryBoundsTheCheck(t *testing.T) {
+	timeout, grace := secretCheckTimeout, secretCheckGrace
+	secretCheckTimeout, secretCheckGrace = 500*time.Millisecond, 500*time.Millisecond
+	t.Cleanup(func() { secretCheckTimeout, secretCheckGrace = timeout, grace })
+	cases := []struct{ name, script string }{
+		{"a plugin that ignores the interrupt",
+			"#!/bin/sh\ntrap '' INT TERM\ni=0\nwhile [ \"$i\" -lt 80 ]; do sleep 0.1; i=$((i + 1)); done\necho dry-run\n"},
+		{"a child that holds the plugin's stdout",
+			"#!/bin/sh\nsleep 8 &\nwait\necho dry-run\n"},
+		{"a plugin that answers only after the interrupt",
+			"#!/bin/sh\ntrap 'echo dry-run; exit 0' INT TERM\ni=0\nwhile [ \"$i\" -lt 80 ]; do sleep 0.1; i=$((i + 1)); done\necho dry-run\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(render.ModeEnv, string(render.ModeExec))
+			base := t.TempDir()
+			p := &config.Paths{Base: base, Bin: filepath.Join(base, ".bin")}
+			t.Setenv(KustomizePluginHomeEnv, "")
+			os.Unsetenv(KustomizePluginHomeEnv)
+			plugin := filepath.Join(base, ".kustomize", filepath.FromSlash(toolchain.SecretPluginRel))
+			testutil.WriteFile(t, plugin, c.script)
+			if err := os.Chmod(plugin, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			done := make(chan error, 1)
+			go func() {
+				b, err := NewDryRunBoundary(t.Context(), p, execx.NewRunner(p))
+				if b != nil {
+					b.Close()
+				}
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err == nil || !strings.Contains(err.Error(), "did not end in 0.5 s") {
+					t.Errorf("err = %v, want the time limit", err)
+				}
+				if took := time.Since(start); took > 4*time.Second {
+					t.Errorf("the check took %s, want about 1 s (the limit and the grace)", took)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("the check did not end in 30 s")
+			}
+		})
+	}
+}
+
 func hashDir(t *testing.T, dir string) string {
 	t.Helper()
 	var b strings.Builder
