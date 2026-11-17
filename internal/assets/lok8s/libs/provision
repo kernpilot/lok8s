@@ -38,7 +38,7 @@ main::provision() {
   :args "Provision a cluster" "${@}"
   # A dry run's every failure outside the per-entry diff is rc 2 (a flag
   # combination here included): bootstrap::_dry_run_exit.
-  _BOOTSTRAP_DRY_DIFFERS=0
+  _BOOTSTRAP_DRY_DIFFERS=0 _BOOTSTRAP_DRY_INTERRUPTED=0
   if ! bootstrap::mode_check "${bootstrap}" "${_only_given}"; then
     (( dry_run )) && return 2
     return 1

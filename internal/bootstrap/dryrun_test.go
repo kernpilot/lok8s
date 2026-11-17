@@ -17,10 +17,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/addons"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/testutil"
+	"github.com/kernpilot/lok8s/internal/toolchain"
 )
 
 // cannedDiff is a two-object `kubectl diff` (GNU diff -u -N over the LIVE
@@ -182,6 +184,61 @@ func TestDryRunExitCodes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// cancelAtThePlugin cancels the run when the dry run's check of the Secret
+// plugin starts: an interrupt of lo (Ctrl-C) during the check. Each other
+// command goes to the fake runner.
+type cancelAtThePlugin struct {
+	*fakeRunner
+	cancel  context.CancelFunc
+	checked bool
+}
+
+func (r *cancelAtThePlugin) Run(ctx context.Context, c execx.Cmd) error {
+	if strings.HasSuffix(c.Name, "/"+toolchain.SecretPluginRel) && strings.Join(c.Args, " ") == "--capabilities" {
+		r.checked = true
+		r.cancel()
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return r.fakeRunner.Run(ctx, c)
+}
+
+// An interrupt of the dry run's check of the Secret plugin is not one of
+// the dry run's refusals (rc 2): Apply prints the check's line and reports
+// the cancelled context, so lo ends with 128+n (main). The render does not
+// start. bash: bootstrap::_dry_run_exit keeps the code of the interrupt.
+func TestDryRunInterruptOfThePluginCheckReportsTheCancel(t *testing.T) {
+	e, f, spec, kc := dryEngine(t, "testcni")
+	t.Setenv(addons.KustomizePluginHomeEnv, "")
+	os.Unsetenv(addons.KustomizePluginHomeEnv)
+	rel := ".kustomize/" + toolchain.SecretPluginRel
+	src := filepath.Join(e.Paths.Base, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	r := &cancelAtThePlugin{fakeRunner: f, cancel: cancel}
+	e.Runner = r
+	err := e.Apply(ctx, "test.lok8s.dev", spec, kc)
+	if !r.checked {
+		t.Fatalf("the dry run did not check the Secret plugin (err %v)", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v (rc %d), want the cancelled context", err, driver.ExitCode(err))
+	}
+	want := "bootstrap dry-run: the check of the Secret plugin " + rel + " was interrupted\n"
+	if got := stderrOf(e); !strings.Contains(got, want) || strings.Contains(got, "does not support a dry run") {
+		t.Errorf("stderr:\n%s\nwant the line %q", got, want)
+	}
+	if calls := f.log(); strings.Contains(calls, "kustomize ") || strings.Contains(calls, "kubectl ") {
+		t.Errorf("the run went on after the interrupt:\n%s", calls)
 	}
 }
 

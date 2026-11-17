@@ -75,6 +75,26 @@ func Watch(parent context.Context) (ctx context.Context, exitCode func() int) {
 	}
 }
 
+// signalNames are the names of the signals that a Watch records, as bash
+// names them in a trap (INT, TERM, HUP) with the SIG prefix.
+var signalNames = map[syscall.Signal]string{
+	syscall.SIGINT:  "SIGINT",
+	syscall.SIGTERM: "SIGTERM",
+	syscall.SIGHUP:  "SIGHUP",
+}
+
+// Signal names the first signal of the Watch in ctx: "SIGINT", "SIGTERM",
+// or "SIGHUP" when CatchHangup caught one. It is "" while no signal came,
+// and for a ctx without a Watch. Once the Watch cancelled ctx, the name is
+// set: the Watch records the signal before it cancels.
+func Signal(ctx context.Context) string {
+	w, _ := ctx.Value(watchKey{}).(*watch)
+	if w == nil {
+		return ""
+	}
+	return signalNames[syscall.Signal(w.got.Load())]
+}
+
 // CatchHangup catches a SIGHUP until stop is called (bash: the EXIT trap
 // of a subshell, which bash runs on a SIGHUP too). A SIGHUP cancels the
 // returned context and the command context of the Watch in ctx: the

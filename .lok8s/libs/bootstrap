@@ -68,7 +68,7 @@ main::bootstrap() {
 
   # A dry run's every failure outside the per-entry diff is rc 2 (a flag
   # combination here included): bootstrap::_dry_run_exit.
-  _BOOTSTRAP_DRY_DIFFERS=0
+  _BOOTSTRAP_DRY_DIFFERS=0 _BOOTSTRAP_DRY_INTERRUPTED=0
   if ! bootstrap::mode_check 1 "${_only_given}"; then
     (( dry_run )) && return 2
     return 1
@@ -89,14 +89,20 @@ main::bootstrap() {
 # main::provision): 0 when nothing would change, 1 ONLY when an entry's diff
 # found a change (bootstrap::_run_dry set _BOOTSTRAP_DRY_DIFFERS), 2 for
 # every other failure, before or outside the per-entry diff — a caller that
-# gates a change window on rc 1 must never read an error as "changes". A
-# real run's rc passes through unchanged.
+# gates a change window on rc 1 must never read an error as "changes". An
+# INT or TERM that stopped the check of the Secret plugin is not a failure:
+# its 128+n (130, 143) passes through (bootstrap::apply set
+# _BOOTSTRAP_DRY_INTERRUPTED), as the Go binary ends with 128+n after an
+# interrupt. A real run's rc passes through unchanged.
 bootstrap::_dry_run_exit() {
   local _rc="${1}"
   (( ${bootstrap_dry_run:-0} )) || return "${_rc}"
   (( _rc != 0 )) || return 0
   if (( _rc == 1 )) && (( ${_BOOTSTRAP_DRY_DIFFERS:-0} )); then
     return 1
+  fi
+  if (( _rc > 128 )) && (( ${_BOOTSTRAP_DRY_INTERRUPTED:-0} )); then
+    return "${_rc}"
   fi
   return 2
 }
@@ -2340,14 +2346,23 @@ bootstrap::apply() {
   # every copy and temp file of the run. Built once, after the plan is valid
   # and before anything is written or reported; removed on EXIT, chained in
   # front of the caller's own EXIT trap (bootstrap::_dry_run_trap).
-  local bootstrap_dry_boundary=""
+  local bootstrap_dry_boundary="" bootstrap_dry_rc=0
   if (( ${bootstrap_dry_run:-0} )); then
     bootstrap_dry_boundary="$(mktemp -d "${TMPDIR:-/tmp}/lok8s-dryrun-XXXXXXXX")" \
       || { error "bootstrap dry-run: cannot create the render boundary"; return 2; }
     bootstrap::_dry_run_trap "${bootstrap_dry_boundary}"
-    if ! addons::dry_run_boundary "${bootstrap_dry_boundary}"; then
+    addons::dry_run_boundary "${bootstrap_dry_boundary}" || bootstrap_dry_rc=$?
+    if (( bootstrap_dry_rc != 0 )); then
       bootstrap::_dry_run_untrap "${bootstrap_dry_boundary}"
-      return 2
+      # An interrupt of the check keeps its 128+n (130, 143), and lo ends
+      # with it, as the Go binary does (bootstrap::_dry_run_exit reads the
+      # mark). Any other refusal is 2.
+      if (( bootstrap_dry_rc > 128 )); then
+        _BOOTSTRAP_DRY_INTERRUPTED=1
+      else
+        bootstrap_dry_rc=2
+      fi
+      return "${bootstrap_dry_rc}"
     fi
   fi
 

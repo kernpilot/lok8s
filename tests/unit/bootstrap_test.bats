@@ -3920,6 +3920,114 @@ _dry_plugin_stopped() {
   _dry_plugin_stopped "${m}" "${start}" || { echo "check rc ${rc}; the plugin is $(<"${m}/pid"); signals from the check: $(tr '\n' ' ' < "${log}")"; return 1; }
 }
 
+# An INT or TERM that stops the check is the interrupt, not a plugin
+# without the dry run: the check names the signal and returns 128+n, the
+# code that lo ends with (Go: TestDryRunBoundaryNamesTheInterrupt). The
+# signal comes in the check's wait, and in each window before the check
+# keeps the pid of the plugin or of the watchdog (the test-only delays):
+# there it is noted, and sent again once both pids are kept. The plugin
+# ends on TERM.
+@test "the dry run's plugin check names an INT or TERM that stops it and returns 128+n" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" sig window m b job rc want i
+  _ADDONS_DRYRUN_CHECK_GRACE=1
+  for sig in INT TERM; do
+    want=$(( 128 + $(kill -l "${sig}") ))
+    for window in wait plugin watchdog; do
+      m="${BATS_TEST_TMPDIR}/m-${sig}-${window}" b="${BATS_TEST_TMPDIR}/b-${sig}-${window}"
+      mkdir -p "${m}" "${b}"
+      _ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN="" _ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG=""
+      [[ "${window}" != plugin ]] || _ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN=1
+      [[ "${window}" != watchdog ]] || _ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG=1
+      _dry_slow_plugin "${plugin}" "${m}" "exit 1"
+      # Job control on: without it, a background job of a script ignores INT.
+      set -m
+      addons::dry_run_boundary "${b}" >"${b}.out" 2>&1 3>&- &
+      job=$!
+      set +m
+      for (( i = 0; i < 100; i++ )); do [[ -s "${m}/ppid" ]] && break; sleep 0.05; done
+      [[ -s "${m}/ppid" ]] || { echo "${sig} (${window}): the plugin did not start"; return 1; }
+      # In a window: 0.3 s into its delay of 1 s.
+      [[ "${window}" == wait ]] || sleep 0.3
+      kill -"${sig}" "$(<"${m}/ppid")"
+      rc=0
+      wait "${job}" 2>/dev/null || rc=$?
+      (( rc == want )) || { echo "${sig} (${window}): the check returned ${rc}, want ${want}: $(<"${b}.out")"; return 1; }
+      grep -qF "bootstrap dry-run: the check of the Secret plugin " "${b}.out" \
+        && grep -qF "/secrets.lok8s.dev/v1/secret/Secret was interrupted (SIG${sig})" "${b}.out" \
+        || { echo "${sig} (${window}): the check does not name the interrupt: $(<"${b}.out")"; return 1; }
+      ! grep -qF "does not support a dry run" "${b}.out" || { echo "${sig} (${window}): the check blames the plugin: $(<"${b}.out")"; return 1; }
+      [ -z "$(ls -A "${b}" | grep -E '^(probe|check)-')" ] || { echo "${sig} (${window}): files of the check are left: $(ls -A "${b}")"; return 1; }
+    done
+  done
+}
+
+# The caller keeps that code: bootstrap::apply returns 128+n, not the 2 of
+# a refused plugin, renders nothing, and sets the mark that
+# bootstrap::_dry_run_exit reads (lo then ends with 128+n, as the Go binary
+# does).
+@test "bootstrap::apply --dry-run returns 128+n when an INT or TERM stops the check of the Secret plugin" {
+  write_cluster_spec "testcni"
+  _dry_kubectl_stub 0
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" sig m job rc want i
+  local bootstrap_dry_run=1
+  _ADDONS_DRYRUN_CHECK_GRACE=1
+  for sig in INT TERM; do
+    want=$(( 128 + $(kill -l "${sig}") ))
+    m="${BATS_TEST_TMPDIR}/m-${sig}"
+    mkdir -p "${m}"
+    _dry_slow_plugin "${plugin}" "${m}" "exit 1"
+    _BOOTSTRAP_DRY_INTERRUPTED=0
+    set -m
+    {
+      _apply_rc=0
+      bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null >"${m}.out" 2>&1 3>&- || _apply_rc=$?
+      echo "${_BOOTSTRAP_DRY_INTERRUPTED}" > "${m}.mark"
+      exit "${_apply_rc}"
+    } &
+    job=$!
+    set +m
+    for (( i = 0; i < 100; i++ )); do [[ -s "${m}/ppid" ]] && break; sleep 0.05; done
+    [[ -s "${m}/ppid" ]] || { echo "${sig}: the plugin did not start: $(<"${m}.out")"; return 1; }
+    kill -"${sig}" "$(<"${m}/ppid")"
+    rc=0
+    wait "${job}" 2>/dev/null || rc=$?
+    (( rc == want )) || { echo "${sig}: bootstrap::apply returned ${rc}, want ${want}: $(<"${m}.out")"; return 1; }
+    grep -qF "was interrupted (SIG${sig})" "${m}.out" || { echo "${sig}: no interrupt line: $(<"${m}.out")"; return 1; }
+    ! grep -qF "does not support a dry run" "${m}.out" || { echo "${sig}: the plugin is blamed: $(<"${m}.out")"; return 1; }
+    ! grep -qF "testcni" "${m}.out" || { echo "${sig}: an entry was rendered after the interrupt: $(<"${m}.out")"; return 1; }
+    [[ "$(<"${m}.mark")" == 1 ]] || { echo "${sig}: bootstrap::apply did not set the mark of the interrupt"; return 1; }
+  done
+}
+
+# The command boundary keeps the 128+n of that interrupt, and only of that:
+# any other failure of a dry run is still 2, also a code above 128 (a child
+# that a signal ended, without an interrupt of lo). A real run's code passes
+# through.
+@test "bootstrap::_dry_run_exit keeps the 128+n of an interrupt of the plugin check, and only that" {
+  local bootstrap_dry_run=1 rc want
+  _BOOTSTRAP_DRY_DIFFERS=0
+  _BOOTSTRAP_DRY_INTERRUPTED=1
+  for rc in 130 143; do
+    run bootstrap::_dry_run_exit "${rc}"
+    [ "${status}" -eq "${rc}" ] || { echo "interrupted, rc ${rc}: got ${status}"; return 1; }
+  done
+  for rc in 1 2 3; do
+    run bootstrap::_dry_run_exit "${rc}"
+    [ "${status}" -eq 2 ] || { echo "interrupted, rc ${rc}: got ${status}, want 2"; return 1; }
+  done
+  _BOOTSTRAP_DRY_INTERRUPTED=0
+  for rc in 130 137 143; do
+    run bootstrap::_dry_run_exit "${rc}"
+    [ "${status}" -eq 2 ] || { echo "no interrupt, rc ${rc}: got ${status}, want 2"; return 1; }
+  done
+  bootstrap_dry_run=0
+  _BOOTSTRAP_DRY_INTERRUPTED=1
+  for rc in 1 2 137; do
+    run bootstrap::_dry_run_exit "${rc}"
+    [ "${status}" -eq "${rc}" ] || { echo "real run, rc ${rc}: got ${status}"; return 1; }
+  done
+}
+
 # The plugin's stdout is a file: a plugin that prints the line, exits 0 and
 # leaves a child that keeps its stdout open passes at once (Go:
 # TestDryRunBoundaryDoesNotWaitForAChildOfThePlugin).
@@ -3947,7 +4055,7 @@ _dry_plugin_stopped() {
     if [[ "${*: -1}" == ${_dry_fail} ]]; then echo "mktemp: no room for it" >&2; return 1; fi
     command mktemp "$@"
   }
-  for which in out late; do
+  for which in out late stop; do
     b="${BATS_TEST_TMPDIR}/boundary-${which}"
     mkdir -p "${b}"
     _dry_fail="*/check-${which}-XXXXXX"

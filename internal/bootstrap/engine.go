@@ -319,7 +319,15 @@ func (e *Engine) apply(ctx context.Context, domain, clusterYAML, kubeconfig stri
 	if e.Options.DryRun {
 		b, err := addons.NewDryRunBoundary(ctx, e.Paths, e.Runner)
 		if err != nil {
-			return e.errorf("bootstrap dry-run: %v", err)
+			herr := e.errorf("bootstrap dry-run: %v", err)
+			// An interrupt (the check of the Secret plugin names it) is
+			// not a refusal: the run reports ctx.Err(), so the dry run's
+			// rc 2 does not replace the 128+n that main ends lo with
+			// (bash: bootstrap::_dry_run_exit).
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return herr
 		}
 		defer b.Close()
 		e.boundary = b

@@ -47,6 +47,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/interrupt"
 	"github.com/kernpilot/lok8s/internal/render"
 	"github.com/kernpilot/lok8s/internal/toolchain"
 	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
@@ -229,7 +230,9 @@ func (b *DryRunBoundary) link(src, rel string) error {
 // "dry-run" exactly (as the keys-only probe reads "keys-only"). Its stdout
 // goes to a new file of the boundary, as in bash: a child that keeps it
 // open does not keep the check waiting. A plugin that does not end within
-// secretCheckTimeout is refused. Without a
+// secretCheckTimeout is refused. An interrupt of lo (a cancelled ctx) is
+// reported as the interrupt, with the signal's name (interrupt.Signal),
+// not as a plugin without the dry run. Without a
 // Secret plugin in the project there is nothing to check (as in a real
 // run, the render then has none); with one, a link of the boundary that
 // does not resolve is refused, not skipped.
@@ -287,9 +290,17 @@ func (b *DryRunBoundary) checkSecretPlugin(ctx context.Context, paths *config.Pa
 		Stderr:    null,
 		WaitDelay: secretCheckGrace,
 	})
-	// The time limit first, as in bash: a plugin that answers only after
-	// the interrupt did not end in time.
-	if limit.Err() != nil && ctx.Err() == nil {
+	// An interrupt of lo (Ctrl-C, TERM) first, as in bash: the check did
+	// not fail, it was stopped. lo then ends with 128+n (main).
+	if ctx.Err() != nil {
+		if sig := interrupt.Signal(ctx); sig != "" {
+			return fmt.Errorf("the check of the Secret plugin %s was interrupted (%s)", rel, sig)
+		}
+		return fmt.Errorf("the check of the Secret plugin %s was interrupted", rel)
+	}
+	// Then the time limit, as in bash: a plugin that answers only after
+	// the interrupt at the limit did not end in time.
+	if limit.Err() != nil {
 		return fmt.Errorf("the check of the Secret plugin %s did not end in %g s — run 'lo toolchain install' to install the plugin of this lo", rel, secretCheckTimeout.Seconds())
 	}
 	if err == nil {
