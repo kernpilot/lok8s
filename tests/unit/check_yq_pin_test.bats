@@ -81,11 +81,12 @@ _yq_fake() {
   assert_output "::error::${BIN}/yq is ${PIN}-rc1, but ${BIN}/b.yaml pins ${PIN}: b install did not install the pinned yq"
 }
 
-@test "check-yq-pin: a pin without the leading v matches" {
+@test "check-yq-pin: a pin without the leading v fails (b uses the pin as the release tag, and the yq tags start with v)" {
   printf 'binaries:\n  yq:\n    version: %s\n' "${PIN#v}" > "${BIN}/b.yaml"
   _yq_fake "${PIN}"
   run bash "${_PROJECT_ROOT}/hack/check-yq-pin.sh" "${BIN}"
-  assert_success
+  assert_failure
+  assert_output "::error::${BIN}/yq is ${PIN}, but ${BIN}/b.yaml pins ${PIN#v}: b install did not install the pinned yq"
 }
 
 @test "check-yq-pin: without an argument it reads the .bin of its repository, as CI runs it" {

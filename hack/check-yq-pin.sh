@@ -34,7 +34,10 @@ pinned=$(awk '
   }
 ' "${b_yaml}")
 [[ -n "${pinned}" ]] || fail "${b_yaml} pins no yq version (binaries.yq.version)"
-pinned="v${pinned#v}" # b matches 4.54.3 and v4.54.3 alike
+# The pin is compared as written. b (v4.18.8) also uses it as written: as the
+# release tag in the download URL. The yq release tags start with v, so b
+# cannot install a pin without the v (4.54.3), and this check does not
+# accept one.
 
 [[ -x "${yq}" ]] || fail "${yq} is not installed: b install did not install yq (b exits 0 when a binary fails)"
 out=$("${yq}" --version 2>&1) || fail "${yq} --version failed: ${out}"
