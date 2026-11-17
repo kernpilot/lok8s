@@ -637,8 +637,15 @@ if [[ "${1:-}" == "--capabilities" ]]; then
   # A slow check, to interrupt the dry run in the middle of it. The mark
   # holds the plugin's pid. The plugin stops on INT or TERM, as the real
   # plugin does (with `sleep` in the foreground, bash would first let it
-  # end), and marks a run to its end (<mark>.ended).
+  # end), and marks a run to its end (<mark>.ended). It first moves to a
+  # session of its own (setsid execs in place: the pid stays), so a Ctrl-C
+  # to lo's process group does not reach it: only lo's stop ends it (bash:
+  # the check's TERM; Go: the runner's SIGINT). Without setsid, the Ctrl-C
+  # case does not prove Go's stop; the TERM case still does.
   if [[ -n "${PARITY_CAPS_SLOW_MARK:-}" ]]; then
+    if [[ -z "${PARITY_CAPS_OWN_SESSION:-}" ]] && command -v setsid >/dev/null; then
+      PARITY_CAPS_OWN_SESSION=1 exec setsid "$0" "$@"
+    fi
     trap 'kill "${slow}" 2>/dev/null; exit 1' INT TERM
     sleep 5 &
     slow=$!
