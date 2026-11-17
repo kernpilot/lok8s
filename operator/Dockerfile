@@ -47,7 +47,10 @@ FROM ghcr.io/flant/shell-operator:v1.19.5@sha256:2b1127a267538899bcf62e1ae6cf030
 #     Alpine's kubectl lags badly, dragging in stale golang.org/x/net)
 #   docker-cli, kind — Lo driver (kind clusters via the host's Docker)
 #   clusterctl — CAPI management (kubeconfig extraction, move)
-#   flux — GitOps bootstrap (flux bootstrap git)
+#   flux — GitOps bootstrap (flux bootstrap git). The release is the Flux
+#     that the fluxcd addon installs: the appVersion on the first line of
+#     .lok8s/addons/fluxcd/values.yaml. A CLI of another release would
+#     apply its own controllers over the addon's. A test checks it.
 #   git, openssh — git operations for GitOps
 #   envsubst — template rendering (part of gettext; the Go hooks render
 #     natively, the legacy bash reference under /hooks/legacy still needs it)
@@ -85,13 +88,13 @@ RUN v="$(cut -d. -f1,2 /etc/alpine-release)" \
       amd64) \
         KUBECTL_SHA256=1e9045ec32bea85da43de85f0065358529ea7c7a152eca78154fba5b58c27d82 \
         CLUSTERCTL_SHA256=a6b94e0da68df254191480b11c0b50019a7a5df87560d6f70a76d3453116f21e \
-        FLUX_SHA256=3791d8fbb73b967ada021186f7b46686a2b180ce206d3c279c3f2ad183877a7f \
+        FLUX_SHA256=6e984c92aa02250ea3f907367dc7829411e31d667b100ce2005cb87d5509e5b3 \
         KIND_SHA256=50030de23cf40a18505f20426f6a8506bedf13c6e509244bd1fa9463721b0f54 \
         KHELM_SHA256=f9a36519c147fc846aa69ca5a19f6259cb2c94f88550ae34de2bdb971b39495c ;; \
       arm64) \
         KUBECTL_SHA256=c957eb8c4bea27a3bb35b269edd9082e27f027f7b76b20b5bf4afebc726c6d3e \
         CLUSTERCTL_SHA256=a9b32e0179cdbb66ba67ebdb45be818c983dedcc827f6d31bca72277250df52c \
-        FLUX_SHA256=738604ab040055ace69777988a24def98ada1aff14ae4726e733089dc8cc5e12 \
+        FLUX_SHA256=16409df2fbd40b23458d81c22dd57abd39e82450831bdf522716d9d1030976c6 \
         KIND_SHA256=b92cd615e97585de8ddade28ed5cd7feb4248d717c233eea5b03c37298900f5d \
         KHELM_SHA256=40da3b53961b5a1b91a5713c536533899f3fc580d8ae31803d9c31aacda8f2e0 ;; \
       *) echo "operator image: no download checksums for ${ARCH}" >&2; exit 1 ;; \
@@ -107,7 +110,7 @@ RUN v="$(cut -d. -f1,2 /etc/alpine-release)" \
     && echo "${CLUSTERCTL_SHA256}  /tmp/dl/clusterctl" | sha256sum -c - \
     && install -m 0755 /tmp/dl/clusterctl /usr/local/bin/clusterctl \
     && wget -qO /tmp/dl/flux.tar.gz \
-      "https://github.com/fluxcd/flux2/releases/download/v2.8.8/flux_2.8.8_linux_${ARCH}.tar.gz" \
+      "https://github.com/fluxcd/flux2/releases/download/v2.9.1/flux_2.9.1_linux_${ARCH}.tar.gz" \
     && echo "${FLUX_SHA256}  /tmp/dl/flux.tar.gz" | sha256sum -c - \
     && tar -xzf /tmp/dl/flux.tar.gz -C /usr/local/bin flux \
     && chmod +x /usr/local/bin/flux \

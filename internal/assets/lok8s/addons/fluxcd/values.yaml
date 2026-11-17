@@ -1,6 +1,11 @@
 # Flux CD (fluxcd-community/flux2 chart 2.19.0, appVersion 2.9.1) — generic,
 # portable framework-addon values.
 #
+# A test reads the first line. Its chart must be the one that chart.yaml
+# pins, and the flux CLI of the lok8s operator image (operator/Dockerfile)
+# must be its appVersion. On a chart bump, write the appVersion of the new
+# chart on that line, and move the image's flux (URL and sums) with it.
+#
 # This file carries ONLY decisions sane for ANY cluster. Everything
 # cluster-specific is GLUE supplied by the consuming cluster as inline
 # `bootstrap:` overrides (deep-merged on top of this file — see
