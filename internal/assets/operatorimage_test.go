@@ -52,6 +52,27 @@ func foldDockerfile(text string) ([]string, error) {
 	return strings.Split(s, "\n"), nil
 }
 
+// runInlineComments returns, for each RUN of folded Dockerfile lines that
+// has a # at the start of a word, the text from that # on. The shell reads
+// such a # as a comment up to the end of the line, and a folded RUN is one
+// line: the rest of the RUN does not run, but a test that reads the text
+// still finds it (the fold drops only whole comment lines). A # in a quoted
+// word counts too: these tests do not read quotes.
+func runInlineComments(lines []string) []string {
+	run := regexp.MustCompile(`(?i)^[ \t]*RUN(?:[ \t]|$)`)
+	hash := regexp.MustCompile(`(?:^|[ \t])#`)
+	var found []string
+	for _, line := range lines {
+		if !run.MatchString(line) {
+			continue
+		}
+		if i := hash.FindStringIndex(line); i != nil {
+			found = append(found, strings.TrimSpace(line[i[0]:min(len(line), i[0]+60)]))
+		}
+	}
+	return found
+}
+
 // dockerStage is one FROM of a folded Dockerfile.
 type dockerStage struct {
 	image string // the base, lower case
@@ -219,7 +240,10 @@ func TestOperatorImageApkUsesAlpineHTTPS(t *testing.T) {
 //     sums in the case are the same (a copy slip would else show only in
 //     the arm64 build);
 //   - each download has its own path and its own <NAME>;
-//   - no curl and no ADD (each fetches with no check).
+//   - no curl and no ADD (each fetches with no check);
+//   - no RUN has a # at the start of a word: the shell reads the rest of
+//     the RUN as a comment, so a check after it would not run, but the
+//     text still has it.
 //
 // The test reads text, not the shell. It checks that each download has a
 // check, not that a sum is right: a wrong sum fails the build. These can
@@ -250,8 +274,7 @@ func TestOperatorImageDownloadsAreChecked(t *testing.T) {
 func TestOperatorImageDownloadCheckFindsEachHole(t *testing.T) {
 	t.Parallel()
 	base := readOperatorDockerfile(t)
-	// re (a regexp, with $1 in new) or old (a literal) names the text.
-	type edit struct{ re, old, new string }
+	type edit = dockerfileEdit
 	const (
 		modDownload    = "RUN go mod download\n"
 		copyLo         = "COPY --from=lo-build /out/lo /usr/local/bin/lo\n"
@@ -374,26 +397,14 @@ func TestOperatorImageDownloadCheckFindsEachHole(t *testing.T) {
 		{"no arm64 branch",
 			[]edit{{re: `(?s)      arm64\) \\\n.*?;; \\\n`, new: ""}},
 			"has no arm64) branch"},
+		{"an inline comment hides every download and check after it",
+			[]edit{{old: mkdirDL, new: "    && mkdir -p /tmp/dl # the downloads \\\n"}},
+			"has a comment after a command (# the downloads"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			text := base
-			for _, e := range c.edits {
-				if e.re != "" {
-					rx := regexp.MustCompile(e.re)
-					if n := len(rx.FindAllStringIndex(text, -1)); n != 1 {
-						t.Fatalf("the edit %s matches operator/Dockerfile %d times, want once: change this case with the image", e.re, n)
-					}
-					text = rx.ReplaceAllString(text, e.new)
-					continue
-				}
-				if n := strings.Count(text, e.old); n != 1 {
-					t.Fatalf("operator/Dockerfile has %d copies of %q, want one: change this case with the image", n, e.old)
-				}
-				text = strings.Replace(text, e.old, e.new, 1)
-			}
-			problems := operatorDownloadProblems(text)
+			problems := operatorDownloadProblems(editOperatorDockerfile(t, base, c.edits))
 			for _, p := range problems {
 				if strings.Contains(p, c.want) {
 					return
@@ -402,6 +413,32 @@ func TestOperatorImageDownloadCheckFindsEachHole(t *testing.T) {
 			t.Errorf("the check lets this hole pass, want a problem with %q; it found %q", c.want, problems)
 		})
 	}
+}
+
+// dockerfileEdit is one edit of a hole case: re (a regexp, with $1 in new)
+// or old (a literal) names the text, which must occur once.
+type dockerfileEdit struct{ re, old, new string }
+
+// editOperatorDockerfile applies the edits to text in order. A text that
+// an edit does not match exactly once stops the test: the case then has to
+// change with the image.
+func editOperatorDockerfile(t *testing.T, text string, edits []dockerfileEdit) string {
+	t.Helper()
+	for _, e := range edits {
+		if e.re != "" {
+			rx := regexp.MustCompile(e.re)
+			if n := len(rx.FindAllStringIndex(text, -1)); n != 1 {
+				t.Fatalf("the edit %s matches operator/Dockerfile %d times, want once: change this case with the image", e.re, n)
+			}
+			text = rx.ReplaceAllString(text, e.new)
+			continue
+		}
+		if n := strings.Count(text, e.old); n != 1 {
+			t.Fatalf("operator/Dockerfile has %d copies of %q, want one: change this case with the image", n, e.old)
+		}
+		text = strings.Replace(text, e.old, e.new, 1)
+	}
+	return text
 }
 
 // operatorDownloadProblems returns what breaks the rules of
@@ -419,6 +456,9 @@ func operatorDownloadProblems(text string) []string {
 	var problems []string
 	bad := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
 	s := strings.Join(lines, "\n")
+	for _, c := range runInlineComments(lines) {
+		bad("a RUN of operator/Dockerfile has a comment after a command (%s): the shell does not run the rest of that RUN", c)
+	}
 
 	// The images: each base and each --from source is an earlier stage, or
 	// an image by its tag and the digest of its index.
