@@ -1544,6 +1544,18 @@ volume delete 24"
   run provider::status "${DESC}"
   assert_success
   assert_output "Running (the owner mark of this cluster is not known)"
+
+  # A list that does not apply its selector gives a server of another
+  # cluster too: the status counts only the servers with the cluster label
+  # of this cluster.
+  export PROVIDER_DOMAIN="prod.example.test"
+  hcloud() {
+    [[ "$1 $2" == "server list" ]] || return 1
+    printf '%s\n' "[{\"id\":23,\"name\":\"old-0\",\"status\":\"running\",\"labels\":{\"lok8s.dev/cluster\":\"prod\"}},{\"id\":31,\"name\":\"other-0\",\"status\":\"off\",\"labels\":{\"lok8s.dev/cluster\":\"other\",\"lok8s.dev/owner\":\"${MARK}\"}}]"
+  }
+  run provider::status "${DESC}"
+  assert_success
+  assert_output "Running (1 of 1 server without the owner mark of this cluster)"
 }
 
 # ── the standalone hetzner command ───────────────────────
@@ -1554,7 +1566,8 @@ volume delete 24"
 # --domain flag has the type domain, so the domain needs its cluster spec.
 # provider::validate and provider::provision are stubs; hcloud must not run.
 @test "standalone: the hetzner command takes the domain of the mark from --domain, and refuses --hetzner-json alone" {
-  [ -x "${_PROJECT_ROOT}/.bin/argsh" ] || skip "argsh binary not available"
+  [ -x "${_PROJECT_ROOT}/.bin/argsh" ] ||
+    skip "needs the argsh binary at .bin/argsh (install it with b); this test does not download it"
   export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
   printf 'kind: KubeOne\nmetadata:\n  name: prod\n' > "${PATH_CLUSTERS}/prod.example.test/cluster.lok8s.yaml"
   local calls="${BATS_TEST_TMPDIR}/calls" script='

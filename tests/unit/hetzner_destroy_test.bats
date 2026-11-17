@@ -278,9 +278,14 @@ volume delete 7"
   run cat "${BATS_TEST_TMPDIR}/plan.err"
   assert_output --partial "hetzner: skipped server 44 other-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=prod-b. lok8s does not delete a part of another cluster."
   assert_output --partial "hetzner: skipped server 45 bare-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=<none>."
+  # The part of this cluster is not a foreign part.
+  refute_output --partial "skipped server 42"
 
   run provider::destroy "${DESC}" "${WORK}"
   assert_success
+  assert_output --partial "hetzner: skipped server 44 other-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=prod-b."
+  assert_output --partial "hetzner: skipped server 45 bare-0: the list of the parts with lok8s.dev/cluster=prod-a gave it, but it has lok8s.dev/cluster=<none>."
+  refute_output --partial "skipped server 42"
   # Not a kept part of this cluster: the summary does not count it.
   refute_output --partial "lo destroy: kept"
   run grep ' delete ' "${HCLOUD_LOG}"
@@ -290,6 +295,9 @@ volume delete 7"
   export LOK8S_DESTROY_PLAN=$'cluster\tprod-a\nserver\t42\tcp-0\nserver\t44\tother-0\nserver\t45\tbare-0'
   run provider::destroy "${DESC}" "${WORK}"
   assert_success
+  assert_output --partial "hetzner: skipped server 44 of the confirmed plan: no server with this id carries lok8s.dev/cluster=prod-a and the owner mark of this cluster now."
+  assert_output --partial "hetzner: skipped server 45 of the confirmed plan"
+  refute_output --partial "skipped server 42"
   run grep ' delete ' "${HCLOUD_LOG}"
   assert_output "server delete 42"
 }

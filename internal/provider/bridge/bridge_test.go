@@ -188,7 +188,12 @@ func TestDestroyStreamsTheProviderOutput(t *testing.T) {
 // and marks the cut.
 func TestTailBufferIsBounded(t *testing.T) {
 	var tb tailBuffer
-	tb.Write([]byte(strings.Repeat("x", 3*stderrTailBytes) + "\nlast\n"))
+	// Write takes every byte (an io.Writer that returns less fails the
+	// copy of the child's stderr), also the bytes that it drops.
+	big := []byte(strings.Repeat("x", 3*stderrTailBytes) + "\nlast\n")
+	if n, err := tb.Write(big); n != len(big) || err != nil {
+		t.Fatalf("Write = %d, %v; want %d, nil", n, err, len(big))
+	}
 	if len(tb.b) > stderrTailBytes {
 		t.Fatalf("kept %d bytes, want at most %d", len(tb.b), stderrTailBytes)
 	}
@@ -197,7 +202,9 @@ func TestTailBufferIsBounded(t *testing.T) {
 	}
 	tb = tailBuffer{}
 	for range 2 * stderrTailBytes / 10 {
-		tb.Write([]byte("123456789\n"))
+		if n, err := tb.Write([]byte("123456789\n")); n != 10 || err != nil {
+			t.Fatalf("Write = %d, %v; want 10, nil", n, err)
+		}
 	}
 	if len(tb.b) > stderrTailBytes {
 		t.Fatalf("kept %d bytes, want at most %d", len(tb.b), stderrTailBytes)

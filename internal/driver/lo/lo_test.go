@@ -523,7 +523,8 @@ func TestDestroyShowsTheMessageOfAFailedProviderOutput(t *testing.T) {
 		t.Fatalf("the destroy ran commands against the local docker: %q", runner.calls)
 	}
 	want := "noise 1\nhetzner: hcloud server list failed: unable to authenticate (unauthorized)\n" +
-		"[error] lo destroy: provider::output of provider 'stub' failed (its message is above), so the remote docker host of cluster test-local is not known."
+		"[error] lo destroy: provider::output of provider 'stub' failed (its message is above), so the remote docker host of cluster test-local is not known. " +
+		"No container and no cloud resource was deleted: the cleanup does not fall back to the local docker. Fix the cause, then run lo destroy again.\n"
 	if !strings.Contains(errBuf.String(), want) {
 		t.Fatalf("the error output does not show the provider's message above the error line:\n%s", errBuf.String())
 	}
