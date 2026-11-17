@@ -1358,6 +1358,33 @@ _claim_no_sha256() {
   shasum() { echo "bash: shasum: command not found" >&2; return 127; }
 }
 
+# The full SHA-256 of test.kubehz.dev; _CLAIM_MARK is its first 32
+# characters: printf %s test.kubehz.dev | sha256sum
+_CLAIM_SHA256=8c1fa30c717e3eab81f42edf29128ca31f73084c4b2fbd1c2dfa6deb2b6e8205
+
+# _claim_shasum_only: shasum is installed and sha256sum is not (macOS, for
+# example). command -v does not find sha256sum, and a call of it prints what
+# bash prints for a missing command. The runner can have no shasum (CI has
+# none), so shasum is a stub: it prints the shasum format of _CLAIM_SHA256,
+# and only for the arguments -a 256 and the exact input test.kubehz.dev (no
+# newline) on stdin. Any other call fails, so a fall back that hashes
+# another way gives no mark or another mark.
+_claim_shasum_only() {
+  command() {
+    if [[ "${1:-}" == -v && "${2:-}" == sha256sum ]]; then
+      return 1
+    fi
+    builtin command "$@"
+  }
+  sha256sum() { echo "bash: sha256sum: command not found" >&2; return 127; }
+  shasum() {
+    local input
+    input=$(cat; printf x)
+    [[ "$*" == "-a 256" && "${input%x}" == test.kubehz.dev ]] || return 2
+    printf '%s  -\n' "${_CLAIM_SHA256}"
+  }
+}
+
 # _claim_sandbox <keys json>: the api mints the claim key of test.kubehz.dev
 # and lists the registry; GET /v1/ssh_keys?name= answers <keys json>. Each
 # Hetzner Cloud call goes to CLAIM_CALLS as "<method> <url>[ <body>]", the
@@ -1443,6 +1470,27 @@ ${_CLAIM_UPLOAD}"
   assert_line "${_CLAIM_OTHER_REGISTER}"
   run cat "${CLAIM_CALLS}"
   assert_output "${_CLAIM_GET}"
+}
+
+@test "claim key: without sha256sum, shasum -a 256 gives the same mark, and register replaces its own key" {
+  _claim_sandbox "$(_claim_keys "${_CLAIM_OWN}")"
+  local with_sha256sum
+  with_sha256sum=$(kubehz::claim_key_mark test.kubehz.dev)
+  assert_equal "${with_sha256sum}" "${_CLAIM_MARK}"
+  _claim_shasum_only
+  run kubehz::claim_key_mark test.kubehz.dev
+  assert_success
+  assert_output "${with_sha256sum}"
+  # register finds its own key by this mark, deletes it, and gives the new
+  # key the same mark.
+  run kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev
+  assert_success
+  refute_output --partial "command not found"
+  refute_output --partial "lo does not replace"
+  run cat "${CLAIM_CALLS}"
+  assert_output "${_CLAIM_GET}
+${_CLAIM_DELETE42}
+${_CLAIM_UPLOAD}"
 }
 
 @test "claim key: register without a SHA-256 tool sends nothing to Hetzner Cloud" {

@@ -1,6 +1,7 @@
 package kubehz
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -139,6 +140,40 @@ func TestClaimKeyOwnershipRegister(t *testing.T) {
 				}
 				want := map[string]string{"legacy": claimLegacyRegister, "other": claimOtherRegister}[tc.warn]
 				mustContain(t, h.output(), want)
+			}
+		})
+	}
+}
+
+// A key of the claim key's name that lo did not make for this cluster: the
+// register step stops with errClaimKeyNotOwn itself (errors.Is), not with
+// any other error, and sends no DELETE and no upload for it.
+func TestEnsureClaimKeyForeignKeyIsNotOwn(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, labels string }{
+		{"key without labels", ""},
+		{"key of another cluster", claimOtherLabels},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.env["HCLOUD_TOKEN"], h.env["HCLOUD_API_BASE"] = "hc_test", h.apiURL()
+			h.handle("POST /api/clusters/register", 200, claimRegisterAnswer)
+			h.handle("GET /v1/ssh_keys", 200, claimKeys(tc.labels))
+			h.handle("DELETE /v1/ssh_keys/42", 204, ``)
+			h.handle("POST /v1/ssh_keys", 201, `{"ssh_key":{"id":43}}`)
+			err := h.ctx.ensureClaimKey(t.Context(), "test.kubehz.dev", h.apiURL())
+			if !errors.Is(err, errClaimKeyNotOwn) {
+				t.Fatalf("err = %v, want errClaimKeyNotOwn", err)
+			}
+			if r := h.lastReq("GET", "/v1/ssh_keys"); r == nil || r.Query != "name=kubehz-claim-test.kubehz.dev" {
+				t.Fatalf("key lookup: %+v", r)
+			}
+			if h.anyReq("DELETE", "/v1/ssh_keys") {
+				t.Errorf("DELETE sent for a key lo did not make: %+v", h.reqs())
+			}
+			if r := h.lastReq("POST", "/v1/ssh_keys"); r != nil {
+				t.Errorf("upload sent next to a key lo did not make: %+v", r)
 			}
 		})
 	}
