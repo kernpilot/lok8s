@@ -43,7 +43,6 @@ Usage: kubehz-api-stub.py <cert.pem> <key.pem> <port-file> <request-log>
 It binds 127.0.0.1 on a free port and writes the port to <port-file>.
 """
 
-import hashlib
 import http.server
 import json
 import os
@@ -60,10 +59,14 @@ REGISTERED = {"id": "cl-parity", "registered": True, "claimed": True, "bindSecre
                            "name": "kubehz-claim-bind-reg.dev"}}
 
 
-def claim_mark(domain):
-    """The value of the label lok8s.dev/kubehz-claim on the claim key that lo
-    made for a domain: the first 32 hex characters of its SHA-256."""
-    return hashlib.sha256(domain.encode()).hexdigest()[:32]
+# The value of the label lok8s.dev/kubehz-claim on the claim key that lo
+# made for own-key.dev: the first 32 hex characters of the SHA-256 of the
+# domain, `printf %s own-key.dev | sha256sum | cut -c1-32`. A literal, so a
+# reader can check the value. The literal cases of the bats and Go unit
+# tests pin the mark itself. This harness compares the bash implementation
+# with the Go implementation only: when both calculate the mark another way,
+# own-key.dev is a foreign key for both, and the harness does not see it.
+OWN_MARK = "303972d926cdaf0cc2869d244c134014"
 
 
 # GET /v1/ssh_keys?name= answers by the key name: the key that lo made for
@@ -71,10 +74,10 @@ def claim_mark(domain):
 # and a key with the label of another cluster.
 SSH_KEYS = {
     "kubehz-claim-own-key.dev": {"id": 42, "name": "kubehz-claim-own-key.dev",
-                                 "labels": {"lok8s.dev/kubehz-claim": claim_mark("own-key.dev")}},
+                                 "labels": {"lok8s.dev/kubehz-claim": OWN_MARK}},
     "kubehz-claim-legacy-key.dev": {"id": 42, "name": "kubehz-claim-legacy-key.dev"},
     "kubehz-claim-other-key.dev": {"id": 42, "name": "kubehz-claim-other-key.dev",
-                                   "labels": {"lok8s.dev/kubehz-claim": claim_mark("own-key.dev")}},
+                                   "labels": {"lok8s.dev/kubehz-claim": OWN_MARK}},
 }
 
 # POST /api/clusters/register refusals by the domain of the body (#312):
