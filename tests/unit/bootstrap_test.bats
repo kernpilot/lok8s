@@ -3925,29 +3925,18 @@ _dry_plugin_stopped() {
 }
 
 # _dry_window_open <pid> <seconds>: true while <pid> runs the test-only
-# delay of a window of the check (a child `sleep <seconds>`). With /proc
-# (Linux, as in the CI bats container, which has no ps) it reads /proc in a
-# shell of its own: bats runs a DEBUG trap before each command of the
-# test's shell, and with it a loop over every process can take longer than
-# the window. Without /proc (macOS) it reads the list of ps.
+# delay of a window of the check (a child `sleep <seconds>`). It uses the
+# process helpers of test_helper (_pgrep_f and _ppid: /proc, else pgrep and
+# ps), in a shell of its own: bats runs a DEBUG trap before each command of
+# the test's shell, and with it a scan of every process can take longer
+# than the window.
 _dry_window_open() {
-  if [[ ! -d /proc/self ]]; then
-    ps -A -o ppid= -o command= | awk -v p="${1}" -v c="sleep ${2}" '$1 == p { $1 = ""; sub(/^ +/, ""); if ($0 == c) f = 1 } END { exit !f }'
-    return
-  fi
-  bash -c '
-    for stat in /proc/[0-9]*/stat; do
-      read -r line 2>/dev/null < "${stat}" || continue
-      [[ "${line}" == *" (sleep) "* ]] || continue
-      # After the name: the state, then the pid of the parent.
-      line="${line##*) }"
-      line="${line#* }"
-      [[ "${line%% *}" == "${1}" ]] || continue
-      arg=$(tr "\\0" " " 2>/dev/null < "${stat%/stat}/cmdline") || continue
-      [[ "${arg}" != "sleep ${2} " ]] || exit 0
+  bash -c "$(declare -f _pgrep_f _ppid)"'
+    for pid in $(_pgrep_f "${2}"); do
+      [[ "$(_ppid "${pid}")" != "${1}" ]] || exit 0
     done
     exit 1
-  ' _ "${1}" "${2}"
+  ' _ "${1}" "^sleep ${2//./[.]}\$"
 }
 
 # An INT or TERM that stops the check is the interrupt, not a plugin
