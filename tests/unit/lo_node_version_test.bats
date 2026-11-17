@@ -218,6 +218,18 @@ exit 2'
   assert_output "spec.kubernetes.version cannot be read: yq stopped at the memory limit of 256 MiB, or a signal stopped it. Simplify the spec file."
 }
 
+@test "spec::kind_node_version: a yq that a signal stops after a panic line is named as stopped, not as a fault of the yq release" {
+  _spec "version: v1.31.4"
+  # A status above 128 is a signal (SIGKILL: 137), also when yq wrote a
+  # "panic: " line before it. The panic message would advise another yq.
+  _yq_stub 'if [[ "${1:-}" == --version ]]; then echo "yq (https://github.com/mikefarah/yq/) version v4.50.1"; exit 0; fi
+printf "panic: runtime error: index out of range [-1]\n" >&2
+kill -KILL $$'
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_output "spec.kubernetes.version cannot be read: yq stopped at the memory limit of 256 MiB, or a signal stopped it. Simplify the spec file."
+}
+
 # _now_ms — the wall clock in milliseconds (bash 5 EPOCHREALTIME: no fork,
 # and macOS date has no %N).
 _now_ms() {
