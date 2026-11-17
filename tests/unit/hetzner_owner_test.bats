@@ -1447,7 +1447,7 @@ volume delete 24"
   # of the confirmed plan does not repeat it for a part that the plan did
   # not name (23), and its last line counts them.
   refute_output --partial "skipped server 23"
-  assert_output --partial "[warn] lo destroy: kept 2 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers): server 22 cp-0, server 23 old-0."
+  assert_output --partial "[warn] lo destroy: kept 2 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers): server 22 'cp-0', server 23 'old-0'."
   run _writes
   assert_output "server delete 21"
 }
@@ -1469,7 +1469,7 @@ volume delete 24"
   # The plan showed 22 and 23 as kept parts: no repeat.
   refute_output --partial "skipped server 22"
   refute_output --partial "skipped server 23"
-  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (3 servers): server 21 cp-0, server 22 cp-0, server 23 old-0. Delete them by hand only if they are yours and you want them gone." ]
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (3 servers): server 21 'cp-0', server 22 'cp-0', server 23 'old-0'. Delete them by hand only if they are yours and you want them gone." ]
   run _writes
   assert_output "volume delete 24"
 }
@@ -1483,7 +1483,7 @@ volume delete 24"
   _part network 26 old-net '{"lok8s.dev/cluster":"prod"}'
   run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
   assert_success
-  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers, 1 network): server 22 cp-0, server 23 old-0, network 26 old-net. Delete them by hand only if they are yours and you want them gone." ]
+  [ "${lines[${#lines[@]}-1]}" = "[warn] lo destroy: kept 3 resources with lok8s.dev/cluster=prod that do not have the owner mark of this cluster (2 servers, 1 network): server 22 'cp-0', server 23 'old-0', network 26 'old-net'. Delete them by hand only if they are yours and you want them gone." ]
   [ "$(grep -c 'lo destroy: kept' <<<"${output}")" -eq 1 ]
   run _writes
   assert_output "server delete 21
@@ -1498,7 +1498,7 @@ volume delete 24"
   refute_output --partial "lo destroy: kept"
   run provider::destroy "${DESC}" "${BATS_TEST_TMPDIR}"
   assert_success
-  assert_output --partial "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod that does not have the owner mark of this cluster (1 network): network 26 old-net."
+  assert_output --partial "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod that does not have the owner mark of this cluster (1 network): network 26 'old-net'. Delete it by hand only if it is yours and you want it gone."
 }
 
 @test "destroy: no domain for the mark stops the plan and the destroy before any hcloud call" {

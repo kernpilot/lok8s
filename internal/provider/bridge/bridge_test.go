@@ -167,7 +167,7 @@ func TestDestroyStreamsTheProviderOutput(t *testing.T) {
 	l, r, errBuf := testLoader(t)
 	var out strings.Builder
 	l.Stdout = &out
-	const kept = "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod that does not have the owner mark of this cluster (1 network): network 9 net. Delete them by hand only if they are yours and you want them gone.\n"
+	const kept = "[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod that does not have the owner mark of this cluster (1 network): network 9 'net'. Delete it by hand only if it is yours and you want it gone.\n"
 	r.handler = func(c execx.Cmd) error {
 		if c.Args[4] == "provider::destroy" {
 			io.WriteString(c.Stdout, "stdout line\n")

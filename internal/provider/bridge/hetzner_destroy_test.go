@@ -128,7 +128,7 @@ func TestHetznerDestroyNamesAPartOfThePlanThatTheListGivesWithAnotherClusterLabe
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
 	want := []string{
 		"[warn] lo destroy: skipped server 46 moved-0: the plan named it, and now it has lok8s.dev/cluster=prod-b, not lok8s.dev/cluster=prod-a. lok8s did not delete it.",
-		"[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server): server 47 old-0. Delete them by hand only if they are yours and you want them gone.",
+		"[warn] lo destroy: kept 1 resource with lok8s.dev/cluster=prod-a that does not have the owner mark of this cluster (1 server): server 47 'old-0'. Delete it by hand only if it is yours and you want it gone.",
 	}
 	if len(lines) < 2 || lines[len(lines)-2] != want[0] || lines[len(lines)-1] != want[1] {
 		t.Errorf("the last lines of stderr are not the skipped part and then the kept line:\n%s", out)

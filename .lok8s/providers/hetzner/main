@@ -191,6 +191,14 @@ hetzner::_destroy_cluster_name() {
 # The resource types provider::destroy deletes, in its delete order.
 _HETZNER_DESTROY_ORDER=(load-balancer server placement-group firewall volume floating-ip ssh-key network)
 
+# A jq def: the name of a part as the warnings of the destroy show it. Each
+# control character and each backslash becomes '?', as ls shows a name on
+# a terminal. warn prints with `echo -e`: a newline in a name would split
+# the line, an ESC would reach the terminal, and a backslash sequence would
+# become a control character. The id names the part exactly.
+_HETZNER_JQ_SHOWN_NAME='def shown_name: tostring | explode
+  | map(if . < 32 or (. >= 127 and . < 160) or . == 92 then 63 else . end) | implode;'
+
 # hetzner::_destroy_resources <cluster_name> [<confirmed plan>]
 # Sets _HETZNER_DESTROY_ROWS: one "<resource>\t<id>\t<name>" line per hcloud
 # resource that carries lok8s.dev/cluster=<cluster_name> AND the owner mark
@@ -242,19 +250,21 @@ hetzner::_destroy_resources() {
     # mark; the parts with the cluster label and another mark or none, as
     # "<id>\t<mark>\t<name>" (the mark is empty when the part has none); and
     # the parts with another cluster label or none, as
-    # "<id>\t<cluster label>\t<name>".
+    # "<id>\t<cluster label>\t<name>". The last two passes give the name as
+    # the warnings show it (shown_name): the destroy uses these names only
+    # in its warnings.
     if ! json="$(hcloud "${resource}" list -o json -l "${selector}")" ||
        ! marked="$(jq -r --arg r "${resource}" --arg key "${key}" --arg mark "${mark}" --arg c "${cluster}" '
            (. // [])[] | select(((.labels // {})["lok8s.dev/cluster"] // "") == $c)
            | select(((.labels // {})[$key] // "") == $mark)
            | [$r, (.id | tostring), (.name // "")] | @tsv' <<<"${json}")" ||
-       ! skipped="$(jq -r --arg key "${key}" --arg mark "${mark}" --arg c "${cluster}" '
+       ! skipped="$(jq -r --arg key "${key}" --arg mark "${mark}" --arg c "${cluster}" "${_HETZNER_JQ_SHOWN_NAME}"'
            (. // [])[] | select(((.labels // {})["lok8s.dev/cluster"] // "") == $c)
            | ((.labels // {})[$key] // "") as $m | select($m != $mark)
-           | [(.id | tostring), $m, (.name // "")] | @tsv' <<<"${json}")" ||
-       ! foreign="$(jq -r --arg c "${cluster}" '
+           | [(.id | tostring), $m, (.name // "" | shown_name)] | @tsv' <<<"${json}")" ||
+       ! foreign="$(jq -r --arg c "${cluster}" "${_HETZNER_JQ_SHOWN_NAME}"'
            (. // [])[] | ((.labels // {})["lok8s.dev/cluster"] // "") as $l | select($l != $c)
-           | [(.id | tostring), $l, (.name // "")] | @tsv' <<<"${json}")"; then
+           | [(.id | tostring), $l, (.name // "" | shown_name)] | @tsv' <<<"${json}")"; then
       error "hetzner: could not list the ${resource} resources with ${selector}. The hetzner provider deleted no resource in this step. Check the hcloud token and the API, then run the destroy again."
       return 1
     fi
@@ -299,16 +309,20 @@ hetzner::_destroy_resources() {
 # its kind, id, name and reason. Then, last, the line of a destroy that kept
 # parts: how many parts with lok8s.dev/cluster=<cluster_name> it did not
 # delete because they do not have the owner mark of this cluster, of which
-# kinds, and each part with its kind, id and name (<kept>: the
-# "<resource>\t<id>\t<name>" lines of _HETZNER_DESTROY_KEPT). That line
+# kinds, and each part with its kind, id and name in single quotes (<kept>:
+# the "<resource>\t<id>\t<name>" lines of _HETZNER_DESTROY_KEPT), in the
+# delete order. It names at most 10 parts, then "and <n> more". That line
 # names the kept parts itself: a part that is new since the plan got no
 # "hetzner: skipped" warning, and the skipped lines directly above it name
 # other parts. With <skipped> and <kept> both empty, it prints nothing.
 # With only <kept> empty, the last skipped line is the last line. The
 # destroy leaves these parts on purpose, so it still exits 0; the lines say
-# that they exist.
+# that they exist. hetzner::_destroy_resources gives each name through
+# shown_name, so no name can split a line or send a control character to
+# the terminal.
 hetzner::_kept_summary() {
   local cluster_name="${1}" kept="${2}" skipped="${3:-}" kind t n total=0 kinds="" names="" line rid rname
+  local max=10
   local -A count=()
   # Split at each tab by hand: an empty name would shift the reason.
   while IFS= read -r line; do
@@ -323,18 +337,21 @@ hetzner::_kept_summary() {
     [[ -n "${kind}" ]] || continue
     count["${kind}"]=$(( ${count["${kind}"]:-0} + 1 ))
     total=$(( total + 1 ))
-    names+="${names:+, }${kind} ${rid}${rname:+ ${rname}}"
+    (( total <= max )) || continue
+    names+="${names:+, }${kind} ${rid}"
+    [[ -z "${rname}" ]] || names+=" '${rname}'"
   done <<<"${kept}"
   (( total > 0 )) || return 0
+  (( total <= max )) || names+=", and $(( total - max )) more"
   for t in "${_HETZNER_DESTROY_ORDER[@]}"; do
     n="${count["${t}"]:-0}"
     (( n > 0 )) || continue
     kinds+="${kinds:+, }${n} ${t}"
     (( n == 1 )) || kinds+="s"
   done
-  local noun="resources" verb="do"
-  (( total > 1 )) || noun="resource" verb="does"
-  warn "lo destroy: kept ${total} ${noun} with lok8s.dev/cluster=${cluster_name} that ${verb} not have the owner mark of this cluster (${kinds}): ${names}. Delete them by hand only if they are yours and you want them gone."
+  local noun="resources" verb="do" act="Delete them by hand only if they are yours and you want them gone."
+  (( total > 1 )) || noun="resource" verb="does" act="Delete it by hand only if it is yours and you want it gone."
+  warn "lo destroy: kept ${total} ${noun} with lok8s.dev/cluster=${cluster_name} that ${verb} not have the owner mark of this cluster (${kinds}): ${names}. ${act}"
 }
 
 # hetzner::_confirmed_rows <cluster_name> <listed> [<kept>] [<skipped>]
