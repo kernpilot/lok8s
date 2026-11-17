@@ -34,7 +34,7 @@ func TestTemplateGroupsAndMarker(t *testing.T) {
 		t.Fatalf("header: %q", strings.SplitN(tpl, "\n", 2)[0])
 	}
 	// Default groups: core + local active, cloud commented out.
-	for _, active := range []string{"  kubectl:\n    groups: [core]\n", "  kind:\n    groups: [local]\n", "  tilt:\n    groups: [local]\n", "  mkcert:\n    groups: [local]\n"} {
+	for _, active := range []string{"  kubectl:\n    groups: [core]\n", "  kind:\n    version: " + KindVersion + "\n    groups: [local]\n", "  tilt:\n    groups: [local]\n", "  mkcert:\n    groups: [local]\n"} {
 		if !strings.Contains(tpl, active) {
 			t.Errorf("missing active entry %q", active)
 		}
@@ -82,7 +82,7 @@ func TestTemplateGroupsAndMarker(t *testing.T) {
 		t.Fatalf("--groups cloud did not activate the cloud entries:\n%s", cloud)
 	}
 	coreOnly := mustTemplate(t, TemplateOptions{Name: "demo", LoVersion: "0.3.0", Variant: "core", Groups: []string{"core"}})
-	if !strings.Contains(coreOnly, "  # kind:\n  #   groups: [local]\n") {
+	if !strings.Contains(coreOnly, "  # kind:\n  #   version: "+KindVersion+"\n  #   groups: [local]\n") {
 		t.Fatalf("--groups core left local active:\n%s", coreOnly)
 	}
 }

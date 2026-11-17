@@ -10,9 +10,11 @@ package toolchain
 import (
 	"bytes"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -80,6 +82,7 @@ func TestTemplateCarriesThePins(t *testing.T) {
 			"github.com/mgoltzsche/khelm": "v" + KhelmVersion,
 			"github.com/kernpilot/lok8s":  "v0.3.0",
 			"yq":                          YQVersion,
+			"kind":                        KindVersion,
 		}},
 		Got:    testutil.Tree{Name: "the b.yaml template", Files: PinnedEntries("0.3.0")},
 		Sync:   "bump internal/toolchain/pins.go and template.go together",
@@ -210,4 +213,106 @@ func TestYQMinimumIsThePin(t *testing.T) {
 			t.Errorf("%s: %d yq minimum statements, want at least %d: the scan no longer reads them", dir, found, tree.min)
 		}
 	}
+}
+
+// Every entry of the template is pinned, or floatingEntries names it with
+// the reason: a new tool cannot float without one. The template is read
+// with every group active, so a commented-out entry counts too.
+func TestTemplateEntriesArePinnedOrNamedFloating(t *testing.T) {
+	t.Parallel()
+	tpl := mustTemplate(t, TemplateOptions{Name: "t", LoVersion: "0.3.0", Variant: "core", Groups: []string{GroupCore, GroupLocal, GroupCloud, GroupBash}})
+	if problems := floatProblems(tpl, floatingEntries); len(problems) > 0 {
+		t.Errorf("the b.yaml template:\n  %s", strings.Join(problems, "\n  "))
+	}
+	if n := len(entries("0.3.0", "")); n != strings.Count(tpl, "\n    groups: [") {
+		t.Errorf("the template with every group active has %d groups: lines, want one per entry (%d)", strings.Count(tpl, "\n    groups: ["), n)
+	}
+}
+
+// Each rule of floatProblems fails on an edit of the real template or of
+// the list.
+func TestFloatCheckFindsEachHole(t *testing.T) {
+	t.Parallel()
+	tpl := mustTemplate(t, TemplateOptions{Name: "t", LoVersion: "0.3.0", Variant: "core", Groups: []string{GroupCore, GroupLocal, GroupCloud, GroupBash}})
+	with := func(key, reason string) map[string]string {
+		m := map[string]string{}
+		maps.Copy(m, floatingEntries)
+		m[key] = reason
+		return m
+	}
+	without := func(key string) map[string]string {
+		m := with(key, "")
+		delete(m, key)
+		return m
+	}
+	const local = "  # ── local: "
+	if strings.Count(tpl, local) != 1 {
+		t.Fatalf("the template has %d copies of %q, want one: change this test with the template", strings.Count(tpl, local), local)
+	}
+	cases := []struct {
+		name     string
+		tpl      string
+		floating map[string]string
+		want     string
+	}{
+		{"a new entry with no version",
+			strings.Replace(tpl, local, "  newtool:\n    groups: [local]\n"+local, 1), floatingEntries,
+			"newtool has no version"},
+		{"a floating entry that the list does not name",
+			tpl, without("tilt"),
+			"tilt has no version"},
+		{"a pinned entry that the list names",
+			tpl, with("kind", "a reason"),
+			"kind is pinned"},
+		{"a name in the list that is no entry",
+			tpl, with("gone", "a reason"),
+			"gone is no entry of the template"},
+		{"a floating entry with no reason",
+			tpl, with("tilt", " "),
+			"tilt floats with no reason"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			problems := floatProblems(c.tpl, c.floating)
+			for _, p := range problems {
+				if strings.Contains(p, c.want) {
+					return
+				}
+			}
+			t.Errorf("the check lets this hole pass, want a problem with %q; it found %q", c.want, problems)
+		})
+	}
+}
+
+// floatProblems returns how a rendered template breaks the rule of
+// TestTemplateEntriesArePinnedOrNamedFloating against the named floating
+// entries. An empty result means the template keeps the rule.
+func floatProblems(tpl string, floating map[string]string) []string {
+	var doc struct {
+		Binaries map[string]struct {
+			Version string `yaml:"version"`
+		} `yaml:"binaries"`
+	}
+	if err := yaml.Unmarshal([]byte(tpl), &doc); err != nil {
+		return []string{"the template is not YAML: " + err.Error()}
+	}
+	var problems []string
+	for _, key := range slices.Sorted(maps.Keys(doc.Binaries)) {
+		reason, named := floating[key]
+		switch pinned := doc.Binaries[key].Version != ""; {
+		case pinned && named:
+			problems = append(problems, key+" is pinned, but floatingEntries names it: remove it from the list")
+		case !pinned && !named:
+			problems = append(problems, key+" has no version: pin it in pins.go, or name it in floatingEntries with the reason it floats")
+		case !pinned && strings.TrimSpace(reason) == "":
+			problems = append(problems, key+" floats with no reason: write the reason in floatingEntries")
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(floating)) {
+		if _, ok := doc.Binaries[key]; !ok {
+			problems = append(problems, key+" is no entry of the template: remove it from floatingEntries")
+		}
+	}
+	return problems
 }

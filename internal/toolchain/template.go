@@ -87,7 +87,7 @@ func entries(loVersion, pluginFileDir string) []entry {
 		{key: "github.com/kernpilot/lok8s", group: GroupCore,
 			comment: "secrets.lok8s.dev/v1/Secret — lok8s' own generator, shipped with every lok8s\nrelease as kustomize-secret-<os>-<arch>; pinned to the version of THIS lo.",
 			fields:  []string{"version: " + vPrefixed(loVersion), "asset: kustomize-secret-*", "file: " + pluginFileDir + "/" + SecretPluginRel}},
-		{key: "kind", group: GroupLocal},
+		{key: "kind", group: GroupLocal, fields: []string{"version: " + KindVersion}},
 		{key: "tilt", group: GroupLocal},
 		{key: "mkcert", group: GroupLocal},
 		{key: "github.com/kubermatic/kubeone", group: GroupCloud},
@@ -201,7 +201,8 @@ func Template(o TemplateOptions) (string, error) {
 	b.WriteString("# releases this lo was built and byte-parity-tested against (lo core execs them;\n")
 	b.WriteString("# lo-full links the same releases). Bump them together and re-render afterwards:\n")
 	b.WriteString("# `lo build` promotes artifacts.yaml only when the bytes change, so a bump that\n")
-	b.WriteString("# moves nothing reports \"render unchanged\". Everything else floats (b update).\n")
+	b.WriteString("# moves nothing reports \"render unchanged\". kind is pinned too: its release picks\n")
+	b.WriteString("# the cluster's default Kubernetes. An entry with no version floats (b update).\n")
 	b.WriteString("#\n")
 	b.WriteString("# Groups are a lok8s convention (b ignores the key): core = what every lo path\n")
 	b.WriteString("# execs; local = the kind + Tilt dev loop; cloud = the provisioning drivers;\n")
@@ -259,8 +260,8 @@ func HasMarker(path string) bool {
 	return false
 }
 
-// PinnedEntries lists the "key → version" pairs the template pins, for
-// tests and for doctor's expectation table.
+// PinnedEntries lists the "key → version" pairs that the template pins.
+// The tests compare it with pins.go; lo doctor does not use it.
 func PinnedEntries(loVersion string) map[string]string {
 	out := map[string]string{}
 	for _, e := range entries(loVersion, "") {

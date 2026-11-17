@@ -91,6 +91,7 @@ binaries:
 
   # ── local: the kind + Tilt dev loop (lo up, lo tilt, lo trust)
   kind:
+    version: v0.32.0
     groups: [local]
   tilt:
     groups: [local]
@@ -113,14 +114,27 @@ binaries:
   `go.mod` or the template disagrees. The exec render (core) and the
   in-process render (full) stay byte-identical because the numbers cannot
   drift apart.
+- **kind is pinned too.** The kind release picks the default node image,
+  which is the cluster's Kubernetes when `spec.kubernetes.version` is not
+  set (kind `v0.32.0`: `kindest/node` `v1.36.1`). The operator image ships
+  the same release, and `go test` fails when it does not.
+- **kubectl floats for now.** kubectl must stay within one minor of the
+  cluster's Kubernetes, but b's kubectl recipe downloads from a release
+  bucket that stopped at `v1.31.0`: `b` installs that release today and
+  cannot install a pin of a current one. kubectl gets its pin when b reads
+  `dl.k8s.io`.
+- **The other entries float**: `b update` installs their latest release.
+  `internal/toolchain/pins.go` names each one with the reason, and `go
+  test` fails on an entry that is neither pinned nor named there.
 - **Groups** are a lok8s convention (`b` ignores the key): `core` is always
   on, `local` by default, `cloud` (kubeone + hcloud) on
   `--groups core,local,cloud`. Entries outside the selection are emitted
   commented out: uncomment and `.bin/b install`.
 - **Never overwritten.** An existing `.bin/b.yaml` stays byte-for-byte;
   `lo toolchain install` prints a unified diff against the template and
-  the instructions, and `lo toolchain doctor` reports which installed tool
-  differs from a pin.
+  the instructions. `lo toolchain doctor` checks only the render tools
+  (kustomize, the khelm `ChartRenderer`, the Secret plugin) against their
+  pins, not kind, kubectl or yq.
 - **Not in the consumer file:** `argsh`, `yq`, `jq`, `envsubst`, `sops`,
   `ssh-to-age`. The Go binary links or reimplements them (sops and
   ssh-to-age as libraries; the split-mode `yq`/`sops` subprocesses are
@@ -151,7 +165,7 @@ side.
 | `kustomize` **v5.8.1** (`core`) | yes, pinned | yes | `lo` core: every render. `lo-full`: only `LO_RENDER=exec`; the bash side always |
 | `khelm` `ChartRenderer` **v2.8.0** (`core`) | yes, pinned, under `.kustomize/` | yes | the addons' Helm charts (core execs it; lo-full links the same release) |
 | `secrets.lok8s.dev` `Secret` plugin at **lo's version** (`core`) | yes, pinned, under `.kustomize/` | built from source (`lo kustomize build`) | every render on core and the bash side; lo-full serves it itself |
-| `kind`, `tilt`, `mkcert` (`local`) | yes (default on) | yes | the local dev loop: `lo up` (kind), Tilt, `lo trust` (mkcert) |
+| `kind` **v0.32.0** (pinned), `tilt`, `mkcert` (`local`) | yes (default on) | yes | the local dev loop: `lo up` (kind), Tilt, `lo trust` (mkcert) |
 | `kubeone`, `hcloud` (`cloud`) | opt-in (`--groups …,cloud`) | `kubeone`/`capi` profiles (+ `clusterctl`) | the provisioning drivers exec them |
 | `docker` | no (install Docker yourself) | `oci://docker` | the Lo driver and Tilt |
 | `argsh`, `jq`, `yq` (v4.54.3 or later, the pinned release), `envsubst`, `sops`, `ssh-to-age` | **no**: the binary links or reimplements them (add them by hand when `lok8s.yaml` routes commands to bash; the file's header shows how) | yes | the frozen `.lok8s/lo`, the provider plugins, `lo build` split mode (`yq`/`sops` subprocesses), the bats suites |
