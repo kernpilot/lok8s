@@ -4102,6 +4102,30 @@ _dry_window_open() {
   ! grep -qF "does not support a dry run" "${b}.out" || { echo "the check blames the plugin: $(<"${b}.out")"; return 1; }
 }
 
+# After the check, lo's shell has its own INT and TERM traps back, and no
+# trap of the check: those name its local _check, which is gone when the
+# check returns. lo runs the check at the top level of its shell, where the
+# check keeps the shell's traps (in a subshell, as bats runs a test, it
+# keeps none), so a shell of its own runs it here: with a TERM trap of its
+# own, and no INT trap.
+@test "the dry run's plugin check gives lo's shell its own INT and TERM traps back" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" top="${BATS_TEST_TMPDIR}/top.sh"
+  mkdir -p "$(dirname "${plugin}")"
+  printf '#!/bin/sh\necho dry-run\n' > "${plugin}"
+  chmod +x "${plugin}"
+  cat > "${top}" <<EOF
+import() { :; }
+source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+source "${_PROJECT_ROOT}/.lok8s/libs/addons"
+trap 'echo earlier' TERM
+addons::dry_run_boundary "${BATS_TEST_TMPDIR}/b" || exit 1
+trap -p INT TERM
+EOF
+  run bash "${top}"
+  assert_success
+  assert_output "trap -- 'echo earlier' SIGTERM"
+}
+
 # The command boundary keeps the 128+n of that interrupt, and only of that:
 # any other failure of a dry run is still 2, also a code above 128 (a child
 # that a signal ended, without an interrupt of lo). A real run's code passes
