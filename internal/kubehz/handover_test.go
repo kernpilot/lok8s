@@ -12,6 +12,8 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -572,6 +574,41 @@ func TestHandoverFetchSnapshotHTTPSLands0600(t *testing.T) {
 	}
 	if info, _ := os.Stat(out); info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode %o", info.Mode().Perm())
+	}
+}
+
+// A presigned URL carries its credential in the query: a failed download
+// (a refusal, or no connection) names the object without the query. The
+// request itself carries the query.
+func TestHandoverFetchSnapshotFailureHidesTheQuery(t *testing.T) {
+	query := "X-Amz-Signature=" + strings.Repeat("ab", 8) + "-query-sentinel"
+	closed := httptest.NewTLSServer(http.NotFoundHandler())
+	closedURL := closed.URL
+	closed.Close()
+	for _, c := range []struct{ name, origin string }{{"refused", ""}, {"no-connection", closedURL}} {
+		t.Run(c.name, func(t *testing.T) {
+			ho := newHandover(t)
+			ho.handle("GET /snap.db", 403, "denied")
+			origin := c.origin
+			if origin == "" {
+				origin = ho.apiURL()
+			}
+			_ = os.WriteFile(filepath.Join(ho.bundle, "snapshot-location"), []byte(origin+"/snap.db?"+query), 0o644)
+			work := filepath.Join(ho.base, "work")
+			_ = os.MkdirAll(work, 0o700)
+			_, err := ho.ctx.fetchSnapshot(t.Context(), ho.bundle, "", work)
+			if !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v", err)
+			}
+			mustContain(t, ho.output(), "handover: downloading the snapshot from "+origin+"/snap.db failed")
+			mustNotContain(t, ho.output(), "query-sentinel")
+			mustNotContain(t, ho.output(), "?")
+			if c.origin == "" {
+				if r := ho.lastReq("GET", "/snap.db"); r == nil || r.Query != query {
+					t.Fatalf("the request must carry the query: %+v", r)
+				}
+			}
+		})
 	}
 }
 

@@ -890,11 +890,13 @@ _stub_mktemp() {
   [ "$(cat "${MKTEMP_ARG}")" = "$(_real "${TMPDIR}")/kubehz-join-XXXXXXXXXX" ]
 }
 
-# A write that fails in the fresh directory (one the user cannot write)
-# leaves nothing: the directory goes, and the live-ticket note follows.
+# A write that fails in the fresh directory (one the user cannot write:
+# 0500) leaves nothing: the directory goes, and the live-ticket note
+# follows. The chmod to 0700 does not take (as GNU chmod 700 on a setgid
+# directory), or it fails.
 @test "space_mint_join: a failed write in the fresh directory removes it" {
   [[ "$(id -u)" != 0 ]] || skip "root writes into a 0500 directory"
-  local ticket
+  local ticket c
   ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
   _MINT_BODY=$(jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}')
   export _MINT_BODY
@@ -903,14 +905,29 @@ _stub_mktemp() {
   }
   export -f curl
   _stub_mktemp
-  mkdir -m 500 "${MKTEMP_DIR}"
-
-  run kubehz::space_mint_join sp-123 worker-1
-  assert_failure
-  assert_output --partial "could not write the join ticket for 'worker-1': the directory is not private (mode 0700)"
-  assert_output --partial "The ticket was minted before the write failed"
-  refute_output --partial "${ticket}"
-  [ ! -e "${MKTEMP_DIR}" ]
+  chmod() {
+    if [[ "${*: -1}" == "${MKTEMP_DIR}" ]]; then
+      [[ "${CHMOD_STUB}" == noop ]]
+      return
+    fi
+    command chmod "$@"
+  }
+  export -f chmod
+  for c in noop fail; do
+    CHMOD_STUB="${c}"
+    export CHMOD_STUB
+    command rm -rf -- "${MKTEMP_DIR}"
+    mkdir -m 500 "${MKTEMP_DIR}"
+    run kubehz::space_mint_join sp-123 worker-1
+    assert_failure
+    case "${c}" in
+      noop) assert_output --partial "could not write the join ticket for 'worker-1': not a private directory (mode 0700)" ;;
+      fail) assert_output --partial "could not write the join ticket for 'worker-1': the mode of the directory cannot be set to 0700" ;;
+    esac
+    assert_output --partial "The ticket was minted before the write failed"
+    refute_output --partial "${ticket}"
+    [ ! -e "${MKTEMP_DIR}" ]
+  done
 }
 
 # A write that fails after a part of the ticket went out: a printf
@@ -1019,7 +1036,7 @@ _stub_mktemp() {
     assert_failure
     case "${c}" in
       dir)
-        assert_output --partial "could not write the join ticket for 'worker-1': the directory is not private (mode 0700)"
+        assert_output --partial "could not write the join ticket for 'worker-1': not a private directory (mode 0700)"
         [ -e "${SEEN}" ]
         [ ! -s "${SEEN}" ]
         ;;
@@ -1531,6 +1548,30 @@ _stub_mktemp() {
   [ "$(cat "${files[0]}")" = "${ticket}" ]
 }
 
+# In a setgid TMPDIR, mktemp -d makes a 2700 directory (it takes the setgid
+# bit). The writer sets it to 0700 before the check, as the Go twin does:
+# the ticket is written, and its directory is 0700.
+@test "space_write_join_ticket: a setgid TMPDIR gives a 0700 directory and the ticket" {
+  local ticket tmpd probe files
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  tmpd="${BATS_TEST_TMPDIR}/sgid"
+  mkdir -m 700 "${tmpd}"
+  chmod g+s "${tmpd}" 2>/dev/null || skip "chmod g+s is refused here"
+  [ "$(stat -c %a "${tmpd}")" = 2700 ] || skip "no setgid bit on this directory"
+  # The bit is live: mktemp -d in it makes a 2700 directory under umask 077.
+  probe=$(umask 077 && mktemp -d "${tmpd}/probe-XXXXXX")
+  [ "$(stat -c %a "${probe}")" = 2700 ]
+  rmdir -- "${probe}"
+  TMPDIR="${tmpd}" run kubehz::space_write_join_ticket worker-1 "${ticket}"
+  assert_success
+  files=("${tmpd}"/kubehz-join-*/kubehz-join-worker-1.token)
+  [ "${#files[@]}" -eq 1 ]
+  [ "${output}" = "$(_real "${tmpd}")/${files[0]#"${tmpd}/"}" ]
+  [ "$(stat -c %a "$(dirname "${files[0]}")")" = 700 ]
+  [ "$(stat -c %a "${files[0]}")" = 600 ]
+  [ "$(cat "${files[0]}")" = "${ticket}" ]
+}
+
 # Under set -x (the trace on stdout: BASH_XTRACEFD=1) the trace holds no
 # ticket, no response and no API token, also when a RETURN trap under
 # set -T turns tracing on again inside (the first guard line). Lines before
@@ -1998,6 +2039,7 @@ _stub_mktemp() {
   local canary name
   canary="canary-$(printf '%s' body-of-the-request)"
   RESP_CANARY="canary-$(printf '%s' the-response)"
+  OLD_BODY="canary-$(printf '%s' an-earlier-response)"
   ENV_DIR="${BATS_TEST_TMPDIR}"
   export ENV_DIR
   printf '{"ok":true,"data":{"note":"%s"}}' "${RESP_CANARY}" > "${ENV_DIR}/resp.json"
@@ -2012,11 +2054,11 @@ _stub_mktemp() {
     export escaped=''
     declare -g -r -n "${1}=escaped"
     # The globals of an earlier call: the refusal must not leave them.
-    KUBEHZ_SPACE_API_STATUS=500 KUBEHZ_SPACE_API_CURL_RC=7
+    KUBEHZ_SPACE_API_STATUS=500 KUBEHZ_SPACE_API_CURL_RC=7 KUBEHZ_SPACE_API_BODY="${OLD_BODY}"
     kubehz::space_api POST /api/spaces "{\"note\":\"${2}\"}" || rc=$?
     env > "${ENV_DIR}/after.env"
     printf '%s' "${escaped}" > "${ENV_DIR}/escaped.after"
-    printf '%s|%s' "${KUBEHZ_SPACE_API_STATUS-unset}" "${KUBEHZ_SPACE_API_CURL_RC-unset}" > "${ENV_DIR}/globals.after"
+    printf '%s|%s|%s' "${KUBEHZ_SPACE_API_STATUS-unset}" "${KUBEHZ_SPACE_API_CURL_RC-unset}" "${KUBEHZ_SPACE_API_BODY-unset}" > "${ENV_DIR}/globals.after"
     return "${rc}"
   }
   for name in body raw; do
@@ -2027,11 +2069,12 @@ _stub_mktemp() {
     refute_output --partial "kubehz API unreachable"
     refute_output --partial "${canary}"
     refute_output --partial "${RESP_CANARY}"
+    refute_output --partial "${OLD_BODY}"
     [ ! -e "${ENV_DIR}/curl.env" ]
     [ "$(grep -c -F -e "${canary}" -e "${RESP_CANARY}" "${ENV_DIR}/after.env")" -eq 0 ]
     [ -e "${ENV_DIR}/escaped.after" ]
     [ ! -s "${ENV_DIR}/escaped.after" ]
-    [ "$(cat "${ENV_DIR}/globals.after")" = "|" ]
+    [ "$(cat "${ENV_DIR}/globals.after")" = "||" ]
   done
 }
 

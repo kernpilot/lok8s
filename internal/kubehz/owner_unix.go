@@ -66,6 +66,10 @@ func readOverflowUID(file string) int {
 // readable by others.
 var errNotPrivate = errors.New("not a private file")
 
+// errNotPrivateDir: the fresh directory of a join file is not a directory,
+// not ours, or not 0700 after the chmod (the bash twin's text).
+var errNotPrivateDir = errors.New("not a private directory (mode 0700)")
+
 // readPrivateFile reads a regular file of ours that nobody else can read.
 // O_NOFOLLOW refuses a link at open, and the checks run on the open file
 // (fstat), so nothing can swap the file between the check and the read.

@@ -206,9 +206,11 @@ kubehz::space_api_call() {
   # nameref names: the function stops before it reads a secret.
   local method="${1}" path="${2}"
   # Before the first refusal: a caller (node::maintain) must not read the
-  # status or the curl code of an earlier call.
+  # status, the curl code or the response of an earlier call (a response
+  # can hold a join ticket). The response global is checked below.
   KUBEHZ_SPACE_API_STATUS=""
   KUBEHZ_SPACE_API_CURL_RC=""
+  KUBEHZ_SPACE_API_BODY=""
   local +x +i body raw || { error "kubehz::space_api_call: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
   body="${3:-}"
   # A response can hold a join ticket: the global never goes to a child
@@ -634,8 +636,8 @@ kubehz::space_join_tmp_dir() {
 # Write a join ticket to a FRESH private directory under the user's temp dir
 # (kubehz::space_join_tmp_dir): <tmp>/kubehz-join-<random>/kubehz-join-<node>.token,
 # 0700 over 0600, as the Go twin writes it (writeJoinFile). mktemp -d picks a
-# name nobody can plant in a shared /tmp. The directory must be 0700 before
-# anything goes into it, as in the Go twin. The file is made empty first,
+# name nobody can plant in a shared /tmp. The directory is set to 0700 and
+# must be 0700 before anything goes into it, as in the Go twin. The file is made empty first,
 # under noclobber, and must then be a regular file of ours, not a link:
 # noclobber lets a FIFO (or a link to one) through, and the check stops
 # there before any byte of the ticket goes out. The umask 077 inside sets
@@ -672,8 +674,14 @@ kubehz::space_write_join_ticket() {
   path="${priv}/kubehz-join-${node_name}.token"
   # Each check before the write; `|| return` returns the status of the
   # cleanup (1 or 3), and keeps set -e of a caller from ending the shell.
+  # In a setgid TMPDIR the fresh directory is 2700 (it takes the setgid
+  # bit). GNU chmod keeps the setgid bit of a directory for a mode of three
+  # or four digits (700, 0700); the fifth digit clears it, as the chmod of
+  # the Go twin does.
+  chmod 00700 -- "${priv}" 2>/dev/null \
+    || { kubehz::_join_write_failed "${priv}" "${path}" "the mode of the directory cannot be set to 0700" || return; }
   [[ "$(stat -c '%a' -- "${priv}" 2>/dev/null)" == 700 ]] \
-    || { kubehz::_join_write_failed "${priv}" "${path}" "the directory is not private (mode 0700)" || return; }
+    || { kubehz::_join_write_failed "${priv}" "${path}" "not a private directory (mode 0700)" || return; }
   ( umask 077 && set -C && : > "${path}" ) 2>/dev/null \
     || { kubehz::_join_write_failed "${priv}" "${path}" "the file cannot be created (it exists, or the directory cannot be written)" || return; }
   [[ -f "${path}" && ! -L "${path}" && -O "${path}" ]] \

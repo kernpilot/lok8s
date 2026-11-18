@@ -750,7 +750,7 @@ func (c *Context) writeJoinInto(priv, name, content string) error {
 		return err
 	}
 	if uid, ok := fileOwner(fi); !fi.IsDir() || fi.Mode().Perm() != 0o700 || !ok || uid != c.euid() {
-		return errNotPrivate
+		return errNotPrivateDir
 	}
 	f, err := createExclNoFollow(root, name)
 	if err != nil {

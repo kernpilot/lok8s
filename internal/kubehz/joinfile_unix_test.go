@@ -440,3 +440,55 @@ func firstPartOwnedBy(t *testing.T, dir string, uid int) string {
 	t.Fatalf("no part of %s belongs to uid %d", dir, uid)
 	return ""
 }
+
+// In a setgid TMPDIR the fresh directory takes the setgid bit (2700). The
+// writer sets it to 0700 before the check, as the bash twin does (chmod
+// 00700): the ticket is written, and its directory has no setgid bit.
+func TestSpaceMintJoinInASetgidTMPDIR(t *testing.T) {
+	h := newHarness(t)
+	tmp := h.env["TMPDIR"]
+	if err := os.Chmod(tmp, 0o700|os.ModeSetgid); err != nil {
+		t.Skipf("chmod g+s is refused here: %v", err)
+	}
+	probe := filepath.Join(tmp, "probe")
+	if err := os.Mkdir(probe, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(probe); err != nil || st.Mode()&os.ModeSetgid == 0 {
+		t.Skip("a directory made in a setgid directory does not take the bit here")
+	}
+	if err := os.Remove(probe); err != nil {
+		t.Fatal(err)
+	}
+	h.handle("POST /api/spaces/sp-123/join-token", 201, noScriptJSON)
+	mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
+	paths := joinTickets(t, tmp, "worker-1")
+	if len(paths) != 1 {
+		t.Fatalf("ticket files: %v", paths)
+	}
+	bits := os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+	if st, err := os.Stat(filepath.Dir(paths[0])); err != nil || st.Mode()&bits != 0o700 {
+		t.Fatalf("directory mode want 0700 and no setgid bit: %v %v", st, err)
+	}
+	if raw, err := os.ReadFile(paths[0]); err != nil || string(raw) != joinTicket+"\n" {
+		t.Fatalf("content %q %v", raw, err)
+	}
+}
+
+// The fresh directory must be ours: a directory of another user (the Euid
+// seam) is refused with the text of the bash twin, and nothing goes in.
+func TestWriteJoinIntoRefusesADirectoryOfAnotherUser(t *testing.T) {
+	h := newHarness(t)
+	priv := filepath.Join(h.base, "priv")
+	if err := os.Mkdir(priv, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h.ctx.Euid = func() int { return os.Geteuid() + 1 }
+	err := h.ctx.writeJoinInto(priv, "kubehz-join-worker-1.token", "content")
+	if !errors.Is(err, errNotPrivateDir) || err.Error() != "not a private directory (mode 0700)" {
+		t.Fatalf("want errNotPrivateDir, got %v", err)
+	}
+	if entries, rerr := os.ReadDir(priv); rerr != nil || len(entries) != 0 {
+		t.Fatalf("the directory must stay empty: %v %v", entries, rerr)
+	}
+}
