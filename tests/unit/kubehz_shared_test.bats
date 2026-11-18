@@ -1038,6 +1038,168 @@ _stub_mktemp() {
   done
 }
 
+# Under set -x (the trace on stdout: BASH_XTRACEFD=1) the trace holds no
+# ticket, no response and no API token, also when a RETURN trap under
+# set -T turns tracing on again inside (the first guard line). Lines before
+# and after the mint prove that the trace was on. The response comes from
+# a file, so no exported variable of the test holds the ticket.
+@test "space_mint_join: a trace holds no ticket and no API token" {
+  local ticket
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  MINT_FILE="${BATS_TEST_TMPDIR}/mint.json"
+  jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}' > "${MINT_FILE}"
+  export MINT_FILE
+  curl() {
+    printf '%s\n201' "$(cat "${MINT_FILE}")"
+  }
+  export -f curl
+  _traced_mint() {
+    BASH_XTRACEFD=1
+    set -x
+    : trace-on
+    kubehz::space_mint_join sp-123 worker-1
+    : trace-after
+  }
+  _traced_mint_t() {
+    BASH_XTRACEFD=1
+    set -T
+    trap 'set -x' RETURN
+    set -x
+    : trace-on
+    kubehz::space_mint_join sp-123 worker-1
+    trap - RETURN
+    : trace-after
+  }
+  local fn
+  for fn in _traced_mint _traced_mint_t; do
+    run "${fn}"
+    assert_success
+    assert_output --partial "+ : trace-on"
+    assert_output --partial "+ : trace-after"
+    assert_output --partial "(written to "
+    refute_output --partial "${ticket}"
+    refute_output --partial "${ticket#*.}"
+    refute_output --partial "${KUBEHZ_TOKEN}"
+  done
+}
+
+# Each api call keeps the bearer out of a trace too, not only the mint:
+# the bearer goes to curl in a config on stdin, through a function argument
+# that a trace would print.
+@test "space_api: a trace holds no API token" {
+  curl() {
+    cat > /dev/null
+    printf '%s\n200' '{"ok":true,"data":[]}'
+  }
+  export -f curl
+  _traced_api() {
+    BASH_XTRACEFD=1
+    set -x
+    : trace-on
+    kubehz::space_api GET /api/spaces
+    : trace-after
+  }
+  run _traced_api
+  assert_success
+  assert_output --partial "+ : trace-on"
+  assert_output --partial "+ : trace-after"
+  refute_output --partial "${KUBEHZ_TOKEN}"
+}
+
+# Under set -a no child gets the ticket or the response: not during the
+# write (a mktemp stand-in records its environment), and not after it.
+# The response global was exported before (as an earlier export would);
+# the writer takes the export off, and the mint unsets it at the end.
+@test "space_mint_join: under set -a no child gets the ticket" {
+  local ticket
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  MINT_FILE="${BATS_TEST_TMPDIR}/mint.json"
+  jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}' > "${MINT_FILE}"
+  ENV_DIR="${BATS_TEST_TMPDIR}"
+  export MINT_FILE ENV_DIR
+  curl() {
+    printf '%s\n201' "$(cat "${MINT_FILE}")"
+  }
+  mktemp() {
+    env > "${ENV_DIR}/during.env"
+    command mktemp "$@"
+  }
+  export -f curl mktemp
+  _exported_mint() {
+    export KUBEHZ_SPACE_API_BODY=""
+    set -a
+    kubehz::space_mint_join sp-123 worker-1 || return
+    env > "${ENV_DIR}/after.env"
+    printf '%s\n' "${KUBEHZ_SPACE_API_BODY-<unset>}" > "${ENV_DIR}/body.after"
+  }
+  run _exported_mint
+  assert_success
+  assert_output --partial "(written to "
+  [ -s "${ENV_DIR}/during.env" ]
+  [ -s "${ENV_DIR}/after.env" ]
+  # Not `! grep`: bash ignores errexit for a negated command, so that line
+  # could never fail the test.
+  [ "$(grep -c -F -- "${ticket#*.}" "${ENV_DIR}/during.env")" -eq 0 ]
+  [ "$(grep -c -F -- "${ticket#*.}" "${ENV_DIR}/after.env")" -eq 0 ]
+  [ "$(cat "${ENV_DIR}/body.after")" = "<unset>" ]
+}
+
+# The writer turns allexport off itself, also when it is called on its
+# own: under set -a no child of the write (a mktemp stand-in records its
+# environment) gets the ticket. The ticket reaches the writer as an
+# argument only, never in an exported variable of the test.
+@test "space_write_join_ticket: under set -a no child gets the ticket" {
+  local ticket
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  printf '%s' "${ticket}" > "${BATS_TEST_TMPDIR}/ticket"
+  ENV_DIR="${BATS_TEST_TMPDIR}"
+  export ENV_DIR
+  mktemp() {
+    env > "${ENV_DIR}/during.env"
+    command mktemp "$@"
+  }
+  export -f mktemp
+  _exported_write() {
+    local t
+    t=$(cat "${ENV_DIR}/ticket")
+    set -a
+    kubehz::space_write_join_ticket worker-1 "${t}"
+  }
+  run _exported_write
+  assert_success
+  [ -s "${ENV_DIR}/during.env" ]
+  [ "$(grep -c -F -- "${ticket#*.}" "${ENV_DIR}/during.env")" -eq 0 ]
+  [ "$(cat "${output}")" = "${ticket}" ]
+}
+
+# nocasematch would let an uppercase ticket through the shape check: the
+# check turns it off and sets it back after. As the Go twin's joinTokenRe.
+@test "space_mint_join: nocasematch does not widen the shape check" {
+  local good bad
+  good=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  bad="${good^^}"
+  _MINT_BODY=$(jq -nc --arg t "${bad}" '{ok: true, data: {token: $t, expiresAt: "soon"}}')
+  export _MINT_BODY
+  curl() {
+    printf '%s\n201' "${_MINT_BODY}"
+  }
+  export -f curl
+  _ncm_mint() {
+    local rc=0
+    shopt -s nocasematch
+    kubehz::space_mint_join sp-123 worker-1 || rc=$?
+    shopt -q nocasematch && echo "nocasematch is on again"
+    return "${rc}"
+  }
+  run _ncm_mint
+  assert_failure
+  assert_output --partial "kubehz API returned a join ticket for 'worker-1' in a shape this CLI does not recognise; nothing was written"
+  assert_output --partial "nocasematch is on again"
+  refute_output --partial "${bad}"
+  local dirs=("${TMPDIR}"/kubehz-join-*)
+  [ ! -e "${dirs[0]}" ]
+}
+
 @test "provision_shared: a lost create race adopts via re-lookup" {
   yq_space_defaults
   CURL_STATE="${BATS_TEST_TMPDIR}/race"

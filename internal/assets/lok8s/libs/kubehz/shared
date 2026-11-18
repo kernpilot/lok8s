@@ -190,7 +190,12 @@ kubehz::space_api() {
 # did not fail) and renders the failure itself.
 # Usage: kubehz::space_api_call <method> <path> [json_body]
 kubehz::space_api_call() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # the bearer and the response (a join ticket)
   local method="${1}" path="${2}" body="${3:-}"
+  # A response can hold a join ticket: the global never goes to a child
+  # (set -a, or an export before), and the caller unsets it.
+  declare -g +x KUBEHZ_SPACE_API_BODY
   KUBEHZ_SPACE_API_STATUS=""
   KUBEHZ_SPACE_API_BODY=""
   KUBEHZ_SPACE_API_CURL_RC=""
@@ -529,6 +534,8 @@ kubehz::space_wait_active() {
 # printed), 1 when the write fails.
 # Usage: kubehz::space_write_join_ticket <node_name> <token>
 kubehz::space_write_join_ticket() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # the ticket
   local node_name="${1}" token="${2}" dir priv path
   node::assert_node_name "${node_name}" || return 2
   dir="${TMPDIR:-/tmp}"
@@ -550,8 +557,22 @@ kubehz::space_write_join_ticket() {
 # (kubehz::space_write_join_ticket), never on stdout: a terminal (scrollback,
 # CI logs, a shared screen) is a copy nobody asked for. A lost ticket is
 # re-minted, not recovered.
+# The response, the ticket and the API token stay out of a trace (set -x)
+# and out of the environment of a child (set -a): the guard lines (as in
+# utils/keysonly.sh) turn both off, and the response global is unset before
+# the options of the caller come back.
 # Usage: kubehz::space_mint_join <space_id> <node_name>
 kubehz::space_mint_join() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # the response and the ticket
+  local rc=0
+  kubehz::_space_mint_join "$@" || rc=$?
+  unset KUBEHZ_SPACE_API_BODY
+  return "${rc}"
+}
+
+# The body of kubehz::space_mint_join (call that one: it holds the guard).
+kubehz::_space_mint_join() {
   local space_id="${1}" node_name="${2}"
   # Before the mint: a refused name must not cost a live ticket.
   node::assert_node_name "${node_name}" || return 1
@@ -585,8 +606,13 @@ kubehz::space_mint_join() {
   # characters are spelled out: in a bash regex, a range like a-z follows
   # the locale (in en_US.UTF-8 it matches e with an accent).
   local tok_c='[abcdefghijklmnopqrstuvwxyz0123456789]'
-  local tok_re="^\"${tok_c}{6}[.]${tok_c}{16}\"\$"
-  if [[ ! "${token_json}" =~ ${tok_re} ]]; then
+  local tok_re="^\"${tok_c}{6}[.]${tok_c}{16}\"\$" ncm=0 shape=0
+  # nocasematch would let an uppercase ticket through: off for the check.
+  shopt -q nocasematch && ncm=1
+  shopt -u nocasematch
+  [[ "${token_json}" =~ ${tok_re} ]] && shape=1
+  (( ncm == 0 )) || shopt -s nocasematch
+  if (( shape == 0 )); then
     error "kubehz API returned a join ticket for '${node_name}' in a shape this CLI does not recognise; nothing was written"
     return 1
   fi
