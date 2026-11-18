@@ -1821,7 +1821,12 @@ unset PARITY_DOCKER_LOG PARITY_DOCKER_VERSION PARITY_ATTACHED PARITY_HA
 # refuses the shared name, lists the plan and needs the cluster_name: off a
 # terminal (stdin closed) only --confirm-cluster gets past it, --force does
 # not. The matching name runs the driver's destroy, which calls the
-# provider's destroy.
+# provider's destroy. The last plan line has runs of tabs (at the start,
+# between the fields, in the name and at the end) and an ESC in the name:
+# both CLIs read it as bash's `IFS=$'\t' read` does and show the name
+# through the unshown list. esc.cloud's plan names a cluster_name with an
+# ESC, and nul.cloud's plan has a NUL byte: both CLIs refuse each one (rc
+# 3) before they show anything, also with the matching --confirm-cluster.
 mkdir -p "${PROJ}/.lok8s/providers/mockplan"
 cat > "${PROJ}/.lok8s/providers/mockplan/main" <<'SH'
 #!/usr/bin/env argsh
@@ -1834,7 +1839,11 @@ provider::output() { printf '{}\n'; }
 provider::destroy_plan() {
   local name
   name="$(sed -n 's/^cluster_name: //p' "${1}")"
-  printf 'cluster\t%s\nserver\t42\t%s-cp-0\nvolume\t7\t%s-data\n' "${name}" "${name}" "${name}"
+  case "${name}" in
+    esc-name) printf 'cluster\tesc\033[2Jname\nserver\t42\tesc-cp-0\n'; return 0 ;;
+    nul-name) printf 'cluster\tnul-name\nserver\t4\x002\tnul-cp-0\n'; return 0 ;;
+  esac
+  printf 'cluster\t%s\nserver\t42\t%s-cp-0\nvolume\t7\t%s-data\n\t\tserver\t\t43\t\t%s-cp\t\t1\033[2K\t\n' "${name}" "${name}" "${name}" "${name}"
 }
 SH
 plan_spec() {  # <domain> <cluster_name>: a KubeOne domain on mockplan
@@ -1846,24 +1855,34 @@ plan_spec() {  # <domain> <cluster_name>: a KubeOne domain on mockplan
 plan_spec dupa.cloud shared-name
 plan_spec dupb.cloud shared-name
 plan_spec solo.cloud solo-name
+plan_spec esc.cloud esc-name
+plan_spec nul.cloud nul-name
 check - destroy --domain dupa.cloud -r -f --confirm-cluster shared-name  # shared cluster_name: refused (rc 3)
 check - destroy --domain solo.cloud -r -f                               # --force alone off a terminal: refused, plan listed
 check - destroy --domain solo.cloud -r --confirm-cluster other          # another name: refused
 check - destroy --domain solo.cloud -r --confirm-cluster solo-name      # the name: the driver and the provider destroy run
 check - down --domain solo.cloud -r                                     # lo down reaches the guard: refused, names the flag
 check - destroy --domain solo.cloud -f --confirm-cluster solo-name      # no -r: no guard, --confirm-cluster refused (rc 1)
+check - destroy --domain esc.cloud -r -f                                # a cluster_name with an ESC: refused before it is shown (rc 3)
+check - destroy --domain nul.cloud -r --confirm-cluster nul-name        # a plan with a NUL byte: refused (rc 3)
 expect_rc 3 destroy --domain dupa.cloud -r -f --confirm-cluster shared-name
 expect_rc 3 destroy --domain solo.cloud -r -f
 expect_rc 1 destroy --domain solo.cloud -f --confirm-cluster solo-name
+expect_rc 3 destroy --domain esc.cloud -r -f
+expect_rc 3 destroy --domain nul.cloud -r --confirm-cluster nul-name
 for side in bash go; do
   parity::run "${side}" "${PROJ}" destroy --domain solo.cloud -r --confirm-cluster solo-name || true
-  grep -qF "mockplan destroy ran: provider.yaml plan: cluster	solo-name|server	42	solo-name-cp-0|volume	7	solo-name-data" "${WORK}/${side}.err" \
+  grep -qF $'mockplan destroy ran: provider.yaml plan: cluster\tsolo-name|server\t42\tsolo-name-cp-0|volume\t7\tsolo-name-data|\t\tserver\t\t43\t\tsolo-name-cp\t\t1\e[2K\t' "${WORK}/${side}.err" \
     || fail "${side}: destroy --confirm-cluster solo-name did not hand the confirmed plan to the provider destroy"
   parity::run "${side}" "${PROJ}" destroy --domain solo.cloud -r -f || true
   grep -q 'mockplan destroy ran' "${WORK}/${side}.err" \
     && fail "${side}: destroy -f without --confirm-cluster reached the provider destroy"
   grep -q '^    server solo-name-cp-0 (42)$' "${WORK}/${side}.err" \
     || fail "${side}: the destroy plan was not listed"
+  grep -qxF '    server solo-name-cp??1?[2K (43)' "${WORK}/${side}.err" \
+    || fail "${side}: the plan line with runs of tabs and an ESC was not shown as bash reads it"
+  grep -qF $'\e[2K' "${WORK}/${side}.err" \
+    && fail "${side}: the ESC of a plan line reached the output"
   grep -q "To confirm, run: lo destroy --domain solo.cloud -r --confirm-cluster solo-name" "${WORK}/${side}.err" \
     || fail "${side}: the refusal does not name -r and --confirm-cluster"
   parity::run "${side}" "${PROJ}" destroy --domain dupa.cloud -r --confirm-cluster shared-name || true
@@ -1871,8 +1890,20 @@ for side in bash go; do
     || fail "${side}: the shared cluster_name was not refused"
   grep -qF "The provider deletes only the resources with this cluster_name and the owner mark of 'dupa.cloud'." "${WORK}/${side}.err" \
     || fail "${side}: the refusal of a shared cluster_name does not say what the provider deletes"
+  parity::run "${side}" "${PROJ}" destroy --domain esc.cloud -r --confirm-cluster $'esc\e[2Jname' || true
+  grep -q 'mockplan destroy ran' "${WORK}/${side}.err" \
+    && fail "${side}: a cluster_name with an ESC reached the provider destroy"
+  grep -qF "the destroy plan of 'esc.cloud' names a cluster_name with a character that a message cannot show" "${WORK}/${side}.err" \
+    || fail "${side}: a cluster_name with an ESC was not refused"
+  grep -qF $'\e[2J' "${WORK}/${side}.err" \
+    && fail "${side}: the ESC of the cluster_name reached the output"
+  parity::run "${side}" "${PROJ}" destroy --domain nul.cloud -r --confirm-cluster nul-name || true
+  grep -q 'mockplan destroy ran' "${WORK}/${side}.err" \
+    && fail "${side}: a plan with a NUL byte reached the provider destroy"
+  grep -qF "the destroy plan of 'nul.cloud' has a NUL byte" "${WORK}/${side}.err" \
+    || fail "${side}: a plan with a NUL byte was not refused"
 done
-rm -rf "${PROJ}/clusters"/{dupa,dupb,solo}.cloud "${PROJ}/.lok8s/providers/mockplan"
+rm -rf "${PROJ}/clusters"/{dupa,dupb,solo,esc,nul}.cloud "${PROJ}/.lok8s/providers/mockplan"
 
 # ── lo destroy --remote — the hetzner provider keeps the parts without its mark
 # The real hetzner provider of the project's bash tree runs in both CLIs (the
