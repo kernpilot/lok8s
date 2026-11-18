@@ -197,6 +197,172 @@ func TestDestroyGuardShowsANameWithTwoTabsAsBashReadsIt(t *testing.T) {
 	assertContains(t, errBuf.String(), "cluster_name \033[1mprod-a\033[0m:\n    server a??b (75)\n")
 }
 
+// assertClusterNameRefused: a plan whose cluster line names name is refused
+// (rc 3) before any message shows the name: with the matching
+// --confirm-cluster, on a terminal with the name typed, and off a terminal.
+// Nothing runs.
+func assertClusterNameRefused(t *testing.T, name string) {
+	t.Helper()
+	const want = "the destroy plan of 'test.prod' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was deleted. Correct the cluster_name in the provider config or the destroy_plan hook of the provider, then run lo destroy again."
+	check := func(how string, errBuf *bytes.Buffer, log *[]string, err error) {
+		t.Helper()
+		if !errors.Is(err, driver.ErrDeclined) || driver.ExitCode(err) != 3 {
+			t.Fatalf("%q, %s: expected a refusal (rc 3), got %v", name, how, err)
+		}
+		joined := strings.Join(*log, ",")
+		refuteContains(t, joined, "DEREGISTERED")
+		refuteContains(t, joined, "destroy:")
+		out := errBuf.String()
+		assertContains(t, out, want)
+		// Nothing shows the name: no header, no prompt, no hint.
+		refuteContains(t, out, name)
+		refuteContains(t, out, "destroy deletes these resources")
+		refuteContains(t, out, "type the cluster_name")
+	}
+	plan := "cluster\t" + strings.Replace(name, "\t", "\t\t", 1) + "\nserver\t42\tcp-0\n"
+
+	d, errBuf, log, prov := guardHarness(t, "", false)
+	prov.plan, d.ConfirmCluster = plan, name
+	check("--confirm-cluster", errBuf, log, d.DispatchDestroy(t.Context(), "test.prod"))
+
+	d, errBuf, log, prov = guardHarness(t, name+"\n", true)
+	prov.plan = plan
+	check("typed", errBuf, log, d.DispatchDestroy(t.Context(), "test.prod"))
+
+	d, errBuf, log, prov = guardHarness(t, "", false)
+	prov.plan = plan
+	check("off a terminal", errBuf, log, d.DispatchDestroy(t.Context(), "test.prod"))
+}
+
+// The cluster_name is shown in the guard's messages and typed as the
+// answer, so a shown form must be the name itself. A name with a character
+// of ui.Unshown is refused before any message shows it. The bash twin is
+// the test "destroy guard: a cluster_name with a character that cannot be
+// shown is refused before it is shown".
+func TestDestroyGuardRefusesAClusterNameThatCannotBeShown(t *testing.T) {
+	for _, name := range []string{
+		"prod\x1b[2J-a",   // ESC
+		"prod\u202e-a",    // bidi override
+		"prod\u200b-a",    // zero-width space
+		"prod\t-a",        // a tab: the cluster line "cluster\tprod\t\t-a"
+		"prod-a\r",        // a CR (a plan with CRLF line ends)
+		"prod\u0085-a",    // C1 (NEL)
+		"prod\U000e0041a", // a tag character
+	} {
+		assertClusterNameRefused(t, name)
+	}
+}
+
+// A backslash: bash's error() prints with echo -e, which reads a backslash
+// sequence ("\e[2J" would reach the terminal as an ESC). The bash twin is
+// the test "destroy guard: a cluster_name with a backslash is refused".
+func TestDestroyGuardRefusesAClusterNameWithABackslash(t *testing.T) {
+	for _, name := range []string{`prod\e[2J-a`, `a\b`, `prod\`} {
+		assertClusterNameRefused(t, name)
+	}
+}
+
+// A byte that is not UTF-8: a terminal shows it as another character, and
+// jq (the bash twin's check) reads it as U+FFFD. The bash twin is the test
+// "destroy guard: a cluster_name that is not UTF-8 is refused".
+func TestDestroyGuardRefusesAClusterNameThatIsNotUTF8(t *testing.T) {
+	for _, name := range []string{
+		"prod\xff-a",             // a byte that never starts a character
+		"prod\xe2\x80-a",         // a sequence without its last byte
+		"prod\xc0\x80-a",         // an overlong form
+		"prod\xed\xa0\x80-a",     // a surrogate
+		"prod\xf4\x90\x80\x80-a", // above U+10FFFF
+		"prod\xf0\x9f\x98-a",     // a four-byte sequence without its last byte
+	} {
+		assertClusterNameRefused(t, name)
+	}
+}
+
+// U+FFFD: the bash twin cannot tell it from a byte that is not UTF-8 (jq
+// reads each such sequence as U+FFFD), so both twins refuse it. The bash
+// twin is the test "destroy guard: a cluster_name with U+FFFD is refused".
+func TestDestroyGuardRefusesAClusterNameWithUFFFD(t *testing.T) {
+	for _, name := range []string{"prod\uFFFD-a", "\uFFFD"} {
+		assertClusterNameRefused(t, name)
+	}
+}
+
+// withoutHeaderColors: out without the fixed colour codes of the guard
+// header (bold yellow, dim, bold, reset), on the header line only. The same
+// codes on any other line stay, so a value that becomes one of them fails
+// the check.
+func withoutHeaderColors(out string) string {
+	codes := strings.NewReplacer("\x1b[1;33m", "", "\x1b[0m", "", "\x1b[2m", "", "\x1b[1m", "")
+	lines := strings.Split(out, "\n")
+	for i, line := range lines {
+		if strings.Contains(line, "destroy deletes these resources of cluster_name") {
+			lines[i] = codes.Replace(line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// A --confirm-cluster value and a typed answer that hold the text "\e[2J":
+// the messages show the value as it is, and no ESC byte (besides the colour
+// codes of the header) is in the output. The guard does not show the typed
+// answer. The bash twin is the test "destroy guard: a backslash sequence in
+// --confirm-cluster or in the answer stays text".
+func TestDestroyGuardShowsABackslashSequenceAsText(t *testing.T) {
+	d, errBuf, log, _ := guardHarness(t, "", false)
+	d.ConfirmCluster = `\e[2J`
+	err := d.DispatchDestroy(t.Context(), "test.prod")
+	assertDeclinedNothingRan(t, err, log)
+	assertContains(t, errBuf.String(), `--confirm-cluster '\e[2J' does not match the cluster_name 'prod-a' of 'test.prod'. Nothing was deleted.`)
+	refuteContains(t, withoutHeaderColors(errBuf.String()), "\x1b")
+
+	d, errBuf, log, _ = guardHarness(t, `\e[2J`+"\n", true)
+	err = d.DispatchDestroy(t.Context(), "test.prod")
+	assertDeclinedNothingRan(t, err, log)
+	assertContains(t, errBuf.String(), "the answer is not the cluster_name 'prod-a'. Nothing was deleted.")
+	refuteContains(t, withoutHeaderColors(errBuf.String()), "\x1b")
+	refuteContains(t, errBuf.String(), `\e[2J`)
+}
+
+// A NUL byte in the plan: no environment variable can hold it, so the
+// confirmed plan could not reach the provider's destroy, and bash's command
+// substitution would drop it (the plan would change: "4<NUL>2" becomes
+// "42"). The whole plan is refused before anything is shown, also with the
+// matching --confirm-cluster. The bash twin is the test "destroy guard: a
+// plan with a NUL byte is refused, and nothing is deleted".
+func TestDestroyGuardRefusesAPlanWithANulByte(t *testing.T) {
+	for _, plan := range []string{
+		"cluster\tprod-a\nserver\t4\x002\tcp-0\n",
+		"cluster\tprod-a\nserver\t42\tcp\x00-0\n",
+		"cluster\tprod\x00-a\nserver\t42\tcp-0\n",
+		"\x00",
+	} {
+		d, errBuf, log, prov := guardHarness(t, "", false)
+		prov.plan, d.ConfirmCluster = plan, "prod-a"
+		err := d.DispatchDestroy(t.Context(), "test.prod")
+		assertDeclinedNothingRan(t, err, log)
+		out := errBuf.String()
+		assertContains(t, out, "the destroy plan of 'test.prod' has a NUL byte, and the confirmed plan cannot carry it to the provider. Nothing was deleted. Correct the destroy_plan hook of the provider, then run lo destroy again.")
+		refuteContains(t, out, "destroy deletes these resources")
+		refuteContains(t, out, "\x00")
+	}
+}
+
+// When the confirmed plan cannot be set, the provider's destroy would run
+// without it and delete what its own list gives. The guard stops instead.
+// Go only: in bash, export of a string cannot fail.
+func TestDestroyGuardStopsWhenTheConfirmedPlanCannotBeSet(t *testing.T) {
+	orig := setenv
+	t.Cleanup(func() { setenv = orig })
+	setenv = func(key, value string) error {
+		return errors.New("setenv: invalid argument")
+	}
+	d, errBuf, log, _ := guardHarness(t, "", false)
+	d.ConfirmCluster = "prod-a"
+	err := d.DispatchDestroy(t.Context(), "test.prod")
+	assertDeclinedNothingRan(t, err, log)
+	assertContains(t, errBuf.String(), "could not give the confirmed plan of 'test.prod' to the provider (setenv: invalid argument). Nothing was deleted. Run lo destroy again.")
+}
+
 func TestDestroyGuardRefusesAConfirmClusterThatDoesNotMatch(t *testing.T) {
 	d, errBuf, log, _ := guardHarness(t, "", false)
 	d.ConfirmCluster = "prod-b"

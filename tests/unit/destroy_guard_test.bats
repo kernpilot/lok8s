@@ -105,6 +105,21 @@ _nothing_ran() {
   _nothing_ran
 }
 
+# The list of the other domains is the only input of this message that can
+# still hold a backslash (the name check refuses one in the cluster_name): a
+# directory under clusters/ with the text "\e[2J" in its name is shown as
+# text, with no ESC byte.
+@test "destroy guard: another domain whose directory name has a backslash is shown as text" {
+  _assume_no_tty
+  _domain 'copy\e[2J.prod' prod-a
+  local confirm_cluster=prod-a
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 3 ]
+  assert_output --partial "[error] cluster_name 'prod-a' of 'test.prod' is also the cluster_name of: copy\e[2J.prod. The provider deletes only"
+  _refute_esc
+  _nothing_ran
+}
+
 @test "destroy guard: an inline config and a configRef of another name count too" {
   _assume_no_tty
   mkdir -p "${PATH_CLUSTERS}/inline.prod" "${PATH_CLUSTERS}/ref.prod/infra"
@@ -251,6 +266,32 @@ server 42 cp-0"
   _nothing_ran
 }
 
+# A hook that fails leaves no plan file. A mktemp that fails stops the
+# destroy before the hook runs, and says what failed.
+@test "destroy guard: a failed plan leaves no plan file, and a failed mktemp stops the destroy" {
+  _assume_no_tty
+  local confirm_cluster=prod-a
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  export PLAN_FAIL=1
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 1 ]
+  assert_output --partial "cannot determine cluster name for destroy"
+  _nothing_ran
+  run find "${TMPDIR}" -mindepth 1
+  assert_output ""
+
+  unset PLAN_FAIL
+  export TMPDIR="${BATS_TEST_TMPDIR}/missing"
+  : > "${CALLS}"
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 1 ]
+  assert_output --partial "[error] could not make a temporary file for the destroy plan of 'test.prod' (mktemp failed in TMPDIR '${TMPDIR}'). Nothing was deleted. Set TMPDIR to a directory that you can write to, then run lo destroy again."
+  run grep -c '^plan:' "${CALLS}"
+  assert_output "0"
+  _nothing_ran
+}
+
 @test "destroy guard: a plan without a cluster line is refused" {
   _assume_no_tty
   export PLAN=$'server\t42\tcp-0\n'
@@ -259,6 +300,192 @@ server 42 cp-0"
   [ "${status}" -eq 3 ]
   assert_output --partial "the provider gave no cluster_name for 'test.prod'. Nothing was deleted."
   _nothing_ran
+}
+
+# _assert_names_refused <field> <name> [<field> <name> ...]: for each pair, a
+# plan whose cluster line has <field> (as printf %b reads it) names <name>,
+# and the guard refuses it (rc 3) before any message shows the name: with
+# the matching --confirm-cluster, off a terminal, and on a terminal with the
+# name typed. Nothing runs.
+_assert_names_refused() {
+  local want="the destroy plan of 'test.prod' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was deleted. Correct the cluster_name in the provider config or the destroy_plan hook of the provider, then run lo destroy again."
+  local name confirm_cluster
+  while (( $# )); do
+    PLAN="cluster\t${1}\nserver\t42\tcp-0\n"
+    export PLAN
+    name="${2}"
+    shift 2
+
+    _assume_no_tty
+    confirm_cluster="${name}"
+    : > "${CALLS}"
+    run provision::dispatch_destroy test.prod < /dev/null
+    [ "${status}" -eq 3 ]
+    assert_output --partial "${want}"
+    refute_output --partial "${name}"
+    refute_output --partial "destroy deletes these resources"
+    _nothing_ran
+
+    confirm_cluster=""
+    : > "${CALLS}"
+    run provision::dispatch_destroy test.prod < /dev/null
+    [ "${status}" -eq 3 ]
+    assert_output --partial "${want}"
+    refute_output --partial "${name}"
+    refute_output --partial "there is no terminal"
+    _nothing_ran
+
+    _assume_tty
+    : > "${CALLS}"
+    run provision::dispatch_destroy test.prod <<< "${name}"
+    [ "${status}" -eq 3 ]
+    assert_output --partial "${want}"
+    refute_output --partial "${name}"
+    refute_output --partial "type the cluster_name"
+    _nothing_ran
+  done
+}
+
+# The cluster_name is shown in the guard's messages and typed as the
+# answer, so a shown form must be the name itself. A name with a code point
+# of the jq def unshown is refused before any message shows it. The Go twin
+# is TestDestroyGuardRefusesAClusterNameThatCannotBeShown.
+@test "destroy guard: a cluster_name with a character that cannot be shown is refused before it is shown" {
+  # <the cluster field of the plan line, as printf %b reads it> <the name>
+  _assert_names_refused \
+    'prod\x1b[2J-a'         $'prod\e[2J-a' \
+    'prod\xe2\x80\xae-a'    $'prod\xe2\x80\xae-a' \
+    'prod\xe2\x80\x8b-a'    $'prod\xe2\x80\x8b-a' \
+    'prod\t\t-a'            $'prod\t-a' \
+    'prod-a\r'              $'prod-a\r' \
+    'prod\xc2\x85-a'        $'prod\xc2\x85-a' \
+    'prod\xf3\xa0\x81\x81a' $'prod\xf3\xa0\x81\x81a'
+}
+
+# A backslash: error() prints with echo -e, which reads a backslash sequence
+# ("\e[2J" would reach the terminal as an ESC). The Go twin is
+# TestDestroyGuardRefusesAClusterNameWithABackslash.
+@test "destroy guard: a cluster_name with a backslash is refused" {
+  _assert_names_refused \
+    'prod\\e[2J-a' 'prod\e[2J-a' \
+    'a\\b'         'a\b' \
+    'prod\\'       'prod\'
+}
+
+# A byte that is not UTF-8: jq reads each such sequence as U+FFFD, and the
+# guard refuses U+FFFD. The Go twin is
+# TestDestroyGuardRefusesAClusterNameThatIsNotUTF8.
+@test "destroy guard: a cluster_name that is not UTF-8 is refused" {
+  _assert_names_refused \
+    'prod\xff-a'             $'prod\xff-a' \
+    'prod\xe2\x80-a'         $'prod\xe2\x80-a' \
+    'prod\xc0\x80-a'         $'prod\xc0\x80-a' \
+    'prod\xed\xa0\x80-a'     $'prod\xed\xa0\x80-a' \
+    'prod\xf4\x90\x80\x80-a' $'prod\xf4\x90\x80\x80-a' \
+    'prod\xf0\x9f\x98-a'     $'prod\xf0\x9f\x98-a'
+}
+
+# U+FFFD itself (the UTF-8 bytes EF BF BD): jq cannot tell it from a byte
+# that is not UTF-8, so both twins refuse it. The Go twin is
+# TestDestroyGuardRefusesAClusterNameWithUFFFD.
+@test "destroy guard: a cluster_name with U+FFFD is refused" {
+  _assert_names_refused \
+    'prod\xef\xbf\xbd-a' $'prod\xef\xbf\xbd-a' \
+    '\xef\xbf\xbd'       $'\xef\xbf\xbd'
+}
+
+# _refute_esc: the output holds no ESC byte besides the fixed colour codes
+# of the guard header (bold yellow, dim, bold, reset), which go on the
+# header line only. The same codes on any other line stay, so a value that
+# becomes one of them fails the check.
+_refute_esc() {
+  local line
+  while IFS= read -r line; do
+    if [[ "${line}" == *"destroy deletes these resources of cluster_name"* ]]; then
+      line="${line//$'\e[1;33m'/}"
+      line="${line//$'\e[0m'/}"
+      line="${line//$'\e[2m'/}"
+      line="${line//$'\e[1m'/}"
+    fi
+    [[ "${line}" != *$'\e'* ]] || { printf 'an ESC byte in the output line:\n%q\n' "${line}" >&2; return 1; }
+  done <<< "${output}"
+}
+
+# The messages that carry the cluster_name or the --confirm-cluster value
+# print with printf '%s', not with error()'s echo -e: a --confirm-cluster
+# value with the text "\e[2J" is shown as text. The guard does not show the
+# typed answer: a typed "\e[2J" gives the wrong-answer error, and neither the
+# text nor an ESC byte (besides the colour codes of the header) is in the
+# output. The Go twin is TestDestroyGuardShowsABackslashSequenceAsText.
+@test "destroy guard: a backslash sequence in --confirm-cluster or in the answer stays text" {
+  _assume_no_tty
+  local confirm_cluster='\e[2J'
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 3 ]
+  assert_output --partial "[error] --confirm-cluster '\e[2J' does not match the cluster_name 'prod-a' of 'test.prod'. Nothing was deleted."
+  _refute_esc
+  _nothing_ran
+
+  _assume_tty
+  confirm_cluster=""
+  : > "${CALLS}"
+  run provision::dispatch_destroy test.prod <<< '\e[2J'
+  [ "${status}" -eq 3 ]
+  assert_output --partial "[error] the answer is not the cluster_name 'prod-a'. Nothing was deleted."
+  _refute_esc
+  refute_output --partial '\e[2J'
+  _nothing_ran
+}
+
+# A jq that fails stops the check of the cluster_name: nothing runs.
+@test "destroy guard: a cluster_name that jq cannot check stops the destroy" {
+  _assume_no_tty
+  local confirm_cluster=prod-a
+  jq() { [[ "${*}" != *'any(unshown'* ]] || return 5; command jq "${@}"; }
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 1 ]
+  assert_output --partial "could not check the cluster_name of the destroy plan of 'test.prod'. Nothing was deleted. Check that jq runs, then run lo destroy again."
+  refute_output --partial "destroy deletes these resources"
+  _nothing_ran
+}
+
+# A NUL byte in the plan: a command substitution drops it with only a
+# warning, so the plan would change on its way to the provider ("4<NUL>2"
+# would become the id 42). The guard reads the plan through a file and
+# refuses it before anything is shown, also with the matching
+# --confirm-cluster. The file is removed. The Go twin is
+# TestDestroyGuardRefusesAPlanWithANulByte.
+@test "destroy guard: a plan with a NUL byte is refused, and nothing is deleted" {
+  _assume_no_tty
+  local confirm_cluster=prod-a plan
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  for plan in \
+    'cluster\tprod-a\nserver\t4\x002\tcp-0\n' \
+    'cluster\tprod-a\nserver\t42\tcp\x00-0\n' \
+    'cluster\tprod\x00-a\nserver\t42\tcp-0\n' \
+    '\x00'; do
+    export PLAN="${plan}"
+    : > "${CALLS}"
+    run provision::dispatch_destroy test.prod < /dev/null
+    [ "${status}" -eq 3 ]
+    assert_output --partial "the destroy plan of 'test.prod' has a NUL byte, and the confirmed plan cannot carry it to the provider. Nothing was deleted. Correct the destroy_plan hook of the provider, then run lo destroy again."
+    refute_output --partial "destroy deletes these resources"
+    refute_output --partial "ignored null byte"
+    _nothing_ran
+    run find "${TMPDIR}" -mindepth 1
+    assert_output ""
+  done
+
+  # A plan without a NUL byte runs, and its file is removed too.
+  unset PLAN
+  : > "${CALLS}"
+  run provision::dispatch_destroy test.prod < /dev/null
+  assert_success
+  run grep -c DRIVER-DESTROY-RAN "${CALLS}"
+  assert_output "1"
+  run find "${TMPDIR}" -mindepth 1
+  assert_output ""
 }
 
 @test "destroy guard: a provider without the hook keeps the yes-prompt" {
@@ -289,6 +516,20 @@ server 42 cp-0"
   assert_success
   run grep -c DRIVER-DESTROY-RAN "${CALLS}"
   assert_output "1"
+}
+
+# The refusal of --confirm-cluster on a destroy that checks no cluster_name
+# prints with printf '%s', as the guard does: a value with the text "\e[2J"
+# is shown as text, with no ESC byte (Go: ui.ErrorTo in DispatchDestroy).
+@test "destroy guard: a backslash sequence in --confirm-cluster stays text when no guard runs" {
+  _assume_no_tty
+  unset LOK8S_REMOTE
+  local force=1 confirm_cluster='\e[2J'
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 1 ]
+  assert_output --partial "[error] --confirm-cluster '\e[2J' is set, but the destroy of 'test.prod' checks no cluster_name: it runs without -r (--remote), so no provider is loaded. Nothing was deleted."
+  _refute_esc
+  _nothing_ran
 }
 
 @test "destroy guard: a hosted KubeOne cluster and a capi cluster get no plan, and --confirm-cluster is refused" {

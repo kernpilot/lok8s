@@ -10,9 +10,12 @@ package provision
 // a resource of the other domain with a wrong mark would be deleted. So
 // before anything is deleted:
 //
-//  1. another domain under clusters/ with the same cluster_name: refuse;
-//  2. print what the provider would delete;
-//  3. the operator types the cluster_name, or passes it with
+//  1. a plan with a NUL byte, or a cluster_name that a message cannot show
+//     as it is (a character of ui.Unshown, a backslash, U+FFFD or a byte
+//     that is not UTF-8; the operator types the name): refuse;
+//  2. another domain under clusters/ with the same cluster_name: refuse;
+//  3. print what the provider would delete;
+//  4. the operator types the cluster_name, or passes it with
 //     --confirm-cluster off a terminal. --force does not skip this step.
 //
 // The confirmed plan goes to the driver's provider::destroy in
@@ -26,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/driver"
@@ -35,6 +39,9 @@ import (
 
 // destroyResource is one line of a destroy plan.
 type destroyResource struct{ kind, id, name string }
+
+// setenv is os.Setenv. A test replaces it with one that fails.
+var setenv = os.Setenv
 
 // parseDestroyPlan reads the provider::destroy_plan text: the
 // "cluster\t<name>" line and one "<resource>\t<id>\t<name>" line per
@@ -124,9 +131,34 @@ func (d *Dispatcher) guardDestroy(ctx context.Context, domainName, kind, cluster
 	if !has {
 		return false, "provider '" + deps.ProviderName + "' has no destroy plan", nil
 	}
+	// A NUL byte: no environment variable can hold it, so the confirmed
+	// plan could not go to the provider's destroy, and bash's command
+	// substitution drops it (the plan would change). Refuse the plan
+	// before anything is shown (bash twin: the NUL check of
+	// provision::_destroy_guard).
+	if strings.IndexByte(text, 0) >= 0 {
+		ui.ErrorTo(w, "the destroy plan of '%s' has a NUL byte, and the confirmed plan cannot carry it to the provider. Nothing was deleted. Correct the destroy_plan hook of the provider, then run lo destroy again.", domainName)
+		return true, "", driver.ErrDeclined
+	}
 	name, res := parseDestroyPlan(text)
 	if name == "" {
 		ui.ErrorTo(w, "the provider gave no cluster_name for '%s'. Nothing was deleted. Set cluster_name in the provider config, then run lo destroy again.", domainName)
+		return true, "", driver.ErrDeclined
+	}
+	// The messages below show the cluster_name, and the operator types it
+	// as the answer, so a shown form must be the name itself: an escaped
+	// form is not what the operator must type. Refuse a name that a message
+	// cannot show as it is, before any message shows it: a character of
+	// ui.Unshown (a control, separator, bidi or invisible character), a
+	// backslash (bash's error() runs echo -e), a byte that is not UTF-8,
+	// and U+FFFD. jq turns each sequence that is not UTF-8 into U+FFFD, so
+	// the bash twin (provision::_destroy_guard) refuses U+FFFD for both and
+	// gives the same verdict. Each rule is a clause of its own.
+	if !utf8.ValidString(name) ||
+		strings.Contains(name, "\uFFFD") ||
+		strings.ContainsRune(name, '\\') ||
+		strings.ContainsFunc(name, ui.Unshown) {
+		ui.ErrorTo(w, "the destroy plan of '%s' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was deleted. Correct the cluster_name in the provider config or the destroy_plan hook of the provider, then run lo destroy again.", domainName)
 		return true, "", driver.ErrDeclined
 	}
 
@@ -167,6 +199,10 @@ func (d *Dispatcher) guardDestroy(ctx context.Context, domainName, kind, cluster
 	}
 	// The driver's provider::destroy deletes exactly the confirmed plan
 	// (bash: the plan from a command substitution, no trailing newline).
-	os.Setenv(driver.DestroyPlanEnv, strings.TrimRight(text, "\n"))
+	// Without it, a provider deletes what its own list gives: stop.
+	if err := setenv(driver.DestroyPlanEnv, strings.TrimRight(text, "\n")); err != nil {
+		ui.ErrorTo(w, "could not give the confirmed plan of '%s' to the provider (%v). Nothing was deleted. Run lo destroy again.", domainName, err)
+		return true, "", driver.ErrDeclined
+	}
 	return true, "", nil
 }
