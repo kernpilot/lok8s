@@ -207,6 +207,8 @@ kubehz::space_api_call() {
   local -a extra=()
   [[ -n "${body}" ]] && extra=(-H "Content-Type: application/json" -d "${body}")
 
+  # +x on raw too: no child runs after its assignment today, but a later
+  # edit could add one.
   local +x raw
   # The bearer reaches curl in a config on stdin, never on argv.
   raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
