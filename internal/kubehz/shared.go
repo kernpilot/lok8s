@@ -457,12 +457,11 @@ var joinTokenRe = regexp.MustCompile(`^[a-z0-9]{6}\.[a-z0-9]{16}$`)
 
 // spaceMintJoin ports kubehz::space_mint_join: mint a single-node join
 // ticket and print the join block. The plaintext token is returned exactly
-// once by the api and never persisted beyond the join script. Deviation
-// D21 (Go-only): when the api ships a join script the ticket is NOT echoed
-// to the terminal unless printToken is set — the script carries it, and a
-// terminal (scrollback, CI logs, a shared screen) is a second copy nobody
-// asked for. Without a script the terminal is the only channel, so the
-// ticket is printed as before.
+// once by the api and kept only in a private file: the join script when
+// the api ships one, else a ticket file of its own (both twins). A
+// terminal (scrollback, CI logs, a shared screen) is a copy nobody asked
+// for, so the ticket goes to stdout only when printToken is set.
+// Deviation D21 (Go-only): the join script and the printToken flag.
 func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeName string, printToken bool) error {
 	res, err := c.spaceAPI(ctx, cfg, "POST", "/api/spaces/"+spaceID+"/join-token", compactJSON(jsonPair{"nodeName", nodeName}))
 	if err != nil {
@@ -492,10 +491,19 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 	}
 	c.echo("")
 	c.echo("  Node '%s' — join ticket (valid until %s, single use):", nodeName, expires)
-	if script == "" || printToken {
+	switch {
+	case printToken:
 		c.echo("    %s", token)
-	} else {
+	case script != "":
 		c.echo("    (inside the join script below; --print-token shows it here)")
+	default:
+		// No script: the ticket goes to a private file of its own, as the
+		// bash twin writes it (same name, same bytes, same line).
+		path, err := c.writeJoinFile(nodeName, ".token", token+"\n")
+		if err != nil {
+			return c.joinWriteFailed("join ticket", nodeName, expires, err)
+		}
+		c.echo("    (written to %s, mode 0600)", path)
 	}
 	// The api ships the join recipe with the ticket (the script the docs
 	// point at: containerd + kubelet, the cluster CA read from the control
@@ -505,20 +513,9 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 	// `git add .` away from a public secret. Nothing runs here: read it,
 	// copy it to the machine, run it as root there.
 	if script != "" {
-		path, err := c.writeJoinScript(nodeName, script)
-		if errors.Is(err, ErrHandled) {
-			return err
-		}
+		path, err := c.writeJoinFile(nodeName, ".sh", script)
 		if err != nil {
-			c.errorf("could not write the join script for '%s': %v", nodeName, err)
-			// The mint already happened server-side; the ticket is live
-			// with no local copy (node.go's mintedSlotNote, for spaces).
-			c.echoErr("")
-			c.echoErr("  The ticket was minted before the write failed. It stays valid until %s,", expires)
-			c.echoErr("  single use, and no copy was saved. Mint a fresh one once the temp dir")
-			c.echoErr("  (TMPDIR) is writable:")
-			c.echoErr("    lo kubehz join %s", nodeName)
-			return ErrHandled
+			return c.joinWriteFailed("join script", nodeName, expires, err)
 		}
 		c.echo("  Join script (the ticket is inside; expires with it):")
 		c.echo("    %s", path)
@@ -538,9 +535,27 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 	return nil
 }
 
-// writeJoinScript stores the api's join recipe under the user's temp dir
-// (TMPDIR, else the OS default) in a FRESH private directory:
-// <tmp>/kubehz-join-<random>/kubehz-join-<node>.sh. The directory comes
+// joinWriteFailed reports a failed write of a join file (what: "join
+// script" or "join ticket"). The mint already happened server-side, so the
+// ticket is live with no local copy (node.go's mintedSlotNote, for spaces).
+// An ErrHandled error (a refused node name) has printed its own message.
+func (c *Context) joinWriteFailed(what, nodeName, expires string, err error) error {
+	if errors.Is(err, ErrHandled) {
+		return err
+	}
+	c.errorf("could not write the %s for '%s': %v", what, nodeName, err)
+	c.echoErr("")
+	c.echoErr("  The ticket was minted before the write failed. It stays valid until %s,", expires)
+	c.echoErr("  single use, and no copy was saved. Mint a fresh one once the temp dir")
+	c.echoErr("  (TMPDIR) is writable:")
+	c.echoErr("    lo kubehz join %s", nodeName)
+	return ErrHandled
+}
+
+// writeJoinFile stores a join file, the api's join recipe (ext ".sh") or
+// the ticket alone (ext ".token"), under the user's temp dir (TMPDIR, else
+// the OS default) in a FRESH private directory:
+// <tmp>/kubehz-join-<random>/kubehz-join-<node><ext>. The directory comes
 // from os.MkdirTemp (0700, unpredictable name), so there is no name to
 // pre-plant in a shared /tmp: nothing a foreign user creates can collide
 // with it, and the O_EXCL create inside is belt and braces. Every mint
@@ -548,7 +563,7 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 // the old one expires with its ticket and the user deletes it. The node
 // name is part of the path, so it is validated here (the api's DNS-label
 // rule) as well.
-func (c *Context) writeJoinScript(nodeName, script string) (string, error) {
+func (c *Context) writeJoinFile(nodeName, ext, content string) (string, error) {
 	if err := c.assertNodeName(nodeName); err != nil {
 		return "", err
 	}
@@ -564,13 +579,13 @@ func (c *Context) writeJoinScript(nodeName, script string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(priv, "kubehz-join-"+nodeName+".sh")
+	path := filepath.Join(priv, "kubehz-join-"+nodeName+ext)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		_ = os.RemoveAll(priv)
 		return "", err
 	}
-	if _, err := f.WriteString(script); err != nil {
+	if _, err := f.WriteString(content); err != nil {
 		_ = f.Close()
 		_ = os.RemoveAll(priv)
 		return "", err

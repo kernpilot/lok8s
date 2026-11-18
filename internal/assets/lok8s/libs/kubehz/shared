@@ -515,9 +515,36 @@ kubehz::space_wait_active() {
   return 1
 }
 
+# Write a join ticket to a FRESH private directory under the user's temp dir
+# (TMPDIR, else /tmp): <tmp>/kubehz-join-<random>/kubehz-join-<node>.token,
+# 0700 over 0600, as the Go twin writes it (writeJoinFile). mktemp -d picks a
+# name nobody can plant in a shared /tmp, and noclobber refuses a file that
+# is there anyway. The node name is part of the path, so it is checked here.
+# Prints the path. Returns 2 when the node name is refused (the message is
+# printed), 1 when the write fails.
+# Usage: kubehz::space_write_join_ticket <node_name> <token>
+kubehz::space_write_join_ticket() {
+  local node_name="${1}" token="${2}" dir priv path
+  node::assert_node_name "${node_name}" || return 2
+  dir="${TMPDIR:-/tmp}"
+  dir="${dir%/}"
+  [[ "${dir}" == /* ]] || dir="${PWD}/${dir}"
+  priv=$(mktemp -d "${dir}/kubehz-join-XXXXXXXXXX" 2>/dev/null) || return 1
+  path="${priv}/kubehz-join-${node_name}.token"
+  # printf is a builtin: the ticket is on no argv.
+  if ! ( umask 077 && set -C && printf '%s\n' "${token}" > "${path}" ) 2>/dev/null; then
+    rm -f -- "${path}"
+    rmdir -- "${priv}" 2>/dev/null
+    return 1
+  fi
+  printf '%s\n' "${path}"
+}
+
 # Mint a single-node join ticket and print the join block. The plaintext token
-# is returned exactly once by the api and never persisted anywhere — a lost
-# ticket is re-minted, not recovered.
+# is returned exactly once by the api and kept only in a private ticket file
+# (kubehz::space_write_join_ticket), never on stdout: a terminal (scrollback,
+# CI logs, a shared screen) is a copy nobody asked for. A lost ticket is
+# re-minted, not recovered.
 # Usage: kubehz::space_mint_join <space_id> <node_name>
 kubehz::space_mint_join() {
   local space_id="${1}" node_name="${2}"
@@ -541,10 +568,34 @@ kubehz::space_mint_join() {
     error "kubehz API did not return a join token for '${node_name}'"
     return 1
   fi
+  # The kubeadm bootstrap-token shape (<6 id>.<16 secret>), as the Go twin's
+  # joinTokenRe: anything else is not a ticket to hand to a machine, and as a
+  # server string for the terminal it could inject. The characters are
+  # spelled out: in a bash regex, a range like a-z follows the locale.
+  local tok_c='[abcdefghijklmnopqrstuvwxyz0123456789]'
+  local tok_re="^${tok_c}{6}[.]${tok_c}{16}\$"
+  if [[ ! "${token}" =~ ${tok_re} ]]; then
+    error "kubehz API returned a join ticket for '${node_name}' in a shape this CLI does not recognise; nothing was written"
+    return 1
+  fi
 
   echo ""
   echo "  Node '${node_name}' — join ticket (valid until ${expires:-<unknown>}, single use):"
-  echo "    ${token}"
+  local path rc=0
+  path=$(kubehz::space_write_join_ticket "${node_name}" "${token}") || rc=$?
+  if (( rc == 2 )); then
+    return 1
+  elif (( rc != 0 )); then
+    # The mint already happened server-side: the ticket is live with no copy.
+    error "could not write the join ticket for '${node_name}'"
+    echo "" >&2
+    echo "  The ticket was minted before the write failed. It stays valid until ${expires:-<unknown>}," >&2
+    echo "  single use, and no copy was saved. Mint a fresh one once the temp dir" >&2
+    echo "  (TMPDIR) is writable:" >&2
+    echo "    lo kubehz join ${node_name}" >&2
+    return 1
+  fi
+  echo "    (written to ${path}, mode 0600)"
   echo "  On the machine, follow the node-join guide for your platform"
   echo "  (kubehz docs: Spaces → Joining nodes). The ticket is bound to this"
   echo "  node name and expires quickly — mint a fresh one with:"

@@ -188,8 +188,15 @@ func TestProvisionSharedCreatesWaitsMints(t *testing.T) {
 	mustContain(t, h.output(), "Space 'acme' is Active (id: sp-123)")
 	mustContain(t, h.output(), "worker-1")
 	mustContain(t, h.output(), "worker-2")
-	if strings.Count(h.output(), "a1b2c3.d4e5f6g7h8i9j0k1") != 2 {
-		t.Fatalf("ticket count:\n%s", h.output())
+	// One ticket file per declared node; stdout repeats neither ticket.
+	mustNotContain(t, h.output(), joinTicket)
+	for _, node := range []string{"worker-1", "worker-2"} {
+		if got := joinTickets(t, h.env["TMPDIR"], node); len(got) != 1 {
+			t.Fatalf("ticket files for %s: %v", node, got)
+		}
+	}
+	if strings.Count(h.output(), ", mode 0600)") != 2 {
+		t.Fatalf("ticket lines:\n%s", h.output())
 	}
 	if r := h.lastReq("POST", "/api/spaces"); r.Body != `{"name":"Acme Prod","slug":"acme","maxNodes":3,"maxNamespaces":2,"maxObjectKiB":128}` {
 		t.Fatalf("create body: %s", r.Body)
@@ -380,7 +387,12 @@ func TestJoinSubcommandMintsTicket(t *testing.T) {
 	h.handle("POST /api/spaces/sp-1/join-token", 201, `{"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","expiresAt":"soon"}}`)
 	mustOK(t, h.ctx.Join(t.Context(), "acme.example.org", "worker-9", false), h.output())
 	mustContain(t, h.output(), "Node 'worker-9' — join ticket (valid until soon, single use):")
-	mustContain(t, h.output(), "    a1b2c3.d4e5f6g7h8i9j0k1")
+	mustNotContain(t, h.output(), joinTicket)
+	if got := joinTickets(t, h.env["TMPDIR"], "worker-9"); len(got) != 1 {
+		t.Fatalf("ticket files: %v", got)
+	} else {
+		mustContain(t, h.output(), "    (written to "+got[0]+", mode 0600)")
+	}
 	if r := h.lastReq("POST", "/join-token"); r.Body != `{"nodeName":"worker-9"}` {
 		t.Fatalf("mint body: %s", r.Body)
 	}
@@ -395,7 +407,8 @@ func TestJoinSubcommandMintsTicket(t *testing.T) {
 // never in the project tree, nothing is executed, and the terminal does
 // not repeat the ticket unless asked (--print-token). Without a script (an
 // older api, or a plane without an endpoint yet) the old guide pointer
-// stays and the ticket is printed — the terminal is the only channel then.
+// stays, and the ticket goes to a private file of its own, as in the bash
+// twin; stdout names the file, not the ticket.
 const joinTicketJSON = `{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","nodeName":"worker-1","expiresAt":"2026-08-07T20:00:00Z","endpoint":"https://kkp1.kubermatic.kkp.example:6443","script":"#!/bin/bash\nset -euo pipefail\nTICKET='a1b2c3.d4e5f6g7h8i9j0k1'\n"}}`
 
 const joinTicket = "a1b2c3.d4e5f6g7h8i9j0k1"
@@ -404,13 +417,28 @@ const joinTicket = "a1b2c3.d4e5f6g7h8i9j0k1"
 // first (the mint never overwrites: one fresh directory per ticket).
 func joinScripts(t *testing.T, tmp, node string) []string {
 	t.Helper()
-	paths, err := filepath.Glob(filepath.Join(tmp, "kubehz-join-*", "kubehz-join-"+node+".sh"))
+	return joinFiles(t, tmp, node, ".sh")
+}
+
+// joinTickets lists every ticket file (no script came) below tmp for node.
+func joinTickets(t *testing.T, tmp, node string) []string {
+	t.Helper()
+	return joinFiles(t, tmp, node, ".token")
+}
+
+func joinFiles(t *testing.T, tmp, node, ext string) []string {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(tmp, "kubehz-join-*", "kubehz-join-"+node+ext))
 	if err != nil {
 		t.Fatal(err)
 	}
 	sort.Strings(paths)
 	return paths
 }
+
+// noScriptJSON is a mint reply without a join script; the ticket is built
+// in, not spelled out.
+const noScriptJSON = `{"ok":true,"data":{"token":"` + joinTicket + `","nodeName":"worker-1","expiresAt":"2026-08-07T20:00:00Z"}}`
 
 func TestSpaceMintJoinWritesTheScriptPrivately(t *testing.T) {
 	t.Parallel()
@@ -589,16 +617,119 @@ func TestSpaceMintJoinRejectsAPathShapedNodeName(t *testing.T) {
 	}
 }
 
-func TestSpaceMintJoinWithoutScriptKeepsTheGuidePointer(t *testing.T) {
+// Without a script the ticket goes to a private file of its own: the same
+// fresh 0700 directory as a script, the file 0600, the ticket and a newline
+// in it (the bytes the bash twin writes). stdout names the file; a name
+// planted at the predictable place in a shared TMPDIR is not touched.
+func TestSpaceMintJoinWithoutScriptWritesTheTicketPrivately(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","nodeName":"worker-1","expiresAt":"2026-08-07T20:00:00Z"}}`)
+	tmp := h.env["TMPDIR"]
+	victim := filepath.Join(h.base, "victim")
+	if err := os.WriteFile(victim, []byte("untouched\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(tmp, "kubehz-join-worker-1.token")); err != nil {
+		t.Fatal(err)
+	}
+	h.handle("POST /api/spaces/sp-123/join-token", 201, noScriptJSON)
 	mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
 	mustContain(t, h.output(), "Spaces → Joining nodes")
-	// No script: the terminal is the only channel, so the ticket is shown.
-	mustContain(t, h.output(), "    "+joinTicket)
+	mustNotContain(t, h.output(), joinTicket)
 	if strings.Contains(h.output(), "Join script") {
 		t.Fatalf("script block without a script:\n%s", h.output())
+	}
+	paths := joinTickets(t, tmp, "worker-1")
+	if len(paths) != 1 {
+		t.Fatalf("ticket files written: %v", paths)
+	}
+	path := paths[0]
+	mustContain(t, h.output(), "  Node 'worker-1' — join ticket (valid until 2026-08-07T20:00:00Z, single use):\n"+
+		"    (written to "+path+", mode 0600)\n  On the machine, follow the node-join guide for your platform\n")
+	if raw, err := os.ReadFile(path); err != nil || string(raw) != joinTicket+"\n" {
+		t.Fatalf("ticket file content: %q %v", raw, err)
+	}
+	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("ticket file mode want 0600: %v %v", st, err)
+	}
+	if dst, err := os.Stat(filepath.Dir(path)); err != nil || dst.Mode().Perm() != 0o700 || filepath.Dir(path) == tmp {
+		t.Fatalf("ticket directory want a fresh 0700 one below tmp: %s %v %v", path, dst, err)
+	}
+	if raw, _ := os.ReadFile(victim); string(raw) != "untouched\n" {
+		t.Fatalf("ticket written through the planted symlink: %q", raw)
+	}
+	if len(joinScripts(t, tmp, "worker-1")) != 0 || len(h.runner.calls) != 0 {
+		t.Fatalf("a script was written or something ran: %+v", h.runner.calls)
+	}
+}
+
+// --print-token without a script: the ticket is shown, as before, and no
+// file is written (the flag keeps its meaning).
+func TestSpaceMintJoinWithoutScriptPrintTokenEchoesTheTicket(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.handle("POST /api/spaces/sp-123/join-token", 201, noScriptJSON)
+	mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", true), h.output())
+	mustContain(t, h.output(), "single use):\n    "+joinTicket+"\n")
+	if got := joinTickets(t, h.env["TMPDIR"], "worker-1"); len(got) != 0 {
+		t.Fatalf("a ticket file was written with --print-token: %v", got)
+	}
+}
+
+// The ticket file fails like the script: the live-ticket note, no ticket on
+// stdout, and a path-shaped node name is refused before any directory.
+func TestSpaceMintJoinWithoutScriptReportsAFailedWrite(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.env["TMPDIR"] = filepath.Join(h.base, "does-not-exist")
+	h.handle("POST /api/spaces/sp-123/join-token", 201, noScriptJSON)
+	mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
+	mustContain(t, h.output(), "could not write the join ticket for 'worker-1'")
+	mustContain(t, h.output(), "The ticket was minted before the write failed")
+	mustContain(t, h.output(), "valid until 2026-08-07T20:00:00Z")
+	mustNotContain(t, h.output(), joinTicket)
+
+	h.reset()
+	h.env["TMPDIR"] = h.base
+	mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "../escaped", false))
+	mustContain(t, h.output(), "is not a node name the platform accepts")
+	mustNotContain(t, h.output(), joinTicket)
+	if dirs, _ := filepath.Glob(filepath.Join(h.base, "kubehz-join-*")); len(dirs) != 0 {
+		t.Fatalf("a directory was created for a rejected node name: %v", dirs)
+	}
+}
+
+// A ticket outside the bootstrap-token shape is refused without a script
+// too: nothing on stdout, no file. The shapes are those of the bats twin:
+// an uppercase letter, a non-ASCII letter, a short secret, an escape, a
+// second line, and a separator other than the dot.
+func TestSpaceMintJoinWithoutScriptRefusesAnOddTicket(t *testing.T) {
+	t.Parallel()
+	for name, odd := range map[string]string{
+		"uppercase": strings.ToUpper(joinTicket),
+		"non-ASCII": strings.Replace(joinTicket, "a1", "\u00e91", 1),
+		"short":     strings.TrimSuffix(joinTicket, "k1"),
+		"escape":    joinTicket + "\x1b[2J",
+		"two lines": joinTicket + "\n" + joinTicket,
+		"separator": strings.Replace(joinTicket, ".", "-", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			quoted, err := json.Marshal(odd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.handle("POST /api/spaces/sp-123/join-token", 201,
+				strings.Replace(noScriptJSON, `"`+joinTicket+`"`, string(quoted), 1))
+			mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
+			mustContain(t, h.output(), "in a shape this CLI does not recognise; nothing was written")
+			mustNotContain(t, h.output(), odd)
+			mustNotContain(t, h.output(), "join ticket (valid until")
+			if got := joinTickets(t, h.env["TMPDIR"], "worker-1"); len(got) != 0 {
+				t.Fatalf("a ticket file was written for a refused ticket: %v", got)
+			}
+		})
 	}
 }
 
