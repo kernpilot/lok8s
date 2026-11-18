@@ -8,6 +8,7 @@ package cli
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,12 +201,35 @@ func TestToolchainDoctorSectionAlone(t *testing.T) {
 	}
 	// With b present (a stub that answers --version) the b line is ✓ and
 	// the exit code follows the render tools only.
-	testutil.WriteFile(t, filepath.Join(p.Bin, "b"), "#!/bin/sh\necho 4.18.7\n")
-	if err := os.Chmod(filepath.Join(p.Bin, "b"), 0o755); err != nil {
-		t.Fatal(err)
+	stubB := func(version string) {
+		testutil.WriteFile(t, filepath.Join(p.Bin, "b"), "#!/bin/sh\necho "+version+"\n")
+		if err := os.Chmod(filepath.Join(p.Bin, "b"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
+	stubB(toolchain.BRelease.Version)
 	stdout, _, _ = runLo(t, NewRoot(p), "toolchain", "doctor")
-	if !strings.Contains(stdout, "b 4.18.7 (.bin/b)") {
+	if !strings.Contains(stdout, "b "+toolchain.BRelease.Version+" (.bin/b)") {
 		t.Errorf("stubbed b not reported:\n%s", stdout)
+	}
+	// A b older than the one this lo ships: one piped line, in a fixed
+	// form (the contract), that names the command that updates it. -o json
+	// reads it as a warning with the same message.
+	stubB("0.1.0")
+	stdout, _, _ = runLo(t, NewRoot(p), "toolchain", "doctor")
+	msg := "b 0.1.0 at .bin/b is older than v" + toolchain.BRelease.Version + ", the b this lo ships — fix: .bin/b update b"
+	if !strings.Contains(stdout, "\n  ! "+msg+"\n") {
+		t.Errorf("no older-b line %q:\n%s", msg, stdout)
+	}
+	c := &doctorCollector{}
+	io.WriteString(c, stdout)
+	found := false
+	for _, s := range c.sections {
+		for _, ch := range s.Checks {
+			found = found || (ch.Status == "warn" && ch.Message == msg)
+		}
+	}
+	if !found {
+		t.Errorf("-o json does not read the older-b line as a warning: %+v", c.sections)
 	}
 }

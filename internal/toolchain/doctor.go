@@ -1,17 +1,21 @@
 package toolchain
 
 // doctor.go — verify what `lo toolchain install` + `b install` landed: b
-// itself, and the three render tools at the paths the exec render
-// resolves, each at the pinned version. Read-only; the fix is always the
-// same command.
+// itself (not older than BRelease), and the three render tools at the
+// paths the exec render resolves, each at the pinned version. Read-only;
+// the fix is the same command for each render tool (Fix), and b updates
+// itself (BUpdateFix).
 
 import (
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/Masterminds/semver/v3"
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -68,6 +72,10 @@ type DoctorOptions struct {
 // Fix is the remedy every failed check names.
 const Fix = "fix: lo toolchain install"
 
+// BUpdateFix is the remedy for a b older than BRelease. lo toolchain
+// install keeps an existing .bin/b, so only b itself updates it.
+const BUpdateFix = "fix: .bin/b update b"
+
 // Doctor runs the checks. ctx bounds the probes (each gets ten seconds
 // under it).
 func Doctor(ctx context.Context, o DoctorOptions) []Check {
@@ -84,14 +92,20 @@ func Doctor(ctx context.Context, o DoctorOptions) []Check {
 		}
 	}
 
-	// b itself.
+	// b itself, and not older than the b this lo bootstraps (BRelease).
+	// A newer b passes: b updates itself to its latest release.
 	bPath := filepath.Join(o.Bin, "b")
 	if fsutil.IsExecutable(bPath) {
 		v, err := d.probe(bPath, "--version")
-		if err != nil {
+		got := firstField(v)
+		switch {
+		case err != nil:
 			d.add(Warn, "b at %s (version unknown: %v)", config.RelTo(o.Base, bPath), err)
-		} else {
-			d.add(OK, "b %s (%s)", firstField(v), config.RelTo(o.Base, bPath))
+		case olderRelease(got, BRelease.Version):
+			d.add(Warn, "b %s at %s is older than %s, the b this lo ships — %s",
+				got, config.RelTo(o.Base, bPath), vPrefixed(BRelease.Version), BUpdateFix)
+		default:
+			d.add(OK, "b %s (%s)", got, config.RelTo(o.Base, bPath))
 		}
 	} else {
 		d.add(Bad, "b missing at %s — %s", config.RelTo(o.Base, bPath), Fix)
@@ -208,6 +222,24 @@ func probe(ctx context.Context, r execx.Runner, path string, args ...string) (st
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// olderRelease reports whether the release got (as `b --version` prints
+// it: v4.18.7, or 4.18.7) is below want. Only major.minor.patch counts: a
+// pre-release of the same release is not older, and a version that does
+// not parse is not compared (the doctor keeps the plain line).
+func olderRelease(got, want string) bool {
+	g, err := semver.NewVersion(got)
+	if err != nil {
+		return false
+	}
+	w, err := semver.NewVersion(want)
+	if err != nil {
+		return false
+	}
+	gr := [3]uint64{g.Major(), g.Minor(), g.Patch()}
+	wr := [3]uint64{w.Major(), w.Minor(), w.Patch()}
+	return slices.Compare(gr[:], wr[:]) < 0
 }
 
 func firstField(s string) string {

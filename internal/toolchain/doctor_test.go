@@ -2,6 +2,7 @@ package toolchain
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,7 +38,7 @@ func TestDoctorFullyProvisionedCore(t *testing.T) {
 	fakeTool(t, filepath.Join(home, filepath.FromSlash(ChartRendererPluginRel)))
 	fakeTool(t, filepath.Join(home, filepath.FromSlash(SecretPluginRel)))
 	answers := map[string]string{
-		"b --version":           "v4.18.7",
+		"b --version":           "v" + BRelease.Version,
 		"kustomize version":     KustomizeCLI,
 		"ChartRenderer version": KhelmVersion + " (helm " + HelmVersion + ")",
 		"Secret --version":      "v0.3.0",
@@ -55,7 +56,7 @@ func TestDoctorFullyProvisionedCore(t *testing.T) {
 		t.Fatalf("statuses = %s\n%+v", got, checks)
 	}
 	want := []string{
-		"b v4.18.7 (.bin/b)",
+		"b v" + BRelease.Version + " (.bin/b)",
 		"kustomize " + KustomizeCLI + " (.bin/kustomize)",
 		"khelm ChartRenderer " + KhelmVersion + " (.kustomize/" + ChartRendererPluginRel + ")",
 		"secrets.lok8s.dev Secret v0.3.0 (.kustomize/" + SecretPluginRel + ")",
@@ -118,5 +119,69 @@ func TestDoctorFindsKustomizeOnPATH(t *testing.T) {
 	checks := Doctor(t.Context(), DoctorOptions{Base: base, Bin: bin, PluginHome: filepath.Join(base, ".kustomize"), LoVersion: "0.3.0", Probe: probe, PATH: elsewhere})
 	if checks[1].Status != OK || !strings.Contains(checks[1].Msg, elsewhere) {
 		t.Fatalf("PATH kustomize: %+v", checks[1])
+	}
+}
+
+// releaseBelow is a release one step below the pin, so the test keeps
+// working after each bump.
+func releaseBelow(t *testing.T) string {
+	t.Helper()
+	var maj, mnr, pat int
+	if _, err := fmt.Sscanf(BRelease.Version, "%d.%d.%d", &maj, &mnr, &pat); err != nil {
+		t.Fatalf("BRelease.Version %q: %v", BRelease.Version, err)
+	}
+	switch {
+	case pat > 0:
+		pat--
+	case mnr > 0:
+		mnr, pat = mnr-1, 999
+	default:
+		maj, mnr, pat = maj-1, 999, 999
+	}
+	return fmt.Sprintf("v%d.%d.%d", maj, mnr, pat)
+}
+
+// The b line warns when the project's .bin/b is older than the b this lo
+// ships, and names the command that updates it (lo toolchain install keeps
+// an existing .bin/b). The same release, a newer one, a pre-release of the
+// pinned release and a version that does not parse keep the plain line.
+func TestDoctorFlagsAnOlderB(t *testing.T) {
+	t.Parallel()
+	pin := "v" + BRelease.Version
+	older := func(v string) string {
+		return "b " + v + " at .bin/b is older than " + pin + ", the b this lo ships — " + BUpdateFix
+	}
+	below := releaseBelow(t)
+	for _, c := range []struct {
+		printed string
+		status  Status
+		msg     string
+	}{
+		{below, Warn, older(below)},
+		{"v0.1.0", Warn, older("v0.1.0")},
+		{"0.1.0", Warn, older("0.1.0")},
+		{"v0.1.0-rc.1", Warn, older("v0.1.0-rc.1")},
+		{pin, OK, "b " + pin + " (.bin/b)"},
+		{BRelease.Version, OK, "b " + BRelease.Version + " (.bin/b)"},
+		{pin + "-rc.1", OK, "b " + pin + "-rc.1 (.bin/b)"},
+		{"v999.0.0", OK, "b v999.0.0 (.bin/b)"},
+		{"dev", OK, "b dev (.bin/b)"},
+	} {
+		t.Run(c.printed, func(t *testing.T) {
+			t.Parallel()
+			base := t.TempDir()
+			bin := filepath.Join(base, ".bin")
+			fakeTool(t, filepath.Join(bin, "b"))
+			probe := func(path string, args ...string) (string, error) {
+				if filepath.Base(path) == "b" {
+					return c.printed, nil
+				}
+				return "", errors.New("not installed")
+			}
+			checks := Doctor(t.Context(), DoctorOptions{Base: base, Bin: bin, PluginHome: filepath.Join(base, ".kustomize"), LoVersion: "0.3.0", Probe: probe, PATH: "/nonexistent"})
+			if checks[0].Status != c.status || checks[0].Msg != c.msg {
+				t.Errorf("b line = %v %q, want %v %q", checks[0].Status, checks[0].Msg, c.status, c.msg)
+			}
+		})
 	}
 }

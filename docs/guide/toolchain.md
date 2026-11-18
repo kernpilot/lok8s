@@ -134,7 +134,9 @@ binaries:
   `lo toolchain install` prints a unified diff against the template and
   the instructions. `lo toolchain doctor` checks only the render tools
   (kustomize, the khelm `ChartRenderer`, the Secret plugin) against their
-  pins, not kind, kubectl or yq.
+  pins, not kind, kubectl or yq. It also warns when `.bin/b` is older than
+  the b this `lo` ships. `lo toolchain install` keeps an existing `.bin/b`,
+  so run `.bin/b update b`.
 - **Not in the consumer file:** `argsh`, `yq`, `jq`, `envsubst`, `sops`,
   `ssh-to-age`. The Go binary links or reimplements them (sops and
   ssh-to-age as libraries; the split-mode `yq`/`sops` subprocesses are
