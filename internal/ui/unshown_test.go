@@ -8,6 +8,8 @@ import (
 	"os"
 	"testing"
 	"unicode"
+
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // go test ./internal/ui/ -update
@@ -126,6 +128,7 @@ func TestUnshownMatchesTheTableOnEveryCodePoint(t *testing.T) {
 		t.Errorf("%d code points differ in all", bad)
 	}
 	if !bytes.Equal(raw, want) {
-		t.Errorf("%s is not the file that Unshown gives (run: go test ./internal/ui/ -update)", unshownTable)
+		t.Errorf("%s is not the file that Unshown gives (run: go test ./internal/ui/ -update)\n%s",
+			unshownTable, testutil.FirstDiff(string(want), string(raw)))
 	}
 }

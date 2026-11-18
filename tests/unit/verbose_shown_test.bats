@@ -32,12 +32,14 @@ setup() {
   assert_success
   assert_output --regexp '^1114111 [0-9]+$'
   (( ${output#* } >= 10 ))
-  # Each code point from 0 to max (U+10FFFF) where the def and the table
-  # differ, with what each says.
+  # The first 20 code points from 0 to max (U+10FFFF) where the def and the
+  # table differ, with what each says, then the count when there are more
+  # (as the Go test does: a broad fault would print a line per code point).
   run jq -r "${VERBOSE_JQ_UNSHOWN}"' [.runs[] | range(.first; .last + 1)] as $want
     | [range(0; .max + 1) | select(unshown)] as $got
-    | (($got - $want)[] | "code point \(.): the jq def says unshown, the table says shown"),
-      (($want - $got)[] | "code point \(.): the jq def says shown, the table says unshown")' "${table}"
+    | [(($got - $want)[] | "code point \(.): the jq def says unshown, the table says shown"),
+       (($want - $got)[] | "code point \(.): the jq def says shown, the table says unshown")]
+    | .[:20][], (select(length > 20) | "\(length) code points differ in all")' "${table}"
   assert_success
   assert_output ""
 }
