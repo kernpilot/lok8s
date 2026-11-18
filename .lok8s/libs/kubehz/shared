@@ -224,9 +224,13 @@ kubehz::space_api_call() {
   local -a extra=()
   [[ -n "${body}" ]] && extra=(-H "Content-Type: application/json" -d "${body}")
 
-  # The bearer reaches curl in a config on stdin, never on argv.
+  # The bearer reaches curl in a config on stdin, never on argv. -q first:
+  # curl then reads no config file of the user (.curlrc in CURL_HOME or
+  # HOME, curlrc in XDG_CONFIG_HOME). A trace-ascii line there would log the
+  # bearer and the answer, an output line would write the answer to another
+  # file. curl obeys -q only as its first argument.
   raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
-    curl -K - -sSL -w $'\n%{http_code}' -X "${method}" \
+    curl -q -K - -sSL -w $'\n%{http_code}' -X "${method}" \
     "${LOK8S_KUBEHZ_API_URL}${path}" \
     "${extra[@]}") || {
     KUBEHZ_SPACE_API_CURL_RC=$?

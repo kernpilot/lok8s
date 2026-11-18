@@ -189,7 +189,11 @@ handover::fetch_snapshot() {
       ;;
     https://*)
       { : > "${out}" && chmod 600 "${out}"; } || return 1
-      ( umask 077 && curl -fsSL "${location}" -o "${out}" ) || {
+      # -q first: no config file of the user. An output line there would
+      # take this URL, and the snapshot would go to that file and not to
+      # out; a trace-ascii line would log the URL (with its signature) and
+      # the snapshot. curl obeys -q only as its first argument.
+      ( umask 077 && curl -q -fsSL "${location}" -o "${out}" ) || {
         error "handover: downloading the snapshot from ${location} failed — download it yourself and re-run with --snapshot <file>"
         return 1
       }

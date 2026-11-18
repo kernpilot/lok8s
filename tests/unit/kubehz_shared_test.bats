@@ -39,6 +39,8 @@ setup() {
 }
 
 teardown() {
+  # A server of tests/lib/http_stub.bash that a failed test left running.
+  [[ -z "${STUB_PID:-}" ]] || kill "${STUB_PID}" 2>/dev/null || :
   teardown_tmpdir
 }
 
@@ -2470,4 +2472,49 @@ _stub_mktemp() {
   assert_success
   assert_output --partial "Space 'acme' removed (id: sp-123)"
   [ ! -e "${PATH_BASE}/.kubeconfig/acme.example.org.yaml" ]
+}
+
+# The production api call and mint run the real curl against a local server
+# (tests/lib/http_stub.bash), with a config file of the user in each place
+# curl looks for one: CURL_HOME, XDG_CONFIG_HOME, HOME. With -q first curl
+# reads none of them: no trace of the bearer or of the answer is written,
+# the answer is not sent to another file, and each request still carries
+# the bearer.
+@test "space_api_call and space_mint_join: curl reads no config file of the user" {
+  command -v python3 >/dev/null || skip "no python3"
+  [[ -n "$(type -P curl)" ]] || skip "no curl"
+  source "${_PROJECT_ROOT}/tests/lib/http_stub.bash"
+  local hex var o e path rc
+  hex=$(od -An -N11 -tx1 /dev/urandom | tr -d ' \n')
+  export STUB_TICKET="${hex:0:6}.${hex:6:16}"
+  STUB_BEARER="khzt-rc-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  export STUB_BEARER KUBEHZ_TOKEN="${STUB_BEARER}"
+  http_stub_start
+  export LOK8S_KUBEHZ_API_URL="http://127.0.0.1:${STUB_PORT}"
+  for var in CURL_HOME XDG_CONFIG_HOME HOME; do
+    echo "# config file in ${var}"
+    curlrc_dir "${var}"
+    o="${RC_DIR}.stdout" e="${RC_DIR}.stderr" rc=0
+    # The checks of the config file come first: a call that fails because
+    # the file took its answer must still show the file as the cause.
+    (
+      curlrc_env "${var}"
+      kubehz::space_api_call GET /api/spaces/sp-q &&
+        printf '%s|%s' "${KUBEHZ_SPACE_API_STATUS}" "${KUBEHZ_SPACE_API_BODY}" > "${RC_DIR}.api" &&
+        kubehz::space_mint_join sp-q worker-1
+    ) > "${o}" 2> "${e}" || rc=$?
+    [ ! -e "${RC_TRACE}" ]
+    [ ! -e "${RC_OUT}" ]
+    run grep -qF -e "${STUB_BEARER}" -e "${STUB_TICKET}" "${o}" "${e}"
+    [ "${status}" -eq 1 ]
+    [ "${rc}" -eq 0 ]
+    [ "$(cat "${RC_DIR}.api")" = '200|{"ok":true,"data":{"id":"sp-q"}}' ]
+    path=$(sed -n 's/^    (written to \(.*\), mode 0600)$/\1/p' "${o}")
+    [ -n "${path}" ]
+    [ "$(cat "${path}")" = "${STUB_TICKET}" ]
+  done
+  [ "$(grep -c '^GET /api/spaces/sp-q bearer$' "${STUB_LOG}")" -eq 3 ]
+  [ "$(grep -c '^POST /api/spaces/sp-q/join-token bearer$' "${STUB_LOG}")" -eq 3 ]
+  [ "$(wc -l < "${STUB_LOG}")" -eq 6 ]
+  http_stub_stop
 }

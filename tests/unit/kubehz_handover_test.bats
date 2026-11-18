@@ -69,6 +69,8 @@ setup() {
 }
 
 teardown() {
+  # A server of tests/lib/http_stub.bash that a failed test left running.
+  [[ -z "${STUB_PID:-}" ]] || kill "${STUB_PID}" 2>/dev/null || :
   teardown_tmpdir
 }
 
@@ -939,4 +941,44 @@ _mock_node_binaries() {
     assert_success
     refute_output --partial "escapes the bundle dir"
   done
+}
+
+# The real curl downloads the snapshot from a local https server
+# (tests/lib/http_stub.bash), with a config file of the user in each place
+# curl looks for one: CURL_HOME, XDG_CONFIG_HOME, HOME. With -q first curl
+# reads none of them: the snapshot lands in the private file and nowhere
+# else, and no trace of the URL or the snapshot is written.
+@test "handover: the snapshot download reads no config file of the user" {
+  command -v python3 >/dev/null || skip "no python3"
+  command -v openssl >/dev/null || skip "no openssl"
+  [[ -n "$(type -P curl)" ]] || skip "no curl"
+  source "${_PROJECT_ROOT}/tests/lib/http_stub.bash"
+  _make_bundle
+  local cert="${BATS_TEST_TMPDIR}/stub.crt" key="${BATS_TEST_TMPDIR}/stub.key" var workdir got o e rc
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=127.0.0.1 \
+    -addext subjectAltName=IP:127.0.0.1 -keyout "${key}" -out "${cert}" 2>/dev/null
+  export STUB_SNAPSHOT="${BATS_TEST_TMPDIR}/snap.src"
+  printf 'snap-%s' "$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')" > "${STUB_SNAPSHOT}"
+  http_stub_start "${cert}" "${key}"
+  export CURL_CA_BUNDLE="${cert}"
+  printf 'https://127.0.0.1:%s/snap.db' "${STUB_PORT}" > "${BUNDLE}/snapshot-location"
+  for var in CURL_HOME XDG_CONFIG_HOME HOME; do
+    echo "# config file in ${var}"
+    curlrc_dir "${var}"
+    workdir="${RC_DIR}.work"
+    mkdir -m 700 "${workdir}"
+    o="${RC_DIR}.stdout" e="${RC_DIR}.stderr" rc=0
+    # The checks of the config file come first, as in the api test.
+    ( curlrc_env "${var}" && handover::fetch_snapshot "${BUNDLE}" "" "${workdir}" ) > "${o}" 2> "${e}" || rc=$?
+    [ ! -e "${RC_TRACE}" ]
+    [ ! -e "${RC_OUT}" ]
+    [ "${rc}" -eq 0 ]
+    [ ! -s "${e}" ]
+    got=$(<"${o}")
+    [ "${got}" = "${workdir}/kubehz-handover-snapshot.db" ]
+    cmp -- "${STUB_SNAPSHOT}" "${got}"
+    [ "$(stat -c %a "${got}")" = 600 ]
+  done
+  [ "$(grep -c '^GET /snap.db none$' "${STUB_LOG}")" -eq 3 ]
+  http_stub_stop
 }

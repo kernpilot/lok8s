@@ -186,6 +186,8 @@ user = "u:p"'
   cfg=$(http::curl_config header $'Authorization: Bearer tok\r' 2>/dev/null) || :
   # Port 9 (discard): a connect attempt would fail with 7. curl 8.20 refuses
   # the line (2), older versions refuse the protocol (1).
+  # -q first, as in the production call: no config file of this host can
+  # change the result.
   run "${REAL_CURL}" -q -sS -K <(printf '%s\n' "${cfg}") http://127.0.0.1:9/
   [[ "${status}" == 1 || "${status}" == 2 ]]
   run "${REAL_CURL}" -q -sS --proto =https -K <(printf '%s\n' "${cfg}") https://127.0.0.1:9/
