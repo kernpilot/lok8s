@@ -713,8 +713,8 @@ _pull_script() {
   assert_output "2"
 }
 
-# warn prints with echo -e: a backslash in the cause must print as is, and
-# an escape such as \c must not cut the line.
+# warn prints the cause as it is: a backslash in the cause stays, and an
+# escape such as \c does not cut the line.
 @test "registries: a backslash in the pull error prints as is in the [warn] line" {
   _load_driver
   _pull_script 0 1

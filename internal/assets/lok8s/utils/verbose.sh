@@ -15,28 +15,34 @@ verbose::color() {
   [[ -t 2 && -z "${NO_COLOR:-}" ]]
 }
 
+# debug, error and warn print the message as it is, with printf '%s'. A
+# backslash sequence in it (from a spec, an argument or an api answer)
+# stays text: "\e[2J" prints as these five characters, not as an escape.
+# Only the colour codes go through %b. The Go twins (internal/ui) also print
+# the message as it is. `builtin printf`: a function named printf (a fake
+# in a test) cannot stop the line.
 debug() {
   [[ -n "${DEBUG:-}" ]] || return 0
   if verbose::color; then
-    echo -e "${GREEN}[debug]${NC} ${*}" >&2
+    builtin printf '%b[debug]%b %s\n' "${GREEN}" "${NC}" "${*}" >&2
   else
-    echo -e "[debug] ${*}" >&2
+    builtin printf '[debug] %s\n' "${*}" >&2
   fi
 }
 
 error() {
   if verbose::color; then
-    echo -e "${RED}[error]${NC} ${*}" >&2
+    builtin printf '%b[error]%b %s\n' "${RED}" "${NC}" "${*}" >&2
   else
-    echo -e "[error] ${*}" >&2
+    builtin printf '[error] %s\n' "${*}" >&2
   fi
 }
 
 warn() {
   if verbose::color; then
-    echo -e "${YELLOW}[warn]${NC} ${*}" >&2
+    builtin printf '%b[warn]%b %s\n' "${YELLOW}" "${NC}" "${*}" >&2
   else
-    echo -e "[warn] ${*}" >&2
+    builtin printf '[warn] %s\n' "${*}" >&2
   fi
 }
 

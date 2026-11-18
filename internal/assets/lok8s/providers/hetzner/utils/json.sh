@@ -723,13 +723,12 @@ hetzner::_part_args() {
 }
 
 # hetzner::_print_refused: one error per entry of _HETZNER_REFUSED. A
-# refusal shows descriptor values (as JSON, with escapes such as \t): each
-# backslash is doubled, so that error (echo -e) prints it as it is and not
-# as a control character.
+# refusal shows descriptor values (as JSON, with escapes such as \t): error
+# prints each backslash as it is, not as a control character.
 hetzner::_print_refused() {
   local r
   for r in "${_HETZNER_REFUSED[@]}"; do
-    error "hetzner: refused ${r//\\/\\\\}"
+    error "hetzner: refused ${r}"
   done
 }
 

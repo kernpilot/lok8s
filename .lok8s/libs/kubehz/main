@@ -521,10 +521,9 @@ kubehz::claim_key_mark() {
 
 # kubehz::claim_key_no_mark <name> — the warning when lo cannot mark the
 # claim key <name> (no sha256sum or shasum). lo then leaves the key alone:
-# without a mark, no key is ours. warn() prints through `echo -e`, so the
-# backslashes of the name are doubled.
+# without a mark, no key is ours.
 kubehz::claim_key_no_mark() {
-  warn "kubehz: lo needs sha256sum or shasum to mark the claim key '${1//\\/\\\\}', so it does not change the key in your Hetzner Cloud project."
+  warn "kubehz: lo needs sha256sum or shasum to mark the claim key '${1}', so it does not change the key in your Hetzner Cloud project."
 }
 
 # kubehz::claim_key_own <keys json> <domain> <verb> <name> — rc 0 when the
@@ -536,23 +535,20 @@ kubehz::claim_key_no_mark() {
 # Call it only when the answer holds a key id. Without a mark (no sha256sum
 # or shasum) no key is ours (kubehz::claim_key_no_mark).
 kubehz::claim_key_own() {
-  local keys="${1}" domain="${2}" verb="${3}" name="${4}" label mark next head esc_domain
+  local keys="${1}" domain="${2}" verb="${3}" name="${4}" label mark next head
   if ! mark=$(kubehz::claim_key_mark "${domain}"); then
     kubehz::claim_key_no_mark "${name}"
     return 1
   fi
   label=$(jq -r --arg l "${_KUBEHZ_CLAIM_LABEL}" '.ssh_keys[0].labels[$l] // empty' <<<"${keys}" 2>/dev/null) || label=""
   [[ "${label}" != "${mark}" ]] || return 0
-  # warn() prints through `echo -e`: double the backslashes of the name and
-  # of the domain.
-  esc_domain="${domain//\\/\\\\}"
-  head="kubehz: lo does not ${verb} the SSH key '${name//\\/\\\\}' in your Hetzner Cloud project: "
+  head="kubehz: lo does not ${verb} the SSH key '${name}' in your Hetzner Cloud project: "
   if [[ -z "${label}" ]]; then
-    next="delete it (Hetzner Console -> Security -> SSH keys), then run 'lo kubehz register --domain ${esc_domain}' again"
+    next="delete it (Hetzner Console -> Security -> SSH keys), then run 'lo kubehz register --domain ${domain}' again"
     [[ "${verb}" != delete ]] || next="delete it by hand (Hetzner Console -> Security -> SSH keys)"
-    warn "${head}it has no label ${_KUBEHZ_CLAIM_LABEL}, so a person or an older lo made it. If an older lo made it for ${esc_domain}, ${next}."
+    warn "${head}it has no label ${_KUBEHZ_CLAIM_LABEL}, so a person or an older lo made it. If an older lo made it for ${domain}, ${next}."
   else
-    warn "${head}its label ${_KUBEHZ_CLAIM_LABEL} does not match ${esc_domain}, so another cluster made it."
+    warn "${head}its label ${_KUBEHZ_CLAIM_LABEL} does not match ${domain}, so another cluster made it."
   fi
   return 1
 }
@@ -1507,14 +1503,11 @@ kubehz::token_access() {
       debug "token request: curl exit ${rc}"
       (( rc == 28 )) || retry=1
     fi
-    # error() and debug() print through `echo -e`: double the backslashes,
-    # or a refusal text could carry a real escape sequence (the
-    # kubehz::space_safe_string rule).
     if (( ! retry || attempt == ${#delays[@]} )); then
-      error "${msg//\\/\\\\}"
+      error "${msg}"
       return 1
     fi
-    debug "token request failed, trying again: ${msg//\\/\\\\}"
+    debug "token request failed, trying again: ${msg}"
     sleep "${delays[attempt]}"
   done
   access_token=$(jq -r '.access_token // empty' <<<"${answer}" 2>/dev/null) || access_token=""

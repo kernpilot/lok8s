@@ -1656,3 +1656,18 @@ ${_CLAIM_UPLOAD}"
   assert_output "${_CLAIM_GET}
 ${_CLAIM_DELETE42}"
 }
+
+# warn() prints the key name and the domain as they are: a backslash in
+# either is one backslash in the warning, and no ESC byte reaches the output.
+@test "claim key: a backslash in the key name or the domain prints as typed in the warning" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  run kubehz::claim_key_own '{"ssh_keys":[{"id":42}]}' 'test\e[2J.dev' replace 'kubehz-claim-test\e[2J.dev'
+  assert_failure
+  assert_output "[warn] kubehz: lo does not replace the SSH key 'kubehz-claim-test\e[2J.dev' in your Hetzner Cloud project: it has no label lok8s.dev/kubehz-claim, so a person or an older lo made it. If an older lo made it for test\e[2J.dev, delete it (Hetzner Console -> Security -> SSH keys), then run 'lo kubehz register --domain test\e[2J.dev' again."
+  run kubehz::claim_key_own '{"ssh_keys":[{"id":42,"labels":{"lok8s.dev/kubehz-claim":"0123456789abcdef0123456789abcdef"}}]}' 'test\n.dev' delete 'k\c'
+  assert_failure
+  assert_output "[warn] kubehz: lo does not delete the SSH key 'k\c' in your Hetzner Cloud project: its label lok8s.dev/kubehz-claim does not match test\n.dev, so another cluster made it."
+  run kubehz::claim_key_no_mark 'k\e[2J'
+  assert_output "[warn] kubehz: lo needs sha256sum or shasum to mark the claim key 'k\e[2J', so it does not change the key in your Hetzner Cloud project."
+  [[ "${output}" != *$'\033'* ]]
+}

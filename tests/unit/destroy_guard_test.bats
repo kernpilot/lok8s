@@ -362,8 +362,8 @@ _assert_names_refused() {
     'prod\xf3\xa0\x81\x81a' $'prod\xf3\xa0\x81\x81a'
 }
 
-# A backslash: error() prints with echo -e, which reads a backslash sequence
-# ("\e[2J" would reach the terminal as an ESC). The Go twin is
+# A backslash: a backslash sequence ("\e[2J") must not reach the terminal
+# as an ESC on any print path. The Go twin is
 # TestDestroyGuardRefusesAClusterNameWithABackslash.
 @test "destroy guard: a cluster_name with a backslash is refused" {
   _assert_names_refused \
@@ -412,8 +412,8 @@ _refute_esc() {
 }
 
 # The messages that carry the cluster_name or the --confirm-cluster value
-# print with printf '%s', not with error()'s echo -e: a --confirm-cluster
-# value with the text "\e[2J" is shown as text. The guard does not show the
+# print with printf '%s': a --confirm-cluster value with the text "\e[2J"
+# is shown as text. The guard does not show the
 # typed answer: a typed "\e[2J" gives the wrong-answer error, and neither the
 # text nor an ESC byte (besides the colour codes of the header) is in the
 # output. The Go twin is TestDestroyGuardShowsABackslashSequenceAsText.

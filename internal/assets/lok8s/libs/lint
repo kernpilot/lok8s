@@ -432,8 +432,8 @@ lint::dns_search() {
   local spec_file="${1}"
   [[ "$(domain::spec_driver "${spec_file}" 2>/dev/null)" == "lo" ]] || return 0
   dnssearch::check "${spec_file}" && return 0
-  # The `error` line format, through printf: `error` runs echo -e, which would
-  # turn a backslash in a rejected value into an escape (Go prints it as is).
+  # The `error` line format, through printf: a backslash in a rejected value
+  # prints as it is (as in Go).
   local tag="[error]" problem
   if verbose::color; then printf -v tag '%b[error]%b' "${RED}" "${NC}"; fi
   for problem in ${DNSSEARCH_PROBLEMS[@]+"${DNSSEARCH_PROBLEMS[@]}"}; do
