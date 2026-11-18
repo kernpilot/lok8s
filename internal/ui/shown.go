@@ -23,7 +23,10 @@ import "strings"
 // Shown replaces each one, and each backslash, with '?'. The api records
 // of internal/kubehz drop each one (cleanText). The bash twin is the jq
 // def unshown (VERBOSE_JQ_UNSHOWN, .lok8s/utils/verbose.sh). Each range is
-// a case of its own (one mutant each).
+// a case of its own (one mutant each). testdata/unshown.json holds the runs
+// of Unshown (go test ./internal/ui/ -update makes it): unshown_test.go
+// checks Unshown and tests/unit/verbose_shown_test.bats checks the jq def
+// against it on every code point from 0 to U+10FFFF.
 func Unshown(r rune) bool {
 	switch {
 	case r < 0x20, r >= 0x7f && r < 0xa0:
