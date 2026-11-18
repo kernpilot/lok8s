@@ -211,14 +211,33 @@ kubehz::space_api_call() {
   [[ "${KUBEHZ_SPACE_API_STATUS}" == 2* ]] || return 2
 }
 
+# A jq def: a SERVER string without each code point of unshown
+# (VERBOSE_JQ_UNSHOWN, utils/verbose.sh), except tab and newline: a status
+# reason or a block of TSV rows can hold them. A compromised api could
+# otherwise hide an ESC, a C1 CSI (U+009B), a bidi override or a line
+# separator in a message and redraw or reorder the caller's terminal (worst
+# under --print-only, where the printed output is read as truth). jq works
+# on code points in any locale; tr -d works on bytes. The Go twin is scrub
+# (internal/kubehz). Values that become argv do not come here: the join-line
+# alphabet gate guards that side; this one is for display only.
+KUBEHZ_SCRUB_JQ="${VERBOSE_JQ_UNSHOWN}"'def scrub: explode | map(select((unshown and . != 9 and . != 10) | not))
+  | implode;'
+
+# The string without the characters that the def scrub drops. The input goes
+# to jq on stdin (no argv size limit); jq makes U+FFFD of a byte that is not
+# UTF-8, as Go does. Each caller reads it with $(...), which drops the
+# trailing newlines.
+# Usage: kubehz::scrub <string>
+kubehz::scrub() {
+  jq -Rrs "${KUBEHZ_SCRUB_JQ}"' scrub' <<<"${1}"
+}
+
 # Bound and disarm a SERVER string before it reaches the terminal. The Go twin
 # runs clip(scrub(...)) on the same strings, so the three steps run in the same
 # order and produce the same bytes:
 #
-#   scrub   drop every character below 0x20 except tab and newline, and DEL.
-#           A compromised api could otherwise hide ANSI escapes in a refusal
-#           and redraw the caller's terminal (the rule node::scrub applies to
-#           the node rows).
+#   scrub   kubehz::scrub: drop each unshown character except tab and
+#           newline.
 #   clip    256 characters, then one ellipsis. A ceiling or an endpoint is a
 #           few dozen characters; past that the rest is not information.
 #   escape  double every backslash. This step belongs to error() ONLY, which
@@ -234,7 +253,7 @@ kubehz::space_api_call() {
 # Usage: kubehz::space_bound_string <string>
 kubehz::space_bound_string() {
   local s
-  s=$(tr -d '\000-\010\013-\037\177' <<<"${1}")
+  s=$(kubehz::scrub "${1}")
   (( ${#s} <= 256 )) || s="${s:0:256}…"
   echo "${s}"
 }
@@ -667,10 +686,9 @@ kubehz::space_status() {
   # platform's own text: clipped to 256 characters here (jq counts code
   # points, as the Go twin counts runes). One node is one line: a newline or
   # a tab in a server string becomes a space, so a reason cannot print a
-  # second node line. Then every line loses its control characters in the tr
-  # after it, as node::scrub does.
+  # second node line. Then the def scrub drops the other unshown characters.
   echo "${KUBEHZ_SPACE_API_BODY}" \
-    | jq -r '(.data? // .) | .nodes[]? | ("  " + .name + "  " + (.status // "-") + "  " + (.lane // "-")
+    | jq -r "${KUBEHZ_SCRUB_JQ}"'(.data? // .) | .nodes[]? | ("  " + .name + "  " + (.status // "-") + "  " + (.lane // "-")
         + (if .unschedulable == true then "  cordoned" else "" end)
         + (if (.maintenance | type) == "object" then
              "  " + (.maintenance.action | if type == "string" then . else "-" end)
@@ -678,6 +696,5 @@ kubehz::space_status() {
              + (.maintenance.reason | if type == "string" and . != ""
                  then ": " + (if length > 256 then .[0:256] + "…" else . end) else "" end)
            else "" end))
-        | split("\n") | join(" ") | split("\t") | join(" ")' 2>/dev/null \
-    | tr -d '\000-\010\013-\037\177' || true
+        | split("\n") | join(" ") | split("\t") | join(" ") | scrub' 2>/dev/null || true
 }

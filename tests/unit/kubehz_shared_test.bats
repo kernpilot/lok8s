@@ -680,10 +680,47 @@ curl_space_refusal() {
   # No control character reaches the terminal.
   refute_output --partial "$(printf '\033')"
   refute_output --partial "$(printf '\007')"
+  # The inputs also hold a C1 CSI, a line separator and a bidi override.
+  refute_output --partial $'\xc2\x9b'
+  refute_output --partial $'\xe2\x80\xa8'
+  refute_output --partial $'\xe2\x80\xae'
   # The characters the api sent stay exactly as many characters, on BOTH
   # print paths.
   assert_output --partial 'literal:\033[2J'
   assert_output --partial 'literal:\t and \\ stay'
+}
+
+# scrub drops each character that shown_name shows as '?' (the def unshown,
+# utils/verbose.sh), but keeps a tab, a newline and a backslash. For each case
+# of the shared table (internal/ui/testdata/shown.json), the input without each
+# other character that the case's result shows as '?' is what scrub gives. The
+# Go twin is TestScrubDropsEachUnshownCharacterButTabAndNewline.
+@test "scrub: drops each character that shown_name shows as '?', keeps a tab, a newline and a backslash" {
+  CASES="${_PROJECT_ROOT}/internal/ui/testdata/shown.json"
+  run jq -r "${KUBEHZ_SCRUB_JQ}"' .[]
+    | ([(.in | explode), (.want | explode)] | transpose
+       | map(select(.[1] != 63 or .[0] == 63 or .[0] == 92 or .[0] == 9 or .[0] == 10) | .[0]) | implode) as $want
+    | (.in | scrub) as $got | select($got != $want)
+    | "\(.case): \($got | @json), want \($want | @json)"' "${CASES}"
+  assert_success
+  assert_output ""
+  # The table drops something: else the test proves nothing.
+  run jq -r "${KUBEHZ_SCRUB_JQ}"' [.[] | select((.in | scrub) != .in)] | length' "${CASES}"
+  assert_success
+  (( output >= 15 ))
+}
+
+# kubehz::scrub works on code points, also in the C locale (tr -d worked on
+# bytes): the bytes of a C1 CSI (U+009B), a line separator (U+2028), a bidi
+# override (U+202E) and an ESC go; a tab and a newline stay.
+@test "kubehz::scrub: U+009B, U+2028, U+202E and ESC go in the C locale, a tab and a newline stay" {
+  export LC_ALL=C
+  local in want
+  in=$(printf 'a\xc2\x9bb\xe2\x80\xa8c\xe2\x80\xaed\te\nf\x1b[2Jg')
+  want=$(printf 'abcd\te\nf[2Jg')
+  run kubehz::scrub "${in}"
+  assert_success
+  assert_output "${want}"
 }
 
 # space_api_error is the FIRST thing an api can print through: `lo provision`
@@ -710,6 +747,10 @@ curl_space_refusal() {
   assert_output "$(cat "${golden_dir}/space-api-error.txt")"
   refute_output --partial "$(printf '\033')"
   refute_output --partial "$(printf '\007')"
+  # The inputs also hold a C1 CSI, a line separator and a bidi override.
+  refute_output --partial $'\xc2\x9b'
+  refute_output --partial $'\xe2\x80\xa8'
+  refute_output --partial $'\xe2\x80\xae'
   assert_output --partial 'literal:\033[2J'
   assert_output --partial 'literal:\t and \\ stay'
 }

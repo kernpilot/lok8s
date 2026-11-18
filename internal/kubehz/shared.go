@@ -739,8 +739,8 @@ func (c *Context) SpaceStatus(ctx context.Context, cfg *Config, domain, clusterY
 			line := "  " + jstr(jget(n, "name")) + "  " + jstrOr(n, "-", "status") + "  " + jstrOr(n, "-", "lane")
 			// One node, one line: a newline or a tab in a server string (a
 			// reason, a name) becomes a space, so it cannot print a second
-			// node line. Then the line loses its control characters, as the
-			// bash pipes its jq output through tr.
+			// node line. Then scrub drops the other unshown characters, as
+			// the bash ends its jq with the def scrub.
 			c.echo("%s", scrub(nodeLineSpaces.Replace(line+nodeMaintenanceSuffix(n))))
 		}
 	}

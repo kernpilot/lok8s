@@ -886,24 +886,29 @@ _refuse_flag() {
 
 @test "remove: an ANSI escape in the returned pool name is stripped" {
   _stub_all
-  STUB_REMOVE_BODY='{"ok":true,"data":{"name":"box-1","pool":"metal\u001b[2J","status":"Draining"}}'
+  STUB_REMOVE_BODY='{"ok":true,"data":{"name":"box-1","pool":"metal\u001b[2J\u009b\u2028\u202e","status":"Draining"}}'
 
   run node::remove --name box-1
   assert_success
-  assert_output --partial "pool metal"
+  assert_output --partial "pool metal[2J"
   [[ "${output}" != *$'\033'* ]]
+  # A C1 CSI (U+009B), a line separator (U+2028) and a bidi override
+  # (U+202E) go too: the Go twin's TestNodeScrubsANSI.
+  [[ "${output}" != *$'\xc2\x9b'* && "${output}" != *$'\xe2\x80\xa8'* && "${output}" != *$'\xe2\x80\xae'* ]]
 }
 
 @test "status: an ANSI escape in a node row is stripped, the table survives" {
   _stub_all
-  STUB_NODES_BODY='{"ok":true,"data":{"nodes":[{"name":"box-\u001b[31m1","pool":"metal","status":"Ready","joinedAt":"2026-08-30T10:00:00Z"}],"usage":{"nodes":1,"maxStaticNodes":20},"discoveryReady":true}}'
+  STUB_NODES_BODY='{"ok":true,"data":{"nodes":[{"name":"box-\u001b[31m\u009b\u202e1","pool":"metal","status":"Ready","joinedAt":"2026-08-30T10:00:00Z"},{"name":"box-2","pool":"metal\u2028","status":"Ready","joinedAt":"2026-08-31T10:00:00Z"}],"usage":{"nodes":2,"maxStaticNodes":20},"discoveryReady":true}}'
 
   run node::status
   assert_success
-  assert_output --partial "box-"
-  assert_output --partial "metal"
-  assert_output --partial "Ready"
+  # One row each, in the columns: the scrub of the TSV block keeps the tab
+  # and the newline (the Go twin's TestNodeScrubsANSI).
+  assert_line "$(printf '  %-24s %-16s %-10s %s' 'box-[31m1' metal Ready 2026-08-30T10:00:00Z)"
+  assert_line "$(printf '  %-24s %-16s %-10s %s' box-2 metal Ready 2026-08-31T10:00:00Z)"
   [[ "${output}" != *$'\033'* ]]
+  [[ "${output}" != *$'\xc2\x9b'* && "${output}" != *$'\xe2\x80\xa8'* && "${output}" != *$'\xe2\x80\xae'* ]]
 }
 
 # ── F5: the global --cluster/-s collision ────────────────

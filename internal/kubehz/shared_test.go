@@ -744,8 +744,10 @@ func TestProvisionSharedScrubsTheSharedCeilingMessage(t *testing.T) {
 	mustErr(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec))
 
 	got := h.output()
-	// No control character may survive into the terminal.
-	for _, bad := range []string{"\x1b", "\x07", "\x7f"} {
+	// No unshown character may survive into the terminal: the inputs also
+	// hold a C1 CSI, a NEL, the separators, bidi and zero-width characters.
+	for _, bad := range []string{"\x1b", "\x07", "\x7f", "\u009b", "\u0085", "\u2028", "\u2029", "\u202e", "\u2066",
+		"\u200b", "\ufeff"} {
 		mustNotContain(t, got, bad)
 	}
 	// The characters the api sent stay exactly as many characters, on both
@@ -790,7 +792,8 @@ func TestSpaceAPIErrorScrubsAndClipsBothHalves(t *testing.T) {
 	mustErr(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec))
 
 	got := h.output()
-	for _, bad := range []string{"\x1b", "\x07", "\x7f"} {
+	for _, bad := range []string{"\x1b", "\x07", "\x7f", "\u009b", "\u0085", "\u2028", "\u2029", "\u202e", "\u2066",
+		"\u200b", "\ufeff"} {
 		mustNotContain(t, got, bad)
 	}
 	mustContain(t, got, `literal:\033[2J`)

@@ -5,6 +5,8 @@ package kubehz
 import (
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -467,18 +469,71 @@ func TestNodeScrubsANSI(t *testing.T) {
 	mustNotContain(t, h.output(), "\033[31m")
 
 	s = defaultNodeStubs()
-	s.removeBody = `{"ok":true,"data":{"name":"box-1","pool":"metal\u001b[2J","status":"Draining"}}`
+	s.removeBody = `{"ok":true,"data":{"name":"box-1","pool":"metal\u001b[2J\u009b\u2028\u202e","status":"Draining"}}`
 	h = nodeHarness(t, s, "hosted", "")
 	mustOK(t, h.ctx.NodeRemove(t.Context(), "acme.example.org", NodeOpts{Name: "box-1"}), h.output())
-	mustContain(t, h.output(), "pool metal")
-	mustNotContain(t, h.output(), "\033")
+	mustContain(t, h.output(), "pool metal[2J")
+	for _, bad := range []string{"\033", "\u009b", "\u2028", "\u202e"} {
+		mustNotContain(t, h.output(), bad)
+	}
 
 	s = defaultNodeStubs()
-	s.nodesBody = `{"ok":true,"data":{"nodes":[{"name":"box-\u001b[31m1","pool":"metal","status":"Ready","joinedAt":"2026-08-30T10:00:00Z"}],"usage":{"nodes":1,"maxStaticNodes":20},"discoveryReady":true}}`
+	s.nodesBody = `{"ok":true,"data":{"nodes":[{"name":"box-\u001b[31m\u009b\u202e1","pool":"metal","status":"Ready","joinedAt":"2026-08-30T10:00:00Z"},{"name":"box-2","pool":"metal\u2028","status":"Ready","joinedAt":"2026-08-31T10:00:00Z"}],"usage":{"nodes":2,"maxStaticNodes":20},"discoveryReady":true}}`
 	h = nodeHarness(t, s, "hosted", "")
 	mustOK(t, h.ctx.NodeStatus(t.Context(), "acme.example.org", NodeOpts{}), h.output())
-	mustContain(t, h.output(), "box-")
-	mustNotContain(t, h.output(), "\033")
+	// One row each, in the columns (the bash twin scrubs the TSV rows as one
+	// block: it keeps the tab and the newline).
+	mustContain(t, h.output(), "\n  box-[31m1                metal            Ready      2026-08-30T10:00:00Z\n")
+	mustContain(t, h.output(), "\n  box-2                    metal            Ready      2026-08-31T10:00:00Z\n")
+	for _, bad := range []string{"\033", "\u009b", "\u2028", "\u202e"} {
+		mustNotContain(t, h.output(), bad)
+	}
+}
+
+// scrub drops each character that ui.Shown shows as '?' (ui.Unshown), but
+// keeps a tab, a newline and a backslash. For each case of the shared table
+// (internal/ui/testdata/shown.json), the input without each other character
+// that the case's result shows as '?' is what scrub gives. The bash twin is
+// the test "scrub: drops each character ..." in kubehz_shared_test.bats.
+func TestScrubDropsEachUnshownCharacterButTabAndNewline(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.Join("..", "ui", "testdata", "shown.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct{ Case, In, Want string }
+	if err := json.Unmarshal(raw, &cases); err != nil {
+		t.Fatal(err)
+	}
+	dropped := 0
+	for _, c := range cases {
+		in, shown := []rune(c.In), []rune(c.Want)
+		if len(in) != len(shown) {
+			t.Fatalf("%s: in and want differ in length", c.Case)
+		}
+		var want []rune
+		for i, r := range in {
+			if shown[i] != '?' || r == '?' || r == '\\' || r == '\t' || r == '\n' {
+				want = append(want, r)
+			}
+		}
+		got := scrub(c.In)
+		if got != c.In {
+			dropped++
+		}
+		if got != string(want) {
+			t.Errorf("%s: scrub(%q) = %q, want %q", c.Case, c.In, got, string(want))
+		}
+	}
+	// The table drops something: else the test proves nothing.
+	if dropped < 15 {
+		t.Fatalf("scrub changed %d cases of the table, want 15 or more", dropped)
+	}
+	// The characters of the item (a C1 CSI, a line separator, a bidi
+	// override, an ESC) go; a tab and a newline stay.
+	if got, want := scrub("a\u009bb\u2028c\u202ed\te\nf\x1b[2Jg"), "abcd\te\nf[2Jg"; got != want {
+		t.Errorf("scrub = %q, want %q", got, want)
+	}
 }
 
 func TestRejectGlobalClusterFlag(t *testing.T) {

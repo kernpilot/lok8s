@@ -550,8 +550,9 @@ func TestSpaceStatusShowsNodeMaintenance(t *testing.T) {
 		`{"name":"worker-4","status":"Ready","lane":"metal","unschedulable":"true","maintenance":{"phase":7,"reason":"`+long+`"}},`+
 		`{"name":"worker-5","status":"Ready","lane":"metal","maintenance":{"action":"cordon","phase":"Pending","reason":""}},`+
 		`{"name":"worker-6","status":"Ready","lane":"metal","maintenance":"drain"},`+
-		`{"name":"worker-7","status":"Ready","lane":"metal","maintenance":{"action":"drain\tx","phase":"Failed","reason":"no\n  worker-9  Ready  metal\tforged"}}`+
-		`],"usage":{"nodes":7,"maxNodes":7}}}`)
+		`{"name":"worker-7","status":"Ready","lane":"metal","maintenance":{"action":"drain\tx","phase":"Failed","reason":"no\n  worker-9  Ready  metal\tforged"}},`+
+		`{"name":"worker-8","status":"Ready","lane":"metal","maintenance":{"action":"drain","phase":"Blocked","reason":"a\u009b2Kb\u2028c\u202ed\u0085e\u200bf"}}`+
+		`],"usage":{"nodes":8,"maxNodes":8}}}`)
 	mustOK(t, h.ctx.SpaceStatus(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec), h.output())
 	out := h.out.String()
 	for _, want := range []string{
@@ -564,6 +565,9 @@ func TestSpaceStatusShowsNodeMaintenance(t *testing.T) {
 		// A newline or a tab in a server string becomes a space: one node,
 		// one line.
 		"  worker-7  Ready  metal  drain x Failed: no   worker-9  Ready  metal forged\n",
+		// A C1 CSI, a line separator, a bidi override, a NEL and a
+		// zero-width space go too.
+		"  worker-8  Ready  metal  drain Blocked: a2Kbcdef\n",
 	} {
 		mustContain(t, out, want)
 	}
