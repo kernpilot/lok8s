@@ -59,7 +59,10 @@ warn() {
 # (U+200D). shown_name replaces each one with '?'. The `clean` of the
 # kubehz agent records (libs/kubehz/agent) drops each one. The Go twin is
 # ui.Unshown (internal/ui). Each range is a clause of its own (one mutant
-# each).
+# each). internal/ui/testdata/unshown.json holds the runs of ui.Unshown (go
+# test ./internal/ui/ -update makes it): a Go test checks ui.Unshown and
+# tests/unit/verbose_shown_test.bats checks this def against it on every
+# code point from 0 to U+10FFFF.
 VERBOSE_JQ_UNSHOWN='def unshown: . < 32 or (. >= 127 and . < 160)
   or . == 173
   or . == 1564
