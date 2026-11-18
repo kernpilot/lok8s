@@ -1456,10 +1456,10 @@ parity::stub_kubectl_fail "${PROJ}"
 # renders kubeone.yaml (generate_config: the core template, then the spec.oidc
 # and spec.auditLog merges), then stops at the inventory step ("ssh private
 # key not found"), before kubeone apply. The streams are diffed, and so is the
-# rendered manifest. The Go merge writes with yaml.v3 and the bash with yq -i,
-# so the CONTENT is the contract: both sides are compared as sorted JSON. A
-# refused spec.auditLog must stop BEFORE the provision ("mock provision ran"
-# absent) and leave no manifest and no temp file.
+# rendered manifest. The Go merge writes with yaml.v3 and the bash with yq
+# (kubeone::_yq_edit), so the CONTENT is the contract: both sides are compared
+# as sorted JSON. A refused spec.auditLog must stop BEFORE the provision
+# ("mock provision ran" absent) and leave no manifest and no temp file.
 mkdir -p "${PROJ}/.lok8s/providers/mock"
 cat > "${PROJ}/.lok8s/providers/mock/main" <<'SH'
 #!/usr/bin/env argsh
