@@ -238,6 +238,15 @@ MAINTENANCE = {
 }
 MAINTENANCE_PREFIX = "/api/spaces/sp-1a2b3c4d/nodes/"
 
+# POST /api/spaces/sp-1a2b3c4d/join-token, by the node name in the body,
+# with no join script: a ticket in the bootstrap-token shape, and three
+# that both implementations refuse (a trailing newline, a NUL, a CR). The
+# ticket is built here from two parts.
+JOIN_PATH = "/api/spaces/sp-1a2b3c4d/join-token"
+TICKET = ".".join(("a1b2c3", "d4e5f6g7h8i9j0k1"))
+TICKETS = {"worker-1": TICKET, "worker-nl": TICKET + "\n", "worker-nul": TICKET + "\x00",
+           "worker-cr": TICKET + "\r"}
+
 ROUTES = {
     ("GET", "/api/spaces"): (200, ok([SPACE, ODD_SPACE], {"pagination": {"page": 1, "perPage": 500, "total": 2, "pages": 1}})),
     ("GET", "/api/spaces/sp-1a2b3c4d"): (200, ok(SPACE_DETAIL)),
@@ -369,6 +378,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.close_connection = True
                 return None
             return self.answer(*found)
+        if self.command == "POST" and path == JOIN_PATH and isinstance(body, dict):
+            ticket = TICKETS.get(body.get("nodeName"))
+            if ticket is None:
+                return self.answer(*refusal(404, "NOT_FOUND", "Node not found in this space"))
+            return self.answer(201, ok({"token": ticket, "expiresAt": "2026-10-04T13:00:00.000Z"}))
         if self.command == "POST" and path == "/api/spaces" and isinstance(body, dict):
             return self.answer(*CREATES.get(body.get("slug"), refusal(400, "BAD_REQUEST", "slug: invalid")))
         return self.answer(*ROUTES.get((self.command, path), refusal(404, "NOT_FOUND", "Not found")))

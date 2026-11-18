@@ -146,9 +146,9 @@ func newKubehzJoin(paths *config.Paths) *cobra.Command {
 			return kubehzRun(kubehzContext(cmd, paths).Join(cmd.Context(), d, args[0], printToken))
 		},
 	}
-	// Go-only (deviation D21): the ticket travels inside the join script;
-	// the terminal shows it only on request.
-	c.Flags().Bool("print-token", false, "Also print the plaintext ticket when a join script was written")
+	// Go-only (deviation D21): the ticket travels in a private file (the
+	// join script, else a ticket file); the terminal shows it only on request.
+	c.Flags().Bool("print-token", false, "Also print the plaintext ticket (without a join script: instead of the ticket file)")
 	return c
 }
 

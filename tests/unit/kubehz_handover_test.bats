@@ -69,6 +69,8 @@ setup() {
 }
 
 teardown() {
+  # A server of tests/lib/http_stub.bash that a failed test left running.
+  [[ -z "${STUB_PID:-}" ]] || kill "${STUB_PID}" 2>/dev/null || :
   teardown_tmpdir
 }
 
@@ -170,7 +172,9 @@ _mock_node_binaries() {
   restore_line=$(grep -n '^etcdutl snapshot restore' "${CALLS}" | head -1 | cut -d: -f1)
   init_line=$(grep -n '^kubeadm init' "${CALLS}" | head -1 | cut -d: -f1)
   verify_line=$(grep -n '^kubectl --kubeconfig' "${CALLS}" | head -1 | cut -d: -f1)
-  [ -n "${restore_line}" ] && [ -n "${init_line}" ] && [ -n "${verify_line}" ]
+  [ -n "${restore_line}" ]
+  [ -n "${init_line}" ]
+  [ -n "${verify_line}" ]
   [ "${restore_line}" -lt "${init_line}" ]
   [ "${init_line}" -lt "${verify_line}" ]
 
@@ -179,8 +183,13 @@ _mock_node_binaries() {
   run grep -F "etcdutl snapshot restore ${SNAPSHOT} --data-dir ${KUBEHZ_HANDOVER_ETCD_DIR}" "${CALLS}"
   assert_success
 
-  # kubeadm init got the config AND the documented preflight ignore.
-  run grep -F "kubeadm init --config ${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml --ignore-preflight-errors=DirAvailable--var-lib-etcd --skip-phases=addon/coredns,addon/kube-proxy" "${CALLS}"
+  # kubeadm init got the config AND the documented preflight ignore, and
+  # --skip-token-print: its closing join line holds the bootstrap token.
+  # The whole line, and one init: an argument added after the flag, or a
+  # second init, fails here.
+  run grep -c '^kubeadm init' "${CALLS}"
+  assert_output 1
+  run grep -F -x -- "kubeadm init --config ${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml --ignore-preflight-errors=DirAvailable--var-lib-etcd --skip-phases=addon/coredns,addon/kube-proxy --skip-token-print" "${CALLS}"
   assert_success
 
   # PKI was seeded byte-identical (kubeadm reuses it — the identity anchor).
@@ -932,4 +941,176 @@ _mock_node_binaries() {
     assert_success
     refute_output --partial "escapes the bundle dir"
   done
+}
+
+# The real curl downloads the snapshot from a local https server
+# (tests/lib/http_stub.bash), with a config file of the user in each place
+# curl looks for one: CURL_HOME, XDG_CONFIG_HOME, HOME. With -q first curl
+# reads none of them: the snapshot lands in the private file and nowhere
+# else, and no trace of the URL or the snapshot is written. The control in
+# each place, as in the api test: curl without -q reads the file there
+# (none for XDG_CONFIG_HOME on curl older than 7.73, with a note).
+@test "handover: the snapshot download reads no config file of the user" {
+  command -v python3 >/dev/null || skip "no python3"
+  [[ -n "$(command -v openssl)" ]] || skip "no openssl: the https stub needs a self-signed certificate"
+  [[ -n "$(type -P curl)" ]] || skip "no curl"
+  source "${_PROJECT_ROOT}/tests/lib/http_stub.bash"
+  _make_bundle
+  local var workdir got o e rc controls=0
+  stub_cert
+  export STUB_SNAPSHOT="${BATS_TEST_TMPDIR}/snap.src"
+  printf 'snap-%s' "$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')" > "${STUB_SNAPSHOT}"
+  http_stub_start "${STUB_CERT}" "${STUB_KEY}"
+  export CURL_CA_BUNDLE="${STUB_CERT}"
+  printf 'https://127.0.0.1:%s/snap.db' "${STUB_PORT}" > "${BUNDLE}/snapshot-location"
+  for var in CURL_HOME XDG_CONFIG_HOME HOME; do
+    echo "# config file in ${var}"
+    curlrc_dir "${var}"
+    workdir="${RC_DIR}.work"
+    mkdir -m 700 "${workdir}"
+    o="${RC_DIR}.stdout" e="${RC_DIR}.stderr" rc=0
+    # The checks of the config file come first, as in the api test.
+    ( curlrc_env "${var}" && handover::fetch_snapshot "${BUNDLE}" "" "${workdir}" ) > "${o}" 2> "${e}" || rc=$?
+    [ ! -e "${RC_TRACE}" ]
+    [ ! -e "${RC_OUT}" ]
+    [ "${rc}" -eq 0 ]
+    [ ! -s "${e}" ]
+    got=$(<"${o}")
+    [ "${got}" = "${workdir}/kubehz-handover-snapshot.db" ]
+    cmp -- "${STUB_SNAPSHOT}" "${got}"
+    [ "$(stat -c %a "${got}")" = 600 ]
+    if [[ "${var}" == XDG_CONFIG_HOME ]] && ! curl_reads_xdg; then
+      echo "# no control for XDG_CONFIG_HOME: this curl is older than 7.73 and does not look there" >&3
+    else
+      curlrc_control "${var}" "https://127.0.0.1:${STUB_PORT}/control"
+      controls=$((controls + 1))
+    fi
+  done
+  [ "$(grep -c '^GET /snap.db none$' "${STUB_LOG}")" -eq 3 ]
+  [ "$(grep -c '^GET /control none$' "${STUB_LOG}")" -eq "${controls}" ]
+  [ "$(wc -l < "${STUB_LOG}")" -eq $((3 + controls)) ]
+  http_stub_stop
+}
+
+# The real curl downloads the snapshot over https with SSLKEYLOGFILE set in
+# the environment: it must not append the TLS session keys to that file
+# (the keys decrypt a captured download: the URL with its signature, and
+# the snapshot). The control first, as in the api test: this curl writes a
+# key log for a request to the same server when the variable reaches it,
+# else the test skips; a control request that does not get to the stub
+# fails the test. A readonly SSLKEYLOGFILE stops the download before curl
+# sends a request, and bash says that it cannot unset it.
+@test "handover: the snapshot download writes no TLS key log" {
+  command -v python3 >/dev/null || skip "no python3"
+  [[ -n "$(command -v openssl)" ]] || skip "no openssl: the https stub needs a self-signed certificate"
+  [[ -n "$(type -P curl)" ]] || skip "no curl"
+  source "${_PROJECT_ROOT}/tests/lib/http_stub.bash"
+  _make_bundle
+  local workdir="${BATS_TEST_TMPDIR}/kl.work" o="${BATS_TEST_TMPDIR}/kl.stdout" e="${BATS_TEST_TMPDIR}/kl.stderr" got rc=0
+  stub_cert
+  export STUB_SNAPSHOT="${BATS_TEST_TMPDIR}/snap.src"
+  printf 'snap-%s' "$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')" > "${STUB_SNAPSHOT}"
+  http_stub_start "${STUB_CERT}" "${STUB_KEY}"
+  export CURL_CA_BUNDLE="${STUB_CERT}"
+  local kc=0
+  keylog_control || kc=$?
+  # 2: the control request did not get to the stub. That is a fault, not a skip.
+  [ "${kc}" -ne 2 ]
+  [ "${kc}" -eq 0 ] || skip "this curl writes no TLS key log (its TLS backend ignores SSLKEYLOGFILE), so the test cannot fail"
+  printf 'https://127.0.0.1:%s/snap.db' "${STUB_PORT}" > "${BUNDLE}/snapshot-location"
+  mkdir -m 700 "${workdir}" "${workdir}.ro"
+  export SSLKEYLOGFILE="${BATS_TEST_TMPDIR}/tls.keys"
+  ( handover::fetch_snapshot "${BUNDLE}" "" "${workdir}" ) > "${o}" 2> "${e}" || rc=$?
+  [ ! -e "${SSLKEYLOGFILE}" ]
+  [ "${rc}" -eq 0 ]
+  [ ! -s "${e}" ]
+  got=$(<"${o}")
+  [ "${got}" = "${workdir}/kubehz-handover-snapshot.db" ]
+  cmp -- "${STUB_SNAPSHOT}" "${got}"
+  rc=0
+  ( readonly SSLKEYLOGFILE && handover::fetch_snapshot "${BUNDLE}" "" "${workdir}.ro" ) > "${o}" 2> "${e}" || rc=$?
+  [ "${rc}" -ne 0 ]
+  grep -qF 'unset: SSLKEYLOGFILE: cannot unset: readonly variable' "${e}"
+  [ ! -e "${SSLKEYLOGFILE}" ]
+  [ "$(grep -c '^GET /snap.db none$' "${STUB_LOG}")" -eq 1 ]
+  [ "$(grep -c '^GET /control none$' "${STUB_LOG}")" -eq 1 ]
+  [ "$(wc -l < "${STUB_LOG}")" -eq 2 ]
+  http_stub_stop
+}
+
+# http::tls_log_vars_unset at the snapshot download, with a curl stand-in
+# that records its environment: curl gets none of the six TLS log and
+# trace variables (SSLKEYLOGFILE, GNUTLS_KEYLOGFILE, GNUTLS_DEBUG_LEVEL,
+# SSLTRACE, SSLDEBUG, SSLDEBUGFILE), the download works, and the caller
+# keeps all six. The
+# record must hold a control variable, else an empty record would pass.
+# Then each name is readonly in turn: bash says that it cannot unset that
+# name, the stand-in does not run, the snapshot file stays empty, and the
+# download fails with its error. This test needs no GnuTLS or NSS curl, so it never
+# skips.
+@test "handover: curl gets no TLS log or trace variable, and a readonly one stops the download" {
+  _make_bundle
+  printf 'https://backups.example.com/snap.db' > "${BUNDLE}/snapshot-location"
+  local name rc workdir="${BATS_TEST_TMPDIR}/tl.work" o="${BATS_TEST_TMPDIR}/tl.stdout" e="${BATS_TEST_TMPDIR}/tl.stderr"
+  local -a names=(SSLKEYLOGFILE GNUTLS_KEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE)
+  mkdir -m 700 "${workdir}" "${workdir}.ro"
+  export CURL_ENV_LOG="${BATS_TEST_TMPDIR}/curl.env"
+  curl() {
+    local out=""
+    command env > "${CURL_ENV_LOG}"
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "-o" ]; then out="$2"; fi
+      shift
+    done
+    printf 'snapshot-bytes' > "${out}"
+  }
+  export -f curl
+  export SSLKEYLOGFILE="${BATS_TEST_TMPDIR}/tls.keys" GNUTLS_KEYLOGFILE="${BATS_TEST_TMPDIR}/gnutls.keys" \
+    GNUTLS_DEBUG_LEVEL=9 SSLTRACE=99 SSLDEBUG=99 SSLDEBUGFILE="${BATS_TEST_TMPDIR}/nss.trace" KUBEHZ_ENV_CONTROL=on
+  handover::fetch_snapshot "${BUNDLE}" "" "${workdir}" > "${o}" 2> "${e}"
+  [ "$(cat "${o}")" = "${workdir}/kubehz-handover-snapshot.db" ]
+  [ "$(cat "${workdir}/kubehz-handover-snapshot.db")" = snapshot-bytes ]
+  [ ! -s "${e}" ]
+  # The control: the record is the exported environment of the stand-in.
+  grep -qx 'KUBEHZ_ENV_CONTROL=on' "${CURL_ENV_LOG}"
+  for name in "${names[@]}"; do
+    [ "$(grep -c "^${name}=" "${CURL_ENV_LOG}")" -eq 0 ]
+    # The caller keeps each one, with its value, as an export.
+    [[ "$(declare -p "${name}")" == "declare -x ${name}="* ]]
+  done
+  [ "${SSLKEYLOGFILE}|${GNUTLS_KEYLOGFILE}|${GNUTLS_DEBUG_LEVEL}|${SSLTRACE}|${SSLDEBUG}|${SSLDEBUGFILE}" = \
+    "${BATS_TEST_TMPDIR}/tls.keys|${BATS_TEST_TMPDIR}/gnutls.keys|9|99|99|${BATS_TEST_TMPDIR}/nss.trace" ]
+  for name in "${names[@]}"; do
+    rm -f -- "${CURL_ENV_LOG}"
+    rc=0
+    ( readonly "${name}" || exit 9
+      handover::fetch_snapshot "${BUNDLE}" "" "${workdir}.ro" ) > "${o}" 2> "${e}" || rc=$?
+    [ "${rc}" -eq 1 ]
+    grep -qF "unset: ${name}: cannot unset: readonly variable" "${e}"
+    [ "$(grep -c 'cannot unset' "${e}")" -eq 1 ]
+    grep -qF 'handover: downloading the snapshot from https://backups.example.com/snap.db failed' "${e}"
+    [ ! -e "${CURL_ENV_LOG}" ]
+    # The download makes the file (0600, empty) before curl runs: no bytes got in.
+    [ ! -s "${workdir}.ro/kubehz-handover-snapshot.db" ]
+  done
+}
+
+# A presigned https URL carries its signature in the query. When the
+# download fails, the error names the URL without the query (as the Go
+# twin's stripQuery): the path is there, no part of the query is. The
+# signature and the credential are built at runtime.
+@test "handover: a failed download names the URL without its query" {
+  _make_bundle
+  local sig cred workdir="${BATS_TEST_TMPDIR}/q.work" o="${BATS_TEST_TMPDIR}/q.stdout" e="${BATS_TEST_TMPDIR}/q.stderr" rc=0
+  sig="$(printf '%s' 5ign4ture)deadbeef"
+  cred="$(printf '%s' EXAMPLEKEY)%2F20261118"
+  printf 'https://backups.example.com/handover/snap.db?X-Amz-Credential=%s&X-Amz-Signature=%s' "${cred}" "${sig}" \
+    > "${BUNDLE}/snapshot-location"
+  mkdir -m 700 "${workdir}"
+  curl() { echo "curl: (22) The requested URL returned error: 403" >&2; return 22; }
+  export -f curl
+  handover::fetch_snapshot "${BUNDLE}" "" "${workdir}" > "${o}" 2> "${e}" || rc=$?
+  [ "${rc}" -eq 1 ]
+  grep -qF 'handover: downloading the snapshot from https://backups.example.com/handover/snap.db failed' "${e}"
+  [ "$(grep -c -F -e '?' -e 'X-Amz' -e "${sig}" -e "${cred}" "${e}" "${o}" | awk -F: '{s += $NF} END {print s}')" -eq 0 ]
 }

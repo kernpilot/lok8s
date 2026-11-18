@@ -15,6 +15,9 @@
 
 import ^utils/verbose
 import ^utils/http
+# node::assert_node_name (the join ticket's node name). node imports this
+# lib too; argsh imports a file once, so the cycle is harmless.
+import ^libs/kubehz/node
 
 # ── Config reader ────────────────────────────────────────
 
@@ -184,24 +187,69 @@ kubehz::space_api() {
 # kubehz::space_api without the "unreachable" line: a caller that must tell
 # a failure before the send from one after it (node::maintain) reads the
 # curl exit code in KUBEHZ_SPACE_API_CURL_RC (empty when curl did not run or
-# did not fail) and renders the failure itself.
+# did not fail) and renders the failure itself. It is also 1 when a
+# readonly name stopped http::tls_log_vars_unset before curl ran (the status
+# of unset). curl's own 1 also means that it sent nothing, so
+# node::curl_sent_nothing reads both correctly.
 # Usage: kubehz::space_api_call <method> <path> [json_body]
 kubehz::space_api_call() {
-  local method="${1}" path="${2}" body="${3:-}"
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # the bearer and the response (a join ticket)
+  # +x: a local takes the export flag of an exported variable of the same
+  # name, and a child would get the request body or the response (raw: no
+  # child runs after its assignment today, but a later edit could add one).
+  # +i: under shopt localvar_inherit (BASHOPTS in the environment can turn
+  # it on), a local takes the attributes of a variable of the same name in
+  # a caller scope, and an integer one (declare -i) would print the value
+  # in an arithmetic error. A readonly name (also a readonly nameref) makes
+  # the local fail, and an assignment would then go into the variable the
+  # nameref names: the function stops before it reads a secret.
+  local method="${1}" path="${2}"
+  # Before the first refusal: a caller (node::maintain) must not read the
+  # status, the curl code or the response of an earlier call (a response
+  # can hold a join ticket). The response global is checked below.
   KUBEHZ_SPACE_API_STATUS=""
-  KUBEHZ_SPACE_API_BODY=""
   KUBEHZ_SPACE_API_CURL_RC=""
+  KUBEHZ_SPACE_API_BODY=""
+  local +x +i body raw || { error "kubehz::space_api_call: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  body="${3:-}"
+  # A response can hold a join ticket: the global never goes to a child
+  # (set -a, or an export before), and the caller unsets it.
+  declare -g +x +i KUBEHZ_SPACE_API_BODY
+  KUBEHZ_SPACE_API_BODY=""
+  # The name the response goes to must now be a plain, empty string. declare
+  # -g follows a nameref (a readonly one too), and the response would go
+  # into the variable it names. A local of a caller with this name gets the
+  # response instead of the global: as an integer or an export it would
+  # print the response in an arithmetic error or give it to a child.
+  [[ "$(declare -p KUBEHZ_SPACE_API_BODY 2>/dev/null)" == 'declare -- KUBEHZ_SPACE_API_BODY=""' ]] || {
+    error "kubehz::space_api_call: KUBEHZ_SPACE_API_BODY is not a plain variable (a nameref, an integer or an export of the caller)"
+    return 1
+  }
   http::credential_ok KUBEHZ_TOKEN || return 1
 
   local -a extra=()
   [[ -n "${body}" ]] && extra=(-H "Content-Type: application/json" -d "${body}")
 
-  local raw
-  # The bearer reaches curl in a config on stdin, never on argv.
-  raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
-    curl -K - -sSL -w $'\n%{http_code}' -X "${method}" \
-    "${LOK8S_KUBEHZ_API_URL}${path}" \
-    "${extra[@]}") || {
+  # The bearer reaches curl in a config on stdin, never on argv. -q first:
+  # curl then reads no config file of the user (.curlrc in CURL_HOME or
+  # HOME, curlrc in XDG_CONFIG_HOME). A trace-ascii line there would log the
+  # bearer and the answer, an output line would write the answer to another
+  # file. curl obeys -q only as its first argument. In the subshell,
+  # http::tls_log_vars_unset clears the TLS log and trace controls for curl
+  # only: SSLKEYLOGFILE, GNUTLS_KEYLOGFILE, GNUTLS_DEBUG_LEVEL, SSLTRACE,
+  # SSLDEBUG and SSLDEBUGFILE (a key log, GnuTLS debug output with key
+  # material, an NSS trace with plaintext; the reasons are in
+  # utils/http.sh). Each could give away the bearer or the answer. A
+  # readonly name in the list stops the call before curl runs:
+  # KUBEHZ_SPACE_API_CURL_RC then holds the status of unset (1), not a
+  # status of curl.
+  raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
+    http::tls_log_vars_unset &&
+      curl -q -K - -sSL -w $'\n%{http_code}' -X "${method}" \
+        "${LOK8S_KUBEHZ_API_URL}${path}" \
+        "${extra[@]}"
+  ) ) || {
     KUBEHZ_SPACE_API_CURL_RC=$?
     return 1
   }
@@ -500,12 +548,188 @@ kubehz::space_wait_active() {
   return 1
 }
 
+# The directory a join ticket goes under, as the Go twin's joinTempDir:
+# TMPDIR (else /tmp), absolute (a relative TMPDIR is taken from PWD), with
+# each symlink resolved (cd -P; TMPDIR=/ and // give /). Each part of the
+# resolved path, from / down to the leaf, must belong to root or to this
+# user, and must not be writable by others unless it has the sticky bit
+# (/tmp passes). The walk goes top-down: each part is read (stat, no
+# follow: a link is refused) before any part below it. A part that passes
+# lets no other user rename or replace an entry in it (they cannot write
+# it, or the sticky bit keeps them to their own entries), so each part
+# that was checked stays the same up to the create below it. A bottom-up
+# walk would let the owner of an ancestor that is not checked yet swap it
+# for a prepared tree after the parts below it passed. "/"
+# alone may also show the overflow uid (/proc/sys/kernel/overflowuid, else
+# 65534): in a user namespace that does not map root, the host's "/" shows
+# so; any other part with that owner can be any user of the host. A part
+# of this user counts only while the uid of this user is not the overflow
+# uid: in a namespace without a mapping for this user, this user and every
+# other unmapped owner show that uid, so "ours" proves nothing there. The
+# owner of a part could otherwise rename the fresh directory and put a
+# FIFO or a link in place of the ticket or the script. Prints the resolved
+# path. Returns 1 when TMPDIR cannot be resolved (silent: the caller
+# reports the failed write), 2 when a part fails (the message is printed).
+# Usage: kubehz::space_join_tmp_dir
+kubehz::space_join_tmp_dir() {
+  local dir="${TMPDIR:-/tmp}" real part rest meta uid mode why ovf="" unmapped
+  [[ "${dir}" == /* ]] || dir="${PWD}/${dir}"
+  real=$(cd -P -- "${dir}" 2>/dev/null && pwd -P) || return 1
+  # pwd -P keeps a leading // (POSIX leaves it open); Go cleans it to /.
+  while [[ "${real}" == //* ]]; do real="${real#/}"; done
+  { read -r ovf < /proc/sys/kernel/overflowuid; } 2>/dev/null || ovf=""
+  [[ "${ovf}" =~ ^[0-9]+$ ]] || ovf=65534
+  # Top-down (see above): / first, then one name more for each turn.
+  part=/ rest="${real#/}"
+  while :; do
+    why="" unmapped=0
+    meta=$(stat -c '%u %a' -- "${part}" 2>/dev/null) || meta=""
+    uid="${meta%% *}" mode="${meta#* }"
+    if [[ -z "${meta}" ]]; then
+      why="cannot be read"
+    elif [[ -L "${part}" ]]; then
+      why="is a symlink"
+    elif ! { [[ "${uid}" == 0 ]] \
+      || [[ "${uid}" == "${EUID}" && "${EUID}" != "${ovf}" ]] \
+      || [[ "${part}" == / && "${uid}" == "${ovf}" ]]; }; then
+      if [[ "${uid}" == "${EUID}" ]]; then
+        # Ours, and refused: this user has the overflow uid.
+        why="cannot be checked (uid ${uid})" unmapped=1
+      else
+        why="belongs to another user (uid ${uid})"
+      fi
+    elif (( (8#${mode} & 8#022) != 0 && (8#${mode} & 8#1000) == 0 )); then
+      why="is writable by others and has no sticky bit"
+    fi
+    if [[ -n "${why}" ]]; then
+      error "the temp dir for the join ticket is not safe: ${part} ${why}"
+      if (( unmapped )); then
+        echo "  The uid of this user is not mapped in the namespace, so the CLI cannot check who owns TMPDIR." >&2
+        echo "  Run it where the uid of this user is mapped (unshare --map-current-user), or outside the namespace." >&2
+      else
+        echo "  Set TMPDIR to a directory of your own that only you can write (mode 0700)." >&2
+      fi
+      return 2
+    fi
+    [[ -n "${rest}" ]] || break
+    part="${part%/}/${rest%%/*}"
+    if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+  done
+  printf '%s\n' "${real}"
+}
+
+# Write a join ticket to a FRESH private directory under the user's temp dir
+# (kubehz::space_join_tmp_dir): <tmp>/kubehz-join-<random>/kubehz-join-<node>.token,
+# 0700 over 0600, as the Go twin writes it (writeJoinFile). mktemp -d picks a
+# name nobody can plant in a shared /tmp. The directory is set to 0700 and
+# must be 0700 before anything goes into it, as in the Go twin. The file is made empty first,
+# under noclobber, and must then be a regular file of ours, not a link:
+# noclobber lets a FIFO (or a link to one) through, and the check stops
+# there before any byte of the ticket goes out. The umask 077 inside sets
+# the modes, and chmod sets the mode of the empty file again (a default ACL
+# on TMPDIR wins over the umask, as the Go twin's chmod through the handle
+# does); that mode is checked before the write too. The node name is part
+# of the path, so it is checked here.
+# Prints the path. Returns 2 when the node name is refused (the message is
+# printed), 1 when the write fails (or a local cannot be declared: nothing
+# was written), 3 when the write fails and the removal of the file or the
+# directory fails too. When the write fails, the first line on stdout is
+# its cause (empty when a message was printed already); with 3, the second
+# line is the directory, which may still hold a part of the ticket.
+# Usage: kubehz::space_write_join_ticket <node_name> <token>
+kubehz::space_write_join_ticket() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # the ticket
+  # +x: a local takes the export flag of an exported variable of the same
+  # name, and a child (mktemp, stat, chmod) would get the ticket. +i and the
+  # refusal: as in kubehz::space_api_call (an integer of a caller would
+  # print the ticket; a readonly nameref would take it).
+  local +x +i node_name token dir priv path || { error "kubehz::space_write_join_ticket: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  node_name="${1}" token="${2}"
+  node::assert_node_name "${node_name}" || return 2
+  # rc 2: the check printed why (no cause); rc 1: TMPDIR cannot be resolved.
+  dir=$(kubehz::space_join_tmp_dir) || {
+    (( $? == 2 )) || printf '%s\n' "the temp dir (TMPDIR) cannot be resolved"
+    return 1
+  }
+  priv=$(umask 077 && mktemp -d "${dir%/}/kubehz-join-XXXXXXXXXX" 2>/dev/null) || {
+    printf '%s\n' "mktemp -d failed in ${dir}"
+    return 1
+  }
+  path="${priv}/kubehz-join-${node_name}.token"
+  # Each check before the write; `|| return` returns the status of the
+  # cleanup (1 or 3), and keeps set -e of a caller from ending the shell.
+  # In a setgid TMPDIR the fresh directory is 2700 (it takes the setgid
+  # bit). GNU chmod keeps the setgid bit of a directory for a mode of three
+  # or four digits (700, 0700); the fifth digit clears it, as the chmod of
+  # the Go twin does.
+  chmod 00700 -- "${priv}" 2>/dev/null \
+    || { kubehz::_join_write_failed "${priv}" "${path}" "the mode of the directory cannot be set to 0700" || return; }
+  [[ "$(stat -c '%a' -- "${priv}" 2>/dev/null)" == 700 ]] \
+    || { kubehz::_join_write_failed "${priv}" "${path}" "not a private directory (mode 0700)" || return; }
+  ( umask 077 && set -C && : > "${path}" ) 2>/dev/null \
+    || { kubehz::_join_write_failed "${priv}" "${path}" "the file cannot be created (it exists, or the directory cannot be written)" || return; }
+  [[ -f "${path}" && ! -L "${path}" && -O "${path}" ]] \
+    || { kubehz::_join_write_failed "${priv}" "${path}" "not a private file" || return; }
+  chmod 600 -- "${path}" 2>/dev/null \
+    || { kubehz::_join_write_failed "${priv}" "${path}" "the mode of the file cannot be set to 0600" || return; }
+  [[ "$(stat -c '%a' -- "${path}" 2>/dev/null)" == 600 ]] \
+    || { kubehz::_join_write_failed "${priv}" "${path}" "not a private file" || return; }
+  # printf is a builtin: the ticket is on no argv.
+  ( printf '%s\n' "${token}" >> "${path}" ) 2>/dev/null \
+    || { kubehz::_join_write_failed "${priv}" "${path}" "the write failed" || return; }
+  printf '%s\n' "${path}"
+}
+
+# The cleanup of a failed ticket write (kubehz::space_write_join_ticket):
+# prints the cause, removes the file and the fresh directory, and when that
+# fails, prints the directory too (it may still hold a part of the ticket).
+# Returns 1, or 3 when the removal failed.
+# Usage: kubehz::_join_write_failed <dir> <file> <cause>
+kubehz::_join_write_failed() {
+  printf '%s\n' "${3}"
+  if ! rm -f -- "${2}" 2>/dev/null || ! rmdir -- "${1}" 2>/dev/null; then
+    printf '%s\n' "${1}"
+    return 3
+  fi
+  return 1
+}
+
 # Mint a single-node join ticket and print the join block. The plaintext token
-# is returned exactly once by the api and never persisted anywhere — a lost
-# ticket is re-minted, not recovered.
+# is returned exactly once by the api and kept only in a private ticket file
+# (kubehz::space_write_join_ticket), never on stdout: a terminal (scrollback,
+# CI logs, a shared screen) is a copy nobody asked for. A lost ticket is
+# re-minted, not recovered.
+# The response, the ticket and the API token stay out of a trace (set -x)
+# and out of the environment of a child (set -a): the guard lines (as in
+# utils/keysonly.sh) turn both off, and the response global is unset before
+# the options of the caller come back.
 # Usage: kubehz::space_mint_join <space_id> <node_name>
 kubehz::space_mint_join() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # the response and the ticket
+  local rc=0
+  kubehz::_space_mint_join "$@" || rc=$?
+  unset KUBEHZ_SPACE_API_BODY
+  return "${rc}"
+}
+
+# The body of kubehz::space_mint_join (call that one: it holds the guard).
+kubehz::_space_mint_join() {
   local space_id="${1}" node_name="${2}"
+  # The names that hold the ticket, before the mint: a refusal here costs
+  # no live ticket. +x: a local takes the export flag of an exported
+  # variable of the same name, and a child (jq) would get the ticket. +i and
+  # the refusal: as in kubehz::space_api_call.
+  local +x +i token_json token expires || { error "kubehz::_space_mint_join: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  # Before the mint: a refused name must not cost a live ticket.
+  node::assert_node_name "${node_name}" || return 1
+  # Nor a temp dir that fails the check (it printed why, rc 2). The writer
+  # checks again: the directory can change in between. A TMPDIR that
+  # cannot be resolved (rc 1) is left to the writer, as before.
+  local tmp_rc=0
+  kubehz::space_join_tmp_dir >/dev/null || tmp_rc=$?
+  (( tmp_rc != 2 )) || return 1
 
   local payload rc=0
   payload=$(jq -n --arg nodeName "${node_name}" '{nodeName: $nodeName}')
@@ -515,24 +739,74 @@ kubehz::space_mint_join() {
     return 1
   fi
 
-  local token expires
-  token=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.token // .token // empty')
+  # The token as JSON text (jq -c): a control character in it stays an
+  # escape, so a trailing newline, a CR or a NUL fails the shape check
+  # below, as in the Go twin. $(jq -r ...) would strip a trailing newline
+  # and drop a NUL.
+  token_json=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -c '.data.token // .token // empty')
   expires=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.expiresAt // .expiresAt // empty')
   # A server string for a plain echo: scrubbed and clipped, as the Go twin
   # does. (The Go twin also prints an endpoint, next to the join script;
   # this tree has no join script, so it prints no endpoint.)
   [[ -z "${expires}" ]] || expires=$(kubehz::space_bound_string "${expires}")
-  if [[ -z "${token}" ]]; then
+  if [[ -z "${token_json}" || "${token_json}" == '""' ]]; then
     error "kubehz API did not return a join token for '${node_name}'"
     return 1
   fi
+  # The kubeadm bootstrap-token shape (<6 id>.<16 secret>), as the Go twin's
+  # joinTokenRe, in JSON quotes: anything else is not a ticket to hand to a
+  # machine, and as a server string for the terminal it could inject. The
+  # characters are spelled out: in a bash regex, a range like a-z follows
+  # the locale (in en_US.UTF-8 it matches e with an accent).
+  local tok_c='[abcdefghijklmnopqrstuvwxyz0123456789]'
+  local tok_re="^\"${tok_c}{6}[.]${tok_c}{16}\"\$" ncm=0 shape=0
+  # nocasematch would let an uppercase ticket through: off for the check.
+  shopt -q nocasematch && ncm=1
+  shopt -u nocasematch
+  [[ "${token_json}" =~ ${tok_re} ]] && shape=1
+  # The match left the ticket in BASH_REMATCH, a global: a trace after the
+  # return (PS4 can name it) would print it. A match of '' replaces it.
+  # shellcheck disable=SC2050 # a constant match on purpose: it empties BASH_REMATCH
+  [[ '' =~ ^$ ]]
+  (( ncm == 0 )) || shopt -s nocasematch
+  if (( shape == 0 )); then
+    error "kubehz API returned a join ticket for '${node_name}' in a shape this CLI does not recognise; nothing was written"
+    return 1
+  fi
+  token="${token_json:1:${#token_json}-2}"
 
   echo ""
   echo "  Node '${node_name}' — join ticket (valid until ${expires:-<unknown>}, single use):"
-  echo "    ${token}"
+  local path cause rc=0
+  path=$(kubehz::space_write_join_ticket "${node_name}" "${token}") || rc=$?
+  if (( rc == 2 )); then
+    return 1
+  elif (( rc != 0 )); then
+    # The mint already happened server-side: the ticket is live. The first
+    # line is the cause of the failed write (empty when the writer printed
+    # a message itself). With rc 3 the cleanup failed too, and the second
+    # line is the directory that may still hold a part of it.
+    cause="${path%%$'\n'*}"
+    if [[ "${path}" == *$'\n'* ]]; then path="${path#*$'\n'}"; else path=""; fi
+    error "could not write the join ticket for '${node_name}'${cause:+: ${cause}}"
+    echo "" >&2
+    echo "  The ticket was minted before the write failed. It stays valid until ${expires:-<unknown>}," >&2
+    if (( rc == 3 )); then
+      echo "  single use. The cleanup failed too: ${path} may still hold a part of it;" >&2
+      echo "  delete that directory. Mint a fresh one once the temp dir (TMPDIR) is writable:" >&2
+    else
+      echo "  single use, and no copy was saved. Mint a fresh one once the temp dir" >&2
+      echo "  (TMPDIR) is writable:" >&2
+    fi
+    echo "    lo kubehz join ${node_name}" >&2
+    return 1
+  fi
+  echo "    (written to ${path}, mode 0600)"
   echo "  On the machine, follow the node-join guide for your platform"
-  echo "  (kubehz docs: Spaces → Joining nodes). The ticket is bound to this"
-  echo "  node name and expires quickly — mint a fresh one with:"
+  echo "  (kubehz docs: Spaces → Joining nodes)."
+  echo "  Delete the ticket file (and its directory) once the node has joined."
+  echo "  The ticket is bound to this node name and expires quickly — mint a"
+  echo "  fresh one with:"
   echo "    lo kubehz join ${node_name}"
 }
 

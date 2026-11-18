@@ -223,15 +223,20 @@ A few things worth knowing before you reach for it:
   ticket: read it, copy it to the machine, run it there as root, delete it
   (and its directory) once the node has joined. The terminal does not repeat
   the ticket; `lo kubehz join <node> --print-token` shows it when you need it
-  in the open. Older platforms without the script print the ticket and a
-  pointer to the node-join guide instead.
+  in the open. Older platforms without the script get the ticket alone, in a
+  file of the same private kind,
+  `$TMPDIR/kubehz-join-<random>/kubehz-join-<node>.token` (0700 over 0600):
+  `lo` prints its path and a pointer to the node-join guide, not the
+  ticket. Delete the file and its directory once the node has joined. With
+  `--print-token`, `lo` prints the ticket instead and writes no ticket
+  file.
 - **The three numbers apply when the space is created.** A later
   `lo provision` adopts the space and changes nothing on the platform. An
   edit under `space.limits` therefore gets a note in the output instead of a
   silent no-op. Change the numbers of a live space in the dashboard.
 - **A join ticket is minted once**, is bound to one node name, and expires
-  quickly. Nothing stores the plaintext outside the script: a lost ticket
-  gets re-minted, never recovered.
+  quickly. Nothing stores the plaintext outside that one private file: a
+  lost ticket gets re-minted, never recovered.
 - **The kubeconfig holds no credential.** The control plane is
   platform-operated and is not handed out. `lo provision` writes
   `.kubeconfig/<domain>.yaml`, the kubelogin file the api serves for the

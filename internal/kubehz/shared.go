@@ -8,9 +8,12 @@ package kubehz
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -457,13 +460,22 @@ var joinTokenRe = regexp.MustCompile(`^[a-z0-9]{6}\.[a-z0-9]{16}$`)
 
 // spaceMintJoin ports kubehz::space_mint_join: mint a single-node join
 // ticket and print the join block. The plaintext token is returned exactly
-// once by the api and never persisted beyond the join script. Deviation
-// D21 (Go-only): when the api ships a join script the ticket is NOT echoed
-// to the terminal unless printToken is set — the script carries it, and a
-// terminal (scrollback, CI logs, a shared screen) is a second copy nobody
-// asked for. Without a script the terminal is the only channel, so the
-// ticket is printed as before.
+// once by the api and kept only in a private file: the join script when
+// the api ships one, else a ticket file of its own (both twins). A
+// terminal (scrollback, CI logs, a shared screen) is a copy nobody asked
+// for, so the ticket goes to stdout only when printToken is set.
+// Deviation D21 (Go-only): the join script and the printToken flag.
 func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeName string, printToken bool) error {
+	// Before the mint: a refused name must not cost a live ticket.
+	if err := c.assertNodeName(nodeName); err != nil {
+		return err
+	}
+	// Nor a temp dir that fails the check (joinTempDir printed why). The
+	// writer checks again: the directory can change in between. A TMPDIR
+	// that cannot be resolved is left to the writer, as before.
+	if _, err := c.joinTempDir(); errors.Is(err, errTmpNotPrivate) {
+		return ErrHandled
+	}
 	res, err := c.spaceAPI(ctx, cfg, "POST", "/api/spaces/"+spaceID+"/join-token", compactJSON(jsonPair{"nodeName", nodeName}))
 	if err != nil {
 		return err
@@ -492,10 +504,19 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 	}
 	c.echo("")
 	c.echo("  Node '%s' — join ticket (valid until %s, single use):", nodeName, expires)
-	if script == "" || printToken {
+	switch {
+	case printToken:
 		c.echo("    %s", token)
-	} else {
+	case script != "":
 		c.echo("    (inside the join script below; --print-token shows it here)")
+	default:
+		// No script: the ticket goes to a private file of its own, as the
+		// bash twin writes it (same name, same bytes, same line).
+		path, err := c.writeJoinFile(nodeName, ".token", token+"\n")
+		if err != nil {
+			return c.joinWriteFailed("join ticket", nodeName, expires, err)
+		}
+		c.echo("    (written to %s, mode 0600)", path)
 	}
 	// The api ships the join recipe with the ticket (the script the docs
 	// point at: containerd + kubelet, the cluster CA read from the control
@@ -505,20 +526,9 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 	// `git add .` away from a public secret. Nothing runs here: read it,
 	// copy it to the machine, run it as root there.
 	if script != "" {
-		path, err := c.writeJoinScript(nodeName, script)
-		if errors.Is(err, ErrHandled) {
-			return err
-		}
+		path, err := c.writeJoinFile(nodeName, ".sh", script)
 		if err != nil {
-			c.errorf("could not write the join script for '%s': %v", nodeName, err)
-			// The mint already happened server-side; the ticket is live
-			// with no local copy (node.go's mintedSlotNote, for spaces).
-			c.echoErr("")
-			c.echoErr("  The ticket was minted before the write failed. It stays valid until %s,", expires)
-			c.echoErr("  single use, and no copy was saved. Mint a fresh one once the temp dir")
-			c.echoErr("  (TMPDIR) is writable:")
-			c.echoErr("    lo kubehz join %s", nodeName)
-			return ErrHandled
+			return c.joinWriteFailed("join script", nodeName, expires, err)
 		}
 		c.echo("  Join script (the ticket is inside; expires with it):")
 		c.echo("    %s", path)
@@ -528,58 +538,240 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 		c.echo("  Read it, then copy it to the machine and run it there as root:")
 		c.echo("    scp %s root@<machine>:/root/ && ssh root@<machine> bash /root/%s", path, filepath.Base(path))
 		c.echo("  Delete it (and its directory) once the node has joined.")
+		c.echo("  The ticket is bound to this node name and expires quickly — mint a")
+		c.echo("  fresh one with:")
 	} else {
+		// Without a script: the lines of the bash twin, which has no script.
 		c.echo("  On the machine, follow the node-join guide for your platform")
 		c.echo("  (kubehz docs: Spaces → Joining nodes).")
+		c.echo("  Delete the ticket file (and its directory) once the node has joined.")
+		c.echo("  The ticket is bound to this node name and expires quickly — mint a")
+		c.echo("  fresh one with:")
 	}
-	c.echo("  The ticket is bound to this node name and expires quickly — mint a")
-	c.echo("  fresh one with:")
 	c.echo("    lo kubehz join %s", nodeName)
 	return nil
 }
 
-// writeJoinScript stores the api's join recipe under the user's temp dir
-// (TMPDIR, else the OS default) in a FRESH private directory:
-// <tmp>/kubehz-join-<random>/kubehz-join-<node>.sh. The directory comes
-// from os.MkdirTemp (0700, unpredictable name), so there is no name to
-// pre-plant in a shared /tmp: nothing a foreign user creates can collide
-// with it, and the O_EXCL create inside is belt and braces. Every mint
-// makes a new directory — a fresh ticket does not overwrite an old file;
-// the old one expires with its ticket and the user deletes it. The node
-// name is part of the path, so it is validated here (the api's DNS-label
-// rule) as well.
-func (c *Context) writeJoinScript(nodeName, script string) (string, error) {
-	if err := c.assertNodeName(nodeName); err != nil {
-		return "", err
+// joinWriteFailed reports a failed write of a join file (what: "join
+// script" or "join ticket"). The mint already happened server-side, so the
+// ticket is live with no local copy (node.go's mintedSlotNote, for spaces).
+// An ErrHandled error (a refused node name) has printed its own message.
+func (c *Context) joinWriteFailed(what, nodeName, expires string, err error) error {
+	switch {
+	case errors.Is(err, ErrHandled):
+		return err
+	case errors.Is(err, errTmpNotPrivate):
+		// joinTempDir printed why, as the bash twin does.
+		c.errorf("could not write the %s for '%s'", what, nodeName)
+	default:
+		c.errorf("could not write the %s for '%s': %v", what, nodeName, err)
 	}
+	c.echoErr("")
+	c.echoErr("  The ticket was minted before the write failed. It stays valid until %s,", expires)
+	if left, ok := errors.AsType[*joinLeftError](err); ok {
+		c.echoErr("  single use. The cleanup failed too: %s may still hold a part of it;", left.dir)
+		c.echoErr("  delete that directory. Mint a fresh one once the temp dir (TMPDIR) is writable:")
+	} else {
+		c.echoErr("  single use, and no copy was saved. Mint a fresh one once the temp dir")
+		c.echoErr("  (TMPDIR) is writable:")
+	}
+	c.echoErr("    lo kubehz join %s", nodeName)
+	return ErrHandled
+}
+
+// joinLeftError: the write of a join file failed, and the removal of its
+// fresh directory (dir) failed too. The directory may still hold a part of
+// the ticket. The error text is the one of the write.
+type joinLeftError struct {
+	dir string
+	err error
+}
+
+func (e *joinLeftError) Error() string { return e.err.Error() }
+func (e *joinLeftError) Unwrap() error { return e.err }
+
+// errTmpNotPrivate: the temp dir of a join file failed the check of
+// joinTempDir, which printed why.
+var errTmpNotPrivate = errors.New("the temp dir is not private")
+
+// joinTempDir ports kubehz::space_join_tmp_dir: the directory a join file
+// goes under. TMPDIR (else the OS default), absolute, with each symlink
+// resolved (TMPDIR=/ is /). Each part of the resolved path, from / down to
+// the leaf (top-down: see the walk), must belong to root or to this user
+// (ownerTrusted: "/" may also show the overflow uid of a user namespace,
+// and a user with the overflow uid owns nothing it can prove), and must not
+// be writable by others unless it has the sticky bit (/tmp passes). The
+// owner of a part could otherwise rename the fresh directory and put a FIFO
+// or a link in place of the ticket or the script.
+func (c *Context) joinTempDir() (string, error) {
 	dir := c.getenv("TMPDIR")
 	if dir == "" {
 		dir = os.TempDir()
 	}
-	dir, err := filepath.Abs(dir)
+	// No filepath.Abs or Clean before EvalSymlinks: they make "link/.." the
+	// directory of the link, where the kernel (and cd -P in the bash twin)
+	// goes up from the target of the link. A relative TMPDIR is joined to
+	// the working directory as it is; EvalSymlinks resolves each link before
+	// the ".." after it.
+	if !filepath.IsAbs(dir) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		dir = wd + string(filepath.Separator) + dir
+	}
+	real, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		return "", err
 	}
-	priv, err := os.MkdirTemp(dir, "kubehz-join-")
+	// Top-down, from / to the leaf: each part is read (Lstat, no follow: a
+	// link is refused) before any part below it. A part that passes lets
+	// no other user rename or replace an entry in it (they cannot write it,
+	// or the sticky bit keeps them to their own entries), so each part that
+	// was checked stays the same up to the create below it (writeJoinFile:
+	// MkdirTemp, then the handle of the fresh directory). A bottom-up walk
+	// would let the owner of an ancestor that is not checked yet swap it for
+	// a prepared tree after the parts below it passed.
+	parts := []string{real}
+	for p := real; filepath.Dir(p) != p; p = filepath.Dir(p) {
+		parts = append(parts, filepath.Dir(p))
+	}
+	slices.Reverse(parts)
+	for _, part := range parts {
+		if why, unmapped := c.notPrivatePart(part); why != "" {
+			c.errorf("the temp dir for the join ticket is not safe: %s %s", part, why)
+			if unmapped {
+				c.echoErr("  The uid of this user is not mapped in the namespace, so the CLI cannot check who owns TMPDIR.")
+				c.echoErr("  Run it where the uid of this user is mapped (unshare --map-current-user), or outside the namespace.")
+			} else {
+				c.echoErr("  Set TMPDIR to a directory of your own that only you can write (mode 0700).")
+			}
+			return "", errTmpNotPrivate
+		}
+	}
+	return real, nil
+}
+
+// notPrivatePart says why one part of a temp dir path fails the check of
+// joinTempDir ("" when it passes). unmapped: the part is ours, and this
+// user has the overflow uid (a user namespace without a mapping for it).
+func (c *Context) notPrivatePart(part string) (why string, unmapped bool) {
+	fi, err := c.lstat(part)
+	if err != nil {
+		return "cannot be read", false
+	}
+	uid, ok := fileOwner(fi)
+	switch {
+	case !ok:
+		return "cannot be read", false
+	case fi.Mode()&fs.ModeSymlink != 0:
+		return "is a symlink", false
+	case !c.ownerTrusted(part, uid):
+		if uid == c.euid() {
+			// Ours, and refused: this user has the overflow uid.
+			return fmt.Sprintf("cannot be checked (uid %d)", uid), true
+		}
+		return fmt.Sprintf("belongs to another user (uid %d)", uid), false
+	case fi.Mode().Perm()&0o022 != 0 && fi.Mode()&fs.ModeSticky == 0:
+		return "is writable by others and has no sticky bit", false
+	}
+	return "", false
+}
+
+// ownerTrusted: a part of the temp dir path must belong to root, or to this
+// user while the uid of this user is not the overflow uid: in a user
+// namespace without a mapping for this user, this user and every other
+// unmapped owner show that uid, so "ours" proves nothing there. "/" alone
+// may also show the overflow uid: in a namespace that does not map root,
+// the host's "/" (root's) shows so. Any other part with that owner is
+// refused: there it can be any user of the host.
+func (c *Context) ownerTrusted(part string, uid int) bool {
+	ovf := c.overflowUID()
+	return uid == 0 || (uid == c.euid() && c.euid() != ovf) || (part == string(filepath.Separator) && uid == ovf)
+}
+
+// writeJoinFile stores a join file, the api's join recipe (ext ".sh") or
+// the ticket alone (ext ".token"), under the user's temp dir (joinTempDir)
+// in a FRESH private directory: <tmp>/kubehz-join-<random>/kubehz-join-<node><ext>.
+// The directory comes from os.MkdirTemp (unpredictable name), so there is
+// no name to pre-plant in a shared /tmp. The file is created through a
+// handle of that directory, with O_EXCL and O_NOFOLLOW: a name that is
+// there anyway (a file, a FIFO, a link) fails. The modes are set, not left
+// to the umask (a umask such as 0400 would give 0300 and 0200): the
+// directory 0700, the file 0600 through its handle. Every mint makes a new
+// directory — a fresh ticket does not overwrite an old file; the old one
+// expires with its ticket and the user deletes it. The node name is part
+// of the path, so it is validated here (the api's DNS-label rule) as well.
+func (c *Context) writeJoinFile(nodeName, ext, content string) (string, error) {
+	if err := c.assertNodeName(nodeName); err != nil {
+		return "", err
+	}
+	dir, err := c.joinTempDir()
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(priv, "kubehz-join-"+nodeName+".sh")
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	mkdirTemp := c.MkdirTemp
+	if mkdirTemp == nil {
+		mkdirTemp = os.MkdirTemp
+	}
+	priv, err := mkdirTemp(dir, "kubehz-join-")
 	if err != nil {
-		_ = os.RemoveAll(priv)
 		return "", err
 	}
-	if _, err := f.WriteString(script); err != nil {
+	name := "kubehz-join-" + nodeName + ext
+	if err := c.writeJoinInto(priv, name, content); err != nil {
+		removeAll := c.RemoveAll
+		if removeAll == nil {
+			removeAll = os.RemoveAll
+		}
+		if rerr := removeAll(priv); rerr != nil {
+			// The directory may still hold a part of the ticket.
+			return "", &joinLeftError{dir: priv, err: err}
+		}
+		return "", err
+	}
+	return filepath.Join(priv, name), nil
+}
+
+// writeJoinInto writes content to the new file name in the fresh directory
+// priv (writeJoinFile removes priv when it fails, and reports a failed
+// removal).
+func (c *Context) writeJoinInto(priv, name, content string) error {
+	if err := os.Chmod(priv, 0o700); err != nil { // #nosec G302 -- priv is a directory: the owner needs x to enter it
+		return err
+	}
+	root, err := os.OpenRoot(priv)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	fi, err := root.Stat(".")
+	if err != nil {
+		return err
+	}
+	if uid, ok := fileOwner(fi); !fi.IsDir() || fi.Mode().Perm() != 0o700 || !ok || uid != c.euid() {
+		return errNotPrivateDir
+	}
+	f, err := createExclNoFollow(root, name)
+	if err != nil {
+		return err
+	}
+	write, closeFile := c.joinWrite, c.joinClose
+	if write == nil {
+		write = func(f *os.File, s string) error { _, err := f.WriteString(s); return err }
+	}
+	if closeFile == nil {
+		closeFile = (*os.File).Close
+	}
+	if err := f.Chmod(0o600); err != nil {
 		_ = f.Close()
-		_ = os.RemoveAll(priv)
-		return "", err
+		return err
 	}
-	if err := f.Close(); err != nil {
-		_ = os.RemoveAll(priv)
-		return "", err
+	if err := write(f, content); err != nil {
+		_ = f.Close()
+		return err
 	}
-	return path, nil
+	return closeFile(f)
 }
 
 // ProvisionShared ports kubehz::provision_shared: the full provision arc for

@@ -38,7 +38,22 @@ http::require_https() {
 # The Go twins are curlConfigQuote and curlConfigData (internal/driver/kkp).
 # Usage: http::curl_config <option> <value> [<option> <value> ...]
 http::curl_config() {
-  local LC_ALL=C opt value out=""
+  local LC_ALL=C
+  # opt, value and out hold the credential line. +x: a local takes the
+  # export flag of an exported variable of the same name (no child runs
+  # here today). +i: under shopt localvar_inherit (BASHOPTS in the
+  # environment can turn it on), a local takes the attributes and the value
+  # of a variable of the same name in a caller scope, and an integer one
+  # (declare -i) would print the credential in an arithmetic error. A
+  # readonly name (also a readonly nameref) makes the local fail: then the
+  # function refuses as for a control character, with the line curl
+  # refuses.
+  local +x +i opt value out || {
+    error "http::curl_config: a local cannot be declared (a readonly name or a nameref of the caller)"
+    printf 'proto = "-all"\n'
+    return 1
+  }
+  out=""
   while (( $# >= 2 )); do
     opt="${1}"
     value="${2}"
@@ -78,4 +93,34 @@ http::credential_ok() {
     fi
   done
   return "${rc}"
+}
+
+# Unset the controls in the environment that make curl or its TLS library
+# write session keys, or a trace with plaintext, before a call that carries
+# a credential. Call it in the subshell that runs curl, so that the caller
+# keeps its environment:
+#   ( http::tls_log_vars_unset && curl -q ... )
+# The list:
+#   SSLKEYLOGFILE        curl appends the TLS session keys to this file, for
+#                        each backend that has a key log. The keys decrypt a
+#                        captured exchange.
+#   GNUTLS_KEYLOGFILE    the same key log under the GnuTLS name, which
+#                        GnuTLS also reads.
+#   GNUTLS_DEBUG_LEVEL   GnuTLS writes debug output on stderr; at high levels
+#                        it holds key material.
+#   SSLTRACE, SSLDEBUG, SSLDEBUGFILE
+#                        the trace and debug output of NSS (an older
+#                        NSS-backed curl, NSS built with DEBUG or TRACE). It
+#                        can hold the plaintext (a bearer, a signed URL).
+#                        Without SSLDEBUGFILE it goes to stderr.
+# One unset for the whole list: its status is 1 when any name in it is
+# readonly (it still unsets the others), so `&& curl` does not run curl.
+# The caller then gets that 1, not a status of curl.
+# Not covered: a curl or TLS library built to write keys or a trace by
+# itself (wolfSSL built with --enable-keylog-export, a debug build of a TLS
+# library), and an environment that an attacker controls (who sets the
+# environment can also set LD_PRELOAD).
+# Usage: http::tls_log_vars_unset
+http::tls_log_vars_unset() {
+  unset -v SSLKEYLOGFILE GNUTLS_KEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE
 }

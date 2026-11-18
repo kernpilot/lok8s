@@ -139,7 +139,13 @@ func newHarness(t *testing.T) *harness {
 	}))
 	t.Cleanup(h.srv.Close)
 
-	h.env = map[string]string{"KUBEHZ_TOKEN": "khz_test_token"}
+	// TMPDIR: a mint writes its join file (the script or the ticket) below
+	// the test's own tree, never into the host's temp dir.
+	tmp := filepath.Join(base, "tmp")
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h.env = map[string]string{"KUBEHZ_TOKEN": "khz_test_token", "TMPDIR": tmp}
 	h.ctx = &Context{
 		Paths: &config.Paths{
 			Base: base, Bin: filepath.Join(base, ".bin"),

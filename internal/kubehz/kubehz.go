@@ -77,11 +77,30 @@ type Context struct {
 	// and its target must have before the agent kubeconfig writes through
 	// the link (agent.go kubeconfigTarget).
 	Euid func() int
+	// OverflowUID is the uid an unmapped owner shows in a user namespace
+	// (nil = /proc/sys/kernel/overflowuid, else 65534): the owner that "/"
+	// alone may have in the temp-dir check of a join file (joinTempDir).
+	OverflowUID func() int
+	// Lstat is os.Lstat (nil = os.Lstat): the read of each part of the
+	// temp dir of a join file (joinTempDir). Tests log the order.
+	Lstat func(path string) (fs.FileInfo, error)
+	// RemoveAll is os.RemoveAll (nil = os.RemoveAll): the cleanup of a
+	// join file whose write failed (writeJoinFile).
+	RemoveAll func(path string) error
 	// LookPath is `command -v <tool>` (nil = execx.Look over Paths).
 	LookPath func(tool string) bool
 	// IsTTY reports whether stdout is a terminal (nil = false) — the
 	// assessment printer's colour switch.
 	IsTTY func() bool
+	// MkdirTemp makes the fresh private directory of a join file (nil =
+	// os.MkdirTemp). Tests return a directory they prepared, to plant a
+	// name at the path the file goes to.
+	MkdirTemp func(dir, pattern string) (string, error)
+	// joinWrite and joinClose are the write and the close of a join file
+	// (nil = (*os.File).WriteString and (*os.File).Close). Tests make them
+	// fail, to see that the fresh directory goes.
+	joinWrite func(f *os.File, s string) error
+	joinClose func(f *os.File) error
 	// ProviderOutput is the loaded provider's inventory JSON
 	// (provider::output on PROVIDER_CONFIG_FILE), consulted by the kubeone
 	// fingerprint reader when set. nil = no provider loaded → the spec's
@@ -136,6 +155,13 @@ func (c *Context) euid() int {
 		return c.Euid()
 	}
 	return os.Geteuid()
+}
+
+func (c *Context) lstat(path string) (fs.FileInfo, error) {
+	if c.Lstat != nil {
+		return c.Lstat(path)
+	}
+	return os.Lstat(path)
 }
 
 func (c *Context) isRoot() bool {

@@ -2269,7 +2269,7 @@ lo kubehz join <node> [flags]
 
 ```
   -h, --help          help for join
-      --print-token   Also print the plaintext ticket when a join script was written
+      --print-token   Also print the plaintext ticket (without a join script: instead of the ticket file)
 ```
 
 ### SEE ALSO
