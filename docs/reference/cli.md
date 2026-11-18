@@ -285,26 +285,28 @@ provider deletes each resource in the token's project that carries
 [the owner mark](../guide/deployment.md#hetzner-owner-mark)) gets a guard
 before anything is deleted:
 
-1. When another domain under `clusters/` has the same `cluster_name`
+1. The provider finds its resources by the `cluster_name`, so a descriptor
+   without `cluster_name` is refused. The destroy also stops before it
+   shows anything when the plan of the provider has a NUL byte. It also
+   stops when the plan names a `cluster_name` that a message cannot show as
+   it is. Such a name has a control, separator, bidi or invisible character
+   (a character that the plan shows as `?`, see
+   [the owner mark](../guide/deployment.md#hetzner-owner-mark)), a
+   backslash, U+FFFD or a byte that is not UTF-8. You type the
+   `cluster_name` to confirm, so the destroy shows it only as it is.
+2. When another domain under `clusters/` has the same `cluster_name`
    (`hetzner.json`, the `spec.provider.configRef` file or an inline
    `spec.provider.config`), the destroy stops. The resources of both
-   domains carry the same cluster label, and only the owner mark keeps them
+   domains carry the same cluster label. Only the owner mark keeps them
    apart: a resource of the other domain with a wrong mark (for example,
    from an `add-label` command that was run for the wrong domain) would be
-   deleted. The provider finds its resources by that key: a descriptor without
-   `cluster_name` is refused. The destroy also stops before it shows
-   anything when the plan of the provider has a NUL byte, or names a
-   `cluster_name` that a message cannot show as it is: a name with a control,
-   separator, bidi or invisible character (a character that the plan shows
-   as `?`, see [the owner mark](../guide/deployment.md#hetzner-owner-mark)),
-   a backslash, U+FFFD or a byte that is not UTF-8. You type the
-   `cluster_name` to confirm, so the destroy shows it only as it is.
-2. The destroy lists the resources that the provider would delete. When a
+   deleted.
+3. The destroy lists the resources that the provider would delete. When a
    list fails, the destroy stops.
-3. On a terminal, type the `cluster_name` to continue. Off a terminal, pass
+4. On a terminal, type the `cluster_name` to continue. Off a terminal, pass
    it with `--confirm-cluster <cluster_name>`. `--force` does not replace
    it. A refusal exits `3` and deletes nothing.
-4. The provider then deletes only the listed resources that still carry the
+5. The provider then deletes only the listed resources that still carry the
    label and the mark. A resource that is new since the confirmation stays, with a
    warning. `LOK8S_DESTROY_PLAN` carries the list to the provider; only this
    guard sets it, and `lo` clears an inherited value.
