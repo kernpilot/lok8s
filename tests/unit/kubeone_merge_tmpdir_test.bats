@@ -407,3 +407,152 @@ if [[ "$(trap -p INT TERM HUP)" == "${before}" ]]; then echo "traps after failur
   assert_output "1"
   _assert_only "${RW}" m.yaml
 }
+
+@test "kubeone::_yq_edit refuses a name of the trace guard (_ko_) and a nameref, and runs no yq" {
+  _yq_log_stub
+  # The trace guard declares _ko_ locals: such a name would export the
+  # guard's variable instead of the caller's.
+  _assert_name_refused '_ko_rc'
+  # A nameref passes the name pattern, but the export follows it to the
+  # variable that it names, here one of the helper's own.
+  local -n fixture_ref=_ye_file
+  _assert_name_refused 'fixture_ref'
+}
+
+# _count_stubs <dir> <yq pattern>: stubs of cat, yq and rm in <dir>. Each
+# logs to ENV_LOG how many lines of its environment hold a fixture
+# credential and how many hold a placeholder (RUSER, RPASS, username,
+# password or _ye_out set to "placeholder"). No value is logged. The cat
+# stub logs only the reads of a .username or .password file. When its
+# arguments hold <yq pattern>, the yq stub logs and sends TERM to MERGE_PID,
+# so the trap of the shell runs rm during the call.
+_count_stubs() {
+  local dir="${1}"
+  export ENV_LOG="${BATS_TEST_TMPDIR}/env.log" YQ_PATTERN="${2}"
+  REAL_YQ=$(command -v yq)
+  REAL_RM=$(command -v rm)
+  REAL_CAT=$(command -v cat)
+  [[ -n "${REAL_YQ}" && -n "${REAL_RM}" && -n "${REAL_CAT}" ]] || { echo "no yq, rm or cat" >&2; return 1; }
+  export REAL_YQ REAL_RM REAL_CAT COUNT_SH="${dir}/count.sh"
+  mkdir -p "${dir}"
+  cat > "${dir}/count.sh" <<'SH'
+_count() {
+  local f p
+  f=$(/usr/bin/env | /usr/bin/grep -cE 'fixture-(user|password)-')
+  p=$(/usr/bin/env | /usr/bin/grep -cE '^(RUSER|RPASS|username|password|_ye_out)=placeholder$')
+  printf '%s: fixture lines %s, placeholders %s\n' "${1}" "${f}" "${p}" >> "${ENV_LOG}"
+}
+SH
+  cat > "${dir}/cat" <<'SH'
+#!/usr/bin/env bash
+[[ -n "${REAL_CAT:-}" ]] || exit 3
+source "${COUNT_SH}"
+case "${1:-}" in
+  *.username) _count "cat username" ;;
+  *.password) _count "cat password" ;;
+esac
+exec "${REAL_CAT}" "$@"
+SH
+  cat > "${dir}/yq" <<'SH'
+#!/usr/bin/env bash
+[[ -n "${REAL_YQ:-}" ]] || exit 3
+if [[ "$*" == *"${YQ_PATTERN}"* ]]; then
+  source "${COUNT_SH}"
+  _count yq
+  kill -TERM "${MERGE_PID}"
+fi
+exec "${REAL_YQ}" "$@"
+SH
+  cat > "${dir}/rm" <<'SH'
+#!/usr/bin/env bash
+[[ -n "${REAL_RM:-}" ]] || exit 3
+source "${COUNT_SH}"
+_count rm
+exec "${REAL_RM}" "$@"
+SH
+  chmod +x "${dir}/cat" "${dir}/yq" "${dir}/rm"
+}
+
+@test "the registry merge gives no credential to the cat of the password or to the rm of a signal trap, also with exported names and set -a" {
+  # A plain `local` keeps the export attribute of a variable of the caller,
+  # and under set -a each assignment exports. The caller here exports
+  # placeholders for RUSER, RPASS, username, password and _ye_out, then
+  # turns set -a on. A TERM arrives at the registry write (see _count_stubs).
+  _registry_fixture 1
+  local stubs="${BATS_TEST_TMPDIR}/stubs" work="${RW}/.kubeone.yaml.work"
+  _count_stubs "${stubs}" 'strenv(RUSER)'
+  cp "${RW}/m.yaml" "${work}"
+  local saved_path="${PATH}"
+  PATH="${stubs}:${PATH}"
+  run bash -c 'import() { :; }
+source "$3/utils/verbose.sh"; source "$3/drivers/kubeone/config"
+export RUSER=placeholder RPASS=placeholder username=placeholder password=placeholder _ye_out=placeholder
+export MERGE_PID=$$
+set -a
+kubeone::_temp_traps "$1"
+kubeone::_inject_registry_auth "$1" "$2"
+echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s"
+  PATH="${saved_path}"
+  [ "${status}" -eq 143 ] || { echo "status ${status}, want 143 (TERM)" >&2; return 1; }
+  refute_output --partial "the merge returned"
+  [ ! -e "${work}" ] || { echo "the trap did not remove the temp manifest" >&2; return 1; }
+  _assert_no_credential_in_output
+  # yq has the two credentials (RUSER, RPASS); every other child sees only
+  # the placeholders of the caller.
+  run cat "${ENV_LOG}"
+  assert_output "cat username: fixture lines 0, placeholders 5
+cat password: fixture lines 0, placeholders 5
+yq: fixture lines 2, placeholders 3
+rm: fixture lines 0, placeholders 5"
+}
+
+@test "kubeone::_yq_edit gives the manifest that it holds to no child of a signal trap, also with _ye_out exported and set -a" {
+  # The manifest holds the fixture credentials. The caller exports a
+  # placeholder _ye_out and turns set -a on. The TERM from the yq stub runs
+  # the trap after the capture of yq's output, while _ye_out holds the
+  # edited manifest.
+  local stubs="${BATS_TEST_TMPDIR}/stubs" work="${RW}/.kubeone.yaml.work"
+  _count_stubs "${stubs}" '.x = 1'
+  printf 'auth:\n  username: fixture-user-1\n  password: fixture-password-1\n' > "${work}"
+  local saved_path="${PATH}"
+  PATH="${stubs}:${PATH}"
+  run bash -c 'import() { :; }
+source "$2/utils/verbose.sh"; source "$2/drivers/kubeone/config"
+export _ye_out=placeholder
+export MERGE_PID=$$
+set -a
+kubeone::_temp_traps "$1"
+kubeone::_yq_edit "$1" ".x = 1"
+echo "the edit returned $?"' bash "${work}" "${_PROJECT_ROOT}/.lok8s"
+  PATH="${saved_path}"
+  [ "${status}" -eq 143 ] || { echo "status ${status}, want 143 (TERM)" >&2; return 1; }
+  refute_output --partial "the edit returned"
+  [ ! -e "${work}" ] || { echo "the trap did not remove the temp manifest" >&2; return 1; }
+  _assert_no_credential_in_output
+  run cat "${ENV_LOG}"
+  assert_output "yq: fixture lines 0, placeholders 1
+rm: fixture lines 0, placeholders 1"
+}
+
+@test "kubeone::_yq_edit returns non-zero when yq succeeds but the write back fails" {
+  # This yq runs the real one, then makes the file read-only, so the write
+  # of the result back into the file fails (setup skips root, which writes
+  # a read-only file). It records the exit status of the real yq.
+  export YQ_RC="${BATS_TEST_TMPDIR}/yq.rc"
+  cp "${RW}/m.yaml" "${BATS_TEST_TMPDIR}/m.before"
+  _fake_yq "${BATS_TEST_TMPDIR}/wbfail" '"${REAL_YQ}" "$@"; rc=$?
+for F in "$@"; do :; done
+chmod 400 "${F}"
+printf "%s\n" "${rc}" > "${YQ_RC}"
+exit "${rc}"'
+  local saved_path="${PATH}" st
+  PATH="${BATS_TEST_TMPDIR}/wbfail:${saved_path}"
+  run kubeone::_yq_edit "${RW}/m.yaml" '.x = 1'
+  PATH="${saved_path}"
+  st="${status}"
+  chmod 600 "${RW}/m.yaml"
+  [ "${st}" -ne 0 ] || { echo "status 0 after a failed write" >&2; return 1; }
+  run cat "${YQ_RC}"
+  assert_output "0"
+  cmp "${RW}/m.yaml" "${BATS_TEST_TMPDIR}/m.before" || { echo "the file changed" >&2; return 1; }
+}

@@ -403,3 +403,25 @@ _ref() {
   [ "${status}" -eq 1 ] || { echo "status ${status}, want 1" >&2; return 1; }
   assert_output --partial "kubeone inventory: cannot write the addons path into ${WD}/kubeone.yaml"
 }
+
+@test "networkID edit: a write back that fails after yq succeeds leaves the old kubeone.yaml, no temp file and an empty TMPDIR, and stops the step" {
+  [[ "$(id -u)" != 0 ]] || skip "root writes a read-only file"
+  _edit_setup net-7
+  # This yq saves the staging file that it reads, runs the real yq, then
+  # makes the staging file read-only, so the write of the result back into
+  # it fails. It records the exit status of the real yq.
+  export YQ_RC="${BATS_TEST_TMPDIR}/yq.rc"
+  _fake_yq 'networkID =' 'cp -- "${F}" "${SNAP}"; "${REAL_YQ}" "$@"; rc=$?; chmod 400 "${F}"; printf "%s\n" "${rc}" > "${YQ_RC}"; exit "${rc}"'
+  _run_step
+  [ "${status}" -eq 1 ] || { echo "status ${status}, want 1" >&2; return 1; }
+  assert_output --partial "kubeone inventory: cannot write cloudProvider.hetzner.networkID into ${WD}/kubeone.yaml"
+  [ -f "${SNAP}" ] || { echo "the networkID edit did not run" >&2; return 1; }
+  cmp "${SNAP}" "${WD}/kubeone.yaml" || { echo "kubeone.yaml is not the old file" >&2; return 1; }
+  _assert_only "${WD}" kubeone.yaml
+  _assert_tmpdir_empty
+  run cat "${YQ_RC}"
+  assert_output "0"
+  # The step stopped: the addons edit did not run.
+  run yq -r '.addons.enable // "unset"' "${WD}/kubeone.yaml"
+  assert_output "unset"
+}

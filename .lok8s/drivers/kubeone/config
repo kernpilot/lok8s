@@ -383,12 +383,18 @@ kubeone::_inject_audit_log() {
 # to <file> and write the result back into <file>. It returns 1 when yq or
 # the write fails.
 # Each <name> is the name of a variable of the caller that the expression
-# reads (strenv, env). Only the yq process gets it in its environment: the
-# export runs in the command substitution that runs yq, so no other command
-# of the call (for example the rm of a signal trap) inherits the value. The
-# arguments are names, never values, so no value goes on a command line or
-# into the expression. The variables of the helper start with _ye_, and a
-# name of the caller must not.
+# reads (strenv, env). The export of the names runs in the command
+# substitution that runs yq, so the yq process gets the values, and no
+# other command of the call (for example the rm of a signal trap) inherits
+# them. That holds when the caller does not export these variables: it
+# declares them with `local +x` and assigns them with allexport (set -a)
+# off, as kubeone::_inject_registry_auth does. The helper declares its own
+# variables with `local +x` and turns allexport off for the call, so the
+# manifest that it holds in memory is not exported either. The arguments
+# are names, never values, so no value goes on a command line or into the
+# expression. The variables of the helper start with _ye_ and those of the
+# trace guard with _ko_: a name with one of these prefixes, or a nameref,
+# is refused before yq runs.
 # It does not use `yq -i`: yq -i writes through a temp file in TMPDIR, and
 # when its last write fails, it keeps that file there, a copy of the manifest
 # outside the work directory. Here the result stays in memory until the
@@ -403,11 +409,13 @@ kubeone::_inject_audit_log() {
 kubeone::_yq_edit() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # a trace must not show the manifest (utils/keysonly.sh)
-  local _ye_file="${1}" _ye_expr="${2}" _ye_out _ye_n
+  [[ $- != *a* ]] || { local -; set +a; }  # set -a would export the manifest held below
+  local +x _ye_file="${1}" _ye_expr="${2}" _ye_out _ye_n
   shift 2
   for _ye_n in "$@"; do
-    [[ "${_ye_n}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "${_ye_n}" != _ye_* ]] \
-      || { error "kubeone::_yq_edit: an argument after the expression is not a variable name"; return 1; }
+    [[ "${_ye_n}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "${_ye_n}" != _ye_* && "${_ye_n}" != _ko_* ]] \
+      && [[ ! "$(declare -p "${_ye_n}" 2>/dev/null)" =~ ^declare\ -[[:alpha:]]*n ]] \
+      || { error "kubeone::_yq_edit: an argument after the expression is not a variable name of the caller (_ye_* and _ko_* are reserved, a nameref is refused)"; return 1; }
   done
   # shellcheck disable=SC2163 # "$@" holds variable names, checked above: export them by name
   _ye_out=$([[ $# == 0 ]] || export -- "$@"; yq "${_ye_expr}" "${_ye_file}" && printf .) || return 1
@@ -478,6 +486,7 @@ kubeone::_audit_shown() {
 kubeone::_inject_registry_auth() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the registry credentials (utils/keysonly.sh)
+  [[ $- != *a* ]] || { local -; set +a; }  # set -a would export the registry credentials
   local manifest="${1}" cluster_yaml="${2}" host sname sns
   # No-op unless the spec declares registries (omitted => anonymous pulls; a
   # test/CI run without DOMAIN_NAME must not error here).
@@ -502,7 +511,11 @@ kubeone::_inject_registry_auth() {
     # Read the resolved creds straight from the per-domain secret cache (each key is
     # a plaintext file Secret.<name>.<ns>.<key>), exactly as provision::dispatch loads
     # provider creds — no `eval` of generated shell.
-    local ns="${sns:-provisioning}" username password RUSER RPASS
+    # +x: a variable of the caller with one of these names can be exported,
+    # and a plain `local` keeps that export attribute. With +x (and set -a
+    # off, above) only yq gets a credential (kubeone::_yq_edit): not the cat
+    # that reads the password, and not the rm of a signal trap.
+    local +x ns="${sns:-provisioning}" username password RUSER RPASS
     username="$(cat "${secrets_dir}/Secret.${sname}.${ns}.username" 2>/dev/null || true)"
     password="$(cat "${secrets_dir}/Secret.${sname}.${ns}.password" 2>/dev/null || true)"
     if [[ -z "${username:-}" || -z "${password:-}" ]]; then
@@ -511,7 +524,8 @@ kubeone::_inject_registry_auth() {
     fi
     # kubeone::_yq_edit, not `yq -i`: a failed yq -i keeps its temp copy of
     # the manifest, with these credentials, in TMPDIR. RUSER and RPASS are
-    # not exported: kubeone::_yq_edit exports them to the yq process only.
+    # not exported (local +x, set -a off): kubeone::_yq_edit exports them to
+    # the yq process only.
     RUSER="${username}" RPASS="${password}"
     kubeone::_yq_edit "${manifest}" ".containerRuntime.containerd.registries.\"${host}\".auth.username = strenv(RUSER) | .containerRuntime.containerd.registries.\"${host}\".auth.password = strenv(RPASS)" RUSER RPASS \
       || { error "registry auth: failed to inject '${host}'"; unset username password RUSER RPASS; return 1; }
