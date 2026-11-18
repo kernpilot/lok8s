@@ -1065,7 +1065,9 @@ EOF
   # writes the ticket to a fresh private directory below TMPDIR and prints
   # its path (the random part normalized). join_post records the file
   # (its bytes, 0600 in a 0700 directory) and the count of entries; the
-  # records must match. A ticket with a trailing newline, a NUL or a CR is
+  # records must match, and each must match the EXPECTED record (the
+  # stub's ticket and a newline, the modes): two equal wrong records fail
+  # too. A ticket with a trailing newline, a NUL or a CR is
   # refused by both, with no file. A path-shaped node name is refused
   # before the mint: the space lookup (a GET) goes out, no join-token POST.
   join_pre() {
@@ -1087,6 +1089,21 @@ EOF
     } > "${WORK}/join.${1}"
   }
   parity_normalize() { sed -i -E 's|kubehz-join-[A-Za-z0-9]+/|kubehz-join-RANDOM/|g' "$@"; }
+  # join_expect <want> <node>: the record join_post must write. The
+  # ticket is the stub's (built here from its two parts).
+  join_expect() {
+    if [[ "${1}" == file ]]; then
+      printf '%s.%s\n' a1b2c3 d4e5f6g7h8i9j0k1 > "${WORK}/join.ticket"
+      {
+        echo "kubehz-join-${2}.token"
+        printf '%s\n' 700 600
+        od -An -c "${WORK}/join.ticket"
+        echo "entries: 2"
+      } > "${WORK}/join.expect"
+    else
+      echo "entries: 0" > "${WORK}/join.expect"
+    fi
+  }
   # check_join <allow|-> <want-file|no-file> <argv...>: check_api with the
   # ticket files compared.
   check_join() {
@@ -1100,6 +1117,9 @@ EOF
     elif ! parity::state_same "${WORK}/join.bash" "${WORK}/join.go" "ticket file lo $*"; then
       failures=$((failures + 1))
     fi
+    join_expect "${want}" "${3}"
+    parity::state_same "${WORK}/join.expect" "${WORK}/join.go" "expected ticket file (Go) lo $*" || failures=$((failures + 1))
+    parity::state_same "${WORK}/join.expect" "${WORK}/join.bash" "expected ticket file (bash) lo $*" || failures=$((failures + 1))
     if [[ ! -s "${WORK}/req.go" ]]; then
       fail "requests lo $* — the Go run sent nothing; the diff proves nothing"
     elif diff -q "${WORK}/req.bash" "${WORK}/req.go" >/dev/null; then
