@@ -1842,6 +1842,7 @@ provider::destroy_plan() {
   case "${name}" in
     esc-name) printf 'cluster\tesc\033[2Jname\nserver\t42\tesc-cp-0\n'; return 0 ;;
     nul-name) printf 'cluster\tnul-name\nserver\t4\x002\tnul-cp-0\n'; return 0 ;;
+    utf-name) printf 'cluster\tbad\xffname\nserver\t42\tutf-cp-0\n'; return 0 ;;
   esac
   printf 'cluster\t%s\nserver\t42\t%s-cp-0\nvolume\t7\t%s-data\n\t\tserver\t\t43\t\t%s-cp\t\t1\033[2K\t\n' "${name}" "${name}" "${name}" "${name}"
 }
@@ -1857,6 +1858,7 @@ plan_spec dupb.cloud shared-name
 plan_spec solo.cloud solo-name
 plan_spec esc.cloud esc-name
 plan_spec nul.cloud nul-name
+plan_spec utf.cloud utf-name
 check - destroy --domain dupa.cloud -r -f --confirm-cluster shared-name  # shared cluster_name: refused (rc 3)
 check - destroy --domain solo.cloud -r -f                               # --force alone off a terminal: refused, plan listed
 check - destroy --domain solo.cloud -r --confirm-cluster other          # another name: refused
@@ -1865,11 +1867,13 @@ check - down --domain solo.cloud -r                                     # lo dow
 check - destroy --domain solo.cloud -f --confirm-cluster solo-name      # no -r: no guard, --confirm-cluster refused (rc 1)
 check - destroy --domain esc.cloud -r -f                                # a cluster_name with an ESC: refused before it is shown (rc 3)
 check - destroy --domain nul.cloud -r --confirm-cluster nul-name        # a plan with a NUL byte: refused (rc 3)
+check - destroy --domain utf.cloud -r -f                                # a cluster_name that is not UTF-8: refused (rc 3)
 expect_rc 3 destroy --domain dupa.cloud -r -f --confirm-cluster shared-name
 expect_rc 3 destroy --domain solo.cloud -r -f
 expect_rc 1 destroy --domain solo.cloud -f --confirm-cluster solo-name
 expect_rc 3 destroy --domain esc.cloud -r -f
 expect_rc 3 destroy --domain nul.cloud -r --confirm-cluster nul-name
+expect_rc 3 destroy --domain utf.cloud -r -f
 for side in bash go; do
   parity::run "${side}" "${PROJ}" destroy --domain solo.cloud -r --confirm-cluster solo-name || true
   grep -qF $'mockplan destroy ran: provider.yaml plan: cluster\tsolo-name|server\t42\tsolo-name-cp-0|volume\t7\tsolo-name-data|\t\tserver\t\t43\t\tsolo-name-cp\t\t1\e[2K\t' "${WORK}/${side}.err" \
@@ -1902,8 +1906,15 @@ for side in bash go; do
     && fail "${side}: a plan with a NUL byte reached the provider destroy"
   grep -qF "the destroy plan of 'nul.cloud' has a NUL byte" "${WORK}/${side}.err" \
     || fail "${side}: a plan with a NUL byte was not refused"
+  parity::run "${side}" "${PROJ}" destroy --domain utf.cloud -r --confirm-cluster $'bad\xffname' || true
+  grep -q 'mockplan destroy ran' "${WORK}/${side}.err" \
+    && fail "${side}: a cluster_name that is not UTF-8 reached the provider destroy"
+  grep -qF "the destroy plan of 'utf.cloud' names a cluster_name with a character that a message cannot show" "${WORK}/${side}.err" \
+    || fail "${side}: a cluster_name that is not UTF-8 was not refused"
+  LC_ALL=C grep -qF $'\xff' "${WORK}/${side}.err" \
+    && fail "${side}: the byte of the cluster_name that is not UTF-8 reached the output"
 done
-rm -rf "${PROJ}/clusters"/{dupa,dupb,solo,esc,nul}.cloud "${PROJ}/.lok8s/providers/mockplan"
+rm -rf "${PROJ}/clusters"/{dupa,dupb,solo,esc,nul,utf}.cloud "${PROJ}/.lok8s/providers/mockplan"
 
 # ── lo destroy --remote — the hetzner provider keeps the parts without its mark
 # The real hetzner provider of the project's bash tree runs in both CLIs (the

@@ -261,28 +261,19 @@ server 42 cp-0"
   _nothing_ran
 }
 
-# The cluster_name is shown in the guard's messages and typed as the
-# answer, so a shown form must be the name itself. A name with a code point
-# of the jq def unshown is refused before any message shows it: also with
-# the matching --confirm-cluster, and also on a terminal with the name
-# typed. The Go twin is TestDestroyGuardRefusesAClusterNameThatCannotBeShown.
-@test "destroy guard: a cluster_name with a character that cannot be shown is refused before it is shown" {
-  local want="the destroy plan of 'test.prod' names a cluster_name with a character that a message cannot show (a control, separator, bidi or invisible character). Nothing was deleted. Correct the cluster_name in the provider config or the destroy_plan hook of the provider, then run lo destroy again."
-  # <the cluster field of the plan line, as printf %b reads it> <the name>
-  local -a cases=(
-    'prod\x1b[2J-a'         $'prod\e[2J-a'
-    'prod\xe2\x80\xae-a'    $'prod\xe2\x80\xae-a'
-    'prod\xe2\x80\x8b-a'    $'prod\xe2\x80\x8b-a'
-    'prod\t\t-a'            $'prod\t-a'
-    'prod-a\r'              $'prod-a\r'
-    'prod\xc2\x85-a'        $'prod\xc2\x85-a'
-    'prod\xf3\xa0\x81\x81a' $'prod\xf3\xa0\x81\x81a'
-  )
-  local i name confirm_cluster
-  for (( i = 0; i < ${#cases[@]}; i += 2 )); do
-    PLAN="cluster\t${cases[i]}\nserver\t42\tcp-0\n"
+# _assert_names_refused <field> <name> [<field> <name> ...]: for each pair, a
+# plan whose cluster line has <field> (as printf %b reads it) names <name>,
+# and the guard refuses it (rc 3) before any message shows the name: with
+# the matching --confirm-cluster, off a terminal, and on a terminal with the
+# name typed. Nothing runs.
+_assert_names_refused() {
+  local want="the destroy plan of 'test.prod' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was deleted. Correct the cluster_name in the provider config or the destroy_plan hook of the provider, then run lo destroy again."
+  local name confirm_cluster
+  while (( $# )); do
+    PLAN="cluster\t${1}\nserver\t42\tcp-0\n"
     export PLAN
-    name="${cases[i+1]}"
+    name="${2}"
+    shift 2
 
     _assume_no_tty
     confirm_cluster="${name}"
@@ -314,11 +305,95 @@ server 42 cp-0"
   done
 }
 
+# The cluster_name is shown in the guard's messages and typed as the
+# answer, so a shown form must be the name itself. A name with a code point
+# of the jq def unshown is refused before any message shows it. The Go twin
+# is TestDestroyGuardRefusesAClusterNameThatCannotBeShown.
+@test "destroy guard: a cluster_name with a character that cannot be shown is refused before it is shown" {
+  # <the cluster field of the plan line, as printf %b reads it> <the name>
+  _assert_names_refused \
+    'prod\x1b[2J-a'         $'prod\e[2J-a' \
+    'prod\xe2\x80\xae-a'    $'prod\xe2\x80\xae-a' \
+    'prod\xe2\x80\x8b-a'    $'prod\xe2\x80\x8b-a' \
+    'prod\t\t-a'            $'prod\t-a' \
+    'prod-a\r'              $'prod-a\r' \
+    'prod\xc2\x85-a'        $'prod\xc2\x85-a' \
+    'prod\xf3\xa0\x81\x81a' $'prod\xf3\xa0\x81\x81a'
+}
+
+# A backslash: error() prints with echo -e, which reads a backslash sequence
+# ("\e[2J" would reach the terminal as an ESC). The Go twin is
+# TestDestroyGuardRefusesAClusterNameWithABackslash.
+@test "destroy guard: a cluster_name with a backslash is refused" {
+  _assert_names_refused \
+    'prod\\e[2J-a' 'prod\e[2J-a' \
+    'a\\b'         'a\b' \
+    'prod\\'       'prod\'
+}
+
+# A byte that is not UTF-8: jq reads each such sequence as U+FFFD, and the
+# guard refuses U+FFFD. The Go twin is
+# TestDestroyGuardRefusesAClusterNameThatIsNotUTF8.
+@test "destroy guard: a cluster_name that is not UTF-8 is refused" {
+  _assert_names_refused \
+    'prod\xff-a'             $'prod\xff-a' \
+    'prod\xe2\x80-a'         $'prod\xe2\x80-a' \
+    'prod\xc0\x80-a'         $'prod\xc0\x80-a' \
+    'prod\xed\xa0\x80-a'     $'prod\xed\xa0\x80-a' \
+    'prod\xf4\x90\x80\x80-a' $'prod\xf4\x90\x80\x80-a' \
+    'prod\xf0\x9f\x98-a'     $'prod\xf0\x9f\x98-a'
+}
+
+# U+FFFD itself (the UTF-8 bytes EF BF BD): jq cannot tell it from a byte
+# that is not UTF-8, so both twins refuse it. The Go twin is
+# TestDestroyGuardRefusesAClusterNameWithUFFFD.
+@test "destroy guard: a cluster_name with U+FFFD is refused" {
+  _assert_names_refused \
+    'prod\xef\xbf\xbd-a' $'prod\xef\xbf\xbd-a' \
+    '\xef\xbf\xbd'       $'\xef\xbf\xbd'
+}
+
+# _refute_esc: the output holds no ESC byte besides the fixed colour codes
+# of the guard header (bold yellow, dim, bold, reset).
+_refute_esc() {
+  local rest="${output//$'\e[1;33m'/}"
+  rest="${rest//$'\e[0m'/}"
+  rest="${rest//$'\e[2m'/}"
+  rest="${rest//$'\e[1m'/}"
+  [[ "${rest}" != *$'\e'* ]] || { printf 'an ESC byte in the output:\n%q\n' "${output}" >&2; return 1; }
+}
+
+# The messages that carry the cluster_name or the --confirm-cluster value
+# print with printf '%s', not with error()'s echo -e: a --confirm-cluster
+# value with the text "\e[2J" is shown as text. The guard does not show the
+# typed answer: a typed "\e[2J" gives the wrong-answer error, and neither the
+# text nor an ESC byte (besides the colour codes of the header) is in the
+# output. The Go twin is TestDestroyGuardShowsABackslashSequenceAsText.
+@test "destroy guard: a backslash sequence in --confirm-cluster or in the answer stays text" {
+  _assume_no_tty
+  local confirm_cluster='\e[2J'
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 3 ]
+  assert_output --partial "[error] --confirm-cluster '\e[2J' does not match the cluster_name 'prod-a' of 'test.prod'. Nothing was deleted."
+  _refute_esc
+  _nothing_ran
+
+  _assume_tty
+  confirm_cluster=""
+  : > "${CALLS}"
+  run provision::dispatch_destroy test.prod <<< '\e[2J'
+  [ "${status}" -eq 3 ]
+  assert_output --partial "[error] the answer is not the cluster_name 'prod-a'. Nothing was deleted."
+  _refute_esc
+  refute_output --partial '\e[2J'
+  _nothing_ran
+}
+
 # A jq that fails stops the check of the cluster_name: nothing runs.
 @test "destroy guard: a cluster_name that jq cannot check stops the destroy" {
   _assume_no_tty
   local confirm_cluster=prod-a
-  jq() { [[ "${*}" != *'any(unshown)'* ]] || return 5; command jq "${@}"; }
+  jq() { [[ "${*}" != *'any(unshown'* ]] || return 5; command jq "${@}"; }
   run provision::dispatch_destroy test.prod < /dev/null
   [ "${status}" -eq 1 ]
   assert_output --partial "could not check the cluster_name of the destroy plan of 'test.prod'. Nothing was deleted. Check that jq runs, then run lo destroy again."

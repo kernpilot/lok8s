@@ -217,6 +217,20 @@ provision::_destroy_guard_skip() {
   declare -F provider::destroy_plan &>/dev/null || echo "provider '${provider_name}' has no destroy plan"
 }
 
+# provision::_guard_error <message>: the [error] line of error(), printed
+# with printf '%s' instead of echo -e. The destroy guard prints each message
+# that carries the cluster_name or the --confirm-cluster value through it, so
+# a backslash sequence in them stays text and the output does not depend on
+# the list of refused characters (Go twin: ui.ErrorTo, which never reads a
+# backslash sequence).
+provision::_guard_error() {
+  if verbose::color; then
+    printf '%b[error]%b %s\n' "${RED}" "${NC}" "${1}" >&2
+  else
+    printf '[error] %s\n' "${1}" >&2
+  fi
+}
+
 # provision::_destroy_guard <domain> <kind>
 # The cluster_name guard of `lo destroy`, for a provider with the
 # provider::destroy_plan hook (Go twin: destroy_guard.go). Such a provider
@@ -226,12 +240,14 @@ provision::_destroy_guard_skip() {
 # kept the cluster_name and the token labels its resources the same way, and
 # only the mark keeps the two apart: a resource of the other domain with a
 # wrong mark would be deleted. So: refuse a plan with a NUL byte, a
-# cluster_name that a message cannot show and a cluster_name another
+# cluster_name that a message cannot show as it is and a cluster_name another
 # domain uses, print what would be deleted, and take the cluster_name typed
 # on a terminal or from --confirm-cluster (`confirm_cluster`, dynamic
 # scoping from main::destroy). `force` does not skip it. The confirmed plan
 # goes to the driver's provider::destroy in LOK8S_DESTROY_PLAN. Returns 3 on
-# a refusal or a decline (nothing ran), 1 when the plan fails.
+# a refusal or a decline (nothing ran), 1 when the plan fails. Each message
+# that carries the cluster_name or the --confirm-cluster value prints through
+# provision::_guard_error.
 provision::_destroy_guard() {
   local domain="${1}" kind="${2}"
   local work_dir="${PATH_CLUSTERS}/${domain}/.provider"
@@ -277,25 +293,30 @@ provision::_destroy_guard() {
 
   # The messages below show the cluster_name, and the operator types it as
   # the answer, so a shown form must be the name itself: an escaped form is
-  # not what the operator must type. Refuse a name with a code point of the
-  # jq def unshown (VERBOSE_JQ_UNSHOWN, utils/verbose.sh: a control,
-  # separator, bidi or invisible character) before any message shows it
-  # (Go twin: strings.ContainsFunc(name, ui.Unshown)). A jq that fails stops
-  # the destroy.
+  # not what the operator must type. Refuse a name that a message cannot
+  # show as it is, before any message shows it: a code point of the jq def
+  # unshown (VERBOSE_JQ_UNSHOWN, utils/verbose.sh: a control, separator,
+  # bidi or invisible character), a backslash (92), and U+FFFD (65533). jq
+  # turns each sequence that is not UTF-8 into U+FFFD, so the U+FFFD clause
+  # also refuses a name that is not UTF-8: the same verdict as the Go twin
+  # (!utf8.ValidString, U+FFFD, a backslash, ui.Unshown). A jq that fails
+  # stops the destroy.
   local unshown
-  if ! unshown="$(jq -nr --arg name "${name}" "${VERBOSE_JQ_UNSHOWN}"' $name | explode | any(unshown)')"; then
+  if ! unshown="$(jq -nr --arg name "${name}" "${VERBOSE_JQ_UNSHOWN}"' $name | explode | any(unshown
+      or . == 92
+      or . == 65533)')"; then
     error "could not check the cluster_name of the destroy plan of '${domain}'. Nothing was deleted. Check that jq runs, then run lo destroy again."
     return 1
   fi
   if [[ "${unshown}" != "false" ]]; then
-    error "the destroy plan of '${domain}' names a cluster_name with a character that a message cannot show (a control, separator, bidi or invisible character). Nothing was deleted. Correct the cluster_name in the provider config or the destroy_plan hook of the provider, then run lo destroy again."
+    error "the destroy plan of '${domain}' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was deleted. Correct the cluster_name in the provider config or the destroy_plan hook of the provider, then run lo destroy again."
     return 3
   fi
 
   local users
   users="$(provision::_cluster_name_users "${domain}" "${name}")"
   if [[ -n "${users}" ]]; then
-    error "cluster_name '${name}' of '${domain}' is also the cluster_name of: ${users//$'\n'/, }. The provider deletes only the resources with this cluster_name and the owner mark of '${domain}'. The resources of those domains have the same cluster label, so only the mark keeps them apart: a resource of another domain with a wrong mark would be deleted. Nothing was deleted. Give each domain its own cluster_name, then run lo destroy again."
+    provision::_guard_error "cluster_name '${name}' of '${domain}' is also the cluster_name of: ${users//$'\n'/, }. The provider deletes only the resources with this cluster_name and the owner mark of '${domain}'. The resources of those domains have the same cluster label, so only the mark keeps them apart: a resource of another domain with a wrong mark would be deleted. Nothing was deleted. Give each domain its own cluster_name, then run lo destroy again."
     return 3
   fi
 
@@ -330,17 +351,17 @@ provision::_destroy_guard() {
 
   if [[ -n "${confirm_cluster:-}" ]]; then
     [[ "${confirm_cluster}" == "${name}" ]] || {
-      error "--confirm-cluster '${confirm_cluster}' does not match the cluster_name '${name}' of '${domain}'. Nothing was deleted."
+      provision::_guard_error "--confirm-cluster '${confirm_cluster}' does not match the cluster_name '${name}' of '${domain}'. Nothing was deleted."
       return 3
     }
   elif ! provision::_interactive; then
-    error "there is no terminal to ask for the cluster_name of '${domain}'. Nothing was deleted. To confirm, run: lo destroy --domain ${domain} -r --confirm-cluster ${name}"
+    provision::_guard_error "there is no terminal to ask for the cluster_name of '${domain}'. Nothing was deleted. To confirm, run: lo destroy --domain ${domain} -r --confirm-cluster ${name}"
     return 3
   else
     local ans=""
     printf '\n  type the cluster_name (%s) to delete these resources: ' "${name}" >&2
     if ! provision::_read_answer ans || [[ "${ans}" != "${name}" ]]; then
-      error "the answer is not the cluster_name '${name}'. Nothing was deleted."
+      provision::_guard_error "the answer is not the cluster_name '${name}'. Nothing was deleted."
       return 3
     fi
   fi
