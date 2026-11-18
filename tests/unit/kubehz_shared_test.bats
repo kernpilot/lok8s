@@ -830,8 +830,10 @@ curl_space_refusal() {
   assert_output --partial "  Node 'worker-1' — join ticket (valid until 2026-08-07T20:00:00Z, single use):
     (written to ${files[0]}, mode 0600)
   On the machine, follow the node-join guide for your platform
-  (kubehz docs: Spaces → Joining nodes). The ticket is bound to this
-  node name and expires quickly — mint a fresh one with:
+  (kubehz docs: Spaces → Joining nodes).
+  Delete the ticket file (and its directory) once the node has joined.
+  The ticket is bound to this node name and expires quickly — mint a
+  fresh one with:
     lo kubehz join worker-1"
   [ "$(cat "${files[0]}")" = "${ticket}" ]
   [ "$(wc -c < "${files[0]}")" -eq $(( ${#ticket} + 1 )) ]
@@ -879,7 +881,7 @@ _stub_mktemp() {
 
   run kubehz::space_mint_join sp-123 worker-1
   assert_failure
-  assert_output --partial "could not write the join ticket for 'worker-1'"
+  assert_output --partial "could not write the join ticket for 'worker-1': the file cannot be created (it exists, or the directory cannot be written)"
   assert_output --partial "The ticket was minted before the write failed"
   refute_output --partial "${ticket}"
   [ "$(cat "${BATS_TEST_TMPDIR}/victim")" = untouched ]
@@ -905,7 +907,7 @@ _stub_mktemp() {
 
   run kubehz::space_mint_join sp-123 worker-1
   assert_failure
-  assert_output --partial "could not write the join ticket for 'worker-1'"
+  assert_output --partial "could not write the join ticket for 'worker-1': the directory is not private (mode 0700)"
   assert_output --partial "The ticket was minted before the write failed"
   refute_output --partial "${ticket}"
   [ ! -e "${MKTEMP_DIR}" ]
@@ -947,7 +949,7 @@ _stub_mktemp() {
     mkdir -m 700 "${MKTEMP_DIR}"
     run _partial_write "${c}"
     assert_failure
-    assert_output --partial "could not write the join ticket for 'worker-1'"
+    assert_output --partial "could not write the join ticket for 'worker-1': the write failed"
     assert_output --partial "The ticket was minted before the write failed"
     refute_output --partial "${ticket}"
     refute_output --partial "${ticket#*.}"
@@ -971,6 +973,66 @@ _stub_mktemp() {
     esac
   done
   command rm -rf -- "${MKTEMP_DIR}"
+}
+
+# The modes are checked before any byte of the ticket goes in, as in the Go
+# twin. A stat stand-in reads 755 for the fresh directory (a mode the
+# umask did not give, as on a file system that ignores it), or 644 for the
+# ticket file, and records what is there when it is called. At the check of
+# the directory it is empty; at the check of the file, the file is empty.
+# The write fails with its cause, the directory goes, and no ticket is
+# printed.
+@test "space_mint_join: the modes are checked before the ticket is written" {
+  local ticket c
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  _MINT_BODY=$(jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}')
+  export _MINT_BODY
+  curl() {
+    printf '%s\n201' "${_MINT_BODY}"
+  }
+  export -f curl
+  _stub_mktemp
+  SEEN="${BATS_TEST_TMPDIR}/seen"
+  # The stand-in lives in the subshell of run only. Its argument picks the
+  # mode it fakes: of the directory (dir) or of the ticket file (file).
+  _wide_mode() {
+    local wide="${1}"
+    stat() {
+      local f="${*: -1}"
+      if [[ "${wide}" == dir && "${f}" == "${MKTEMP_DIR}" ]]; then
+        command ls -A -- "${f}" > "${SEEN}"
+        echo 755
+        return 0
+      elif [[ "${wide}" == file && "${f}" == "${MKTEMP_DIR}/kubehz-join-worker-1.token" ]]; then
+        command wc -c < "${f}" > "${SEEN}"
+        echo 644
+        return 0
+      fi
+      command stat "$@"
+    }
+    kubehz::space_mint_join sp-123 worker-1
+  }
+  for c in dir file; do
+    command rm -rf -- "${MKTEMP_DIR}" "${SEEN}"
+    mkdir -m 700 "${MKTEMP_DIR}"
+    run _wide_mode "${c}"
+    assert_failure
+    case "${c}" in
+      dir)
+        assert_output --partial "could not write the join ticket for 'worker-1': the directory is not private (mode 0700)"
+        [ -e "${SEEN}" ]
+        [ ! -s "${SEEN}" ]
+        ;;
+      file)
+        assert_output --partial "could not write the join ticket for 'worker-1': not a private file"
+        [ "$(cat "${SEEN}")" = 0 ]
+        ;;
+    esac
+    assert_output --partial "single use, and no copy was saved."
+    refute_output --partial "${ticket}"
+    refute_output --partial "${ticket#*.}"
+    [ ! -e "${MKTEMP_DIR}" ]
+  done
 }
 
 # TMPDIR=/ (and //) is the root directory, not the working directory, as
@@ -1949,9 +2011,12 @@ _stub_mktemp() {
     local rc=0
     export escaped=''
     declare -g -r -n "${1}=escaped"
+    # The globals of an earlier call: the refusal must not leave them.
+    KUBEHZ_SPACE_API_STATUS=500 KUBEHZ_SPACE_API_CURL_RC=7
     kubehz::space_api POST /api/spaces "{\"note\":\"${2}\"}" || rc=$?
     env > "${ENV_DIR}/after.env"
     printf '%s' "${escaped}" > "${ENV_DIR}/escaped.after"
+    printf '%s|%s' "${KUBEHZ_SPACE_API_STATUS-unset}" "${KUBEHZ_SPACE_API_CURL_RC-unset}" > "${ENV_DIR}/globals.after"
     return "${rc}"
   }
   for name in body raw; do
@@ -1966,6 +2031,7 @@ _stub_mktemp() {
     [ "$(grep -c -F -e "${canary}" -e "${RESP_CANARY}" "${ENV_DIR}/after.env")" -eq 0 ]
     [ -e "${ENV_DIR}/escaped.after" ]
     [ ! -s "${ENV_DIR}/escaped.after" ]
+    [ "$(cat "${ENV_DIR}/globals.after")" = "|" ]
   done
 }
 
@@ -2579,9 +2645,9 @@ _stub_mktemp() {
 }
 
 # http::tls_log_vars_unset at the api call, with a curl stand-in that
-# records its environment: curl gets none of the five TLS log and trace
-# variables (SSLKEYLOGFILE, GNUTLS_DEBUG_LEVEL, SSLTRACE, SSLDEBUG,
-# SSLDEBUGFILE), the call works, and the caller keeps all five. The record
+# records its environment: curl gets none of the six TLS log and trace
+# variables (SSLKEYLOGFILE, GNUTLS_KEYLOGFILE, GNUTLS_DEBUG_LEVEL, SSLTRACE,
+# SSLDEBUG, SSLDEBUGFILE), the call works, and the caller keeps all six. The record
 # must hold a control variable, else an empty record would pass. Then each
 # name is readonly in turn: bash says that it cannot unset that name, the
 # stand-in does not run, and the call fails with 1 in
@@ -2589,7 +2655,7 @@ _stub_mktemp() {
 # or NSS curl, so it never skips.
 @test "space_api_call: curl gets no TLS log or trace variable, and a readonly one stops the call" {
   local name r rc o="${BATS_TEST_TMPDIR}/tl.stdout" e="${BATS_TEST_TMPDIR}/tl.stderr"
-  local -a names=(SSLKEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE)
+  local -a names=(SSLKEYLOGFILE GNUTLS_KEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE)
   export CURL_ENV_LOG="${BATS_TEST_TMPDIR}/curl.env"
   curl() {
     command env > "${CURL_ENV_LOG}"
@@ -2597,8 +2663,8 @@ _stub_mktemp() {
     printf '{"ok":true,"data":{"id":"sp-t"}}\n200'
   }
   export -f curl
-  export SSLKEYLOGFILE="${BATS_TEST_TMPDIR}/tls.keys" GNUTLS_DEBUG_LEVEL=9 SSLTRACE=99 SSLDEBUG=99 \
-    SSLDEBUGFILE="${BATS_TEST_TMPDIR}/nss.trace" KUBEHZ_ENV_CONTROL=on
+  export SSLKEYLOGFILE="${BATS_TEST_TMPDIR}/tls.keys" GNUTLS_KEYLOGFILE="${BATS_TEST_TMPDIR}/gnutls.keys" \
+    GNUTLS_DEBUG_LEVEL=9 SSLTRACE=99 SSLDEBUG=99 SSLDEBUGFILE="${BATS_TEST_TMPDIR}/nss.trace" KUBEHZ_ENV_CONTROL=on
   kubehz::space_api_call GET /api/spaces/sp-t > "${o}" 2> "${e}"
   [ "${KUBEHZ_SPACE_API_STATUS}" = 200 ]
   [ "${KUBEHZ_SPACE_API_BODY}" = '{"ok":true,"data":{"id":"sp-t"}}' ]
@@ -2610,8 +2676,8 @@ _stub_mktemp() {
     # The caller keeps each one, with its value, as an export.
     [[ "$(declare -p "${name}")" == "declare -x ${name}="* ]]
   done
-  [ "${SSLKEYLOGFILE}|${GNUTLS_DEBUG_LEVEL}|${SSLTRACE}|${SSLDEBUG}|${SSLDEBUGFILE}" = \
-    "${BATS_TEST_TMPDIR}/tls.keys|9|99|99|${BATS_TEST_TMPDIR}/nss.trace" ]
+  [ "${SSLKEYLOGFILE}|${GNUTLS_KEYLOGFILE}|${GNUTLS_DEBUG_LEVEL}|${SSLTRACE}|${SSLDEBUG}|${SSLDEBUGFILE}" = \
+    "${BATS_TEST_TMPDIR}/tls.keys|${BATS_TEST_TMPDIR}/gnutls.keys|9|99|99|${BATS_TEST_TMPDIR}/nss.trace" ]
   for name in "${names[@]}"; do
     rm -f -- "${CURL_ENV_LOG}" "${BATS_TEST_TMPDIR}/tl.rc"
     rc=0

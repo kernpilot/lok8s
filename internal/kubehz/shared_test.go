@@ -649,8 +649,10 @@ func TestSpaceMintJoinWithoutScriptWritesTheTicketPrivately(t *testing.T) {
 	path := paths[0]
 	mustContain(t, h.output(), "  Node 'worker-1' — join ticket (valid until 2026-08-07T20:00:00Z, single use):\n"+
 		"    (written to "+path+", mode 0600)\n  On the machine, follow the node-join guide for your platform\n"+
-		"  (kubehz docs: Spaces → Joining nodes). The ticket is bound to this\n"+
-		"  node name and expires quickly — mint a fresh one with:\n    lo kubehz join worker-1\n")
+		"  (kubehz docs: Spaces → Joining nodes).\n"+
+		"  Delete the ticket file (and its directory) once the node has joined.\n"+
+		"  The ticket is bound to this node name and expires quickly — mint a\n"+
+		"  fresh one with:\n    lo kubehz join worker-1\n")
 	if raw, err := os.ReadFile(path); err != nil || string(raw) != joinTicket+"\n" {
 		t.Fatalf("ticket file content: %q %v", raw, err)
 	}

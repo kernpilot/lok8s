@@ -47,8 +47,7 @@ http::curl_config() {
   # (declare -i) would print the credential in an arithmetic error. A
   # readonly name (also a readonly nameref) makes the local fail: then the
   # function refuses as for a control character, with the line curl
-  # refuses. (This replaces an earlier review decision to leave this
-  # function as it was.)
+  # refuses.
   local +x +i opt value out || {
     error "http::curl_config: a local cannot be declared (a readonly name or a nameref of the caller)"
     printf 'proto = "-all"\n'
@@ -105,6 +104,8 @@ http::credential_ok() {
 #   SSLKEYLOGFILE        curl appends the TLS session keys to this file, for
 #                        each backend that has a key log. The keys decrypt a
 #                        captured exchange.
+#   GNUTLS_KEYLOGFILE    the same key log under the GnuTLS name, which
+#                        GnuTLS also reads.
 #   GNUTLS_DEBUG_LEVEL   GnuTLS writes debug output on stderr; at high levels
 #                        it holds key material.
 #   SSLTRACE, SSLDEBUG, SSLDEBUGFILE
@@ -121,5 +122,5 @@ http::credential_ok() {
 # environment can also set LD_PRELOAD).
 # Usage: http::tls_log_vars_unset
 http::tls_log_vars_unset() {
-  unset -v SSLKEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE
+  unset -v SSLKEYLOGFILE GNUTLS_KEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE
 }

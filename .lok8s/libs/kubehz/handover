@@ -195,14 +195,16 @@ handover::fetch_snapshot() {
       # out; a trace-ascii line would log the URL (with its signature) and
       # the snapshot. curl obeys -q only as its first argument.
       # In the subshell, http::tls_log_vars_unset clears the TLS log and
-      # trace controls for curl only: SSLKEYLOGFILE, GNUTLS_DEBUG_LEVEL,
-      # SSLTRACE, SSLDEBUG and SSLDEBUGFILE (a key log, GnuTLS debug output
-      # with key material, an NSS trace with plaintext; the reasons are in
-      # utils/http.sh). Each could give away the URL with its signature, or
-      # the snapshot. A readonly name in the list stops the download before
-      # curl runs.
+      # trace controls for curl only: SSLKEYLOGFILE, GNUTLS_KEYLOGFILE,
+      # GNUTLS_DEBUG_LEVEL, SSLTRACE, SSLDEBUG and SSLDEBUGFILE (a key log,
+      # GnuTLS debug output with key material, an NSS trace with plaintext;
+      # the reasons are in utils/http.sh). Each could give away the URL with
+      # its signature, or the snapshot. A readonly name in the list stops
+      # the download before curl runs.
       ( umask 077 && http::tls_log_vars_unset && curl -q -fsSL "${location}" -o "${out}" ) || {
-        error "handover: downloading the snapshot from ${location} failed — download it yourself and re-run with --snapshot <file>"
+        # Without the query: a presigned URL carries its signature there
+        # (as the Go twin's stripQuery).
+        error "handover: downloading the snapshot from ${location%%\?*} failed — download it yourself and re-run with --snapshot <file>"
         return 1
       }
       ;;

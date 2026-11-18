@@ -543,8 +543,10 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 	} else {
 		// Without a script: the lines of the bash twin, which has no script.
 		c.echo("  On the machine, follow the node-join guide for your platform")
-		c.echo("  (kubehz docs: Spaces → Joining nodes). The ticket is bound to this")
-		c.echo("  node name and expires quickly — mint a fresh one with:")
+		c.echo("  (kubehz docs: Spaces → Joining nodes).")
+		c.echo("  Delete the ticket file (and its directory) once the node has joined.")
+		c.echo("  The ticket is bound to this node name and expires quickly — mint a")
+		c.echo("  fresh one with:")
 	}
 	c.echo("    lo kubehz join %s", nodeName)
 	return nil
@@ -735,7 +737,7 @@ func (c *Context) writeJoinFile(nodeName, ext, content string) (string, error) {
 // priv (writeJoinFile removes priv when it fails, and reports a failed
 // removal).
 func (c *Context) writeJoinInto(priv, name, content string) error {
-	if err := os.Chmod(priv, 0o700); err != nil {
+	if err := os.Chmod(priv, 0o700); err != nil { // #nosec G302 -- priv is a directory: the owner needs x to enter it
 		return err
 	}
 	root, err := os.OpenRoot(priv)

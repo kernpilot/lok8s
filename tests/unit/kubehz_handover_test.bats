@@ -1039,9 +1039,10 @@ _mock_node_binaries() {
 }
 
 # http::tls_log_vars_unset at the snapshot download, with a curl stand-in
-# that records its environment: curl gets none of the five TLS log and
-# trace variables (SSLKEYLOGFILE, GNUTLS_DEBUG_LEVEL, SSLTRACE, SSLDEBUG,
-# SSLDEBUGFILE), the download works, and the caller keeps all five. The
+# that records its environment: curl gets none of the six TLS log and
+# trace variables (SSLKEYLOGFILE, GNUTLS_KEYLOGFILE, GNUTLS_DEBUG_LEVEL,
+# SSLTRACE, SSLDEBUG, SSLDEBUGFILE), the download works, and the caller
+# keeps all six. The
 # record must hold a control variable, else an empty record would pass.
 # Then each name is readonly in turn: bash says that it cannot unset that
 # name, the stand-in does not run, the snapshot file stays empty, and the
@@ -1051,7 +1052,7 @@ _mock_node_binaries() {
   _make_bundle
   printf 'https://backups.example.com/snap.db' > "${BUNDLE}/snapshot-location"
   local name rc workdir="${BATS_TEST_TMPDIR}/tl.work" o="${BATS_TEST_TMPDIR}/tl.stdout" e="${BATS_TEST_TMPDIR}/tl.stderr"
-  local -a names=(SSLKEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE)
+  local -a names=(SSLKEYLOGFILE GNUTLS_KEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE)
   mkdir -m 700 "${workdir}" "${workdir}.ro"
   export CURL_ENV_LOG="${BATS_TEST_TMPDIR}/curl.env"
   curl() {
@@ -1064,8 +1065,8 @@ _mock_node_binaries() {
     printf 'snapshot-bytes' > "${out}"
   }
   export -f curl
-  export SSLKEYLOGFILE="${BATS_TEST_TMPDIR}/tls.keys" GNUTLS_DEBUG_LEVEL=9 SSLTRACE=99 SSLDEBUG=99 \
-    SSLDEBUGFILE="${BATS_TEST_TMPDIR}/nss.trace" KUBEHZ_ENV_CONTROL=on
+  export SSLKEYLOGFILE="${BATS_TEST_TMPDIR}/tls.keys" GNUTLS_KEYLOGFILE="${BATS_TEST_TMPDIR}/gnutls.keys" \
+    GNUTLS_DEBUG_LEVEL=9 SSLTRACE=99 SSLDEBUG=99 SSLDEBUGFILE="${BATS_TEST_TMPDIR}/nss.trace" KUBEHZ_ENV_CONTROL=on
   handover::fetch_snapshot "${BUNDLE}" "" "${workdir}" > "${o}" 2> "${e}"
   [ "$(cat "${o}")" = "${workdir}/kubehz-handover-snapshot.db" ]
   [ "$(cat "${workdir}/kubehz-handover-snapshot.db")" = snapshot-bytes ]
@@ -1077,8 +1078,8 @@ _mock_node_binaries() {
     # The caller keeps each one, with its value, as an export.
     [[ "$(declare -p "${name}")" == "declare -x ${name}="* ]]
   done
-  [ "${SSLKEYLOGFILE}|${GNUTLS_DEBUG_LEVEL}|${SSLTRACE}|${SSLDEBUG}|${SSLDEBUGFILE}" = \
-    "${BATS_TEST_TMPDIR}/tls.keys|9|99|99|${BATS_TEST_TMPDIR}/nss.trace" ]
+  [ "${SSLKEYLOGFILE}|${GNUTLS_KEYLOGFILE}|${GNUTLS_DEBUG_LEVEL}|${SSLTRACE}|${SSLDEBUG}|${SSLDEBUGFILE}" = \
+    "${BATS_TEST_TMPDIR}/tls.keys|${BATS_TEST_TMPDIR}/gnutls.keys|9|99|99|${BATS_TEST_TMPDIR}/nss.trace" ]
   for name in "${names[@]}"; do
     rm -f -- "${CURL_ENV_LOG}"
     rc=0
@@ -1092,4 +1093,24 @@ _mock_node_binaries() {
     # The download makes the file (0600, empty) before curl runs: no bytes got in.
     [ ! -s "${workdir}.ro/kubehz-handover-snapshot.db" ]
   done
+}
+
+# A presigned https URL carries its signature in the query. When the
+# download fails, the error names the URL without the query (as the Go
+# twin's stripQuery): the path is there, no part of the query is. The
+# signature and the credential are built at runtime.
+@test "handover: a failed download names the URL without its query" {
+  _make_bundle
+  local sig cred workdir="${BATS_TEST_TMPDIR}/q.work" o="${BATS_TEST_TMPDIR}/q.stdout" e="${BATS_TEST_TMPDIR}/q.stderr" rc=0
+  sig="$(printf '%s' 5ign4ture)deadbeef"
+  cred="$(printf '%s' EXAMPLEKEY)%2F20261118"
+  printf 'https://backups.example.com/handover/snap.db?X-Amz-Credential=%s&X-Amz-Signature=%s' "${cred}" "${sig}" \
+    > "${BUNDLE}/snapshot-location"
+  mkdir -m 700 "${workdir}"
+  curl() { echo "curl: (22) The requested URL returned error: 403" >&2; return 22; }
+  export -f curl
+  handover::fetch_snapshot "${BUNDLE}" "" "${workdir}" > "${o}" 2> "${e}" || rc=$?
+  [ "${rc}" -eq 1 ]
+  grep -qF 'handover: downloading the snapshot from https://backups.example.com/handover/snap.db failed' "${e}"
+  [ "$(grep -c -F -e '?' -e 'X-Amz' -e "${sig}" -e "${cred}" "${e}" "${o}" | awk -F: '{s += $NF} END {print s}')" -eq 0 ]
 }
