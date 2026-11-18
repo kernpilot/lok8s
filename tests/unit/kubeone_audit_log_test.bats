@@ -381,19 +381,23 @@ exec "${REAL_YQ}" "$@"'
   run kubeone::_inject_audit_log "${BATS_TEST_TMPDIR}/absent.yaml" "${CY}"
   assert_failure
   assert_output --partial "audit log: lok8s cannot read the rendered manifest in ${BATS_TEST_TMPDIR}. Check the permissions of the directory, then run lo provision again."
-  # yq -i writes through a temp file and falls back to writing in place:
-  # only a read-only file in a read-only directory makes it fail.
+  # A read-only file in a read-only directory: no write can replace it, also
+  # not `yq -i`, which writes through a temp file and falls back to a copy.
   [[ "$(id -u)" != 0 ]] || skip "root writes a read-only file"
-  local ro="${BATS_TEST_TMPDIR}/ro"
-  mkdir -p "${ro}"
+  local ro="${BATS_TEST_TMPDIR}/ro" tmpd="${BATS_TEST_TMPDIR}/tmpdir" left
+  mkdir -p "${ro}" "${tmpd}"
   printf 'features: {}\n' > "${ro}/m.yaml"
   chmod 400 "${ro}/m.yaml"
   chmod 500 "${ro}"
-  run kubeone::_inject_audit_log "${ro}/m.yaml" "${CY}"
+  TMPDIR="${tmpd}" run kubeone::_inject_audit_log "${ro}/m.yaml" "${CY}"
   chmod 700 "${ro}"
   chmod 600 "${ro}/m.yaml"
   assert_failure
   assert_output --partial "audit log: cannot write the manifest in ${ro}. Check the free disk space and the permissions of the directory, then run lo provision again."
+  # The failed write leaves TMPDIR as it was: a failed `yq -i` keeps its
+  # temp copy of the manifest there.
+  left=$(find "${tmpd}" -mindepth 1 -printf '%P (mode %m)\n')
+  [ -z "${left}" ] || { echo "left in TMPDIR: ${left}" >&2; return 1; }
 }
 
 @test "a yq that is not mikefarah yq v4 is a yq failure, not an invalid file" {

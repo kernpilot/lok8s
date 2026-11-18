@@ -367,16 +367,33 @@ kubeone::_inject_audit_log() {
   fi
   local write_error="audit log: cannot write the manifest in ${manifest%/*}. Check the free disk space and the permissions of the directory, then run lo provision again."
 
-  AUDIT_POLICY="${_AUDIT_LOG_POLICY}" yq -i '
+  AUDIT_POLICY="${_AUDIT_LOG_POLICY}" kubeone::_yq_edit "${manifest}" '
     .features.staticAuditLog.enable = true |
     .features.staticAuditLog.config.policyFilePath = strenv(AUDIT_POLICY)
-  ' "${manifest}" || { error "${write_error}"; return 1; }
+  ' || { error "${write_error}"; return 1; }
   for i in "${!_AUDIT_LOG_KEYS[@]}"; do
     # env() reads the value as YAML: the validated digits land as an integer.
-    AUDIT_LIMIT="${_AUDIT_LOG_VALS[i]}" yq -i ".features.staticAuditLog.config.${_AUDIT_LOG_KEYS[i]} = env(AUDIT_LIMIT)" "${manifest}" \
+    AUDIT_LIMIT="${_AUDIT_LOG_VALS[i]}" kubeone::_yq_edit "${manifest}" ".features.staticAuditLog.config.${_AUDIT_LOG_KEYS[i]} = env(AUDIT_LIMIT)" \
       || { error "${write_error}"; return 1; }
   done
   debug "audit log: features.staticAuditLog injected (policy ${_AUDIT_LOG_POLICY})"
+}
+
+# kubeone::_yq_edit <file> <yq expression>: apply the expression to <file> and
+# write the result back into <file>. It returns 1 when yq or the write fails.
+# It does not use `yq -i`: yq -i writes through a temp file in TMPDIR, and
+# when its last write fails, it keeps that file there, a copy of the manifest
+# outside the work directory. Here the result stays in memory until the
+# write, so there is no copy to remove on any path, also not on a signal.
+# The write is in place, as the copy that yq -i falls back to when TMPDIR is
+# on another file system. The caller edits the temp manifest of the render,
+# which kubeone::_render_manifest removes on a failure. The variables set for
+# the call reach yq (strenv and env in the expression).
+kubeone::_yq_edit() {
+  [[ $- != *x* ]] || { local -; set +x; }  # a trace must not show the manifest
+  local file="${1}" out
+  out=$(yq "${2}" "${file}" && printf .) || return 1
+  { printf '%s' "${out%.}" > "${file}"; } 2>/dev/null
 }
 
 # The absolute, lexically clean form of a path, as Go's filepath.Abs makes it:
