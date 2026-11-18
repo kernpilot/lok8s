@@ -141,7 +141,7 @@ kubeone::_inject_oidc() {
   OIDC_ISSUER="${LOK8S_SPEC_OIDC_ISSUER}"           OIDC_CLIENTID="${LOK8S_SPEC_OIDC_CLIENTID}" \
   OIDC_UCLAIM="${LOK8S_SPEC_OIDC_USERNAMECLAIM}"     OIDC_UPREFIX="${LOK8S_SPEC_OIDC_USERNAMEPREFIX}" \
   OIDC_GCLAIM="${LOK8S_SPEC_OIDC_GROUPSCLAIM}"       OIDC_GPREFIX="${LOK8S_SPEC_OIDC_GROUPSPREFIX}" \
-  yq -i '
+  kubeone::_yq_edit "${manifest}" '
     .features.openidConnect.enable = true |
     .features.openidConnect.config.issuerUrl = strenv(OIDC_ISSUER) |
     .features.openidConnect.config.clientId = strenv(OIDC_CLIENTID) |
@@ -149,7 +149,7 @@ kubeone::_inject_oidc() {
     .features.openidConnect.config.usernamePrefix = strenv(OIDC_UPREFIX) |
     .features.openidConnect.config.groupsClaim = strenv(OIDC_GCLAIM) |
     .features.openidConnect.config.groupsPrefix = strenv(OIDC_GPREFIX)
-  ' "${manifest}" || { error "OIDC: failed to inject features.openidConnect"; return 1; }
+  ' || { error "OIDC: failed to inject features.openidConnect"; return 1; }
 
   # caBundle (optional): KubeOne auto-uploads + mounts the caFile for the
   # openidConnect feature, so a custom-CA issuer just needs the local file +
@@ -158,7 +158,7 @@ kubeone::_inject_oidc() {
     local cadir="${manifest%/*}/.oidc"; mkdir -p "${cadir}"
     printf '%s\n' "${LOK8S_SPEC_OIDC_CABUNDLE}" > "${cadir}/oidc-ca.pem"
     OIDC_CAFILE="${cadir}/oidc-ca.pem" \
-      yq -i '.features.openidConnect.config.caFile = strenv(OIDC_CAFILE)' "${manifest}" \
+      kubeone::_yq_edit "${manifest}" '.features.openidConnect.config.caFile = strenv(OIDC_CAFILE)' \
       || { error "OIDC: failed to set caFile"; return 1; }
   fi
   debug "OIDC: features.openidConnect injected (issuer ${LOK8S_SPEC_OIDC_ISSUER})"
@@ -386,9 +386,10 @@ kubeone::_inject_audit_log() {
 # outside the work directory. Here the result stays in memory until the
 # write, so there is no copy to remove on any path, also not on a signal.
 # The write is in place, as the copy that yq -i falls back to when TMPDIR is
-# on another file system. The caller edits the temp manifest of the render,
-# which kubeone::_render_manifest removes on a failure. The variables set for
-# the call reach yq (strenv and env in the expression).
+# on another file system, so a failed write can leave a partial file. Use it
+# only on the temp manifest of the render, which kubeone::_render_manifest
+# removes on a failure (the oidc, audit-log and registry merges). The
+# variables set for the call reach yq (strenv and env in the expression).
 kubeone::_yq_edit() {
   [[ $- != *x* ]] || { local -; set +x; }  # a trace must not show the manifest
   local file="${1}" out
@@ -466,8 +467,10 @@ kubeone::_inject_registry_auth() {
       warn "registry auth: secret ${ns}/${sname} lacks username/password — '${host}' left anonymous"
       unset username password; continue
     fi
+    # kubeone::_yq_edit, not `yq -i`: a failed yq -i keeps its temp copy of
+    # the manifest, with these credentials, in TMPDIR.
     RUSER="${username}" RPASS="${password}" \
-    yq -i ".containerRuntime.containerd.registries.\"${host}\".auth.username = strenv(RUSER) | .containerRuntime.containerd.registries.\"${host}\".auth.password = strenv(RPASS)" "${manifest}" \
+    kubeone::_yq_edit "${manifest}" ".containerRuntime.containerd.registries.\"${host}\".auth.username = strenv(RUSER) | .containerRuntime.containerd.registries.\"${host}\".auth.password = strenv(RPASS)" \
       || { error "registry auth: failed to inject '${host}'"; unset username password; return 1; }
     unset username password
     n_configured=$(( n_configured + 1 ))
