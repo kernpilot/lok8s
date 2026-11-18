@@ -611,12 +611,23 @@ func TestSpaceMintJoinScrubsServerStringsAndRefusesAnOddTicket(t *testing.T) {
 	tmp := filepath.Join(h.base, "tmp")
 	_ = os.MkdirAll(tmp, 0o755)
 	h.env["TMPDIR"] = tmp
-	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","expiresAt":"2026\u001b[2J-08-07","endpoint":"https://kkp1\u001b[31m.example:6443","script":"#!/bin/bash\n"}}`)
+	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"`+joinTicket+`","expiresAt":"2026\u001b[2J\u009b\u2028\u202e-08-07","endpoint":"https://kkp1\u001b[31m\u009b\u2028\u202e.example:6443","script":"#!/bin/bash\n"}}`)
 	mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
 	mustNotContain(t, h.output(), "\x1b[2J")
 	mustNotContain(t, h.output(), "\x1b[31m")
+	for _, bad := range []string{"\u009b", "\u2028", "\u202e"} {
+		mustNotContain(t, h.output(), bad)
+	}
 	mustContain(t, h.output(), "valid until 2026[2J-08-07")
 	mustContain(t, h.output(), "https://kkp1[31m.example:6443")
+
+	// The expiry is clipped at 256 runes, then one ellipsis (the bash twin's
+	// "space_mint_join: the expiry is scrubbed and clipped").
+	h.reset()
+	long := strings.Repeat("y", 300)
+	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"`+joinTicket+`","expiresAt":"`+long+`"}}`)
+	mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
+	mustContain(t, h.output(), "valid until "+long[:256]+"…, single use")
 
 	h.reset()
 	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"evil\u001b[2Jtoken","expiresAt":"2026-08-07T20:00:00Z","script":"#!/bin/bash\n"}}`)
@@ -744,8 +755,10 @@ func TestProvisionSharedScrubsTheSharedCeilingMessage(t *testing.T) {
 	mustErr(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec))
 
 	got := h.output()
-	// No control character may survive into the terminal.
-	for _, bad := range []string{"\x1b", "\x07", "\x7f"} {
+	// No unshown character may survive into the terminal: the inputs also
+	// hold a C1 CSI, a NEL, the separators, bidi and zero-width characters.
+	for _, bad := range []string{"\x1b", "\x07", "\x7f", "\u009b", "\u0085", "\u2028", "\u2029", "\u202e", "\u2066",
+		"\u200b", "\ufeff"} {
 		mustNotContain(t, got, bad)
 	}
 	// The characters the api sent stay exactly as many characters, on both
@@ -790,7 +803,8 @@ func TestSpaceAPIErrorScrubsAndClipsBothHalves(t *testing.T) {
 	mustErr(t, h.ctx.ProvisionShared(t.Context(), &Config{APIURL: h.apiURL()}, "acme.example.org", spec))
 
 	got := h.output()
-	for _, bad := range []string{"\x1b", "\x07", "\x7f"} {
+	for _, bad := range []string{"\x1b", "\x07", "\x7f", "\u009b", "\u0085", "\u2028", "\u2029", "\u202e", "\u2066",
+		"\u200b", "\ufeff"} {
 		mustNotContain(t, got, bad)
 	}
 	mustContain(t, got, `literal:\033[2J`)

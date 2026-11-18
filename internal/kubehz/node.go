@@ -19,6 +19,7 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // NodeOpts carries the `lo kubehz node` flags.
@@ -135,17 +136,19 @@ func (c *Context) nodePreflight(ctx context.Context, domain, action, clusterIDFl
 	}
 }
 
-// scrub ports node::scrub: strip terminal control characters from a server
-// string before it is shown. Tab and newline survive.
+// scrub drops each character of ui.Unshown from a server string before it
+// is shown, except tab and newline: a status reason or a detail can have
+// more than one line. Thus an ESC, a C1 CSI (U+009B), a bidi override or a
+// line separator from the api cannot reach the terminal. cleanText (the
+// api records) drops the same set, tab and newline too. The bash twin is
+// kubehz::scrub (libs/kubehz/shared).
 func scrub(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		if r < 0x20 && r != '\t' && r != '\n' || r == 0x7f {
-			continue
+	return strings.Map(func(r rune) rune {
+		if r != '\t' && r != '\n' && ui.Unshown(r) {
+			return -1
 		}
-		b.WriteRune(r)
-	}
-	return b.String()
+		return r
+	}, s)
 }
 
 // nodeAPIError ports node::api_error: the api's refusal codes, each an
