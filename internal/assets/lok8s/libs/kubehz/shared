@@ -234,19 +234,16 @@ kubehz::scrub() {
 }
 
 # Bound and disarm a SERVER string before it reaches the terminal. The Go twin
-# runs clip(scrub(...)) on the same strings, so the three steps run in the same
+# runs clip(scrub(...)) on the same strings, so the two steps run in the same
 # order and produce the same bytes:
 #
 #   scrub   kubehz::scrub: drop each unshown character except tab and
 #           newline.
 #   clip    256 characters, then one ellipsis. A ceiling or an endpoint is a
 #           few dozen characters; past that the rest is not information.
-#   escape  double every backslash. This step belongs to error() ONLY, which
-#           prints through `echo -e`: an api that sends the six characters
-#           \033[2J would get a real escape sequence out of this tree while
-#           the Go twin prints the six characters. A string printed with a
-#           plain `echo` must NOT be escaped, or the backslashes double on
-#           screen. kubehz::space_bound_string is that half.
+#
+# A backslash stays: error() and a plain `echo` print it as it is, as the Go
+# twin does, so a \033[2J in the string prints as text.
 #
 # Two known limits: the character count is the shell's, so it counts runes
 # only in a UTF-8 locale (Go always counts runes), and `$(...)` drops a
@@ -259,25 +256,14 @@ kubehz::space_bound_string() {
   echo "${s}"
 }
 
-# The same string, plus the backslash escape `echo -e` needs. Use this one for
-# anything that reaches error(), warn() or debug(); use space_bound_string for
-# a plain `echo`. The escape runs LAST so it cannot move the clip boundary.
-# Usage: kubehz::space_safe_string <string>
-kubehz::space_safe_string() {
-  local s
-  s=$(kubehz::space_bound_string "${1}")
-  echo "${s//\\/\\\\}"
-}
-
 # Print "<what>: <the api's message>", then the api's help. The fallback
 # stands in for an api that sends the code alone, and states no number of its
-# own. Both server strings are scrubbed and bounded; only the one that reaches
-# error() is escaped.
+# own. Both server strings are scrubbed and bounded.
 # Usage: kubehz::space_api_reason <what> <fallback>
 kubehz::space_api_reason() {
   local what="${1}" fallback="${2}" reason help
   reason=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.message // .message // empty' 2>/dev/null) || reason=""
-  [[ -z "${reason}" ]] || reason=$(kubehz::space_safe_string "${reason}")
+  [[ -z "${reason}" ]] || reason=$(kubehz::space_bound_string "${reason}")
   [[ -n "${reason}" ]] || reason="${fallback}"
   error "${what}: ${reason}"
   help=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.help // .help // empty' 2>/dev/null) || help=""
@@ -301,10 +287,9 @@ kubehz::space_api_error() {
   help=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.help // .help // empty' 2>/dev/null) || help=""
   # Both halves are SERVER strings and this is the FIRST api call lo makes,
   # so an api that hides \033[2J\033[H in a message would clear the caller's
-  # terminal before anything else is printed. The message reaches error()
-  # (echo -e) and needs the backslash escape; the help reaches a plain echo
-  # and must not be escaped.
-  [[ -z "${msg}" ]] || msg=$(kubehz::space_safe_string "${msg}")
+  # terminal before anything else is printed. Both are scrubbed and clipped
+  # the same way: error() and the plain echo print them as they are.
+  [[ -z "${msg}" ]] || msg=$(kubehz::space_bound_string "${msg}")
   [[ -z "${help}" ]] || help=$(kubehz::space_bound_string "${help}")
   error "${context} (HTTP ${KUBEHZ_SPACE_API_STATUS})${msg:+: ${msg}}"
   [[ -n "${help}" ]] && echo "  ${help}" >&2

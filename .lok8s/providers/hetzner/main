@@ -195,9 +195,8 @@ _HETZNER_DESTROY_ORDER=(load-balancer server placement-group firewall volume flo
 # destroy show it (VERBOSE_JQ_SHOWN_NAME, utils/verbose.sh: each backslash
 # and each character of its explicit list becomes '?', such as a control
 # character, a line separator, or a bidi, zero-width or invisible format
-# character). warn prints with `echo -e`: a newline in a name would split
-# the line, an ESC would reach the terminal, and a backslash sequence would
-# become a control character. The id names the part exactly.
+# character). A newline in a name would split the line, and an ESC would
+# reach the terminal. The id names the part exactly.
 _HETZNER_JQ_SHOWN_NAME="${VERBOSE_JQ_SHOWN_NAME}"
 
 # hetzner::_destroy_resources <cluster_name> [<confirmed plan>]

@@ -235,13 +235,13 @@ node::api_error() {
 # Refuse a node name the platform would refuse anyway, and — for `remove` —
 # a name that is not a name at all: the value is pasted into a URL PATH, so a
 # `../` in it would address a different route. The refusal repeats the value
-# with each backslash doubled: error() prints through `echo -e`, and a typed
-# \e[2J must print as typed (as the Go twin prints it), not as an escape.
+# as typed (error() prints it as it is, as the Go twin does): a typed \e[2J
+# prints as these five characters, not as an escape.
 # Usage: node::assert_node_name <name>
 node::assert_node_name() {
   local name="${1}"
   if [[ ! "${name}" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ || "${#name}" -gt 63 ]]; then
-    error "kubehz: '${name//\\/\\\\}' is not a node name the platform accepts."
+    error "kubehz: '${name}' is not a node name the platform accepts."
     echo "  A node name is a DNS label: lowercase letters, digits and dashes, 63 at most." >&2
     echo "  Give one with:  --name <node-name>" >&2
     return 1
@@ -717,11 +717,11 @@ node::space_preflight() {
   node::api_access "${domain}" "${action}" || return 1
 
   # The id is pasted into a URL PATH, so its shape is checked here: a `../`
-  # in it would address a different route. The refusal doubles each
-  # backslash for the `echo -e` of error() (see node::assert_node_name).
+  # in it would address a different route. The refusal repeats the id as
+  # typed (see node::assert_node_name).
   if [[ -n "${space_id:-}" ]]; then
     if ! node::url_id "${space_id}"; then
-      error "kubehz: '${space_id//\\/\\\\}' is not a space id."
+      error "kubehz: '${space_id}' is not a space id."
       echo "  A space id looks like sp-xxxxxxxx. Read yours in the dashboard." >&2
       return 1
     fi
@@ -733,9 +733,9 @@ node::space_preflight() {
   kubehz::space_config "${domain}" "${cluster_yaml}" || return 1
   kubehz::space_lookup "${LOK8S_SPACE_SLUG}" || return 1
   # The slug is the spec's value as typed, and no check limits its shape:
-  # its backslashes are doubled for the `echo -e` of error().
+  # error() prints it as it is.
   if [[ -z "${KUBEHZ_SPACE_ROW}" ]]; then
-    error "kubehz: no space '${LOK8S_SPACE_SLUG//\\/\\\\}' found for ${domain}."
+    error "kubehz: no space '${LOK8S_SPACE_SLUG}' found for ${domain}."
     echo "  Create it with 'lo provision', or name the space with:  --space-id sp-xxxxxxxx" >&2
     return 1
   fi
@@ -752,8 +752,8 @@ node::space_preflight() {
 
 # The drain deadline as the api takes it: a whole number of seconds from 60
 # to 3600. Leading zeros are dropped, so 0600 is 600 (never octal), the same
-# number the Go twin sends. The refusal does not repeat the value: error()
-# prints through `echo -e`, and the Go twin would print a backslash as typed.
+# number the Go twin sends. The refusal does not repeat the value, as in the
+# Go twin.
 # Usage: node::drain_timeout <value>
 # Outputs: the number of seconds to stdout
 node::drain_timeout() {
@@ -872,10 +872,9 @@ node::maintain() {
   if (( rc != 0 )); then
     # The api answers 404 for a space it does not know and for a node the
     # space does not hold; an api older than these routes answers 404 too.
-    # The label can be the slug as typed: its backslashes are doubled for
-    # the `echo -e` of error().
+    # The label can be the slug as typed: error() prints it as it is.
     if [[ "${KUBEHZ_SPACE_API_STATUS}" == "404" ]]; then
-      error "kubehz: the platform knows no node '${name}' in space ${NODE_SPACE_LABEL//\\/\\\\}."
+      error "kubehz: the platform knows no node '${name}' in space ${NODE_SPACE_LABEL}."
       echo "  Check the node name and the space with:  lo kubehz status" >&2
       return 1
     fi

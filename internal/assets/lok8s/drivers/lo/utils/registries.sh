@@ -126,8 +126,7 @@ lo::registry_image_ensure() {
     (( attempt < attempts )) || break
     wait="${LO_REGISTRY_PULL_BACKOFF[attempt - 1]}"
     cause=$(lo::docker_err_summary "${err}")
-    # warn prints with echo -e: double each backslash so the cause prints as is.
-    warn "docker pull ${LO_REGISTRY_IMAGE} failed (attempt ${attempt} of ${attempts}): ${cause//\\/\\\\}. Retrying in ${wait}s."
+    warn "docker pull ${LO_REGISTRY_IMAGE} failed (attempt ${attempt} of ${attempts}): ${cause}. Retrying in ${wait}s."
     sleep "${wait}"
   done
   LO_REGISTRY_IMAGE_READY=0

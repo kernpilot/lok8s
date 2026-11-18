@@ -127,8 +127,8 @@ func TestNodeMaintenanceChecksTheNameAndTheSpaceID(t *testing.T) {
 			t.Fatalf("name %q sent %+v", name, h.reqs())
 		}
 	}
-	// A typed backslash prints as typed (the bash twin doubles it for the
-	// `echo -e` of its error()).
+	// A typed backslash prints as typed, in the bash twin too (its error()
+	// prints the message as it is).
 	h := maintHarness(t)
 	mustErr(t, h.ctx.NodeCordon(t.Context(), "acme.example.org", MaintenanceOpts{Name: `\e[2J`}))
 	mustContain(t, h.output(), `kubehz: '\e[2J' is not a node name the platform accepts.`)

@@ -567,12 +567,12 @@ volume delete 7"
   assert_output "1"
 }
 
-# A name can hold any character. warn prints with `echo -e`, so a newline
-# in a name split the line, an ESC reached the terminal, and a backslash
-# sequence became a control character. Each control character and each
-# backslash of a name now shows as '?': each message is one line. Part 60
-# has a newline in its name, part 61 a backslash and an 'n', part 62 an
-# ESC, a CR and a tab.
+# A name can hold any character. When warn printed with `echo -e`, a
+# newline in a name split the line, an ESC reached the terminal, and a
+# backslash sequence became a control character. Each control character
+# and each backslash of a name now shows as '?': each message is one line.
+# Part 60 has a newline in its name, part 61 a backslash and an 'n', part
+# 62 an ESC, a CR and a tab.
 @test "destroy: a control character or a backslash in a name shows as '?', one line for each message" {
   unset LOK8S_DESTROY_PLAN
   hcloud() {

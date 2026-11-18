@@ -419,6 +419,31 @@ _refused() {
   _refused volume 16 prod-data
 }
 
+@test "refused: a name with a backslash is shown with '?', the id names the part" {
+  jq '.network[0].name = "prod\\net"' "${DESC}" > "${DESC}.new" && mv "${DESC}.new" "${DESC}"
+  _part network 13 'prod\net' '{"lok8s.dev/cluster":"prod"}'
+  run _provision
+  assert_failure
+  assert_output --partial "refused network 'prod?net' (id 13): it exists, but it does not have the owner mark"
+  refute_output --partial 'prod\\net'
+  run _writes
+  assert_output ""
+}
+
+@test "refused: an ESC, a newline or a bidi character in a name is shown with '?'" {
+  jq '.network[0].name = "prod\u001b[2Jx\u202e\nnet"' "${DESC}" > "${DESC}.new" && mv "${DESC}.new" "${DESC}"
+  # The bidi mark U+202E as its UTF-8 bytes: $'\u202e' depends on the locale
+  # (in the C locale bash keeps it as text).
+  _part network 13 $'prod\033[2Jx\xe2\x80\xae\nnet' '{"lok8s.dev/cluster":"prod"}'
+  run _provision
+  assert_failure
+  assert_output --partial "refused network 'prod?[2Jx??net' (id 13): it exists, but it does not have the owner mark"
+  refute_output --partial $'\033[2J'
+  refute_output --partial $'\xe2\x80\xae'
+  run _writes
+  assert_output ""
+}
+
 @test "refused: a part with the owner mark of another cluster" {
   _part network 13 prod-net "{\"lok8s.dev/owner\":\"${OTHER}\"}"
   run _provision

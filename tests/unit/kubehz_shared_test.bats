@@ -654,10 +654,8 @@ curl_space_refusal() {
 
 # A refusal message and its help are SERVER strings. The api could hide an
 # escape sequence in either and redraw this terminal, so both implementations
-# scrub them and clip them to 256 characters. The message additionally gets
-# the backslash escape error() needs, because error() prints through
-# `echo -e`; the help does NOT, because a plain echo would then double every
-# backslash on screen.
+# scrub them and clip them to 256 characters. A backslash stays: error()
+# and the plain echo of the help print it as it is.
 #
 # The fixtures and the expected bytes are the GOLDEN SET the Go twin owns
 # (internal/kubehz/testdata/golden/, written by `go test ./internal/kubehz/

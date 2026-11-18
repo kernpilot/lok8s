@@ -284,6 +284,35 @@ Created:     2026-10-04T12:00:00.000Z"
   [ ! -e "${CURL_ARGS}" ]
 }
 
+# error() prints a typed value as it is, as the Go twin does: a backslash
+# in a slug, a number flag, an id or a file path is one backslash in the
+# refusal, and no ESC byte reaches the output.
+@test "refusals: a typed backslash in a slug, a number, an id or a file path prints as typed" {
+  run kubehz::space::create --name Acme --slug 'a\e[2J' --nodes '1\n'
+  assert_failure
+  assert_output '[error] kubehz space create a\e[2J: --nodes 1\n is not valid
+  Use a whole number of 1 or more, or leave the flag out for the platform default.'
+  run kubehz::cluster::lease cl-1a2b3c4d --hours '1\c'
+  assert_failure
+  assert_output '[error] kubehz cluster lease cl-1a2b3c4d: --hours 1\c is not valid
+  Use a whole number of hours from 1 to 720.'
+  run kubehz::space::lease 'sp-\e[2J' --hours 1
+  assert_failure
+  assert_output --partial '[error] kubehz space lease: sp-\e[2J is not a space id'
+  local d="${BATS_TEST_TMPDIR}/p\e[2J"
+  mkdir -p "${d}"
+  echo contexts > "${d}/config"
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/config"
+  assert_failure
+  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/config exists
+  Pass --force to replace it, or name a new file."
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}" --force
+  assert_failure
+  assert_output --partial "[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${d} is a directory"
+  [[ "${output}" != *$'\033'* ]]
+  [ ! -e "${CURL_ARGS}" ]
+}
+
 @test "lease: the hours are sent as a number and checked against 1 to 720" {
   route PATCH /api/spaces/sp-1a2b3c4d/lease 200 '{"ok":true,"data":{"id":"sp-1a2b3c4d","leaseExpiresAt":"2026-10-05T12:00:00.000Z"}}'
   run kubehz::space::lease sp-1a2b3c4d --hours 024

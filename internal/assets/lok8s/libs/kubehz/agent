@@ -110,7 +110,7 @@ kubehz::space::create() {
     namespaces      maxNamespaces  "${namespaces}"
     object-cap-kib  maxObjectKiB   "${object_cap_kib}"
   )
-  action="space create $(kubehz::agent_clean_e "${slug}")"
+  action="space create $(kubehz::agent_clean "${slug}")"
   body=$(jq -cn --arg name "${name}" --arg slug "${slug}" '{name: $name, slug: $slug}') || return 1
   # A number the flags leave out is not sent: the api applies its default.
   for (( i = 0; i < ${#numbers[@]}; i += 3 )); do
@@ -119,7 +119,7 @@ kubehz::space::create() {
     value="${numbers[i + 2]}"
     [[ -n "${value}" ]] || continue
     if ! kubehz::agent_match "${value}" '^[0-9]+$' || ! number=$(kubehz::space_number_value "${value}"); then
-      error "kubehz ${action}: --${flag} $(kubehz::agent_clean_e "${value}") is not valid"
+      error "kubehz ${action}: --${flag} $(kubehz::agent_clean "${value}") is not valid"
       echo "  Use a whole number of 1 or more, or leave the flag out for the platform default." >&2
       return 1
     fi
@@ -313,15 +313,6 @@ kubehz::agent_clean() {
   jq -nr --arg s "${1}" "${KUBEHZ_AGENT_JQ}"' $s | clean | clip'
 }
 
-# The same, with the backslashes doubled for error() and warn(), which
-# print through `echo -e`.
-# Usage: kubehz::agent_clean_e <string>
-kubehz::agent_clean_e() {
-  local s
-  s=$(kubehz::agent_clean "${1}")
-  printf '%s\n' "${s//\\/\\\\}"
-}
-
 # Refuse an -o value other than text, json or yaml, in the shape the Go
 # twin's --output check prints.
 # Usage: kubehz::agent_output <format>
@@ -342,7 +333,7 @@ kubehz::agent_check_id() {
   local noun="${1}" verb="${2}" id="${3}" prefix="sp-"
   [[ "${noun}" == space ]] || prefix="cl-"
   kubehz::agent_match "${id}" "^${prefix}[A-Za-z0-9-]{1,64}\$" && return 0
-  error "kubehz ${noun} ${verb}: $(kubehz::agent_clean_e "${id}") is not a ${noun} id"
+  error "kubehz ${noun} ${verb}: $(kubehz::agent_clean "${id}") is not a ${noun} id"
   echo "  A ${noun} id is ${prefix} and 1 to 64 letters, digits or dashes. List them: lo kubehz ${noun} list" >&2
   return 1
 }
@@ -358,7 +349,7 @@ kubehz::agent_hours() {
     KUBEHZ_AGENT_HOURS="${n}"
     return 0
   fi
-  error "kubehz ${action}: --${flag} $(kubehz::agent_clean_e "${value}") is not valid"
+  error "kubehz ${action}: --${flag} $(kubehz::agent_clean "${value}") is not valid"
   echo "  Use a whole number of hours from 1 to 720." >&2
   return 1
 }
@@ -439,7 +430,7 @@ kubehz::agent_api() {
   if ! raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_AGENT_BEARER}" | curl -q -sS --proto =https \
     --connect-timeout 10 --max-time 60 -K - -X "${method}" -H 'Accept: application/json' "${extra[@]}" \
     -w $'\n%{http_code}' "${KUBEHZ_AGENT_BASE}${path}" 2>/dev/null); then
-    error "kubehz ${action}: the api at ${KUBEHZ_AGENT_BASE//\\/\\\\} did not answer"
+    error "kubehz ${action}: the api at ${KUBEHZ_AGENT_BASE} did not answer"
     echo "  Check KUBEHZ_API_URL and the network. Then try again." >&2
     return 1
   fi
@@ -452,8 +443,7 @@ kubehz::agent_api() {
 # message of the api. Then print the next step. lo prints its own hint where
 # it knows more than the api (a flag name, the list command). Else it prints
 # the help of the api. Both server strings lose every control character and
-# are clipped. A line break goes too, because one refusal is two lines. Only
-# the string that reaches error() is escaped for `echo -e`. A
+# are clipped. A line break goes too, because one refusal is two lines. A
 # resource-scoped key never gets AGENT_KEY_OUT_OF_SCOPE here. A space or a
 # cluster outside its reach answers 404, like one that does not exist.
 # Usage: kubehz::agent_refused <space|cluster> <action> <id>
@@ -463,7 +453,7 @@ kubehz::agent_refused() {
   kubehz::agent_match "${code}" '^[A-Z0-9_]{1,64}$' || code=""
   msg=$(jq -r "${KUBEHZ_AGENT_JQ}"' said("message")' <<<"${KUBEHZ_AGENT_BODY}" 2>/dev/null) || msg=""
   [[ -n "${msg}" ]] || msg="no reason given"
-  error "kubehz ${action}: the api refused the request (HTTP ${KUBEHZ_AGENT_STATUS}${code:+ ${code}}): ${msg//\\/\\\\}"
+  error "kubehz ${action}: the api refused the request (HTTP ${KUBEHZ_AGENT_STATUS}${code:+ ${code}}): ${msg}"
 
   if [[ "${KUBEHZ_AGENT_STATUS}" == 401 ]] && (( KUBEHZ_AGENT_KEY )); then
     hint="The api did not accept the agent key. A revoked or expired key needs a new key from a tenant owner."
@@ -609,7 +599,7 @@ kubehz::agent_kubeconfig() {
       kubehz::agent_exists "${action}" "${file}"
       return 1
     fi
-    error "kubehz ${action}: cannot write ${file//\\/\\\\}"
+    error "kubehz ${action}: cannot write ${file}"
     echo "  Name a file in a directory that exists and that you can write to." >&2
     return 1
   fi
@@ -642,12 +632,12 @@ kubehz::agent_target() {
   local action="${1}" file="${2}" force="${3}" me link_uid target_uid
   KUBEHZ_AGENT_TARGET="${file}"
   if kubehz::agent_in_proc_or_dev "${file}"; then
-    error "kubehz ${action}: ${file//\\/\\\\} is in /proc or /dev, or a link in its path points there"
+    error "kubehz ${action}: ${file} is in /proc or /dev, or a link in its path points there"
     echo "  lo does not write to /proc or /dev. Name a file in another directory." >&2
     return 1
   fi
   if [[ -d "${file}" ]]; then
-    error "kubehz ${action}: ${file//\\/\\\\} is a directory"
+    error "kubehz ${action}: ${file} is a directory"
     echo "  Name a file, not a directory." >&2
     return 1
   fi
@@ -658,7 +648,7 @@ kubehz::agent_target() {
   fi
   [[ -L "${file}" ]] || return 0
   if ! KUBEHZ_AGENT_TARGET=$(realpath -e -- "${file}" 2>/dev/null); then
-    error "kubehz ${action}: cannot write ${file//\\/\\\\}"
+    error "kubehz ${action}: cannot write ${file}"
     echo "  Name a file in a directory that exists and that you can write to." >&2
     return 1
   fi
@@ -666,7 +656,7 @@ kubehz::agent_target() {
   link_uid=$(stat -c '%u' -- "${file}" 2>/dev/null) || link_uid=""
   target_uid=$(stat -c '%u' -- "${KUBEHZ_AGENT_TARGET}" 2>/dev/null) || target_uid=""
   if [[ "${link_uid}" != "${me}" || "${target_uid}" != "${me}" ]]; then
-    error "kubehz ${action}: ${file//\\/\\\\} is a link, and the link or its target belongs to another user"
+    error "kubehz ${action}: ${file} is a link, and the link or its target belongs to another user"
     echo "  lo writes through a link only when you own the link and its target. Name another file." >&2
     return 1
   fi
@@ -710,7 +700,7 @@ kubehz::agent_in_proc_or_dev() {
 # The refusal for a path that exists without --force.
 # Usage: kubehz::agent_exists <action> <file>
 kubehz::agent_exists() {
-  error "kubehz ${1}: ${2//\\/\\\\} exists"
+  error "kubehz ${1}: ${2} exists"
   echo "  Pass --force to replace it, or name a new file." >&2
 }
 

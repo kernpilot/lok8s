@@ -20,7 +20,7 @@
 # are unset except for dummy values in those sections.
 #
 # The provision path renders a SERVER string too (the api's own refusal
-# message, scrubbed, clipped, and in the bash tree escaped for `echo -e`),
+# message, scrubbed and clipped),
 # and no case here reaches it: spec.kubehz.apiUrl of a provision case is
 # not the stub. That rendering is pinned by a golden PAIR both suites read:
 # internal/kubehz/testdata/golden/space-above-shared-message.txt (the
@@ -925,7 +925,7 @@ check - kubehz node cordon --name Bad_ --domain shared.dev
 check - kubehz node drain --name '' --domain shared.dev
 check - kubehz node cordon --name ../../clusters --domain shared.dev
 # A backslash that the user types prints as typed in both (error() of the
-# bash tree prints through `echo -e`).
+# bash tree prints the message as it is).
 check - kubehz node cordon --name '\e[2J' --domain shared.dev
 check - kubehz node remove --name 'a\\b\e[31m'
 check - kubehz node remove --name ''
@@ -1058,7 +1058,7 @@ EOF
     KUBEHZ_TOKEN="${token}" check_api_none - kubehz node status --domain hstub.dev
   done
   # A backslash in the slug prints as typed in both (error() of the bash
-  # tree prints through `echo -e`).
+  # tree prints the message as it is).
   check_api - kubehz node cordon --name worker-1 --domain bslug.dev
   # The contract on the Go side alone: 0 on success, 1 on a refusal.
   expect_rc 0 kubehz node cordon --name worker-1 --domain acme.dev

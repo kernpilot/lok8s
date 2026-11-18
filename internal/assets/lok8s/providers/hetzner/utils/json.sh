@@ -268,15 +268,17 @@ hetzner::lookup() {
       return 1
     fi
 
-    # The parts with a descriptor name and without this cluster's mark.
+    # The parts with a descriptor name and without this cluster's mark. The
+    # name is only shown (shown_name: a backslash or a control character
+    # becomes '?'); the id names the part.
     # shellcheck disable=2016
     rows="$(hetzner::json -r --argjson remote "${remote}" --arg field "${resource}" \
-      --arg key "${_HETZNER_OWNER_KEY}" --arg mark "${mark}" '
+      --arg key "${_HETZNER_OWNER_KEY}" --arg mark "${mark}" "${_HETZNER_JQ_SHOWN_NAME}"'
       [ .[$field][]? | .name ] as $names
       | ($remote // [])[]
       | select(.name as $n | any($names[]; . == $n))
       | select((.labels // {})[$key] != $mark)
-      | [ (.id | tostring), .name, ((.labels // {})[$key] // "") ] | @tsv')" || return 1
+      | [ (.id | tostring), (.name | shown_name), ((.labels // {})[$key] // "") ] | @tsv')" || return 1
     while IFS=$'\t' read -r rid rname rmark; do
       [[ -n "${rid}" ]] || continue
       refused+=("${resource}"$'\t'"${rid}"$'\t'"${rname}"$'\t'"${rmark}")
@@ -723,13 +725,12 @@ hetzner::_part_args() {
 }
 
 # hetzner::_print_refused: one error per entry of _HETZNER_REFUSED. A
-# refusal shows descriptor values (as JSON, with escapes such as \t): each
-# backslash is doubled, so that error (echo -e) prints it as it is and not
-# as a control character.
+# refusal shows descriptor values (as JSON, with escapes such as \t): error
+# prints each backslash as it is, not as a control character.
 hetzner::_print_refused() {
   local r
   for r in "${_HETZNER_REFUSED[@]}"; do
-    error "hetzner: refused ${r//\\/\\\\}"
+    error "hetzner: refused ${r}"
   done
 }
 
