@@ -3803,18 +3803,21 @@ _dry_plugin_stopped() {
 # the watchdog, is only noted until it keeps both. Then it stops the check
 # as at any other time, so neither runs on. A forced delay holds each
 # window open (_ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN, _WATCHDOG; empty in
-# a normal run). A watchdog that ran on would write its time-limit mark
-# into the boundary after _ADDONS_DRYRUN_CHECK_TIMEOUT (3 s), and the test
-# looks after 4.5 s. Go has no such window: exec.Cmd.Start returns with the
+# a normal run). A watchdog that ran on would send USR1 at
+# _ADDONS_DRYRUN_CHECK_TIMEOUT (3 s), and the test looks after 4.5 s: the
+# stop ends the watchdog with its lines, and the watchdog sends at most the
+# USR2 of the grace. Go has no such window: exec.Cmd.Start returns with the
 # process.
 @test "the dry run's plugin check stops the plugin and the watchdog on a TERM before it keeps their pids" {
   _dry_need_clock
-  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" window m b start sent took job rc i
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" window m b log start sent took job rc i
   _ADDONS_DRYRUN_CHECK_TIMEOUT=3
   _ADDONS_DRYRUN_CHECK_GRACE=1
+  kill() { printf '%s\n' "$*" >> "${log}"; builtin kill "$@"; }
   for window in plugin watchdog; do
-    m="${BATS_TEST_TMPDIR}/m-${window}" b="${BATS_TEST_TMPDIR}/b-${window}"
+    m="${BATS_TEST_TMPDIR}/m-${window}" b="${BATS_TEST_TMPDIR}/b-${window}" log="${BATS_TEST_TMPDIR}/kills-${window}"
     mkdir -p "${m}" "${b}"
+    : > "${log}"
     if [[ "${window}" == plugin ]]; then
       _ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN=1.5 _ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG=""
     else
@@ -3828,34 +3831,40 @@ _dry_plugin_stopped() {
     [[ -s "${m}/ppid" ]] || { echo "${window}: the plugin did not start"; return 1; }
     # 0.3 s into the delay of 1.5 s: the window is open.
     sleep 0.3
-    kill -TERM "$(<"${m}/ppid")"
+    builtin kill -TERM "$(<"${m}/ppid")"
     sent=$(_dry_now_ms)
     rc=0
     wait "${job}" 2>/dev/null || rc=$?
     took=$(( $(_dry_now_ms) - sent ))
-    (( rc != 0 )) || { echo "${window}: the check passed after TERM: $(<"${b}.out")"; return 1; }
+    (( rc != 0 )) || { unset -f kill; echo "${window}: the check passed after TERM: $(<"${b}.out")"; return 1; }
     # The rest of the delay, then the grace (the plugin ignores TERM). The
     # floor is above the grace alone (about 1000 ms): a stop that does not
     # wait for the end of the window takes only the grace.
     (( took >= 1600 && took <= 3500 )) || { echo "${window}: the check took ${took} ms after TERM, want the rest of the delay and then the grace (about 2200)"; return 1; }
-    _dry_plugin_stopped "${m}" "${start}" || { echo "(TERM in the ${window} window)"; return 1; }
-    [ -z "$(ls -A "${b}" | grep -E '^(probe|check)-')" ] || { echo "${window}: a file of the check is in the boundary (a watchdog ran on): $(ls -A "${b}")"; return 1; }
+    _dry_plugin_stopped "${m}" "${start}" || { unset -f kill; echo "(TERM in the ${window} window)"; return 1; }
+    [ -z "$(ls -A "${b}" | grep -E '^(probe|check)-')" ] || { unset -f kill; echo "${window}: a file of the check is in the boundary: $(ls -A "${b}")"; return 1; }
+    ! grep -q -- "^-USR1 " "${log}" || { unset -f kill; echo "${window}: a watchdog ran on to the time limit: $(tr '\n' ' ' < "${log}")"; return 1; }
   done
+  unset -f kill
 }
 
 # After the check's wait the plugin is reaped, and its pid can be another
 # process's: a stop sends no signal to a job of the check that has ended,
-# waited for or not (addons::_running_job). A job that runs gets TERM. The
-# stops run with set -e on, as in a trap of the check. They run in a job of
-# their own (set -m) with a time limit: a stop that does not return fails
-# the test, and a KILL to the job's group leaves no process behind.
+# waited for or not (addons::_running_job). A plugin that runs gets TERM,
+# and the watchdog gets no signal: the stop writes "stop", then "end", on
+# the FIFO. After the time limit sent TERM already (<past> 1), the stop
+# sends none. The stops run with set -e on, as in a trap of the check. They
+# run in a job of their own (set -m) with a time limit: a stop that does not
+# return fails the test, and a KILL to the job's group leaves no process
+# behind.
 @test "the dry run's plugin check sends no signal to a job of its own that has ended" {
-  local log="${BATS_TEST_TMPDIR}/kills" sub i
-  _ADDONS_DRYRUN_CHECK_GRACE=1
+  local log="${BATS_TEST_TMPDIR}/kills" fifo="${BATS_TEST_TMPDIR}/tick" got="${BATS_TEST_TMPDIR}/lines" sub i
   : > "${log}"
+  mkfifo "${fifo}"
   set -m
   (
     kill() { printf '%s\n' "$*" >> "${log}"; builtin kill "$@"; }
+    exec {tick}<>"${fifo}"
     sleep 0.1 3>&- &
     waited=$!
     sleep 0.1 3>&- &
@@ -3863,12 +3872,24 @@ _dry_plugin_stopped() {
     wait "${waited}"
     # The shell reaps the other one when it ends, with no wait.
     sleep 0.5
-    addons::_check_stop "${waited}" "${ended}"
+    addons::_check_stop "${waited}" "${ended}" "${tick}" 0
     [[ ! -s "${log}" ]] || { echo "a stop sent a signal to a job that had ended: $(<"${log}")"; exit 1; }
+    read -r -t 1 -u "${tick}" l1 && read -r -t 1 -u "${tick}" l2 || { echo "the stop wrote no two lines on the FIFO"; exit 1; }
+    [[ "${l1} ${l2}" == "stop end" ]] || { echo "the stop wrote '${l1} ${l2}' on the FIFO, want 'stop end'"; exit 1; }
     sleep 5 3>&- &
     running=$!
-    addons::_check_stop "" "${running}"
-    [[ "$(<"${log}")" == "-TERM ${running}" ]] || { echo "a stop did not send TERM to the running job ${running}: $(<"${log}")"; exit 1; }
+    ( read -r -u "${tick}" l1; read -r -u "${tick}" l2; printf '%s %s\n' "${l1}" "${l2}" > "${got}" ) 3>&- &
+    watchdog=$!
+    addons::_check_stop "${running}" "${watchdog}" "${tick}" 0
+    [[ "$(<"${log}")" == "-TERM ${running}" ]] || { echo "a stop sent '$(<"${log}")', want only TERM to the running plugin ${running}"; exit 1; }
+    [[ "$(<"${got}")" == "stop end" ]] || { echo "the watchdog read '$(<"${got}")', want 'stop end'"; exit 1; }
+    : > "${log}"
+    sleep 0.5 3>&- &
+    running=$!
+    ( read -r -u "${tick}" l1; read -r -u "${tick}" l2 ) 3>&- &
+    watchdog=$!
+    addons::_check_stop "${running}" "${watchdog}" "${tick}" 1
+    [[ ! -s "${log}" ]] || { echo "a stop after the time limit's TERM sent '$(<"${log}")', want no signal"; exit 1; }
   ) 3>&- &
   sub=$!
   set +m
@@ -3887,10 +3908,13 @@ _dry_plugin_stopped() {
 # makes the stop's wait fail. The stop must still stop its grace timer, or
 # the timer sends KILL to the plugin's pid after the grace, when the pid is
 # no longer the plugin's. A plugin that TERM ends at once ("-": the default
-# action) gets no KILL either.
+# action) gets no KILL either. The stop ends the watchdog with the line
+# "end" when the plugin ends, so the check does not wait out the grace (2 s),
+# and the watchdog sends no signal to the check after it (no USR1, no USR2).
 @test "the dry run's plugin check stops its grace timer when the plugin ends on TERM" {
-  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" on m b log job rc i p n=0
-  _ADDONS_DRYRUN_CHECK_GRACE=1
+  _dry_need_clock
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" on m b log job rc i p sent took n=0
+  _ADDONS_DRYRUN_CHECK_GRACE=2
   for on in "-" "sleep 0.3; exit 1"; do
     n=$(( n + 1 )) m="${BATS_TEST_TMPDIR}/m${n}" b="${BATS_TEST_TMPDIR}/b${n}" log="${BATS_TEST_TMPDIR}/kills${n}"
     mkdir -p "${m}" "${b}"
@@ -3902,15 +3926,19 @@ _dry_plugin_stopped() {
     for (( i = 0; i < 100; i++ )); do [[ -s "${m}/ppid" ]] && break; sleep 0.05; done
     [[ -s "${m}/ppid" ]] || { unset -f kill; echo "the plugin did not start (on TERM: ${on})"; return 1; }
     builtin kill -TERM "$(<"${m}/ppid")"
+    sent=$(_dry_now_ms)
     rc=0
     wait "${job}" 2>/dev/null || rc=$?
+    took=$(( $(_dry_now_ms) - sent ))
     # Past the grace: a timer that ran on has sent its KILL by now.
-    sleep 1.5
+    sleep 2.5
     unset -f kill
     (( rc != 0 )) || { echo "the check passed after TERM (on TERM: ${on})"; return 1; }
+    (( took <= 1500 )) || { echo "the check ended ${took} ms after TERM (on TERM: ${on}): it waited out the grace"; return 1; }
     p=$(<"${m}/pid")
     grep -qx -- "-TERM ${p}" "${log}" || { echo "the plugin got no TERM (on TERM: ${on}): $(tr '\n' ' ' < "${log}")"; return 1; }
     ! grep -qx -- "-KILL ${p}" "${log}" || { echo "the grace timer sent KILL to ${p} after the plugin ended (on TERM: ${on}): $(tr '\n' ' ' < "${log}")"; return 1; }
+    ! grep -qE -- "^-USR[12] " "${log}" || { echo "the watchdog signalled the check after the plugin ended (on TERM: ${on}): $(tr '\n' ' ' < "${log}")"; return 1; }
   done
 }
 
@@ -3941,6 +3969,286 @@ _dry_plugin_stopped() {
   n=$(grep -cx -- "-TERM $(<"${m}/pid")" "${log}" || true)
   [[ "${n}" == 1 ]] || { echo "the plugin got TERM ${n} times from the check, want once: $(tr '\n' ' ' < "${log}")"; return 1; }
   _dry_plugin_stopped "${m}" "${start}" || { echo "check rc ${rc}; the plugin is $(<"${m}/pid"); signals from the check: $(tr '\n' ' ' < "${log}")"; return 1; }
+}
+
+# A plugin that ends in time gets no signal, and neither does anything else:
+# the check ends its watchdog with the line "end" on the FIFO, not with a
+# TERM (on bash 5.2 a TERM to the watchdog could be lost, and the watchdog
+# then sent TERM to the plugin's pid at the time limit). The check runs 5
+# times; the last run is in the test's own shell (not in `run`), so that the
+# test can read the shell's descriptors after it. Where /proc gives the
+# descriptors (Linux), neither the plugin nor lo's shell after the check
+# holds the FIFO. No file of the check is left in the boundary.
+@test "the dry run's plugin check sends no signal when the plugin ends in time" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" log="${BATS_TEST_TMPDIR}/kills" fds="${BATS_TEST_TMPDIR}/fds" n fd
+  _ADDONS_DRYRUN_CHECK_TIMEOUT=5
+  _ADDONS_DRYRUN_CHECK_GRACE=1
+  mkdir -p "$(dirname "${plugin}")"
+  printf '#!/bin/sh\nexec 3>&-\nif [ -d /proc/$$/fd ]; then for f in /proc/$$/fd/*; do readlink "$f"; done >> "%s"; fi\necho dry-run\n' "${fds}" > "${plugin}"
+  chmod +x "${plugin}"
+  : > "${log}"
+  kill() { printf '%s %s\n' "${BASHPID}" "$*" >> "${log}"; builtin kill "$@"; }
+  for n in 1 2 3 4; do
+    mkdir -p "${BATS_TEST_TMPDIR}/b${n}"
+    run addons::dry_run_boundary "${BATS_TEST_TMPDIR}/b${n}"
+    [ "${status}" -eq 0 ] || { unset -f kill; echo "run ${n}: the check failed: ${output}"; return 1; }
+  done
+  mkdir -p "${BATS_TEST_TMPDIR}/b5"
+  addons::dry_run_boundary "${BATS_TEST_TMPDIR}/b5" >"${BATS_TEST_TMPDIR}/b5.out" 2>&1 \
+    || { unset -f kill; echo "run 5: the check failed: $(<"${BATS_TEST_TMPDIR}/b5.out")"; return 1; }
+  unset -f kill
+  [[ ! -s "${log}" ]] || { echo "the check sent signals: $(tr '\n' ' ' < "${log}")"; return 1; }
+  for n in 1 2 3 4 5; do
+    [ -z "$(ls -A "${BATS_TEST_TMPDIR}/b${n}" | grep -E '^(probe|check)-')" ] \
+      || { echo "run ${n}: a file of the check is left in the boundary: $(ls -A "${BATS_TEST_TMPDIR}/b${n}")"; return 1; }
+  done
+  if [[ -d "/proc/${BASHPID}/fd" ]]; then
+    [[ -s "${fds}" ]] || { echo "the plugin did not list its descriptors"; return 1; }
+    ! grep -q -- "check-tick-" "${fds}" || { echo "the plugin got the FIFO: $(grep -- check-tick- "${fds}" | tr '\n' ' ')"; return 1; }
+    for fd in "/proc/${BASHPID}/fd/"*; do
+      [[ "$(readlink "${fd}" 2>/dev/null || true)" != *check-tick-* ]] || { echo "lo's shell holds the FIFO after the check: ${fd}"; return 1; }
+    done
+  fi
+}
+
+# Only the check sends a signal to the plugin: at the time limit the
+# watchdog sends USR1 and, at the end of the grace, USR2 to the check, and
+# the check sends TERM and KILL to a plugin that is still its running job.
+# A plugin that ignores TERM stands for a TERM that bash lost.
+@test "the dry run's plugin check sends the time limit's TERM and KILL from the check" {
+  _dry_need_clock
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m" b="${BATS_TEST_TMPDIR}/b" log="${BATS_TEST_TMPDIR}/kills" start pid sub
+  _ADDONS_DRYRUN_CHECK_TIMEOUT=1
+  _ADDONS_DRYRUN_CHECK_GRACE=1
+  mkdir -p "${m}" "${b}"
+  : > "${log}"
+  _dry_slow_plugin "${plugin}" "${m}" ""
+  kill() { printf '%s %s\n' "${BASHPID}" "$*" >> "${log}"; builtin kill "$@"; }
+  start=$(_dry_now_ms)
+  run addons::dry_run_boundary "${b}"
+  unset -f kill
+  assert_failure
+  assert_output --partial "/secrets.lok8s.dev/v1/secret/Secret did not end in 1 s"
+  pid=$(<"${m}/pid") sub=$(<"${m}/ppid")
+  grep -qx -- "${sub} -TERM ${pid}" "${log}" && grep -qx -- "${sub} -KILL ${pid}" "${log}" \
+    || { echo "the check (${sub}) did not send TERM and KILL to the plugin (${pid}): $(tr '\n' ' ' < "${log}")"; return 1; }
+  ! grep -E -- " -[A-Z0-9]+ ${pid}\$" "${log}" | grep -qv -- "^${sub} " \
+    || { echo "another process sent a signal to the plugin: $(tr '\n' ' ' < "${log}")"; return 1; }
+  _dry_plugin_stopped "${m}" "${start}"
+}
+
+# A stop sends TERM to the plugin first, and no signal to the watchdog: it
+# writes "stop" on the FIFO, and the watchdog's USR2 at the end of the
+# grace makes the check send KILL to a plugin that ignores TERM. Every
+# signal goes to the plugin or to the check, and the watchdog sends no USR1
+# (the stop came before the time limit).
+@test "the dry run's plugin check stop sends TERM to the plugin first and no signal to the watchdog" {
+  _dry_need_clock
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m" b="${BATS_TEST_TMPDIR}/b" log="${BATS_TEST_TMPDIR}/kills" start job rc pid sub i
+  _ADDONS_DRYRUN_CHECK_GRACE=1
+  mkdir -p "${m}" "${b}"
+  : > "${log}"
+  _dry_slow_plugin "${plugin}" "${m}" ""
+  kill() { printf '%s %s\n' "${BASHPID}" "$*" >> "${log}"; builtin kill "$@"; }
+  start=$(_dry_now_ms)
+  addons::dry_run_boundary "${b}" >"${b}.out" 2>&1 3>&- &
+  job=$!
+  for (( i = 0; i < 100; i++ )); do [[ -s "${m}/ppid" ]] && break; sleep 0.05; done
+  [[ -s "${m}/ppid" ]] || { unset -f kill; echo "the plugin did not start"; return 1; }
+  pid=$(<"${m}/pid") sub=$(<"${m}/ppid")
+  builtin kill -TERM "${sub}"
+  rc=0
+  wait "${job}" 2>/dev/null || rc=$?
+  unset -f kill
+  (( rc == 143 )) || { echo "the check returned ${rc}, want 143: $(<"${b}.out")"; return 1; }
+  [[ "$(head -n 1 "${log}")" == "${sub} -TERM ${pid}" ]] || { echo "the stop's first signal is not TERM to the plugin: $(tr '\n' ' ' < "${log}")"; return 1; }
+  grep -qx -- "${sub} -KILL ${pid}" "${log}" || { echo "the check sent no KILL after the grace: $(tr '\n' ' ' < "${log}")"; return 1; }
+  ! awk -v p="${pid}" -v s="${sub}" '$3 != p && $3 != s { bad = 1 } END { exit !bad }' "${log}" \
+    || { echo "a signal went to a process that is neither the plugin nor the check (the watchdog): $(tr '\n' ' ' < "${log}")"; return 1; }
+  ! grep -q -- " -USR1 " "${log}" || { echo "the watchdog sent USR1 before the time limit (30 s): $(tr '\n' ' ' < "${log}")"; return 1; }
+  _dry_plugin_stopped "${m}" "${start}"
+}
+
+# A plugin that ends after the time limit, but before the watchdog's signal
+# comes, gets no signal: the watchdog signals the check, and the check
+# sends nothing to a job that has ended (its pid can be another process's
+# then). The test's kill holds each signal of another process than the
+# check for 2 s (with TERM ignored, so the hold is not cut short). The time
+# limit and the grace are 1 s each, and the plugin ignores TERM:
+#   - a plugin that ends at 2 s ends before the USR1 of the time limit
+#     (sent at 1 s, held until 3 s): it gets no signal;
+#   - a plugin that ends at 5 s gets the time limit's TERM at 3 s, while it
+#     runs. It ends after the end of the grace (the grace runs from 3 s to
+#     4 s), before the USR2 (sent at 4 s, held until 6 s): it gets no KILL.
+@test "the dry run's plugin check sends no signal to a plugin that ends between the time limit and the signal" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m b log pid ends sig
+  _ADDONS_DRYRUN_CHECK_TIMEOUT=1
+  _ADDONS_DRYRUN_CHECK_GRACE=1
+  mkdir -p "$(dirname "${plugin}")"
+  kill() {
+    if [[ "${BASHPID}" != "$(<"${m}/ppid")" ]]; then trap '' TERM; sleep 2; fi
+    printf '%s %s\n' "${BASHPID}" "$*" >> "${log}"
+    builtin kill "$@"
+  }
+  for ends in 2 5; do
+    sig='[A-Z0-9]+'
+    [[ "${ends}" != 5 ]] || sig=KILL
+    m="${BATS_TEST_TMPDIR}/m${ends}" b="${BATS_TEST_TMPDIR}/b${ends}" log="${BATS_TEST_TMPDIR}/kills${ends}"
+    mkdir -p "${m}" "${b}"
+    : > "${log}"
+    printf '#!/bin/sh\nexec 3>&-\ntrap "" TERM\necho $$ > "%s/pid"\necho $PPID > "%s/ppid"\nsleep %s\necho dry-run\n' "${m}" "${m}" "${ends}" > "${plugin}"
+    chmod +x "${plugin}"
+    run addons::dry_run_boundary "${b}"
+    assert_failure
+    assert_output --partial "/secrets.lok8s.dev/v1/secret/Secret did not end in 1 s"
+    pid=$(<"${m}/pid")
+    ! grep -qE -- " -${sig} ${pid}\$" "${log}" \
+      || { unset -f kill; echo "plugin end at ${ends} s: a signal went to the plugin's pid after it ended: $(tr '\n' ' ' < "${log}")"; return 1; }
+  done
+  unset -f kill
+  # The second case reached the USR2: else it tests nothing of the KILL.
+  grep -qE -- "^[0-9]+ -USR2 " "${BATS_TEST_TMPDIR}/kills5" \
+    || { echo "plugin end at 5 s: the watchdog sent no USR2: $(tr '\n' ' ' < "${BATS_TEST_TMPDIR}/kills5")"; return 1; }
+}
+
+# A stop waits for its watchdog, so a USR2 that the watchdog sends late
+# still finds the check, and the check sends nothing to a plugin that has
+# ended. The test's kill holds each signal of another process than the
+# check for 2 s (with TERM ignored). The plugin ignores TERM and ends at
+# 2 s; the stop comes at about 0.1 s, so the grace (1 s) ends at about
+# 1.1 s, and the watchdog's USR2 comes at about 3.1 s, after the plugin's
+# end. A check that did not wait for its watchdog would be gone by then:
+# the USR2 would fail, and the watchdog would send KILL to the plugin's pid.
+@test "the dry run's plugin check stop waits for its watchdog, so a late USR2 finds the check" {
+  _dry_need_clock
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m" b="${BATS_TEST_TMPDIR}/b" log="${BATS_TEST_TMPDIR}/kills" start job rc pid sub i left
+  _ADDONS_DRYRUN_CHECK_GRACE=1
+  mkdir -p "$(dirname "${plugin}")" "${m}" "${b}"
+  : > "${log}"
+  printf '#!/bin/sh\nexec 3>&-\ntrap "" TERM\necho $$ > "%s/pid"\necho $PPID > "%s/ppid"\nsleep 2\necho dry-run\n' "${m}" "${m}" > "${plugin}"
+  chmod +x "${plugin}"
+  kill() {
+    if [[ "${BASHPID}" != "$(<"${m}/ppid")" ]]; then trap '' TERM; sleep 2; fi
+    printf '%s %s\n' "${BASHPID}" "$*" >> "${log}"
+    builtin kill "$@"
+  }
+  start=$(_dry_now_ms)
+  addons::dry_run_boundary "${b}" >"${b}.out" 2>&1 3>&- &
+  job=$!
+  for (( i = 0; i < 100; i++ )); do [[ -s "${m}/ppid" ]] && break; sleep 0.05; done
+  [[ -s "${m}/ppid" ]] || { unset -f kill; echo "the plugin did not start"; return 1; }
+  pid=$(<"${m}/pid") sub=$(<"${m}/ppid")
+  builtin kill -TERM "${sub}"
+  rc=0
+  wait "${job}" 2>/dev/null || rc=$?
+  # A watchdog that ran on sends its KILL at about 5.1 s (two holds).
+  left=$(( start + 6000 - $(_dry_now_ms) ))
+  (( left <= 0 )) || sleep "$(( left / 1000 )).$(printf '%03d' $(( left % 1000 )))"
+  unset -f kill
+  (( rc == 143 )) || { echo "the check returned ${rc}, want 143: $(<"${b}.out")"; return 1; }
+  grep -qE -- "^[0-9]+ -USR2 ${sub}\$" "${log}" || { echo "the watchdog sent no USR2 (the test reached no race): $(tr '\n' ' ' < "${log}")"; return 1; }
+  ! grep -qE -- " -KILL ${pid}\$" "${log}" || { echo "a KILL went to the plugin's pid after it ended: $(tr '\n' ' ' < "${log}")"; return 1; }
+}
+
+# A TERM to the whole process group (a CI runner that stops a job) reaches
+# the watchdog too. It inherits TERM as ignored, so it still ends the grace:
+# a plugin that ignores TERM gets KILL after the grace, and the check does
+# not wait until the plugin ends by itself (about 4 s).
+@test "the dry run's plugin check keeps the grace when TERM comes to the whole process group" {
+  _dry_need_clock
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m" b="${BATS_TEST_TMPDIR}/b" start sent took job rc i
+  _ADDONS_DRYRUN_CHECK_GRACE=1
+  mkdir -p "${m}" "${b}"
+  _dry_slow_plugin "${plugin}" "${m}" ""
+  start=$(_dry_now_ms)
+  # Job control on: the job is lo's shell, in a process group of its own.
+  set -m
+  addons::dry_run_boundary "${b}" >"${b}.out" 2>&1 3>&- &
+  job=$!
+  set +m
+  for (( i = 0; i < 100; i++ )); do [[ -s "${m}/ppid" ]] && break; sleep 0.05; done
+  [[ -s "${m}/ppid" ]] || { echo "the plugin did not start"; return 1; }
+  kill -TERM -- "-${job}"
+  sent=$(_dry_now_ms)
+  rc=0
+  wait "${job}" 2>/dev/null || rc=$?
+  took=$(( $(_dry_now_ms) - sent ))
+  (( rc == 143 )) || { echo "the check returned ${rc}, want 143: $(<"${b}.out")"; return 1; }
+  (( took >= 800 && took <= 2500 )) || { echo "the check took ${took} ms after the group TERM, want about 1000 (the grace)"; return 1; }
+  _dry_plugin_stopped "${m}" "${start}"
+}
+
+# A stop in the grace of the time limit sends no second TERM (the time
+# limit sent one), and it starts the grace again, once: the KILL comes a
+# whole grace (2 s) after the stop, not at the end of the time limit's
+# grace (0.5 s after the stop).
+@test "the dry run's plugin check stop in the time limit's grace sends no second TERM and starts the grace again" {
+  _dry_need_clock
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m" b="${BATS_TEST_TMPDIR}/b" log="${BATS_TEST_TMPDIR}/kills" start sent took job rc pid sub i n left
+  _ADDONS_DRYRUN_CHECK_TIMEOUT=1
+  _ADDONS_DRYRUN_CHECK_GRACE=2
+  mkdir -p "${m}" "${b}"
+  : > "${log}"
+  mkdir -p "$(dirname "${plugin}")"
+  printf '#!/bin/sh\nexec 3>&-\ntrap "" INT TERM\necho $$ > "%s/pid"\necho $PPID > "%s/ppid"\ni=0\nwhile [ "$i" -lt 60 ]; do sleep 0.1; i=$((i + 1)); done\ntouch "%s/ended"\necho dry-run\n' "${m}" "${m}" "${m}" > "${plugin}"
+  chmod +x "${plugin}"
+  kill() { printf '%s %s\n' "${BASHPID}" "$*" >> "${log}"; builtin kill "$@"; }
+  start=$(_dry_now_ms)
+  addons::dry_run_boundary "${b}" >"${b}.out" 2>&1 3>&- &
+  job=$!
+  for (( i = 0; i < 100; i++ )); do [[ -s "${m}/ppid" ]] && break; sleep 0.05; done
+  [[ -s "${m}/ppid" ]] || { unset -f kill; echo "the plugin did not start"; return 1; }
+  pid=$(<"${m}/pid") sub=$(<"${m}/ppid")
+  # 1.5 s after the start: in the time limit's grace (1 s to 3 s).
+  left=$(( start + 1500 - $(_dry_now_ms) ))
+  (( left <= 0 )) || sleep "$(( left / 1000 )).$(printf '%03d' $(( left % 1000 )))"
+  builtin kill -TERM "${sub}"
+  sent=$(_dry_now_ms)
+  rc=0
+  wait "${job}" 2>/dev/null || rc=$?
+  took=$(( $(_dry_now_ms) - sent ))
+  unset -f kill
+  (( rc == 143 )) || { echo "the check returned ${rc}, want 143: $(<"${b}.out")"; return 1; }
+  n=$(grep -cE -- "^[0-9]+ -TERM ${pid}\$" "${log}" || true)
+  [[ "${n}" == 1 ]] || { echo "the plugin got TERM ${n} times, want once (the time limit's): $(tr '\n' ' ' < "${log}")"; return 1; }
+  (( took >= 1700 && took <= 3000 )) || { echo "the check ended ${took} ms after the stop, want about 2000 (a whole grace)"; return 1; }
+  [[ ! -e "${m}/ended" ]] || { echo "the plugin ran to its end"; return 1; }
+}
+
+# When the check is gone (a KILL ends it, and lo's shell goes on), the
+# watchdog's USR1 to it fails: the watchdog then sends TERM to the plugin
+# itself, and KILL after the grace, by its pid. The plugin ignores TERM and
+# would run for about 4 s.
+@test "the dry run's plugin check watchdog stops the plugin itself when the check is gone" {
+  _dry_need_clock
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m" b="${BATS_TEST_TMPDIR}/b" log="${BATS_TEST_TMPDIR}/kills" start job pid sub i left
+  _ADDONS_DRYRUN_CHECK_TIMEOUT=1
+  _ADDONS_DRYRUN_CHECK_GRACE=1
+  mkdir -p "${m}" "${b}"
+  : > "${log}"
+  _dry_slow_plugin "${plugin}" "${m}" ""
+  kill() { printf '%s %s\n' "${BASHPID}" "$*" >> "${log}"; builtin kill "$@"; }
+  start=$(_dry_now_ms)
+  addons::dry_run_boundary "${b}" >"${b}.out" 2>&1 3>&- &
+  job=$!
+  for (( i = 0; i < 100; i++ )); do [[ -s "${m}/ppid" ]] && break; sleep 0.05; done
+  [[ -s "${m}/ppid" ]] || { unset -f kill; echo "the plugin did not start"; return 1; }
+  pid=$(<"${m}/pid") sub=$(<"${m}/ppid")
+  builtin kill -KILL "${sub}"
+  wait "${job}" 2>/dev/null || true
+  # The time limit (1 s) and the grace (1 s), then some room.
+  left=$(( start + 3000 - $(_dry_now_ms) ))
+  (( left <= 0 )) || sleep "$(( left / 1000 )).$(printf '%03d' $(( left % 1000 )))"
+  unset -f kill
+  if builtin kill -0 "${pid}" 2>/dev/null; then
+    builtin kill -KILL "${pid}" 2>/dev/null || true
+    echo "the plugin still runs 3 s after the start: the watchdog did not stop it: $(tr '\n' ' ' < "${log}")"
+    return 1
+  fi
+  [[ ! -e "${m}/ended" ]] || { echo "the plugin ran to its end"; return 1; }
+  grep -qE -- "^[0-9]+ -TERM ${pid}\$" "${log}" && grep -qE -- "^[0-9]+ -KILL ${pid}\$" "${log}" \
+    || { echo "the watchdog did not send TERM, then KILL, to the plugin: $(tr '\n' ' ' < "${log}")"; return 1; }
+  ! grep -qE -- "^${sub} " "${log}" || { echo "the check sent a signal after its KILL: $(tr '\n' ' ' < "${log}")"; return 1; }
 }
 
 # _dry_window_open <pid> <seconds>: true while <pid> runs the test-only
@@ -4000,9 +4308,23 @@ _dry_window_open() {
       # Job control on: without it, a background job of a script ignores INT.
       # The job is lo's shell, in a process group of its own. Its kill logs
       # each signal of the check with the pid of the shell that sends it.
+      # The INT of the group reaches the check and lo's shell at once, and
+      # lo's shell then sends TERM to the check. In a window of the check,
+      # that TERM can come after the check sets its last traps and before it
+      # sends itself the INT it noted: the TERM then stops the check (which
+      # is correct), and the log has no proof of the window. So in those
+      # windows lo's shell holds its TERM to the check for 1 s.
       set -m
       {
-        kill() { printf '%s %s\n' "${BASHPID}" "$*" >> "${log}"; builtin kill "$@"; }
+        _dry_lo_pid=${BASHPID}
+        kill() {
+          if [[ "${BASHPID}" == "${_dry_lo_pid}" && "${to}" == group && "${!#}" != "${_dry_lo_pid}" ]] \
+            && [[ "${window}" == plugin || "${window}" == watchdog ]]; then
+            sleep 1
+          fi
+          printf '%s %s\n' "${BASHPID}" "$*" >> "${log}"
+          builtin kill "$@"
+        }
         addons::dry_run_boundary "${b}"
       } >"${b}.out" 2>&1 3>&- &
       job=$!
@@ -4256,6 +4578,41 @@ EOF
     [ -z "$(ls -A "${b}" | grep -E '^(probe|check)-')" ] || { echo "${which}: files of the check are left: $(ls -A "${b}")"; return 1; }
   done
   unset -f mktemp
+}
+
+# The FIFO of the check has its own messages: its directory, the FIFO, and
+# its open (here a directory stands where the FIFO is). Each leaves no file
+# of the check behind and does not blame the plugin.
+@test "the dry run names a FIFO of the check that it cannot make or open" {
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" b want how
+  mkdir -p "$(dirname "${plugin}")"
+  printf '#!/bin/sh\necho dry-run\n' > "${plugin}"
+  chmod +x "${plugin}"
+  for how in dir fifo open; do
+    b="${BATS_TEST_TMPDIR}/boundary-${how}"
+    mkdir -p "${b}"
+    case "${how}" in
+      dir)
+        mktemp() {
+          if [[ "${*: -1}" == */check-tick-XXXXXX ]]; then echo "mktemp: no room for it" >&2; return 1; fi
+          command mktemp "$@"
+        }
+        want="cannot make a directory for the FIFO of the check of the Secret plugin " ;;
+      fifo) mkfifo() { echo "mkfifo: no room for it" >&2; return 1; }; want="cannot make the FIFO of the check of the Secret plugin " ;;
+      open) mkfifo() { mkdir "${1}"; }; want="cannot open the FIFO " ;;
+    esac
+    run addons::dry_run_boundary "${b}"
+    unset -f mktemp mkfifo
+    assert_failure
+    assert_output --partial "bootstrap dry-run: ${want}"
+    case "${how}" in
+      dir) assert_output --partial "/secrets.lok8s.dev/v1/secret/Secret: mktemp: no room for it" ;;
+      fifo) assert_output --partial "/secrets.lok8s.dev/v1/secret/Secret: mkfifo: no room for it" ;;
+      open) assert_output --partial "/tick of the check of the Secret plugin " ;;
+    esac
+    refute_output --partial "does not support a dry run"
+    [ -z "$(ls -A "${b}" | grep -E '^(probe|check)-')" ] || { echo "${how}: files of the check are left: $(ls -A "${b}")"; return 1; }
+  done
 }
 
 # The check never opens a name that is already in the boundary: a link to a
