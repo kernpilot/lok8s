@@ -188,7 +188,7 @@ _run_lo_stubbed() {
   for flags in himxB hiTB hiEB ehuxTE; do
     run keysonly::check_trace_support 4 3 "${flags}"
     assert_failure 1
-    assert_output "lo: bash 4.3 cannot keep Secret values out of a trace: run lo without set -x, set -T and set -E, or use bash 4.4 or later"
+    assert_output "lo: bash 4.3 cannot keep Secret values out of a trace or the environment: run lo without set -x, set -T, set -E and set -a, or use bash 4.4 or later"
   done
   run keysonly::check_trace_support 3 2 x
   assert_failure 1
@@ -209,6 +209,32 @@ _run_lo_stubbed() {
   main="$(grep -n '^main() {' "${_PROJECT_ROOT}/.lok8s/lo" | cut -d: -f1)"
   [ -n "${call}" ] && [ -n "${main}" ] && [ "${call}" -lt "${main}" ]
   [[ "$(sed -n "${call}p" "${_PROJECT_ROOT}/.lok8s/lo")" == keysonly::* ]]
+}
+
+# The KubeOne merges (drivers/kubeone/config) turn allexport off for a call
+# with `local -` (bash 4.4): bash 4.3 with set -a on stops at the start of
+# lo as well. Without it, and with bash 4.4 or later, lo goes on.
+@test "keysonly::check_trace_support stops bash 4.3 under set -a, at the start of lo" {
+  error() { printf '%s\n' "$*" >&2; }
+  # shellcheck source=/dev/null
+  source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
+  local flags version
+  for flags in ahB ehuaBH; do
+    run keysonly::check_trace_support 4 3 "${flags}"
+    assert_failure 1
+    assert_output "lo: bash 4.3 cannot keep Secret values out of a trace or the environment: run lo without set -x, set -T, set -E and set -a, or use bash 4.4 or later"
+  done
+  for flags in hB ehuBH; do
+    run keysonly::check_trace_support 4 3 "${flags}"
+    assert_success
+    assert_output ""
+  done
+  for version in "4 4" "5 3"; do
+    # shellcheck disable=SC2086 # the major and the minor version
+    run keysonly::check_trace_support ${version} ehuaBH
+    assert_success
+    assert_output ""
+  done
 }
 
 # The trace guard (the first of the two tracing lines of utils/keysonly.sh),

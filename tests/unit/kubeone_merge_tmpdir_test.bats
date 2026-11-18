@@ -417,6 +417,10 @@ if [[ "$(trap -p INT TERM HUP)" == "${before}" ]]; then echo "traps after failur
   # variable that it names, here one of the helper's own.
   local -n fixture_ref=_ye_file
   _assert_name_refused 'fixture_ref'
+  # An unset nameref (no target yet) is refused as well; `[[ -R name ]]`
+  # is false for it.
+  local -n fixture_unset_ref
+  _assert_name_refused 'fixture_unset_ref'
 }
 
 # _count_stubs <dir> <yq pattern>: stubs of cat, yq and rm in <dir>. Each
@@ -555,4 +559,196 @@ exit "${rc}"'
   run cat "${YQ_RC}"
   assert_output "0"
   cmp "${RW}/m.yaml" "${BATS_TEST_TMPDIR}/m.before" || { echo "the file changed" >&2; return 1; }
+}
+
+@test "kubeone::_yq_edit checks for a nameref without reading a value: no declare call names an argument" {
+  # A child shell wraps the declare builtin in a function that logs its
+  # arguments (flags and names only), then calls kubeone::_yq_edit with the
+  # name of a variable that holds a fixture credential. The nameref check
+  # lists the namerefs (declare -pn, no names); it does not run
+  # `declare -p <name>`, which would print the value.
+  export DECL_LOG="${BATS_TEST_TMPDIR}/declare.log"
+  run bash -c 'import() { :; }
+source "$2/utils/verbose.sh"; source "$2/drivers/kubeone/config"
+declare() { printf "%s\n" "$*" >> "${DECL_LOG}"; builtin declare "$@"; }
+f() { local +x FIXTURE_PW=fixture-password-1; kubeone::_yq_edit "$1" ".auth.password = strenv(FIXTURE_PW)" FIXTURE_PW; }
+f "$1"
+echo "the edit returned $?"' bash "${RW}/m.yaml" "${_PROJECT_ROOT}/.lok8s"
+  assert_success
+  assert_output "the edit returned 0"
+  run yq -r '.auth.password == "fixture-password-1"' "${RW}/m.yaml"
+  assert_output "true"
+  # The check ran, through the wrapper, and no call named the argument.
+  run cat "${DECL_LOG}"
+  assert_output "-pn"
+}
+
+@test "the registry merge stops when the caller has a readonly nameref named username, and writes nothing through it" {
+  # `local +x username` fails over a readonly nameref of the caller. An
+  # assignment after that would write the username through the reference
+  # into the exported variable that it names (TARGET), so the cat of the
+  # password would get it. The stubs of _count_stubs log each cat of a
+  # credential file and the yq of the registry write.
+  _registry_fixture 1
+  local stubs="${BATS_TEST_TMPDIR}/stubs" work="${RW}/.kubeone.yaml.work"
+  _count_stubs "${stubs}" 'strenv(RUSER)'
+  cp "${RW}/m.yaml" "${work}"
+  local saved_path="${PATH}"
+  PATH="${stubs}:${PATH}"
+  run bash -c 'import() { :; }
+source "$3/utils/verbose.sh"; source "$3/drivers/kubeone/config"
+export TARGET=placeholder
+declare -nr username=TARGET
+kubeone::_inject_registry_auth "$1" "$2"
+echo "the merge returned $?"
+if [[ "${TARGET}" == placeholder ]]; then echo "TARGET kept"; else echo "TARGET changed"; fi' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s"
+  PATH="${saved_path}"
+  assert_success
+  assert_output --partial "kubeone::_inject_registry_auth: a local cannot be declared (a readonly name or a nameref of the caller)"
+  assert_output --partial "the merge returned 1"
+  assert_output --partial "TARGET kept"
+  _assert_no_credential_in_output
+  [ ! -s "${ENV_LOG}" ] || { echo "a cat of a credential or the yq of the write ran ($(wc -l < "${ENV_LOG}") lines logged)" >&2; return 1; }
+  cmp "${work}" "${RW}/m.yaml" || { echo "the manifest changed" >&2; return 1; }
+}
+
+@test "kubeone::_yq_edit stops when the caller has a readonly nameref named _ye_out, and runs no yq" {
+  # `local +x ... _ye_out` fails over a readonly nameref of the caller. The
+  # capture of yq's output would then go through the reference into the
+  # exported TARGET: the manifest, with its credentials.
+  local stubs="${BATS_TEST_TMPDIR}/stubs" work="${RW}/.kubeone.yaml.work"
+  _count_stubs "${stubs}" '.x = 1'
+  printf 'auth:\n  username: fixture-user-1\n  password: fixture-password-1\n' > "${work}"
+  cp "${work}" "${BATS_TEST_TMPDIR}/work.before"
+  local saved_path="${PATH}"
+  PATH="${stubs}:${PATH}"
+  run bash -c 'import() { :; }
+source "$2/utils/verbose.sh"; source "$2/drivers/kubeone/config"
+export TARGET=placeholder
+declare -nr _ye_out=TARGET
+kubeone::_yq_edit "$1" ".x = 1"
+echo "the edit returned $?"
+if [[ "${TARGET}" == placeholder ]]; then echo "TARGET kept"; else echo "TARGET changed"; fi' bash "${work}" "${_PROJECT_ROOT}/.lok8s"
+  PATH="${saved_path}"
+  assert_success
+  assert_output --partial "kubeone::_yq_edit: a local cannot be declared (a readonly name or a nameref of the caller)"
+  assert_output --partial "the edit returned 1"
+  assert_output --partial "TARGET kept"
+  _assert_no_credential_in_output
+  [ ! -s "${ENV_LOG}" ] || { echo "yq ran ($(wc -l < "${ENV_LOG}") lines logged)" >&2; return 1; }
+  cmp "${work}" "${BATS_TEST_TMPDIR}/work.before" || { echo "the manifest changed" >&2; return 1; }
+}
+
+@test "after a registry merge that succeeds, the caller keeps set -a and its exported names with their values" {
+  # No signal: the call returns. Both functions turn allexport off with
+  # `local -`, so it is on again after the return, and their locals
+  # (local +x) leave the caller's exported variables as they were.
+  _registry_fixture 1
+  local work="${RW}/.kubeone.yaml.work"
+  cp "${RW}/m.yaml" "${work}"
+  run bash -c 'import() { :; }
+source "$3/utils/verbose.sh"; source "$3/drivers/kubeone/config"
+export RUSER=placeholder RPASS=placeholder username=placeholder password=placeholder _ye_out=placeholder
+set -a
+kubeone::_inject_registry_auth "$1" "$2"
+echo "the merge returned $?"
+if [[ $- == *a* ]]; then echo "allexport: on"; else echo "allexport: off"; fi
+for n in RUSER RPASS username password _ye_out; do
+  if [[ "$(declare -p "${n}" 2>/dev/null)" == "declare -x ${n}="* ]]; then x=exported; else x="not exported"; fi
+  if [[ "${!n-}" == placeholder ]]; then v=placeholder; else v="another value"; fi
+  echo "${n}: ${x}, ${v}"
+done' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s"
+  assert_success
+  _assert_no_credential_in_output
+  assert_output "the merge returned 0
+allexport: on
+RUSER: exported, placeholder
+RPASS: exported, placeholder
+username: exported, placeholder
+password: exported, placeholder
+_ye_out: exported, placeholder"
+  _assert_credentials_written "${work}" 1
+}
+
+# _registry_password <value>: the fixture password of registry1.example.com
+# (after _registry_fixture 1) is now <value>.
+_registry_password() {
+  printf '%s' "${1}" > "${PATH_CLUSTERS}/ko.cloud/secrets/Secret.fixture-pull-1.provisioning.password"
+}
+
+# _written <field> <value>: "true" when the registry merge wrote <value> as
+# registry1.example.com's auth.<field>. No value is printed.
+_written() {
+  yq -r ".containerRuntime.containerd.registries.\"registry1.example.com\".auth.${1} == \"${2}\"" "${work}"
+}
+
+@test "the registry merge keeps the password out of an arithmetic error under localvar_inherit and a caller's declare -i" {
+  # With localvar_inherit (BASHOPTS can turn it on), a local inherits the
+  # attributes of the caller's variable of the same name: with -i, the
+  # assignment of the password is arithmetic, and the error quotes it.
+  # The fixture password holds a ':' so that the arithmetic fails.
+  _registry_fixture 1
+  _registry_password 'fixture-password-1:x'
+  local work="${RW}/.kubeone.yaml.work"
+  cp "${RW}/m.yaml" "${work}"
+  run bash -c 'import() { :; }
+source "$3/utils/verbose.sh"; source "$3/drivers/kubeone/config"
+shopt -s localvar_inherit
+declare -i password=0
+kubeone::_inject_registry_auth "$1" "$2"
+echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s"
+  _assert_no_credential_in_output
+  assert_success
+  assert_output "the merge returned 0"
+  run _written password 'fixture-password-1:x'
+  assert_output "true"
+  run _written username 'fixture-user-1'
+  assert_output "true"
+}
+
+@test "kubeone::_yq_edit keeps the manifest out of an arithmetic error under localvar_inherit and a caller's declare -i _ye_out" {
+  local work="${RW}/.kubeone.yaml.work"
+  printf 'auth:\n  username: fixture-user-1\n  password: fixture-password-1\n' > "${work}"
+  run bash -c 'import() { :; }
+source "$2/utils/verbose.sh"; source "$2/drivers/kubeone/config"
+shopt -s localvar_inherit
+declare -i _ye_out=0
+kubeone::_yq_edit "$1" ".x = 1"
+echo "the edit returned $?"' bash "${work}" "${_PROJECT_ROOT}/.lok8s"
+  _assert_no_credential_in_output
+  [[ "${output}" != *auth* ]] || { echo "manifest text is in the output" >&2; return 1; }
+  assert_success
+  assert_output "the edit returned 0"
+  run yq -r '.x == 1 and .auth.username == "fixture-user-1" and .auth.password == "fixture-password-1"' "${work}"
+  assert_output "true"
+}
+
+@test "the registry merge writes the credentials unchanged under localvar_inherit and a caller's declare -u and -l" {
+  # With localvar_inherit, a caller's -u or -l would change the case of
+  # the username, the password or the captured manifest, without an error.
+  # Two runs: the names that are -u in the first run are -l in the second.
+  # Both credentials hold upper and lower case letters.
+  _registry_fixture 1
+  _registry_password 'fixture-Password-1'
+  printf '%s' 'fixture-User-1' > "${PATH_CLUSTERS}/ko.cloud/secrets/Secret.fixture-pull-1.provisioning.username"
+  local work="${RW}/.kubeone.yaml.work" upper lower
+  for upper in 'username _ye_out' 'password'; do
+    lower='password'
+    [[ "${upper}" == 'password' ]] && lower='username _ye_out'
+    cp "${RW}/m.yaml" "${work}"
+    run bash -c 'import() { :; }
+source "$3/utils/verbose.sh"; source "$3/drivers/kubeone/config"
+shopt -s localvar_inherit
+declare -u $4
+declare -l $5
+kubeone::_inject_registry_auth "$1" "$2"
+echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s" "${upper}" "${lower}"
+    [[ "${output}" != *[Ff][Ii][Xx][Tt][Uu][Rr][Ee]* ]] || { echo "a fixture credential is in the output" >&2; return 1; }
+    assert_success
+    assert_output "the merge returned 0"
+    run _written username 'fixture-User-1'
+    assert_output "true"
+    run _written password 'fixture-Password-1'
+    assert_output "true"
+  done
 }

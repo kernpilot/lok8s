@@ -390,11 +390,17 @@ kubeone::_inject_audit_log() {
 # declares them with `local +x` and assigns them with allexport (set -a)
 # off, as kubeone::_inject_registry_auth does. The helper declares its own
 # variables with `local +x` and turns allexport off for the call, so the
-# manifest that it holds in memory is not exported either. The arguments
-# are names, never values, so no value goes on a command line or into the
-# expression. The variables of the helper start with _ye_ and those of the
-# trace guard with _ko_: a name with one of these prefixes, or a nameref,
-# is refused before yq runs.
+# manifest that it holds in memory is not exported either. +i +l +u: under
+# shopt localvar_inherit a local takes the attributes of the caller's
+# variable of the same name, and an integer one makes the assignment of the
+# manifest arithmetic (an error quotes it), a case one changes it. When it
+# cannot declare them (a readonly name or a readonly nameref of the caller,
+# which would send an assignment elsewhere), it returns 1 before yq runs. The
+# arguments are names, never values, so no value goes on a command line or
+# into the expression. The variables of the helper start with _ye_ and
+# those of the trace guard with _ko_: a name with one of these prefixes, or
+# a nameref, is refused before yq runs. The nameref check reads the list of
+# `declare -pn` (names and the names that they reference), never a value.
 # It does not use `yq -i`: yq -i writes through a temp file in TMPDIR, and
 # when its last write fails, it keeps that file there, a copy of the manifest
 # outside the work directory. Here the result stays in memory until the
@@ -410,11 +416,13 @@ kubeone::_yq_edit() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # a trace must not show the manifest (utils/keysonly.sh)
   [[ $- != *a* ]] || { local -; set +a; }  # set -a would export the manifest held below
-  local +x _ye_file="${1}" _ye_expr="${2}" _ye_out _ye_n
+  local +x +i +l +u _ye_file="${1}" _ye_expr="${2}" _ye_out _ye_n _ye_refs \
+    || { error "kubeone::_yq_edit: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
   shift 2
+  _ye_refs=$'\n'"$(declare -pn)"$'\n'  # a line per nameref in scope, `declare -<flags> <name>[="<name>"]`: no value
   for _ye_n in "$@"; do
     [[ "${_ye_n}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "${_ye_n}" != _ye_* && "${_ye_n}" != _ko_* ]] \
-      && [[ ! "$(declare -p "${_ye_n}" 2>/dev/null)" =~ ^declare\ -[[:alpha:]]*n ]] \
+      && [[ ! "${_ye_refs}" =~ $'\n'declare\ -[[:alpha:]]*n[[:alpha:]]*\ ${_ye_n}(=|$'\n') ]] \
       || { error "kubeone::_yq_edit: an argument after the expression is not a variable name of the caller (_ye_* and _ko_* are reserved, a nameref is refused)"; return 1; }
   done
   # shellcheck disable=SC2163 # "$@" holds variable names, checked above: export them by name
@@ -513,9 +521,18 @@ kubeone::_inject_registry_auth() {
     # provider creds — no `eval` of generated shell.
     # +x: a variable of the caller with one of these names can be exported,
     # and a plain `local` keeps that export attribute. With +x (and set -a
-    # off, above) only yq gets a credential (kubeone::_yq_edit): not the cat
-    # that reads the password, and not the rm of a signal trap.
-    local +x ns="${sns:-provisioning}" username password RUSER RPASS
+    # off, above) the values that this function assigns here reach only yq
+    # (kubeone::_yq_edit): not the cat that reads the password, and not the
+    # rm of a signal trap. A value that the caller exported itself reaches
+    # the children as before. +i +l +u: under shopt localvar_inherit a local
+    # takes the attributes of the caller's variable of the same name; with
+    # -i an error of the arithmetic assignment would quote the credential,
+    # with -l or -u its case would change. When a local cannot be declared
+    # (a readonly name or a readonly nameref of the caller, which would
+    # send the assignment elsewhere), the merge stops before it reads a
+    # credential.
+    local +x +i +l +u ns="${sns:-provisioning}" username password RUSER RPASS \
+      || { error "kubeone::_inject_registry_auth: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
     username="$(cat "${secrets_dir}/Secret.${sname}.${ns}.username" 2>/dev/null || true)"
     password="$(cat "${secrets_dir}/Secret.${sname}.${ns}.password" 2>/dev/null || true)"
     if [[ -z "${username:-}" || -z "${password:-}" ]]; then

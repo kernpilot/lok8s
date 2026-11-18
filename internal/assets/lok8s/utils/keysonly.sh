@@ -53,15 +53,17 @@
 #     can leave behind.
 
 # keysonly::check_trace_support <major> <minor> <flags>: stop when this bash
-# cannot keep Secret values out of a trace. <major>.<minor> is the bash
-# version and <flags> the options ($-). The tracing rules above need
-# `local -` (bash 4.4) when xtrace, functrace or errtrace is on: with an
-# older bash, the guard would fail at the point that holds the value, so lo
-# stops at its start instead (.lok8s/lo).
+# cannot keep Secret values out of a trace or out of the environment.
+# <major>.<minor> is the bash version and <flags> the options ($-). The
+# tracing rules above need `local -` (bash 4.4) when xtrace, functrace or
+# errtrace is on, and the KubeOne merges (drivers/kubeone/config) need it
+# to turn allexport (set -a) off for a call: with an older bash, the guard
+# would fail at the point that holds the value, so lo stops at its start
+# instead (.lok8s/lo).
 keysonly::check_trace_support() {
   (( ${1} > 4 || (${1} == 4 && ${2} >= 4) )) && return 0
-  [[ ${3} != *[xTE]* ]] && return 0
-  error "lo: bash ${1}.${2} cannot keep Secret values out of a trace: run lo without set -x, set -T and set -E, or use bash 4.4 or later"
+  [[ ${3} != *[xTEa]* ]] && return 0
+  error "lo: bash ${1}.${2} cannot keep Secret values out of a trace or the environment: run lo without set -x, set -T, set -E and set -a, or use bash 4.4 or later"
   return 1
 }
 
