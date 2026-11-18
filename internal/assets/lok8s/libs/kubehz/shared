@@ -224,9 +224,10 @@ KUBEHZ_SCRUB_JQ="${VERBOSE_JQ_UNSHOWN}"'def scrub: explode | map(select((unshown
   | implode;'
 
 # The string without the characters that the def scrub drops. The input goes
-# to jq on stdin (no argv size limit); jq makes U+FFFD of a byte that is not
-# UTF-8, as Go does. Each caller reads it with $(...), which drops the
-# trailing newlines.
+# to jq on stdin (no argv size limit). jq makes one U+FFFD of each sequence
+# that is not UTF-8, where Go makes one per byte; the callers pass jq -r
+# output, which is UTF-8 already. Each caller reads it with $(...), which
+# drops the trailing newlines.
 # Usage: kubehz::scrub <string>
 kubehz::scrub() {
   jq -Rrs "${KUBEHZ_SCRUB_JQ}"' scrub' <<<"${1}"
