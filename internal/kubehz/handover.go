@@ -540,11 +540,15 @@ func (c *Context) writeKubeadmConfig(bundle, k8sDir, out, etcdTag string) error 
 	return os.WriteFile(out, []byte(content), 0o644) // #nosec G306 -- a static-pod manifest; the secret it mounts is its own 0600 file
 }
 
-// kubeadmInit ports handover::kubeadm_init.
+// kubeadmInit ports handover::kubeadm_init. --skip-token-print: the join
+// line that kubeadm prints at the end holds its bootstrap token, and that
+// output reaches the terminal (and a log). kubeadm prints the line with
+// the token withheld instead.
 func (c *Context) kubeadmInit(ctx context.Context, config string) error {
 	return c.run(ctx, "kubeadm", "init", "--config", config,
 		"--ignore-preflight-errors=DirAvailable--var-lib-etcd",
-		"--skip-phases=addon/coredns,addon/kube-proxy")
+		"--skip-phases=addon/coredns,addon/kube-proxy",
+		"--skip-token-print")
 }
 
 // verify ports handover::verify: the apiserver answers WITH the restored

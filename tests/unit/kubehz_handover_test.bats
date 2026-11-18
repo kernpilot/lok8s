@@ -179,8 +179,9 @@ _mock_node_binaries() {
   run grep -F "etcdutl snapshot restore ${SNAPSHOT} --data-dir ${KUBEHZ_HANDOVER_ETCD_DIR}" "${CALLS}"
   assert_success
 
-  # kubeadm init got the config AND the documented preflight ignore.
-  run grep -F "kubeadm init --config ${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml --ignore-preflight-errors=DirAvailable--var-lib-etcd --skip-phases=addon/coredns,addon/kube-proxy" "${CALLS}"
+  # kubeadm init got the config AND the documented preflight ignore, and
+  # --skip-token-print: its closing join line holds the bootstrap token.
+  run grep -F "kubeadm init --config ${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml --ignore-preflight-errors=DirAvailable--var-lib-etcd --skip-phases=addon/coredns,addon/kube-proxy --skip-token-print" "${CALLS}"
   assert_success
 
   # PKI was seeded byte-identical (kubeadm reuses it — the identity anchor).

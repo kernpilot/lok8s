@@ -272,7 +272,7 @@ func TestHandoverReceiveRunsInOrder(t *testing.T) {
 	if ho.lineIndex("etcdutl snapshot restore "+ho.snapshot+" --data-dir "+ho.etcdDir) < 0 {
 		t.Fatal("restore args")
 	}
-	if ho.lineIndex("kubeadm init --config "+ho.k8sDir+"/kubehz-handover-kubeadm.yaml --ignore-preflight-errors=DirAvailable--var-lib-etcd --skip-phases=addon/coredns,addon/kube-proxy") < 0 {
+	if ho.lineIndex("kubeadm init --config "+ho.k8sDir+"/kubehz-handover-kubeadm.yaml --ignore-preflight-errors=DirAvailable--var-lib-etcd --skip-phases=addon/coredns,addon/kube-proxy --skip-token-print") < 0 {
 		t.Fatalf("kubeadm init args:\n%s", strings.Join(ho.calls, "\n"))
 	}
 	for _, k := range []string{"ca.crt", "sa.key", "front-proxy-ca.key"} {
