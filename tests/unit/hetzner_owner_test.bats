@@ -432,12 +432,14 @@ _refused() {
 
 @test "refused: an ESC, a newline or a bidi character in a name is shown with '?'" {
   jq '.network[0].name = "prod\u001b[2Jx\u202e\nnet"' "${DESC}" > "${DESC}.new" && mv "${DESC}.new" "${DESC}"
-  _part network 13 $'prod\033[2Jx\u202e\nnet' '{"lok8s.dev/cluster":"prod"}'
+  # The bidi mark U+202E as its UTF-8 bytes: $'\u202e' depends on the locale
+  # (in the C locale bash keeps it as text).
+  _part network 13 $'prod\033[2Jx\xe2\x80\xae\nnet' '{"lok8s.dev/cluster":"prod"}'
   run _provision
   assert_failure
   assert_output --partial "refused network 'prod?[2Jx??net' (id 13): it exists, but it does not have the owner mark"
   refute_output --partial $'\033[2J'
-  refute_output --partial $'\u202e'
+  refute_output --partial $'\xe2\x80\xae'
   run _writes
   assert_output ""
 }
