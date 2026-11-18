@@ -66,7 +66,8 @@ func TestSpaceMintJoinNeverWritesIntoAPlantedFIFO(t *testing.T) {
 // A TMPDIR whose path a foreign owner could change is refused before any
 // directory is made: a part that others can write without the sticky bit
 // (the TMPDIR itself or a parent), a part of another user (the Euid seam
-// makes us someone else), and a link to such a directory. A part with the
+// makes us someone else), the same part when its owner is the overflow
+// uid (only "/" may be), and a link to such a directory. A part with the
 // sticky bit passes, as /tmp does. The mint has happened, so the
 // live-ticket note follows the reason.
 func TestSpaceMintJoinRefusesATMPDIROthersCanChange(t *testing.T) {
@@ -74,19 +75,20 @@ func TestSpaceMintJoinRefusesATMPDIROthersCanChange(t *testing.T) {
 	for _, c := range []struct {
 		name, why string
 		other     bool
+		overflow  bool
 		mk        func(t *testing.T, base string) (tmpdir, bad string)
 	}{
-		{"group-writable", "is writable by others and has no sticky bit", false, func(t *testing.T, base string) (string, string) {
+		{"group-writable", "is writable by others and has no sticky bit", false, false, func(t *testing.T, base string) (string, string) {
 			return modeDir(t, base, "gw", 0o770), filepath.Join(base, "gw")
 		}},
-		{"other-writable", "is writable by others and has no sticky bit", false, func(t *testing.T, base string) (string, string) {
+		{"other-writable", "is writable by others and has no sticky bit", false, false, func(t *testing.T, base string) (string, string) {
 			return modeDir(t, base, "ow", 0o707), filepath.Join(base, "ow")
 		}},
-		{"writable-parent", "is writable by others and has no sticky bit", false, func(t *testing.T, base string) (string, string) {
+		{"writable-parent", "is writable by others and has no sticky bit", false, false, func(t *testing.T, base string) (string, string) {
 			parent := modeDir(t, base, "wp", 0o777)
 			return modeDir(t, parent, "sub", 0o700), parent
 		}},
-		{"link-to-writable", "is writable by others and has no sticky bit", false, func(t *testing.T, base string) (string, string) {
+		{"link-to-writable", "is writable by others and has no sticky bit", false, false, func(t *testing.T, base string) (string, string) {
 			target := modeDir(t, base, "lw", 0o770)
 			link := filepath.Join(base, "link")
 			if err := os.Symlink(target, link); err != nil {
@@ -94,8 +96,11 @@ func TestSpaceMintJoinRefusesATMPDIROthersCanChange(t *testing.T) {
 			}
 			return link, target
 		}},
-		{"another-user", "belongs to another user (uid " + strconv.Itoa(os.Geteuid()) + ")", true, func(t *testing.T, base string) (string, string) {
+		{"another-user", "belongs to another user (uid " + strconv.Itoa(os.Geteuid()) + ")", true, false, func(t *testing.T, base string) (string, string) {
 			return modeDir(t, base, "au", 0o700), filepath.Join(base, "au")
+		}},
+		{"overflow-uid-not-root", "belongs to another user (uid " + strconv.Itoa(os.Geteuid()) + ")", true, true, func(t *testing.T, base string) (string, string) {
+			return modeDir(t, base, "ov", 0o700), filepath.Join(base, "ov")
 		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -105,6 +110,11 @@ func TestSpaceMintJoinRefusesATMPDIROthersCanChange(t *testing.T) {
 			h.env["TMPDIR"] = tmpdir
 			if c.other {
 				h.ctx.Euid = func() int { return os.Geteuid() + 1 }
+			}
+			if c.overflow {
+				// Our own uid is now the overflow uid: a part that is not "/"
+				// with that owner is still refused.
+				h.ctx.OverflowUID = os.Geteuid
 			}
 			h.handle("POST /api/spaces/sp-123/join-token", 201, noScriptJSON)
 			mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
@@ -128,6 +138,58 @@ func TestSpaceMintJoinRefusesATMPDIROthersCanChange(t *testing.T) {
 			t.Fatalf("ticket files below a sticky TMPDIR: %v", got)
 		}
 	})
+}
+
+// The overflow uid is trusted for "/" alone: in a user namespace that does
+// not map root, the host's "/" shows that owner. /tmp or any other part
+// with that owner is refused; root and the caller own any part.
+func TestOwnerTrustedTakesTheOverflowUIDOnlyForRoot(t *testing.T) {
+	t.Parallel()
+	c := &Context{Euid: func() int { return 1000 }, OverflowUID: func() int { return 65534 }}
+	for _, tc := range []struct {
+		part string
+		uid  int
+		want bool
+	}{
+		{"/", 65534, true},
+		{"/tmp", 65534, false},
+		{"/home/me/tmp", 65534, false},
+		{"/", 1234, false},
+		{"/tmp", 0, true},
+		{"/home/me/tmp", 1000, true},
+		{"/home/me/tmp", 1001, false},
+	} {
+		if got := c.ownerTrusted(tc.part, tc.uid); got != tc.want {
+			t.Errorf("ownerTrusted(%q, %d) = %v, want %v", tc.part, tc.uid, got, tc.want)
+		}
+	}
+}
+
+// The overflow uid comes from the kernel file; a file that cannot be read
+// or holds no uid gives 65534.
+func TestReadOverflowUIDFallsBackTo65534(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		name, content string
+		want          int
+	}{
+		{"a-uid", "4242\n", 4242},
+		{"empty", "", 65534},
+		{"junk", "x\n", 65534},
+		{"negative", "-1\n", 65534},
+	} {
+		file := filepath.Join(dir, tc.name)
+		if err := os.WriteFile(file, []byte(tc.content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := readOverflowUID(file); got != tc.want {
+			t.Errorf("readOverflowUID(%s) = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+	if got := readOverflowUID(filepath.Join(dir, "missing")); got != 65534 {
+		t.Errorf("readOverflowUID(missing) = %d, want 65534", got)
+	}
 }
 
 // modeDir makes dir/name with exactly mode (the umask does not apply; the

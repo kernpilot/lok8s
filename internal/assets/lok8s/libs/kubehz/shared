@@ -527,18 +527,23 @@ kubehz::space_wait_active() {
 # TMPDIR (else /tmp), absolute (a relative TMPDIR is taken from PWD), with
 # each symlink resolved (cd -P; TMPDIR=/ and // give /). Each part of the
 # resolved path, up to /, must belong to root or to this user, and must not
-# be writable by others unless it has the sticky bit (/tmp passes). The
+# be writable by others unless it has the sticky bit (/tmp passes). "/"
+# alone may also show the overflow uid (/proc/sys/kernel/overflowuid, else
+# 65534): in a user namespace that does not map root, the host's "/" shows
+# so; any other part with that owner can be any user of the host. The
 # owner of a part could otherwise rename the fresh directory and put a
 # FIFO or a link in place of the ticket or the script. Prints the resolved
 # path. Returns 1 when TMPDIR cannot be resolved (silent: the caller
 # reports the failed write) or a part fails (the message is printed).
 # Usage: kubehz::space_join_tmp_dir
 kubehz::space_join_tmp_dir() {
-  local dir="${TMPDIR:-/tmp}" real part meta uid mode why
+  local dir="${TMPDIR:-/tmp}" real part meta uid mode why ovf=""
   [[ "${dir}" == /* ]] || dir="${PWD}/${dir}"
   real=$(cd -P -- "${dir}" 2>/dev/null && pwd -P) || return 1
   # pwd -P keeps a leading // (POSIX leaves it open); Go cleans it to /.
   while [[ "${real}" == //* ]]; do real="${real#/}"; done
+  { read -r ovf < /proc/sys/kernel/overflowuid; } 2>/dev/null || ovf=""
+  [[ "${ovf}" =~ ^[0-9]+$ ]] || ovf=65534
   part="${real}"
   while :; do
     why=""
@@ -548,7 +553,7 @@ kubehz::space_join_tmp_dir() {
       why="cannot be read"
     elif [[ -L "${part}" ]]; then
       why="is a symlink"
-    elif [[ "${uid}" != 0 && "${uid}" != "${EUID}" ]]; then
+    elif [[ "${uid}" != 0 && "${uid}" != "${EUID}" ]] && ! [[ "${part}" == / && "${uid}" == "${ovf}" ]]; then
       why="belongs to another user (uid ${uid})"
     elif (( (8#${mode} & 8#022) != 0 && (8#${mode} & 8#1000) == 0 )); then
       why="is writable by others and has no sticky bit"

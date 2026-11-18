@@ -572,7 +572,8 @@ var errTmpNotPrivate = errors.New("the temp dir is not private")
 // joinTempDir ports kubehz::space_join_tmp_dir: the directory a join file
 // goes under. TMPDIR (else the OS default), absolute, with each symlink
 // resolved (TMPDIR=/ is /). Each part of the resolved path, up to /, must
-// belong to root or to this user, and must not be writable by others
+// belong to root or to this user (ownerTrusted: "/" may also show the
+// overflow uid of a user namespace), and must not be writable by others
 // unless it has the sticky bit (/tmp passes). The owner of a part could
 // otherwise rename the fresh directory and put a FIFO or a link in place
 // of the ticket or the script.
@@ -614,12 +615,20 @@ func (c *Context) notPrivatePart(part string) string {
 		return "cannot be read"
 	case fi.Mode()&fs.ModeSymlink != 0:
 		return "is a symlink"
-	case uid != 0 && uid != c.euid():
+	case !c.ownerTrusted(part, uid):
 		return fmt.Sprintf("belongs to another user (uid %d)", uid)
 	case fi.Mode().Perm()&0o022 != 0 && fi.Mode()&fs.ModeSticky == 0:
 		return "is writable by others and has no sticky bit"
 	}
 	return ""
+}
+
+// ownerTrusted: a part of the temp dir path must belong to root or to this
+// user. "/" alone may also show the overflow uid: in a user namespace that
+// does not map root, the host's "/" (root's) shows so. Any other part with
+// that owner is refused: there it can be any user of the host.
+func (c *Context) ownerTrusted(part string, uid int) bool {
+	return uid == 0 || uid == c.euid() || (part == string(filepath.Separator) && uid == c.overflowUID())
 }
 
 // writeJoinFile stores a join file, the api's join recipe (ext ".sh") or

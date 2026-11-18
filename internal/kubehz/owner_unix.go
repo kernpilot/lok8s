@@ -7,6 +7,8 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -37,6 +39,27 @@ func fileOwner(info fs.FileInfo) (int, bool) {
 		return 0, false
 	}
 	return int(st.Uid), true
+}
+
+// overflowUID is the uid that an owner without a mapping shows in a user
+// namespace: /proc/sys/kernel/overflowuid, else 65534 (the bash twin reads
+// the same file).
+func (c *Context) overflowUID() int {
+	if c.OverflowUID != nil {
+		return c.OverflowUID()
+	}
+	return readOverflowUID("/proc/sys/kernel/overflowuid")
+}
+
+// readOverflowUID reads the uid in file, else gives 65534 (the file
+// cannot be read or does not hold a uid).
+func readOverflowUID(file string) int {
+	if b, err := os.ReadFile(file); err == nil {
+		if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return 65534
 }
 
 // errNotPrivate: the file is a link, not a regular file, not ours, or

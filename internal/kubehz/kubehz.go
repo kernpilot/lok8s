@@ -77,6 +77,10 @@ type Context struct {
 	// and its target must have before the agent kubeconfig writes through
 	// the link (agent.go kubeconfigTarget).
 	Euid func() int
+	// OverflowUID is the uid an unmapped owner shows in a user namespace
+	// (nil = /proc/sys/kernel/overflowuid, else 65534): the owner that "/"
+	// alone may have in the temp-dir check of a join file (joinTempDir).
+	OverflowUID func() int
 	// LookPath is `command -v <tool>` (nil = execx.Look over Paths).
 	LookPath func(tool string) bool
 	// IsTTY reports whether stdout is a terminal (nil = false) — the

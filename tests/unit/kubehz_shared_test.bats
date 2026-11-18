@@ -1122,26 +1122,109 @@ _stub_mktemp() {
   [ "$(cat "${output}")" = "${ticket}" ]
 }
 
-# A part of another user is refused. A user namespace that maps only this
-# user shows the parts of root (/, /tmp) as the overflow uid: another user.
-# Skipped where no user namespace can be made.
+# A part of another user is refused, also when its owner is the overflow
+# uid: a user namespace that maps only this user shows the parts of root
+# with that owner, and only "/" may have it (the next test). The first part
+# above the test's TMPDIR that is not ours (often /tmp, sticky or not) is
+# refused, and so is /usr. Skipped where no user namespace can be made.
 @test "space_write_join_ticket: a TMPDIR part of another user is refused" {
   unshare --user --map-current-user true 2>/dev/null || skip "no user namespace here"
-  local ticket
+  local ticket ovf part foreign="" tmpdir want
   ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
   printf '%s' "${ticket}" > "${BATS_TEST_TMPDIR}/ticket"
-  run unshare --user --map-current-user bash -c '
+  ovf=$(cat /proc/sys/kernel/overflowuid 2>/dev/null) || ovf=65534
+  part=$(_real "${TMPDIR}")
+  while :; do
+    if [[ "$(stat -c %u -- "${part}")" != "${EUID}" ]]; then
+      foreign="${part}"
+      break
+    fi
+    [[ "${part}" != / ]] || break
+    part="${part%/*}"
+    part="${part:-/}"
+  done
+  [[ -n "${foreign}" && "${foreign}" != / ]] || skip "every part above TMPDIR but / is ours"
+  # TMPDIR|the part that fails
+  for tmpdir in "${TMPDIR}|${foreign}" "/usr|/usr"; do
+    want="${tmpdir#*|}"
+    run unshare --user --map-current-user bash -c '
+      import() { :; }
+      source "${1}/.lok8s/utils/verbose.sh"
+      source "${1}/.lok8s/libs/kubehz/shared"
+      source "${1}/.lok8s/libs/kubehz/node"
+      TMPDIR="${3}" kubehz::space_write_join_ticket worker-1 "$(cat "${2}")"' _ "${_PROJECT_ROOT}" "${BATS_TEST_TMPDIR}/ticket" "${tmpdir%%|*}"
+    assert_failure 1
+    assert_output --partial "the temp dir for the join ticket is not safe: ${want} belongs to another user (uid ${ovf})"
+    refute_output --partial "${ticket}"
+  done
+  local dirs=("${TMPDIR}"/kubehz-join-*)
+  [ ! -e "${dirs[0]}" ]
+}
+
+# "/" alone may show the overflow uid: in a user namespace that maps only
+# this user, the host's "/" (root's) shows that owner. A tmpfs on /tmp
+# (ours inside the namespace) gives a TMPDIR whose only foreign part is
+# "/", and the ticket is written there, 0600 in a 0700 directory. Skipped
+# where no user namespace with a tmpfs mount can be made.
+@test "space_write_join_ticket: in a user namespace, a / of the overflow uid passes" {
+  unshare --user --map-current-user --keep-caps --mount sh -c 'mount -t tmpfs none /tmp' 2>/dev/null \
+    || skip "no user namespace with a tmpfs mount here"
+  local ticket ovf
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  printf '%s' "${ticket}" > "${BATS_TEST_TMPDIR}/ticket"
+  ovf=$(cat /proc/sys/kernel/overflowuid 2>/dev/null) || ovf=65534
+  # The sources and the ticket are read before the tmpfs hides /tmp.
+  run unshare --user --map-current-user --keep-caps --mount bash -c '
     import() { :; }
     source "${1}/.lok8s/utils/verbose.sh"
     source "${1}/.lok8s/libs/kubehz/shared"
     source "${1}/.lok8s/libs/kubehz/node"
-    kubehz::space_write_join_ticket worker-1 "$(cat "${2}")"' _ "${_PROJECT_ROOT}" "${BATS_TEST_TMPDIR}/ticket"
-  assert_failure 1
-  assert_output --partial "the temp dir for the join ticket is not safe: "
-  assert_output --partial " belongs to another user (uid "
+    t=$(cat "${2}")
+    echo "owner of /: $(stat -c %u /)"
+    mount -t tmpfs -o mode=1777 none /tmp || exit 9
+    mkdir -m 700 /tmp/t
+    p=$(TMPDIR=/tmp/t kubehz::space_write_join_ticket worker-1 "${t}") || exit 3
+    echo "path: ${p}"
+    echo "modes: $(stat -c %a "${p%/*}") $(stat -c %a "${p}")"
+    if [ "$(cat "${p}")" = "${t}" ]; then echo "content: the ticket"; fi' _ "${_PROJECT_ROOT}" "${BATS_TEST_TMPDIR}/ticket"
+  assert_success
+  assert_output --partial "owner of /: ${ovf}"
+  assert_output --regexp "path: /tmp/t/kubehz-join-[A-Za-z0-9]+/kubehz-join-worker-1\.token"
+  assert_output --partial "modes: 700 600"
+  assert_output --partial "content: the ticket"
+  refute_output --partial "not safe"
   refute_output --partial "${ticket}"
-  local dirs=("${TMPDIR}"/kubehz-join-*)
-  [ ! -e "${dirs[0]}" ]
+}
+
+# The overflow uid comes from /proc/sys/kernel/overflowuid, else 65534. A
+# file bound over it says 4242: the "/" of the namespace (it shows the real
+# overflow uid) is then another user's and is refused. An empty file gives
+# 65534, and "/" passes where the real overflow uid is 65534. Skipped where
+# no user namespace with mounts can be made.
+@test "space_join_tmp_dir: the overflow uid comes from the kernel file, else 65534" {
+  unshare --user --map-current-user --keep-caps --mount sh -c 'mount -t tmpfs none /tmp' 2>/dev/null \
+    || skip "no user namespace with a tmpfs mount here"
+  printf '4242\n' > "${BATS_TEST_TMPDIR}/num"
+  : > "${BATS_TEST_TMPDIR}/empty"
+  local f
+  for f in num empty; do
+    run unshare --user --map-current-user --keep-caps --mount bash -c '
+      import() { :; }
+      source "${1}/.lok8s/utils/verbose.sh"
+      source "${1}/.lok8s/libs/kubehz/shared"
+      mount --bind "${2}" /proc/sys/kernel/overflowuid || exit 9
+      echo "owner of /: $(stat -c %u /)"
+      mount -t tmpfs -o mode=1777 none /tmp || exit 9
+      mkdir -m 700 /tmp/t
+      TMPDIR=/tmp/t kubehz::space_join_tmp_dir' _ "${_PROJECT_ROOT}" "${BATS_TEST_TMPDIR}/${f}"
+    if [[ "${f}" == num ]]; then
+      assert_failure 1
+      assert_output --partial "the temp dir for the join ticket is not safe: / belongs to another user (uid "
+    elif [[ "${output}" == *"owner of /: 65534"* ]]; then
+      assert_success
+      assert_line "/tmp/t"
+    fi
+  done
 }
 
 # The modes do not follow the umask: under 0400 (which would give a 0300
