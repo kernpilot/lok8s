@@ -69,7 +69,7 @@ func (r Release) Asset(goos, goarch string) (name, sum string, err error) {
 		if goos == "darwin" {
 			return "", "", fmt.Errorf("b v%s has no darwin build (linux, freebsd and windows only). Install b by hand from https://binary.help (brew install fentas/tap/b if offered), put it on PATH or copy it to .bin/b, then re-run lo toolchain install", r.Version)
 		}
-		return "", "", fmt.Errorf("b v%s has no pinned asset for %s/%s (%s). Add the asset to the pinned release in internal/toolchain/pins.go", r.Version, goos, goarch, name)
+		return "", "", fmt.Errorf("b v%s has no pinned asset for %s/%s (%s). Add the asset to BRelease in internal/toolchain/bootstrap.go", r.Version, goos, goarch, name)
 	}
 	return name, sum, nil
 }
