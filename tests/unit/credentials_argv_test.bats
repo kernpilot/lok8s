@@ -415,6 +415,49 @@ YAML
   [ "$(req_count "POST https://api.kubehz.example/api/spaces | user= | headers=Content-Type: application/json; Authorization: Bearer ${KUBEHZ_TOKEN} | body={\"name\":\"acme\"}")" = 1 ]
 }
 
+# http::curl_config holds the credential line in its locals (opt, value,
+# out). Under shopt localvar_inherit a local takes the attributes and the
+# value of a variable of the same name in a caller scope: an integer one
+# would print the credential in an arithmetic error, and an inherited
+# value would go in front of the config. Here each is an integer local of
+# the caller of the api call: nothing is printed, and the request still
+# carries the bearer. A readonly name (also a readonly nameref) makes a
+# local fail: the function then refuses with the line curl refuses, and
+# the target of the nameref gets nothing.
+@test "http::curl_config: an integer or a readonly nameref of a caller gets no credential" {
+  local name
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/shared"
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.example"
+  _inherit_call() {
+    shopt -s localvar_inherit
+    local -i opt=0 value=0 out=0
+    kubehz::space_api POST /api/spaces '{"name":"acme"}'
+  }
+  run _inherit_call
+  assert_success
+  refute_output --partial "${KUBEHZ_TOKEN}"
+  assert_argv_clean
+  [ "$(req_count "POST https://api.kubehz.example/api/spaces | user= | headers=Content-Type: application/json; Authorization: Bearer ${KUBEHZ_TOKEN} | body={\"name\":\"acme\"}")" = 1 ]
+  _nameref_config() {
+    local rc=0
+    export escaped=''
+    declare -g -r -n "${1}=escaped"
+    http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" || rc=$?
+    printf '%s' "${escaped}" > "${BATS_TEST_TMPDIR}/escaped.after"
+    return "${rc}"
+  }
+  for name in opt value out; do
+    rm -f -- "${BATS_TEST_TMPDIR}/escaped.after"
+    run _nameref_config "${name}"
+    assert_failure 1
+    assert_output --partial "http::curl_config: a local cannot be declared (a readonly name or a nameref of the caller)"
+    assert_output --partial 'proto = "-all"'
+    refute_output --partial "${KUBEHZ_TOKEN}"
+    [ -e "${BATS_TEST_TMPDIR}/escaped.after" ]
+    [ ! -s "${BATS_TEST_TMPDIR}/escaped.after" ]
+  done
+}
+
 # ── drivers: KKP and CAPI ──
 
 @test "KKP: the cloud spec and the api call keep the tokens off argv" {

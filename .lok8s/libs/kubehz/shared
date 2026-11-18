@@ -193,23 +193,37 @@ kubehz::space_api_call() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *[xa]* ]] || { local -; set +xa; }  # the bearer and the response (a join ticket)
   # +x: a local takes the export flag of an exported variable of the same
-  # name, and a child would get the request body or the response.
+  # name, and a child would get the request body or the response (raw: no
+  # child runs after its assignment today, but a later edit could add one).
+  # +i: under shopt localvar_inherit (BASHOPTS in the environment can turn
+  # it on), a local takes the attributes of a variable of the same name in
+  # a caller scope, and an integer one (declare -i) would print the value
+  # in an arithmetic error. A readonly name (also a readonly nameref) makes
+  # the local fail, and an assignment would then go into the variable the
+  # nameref names: the function stops before it reads a secret.
   local method="${1}" path="${2}"
-  local +x body="${3:-}"
+  local +x +i body raw || { error "kubehz::space_api_call: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  body="${3:-}"
   # A response can hold a join ticket: the global never goes to a child
   # (set -a, or an export before), and the caller unsets it.
-  declare -g +x KUBEHZ_SPACE_API_BODY
+  declare -g +x +i KUBEHZ_SPACE_API_BODY
   KUBEHZ_SPACE_API_STATUS=""
   KUBEHZ_SPACE_API_BODY=""
   KUBEHZ_SPACE_API_CURL_RC=""
+  # The name the response goes to must now be a plain, empty string. declare
+  # -g follows a nameref (a readonly one too), and the response would go
+  # into the variable it names. A local of a caller with this name gets the
+  # response instead of the global: as an integer or an export it would
+  # print the response in an arithmetic error or give it to a child.
+  [[ "$(declare -p KUBEHZ_SPACE_API_BODY 2>/dev/null)" == 'declare -- KUBEHZ_SPACE_API_BODY=""' ]] || {
+    error "kubehz::space_api_call: KUBEHZ_SPACE_API_BODY is not a plain variable (a nameref, an integer or an export of the caller)"
+    return 1
+  }
   http::credential_ok KUBEHZ_TOKEN || return 1
 
   local -a extra=()
   [[ -n "${body}" ]] && extra=(-H "Content-Type: application/json" -d "${body}")
 
-  # +x on raw too: no child runs after its assignment today, but a later
-  # edit could add one.
-  local +x raw
   # The bearer reaches curl in a config on stdin, never on argv.
   raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
     curl -K - -sSL -w $'\n%{http_code}' -X "${method}" \
@@ -531,8 +545,15 @@ kubehz::space_wait_active() {
 # The directory a join ticket goes under, as the Go twin's joinTempDir:
 # TMPDIR (else /tmp), absolute (a relative TMPDIR is taken from PWD), with
 # each symlink resolved (cd -P; TMPDIR=/ and // give /). Each part of the
-# resolved path, up to /, must belong to root or to this user, and must not
-# be writable by others unless it has the sticky bit (/tmp passes). "/"
+# resolved path, from / down to the leaf, must belong to root or to this
+# user, and must not be writable by others unless it has the sticky bit
+# (/tmp passes). The walk goes top-down: each part is read (stat, no
+# follow: a link is refused) before any part below it. A part that passes
+# lets no other user rename or replace an entry in it (they cannot write
+# it, or the sticky bit keeps them to their own entries), so each part
+# that was checked stays the same up to the create below it. A bottom-up
+# walk would let the owner of an ancestor that is not checked yet swap it
+# for a prepared tree after the parts below it passed. "/"
 # alone may also show the overflow uid (/proc/sys/kernel/overflowuid, else
 # 65534): in a user namespace that does not map root, the host's "/" shows
 # so; any other part with that owner can be any user of the host. A part
@@ -545,14 +566,15 @@ kubehz::space_wait_active() {
 # reports the failed write), 2 when a part fails (the message is printed).
 # Usage: kubehz::space_join_tmp_dir
 kubehz::space_join_tmp_dir() {
-  local dir="${TMPDIR:-/tmp}" real part meta uid mode why ovf="" unmapped
+  local dir="${TMPDIR:-/tmp}" real part rest meta uid mode why ovf="" unmapped
   [[ "${dir}" == /* ]] || dir="${PWD}/${dir}"
   real=$(cd -P -- "${dir}" 2>/dev/null && pwd -P) || return 1
   # pwd -P keeps a leading // (POSIX leaves it open); Go cleans it to /.
   while [[ "${real}" == //* ]]; do real="${real#/}"; done
   { read -r ovf < /proc/sys/kernel/overflowuid; } 2>/dev/null || ovf=""
   [[ "${ovf}" =~ ^[0-9]+$ ]] || ovf=65534
-  part="${real}"
+  # Top-down (see above): / first, then one name more for each turn.
+  part=/ rest="${real#/}"
   while :; do
     why="" unmapped=0
     meta=$(stat -c '%u %a' -- "${part}" 2>/dev/null) || meta=""
@@ -583,9 +605,9 @@ kubehz::space_join_tmp_dir() {
       fi
       return 2
     fi
-    [[ "${part}" != / ]] || break
-    part="${part%/*}"
-    part="${part:-/}"
+    [[ -n "${rest}" ]] || break
+    part="${part%/}/${rest%%/*}"
+    if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
   done
   printf '%s\n' "${real}"
 }
@@ -602,7 +624,8 @@ kubehz::space_join_tmp_dir() {
 # are checked after the write. The node name is part of the path, so it is
 # checked here.
 # Prints the path. Returns 2 when the node name is refused (the message is
-# printed), 1 when the write fails, 3 when the write fails and the removal
+# printed), 1 when the write fails (or a local cannot be declared: nothing
+# was written), 3 when the write fails and the removal
 # of the file or the directory fails too: then it prints the directory,
 # which may still hold a part of the ticket.
 # Usage: kubehz::space_write_join_ticket <node_name> <token>
@@ -610,8 +633,11 @@ kubehz::space_write_join_ticket() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *[xa]* ]] || { local -; set +xa; }  # the ticket
   # +x: a local takes the export flag of an exported variable of the same
-  # name, and a child (mktemp, stat, chmod) would get the ticket.
-  local +x node_name="${1}" token="${2}" dir priv path
+  # name, and a child (mktemp, stat, chmod) would get the ticket. +i and the
+  # refusal: as in kubehz::space_api_call (an integer of a caller would
+  # print the ticket; a readonly nameref would take it).
+  local +x +i node_name token dir priv path || { error "kubehz::space_write_join_ticket: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  node_name="${1}" token="${2}"
   node::assert_node_name "${node_name}" || return 2
   dir=$(kubehz::space_join_tmp_dir) || return 1
   priv=$(umask 077 && mktemp -d "${dir%/}/kubehz-join-XXXXXXXXXX" 2>/dev/null) || return 1
@@ -654,6 +680,11 @@ kubehz::space_mint_join() {
 # The body of kubehz::space_mint_join (call that one: it holds the guard).
 kubehz::_space_mint_join() {
   local space_id="${1}" node_name="${2}"
+  # The names that hold the ticket, before the mint: a refusal here costs
+  # no live ticket. +x: a local takes the export flag of an exported
+  # variable of the same name, and a child (jq) would get the ticket. +i and
+  # the refusal: as in kubehz::space_api_call.
+  local +x +i token_json token expires || { error "kubehz::_space_mint_join: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
   # Before the mint: a refused name must not cost a live ticket.
   node::assert_node_name "${node_name}" || return 1
   # Nor a temp dir that fails the check (it printed why, rc 2). The writer
@@ -675,9 +706,6 @@ kubehz::_space_mint_join() {
   # escape, so a trailing newline, a CR or a NUL fails the shape check
   # below, as in the Go twin. $(jq -r ...) would strip a trailing newline
   # and drop a NUL.
-  # +x: a local takes the export flag of an exported variable of the same
-  # name, and a child (jq) would get the ticket.
-  local +x token_json token expires
   token_json=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -c '.data.token // .token // empty')
   expires=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.expiresAt // .expiresAt // empty')
   # A server string for a plain echo: scrubbed and clipped, as the Go twin
@@ -701,6 +729,7 @@ kubehz::_space_mint_join() {
   [[ "${token_json}" =~ ${tok_re} ]] && shape=1
   # The match left the ticket in BASH_REMATCH, a global: a trace after the
   # return (PS4 can name it) would print it. A match of '' replaces it.
+  # shellcheck disable=SC2050 # a constant match on purpose: it empties BASH_REMATCH
   [[ '' =~ ^$ ]]
   (( ncm == 0 )) || shopt -s nocasematch
   if (( shape == 0 )); then

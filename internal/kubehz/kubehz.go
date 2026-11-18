@@ -81,6 +81,9 @@ type Context struct {
 	// (nil = /proc/sys/kernel/overflowuid, else 65534): the owner that "/"
 	// alone may have in the temp-dir check of a join file (joinTempDir).
 	OverflowUID func() int
+	// Lstat is os.Lstat (nil = os.Lstat): the read of each part of the
+	// temp dir of a join file (joinTempDir). Tests log the order.
+	Lstat func(path string) (fs.FileInfo, error)
 	// RemoveAll is os.RemoveAll (nil = os.RemoveAll): the cleanup of a
 	// join file whose write failed (writeJoinFile).
 	RemoveAll func(path string) error
@@ -152,6 +155,13 @@ func (c *Context) euid() int {
 		return c.Euid()
 	}
 	return os.Geteuid()
+}
+
+func (c *Context) lstat(path string) (fs.FileInfo, error) {
+	if c.Lstat != nil {
+		return c.Lstat(path)
+	}
+	return os.Lstat(path)
 }
 
 func (c *Context) isRoot() bool {

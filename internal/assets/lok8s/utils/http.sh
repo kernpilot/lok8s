@@ -38,7 +38,23 @@ http::require_https() {
 # The Go twins are curlConfigQuote and curlConfigData (internal/driver/kkp).
 # Usage: http::curl_config <option> <value> [<option> <value> ...]
 http::curl_config() {
-  local LC_ALL=C opt value out=""
+  local LC_ALL=C
+  # opt, value and out hold the credential line. +x: a local takes the
+  # export flag of an exported variable of the same name (no child runs
+  # here today). +i: under shopt localvar_inherit (BASHOPTS in the
+  # environment can turn it on), a local takes the attributes and the value
+  # of a variable of the same name in a caller scope, and an integer one
+  # (declare -i) would print the credential in an arithmetic error. A
+  # readonly name (also a readonly nameref) makes the local fail: then the
+  # function refuses as for a control character, with the line curl
+  # refuses. (This replaces an earlier review decision to leave this
+  # function as it was.)
+  local +x +i opt value out || {
+    error "http::curl_config: a local cannot be declared (a readonly name or a nameref of the caller)"
+    printf 'proto = "-all"\n'
+    return 1
+  }
+  out=""
   while (( $# >= 2 )); do
     opt="${1}"
     value="${2}"

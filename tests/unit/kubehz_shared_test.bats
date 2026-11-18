@@ -1210,23 +1210,26 @@ _stub_mktemp() {
 # A part of another user is refused, also when its owner is the overflow
 # uid: a user namespace that maps only this user shows the parts of root
 # with that owner, and only "/" may have it (the next test). The first part
-# above the test's TMPDIR that is not ours (often /tmp, sticky or not) is
-# refused, and so is /usr. Skipped where no user namespace can be made.
+# below / on the path to the test's TMPDIR that is not ours (often /tmp,
+# sticky or not) is refused: the walk goes top-down. So is /usr. Skipped
+# where no user namespace can be made.
 @test "space_write_join_ticket: a TMPDIR part of another user is refused" {
   unshare --user --map-current-user true 2>/dev/null || skip "no user namespace here"
   local ticket ovf part foreign="" tmpdir want
   ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
   printf '%s' "${ticket}" > "${BATS_TEST_TMPDIR}/ticket"
   ovf=$(cat /proc/sys/kernel/overflowuid 2>/dev/null) || ovf=65534
-  part=$(_real "${TMPDIR}")
-  while :; do
+  # The first part below / that is not ours: the walk goes top-down.
+  local rest
+  part="" rest=$(_real "${TMPDIR}")
+  rest="${rest#/}"
+  while [[ -n "${rest}" ]]; do
+    part+="/${rest%%/*}"
     if [[ "$(stat -c %u -- "${part}")" != "${EUID}" ]]; then
       foreign="${part}"
       break
     fi
-    [[ "${part}" != / ]] || break
-    part="${part%/*}"
-    part="${part:-/}"
+    if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
   done
   [[ -n "${foreign}" && "${foreign}" != / ]] || skip "every part above TMPDIR but / is ours"
   # TMPDIR|the part that fails
@@ -1314,17 +1317,21 @@ _stub_mktemp() {
 
 # Without a mapping for this user (unshare --user alone), this user and
 # every other unmapped owner show the overflow uid, so "ours" proves
-# nothing. /usr (root's on the host) and a 1777 directory that shows that
-# owner are refused, with the hint for an unmapped user, and the mint
-# sends no join-token request (the curl stand-in logs each call).
+# nothing. Each part but / shows that owner, so the walk (top-down) stops
+# at the first part below /: /usr (root's on the host), and the top part
+# of the path to a 1777 directory, are refused with the hint for an
+# unmapped user, and the mint sends no join-token request (the curl
+# stand-in logs each call).
 # Skipped where no user namespace can be made.
 @test "space_join_tmp_dir: a caller without a uid mapping trusts no part of its own uid" {
   unshare --user true 2>/dev/null || skip "no user namespace here"
-  local ovf tmpdir want
+  local ovf tmpdir want top
   ovf=$(cat /proc/sys/kernel/overflowuid 2>/dev/null) || ovf=65534
   mkdir -m 1777 "${BATS_TEST_TMPDIR}/sticky"
+  top=$(_real "${BATS_TEST_TMPDIR}/sticky")
+  top="/$(cut -d / -f 2 <<< "${top}")"
   # TMPDIR|the part that fails
-  for tmpdir in "/usr|/usr" "${BATS_TEST_TMPDIR}/sticky|$(_real "${BATS_TEST_TMPDIR}/sticky")"; do
+  for tmpdir in "/usr|/usr" "${BATS_TEST_TMPDIR}/sticky|${top}"; do
     want="${tmpdir#*|}"
     rm -f -- "${BATS_TEST_TMPDIR}/calls"
     run unshare --user bash -c '
@@ -1700,6 +1707,353 @@ _stub_mktemp() {
   [ -s "${ENV_DIR}/during.env" ]
   [ "$(grep -c -F -- "${ticket#*.}" "${ENV_DIR}/during.env")" -eq 0 ]
   [ "$(cat "${output}")" = "${ticket}" ]
+}
+
+# The parts of the temp dir are read top-down, from / to the leaf (a stat
+# stand-in logs each part it reads): a part that passes lets nobody else
+# swap an entry in it, so each part that was checked stays the same up to
+# the create. A bottom-up walk would let the owner of an ancestor that is
+# not checked yet replace it after the parts below it passed. A refusal
+# comes at the FIRST part that fails, and no part below it is read: with a
+# parent and its leaf both writable by others, the message names the
+# parent. The wanted order is built from the names of the path.
+@test "space_join_tmp_dir: the parts are read top-down, and the first part that fails stops the walk" {
+  local leaf real want="/" acc="" name parent
+  local -a names
+  mkdir -p "${BATS_TEST_TMPDIR}/td/a/b"
+  chmod 700 "${BATS_TEST_TMPDIR}/td" "${BATS_TEST_TMPDIR}/td/a" "${BATS_TEST_TMPDIR}/td/a/b"
+  STAT_LOG="${BATS_TEST_TMPDIR}/stat.log"
+  export STAT_LOG
+  stat() {
+    printf '%s\n' "${@: -1}" >> "${STAT_LOG}"
+    command stat "$@"
+  }
+  export -f stat
+  leaf="${BATS_TEST_TMPDIR}/td/a/b"
+  real=$(_real "${leaf}")
+  IFS=/ read -r -a names <<< "${real#/}"
+  for name in "${names[@]}"; do
+    acc+="/${name}"
+    want+=$'\n'"${acc}"
+  done
+  : > "${STAT_LOG}"
+  TMPDIR="${leaf}" run kubehz::space_join_tmp_dir
+  assert_success
+  assert_output "${real}"
+  [ "$(cat "${STAT_LOG}")" = "${want}" ]
+
+  chmod 777 "${BATS_TEST_TMPDIR}/td/a" "${BATS_TEST_TMPDIR}/td/a/b"
+  parent=$(_real "${BATS_TEST_TMPDIR}/td/a")
+  : > "${STAT_LOG}"
+  TMPDIR="${leaf}" run kubehz::space_join_tmp_dir
+  assert_failure 2
+  assert_output --partial "the temp dir for the join ticket is not safe: ${parent} is writable by others and has no sticky bit"
+  [ "$(tail -n 1 "${STAT_LOG}")" = "${parent}" ]
+  [ "$(grep -c -x -F -- "${real}" "${STAT_LOG}")" -eq 0 ]
+}
+
+# A readonly name makes a local fail. A readonly nameref of a caller on the
+# name of a ticket local would then take the ticket into the variable it
+# names (here an exported one, so a child would get it). The mint declares
+# these locals before the request and stops when one fails: an error, no
+# request (a refusal costs no live ticket), no child of the write, and the
+# target of the nameref stays empty, also for a child after the mint.
+@test "space_mint_join: a readonly nameref on a ticket name stops it before the mint" {
+  local ticket name
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  MINT_FILE="${BATS_TEST_TMPDIR}/mint.json"
+  jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}' > "${MINT_FILE}"
+  ENV_DIR="${BATS_TEST_TMPDIR}"
+  export MINT_FILE ENV_DIR
+  curl() {
+    env > "${ENV_DIR}/curl.env"
+    cat > /dev/null
+    printf '%s\n201' "$(cat "${MINT_FILE}")"
+  }
+  mktemp() {
+    env > "${ENV_DIR}/mktemp.env"
+    command mktemp "$@"
+  }
+  export -f curl mktemp
+  _nameref_mint() {
+    export escaped=''
+    declare -g -r -n "${1}=escaped"
+    local rc=0
+    kubehz::space_mint_join sp-123 worker-1 || rc=$?
+    env > "${ENV_DIR}/after.env"
+    printf '%s' "${escaped}" > "${ENV_DIR}/escaped.after"
+    return "${rc}"
+  }
+  for name in token_json token expires; do
+    rm -f -- "${ENV_DIR}/curl.env" "${ENV_DIR}/mktemp.env" "${ENV_DIR}/after.env" "${ENV_DIR}/escaped.after"
+    run _nameref_mint "${name}"
+    assert_failure 1
+    assert_output --partial "kubehz::_space_mint_join: a local cannot be declared (a readonly name or a nameref of the caller)"
+    refute_output --partial "${ticket#*.}"
+    [ ! -e "${ENV_DIR}/curl.env" ]
+    [ ! -e "${ENV_DIR}/mktemp.env" ]
+    [ -s "${ENV_DIR}/after.env" ]
+    [ "$(grep -c -F -- "${ticket#*.}" "${ENV_DIR}/after.env")" -eq 0 ]
+    [ -e "${ENV_DIR}/escaped.after" ]
+    [ ! -s "${ENV_DIR}/escaped.after" ]
+  done
+}
+
+# Under shopt localvar_inherit (BASHOPTS in the environment can turn it
+# on), a local takes the attributes and the value of a variable of the
+# same name in a caller scope. An integer one (declare -i) would print the
+# ticket, the response or the API token in an arithmetic error. Each name
+# of the api call (body, raw), of http::curl_config (opt, value, out) and
+# of the mint (token_json, token, expires) is an integer local of the
+# caller here: the mint goes through, the request carries the bearer, no
+# ticket and no API token is printed or reaches a child, the file holds the
+# ticket, and the integers of the caller keep their values.
+@test "space_mint_join: under localvar_inherit, integers of a caller print no ticket" {
+  local ticket f path
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  MINT_FILE="${BATS_TEST_TMPDIR}/mint.json"
+  jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}' > "${MINT_FILE}"
+  ENV_DIR="${BATS_TEST_TMPDIR}"
+  export MINT_FILE ENV_DIR
+  curl() {
+    env > "${ENV_DIR}/curl.env"
+    cat > "${ENV_DIR}/curl.cfg"
+    printf '%s\n201' "$(cat "${MINT_FILE}")"
+  }
+  mktemp() {
+    env > "${ENV_DIR}/mktemp.env"
+    command mktemp "$@"
+  }
+  export -f curl mktemp
+  _inherit_mint() {
+    export -n KUBEHZ_TOKEN
+    shopt -s localvar_inherit
+    local -i body=0 raw=0 opt=0 value=0 out=0 token_json=0 token=0 expires=0
+    kubehz::space_mint_join sp-123 worker-1 || return
+    env > "${ENV_DIR}/after.env"
+    declare -p body raw opt value out token_json token expires > "${ENV_DIR}/caller.after"
+  }
+  run _inherit_mint
+  assert_success
+  assert_output --partial "(written to "
+  refute_output --partial "${ticket#*.}"
+  refute_output --partial "${KUBEHZ_TOKEN}"
+  [ "$(cat "${ENV_DIR}/curl.cfg")" = "header = \"Authorization: Bearer ${KUBEHZ_TOKEN}\"" ]
+  for f in curl mktemp after; do
+    [ -s "${ENV_DIR}/${f}.env" ]
+    [ "$(grep -c -F -- "${ticket#*.}" "${ENV_DIR}/${f}.env")" -eq 0 ]
+    [ "$(grep -c -F -- "${KUBEHZ_TOKEN}" "${ENV_DIR}/${f}.env")" -eq 0 ]
+  done
+  [ "$(wc -l < "${ENV_DIR}/caller.after")" -eq 8 ]
+  [ "$(grep -c -v -x -E 'declare -i [a-z_]+="0"' "${ENV_DIR}/caller.after")" -eq 0 ]
+  path=$(sed -n 's/^    (written to \(.*\), mode 0600)$/\1/p' <<< "${output}")
+  [ -n "${path}" ]
+  [ "$(cat "${path}")" = "${ticket}" ]
+}
+
+# The writer on its own: a readonly nameref of a caller on the name of any
+# of its five locals stops it before the write (an error, rc 1, no child,
+# no directory), and the target of the nameref stays empty.
+@test "space_write_join_ticket: a readonly nameref on a local name stops it before the write" {
+  local ticket name
+  local -a dirs
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  printf '%s' "${ticket}" > "${BATS_TEST_TMPDIR}/ticket"
+  ENV_DIR="${BATS_TEST_TMPDIR}"
+  export ENV_DIR
+  mktemp() {
+    env > "${ENV_DIR}/mktemp.env"
+    command mktemp "$@"
+  }
+  export -f mktemp
+  _nameref_write() {
+    local t rc=0
+    t=$(cat "${ENV_DIR}/ticket")
+    export escaped=''
+    declare -g -r -n "${1}=escaped"
+    kubehz::space_write_join_ticket worker-1 "${t}" || rc=$?
+    env > "${ENV_DIR}/after.env"
+    printf '%s' "${escaped}" > "${ENV_DIR}/escaped.after"
+    return "${rc}"
+  }
+  for name in node_name token dir priv path; do
+    rm -f -- "${ENV_DIR}/mktemp.env" "${ENV_DIR}/after.env" "${ENV_DIR}/escaped.after"
+    run _nameref_write "${name}"
+    assert_failure 1
+    assert_output --partial "kubehz::space_write_join_ticket: a local cannot be declared (a readonly name or a nameref of the caller)"
+    refute_output --partial "${ticket#*.}"
+    [ ! -e "${ENV_DIR}/mktemp.env" ]
+    [ -s "${ENV_DIR}/after.env" ]
+    [ "$(grep -c -F -- "${ticket#*.}" "${ENV_DIR}/after.env")" -eq 0 ]
+    [ -e "${ENV_DIR}/escaped.after" ]
+    [ ! -s "${ENV_DIR}/escaped.after" ]
+    dirs=("${TMPDIR}"/kubehz-join-*)
+    [ ! -e "${dirs[0]}" ]
+  done
+}
+
+# The writer on its own under localvar_inherit, with each of its five
+# names an integer local of the caller: the write goes through, no ticket
+# is printed or reaches a child, and the integers keep their values.
+@test "space_write_join_ticket: under localvar_inherit, integers of a caller print no ticket" {
+  local ticket
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  printf '%s' "${ticket}" > "${BATS_TEST_TMPDIR}/ticket"
+  ENV_DIR="${BATS_TEST_TMPDIR}"
+  export ENV_DIR
+  mktemp() {
+    env > "${ENV_DIR}/mktemp.env"
+    command mktemp "$@"
+  }
+  export -f mktemp
+  _inherit_write() {
+    local t
+    t=$(cat "${ENV_DIR}/ticket")
+    shopt -s localvar_inherit
+    local -i node_name=0 token=0 dir=0 priv=0 path=0
+    kubehz::space_write_join_ticket worker-1 "${t}" || return
+    env > "${ENV_DIR}/after.env"
+    declare -p node_name token dir priv path > "${ENV_DIR}/caller.after"
+  }
+  run _inherit_write
+  assert_success
+  refute_output --partial "${ticket#*.}"
+  [ "$(cat "${output}")" = "${ticket}" ]
+  [ -s "${ENV_DIR}/mktemp.env" ]
+  [ "$(grep -c -F -- "${ticket#*.}" "${ENV_DIR}/mktemp.env")" -eq 0 ]
+  [ "$(grep -c -F -- "${ticket#*.}" "${ENV_DIR}/after.env")" -eq 0 ]
+  [ "$(wc -l < "${ENV_DIR}/caller.after")" -eq 5 ]
+  [ "$(grep -c -v -x -E 'declare -i [a-z_]+="0"' "${ENV_DIR}/caller.after")" -eq 0 ]
+}
+
+# The api call: a readonly nameref of a caller on body or raw stops it
+# before the request (no curl, no "unreachable" line), and the target of
+# the nameref gets neither the request body nor the response. Both carry a
+# canary built at runtime.
+@test "space_api: a readonly nameref on body or raw stops it before the request" {
+  local canary name
+  canary="canary-$(printf '%s' body-of-the-request)"
+  RESP_CANARY="canary-$(printf '%s' the-response)"
+  ENV_DIR="${BATS_TEST_TMPDIR}"
+  export ENV_DIR
+  printf '{"ok":true,"data":{"note":"%s"}}' "${RESP_CANARY}" > "${ENV_DIR}/resp.json"
+  curl() {
+    env > "${ENV_DIR}/curl.env"
+    cat > /dev/null
+    printf '%s\n200' "$(cat "${ENV_DIR}/resp.json")"
+  }
+  export -f curl
+  _nameref_api() {
+    local rc=0
+    export escaped=''
+    declare -g -r -n "${1}=escaped"
+    kubehz::space_api POST /api/spaces "{\"note\":\"${2}\"}" || rc=$?
+    env > "${ENV_DIR}/after.env"
+    printf '%s' "${escaped}" > "${ENV_DIR}/escaped.after"
+    return "${rc}"
+  }
+  for name in body raw; do
+    rm -f -- "${ENV_DIR}/curl.env" "${ENV_DIR}/after.env" "${ENV_DIR}/escaped.after"
+    run _nameref_api "${name}" "${canary}"
+    assert_failure 1
+    assert_output --partial "kubehz::space_api_call: a local cannot be declared (a readonly name or a nameref of the caller)"
+    refute_output --partial "kubehz API unreachable"
+    refute_output --partial "${canary}"
+    refute_output --partial "${RESP_CANARY}"
+    [ ! -e "${ENV_DIR}/curl.env" ]
+    [ "$(grep -c -F -e "${canary}" -e "${RESP_CANARY}" "${ENV_DIR}/after.env")" -eq 0 ]
+    [ -e "${ENV_DIR}/escaped.after" ]
+    [ ! -s "${ENV_DIR}/escaped.after" ]
+  done
+}
+
+# The api call under localvar_inherit, with body, raw, opt, value and out
+# integer locals of the caller, and the response global an integer global:
+# the call goes through, the request carries the bearer, nothing of the
+# body, the response or the API token is printed, the response lands in
+# KUBEHZ_SPACE_API_BODY, and the integers of the caller keep their values.
+@test "space_api: under localvar_inherit, integers of a caller print no body and no response" {
+  local canary
+  canary="canary-$(printf '%s' body-of-the-request)"
+  RESP_CANARY="canary-$(printf '%s' the-response)"
+  ENV_DIR="${BATS_TEST_TMPDIR}"
+  export ENV_DIR
+  printf '{"ok":true,"data":{"note":"%s"}}' "${RESP_CANARY}" > "${ENV_DIR}/resp.json"
+  curl() {
+    env > "${ENV_DIR}/curl.env"
+    cat > "${ENV_DIR}/curl.cfg"
+    printf '%s\n200' "$(cat "${ENV_DIR}/resp.json")"
+  }
+  export -f curl
+  _inherit_api() {
+    export -n KUBEHZ_TOKEN
+    declare -g -i KUBEHZ_SPACE_API_BODY=0
+    shopt -s localvar_inherit
+    local -i body=0 raw=0 opt=0 value=0 out=0
+    kubehz::space_api POST /api/spaces "{\"note\":\"${1}\"}" || return
+    printf '%s' "${KUBEHZ_SPACE_API_BODY}" > "${ENV_DIR}/body.after"
+    declare -p body raw opt value out > "${ENV_DIR}/caller.after"
+  }
+  run _inherit_api "${canary}"
+  assert_success
+  refute_output --partial "${canary}"
+  refute_output --partial "${RESP_CANARY}"
+  refute_output --partial "${KUBEHZ_TOKEN}"
+  [ "$(cat "${ENV_DIR}/curl.cfg")" = "header = \"Authorization: Bearer ${KUBEHZ_TOKEN}\"" ]
+  [ "$(grep -c -F -e "${RESP_CANARY}" -e "${KUBEHZ_TOKEN}" "${ENV_DIR}/curl.env")" -eq 0 ]
+  [ "$(jq -r .data.note "${ENV_DIR}/body.after")" = "${RESP_CANARY}" ]
+  [ "$(wc -l < "${ENV_DIR}/caller.after")" -eq 5 ]
+  [ "$(grep -c -v -x -E 'declare -i [a-z_]+="0"' "${ENV_DIR}/caller.after")" -eq 0 ]
+}
+
+# The response goes to KUBEHZ_SPACE_API_BODY. declare -g follows a nameref
+# (a readonly one too): the response would go into the variable it names.
+# A local of a caller with this name gets the response instead of the
+# global: an integer one would print it in an arithmetic error, an
+# exported one would give it to a child. The api call checks that the name
+# is a plain, empty string before the request, and else stops: no curl,
+# no response anywhere.
+@test "space_api: the response name must be a plain variable" {
+  local f
+  RESP_CANARY="canary-$(printf '%s' the-response)"
+  ENV_DIR="${BATS_TEST_TMPDIR}"
+  export ENV_DIR
+  printf '{"ok":true,"data":{"note":"%s"}}' "${RESP_CANARY}" > "${ENV_DIR}/resp.json"
+  curl() {
+    env > "${ENV_DIR}/curl.env"
+    cat > /dev/null
+    printf '%s\n200' "$(cat "${ENV_DIR}/resp.json")"
+  }
+  export -f curl
+  _nameref_response() {
+    local rc=0
+    export escaped=''
+    declare -g -r -n KUBEHZ_SPACE_API_BODY=escaped
+    kubehz::space_api GET /api/spaces || rc=$?
+    env > "${ENV_DIR}/after.env"
+    printf '%s' "${escaped}" > "${ENV_DIR}/escaped.after"
+    return "${rc}"
+  }
+  _integer_response() {
+    local -i KUBEHZ_SPACE_API_BODY=0
+    kubehz::space_api GET /api/spaces
+  }
+  _export_response() {
+    local -x KUBEHZ_SPACE_API_BODY=''
+    kubehz::space_api GET /api/spaces
+  }
+  for f in _nameref_response _integer_response _export_response; do
+    rm -f -- "${ENV_DIR}/curl.env" "${ENV_DIR}/after.env" "${ENV_DIR}/escaped.after"
+    run "${f}"
+    assert_failure 1
+    assert_output --partial "kubehz::space_api_call: KUBEHZ_SPACE_API_BODY is not a plain variable (a nameref, an integer or an export of the caller)"
+    refute_output --partial "${RESP_CANARY}"
+    [ ! -e "${ENV_DIR}/curl.env" ]
+  done
+  run _nameref_response
+  [ "$(grep -c -F -- "${RESP_CANARY}" "${ENV_DIR}/after.env")" -eq 0 ]
+  [ -e "${ENV_DIR}/escaped.after" ]
+  [ ! -s "${ENV_DIR}/escaped.after" ]
 }
 
 # nocasematch would let an uppercase ticket through the shape check: the

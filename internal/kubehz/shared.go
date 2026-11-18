@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -593,13 +594,13 @@ var errTmpNotPrivate = errors.New("the temp dir is not private")
 
 // joinTempDir ports kubehz::space_join_tmp_dir: the directory a join file
 // goes under. TMPDIR (else the OS default), absolute, with each symlink
-// resolved (TMPDIR=/ is /). Each part of the resolved path, up to /, must
-// belong to root or to this user (ownerTrusted: "/" may also show the
-// overflow uid of a user namespace, and a user with the overflow uid owns
-// nothing it can prove), and must not be writable by others unless it has
-// the sticky bit (/tmp passes). The owner of a part could otherwise rename
-// the fresh directory and put a FIFO or a link in place of the ticket or
-// the script.
+// resolved (TMPDIR=/ is /). Each part of the resolved path, from / down to
+// the leaf (top-down: see the walk), must belong to root or to this user
+// (ownerTrusted: "/" may also show the overflow uid of a user namespace,
+// and a user with the overflow uid owns nothing it can prove), and must not
+// be writable by others unless it has the sticky bit (/tmp passes). The
+// owner of a part could otherwise rename the fresh directory and put a FIFO
+// or a link in place of the ticket or the script.
 func (c *Context) joinTempDir() (string, error) {
 	dir := c.getenv("TMPDIR")
 	if dir == "" {
@@ -621,7 +622,20 @@ func (c *Context) joinTempDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for part := real; ; part = filepath.Dir(part) {
+	// Top-down, from / to the leaf: each part is read (Lstat, no follow: a
+	// link is refused) before any part below it. A part that passes lets
+	// no other user rename or replace an entry in it (they cannot write it,
+	// or the sticky bit keeps them to their own entries), so each part that
+	// was checked stays the same up to the create below it (writeJoinFile:
+	// MkdirTemp, then the handle of the fresh directory). A bottom-up walk
+	// would let the owner of an ancestor that is not checked yet swap it for
+	// a prepared tree after the parts below it passed.
+	parts := []string{real}
+	for p := real; filepath.Dir(p) != p; p = filepath.Dir(p) {
+		parts = append(parts, filepath.Dir(p))
+	}
+	slices.Reverse(parts)
+	for _, part := range parts {
 		if why, unmapped := c.notPrivatePart(part); why != "" {
 			c.errorf("the temp dir for the join ticket is not safe: %s %s", part, why)
 			if unmapped {
@@ -632,17 +646,15 @@ func (c *Context) joinTempDir() (string, error) {
 			}
 			return "", errTmpNotPrivate
 		}
-		if part == string(filepath.Separator) {
-			return real, nil
-		}
 	}
+	return real, nil
 }
 
 // notPrivatePart says why one part of a temp dir path fails the check of
 // joinTempDir ("" when it passes). unmapped: the part is ours, and this
 // user has the overflow uid (a user namespace without a mapping for it).
 func (c *Context) notPrivatePart(part string) (why string, unmapped bool) {
-	fi, err := os.Lstat(part)
+	fi, err := c.lstat(part)
 	if err != nil {
 		return "cannot be read", false
 	}

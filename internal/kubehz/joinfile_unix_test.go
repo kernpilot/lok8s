@@ -3,11 +3,15 @@
 package kubehz
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -69,7 +73,9 @@ func TestSpaceMintJoinNeverWritesIntoAPlantedFIFO(t *testing.T) {
 // mint, so it costs no ticket: a part that others can write without the
 // sticky bit (the TMPDIR itself or a parent), a part of another user (the
 // Euid seam makes us someone else), the same part when its owner is the
-// overflow uid (only "/" may be), and a link to such a directory. No
+// overflow uid (only "/" may be), and a link to such a directory. With
+// the Euid seam each part of ours is another user's, so the top-down walk
+// refuses the first part of ours from the top (firstPartOwnedBy). No
 // join-token request goes out, and no live-ticket note follows. A part
 // with the sticky bit passes, as /tmp does.
 func TestSpaceMintJoinRefusesATMPDIROthersCanChange(t *testing.T) {
@@ -112,6 +118,7 @@ func TestSpaceMintJoinRefusesATMPDIROthersCanChange(t *testing.T) {
 			h.env["TMPDIR"] = tmpdir
 			if c.other {
 				h.ctx.Euid = func() int { return os.Geteuid() + 1 }
+				bad = firstPartOwnedBy(t, tmpdir, os.Geteuid())
 			}
 			if c.overflow {
 				// Our own uid is now the overflow uid: a part that is not "/"
@@ -221,8 +228,9 @@ func TestOwnerTrustedForAnUnmappedCaller(t *testing.T) {
 }
 
 // The seams make the euid the overflow uid (a user namespace without a
-// mapping for this user): a 0700 TMPDIR of ours cannot be checked and is
-// refused before the mint, with the hint for an unmapped user.
+// mapping for this user): the parts of ours cannot be checked, and the
+// first of them from the top (the walk goes top-down) is refused before
+// the mint, with the hint for an unmapped user.
 func TestSpaceMintJoinRefusesTheOwnPartsOfAnUnmappedCaller(t *testing.T) {
 	t.Parallel()
 	if os.Geteuid() == 0 {
@@ -235,7 +243,7 @@ func TestSpaceMintJoinRefusesTheOwnPartsOfAnUnmappedCaller(t *testing.T) {
 	h.ctx.OverflowUID = os.Geteuid
 	h.handle("POST /api/spaces/sp-123/join-token", 201, noScriptJSON)
 	mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
-	mustContain(t, h.output(), "the temp dir for the join ticket is not safe: "+realDir(t, tmpdir)+" cannot be checked (uid "+strconv.Itoa(os.Geteuid())+")\n")
+	mustContain(t, h.output(), "the temp dir for the join ticket is not safe: "+firstPartOwnedBy(t, tmpdir, os.Geteuid())+" cannot be checked (uid "+strconv.Itoa(os.Geteuid())+")\n")
 	mustContain(t, h.output(), "  The uid of this user is not mapped in the namespace, so the CLI cannot check who owns TMPDIR.\n")
 	mustNotContain(t, h.output(), "Set TMPDIR to a directory of your own")
 	if h.anyReq("POST", "/join-token") {
@@ -352,4 +360,83 @@ func TestSpaceMintJoinSetsTheModesUnderAnyUmask(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The parts of the temp dir are read top-down, from "/" to the leaf (the
+// Lstat seam logs each read): a part that passes lets nobody else swap an
+// entry in it, so each part that was checked stays the same up to the
+// create. A bottom-up walk would let the owner of an ancestor that is not
+// checked yet replace it after the parts below it passed. The wanted list
+// is built from the names of the path, not with filepath.Dir.
+func TestJoinTempDirReadsThePartsTopDown(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	leaf := modeDir(t, modeDir(t, modeDir(t, h.base, "td", 0o700), "a", 0o700), "b", 0o700)
+	h.env["TMPDIR"] = leaf
+	var got []string
+	h.ctx.Lstat = func(p string) (fs.FileInfo, error) {
+		got = append(got, p)
+		return os.Lstat(p)
+	}
+	real, err := h.ctx.joinTempDir()
+	mustOK(t, err, h.output())
+	if real != realDir(t, leaf) {
+		t.Fatalf("joinTempDir = %q, want %q", real, realDir(t, leaf))
+	}
+	want, acc := []string{"/"}, ""
+	for name := range strings.SplitSeq(strings.TrimPrefix(real, "/"), "/") {
+		acc += "/" + name
+		want = append(want, acc)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("the parts were read in this order:\n%q\nwant top-down:\n%q", got, want)
+	}
+}
+
+// A refusal comes at the FIRST part that fails, and no part below it is
+// read. Here a parent and the leaf below it are both writable by others:
+// the message names the parent, it is the last part read, and the leaf is
+// never read.
+func TestJoinTempDirStopsAtTheFirstPartThatFails(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	parent := modeDir(t, h.base, "wp", 0o777)
+	leaf := modeDir(t, parent, "wl", 0o777)
+	h.env["TMPDIR"] = leaf
+	var got []string
+	h.ctx.Lstat = func(p string) (fs.FileInfo, error) {
+		got = append(got, p)
+		return os.Lstat(p)
+	}
+	_, err := h.ctx.joinTempDir()
+	if !errors.Is(err, errTmpNotPrivate) {
+		t.Fatalf("joinTempDir error = %v, want errTmpNotPrivate", err)
+	}
+	mustContain(t, h.output(), "the temp dir for the join ticket is not safe: "+realDir(t, parent)+" is writable by others and has no sticky bit\n")
+	if len(got) == 0 || got[len(got)-1] != realDir(t, parent) {
+		t.Fatalf("the last part read is not the refused parent: %q", got)
+	}
+	if slices.Contains(got, realDir(t, leaf)) {
+		t.Fatalf("a part below the refused one was read: %q", got)
+	}
+}
+
+// firstPartOwnedBy is the first part of the resolved path of dir, from the
+// top, that uid owns: the part the top-down walk refuses when a seam makes
+// the parts of uid untrusted.
+func firstPartOwnedBy(t *testing.T, dir string, uid int) string {
+	t.Helper()
+	acc := ""
+	for name := range strings.SplitSeq(strings.TrimPrefix(realDir(t, dir), "/"), "/") {
+		acc += "/" + name
+		fi, err := os.Lstat(acc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if owner, ok := fileOwner(fi); ok && owner == uid {
+			return acc
+		}
+	}
+	t.Fatalf("no part of %s belongs to uid %d", dir, uid)
+	return ""
 }
