@@ -38,7 +38,7 @@ func TestDoctorFullyProvisionedCore(t *testing.T) {
 	fakeTool(t, filepath.Join(home, filepath.FromSlash(ChartRendererPluginRel)))
 	fakeTool(t, filepath.Join(home, filepath.FromSlash(SecretPluginRel)))
 	answers := map[string]string{
-		"b --version":           "v" + BRelease.Version,
+		"b --version":           BRelease.Version,
 		"kustomize version":     KustomizeCLI,
 		"ChartRenderer version": KhelmVersion + " (helm " + HelmVersion + ")",
 		"Secret --version":      "v0.3.0",
@@ -56,7 +56,7 @@ func TestDoctorFullyProvisionedCore(t *testing.T) {
 		t.Fatalf("statuses = %s\n%+v", got, checks)
 	}
 	want := []string{
-		"b v" + BRelease.Version + " (.bin/b)",
+		"b " + BRelease.Version + " (.bin/b)",
 		"kustomize " + KustomizeCLI + " (.bin/kustomize)",
 		"khelm ChartRenderer " + KhelmVersion + " (.kustomize/" + ChartRendererPluginRel + ")",
 		"secrets.lok8s.dev Secret v0.3.0 (.kustomize/" + SecretPluginRel + ")",
@@ -123,7 +123,7 @@ func TestDoctorFindsKustomizeOnPATH(t *testing.T) {
 }
 
 // releaseBelow is a release one step below the pin, so the test keeps
-// working after each bump.
+// working after each bump. It is bare, as a b release prints it.
 func releaseBelow(t *testing.T) string {
 	t.Helper()
 	var maj, mnr, pat int
@@ -138,43 +138,54 @@ func releaseBelow(t *testing.T) string {
 	default:
 		maj, mnr, pat = maj-1, 999, 999
 	}
-	return fmt.Sprintf("v%d.%d.%d", maj, mnr, pat)
+	return fmt.Sprintf("%d.%d.%d", maj, mnr, pat)
 }
 
 // The b line warns when the project's .bin/b is older than the b this lo
 // ships, and names the command that updates it (lo toolchain install keeps
-// an existing .bin/b). The same release, a newer one, a pre-release of the
-// pinned release and a version that does not parse keep the plain line.
+// an existing .bin/b). A b release prints its version bare (1.2.3), a
+// build from source with a v (v1.2.3); the older line prints both versions
+// bare. The same release, a newer one and a pre-release of the pinned
+// release keep the plain line. A version that does not parse is a warning
+// with the words of a failed probe.
 func TestDoctorFlagsAnOlderB(t *testing.T) {
 	t.Parallel()
-	pin := "v" + BRelease.Version
+	pin := BRelease.Version
 	older := func(v string) string {
 		return "b " + v + " at .bin/b is older than " + pin + ", the b this lo ships — " + BUpdateFix
 	}
+	unknown := func(why string) string { return "b at .bin/b (version unknown: " + why + ")" }
 	below := releaseBelow(t)
 	for _, c := range []struct {
 		printed string
+		err     error
 		status  Status
 		msg     string
 	}{
-		{below, Warn, older(below)},
-		{"v0.1.0", Warn, older("v0.1.0")},
-		{"0.1.0", Warn, older("0.1.0")},
-		{"v0.1.0-rc.1", Warn, older("v0.1.0-rc.1")},
-		{pin, OK, "b " + pin + " (.bin/b)"},
-		{BRelease.Version, OK, "b " + BRelease.Version + " (.bin/b)"},
-		{pin + "-rc.1", OK, "b " + pin + "-rc.1 (.bin/b)"},
-		{"v999.0.0", OK, "b v999.0.0 (.bin/b)"},
-		{"dev", OK, "b dev (.bin/b)"},
+		{below, nil, Warn, older(below)},
+		{"0.1.0", nil, Warn, older("0.1.0")},
+		{"0.1.0-rc.1", nil, Warn, older("0.1.0-rc.1")},
+		{"v0.1.0", nil, Warn, older("0.1.0")},
+		{pin, nil, OK, "b " + pin + " (.bin/b)"},
+		{"v" + pin, nil, OK, "b v" + pin + " (.bin/b)"},
+		{pin + "-rc.1", nil, OK, "b " + pin + "-rc.1 (.bin/b)"},
+		{"999.0.0", nil, OK, "b 999.0.0 (.bin/b)"},
+		{"dev", nil, Warn, unknown(`--version printed "dev", not a version`)},
+		{"", nil, Warn, unknown(`--version printed "", not a version`)},
+		{"", errors.New("exit status 1"), Warn, unknown("exit status 1")},
 	} {
-		t.Run(c.printed, func(t *testing.T) {
+		name := fmt.Sprintf("%q", c.printed)
+		if c.err != nil {
+			name = "a failed probe"
+		}
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			base := t.TempDir()
 			bin := filepath.Join(base, ".bin")
 			fakeTool(t, filepath.Join(bin, "b"))
 			probe := func(path string, args ...string) (string, error) {
 				if filepath.Base(path) == "b" {
-					return c.printed, nil
+					return c.printed, c.err
 				}
 				return "", errors.New("not installed")
 			}
