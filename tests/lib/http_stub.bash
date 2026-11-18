@@ -20,18 +20,19 @@
 # (RC_OUT: the answer of the first URL would be written there).
 
 http_stub_start() {
-  local pf="${BATS_TEST_TMPDIR}/stub.port" i
+  local pf="${BATS_TEST_TMPDIR}/stub.port"
   STUB_LOG="${BATS_TEST_TMPDIR}/stub.log"
   : > "${STUB_LOG}"
   rm -f -- "${pf}"
   # 3>&-: bats waits for each process that holds its fd 3.
   python3 "${_PROJECT_ROOT}/tests/lib/http_stub.py" "${pf}" "${STUB_LOG}" "$@" >/dev/null 2>&1 3>&- &
   STUB_PID=$!
-  for i in $(seq 1 200); do
+  for _ in $(seq 1 200); do
     [[ -s "${pf}" ]] && break
     command sleep 0.05
   done
   [[ -s "${pf}" ]] || { echo "http_stub: no port after 10 seconds" >&2; return 1; }
+  # shellcheck disable=SC2034 # read by the tests that source this file
   STUB_PORT=$(<"${pf}")
 }
 
