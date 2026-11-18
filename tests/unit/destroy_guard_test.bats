@@ -105,6 +105,21 @@ _nothing_ran() {
   _nothing_ran
 }
 
+# The list of the other domains is the only input of this message that can
+# still hold a backslash (the name check refuses one in the cluster_name): a
+# directory under clusters/ with the text "\e[2J" in its name is shown as
+# text, with no ESC byte.
+@test "destroy guard: another domain whose directory name has a backslash is shown as text" {
+  _assume_no_tty
+  _domain 'copy\e[2J.prod' prod-a
+  local confirm_cluster=prod-a
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 3 ]
+  assert_output --partial "[error] cluster_name 'prod-a' of 'test.prod' is also the cluster_name of: copy\e[2J.prod. The provider deletes only"
+  _refute_esc
+  _nothing_ran
+}
+
 @test "destroy guard: an inline config and a configRef of another name count too" {
   _assume_no_tty
   mkdir -p "${PATH_CLUSTERS}/inline.prod" "${PATH_CLUSTERS}/ref.prod/infra"
@@ -251,6 +266,32 @@ server 42 cp-0"
   _nothing_ran
 }
 
+# A hook that fails leaves no plan file. A mktemp that fails stops the
+# destroy before the hook runs, and says what failed.
+@test "destroy guard: a failed plan leaves no plan file, and a failed mktemp stops the destroy" {
+  _assume_no_tty
+  local confirm_cluster=prod-a
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  export PLAN_FAIL=1
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 1 ]
+  assert_output --partial "cannot determine cluster name for destroy"
+  _nothing_ran
+  run find "${TMPDIR}" -mindepth 1
+  assert_output ""
+
+  unset PLAN_FAIL
+  export TMPDIR="${BATS_TEST_TMPDIR}/missing"
+  : > "${CALLS}"
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 1 ]
+  assert_output --partial "[error] could not make a temporary file for the destroy plan of 'test.prod' (mktemp failed in TMPDIR '${TMPDIR}'). Nothing was deleted. Set TMPDIR to a directory that you can write to, then run lo destroy again."
+  run grep -c '^plan:' "${CALLS}"
+  assert_output "0"
+  _nothing_ran
+}
+
 @test "destroy guard: a plan without a cluster line is refused" {
   _assume_no_tty
   export PLAN=$'server\t42\tcp-0\n'
@@ -354,13 +395,20 @@ _assert_names_refused() {
 }
 
 # _refute_esc: the output holds no ESC byte besides the fixed colour codes
-# of the guard header (bold yellow, dim, bold, reset).
+# of the guard header (bold yellow, dim, bold, reset), which go on the
+# header line only. The same codes on any other line stay, so a value that
+# becomes one of them fails the check.
 _refute_esc() {
-  local rest="${output//$'\e[1;33m'/}"
-  rest="${rest//$'\e[0m'/}"
-  rest="${rest//$'\e[2m'/}"
-  rest="${rest//$'\e[1m'/}"
-  [[ "${rest}" != *$'\e'* ]] || { printf 'an ESC byte in the output:\n%q\n' "${output}" >&2; return 1; }
+  local line
+  while IFS= read -r line; do
+    if [[ "${line}" == *"destroy deletes these resources of cluster_name"* ]]; then
+      line="${line//$'\e[1;33m'/}"
+      line="${line//$'\e[0m'/}"
+      line="${line//$'\e[2m'/}"
+      line="${line//$'\e[1m'/}"
+    fi
+    [[ "${line}" != *$'\e'* ]] || { printf 'an ESC byte in the output line:\n%q\n' "${line}" >&2; return 1; }
+  done <<< "${output}"
 }
 
 # The messages that carry the cluster_name or the --confirm-cluster value
@@ -468,6 +516,20 @@ _refute_esc() {
   assert_success
   run grep -c DRIVER-DESTROY-RAN "${CALLS}"
   assert_output "1"
+}
+
+# The refusal of --confirm-cluster on a destroy that checks no cluster_name
+# prints with printf '%s', as the guard does: a value with the text "\e[2J"
+# is shown as text, with no ESC byte (Go: ui.ErrorTo in DispatchDestroy).
+@test "destroy guard: a backslash sequence in --confirm-cluster stays text when no guard runs" {
+  _assume_no_tty
+  unset LOK8S_REMOTE
+  local force=1 confirm_cluster='\e[2J'
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 1 ]
+  assert_output --partial "[error] --confirm-cluster '\e[2J' is set, but the destroy of 'test.prod' checks no cluster_name: it runs without -r (--remote), so no provider is loaded. Nothing was deleted."
+  _refute_esc
+  _nothing_ran
 }
 
 @test "destroy guard: a hosted KubeOne cluster and a capi cluster get no plan, and --confirm-cluster is refused" {

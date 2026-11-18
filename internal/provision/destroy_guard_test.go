@@ -200,7 +200,7 @@ func TestDestroyGuardShowsANameWithTwoTabsAsBashReadsIt(t *testing.T) {
 // assertClusterNameRefused: a plan whose cluster line names name is refused
 // (rc 3) before any message shows the name: with the matching
 // --confirm-cluster, on a terminal with the name typed, and off a terminal.
-// Nothing runs, and the confirmed plan is not set.
+// Nothing runs.
 func assertClusterNameRefused(t *testing.T, name string) {
 	t.Helper()
 	const want = "the destroy plan of 'test.prod' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was deleted. Correct the cluster_name in the provider config or the destroy_plan hook of the provider, then run lo destroy again."
@@ -218,9 +218,6 @@ func assertClusterNameRefused(t *testing.T, name string) {
 		refuteContains(t, out, name)
 		refuteContains(t, out, "destroy deletes these resources")
 		refuteContains(t, out, "type the cluster_name")
-		if _, ok := os.LookupEnv(driver.DestroyPlanEnv); ok {
-			t.Errorf("%q, %s: %s is set", name, how, driver.DestroyPlanEnv)
-		}
 	}
 	plan := "cluster\t" + strings.Replace(name, "\t", "\t\t", 1) + "\nserver\t42\tcp-0\n"
 
@@ -291,9 +288,18 @@ func TestDestroyGuardRefusesAClusterNameWithUFFFD(t *testing.T) {
 }
 
 // withoutHeaderColors: out without the fixed colour codes of the guard
-// header (bold yellow, dim, bold, reset).
+// header (bold yellow, dim, bold, reset), on the header line only. The same
+// codes on any other line stay, so a value that becomes one of them fails
+// the check.
 func withoutHeaderColors(out string) string {
-	return strings.NewReplacer("\x1b[1;33m", "", "\x1b[0m", "", "\x1b[2m", "", "\x1b[1m", "").Replace(out)
+	codes := strings.NewReplacer("\x1b[1;33m", "", "\x1b[0m", "", "\x1b[2m", "", "\x1b[1m", "")
+	lines := strings.Split(out, "\n")
+	for i, line := range lines {
+		if strings.Contains(line, "destroy deletes these resources of cluster_name") {
+			lines[i] = codes.Replace(line)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // A --confirm-cluster value and a typed answer that hold the text "\e[2J":
@@ -338,9 +344,6 @@ func TestDestroyGuardRefusesAPlanWithANulByte(t *testing.T) {
 		assertContains(t, out, "the destroy plan of 'test.prod' has a NUL byte, and the confirmed plan cannot carry it to the provider. Nothing was deleted. Correct the destroy_plan hook of the provider, then run lo destroy again.")
 		refuteContains(t, out, "destroy deletes these resources")
 		refuteContains(t, out, "\x00")
-		if _, ok := os.LookupEnv(driver.DestroyPlanEnv); ok {
-			t.Errorf("plan %q: %s is set", plan, driver.DestroyPlanEnv)
-		}
 	}
 }
 
