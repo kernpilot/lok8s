@@ -2479,12 +2479,14 @@ _stub_mktemp() {
 # curl looks for one: CURL_HOME, XDG_CONFIG_HOME, HOME. With -q first curl
 # reads none of them: no trace of the bearer or of the answer is written,
 # the answer is not sent to another file, and each request still carries
-# the bearer.
+# the bearer. The control in each place: curl without -q reads the file
+# there, so the test can fail. curl older than 7.73 does not look in
+# XDG_CONFIG_HOME: that control is left out, with a note.
 @test "space_api_call and space_mint_join: curl reads no config file of the user" {
   command -v python3 >/dev/null || skip "no python3"
   [[ -n "$(type -P curl)" ]] || skip "no curl"
   source "${_PROJECT_ROOT}/tests/lib/http_stub.bash"
-  local hex var o e path rc
+  local hex var o e path rc controls=0
   hex=$(od -An -N11 -tx1 /dev/urandom | tr -d ' \n')
   export STUB_TICKET="${hex:0:6}.${hex:6:16}"
   STUB_BEARER="khzt-rc-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
@@ -2512,9 +2514,60 @@ _stub_mktemp() {
     path=$(sed -n 's/^    (written to \(.*\), mode 0600)$/\1/p' "${o}")
     [ -n "${path}" ]
     [ "$(cat "${path}")" = "${STUB_TICKET}" ]
+    if [[ "${var}" == XDG_CONFIG_HOME ]] && ! curl_reads_xdg; then
+      echo "# no control for XDG_CONFIG_HOME: this curl is older than 7.73 and does not look there" >&3
+    else
+      curlrc_control "${var}" "${LOK8S_KUBEHZ_API_URL}/control"
+      controls=$((controls + 1))
+    fi
   done
   [ "$(grep -c '^GET /api/spaces/sp-q bearer$' "${STUB_LOG}")" -eq 3 ]
   [ "$(grep -c '^POST /api/spaces/sp-q/join-token bearer$' "${STUB_LOG}")" -eq 3 ]
-  [ "$(wc -l < "${STUB_LOG}")" -eq 6 ]
+  [ "$(grep -c '^GET /control none$' "${STUB_LOG}")" -eq "${controls}" ]
+  [ "$(wc -l < "${STUB_LOG}")" -eq $((6 + controls)) ]
+  http_stub_stop
+}
+
+# The production api call and mint over https, with SSLKEYLOGFILE set in
+# the environment: curl must not append the TLS session keys to that file
+# (the keys decrypt a captured exchange: the bearer and the ticket). The
+# control first: this curl writes a key log for a request to the same
+# server when the variable reaches it. A curl that writes none makes the
+# test skip, because it could not fail. A readonly SSLKEYLOGFILE cannot be
+# unset: the call stops before curl sends a request.
+@test "space_api_call and space_mint_join: curl writes no TLS key log" {
+  command -v python3 >/dev/null || skip "no python3"
+  [[ -n "$(command -v openssl)" ]] || skip "no openssl: the https stub needs a self-signed certificate"
+  [[ -n "$(type -P curl)" ]] || skip "no curl"
+  source "${_PROJECT_ROOT}/tests/lib/http_stub.bash"
+  local hex path rc=0 o="${BATS_TEST_TMPDIR}/kl.stdout" e="${BATS_TEST_TMPDIR}/kl.stderr"
+  hex=$(od -An -N11 -tx1 /dev/urandom | tr -d ' \n')
+  export STUB_TICKET="${hex:0:6}.${hex:6:16}"
+  STUB_BEARER="khzt-kl-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  export STUB_BEARER KUBEHZ_TOKEN="${STUB_BEARER}"
+  stub_cert
+  http_stub_start "${STUB_CERT}" "${STUB_KEY}"
+  export CURL_CA_BUNDLE="${STUB_CERT}" LOK8S_KUBEHZ_API_URL="https://127.0.0.1:${STUB_PORT}"
+  keylog_written || skip "this curl writes no TLS key log (its TLS backend ignores SSLKEYLOGFILE), so the test cannot fail"
+  export SSLKEYLOGFILE="${BATS_TEST_TMPDIR}/tls.keys"
+  (
+    kubehz::space_api_call GET /api/spaces/sp-q &&
+      printf '%s|%s' "${KUBEHZ_SPACE_API_STATUS}" "${KUBEHZ_SPACE_API_BODY}" > "${BATS_TEST_TMPDIR}/kl.api" &&
+      kubehz::space_mint_join sp-q worker-1
+  ) > "${o}" 2> "${e}" || rc=$?
+  [ ! -e "${SSLKEYLOGFILE}" ]
+  [ "${rc}" -eq 0 ]
+  [ "$(cat "${BATS_TEST_TMPDIR}/kl.api")" = '200|{"ok":true,"data":{"id":"sp-q"}}' ]
+  path=$(sed -n 's/^    (written to \(.*\), mode 0600)$/\1/p' "${o}")
+  [ -n "${path}" ]
+  [ "$(cat "${path}")" = "${STUB_TICKET}" ]
+  rc=0
+  ( readonly SSLKEYLOGFILE && kubehz::space_api_call GET /api/spaces/sp-r ) > "${o}" 2> "${e}" || rc=$?
+  [ "${rc}" -ne 0 ]
+  [ ! -e "${SSLKEYLOGFILE}" ]
+  [ "$(grep -c '^GET /api/spaces/sp-q bearer$' "${STUB_LOG}")" -eq 1 ]
+  [ "$(grep -c '^POST /api/spaces/sp-q/join-token bearer$' "${STUB_LOG}")" -eq 1 ]
+  [ "$(grep -c '^GET /control none$' "${STUB_LOG}")" -eq 1 ]
+  [ "$(wc -l < "${STUB_LOG}")" -eq 3 ]
   http_stub_stop
 }

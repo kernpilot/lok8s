@@ -12,6 +12,18 @@
 #   curlrc_env VAR              in the subshell that runs the code under
 #                               test: VAR names RC_DIR, the other two name
 #                               no config file
+#   curlrc_control VAR URL      the positive control: curl WITHOUT -q, in
+#                               the environment of curlrc_env VAR, reads the
+#                               file of curlrc_dir VAR (the trace appears)
+#   curl_reads_xdg              0 when this curl looks in XDG_CONFIG_HOME
+#                               (curl 7.73 and later)
+#   stub_cert                   a throwaway self-signed certificate for
+#                               127.0.0.1 in the test dir (openssl):
+#                               STUB_CERT, STUB_KEY
+#   keylog_written              0 when this curl writes a TLS key log
+#                               (SSLKEYLOGFILE) for a request to the https
+#                               stub. Without that, a test that checks the
+#                               key log cannot fail: it must skip
 #
 # Unless -q is its first argument, curl reads one config file of the user:
 # $CURL_HOME/.curlrc, else $XDG_CONFIG_HOME/curlrc (no dot), else
@@ -55,4 +67,35 @@ curlrc_env() {
   unset CURL_HOME XDG_CONFIG_HOME
   export HOME="${BATS_TEST_TMPDIR}/curlrc-none"
   export "${1}=${RC_DIR}"
+}
+
+curlrc_control() {
+  ( curlrc_env "${1}" && command curl -sS "${2}" ) >/dev/null 2>&1 || :
+  [[ -s "${RC_TRACE}" ]]
+}
+
+curl_reads_xdg() {
+  local v major minor
+  v=$(command curl -q --version 2>/dev/null) || return 1
+  v=${v#curl }
+  v=${v%% *}
+  major=${v%%.*}
+  minor=${v#*.}
+  minor=${minor%%.*}
+  [[ "${major}" =~ ^[0-9]+$ && "${minor}" =~ ^[0-9]+$ ]] || return 1
+  (( major > 7 || (major == 7 && minor >= 73) ))
+}
+
+stub_cert() {
+  STUB_CERT="${BATS_TEST_TMPDIR}/stub.crt"
+  STUB_KEY="${BATS_TEST_TMPDIR}/stub.key"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=127.0.0.1 \
+    -addext subjectAltName=IP:127.0.0.1 -keyout "${STUB_KEY}" -out "${STUB_CERT}" 2>/dev/null
+}
+
+keylog_written() {
+  local log="${BATS_TEST_TMPDIR}/control.keys"
+  rm -f -- "${log}"
+  SSLKEYLOGFILE="${log}" command curl -q -sS -o /dev/null "https://127.0.0.1:${STUB_PORT}/control" 2>/dev/null || return 1
+  [[ -s "${log}" ]]
 }

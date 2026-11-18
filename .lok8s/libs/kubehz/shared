@@ -228,11 +228,16 @@ kubehz::space_api_call() {
   # curl then reads no config file of the user (.curlrc in CURL_HOME or
   # HOME, curlrc in XDG_CONFIG_HOME). A trace-ascii line there would log the
   # bearer and the answer, an output line would write the answer to another
-  # file. curl obeys -q only as its first argument.
-  raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
-    curl -q -K - -sSL -w $'\n%{http_code}' -X "${method}" \
-    "${LOK8S_KUBEHZ_API_URL}${path}" \
-    "${extra[@]}") || {
+  # file. curl obeys -q only as its first argument. SSLKEYLOGFILE is unset
+  # for curl only, in a subshell: with it, curl appends the TLS session keys
+  # to that file, and the keys decrypt a captured exchange (the bearer and
+  # the answer). A readonly SSLKEYLOGFILE stops the call before curl runs.
+  raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
+    unset -v SSLKEYLOGFILE &&
+      curl -q -K - -sSL -w $'\n%{http_code}' -X "${method}" \
+        "${LOK8S_KUBEHZ_API_URL}${path}" \
+        "${extra[@]}"
+  ) ) || {
     KUBEHZ_SPACE_API_CURL_RC=$?
     return 1
   }

@@ -947,20 +947,21 @@ _mock_node_binaries() {
 # (tests/lib/http_stub.bash), with a config file of the user in each place
 # curl looks for one: CURL_HOME, XDG_CONFIG_HOME, HOME. With -q first curl
 # reads none of them: the snapshot lands in the private file and nowhere
-# else, and no trace of the URL or the snapshot is written.
+# else, and no trace of the URL or the snapshot is written. The control in
+# each place, as in the api test: curl without -q reads the file there
+# (none for XDG_CONFIG_HOME on curl older than 7.73, with a note).
 @test "handover: the snapshot download reads no config file of the user" {
   command -v python3 >/dev/null || skip "no python3"
-  command -v openssl >/dev/null || skip "no openssl"
+  [[ -n "$(command -v openssl)" ]] || skip "no openssl: the https stub needs a self-signed certificate"
   [[ -n "$(type -P curl)" ]] || skip "no curl"
   source "${_PROJECT_ROOT}/tests/lib/http_stub.bash"
   _make_bundle
-  local cert="${BATS_TEST_TMPDIR}/stub.crt" key="${BATS_TEST_TMPDIR}/stub.key" var workdir got o e rc
-  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=127.0.0.1 \
-    -addext subjectAltName=IP:127.0.0.1 -keyout "${key}" -out "${cert}" 2>/dev/null
+  local var workdir got o e rc controls=0
+  stub_cert
   export STUB_SNAPSHOT="${BATS_TEST_TMPDIR}/snap.src"
   printf 'snap-%s' "$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')" > "${STUB_SNAPSHOT}"
-  http_stub_start "${cert}" "${key}"
-  export CURL_CA_BUNDLE="${cert}"
+  http_stub_start "${STUB_CERT}" "${STUB_KEY}"
+  export CURL_CA_BUNDLE="${STUB_CERT}"
   printf 'https://127.0.0.1:%s/snap.db' "${STUB_PORT}" > "${BUNDLE}/snapshot-location"
   for var in CURL_HOME XDG_CONFIG_HOME HOME; do
     echo "# config file in ${var}"
@@ -978,7 +979,55 @@ _mock_node_binaries() {
     [ "${got}" = "${workdir}/kubehz-handover-snapshot.db" ]
     cmp -- "${STUB_SNAPSHOT}" "${got}"
     [ "$(stat -c %a "${got}")" = 600 ]
+    if [[ "${var}" == XDG_CONFIG_HOME ]] && ! curl_reads_xdg; then
+      echo "# no control for XDG_CONFIG_HOME: this curl is older than 7.73 and does not look there" >&3
+    else
+      curlrc_control "${var}" "https://127.0.0.1:${STUB_PORT}/control"
+      controls=$((controls + 1))
+    fi
   done
   [ "$(grep -c '^GET /snap.db none$' "${STUB_LOG}")" -eq 3 ]
+  [ "$(grep -c '^GET /control none$' "${STUB_LOG}")" -eq "${controls}" ]
+  [ "$(wc -l < "${STUB_LOG}")" -eq $((3 + controls)) ]
+  http_stub_stop
+}
+
+# The real curl downloads the snapshot over https with SSLKEYLOGFILE set in
+# the environment: it must not append the TLS session keys to that file
+# (the keys decrypt a captured download: the URL with its signature, and
+# the snapshot). The control first, as in the api test: this curl writes a
+# key log for a request to the same server when the variable reaches it,
+# else the test skips. A readonly SSLKEYLOGFILE stops the download before
+# curl sends a request.
+@test "handover: the snapshot download writes no TLS key log" {
+  command -v python3 >/dev/null || skip "no python3"
+  [[ -n "$(command -v openssl)" ]] || skip "no openssl: the https stub needs a self-signed certificate"
+  [[ -n "$(type -P curl)" ]] || skip "no curl"
+  source "${_PROJECT_ROOT}/tests/lib/http_stub.bash"
+  _make_bundle
+  local workdir="${BATS_TEST_TMPDIR}/kl.work" o="${BATS_TEST_TMPDIR}/kl.stdout" e="${BATS_TEST_TMPDIR}/kl.stderr" got rc=0
+  stub_cert
+  export STUB_SNAPSHOT="${BATS_TEST_TMPDIR}/snap.src"
+  printf 'snap-%s' "$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')" > "${STUB_SNAPSHOT}"
+  http_stub_start "${STUB_CERT}" "${STUB_KEY}"
+  export CURL_CA_BUNDLE="${STUB_CERT}"
+  keylog_written || skip "this curl writes no TLS key log (its TLS backend ignores SSLKEYLOGFILE), so the test cannot fail"
+  printf 'https://127.0.0.1:%s/snap.db' "${STUB_PORT}" > "${BUNDLE}/snapshot-location"
+  mkdir -m 700 "${workdir}" "${workdir}.ro"
+  export SSLKEYLOGFILE="${BATS_TEST_TMPDIR}/tls.keys"
+  ( handover::fetch_snapshot "${BUNDLE}" "" "${workdir}" ) > "${o}" 2> "${e}" || rc=$?
+  [ ! -e "${SSLKEYLOGFILE}" ]
+  [ "${rc}" -eq 0 ]
+  [ ! -s "${e}" ]
+  got=$(<"${o}")
+  [ "${got}" = "${workdir}/kubehz-handover-snapshot.db" ]
+  cmp -- "${STUB_SNAPSHOT}" "${got}"
+  rc=0
+  ( readonly SSLKEYLOGFILE && handover::fetch_snapshot "${BUNDLE}" "" "${workdir}.ro" ) > "${o}" 2> "${e}" || rc=$?
+  [ "${rc}" -ne 0 ]
+  [ ! -e "${SSLKEYLOGFILE}" ]
+  [ "$(grep -c '^GET /snap.db none$' "${STUB_LOG}")" -eq 1 ]
+  [ "$(grep -c '^GET /control none$' "${STUB_LOG}")" -eq 1 ]
+  [ "$(wc -l < "${STUB_LOG}")" -eq 2 ]
   http_stub_stop
 }
