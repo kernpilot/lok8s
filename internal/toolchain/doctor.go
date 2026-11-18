@@ -76,8 +76,21 @@ const Fix = "fix: lo toolchain install"
 // install keeps an existing .bin/b, so only b itself updates it.
 const BUpdateFix = "fix: .bin/b update b"
 
-// Doctor runs the checks. ctx bounds the probes (each gets ten seconds
-// under it).
+// The time limit of one version probe of Doctor, and the grace of every
+// probe after its interrupt. At the limit (or on a cancel of the caller)
+// the tool gets an interrupt, the runner's cancel. A tool that still runs
+// at the end of the grace is killed, and its output pipe closes
+// (exec.Cmd.WaitDelay). Without the grace, a tool that ignores the
+// interrupt (a broken or foreign .bin/b) holds the caller without bound.
+// A version probe has no cleanup to finish, so the grace is short.
+// Variables, so a test can set them.
+var (
+	probeTimeout = 10 * time.Second
+	probeGrace   = 2 * time.Second
+)
+
+// Doctor runs the checks. ctx bounds the probes: each gets probeTimeout
+// under it, then probeGrace to end after its interrupt.
 func Doctor(ctx context.Context, o DoctorOptions) []Check {
 	d := &doctor{o: o, probe: o.Probe}
 	if d.probe == nil {
@@ -86,7 +99,7 @@ func Doctor(ctx context.Context, o DoctorOptions) []Check {
 			r = execx.NewRunner(nil)
 		}
 		d.probe = func(path string, args ...string) (string, error) {
-			ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 			defer cancel()
 			return probe(ctx, r, path, args...)
 		}
@@ -223,9 +236,10 @@ func (o *DoctorOptions) path() string {
 	return os.Getenv("PATH")
 }
 
-// probe runs path args… and returns its trimmed stdout.
+// probe runs path args… and returns its trimmed stdout. A tool that does
+// not end within probeGrace after a cancel of ctx is killed.
 func probe(ctx context.Context, r execx.Runner, path string, args ...string) (string, error) {
-	out, err := execx.Output(ctx, r, execx.Cmd{Name: path, Args: args})
+	out, err := execx.Output(ctx, r, execx.Cmd{Name: path, Args: args, WaitDelay: probeGrace})
 	if err != nil {
 		return "", err
 	}
