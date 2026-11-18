@@ -366,11 +366,24 @@ _check_line() {
   _check_line "spec.network.dnsSearch could not be read: yq did not start, or its files in ${TMPDIR} do not exist. Make sure that ${TMPDIR} is writable and has free space, and that no other process removes files from it. Then run the command again."
 }
 
-# End to end: no yq on PATH (8), a yq on PATH that cannot run (9), and a
-# yq output that cannot be read (10) fail the check with their cause. A
-# missing or broken yq read as "no list" before (1), and the spec's list
-# was dropped without a word.
-@test "dnssearch::check: no yq, a yq that cannot run, and an output that cannot be read fail the check with their cause" {
+# The causes 8 (no yq on PATH) and 9 (a yq that cannot run) have one
+# wording, in dnssearch.sh and in spec.sh (spec::_kver_yq).
+_NO_YQ_CAUSE="lo cannot find yq on PATH. Install yq v4.54.3 or later (b install installs the pinned yq)."
+_YQ_CANNOT_RUN_CAUSE="the yq on PATH cannot run: it has no execute permission, or it is not a program for this system. Install yq v4.54.3 or later (b install installs the pinned yq)."
+
+@test "the causes 8 and 9 read the same in dnssearch.sh and spec.sh" {
+  local file cause
+  for file in "${_PROJECT_ROOT}/.lok8s/utils/dnssearch.sh" "${_PROJECT_ROOT}/.lok8s/utils/spec.sh"; do
+    for cause in "${_NO_YQ_CAUSE}" "${_YQ_CANNOT_RUN_CAUSE}"; do
+      grep -qF -- "${cause}" "${file}" || { echo "${file##*/} does not have the cause: ${cause}" >&2; return 1; }
+    done
+  done
+}
+
+# End to end: no yq on PATH (8) and a yq on PATH that cannot run (9) fail
+# the check with their cause. A missing or broken yq read as "no list"
+# before (1), and the spec's list was dropped without a word.
+@test "dnssearch::check: no yq, and a yq that cannot run, fail the check with their cause" {
   export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
   mkdir -p "${TMPDIR}"
   CHECK_SPEC="$(_spec "  network:
@@ -379,15 +392,24 @@ _check_line() {
   local nyq prefix="spec.network.dnsSearch could not be read:"
   nyq="$(_path_without_yq "${BATS_TEST_TMPDIR}/no-yq")"
   ( PATH="${nyq}"
-    _check_line "${prefix} lo cannot find yq on PATH. Install yq v4.54.3 or later." )
+    _check_line "${prefix} ${_NO_YQ_CAUSE}" )
   printf '#!/usr/bin/env bash\necho "!!seq"\n' > "${nyq}/yq"
   chmod 644 "${nyq}/yq"
   ( PATH="${nyq}"
-    _check_line "${prefix} the yq on PATH cannot run: it has no execute permission, or it is not a program for this system. Install yq v4.54.3 or later." )
-  if [[ "$(id -u)" != 0 ]]; then  # root reads a file without read permission
-    ( _slow_yq 'echo "!!seq"; chmod 000 "${TMPDIR}"/lo-yq.*/out'
-      _check_line "${prefix} yq ended, but lo cannot pass on its output: the read of its output file in ${TMPDIR}, or the write of the output, failed. Run the command again." )
-  fi
+    _check_line "${prefix} ${_YQ_CANNOT_RUN_CAUSE}" )
+}
+
+# End to end: a yq output that cannot be read (10) fails the check with its
+# cause.
+@test "dnssearch::check: a yq output that cannot be read fails the check with its cause" {
+  [[ "$(id -u)" != 0 ]] || skip "root reads a file without read permission"
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  CHECK_SPEC="$(_spec "  network:
+    dnsSearch: [a.example]
+")"
+  _slow_yq 'echo "!!seq"; chmod 000 "${TMPDIR}"/lo-yq.*/out'
+  _check_line "spec.network.dnsSearch could not be read: yq ended, but lo cannot pass on its output: the read of its output file in ${TMPDIR}, or the write of the output, failed. Run the command again."
 }
 
 # A yq before v4.47.1 rejects --yaml-fix-merge-anchor-to-spec (5). The

@@ -513,12 +513,18 @@ addons::dry_run_boundary() {
     error "bootstrap dry-run: cannot make a file for the interrupt mark of the check of the Secret plugin ${_rel}: ${_stop}"
     return 1
   fi
-  # The plugin runs in the background with a watchdog (the pattern of
-  # spec::_kver_yq): at the time limit it gets TERM (a background job
-  # ignores INT, so not the interrupt that Go sends), and KILL after the
-  # grace. Its stdout goes to a file outside the probe directory: a $(...)
-  # would wait for every process that holds the pipe. INT and TERM stop the
-  # watchdog, and the plugin the same way (addons::_check_stop).
+  # The plugin runs in the background with a watchdog: a subshell that
+  # sleeps until the time limit, then sends the plugin TERM (a background
+  # job ignores INT, so not the interrupt that Go sends), and KILL after the
+  # grace. When the plugin ends, the check sends TERM to the watchdog, whose
+  # trap stops its sleep. On bash 5.2 that TERM can be lost when it comes
+  # before the watchdog has set its trap: the check then waits until the
+  # time limit, and reports that the plugin did not end in time. (The
+  # bounded yq reads, spec::_kver_yq and yqbound::run, end their watchdog
+  # with a line on a FIFO instead.) The plugin's stdout goes to a file
+  # outside the probe directory: a $(...) would wait for every process that
+  # holds the pipe. INT and TERM stop the watchdog, and the plugin the same
+  # way (addons::_check_stop).
   #
   # Until the pids of the plugin and of the watchdog are kept, INT and TERM
   # are only noted: a stop between a start and its `$!` would not know that

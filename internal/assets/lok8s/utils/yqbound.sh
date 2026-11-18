@@ -45,21 +45,28 @@ yqbound::_running_job() {
 
 # yqbound::_stop <pid> <watchdog> <tickfd> — the stop of yqbound::run on
 # INT, QUIT or TERM: TERM to yq and a wait for it, then the line on <tickfd>
-# that ends the watchdog, and a wait for the watchdog. The watchdog gets no
-# signal. It stays armed until yq ended: if yq does not take the TERM (bash
-# can drop a signal that a subshell gets as it starts), the watchdog stops
-# yq at the time limit, and the stop does not wait for ever. A job that
-# ended gets no signal (yqbound::_running_job): after the wait of
-# yqbound::run, the pid of yq can be another process's. The trap sets INT,
-# QUIT and TERM to do nothing before the stop, and a signal that comes
-# during the stop ends a wait early: so the stop waits again while the job
-# runs. It runs in a trap, where set -e applies again: each command that
-# can fail ends in `|| :`.
+# that ends the watchdog, and a wait for the watchdog. All three arguments
+# are required (an empty one for a job that does not exist). The watchdog
+# gets no signal; without a <tickfd> (a caller error) it gets TERM. It stays
+# armed until yq ended: if yq does not take the TERM (bash can drop a signal
+# that a subshell gets as it starts), the watchdog stops yq at the time
+# limit, and the stop does not wait for ever. A job that ended gets no
+# signal (yqbound::_running_job): after the wait of yqbound::run, the pid of
+# yq can be another process's. The trap sets INT, QUIT and TERM to do
+# nothing before the stop, and a signal that comes during the stop ends a
+# wait early: so the stop waits again while the job runs. It runs in a trap,
+# where set -e applies again: each command that can fail ends in `|| :`.
 yqbound::_stop() {
-  local pid="${1}" watchdog="${2}" tickfd="${3:-}"
+  local pid="${1}" watchdog="${2}" tickfd="${3}"
   ! yqbound::_running_job "${pid}" || kill -TERM "${pid}" 2>/dev/null || :
   while yqbound::_running_job "${pid}"; do wait "${pid}" 2>/dev/null || :; done
-  [[ -z "${tickfd}" ]] || { printf '\n' >&"${tickfd}"; } 2>/dev/null || :
+  if [[ -n "${tickfd}" ]]; then
+    { printf '\n' >&"${tickfd}"; } 2>/dev/null || :
+  else
+    # No FIFO: a caller error. A TERM, so that the stop does not wait until
+    # the time limit of the watchdog.
+    ! yqbound::_running_job "${watchdog}" || kill -TERM "${watchdog}" 2>/dev/null || :
+  fi
   while yqbound::_running_job "${watchdog}"; do wait "${watchdog}" 2>/dev/null || :; done
   return 0
 }

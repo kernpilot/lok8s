@@ -320,12 +320,11 @@ spec cost nothing. The frozen bash implementation reads the list with `yq`
 v4.54.3 or later, the pinned release (it needs `--yaml-fix-merge-anchor-to-spec`,
 which yq v4.47.1 added; an older `yq` stops the read with an error that names
 its version). No `yq` on `PATH`, or one that cannot run, also stops the read
-with an error. Each read has two
-limits. The time limit (10 s) always holds: a pure-bash watchdog stops `yq`,
-with no GNU `timeout` (macOS has none). The memory limit (1 GiB of data
-memory, `ulimit -d`) is best effort: it holds only where the operating system
-enforces it. At a limit, the read stops with one error line that names the
-limit.
+with an error. Each read has two limits. The time limit (10 s) always holds:
+a pure-bash watchdog stops `yq`, with no GNU `timeout` (macOS has none). The
+memory limit (1 GiB of data memory, `ulimit -d`) is best effort: it holds only
+where the operating system enforces it. At a limit, the read stops with one
+error line that names the limit.
 
 kind sets the search list when it creates the nodes. A cluster created before
 this change, or before you change the list, keeps its old search line until

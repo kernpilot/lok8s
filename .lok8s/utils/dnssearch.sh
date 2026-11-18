@@ -166,8 +166,8 @@ dnssearch::_stop() {
     5) cause="the installed yq ($(dnssearch::_yq_version)) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.54.3 or later." ;;
     6) cause="yq ended, but its output file in ${tmpdir} does not exist. Make sure that no other process removes files from ${tmpdir}, then run the command again." ;;
     7) cause="yq did not start, or its files in ${tmpdir} do not exist. Make sure that ${tmpdir} is writable and has free space, and that no other process removes files from it. Then run the command again." ;;
-    8) cause="lo cannot find yq on PATH. Install yq v4.54.3 or later." ;;
-    9) cause="the yq on PATH cannot run: it has no execute permission, or it is not a program for this system. Install yq v4.54.3 or later." ;;
+    8) cause="lo cannot find yq on PATH. Install yq v4.54.3 or later (b install installs the pinned yq)." ;;
+    9) cause="the yq on PATH cannot run: it has no execute permission, or it is not a program for this system. Install yq v4.54.3 or later (b install installs the pinned yq)." ;;
     10) cause="yq ended, but lo cannot pass on its output: the read of its output file in ${tmpdir}, or the write of the output, failed. Run the command again." ;;
     *)
       if (( rc > 64 && rc < 128 )); then

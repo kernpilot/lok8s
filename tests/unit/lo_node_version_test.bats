@@ -683,6 +683,8 @@ _kill_left() {
   export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
   mkdir -p "${TMPDIR}"
   local window sig want rc limit=20 mark stub_sleep pre dyq dwd start took bad=0
+  local m="${BATS_TEST_TMPDIR}/m" log="${BATS_TEST_TMPDIR}/kills"
+  mkdir -p "${m}"
   for window in yq watchdog; do
     for sig in INT TERM; do
       want=143
@@ -700,17 +702,28 @@ _kill_left() {
       else
         dyq="" dwd=1.5 pre="sleep 0.5; "
       fi
-      _yq_stub "${pre}kill -${sig} \"\${PPID}\"; exec sleep ${stub_sleep}"
+      _yq_stub "echo \$\$ > '${m}/pid'; echo \$PPID > '${m}/body'; ${pre}kill -${sig} \"\${PPID}\"; exec sleep ${stub_sleep}"
+      : > "${log}"
       rc=0
       start=$(_now_ms)
-      bash -c \
-        'import() { :; }; source "$1/domain.sh"; source "$1/spec.sh"; _SPEC_KVER_TIMEOUT=$3 _SPEC_KVER_TEST_DELAY_YQ=$4 _SPEC_KVER_TEST_DELAY_WATCHDOG=$5; spec::_kver_yq "$2" -r .kind' \
-        "${mark}" "${_PROJECT_ROOT}/.lok8s/utils" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" "${limit}" "${dyq}" "${dwd}" \
+      bash -c 'log=$6; kill() { printf "%s %s\n" "${BASHPID}" "$*" >> "${log}"; builtin kill "$@"; }
+        import() { :; }; source "$1/domain.sh"; source "$1/spec.sh"; _SPEC_KVER_TIMEOUT=$3 _SPEC_KVER_TEST_DELAY_YQ=$4 _SPEC_KVER_TEST_DELAY_WATCHDOG=$5; spec::_kver_yq "$2" -r .kind' \
+        "${mark}" "${_PROJECT_ROOT}/.lok8s/utils" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" "${limit}" "${dyq}" "${dwd}" "${log}" \
         >"${BATS_TEST_TMPDIR}/out" 2>&1 || rc=$?
       took=$(( $(_now_ms) - start ))
       if (( rc != want )); then
         echo "${window} window, ${sig}: status ${rc}, want ${want}: $(<"${BATS_TEST_TMPDIR}/out")" >&2; bad=1
       fi
+      # The watchdog gets no signal: the stop ends it with a line on the
+      # FIFO. Each signal of the read (the kill() wrapper logs the sender
+      # and the arguments) goes to yq, or to the body itself (a signal that
+      # came before the pids were kept, sent again).
+      local from ksig target
+      while read -r from ksig target; do
+        [[ "${target}" == "$(<"${m}/pid")" || "${target}" == "$(<"${m}/body")" ]] || {
+          echo "${window} window, ${sig}: a signal to ${target}, not to yq or the body: $(tr '\n' ';' < "${log}")" >&2; bad=1
+        }
+      done < "${log}"
       # The floor: the read ends after the delay (the signal waits for the
       # end of the delay's sleep), so the window was open. The ceiling is
       # far below the time limit: the stop, not the watchdog, ended the read.
@@ -738,7 +751,8 @@ _kill_left() {
 # process's: a stop sends no signal to a job of the read that has ended,
 # waited for or not (spec::_running_job). A job that runs gets TERM, and the
 # stop returns after the job ends. The watchdog gets no signal: the stop
-# ends it with a line on the FIFO (its third argument). The stops run in a
+# ends it with a line on the FIFO (its third argument). Without a FIFO (a
+# caller error), the stop sends the watchdog TERM. The stops run in a
 # job of their own (set -m) with a time limit: a stop that does not return
 # fails the test, and a KILL to the job's group leaves no process behind.
 @test "spec::_kver_yq: a stop sends no signal to a job of the read that has ended, nor to the watchdog" {
@@ -754,11 +768,11 @@ _kill_left() {
     wait "${waited}"
     # The shell reaps the other one when it ends, with no wait.
     sleep 0.5
-    spec::_kver_stop "${waited}" "${ended}"
+    spec::_kver_stop "${waited}" "${ended}" ""
     [[ ! -s "${log}" ]] || { echo "a stop sent a signal to a job that had ended: $(<"${log}")"; exit 1; }
     sleep 5 3>&- &
     running=$!
-    spec::_kver_stop "${running}" ""
+    spec::_kver_stop "${running}" "" ""
     [[ "$(<"${log}")" == "-TERM ${running}" ]] || { echo "a stop did not send TERM to the running job ${running}: $(<"${log}")"; exit 1; }
     ! builtin kill -0 "${running}" 2>/dev/null || { echo "the stop returned while the job ${running} ran"; exit 1; }
     # A watchdog: the read of spec::_kver_yq, with a time limit of 20 s.
@@ -769,6 +783,15 @@ _kill_left() {
     : > "${log}"
     spec::_kver_stop "" "${watch}" "${fd}"
     [[ ! -s "${log}" ]] || { echo "a stop sent a signal to the watchdog: $(<"${log}")"; exit 1; }
+    ! builtin kill -0 "${watch}" 2>/dev/null || { echo "the stop returned while the watchdog ${watch} ran"; exit 1; }
+    # A stop without a FIFO (a caller error) does not wait until the time
+    # limit of the watchdog: it sends the watchdog TERM.
+    ( read -r -t 20 -u "${fd}" && exit 0; exit 9 ) 3>&- &
+    watch=$!
+    sleep 0.2
+    : > "${log}"
+    spec::_kver_stop "" "${watch}" ""
+    [[ "$(<"${log}")" == "-TERM ${watch}" ]] || { echo "a stop without a FIFO did not send TERM to the watchdog ${watch}: $(<"${log}")"; exit 1; }
     ! builtin kill -0 "${watch}" 2>/dev/null || { echo "the stop returned while the watchdog ${watch} ran"; exit 1; }
   ) 3>&- &
   sub=$!
@@ -820,33 +843,47 @@ while :; do sleep 0.1; done"
 # subshell gets as it starts) still ends, at the time limit: the watchdog
 # stays armed until yq ended, and then stops yq. The yq stub takes its
 # first TERM as lost (a trap that only removes itself), then sends TERM to
-# the read (its parent). The time limit is 3 s; a stop that is not done in
-# 12 s fails the test.
+# the read (its parent). A kill() wrapper logs each signal of the read and
+# of its jobs, with the pid of the sender: the stop (in the body, the parent
+# of yq) sends yq one TERM, and the watchdog sends the second at the time
+# limit. The time limit is 3 s; a stop that is not done in 12 s fails the
+# test.
 @test "spec::_kver_yq: a stop whose TERM yq does not take ends at the time limit" {
   _spec "version: v1.31.4"
   export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
   mkdir -p "${TMPDIR}"
-  local m="${BATS_TEST_TMPDIR}/m" mark="kver-lost-${RANDOM}${RANDOM}" reader rc=0 start took i yq
+  local m="${BATS_TEST_TMPDIR}/m" mark="kver-lost-${RANDOM}${RANDOM}" log="${BATS_TEST_TMPDIR}/kills"
+  local reader rc=0 start took i yq body
   mkdir -p "${m}"
+  : > "${log}"
   _yq_stub "echo \$\$ > '${m}/pid'
+echo \$PPID > '${m}/body'
 trap 'trap - TERM' TERM
 kill -TERM \"\${PPID}\"
 while :; do sleep 0.1; done"
   start=$(_now_ms)
-  bash -c 'import() { :; }; source "$1/domain.sh"; source "$1/spec.sh"; _SPEC_KVER_TIMEOUT=3; spec::_kver_yq "$2" -r .kind' \
-    "${mark}" "${_PROJECT_ROOT}/.lok8s/utils" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" \
+  bash -c 'log=$3; kill() { printf "%s %s\n" "${BASHPID}" "$*" >> "${log}"; builtin kill "$@"; }
+    import() { :; }; source "$1/domain.sh"; source "$1/spec.sh"; _SPEC_KVER_TIMEOUT=3; spec::_kver_yq "$2" -r .kind' \
+    "${mark}" "${_PROJECT_ROOT}/.lok8s/utils" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" "${log}" \
     >"${BATS_TEST_TMPDIR}/out" 2>&1 &
   reader=$!
   for (( i = 0; i < 120; i++ )); do kill -0 "${reader}" 2>/dev/null || break; sleep 0.1; done
   took=$(( $(_now_ms) - start ))
   yq=$(<"${m}/pid")
+  body=$(<"${m}/body")
   if kill -0 "${reader}" 2>/dev/null; then
     kill -KILL "${yq}" 2>/dev/null || :
     _kill_left "${mark}"
     wait "${reader}" 2>/dev/null || :
-    echo "the stop did not end in 12 s; the time limit is 3 s" >&2
+    echo "the stop did not end in 12 s; the time limit is 3 s. Signals (sender, args): $(tr '\n' ';' < "${log}")" >&2
     return 1
   fi
+  grep -qx "${body} -TERM ${yq}" "${log}" || {
+    echo "the stop (pid ${body}) sent yq (${yq}) no TERM. Signals (sender, args): $(tr '\n' ';' < "${log}")" >&2; return 1
+  }
+  grep -vx "${body} -TERM ${yq}" "${log}" | grep -q " -TERM ${yq}$" || {
+    echo "the watchdog sent yq (${yq}) no TERM at the time limit. Signals (sender, args): $(tr '\n' ';' < "${log}")" >&2; return 1
+  }
   wait "${reader}" || rc=$?
   [ "${rc}" -eq 143 ] || { echo "status ${rc}, want 143: $(<"${BATS_TEST_TMPDIR}/out")" >&2; return 1; }
   (( took >= 2500 )) || { echo "the read ended after ${took} ms, before the time limit: the stub did not keep yq running" >&2; return 1; }
