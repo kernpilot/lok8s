@@ -1906,13 +1906,29 @@ for side in bash go; do
     && fail "${side}: a plan with a NUL byte reached the provider destroy"
   grep -qF "the destroy plan of 'nul.cloud' has a NUL byte" "${WORK}/${side}.err" \
     || fail "${side}: a plan with a NUL byte was not refused"
-  parity::run "${side}" "${PROJ}" destroy --domain utf.cloud -r --confirm-cluster $'bad\xffname' || true
+  # The byte reaches the guard only through the plan: the --confirm-cluster
+  # value is UTF-8.
+  parity::run "${side}" "${PROJ}" destroy --domain utf.cloud -r --confirm-cluster bad-name || true
   grep -q 'mockplan destroy ran' "${WORK}/${side}.err" \
     && fail "${side}: a cluster_name that is not UTF-8 reached the provider destroy"
   grep -qF "the destroy plan of 'utf.cloud' names a cluster_name with a character that a message cannot show" "${WORK}/${side}.err" \
     || fail "${side}: a cluster_name that is not UTF-8 was not refused"
   LC_ALL=C grep -qF $'\xff' "${WORK}/${side}.err" \
     && fail "${side}: the byte of the cluster_name that is not UTF-8 reached the output"
+  # The byte in argv: the native argsh builtin refuses a --confirm-cluster
+  # value that is not UTF-8 when it parses the arguments ("missing value for
+  # flag", exit 2), before the destroy starts. The pure-bash argsh parser and
+  # Go pass the value on, and the guard refuses the plan (rc 3). So the
+  # message may differ between the CLIs: only a non-zero exit, no provider
+  # destroy and no 0xFF byte in the output are checked.
+  utf_rc=0
+  parity::run "${side}" "${PROJ}" destroy --domain utf.cloud -r --confirm-cluster $'bad\xffname' || utf_rc=$?
+  (( utf_rc != 0 )) \
+    || fail "${side}: destroy with a --confirm-cluster value that is not UTF-8 exited 0"
+  grep -q 'mockplan destroy ran' "${WORK}/${side}.err" \
+    && fail "${side}: a --confirm-cluster value that is not UTF-8 reached the provider destroy"
+  LC_ALL=C grep -qF $'\xff' "${WORK}/${side}.err" \
+    && fail "${side}: the byte of a --confirm-cluster value that is not UTF-8 reached the output"
 done
 rm -rf "${PROJ}/clusters"/{dupa,dupb,solo,esc,nul,utf}.cloud "${PROJ}/.lok8s/providers/mockplan"
 
