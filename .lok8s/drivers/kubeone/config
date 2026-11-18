@@ -391,7 +391,8 @@ kubeone::_inject_audit_log() {
 # removes on a failure (the oidc, audit-log and registry merges). The
 # variables set for the call reach yq (strenv and env in the expression).
 kubeone::_yq_edit() {
-  [[ $- != *x* ]] || { local -; set +x; }  # a trace must not show the manifest
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # a trace must not show the manifest (utils/keysonly.sh)
   local file="${1}" out
   out=$(yq "${2}" "${file}" && printf .) || return 1
   { printf '%s' "${out%.}" > "${file}"; } 2>/dev/null
@@ -436,6 +437,8 @@ kubeone::_audit_shown() {
 # cluster that omits it pulls anonymously, unchanged.
 # Usage: kubeone::_inject_registry_auth <kubeone.yaml> <cluster_yaml>
 kubeone::_inject_registry_auth() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # the registry credentials (utils/keysonly.sh)
   local manifest="${1}" cluster_yaml="${2}" host sname sns
   # No-op unless the spec declares registries (omitted => anonymous pulls; a
   # test/CI run without DOMAIN_NAME must not error here).

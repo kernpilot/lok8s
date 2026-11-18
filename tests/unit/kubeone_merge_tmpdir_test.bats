@@ -1,15 +1,19 @@
 #!/usr/bin/env bats
-# kubeone_merge_tmpdir_test.bats — a merge into the rendered KubeOne manifest
-# that cannot write leaves TMPDIR as it was (drivers/kubeone/config,
-# kubeone::_yq_edit). `yq -i` writes through a temp file in TMPDIR and keeps
-# it when its last write fails: a copy of the manifest, and after the
-# registry merge that copy holds the registry credentials. The audit-log
-# merge has the same case in kubeone_audit_log_test.bats.
+# kubeone_merge_tmpdir_test.bats — the merges into the rendered KubeOne
+# manifest (drivers/kubeone/config, kubeone::_yq_edit) leave no copy of the
+# manifest behind, and a trace of the registry merge shows no credential.
 #
-# Each case points TMPDIR at a fresh directory and requires it to be empty
-# after the failed call. The credentials are fixtures. No case prints the
-# content of a file: a leftover is shown by its name and mode only.
-# Uses the real yq provided by `argsh test`.
+# `yq -i` writes through a temp file in TMPDIR and keeps it when its last
+# write fails: a copy of the manifest, and after the registry merge that
+# copy holds the registry credentials. Each failed-write case points TMPDIR
+# at a fresh directory and requires it to be empty after the call, and the
+# directory of the manifest to hold only the expected files. The control
+# case pins the premise: under the same setup, a raw `yq -i` leaves its
+# copy. The audit-log merge has the same case in kubeone_audit_log_test.bats.
+#
+# The credentials are fixtures. No case prints the content of a file or a
+# trace: a leftover is shown by its name and mode only, and a credential
+# check prints no value. Uses the real yq provided by `argsh test`.
 
 setup() {
   load "../test_helper"
@@ -31,9 +35,11 @@ setup() {
 
   TMPD="${BATS_TEST_TMPDIR}/tmpdir"
   RO="${BATS_TEST_TMPDIR}/ro"
+  RW="${BATS_TEST_TMPDIR}/rw"
   M="${RO}/m.yaml"
-  mkdir -p "${TMPD}" "${RO}"
+  mkdir -p "${TMPD}" "${RO}" "${RW}"
   printf 'features: {}\n' > "${M}"
+  printf 'features: {}\n' > "${RW}/m.yaml"
 
   export LOK8S_SPEC_OIDC_ISSUER="https://id.example.com"
   export LOK8S_SPEC_OIDC_CLIENTID="kubectl"
@@ -69,12 +75,73 @@ _assert_tmpdir_empty() {
   [ -z "${left}" ] || { echo "left in TMPDIR: ${left}" >&2; return 1; }
 }
 
+# _assert_only <dir> <entry>...: the directory holds exactly these entries
+# (paths relative to it). Only the names are shown.
+_assert_only() {
+  local dir="${1}" want got
+  shift
+  want=$(printf '%s\n' "$@" | sort)
+  got=$(find "${dir}" -mindepth 1 -printf '%P\n' | sort)
+  [ "${got}" = "${want}" ] || { echo "entries of ${dir}: ${got//$'\n'/ } (want: ${want//$'\n'/ })" >&2; return 1; }
+}
+
 # _fake_yq <dir> <script body>: a yq on PATH in front of the real one.
 _fake_yq() {
   local dir="${1}" real; real=$(command -v yq)
   mkdir -p "${dir}"
   printf '#!/usr/bin/env bash\nREAL_YQ=%q\n%s\n' "${real}" "${2}" > "${dir}/yq"
   chmod +x "${dir}/yq"
+}
+
+# _registry_fixture <n>: a per-domain store with the fixture credentials
+# fixture-user-<i> and fixture-password-<i> for the hosts
+# registry<i>.example.com, and the cluster spec CY that names them.
+_registry_fixture() {
+  local n="${1}" i store="${PATH_CLUSTERS}/ko.cloud/secrets"
+  export DOMAIN_NAME="ko.cloud"
+  CY="${PATH_CLUSTERS}/ko.cloud/cluster.lok8s.yaml"
+  mkdir -p "${store}"
+  printf '%s\n' 'apiVersion: cluster.lok8s.dev/v1beta1' 'kind: KubeOne' 'metadata:' '  name: ko-test' \
+    'spec:' '  registries:' > "${CY}"
+  for (( i = 1; i <= n; i++ )); do
+    printf 'fixture-user-%s' "${i}" > "${store}/Secret.fixture-pull-${i}.provisioning.username"
+    printf 'fixture-password-%s' "${i}" > "${store}/Secret.fixture-pull-${i}.provisioning.password"
+    printf '%s\n' "    registry${i}.example.com:" '      auth:' '        secretRef:' "          name: fixture-pull-${i}" >> "${CY}"
+  done
+}
+
+# _assert_credentials_written <manifest> <n>: the merge wrote the fixture
+# credentials of the n hosts. No value is printed.
+_assert_credentials_written() {
+  local m="${1}" n="${2}" i base
+  for (( i = 1; i <= n; i++ )); do
+    base=".containerRuntime.containerd.registries.\"registry${i}.example.com\".auth"
+    [[ "$(yq -r "${base}.username" "${m}")" == "fixture-user-${i}" ]] \
+      || { echo "the merge did not write the username of registry${i}" >&2; return 1; }
+    [[ "$(yq -r "${base}.password" "${m}")" == "fixture-password-${i}" ]] \
+      || { echo "the merge did not write the password of registry${i}" >&2; return 1; }
+  done
+}
+
+# _assert_no_credential_in_output: neither fixture credential is in the
+# output (stdout and stderr) of the run. The output is not printed.
+_assert_no_credential_in_output() {
+  [[ "${output}" != *fixture-user* ]] || { echo "a fixture username is in the output" >&2; return 1; }
+  [[ "${output}" != *fixture-password* ]] || { echo "a fixture password is in the output" >&2; return 1; }
+}
+
+@test "control: under the same setup, a raw yq -i leaves its copy in TMPDIR" {
+  # The premise of the failed-write cases: the yq on PATH keeps its temp
+  # file in TMPDIR when the write of a read-only manifest in a read-only
+  # directory fails. Without it, an empty TMPDIR would prove nothing.
+  _read_only
+  TMPDIR="${TMPD}" run yq -i '.features.x = 1' "${M}"
+  _writable
+  [ "${status}" -ne 0 ] || { echo "yq -i did not fail" >&2; return 1; }
+  local -a left=()
+  mapfile -t left < <(find "${TMPD}" -mindepth 1 -printf '%P\n')
+  [ "${#left[@]}" -eq 1 ] || { echo "want 1 file in TMPDIR, got ${#left[@]}: ${left[*]}" >&2; return 1; }
+  [[ "${left[0]}" =~ ^temp[0-9]+$ ]] || { echo "unexpected name in TMPDIR: ${left[0]}" >&2; return 1; }
 }
 
 @test "a failed write of features.openidConnect leaves TMPDIR as it was" {
@@ -84,10 +151,21 @@ _fake_yq() {
   assert_failure
   assert_output --partial "OIDC: failed to inject features.openidConnect"
   _assert_tmpdir_empty
+  _assert_only "${RO}" m.yaml
 }
 
 @test "a failed write of the OIDC caFile leaves TMPDIR as it was" {
   export LOK8S_SPEC_OIDC_CABUNDLE="fixture-ca"
+  # On a manifest that can be written, the merge sets caFile to the CA file
+  # beside the manifest, and that file holds the bundle.
+  TMPDIR="${TMPD}" run kubeone::_inject_oidc "${RW}/m.yaml"
+  assert_success
+  run yq -r '.features.openidConnect.config.caFile' "${RW}/m.yaml"
+  assert_output "${RW}/.oidc/oidc-ca.pem"
+  [ "$(cat "${RW}/.oidc/oidc-ca.pem")" = "fixture-ca" ] || { echo "the CA file does not hold the bundle" >&2; return 1; }
+  _assert_only "${RW}" m.yaml .oidc .oidc/oidc-ca.pem
+  _assert_tmpdir_empty
+
   # The features write succeeds. This yq makes the manifest and its
   # directory read-only just before the caFile write, so only that write
   # fails. The manifest is the last argument.
@@ -103,34 +181,73 @@ exec "${REAL_YQ}" "$@"'
   assert_output --partial "OIDC: failed to set caFile"
   refute_output --partial "OIDC: failed to inject features.openidConnect"
   _assert_tmpdir_empty
+  _assert_only "${RO}" m.yaml .oidc .oidc/oidc-ca.pem
 }
 
 @test "a failed write of the registry credentials leaves TMPDIR as it was" {
-  export DOMAIN_NAME="ko.cloud"
-  local cy="${PATH_CLUSTERS}/ko.cloud/cluster.lok8s.yaml"
-  local store="${PATH_CLUSTERS}/ko.cloud/secrets"
-  mkdir -p "${store}"
-  printf 'fixture-user' > "${store}/Secret.fixture-pull.provisioning.username"
-  printf 'fixture-password' > "${store}/Secret.fixture-pull.provisioning.password"
-  printf '%s\n' 'apiVersion: cluster.lok8s.dev/v1beta1' 'kind: KubeOne' 'metadata:' '  name: ko-test' \
-    'spec:' '  registries:' '    registry.example.com:' '      auth:' '        secretRef:' '          name: fixture-pull' > "${cy}"
-
+  _registry_fixture 1
   # Anti-vacuity: on a manifest that can be written, the same merge writes
-  # the fixture credentials. Checked without printing them.
-  local w="${BATS_TEST_TMPDIR}/w.yaml"
-  printf 'features: {}\n' > "${w}"
-  TMPDIR="${TMPD}" run kubeone::_inject_registry_auth "${w}" "${cy}"
-  assert_success
-  [[ "$(yq -r '.containerRuntime.containerd.registries."registry.example.com".auth.username' "${w}")" == fixture-user ]] \
-    || { echo "the merge did not write the username" >&2; return 1; }
-  [[ "$(yq -r '.containerRuntime.containerd.registries."registry.example.com".auth.password' "${w}")" == fixture-password ]] \
-    || { echo "the merge did not write the password" >&2; return 1; }
+  # the fixture credentials.
+  TMPDIR="${TMPD}" run kubeone::_inject_registry_auth "${RW}/m.yaml" "${CY}"
+  [ "${status}" -eq 0 ] || { echo "the merge failed: status ${status}" >&2; return 1; }
+  _assert_credentials_written "${RW}/m.yaml" 1
+  _assert_only "${RW}" m.yaml
   _assert_tmpdir_empty
 
   _read_only
-  TMPDIR="${TMPD}" run kubeone::_inject_registry_auth "${M}" "${cy}"
+  TMPDIR="${TMPD}" run kubeone::_inject_registry_auth "${M}" "${CY}"
   _writable
   assert_failure
-  assert_output --partial "registry auth: failed to inject 'registry.example.com'"
+  assert_output --partial "registry auth: failed to inject 'registry1.example.com'"
   _assert_tmpdir_empty
+  _assert_only "${RO}" m.yaml
+}
+
+# The trace cases run the merge in a child bash that sources the driver,
+# then turns tracing on (utils/keysonly.sh: the two guard lines).
+
+@test "a registry merge under set -x shows neither credential in its trace" {
+  _registry_fixture 2
+  run bash -c 'import() { :; }
+source "$3/utils/verbose.sh"; source "$3/drivers/kubeone/config"
+set -x
+kubeone::_inject_registry_auth "$1" "$2"' bash "${RW}/m.yaml" "${CY}" "${_PROJECT_ROOT}/.lok8s"
+  [ "${status}" -eq 0 ] || { echo "the merge failed: status ${status}" >&2; return 1; }
+  # Anti-vacuity: the trace ran, and the merge wrote the values.
+  [[ "${output}" == *kubeone::_inject_registry_auth* ]] || { echo "no trace of the call" >&2; return 1; }
+  _assert_credentials_written "${RW}/m.yaml" 2
+  _assert_no_credential_in_output
+}
+
+@test "a registry merge under set -T with a RETURN trap that turns tracing on shows neither credential" {
+  # Two registries: the RETURN trap of a function that the merge calls for
+  # the first one (debug, kubeone::_yq_edit) would turn tracing on again
+  # before the merge reads the second one. The first guard line clears the
+  # trap.
+  _registry_fixture 2
+  run bash -c 'import() { :; }
+source "$3/utils/verbose.sh"; source "$3/drivers/kubeone/config"
+set -x; set -T; trap "set -x" RETURN
+kubeone::_inject_registry_auth "$1" "$2"' bash "${RW}/m.yaml" "${CY}" "${_PROJECT_ROOT}/.lok8s"
+  [ "${status}" -eq 0 ] || { echo "the merge failed: status ${status}" >&2; return 1; }
+  [[ "${output}" == *kubeone::_inject_registry_auth* ]] || { echo "no trace of the call" >&2; return 1; }
+  _assert_credentials_written "${RW}/m.yaml" 2
+  _assert_no_credential_in_output
+}
+
+@test "kubeone::_yq_edit under set -T with a DEBUG trap that turns tracing on shows no credential of the manifest" {
+  # The manifest already holds the credentials, as after the registry
+  # merge. A DEBUG trap runs before each command of the function: without
+  # the first guard line, it would trace the captured manifest.
+  printf '%s\n' 'containerRuntime:' '  containerd:' '    registries:' '      registry1.example.com:' \
+    '        auth:' '          username: fixture-user-1' '          password: fixture-password-1' > "${RW}/m.yaml"
+  run bash -c 'import() { :; }
+source "$2/utils/verbose.sh"; source "$2/drivers/kubeone/config"
+set -x; set -T; trap "set -x" DEBUG
+kubeone::_yq_edit "$1" ".features.x = 1"' bash "${RW}/m.yaml" "${_PROJECT_ROOT}/.lok8s"
+  [ "${status}" -eq 0 ] || { echo "the edit failed: status ${status}" >&2; return 1; }
+  [[ "${output}" == *kubeone::_yq_edit* ]] || { echo "no trace of the call" >&2; return 1; }
+  [[ "$(yq -r '.features.x' "${RW}/m.yaml")" == 1 ]] || { echo "the edit was not written" >&2; return 1; }
+  _assert_credentials_written "${RW}/m.yaml" 1
+  _assert_no_credential_in_output
 }
