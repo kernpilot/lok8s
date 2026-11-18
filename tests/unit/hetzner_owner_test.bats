@@ -430,6 +430,18 @@ _refused() {
   assert_output ""
 }
 
+@test "refused: an ESC, a newline or a bidi character in a name is shown with '?'" {
+  jq '.network[0].name = "prod\u001b[2Jx\u202e\nnet"' "${DESC}" > "${DESC}.new" && mv "${DESC}.new" "${DESC}"
+  _part network 13 $'prod\033[2Jx\u202e\nnet' '{"lok8s.dev/cluster":"prod"}'
+  run _provision
+  assert_failure
+  assert_output --partial "refused network 'prod?[2Jx??net' (id 13): it exists, but it does not have the owner mark"
+  refute_output --partial $'\033[2J'
+  refute_output --partial $'\u202e'
+  run _writes
+  assert_output ""
+}
+
 @test "refused: a part with the owner mark of another cluster" {
   _part network 13 prod-net "{\"lok8s.dev/owner\":\"${OTHER}\"}"
   run _provision

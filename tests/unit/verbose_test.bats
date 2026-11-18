@@ -61,12 +61,19 @@ _no_esc() {
   [ "${#esc}" -eq 2 ]
 }
 
-# A colour that the environment sets (verbose.sh only sets a colour that is
-# unset) is read with its escapes, as before.
-@test "error: a colour from the environment keeps its escapes" {
+# The colours are fixed: a colour that the environment sets is not used,
+# also when it holds an escape ("\e[2J" clears the screen, "\c" cuts the
+# line with %b).
+@test "error, warn, debug: a colour from the environment is not used" {
+  export GREEN='\e[2J' RED='\c' YELLOW='\e[2J' NC='\c'
+  source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   verbose::color() { return 0; }
-  RED='\e[1;35m' NC='\e[0m' run error 'x \e y'
-  assert_output $'\033[1;35m[error]\033[0m x \\e y'
+  run error 'x'
+  assert_output $'\033[0;31m[error]\033[0m x'
+  run warn 'y'
+  assert_output $'\033[0;33m[warn]\033[0m y'
+  DEBUG=1 run debug 'z'
+  assert_output $'\033[0;32m[debug]\033[0m z'
 }
 
 # A test fake can replace printf (to make a write fail): the line of the
@@ -82,4 +89,16 @@ _with_a_failing_printf() {
   assert_output '[error] a \e b'
   run _with_a_failing_printf warn 'c'
   assert_output '[warn] c'
+  DEBUG=1 run _with_a_failing_printf debug 'd'
+  assert_output '[debug] d'
+}
+
+@test "error, warn, debug: a function named printf does not stop a coloured line" {
+  verbose::color() { return 0; }
+  run _with_a_failing_printf error 'a \e b'
+  assert_output $'\033[0;31m[error]\033[0m a \\e b'
+  run _with_a_failing_printf warn 'c'
+  assert_output $'\033[0;33m[warn]\033[0m c'
+  DEBUG=1 run _with_a_failing_printf debug 'd'
+  assert_output $'\033[0;32m[debug]\033[0m d'
 }

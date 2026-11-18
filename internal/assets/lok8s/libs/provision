@@ -226,7 +226,7 @@ provision::_destroy_guard_skip() {
 # ui.ErrorTo, which never reads a backslash sequence).
 provision::_guard_error() {
   if verbose::color; then
-    printf '%b[error]%b %s\n' "${RED}" "${NC}" "${1}" >&2
+    printf '%s[error]%s %s\n' "${RED}" "${NC}" "${1}" >&2
   else
     printf '[error] %s\n' "${1}" >&2
   fi

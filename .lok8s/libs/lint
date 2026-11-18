@@ -435,7 +435,7 @@ lint::dns_search() {
   # The `error` line format, through printf: a backslash in a rejected value
   # prints as it is (as in Go).
   local tag="[error]" problem
-  if verbose::color; then printf -v tag '%b[error]%b' "${RED}" "${NC}"; fi
+  if verbose::color; then printf -v tag '%s[error]%s' "${RED}" "${NC}"; fi
   for problem in ${DNSSEARCH_PROBLEMS[@]+"${DNSSEARCH_PROBLEMS[@]}"}; do
     printf '%s   %s\n' "${tag}" "${problem}" >&2
   done
