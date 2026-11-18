@@ -324,3 +324,86 @@ rm: RUSER absent, RPASS absent"
   cmp "${RW}/m.yaml" "${RW}/ref.yaml"
   _assert_tmpdir_empty
 }
+
+# _yq_log_stub: a yq on PATH (YQ_STUBS) in front of the real one that logs
+# each run to YQ_LOG, then runs the real yq.
+_yq_log_stub() {
+  YQ_STUBS="${BATS_TEST_TMPDIR}/yqlog"
+  export YQ_LOG="${BATS_TEST_TMPDIR}/yq.log"
+  REAL_YQ=$(command -v yq)
+  [[ -n "${REAL_YQ}" ]] || { echo "no yq" >&2; return 1; }
+  export REAL_YQ
+  mkdir -p "${YQ_STUBS}"
+  cat > "${YQ_STUBS}/yq" <<'SH'
+#!/usr/bin/env bash
+[[ -n "${REAL_YQ:-}" ]] || exit 3
+echo "yq ran" >> "${YQ_LOG}"
+exec "${REAL_YQ}" "$@"
+SH
+  chmod +x "${YQ_STUBS}/yq"
+}
+
+# _assert_name_refused <name>: kubeone::_yq_edit with <name> after the
+# expression returns 1 with its message, runs no yq and leaves the file as
+# it was.
+_assert_name_refused() {
+  local saved_path="${PATH}"
+  : > "${YQ_LOG}"
+  cp "${RW}/m.yaml" "${BATS_TEST_TMPDIR}/m.before"
+  PATH="${YQ_STUBS}:${saved_path}"
+  run kubeone::_yq_edit "${RW}/m.yaml" '.x = 1' "${1}"
+  PATH="${saved_path}"
+  [ "${status}" -eq 1 ] || { echo "name '${1}': status ${status}, want 1" >&2; return 1; }
+  assert_output --partial "kubeone::_yq_edit: an argument after the expression is not a variable name"
+  [ ! -s "${YQ_LOG}" ] || { echo "name '${1}': yq ran" >&2; return 1; }
+  cmp "${RW}/m.yaml" "${BATS_TEST_TMPDIR}/m.before" || { echo "name '${1}': the file changed" >&2; return 1; }
+}
+
+@test "kubeone::_yq_edit refuses an argument that is not a variable name, and runs no yq" {
+  _yq_log_stub
+  _assert_name_refused 'A-B'
+  _assert_name_refused '1X'
+  _assert_name_refused ''
+  # Anti-vacuity: a variable name of the caller, not exported, reaches yq.
+  local FIXTURE_X=7
+  : > "${YQ_LOG}"
+  local saved_path="${PATH}"
+  PATH="${YQ_STUBS}:${saved_path}"
+  run kubeone::_yq_edit "${RW}/m.yaml" '.x = strenv(FIXTURE_X)' FIXTURE_X
+  PATH="${saved_path}"
+  assert_success
+  [ -s "${YQ_LOG}" ] || { echo "the stub logged no yq run" >&2; return 1; }
+  run yq -r '.x' "${RW}/m.yaml"
+  assert_output "7"
+}
+
+@test "kubeone::_yq_edit refuses a name of its own (_ye_), and runs no yq" {
+  # Its own variables start with _ye_: such a name would export the helper's
+  # variable instead of the caller's.
+  _yq_log_stub
+  _assert_name_refused '_ye_file'
+}
+
+@test "kubeone::_yq_replace gives the caller's INT, TERM and HUP traps back, on success and on failure" {
+  run bash -c 'import() { :; }
+source "$2/utils/verbose.sh"; source "$2/drivers/kubeone/config"
+trap "echo caller-int" INT; trap "echo caller-term" TERM; trap "echo caller-hup" HUP
+before=$(trap -p INT TERM HUP)
+[[ -n "${before}" ]] || echo "no caller traps"
+kubeone::_yq_replace "$1" ".x = 1"; echo "success rc=$?"
+if [[ "$(trap -p INT TERM HUP)" == "${before}" ]]; then echo "traps after success: same"; else echo "traps after success: changed"; fi
+kubeone::_yq_replace "$1" ".x = ("; echo "failure rc=$?"
+if [[ "$(trap -p INT TERM HUP)" == "${before}" ]]; then echo "traps after failure: same"; else echo "traps after failure: changed"; fi' \
+    bash "${RW}/m.yaml" "${_PROJECT_ROOT}/.lok8s"
+  assert_success
+  refute_output --partial "no caller traps"
+  assert_output --partial "success rc=0"
+  assert_output --partial "traps after success: same"
+  assert_output --partial "failure rc=1"
+  assert_output --partial "traps after failure: same"
+  # The success wrote the edit, the failure left the file, and no temp file
+  # is left beside it.
+  run yq -r '.x' "${RW}/m.yaml"
+  assert_output "1"
+  _assert_only "${RW}" m.yaml
+}

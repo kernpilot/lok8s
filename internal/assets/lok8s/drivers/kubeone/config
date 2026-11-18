@@ -409,6 +409,7 @@ kubeone::_yq_edit() {
     [[ "${_ye_n}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "${_ye_n}" != _ye_* ]] \
       || { error "kubeone::_yq_edit: an argument after the expression is not a variable name"; return 1; }
   done
+  # shellcheck disable=SC2163 # "$@" holds variable names, checked above: export them by name
   _ye_out=$([[ $# == 0 ]] || export -- "$@"; yq "${_ye_expr}" "${_ye_file}" && printf .) || return 1
   { printf '%s' "${_ye_out%.}" > "${_ye_file}"; } 2>/dev/null
 }
