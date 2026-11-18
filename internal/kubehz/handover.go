@@ -543,7 +543,8 @@ func (c *Context) writeKubeadmConfig(bundle, k8sDir, out, etcdTag string) error 
 // kubeadmInit ports handover::kubeadm_init. --skip-token-print: the join
 // line that kubeadm prints at the end holds its bootstrap token, and that
 // output reaches the terminal (and a log). kubeadm prints the line with
-// the token withheld instead.
+// the token withheld instead. No verbosity flag: kubeadm at --v=8 or above
+// can log the bodies of Secrets.
 func (c *Context) kubeadmInit(ctx context.Context, config string) error {
 	return c.run(ctx, "kubeadm", "init", "--config", config,
 		"--ignore-preflight-errors=DirAvailable--var-lib-etcd",
