@@ -83,7 +83,7 @@ const BUpdateFix = "fix: .bin/b update b"
 // (exec.Cmd.WaitDelay). Without the grace, a tool that ignores the
 // interrupt (a broken or foreign .bin/b) holds the caller without bound.
 // A version probe has no cleanup to finish, so the grace is short.
-// Variables, so a test can make them short.
+// Variables, so a test can set them.
 var (
 	probeTimeout = 10 * time.Second
 	probeGrace   = 2 * time.Second
