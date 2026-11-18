@@ -158,3 +158,26 @@ _seed_previous_kubeconfig() {
   }
   [ -f "${PATH_BASE}/.kubeconfig/guardtest.yaml" ]
 }
+
+@test "a FAILED inventory step stops before kubeone apply" {
+  # The inventory step writes the final kubeone.yaml. When one of its edits
+  # fails it returns 1, and the provision must stop there: kubeone apply
+  # must not run on that manifest.
+  _load_provision
+  _seed_previous_kubeconfig
+  local trace="${BATS_TEST_TMPDIR}/trace"; : > "${trace}"
+  _append_inventory() { return 1; }
+  kubeone::apply()    { echo apply >> "${trace}"; return 0; }
+
+  local rc=0
+  driver::provision test.dev || rc=$?
+
+  [ "${rc}" -ne 0 ] || {
+    echo "driver::provision returned 0 although the inventory step failed" >&2
+    return 1
+  }
+  [ ! -s "${trace}" ] || {
+    echo "kubeone apply ran after the inventory step failed" >&2
+    return 1
+  }
+}

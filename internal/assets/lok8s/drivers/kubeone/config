@@ -379,23 +379,61 @@ kubeone::_inject_audit_log() {
   debug "audit log: features.staticAuditLog injected (policy ${_AUDIT_LOG_POLICY})"
 }
 
-# kubeone::_yq_edit <file> <yq expression>: apply the expression to <file> and
-# write the result back into <file>. It returns 1 when yq or the write fails.
+# kubeone::_yq_edit <file> <yq expression> [<name>...]: apply the expression
+# to <file> and write the result back into <file>. It returns 1 when yq or
+# the write fails.
+# Each <name> is the name of a variable of the caller that the expression
+# reads (strenv, env). Only the yq process gets it in its environment: the
+# export runs in the command substitution that runs yq, so no other command
+# of the call (for example the rm of a signal trap) inherits the value. The
+# arguments are names, never values, so no value goes on a command line or
+# into the expression. The variables of the helper start with _ye_, and a
+# name of the caller must not.
 # It does not use `yq -i`: yq -i writes through a temp file in TMPDIR, and
 # when its last write fails, it keeps that file there, a copy of the manifest
 # outside the work directory. Here the result stays in memory until the
-# write, so there is no copy to remove on any path, also not on a signal.
-# The write is in place, as the copy that yq -i falls back to when TMPDIR is
-# on another file system, so a failed write can leave a partial file. Use it
-# only on the temp manifest of the render, which kubeone::_render_manifest
-# removes on a failure (the oidc, audit-log and registry merges). The
-# variables set for the call reach yq (strenv and env in the expression).
+# write, so yq makes no temp copy, also not on a signal. The write goes into
+# <file> in place, through the path as the caller opened it (a symlink is
+# followed), so a failed write can leave a partial file. Use it only on a
+# staging file that the caller removes on a failure: the temp manifest of
+# the render (kubeone::_render_manifest) or the temp file of
+# kubeone::_yq_replace. Both are 0600 files (mktemp) beside the manifest,
+# and their traps remove them on INT, TERM and HUP. A SIGKILL leaves one
+# behind.
 kubeone::_yq_edit() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # a trace must not show the manifest (utils/keysonly.sh)
-  local file="${1}" out
-  out=$(yq "${2}" "${file}" && printf .) || return 1
-  { printf '%s' "${out%.}" > "${file}"; } 2>/dev/null
+  local _ye_file="${1}" _ye_expr="${2}" _ye_out _ye_n
+  shift 2
+  for _ye_n in "$@"; do
+    [[ "${_ye_n}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "${_ye_n}" != _ye_* ]] \
+      || { error "kubeone::_yq_edit: an argument after the expression is not a variable name"; return 1; }
+  done
+  _ye_out=$([[ $# == 0 ]] || export -- "$@"; yq "${_ye_expr}" "${_ye_file}" && printf .) || return 1
+  { printf '%s' "${_ye_out%.}" > "${_ye_file}"; } 2>/dev/null
+}
+
+# kubeone::_yq_replace <file> <yq expression>: apply the expression to <file>
+# through a temp file beside it (mktemp, 0600), then rename the temp file
+# over <file>. Use it for a file that is read again after a failed step: the
+# final kubeone.yaml, which kubeone reset and kubeone status read as it is.
+# On a failure <file> stays as it was and the temp file is removed; on INT,
+# TERM or HUP the traps of kubeone::_temp_traps remove it, and the previous
+# traps come back when the call ends. After the rename <file> is 0600.
+kubeone::_yq_replace() {
+  local file="${1}" tmp saved_traps rc=0
+  [[ "${file}" == */* ]] || file="./${file}"
+  tmp=$(mktemp "${file%/*}/.${file##*/}.XXXXXX") || return 1
+  saved_traps=$(trap -p INT TERM HUP)
+  kubeone::_temp_traps "${tmp}"
+  { cat -- "${file}" > "${tmp}"; } 2>/dev/null \
+    && kubeone::_yq_edit "${tmp}" "${2}" \
+    && mv -f -- "${tmp}" "${file}" \
+    || rc=1
+  (( rc == 0 )) || rm -f -- "${tmp}"
+  trap - INT TERM HUP
+  eval "${saved_traps}"
+  return "${rc}"
 }
 
 # The absolute, lexically clean form of a path, as Go's filepath.Abs makes it:
@@ -463,7 +501,7 @@ kubeone::_inject_registry_auth() {
     # Read the resolved creds straight from the per-domain secret cache (each key is
     # a plaintext file Secret.<name>.<ns>.<key>), exactly as provision::dispatch loads
     # provider creds — no `eval` of generated shell.
-    local ns="${sns:-provisioning}" username password
+    local ns="${sns:-provisioning}" username password RUSER RPASS
     username="$(cat "${secrets_dir}/Secret.${sname}.${ns}.username" 2>/dev/null || true)"
     password="$(cat "${secrets_dir}/Secret.${sname}.${ns}.password" 2>/dev/null || true)"
     if [[ -z "${username:-}" || -z "${password:-}" ]]; then
@@ -471,11 +509,12 @@ kubeone::_inject_registry_auth() {
       unset username password; continue
     fi
     # kubeone::_yq_edit, not `yq -i`: a failed yq -i keeps its temp copy of
-    # the manifest, with these credentials, in TMPDIR.
-    RUSER="${username}" RPASS="${password}" \
-    kubeone::_yq_edit "${manifest}" ".containerRuntime.containerd.registries.\"${host}\".auth.username = strenv(RUSER) | .containerRuntime.containerd.registries.\"${host}\".auth.password = strenv(RPASS)" \
-      || { error "registry auth: failed to inject '${host}'"; unset username password; return 1; }
-    unset username password
+    # the manifest, with these credentials, in TMPDIR. RUSER and RPASS are
+    # not exported: kubeone::_yq_edit exports them to the yq process only.
+    RUSER="${username}" RPASS="${password}"
+    kubeone::_yq_edit "${manifest}" ".containerRuntime.containerd.registries.\"${host}\".auth.username = strenv(RUSER) | .containerRuntime.containerd.registries.\"${host}\".auth.password = strenv(RPASS)" RUSER RPASS \
+      || { error "registry auth: failed to inject '${host}'"; unset username password RUSER RPASS; return 1; }
+    unset username password RUSER RPASS
     n_configured=$(( n_configured + 1 ))
     debug "registry auth: ${host} ← ${ns}/${sname}"
   done < <(yq -r '.spec.registries // {} | to_entries | .[] | [.key, (.value.auth.secretRef.name // ""), (.value.auth.secretRef.namespace // "provisioning")] | @tsv' "${cluster_yaml}" 2>/dev/null)

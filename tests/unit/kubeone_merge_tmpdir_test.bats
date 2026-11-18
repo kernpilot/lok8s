@@ -251,3 +251,76 @@ kubeone::_yq_edit "$1" ".features.x = 1"' bash "${RW}/m.yaml" "${_PROJECT_ROOT}/
   _assert_credentials_written "${RW}/m.yaml" 1
   _assert_no_credential_in_output
 }
+
+@test "during the registry merge only yq gets RUSER and RPASS, not the rm of a signal trap" {
+  # The render's signal trap (kubeone::_temp_traps) runs rm. A yq stub sends
+  # TERM to the shell of the merge while it runs the registry write, so the
+  # trap fires during the call. Both stubs log only whether RUSER and RPASS
+  # are in their environment, never a value.
+  _registry_fixture 1
+  local stubs="${BATS_TEST_TMPDIR}/stubs" work="${RW}/.kubeone.yaml.work"
+  export ENV_LOG="${BATS_TEST_TMPDIR}/env.log"
+  REAL_YQ=$(command -v yq)
+  REAL_RM=$(command -v rm)
+  [[ -n "${REAL_YQ}" && -n "${REAL_RM}" ]] || { echo "no yq or rm" >&2; return 1; }
+  export REAL_YQ REAL_RM
+  cp "${RW}/m.yaml" "${work}"
+  mkdir -p "${stubs}"
+  cat > "${stubs}/rm" <<'SH'
+#!/usr/bin/env bash
+[[ -n "${REAL_RM:-}" ]] || exit 3
+u=absent; p=absent
+[[ -z "${RUSER+x}" ]] || u=present
+[[ -z "${RPASS+x}" ]] || p=present
+printf 'rm: RUSER %s, RPASS %s\n' "${u}" "${p}" >> "${ENV_LOG}"
+exec "${REAL_RM}" "$@"
+SH
+  cat > "${stubs}/yq" <<'SH'
+#!/usr/bin/env bash
+[[ -n "${REAL_YQ:-}" ]] || exit 3
+if [[ "$*" == *'strenv(RUSER)'* ]]; then
+  u=absent; p=absent
+  [[ -z "${RUSER+x}" ]] || u=present
+  [[ -z "${RPASS+x}" ]] || p=present
+  printf 'yq: RUSER %s, RPASS %s\n' "${u}" "${p}" >> "${ENV_LOG}"
+  kill -TERM "${MERGE_PID}"
+fi
+exec "${REAL_YQ}" "$@"
+SH
+  chmod +x "${stubs}/rm" "${stubs}/yq"
+  local saved_path="${PATH}"
+  PATH="${stubs}:${PATH}"
+  run bash -c 'import() { :; }
+source "$3/utils/verbose.sh"; source "$3/drivers/kubeone/config"
+export MERGE_PID=$$
+kubeone::_temp_traps "$1"
+kubeone::_inject_registry_auth "$1" "$2"
+echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s"
+  PATH="${saved_path}"
+  # The trap ran (rm, then the TERM ends the shell) during the call.
+  [ "${status}" -eq 143 ] || { echo "status ${status}, want 143 (TERM)" >&2; return 1; }
+  refute_output --partial "the merge returned"
+  [ ! -e "${work}" ] || { echo "the trap did not remove the temp manifest" >&2; return 1; }
+  _assert_no_credential_in_output
+  run cat "${ENV_LOG}"
+  assert_output "yq: RUSER present, RPASS present
+rm: RUSER absent, RPASS absent"
+}
+
+@test "kubeone::_yq_edit keeps a block scalar that ends in blank lines byte for byte" {
+  # A keep (|+) block scalar keeps its final blank lines as part of its
+  # value. A plain $(...) capture would drop the final newlines of the file.
+  # The edit changes another key, so the case also shows the write. The
+  # reference is the output of yq -i, the form that the helper replaces; it
+  # is the input with only that key changed (yq does not normalise this
+  # input), and the case checks that too.
+  printf 'a: |+\n  line one\n\n\nb: 1\nc: |+\n  last\n\n\n' > "${RW}/m.yaml"
+  printf 'a: |+\n  line one\n\n\nb: 2\nc: |+\n  last\n\n\n' > "${RW}/want.yaml"
+  cp "${RW}/m.yaml" "${RW}/ref.yaml"
+  TMPDIR="${TMPD}" yq -i '.b = 2' "${RW}/ref.yaml"
+  cmp "${RW}/ref.yaml" "${RW}/want.yaml" || { echo "yq -i changed more than b" >&2; return 1; }
+  TMPDIR="${TMPD}" run kubeone::_yq_edit "${RW}/m.yaml" '.b = 2'
+  assert_success
+  cmp "${RW}/m.yaml" "${RW}/ref.yaml"
+  _assert_tmpdir_empty
+}
