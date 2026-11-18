@@ -266,6 +266,74 @@ case \"\$*\" in *'kind + \" \" + tag'*) rm -f \"\${TMPDIR}\"/lo-kver.*/out ;; es
   [ -z "$(ls -A "${TMPDIR}")" ] || { echo "left in TMPDIR: $(ls -A "${TMPDIR}")" >&2; return 1; }
 }
 
+# No yq on PATH: `exec yq` ends with the shell's 127. The read names that
+# cause; before, it read as an error of the spec file ("exec: yq: not
+# found. Correct the spec file.").
+@test "spec::kind_node_version: no yq on PATH is named, not read as an error of the spec file" {
+  _spec "version: v1.31.4"
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  local nyq out rc=0
+  nyq="$(_path_without_yq "${BATS_TEST_TMPDIR}/no-yq")"
+  out=$(PATH="${nyq}" spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" 2>&1) || rc=$?
+  [ "${rc}" -eq 1 ] && [ "${out}" = "spec.kubernetes.version cannot be read: lo cannot find yq on PATH. Install yq v4.54.3 or later (b install installs the pinned yq)." ] || {
+    echo "status ${rc}: ${out}" >&2; return 1
+  }
+  [ -z "$(ls -A "${TMPDIR}")" ] || { echo "left in TMPDIR: $(ls -A "${TMPDIR}")" >&2; return 1; }
+}
+
+# A yq on PATH that cannot run (here: no execute permission) ends with the
+# shell's 126. The read names that cause.
+@test "spec::kind_node_version: a yq on PATH that cannot run is named, not read as an error of the spec file" {
+  _spec "version: v1.31.4"
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  local nyq out rc=0
+  nyq="$(_path_without_yq "${BATS_TEST_TMPDIR}/no-yq")"
+  printf '#!/usr/bin/env bash\necho v1.31.4\n' > "${nyq}/yq"
+  chmod 644 "${nyq}/yq"
+  out=$(PATH="${nyq}" spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" 2>&1) || rc=$?
+  [ "${rc}" -eq 1 ] && [ "${out}" = "spec.kubernetes.version cannot be read: the yq on PATH cannot run: it has no execute permission, or it is not a program for this system. Install yq v4.54.3 or later (b install installs the pinned yq)." ] || {
+    echo "status ${rc}: ${out}" >&2; return 1
+  }
+  [ -z "$(ls -A "${TMPDIR}")" ] || { echo "left in TMPDIR: $(ls -A "${TMPDIR}")" >&2; return 1; }
+}
+
+# yq ends well, but its output file cannot be read (no read permission).
+# That is no answer, and not a lost file: the read names the failed read.
+@test "spec::kind_node_version: a yq output that cannot be read is named, not read as a lost file" {
+  [[ "$(id -u)" != 0 ]] || skip "root reads a file without read permission"
+  _spec "version: v1.31.4"
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  local real
+  real="$(command -v yq)"
+  _yq_stub "\"${real}\" \"\$@\" || exit
+chmod 000 \"\${TMPDIR}\"/lo-kver.*/out"
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  assert_failure
+  [[ "${output}" == "spec.kubernetes.version cannot be read: yq ended, but lo cannot pass on its output: the read of ${TMPDIR}/lo-kver."??????"/out, or the write of the output, failed. Run the command again." ]] || {
+    echo "got: ${output}" >&2; return 1
+  }
+  [ -z "$(ls -A "${TMPDIR}")" ] || { echo "left in TMPDIR: $(ls -A "${TMPDIR}")" >&2; return 1; }
+}
+
+# The watchdog waits on a FIFO. When the read cannot make it, the read
+# names the cause, and yq does not run. A mkfifo stub fails.
+@test "spec::_kver_yq: a FIFO that cannot be made is a read error, and yq does not run" {
+  _spec "version: v1.31.4"
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  _yq_stub 'echo ran > "'"${BATS_TEST_TMPDIR}"'/ran"; echo v1.31.4'
+  printf '#!/usr/bin/env bash\nexit 1\n' > "${BATS_TEST_TMPDIR}/stub/mkfifo"
+  chmod +x "${BATS_TEST_TMPDIR}/stub/mkfifo"
+  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
+  assert_failure
+  assert_output "spec.kubernetes.version cannot be read: lo cannot create or open a FIFO in ${TMPDIR}. Set TMPDIR to a local directory."
+  [ ! -e "${BATS_TEST_TMPDIR}/ran" ] || { echo "yq ran" >&2; return 1; }
+  [ -z "$(ls -A "${TMPDIR}")" ] || { echo "left in TMPDIR: $(ls -A "${TMPDIR}")" >&2; return 1; }
+}
+
 # The read removes its temporary directory in its EXIT trap, through
 # spec::_kver_cleanup, and only in its own process. A job of the read (the
 # watchdog) that runs the read's EXIT trap as it ends must leave the
@@ -427,17 +495,29 @@ _kill_left() {
   assert_output "v1.31.4"
 }
 
-@test "spec::_kver_yq: a read that ends in time leaves no watchdog sleep behind" {
+# When yq ends in time, the read ends the watchdog with a line on the FIFO,
+# not with a signal. bash 5.2 can drop a TERM that a subshell gets before
+# it resets the read's traps: the watchdog then waited the full time limit
+# and sent its TERM to the pid of a yq that had ended. A kill() wrapper
+# logs each signal of the reads and of their jobs. The reads run in a new
+# bash whose $0 is a mark: the watchdog is a subshell of it and has the
+# same command line, so the mark finds a watchdog that runs on.
+@test "spec::_kver_yq: a read that ends in time sends no signal, and no watchdog runs on" {
   _spec "version: v1.31.4"
-  # A time limit that no other process uses, so _gone finds only this sleep.
-  _SPEC_KVER_TIMEOUT=$(( 7000 + RANDOM % 1000 ))
-  run spec::kind_node_version "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml"
-  assert_success
-  assert_output "v1.31.4"
-  _gone "^sleep ${_SPEC_KVER_TIMEOUT}\$" || {
-    _kill_left "^sleep ${_SPEC_KVER_TIMEOUT}\$"
-    echo "the watchdog left 'sleep ${_SPEC_KVER_TIMEOUT}' running" >&2; return 1
+  local log="${BATS_TEST_TMPDIR}/kills" mark="kver-wake-${RANDOM}${RANDOM}" rc=0 start took
+  : > "${log}"
+  start=$(_now_ms)
+  bash -c 'log=$4; kill() { printf "%s\n" "$*" >> "${log}"; builtin kill "$@"; }
+    import() { :; }; source "$1/domain.sh"; source "$1/spec.sh"; _SPEC_KVER_TIMEOUT=$3; spec::kind_node_version "$2"' \
+    "${mark}" "${_PROJECT_ROOT}/.lok8s/utils" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" 30 "${log}" \
+    > "${BATS_TEST_TMPDIR}/out" 2>&1 || rc=$?
+  took=$(( $(_now_ms) - start ))
+  [ "${rc}" -eq 0 ] && [ "$(<"${BATS_TEST_TMPDIR}/out")" = "v1.31.4" ] || {
+    echo "status ${rc}: $(<"${BATS_TEST_TMPDIR}/out")" >&2; return 1
   }
+  [ ! -s "${log}" ] || { echo "the reads sent signals: $(tr '\n' ' ' < "${log}")" >&2; return 1; }
+  (( took < 10000 )) || { echo "the reads took ${took} ms (the time limit is 30 s)" >&2; return 1; }
+  _gone "${mark}" || { _kill_left "${mark}"; echo "a watchdog runs on after the reads" >&2; return 1; }
 }
 
 # The read's body dies (SIGKILL) while yq runs. The caller's $(...) must
@@ -448,10 +528,7 @@ _kill_left() {
   _spec "version: v1.31.4"
   export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
   mkdir -p "${TMPDIR}"
-  local reads caller i yq body start took limit
-  # A time limit that no other process uses, so _kill_left finds only this
-  # watchdog's sleep.
-  limit="8.$(printf '%04d' $(( RANDOM % 10000 )))"
+  local reads caller i yq body watchdog start took limit=8
   for reads in stdout stderr; do
     rm -f "${BATS_TEST_TMPDIR}/yq.pid" "${BATS_TEST_TMPDIR}/done"
     _yq_stub 'echo $$ > "'"${BATS_TEST_TMPDIR}"'/yq.pid"; exec sleep 30'
@@ -469,12 +546,15 @@ _kill_left() {
     yq="$(cat "${BATS_TEST_TMPDIR}/yq.pid")"
     body="$(_ppid "${yq}")"
     [ -n "${body}" ]
+    # The watchdog: the other child of the body. Without the body, it waits
+    # until the time limit; the test stops it.
+    watchdog="$(_children "${body}" | grep -vx "${yq}" | head -n 1)"
     start=${SECONDS}
     kill -KILL "${body}"
     for (( i = 0; i < 60; i++ )); do [ -e "${BATS_TEST_TMPDIR}/done" ] && break; sleep 0.1; done
     took=$(( SECONDS - start ))
     kill -TERM "${yq}" 2>/dev/null || :
-    _kill_left "^sleep ${limit//./\\.}\$"
+    [ -z "${watchdog}" ] || kill -TERM "${watchdog}" 2>/dev/null || :
     wait "${caller}" 2>/dev/null || :
     [ -e "${BATS_TEST_TMPDIR}/done" ] || { echo "${reads}: the caller's \$(...) did not return within 6 s" >&2; return 1; }
     (( took < 4 )) || { echo "${reads}: the caller's \$(...) returned after ${took} s" >&2; return 1; }
@@ -543,40 +623,49 @@ _kill_left() {
 
 # An interrupt of the read (TERM, or INT from Ctrl-C) stops yq and the
 # watchdog, and the EXIT trap removes the temporary files. The read runs
-# outside `run`, so a yq or a sleep that the traps miss stays visible.
+# outside `run`, so a yq or a watchdog that the traps miss stays visible.
 @test "spec::_kver_yq: an interrupt stops yq and the watchdog and removes the temporary files" {
   _spec "version: v1.31.4"
   export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
   mkdir -p "${TMPDIR}"
-  local sig want rc limit stub_sleep bad=0
+  local sig want rc limit=20 mark stub_sleep start took bad=0
   for sig in TERM INT; do
     want=143
     [[ "${sig}" == INT ]] && want=130
-    # Durations that no other process uses, so _gone finds only these.
-    limit=$(( 8000 + RANDOM % 1000 ))
+    # A stub sleep that no other process uses, so _gone finds only it. The
+    # read runs in a new bash whose $0 is a mark: the watchdog is a subshell
+    # of it and has the same command line.
     stub_sleep=$(( 9000 + RANDOM % 1000 ))
+    mark="kver-interrupt-${RANDOM}${RANDOM}"
     # The yq stub stops the read it runs in (its parent) with the signal, as
     # an interrupt of `lo` would, then waits: only a trap stops it sooner.
     _yq_stub "kill -${sig} \"\${PPID}\"; exec sleep ${stub_sleep}"
     rc=0
+    start=$(_now_ms)
     _SPEC_KVER_TIMEOUT="${limit}" bash -c \
       'import() { :; }; source "$1/domain.sh"; source "$1/spec.sh"; _SPEC_KVER_TIMEOUT=$3; spec::_kver_yq "$2" -r .kind' \
-      bash "${_PROJECT_ROOT}/.lok8s/utils" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" "${limit}" \
+      "${mark}" "${_PROJECT_ROOT}/.lok8s/utils" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" "${limit}" \
       >"${BATS_TEST_TMPDIR}/out" 2>&1 || rc=$?
+    took=$(( $(_now_ms) - start ))
     if (( rc != want )); then
       echo "${sig}: status ${rc}, want ${want}" >&2; bad=1
+    fi
+    # Far below the time limit (20 s): the stop, not the watchdog, ended
+    # the read.
+    if (( took > 8000 )); then
+      echo "${sig}: the read took ${took} ms; the stop did not end it" >&2; bad=1
     fi
     if ! _gone "^sleep ${stub_sleep}\$"; then
       echo "${sig}: the trap did not stop yq" >&2; bad=1
     fi
-    if ! _gone "^sleep ${limit}\$"; then
+    if ! _gone "${mark}"; then
       echo "${sig}: the trap did not stop the watchdog" >&2; bad=1
     fi
     if [[ -n "$(ls -A "${TMPDIR}")" ]]; then
       echo "${sig}: temporary files remain: $(ls -A "${TMPDIR}")" >&2; bad=1
     fi
     _kill_left "^sleep ${stub_sleep}\$"
-    _kill_left "^sleep ${limit}\$"
+    _kill_left "${mark}"
     rm -rf "${TMPDIR:?}"/*
   done
   (( bad == 0 ))
@@ -593,18 +682,19 @@ _kill_left() {
   _spec "version: v1.31.4"
   export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
   mkdir -p "${TMPDIR}"
-  local window sig want rc limit stub_sleep pre dyq dwd start took bad=0
+  local window sig want rc limit=20 mark stub_sleep pre dyq dwd start took bad=0
   for window in yq watchdog; do
     for sig in INT TERM; do
       want=143
       [[ "${sig}" == INT ]] && want=130
-      # A time limit (20.NNNN s) and a stub sleep that no other process
-      # uses, so _gone finds only these. The limit also ends a read whose
-      # stop does not run. It is long: a watchdog that runs on must still
-      # run when the checks below end (each scan of /proc can take a second
-      # or more).
-      limit="20.$(printf '%04d' $(( RANDOM % 10000 )))"
+      # A stub sleep that no other process uses, so _gone finds only it.
+      # The read runs in a new bash whose $0 is a mark: the watchdog is a
+      # subshell of it and has the same command line. The time limit (20 s)
+      # also ends a read whose stop does not run. It is long: a watchdog
+      # that runs on must still run when the checks below end (each scan of
+      # /proc can take a second or more).
       stub_sleep=$(( 9000 + RANDOM % 1000 ))
+      mark="kver-window-${RANDOM}${RANDOM}"
       if [[ "${window}" == yq ]]; then
         dyq=1.5 dwd="" pre=""
       else
@@ -615,7 +705,7 @@ _kill_left() {
       start=$(_now_ms)
       bash -c \
         'import() { :; }; source "$1/domain.sh"; source "$1/spec.sh"; _SPEC_KVER_TIMEOUT=$3 _SPEC_KVER_TEST_DELAY_YQ=$4 _SPEC_KVER_TEST_DELAY_WATCHDOG=$5; spec::_kver_yq "$2" -r .kind' \
-        bash "${_PROJECT_ROOT}/.lok8s/utils" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" "${limit}" "${dyq}" "${dwd}" \
+        "${mark}" "${_PROJECT_ROOT}/.lok8s/utils" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" "${limit}" "${dyq}" "${dwd}" \
         >"${BATS_TEST_TMPDIR}/out" 2>&1 || rc=$?
       took=$(( $(_now_ms) - start ))
       if (( rc != want )); then
@@ -631,9 +721,9 @@ _kill_left() {
         echo "${window} window, ${sig}: yq runs on after the read" >&2; bad=1
         _kill_left "^sleep ${stub_sleep}\$"
       fi
-      if ! _gone "^sleep ${limit//./\\.}\$"; then
+      if ! _gone "${mark}"; then
         echo "${window} window, ${sig}: the watchdog runs on after the read" >&2; bad=1
-        _kill_left "^sleep ${limit//./\\.}\$"
+        _kill_left "${mark}"
       fi
       if [[ -n "$(ls -A "${TMPDIR}")" ]]; then
         echo "${window} window, ${sig}: temporary files remain: $(ls -A "${TMPDIR}")" >&2; bad=1
@@ -647,11 +737,12 @@ _kill_left() {
 # After the read's wait, yq is reaped, and its pid can be another
 # process's: a stop sends no signal to a job of the read that has ended,
 # waited for or not (spec::_running_job). A job that runs gets TERM, and the
-# stop returns after the job ends. The stops run in a job of their own
-# (set -m) with a time limit: a stop that does not return fails the test,
-# and a KILL to the job's group leaves no process behind.
-@test "spec::_kver_yq: a stop sends no signal to a job of the read that has ended" {
-  local log="${BATS_TEST_TMPDIR}/kills" sub i
+# stop returns after the job ends. The watchdog gets no signal: the stop
+# ends it with a line on the FIFO (its third argument). The stops run in a
+# job of their own (set -m) with a time limit: a stop that does not return
+# fails the test, and a KILL to the job's group leaves no process behind.
+@test "spec::_kver_yq: a stop sends no signal to a job of the read that has ended, nor to the watchdog" {
+  local log="${BATS_TEST_TMPDIR}/kills" tick="${BATS_TEST_TMPDIR}/tick" sub i
   : > "${log}"
   set -m
   (
@@ -670,6 +761,15 @@ _kill_left() {
     spec::_kver_stop "${running}" ""
     [[ "$(<"${log}")" == "-TERM ${running}" ]] || { echo "a stop did not send TERM to the running job ${running}: $(<"${log}")"; exit 1; }
     ! builtin kill -0 "${running}" 2>/dev/null || { echo "the stop returned while the job ${running} ran"; exit 1; }
+    # A watchdog: the read of spec::_kver_yq, with a time limit of 20 s.
+    mkfifo "${tick}"
+    exec {fd}<>"${tick}"
+    ( read -r -t 20 -u "${fd}" && exit 0; exit 9 ) 3>&- &
+    watch=$!
+    : > "${log}"
+    spec::_kver_stop "" "${watch}" "${fd}"
+    [[ ! -s "${log}" ]] || { echo "a stop sent a signal to the watchdog: $(<"${log}")"; exit 1; }
+    ! builtin kill -0 "${watch}" 2>/dev/null || { echo "the stop returned while the watchdog ${watch} ran"; exit 1; }
   ) 3>&- &
   sub=$!
   set +m
@@ -713,6 +813,48 @@ while :; do sleep 0.1; done"
   [ "${rc}" -eq 143 ] || { echo "status ${rc}, want 143: $(<"${BATS_TEST_TMPDIR}/out")" >&2; return 1; }
   n=$(grep -cx -- "-TERM ${yq}" "${log}" || true)
   [ "${n}" = 1 ] || { echo "yq got TERM ${n} times from the read, want once: $(tr '\n' ' ' < "${log}")" >&2; return 1; }
+  [ -z "$(ls -A "${TMPDIR}")" ] || { echo "temporary files remain: $(ls -A "${TMPDIR}")" >&2; return 1; }
+}
+
+# A stop whose TERM yq does not take (bash can drop a signal that a
+# subshell gets as it starts) still ends, at the time limit: the watchdog
+# stays armed until yq ended, and then stops yq. The yq stub takes its
+# first TERM as lost (a trap that only removes itself), then sends TERM to
+# the read (its parent). The time limit is 3 s; a stop that is not done in
+# 12 s fails the test.
+@test "spec::_kver_yq: a stop whose TERM yq does not take ends at the time limit" {
+  _spec "version: v1.31.4"
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  local m="${BATS_TEST_TMPDIR}/m" mark="kver-lost-${RANDOM}${RANDOM}" reader rc=0 start took i yq
+  mkdir -p "${m}"
+  _yq_stub "echo \$\$ > '${m}/pid'
+trap 'trap - TERM' TERM
+kill -TERM \"\${PPID}\"
+while :; do sleep 0.1; done"
+  start=$(_now_ms)
+  bash -c 'import() { :; }; source "$1/domain.sh"; source "$1/spec.sh"; _SPEC_KVER_TIMEOUT=3; spec::_kver_yq "$2" -r .kind' \
+    "${mark}" "${_PROJECT_ROOT}/.lok8s/utils" "${PATH_CLUSTERS}/test.dev/cluster.lok8s.yaml" \
+    >"${BATS_TEST_TMPDIR}/out" 2>&1 &
+  reader=$!
+  for (( i = 0; i < 120; i++ )); do kill -0 "${reader}" 2>/dev/null || break; sleep 0.1; done
+  took=$(( $(_now_ms) - start ))
+  yq=$(<"${m}/pid")
+  if kill -0 "${reader}" 2>/dev/null; then
+    kill -KILL "${yq}" 2>/dev/null || :
+    _kill_left "${mark}"
+    wait "${reader}" 2>/dev/null || :
+    echo "the stop did not end in 12 s; the time limit is 3 s" >&2
+    return 1
+  fi
+  wait "${reader}" || rc=$?
+  [ "${rc}" -eq 143 ] || { echo "status ${rc}, want 143: $(<"${BATS_TEST_TMPDIR}/out")" >&2; return 1; }
+  (( took >= 2500 )) || { echo "the read ended after ${took} ms, before the time limit: the stub did not keep yq running" >&2; return 1; }
+  if kill -0 "${yq}" 2>/dev/null; then
+    kill -KILL "${yq}" 2>/dev/null || :
+    echo "yq (${yq}) runs on after the read" >&2; return 1
+  fi
+  _gone "${mark}" || { _kill_left "${mark}"; echo "a watchdog runs on after the read" >&2; return 1; }
   [ -z "$(ls -A "${TMPDIR}")" ] || { echo "temporary files remain: $(ls -A "${TMPDIR}")" >&2; return 1; }
 }
 

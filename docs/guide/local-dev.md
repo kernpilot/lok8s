@@ -319,7 +319,8 @@ only `spec.network.dnsSearch` and its entries, so anchors elsewhere in the
 spec cost nothing. The frozen bash implementation reads the list with `yq`
 v4.54.3 or later, the pinned release (it needs `--yaml-fix-merge-anchor-to-spec`,
 which yq v4.47.1 added; an older `yq` stops the read with an error that names
-its version). Each read has two
+its version). No `yq` on `PATH`, or one that cannot run, also stops the read
+with an error. Each read has two
 limits. The time limit (10 s) always holds: a pure-bash watchdog stops `yq`,
 with no GNU `timeout` (macOS has none). The memory limit (1 GiB of data
 memory, `ulimit -d`) is best effort: it holds only where the operating system

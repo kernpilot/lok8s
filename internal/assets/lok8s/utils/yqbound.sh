@@ -3,8 +3,13 @@
 #
 # The time limit always holds: a watchdog stops yq after the given seconds,
 # with no GNU timeout(1) (macOS has none by default). The watchdog waits in
-# `read -t` on a FIFO that it opens read-write itself: no writer ever comes,
-# so the read returns at the time limit, and no sleep process is left
+# `read -t` on a FIFO that the call keeps open read-write (tickfd). When yq
+# ends first, the call writes one line to the FIFO, and the watchdog ends
+# without a signal: a line stays in the FIFO until the watchdog reads it,
+# so the watchdog cannot miss it. A TERM to the watchdog could be lost:
+# bash 5.2 can drop a signal that a subshell gets before it resets the
+# call's traps, and the watchdog then waited the full time limit and sent
+# its TERM to the pid of a yq that had ended. No sleep process is left
 # behind. A FIFO, not a read-write redirect onto a process substitution:
 # macOS cannot reopen the read end of a pipe through /dev/fd (EACCES, or EOF
 # at once), so that wait returned at once.
@@ -38,8 +43,12 @@ yqbound::_running_job() {
   return 1
 }
 
-# yqbound::_stop <pid> <watchdog> — the stop of yqbound::run on INT, QUIT or
-# TERM: TERM to the watchdog and to yq, then a wait for both. A job that
+# yqbound::_stop <pid> <watchdog> <tickfd> — the stop of yqbound::run on
+# INT, QUIT or TERM: TERM to yq and a wait for it, then the line on <tickfd>
+# that ends the watchdog, and a wait for the watchdog. The watchdog gets no
+# signal. It stays armed until yq ended: if yq does not take the TERM (bash
+# can drop a signal that a subshell gets as it starts), the watchdog stops
+# yq at the time limit, and the stop does not wait for ever. A job that
 # ended gets no signal (yqbound::_running_job): after the wait of
 # yqbound::run, the pid of yq can be another process's. The trap sets INT,
 # QUIT and TERM to do nothing before the stop, and a signal that comes
@@ -47,10 +56,10 @@ yqbound::_running_job() {
 # runs. It runs in a trap, where set -e applies again: each command that
 # can fail ends in `|| :`.
 yqbound::_stop() {
-  local pid="${1}" watchdog="${2}"
-  ! yqbound::_running_job "${watchdog}" || kill -TERM "${watchdog}" 2>/dev/null || :
+  local pid="${1}" watchdog="${2}" tickfd="${3:-}"
   ! yqbound::_running_job "${pid}" || kill -TERM "${pid}" 2>/dev/null || :
   while yqbound::_running_job "${pid}"; do wait "${pid}" 2>/dev/null || :; done
+  [[ -z "${tickfd}" ]] || { printf '\n' >&"${tickfd}"; } 2>/dev/null || :
   while yqbound::_running_job "${watchdog}"; do wait "${watchdog}" 2>/dev/null || :; done
   return 0
 }
@@ -83,9 +92,15 @@ yqbound::_cleanup() {
 #        from ${TMPDIR:-/tmp}): nothing to stdout.
 #   7    yq did not start, or its files are gone: yq's stderr file is
 #        missing.
+#   8    no yq on PATH (the shell's exit status 127).
+#   9    a yq on PATH that cannot run: no execute permission, or not a
+#        program for this system (the shell's exit status 126).
+#   10   yq ended well, but its output could not be passed on: the read of
+#        its output file, or the write to stdout, failed. Part of the output
+#        can be on stdout.
 #   64+N the signal N stopped yq (SIGSEGV: 75, SIGKILL: 73).
 #   130, 131, 143: yqbound::run itself got INT, QUIT or TERM.
-# For 2 to 7 and 64+N, yq's stderr (a usage text or a Go runtime dump) is
+# For 2 to 10 and 64+N, yq's stderr (a usage text or a Go runtime dump) is
 # dropped; the caller writes the message.
 yqbound::run() (
   seconds="${1}" kib="${2}" file="${3}"
@@ -116,43 +131,56 @@ yqbound::run() (
   # hold a caller's $(…) pipe open. Not a `{ …; } 2>/dev/null` group: bash
   # keeps the caller's stderr in a copy that the watchdog would get.
   exec {errfd}>&2 2>/dev/null || exit 4
+  # tickfd: the FIFO, read-write, so that neither its open nor a write
+  # blocks, and the watchdog's read sees no end of file.
+  exec {tickfd}<>"${tmp}/tick" || exit 4
   (
     ulimit -d "${kib}" 2>/dev/null
     exec yq "${@}" "${file}" >"${tmp}/out" 2>"${tmp}/err"
-  ) {errfd}>&- &
+  ) {errfd}>&- {tickfd}>&- &
   [[ -z "${_YQBOUND_TEST_DELAY_YQ}" ]] || sleep "${_YQBOUND_TEST_DELAY_YQ}"
   pid=$!
-  # The watchdog's stdout and stderr go to /dev/null: if the body dies (a
-  # SIGKILL), the watchdog must not hold the caller's $(…) pipe open until
-  # the time limit.
+  # The watchdog: a line on tickfd (yq ended) ends it; at the time limit it
+  # stops yq. A failed read stops yq too. Its stdout and stderr go to
+  # /dev/null: if the body dies (a SIGKILL), the watchdog must not hold the
+  # caller's $(…) pipe open until the time limit. A yq that ends just at
+  # the time limit can still get the watchdog's TERM by its pid after bash
+  # reaped it.
   (
-    read -r -t "${seconds}" <>"${tmp}/tick" || :
+    read -r -t "${seconds}" -u "${tickfd}" && exit 0
     : >"${tmp}/timeout"
     kill -TERM "${pid}" 2>/dev/null
   ) >/dev/null 2>&1 {errfd}>&- &
   [[ -z "${_YQBOUND_TEST_DELAY_WATCHDOG}" ]] || sleep "${_YQBOUND_TEST_DELAY_WATCHDOG}"
   watchdog=$!
-  trap 'trap : INT QUIT TERM; yqbound::_stop "${pid}" "${watchdog}"; exit 130' INT
-  trap 'trap : INT QUIT TERM; yqbound::_stop "${pid}" "${watchdog}"; exit 131' QUIT
-  trap 'trap : INT QUIT TERM; yqbound::_stop "${pid}" "${watchdog}"; exit 143' TERM
+  trap 'trap : INT QUIT TERM; yqbound::_stop "${pid}" "${watchdog}" "${tickfd}"; exit 130' INT
+  trap 'trap : INT QUIT TERM; yqbound::_stop "${pid}" "${watchdog}" "${tickfd}"; exit 131' QUIT
+  trap 'trap : INT QUIT TERM; yqbound::_stop "${pid}" "${watchdog}" "${tickfd}"; exit 143' TERM
   [[ -z "${sig}" ]] || kill -"${sig}" "${BASHPID}"
   rc=0
   wait "${pid}" 2>/dev/null || rc=$?
-  # `|| :` on both: the watchdog may be gone already, and a caller under
-  # `set -e` must not stop here after a successful yq.
-  ! yqbound::_running_job "${watchdog}" || kill -TERM "${watchdog}" 2>/dev/null || :
+  # The line that ends the watchdog. `|| :`: a caller under `set -e` must
+  # not stop here after a successful yq.
+  { printf '\n' >&"${tickfd}"; } 2>/dev/null || :
   wait "${watchdog}" 2>/dev/null || :
-  exec 2>&"${errfd}" {errfd}>&-
+  exec 2>&"${errfd}" {errfd}>&- {tickfd}>&-
   # yq ended well: its output is the answer. A missing output file is no
-  # answer (6): an empty stdout would read as an empty value.
+  # answer (6): an empty stdout would read as an empty value. A failed read
+  # of the file, or a failed write to stdout, is no answer either (10).
   if (( rc == 0 )); then
-    [[ -f "${tmp}/out" ]] && cat "${tmp}/out" 2>/dev/null || exit 6
+    [[ -f "${tmp}/out" ]] || exit 6
+    cat "${tmp}/out" 2>/dev/null || exit 10
     # yq's notes, if any: a lost stderr file costs only the notes.
     cat "${tmp}/err" >&2 2>/dev/null || :
     exit 0
   fi
   [[ ! -e "${tmp}/timeout" ]] || exit 2
   (( rc <= 128 )) || exit $(( rc - 128 + 64 ))
+  # 127 and 126 are the shell's own: `exec yq` found no yq on PATH (8), or
+  # one that it cannot run (9). Not 1: a caller reads 1 as yq's own verdict
+  # on the file.
+  (( rc != 127 )) || exit 8
+  (( rc != 126 )) || exit 9
   # No stderr file of yq: its redirect failed (yq did not start), or the
   # files are gone (7). Not 1: a caller reads 1 as yq's own verdict on the
   # file.
