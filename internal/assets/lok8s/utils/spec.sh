@@ -130,18 +130,31 @@ spec::_running_job() {
   return 1
 }
 
-# spec::_kver_stop <pid> <watchdog> — the stop of spec::_kver_yq on INT or
-# TERM: TERM to the watchdog and to yq, then a wait for both. A job that
-# ended gets no signal (spec::_running_job): after the read's wait, the pid
-# of yq can be another process's. The trap sets INT and TERM to do nothing
-# before the stop, and a signal that comes during the stop ends a wait
-# early: so the stop waits again while the job runs. It runs in a trap,
-# where set -e applies again: each command that can fail ends in `|| :`.
+# spec::_kver_stop <pid> <watchdog> <tickfd> — the stop of spec::_kver_yq on
+# INT or TERM: TERM to yq and a wait for it, then the line on <tickfd> that
+# ends the watchdog, and a wait for the watchdog. All three arguments are
+# required (an empty one for a job that does not exist). The watchdog gets
+# no signal; without a <tickfd> (a caller error) it gets TERM. It stays
+# armed until yq ended: if yq does not take the TERM (bash can drop a signal
+# that a subshell gets as it starts), the watchdog stops yq at the time
+# limit, and the stop does not wait for ever. A job that ended gets no
+# signal (spec::_running_job): after the read's wait, the pid of yq can be
+# another process's. The trap sets INT and TERM to do nothing before the
+# stop, and a signal that comes during the stop ends a wait early: so the
+# stop waits again while the job runs. It runs in a trap, where set -e
+# applies again: each command that can fail ends in `|| :`.
+# yqbound.sh has its own copy (yqbound::_stop).
 spec::_kver_stop() {
-  local pid="${1}" watchdog="${2}"
-  ! spec::_running_job "${watchdog}" || kill -TERM "${watchdog}" 2>/dev/null || :
+  local pid="${1}" watchdog="${2}" tickfd="${3}"
   ! spec::_running_job "${pid}" || kill -TERM "${pid}" 2>/dev/null || :
   while spec::_running_job "${pid}"; do wait "${pid}" 2>/dev/null || :; done
+  if [[ -n "${tickfd}" ]]; then
+    { printf '\n' >&"${tickfd}"; } 2>/dev/null || :
+  else
+    # No FIFO: a caller error. A TERM, so that the stop does not wait until
+    # the time limit of the watchdog.
+    ! spec::_running_job "${watchdog}" || kill -TERM "${watchdog}" 2>/dev/null || :
+  fi
   while spec::_running_job "${watchdog}"; do wait "${watchdog}" 2>/dev/null || :; done
   return 0
 }
@@ -163,14 +176,20 @@ spec::_kver_cleanup() {
 # into the output that the caller reads.
 #
 # The time limit needs no GNU timeout (macOS has none): a watchdog subshell
-# runs `sleep N` in the background and waits for it; when the sleep ends, the
-# watchdog stops yq. When yq ends first, the read stops the watchdog, and the
-# watchdog's TERM trap stops its sleep, so no `sleep` process stays behind.
-# (A `read -t N` on a process substitution that is opened read-write is not
-# portable: on macOS the read ends at once, and every read timed out.) The
-# memory limit is `ulimit -d`, best effort: an OS that does not enforce it gets
-# the time limit only. The body is a subshell, so its traps remove the
-# temporary files on an interrupt and change nothing in the caller.
+# waits in `read -t N` on a FIFO that the read keeps open read-write
+# (tickfd); at the time limit, the watchdog stops yq. When yq ends first,
+# the read writes one line to the FIFO, and the watchdog ends without a
+# signal: a line stays in the FIFO until the watchdog reads it, so the
+# watchdog cannot miss it. A TERM to the watchdog could be lost: bash 5.2
+# can drop a signal that a subshell gets before it resets the read's traps,
+# and the watchdog then waited the full time limit and sent its TERM to the
+# pid of a yq that had ended. No sleep process is left behind. A FIFO, not
+# a process substitution opened read-write: on macOS a read on that ends at
+# once, and every read timed out. yqbound::run (utils/yqbound.sh) has the
+# same watchdog. The memory limit is `ulimit -d`, best effort: an OS that
+# does not enforce it gets the time limit only. The body is a subshell, so
+# its traps remove the temporary files on an interrupt and change nothing in
+# the caller.
 spec::_kver_yq() (
   cluster_yaml="${1}"
   shift
@@ -206,47 +225,66 @@ spec::_kver_yq() (
     printf '%s lo cannot open a file descriptor. Raise the open-file limit (ulimit -n).\n' "${unreadable}"
     exit 1
   }
+  # tickfd: the FIFO of the watchdog, read-write, so that neither its open
+  # nor a write blocks, and the watchdog's read sees no end of file. stdout
+  # and errfd: the messages go to the caller's stdout, as all of this read's.
+  if ! mkfifo "${tmp}/tick" 2>/dev/null || ! exec {tickfd}<>"${tmp}/tick"; then
+    exec 2>&"${errfd}" {errfd}>&-
+    printf '%s lo cannot create or open a FIFO in %s. Set TMPDIR to a local directory.\n' "${unreadable}" "${TMPDIR:-/tmp}"
+    exit 1
+  fi
   (
     ulimit -d "${_SPEC_KVER_MAX_KB}" 2>/dev/null
     exec yq --yaml-fix-merge-anchor-to-spec "${@}" "${cluster_yaml}" >"${tmp}/out" 2>"${tmp}/err"
-  ) {errfd}>&- &
+  ) {errfd}>&- {tickfd}>&- &
   [[ -z "${_SPEC_KVER_TEST_DELAY_YQ}" ]] || sleep "${_SPEC_KVER_TEST_DELAY_YQ}"
   pid=$!
-  # The watchdog: a background sleep and a wait for it (portable, see above).
-  # A TERM (the read is done) interrupts the wait; the trap stops the sleep.
-  # The trap comes first and names the sleep with `jobs -p`, so a TERM at any
-  # point leaves no sleep behind. The watchdog writes nothing, and it holds no
-  # pipe of the caller: a caller that reads the output with $(...) waits for
-  # all writers to close the pipe.
+  # The watchdog: a line on tickfd (yq ended) ends it; at the time limit it
+  # stops yq. A failed read stops yq too. The watchdog writes nothing, and it
+  # holds no pipe of the caller: a caller that reads the output with $(...)
+  # waits for all writers to close the pipe. A yq that ends just at the time
+  # limit can still get the watchdog's TERM by its pid after bash reaped it.
   (
-    trap 'kill -TERM $(jobs -p) 2>/dev/null; exit 0' TERM
-    sleep "${_SPEC_KVER_TIMEOUT}" &
-    wait "$!" || exit 0
+    read -r -t "${_SPEC_KVER_TIMEOUT}" -u "${tickfd}" && exit 0
     : >"${tmp}/timeout"
     kill -TERM "${pid}" 2>/dev/null
   ) >/dev/null 2>&1 {errfd}>&- &
   [[ -z "${_SPEC_KVER_TEST_DELAY_WATCHDOG}" ]] || sleep "${_SPEC_KVER_TEST_DELAY_WATCHDOG}"
   watchdog=$!
-  trap 'trap : INT TERM; spec::_kver_stop "${pid}" "${watchdog}"; exit 130' INT
-  trap 'trap : INT TERM; spec::_kver_stop "${pid}" "${watchdog}"; exit 143' TERM
+  trap 'trap : INT TERM; spec::_kver_stop "${pid}" "${watchdog}" "${tickfd}"; exit 130' INT
+  trap 'trap : INT TERM; spec::_kver_stop "${pid}" "${watchdog}" "${tickfd}"; exit 143' TERM
   [[ -z "${sig}" ]] || kill -"${sig}" "${BASHPID}"
   rc=0
   wait "${pid}" 2>/dev/null || rc=$?
-  ! spec::_running_job "${watchdog}" || kill -TERM "${watchdog}" 2>/dev/null
-  wait "${watchdog}" 2>/dev/null
-  exec 2>&"${errfd}" {errfd}>&-
+  # The line that ends the watchdog. `|| :`: a caller under `set -e` must
+  # not stop here.
+  { printf '\n' >&"${tickfd}"; } 2>/dev/null || :
+  wait "${watchdog}" 2>/dev/null || :
+  exec 2>&"${errfd}" {errfd}>&- {tickfd}>&-
   # yq ended well: its output is the answer. A missing output file is no
-  # answer: an empty output read as "spec is ..., not a map".
+  # answer: an empty output read as "spec is ..., not a map". A failed read
+  # of the file, or a failed write to stdout, is no answer either.
   if (( rc == 0 )); then
-    if [[ -f "${tmp}/out" ]] && cat "${tmp}/out" 2>/dev/null; then
+    if [[ ! -f "${tmp}/out" ]]; then
+      printf '%s yq ended, but its output file %s does not exist. Make sure that no other process removes files from %s, then run the command again.\n' \
+        "${unreadable}" "${tmp}/out" "${TMPDIR:-/tmp}"
+      exit 1
+    fi
+    if cat "${tmp}/out" 2>/dev/null; then
       exit 0
     fi
-    printf '%s yq ended, but its output file %s does not exist. Make sure that no other process removes files from %s, then run the command again.\n' \
-      "${unreadable}" "${tmp}/out" "${TMPDIR:-/tmp}"
+    printf '%s yq ended, but lo cannot pass on its output: the read of %s, or the write of the output, failed. Run the command again.\n' \
+      "${unreadable}" "${tmp}/out"
     exit 1
   fi
   if [[ -e "${tmp}/timeout" ]]; then
     printf '%s yq did not finish in %s s. Simplify the spec file.\n' "${unreadable}" "${_SPEC_KVER_TIMEOUT}"
+  elif (( rc == 127 )); then
+    # The shell's own status: `exec yq` found no yq on PATH.
+    printf '%s lo cannot find yq on PATH. Install yq v4.54.3 or later (b install installs the pinned yq).\n' "${unreadable}"
+  elif (( rc == 126 )); then
+    # The shell's own status: the yq on PATH cannot run.
+    printf '%s the yq on PATH cannot run: it has no execute permission, or it is not a program for this system. Install yq v4.54.3 or later (b install installs the pinned yq).\n' "${unreadable}"
   elif (( rc <= 128 )) && [[ ! -f "${tmp}/err" ]]; then
     # No stderr file of yq: its redirect failed (yq did not start), or the
     # files are gone. Not a yq error of the spec file.

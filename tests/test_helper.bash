@@ -310,6 +310,20 @@ mock_yq_value() {
   export -f yq
 }
 
+# _path_without_yq <dir> — make <dir> a PATH that has the tools of the
+# bounded yq reads (yqbound.sh, spec.sh, dnssearch.sh) and no yq: a link
+# to each of them, found on PATH. Prints <dir>. For the cases of a missing
+# yq, or of a yq that cannot run.
+_path_without_yq() {
+  local tool path
+  mkdir -p "${1}"
+  for tool in mktemp mkfifo rm cat grep head sleep; do
+    path="$(type -P "${tool}")" || { echo "_path_without_yq: no ${tool} on PATH" >&2; return 1; }
+    ln -sf "${path}" "${1}/${tool}"
+  done
+  echo "${1}"
+}
+
 # _ppid <pid> / _children <pid> — from /proc where it exists (the CI bats
 # container has no ps), else from ps (macOS).
 _ppid() {

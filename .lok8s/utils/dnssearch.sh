@@ -49,10 +49,15 @@ dnssearch::check() {
   local tag rc=0
   # "" when spec.network is not a map: yq yields no value at all.
   dnssearch::_read tag "${file}" "${list} | tag" || rc=$?
-  if (( rc == 5 )) && dnssearch::_unset_without_flag "${file}" "${list}"; then
+  if (( rc == 5 )); then
     # A yq before v4.47.1 (no --yaml-fix-merge-anchor-to-spec): only a spec
-    # that sets the list needs the newer yq.
-    return 0
+    # that sets the list needs the newer yq. Read the tag again without the
+    # flag. A failure of that read is its own cause (its status), not the
+    # old yq.
+    dnssearch::_read tag "${file}" "${list} | tag" plain || { dnssearch::_stop $?; return $?; }
+    [[ -n "${tag}" && "${tag}" != '!!null' ]] || return 0
+    dnssearch::_stop 5
+    return $?
   fi
   (( rc == 0 )) || { dnssearch::_stop "${rc}"; return $?; }
   [[ -n "${tag}" && "${tag}" != '!!null' ]] || return 0
@@ -123,7 +128,9 @@ dnssearch::check() {
 # readers report the file); 2 at the time limit; 3 at the memory cap; 4
 # without a temporary directory or FIFO; 5 when yq does not know a flag (a
 # yq before v4.47.1); 6 when yq ended, but its output file is gone; 7 when
-# yq did not start, or its files are gone; 64+N when the signal N stopped yq.
+# yq did not start, or its files are gone; 8 without a yq on PATH; 9 when
+# the yq on PATH cannot run; 10 when yq ended, but its output could not be
+# passed on; 64+N when the signal N stopped yq.
 dnssearch::_read() {
   local out rc=0
   local -a flags=(--yaml-fix-merge-anchor-to-spec)
@@ -159,6 +166,9 @@ dnssearch::_stop() {
     5) cause="the installed yq ($(dnssearch::_yq_version)) does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.54.3 or later." ;;
     6) cause="yq ended, but its output file in ${tmpdir} does not exist. Make sure that no other process removes files from ${tmpdir}, then run the command again." ;;
     7) cause="yq did not start, or its files in ${tmpdir} do not exist. Make sure that ${tmpdir} is writable and has free space, and that no other process removes files from it. Then run the command again." ;;
+    8) cause="lo cannot find yq on PATH. Install yq v4.54.3 or later (b install installs the pinned yq)." ;;
+    9) cause="the yq on PATH cannot run: it has no execute permission, or it is not a program for this system. Install yq v4.54.3 or later (b install installs the pinned yq)." ;;
+    10) cause="yq ended, but lo cannot pass on its output: the read of its output file in ${tmpdir}, or the write of the output, failed. Run the command again." ;;
     *)
       if (( rc > 64 && rc < 128 )); then
         cause="the signal SIG$(kill -l $(( rc - 64 )) 2>/dev/null || echo $(( rc - 64 ))) stopped yq. Run the command again."
@@ -169,15 +179,6 @@ dnssearch::_stop() {
   esac
   DNSSEARCH_PROBLEMS+=("spec.network.dnsSearch could not be read: ${cause}")
   return 1
-}
-
-# dnssearch::_unset_without_flag <file> <list-expr> — true when the spec sets
-# no list (missing, null, or spec.network not a map), read without
-# --yaml-fix-merge-anchor-to-spec, which an old yq does not know.
-dnssearch::_unset_without_flag() {
-  local tag
-  dnssearch::_read tag "${1}" "${2} | tag" plain || return 1
-  [[ -z "${tag}" || "${tag}" == '!!null' ]]
 }
 
 # dnssearch::_yq_version — the version of the yq on PATH (vX.Y.Z, with its
