@@ -529,12 +529,14 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 		c.echo("  Read it, then copy it to the machine and run it there as root:")
 		c.echo("    scp %s root@<machine>:/root/ && ssh root@<machine> bash /root/%s", path, filepath.Base(path))
 		c.echo("  Delete it (and its directory) once the node has joined.")
+		c.echo("  The ticket is bound to this node name and expires quickly — mint a")
+		c.echo("  fresh one with:")
 	} else {
+		// Without a script: the lines of the bash twin, which has no script.
 		c.echo("  On the machine, follow the node-join guide for your platform")
-		c.echo("  (kubehz docs: Spaces → Joining nodes).")
+		c.echo("  (kubehz docs: Spaces → Joining nodes). The ticket is bound to this")
+		c.echo("  node name and expires quickly — mint a fresh one with:")
 	}
-	c.echo("  The ticket is bound to this node name and expires quickly — mint a")
-	c.echo("  fresh one with:")
 	c.echo("    lo kubehz join %s", nodeName)
 	return nil
 }

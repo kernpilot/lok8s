@@ -826,7 +826,10 @@ curl_space_refusal() {
   [ ! -L "${files[0]}" ]
   assert_output --partial "  Node 'worker-1' — join ticket (valid until 2026-08-07T20:00:00Z, single use):
     (written to ${files[0]}, mode 0600)
-  On the machine, follow the node-join guide for your platform"
+  On the machine, follow the node-join guide for your platform
+  (kubehz docs: Spaces → Joining nodes). The ticket is bound to this
+  node name and expires quickly — mint a fresh one with:
+    lo kubehz join worker-1"
   [ "$(cat "${files[0]}")" = "${ticket}" ]
   [ "$(wc -c < "${files[0]}")" -eq $(( ${#ticket} + 1 )) ]
   [ "$(stat -c %a "${files[0]}")" = 600 ]
