@@ -416,7 +416,8 @@ yq_space_plan_type() {
   local node files
   for node in worker-1 worker-2; do
     files=("${TMPDIR}"/kubehz-join-*/"kubehz-join-${node}.token")
-    [ "${#files[@]}" -eq 1 ] && [ -f "${files[0]}" ]
+    [ "${#files[@]}" -eq 1 ]
+    [ -f "${files[0]}" ]
   done
 }
 
@@ -803,8 +804,8 @@ curl_space_refusal() {
 # A mint writes the ticket to a private file and names the file on stdout,
 # as the Go twin does without a script
 # (TestSpaceMintJoinWithoutScriptWritesTheTicketPrivately): a fresh 0700
-# directory below TMPDIR, the file 0600, the ticket and a newline in it, a
-# name planted at the predictable place untouched.
+# directory below TMPDIR, the file 0600, the ticket and a newline in it.
+# A name planted in the fresh directory: the next test.
 @test "space_mint_join: the ticket goes to a private file, not to stdout" {
   local ticket
   ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
@@ -814,15 +815,15 @@ curl_space_refusal() {
     printf '%s\n201' "${_MINT_BODY}"
   }
   export -f curl
-  printf 'untouched\n' > "${BATS_TEST_TMPDIR}/victim"
-  ln -s "${BATS_TEST_TMPDIR}/victim" "${TMPDIR}/kubehz-join-worker-1.token"
 
   run kubehz::space_mint_join sp-123 worker-1
   assert_success
   refute_output --partial "${ticket}"
   local files
   files=("${TMPDIR}"/kubehz-join-*/kubehz-join-worker-1.token)
-  [ "${#files[@]}" -eq 1 ] && [ -f "${files[0]}" ] && [ ! -L "${files[0]}" ]
+  [ "${#files[@]}" -eq 1 ]
+  [ -f "${files[0]}" ]
+  [ ! -L "${files[0]}" ]
   assert_output --partial "  Node 'worker-1' — join ticket (valid until 2026-08-07T20:00:00Z, single use):
     (written to ${files[0]}, mode 0600)
   On the machine, follow the node-join guide for your platform"
@@ -831,11 +832,109 @@ curl_space_refusal() {
   [ "$(stat -c %a "${files[0]}")" = 600 ]
   [ "$(stat -c %a "$(dirname "${files[0]}")")" = 700 ]
   [ "$(dirname "${files[0]}")" != "${TMPDIR}" ]
+}
+
+# A mktemp stand-in: it records its template in MKTEMP_ARG and returns
+# MKTEMP_DIR, which the test prepared (made by MKTEMP_PREP when set).
+_stub_mktemp() {
+  MKTEMP_ARG="${BATS_TEST_TMPDIR}/mktemp.arg"
+  MKTEMP_DIR="${BATS_TEST_TMPDIR}/priv"
+  export MKTEMP_ARG MKTEMP_DIR
+  mktemp() {
+    printf '%s\n' "${*: -1}" > "${MKTEMP_ARG}"
+    printf '%s\n' "${MKTEMP_DIR}"
+  }
+  export -f mktemp
+}
+
+# A name planted at the very path of the ticket (a symlink to a victim, in
+# the directory mktemp gave) is never written through: noclobber refuses
+# it, the live-ticket note follows, the victim keeps its bytes, and the
+# directory goes. As the Go twin's
+# TestSpaceMintJoinNeverWritesThroughAPlantedName.
+@test "space_mint_join: a name planted at the ticket path is never written through" {
+  local ticket
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  _MINT_BODY=$(jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}')
+  export _MINT_BODY
+  curl() {
+    printf '%s\n201' "${_MINT_BODY}"
+  }
+  export -f curl
+  _stub_mktemp
+  mkdir -m 700 "${MKTEMP_DIR}"
+  printf 'untouched\n' > "${BATS_TEST_TMPDIR}/victim"
+  ln -s "${BATS_TEST_TMPDIR}/victim" "${MKTEMP_DIR}/kubehz-join-worker-1.token"
+
+  run kubehz::space_mint_join sp-123 worker-1
+  assert_failure
+  assert_output --partial "could not write the join ticket for 'worker-1'"
+  assert_output --partial "The ticket was minted before the write failed"
+  refute_output --partial "${ticket}"
   [ "$(cat "${BATS_TEST_TMPDIR}/victim")" = untouched ]
+  [ ! -e "${MKTEMP_DIR}" ]
+  [ ! -L "${MKTEMP_DIR}" ]
+  [ "$(cat "${MKTEMP_ARG}")" = "${TMPDIR}/kubehz-join-XXXXXXXXXX" ]
+}
+
+# A write that fails in the fresh directory (one the user cannot write)
+# leaves nothing: the directory goes, and the live-ticket note follows.
+@test "space_mint_join: a failed write in the fresh directory removes it" {
+  [[ "$(id -u)" != 0 ]] || skip "root writes into a 0500 directory"
+  local ticket
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  _MINT_BODY=$(jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}')
+  export _MINT_BODY
+  curl() {
+    printf '%s\n201' "${_MINT_BODY}"
+  }
+  export -f curl
+  _stub_mktemp
+  mkdir -m 500 "${MKTEMP_DIR}"
+
+  run kubehz::space_mint_join sp-123 worker-1
+  assert_failure
+  assert_output --partial "could not write the join ticket for 'worker-1'"
+  assert_output --partial "The ticket was minted before the write failed"
+  refute_output --partial "${ticket}"
+  [ ! -e "${MKTEMP_DIR}" ]
+}
+
+# TMPDIR=/ (and //) is the root directory, not the working directory, as
+# in the Go twin; a trailing slash goes.
+@test "space_write_join_ticket: TMPDIR=/ is the root directory" {
+  local ticket pair tmpdir want
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  _stub_mktemp
+  # TMPDIR|the template's directory
+  for pair in "/|" "//|" "${BATS_TEST_TMPDIR}/t/|${BATS_TEST_TMPDIR}/t"; do
+    tmpdir="${pair%%|*}"
+    want="${pair#*|}"
+    rm -rf -- "${MKTEMP_DIR}"
+    mkdir -m 700 "${MKTEMP_DIR}"
+    TMPDIR="${tmpdir}" run kubehz::space_write_join_ticket worker-1 "${ticket}"
+    assert_success
+    assert_output "${MKTEMP_DIR}/kubehz-join-worker-1.token"
+    [ "$(cat "${MKTEMP_ARG}")" = "${want}/kubehz-join-XXXXXXXXXX" ]
+  done
+}
+
+# The writer checks the node name itself (the name is part of the path),
+# not only space_mint_join before the mint.
+@test "space_write_join_ticket: a path-shaped node name is refused before any directory" {
+  local ticket dirs
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  run kubehz::space_write_join_ticket ../escaped "${ticket}"
+  assert_failure 2
+  assert_output --partial "is not a node name the platform accepts"
+  refute_output --partial "${ticket}"
+  dirs=("${TMPDIR}"/kubehz-join-*)
+  [ ! -e "${dirs[0]}" ]
 }
 
 # The write fails after the mint: the live-ticket note, nothing on stdout.
-# A path-shaped node name is refused before any directory is made.
+# A path-shaped node name is refused before the mint (no request, so no
+# live ticket) and before any directory is made.
 @test "space_mint_join: a failed ticket write prints the live-ticket note" {
   local ticket
   ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
@@ -853,10 +952,18 @@ curl_space_refusal() {
   assert_output --partial "lo kubehz join worker-1"
   refute_output --partial "${ticket}"
 
+  CURL_CALLS="${BATS_TEST_TMPDIR}/curl.calls"
+  export CURL_CALLS
+  curl() {
+    echo called >> "${CURL_CALLS}"
+    printf '%s\n201' "${_MINT_BODY}"
+  }
+  export -f curl
   run kubehz::space_mint_join sp-123 ../escaped
   assert_failure
   assert_output --partial "is not a node name the platform accepts"
   refute_output --partial "${ticket}"
+  [ ! -e "${CURL_CALLS}" ]
   local dirs=("${TMPDIR}"/kubehz-join-*)
   [ ! -e "${dirs[0]}" ]
 }
@@ -864,8 +971,10 @@ curl_space_refusal() {
 # A ticket outside the kubeadm bootstrap-token shape is refused before
 # anything is printed or written, as by the Go twin's joinTokenRe: an
 # uppercase letter, a non-ASCII letter, a short secret, an escape, a second
-# line, a separator other than the dot. The shape check spells its
-# characters out, so the locale does not widen it.
+# line, a separator other than the dot, and a trailing newline, a NUL or a
+# CR (the token is read as JSON text, so $(...) strips and drops nothing).
+# The shape check spells its characters out, so the locale does not widen
+# it (the next test).
 @test "space_mint_join: a ticket outside the bootstrap-token shape is refused" {
   local good bad
   good=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
@@ -882,8 +991,48 @@ curl_space_refusal() {
     refute_output --partial "join ticket (valid until"
     refute_output --partial "${bad}"
   done
+  local sfx
+  for sfx in '\n' '\u0000' '\r'; do
+    _MINT_BODY=$(jq -nc --arg t "${good}" "{ok: true, data: {token: (\$t + \"${sfx}\"), expiresAt: \"soon\"}}")
+    export _MINT_BODY
+    run kubehz::space_mint_join sp-123 worker-1
+    assert_failure
+    assert_output --partial "kubehz API returned a join ticket for 'worker-1' in a shape this CLI does not recognise; nothing was written"
+    refute_output --partial "join ticket (valid until"
+    refute_output --partial "${good}"
+  done
   local dirs=("${TMPDIR}"/kubehz-join-*)
   [ ! -e "${dirs[0]}" ]
+}
+
+# In a UTF-8 locale where a bash range [a-z] matches e with an accent
+# (en_US.UTF-8 with glibc does), the spelled-out class still refuses a
+# non-ASCII letter. Skipped where no such locale exists.
+@test "space_mint_join: the shape check does not widen with the locale" {
+  local good loc wide="" bad e_acute=$'\xc3\xa9' sharp_s=$'\xc3\x9f'
+  good=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  for loc in $(locale -a 2>/dev/null); do
+    [[ "${loc,,}" == *utf*8* ]] || continue
+    if LC_ALL="${loc}" bash -c '[[ $1 =~ ^[a-z]$ ]]' _ "${e_acute}" 2>/dev/null; then
+      wide="${loc}"
+      break
+    fi
+  done
+  [[ -n "${wide}" ]] || skip "no locale here widens [a-z]"
+  export LC_ALL="${wide}"
+  # The range widens in this shell too, so the check below is the real one.
+  [[ "${e_acute}" =~ ^[a-z]$ ]]
+  curl() {
+    printf '%s\n201' "${_MINT_BODY}"
+  }
+  export -f curl
+  for bad in "${good/a1/${e_acute}1}" "${good/a1/${sharp_s}1}"; do
+    _MINT_BODY=$(jq -nc --arg t "${bad}" '{ok: true, data: {token: $t, expiresAt: "soon"}}')
+    export _MINT_BODY
+    run kubehz::space_mint_join sp-123 worker-1
+    assert_failure
+    assert_output --partial "in a shape this CLI does not recognise; nothing was written"
+  done
 }
 
 @test "provision_shared: a lost create race adopts via re-lookup" {

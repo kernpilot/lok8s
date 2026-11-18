@@ -463,6 +463,10 @@ var joinTokenRe = regexp.MustCompile(`^[a-z0-9]{6}\.[a-z0-9]{16}$`)
 // for, so the ticket goes to stdout only when printToken is set.
 // Deviation D21 (Go-only): the join script and the printToken flag.
 func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeName string, printToken bool) error {
+	// Before the mint: a refused name must not cost a live ticket.
+	if err := c.assertNodeName(nodeName); err != nil {
+		return err
+	}
 	res, err := c.spaceAPI(ctx, cfg, "POST", "/api/spaces/"+spaceID+"/join-token", compactJSON(jsonPair{"nodeName", nodeName}))
 	if err != nil {
 		return err
@@ -554,7 +558,7 @@ func (c *Context) joinWriteFailed(what, nodeName, expires string, err error) err
 
 // writeJoinFile stores a join file, the api's join recipe (ext ".sh") or
 // the ticket alone (ext ".token"), under the user's temp dir (TMPDIR, else
-// the OS default) in a FRESH private directory:
+// the OS default; TMPDIR=/ is /) in a FRESH private directory:
 // <tmp>/kubehz-join-<random>/kubehz-join-<node><ext>. The directory comes
 // from os.MkdirTemp (0700, unpredictable name), so there is no name to
 // pre-plant in a shared /tmp: nothing a foreign user creates can collide
@@ -575,7 +579,11 @@ func (c *Context) writeJoinFile(nodeName, ext, content string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	priv, err := os.MkdirTemp(dir, "kubehz-join-")
+	mkdirTemp := c.MkdirTemp
+	if mkdirTemp == nil {
+		mkdirTemp = os.MkdirTemp
+	}
+	priv, err := mkdirTemp(dir, "kubehz-join-")
 	if err != nil {
 		return "", err
 	}

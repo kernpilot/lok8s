@@ -601,7 +601,8 @@ func TestSpaceMintJoinReportsAnUnwritableTempDir(t *testing.T) {
 
 // The node name becomes part of a filesystem path; the CLI validates it at
 // the boundary (the same DNS-label rule the api enforces) instead of
-// trusting the caller — before any directory is created.
+// trusting the caller — before the mint, so a refused name costs no live
+// ticket, and before any directory is created.
 func TestSpaceMintJoinRejectsAPathShapedNodeName(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -609,6 +610,9 @@ func TestSpaceMintJoinRejectsAPathShapedNodeName(t *testing.T) {
 	h.handle("POST /api/spaces/sp-123/join-token", 201, joinTicketJSON)
 	mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "../escaped", false))
 	mustContain(t, h.output(), "is not a node name the platform accepts")
+	if h.anyReq("POST", "join-token") {
+		t.Fatal("a refused node name was minted: the ticket is live with no copy")
+	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(h.base), "kubehz-join-escaped.sh")); err == nil {
 		t.Fatal("script escaped the temp dir")
 	}
@@ -619,19 +623,13 @@ func TestSpaceMintJoinRejectsAPathShapedNodeName(t *testing.T) {
 
 // Without a script the ticket goes to a private file of its own: the same
 // fresh 0700 directory as a script, the file 0600, the ticket and a newline
-// in it (the bytes the bash twin writes). stdout names the file; a name
-// planted at the predictable place in a shared TMPDIR is not touched.
+// in it (the bytes the bash twin writes). stdout names the file. A name
+// planted in the fresh directory is in
+// TestSpaceMintJoinNeverWritesThroughAPlantedName.
 func TestSpaceMintJoinWithoutScriptWritesTheTicketPrivately(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	tmp := h.env["TMPDIR"]
-	victim := filepath.Join(h.base, "victim")
-	if err := os.WriteFile(victim, []byte("untouched\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(victim, filepath.Join(tmp, "kubehz-join-worker-1.token")); err != nil {
-		t.Fatal(err)
-	}
 	h.handle("POST /api/spaces/sp-123/join-token", 201, noScriptJSON)
 	mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
 	mustContain(t, h.output(), "Spaces → Joining nodes")
@@ -654,9 +652,6 @@ func TestSpaceMintJoinWithoutScriptWritesTheTicketPrivately(t *testing.T) {
 	}
 	if dst, err := os.Stat(filepath.Dir(path)); err != nil || dst.Mode().Perm() != 0o700 || filepath.Dir(path) == tmp {
 		t.Fatalf("ticket directory want a fresh 0700 one below tmp: %s %v %v", path, dst, err)
-	}
-	if raw, _ := os.ReadFile(victim); string(raw) != "untouched\n" {
-		t.Fatalf("ticket written through the planted symlink: %q", raw)
 	}
 	if len(joinScripts(t, tmp, "worker-1")) != 0 || len(h.runner.calls) != 0 {
 		t.Fatalf("a script was written or something ran: %+v", h.runner.calls)
@@ -694,7 +689,141 @@ func TestSpaceMintJoinWithoutScriptReportsAFailedWrite(t *testing.T) {
 	mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "../escaped", false))
 	mustContain(t, h.output(), "is not a node name the platform accepts")
 	mustNotContain(t, h.output(), joinTicket)
+	if h.anyReq("POST", "join-token") {
+		t.Fatal("a refused node name was minted")
+	}
 	if dirs, _ := filepath.Glob(filepath.Join(h.base, "kubehz-join-*")); len(dirs) != 0 {
+		t.Fatalf("a directory was created for a rejected node name: %v", dirs)
+	}
+}
+
+// joinDir is a MkdirTemp seam: it returns dir (prepared by the test) and
+// records the parent directory the writer asked for.
+func joinDir(dir string, parent *string) func(string, string) (string, error) {
+	return func(p, _ string) (string, error) {
+		*parent = p
+		return dir, nil
+	}
+}
+
+// A name planted at the very path of the file (a symlink to a victim, in
+// the directory the writer was given) is never written through: the
+// O_EXCL create refuses it, the live-ticket note follows, the victim keeps
+// its bytes, and the directory goes. The writer is the same for the
+// script and for the ticket alone.
+func TestSpaceMintJoinNeverWritesThroughAPlantedName(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct{ ext, what, body string }{
+		{".token", "join ticket", noScriptJSON},
+		{".sh", "join script", joinTicketJSON},
+	} {
+		t.Run(c.ext, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			victim := filepath.Join(h.base, "victim")
+			if err := os.WriteFile(victim, []byte("untouched\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			priv := filepath.Join(h.base, "priv")
+			if err := os.Mkdir(priv, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(victim, filepath.Join(priv, "kubehz-join-worker-1"+c.ext)); err != nil {
+				t.Fatal(err)
+			}
+			var parent string
+			h.ctx.MkdirTemp = joinDir(priv, &parent)
+			h.handle("POST /api/spaces/sp-123/join-token", 201, c.body)
+			mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
+			mustContain(t, h.output(), "could not write the "+c.what+" for 'worker-1'")
+			mustContain(t, h.output(), "The ticket was minted before the write failed")
+			mustNotContain(t, h.output(), joinTicket)
+			if raw, err := os.ReadFile(victim); err != nil || string(raw) != "untouched\n" {
+				t.Fatalf("the file was written through the planted symlink: %q %v", raw, err)
+			}
+			if _, err := os.Lstat(priv); !os.IsNotExist(err) {
+				t.Fatalf("the directory stays after the failed write: %v", err)
+			}
+			if parent != h.env["TMPDIR"] {
+				t.Fatalf("parent dir %q, want TMPDIR %q", parent, h.env["TMPDIR"])
+			}
+		})
+	}
+}
+
+// A write that fails in the fresh directory (here: a directory the user
+// cannot write) leaves nothing: the directory goes, and the live-ticket
+// note follows. The failure is at the create, after the directory exists.
+func TestSpaceMintJoinRemovesTheDirectoryWhenTheWriteFails(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a 0500 directory")
+	}
+	for _, c := range []struct{ ext, what, body string }{
+		{".token", "join ticket", noScriptJSON},
+		{".sh", "join script", joinTicketJSON},
+	} {
+		t.Run(c.ext, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			priv := filepath.Join(h.base, "priv")
+			if err := os.Mkdir(priv, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			var parent string
+			h.ctx.MkdirTemp = joinDir(priv, &parent)
+			h.handle("POST /api/spaces/sp-123/join-token", 201, c.body)
+			mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
+			mustContain(t, h.output(), "could not write the "+c.what+" for 'worker-1'")
+			mustContain(t, h.output(), "The ticket was minted before the write failed")
+			mustNotContain(t, h.output(), joinTicket)
+			if _, err := os.Lstat(priv); !os.IsNotExist(err) {
+				t.Fatalf("the directory stays after the failed write: %v", err)
+			}
+		})
+	}
+}
+
+// TMPDIR=/ (and //) is the root directory, not the working directory, as
+// in the bash twin; a trailing slash goes.
+func TestSpaceMintJoinTakesTheTMPDIRAsGiven(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	for tmpdir, want := range map[string]string{
+		"/":                            "/",
+		"//":                           "/",
+		filepath.Join(base, "t") + "/": filepath.Join(base, "t"),
+	} {
+		t.Run(tmpdir, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.env["TMPDIR"] = tmpdir
+			priv := filepath.Join(h.base, "priv")
+			if err := os.Mkdir(priv, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			var parent string
+			h.ctx.MkdirTemp = joinDir(priv, &parent)
+			h.handle("POST /api/spaces/sp-123/join-token", 201, noScriptJSON)
+			mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
+			if parent != want {
+				t.Fatalf("TMPDIR %q: parent dir %q, want %q", tmpdir, parent, want)
+			}
+			mustContain(t, h.output(), "(written to "+filepath.Join(priv, "kubehz-join-worker-1.token")+", mode 0600)")
+		})
+	}
+}
+
+// The writer checks the node name itself (the name is part of the path),
+// not only spaceMintJoin before the mint.
+func TestWriteJoinFileRefusesAPathShapedNodeName(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	if _, err := h.ctx.writeJoinFile("../escaped", ".token", "x\n"); err == nil {
+		t.Fatal("a path-shaped node name was written")
+	}
+	mustContain(t, h.output(), "is not a node name the platform accepts")
+	if dirs, _ := filepath.Glob(filepath.Join(h.env["TMPDIR"], "kubehz-join-*")); len(dirs) != 0 {
 		t.Fatalf("a directory was created for a rejected node name: %v", dirs)
 	}
 }
@@ -702,7 +831,8 @@ func TestSpaceMintJoinWithoutScriptReportsAFailedWrite(t *testing.T) {
 // A ticket outside the bootstrap-token shape is refused without a script
 // too: nothing on stdout, no file. The shapes are those of the bats twin:
 // an uppercase letter, a non-ASCII letter, a short secret, an escape, a
-// second line, and a separator other than the dot.
+// second line, a separator other than the dot, and a trailing newline, a
+// NUL or a CR (the bash twin reads the token as JSON text for these).
 func TestSpaceMintJoinWithoutScriptRefusesAnOddTicket(t *testing.T) {
 	t.Parallel()
 	for name, odd := range map[string]string{
@@ -712,6 +842,9 @@ func TestSpaceMintJoinWithoutScriptRefusesAnOddTicket(t *testing.T) {
 		"escape":    joinTicket + "\x1b[2J",
 		"two lines": joinTicket + "\n" + joinTicket,
 		"separator": strings.Replace(joinTicket, ".", "-", 1),
+		"newline":   joinTicket + "\n",
+		"NUL":       joinTicket + "\x00",
+		"CR":        joinTicket + "\r",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

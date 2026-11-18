@@ -82,6 +82,10 @@ type Context struct {
 	// IsTTY reports whether stdout is a terminal (nil = false) — the
 	// assessment printer's colour switch.
 	IsTTY func() bool
+	// MkdirTemp makes the fresh private directory of a join file (nil =
+	// os.MkdirTemp). Tests return a directory they prepared, to plant a
+	// name at the path the file goes to.
+	MkdirTemp func(dir, pattern string) (string, error)
 	// ProviderOutput is the loaded provider's inventory JSON
 	// (provider::output on PROVIDER_CONFIG_FILE), consulted by the kubeone
 	// fingerprint reader when set. nil = no provider loaded → the spec's
