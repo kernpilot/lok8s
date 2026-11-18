@@ -721,9 +721,9 @@ func TestProvisionSharedLimitRefusals(t *testing.T) {
 }
 
 // spaceAPIMessageFixture is the hostile refusal message both implementations
-// are fed: one real newline, a raw ESC sequence, the six characters an api
-// would send to slip an escape sequence through `echo -e`, a BEL, a DEL, and
-// enough padding to pass the 256-character clip.
+// are fed: one real newline, a raw ESC sequence, the six characters of an
+// escape sequence written as text (\033[2J, which must print as text), a BEL,
+// a DEL, and enough padding to pass the 256-character clip.
 func spaceAPIMessageFixture(t *testing.T, name string) string {
 	t.Helper()
 	return strings.TrimSuffix(
@@ -731,8 +731,8 @@ func spaceAPIMessageFixture(t *testing.T, name string) string {
 }
 
 // A refusal message is a SERVER string, and the two implementations must
-// disarm it identically: scrub, then clip, and (bash only, because error()
-// prints through `echo -e`) escape the backslashes last. The golden holds the
+// disarm it identically: scrub, then clip. A backslash stays in both, because
+// error() prints the message as it is. The golden holds the
 // rendered bytes; tests/unit/kubehz_shared_test.bats asserts the bash tree
 // against the SAME file, so a drift on either side turns one of them red.
 func TestProvisionSharedScrubsTheSharedCeilingMessage(t *testing.T) {

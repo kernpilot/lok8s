@@ -253,8 +253,8 @@ func TestDestroyGuardRefusesAClusterNameThatCannotBeShown(t *testing.T) {
 	}
 }
 
-// A backslash: bash's error() prints with echo -e, which reads a backslash
-// sequence ("\e[2J" would reach the terminal as an ESC). The bash twin is
+// A backslash is refused. The rule dates from when bash's error() printed
+// with echo -e, which read "\e[2J" as an ESC; it stays. The bash twin is
 // the test "destroy guard: a cluster_name with a backslash is refused".
 func TestDestroyGuardRefusesAClusterNameWithABackslash(t *testing.T) {
 	for _, name := range []string{`prod\e[2J-a`, `a\b`, `prod\`} {

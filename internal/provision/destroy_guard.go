@@ -150,7 +150,9 @@ func (d *Dispatcher) guardDestroy(ctx context.Context, domainName, kind, cluster
 	// form is not what the operator must type. Refuse a name that a message
 	// cannot show as it is, before any message shows it: a character of
 	// ui.Unshown (a control, separator, bidi or invisible character), a
-	// backslash (bash's error() runs echo -e), a byte that is not UTF-8,
+	// backslash (refused since bash's error() printed with echo -e; it stays
+	// refused, so a name that an older release refused is still refused), a
+	// byte that is not UTF-8,
 	// and U+FFFD. jq turns each sequence that is not UTF-8 into U+FFFD, so
 	// the bash twin (provision::_destroy_guard) refuses U+FFFD for both and
 	// gives the same verdict. Each rule is a clause of its own.

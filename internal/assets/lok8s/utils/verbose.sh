@@ -86,8 +86,9 @@ VERBOSE_JQ_UNSHOWN='def unshown: . < 32 or (. >= 127 and . < 160)
 
 # A jq def: a name from an API (a cloud part, a plan line) as a message
 # shows it, as ls shows a name on a terminal: each code point of unshown,
-# and each backslash, becomes '?'. A backslash sequence would become a
-# control character in `echo -e`. Other characters stay, also multibyte
+# and each backslash, becomes '?' (a backslash sequence became a control
+# character when error() printed with `echo -e`; the rule stays, as in the Go
+# twin). Other characters stay, also multibyte
 # ones. The Go twin is ui.Shown (internal/ui).
 VERBOSE_JQ_SHOWN_NAME="${VERBOSE_JQ_UNSHOWN}"'def shown_name: tostring | explode
   | map(if unshown or . == 92 then 63 else . end) | implode;'
