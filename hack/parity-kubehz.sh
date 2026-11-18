@@ -1060,6 +1060,66 @@ EOF
   # A backslash in the slug prints as typed in both (error() of the bash
   # tree prints through `echo -e`).
   check_api - kubehz node cordon --name worker-1 --domain bslug.dev
+
+  # `lo kubehz join` with no join script from the api: each implementation
+  # writes the ticket to a fresh private directory below TMPDIR and prints
+  # its path (the random part normalized). join_post records the file
+  # (its bytes, 0600 in a 0700 directory) and the count of entries; the
+  # records must match. A ticket with a trailing newline, a NUL or a CR is
+  # refused by both, with no file. A path-shaped node name is refused
+  # before the mint: the space lookup (a GET) goes out, no join-token POST.
+  join_pre() {
+    agent_pre
+    rm -rf "${WORK}/jtmp"
+    mkdir -m 700 "${WORK}/jtmp"
+  }
+  join_post() {
+    agent_post "${1}"
+    local f
+    {
+      for f in "${WORK}"/jtmp/kubehz-join-*/kubehz-join-*.token; do
+        [[ -e "${f}" ]] || continue
+        echo "${f##*/}"
+        stat -c '%a' "${f%/*}" "${f}"
+        od -An -c "${f}"
+      done
+      echo "entries: $(find "${WORK}/jtmp" -mindepth 1 | wc -l)"
+    } > "${WORK}/join.${1}"
+  }
+  parity_normalize() { sed -i -E 's|kubehz-join-[A-Za-z0-9]+/|kubehz-join-RANDOM/|g' "$@"; }
+  # check_join <allow|-> <want-file|no-file> <argv...>: check_api with the
+  # ticket files compared.
+  check_join() {
+    local allow="${1}" want="${2}"
+    shift 2
+    TMPDIR="${WORK}/jtmp" PARITY_PRE_EACH=join_pre PARITY_POST_EACH=join_post check "${allow}" "$@"
+    if [[ "${want}" == file ]] && ! grep -q '^entries: 2$' "${WORK}/join.go"; then
+      fail "ticket file lo $* — the Go run wrote no ticket file: $(head -c 200 "${WORK}/join.go")"
+    elif [[ "${want}" == no-file ]] && ! grep -q '^entries: 0$' "${WORK}/join.go"; then
+      fail "ticket file lo $* — the Go run wrote a file: $(head -c 200 "${WORK}/join.go")"
+    elif ! parity::state_same "${WORK}/join.bash" "${WORK}/join.go" "ticket file lo $*"; then
+      failures=$((failures + 1))
+    fi
+    if [[ ! -s "${WORK}/req.go" ]]; then
+      fail "requests lo $* — the Go run sent nothing; the diff proves nothing"
+    elif diff -q "${WORK}/req.bash" "${WORK}/req.go" >/dev/null; then
+      echo "ok: requests lo $*"
+    else
+      fail "requests lo $* — the two implementations sent different requests:"
+      diff "${WORK}/req.bash" "${WORK}/req.go" | head -10 | sed 's/^/  /' || true
+    fi
+  }
+  check_join "${UNBOUND}" file kubehz join worker-1 --domain acme.dev
+  for node in worker-nl worker-nul worker-cr; do
+    check_join "${UNBOUND}" no-file kubehz join "${node}" --domain acme.dev
+  done
+  TMPDIR="${WORK}/jtmp" check_api "${UNBOUND}" kubehz join ../escaped --domain acme.dev
+  if grep -q 'join-token' "${WORK}/req.go" "${WORK}/req.bash"; then
+    fail "lo kubehz join ../escaped --domain acme.dev — a refused node name was minted"
+  else
+    echo "ok: no mint lo kubehz join ../escaped --domain acme.dev"
+  fi
+  unset -f parity_normalize
   # The contract on the Go side alone: 0 on success, 1 on a refusal.
   expect_rc 0 kubehz node cordon --name worker-1 --domain acme.dev
   expect_rc 1 kubehz node cordon --name joining-1 --domain acme.dev
