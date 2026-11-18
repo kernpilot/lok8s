@@ -272,8 +272,16 @@ func TestHandoverReceiveRunsInOrder(t *testing.T) {
 	if ho.lineIndex("etcdutl snapshot restore "+ho.snapshot+" --data-dir "+ho.etcdDir) < 0 {
 		t.Fatal("restore args")
 	}
-	if ho.lineIndex("kubeadm init --config "+ho.k8sDir+"/kubehz-handover-kubeadm.yaml --ignore-preflight-errors=DirAvailable--var-lib-etcd --skip-phases=addon/coredns,addon/kube-proxy --skip-token-print") < 0 {
-		t.Fatalf("kubeadm init args:\n%s", strings.Join(ho.calls, "\n"))
+	// The whole argv, not a prefix, and one init: an argument added after
+	// --skip-token-print, or a second init, fails here.
+	var inits []string
+	for _, l := range ho.calls {
+		if strings.HasPrefix(l, "kubeadm init") {
+			inits = append(inits, l)
+		}
+	}
+	if want := "kubeadm init --config " + ho.k8sDir + "/kubehz-handover-kubeadm.yaml --ignore-preflight-errors=DirAvailable--var-lib-etcd --skip-phases=addon/coredns,addon/kube-proxy --skip-token-print"; len(inits) != 1 || inits[0] != want {
+		t.Fatalf("kubeadm init argv:\n%s\nwant exactly:\n%s", strings.Join(inits, "\n"), want)
 	}
 	for _, k := range []string{"ca.crt", "sa.key", "front-proxy-ca.key"} {
 		if readFile(t, filepath.Join(ho.bundle, k)) != readFile(t, filepath.Join(ho.k8sDir, "pki", k)) {

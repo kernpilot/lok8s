@@ -170,7 +170,9 @@ _mock_node_binaries() {
   restore_line=$(grep -n '^etcdutl snapshot restore' "${CALLS}" | head -1 | cut -d: -f1)
   init_line=$(grep -n '^kubeadm init' "${CALLS}" | head -1 | cut -d: -f1)
   verify_line=$(grep -n '^kubectl --kubeconfig' "${CALLS}" | head -1 | cut -d: -f1)
-  [ -n "${restore_line}" ] && [ -n "${init_line}" ] && [ -n "${verify_line}" ]
+  [ -n "${restore_line}" ]
+  [ -n "${init_line}" ]
+  [ -n "${verify_line}" ]
   [ "${restore_line}" -lt "${init_line}" ]
   [ "${init_line}" -lt "${verify_line}" ]
 
@@ -181,7 +183,11 @@ _mock_node_binaries() {
 
   # kubeadm init got the config AND the documented preflight ignore, and
   # --skip-token-print: its closing join line holds the bootstrap token.
-  run grep -F "kubeadm init --config ${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml --ignore-preflight-errors=DirAvailable--var-lib-etcd --skip-phases=addon/coredns,addon/kube-proxy --skip-token-print" "${CALLS}"
+  # The whole line, and one init: an argument added after the flag, or a
+  # second init, fails here.
+  run grep -c '^kubeadm init' "${CALLS}"
+  assert_output 1
+  run grep -F -x -- "kubeadm init --config ${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml --ignore-preflight-errors=DirAvailable--var-lib-etcd --skip-phases=addon/coredns,addon/kube-proxy --skip-token-print" "${CALLS}"
   assert_success
 
   # PKI was seeded byte-identical (kubeadm reuses it — the identity anchor).
