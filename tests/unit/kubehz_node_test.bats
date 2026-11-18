@@ -862,26 +862,32 @@ _refuse_flag() {
 
 @test "join --print-only: an ANSI escape in expiresAt is stripped" {
   _stub_all
-  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1","expiresAt":"2026-09-01T12:00:00Z\u001b[2J\u001b[Hpwned","ready":true}}'
+  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1","expiresAt":"2026-09-01T12:00:00Z\u001b[2J\u001b[Hpwned\u009b\u2028\u202e","ready":true}}'
 
   run node::join --name box-1 --pool metal --print-only
   assert_success
-  assert_output --partial "2026-09-01T12:00:00Z"
+  assert_output --partial "2026-09-01T12:00:00Z[2J[Hpwned"
   [[ "${output}" != *$'\033'* ]]
+  # A C1 CSI (U+009B), a line separator (U+2028) and a bidi override
+  # (U+202E) go too (the Go twin's TestNodeScrubsANSI).
+  [[ "${output}" != *$'\xc2\x9b'* && "${output}" != *$'\xe2\x80\xa8'* && "${output}" != *$'\xe2\x80\xae'* ]]
 }
 
 @test "error: an ANSI escape in the api's message is stripped" {
   _stub_all
   STUB_MINT_CODE="400"
-  STUB_MINT_BODY='{"ok":false,"data":{"code":"KUBELET_BELOW_FLOOR","message":"v1.29.0 is below\u001b[31m the floor"}}'
+  STUB_MINT_BODY='{"ok":false,"data":{"code":"KUBELET_BELOW_FLOOR","message":"v1.29.0 is below\u001b[31m\u009b\u2028\u202e the floor"}}'
 
   run node::join --name box-1 --pool metal
   assert_failure
-  assert_output --partial "v1.29.0 is below"
+  assert_output --partial "v1.29.0 is below[31m the floor"
   # error() colors its own [error] prefix (its ESC is \033[0;31m), so pin the
   # absence of the INJECTED sequence — without its ESC byte the "[31m"
   # remainder is inert text.
   [[ "${output}" != *$'\033[31m'* ]]
+  # A C1 CSI (U+009B), a line separator (U+2028) and a bidi override
+  # (U+202E) go too (the Go twin's TestNodeScrubsANSI).
+  [[ "${output}" != *$'\xc2\x9b'* && "${output}" != *$'\xe2\x80\xa8'* && "${output}" != *$'\xe2\x80\xae'* ]]
 }
 
 @test "remove: an ANSI escape in the returned pool name is stripped" {
@@ -899,7 +905,7 @@ _refuse_flag() {
 
 @test "status: an ANSI escape in a node row is stripped, the table survives" {
   _stub_all
-  STUB_NODES_BODY='{"ok":true,"data":{"nodes":[{"name":"box-\u001b[31m\u009b\u202e1","pool":"metal","status":"Ready","joinedAt":"2026-08-30T10:00:00Z"},{"name":"box-2","pool":"metal\u2028","status":"Ready","joinedAt":"2026-08-31T10:00:00Z"}],"usage":{"nodes":2,"maxStaticNodes":20},"discoveryReady":true}}'
+  STUB_NODES_BODY='{"ok":true,"data":{"nodes":[{"name":"box-\u001b[31m\u009b\u202e1","pool":"metal","status":"Ready","joinedAt":"2026-08-30T10:00:00Z"},{"name":"box-2","pool":"metal\u2028","status":"Ready","joinedAt":"2026-08-31T10:00:00Z"}],"usage":{"nodes":"2\u009b","maxStaticNodes":"2\u20280\u202e"},"discoveryReady":true}}'
 
   run node::status
   assert_success
@@ -907,6 +913,8 @@ _refuse_flag() {
   # and the newline (the Go twin's TestNodeScrubsANSI).
   assert_line "$(printf '  %-24s %-16s %-10s %s' 'box-[31m1' metal Ready 2026-08-30T10:00:00Z)"
   assert_line "$(printf '  %-24s %-16s %-10s %s' box-2 metal Ready 2026-08-31T10:00:00Z)"
+  # The usage counts are server strings too.
+  assert_line "Nodes:   2/20"
   [[ "${output}" != *$'\033'* ]]
   [[ "${output}" != *$'\xc2\x9b'* && "${output}" != *$'\xe2\x80\xa8'* && "${output}" != *$'\xe2\x80\xae'* ]]
 }

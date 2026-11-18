@@ -455,18 +455,24 @@ func TestNodeStatus(t *testing.T) {
 
 func TestNodeScrubsANSI(t *testing.T) {
 	s := defaultNodeStubs()
-	s.mintBody = `{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1","expiresAt":"2026-09-01T12:00:00Z\u001b[2J\u001b[Hpwned","ready":true}}`
+	s.mintBody = `{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1","expiresAt":"2026-09-01T12:00:00Z\u001b[2J\u001b[Hpwned\u009b\u2028\u202e","ready":true}}`
 	h := nodeHarness(t, s, "hosted", "")
 	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", PrintOnly: true}), h.output())
-	mustContain(t, h.output(), "2026-09-01T12:00:00Z")
+	mustContain(t, h.output(), "2026-09-01T12:00:00Z[2J[Hpwned")
 	mustNotContain(t, h.output(), "\033")
+	for _, bad := range []string{"\u009b", "\u2028", "\u202e"} {
+		mustNotContain(t, h.output(), bad)
+	}
 
 	s = defaultNodeStubs()
-	s.mintCode, s.mintBody = 400, `{"ok":false,"data":{"code":"KUBELET_BELOW_FLOOR","message":"v1.29.0 is below\u001b[31m the floor"}}`
+	s.mintCode, s.mintBody = 400, `{"ok":false,"data":{"code":"KUBELET_BELOW_FLOOR","message":"v1.29.0 is below\u001b[31m\u009b\u2028\u202e the floor"}}`
 	h = nodeHarness(t, s, "hosted", "")
 	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
-	mustContain(t, h.output(), "v1.29.0 is below")
+	mustContain(t, h.output(), "v1.29.0 is below[31m the floor")
 	mustNotContain(t, h.output(), "\033[31m")
+	for _, bad := range []string{"\u009b", "\u2028", "\u202e"} {
+		mustNotContain(t, h.output(), bad)
+	}
 
 	s = defaultNodeStubs()
 	s.removeBody = `{"ok":true,"data":{"name":"box-1","pool":"metal\u001b[2J\u009b\u2028\u202e","status":"Draining"}}`
@@ -478,13 +484,15 @@ func TestNodeScrubsANSI(t *testing.T) {
 	}
 
 	s = defaultNodeStubs()
-	s.nodesBody = `{"ok":true,"data":{"nodes":[{"name":"box-\u001b[31m\u009b\u202e1","pool":"metal","status":"Ready","joinedAt":"2026-08-30T10:00:00Z"},{"name":"box-2","pool":"metal\u2028","status":"Ready","joinedAt":"2026-08-31T10:00:00Z"}],"usage":{"nodes":2,"maxStaticNodes":20},"discoveryReady":true}}`
+	s.nodesBody = `{"ok":true,"data":{"nodes":[{"name":"box-\u001b[31m\u009b\u202e1","pool":"metal","status":"Ready","joinedAt":"2026-08-30T10:00:00Z"},{"name":"box-2","pool":"metal\u2028","status":"Ready","joinedAt":"2026-08-31T10:00:00Z"}],"usage":{"nodes":"2\u009b","maxStaticNodes":"2\u20280\u202e"},"discoveryReady":true}}`
 	h = nodeHarness(t, s, "hosted", "")
 	mustOK(t, h.ctx.NodeStatus(t.Context(), "acme.example.org", NodeOpts{}), h.output())
 	// One row each, in the columns (the bash twin scrubs the TSV rows as one
 	// block: it keeps the tab and the newline).
 	mustContain(t, h.output(), "\n  box-[31m1                metal            Ready      2026-08-30T10:00:00Z\n")
 	mustContain(t, h.output(), "\n  box-2                    metal            Ready      2026-08-31T10:00:00Z\n")
+	// The usage counts are server strings too.
+	mustContain(t, h.output(), "Nodes:   2/20\n")
 	for _, bad := range []string{"\033", "\u009b", "\u2028", "\u202e"} {
 		mustNotContain(t, h.output(), bad)
 	}
