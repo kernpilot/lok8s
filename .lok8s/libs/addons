@@ -385,43 +385,90 @@ addons::_running_job() {
   return 1
 }
 
-# addons::_check_stop <pid> <watchdog>
+# addons::_check_watchdog <check> <pid> <tickfd>
+# The watchdog of the Secret plugin check of addons::dry_run_boundary. It
+# runs in a job of the check (<check>: the pid of the check's subshell, the
+# parent of the plugin <pid>), and waits in `read -t` on <tickfd>, the
+# check's FIFO:
+#   - the line "end" (the plugin ended) ends it, and it sends no signal;
+#   - at _ADDONS_DRYRUN_CHECK_TIMEOUT seconds it sends USR1 to the check,
+#     which sends TERM to the plugin if it still runs and writes the
+#     time-limit mark. Then the grace starts;
+#   - the line "stop" (an INT or TERM stopped the check, and the check sent
+#     TERM to the plugin) starts the grace at once. A "stop" in the grace of
+#     the time limit starts the grace again, once;
+#   - at the end of the grace it sends USR2 to the check, which sends KILL
+#     to the plugin if it still runs.
+# A read that fails, or a line it does not know, counts as the end of the
+# time. A line stays in the FIFO until the watchdog reads it, so the
+# watchdog cannot miss it. A TERM to the watchdog could be lost: bash 5.2
+# can drop a signal that a subshell gets before it sets its trap, and the
+# watchdog then waited until the time limit and sent TERM to the pid of a
+# plugin that had ended. Only the check sends a signal to the plugin, after
+# addons::_running_job: the watchdog cannot read the check's jobs.
+# If the check is gone (its USR1 or USR2 fails; only a KILL ends the check
+# before its watchdog), the watchdog sends TERM to the plugin, and KILL
+# after the grace, by its pid. Only in that case can the plugin's pid be
+# another process's when the signal comes, and so can the check's pid.
+# The watchdog inherits TERM as ignored (addons::dry_run_boundary): a TERM
+# to the process group must not end the grace.
+addons::_check_watchdog() {
+  local _check="${1}" _pid="${2}" _tick="${3}" _line="" _rc=0 _again=0 _gone=0
+  read -r -t "${_ADDONS_DRYRUN_CHECK_TIMEOUT}" -u "${_tick}" _line || _rc=$?
+  if (( _rc == 0 )) && [[ "${_line}" == end ]]; then
+    return 0
+  fi
+  if (( _rc != 0 )) || [[ "${_line}" != stop ]]; then
+    _again=1
+    kill -USR1 "${_check}" 2>/dev/null || { _gone=1; kill -TERM "${_pid}" 2>/dev/null || :; }
+  fi
+  while :; do
+    _rc=0
+    read -r -t "${_ADDONS_DRYRUN_CHECK_GRACE}" -u "${_tick}" _line || _rc=$?
+    if (( _rc == 0 )) && [[ "${_line}" == end ]]; then
+      return 0
+    fi
+    if (( _rc == 0 && _again )) && [[ "${_line}" == stop ]]; then
+      _again=0
+      continue
+    fi
+    break
+  done
+  if (( _gone )) || ! kill -USR2 "${_check}" 2>/dev/null; then
+    kill -KILL "${_pid}" 2>/dev/null || :
+  fi
+  return 0
+}
+
+# addons::_check_stop <pid> <watchdog> <tickfd> <past>
 # Stops the Secret plugin check of addons::dry_run_boundary on INT or TERM
-# (Go: the runner's interrupt, then WaitDelay): TERM to the watchdog and to
-# the plugin, then KILL to the plugin if it still runs after
-# _ADDONS_DRYRUN_CHECK_GRACE seconds. It runs in the check's subshell,
-# which started both, so it can wait for the plugin. A job that ended gets
-# no signal (addons::_running_job): after the check's wait, the plugin's
-# pid can be another process's. The grace timer and the watchdog are other
-# processes and cannot read the check's jobs: if the plugin ends at the
-# moment that their time runs out, their signal can still reach its pid.
-# The same is true, for some microseconds, between the job test and the
-# kill of the check itself (bash reaps a job in its SIGCHLD handler).
+# (Go: the runner's interrupt, then WaitDelay). It runs in the check's
+# subshell, which started the plugin <pid> and the watchdog <watchdog>
+# (addons::_check_watchdog), and it sends no signal to the watchdog:
+#   1. TERM to the plugin, if it still runs and the time limit did not send
+#      it one already (<past> is 1 then);
+#   2. the line "stop" on <tickfd>: the watchdog starts the grace, and at
+#      its end it sends USR2 to the check, whose trap sends KILL to the
+#      plugin if it still runs;
+#   3. a wait for the plugin, the line "end" on <tickfd>, and a wait for the
+#      watchdog.
+# A job that ended gets no signal (addons::_running_job): after the check's
+# wait, the plugin's pid can be another process's. A signal that comes
+# during the stop (the watchdog's USR2 too) ends a wait early, so the stop
+# waits again while the job runs. All four arguments are required (an
+# empty one for a job that does not exist).
 #
 # It runs in a trap, and set -e applies there again (the `||` of the check
-# does not reach a trap). So each command that can fail ends in `|| :`:
-# else the stop ends at the first one, for example at the wait for a plugin
-# that fails after TERM, and the grace timer then sends KILL to a pid that
-# is no longer the plugin's.
+# does not reach a trap). So each command that can fail ends in `|| :`.
 addons::_check_stop() {
-  local _pid="${1}" _watchdog="${2}" _killer
-  ! addons::_running_job "${_watchdog}" || kill -TERM "${_watchdog}" 2>/dev/null || :
-  if addons::_running_job "${_pid}"; then
-    kill -TERM "${_pid}" 2>/dev/null || :
-    (
-      trap 'kill -TERM $(jobs -p) 2>/dev/null; exit 0' TERM
-      sleep "${_ADDONS_DRYRUN_CHECK_GRACE}" &
-      wait "$!" || exit 0
-      kill -KILL "${_pid}" 2>/dev/null
-    ) >/dev/null 2>&1 &
-    _killer=$!
-    # A signal that comes during the stop ends a wait early (its trap does
-    # nothing now), so wait again while the plugin runs.
-    while addons::_running_job "${_pid}"; do wait "${_pid}" 2>/dev/null || :; done
-    ! addons::_running_job "${_killer}" || kill -TERM "${_killer}" 2>/dev/null || :
-    wait "${_killer}" 2>/dev/null || :
+  local _pid="${1}" _watchdog="${2}" _tick="${3}" _past="${4}"
+  if [[ "${_past}" != 1 ]]; then
+    ! addons::_running_job "${_pid}" || kill -TERM "${_pid}" 2>/dev/null || :
   fi
-  [[ -z "${_watchdog}" ]] || wait "${_watchdog}" 2>/dev/null || :
+  { printf 'stop\n' >&"${_tick}"; } 2>/dev/null || :
+  while addons::_running_job "${_pid}"; do wait "${_pid}" 2>/dev/null || :; done
+  { printf 'end\n' >&"${_tick}"; } 2>/dev/null || :
+  while addons::_running_job "${_watchdog}"; do wait "${_watchdog}" 2>/dev/null || :; done
   return 0
 }
 
@@ -484,7 +531,7 @@ addons::dry_run_boundary() {
   addons::_helm_stub "${_dir}/bin" > "${_dir}/bin/helm" || return 1
   chmod 700 "${_dir}/bin/docker" "${_dir}/bin/git" "${_dir}/bin/helm" || return 1
   ( umask 077; : > "${_dir}/report" ) || return 1
-  local _plugin="${_dir}/plugins/${_secret}" _rel="${_home#"${PATH_BASE}/"}/${_secret}" _probe _out _late _stop _stopped _caps="" _rc=0 _pid _watchdog _check _lo_sig="" _traps=""
+  local _plugin="${_dir}/plugins/${_secret}" _rel="${_home#"${PATH_BASE}/"}/${_secret}" _probe _out _late _stop _tickdir _tick="" _err _stopped _caps="" _rc=0 _pid _watchdog _check _lo_sig="" _traps=""
   [[ -f "${_home}/${_secret}" ]] || return 0
   if [[ ! -f "${_plugin}" ]]; then
     error "bootstrap dry-run: the dry run's link to the Secret plugin ${_rel} does not resolve, so the dry run cannot check the plugin"
@@ -513,27 +560,49 @@ addons::dry_run_boundary() {
     error "bootstrap dry-run: cannot make a file for the interrupt mark of the check of the Secret plugin ${_rel}: ${_stop}"
     return 1
   fi
-  # The plugin runs in the background with a watchdog: a subshell that
-  # sleeps until the time limit, then sends the plugin TERM (a background
-  # job ignores INT, so not the interrupt that Go sends), and KILL after the
-  # grace. When the plugin ends, the check sends TERM to the watchdog, whose
-  # trap stops its sleep. On bash 5.2 that TERM can be lost when it comes
-  # before the watchdog has set its trap: the check then waits until the
-  # time limit, and reports that the plugin did not end in time. (The
-  # bounded yq reads, spec::_kver_yq and yqbound::run, end their watchdog
-  # with a line on a FIFO instead.) The plugin's stdout goes to a file
-  # outside the probe directory: a $(...) would wait for every process that
-  # holds the pipe. INT and TERM stop the watchdog, and the plugin the same
-  # way (addons::_check_stop).
+  # The FIFO of the watchdog (addons::_check_watchdog), in a directory of
+  # its own. lo's shell opens it read-write (tickfd): neither the open nor a
+  # write blocks, and the watchdog's read sees no end of file. The check
+  # and the watchdog get the descriptor, the plugin does not.
+  if ! _tickdir=$(mktemp -d "${_dir}/check-tick-XXXXXX" 2>&1); then
+    rm -rf -- "${_probe}" "${_out}" "${_late}" "${_stop}"
+    error "bootstrap dry-run: cannot make a directory for the FIFO of the check of the Secret plugin ${_rel}: ${_tickdir}"
+    return 1
+  fi
+  if ! _err=$(mkfifo "${_tickdir}/tick" 2>&1); then
+    rm -rf -- "${_probe}" "${_out}" "${_late}" "${_stop}" "${_tickdir}"
+    error "bootstrap dry-run: cannot make the FIFO of the check of the Secret plugin ${_rel}: ${_err}"
+    return 1
+  fi
+  if ! { exec {_tick}<>"${_tickdir}/tick"; } 2>/dev/null; then
+    rm -rf -- "${_probe}" "${_out}" "${_late}" "${_stop}" "${_tickdir}"
+    error "bootstrap dry-run: cannot open the FIFO ${_tickdir}/tick of the check of the Secret plugin ${_rel}"
+    return 1
+  fi
+  # The plugin runs in the background with a watchdog
+  # (addons::_check_watchdog), which reads lines on the FIFO and sends
+  # signals only to the check: USR1 at the time limit, USR2 at the end of
+  # the grace. The check's traps send the plugin TERM and KILL (a background
+  # job ignores INT, so not the interrupt that Go sends), each only while
+  # the plugin is a running job of the check. When the plugin ends, the
+  # check writes "end" on the FIFO, and the watchdog ends. The check starts
+  # the watchdog while it ignores TERM, so the watchdog inherits the ignore:
+  # a TERM to the process group must not end it. A TERM to the check in
+  # those two commands is lost; the check then ends when the plugin ends, at
+  # the latest at the time limit and its grace. The plugin's stdout goes to
+  # a file outside the probe directory: a $(...) would wait for every
+  # process that holds the pipe. INT and TERM stop the plugin with the same
+  # watchdog (addons::_check_stop).
   #
   # Until the pids of the plugin and of the watchdog are kept, INT and TERM
   # are only noted: a stop between a start and its `$!` would not know that
   # pid and would leave the plugin or the watchdog running. Then the stop
   # traps come, and a noted signal is sent again, so it stops the check as a
-  # later one does. A stop first sets INT and TERM to do nothing: a second
-  # signal would start a second stop inside the first (bash runs its trap
-  # between the commands of the first). It still ends a wait early, so the
-  # stop waits for the plugin again (addons::_check_stop).
+  # later one does. A stop first sets INT, TERM and USR1 to do nothing: a
+  # second signal would start a second stop inside the first (bash runs its
+  # trap between the commands of the first), and the time limit would send
+  # a second TERM. Such a signal still ends a wait early, so the stop waits
+  # for the plugin again (addons::_check_stop).
   #
   # A stop first writes the name of its signal into a mark of its own: the
   # check then reports the interrupt, not a plugin without the dry run. The
@@ -555,7 +624,7 @@ addons::dry_run_boundary() {
   trap '_lo_sig="${_lo_sig:-TERM}"' TERM
   (
     cd "${_probe}" || exit 1
-    _sig=""
+    _sig="" _past=0 _self="${BASHPID}"
     trap '_sig="${_sig:-INT}"' INT
     trap '_sig="${_sig:-TERM}"' TERM
     LOK8S_BOOTSTRAP_DRYRUN=1 \
@@ -568,28 +637,39 @@ addons::dry_run_boundary() {
     PATH_SECRETS="${_probe}/store" \
     LOK8S_SECRETS_DISABLE=1 \
     LOK8S_INTERNAL_SECRETS_KEYS_ONLY=0 \
-      "${_plugin}" --capabilities </dev/null >"${_out}" 2>/dev/null &
+      "${_plugin}" --capabilities </dev/null >"${_out}" 2>/dev/null {_tick}>&- &
     [[ -z "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN}" ]] || sleep "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_PLUGIN}" || :
     _pid=$!
-    (
-      trap 'kill -TERM $(jobs -p) 2>/dev/null; exit 0' TERM
-      sleep "${_ADDONS_DRYRUN_CHECK_TIMEOUT}" &
-      wait "$!" || exit 0
-      echo late > "${_late}"
-      kill -TERM "${_pid}" 2>/dev/null
-      sleep "${_ADDONS_DRYRUN_CHECK_GRACE}" &
-      wait "$!" || exit 0
-      kill -KILL "${_pid}" 2>/dev/null
-    ) >/dev/null 2>&1 &
+    # The watchdog's signals. The time limit sends TERM before it sets
+    # _past: a stop that runs between the two sends TERM once more, never
+    # not at all.
+    trap '! addons::_running_job "${_pid}" || kill -TERM "${_pid}" 2>/dev/null || :; _past=1; echo late > "${_late}" || :' USR1
+    trap '! addons::_running_job "${_pid}" || kill -KILL "${_pid}" 2>/dev/null || :' USR2
+    trap '' TERM
+    ( addons::_check_watchdog "${_self}" "${_pid}" "${_tick}" ) >/dev/null 2>&1 &
+    trap '_sig="${_sig:-TERM}"' TERM
     [[ -z "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG}" ]] || sleep "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_WATCHDOG}" || :
     _watchdog=$!
-    trap 'trap : INT TERM; echo SIGINT > "${_stop}" || :; addons::_check_stop "${_pid}" "${_watchdog}"; exit 130' INT
-    trap 'trap : INT TERM; echo SIGTERM > "${_stop}" || :; addons::_check_stop "${_pid}" "${_watchdog}"; exit 143' TERM
+    trap 'trap : INT TERM USR1; echo SIGINT > "${_stop}" || :; addons::_check_stop "${_pid}" "${_watchdog}" "${_tick}" "${_past}"; exit 130' INT
+    trap 'trap : INT TERM USR1; echo SIGTERM > "${_stop}" || :; addons::_check_stop "${_pid}" "${_watchdog}" "${_tick}" "${_past}"; exit 143' TERM
     [[ -z "${_sig}" ]] || kill -"${_sig}" "${BASHPID}"
+    # The watchdog's USR1 or USR2 ends a wait early with 128+n: wait again
+    # while the plugin runs. A plugin that ended before the first wait is
+    # reaped already, and the first wait still reads its code. After a
+    # code above 128, one more wait reads the plugin's own code (bash keeps
+    # the code of a job that ended).
     _rc=0
     wait "${_pid}" 2>/dev/null || _rc=$?
-    ! addons::_running_job "${_watchdog}" || kill -TERM "${_watchdog}" 2>/dev/null
-    wait "${_watchdog}" 2>/dev/null
+    while addons::_running_job "${_pid}"; do
+      _rc=0
+      wait "${_pid}" 2>/dev/null || _rc=$?
+    done
+    if (( _rc > 128 )); then
+      _rc=0
+      wait "${_pid}" 2>/dev/null || _rc=$?
+    fi
+    { printf 'end\n' >&"${_tick}"; } 2>/dev/null || :
+    while addons::_running_job "${_watchdog}"; do wait "${_watchdog}" 2>/dev/null || :; done
     exit "${_rc}"
   ) &
   [[ -z "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_CHECK}" ]] || sleep "${_ADDONS_DRYRUN_CHECK_TEST_DELAY_CHECK}" || :
@@ -616,7 +696,8 @@ addons::dry_run_boundary() {
   fi
   trap - INT TERM
   [[ -z "${_traps}" ]] || eval "${_traps}"
-  rm -rf -- "${_probe}"
+  exec {_tick}>&-
+  rm -rf -- "${_probe}" "${_tickdir}"
   _caps=$(<"${_out}")
   _stopped=$(<"${_stop}")
   # lo's own signal names the stop: for an INT, lo's shell sent TERM.
