@@ -218,7 +218,7 @@ provision::_destroy_guard_skip() {
 }
 
 # provision::_guard_error <message>: the [error] line of error(), printed
-# with printf '%s' instead of echo -e. The destroy guard and the guard-skip
+# with printf '%s' as error() prints it. The destroy guard and the guard-skip
 # branch of provision::dispatch_destroy print each message that carries the
 # cluster_name, the --confirm-cluster value, the names of other domains or
 # TMPDIR through it, so a backslash sequence in them stays text and the
