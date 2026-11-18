@@ -820,7 +820,8 @@ curl_space_refusal() {
   assert_success
   refute_output --partial "${ticket}"
   local files
-  files=("${TMPDIR}"/kubehz-join-*/kubehz-join-worker-1.token)
+  # The writer resolves each symlink of TMPDIR and prints that path.
+  files=("$(_real "${TMPDIR}")"/kubehz-join-*/kubehz-join-worker-1.token)
   [ "${#files[@]}" -eq 1 ]
   [ -f "${files[0]}" ]
   [ ! -L "${files[0]}" ]
@@ -835,6 +836,11 @@ curl_space_refusal() {
   [ "$(stat -c %a "${files[0]}")" = 600 ]
   [ "$(stat -c %a "$(dirname "${files[0]}")")" = 700 ]
   [ "$(dirname "${files[0]}")" != "${TMPDIR}" ]
+}
+
+# The path with each symlink resolved, as the writer resolves TMPDIR.
+_real() {
+  (cd -P -- "${1}" && pwd -P)
 }
 
 # A mktemp stand-in: it records its template in MKTEMP_ARG and returns
@@ -877,7 +883,7 @@ _stub_mktemp() {
   [ "$(cat "${BATS_TEST_TMPDIR}/victim")" = untouched ]
   [ ! -e "${MKTEMP_DIR}" ]
   [ ! -L "${MKTEMP_DIR}" ]
-  [ "$(cat "${MKTEMP_ARG}")" = "${TMPDIR}/kubehz-join-XXXXXXXXXX" ]
+  [ "$(cat "${MKTEMP_ARG}")" = "$(_real "${TMPDIR}")/kubehz-join-XXXXXXXXXX" ]
 }
 
 # A write that fails in the fresh directory (one the user cannot write)
@@ -904,13 +910,17 @@ _stub_mktemp() {
 }
 
 # TMPDIR=/ (and //) is the root directory, not the working directory, as
-# in the Go twin; a trailing slash goes.
+# in the Go twin; a trailing slash goes, and each symlink is resolved (the
+# writer checks the resolved path and makes the directory there).
 @test "space_write_join_ticket: TMPDIR=/ is the root directory" {
-  local ticket pair tmpdir want
+  local ticket pair tmpdir want real_t
   ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
   _stub_mktemp
+  mkdir -m 700 "${BATS_TEST_TMPDIR}/t"
+  ln -s "${BATS_TEST_TMPDIR}/t" "${BATS_TEST_TMPDIR}/link"
+  real_t=$(_real "${BATS_TEST_TMPDIR}/t")
   # TMPDIR|the template's directory
-  for pair in "/|" "//|" "${BATS_TEST_TMPDIR}/t/|${BATS_TEST_TMPDIR}/t"; do
+  for pair in "/|" "//|" "${BATS_TEST_TMPDIR}/t/|${real_t}" "${BATS_TEST_TMPDIR}/link/|${real_t}"; do
     tmpdir="${pair%%|*}"
     want="${pair#*|}"
     rm -rf -- "${MKTEMP_DIR}"
@@ -1036,6 +1046,157 @@ _stub_mktemp() {
     assert_failure
     assert_output --partial "in a shape this CLI does not recognise; nothing was written"
   done
+}
+
+# A FIFO planted at the very path of the ticket, or a link to one, gets no
+# byte of the ticket: noclobber lets a FIFO through, so the writer makes
+# the file empty first and checks it is a regular file of ours, not a link,
+# before the write. The test holds the FIFO open for reading and writing:
+# no open by the writer can block, and the FIFO keeps what it gets for the
+# read after the mint. The live-ticket note follows, and the directory
+# goes. As the Go twin's TestSpaceMintJoinNeverWritesIntoAPlantedFIFO.
+@test "space_mint_join: a FIFO at the ticket path, or a link to one, gets no byte of the ticket" {
+  local ticket kind fifo got ffd
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  _MINT_BODY=$(jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}')
+  export _MINT_BODY
+  curl() {
+    printf '%s\n201' "${_MINT_BODY}"
+  }
+  export -f curl
+  _stub_mktemp
+  for kind in fifo link; do
+    rm -rf -- "${MKTEMP_DIR}"
+    mkdir -m 700 "${MKTEMP_DIR}"
+    fifo="${MKTEMP_DIR}/kubehz-join-worker-1.token"
+    if [[ "${kind}" == link ]]; then
+      fifo="${BATS_TEST_TMPDIR}/fifo"
+      rm -f -- "${fifo}"
+      ln -s "${fifo}" "${MKTEMP_DIR}/kubehz-join-worker-1.token"
+    fi
+    mkfifo -m 600 "${fifo}"
+    exec {ffd}<>"${fifo}"
+    run kubehz::space_mint_join sp-123 worker-1
+    got=""
+    read -r -t 1 -u "${ffd}" got || true
+    exec {ffd}>&-
+    assert_failure
+    assert_output --partial "could not write the join ticket for 'worker-1'"
+    assert_output --partial "The ticket was minted before the write failed"
+    refute_output --partial "${ticket}"
+    [ -z "${got}" ]
+    [ ! -e "${MKTEMP_DIR}" ]
+  done
+}
+
+# A TMPDIR whose path a foreign owner could change is refused before any
+# directory is made: a part others can write without the sticky bit (the
+# TMPDIR itself or a parent), and a link to such a directory (the resolved
+# path counts). A part with the sticky bit passes, as /tmp does. As the Go
+# twin's TestSpaceMintJoinRefusesATMPDIROthersCanChange.
+@test "space_write_join_ticket: a TMPDIR others can change is refused" {
+  local ticket pair tmpdir bad dirs
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  mkdir "${BATS_TEST_TMPDIR}/gw" "${BATS_TEST_TMPDIR}/ow" "${BATS_TEST_TMPDIR}/wp" "${BATS_TEST_TMPDIR}/lw" "${BATS_TEST_TMPDIR}/st"
+  mkdir "${BATS_TEST_TMPDIR}/wp/sub"
+  chmod 770 "${BATS_TEST_TMPDIR}/gw" "${BATS_TEST_TMPDIR}/lw"
+  chmod 707 "${BATS_TEST_TMPDIR}/ow"
+  chmod 777 "${BATS_TEST_TMPDIR}/wp"
+  chmod 700 "${BATS_TEST_TMPDIR}/wp/sub"
+  chmod 1777 "${BATS_TEST_TMPDIR}/st"
+  ln -s "${BATS_TEST_TMPDIR}/lw" "${BATS_TEST_TMPDIR}/link"
+  # TMPDIR|the part that fails
+  for pair in "gw|gw" "ow|ow" "wp/sub|wp" "link|lw"; do
+    tmpdir="${BATS_TEST_TMPDIR}/${pair%%|*}"
+    bad=$(_real "${BATS_TEST_TMPDIR}/${pair#*|}")
+    TMPDIR="${tmpdir}" run kubehz::space_write_join_ticket worker-1 "${ticket}"
+    assert_failure 1
+    assert_output --partial "the temp dir for the join ticket is not safe: ${bad} is writable by others and has no sticky bit"
+    assert_output --partial "Set TMPDIR to a directory of your own that only you can write (mode 0700)."
+    refute_output --partial "${ticket}"
+    dirs=("${tmpdir}"/kubehz-join-*)
+    [ ! -e "${dirs[0]}" ]
+  done
+  TMPDIR="${BATS_TEST_TMPDIR}/st" run kubehz::space_write_join_ticket worker-1 "${ticket}"
+  assert_success
+  [ "$(cat "${output}")" = "${ticket}" ]
+}
+
+# A part of another user is refused. A user namespace that maps only this
+# user shows the parts of root (/, /tmp) as the overflow uid: another user.
+# Skipped where no user namespace can be made.
+@test "space_write_join_ticket: a TMPDIR part of another user is refused" {
+  unshare --user --map-current-user true 2>/dev/null || skip "no user namespace here"
+  local ticket
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  printf '%s' "${ticket}" > "${BATS_TEST_TMPDIR}/ticket"
+  run unshare --user --map-current-user bash -c '
+    import() { :; }
+    source "${1}/.lok8s/utils/verbose.sh"
+    source "${1}/.lok8s/libs/kubehz/shared"
+    source "${1}/.lok8s/libs/kubehz/node"
+    kubehz::space_write_join_ticket worker-1 "$(cat "${2}")"' _ "${_PROJECT_ROOT}" "${BATS_TEST_TMPDIR}/ticket"
+  assert_failure 1
+  assert_output --partial "the temp dir for the join ticket is not safe: "
+  assert_output --partial " belongs to another user (uid "
+  refute_output --partial "${ticket}"
+  local dirs=("${TMPDIR}"/kubehz-join-*)
+  [ ! -e "${dirs[0]}" ]
+}
+
+# The modes do not follow the umask: under 0400 (which would give a 0300
+# directory) and 0077, the directory is 0700 and the file 0600, and the
+# ticket is in it. As the Go twin's TestSpaceMintJoinSetsTheModesUnderAnyUmask.
+@test "space_mint_join: the modes do not follow the umask" {
+  local ticket mask tmpd files
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  _MINT_BODY=$(jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}')
+  export _MINT_BODY
+  curl() {
+    printf '%s\n201' "${_MINT_BODY}"
+  }
+  export -f curl
+  _masked_mint() {
+    umask "${1}"
+    kubehz::space_mint_join sp-123 worker-1
+  }
+  for mask in 0400 0077; do
+    tmpd="${BATS_TEST_TMPDIR}/u${mask}"
+    mkdir -m 700 "${tmpd}"
+    TMPDIR="${tmpd}" run _masked_mint "${mask}"
+    assert_success
+    files=("${tmpd}"/kubehz-join-*/kubehz-join-worker-1.token)
+    [ "${#files[@]}" -eq 1 ]
+    [ "$(stat -c %a "${files[0]}")" = 600 ]
+    [ "$(stat -c %a "$(dirname "${files[0]}")")" = 700 ]
+    [ "$(cat "${files[0]}")" = "${ticket}" ]
+  done
+}
+
+# A default ACL on TMPDIR wins over the umask: a file made in it gets the
+# group's bits from the ACL (0660 here), not 0600. The writer sets the mode
+# of the empty file before the write, as the Go twin does through the
+# handle, so the ticket file is 0600 in a 0700 directory all the same.
+# Skipped where no ACL can be set.
+@test "space_write_join_ticket: a default ACL on TMPDIR does not widen the modes" {
+  local ticket tmpd files
+  command -v setfacl >/dev/null || skip "no setfacl here"
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  tmpd="${BATS_TEST_TMPDIR}/acl"
+  mkdir -m 700 "${tmpd}"
+  setfacl -d -m u::rwx,g::rwx,o::-,m::rwx "${tmpd}" 2>/dev/null || skip "no ACL on this file system"
+  # The ACL is live: a plain file made in it is 0660 under umask 077.
+  ( umask 077 && : > "${tmpd}/probe" )
+  [ "$(stat -c %a "${tmpd}/probe")" = 660 ]
+  rm -- "${tmpd}/probe"
+  TMPDIR="${tmpd}" run kubehz::space_write_join_ticket worker-1 "${ticket}"
+  assert_success
+  files=("${tmpd}"/kubehz-join-*/kubehz-join-worker-1.token)
+  [ "${#files[@]}" -eq 1 ]
+  [ "${output}" = "$(_real "${tmpd}")/${files[0]#"${tmpd}/"}" ]
+  [ "$(stat -c %a "${files[0]}")" = 600 ]
+  [ "$(stat -c %a "$(dirname "${files[0]}")")" = 700 ]
+  [ "$(cat "${files[0]}")" = "${ticket}" ]
 }
 
 # Under set -x (the trace on stdout: BASH_XTRACEFD=1) the trace holds no

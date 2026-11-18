@@ -86,6 +86,11 @@ type Context struct {
 	// os.MkdirTemp). Tests return a directory they prepared, to plant a
 	// name at the path the file goes to.
 	MkdirTemp func(dir, pattern string) (string, error)
+	// joinWrite and joinClose are the write and the close of a join file
+	// (nil = (*os.File).WriteString and (*os.File).Close). Tests make them
+	// fail, to see that the fresh directory goes.
+	joinWrite func(f *os.File, s string) error
+	joinClose func(f *os.File) error
 	// ProviderOutput is the loaded provider's inventory JSON
 	// (provider::output on PROVIDER_CONFIG_FILE), consulted by the kubeone
 	// fingerprint reader when set. nil = no provider loaded → the spec's

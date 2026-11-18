@@ -4,6 +4,7 @@ package kubehz
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -428,6 +429,10 @@ func joinTickets(t *testing.T, tmp, node string) []string {
 
 func joinFiles(t *testing.T, tmp, node, ext string) []string {
 	t.Helper()
+	// The writer resolves each symlink of TMPDIR and prints that path.
+	if real, err := filepath.EvalSymlinks(tmp); err == nil {
+		tmp = real
+	}
 	paths, err := filepath.Glob(filepath.Join(tmp, "kubehz-join-*", "kubehz-join-"+node+ext))
 	if err != nil {
 		t.Fatal(err)
@@ -699,6 +704,17 @@ func TestSpaceMintJoinWithoutScriptReportsAFailedWrite(t *testing.T) {
 	}
 }
 
+// realDir is dir with each symlink resolved, as the writer resolves TMPDIR
+// (t.TempDir() is below /var -> /private/var on macOS).
+func realDir(t *testing.T, dir string) string {
+	t.Helper()
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return real
+}
+
 // joinDir is a MkdirTemp seam: it returns dir (prepared by the test) and
 // records the parent directory the writer asked for.
 func joinDir(dir string, parent *string) func(string, string) (string, error) {
@@ -746,55 +762,70 @@ func TestSpaceMintJoinNeverWritesThroughAPlantedName(t *testing.T) {
 			if _, err := os.Lstat(priv); !os.IsNotExist(err) {
 				t.Fatalf("the directory stays after the failed write: %v", err)
 			}
-			if parent != h.env["TMPDIR"] {
+			if parent != realDir(t, h.env["TMPDIR"]) {
 				t.Fatalf("parent dir %q, want TMPDIR %q", parent, h.env["TMPDIR"])
 			}
 		})
 	}
 }
 
-// A write that fails in the fresh directory (here: a directory the user
-// cannot write) leaves nothing: the directory goes, and the live-ticket
-// note follows. The failure is at the create, after the directory exists.
+// A write or a close that fails in the fresh directory leaves nothing: the
+// directory goes, and the live-ticket note follows. The seams fail the
+// write and the close of the file itself, after the directory and the
+// file exist.
 func TestSpaceMintJoinRemovesTheDirectoryWhenTheWriteFails(t *testing.T) {
 	t.Parallel()
-	if os.Geteuid() == 0 {
-		t.Skip("root writes into a 0500 directory")
-	}
-	for _, c := range []struct{ ext, what, body string }{
-		{".token", "join ticket", noScriptJSON},
-		{".sh", "join script", joinTicketJSON},
+	failWrite := func(*os.File, string) error { return errors.New("disk full (test)") }
+	failClose := func(f *os.File) error { _ = f.Close(); return errors.New("close failed (test)") }
+	for _, c := range []struct{ name, ext, what, body string }{
+		{"write.token", ".token", "join ticket", noScriptJSON},
+		{"write.sh", ".sh", "join script", joinTicketJSON},
+		{"close.token", ".token", "join ticket", noScriptJSON},
+		{"close.sh", ".sh", "join script", joinTicketJSON},
 	} {
-		t.Run(c.ext, func(t *testing.T) {
+		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			h := newHarness(t)
 			priv := filepath.Join(h.base, "priv")
-			if err := os.Mkdir(priv, 0o500); err != nil {
+			if err := os.Mkdir(priv, 0o700); err != nil {
 				t.Fatal(err)
 			}
 			var parent string
 			h.ctx.MkdirTemp = joinDir(priv, &parent)
+			if strings.HasPrefix(c.name, "write") {
+				h.ctx.joinWrite = failWrite
+			} else {
+				h.ctx.joinClose = failClose
+			}
 			h.handle("POST /api/spaces/sp-123/join-token", 201, c.body)
 			mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
 			mustContain(t, h.output(), "could not write the "+c.what+" for 'worker-1'")
 			mustContain(t, h.output(), "The ticket was minted before the write failed")
 			mustNotContain(t, h.output(), joinTicket)
 			if _, err := os.Lstat(priv); !os.IsNotExist(err) {
-				t.Fatalf("the directory stays after the failed write: %v", err)
+				t.Fatalf("the directory stays after the failed %s: %v", c.name, err)
 			}
 		})
 	}
 }
 
 // TMPDIR=/ (and //) is the root directory, not the working directory, as
-// in the bash twin; a trailing slash goes.
+// in the bash twin; a trailing slash goes, and each symlink is resolved
+// (the writer checks the resolved path and makes the directory there).
 func TestSpaceMintJoinTakesTheTMPDIRAsGiven(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
+	if err := os.Mkdir(filepath.Join(base, "t"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(base, "t"), filepath.Join(base, "link")); err != nil {
+		t.Fatal(err)
+	}
 	for tmpdir, want := range map[string]string{
-		"/":                            "/",
-		"//":                           "/",
-		filepath.Join(base, "t") + "/": filepath.Join(base, "t"),
+		"/":                               "/",
+		"//":                              "/",
+		filepath.Join(base, "t") + "/":    realDir(t, filepath.Join(base, "t")),
+		filepath.Join(base, "link") + "/": realDir(t, filepath.Join(base, "t")),
 	} {
 		t.Run(tmpdir, func(t *testing.T) {
 			t.Parallel()
