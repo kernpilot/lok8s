@@ -8,11 +8,13 @@ package cli
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/testutil"
 	"github.com/kernpilot/lok8s/internal/toolchain"
 )
@@ -198,14 +200,56 @@ func TestToolchainDoctorSectionAlone(t *testing.T) {
 	if !strings.Contains(stderr, "toolchain doctor: a pinned tool is missing") {
 		t.Errorf("stderr = %q", stderr)
 	}
-	// With b present (a stub that answers --version) the b line is ✓ and
-	// the exit code follows the render tools only.
-	testutil.WriteFile(t, filepath.Join(p.Bin, "b"), "#!/bin/sh\necho 4.18.7\n")
-	if err := os.Chmod(filepath.Join(p.Bin, "b"), 0o755); err != nil {
-		t.Fatal(err)
+	// With b and the render tools present at their pins (stubs that answer
+	// the version probe) every line is ✓ and the doctor exits 0.
+	stub := func(path, version string) {
+		testutil.WriteFile(t, path, "#!/bin/sh\necho '"+version+"'\n")
+		if err := os.Chmod(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
-	stdout, _, _ = runLo(t, NewRoot(p), "toolchain", "doctor")
-	if !strings.Contains(stdout, "b 4.18.7 (.bin/b)") {
+	stubB := func(version string) { stub(filepath.Join(p.Bin, "b"), version) }
+	home := filepath.Join(p.Base, ".kustomize")
+	t.Setenv("KUSTOMIZE_PLUGIN_HOME", home)
+	stub(filepath.Join(p.Bin, "kustomize"), toolchain.KustomizeCLI)
+	stub(filepath.Join(home, filepath.FromSlash(toolchain.ChartRendererPluginRel)), toolchain.KhelmVersion+" (helm "+toolchain.HelmVersion+")")
+	stub(filepath.Join(home, filepath.FromSlash(toolchain.SecretPluginRel)), "v"+strings.TrimPrefix(assets.Version(), "v"))
+	stubB(toolchain.BRelease.Version)
+	stdout, _, err = runLo(t, NewRoot(p), "toolchain", "doctor")
+	if !strings.Contains(stdout, "b "+toolchain.BRelease.Version+" (.bin/b)") {
 		t.Errorf("stubbed b not reported:\n%s", stdout)
+	}
+	if err != nil || strings.Contains(stdout, "\n  ! ") {
+		t.Fatalf("all tools at their pins: err = %v\n%s", err, stdout)
+	}
+	// A b older than the one this lo ships, and a b whose version does not
+	// parse: one piped warning line each, in a fixed form (the contract).
+	// The older line names the command that updates b and prints both
+	// versions bare, as a b release prints its own. -o json reads each as
+	// a warning with the same message. A warning does not change the exit
+	// code.
+	for _, c := range []struct{ printed, msg string }{
+		{"0.1.0", "b 0.1.0 at .bin/b is older than " + toolchain.BRelease.Version + ", the b this lo ships — fix: .bin/b update b"},
+		{"dev", `b at .bin/b (version unknown: --version printed "dev", not a version)`},
+	} {
+		stubB(c.printed)
+		stdout, _, err := runLo(t, NewRoot(p), "toolchain", "doctor")
+		if !strings.Contains(stdout, "\n  ! "+c.msg+"\n") {
+			t.Errorf("b %s: no warning line %q:\n%s", c.printed, c.msg, stdout)
+		}
+		if err != nil {
+			t.Errorf("b %s: err = %v: a warning changed the exit code", c.printed, err)
+		}
+		col := &doctorCollector{}
+		io.WriteString(col, stdout)
+		found := false
+		for _, s := range col.sections {
+			for _, ch := range s.Checks {
+				found = found || (ch.Status == "warn" && ch.Message == c.msg)
+			}
+		}
+		if !found {
+			t.Errorf("b %s: -o json does not read the line as a warning: %+v", c.printed, col.sections)
+		}
 	}
 }

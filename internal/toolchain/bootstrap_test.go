@@ -11,12 +11,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // fakeTarball builds a b-style release tarball: LICENSE + a `b` script.
@@ -284,6 +286,24 @@ func TestExtractBRefusesOversizedMember(t *testing.T) {
 	}
 	if err := extractB(archive, dst); err != nil || !fsutil.IsExecutable(dst) {
 		t.Fatalf("small member: %v", err)
+	}
+}
+
+// An asset that BRelease does not pin fails with an error that names the
+// file where BRelease is declared, so the fix goes to the right place.
+func TestUnpinnedAssetNamesThePinFile(t *testing.T) {
+	t.Parallel()
+	_, _, err := BRelease.Asset("linux", "riscv64")
+	if err == nil {
+		t.Fatal("linux/riscv64 has a pinned asset: pick an architecture that BRelease does not pin")
+	}
+	file := regexp.MustCompile(`internal/toolchain/[a-z_]+\.go`).FindString(err.Error())
+	if file == "" {
+		t.Fatalf("the error names no file: %v", err)
+	}
+	src, readErr := os.ReadFile(filepath.Join(testutil.RepoRoot(t), filepath.FromSlash(file)))
+	if readErr != nil || !strings.Contains(string(src), "\nvar BRelease = Release{") {
+		t.Errorf("the error names %s, which does not declare BRelease (%v): %v", file, readErr, err)
 	}
 }
 
