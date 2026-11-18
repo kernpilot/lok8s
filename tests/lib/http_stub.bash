@@ -20,10 +20,16 @@
 #   stub_cert                   a throwaway self-signed certificate for
 #                               127.0.0.1 in the test dir (openssl):
 #                               STUB_CERT, STUB_KEY
-#   keylog_written              0 when this curl writes a TLS key log
-#                               (SSLKEYLOGFILE) for a request to the https
-#                               stub. Without that, a test that checks the
-#                               key log cannot fail: it must skip
+#   keylog_control              the control of a key log test: curl with
+#                               SSLKEYLOGFILE, to /control of the https
+#                               stub. 0: the request is in the stub log and
+#                               curl wrote a key log. 1: the request is in
+#                               the stub log and curl wrote no key log (its
+#                               TLS backend ignores SSLKEYLOGFILE): a test
+#                               that checks the key log cannot fail, so it
+#                               must skip. 2: the request is not in the stub
+#                               log (no connect, a TLS failure): the test
+#                               fails, because a skip would hide it
 #
 # Unless -q is its first argument, curl reads one config file of the user:
 # $CURL_HOME/.curlrc, else $XDG_CONFIG_HOME/curlrc (no dot), else
@@ -93,9 +99,16 @@ stub_cert() {
     -addext subjectAltName=IP:127.0.0.1 -keyout "${STUB_KEY}" -out "${STUB_CERT}" 2>/dev/null
 }
 
-keylog_written() {
-  local log="${BATS_TEST_TMPDIR}/control.keys"
+keylog_control() {
+  local log="${BATS_TEST_TMPDIR}/control.keys" before after
   rm -f -- "${log}"
-  SSLKEYLOGFILE="${log}" command curl -q -sS -o /dev/null "https://127.0.0.1:${STUB_PORT}/control" 2>/dev/null || return 1
+  # The stub writes the log line before it answers.
+  before=$(grep -c '^GET /control none$' "${STUB_LOG}") || :
+  SSLKEYLOGFILE="${log}" command curl -q -sS -o /dev/null "https://127.0.0.1:${STUB_PORT}/control" 2>/dev/null || :
+  after=$(grep -c '^GET /control none$' "${STUB_LOG}") || :
+  if [[ "${after}" != "$((before + 1))" ]]; then
+    echo "keylog_control: the control request did not get to the https stub, so the test cannot tell a skip from a fault" >&2
+    return 2
+  fi
   [[ -s "${log}" ]]
 }

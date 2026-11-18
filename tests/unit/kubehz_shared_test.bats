@@ -2533,8 +2533,9 @@ _stub_mktemp() {
 # (the keys decrypt a captured exchange: the bearer and the ticket). The
 # control first: this curl writes a key log for a request to the same
 # server when the variable reaches it. A curl that writes none makes the
-# test skip, because it could not fail. A readonly SSLKEYLOGFILE cannot be
-# unset: the call stops before curl sends a request.
+# test skip, because it could not fail. A control request that does not get
+# to the stub fails the test. A readonly SSLKEYLOGFILE cannot be unset: bash
+# says so, and the call stops before curl sends a request.
 @test "space_api_call and space_mint_join: curl writes no TLS key log" {
   command -v python3 >/dev/null || skip "no python3"
   [[ -n "$(command -v openssl)" ]] || skip "no openssl: the https stub needs a self-signed certificate"
@@ -2548,7 +2549,11 @@ _stub_mktemp() {
   stub_cert
   http_stub_start "${STUB_CERT}" "${STUB_KEY}"
   export CURL_CA_BUNDLE="${STUB_CERT}" LOK8S_KUBEHZ_API_URL="https://127.0.0.1:${STUB_PORT}"
-  keylog_written || skip "this curl writes no TLS key log (its TLS backend ignores SSLKEYLOGFILE), so the test cannot fail"
+  local kc=0
+  keylog_control || kc=$?
+  # 2: the control request did not get to the stub. That is a fault, not a skip.
+  [ "${kc}" -ne 2 ]
+  [ "${kc}" -eq 0 ] || skip "this curl writes no TLS key log (its TLS backend ignores SSLKEYLOGFILE), so the test cannot fail"
   export SSLKEYLOGFILE="${BATS_TEST_TMPDIR}/tls.keys"
   (
     kubehz::space_api_call GET /api/spaces/sp-q &&
@@ -2564,10 +2569,62 @@ _stub_mktemp() {
   rc=0
   ( readonly SSLKEYLOGFILE && kubehz::space_api_call GET /api/spaces/sp-r ) > "${o}" 2> "${e}" || rc=$?
   [ "${rc}" -ne 0 ]
+  grep -qF 'unset: SSLKEYLOGFILE: cannot unset: readonly variable' "${e}"
   [ ! -e "${SSLKEYLOGFILE}" ]
   [ "$(grep -c '^GET /api/spaces/sp-q bearer$' "${STUB_LOG}")" -eq 1 ]
   [ "$(grep -c '^POST /api/spaces/sp-q/join-token bearer$' "${STUB_LOG}")" -eq 1 ]
   [ "$(grep -c '^GET /control none$' "${STUB_LOG}")" -eq 1 ]
   [ "$(wc -l < "${STUB_LOG}")" -eq 3 ]
   http_stub_stop
+}
+
+# http::tls_log_vars_unset at the api call, with a curl stand-in that
+# records its environment: curl gets none of the five TLS log and trace
+# variables (SSLKEYLOGFILE, GNUTLS_DEBUG_LEVEL, SSLTRACE, SSLDEBUG,
+# SSLDEBUGFILE), the call works, and the caller keeps all five. The record
+# must hold a control variable, else an empty record would pass. Then each
+# name is readonly in turn: bash says that it cannot unset that name, the
+# stand-in does not run, and the call fails with 1 in
+# KUBEHZ_SPACE_API_CURL_RC (the status of unset). This test needs no GnuTLS
+# or NSS curl, so it never skips.
+@test "space_api_call: curl gets no TLS log or trace variable, and a readonly one stops the call" {
+  local name r rc o="${BATS_TEST_TMPDIR}/tl.stdout" e="${BATS_TEST_TMPDIR}/tl.stderr"
+  local -a names=(SSLKEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE)
+  export CURL_ENV_LOG="${BATS_TEST_TMPDIR}/curl.env"
+  curl() {
+    command env > "${CURL_ENV_LOG}"
+    command cat > /dev/null
+    printf '{"ok":true,"data":{"id":"sp-t"}}\n200'
+  }
+  export -f curl
+  export SSLKEYLOGFILE="${BATS_TEST_TMPDIR}/tls.keys" GNUTLS_DEBUG_LEVEL=9 SSLTRACE=99 SSLDEBUG=99 \
+    SSLDEBUGFILE="${BATS_TEST_TMPDIR}/nss.trace" KUBEHZ_ENV_CONTROL=on
+  kubehz::space_api_call GET /api/spaces/sp-t > "${o}" 2> "${e}"
+  [ "${KUBEHZ_SPACE_API_STATUS}" = 200 ]
+  [ "${KUBEHZ_SPACE_API_BODY}" = '{"ok":true,"data":{"id":"sp-t"}}' ]
+  [ ! -s "${e}" ]
+  # The control: the record is the exported environment of the stand-in.
+  grep -qx 'KUBEHZ_ENV_CONTROL=on' "${CURL_ENV_LOG}"
+  for name in "${names[@]}"; do
+    [ "$(grep -c "^${name}=" "${CURL_ENV_LOG}")" -eq 0 ]
+    # The caller keeps each one, with its value, as an export.
+    [[ "$(declare -p "${name}")" == "declare -x ${name}="* ]]
+  done
+  [ "${SSLKEYLOGFILE}|${GNUTLS_DEBUG_LEVEL}|${SSLTRACE}|${SSLDEBUG}|${SSLDEBUGFILE}" = \
+    "${BATS_TEST_TMPDIR}/tls.keys|9|99|99|${BATS_TEST_TMPDIR}/nss.trace" ]
+  for name in "${names[@]}"; do
+    rm -f -- "${CURL_ENV_LOG}" "${BATS_TEST_TMPDIR}/tl.rc"
+    rc=0
+    (
+      readonly "${name}" || exit 9
+      r=0
+      kubehz::space_api_call GET /api/spaces/sp-ro || r=$?
+      printf '%s|%s' "${r}" "${KUBEHZ_SPACE_API_CURL_RC-unset}" > "${BATS_TEST_TMPDIR}/tl.rc"
+    ) > "${o}" 2> "${e}" || rc=$?
+    [ "${rc}" -eq 0 ]
+    [ "$(cat "${BATS_TEST_TMPDIR}/tl.rc")" = '1|1' ]
+    grep -qF "unset: ${name}: cannot unset: readonly variable" "${e}"
+    [ "$(grep -c 'cannot unset' "${e}")" -eq 1 ]
+    [ ! -e "${CURL_ENV_LOG}" ]
+  done
 }

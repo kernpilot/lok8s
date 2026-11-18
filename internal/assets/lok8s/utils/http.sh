@@ -95,3 +95,31 @@ http::credential_ok() {
   done
   return "${rc}"
 }
+
+# Unset the controls in the environment that make curl or its TLS library
+# write session keys, or a trace with plaintext, before a call that carries
+# a credential. Call it in the subshell that runs curl, so that the caller
+# keeps its environment:
+#   ( http::tls_log_vars_unset && curl -q ... )
+# The list:
+#   SSLKEYLOGFILE        curl appends the TLS session keys to this file, for
+#                        each backend that has a key log. The keys decrypt a
+#                        captured exchange.
+#   GNUTLS_DEBUG_LEVEL   GnuTLS writes debug output on stderr; at high levels
+#                        it holds key material.
+#   SSLTRACE, SSLDEBUG, SSLDEBUGFILE
+#                        the trace and debug output of NSS (an older
+#                        NSS-backed curl, NSS built with DEBUG or TRACE). It
+#                        can hold the plaintext (a bearer, a signed URL).
+#                        Without SSLDEBUGFILE it goes to stderr.
+# One unset for the whole list: its status is 1 when any name in it is
+# readonly (it still unsets the others), so `&& curl` does not run curl.
+# The caller then gets that 1, not a status of curl.
+# Not covered: a curl or TLS library built to write keys or a trace by
+# itself (wolfSSL built with --enable-keylog-export, a debug build of a TLS
+# library), and an environment that an attacker controls (who sets the
+# environment can also set LD_PRELOAD).
+# Usage: http::tls_log_vars_unset
+http::tls_log_vars_unset() {
+  unset -v SSLKEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE
+}

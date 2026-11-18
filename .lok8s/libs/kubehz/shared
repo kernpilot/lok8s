@@ -187,7 +187,10 @@ kubehz::space_api() {
 # kubehz::space_api without the "unreachable" line: a caller that must tell
 # a failure before the send from one after it (node::maintain) reads the
 # curl exit code in KUBEHZ_SPACE_API_CURL_RC (empty when curl did not run or
-# did not fail) and renders the failure itself.
+# did not fail) and renders the failure itself. It is also 1 when a
+# readonly name stopped http::tls_log_vars_unset before curl ran (the status
+# of unset). curl's own 1 also means that it sent nothing, so
+# node::curl_sent_nothing reads both correctly.
 # Usage: kubehz::space_api_call <method> <path> [json_body]
 kubehz::space_api_call() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
@@ -228,12 +231,16 @@ kubehz::space_api_call() {
   # curl then reads no config file of the user (.curlrc in CURL_HOME or
   # HOME, curlrc in XDG_CONFIG_HOME). A trace-ascii line there would log the
   # bearer and the answer, an output line would write the answer to another
-  # file. curl obeys -q only as its first argument. SSLKEYLOGFILE is unset
-  # for curl only, in a subshell: with it, curl appends the TLS session keys
-  # to that file, and the keys decrypt a captured exchange (the bearer and
-  # the answer). A readonly SSLKEYLOGFILE stops the call before curl runs.
+  # file. curl obeys -q only as its first argument. In the subshell,
+  # http::tls_log_vars_unset clears the TLS log and trace controls for curl
+  # only: SSLKEYLOGFILE, GNUTLS_DEBUG_LEVEL, SSLTRACE, SSLDEBUG and
+  # SSLDEBUGFILE (a key log, GnuTLS debug output with key material, an NSS
+  # trace with plaintext; the reasons are in utils/http.sh). Each could give
+  # away the bearer or the answer. A readonly name in the list stops the
+  # call before curl runs: KUBEHZ_SPACE_API_CURL_RC then holds the status of
+  # unset (1), not a status of curl.
   raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
-    unset -v SSLKEYLOGFILE &&
+    http::tls_log_vars_unset &&
       curl -q -K - -sSL -w $'\n%{http_code}' -X "${method}" \
         "${LOK8S_KUBEHZ_API_URL}${path}" \
         "${extra[@]}"

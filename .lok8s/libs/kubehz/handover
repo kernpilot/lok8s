@@ -42,6 +42,7 @@
 #                             3.5.21-0 — the platform's source line)
 
 import ^utils/verbose
+import ^utils/http
 
 # The contract §2 bundle keys. The six PKI files are what preseed places;
 # receive additionally needs the restore artifacts.
@@ -193,11 +194,14 @@ handover::fetch_snapshot() {
       # take this URL, and the snapshot would go to that file and not to
       # out; a trace-ascii line would log the URL (with its signature) and
       # the snapshot. curl obeys -q only as its first argument.
-      # SSLKEYLOGFILE is unset for curl only, in the subshell: with it, curl
-      # appends the TLS session keys to that file, and the keys decrypt a
-      # captured download (the URL with its signature, and the snapshot). A
-      # readonly SSLKEYLOGFILE stops the download before curl runs.
-      ( umask 077 && unset -v SSLKEYLOGFILE && curl -q -fsSL "${location}" -o "${out}" ) || {
+      # In the subshell, http::tls_log_vars_unset clears the TLS log and
+      # trace controls for curl only: SSLKEYLOGFILE, GNUTLS_DEBUG_LEVEL,
+      # SSLTRACE, SSLDEBUG and SSLDEBUGFILE (a key log, GnuTLS debug output
+      # with key material, an NSS trace with plaintext; the reasons are in
+      # utils/http.sh). Each could give away the URL with its signature, or
+      # the snapshot. A readonly name in the list stops the download before
+      # curl runs.
+      ( umask 077 && http::tls_log_vars_unset && curl -q -fsSL "${location}" -o "${out}" ) || {
         error "handover: downloading the snapshot from ${location} failed — download it yourself and re-run with --snapshot <file>"
         return 1
       }
