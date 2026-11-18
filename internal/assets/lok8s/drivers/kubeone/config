@@ -416,13 +416,14 @@ kubeone::_yq_edit() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # a trace must not show the manifest (utils/keysonly.sh)
   [[ $- != *a* ]] || { local -; set +a; }  # set -a would export the manifest held below
-  local +x +i +l +u _ye_file="${1}" _ye_expr="${2}" _ye_out _ye_n _ye_refs \
+  local +x +i +l +u _ye_file="${1}" _ye_expr="${2}" _ye_nl=$'\n' _ye_out _ye_n _ye_refs \
     || { error "kubeone::_yq_edit: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
   shift 2
-  _ye_refs=$'\n'"$(declare -pn)"$'\n'  # a line per nameref in scope, `declare -<flags> <name>[="<name>"]`: no value
+  _ye_refs="${_ye_nl}$(declare -pn)${_ye_nl}"  # a line per nameref in scope, `declare -<flags> <name>[="<name>"]`: no value
+  # The newline is in _ye_nl: shellcheck misreads $'\n' inside =~ (SC1011).
   for _ye_n in "$@"; do
     [[ "${_ye_n}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "${_ye_n}" != _ye_* && "${_ye_n}" != _ko_* ]] \
-      && [[ ! "${_ye_refs}" =~ $'\n'declare\ -[[:alpha:]]*n[[:alpha:]]*\ ${_ye_n}(=|$'\n') ]] \
+      && [[ ! "${_ye_refs}" =~ ${_ye_nl}declare\ -[[:alpha:]]*n[[:alpha:]]*\ ${_ye_n}(=|${_ye_nl}) ]] \
       || { error "kubeone::_yq_edit: an argument after the expression is not a variable name of the caller (_ye_* and _ko_* are reserved, a nameref is refused)"; return 1; }
   done
   # shellcheck disable=SC2163 # "$@" holds variable names, checked above: export them by name

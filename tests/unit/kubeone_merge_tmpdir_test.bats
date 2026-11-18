@@ -421,6 +421,19 @@ if [[ "$(trap -p INT TERM HUP)" == "${before}" ]]; then echo "traps after failur
   # is false for it.
   local -n fixture_unset_ref
   _assert_name_refused 'fixture_unset_ref'
+  # Anti-vacuity of the anchors: a plain variable whose name is the start
+  # of a nameref's name is not a nameref. It passes and reaches yq.
+  local FIXTURE_P=8
+  local -n FIXTURE_P_ref=FIXTURE_P
+  : > "${YQ_LOG}"
+  local saved_path="${PATH}"
+  PATH="${YQ_STUBS}:${saved_path}"
+  run kubeone::_yq_edit "${RW}/m.yaml" '.x = strenv(FIXTURE_P)' FIXTURE_P
+  PATH="${saved_path}"
+  assert_success
+  [ -s "${YQ_LOG}" ] || { echo "the stub logged no yq run" >&2; return 1; }
+  run yq -r '.x' "${RW}/m.yaml"
+  assert_output "8"
 }
 
 # _count_stubs <dir> <yq pattern>: stubs of cat, yq and rm in <dir>. Each
