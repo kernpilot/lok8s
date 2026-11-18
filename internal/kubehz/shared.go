@@ -469,6 +469,12 @@ func (c *Context) spaceMintJoin(ctx context.Context, cfg *Config, spaceID, nodeN
 	if err := c.assertNodeName(nodeName); err != nil {
 		return err
 	}
+	// Nor a temp dir that fails the check (joinTempDir printed why). The
+	// writer checks again: the directory can change in between. A TMPDIR
+	// that cannot be resolved is left to the writer, as before.
+	if _, err := c.joinTempDir(); errors.Is(err, errTmpNotPrivate) {
+		return ErrHandled
+	}
 	res, err := c.spaceAPI(ctx, cfg, "POST", "/api/spaces/"+spaceID+"/join-token", compactJSON(jsonPair{"nodeName", nodeName}))
 	if err != nil {
 		return err

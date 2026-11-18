@@ -3,6 +3,8 @@
 package kubehz
 
 import (
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -63,13 +65,13 @@ func TestSpaceMintJoinNeverWritesIntoAPlantedFIFO(t *testing.T) {
 	}
 }
 
-// A TMPDIR whose path a foreign owner could change is refused before any
-// directory is made: a part that others can write without the sticky bit
-// (the TMPDIR itself or a parent), a part of another user (the Euid seam
-// makes us someone else), the same part when its owner is the overflow
-// uid (only "/" may be), and a link to such a directory. A part with the
-// sticky bit passes, as /tmp does. The mint has happened, so the
-// live-ticket note follows the reason.
+// A TMPDIR whose path a foreign owner could change is refused BEFORE the
+// mint, so it costs no ticket: a part that others can write without the
+// sticky bit (the TMPDIR itself or a parent), a part of another user (the
+// Euid seam makes us someone else), the same part when its owner is the
+// overflow uid (only "/" may be), and a link to such a directory. No
+// join-token request goes out, and no live-ticket note follows. A part
+// with the sticky bit passes, as /tmp does.
 func TestSpaceMintJoinRefusesATMPDIROthersCanChange(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
@@ -120,8 +122,11 @@ func TestSpaceMintJoinRefusesATMPDIROthersCanChange(t *testing.T) {
 			mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
 			mustContain(t, h.output(), "the temp dir for the join ticket is not safe: "+realDir(t, bad)+" "+c.why+"\n")
 			mustContain(t, h.output(), "Set TMPDIR to a directory of your own that only you can write (mode 0700).")
-			mustContain(t, h.output(), "could not write the join ticket for 'worker-1'\n")
-			mustContain(t, h.output(), "The ticket was minted before the write failed")
+			if h.anyReq("POST", "/join-token") {
+				t.Fatal("a refused TMPDIR still minted a ticket")
+			}
+			mustNotContain(t, h.output(), "could not write")
+			mustNotContain(t, h.output(), "The ticket was minted")
 			mustNotContain(t, h.output(), joinTicket)
 			if dirs, _ := filepath.Glob(filepath.Join(tmpdir, "kubehz-join-*")); len(dirs) != 0 {
 				t.Fatalf("a directory was made in a refused TMPDIR: %v", dirs)
@@ -138,6 +143,32 @@ func TestSpaceMintJoinRefusesATMPDIROthersCanChange(t *testing.T) {
 			t.Fatalf("ticket files below a sticky TMPDIR: %v", got)
 		}
 	})
+}
+
+// The writer checks the TMPDIR again: it can change between the check
+// before the mint and the write. Here the api stub makes it group-writable
+// while it answers the mint. The writer refuses, no directory is made, and
+// the live-ticket note follows (the mint has happened).
+func TestSpaceMintJoinChecksTheTMPDIRAgainAtTheWrite(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	tmpdir := modeDir(t, h.base, "changes", 0o700)
+	h.env["TMPDIR"] = tmpdir
+	h.handleFunc("POST /api/spaces/sp-123/join-token", func(w http.ResponseWriter, _ *http.Request) {
+		if err := os.Chmod(tmpdir, 0o770); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(201)
+		_, _ = io.WriteString(w, noScriptJSON)
+	})
+	mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
+	mustContain(t, h.output(), "the temp dir for the join ticket is not safe: "+realDir(t, tmpdir)+" is writable by others and has no sticky bit\n")
+	mustContain(t, h.output(), "could not write the join ticket for 'worker-1'\n")
+	mustContain(t, h.output(), "The ticket was minted before the write failed")
+	mustNotContain(t, h.output(), joinTicket)
+	if dirs, _ := filepath.Glob(filepath.Join(tmpdir, "kubehz-join-*")); len(dirs) != 0 {
+		t.Fatalf("a directory was made in a refused TMPDIR: %v", dirs)
+	}
 }
 
 // The overflow uid is trusted for "/" alone: in a user namespace that does

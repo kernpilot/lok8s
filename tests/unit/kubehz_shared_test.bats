@@ -1218,13 +1218,67 @@ _stub_mktemp() {
       mkdir -m 700 /tmp/t
       TMPDIR=/tmp/t kubehz::space_join_tmp_dir' _ "${_PROJECT_ROOT}" "${BATS_TEST_TMPDIR}/${f}"
     if [[ "${f}" == num ]]; then
-      assert_failure 1
+      assert_failure 2
       assert_output --partial "the temp dir for the join ticket is not safe: / belongs to another user (uid "
     elif [[ "${output}" == *"owner of /: 65534"* ]]; then
       assert_success
       assert_line "/tmp/t"
     fi
   done
+}
+
+# The TMPDIR check runs before the mint as well: a TMPDIR that fails it
+# costs no ticket. No join-token request goes out (the curl stand-in logs
+# each call), and no live-ticket note follows. As the Go twin's
+# TestSpaceMintJoinRefusesATMPDIROthersCanChange.
+@test "space_mint_join: a TMPDIR that fails the check mints nothing" {
+  local tmpd
+  CALLS="${BATS_TEST_TMPDIR}/calls"
+  export CALLS
+  curl() {
+    printf '%s\n' "$*" >> "${CALLS}"
+    printf '%s\n201' '{"ok":true,"data":{}}'
+  }
+  export -f curl
+  tmpd="${BATS_TEST_TMPDIR}/gw"
+  mkdir "${tmpd}"
+  chmod 770 "${tmpd}"
+  TMPDIR="${tmpd}" run kubehz::space_mint_join sp-123 worker-1
+  assert_failure
+  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${tmpd}") is writable by others and has no sticky bit"
+  assert_output --partial "Set TMPDIR to a directory of your own that only you can write (mode 0700)."
+  refute_output --partial "could not write"
+  refute_output --partial "The ticket was minted"
+  [ ! -e "${CALLS}" ]
+  local dirs=("${tmpd}"/kubehz-join-*)
+  [ ! -e "${dirs[0]}" ]
+}
+
+# The writer checks the TMPDIR again: it can change between the check
+# before the mint and the write. Here the curl stand-in makes it
+# group-writable while it answers the mint. The writer refuses, no
+# directory is made, and the live-ticket note follows (the mint has
+# happened). As the Go twin's TestSpaceMintJoinChecksTheTMPDIRAgainAtTheWrite.
+@test "space_mint_join: the writer checks the TMPDIR again" {
+  local ticket
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  _MINT_BODY=$(jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}')
+  CHG_DIR="${BATS_TEST_TMPDIR}/changes"
+  export _MINT_BODY CHG_DIR
+  mkdir -m 700 "${CHG_DIR}"
+  curl() {
+    chmod 770 "${CHG_DIR}"
+    printf '%s\n201' "${_MINT_BODY}"
+  }
+  export -f curl
+  TMPDIR="${CHG_DIR}" run kubehz::space_mint_join sp-123 worker-1
+  assert_failure
+  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${CHG_DIR}") is writable by others and has no sticky bit"
+  assert_output --partial "could not write the join ticket for 'worker-1'"
+  assert_output --partial "The ticket was minted before the write failed"
+  refute_output --partial "${ticket}"
+  local dirs=("${CHG_DIR}"/kubehz-join-*)
+  [ ! -e "${dirs[0]}" ]
 }
 
 # The modes do not follow the umask: under 0400 (which would give a 0300
