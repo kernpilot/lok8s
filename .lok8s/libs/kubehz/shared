@@ -532,6 +532,10 @@ kubehz::space_mint_join() {
   local token expires
   token=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.token // .token // empty')
   expires=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.expiresAt // .expiresAt // empty')
+  # A server string for a plain echo: scrubbed and clipped, as the Go twin
+  # does. (The Go twin also prints an endpoint, next to the join script;
+  # this tree has no join script, so it prints no endpoint.)
+  [[ -z "${expires}" ]] || expires=$(kubehz::space_bound_string "${expires}")
   if [[ -z "${token}" ]]; then
     error "kubehz API did not return a join token for '${node_name}'"
     return 1

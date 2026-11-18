@@ -755,6 +755,35 @@ curl_space_refusal() {
   assert_output --partial 'literal:\t and \\ stay'
 }
 
+# The expiry of a join ticket is a server string too: scrubbed, then clipped
+# at 256 characters (the Go twin's
+# TestSpaceMintJoinScrubsServerStringsAndRefusesAnOddTicket).
+@test "space_mint_join: the expiry is scrubbed and clipped" {
+  local ticket
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  _MINT_BODY='{"ok":true,"data":{"token":"'"${ticket}"'","expiresAt":"2026\u001b[2J\u009b\u2028\u202e-08-07"}}'
+  export _MINT_BODY
+  curl() {
+    printf '%s\n201' "${_MINT_BODY}"
+  }
+  export -f curl
+
+  run kubehz::space_mint_join sp-123 worker-1
+  assert_success
+  assert_output --partial "valid until 2026[2J-08-07, single use"
+  refute_output --partial $'\033'
+  refute_output --partial $'\xc2\x9b'
+  refute_output --partial $'\xe2\x80\xa8'
+  refute_output --partial $'\xe2\x80\xae'
+
+  local long
+  long=$(printf 'y%.0s' {1..300})
+  _MINT_BODY=$(jq -nc --arg t "${ticket}" --arg e "${long}" '{ok: true, data: {token: $t, expiresAt: $e}}')
+  run kubehz::space_mint_join sp-123 worker-1
+  assert_success
+  assert_output --partial "valid until ${long:0:256}…, single use"
+}
+
 @test "provision_shared: a lost create race adopts via re-lookup" {
   yq_space_defaults
   CURL_STATE="${BATS_TEST_TMPDIR}/race"

@@ -611,12 +611,23 @@ func TestSpaceMintJoinScrubsServerStringsAndRefusesAnOddTicket(t *testing.T) {
 	tmp := filepath.Join(h.base, "tmp")
 	_ = os.MkdirAll(tmp, 0o755)
 	h.env["TMPDIR"] = tmp
-	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","expiresAt":"2026\u001b[2J-08-07","endpoint":"https://kkp1\u001b[31m.example:6443","script":"#!/bin/bash\n"}}`)
+	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"`+joinTicket+`","expiresAt":"2026\u001b[2J\u009b\u2028\u202e-08-07","endpoint":"https://kkp1\u001b[31m\u009b\u2028\u202e.example:6443","script":"#!/bin/bash\n"}}`)
 	mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
 	mustNotContain(t, h.output(), "\x1b[2J")
 	mustNotContain(t, h.output(), "\x1b[31m")
+	for _, bad := range []string{"\u009b", "\u2028", "\u202e"} {
+		mustNotContain(t, h.output(), bad)
+	}
 	mustContain(t, h.output(), "valid until 2026[2J-08-07")
 	mustContain(t, h.output(), "https://kkp1[31m.example:6443")
+
+	// The expiry is clipped at 256 runes, then one ellipsis (the bash twin's
+	// "space_mint_join: the expiry is scrubbed and clipped").
+	h.reset()
+	long := strings.Repeat("y", 300)
+	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"`+joinTicket+`","expiresAt":"`+long+`"}}`)
+	mustOK(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false), h.output())
+	mustContain(t, h.output(), "valid until "+long[:256]+"…, single use")
 
 	h.reset()
 	h.handle("POST /api/spaces/sp-123/join-token", 201, `{"ok":true,"data":{"token":"evil\u001b[2Jtoken","expiresAt":"2026-08-07T20:00:00Z","script":"#!/bin/bash\n"}}`)
