@@ -909,6 +909,68 @@ _stub_mktemp() {
   [ ! -e "${MKTEMP_DIR}" ]
 }
 
+# A write that fails after a part of the ticket went out: a printf
+# stand-in writes 5 bytes into the ticket file, then fails (as on a full
+# disk). The cleanup removes the file and the directory, and the note says
+# that no copy was saved. When the cleanup fails too (an rm or an rmdir
+# stand-in fails), the note names the directory, which may still hold a
+# part of the ticket, and does not say that no copy was saved.
+@test "space_mint_join: a partial write is removed, or its directory is named" {
+  local ticket c
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  _MINT_BODY=$(jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}')
+  export _MINT_BODY
+  curl() {
+    printf '%s\n201' "${_MINT_BODY}"
+  }
+  export -f curl
+  _stub_mktemp
+  # The stand-ins live in the subshell of run only.
+  _partial_write() {
+    printf() {
+      if [[ -n "${path-}" && /dev/stdout -ef "${path}" ]]; then
+        builtin printf '%s' "${2:0:5}"
+        return 1
+      fi
+      builtin printf "$@"
+    }
+    case "${1}" in
+      rm) rm() { return 1; } ;;
+      rmdir) rmdir() { return 1; } ;;
+    esac
+    kubehz::space_mint_join sp-123 worker-1
+  }
+  for c in none rm rmdir; do
+    command rm -rf -- "${MKTEMP_DIR}"
+    mkdir -m 700 "${MKTEMP_DIR}"
+    run _partial_write "${c}"
+    assert_failure
+    assert_output --partial "could not write the join ticket for 'worker-1'"
+    assert_output --partial "The ticket was minted before the write failed"
+    refute_output --partial "${ticket}"
+    refute_output --partial "${ticket#*.}"
+    case "${c}" in
+      none)
+        assert_output --partial "single use, and no copy was saved."
+        [ ! -e "${MKTEMP_DIR}" ]
+        ;;
+      rm)
+        assert_output --partial "single use. The cleanup failed too: ${MKTEMP_DIR} may still hold a part of it;"
+        assert_output --partial "delete that directory. Mint a fresh one once the temp dir (TMPDIR) is writable:"
+        refute_output --partial "no copy was saved"
+        [ "$(wc -c < "${MKTEMP_DIR}/kubehz-join-worker-1.token")" -eq 5 ]
+        ;;
+      rmdir)
+        assert_output --partial "single use. The cleanup failed too: ${MKTEMP_DIR} may still hold a part of it;"
+        refute_output --partial "no copy was saved"
+        [ -d "${MKTEMP_DIR}" ]
+        [ ! -e "${MKTEMP_DIR}/kubehz-join-worker-1.token" ]
+        ;;
+    esac
+  done
+  command rm -rf -- "${MKTEMP_DIR}"
+}
+
 # TMPDIR=/ (and //) is the root directory, not the working directory, as
 # in the Go twin; a trailing slash goes, and each symlink is resolved (the
 # writer checks the resolved path and makes the directory there).
@@ -930,6 +992,29 @@ _stub_mktemp() {
     assert_output "${MKTEMP_DIR}/kubehz-join-worker-1.token"
     [ "$(cat "${MKTEMP_ARG}")" = "${want}/kubehz-join-XXXXXXXXXX" ]
   done
+}
+
+# TMPDIR=<safe>/link/.. with link pointing to <unsafe>/child: ".." goes up
+# from the target of the link, as the kernel does (cd -P), so the check
+# reads <unsafe>, which others can write, and refuses it. A lexical clean
+# would read <safe> and pass. Also as a relative TMPDIR. As the Go twin's
+# TestSpaceMintJoinResolvesDotDotAfterALinkPhysically.
+@test "space_join_tmp_dir: .. after a link goes up from the target of the link" {
+  local base
+  base="${BATS_TEST_TMPDIR}/ll"
+  mkdir -m 700 "${base}" "${base}/safe"
+  mkdir -m 770 "${base}/unsafe"
+  mkdir -m 700 "${base}/unsafe/child"
+  ln -s "${base}/unsafe/child" "${base}/safe/link"
+  TMPDIR="${base}/safe/link/.." run kubehz::space_join_tmp_dir
+  assert_failure 2
+  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${base}/unsafe") is writable by others and has no sticky bit"
+  _relative_link_dotdot() {
+    cd -- "${1}" && TMPDIR=link/.. kubehz::space_join_tmp_dir
+  }
+  run _relative_link_dotdot "${base}/safe"
+  assert_failure 2
+  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${base}/unsafe") is writable by others and has no sticky bit"
 }
 
 # The writer checks the node name itself (the name is part of the path),
@@ -1227,6 +1312,45 @@ _stub_mktemp() {
   done
 }
 
+# Without a mapping for this user (unshare --user alone), this user and
+# every other unmapped owner show the overflow uid, so "ours" proves
+# nothing. /usr (root's on the host) and a 1777 directory that shows that
+# owner are refused, with the hint for an unmapped user, and the mint
+# sends no join-token request (the curl stand-in logs each call).
+# Skipped where no user namespace can be made.
+@test "space_join_tmp_dir: a caller without a uid mapping trusts no part of its own uid" {
+  unshare --user true 2>/dev/null || skip "no user namespace here"
+  local ovf tmpdir want
+  ovf=$(cat /proc/sys/kernel/overflowuid 2>/dev/null) || ovf=65534
+  mkdir -m 1777 "${BATS_TEST_TMPDIR}/sticky"
+  # TMPDIR|the part that fails
+  for tmpdir in "/usr|/usr" "${BATS_TEST_TMPDIR}/sticky|$(_real "${BATS_TEST_TMPDIR}/sticky")"; do
+    want="${tmpdir#*|}"
+    rm -f -- "${BATS_TEST_TMPDIR}/calls"
+    run unshare --user bash -c '
+      import() { :; }
+      source "${1}/.lok8s/utils/verbose.sh"
+      source "${1}/.lok8s/libs/kubehz/shared"
+      source "${1}/.lok8s/libs/kubehz/node"
+      curl() { echo called >> "${3}"; }
+      echo "uid: ${EUID}"
+      rc=0
+      TMPDIR="${2}" kubehz::space_join_tmp_dir || rc=$?
+      echo "check rc: ${rc}"
+      rc=0
+      TMPDIR="${2}" kubehz::space_mint_join sp-123 worker-1 || rc=$?
+      echo "mint rc: ${rc}"' _ "${_PROJECT_ROOT}" "${tmpdir%%|*}" "${BATS_TEST_TMPDIR}/calls"
+    assert_success
+    assert_line "uid: ${ovf}"
+    assert_line "check rc: 2"
+    assert_line "mint rc: 1"
+    assert_output --partial "the temp dir for the join ticket is not safe: ${want} cannot be checked (uid ${ovf})"
+    assert_output --partial "The uid of this user is not mapped in the namespace, so the CLI cannot check who owns TMPDIR."
+    refute_output --partial "Set TMPDIR to a directory of your own"
+    [ ! -e "${BATS_TEST_TMPDIR}/calls" ]
+  done
+}
+
 # The TMPDIR check runs before the mint as well: a TMPDIR that fails it
 # costs no ticket. No join-token request goes out (the curl stand-in logs
 # each call), and no live-ticket note follows. As the Go twin's
@@ -1381,6 +1505,42 @@ _stub_mktemp() {
   done
 }
 
+# The shape check leaves the quoted ticket in BASH_REMATCH, a global, and a
+# trace after the mint prints it when PS4 names it. The mint clears it on
+# each path: after a success, and after a failed write (TMPDIR does not
+# exist). The trace goes to stdout (BASH_XTRACEFD=1); the mint's own
+# output goes to a file.
+@test "space_mint_join: no ticket stays in BASH_REMATCH for a later trace" {
+  local ticket tmpdir
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  MINT_FILE="${BATS_TEST_TMPDIR}/mint.json"
+  jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}' > "${MINT_FILE}"
+  export MINT_FILE
+  curl() {
+    printf '%s\n201' "$(cat "${MINT_FILE}")"
+  }
+  export -f curl
+  _ps4_after_mint() {
+    TMPDIR="${1}" kubehz::space_mint_join sp-123 worker-1 > "${BATS_TEST_TMPDIR}/mint.out" 2>&1 || true
+    PS4='+${BASH_REMATCH[0]-} '
+    BASH_XTRACEFD=1
+    set -x
+    : trace-after
+    set +x
+  }
+  for tmpdir in "${TMPDIR}" "${BATS_TEST_TMPDIR}/does-not-exist"; do
+    run _ps4_after_mint "${tmpdir}"
+    assert_success
+    assert_output --partial "+ : trace-after"
+    refute_output --partial "${ticket#*.}"
+    if [[ "${tmpdir}" == "${TMPDIR}" ]]; then
+      grep -q -F "(written to " "${BATS_TEST_TMPDIR}/mint.out"
+    else
+      grep -q -F "could not write the join ticket for 'worker-1'" "${BATS_TEST_TMPDIR}/mint.out"
+    fi
+  done
+}
+
 # Each api call keeps the bearer out of a trace too, not only the mint:
 # the bearer goes to curl in a config on stdin, through a function argument
 # that a trace would print.
@@ -1442,10 +1602,79 @@ _stub_mktemp() {
   [ "$(cat "${ENV_DIR}/body.after")" = "<unset>" ]
 }
 
+# A local takes the export flag of an exported variable of the same name.
+# Each name that holds the ticket, the response, the request body or the
+# API token in the api call (body, raw, extra), in http::curl_config
+# (value, out), in the mint (token_json, token, expires, payload) and in
+# the writer (token, node_name, dir, priv, path) is exported before the
+# mint, empty. Under set -a no child gets the ticket or the API token: the
+# curl stand-in (during the request), mktemp (during the write) and a
+# child after the mint record their environment. The API token is a shell
+# variable here, not exported, so only a leak can put it into a child.
+@test "space_mint_join: exported names of the locals carry nothing to a child" {
+  local ticket f
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  MINT_FILE="${BATS_TEST_TMPDIR}/mint.json"
+  jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}' > "${MINT_FILE}"
+  ENV_DIR="${BATS_TEST_TMPDIR}"
+  export MINT_FILE ENV_DIR
+  curl() {
+    env > "${ENV_DIR}/curl.env"
+    cat > /dev/null
+    printf '%s\n201' "$(cat "${MINT_FILE}")"
+  }
+  mktemp() {
+    env > "${ENV_DIR}/mktemp.env"
+    command mktemp "$@"
+  }
+  export -f curl mktemp
+  _exported_names_mint() {
+    export -n KUBEHZ_TOKEN
+    export body='' raw='' extra='' value='' out='' token_json='' token='' expires='' payload=''
+    export node_name='' dir='' priv='' path=''
+    set -a
+    kubehz::space_mint_join sp-123 worker-1 || return
+    env > "${ENV_DIR}/after.env"
+  }
+  run _exported_names_mint
+  assert_success
+  assert_output --partial "(written to "
+  for f in curl mktemp after; do
+    [ -s "${ENV_DIR}/${f}.env" ]
+    [ "$(grep -c -F -- "${ticket#*.}" "${ENV_DIR}/${f}.env")" -eq 0 ]
+    [ "$(grep -c -F -- "${KUBEHZ_TOKEN}" "${ENV_DIR}/${f}.env")" -eq 0 ]
+  done
+}
+
+# The api call holds the request body in a local: an exported name body
+# (or raw, extra) must not carry it to curl. The body here is a canary.
+@test "space_api: exported names of the locals carry no request body to curl" {
+  local canary
+  canary="canary-$(printf '%s' body-of-the-request)"
+  ENV_DIR="${BATS_TEST_TMPDIR}"
+  export ENV_DIR
+  curl() {
+    env > "${ENV_DIR}/curl.env"
+    cat > /dev/null
+    printf '%s\n200' '{"ok":true,"data":{}}'
+  }
+  export -f curl
+  _exported_names_api() {
+    export body='' raw='' extra=''
+    set -a
+    kubehz::space_api POST /api/spaces "{\"note\":\"${1}\"}"
+  }
+  run _exported_names_api "${canary}"
+  assert_success
+  [ -s "${ENV_DIR}/curl.env" ]
+  [ "$(grep -c -F -- "${canary}" "${ENV_DIR}/curl.env")" -eq 0 ]
+}
+
 # The writer turns allexport off itself, also when it is called on its
 # own: under set -a no child of the write (a mktemp stand-in records its
-# environment) gets the ticket. The ticket reaches the writer as an
-# argument only, never in an exported variable of the test.
+# environment) gets the ticket, also when the names of its locals were
+# exported before. The ticket reaches the writer as an argument only,
+# never in an exported variable of the test.
 @test "space_write_join_ticket: under set -a no child gets the ticket" {
   local ticket
   ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
@@ -1460,6 +1689,9 @@ _stub_mktemp() {
   _exported_write() {
     local t
     t=$(cat "${ENV_DIR}/ticket")
+    # A local takes the export flag of an exported variable of the same
+    # name: each local of the writer is exported before, empty.
+    export token='' node_name='' dir='' priv='' path=''
     set -a
     kubehz::space_write_join_ticket worker-1 "${t}"
   }

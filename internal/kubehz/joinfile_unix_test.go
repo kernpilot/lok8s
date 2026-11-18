@@ -196,6 +196,89 @@ func TestOwnerTrustedTakesTheOverflowUIDOnlyForRoot(t *testing.T) {
 	}
 }
 
+// Without a mapping for this user in a user namespace, this user and every
+// other unmapped owner show the overflow uid: "ours" proves nothing there.
+// Then only root's parts and "/" (of the overflow uid) pass.
+func TestOwnerTrustedForAnUnmappedCaller(t *testing.T) {
+	t.Parallel()
+	c := &Context{Euid: func() int { return 65534 }, OverflowUID: func() int { return 65534 }}
+	for _, tc := range []struct {
+		part string
+		uid  int
+		want bool
+	}{
+		{"/", 65534, true},
+		{"/usr", 65534, false},
+		{"/tmp/sticky", 65534, false},
+		{"/home/me/tmp", 65534, false},
+		{"/tmp", 0, true},
+		{"/home/me/tmp", 1000, false},
+	} {
+		if got := c.ownerTrusted(tc.part, tc.uid); got != tc.want {
+			t.Errorf("ownerTrusted(%q, %d) = %v, want %v", tc.part, tc.uid, got, tc.want)
+		}
+	}
+}
+
+// The seams make the euid the overflow uid (a user namespace without a
+// mapping for this user): a 0700 TMPDIR of ours cannot be checked and is
+// refused before the mint, with the hint for an unmapped user.
+func TestSpaceMintJoinRefusesTheOwnPartsOfAnUnmappedCaller(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root owns its parts as root")
+	}
+	h := newHarness(t)
+	tmpdir := modeDir(t, h.base, "mine", 0o700)
+	h.env["TMPDIR"] = tmpdir
+	h.ctx.Euid = os.Geteuid
+	h.ctx.OverflowUID = os.Geteuid
+	h.handle("POST /api/spaces/sp-123/join-token", 201, noScriptJSON)
+	mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
+	mustContain(t, h.output(), "the temp dir for the join ticket is not safe: "+realDir(t, tmpdir)+" cannot be checked (uid "+strconv.Itoa(os.Geteuid())+")\n")
+	mustContain(t, h.output(), "  The uid of this user is not mapped in the namespace, so the CLI cannot check who owns TMPDIR.\n")
+	mustNotContain(t, h.output(), "Set TMPDIR to a directory of your own")
+	if h.anyReq("POST", "/join-token") {
+		t.Fatal("an unmapped caller's TMPDIR still minted a ticket")
+	}
+	if dirs, _ := filepath.Glob(filepath.Join(tmpdir, "kubehz-join-*")); len(dirs) != 0 {
+		t.Fatalf("a directory was made in a refused TMPDIR: %v", dirs)
+	}
+}
+
+// TMPDIR=<safe>/link/.. with link pointing to <unsafe>/child: ".." goes up
+// from the target of the link, as the kernel and cd -P (the bash twin) do,
+// so the check reads <unsafe> (others can write it) and refuses it before
+// the mint. filepath.Abs or Clean before EvalSymlinks would make it <safe>
+// and pass. The relative form is joined to the working directory (t.Chdir,
+// so no t.Parallel here).
+func TestSpaceMintJoinResolvesDotDotAfterALinkPhysically(t *testing.T) {
+	for _, rel := range []bool{false, true} {
+		t.Run(map[bool]string{false: "absolute", true: "relative"}[rel], func(t *testing.T) {
+			h := newHarness(t)
+			safe := modeDir(t, h.base, "safe", 0o700)
+			unsafe := modeDir(t, h.base, "unsafe", 0o770)
+			child := modeDir(t, unsafe, "child", 0o700)
+			if err := os.Symlink(child, filepath.Join(safe, "link")); err != nil {
+				t.Fatal(err)
+			}
+			// Not filepath.Join: it would clean "link/.." away.
+			tmpdir := safe + "/link/.."
+			if rel {
+				t.Chdir(safe)
+				tmpdir = "link/.."
+			}
+			h.env["TMPDIR"] = tmpdir
+			h.handle("POST /api/spaces/sp-123/join-token", 201, noScriptJSON)
+			mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
+			mustContain(t, h.output(), "the temp dir for the join ticket is not safe: "+realDir(t, unsafe)+" is writable by others and has no sticky bit\n")
+			if h.anyReq("POST", "/join-token") {
+				t.Fatal("a TMPDIR that resolves to a directory others can write still minted a ticket")
+			}
+		})
+	}
+}
+
 // The overflow uid comes from the kernel file; a file that cannot be read
 // or holds no uid gives 65534.
 func TestReadOverflowUIDFallsBackTo65534(t *testing.T) {

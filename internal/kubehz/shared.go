@@ -565,11 +565,27 @@ func (c *Context) joinWriteFailed(what, nodeName, expires string, err error) err
 	}
 	c.echoErr("")
 	c.echoErr("  The ticket was minted before the write failed. It stays valid until %s,", expires)
-	c.echoErr("  single use, and no copy was saved. Mint a fresh one once the temp dir")
-	c.echoErr("  (TMPDIR) is writable:")
+	if left, ok := errors.AsType[*joinLeftError](err); ok {
+		c.echoErr("  single use. The cleanup failed too: %s may still hold a part of it;", left.dir)
+		c.echoErr("  delete that directory. Mint a fresh one once the temp dir (TMPDIR) is writable:")
+	} else {
+		c.echoErr("  single use, and no copy was saved. Mint a fresh one once the temp dir")
+		c.echoErr("  (TMPDIR) is writable:")
+	}
 	c.echoErr("    lo kubehz join %s", nodeName)
 	return ErrHandled
 }
+
+// joinLeftError: the write of a join file failed, and the removal of its
+// fresh directory (dir) failed too. The directory may still hold a part of
+// the ticket. The error text is the one of the write.
+type joinLeftError struct {
+	dir string
+	err error
+}
+
+func (e *joinLeftError) Error() string { return e.err.Error() }
+func (e *joinLeftError) Unwrap() error { return e.err }
 
 // errTmpNotPrivate: the temp dir of a join file failed the check of
 // joinTempDir, which printed why.
@@ -579,27 +595,41 @@ var errTmpNotPrivate = errors.New("the temp dir is not private")
 // goes under. TMPDIR (else the OS default), absolute, with each symlink
 // resolved (TMPDIR=/ is /). Each part of the resolved path, up to /, must
 // belong to root or to this user (ownerTrusted: "/" may also show the
-// overflow uid of a user namespace), and must not be writable by others
-// unless it has the sticky bit (/tmp passes). The owner of a part could
-// otherwise rename the fresh directory and put a FIFO or a link in place
-// of the ticket or the script.
+// overflow uid of a user namespace, and a user with the overflow uid owns
+// nothing it can prove), and must not be writable by others unless it has
+// the sticky bit (/tmp passes). The owner of a part could otherwise rename
+// the fresh directory and put a FIFO or a link in place of the ticket or
+// the script.
 func (c *Context) joinTempDir() (string, error) {
 	dir := c.getenv("TMPDIR")
 	if dir == "" {
 		dir = os.TempDir()
 	}
-	dir, err := filepath.Abs(dir)
-	if err != nil {
-		return "", err
+	// No filepath.Abs or Clean before EvalSymlinks: they make "link/.." the
+	// directory of the link, where the kernel (and cd -P in the bash twin)
+	// goes up from the target of the link. A relative TMPDIR is joined to
+	// the working directory as it is; EvalSymlinks resolves each link before
+	// the ".." after it.
+	if !filepath.IsAbs(dir) {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		dir = wd + string(filepath.Separator) + dir
 	}
 	real, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		return "", err
 	}
 	for part := real; ; part = filepath.Dir(part) {
-		if why := c.notPrivatePart(part); why != "" {
+		if why, unmapped := c.notPrivatePart(part); why != "" {
 			c.errorf("the temp dir for the join ticket is not safe: %s %s", part, why)
-			c.echoErr("  Set TMPDIR to a directory of your own that only you can write (mode 0700).")
+			if unmapped {
+				c.echoErr("  The uid of this user is not mapped in the namespace, so the CLI cannot check who owns TMPDIR.")
+				c.echoErr("  Run it where the uid of this user is mapped (unshare --map-current-user), or outside the namespace.")
+			} else {
+				c.echoErr("  Set TMPDIR to a directory of your own that only you can write (mode 0700).")
+			}
 			return "", errTmpNotPrivate
 		}
 		if part == string(filepath.Separator) {
@@ -609,32 +639,41 @@ func (c *Context) joinTempDir() (string, error) {
 }
 
 // notPrivatePart says why one part of a temp dir path fails the check of
-// joinTempDir ("" when it passes).
-func (c *Context) notPrivatePart(part string) string {
+// joinTempDir ("" when it passes). unmapped: the part is ours, and this
+// user has the overflow uid (a user namespace without a mapping for it).
+func (c *Context) notPrivatePart(part string) (why string, unmapped bool) {
 	fi, err := os.Lstat(part)
 	if err != nil {
-		return "cannot be read"
+		return "cannot be read", false
 	}
 	uid, ok := fileOwner(fi)
 	switch {
 	case !ok:
-		return "cannot be read"
+		return "cannot be read", false
 	case fi.Mode()&fs.ModeSymlink != 0:
-		return "is a symlink"
+		return "is a symlink", false
 	case !c.ownerTrusted(part, uid):
-		return fmt.Sprintf("belongs to another user (uid %d)", uid)
+		if uid == c.euid() {
+			// Ours, and refused: this user has the overflow uid.
+			return fmt.Sprintf("cannot be checked (uid %d)", uid), true
+		}
+		return fmt.Sprintf("belongs to another user (uid %d)", uid), false
 	case fi.Mode().Perm()&0o022 != 0 && fi.Mode()&fs.ModeSticky == 0:
-		return "is writable by others and has no sticky bit"
+		return "is writable by others and has no sticky bit", false
 	}
-	return ""
+	return "", false
 }
 
-// ownerTrusted: a part of the temp dir path must belong to root or to this
-// user. "/" alone may also show the overflow uid: in a user namespace that
-// does not map root, the host's "/" (root's) shows so. Any other part with
-// that owner is refused: there it can be any user of the host.
+// ownerTrusted: a part of the temp dir path must belong to root, or to this
+// user while the uid of this user is not the overflow uid: in a user
+// namespace without a mapping for this user, this user and every other
+// unmapped owner show that uid, so "ours" proves nothing there. "/" alone
+// may also show the overflow uid: in a namespace that does not map root,
+// the host's "/" (root's) shows so. Any other part with that owner is
+// refused: there it can be any user of the host.
 func (c *Context) ownerTrusted(part string, uid int) bool {
-	return uid == 0 || uid == c.euid() || (part == string(filepath.Separator) && uid == c.overflowUID())
+	ovf := c.overflowUID()
+	return uid == 0 || (uid == c.euid() && c.euid() != ovf) || (part == string(filepath.Separator) && uid == ovf)
 }
 
 // writeJoinFile stores a join file, the api's join recipe (ext ".sh") or
@@ -667,14 +706,22 @@ func (c *Context) writeJoinFile(nodeName, ext, content string) (string, error) {
 	}
 	name := "kubehz-join-" + nodeName + ext
 	if err := c.writeJoinInto(priv, name, content); err != nil {
-		_ = os.RemoveAll(priv)
+		removeAll := c.RemoveAll
+		if removeAll == nil {
+			removeAll = os.RemoveAll
+		}
+		if rerr := removeAll(priv); rerr != nil {
+			// The directory may still hold a part of the ticket.
+			return "", &joinLeftError{dir: priv, err: err}
+		}
 		return "", err
 	}
 	return filepath.Join(priv, name), nil
 }
 
 // writeJoinInto writes content to the new file name in the fresh directory
-// priv (writeJoinFile removes priv when it fails).
+// priv (writeJoinFile removes priv when it fails, and reports a failed
+// removal).
 func (c *Context) writeJoinInto(priv, name, content string) error {
 	if err := os.Chmod(priv, 0o700); err != nil {
 		return err

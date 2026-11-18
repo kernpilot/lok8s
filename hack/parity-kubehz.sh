@@ -1139,6 +1139,26 @@ EOF
   else
     echo "ok: no mint lo kubehz join ../escaped --domain acme.dev"
   fi
+  # TMPDIR=<safe>/link/.. with link pointing to <unsafe>/child: ".." goes
+  # up from the target of the link (the kernel's walk), so both check
+  # <unsafe>, which others can write, and refuse it before the mint (the
+  # space lookup goes out, no join-token POST). A lexical clean of the
+  # path would check <safe>, pass and mint.
+  rm -rf "${WORK}/jlink"
+  mkdir -m 700 "${WORK}/jlink" "${WORK}/jlink/safe"
+  mkdir -m 770 "${WORK}/jlink/unsafe"
+  mkdir -m 700 "${WORK}/jlink/unsafe/child"
+  ln -s "${WORK}/jlink/unsafe/child" "${WORK}/jlink/safe/link"
+  TMPDIR="${WORK}/jlink/safe/link/.." check_api "${UNBOUND}" kubehz join worker-1 --domain acme.dev
+  if grep -q 'join-token' "${WORK}/req.go" "${WORK}/req.bash"; then
+    fail "lo kubehz join worker-1 (TMPDIR <safe>/link/..) — a TMPDIR others can write was minted"
+  elif ! grep -q 'jlink/unsafe is writable by others' "${WORK}/go.err" \
+    || ! grep -q 'jlink/unsafe is writable by others' "${WORK}/bash.err"; then
+    fail "lo kubehz join worker-1 (TMPDIR <safe>/link/..) — the check did not read the target of the link"
+  else
+    echo "ok: .. after a link lo kubehz join worker-1 --domain acme.dev"
+  fi
+  rm -rf "${WORK}/jlink"
   unset -f parity_normalize
   # The contract on the Go side alone: 0 on success, 1 on a refusal.
   expect_rc 0 kubehz node cordon --name worker-1 --domain acme.dev

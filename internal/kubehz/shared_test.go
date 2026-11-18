@@ -771,11 +771,11 @@ func TestSpaceMintJoinNeverWritesThroughAPlantedName(t *testing.T) {
 
 // A write or a close that fails in the fresh directory leaves nothing: the
 // directory goes, and the live-ticket note follows. The seams fail the
-// write and the close of the file itself, after the directory and the
-// file exist.
+// write (after 5 bytes went into the file, as a full disk can) and the
+// close of the file itself, after the directory and the file exist.
 func TestSpaceMintJoinRemovesTheDirectoryWhenTheWriteFails(t *testing.T) {
 	t.Parallel()
-	failWrite := func(*os.File, string) error { return errors.New("disk full (test)") }
+	failWrite := partialWrite
 	failClose := func(f *os.File) error { _ = f.Close(); return errors.New("close failed (test)") }
 	for _, c := range []struct{ name, ext, what, body string }{
 		{"write.token", ".token", "join ticket", noScriptJSON},
@@ -801,9 +801,62 @@ func TestSpaceMintJoinRemovesTheDirectoryWhenTheWriteFails(t *testing.T) {
 			mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
 			mustContain(t, h.output(), "could not write the "+c.what+" for 'worker-1'")
 			mustContain(t, h.output(), "The ticket was minted before the write failed")
+			mustContain(t, h.output(), "no copy was saved")
 			mustNotContain(t, h.output(), joinTicket)
 			if _, err := os.Lstat(priv); !os.IsNotExist(err) {
 				t.Fatalf("the directory stays after the failed %s: %v", c.name, err)
+			}
+		})
+	}
+}
+
+// partialWrite is a joinWrite seam: 5 bytes of the content go into the
+// file, then the write fails, as on a full disk.
+func partialWrite(f *os.File, s string) error {
+	if _, err := f.WriteString(s[:5]); err != nil {
+		return err
+	}
+	return errors.New("disk full (test)")
+}
+
+// When the write fails after a part of the content went out and the
+// removal of the fresh directory fails too (the RemoveAll seam), the note
+// names that directory, which may still hold a part of the ticket, and
+// does not say that no copy was saved. The 5 bytes are still there.
+func TestSpaceMintJoinNamesTheDirectoryWhenTheCleanupFails(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct{ ext, what, body string }{
+		{".token", "join ticket", noScriptJSON},
+		{".sh", "join script", joinTicketJSON},
+	} {
+		t.Run(c.ext, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			priv := filepath.Join(h.base, "priv")
+			if err := os.Mkdir(priv, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			var parent, removed string
+			h.ctx.MkdirTemp = joinDir(priv, &parent)
+			h.ctx.joinWrite = partialWrite
+			h.ctx.RemoveAll = func(p string) error {
+				removed = p
+				return errors.New("read-only file system (test)")
+			}
+			h.handle("POST /api/spaces/sp-123/join-token", 201, c.body)
+			mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
+			mustContain(t, h.output(), "could not write the "+c.what+" for 'worker-1': disk full (test)\n")
+			mustContain(t, h.output(), "The ticket was minted before the write failed")
+			mustContain(t, h.output(), "  single use. The cleanup failed too: "+priv+" may still hold a part of it;\n")
+			mustContain(t, h.output(), "  delete that directory. Mint a fresh one once the temp dir (TMPDIR) is writable:\n")
+			mustNotContain(t, h.output(), "no copy was saved")
+			mustNotContain(t, h.output(), joinTicket)
+			if removed != priv {
+				t.Fatalf("removed %q, want %q", removed, priv)
+			}
+			raw, err := os.ReadFile(filepath.Join(priv, "kubehz-join-worker-1"+c.ext))
+			if err != nil || len(raw) != 5 {
+				t.Fatalf("the partial file: %q %v, want 5 bytes", raw, err)
 			}
 		})
 	}

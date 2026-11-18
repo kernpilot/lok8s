@@ -81,6 +81,9 @@ type Context struct {
 	// (nil = /proc/sys/kernel/overflowuid, else 65534): the owner that "/"
 	// alone may have in the temp-dir check of a join file (joinTempDir).
 	OverflowUID func() int
+	// RemoveAll is os.RemoveAll (nil = os.RemoveAll): the cleanup of a
+	// join file whose write failed (writeJoinFile).
+	RemoveAll func(path string) error
 	// LookPath is `command -v <tool>` (nil = execx.Look over Paths).
 	LookPath func(tool string) bool
 	// IsTTY reports whether stdout is a terminal (nil = false) — the

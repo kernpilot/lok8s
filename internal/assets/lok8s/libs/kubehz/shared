@@ -192,7 +192,10 @@ kubehz::space_api() {
 kubehz::space_api_call() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *[xa]* ]] || { local -; set +xa; }  # the bearer and the response (a join ticket)
-  local method="${1}" path="${2}" body="${3:-}"
+  # +x: a local takes the export flag of an exported variable of the same
+  # name, and a child would get the request body or the response.
+  local method="${1}" path="${2}"
+  local +x body="${3:-}"
   # A response can hold a join ticket: the global never goes to a child
   # (set -a, or an export before), and the caller unsets it.
   declare -g +x KUBEHZ_SPACE_API_BODY
@@ -204,7 +207,7 @@ kubehz::space_api_call() {
   local -a extra=()
   [[ -n "${body}" ]] && extra=(-H "Content-Type: application/json" -d "${body}")
 
-  local raw
+  local +x raw
   # The bearer reaches curl in a config on stdin, never on argv.
   raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
     curl -K - -sSL -w $'\n%{http_code}' -X "${method}" \
@@ -530,14 +533,17 @@ kubehz::space_wait_active() {
 # be writable by others unless it has the sticky bit (/tmp passes). "/"
 # alone may also show the overflow uid (/proc/sys/kernel/overflowuid, else
 # 65534): in a user namespace that does not map root, the host's "/" shows
-# so; any other part with that owner can be any user of the host. The
+# so; any other part with that owner can be any user of the host. A part
+# of this user counts only while the uid of this user is not the overflow
+# uid: in a namespace without a mapping for this user, this user and every
+# other unmapped owner show that uid, so "ours" proves nothing there. The
 # owner of a part could otherwise rename the fresh directory and put a
 # FIFO or a link in place of the ticket or the script. Prints the resolved
 # path. Returns 1 when TMPDIR cannot be resolved (silent: the caller
 # reports the failed write), 2 when a part fails (the message is printed).
 # Usage: kubehz::space_join_tmp_dir
 kubehz::space_join_tmp_dir() {
-  local dir="${TMPDIR:-/tmp}" real part meta uid mode why ovf=""
+  local dir="${TMPDIR:-/tmp}" real part meta uid mode why ovf="" unmapped
   [[ "${dir}" == /* ]] || dir="${PWD}/${dir}"
   real=$(cd -P -- "${dir}" 2>/dev/null && pwd -P) || return 1
   # pwd -P keeps a leading // (POSIX leaves it open); Go cleans it to /.
@@ -546,21 +552,33 @@ kubehz::space_join_tmp_dir() {
   [[ "${ovf}" =~ ^[0-9]+$ ]] || ovf=65534
   part="${real}"
   while :; do
-    why=""
+    why="" unmapped=0
     meta=$(stat -c '%u %a' -- "${part}" 2>/dev/null) || meta=""
     uid="${meta%% *}" mode="${meta#* }"
     if [[ -z "${meta}" ]]; then
       why="cannot be read"
     elif [[ -L "${part}" ]]; then
       why="is a symlink"
-    elif [[ "${uid}" != 0 && "${uid}" != "${EUID}" ]] && ! [[ "${part}" == / && "${uid}" == "${ovf}" ]]; then
-      why="belongs to another user (uid ${uid})"
+    elif ! { [[ "${uid}" == 0 ]] \
+      || [[ "${uid}" == "${EUID}" && "${EUID}" != "${ovf}" ]] \
+      || [[ "${part}" == / && "${uid}" == "${ovf}" ]]; }; then
+      if [[ "${uid}" == "${EUID}" ]]; then
+        # Ours, and refused: this user has the overflow uid.
+        why="cannot be checked (uid ${uid})" unmapped=1
+      else
+        why="belongs to another user (uid ${uid})"
+      fi
     elif (( (8#${mode} & 8#022) != 0 && (8#${mode} & 8#1000) == 0 )); then
       why="is writable by others and has no sticky bit"
     fi
     if [[ -n "${why}" ]]; then
       error "the temp dir for the join ticket is not safe: ${part} ${why}"
-      echo "  Set TMPDIR to a directory of your own that only you can write (mode 0700)." >&2
+      if (( unmapped )); then
+        echo "  The uid of this user is not mapped in the namespace, so the CLI cannot check who owns TMPDIR." >&2
+        echo "  Run it where the uid of this user is mapped (unshare --map-current-user), or outside the namespace." >&2
+      else
+        echo "  Set TMPDIR to a directory of your own that only you can write (mode 0700)." >&2
+      fi
       return 2
     fi
     [[ "${part}" != / ]] || break
@@ -582,12 +600,16 @@ kubehz::space_join_tmp_dir() {
 # are checked after the write. The node name is part of the path, so it is
 # checked here.
 # Prints the path. Returns 2 when the node name is refused (the message is
-# printed), 1 when the write fails.
+# printed), 1 when the write fails, 3 when the write fails and the removal
+# of the file or the directory fails too: then it prints the directory,
+# which may still hold a part of the ticket.
 # Usage: kubehz::space_write_join_ticket <node_name> <token>
 kubehz::space_write_join_ticket() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *[xa]* ]] || { local -; set +xa; }  # the ticket
-  local node_name="${1}" token="${2}" dir priv path
+  # +x: a local takes the export flag of an exported variable of the same
+  # name, and a child (mktemp, stat, chmod) would get the ticket.
+  local +x node_name="${1}" token="${2}" dir priv path
   node::assert_node_name "${node_name}" || return 2
   dir=$(kubehz::space_join_tmp_dir) || return 1
   priv=$(umask 077 && mktemp -d "${dir%/}/kubehz-join-XXXXXXXXXX" 2>/dev/null) || return 1
@@ -599,8 +621,10 @@ kubehz::space_write_join_ticket() {
     || ! ( printf '%s\n' "${token}" >> "${path}" ) 2>/dev/null \
     || [[ "$(stat -c '%a' -- "${priv}" 2>/dev/null)" != 700 ]] \
     || [[ "$(stat -c '%a' -- "${path}" 2>/dev/null)" != 600 ]]; then
-    rm -f -- "${path}"
-    rmdir -- "${priv}" 2>/dev/null
+    if ! rm -f -- "${path}" 2>/dev/null || ! rmdir -- "${priv}" 2>/dev/null; then
+      printf '%s\n' "${priv}"
+      return 3
+    fi
     return 1
   fi
   printf '%s\n' "${path}"
@@ -649,7 +673,9 @@ kubehz::_space_mint_join() {
   # escape, so a trailing newline, a CR or a NUL fails the shape check
   # below, as in the Go twin. $(jq -r ...) would strip a trailing newline
   # and drop a NUL.
-  local token_json token expires
+  # +x: a local takes the export flag of an exported variable of the same
+  # name, and a child (jq) would get the ticket.
+  local +x token_json token expires
   token_json=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -c '.data.token // .token // empty')
   expires=$(echo "${KUBEHZ_SPACE_API_BODY}" | jq -r '.data.expiresAt // .expiresAt // empty')
   # A server string for a plain echo: scrubbed and clipped, as the Go twin
@@ -671,6 +697,9 @@ kubehz::_space_mint_join() {
   shopt -q nocasematch && ncm=1
   shopt -u nocasematch
   [[ "${token_json}" =~ ${tok_re} ]] && shape=1
+  # The match left the ticket in BASH_REMATCH, a global: a trace after the
+  # return (PS4 can name it) would print it. A match of '' replaces it.
+  [[ '' =~ ^$ ]]
   (( ncm == 0 )) || shopt -s nocasematch
   if (( shape == 0 )); then
     error "kubehz API returned a join ticket for '${node_name}' in a shape this CLI does not recognise; nothing was written"
@@ -685,12 +714,19 @@ kubehz::_space_mint_join() {
   if (( rc == 2 )); then
     return 1
   elif (( rc != 0 )); then
-    # The mint already happened server-side: the ticket is live with no copy.
+    # The mint already happened server-side: the ticket is live. With rc 3
+    # the cleanup failed too, and path is the directory that may still
+    # hold a part of it.
     error "could not write the join ticket for '${node_name}'"
     echo "" >&2
     echo "  The ticket was minted before the write failed. It stays valid until ${expires:-<unknown>}," >&2
-    echo "  single use, and no copy was saved. Mint a fresh one once the temp dir" >&2
-    echo "  (TMPDIR) is writable:" >&2
+    if (( rc == 3 )); then
+      echo "  single use. The cleanup failed too: ${path} may still hold a part of it;" >&2
+      echo "  delete that directory. Mint a fresh one once the temp dir (TMPDIR) is writable:" >&2
+    else
+      echo "  single use, and no copy was saved. Mint a fresh one once the temp dir" >&2
+      echo "  (TMPDIR) is writable:" >&2
+    fi
     echo "    lo kubehz join ${node_name}" >&2
     return 1
   fi
