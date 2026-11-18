@@ -1,0 +1,22 @@
+{
+  "note": "Generated from ui.Unshown by: go test ./internal/ui/ -update. Each run is a range of code points (first to last, both in) that a message does not show. Each other code point from 0 to max is shown. ui.Unshown (internal/ui/unshown_test.go) and the jq def unshown (tests/unit/verbose_shown_test.bats) must agree with it on every code point.",
+  "max": 1114111,
+  "runs": [
+    {"first": 0, "last": 31, "hex": "U+0000..U+001F"},
+    {"first": 127, "last": 159, "hex": "U+007F..U+009F"},
+    {"first": 173, "last": 173, "hex": "U+00AD..U+00AD"},
+    {"first": 1564, "last": 1564, "hex": "U+061C..U+061C"},
+    {"first": 4447, "last": 4448, "hex": "U+115F..U+1160"},
+    {"first": 6155, "last": 6159, "hex": "U+180B..U+180F"},
+    {"first": 8203, "last": 8207, "hex": "U+200B..U+200F"},
+    {"first": 8232, "last": 8238, "hex": "U+2028..U+202E"},
+    {"first": 8288, "last": 8292, "hex": "U+2060..U+2064"},
+    {"first": 8294, "last": 8303, "hex": "U+2066..U+206F"},
+    {"first": 12644, "last": 12644, "hex": "U+3164..U+3164"},
+    {"first": 65024, "last": 65039, "hex": "U+FE00..U+FE0F"},
+    {"first": 65279, "last": 65279, "hex": "U+FEFF..U+FEFF"},
+    {"first": 65440, "last": 65440, "hex": "U+FFA0..U+FFA0"},
+    {"first": 917504, "last": 917631, "hex": "U+E0000..U+E007F"},
+    {"first": 917760, "last": 917999, "hex": "U+E0100..U+E01EF"}
+  ]
+}
