@@ -261,6 +261,110 @@ server 42 cp-0"
   _nothing_ran
 }
 
+# The cluster_name is shown in the guard's messages and typed as the
+# answer, so a shown form must be the name itself. A name with a code point
+# of the jq def unshown is refused before any message shows it: also with
+# the matching --confirm-cluster, and also on a terminal with the name
+# typed. The Go twin is TestDestroyGuardRefusesAClusterNameThatCannotBeShown.
+@test "destroy guard: a cluster_name with a character that cannot be shown is refused before it is shown" {
+  local want="the destroy plan of 'test.prod' names a cluster_name with a character that a message cannot show (a control, separator, bidi or invisible character). Nothing was deleted. Correct the cluster_name in the provider config or the destroy_plan hook of the provider, then run lo destroy again."
+  # <the cluster field of the plan line, as printf %b reads it> <the name>
+  local -a cases=(
+    'prod\x1b[2J-a'         $'prod\e[2J-a'
+    'prod\xe2\x80\xae-a'    $'prod\xe2\x80\xae-a'
+    'prod\xe2\x80\x8b-a'    $'prod\xe2\x80\x8b-a'
+    'prod\t\t-a'            $'prod\t-a'
+    'prod-a\r'              $'prod-a\r'
+    'prod\xc2\x85-a'        $'prod\xc2\x85-a'
+    'prod\xf3\xa0\x81\x81a' $'prod\xf3\xa0\x81\x81a'
+  )
+  local i name confirm_cluster
+  for (( i = 0; i < ${#cases[@]}; i += 2 )); do
+    PLAN="cluster\t${cases[i]}\nserver\t42\tcp-0\n"
+    export PLAN
+    name="${cases[i+1]}"
+
+    _assume_no_tty
+    confirm_cluster="${name}"
+    : > "${CALLS}"
+    run provision::dispatch_destroy test.prod < /dev/null
+    [ "${status}" -eq 3 ]
+    assert_output --partial "${want}"
+    refute_output --partial "${name}"
+    refute_output --partial "destroy deletes these resources"
+    _nothing_ran
+
+    confirm_cluster=""
+    : > "${CALLS}"
+    run provision::dispatch_destroy test.prod < /dev/null
+    [ "${status}" -eq 3 ]
+    assert_output --partial "${want}"
+    refute_output --partial "${name}"
+    refute_output --partial "there is no terminal"
+    _nothing_ran
+
+    _assume_tty
+    : > "${CALLS}"
+    run provision::dispatch_destroy test.prod <<< "${name}"
+    [ "${status}" -eq 3 ]
+    assert_output --partial "${want}"
+    refute_output --partial "${name}"
+    refute_output --partial "type the cluster_name"
+    _nothing_ran
+  done
+}
+
+# A jq that fails stops the check of the cluster_name: nothing runs.
+@test "destroy guard: a cluster_name that jq cannot check stops the destroy" {
+  _assume_no_tty
+  local confirm_cluster=prod-a
+  jq() { [[ "${*}" != *'any(unshown)'* ]] || return 5; command jq "${@}"; }
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 1 ]
+  assert_output --partial "could not check the cluster_name of the destroy plan of 'test.prod'. Nothing was deleted. Check that jq runs, then run lo destroy again."
+  refute_output --partial "destroy deletes these resources"
+  _nothing_ran
+}
+
+# A NUL byte in the plan: a command substitution drops it with only a
+# warning, so the plan would change on its way to the provider ("4<NUL>2"
+# would become the id 42). The guard reads the plan through a file and
+# refuses it before anything is shown, also with the matching
+# --confirm-cluster. The file is removed. The Go twin is
+# TestDestroyGuardRefusesAPlanWithANulByte.
+@test "destroy guard: a plan with a NUL byte is refused, and nothing is deleted" {
+  _assume_no_tty
+  local confirm_cluster=prod-a plan
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  for plan in \
+    'cluster\tprod-a\nserver\t4\x002\tcp-0\n' \
+    'cluster\tprod-a\nserver\t42\tcp\x00-0\n' \
+    'cluster\tprod\x00-a\nserver\t42\tcp-0\n' \
+    '\x00'; do
+    export PLAN="${plan}"
+    : > "${CALLS}"
+    run provision::dispatch_destroy test.prod < /dev/null
+    [ "${status}" -eq 3 ]
+    assert_output --partial "the destroy plan of 'test.prod' has a NUL byte, and the confirmed plan cannot carry it to the provider. Nothing was deleted. Correct the destroy_plan hook of the provider, then run lo destroy again."
+    refute_output --partial "destroy deletes these resources"
+    refute_output --partial "ignored null byte"
+    _nothing_ran
+    run find "${TMPDIR}" -mindepth 1
+    assert_output ""
+  done
+
+  # A plan without a NUL byte runs, and its file is removed too.
+  unset PLAN
+  : > "${CALLS}"
+  run provision::dispatch_destroy test.prod < /dev/null
+  assert_success
+  run grep -c DRIVER-DESTROY-RAN "${CALLS}"
+  assert_output "1"
+  run find "${TMPDIR}" -mindepth 1
+  assert_output ""
+}
+
 @test "destroy guard: a provider without the hook keeps the yes-prompt" {
   _assume_tty
   sed -i '/^provider::destroy_plan()/,/^}/d' "${PATH_LOK8S}/providers/mock/main"

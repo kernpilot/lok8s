@@ -292,7 +292,12 @@ before anything is deleted:
    apart: a resource of the other domain with a wrong mark (for example,
    from an `add-label` command that was run for the wrong domain) would be
    deleted. The provider finds its resources by that key: a descriptor without
-   `cluster_name` is refused.
+   `cluster_name` is refused. The destroy also stops before it shows
+   anything when the plan of the provider has a NUL byte, or names a
+   `cluster_name` with a character that a message cannot show (a character
+   that the plan shows as `?`, see [the owner mark](../guide/deployment.md#hetzner-owner-mark),
+   except the backslash). You type the `cluster_name` to confirm, so the
+   destroy shows it only as it is.
 2. The destroy lists the resources that the provider would delete. When a
    list fails, the destroy stops.
 3. On a terminal, type the `cluster_name` to continue. Off a terminal, pass

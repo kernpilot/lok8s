@@ -225,7 +225,8 @@ provision::_destroy_guard_skip() {
 # AND the owner mark of this domain. A domain copied from another one that
 # kept the cluster_name and the token labels its resources the same way, and
 # only the mark keeps the two apart: a resource of the other domain with a
-# wrong mark would be deleted. So: refuse a cluster_name another
+# wrong mark would be deleted. So: refuse a plan with a NUL byte, a
+# cluster_name that a message cannot show and a cluster_name another
 # domain uses, print what would be deleted, and take the cluster_name typed
 # on a terminal or from --confirm-cluster (`confirm_cluster`, dynamic
 # scoping from main::destroy). `force` does not skip it. The confirmed plan
@@ -236,8 +237,26 @@ provision::_destroy_guard() {
   local work_dir="${PATH_CLUSTERS}/${domain}/.provider"
   [[ "${kind}" != "kubeone" ]] || work_dir="${PATH_CLUSTERS}/${domain}/.kubeone"
 
-  local plan
-  plan="$(provider::destroy_plan "${PROVIDER_CONFIG_FILE:-}" "${work_dir}")" || return 1
+  # The plan goes through a file: a command substitution drops each NUL
+  # byte with only a warning, so the plan would change on its way to the
+  # provider ("4<NUL>2" would become the id 42). `read -d ''` stops at the
+  # first NUL byte (rc 0) and fails at the end of a file without one. A
+  # plan with a NUL byte is refused before anything is shown (Go twin: the
+  # NUL check of guardDestroy, where no environment variable can hold it).
+  # The hook runs in a subshell, as in the command substitution.
+  local plan plan_file
+  plan_file="$(mktemp)" || return 1
+  if ! ( provider::destroy_plan "${PROVIDER_CONFIG_FILE:-}" "${work_dir}" ) >"${plan_file}"; then
+    rm -f "${plan_file}"
+    return 1
+  fi
+  if IFS= read -r -d '' _ <"${plan_file}"; then
+    rm -f "${plan_file}"
+    error "the destroy plan of '${domain}' has a NUL byte, and the confirmed plan cannot carry it to the provider. Nothing was deleted. Correct the destroy_plan hook of the provider, then run lo destroy again."
+    return 3
+  fi
+  plan="$(<"${plan_file}")"
+  rm -f "${plan_file}"
 
   local name="" line rkind rid rname
   local -a rows=()
@@ -253,6 +272,23 @@ provision::_destroy_guard() {
 
   if [[ -z "${name}" ]]; then
     error "the provider gave no cluster_name for '${domain}'. Nothing was deleted. Set cluster_name in the provider config, then run lo destroy again."
+    return 3
+  fi
+
+  # The messages below show the cluster_name, and the operator types it as
+  # the answer, so a shown form must be the name itself: an escaped form is
+  # not what the operator must type. Refuse a name with a code point of the
+  # jq def unshown (VERBOSE_JQ_UNSHOWN, utils/verbose.sh: a control,
+  # separator, bidi or invisible character) before any message shows it
+  # (Go twin: strings.ContainsFunc(name, ui.Unshown)). A jq that fails stops
+  # the destroy.
+  local unshown
+  if ! unshown="$(jq -nr --arg name "${name}" "${VERBOSE_JQ_UNSHOWN}"' $name | explode | any(unshown)')"; then
+    error "could not check the cluster_name of the destroy plan of '${domain}'. Nothing was deleted. Check that jq runs, then run lo destroy again."
+    return 1
+  fi
+  if [[ "${unshown}" != "false" ]]; then
+    error "the destroy plan of '${domain}' names a cluster_name with a character that a message cannot show (a control, separator, bidi or invisible character). Nothing was deleted. Correct the cluster_name in the provider config or the destroy_plan hook of the provider, then run lo destroy again."
     return 3
   fi
 
