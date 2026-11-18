@@ -226,8 +226,9 @@ A few things worth knowing before you reach for it:
   in the open. Older platforms without the script get the ticket alone, in a
   file of the same private kind,
   `$TMPDIR/kubehz-join-<random>/kubehz-join-<node>.token` (0700 over 0600):
-  `lo` prints its path and a pointer to the node-join guide, never the
-  ticket.
+  `lo` prints its path and a pointer to the node-join guide, not the
+  ticket. With `--print-token`, `lo` prints the ticket instead and writes
+  no ticket file.
 - **The three numbers apply when the space is created.** A later
   `lo provision` adopts the space and changes nothing on the platform. An
   edit under `space.limits` therefore gets a note in the output instead of a
