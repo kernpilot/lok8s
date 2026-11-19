@@ -211,61 +211,78 @@ recover::_resolve() {
 # spec metadata.name, the domain) are names for the prompt. A config without a
 # cluster_name is not checked: the hetzner rebuild refuses it. The check fails
 # closed. It refuses:
-#   1. a provider config that gives no plain cluster_name: yq fails, or the tag
-#      of .cluster_name is not exactly one of !!str, !!int, !!float, !!bool and
-#      !!null (more than one document, a top that is not a mapping, an alias, a
-#      mapping, a list, another tag; Go twin: configClusterName);
+#   1. a provider config that gives no plain cluster_name
+#      (recover::_config_name): one that does not parse, has more than one
+#      document or a top that is not a mapping, has a merge key (<<) at the
+#      top, or a cluster_name that is not a text;
 #   2. a cluster_name that a message cannot show as it is: the rule of the
 #      destroy guard (a code point of the jq def unshown, a backslash, U+FFFD),
-#      before a message shows the name;
+#      before a message shows the name. The check reads the name as JSON, so
+#      it sees a NUL and the newlines at the end too;
 #   3. a cluster_name with a '$': the rebuild expands the variables of the
-#      config (template::descriptor_json, with the envsubst on PATH), so the
-#      name that it uses can differ from the text here;
-#   4. a cluster_name that another domain also has.
-# A scan of the other domains that fails stops the recover too.
+#      config, so the name that it uses can differ from the text here;
+#   4. a provider config that gives another cluster_name (or none) when the
+#      variables are expanded as the rebuild expands them: the same
+#      `expanded="$(envsubst < file)"` as template::descriptor_json, in this
+#      shell, after the provider load. A variable outside the cluster_name can
+#      add or change one. The variables that the rebuild sets itself are not
+#      set yet (CLOUD_LOG_FILE, and CLOUD_DRY_RUN and CLOUD_DRY_RUN_PATH under
+#      --dry-run);
+#   5. a cluster_name that another domain also has.
+# A jq check or a scan of the other domains that fails stops the recover too.
 #
 # As in the destroy guard, nothing skips this check: not --force, not
 # LOK8S_NONINTERACTIVE, not --dry-run. It runs at the end of resolve, before the
 # doctor, the dry run and the consent.
 recover::_cluster_name_guard() {
-  local name="" tag users unshown
-  if [[ -f "${_RECOVER_CONFIG:-}" ]]; then
-    # yq reads the config on stdin, so it parses it as YAML (JSON is YAML
-    # too), whatever its extension: the rebuild reads it by its content too
-    # (template::descriptor_json). With a path, yq picks the parser from the
-    # extension.
-    tag="$(yq -r '.cluster_name | tag' - <"${_RECOVER_CONFIG}" 2>/dev/null)" || tag=""
-    case "${tag}" in
-      '!!str' | '!!int' | '!!float' | '!!bool' | '!!null')
-        # yq -r prints the value and one newline. The x keeps the newlines at
-        # the end of the value itself (a command substitution drops them), so
-        # the check below sees the name as the Go twin does.
-        name="$(yq -r '.cluster_name // ""' - <"${_RECOVER_CONFIG}" 2>/dev/null && printf x)" || name=""
-        ;;
-      *) name="" ;;
-    esac
-    if [[ "${name}" != *x ]]; then
-      error "recover: the provider config of '${_RECOVER_DOMAIN}' is not one YAML or JSON document with a plain cluster_name (a text, a number, true or false), so recover cannot compare its cluster_name with the other domains. Nothing was changed. Correct the provider config, then run lo recover again."
+  local raw seen expanded json="" name="" users unshown
+  [[ -f "${_RECOVER_CONFIG:-}" ]] || return 0
+  raw="$(recover::_config_name file "${_RECOVER_CONFIG}")"
+  case "${raw}" in
+    config)
+      error "recover: the provider config of '${_RECOVER_DOMAIN}' is not one YAML or JSON document whose top is a mapping with a plain cluster_name (not an alias, a mapping or a list), so recover cannot compare its cluster_name with the other domains. Nothing was changed. Correct the provider config, then run lo recover again."
+      return 1 ;;
+    merge)
+      error "recover: the provider config of '${_RECOVER_DOMAIN}' has a merge key (<<) at the top. The rebuild can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write cluster_name as a literal key, without a merge key, then run lo recover again."
+      return 1 ;;
+    quote)
+      error "recover: the cluster_name of the provider config of '${_RECOVER_DOMAIN}' is not a text: YAML reads it as a number, as true or as another type. The rebuild writes it as JSON, which can change how it is written, so recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write the cluster_name in quotes, then run lo recover again."
+      return 1 ;;
+    'name '*) json="${raw#name }" ;;
+  esac
+  if [[ -n "${json}" ]]; then
+    if ! unshown="$(jq -nr --argjson name "${json}" "${VERBOSE_JQ_UNSHOWN}"' $name | explode | any(unshown
+        or . == 92
+        or . == 65533)')"; then
+      error "recover: could not check the cluster_name of the provider config of '${_RECOVER_DOMAIN}'. Nothing was changed. Check that jq runs, then run lo recover again."
       return 1
     fi
-    name="${name%x}"
-    name="${name%$'\n'}"
+    if [[ "${unshown}" != "false" ]]; then
+      error "recover: the provider config of '${_RECOVER_DOMAIN}' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was changed. Correct the cluster_name in the provider config, then run lo recover again."
+      return 1
+    fi
+    # The name has no control character now, so a bash string holds it as it is.
+    if ! name="$(jq -nr --argjson name "${json}" '$name')"; then
+      error "recover: could not check the cluster_name of the provider config of '${_RECOVER_DOMAIN}'. Nothing was changed. Check that jq runs, then run lo recover again."
+      return 1
+    fi
+    if [[ "${name}" == *'$'* ]]; then
+      error "recover: the cluster_name '${name}' of '${_RECOVER_DOMAIN}' has a '\$'. The rebuild expands the variables in the provider config, so the cluster_name that it uses can differ from this text, and recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write the cluster_name without a variable, then run lo recover again."
+      return 1
+    fi
+  fi
+  # The expansion holds the expanded variables (credentials too): it stays in
+  # this shell, and recover::_cfg_yq gives it to yq through a pipe.
+  if ! expanded="$(envsubst <"${_RECOVER_CONFIG}" 2>/dev/null)"; then
+    error "recover: could not expand the variables of the provider config of '${_RECOVER_DOMAIN}' as the rebuild does (envsubst failed). Nothing was changed. Check the provider config and that envsubst runs, then run lo recover again."
+    return 1
+  fi
+  seen="$(recover::_config_name text "${expanded}")"
+  if [[ "${seen}" != "${raw}" ]]; then
+    error "recover: the provider config of '${_RECOVER_DOMAIN}' gives another cluster_name when the rebuild expands its variables (a variable adds or changes it), so recover cannot compare the cluster_name that the rebuild uses with the other domains. Nothing was changed. Write the provider config so that no variable sets or changes the cluster_name, then run lo recover again."
+    return 1
   fi
   [[ -n "${name}" ]] || return 0
-  if ! unshown="$(jq -nr --arg name "${name}" "${VERBOSE_JQ_UNSHOWN}"' $name | explode | any(unshown
-      or . == 92
-      or . == 65533)')"; then
-    error "recover: could not check the cluster_name of the provider config of '${_RECOVER_DOMAIN}'. Nothing was changed. Check that jq runs, then run lo recover again."
-    return 1
-  fi
-  if [[ "${unshown}" != "false" ]]; then
-    error "recover: the provider config of '${_RECOVER_DOMAIN}' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was changed. Correct the cluster_name in the provider config, then run lo recover again."
-    return 1
-  fi
-  if [[ "${name}" == *'$'* ]]; then
-    error "recover: the cluster_name '${name}' of '${_RECOVER_DOMAIN}' has a '\$'. The rebuild expands the variables in the provider config, so the cluster_name that it uses can differ from this text, and recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write the cluster_name without a variable, then run lo recover again."
-    return 1
-  fi
   if ! users="$(provision::_cluster_name_users "${_RECOVER_DOMAIN}" "${name}")"; then
     error "recover: could not check if another domain has the cluster_name '${name}' of '${_RECOVER_DOMAIN}'. Nothing was changed. Run lo recover again."
     return 1
@@ -273,6 +290,71 @@ recover::_cluster_name_guard() {
   [[ -n "${users}" ]] || return 0
   error "recover: cluster_name '${name}' of '${_RECOVER_DOMAIN}' is also the cluster_name of: ${users//$'\n'/, }. The rebuild resets only the servers with this cluster_name and the owner mark of '${_RECOVER_DOMAIN}'. The servers of those domains have the same cluster label, so only the mark keeps them apart: a server of another domain with a wrong mark would be reset. Nothing was changed. Give each domain its own cluster_name, then run lo recover again."
   return 1
+}
+
+# recover::_cfg_yq <file|text> <source> <yq argument>...: run yq with the
+# arguments on a provider config on stdin: the file <source>, or the text
+# <source>. On stdin, yq parses the config as YAML (JSON is YAML too), whatever
+# the extension of its file: the rebuild reads it by its content too
+# (template::descriptor_json). With a path, yq picks the parser from the
+# extension. A text goes through a pipe, not a here-string: it can hold
+# credentials, and bash writes a here-string to a temp file.
+recover::_cfg_yq() {
+  local kind="${1}" src="${2}"
+  shift 2
+  if [[ "${kind}" == file ]]; then
+    yq "$@" - <"${src}" 2>/dev/null
+  else
+    printf '%s' "${src}" | yq "$@" - 2>/dev/null
+  fi
+}
+
+# recover::_config_name <file|text> <source>: read the cluster_name of a
+# provider config (recover::_cfg_yq) as the Go twin reads it
+# (configClusterName), and print one verdict:
+#   none         an empty text, a null document, a mapping without the key, a
+#                null or false cluster_name (yq `// ""`);
+#   name <json>  a !!str cluster_name, as a JSON string: it keeps a NUL and the
+#                newlines at the end, which a bash string drops;
+#   config       yq fails, more than one document, a top that is not a
+#                mapping (a !!map), or an alias, a mapping or a list as the
+#                cluster_name;
+#   merge        a key << at the top mapping (a merge key or the text "<<"):
+#                yq and the rebuild can take the cluster_name from the merged
+#                mapping;
+#   quote        another tag (!!int, !!float, true, !!timestamp, a custom
+#                tag): the rebuild writes it as JSON (jq), which can change it
+#                (0123 is 123).
+# With two cluster_name keys, the last one counts.
+recover::_config_name() {
+  local kind="${1}" src="${2}" shape merge json
+  shape="$(recover::_cfg_yq "${kind}" "${src}" -r '[tag, (.cluster_name | tag)] | join(" ")')" \
+    || { echo config; return 0; }
+  case "${shape}" in
+    *$'\n'*) echo config; return 0 ;;
+    '!!null !!null') echo none; return 0 ;;
+    '!!map '*) ;;
+    *) echo config; return 0 ;;
+  esac
+  merge="$(recover::_cfg_yq "${kind}" "${src}" -r '[keys[] | select(. == "<<")] | length')" \
+    || { echo config; return 0; }
+  if [[ "${merge}" != 0 ]]; then
+    echo merge
+    return 0
+  fi
+  case "${shape#'!!map '}" in
+    '!!null') echo none; return 0 ;;
+    '!!str' | '!!bool') ;;
+    '' | '!!map' | '!!seq') echo config; return 0 ;;
+    *) echo quote; return 0 ;;
+  esac
+  json="$(recover::_cfg_yq "${kind}" "${src}" -o json -I0 '.cluster_name')" \
+    || { echo config; return 0; }
+  case "${json}" in
+    false) echo none ;;
+    '"'*) printf 'name %s\n' "${json}" ;;
+    *) echo quote ;;
+  esac
 }
 
 # recover::_load_provider — resolve + source the cluster's infrastructure

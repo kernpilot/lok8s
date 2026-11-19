@@ -12,9 +12,11 @@ package recover
 // a fake).
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -166,6 +168,23 @@ func (p *bashProviderImpl) Doctor(ctx context.Context, configFile string) string
 // stdin is the terminal, or empty when the input is not a terminal.
 func (p *bashProviderImpl) Rebuild(ctx context.Context, configFile, workDir string) error {
 	return p.call(ctx, "provider::rebuild", p.r.ttyIn(), p.r.out(), p.r.errOut(), configFile, workDir)
+}
+
+// Expand: `envsubst <config 2>/dev/null`, after the provider load of every
+// call, as provider::rebuild expands the config (template::descriptor_json
+// runs `envsubst < "${file}"`). The output holds the expanded variables
+// (credentials too): it stays in memory.
+func (p *bashProviderImpl) Expand(ctx context.Context, configFile string) ([]byte, error) {
+	f, err := os.Open(configFile)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var out bytes.Buffer
+	if err := p.call(ctx, "envsubst", f, &out, io.Discard); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }
 
 // Output: `provider::output <config> 2>/dev/null </dev/null`.

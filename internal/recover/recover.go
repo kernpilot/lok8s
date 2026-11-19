@@ -92,6 +92,12 @@ type Provider interface {
 	Rebuild(ctx context.Context, configFile, workDir string) error
 	// Output is `provider::output <config> 2>/dev/null`: the inventory JSON.
 	Output(ctx context.Context, configFile string) ([]byte, error)
+	// Expand is `envsubst <config` in the shell of the provider, the step of
+	// the rebuild that expands the variables of the config
+	// (template::descriptor_json): the same envsubst on PATH and the same
+	// environment, up to the variables that the rebuild sets itself. It
+	// changes nothing.
+	Expand(ctx context.Context, configFile string) ([]byte, error)
 }
 
 // Runner drives one recovery. Zero-value seams fall back to the real
@@ -345,7 +351,7 @@ func (r *Runner) resolve(ctx context.Context) error {
 
 	r.clusterName = r.resolveClusterName()
 	ui.DebugTo(stderr, "recover: resolved %s → provider=%s cluster=%s", r.domain, r.provider, r.clusterName)
-	return r.guardClusterName()
+	return r.guardClusterName(ctx)
 }
 
 // guardClusterName refuses a cluster_name that another domain under
@@ -364,42 +370,70 @@ func (r *Runner) resolve(ctx context.Context) error {
 // rebuild refuses it. The check fails closed. It refuses:
 //
 //  1. a provider config that gives no plain cluster_name
-//     (configClusterName);
+//     (configClusterName): one that does not parse, has more than one
+//     document or a top that is not a mapping, has a merge key (<<) at the
+//     top, or a cluster_name that is not a text;
 //  2. a cluster_name that a message cannot show as it is: the rule of the
 //     destroy guard (a character of ui.Unshown, a backslash, U+FFFD or a
 //     byte that is not UTF-8), before a message shows the name;
 //  3. a cluster_name with a '$': the rebuild expands the variables of the
-//     config (bash template::descriptor_json, with the envsubst on PATH),
-//     so the name that it uses can differ from the text here;
-//  4. a cluster_name that another domain also has.
+//     config, so the name that it uses can differ from the text here;
+//  4. a provider config that gives another cluster_name (or none) when the
+//     variables are expanded as the rebuild expands them: envsubst in the
+//     shell of the provider (Provider.Expand), and then the end newlines
+//     dropped, as template::descriptor_json does. A variable outside the
+//     cluster_name can add or change one. The variables that the rebuild
+//     sets itself are not set yet (CLOUD_LOG_FILE, and CLOUD_DRY_RUN and
+//     CLOUD_DRY_RUN_PATH under --dry-run);
+//  5. a cluster_name that another domain also has.
 //
 // As in the destroy guard, nothing skips this check: not --force, not
 // LOK8S_NONINTERACTIVE, not --dry-run. It runs at the end of resolve, before
 // the doctor, the dry run and the consent.
-func (r *Runner) guardClusterName() error {
+func (r *Runner) guardClusterName(ctx context.Context) error {
 	w := r.errOut()
-	name := ""
-	if fsutil.IsRegular(r.config) {
-		n, ok := configClusterName(r.config)
-		if !ok {
-			ui.ErrorTo(w, "recover: the provider config of '%s' is not one YAML or JSON document with a plain cluster_name (a text, a number, true or false), so recover cannot compare its cluster_name with the other domains. Nothing was changed. Correct the provider config, then run lo recover again.", r.domain)
+	if !fsutil.IsRegular(r.config) {
+		return nil
+	}
+	name, read := "", readConfig
+	if raw, err := os.ReadFile(r.config); err == nil {
+		name, read = configClusterName(raw)
+	}
+	switch read {
+	case readConfig:
+		ui.ErrorTo(w, "recover: the provider config of '%s' is not one YAML or JSON document whose top is a mapping with a plain cluster_name (not an alias, a mapping or a list), so recover cannot compare its cluster_name with the other domains. Nothing was changed. Correct the provider config, then run lo recover again.", r.domain)
+		return ErrHandled
+	case readMerge:
+		ui.ErrorTo(w, "recover: the provider config of '%s' has a merge key (<<) at the top. The rebuild can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write cluster_name as a literal key, without a merge key, then run lo recover again.", r.domain)
+		return ErrHandled
+	case readQuote:
+		ui.ErrorTo(w, "recover: the cluster_name of the provider config of '%s' is not a text: YAML reads it as a number, as true or as another type. The rebuild writes it as JSON, which can change how it is written, so recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write the cluster_name in quotes, then run lo recover again.", r.domain)
+		return ErrHandled
+	}
+	if name != "" {
+		if !utf8.ValidString(name) ||
+			strings.Contains(name, "\uFFFD") ||
+			strings.ContainsRune(name, '\\') ||
+			strings.ContainsFunc(name, ui.Unshown) {
+			ui.ErrorTo(w, "recover: the provider config of '%s' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was changed. Correct the cluster_name in the provider config, then run lo recover again.", r.domain)
 			return ErrHandled
 		}
-		name = n
+		if strings.Contains(name, "$") {
+			ui.ErrorTo(w, "recover: the cluster_name '%s' of '%s' has a '$'. The rebuild expands the variables in the provider config, so the cluster_name that it uses can differ from this text, and recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write the cluster_name without a variable, then run lo recover again.", name, r.domain)
+			return ErrHandled
+		}
+	}
+	expanded, err := r.prov.Expand(ctx, r.config)
+	if err != nil {
+		ui.ErrorTo(w, "recover: could not expand the variables of the provider config of '%s' as the rebuild does (envsubst failed). Nothing was changed. Check the provider config and that envsubst runs, then run lo recover again.", r.domain)
+		return ErrHandled
+	}
+	if n, k := configClusterName(bytes.TrimRight(expanded, "\n")); n != name || k != read {
+		ui.ErrorTo(w, "recover: the provider config of '%s' gives another cluster_name when the rebuild expands its variables (a variable adds or changes it), so recover cannot compare the cluster_name that the rebuild uses with the other domains. Nothing was changed. Write the provider config so that no variable sets or changes the cluster_name, then run lo recover again.", r.domain)
+		return ErrHandled
 	}
 	if name == "" {
 		return nil
-	}
-	if !utf8.ValidString(name) ||
-		strings.Contains(name, "\uFFFD") ||
-		strings.ContainsRune(name, '\\') ||
-		strings.ContainsFunc(name, ui.Unshown) {
-		ui.ErrorTo(w, "recover: the provider config of '%s' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was changed. Correct the cluster_name in the provider config, then run lo recover again.", r.domain)
-		return ErrHandled
-	}
-	if strings.Contains(name, "$") {
-		ui.ErrorTo(w, "recover: the cluster_name '%s' of '%s' has a '$'. The rebuild expands the variables in the provider config, so the cluster_name that it uses can differ from this text, and recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write the cluster_name without a variable, then run lo recover again.", name, r.domain)
-		return ErrHandled
 	}
 	users := domain.ProviderClusterNameUsers(r.Paths.Clusters, r.domain, name)
 	if len(users) == 0 {
@@ -409,58 +443,85 @@ func (r *Runner) guardClusterName() error {
 	return ErrHandled
 }
 
-// configClusterName reads the cluster_name of a provider config as the bash
-// twin reads it with `yq -r '.cluster_name | tag'` and then
-// `yq -r '.cluster_name // ""'`, on stdin. It parses the file as YAML (JSON is
-// YAML too) whatever its extension, as the rebuild reads it by its content
-// (template::descriptor_json). An empty file, a null document and a
-// mapping without the key have no cluster_name (ok, ""). ok=false when yq
-// gives no plain answer: the file cannot be read or does not parse, it holds
-// more than one document, its top is not a mapping, or the cluster_name is
-// an alias, a mapping, a list, or a scalar with a tag other than !!str,
-// !!int, !!float, !!bool and !!null. With two cluster_name keys, the last
-// one counts, as in yq.
-func configClusterName(path string) (string, bool) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return "", false
-	}
+// nameRead is the verdict of configClusterName.
+type nameRead int
+
+const (
+	readNone   nameRead = iota // no cluster_name
+	readName                   // a cluster_name that is a text
+	readConfig                 // not one document whose top is a mapping, or an alias, a mapping or a list as the cluster_name
+	readMerge                  // a merge key (<<) at the top
+	readQuote                  // a cluster_name that is not a text: a number, true, a timestamp, another tag
+)
+
+// configClusterName reads the cluster_name of a provider config text as the
+// bash twin reads it (recover::_config_name): yq on stdin, so the text is
+// YAML (JSON is YAML too) whatever the extension of its file, as the rebuild
+// reads it by its content (template::descriptor_json). The verdicts:
+//
+//   - readNone: an empty text, a null document, a mapping without the key,
+//     a null cluster_name, or a false one (yq `// ""`);
+//   - readName: a !!str cluster_name, the text as it is;
+//   - readConfig: the text does not parse, holds more than one document, or
+//     its top is not a mapping (a !!map); or the cluster_name is an alias, a
+//     mapping or a list;
+//   - readMerge: the top mapping has a key << (a merge key or the text
+//     "<<"): yq and the rebuild can take the cluster_name from the merged
+//     mapping;
+//   - readQuote: the cluster_name has another tag (!!int, !!float, true,
+//     !!timestamp, a custom tag): the rebuild writes it as JSON (jq), which
+//     can change it (0123 is 123).
+//
+// With two cluster_name keys, the last one counts, as in yq.
+func configClusterName(raw []byte) (string, nameRead) {
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	var doc yaml.Node
 	if err := dec.Decode(&doc); err != nil {
-		return "", errors.Is(err, io.EOF)
+		if errors.Is(err, io.EOF) {
+			return "", readNone
+		}
+		return "", readConfig
 	}
 	var next yaml.Node
 	if err := dec.Decode(&next); !errors.Is(err, io.EOF) {
-		return "", false
+		return "", readConfig
 	}
 	if len(doc.Content) == 0 {
-		return "", true
+		return "", readNone
 	}
 	top := doc.Content[0]
 	if top.Kind == yaml.ScalarNode && top.ShortTag() == "!!null" {
-		return "", true
+		return "", readNone
 	}
-	if top.Kind != yaml.MappingNode {
-		return "", false
+	if top.Kind != yaml.MappingNode || top.ShortTag() != "!!map" {
+		return "", readConfig
 	}
 	var v *yaml.Node
 	for i := 0; i+1 < len(top.Content); i += 2 {
-		if top.Content[i].Value == "cluster_name" {
+		switch top.Content[i].Value {
+		case "<<":
+			return "", readMerge
+		case "cluster_name":
 			v = top.Content[i+1]
 		}
 	}
 	if v == nil {
-		return "", true
+		return "", readNone
 	}
 	if v.Kind != yaml.ScalarNode {
-		return "", false
+		return "", readConfig
 	}
 	switch v.ShortTag() {
-	case "!!str", "!!int", "!!float", "!!bool", "!!null":
-		return yqsem.Or(v, ""), true
+	case "!!null":
+		return "", readNone
+	case "!!str":
+		return v.Value, readName
+	case "!!bool":
+		if yqsem.Or(v, "") == "" {
+			return "", readNone
+		}
 	}
-	return "", false
+	return "", readQuote
 }
 
 // providerNameRe is provider::read_name's allowlist.

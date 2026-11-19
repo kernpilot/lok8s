@@ -110,9 +110,10 @@ for d in twin-a twin-b; do
 done
 # Provider configs whose cluster_name recover cannot compare: a variable (the
 # rebuild expands it), a config that does not parse, a backslash (a message
-# cannot show it as it is). Without the refusal, the mock rebuild would run
+# cannot show it as it is), a merge key, a number, and a variable outside the
+# name that adds one when the rebuild expands it. Without the refusal, the mock rebuild would run
 # (and fail): refused_with checks the refusal text and that it did not run.
-for d in tmpl unparsed bslash; do
+for d in tmpl unparsed bslash merge quote expand; do
   mkdir -p "${PROJ}/clusters/${d}.cloud"
   printf 'kind: KubeOne\nmetadata:\n  name: %s\nspec:\n  provider:\n    name: mock\n    configRef: provider.yaml\n' "${d}" \
     > "${PROJ}/clusters/${d}.cloud/cluster.lok8s.yaml"
@@ -120,6 +121,11 @@ done
 printf 'cluster_name: ${NAME}-a\n' > "${PROJ}/clusters/tmpl.cloud/provider.yaml"
 printf '{"cluster_name": "twiny", "token": ${TOKEN}}\n' > "${PROJ}/clusters/unparsed.cloud/provider.yaml"
 printf 'cluster_name: "a\\\\b"\n' > "${PROJ}/clusters/bslash.cloud/provider.yaml"
+# Its own merged name: the scan of the other domains reads a merge key in
+# bash (yq) but not in Go, so a merged twiny would change the twin checks.
+printf 'base: &b {cluster_name: mergy}\n<<: *b\n' > "${PROJ}/clusters/merge.cloud/provider.yaml"
+printf 'cluster_name: 0123\n' > "${PROJ}/clusters/quote.cloud/provider.yaml"
+printf '{"x": 1, "note": "${LOK8S_PARITY_NOTE}"}\n' > "${PROJ}/clusters/expand.cloud/provider.yaml"
 echo alpha.dev > "${PROJ}/clusters/.active"
 
 # The deploy artifact: one CRD, one labelled Namespace (with an UNQUOTED
@@ -287,9 +293,20 @@ refused_with() {
 check - recover --force tmpl.cloud
 refused_with tmpl.cloud "[error] recover: the cluster_name '\${NAME}-a' of 'tmpl.cloud' has a '\$'. The rebuild expands the variables in the provider config"
 check - recover --force unparsed.cloud
-refused_with unparsed.cloud "[error] recover: the provider config of 'unparsed.cloud' is not one YAML or JSON document with a plain cluster_name"
+refused_with unparsed.cloud "[error] recover: the provider config of 'unparsed.cloud' is not one YAML or JSON document whose top is a mapping"
 check - recover --force bslash.cloud
 refused_with bslash.cloud "[error] recover: the provider config of 'bslash.cloud' names a cluster_name with a character that a message cannot show as it is"
+check - recover --force merge.cloud
+refused_with merge.cloud "[error] recover: the provider config of 'merge.cloud' has a merge key (<<) at the top."
+check - recover --force quote.cloud
+refused_with quote.cloud "[error] recover: the cluster_name of the provider config of 'quote.cloud' is not a text"
+# The variable adds the cluster_name of the twins when the rebuild expands it:
+# both implementations expand with the envsubst on PATH, in the shell of the
+# provider.
+export LOK8S_PARITY_NOTE='a", "cluster_name": "twiny'
+check - recover --force expand.cloud
+refused_with expand.cloud "[error] recover: the provider config of 'expand.cloud' gives another cluster_name when the rebuild expands its variables"
+unset LOK8S_PARITY_NOTE
 # --dry-run: the mock rebuild runs under CLOUD_DRY_RUN; provision never.
 check - recover --dry-run mock.cloud
 check - recover -v --dry-run mock.cloud

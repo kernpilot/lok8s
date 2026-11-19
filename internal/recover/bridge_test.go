@@ -3,11 +3,14 @@ package recover
 // bridge_test.go covers the bash bridge argv.
 
 import (
-	"github.com/kernpilot/lok8s/internal/assets"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kernpilot/lok8s/internal/assets"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 func TestBashBridgeArgv(t *testing.T) {
@@ -24,6 +27,22 @@ func TestBashBridgeArgv(t *testing.T) {
 	_ = prov.Doctor(t.Context(), "/cfg")
 	_ = prov.Rebuild(t.Context(), "/cfg", "/wd")
 	_, _ = prov.Output(t.Context(), "/cfg")
+	// Expand: envsubst in the shell of the provider, the config on its
+	// stdin, its stdout returned, its stderr dropped.
+	testutil.WriteFile(t, h.cfg, `{"cluster_name": "${NAME}"}`)
+	expanded, err := prov.Expand(t.Context(), h.cfg)
+	if err != nil || string(expanded) != rec.probe {
+		t.Errorf("Expand = %q, %v; want the stdout of the child", expanded, err)
+	}
+	if got := rec.stdins[len(rec.stdins)-1]; got != `{"cluster_name": "${NAME}"}` {
+		t.Errorf("Expand stdin = %q, want the config", got)
+	}
+	if c := rec.cmds[len(rec.cmds)-1]; c.Stderr != io.Discard {
+		t.Errorf("Expand stderr = %v, want io.Discard", c.Stderr)
+	}
+	if _, err := prov.Expand(t.Context(), filepath.Join(t.TempDir(), "none.json")); err == nil {
+		t.Error("Expand of a config that does not exist: no error")
+	}
 	_ = h.r.bashProvision(t.Context(), "test.dom")
 
 	wantArgs := [][]string{
@@ -31,6 +50,7 @@ func TestBashBridgeArgv(t *testing.T) {
 		{"-c", providerCallScript, "lo-recover-provider", "hetzner", "provider::doctor", "/cfg"},
 		{"-c", providerCallScript, "lo-recover-provider", "hetzner", "provider::rebuild", "/cfg", "/wd"},
 		{"-c", providerCallScript, "lo-recover-provider", "hetzner", "provider::output", "/cfg"},
+		{"-c", providerCallScript, "lo-recover-provider", "hetzner", "envsubst"},
 		{"-c", provisionScript, "lo-recover-provision", "test.dom"},
 	}
 	if len(rec.cmds) != len(wantArgs) {
