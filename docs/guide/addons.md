@@ -1286,16 +1286,23 @@ $ lo doctor
 ...
 --- domain ---
   ✓ active: example.org (kind kubeone)
-  ! migration incomplete: ClusterRoleBinding system-upgrade-controller binds the system-upgrade-controller ServiceAccount to cluster-admin (run: kubectl delete clusterrolebinding system-upgrade-controller)
+  ! migration incomplete: ClusterRoleBinding system-upgrade-controller binds the system-upgrade-controller ServiceAccount to cluster-admin (run: kubectl delete clusterrolebinding system-upgrade-controller, unless you keep it on purpose)
 ```
 
-Doctor only reads: you run the delete. When no binding gives the
-ServiceAccount `lok8s-system-upgrade-controller` yet, doctor first says
-to apply the bootstrap. A cluster without leftovers prints
-`✓ system-upgrade-controller: no RBAC migration leftovers`. The check
-needs the domain's kubeconfig (`.kubeconfig/<metadata.name>.yaml`) and the
-right to list ClusterRoleBindings and ClusterRoles. It does not run when
-`spec.bootstrap` has `system-upgrade-controller-cluster-admin`.
+Doctor only reads: you run the delete. When doctor finds a leftover and
+no binding gives the ServiceAccount `lok8s-system-upgrade-controller`
+yet, it first says to apply the bootstrap. A cluster without leftovers
+prints `✓ system-upgrade-controller: no RBAC migration leftovers`. The
+check needs the domain's kubeconfig (`.kubeconfig/<metadata.name>.yaml`)
+and the right to list ClusterRoleBindings and ClusterRoles. Doctor reads
+them with that kubeconfig, so its credential plugin
+(`users[].user.exec`) runs and can ask you to log in; each read stops
+after 30 s. The check does not run when `spec.bootstrap` has
+`system-upgrade-controller-cluster-admin`. Doctor finds that opt-in addon
+only as a bare entry name, not as a path entry, so each delete command
+ends with "unless you keep it on purpose". Doctor prints a binding name only when
+it is a DNS-1123 subdomain. For any other name, the line has no name and
+no delete command.
 
 The `can-i` lines are spot checks. Until now cluster-admin hid any call
 the new roles miss. Restart the controller, run one Plan that does what
@@ -1574,12 +1581,17 @@ these:
 - its `aggregate-to-*` labels (with the value `true`): the built-in roles
   keep the copied rules until the delete.
 
-Doctor only reads: you run the deletes. When no binding gives the
-ServiceAccount `lok8s-redis-operator` yet, doctor first says to apply the
-bootstrap. A cluster without leftovers prints
+Doctor only reads: you run the deletes. When doctor finds a leftover and
+no binding gives the ServiceAccount `lok8s-redis-operator` yet, it first
+says to apply the bootstrap. A cluster without leftovers prints
 `✓ redis-operator: no RBAC migration leftovers`. The check needs the
 domain's kubeconfig (`.kubeconfig/<metadata.name>.yaml`) and the right to
-list ClusterRoleBindings and ClusterRoles.
+list ClusterRoleBindings and ClusterRoles. Doctor reads them with that
+kubeconfig, so its credential plugin (`users[].user.exec`) runs and can
+ask you to log in; each read stops after 30 s. Doctor finds the opt-in
+addon only as a bare entry name (`- redis-operator-chart-rbac`), not as a
+path entry, so the line for its binding ends with "unless you keep it on
+purpose".
 
 The removal from `admin` is asynchronous. The delete of the labelled
 ClusterRole queues the clusterrole-aggregation controller, which then
