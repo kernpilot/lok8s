@@ -251,7 +251,9 @@ func TestAgentKubectlCallsCarryNoClientConfigFlag(t *testing.T) {
 
 // TestAgentProbesAreBoundedByTimeout: the marker read and every assessment
 // probe stay bounded in time, with `timeout <seconds>` (the syntax that
-// busybox and coreutils both accept), not with a kubectl flag.
+// busybox and coreutils both accept), not with a kubectl flag. The scan of
+// the assessment block starts at the send gate (the first `if [ -n
+// "${ASSESS_NOW}" ]`), so it covers the gate's dry run too.
 func TestAgentProbesAreBoundedByTimeout(t *testing.T) {
 	t.Parallel()
 	script := heartbeatScript(t)

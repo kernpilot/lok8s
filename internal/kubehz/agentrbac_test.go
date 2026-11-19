@@ -444,12 +444,16 @@ func configmapTarget(args []string) (name, ns string) {
 
 // TestAgentScriptMarkersUseTheStateConfigMap: the heartbeat script reads its
 // markers from kubehz-agent-state once and writes them there with annotate
-// (nine writers), and no kubectl call names kubehz-agent-config. The CronJob
-// still gets kubehz-agent-config through envFrom.
+// (nine writers), and no kubectl call names kubehz-agent-config. The send
+// gate is the 24h marker write plus --dry-run=server (a client dry run never
+// reaches the apiserver), and it runs before the assessment is put together.
+// The CronJob still gets kubehz-agent-config through envFrom.
 func TestAgentScriptMarkersUseTheStateConfigMap(t *testing.T) {
 	t.Parallel()
 	script := heartbeatScript(t)
-	reads, writes := 0, 0
+	reads := 0
+	var writes [][]string
+	var gates []kubectlCall
 	for _, c := range kubectlCalls(script) {
 		joined := strings.Join(c.args, " ")
 		if strings.Contains(joined, agentConfigName) {
@@ -469,13 +473,29 @@ func TestAgentScriptMarkersUseTheStateConfigMap(t *testing.T) {
 		case "get":
 			reads++
 		case "annotate":
-			writes++
+			if slices.ContainsFunc(c.args, func(a string) bool { return strings.HasPrefix(a, "--dry-run") }) {
+				gates = append(gates, c)
+			} else {
+				writes = append(writes, c.args)
+			}
 		default:
 			t.Errorf("script line %d: kubectl %s: the agent may only get and annotate (patch) %s", c.line, joined, agentStateName)
 		}
 	}
-	if reads != 1 || writes != 9 {
-		t.Errorf("%s: %d reads and %d annotate calls, want 1 and 9", agentStateName, reads, writes)
+	if reads != 1 || len(writes) != 9 {
+		t.Errorf("%s: %d reads and %d annotate calls, want 1 and 9", agentStateName, reads, len(writes))
+	}
+	if len(gates) != 1 {
+		t.Fatalf("%d dry-run annotate calls, want 1 (the send gate)", len(gates))
+	}
+	gate := gates[0]
+	write := slices.DeleteFunc(slices.Clone(gate.args), func(a string) bool { return a == "--dry-run=server" })
+	if len(write) != len(gate.args)-1 || !slices.Contains(write, `"kubehz.cloud/last-assessment=${NOW_EPOCH}"`) ||
+		!slices.ContainsFunc(writes, func(w []string) bool { return slices.Equal(w, write) }) {
+		t.Errorf("script line %d: the send gate kubectl %s is not the 24h marker write plus --dry-run=server", gate.line, strings.Join(gate.args, " "))
+	}
+	if at := strings.Index(script, "ASSESSMENT=$(jq "); at < 0 || gate.line >= strings.Count(script[:at], "\n")+1 {
+		t.Errorf("script line %d: the send gate must run before the assessment is put together", gate.line)
 	}
 
 	raw, err := fs.ReadFile(Manifests(), "agent/cronjob.yaml")

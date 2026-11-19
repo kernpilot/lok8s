@@ -331,7 +331,8 @@ spec:
                   # UNREADABLE marker (an install without kubehz-agent-state,
                   # until `lo kubehz deploy` runs again) sends NOTHING:
                   # fail-closed beats spamming a full assessment every 5-minute
-                  # tick.
+                  # tick. A marker that the agent can read but not write sends
+                  # nothing either (the send gate below).
                   #
                   # An install made before kubehz-agent-state kept these markers
                   # on kubehz-agent-config. The agent does not read them there.
@@ -419,6 +420,33 @@ spec:
                   [ -z "${CLAIM_NONCE}" ] || CLAIM_FIELD='"claim": {"nonce": "'"${CLAIM_NONCE}"'"},'
 
                   ASSESSMENT=""
+                  # The send gate. An assessment goes out only when this tick
+                  # can store the time of the send. With a marker that the
+                  # agent can read but not write (RBAC without the patch, or an
+                  # admission webhook that refuses it), the 24h marker never
+                  # moves, and the agent sends the full assessment on every
+                  # 5-minute tick. So before the probes, the agent sends the
+                  # marker write of a delivered assessment (below) as a
+                  # server-side dry run. The apiserver runs authentication,
+                  # RBAC and admission on it and stores nothing: every
+                  # admissionregistration.k8s.io/v1 webhook declares
+                  # sideEffects None or NoneOnDryRun, so a webhook runs on a
+                  # dry run too. A dry run, not a first real write: the marker
+                  # keeps its old value until a send lands, so a beat that
+                  # fails on the network sends the assessment again on the next
+                  # tick, and no new annotation is needed. A denied dry run
+                  # sends the plain heartbeat, keeps an assess request for a
+                  # later tick (the platform clears it only on an
+                  # assessment-bearing beat) and logs one line. `timeout 5`
+                  # bounds the call, as for the marker read above: a kubectl
+                  # client flag would make kubectl skip the in-cluster config.
+                  if [ -n "${ASSESS_NOW}" ]; then
+                    if ! timeout 5 kubectl annotate --dry-run=server --overwrite configmap kubehz-agent-state -n kubehz-system \
+                        "kubehz.cloud/last-assessment=${NOW_EPOCH}" >/dev/null 2>&1; then
+                      echo "kubehz: assessment not sent: the agent cannot write configmap/kubehz-agent-state in kubehz-system; run 'lo kubehz deploy'" >&2
+                      ASSESS_NOW=""
+                    fi
+                  fi
                   if [ -n "${ASSESS_NOW}" ]; then
                     # datastore + etcdReachable: etcd static pods in kube-system
                     # are the primary probe; with none visible, the
@@ -718,7 +746,7 @@ spec:
 
                   # Claim succeeded → the response carries the additive
                   # `claim: {verified: true}` key, the platform's cue to clear
-                  # the nonce from the config (it is consumed server-side and
+                  # the nonce from kubehz-agent-state (it is consumed server-side and
                   # can never succeed again). A beat whose nonce was wrong or
                   # expired carries NO cue and clears nothing — the expiry
                   # window above bounds how long such a nonce keeps echoing.
@@ -731,8 +759,10 @@ spec:
                   fi
 
                   # Assessment handled → move the 24h marker; clear a served
-                  # assess request. A failed annotate only risks a RE-send next
-                  # tick (idempotent server-side), never a lost heartbeat.
+                  # assess request. The send gate ran this write as a dry run
+                  # before the send, so it fails here only on a passing error,
+                  # and that risks one RE-send next tick (idempotent
+                  # server-side), never a lost heartbeat.
                   if [ -n "${ASSESS_DELIVERED}" ]; then
                     kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                       "kubehz.cloud/last-assessment=${NOW_EPOCH}" >/dev/null 2>&1 \
@@ -749,7 +779,9 @@ spec:
                   # still carries the un-served ask (the server clears it only on
                   # assessment-bearing beats), and re-arming would bypass the 24h
                   # deferral into an every-other-tick resend of the same poison.
-                  if [ -z "${ASSESS_REJECTED:-}" ] && printf '%s' "${RESPONSE}" | \
+                  # NOT with an unreadable marker either: that tick writes
+                  # nothing (fail-closed, as for the assessment gate above).
+                  if [ -n "${MARKER_OK}" ] && [ -z "${ASSESS_REJECTED:-}" ] && printf '%s' "${RESPONSE}" | \
                       jq -e '((.actions // .data.actions // []) | index("assess")) != null' >/dev/null 2>&1; then
                     kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                       "kubehz.cloud/assess-requested=true" >/dev/null 2>&1 || true
@@ -781,8 +813,9 @@ spec:
                   if [ -z "${MARKER_OK}" ]; then
                     # Fail closed like the assessment gate: without the marker
                     # ConfigMap the etag/error state cannot persist, so every
-                    # tick would re-poll and re-log — skip entirely.
-                    echo "kubehz: desired-state poll skipped (marker ConfigMap unreadable)" >&2
+                    # tick would re-poll and re-log — skip entirely. The line
+                    # names the assessment too: this tick sent none.
+                    echo "kubehz: assessment and desired-state poll skipped: the agent cannot read configmap/kubehz-agent-state in kubehz-system; run 'lo kubehz deploy'" >&2
                   else
                   set --
                   [ -z "${DESIRED_ETAG}" ] || set -- -H "If-None-Match: ${DESIRED_ETAG}"

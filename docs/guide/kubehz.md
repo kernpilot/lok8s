@@ -1206,6 +1206,18 @@ fail-soft, and sent **at most once per 24 h** (or when the platform requests
 a refresh through the heartbeat response). The platform turns it into a
 handover **feasibility** verdict.
 
+The agent keeps the time of the last send on `kubehz-agent-state`, and it
+sends an assessment only when it can store that time. Before the probes, it
+sends the write as a server-side dry run. If the agent cannot write the
+ConfigMap (its RBAC lacks the `patch`, or an admission webhook refuses it),
+the tick sends no assessment and logs
+`kubehz: assessment not sent: the agent cannot write configmap/kubehz-agent-state in kubehz-system; run 'lo kubehz deploy'`.
+If the agent cannot read the ConfigMap, the tick logs
+`kubehz: assessment and desired-state poll skipped: …`. In both cases the
+plain heartbeat still goes out. `lo kubehz deploy` puts back the ConfigMap
+and the agent's RBAC. An admission webhook that refuses the write is yours
+to change.
+
 ```bash
 lo kubehz assess    # pretty-print the stored assessment + feasibility
 ```
