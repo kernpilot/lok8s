@@ -142,6 +142,12 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		ui.ErrorTo(c.ErrOut, "%s not found — run: lo secrets init", sopsConfig)
 		return ErrHandled
 	}
+	// One run at a time, from this read to the last encrypt (lock.go).
+	unlock, err := c.lockSopsConfig()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	raw, err := os.ReadFile(sopsConfig)
 	if err != nil {
@@ -157,7 +163,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	// format).
 	before := 0
 	edited, after := appendRecipient(string(raw), agePubkey, &before)
-	if err := os.WriteFile(sopsConfig, []byte(edited), 0o644); err != nil { // #nosec G306 -- .sops.yaml holds public age recipients only
+	if err := replaceFile(sopsConfig, []byte(edited)); err != nil {
 		return err
 	}
 	if after < 1 {

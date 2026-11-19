@@ -145,7 +145,7 @@ func TestKeyArgumentRefusesAPrivateKey(t *testing.T) {
 		{"add-key", func(c *Context, k string) error { return c.AddKey(k, false, false) }},
 		{"remove-key", func(c *Context, k string) error { return c.RemoveKey(k, false, false) }},
 	} {
-		for _, arg := range []string{fakeAgeIdentity, strings.ToLower(fakeAgeIdentity), "-----BEGIN OPENSSH PRIVATE KEY-----"} {
+		for _, arg := range []string{fakeAgeIdentity, strings.ToLower(fakeAgeIdentity), "-----BEGIN OPENSSH PRIVATE KEY-----", "-----BEGIN"} {
 			t.Run(tc.name, func(t *testing.T) {
 				c, out, errOut := testEnv(t)
 				sopsYAMLWith(t, c, keyA+","+keyB)
@@ -210,10 +210,30 @@ func opens(t *testing.T, enc string, id *age.X25519Identity, plain string) bool 
 	return err == nil && string(dec) == plain
 }
 
+// freshen makes each plaintext one second newer than its .enc: the state
+// after `lo secrets decrypt`. remove-key refuses a cache file older than its
+// .enc.
+func freshen(t *testing.T, plains ...string) {
+	t.Helper()
+	for _, p := range plains {
+		info, err := os.Stat(p + ".enc")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ts := info.ModTime().Add(time.Second)
+		if err := os.Chtimes(p, ts, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 const rotateWarn = "[warn] a removal does not revoke what the key already read (older .enc files in git history included): rotate those secrets\n"
 
 // The removal edits every creation rule and re-keys the store: after it the
-// removed identity cannot open the store, and the one that stays can.
+// removed identity cannot open the store, and the one that stays can. Only
+// the .enc files that listed the recipient are re-encrypted: a new plaintext
+// gets no .enc. .sops.yaml is replaced, not rewritten in place: a hard link
+// to the old file keeps the old content.
 func TestRemoveKeyRekeysEveryRule(t *testing.T) {
 	c, out, errOut := testEnv(t)
 	c.Domain = "a.dev"
@@ -223,8 +243,15 @@ func TestRemoveKeyRekeysEveryRule(t *testing.T) {
 	a := c.Paths.Clusters + "/a.dev/secrets"
 	write(t, a+"/Secret.app.default.K", "v")
 	encryptStore(t, c, "a.dev", out, errOut)
+	freshen(t, a+"/Secret.app.default.K")
+	write(t, a+"/Secret.new.default.K", "n")
 	if !opens(t, a+"/Secret.app.default.K.enc", gone, "v") {
 		t.Fatal("fixture: the identity to remove cannot open the store before the removal")
+	}
+	oldYAML := readFile(t, c.sopsConfigPath())
+	link := c.Paths.Base + "/old.sops.yaml"
+	if err := os.Link(c.sopsConfigPath(), link); err != nil {
+		t.Fatal(err)
 	}
 
 	if err := c.RemoveKey(g, false, false); err != nil {
@@ -253,10 +280,17 @@ func TestRemoveKeyRekeysEveryRule(t *testing.T) {
 	if !opens(t, enc, keep, "v") {
 		t.Error("the remaining identity cannot open the store")
 	}
+	if fsutil.Exists(a + "/Secret.new.default.K.enc") {
+		t.Error("a plaintext that no .enc listed was encrypted")
+	}
+	if readFile(t, link) != oldYAML {
+		t.Error(".sops.yaml was rewritten in place, not replaced")
+	}
 }
 
-// --all re-keys every domain store, each under its own domain; without it
-// only the context's store is re-keyed.
+// --all re-keys every domain store; without it only the context's store is
+// re-keyed, and a warning names the other store that still lists the
+// recipient. The flat store is never re-keyed and is named too.
 func TestRemoveKeyAllRekeysEveryStore(t *testing.T) {
 	for _, all := range []bool{true, false} {
 		c, out, errOut := testEnv(t)
@@ -270,6 +304,8 @@ func TestRemoveKeyAllRekeysEveryStore(t *testing.T) {
 		write(t, b+"/Secret.app.default.K", "w")
 		encryptStore(t, c, "a.dev", out, errOut)
 		encryptStore(t, c, "b.dev", out, errOut)
+		freshen(t, a+"/Secret.app.default.K", b+"/Secret.app.default.K")
+		write(t, c.Paths.Base+"/.secrets/Secret.flat.default.K.enc", "sops: "+g+"\n")
 		bBefore := readFile(t, b+"/Secret.app.default.K.enc")
 
 		if err := c.RemoveKey(g, all, false); err != nil {
@@ -293,6 +329,14 @@ func TestRemoveKeyAllRekeysEveryStore(t *testing.T) {
 			}
 		} else if readFile(t, b+"/Secret.app.default.K.enc") != bBefore {
 			t.Error("without --all a store other than the context's was re-encrypted")
+		}
+		wantErr := "[warn] still listed in 1 .enc file(s) of the flat store, which --all does not re-key: .secrets\n" + rotateWarn
+		if !all {
+			wantErr = "[warn] still listed in 1 .enc file(s) of a store this run did not re-key: clusters/b.dev/secrets\n" +
+				"[warn]   rerun with --all to re-key every domain store\n" + wantErr
+		}
+		if errOut.String() != wantErr {
+			t.Errorf("all=%v: stderr:\n%q\nwant:\n%q", all, errOut.String(), wantErr)
 		}
 	}
 }
@@ -356,6 +400,7 @@ func TestRemoveKeySkipOrphansWarns(t *testing.T) {
 	write(t, a+"/Secret.app.default.K", "v")
 	write(t, a+"/Secret.orphan.default.K", "o")
 	encryptStore(t, c, "a.dev", out, errOut)
+	freshen(t, a+"/Secret.app.default.K")
 	if err := os.Remove(a + "/Secret.orphan.default.K"); err != nil {
 		t.Fatal(err)
 	}
@@ -431,6 +476,7 @@ func TestRemoveKeyRekeysStaleEncFiles(t *testing.T) {
 	a := c.Paths.Clusters + "/a.dev/secrets"
 	write(t, a+"/Secret.app.default.K", "v")
 	encryptStore(t, c, "a.dev", out, errOut)
+	freshen(t, a+"/Secret.app.default.K")
 	sopsRules(t, c, k)
 	yaml := readFile(t, c.sopsConfigPath())
 
@@ -448,32 +494,40 @@ func TestRemoveKeyRekeysStaleEncFiles(t *testing.T) {
 	}
 }
 
-// The command checks the files after the re-key: an .enc newer than its
-// plaintext is skipped by encrypt and keeps the removed recipient.
-func TestRemoveKeyFailsWhenAnEncWasNotRekeyed(t *testing.T) {
-	c, out, errOut := testEnv(t)
-	c.Domain = "a.dev"
-	keep, gone := newAgeIdentity(t), newAgeIdentity(t)
-	k, g := keep.Recipient().String(), gone.Recipient().String()
-	sopsRules(t, c, k+","+g)
-	a := c.Paths.Clusters + "/a.dev/secrets"
-	write(t, a+"/Secret.app.default.K", "v")
-	encryptStore(t, c, "a.dev", out, errOut)
-	future := time.Now().Add(time.Hour)
-	if err := os.Chtimes(a+"/Secret.app.default.K.enc", future, future); err != nil {
-		t.Fatal(err)
-	}
+// An .enc that lists the recipient and is newer than its plaintext is
+// refused before any write: the re-key encrypts the plaintext, and would
+// write its older value over the newer one. The state right after
+// `lo secrets encrypt` is the common case; a future mtime is the extreme one.
+func TestRemoveKeyRefusesAStaleCache(t *testing.T) {
+	for _, future := range []bool{false, true} {
+		c, out, errOut := testEnv(t)
+		c.Domain = "a.dev"
+		keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+		k, g := keep.Recipient().String(), gone.Recipient().String()
+		sopsRules(t, c, k+","+g)
+		a := c.Paths.Clusters + "/a.dev/secrets"
+		write(t, a+"/Secret.app.default.K", "v")
+		encryptStore(t, c, "a.dev", out, errOut)
+		if future {
+			ts := time.Now().Add(time.Hour)
+			if err := os.Chtimes(a+"/Secret.app.default.K.enc", ts, ts); err != nil {
+				t.Fatal(err)
+			}
+		}
+		before, encBefore := readFile(t, c.sopsConfigPath()), readFile(t, a+"/Secret.app.default.K.enc")
 
-	if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
-		t.Fatalf("want ErrHandled, got %v", err)
-	}
-	want := "[error] still encrypted to the removed recipient: clusters/a.dev/secrets/Secret.app.default.K.enc\n" +
-		"[error] 1 .enc file(s) were not re-keyed (an .enc newer than its plaintext?) — touch the plaintext, then run 'lo secrets encrypt'\n"
-	if errOut.String() != want {
-		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
-	}
-	if strings.Contains(out.String(), "done —") {
-		t.Error("printed done for a failed re-key")
+		if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
+			t.Fatalf("want ErrHandled, got %v", err)
+		}
+		want := "[error] newer than its decrypted twin: clusters/a.dev/secrets/Secret.app.default.K.enc\n" +
+			"[error] 1 .enc file(s) are newer than their plaintext: the cache is stale, and the re-key would write the old value back over the newer one\n" +
+			"[error]   Run 'lo secrets decrypt' first (in each store), then run this command again. Nothing was written.\n"
+		if errOut.String() != want || out.String() != "" {
+			t.Errorf("future=%v: stdout %q\nstderr:\n%q\nwant:\n%q", future, out.String(), errOut.String(), want)
+		}
+		if readFile(t, c.sopsConfigPath()) != before || readFile(t, a+"/Secret.app.default.K.enc") != encBefore {
+			t.Errorf("future=%v: a file changed before the refusal", future)
+		}
 	}
 }
 

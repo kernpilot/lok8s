@@ -3951,11 +3951,28 @@ Remove an age recipient and re-key the store
 ### Synopsis
 
 Remove an age recipient from every creation rule in .sops.yaml, then
-re-encrypt the selected stores so that no .enc file lists it.
+re-encrypt each .enc file of the selected stores that lists it. Without --all
+that is the store of the current domain; with --all, every domain store. The
+flat store is not re-keyed. A warning names each other store that still
+lists the recipient.
 
-The command refuses to remove the last recipient of a rule. Without
---skip-orphans it also refuses when an .enc file has no decrypted twin: the
-re-key cannot rewrite that file, so it keeps the removed recipient.
+Before the first write, the command refuses:
+  - a key argument that looks like a private key (it is not printed),
+  - a recipient outside a single-quoted age: list (an unquoted list, an
+    escaped string, a YAML list, key_groups, an alias or a merge key),
+  - the last recipient of a rule,
+  - a recipient that is in no rule and in no .enc file,
+  - an .enc file that it cannot read,
+  - an .enc file that lists the recipient and is newer than its plaintext
+    (run 'lo secrets decrypt' first),
+  - an .enc file that matches no creation rule, a rule with a recipient that
+    is not age, or a rule with an age recipient that does not parse,
+  - without --skip-orphans, an .enc file with no decrypted twin: the re-key
+    cannot rewrite that file, so it keeps the removed recipient.
+
+The command holds the lock .sops.yaml.lock for the whole run, and waits for
+it LO_SECRETS_LOCK_WAIT seconds (60 by default). If the re-key stops after
+the .sops.yaml write, run the same command again to resume it.
 
 A removal does not revoke what the key already read. Its holder can still
 decrypt the older .enc files in the git history, and keeps every value it

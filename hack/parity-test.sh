@@ -74,7 +74,8 @@ export XDG_CONFIG_HOME="${HOME}/.config"
 mkdir -p "${HOME}"
 ssh-keygen -t ed25519 -N '' -C parity -f "${WORK}/home/key" -q
 export LOK8S_SSH_KEY="${WORK}/home/key"   # private key (decrypt derivation)
-unset SOPS_AGE_KEY SOPS_AGE_KEY_FILE || true
+# Every other age identity source sops reads from the environment.
+unset SOPS_AGE_KEY SOPS_AGE_KEY_FILE SOPS_AGE_KEY_CMD SOPS_AGE_SSH_PRIVATE_KEY_FILE || true
 
 for impl in go bash; do
   parity::new_project "${WORK}/sec-${impl}"
@@ -90,6 +91,18 @@ sec_check() {
 # sec_state <relpath> — the file must be byte-identical across the two clones.
 sec_state() {
   parity::state_same "${WORK}/sec-bash/${1}" "${WORK}/sec-go/${1}" "${1}" || failures=$((failures + 1))
+}
+
+# sec_prep <argv...> — a fixture step, not a parity case: run in both clones,
+# each under its own implementation, output discarded. A non-zero rc fails.
+sec_prep() {
+  local impl rc
+  for impl in go bash; do
+    parity::implementation "${WORK}/sec-${impl}" "${impl}"
+    rc=0
+    (cd "${WORK}/sec-${impl}" && "${LO_BIN}" "$@" </dev/null >/dev/null 2>&1) || rc=$?
+    (( rc == 0 )) || fail "fixture (${impl}): lo $* exited ${rc}"
+  done
 }
 
 sec_check secrets path
@@ -166,12 +179,87 @@ sec_check secrets add-key "${FAKE_ID}"
 sec_no_echo "${FAKE_ID}" "secrets add-key <private key>"
 sec_check secrets remove-key "${FAKE_ID}"
 sec_no_echo "${FAKE_ID}" "secrets remove-key <private key>"
+# The same before any parser can print it: a PEM line (it looks like a
+# flag), the PEM block split into words, and a private key as an extra
+# argument. PEM_HEAD is built from two parts, so that the private-key rule of
+# a secret scanner does not match from one PEM literal to the next.
+PEM_HEAD="-----BEGIN OPENSSH PRIVATE ""KEY-----"
+for cmd in add-key remove-key; do
+  sec_check secrets "${cmd}" "${PEM_HEAD}"
+  sec_no_echo "OPENSSH" "secrets ${cmd} <PEM line>"
+  # shellcheck disable=SC2086 # the four words of the PEM line
+  sec_check secrets "${cmd}" ${PEM_HEAD}
+  sec_no_echo "OPENSSH" "secrets ${cmd} <PEM words>"
+  sec_check secrets "${cmd}" "${KEY2}" "${FAKE_ID}"
+  sec_no_echo "${FAKE_ID}" "secrets ${cmd} <age key> <private key>"
+done
 
 # remove-key: the refusals first. None of them may write .sops.yaml.
 KEY2B="$("${ROOT}/.bin/ssh-to-age" < "${WORK}/home/key2.pub")"
 for impl in go bash; do
   cp -p "${WORK}/sec-${impl}/.sops.yaml" "${WORK}/sops-${impl}.saved"
 done
+
+# sec_refusal <label> <yaml> <argv...> — writes .sops.yaml (the saved one with
+# the yaml appended, or the yaml alone when it starts with creation_rules:)
+# in both clones, runs the case, checks that .sops.yaml did not change, and
+# puts the saved one back.
+sec_refusal() {
+  local label="${1}" yaml="${2}" impl
+  shift 2
+  for impl in go bash; do
+    if [[ "${yaml}" == creation_rules:* ]]; then
+      printf '%s' "${yaml}" > "${WORK}/sec-${impl}/.sops.yaml"
+    else
+      cp -p "${WORK}/sops-${impl}.saved" "${WORK}/sec-${impl}/.sops.yaml"
+      printf '%s' "${yaml}" >> "${WORK}/sec-${impl}/.sops.yaml"
+    fi
+    cp -p "${WORK}/sec-${impl}/.sops.yaml" "${WORK}/sops-${impl}.case"
+  done
+  sec_check "$@"
+  for impl in go bash; do
+    cmp -s "${WORK}/sops-${impl}.case" "${WORK}/sec-${impl}/.sops.yaml" \
+      || fail "secrets remove-key (${impl}): .sops.yaml changed by the ${label} refusal"
+    cp -p "${WORK}/sops-${impl}.saved" "${WORK}/sec-${impl}/.sops.yaml"
+  done
+}
+
+# The YAML read: key2 where the line edit does not look (an escaped string,
+# a key group, an alias). ESC2 is key2 with its first letter as the escape
+# backslash, u, 0061 in a double-quoted string.
+ESC2="\"$(printf '\134')u0061${KEY2B:1}\""
+sec_refusal "escaped string" "  - path_regex: 'Other\\..*'
+    age: ${ESC2}
+" secrets remove-key "${WORK}/home/key2.pub"
+sec_refusal "key_groups" "  - path_regex: 'Other\\..*'
+    key_groups:
+      - age:
+          - ${ESC2}
+" secrets remove-key "${WORK}/home/key2.pub"
+sec_refusal "alias" "  - path_regex: &shared ${ESC2}
+    age: '${KEY2}'
+  - path_regex: 'Otherx\\..*'
+    age: *shared
+" secrets remove-key "${WORK}/home/key2.pub"
+
+# The lock: while another run holds .sops.yaml.lock, both commands refuse
+# at once (LO_SECRETS_LOCK_WAIT=0) and change nothing.
+if command -v flock >/dev/null 2>&1; then
+  exec {lock_go}>"${WORK}/sec-go/.sops.yaml.lock" {lock_bash}>"${WORK}/sec-bash/.sops.yaml.lock"
+  if flock -n "${lock_go}" && flock -n "${lock_bash}"; then
+    export LO_SECRETS_LOCK_WAIT=0
+    sec_check secrets remove-key "${WORK}/home/key2.pub"
+    sec_check secrets add-key "${WORK}/home/key.pub"
+    unset LO_SECRETS_LOCK_WAIT
+  else
+    fail "secrets lock fixture: the harness cannot take the lock"
+  fi
+  exec {lock_go}>&- {lock_bash}>&-
+  for impl in go bash; do
+    cmp -s "${WORK}/sops-${impl}.saved" "${WORK}/sec-${impl}/.sops.yaml" \
+      || fail "secrets (${impl}): .sops.yaml changed while the lock was held"
+  done
+fi
 sec_check secrets remove-key age1nope
 sec_check secrets remove-key /no/such/file
 sec_check secrets remove-key "age1$(printf 'q%.0s' {1..57})z"   # valid shape, not a recipient
@@ -193,14 +281,44 @@ for impl in go bash; do
   rm -f "${WORK}/sec-${impl}/.secrets/Secret.orphan.default.X.enc"
 done
 
-# --all: every domain store is re-keyed, each under its own domain (add-key's
-# --all re-encrypts the current store only).
+# --all: every domain store is re-keyed (add-key's --all re-encrypts the
+# current store only).
 sec_check secrets --domain alpha.dev encrypt
 sec_check secrets --domain beta.dev encrypt
 for impl in go bash; do
   grep -qF "${KEY2B}" "${WORK}/sec-${impl}/clusters/beta.dev/secrets/Secret.app.default.TOKEN.enc" \
     || fail "secrets remove-key fixture (${impl}): the beta.dev store does not list key2"
 done
+# Right after an encrypt each .enc is newer than its plaintext: the re-key
+# would write the older plaintext back. Refused until a decrypt.
+sec_check secrets --domain alpha.dev remove-key "${WORK}/home/key2.pub"
+sec_prep secrets --domain alpha.dev decrypt
+sec_prep secrets --domain beta.dev decrypt
+# An .enc of the store that matches no creation rule, a rule with a
+# recipient that is not age, or a rule with an age recipient that does not
+# parse (NOT_RCPT: the length of one, in a letter outside bech32): the re-key
+# would stop half way.
+NOT_RCPT="age1$(printf 'b%.0s' {1..58})"
+sec_refusal "no rule" "creation_rules:
+  - path_regex: 'Other\\..*'
+    age: '${KEY2},${KEY2B}'
+" secrets --domain alpha.dev remove-key "${WORK}/home/key2.pub"
+sec_refusal "pgp rule" "creation_rules:
+  - path_regex: 'Secret\\..*'
+    age: '${KEY2},${KEY2B}'
+    pgp: 'FFFF0000FFFF0000FFFF0000FFFF0000FFFF0000'
+" secrets --domain alpha.dev remove-key "${WORK}/home/key2.pub"
+sec_refusal "age recipient that does not parse" "creation_rules:
+  - path_regex: 'Secret\\..*'
+    age: '${KEY2},${KEY2B},${NOT_RCPT}'
+" secrets --domain alpha.dev remove-key "${WORK}/home/key2.pub"
+sec_refusal "key-group recipient that does not parse" "creation_rules:
+  - path_regex: 'Secret\\..*'
+    key_groups:
+      - age: ['${KEY2}', '${NOT_RCPT}']
+  - path_regex: 'Other\\..*'
+    age: '${KEY2},${KEY2B}'
+" secrets --domain alpha.dev remove-key "${WORK}/home/key2.pub"
 sec_check secrets remove-key "${WORK}/home/key2.pub" --all
 sec_state .sops.yaml
 for impl in go bash; do
@@ -211,7 +329,8 @@ for impl in go bash; do
     || fail "secrets remove-key --all (${impl}): the flat store was re-keyed too"
 done
 # The recipient is in no rule now, but the flat store's .enc files still list
-# it: a second run re-keys them.
+# it: a second run re-keys them, once the cache is fresh.
+sec_prep secrets decrypt
 sec_check secrets remove-key "${WORK}/home/key2.pub"
 for impl in go bash; do
   if grep -rlF --include='*.enc' "${KEY2B}" "${WORK}/sec-${impl}/.secrets" "${WORK}/sec-${impl}/clusters"; then

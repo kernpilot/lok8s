@@ -13,9 +13,11 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 
@@ -120,6 +122,62 @@ func secretsArgs(minArgs, maxArgs int, names ...string) cobra.PositionalArgs {
 	}
 }
 
+// keyArgCommand guards a command whose argument is a key (add-key,
+// remove-key): a pasted private key must not reach any message. Before RunE
+// runs, cobra prints a flag-parse error and secretsArgs an extra argument,
+// both with the value. So the Args check refuses a positional or a flag value
+// of that shape first, and the flag-error func does not print an error that
+// holds one. GuardPrivateKeyArgv runs the same check on the raw argv, before
+// cobra parses anything.
+func keyArgCommand(c *cobra.Command) *cobra.Command {
+	arity := secretsArgs(1, 1, "key")
+	c.Args = func(cmd *cobra.Command, args []string) error {
+		private := false
+		for _, a := range args {
+			private = private || secrets.LooksLikePrivateKey(a)
+		}
+		cmd.Flags().Visit(func(f *pflag.Flag) {
+			private = private || secrets.LooksLikePrivateKey(f.Value.String())
+		})
+		if private {
+			secrets.RefusePrivateKey(cmd.ErrOrStderr())
+			return ErrHandled
+		}
+		return arity(cmd, args)
+	}
+	c.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		if secrets.LooksLikePrivateKey(err.Error()) {
+			secrets.RefusePrivateKey(cmd.ErrOrStderr())
+			return ErrHandled
+		}
+		return argshErrorf(cmd.ErrOrStderr(), "%s", argshFlagError(cmd, err.Error()))
+	})
+	return c
+}
+
+// GuardPrivateKeyArgv refuses a `lo secrets add-key` or `remove-key` call
+// whose raw argv holds an argument with the shape of a private key, flag
+// values and words that look like flags included. main runs it before
+// Execute: cobra's flag parser and the argument checks print what they
+// reject. It prints the refusal (never the argument) and reports whether it
+// refused. Any other command is left to cobra.
+func GuardPrivateKeyArgv(root *cobra.Command, argv []string, errOut io.Writer) bool {
+	cmd, _, err := root.Find(argv)
+	if err != nil || cmd.Parent() == nil || cmd.Parent().Name() != "secrets" {
+		return false
+	}
+	if cmd.Name() != "add-key" && cmd.Name() != "remove-key" {
+		return false
+	}
+	for _, a := range argv {
+		if secrets.LooksLikePrivateKey(a) {
+			secrets.RefusePrivateKey(errOut)
+			return true
+		}
+	}
+	return false
+}
+
 func newSecretsCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "secrets",
@@ -173,7 +231,6 @@ func newSecretsAddKey(paths *config.Paths) *cobra.Command {
 		Use:          "add-key <key>",
 		Short:        "Add an age recipient and re-key the store",
 		Annotations:  commandSpec{destructive: true}.annotations(),
-		Args:         secretsArgs(1, 1, "key"),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			all, _ := cmd.Flags().GetBool("all")
@@ -184,7 +241,7 @@ func newSecretsAddKey(paths *config.Paths) *cobra.Command {
 	}
 	c.Flags().BoolP("all", "a", false, "Re-key every domain store, not just the current one")
 	c.Flags().Bool("skip-orphans", false, "Proceed even if some .enc files have no decrypted twin")
-	return c
+	return keyArgCommand(c)
 }
 
 func newSecretsRemoveKey(paths *config.Paths) *cobra.Command {
@@ -192,17 +249,33 @@ func newSecretsRemoveKey(paths *config.Paths) *cobra.Command {
 		Use:   "remove-key <key>",
 		Short: "Remove an age recipient and re-key the store",
 		Long: `Remove an age recipient from every creation rule in .sops.yaml, then
-re-encrypt the selected stores so that no .enc file lists it.
+re-encrypt each .enc file of the selected stores that lists it. Without --all
+that is the store of the current domain; with --all, every domain store. The
+flat store is not re-keyed. A warning names each other store that still
+lists the recipient.
 
-The command refuses to remove the last recipient of a rule. Without
---skip-orphans it also refuses when an .enc file has no decrypted twin: the
-re-key cannot rewrite that file, so it keeps the removed recipient.
+Before the first write, the command refuses:
+  - a key argument that looks like a private key (it is not printed),
+  - a recipient outside a single-quoted age: list (an unquoted list, an
+    escaped string, a YAML list, key_groups, an alias or a merge key),
+  - the last recipient of a rule,
+  - a recipient that is in no rule and in no .enc file,
+  - an .enc file that it cannot read,
+  - an .enc file that lists the recipient and is newer than its plaintext
+    (run 'lo secrets decrypt' first),
+  - an .enc file that matches no creation rule, a rule with a recipient that
+    is not age, or a rule with an age recipient that does not parse,
+  - without --skip-orphans, an .enc file with no decrypted twin: the re-key
+    cannot rewrite that file, so it keeps the removed recipient.
+
+The command holds the lock .sops.yaml.lock for the whole run, and waits for
+it LO_SECRETS_LOCK_WAIT seconds (60 by default). If the re-key stops after
+the .sops.yaml write, run the same command again to resume it.
 
 A removal does not revoke what the key already read. Its holder can still
 decrypt the older .enc files in the git history, and keeps every value it
 decrypted before. Rotate those secrets after the removal.`,
 		Annotations:  commandSpec{destructive: true}.annotations(),
-		Args:         secretsArgs(1, 1, "key"),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			all, _ := cmd.Flags().GetBool("all")
@@ -213,7 +286,7 @@ decrypted before. Rotate those secrets after the removal.`,
 	}
 	c.Flags().BoolP("all", "a", false, "Re-key every domain store, not just the current one")
 	c.Flags().Bool("skip-orphans", false, "Proceed even if some .enc files have no decrypted twin (they keep the removed recipient)")
-	return c
+	return keyArgCommand(c)
 }
 
 func newSecretsEncrypt(paths *config.Paths) *cobra.Command {

@@ -746,6 +746,17 @@ func TestMcpRefusesADashArgumentAndRunsNothing(t *testing.T) {
 	}
 }
 
+// TestMcpDoesNotEchoAPrivateKeyArgument: a dash argument with the shape of
+// a private key (the first line of a PEM block) is refused like any dash
+// argument, and the refusal does not print it.
+func TestMcpDoesNotEchoAPrivateKeyArgument(t *testing.T) {
+	res := mcpCall(t, mcpExposure{destructive: true}, "lo_kubehz_space_get", map[string]any{}, []string{"-----BEGIN OPENSSH PRIVATE KEY-----"})
+	text := resultText(res)
+	if !res.IsError || !strings.Contains(text, "starts with a dash") || strings.Contains(text, "OPENSSH") {
+		t.Errorf("isError=%v text=%q, want the refusal without the argument", res.IsError, text)
+	}
+}
+
 // TestMcpRunsAnAllowedCallWithItsArgvUnchanged: the argv of an allowed
 // call is <command path> <flags> <args>, nothing added. A routed project
 // hands it to the argsh tree, which has no "--" marker.

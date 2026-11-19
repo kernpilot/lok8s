@@ -20,6 +20,11 @@ import (
 	"github.com/kernpilot/lok8s/internal/config"
 )
 
+// isolatedIdentityVars are the age identity sources sops reads from the
+// environment besides SOPS_AGE_KEY_FILE: testEnv unsets each one, so that an
+// identity of the caller cannot open a file a test expects to stay closed.
+var isolatedIdentityVars = []string{"SOPS_AGE_KEY", "SOPS_AGE_KEY_CMD", "SOPS_AGE_SSH_PRIVATE_KEY_FILE"}
+
 // testEnv builds a throwaway project and a Context writing into buffers.
 func testEnv(t *testing.T) (*Context, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
@@ -29,9 +34,13 @@ func testEnv(t *testing.T) (*Context, *bytes.Buffer, *bytes.Buffer) {
 	// sops also reads <user config dir>/sops/age/keys.txt, and on Linux that
 	// dir is $XDG_CONFIG_HOME when it is set, not $HOME/.config.
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "home", ".config"))
-	t.Setenv("SOPS_AGE_KEY", "")
-	os.Unsetenv("SOPS_AGE_KEY")
+	for _, v := range isolatedIdentityVars {
+		t.Setenv(v, "")
+		os.Unsetenv(v)
+	}
 	t.Setenv("SOPS_AGE_KEY_FILE", filepath.Join(base, "no-keys.txt"))
+	// remove-key reads the .pub of the SSH key lo decrypts with.
+	t.Setenv("LOK8S_SSH_KEY", filepath.Join(base, "home", ".ssh", "id_ed25519"))
 	out, errOut := &bytes.Buffer{}, &bytes.Buffer{}
 	c := &Context{
 		Paths: &config.Paths{

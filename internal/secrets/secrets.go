@@ -166,9 +166,16 @@ func ensureGitignore(dir string) error {
 // filtered to those with the given prefix. Only names are filtered here;
 // callers apply their own regular-file / .enc checks like the bash loops do.
 func storeEntries(dir, prefix string) []string {
+	names, _ := storeNames(dir, prefix)
+	return names
+}
+
+// storeNames is storeEntries with the error of the directory read, for a
+// caller that must fail closed when it cannot list the store.
+func storeNames(dir, prefix string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var names []string
 	for _, e := range entries {
@@ -177,7 +184,7 @@ func storeEntries(dir, prefix string) []string {
 		}
 	}
 	sort.Strings(names)
-	return names
+	return names, nil
 }
 
 // newerThan mirrors bash [[ a -nt b ]]: a exists and its mtime is strictly
