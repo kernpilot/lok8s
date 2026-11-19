@@ -68,6 +68,9 @@ fi
 # nondeterministic).
 
 export HOME="${WORK}/home"          # isolate ~/.config/sops/age/keys.txt
+# sops reads <config dir>/sops/age/keys.txt, and on Linux the config dir is
+# $XDG_CONFIG_HOME when it is set, not $HOME/.config: pin it into WORK too.
+export XDG_CONFIG_HOME="${HOME}/.config"
 mkdir -p "${HOME}"
 ssh-keygen -t ed25519 -N '' -C parity -f "${WORK}/home/key" -q
 export LOK8S_SSH_KEY="${WORK}/home/key"   # private key (decrypt derivation)
@@ -147,6 +150,74 @@ sec_check secrets add-key "${KEY2}"                       # already present → 
 ssh-keygen -t ed25519 -N '' -C parity2 -f "${WORK}/home/key2" -q
 sec_check secrets add-key "${WORK}/home/key2.pub"         # re-key + sweep
 sec_state .sops.yaml
+
+# sec_no_echo <text> <label> — no output of the last sec_check contains text.
+sec_no_echo() {
+  if grep -qF -- "${1}" "${WORK}/go.out" "${WORK}/go.err" "${WORK}/bash.out" "${WORK}/bash.err"; then
+    fail "${2}: the output echoes the argument"
+  fi
+}
+
+# A private key pasted as the argument: refused by add-key and remove-key,
+# never echoed. A fixed filler outside the bech32 alphabet: the shape of an
+# age identity, not a key.
+FAKE_ID="AGE-SECRET-KEY-1$(printf 'O%.0s' {1..58})"
+sec_check secrets add-key "${FAKE_ID}"
+sec_no_echo "${FAKE_ID}" "secrets add-key <private key>"
+sec_check secrets remove-key "${FAKE_ID}"
+sec_no_echo "${FAKE_ID}" "secrets remove-key <private key>"
+
+# remove-key: the refusals first. None of them may write .sops.yaml.
+KEY2B="$("${ROOT}/.bin/ssh-to-age" < "${WORK}/home/key2.pub")"
+for impl in go bash; do
+  cp -p "${WORK}/sec-${impl}/.sops.yaml" "${WORK}/sops-${impl}.saved"
+done
+sec_check secrets remove-key age1nope
+sec_check secrets remove-key /no/such/file
+sec_check secrets remove-key "age1$(printf 'q%.0s' {1..57})z"   # valid shape, not a recipient
+for impl in go bash; do                                   # a second rule that lists only key2
+  printf "  - path_regex: 'Other\\\\..*'\n    age: '%s'\n" "${KEY2B}" >> "${WORK}/sec-${impl}/.sops.yaml"
+  cp -p "${WORK}/sec-${impl}/.sops.yaml" "${WORK}/sops-${impl}.last"
+done
+sec_check secrets remove-key "${WORK}/home/key2.pub"      # the last recipient of a rule
+for impl in go bash; do
+  cmp -s "${WORK}/sops-${impl}.last" "${WORK}/sec-${impl}/.sops.yaml" \
+    || fail "secrets remove-key (${impl}): .sops.yaml changed by the last-recipient refusal"
+  cp -p "${WORK}/sops-${impl}.saved" "${WORK}/sec-${impl}/.sops.yaml"
+  printf 'enc\n' > "${WORK}/sec-${impl}/.secrets/Secret.orphan.default.X.enc"
+done
+sec_check secrets remove-key "${WORK}/home/key2.pub"      # an orphan .enc
+for impl in go bash; do
+  cmp -s "${WORK}/sops-${impl}.saved" "${WORK}/sec-${impl}/.sops.yaml" \
+    || fail "secrets remove-key (${impl}): .sops.yaml changed by the orphan refusal"
+  rm -f "${WORK}/sec-${impl}/.secrets/Secret.orphan.default.X.enc"
+done
+
+# --all: every domain store is re-keyed, each under its own domain (add-key's
+# --all re-encrypts the current store only).
+sec_check secrets --domain alpha.dev encrypt
+sec_check secrets --domain beta.dev encrypt
+for impl in go bash; do
+  grep -qF "${KEY2B}" "${WORK}/sec-${impl}/clusters/beta.dev/secrets/Secret.app.default.TOKEN.enc" \
+    || fail "secrets remove-key fixture (${impl}): the beta.dev store does not list key2"
+done
+sec_check secrets remove-key "${WORK}/home/key2.pub" --all
+sec_state .sops.yaml
+for impl in go bash; do
+  if grep -lF "${KEY2B}" "${WORK}/sec-${impl}"/clusters/*/secrets/Secret.*.enc; then
+    fail "secrets remove-key --all (${impl}): a domain store still lists the removed recipient"
+  fi
+  grep -qF "${KEY2B}" "${WORK}/sec-${impl}/.secrets/Secret.app.default.JWT_SECRET.enc" \
+    || fail "secrets remove-key --all (${impl}): the flat store was re-keyed too"
+done
+# The recipient is in no rule now, but the flat store's .enc files still list
+# it: a second run re-keys them.
+sec_check secrets remove-key "${WORK}/home/key2.pub"
+for impl in go bash; do
+  if grep -rlF --include='*.enc' "${KEY2B}" "${WORK}/sec-${impl}/.secrets" "${WORK}/sec-${impl}/clusters"; then
+    fail "secrets remove-key (${impl}): an .enc file still lists the removed recipient"
+  fi
+done
 
 # Cross-decrypt: wipe the plaintexts, then decrypt the go-encrypted store
 # with the BASH impl and the bash-encrypted store with the GO impl. Both must

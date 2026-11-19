@@ -18,14 +18,19 @@
 # Everything here runs against a THROWAWAY store. These tests must never be able
 # to touch clusters/*/secrets — PATH_BASE and PATH_CLUSTERS are redirected into
 # BATS_TEST_TMPDIR, and the encrypt step is stubbed, so no sops key is needed and
-# no real cache file is reachable.
+# no real cache file is reachable. HOME, XDG_CONFIG_HOME (sops reads <config
+# dir>/sops/age/keys.txt) and SOPS_AGE_KEY_FILE point into BATS_TEST_TMPDIR too.
 
 setup() {
   load "../test_helper"
   setup_tmpdir
+  export HOME="${BATS_TEST_TMPDIR}/home"
+  export XDG_CONFIG_HOME="${HOME}/.config"
+  export SOPS_AGE_KEY_FILE="${BATS_TEST_TMPDIR}/no-keys.txt"
+  unset SOPS_AGE_KEY SOPS_AGE_KEY_CMD SOPS_AGE_SSH_PRIVATE_KEY_FILE
   export PATH_BASE="${BATS_TEST_TMPDIR}/base"
   export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
-  mkdir -p "${PATH_BASE}" "${PATH_CLUSTERS}/a.dev/secrets" "${PATH_CLUSTERS}/b.dev/secrets"
+  mkdir -p "${HOME}" "${PATH_BASE}" "${PATH_CLUSTERS}/a.dev/secrets" "${PATH_CLUSTERS}/b.dev/secrets"
   import() { :; }
   export -f import
 
@@ -129,4 +134,21 @@ _add() { # <key> [all] [skip_orphans]
   run _add '/no/such/path'
   [ "$status" -ne 0 ]
   [[ "$output" == *"not an age key and not a readable file"* ]]
+}
+
+@test "a private key argument is refused and not echoed" {
+  # The not-a-file error above prints the argument, so a pasted age identity
+  # would land in the terminal. The filler is outside the bech32 alphabet: the
+  # shape of an age identity, not a key.
+  _load
+  local fake; fake="AGE-SECRET-KEY-1$(printf 'O%.0s' {1..58})"
+  local before; before="$(cat "${PATH_BASE}/.sops.yaml")"
+  run _add "${fake}"
+  [ "$status" -eq 1 ]
+  [ "$output" = "[error] the key argument looks like a private key — it is not printed
+[error] pass an age public key (age1…) or the path to an ed25519 SSH public key" ] || {
+    echo "unexpected output (${#output} bytes)" >&2; return 1; }
+  [[ "$output" != *"${fake}"* ]]
+  [ "$(cat "${PATH_BASE}/.sops.yaml")" = "${before}" ]
+  [ ! -s "${ENCRYPT_RAN}" ]
 }

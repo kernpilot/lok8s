@@ -3713,6 +3713,7 @@ lo secrets [flags]
 * [lo secrets list](#lo-secrets-list)	 - List secrets
 * [lo secrets path](#lo-secrets-path)	 - Resolve the secrets path for the current context
 * [lo secrets print](#lo-secrets-print)	 - Print secret(s)
+* [lo secrets remove-key](#lo-secrets-remove-key)	 - Remove an age recipient and re-key the store
 * [lo secrets set](#lo-secrets-set)	 - Write a literal value into the secret cache
 
 ## lo secrets add-key
@@ -3937,6 +3938,46 @@ lo secrets print [pattern...] [flags]
   -c, --copy       Copy secret(s) to clipboard (--only-one is implied)
   -h, --help       help for print
   -o, --only-one   Only print one secret (error if multiple matches)
+```
+
+### SEE ALSO
+
+* [lo secrets](#lo-secrets)	 - Manage secrets (encrypt/decrypt/set)
+
+## lo secrets remove-key
+
+Remove an age recipient and re-key the store
+
+### Synopsis
+
+Remove an age recipient from every creation rule in .sops.yaml, then
+re-encrypt the selected stores so that no .enc file lists it.
+
+The command refuses to remove the last recipient of a rule. Without
+--skip-orphans it also refuses when an .enc file has no decrypted twin: the
+re-key cannot rewrite that file, so it keeps the removed recipient.
+
+A removal does not revoke what the key already read. Its holder can still
+decrypt the older .enc files in the git history, and keeps every value it
+decrypted before. Rotate those secrets after the removal.
+
+```
+lo secrets remove-key <key> [flags]
+```
+
+### Examples
+
+```
+  lo secrets remove-key ~/.ssh/old_ed25519.pub
+  lo secrets remove-key age1<recipient> --all
+```
+
+### Options
+
+```
+  -a, --all            Re-key every domain store, not just the current one
+  -h, --help           help for remove-key
+      --skip-orphans   Proceed even if some .enc files have no decrypted twin (they keep the removed recipient)
 ```
 
 ### SEE ALSO

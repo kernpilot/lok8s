@@ -14,9 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
-	"time"
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -130,39 +128,13 @@ func grepQF(content, pattern string) bool {
 // to them. Decrypt first, or pass skipOrphans to accept the gap knowingly.
 // (Like bash, the orphan check runs AFTER .sops.yaml was already modified —
 // the ordering is part of the observable contract.)
+//
+// The argument check and the re-key steps are the helpers in rekey.go, which
+// RemoveKey shares; rekey_test.go pins this command's output and effects.
 func (c *Context) AddKey(key string, all, skipOrphans bool) error {
-	// Accept an age key directly, or derive one from an SSH public key.
-	agePubkey := ""
-	if strings.HasPrefix(key, "age1") {
-		agePubkey = key
-	} else {
-		if !fsutil.IsRegular(key) {
-			ui.ErrorTo(c.ErrOut, "not an age key and not a readable file: %s", key)
-			ui.ErrorTo(c.ErrOut, "pass an age public key (age1…) or the path to an ed25519 SSH public key")
-			return ErrHandled
-		}
-		// Contained (bash: 2>/dev/null): the ssh-to-age binary echoes its
-		// ENTIRE input on failure, which for a mistakenly-passed PRIVATE key
-		// would print the key material (see
-		// tests/unit/secret_material_containment_test.bats). The library
-		// error is likewise never surfaced.
-		derived, _, err := deriveAgePublicKey(key)
-		if err != nil && !errors.Is(err, errUnsupportedKey) {
-			ui.ErrorTo(c.ErrOut, "could not derive an age key from %s", key)
-			ui.ErrorTo(c.ErrOut, "only ed25519 SSH keys are supported, and it must be the PUBLIC key")
-			return ErrHandled
-		}
-		// A parseable non-ed25519 key derives to "" (the binary's rc-0 skip)
-		// and is caught by the shape check below, matching bash.
-		agePubkey = derived
-	}
-
-	// bech32 age public key. Validated because a typo here is silent: sops
-	// accepts the config and every later encrypt writes a recipient nobody
-	// holds.
-	if !agePubkeyRe.MatchString(agePubkey) {
-		ui.ErrorTo(c.ErrOut, "not a valid age public key: %s", agePubkey)
-		return ErrHandled
+	agePubkey, err := c.recipientArg(key)
+	if err != nil {
+		return err
 	}
 
 	sopsConfig := c.sopsConfigPath()
@@ -197,72 +169,20 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 
 	// Re-key the stores. Without this the recipient is listed but holds
 	// nothing.
-	var stores []string
-	if all {
-		matches, _ := filepath.Glob(c.Paths.Clusters + "/*/secrets")
-		sort.Strings(matches)
-		for _, d := range matches {
-			// bash's * glob skips dot-directories; Go's does not.
-			if strings.HasPrefix(filepath.Base(filepath.Dir(d)), ".") {
-				continue
-			}
-			if fsutil.DirExists(d) {
-				stores = append(stores, d)
-			}
-		}
-	} else {
-		dir, err := c.ResolveStore()
-		if err != nil {
-			return err
-		}
-		stores = append(stores, dir)
+	stores, err := c.rekeyStores(all)
+	if err != nil {
+		return err
 	}
-	if len(stores) == 0 {
-		ui.ErrorTo(c.ErrOut, "no secret store found to re-key")
-		return ErrHandled
-	}
-
-	orphans := 0
-	for _, store := range stores {
-		for _, base := range storeEntries(store, "Secret.") {
-			if !strings.HasSuffix(base[len("Secret."):], ".enc") {
-				continue
-			}
-			enc := store + "/" + base
-			if !fsutil.Exists(enc) {
-				continue
-			}
-			if !fsutil.IsRegular(strings.TrimSuffix(enc, ".enc")) {
-				ui.WarnTo(c.ErrOut, "orphan (no decrypted twin, cannot re-key): %s", strings.TrimPrefix(enc, c.Paths.Base+"/"))
-				orphans++
-			}
-		}
-	}
-	if orphans > 0 && !skipOrphans {
+	if orphans := len(c.orphanEncs(stores)); orphans > 0 && !skipOrphans {
 		ui.ErrorTo(c.ErrOut, "%d encrypted file(s) have no decrypted twin — they would keep the OLD", orphans)
 		ui.ErrorTo(c.ErrOut, "  recipient list while .sops.yaml claims the new key was added.")
 		ui.ErrorTo(c.ErrOut, "  Run 'lo secrets decrypt' first, or re-run with --skip-orphans to accept it.")
 		return ErrHandled
 	}
 
-	rekeyed := 0
-	now := time.Now()
-	for _, store := range stores {
-		for _, base := range storeEntries(store, "Secret.") {
-			plain := store + "/" + base
-			// bash tests [[ -e && != *.enc ]] — any existing entry counts,
-			// not just regular files.
-			if !fsutil.Exists(plain) || strings.HasSuffix(base, ".enc") {
-				continue
-			}
-			// The freshness skip in Encrypt is keyed on mtime, and a
-			// recipient change does not touch the plaintext — so nudge it,
-			// which is exactly the manual step this command exists to remove.
-			if err := os.Chtimes(plain, now, now); err != nil {
-				return err
-			}
-			rekeyed++
-		}
+	rekeyed, err := touchPlaintexts(stores)
+	if err != nil {
+		return err
 	}
 	fmt.Fprintf(c.Out, "re-keying %d cache file(s) across %d store(s)…\n", rekeyed, len(stores))
 	// No name filter on purpose: a re-key rewrote every cache file in every

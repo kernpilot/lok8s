@@ -134,6 +134,7 @@ func newSecretsCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	cmd.AddCommand(
 		newSecretsInit(paths),
 		newSecretsAddKey(paths),
+		newSecretsRemoveKey(paths),
 		newSecretsSet(paths),
 		newSecretsEncrypt(paths),
 		newSecretsDecrypt(paths),
@@ -183,6 +184,35 @@ func newSecretsAddKey(paths *config.Paths) *cobra.Command {
 	}
 	c.Flags().BoolP("all", "a", false, "Re-key every domain store, not just the current one")
 	c.Flags().Bool("skip-orphans", false, "Proceed even if some .enc files have no decrypted twin")
+	return c
+}
+
+func newSecretsRemoveKey(paths *config.Paths) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "remove-key <key>",
+		Short: "Remove an age recipient and re-key the store",
+		Long: `Remove an age recipient from every creation rule in .sops.yaml, then
+re-encrypt the selected stores so that no .enc file lists it.
+
+The command refuses to remove the last recipient of a rule. Without
+--skip-orphans it also refuses when an .enc file has no decrypted twin: the
+re-key cannot rewrite that file, so it keeps the removed recipient.
+
+A removal does not revoke what the key already read. Its holder can still
+decrypt the older .enc files in the git history, and keeps every value it
+decrypted before. Rotate those secrets after the removal.`,
+		Annotations:  commandSpec{destructive: true}.annotations(),
+		Args:         secretsArgs(1, 1, "key"),
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			all, _ := cmd.Flags().GetBool("all")
+			skipOrphans, _ := cmd.Flags().GetBool("skip-orphans")
+			ctx := secretsContext(cmd, paths, "", "")
+			return secretsRun(ctx.RemoveKey(args[0], all, skipOrphans))
+		},
+	}
+	c.Flags().BoolP("all", "a", false, "Re-key every domain store, not just the current one")
+	c.Flags().Bool("skip-orphans", false, "Proceed even if some .enc files have no decrypted twin (they keep the removed recipient)")
 	return c
 }
 

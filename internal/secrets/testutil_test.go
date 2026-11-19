@@ -26,6 +26,9 @@ func testEnv(t *testing.T) (*Context, *bytes.Buffer, *bytes.Buffer) {
 	base := t.TempDir()
 	// Isolate every ambient identity source.
 	t.Setenv("HOME", filepath.Join(base, "home"))
+	// sops also reads <user config dir>/sops/age/keys.txt, and on Linux that
+	// dir is $XDG_CONFIG_HOME when it is set, not $HOME/.config.
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "home", ".config"))
 	t.Setenv("SOPS_AGE_KEY", "")
 	os.Unsetenv("SOPS_AGE_KEY")
 	t.Setenv("SOPS_AGE_KEY_FILE", filepath.Join(base, "no-keys.txt"))
