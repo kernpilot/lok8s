@@ -622,6 +622,10 @@ kubehz::agent_kubeconfig() {
 #   - A path in /proc or /dev, or a path that a link sends there, is
 #     refused (see kubehz::agent_in_proc_or_dev).
 #   - A directory, or a link to one, is refused.
+#   - Each name of the path that a "/" follows must be a directory that
+#     exists, as the kernel requires (see kubehz::agent_path_parts). Thus
+#     real/, real/., missing/../real and file/../real are refused before
+#     any request, not at the write.
 #   - A path that exists (a file or a link) is refused without --force.
 #     Thus --file ~/.kube/config cannot lose its contexts by accident.
 #   - With --force, lo writes through a link: the target becomes a new file
@@ -648,6 +652,7 @@ kubehz::agent_target() {
     echo "  Name a file, not a directory." >&2
     return 1
   fi
+  kubehz::agent_path_parts "${action}" "${file}" || return 1
   [[ -e "${file}" || -L "${file}" ]] || return 0
   if (( ! force )); then
     kubehz::agent_exists "${action}" "${file}"
@@ -655,6 +660,31 @@ kubehz::agent_target() {
   fi
   [[ -L "${file}" ]] || return 0
   kubehz::agent_link_target "${action}" "${file}"
+}
+
+# Check each name of <file> that a "/" follows, as the kernel does when it
+# opens the path: it must be a directory that exists (Go:
+# kubeconfigPathParts). Each part is tested as written (-e and -d follow a
+# link, and ".." goes up from where a link points, as in the kernel). A
+# trailing "/" makes the last name such a part too. The first part that
+# fails is refused (kubehz::agent_bad_part).
+# Usage: kubehz::agent_path_parts <action> <file>
+kubehz::agent_path_parts() {
+  local action="${1}" file="${2}" part="" rest="${2}"
+  while [[ "${rest}" == */* ]]; do
+    part+="${rest%%/*}"
+    rest="${rest#*/}"
+    if [[ -n "${part}" && "${part}" != */ ]]; then
+      if [[ ! -e "${part}" ]]; then
+        kubehz::agent_bad_part "${action}" "${file}" "${part}" "does not exist or cannot be read"
+        return 1
+      elif [[ ! -d "${part}" ]]; then
+        kubehz::agent_bad_part "${action}" "${file}" "${part}" "is not a directory"
+        return 1
+      fi
+    fi
+    part+=/
+  done
 }
 
 # The most links that kubehz::agent_link_target follows on the way to the
@@ -669,28 +699,51 @@ _KUBEHZ_MAX_LINK_HOPS=8
 # root or to this user, and it is not writable by its group or by others
 # unless it has the sticky bit. The link itself must belong to root or to
 # this user. The directory of the target gets the same check, and the
-# target must be a file of this user. Thus only root and this user can
-# change a link or a directory on the way, and the target stays the file
-# that the check saw. A refusal names the part that failed and why.
+# target must be a regular file of this user. Thus only root and this user
+# can change a link or a directory on the way, and the target stays the
+# file that the check saw. A refusal names the part that failed and why.
 # Nothing is written.
+# The walk keeps the rules of the kernel: a name that a "/" follows (also
+# in the target of a link, also a trailing "/") must be a directory that
+# exists before "." or ".." applies to it. So real/, real/.,
+# missing/../real and file/../real are refused, as the kernel refuses
+# them. ".." goes up from where a link to a directory points. A relative
+# path starts at the working directory as the kernel knows it (pwd -P),
+# not at $PWD: a stale or reassigned PWD names another directory.
 # Usage: kubehz::agent_link_target <action> <file>
 # Sets: KUBEHZ_AGENT_TARGET
 kubehz::agent_link_target() {
-  local action="${1}" file="${2}" rest walked="" name next dest links=0 me ovf why rc target uid
+  local action="${1}" file="${2}" rest walked="" name next dest links=0 me ovf why rc target uid meta mode wd dir_next
   me=$(id -u)
   { read -r ovf < /proc/sys/kernel/overflowuid; } 2>/dev/null || ovf=""
   [[ "${ovf}" =~ ^[0-9]+$ ]] || ovf=65534
   rest="${file}"
-  [[ "${rest}" == /* ]] || rest="${PWD}/${rest}"
+  if [[ "${rest}" != /* ]]; then
+    # pwd prints a newline: the x keeps the trailing newlines of a name.
+    if ! wd=$(pwd -P 2>/dev/null && printf x); then
+      kubehz::agent_no_wd "${action}" "${file}"
+      return 1
+    fi
+    rest="${wd%$'\n'x}/${rest}"
+  fi
   while [[ -n "${rest}" ]]; do
-    name="${rest%%/*}"
-    if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+    name="${rest%%/*}" dir_next=0
+    if [[ "${rest}" == */* ]]; then rest="${rest#*/}" dir_next=1; else rest=""; fi
     case "${name}" in
       "" | .) continue ;;
       ..) walked="${walked%/*}"; continue ;;
     esac
     next="${walked}/${name}"
     if [[ ! -L "${next}" ]]; then
+      if (( dir_next )); then
+        if [[ ! -e "${next}" ]]; then
+          kubehz::agent_bad_part "${action}" "${file}" "${next}" "does not exist or cannot be read"
+          return 1
+        elif [[ ! -d "${next}" ]]; then
+          kubehz::agent_bad_part "${action}" "${file}" "${next}" "is not a directory"
+          return 1
+        fi
+      fi
       walked="${next}"
       continue
     fi
@@ -714,14 +767,25 @@ kubehz::agent_link_target() {
     fi
     dest="${dest%$'\n'x}"
     [[ "${dest}" != /* ]] || walked=""
-    [[ -z "${rest}" ]] || dest+="/${rest}"
+    # A "/" after the link (also a trailing one) stays: the target of the
+    # link must then be a directory.
+    (( ! dir_next )) || dest+="/${rest}"
     rest="${dest}"
   done
   target="${walked:-/}"
   dest="${target%/*}"
   kubehz::agent_dir_safe "${action}" "${file}" "${dest:-/}" "${me}" "${ovf}" || return 1
-  if [[ -L "${target}" ]] || ! uid=$(stat -c '%u' -- "${target}" 2>/dev/null); then
+  # One stat (it does not follow a link): the owner and the raw mode.
+  if [[ -L "${target}" ]] || ! meta=$(stat -c '%u %f' -- "${target}" 2>/dev/null); then
     kubehz::agent_unwritable "${action}" "${file}"
+    return 1
+  fi
+  uid="${meta%% *}" mode="${meta#* }"
+  # A FIFO, a socket, a device or a directory is not a kubeconfig: the mv
+  # would replace it. The file type is the top 4 bits of the mode (8 =
+  # a regular file).
+  if [[ ! "${mode}" =~ ^[0-9a-f]+$ ]] || (( (16#${mode} & 16#F000) != 16#8000 )); then
+    kubehz::agent_link_not_regular "${action}" "${file}" "${target}"
     return 1
   fi
   if [[ "${uid}" != "${me}" || "${me}" == "${ovf}" ]]; then
@@ -768,8 +832,11 @@ kubehz::agent_part_why() {
     echo "is a symlink"
   elif ! kubehz::agent_owner_trusted "${part}" "${uid}" "${me}" "${ovf}"; then
     kubehz::agent_owner_why "${uid}" "${me}"
-  elif (( (8#${mode} & 8#022) != 0 && (8#${mode} & 8#1000) == 0 )); then
+  elif (( (8#${mode} & 8#1000) == 0 && (8#${mode} & 8#002) != 0 )); then
     echo "is writable by others and has no sticky bit"
+  elif (( (8#${mode} & 8#1000) == 0 && (8#${mode} & 8#020) != 0 )); then
+    # The group can hold other users, and lo does not read who is in it.
+    echo "is writable by its group and has no sticky bit"
   fi
 }
 
@@ -812,11 +879,35 @@ kubehz::agent_link_not_safe() {
   echo "  and must not be writable by its group or by others unless it has the sticky bit. Name another file." >&2
 }
 
+# The refusal of a link whose target is not a regular file (Go:
+# linkNotRegular).
+# Usage: kubehz::agent_link_not_regular <action> <file> <target>
+kubehz::agent_link_not_regular() {
+  error "kubehz ${1}: ${2} is a link, and its target ${3} is not a regular file"
+  echo "  lo writes through a link only to a regular file of yours. Name another file." >&2
+}
+
 # The refusal of a path that lo cannot write (Go: kubeconfigUnwritable).
 # Usage: kubehz::agent_unwritable <action> <file>
 kubehz::agent_unwritable() {
   error "kubehz ${1}: cannot write ${2}"
   echo "  Name a file in a directory that exists and that you can write to." >&2
+}
+
+# The refusal of a path with a part that is not a directory that exists,
+# with why (Go: kubeconfigBadPart).
+# Usage: kubehz::agent_bad_part <action> <file> <part> <why>
+kubehz::agent_bad_part() {
+  error "kubehz ${1}: cannot write ${2}: ${3} ${4}"
+  echo "  Name a file in a directory that exists and that you can write to." >&2
+}
+
+# The refusal of a relative path when the working directory cannot be
+# read, for example when it was removed (Go: kubeconfigNoWorkDir).
+# Usage: kubehz::agent_no_wd <action> <file>
+kubehz::agent_no_wd() {
+  error "kubehz ${1}: cannot write ${2}: the working directory cannot be read"
+  echo "  Run lo in a directory that exists, or name the file with its full path." >&2
 }
 
 # Is the path in /proc or /dev, or does a link on its path point there? The
@@ -828,8 +919,13 @@ kubehz::agent_unwritable() {
 # After 40 links the walk stops with "no": the write then fails anyway.
 # Usage: kubehz::agent_in_proc_or_dev <file>
 kubehz::agent_in_proc_or_dev() {
-  local rest="${1}" walked="" name next dest links=0
-  [[ "${rest}" == /* ]] || rest="${PWD}/${rest}"
+  local rest="${1}" walked="" name next dest links=0 wd
+  # The working directory as the kernel knows it, not $PWD (see
+  # kubehz::agent_link_target). When it cannot be read: "no", as in Go.
+  if [[ "${rest}" != /* ]]; then
+    wd=$(pwd -P 2>/dev/null && printf x) || return 1
+    rest="${wd%$'\n'x}/${rest}"
+  fi
   while [[ -n "${rest}" ]]; do
     name="${rest%%/*}"
     if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=""; fi

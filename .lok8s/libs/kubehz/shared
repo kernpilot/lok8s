@@ -552,8 +552,8 @@ kubehz::space_wait_active() {
 # TMPDIR (else /tmp), absolute (a relative TMPDIR is taken from PWD), with
 # each symlink resolved (cd -P; TMPDIR=/ and // give /). Each part of the
 # resolved path, from / down to the leaf, must belong to root or to this
-# user, and must not be writable by others unless it has the sticky bit
-# (/tmp passes). The walk goes top-down: each part is read (stat, no
+# user, and must not be writable by its group or by others unless it has
+# the sticky bit (/tmp passes). The walk goes top-down: each part is read (stat, no
 # follow: a link is refused) before any part below it. A part that passes
 # lets no other user rename or replace an entry in it (they cannot write
 # it, or the sticky bit keeps them to their own entries), so each part
@@ -598,8 +598,11 @@ kubehz::space_join_tmp_dir() {
       else
         why="belongs to another user (uid ${uid})"
       fi
-    elif (( (8#${mode} & 8#022) != 0 && (8#${mode} & 8#1000) == 0 )); then
+    elif (( (8#${mode} & 8#1000) == 0 && (8#${mode} & 8#002) != 0 )); then
       why="is writable by others and has no sticky bit"
+    elif (( (8#${mode} & 8#1000) == 0 && (8#${mode} & 8#020) != 0 )); then
+      # The group can hold other users, and the CLI does not read who is in it.
+      why="is writable by its group and has no sticky bit"
     fi
     if [[ -n "${why}" ]]; then
       error "the temp dir for the join ticket is not safe: ${part} ${why}"

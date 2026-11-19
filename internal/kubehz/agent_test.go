@@ -693,7 +693,8 @@ func TestAgentKubeconfigRefusals(t *testing.T) {
 		body, want string
 	}{
 		{"a missing directory", filepath.Join(dir, "no", "kc.yaml"), 200, agentKubeconfigYAML,
-			"[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write " + filepath.Join(dir, "no", "kc.yaml") + "\n  Name a file in a directory that exists and that you can write to.\n"},
+			"[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write " + filepath.Join(dir, "no", "kc.yaml") + ": " + filepath.Join(dir, "no") +
+				" does not exist or cannot be read\n  Name a file in a directory that exists and that you can write to.\n"},
 		{"an empty answer", filepath.Join(dir, "kc.yaml"), 200, " \n",
 			"[error] kubehz cluster kubeconfig cl-1a2b3c4d: the api answered without a kubeconfig\n"},
 		{"a refusal", filepath.Join(dir, "kc.yaml"), 409, refusalBody("KUBECONFIG_NOT_READY", "not ready", "Poll, then retry."),

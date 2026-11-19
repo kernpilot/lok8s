@@ -1078,8 +1078,8 @@ new file belongs to you and has mode 0600. A hard link to the old file keeps
 the old content.
 
 When the path is a link, `--force` replaces the file that the link points
-to, and the link stays. `lo` does this only when no other user can send the
-write to another file:
+to, and the link stays. `lo` does this only when the owners and the mode
+bits on the way let no other user send the write to another file:
 
 - `lo` follows each link on the way itself, one at a time, and at most 8. A
   loop or a longer chain is refused.
@@ -1088,13 +1088,28 @@ write to another file:
   must belong to root or to you. It must not be writable by its group or by
   others, unless it has the sticky bit (as `/tmp` has).
 - The directory of the target gets the same check, and the target must be a
-  file of yours.
+  regular file of yours. A FIFO, a socket, a device or a directory is
+  refused.
 
 Thus a link that another user puts in a shared directory such as `/tmp`, or
 a link in a directory that another user can write, cannot make `lo` replace
 one of your files. The refusal names the part of the path that failed, and
-why. A directory, a link to one, and a link to nothing are refused. A plain
-file and a new file do not get these checks.
+why: "writable by its group" or "writable by others" names the class that
+has the write bit. A directory, a link to one, and a link to nothing are
+refused. A plain file and a new file do not get these checks.
+
+The check reads the owners and the mode bits only. It does not read ACLs or
+other permission systems: a directory that an ACL lets another user write
+passes the check. `lo` does not read who is in a group, so a directory with
+mode 775 is refused, also when the group is your own (umask 002 makes such
+directories). `chmod g-w <dir>` removes the group write bit.
+
+Each name of the path that a `/` follows must be a directory that exists,
+as the kernel requires. Thus `real/`, `real/.`, `missing/../real` and
+`file/../real` are refused before `lo` calls the api, in the path that you
+name and in the target of a link. A `..` after a link to a directory goes
+up from where the link points, as in the kernel. A relative path starts at
+the working directory that the kernel knows, not at `$PWD`.
 
 A path in `/proc` or `/dev` is refused, also when a link in the path points
 there. Some of these paths change with the process that opens them: for

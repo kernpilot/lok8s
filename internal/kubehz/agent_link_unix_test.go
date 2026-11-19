@@ -76,6 +76,35 @@ const linkNotSafeHint = "  lo writes through a link only to a file of yours. Eac
 
 const linkHopHint = "  Point the link at the file, or name the file itself.\n"
 
+const linkNotRegularHint = "  lo writes through a link only to a regular file of yours. Name another file.\n"
+
+const unwritableHint = "  Name a file in a directory that exists and that you can write to.\n"
+
+const unmappedHint = "  The uid of this user is not mapped in the namespace, so lo cannot check who owns the path.\n" +
+	"  Run it where the uid of this user is mapped (unshare --map-current-user), or name a file that is not a link.\n"
+
+// ownersAs is an Lstat seam: each path in uids shows its uid, each other
+// directory shows root, and each other path its real owner.
+func ownersAs(uids map[string]int) func(string) (fs.FileInfo, error) {
+	return func(p string) (fs.FileInfo, error) {
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return fi, err
+		}
+		uid, ok := uids[p]
+		switch {
+		case ok:
+		case fi.IsDir():
+			uid = 0
+		default:
+			return fi, nil
+		}
+		st := *fi.Sys().(*syscall.Stat_t)
+		st.Uid = uint32(uid)
+		return ownedInfo{fi, &st}, nil
+	}
+}
+
 func TestAgentKubeconfigLinkChain(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("the test needs a user other than root: root passes each owner check")
@@ -97,19 +126,87 @@ func TestAgentKubeconfigLinkChain(t *testing.T) {
 			must(t, os.Symlink("../kube/real", filepath.Join(dir, "b", "l3")))
 			return filepath.Join(dir, "l1")
 		}, land: "kube/real"},
-		{name: "a link to a directory on the way counts, and passes", setup: func(t *testing.T, dir string) string {
+		{name: "8 links with a link to a directory among them pass", setup: func(t *testing.T, dir string) string {
 			modeDir(t, dir, "kube", 0o700)
 			writeReal(t, dir, "kube/real")
 			must(t, os.Symlink("kube", filepath.Join(dir, "sub")))
-			must(t, os.Symlink("sub/real", filepath.Join(dir, "l1")))
-			return filepath.Join(dir, "l1")
+			return linkChain(t, dir, 7, "sub/real")
 		}, land: "kube/real"},
+		{name: "9 links with a link to a directory among them are refused: that link counts", setup: func(t *testing.T, dir string) string {
+			modeDir(t, dir, "kube", 0o700)
+			writeReal(t, dir, "kube/real")
+			must(t, os.Symlink("kube", filepath.Join(dir, "sub")))
+			return linkChain(t, dir, 8, "sub/real")
+		}, want: "DIR/l1 is a link, and its path is not safe: DIR/sub is link 9 on the way, and lo follows at most 8 (a loop, or a chain that is too long)\n" + linkHopHint},
 		{name: "a relative path starts at the working directory", setup: func(t *testing.T, dir string) string {
 			writeReal(t, dir, "real")
 			linkChain(t, dir, 2, "real")
 			t.Chdir(dir)
 			return "l1"
 		}, land: "real"},
+		{name: "a relative path starts at the real working directory, not at a stale PWD", setup: func(t *testing.T, dir string) string {
+			writeReal(t, dir, "real")
+			linkChain(t, dir, 1, "real")
+			other := modeDir(t, dir, "other", 0o700)
+			writeReal(t, other, "real")
+			linkChain(t, other, 1, "real")
+			t.Chdir(dir)
+			t.Setenv("PWD", other)
+			return "l1"
+		}, land: "real"},
+		{name: "a link to real/ is refused: a file is not a directory", setup: func(t *testing.T, dir string) string {
+			writeReal(t, dir, "real")
+			return linkChain(t, dir, 1, "real/")
+		}, want: "cannot write DIR/l1: DIR/real is not a directory\n" + unwritableHint},
+		{name: "a link to real/. is refused", setup: func(t *testing.T, dir string) string {
+			writeReal(t, dir, "real")
+			return linkChain(t, dir, 1, "real/.")
+		}, want: "cannot write DIR/l1: DIR/real is not a directory\n" + unwritableHint},
+		{name: "a link to missing/../real is refused: the name before .. must exist", setup: func(t *testing.T, dir string) string {
+			writeReal(t, dir, "real")
+			return linkChain(t, dir, 1, "missing/../real")
+		}, want: "cannot write DIR/l1: DIR/missing does not exist or cannot be read\n" + unwritableHint},
+		{name: "a link to regular/../real is refused: the name before .. must be a directory", setup: func(t *testing.T, dir string) string {
+			writeReal(t, dir, "real")
+			writeReal(t, dir, "regular")
+			return linkChain(t, dir, 1, "regular/../real")
+		}, want: "cannot write DIR/l1: DIR/regular is not a directory\n" + unwritableHint},
+		{name: "a .. after a link to a directory goes up from where the link points", setup: func(t *testing.T, dir string) string {
+			kube := modeDir(t, dir, "kube", 0o700)
+			modeDir(t, kube, "sub", 0o700)
+			writeReal(t, dir, "kube/real")
+			must(t, os.Symlink("kube/sub", filepath.Join(dir, "dl")))
+			return linkChain(t, dir, 1, "dl/../real")
+		}, land: "kube/real"},
+		{name: "a link to a FIFO is refused: the target must be a regular file", setup: func(t *testing.T, dir string) string {
+			must(t, syscall.Mkfifo(filepath.Join(dir, "fifo"), 0o600))
+			return linkChain(t, dir, 1, "fifo")
+		}, want: "DIR/l1 is a link, and its target DIR/fifo is not a regular file\n" + linkNotRegularHint},
+		{name: "the argument real/ is refused before any request", setup: func(t *testing.T, dir string) string {
+			writeReal(t, dir, "real")
+			return dir + "/real/"
+		}, want: "cannot write DIR/real/: DIR/real is not a directory\n" + unwritableHint},
+		{name: "the argument real/. is refused before any request", setup: func(t *testing.T, dir string) string {
+			writeReal(t, dir, "real")
+			return dir + "/real/."
+		}, want: "cannot write DIR/real/.: DIR/real is not a directory\n" + unwritableHint},
+		{name: "the argument missing/../real is refused before any request", setup: func(t *testing.T, dir string) string {
+			writeReal(t, dir, "real")
+			return dir + "/missing/../real"
+		}, want: "cannot write DIR/missing/../real: DIR/missing does not exist or cannot be read\n" + unwritableHint},
+		{name: "the argument regular/../real is refused before any request", setup: func(t *testing.T, dir string) string {
+			writeReal(t, dir, "real")
+			writeReal(t, dir, "regular")
+			return dir + "/regular/../real"
+		}, want: "cannot write DIR/regular/../real: DIR/regular is not a directory\n" + unwritableHint},
+		{name: "the argument dl/../l1 goes up from where the link points", setup: func(t *testing.T, dir string) string {
+			kube := modeDir(t, dir, "kube", 0o700)
+			modeDir(t, kube, "sub", 0o700)
+			writeReal(t, dir, "kube/real")
+			linkChain(t, kube, 1, "real")
+			must(t, os.Symlink("kube/sub", filepath.Join(dir, "dl")))
+			return dir + "/dl/../l1"
+		}, land: "kube/real"},
 		{name: "a chain of 8 passes", setup: func(t *testing.T, dir string) string {
 			writeReal(t, dir, "real")
 			return linkChain(t, dir, 8, "real")
@@ -129,7 +226,7 @@ func TestAgentKubeconfigLinkChain(t *testing.T) {
 			must(t, os.Symlink("mid/l2", filepath.Join(dir, "l1")))
 			must(t, os.Symlink("../real", filepath.Join(dir, "mid", "l2")))
 			return filepath.Join(dir, "l1")
-		}, want: "DIR/l1 is a link, and its path is not safe: DIR/mid is writable by others and has no sticky bit\n" + linkNotSafeHint},
+		}, want: "DIR/l1 is a link, and its path is not safe: DIR/mid is writable by its group and has no sticky bit\n" + linkNotSafeHint},
 		{name: "each directory above a link is checked, from / down", setup: func(t *testing.T, dir string) string {
 			open := modeDir(t, dir, "open", 0o777)
 			modeDir(t, open, "sub", 0o700)
@@ -203,7 +300,7 @@ func TestAgentKubeconfigLinkChain(t *testing.T) {
 			if got := readFile(t, filepath.Join(dir, tc.land)); got != agentKubeconfigYAML {
 				t.Errorf("%s = %q, want the kubeconfig", tc.land, got)
 			}
-			if fi, err := os.Lstat(filepath.Join(dir, "l1")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			if fi, err := os.Lstat(file); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 				t.Error("the first link was replaced")
 			}
 			if tmp, _ := filepath.Glob(filepath.Join(filepath.Dir(filepath.Join(dir, tc.land)), ".kubeconfig-*")); len(tmp) != 0 {
@@ -237,4 +334,88 @@ func TestAgentKubeconfigLinkForAnUnmappedUser(t *testing.T) {
 	if got := readFile(t, filepath.Join(dir, "real")); got != "contexts" {
 		t.Errorf("real = %q", got)
 	}
+}
+
+// Under the unmapped state, every directory on the way shows root (the
+// seam), so the walk reaches the owner checks of the link and of the
+// target: a part of ours there proves nothing, and the refusal gives the
+// hint for an unmapped user.
+func TestAgentKubeconfigLinkOwnersForAnUnmappedUser(t *testing.T) {
+	me := os.Geteuid()
+	if me == 0 {
+		t.Skip("the test needs a user other than root")
+	}
+	for _, tc := range []struct {
+		name string
+		uids func(dir string) map[string]int
+		part string
+	}{
+		{"a link of ours cannot be checked", func(string) map[string]int { return nil }, "l1"},
+		{"a target of ours cannot be checked", func(dir string) map[string]int {
+			return map[string]int{filepath.Join(dir, "l1"): 0}
+		}, "real"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := agentHarness(t)
+			h.handle("GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent", 200, agentKubeconfigYAML)
+			h.ctx.Euid = func() int { return me }
+			h.ctx.OverflowUID = func() int { return me }
+			dir := linkTestDir(t)
+			writeReal(t, dir, "real")
+			file := linkChain(t, dir, 1, "real")
+			h.ctx.Lstat = ownersAs(tc.uids(dir))
+			_, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", file, true)
+			mustErr(t, err)
+			want := "[error] kubehz cluster kubeconfig cl-1a2b3c4d: DIR/l1 is a link, and its path is not safe: DIR/" + tc.part +
+				fmt.Sprintf(" cannot be checked (uid %d)\n", me) + unmappedHint
+			if got := strings.ReplaceAll(h.errOut.String(), dir, "DIR"); got != want {
+				t.Errorf("stderr = %q, want %q", got, want)
+			}
+			if n := len(h.reqs()); n != 0 {
+				t.Errorf("%d requests: a refused path must cost no grant and no download", n)
+			}
+			if got := readFile(t, filepath.Join(dir, "real")); got != "contexts" {
+				t.Errorf("real = %q", got)
+			}
+		})
+	}
+}
+
+// Two refusals that kubeconfigTarget does not reach, so the test calls
+// linkTarget itself: a link to a directory (the os.Stat check of
+// kubeconfigTarget refuses it first), and a relative path when the working
+// directory was removed (the path then does not exist, so it is not a
+// link).
+func TestAgentKubeconfigLinkTargetDirect(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("the test needs a user other than root: root passes each owner check")
+	}
+	const action = "cluster kubeconfig cl-1a2b3c4d"
+	t.Run("a directory as the final target is not a regular file", func(t *testing.T) {
+		h := agentHarness(t)
+		dir := linkTestDir(t)
+		modeDir(t, dir, "sub", 0o700)
+		_, err := h.ctx.linkTarget(action, linkChain(t, dir, 1, "sub"))
+		mustErr(t, err)
+		want := "[error] kubehz " + action + ": DIR/l1 is a link, and its target DIR/sub is not a regular file\n" + linkNotRegularHint
+		if got := strings.ReplaceAll(h.errOut.String(), dir, "DIR"); got != want {
+			t.Errorf("stderr = %q, want %q", got, want)
+		}
+	})
+	t.Run("a relative path in a removed working directory is refused", func(t *testing.T) {
+		h := agentHarness(t)
+		wd := modeDir(t, linkTestDir(t), "wd", 0o700)
+		t.Chdir(wd)
+		must(t, os.Remove(wd))
+		if got, err := os.Getwd(); err == nil {
+			t.Skipf("os.Getwd still works in a removed directory here (%s)", got)
+		}
+		_, err := h.ctx.linkTarget(action, "l1")
+		mustErr(t, err)
+		want := "[error] kubehz " + action + ": cannot write l1: the working directory cannot be read\n" +
+			"  Run lo in a directory that exists, or name the file with its full path.\n"
+		if got := h.errOut.String(); got != want {
+			t.Errorf("stderr = %q, want %q", got, want)
+		}
+	})
 }

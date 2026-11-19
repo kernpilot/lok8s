@@ -870,6 +870,10 @@ func (c *Context) kubeconfigExists(action, file string) {
 //   - A path in /proc or /dev, or a path that a link sends there, is
 //     refused (see inProcOrDev).
 //   - A directory, or a link to one, is refused.
+//   - Each name of the path that a "/" follows must be a directory that
+//     exists, as the kernel requires (see kubeconfigPathParts). Thus
+//     real/, real/., missing/../real and file/../real are refused before
+//     any request, not at the write.
 //   - A path that exists (a file or a link) is refused without force. Thus
 //     --file ~/.kube/config cannot lose its contexts by accident.
 //   - With force, lo writes through a link: the target becomes a new file
@@ -897,6 +901,9 @@ func (c *Context) kubeconfigTarget(action, file string, force bool) (string, err
 		c.echoErr("  Name a file, not a directory.")
 		return "", ErrHandled
 	}
+	if err := c.kubeconfigPathParts(action, file); err != nil {
+		return "", err
+	}
 	li, err := os.Lstat(file)
 	if err != nil {
 		return file, nil
@@ -911,6 +918,31 @@ func (c *Context) kubeconfigTarget(action, file string, force bool) (string, err
 	return c.linkTarget(action, file)
 }
 
+// kubeconfigPathParts checks each name of file that a "/" follows, as the
+// kernel does when it opens the path: it must be a directory that exists.
+// The check stats each part as written (os.Stat follows a link, and ".."
+// goes up from where a link points, as in the kernel). A trailing "/" makes
+// the last name such a part too. The first part that fails is refused
+// (kubeconfigBadPart).
+//
+// The bash twin is kubehz::agent_path_parts.
+func (c *Context) kubeconfigPathParts(action, file string) error {
+	for i := 1; i < len(file); i++ {
+		if file[i] != '/' || file[i-1] == '/' {
+			continue
+		}
+		part := file[:i]
+		fi, err := os.Stat(part)
+		switch {
+		case err != nil:
+			return c.kubeconfigBadPart(action, file, part, "does not exist or cannot be read")
+		case !fi.IsDir():
+			return c.kubeconfigBadPart(action, file, part, "is not a directory")
+		}
+	}
+	return nil
+}
+
 // maxLinkHops is the most links that linkTarget follows on the way to the
 // target. A loop, or a longer chain, is refused.
 const maxLinkHops = 8
@@ -923,10 +955,16 @@ const maxLinkHops = 8
 // to root or to this user, and it is not writable by its group or by
 // others unless it has the sticky bit. The link itself must belong to root
 // or to this user. The directory of the target gets the same check, and
-// the target must be a file of this user. Thus only root and this user can
-// change a link or a directory on the way, and the target stays the file
-// that the check saw. A refusal names the part that failed and why.
-// Nothing is written.
+// the target must be a regular file of this user. Thus only root and this
+// user can change a link or a directory on the way, and the target stays
+// the file that the check saw. A refusal names the part that failed and
+// why. Nothing is written.
+//
+// The walk keeps the rules of the kernel: a name that a "/" follows (also
+// in the target of a link, also a trailing "/") must be a directory that
+// exists before "." or ".." applies to it. So real/, real/.,
+// missing/../real and file/../real are refused, as the kernel refuses
+// them. ".." goes up from where a link to a directory points.
 //
 // The bash twin is kubehz::agent_link_target.
 func (c *Context) linkTarget(action, file string) (string, error) {
@@ -934,13 +972,13 @@ func (c *Context) linkTarget(action, file string) (string, error) {
 	if !strings.HasPrefix(rest, "/") {
 		wd, err := os.Getwd()
 		if err != nil {
-			return "", c.kubeconfigUnwritable(action, file)
+			return "", c.kubeconfigNoWorkDir(action, file)
 		}
 		rest = wd + "/" + rest
 	}
 	walked, links := "", 0
 	for rest != "" {
-		name, after, _ := strings.Cut(rest, "/")
+		name, after, dirNext := strings.Cut(rest, "/")
 		rest = after
 		switch name {
 		case "", ".":
@@ -954,6 +992,14 @@ func (c *Context) linkTarget(action, file string) (string, error) {
 		next := walked + "/" + name
 		li, err := c.lstat(next)
 		if err != nil || li.Mode()&os.ModeSymlink == 0 {
+			if dirNext {
+				switch {
+				case err != nil:
+					return "", c.kubeconfigBadPart(action, file, next, "does not exist or cannot be read")
+				case !li.IsDir():
+					return "", c.kubeconfigBadPart(action, file, next, "is not a directory")
+				}
+			}
 			walked = next
 			continue
 		}
@@ -977,7 +1023,9 @@ func (c *Context) linkTarget(action, file string) (string, error) {
 		if strings.HasPrefix(dest, "/") {
 			walked = ""
 		}
-		if rest != "" {
+		// A "/" after the link (also a trailing one) stays: the target of
+		// the link must then be a directory.
+		if dirNext {
 			dest += "/" + rest
 		}
 		rest = dest
@@ -989,6 +1037,11 @@ func (c *Context) linkTarget(action, file string) (string, error) {
 	ti, err := c.lstat(target)
 	if err != nil || ti.Mode()&os.ModeSymlink != 0 {
 		return "", c.kubeconfigUnwritable(action, file)
+	}
+	// A FIFO, a socket, a device or a directory is not a kubeconfig: the
+	// rename would replace it.
+	if !ti.Mode().IsRegular() {
+		return "", c.linkNotRegular(action, file, target)
 	}
 	if uid, ok := fileOwner(ti); !ok || uid != c.euid() || c.euid() == c.overflowUID() {
 		why, unmapped := ownerWhy(uid, ok, c.euid())
@@ -1041,10 +1094,34 @@ func (c *Context) linkNotSafe(action, file, part, why string, unmapped bool) err
 	return ErrHandled
 }
 
+// linkNotRegular prints the refusal of a link whose target is not a
+// regular file.
+func (c *Context) linkNotRegular(action, file, target string) error {
+	c.errorf("kubehz %s: %s is a link, and its target %s is not a regular file", action, file, target)
+	c.echoErr("  lo writes through a link only to a regular file of yours. Name another file.")
+	return ErrHandled
+}
+
 // kubeconfigUnwritable prints the refusal of a path that lo cannot write.
 func (c *Context) kubeconfigUnwritable(action, file string) error {
 	c.errorf("kubehz %s: cannot write %s", action, file)
 	c.echoErr("  Name a file in a directory that exists and that you can write to.")
+	return ErrHandled
+}
+
+// kubeconfigBadPart prints the refusal of a path with a part that is not
+// a directory that exists, with why.
+func (c *Context) kubeconfigBadPart(action, file, part, why string) error {
+	c.errorf("kubehz %s: cannot write %s: %s %s", action, file, part, why)
+	c.echoErr("  Name a file in a directory that exists and that you can write to.")
+	return ErrHandled
+}
+
+// kubeconfigNoWorkDir prints the refusal of a relative path when the
+// working directory cannot be read (it was removed, for example).
+func (c *Context) kubeconfigNoWorkDir(action, file string) error {
+	c.errorf("kubehz %s: cannot write %s: the working directory cannot be read", action, file)
+	c.echoErr("  Run lo in a directory that exists, or name the file with its full path.")
 	return ErrHandled
 }
 
