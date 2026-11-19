@@ -36,30 +36,9 @@
 #
 # No test may reach a real tool. On the tested paths, the function stubs in
 # _load answer every call that would run docker, kind, kubectl, ssh or rsync.
-# As a net under them, _stub_tools puts failing stubs of those tools first on
-# PATH, and teardown fails the test when one of them ran.
-
-# _stub_tools — docker, kind, kubectl, helm, ssh, scp, rsync and curl FIRST on
-# PATH: each logs its argv and fails, so a call that a function stub misses
-# never reaches the host's docker or a live cluster.
-_stub_tools() {
-  local tool
-  mkdir -p "${BATS_TEST_TMPDIR}/stub-bin"
-  for tool in docker kind kubectl helm ssh scp rsync curl; do
-    printf '#!/usr/bin/env bash\necho "%s $*" >> "%s"\nexit 97\n' \
-      "${tool}" "${BATS_TEST_TMPDIR}/tools.log" > "${BATS_TEST_TMPDIR}/stub-bin/${tool}"
-    chmod +x "${BATS_TEST_TMPDIR}/stub-bin/${tool}"
-  done
-  export PATH="${BATS_TEST_TMPDIR}/stub-bin:${PATH}"
-}
-
-_no_tool_ran() {
-  [ ! -s "${BATS_TEST_TMPDIR}/tools.log" ] || {
-    echo "a tool on PATH ran (only the function stubs may answer):" >&2
-    cat "${BATS_TEST_TMPDIR}/tools.log" >&2
-    return 1
-  }
-}
+# As a net under them, setup puts failing stubs of eight tools first on PATH
+# (stub_tools in tests/test_helper.bash: docker, kind, kubectl, helm, ssh,
+# scp, rsync and curl), and teardown fails the test when one of them ran.
 
 setup() {
   load "../test_helper"
@@ -69,7 +48,11 @@ setup() {
   export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s"
   export KIND_EXPERIMENTAL_DOCKER_NETWORK="lok8s-test"
   mkdir -p "${PATH_CLUSTERS}/test.dev" "${PATH_BASE}/.kubeconfig"
-  _stub_tools
+  # A shell that exports one of these sends driver::provision down another
+  # path: LOK8S_REMOTE* to the remote branch and the expose, PROVIDER_NAME to
+  # the provider, LOK8S_BOOTSTRAP_DRYRUN* to the registry document of a dry run.
+  unset "${!LOK8S_REMOTE@}" PROVIDER_NAME "${!LOK8S_BOOTSTRAP_DRYRUN@}"
+  stub_tools docker kind kubectl helm ssh scp rsync curl
   import() { :; }
   export -f import
   command -v yq &>/dev/null || skip "yq not available"
@@ -88,7 +71,7 @@ YAML
 # Every test ends with the check that no tool on PATH ran.
 teardown() {
   local rc=0
-  _no_tool_ran || rc=$?
+  assert_no_tool_ran || rc=$?
   teardown_tmpdir
   return "${rc}"
 }
@@ -123,8 +106,8 @@ _load() {
   # lo::nodes_on_registry_network asks docker on every run that gets that far.
   lo::registries()                       { return 0; }
   lo::reconcile_registry_network_nodes() { return 0; }
-  # No node is on the registry network, so the heal branch stays off unless a
-  # test turns it on.
+  # No node is on the registry network, so the heal branch stays off. The two
+  # tests of the heal gate below turn it on and off.
   lo::nodes_on_registry_network()        { return 1; }
   lo::heal_node_ips()                    { return 0; }
   # The remote expose (docker) runs only with LOK8S_REMOTE_EXPOSE=true.
@@ -417,6 +400,40 @@ JSON
 
   [ "${rc}" -eq 0 ] || {
     echo "the happy path with a registry document in the environment failed (rc=${rc})" >&2
+    return 1
+  }
+}
+
+# The node IP heal gate (drivers/lo/main): a cluster that is not shared runs
+# the heal only when one of its nodes is on the registry network. A node
+# that is there runs it.
+@test "lo provision: a node on the registry network gets the node IP heal" {
+  _load
+  lo::nodes_on_registry_network() { return 0; }
+  lo::heal_node_ips() { touch "${BATS_TEST_TMPDIR}/healed"; }
+
+  local rc=0
+  driver::provision test.dev || rc=$?
+
+  [ -e "${BATS_TEST_TMPDIR}/healed" ] || {
+    echo "a node is on the registry network, but the node IP heal did not run (rc=${rc})" >&2
+    return 1
+  }
+}
+
+# No node on the registry network, and not shared: the heal does not run.
+# The run must also end with 0, so that it passed the gate and did not stop
+# before it.
+@test "lo provision: without a node on the registry network, the node IP heal does not run" {
+  _load
+  lo::heal_node_ips() { touch "${BATS_TEST_TMPDIR}/healed"; }
+
+  local rc=0
+  driver::provision test.dev || rc=$?
+
+  [ "${rc}" -eq 0 ] && [ ! -e "${BATS_TEST_TMPDIR}/healed" ] || {
+    echo "rc=${rc}; healed: $([ -e "${BATS_TEST_TMPDIR}/healed" ] && echo yes || echo no)" >&2
+    echo "want rc=0 and no node IP heal: no node is on the registry network" >&2
     return 1
   }
 }
