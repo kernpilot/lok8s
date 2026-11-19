@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -185,5 +186,58 @@ func TestRunWithWaitDelayKillsAChildThatIgnoresTheInterrupt(t *testing.T) {
 	}
 	if took > 3*time.Second {
 		t.Errorf("Run returned %s after the cancel, want about the delay (300ms)", took)
+	}
+}
+
+// Run with Unset: the child does not inherit the named variables, also one
+// that the parent holds with an empty value (an empty value is not an
+// unset). It keeps every other inherited variable, and a name in both
+// Unset and Env gets its Env value, once.
+func TestRunUnsetRemovesInheritedVariables(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("no /bin/sh")
+	}
+	t.Setenv("LO_EXECX_DROP", "dropped")
+	t.Setenv("LO_EXECX_DROP_EMPTY", "")
+	t.Setenv("LO_EXECX_KEEP", "kept")
+	t.Setenv("LO_EXECX_BOTH", "inherited")
+	var out bytes.Buffer
+	err := NewRunner(nil).Run(t.Context(), Cmd{
+		Name:   "/bin/sh",
+		Args:   []string{"-c", "env"},
+		Unset:  []string{"LO_EXECX_DROP", "LO_EXECX_DROP_EMPTY", "LO_EXECX_BOTH"},
+		Env:    []string{"LO_EXECX_BOTH=added"},
+		Stdout: &out,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := map[string]int{}
+	for line := range strings.SplitSeq(out.String(), "\n") {
+		if strings.HasPrefix(line, "LO_EXECX_") {
+			count[line]++
+		}
+		if name, _, _ := strings.Cut(line, "="); name == "LO_EXECX_DROP" || name == "LO_EXECX_DROP_EMPTY" {
+			t.Errorf("the child got %q", line)
+		}
+	}
+	if count["LO_EXECX_KEEP=kept"] != 1 {
+		t.Errorf("the child lost LO_EXECX_KEEP: %q", out.String())
+	}
+	if count["LO_EXECX_BOTH=added"] != 1 || count["LO_EXECX_BOTH=inherited"] != 0 {
+		t.Errorf("LO_EXECX_BOTH: %v, want the Env value once", count)
+	}
+}
+
+// ChildEnv: nil (inherit as it is) without Env and Unset, so the callers
+// that set neither keep the exec default.
+func TestChildEnvIsNilWithoutEnvOrUnset(t *testing.T) {
+	if env := ChildEnv(Cmd{Name: "true"}); env != nil {
+		t.Fatalf("ChildEnv = %d entries, want nil", len(env))
+	}
+	t.Setenv("LO_EXECX_ONLY", "x")
+	env := ChildEnv(Cmd{Unset: []string{"LO_EXECX_ONLY"}})
+	if env == nil || slices.Contains(env, "LO_EXECX_ONLY=x") {
+		t.Fatalf("ChildEnv with Unset = %v", env)
 	}
 }

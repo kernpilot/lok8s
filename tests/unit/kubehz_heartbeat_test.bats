@@ -22,6 +22,12 @@
 # volumesAttached, distinct client/server versions) so this whole bug class —
 # which slipped past a trivial single-node stub while the agent was DOA — is
 # caught.
+#
+# The pod runs the script with /bin/sh of its image (alpine/k8s: busybox
+# ash). The cases run it with `bash --posix`, the nearest shell that every
+# test host has: bash in POSIX mode, not busybox ash. A construct that bash
+# accepts in POSIX mode and ash does not is not caught here (shellcheck -s
+# sh on the script is the other check).
 
 setup() {
   load "../test_helper"
@@ -93,6 +99,9 @@ kubectl() {
     # fire. claim-code is left to the default (empty) → the best-effort
     # self-register stays a no-op here.
     *"get secret kubehz-agent"*"agent-token"*) printf '%s' "${STUB_AGENT_TOKEN:-khz_agt_test}" | base64 | tr -d '\n' ;;
+    # The claim code: empty unless STUB_CLAIM_CODE sets one. With one, the
+    # bootstrap sends its self-register.
+    *"get secret kubehz-agent"*"claim-code"*) printf '%s' "${STUB_CLAIM_CODE:-}" | base64 | tr -d '\n' ;;
 
     # kubernetesVersion = the SERVER version. The FIX reads the apiserver
     # /version endpoint (a single "gitVersion" → unambiguous). `version -o json`
@@ -305,6 +314,8 @@ _node_list() {
 }
 
 teardown() {
+  # The local server of the real-curl case (tests/lib/http_stub.bash).
+  [[ -z "${STUB_PID:-}" ]] || kill "${STUB_PID}" 2>/dev/null || :
   teardown_tmpdir
 }
 
@@ -332,7 +343,7 @@ teardown() {
 
 @test "heartbeat: a labeled node reports its instanceType and emits valid JSON" {
   export STUB_ITYPE="cx32"
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   # The captured payload is valid JSON …
@@ -353,7 +364,7 @@ teardown() {
   # literal condition value ("True") — the stub mirrors that. The platform
   # counts ready nodes by an exact "Ready" match, so the agent must translate
   # (0/12-on-a-healthy-pilot bug, 2026-08-01).
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   # Both stub nodes present AND both mapped — `unique` alone could pass on a
   # one-node payload (review round 1 nit).
@@ -367,7 +378,7 @@ teardown() {
   # Round-2 mutation check: breaking the False arm passed the suite — this
   # pins it. The stub reports False for every node this run.
   export STUB_READY_STATUS="False"
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   run command jq -r '[.nodes[].status] | unique | .[]' "${STUB_PAYLOAD_OUT}"
   assert_output "NotReady"
@@ -375,7 +386,7 @@ teardown() {
 
 @test "heartbeat: a missing Ready condition reports \"Unknown\", never an empty string" {
   export STUB_READY_MISSING=1
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   # No node has a Ready condition — both must land as Unknown.
   run command jq -r '[.nodes[].status] | unique | .[]' "${STUB_PAYLOAD_OUT}"
@@ -384,7 +395,7 @@ teardown() {
 
 @test "heartbeat: a Ready condition of Unknown reports \"Unknown\"" {
   export STUB_READY_STATUS="Unknown"
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   run command jq -r '[.nodes[].status] | unique | .[]' "${STUB_PAYLOAD_OUT}"
   assert_output "Unknown"
@@ -394,7 +405,7 @@ teardown() {
 
 @test "heartbeat: an unlabeled node reports instanceType \"\" and still emits valid JSON" {
   export STUB_ITYPE=""
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -e . "${STUB_PAYLOAD_OUT}"
@@ -415,7 +426,7 @@ teardown() {
   export STUB_NODES_FILE="${BATS_TEST_TMPDIR}/nodes.json"
   printf '%s\n' '{"items":[{"metadata":{"name":"bare-1"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}' \
     > "${STUB_NODES_FILE}"
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -rc '.nodes' "${STUB_PAYLOAD_OUT}"
@@ -430,7 +441,7 @@ teardown() {
 # POST — the agent was DOA on every real cluster.
 
 @test "heartbeat: node names are EXACTLY the two metadata names (never a runtimeHandler/CSI handle)" {
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -e . "${STUB_PAYLOAD_OUT}"
@@ -454,7 +465,7 @@ teardown() {
 # for EVERY node. The fix tests the label KEY's presence; absent → worker.
 
 @test "heartbeat: roles are per-node — control-plane for cp-1, worker for worker-1" {
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -r '.nodes[] | select(.name == "cp-1") | .roles' "${STUB_PAYLOAD_OUT}"
@@ -479,7 +490,7 @@ teardown() {
     export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl-${n}.log"
     : > "${STUB_CURL_LOG}"
     rm -f "${STUB_PAYLOAD_OUT}"
-    run bash "${RUNNER}"
+    run bash --posix "${RUNNER}"
     assert_success
     # The beat went out, with every node.
     run grep -c '/heartbeat$' "${STUB_CURL_LOG}"
@@ -501,7 +512,7 @@ teardown() {
 
 @test "node list: the node fields map the Ready condition, the role label keys and the instance type" {
   _node_list 4
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   # Exact match: the values AND the field order that the platform reads.
   run command jq -c '.nodes' "${STUB_PAYLOAD_OUT}"
@@ -512,7 +523,7 @@ teardown() {
   export STUB_NODES_FILE="${BATS_TEST_TMPDIR}/nodes.json"
   command jq -n '{items: [{metadata: {name: "we\"ird\\node\tx"},
     status: {conditions: [{type: "Ready", status: "True"}]}}]}' > "${STUB_NODES_FILE}"
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   run command jq -e . "${STUB_PAYLOAD_OUT}"
   assert_success
@@ -523,14 +534,14 @@ teardown() {
 @test "node list: above 500 nodes (the api's limit) the beat sends the first 500 and logs it" {
   # At the limit: no truncation.
   _node_list 500
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   refute_output --partial "heartbeat summarizes the first"
   run command jq -r '.nodes | length' "${STUB_PAYLOAD_OUT}"
   assert_output "500"
 
   _node_list 503
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   assert_output --partial "kubehz: heartbeat summarizes the first 500 of 503 nodes"
   run command jq -r '.nodes | length' "${STUB_PAYLOAD_OUT}"
@@ -557,7 +568,7 @@ teardown() {
   _node_list 200
   export STUB_KUBECTL_DELAY=1
   local start=${SECONDS} took
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   took=$(( SECONDS - start ))
   assert_success
   run grep -c '/heartbeat$' "${STUB_CURL_LOG}"
@@ -571,7 +582,7 @@ teardown() {
 # reads the apiserver /version endpoint → the true server version.
 
 @test "heartbeat: kubernetesVersion is the SERVER version (v1.35.5), not the client (v1.31.4)" {
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -r '.kubernetes.version' "${STUB_PAYLOAD_OUT}"
@@ -588,7 +599,7 @@ teardown() {
 # kubectl-only probes.
 
 @test "assessment: first run includes a contract-shaped assessment and moves the marker" {
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -e '.assessment' "${STUB_PAYLOAD_OUT}"
@@ -636,7 +647,7 @@ teardown() {
 # ── Assessment: pvSummary grouping + unit conversion ─────
 
 @test "assessment: pvSummary groups by provisioner and converts Mi/Gi to Gi" {
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -r '.assessment.pvSummary.count' "${STUB_PAYLOAD_OUT}"
@@ -659,7 +670,7 @@ teardown() {
   export STUB_SC_JSON
   STUB_SC_JSON=$(command jq -nc '{items: [range(60) | {metadata: {name: "sc-\(.)"}, provisioner: "csi.example.com"}]}')
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   assert_output --partial "first 50 of 60 StorageClasses"
 
@@ -681,7 +692,7 @@ teardown() {
 @test "heartbeat: a rejected assessment POST retries ONCE as a plain heartbeat (beat never lost)" {
   export STUB_CURL_FAIL_ASSESS=1
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   assert_output --partial "retrying once without it"
 
@@ -714,7 +725,7 @@ teardown() {
   now=$(date -u +%s)
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'"}'
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -e '.assessment' "${STUB_PAYLOAD_OUT}"
@@ -728,7 +739,7 @@ teardown() {
   now=$(date -u +%s)
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 90000 ))'"}'
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -e '.assessment' "${STUB_PAYLOAD_OUT}"
@@ -744,7 +755,7 @@ teardown() {
   now=$(date -u +%s)
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/assess-requested":"true"}'
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -e '.assessment' "${STUB_PAYLOAD_OUT}"
@@ -761,7 +772,7 @@ teardown() {
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'"}'
   export STUB_RESPONSE='{"status":"ok","actions":["assess"]}'
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -e '.assessment' "${STUB_PAYLOAD_OUT}"
@@ -776,7 +787,7 @@ teardown() {
   export STUB_ETCD_READY=""
   export STUB_APISERVER_PODS='["kube-apiserver","--etcd-servers=unix:///var/run/kine.sock","--authorization-mode=Node,RBAC"]'
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -r '.assessment.datastore' "${STUB_PAYLOAD_OUT}"
@@ -790,7 +801,7 @@ teardown() {
   export STUB_ETCD_READY=""
   export STUB_APISERVER_PODS=""
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -r '.assessment.datastore' "${STUB_PAYLOAD_OUT}"
@@ -801,7 +812,7 @@ teardown() {
   export STUB_ETCD_READY=""
   export STUB_APISERVER_PODS='["kube-apiserver","--etcd-servers=https://10.0.0.5:2379"]'
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -r '.assessment.datastore' "${STUB_PAYLOAD_OUT}"
@@ -815,7 +826,7 @@ teardown() {
 @test "assessment: an unreadable marker (missing RBAC) sends NO assessment" {
   export STUB_MARKER_FORBIDDEN=1
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -e '.assessment' "${STUB_PAYLOAD_OUT}"
@@ -834,7 +845,7 @@ teardown() {
 # empty. `timeout 5` bounds the calls now.
 
 @test "in-cluster kubectl: the marker read reaches the apiserver: the assessment probes and the desired-state poll run" {
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   # The marker was readable, so the desired-state poll ran.
   refute_output --partial "desired-state poll skipped"
@@ -846,7 +857,7 @@ teardown() {
 }
 
 @test "in-cluster kubectl: the marker read and every assessment probe run under timeout 5; the node list under timeout 30" {
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   run cat "${STUB_TIMEOUT_LOG}"
   assert_line "5 kubectl get configmap kubehz-agent-config -n kubehz-system -o jsonpath={.metadata.annotations}"
@@ -881,7 +892,7 @@ teardown() {
       "node-role.kubernetes.io/control-plane" "get storageclasses" "get pv " "get crd clusters.cluster.x-k8s.io"; do
     export STUB_TIMEOUT_MATCH="${match}"
     rm -f "${STUB_PAYLOAD_OUT}" "${STUB_ANNOTATE_LOG}"
-    run bash "${RUNNER}"
+    run bash --posix "${RUNNER}"
     assert_success
     assert_output --partial "kubehz: assessment deferred: no answer for "
     run command jq -e 'has("assessment") | not' "${STUB_PAYLOAD_OUT}"
@@ -895,7 +906,7 @@ teardown() {
 
 @test "assessment: a failed node list leaves cpUsage.nodes unknown, never 0" {
   export STUB_NODES_FAIL=1
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   assert_output --partial "kubehz: assessment deferred: no answer for cpUsage.nodes"
   run command jq -e 'has("assessment") | not' "${STUB_PAYLOAD_OUT}"
@@ -911,7 +922,7 @@ teardown() {
   for body in '' '{"items":[{"metadata":' '{"items":[{"metadata":{"name":"a"}},' 'not json' '{}'; do
     export STUB_NODES_BODY="${body}"
     rm -f "${STUB_PAYLOAD_OUT}"
-    run bash "${RUNNER}"
+    run bash --posix "${RUNNER}"
     assert_success
     assert_output --partial "kubehz: assessment deferred: no answer for cpUsage.nodes"
     run command jq -c '.nodes' "${STUB_PAYLOAD_OUT}"
@@ -922,12 +933,12 @@ teardown() {
 }
 
 @test "assessment: a missing CAPI CRD (NotFound) reads capiManaged false; the CRD reads true" {
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   run command jq -r '.assessment.capiManaged' "${STUB_PAYLOAD_OUT}"
   assert_output "false"
   export STUB_CAPI=1
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   run command jq -r '.assessment.capiManaged' "${STUB_PAYLOAD_OUT}"
   assert_output "true"
@@ -963,7 +974,7 @@ teardown() {
   nonce="khzn_l1vE_p1AcEd_n0ncE_43charsBase64urlValue0"
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"'"${nonce}"'","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'"}'
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   # The nonce value never surfaces in stdout/stderr — it is a claim ticket.
   refute_output --partial "${nonce}"
@@ -984,7 +995,7 @@ teardown() {
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"'"${nonce}"'","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'"}'
   _argv_spies
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   assert_argv_clean "${nonce}" khz_agt_test
   # Both still arrive: the nonce in the body, the token as the bearer of
@@ -998,7 +1009,7 @@ teardown() {
   export STUB_CURL_FAIL_ASSESS=1
   _argv_spies
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   assert_output --partial "retrying once without it"
   assert_argv_clean khz_agt_test
@@ -1014,7 +1025,7 @@ teardown() {
   local tok
   for tok in 'khz_agt_a"b' 'khz_agt_a\b' 'khz_agt_a b' $'khz_agt_a\nurl = https://x'; do
     : > "${STUB_CURL_LOG}"
-    STUB_AGENT_TOKEN="${tok}" run bash "${RUNNER}"
+    STUB_AGENT_TOKEN="${tok}" run bash --posix "${RUNNER}"
     assert_success
     assert_output --partial "kubehz: skipping heartbeat: agent-token holds a character that a curl config cannot carry"
     run grep -c "/heartbeat" "${STUB_CURL_LOG}"
@@ -1027,7 +1038,7 @@ teardown() {
   now=$(date -u +%s)
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'"}'
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   run command jq -e '.claim' "${STUB_PAYLOAD_OUT}"
   assert_failure
@@ -1038,7 +1049,7 @@ teardown() {
   now=$(date -u +%s)
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_eXp1rEd_n0ncE_43charsBase64urlValue00000","kubehz.cloud/claim-nonce-placed":"'$(( now - 1000 ))'"}'
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
 
   run command jq -e '.claim' "${STUB_PAYLOAD_OUT}"
@@ -1056,7 +1067,7 @@ teardown() {
   now=$(date -u +%s)
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_st4mplEss_n0ncE_43charsBase64urlValue00"}'
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   run command jq -e '.claim' "${STUB_PAYLOAD_OUT}"
   assert_failure
@@ -1070,7 +1081,7 @@ teardown() {
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_vEr1f1Ed_n0ncE_43charsBase64urlValue000","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'"}'
   export STUB_RESPONSE='{"status":"ok","claim":{"verified":true}}'
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   assert_output --partial "claim verified"
 
@@ -1090,7 +1101,7 @@ teardown() {
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_uNvEr1f1Ed_n0ncE_43charsBase64urlValue0","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'"}'
   export STUB_RESPONSE='{"status":"ok"}'
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   run grep -F "kubehz.cloud/claim-nonce-" "${STUB_ANNOTATE_LOG}"
   assert_failure
@@ -1108,7 +1119,7 @@ teardown() {
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/desired-etag":"\"7-100\""}'
   export STUB_DESIRED_CODE=304
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   refute_output --partial "desired state changed"
   run grep -F "kubehz.cloud/desired-etag=" "${STUB_ANNOTATE_LOG}"
@@ -1127,7 +1138,7 @@ teardown() {
   export STUB_DESIRED_ETAG='"8-110"'
   export STUB_DESIRED_BODY='{"revision":8,"kubernetesVersion":"v1.36.0","workerPools":[],"execution":{"scaling":true,"upgrades":true,"healing":false},"healing":{"enabled":false}}'
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   assert_output --partial "desired state changed — revision 8"
   assert_output --partial "flags on: scaling,upgrades"
@@ -1150,7 +1161,7 @@ teardown() {
   export STUB_DESIRED_ETAG='"3-000"'
   export STUB_DESIRED_BODY='{"revision":3,"kubernetesVersion":null,"workerPools":[],"execution":{"scaling":false,"upgrades":false,"healing":false},"healing":{"enabled":false}}'
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   assert_output --partial "revision 3, execution flags on: none"
   refute_output --partial "desired k8s"
@@ -1163,7 +1174,7 @@ teardown() {
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'"}'
   export STUB_DESIRED_CODE=401
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   assert_output --partial "desired-state poll refused (HTTP 401)"
   run grep -F "kubehz.cloud/desired-error=401" "${STUB_ANNOTATE_LOG}"
@@ -1172,7 +1183,7 @@ teardown() {
   # Same refusal with the state already stored → silent (once per change).
   : > "${STUB_ANNOTATE_LOG}"
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/desired-error":"401"}'
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   refute_output --partial "desired-state poll refused"
 }
@@ -1185,7 +1196,173 @@ teardown() {
   export STUB_DESIRED_CODE=200
   export STUB_DESIRED_BODY='not json'
 
-  run bash "${RUNNER}"
+  run bash --posix "${RUNNER}"
   assert_success
   assert_output --partial "unparseable"
+}
+
+# ── curl reads no config file (the real curl against a local server) ──
+# Every curl call of the script passes -q first: the self-register (its
+# body can carry the bind secret), the beat with the assessment, the plain
+# retry and the desired-state poll (both with the bearer). The script runs
+# with the real curl against tests/lib/http_stub.py on 127.0.0.1: once
+# without a config file of the user (the reference), then with a hostile
+# one (a trace-ascii and an output line) in each place curl looks: CURL_HOME,
+# XDG_CONFIG_HOME, HOME. Each run writes no trace and no output file and
+# prints the same stdout and stderr as the reference, with the same status.
+# The control in each place: curl without -q reads the file there. curl
+# older than 7.73 does not look in XDG_CONFIG_HOME: that control is left
+# out, with a note. The pod runs the script with its own HOME and no
+# writable file system (cronjob.yaml), so -q there guards against a config
+# file in the image. The register carries a synthetic bind secret: the stub
+# logs bind=yes when that value is in the body (it never logs the value).
+@test "heartbeat: curl reads no config file of the user (register, beat, plain retry, desired poll)" {
+  command -v python3 >/dev/null || skip "no python3"
+  [[ -n "$(type -P curl)" ]] || skip "no curl"
+  source "${_PROJECT_ROOT}/tests/lib/http_stub.bash"
+  local real="${BATS_TEST_TMPDIR}/run-real-curl.sh" ref="${BATS_TEST_TMPDIR}/ref"
+  local var o e rc ref_rc=0 hex controls=0
+  # The runner without the curl stub: the script calls the real curl.
+  { cat "${_PROJECT_ROOT}/tests/lib/curl_capture.sh" "${BATS_TEST_TMPDIR}/stubs.sh"
+    echo 'unset -f curl'
+    cat "${HEARTBEAT}"; } > "${real}"
+  hex=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+  export STUB_AGENT_TOKEN="khz_agt_${hex}" STUB_CLAIM_CODE="khzc_${hex}" STUB_BEARER="khz_agt_${hex}"
+  export BIND_SECRET="${hex}${hex}${hex}${hex}"
+  export STUB_BIND_SECRET="${BIND_SECRET}"
+  # The beat with the assessment gets a 400, the plain retry a 200.
+  export STUB_ROUTES="${BATS_TEST_TMPDIR}/routes.json"
+  cat > "${STUB_ROUTES}" <<'JSON'
+{
+  "POST /api/clusters/agent-register": {"code": 201, "bind_secret": true, "body": {"ok": true}},
+  "POST /api/clusters/test.example.com/heartbeat": {"code": 200, "body": {"ok": true},
+    "fail_if_body_has": "\"assessment\""},
+  "GET /api/clusters/test.example.com/desired": {"code": 304, "headers": {"Etag": "\"7-100\""}}
+}
+JSON
+  unset CURL_HOME XDG_CONFIG_HOME http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+  http_stub_start
+  export KUBEHZ_API_URL="http://127.0.0.1:${STUB_PORT}"
+  mkdir -p "${BATS_TEST_TMPDIR}/curlrc-none"
+  ( export HOME="${BATS_TEST_TMPDIR}/curlrc-none" && bash --posix "${real}" ) > "${ref}.out" 2> "${ref}.err" || ref_rc=$?
+  [ "${ref_rc}" -eq 0 ]
+  grep -qx '{"ok":true}' "${ref}.out"
+  grep -qF 'retrying once without it' "${ref}.err"
+  for var in CURL_HOME XDG_CONFIG_HOME HOME; do
+    echo "# config file in ${var}"
+    curlrc_dir "${var}"
+    o="${RC_DIR}.stdout" e="${RC_DIR}.stderr" rc=0
+    ( curlrc_env "${var}" && bash --posix "${real}" ) > "${o}" 2> "${e}" || rc=$?
+    [ ! -e "${RC_TRACE}" ]
+    [ ! -e "${RC_OUT}" ]
+    diff "${ref}.out" "${o}"
+    diff "${ref}.err" "${e}"
+    [ "${rc}" -eq "${ref_rc}" ]
+    run grep -qF -e "${STUB_AGENT_TOKEN}" -e "${STUB_CLAIM_CODE}" -e "${BIND_SECRET}" "${o}" "${e}"
+    [ "${status}" -eq 1 ]
+    if [[ "${var}" == XDG_CONFIG_HOME ]] && ! curl_reads_xdg; then
+      echo "# no control for XDG_CONFIG_HOME: this curl is older than 7.73 and does not look there" >&3
+    else
+      curlrc_control "${var}" "${KUBEHZ_API_URL}/control"
+      controls=$((controls + 1))
+    fi
+  done
+  [ "$(grep -c '^POST /api/clusters/agent-register none bind=yes$' "${STUB_LOG}")" -eq 4 ]
+  [ "$(grep -c '^POST /api/clusters/test.example.com/heartbeat bearer$' "${STUB_LOG}")" -eq 8 ]
+  [ "$(grep -c '^GET /api/clusters/test.example.com/desired bearer$' "${STUB_LOG}")" -eq 4 ]
+  [ "$(grep -c '^GET /control none$' "${STUB_LOG}")" -eq "${controls}" ]
+  [ "$(wc -l < "${STUB_LOG}")" -eq $((16 + controls)) ]
+  http_stub_stop
+}
+
+# ── the TLS log and trace controls (the real curl against a local server) ──
+# The pod gets each key of the agent ConfigMap as an environment variable
+# (envFrom), so the script clears the TLS log and trace controls itself
+# before its first curl call (the image has no utils/http.sh). The script
+# runs against the https stub with each name of _HTTP_TLS_LOG_VARS
+# (utils/http.sh) set and a spy for curl (tls_spy_on: a record of names,
+# never a value, then the real curl): the four calls (register, beat, plain
+# retry, desired poll) get none of them, each record has the control, and
+# no key log or trace file is written. The key log control first: this
+# curl writes a key log for a request to the same server when SSLKEYLOGFILE
+# reaches it. A curl that writes none leaves the record check alone. A
+# control request that does not get to the stub fails the test. Then a
+# readonly SSLKEYLOGFILE: the script stops with the line that names it,
+# curl does not run and no request reaches the stub.
+@test "heartbeat: curl gets no TLS log or trace variable, and a readonly one stops the script" {
+  command -v python3 >/dev/null || skip "no python3"
+  [[ -n "$(type -P curl)" ]] || skip "no curl"
+  [[ -n "$(command -v openssl)" ]] || skip "no openssl: the https stub needs a self-signed certificate"
+  source "${_PROJECT_ROOT}/.lok8s/utils/http.sh"
+  source "${_PROJECT_ROOT}/tests/lib/http_stub.bash"
+  local real="${BATS_TEST_TMPDIR}/run-spy-curl.sh" spy="${BATS_TEST_TMPDIR}/curl-env"
+  local o="${BATS_TEST_TMPDIR}/tls.stdout" e="${BATS_TEST_TMPDIR}/tls.stderr" hex name f before rc=0 kc=0
+  (( ${#_HTTP_TLS_LOG_VARS[@]} >= 6 ))
+  hex=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+  export STUB_AGENT_TOKEN="khz_agt_${hex}" STUB_CLAIM_CODE="khzc_${hex}" STUB_BEARER="khz_agt_${hex}"
+  export BIND_SECRET="${hex}${hex}${hex}${hex}"
+  export STUB_BIND_SECRET="${BIND_SECRET}"
+  export STUB_ROUTES="${BATS_TEST_TMPDIR}/routes.json"
+  cat > "${STUB_ROUTES}" <<'JSON'
+{
+  "POST /api/clusters/agent-register": {"code": 201, "bind_secret": true, "body": {"ok": true}},
+  "POST /api/clusters/test.example.com/heartbeat": {"code": 200, "body": {"ok": true},
+    "fail_if_body_has": "\"assessment\""},
+  "GET /api/clusters/test.example.com/desired": {"code": 304, "headers": {"Etag": "\"7-100\""}}
+}
+JSON
+  unset CURL_HOME XDG_CONFIG_HOME http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+  export HOME="${BATS_TEST_TMPDIR}/curlrc-none"
+  mkdir -p "${HOME}"
+  stub_cert
+  http_stub_start "${STUB_CERT}" "${STUB_KEY}"
+  export CURL_CA_BUNDLE="${STUB_CERT}" KUBEHZ_API_URL="https://127.0.0.1:${STUB_PORT}"
+  keylog_control || kc=$?
+  # 2: the control request did not get to the stub. That is a fault, not a skip.
+  [ "${kc}" -ne 2 ]
+  if (( kc != 0 )); then
+    echo "# this curl writes no TLS key log (its TLS backend ignores SSLKEYLOGFILE): the record check alone" >&3
+  fi
+  # The runner without the curl stub: the spy, then the real curl.
+  tls_spy_on "${spy}"
+  { cat "${_PROJECT_ROOT}/tests/lib/curl_capture.sh" "${BATS_TEST_TMPDIR}/stubs.sh"
+    echo 'unset -f curl'
+    declare -f curl
+    cat "${HEARTBEAT}"; } > "${real}"
+  unset -f curl
+  for name in "${_HTTP_TLS_LOG_VARS[@]}"; do
+    case "${name}" in
+      GNUTLS_DEBUG_LEVEL) export "${name}=9" ;;
+      SSLTRACE | SSLDEBUG) export "${name}=99" ;;
+      *) export "${name}=${BATS_TEST_TMPDIR}/tls.${name}" ;;
+    esac
+  done
+  export TLS_ENV_CONTROL=on
+  bash --posix "${real}" > "${o}" 2> "${e}" || rc=$?
+  [ "${rc}" -eq 0 ]
+  grep -qx '{"ok":true}' "${o}"
+  [ "$(find "${spy}" -type f | wc -l)" -eq 4 ]
+  for f in "${spy}"/env.*; do
+    [ "$(cat "${f}")" = $'record\ncontrol' ]
+  done
+  for name in "${_HTTP_TLS_LOG_VARS[@]}"; do
+    [ ! -e "${BATS_TEST_TMPDIR}/tls.${name}" ]
+  done
+  [ "$(grep -c '^POST /api/clusters/agent-register none bind=yes$' "${STUB_LOG}")" -eq 1 ]
+  [ "$(grep -c '^POST /api/clusters/test.example.com/heartbeat bearer$' "${STUB_LOG}")" -eq 2 ]
+  [ "$(grep -c '^GET /api/clusters/test.example.com/desired bearer$' "${STUB_LOG}")" -eq 1 ]
+  find "${spy}" -type f -name 'env.*' -delete
+  before=$(wc -l < "${STUB_LOG}")
+  { echo 'readonly SSLKEYLOGFILE'; cat "${real}"; } > "${real}.ro"
+  rc=0
+  bash --posix "${real}.ro" > "${o}" 2> "${e}" || rc=$?
+  [ "${rc}" -eq 1 ]
+  grep -qxF 'kubehz: SSLKEYLOGFILE is readonly, so the agent cannot clear it for curl: no request is sent' "${e}"
+  # That line only: the script stops at its check, before the unset that
+  # the readonly name would fail with a message of the shell.
+  [ "$(wc -l < "${e}")" -eq 1 ]
+  [ "$(find "${spy}" -type f | wc -l)" -eq 0 ]
+  [ "$(wc -l < "${STUB_LOG}")" -eq "${before}" ]
+  [ ! -e "${SSLKEYLOGFILE}" ]
+  http_stub_stop
 }

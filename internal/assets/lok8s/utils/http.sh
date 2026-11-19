@@ -97,9 +97,11 @@ http::credential_ok() {
 
 # Unset the controls in the environment that make curl or its TLS library
 # write session keys, or a trace with plaintext, before a call that carries
-# a credential. Call it in the subshell that runs curl, so that the caller
-# keeps its environment:
+# a credential. Call it as the first command of the subshell that runs
+# curl, joined to curl with &&, so that the caller keeps its environment:
 #   ( http::tls_log_vars_unset && curl -q ... )
+# Each curl call of the bash tree has this form, except the calls in the
+# allowlist of tests/lib/curl_gate.bash (the source gate).
 # The list:
 #   SSLKEYLOGFILE        curl appends the TLS session keys to this file, for
 #                        each backend that has a key log. The keys decrypt a
@@ -113,14 +115,105 @@ http::credential_ok() {
 #                        NSS-backed curl, NSS built with DEBUG or TRACE). It
 #                        can hold the plaintext (a bearer, a signed URL).
 #                        Without SSLDEBUGFILE it goes to stderr.
-# One unset for the whole list: its status is 1 when any name in it is
-# readonly (it still unsets the others), so `&& curl` does not run curl.
-# The caller then gets that 1, not a status of curl.
+# A readonly name cannot be unset. The function then unsets the others,
+# prints one error line for each readonly name and returns 1, so
+# `&& curl` does not run curl. The caller then gets that 1, not a status
+# of curl. An empty or unset list is refused the same way (one error
+# line, status 1): with no names the function would clear nothing.
 # Not covered: a curl or TLS library built to write keys or a trace by
 # itself (wolfSSL built with --enable-keylog-export, a debug build of a TLS
 # library), and an environment that an attacker controls (who sets the
 # environment can also set LD_PRELOAD).
+#
+# _HTTP_TLS_LOG_VARS is the one list. The tests read it, and tests compare
+# it with the two copies that cannot read this file: the Go list
+# (credentials.TLSLogVars) and the script of the agent CronJob
+# (libs/kubehz/manifests/agent/cronjob.yaml).
+_HTTP_TLS_LOG_VARS=(SSLKEYLOGFILE GNUTLS_KEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE)
+
 # Usage: http::tls_log_vars_unset
 http::tls_log_vars_unset() {
-  unset -v SSLKEYLOGFILE GNUTLS_KEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE
+  local _http_name _http_rc=0
+  http::_tls_log_list_ok || return 1
+  for _http_name in "${_HTTP_TLS_LOG_VARS[@]}"; do
+    unset -v "${_http_name}" 2>/dev/null && continue
+    http::_tls_log_var_stop "${_http_name}"
+    _http_rc=1
+  done
+  return "${_http_rc}"
+}
+
+# http::tls_log_vars_readonly: print the names of the list that are
+# readonly here (one line, a space between two names). Status 1 when no
+# name is readonly. Status 2, with the error line of an empty list, when
+# the list is empty or not set: then no name can be checked, and a caller
+# must not read that as "no name is readonly". The probe of each name runs
+# in a subshell, so the function changes no variable.
+# Usage: names=$(http::tls_log_vars_readonly)
+http::tls_log_vars_readonly() {
+  local _http_name
+  local -a _http_found=()
+  http::_tls_log_list_ok || return 2
+  for _http_name in "${_HTTP_TLS_LOG_VARS[@]}"; do
+    ( unset -v "${_http_name}" ) 2>/dev/null || _http_found+=("${_http_name}")
+  done
+  (( ${#_http_found[@]} > 0 )) || return 1
+  printf '%s\n' "${_http_found[*]}"
+}
+
+# http::tls_log_vars_ok: status 0 when no name of the list is readonly.
+# Else the same error line as http::tls_log_vars_unset for each readonly
+# name, and status 1. For a caller that sends the stderr of its curl call
+# to /dev/null: the check before the call shows the cause, and the
+# caller stops.
+# Usage: http::tls_log_vars_ok || return 1
+http::tls_log_vars_ok() {
+  local _http_name _http_rc=0
+  http::_tls_log_list_ok || return 1
+  for _http_name in "${_HTTP_TLS_LOG_VARS[@]}"; do
+    ( unset -v "${_http_name}" ) 2>/dev/null && continue
+    http::_tls_log_var_stop "${_http_name}"
+    _http_rc=1
+  done
+  return "${_http_rc}"
+}
+
+# http::tls_log_var_readonly_text <name>...: the start of each message
+# about readonly names of the list: "A is readonly, so lo cannot clear it
+# for curl", or for more names "A, B and C are readonly, so lo cannot clear
+# them for curl". The names can come as separate arguments or as one
+# argument with a space between two names (the output of
+# http::tls_log_vars_readonly). The callers add what does not run.
+http::tls_log_var_readonly_text() {
+  local -a _http_n=()
+  local _http_head
+  read -r -a _http_n < <(printf '%s\n' "$*")
+  if (( ${#_http_n[@]} < 2 )); then
+    printf '%s is readonly, so lo cannot clear it for curl' "${_http_n[0]:-}"
+    return 0
+  fi
+  printf -v _http_head '%s, ' "${_http_n[@]:0:${#_http_n[@]}-1}"
+  printf '%s and %s are readonly, so lo cannot clear them for curl' "${_http_head%, }" "${_http_n[-1]}"
+}
+
+# http::tls_log_list_empty_text: the start of each message about an empty
+# or unset list. The callers add what does not run.
+http::tls_log_list_empty_text() {
+  printf 'the list of TLS log and trace variables (_HTTP_TLS_LOG_VARS) is empty or not set'
+}
+
+# The error line for a readonly name of the list.
+http::_tls_log_var_stop() {
+  error "$(http::tls_log_var_readonly_text "${1}"): the request does not run"
+}
+
+# Status 0 when the list has at least one name. Else one error line and
+# status 1: an empty or unset list would clear nothing, and the request
+# would run with each TLS log and trace control of the environment. (The
+# ${…[@]+…} form expands to nothing for an unset array under set -u too.)
+http::_tls_log_list_ok() {
+  set -- ${_HTTP_TLS_LOG_VARS[@]+"${_HTTP_TLS_LOG_VARS[@]}"}
+  (( $# > 0 )) && return 0
+  error "$(http::tls_log_list_empty_text): the request does not run"
+  return 1
 }

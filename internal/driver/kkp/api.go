@@ -54,6 +54,11 @@ func (d *Driver) validateURL(url string, stderr io.Writer) error {
 	return credentials.RequireHTTPS(url, "KKP API URL", stderr)
 }
 
+// tlsLogVars gives the TLS log and trace controls that the curl child runs
+// without (credentials.TLSLogVars). A variable, so that a test can give an
+// empty list.
+var tlsLogVars = credentials.TLSLogVars
+
 // api ports kkp::api: the generic KKP REST API caller with auth, JSON
 // handling, and retry. Returns the response body. stderr is the diagnostic
 // sink — the wait/status paths pass io.Discard, replicating the bash
@@ -95,7 +100,15 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 		}
 		curlConfig += "data-raw = " + data + "\n"
 	}
+	// -q first: curl reads no config file of the user (.curlrc in
+	// CURL_HOME or HOME, curlrc in XDG_CONFIG_HOME). A trace-ascii line
+	// there would log the bearer and the body, an output line would write
+	// the answer to another file. curl obeys -q only as its first
+	// argument. The child also runs without the TLS log and trace
+	// controls (credentials.TLSLogVars, removed through Cmd.Unset), as the
+	// bash twin (kkp::api) runs curl after http::tls_log_vars_unset.
 	curlArgs := []string{
+		"-q",
 		"--silent",
 		"--show-error",
 		"--fail-with-body",
@@ -120,6 +133,15 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 		}
 	}
 
+	// An empty list would remove nothing, and curl would get each TLS log
+	// and trace control of the environment: the call is refused, as the
+	// bash twin refuses an empty _HTTP_TLS_LOG_VARS (utils/http.sh).
+	unset := tlsLogVars()
+	if len(unset) == 0 {
+		ui.ErrorTo(stderr, "the list of TLS log and trace variables (credentials.TLSLogVars) is empty: the request does not run")
+		return "", ui.Handled(fmt.Errorf("kkp: the list of TLS log and trace variables is empty"))
+	}
+
 	// Redact token from debug output.
 	ui.DebugTo(stderr, "KKP API: %s %s (token=<redacted>)", method, url)
 
@@ -131,6 +153,7 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 		var buf strings.Builder
 		_ = d.deps.Runner.Run(ctx, execx.Cmd{
 			Name: "curl", Args: append(append([]string{}, curlArgs...), url),
+			Unset:  unset,
 			Stdin:  strings.NewReader(curlConfig),
 			Stdout: &buf, Stderr: &buf,
 		})

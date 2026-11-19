@@ -355,6 +355,26 @@ JSON
   refute_output --partial "/rescue"
 }
 
+# A readonly TLS log or trace variable stops each Robot call before curl
+# runs (utils/http.sh, http::tls_log_vars_unset). The IP lookup sends its
+# stderr to /dev/null, so the rebuild names the variable before the first
+# Robot call, and does not blame the lookup.
+_rebuild_readonly() {
+  readonly SSLKEYLOGFILE
+  provider::rebuild "${DESC}" "${WORK}"
+}
+
+@test "provider::rebuild names a readonly TLS log variable and makes no Robot call" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  run _rebuild_readonly
+  assert_failure
+  assert_output --partial "SSLKEYLOGFILE is readonly, so lo cannot clear it for curl: the request does not run"
+  refute_output --partial "did not resolve to exactly one Robot server"
+  [ ! -s "${CURL_LOG}" ]
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
+}
+
 @test "provider::rebuild rejects a hostile server name (shell/regex metachars) before acting" {
   export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
   # A name with shell metacharacters must be refused by the name guard.
@@ -436,6 +456,58 @@ JSON
   assert_output --partial "Robot creds set but API not reachable"
   assert_output --partial "cannot verify rescue key"
   refute_output --partial "NOT registered in Robot"
+}
+
+# The doctor's Robot call sends its stderr to /dev/null. A readonly TLS
+# log or trace variable stops that call, so the doctor names the variable
+# and does not blame the Robot creds.
+_doctor_readonly() {
+  readonly SSLKEYLOGFILE
+  provider::doctor "${DESC}"
+}
+
+@test "provider::doctor names a readonly TLS log variable, not the Robot creds" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef" ROBOT_REG_FP="de:ad:be:ef"
+  run _doctor_readonly
+  assert_success
+  assert_output --partial $'warn\tSSLKEYLOGFILE is readonly, so lo cannot clear it for curl: no call to the Robot API'
+  refute_output --partial "verify HROBOT_USER/HROBOT_PASSWORD"
+  refute_output --partial $'ok\tRobot API reachable'
+  assert_output --partial "cannot verify rescue key"
+  [ ! -s "${CURL_LOG}" ]
+}
+
+_doctor_two_readonly() {
+  readonly SSLKEYLOGFILE SSLTRACE
+  provider::doctor "${DESC}"
+}
+
+# Two readonly names: one line that names both, in the plural.
+@test "provider::doctor names two readonly TLS log variables in one line" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef" ROBOT_REG_FP="de:ad:be:ef"
+  run _doctor_two_readonly
+  assert_success
+  assert_output --partial $'warn\tSSLKEYLOGFILE and SSLTRACE are readonly, so lo cannot clear them for curl: no call to the Robot API'
+  refute_output --partial "verify HROBOT_USER/HROBOT_PASSWORD"
+  [ ! -s "${CURL_LOG}" ]
+}
+
+_doctor_empty_list() {
+  _HTTP_TLS_LOG_VARS=()
+  provider::doctor "${DESC}"
+}
+
+# An empty list: the probe of the readonly names cannot check a name, so
+# the doctor names the list and makes no Robot call, and does not blame the
+# Robot credentials.
+@test "provider::doctor names an empty TLS list, not the Robot creds" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef" ROBOT_REG_FP="de:ad:be:ef"
+  run _doctor_empty_list
+  assert_success
+  assert_output --partial $'warn\tthe list of TLS log and trace variables (_HTTP_TLS_LOG_VARS) is empty or not set: no call to the Robot API'
+  refute_output --partial "verify HROBOT_USER/HROBOT_PASSWORD"
+  refute_output --partial $'ok\tRobot API reachable'
+  [ ! -s "${CURL_LOG}" ]
 }
 
 # A failed provider::output is no "no control-plane node": the doctor goes
