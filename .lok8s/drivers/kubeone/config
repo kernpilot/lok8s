@@ -551,7 +551,7 @@ kubeone::_inject_registry_auth() {
     # (names only, never a value); without a value, a local that takes an
     # array with no element is not listed. Then the merge stops before it
     # reads a credential. The _ra_ locals hold the list.
-    local +x +i +l +u ns="${sns:-provisioning}" username= password= RUSER= RPASS= _ra_nl=$'\n' _ra_arrays _ra_n \
+    local +x +i +l +u ns="${sns:-provisioning}" username='' password='' RUSER='' RPASS='' _ra_nl=$'\n' _ra_arrays _ra_n \
       || { error "kubeone::_inject_registry_auth: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
     _ra_arrays="${_ra_nl}$(compgen -A arrayvar)${_ra_nl}" \
       || { error "kubeone::_inject_registry_auth: the arrays in scope cannot be listed"; return 1; }

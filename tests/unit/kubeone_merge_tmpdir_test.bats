@@ -814,6 +814,37 @@ echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s" "
   _registry_array_case '-a username password'
 }
 
+# One name a case: only that name is an array of the caller, so each empty
+# value on the local line of the registry merge has its own case. The
+# caller's array is declared and never assigned. compgen -A arrayvar lists
+# only a set array, so a local that takes such an array is listed only
+# after its empty value. A caller's array assigned with no element (=())
+# is listed with or without the empty value; the last case checks that
+# the merge refuses it too.
+@test "the registry merge stops before it reads a credential when only username is an indexed array of the caller, never assigned, under localvar_inherit" {
+  _registry_array_case '-a username'
+}
+
+@test "the registry merge stops before it reads a credential when only password is an indexed array of the caller, never assigned, under localvar_inherit" {
+  _registry_array_case '-a password'
+}
+
+@test "the registry merge stops before it reads a credential when only RUSER is an indexed array of the caller, never assigned, under localvar_inherit" {
+  _registry_array_case '-a RUSER'
+}
+
+@test "the registry merge stops before it reads a credential when only RPASS is an indexed array of the caller, never assigned, under localvar_inherit" {
+  _registry_array_case '-a RPASS'
+}
+
+@test "the registry merge stops before it reads a credential when only RPASS is an associative array of the caller, never assigned, under localvar_inherit" {
+  _registry_array_case '-A RPASS'
+}
+
+@test "the registry merge stops before it reads a credential when RUSER is an indexed array of the caller with no element (=()) under localvar_inherit" {
+  _registry_array_case '-a RUSER=()'
+}
+
 @test "kubeone::_yq_edit refuses an array as a name argument, and runs no yq" {
   # Bash exports no array, so yq would get an empty strenv() for it.
   _yq_log_stub
@@ -855,9 +886,10 @@ echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s"
 }
 
 @test "under localvar_inherit, the registry merge leaves the target of a caller's nameref RUSER as it was" {
-  # The empty initial values of the locals (username= password= RUSER=
-  # RPASS=) must not write through a nameref of the caller. Bash does not
-  # give a local the nameref attribute of the caller's variable.
+  # The empty initial values of the locals (username='' password=''
+  # RUSER='' RPASS='') must not write through a nameref of the caller.
+  # Bash does not give a local the nameref attribute of the caller's
+  # variable.
   _need_localvar_inherit
   _registry_fixture 1
   local work="${RW}/.kubeone.yaml.work"
