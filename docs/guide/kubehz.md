@@ -1078,10 +1078,23 @@ new file belongs to you and has mode 0600. A hard link to the old file keeps
 the old content.
 
 When the path is a link, `--force` replaces the file that the link points
-to, and the link stays. `lo` does this only when you own the link and its
-target. Thus a link that another user puts in a shared directory such as
-`/tmp` cannot make `lo` replace one of your files. A directory, a link to
-one, and a link to nothing are refused.
+to, and the link stays. `lo` does this only when no other user can send the
+write to another file:
+
+- `lo` follows each link on the way itself, one at a time, and at most 8. A
+  loop or a longer chain is refused.
+- Each link must belong to root or to you.
+- Each directory that holds a link, and each directory above it up to `/`,
+  must belong to root or to you. It must not be writable by its group or by
+  others, unless it has the sticky bit (as `/tmp` has).
+- The directory of the target gets the same check, and the target must be a
+  file of yours.
+
+Thus a link that another user puts in a shared directory such as `/tmp`, or
+a link in a directory that another user can write, cannot make `lo` replace
+one of your files. The refusal names the part of the path that failed, and
+why. A directory, a link to one, and a link to nothing are refused. A plain
+file and a new file do not get these checks.
 
 A path in `/proc` or `/dev` is refused, also when a link in the path points
 there. Some of these paths change with the process that opens them: for

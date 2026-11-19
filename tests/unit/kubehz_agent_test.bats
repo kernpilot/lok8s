@@ -601,39 +601,220 @@ EOF
   assert_output 'real'
 }
 
-@test "kubeconfig: a link is written through only when we own the link and its target" {
+# The hint of a link whose path is not safe (Go: linkNotSafe).
+LINK_HINT='  lo writes through a link only to a file of yours. Each link and each directory on the way must belong to root or to you,
+  and must not be writable by its group or by others unless it has the sticky bit. Name another file.'
+LINK_HOPS='  Point the link at the file, or name the file itself.'
+
+# _link_dir <name>: a fresh dir (mode 0700) under the test dir, with each
+# link resolved, as the walk names it.
+_link_dir() {
+  local d
+  d="$(cd -P -- "${BATS_TEST_TMPDIR}" && pwd -P)/${1}"
+  mkdir -m 700 -- "${d}"
+  printf '%s\n' "${d}"
+}
+
+# _link_chain <dir> <n> <last>: <dir>/l1 -> l2 -> ... -> l<n> -> <last>.
+_link_chain() {
+  local i dest
+  for (( i = 1; i <= ${2}; i++ )); do
+    dest="l$(( i + 1 ))"
+    (( i < ${2} )) || dest="${3}"
+    ln -s "${dest}" "${1}/l${i}"
+  done
+}
+
+# A stat stand-in: with STAT_UID_AS=<path>=<uid>, that path shows the owner
+# <uid> (the first field), each other path its real owner (Go: ownerAs).
+_stat_uid_as() {
+  stat() {
+    local out
+    out=$(command stat "$@") || return
+    if [[ -n "${STAT_UID_AS:-}" && "${*: -1}" == "${STAT_UID_AS%=*}" ]]; then
+      out="${STAT_UID_AS##*=}${out#"${out%% *}"}"
+    fi
+    printf '%s\n' "${out}"
+  }
+}
+
+@test "kubeconfig: a link is written through only to a file of ours" {
   [[ "$(id -u)" != 0 ]] || skip "the test needs a user other than root"
-  local d="${BATS_TEST_TMPDIR}/own" want foreign
+  local d want foreign
   foreign=$(foreign_file) || skip "no file of root to point at"
   route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
-  mkdir -p "${d}"
+  d=$(_link_dir own)
   ln -s "${foreign}" "${d}/link"
-  want="[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/link is a link, and the link or its target belongs to another user
-  lo writes through a link only when you own the link and its target. Name another file."
+  want="[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/link is a link, and its path is not safe: $(realpath -- "${foreign}") belongs to another user (uid 0)
+${LINK_HINT}"
   run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/link" --force
   assert_failure
   assert_output "${want}"
-  # As root (id stubbed), the target passes and the link (ours) does not.
+  # As root (id stubbed), the parts of ours on the way belong to another user.
   id() { if [[ "${1:-}" == -u ]]; then echo 0; else command id "$@"; fi; }
   run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/link" --force
   assert_failure
-  assert_output "${want}"
+  assert_output --partial "${d}/link is a link, and its path is not safe: "
+  assert_output --partial " belongs to another user (uid $(command id -u))"
   unset -f id
   [ ! -e "${CURL_ARGS}" ]
 }
 
 @test "kubeconfig: the path rules run again just before the write" {
   [[ "$(id -u)" != 0 ]] || skip "the test needs a user other than root"
-  local d="${BATS_TEST_TMPDIR}/again" foreign
+  local d foreign
   foreign=$(foreign_file) || skip "no file of root to point at"
   route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
-  mkdir -p "${d}"
+  d=$(_link_dir again)
   echo contexts > "${d}/real"
   ln -s real "${d}/link"
   # The link moves to another user's file during the download.
   STUB_HOOK="ln -sfn '${foreign}' '${d}/link'" run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/link" --force
   assert_failure
-  assert_output --partial 'is a link, and the link or its target belongs to another user'
+  assert_output --partial "is a link, and its path is not safe: $(realpath -- "${foreign}") belongs to another user (uid 0)"
+  run cat "${d}/real"
+  assert_output contexts
+}
+
+# The Go twin is TestAgentKubeconfigLinkChain: each case that passes.
+@test "kubeconfig --force: a clean link chain passes, and the file lands at the final target" {
+  [[ "$(id -u)" != 0 ]] || skip "the test needs a user other than root: root passes each owner check"
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  _stat_uid_as
+  local d kind land
+  # case|the file that gets the kubeconfig
+  for kind in chain3/kube/real dirlink/kube/real chain8/real sticky/st/real rootlink/real relative/real; do
+    d=$(_link_dir "${kind%%/*}")
+    land="${d}/${kind#*/}"
+    case "${kind%%/*}" in
+      chain3)
+        mkdir -m 755 "${d}/a"
+        mkdir -m 700 "${d}/b" "${d}/kube"
+        ln -s a/l2 "${d}/l1"
+        ln -s "${d}/b/l3" "${d}/a/l2"
+        ln -s ../kube/real "${d}/b/l3" ;;
+      dirlink)
+        mkdir -m 700 "${d}/kube"
+        ln -s kube "${d}/sub"
+        ln -s sub/real "${d}/l1" ;;
+      chain8) _link_chain "${d}" 8 real ;;
+      sticky)
+        mkdir -m 1777 "${d}/st"
+        ln -s st/l2 "${d}/l1"
+        ln -s real "${d}/st/l2" ;;
+      rootlink|relative) _link_chain "${d}" 2 real ;;
+    esac
+    echo contexts > "${land}"
+    if [[ "${kind%%/*}" == relative ]]; then
+      cd "${d}"
+      run kubehz::cluster::kubeconfig cl-1a2b3c4d --file l1 --force
+    elif [[ "${kind%%/*}" == rootlink ]]; then
+      STAT_UID_AS="${d}/l2=0" run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/l1" --force
+    else
+      run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/l1" --force
+    fi
+    assert_success
+    run cat "${land}"
+    assert_output 'apiVersion: v1'
+    [ -L "${d}/l1" ] || fail "${kind}: the first link was replaced"
+    run ls -A "${land%/*}"
+    refute_output --partial .kubeconfig-
+  done
+}
+
+# The Go twin is TestAgentKubeconfigLinkChain: each case that is refused.
+@test "kubeconfig --force: the link walk refuses a long chain, a loop, a mode or an owner on the way, and writes nothing" {
+  [[ "$(id -u)" != 0 ]] || skip "the test needs a user other than root: root passes each owner check"
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  _stat_uid_as
+  local d kind want file as
+  for kind in chain9 loop midmode above targetdir linkowner dirowner targetowner targetroot; do
+    d=$(_link_dir "${kind}")
+    file="${d}/l1" as=""
+    echo contexts > "${d}/real"
+    case "${kind}" in
+      chain9)
+        _link_chain "${d}" 9 real
+        want="${d}/l9 is link 9 on the way, and lo follows at most 8 (a loop, or a chain that is too long)
+${LINK_HOPS}" ;;
+      loop)
+        ln -s b "${d}/a"
+        ln -s a "${d}/b"
+        file="${d}/a"
+        want="${d}/a is link 9 on the way, and lo follows at most 8 (a loop, or a chain that is too long)
+${LINK_HOPS}" ;;
+      midmode)
+        mkdir -m 775 "${d}/mid"
+        ln -s mid/l2 "${d}/l1"
+        ln -s ../real "${d}/mid/l2"
+        want="${d}/mid is writable by others and has no sticky bit
+${LINK_HINT}" ;;
+      above)
+        mkdir -m 777 "${d}/open"
+        mkdir -m 700 "${d}/open/sub"
+        ln -s open/sub/l2 "${d}/l1"
+        ln -s ../../real "${d}/open/sub/l2"
+        want="${d}/open is writable by others and has no sticky bit
+${LINK_HINT}" ;;
+      targetdir)
+        mkdir -m 777 "${d}/open"
+        echo contexts > "${d}/open/real"
+        ln -s open/real "${d}/l1"
+        want="${d}/open is writable by others and has no sticky bit
+${LINK_HINT}" ;;
+      linkowner)
+        _link_chain "${d}" 2 real
+        as="${d}/l2=4242"
+        want="${d}/l2 belongs to another user (uid 4242)
+${LINK_HINT}" ;;
+      dirowner)
+        mkdir -m 755 "${d}/mid"
+        ln -s mid/l2 "${d}/l1"
+        ln -s ../real "${d}/mid/l2"
+        as="${d}/mid=4242"
+        want="${d}/mid belongs to another user (uid 4242)
+${LINK_HINT}" ;;
+      targetowner|targetroot)
+        _link_chain "${d}" 1 real
+        as="${d}/real=4242"
+        [[ "${kind}" == targetowner ]] || as="${d}/real=0"
+        want="${d}/real belongs to another user (uid ${as##*=})
+${LINK_HINT}" ;;
+    esac
+    STAT_UID_AS="${as}" run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${file}" --force
+    assert_failure
+    assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${file} is a link, and its path is not safe: ${want}"
+    run cat "${d}/real"
+    assert_output contexts
+  done
+  [ ! -e "${CURL_ARGS}" ]
+}
+
+# Without a mapping for this user (unshare --user alone), this user and
+# every other unmapped owner show the overflow uid, so "ours" proves
+# nothing: the first part below / on the way is refused with the hint for
+# an unmapped user. The Go twin is TestAgentKubeconfigLinkForAnUnmappedUser.
+# Skipped where no user namespace can be made.
+@test "kubeconfig --force: a caller without a uid mapping trusts no part of its own uid on the way" {
+  unshare --user true 2>/dev/null || skip "no user namespace here"
+  local d ovf top
+  ovf=$(cat /proc/sys/kernel/overflowuid 2>/dev/null) || ovf=65534
+  d=$(_link_dir unmapped)
+  echo contexts > "${d}/real"
+  _link_chain "${d}" 1 real
+  top="/$(cut -d / -f 2 <<< "${d}")"
+  run unshare --user bash -c '
+    import() { :; }
+    source "${1}/.lok8s/utils/verbose.sh"
+    source "${1}/.lok8s/libs/kubehz/agent"
+    rc=0
+    kubehz::agent_link_target "cluster kubeconfig cl-1a2b3c4d" "${2}" || rc=$?
+    echo "rc: ${rc}"' _ "${_PROJECT_ROOT}" "${d}/l1"
+  assert_success
+  assert_line "rc: 1"
+  assert_output --partial "[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/l1 is a link, and its path is not safe: ${top} cannot be checked (uid ${ovf})
+  The uid of this user is not mapped in the namespace, so lo cannot check who owns the path.
+  Run it where the uid of this user is mapped (unshare --map-current-user), or name a file that is not a link."
   run cat "${d}/real"
   assert_output contexts
 }

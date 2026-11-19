@@ -685,13 +685,16 @@ fi
 
 # The kubeconfig fixtures (KC_SETUP names one; agent_pre runs it before each
 # implementation): kc.yaml as a file that exists, a link to a file, a link
-# to a directory, a link to nothing.
+# to a directory, a link to nothing, a link to a file in a directory that
+# others can write, a link to itself (a loop).
 kc_exists() { echo contexts > "${PROJ}/kc.yaml"; }
 kc_link_file() { mkdir -p "${PROJ}/kube"; echo contexts > "${PROJ}/kube/real"; ln -s kube/real "${PROJ}/kc.yaml"; }
 kc_link_dir() { mkdir -p "${PROJ}/kc-dir"; ln -s kc-dir "${PROJ}/kc.yaml"; }
 kc_link_nothing() { ln -s gone "${PROJ}/kc.yaml"; }
 kc_link_foreign() { ln -s /etc/passwd "${PROJ}/kc.yaml"; }
 kc_link_proc() { ln -s /proc/self/fd/1 "${PROJ}/kc.yaml"; }
+kc_link_open() { mkdir -m 777 "${PROJ}/kube"; echo contexts > "${PROJ}/kube/real"; ln -s kube/real "${PROJ}/kc.yaml"; }
+kc_link_loop() { ln -s kc.yaml "${PROJ}/kc.yaml"; }
 
 agent_pre() {
   rm -rf "${HOME}/.cache/lok8s/kubehz-token" "${PROJ}/kc.yaml" "${PROJ}/kube" "${PROJ}/kc-dir"
@@ -836,6 +839,11 @@ if [[ -n "${STUB_PORT}" ]]; then
   else
     echo "skip: a link to another user's file (root owns /etc/passwd)"
   fi
+  # A link walk that another user could redirect is refused: the directory
+  # of the target can be written by others, or the link is a loop (the hop
+  # limit).
+  KC_SETUP=kc_link_open check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
+  KC_SETUP=kc_link_loop check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
   # /proc and /dev are refused, also through a link. /proc/self resolves
   # against the process that asks: fd 1 of lo is the harness's output file.
   if [[ -d /proc/self/fd ]]; then

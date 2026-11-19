@@ -38,6 +38,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -874,16 +875,15 @@ func (c *Context) kubeconfigExists(action, file string) {
 //   - With force, lo writes through a link: the target becomes a new file
 //     (owned by this user, mode 0600) and the link stays. A hard link to
 //     the old target keeps the old content.
-//   - lo writes through a link only when the link and its target belong to
-//     this user. lo resolves the link itself and renames onto the target,
-//     so the kernel rule fs.protected_symlinks does not apply. A link that
-//     another user put in a shared directory (/tmp/kc.yaml) must not send
-//     the write to a file of this user, such as ~/.bashrc. A link to
-//     nothing is refused.
+//   - lo writes through a link only when no other user can send the write
+//     somewhere else (see linkTarget). lo resolves the link itself and
+//     renames onto the target, so the kernel rule fs.protected_symlinks
+//     does not apply. A link that another user put in a shared directory
+//     (/tmp/kc.yaml) must not send the write to a file of this user, such
+//     as ~/.bashrc. A link to nothing is refused.
 //
-// A short race stays. Between the last check and the rename, a user who
-// can write the directory of a link can point the link somewhere else. The
-// check just before the write keeps that window as short as lo can.
+// A plain file and a path that does not exist yet keep the rules above
+// only: the walk of linkTarget is for a link.
 //
 // The bash twin is kubehz::agent_target.
 func (c *Context) kubeconfigTarget(action, file string, force bool) (string, error) {
@@ -908,19 +908,152 @@ func (c *Context) kubeconfigTarget(action, file string, force bool) (string, err
 	if li.Mode()&os.ModeSymlink == 0 {
 		return file, nil
 	}
-	target, err := filepath.EvalSymlinks(file)
-	if err != nil {
-		c.errorf("kubehz %s: cannot write %s", action, file)
-		c.echoErr("  Name a file in a directory that exists and that you can write to.")
-		return "", ErrHandled
+	return c.linkTarget(action, file)
+}
+
+// maxLinkHops is the most links that linkTarget follows on the way to the
+// target. A loop, or a longer chain, is refused.
+const maxLinkHops = 8
+
+// linkTarget resolves the link file hop by hop and returns the target. The
+// walk reads each name of the path itself, as inProcOrDev does, and counts
+// each link that it follows: a link as the last name, and a link to a
+// directory on the way. For each link, each part of the directory that
+// holds it, from / down, must pass the check of notPrivatePart: it belongs
+// to root or to this user, and it is not writable by its group or by
+// others unless it has the sticky bit. The link itself must belong to root
+// or to this user. The directory of the target gets the same check, and
+// the target must be a file of this user. Thus only root and this user can
+// change a link or a directory on the way, and the target stays the file
+// that the check saw. A refusal names the part that failed and why.
+// Nothing is written.
+//
+// The bash twin is kubehz::agent_link_target.
+func (c *Context) linkTarget(action, file string) (string, error) {
+	rest := file
+	if !strings.HasPrefix(rest, "/") {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", c.kubeconfigUnwritable(action, file)
+		}
+		rest = wd + "/" + rest
 	}
-	ti, err := os.Stat(target)
-	if err != nil || !c.ownedByMe(li) || !c.ownedByMe(ti) {
-		c.errorf("kubehz %s: %s is a link, and the link or its target belongs to another user", action, file)
-		c.echoErr("  lo writes through a link only when you own the link and its target. Name another file.")
-		return "", ErrHandled
+	walked, links := "", 0
+	for rest != "" {
+		name, after, _ := strings.Cut(rest, "/")
+		rest = after
+		switch name {
+		case "", ".":
+			continue
+		case "..":
+			if i := strings.LastIndex(walked, "/"); i >= 0 {
+				walked = walked[:i]
+			}
+			continue
+		}
+		next := walked + "/" + name
+		li, err := c.lstat(next)
+		if err != nil || li.Mode()&os.ModeSymlink == 0 {
+			walked = next
+			continue
+		}
+		if links++; links > maxLinkHops {
+			c.errorf("kubehz %s: %s is a link, and its path is not safe: %s is link %d on the way, and lo follows at most %d (a loop, or a chain that is too long)",
+				action, file, next, links, maxLinkHops)
+			c.echoErr("  Point the link at the file, or name the file itself.")
+			return "", ErrHandled
+		}
+		if err := c.linkDirSafe(action, file, rootIfEmpty(walked)); err != nil {
+			return "", err
+		}
+		if uid, ok := fileOwner(li); !ok || !c.ownerTrusted(next, uid) {
+			why, unmapped := ownerWhy(uid, ok, c.euid())
+			return "", c.linkNotSafe(action, file, next, why, unmapped)
+		}
+		dest, err := os.Readlink(next)
+		if err != nil {
+			return "", c.kubeconfigUnwritable(action, file)
+		}
+		if strings.HasPrefix(dest, "/") {
+			walked = ""
+		}
+		if rest != "" {
+			dest += "/" + rest
+		}
+		rest = dest
+	}
+	target := rootIfEmpty(walked)
+	if err := c.linkDirSafe(action, file, filepath.Dir(target)); err != nil {
+		return "", err
+	}
+	ti, err := c.lstat(target)
+	if err != nil || ti.Mode()&os.ModeSymlink != 0 {
+		return "", c.kubeconfigUnwritable(action, file)
+	}
+	if uid, ok := fileOwner(ti); !ok || uid != c.euid() || c.euid() == c.overflowUID() {
+		why, unmapped := ownerWhy(uid, ok, c.euid())
+		return "", c.linkNotSafe(action, file, target, why, unmapped)
 	}
 	return target, nil
+}
+
+// linkDirSafe checks each part of dir (a path that linkTarget resolved),
+// from / down, with notPrivatePart. The first part that fails is refused
+// (linkNotSafe).
+func (c *Context) linkDirSafe(action, file, dir string) error {
+	parts := []string{dir}
+	for p := dir; filepath.Dir(p) != p; p = filepath.Dir(p) {
+		parts = append(parts, filepath.Dir(p))
+	}
+	slices.Reverse(parts)
+	for _, part := range parts {
+		if why, unmapped := c.notPrivatePart(part); why != "" {
+			return c.linkNotSafe(action, file, part, why, unmapped)
+		}
+	}
+	return nil
+}
+
+// ownerWhy says why an owner fails the check of a link or a target, in the
+// words of notPrivatePart. unmapped: the entry is ours, and this user has
+// the overflow uid (a user namespace without a mapping for it).
+func ownerWhy(uid int, ok bool, euid int) (why string, unmapped bool) {
+	switch {
+	case !ok:
+		return "cannot be read", false
+	case uid == euid:
+		return fmt.Sprintf("cannot be checked (uid %d)", uid), true
+	}
+	return fmt.Sprintf("belongs to another user (uid %d)", uid), false
+}
+
+// linkNotSafe prints the refusal of a link whose part failed the check of
+// linkTarget, with why.
+func (c *Context) linkNotSafe(action, file, part, why string, unmapped bool) error {
+	c.errorf("kubehz %s: %s is a link, and its path is not safe: %s %s", action, file, part, why)
+	if unmapped {
+		c.echoErr("  The uid of this user is not mapped in the namespace, so lo cannot check who owns the path.")
+		c.echoErr("  Run it where the uid of this user is mapped (unshare --map-current-user), or name a file that is not a link.")
+		return ErrHandled
+	}
+	c.echoErr("  lo writes through a link only to a file of yours. Each link and each directory on the way must belong to root or to you,")
+	c.echoErr("  and must not be writable by its group or by others unless it has the sticky bit. Name another file.")
+	return ErrHandled
+}
+
+// kubeconfigUnwritable prints the refusal of a path that lo cannot write.
+func (c *Context) kubeconfigUnwritable(action, file string) error {
+	c.errorf("kubehz %s: cannot write %s", action, file)
+	c.echoErr("  Name a file in a directory that exists and that you can write to.")
+	return ErrHandled
+}
+
+// rootIfEmpty is p, or "/" for the empty path of a walk at the root.
+func rootIfEmpty(p string) string {
+	if p == "" {
+		return "/"
+	}
+	return p
 }
 
 // inProcOrDev reports whether file is in /proc or /dev, or whether a link
@@ -983,17 +1116,13 @@ func inProcOrDev(file string) bool {
 	return false
 }
 
-// ownedByMe reports whether the effective user owns the entry.
-func (c *Context) ownedByMe(info os.FileInfo) bool {
-	uid, ok := fileOwner(info)
-	return ok && uid == c.euid()
-}
-
 // publishKubeconfig writes data to target through a temporary file next to
 // it (mode 0600). With force, a rename replaces the target. Without force,
 // a hard link publishes the file. link(2) fails when the path exists, so a
 // file that appeared during the download stays as it is. The temporary
-// file goes in both cases.
+// file goes in both cases. For a link, target is the file that linkTarget
+// checked: no other user can change a directory from / down to it, so the
+// path names that file up to the rename.
 func publishKubeconfig(target string, data []byte, force bool) error {
 	tmp, err := os.CreateTemp(filepath.Dir(target), ".kubeconfig-*")
 	if err != nil {

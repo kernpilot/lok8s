@@ -626,17 +626,17 @@ kubehz::agent_kubeconfig() {
 #     Thus --file ~/.kube/config cannot lose its contexts by accident.
 #   - With --force, lo writes through a link: the target becomes a new file
 #     (owned by this user, mode 0600) and the link stays.
-#   - lo writes through a link only when the link and its target belong to
-#     this user. lo resolves the link itself, so fs.protected_symlinks does
-#     not apply: a link that another user put in /tmp must not send the
-#     write to a file of this user, such as ~/.bashrc. A link to nothing is
-#     refused.
-# A short race stays between the last check and the mv. A user who can write
-# the directory of a link can point the link somewhere else.
+#   - lo writes through a link only when no other user can send the write
+#     somewhere else (see kubehz::agent_link_target). lo resolves the link
+#     itself, so fs.protected_symlinks does not apply: a link that another
+#     user put in /tmp must not send the write to a file of this user, such
+#     as ~/.bashrc. A link to nothing is refused.
+# A plain file and a path that does not exist yet keep the rules above
+# only: the walk of kubehz::agent_link_target is for a link.
 # Usage: kubehz::agent_target <action> <file> <force>
 # Sets: KUBEHZ_AGENT_TARGET
 kubehz::agent_target() {
-  local action="${1}" file="${2}" force="${3}" me link_uid target_uid
+  local action="${1}" file="${2}" force="${3}"
   KUBEHZ_AGENT_TARGET="${file}"
   if kubehz::agent_in_proc_or_dev "${file}"; then
     error "kubehz ${action}: ${file} is in /proc or /dev, or a link in its path points there"
@@ -654,19 +654,169 @@ kubehz::agent_target() {
     return 1
   fi
   [[ -L "${file}" ]] || return 0
-  if ! KUBEHZ_AGENT_TARGET=$(realpath -e -- "${file}" 2>/dev/null); then
-    error "kubehz ${action}: cannot write ${file}"
-    echo "  Name a file in a directory that exists and that you can write to." >&2
-    return 1
-  fi
+  kubehz::agent_link_target "${action}" "${file}"
+}
+
+# The most links that kubehz::agent_link_target follows on the way to the
+# target (Go: maxLinkHops). A loop, or a longer chain, is refused.
+_KUBEHZ_MAX_LINK_HOPS=8
+
+# Resolve the link <file> hop by hop, the Go twin's linkTarget. The walk
+# reads each name of the path itself, as kubehz::agent_in_proc_or_dev does,
+# and counts each link that it follows: a link as the last name, and a link
+# to a directory on the way. For each link, each part of the directory that
+# holds it, from / down, must pass kubehz::agent_part_why: it belongs to
+# root or to this user, and it is not writable by its group or by others
+# unless it has the sticky bit. The link itself must belong to root or to
+# this user. The directory of the target gets the same check, and the
+# target must be a file of this user. Thus only root and this user can
+# change a link or a directory on the way, and the target stays the file
+# that the check saw. A refusal names the part that failed and why.
+# Nothing is written.
+# Usage: kubehz::agent_link_target <action> <file>
+# Sets: KUBEHZ_AGENT_TARGET
+kubehz::agent_link_target() {
+  local action="${1}" file="${2}" rest walked="" name next dest links=0 me ovf why rc target uid
   me=$(id -u)
-  link_uid=$(stat -c '%u' -- "${file}" 2>/dev/null) || link_uid=""
-  target_uid=$(stat -c '%u' -- "${KUBEHZ_AGENT_TARGET}" 2>/dev/null) || target_uid=""
-  if [[ "${link_uid}" != "${me}" || "${target_uid}" != "${me}" ]]; then
-    error "kubehz ${action}: ${file} is a link, and the link or its target belongs to another user"
-    echo "  lo writes through a link only when you own the link and its target. Name another file." >&2
+  { read -r ovf < /proc/sys/kernel/overflowuid; } 2>/dev/null || ovf=""
+  [[ "${ovf}" =~ ^[0-9]+$ ]] || ovf=65534
+  rest="${file}"
+  [[ "${rest}" == /* ]] || rest="${PWD}/${rest}"
+  while [[ -n "${rest}" ]]; do
+    name="${rest%%/*}"
+    if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+    case "${name}" in
+      "" | .) continue ;;
+      ..) walked="${walked%/*}"; continue ;;
+    esac
+    next="${walked}/${name}"
+    if [[ ! -L "${next}" ]]; then
+      walked="${next}"
+      continue
+    fi
+    if (( ++links > _KUBEHZ_MAX_LINK_HOPS )); then
+      error "kubehz ${action}: ${file} is a link, and its path is not safe: ${next} is link ${links} on the way, and lo follows at most ${_KUBEHZ_MAX_LINK_HOPS} (a loop, or a chain that is too long)"
+      echo "  Point the link at the file, or name the file itself." >&2
+      return 1
+    fi
+    kubehz::agent_dir_safe "${action}" "${file}" "${walked:-/}" "${me}" "${ovf}" || return 1
+    uid=$(stat -c '%u' -- "${next}" 2>/dev/null) || uid=""
+    if [[ -z "${uid}" ]] || ! kubehz::agent_owner_trusted "${next}" "${uid}" "${me}" "${ovf}"; then
+      rc=0
+      why=$(kubehz::agent_owner_why "${uid}" "${me}") || rc=$?
+      kubehz::agent_link_not_safe "${action}" "${file}" "${next}" "${why}" "$(( rc == 2 ))"
+      return 1
+    fi
+    # readlink prints a newline: the x keeps the trailing newlines of a name.
+    if ! dest=$(readlink -- "${next}" && printf x); then
+      kubehz::agent_unwritable "${action}" "${file}"
+      return 1
+    fi
+    dest="${dest%$'\n'x}"
+    [[ "${dest}" != /* ]] || walked=""
+    [[ -z "${rest}" ]] || dest+="/${rest}"
+    rest="${dest}"
+  done
+  target="${walked:-/}"
+  dest="${target%/*}"
+  kubehz::agent_dir_safe "${action}" "${file}" "${dest:-/}" "${me}" "${ovf}" || return 1
+  if [[ -L "${target}" ]] || ! uid=$(stat -c '%u' -- "${target}" 2>/dev/null); then
+    kubehz::agent_unwritable "${action}" "${file}"
     return 1
   fi
+  if [[ "${uid}" != "${me}" || "${me}" == "${ovf}" ]]; then
+    rc=0
+    why=$(kubehz::agent_owner_why "${uid}" "${me}") || rc=$?
+    kubehz::agent_link_not_safe "${action}" "${file}" "${target}" "${why}" "$(( rc == 2 ))"
+    return 1
+  fi
+  KUBEHZ_AGENT_TARGET="${target}"
+}
+
+# Check each part of <dir> (a path that kubehz::agent_link_target
+# resolved), from / down, with kubehz::agent_part_why (Go: linkDirSafe).
+# The first part that fails is refused (kubehz::agent_link_not_safe).
+# Usage: kubehz::agent_dir_safe <action> <file> <dir> <uid> <overflow uid>
+kubehz::agent_dir_safe() {
+  local action="${1}" file="${2}" dir="${3}" me="${4}" ovf="${5}" part=/ rest why rc
+  rest="${dir#/}"
+  while :; do
+    rc=0
+    why=$(kubehz::agent_part_why "${part}" "${me}" "${ovf}") || rc=$?
+    if [[ -n "${why}" ]]; then
+      kubehz::agent_link_not_safe "${action}" "${file}" "${part}" "${why}" "$(( rc == 2 ))"
+      return 1
+    fi
+    [[ -n "${rest}" ]] || return 0
+    part="${part%/}/${rest%%/*}"
+    if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+  done
+}
+
+# Why one part of a path fails the check (nothing when it passes), in the
+# words of kubehz::space_join_tmp_dir (Go: notPrivatePart). Status 2 with
+# the text: the part is ours, and this user has the overflow uid (a user
+# namespace without a mapping for it).
+# Usage: kubehz::agent_part_why <part> <uid> <overflow uid>
+kubehz::agent_part_why() {
+  local part="${1}" me="${2}" ovf="${3}" meta uid mode
+  meta=$(stat -c '%u %a' -- "${part}" 2>/dev/null) || meta=""
+  uid="${meta%% *}" mode="${meta#* }"
+  if [[ -z "${meta}" ]]; then
+    echo "cannot be read"
+  elif [[ -L "${part}" ]]; then
+    echo "is a symlink"
+  elif ! kubehz::agent_owner_trusted "${part}" "${uid}" "${me}" "${ovf}"; then
+    kubehz::agent_owner_why "${uid}" "${me}"
+  elif (( (8#${mode} & 8#022) != 0 && (8#${mode} & 8#1000) == 0 )); then
+    echo "is writable by others and has no sticky bit"
+  fi
+}
+
+# Is <owner> trusted for <part> (Go: ownerTrusted)? Root, or this user
+# while the uid of this user is not the overflow uid. "/" alone may also
+# show the overflow uid: in a namespace that does not map root, the host's
+# "/" shows so.
+# Usage: kubehz::agent_owner_trusted <part> <owner> <uid> <overflow uid>
+kubehz::agent_owner_trusted() {
+  [[ "${2}" == 0 ]] || [[ "${2}" == "${3}" && "${3}" != "${4}" ]] || [[ "${1}" == / && "${2}" == "${4}" ]]
+}
+
+# Why an owner failed the check of a link, a part or the target, as the Go
+# twin's ownerWhy. An empty owner cannot be read. Status 2: the entry is
+# ours, and this user has the overflow uid (a user namespace without a
+# mapping for it).
+# Usage: kubehz::agent_owner_why <owner> <uid>
+kubehz::agent_owner_why() {
+  if [[ -z "${1}" ]]; then
+    echo "cannot be read"
+  elif [[ "${1}" == "${2}" ]]; then
+    echo "cannot be checked (uid ${1})"
+    return 2
+  else
+    echo "belongs to another user (uid ${1})"
+  fi
+}
+
+# The refusal of a link whose part failed the check of
+# kubehz::agent_link_target (Go: linkNotSafe).
+# Usage: kubehz::agent_link_not_safe <action> <file> <part> <why> <unmapped 0|1>
+kubehz::agent_link_not_safe() {
+  error "kubehz ${1}: ${2} is a link, and its path is not safe: ${3} ${4}"
+  if [[ "${5}" == 1 ]]; then
+    echo "  The uid of this user is not mapped in the namespace, so lo cannot check who owns the path." >&2
+    echo "  Run it where the uid of this user is mapped (unshare --map-current-user), or name a file that is not a link." >&2
+    return 0
+  fi
+  echo "  lo writes through a link only to a file of yours. Each link and each directory on the way must belong to root or to you," >&2
+  echo "  and must not be writable by its group or by others unless it has the sticky bit. Name another file." >&2
+}
+
+# The refusal of a path that lo cannot write (Go: kubeconfigUnwritable).
+# Usage: kubehz::agent_unwritable <action> <file>
+kubehz::agent_unwritable() {
+  error "kubehz ${1}: cannot write ${2}"
+  echo "  Name a file in a directory that exists and that you can write to." >&2
 }
 
 # Is the path in /proc or /dev, or does a link on its path point there? The
@@ -715,7 +865,10 @@ kubehz::agent_exists() {
 # (mktemp: mode 0600). With force, mv replaces the file. Without force, a
 # hard link publishes it. ln fails when the path exists, so a file that
 # appeared during the download stays as it is. -T keeps both from moving the
-# file into a directory. The temporary file goes in both cases.
+# file into a directory. The temporary file goes in both cases. For a link,
+# <file> is the file that kubehz::agent_link_target checked: no other user
+# can change a directory from / down to it, so the path names that file up
+# to the mv.
 # Usage: kubehz::agent_write <file> <force>
 kubehz::agent_write() {
   local file="${1}" force="${2}" tmp rc=0
