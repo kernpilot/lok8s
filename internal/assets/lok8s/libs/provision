@@ -160,28 +160,58 @@ provision::confirm_infra() {
 # <cluster_name>: clusters/<d>/hetzner.json, the file of
 # spec.provider.configRef, or an inline spec.provider.config. One per line,
 # sorted (Go twin: domain.ProviderClusterNameUsers).
+#
+# A merge key (<<) on the path to a name stops the scan: it prints the
+# domains that have one, one per line, sorted, and returns 2 (Go twin:
+# domain.MergeKeyError). The name that a merge key brings in is not one
+# value: yq gives the merged value over the own key, and from a merge list
+# the last mapping on a path read (.cluster_name) but the first one on the
+# JSON read of the provider (template::descriptor_json);
+# --yaml-fix-merge-anchor-to-spec changes both, and yq says that this will
+# become its default. The Go twin does not merge at all. The path is the top
+# of each file, and the top, spec, spec.provider and spec.provider.config of
+# the spec; the rule is the one of recover::_config_name: a key whose text
+# is "<<", quoted or not. Only the first document counts, as in the Go twin.
+#
+# A provider file goes to yq on stdin, so yq parses it as YAML (JSON is
+# YAML too) whatever its extension, as the provider and the Go twin read it:
+# with the path, yq reads hetzner.json as JSON only and gives no name for a
+# YAML one.
 provision::_cluster_name_users() {
-  local self="${1}" name="${2}" dir other spec ref f
-  local -a files=() names=() users=()
+  local self="${1}" name="${2}" dir other spec ref f merge
+  local -a files=() names=() users=() merged=()
+  # The number of keys "<<" in the mappings on the path (Go: mergeOnPath).
+  local -r merge_spec='select(document_index == 0) | [(., .spec, .spec.provider, .spec.provider.config) | select(tag == "!!map") | keys[] | select(. == "<<")] | length'
+  local -r merge_file='select(document_index == 0) | [select(tag == "!!map") | keys[] | select(. == "<<")] | length'
   for dir in "${PATH_CLUSTERS}"/*/; do
     [[ -d "${dir}" ]] || continue
     other="$(basename "${dir}")"
     [[ "${other}" != "${self}" && "${other}" != .* ]] || continue
-    files=() names=()
+    files=() names=() merge=""
     [[ ! -f "${dir}hetzner.json" ]] || files+=("${dir}hetzner.json")
     spec="${dir}cluster.lok8s.yaml"
     if [[ -f "${spec}" ]]; then
+      merge+="$(yq -r "${merge_spec}" "${spec}" 2>/dev/null)"
       ref="$(yq -r '.spec.provider.configRef // ""' "${spec}" 2>/dev/null)" || ref=""
       [[ -z "${ref}" || ! -f "${dir}${ref}" ]] || files+=("${dir}${ref}")
       names+=("$(yq -r '.spec.provider.config.cluster_name // ""' "${spec}" 2>/dev/null)")
     fi
     for f in "${files[@]}"; do
-      names+=("$(yq -r '.cluster_name // ""' "${f}" 2>/dev/null)")
+      merge+="$(yq -r "${merge_file}" - <"${f}" 2>/dev/null)"
+      names+=("$(yq -r '.cluster_name // ""' - <"${f}" 2>/dev/null)")
     done
+    if [[ "${merge}" == *[1-9]* ]]; then
+      merged+=("${other}")
+      continue
+    fi
     for f in "${names[@]}"; do
       [[ "${f}" != "${name}" ]] || { users+=("${other}"); break; }
     done
   done
+  if (( ${#merged[@]} > 0 )); then
+    printf '%s\n' "${merged[@]}" | LC_ALL=C sort
+    return 2
+  fi
   (( ${#users[@]} == 0 )) || printf '%s\n' "${users[@]}" | LC_ALL=C sort
 }
 
@@ -317,8 +347,16 @@ provision::_destroy_guard() {
     return 3
   fi
 
-  local users
-  users="$(provision::_cluster_name_users "${domain}" "${name}")"
+  local users rc=0
+  users="$(provision::_cluster_name_users "${domain}" "${name}")" || rc=$?
+  if (( rc == 2 )); then
+    provision::_guard_error "a domain has a merge key (<<) on the path to the cluster_name of its provider config: ${users//$'\n'/, }. The provider can take the cluster_name from the merged mapping, so lo destroy cannot compare it with the cluster_name '${name}' of '${domain}'. Nothing was deleted. Write cluster_name as a literal key, without a merge key, in the provider config of that domain, then run lo destroy again."
+    return 3
+  fi
+  if (( rc != 0 )); then
+    provision::_guard_error "could not check if another domain has the cluster_name '${name}' of '${domain}'. Nothing was deleted. Run lo destroy again."
+    return 3
+  fi
   if [[ -n "${users}" ]]; then
     provision::_guard_error "cluster_name '${name}' of '${domain}' is also the cluster_name of: ${users//$'\n'/, }. The provider deletes only the resources with this cluster_name and the owner mark of '${domain}'. The resources of those domains have the same cluster label, so only the mark keeps them apart: a resource of another domain with a wrong mark would be deleted. Nothing was deleted. Give each domain its own cluster_name, then run lo destroy again."
     return 3

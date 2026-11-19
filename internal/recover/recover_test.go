@@ -707,6 +707,31 @@ func TestRunRefusesAClusterNameOfAnotherDomain(t *testing.T) {
 	}
 }
 
+// Another domain whose provider config has a merge key (<<) on the path to
+// its cluster_name: the scan cannot tell the name that its provider uses,
+// so recover is refused at resolve (fail closed), before the doctor, the
+// rebuild and the provision; a plain user does not hide it.
+func TestRunClusterNameGuardRefusesAMergeKeyInAnotherDomain(t *testing.T) {
+	h := newHarness(t)
+	h.r.Force = true
+	testutil.WriteFile(t, h.cfg, `{"cluster_name": "shared"}`+"\n")
+	sharedNameForms[0].write(t, filepath.Join(h.r.Paths.Clusters, "copy.dom"))
+	testutil.WriteFile(t, filepath.Join(h.r.Paths.Clusters, "merge.dom", "cluster.lok8s.yaml"),
+		"kind: KubeOne\nmetadata:\n  name: m\nspec:\n  provider:\n    name: mock\n    config:\n      <<: {cluster_name: shared}\n")
+	if err := h.r.Run(t.Context(), "test.dom", false, false); !errors.Is(err, ErrHandled) {
+		t.Fatalf("err = %v, want ErrHandled", err)
+	}
+	if want := "[error] recover: a domain has a merge key (<<) on the path to the cluster_name of its provider config: merge.dom. The provider can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name 'shared' of 'test.dom'. Nothing was changed. Write cluster_name as a literal key, without a merge key, in the provider config of that domain, then run lo recover again.\n"; !strings.Contains(h.errBuf.String(), want) {
+		t.Errorf("missing %q in stderr:\n%s", want, h.errBuf.String())
+	}
+	if strings.Contains(h.errBuf.String(), "is also the cluster_name of") {
+		t.Errorf("the guard compared the name:\n%s", h.errBuf.String())
+	}
+	if got := h.recorded(); got != "resolve" {
+		t.Errorf("record = %q, want only the resolve (no doctor, rebuild or provision)", got)
+	}
+}
+
 // The refusal names every other domain with the cluster_name, sorted.
 func TestRunClusterNameGuardNamesEveryDomain(t *testing.T) {
 	h := newHarness(t)

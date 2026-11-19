@@ -782,6 +782,20 @@ _assert_refused() {
   assert_output --partial "provision test.dom"
 }
 
+@test "recover refuses a merge key in the provider config of another domain, before it compares the name" {
+  _shared_name_setup
+  mkdir -p "${PATH_CLUSTERS}/merge.dom"
+  printf 'kind: KubeOne\nmetadata:\n  name: m\nspec:\n  provider:\n    name: mock\n    config:\n      <<: {cluster_name: shared}\n' \
+    > "${PATH_CLUSTERS}/merge.dom/cluster.lok8s.yaml"
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_failure 1
+  assert_output --partial "[error] recover: a domain has a merge key (<<) on the path to the cluster_name of its provider config: merge.dom. The provider can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name 'shared' of 'test.dom'. Nothing was changed. Write cluster_name as a literal key, without a merge key, in the provider config of that domain, then run lo recover again."
+  refute_output --partial "is also the cluster_name of"
+  run cat "${RECORD}"
+  assert_output "resolve"
+}
+
 # The real scan (provision::_cluster_name_users) fails only when its
 # printf | sort pipeline fails: a yq error reads as no name. So this test
 # stubs the scan to pin the fail-closed branch of the guard.

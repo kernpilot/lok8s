@@ -270,3 +270,35 @@ func TestWriteClusterSpecRefusesAClusterNameInUse(t *testing.T) {
 		}
 	}
 }
+
+// A domain with a merge key (<<) on the path to its cluster_name or its
+// metadata.name: the check cannot tell its names, so a new domain is
+// refused (fail closed) and nothing is written.
+func TestWriteClusterSpecRefusesWhenAMergeKeyHidesAName(t *testing.T) {
+	for _, tc := range []struct{ name, file, content string }{
+		{"provider config", "hetzner.json", "base: &b {cluster_name: other}\n<<: *b\n"},
+		{"metadata", "cluster.lok8s.yaml", "base: &b {name: other}\nmetadata:\n  <<: *b\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clusters := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(clusters, "merge.cloud"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(clusters, "merge.cloud", tc.file), []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var out, stderr bytes.Buffer
+			err := WriteClusterSpec(clusters, "green.cloud", "kubeone", false, &out, &stderr)
+			if !errors.Is(err, ErrHandled) {
+				t.Fatalf("err = %v, want ErrHandled", err)
+			}
+			want := "the cluster name 'green' (the first label of green.cloud) cannot be compared with the other domains: a domain has a merge key (<<) on the path to the cluster_name of its provider config or to the metadata.name of its cluster.lok8s.yaml: merge.cloud. Nothing was written."
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("stderr = %s, want %q", stderr.String(), want)
+			}
+			if _, err := os.Stat(filepath.Join(clusters, "green.cloud")); err == nil {
+				t.Error("the refused domain was written")
+			}
+		})
+	}
+}

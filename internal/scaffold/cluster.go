@@ -8,6 +8,7 @@ package scaffold
 // function. Go-only: the frozen tree has no project scaffold.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -151,7 +152,16 @@ func WriteClusterSpec(clusters, dom, driverName string, force bool, out, stderr 
 	// same name shares the kubeconfig, and its destroy can delete the
 	// resources of the other (domain.ClusterNameUsers).
 	name := ClusterName(dom)
-	if users := domain.ClusterNameUsers(clusters, dom, name); len(users) > 0 {
+	users, err := domain.ClusterNameUsers(clusters, dom, name)
+	if merge := (*domain.MergeKeyError)(nil); errors.As(err, &merge) {
+		ui.ErrorTo(stderr, "the cluster name '%s' (the first label of %s) cannot be compared with the other domains: a domain has a merge key (<<) on the path to the cluster_name of its provider config or to the metadata.name of its cluster.lok8s.yaml: %s. Nothing was written. Write those keys as literal keys, without a merge key, in that domain, then run lo init cluster again.", name, dom, strings.Join(merge.Domains, ", "))
+		return ErrHandled
+	}
+	if err != nil {
+		ui.ErrorTo(stderr, "could not check if another domain uses the cluster name '%s' (the first label of %s). Nothing was written. Run lo init cluster again.", name, dom)
+		return ErrHandled
+	}
+	if len(users) > 0 {
 		ui.ErrorTo(stderr, "the cluster name '%s' (the first label of %s) is already in use by: %s, as metadata.name or as the provider cluster_name. Two domains with one cluster name share a kubeconfig, and lo destroy of one can delete the resources of the other. Nothing was written. Choose a domain with another first label.", name, dom, strings.Join(users, ", "))
 		return ErrHandled
 	}

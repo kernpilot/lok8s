@@ -233,14 +233,16 @@ recover::_resolve() {
 #      add or change one. The variables that the rebuild sets itself are not
 #      set yet (CLOUD_LOG_FILE, and CLOUD_DRY_RUN and CLOUD_DRY_RUN_PATH under
 #      --dry-run);
-#   5. a cluster_name that another domain also has.
+#   5. a cluster_name that another domain also has, and a provider config of
+#      another domain that has a merge key (<<) on the path to its
+#      cluster_name (provision::_cluster_name_users returns 2).
 # A jq check or a scan of the other domains that fails stops the recover too.
 #
 # As in the destroy guard, nothing skips this check: not --force, not
 # LOK8S_NONINTERACTIVE, not --dry-run. It runs at the end of resolve, before the
 # doctor, the dry run and the consent.
 recover::_cluster_name_guard() {
-  local raw seen expanded json="" name="" users unshown
+  local raw seen expanded json="" name="" users unshown rc=0
   [[ -f "${_RECOVER_CONFIG:-}" ]] || return 0
   raw="$(recover::_config_name file "${_RECOVER_CONFIG}")"
   case "${raw}" in
@@ -295,7 +297,12 @@ recover::_cluster_name_guard() {
     return 1
   fi
   [[ -n "${name}" ]] || return 0
-  if ! users="$(provision::_cluster_name_users "${_RECOVER_DOMAIN}" "${name}")"; then
+  users="$(provision::_cluster_name_users "${_RECOVER_DOMAIN}" "${name}")" || rc=$?
+  if (( rc == 2 )); then
+    error "recover: a domain has a merge key (<<) on the path to the cluster_name of its provider config: ${users//$'\n'/, }. The provider can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name '${name}' of '${_RECOVER_DOMAIN}'. Nothing was changed. Write cluster_name as a literal key, without a merge key, in the provider config of that domain, then run lo recover again."
+    return 1
+  fi
+  if (( rc != 0 )); then
     error "recover: could not check if another domain has the cluster_name '${name}' of '${_RECOVER_DOMAIN}'. Nothing was changed. Run lo recover again."
     return 1
   fi

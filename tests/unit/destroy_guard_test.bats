@@ -120,6 +120,99 @@ _nothing_ran() {
   _nothing_ran
 }
 
+# The cluster_name scan and the merge key.
+# A merge key (<<) on the path to a cluster_name stops the scan
+# (provision::_cluster_name_users returns 2 and prints the domains; Go twin:
+# domain.MergeKeyError, the same inputs in clustername_test.go): the name it
+# brings in is not one value. A merge key off the path, an alias and an
+# anchor read as before.
+
+# _scan_case <want> <file>=<content>...: the files under clusters/o.cloud of
+# a clusters dir of its own (printf %b content), then the scan for the name
+# prod from self.cloud, whose own merge key is not part of the scan. <want>
+# is "merge" (rc 2 and the output o.cloud) or the users (rc 0).
+_scan_case() {
+  local want="${1}" kv
+  shift
+  _SCAN_N=$(( ${_SCAN_N:-0} + 1 ))
+  local PATH_CLUSTERS="${BATS_TEST_TMPDIR}/scan${_SCAN_N}"
+  mkdir -p "${PATH_CLUSTERS}/self.cloud"
+  printf 'base: &b {cluster_name: prod}\n<<: *b\n' > "${PATH_CLUSTERS}/self.cloud/hetzner.json"
+  for kv in "$@"; do
+    mkdir -p "$(dirname "${PATH_CLUSTERS}/o.cloud/${kv%%=*}")"
+    printf '%b' "${kv#*=}" > "${PATH_CLUSTERS}/o.cloud/${kv%%=*}"
+  done
+  run provision::_cluster_name_users self.cloud prod
+  if [[ "${want}" == merge ]]; then
+    [[ "${status}" -eq 2 && "${output}" == "o.cloud" ]] \
+      || { echo "case ${_SCAN_N} ($*): status ${status}, output '${output}', want 2 and o.cloud"; return 1; }
+  else
+    [[ "${status}" -eq 0 && "${output}" == "${want}" ]] \
+      || { echo "case ${_SCAN_N} ($*): status ${status}, output '${output}', want 0 and '${want}'"; return 1; }
+  fi
+}
+
+_SPEC='apiVersion: cluster.lok8s.dev/v1beta1\nkind: KubeOne\nmetadata:\n  name: m\nspec:\n  provider:\n    name: hetzner\n'
+
+@test "cluster_name scan: a merge key on the path stops the scan (rc 2, the domain)" {
+  # brings cluster_name into hetzner.json (a YAML body: yq reads it on stdin)
+  _scan_case merge 'hetzner.json=base: &b {cluster_name: prod}\n<<: *b\n'
+  # into a configRef file
+  _scan_case merge "cluster.lok8s.yaml=${_SPEC}    configRef: desc.yaml\n" 'desc.yaml=base: &b {cluster_name: prod}\n<<: *b\n'
+  # next to its own cluster_name
+  _scan_case merge 'hetzner.json=base: &b {cluster_name: prod}\ncluster_name: other\n<<: *b\n'
+  # a merge list
+  _scan_case merge 'hetzner.json=a: &a {cluster_name: one}\nb: &b {cluster_name: prod}\n<<: [*a, *b]\n'
+  # in the inline config, spec.provider, spec, the top of the spec
+  _scan_case merge "cluster.lok8s.yaml=${_SPEC}    config:\n      <<: {cluster_name: prod}\n"
+  _scan_case merge 'cluster.lok8s.yaml=base: &b {config: {cluster_name: prod}}\nspec:\n  provider:\n    <<: *b\n    name: hetzner\n'
+  _scan_case merge 'cluster.lok8s.yaml=base: &b {provider: {config: {cluster_name: prod}}}\nspec:\n  <<: *b\n'
+  _scan_case merge 'cluster.lok8s.yaml=base: &b {spec: {provider: {config: {cluster_name: prod}}}}\n<<: *b\n'
+  # on the path through an alias
+  _scan_case merge 'cluster.lok8s.yaml=p: &p\n  config: {<<: {cluster_name: prod}}\nspec:\n  provider: *p\n'
+  # a quoted << key (the rule of recover::_config_name)
+  _scan_case merge 'hetzner.json={"<<": {"cluster_name": "prod"}, "cluster_name": "other"}'
+  # on the path without a cluster_name
+  _scan_case merge 'hetzner.json=base: &b {token: x}\n<<: *b\ncluster_name: other\n'
+}
+
+@test "cluster_name scan: a merge key off the path, an alias and an anchor read as before" {
+  # a merge key in the metadata: the provider scan reads on
+  _scan_case "" 'cluster.lok8s.yaml=base: &b {name: prod}\nmetadata:\n  <<: *b\nspec:\n  provider:\n    config: {cluster_name: other}\n'
+  _scan_case o.cloud 'hetzner.json=base: &b {type: cx22}\nserver: {<<: *b}\ncluster_name: prod\n' \
+    'cluster.lok8s.yaml=base: &b {domain: o.cloud}\nspec:\n  cluster: {<<: *b}\n  provider:\n    name: hetzner\n    configRef: hetzner.json\n'
+  _scan_case o.cloud "cluster.lok8s.yaml=base: &b {cluster_name: &n prod}\nalso: *n\n${_SPEC}    config: *b\n"
+  _scan_case "" "cluster.lok8s.yaml=base: &b {cluster_name: other}\n${_SPEC}    config: *b\n"
+  # a hetzner.json with a YAML body counts, as the provider reads it
+  _scan_case o.cloud 'hetzner.json=cluster_name: prod\n'
+  # only the first document counts (the Go twin reads the first one)
+  _scan_case "" 'hetzner.json=cluster_name: other\n---\n<<: {cluster_name: prod}\n'
+}
+
+@test "destroy guard: a merge key in the provider config of another domain is refused, even with --force and --confirm-cluster" {
+  _assume_no_tty
+  mkdir -p "${PATH_CLUSTERS}/merge.prod"
+  printf 'base: &b {cluster_name: prod-a}\n<<: *b\n' > "${PATH_CLUSTERS}/merge.prod/hetzner.json"
+  local force=1 confirm_cluster=prod-a
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 3 ]
+  assert_output --partial "[error] a domain has a merge key (<<) on the path to the cluster_name of its provider config: merge.prod. The provider can take the cluster_name from the merged mapping, so lo destroy cannot compare it with the cluster_name 'prod-a' of 'test.prod'. Nothing was deleted. Write cluster_name as a literal key, without a merge key, in the provider config of that domain, then run lo destroy again."
+  refute_output --partial "is also the cluster_name of"
+  _nothing_ran
+}
+
+# The real scan fails (rc 1) only when its printf | sort pipeline fails, so
+# a stub pins the fail-closed branch. The Go scan has no such failure.
+@test "destroy guard: a failed cluster_name scan stops the destroy (a stub)" {
+  _assume_no_tty
+  provision::_cluster_name_users() { return 1; }
+  local confirm_cluster=prod-a
+  run provision::dispatch_destroy test.prod < /dev/null
+  [ "${status}" -eq 3 ]
+  assert_output --partial "[error] could not check if another domain has the cluster_name 'prod-a' of 'test.prod'. Nothing was deleted. Run lo destroy again."
+  _nothing_ran
+}
+
 @test "destroy guard: an inline config and a configRef of another name count too" {
   _assume_no_tty
   mkdir -p "${PATH_CLUSTERS}/inline.prod" "${PATH_CLUSTERS}/ref.prod/infra"

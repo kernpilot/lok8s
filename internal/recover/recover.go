@@ -393,7 +393,9 @@ func (r *Runner) resolve(ctx context.Context) error {
 //     cluster_name can add or change one. The variables that the rebuild
 //     sets itself are not set yet (CLOUD_LOG_FILE, and CLOUD_DRY_RUN and
 //     CLOUD_DRY_RUN_PATH under --dry-run);
-//  5. a cluster_name that another domain also has.
+//  5. a cluster_name that another domain also has, and a provider config of
+//     another domain that has a merge key (<<) on the path to its
+//     cluster_name (domain.MergeKeyError).
 //
 // As in the destroy guard, nothing skips this check: not --force, not
 // LOK8S_NONINTERACTIVE, not --dry-run. It runs at the end of resolve, before
@@ -451,7 +453,15 @@ func (r *Runner) guardClusterName(ctx context.Context) error {
 	if name == "" {
 		return nil
 	}
-	users := domain.ProviderClusterNameUsers(r.Paths.Clusters, r.domain, name)
+	users, err := domain.ProviderClusterNameUsers(r.Paths.Clusters, r.domain, name)
+	if merge := (*domain.MergeKeyError)(nil); errors.As(err, &merge) {
+		ui.ErrorTo(w, "recover: a domain has a merge key (<<) on the path to the cluster_name of its provider config: %s. The provider can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name '%s' of '%s'. Nothing was changed. Write cluster_name as a literal key, without a merge key, in the provider config of that domain, then run lo recover again.", strings.Join(merge.Domains, ", "), name, r.domain)
+		return ErrHandled
+	}
+	if err != nil {
+		ui.ErrorTo(w, "recover: could not check if another domain has the cluster_name '%s' of '%s'. Nothing was changed. Run lo recover again.", name, r.domain)
+		return ErrHandled
+	}
 	if len(users) == 0 {
 		return nil
 	}
