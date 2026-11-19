@@ -3,13 +3,16 @@
 # manifest (drivers/kubeone/config, kubeone::_yq_edit) leave no copy of the
 # manifest behind, and a trace of the registry merge shows no credential.
 #
-# `yq -i` writes through a temp file in TMPDIR and keeps it when its last
-# write fails: a copy of the manifest, and after the registry merge that
-# copy holds the registry credentials. Each failed-write case points TMPDIR
-# at a fresh directory and requires it to be empty after the call, and the
-# directory of the manifest to hold only the expected files. The control
-# case pins the premise: under the same setup, a raw `yq -i` leaves its
-# copy. The audit-log merge has the same case in kubeone_audit_log_test.bats.
+# Some yq releases (v4.54.1 is one) write `yq -i` through a temp file in
+# TMPDIR and keep it when the last write fails: a copy of the manifest, and
+# after the registry merge that copy holds the registry credentials. yq
+# v4.54.3 puts its temp file beside the target (.yq-inplace-*) and refuses
+# a read-only target before it makes one. Each failed-write case points
+# TMPDIR at a fresh directory and requires it to be empty after the call,
+# and the directory of the manifest to hold only the expected files, so a
+# leftover of either kind fails the case. The control case shows which of
+# the two the yq on PATH does. The audit-log merge has the same case in
+# kubeone_audit_log_test.bats.
 #
 # The credentials are fixtures. No case prints the content of a file or a
 # trace: a leftover is shown by its name and mode only, and a credential
@@ -130,16 +133,30 @@ _assert_no_credential_in_output() {
   [[ "${output}" != *fixture-password* ]] || { echo "a fixture password is in the output" >&2; return 1; }
 }
 
-@test "control: under the same setup, a raw yq -i leaves its copy in TMPDIR" {
-  # The premise of the failed-write cases: the yq on PATH keeps its temp
-  # file in TMPDIR when the write of a read-only manifest in a read-only
-  # directory fails. Without it, an empty TMPDIR would prove nothing.
+@test "control: under the same setup, a raw yq -i leaves its copy in TMPDIR, or this yq refuses the read-only manifest first" {
+  # The premise of the failed-write cases: with this setup, the yq on PATH
+  # keeps its temp file in TMPDIR when the write of a read-only manifest in
+  # a read-only directory fails. Without it, an empty TMPDIR would prove
+  # nothing. Whether a file stays depends on the yq release, not on the
+  # filesystems: the same result comes with TMPDIR and the manifest on one
+  # filesystem and on two. yq v4.54.1 writes through TMPDIR, fails at the
+  # rename and at the copy into the manifest, and keeps the temp file. yq
+  # v4.54.3 refuses the read-only file before it makes a temp file, and it
+  # makes its temp file beside the target, never in TMPDIR. With such a
+  # yq, the case checks the refusal and that nothing is left, then skips:
+  # this yq cannot show the premise. The fake yq of the inventory cases
+  # (kubeone_inventory_test.bats) shows it with every yq.
   _read_only
   TMPDIR="${TMPD}" run yq -i '.features.x = 1' "${M}"
   _writable
   [ "${status}" -ne 0 ] || { echo "yq -i did not fail" >&2; return 1; }
   local -a left=()
   mapfile -t left < <(find "${TMPD}" -mindepth 1 -printf '%P\n')
+  if (( ${#left[@]} == 0 )); then
+    assert_output --partial "cannot write in place to read-only file"
+    _assert_only "${RO}" m.yaml
+    skip "this yq refuses a read-only file before it makes a temp file (yq v4.54.3 does), so it leaves no copy in TMPDIR to show"
+  fi
   [ "${#left[@]}" -eq 1 ] || { echo "want 1 file in TMPDIR, got ${#left[@]}: ${left[*]}" >&2; return 1; }
   [[ "${left[0]}" =~ ^temp[0-9]+$ ]] || { echo "unexpected name in TMPDIR: ${left[0]}" >&2; return 1; }
 }

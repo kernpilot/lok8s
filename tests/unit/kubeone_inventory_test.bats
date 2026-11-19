@@ -239,10 +239,12 @@ JSON
 # addons path (on Hetzner) go through kubeone::_yq_replace: a temp file
 # beside kubeone.yaml, renamed over it. kubeone reset and kubeone status read
 # kubeone.yaml as it is, also after a failed step, so a failed edit must
-# leave the whole old file. A raw `yq -i` keeps its temp copy of the
-# manifest in TMPDIR when its last write fails. Each case runs the step on
-# kubeone.yaml in its own directory WD, with a fresh TMPDIR (TMPD). No case
-# prints the content of a file.
+# leave the whole old file. A raw `yq -i` of some yq releases (v4.54.1 is
+# one) keeps its temp copy of the manifest in TMPDIR when its last write
+# fails; yq v4.54.3 puts its temp file beside the target. The fake yq of
+# the failed-write cases (_FAILED_WRITE) acts as the first kind with every
+# yq on PATH. Each case runs the step on kubeone.yaml in its own directory
+# WD, with a fresh TMPDIR (TMPD). No case prints the content of a file.
 
 # _edit_setup <network id>: one declared control plane, the network id ("" =
 # no network), and the seed manifest in WD.
@@ -316,12 +318,13 @@ _ref() {
 }
 
 # _FAILED_WRITE: the action of a fake yq (_fake_yq) whose write fails part
-# way. As the real yq does in place (-i, --inplace, or a group of short
-# flags that holds i, such as -Pi), it first writes its output into a temp
-# file in TMPDIR, and that file stays there when the write fails. Then it
-# saves the file that it reads (SNAP), empties it and fails. Not in place,
-# the real yq makes no temp file, and this one makes none either. So an
-# empty TMPDIR after the step shows that the edit ran no yq in place.
+# way. As a yq that writes in place through TMPDIR does (v4.54.1 is one;
+# -i, --inplace, or a group of short flags that holds i, such as -Pi), it
+# first writes its output into a temp file in TMPDIR, and that file stays
+# there when the write fails. Then it saves the file that it reads (SNAP),
+# empties it and fails. Not in place, yq makes no temp file, and this one
+# makes none either. So an empty TMPDIR after the step shows that the edit
+# ran no yq in place, whatever the yq on PATH does in place.
 # shellcheck disable=SC2016 # expanded by the fake yq, not here
 _FAILED_WRITE='inplace=no; a=()
 for x in "$@"; do
@@ -400,7 +403,8 @@ _assert_fake_leaves_temp() {
   _edit_setup net-7
   # After the host append, at the cloudProvider read before the edit, this yq
   # makes kubeone.yaml and its directory read-only. In that setup a raw
-  # `yq -i` keeps its temp copy of the manifest in TMPDIR.
+  # `yq -i` of a yq that writes through TMPDIR (v4.54.1) keeps its temp
+  # copy of the manifest there.
   _fake_yq 'has("hetzner")' 'chmod 400 "${F}"; chmod 500 "${F%/*}"'
   _run_step
   chmod 700 "${WD}"
