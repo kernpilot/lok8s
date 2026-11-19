@@ -89,8 +89,7 @@ func fakeKubeadm(h *harness, version string, joinErr error) *joinSeen {
 		if c.Name != "kubeadm" {
 			return nil
 		}
-		switch strings.Join(c.Args, " ") {
-		case "version -o short":
+		if strings.Join(c.Args, " ") == "version -o short" {
 			seen.mintedAtVersion = h.anyReq("POST", "/join-token")
 			_, _ = io.WriteString(c.Stdout, version)
 			return nil
@@ -865,9 +864,9 @@ func shortStopDelay(t *testing.T, d time.Duration) {
 }
 
 // runRealKubeadmJoin runs one join with the stand-in of onInt as kubeadm,
-// cancels ctx once it runs, and returns the result, the time from the
-// start of the join, and the pid of the stand-in.
-func runRealKubeadmJoin(t *testing.T, h *harness, onInt string) (error, time.Duration, int) {
+// cancels ctx once it runs, and returns the time from the start of the
+// join, the pid of the stand-in, and the result.
+func runRealKubeadmJoin(t *testing.T, h *harness, onInt string) (time.Duration, int, error) {
 	t.Helper()
 	script := writeKubeadmScript(t, t.TempDir(), onInt)
 	h.ctx.Runner = stubKubeadmRunner{script: script}
@@ -880,7 +879,7 @@ func runRealKubeadmJoin(t *testing.T, h *harness, onInt string) (error, time.Dur
 	}()
 	start := time.Now()
 	err := h.ctx.NodeJoin(ctx, "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", KubeletVersion: "v1.36.0"})
-	return err, time.Since(start), readPid(t, script+".pid")
+	return time.Since(start), readPid(t, script+".pid"), err
 }
 
 // A real kubeadm child that ignores the SIGINT of the stop: the runner
@@ -889,7 +888,7 @@ func runRealKubeadmJoin(t *testing.T, h *harness, onInt string) (error, time.Dur
 func TestNodeJoinStopKillsAKubeadmThatIgnoresTheInterrupt(t *testing.T) {
 	shortStopDelay(t, 300*time.Millisecond)
 	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	err, took, pid := runRealKubeadmJoin(t, h, "")
+	took, pid, err := runRealKubeadmJoin(t, h, "")
 	mustStopAfterTheMint(t, h, err)
 	if took > 5*time.Second {
 		t.Errorf("the join took %s; the stand-in runs 20 s, the stop bound is 300 ms", took)
@@ -902,7 +901,7 @@ func TestNodeJoinStopKillsAKubeadmThatIgnoresTheInterrupt(t *testing.T) {
 // the success text goes out and no slot note, as in the bash twin.
 func TestNodeJoinAKubeadmThatEndsWithZeroOnTheStopLanded(t *testing.T) {
 	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	err, _, pid := runRealKubeadmJoin(t, h, "exit 0")
+	_, pid, err := runRealKubeadmJoin(t, h, "exit 0")
 	mustOK(t, err, h.output())
 	mustContain(t, h.output(), "node 'box-1' joined cluster cl-1234abcd")
 	mustNotContain(t, h.output(), "interrupted after the ticket was minted")
