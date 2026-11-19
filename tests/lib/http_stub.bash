@@ -17,12 +17,15 @@
 #                               file of curlrc_dir VAR (the trace appears)
 #   curl_reads_xdg              0 when this curl looks in XDG_CONFIG_HOME
 #                               (curl 7.73 and later)
-#   stub_cert                   a throwaway self-signed certificate for
-#                               127.0.0.1 in the test dir (openssl):
-#                               STUB_CERT, STUB_KEY
-#   keylog_control              the control of a key log test: curl with
-#                               SSLKEYLOGFILE, to /control of the https
-#                               stub. 0: the request is in the stub log and
+#   stub_cert [SAN]             a throwaway self-signed certificate for
+#                               SAN (default IP:127.0.0.1) in the test dir
+#                               (openssl): STUB_CERT, STUB_KEY. Another call
+#                               overwrites them: copy the paths first
+#   keylog_control [URL]        the control of a key log test: curl with
+#                               SSLKEYLOGFILE, to URL (default /control of
+#                               the https stub; the path must be /control,
+#                               the URL can go through a tunnel of the
+#                               stub). 0: the request is in the stub log and
 #                               curl wrote a key log. 1: the request is in
 #                               the stub log and curl wrote no key log (its
 #                               TLS backend ignores SSLKEYLOGFILE): a test
@@ -96,7 +99,7 @@ stub_cert() {
   STUB_CERT="${BATS_TEST_TMPDIR}/stub.crt"
   STUB_KEY="${BATS_TEST_TMPDIR}/stub.key"
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=127.0.0.1 \
-    -addext subjectAltName=IP:127.0.0.1 -keyout "${STUB_KEY}" -out "${STUB_CERT}" 2>/dev/null
+    -addext "subjectAltName=${1:-IP:127.0.0.1}" -keyout "${STUB_KEY}" -out "${STUB_CERT}" 2>/dev/null
 }
 
 keylog_control() {
@@ -104,7 +107,7 @@ keylog_control() {
   rm -f -- "${log}"
   # The stub writes the log line before it answers.
   before=$(grep -c '^GET /control none$' "${STUB_LOG}") || :
-  SSLKEYLOGFILE="${log}" command curl -q -sS -o /dev/null "https://127.0.0.1:${STUB_PORT}/control" 2>/dev/null || :
+  SSLKEYLOGFILE="${log}" command curl -q -sS -o /dev/null "${1:-https://127.0.0.1:${STUB_PORT}/control}" 2>/dev/null || :
   after=$(grep -c '^GET /control none$' "${STUB_LOG}") || :
   if [[ "${after}" != "$((before + 1))" ]]; then
     echo "keylog_control: the control request did not get to the https stub, so the test cannot tell a skip from a fault" >&2

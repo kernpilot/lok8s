@@ -93,6 +93,9 @@ kubectl() {
     # fire. claim-code is left to the default (empty) → the best-effort
     # self-register stays a no-op here.
     *"get secret kubehz-agent"*"agent-token"*) printf '%s' "${STUB_AGENT_TOKEN:-khz_agt_test}" | base64 | tr -d '\n' ;;
+    # The claim code: empty unless STUB_CLAIM_CODE sets one. With one, the
+    # bootstrap sends its self-register.
+    *"get secret kubehz-agent"*"claim-code"*) printf '%s' "${STUB_CLAIM_CODE:-}" | base64 | tr -d '\n' ;;
 
     # kubernetesVersion = the SERVER version. The FIX reads the apiserver
     # /version endpoint (a single "gitVersion" → unambiguous). `version -o json`
@@ -305,6 +308,8 @@ _node_list() {
 }
 
 teardown() {
+  # The local server of the real-curl case (tests/lib/http_stub.bash).
+  [[ -z "${STUB_PID:-}" ]] || kill "${STUB_PID}" 2>/dev/null || :
   teardown_tmpdir
 }
 
@@ -1188,4 +1193,75 @@ teardown() {
   run bash "${RUNNER}"
   assert_success
   assert_output --partial "unparseable"
+}
+
+# ── curl reads no config file (the real curl against a local server) ──
+# Every curl call of the script passes -q first: the self-register (its
+# body can carry the bind secret), the beat with the assessment, the plain
+# retry and the desired-state poll (both with the bearer). The script runs
+# with the real curl against tests/lib/http_stub.py on 127.0.0.1: once
+# without a config file of the user (the reference), then with a hostile
+# one (a trace-ascii and an output line) in each place curl looks: CURL_HOME,
+# XDG_CONFIG_HOME, HOME. Each run writes no trace and no output file and
+# prints the same stdout and stderr as the reference, with the same status.
+# The control in each place: curl without -q reads the file there. curl
+# older than 7.73 does not look in XDG_CONFIG_HOME: that control is left
+# out, with a note. The pod runs the script with its own HOME and no
+# writable file system (cronjob.yaml), so -q there guards against a config
+# file in the image.
+@test "heartbeat: curl reads no config file of the user (register, beat, plain retry, desired poll)" {
+  command -v python3 >/dev/null || skip "no python3"
+  [[ -n "$(type -P curl)" ]] || skip "no curl"
+  source "${_PROJECT_ROOT}/tests/lib/http_stub.bash"
+  local real="${BATS_TEST_TMPDIR}/run-real-curl.sh" ref="${BATS_TEST_TMPDIR}/ref"
+  local var o e rc ref_rc=0 hex controls=0
+  # The runner without the curl stub: the script calls the real curl.
+  { cat "${_PROJECT_ROOT}/tests/lib/curl_capture.sh" "${BATS_TEST_TMPDIR}/stubs.sh"
+    echo 'unset -f curl'
+    cat "${HEARTBEAT}"; } > "${real}"
+  hex=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+  export STUB_AGENT_TOKEN="khz_agt_${hex}" STUB_CLAIM_CODE="khzc_${hex}" STUB_BEARER="khz_agt_${hex}"
+  # The beat with the assessment gets a 400, the plain retry a 200.
+  export STUB_ROUTES="${BATS_TEST_TMPDIR}/routes.json"
+  cat > "${STUB_ROUTES}" <<'JSON'
+{
+  "POST /api/clusters/agent-register": {"code": 201, "body": {"ok": true}},
+  "POST /api/clusters/test.example.com/heartbeat": {"code": 200, "body": {"ok": true},
+    "fail_if_body_has": "\"assessment\""},
+  "GET /api/clusters/test.example.com/desired": {"code": 304, "headers": {"Etag": "\"7-100\""}}
+}
+JSON
+  unset CURL_HOME XDG_CONFIG_HOME http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+  http_stub_start
+  export KUBEHZ_API_URL="http://127.0.0.1:${STUB_PORT}"
+  mkdir -p "${BATS_TEST_TMPDIR}/curlrc-none"
+  ( export HOME="${BATS_TEST_TMPDIR}/curlrc-none" && bash "${real}" ) > "${ref}.out" 2> "${ref}.err" || ref_rc=$?
+  [ "${ref_rc}" -eq 0 ]
+  grep -qx '{"ok":true}' "${ref}.out"
+  grep -qF 'retrying once without it' "${ref}.err"
+  for var in CURL_HOME XDG_CONFIG_HOME HOME; do
+    echo "# config file in ${var}"
+    curlrc_dir "${var}"
+    o="${RC_DIR}.stdout" e="${RC_DIR}.stderr" rc=0
+    ( curlrc_env "${var}" && bash "${real}" ) > "${o}" 2> "${e}" || rc=$?
+    [ ! -e "${RC_TRACE}" ]
+    [ ! -e "${RC_OUT}" ]
+    diff "${ref}.out" "${o}"
+    diff "${ref}.err" "${e}"
+    [ "${rc}" -eq "${ref_rc}" ]
+    run grep -qF -e "${STUB_AGENT_TOKEN}" -e "${STUB_CLAIM_CODE}" "${o}" "${e}"
+    [ "${status}" -eq 1 ]
+    if [[ "${var}" == XDG_CONFIG_HOME ]] && ! curl_reads_xdg; then
+      echo "# no control for XDG_CONFIG_HOME: this curl is older than 7.73 and does not look there" >&3
+    else
+      curlrc_control "${var}" "${KUBEHZ_API_URL}/control"
+      controls=$((controls + 1))
+    fi
+  done
+  [ "$(grep -c '^POST /api/clusters/agent-register none$' "${STUB_LOG}")" -eq 4 ]
+  [ "$(grep -c '^POST /api/clusters/test.example.com/heartbeat bearer$' "${STUB_LOG}")" -eq 8 ]
+  [ "$(grep -c '^GET /api/clusters/test.example.com/desired bearer$' "${STUB_LOG}")" -eq 4 ]
+  [ "$(grep -c '^GET /control none$' "${STUB_LOG}")" -eq "${controls}" ]
+  [ "$(wc -l < "${STUB_LOG}")" -eq $((16 + controls)) ]
+  http_stub_stop
 }
