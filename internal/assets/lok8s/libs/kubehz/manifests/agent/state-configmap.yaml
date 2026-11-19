@@ -1,0 +1,14 @@
+# The agent's state: the markers that the heartbeat CronJob and
+# `lo kubehz claim` keep as annotations (see the kubehz-agent-marker Role in
+# rbac.yaml). It is apart from kubehz-agent-config, so the agent, which can
+# annotate this ConfigMap, cannot change its own configuration. It has no
+# data. `kubectl apply` of this file keeps the annotations that the agent
+# wrote: it removes only what an earlier apply set.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubehz-agent-state
+  namespace: kubehz-system
+  labels:
+    app.kubernetes.io/name: kubehz-agent
+    app.kubernetes.io/part-of: kubehz

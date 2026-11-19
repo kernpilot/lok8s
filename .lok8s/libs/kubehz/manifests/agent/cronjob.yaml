@@ -321,13 +321,25 @@ spec:
                   # the tick after the platform requested one via the heartbeat
                   # response's desired actions[] ("assess"). The pod is
                   # ephemeral (CronJob), so the gate marker persists as
-                  # annotations on the kubehz-agent-config ConfigMap:
+                  # annotations on the kubehz-agent-state ConfigMap:
                   #   kubehz.cloud/last-assessment  (epoch seconds of last send)
                   #   kubehz.cloud/assess-requested ("true" = send next tick)
                   # get/patch on that ONE ConfigMap comes from the
-                  # kubehz-agent-marker Role. An UNREADABLE marker (old install
-                  # without the new RBAC) sends NOTHING — fail-closed beats
-                  # spamming a full assessment every 5-minute tick.
+                  # kubehz-agent-marker Role. The agent has no access to
+                  # kubehz-agent-config (its configuration, which the pod gets
+                  # through envFrom), so it cannot change its own API URL. An
+                  # UNREADABLE marker (an install without kubehz-agent-state,
+                  # until `lo kubehz deploy` runs again) sends NOTHING:
+                  # fail-closed beats spamming a full assessment every 5-minute
+                  # tick.
+                  #
+                  # An install made before kubehz-agent-state kept these markers
+                  # on kubehz-agent-config. The agent does not read them there.
+                  # So the first tick after the upgrade finds no last-assessment
+                  # and sends one assessment (the platform takes a repeat, and it
+                  # can ask for one at any time with "assess"). The desired-state
+                  # poll gets one full answer, and a claim nonce placed before the
+                  # upgrade is not echoed: place a new one.
                   #
                   # `timeout 5` bounds a kubectl call, never a kubectl
                   # client flag. Any client-config flag (--request-timeout,
@@ -343,7 +355,7 @@ spec:
                   ASSESS_REQ=""
                   MARKER_OK=""
                   MARKER=""
-                  if MARKER=$(timeout 5 kubectl get configmap kubehz-agent-config -n kubehz-system \
+                  if MARKER=$(timeout 5 kubectl get configmap kubehz-agent-state -n kubehz-system \
                       -o jsonpath='{.metadata.annotations}' 2>/dev/null); then
                     MARKER_OK=1
                     LAST_ASSESS=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/last-assessment" // ""' 2>/dev/null) || LAST_ASSESS=""
@@ -393,7 +405,7 @@ spec:
                           fi ;;
                       esac
                       if [ -z "${CLAIM_LIVE}" ]; then
-                        if kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                        if kubectl annotate configmap kubehz-agent-state -n kubehz-system \
                           "kubehz.cloud/claim-nonce-" "kubehz.cloud/claim-nonce-placed-" >/dev/null 2>&1; then
                           echo "kubehz: cleared an expired/invalid claim nonce (place a fresh one with 'lo kubehz claim')" >&2
                         else
@@ -712,7 +724,7 @@ spec:
                   # window above bounds how long such a nonce keeps echoing.
                   if [ -n "${CLAIM_NONCE}" ] && printf '%s' "${RESPONSE}" | \
                       jq -e '(.claim.verified // .data.claim.verified // false) == true' >/dev/null 2>&1; then
-                    kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                    kubectl annotate configmap kubehz-agent-state -n kubehz-system \
                       "kubehz.cloud/claim-nonce-" "kubehz.cloud/claim-nonce-placed-" >/dev/null 2>&1 \
                       || echo "kubehz: claim verified but the nonce annotation could not be cleared; the next tick will expire it" >&2
                     echo "kubehz: cluster claim verified by the platform" >&2
@@ -722,11 +734,11 @@ spec:
                   # assess request. A failed annotate only risks a RE-send next
                   # tick (idempotent server-side), never a lost heartbeat.
                   if [ -n "${ASSESS_DELIVERED}" ]; then
-                    kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
+                    kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                       "kubehz.cloud/last-assessment=${NOW_EPOCH}" >/dev/null 2>&1 \
                       || echo "kubehz: could not persist the assessment marker; the next tick may resend" >&2
                     if [ "${ASSESS_REQ}" = "true" ]; then
-                      kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                      kubectl annotate configmap kubehz-agent-state -n kubehz-system \
                         "kubehz.cloud/assess-requested-" >/dev/null 2>&1 || true
                     fi
                   fi
@@ -739,7 +751,7 @@ spec:
                   # deferral into an every-other-tick resend of the same poison.
                   if [ -z "${ASSESS_REJECTED:-}" ] && printf '%s' "${RESPONSE}" | \
                       jq -e '((.actions // .data.actions // []) | index("assess")) != null' >/dev/null 2>&1; then
-                    kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
+                    kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                       "kubehz.cloud/assess-requested=true" >/dev/null 2>&1 || true
                   fi
 
@@ -752,7 +764,7 @@ spec:
                   # execution flags, k8s-version skew — and acts on NOTHING:
                   # the acting pull loop is the P2 Go-agent capability
                   # (managed-platform-spec §8) and arrives with it. Markers
-                  # persist on the kubehz-agent-config ConfigMap (the same
+                  # persist on the kubehz-agent-state ConfigMap (the same
                   # annotation pattern + RBAC as the assessment gate):
                   #   kubehz.cloud/desired-etag      last-seen validator
                   #                                  (opaque — never parsed)
@@ -788,7 +800,7 @@ spec:
                         # Unchanged — silent. Clear a sticky refusal state so a
                         # later refusal logs again (e.g. after a re-enroll).
                         if [ -n "${DESIRED_ERR}" ]; then
-                          kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                          kubectl annotate configmap kubehz-agent-state -n kubehz-system \
                             "kubehz.cloud/desired-error-" >/dev/null 2>&1 || true
                         fi
                         ;;
@@ -815,12 +827,12 @@ spec:
                             DES_SKEW=" — desired k8s ${DES_K8S}, local ${KUBE_VERSION}"
                           fi
                           echo "kubehz: desired state changed — revision ${DES_REV}, execution flags on: ${DES_FLAGS}${DES_SKEW} (report-only; acting arrives with the Go agent)"
-                          kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
+                          kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                             "kubehz.cloud/desired-etag=${DES_NEW_ETAG}" \
                             "kubehz.cloud/desired-revision=${DES_REV}" >/dev/null 2>&1 \
                             || echo "kubehz: could not persist the desired-state marker; the next poll re-reports" >&2
                           if [ -n "${DESIRED_ERR}" ]; then
-                            kubectl annotate configmap kubehz-agent-config -n kubehz-system \
+                            kubectl annotate configmap kubehz-agent-state -n kubehz-system \
                               "kubehz.cloud/desired-error-" >/dev/null 2>&1 || true
                           fi
                         fi
@@ -828,7 +840,7 @@ spec:
                       401|403|404)
                         if [ "${DESIRED_ERR}" != "${DES_CODE}" ]; then
                           echo "kubehz: desired-state poll refused (HTTP ${DES_CODE}) — check the cluster's enrollment/claim; identical refusals stay quiet" >&2
-                          kubectl annotate --overwrite configmap kubehz-agent-config -n kubehz-system \
+                          kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                             "kubehz.cloud/desired-error=${DES_CODE}" >/dev/null 2>&1 || true
                         fi
                         ;;
