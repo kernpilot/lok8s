@@ -574,12 +574,12 @@ exit "${rc}"'
   cmp "${RW}/m.yaml" "${BATS_TEST_TMPDIR}/m.before" || { echo "the file changed" >&2; return 1; }
 }
 
-@test "kubeone::_yq_edit checks for a nameref without reading a value: no declare call names an argument" {
+@test "kubeone::_yq_edit: no declare call of its nameref check names an argument" {
   # A child shell wraps the declare builtin in a function that logs its
   # arguments (flags and names only), then calls kubeone::_yq_edit with the
   # name of a variable that holds a fixture credential. The nameref check
-  # lists the namerefs (declare -pn, no names); it does not run
-  # `declare -p <name>`, which would print the value.
+  # calls declare only as `declare -pn` (no names), never as
+  # `declare -p <name>`, which would print the value of the variable.
   export DECL_LOG="${BATS_TEST_TMPDIR}/declare.log"
   run bash -c 'import() { :; }
 source "$2/utils/verbose.sh"; source "$2/drivers/kubeone/config"
@@ -764,4 +764,115 @@ echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s" "
     run _written password 'fixture-Password-1'
     assert_output "true"
   done
+}
+
+# _need_localvar_inherit: skip the case when this bash has no
+# `shopt localvar_inherit` (bash 5.0 and later have it).
+_need_localvar_inherit() {
+  bash -c 'shopt -s localvar_inherit' 2>/dev/null || skip "this bash has no shopt localvar_inherit"
+}
+
+# _registry_array_case <declare arguments>: the registry merge under
+# localvar_inherit, with `declare <declare arguments>` in the caller. Bash
+# exports no array, so an inherited array local would give yq an empty
+# strenv(). The merge must return 1 with its message, before a cat of a
+# credential file and before the yq of the write (the stubs of
+# _count_stubs log both), and leave the manifest as it was (sha256).
+_registry_array_case() {
+  _need_localvar_inherit
+  _registry_fixture 1
+  local stubs="${BATS_TEST_TMPDIR}/stubs" work="${RW}/.kubeone.yaml.work" before
+  _count_stubs "${stubs}" 'strenv(RUSER)'
+  cp "${RW}/m.yaml" "${work}"
+  before=$(sha256sum < "${work}")
+  local saved_path="${PATH}"
+  PATH="${stubs}:${PATH}"
+  run bash -c 'import() { :; }
+source "$3/utils/verbose.sh"; source "$3/drivers/kubeone/config"
+shopt -s localvar_inherit
+declare $4
+kubeone::_inject_registry_auth "$1" "$2"
+echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s" "${1}"
+  PATH="${saved_path}"
+  assert_success
+  assert_output --partial "is an array (an array of the caller, under localvar_inherit)"
+  assert_output --partial "the merge returned 1"
+  _assert_no_credential_in_output
+  [ ! -s "${ENV_LOG}" ] || { echo "a cat of a credential or the yq of the write ran ($(wc -l < "${ENV_LOG}") lines logged)" >&2; return 1; }
+  [[ "$(sha256sum < "${work}")" == "${before}" ]] || { echo "the manifest changed" >&2; return 1; }
+}
+
+@test "the registry merge stops before it reads a credential when the caller has indexed arrays RUSER and RPASS under localvar_inherit" {
+  _registry_array_case '-a RUSER RPASS'
+}
+
+@test "the registry merge stops before it reads a credential when the caller has associative arrays RUSER and RPASS under localvar_inherit" {
+  _registry_array_case '-A RUSER RPASS'
+}
+
+@test "the registry merge stops before it reads a credential when the caller has arrays username and password under localvar_inherit" {
+  _registry_array_case '-a username password'
+}
+
+@test "kubeone::_yq_edit refuses an array as a name argument, and runs no yq" {
+  # Bash exports no array, so yq would get an empty strenv() for it.
+  _yq_log_stub
+  local -a FIXTURE_LIST=(x)
+  local -A FIXTURE_MAP=([k]=x)
+  _assert_name_refused 'FIXTURE_LIST'
+  _assert_name_refused 'FIXTURE_MAP'
+  # Anti-vacuity of the whole-name match: arrays whose names start or end
+  # with the name of a scalar do not make the scalar refused. It reaches yq.
+  local FIXTURE_S=9
+  local -a FIXTURE_SS=(x) XFIXTURE_S=(y)
+  : > "${YQ_LOG}"
+  local saved_path="${PATH}"
+  PATH="${YQ_STUBS}:${saved_path}"
+  run kubeone::_yq_edit "${RW}/m.yaml" '.x = strenv(FIXTURE_S)' FIXTURE_S
+  PATH="${saved_path}"
+  assert_success
+  [ -s "${YQ_LOG}" ] || { echo "the stub logged no yq run" >&2; return 1; }
+  run yq -r '.x' "${RW}/m.yaml"
+  assert_output "9"
+}
+
+@test "the registry merge goes through when the caller has arrays whose names hold a checked name, and a scalar RUSER" {
+  # The array check matches whole names: RUSERS, XRUSER, usernames and
+  # xpassword are not RUSER, username or password.
+  _registry_fixture 1
+  local work="${RW}/.kubeone.yaml.work"
+  cp "${RW}/m.yaml" "${work}"
+  run bash -c 'import() { :; }
+source "$3/utils/verbose.sh"; source "$3/drivers/kubeone/config"
+declare -a RUSERS=(x) XRUSER=(y) usernames=(z) xpassword=(w)
+RUSER=placeholder
+kubeone::_inject_registry_auth "$1" "$2"
+echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s"
+  _assert_no_credential_in_output
+  assert_success
+  assert_output "the merge returned 0"
+  _assert_credentials_written "${work}" 1
+}
+
+@test "under localvar_inherit, the registry merge leaves the target of a caller's nameref RUSER as it was" {
+  # The empty initial values of the locals (username= password= RUSER=
+  # RPASS=) must not write through a nameref of the caller. Bash does not
+  # give a local the nameref attribute of the caller's variable.
+  _need_localvar_inherit
+  _registry_fixture 1
+  local work="${RW}/.kubeone.yaml.work"
+  cp "${RW}/m.yaml" "${work}"
+  run bash -c 'import() { :; }
+source "$3/utils/verbose.sh"; source "$3/drivers/kubeone/config"
+shopt -s localvar_inherit
+target=keep
+declare -n RUSER=target
+kubeone::_inject_registry_auth "$1" "$2"
+echo "the merge returned $?"
+echo "target: ${target}"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s"
+  _assert_no_credential_in_output
+  assert_success
+  assert_output "the merge returned 0
+target: keep"
+  _assert_credentials_written "${work}" 1
 }

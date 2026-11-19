@@ -398,9 +398,15 @@ kubeone::_inject_audit_log() {
 # which would send an assignment elsewhere), it returns 1 before yq runs. The
 # arguments are names, never values, so no value goes on a command line or
 # into the expression. The variables of the helper start with _ye_ and
-# those of the trace guard with _ko_: a name with one of these prefixes, or
-# a nameref, is refused before yq runs. The nameref check reads the list of
-# `declare -pn` (names and the names that they reference), never a value.
+# those of the trace guard with _ko_: a name with one of these prefixes, a
+# nameref or an array is refused before yq runs. The nameref check reads
+# `declare -pn`, which lists the nameref declarations without dereferencing
+# them; a target's text (a name, or an array element with its subscript) is
+# printed, never the referenced value. The array check reads the names that
+# `compgen -A arrayvar` lists, never a value: bash exports no array, so yq
+# would get an empty strenv() for one. An array with no element is not
+# listed and passes; it holds no value, so its name exports nothing, as an
+# empty variable does.
 # It does not use `yq -i`: yq -i writes through a temp file in TMPDIR, and
 # when its last write fails, it keeps that file there, a copy of the manifest
 # outside the work directory. Here the result stays in memory until the
@@ -416,15 +422,22 @@ kubeone::_yq_edit() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # a trace must not show the manifest (utils/keysonly.sh)
   [[ $- != *a* ]] || { local -; set +a; }  # set -a would export the manifest held below
-  local +x +i +l +u _ye_file="${1}" _ye_expr="${2}" _ye_nl=$'\n' _ye_out _ye_n _ye_refs \
+  local +x +i +l +u _ye_file="${1}" _ye_expr="${2}" _ye_nl=$'\n' _ye_out _ye_n _ye_refs _ye_arrays \
     || { error "kubeone::_yq_edit: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
   shift 2
-  _ye_refs="${_ye_nl}$(declare -pn)${_ye_nl}"  # a line per nameref in scope, `declare -<flags> <name>[="<name>"]`: no value
+  # declare -pn lists the nameref declarations without dereferencing them; a
+  # target's text (a name, or an array element with its subscript) is
+  # printed, never the referenced value.
+  _ye_refs="${_ye_nl}$(declare -pn)${_ye_nl}"
+  # compgen -A arrayvar lists the names of the arrays in scope, one a line.
+  _ye_arrays="${_ye_nl}$(compgen -A arrayvar)${_ye_nl}" \
+    || { error "kubeone::_yq_edit: the arrays in scope cannot be listed"; return 1; }
   # The newline is in _ye_nl: shellcheck misreads $'\n' inside =~ (SC1011).
   for _ye_n in "$@"; do
     [[ "${_ye_n}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "${_ye_n}" != _ye_* && "${_ye_n}" != _ko_* ]] \
       && [[ ! "${_ye_refs}" =~ ${_ye_nl}declare\ -[[:alpha:]]*n[[:alpha:]]*\ ${_ye_n}(=|${_ye_nl}) ]] \
-      || { error "kubeone::_yq_edit: an argument after the expression is not a variable name of the caller (_ye_* and _ko_* are reserved, a nameref is refused)"; return 1; }
+      && [[ "${_ye_arrays}" != *"${_ye_nl}${_ye_n}${_ye_nl}"* ]] \
+      || { error "kubeone::_yq_edit: an argument after the expression is not a variable name of the caller (_ye_* and _ko_* are reserved, a nameref or an array is refused)"; return 1; }
   done
   # shellcheck disable=SC2163 # "$@" holds variable names, checked above: export them by name
   _ye_out=$([[ $# == 0 ]] || export -- "$@"; yq "${_ye_expr}" "${_ye_file}" && printf .) || return 1
@@ -531,9 +544,21 @@ kubeone::_inject_registry_auth() {
     # with -l or -u its case would change. When a local cannot be declared
     # (a readonly name or a readonly nameref of the caller, which would
     # send the assignment elsewhere), the merge stops before it reads a
-    # credential.
-    local +x +i +l +u ns="${sns:-provisioning}" username password RUSER RPASS \
+    # credential. An array: under localvar_inherit a local also takes the
+    # array attribute of a caller's array of the same name, and bash exports
+    # no array, so yq would get an empty strenv(). The empty values on this
+    # line make such a local a set array, which compgen -A arrayvar lists
+    # (names only, never a value); without a value, a local that takes an
+    # array with no element is not listed. Then the merge stops before it
+    # reads a credential. The _ra_ locals hold the list.
+    local +x +i +l +u ns="${sns:-provisioning}" username= password= RUSER= RPASS= _ra_nl=$'\n' _ra_arrays _ra_n \
       || { error "kubeone::_inject_registry_auth: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+    _ra_arrays="${_ra_nl}$(compgen -A arrayvar)${_ra_nl}" \
+      || { error "kubeone::_inject_registry_auth: the arrays in scope cannot be listed"; return 1; }
+    for _ra_n in username password RUSER RPASS; do
+      [[ "${_ra_arrays}" != *"${_ra_nl}${_ra_n}${_ra_nl}"* ]] \
+        || { error "kubeone::_inject_registry_auth: ${_ra_n} is an array (an array of the caller, under localvar_inherit)"; return 1; }
+    done
     username="$(cat "${secrets_dir}/Secret.${sname}.${ns}.username" 2>/dev/null || true)"
     password="$(cat "${secrets_dir}/Secret.${sname}.${ns}.password" 2>/dev/null || true)"
     if [[ -z "${username:-}" || -z "${password:-}" ]]; then
