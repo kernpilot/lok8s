@@ -821,7 +821,9 @@ func (e *Engine) dryRunRestoreD(ctx context.Context, domain, kubeconfig string) 
 		}
 		dec, err := e.sopsDecrypt(f)
 		if err != nil {
-			ui.DebugTo(stderr, "bootstrap: dry-run: restore.d: %s: %s", filepath.Base(f), firstLine(err.Error()))
+			// The line names the file only, also at debug: on a MAC
+			// mismatch the sops message holds two unkeyed SHA-512 digests
+			// of the plaintext.
 			ui.ErrorTo(stderr, "bootstrap: dry-run: restore.d: cannot decrypt %s", filepath.Base(f))
 			failed = true
 			continue
