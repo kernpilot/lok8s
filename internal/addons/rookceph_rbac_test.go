@@ -526,6 +526,50 @@ func cosiBindings(objs map[string]object) []object {
 	return out
 }
 
+// withoutAddedLabels returns copies of objs without the labels that the
+// addon's kustomization adds: a label goes only when its key and its value
+// are a pair of added. Every other label stays (the chart's own labels,
+// and a label with an added key but another value), so that a compare
+// against an upstream fixture still sees it. The input objects do not
+// change.
+func withoutAddedLabels(objs []object, added map[string]string) []object {
+	var out []object
+	for _, o := range objs {
+		labels := make(map[string]string, len(o.Labels))
+		for k, v := range o.Labels {
+			if a, ok := added[k]; ok && a == v {
+				continue
+			}
+			labels[k] = v
+		}
+		o.Labels = labels
+		out = append(out, o)
+	}
+	return out
+}
+
+// sameObjects reports whether a and b hold equal objects in the same
+// order: the kind, the name, the namespace, the labels, the annotations
+// and the document (the subjects and the roleRef of a binding). An empty
+// map equals a missing one.
+func sameObjects(a, b []object) bool {
+	return slices.EqualFunc(a, b, func(x, y object) bool {
+		return x.Kind == y.Kind && x.Name == y.Name && x.Namespace == y.Namespace &&
+			maps.Equal(x.Labels, y.Labels) && maps.Equal(x.Annotations, y.Annotations) &&
+			reflect.DeepEqual(x.Doc, y.Doc)
+	})
+}
+
+// matchFixture compares rendered objects with an upstream fixture: the
+// render without the labels of the addon's kustomization (added) must
+// equal the fixture as whole objects (sameObjects). The fixture keeps the
+// chart's own labels and none of the added ones. It returns the render as
+// compared.
+func matchFixture(rendered, fixture []object, added map[string]string) ([]object, bool) {
+	got := withoutAddedLabels(rendered, added)
+	return got, sameObjects(got, fixture)
+}
+
 // roleRefName returns a binding's roleRef name.
 func roleRefName(b object) string {
 	ref, _ := b.Doc["roleRef"].(map[string]any)
@@ -847,13 +891,16 @@ func TestRookCephFixturesMatchChart(t *testing.T) {
 		}
 	}
 
-	// The COSI binding: the unpatched chart renders exactly the fixture's.
+	// The COSI binding: the unpatched chart renders exactly the fixture's,
+	// the chart's own labels included. The labels of the addon's
+	// kustomization are not in the fixture: the compare drops them from the
+	// render (TestRookCephFixtureCompareDropsOnlyAddedLabels).
 	cosiRaw, err := os.ReadFile(cosiFixture)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cosiFx := cosiBindings(decodeObjects(t, cosiRaw))
-	if got := cosiBindings(chart); !reflect.DeepEqual(got, cosiFx) {
+	if got, ok := matchFixture(cosiBindings(chart), cosiFx, kustomizationLabels(t, addon)); !ok {
 		t.Errorf("the chart binds %s/%s with\n%s\nbut the fixture has\n%s\nrefresh %s", rookCephNS, cosiSA, canon(t, got), canon(t, cosiFx), cosiFixture)
 	}
 
@@ -888,6 +935,84 @@ func TestRookCephFixturesMatchChart(t *testing.T) {
 				t.Errorf("%s still grants %s in the shipped render", name, canon(t, r))
 			}
 		}
+	}
+}
+
+// TestRookCephFixtureCompareDropsOnlyAddedLabels checks the compare of
+// TestRookCephFixturesMatchChart (matchFixture) offline, with hand-built
+// object pairs: the labels that the addon's kustomization adds (read from
+// it) do not reach the compare, and every other part of an object does:
+// the chart's own labels, the annotations, the name, the namespace, the
+// subjects and the roleRef.
+func TestRookCephFixtureCompareDropsOnlyAddedLabels(t *testing.T) {
+	t.Parallel()
+	addon := filepath.Join(testutil.RepoRoot(t), rookCephAddon)
+	added := kustomizationLabels(t, addon)
+	// The reader finds the labels: the name label is the addon directory
+	// and the category label is the one that the addon list reads.
+	if len(added) == 0 || added["lok8s.dev/name"] != filepath.Base(addon) || added["lok8s.dev/category"] != Category(addon) {
+		t.Fatalf("kustomizationLabels(%s) = %v, want lok8s.dev/name %s and lok8s.dev/category %s", addon, added, filepath.Base(addon), Category(addon))
+	}
+
+	// fixture is the binding as the fixture file holds it: the chart's own
+	// labels, no added label. render is the same binding as the addon
+	// renders it: the added labels too.
+	fixture := func(edit func(o *object)) []object {
+		o := object{
+			Kind: "ClusterRoleBinding", Name: "binding",
+			Labels:      map[string]string{"app.kubernetes.io/name": "driver", "app.kubernetes.io/part-of": "storage"},
+			Annotations: map[string]string{},
+			Doc: map[string]any{
+				"apiVersion": "rbac.authorization.k8s.io/v1",
+				"kind":       "ClusterRoleBinding",
+				"metadata":   map[string]any{"name": "binding"},
+				"roleRef":    map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "role"},
+				"subjects":   []any{map[string]any{"kind": "ServiceAccount", "name": cosiSA, "namespace": rookCephNS}},
+			},
+		}
+		if edit != nil {
+			edit(&o)
+		}
+		return []object{o}
+	}
+	render := func(edit func(o *object)) []object {
+		return fixture(func(o *object) {
+			maps.Copy(o.Labels, added)
+			if edit != nil {
+				edit(o)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name            string
+		render, fixture []object
+		match           bool
+	}{
+		{"a clean render matches", render(nil), fixture(nil), true},
+		{"a chart label changed in the fixture", render(nil), fixture(func(o *object) { o.Labels["app.kubernetes.io/name"] = "other" }), false},
+		{"a chart label missing from the render", render(func(o *object) { delete(o.Labels, "app.kubernetes.io/part-of") }), fixture(nil), false},
+		{"an added key with another value stays", render(func(o *object) { o.Labels["lok8s.dev/name"] = "other" }), fixture(nil), false},
+		{"an added label in the fixture", render(nil), fixture(func(o *object) { maps.Copy(o.Labels, added) }), false},
+		{"an annotation differs", render(nil), fixture(func(o *object) { o.Annotations["note"] = "other" }), false},
+		{"the roleRef differs", render(nil), fixture(func(o *object) { o.Doc["roleRef"].(map[string]any)["name"] = "other" }), false},
+		{"a subject differs", render(nil), fixture(func(o *object) {
+			o.Doc["subjects"] = []any{map[string]any{"kind": "ServiceAccount", "name": "other", "namespace": rookCephNS}}
+		}), false},
+		{"the name differs", render(nil), fixture(func(o *object) { o.Name = "other" }), false},
+		{"the namespace differs", render(nil), fixture(func(o *object) { o.Namespace = "other" }), false},
+		{"a binding more in the render", append(render(nil), render(nil)...), fixture(nil), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := maps.Clone(tc.render[0].Labels)
+			got, ok := matchFixture(tc.render, tc.fixture, added)
+			if ok != tc.match {
+				t.Errorf("match %v, want %v: the render as compared\n%s\nthe fixture\n%s", ok, tc.match, canon(t, got), canon(t, tc.fixture))
+			}
+			if !maps.Equal(tc.render[0].Labels, before) {
+				t.Errorf("matchFixture changed the labels of the render from %v to %v", before, tc.render[0].Labels)
+			}
+		})
 	}
 }
 

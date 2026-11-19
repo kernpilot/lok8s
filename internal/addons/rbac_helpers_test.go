@@ -10,6 +10,7 @@ package addons
 import (
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -267,6 +268,33 @@ func kustomizationResources(t *testing.T, dir string) []string {
 		t.Fatal(err)
 	}
 	return kz.Resources
+}
+
+// kustomizationLabels returns the labels that a kustomization.yaml adds to
+// every object it renders: the pairs of each `labels:` entry and the
+// `commonLabels:` map. A compare of a render against an upstream fixture
+// drops exactly these (withoutAddedLabels).
+func kustomizationLabels(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "kustomization.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kz struct {
+		Labels []struct {
+			Pairs map[string]string `yaml:"pairs"`
+		} `yaml:"labels"`
+		CommonLabels map[string]string `yaml:"commonLabels"`
+	}
+	if err := yaml.Unmarshal(raw, &kz); err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for _, l := range kz.Labels {
+		maps.Copy(out, l.Pairs)
+	}
+	maps.Copy(out, kz.CommonLabels)
+	return out
 }
 
 // rawDoc is one document of a stream as it is, and its key (objKey).
