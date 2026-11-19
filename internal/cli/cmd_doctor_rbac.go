@@ -70,9 +70,9 @@ const (
 	rbacSUCNewRole      = "lok8s-system-upgrade-controller"
 	rbacRedisOldRole    = "redis-operator"
 	rbacRedisNewRole    = "lok8s-redis-operator"
-	rbacRedisChartRole  = "lok8s-redis-operator-chart-rbac"
-	rbacRedisExecRole   = "lok8s-redis-operator-exec"
-	rbacClusterAdmin    = "cluster-admin"
+	rbacRedisChartRole  = "lok8s-redis-operator-chart-rbac" // #nosec G101 -- a role name, not a credential
+	rbacRedisExecRole   = "lok8s-redis-operator-exec"       // #nosec G101 -- a role name, not a credential
+	rbacClusterAdmin    = "cluster-admin"                   // #nosec G101 -- a role name, not a credential
 	rbacAggregatePrefix = "rbac.authorization.k8s.io/aggregate-to-"
 )
 
