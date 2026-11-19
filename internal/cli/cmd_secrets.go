@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -169,11 +170,9 @@ func GuardPrivateKeyArgv(root *cobra.Command, argv []string, errOut io.Writer) b
 	if cmd.Name() != "add-key" && cmd.Name() != "remove-key" {
 		return false
 	}
-	for _, a := range argv {
-		if secrets.LooksLikePrivateKey(a) {
-			secrets.RefusePrivateKey(errOut)
-			return true
-		}
+	if slices.ContainsFunc(argv, secrets.LooksLikePrivateKey) {
+		secrets.RefusePrivateKey(errOut)
+		return true
 	}
 	return false
 }
