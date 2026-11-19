@@ -175,7 +175,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 
 	// Re-key the stores. Without this the recipient is listed but holds
 	// nothing.
-	stores, err := c.rekeyStores(all)
+	stores, _, err := c.rekeyStores(all)
 	if err != nil {
 		return err
 	}

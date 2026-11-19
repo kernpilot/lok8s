@@ -2,19 +2,21 @@ package secrets
 
 // rekey.go: the re-key path that add-key and remove-key share, and
 // remove-key itself. Each helper has a bash twin of the same shape in
-// .lok8s/libs/secrets (secrets::_no_private_key, _recipient, _rekey_stores,
-// _orphans, _touch_plaintexts, _encs_with, _other_stores, _own_identity,
-// _replace, _drop_recipient, _rekey_files).
+// .lok8s/libs/secrets (secrets::_no_private_key, _recipient, _lstat,
+// _domain_stores, _rekey_stores, _orphans, _touch_plaintexts, _encs_with,
+// _enc_lists, _other_stores, _own_identity, _replace, _drop_recipient,
+// _rekey_files).
 
 import (
-	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -106,43 +108,108 @@ func (c *Context) recipientArg(key string) (string, error) {
 	return agePubkey, nil
 }
 
-// domainStores lists every clusters/<domain>/secrets directory, in bash glob
-// order.
-func (c *Context) domainStores() []string {
-	var stores []string
-	matches, _ := filepath.Glob(c.Paths.Clusters + "/*/secrets")
-	sort.Strings(matches)
-	for _, d := range matches {
-		// bash's * glob skips dot-directories; Go's does not.
-		if strings.HasPrefix(filepath.Base(filepath.Dir(d)), ".") {
+// statPath is Lstat, then Stat for a symlink (bash: secrets::_lstat and the
+// symlink checks of its callers). absent is true only when Lstat finds no
+// entry (ENOENT). Every other error is returned, a dangling or unreadable
+// symlink target included, so that a scan names the path instead of
+// skipping it.
+func statPath(path string) (info os.FileInfo, absent bool, err error) {
+	info, err = os.Lstat(path)
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		info, err = os.Stat(path)
+	} else if errors.Is(err, fs.ErrNotExist) {
+		return nil, true, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return info, false, nil
+}
+
+// domainStores lists every clusters/<domain>/secrets directory in bash glob
+// order (bash: secrets::_domain_stores), together with the paths on the way
+// that it cannot read, which bad marks: the clusters directory, a domain
+// entry whose symlink target it cannot stat, a store path that Lstat or Stat
+// cannot read (a domain directory it cannot search, a dangling store link). A
+// path that does not exist is skipped, as the glob skips it.
+func (c *Context) domainStores() (paths []string, bad map[string]bool) {
+	bad = map[string]bool{}
+	unreadable := func(p string) {
+		paths = append(paths, p)
+		bad[p] = true
+	}
+	clusters := c.Paths.Clusters
+	info, absent, err := statPath(clusters)
+	if absent || (err == nil && !info.IsDir()) {
+		return nil, bad
+	}
+	var entries []os.DirEntry
+	if err == nil {
+		entries, err = os.ReadDir(clusters)
+	}
+	if err == nil {
+		_, err = os.Stat(clusters + "/.")
+	}
+	if err != nil {
+		unreadable(clusters)
+		return paths, bad
+	}
+	for _, e := range entries {
+		// bash's * glob skips dot entries; ReadDir does not.
+		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		if fsutil.DirExists(d) {
-			stores = append(stores, d)
+		d := clusters + "/" + e.Name()
+		info, absent, err := statPath(d)
+		switch {
+		case absent:
+			continue
+		case err != nil:
+			unreadable(d)
+			continue
+		case !info.IsDir():
+			continue
+		}
+		store := d + "/secrets"
+		info, absent, err = statPath(store)
+		switch {
+		case absent:
+		case err != nil:
+			unreadable(store)
+		case info.IsDir():
+			paths = append(paths, store)
 		}
 	}
-	return stores
+	return paths, bad
 }
 
 // rekeyStores lists the stores a re-key covers (bash: secrets::_rekey_stores):
 // with all, every clusters/<domain>/secrets directory (never the flat store);
-// without it, the store of the current context.
-func (c *Context) rekeyStores(all bool) ([]string, error) {
-	var stores []string
+// without it, the store of the current context. With all it also returns the
+// domain paths it cannot read: remove-key refuses them; add-key, which wrote
+// .sops.yaml before this step, does not read them.
+func (c *Context) rekeyStores(all bool) (stores, unreadable []string, err error) {
 	if all {
-		stores = c.domainStores()
+		paths, bad := c.domainStores()
+		for _, p := range paths {
+			if bad[p] {
+				unreadable = append(unreadable, p)
+			} else {
+				stores = append(stores, p)
+			}
+		}
 	} else {
-		dir, err := c.ResolveStore()
-		if err != nil {
-			return nil, err
+		dir, rerr := c.ResolveStore()
+		if rerr != nil {
+			return nil, nil, rerr
 		}
 		stores = append(stores, dir)
 	}
 	if len(stores) == 0 {
 		ui.ErrorTo(c.ErrOut, "no secret store found to re-key")
-		return nil, ErrHandled
+		return nil, nil, ErrHandled
 	}
-	return stores, nil
+	return stores, unreadable, nil
 }
 
 // isEncEntry is the bash glob Secret.*.enc on a store entry's name.
@@ -205,21 +272,29 @@ func touchPlaintexts(stores []string) (int, error) {
 // encScan is what scanEncs read in a set of stores.
 type encScan struct {
 	all        []string // every regular Secret.*.enc
-	listed     []string // those whose bytes hold the recipient
-	unreadable []string // a store it cannot list, an .enc it cannot read
+	listed     []string // those whose sops metadata lists the recipient
+	unreadable []string // a store or an .enc it cannot stat, list or read
+	malformed  []string // an .enc whose sops metadata does not parse or lists no age recipient
 }
 
-// scanEncs reads every Secret.*.enc of the stores (bash: secrets::_encs_with).
-// sops writes each age recipient in clear text into a file's metadata, so a
-// file that lists the recipient is a file its key can open. A store or a
-// file it cannot read is reported, never taken as one that does not list it.
+// scanEncs reads the sops metadata of every Secret.*.enc of the stores (bash:
+// secrets::_encs_with). sops writes each age recipient into a file's
+// metadata, so a file that lists the recipient is a file its key can open.
+// The recipients are read from the parsed metadata (encRecipients) and
+// compared exactly, so a JSON escape in the file cannot hide one. A store or
+// a file it cannot read, and a file whose metadata does not parse, are
+// reported, never taken as one that does not list it.
 func scanEncs(stores []string, recipient string) encScan {
 	var s encScan
 	for _, store := range stores {
-		if !fsutil.Exists(store) {
+		_, absent, err := statPath(store)
+		if absent {
 			continue // no store, no file
 		}
-		names, err := storeNames(store, "Secret.")
+		var names []string
+		if err == nil {
+			names, err = storeNames(store, "Secret.")
+		}
 		if err == nil {
 			_, err = os.Stat(store + "/.")
 		}
@@ -228,16 +303,31 @@ func scanEncs(stores []string, recipient string) encScan {
 			continue
 		}
 		for _, base := range names {
+			if !isEncEntry(base) {
+				continue
+			}
 			enc := store + "/" + base
-			if !isEncEntry(base) || !fsutil.IsRegular(enc) {
+			info, absent, err := statPath(enc)
+			switch {
+			case absent:
+				continue
+			case err != nil:
+				s.unreadable = append(s.unreadable, enc)
+				continue
+			case !info.Mode().IsRegular():
 				continue
 			}
 			s.all = append(s.all, enc)
 			raw, err := os.ReadFile(enc) // #nosec G304 -- an .enc of the store
+			if err != nil {
+				s.unreadable = append(s.unreadable, enc)
+				continue
+			}
+			rcpts, err := encRecipients(raw)
 			switch {
 			case err != nil:
-				s.unreadable = append(s.unreadable, enc)
-			case bytes.Contains(raw, []byte(recipient)):
+				s.malformed = append(s.malformed, enc)
+			case slices.Contains(rcpts, recipient):
 				s.listed = append(s.listed, enc)
 			}
 		}
@@ -245,11 +335,112 @@ func scanEncs(stores []string, recipient string) encScan {
 	return s
 }
 
+// errEncMetadata: the sops metadata of an .enc does not parse or lists no age
+// recipient. It never quotes the file.
+var errEncMetadata = errors.New("the sops metadata does not parse or lists no age recipient")
+
+// encRecipients reads the age recipients from the sops metadata of an .enc,
+// the JSON envelope of the binary store (bash: secrets::_enc_lists): each
+// recipient of sops.age and of the age list of every sops.key_groups entry,
+// with its JSON escapes decoded. It returns errEncMetadata when the file is
+// not one JSON object with a sops object, when it holds no age entry or an
+// age entry without a recipient string, and when a key that the sops
+// metadata decoder matches regardless of case is spelled another way ("AGE",
+// "Recipient"): sops would then read a value that this read does not.
+func encRecipients(raw []byte) ([]string, error) {
+	var top any
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return nil, errEncMetadata
+	}
+	root, _ := top.(map[string]any)
+	meta, ok := root["sops"].(map[string]any)
+	if !ok {
+		return nil, errEncMetadata
+	}
+	flat, err := metaField(meta, "age")
+	if err != nil {
+		return nil, err
+	}
+	out, err := ageRecipients(flat)
+	if err != nil {
+		return nil, err
+	}
+	groups, err := metaField(meta, "key_groups")
+	if err != nil {
+		return nil, err
+	}
+	switch g := groups.(type) {
+	case nil:
+	case []any:
+		for _, item := range g {
+			group, ok := item.(map[string]any)
+			if !ok {
+				return nil, errEncMetadata
+			}
+			age, err := metaField(group, "age")
+			if err != nil {
+				return nil, err
+			}
+			rcpts, err := ageRecipients(age)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, rcpts...)
+		}
+	default:
+		return nil, errEncMetadata
+	}
+	if len(out) == 0 {
+		return nil, errEncMetadata
+	}
+	return out, nil
+}
+
+// metaField is m[name], or errEncMetadata when m has another key that equals
+// name regardless of case.
+func metaField(m map[string]any, name string) (any, error) {
+	for k := range m {
+		if k != name && strings.EqualFold(k, name) {
+			return nil, errEncMetadata
+		}
+	}
+	return m[name], nil
+}
+
+// ageRecipients reads a sops age list: absent (nil), or a list of objects
+// that each hold a recipient string that is not empty.
+func ageRecipients(v any) ([]string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	list, ok := v.([]any)
+	if !ok {
+		return nil, errEncMetadata
+	}
+	var out []string
+	for _, item := range list {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			return nil, errEncMetadata
+		}
+		r, err := metaField(entry, "recipient")
+		if err != nil {
+			return nil, err
+		}
+		s, ok := r.(string)
+		if !ok || s == "" {
+			return nil, errEncMetadata
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
 // reportOtherStores prints, at the level of say, one line for each store
 // that this run does not re-key and that still lists the recipient (bash:
 // secrets::_other_stores): the domain stores it did not select, then the
-// flat store, which --all does not re-key either. A file it cannot read
-// counts as one that lists it.
+// flat store, which --all does not re-key either. A path or a file it cannot
+// read, and a file whose metadata does not parse, count as one that lists it.
 func (c *Context) reportOtherStores(say func(io.Writer, string, ...any), selected []string, recipient string) {
 	picked := map[string]bool{}
 	for _, s := range selected {
@@ -257,10 +448,11 @@ func (c *Context) reportOtherStores(say func(io.Writer, string, ...any), selecte
 	}
 	count := func(store string) int {
 		s := scanEncs([]string{store}, recipient)
-		return len(s.listed) + len(s.unreadable)
+		return len(s.listed) + len(s.unreadable) + len(s.malformed)
 	}
 	domains := 0
-	for _, store := range c.domainStores() {
+	paths, _ := c.domainStores()
+	for _, store := range paths {
 		if picked[filepath.Clean(store)] {
 			continue
 		}
@@ -440,22 +632,26 @@ func (c *Context) rerunRemoveKey(recipient string, all, skipOrphans bool) {
 // the re-encryption covers every selected store, not only the context's.
 //
 // It holds the lock of .sops.yaml for the whole run. It reads .sops.yaml as
-// YAML too and refuses when the recipient is in a value the line edit cannot
-// rewrite (an escaped string, a YAML list, a key group, an alias or a merge
-// key), when the edit would drop the last recipient of a rule, and when an
-// .enc file of the stores matches no creation rule, a rule with a recipient
-// that is not age, or a rule with an age recipient that does not parse. It
-// refuses a recipient that is in no rule and no .enc file (a typo must not
-// look like a removal), an .enc file it cannot read, an .enc that lists the
-// recipient and is newer than its plaintext (the re-key would write the old
-// value back over the newer one), and, without skipOrphans, an .enc with no
-// decrypted twin: a re-key cannot rewrite that file, so it keeps the removed
-// recipient.
+// YAML too and refuses a YAML tag under creation_rules other than !!str,
+// !!seq or !!map and a mapping key that is not a string, and refuses when the
+// recipient is in a value the line edit cannot rewrite (an escaped string, a
+// YAML list, a key group, an alias or a merge key), when the edit would drop
+// the last recipient of a rule, and when an .enc file of the stores matches
+// no creation rule, a rule with a recipient that is not age, or a rule with
+// an age recipient that does not parse. It refuses a recipient that is in no
+// rule and no .enc file (a typo must not look like a removal), a store path
+// or an .enc file it cannot stat or read (a dangling symlink included), an
+// .enc whose sops metadata does not parse or lists no age recipient, an .enc
+// that lists the recipient and is newer than its plaintext (the re-key would
+// write the old value back over the newer one), and, without skipOrphans, an
+// .enc with no decrypted twin: a re-key cannot rewrite that file, so it
+// keeps the removed recipient.
 //
 // It re-encrypts each .enc that lists the recipient from its plaintext, then
 // reads the .enc files again and fails when one still lists it, with the
-// command that resumes the run. Other stores that still list the recipient
-// are named in a warning; they are not re-keyed.
+// command that resumes the run. Each read takes the recipients from the
+// parsed sops metadata of the file. Other stores that still list the
+// recipient are named in a warning; they are not re-keyed.
 //
 // A removal does not revoke what the key already read; the last line says
 // so.
@@ -541,16 +737,24 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 		return ErrHandled
 	}
 
-	stores, err := c.rekeyStores(all)
+	stores, unreadableStores, err := c.rekeyStores(all)
 	if err != nil {
 		return err
 	}
 	scan := scanEncs(stores, agePubkey)
+	scan.unreadable = append(unreadableStores, scan.unreadable...)
 	if len(scan.unreadable) > 0 {
 		for _, u := range scan.unreadable {
 			ui.ErrorTo(c.ErrOut, "cannot read %s", c.rel(u))
 		}
 		ui.ErrorTo(c.ErrOut, "  a file that is not read may still list the recipient — fix the permissions first; nothing was written")
+		return ErrHandled
+	}
+	if len(scan.malformed) > 0 {
+		for _, m := range scan.malformed {
+			ui.ErrorTo(c.ErrOut, "the sops metadata of %s does not parse or lists no age recipient", c.rel(m))
+		}
+		ui.ErrorTo(c.ErrOut, "  remove-key reads the recipients of each .enc from its sops metadata — fix or restore those files first; nothing was written")
 		return ErrHandled
 	}
 	if rules == 0 && len(scan.listed) == 0 {
@@ -636,6 +840,9 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 	for _, u := range after.unreadable {
 		ui.ErrorTo(c.ErrOut, "cannot read %s", c.rel(u))
 	}
+	for _, m := range after.malformed {
+		ui.ErrorTo(c.ErrOut, "the sops metadata of %s does not parse or lists no age recipient", c.rel(m))
+	}
 	for _, enc := range after.listed {
 		if !fsutil.IsRegular(strings.TrimSuffix(enc, ".enc")) {
 			orphansLeft++
@@ -644,8 +851,8 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 		ui.ErrorTo(c.ErrOut, "still encrypted to the removed recipient: %s", c.rel(enc))
 		left++
 	}
-	if left > 0 || len(after.unreadable) > 0 {
-		ui.ErrorTo(c.ErrOut, "%d .enc file(s) still list the removed recipient after the re-key, %d cannot be read", left, len(after.unreadable))
+	if bad := len(after.unreadable) + len(after.malformed); left > 0 || bad > 0 {
+		ui.ErrorTo(c.ErrOut, "%d .enc file(s) still list the removed recipient after the re-key, %d cannot be read or do not parse", left, bad)
 		c.rerunRemoveKey(agePubkey, all, skipOrphans)
 		return ErrHandled
 	}

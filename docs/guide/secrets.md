@@ -214,7 +214,11 @@ lo secrets remove-key age1<recipient> --all     # every clusters/<domain>/secret
 - The key is in no creation rule and in no `.enc` file. A typo then does not
   look like a removal. The message names the other stores that still list the
   key.
-- The command cannot read a store or an `.enc` file.
+- The command cannot stat or read a store path or an `.enc` file. A symlink
+  whose target is missing counts as a file that it cannot read.
+- The sops metadata of an `.enc` file does not parse, or lists no age
+  recipient. The command reads the recipients of each file from that
+  metadata, so a JSON escape cannot hide one. Fix or restore the file first.
 - An `.enc` file that lists the key is newer than its plaintext. The re-key
   encrypts the plaintext, so it would write the old value back over the newer
   one. Run `lo secrets decrypt` first.

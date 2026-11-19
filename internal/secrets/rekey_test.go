@@ -307,7 +307,7 @@ func TestRemoveKeyAllRekeysEveryStore(t *testing.T) {
 		encryptStore(t, c, "a.dev", out, errOut)
 		encryptStore(t, c, "b.dev", out, errOut)
 		freshen(t, a+"/Secret.app.default.K", b+"/Secret.app.default.K")
-		write(t, c.Paths.Base+"/.secrets/Secret.flat.default.K.enc", "sops: "+g+"\n")
+		write(t, c.Paths.Base+"/.secrets/Secret.flat.default.K.enc", encEnvelope(g))
 		bBefore := readFile(t, b+"/Secret.app.default.K.enc")
 
 		if err := c.RemoveKey(g, all, false); err != nil {
@@ -372,7 +372,7 @@ func TestRemoveKeyOrphanFailsClosedBeforeAnyWrite(t *testing.T) {
 	c, out, errOut := testEnv(t)
 	c.Domain = "a.dev"
 	sopsRules(t, c, keyA+","+keyB)
-	write(t, c.Paths.Clusters+"/a.dev/secrets/Secret.orphan.default.K.enc", "enc")
+	write(t, c.Paths.Clusters+"/a.dev/secrets/Secret.orphan.default.K.enc", encEnvelope(keyA, keyB))
 	before := readFile(t, c.sopsConfigPath())
 
 	if err := c.RemoveKey(keyB, false, false); !errors.Is(err, ErrHandled) {

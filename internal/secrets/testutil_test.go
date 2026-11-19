@@ -118,3 +118,14 @@ func sopsYAMLWith(t *testing.T, c *Context, key string) {
 	t.Helper()
 	write(t, c.sopsConfigPath(), "creation_rules:\n  - path_regex: 'Secret\\..*'\n    age: '"+key+"'\n")
 }
+
+// encEnvelope is the shape of a binary-mode .enc that lists rcpts in its sops
+// metadata, with no real ciphertext: enough for the recipient scans, not for
+// a decrypt.
+func encEnvelope(rcpts ...string) string {
+	entries := make([]string, 0, len(rcpts))
+	for _, r := range rcpts {
+		entries = append(entries, `{"recipient":"`+r+`","enc":"x"}`)
+	}
+	return `{"data":"ENC[x]","sops":{"age":[` + strings.Join(entries, ",") + `]}}` + "\n"
+}

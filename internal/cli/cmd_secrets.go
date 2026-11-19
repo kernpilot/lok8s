@@ -261,7 +261,10 @@ Before the first write, the command refuses:
     escaped string, a YAML list, key_groups, an alias or a merge key),
   - the last recipient of a rule,
   - a recipient that is in no rule and in no .enc file,
-  - an .enc file that it cannot read,
+  - a store path or an .enc file that it cannot stat or read (a dangling
+    symlink included),
+  - an .enc file whose sops metadata does not parse or lists no age
+    recipient (the command reads the recipients from that metadata),
   - an .enc file that lists the recipient and is newer than its plaintext
     (run 'lo secrets decrypt' first),
   - an .enc file that matches no creation rule, a rule with a recipient that

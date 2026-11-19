@@ -10,9 +10,10 @@
 # Everything runs against a THROWAWAY store and throwaway keys. HOME,
 # XDG_CONFIG_HOME (sops reads <config dir>/sops/age/keys.txt) and
 # SOPS_AGE_KEY_FILE point into BATS_TEST_TMPDIR, and so do PATH_BASE and
-# PATH_CLUSTERS. Most tests stub secrets::_encrypt_file; the round trip runs
-# the real one and skips without sops, ssh-to-age or ssh-keygen. No test
-# prints a private key.
+# PATH_CLUSTERS. Most tests stub secrets::_encrypt_file, and their .enc files
+# are sops envelopes with no ciphertext (_envelope); the round trip runs the
+# real one and skips without sops, ssh-to-age or ssh-keygen. No test prints a
+# private key.
 
 setup() {
   load "../test_helper"
@@ -34,6 +35,8 @@ setup() {
   # RCPT_B as YAML decodes it, while its bytes do not hold it: the first
   # letter as the escape backslash, u, 0061 in a double-quoted string.
   ESC_B="\"$(printf '\134')u0061${RCPT_B:1}\""
+  # RCPT_B as a JSON string of an .enc spells it: the same escape, no quotes.
+  JESC_B="$(printf '\134')u0061${RCPT_B:1}"
   # The first line of an OpenSSH private key block, no key. Built from two
   # parts, so that the private-key rule of a secret scanner does not match
   # from one PEM literal to the next.
@@ -71,21 +74,49 @@ _load() {
   command -v sops >/dev/null 2>&1 || sops() { return 0; }
 }
 
+# _envelope <recipient>... — the shape of a binary-mode .enc whose sops
+# metadata lists the recipients, with no real ciphertext: enough for the
+# recipient scans, not for a decrypt. A recipient goes into the JSON as given,
+# so a JSON escape stays one.
+_envelope() {
+  local r out=""
+  for r in "${@}"; do
+    out+="${out:+,}{\"recipient\":\"${r}\",\"enc\":\"x\"}"
+  done
+  printf '{"data":"ENC[x]","sops":{"age":[%s]}}\n' "${out}"
+}
+
+# _first_rule_envelope — the envelope of the recipients in the age list of the
+# first rule, as sops would write it.
+_first_rule_envelope() {
+  local line r
+  local -a parts=() rcpts=()
+  line="$(grep -m1 "age:" "${CFG}")"
+  line="${line#*\'}"
+  IFS=',' read -r -a parts <<< "${line%%\'*}"
+  for r in "${parts[@]}"; do
+    r="${r// /}"
+    [[ -z "${r}" ]] || rcpts+=("${r}")
+  done
+  _envelope "${rcpts[@]}"
+}
+
 # The stub re-encryption logs each file it ran on (relative to PATH_CLUSTERS)
 # and rewrites its .enc with the recipients of the first rule, as sops would.
 _stub_encrypt() {
   secrets::_encrypt_file() {
     echo "${1#"${PATH_CLUSTERS}/"}" >> "${ENCRYPT_LOG}"
-    grep -m1 "age:" "${CFG}" > "${1}.enc"
+    _first_rule_envelope > "${1}.enc"
   }
 }
 
-# _cache <domain> <name> <.enc content> — a plaintext cache file and its .enc,
-# the plaintext the newer of the two (the state after a decrypt).
+# _cache <domain> <name> <recipient> — a plaintext cache file and its .enc
+# that lists the recipient, the plaintext the newer of the two (the state
+# after a decrypt).
 _cache() {
   local f="${PATH_CLUSTERS}/${1}/secrets/Secret.${2}.default.K"
   printf 'v' > "${f}"
-  printf '%s\n' "${3}" > "${f}.enc"
+  _envelope "${3}" > "${f}.enc"
   touch -t 200001010000 "${f}.enc"
 }
 
@@ -159,7 +190,7 @@ _not_written='[error]   the re-key encrypts with age through the first matching 
   _cache a.dev app "${RCPT_B}"
   _cache b.dev app "${RCPT_B}"
   mkdir -p "${PATH_BASE}/.secrets"
-  printf '%s\n' "${RCPT_B}" > "${PATH_BASE}/.secrets/Secret.flat.default.K.enc"
+  _envelope "${RCPT_B}" > "${PATH_BASE}/.secrets/Secret.flat.default.K.enc"
   DOMAIN=a.dev run _rm "${RCPT_B}"
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
   [ "$(cat "${ENCRYPT_LOG}")" = "a.dev/secrets/Secret.app.default.K" ]
@@ -191,7 +222,7 @@ ${_rotate}" ]] || { echo "$output" >&2; return 1; }
   # keep the removed recipient.
   _load
   _stub_encrypt
-  printf 'enc\n' > "${PATH_CLUSTERS}/a.dev/secrets/Secret.orphan.default.K.enc"
+  _envelope "${RCPT_A}" "${RCPT_B}" > "${PATH_CLUSTERS}/a.dev/secrets/Secret.orphan.default.K.enc"
   local before; before="$(cat "${CFG}")"
   DOMAIN=a.dev run _rm "${RCPT_B}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
@@ -204,7 +235,7 @@ ${_rotate}" ]] || { echo "$output" >&2; return 1; }
   _load
   _stub_encrypt
   _cache a.dev app "${RCPT_B}"
-  printf '%s\n' "${RCPT_B}" > "${PATH_CLUSTERS}/a.dev/secrets/Secret.orphan.default.K.enc"
+  _envelope "${RCPT_B}" > "${PATH_CLUSTERS}/a.dev/secrets/Secret.orphan.default.K.enc"
   DOMAIN=a.dev run _rm "${RCPT_B}" 0 1
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
   [[ "$output" == *"[warn] 1 orphan .enc file(s) still list the removed recipient — its key can still decrypt them"* ]]
@@ -478,6 +509,85 @@ _class() {
   [ ! -s "${ENCRYPT_LOG}" ]
 }
 
+@test "a dangling .enc symlink is refused before any write" {
+  # lstat finds the link and stat does not: the file is not absent, and its
+  # target may list the recipient.
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  local store="${PATH_CLUSTERS}/a.dev/secrets" before
+  before="$(cat "${CFG}")"
+  ln -s Secret.nowhere.default.K.enc "${store}/Secret.gone.default.K.enc"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] cannot read ${store}/Secret.gone.default.K.enc
+[error]   a file that is not read may still list the recipient — fix the permissions first; nothing was written" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(cat "${CFG}")" = "${before}" ]
+  [ ! -s "${ENCRYPT_LOG}" ]
+}
+
+@test "with --all, a domain directory it cannot search is refused before any write" {
+  [ "$(id -u)" -ne 0 ] || skip "root reads every file"
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  _cache b.dev app "${RCPT_B}"
+  local before; before="$(cat "${CFG}")"
+  chmod 000 "${PATH_CLUSTERS}/b.dev"
+  DOMAIN=a.dev run _rm "${RCPT_B}" 1
+  chmod 755 "${PATH_CLUSTERS}/b.dev"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] cannot read ${PATH_CLUSTERS}/b.dev/secrets
+[error]   a file that is not read may still list the recipient — fix the permissions first; nothing was written" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(cat "${CFG}")" = "${before}" ]
+  [ ! -s "${ENCRYPT_LOG}" ]
+}
+
+@test "the select scan reads the parsed metadata: an .enc that spells the recipient as a JSON escape is re-keyed" {
+  _load
+  _stub_encrypt
+  _cache a.dev app "${JESC_B}"
+  ! grep -qF "${RCPT_B}" "${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.K.enc" || {
+    echo "fixture: the bytes of the .enc hold the recipient" >&2; return 1; }
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${ENCRYPT_LOG}")" = "a.dev/secrets/Secret.app.default.K" ] || { echo "encrypted: $(cat "${ENCRYPT_LOG}")" >&2; return 1; }
+  [[ "$output" == *"re-keying 1 cache file(s) across 1 store(s)…"* ]] || { echo "$output" >&2; return 1; }
+}
+
+@test "the post-check reads the parsed metadata: an orphan that spells the recipient as a JSON escape is named" {
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  _envelope "${RCPT_A}" "${JESC_B}" > "${PATH_CLUSTERS}/a.dev/secrets/Secret.orphan.default.K.enc"
+  DOMAIN=a.dev run _rm "${RCPT_B}" 0 1
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+  [[ "$output" == *"[warn] 1 orphan .enc file(s) still list the removed recipient — its key can still decrypt them"* ]] || {
+    echo "$output" >&2; return 1; }
+}
+
+@test "an .enc whose sops metadata does not parse or lists no age recipient is refused before any write" {
+  _load
+  _stub_encrypt
+  local store="${PATH_CLUSTERS}/a.dev/secrets" content before
+  for content in 'enc' '{"data":"ENC[x]","sops":{"lastmodified":"x"}}'; do
+    _cache a.dev app "${RCPT_B}"
+    printf 'b' > "${store}/Secret.bad.default.K"
+    printf '%s\n' "${content}" > "${store}/Secret.bad.default.K.enc"
+    touch -t 200001010000 "${store}/Secret.bad.default.K.enc"
+    before="$(cat "${CFG}")"
+    DOMAIN=a.dev run _rm "${RCPT_B}"
+    [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] the sops metadata of ${store}/Secret.bad.default.K.enc does not parse or lists no age recipient
+[error]   remove-key reads the recipients of each .enc from its sops metadata — fix or restore those files first; nothing was written" ] || {
+      echo "$output" >&2; return 1; }
+    [ "$(cat "${CFG}")" = "${before}" ] || { echo ".sops.yaml was written" >&2; return 1; }
+    [ ! -s "${ENCRYPT_LOG}" ]
+  done
+}
+
 # _rm_path <dir> <argv...> — _rm with PATH set to <dir> alone.
 _rm_path() {
   local PATH="${1}"
@@ -614,7 +724,7 @@ _sops_writes() {
   secrets::_encrypt_file() {
     [[ "${1}" != */b.dev/* ]] || { error "Failed to encrypt $(basename "${1}")"; return 1; }
     echo "${1#"${PATH_CLUSTERS}/"}" >> "${ENCRYPT_LOG}"
-    grep -m1 "age:" "${CFG}" > "${1}.enc"
+    _first_rule_envelope > "${1}.enc"
   }
   DOMAIN=a.dev run _rm "${RCPT_B}" 1
   [ "$status" -eq 1 ]
