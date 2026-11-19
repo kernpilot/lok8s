@@ -5,7 +5,9 @@ package scaffold
 
 import (
 	"bytes"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -129,6 +131,174 @@ func TestGitignoreEntriesCoverTheSplitScratch(t *testing.T) {
 	}
 	if again, _ := os.ReadFile(filepath.Join(dir, ".gitignore")); string(again) != string(raw) {
 		t.Errorf("a re-run changed .gitignore:\n%s", again)
+	}
+}
+
+// workDirEntries are the drivers' per-cluster work dirs under
+// clusters/<domain>/: .kubeone/ (the kubeone driver: the admin kubeconfig,
+// the rendered kubeone.yaml with registry auth), .kkp/ (the kkp driver's
+// saved cluster and project ids), and the lo driver's .provider/ (the cloud
+// VM's provider state), .oidc/ (the apiserver auth config), .containerd/
+// (the registry certs.d tree), .registries.json (the registry slot plan)
+// and .docker.sock. The list is written here, not read from
+// gitignoreEntries, so a removed entry fails the tests below.
+var workDirEntries = []string{
+	"**/clusters/*/.kubeone/",
+	"**/clusters/*/.kkp/",
+	"**/clusters/*/.provider/",
+	"**/clusters/*/.oidc/",
+	"**/clusters/*/.containerd/",
+	"**/clusters/*/.registries.json",
+	"**/clusters/*/.docker.sock",
+}
+
+// lineCounts counts each line of a .gitignore, trimmed (appendGitignore
+// compares trimmed lines too).
+func lineCounts(raw []byte) map[string]int {
+	counts := map[string]int{}
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		counts[strings.TrimSpace(line)]++
+	}
+	return counts
+}
+
+// `lo init project` writes an entry for each driver work dir, once, so a
+// `git add -A` in the project does not commit cluster state or credentials.
+func TestGitignoreEntriesCoverTheDriverWorkDirs(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	var out, errOut bytes.Buffer
+	if err := Project(dir, ProjectOptions{Name: "demo"}, &out, &errOut); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := lineCounts(raw)
+	for _, want := range workDirEntries {
+		if counts[want] != 1 {
+			t.Errorf(".gitignore must carry %q exactly once (found %d):\n%s", want, counts[want], raw)
+		}
+	}
+}
+
+// An entry is appended only when it is absent: a .gitignore that already
+// has some work-dir entries (written by hand, with spaces around one) keeps
+// its lines first and unchanged and gets only the missing entries; a
+// second run changes nothing and says so. No line is written twice.
+func TestGitignoreWorkDirEntriesAppendOnlyWhenAbsent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".gitignore")
+	mine := "node_modules/\n**/clusters/*/.provider/\n  **/clusters/*/.kubeone/  \n"
+	if err := os.WriteFile(path, []byte(mine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := EnsureGitignore(dir, &out); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(first), mine) {
+		t.Errorf("the existing lines must stay first and unchanged:\n%s", first)
+	}
+	counts := lineCounts(first)
+	for _, want := range workDirEntries {
+		if counts[want] != 1 {
+			t.Errorf(".gitignore must carry %q exactly once (found %d):\n%s", want, counts[want], first)
+		}
+	}
+	for line, n := range counts {
+		if line != "" && n > 1 {
+			t.Errorf("%q is written %d times:\n%s", line, n, first)
+		}
+	}
+	out.Reset()
+	if err := EnsureGitignore(dir, &out); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := os.ReadFile(path); string(again) != string(first) {
+		t.Errorf("a second run changed .gitignore:\n%s", again)
+	}
+	if want := "Kept " + path + " (entries present)\n"; !strings.Contains(out.String(), want) {
+		t.Errorf("a second run must report %q, got:\n%s", want, out.String())
+	}
+}
+
+// git itself ignores the files in the work dirs with the written
+// .gitignore, in a project at the repository root and in one nested in a
+// larger repository, and still tracks the cluster spec. git runs with no
+// user or system config, so a global excludes file cannot make this pass.
+func TestGitignoreWorkDirsIgnoredByGit(t *testing.T) {
+	t.Parallel()
+	git, err := exec.LookPath("git")
+	if err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal("CI=true: git not on PATH")
+		}
+		t.Skip("git not on PATH")
+	}
+	repo := t.TempDir()
+	home := t.TempDir()
+	var env []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "GIT_") || strings.HasPrefix(kv, "HOME=") || strings.HasPrefix(kv, "XDG_CONFIG_HOME=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env, "HOME="+home, "XDG_CONFIG_HOME="+home, "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
+	run := func(args ...string) (string, error) {
+		cmd := exec.Command(git, append([]string{"-C", repo}, args...)...)
+		cmd.Env = env
+		b, err := cmd.CombinedOutput()
+		return string(b), err
+	}
+	if out, err := run("init", "-q"); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	var out bytes.Buffer
+	if err := EnsureGitignore(repo, &out); err != nil {
+		t.Fatal(err)
+	}
+	ignored := []string{
+		"clusters/x/.kubeone/state",
+		"clusters/x/.kubeone/x-kubeconfig",
+		"clusters/x/.kkp/cluster_id",
+		"clusters/x/.provider/y",
+		"clusters/x/.oidc/auth-config.yaml",
+		"clusters/x/.containerd/certs.d/hosts.toml",
+		"clusters/x/.registries.json",
+		"clusters/x/.docker.sock",
+		"clusters/x/.kubeconfig/admin",
+		"infra/clusters/x/.kubeone/state",
+		"infra/clusters/x/.provider/y",
+	}
+	kept := []string{"clusters/x/cluster.lok8s.yaml", "lok8s.yaml"}
+	for _, p := range append(append([]string(nil), ignored...), kept...) {
+		full := filepath.Join(repo, filepath.FromSlash(p))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range ignored {
+		if out, err := run("check-ignore", "-q", "--", p); err != nil {
+			t.Errorf("git does not ignore %s: %v\n%s", p, err, out)
+		}
+	}
+	for _, p := range kept {
+		out, err := run("check-ignore", "-q", "--", p)
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+			t.Errorf("git must track %s (check-ignore exit 1), got %v\n%s", p, err, out)
+		}
 	}
 }
 

@@ -145,6 +145,14 @@ var gitignoreEntries = []string{
 	"**/clusters/*/.artifacts-tmp.*/",
 	"**/clusters/*/.registry-tls-tmp.*/",
 	"**/clusters/*/.artifacts-stage.*/",
+	"# lok8s — the drivers' per-cluster work dirs (admin kubeconfigs, rendered configs that can hold registry credentials, provider state)",
+	"**/clusters/*/.kubeone/",
+	"**/clusters/*/.kkp/",
+	"**/clusters/*/.provider/",
+	"**/clusters/*/.oidc/",
+	"**/clusters/*/.containerd/",
+	"**/clusters/*/.registries.json",
+	"**/clusters/*/.docker.sock",
 }
 
 // ProjectOptions shapes one `lo init project` run.
