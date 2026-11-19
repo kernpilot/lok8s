@@ -909,6 +909,15 @@ there from the next tick.
 - The agent does not echo a claim nonce that you placed before the deploy.
   Place a new one with `lo kubehz claim`.
 - The old annotations stay on `kubehz-agent-config`. Nothing reads them.
+- Deploy and claim with one lo version. `lo kubehz claim` only checks that
+  `kubehz-agent-state` exists, and that does not prove that the agent in the
+  cluster reads it. A `lo kubehz deploy` with an older lo puts back the old
+  agent, which reads its markers from `kubehz-agent-config`, and leaves
+  `kubehz-agent-state` behind with nothing reading it. An older lo's
+  `lo kubehz claim` places the nonce on `kubehz-agent-config`, which the
+  current agent does not read. In both cases the claim never verifies: run
+  `lo kubehz deploy` with the current lo, then place a new nonce with
+  `lo kubehz claim`.
 
 Each later `lo kubehz deploy` keeps the markers on `kubehz-agent-state`:
 `kubectl apply` removes only what an earlier apply set.
