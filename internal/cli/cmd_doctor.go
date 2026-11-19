@@ -3,7 +3,8 @@ package cli
 // lo doctor — environment + toolchain preflight diagnostics.
 // Go port of .lok8s/libs/doctor; output is byte-identical. Reports bash
 // version (argsh needs >= 4.3), required/optional tool presence, the PATH_*
-// environment, whether the secrets plugin is built, and the active domain.
+// environment, whether the secrets plugin is built, the active domain, and
+// the RBAC migration leftovers of its cluster (cmd_doctor_rbac.go).
 // Exits non-zero when a REQUIRED prerequisite is missing.
 //
 // Tool checks are PATH-based (`command -v`) on purpose, NOT execx.Look:
@@ -134,6 +135,9 @@ func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag
 	doctorTLSSection(ctx, r, path, d, out)
 	doctorRegistryTLS(ctx, r, paths, d, out)
 	doctorDomainSection(paths, d, out)
+	// The RBAC migration check of the domain's cluster (advisory, read-only;
+	// cmd_doctor_rbac.go). Its lines close the domain section.
+	doctorRBACLeftovers(ctx, r, paths, d, path, bootstrapEntries(paths), out)
 
 	// Provider / infrastructure diagnosis — advisory, never affects the exit
 	// code.

@@ -3,8 +3,9 @@
 # vim: set syntax=bash:
 # doctor — environment + toolchain preflight diagnostics
 # Reports bash version (argsh needs >= 4.3), required/optional tool presence,
-# the PATH_* environment, whether the secrets plugin is built, and the active
-# domain. Exits non-zero when a REQUIRED prerequisite is missing.
+# the PATH_* environment, whether the secrets plugin is built, the active
+# domain, and the RBAC migration leftovers of its cluster (doctor::_rbac_check).
+# Exits non-zero when a REQUIRED prerequisite is missing.
 
 import ^utils/domain
 import ^utils/verbose
@@ -103,6 +104,9 @@ main::doctor() {
   else
     doctor::_warn "no active domain (run: lo use <domain>)"
   fi
+  # The RBAC migration check of the domain's cluster (advisory, read-only).
+  # Its lines close the domain section.
+  doctor::_rbac_check "${domain}"
 
   # Provider / infrastructure diagnosis — advisory, never affects the exit code.
   doctor::_provider_section "${domain}"
@@ -121,6 +125,245 @@ doctor::_color() { [[ -t 1 && -z "${NO_COLOR:-}" ]]; }
 doctor::_ok()   { if doctor::_color; then printf '  \033[32m✓\033[0m %s\n' "${1}"; else printf '  ✓ %s\n' "${1}"; fi; }
 doctor::_warn() { if doctor::_color; then printf '  \033[33m!\033[0m %s\n' "${1}"; else printf '  ! %s\n' "${1}"; fi; }
 doctor::_bad()  { if doctor::_color; then printf '  \033[31m✗\033[0m %s\n' "${1}"; else printf '  ✗ %s\n' "${1}"; fi; }
+# A neutral fact, neither a pass nor a finding (the Go binary's ℹ line): the
+# whole line is dim on a terminal.
+doctor::_info() { if doctor::_color; then printf '  \033[2mℹ %s\033[0m\n' "${1}"; else printf '  ℹ %s\n' "${1}"; fi; }
+
+# doctor::_rbac_check <domain>
+# The RBAC migration check (issues #311 and #315). Go twin:
+# internal/cli/cmd_doctor_rbac.go. The piped lines are the same in both.
+#
+# The system-upgrade-controller and redis-operator addons no longer bind the
+# broad RBAC of their charts. The bootstrap applies without prune, so a
+# cluster that ran an earlier version of an addon keeps the old objects until
+# a person deletes them. This check reads the ClusterRoleBindings and
+# ClusterRoles of the domain's cluster and reports each old object with its
+# delete command. It never changes the cluster.
+#
+# It runs only when spec.bootstrap has one of the two addons (read with the
+# entry parser of `lo addons --detail`) and the domain has a kubeconfig (the
+# file that the entrypoint exports as KUBECONFIG). It makes two reads, each
+# with --request-timeout=10s. A failed read is a warning with a fixed reason
+# per class. kubectl's stderr can name the server and the user, so the check
+# never prints it. Every line is advisory: it always returns 0.
+doctor::_rbac_check() {
+  local domain="${1}"
+  local skipped="RBAC migration check skipped: "
+  local not_checked="RBAC migration leftovers not checked: "
+  local invalid="kubectl failed or did not return a valid list"
+  if [[ -z "${domain}" ]]; then
+    doctor::_info "${skipped}no active domain"
+    return 0
+  fi
+  local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  if [[ ! "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ || ! -f "${spec}" ]]; then
+    doctor::_info "${skipped}${domain} has no cluster.lok8s.yaml"
+    return 0
+  fi
+  local kind
+  if ! kind=$(domain::spec_driver "${spec}" lo 2>/dev/null); then
+    doctor::_info "${skipped}the cluster spec of ${domain} cannot be read (run: lo lint)"
+    return 0
+  fi
+  # The entry parser of libs/bootstrap (the entrypoint loads it). A bare
+  # framework-addon entry resolves to ${PATH_LOK8S}/addons/<name>.
+  if ! declare -F bootstrap::_resolve_entries >/dev/null || ! declare -F bootstrap::_parse_entry >/dev/null; then
+    doctor::_info "${skipped}the bootstrap entry parser is not loaded"
+    return 0
+  fi
+  local -a entries=()
+  mapfile -t entries < <(bootstrap::_resolve_entries "${spec}" "${kind}" 2>/dev/null)
+  local e nm dr inl ev wt dp suc=0 suc_admin=0 redis=0 chart_rbac=0
+  for e in "${entries[@]+"${entries[@]}"}"; do
+    [[ -n "${e}" ]] || continue
+    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""
+    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp 2>/dev/null || continue
+    [[ "${dr}" == "${PATH_LOK8S}/addons/"* ]] || continue
+    case "${dr##*/}" in
+      system-upgrade-controller) suc=1 ;;
+      system-upgrade-controller-cluster-admin) suc_admin=1 ;;
+      redis-operator) redis=1 ;;
+      redis-operator-chart-rbac) chart_rbac=1 ;;
+    esac
+  done
+  if (( ! suc && ! redis )); then
+    doctor::_info "${skipped}spec.bootstrap has no system-upgrade-controller and no redis-operator"
+    return 0
+  fi
+  if (( suc && suc_admin )); then
+    doctor::_info "RBAC migration check of system-upgrade-controller skipped: spec.bootstrap has system-upgrade-controller-cluster-admin, which owns the cluster-admin binding"
+    suc=0
+  fi
+  (( suc || redis )) || return 0
+
+  # The kubeconfig that the entrypoint exports for the domain: the spec's
+  # metadata.name, else LOK8S_CLUSTER_NAME (Go: build.AmbientKubeconfig).
+  local cluster="${LOK8S_CLUSTER_NAME:-local}" spec_name=""
+  spec_name=$(yq -r '.metadata.name // ""' "${spec}" 2>/dev/null) || spec_name=""
+  [[ -z "${spec_name}" ]] || cluster="${spec_name}"
+  local kubeconfig="${PATH_BASE}/.kubeconfig/${cluster}.yaml"
+  if [[ ! -f "${kubeconfig}" ]]; then
+    doctor::_info "${skipped}no kubeconfig at ${kubeconfig#"${PATH_BASE}/"}"
+    return 0
+  fi
+  if ! command -v kubectl >/dev/null 2>&1; then
+    doctor::_warn "${not_checked}kubectl not found"
+    return 0
+  fi
+
+  local tmp reason="" records=""
+  if ! tmp=$(mktemp -d "${TMPDIR:-/tmp}/lo-doctor-rbac.XXXXXX"); then
+    doctor::_warn "${not_checked}${invalid}"
+    return 0
+  fi
+  reason=$(doctor::_rbac_read "${kubeconfig}" clusterrolebindings "${tmp}/crb.json" "${tmp}/err")
+  [[ -n "${reason}" ]] || reason=$(doctor::_rbac_read "${kubeconfig}" clusterroles "${tmp}/cr.json" "${tmp}/err")
+  if [[ -z "${reason}" ]] && ! records=$(doctor::_rbac_records "${tmp}/crb.json" "${tmp}/cr.json" "${chart_rbac}"); then
+    reason="${invalid}"
+  fi
+  rm -f "${tmp}/crb.json" "${tmp}/cr.json" "${tmp}/err"
+  rmdir "${tmp}" 2>/dev/null || true
+  if [[ -n "${reason}" ]]; then
+    doctor::_warn "${not_checked}${reason}"
+    return 0
+  fi
+  doctor::_rbac_report "${records}" "${suc}" "${redis}"
+}
+
+# doctor::_rbac_read <kubeconfig> <resource> <out file> <err file>
+# One `kubectl get <resource> -o json`. Prints nothing when the output is a
+# list, else the fixed reason of the failure's class. The stderr goes to
+# <err file> for the class and is never printed.
+doctor::_rbac_read() {
+  local kubeconfig="${1}" resource="${2}" out="${3}" err="${4}"
+  if ! kubectl --kubeconfig "${kubeconfig}" get "${resource}" -o json --request-timeout=10s \
+      < /dev/null > "${out}" 2> "${err}"; then
+    doctor::_rbac_reason "$(cat "${err}" 2>/dev/null)"
+    return 0
+  fi
+  jq -e '(.items | type) == "array"' "${out}" > /dev/null 2>&1 \
+    || echo "kubectl failed or did not return a valid list"
+}
+
+# doctor::_rbac_reason <stderr> — the fixed reason of a failed read (Go:
+# rbacReadReason, the same words in the same order).
+doctor::_rbac_reason() {
+  local s="${1,,}"
+  case "${s}" in
+    *forbidden*|*unauthorized*|*"must be logged in"*)
+      echo "the kubeconfig user cannot list ClusterRoles and ClusterRoleBindings (forbidden or unauthorized)" ;;
+    *"unable to connect"*|*"connection refused"*|*"no such host"*|*timeout*|*"deadline exceeded"*|*"network is unreachable"*|*"no route to host"*)
+      echo "the cluster API did not answer (unreachable or timed out)" ;;
+    *)
+      echo "kubectl failed or did not return a valid list" ;;
+  esac
+}
+
+# doctor::_rbac_records <bindings file> <roles file> <chart_rbac 0|1>
+# The facts the report needs, one TAB-separated record per line, from one jq
+# run (a failed run is a failed check, never an empty pass):
+#   suc-left <binding> <role>    a binding of the SUC ServiceAccount to cluster-admin
+#   suc-new 0|1                  a binding of it to lok8s-system-upgrade-controller
+#   redis-left <binding> <role>  a binding of the redis-operator ServiceAccount to
+#                                cluster-admin, redis-operator or (without the
+#                                opt-in addon) lok8s-redis-operator-chart-rbac
+#   redis-new 0|1                a binding of it to lok8s-redis-operator
+#   redis-oldrole 0|1            the chart's ClusterRole redis-operator
+#   redis-agg <labels>           its aggregate-to-* labels with the value "true"
+#   redis-exec 0|1               a ClusterRole bound to it gives create on pods/exec
+# A binding matches by its subjects and roleRef, never by its name.
+doctor::_rbac_records() {
+  # shellcheck disable=SC2016 # jq program text
+  jq -r --slurpfile cr "${2}" --arg chart "${3}" '
+    def sa($n; $ns): any(.subjects[]?; .kind == "ServiceAccount" and .name == $n and .namespace == $ns);
+    def bound($n; $ns; $roles):
+      .items[] | select(.roleRef.kind == "ClusterRole" and (.roleRef.name as $r | any($roles[]; . == $r)) and sa($n; $ns));
+    def anyof($want): . as $list | any($want[]; . as $w | any(($list // [])[]; . == $w));
+    ($cr[0].items) as $roles
+    | ([$roles[] | select(.metadata.name == "redis-operator")] | .[0]) as $old
+    | ([.items[] | select(.roleRef.kind == "ClusterRole" and sa("redis-operator"; "redis-operator")) | .roleRef.name]) as $refs
+    | (bound("system-upgrade-controller"; "cattle-system"; ["cluster-admin"])
+        | "suc-left\t\(.metadata.name)\t\(.roleRef.name)"),
+      "suc-new\t\([bound("system-upgrade-controller"; "cattle-system"; ["lok8s-system-upgrade-controller"])] | if length > 0 then 1 else 0 end)",
+      (bound("redis-operator"; "redis-operator";
+          ["cluster-admin", "redis-operator"] + (if $chart == "1" then [] else ["lok8s-redis-operator-chart-rbac"] end))
+        | "redis-left\t\(.metadata.name)\t\(.roleRef.name)"),
+      "redis-new\t\([bound("redis-operator"; "redis-operator"; ["lok8s-redis-operator"])] | if length > 0 then 1 else 0 end)",
+      "redis-oldrole\t\(if $old == null then 0 else 1 end)",
+      (if $old == null then empty else
+        (($old.metadata.labels // {}) | to_entries
+          | map(select((.key | startswith("rbac.authorization.k8s.io/aggregate-to-")) and .value == "true") | .key)
+          | sort | join(", ")) as $agg
+        | if $agg == "" then empty else "redis-agg\t\($agg)" end
+      end),
+      "redis-exec\t\(if any($roles[];
+          (.metadata.name as $m | any($refs[]; . == $m))
+          and any(.rules[]?; ((.resourceNames // []) | length) == 0
+            and (.apiGroups | anyof(["", "*"]))
+            and (.resources | anyof(["pods/exec", "*", "*/exec"]))
+            and (.verbs | anyof(["create", "*"])))) then 1 else 0 end)"
+  ' "${1}"
+}
+
+# doctor::_rbac_report <records> <suc 0|1> <redis 0|1> — the lines, in the
+# order of the Go twin.
+doctor::_rbac_report() {
+  local records="${1}" suc="${2}" redis="${3}" rec tag a b
+  local -a suc_left=() redis_left=()
+  local suc_new=0 redis_new=0 old_role=0 agg="" has_exec=0
+  while IFS=$'\t' read -r tag a b; do
+    case "${tag}" in
+      suc-left)      suc_left+=("${a}"$'\t'"${b}") ;;
+      suc-new)       suc_new="${a}" ;;
+      redis-left)    redis_left+=("${a}"$'\t'"${b}") ;;
+      redis-new)     redis_new="${a}" ;;
+      redis-oldrole) old_role="${a}" ;;
+      redis-agg)     agg="${a}" ;;
+      redis-exec)    has_exec="${a}" ;;
+    esac
+  done <<< "${records}"
+
+  if (( suc )); then
+    if (( ${#suc_left[@]} == 0 )); then
+      doctor::_ok "system-upgrade-controller: no RBAC migration leftovers"
+    else
+      (( suc_new )) || doctor::_rbac_new_missing system-upgrade-controller lok8s-system-upgrade-controller
+      for rec in "${suc_left[@]}"; do
+        doctor::_rbac_binding_line "${rec}" system-upgrade-controller
+      done
+    fi
+  fi
+  if (( redis )); then
+    if (( ${#redis_left[@]} == 0 && ! old_role )); then
+      doctor::_ok "redis-operator: no RBAC migration leftovers"
+    else
+      (( redis_new )) || doctor::_rbac_new_missing redis-operator lok8s-redis-operator
+      for rec in "${redis_left[@]+"${redis_left[@]}"}"; do
+        doctor::_rbac_binding_line "${rec}" redis-operator
+      done
+      if (( old_role )); then
+        doctor::_warn "migration incomplete: ClusterRole redis-operator, the old role of the chart, is still in the cluster (run: kubectl delete clusterrole redis-operator)"
+        if [[ -n "${agg}" ]]; then
+          doctor::_warn "migration incomplete: ClusterRole redis-operator copies its rules into built-in roles (${agg}). The aggregation controller removes the copies after the delete (run: kubectl delete clusterrole redis-operator)"
+        fi
+      fi
+    fi
+    (( has_exec )) || doctor::_info "redis-operator: no ClusterRoleBinding gives the redis-operator ServiceAccount create on pods/exec. A RedisCluster cannot form or scale without it (restore ClusterRoleBinding lok8s-redis-operator-exec before you add one)"
+  fi
+  return 0
+}
+
+# doctor::_rbac_new_missing <account> <new role> — a delete of the old
+# binding before the new one exists leaves the workload without access.
+doctor::_rbac_new_missing() {
+  doctor::_warn "migration incomplete: no ClusterRoleBinding binds the ${1} ServiceAccount to ${2} yet (apply the bootstrap before the deletes below: lo bootstrap)"
+}
+
+# doctor::_rbac_binding_line <binding TAB role> <account>
+doctor::_rbac_binding_line() {
+  local name="${1%%$'\t'*}" role="${1#*$'\t'}"
+  doctor::_warn "migration incomplete: ClusterRoleBinding ${name} binds the ${2} ServiceAccount to ${role} (run: kubectl delete clusterrolebinding ${name})"
+}
 
 # doctor::_provider_section <domain>
 # If the active domain is a provider-backed cluster whose provider implements

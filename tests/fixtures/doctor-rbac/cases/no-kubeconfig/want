@@ -1,0 +1,1 @@
+  ℹ RBAC migration check skipped: no kubeconfig at .kubeconfig/rbac-test.yaml
