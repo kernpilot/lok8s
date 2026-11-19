@@ -1075,7 +1075,7 @@ _stub_mktemp() {
 
 # TMPDIR=<safe>/link/.. with link pointing to <unsafe>/child: ".." goes up
 # from the target of the link, as the kernel does (cd -P), so the check
-# reads <unsafe>, which others can write, and refuses it. A lexical clean
+# reads <unsafe>, which its group can write, and refuses it. A lexical clean
 # would read <safe> and pass. Also as a relative TMPDIR. As the Go twin's
 # TestSpaceMintJoinResolvesDotDotAfterALinkPhysically.
 @test "space_join_tmp_dir: .. after a link goes up from the target of the link" {
@@ -1087,13 +1087,13 @@ _stub_mktemp() {
   ln -s "${base}/unsafe/child" "${base}/safe/link"
   TMPDIR="${base}/safe/link/.." run kubehz::space_join_tmp_dir
   assert_failure 2
-  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${base}/unsafe") is writable by others and has no sticky bit"
+  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${base}/unsafe") is writable by its group and has no sticky bit"
   _relative_link_dotdot() {
     cd -- "${1}" && TMPDIR=link/.. kubehz::space_join_tmp_dir
   }
   run _relative_link_dotdot "${base}/safe"
   assert_failure 2
-  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${base}/unsafe") is writable by others and has no sticky bit"
+  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${base}/unsafe") is writable by its group and has no sticky bit"
 }
 
 # The writer checks the node name itself (the name is part of the path),
@@ -1282,8 +1282,8 @@ _stub_mktemp() {
 }
 
 # A TMPDIR whose path a foreign owner could change is refused before any
-# directory is made: a part others can write without the sticky bit (the
-# TMPDIR itself or a parent), and a link to such a directory (the resolved
+# directory is made: a part its group or others can write without the
+# sticky bit (the TMPDIR itself or a parent), and a link to such a directory (the resolved
 # path counts). A part with the sticky bit passes, as /tmp does. As the Go
 # twin's TestSpaceMintJoinRefusesATMPDIROthersCanChange.
 @test "space_write_join_ticket: a TMPDIR others can change is refused" {
@@ -1297,13 +1297,14 @@ _stub_mktemp() {
   chmod 700 "${BATS_TEST_TMPDIR}/wp/sub"
   chmod 1777 "${BATS_TEST_TMPDIR}/st"
   ln -s "${BATS_TEST_TMPDIR}/lw" "${BATS_TEST_TMPDIR}/link"
-  # TMPDIR|the part that fails
-  for pair in "gw|gw" "ow|ow" "wp/sub|wp" "link|lw"; do
+  # TMPDIR|the part that fails|the class that has the write bit
+  for pair in "gw|gw|its group" "ow|ow|others" "wp/sub|wp|others" "link|lw|its group"; do
     tmpdir="${BATS_TEST_TMPDIR}/${pair%%|*}"
-    bad=$(_real "${BATS_TEST_TMPDIR}/${pair#*|}")
+    bad="${pair#*|}"
+    bad=$(_real "${BATS_TEST_TMPDIR}/${bad%%|*}")
     TMPDIR="${tmpdir}" run kubehz::space_write_join_ticket worker-1 "${ticket}"
     assert_failure 1
-    assert_output --partial "the temp dir for the join ticket is not safe: ${bad} is writable by others and has no sticky bit"
+    assert_output --partial "the temp dir for the join ticket is not safe: ${bad} is writable by ${pair##*|} and has no sticky bit"
     assert_output --partial "Set TMPDIR to a directory of your own that only you can write (mode 0700)."
     refute_output --partial "${ticket}"
     dirs=("${tmpdir}"/kubehz-join-*)
@@ -1483,7 +1484,7 @@ _stub_mktemp() {
   chmod 770 "${tmpd}"
   TMPDIR="${tmpd}" run kubehz::space_mint_join sp-123 worker-1
   assert_failure
-  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${tmpd}") is writable by others and has no sticky bit"
+  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${tmpd}") is writable by its group and has no sticky bit"
   assert_output --partial "Set TMPDIR to a directory of your own that only you can write (mode 0700)."
   refute_output --partial "could not write"
   refute_output --partial "The ticket was minted"
@@ -1511,7 +1512,7 @@ _stub_mktemp() {
   export -f curl
   TMPDIR="${CHG_DIR}" run kubehz::space_mint_join sp-123 worker-1
   assert_failure
-  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${CHG_DIR}") is writable by others and has no sticky bit"
+  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${CHG_DIR}") is writable by its group and has no sticky bit"
   assert_output --partial "could not write the join ticket for 'worker-1'"
   assert_output --partial "The ticket was minted before the write failed"
   refute_output --partial "${ticket}"
