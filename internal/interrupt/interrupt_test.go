@@ -159,6 +159,45 @@ func TestSignalNamesTheSignalOfTheWatch(t *testing.T) {
 	}
 }
 
+// Another receiver of the signals of lo (the hold of a node join) gets a
+// SIGTERM and ends the command, and main calls exitCode before the
+// goroutine of the Watch took the SIGTERM. The hook holds the goroutine
+// until exitCode runs, and a little longer: exitCode must wait for the
+// goroutine and report 143. The test waits for the SIGTERM on a channel
+// of its own (the other receiver) before it calls exitCode: signal gives
+// a signal to each channel in one step, under the lock that signal.Stop
+// takes, so the SIGTERM is then in the channel of the Watch too.
+func TestWatchExitCodeCountsASignalThatCameBefore(t *testing.T) {
+	var held atomic.Bool
+	beforeWatchWait = func(stopping <-chan struct{}) {
+		<-stopping
+		time.Sleep(20 * time.Millisecond)
+		held.Store(true)
+	}
+	defer func() { beforeWatchWait = func(<-chan struct{}) {} }()
+	other := make(chan os.Signal, 1)
+	signal.Notify(other, syscall.SIGTERM)
+	defer signal.Stop(other)
+	for round := range 4 {
+		held.Store(false)
+		_, exitCode := Watch(t.Context())
+		if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-other:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("round %d: the SIGTERM did not come", round)
+		}
+		if got := exitCode(); got != 143 {
+			t.Fatalf("round %d: exit code = %d, want 143", round, got)
+		}
+		if !held.Load() {
+			t.Fatalf("round %d: exitCode returned before the goroutine of the Watch ended", round)
+		}
+	}
+}
+
 // A SIGHUP that came before stop counts, also when it is still in the
 // channel as stop runs. The hook holds the goroutine of the catch until
 // stop runs: the SIGHUP is then in the channel, and the goroutine sees

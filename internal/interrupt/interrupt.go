@@ -43,14 +43,21 @@ var hungUp atomic.Bool
 // it for its time with CatchHangup.
 //
 // exitCode stops the watch and returns 0 while no signal arrived, else
-// 128+n. Call it once, after the command returned.
+// 128+n. Call it once, after the command returned. Another receiver of
+// the signals (the hold of a node join) can end the command before the
+// goroutine of the watch took the signal: exitCode waits for the
+// goroutine, so a signal that came before it counts.
 func Watch(parent context.Context) (ctx context.Context, exitCode func() int) {
 	ctx, cancel := context.WithCancel(parent)
 	w := &watch{cancel: cancel}
 	ctx = context.WithValue(ctx, watchKey{}, w)
 	ch := make(chan os.Signal, 1)
+	stopping := make(chan struct{})
+	finished := make(chan struct{})
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
+		defer close(finished)
+		beforeWatchWait(stopping)
 		s, ok := <-ch
 		if !ok {
 			return
@@ -65,8 +72,16 @@ func Watch(parent context.Context) (ctx context.Context, exitCode func() int) {
 		cancel()
 	}()
 	return ctx, func() int {
+		// After signal.Stop, a signal that came before it is in ch (or
+		// the goroutine has it): os/signal gives a signal to each channel
+		// in one step, under the lock that signal.Stop takes, so a signal
+		// that another receiver got is in ch too. The goroutine takes a
+		// value that is still in ch before it sees the close: exitCode
+		// waits for it, then reads the signal.
 		signal.Stop(ch)
+		close(stopping)
 		close(ch)
+		<-finished
 		cancel()
 		if n := w.got.Load(); n != 0 {
 			return 128 + int(n)
@@ -74,6 +89,12 @@ func Watch(parent context.Context) (ctx context.Context, exitCode func() int) {
 		return 0
 	}
 }
+
+// beforeWatchWait runs in the goroutine of Watch before it waits for a
+// signal. Its argument closes when exitCode runs. A test sets it to hold
+// the goroutine until then, so that a signal is still in the channel when
+// exitCode runs.
+var beforeWatchWait = func(<-chan struct{}) {}
 
 // signalNames are the names of the signals that a Watch records, as bash
 // names them in a trap (INT, TERM, HUP) with the SIG prefix.
