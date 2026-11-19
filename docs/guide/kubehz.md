@@ -464,8 +464,8 @@ Use `--print-only` to mint on one machine and join on another.
 **The bootstrap token stays off argv.** The command reads the line into a
 kubeadm join configuration (`v1beta3` for kubeadm 1.22 to 1.30, `v1beta4`
 from 1.31). It writes the configuration to a file of mode 0600 in a new
-directory of mode 0700 under `TMPDIR`, and runs `kubeadm join --config
-<file>`. It removes the file and the directory after the join, after a
+directory of mode 0700 under `TMPDIR`, and runs
+`kubeadm join --config <file>`. It removes the file and the directory after the join, after a
 failure, and after Ctrl-C, SIGTERM or SIGHUP. On a signal it stops
 `kubeadm` first: it signals `kubeadm`, waits at most 10 seconds, then
 kills it. A second Ctrl-C, SIGTERM or SIGHUP does not end the command
