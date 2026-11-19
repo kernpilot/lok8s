@@ -507,6 +507,8 @@ lo status [--domain <domain>]
 
 Delegates to the driver contract's `driver::status` function. For Lo clusters: checks if the kind cluster exists. For Capi clusters: queries the CAPI Cluster resource phase.
 
+When the kubeconfig file exists, `lo status` (also with `-o json`) reads the nodes and the `ClusterInventory/cluster` object with kubectl. Each request of these two reads stops after 5 seconds (`--request-timeout=5s`). After `lo down` the kubeconfig can point to an API server that does not answer. The Nodes section then shows `(not reachable)`.
+
 ### lo gitops
 
 GitOps integration (Flux / Argo). **Deferred.** Both subcommands currently return a deferred-error stub: the integration is under redesign around the new `services.yaml` targets-map model.

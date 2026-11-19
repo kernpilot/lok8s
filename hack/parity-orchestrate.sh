@@ -223,6 +223,23 @@ check - status --domain alpha.dev                  # targets listed, built, stal
 : > "${PROJ}/.tilt.pid"
 check - status --domain alpha.dev                  # empty pidfile
 rm -f "${PROJ}/.tilt.pid"
+# A gone cluster with its kubeconfig left behind, as after `lo down`
+# (issue #194): the driver says NotFound and both kubectl reads still run.
+# This stub prints its arguments, so the diff also compares the
+# --request-timeout=5s of the node read in the two twins. Then it fails,
+# as an API server that does not answer.
+mkdir -p "${PROJ}/.kubeconfig"
+printf 'apiVersion: v1\n' > "${PROJ}/.kubeconfig/sharedc.yaml"
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub: print the arguments, then fail (no live cluster is reached).
+echo "stub: kubectl $*"
+exit 1
+SH
+check - status --domain shared.dev                 # lo: NotFound, kubeconfig present → Nodes (not reachable)
+parity::stub_kubectl_fail "${PROJ}"
+rm -f "${PROJ}/.kubeconfig/sharedc.yaml"
+rmdir "${PROJ}/.kubeconfig" 2>/dev/null || true
 
 # ── lo down ──────────────────────────────────────────────────────────────────
 check - down --domain nokind.dev                   # spec without .kind → refusal, NEVER driver-destroy
