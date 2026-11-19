@@ -595,6 +595,10 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInp
 		return dryResult{status: dryUnchanged}
 	}
 
+	// The diff's stdout is the diff text. Its stderr goes to a buffer that
+	// only the classification below reads: lo never prints it, at any exit
+	// code and at any log level, because it can quote a value of the
+	// manifest (see diffFailedText).
 	var out, errOut strings.Builder
 	err := e.Runner.Run(ctx, execx.Cmd{
 		Name:   "kubectl",
@@ -604,9 +608,6 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInp
 	})
 	rc := execx.ExitCode(err)
 	errMsg := strings.TrimRight(errOut.String(), "\n")
-	if errMsg != "" {
-		fmt.Fprintln(stderr, errMsg)
-	}
 	diff := out.String()
 	if e.Options.RenderDir != "" {
 		text := ""
@@ -647,10 +648,27 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInp
 		res.changed, res.added, res.counted = summarizeDiff(diff)
 		return res
 	}
-	// rc > 1, no race pattern: kubectl/diff genuinely failed. The stderr
-	// went out above.
-	ui.ErrorTo(stderr, "bootstrap: kubectl diff failed for %s (rc=%d)", label, rc)
+	// rc > 1, no race pattern: kubectl/diff genuinely failed.
+	ui.ErrorTo(stderr, "%s", diffFailedText(label, kubeconfig, e.Options.RenderDir, stem, rc))
 	return dryResult{status: dryError}
+}
+
+// diffFailedText is the line of a failed `kubectl diff` (rc > 1, no race
+// pattern): fixed text that names the entry and the exit code, also at
+// debug, and never the kubectl message. A server-side diff of a bad
+// manifest quotes the bad value, also of a Secret: a field error prints
+// "Invalid value: <value>", a typed-patch error prints
+// "valueUnstructured{Value:<value>}". The line tells the operator how to
+// see the message: run the diff by hand on the rendered file under
+// --render-dir (without --render-dir, do the dry run again with it). The
+// bash twin (bootstrap::_diff_manifest) prints the same text.
+func diffFailedText(label, kubeconfig, renderDir, stem string, rc int) string {
+	dir, again := renderDir, ""
+	if dir == "" {
+		dir, again = "<dir>", "do the dry run again with --render-dir <dir>, then "
+	}
+	return fmt.Sprintf("bootstrap: kubectl diff failed for %s (rc=%d). lo does not show the kubectl message: it can quote a value of the manifest. To see it, %srun: kubectl --kubeconfig %s diff --server-side --force-conflicts -f %s/%s.yaml",
+		label, rc, again, kubeconfig, dir, stem)
 }
 
 // renderDirMarker names the file a dry run writes into a fresh/emptied

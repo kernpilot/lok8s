@@ -1807,15 +1807,16 @@ bootstrap::_diff_manifest() {
     return 0
   fi
 
-  # The diff's stdout is the diff text; its stderr (warnings, the error of a
-  # failed call) is forwarded to ours.
+  # The diff's stdout is the diff text. Its stderr goes to a temp file under
+  # the boundary that only the classification below reads: lo never prints
+  # it, at any exit code and at any log level, because it can quote a value
+  # of the manifest (see the error line at the end).
   local _derr _diff _drc=0 _emsg
   _derr="$(mktemp -p "${bootstrap_dry_boundary:-${TMPDIR:-/tmp}}")" || { error "bootstrap: dry-run: no temp file"; echo error; return 0; }
   _diff=$(printf '%s\n' "${diff_input}" \
     | kubectl --kubeconfig "${kubeconfig}" diff --server-side --force-conflicts -f - 2>"${_derr}") || _drc=$?
   _emsg="$(cat "${_derr}" 2>/dev/null || true)"
   rm -f "${_derr}"
-  [[ -z "${_emsg}" ]] || printf '%s\n' "${_emsg}" >&2
   if [[ -n "${bootstrap_render_dir:-}" ]]; then
     local _diff_write_rc=0
     if [[ -n "${_diff}" ]]; then
@@ -1869,7 +1870,19 @@ bootstrap::_diff_manifest() {
       echo "differs changed=${_chg} new=${_new}"
       return 0 ;;
   esac
-  error "bootstrap: kubectl diff failed for ${label} (rc=${_drc})"
+  # rc > 1, no race pattern: fixed text that names the entry and the exit
+  # code, also at debug, and never the kubectl message. A server-side diff
+  # of a bad manifest quotes the bad value, also of a Secret: a field error
+  # prints "Invalid value: <value>", a typed-patch error prints
+  # "valueUnstructured{Value:<value>}". The line tells the operator how to
+  # see the message: run the diff by hand on the rendered file under
+  # --render-dir (without --render-dir, do the dry run again with it). The
+  # Go twin: diffFailedText.
+  local _hint_dir="${bootstrap_render_dir:-}" _again=""
+  if [[ -z "${_hint_dir}" ]]; then
+    _hint_dir="<dir>" _again="do the dry run again with --render-dir <dir>, then "
+  fi
+  error "bootstrap: kubectl diff failed for ${label} (rc=${_drc}). lo does not show the kubectl message: it can quote a value of the manifest. To see it, ${_again}run: kubectl --kubeconfig ${kubeconfig} diff --server-side --force-conflicts -f ${_hint_dir}/${stem}.yaml"
   echo error
   return 0
 }
