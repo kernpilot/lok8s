@@ -46,6 +46,8 @@ services.*.yaml
 
 # dependencies
 node_modules/
+# the repo uses yarn.lock; `npm install` writes this file (CONTRIBUTING.md)
+/package-lock.json
 
 # claude — the whole agent-tooling tree is internal (planning/handoff/feedback +
 # the cuite subtree); kept local, never published. Root CLAUDE.md/AGENTS.md stay.
