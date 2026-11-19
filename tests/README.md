@@ -69,6 +69,14 @@ library-under-test and its utility deps (see
 (`yq`, `kubectl`, `docker`, `kustomize`, `kubehz::*`) — unit tests
 never touch a real cluster or network.
 
+A test that sources a driver also gets a net under its function stubs:
+`stub_tools <tool>...` in `setup()`, after `setup_tmpdir`, and
+`assert_no_tool_ran` in `teardown()`, before `teardown_tmpdir`.
+
+Each named tool is then a stub first on PATH that logs its call and
+fails. Teardown fails the test when one ran. A function of the same
+name still answers first. See `tests/unit/lo_provision_guards_test.bats`.
+
 The helper sets `XDG_STATE_HOME`, `XDG_CACHE_HOME` and
 `LO_REGISTRY_STATE_DIR` to directories under `BATS_TEST_TMPDIR` for each
 test (`isolate_state_dirs`). Load the helper in `setup()`, where

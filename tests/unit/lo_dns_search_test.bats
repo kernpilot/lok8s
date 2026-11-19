@@ -7,10 +7,16 @@
 # (internal/driver/lo/testdata/kindconfig_*.golden), so both implementations
 # render the same kind config. The reader's error lines are pinned with the
 # same text as the Go twin. Go twin: internal/driver/lo/dnssearch_test.go.
+#
+# No test may reach a real tool. Setup puts failing stubs of eight tools first
+# on PATH (stub_tools in tests/test_helper.bash), and teardown fails the test
+# when one of them ran. The provision tests stub every collaborator that would
+# run one (_provision_stubs).
 
 setup() {
   load "../test_helper"
   setup_tmpdir
+  stub_tools docker kind kubectl helm ssh scp rsync curl
   import() { :; }
   export -f import
   command -v yq &>/dev/null || skip "yq not available"
@@ -23,7 +29,13 @@ setup() {
   GOLDEN="${_PROJECT_ROOT}/internal/driver/lo/testdata"
 }
 
-teardown() { teardown_tmpdir; }
+# Every test ends with the check that no tool on PATH ran.
+teardown() {
+  local rc=0
+  assert_no_tool_ran || rc=$?
+  teardown_tmpdir
+  return "${rc}"
+}
 
 # _same_as_golden <golden> [spec] — the bash render equals the golden file.
 _same_as_golden() {
@@ -51,29 +63,6 @@ _dns_search() {
 _spec() {
   printf 'kind: Lo\nmetadata:\n  name: dns\nspec:\n%s' "${1}" > "${BATS_TEST_TMPDIR}/spec.yaml"
   echo "${BATS_TEST_TMPDIR}/spec.yaml"
-}
-
-# _stub_tools — docker, kind and kubectl FIRST on PATH: each logs its argv and
-# fails. A provision test calls _no_tool_ran at its end, so a real tool can
-# never touch the host's live clusters, and a call that a stub catches fails
-# the test.
-_stub_tools() {
-  local tool
-  mkdir -p "${BATS_TEST_TMPDIR}/stub-bin"
-  for tool in docker kind kubectl; do
-    printf '#!/usr/bin/env bash\necho "%s $*" >> "%s"\nexit 97\n' \
-      "${tool}" "${BATS_TEST_TMPDIR}/tools.log" > "${BATS_TEST_TMPDIR}/stub-bin/${tool}"
-    chmod +x "${BATS_TEST_TMPDIR}/stub-bin/${tool}"
-  done
-  export PATH="${BATS_TEST_TMPDIR}/stub-bin:${PATH}"
-}
-
-_no_tool_ran() {
-  [ ! -s "${BATS_TEST_TMPDIR}/tools.log" ] || {
-    echo "a tool on PATH ran (only the function stubs may answer):" >&2
-    cat "${BATS_TEST_TMPDIR}/tools.log" >&2
-    return 1
-  }
 }
 
 @test "render: the default config equals the golden and drops the host search domains" {
@@ -597,7 +586,10 @@ echo 'Error: bad file' >&2; exit 1"
 # SUCCEED, except the render and the DNS search reader (the real ones).
 # `kind create` copies its config file to ${BATS_TEST_TMPDIR}/kind-config.
 _provision_stubs() {
-  _stub_tools
+  # A shell that exports one of these sends driver::provision down another
+  # path: LOK8S_REMOTE* to the remote branch and the expose, PROVIDER_NAME to
+  # the provider, LOK8S_BOOTSTRAP_DRYRUN* to the registry document of a dry run.
+  unset "${!LOK8S_REMOTE@}" PROVIDER_NAME "${!LOK8S_BOOTSTRAP_DRYRUN@}"
   export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters" PATH_BASE="${BATS_TEST_TMPDIR}/base"
   mkdir -p "${PATH_CLUSTERS}/test.dev" "${PATH_BASE}/.kubeconfig"
   printf 'apiVersion: cluster.lok8s.dev/v1beta1\nkind: Lo\nmetadata:\n  name: lotest\nspec:\n  runtime: kind\n  kubernetes:\n    version: v1.31.4\n%s' \
@@ -611,12 +603,15 @@ _provision_stubs() {
   registry::is_shared() { return 1; }
   lo::registries_tls_cert() { :; }
   lo::registries() { :; }
+  # The registry network of the nodes (docker) acts only when the environment
+  # names a registry document (LOK8S_REGISTRY_JSON).
+  lo::reconcile_registry_network_nodes() { :; }
   lo::write_certs_d() { :; }
   lo::write_oidc_auth_config() { :; }
   lo::registries_tls_nudge() { :; }
   _lo_extract_kubeconfig() { echo "${PATH_BASE}/.kubeconfig/lotest.yaml"; }
   # The node-ip heal gate runs `docker network inspect`; no node has a
-  # registry NIC here.
+  # registry NIC here, so the heal (docker, kind) does not run.
   lo::nodes_on_registry_network() { return 1; }
   lo::coredns() { :; }
   lo::apply_local_registry_hosting() { :; }
@@ -641,7 +636,6 @@ _provision_stubs() {
   [ "${rc}" -eq 0 ]
   [ -s "${BATS_TEST_TMPDIR}/kind-config" ] || { echo "kind create got no config" >&2; return 1; }
   _dns_search "${BATS_TEST_TMPDIR}/kind-config"
-  _no_tool_ran
 }
 
 @test "lo provision: kind create gets the spec.network.dnsSearch list" {
@@ -652,7 +646,6 @@ _provision_stubs() {
   driver::provision test.dev || rc=$?
   [ "${rc}" -eq 0 ]
   _dns_search "${BATS_TEST_TMPDIR}/kind-config" corp.example.com example.ts.net
-  _no_tool_ran
 }
 
 @test "lo provision: a bad dnsSearch entry stops before kind create" {
@@ -668,5 +661,22 @@ _provision_stubs() {
     echo "the provision went on to the docker network after the rejected read" >&2; return 1
   fi
   [ ! -e "${BATS_TEST_TMPDIR}/kind-config" ]
-  _no_tool_ran
+}
+
+@test "lo provision: a registry document in the environment reaches no real tool" {
+  # The registry steps act on LOK8S_REGISTRY_JSON. A shell that exports it
+  # would send the real lo::reconcile_registry_network_nodes to docker. The
+  # stub in _provision_stubs keeps it off, and teardown fails this test when
+  # a tool on PATH ran.
+  _provision_stubs
+  export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/registries.json"
+  cat > "${LOK8S_REGISTRY_JSON}" <<'JSON'
+{"shared": false, "tls": false, "port": 80,
+ "project_network": "lok8s-test",
+ "network": {"name": "lok8s-registry", "cidr": "172.30.0.0/24"},
+ "registries": [{"name": "cache", "ip": "172.30.0.10", "url": "", "domain": "", "host": "", "type": "local"}]}
+JSON
+  local rc=0
+  driver::provision test.dev || rc=$?
+  [ "${rc}" -eq 0 ] || { echo "the provision with a registry document failed (rc=${rc})" >&2; return 1; }
 }
