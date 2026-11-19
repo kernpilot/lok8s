@@ -100,6 +100,38 @@ for d in mock nodoc norebuild; do
     > "${PROJ}/clusters/${d}.cloud/cluster.lok8s.yaml"
   printf 'cluster_name: %sy\n' "${d}" > "${PROJ}/clusters/${d}.cloud/provider.yaml"
 done
+# twin-a.cloud and twin-b.cloud: one domain copied from the other with the
+# same cluster_name (recover refuses both).
+for d in twin-a twin-b; do
+  mkdir -p "${PROJ}/clusters/${d}.cloud"
+  printf 'kind: KubeOne\nmetadata:\n  name: %s\nspec:\n  provider:\n    name: mock\n    configRef: provider.yaml\n' "${d}" \
+    > "${PROJ}/clusters/${d}.cloud/cluster.lok8s.yaml"
+  printf 'cluster_name: twiny\n' > "${PROJ}/clusters/${d}.cloud/provider.yaml"
+done
+# Provider configs whose cluster_name recover cannot compare: a variable (the
+# rebuild expands it), a config that parses only after the expansion (a
+# variable outside quotes), a config that does not parse, a backslash (a
+# message cannot show it as it is), a merge key, a number, and a variable
+# outside the name that adds one when the rebuild expands it. Without the
+# refusal, the mock rebuild would run (and fail): refused_with checks the
+# refusal text and that it did not run.
+for d in tmpl unparsed broken bslash merge quote expand; do
+  mkdir -p "${PROJ}/clusters/${d}.cloud"
+  printf 'kind: KubeOne\nmetadata:\n  name: %s\nspec:\n  provider:\n    name: mock\n    configRef: provider.yaml\n' "${d}" \
+    > "${PROJ}/clusters/${d}.cloud/cluster.lok8s.yaml"
+done
+# shellcheck disable=SC2016  # the config holds ${...} as text: the guard must see the variable
+printf 'cluster_name: ${NAME}-a\n' > "${PROJ}/clusters/tmpl.cloud/provider.yaml"
+# shellcheck disable=SC2016  # the config holds ${...} as text: the guard must see the variable
+printf '{"cluster_name": "twiny", "token": ${LOK8S_PARITY_TOKEN}}\n' > "${PROJ}/clusters/unparsed.cloud/provider.yaml"
+printf '{"cluster_name": "twiny", "token": [}\n' > "${PROJ}/clusters/broken.cloud/provider.yaml"
+printf 'cluster_name: "a\\\\b"\n' > "${PROJ}/clusters/bslash.cloud/provider.yaml"
+# Its own merged name: the scan of the other domains reads a merge key in
+# bash (yq) but not in Go, so a merged twiny would change the twin checks.
+printf 'base: &b {cluster_name: mergy}\n<<: *b\n' > "${PROJ}/clusters/merge.cloud/provider.yaml"
+printf 'cluster_name: 0123\n' > "${PROJ}/clusters/quote.cloud/provider.yaml"
+# shellcheck disable=SC2016  # the config holds ${...} as text: the guard must see the variable
+printf '{"x": 1, "note": "${LOK8S_PARITY_NOTE}"}\n' > "${PROJ}/clusters/expand.cloud/provider.yaml"
 echo alpha.dev > "${PROJ}/clusters/.active"
 
 # The deploy artifact: one CRD, one labelled Namespace (with an UNQUOTED
@@ -236,6 +268,55 @@ check - recover mock.cloud
 check "   " recover mock.cloud
 check no recover mock.cloud --skip-rebuild     # re-provision wording
 check no recover nodoc.cloud                   # "no doctor hook" branch, then the prompt
+# A cluster_name that another domain also has: refused at resolve, before the
+# doctor, the dry run and the consent. A "yes", --force, --dry-run and
+# LOK8S_NONINTERACTIVE do not skip it. Both implementations could pass the
+# diff and still run the rebuild, so check the refusal and that no rebuild ran.
+refused_shared() {
+  grep -qF "[error] recover: cluster_name 'twiny' of '${1}' is also the cluster_name of: ${2}. " "${WORK}/go.err" \
+    || fail "recover ${1}: no refusal of the shared cluster_name on stderr"
+  ! grep -qF "mock rebuild" "${WORK}/go.out" "${WORK}/go.err" || fail "recover ${1}: the rebuild ran"
+}
+check yes recover twin-a.cloud
+refused_shared twin-a.cloud twin-b.cloud
+check - recover --force twin-a.cloud
+refused_shared twin-a.cloud twin-b.cloud
+check - recover --dry-run twin-b.cloud
+refused_shared twin-b.cloud twin-a.cloud
+check - recover --force --skip-rebuild twin-b.cloud
+refused_shared twin-b.cloud twin-a.cloud
+export LOK8S_NONINTERACTIVE=1
+check - recover twin-a.cloud
+refused_shared twin-a.cloud twin-b.cloud
+unset LOK8S_NONINTERACTIVE
+# A cluster_name that recover cannot compare: refused before it compares.
+# refused_with <domain> <refusal text>
+refused_with() {
+  grep -qF "${2}" "${WORK}/go.err" || fail "recover ${1}: no refusal on stderr: ${2}"
+  ! grep -qF "is also the cluster_name of" "${WORK}/go.err" || fail "recover ${1}: the guard compared the name"
+  ! grep -qF "mock rebuild" "${WORK}/go.out" "${WORK}/go.err" || fail "recover ${1}: the rebuild ran"
+}
+check - recover --force tmpl.cloud
+refused_with tmpl.cloud "[error] recover: the cluster_name '\${NAME}-a' of 'tmpl.cloud' has a '\$'. The rebuild expands the variables in the provider config"
+# The variable is unset: the expansion gives `"token": }`, which parses.
+unset LOK8S_PARITY_TOKEN
+check - recover --force unparsed.cloud
+refused_with unparsed.cloud "[error] recover: the provider config of 'unparsed.cloud' parses only after its variables are expanded."
+check - recover --force broken.cloud
+refused_with broken.cloud "[error] recover: the provider config of 'broken.cloud' is not one YAML or JSON document whose top is a mapping"
+check - recover --force bslash.cloud
+refused_with bslash.cloud "[error] recover: the provider config of 'bslash.cloud' names a cluster_name with a character that a message cannot show as it is"
+check - recover --force merge.cloud
+refused_with merge.cloud "[error] recover: the provider config of 'merge.cloud' has a merge key (<<) at the top."
+check - recover --force quote.cloud
+refused_with quote.cloud "[error] recover: the cluster_name of the provider config of 'quote.cloud' is not a text"
+# The variable adds the cluster_name of the twins when the rebuild expands it:
+# both implementations expand with the envsubst on PATH, in the shell of the
+# provider.
+export LOK8S_PARITY_NOTE='a", "cluster_name": "twiny'
+check - recover --force expand.cloud
+refused_with expand.cloud "[error] recover: the provider config of 'expand.cloud' gives another cluster_name when the rebuild expands its variables"
+unset LOK8S_PARITY_NOTE
 # --dry-run: the mock rebuild runs under CLOUD_DRY_RUN; provision never.
 check - recover --dry-run mock.cloud
 check - recover -v --dry-run mock.cloud

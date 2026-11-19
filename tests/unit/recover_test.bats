@@ -667,3 +667,413 @@ EOF
   [ "$status" -ne 0 ]
   [[ "$output" == *"too many arguments"*"stray-token"* ]]
 }
+
+# ── the cluster_name guard ───────────────────────────────────────────────────
+# The hetzner provider::rebuild resets the servers with
+# lok8s.dev/cluster=<cluster_name> and the owner mark of the domain. A
+# cluster_name that another domain under clusters/ also has in its provider
+# config is refused at resolve (recover::_cluster_name_guard, Go twin:
+# Runner.guardClusterName), before the doctor, the dry run and the consent.
+# As in the destroy guard, nothing skips it. The real
+# provision::_cluster_name_users of the provision lib scans clusters/.
+
+# _shared_name_setup: the provision lib (for its scan), the fakes, and a
+# provider::rebuild that records a line that the refusal tests refute. The
+# provider config of test.dom and the hetzner.json of copy.dom have the
+# cluster_name "shared".
+_shared_name_setup() {
+  # shellcheck source=/dev/null
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  _fakes_all
+  provision::load_provider_creds() { :; }
+  provider::rebuild() { echo "REBUILD-RAN" >> "${RECORD}"; return 1; }
+  printf '{"cluster_name": "shared"}\n' > "${_FAKE_CFG}"
+  mkdir -p "${PATH_CLUSTERS}/copy.dom"
+  printf '{"cluster_name": "shared"}\n' > "${PATH_CLUSTERS}/copy.dom/hetzner.json"
+}
+
+# _assert_refused: the refusal, and nothing ran after the resolve (no doctor,
+# no rebuild, no provision).
+_assert_refused() {
+  assert_failure 1
+  assert_output --partial "[error] recover: cluster_name 'shared' of 'test.dom' is also the cluster_name of: copy.dom. The rebuild resets only the servers with this cluster_name and the owner mark of 'test.dom'."
+  assert_output --partial "Nothing was changed. Give each domain its own cluster_name, then run lo recover again."
+  refute_output --partial "continue? [type yes"
+  refute_output --partial "DRY RUN"
+  run cat "${RECORD}"
+  assert_output "resolve"
+}
+
+@test "recover refuses a cluster_name that another domain has: a yes at the prompt" {
+  _shared_name_setup
+  run recover::_run "test.dom" 0 0 <<<"yes"
+  _assert_refused
+}
+
+@test "recover refuses a cluster_name that another domain has: --force" {
+  _shared_name_setup
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  _assert_refused
+}
+
+@test "recover refuses a cluster_name that another domain has: LOK8S_NONINTERACTIVE" {
+  _shared_name_setup
+  export LOK8S_NONINTERACTIVE=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  _assert_refused
+}
+
+@test "recover refuses a cluster_name that another domain has: --dry-run" {
+  _shared_name_setup
+  run recover::_run "test.dom" 0 1 </dev/null
+  _assert_refused
+}
+
+@test "recover refuses a cluster_name that another domain has: --force --skip-rebuild" {
+  _shared_name_setup
+  force=1
+  run recover::_run "test.dom" 1 0 </dev/null
+  _assert_refused
+}
+
+@test "recover refuses a cluster_name of an inline config and a configRef too, and names each domain, sorted" {
+  _shared_name_setup
+  mkdir -p "${PATH_CLUSTERS}/b.dom" "${PATH_CLUSTERS}/ref.dom/infra"
+  printf 'kind: KubeOne\nmetadata:\n  name: b\nspec:\n  provider:\n    name: mock\n    config:\n      cluster_name: shared\n' \
+    > "${PATH_CLUSTERS}/b.dom/cluster.lok8s.yaml"
+  printf 'kind: KubeOne\nmetadata:\n  name: ref\nspec:\n  provider:\n    name: mock\n    configRef: infra/desc.yaml\n' \
+    > "${PATH_CLUSTERS}/ref.dom/cluster.lok8s.yaml"
+  printf 'cluster_name: shared\n' > "${PATH_CLUSTERS}/ref.dom/infra/desc.yaml"
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_failure 1
+  assert_output --partial "is also the cluster_name of: b.dom, copy.dom, ref.dom. "
+  run cat "${RECORD}"
+  assert_output "resolve"
+}
+
+@test "recover runs when only this domain has the cluster_name (its own files, a dot dir, another name)" {
+  _shared_name_setup
+  _fake_rebuild
+  printf '{"cluster_name": "other"}\n' > "${PATH_CLUSTERS}/copy.dom/hetzner.json"
+  mkdir -p "${PATH_CLUSTERS}/test.dom" "${PATH_CLUSTERS}/.old"
+  printf '{"cluster_name": "shared"}\n' > "${PATH_CLUSTERS}/test.dom/hetzner.json"
+  printf '{"cluster_name": "shared"}\n' > "${PATH_CLUSTERS}/.old/hetzner.json"
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_success
+  refute_output --partial "is also the cluster_name of"
+  run cat "${RECORD}"
+  assert_output --partial "rebuild cfg=${_FAKE_CFG}"
+  assert_output --partial "provision test.dom"
+}
+
+@test "recover checks the cluster_name of the provider config only, not the name of the prompt" {
+  _shared_name_setup
+  _fake_rebuild
+  printf '{}\n' > "${_FAKE_CFG}"
+  printf '{"cluster_name": "test.dom"}\n' > "${PATH_CLUSTERS}/copy.dom/hetzner.json"
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_success
+  refute_output --partial "is also the cluster_name of"
+  run cat "${RECORD}"
+  assert_output --partial "provision test.dom"
+}
+
+# The real scan (provision::_cluster_name_users) fails only when its
+# printf | sort pipeline fails: a yq error reads as no name. So this test
+# stubs the scan to pin the fail-closed branch of the guard.
+@test "recover stops when the cluster_name scan fails (a stub: the real scan fails only when its printf | sort fails)" {
+  _shared_name_setup
+  provision::_cluster_name_users() { return 1; }
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_failure 1
+  assert_output --partial "[error] recover: could not check if another domain has the cluster_name 'shared' of 'test.dom'. Nothing was changed. Run lo recover again."
+  run cat "${RECORD}"
+  assert_output "resolve"
+}
+
+@test "recover stops when jq cannot check the cluster_name (a stub jq that fails)" {
+  _shared_name_setup
+  jq() { return 1; }
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_failure 1
+  assert_output --partial "[error] recover: could not check the cluster_name of the provider config of 'test.dom'. Nothing was changed. Check that jq runs, then run lo recover again."
+  refute_output --partial "is also the cluster_name of"
+  run cat "${RECORD}"
+  assert_output "resolve"
+}
+
+# ── the cluster_name guard: the shapes of the provider config ───────────────
+# The same table as configShapes in internal/recover/recover_test.go. Each row
+# runs the guard on a provider config of test.dom with that text. A row
+# "none:<text>" or "shared:<text>" gives copy.dom the cluster_name <text>:
+# for "none", the text that a wrong read gives (yq without `// ""` prints
+# "null" and "false"). Other rows give copy.dom a name that no row reads.
+# The config file is hetzner.json, so a YAML row also checks that the guard
+# parses the config by its content, not by its extension.
+
+_msg_config="[error] recover: the provider config of 'test.dom' is not one YAML or JSON document whose top is a mapping with a plain cluster_name (not an alias, a mapping or a list), so recover cannot compare its cluster_name with the other domains. Nothing was changed. Correct the provider config, then run lo recover again."
+_msg_merge="[error] recover: the provider config of 'test.dom' has a merge key (<<) at the top. The rebuild can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write cluster_name as a literal key, without a merge key, then run lo recover again."
+_msg_quote="[error] recover: the cluster_name of the provider config of 'test.dom' is not a text: YAML reads it as a number, as true or as another type. The rebuild writes it as JSON, which can change how it is written, so recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write the cluster_name in quotes, then run lo recover again."
+_msg_unshown="[error] recover: the provider config of 'test.dom' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was changed. Correct the cluster_name in the provider config, then run lo recover again."
+_msg_expand="[error] recover: could not expand the variables of the provider config of 'test.dom' as the rebuild does (the provider shell or envsubst failed). Nothing was changed. Check the provider config, that the provider loads and that envsubst runs, then run lo recover again."
+_msg_unquoted="[error] recover: the provider config of 'test.dom' parses only after its variables are expanded. recover reads the cluster_name before and after the expansion, so it cannot compare it with the other domains. A variable outside quotes can cause this. Nothing was changed. Write each variable of the provider config in quotes, then run lo recover again."
+_msg_changed="[error] recover: the provider config of 'test.dom' gives another cluster_name when the rebuild expands its variables (a variable adds or changes it), so recover cannot compare the cluster_name that the rebuild uses with the other domains. Nothing was changed. Write the provider config so that no variable sets or changes the cluster_name, then run lo recover again."
+
+# _guard_row <row name> <want> <config text>: run the guard on the config and
+# check the result. <want>: none:<text> (no refusal), shared:<n> (the refusal
+# names <n>), or config, merge, quote, unshown, changed or unquoted (that
+# refusal and nothing else).
+_guard_row() {
+  local row="${1}" want="${2}" other="a-name-no-row-reads"
+  echo "row: ${row}"
+  [[ "${want}" != *:* ]] || other="${want#*:}"
+  printf '%s' "${3}" > "${_FAKE_CFG}"
+  jq -n --arg n "${other}" '{cluster_name: $n}' > "${PATH_CLUSTERS}/copy.dom/hetzner.json"
+  _RECOVER_DOMAIN="test.dom"
+  _RECOVER_CONFIG="${_FAKE_CFG}"
+  run recover::_cluster_name_guard
+  case "${want}" in
+    none:*)
+      assert_success
+      assert_output "" ;;
+    shared:*)
+      assert_failure 1
+      assert_output --partial "[error] recover: cluster_name '${other}' of 'test.dom' is also the cluster_name of: copy.dom. " ;;
+    config | merge | quote | unshown | changed | unquoted)
+      local msg="_msg_${want}"
+      assert_failure 1
+      assert_output "${!msg}" ;;
+    *)
+      echo "unknown want: ${want}"
+      return 1 ;;
+  esac
+}
+
+@test "recover guard: a provider config without a cluster_name is not checked" {
+  _shared_name_setup
+  _guard_row "empty file" none:null ""
+  _guard_row "only a comment" none:null $'# a comment\n'
+  _guard_row "null document" none:null $'null\n'
+  _guard_row "empty mapping" none:null $'{}\n'
+  _guard_row "a mapping without the key" none:null $'x: 1\n'
+  _guard_row "null" none:null $'cluster_name: null\n'
+  _guard_row "false" none:false $'cluster_name: false\n'
+  _guard_row "False" none:False $'cluster_name: False\n'
+}
+
+@test "recover guard: reads a cluster_name that is a text, as yq prints it" {
+  _shared_name_setup
+  _guard_row "json" shared:a '{"cluster_name": "a"}'
+  _guard_row "json with tabs" shared:a $'{\n\t"cluster_name": "a"\n}\n'
+  _guard_row "yaml with a leading document marker" shared:a $'---\ncluster_name: a\n'
+  _guard_row "a quoted number is a text" shared:0123 $'cluster_name: "0123"\n'
+  _guard_row "a quoted false is a text" shared:false $'cluster_name: "false"\n'
+  _guard_row "yes is a text" shared:yes $'cluster_name: yes\n'
+  _guard_row "two keys: the last one" shared:b $'cluster_name: a\ncluster_name: b\n'
+}
+
+@test "recover guard: refuses a provider config that does not parse or is not one mapping" {
+  _shared_name_setup
+  _guard_row "does not parse" config '{"cluster_name": "a", "token": [}'
+  _guard_row "top is a list" config $'- a\n- b\n'
+  _guard_row "top is a text" config $'hello\n'
+  _guard_row "top has a custom tag" config $'!foo {cluster_name: a}\n'
+  _guard_row "two documents" config $'cluster_name: a\n---\ncluster_name: b\n'
+  _guard_row "an empty second document" config $'cluster_name: a\n---\n'
+}
+
+@test "recover guard: refuses a cluster_name that is an alias, a mapping or a list" {
+  _shared_name_setup
+  _guard_row "name is a mapping" config $'cluster_name:\n  x: 1\n'
+  _guard_row "name is a list" config $'cluster_name: [a]\n'
+  _guard_row "name is an alias" config $'n: &x a\ncluster_name: *x\n'
+}
+
+@test "recover guard: refuses a merge key at the top" {
+  _shared_name_setup
+  _guard_row "a merge key gives the name" merge $'base: &b {cluster_name: merged}\n<<: *b\n'
+  _guard_row "a merge key after the name" merge $'base: &b {cluster_name: merged}\ncluster_name: a\n<<: *b\n'
+  _guard_row "a merge key with a list" merge $'base: &b {x: 1}\n<<: [*b]\ncluster_name: a\n'
+  _guard_row "a quoted << key" merge $'"<<": x\ncluster_name: a\n'
+}
+
+@test "recover guard: refuses a cluster_name that is not a text, and says to quote it" {
+  _shared_name_setup
+  _guard_row "int" quote $'cluster_name: 0123\n'
+  _guard_row "hex int" quote $'cluster_name: 0x1F\n'
+  _guard_row "float" quote $'cluster_name: 1.5\n'
+  _guard_row "true" quote $'cluster_name: true\n'
+  _guard_row "True" quote $'cluster_name: True\n'
+  _guard_row "name has a custom tag" quote $'cluster_name: !foo a\n'
+  _guard_row "name is a timestamp" quote $'cluster_name: 2001-12-14\n'
+}
+
+@test "recover guard: keeps the newline at the end of a cluster_name and a NUL, and refuses them" {
+  _shared_name_setup
+  _guard_row "name ends with a newline" unshown $'cluster_name: "a\\n"\n'
+  _guard_row "name has a NUL" unshown $'cluster_name: "a\\0b"\n'
+}
+
+# ── the cluster_name guard: the expansion of the rebuild ────────────────────
+# The guard reads the config again after the real envsubst on PATH (the
+# expansion of template::descriptor_json). GUARD_NOTE is the variable of
+# each row.
+
+# _expand_row <row name> <GUARD_NOTE> <want> <config text>: _guard_row with
+# GUARD_NOTE exported.
+_expand_row() {
+  export GUARD_NOTE="${2}"
+  _guard_row "${1}" "${3}" "${4}"
+  unset GUARD_NOTE
+}
+
+@test "recover guard: refuses a variable that adds or changes the cluster_name (the real envsubst)" {
+  _shared_name_setup
+  _expand_row "a variable adds a cluster_name" 'a", "cluster_name": "shared' changed '{"x": 1, "note": "${GUARD_NOTE}"}'
+  _expand_row "a variable adds a cluster_name in yaml" $'a\ncluster_name: shared' changed $'x: 1\nnote: ${GUARD_NOTE}\n'
+  _expand_row "a variable changes the cluster_name" 'b", "cluster_name": "shared' changed '{"cluster_name": "a", "note": "${GUARD_NOTE}"}'
+  _expand_row "a variable takes the cluster_name away" 'x", "cluster_name": null, "y": "' changed '{"cluster_name": "a", "note": "${GUARD_NOTE}"}'
+  _expand_row "a variable adds a merge key" $'x\n<<: {cluster_name: shared}' changed $'cluster_name: a\nnote: ${GUARD_NOTE}\n'
+  _expand_row "a variable breaks the config" $'[\n' changed $'cluster_name: a\nnote: ${GUARD_NOTE}\n'
+  # No cluster_name before the expansion: only the verdict of the read
+  # changes, not the name (none before, another verdict after).
+  _expand_row "a variable adds a merge key with a cluster_name, no cluster_name before" $'x\n<<: {cluster_name: shared}' changed $'x: 1\nnote: ${GUARD_NOTE}\n'
+  _expand_row "a variable adds a cluster_name that is not a text" 'a", "cluster_name": 123, "y": "' changed '{"x": 1, "note": "${GUARD_NOTE}"}'
+  _expand_row "a variable breaks a config without a cluster_name" $'[\n' changed $'x: 1\nnote: ${GUARD_NOTE}\n'
+}
+
+@test "recover guard: a config that parses only after the expansion names a variable outside quotes" {
+  _shared_name_setup
+  _expand_row "a variable outside quotes" 3 unquoted '{"cluster_name": "a", "count": ${GUARD_NOTE}}'
+  _expand_row "a config that does not parse after the expansion either" 3 config '{"cluster_name": "a", "count": ${GUARD_NOTE}'
+}
+
+@test "recover guard: an expansion that keeps the cluster_name passes (the real envsubst)" {
+  _shared_name_setup
+  _expand_row "an expansion that keeps the cluster_name" xyz shared:a '{"cluster_name": "a", "token": "${GUARD_NOTE}"}'
+  _expand_row "an unset variable" "" shared:a '{"cluster_name": "a", "token": "${GUARD_UNSET_NOTE}"}'
+  _expand_row "an expansion without a cluster_name" xyz none:null '{"token": "${GUARD_NOTE}"}'
+}
+
+@test "recover guard: a config that does not parse, with a failed expansion, gets the general text" {
+  _shared_name_setup
+  envsubst() { return 1; }
+  _guard_row "a variable outside quotes, envsubst fails" config '{"cluster_name": "a", "count": ${GUARD_NOTE}}'
+}
+
+@test "recover: the resolve debug line comes after the guard (DEBUG)" {
+  _shared_name_setup
+  export DEBUG=1
+  force=1
+  # A name that the guard refuses never reaches the debug line.
+  jq -nc --arg n $'a\e[2Jb' '{cluster_name: $n}' > "${_FAKE_CFG}"
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_failure 1
+  assert_output --partial "${_msg_unshown}"
+  refute_output --partial "recover: resolved"
+  refute_output --partial $'\e[2J'
+  # A name that passes: the debug line follows the guard.
+  printf '{"cluster_name": "solo"}\n' > "${_FAKE_CFG}"
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_output --partial "recover: resolved test.dom → provider="
+  unset DEBUG
+}
+
+@test "recover stops when envsubst fails (a stub envsubst that fails)" {
+  _shared_name_setup
+  envsubst() { return 1; }
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_failure 1
+  assert_output --partial "${_msg_expand}"
+  refute_output --partial "is also the cluster_name of"
+  run cat "${RECORD}"
+  assert_output "resolve"
+}
+
+# ── the cluster_name guard: names it cannot show or compare ─────────────────
+# Each row runs recover with --force, and copy.dom has the same text: the
+# guard must refuse before it compares, and before a message shows the name.
+
+# _refuses_name <row name> <config text> <message>: recover refuses with
+# <message>, does not compare, does not show an escape of the name, and stops
+# after the resolve.
+_refuses_name() {
+  echo "row: ${1}"
+  printf '%s\n' "${2}" > "${_FAKE_CFG}"
+  printf '%s\n' "${2}" > "${PATH_CLUSTERS}/copy.dom/hetzner.json"
+  : > "${RECORD}"
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_failure 1
+  assert_output --partial "${3}"
+  refute_output --partial "is also the cluster_name of"
+  refute_output --partial $'\e[2J'
+  run cat "${RECORD}"
+  assert_output "resolve"
+}
+
+@test "recover refuses a cluster_name that a message cannot show (as lo destroy does)" {
+  _shared_name_setup
+  local v
+  for v in $'a\e[2Jb' 'a\b' $'a\xe2\x80\xaeb' $'a\xe2\x80\x8bb' $'a\xef\xbf\xbdb'; do
+    _refuses_name "$(printf '%q' "${v}")" "$(jq -nc --arg n "${v}" '{cluster_name: $n}')" "${_msg_unshown}"
+  done
+  # A NUL: bash drops it from a string, so the guard reads the name as JSON.
+  _refuses_name "NUL" '{"cluster_name": "a\u0000b"}' "${_msg_unshown}"
+  # yaml (both twins) does not parse a file that is not UTF-8.
+  _refuses_name "not UTF-8" $'cluster_name: a\xffb' "${_msg_config}"
+}
+
+@test "recover refuses a cluster_name with a variable: the rebuild expands it" {
+  _shared_name_setup
+  local v
+  for v in '${NAME}-a' 'prod-$ENV'; do
+    _refuses_name "${v}" "$(jq -nc --arg n "${v}" '{cluster_name: $n}')" \
+      "[error] recover: the cluster_name '${v}' of 'test.dom' has a '\$'. The rebuild expands the variables in the provider config, so the cluster_name that it uses can differ from this text, and recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write the cluster_name without a variable, then run lo recover again."
+  done
+}
+
+# ── the cluster_name guard: this domain's real provider config ──────────────
+# The real recover::_load_provider reads the provider config of the spec of
+# clusters/test.dom (provider::write_config: a configRef, or an inline config
+# that it writes to a temp file). Only provider::load is a stub (it would
+# source the provider). The fake config holds another name, so a fake load
+# does not give the refusal.
+
+_real_config_setup() {
+  _shared_name_setup
+  # shellcheck source=/dev/null
+  source "${_PROJECT_ROOT}/.lok8s/utils/provider.sh"
+  # shellcheck source=/dev/null
+  source "${_PROJECT_ROOT}/.lok8s/libs/recover"
+  provider::load() { :; }
+  printf '{"cluster_name": "the-fake-config"}\n' > "${_FAKE_CFG}"
+  mkdir -p "${PATH_CLUSTERS}/test.dom"
+  _FAKE_SPEC="${PATH_CLUSTERS}/test.dom/cluster.lok8s.yaml"
+  unset PROVIDER_CONFIG_FILE PROVIDER_DOMAIN
+}
+
+@test "recover refuses a cluster_name of this domain's real configRef" {
+  _real_config_setup
+  mkdir -p "${PATH_CLUSTERS}/test.dom/infra"
+  printf 'kind: KubeOne\nmetadata:\n  name: test\nspec:\n  provider:\n    name: mock\n    configRef: infra/desc.yaml\n' > "${_FAKE_SPEC}"
+  printf 'cluster_name: shared\n' > "${PATH_CLUSTERS}/test.dom/infra/desc.yaml"
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  _assert_refused
+}
+
+@test "recover refuses a cluster_name of this domain's real inline config" {
+  _real_config_setup
+  printf 'kind: KubeOne\nmetadata:\n  name: test\nspec:\n  provider:\n    name: mock\n    config:\n      cluster_name: shared\n' > "${_FAKE_SPEC}"
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  _assert_refused
+}
