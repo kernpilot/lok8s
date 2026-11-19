@@ -655,6 +655,20 @@ lines come in the order of the run; only the `--render-dir` files carry the
 - `restore.d` is diffed as its own entry, because a real run applies it
   before all other entries. The files decrypt with the normal sops key
   discovery. A file that does not decrypt is an error: the run exits 2.
+- `error`: the render or the server-side diff of the entry failed, and the
+  run exits 2. For a failed diff, lo prints the exit code of kubectl but not
+  the kubectl message, also at debug: the message can quote a value of the
+  manifest, also of a Secret. lo does not print the kubectl warnings of a
+  diff that exits 0 or 1 either. The line gives the command that shows the
+  message: `kubectl diff` on the rendered file under `--render-dir`, with
+  the kubectl that the dry run used. Each path in the command is in single
+  quotes, so you can paste it into a shell. Without `--render-dir`, the
+  line tells you to do the dry run again with `--render-dir <dir>`: `<dir>`
+  is a directory that you choose. With `--ignore-nondeterministic`, the dry
+  run diffed the render without its non-deterministic objects, but the file
+  holds the full render: the diff by hand can show more. When kubectl did
+  not start (it is not installed), or an interrupt or a SIGTERM stopped it
+  (exit 130 or 143), the line says so and gives no command.
 - `inconclusive (needs-crd)`: the server-side diff failed because the CRD
   or the webhook of an earlier entry is not in the cluster yet (expected on
   a new cluster). The run cannot say what this entry changes, so the run
