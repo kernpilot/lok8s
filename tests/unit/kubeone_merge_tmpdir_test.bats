@@ -409,6 +409,35 @@ if [[ "$(trap -p INT TERM HUP)" == "${before}" ]]; then echo "traps after failur
   _assert_only "${RW}" m.yaml
 }
 
+@test "kubeone::_yq_edit stops before yq runs when the export of a name fails" {
+  # The names pass the checks, then the subshell of yq exports them. After
+  # a failed export, yq would get an empty strenv() for the name. In the
+  # child bash a function named export makes the export fail: outside of
+  # POSIX mode, bash finds a function before a builtin of the same name.
+  # After `unset -f export` the same call goes through.
+  _yq_log_stub
+  : > "${YQ_LOG}"
+  local saved_path="${PATH}"
+  PATH="${YQ_STUBS}:${saved_path}"
+  run bash -c 'import() { :; }
+source "$2/utils/verbose.sh"; source "$2/drivers/kubeone/config"
+export() { return 1; }
+FIXTURE_X=7
+kubeone::_yq_edit "$1" ".x = strenv(FIXTURE_X)" FIXTURE_X
+echo "the edit with a failed export returned $?"
+if [[ -s "${YQ_LOG}" ]]; then echo "yq ran"; fi
+unset -f export
+kubeone::_yq_edit "$1" ".x = strenv(FIXTURE_X)" FIXTURE_X
+echo "the edit returned $?"' bash "${RW}/m.yaml" "${_PROJECT_ROOT}/.lok8s"
+  PATH="${saved_path}"
+  assert_success
+  assert_output "the edit with a failed export returned 1
+the edit returned 0"
+  [ "$(wc -l < "${YQ_LOG}")" -eq 1 ] || { echo "want 1 yq run, got $(wc -l < "${YQ_LOG}")" >&2; return 1; }
+  run yq -r '.x' "${RW}/m.yaml"
+  assert_output "7"
+}
+
 @test "kubeone::_yq_edit refuses a name of the trace guard (_ko_) and a nameref, and runs no yq" {
   _yq_log_stub
   # The trace guard declares _ko_ locals: such a name would export the

@@ -455,8 +455,10 @@ kubeone::_yq_edit() {
         || { error "kubeone::_yq_edit: an array named ${_ye_n} is visible in the caller's scope (compgen -A arrayvar lists it); bash exports no array, so it is refused as a name after the expression"; return 1; }
     done
   fi
+  # A failed export stops the call before yq runs: yq would get an empty
+  # strenv() for a name that is not exported.
   # shellcheck disable=SC2163 # "$@" holds variable names, checked above: export them by name
-  _ye_out=$([[ $# == 0 ]] || export -- "$@"; yq "${_ye_expr}" "${_ye_file}" && printf .) || return 1
+  _ye_out=$({ [[ $# == 0 ]] || export -- "$@"; } && yq "${_ye_expr}" "${_ye_file}" && printf .) || return 1
   { printf '%s' "${_ye_out%.}" > "${_ye_file}"; } 2>/dev/null
 }
 
