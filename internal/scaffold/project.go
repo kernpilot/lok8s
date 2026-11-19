@@ -145,6 +145,12 @@ var gitignoreEntries = []string{
 	"**/clusters/*/.artifacts-tmp.*/",
 	"**/clusters/*/.registry-tls-tmp.*/",
 	"**/clusters/*/.artifacts-stage.*/",
+	"# lok8s — the drivers' per-cluster work dirs (admin kubeconfigs, rendered configs that can hold registry credentials, provider state)",
+	"**/clusters/*/.kubeone/",
+	"**/clusters/*/.provider/",
+	"**/clusters/*/.oidc/",
+	"**/clusters/*/.registries.json",
+	"**/clusters/*/.docker.sock",
 }
 
 // ProjectOptions shapes one `lo init project` run.
@@ -327,14 +333,23 @@ func writeUnlessPresent(path, content string, force bool, out io.Writer) error {
 	return nil
 }
 
+// gitignorePattern is a .gitignore line as git reads it: git removes one
+// carriage return at the end of the line and the trailing spaces. It keeps
+// leading spaces and a trailing tab in the pattern, so git does not ignore
+// x/ with the line "  x/" or "x/<tab>", and such a line is not the entry x/.
+func gitignorePattern(line string) string {
+	return strings.TrimRight(strings.TrimSuffix(line, "\r"), " ")
+}
+
 // appendGitignore adds the missing entries (never removes or reorders
-// existing lines).
+// existing lines). An entry is present when a line reads as it in git
+// (gitignorePattern).
 func appendGitignore(path string, out io.Writer) error {
 	existing := map[string]bool{}
 	raw, err := os.ReadFile(path)
 	if err == nil {
 		for line := range strings.SplitSeq(string(raw), "\n") {
-			existing[strings.TrimSpace(line)] = true
+			existing[gitignorePattern(line)] = true
 		}
 	}
 	// A comment header is emitted only when a missing entry follows it —
