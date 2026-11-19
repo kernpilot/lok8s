@@ -300,7 +300,17 @@ before anything is deleted:
    domains carry the same cluster label. Only the owner mark keeps them
    apart: a resource of the other domain with a wrong mark (for example,
    from an `add-label` command that was run for the wrong domain) would be
-   deleted.
+   deleted. The destroy also stops when the provider config of another
+   domain has a merge key (`<<`) on the path to its `cluster_name`: the top
+   of the file, or `spec`, `spec.provider` or `spec.provider.config` of
+   `cluster.lok8s.yaml`. YAML readers give different names for a merged
+   `cluster_name`, so `lo` cannot compare it. Write `cluster_name` as a
+   literal key. A key with the tag `!!merge` is a merge key too. An alias
+   on the path counts with the mapping that it names, and an alias as a key
+   counts with the key that it names. The destroy also stops when `lo`
+   cannot list or search a directory that it must read: `clusters/`, the
+   directory of a domain, or a directory on the way to a
+   `spec.provider.configRef` file. The message names that directory.
 3. The destroy lists the resources that the provider would delete. When a
    list fails, the destroy stops.
 4. On a terminal, type the `cluster_name` to continue. Off a terminal, pass
@@ -315,12 +325,14 @@ This guard replaces the `yes` prompt for such a provider. It runs for the
 `lo` driver and a KubeOne cluster that is not hosted (the drivers that
 destroy through the provider). `--confirm-cluster` on a destroy without the
 guard (no `-r`, a hosted or a `capi`/`kkp` cluster) is refused with exit
-code `1`. The guard sees only the `clusters/` of this checkout, and
-`lo recover` has no such guard yet (#302).
+code `1`. The guard sees only the `clusters/` of this checkout.
+`lo recover` refuses a shared `cluster_name` and such a merge key in the
+same way, before its doctor and its consent.
 
 `lo init cluster` refuses a domain whose cluster name (the first label of
 the domain) another domain already uses as its `metadata.name` or its
-`cluster_name`.
+`cluster_name`. A merge key (`<<`) on the path to one of these names in
+another domain stops it too.
 
 ### lo recover
 

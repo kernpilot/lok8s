@@ -25,6 +25,7 @@ package provision
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -164,7 +165,17 @@ func (d *Dispatcher) guardDestroy(ctx context.Context, domainName, kind, cluster
 		return true, "", driver.ErrDeclined
 	}
 
-	if users := domain.ProviderClusterNameUsers(d.Paths.Clusters, domainName, name); len(users) > 0 {
+	users, err := domain.ProviderClusterNameUsers(d.Paths.Clusters, domainName, name)
+	if merge := (*domain.MergeKeyError)(nil); errors.As(err, &merge) {
+		ui.ErrorTo(w, "a domain has a merge key (<<) on the path to the cluster_name of its provider config: %s. The provider can take the cluster_name from the merged mapping, so lo destroy cannot compare it with the cluster_name '%s' of '%s'. Nothing was deleted. Write cluster_name as a literal key, without a merge key, in the provider config of that domain, then run lo destroy again.", strings.Join(merge.Domains, ", "), name, domainName)
+		return true, "", driver.ErrDeclined
+	}
+	if err != nil {
+		unread := domain.UnreadableDir(err, d.Paths.Clusters)
+		ui.ErrorTo(w, "could not check if another domain has the cluster_name '%s' of '%s': lo cannot read the directory %s. Nothing was deleted. Make %s a directory that you can read and search, then run lo destroy again.", name, domainName, unread, unread)
+		return true, "", driver.ErrDeclined
+	}
+	if len(users) > 0 {
 		ui.ErrorTo(w, "cluster_name '%s' of '%s' is also the cluster_name of: %s. The provider deletes only the resources with this cluster_name and the owner mark of '%s'. The resources of those domains have the same cluster label, so only the mark keeps them apart: a resource of another domain with a wrong mark would be deleted. Nothing was deleted. Give each domain its own cluster_name, then run lo destroy again.", name, domainName, strings.Join(users, ", "), domainName)
 		return true, "", driver.ErrDeclined
 	}

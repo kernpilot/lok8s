@@ -1930,7 +1930,21 @@ for side in bash go; do
   LC_ALL=C grep -qF $'\xff' "${WORK}/${side}.err" \
     && fail "${side}: the byte of a --confirm-cluster value that is not UTF-8 reached the output"
 done
-rm -rf "${PROJ}/clusters"/{dupa,dupb,solo,esc,nul,utf}.cloud "${PROJ}/.lok8s/providers/mockplan"
+# A merge key (<<) on the path to the cluster_name of another domain: the
+# scan stops on it and the destroy is refused (rc 3), also with the matching
+# --confirm-cluster.
+plan_spec mrg.cloud mrg-name
+printf 'base: &b {cluster_name: solo-name}\n<<: *b\n' > "${PROJ}/clusters/mrg.cloud/provider.yaml"
+check - destroy --domain solo.cloud -r --confirm-cluster solo-name      # a merge key in another domain: refused (rc 3)
+expect_rc 3 destroy --domain solo.cloud -r --confirm-cluster solo-name
+for side in bash go; do
+  parity::run "${side}" "${PROJ}" destroy --domain solo.cloud -r --confirm-cluster solo-name || true
+  grep -qF "a domain has a merge key (<<) on the path to the cluster_name of its provider config: mrg.cloud. The provider can take the cluster_name from the merged mapping, so lo destroy cannot compare it with the cluster_name 'solo-name' of 'solo.cloud'. Nothing was deleted." "${WORK}/${side}.err" \
+    || fail "${side}: a merge key in another domain was not refused"
+  grep -q 'mockplan destroy ran' "${WORK}/${side}.err" \
+    && fail "${side}: a merge key in another domain let the provider destroy run"
+done
+rm -rf "${PROJ}/clusters"/{dupa,dupb,solo,esc,nul,utf,mrg}.cloud "${PROJ}/.lok8s/providers/mockplan"
 
 # ── lo destroy --remote — the hetzner provider keeps the parts without its mark
 # The real hetzner provider of the project's bash tree runs in both CLIs (the

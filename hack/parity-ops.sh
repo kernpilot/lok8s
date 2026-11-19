@@ -126,9 +126,9 @@ printf 'cluster_name: ${NAME}-a\n' > "${PROJ}/clusters/tmpl.cloud/provider.yaml"
 printf '{"cluster_name": "twiny", "token": ${LOK8S_PARITY_TOKEN}}\n' > "${PROJ}/clusters/unparsed.cloud/provider.yaml"
 printf '{"cluster_name": "twiny", "token": [}\n' > "${PROJ}/clusters/broken.cloud/provider.yaml"
 printf 'cluster_name: "a\\\\b"\n' > "${PROJ}/clusters/bslash.cloud/provider.yaml"
-# Its own merged name: the scan of the other domains reads a merge key in
-# bash (yq) but not in Go, so a merged twiny would change the twin checks.
-printf 'base: &b {cluster_name: mergy}\n<<: *b\n' > "${PROJ}/clusters/merge.cloud/provider.yaml"
+# merge.cloud gets its provider config (a merge key at the top) after the
+# last row that scans the other domains: the scan of every other domain stops
+# on it from then on (the rows at the end).
 printf 'cluster_name: 0123\n' > "${PROJ}/clusters/quote.cloud/provider.yaml"
 # shellcheck disable=SC2016  # the config holds ${...} as text: the guard must see the variable
 printf '{"x": 1, "note": "${LOK8S_PARITY_NOTE}"}\n' > "${PROJ}/clusters/expand.cloud/provider.yaml"
@@ -306,8 +306,6 @@ check - recover --force broken.cloud
 refused_with broken.cloud "[error] recover: the provider config of 'broken.cloud' is not one YAML or JSON document whose top is a mapping"
 check - recover --force bslash.cloud
 refused_with bslash.cloud "[error] recover: the provider config of 'bslash.cloud' names a cluster_name with a character that a message cannot show as it is"
-check - recover --force merge.cloud
-refused_with merge.cloud "[error] recover: the provider config of 'merge.cloud' has a merge key (<<) at the top."
 check - recover --force quote.cloud
 refused_with quote.cloud "[error] recover: the cluster_name of the provider config of 'quote.cloud' is not a text"
 # The variable adds the cluster_name of the twins when the rebuild expands it:
@@ -322,6 +320,14 @@ check - recover --dry-run mock.cloud
 check - recover -v --dry-run mock.cloud
 check - recover --domain mock.cloud --dry-run
 check "  yes  " recover mock.cloud --skip-rebuild --dry-run   # dry-run never prompts
+# A merge key: recover refuses it in its own provider config, and the scan of
+# the other domains stops on it, so a twin is refused with the domain of the
+# merge key before the names are compared.
+printf 'base: &b {cluster_name: mergy}\n<<: *b\n' > "${PROJ}/clusters/merge.cloud/provider.yaml"
+check - recover --force merge.cloud
+refused_with merge.cloud "[error] recover: the provider config of 'merge.cloud' has a merge key (<<) at the top."
+check - recover --force twin-a.cloud
+refused_with twin-a.cloud "[error] recover: a domain has a merge key (<<) on the path to the cluster_name of its provider config: merge.cloud. The provider can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name 'twiny' of 'twin-a.cloud'. Nothing was changed."
 # The work dir both implementations create.
 for impl_dir in mock.cloud nope.dom; do
   if [[ -d "${PROJ}/clusters/${impl_dir}/.provider" ]]; then

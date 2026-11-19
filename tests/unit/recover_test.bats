@@ -24,6 +24,10 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   # shellcheck source=/dev/null
   source "${_PROJECT_ROOT}/.lok8s/libs/recover"
+  # The lib imports libs/provision (its merge-key rule, PROVISION_YQ_IS_MERGE,
+  # and its scan); import is a no-op here.
+  # shellcheck source=/dev/null
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
 
   # Every fake appends its name to this file, so the parent can assert call order.
   export RECORD="${BATS_TEST_TMPDIR}/record"
@@ -782,16 +786,33 @@ _assert_refused() {
   assert_output --partial "provision test.dom"
 }
 
-# The real scan (provision::_cluster_name_users) fails only when its
-# printf | sort pipeline fails: a yq error reads as no name. So this test
-# stubs the scan to pin the fail-closed branch of the guard.
-@test "recover stops when the cluster_name scan fails (a stub: the real scan fails only when its printf | sort fails)" {
+@test "recover refuses a merge key in the provider config of another domain, before it compares the name" {
   _shared_name_setup
-  provision::_cluster_name_users() { return 1; }
+  mkdir -p "${PATH_CLUSTERS}/merge.dom"
+  printf 'kind: KubeOne\nmetadata:\n  name: m\nspec:\n  provider:\n    name: mock\n    config:\n      <<: {cluster_name: shared}\n' \
+    > "${PATH_CLUSTERS}/merge.dom/cluster.lok8s.yaml"
   force=1
   run recover::_run "test.dom" 0 0 </dev/null
   assert_failure 1
-  assert_output --partial "[error] recover: could not check if another domain has the cluster_name 'shared' of 'test.dom'. Nothing was changed. Run lo recover again."
+  assert_output --partial "[error] recover: a domain has a merge key (<<) on the path to the cluster_name of its provider config: merge.dom. The provider can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name 'shared' of 'test.dom'. Nothing was changed. Write cluster_name as a literal key, without a merge key, in the provider config of that domain, then run lo recover again."
+  refute_output --partial "is also the cluster_name of"
+  run cat "${RECORD}"
+  assert_output "resolve"
+}
+
+# A clusters dir that the scan cannot list (no read permission): the scan
+# returns 1 and recover stops at resolve (Go twin:
+# TestRunClusterNameGuardRefusesWhenTheClustersDirCannotBeRead). A yq error
+# in a file still reads as no name.
+@test "recover stops when the clusters dir cannot be listed" {
+  [[ "$(id -u)" -ne 0 ]] || skip "root reads a dir without the read permission"
+  _shared_name_setup
+  force=1
+  chmod 0300 "${PATH_CLUSTERS}"
+  run recover::_run "test.dom" 0 0 </dev/null
+  chmod 0755 "${PATH_CLUSTERS}"
+  assert_failure 1
+  assert_output --partial "[error] recover: could not check if another domain has the cluster_name 'shared' of 'test.dom': lo cannot read the directory ${PATH_CLUSTERS}. Nothing was changed. Make ${PATH_CLUSTERS} a directory that you can read and search, then run lo recover again."
   run cat "${RECORD}"
   assert_output "resolve"
 }
@@ -901,6 +922,9 @@ _guard_row() {
   _guard_row "a merge key after the name" merge $'base: &b {cluster_name: merged}\ncluster_name: a\n<<: *b\n'
   _guard_row "a merge key with a list" merge $'base: &b {x: 1}\n<<: [*b]\ncluster_name: a\n'
   _guard_row "a quoted << key" merge $'"<<": x\ncluster_name: a\n'
+  _guard_row "a key with the explicit tag !!merge" merge $'x: 1\n!!merge base: {cluster_name: merged}\n'
+  _guard_row "an alias key that names a plain <<" merge $'x: &k <<\n*k : {cluster_name: merged}\ncluster_name: a\n'
+  _guard_row "an alias key that names a quoted <<" merge $'x: &k \'<<\'\n*k : {cluster_name: merged}\ncluster_name: a\n'
 }
 
 @test "recover guard: refuses a cluster_name that is not a text, and says to quote it" {

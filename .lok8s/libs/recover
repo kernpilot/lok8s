@@ -233,14 +233,16 @@ recover::_resolve() {
 #      add or change one. The variables that the rebuild sets itself are not
 #      set yet (CLOUD_LOG_FILE, and CLOUD_DRY_RUN and CLOUD_DRY_RUN_PATH under
 #      --dry-run);
-#   5. a cluster_name that another domain also has.
+#   5. a cluster_name that another domain also has, and a provider config of
+#      another domain that has a merge key (<<) on the path to its
+#      cluster_name (provision::_cluster_name_users returns 2).
 # A jq check or a scan of the other domains that fails stops the recover too.
 #
 # As in the destroy guard, nothing skips this check: not --force, not
 # LOK8S_NONINTERACTIVE, not --dry-run. It runs at the end of resolve, before the
 # doctor, the dry run and the consent.
 recover::_cluster_name_guard() {
-  local raw seen expanded json="" name="" users unshown
+  local raw seen expanded json="" name="" users unshown rc=0
   [[ -f "${_RECOVER_CONFIG:-}" ]] || return 0
   raw="$(recover::_config_name file "${_RECOVER_CONFIG}")"
   case "${raw}" in
@@ -295,8 +297,15 @@ recover::_cluster_name_guard() {
     return 1
   fi
   [[ -n "${name}" ]] || return 0
-  if ! users="$(provision::_cluster_name_users "${_RECOVER_DOMAIN}" "${name}")"; then
-    error "recover: could not check if another domain has the cluster_name '${name}' of '${_RECOVER_DOMAIN}'. Nothing was changed. Run lo recover again."
+  users="$(provision::_cluster_name_users "${_RECOVER_DOMAIN}" "${name}")" || rc=$?
+  if (( rc == 2 )); then
+    error "recover: a domain has a merge key (<<) on the path to the cluster_name of its provider config: ${users//$'\n'/, }. The provider can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name '${name}' of '${_RECOVER_DOMAIN}'. Nothing was changed. Write cluster_name as a literal key, without a merge key, in the provider config of that domain, then run lo recover again."
+    return 1
+  fi
+  if (( rc != 0 )); then
+    # The scan prints the directory that it cannot read.
+    local unread="${users:-${PATH_CLUSTERS}}"
+    error "recover: could not check if another domain has the cluster_name '${name}' of '${_RECOVER_DOMAIN}': lo cannot read the directory ${unread}. Nothing was changed. Make ${unread} a directory that you can read and search, then run lo recover again."
     return 1
   fi
   [[ -n "${users}" ]] || return 0
@@ -331,9 +340,11 @@ recover::_cfg_yq() {
 #   config       yq fails, more than one document, a top that is not a
 #                mapping (a !!map), or an alias, a mapping or a list as the
 #                cluster_name;
-#   merge        a key << at the top mapping (a merge key or the text "<<"):
-#                yq and the rebuild can take the cluster_name from the merged
-#                mapping;
+#   merge        a key << at the top mapping (a merge key or the text "<<")
+#                or a key with the tag !!merge, an alias key counting with
+#                the key that it names (PROVISION_YQ_IS_MERGE, libs/provision):
+#                yq and the rebuild can take the cluster_name from the
+#                merged mapping;
 #   quote        another tag (!!int, !!float, true, !!timestamp, a custom
 #                tag): the rebuild writes it as JSON (jq), which can change it
 #                (0123 is 123).
@@ -348,7 +359,7 @@ recover::_config_name() {
     '!!map '*) ;;
     *) echo config; return 0 ;;
   esac
-  merge="$(recover::_cfg_yq "${kind}" "${src}" -r '[keys[] | select(. == "<<")] | length')" \
+  merge="$(recover::_cfg_yq "${kind}" "${src}" -r ". as \$doc | [keys[] | ${PROVISION_YQ_IS_MERGE}] | length")" \
     || { echo config; return 0; }
   if [[ "${merge}" != 0 ]]; then
     echo merge

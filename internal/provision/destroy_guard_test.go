@@ -124,6 +124,41 @@ func TestDestroyGuardRefusesAClusterNameAnotherDomainUses(t *testing.T) {
 	assertContains(t, errBuf.String(), "Nothing was deleted. Give each domain its own cluster_name, then run lo destroy again.")
 }
 
+// Another domain whose provider config has a merge key (<<) on the path to
+// its cluster_name: the scan cannot tell the name that its provider uses,
+// so the destroy is refused (fail closed), with --force and the right
+// --confirm-cluster too.
+func TestDestroyGuardRefusesAMergeKeyInAnotherDomain(t *testing.T) {
+	d, errBuf, log, _ := guardHarness(t, "", false)
+	testutil.WriteFile(t, filepath.Join(d.Paths.Clusters, "merge.prod", "hetzner.json"), "base: &b {cluster_name: prod-a}\n<<: *b\n")
+	d.Force, d.ConfirmCluster = true, "prod-a"
+	err := d.DispatchDestroy(t.Context(), "test.prod")
+	assertDeclinedNothingRan(t, err, log)
+	assertContains(t, errBuf.String(), "[error] a domain has a merge key (<<) on the path to the cluster_name of its provider config: merge.prod. The provider can take the cluster_name from the merged mapping, so lo destroy cannot compare it with the cluster_name 'prod-a' of 'test.prod'. Nothing was deleted. Write cluster_name as a literal key, without a merge key, in the provider config of that domain, then run lo destroy again.")
+	refuteContains(t, errBuf.String(), "is also the cluster_name of")
+}
+
+// A clusters dir that the scan cannot list (no read permission): the guard
+// cannot tell the other domains, so the destroy is refused (fail closed).
+// The bash twin is the test "destroy guard: an unreadable clusters dir stops
+// the destroy" in destroy_guard_test.bats.
+func TestDestroyGuardRefusesWhenTheClustersDirCannotBeRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a dir without the read permission")
+	}
+	d, errBuf, log, _ := guardHarness(t, "", false)
+	if err := os.Chmod(d.Paths.Clusters, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(d.Paths.Clusters, 0o755) })
+	d.Force, d.ConfirmCluster = true, "prod-a"
+	err := d.DispatchDestroy(t.Context(), "test.prod")
+	assertDeclinedNothingRan(t, err, log)
+	assertContains(t, errBuf.String(), "[error] could not check if another domain has the cluster_name 'prod-a' of 'test.prod': lo cannot read the directory "+d.Paths.Clusters+
+		". Nothing was deleted. Make "+d.Paths.Clusters+" a directory that you can read and search, then run lo destroy again.")
+	refuteContains(t, errBuf.String(), "destroy deletes these resources")
+}
+
 func TestDestroyGuardListsTheResourcesAndRefusesOffATerminal(t *testing.T) {
 	d, errBuf, log, _ := guardHarness(t, "", false)
 	d.Force = true // --force does not replace the cluster_name
