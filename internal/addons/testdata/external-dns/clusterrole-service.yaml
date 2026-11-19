@@ -1,0 +1,107 @@
+# Fixture for internal/addons/external_dns_rbac_test.go: the ClusterRole
+# external-dns that the external-dns chart renders when `sources` is the list
+# of the addon with `service` added (the whole list, as a consumer sets it).
+# The metadata is reduced to the name. The rules and their order are those of
+# charts/external-dns/templates/clusterrole.yaml at the tag
+# external-dns-helm-chart-1.21.1: lines 12-31 give the nodes, the pods, the
+# services and the discovery.k8s.io EndpointSlices for the service source,
+# and lines 66-107 give the rules of the gateway sources.
+#
+# chart: external-dns 1.21.1
+#
+# TestExternalDNSFixtureMatchesChart renders the chart (on CI, or
+# LOK8S_ONLINE_TESTS=1) and fails on any drift from this file. Refresh it as
+# clusterrole-default.yaml, from a copy of the addon with a second values file
+# that sets `sources` to the list of the addon plus `service`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: external-dns
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - discovery.k8s.io
+    resources:
+      - endpointslices
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - gateways
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - httproutes
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - grpcroutes
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - tlsroutes
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - tcproutes
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - udproutes
+    verbs:
+      - get
+      - watch
+      - list
