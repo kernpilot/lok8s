@@ -395,7 +395,7 @@ underlying cause.
 | `envoy-gateway` | Envoy Gateway controller **+ the upstream Gateway API CRD bundle**. See [upgrading in place](#envoy-gateway-upgrading-in-place) before you bump the pin | `envoyproxy/gateway-helm` v1.9.3 |
 | `external-dns` | ExternalDNS with the Hetzner DNS webhook as a sidecar. It publishes the hostnames of the Gateway API routes. To publish Services too, see [external-dns](#external-dns) | `external-dns/external-dns` 1.21.1 |
 | `rook-ceph` | Rook-Ceph operator + CRDs, and the ceph-csi-operator work orders that yield the RBD `CSIDriver`. The CSI node plugin runs with a [narrowed ClusterRole](#rook-ceph) | `rook-release/rook-ceph` v1.20.6, `ceph-csi-drivers` 1.0.4 |
-| `rook-ceph-csi-kms` | **Opt-in**, after `rook-ceph`: gives the CSI node plugin back the Secret / ServiceAccount-token grants that KMS-encrypted volumes and `mounter: rbd-nbd` need. See [rook-ceph](#rook-ceph) | raw manifests |
+| `rook-ceph-csi-kms` | **Opt-in**, after `rook-ceph`: gives the CSI plugins back the API grants of the ceph-csi features that a cluster uses (a KMS type, `mounter: rbd-nbd`, block-volume metrics), one `values.kms` option per feature. No option stops the render; `all` renders the rules of earlier releases. See [rook-ceph](#rook-ceph) | local chart |
 | `redis-operator` | The OT-CONTAINER-KIT Redis operator + CRDs (`Redis`, `RedisReplication`, `RedisSentinel`, `RedisCluster`). It runs with [narrowed RBAC](#redis-operator), and nothing aggregates into the built-in `admin` role. The CRs go in a target | `ot-container-kit/redis-operator` 0.26.1 |
 | `redis-operator-chart-rbac` | **Opt-in, not recommended**, after `redis-operator`: binds the chart's broad ClusterRole rules to the operator again (without the aggregation). See [redis-operator](#redis-operator) | raw manifests |
 | `system-upgrade-controller` | Rancher's system-upgrade-controller. It runs [without cluster-admin](#system-upgrade-controller), with both images pinned by digest. The `Plan`s go in a target | `rancher/system-upgrade-controller` 110.0.0 |
@@ -906,7 +906,7 @@ report the used bytes (ceph-csi `internal/rbd/nodeserver.go`,
 With the narrowed role that read fails on the volume **stats** of block
 volumes, not on their mount. Kubelet logs the error and the volume keeps
 working. A cluster that needs usage metrics for block volumes bootstraps
-`rook-ceph-csi-kms` (below).
+`rook-ceph-csi-kms` with `kms: [block-volume-stats]` (below).
 
 The removal is a guarded JSON patch in the addon's `kustomization.yaml`.
 A `test` on the complete rule precedes each `remove`. A chart bump that
@@ -1063,7 +1063,7 @@ subjects:
 
 #### When you need the grants back
 
-Three ceph-csi features read those objects through the Kubernetes API:
+These ceph-csi features read those objects through the Kubernetes API:
 
 - **encrypted volumes with a KMS**: a StorageClass with `encrypted: "true"`
   and an `encryptionKMSID` (Vault, `vaulttokens`, `vaulttenantsa`, the
@@ -1072,11 +1072,12 @@ Three ceph-csi features read those objects through the Kubernetes API:
   each attached volume's node-stage Secret to re-map the device
 - **usage metrics for `volumeMode: Block` volumes** (the exception above)
 
+Encryption without an `encryptionKMSID` needs none of them: the passphrase
+comes from the StorageClass secret, which kubelet passes inside the CSI
+request.
+
 For those clusters bootstrap the opt-in `rook-ceph-csi-kms` addon after
-`rook-ceph`. It binds the five removed rules to the RBD node plugin and
-controller plugin ServiceAccounts again (a KMS runs on both sides: the
-controller creates the key, the node unlocks it), so the effective
-permissions equal the upstream chart's:
+`rook-ceph`, and list the features that the cluster uses in `values.kms`:
 
 ```yaml
 spec:
@@ -1084,58 +1085,142 @@ spec:
     - rook-ceph
     - rook-ceph-csi-kms:
         dependsOn: [rook-ceph]
+        values:
+          kms: [metadata, rbd-nbd]
 ```
 
-::: warning This restores the every-node escalation path
-`rook-ceph-csi-kms` restores the upstream grants, not the minimum a KMS
-needs. With it, root on any node that runs the plugin, and the controller
-pod, can read every Secret and mint a token for any ServiceAccount again.
-Enable it only for one of the three features above, and track the
-narrower, per-feature grants in [kernpilot/lok8s#265](https://github.com/kernpilot/lok8s/issues/265).
+Each option renders only the rules that its feature calls in ceph-csi
+v3.17.0 (the plugin image of ceph-csi-operator v1.0.4), and binds them only
+to the plugin that makes the call. The addon is a local chart:
+`chart/templates/rbac.yaml` names the upstream call site of each rule. Two
+options render the union of their objects.
+
+The **node** plugin is the ServiceAccount
+`rook-ceph-rbd-csi-ceph-com-nodeplugin-sa`, the **controller** plugin is
+`rook-ceph-rbd-csi-ceph-com-ctrlplugin-sa`, both in `rook-ceph`. A KMS runs
+on both: the controller plugin sets up the key when it creates the volume,
+the node plugin opens it when it stages the volume. Each binding has the
+name of its role.
+
+| Option | Plugins | Role | Rules | What ceph-csi reads |
+|---|---|---|---|---|
+| `metadata` | node, controller | ClusterRole `rook-ceph-csi-kms-metadata` | `secrets` get | the passphrase Secret (`secretName`) in `secretNamespace`, else in the PVC namespace |
+| `vault` | node, controller | only `rook-ceph-csi-kms-config` (below) | none | the KMS configuration. The Vault login uses the plugin's own token, read from its file |
+| `vaulttokens` | node, controller | ClusterRole `rook-ceph-csi-kms-vaulttokens` | `secrets` get, `configmaps` get | in the PVC namespace: the Vault token Secret, the TLS Secrets and the tenant ConfigMap |
+| `vaulttenantsa` | node, controller | ClusterRole `rook-ceph-csi-kms-vaulttenantsa` | `secrets` get, `configmaps` get, `serviceaccounts` get, `serviceaccounts/token` create | in the PVC namespace: the tenant ServiceAccount and a token for it, the TLS Secrets and the tenant ConfigMap |
+| `aws-metadata` | node, controller | Role `rook-ceph-csi-kms-aws-metadata` in `rook-ceph` | `secrets` get `ceph-csi-aws-credentials` | the AWS credentials |
+| `aws-sts-metadata` | node, controller | ClusterRole `rook-ceph-csi-kms-aws-sts-metadata` | `secrets` get | the AWS STS Secret in the PVC namespace |
+| `azure-kv` | node, controller | Role `rook-ceph-csi-kms-azure-kv` in `rook-ceph` | `secrets` get `ceph-csi-azure-credentials` | the Azure certificate |
+| `kmip` | node, controller | Role `rook-ceph-csi-kms-kmip` in `rook-ceph` | `secrets` get `ceph-csi-kmip-credentials` | the KMIP credentials |
+| `ibmkeyprotect` | node, controller | Role `rook-ceph-csi-kms-ibmkeyprotect` in `rook-ceph` | `secrets` get `ceph-csi-kp-credentials` | the Key Protect credentials |
+| `vault-tokenreview` | node | ClusterRole `rook-ceph-csi-kms-vault-tokenreview` | `tokenreviews` create | not a ceph-csi call: Vault's Kubernetes auth method reviews the plugin's token with that same token when the Vault role has no `token_reviewer_jwt`. The controller plugin keeps this rule in its chart role |
+| `rbd-nbd` | node | Role `rook-ceph-csi-kms-rbd-nbd` in `rook-ceph` | `secrets` get `rook-csi-rbd-node` | the node-stage Secret, for the volume healer |
+| `block-volume-stats` | node | Role `rook-ceph-csi-kms-block-volume-stats` in `rook-ceph` | `secrets` get `rook-csi-rbd-provisioner` | the controller-publish Secret, for the used bytes of a Block volume |
+| `all` | node, controller | ClusterRole `rook-ceph-csi-nodeplugin-kms-cr` | the five rules of the table above, cluster-wide | the rule set of earlier releases |
+
+Every KMS type (the options from `metadata` to `ibmkeyprotect`) also
+renders the Role `rook-ceph-csi-kms-config` in `rook-ceph` for both
+plugins: `configmaps` get on `csi-kms-connection-details`, the KMS
+configuration.
+
+Why two kinds of role:
+
+- **A Role in `rook-ceph`** when the object is in the CSI namespace. Rook or
+  the ceph-csi default fixes its name, so the rule names it too
+  (`resourceNames`). A KMS configuration that sets another Secret name
+  (`KMS_SECRET_NAME`, `AZURE_CERT_SECRET_NAME`, `KMIP_SECRET_NAME`,
+  `IBM_KP_SECRET_NAME`), or a StorageClass with another node-stage Secret,
+  needs a Role of its own in a target.
+- **A ClusterRole** when the object is in the namespace of the PVC (the
+  tenant). The plugin gets that namespace from each volume request, so a
+  Role in one namespace cannot cover it. The ClusterRole has no `list` and
+  no `watch`: the plugin gets each object by name.
+
+::: warning Some options keep a cluster-wide grant
+`metadata`, `vaulttokens`, `vaulttenantsa` and `aws-sts-metadata` let the
+plugins get any Secret in any namespace by name. `vaulttenantsa` and `all`
+also let them mint a token for any ServiceAccount. With these options, root
+on any node that runs the node plugin, and the controller pod, holds those
+grants. Use them only for a KMS type that the cluster uses.
 :::
 
-The binding names the RBD ServiceAccounts only (node plugin and controller
-plugin). A cluster that also runs the CephFS driver with encryption adds
-both CephFS ServiceAccounts from a patch in its own target: CephFS
-initializes encryption on the controller side, so the node subject alone
-restores only half.
+::: warning Upgrade note: the entry needs `values.kms`
+An entry without `values.kms` (the form of earlier releases) stops the
+render with an error that names the options, before anything is applied.
+The addon never selects a set of grants for you. To keep the grants of
+earlier releases, add `values: {kms: [all]}`: it renders the same
+ClusterRole and ClusterRoleBinding, rule for rule.
+
+To narrow the grants, set the options of the features that the cluster
+uses. The bootstrap applies without prune, so the objects of `all` (or of
+an earlier release) stay, and their grants with them. Apply the bootstrap
+first (`lo up`, `lo provision` or `lo bootstrap`): it adds the new roles.
+Then delete the old objects:
+
+```console
+$ kubectl delete clusterrolebinding rook-ceph-csi-nodeplugin-kms-crb
+$ kubectl delete clusterrole rook-ceph-csi-nodeplugin-kms-cr
+```
+
+The same applies when you remove an option from the list: delete its role
+and its binding (they have the same name).
+:::
+
+The bindings name the RBD ServiceAccounts only. A cluster that also runs
+the CephFS driver with a KMS binds both CephFS ServiceAccounts to the same
+roles from its own target: CephFS sets up encryption on the controller
+side too, so the node subject alone restores only half. For example, for
+`kms: [metadata]`:
 
 ```yaml
-patches:
-  - target: { kind: ClusterRoleBinding, name: rook-ceph-csi-nodeplugin-kms-crb }
-    patch: |-
-      - op: add
-        path: /subjects/-
-        value:
-          kind: ServiceAccount
-          name: rook-ceph-cephfs-csi-ceph-com-nodeplugin-sa
-          namespace: rook-ceph
-      - op: add
-        path: /subjects/-
-        value:
-          kind: ServiceAccount
-          name: rook-ceph-cephfs-csi-ceph-com-ctrlplugin-sa
-          namespace: rook-ceph
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rook-ceph-cephfs-csi-kms-metadata
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: rook-ceph-csi-kms-metadata }
+subjects:
+  - { kind: ServiceAccount, name: rook-ceph-cephfs-csi-ceph-com-nodeplugin-sa, namespace: rook-ceph }
+  - { kind: ServiceAccount, name: rook-ceph-cephfs-csi-ceph-com-ctrlplugin-sa, namespace: rook-ceph }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rook-ceph-cephfs-csi-kms-config
+  namespace: rook-ceph
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: rook-ceph-csi-kms-config }
+subjects:
+  - { kind: ServiceAccount, name: rook-ceph-cephfs-csi-ceph-com-nodeplugin-sa, namespace: rook-ceph }
+  - { kind: ServiceAccount, name: rook-ceph-cephfs-csi-ceph-com-ctrlplugin-sa, namespace: rook-ceph }
 ```
 
 A fork that keeps the chart-default driver names uses
 `cephfs-csi-ceph-com-nodeplugin-sa` and `cephfs-csi-ceph-com-ctrlplugin-sa`.
-NVMe-oF with encryption adds `rook-ceph-nvmeof-csi-ceph-com-nodeplugin-sa`
+NVMe-oF with encryption binds `rook-ceph-nvmeof-csi-ceph-com-nodeplugin-sa`
 and `rook-ceph-nvmeof-csi-ceph-com-ctrlplugin-sa` the same way.
 
 #### Verify it
 
 ```console
 $ SA=system:serviceaccount:rook-ceph:rook-ceph-rbd-csi-ceph-com-nodeplugin-sa
-$ kubectl auth can-i create serviceaccounts/token --as="${SA}"
+$ kubectl auth can-i create serviceaccounts --subresource=token --as="${SA}"
 no
 $ kubectl auth can-i get secrets --as="${SA}" --all-namespaces
+no
+$ kubectl auth can-i list secrets --as="${SA}" -n rook-ceph
 no
 $ kubectl auth can-i list volumeattachments --as="${SA}"
 yes
 ```
 
-Both `no` lines read `yes` on a cluster that bootstraps `rook-ceph-csi-kms`.
+The first `no` reads `yes` with `vaulttenantsa` or `all`. The second reads
+`yes` with `metadata`, `vaulttokens`, `vaulttenantsa`, `aws-sts-metadata`
+or `all`. The third reads `yes` only with `all`. A Role option shows on
+its Secret alone, for example with `kms: [rbd-nbd]`:
+
+```console
+$ kubectl auth can-i get secrets/rook-csi-rbd-node --as="${SA}" -n rook-ceph
+yes
+```
 
 ### system-upgrade-controller: no cluster-admin {#system-upgrade-controller}
 
