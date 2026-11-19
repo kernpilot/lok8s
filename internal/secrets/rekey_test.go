@@ -76,9 +76,11 @@ func TestAddKeyOutputIsPinned(t *testing.T) {
 	if got := readFile(t, c.sopsConfigPath()); got != wantYAML {
 		t.Errorf(".sops.yaml:\n%q\nwant:\n%q", got, wantYAML)
 	}
+	// A fixed text on failure: the decrypted value and the library error stay
+	// out of the test output.
 	dec, err := sopsDecryptData([]byte(readFile(t, a+"/Secret.app.default.K.enc")), second.String())
 	if err != nil || string(dec) != "v" {
-		t.Errorf("the added identity cannot read the re-keyed store: %q %v", dec, err)
+		t.Error("the added identity cannot read the re-keyed store")
 	}
 	if fsutil.Exists(b + "/Secret.app.default.K.enc") {
 		t.Error("add-key --all now re-encrypts a store other than the context's: its behaviour changed")
