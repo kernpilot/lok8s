@@ -141,7 +141,7 @@ kubeone::_inject_oidc() {
   OIDC_ISSUER="${LOK8S_SPEC_OIDC_ISSUER}"           OIDC_CLIENTID="${LOK8S_SPEC_OIDC_CLIENTID}" \
   OIDC_UCLAIM="${LOK8S_SPEC_OIDC_USERNAMECLAIM}"     OIDC_UPREFIX="${LOK8S_SPEC_OIDC_USERNAMEPREFIX}" \
   OIDC_GCLAIM="${LOK8S_SPEC_OIDC_GROUPSCLAIM}"       OIDC_GPREFIX="${LOK8S_SPEC_OIDC_GROUPSPREFIX}" \
-  yq -i '
+  kubeone::_yq_edit "${manifest}" '
     .features.openidConnect.enable = true |
     .features.openidConnect.config.issuerUrl = strenv(OIDC_ISSUER) |
     .features.openidConnect.config.clientId = strenv(OIDC_CLIENTID) |
@@ -149,7 +149,7 @@ kubeone::_inject_oidc() {
     .features.openidConnect.config.usernamePrefix = strenv(OIDC_UPREFIX) |
     .features.openidConnect.config.groupsClaim = strenv(OIDC_GCLAIM) |
     .features.openidConnect.config.groupsPrefix = strenv(OIDC_GPREFIX)
-  ' "${manifest}" || { error "OIDC: failed to inject features.openidConnect"; return 1; }
+  ' || { error "OIDC: failed to inject features.openidConnect"; return 1; }
 
   # caBundle (optional): KubeOne auto-uploads + mounts the caFile for the
   # openidConnect feature, so a custom-CA issuer just needs the local file +
@@ -158,7 +158,7 @@ kubeone::_inject_oidc() {
     local cadir="${manifest%/*}/.oidc"; mkdir -p "${cadir}"
     printf '%s\n' "${LOK8S_SPEC_OIDC_CABUNDLE}" > "${cadir}/oidc-ca.pem"
     OIDC_CAFILE="${cadir}/oidc-ca.pem" \
-      yq -i '.features.openidConnect.config.caFile = strenv(OIDC_CAFILE)' "${manifest}" \
+      kubeone::_yq_edit "${manifest}" '.features.openidConnect.config.caFile = strenv(OIDC_CAFILE)' \
       || { error "OIDC: failed to set caFile"; return 1; }
   fi
   debug "OIDC: features.openidConnect injected (issuer ${LOK8S_SPEC_OIDC_ISSUER})"
@@ -367,16 +367,129 @@ kubeone::_inject_audit_log() {
   fi
   local write_error="audit log: cannot write the manifest in ${manifest%/*}. Check the free disk space and the permissions of the directory, then run lo provision again."
 
-  AUDIT_POLICY="${_AUDIT_LOG_POLICY}" yq -i '
+  AUDIT_POLICY="${_AUDIT_LOG_POLICY}" kubeone::_yq_edit "${manifest}" '
     .features.staticAuditLog.enable = true |
     .features.staticAuditLog.config.policyFilePath = strenv(AUDIT_POLICY)
-  ' "${manifest}" || { error "${write_error}"; return 1; }
+  ' || { error "${write_error}"; return 1; }
   for i in "${!_AUDIT_LOG_KEYS[@]}"; do
     # env() reads the value as YAML: the validated digits land as an integer.
-    AUDIT_LIMIT="${_AUDIT_LOG_VALS[i]}" yq -i ".features.staticAuditLog.config.${_AUDIT_LOG_KEYS[i]} = env(AUDIT_LIMIT)" "${manifest}" \
+    AUDIT_LIMIT="${_AUDIT_LOG_VALS[i]}" kubeone::_yq_edit "${manifest}" ".features.staticAuditLog.config.${_AUDIT_LOG_KEYS[i]} = env(AUDIT_LIMIT)" \
       || { error "${write_error}"; return 1; }
   done
   debug "audit log: features.staticAuditLog injected (policy ${_AUDIT_LOG_POLICY})"
+}
+
+# kubeone::_yq_edit <file> <yq expression> [<name>...]: apply the expression
+# to <file> and write the result back into <file>. It returns 1 when yq or
+# the write fails.
+# Each <name> is the name of a variable of the caller that the expression
+# reads (strenv, env). The export of the names runs in the command
+# substitution that runs yq, so the yq process gets the values, and no
+# other command of the call (for example the rm of a signal trap) inherits
+# them. That holds when the caller does not export these variables: it
+# declares them with `local +x` and assigns them with allexport (set -a)
+# off, as kubeone::_inject_registry_auth does. The helper declares its own
+# variables with `local +x` and turns allexport off for the call, so the
+# manifest that it holds in memory is not exported either. +i +l +u: under
+# shopt localvar_inherit a local takes the attributes of the caller's
+# variable of the same name, and an integer one makes the assignment of the
+# manifest arithmetic (an error quotes it), a case one changes it. When it
+# cannot declare them (a readonly name or a readonly nameref of the caller,
+# which would send an assignment elsewhere), it returns 1 before yq runs. The
+# arguments are names, never values, so no value goes on a command line or
+# into the expression. The variables of the helper start with _ye_ and
+# those of the trace guard with _ko_: a name with one of these prefixes, a
+# nameref or an array is refused before yq runs. The nameref check reads
+# `declare -pn`, which lists the nameref declarations without dereferencing
+# them; a target's text (a name, or an array element with its subscript) is
+# printed, never the referenced value. The array check reads the names that
+# `compgen -A arrayvar` lists, never a value: bash exports no array, so yq
+# would get an empty strenv() for one. An array that is declared and never
+# assigned is not listed and passes; it holds no value, so its name exports
+# nothing, as an empty variable does. An array assigned with no element
+# (=()) is listed and refused. compgen also lists an array of an outer scope
+# when a plain local of the same name hides it; such a name is refused too
+# (fail closed). The checks run only when names follow the expression: a
+# call without names needs no compgen and also edits in a bash without
+# programmable completion. In such a bash, a call with names stops before
+# yq runs (fail closed).
+# It does not use `yq -i`, whose temp file depends on the yq release. yq
+# v4.54.1 writes through a temp file in TMPDIR and keeps it there when the
+# in-place write fails: a copy of the manifest outside the work directory.
+# yq v4.54.3 refuses a read-only file before it makes a temp file, and
+# otherwise makes .yq-inplace-* beside the target, which a SIGKILL leaves
+# there. Here the result stays in memory until the write, so yq makes no
+# temp copy with any release, also not on a signal. The write goes into
+# <file> in place, through the path as the caller opened it (a symlink is
+# followed), so a failed write can leave a partial file. Use it only on a
+# staging file that the caller removes on a failure: the temp manifest of
+# the render (kubeone::_render_manifest) or the temp file of
+# kubeone::_yq_replace. Both are 0600 files (mktemp) beside the manifest,
+# and their traps remove them on INT, TERM and HUP. A SIGKILL leaves one
+# behind.
+kubeone::_yq_edit() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # a trace must not show the manifest (utils/keysonly.sh)
+  [[ $- != *a* ]] || { local -; set +a; }  # set -a would export the manifest held below
+  local +x +i +l +u _ye_file="${1}" _ye_expr="${2}" _ye_nl=$'\n' _ye_out _ye_n _ye_refs _ye_arrays \
+    || { error "kubeone::_yq_edit: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  shift 2
+  # The checks of the names run only when names follow the expression. A
+  # call without names exports nothing and needs no compgen, so it also
+  # edits in a bash without programmable completion.
+  if (( $# > 0 )); then
+    # declare -pn lists the nameref declarations without dereferencing them;
+    # a target's text (a name, or an array element with its subscript) is
+    # printed, never the referenced value.
+    _ye_refs="${_ye_nl}$(declare -pn)${_ye_nl}"
+    # compgen -A arrayvar lists the names of the arrays in scope, one a line.
+    # Without compgen the names cannot be checked, and the call stops.
+    _ye_arrays="${_ye_nl}$(compgen -A arrayvar)${_ye_nl}" \
+      || { error "kubeone::_yq_edit: the arrays in scope cannot be listed (compgen -A arrayvar failed; a bash without programmable completion has no compgen), so the names after the expression cannot be checked"; return 1; }
+    # The newline is in _ye_nl: shellcheck misreads $'\n' inside =~ (SC1011).
+    # A name is printed only after the first check: then it is a variable
+    # name, and the nameref and array scans saw it in scope.
+    for _ye_n in "$@"; do
+      [[ "${_ye_n}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "${_ye_n}" != _ye_* && "${_ye_n}" != _ko_* ]] \
+        || { error "kubeone::_yq_edit: an argument after the expression is not a variable name of the caller (_ye_* and _ko_* are reserved)"; return 1; }
+      [[ ! "${_ye_refs}" =~ ${_ye_nl}declare\ -[[:alpha:]]*n[[:alpha:]]*\ ${_ye_n}(=|${_ye_nl}) ]] \
+        || { error "kubeone::_yq_edit: a nameref named ${_ye_n} is visible in the caller's scope (declare -pn lists it); a nameref is refused as a name after the expression"; return 1; }
+      [[ "${_ye_arrays}" != *"${_ye_nl}${_ye_n}${_ye_nl}"* ]] \
+        || { error "kubeone::_yq_edit: an array named ${_ye_n} is visible in the caller's scope (compgen -A arrayvar lists it); bash exports no array, so it is refused as a name after the expression"; return 1; }
+    done
+  fi
+  # A failed export stops the call before yq runs: yq would get an empty
+  # strenv() for a name that is not exported.
+  # shellcheck disable=SC2163 # "$@" holds variable names, checked above: export them by name
+  _ye_out=$({ [[ $# == 0 ]] || export -- "$@"; } && yq "${_ye_expr}" "${_ye_file}" && printf .) || return 1
+  { printf '%s' "${_ye_out%.}" > "${_ye_file}"; } 2>/dev/null
+}
+
+# kubeone::_yq_replace <file> <yq expression>: apply the expression to <file>
+# through a temp file beside it (mktemp, 0600), then rename the temp file
+# over <file>. Use it for a file that is read again after a failed step: the
+# final kubeone.yaml, which kubeone reset and kubeone status read as it is.
+# On a failure <file> stays as it was and the temp file is removed; on INT,
+# TERM or HUP the traps of kubeone::_temp_traps remove it, and the previous
+# traps come back when the call ends. After the rename <file> is 0600.
+# It takes exactly these two arguments and passes no names to
+# kubeone::_yq_edit. A third argument is refused, not dropped: a name there
+# would not be exported, and yq would get an empty strenv() for it.
+kubeone::_yq_replace() {
+  (( $# == 2 )) || { error "kubeone::_yq_replace: it takes two arguments (<file> <yq expression>), not $#; it passes no names to kubeone::_yq_edit"; return 1; }
+  local file="${1}" tmp saved_traps rc=0
+  [[ "${file}" == */* ]] || file="./${file}"
+  tmp=$(mktemp "${file%/*}/.${file##*/}.XXXXXX") || return 1
+  saved_traps=$(trap -p INT TERM HUP)
+  kubeone::_temp_traps "${tmp}"
+  { cat -- "${file}" > "${tmp}"; } 2>/dev/null \
+    && kubeone::_yq_edit "${tmp}" "${2}" \
+    && mv -f -- "${tmp}" "${file}" \
+    || rc=1
+  (( rc == 0 )) || rm -f -- "${tmp}"
+  trap - INT TERM HUP
+  eval "${saved_traps}"
+  return "${rc}"
 }
 
 # The absolute, lexically clean form of a path, as Go's filepath.Abs makes it:
@@ -418,6 +531,9 @@ kubeone::_audit_shown() {
 # cluster that omits it pulls anonymously, unchanged.
 # Usage: kubeone::_inject_registry_auth <kubeone.yaml> <cluster_yaml>
 kubeone::_inject_registry_auth() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # the registry credentials (utils/keysonly.sh)
+  [[ $- != *a* ]] || { local -; set +a; }  # set -a would export the registry credentials
   local manifest="${1}" cluster_yaml="${2}" host sname sns
   # No-op unless the spec declares registries (omitted => anonymous pulls; a
   # test/CI run without DOMAIN_NAME must not error here).
@@ -442,17 +558,54 @@ kubeone::_inject_registry_auth() {
     # Read the resolved creds straight from the per-domain secret cache (each key is
     # a plaintext file Secret.<name>.<ns>.<key>), exactly as provision::dispatch loads
     # provider creds — no `eval` of generated shell.
-    local ns="${sns:-provisioning}" username password
+    # +x: a variable of the caller with one of these names can be exported,
+    # and a plain `local` keeps that export attribute. With +x (and set -a
+    # off, above) the values that this function assigns here reach only yq
+    # (kubeone::_yq_edit): not the cat that reads the password, and not the
+    # rm of a signal trap. A value that the caller exported itself reaches
+    # the children as before. +i +l +u: under shopt localvar_inherit a local
+    # takes the attributes of the caller's variable of the same name; with
+    # -i an error of the arithmetic assignment would quote the credential,
+    # with -l or -u its case would change. When a local cannot be declared
+    # (a readonly name or a readonly nameref of the caller, which would
+    # send the assignment elsewhere), the merge stops before it reads a
+    # credential. An array: under localvar_inherit a local also takes the
+    # array attribute of a caller's array of the same name, and bash exports
+    # no array, so yq would get an empty strenv(). The empty values on this
+    # line make such a local a set array, which compgen -A arrayvar lists
+    # (names only, never a value); without a value, a local that takes a
+    # caller's array that is declared and never assigned is not listed. Then
+    # the merge stops before it reads a credential. compgen also lists a
+    # caller's set array that one of these locals hides as a plain variable
+    # (without localvar_inherit); the merge stops then too (fail closed). So
+    # the message says what compgen saw, not why. Without compgen (a bash
+    # without programmable completion) the merge stops as well. The _ra_
+    # locals hold the list.
+    local +x +i +l +u ns="${sns:-provisioning}" username='' password='' RUSER='' RPASS='' _ra_nl=$'\n' _ra_arrays _ra_n \
+      || { error "kubeone::_inject_registry_auth: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+    _ra_arrays="${_ra_nl}$(compgen -A arrayvar)${_ra_nl}" \
+      || { error "kubeone::_inject_registry_auth: the arrays in scope cannot be listed (compgen -A arrayvar failed; a bash without programmable completion has no compgen), so the merge stops before it reads a credential"; return 1; }
+    for _ra_n in username password RUSER RPASS; do
+      [[ "${_ra_arrays}" != *"${_ra_nl}${_ra_n}${_ra_nl}"* ]] \
+        || { error "kubeone::_inject_registry_auth: an array named ${_ra_n} is visible in the caller's scope (compgen -A arrayvar lists it); bash exports no array, so the merge stops before it reads a credential"; return 1; }
+    done
     username="$(cat "${secrets_dir}/Secret.${sname}.${ns}.username" 2>/dev/null || true)"
     password="$(cat "${secrets_dir}/Secret.${sname}.${ns}.password" 2>/dev/null || true)"
     if [[ -z "${username:-}" || -z "${password:-}" ]]; then
       warn "registry auth: secret ${ns}/${sname} lacks username/password — '${host}' left anonymous"
       unset username password; continue
     fi
-    RUSER="${username}" RPASS="${password}" \
-    yq -i ".containerRuntime.containerd.registries.\"${host}\".auth.username = strenv(RUSER) | .containerRuntime.containerd.registries.\"${host}\".auth.password = strenv(RPASS)" "${manifest}" \
-      || { error "registry auth: failed to inject '${host}'"; unset username password; return 1; }
-    unset username password
+    # kubeone::_yq_edit, not `yq -i`: with these credentials in the
+    # manifest, a temp copy of yq would hold them. yq v4.54.1 keeps its temp
+    # copy in TMPDIR when the in-place write fails; yq v4.54.3 makes
+    # .yq-inplace-* beside the manifest, which a SIGKILL leaves there.
+    # kubeone::_yq_edit makes no temp copy. RUSER and RPASS are not exported
+    # (local +x, set -a off): kubeone::_yq_edit exports them to the yq
+    # process only.
+    RUSER="${username}" RPASS="${password}"
+    kubeone::_yq_edit "${manifest}" ".containerRuntime.containerd.registries.\"${host}\".auth.username = strenv(RUSER) | .containerRuntime.containerd.registries.\"${host}\".auth.password = strenv(RPASS)" RUSER RPASS \
+      || { error "registry auth: failed to inject '${host}'"; unset username password RUSER RPASS; return 1; }
+    unset username password RUSER RPASS
     n_configured=$(( n_configured + 1 ))
     debug "registry auth: ${host} ← ${ns}/${sname}"
   done < <(yq -r '.spec.registries // {} | to_entries | .[] | [.key, (.value.auth.secretRef.name // ""), (.value.auth.secretRef.namespace // "provisioning")] | @tsv' "${cluster_yaml}" 2>/dev/null)

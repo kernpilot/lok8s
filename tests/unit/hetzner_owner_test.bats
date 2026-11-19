@@ -649,6 +649,9 @@ network list -o json -l lok8s.dev/owner=${MARK}"
   _inventory_parts
   :usage() { :; }
   :args() { shift; }
+  # main imports drivers/kubeone/config (import is stubbed here): the edits
+  # of kubeone.yaml run through its kubeone::_yq_replace.
+  source "${_PROJECT_ROOT}/.lok8s/drivers/kubeone/config"
   source "${_PROJECT_ROOT}/.lok8s/drivers/kubeone/main"
   : > "${BATS_TEST_TMPDIR}/id_key"
   yq -i -o json ".sshPrivateKey = \"${BATS_TEST_TMPDIR}/id_key\"" "${DESC}"
