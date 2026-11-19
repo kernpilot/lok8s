@@ -409,7 +409,8 @@ func TestRemoveKeyResumesAStoppedRekey(t *testing.T) {
 
 // Removing the caller's own identity is allowed, with a warning: the sops
 // age keys file by its public key line, and the SSH key lo decrypts with by
-// the age key of its .pub. No private key is read into any output.
+// the age key of its .pub. The second line names the two sources the check
+// reads and those it does not. No private key is read into any output.
 func TestRemoveKeyWarnsAboutTheCallersOwnIdentity(t *testing.T) {
 	for _, source := range []string{"keys file", "ssh key"} {
 		t.Run(source, func(t *testing.T) {
@@ -438,7 +439,8 @@ func TestRemoveKeyWarnsAboutTheCallersOwnIdentity(t *testing.T) {
 			if err := c.RemoveKey(g, false, false); err != nil {
 				t.Fatalf("%v\n%s", err, errOut.String())
 			}
-			want := "[warn] the recipient is your own decrypt identity (" + file + "): once it is removed, that identity cannot decrypt the re-keyed files\n" + rotateWarn
+			want := "[warn] the recipient is your own decrypt identity (" + file + "): once it is removed, that identity cannot decrypt the re-keyed files\n" +
+				"[warn] " + ownIdentityScope + "\n" + rotateWarn
 			if errOut.String() != want {
 				t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
 			}

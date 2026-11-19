@@ -752,7 +752,10 @@ _sops_writes() {
   printf '# created: test\n# public key: %s\n' "${RCPT_B}" > "${SOPS_AGE_KEY_FILE}"
   DOMAIN=a.dev run _rm "${RCPT_B}"
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
-  [[ "$output" == *"[warn] the recipient is your own decrypt identity (${SOPS_AGE_KEY_FILE}): once it is removed, that identity cannot decrypt the re-keyed files"* ]] || {
+  # The second line names the two sources the check reads, and those it does
+  # not.
+  [[ "$output" == *"[warn] the recipient is your own decrypt identity (${SOPS_AGE_KEY_FILE}): once it is removed, that identity cannot decrypt the re-keyed files
+[warn]   this check reads only SOPS_AGE_KEY_FILE (default ~/.config/sops/age/keys.txt) and the .pub of LOK8S_SSH_KEY (default ~/.ssh/id_ed25519); it does not read SOPS_AGE_KEY, SOPS_AGE_KEY_CMD or other files"* ]] || {
     echo "$output" >&2; return 1; }
 }
 

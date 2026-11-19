@@ -476,7 +476,8 @@ func (c *Context) reportOtherStores(say func(io.Writer, string, ...any), selecte
 // file (${SOPS_AGE_KEY_FILE:-~/.config/sops/age/keys.txt}) by its
 // "# public key: " lines, or the SSH key lo decrypts with
 // (${LOK8S_SSH_KEY:-~/.ssh/id_ed25519}) by the age key of its .pub. "" when
-// neither matches. No private key is printed or derived.
+// neither matches. No private key is printed or derived. It reads these two
+// sources only, and the warning says so (ownIdentityScope).
 func ownIdentity(recipient string) string {
 	keyFile := os.Getenv("SOPS_AGE_KEY_FILE")
 	if keyFile == "" {
@@ -502,6 +503,10 @@ func ownIdentity(recipient string) string {
 	}
 	return ""
 }
+
+// ownIdentityScope is the second line of the own-identity warning: the two
+// sources ownIdentity reads, and those it does not.
+const ownIdentityScope = "  this check reads only SOPS_AGE_KEY_FILE (default ~/.config/sops/age/keys.txt) and the .pub of LOK8S_SSH_KEY (default ~/.ssh/id_ed25519); it does not read SOPS_AGE_KEY, SOPS_AGE_KEY_CMD or other files"
 
 // replaceFile writes content to path through a temp file in the same
 // directory and a rename (bash: secrets::_replace), so no reader sees half a
@@ -813,6 +818,7 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 	}
 	if own := ownIdentity(agePubkey); own != "" {
 		ui.WarnTo(c.ErrOut, "the recipient is your own decrypt identity (%s): once it is removed, that identity cannot decrypt the re-keyed files", own)
+		ui.WarnTo(c.ErrOut, "%s", ownIdentityScope)
 	}
 
 	// The first write. A run that stops after it (a failed encrypt) is
