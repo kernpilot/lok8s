@@ -33,6 +33,33 @@
 #
 # Every test reproduces the caller's `|| rc=$?`. Without it errexit alone would
 # catch these, which is precisely why they survived.
+#
+# No test may reach a real tool. On the tested paths, the function stubs in
+# _load answer every call that would run docker, kind, kubectl, ssh or rsync.
+# As a net under them, _stub_tools puts failing stubs of those tools first on
+# PATH, and teardown fails the test when one of them ran.
+
+# _stub_tools — docker, kind, kubectl, helm, ssh, scp, rsync and curl FIRST on
+# PATH: each logs its argv and fails, so a call that a function stub misses
+# never reaches the host's docker or a live cluster.
+_stub_tools() {
+  local tool
+  mkdir -p "${BATS_TEST_TMPDIR}/stub-bin"
+  for tool in docker kind kubectl helm ssh scp rsync curl; do
+    printf '#!/usr/bin/env bash\necho "%s $*" >> "%s"\nexit 97\n' \
+      "${tool}" "${BATS_TEST_TMPDIR}/tools.log" > "${BATS_TEST_TMPDIR}/stub-bin/${tool}"
+    chmod +x "${BATS_TEST_TMPDIR}/stub-bin/${tool}"
+  done
+  export PATH="${BATS_TEST_TMPDIR}/stub-bin:${PATH}"
+}
+
+_no_tool_ran() {
+  [ ! -s "${BATS_TEST_TMPDIR}/tools.log" ] || {
+    echo "a tool on PATH ran (only the function stubs may answer):" >&2
+    cat "${BATS_TEST_TMPDIR}/tools.log" >&2
+    return 1
+  }
+}
 
 setup() {
   load "../test_helper"
@@ -42,6 +69,7 @@ setup() {
   export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s"
   export KIND_EXPERIMENTAL_DOCKER_NETWORK="lok8s-test"
   mkdir -p "${PATH_CLUSTERS}/test.dev" "${PATH_BASE}/.kubeconfig"
+  _stub_tools
   import() { :; }
   export -f import
   command -v yq &>/dev/null || skip "yq not available"
@@ -57,7 +85,13 @@ spec:
 YAML
 }
 
-teardown() { teardown_tmpdir; }
+# Every test ends with the check that no tool on PATH ran.
+teardown() {
+  local rc=0
+  _no_tool_ran || rc=$?
+  teardown_tmpdir
+  return "${rc}"
+}
 
 # Everything stubbed to SUCCEED; each test breaks exactly one collaborator.
 _load() {
@@ -82,6 +116,22 @@ _load() {
   kapply::run() { local phase="${1}" fn="${2}"; shift 2; "${fn}" "${@}"; }
   # `kind get clusters` must come back EMPTY so the create branch is taken.
   kind() { case "${1:-}" in get) return 0 ;; *) return 0 ;; esac; }
+  # The registry and node steps run docker, kind and kubectl for real: the
+  # registry containers, the registry network of the nodes, the node IP heal.
+  # lo::registries and lo::reconcile_registry_network_nodes act only when the
+  # environment names a registry document (LOK8S_REGISTRY_JSON);
+  # lo::nodes_on_registry_network asks docker on every run that gets that far.
+  lo::registries()                       { return 0; }
+  lo::reconcile_registry_network_nodes() { return 0; }
+  # No node is on the registry network, so the heal branch stays off unless a
+  # test turns it on.
+  lo::nodes_on_registry_network()        { return 1; }
+  lo::heal_node_ips()                    { return 0; }
+  # The remote expose (docker) runs only with LOK8S_REMOTE_EXPOSE=true.
+  lo::expose()                           { return 0; }
+  # lo::provision_remote stays real: the provider tests below drive its guard.
+  # With no node in the provider output, it returns before its ssh and docker
+  # calls. lo::remote_ci (ssh, rsync) is stubbed by the two tests that reach it.
 }
 
 @test "lo provision: a FAILED 'kind create' does not report success" {
@@ -343,6 +393,30 @@ _load() {
     echo "driver::provision returned ${rc} because the advisory TLS nudge did." >&2
     echo "The cluster was created successfully; a host trust-store nag must not" >&2
     echo "fail the provision." >&2
+    return 1
+  }
+}
+
+@test "lo provision: a registry document in the environment reaches no real tool" {
+  # The registry steps act on LOK8S_REGISTRY_JSON. A shell that exports it (the
+  # registry map of a lok8s project) would send the real lo::registries and
+  # lo::reconcile_registry_network_nodes to docker: inspect, run, network
+  # inspect. The stubs in _load keep them off, and teardown fails this test
+  # when a tool on PATH ran.
+  _load
+  export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/registries.json"
+  cat > "${LOK8S_REGISTRY_JSON}" <<'JSON'
+{"shared": false, "tls": false, "port": 80,
+ "project_network": "lok8s-test",
+ "network": {"name": "lok8s-registry", "cidr": "172.30.0.0/24"},
+ "registries": [{"name": "cache", "ip": "172.30.0.10", "url": "", "domain": "", "host": "", "type": "local"}]}
+JSON
+
+  local rc=0
+  driver::provision test.dev || rc=$?
+
+  [ "${rc}" -eq 0 ] || {
+    echo "the happy path with a registry document in the environment failed (rc=${rc})" >&2
     return 1
   }
 }
