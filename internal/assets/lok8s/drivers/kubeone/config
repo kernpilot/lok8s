@@ -404,9 +404,10 @@ kubeone::_inject_audit_log() {
 # them; a target's text (a name, or an array element with its subscript) is
 # printed, never the referenced value. The array check reads the names that
 # `compgen -A arrayvar` lists, never a value: bash exports no array, so yq
-# would get an empty strenv() for one. An array with no element is not
-# listed and passes; it holds no value, so its name exports nothing, as an
-# empty variable does.
+# would get an empty strenv() for one. An array that is declared and never
+# assigned is not listed and passes; it holds no value, so its name exports
+# nothing, as an empty variable does. An array assigned with no element
+# (=()) is listed and refused.
 # It does not use `yq -i`: yq -i writes through a temp file in TMPDIR, and
 # when its last write fails, it keeps that file there, a copy of the manifest
 # outside the work directory. Here the result stays in memory until the
@@ -548,9 +549,10 @@ kubeone::_inject_registry_auth() {
     # array attribute of a caller's array of the same name, and bash exports
     # no array, so yq would get an empty strenv(). The empty values on this
     # line make such a local a set array, which compgen -A arrayvar lists
-    # (names only, never a value); without a value, a local that takes an
-    # array with no element is not listed. Then the merge stops before it
-    # reads a credential. The _ra_ locals hold the list.
+    # (names only, never a value); without a value, a local that takes a
+    # caller's array that is declared and never assigned is not listed. Then
+    # the merge stops before it reads a credential. The _ra_ locals hold the
+    # list.
     local +x +i +l +u ns="${sns:-provisioning}" username='' password='' RUSER='' RPASS='' _ra_nl=$'\n' _ra_arrays _ra_n \
       || { error "kubeone::_inject_registry_auth: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
     _ra_arrays="${_ra_nl}$(compgen -A arrayvar)${_ra_nl}" \
