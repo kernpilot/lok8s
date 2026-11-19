@@ -251,8 +251,9 @@ if out=$(printf '%s' "${b}" | ( http::tls_log_vars_unset && curl -q -sS --data-b
 ( http::tls_log_vars_unset && cu\
 rl -q -sS https://h.example/n10 )
 eval "${saved_traps}"
-x=$(echo curl)
+x=$(echo curl is a word, not a call)
 printf '%s\n' "${a}" | tr -d '\n' | ( http::tls_log_vars_unset && curl -q -sS https://h.example/n11 )
+y="$(echo curl is a word here too)"
 SH
   local q="a curl call: -q is not its first argument"
   local v="curl named through a variable: the gate cannot check that call"
