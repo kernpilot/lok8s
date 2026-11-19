@@ -120,7 +120,9 @@ for d in tmpl unparsed broken bslash merge quote expand; do
   printf 'kind: KubeOne\nmetadata:\n  name: %s\nspec:\n  provider:\n    name: mock\n    configRef: provider.yaml\n' "${d}" \
     > "${PROJ}/clusters/${d}.cloud/cluster.lok8s.yaml"
 done
+# shellcheck disable=SC2016  # the config holds ${...} as text: the guard must see the variable
 printf 'cluster_name: ${NAME}-a\n' > "${PROJ}/clusters/tmpl.cloud/provider.yaml"
+# shellcheck disable=SC2016  # the config holds ${...} as text: the guard must see the variable
 printf '{"cluster_name": "twiny", "token": ${LOK8S_PARITY_TOKEN}}\n' > "${PROJ}/clusters/unparsed.cloud/provider.yaml"
 printf '{"cluster_name": "twiny", "token": [}\n' > "${PROJ}/clusters/broken.cloud/provider.yaml"
 printf 'cluster_name: "a\\\\b"\n' > "${PROJ}/clusters/bslash.cloud/provider.yaml"
@@ -128,6 +130,7 @@ printf 'cluster_name: "a\\\\b"\n' > "${PROJ}/clusters/bslash.cloud/provider.yaml
 # bash (yq) but not in Go, so a merged twiny would change the twin checks.
 printf 'base: &b {cluster_name: mergy}\n<<: *b\n' > "${PROJ}/clusters/merge.cloud/provider.yaml"
 printf 'cluster_name: 0123\n' > "${PROJ}/clusters/quote.cloud/provider.yaml"
+# shellcheck disable=SC2016  # the config holds ${...} as text: the guard must see the variable
 printf '{"x": 1, "note": "${LOK8S_PARITY_NOTE}"}\n' > "${PROJ}/clusters/expand.cloud/provider.yaml"
 echo alpha.dev > "${PROJ}/clusters/.active"
 
