@@ -128,7 +128,8 @@ khelm → kustomize.
 ### Merge order
 
 Later files override earlier ones. Deep-merge semantics: nested keys
-combine instead of replace.
+combine instead of replace. Lists do not merge: a list in a later layer
+replaces the whole list of an earlier layer.
 
 1. `values.yaml`: base (shared across all drivers and providers)
 2. `values.${kind}.yaml`: driver (`lo`, `kubeone`, `capi`, `kkp`)
@@ -392,6 +393,7 @@ underlying cause.
 | `cert-manager` | cert-manager controller + CRDs (Issuers, Certificates) | `jetstack/cert-manager` v1.21.3 |
 | `cert-manager-webhook-hetzner` | Hetzner DNS-01 ACME solver webhook. **Opt-in**: bootstrap *after* `cert-manager`. Only clusters that issue via Hetzner DNS-01 (e.g. Let's Encrypt on a public plane) need it; kind/dev clusters serving their Gateway from a `cert:` Secret skip it. | `cert-manager-webhook-hetzner` 0.7.0 |
 | `envoy-gateway` | Envoy Gateway controller **+ the upstream Gateway API CRD bundle**. See [upgrading in place](#envoy-gateway-upgrading-in-place) before you bump the pin | `envoyproxy/gateway-helm` v1.9.3 |
+| `external-dns` | ExternalDNS with the Hetzner DNS webhook as a sidecar. It publishes the hostnames of the Gateway API routes. To publish Services too, see [external-dns](#external-dns) | `external-dns/external-dns` 1.21.1 |
 | `rook-ceph` | Rook-Ceph operator + CRDs, and the ceph-csi-operator work orders that yield the RBD `CSIDriver`. The CSI node plugin runs with a [narrowed ClusterRole](#rook-ceph) | `rook-release/rook-ceph` v1.20.6, `ceph-csi-drivers` 1.0.4 |
 | `rook-ceph-csi-kms` | **Opt-in**, after `rook-ceph`: gives the CSI node plugin back the Secret / ServiceAccount-token grants that KMS-encrypted volumes and `mounter: rbd-nbd` need. See [rook-ceph](#rook-ceph) | raw manifests |
 | `redis-operator` | The OT-CONTAINER-KIT Redis operator + CRDs (`Redis`, `RedisReplication`, `RedisSentinel`, `RedisCluster`). It runs with [narrowed RBAC](#redis-operator), and nothing aggregates into the built-in `admin` role. The CRs go in a target | `ot-container-kit/redis-operator` 0.26.1 |
@@ -1626,6 +1628,52 @@ $ kubectl delete clusterrole lok8s-redis-operator-chart-rbac
 If namespace admins must manage Redis CRs, do not use the opt-in addon for
 that. Give them a ClusterRole in a target with only the
 `redis.redis.opstreelabs.in` resources they need.
+
+### external-dns: the RBAC follows `sources` {#external-dns}
+
+The `external-dns` addon installs ExternalDNS (chart 1.21.1) with the
+Hetzner DNS webhook as a sidecar. It enables five sources:
+`gateway-httproute`, `gateway-grpcroute`, `gateway-tlsroute`,
+`gateway-tcproute` and `gateway-udproute`.
+
+The chart derives the rules of the ClusterRole `external-dns` from the
+`sources` value. It also gives the container one `--source` argument for
+each item of that list. A source that only `extraArgs` enables gets the
+argument but no rules. external-dns then cannot read the objects of that
+source. Enable a source through `sources` only.
+
+To publish the hostnames of Services too, add `service` to the list. Set
+the whole list inline, because a list in inline values replaces the list of
+the addon (see [merge order](#merge-order)):
+
+```yaml
+spec:
+  bootstrap:
+    - external-dns:
+        sources:
+          - gateway-httproute
+          - gateway-grpcroute
+          - gateway-tlsroute
+          - gateway-tcproute
+          - gateway-udproute
+          - service
+```
+
+The `service` source adds four read-only rules to the ClusterRole
+(`templates/clusterrole.yaml` of the chart):
+
+| API group | Resources | Verbs |
+|---|---|---|
+| `""` | `nodes` | list, watch |
+| `""` | `pods` | get, list, watch |
+| `""` | `services` | get, list, watch |
+| `discovery.k8s.io` | `endpointslices` | get, list, watch |
+
+`internal/addons/external_dns_rbac_test.go` holds the ClusterRole of the
+pinned chart for the addon as shipped and for the list above. It fails when
+`extraArgs` enables a source, and when the `service` source does not give
+the EndpointSlice rule. On CI it renders the chart and fails when the chart
+renders other rules than the fixtures.
 
 ## Writing a custom addon
 

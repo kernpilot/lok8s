@@ -1,0 +1,78 @@
+# Fixture for internal/addons/external_dns_rbac_test.go: the ClusterRole
+# external-dns that the external-dns chart renders for the values of the
+# addon, with its five gateway-* sources. The metadata is reduced to the name.
+# The rules and their order are those of
+# charts/external-dns/templates/clusterrole.yaml at the tag
+# external-dns-helm-chart-1.21.1: lines 66-107 give the Gateways, the
+# Namespaces and the five route kinds.
+#
+# chart: external-dns 1.21.1
+#
+# TestExternalDNSFixtureMatchesChart renders the chart (on CI, or
+# LOK8S_ONLINE_TESTS=1) and fails on any drift from this file. Refresh it on
+# every chart bump and on every change of `sources` in the addon values:
+# render the addon (`KHELM_TRUST_ANY_REPO=true kustomize build
+# --enable-alpha-plugins --enable-exec <addon dir>`, with KUSTOMIZE_PLUGIN_HOME
+# at .kustomize), take the ClusterRole external-dns, and reduce its metadata
+# to the name.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: external-dns
+rules:
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - gateways
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - httproutes
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - grpcroutes
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - tlsroutes
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - tcproutes
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - udproutes
+    verbs:
+      - get
+      - watch
+      - list
