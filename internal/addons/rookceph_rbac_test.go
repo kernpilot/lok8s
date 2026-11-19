@@ -21,6 +21,7 @@ package addons
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -141,11 +142,13 @@ var plugins = []plugin{
 	},
 }
 
-// object is one Kubernetes object as a generic document, metadata reduced
-// to name (+ namespace) because the addon's label transformer adds labels
-// the chart does not.
+// object is one Kubernetes object as a generic document. Doc has the
+// metadata reduced to name (+ namespace), because the addon's label
+// transformer adds labels the chart does not; Labels and Annotations keep
+// the rest, so that a gate can still check them (rbacCheckMetadata).
 type object struct {
 	Kind, Name, Namespace string
+	Labels, Annotations   map[string]string
 	Doc                   map[string]any
 }
 
@@ -171,9 +174,10 @@ func objKey(kind, ns, name string) string {
 }
 
 // decodeObjects returns every object of a multi-document stream, keyed by
-// objKey, with the metadata reduced to the name and the namespace (the
-// addons' label transformers add labels the charts do not). decodeDocs
-// fails the test on a decode error and on a key that comes twice.
+// objKey, with the metadata of Doc reduced to the name and the namespace
+// (the addons' label transformers add labels the charts do not) and the
+// labels and annotations in their own fields. decodeDocs fails the test on
+// a decode error and on a key that comes twice.
 func decodeObjects(t *testing.T, stream []byte) map[string]object {
 	t.Helper()
 	objs := map[string]object{}
@@ -186,9 +190,28 @@ func decodeObjects(t *testing.T, stream []byte) map[string]object {
 			m["namespace"] = ns
 		}
 		d.Doc["metadata"] = m
-		objs[d.Key] = object{Kind: d.Kind, Name: name, Namespace: ns, Doc: d.Doc}
+		objs[d.Key] = object{
+			Kind: d.Kind, Name: name, Namespace: ns, Doc: d.Doc,
+			Labels: stringMap(meta["labels"]), Annotations: stringMap(meta["annotations"]),
+		}
 	}
 	return objs
+}
+
+// stringMap returns a decoded labels or annotations map as strings (a
+// value that is not a string keeps its YAML text, so a compare still sees
+// it); a missing map is empty.
+func stringMap(v any) map[string]string {
+	m, _ := v.(map[string]any)
+	out := make(map[string]string, len(m))
+	for k, val := range m {
+		if s, ok := val.(string); ok {
+			out[k] = s
+		} else {
+			out[k] = fmt.Sprint(val)
+		}
+	}
+	return out
 }
 
 // clusterRoles filters decoded objects to the ClusterRoles with a suffix.
@@ -578,6 +601,12 @@ func checkPluginRoles(t *testing.T, p plugin, names map[string]string, fixture, 
 		if !reflect.DeepEqual(got.Doc, wantDoc) {
 			t.Errorf("%s: effective ClusterRole\n got: %s\nwant: %s", name, canon(t, got.Doc), canon(t, wantDoc))
 		}
+		// The patches change rules only: the labels and annotations stay
+		// those of the chart, and none of them grants through aggregation.
+		if !maps.Equal(got.Labels, fixture[name].Labels) || !maps.Equal(got.Annotations, fixture[name].Annotations) {
+			t.Errorf("%s: labels %v annotations %v, the fixture has labels %v annotations %v", name, got.Labels, got.Annotations, fixture[name].Labels, fixture[name].Annotations)
+		}
+		rbacCheckMetadata(t, got)
 		// What the patch removed is what rook-ceph-csi-kms with `kms: [all]`
 		// gives back: the node plugin's five rules exactly; the controller
 		// plugin's four (it keeps tokenreviews). Not for nfs: it has no KMS, and its

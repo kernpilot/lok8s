@@ -150,6 +150,32 @@ func rbacCheckRulesNeeded(t *testing.T, g rbacGrant, calls []rbacCall) {
 	}
 }
 
+// rbacAggregateTo is the name part of an aggregation label. The built-in
+// admin, edit and view roles collect the rules of every ClusterRole with
+// rbac.authorization.k8s.io/aggregate-to-<role>, and any ClusterRole with
+// an aggregationRule collects the roles that its selector matches: such a
+// label hands the rules of a role to another role that no gate reads.
+const rbacAggregateTo = "aggregate-to-"
+
+// rbacCheckMetadata rejects the metadata that grants or changes a role
+// outside its rules: a label whose name starts with aggregate-to- (with
+// any prefix) on any object, an aggregationRule on a ClusterRole, and any
+// annotation on a Role or ClusterRole.
+func rbacCheckMetadata(t *testing.T, o object) {
+	t.Helper()
+	for k := range o.Labels {
+		if _, name, _ := strings.Cut(k, "/"); strings.HasPrefix(name, rbacAggregateTo) || strings.HasPrefix(k, rbacAggregateTo) {
+			t.Errorf("%s/%s: aggregation label %s", o.Kind, o.Name, k)
+		}
+	}
+	if _, ok := o.Doc["aggregationRule"]; ok {
+		t.Errorf("%s/%s: aggregationRule %s", o.Kind, o.Name, canon(t, o.Doc["aggregationRule"]))
+	}
+	if (o.Kind == "Role" || o.Kind == "ClusterRole") && len(o.Annotations) > 0 {
+		t.Errorf("%s/%s: annotations %v on a role", o.Kind, o.Name, o.Annotations)
+	}
+}
+
 // rbacClusterScoped are the cluster-scoped kinds a render of an addon can
 // carry; every other kind is namespaced.
 var rbacClusterScoped = []string{"Namespace", "ClusterRole", "ClusterRoleBinding", "CustomResourceDefinition"}
