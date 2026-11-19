@@ -178,9 +178,45 @@ git add clusters/app.example.com/secrets/*.enc  # each store's .gitignore commit
 lo secrets --domain app.example.com decrypt     # restore plaintext from the .enc files
 ```
 
-Add teammates by putting their age public keys (derived from their SSH keys)
-into `.sops.yaml`'s `creation_rules`, then re-`encrypt`. Scope those rules by
-path to give each environment **different** recipients. See below.
+Add a teammate with `lo secrets add-key`. It takes their age public key, or the
+path to their ed25519 SSH public key. It adds the key to every creation rule in
+`.sops.yaml`, then re-encrypts the store so that the new recipient can read it:
+
+```bash
+lo secrets --domain app.example.com add-key ~/keys/alice_ed25519.pub
+```
+
+Remove a recipient with `lo secrets remove-key`, for example when a teammate
+leaves or a key is lost. It removes the key from every creation rule, then
+re-encrypts the store so that no `.enc` file lists the key. With `--all` it
+re-encrypts every domain store:
+
+```bash
+lo secrets --domain app.example.com remove-key ~/keys/alice_ed25519.pub
+lo secrets remove-key age1<recipient> --all     # every clusters/<domain>/secrets store
+```
+
+`remove-key` changes nothing when one of these is true:
+
+- The key is the last recipient of a creation rule. Nothing could then decrypt
+  the files that the rule matches. Add another recipient first.
+- An `.enc` file has no decrypted twin. The re-key cannot rewrite that file, so
+  it would keep the removed recipient. Run `lo secrets decrypt` first, or pass
+  `--skip-orphans` to accept it.
+- The key is in no creation rule and in no `.enc` file. A typo then does not
+  look like a removal.
+
+After the re-key the command reads the `.enc` files again. It fails when a
+file still lists the removed key.
+
+::: warning A removal does not revoke access
+The removed key can still decrypt the older `.enc` files in the git history,
+and its holder keeps every value that they decrypted before. After a removal,
+rotate the secrets that the key could read.
+:::
+
+Scope the creation rules by path to give each environment **different**
+recipients. See below.
 
 ## Per-environment isolation
 
@@ -205,7 +241,7 @@ them share a store:
 ```yaml
 # .sops.yaml — first match wins, so specific rules go BEFORE any catch-all
 creation_rules:
-  - path_regex: clusters/kubehz\.cloud/secrets/Secret\..*
+  - path_regex: clusters/example\.com/secrets/Secret\..*
     age: 'age1prod…'                 # prod-key holders only
   - path_regex: clusters/.*/secrets/Secret\..*
     age: 'age1dev…,age1prod…'        # dev/CI (+ prod, who may read everything)
