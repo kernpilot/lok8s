@@ -687,7 +687,8 @@ fi
 # implementation): kc.yaml as a file that exists, a link to a file, a link
 # to a directory, a link to nothing, a link to a file in a directory that
 # others can write, a link to itself (a loop), a link to a file with a
-# trailing "/", a link through a missing name and "..", a link to a FIFO.
+# trailing "/", a link through a missing name and "..", a link to a FIFO,
+# a FIFO.
 kc_exists() { echo contexts > "${PROJ}/kc.yaml"; }
 kc_link_file() { mkdir -p "${PROJ}/kube"; echo contexts > "${PROJ}/kube/real"; ln -s kube/real "${PROJ}/kc.yaml"; }
 kc_link_dir() { mkdir -p "${PROJ}/kc-dir"; ln -s kc-dir "${PROJ}/kc.yaml"; }
@@ -699,6 +700,7 @@ kc_link_loop() { ln -s kc.yaml "${PROJ}/kc.yaml"; }
 kc_link_slash() { mkdir -p "${PROJ}/kube"; echo contexts > "${PROJ}/kube/real"; ln -s kube/real/ "${PROJ}/kc.yaml"; }
 kc_link_dotdot() { mkdir -p "${PROJ}/kube"; echo contexts > "${PROJ}/kube/real"; ln -s missing/../kube/real "${PROJ}/kc.yaml"; }
 kc_link_fifo() { mkdir -p "${PROJ}/kube"; mkfifo "${PROJ}/kube/real"; ln -s kube/real "${PROJ}/kc.yaml"; }
+kc_fifo() { mkdir -p "${PROJ}/kube"; mkfifo "${PROJ}/kube/real"; }
 
 agent_pre() {
   rm -rf "${HOME}/.cache/lok8s/kubehz-token" "${PROJ}/kc.yaml" "${PROJ}/kube" "${PROJ}/kc-dir"
@@ -869,6 +871,8 @@ if [[ -n "${STUB_PORT}" ]]; then
   kc_reason "a link to missing/../kube/real" "cannot write kc.yaml: PROJ/missing does not exist or cannot be read"
   KC_SETUP=kc_link_fifo check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
   kc_reason "a link to a FIFO" "kc.yaml is a link, and its target PROJ/kube/real is not a regular file"
+  KC_SETUP=kc_fifo check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kube/real --force
+  kc_reason "a FIFO" "kubeconfig sp-1a2b3c4d: kube/real is not a regular file"
   KC_SETUP=kc_link_file check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kube/real/ --force
   kc_reason "the argument kube/real/" "cannot write kube/real/: kube/real is not a directory"
   # /proc and /dev are refused, also through a link. /proc/self resolves

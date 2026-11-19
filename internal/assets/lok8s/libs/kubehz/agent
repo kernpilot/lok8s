@@ -636,7 +636,9 @@ kubehz::agent_kubeconfig() {
 #     user put in /tmp must not send the write to a file of this user, such
 #     as ~/.bashrc. A link to nothing is refused.
 # A plain file and a path that does not exist yet keep the rules above
-# only: the walk of kubehz::agent_link_target is for a link.
+# only: the walk of kubehz::agent_link_target is for a link. A plain path
+# that exists must be a regular file, as the target of a link must be: a
+# FIFO, a socket or a device is refused (kubehz::agent_not_regular).
 # Usage: kubehz::agent_target <action> <file> <force>
 # Sets: KUBEHZ_AGENT_TARGET
 kubehz::agent_target() {
@@ -658,7 +660,15 @@ kubehz::agent_target() {
     kubehz::agent_exists "${action}" "${file}"
     return 1
   fi
-  [[ -L "${file}" ]] || return 0
+  if [[ ! -L "${file}" ]]; then
+    # A FIFO, a socket or a device is not a kubeconfig (a directory was
+    # refused above): the mv would replace it.
+    if [[ ! -f "${file}" ]]; then
+      kubehz::agent_not_regular "${action}" "${file}"
+      return 1
+    fi
+    return 0
+  fi
   kubehz::agent_link_target "${action}" "${file}"
 }
 
@@ -708,8 +718,10 @@ _KUBEHZ_MAX_LINK_HOPS=8
 # exists before "." or ".." applies to it. So real/, real/.,
 # missing/../real and file/../real are refused, as the kernel refuses
 # them. ".." goes up from where a link to a directory points. A relative
-# path starts at the working directory as the kernel knows it (pwd -P),
-# not at $PWD: a stale or reassigned PWD names another directory.
+# path starts at the working directory as the kernel knows it (pwd -P, Go:
+# syscall.Getwd), not at $PWD: a stale or reassigned PWD names another
+# directory, and a PWD through a link names links that the kernel does not
+# pass.
 # Usage: kubehz::agent_link_target <action> <file>
 # Sets: KUBEHZ_AGENT_TARGET
 kubehz::agent_link_target() {
@@ -785,7 +797,7 @@ kubehz::agent_link_target() {
   # would replace it. The file type is the top 4 bits of the mode (8 =
   # a regular file).
   if [[ ! "${mode}" =~ ^[0-9a-f]+$ ]] || (( (16#${mode} & 16#F000) != 16#8000 )); then
-    kubehz::agent_link_not_regular "${action}" "${file}" "${target}"
+    kubehz::agent_not_regular "${action}" "${file}" "${target}"
     return 1
   fi
   if [[ "${uid}" != "${me}" || "${me}" == "${ovf}" ]]; then
@@ -879,12 +891,17 @@ kubehz::agent_link_not_safe() {
   echo "  and must not be writable by its group or by others unless it has the sticky bit. Name another file." >&2
 }
 
-# The refusal of a link whose target is not a regular file (Go:
-# linkNotRegular).
-# Usage: kubehz::agent_link_not_regular <action> <file> <target>
-kubehz::agent_link_not_regular() {
-  error "kubehz ${1}: ${2} is a link, and its target ${3} is not a regular file"
-  echo "  lo writes through a link only to a regular file of yours. Name another file." >&2
+# The refusal of a path that exists and is not a regular file: <file>
+# itself (no <target>), or <target>, where the link <file> points (Go:
+# kubeconfigNotRegular). One rule and one hint for both.
+# Usage: kubehz::agent_not_regular <action> <file> [<target>]
+kubehz::agent_not_regular() {
+  if [[ -z "${3:-}" ]]; then
+    error "kubehz ${1}: ${2} is not a regular file"
+  else
+    error "kubehz ${1}: ${2} is a link, and its target ${3} is not a regular file"
+  fi
+  echo "  lo replaces only a regular file. Name another file." >&2
 }
 
 # The refusal of a path that lo cannot write (Go: kubeconfigUnwritable).
@@ -965,11 +982,21 @@ kubehz::agent_exists() {
 # <file> is the file that kubehz::agent_link_target checked: no other user
 # can change a directory from / down to it, so the path names that file up
 # to the mv.
+# The temporary file goes to the directory of <file> as written, the part
+# before its last "/" (Go: kubeconfigTempDir). A parameter expansion takes
+# it, not $(dirname): a command substitution drops the trailing newlines of
+# a name, and "safe<newline>/real" would get its temporary file in "safe".
+# The kernel resolves "alias/.." in the part as it does in <file>, so the
+# temporary file and the mv stay in one directory.
 # Usage: kubehz::agent_write <file> <force>
 kubehz::agent_write() {
-  local file="${1}" force="${2}" tmp rc=0
+  local file="${1}" force="${2}" dir=. tmp rc=0
   [[ ! -d "${file}" ]] || return 1
-  tmp=$(mktemp "$(dirname -- "${file}")/.kubeconfig-XXXXXX" 2>/dev/null) || return 1
+  # "/" for a name in /: the part is empty, and the template adds the "/".
+  [[ "${file}" != */* ]] || dir="${file%/*}"
+  # mktemp prints a newline: the x keeps the trailing newlines of a name.
+  tmp=$(mktemp "${dir%/}/.kubeconfig-XXXXXX" 2>/dev/null && printf x) || return 1
+  tmp="${tmp%$'\n'x}"
   if ! printf '%s' "${KUBEHZ_AGENT_BODY}" >"${tmp}"; then
     rc=1
   elif (( force )); then

@@ -1096,11 +1096,16 @@ a link in a directory that another user can write, cannot make `lo` replace
 one of your files. The refusal names the part of the path that failed, and
 why: "writable by its group" or "writable by others" names the class that
 has the write bit. A directory, a link to one, and a link to nothing are
-refused. A plain file and a new file do not get these checks.
+refused. A plain file and a new file do not get these checks. But a path
+that exists must be a regular file: `lo` refuses a FIFO, a socket or a
+device there too.
 
-The check reads the owners and the mode bits only. It does not read ACLs or
-other permission systems: a directory that an ACL lets another user write
-passes the check. `lo` does not read who is in a group, so a directory with
+The check reads the owners and the mode bits only. A POSIX ACL entry that
+lets another user write a directory shows in the group bits of its mode
+(the ACL mask), so the check refuses such a directory unless it has the
+sticky bit. The check does not see a right that the mode bits do not show,
+for example the rights of root or of a process with a capability such as
+`CAP_DAC_OVERRIDE`. `lo` does not read who is in a group, so a directory with
 mode 775 is refused, also when the group is your own (umask 002 makes such
 directories). `chmod g-w <dir>` removes the group write bit.
 
@@ -1109,7 +1114,10 @@ as the kernel requires. Thus `real/`, `real/.`, `missing/../real` and
 `file/../real` are refused before `lo` calls the api, in the path that you
 name and in the target of a link. A `..` after a link to a directory goes
 up from where the link points, as in the kernel. A relative path starts at
-the working directory that the kernel knows, not at `$PWD`.
+the working directory that the kernel knows, not at `$PWD`, also when
+`$PWD` names that directory through a link. The temporary file of the
+write goes to the directory that the kernel resolves for the path, so for
+`alias/../config` it goes where `alias` points, one level up.
 
 A path in `/proc` or `/dev` is refused, also when a link in the path points
 there. Some of these paths change with the process that opens them: for

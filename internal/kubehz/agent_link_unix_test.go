@@ -76,7 +76,7 @@ const linkNotSafeHint = "  lo writes through a link only to a file of yours. Eac
 
 const linkHopHint = "  Point the link at the file, or name the file itself.\n"
 
-const linkNotRegularHint = "  lo writes through a link only to a regular file of yours. Name another file.\n"
+const notRegularHint = "  lo replaces only a regular file. Name another file.\n"
 
 const unwritableHint = "  Name a file in a directory that exists and that you can write to.\n"
 
@@ -105,16 +105,34 @@ func ownersAs(uids map[string]int) func(string) (fs.FileInfo, error) {
 	}
 }
 
-func TestAgentKubeconfigLinkChain(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("the test needs a user other than root: root passes each owner check")
+// pwdThroughAlias makes dir/wd with the file real and a chain of n links
+// to it (l1 first), and the link <in>/alias to dir/wd. The test then runs
+// in dir/wd, and PWD names it through the alias: os.Getwd gives the alias
+// (the test checks that, else the case proves nothing). The walk must
+// start at dir/wd.
+func pwdThroughAlias(t *testing.T, dir, in string, n int) string {
+	t.Helper()
+	wd := modeDir(t, dir, "wd", 0o700)
+	writeReal(t, wd, "real")
+	linkChain(t, wd, n, "real")
+	alias := filepath.Join(dir, in, "alias")
+	must(t, os.Symlink(wd, alias))
+	t.Chdir(wd)
+	t.Setenv("PWD", alias)
+	if got, err := os.Getwd(); err != nil || got != alias {
+		t.Fatalf("os.Getwd = %q, %v: want the alias %s", got, err, alias)
 	}
+	return "l1"
+}
+
+func TestAgentKubeconfigLinkChain(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		setup func(t *testing.T, dir string) string // the --file value
-		seam  func(c *Context, dir string)
-		want  string // stderr after the action ("" for success); DIR is the test dir
-		land  string // success: the file under DIR that gets the kubeconfig
+		name    string
+		nonRoot bool                                  // the verdict needs a caller other than root
+		setup   func(t *testing.T, dir string) string // the --file value
+		seam    func(c *Context, dir string)
+		want    string // stderr after the action ("" for success); DIR is the test dir
+		land    string // success: the file under DIR that gets the kubeconfig
 	}{
 		{name: "a clean chain of 3 passes, and the file lands at the final target", setup: func(t *testing.T, dir string) string {
 			modeDir(t, dir, "a", 0o755)
@@ -154,6 +172,33 @@ func TestAgentKubeconfigLinkChain(t *testing.T) {
 			t.Setenv("PWD", other)
 			return "l1"
 		}, land: "real"},
+		{name: "PWD names the working directory through a link in an open directory: the walk starts at the physical path", setup: func(t *testing.T, dir string) string {
+			modeDir(t, dir, "open", 0o777)
+			return pwdThroughAlias(t, dir, "open", 1)
+		}, land: "wd/real"},
+		{name: "PWD names the working directory through a link of another user: the walk starts at the physical path", setup: func(t *testing.T, dir string) string {
+			return pwdThroughAlias(t, dir, ".", 1)
+		}, seam: func(c *Context, dir string) { c.Lstat = ownerAs(filepath.Join(dir, "alias"), 4242) }, land: "wd/real"},
+		{name: "PWD names the working directory through one more link: a chain of 8 from the physical path passes", setup: func(t *testing.T, dir string) string {
+			return pwdThroughAlias(t, dir, ".", 8)
+		}, land: "wd/real"},
+		{name: "PWD=/proc/self/cwd: the walk starts at the physical path, not in /proc", setup: func(t *testing.T, dir string) string {
+			wd := modeDir(t, dir, "wd", 0o700)
+			writeReal(t, wd, "real")
+			linkChain(t, wd, 1, "real")
+			t.Chdir(wd)
+			t.Setenv("PWD", "/proc/self/cwd")
+			if got, err := os.Getwd(); err != nil || got != "/proc/self/cwd" {
+				t.Skipf("os.Getwd = %q, %v here, not /proc/self/cwd: the case proves nothing", got, err)
+			}
+			return "l1"
+		}, land: "wd/real"},
+		{name: "a target in a directory whose name ends in a newline: the name keeps its bytes", setup: func(t *testing.T, dir string) string {
+			modeDir(t, dir, "safe\n", 0o700)
+			modeDir(t, dir, "safe", 0o700)
+			writeReal(t, dir, "safe\n/real")
+			return linkChain(t, dir, 1, "safe\n/real")
+		}, land: "safe\n/real"},
 		{name: "a link to real/ is refused: a file is not a directory", setup: func(t *testing.T, dir string) string {
 			writeReal(t, dir, "real")
 			return linkChain(t, dir, 1, "real/")
@@ -181,7 +226,11 @@ func TestAgentKubeconfigLinkChain(t *testing.T) {
 		{name: "a link to a FIFO is refused: the target must be a regular file", setup: func(t *testing.T, dir string) string {
 			must(t, syscall.Mkfifo(filepath.Join(dir, "fifo"), 0o600))
 			return linkChain(t, dir, 1, "fifo")
-		}, want: "DIR/l1 is a link, and its target DIR/fifo is not a regular file\n" + linkNotRegularHint},
+		}, want: "DIR/l1 is a link, and its target DIR/fifo is not a regular file\n" + notRegularHint},
+		{name: "a plain FIFO is refused: a path that exists must be a regular file", setup: func(t *testing.T, dir string) string {
+			must(t, syscall.Mkfifo(filepath.Join(dir, "fifo"), 0o600))
+			return filepath.Join(dir, "fifo")
+		}, want: "DIR/fifo is not a regular file\n" + notRegularHint},
 		{name: "the argument real/ is refused before any request", setup: func(t *testing.T, dir string) string {
 			writeReal(t, dir, "real")
 			return dir + "/real/"
@@ -270,13 +319,16 @@ func TestAgentKubeconfigLinkChain(t *testing.T) {
 			return linkChain(t, dir, 1, "real")
 		}, seam: func(c *Context, dir string) { c.Lstat = ownerAs(filepath.Join(dir, "real"), 4242) },
 			want: "DIR/l1 is a link, and its path is not safe: DIR/real belongs to another user (uid 4242)\n" + linkNotSafeHint},
-		{name: "a target of root is refused: the target must be a file of yours", setup: func(t *testing.T, dir string) string {
+		{name: "a target of root is refused: the target must be a file of yours", nonRoot: true, setup: func(t *testing.T, dir string) string {
 			writeReal(t, dir, "real")
 			return linkChain(t, dir, 1, "real")
 		}, seam: func(c *Context, dir string) { c.Lstat = ownerAs(filepath.Join(dir, "real"), 0) },
 			want: "DIR/l1 is a link, and its path is not safe: DIR/real belongs to another user (uid 0)\n" + linkNotSafeHint},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.nonRoot && os.Geteuid() == 0 {
+				t.Skip("the case needs a user other than root: a file of root is a file of yours for root")
+			}
 			h := agentHarness(t)
 			h.handle("GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent", 200, agentKubeconfigYAML)
 			dir := linkTestDir(t)
@@ -385,11 +437,8 @@ func TestAgentKubeconfigLinkOwnersForAnUnmappedUser(t *testing.T) {
 // linkTarget itself: a link to a directory (the os.Stat check of
 // kubeconfigTarget refuses it first), and a relative path when the working
 // directory was removed (the path then does not exist, so it is not a
-// link).
+// link). Neither verdict depends on the caller, so root runs them too.
 func TestAgentKubeconfigLinkTargetDirect(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("the test needs a user other than root: root passes each owner check")
-	}
 	const action = "cluster kubeconfig cl-1a2b3c4d"
 	t.Run("a directory as the final target is not a regular file", func(t *testing.T) {
 		h := agentHarness(t)
@@ -397,7 +446,7 @@ func TestAgentKubeconfigLinkTargetDirect(t *testing.T) {
 		modeDir(t, dir, "sub", 0o700)
 		_, err := h.ctx.linkTarget(action, linkChain(t, dir, 1, "sub"))
 		mustErr(t, err)
-		want := "[error] kubehz " + action + ": DIR/l1 is a link, and its target DIR/sub is not a regular file\n" + linkNotRegularHint
+		want := "[error] kubehz " + action + ": DIR/l1 is a link, and its target DIR/sub is not a regular file\n" + notRegularHint
 		if got := strings.ReplaceAll(h.errOut.String(), dir, "DIR"); got != want {
 			t.Errorf("stderr = %q, want %q", got, want)
 		}
@@ -407,8 +456,8 @@ func TestAgentKubeconfigLinkTargetDirect(t *testing.T) {
 		wd := modeDir(t, linkTestDir(t), "wd", 0o700)
 		t.Chdir(wd)
 		must(t, os.Remove(wd))
-		if got, err := os.Getwd(); err == nil {
-			t.Skipf("os.Getwd still works in a removed directory here (%s)", got)
+		if got, err := syscall.Getwd(); err == nil {
+			t.Skipf("getcwd still works in a removed directory here (%s)", got)
 		}
 		_, err := h.ctx.linkTarget(action, "l1")
 		mustErr(t, err)
@@ -418,4 +467,60 @@ func TestAgentKubeconfigLinkTargetDirect(t *testing.T) {
 			t.Errorf("stderr = %q, want %q", got, want)
 		}
 	})
+}
+
+// A plain or a new path with alias/.. in it: the temporary file goes to
+// the directory that the kernel resolves (one up from where alias points),
+// the directory of the rename, not to the lexical parent (filepath.Dir
+// cleans ro/alias/.. to ro). Here ro, the lexical parent, cannot be
+// written, so a temporary file there fails. The bash twin is in
+// tests/unit/kubehz_agent_test.bats.
+func TestAgentKubeconfigTempFileInThePhysicalParent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("the test needs a user other than root: root writes to a directory with mode 0500")
+	}
+	for _, force := range []bool{false, true} {
+		t.Run(fmt.Sprintf("force=%v", force), func(t *testing.T) {
+			h := agentHarness(t)
+			h.handle("GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent", 200, agentKubeconfigYAML)
+			dir := linkTestDir(t)
+			kube := modeDir(t, dir, "kube", 0o700)
+			modeDir(t, kube, "sub", 0o700)
+			ro := modeDir(t, dir, "ro", 0o700)
+			must(t, os.Symlink(filepath.Join(kube, "sub"), filepath.Join(ro, "alias")))
+			must(t, os.Chmod(ro, 0o500))
+			t.Cleanup(func() { _ = os.Chmod(ro, 0o700) })
+			if force {
+				writeReal(t, kube, "config")
+			}
+			// Not filepath.Join: it cleans alias/.. away.
+			_, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", ro+"/alias/../config", force)
+			mustOK(t, err, h.errOut.String())
+			if got := readFile(t, filepath.Join(kube, "config")); got != agentKubeconfigYAML {
+				t.Errorf("kube/config = %q, want the kubeconfig", got)
+			}
+			for _, d := range []string{kube, ro} {
+				if tmp, _ := filepath.Glob(filepath.Join(d, ".kubeconfig-*")); len(tmp) != 0 {
+					t.Errorf("a temporary file was left behind: %v", tmp)
+				}
+			}
+		})
+	}
+}
+
+func TestKubeconfigTempDir(t *testing.T) {
+	for target, want := range map[string]string{
+		"config":             ".",
+		"/config":            "/",
+		"//config":           "/",
+		"a/config":           "a",
+		"a//config":          "a/",
+		"ro/alias/../config": "ro/alias/..",
+		"/tmp/safe\n/real":   "/tmp/safe\n",
+		"/tmp/sa\nfe/real":   "/tmp/sa\nfe",
+	} {
+		if got := kubeconfigTempDir(target); got != want {
+			t.Errorf("kubeconfigTempDir(%q) = %q, want %q", target, got, want)
+		}
+	}
 }

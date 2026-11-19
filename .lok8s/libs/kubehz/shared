@@ -869,10 +869,15 @@ kubehz::space_kubeconfig() {
   local space_id="${1}" domain="${2}"
   kubehz::space_api GET "/api/spaces/${space_id}/kubeconfig" >/dev/null 2>&1 || return 1
   [[ -n "${KUBEHZ_SPACE_API_BODY}" ]] || return 1
-  local path="${PATH_BASE}/.kubeconfig/${domain}.yaml" tmp
-  mkdir -p "$(dirname "${path}")" || return 1
+  local path="${PATH_BASE}/.kubeconfig/${domain}.yaml" dir tmp
+  # The directory by parameter expansion, not $(dirname): a command
+  # substitution drops the trailing newlines of a name.
+  dir="${path%/*}"
+  mkdir -p "${dir}" || return 1
   # Whole file or nothing: a temp file beside it, the mode set, one rename.
-  tmp="$(mktemp "$(dirname "${path}")/.kubeconfig-XXXXXX")" || return 1
+  # mktemp prints a newline: the x keeps the trailing newlines of a name.
+  tmp=$(mktemp "${dir}/.kubeconfig-XXXXXX" && printf x) || return 1
+  tmp="${tmp%$'\n'x}"
   if ! printf '%s\n' "${KUBEHZ_SPACE_API_BODY}" > "${tmp}" || ! chmod 600 "${tmp}" || ! mv -f "${tmp}" "${path}"; then
     rm -f "${tmp}"
     return 1

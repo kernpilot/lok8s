@@ -41,6 +41,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/ui"
@@ -887,7 +888,9 @@ func (c *Context) kubeconfigExists(action, file string) {
 //     as ~/.bashrc. A link to nothing is refused.
 //
 // A plain file and a path that does not exist yet keep the rules above
-// only: the walk of linkTarget is for a link.
+// only: the walk of linkTarget is for a link. A plain path that exists must
+// be a regular file, as the target of a link must be: a FIFO, a socket or a
+// device is refused (kubeconfigNotRegular).
 //
 // The bash twin is kubehz::agent_target.
 func (c *Context) kubeconfigTarget(action, file string, force bool) (string, error) {
@@ -913,6 +916,11 @@ func (c *Context) kubeconfigTarget(action, file string, force bool) (string, err
 		return "", ErrHandled
 	}
 	if li.Mode()&os.ModeSymlink == 0 {
+		// A FIFO, a socket or a device is not a kubeconfig (a directory
+		// was refused above): the rename would replace it.
+		if !li.Mode().IsRegular() {
+			return "", c.kubeconfigNotRegular(action, file, "")
+		}
 		return file, nil
 	}
 	return c.linkTarget(action, file)
@@ -964,13 +972,18 @@ const maxLinkHops = 8
 // in the target of a link, also a trailing "/") must be a directory that
 // exists before "." or ".." applies to it. So real/, real/.,
 // missing/../real and file/../real are refused, as the kernel refuses
-// them. ".." goes up from where a link to a directory points.
+// them. ".." goes up from where a link to a directory points. A relative
+// path starts at the working directory as the kernel knows it (the
+// physical path), not at $PWD.
 //
 // The bash twin is kubehz::agent_link_target.
 func (c *Context) linkTarget(action, file string) (string, error) {
 	rest := file
 	if !strings.HasPrefix(rest, "/") {
-		wd, err := os.Getwd()
+		// getcwd, as pwd -P in the bash twin. os.Getwd gives $PWD when it
+		// names the same directory, also through a link: the walk would
+		// then check links and directories that the kernel does not pass.
+		wd, err := syscall.Getwd()
 		if err != nil {
 			return "", c.kubeconfigNoWorkDir(action, file)
 		}
@@ -1041,7 +1054,7 @@ func (c *Context) linkTarget(action, file string) (string, error) {
 	// A FIFO, a socket, a device or a directory is not a kubeconfig: the
 	// rename would replace it.
 	if !ti.Mode().IsRegular() {
-		return "", c.linkNotRegular(action, file, target)
+		return "", c.kubeconfigNotRegular(action, file, target)
 	}
 	if uid, ok := fileOwner(ti); !ok || uid != c.euid() || c.euid() == c.overflowUID() {
 		why, unmapped := ownerWhy(uid, ok, c.euid())
@@ -1094,11 +1107,16 @@ func (c *Context) linkNotSafe(action, file, part, why string, unmapped bool) err
 	return ErrHandled
 }
 
-// linkNotRegular prints the refusal of a link whose target is not a
-// regular file.
-func (c *Context) linkNotRegular(action, file, target string) error {
-	c.errorf("kubehz %s: %s is a link, and its target %s is not a regular file", action, file, target)
-	c.echoErr("  lo writes through a link only to a regular file of yours. Name another file.")
+// kubeconfigNotRegular prints the refusal of a path that exists and is not
+// a regular file: file itself (target ""), or target, where the link file
+// points. One rule and one hint for both.
+func (c *Context) kubeconfigNotRegular(action, file, target string) error {
+	if target == "" {
+		c.errorf("kubehz %s: %s is not a regular file", action, file)
+	} else {
+		c.errorf("kubehz %s: %s is a link, and its target %s is not a regular file", action, file, target)
+	}
+	c.echoErr("  lo replaces only a regular file. Name another file.")
 	return ErrHandled
 }
 
@@ -1140,14 +1158,15 @@ func rootIfEmpty(p string) string {
 // looks like a usual file. The walk reads each link itself, hop by hop, and
 // checks each component before it reads a link there. ".." goes up from
 // the resolved path, as in the kernel. A relative path starts at the
-// working directory. After 40 links the walk stops with false: the write
-// then fails anyway.
+// working directory as the kernel knows it (getcwd, see linkTarget): with
+// PWD=/proc/self/cwd, os.Getwd would start the walk in /proc. After 40
+// links the walk stops with false: the write then fails anyway.
 //
 // The bash twin is kubehz::agent_in_proc_or_dev.
 func inProcOrDev(file string) bool {
 	rest := file
 	if !strings.HasPrefix(rest, "/") {
-		wd, err := os.Getwd()
+		wd, err := syscall.Getwd()
 		if err != nil {
 			return false
 		}
@@ -1199,9 +1218,11 @@ func inProcOrDev(file string) bool {
 // file that appeared during the download stays as it is. The temporary
 // file goes in both cases. For a link, target is the file that linkTarget
 // checked: no other user can change a directory from / down to it, so the
-// path names that file up to the rename.
+// path names that file up to the rename. The temporary file goes to the
+// directory of target as written (kubeconfigTempDir), the directory that
+// the rename resolves.
 func publishKubeconfig(target string, data []byte, force bool) error {
-	tmp, err := os.CreateTemp(filepath.Dir(target), ".kubeconfig-*")
+	tmp, err := os.CreateTemp(kubeconfigTempDir(target), ".kubeconfig-*")
 	if err != nil {
 		return err
 	}
@@ -1220,4 +1241,22 @@ func publishKubeconfig(target string, data []byte, force bool) error {
 		_ = os.Remove(name)
 	}
 	return err
+}
+
+// kubeconfigTempDir is the directory of target as written: the part before
+// its last "/" ("/" for a name in /, "." for a name without a "/"). It is
+// not cleaned: filepath.Dir makes "alias/../config" a file of the
+// directory that holds alias, but the kernel goes up from where alias
+// points. The kernel resolves the part as it resolves target, so the
+// temporary file and the rename stay in one directory. The bash twin is in
+// kubehz::agent_write.
+func kubeconfigTempDir(target string) string {
+	i := strings.LastIndex(target, "/")
+	switch {
+	case i < 0:
+		return "."
+	case i == 0:
+		return "/"
+	}
+	return target[:i]
 }
