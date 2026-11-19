@@ -316,33 +316,50 @@ _ref() {
 }
 
 # _FAILED_WRITE: the action of a fake yq (_fake_yq) whose write fails part
-# way. As the real yq does with -i, it first writes its output into a temp
+# way. As the real yq does in place (-i, --inplace, or a group of short
+# flags that holds i, such as -Pi), it first writes its output into a temp
 # file in TMPDIR, and that file stays there when the write fails. Then it
-# saves the file that it reads (SNAP), empties it and fails. Without -i the
-# real yq makes no temp file, and this one makes none either. So an empty
-# TMPDIR after the step shows that the edit ran no yq -i.
+# saves the file that it reads (SNAP), empties it and fails. Not in place,
+# the real yq makes no temp file, and this one makes none either. So an
+# empty TMPDIR after the step shows that the edit ran no yq in place.
 # shellcheck disable=SC2016 # expanded by the fake yq, not here
-_FAILED_WRITE='if [[ " $* " == *" -i "* ]]; then
+_FAILED_WRITE='inplace=no; a=()
+for x in "$@"; do
+  if [[ "${x}" == --inplace || "${x}" == --inplace=true ]]; then inplace=yes; continue; fi
+  if [[ "${x}" =~ ^-[A-Za-z]*i[A-Za-z]*$ ]]; then
+    inplace=yes; x="${x//i/}"; [[ "${x}" == - ]] && continue
+  fi
+  a+=("${x}")
+done
+if [[ "${inplace}" == yes ]]; then
   [[ -n "${TMPDIR:-}" ]] || exit 3
   t=$(mktemp "${TMPDIR}/tempXXXXXXXXXX") || exit 3
-  a=(); for x in "$@"; do [[ "${x}" == -i ]] || a+=("${x}"); done
   "${REAL_YQ}" "${a[@]}" > "${t}"
 fi
 cp -- "${F}" "${SNAP}"; : > "${F}"; exit 1'
 
 # _assert_fake_leaves_temp <expression>: anti-vacuity of the empty TMPDIR.
-# Run as `yq -i <expression>` on a copy of the seed manifest, the fake yq
-# fails and leaves one temp file in a fresh TMPDIR. It uses its own TMPDIR
-# and SNAP, so the files of the case stay as they are.
+# Run in place (`yq -i`, `yq --inplace` and `yq -Pi`) with <expression> on
+# a copy of the seed manifest, the fake yq fails and leaves one temp file
+# in a fresh TMPDIR each time. Not in place, it leaves none. It uses its
+# own TMPDIRs and SNAP, so the files of the case stay as they are.
 _assert_fake_leaves_temp() {
-  local td="${BATS_TEST_TMPDIR}/tmpdir-fake-check" c="${BATS_TEST_TMPDIR}/fake-check.yaml" left
-  mkdir -p "${td}"
-  cp -- "${MANIFEST}" "${c}"
-  if TMPDIR="${td}" SNAP="${BATS_TEST_TMPDIR}/fake-check.snap" "${BATS_TEST_TMPDIR}/fakeyq/yq" -i "${1}" "${c}"; then
-    echo "the fake yq -i did not fail" >&2; return 1
-  fi
-  left=$(find "${td}" -mindepth 1 -printf '%P\n')
-  [[ "${left}" =~ ^temp[[:alnum:]]+$ ]] || { echo "the fake yq -i left no single temp file in TMPDIR: ${left//$'\n'/ }" >&2; return 1; }
+  local c="${BATS_TEST_TMPDIR}/fake-check.yaml" flag td left n=0
+  for flag in -i --inplace -Pi -P; do
+    n=$(( n + 1 ))
+    td="${BATS_TEST_TMPDIR}/tmpdir-fake-check-${n}"
+    mkdir -p "${td}"
+    cp -- "${MANIFEST}" "${c}"
+    if TMPDIR="${td}" SNAP="${BATS_TEST_TMPDIR}/fake-check.snap" "${BATS_TEST_TMPDIR}/fakeyq/yq" "${flag}" "${1}" "${c}"; then
+      echo "the fake yq ${flag} did not fail" >&2; return 1
+    fi
+    left=$(find "${td}" -mindepth 1 -printf '%P\n')
+    if [[ "${flag}" == -P ]]; then
+      [[ -z "${left}" ]] || { echo "the fake yq -P (not in place) left a file in TMPDIR: ${left//$'\n'/ }" >&2; return 1; }
+    else
+      [[ "${left}" =~ ^temp[[:alnum:]]+$ ]] || { echo "the fake yq ${flag} left no single temp file in TMPDIR: ${left//$'\n'/ }" >&2; return 1; }
+    fi
+  done
 }
 
 @test "networkID edit: kubeone.yaml holds what yq -i writes from the same input" {
