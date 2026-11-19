@@ -318,13 +318,13 @@ mock_yq_value() {
 # call assert_no_tool_ran in teardown, before teardown_tmpdir.
 stub_tools() {
   (( $# )) || { echo "stub_tools: name at least one tool" >&2; return 1; }
-  [[ -d "${BATS_TEST_TMPDIR:-}" ]] || { echo "stub_tools: BATS_TEST_TMPDIR is not a directory; call setup_tmpdir first" >&2; return 1; }
+  [[ -d "${BATS_TEST_TMPDIR:-}" ]] || { echo "stub_tools: BATS_TEST_TMPDIR is not a directory (call stub_tools in setup or in a test, not in setup_file)" >&2; return 1; }
   local tool
   mkdir -p "${BATS_TEST_TMPDIR}/stub-bin"
   for tool in "$@"; do
     [[ "${tool}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || { echo "stub_tools: '${tool}' is not a tool name" >&2; return 1; }
-    printf '#!/usr/bin/env bash\necho "%s $*" >> "%s"\nexit 97\n' \
-      "${tool}" "${BATS_TEST_TMPDIR}/tools.log" > "${BATS_TEST_TMPDIR}/stub-bin/${tool}"
+    printf '#!%s\necho "%s $*" >> %q\nexit 97\n' \
+      "${BASH}" "${tool}" "${BATS_TEST_TMPDIR}/tools.log" > "${BATS_TEST_TMPDIR}/stub-bin/${tool}"
     chmod +x "${BATS_TEST_TMPDIR}/stub-bin/${tool}"
   done
   export PATH="${BATS_TEST_TMPDIR}/stub-bin:${PATH}"

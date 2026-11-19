@@ -69,13 +69,22 @@ library-under-test and its utility deps (see
 (`yq`, `kubectl`, `docker`, `kustomize`, `kubehz::*`) — unit tests
 never touch a real cluster or network.
 
-A test that sources a driver also gets a net under its function stubs:
+Four files run the lo driver's provision (`driver::provision`) up to
+`kind create` or past it: `lo_provision_guards_test.bats`,
+`lo_dns_search_test.bats`, `kind_contract_test.bats` and
+`lo_node_version_test.bats`.
+
+Each of them has a net under its function stubs:
 `stub_tools <tool>...` in `setup()`, after `setup_tmpdir`, and
-`assert_no_tool_ran` in `teardown()`, before `teardown_tmpdir`.
+`assert_no_tool_ran` in `teardown()`, before `teardown_tmpdir`. Give a
+new test that runs the provision the same net.
 
 Each named tool is then a stub first on PATH that logs its call and
-fails. Teardown fails the test when one ran. A function of the same
-name still answers first. See `tests/unit/lo_provision_guards_test.bats`.
+fails. A function of the same name still answers first.
+
+Teardown fails the test when a stub ran, when the test has no net (no
+`stub_tools`), or when a stub is no longer the first `<tool>` on PATH.
+See `tests/unit/lo_provision_guards_test.bats`.
 
 The helper sets `XDG_STATE_HOME`, `XDG_CACHE_HOME` and
 `LO_REGISTRY_STATE_DIR` to directories under `BATS_TEST_TMPDIR` for each
