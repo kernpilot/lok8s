@@ -740,6 +740,141 @@ _hosted_kc_harness() {
   [[ -f "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml" ]] || fail "domain kubeconfig missing"
 }
 
+# ── the kubeconfig writes (kubehz::_write_private) ──────────────────────────
+# The fixtures are the same as in internal/kubehz/hosted_test.go
+# (writePrivateFile).
+
+# _hosted_temps <dir> <file>: the temp files of kubehz::_write_private for
+# <file> in <dir> (the name <file>.XXXXXX), one per line.
+_hosted_temps() {
+  find "${1}" -maxdepth 1 -name "${2}.*" -print
+}
+
+@test "provision_hosted: a failed download keeps the old kubeconfig and leaves no temp file" {
+  _hosted_kc_harness
+  yq() { case "$2" in '.metadata.name') echo "test.kubehz.dev" ;; *) echo "1" ;; esac; }
+  curl() {
+    if [[ "$*" == *"/api/clusters/"*"/kubeconfig"* ]]; then printf 'partial'; return 22; fi
+    printf '{"data":{"id":"cl-1","status":"Running"}}\n201'
+  }
+  export -f curl
+  local kc="${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml"
+  printf 'old\n' > "${kc}"
+  run kubehz::provision_hosted "test.kubehz.dev" "/dev/null"
+  assert_failure
+  assert_output --partial "ERR: Failed to download kubeconfig for hosted cluster cl-1"
+  [ "$(cat "${kc}")" = old ]
+  [ -z "$(_hosted_temps "${PATH_BASE}/.kubeconfig" test.kubehz.dev.yaml)" ]
+}
+
+# The mirror is never written in place (cp truncated the old file and
+# wrote into it). The mirror here is a link to a file that the user can
+# write, in a directory without write permission: no temp file can go
+# beside it, so the old file stays, with a warning, and the provision
+# succeeds.
+@test "provision_hosted: the mirror is not written in place, and a mirror that cannot be written keeps the old file" {
+  (( EUID != 0 )) || skip "root can write into a directory without write permission"
+  _hosted_kc_harness
+  yq() { case "$2" in '.metadata.name') echo "shortname" ;; *) echo "1" ;; esac; }
+  local ro="${PATH_BASE}/ro"
+  mkdir -p "${ro}"
+  printf 'old-mirror\n' > "${ro}/shortname.yaml"
+  chmod 600 "${ro}/shortname.yaml"
+  ln -s ../ro/shortname.yaml "${PATH_BASE}/.kubeconfig/shortname.yaml"
+  chmod 500 "${ro}"
+  run kubehz::provision_hosted "test.kubehz.dev" "/dev/null"
+  chmod 700 "${ro}"
+  assert_success
+  assert_output --partial "could not mirror the kubeconfig to .kubeconfig/shortname.yaml"
+  [ "$(cat "${ro}/shortname.yaml")" = old-mirror ]
+  [ -z "$(_hosted_temps "${ro}" shortname.yaml)" ]
+  [ "$(cat "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml")" = kc-bytes ]
+}
+
+@test "provision_hosted: a symlinked kubeconfig keeps the link and gets the new content, mode 0600" {
+  _hosted_kc_harness
+  yq() { case "$2" in '.metadata.name') echo "test.kubehz.dev" ;; *) echo "1" ;; esac; }
+  local real="${PATH_BASE}/real" kc="${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml"
+  mkdir -p "${real}"
+  printf 'old\n' > "${real}/test.kubehz.dev.yaml"
+  chmod 644 "${real}/test.kubehz.dev.yaml"
+  ln -s ../real/test.kubehz.dev.yaml "${kc}"
+  run kubehz::provision_hosted "test.kubehz.dev" "/dev/null"
+  assert_success
+  [ "$(readlink "${kc}")" = ../real/test.kubehz.dev.yaml ]
+  [ "$(cat "${real}/test.kubehz.dev.yaml")" = kc-bytes ]
+  [ "$(stat -c %a "${real}/test.kubehz.dev.yaml")" = 600 ]
+  [ -z "$(_hosted_temps "${real}" test.kubehz.dev.yaml)" ]
+  [ -z "$(_hosted_temps "${PATH_BASE}/.kubeconfig" test.kubehz.dev.yaml)" ]
+}
+
+@test "kubehz::_write_private refuses a link to nothing and a directory, and leaves no temp file" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local d="${BATS_TEST_TMPDIR}/wp"
+  mkdir -p "${d}/sub.yaml"
+  # The directory of the target exists: readlink -f alone would resolve it.
+  ln -s "${d}/none.yaml" "${d}/dangling.yaml"
+  run kubehz::_write_private "${d}/dangling.yaml" printf x
+  assert_failure
+  assert_output --partial "Cannot resolve the symlink ${d}/dangling.yaml"
+  run kubehz::_write_private "${d}/sub.yaml" printf x
+  assert_failure
+  assert_output --partial "${d}/sub.yaml is a directory, not a file"
+  [ "$(find "${d}" -mindepth 1 -maxdepth 1 | wc -l)" -eq 2 ]
+}
+
+# A TERM or a HUP during the download: the trap removes the temp file and
+# ends the shell with that signal, and the old file stays. The download
+# sends the signal to its own shell and then goes on, so without the trap
+# the shell would end at once and leave the partial temp file. (INT has
+# the same trap. It has no case: a shell that starts with INT ignored, as
+# a background job does, cannot trap it.)
+@test "kubehz::_write_private: TERM and HUP remove the temp file, and the old file stays" {
+  local kc="${BATS_TEST_TMPDIR}/kc.yaml" pair sig code
+  for pair in TERM:143 HUP:129; do
+    sig="${pair%:*}" code="${pair#*:}"
+    printf 'old\n' > "${kc}"
+    run bash -c 'import() { :; }
+source "$3/utils/verbose.sh"
+source "$3/utils/http.sh"
+source "$3/libs/kubehz/hosted"
+# A name of its own: the function sees the locals of its caller.
+test_signal="$2"
+dl() { printf partial; kill -s "${test_signal}" "$$"; printf rest; }
+kubehz::_write_private "$1" dl
+echo "returned $?"' bash "${kc}" "${sig}" "${_PROJECT_ROOT}/.lok8s"
+    [ "${status}" -eq "${code}" ] || { echo "${sig}: status ${status}, want ${code}" >&2; return 1; }
+    refute_output --partial returned
+    [ "$(cat "${kc}")" = old ]
+    [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}" kc.yaml)" ]
+  done
+}
+
+@test "kubehz::_write_private gives the caller's INT, TERM and HUP traps back, on success and on failure" {
+  run bash -c 'import() { :; }
+source "$2/utils/verbose.sh"
+source "$2/utils/http.sh"
+source "$2/libs/kubehz/hosted"
+trap "echo caller-term" TERM
+trap "echo caller-hup" HUP
+before=$(trap -p INT TERM HUP)
+kubehz::_write_private "$1" printf new
+echo "success rc=$?"
+[ "$(trap -p INT TERM HUP)" = "${before}" ] && echo "same after success"
+kubehz::_write_private "$1" false
+echo "failure rc=$?"
+[ "$(trap -p INT TERM HUP)" = "${before}" ] && echo "same after failure"
+[ -n "${before}" ] && echo "the caller had traps"
+cat "$1"' bash "${BATS_TEST_TMPDIR}/kc.yaml" "${_PROJECT_ROOT}/.lok8s"
+  assert_success
+  assert_output "success rc=0
+same after success
+failure rc=1
+same after failure
+the caller had traps
+new"
+}
+
 @test "destroy_hosted: removes BOTH the domain kubeconfig and the metadata.name mirror" {
   _hosted_kc_harness
   yq() { case "$2" in '.metadata.name'*) echo "shortname" ;; *) echo "1" ;; esac; }

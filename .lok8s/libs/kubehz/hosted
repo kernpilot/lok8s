@@ -195,25 +195,13 @@ kubehz::provision_hosted() {
   # kubeconfig download below.
   kubehz::wait_for_cluster "${api_url}" "${cluster_id}" || return 1
 
-  # Download kubeconfig
-  local kubeconfig_path="${PATH_BASE}/.kubeconfig/${domain}.yaml" kubeconfig_tmp
+  # Download kubeconfig. kubehz::_write_private: a private temp file beside
+  # the kubeconfig, renamed onto it only after a complete download. A
+  # failed download leaves the old file as it was.
+  local kubeconfig_path="${PATH_BASE}/.kubeconfig/${domain}.yaml"
   mkdir -p "$(dirname "${kubeconfig_path}")"
-  # The download goes to a temp file beside the kubeconfig (0600: mktemp,
-  # under umask 077), and replaces the kubeconfig only when curl succeeds.
-  # A failed download leaves the old file as it was, and the kubeconfig is
-  # never readable by others, not even for a moment.
-  kubeconfig_tmp=$(umask 077 && mktemp "${kubeconfig_path}.XXXXXX") || {
-    error "Cannot create a temp file beside ${kubeconfig_path}"
-    return 1
-  }
-  # -q first: an output line in a config file of the user would take the
-  # kubeconfig. The subshell with http::tls_log_vars_unset: curl gets no TLS
-  # log or trace control (utils/http.sh).
-  if ! http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" | (
-    http::tls_log_vars_unset &&
-      curl -q -K - -fsSL "${api_url}/api/clusters/${cluster_id}/kubeconfig"
-  ) > "${kubeconfig_tmp}" || ! mv -f -- "${kubeconfig_tmp}" "${kubeconfig_path}"; then
-    rm -f -- "${kubeconfig_tmp}"
+  if ! kubehz::_write_private "${kubeconfig_path}" \
+    kubehz::_hosted_kubeconfig_get "${api_url}" "${cluster_id}"; then
     error "Failed to download kubeconfig for hosted cluster ${cluster_id}"
     return 1
   fi
@@ -226,18 +214,83 @@ kubehz::provision_hosted() {
   # dispatch tail fails on a missing kubeconfig right after a successful
   # hosted provision. (bootstrap::apply itself owns the hosted gates:
   # OIDC-kubeconfig reachability, Ready-worker check, platform-owned skips.)
-  chmod 600 "${kubeconfig_path}" || true
+  # The mirror is written in the same way as the download (a private temp
+  # file and a rename), not with cp onto the old file.
   local cluster_name
   cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
   if [[ -n "${cluster_name}" && "${cluster_name}" != "null" && "${cluster_name}" != "${domain}" ]]; then
     # Guarded: a pathological metadata.name must not fail a provision that
     # already succeeded — warn and leave the domain-keyed file as the source.
-    if cp "${kubeconfig_path}" "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml" 2>/dev/null; then
-      chmod 600 "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml" || true
-    else
+    if ! kubehz::_write_private "${PATH_BASE}/.kubeconfig/${cluster_name}.yaml" \
+      cat -- "${kubeconfig_path}" 2>/dev/null; then
       echo "[kubehz] warning: could not mirror the kubeconfig to .kubeconfig/${cluster_name}.yaml — the bootstrap step will report it missing" >&2
     fi
   fi
+}
+
+# kubehz::_hosted_kubeconfig_get <api_url> <cluster_id>: the kubeconfig of
+# a hosted cluster on stdout. -q first: an output line in a config file of
+# the user would take the kubeconfig. The subshell with
+# http::tls_log_vars_unset: curl gets no TLS log or trace control
+# (utils/http.sh).
+kubehz::_hosted_kubeconfig_get() {
+  http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" | (
+    http::tls_log_vars_unset &&
+      curl -q -K - -fsSL "${1}/api/clusters/${2}/kubeconfig"
+  )
+}
+
+# kubehz::_write_private <dest> <command...>: run the command with its
+# stdout in a new private file, and put that file at <dest> only when the
+# command succeeds. The temp file is beside the file (mode 0600: mktemp
+# under umask 077), and one rename replaces the file. So <dest> is the old
+# file or the complete new one, never a part, and never readable by
+# others. A failed command or rename leaves the old file as it was and
+# removes the temp file.
+# A <dest> that is a symlink is resolved (readlink -f): the temp file goes
+# beside the file that the link names, and the rename replaces that file,
+# so the link stays. A link to nothing, a link that cannot be resolved and
+# a directory are refused (one error line).
+# INT, TERM and HUP remove the temp file, then end the shell with that
+# signal. The INT, TERM and HUP traps of the caller come back when the
+# function returns. SIGKILL cannot be caught: it leaves the temp file
+# (mode 0600, the name <file>.XXXXXX).
+# Status 0 when <dest> holds the new content, else 1.
+kubehz::_write_private() {
+  local dest="${1}" target tmp q sig saved_traps rc=0
+  shift
+  target="${dest}"
+  if [[ -L "${dest}" ]]; then
+    target=""
+    if [[ -e "${dest}" ]]; then
+      target=$(readlink -f -- "${dest}" 2>/dev/null) || target=""
+    fi
+    [[ -n "${target}" ]] || {
+      error "Cannot resolve the symlink ${dest}"
+      return 1
+    }
+  fi
+  [[ ! -d "${target}" ]] || {
+    error "${dest} is a directory, not a file"
+    return 1
+  }
+  tmp=$(umask 077 && mktemp "${target}.XXXXXX") || {
+    error "Cannot create a temp file beside ${target}"
+    return 1
+  }
+  saved_traps=$(trap -p INT TERM HUP)
+  q=$(printf '%q' "${tmp}")
+  for sig in INT TERM HUP; do
+    # shellcheck disable=SC2064 # expand the path now, while it is known
+    trap "rm -f -- ${q}; trap - ${sig}; kill -${sig} \${BASHPID}" "${sig}"
+  done
+  if ! "$@" > "${tmp}" || ! mv -f -- "${tmp}" "${target}"; then
+    rm -f -- "${tmp}"
+    rc=1
+  fi
+  trap - INT TERM HUP
+  eval "${saved_traps}"
+  return "${rc}"
 }
 
 # Destroy a hosted cluster via the kubehz API.
