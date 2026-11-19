@@ -409,6 +409,32 @@ if [[ "$(trap -p INT TERM HUP)" == "${before}" ]]; then echo "traps after failur
   _assert_only "${RW}" m.yaml
 }
 
+@test "kubeone::_yq_replace refuses a third argument, and runs no yq" {
+  # kubeone::_yq_replace passes no names to kubeone::_yq_edit. A name as a
+  # third argument would not be exported, and yq would write an empty
+  # strenv(). The call is refused before it makes its temp file.
+  _yq_log_stub
+  : > "${YQ_LOG}"
+  cp "${RW}/m.yaml" "${BATS_TEST_TMPDIR}/m.before"
+  local saved_path="${PATH}" FIXTURE_X=7
+  PATH="${YQ_STUBS}:${saved_path}"
+  run kubeone::_yq_replace "${RW}/m.yaml" '.x = strenv(FIXTURE_X)' FIXTURE_X
+  PATH="${saved_path}"
+  [ "${status}" -eq 1 ] || { echo "status ${status}, want 1" >&2; return 1; }
+  assert_output --partial "kubeone::_yq_replace: it takes two arguments (<file> <yq expression>), not 3"
+  [ ! -s "${YQ_LOG}" ] || { echo "yq ran" >&2; return 1; }
+  cmp "${RW}/m.yaml" "${BATS_TEST_TMPDIR}/m.before" || { echo "the file changed" >&2; return 1; }
+  _assert_only "${RW}" m.yaml
+  # Anti-vacuity: with two arguments the same call reaches yq and writes.
+  PATH="${YQ_STUBS}:${saved_path}"
+  run kubeone::_yq_replace "${RW}/m.yaml" '.x = 7'
+  PATH="${saved_path}"
+  assert_success
+  [ -s "${YQ_LOG}" ] || { echo "the stub logged no yq run" >&2; return 1; }
+  run yq -r '.x' "${RW}/m.yaml"
+  assert_output "7"
+}
+
 @test "kubeone::_yq_edit stops before yq runs when the export of a name fails" {
   # The names pass the checks, then the subshell of yq exports them. After
   # a failed export, yq would get an empty strenv() for the name. In the

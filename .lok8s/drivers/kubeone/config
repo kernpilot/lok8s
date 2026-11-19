@@ -469,7 +469,11 @@ kubeone::_yq_edit() {
 # On a failure <file> stays as it was and the temp file is removed; on INT,
 # TERM or HUP the traps of kubeone::_temp_traps remove it, and the previous
 # traps come back when the call ends. After the rename <file> is 0600.
+# It takes exactly these two arguments and passes no names to
+# kubeone::_yq_edit. A third argument is refused, not dropped: a name there
+# would not be exported, and yq would get an empty strenv() for it.
 kubeone::_yq_replace() {
+  (( $# == 2 )) || { error "kubeone::_yq_replace: it takes two arguments (<file> <yq expression>), not $#; it passes no names to kubeone::_yq_edit"; return 1; }
   local file="${1}" tmp saved_traps rc=0
   [[ "${file}" == */* ]] || file="./${file}"
   tmp=$(mktemp "${file%/*}/.${file##*/}.XXXXXX") || return 1
