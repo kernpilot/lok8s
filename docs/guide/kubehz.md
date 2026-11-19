@@ -449,8 +449,15 @@ when:
   `--print-only`).
 - `kubeadm version -o short` reports a version older than 1.22, or an answer
   the command cannot read (not checked with `--print-only`).
-- The temp dir (`TMPDIR`) is not a directory that only you can write (not
-  checked with `--print-only`).
+- A part of the temp dir path fails the owner check (not checked with
+  `--print-only`). The path is `TMPDIR` (else `/tmp`) with each symlink
+  resolved. Each part, from `/` down, must belong to root or to you, and
+  must not be writable by its group or by others unless it has the sticky
+  bit. Thus `/tmp` (root, mode 1777) passes, and so does a directory of
+  yours of mode 0755 or 0700. A directory of yours of mode 0775 fails, and
+  so does a directory of another user. In a user namespace that does not
+  map your uid, a part of yours fails too: the command cannot prove that
+  it is yours.
 
 Use `--print-only` to mint on one machine and join on another.
 
@@ -458,10 +465,21 @@ Use `--print-only` to mint on one machine and join on another.
 kubeadm join configuration (`v1beta3` for kubeadm 1.22 to 1.30, `v1beta4`
 from 1.31). It writes the configuration to a file of mode 0600 in a new
 directory of mode 0700 under `TMPDIR`, and runs `kubeadm join --config
-<file>`. It removes the file and the directory on each way out: after the
-join, after a failure, and after Ctrl-C, SIGTERM or SIGHUP (it stops
-`kubeadm` first). If the removal fails, the command names the directory.
-Delete that directory: it holds the token until the ticket expires.
+<file>`. It removes the file and the directory after the join, after a
+failure, and after Ctrl-C, SIGTERM or SIGHUP. On a signal it stops
+`kubeadm` first: it signals `kubeadm`, waits at most 10 seconds, then
+kills it. A second Ctrl-C, SIGTERM or SIGHUP does not end the command
+sooner: the stop and the removal finish first. Only SIGKILL ends the
+command at once, and then the file and the directory stay. If the removal
+fails, the command names the directory. Delete that directory: it holds
+the token until the ticket expires.
+
+After a signal, the command exits with 128 plus the signal number (130 for
+Ctrl-C). If `kubeadm join` ended with 0 all the same, the command says
+that the node joined. Otherwise it says that the ticket holds a node slot
+for about ten minutes, and prints the command that frees it. A signal
+during the mint gets the same note: the platform may have minted the
+ticket.
 
 After the mint, the command joins only with a line it can read:
 `kubeadm join <host>:<port>`, exactly one `--token`, at least one

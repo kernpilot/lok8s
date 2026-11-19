@@ -237,10 +237,13 @@ private, and examine it on a shared machine.
 `kubeadm join` line of the platform into a kubeadm join configuration. It
 writes the configuration to a file of mode 0600 in a new directory of mode
 0700 under your temp dir (`TMPDIR`), and runs `kubeadm join --config <file>`.
-It removes the file and the directory on each way out: after the join, after
-a failure, and after Ctrl-C, SIGTERM or SIGHUP (it stops `kubeadm` first). If
-the removal fails, it names the directory. Delete that directory: it holds
-the token until the ticket expires.
+It removes the file and the directory after the join, after a failure, and
+after Ctrl-C, SIGTERM or SIGHUP. On a signal it stops `kubeadm` first (at most
+10 seconds, then it kills `kubeadm`). A second Ctrl-C, SIGTERM or SIGHUP does
+not end it sooner: the stop and the removal finish first. Only SIGKILL ends
+it at once, and then the file and the directory stay. If the removal fails,
+it names the directory. Delete that directory: it holds the token until the
+ticket expires.
 
 One exception stays: `lo kubehz node join --print-only` prints the
 `kubeadm join` line, and that line holds the bootstrap token. When you run
