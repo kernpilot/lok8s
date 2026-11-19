@@ -24,8 +24,9 @@
 #            The helper is the first command of the subshell (the "(" is
 #            not "$(", "<(" or ">("), and only "&&" joins it to curl.
 #            Between them, only "umask NNN &&" and then "timeout N" (a
-#            number, no option) can stand. An assignment (NAME=value curl),
-#            env, command, exec, sudo or any other word there is a finding,
+#            number, no option) can stand. An assignment (NAME=value,
+#            NAME="a b", NAME='a', NAME=$(…) or NAME= before curl), env,
+#            command, exec, sudo or any other word there is a finding,
 #            and so is a pipe, ";" or "||" between them, or the helper
 #            outside the subshell. Two exceptions: a file under a
 #            manifests/ directory (a script that runs in its own image,
@@ -40,7 +41,8 @@
 # In both q and tls modes, two more forms are findings, because the gate
 # cannot see the call that they make:
 #   - curl named through a variable: an assignment whose value is curl or
-#     ends in /curl (c=curl, c=(curl …), local c=/usr/bin/curl) or a
+#     ends in /curl (c=curl, c=(curl …), local c=/usr/bin/curl), a lookup
+#     of curl (c=$(command -v curl), $(which curl), $(type -P curl)) or a
 #     default expansion ${X:-curl};
 #   - an eval in a command position whose command holds the text curl
 #     (eval 'curl …'), or a variable that such an assignment or expansion
@@ -51,27 +53,32 @@
 # {, $(, <(, &&, ||, a YAML list item "- ", or the words if, then, do,
 # else, elif, while, until and time. Before it can stand wrappers: command,
 # exec, env, xargs, timeout, nice, nohup, sudo, stdbuf, setsid, builtin,
-# their options and values, and assignments (VAR=x curl). A curl in a
-# quoted string (an echo of a command for the user) and comment lines do
-# not count. Before any other step, a line that ends in a backslash is
+# their options and values (also quoted: sudo -u "${u}"), and assignment
+# words (NAME= or NAME+=, then any value: quoted, $( ) or none). The words
+# are shell words: white space in quotes or in a $( ) does not end one. A
+# curl in a quoted string (an echo of a command for the user) and comment
+# lines do not count. Before any other step, a line that ends in a backslash is
 # joined to the next line without the backslash and the newline, as the
 # shell does (so cu\<newline>rl is curl). The lines that a trailing |, &&,
 # || or ( joins are one command.
 #
-# A call carries a credential when its command has one of: -K or --config
-# (a curl config), an Authorization header, a header in a variable
+# A call carries a credential when its own arguments (from the curl word up
+# to the next |, ;, & of && or ||, or the ")" that ends its subshell: not an
+# option of another command of the pipeline, as grep -F, tr -d or head -n)
+# have one of: -K or --config (a curl config), a header in a variable
 # (-H "${…}"), -u, -uUSER:PW, --user, -b, --cookie, --oauth2-bearer, -U,
 # --proxy-user, a body (-d, -dX, --data*, -F, --form, --json), a body on
-# stdin (@-), http::curl_config or curl_config (the config text), a user and
-# password in a URL (scheme://user:pw@host) or a query key token, sig,
-# signature, key, secret, password or X-Amz-Signature. It also carries one
-# when its own arguments (up to the next |, ;, &, or the ")" that ends its
-# subshell) have one of: a short option or a group of short options with
-# n, E, K, u, b, d, F, T or U (-n, -E, -sK, -Ecert.pem), --netrc,
-# --netrc-file, --netrc-optional, --cert, --key, --proxy-cert,
-# --proxy-key, -T, --upload-file, --variable, --form-string, --data-*, a
-# header from a file (-H @file, --header @file) or a header with an
-# expansion in its value (-H "X-API-Key: ${TOKEN}").
+# stdin (@-), a short option or a group of short options with n, E, K, u,
+# b, d, F, T or U (-n, -E, -sK, -Ecert.pem), --netrc, --netrc-file,
+# --netrc-optional, --cert, --key, --proxy-cert, --proxy-key, -T,
+# --upload-file, --variable, --form-string, --data-*, a header from a file
+# (-H @file, --header @file) or a header with an expansion in its value
+# (-H "X-API-Key: ${TOKEN}"). It also carries one when the command up to
+# the end of the call (so also a command that feeds the stdin of curl)
+# has one of these texts: an Authorization header, http::curl_config or
+# curl_config (the config text), a user and password in a URL
+# (scheme://user:pw@host) or a query key token, sig, signature, key,
+# secret, password or X-Amz-Signature.
 #
 # The forms that the gate does not see (the residuals): a name built from
 # parts (c="cu""rl", printf, a generated file that is sourced), and an eval
@@ -80,7 +87,9 @@
 # eval is outside the gate. The evals of the tree today hold neither.
 #
 # The check reads the source text only: it needs no shellcheck and runs no
-# code of the tree.
+# code of the tree. curl_gate_files gives it every file of the tree, not
+# only the files that hold the word curl (a split name holds no such
+# word).
 
 # CURL_GATE_ALLOW: the calls that run without the TLS helper. One entry for
 # each call: the path of the file in the tree (it matches a file whose path
@@ -170,22 +179,30 @@ curl_gate() {
     function path_is(file, path) {
       return file == path || substr(file, length(file) - length(path)) == "/" path
     }
-    # A credential anywhere in the command.
+    # A text that carries a credential: in the call, or in a command before
+    # it that feeds its stdin (http::curl_config | curl -K -). The caller
+    # gives the command up to the end of the call, not the commands after
+    # it.
+    function credential_text(s) {
+      return s ~ /[Aa]uthorization:/ ||
+        s ~ /curl_config/ ||
+        s ~ /:\/\/[^\/[:space:]"\047@]*@/ ||
+        s ~ /[?&](token|access_token|sig|signature|key|secret|password|X-Amz-Signature)=/
+    }
+    # A credential option in the arguments of the call (the caller gives
+    # the call only: an option of another command of the pipeline, grep -F
+    # or tr -d, does not count).
     function credential(s) {
       return s ~ /(^|[[:space:]])(-K|--config)([[:space:]=]|$)/ ||
-        s ~ /[Aa]uthorization:/ ||
         s ~ /(^|[[:space:]])(-H|--header)[[:space:]=]+["\047]?\$/ ||
         s ~ /(^|[[:space:]])(-u|--user|-b|--cookie|--oauth2-bearer|-U|--proxy-user)([[:space:]=]|$)/ ||
         s ~ /(^|[[:space:]])-u[^[:space:]-]/ ||
         s ~ /(^|[[:space:]])(-d|--data|--data-raw|--data-binary|--data-urlencode|-F|--form|--json)([[:space:]=]|$)/ ||
         s ~ /(^|[[:space:]])-d[^[:space:]-]/ ||
-        s ~ /@-/ ||
-        s ~ /curl_config/ ||
-        s ~ /:\/\/[^\/[:space:]"\047@]*@/ ||
-        s ~ /[?&](token|access_token|sig|signature|key|secret|password|X-Amz-Signature)=/
+        s ~ /@-/
     }
-    # A credential in the arguments of the call itself (a short option of
-    # another command of the pipeline, head -n or grep -E, does not count).
+    # More credential options of the call (the caller gives the call only,
+    # so head -n or grep -E of another command does not count).
     function credential_call(s) {
       return s ~ /(^|[[:space:]])-[A-Za-z]*[nEKubdFTU]/ ||
         s ~ /(^|[[:space:]])--(netrc|netrc-file|netrc-optional|cert|key|proxy-cert|proxy-key|upload-file|variable|form-string|data-[a-z]+)([[:space:]=]|$)/ ||
@@ -245,10 +262,41 @@ curl_gate() {
       }
       return L + 1
     }
-    function last_word(s) { return match(s, /[^[:space:]]+$/) ? substr(s, RSTART) : "" }
-    function drop_last(s) { sub(/[^[:space:]]+[[:space:]]*$/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    # The start of the last shell word of s. Words end at white space in
+    # code, not in quotes, and not in a $( ) that closes before the end
+    # (NAME="a b" and NAME=$(f x) are one word each). In a $( ) that is
+    # still open at the end, the word starts after the $( or after the
+    # last white space in it (the prefix "x=$(echo" ends in the word echo).
+    function word_start(s,   i, c, L, top, st, dp, ws) {
+      L = length(s); top = 1; st[1] = "c"; dp[1] = 0; ws[1] = 1
+      for (i = 1; i <= L; i++) {
+        c = substr(s, i, 1)
+        if (st[top] == "s") { if (c == SQ) top--; continue }
+        if (c == "\\") { i++; continue }
+        if (st[top] == "d") {
+          if (c == "\"") top--
+          else if (c == "$" && substr(s, i + 1, 1) == "(") { top++; st[top] = "c"; dp[top] = 0; i++; ws[top] = i + 1 }
+          continue
+        }
+        if (c == SQ) { top++; st[top] = "s"; continue }
+        if (c == "\"") { top++; st[top] = "d"; continue }
+        if (c == "$" && substr(s, i + 1, 1) == "(") { top++; st[top] = "c"; dp[top] = 0; i++; ws[top] = i + 1; continue }
+        if (c == "(") { dp[top]++; continue }
+        if (c == ")") { if (dp[top] > 0) dp[top]--; else if (top > 1) top--; continue }
+        if (c ~ /[[:space:]]/) ws[top] = i + 1
+      }
+      while (top > 1 && st[top] != "c") top--
+      return ws[top]
+    }
+    function last_word(s) { return s ~ /[[:space:]]$/ ? "" : substr(s, word_start(s)) }
+    function drop_last(s) { sub(/[[:space:]]+$/, "", s); s = substr(s, 1, word_start(s) - 1); sub(/[[:space:]]+$/, "", s); return s }
+    # An operator of the shell in the code of a word (not in its quotes or
+    # in a ${ } expansion): the wrapper search stops there.
+    function has_op(w) { gsub(/"[^"]*"|\047[^\047]*\047|\$\{[^}]*\}/, "", w); return w ~ /[|;&(){}<>`]/ }
     function is_wrapper(w) { return w ~ /^(command|exec|env|xargs|timeout|nice|nohup|sudo|stdbuf|setsid|builtin)$/ }
-    function is_assign(w) { return w ~ /^[A-Za-z_][A-Za-z0-9_]*=[^|;&()<>`"\047]*$/ }
+    # An assignment word: NAME= or NAME+= and then anything (a quoted or
+    # unquoted value, a $( ), or nothing).
+    function is_assign(w) { return w ~ /^[A-Za-z_][A-Za-z0-9_]*\+?=/ }
     # The prefix without the wrappers, options and assignments before curl.
     # "command -v curl" (or -V) looks curl up and runs nothing: the prefix
     # then stays as it is, which is no command position.
@@ -261,7 +309,7 @@ curl_gate() {
         t = p; k = 0; found = 0; lookup = 0
         while (k < 8) {
           w = last_word(t)
-          if (w == "" || w ~ /[|;&(){}<>`]/) break
+          if (w == "" || has_op(w)) break
           if (is_wrapper(w)) { found = 1; break }
           if (w ~ /^-[A-Za-z]*[vV]/) lookup = 1
           t = drop_last(t); k++
@@ -326,11 +374,12 @@ curl_gate() {
         else { ne++; evtext[ne] = buf; evfile[ne] = cmdfile; evline[ne] = line_at(b) }
       }
     }
-    function check(   s, off, c0, b, adv, prefix, stripped, rest, l, marked, i, hit, cred, manifest) {
+    function check(   s, off, c0, b, adv, prefix, stripped, rest, l, marked, i, hit, cred, manifest, seg, e) {
       if (buf == "") { reset(); return }
       if (mode != "list") {
-        indirect("(^|[[:space:];&|({])((local|declare|typeset|readonly|export)[[:space:]]+(-[A-Za-z]+[[:space:]]+)*)?[A-Za-z_][A-Za-z0-9_]*(\\[[^]]*\\])?\\+?=\\(?[[:space:]]*[\"\047]?([^[:space:]\"\047()]*/)?curl[\"\047]?([[:space:]);]|$)", 0, "assign")
+        indirect("(^|[[:space:];&|({])((local|declare|typeset|readonly|export)[[:space:]]+(-[A-Za-z]+[[:space:]]+)*)?[A-Za-z_][A-Za-z0-9_]*(\\[[^]]*\\])?\\+?=(\\([[:space:]]*)?[\"\047]?([^[:space:]\"\047()]*/)?curl[\"\047]?([[:space:]);]|$)", 0, "assign")
         indirect("\\$\\{[A-Za-z_][A-Za-z0-9_]*:?[-=][^}]*curl[\"\047]?\\}", 1, "default")
+        indirect("(^|[[:space:];&|({])((local|declare|typeset|readonly|export)[[:space:]]+(-[A-Za-z]+[[:space:]]+)*)?[A-Za-z_][A-Za-z0-9_]*\\+?=[\"\047]?(\\$\\(|`)[[:space:]]*(command[[:space:]]+-[A-Za-z]*[vV]|which|type[[:space:]]+-[A-Za-z]*[pP])[[:space:]]+[\"\047]?curl[\"\047]?[[:space:]]*(\\)|`)", 0, "assign")
         evals()
       }
       manifest = cmdfile ~ /(^|\/)manifests\//
@@ -357,7 +406,9 @@ curl_gate() {
         stripped = strip_wrappers(prefix)
         if (quoted(buf, b) || !command_position(stripped)) continue
         l = line_at(b)
-        cred = credential(buf) || credential_call(substr(buf, b, call_end(b) - b))
+        e = call_end(b)
+        seg = substr(buf, b, e - b)
+        cred = credential(seg) || credential_call(seg) || credential_text(substr(buf, 1, e - 1))
         if (mode == "list")
           printf "%s:%d%s\n", cmdfile, l, cred ? " credential" : ""
         if (mode == "q" && rest !~ /^[[:space:]]*-q([[:space:]]|$)/)
@@ -414,17 +465,22 @@ curl_gate() {
   [[ "${mode}" == list ]] || return 1
 }
 
-# curl_gate_files — every file of the bash tree that names curl, one path
-# per line. Left out: the scaffolding under init.d (TypeScript for a user
-# project, not framework code) and the package list of the hetzner
-# cloud-init (a list of package names, not a script). Fails loudly on a
-# near-empty result: a broken predicate must not read as "nothing to find".
+# curl_gate_files [ROOT [MIN]] — every regular file under ROOT (the bash
+# tree, .lok8s, by default), one path per line. No text search selects
+# them: a file whose only call is cu\<newline>rl holds no word curl, so the
+# scanner reads each file and decides. Left out: the scaffolding under
+# init.d (TypeScript for a user project, not framework code) and the
+# package list of the hetzner cloud-init (a list of package names, not a
+# script). Fails loudly when it finds fewer than MIN files (150 by default;
+# the tree has 229 today): a broken discovery must not read as "nothing to
+# find".
 curl_gate_files() {
+  local root="${1:-${_PROJECT_ROOT}/.lok8s}" min="${2:-150}"
   local -a files=()
-  mapfile -t files < <(grep -rlw curl "${_PROJECT_ROOT}/.lok8s" --exclude-dir=init.d |
-    grep -vx "${_PROJECT_ROOT}/.lok8s/providers/hetzner/cloud-init/packages" | LC_ALL=C sort)
-  (( ${#files[@]} >= 15 )) || {
-    echo "curl_gate_files found only ${#files[@]} file(s) under .lok8s: the discovery is broken, not the tree" >&2
+  mapfile -t files < <(find "${root}" -name init.d -prune -o -type f -print |
+    grep -vxF -- "${root}/providers/hetzner/cloud-init/packages" | LC_ALL=C sort)
+  (( ${#files[@]} >= min )) || {
+    echo "curl_gate_files found only ${#files[@]} file(s) under ${root}: the discovery is broken, not the tree" >&2
     return 1
   }
   printf '%s\n' "${files[@]}"

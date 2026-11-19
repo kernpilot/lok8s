@@ -477,6 +477,39 @@ _doctor_readonly() {
   [ ! -s "${CURL_LOG}" ]
 }
 
+_doctor_two_readonly() {
+  readonly SSLKEYLOGFILE SSLTRACE
+  provider::doctor "${DESC}"
+}
+
+# Two readonly names: one line that names both, in the plural.
+@test "provider::doctor names two readonly TLS log variables in one line" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef" ROBOT_REG_FP="de:ad:be:ef"
+  run _doctor_two_readonly
+  assert_success
+  assert_output --partial $'warn\tSSLKEYLOGFILE and SSLTRACE are readonly, so lo cannot clear them for curl: no call to the Robot API'
+  refute_output --partial "verify HROBOT_USER/HROBOT_PASSWORD"
+  [ ! -s "${CURL_LOG}" ]
+}
+
+_doctor_empty_list() {
+  _HTTP_TLS_LOG_VARS=()
+  provider::doctor "${DESC}"
+}
+
+# An empty list: the probe of the readonly names cannot check a name, so
+# the doctor names the list and makes no Robot call, and does not blame the
+# Robot credentials.
+@test "provider::doctor names an empty TLS list, not the Robot creds" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef" ROBOT_REG_FP="de:ad:be:ef"
+  run _doctor_empty_list
+  assert_success
+  assert_output --partial $'warn\tthe list of TLS log and trace variables (_HTTP_TLS_LOG_VARS) is empty or not set: no call to the Robot API'
+  refute_output --partial "verify HROBOT_USER/HROBOT_PASSWORD"
+  refute_output --partial $'ok\tRobot API reachable'
+  [ ! -s "${CURL_LOG}" ]
+}
+
 # A failed provider::output is no "no control-plane node": the doctor goes
 # on and shows the first error line of the output as the reason.
 @test "provider::doctor shows why provider::output failed, and goes on" {

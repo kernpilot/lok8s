@@ -136,6 +136,40 @@ teardown() {
   [ "${#CURL_GATE_ALLOW[@]}" -eq 11 ]
 }
 
+# The discovery: curl_gate_files gives every file of the tree, so the
+# scanner sees a file whose only call is a split name (no word curl in it).
+# The fixture tree also holds a file without curl and the two parts that
+# discovery leaves out. A floor above the count of files fails loudly.
+@test "curl gate: discovery gives each file of the tree, so a split name is found" {
+  local root="${BATS_TEST_TMPDIR}/tree"
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  mkdir -p "${root}/libs" "${root}/init.d" "${root}/providers/hetzner/cloud-init"
+  printf '%s\n' 'cu\' 'rl -u "${U}:${P}" "${url}"' > "${root}/libs/split"
+  printf '%s\n' 'echo hello' > "${root}/libs/plain"
+  printf '%s\n' 'curl -sS https://h.example/i' > "${root}/init.d/scaffold.ts"
+  printf '%s\n' 'curl' > "${root}/providers/hetzner/cloud-init/packages"
+  run curl_gate_files "${root}" 2
+  assert_success
+  assert_output "${root}/libs/plain
+${root}/libs/split"
+  local -a files=()
+  mapfile -t files < <(curl_gate_files "${root}" 2)
+  CURL_GATE_ALLOW=()
+  run curl_gate q "${files[@]}"
+  assert_failure 1
+  assert_output "${root}/libs/split:1: ${q}"
+  run curl_gate tls "${files[@]}"
+  assert_failure 1
+  assert_output "${root}/libs/split:1: ${t}"
+  run curl_gate list "${files[@]}"
+  assert_success
+  assert_output "${root}/libs/split:1 credential"
+  run curl_gate_files "${root}" 3
+  assert_failure 1
+  assert_output "curl_gate_files found only 2 file(s) under ${root}: the discovery is broken, not the tree"
+}
+
 # The anti-vacuity half: each canary breaks a rule in one way, and the gate
 # names its file and line. The compliant forms (and the forms that are not
 # a curl call) give no line. The allowlist of the tree is cleared here: its
@@ -181,6 +215,19 @@ eval "${c} -sS https://h.example/p"
 ( http::tls_log_vars_unset && timeout -s KILL 5 curl -q -K - "${url}" )
 ( http::tls_log_vars_unset && nice curl -q -K - "${url}" )
 ( http::tls_log_vars_unset && umask 077 && umask 022 && curl -q -K - "${url}" )
+SSLKEYLOGFILE="/tmp/my keys" curl -K - https://h.example/r1
+SSLKEYLOGFILE='/tmp/keys' curl -K - https://h.example/r2
+SSLKEYLOGFILE= curl -K - https://h.example/r3
+SSLKEYLOGFILE=$(printf '%s' /tmp/k) curl -K - https://h.example/r4
+( http::tls_log_vars_unset && SSLKEYLOGFILE="/tmp/keys" curl -q -K - "${url}" )
+( http::tls_log_vars_unset && SSLKEYLOGFILE='/tmp/keys' curl -q -K - "${url}" )
+( http::tls_log_vars_unset && SSLKEYLOGFILE= curl -q -K - "${url}" )
+( http::tls_log_vars_unset && SSLKEYLOGFILE=$(printf '%s' /tmp/k) curl -q -K - "${url}" )
+sudo -u "${user}" curl -K - https://h.example/r5
+cl=$(command -v curl)
+local w="$(which curl)"
+t=`type -P curl`
+eval "${cl} -sS https://h.example/r6"
 SH
   cat > "${good}" <<'SH'
 # curl -K - https://h.example/n1
@@ -204,6 +251,8 @@ if out=$(printf '%s' "${b}" | ( http::tls_log_vars_unset && curl -q -sS --data-b
 ( http::tls_log_vars_unset && cu\
 rl -q -sS https://h.example/n10 )
 eval "${saved_traps}"
+x=$(echo curl)
+printf '%s\n' "${a}" | tr -d '\n' | ( http::tls_log_vars_unset && curl -q -sS https://h.example/n11 )
 SH
   local q="a curl call: -q is not its first argument"
   local v="curl named through a variable: the gate cannot check that call"
@@ -230,7 +279,16 @@ ${bad}:17: ${v}
 ${bad}:18: ${q}
 ${bad}:26: ${q}
 ${bad}:28: ${e}
-${bad}:29: ${ev}"
+${bad}:38: ${q}
+${bad}:39: ${q}
+${bad}:40: ${q}
+${bad}:41: ${q}
+${bad}:46: ${q}
+${bad}:47: ${v}
+${bad}:48: ${v}
+${bad}:49: ${v}
+${bad}:29: ${ev}
+${bad}:50: ${ev}"
   run curl_gate tls "${bad}"
   assert_failure 1
   assert_output "${bad}:1: ${t}
@@ -266,7 +324,20 @@ ${bad}:34: ${t}
 ${bad}:35: ${t}
 ${bad}:36: ${t}
 ${bad}:37: ${t}
-${bad}:29: ${ev}"
+${bad}:38: ${t}
+${bad}:39: ${t}
+${bad}:40: ${t}
+${bad}:41: ${t}
+${bad}:42: ${t}
+${bad}:43: ${t}
+${bad}:44: ${t}
+${bad}:45: ${t}
+${bad}:46: ${t}
+${bad}:47: ${v}
+${bad}:48: ${v}
+${bad}:49: ${v}
+${bad}:29: ${ev}
+${bad}:50: ${ev}"
   run curl_gate q "${good}"
   assert_success
   assert_output ""
@@ -279,7 +350,8 @@ ${good}:15 credential
 ${good}:16
 ${good}:17 credential
 ${good}:18
-${good}:19"
+${good}:19
+${good}:23"
   run curl_gate x "${good}"
   assert_failure 2
 }
@@ -313,6 +385,9 @@ curl -q -F "f=@${p}" https://h.example/c19
 curl -q -T "${p}" https://h.example/c20
 curl -q --upload-file "${p}" https://h.example/c21
 curl -q -sS https://h.example/c22 2>&1 --netrc
+curl -q --variable "t@${f}" https://h.example/c23
+curl -q --form-string "k=${v}" https://h.example/c24
+printf 'header = "Authorization: Bearer %s"\n' "${T}" | curl -q -K - https://h.example/c25
 SH
   cat > "${plain}" <<'SH'
 curl -q -fsSL https://h.example/p1 | head -n 1
@@ -320,8 +395,13 @@ curl -q -sS https://h.example/p2 | grep -E 'x|y'
 curl -q -H "Accept: application/json" https://h.example/p3
 curl -q -fLo /tmp/p4 https://h.example/p4
 x=$(curl -q -sS https://h.example/p5 2>&1 | sed -n 1p)
+curl -q -sS https://h.example/p6 | grep -F x
+curl -q -sS https://h.example/p7 | tr -d '\r'
+curl -q -sS https://h.example/p8 && grep -F y /tmp/f
+curl -q -sS https://h.example/p9 || tr -d x
+curl -q -sS https://h.example/p10 | grep -F 'Authorization: Bearer'
 SH
-  for i in $(seq 1 22); do
+  for i in $(seq 1 25); do
     want+="${cred}:${i} credential"$'\n'
   done
   run curl_gate list "${cred}"
@@ -333,7 +413,12 @@ SH
 ${plain}:2
 ${plain}:3
 ${plain}:4
-${plain}:5"
+${plain}:5
+${plain}:6
+${plain}:7
+${plain}:8
+${plain}:9
+${plain}:10"
 }
 
 # The allowlist: an entry exempts exactly one call of its file from the
@@ -407,6 +492,34 @@ other.sh: the allowlist entry names a file that this run does not read (a stale 
       grep -qF 'the list of TLS log and trace variables (_HTTP_TLS_LOG_VARS) is empty or not set: the request does not run' "${e}"
     done
   done
+  # The probe of the readonly names: status 2 and the same line, so a
+  # caller cannot read an empty list as "no name is readonly".
+  for form in empty unset; do
+    rc=0
+    (
+      if [[ "${form}" == empty ]]; then _HTTP_TLS_LOG_VARS=(); else unset _HTTP_TLS_LOG_VARS; fi
+      set -u
+      http::tls_log_vars_readonly
+    ) > "${o}" 2> "${e}" || rc=$?
+    [ "${rc}" -eq 2 ]
+    [ ! -s "${o}" ]
+    [ "$(wc -l < "${e}")" -eq 1 ]
+    grep -qF 'the list of TLS log and trace variables (_HTTP_TLS_LOG_VARS) is empty or not set: the request does not run' "${e}"
+  done
+}
+
+# The text of the readonly messages reads right for one name and for more
+# names, given as separate arguments or as one line with a space between
+# two names (the output of http::tls_log_vars_readonly).
+@test "the TLS helper: the readonly text names one name, or more names in the plural" {
+  [ "$(http::tls_log_var_readonly_text SSLKEYLOGFILE)" = "SSLKEYLOGFILE is readonly, so lo cannot clear it for curl" ]
+  [ "$(http::tls_log_var_readonly_text "SSLKEYLOGFILE SSLTRACE")" = "SSLKEYLOGFILE and SSLTRACE are readonly, so lo cannot clear them for curl" ]
+  [ "$(http::tls_log_var_readonly_text SSLKEYLOGFILE SSLTRACE SSLDEBUG)" = "SSLKEYLOGFILE, SSLTRACE and SSLDEBUG are readonly, so lo cannot clear them for curl" ]
+  (
+    readonly SSLKEYLOGFILE SSLTRACE
+    [ "$(http::tls_log_vars_readonly)" = "SSLKEYLOGFILE SSLTRACE" ]
+    [ "$(http::tls_log_var_readonly_text "$(http::tls_log_vars_readonly)")" = "SSLKEYLOGFILE and SSLTRACE are readonly, so lo cannot clear them for curl" ]
+  )
 }
 
 # One list of the TLS log and trace variables: _HTTP_TLS_LOG_VARS of

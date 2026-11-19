@@ -145,12 +145,15 @@ http::tls_log_vars_unset() {
 
 # http::tls_log_vars_readonly: print the names of the list that are
 # readonly here (one line, a space between two names). Status 1 when no
-# name is readonly. The probe of each name runs in a subshell, so the
-# function changes no variable.
+# name is readonly. Status 2, with the error line of an empty list, when
+# the list is empty or not set: then no name can be checked, and a caller
+# must not read that as "no name is readonly". The probe of each name runs
+# in a subshell, so the function changes no variable.
 # Usage: names=$(http::tls_log_vars_readonly)
 http::tls_log_vars_readonly() {
   local _http_name
   local -a _http_found=()
+  http::_tls_log_list_ok || return 2
   for _http_name in "${_HTTP_TLS_LOG_VARS[@]}"; do
     ( unset -v "${_http_name}" ) 2>/dev/null || _http_found+=("${_http_name}")
   done
@@ -175,11 +178,28 @@ http::tls_log_vars_ok() {
   return "${_http_rc}"
 }
 
-# http::tls_log_var_readonly_text <names>: the start of each message
-# about a readonly name of the list, "<names> is readonly, so lo cannot
-# clear it for curl". The callers add what does not run.
+# http::tls_log_var_readonly_text <name>...: the start of each message
+# about readonly names of the list: "A is readonly, so lo cannot clear it
+# for curl", or for more names "A, B and C are readonly, so lo cannot clear
+# them for curl". The names can come as separate arguments or as one
+# argument with a space between two names (the output of
+# http::tls_log_vars_readonly). The callers add what does not run.
 http::tls_log_var_readonly_text() {
-  printf '%s is readonly, so lo cannot clear it for curl' "${1}"
+  local -a _http_n=()
+  local _http_head
+  read -r -a _http_n < <(printf '%s\n' "$*")
+  if (( ${#_http_n[@]} < 2 )); then
+    printf '%s is readonly, so lo cannot clear it for curl' "${_http_n[0]:-}"
+    return 0
+  fi
+  printf -v _http_head '%s, ' "${_http_n[@]:0:${#_http_n[@]}-1}"
+  printf '%s and %s are readonly, so lo cannot clear them for curl' "${_http_head%, }" "${_http_n[-1]}"
+}
+
+# http::tls_log_list_empty_text: the start of each message about an empty
+# or unset list. The callers add what does not run.
+http::tls_log_list_empty_text() {
+  printf 'the list of TLS log and trace variables (_HTTP_TLS_LOG_VARS) is empty or not set'
 }
 
 # The error line for a readonly name of the list.
@@ -194,6 +214,6 @@ http::_tls_log_var_stop() {
 http::_tls_log_list_ok() {
   set -- ${_HTTP_TLS_LOG_VARS[@]+"${_HTTP_TLS_LOG_VARS[@]}"}
   (( $# > 0 )) && return 0
-  error "the list of TLS log and trace variables (_HTTP_TLS_LOG_VARS) is empty or not set: the request does not run"
+  error "$(http::tls_log_list_empty_text): the request does not run"
   return 1
 }

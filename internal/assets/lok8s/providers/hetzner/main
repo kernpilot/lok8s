@@ -1272,12 +1272,16 @@ hetzner::_doctor_checks() {
   local have_robot=0 robot_api_ok=0
   if [[ -n "${HROBOT_USER:-}" && -n "${HROBOT_PASSWORD:-}" ]]; then
     have_robot=1
-    local robot_ro
+    # The Robot call below sends its stderr to /dev/null: a readonly TLS
+    # log variable or an empty list is named here, not the credentials
+    # (status 0: readonly names, 2: the list is empty or not set).
+    local robot_ro="" robot_ro_rc=0
+    robot_ro=$(http::tls_log_vars_readonly 2>/dev/null) || robot_ro_rc=$?
     if ! http::credential_ok HROBOT_USER HROBOT_PASSWORD 2>/dev/null; then
       printf 'warn\tHROBOT_USER or HROBOT_PASSWORD holds a control character (a CR from a file with CRLF line ends?) — remove it\n'
-    elif robot_ro=$(http::tls_log_vars_readonly); then
-      # The Robot call below sends its stderr to /dev/null: name the cause
-      # here, not the credentials.
+    elif (( robot_ro_rc == 2 )); then
+      printf 'warn\t%s: no call to the Robot API\n' "$(http::tls_log_list_empty_text)"
+    elif (( robot_ro_rc == 0 )); then
       printf 'warn\t%s: no call to the Robot API\n' "$(http::tls_log_var_readonly_text "${robot_ro}")"
     elif hetzner::_robot_curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
          "${HROBOT_API}/server" >/dev/null 2>&1; then
