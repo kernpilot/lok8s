@@ -95,7 +95,16 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 		}
 		curlConfig += "data-raw = " + data + "\n"
 	}
+	// -q first: curl reads no config file of the user (.curlrc in
+	// CURL_HOME or HOME, curlrc in XDG_CONFIG_HOME). A trace-ascii line
+	// there would log the bearer and the body, an output line would write
+	// the answer to another file. curl obeys -q only as its first
+	// argument. The bash twin (kkp::api) also clears the TLS log and trace
+	// controls for curl (http::tls_log_vars_unset). This call does not:
+	// execx.Cmd can add a variable to the inherited environment but not
+	// remove one (catalogue D44).
 	curlArgs := []string{
+		"-q",
 		"--silent",
 		"--show-error",
 		"--fail-with-body",

@@ -243,7 +243,10 @@ func TestAPICurlArgvExact(t *testing.T) {
 	if body != `{"ok": true}` {
 		t.Fatalf("body = %q", body)
 	}
+	// -q is the first argument: curl obeys it only there, and then reads no
+	// config file of the user.
 	want := []string{
+		"-q",
 		"--silent", "--show-error", "--fail-with-body", "--location",
 		"--config", "-",
 		"--header", "Content-Type: application/json",
