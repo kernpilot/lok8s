@@ -1807,15 +1807,16 @@ bootstrap::_diff_manifest() {
     return 0
   fi
 
-  # The diff's stdout is the diff text; its stderr (warnings, the error of a
-  # failed call) is forwarded to ours.
+  # The diff's stdout is the diff text. Its stderr goes to a temp file under
+  # the boundary that only the classification below reads: lo never prints
+  # it, at any exit code and at any log level, because it can quote a value
+  # of the manifest (see the error line at the end).
   local _derr _diff _drc=0 _emsg
   _derr="$(mktemp -p "${bootstrap_dry_boundary:-${TMPDIR:-/tmp}}")" || { error "bootstrap: dry-run: no temp file"; echo error; return 0; }
   _diff=$(printf '%s\n' "${diff_input}" \
     | kubectl --kubeconfig "${kubeconfig}" diff --server-side --force-conflicts -f - 2>"${_derr}") || _drc=$?
   _emsg="$(cat "${_derr}" 2>/dev/null || true)"
   rm -f "${_derr}"
-  [[ -z "${_emsg}" ]] || printf '%s\n' "${_emsg}" >&2
   if [[ -n "${bootstrap_render_dir:-}" ]]; then
     local _diff_write_rc=0
     if [[ -n "${_diff}" ]]; then
@@ -1836,14 +1837,21 @@ bootstrap::_diff_manifest() {
   # stdout-shape heuristic — the old "`--- ` header or it's an error" rule
   # broke KUBECTL_EXTERNAL_DIFF (a `diff -q` exits 1 on a real difference
   # with NO header at all, and was misclassified as error).
+  #   • rc 127 (bash's "command not found") → a launch failure: error, with
+  #     the line of the Go twin's launch failure (execx.ErrNotFound).
   #   • the race-class pattern on stderr (the same regex
   #     bootstrap::_apply_one uses), at ANY exit code → inconclusive
   #     (needs-crd): an earlier entry's CRD/webhook has not landed in this
   #     read-only probe yet — not a real diff, not a real error either.
   #   • rc 0 → unchanged; rc 1 → differs (whatever the diff tool printed,
-  #     or didn't); anything else (including a launch failure — bash's
-  #     own "command not found" convention already reports that as rc
-  #     127, well above 1) → a genuine kubectl/diff error.
+  #     or didn't); rc 130 or 143 (128 + SIGINT or SIGTERM) → an
+  #     interrupt; anything else → a genuine kubectl/diff error.
+  # No branch prints the kubectl stderr: each prints fixed text.
+  if (( _drc == 127 )); then
+    error "bootstrap: kubectl diff failed to start for ${label}: kubectl: executable not found"
+    echo error
+    return 0
+  fi
   local _race='ensure CRDs are installed first|failed calling webhook|no matches for kind|resource mapping not found'
   if kapply::output_matches "${_race}" "${_emsg}"; then
     echo "inconclusive (needs-crd)"
@@ -1869,9 +1877,57 @@ bootstrap::_diff_manifest() {
       echo "differs changed=${_chg} new=${_new}"
       return 0 ;;
   esac
-  error "bootstrap: kubectl diff failed for ${label} (rc=${_drc})"
+  # An interrupt or a SIGTERM ended kubectl: the hint to diff by hand does
+  # not apply.
+  case "${_drc}" in
+    130|143)
+      error "bootstrap: kubectl diff was interrupted for ${label} (rc=${_drc})"
+      echo error
+      return 0 ;;
+  esac
+  # rc > 1, no race pattern: kubectl/diff genuinely failed. The hint names
+  # the kubectl that ran (the project's .bin is first on PATH).
+  local _kubectl _filtered=0
+  _kubectl="$(command -v kubectl 2>/dev/null)" || _kubectl=kubectl
+  [[ "${diff_input}" == "${rendered}" ]] || _filtered=1
+  error "$(bootstrap::_diff_failed_text "${label}" "${_drc}" "${_kubectl}" "${kubeconfig}" "${bootstrap_render_dir:-}" "${stem}" "${_filtered}")"
   echo error
   return 0
+}
+
+# bootstrap::_diff_failed_text <label> <rc> <kubectl> <kubeconfig> <render-dir> <stem> <filtered>
+# The line of a failed `kubectl diff` (rc > 1, no race pattern): fixed text
+# that names the entry and the exit code, also at debug, and never the
+# kubectl message. A server-side diff of a bad manifest quotes the bad
+# value, also of a Secret: a field error prints "Invalid value: <value>", a
+# typed-patch error prints "valueUnstructured{Value:<value>}". The line
+# tells the operator how to see the message: run the diff by hand on the
+# rendered file under --render-dir. Without --render-dir (an empty
+# <render-dir>), do the dry run again with it: <dir> is a placeholder.
+# <filtered> 1 (--ignore-nondeterministic removed objects from the diff
+# input) adds that the diff by hand can show more, because the file holds
+# the full render. Each argument that lo puts into the command is quoted
+# for a POSIX shell (bootstrap::_sh_quote), so a path with a space, a quote
+# or `$(...)` pastes as one word and runs nothing. The Go twin:
+# diffFailedText (the same bytes).
+bootstrap::_diff_failed_text() {
+  local _dir="${5}" _again="" _more=""
+  if [[ -z "${_dir}" ]]; then
+    _dir="<dir>" _again="do the dry run again with --render-dir <dir> (<dir> is a directory that you choose), then "
+  fi
+  if [[ "${7}" == 1 ]]; then
+    _more=" (this diff can show more: the dry run diffed the render without its non-deterministic objects)"
+  fi
+  printf '%s' "bootstrap: kubectl diff failed for ${1} (rc=${2}). lo does not show the kubectl message: it can quote a value of the manifest. To see it, ${_again}run${_more}: $(bootstrap::_sh_quote "${3}") --kubeconfig $(bootstrap::_sh_quote "${4}") diff --server-side --force-conflicts -f $(bootstrap::_sh_quote "${_dir}/${6}.yaml")"
+}
+
+# bootstrap::_sh_quote <string>
+# Prints <string> quoted for a POSIX shell: in single quotes, each single
+# quote written as '\''. Not printf %q: the Go twin (shQuote) must print the
+# same bytes.
+bootstrap::_sh_quote() {
+  local _sq="'" _esc="'\\''"
+  printf "'%s'" "${1//"${_sq}"/"${_esc}"}"
 }
 
 # bootstrap::_dry_run_restore_d <domain> <kubeconfig>

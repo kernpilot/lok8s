@@ -577,8 +577,8 @@ kubehz::space_wait_active() {
 # TMPDIR (else /tmp), absolute (a relative TMPDIR is taken from PWD), with
 # each symlink resolved (cd -P; TMPDIR=/ and // give /). Each part of the
 # resolved path, from / down to the leaf, must belong to root or to this
-# user, and must not be writable by others unless it has the sticky bit
-# (/tmp passes). The walk goes top-down: each part is read (stat, no
+# user, and must not be writable by its group or by others unless it has
+# the sticky bit (/tmp passes). The walk goes top-down: each part is read (stat, no
 # follow: a link is refused) before any part below it. A part that passes
 # lets no other user rename or replace an entry in it (they cannot write
 # it, or the sticky bit keeps them to their own entries), so each part
@@ -623,8 +623,11 @@ kubehz::space_join_tmp_dir() {
       else
         why="belongs to another user (uid ${uid})"
       fi
-    elif (( (8#${mode} & 8#022) != 0 && (8#${mode} & 8#1000) == 0 )); then
+    elif (( (8#${mode} & 8#1000) == 0 && (8#${mode} & 8#002) != 0 )); then
       why="is writable by others and has no sticky bit"
+    elif (( (8#${mode} & 8#1000) == 0 && (8#${mode} & 8#020) != 0 )); then
+      # The group can hold other users, and the CLI does not read who is in it.
+      why="is writable by its group and has no sticky bit"
     fi
     if [[ -n "${why}" ]]; then
       error "the temp dir for the join ticket is not safe: ${part} ${why}"
@@ -958,10 +961,15 @@ kubehz::space_kubeconfig() {
   local space_id="${1}" domain="${2}"
   kubehz::space_api GET "/api/spaces/${space_id}/kubeconfig" >/dev/null 2>&1 || return 1
   [[ -n "${KUBEHZ_SPACE_API_BODY}" ]] || return 1
-  local path="${PATH_BASE}/.kubeconfig/${domain}.yaml" tmp
-  mkdir -p "$(dirname "${path}")" || return 1
+  local path="${PATH_BASE}/.kubeconfig/${domain}.yaml" dir tmp
+  # The directory by parameter expansion, not $(dirname): a command
+  # substitution drops the trailing newlines of a name.
+  dir="${path%/*}"
+  mkdir -p "${dir}" || return 1
   # Whole file or nothing: a temp file beside it, the mode set, one rename.
-  tmp="$(mktemp "$(dirname "${path}")/.kubeconfig-XXXXXX")" || return 1
+  # mktemp prints a newline: the x keeps the trailing newlines of a name.
+  tmp=$(mktemp "${dir}/.kubeconfig-XXXXXX" && printf x) || return 1
+  tmp="${tmp%$'\n'x}"
   if ! printf '%s\n' "${KUBEHZ_SPACE_API_BODY}" > "${tmp}" || ! chmod 600 "${tmp}" || ! mv -f "${tmp}" "${path}"; then
     rm -f "${tmp}"
     return 1

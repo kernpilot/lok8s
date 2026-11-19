@@ -542,8 +542,9 @@ EOF
   route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
   run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${BATS_TEST_TMPDIR}/no/kc.yaml"
   assert_failure
-  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write ${BATS_TEST_TMPDIR}/no/kc.yaml
+  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write ${BATS_TEST_TMPDIR}/no/kc.yaml: ${BATS_TEST_TMPDIR}/no does not exist or cannot be read
   Name a file in a directory that exists and that you can write to."
+  [ ! -e "${CURL_ARGS}" ]
   : > "${ROUTES}"
   route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 ' '
   run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${BATS_TEST_TMPDIR}/kc.yaml"
@@ -601,39 +602,514 @@ EOF
   assert_output 'real'
 }
 
-@test "kubeconfig: a link is written through only when we own the link and its target" {
+# The hint of a link whose path is not safe (Go: linkNotSafe).
+LINK_HINT='  lo writes through a link only to a file of yours. Each link and each directory on the way must belong to root or to you,
+  and must not be writable by its group or by others unless it has the sticky bit. Name another file.'
+LINK_HOPS='  Point the link at the file, or name the file itself.'
+NOT_REGULAR='  lo replaces only a regular file. Name another file.'
+UNWRITABLE='  Name a file in a directory that exists and that you can write to.'
+UNMAPPED='  The uid of this user is not mapped in the namespace, so lo cannot check who owns the path.
+  Run it where the uid of this user is mapped (unshare --map-current-user), or name a file that is not a link.'
+
+# _link_dir <name>: a fresh dir (mode 0700) under the test dir, with each
+# link resolved, as the walk names it.
+_link_dir() {
+  local d
+  d="$(cd -P -- "${BATS_TEST_TMPDIR}" && pwd -P)/${1}"
+  mkdir -m 700 -- "${d}"
+  printf '%s\n' "${d}"
+}
+
+# _link_chain <dir> <n> <last>: <dir>/l1 -> l2 -> ... -> l<n> -> <last>.
+_link_chain() {
+  local i dest
+  for (( i = 1; i <= ${2}; i++ )); do
+    dest="l$(( i + 1 ))"
+    (( i < ${2} )) || dest="${3}"
+    ln -s "${dest}" "${1}/l${i}"
+  done
+}
+
+# A stat stand-in: with STAT_UID_AS=<path>=<uid>, that path shows the owner
+# <uid> (the first field), each other path its real owner (Go: ownerAs).
+_stat_uid_as() {
+  stat() {
+    local out
+    out=$(command stat "$@") || return
+    if [[ -n "${STAT_UID_AS:-}" && "${*: -1}" == "${STAT_UID_AS%=*}" ]]; then
+      out="${STAT_UID_AS##*=}${out#"${out%% *}"}"
+    fi
+    printf '%s\n' "${out}"
+  }
+}
+
+@test "kubeconfig: a link is written through only to a file of ours" {
   [[ "$(id -u)" != 0 ]] || skip "the test needs a user other than root"
-  local d="${BATS_TEST_TMPDIR}/own" want foreign
+  local d want foreign
   foreign=$(foreign_file) || skip "no file of root to point at"
   route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
-  mkdir -p "${d}"
+  d=$(_link_dir own)
   ln -s "${foreign}" "${d}/link"
-  want="[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/link is a link, and the link or its target belongs to another user
-  lo writes through a link only when you own the link and its target. Name another file."
+  want="[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/link is a link, and its path is not safe: $(realpath -- "${foreign}") belongs to another user (uid 0)
+${LINK_HINT}"
   run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/link" --force
   assert_failure
   assert_output "${want}"
-  # As root (id stubbed), the target passes and the link (ours) does not.
+  # As root (id stubbed), the parts of ours on the way belong to another user.
   id() { if [[ "${1:-}" == -u ]]; then echo 0; else command id "$@"; fi; }
   run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/link" --force
   assert_failure
-  assert_output "${want}"
+  assert_output --partial "${d}/link is a link, and its path is not safe: "
+  assert_output --partial " belongs to another user (uid $(command id -u))"
   unset -f id
   [ ! -e "${CURL_ARGS}" ]
 }
 
 @test "kubeconfig: the path rules run again just before the write" {
   [[ "$(id -u)" != 0 ]] || skip "the test needs a user other than root"
-  local d="${BATS_TEST_TMPDIR}/again" foreign
+  local d foreign
   foreign=$(foreign_file) || skip "no file of root to point at"
   route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
-  mkdir -p "${d}"
+  d=$(_link_dir again)
   echo contexts > "${d}/real"
   ln -s real "${d}/link"
   # The link moves to another user's file during the download.
   STUB_HOOK="ln -sfn '${foreign}' '${d}/link'" run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/link" --force
   assert_failure
-  assert_output --partial 'is a link, and the link or its target belongs to another user'
+  assert_output --partial "is a link, and its path is not safe: $(realpath -- "${foreign}") belongs to another user (uid 0)"
+  run cat "${d}/real"
+  assert_output contexts
+}
+
+# The Go twin is TestAgentKubeconfigLinkChain: each case that passes. No
+# verdict here depends on the caller, so root runs them too.
+@test "kubeconfig --force: a clean link chain passes, and the file lands at the final target" {
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  _stat_uid_as
+  local d kind land file alias hops as
+  # case/the file that gets the kubeconfig
+  for kind in chain3/kube/real dirlink8/kube/real chain8/real sticky/st/real rootlink/real relative/real \
+    stalepwd/real pwdopen/wd/real pwdowner/wd/real pwdhops/wd/real dotdot/kube/real argdotdot/kube/real; do
+    d=$(_link_dir "${kind%%/*}")
+    land="${d}/${kind#*/}" file="${d}/l1"
+    case "${kind%%/*}" in
+      chain3)
+        mkdir -m 755 "${d}/a"
+        mkdir -m 700 "${d}/b" "${d}/kube"
+        ln -s a/l2 "${d}/l1"
+        ln -s "${d}/b/l3" "${d}/a/l2"
+        ln -s ../kube/real "${d}/b/l3" ;;
+      dirlink8)
+        # 8 links with a link to a directory among them.
+        mkdir -m 700 "${d}/kube"
+        ln -s kube "${d}/sub"
+        _link_chain "${d}" 7 sub/real ;;
+      chain8) _link_chain "${d}" 8 real ;;
+      sticky)
+        mkdir -m 1777 "${d}/st"
+        ln -s st/l2 "${d}/l1"
+        ln -s real "${d}/st/l2" ;;
+      rootlink|relative) _link_chain "${d}" 2 real ;;
+      stalepwd)
+        # A relative path starts at the working directory, not at $PWD.
+        _link_chain "${d}" 1 real
+        mkdir -m 700 "${d}/other"
+        echo contexts > "${d}/other/real"
+        ln -s real "${d}/other/l1" ;;
+      pwdopen|pwdowner|pwdhops)
+        # PWD names the working directory wd through the link alias: in an
+        # open directory, of another user (STAT_UID_AS), or as one link more
+        # than the limit. The walk starts at wd, the physical path.
+        mkdir -m 700 "${d}/wd"
+        alias="${d}/alias" hops=1
+        if [[ "${kind%%/*}" == pwdopen ]]; then
+          mkdir -m 777 "${d}/open"
+          alias="${d}/open/alias"
+        fi
+        [[ "${kind%%/*}" != pwdhops ]] || hops=8
+        ln -s "${d}/wd" "${alias}"
+        _link_chain "${d}/wd" "${hops}" real ;;
+      dotdot|argdotdot)
+        # ".." goes up from where the link dl points.
+        mkdir -m 700 "${d}/kube" "${d}/kube/sub"
+        ln -s kube/sub "${d}/dl"
+        if [[ "${kind%%/*}" == dotdot ]]; then
+          _link_chain "${d}" 1 dl/../real
+        else
+          ln -s real "${d}/kube/l1"
+          file="${d}/dl/../l1"
+        fi ;;
+    esac
+    echo contexts > "${land}"
+    case "${kind%%/*}" in
+      relative)
+        cd "${d}"
+        file=l1
+        run kubehz::cluster::kubeconfig cl-1a2b3c4d --file l1 --force ;;
+      stalepwd)
+        cd "${d}"
+        file=l1
+        PWD="${d}/other" run kubehz::cluster::kubeconfig cl-1a2b3c4d --file l1 --force ;;
+      pwdopen|pwdowner|pwdhops)
+        cd -L "${alias}"
+        [[ "${PWD}" == "${alias}" ]] || fail "${kind}: PWD is ${PWD}, not the alias"
+        file=l1 as=""
+        [[ "${kind%%/*}" != pwdowner ]] || as="${alias}=4242"
+        STAT_UID_AS="${as}" run kubehz::cluster::kubeconfig cl-1a2b3c4d --file l1 --force ;;
+      rootlink) STAT_UID_AS="${d}/l2=0" run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${file}" --force ;;
+      *) run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${file}" --force ;;
+    esac
+    assert_success
+    run cat "${land}"
+    assert_output 'apiVersion: v1'
+    if [[ "${kind%%/*}" == stalepwd ]]; then
+      run cat "${d}/other/real"
+      assert_output contexts
+    fi
+    [ -L "${file}" ] || fail "${kind}: the first link was replaced"
+    run ls -A "${land%/*}"
+    refute_output --partial .kubeconfig-
+  done
+}
+
+# PWD=/proc/self/cwd names the working directory through /proc: the walk
+# starts at the physical path, so the path is not in /proc. The Go twin is
+# in TestAgentKubeconfigLinkChain.
+@test "kubeconfig --force: with PWD=/proc/self/cwd, the walk starts at the physical working directory" {
+  [[ -e /proc/self/cwd ]] || skip "this system has no /proc"
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  local d
+  d=$(_link_dir procpwd)
+  mkdir -m 700 "${d}/wd"
+  echo contexts > "${d}/wd/real"
+  _link_chain "${d}/wd" 1 real
+  cd "${d}/wd"
+  cd -L /proc/self/cwd
+  [[ "${PWD}" == /proc/self/cwd ]] || fail "PWD is ${PWD}, not /proc/self/cwd"
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file l1 --force
+  assert_success
+  run cat "${d}/wd/real"
+  assert_output 'apiVersion: v1'
+  [ -L "${d}/wd/l1" ]
+}
+
+# The write keeps the bytes of a directory name: for a name that ends in a
+# newline, or holds one, the temporary file is made in that directory, not
+# in the one without the newline, and the write lands at the checked
+# target. A mktemp stand-in records the template of each kubeconfig
+# temporary file (NUL-separated: the names hold newlines). The Go twin is
+# TestKubeconfigTempDir and the newline case of TestAgentKubeconfigLinkChain.
+@test "kubeconfig: a directory name that ends in a newline, or holds one, keeps its bytes in the write" {
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  local d sub i=0 log="${BATS_TEST_TMPDIR}/mktemp.log" want="${BATS_TEST_TMPDIR}/mktemp.want"
+  mktemp() {
+    [[ "${*: -1}" != */.kubeconfig-XXXXXX ]] || printf '%s\0' "${*: -1}" >> "${log}"
+    command mktemp "$@"
+  }
+  for sub in $'safe\n' $'sa\nfe'; do
+    (( ++i ))
+    d=$(_link_dir "newline${i}")
+    # The name without the newline is a directory too: it stays empty.
+    mkdir -m 700 "${d}/${sub}" "${d}/safe"
+    echo contexts > "${d}/${sub}/real"
+    ln -s "${sub}/real" "${d}/l1"
+    printf '%s\0' "${d}/${sub}/.kubeconfig-XXXXXX" > "${want}"
+    # Through a link, with --force: the walk checks the target.
+    : > "${log}"
+    run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/l1" --force
+    assert_success
+    run cat "${d}/${sub}/real"
+    assert_output 'apiVersion: v1'
+    cmp -s "${log}" "${want}" || fail "${sub@Q}, through a link: the temporary file is not in the checked directory"
+    # A new file, without --force: the hard link publishes it there.
+    : > "${log}"
+    run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/${sub}/new.yaml"
+    assert_success
+    run cat "${d}/${sub}/new.yaml"
+    assert_output 'apiVersion: v1'
+    cmp -s "${log}" "${want}" || fail "${sub@Q}, a new file: the temporary file is not in the checked directory"
+    run ls -A "${d}/safe"
+    assert_output ''
+    run ls -A "${d}/${sub}"
+    assert_output $'new.yaml\nreal'
+  done
+  unset -f mktemp
+}
+
+# A plain or a new path with alias/.. in it: the temporary file goes to the
+# directory that the kernel resolves (one up from where alias points), the
+# directory of the mv or the ln, not to ro, the lexical parent, which
+# cannot be written here. The Go twin is
+# TestAgentKubeconfigTempFileInThePhysicalParent.
+@test "kubeconfig: for alias/../config, the write happens in the directory that the kernel resolves" {
+  [[ "$(id -u)" != 0 ]] || skip "the test needs a user other than root: root writes to a directory with mode 0500"
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  local d force
+  for force in 0 1; do
+    d=$(_link_dir "up${force}")
+    mkdir -m 700 "${d}/kube" "${d}/kube/sub" "${d}/ro"
+    ln -s "${d}/kube/sub" "${d}/ro/alias"
+    chmod 500 "${d}/ro"
+    if (( force )); then
+      echo contexts > "${d}/kube/config"
+      run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/ro/alias/../config" --force
+    else
+      run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/ro/alias/../config"
+    fi
+    chmod 700 "${d}/ro"
+    assert_success
+    run cat "${d}/kube/config"
+    assert_output 'apiVersion: v1'
+    run ls -A "${d}/kube"
+    assert_output $'config\nsub'
+    run ls -A "${d}/ro"
+    assert_output alias
+  done
+}
+
+# The Go twin is TestAgentKubeconfigLinkChain: each case that is refused.
+# No verdict here depends on the caller, so root runs them too (a target of
+# root is the next test).
+@test "kubeconfig --force: the link walk refuses a long chain, a loop, a mode or an owner on the way, and writes nothing" {
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  _stat_uid_as
+  local d kind want file as
+  for kind in chain9 dirlink9 loop midmode above targetdir linkowner dirowner targetowner; do
+    d=$(_link_dir "${kind}")
+    file="${d}/l1" as=""
+    echo contexts > "${d}/real"
+    case "${kind}" in
+      chain9)
+        _link_chain "${d}" 9 real
+        want="${d}/l9 is link 9 on the way, and lo follows at most 8 (a loop, or a chain that is too long)
+${LINK_HOPS}" ;;
+      dirlink9)
+        # 9 links with a link to a directory among them: that link counts.
+        mkdir -m 700 "${d}/kube"
+        ln -s kube "${d}/sub"
+        _link_chain "${d}" 8 sub/real
+        want="${d}/sub is link 9 on the way, and lo follows at most 8 (a loop, or a chain that is too long)
+${LINK_HOPS}" ;;
+      loop)
+        ln -s b "${d}/a"
+        ln -s a "${d}/b"
+        file="${d}/a"
+        want="${d}/a is link 9 on the way, and lo follows at most 8 (a loop, or a chain that is too long)
+${LINK_HOPS}" ;;
+      midmode)
+        mkdir -m 775 "${d}/mid"
+        ln -s mid/l2 "${d}/l1"
+        ln -s ../real "${d}/mid/l2"
+        want="${d}/mid is writable by its group and has no sticky bit
+${LINK_HINT}" ;;
+      above)
+        mkdir -m 777 "${d}/open"
+        mkdir -m 700 "${d}/open/sub"
+        ln -s open/sub/l2 "${d}/l1"
+        ln -s ../../real "${d}/open/sub/l2"
+        want="${d}/open is writable by others and has no sticky bit
+${LINK_HINT}" ;;
+      targetdir)
+        mkdir -m 777 "${d}/open"
+        echo contexts > "${d}/open/real"
+        ln -s open/real "${d}/l1"
+        want="${d}/open is writable by others and has no sticky bit
+${LINK_HINT}" ;;
+      linkowner)
+        _link_chain "${d}" 2 real
+        as="${d}/l2=4242"
+        want="${d}/l2 belongs to another user (uid 4242)
+${LINK_HINT}" ;;
+      dirowner)
+        mkdir -m 755 "${d}/mid"
+        ln -s mid/l2 "${d}/l1"
+        ln -s ../real "${d}/mid/l2"
+        as="${d}/mid=4242"
+        want="${d}/mid belongs to another user (uid 4242)
+${LINK_HINT}" ;;
+      targetowner)
+        _link_chain "${d}" 1 real
+        as="${d}/real=4242"
+        want="${d}/real belongs to another user (uid 4242)
+${LINK_HINT}" ;;
+    esac
+    STAT_UID_AS="${as}" run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${file}" --force
+    assert_failure
+    assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${file} is a link, and its path is not safe: ${want}"
+    run cat "${d}/real"
+    assert_output contexts
+  done
+  [ ! -e "${CURL_ARGS}" ]
+}
+
+# The Go twin is the case "a target of root is refused" of
+# TestAgentKubeconfigLinkChain.
+@test "kubeconfig --force: a target of root is refused: the target must be a file of yours" {
+  [[ "$(id -u)" != 0 ]] || skip "the test needs a user other than root: a file of root is a file of yours for root"
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  _stat_uid_as
+  local d
+  d=$(_link_dir targetroot)
+  echo contexts > "${d}/real"
+  _link_chain "${d}" 1 real
+  STAT_UID_AS="${d}/real=0" run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/l1" --force
+  assert_failure
+  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/l1 is a link, and its path is not safe: ${d}/real belongs to another user (uid 0)
+${LINK_HINT}"
+  run cat "${d}/real"
+  assert_output contexts
+  [ ! -e "${CURL_ARGS}" ]
+}
+
+# Without a mapping for this user (unshare --user alone), this user and
+# every other unmapped owner show the overflow uid, so "ours" proves
+# nothing: the first part below / on the way is refused with the hint for
+# an unmapped user. The Go twin is TestAgentKubeconfigLinkForAnUnmappedUser.
+# Skipped where no user namespace can be made.
+@test "kubeconfig --force: a caller without a uid mapping trusts no part of its own uid on the way" {
+  unshare --user true 2>/dev/null || skip "no user namespace here"
+  local d ovf top
+  ovf=$(cat /proc/sys/kernel/overflowuid 2>/dev/null) || ovf=65534
+  d=$(_link_dir unmapped)
+  echo contexts > "${d}/real"
+  _link_chain "${d}" 1 real
+  top="/$(cut -d / -f 2 <<< "${d}")"
+  run unshare --user bash -c '
+    import() { :; }
+    source "${1}/.lok8s/utils/verbose.sh"
+    source "${1}/.lok8s/libs/kubehz/agent"
+    rc=0
+    kubehz::agent_link_target "cluster kubeconfig cl-1a2b3c4d" "${2}" || rc=$?
+    echo "rc: ${rc}"' _ "${_PROJECT_ROOT}" "${d}/l1"
+  assert_success
+  assert_line "rc: 1"
+  assert_output --partial "[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/l1 is a link, and its path is not safe: ${top} cannot be checked (uid ${ovf})
+  The uid of this user is not mapped in the namespace, so lo cannot check who owns the path.
+  Run it where the uid of this user is mapped (unshare --map-current-user), or name a file that is not a link."
+  run cat "${d}/real"
+  assert_output contexts
+}
+
+# The Go twin is TestAgentKubeconfigLinkChain: the kernel's path rules, as
+# the target of a link and as the argument, and the regular-file rule, for
+# the target of a link and for a plain path. No verdict here depends on the
+# caller, so root runs them too.
+@test "kubeconfig --force: real/, real/., missing/../real, file/../real, a FIFO and a link to one are refused before any request" {
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  local d kind want file
+  for kind in slash slashdot missing regular fifo plainfifo argslash argslashdot argmissing argregular; do
+    d=$(_link_dir "${kind}")
+    file="${d}/l1"
+    echo contexts > "${d}/real"
+    echo contexts > "${d}/regular"
+    case "${kind}" in
+      slash)
+        _link_chain "${d}" 1 real/
+        want="cannot write ${file}: ${d}/real is not a directory" ;;
+      slashdot)
+        _link_chain "${d}" 1 real/.
+        want="cannot write ${file}: ${d}/real is not a directory" ;;
+      missing)
+        _link_chain "${d}" 1 missing/../real
+        want="cannot write ${file}: ${d}/missing does not exist or cannot be read" ;;
+      regular)
+        _link_chain "${d}" 1 regular/../real
+        want="cannot write ${file}: ${d}/regular is not a directory" ;;
+      fifo)
+        mkfifo -m 600 "${d}/fifo"
+        _link_chain "${d}" 1 fifo
+        want="${file} is a link, and its target ${d}/fifo is not a regular file
+${NOT_REGULAR}" ;;
+      plainfifo)
+        mkfifo -m 600 "${d}/fifo"
+        file="${d}/fifo"
+        want="${file} is not a regular file
+${NOT_REGULAR}" ;;
+      argslash|argslashdot)
+        file="${d}/real/"
+        [[ "${kind}" == argslash ]] || file="${d}/real/."
+        want="cannot write ${file}: ${d}/real is not a directory" ;;
+      argmissing)
+        file="${d}/missing/../real"
+        want="cannot write ${file}: ${d}/missing does not exist or cannot be read" ;;
+      argregular)
+        file="${d}/regular/../real"
+        want="cannot write ${file}: ${d}/regular is not a directory" ;;
+    esac
+    [[ "${kind}" == *fifo ]] || want+=$'\n'"${UNWRITABLE}"
+    run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${file}" --force
+    assert_failure
+    assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${want}"
+    run cat "${d}/real"
+    assert_output contexts
+    [[ "${kind}" != *fifo ]] || [ -p "${d}/fifo" ] || fail "${kind}: the FIFO was replaced"
+  done
+  [ ! -e "${CURL_ARGS}" ]
+}
+
+# _in_removed_wd <dir>: the link walk for "l1" in <dir>, after <dir> is
+# removed. Called through run, so the cd stays in the subshell.
+_in_removed_wd() {
+  cd -- "${1}" && rmdir -- "${1}" && kubehz::agent_link_target "cluster kubeconfig cl-1a2b3c4d" l1
+}
+
+# Two refusals that kubehz::agent_target does not reach, so the test calls
+# the walk itself: a link to a directory (the -d check refuses it first),
+# and a relative path when the working directory was removed (the path then
+# does not exist, so it is not a link). The Go twin is
+# TestAgentKubeconfigLinkTargetDirect.
+@test "the link walk on its own: a directory target is not a regular file, and a removed working directory is refused" {
+  local d
+  d=$(_link_dir direct)
+  mkdir -m 700 "${d}/sub" "${d}/wd"
+  _link_chain "${d}" 1 sub
+  run kubehz::agent_link_target "cluster kubeconfig cl-1a2b3c4d" "${d}/l1"
+  assert_failure
+  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/l1 is a link, and its target ${d}/sub is not a regular file
+${NOT_REGULAR}"
+  run _in_removed_wd "${d}/wd"
+  assert_failure
+  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write l1: the working directory cannot be read
+  Run lo in a directory that exists, or name the file with its full path."
+  [ ! -e "${d}/wd" ]
+}
+
+# Without a uid mapping, a stat stand-in shows each directory as root (and
+# a path in STAT_UID_AS its uid), so the walk reaches the owner checks of
+# the link and of the target: a link or a target of our uid proves
+# nothing there. The Go twin is
+# TestAgentKubeconfigLinkOwnersForAnUnmappedUser.
+@test "kubeconfig --force: without a uid mapping, a link or a target of our uid cannot be checked" {
+  unshare --user true 2>/dev/null || skip "no user namespace here"
+  local d ovf as
+  ovf=$(cat /proc/sys/kernel/overflowuid 2>/dev/null) || ovf=65534
+  d=$(_link_dir owners)
+  echo contexts > "${d}/real"
+  _link_chain "${d}" 1 real
+  # STAT_UID_AS|the part that cannot be checked
+  for as in "|l1" "${d}/l1=0|real"; do
+    STAT_UID_AS="${as%|*}" run unshare --user bash -c '
+      import() { :; }
+      source "${1}/.lok8s/utils/verbose.sh"
+      source "${1}/.lok8s/libs/kubehz/agent"
+      stat() {
+        local out
+        out=$(command stat "$@") || return
+        if [[ -n "${STAT_UID_AS:-}" && "${*: -1}" == "${STAT_UID_AS%=*}" ]]; then
+          out="${STAT_UID_AS##*=}${out#"${out%% *}"}"
+        elif [[ -d "${*: -1}" && ! -L "${*: -1}" ]]; then
+          out="0${out#"${out%% *}"}"
+        fi
+        printf "%s\n" "${out}"
+      }
+      rc=0
+      kubehz::agent_link_target "cluster kubeconfig cl-1a2b3c4d" "${2}" || rc=$?
+      echo "rc: ${rc}"' _ "${_PROJECT_ROOT}" "${d}/l1"
+    assert_success
+    assert_line "rc: 1"
+    assert_output --partial "[error] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/l1 is a link, and its path is not safe: ${d}/${as#*|} cannot be checked (uid ${ovf})
+${UNMAPPED}"
+  done
   run cat "${d}/real"
   assert_output contexts
 }
@@ -686,6 +1162,8 @@ EOF
   for f in /procfs/x /devx /device/x /tmp/proc kc.yaml proc/kc.yaml here/kc.yaml loop/kc.yaml; do
     ! kubehz::agent_in_proc_or_dev "${f}" || fail "${f}: want not in /proc or /dev"
   done
+  # A relative path starts at the working directory, not at $PWD.
+  PWD="${BATS_TEST_TMPDIR}" kubehz::agent_in_proc_or_dev p/kc.yaml || fail "a stale PWD: p/kc.yaml is in /proc"
 }
 
 @test "kubeconfig: the write step on its own never replaces a file without --force" {

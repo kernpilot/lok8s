@@ -600,7 +600,8 @@ var errTmpNotPrivate = errors.New("the temp dir is not private")
 // the leaf (top-down: see the walk), must belong to root or to this user
 // (ownerTrusted: "/" may also show the overflow uid of a user namespace,
 // and a user with the overflow uid owns nothing it can prove), and must not
-// be writable by others unless it has the sticky bit (/tmp passes). The
+// be writable by its group or by others unless it has the sticky bit (/tmp
+// passes). The
 // owner of a part could otherwise rename the fresh directory and put a FIFO
 // or a link in place of the ticket or the script.
 func (c *Context) joinTempDir() (string, error) {
@@ -672,8 +673,12 @@ func (c *Context) notPrivatePart(part string) (why string, unmapped bool) {
 			return fmt.Sprintf("cannot be checked (uid %d)", uid), true
 		}
 		return fmt.Sprintf("belongs to another user (uid %d)", uid), false
-	case fi.Mode().Perm()&0o022 != 0 && fi.Mode()&fs.ModeSticky == 0:
+	case fi.Mode()&fs.ModeSticky == 0 && fi.Mode().Perm()&0o002 != 0:
 		return "is writable by others and has no sticky bit", false
+	case fi.Mode()&fs.ModeSticky == 0 && fi.Mode().Perm()&0o020 != 0:
+		// The group can hold other users, and lo does not read who is in
+		// it: a part that its group can write is refused too.
+		return "is writable by its group and has no sticky bit", false
 	}
 	return "", false
 }

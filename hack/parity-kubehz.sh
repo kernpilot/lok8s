@@ -685,13 +685,22 @@ fi
 
 # The kubeconfig fixtures (KC_SETUP names one; agent_pre runs it before each
 # implementation): kc.yaml as a file that exists, a link to a file, a link
-# to a directory, a link to nothing.
+# to a directory, a link to nothing, a link to a file in a directory that
+# others can write, a link to itself (a loop), a link to a file with a
+# trailing "/", a link through a missing name and "..", a link to a FIFO,
+# a FIFO.
 kc_exists() { echo contexts > "${PROJ}/kc.yaml"; }
 kc_link_file() { mkdir -p "${PROJ}/kube"; echo contexts > "${PROJ}/kube/real"; ln -s kube/real "${PROJ}/kc.yaml"; }
 kc_link_dir() { mkdir -p "${PROJ}/kc-dir"; ln -s kc-dir "${PROJ}/kc.yaml"; }
 kc_link_nothing() { ln -s gone "${PROJ}/kc.yaml"; }
 kc_link_foreign() { ln -s /etc/passwd "${PROJ}/kc.yaml"; }
 kc_link_proc() { ln -s /proc/self/fd/1 "${PROJ}/kc.yaml"; }
+kc_link_open() { mkdir -m 777 "${PROJ}/kube"; echo contexts > "${PROJ}/kube/real"; ln -s kube/real "${PROJ}/kc.yaml"; }
+kc_link_loop() { ln -s kc.yaml "${PROJ}/kc.yaml"; }
+kc_link_slash() { mkdir -p "${PROJ}/kube"; echo contexts > "${PROJ}/kube/real"; ln -s kube/real/ "${PROJ}/kc.yaml"; }
+kc_link_dotdot() { mkdir -p "${PROJ}/kube"; echo contexts > "${PROJ}/kube/real"; ln -s missing/../kube/real "${PROJ}/kc.yaml"; }
+kc_link_fifo() { mkdir -p "${PROJ}/kube"; mkfifo "${PROJ}/kube/real"; ln -s kube/real "${PROJ}/kc.yaml"; }
+kc_fifo() { mkdir -p "${PROJ}/kube"; mkfifo "${PROJ}/kube/real"; }
 
 agent_pre() {
   rm -rf "${HOME}/.cache/lok8s/kubehz-token" "${PROJ}/kc.yaml" "${PROJ}/kube" "${PROJ}/kc-dir"
@@ -769,6 +778,16 @@ check_api_none() {
   fi
 }
 
+# kc_reason <label> <text>: the stderr of both implementations names the
+# reason <text> (two equal outputs could both give the wrong reason).
+kc_reason() {
+  if grep -qF -- "${2}" "${WORK}/go.err" && grep -qF -- "${2}" "${WORK}/bash.err"; then
+    echo "ok: the reason (${1})"
+  else
+    fail "the reason (${1}) — want ${2} in both, got: $(head -c 300 "${WORK}/go.err")"
+  fi
+}
+
 # kc_state <label>: kc.yaml (and a link target) is the same in both, and
 # exists (a missing file in both would prove nothing).
 kc_state() {
@@ -836,6 +855,26 @@ if [[ -n "${STUB_PORT}" ]]; then
   else
     echo "skip: a link to another user's file (root owns /etc/passwd)"
   fi
+  # A link walk that another user could redirect is refused: the directory
+  # of the target can be written by others, or the link is a loop (the hop
+  # limit).
+  KC_SETUP=kc_link_open check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
+  kc_reason "the open directory" "kube is writable by others and has no sticky bit"
+  KC_SETUP=kc_link_loop check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
+  kc_reason "the loop" "kc.yaml is link 9 on the way, and lo follows at most 8"
+  # The kernel's path rules, in the target of a link and in the argument:
+  # a name that a "/" follows must be a directory that exists. The target
+  # must be a regular file.
+  KC_SETUP=kc_link_slash check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
+  kc_reason "a link to kube/real/" "cannot write kc.yaml: PROJ/kube/real is not a directory"
+  KC_SETUP=kc_link_dotdot check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
+  kc_reason "a link to missing/../kube/real" "cannot write kc.yaml: PROJ/missing does not exist or cannot be read"
+  KC_SETUP=kc_link_fifo check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kc.yaml --force
+  kc_reason "a link to a FIFO" "kc.yaml is a link, and its target PROJ/kube/real is not a regular file"
+  KC_SETUP=kc_fifo check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kube/real --force
+  kc_reason "a FIFO" "kubeconfig sp-1a2b3c4d: kube/real is not a regular file"
+  KC_SETUP=kc_link_file check_api_none - kubehz space kubeconfig sp-1a2b3c4d --file kube/real/ --force
+  kc_reason "the argument kube/real/" "cannot write kube/real/: kube/real is not a directory"
   # /proc and /dev are refused, also through a link. /proc/self resolves
   # against the process that asks: fd 1 of lo is the harness's output file.
   if [[ -d /proc/self/fd ]]; then
@@ -1154,7 +1193,7 @@ EOF
   fi
   # TMPDIR=<safe>/link/.. with link pointing to <unsafe>/child: ".." goes
   # up from the target of the link (the kernel's walk), so both check
-  # <unsafe>, which others can write, and refuse it before the mint (the
+  # <unsafe>, which its group can write, and refuse it before the mint (the
   # space lookup goes out, no join-token POST). A lexical clean of the
   # path would check <safe>, pass and mint.
   rm -rf "${WORK}/jlink"
@@ -1164,9 +1203,9 @@ EOF
   ln -s "${WORK}/jlink/unsafe/child" "${WORK}/jlink/safe/link"
   TMPDIR="${WORK}/jlink/safe/link/.." check_api "${UNBOUND}" kubehz join worker-1 --domain acme.dev
   if grep -q 'join-token' "${WORK}/req.go" "${WORK}/req.bash"; then
-    fail "lo kubehz join worker-1 (TMPDIR <safe>/link/..) — a TMPDIR others can write was minted"
-  elif ! grep -q 'jlink/unsafe is writable by others' "${WORK}/go.err" \
-    || ! grep -q 'jlink/unsafe is writable by others' "${WORK}/bash.err"; then
+    fail "lo kubehz join worker-1 (TMPDIR <safe>/link/..) — a TMPDIR its group can write was minted"
+  elif ! grep -q 'jlink/unsafe is writable by its group' "${WORK}/go.err" \
+    || ! grep -q 'jlink/unsafe is writable by its group' "${WORK}/bash.err"; then
     fail "lo kubehz join worker-1 (TMPDIR <safe>/link/..) — the check did not read the target of the link"
   else
     echo "ok: .. after a link lo kubehz join worker-1 --domain acme.dev"

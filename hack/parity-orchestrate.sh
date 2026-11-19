@@ -223,6 +223,23 @@ check - status --domain alpha.dev                  # targets listed, built, stal
 : > "${PROJ}/.tilt.pid"
 check - status --domain alpha.dev                  # empty pidfile
 rm -f "${PROJ}/.tilt.pid"
+# A gone cluster with its kubeconfig left behind, as after `lo down`
+# (issue #194): the driver says NotFound and both kubectl reads still run.
+# This stub prints its arguments, so the diff also compares the
+# --request-timeout=5s of the node read in the two twins. Then it fails,
+# as an API server that does not answer.
+mkdir -p "${PROJ}/.kubeconfig"
+printf 'apiVersion: v1\n' > "${PROJ}/.kubeconfig/sharedc.yaml"
+parity::stub "${PROJ}" kubectl <<'SH'
+#!/usr/bin/env bash
+# Parity stub: print the arguments, then fail (no live cluster is reached).
+echo "stub: kubectl $*"
+exit 1
+SH
+check - status --domain shared.dev                 # lo: NotFound, kubeconfig present → Nodes (not reachable)
+parity::stub_kubectl_fail "${PROJ}"
+rm -f "${PROJ}/.kubeconfig/sharedc.yaml"
+rmdir "${PROJ}/.kubeconfig" 2>/dev/null || true
 
 # ── lo down ──────────────────────────────────────────────────────────────────
 check - down --domain nokind.dev                   # spec without .kind → refusal, NEVER driver-destroy
@@ -1175,6 +1192,16 @@ for side in bash go; do
   if [[ -s "${WORK}/render.${side}/03-ccm.yaml" ]]; then echo "ok: ${side}: 03-ccm.yaml rendered before the failed diff"; else fail "${side}: 03-ccm.yaml missing"; fi
 done
 dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --render-dir render-out
+# A failed diff without --render-dir: both sides print the same fixed line
+# (the <dir> placeholder, the project's kubectl, the paths in single quotes)
+# and never the kubectl message.
+dry_check - bootstrap --domain dry.dev --dry-run --only ccm
+dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --only ccm
+for side in bash go; do
+  tls_pin    "${side}: ccm error without --render-dir" "${WORK}/${side}.out" "^bootstrap dry-run: ccm: error$"
+  tls_pin    "${side}: the failed line names <dir>"   "${WORK}/${side}.err" "^\[error\] bootstrap: kubectl diff failed for ccm \(rc=2\)\. lo does not show the kubectl message: it can quote a value of the manifest\. To see it, do the dry run again with --render-dir <dir> \(<dir> is a directory that you choose\), then run: 'PROJ/\.bin/kubectl' --kubeconfig 'PROJ/\.kubeconfig/dryc\.yaml' diff --server-side --force-conflicts -f '<dir>/[0-9]{2}-ccm\.yaml'$"
+  tls_absent "${side}: no kubectl message"            "${WORK}/${side}.err" "could not be reached"
+done
 # --only narrows the run: one entry; its unchanged diff → rc 0.
 dry_check - bootstrap --domain dry.dev --dry-run --only cilium
 dry_expect_rc 0 bootstrap --domain dry.dev --dry-run --only cilium
