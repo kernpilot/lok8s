@@ -10,12 +10,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -456,31 +459,34 @@ func (c *Context) NodeJoin(ctx context.Context, domain string, o NodeOpts) error
 			return ErrHandled
 		}
 	}
+	// The ticket holds a slot from the mint until the join lands. The hold
+	// comes before the mint (bash: the traps of node::join, set before its
+	// mint): a signal during the mint or just after it ends ctx, and the
+	// join ends with a note. Then kubeadm stops or does not start, the
+	// config is removed, and the slot note goes out.
+	ctx, release := holdJoinSignals(ctx)
+	defer release()
 	ticket, err := c.mintTicket(ctx, cfg, clusterID, nodeName, nodePool, o.KubeletVersion)
 	if err != nil {
 		return err
 	}
-	// The ticket holds a slot from here until the join lands. A signal ends
-	// ctx: SIGINT and SIGTERM through cli.WatchInterrupt, a SIGHUP through
-	// CatchHangup (which also ends the command context, so main ends lo
-	// with the SIGHUP). Then kubeadm stops or does not start, the config
-	// is removed, and the slot note goes out (bash: the traps of
-	// node::join).
-	ctx, stopHangup := interrupt.CatchHangup(ctx)
-	defer stopHangup()
+	if c.joinMinted != nil {
+		c.joinMinted()
+	}
 	// The strict read of the line, before --print-only too: the same
 	// verdicts. An empty version checks the line and makes no config.
 	if _, err := c.joinConfig(ticket.joinCommand, "", ""); err != nil {
 		c.mintedSlotNote(nodeName)
 		return err
 	}
-	if o.PrintOnly {
-		c.printJoin(nodeName, nodePool, clusterID, ticket.expires, ticket.joinCommand)
-		return nil
-	}
+	// A signal so far: nothing is printed, and nothing is made.
 	if ctx.Err() != nil {
 		c.interruptedSlotNote(nodeName)
 		return ErrHandled
+	}
+	if o.PrintOnly {
+		c.printJoin(nodeName, nodePool, clusterID, ticket.expires, ticket.joinCommand)
+		return nil
 	}
 	config, err := c.joinConfig(ticket.joinCommand, configVersion, o.NodeIP)
 	if err != nil {
@@ -549,7 +555,12 @@ func (c *Context) joinConfig(line, apiVersion, nodeIP string) (string, error) {
 		return "", ErrHandled
 	}
 	tok := strings.Fields(line)
-	endpoint := tok[2]
+	// AssertJoinCommand passed the line, so it has three words or more; a
+	// shorter line carries no token, as the bash twin reads it.
+	endpoint := ""
+	if len(tok) > 2 {
+		endpoint = tok[2]
+	}
 	var token, name string
 	var hashes []string
 	for i := 3; i < len(tok); i++ {
@@ -682,6 +693,9 @@ func (c *Context) mintTicket(ctx context.Context, cfg *Config, clusterID, nodeNa
 	}
 	res, err := c.spaceAPI(ctx, cfg, "POST", "/api/clusters/"+clusterID+"/nodes/join-token", compactJSON(pairs...))
 	if err != nil {
+		if ctx.Err() != nil {
+			c.interruptedMintNote(nodeName)
+		}
 		return mintedTicket{}, err
 	}
 	if !is2xx(res.Status) {
@@ -734,8 +748,68 @@ func (c *Context) printJoin(nodeName, nodePool, clusterID, expires, line string)
 }
 
 // joinStopDelay bounds the stop of an interrupted kubeadm join: the runner
-// sends it a SIGINT when ctx ends, and a SIGKILL after this delay.
-const joinStopDelay = 10 * time.Second
+// sends it a SIGINT when ctx ends, and a SIGKILL after this delay. A
+// variable, so that a test can make it short.
+var joinStopDelay = 10 * time.Second
+
+// holdJoinSignals holds SIGINT, SIGTERM and SIGHUP for a node join: from
+// before the mint until release, which NodeJoin defers, so that it runs
+// after runJoin removed the config. A signal cancels the returned context:
+// SIGINT and SIGTERM also through the Watch of main (cli.WatchInterrupt),
+// a SIGHUP also through CatchHangup (which ends the command context too,
+// so main ends lo with the SIGHUP). The Watch and the catch end with their
+// first signal: a second one would take its default action, and end lo
+// before the config is removed and before WaitDelay stops a kubeadm that
+// ignores the first signal. The hold takes each later signal and only
+// cancels the context again. Thus a second Ctrl-C does not end lo during a
+// join: the join ends within joinStopDelay and the removal of the config,
+// and SIGKILL stays the way to force it. A signal that is ignored when the
+// hold starts (nohup lo …) stays ignored: signal.Notify would undo the
+// ignore.
+func holdJoinSignals(ctx context.Context) (context.Context, func()) {
+	ctx, stopHangup := interrupt.CatchHangup(ctx)
+	ctx, cancel := context.WithCancel(ctx)
+	var held []os.Signal
+	for _, s := range []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP} {
+		if !signal.Ignored(s) {
+			held = append(held, s)
+		}
+	}
+	ch := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	if len(held) > 0 {
+		signal.Notify(ch, held...)
+	}
+	go func() {
+		defer close(finished)
+		for {
+			select {
+			case <-ch:
+				cancel()
+			case <-done:
+				return
+			}
+		}
+	}()
+	return ctx, func() {
+		// The hold ends first: a SIGHUP after it still reaches the catch,
+		// which records it for main.
+		signal.Stop(ch)
+		close(done)
+		<-finished
+		stopHangup()
+		cancel()
+	}
+}
+
+// interruptedMintNote ports node::interrupted_mint_note: a signal stopped
+// the mint request, and the platform may have minted the ticket.
+func (c *Context) interruptedMintNote(nodeName string) {
+	c.echoErr("")
+	c.warnf("kubehz: interrupted during the mint. If the platform minted the ticket, it holds a node slot for about ten minutes.")
+	c.warnf("Look for it with 'lo kubehz node status', and free it with:  lo kubehz node remove --name %s", nodeName)
+}
 
 // interruptedSlotNote ports node::interrupted_slot_note: a signal stopped
 // the join after the mint, and the ticket holds a slot.
@@ -749,8 +823,10 @@ func (c *Context) interruptedSlotNote(nodeName string) {
 // removes the config on each way out, before it prints the result. When
 // ctx ends (a signal, see NodeJoin), kubeadm does not start, or the
 // runner stops it (a SIGINT, then a SIGKILL after joinStopDelay); the
-// slot note then goes out. A kubeadm that ended without an error before
-// the signal counts as a join that landed (as in the bash twin).
+// slot note then goes out. A kubeadm that ended with 0, before the signal
+// or after the stop signal, counts as a join that landed (as in the bash
+// twin): the success text goes out, and main ends lo with 128 + the
+// signal.
 func (c *Context) runJoin(ctx context.Context, nodeName, nodePool, clusterID, configPath string) error {
 	removed := false
 	remove := func() {
@@ -767,14 +843,22 @@ func (c *Context) runJoin(ctx context.Context, nodeName, nodePool, clusterID, co
 	}
 	c.echo("kubehz: joining '%s' to pool '%s' of cluster %s", nodeName, nodePool, clusterID)
 	// argv, never a shell. The token is in the config file, not on argv.
+	var state *os.ProcessState
 	runErr := c.Runner.Run(ctx, execx.Cmd{
 		Name:      "kubeadm",
 		Args:      []string{"join", "--config", configPath},
 		Stdout:    c.out(),
 		Stderr:    c.errOut(),
 		WaitDelay: joinStopDelay,
+		Exited:    func(s *os.ProcessState) { state = s },
 	})
 	remove()
+	// A kubeadm that ended with 0 is a join that landed, also when a
+	// signal came: the runner then returns the error of ctx, and the state
+	// of kubeadm tells (bash: the status that node::_join_stop reads).
+	if runErr != nil && state != nil && state.Success() {
+		runErr = nil
+	}
 	if runErr != nil && ctx.Err() != nil {
 		c.interruptedSlotNote(nodeName)
 		return ErrHandled

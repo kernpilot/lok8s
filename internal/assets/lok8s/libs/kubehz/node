@@ -426,6 +426,15 @@ node::interrupted_slot_note() {
   warn "Free the slot if you are not retrying:  lo kubehz node remove --name ${node_name}" || :
 }
 
+# Printed when a signal stops the mint request of a join (curl failed after
+# the signal): the platform may have minted the ticket, and it then holds a
+# node slot. The Go twin prints the same lines (interruptedMintNote).
+node::interrupted_mint_note() {
+  echo "" >&2 || :
+  warn "kubehz: interrupted during the mint. If the platform minted the ticket, it holds a node slot for about ten minutes." || :
+  warn "Look for it with 'lo kubehz node status', and free it with:  lo kubehz node remove --name ${node_name}" || :
+}
+
 # Printed when a post-mint gate refuses the returned join line: nothing ran on
 # this machine, but the mint itself succeeded — the ticket holds a node slot
 # server-side until it expires. One message, one place: every refusal between
@@ -589,20 +598,69 @@ node::remove_join_config() {
   fi
 }
 
+# The traps of a join, from before the mint until node::join returns: a
+# signal goes to node::_join_signalled.
+node::_join_traps() {
+  trap 'node::_join_signalled 2' INT
+  trap 'node::_join_signalled 15' TERM
+  trap 'node::_join_signalled 1' HUP
+}
+
+# The trap of a join (node::_join_traps). The first signal goes to
+# join_signal of node::join; node::_join_minted stops at its next step.
+# While kubeadm runs (join_kpid names it), the trap also stops kubeadm at
+# once: the wait for kubeadm then ends, also when the signal came just
+# before that wait. join_kpid is emptied first, so that kubeadm is stopped
+# once.
+# Usage: node::_join_signalled <signal number>
+node::_join_signalled() {
+  [[ -n "${join_signal}" ]] || join_signal="${1}"
+  local pid="${join_kpid}"
+  [[ -n "${pid}" ]] || return 0
+  join_kpid=""
+  node::_join_stop "${pid}"
+}
+
 # Stop the kubeadm of an interrupted join (<pid>, a child of this shell): a
-# TERM, then a KILL when it still runs after 10 seconds. Returns when it has
-# ended.
+# TERM, then a KILL when it still runs after the bound
+# (node::_join_stop_ticks). Returns when it has ended, and sets join_krc of
+# node::join to the status of kubeadm: 0 is a join that landed before the
+# stop. INT, TERM and HUP are ignored while it runs (a second signal would
+# cut the wait for the status short); then the traps of the join come
+# back.
 # Usage: node::_join_stop <pid>
 node::_join_stop() {
-  local pid="${1}" n=0
+  local pid="${1}" n=0 ticks
+  trap '' INT TERM HUP
+  ticks=$(node::_join_stop_ticks)
   kill -TERM "${pid}" 2>/dev/null || :
-  while kill -0 "${pid}" 2>/dev/null && (( n < 100 )); do
+  while kill -0 "${pid}" 2>/dev/null && (( n < ticks )); do
     sleep 0.1 || :
     n=$(( n + 1 ))
   done
   kill -KILL "${pid}" 2>/dev/null || :
-  wait "${pid}" 2>/dev/null || :
+  join_krc=0
+  wait "${pid}" 2>/dev/null || join_krc=$?
+  node::_join_traps
 }
+
+# The bound of node::_join_stop in tenths of a second: 10 seconds, the
+# WaitDelay of the Go twin (joinStopDelay).
+node::_join_stop_ticks() { echo 100; }
+
+# The wait for the kubeadm of a join (<pid>): the status of kubeadm, or
+# above 128 when a signal ended the wait (the trap then stopped kubeadm).
+# When the trap stopped kubeadm before this wait, the wait returns at once
+# (bash keeps the status of a child it reaped, or says it is no child: the
+# message is dropped).
+# Usage: node::_join_wait <pid>
+node::_join_wait() { wait "${1}" 2>/dev/null; }
+
+# Runs after kubeadm started (<pid>) and before join_kpid names it: it does
+# nothing. A test sends a signal here, the window that the check after the
+# assignment covers.
+# Usage: node::_join_started <pid>
+node::_join_started() { :; }
 
 # The jq filter that reads the join line of a mint response: "line <the
 # line>", or "control" for a line with a control character (U+0000 to
@@ -707,7 +765,7 @@ node::join() {
   # before the mint: a refusal here costs no ticket. +x, +i and the
   # refusal: as in kubehz::space_api_call. node::_join_minted sets them
   # through dynamic scope.
-  local +x +i join_command expires ready config path cause join_signal saved_traps || { error "node::join: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  local +x +i join_command expires ready config path cause join_signal join_kpid join_krc saved_traps || { error "node::join: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
 
   local payload
   payload=$(jq -n \
@@ -717,30 +775,37 @@ node::join() {
     '{nodeName: $nodeName, pool: $pool}
       + (if $kubeletVersion != "" then {kubeletVersion: $kubeletVersion} else {} end)')
 
-  local rc=0
-  kubehz::space_api POST "/api/clusters/${NODE_CLUSTER_ID}/nodes/join-token" "${payload}" || rc=$?
-  if (( rc != 0 )); then
-    (( rc == 2 )) && node::api_error "Failed to mint a join ticket for '${node_name}'"
-    unset KUBEHZ_SPACE_API_BODY
-    return 1
-  fi
-
-  # The ticket holds a slot from here until the join lands. A signal (INT,
-  # TERM, HUP) only sets join_signal: node::_join_minted stops at its next
-  # step, stops kubeadm and removes the join config. Then the slot note
-  # goes out, the traps of the caller come back (as in kubeone::_yq_replace),
-  # and node::join returns 128 + the number of the signal. Without a trap,
-  # a hangup would end the shell before the config is removed.
+  # The ticket holds a slot from the mint until the join lands. The traps
+  # (node::_join_traps) come before the mint: a signal during the mint or
+  # just after it ends with a note, never with a silent exit, and without a
+  # trap a hangup would end the shell before the config is removed. A
+  # signal (INT, TERM, HUP) sets join_signal: node::_join_minted stops at
+  # its next step, and the trap stops a kubeadm that runs. A second signal
+  # does not end the join early (SIGKILL does). After the mint, a join that
+  # did not land gets the slot note. The traps of the caller come back (as
+  # in kubeone::_yq_replace), and node::join returns 128 + the number of the
+  # first signal, also after a join that landed or a printed line (as the
+  # Go twin: cmd/lo/main.go).
   saved_traps=$(trap -p INT TERM HUP)
-  join_signal=""
-  trap 'join_signal=2' INT
-  trap 'join_signal=15' TERM
-  trap 'join_signal=1' HUP
-  rc=0
-  node::_join_minted || rc=$?
+  join_signal="" join_kpid="" join_krc=""
+  node::_join_traps
+  # mark-nul: a NUL byte of the response becomes a control byte that jq
+  # refuses, so that it cannot vanish in $(...); the Go twin refuses such a
+  # body as JSON (parseJSON).
+  local rc=0 minted=0
+  kubehz::space_api POST "/api/clusters/${NODE_CLUSTER_ID}/nodes/join-token" "${payload}" mark-nul || rc=$?
+  if (( rc == 0 )); then
+    minted=1
+    node::_join_minted || rc=$?
+  elif (( rc == 2 )); then
+    node::api_error "Failed to mint a join ticket for '${node_name}'"
+  elif [[ -n "${join_signal}" && -n "${KUBEHZ_SPACE_API_CURL_RC}" ]]; then
+    node::interrupted_mint_note
+  fi
   unset KUBEHZ_SPACE_API_BODY
-  if [[ -n "${join_signal}" ]] && (( rc != 0 )); then
-    node::interrupted_slot_note
+  (( rc == 0 )) || rc=1
+  if [[ -n "${join_signal}" ]]; then
+    (( rc == 0 || ! minted )) || node::interrupted_slot_note
     rc=$(( 128 + join_signal ))
   fi
   trap - INT TERM HUP
@@ -750,12 +815,12 @@ node::join() {
 
 # The steps of node::join after the mint. Call node::join: it holds the
 # guard, the traps and the names that this function sets through dynamic
-# scope (join_command, expires, ready, config, path, cause). It reads
-# node_name, node_pool, print_only, config_version, node_ip and
-# join_signal of node::join the same way. Before each step that makes
-# something it reads join_signal: after a signal it removes what it made
-# and returns 1 (node::join prints the note). It removes the config before
-# it prints a result.
+# scope (join_command, expires, ready, config, path, cause, join_kpid,
+# join_krc). It reads node_name, node_pool, print_only, config_version,
+# node_ip and join_signal of node::join the same way. Before each step that
+# prints the line or makes something it reads join_signal: after a signal
+# it removes what it made and returns 1 (node::join prints the note). It
+# removes the config before it prints a result.
 node::_join_minted() {
   local rc=0 kpid krc=0
   # Guard every read: the mint returned 2xx, but a 2xx body is not a promise of
@@ -807,6 +872,8 @@ node::_join_minted() {
   # An empty version checks the line and prints nothing; the subshell keeps
   # nocasematch and BASH_REMATCH of this shell.
   ( node::join_config "${join_command}" "" "" ) || { node::minted_slot_note; return 1; }
+  # A signal so far: nothing is printed, and nothing is made.
+  [[ -z "${join_signal}" ]] || return 1
 
   if (( print_only )); then
     # The line passed the alphabet check: its words are split by one space.
@@ -823,7 +890,6 @@ node::_join_minted() {
 
   # The line, read into a kubeadm join config in a private file
   # (kubehz::write_join_file): the bootstrap token is on no argv.
-  [[ -z "${join_signal}" ]] || return 1
   config=$(node::join_config "${join_command}" "${config_version}" "${node_ip}") \
     || { node::minted_slot_note; return 1; }
   config+=$'\n'
@@ -854,24 +920,26 @@ node::_join_minted() {
   # argv, never a shell. The token is in the config file, not on argv.
   # kubeadm runs in the background, with the stdin of lo, so that a signal
   # ends the wait at once (bash runs a trap only after a foreground child
-  # ends): then node::_join_stop stops kubeadm. A kubeadm that ended
-  # before the signal counts. A signal that came before the wait set
-  # join_signal already, and the wait would then last until kubeadm ends:
-  # the check skips the wait.
+  # ends). Once join_kpid names kubeadm, the trap stops it
+  # (node::_join_signalled), also when the signal comes before the wait. A
+  # signal before that found no kubeadm to stop: the check after the
+  # assignment stops it.
   kubeadm join --config "${path}" <&0 &
   kpid=$!
-  if [[ -z "${join_signal}" ]]; then
-    wait "${kpid}" || krc=$?
-  else
-    krc=1
-  fi
-  if [[ -n "${join_signal}" ]] && (( krc != 0 )); then
-    node::_join_stop "${kpid}"
-    node::remove_join_config "${path}"
-    return 1
-  fi
+  node::_join_started "${kpid}"
+  join_kpid="${kpid}"
+  [[ -z "${join_signal}" || -z "${join_kpid}" ]] || node::_join_signalled "${join_signal}"
+  node::_join_wait "${kpid}" || krc=$?
+  join_kpid=""
+  # After a stop, the status of kubeadm is the one the stop read: the wait
+  # ended on the signal (above 128), or found kubeadm stopped already. A 0
+  # of the wait is always the status of kubeadm. A kubeadm that ended with
+  # 0 is a join that landed, also when a signal came.
+  (( krc == 0 )) || [[ -z "${join_krc}" ]] || krc="${join_krc}"
   node::remove_join_config "${path}"
   if (( krc != 0 )); then
+    # A signal: node::join prints the slot note.
+    [[ -z "${join_signal}" ]] || return 1
     error "kubehz: kubeadm join failed — read its output above."
     echo "  The node keeps its slot until you remove it:" >&2
     echo "    lo kubehz node remove --name ${node_name}" >&2

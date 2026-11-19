@@ -108,6 +108,19 @@ setup() {
 }
 
 teardown() {
+  # A stub kubeadm that a failed case left running holds the output of bats
+  # open, and bats waits for it. Stop it: its pid file names it, and its
+  # environment holds KUBEADM_SEEN of this case (a pid that is used again
+  # does not).
+  local pid kv
+  if [[ -s "${KUBEADM_SEEN:-}.pid" ]]; then
+    pid=$(cat "${KUBEADM_SEEN}.pid")
+    if [[ "${pid}" =~ ^[0-9]+$ && -r "/proc/${pid}/environ" ]]; then
+      while IFS= read -r -d '' kv; do
+        [[ "${kv}" != "KUBEADM_SEEN=${KUBEADM_SEEN}" ]] || { kill -KILL "${pid}" 2>/dev/null || :; break; }
+      done < "/proc/${pid}/environ"
+    fi
+  fi
   teardown_tmpdir
 }
 
@@ -641,44 +654,58 @@ _stub_all() {
 }
 
 # A kubeadm that runs until a signal stops it: version answers as the
-# default stub does; the join keeps its path and its pid, then becomes a
-# sleep (exec keeps the pid).
+# default stub does. The join keeps its path, then its pid as the marker
+# that it runs, and then becomes a sleep (exec keeps the pid). <on-term>:
+# empty (a TERM ends it), "ignore" (only a KILL ends it), or "exit0" (a TERM
+# ends it with 0: a join that landed as the stop came). Each form ends by
+# itself after 30 seconds.
+# Usage: _stub_sleeping_kubeadm [on-term]
 _stub_sleeping_kubeadm() {
+  export STUB_KUBEADM_ON_TERM="${1:-}"
   kubeadm() {
     if [[ "${1}" == version ]]; then
       printf 'v1.36.0\n'
       return 0
     fi
     printf '%s\n' "${3}" > "${KUBEADM_SEEN}.path"
+    case "${STUB_KUBEADM_ON_TERM}" in
+      ignore) trap '' TERM ;;
+      exit0) trap 'exit 0' TERM ;;
+    esac
+    # The marker last: when it is there, the trap is in place.
     printf '%s\n' "${BASHPID}" > "${KUBEADM_SEEN}.pid"
+    if [[ "${STUB_KUBEADM_ON_TERM}" == exit0 ]]; then
+      # A trap runs when a foreground child ends: short sleeps. Not stopped
+      # within 30 seconds: a failed join.
+      local i
+      for (( i = 0; i < 600; i++ )); do sleep 0.05; done
+      exit 1
+    fi
     exec sleep 30
   }
   export -f kubeadm
 }
 
-# Run node::join in the background as the lo process, send <signal> to it
-# alone once kubeadm runs, and check the end: the exit code <rc>, kubeadm
-# stopped within the bound, the slot note, no failure text, no config.
-# (An asynchronous job ignores SIGINT in a shell without job control, so
-# INT has no case here; INT and TERM set the same trap.)
-# Usage: _signal_mid_join <signal> <rc>
-_signal_mid_join() {
-  local sig="${1}" want="${2}" lo kpid i rc=0 start
-  ( node::join --name box-1 --pool metal ) > "${BATS_TEST_TMPDIR}/join.out" 2>&1 3>&- &
-  lo=$!
+# Wait (10 s at most) for the marker of the stub kubeadm: its pid file.
+_wait_for_kubeadm() {
+  local i
   for (( i = 0; i < 100; i++ )); do
-    [[ ! -s "${KUBEADM_SEEN}.pid" ]] || break
+    [[ ! -s "${KUBEADM_SEEN}.pid" ]] || return 0
     sleep 0.1
   done
-  [ -s "${KUBEADM_SEEN}.pid" ]
-  kpid=$(cat "${KUBEADM_SEEN}.pid")
-  # lo is in the wait for kubeadm by now.
-  sleep 0.2
-  start=${EPOCHREALTIME//[.,]/}
-  kill "-${sig}" "${lo}"
-  wait "${lo}" || rc=$?
+  echo "the stub kubeadm did not start" >&2
+  return 1
+}
+
+# The end of a join that a signal stopped: the exit code <rc>, within
+# 10 s of <start> (microseconds; the bound of node::_join_stop is 10 s, so
+# a test that shortens the bound or stops a kubeadm that ends on TERM is
+# well below), kubeadm <kpid> gone, the slot note, no failure text, no
+# config.
+# Usage: _assert_stopped_join <rc> <got-rc> <start> <kpid>
+_assert_stopped_join() {
+  local want="${1}" rc="${2}" start="${3}" kpid="${4}" path
   [ "${rc}" -eq "${want}" ]
-  # Below the 10 s bound of node::_join_stop: the TERM stopped kubeadm.
   (( ${EPOCHREALTIME//[.,]/} - start < 10000000 ))
   run kill -0 "${kpid}"
   assert_failure
@@ -687,11 +714,38 @@ _signal_mid_join() {
   assert_output --partial "lo kubehz node remove --name box-1"
   refute_output --partial "kubeadm join failed"
   refute_output --partial "joined cluster"
-  local path
-  path=$(cat "${KUBEADM_SEEN}.path")
-  [[ "${path}" == */kubehz-join-*/kubehz-join-box-1.yaml ]]
-  [ ! -e "${path%/*}" ]
+  if [[ -s "${KUBEADM_SEEN}.path" ]]; then
+    path=$(cat "${KUBEADM_SEEN}.path")
+    [[ "${path}" == */kubehz-join-*/kubehz-join-box-1.yaml ]]
+    [ ! -e "${path%/*}" ]
+  fi
   _assert_tmpdir_empty
+}
+
+# Run node::join in the background as the lo process, send <signal> once
+# kubeadm runs (its marker is there), and check the end
+# (_assert_stopped_join). The signal goes to lo alone, or with "group" to
+# the process group of lo, as a Ctrl-C does: set -m gives lo a group of its
+# own, and an asynchronous job of a shell with job control does not ignore
+# SIGINT. kubeadm, an asynchronous job of lo, ignores SIGINT: the trap of
+# lo must stop it.
+# Usage: _signal_mid_join <signal> <rc> [group]
+_signal_mid_join() {
+  local sig="${1}" want="${2}" group="${3:-}" lo kpid rc=0 start
+  [[ -z "${group}" ]] || set -m
+  ( node::join --name box-1 --pool metal ) > "${BATS_TEST_TMPDIR}/join.out" 2>&1 3>&- &
+  lo=$!
+  [[ -z "${group}" ]] || set +m
+  _wait_for_kubeadm
+  kpid=$(cat "${KUBEADM_SEEN}.pid")
+  start=${EPOCHREALTIME//[.,]/}
+  if [[ -n "${group}" ]]; then
+    kill "-${sig}" -- "-${lo}"
+  else
+    kill "-${sig}" "${lo}"
+  fi
+  wait "${lo}" || rc=$?
+  _assert_stopped_join "${want}" "${rc}" "${start}" "${kpid}"
 }
 
 @test "join: a TERM to lo mid-join stops kubeadm, removes the config, and exits 143" {
@@ -706,6 +760,148 @@ _signal_mid_join() {
   _signal_mid_join HUP 129
 }
 
+# A Ctrl-C signals the process group: lo and kubeadm get the INT, and
+# kubeadm (an asynchronous job of lo) ignores it.
+@test "join: a Ctrl-C (INT to the process group) mid-join stops kubeadm, removes the config, and exits 130" {
+  _stub_all
+  _stub_sleeping_kubeadm
+  _signal_mid_join INT 130 group
+}
+
+# The signal comes after the check that follows the start of kubeadm, and
+# before the wait (the wait seam sends it): the trap must stop kubeadm, or
+# the wait lasts until kubeadm ends (30 s).
+@test "join: a TERM just before the wait for kubeadm stops kubeadm, removes the config, and exits 143" {
+  _stub_all
+  _stub_sleeping_kubeadm
+  node::_join_wait() {
+    printf '%s\n' "${1}" > "${BATS_TEST_TMPDIR}/kpid"
+    kill -TERM "${BASHPID}"
+    wait "${1}" 2>/dev/null
+  }
+  local rc=0 start=${EPOCHREALTIME//[.,]/}
+  ( node::join --name box-1 --pool metal ) > "${BATS_TEST_TMPDIR}/join.out" 2>&1 3>&- &
+  wait "$!" || rc=$?
+  _assert_stopped_join 143 "${rc}" "${start}" "$(cat "${BATS_TEST_TMPDIR}/kpid")"
+}
+
+# The signal comes after kubeadm started and before its pid is recorded
+# (the start seam sends it): the trap finds no kubeadm to stop, so the
+# check after the record must stop it, or the wait lasts until kubeadm
+# ends (30 s).
+@test "join: a TERM before the pid of kubeadm is recorded stops kubeadm, removes the config, and exits 143" {
+  _stub_all
+  _stub_sleeping_kubeadm
+  node::_join_started() {
+    printf '%s\n' "${1}" > "${BATS_TEST_TMPDIR}/kpid"
+    kill -TERM "${BASHPID}"
+  }
+  local rc=0 start=${EPOCHREALTIME//[.,]/}
+  ( node::join --name box-1 --pool metal ) > "${BATS_TEST_TMPDIR}/join.out" 2>&1 3>&- &
+  wait "$!" || rc=$?
+  _assert_stopped_join 143 "${rc}" "${start}" "$(cat "${BATS_TEST_TMPDIR}/kpid")"
+}
+
+# A kubeadm that ignores TERM: the stop sends a KILL after the bound
+# (shortened here to 0.5 s).
+@test "join: a kubeadm that ignores TERM is killed after the bound of the stop" {
+  _stub_all
+  _stub_sleeping_kubeadm ignore
+  node::_join_stop_ticks() { echo 5; }
+  _signal_mid_join TERM 143
+}
+
+# kubeadm ended with 0 as the stop came: the join landed. The status of
+# kubeadm counts, not the status of the wait that the signal cut short:
+# the success text, no slot note, and 128 + the signal (as the Go twin).
+@test "join: a kubeadm that ends with 0 on the stop signal is a join that landed, and lo exits 143" {
+  _stub_all
+  _stub_sleeping_kubeadm exit0
+  local lo rc=0 path kpid
+  ( node::join --name box-1 --pool metal ) > "${BATS_TEST_TMPDIR}/join.out" 2>&1 3>&- &
+  lo=$!
+  _wait_for_kubeadm
+  kpid=$(cat "${KUBEADM_SEEN}.pid")
+  kill -TERM "${lo}"
+  wait "${lo}" || rc=$?
+  [ "${rc}" -eq 143 ]
+  run kill -0 "${kpid}"
+  assert_failure
+  run cat "${BATS_TEST_TMPDIR}/join.out"
+  assert_output --partial "node 'box-1' joined cluster cl-1234abcd"
+  refute_output --partial "interrupted after the ticket was minted"
+  refute_output --partial "kubeadm join failed"
+  path=$(cat "${KUBEADM_SEEN}.path")
+  [ ! -e "${path%/*}" ]
+  _assert_tmpdir_empty
+}
+
+# A signal right after a join that landed (the wait seam sends it once the
+# wait returned): the join is printed, no slot note, and 128 + the signal.
+@test "join: a TERM right after a join that landed prints the join and exits 143" {
+  _stub_all
+  node::_join_wait() {
+    local r=0
+    wait "${1}" 2>/dev/null || r=$?
+    kill -TERM "${BASHPID}"
+    return "${r}"
+  }
+  run node::join --name box-1 --pool metal
+  assert_failure 143
+  assert_output --partial "node 'box-1' joined cluster cl-1234abcd"
+  refute_output --partial "interrupted after the ticket was minted"
+  _assert_join_config _config_v1beta4
+}
+
+# A signal to lo while the mint request runs: the trap is in place before
+# the mint. The mint answers (curl is not stopped), so the ticket holds a
+# slot: the slot note, and no kubeadm. With --print-only, no command is
+# printed either.
+@test "join: a TERM during the mint ends with the slot note, runs no kubeadm, and exits 143" {
+  _stub_all
+  export LO_PID_FILE="${BATS_TEST_TMPDIR}/lo.pid"
+  eval "_curl_stub() $(declare -f curl | tail -n +2)"
+  curl() {
+    [[ " $* " != *" POST "*"/join-token "* ]] || kill -TERM "$(cat "${LO_PID_FILE}")"
+    _curl_stub "$@"
+  }
+  local print_only rc
+  for print_only in "" --print-only; do
+    rc=0
+    ( printf '%s\n' "${BASHPID}" > "${LO_PID_FILE}"; node::join --name box-1 --pool metal ${print_only} ) > "${BATS_TEST_TMPDIR}/join.out" 2>&1 3>&- &
+    wait "$!" || rc=$?
+    [ "${rc}" -eq 143 ]
+    run cat "${BATS_TEST_TMPDIR}/join.out"
+    assert_output --partial "interrupted after the ticket was minted"
+    assert_output --partial "lo kubehz node remove --name box-1"
+    refute_output --partial "joining 'box-1'"
+    refute_output --partial "kubeadm join cp.example.test"
+    [ ! -f "${KUBEADM_LOG}" ]
+    _assert_tmpdir_empty
+  done
+}
+
+# A signal that stops the mint request itself (curl fails after it): the
+# platform may have minted the ticket. The note says so.
+@test "join: a signal that stops the mint request says the ticket may hold a slot" {
+  _stub_all
+  export LO_PID_FILE="${BATS_TEST_TMPDIR}/lo.pid"
+  curl() {
+    kill -TERM "$(cat "${LO_PID_FILE}")"
+    return 130
+  }
+  local rc=0
+  ( printf '%s\n' "${BASHPID}" > "${LO_PID_FILE}"; node::join --name box-1 --pool metal --cluster-id cl-1234abcd ) > "${BATS_TEST_TMPDIR}/join.out" 2>&1 3>&- &
+  wait "$!" || rc=$?
+  [ "${rc}" -eq 143 ]
+  run cat "${BATS_TEST_TMPDIR}/join.out"
+  assert_output --partial "kubehz API unreachable (POST /api/clusters/cl-1234abcd/nodes/join-token)"
+  assert_output --partial "interrupted during the mint. If the platform minted the ticket, it holds a node slot"
+  assert_output --partial "lo kubehz node remove --name box-1"
+  refute_output --partial "interrupted after the ticket was minted"
+  [ ! -f "${KUBEADM_LOG}" ]
+}
+
 # After a hangup the terminal is gone, and a write to it fails (here
 # /dev/full). The cleanup runs before the note, and a failed write of the
 # note does not end the shell under set -e: the exit code is still the one
@@ -713,16 +909,11 @@ _signal_mid_join() {
 @test "join: a HUP mid-join with a broken stderr still cleans up and exits 129" {
   _stub_all
   _stub_sleeping_kubeadm
-  local lo kpid i rc=0 path
+  local lo kpid rc=0 path
   ( set -e; node::join --name box-1 --pool metal ) > "${BATS_TEST_TMPDIR}/join.out" 2>/dev/full 3>&- &
   lo=$!
-  for (( i = 0; i < 100; i++ )); do
-    [[ ! -s "${KUBEADM_SEEN}.pid" ]] || break
-    sleep 0.1
-  done
-  [ -s "${KUBEADM_SEEN}.pid" ]
+  _wait_for_kubeadm
   kpid=$(cat "${KUBEADM_SEEN}.pid")
-  sleep 0.2
   kill -HUP "${lo}"
   wait "${lo}" || rc=$?
   [ "${rc}" -eq 129 ]
@@ -768,6 +959,104 @@ _signal_mid_join() {
   assert_failure 1
   assert_output --partial "could not write the join config for 'box-1': the write was interrupted"
   assert_output --partial "holds a node slot"
+  [ ! -f "${KUBEADM_LOG}" ]
+  _assert_tmpdir_empty
+}
+
+# A TERM to the process group during the write (as a kill of the group
+# does): lo and the subshell of the writer get it. The writer removes what
+# it made, lo prints the slot note, and no join runs.
+@test "join: a TERM to the process group during the write of the config removes it and runs no join" {
+  _stub_all
+  export LO_PID_FILE="${BATS_TEST_TMPDIR}/lo.pid"
+  chmod() {
+    [[ "${1}" != 00700 ]] || kill -TERM -- "-$(cat "${LO_PID_FILE}")"
+    command chmod "$@"
+  }
+  export -f chmod
+  local lo rc=0
+  set -m
+  ( printf '%s\n' "${BASHPID}" > "${LO_PID_FILE}"; node::join --name box-1 --pool metal ) > "${BATS_TEST_TMPDIR}/join.out" 2>&1 3>&- &
+  lo=$!
+  set +m
+  wait "${lo}" || rc=$?
+  [ "${rc}" -eq 143 ]
+  run cat "${BATS_TEST_TMPDIR}/join.out"
+  assert_output --partial "the write was interrupted"
+  assert_output --partial "interrupted after the ticket was minted"
+  refute_output --partial "joining 'box-1'"
+  [ ! -f "${KUBEADM_LOG}" ]
+  _assert_tmpdir_empty
+}
+
+# A signal to the writer while it cleans up after a failed write (here
+# after the rmdir of the cleanup): the cause and the status of the failed
+# write stay. The trap must not report the interrupt, or a removal it
+# could not do (the directory is gone already) as a cleanup that failed.
+@test "join: a signal during the cleanup of a failed write keeps its cause and its status" {
+  _stub_all
+  export RMDIR_ONCE="${BATS_TEST_TMPDIR}/rmdir.once"
+  chmod() {
+    [[ "${1}" != 00700 ]] || return 1
+    command chmod "$@"
+  }
+  rmdir() {
+    local r=0
+    command rmdir "$@" || r=$?
+    [[ -e "${RMDIR_ONCE}" ]] || { : > "${RMDIR_ONCE}"; kill -TERM "${BASHPID}"; }
+    return "${r}"
+  }
+  export -f chmod rmdir
+  run node::join --name box-1 --pool metal
+  assert_failure 1
+  [ -e "${RMDIR_ONCE}" ]
+  assert_output --partial "could not write the join config for 'box-1': the mode of the directory cannot be set to 0700"
+  assert_output --partial "holds a node slot"
+  refute_output --partial "The cleanup failed too"
+  refute_output --partial "interrupted"
+  [ ! -f "${KUBEADM_LOG}" ]
+  _assert_tmpdir_empty
+}
+
+# A signal to the writer after the write (the trap runs with the phase
+# "written"): the file is the result, and the writer goes on to print its
+# path. The trap must not remove the file, print a cause after the path,
+# or end the writer.
+@test "join: the trap of the writer does nothing after the write" {
+  local priv="${TMPDIR}/kubehz-join-late" path
+  mkdir -m 700 -- "${priv}"
+  path="${priv}/kubehz-join-box-1.yaml"
+  : > "${path}"
+  _late_trap() {
+    local priv="${1}" path="${2}" phase=written
+    kubehz::_join_write_signalled
+    echo "returned $?"
+  }
+  run _late_trap "${priv}" "${path}"
+  assert_success
+  assert_output "returned 0"
+  [ -f "${path}" ]
+}
+
+# A literal NUL byte inside the join line of the mint response (a byte, not
+# a JSON escape): $(...) drops a NUL, and the line would then read as a
+# clean one. The node join maps it to a control byte that jq refuses, as
+# the Go twin refuses the body as JSON: no join command, the slot, no join.
+@test "join: a NUL byte in the mint response is refused, and nothing runs" {
+  _stub_all
+  eval "_curl_stub() $(declare -f curl | tail -n +2)"
+  curl() {
+    if [[ " $* " == *" POST "*"/join-token "* ]]; then
+      printf '{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token %s\0 --discovery-token-ca-cert-hash %s --node-name box-1","expiresAt":"2026-09-01T12:00:00Z","ready":true}}\n201' "${JOIN_TOKEN}" "${CA_PIN}"
+      return 0
+    fi
+    _curl_stub "$@"
+  }
+  run node::join --name box-1 --pool metal
+  assert_failure 1
+  assert_output --partial "the platform accepted the mint but returned no join command this CLI could read"
+  assert_output --partial "lo kubehz node remove --name box-1"
+  refute_output --partial "${JOIN_TOKEN}"
   [ ! -f "${KUBEADM_LOG}" ]
   _assert_tmpdir_empty
 }

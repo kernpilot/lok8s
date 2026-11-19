@@ -3,15 +3,19 @@ package kubehz
 // node_test.go ports tests/unit/kubehz_node_test.bats.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -668,6 +672,359 @@ func TestNodeJoinHangupStopsTheJoin(t *testing.T) {
 			if during == "the write" && kubeadmJoin(h) != nil {
 				t.Error("kubeadm join started after the SIGHUP")
 			}
+		})
+	}
+}
+
+// A SIGHUP during the mint request: the hold is in place before the mint,
+// so the SIGHUP ends ctx and the request. The platform may have minted the
+// ticket: the note says so. No kubeadm runs, and the exit code is 129. Not
+// parallel: the signal goes to the test process.
+func TestNodeJoinHangupDuringTheMint(t *testing.T) {
+	if signal.Ignored(syscall.SIGHUP) {
+		t.Skip("SIGHUP is ignored here (nohup): the catch does nothing then")
+	}
+	keep := make(chan os.Signal, 1)
+	signal.Notify(keep, syscall.SIGHUP)
+	defer signal.Stop(keep)
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	ctx, exitCode := interrupt.Watch(t.Context())
+	h.handleFunc("POST /api/clusters/cl-1234abcd/nodes/join-token", func(w http.ResponseWriter, _ *http.Request) {
+		_ = syscall.Kill(os.Getpid(), syscall.SIGHUP)
+		waitDone(t, ctx)
+		w.WriteHeader(201)
+		_, _ = io.WriteString(w, stubMintBody)
+	})
+	err := h.ctx.NodeJoin(ctx, "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"})
+	code := exitCode()
+	if !errors.Is(err, ErrHandled) {
+		t.Fatalf("err = %v, want ErrHandled", err)
+	}
+	mustContain(t, h.output(), "kubehz API unreachable (POST /api/clusters/cl-1234abcd/nodes/join-token)")
+	mustContain(t, h.output(), "interrupted during the mint. If the platform minted the ticket, it holds a node slot for about ten minutes.")
+	mustContain(t, h.output(), "lo kubehz node remove --name box-1")
+	mustNotContain(t, h.output(), "interrupted after the ticket was minted")
+	if code != 129 {
+		t.Errorf("exit code = %d, want 129 (128 + SIGHUP)", code)
+	}
+	if kubeadmJoin(h) != nil {
+		t.Error("kubeadm join ran after the SIGHUP")
+	}
+	mustLeaveNoJoinDir(t, h)
+}
+
+// A signal between the mint and the print of --print-only (the joinMinted
+// seam cancels ctx there): no command is printed, and the slot note goes
+// out.
+func TestNodeJoinPrintOnlyPrintsNothingAfterASignal(t *testing.T) {
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	h.ctx.joinMinted = cancel
+	mustStopAfterTheMint(t, h, h.ctx.NodeJoin(ctx, "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", PrintOnly: true}))
+	mustNotContain(t, h.output(), "kubeadm join cp.example.test")
+	mustNotContain(t, h.output(), "Run this as root")
+}
+
+// A SIGHUP right after a join that landed (the fake kubeadm sends it and
+// ends with 0): the join is printed, no slot note, and the exit code is
+// 129, as in the bash twin. Not parallel: the signal goes to the test
+// process.
+func TestNodeJoinHangupAfterALandedJoinPrintsTheJoin(t *testing.T) {
+	if signal.Ignored(syscall.SIGHUP) {
+		t.Skip("SIGHUP is ignored here (nohup): the catch does nothing then")
+	}
+	keep := make(chan os.Signal, 1)
+	signal.Notify(keep, syscall.SIGHUP)
+	defer signal.Stop(keep)
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	ctx, exitCode := interrupt.Watch(t.Context())
+	fakeKubeadm(h, "v1.36.0\n", nil)
+	fake := h.runner.handler
+	h.runner.handler = func(c execx.Cmd, stdin string) error {
+		err := fake(c, stdin)
+		if len(c.Args) > 0 && c.Args[0] == "join" {
+			_ = syscall.Kill(os.Getpid(), syscall.SIGHUP)
+			waitDone(t, ctx)
+		}
+		return err
+	}
+	err := h.ctx.NodeJoin(ctx, "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"})
+	code := exitCode()
+	mustOK(t, err, h.output())
+	mustContain(t, h.output(), "node 'box-1' joined cluster cl-1234abcd")
+	mustNotContain(t, h.output(), "interrupted after the ticket was minted")
+	if code != 129 {
+		t.Errorf("exit code = %d, want 129 (128 + SIGHUP)", code)
+	}
+	mustLeaveNoJoinDir(t, h)
+}
+
+// A literal NUL byte inside the join line of the mint response (a byte,
+// not a JSON escape): the body is not JSON, so there is no join command,
+// as in the bash twin (mark-nul). Nothing runs.
+func TestNodeJoinRefusesANULByteInTheMintResponse(t *testing.T) {
+	s := defaultNodeStubs()
+	s.mintBody = strings.Replace(stubMintBody, " --discovery-token-ca-cert-hash", "\x00 --discovery-token-ca-cert-hash", 1)
+	h := nodeHarness(t, s, "hosted", "")
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+	mustContain(t, h.output(), "the platform accepted the mint but returned no join command this CLI could read")
+	mustContain(t, h.output(), "lo kubehz node remove --name box-1")
+	mustNotContain(t, h.output(), joinToken)
+	if kubeadmJoin(h) != nil {
+		t.Error("kubeadm join ran")
+	}
+	mustLeaveNoJoinDir(t, h)
+}
+
+// joinConfig reads the endpoint as the third word: a shorter line is
+// refused (no token), not a panic, as the bash twin reads it.
+func TestJoinConfigRefusesAShortLine(t *testing.T) {
+	for _, line := range []string{"", "kubeadm", "kubeadm join", "kubeadm join cp.example.test:6443"} {
+		h := newHarness(t)
+		config, err := h.ctx.joinConfig(line, "v1beta4", "")
+		if !errors.Is(err, ErrHandled) || config != "" {
+			t.Errorf("%q: config %q, err %v; want a refusal", line, config, err)
+		}
+		mustContain(t, h.output(), "the join command must carry exactly one bootstrap token (--token).")
+	}
+}
+
+// stubKubeadmRunner runs a shell script as `kubeadm join` (a real child
+// process, through the runner of lo) and answers `kubeadm version` itself.
+// Each other call fails.
+type stubKubeadmRunner struct{ script string }
+
+func (r stubKubeadmRunner) Run(ctx context.Context, c execx.Cmd) error {
+	if c.Name != "kubeadm" {
+		return errors.New(c.Name + ": not in this test")
+	}
+	if len(c.Args) > 0 && c.Args[0] == "version" {
+		_, _ = io.WriteString(c.Stdout, "v1.36.0\n")
+		return nil
+	}
+	c.Name = r.script
+	return execx.NewRunner(nil).Run(ctx, c)
+}
+
+// writeKubeadmScript writes a stand-in for `kubeadm join` to dir/kubeadm:
+// onInt is its trap on SIGINT (the signal the runner stops it with): an
+// empty trap ignores it, "exit 0" ends with 0. It writes its pid to <script>.pid, the
+// marker that it runs, and then runs for 20 seconds.
+func writeKubeadmScript(t *testing.T, dir, onInt string) string {
+	t.Helper()
+	script := filepath.Join(dir, "kubeadm")
+	body := "#!/bin/sh\ntrap '" + onInt + "' INT\necho $$ > \"$0.pid\"\n" +
+		"i=0\nwhile [ \"$i\" -lt 400 ]; do sleep 0.05; i=$((i + 1)); done\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil { // #nosec G306 -- the stand-in runs as a program
+		t.Fatal(err)
+	}
+	return script
+}
+
+// waitForLines waits (bound at most) for path to hold n lines or more.
+func waitForLines(path string, n int, bound time.Duration) bool {
+	for end := time.Now().Add(bound); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		if b, err := os.ReadFile(path); err == nil && bytes.Count(b, []byte("\n")) >= n {
+			return true
+		}
+	}
+	return false
+}
+
+// readPid reads the pid that the stand-in wrote.
+func readPid(t *testing.T, path string) int {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pid
+}
+
+// mustBeGone fails when the process pid still runs.
+func mustBeGone(t *testing.T, pid int) {
+	t.Helper()
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Errorf("kubeadm (pid %d) still runs after lo ended (%v)", pid, err)
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}
+
+// shortStopDelay makes joinStopDelay d for the test. Not parallel: the
+// tests that call t.Parallel run after the others.
+func shortStopDelay(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := joinStopDelay
+	joinStopDelay = d
+	t.Cleanup(func() { joinStopDelay = old })
+}
+
+// runRealKubeadmJoin runs one join with the stand-in of onInt as kubeadm,
+// cancels ctx once it runs, and returns the result, the time from the
+// start of the join, and the pid of the stand-in.
+func runRealKubeadmJoin(t *testing.T, h *harness, onInt string) (error, time.Duration, int) {
+	t.Helper()
+	script := writeKubeadmScript(t, t.TempDir(), onInt)
+	h.ctx.Runner = stubKubeadmRunner{script: script}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		if waitForLines(script+".pid", 1, 10*time.Second) {
+			cancel()
+		}
+	}()
+	start := time.Now()
+	err := h.ctx.NodeJoin(ctx, "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", KubeletVersion: "v1.36.0"})
+	return err, time.Since(start), readPid(t, script+".pid")
+}
+
+// A real kubeadm child that ignores the SIGINT of the stop: the runner
+// kills it after joinStopDelay (here 300 ms). The config is removed, and
+// the slot note goes out.
+func TestNodeJoinStopKillsAKubeadmThatIgnoresTheInterrupt(t *testing.T) {
+	shortStopDelay(t, 300*time.Millisecond)
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	err, took, pid := runRealKubeadmJoin(t, h, "")
+	mustStopAfterTheMint(t, h, err)
+	if took > 5*time.Second {
+		t.Errorf("the join took %s; the stand-in runs 20 s, the stop bound is 300 ms", took)
+	}
+	mustBeGone(t, pid)
+}
+
+// A real kubeadm child that ends with 0 on the SIGINT of the stop: the
+// join landed (the runner returns the error of ctx, the state tells), so
+// the success text goes out and no slot note, as in the bash twin.
+func TestNodeJoinAKubeadmThatEndsWithZeroOnTheStopLanded(t *testing.T) {
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	err, _, pid := runRealKubeadmJoin(t, h, "exit 0")
+	mustOK(t, err, h.output())
+	mustContain(t, h.output(), "node 'box-1' joined cluster cl-1234abcd")
+	mustNotContain(t, h.output(), "interrupted after the ticket was minted")
+	mustLeaveNoJoinDir(t, h)
+	mustBeGone(t, pid)
+}
+
+// joinHelperEnv names the directory of TestNodeJoinHelperProcess; only
+// TestNodeJoinRepeatedSignalsEndTheJoinCleanly sets it.
+const joinHelperEnv = "LOK8S_TEST_JOIN_HELPER_DIR"
+
+// TestNodeJoinHelperProcess is the lo process of
+// TestNodeJoinRepeatedSignalsEndTheJoinCleanly (the test binary, run
+// again): a signal that takes its default action there ends that process,
+// not the test run. It runs one join with the stand-in in its directory
+// as kubeadm and a stop bound of 500 ms. It writes the marker "cancelled"
+// when the Watch (or the catch of a SIGHUP) has cancelled the command
+// context: both stop their catch before they cancel. It writes its output
+// to "out" and exits with the code of the Watch (main ends a SIGHUP run
+// with the SIGHUP itself, through interrupt.Exit).
+func TestNodeJoinHelperProcess(t *testing.T) {
+	dir := os.Getenv(joinHelperEnv)
+	if dir == "" {
+		t.Skip("the lo process of TestNodeJoinRepeatedSignalsEndTheJoinCleanly")
+	}
+	joinStopDelay = 500 * time.Millisecond
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	h.env["TMPDIR"] = filepath.Join(dir, "tmp")
+	h.ctx.Runner = stubKubeadmRunner{script: filepath.Join(dir, "kubeadm")}
+	ctx, exitCode := interrupt.Watch(context.Background())
+	go func() {
+		<-ctx.Done()
+		_ = os.WriteFile(filepath.Join(dir, "cancelled"), []byte("cancelled\n"), 0o600)
+	}()
+	_ = h.ctx.NodeJoin(ctx, "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", KubeletVersion: "v1.36.0"})
+	code := exitCode()
+	_ = os.WriteFile(filepath.Join(dir, "out"), []byte(h.output()), 0o600)
+	os.Exit(code)
+}
+
+// Signals to lo (a process of its own) during a join, with a kubeadm that
+// ignores SIGINT. A Ctrl-C signals the process group: lo and kubeadm get
+// the INT. A second signal comes after the first one has stopped the
+// Watch (or the catch of a SIGHUP): the helper writes the marker then.
+// Without the hold of the join, that signal takes its default action and
+// ends lo before kubeadm is stopped and the config is removed. lo ends
+// within the bound of the stop with 128 + the signal, and the slot note.
+func TestNodeJoinRepeatedSignalsEndTheJoinCleanly(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		sigs  []syscall.Signal
+		group bool
+		want  int
+	}{
+		{"an INT to the group", []syscall.Signal{syscall.SIGINT}, true, 130},
+		{"two INTs to the group", []syscall.Signal{syscall.SIGINT, syscall.SIGINT}, true, 130},
+		{"two TERMs", []syscall.Signal{syscall.SIGTERM, syscall.SIGTERM}, false, 143},
+		{"two HUPs", []syscall.Signal{syscall.SIGHUP, syscall.SIGHUP}, false, 129},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.sigs[0] == syscall.SIGHUP && signal.Ignored(syscall.SIGHUP) {
+				t.Skip("SIGHUP is ignored here (nohup): the catch does nothing then")
+			}
+			dir := t.TempDir()
+			for _, d := range []string{"tmp", "proc"} {
+				if err := os.Mkdir(filepath.Join(dir, d), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			script := writeKubeadmScript(t, dir, "")
+			cmd := exec.Command(os.Args[0], "-test.run=^TestNodeJoinHelperProcess$", "-test.count=1") // #nosec G204 -- the test binary itself
+			cmd.Env = append(os.Environ(), joinHelperEnv+"="+dir, "TMPDIR="+filepath.Join(dir, "proc"))
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			var out bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &out, &out
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			lo := cmd.Process.Pid
+			t.Cleanup(func() { _ = syscall.Kill(-lo, syscall.SIGKILL) })
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			if !waitForLines(script+".pid", 1, 10*time.Second) {
+				t.Fatalf("kubeadm did not start; lo said:\n%s", out.String())
+			}
+			pid := readPid(t, script+".pid")
+			t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+			target := lo
+			if tc.group {
+				target = -lo
+			}
+			start := time.Now()
+			for i, s := range tc.sigs {
+				if i > 0 && !waitForLines(filepath.Join(dir, "cancelled"), 1, 5*time.Second) {
+					t.Fatalf("the first %s did not cancel the join; lo said:\n%s", tc.sigs[0], out.String())
+				}
+				if err := syscall.Kill(target, s); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("lo did not end within 10 s; it said:\n%s", out.String())
+			}
+			if code := cmd.ProcessState.ExitCode(); code != tc.want {
+				t.Errorf("lo ended with %d (%s), want %d; it said:\n%s", code, cmd.ProcessState, tc.want, out.String())
+			}
+			if took := time.Since(start); took > 5*time.Second {
+				t.Errorf("lo ended %s after the first signal; the stop bound is 500 ms", took)
+			}
+			mustBeGone(t, pid)
+			entries, err := os.ReadDir(filepath.Join(dir, "tmp"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range entries {
+				t.Errorf("left in the temp dir: %s", e.Name())
+			}
+			said, _ := os.ReadFile(filepath.Join(dir, "out"))
+			mustContain(t, string(said), "interrupted after the ticket was minted")
+			mustContain(t, string(said), "lo kubehz node remove --name box-1")
 		})
 	}
 }

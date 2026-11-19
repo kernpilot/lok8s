@@ -1145,6 +1145,34 @@ _stub_mktemp() {
   [ ! -e "${dirs[0]}" ]
 }
 
+# A signal to the writer during the ticket write: the trap of the writer
+# removes what it made, and the note says that a signal stopped the write
+# (the note form of the node join), not that the temp dir must become
+# writable.
+@test "space_mint_join: a signal during the ticket write says so, not that TMPDIR must be writable" {
+  local ticket
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  _MINT_BODY=$(jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}')
+  export _MINT_BODY
+  curl() {
+    printf '%s\n201' "${_MINT_BODY}"
+  }
+  chmod() {
+    [[ "${1}" != 00700 ]] || kill -TERM "${BASHPID}"
+    command chmod "$@"
+  }
+  export -f curl chmod
+  run kubehz::space_mint_join sp-123 worker-1
+  assert_failure 1
+  assert_output --partial "kubehz: interrupted after the ticket was minted. It stays valid until 2026-08-07T20:00:00Z, single use, and no copy was saved."
+  assert_output --partial "Mint a fresh one if you are not retrying:  lo kubehz join worker-1"
+  refute_output --partial "could not write the join ticket"
+  refute_output --partial "is writable"
+  refute_output --partial "${ticket}"
+  local dirs=("${TMPDIR}"/kubehz-join-*)
+  [ ! -e "${dirs[0]}" ]
+}
+
 # A ticket outside the kubeadm bootstrap-token shape is refused before
 # anything is printed or written, as by the Go twin's joinTokenRe: an
 # uppercase letter, a non-ASCII letter, a short secret, an escape, a second

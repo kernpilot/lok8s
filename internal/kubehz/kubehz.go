@@ -102,6 +102,10 @@ type Context struct {
 	// fail, to see that the fresh directory goes.
 	joinWrite func(f *os.File, s string) error
 	joinClose func(f *os.File) error
+	// joinMinted runs after the mint of a node join returned a ticket (nil
+	// = nothing). Tests send a signal there, between the mint and the
+	// next step.
+	joinMinted func()
 	// ProviderOutput is the loaded provider's inventory JSON
 	// (provider::output on PROVIDER_CONFIG_FILE), consulted by the kubeone
 	// fingerprint reader when set. nil = no provider loaded → the spec's

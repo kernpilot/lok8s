@@ -173,7 +173,7 @@ kubehz::space_config() {
 #   rc 0  → 2xx; body in KUBEHZ_SPACE_API_BODY
 #   rc 2  → non-2xx; status + body in the globals for caller branching
 #   rc 1  → transport failure (already rendered)
-# Usage: kubehz::space_api <method> <path> [json_body]
+# Usage: kubehz::space_api <method> <path> [json_body] [mark-nul]
 kubehz::space_api() {
   local rc=0
   kubehz::space_api_call "$@" || rc=$?
@@ -191,7 +191,12 @@ kubehz::space_api() {
 # readonly name stopped http::tls_log_vars_unset before curl ran (the status
 # of unset). curl's own 1 also means that it sent nothing, so
 # node::curl_sent_nothing reads both correctly.
-# Usage: kubehz::space_api_call <method> <path> [json_body]
+# With mark-nul, a NUL byte of the response becomes U+0001 before the
+# capture: $(...) drops a NUL, and a body with a NUL could then pass as
+# JSON. U+0001 is a control byte that jq refuses in JSON, as the Go twin
+# refuses the NUL (parseJSON). The node join uses it; the other callers do
+# not (the Go twin writes the body of a Space kubeconfig as it is).
+# Usage: kubehz::space_api_call <method> <path> [json_body] [mark-nul]
 kubehz::space_api_call() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *[xa]* ]] || { local -; set +xa; }  # the bearer and the response (a join ticket)
@@ -213,6 +218,7 @@ kubehz::space_api_call() {
   KUBEHZ_SPACE_API_BODY=""
   local +x +i body raw || { error "kubehz::space_api_call: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
   body="${3:-}"
+  local nul="${4:-}"
   # A response can hold a join ticket: the global never goes to a child
   # (set -a, or an export before), and the caller unsets it.
   declare -g +x +i KUBEHZ_SPACE_API_BODY
@@ -228,7 +234,7 @@ kubehz::space_api_call() {
   }
   http::credential_ok KUBEHZ_TOKEN || return 1
 
-  local -a extra=()
+  local -a extra=() curl_argv
   [[ -n "${body}" ]] && extra=(-H "Content-Type: application/json" -d "${body}")
 
   # The bearer reaches curl in a config on stdin, never on argv. -q first:
@@ -243,12 +249,17 @@ kubehz::space_api_call() {
   # utils/http.sh). Each could give away the bearer or the answer. A
   # readonly name in the list stops the call before curl runs:
   # KUBEHZ_SPACE_API_CURL_RC then holds the status of unset (1), not a
+  # status of curl. With mark-nul, tr maps the NUL, and pipefail keeps the
   # status of curl.
+  curl_argv=(curl -q -K - -sSL -w $'\n%{http_code}' -X "${method}" "${LOK8S_KUBEHZ_API_URL}${path}" "${extra[@]}")
   raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
-    http::tls_log_vars_unset &&
-      curl -q -K - -sSL -w $'\n%{http_code}' -X "${method}" \
-        "${LOK8S_KUBEHZ_API_URL}${path}" \
-        "${extra[@]}"
+    http::tls_log_vars_unset || exit
+    if [[ "${nul}" == mark-nul ]]; then
+      set -o pipefail
+      "${curl_argv[@]}" | tr '\000' '\001'
+    else
+      "${curl_argv[@]}"
+    fi
   ) ) || {
     KUBEHZ_SPACE_API_CURL_RC=$?
     return 1
@@ -658,10 +669,13 @@ kubehz::_write_join_file() {
   # name, and a child (mktemp, stat, chmod) would get the ticket. +i and the
   # refusal: as in kubehz::space_api_call (an integer of a caller would
   # print the ticket; a readonly nameref would take it).
-  local +x +i node_name ext content dir priv path || { error "kubehz::write_join_file: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  local +x +i node_name ext content dir priv path phase || { error "kubehz::write_join_file: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
   # Empty first: under localvar_inherit a local takes the value of a caller
-  # too, and the trap removes what priv and path name.
-  node_name="${1}" ext="${2}" content="${3}" dir="" priv="" path=""
+  # too, and the trap removes what priv and path name. phase: empty while
+  # the write runs; "failed" while kubehz::_join_write_failed cleans up,
+  # "written" when the file holds the content, "interrupted" in the trap.
+  # The trap acts only while it is empty (kubehz::_join_write_signalled).
+  node_name="${1}" ext="${2}" content="${3}" dir="" priv="" path="" phase=""
   # Before the directory is made: a signal from here on removes what the
   # write made.
   trap 'kubehz::_join_write_signalled' INT TERM HUP
@@ -697,6 +711,7 @@ kubehz::_write_join_file() {
   # printf is a builtin: the ticket is on no argv.
   ( printf '%s' "${content}" >> "${path}" ) 2>/dev/null \
     || { kubehz::_join_write_failed "${priv}" "${path}" "the write failed" || return; }
+  phase=written
   printf '%s\n' "${path}"
 }
 
@@ -714,8 +729,14 @@ kubehz::space_write_join_ticket() {
 # prints the cause, removes the file and the fresh directory when the write
 # made them (priv and path of the writer, through dynamic scope), and ends
 # the subshell of the writer as kubehz::_join_write_failed returns: 1, or 3
-# when the removal fails (the directory is then the second line).
+# when the removal fails (the directory is then the second line). A signal
+# that comes late does nothing (phase of the writer is set): during the
+# cleanup of a failed write (its cause and its status stay), after the
+# write (the file is the result, and the caller handles its own signal),
+# and in this trap itself.
 kubehz::_join_write_signalled() {
+  [[ -z "${phase:-}" ]] || return 0
+  phase=interrupted
   local rc=1
   printf '%s\n' "the write was interrupted" || :
   if [[ -n "${priv:-}" ]]; then
@@ -730,9 +751,11 @@ kubehz::_join_write_signalled() {
 # The cleanup of a failed write of a join file (kubehz::write_join_file):
 # prints the cause, removes the file and the fresh directory, and when that
 # fails, prints the directory too (it may still hold a part of the ticket).
-# Returns 1, or 3 when the removal failed.
+# Returns 1, or 3 when the removal failed. It sets phase of the writer
+# (dynamic scope): a signal from here on keeps this cause and this status.
 # Usage: kubehz::_join_write_failed <dir> <file> <cause>
 kubehz::_join_write_failed() {
+  phase=failed
   printf '%s\n' "${3}"
   if ! rm -f -- "${2}" 2>/dev/null || ! rmdir -- "${1}" 2>/dev/null; then
     printf '%s\n' "${1}"
@@ -834,6 +857,15 @@ kubehz::_space_mint_join() {
     # line is the directory that may still hold a part of it.
     cause="${path%%$'\n'*}"
     if [[ "${path}" == *$'\n'* ]]; then path="${path#*$'\n'}"; else path=""; fi
+    if [[ "${cause}" == "the write was interrupted" ]]; then
+      # A signal stopped the write (the trap of the writer removed what it
+      # made): the note form of the node join. The temp dir is fine.
+      echo "" >&2
+      warn "kubehz: interrupted after the ticket was minted. It stays valid until ${expires:-<unknown>}, single use, and no copy was saved."
+      (( rc != 3 )) || warn "The cleanup failed too: ${path} may still hold a part of it. Delete that directory."
+      warn "Mint a fresh one if you are not retrying:  lo kubehz join ${node_name}"
+      return 1
+    fi
     error "could not write the join ticket for '${node_name}'${cause:+: ${cause}}"
     echo "" >&2
     echo "  The ticket was minted before the write failed. It stays valid until ${expires:-<unknown>}," >&2
