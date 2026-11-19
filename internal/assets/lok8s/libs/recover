@@ -209,18 +209,63 @@ recover::_resolve() {
 # It reads the cluster_name of the provider config only, because the provider
 # finds its servers by that name. The other names of recover::_cluster_name (the
 # spec metadata.name, the domain) are names for the prompt. A config without a
-# cluster_name is not checked: the hetzner rebuild refuses it. A scan that fails
-# stops the recover.
+# cluster_name is not checked: the hetzner rebuild refuses it. The check fails
+# closed. It refuses:
+#   1. a provider config that gives no plain cluster_name: yq fails, or the tag
+#      of .cluster_name is not exactly one of !!str, !!int, !!float, !!bool and
+#      !!null (more than one document, a top that is not a mapping, an alias, a
+#      mapping, a list, another tag; Go twin: configClusterName);
+#   2. a cluster_name that a message cannot show as it is: the rule of the
+#      destroy guard (a code point of the jq def unshown, a backslash, U+FFFD),
+#      before a message shows the name;
+#   3. a cluster_name with a '$': the rebuild expands the variables of the
+#      config (template::descriptor_json, with the envsubst on PATH), so the
+#      name that it uses can differ from the text here;
+#   4. a cluster_name that another domain also has.
+# A scan of the other domains that fails stops the recover too.
 #
 # As in the destroy guard, nothing skips this check: not --force, not
 # LOK8S_NONINTERACTIVE, not --dry-run. It runs at the end of resolve, before the
 # doctor, the dry run and the consent.
 recover::_cluster_name_guard() {
-  local name="" users
+  local name="" tag users unshown
   if [[ -f "${_RECOVER_CONFIG:-}" ]]; then
-    name="$(yq -r '.cluster_name // ""' "${_RECOVER_CONFIG}" 2>/dev/null)" || name=""
+    # yq reads the config on stdin, so it parses it as YAML (JSON is YAML
+    # too), whatever its extension: the rebuild reads it by its content too
+    # (template::descriptor_json). With a path, yq picks the parser from the
+    # extension.
+    tag="$(yq -r '.cluster_name | tag' - <"${_RECOVER_CONFIG}" 2>/dev/null)" || tag=""
+    case "${tag}" in
+      '!!str' | '!!int' | '!!float' | '!!bool' | '!!null')
+        # yq -r prints the value and one newline. The x keeps the newlines at
+        # the end of the value itself (a command substitution drops them), so
+        # the check below sees the name as the Go twin does.
+        name="$(yq -r '.cluster_name // ""' - <"${_RECOVER_CONFIG}" 2>/dev/null && printf x)" || name=""
+        ;;
+      *) name="" ;;
+    esac
+    if [[ "${name}" != *x ]]; then
+      error "recover: the provider config of '${_RECOVER_DOMAIN}' is not one YAML or JSON document with a plain cluster_name (a text, a number, true or false), so recover cannot compare its cluster_name with the other domains. Nothing was changed. Correct the provider config, then run lo recover again."
+      return 1
+    fi
+    name="${name%x}"
+    name="${name%$'\n'}"
   fi
   [[ -n "${name}" ]] || return 0
+  if ! unshown="$(jq -nr --arg name "${name}" "${VERBOSE_JQ_UNSHOWN}"' $name | explode | any(unshown
+      or . == 92
+      or . == 65533)')"; then
+    error "recover: could not check the cluster_name of the provider config of '${_RECOVER_DOMAIN}'. Nothing was changed. Check that jq runs, then run lo recover again."
+    return 1
+  fi
+  if [[ "${unshown}" != "false" ]]; then
+    error "recover: the provider config of '${_RECOVER_DOMAIN}' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was changed. Correct the cluster_name in the provider config, then run lo recover again."
+    return 1
+  fi
+  if [[ "${name}" == *'$'* ]]; then
+    error "recover: the cluster_name '${name}' of '${_RECOVER_DOMAIN}' has a '\$'. The rebuild expands the variables in the provider config, so the cluster_name that it uses can differ from this text, and recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write the cluster_name without a variable, then run lo recover again."
+    return 1
+  fi
   if ! users="$(provision::_cluster_name_users "${_RECOVER_DOMAIN}" "${name}")"; then
     error "recover: could not check if another domain has the cluster_name '${name}' of '${_RECOVER_DOMAIN}'. Nothing was changed. Run lo recover again."
     return 1

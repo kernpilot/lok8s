@@ -108,6 +108,18 @@ for d in twin-a twin-b; do
     > "${PROJ}/clusters/${d}.cloud/cluster.lok8s.yaml"
   printf 'cluster_name: twiny\n' > "${PROJ}/clusters/${d}.cloud/provider.yaml"
 done
+# Provider configs whose cluster_name recover cannot compare: a variable (the
+# rebuild expands it), a config that does not parse, a backslash (a message
+# cannot show it as it is). Without the refusal, the mock rebuild would run
+# (and fail): refused_with checks the refusal text and that it did not run.
+for d in tmpl unparsed bslash; do
+  mkdir -p "${PROJ}/clusters/${d}.cloud"
+  printf 'kind: KubeOne\nmetadata:\n  name: %s\nspec:\n  provider:\n    name: mock\n    configRef: provider.yaml\n' "${d}" \
+    > "${PROJ}/clusters/${d}.cloud/cluster.lok8s.yaml"
+done
+printf 'cluster_name: ${NAME}-a\n' > "${PROJ}/clusters/tmpl.cloud/provider.yaml"
+printf '{"cluster_name": "twiny", "token": ${TOKEN}}\n' > "${PROJ}/clusters/unparsed.cloud/provider.yaml"
+printf 'cluster_name: "a\\\\b"\n' > "${PROJ}/clusters/bslash.cloud/provider.yaml"
 echo alpha.dev > "${PROJ}/clusters/.active"
 
 # The deploy artifact: one CRD, one labelled Namespace (with an UNQUOTED
@@ -265,6 +277,19 @@ export LOK8S_NONINTERACTIVE=1
 check - recover twin-a.cloud
 refused_shared twin-a.cloud twin-b.cloud
 unset LOK8S_NONINTERACTIVE
+# A cluster_name that recover cannot compare: refused before it compares.
+# refused_with <domain> <refusal text>
+refused_with() {
+  grep -qF "${2}" "${WORK}/go.err" || fail "recover ${1}: no refusal on stderr: ${2}"
+  ! grep -qF "is also the cluster_name of" "${WORK}/go.err" || fail "recover ${1}: the guard compared the name"
+  ! grep -qF "mock rebuild" "${WORK}/go.out" "${WORK}/go.err" || fail "recover ${1}: the rebuild ran"
+}
+check - recover --force tmpl.cloud
+refused_with tmpl.cloud "[error] recover: the cluster_name '\${NAME}-a' of 'tmpl.cloud' has a '\$'. The rebuild expands the variables in the provider config"
+check - recover --force unparsed.cloud
+refused_with unparsed.cloud "[error] recover: the provider config of 'unparsed.cloud' is not one YAML or JSON document with a plain cluster_name"
+check - recover --force bslash.cloud
+refused_with bslash.cloud "[error] recover: the provider config of 'bslash.cloud' names a cluster_name with a character that a message cannot show as it is"
 # --dry-run: the mock rebuild runs under CLOUD_DRY_RUN; provision never.
 check - recover --dry-run mock.cloud
 check - recover -v --dry-run mock.cloud
