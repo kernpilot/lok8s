@@ -893,6 +893,19 @@ check - kubehz node join
 check - kubehz n j --domain shared.dev
 check - kubehz node join --domain hosted-http.dev
 check - kubehz node join --domain nonexist.dev
+# The refusals before the mint (a refusal costs no ticket): the name, the
+# shape of --node-ip, --print-only with --node-ip, and kubeadm absent (the
+# harness has no kubeadm). --cluster-id and --pool keep the api out of it.
+# The read of the join line (the control set, the pin) comes after the
+# mint, and the stub has no join-token route; the version and temp-dir
+# checks come after the root check, and the harness is not root.
+node_join=(kubehz node join --domain lo-hosted.dev --cluster-id cl-1234abcd --pool metal)
+KUBEHZ_TOKEN=parity-dummy check - "${node_join[@]}" --name Bad_
+KUBEHZ_TOKEN=parity-dummy check - "${node_join[@]}" --node-ip 203.0.113.7/24
+KUBEHZ_TOKEN=parity-dummy check - "${node_join[@]}" --node-ip 203.0.113.7,198.51.100.2,2001:db8::1
+KUBEHZ_TOKEN=parity-dummy check - "${node_join[@]}" --print-only --node-ip 203.0.113.7
+KUBEHZ_TOKEN=parity-dummy check - "${node_join[@]}" --node-ip 203.0.113.7,2001:db8::7
+KUBEHZ_TOKEN=parity-dummy expect_rc 1 "${node_join[@]}" --node-ip 203.0.113.7/24
 check_parse - kubehz node remove
 check - kubehz node remove --name Bad_
 check - kubehz node remove --name ../../clusters

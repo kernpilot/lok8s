@@ -424,9 +424,9 @@ node-level surface, so a verb never touches more than its name says.
 ### `lo kubehz node join`
 
 Run it **as root on the machine you are adding**. It mints a join ticket from
-the platform, then runs the `kubeadm join` line the platform composes. The
-platform composes that line because the join address and the CA fingerprints
-are properties of a control plane you do not run.
+the platform, then joins with the `kubeadm join` line the platform composes.
+The platform composes that line because the join address and the CA
+fingerprints are properties of a control plane you do not run.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -437,9 +437,64 @@ are properties of a control plane you do not run.
 | `--kubelet-version` | read from this machine | The kubelet version to declare. The platform refuses a version more than two minors behind the control plane. |
 | `--print-only` | off | Mint the ticket, print the command, and run nothing. |
 
-The command refuses before it mints anything when `kubeadm` is absent, or when
-the shell is not root. Use `--print-only` to mint on one machine and join on
-another.
+The command refuses before it mints anything, so a refusal costs no ticket,
+when:
+
+- `--node-ip` is not one IP address, or an IPv4 and an IPv6 address with a
+  comma between them.
+- `--print-only` and `--node-ip` are both set. `kubeadm join` has no
+  `--node-ip` flag. Without `--print-only`, the join configuration sets the
+  node IP of the kubelet.
+- `kubeadm` is absent, or the shell is not root (not checked with
+  `--print-only`).
+- `kubeadm version -o short` reports a version older than 1.22, or an answer
+  the command cannot read (not checked with `--print-only`).
+- A part of the temp dir path fails the owner check (not checked with
+  `--print-only`). The path is `TMPDIR` (else `/tmp`) with each symlink
+  resolved. Each part, from `/` down, must belong to root or to you, and
+  must not be writable by its group or by others unless it has the sticky
+  bit. Thus `/tmp` (root, mode 1777) passes, and so does a directory of
+  yours of mode 0755 or 0700. A directory of yours of mode 0775 fails, and
+  so does a directory of another user. In a user namespace that does not
+  map your uid, a part of yours fails too: the command cannot prove that
+  it is yours.
+
+Use `--print-only` to mint on one machine and join on another.
+
+**The bootstrap token stays off argv.** The command reads the line into a
+kubeadm join configuration (`v1beta3` for kubeadm 1.22 to 1.30, `v1beta4`
+from 1.31). It writes the configuration to a file of mode 0600 in a new
+directory of mode 0700 under `TMPDIR`, and runs `kubeadm join --config
+<file>`. It removes the file and the directory after the join, after a
+failure, and after Ctrl-C, SIGTERM or SIGHUP. On a signal it stops
+`kubeadm` first: it signals `kubeadm`, waits at most 10 seconds, then
+kills it. A second Ctrl-C, SIGTERM or SIGHUP does not end the command
+sooner: the stop and the removal finish first. Only SIGKILL ends the
+command at once, and then the file and the directory stay. If the removal
+fails, the command names the directory. Delete that directory: it holds
+the token until the ticket expires.
+
+After a signal, the command exits with 128 plus the signal number (130 for
+Ctrl-C). If `kubeadm join` ended with 0 all the same, the command says
+that the node joined. Otherwise it says that the ticket holds a node slot
+for about ten minutes, and prints the command that frees it. A signal
+during the mint gets the same note: the platform may have minted the
+ticket. The mint request ends within 150 seconds (30 seconds for the
+connect), also when the platform does not answer.
+
+After the mint, the command joins only with a line it can read:
+`kubeadm join <host>:<port>`, exactly one `--token`, at least one
+`--discovery-token-ca-cert-hash sha256:<64 hex digits>`, and an optional
+`--node-name`. Any other word, flag or control character stops the join,
+with or without `--print-only`. The error names the position of the word,
+never the word, because a word can hold a token. A refusal after the mint
+holds a node slot, and the error prints the command that frees it.
+
+::: warning `--print-only` prints the bootstrap token
+The printed `kubeadm join` line holds the token. When you run it, the token
+is on the argv of `kubeadm`, where other users of that machine can read it.
+The token is valid for ten minutes and for one join.
+:::
 
 ::: warning Re-run with `sudo -E`, not plain `sudo`
 `kubeadm join` must run as root, but the join reads `KUBEHZ_TOKEN` and the

@@ -35,9 +35,12 @@ import (
 var update = flag.Bool("update", false, "rewrite the golden files")
 
 type fakeRunner struct {
-	mu      sync.Mutex
-	calls   []execx.Cmd
-	stdins  []string
+	mu     sync.Mutex
+	calls  []execx.Cmd
+	stdins []string
+	// ctx is the context of the call that runs now: a handler reads it
+	// to act as a process that a cancel stops.
+	ctx     context.Context
 	handler func(c execx.Cmd, stdin string) error
 }
 
@@ -51,6 +54,7 @@ func (r *fakeRunner) Run(ctx context.Context, c execx.Cmd) error {
 	r.mu.Lock()
 	r.calls = append(r.calls, c)
 	r.stdins = append(r.stdins, stdin)
+	r.ctx = ctx
 	r.mu.Unlock()
 	if r.handler != nil {
 		return r.handler(c, stdin)

@@ -2387,7 +2387,7 @@ lo kubehz node join [flags]
   -n, --name string              Node name; default: the short hostname of this machine
       --node-ip string           Address other nodes reach this machine on (needed behind NAT)
   -p, --pool string              Static pool to join; default: the one pool every node of the cluster is in
-      --print-only               Print the join command and run nothing
+      --print-only               Print the join command and run nothing. The command holds the bootstrap token: when you run it, the token is on argv
 ```
 
 ### SEE ALSO

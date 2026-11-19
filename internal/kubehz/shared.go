@@ -690,8 +690,9 @@ func (c *Context) ownerTrusted(part string, uid int) bool {
 	return uid == 0 || (uid == c.euid() && c.euid() != ovf) || (part == string(filepath.Separator) && uid == ovf)
 }
 
-// writeJoinFile stores a join file, the api's join recipe (ext ".sh") or
-// the ticket alone (ext ".token"), under the user's temp dir (joinTempDir)
+// writeJoinFile stores a join file, the api's join recipe (ext ".sh"), the
+// ticket alone (ext ".token") or the kubeadm join config of `lo kubehz node
+// join` (ext ".yaml"), under the user's temp dir (joinTempDir)
 // in a FRESH private directory: <tmp>/kubehz-join-<random>/kubehz-join-<node><ext>.
 // The directory comes from os.MkdirTemp (unpredictable name), so there is
 // no name to pre-plant in a shared /tmp. The file is created through a
@@ -720,17 +721,29 @@ func (c *Context) writeJoinFile(nodeName, ext, content string) (string, error) {
 	}
 	name := "kubehz-join-" + nodeName + ext
 	if err := c.writeJoinInto(priv, name, content); err != nil {
-		removeAll := c.RemoveAll
-		if removeAll == nil {
-			removeAll = os.RemoveAll
-		}
-		if rerr := removeAll(priv); rerr != nil {
+		if rerr := c.removeJoinFile(priv, filepath.Join(priv, name)); rerr != nil {
 			// The directory may still hold a part of the ticket.
 			return "", &joinLeftError{dir: priv, err: err}
 		}
 		return "", err
 	}
 	return filepath.Join(priv, name), nil
+}
+
+// removeJoinFile removes the join file at file when it is there, then its
+// fresh directory dir, as the bash twin does (rm -f, then rmdir;
+// kubehz::_join_write_failed): never a removal of a whole tree under the
+// temp dir. A directory that holds anything else stays, and the error
+// says so.
+func (c *Context) removeJoinFile(dir, file string) error {
+	remove := c.Remove
+	if remove == nil {
+		remove = os.Remove
+	}
+	if err := remove(file); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return remove(dir)
 }
 
 // writeJoinInto writes content to the new file name in the fresh directory

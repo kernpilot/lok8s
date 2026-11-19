@@ -32,6 +32,9 @@ import (
 //     argv; use --from-file or --from-env-file=/dev/stdin);
 //   - a string that holds "Authorization" or "Bearer " (a header goes in a
 //     curl config on stdin);
+//   - a string that is a token flag of kubeadm (--token,
+//     --tls-bootstrap-token, --discovery-token, also with =): the
+//     bootstrap token goes in a join config file (kubeadm join --config);
 //   - a read of an environment variable whose name holds TOKEN, SECRET,
 //     PASSWORD, PASSWD or a KEY word (os.Getenv, getenv);
 //   - a variable or field named like a credential (token, secret, password,
@@ -39,10 +42,13 @@ import (
 //     in Name, Path, File, Dir, URL, Hash or Ref.
 //
 // The test reads code, not data. A credential that comes in through a
-// value without such a name stays hidden from it. One such case is known:
-// `lo kubehz node join` runs the platform's `kubeadm join … --token <t>`
-// line (internal/kubehz/node.go), so the short-lived bootstrap token is on
-// kubeadm's argv in both implementations.
+// value without such a name stays hidden from it. One such value is the
+// platform's `kubeadm join` line (joinCommand), which holds the bootstrap
+// token. A name rule for it would also flag the path of the join config,
+// which the scan follows back to the line. So the sentinel tests of
+// `lo kubehz node join` read the argv of each process with the token as a
+// sentinel instead (internal/kubehz/node_test.go, and
+// tests/unit/credentials_argv_test.bats for the bash tree).
 func TestNoCredentialOnArgv(t *testing.T) {
 	root := testutil.RepoRoot(t)
 	fset := token.NewFileSet()
@@ -124,6 +130,12 @@ func (c *Context) claim(ctx context.Context, nonce string) {
 func (c *Context) runPatch(ctx context.Context, args ...string) error {
 	_, err := c.capture(ctx, true, "kubectl", args...)
 	return err
+}
+func (c *Context) join(ctx context.Context, h, v string) {
+	_ = c.Runner.Run(ctx, execx.Cmd{Name: "kubeadm", Args: []string{"join", "--token", v}})
+	_ = exec.Command("kubeadm", "join", "--discovery-token-ca-cert-hash", h, "--tls-bootstrap-token="+v)
+	_ = exec.Command("kubeadm", "join", "--discovery-token", v)
+	_ = exec.Command("kubeadm", "join", "--config", configPath)
 }`
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "p.go", src, 0)
@@ -140,9 +152,9 @@ func (c *Context) runPatch(ctx context.Context, args ...string) error {
 	}
 	found, sinks := argvFindings(fset, "p.go", f, wrappers)
 	// The three direct starts, the start in capture, the two calls of
-	// capture, the call of runPatch.
-	if sinks != 7 {
-		t.Errorf("sinks = %d, want 7", sinks)
+	// capture, the call of runPatch, the four starts in join.
+	if sinks != 11 {
+		t.Errorf("sinks = %d, want 11", sinks)
 	}
 	got := strings.Join(found, "\n")
 	for _, want := range []string{
@@ -153,13 +165,16 @@ func (c *Context) runPatch(ctx context.Context, args ...string) error {
 		`identifier password`,
 		`p.go:13: identifier nonce`,
 		`p.go:14: identifier nonce`,
+		`p.go:21: string "--token"`,
+		`p.go:22: string "--tls-bootstrap-token="`,
+		`p.go:23: string "--discovery-token"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("finding %q missing in:\n%s", want, got)
 		}
 	}
-	for _, clean := range []string{"secretName", "tokenPath"} {
-		if strings.Contains(got, "identifier "+clean) {
+	for _, clean := range []string{"identifier secretName", "identifier tokenPath", `"--discovery-token-ca-cert-hash"`, "p.go:24:"} {
+		if strings.Contains(got, clean) {
 			t.Errorf("%s is no credential, but it is a finding:\n%s", clean, got)
 		}
 	}
@@ -170,6 +185,7 @@ var (
 	harmlessSuffix  = regexp.MustCompile(`(Name|Path|File|Dir|URL|Url|Hash|Ref)s?$`)
 	credentialEnv   = regexp.MustCompile(`(TOKEN|SECRET|PASSWORD|PASSWD|_KEY$|^KEY_|_KEY_)`)
 	headerLiteral   = regexp.MustCompile(`Authorization|Bearer `)
+	tokenFlag       = regexp.MustCompile(`^--([a-z0-9]+-)*token(=|$)`)
 	envReaderSuffix = regexp.MustCompile(`(?i)getenv$`)
 )
 
@@ -405,7 +421,7 @@ func inspectArgs(args ast.Expr, assigns map[string][]ast.Expr) []string {
 				if err != nil {
 					return true
 				}
-				if strings.HasPrefix(s, "--from-literal") || headerLiteral.MatchString(s) {
+				if strings.HasPrefix(s, "--from-literal") || headerLiteral.MatchString(s) || tokenFlag.MatchString(s) {
 					out = append(out, "string "+x.Value)
 				}
 			case *ast.CallExpr:
