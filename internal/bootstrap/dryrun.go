@@ -631,7 +631,9 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInp
 	//     probe, at ANY exit code — not a real diff, not a real error
 	//     either: inconclusive.
 	//   • rc 0 → unchanged; rc 1 → differs (whatever the diff tool printed,
-	//     or didn't); anything else → a genuine kubectl/diff error.
+	//     or didn't); rc 130 or 143 (128 + SIGINT or SIGTERM) → an
+	//     interrupt; anything else → a genuine kubectl/diff error.
+	// No branch prints the kubectl stderr: each prints fixed text.
 	switch {
 	case execx.LaunchFailed(err):
 		ui.ErrorTo(stderr, "bootstrap: kubectl diff failed to start for %s: %v", label, err)
@@ -648,8 +650,19 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInp
 		res.changed, res.added, res.counted = summarizeDiff(diff)
 		return res
 	}
-	// rc > 1, no race pattern: kubectl/diff genuinely failed.
-	ui.ErrorTo(stderr, "%s", diffFailedText(label, kubeconfig, e.Options.RenderDir, stem, rc))
+	// An interrupt or a SIGTERM ended kubectl: the hint to diff by hand
+	// does not apply.
+	if rc == 130 || rc == 143 {
+		ui.ErrorTo(stderr, "bootstrap: kubectl diff was interrupted for %s (rc=%d)", label, rc)
+		return dryResult{status: dryError}
+	}
+	// rc > 1, no race pattern: kubectl/diff genuinely failed. The hint
+	// names the kubectl that the runner ran (the project's .bin first).
+	kubectl := "kubectl"
+	if path, ok := execx.Look(e.Paths, "kubectl"); ok {
+		kubectl = path
+	}
+	ui.ErrorTo(stderr, "%s", diffFailedText(label, rc, kubectl, kubeconfig, e.Options.RenderDir, stem, diffInput != rendered))
 	return dryResult{status: dryError}
 }
 
@@ -660,15 +673,30 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInp
 // "Invalid value: <value>", a typed-patch error prints
 // "valueUnstructured{Value:<value>}". The line tells the operator how to
 // see the message: run the diff by hand on the rendered file under
-// --render-dir (without --render-dir, do the dry run again with it). The
-// bash twin (bootstrap::_diff_manifest) prints the same text.
-func diffFailedText(label, kubeconfig, renderDir, stem string, rc int) string {
-	dir, again := renderDir, ""
+// --render-dir. Without --render-dir, do the dry run again with it: <dir>
+// is a placeholder. filtered (--ignore-nondeterministic removed objects
+// from the diff input) adds that the diff by hand can show more, because
+// the file holds the full render. Each argument that lo puts into the
+// command is quoted for a POSIX shell (shQuote), so a path with a space,
+// a quote or `$(...)` pastes as one word and runs nothing. The bash twin
+// (bootstrap::_diff_failed_text) prints the same bytes.
+func diffFailedText(label string, rc int, kubectl, kubeconfig, renderDir, stem string, filtered bool) string {
+	dir, again, more := renderDir, "", ""
 	if dir == "" {
-		dir, again = "<dir>", "do the dry run again with --render-dir <dir>, then "
+		dir, again = "<dir>", "do the dry run again with --render-dir <dir> (<dir> is a directory that you choose), then "
 	}
-	return fmt.Sprintf("bootstrap: kubectl diff failed for %s (rc=%d). lo does not show the kubectl message: it can quote a value of the manifest. To see it, %srun: kubectl --kubeconfig %s diff --server-side --force-conflicts -f %s/%s.yaml",
-		label, rc, again, kubeconfig, dir, stem)
+	if filtered {
+		more = " (this diff can show more: the dry run diffed the render without its non-deterministic objects)"
+	}
+	return fmt.Sprintf("bootstrap: kubectl diff failed for %s (rc=%d). lo does not show the kubectl message: it can quote a value of the manifest. To see it, %srun%s: %s --kubeconfig %s diff --server-side --force-conflicts -f %s",
+		label, rc, again, more, shQuote(kubectl), shQuote(kubeconfig), shQuote(dir+"/"+stem+".yaml"))
+}
+
+// shQuote quotes s for a POSIX shell: in single quotes, and each single
+// quote in s ends the quoted part, is written as \' and opens a new quoted
+// part (the bash twin: bootstrap::_sh_quote).
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // renderDirMarker names the file a dry run writes into a fresh/emptied

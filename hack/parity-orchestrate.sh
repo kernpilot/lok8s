@@ -1175,6 +1175,16 @@ for side in bash go; do
   if [[ -s "${WORK}/render.${side}/03-ccm.yaml" ]]; then echo "ok: ${side}: 03-ccm.yaml rendered before the failed diff"; else fail "${side}: 03-ccm.yaml missing"; fi
 done
 dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --render-dir render-out
+# A failed diff without --render-dir: both sides print the same fixed line
+# (the <dir> placeholder, the project's kubectl, the paths in single quotes)
+# and never the kubectl message.
+dry_check - bootstrap --domain dry.dev --dry-run --only ccm
+dry_expect_rc 2 bootstrap --domain dry.dev --dry-run --only ccm
+for side in bash go; do
+  tls_pin    "${side}: ccm error without --render-dir" "${WORK}/${side}.out" "^bootstrap dry-run: ccm: error$"
+  tls_pin    "${side}: the failed line names <dir>"   "${WORK}/${side}.err" "^\[error\] bootstrap: kubectl diff failed for ccm \(rc=2\)\. lo does not show the kubectl message: it can quote a value of the manifest\. To see it, do the dry run again with --render-dir <dir> \(<dir> is a directory that you choose\), then run: 'PROJ/\.bin/kubectl' --kubeconfig 'PROJ/\.kubeconfig/dryc\.yaml' diff --server-side --force-conflicts -f '<dir>/[0-9]{2}-ccm\.yaml'$"
+  tls_absent "${side}: no kubectl message"            "${WORK}/${side}.err" "could not be reached"
+done
 # --only narrows the run: one entry; its unchanged diff → rc 0.
 dry_check - bootstrap --domain dry.dev --dry-run --only cilium
 dry_expect_rc 0 bootstrap --domain dry.dev --dry-run --only cilium

@@ -3025,12 +3025,14 @@ _dry_kubectl_stub() {
   assert_output 0
 }
 
-# _dry_text_stub <msg> <rc>... — a kubectl that answers the N-th `diff` with
-# the N-th rc and prints <msg> on stderr at every exit code (1 also prints
-# the canned diff on stdout). Any other verb is a test failure.
+# _dry_text_stub <out> <err> <rc>... — a kubectl that answers the N-th `diff`
+# with the N-th rc (0 past the end) and prints <out> on stdout and <err> on
+# stderr at every exit code (each with one trailing newline, when not
+# empty). Any other verb is a test failure. The kubectl of these tests is a
+# function, so `command -v kubectl` names it "kubectl".
 _dry_text_stub() {
   export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
-  export DRY_MSG="${1}"; shift
+  export DRY_OUT="${1}" DRY_ERR="${2}"; shift 2
   export DRY_RCS="$*" DRY_CALLS="${BATS_TEST_TMPDIR}/diff.calls"; : > "${DRY_CALLS}"
   kubectl() {
     echo "kubectl $*" >> "${KLOG}"
@@ -3043,94 +3045,277 @@ _dry_text_stub() {
     local n rc=0; n="$(wc -l < "${DRY_CALLS}")"
     set -- ${DRY_RCS}
     (( n <= $# )) && rc="${!n}"
-    printf '%s\n' "${DRY_MSG}" >&2
-    [[ "${rc}" != 1 ]] || _dry_canned_diff
+    [[ -z "${DRY_OUT}" ]] || printf '%s\n' "${DRY_OUT}"
+    [[ -z "${DRY_ERR}" ]] || printf '%s\n' "${DRY_ERR}" >&2
     return "${rc}"
   }
-  export -f kubectl _dry_canned_diff
+  export -f kubectl
 }
 
-# The kubectl message of the next tests is synthetic: the shapes of a field
-# error and of a typed-patch error of a server-side diff, which quote a value
-# of the manifest. The values are obvious fakes.
+# The kubectl output of the next tests is synthetic. Its stderr has the
+# shapes of a field error and of a typed-patch error of a server-side diff,
+# which quote a value of the manifest; its stdout is diff text. The two
+# streams carry different canaries, obvious fakes, so a test can tell which
+# stream leaked: canary-value-0000 on stderr, diff-text-canary-1111 on
+# stdout.
 _dry_value_text() {
   printf '%s\n%s' \
     'The Secret "tls" is invalid: data[tls.crt]: Invalid value: "canary-value-0000": a value in the manifest' \
     'Error from server: failed to create typed patch object (/v1, Kind=Secret) default/tls: .stringData.tls.crt: expected string, got &value.valueUnstructured{Value:canary-value-0000}'
 }
+# The stdout of a failed diff.
+_dry_partial_text() { printf 'partial diff text: diff-text-canary-1111'; }
+# The canned diff with the stdout canary in its last hunk (the counts stay
+# changed=1 new=2).
+_dry_diff_with_canary() { _dry_canned_diff; printf '+  note: diff-text-canary-1111'; }
+
+# _dry_assert_diff_file <file> <out> — the .diff file holds the stdout of the
+# diff (<out> with one trailing newline, or nothing) and not its stderr.
+_dry_assert_diff_file() {
+  if [[ -n "${2}" ]]; then diff <(printf '%s\n' "${2}") "${1}"; else [ -f "${1}" ] && [ ! -s "${1}" ]; fi
+  ! grep -q canary-value-0000 "${1}" || { echo "${1} holds the stderr of the diff" >&2; return 1; }
+}
+
+# The line of a failed diff, byte for byte, for paths that hold a space,
+# `$(...)`, a `;` and a single quote: each argument that lo puts into the
+# command is in single quotes (bootstrap::_sh_quote has the rule). The Go
+# twin TestDiffFailedTextGolden holds the same three lines. The shell reads
+# the command back as eight words with the paths unchanged, and runs
+# nothing.
+@test "bootstrap::_diff_failed_text prints the bytes of the Go twin" {
+  local -r odd="/p/a b \$(touch x); c'd"
+  local want
+  want="$(cat <<'TEXT'
+bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, run: '/p/a b $(touch x); c'\''d/.bin/kubectl' --kubeconfig '/p/a b $(touch x); c'\''d/kc.yaml' diff --server-side --force-conflicts -f '/p/a b $(touch x); c'\''d/out/01-testcni.yaml'
+TEXT
+)"
+  run bootstrap::_diff_failed_text testcni 2 "${odd}/.bin/kubectl" "${odd}/kc.yaml" "${odd}/out" 01-testcni 0
+  assert_success
+  assert_output "${want}"
+  cd "${BATS_TEST_TMPDIR}"
+  eval "set -- ${output#*To see it, run: }"
+  [ "$#" -eq 8 ]
+  [ "${1}" = "${odd}/.bin/kubectl" ]
+  [ "${3}" = "${odd}/kc.yaml" ]
+  [ "${8}" = "${odd}/out/01-testcni.yaml" ]
+  [ ! -e x ]
+
+  want="$(cat <<'TEXT'
+bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, do the dry run again with --render-dir <dir> (<dir> is a directory that you choose), then run: '/p/a b $(touch x); c'\''d/.bin/kubectl' --kubeconfig '/p/a b $(touch x); c'\''d/kc.yaml' diff --server-side --force-conflicts -f '<dir>/01-testcni.yaml'
+TEXT
+)"
+  run bootstrap::_diff_failed_text testcni 2 "${odd}/.bin/kubectl" "${odd}/kc.yaml" "" 01-testcni 0
+  assert_success
+  assert_output "${want}"
+
+  want="$(cat <<'TEXT'
+bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, run (this diff can show more: the dry run diffed the render without its non-deterministic objects): '/p/a b $(touch x); c'\''d/.bin/kubectl' --kubeconfig '/p/a b $(touch x); c'\''d/kc.yaml' diff --server-side --force-conflicts -f '/p/a b $(touch x); c'\''d/out/01-testcni.yaml'
+TEXT
+)"
+  run bootstrap::_diff_failed_text testcni 2 "${odd}/.bin/kubectl" "${odd}/kc.yaml" "${odd}/out" 01-testcni 1
+  assert_success
+  assert_output "${want}"
+}
 
 # A failed server-side diff (rc 2) prints fixed text that names the entry,
 # also at debug, and never the kubectl message: it can quote a value of the
-# manifest. The line names the rendered file to diff by hand: under
-# --render-dir, or the file a dry run with --render-dir writes. The Go twin
-# is TestDryRunFailedDiffPrintsNoKubectlText.
+# manifest. The line names the kubectl that ran and the rendered file to
+# diff by hand: under --render-dir, or the file a dry run with --render-dir
+# writes. The .diff file holds the stdout of the diff and never its stderr.
+# The Go twin is TestDryRunFailedDiffPrintsNoKubectlText.
 @test "bootstrap::apply --dry-run: a failed diff prints no kubectl text, also at debug" {
   write_cluster_spec "testcni"
   local bootstrap_dry_run=1 lvl rd want
   local -r head="[error] bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, "
   for lvl in "" 1; do
     for rd in "" "${BATS_TEST_TMPDIR}/out-${lvl:-0}"; do
-      _dry_text_stub "$(_dry_value_text)" 2
+      _dry_text_stub "$(_dry_partial_text)" "$(_dry_value_text)" 2
       local bootstrap_render_dir="${rd}"
       DEBUG="${lvl}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
       [ "${status}" -eq 2 ]
       assert_line "bootstrap dry-run: testcni: error"
       if [[ -z "${rd}" ]]; then
-        want="${head}do the dry run again with --render-dir <dir>, then run: kubectl --kubeconfig ${KUBECONFIG_FILE} diff --server-side --force-conflicts -f <dir>/01-testcni.yaml"
+        want="${head}do the dry run again with --render-dir <dir> (<dir> is a directory that you choose), then run: 'kubectl' --kubeconfig '${KUBECONFIG_FILE}' diff --server-side --force-conflicts -f '<dir>/01-testcni.yaml'"
       else
-        want="${head}run: kubectl --kubeconfig ${KUBECONFIG_FILE} diff --server-side --force-conflicts -f ${rd}/01-testcni.yaml"
-        [ -s "${rd}/01-testcni.yaml" ]
+        want="${head}run: 'kubectl' --kubeconfig '${KUBECONFIG_FILE}' diff --server-side --force-conflicts -f '${rd}/01-testcni.yaml'"
       fi
       assert_line "${want}"
       if [[ -n "${lvl}" ]]; then assert_output --partial "[debug] "; else refute_output --partial "[debug] "; fi
+      # A failed diff prints no diff text, also at debug.
       refute_output --partial "canary-value-0000"
       refute_output --partial "Invalid value"
       refute_output --partial "typed patch"
+      refute_output --partial "diff-text-canary-1111"
+      if [[ -n "${rd}" ]]; then
+        [ -s "${rd}/01-testcni.yaml" ]
+        _dry_assert_diff_file "${rd}/01-testcni.diff" "$(_dry_partial_text)"
+      fi
     done
+  done
+}
+
+# The line names the kubectl that runs (the project's .bin is first on
+# PATH) and quotes each path: a .bin, a kubeconfig and a render dir under a
+# directory with a space, `$(...)`, a `;` and a single quote. The shell
+# reads the command back as eight words with the paths unchanged, and runs
+# nothing. The Go twins are TestDryRunFailedDiffQuotesThePaths and
+# TestDryRunFailedDiffNamesTheKubectlThatRuns.
+@test "bootstrap::apply --dry-run: the line of a failed diff names the kubectl that runs and quotes the paths" {
+  write_cluster_spec "testcni"
+  local -r odd="${BATS_TEST_TMPDIR}/a b \$(touch pwned); c'd"
+  local -r qodd="${BATS_TEST_TMPDIR}/a b \$(touch pwned); c'\\''d"
+  mkdir -p "${odd}/.bin"
+  # A stand-in kubectl in the project's .bin: it logs its argv, drains the
+  # manifest, prints both canaries and fails like the diff of a bad
+  # manifest (rc 2).
+  cat > "${odd}/.bin/kubectl" <<'STANDIN'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${KLOG}"
+cat > /dev/null
+printf 'partial diff text: diff-text-canary-1111\n'
+printf 'Invalid value: "canary-value-0000"\n' >&2
+exit 2
+STANDIN
+  chmod +x "${odd}/.bin/kubectl"
+  unset -f kubectl
+  export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
+  local -r kc="${odd}/kc.yaml"
+  : > "${kc}"
+  local bootstrap_dry_run=1 bootstrap_render_dir="${odd}/out"
+  cd "${BATS_TEST_TMPDIR}"
+  PATH="${odd}/.bin:${PATH}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${kc}" </dev/null
+  [ "${status}" -eq 2 ]
+  grep -qxF -- "--kubeconfig ${kc} diff --server-side --force-conflicts -f -" "${KLOG}"
+  assert_line "bootstrap dry-run: testcni: error"
+  assert_line "[error] bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, run: '${qodd}/.bin/kubectl' --kubeconfig '${qodd}/kc.yaml' diff --server-side --force-conflicts -f '${qodd}/out/01-testcni.yaml'"
+  refute_output --partial "canary-value-0000"
+  refute_output --partial "diff-text-canary-1111"
+  _dry_assert_diff_file "${odd}/out/01-testcni.diff" "$(_dry_partial_text)"
+  local cmd
+  cmd="$(printf '%s\n' "${output}" | grep -F 'To see it, run: ')"
+  eval "set -- ${cmd#*To see it, run: }"
+  [ "$#" -eq 8 ]
+  [ "${1}" = "${odd}/.bin/kubectl" ]
+  [ "${3}" = "${kc}" ]
+  [ "${8}" = "${odd}/out/01-testcni.yaml" ]
+  [ -s "${8}" ]
+  [ ! -e pwned ]
+}
+
+# With --ignore-nondeterministic, the dry run diffed the render without its
+# non-deterministic objects, but the file under --render-dir holds the full
+# render: the line says that the diff by hand can show more. Without the
+# option, the line does not say it. The Go twin is
+# TestDryRunFailedDiffUnderIgnoreNondeterministic.
+@test "bootstrap::apply --dry-run: a failed diff under --ignore-nondeterministic says the diff by hand can show more" {
+  write_cluster_spec "testcni"
+  export RENDERS="${BATS_TEST_TMPDIR}/renders"
+  kustomize() {
+    echo x >> "${RENDERS}"
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: stable\n  namespace: kube-system\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: cilium-ca\n  namespace: kube-system\ndata:\n  ca.crt: Q0Et%d\n' "$(wc -l < "${RENDERS}")"
+  }
+  export -f kustomize
+  local dir="${BATS_TEST_TMPDIR}/out" bootstrap_dry_run=1 nd
+  local bootstrap_render_dir="${dir}"
+  local -r head="[error] bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, "
+  local -r tail=": 'kubectl' --kubeconfig '${KUBECONFIG_FILE}' diff --server-side --force-conflicts -f '${dir}/01-testcni.yaml'"
+  for nd in 0 1; do
+    : > "${RENDERS}"
+    _dry_text_stub "" "$(_dry_value_text)" 2
+    local bootstrap_ignore_nondet="${nd}"
+    run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+    [ "${status}" -eq 2 ]
+    [ "$(wc -l < "${RENDERS}")" -eq 2 ]
+    if (( nd )); then
+      assert_line "${head}run (this diff can show more: the dry run diffed the render without its non-deterministic objects)${tail}"
+    else
+      assert_line "${head}run${tail}"
+      refute_output --partial "can show more"
+    fi
+    grep -q cilium-ca "${dir}/01-testcni.yaml"
   done
 }
 
 # A diff with differences (rc 1) still reports as before, also when kubectl
 # prints a message on stderr: "differs" with the counts, rc 1, and the diff
 # text at debug (kubectl masks the data of a Secret in it). The kubectl
-# stderr is not printed. The Go twin is
-# TestDryRunDiffersWithKubectlTextStillDiffers.
+# stderr is not printed, and the .diff file holds the diff text only. The
+# Go twin is TestDryRunDiffersWithKubectlTextStillDiffers.
 @test "bootstrap::apply --dry-run: a diff with differences and a kubectl message still differs (rc 1)" {
   write_cluster_spec "testcni"
-  local bootstrap_dry_run=1 lvl
+  local bootstrap_dry_run=1 lvl rd
   for lvl in "" 1; do
-    _dry_text_stub "$(_dry_value_text)" 1
+    rd="${BATS_TEST_TMPDIR}/out-${lvl:-0}"
+    _dry_text_stub "$(_dry_diff_with_canary)" "$(_dry_value_text)" 1
+    local bootstrap_render_dir="${rd}"
     DEBUG="${lvl}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
     [ "${status}" -eq 1 ]
     assert_line "bootstrap dry-run: testcni: differs changed=1 new=2"
     assert_line "bootstrap dry-run: entries=1 unchanged=0 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0 nondeterministic=0"
-    if [[ -n "${lvl}" ]]; then assert_line "+  foo: bar"; else refute_line "+  foo: bar"; fi
+    if [[ -n "${lvl}" ]]; then assert_line "+  note: diff-text-canary-1111"; else refute_output --partial "diff-text-canary-1111"; fi
     refute_output --partial "canary-value-0000"
     refute_output --partial "Invalid value"
     refute_output --partial "typed patch"
     refute_output --partial "kubectl diff failed"
+    _dry_assert_diff_file "${rd}/01-testcni.diff" "$(_dry_diff_with_canary)"
   done
 }
 
-# The race-class pattern stays inconclusive (needs-crd), and the rest of the
-# kubectl stderr is not printed either. The Go twin is
-# TestDryRunInconclusiveDiffPrintsNoKubectlText.
-@test "bootstrap::apply --dry-run: an inconclusive diff prints no kubectl text" {
+# A clean diff (rc 0) with a kubectl warning on stderr is unchanged, rc 0,
+# and the warning is not printed, also at debug, nor written to the .diff
+# file. The Go twin is TestDryRunUnchangedWithKubectlWarning.
+@test "bootstrap::apply --dry-run: a clean diff with a kubectl warning is unchanged (rc 0)" {
+  write_cluster_spec "testcni"
+  local bootstrap_dry_run=1 bootstrap_render_dir="${BATS_TEST_TMPDIR}/out"
+  _dry_text_stub "" 'Warning: the value "canary-value-0000" is deprecated' 0
+  DEBUG=1 run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_line "bootstrap dry-run: testcni: unchanged"
+  refute_output --partial "canary-value-0000"
+  refute_output --partial "is deprecated"
+  _dry_assert_diff_file "${bootstrap_render_dir}/01-testcni.diff" ""
+}
+
+# _dry_race_case <alternative> <message> — the race-class pattern stays
+# inconclusive (needs-crd), and the rest of the kubectl stderr is not
+# printed either. <message> holds one alternative of the pattern: a test
+# per alternative fails when the pattern loses it. The Go twin is
+# TestDryRunInconclusiveDiffPrintsNoKubectlText (a subtest per
+# alternative).
+_dry_race_case() {
   write_cluster_spec "testcni"
   local bootstrap_dry_run=1
-  _dry_text_stub "$(_dry_value_text)"$'\nerror: resource mapping not found for name: "x": ensure CRDs are installed first' 2
+  _dry_text_stub "" "$(_dry_value_text)"$'\n'"${2}" 2
   DEBUG=1 run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
   [ "${status}" -eq 2 ]
   assert_line "bootstrap dry-run: testcni: inconclusive (needs-crd)"
   refute_output --partial "canary-value-0000"
   refute_output --partial "Invalid value"
   refute_output --partial "typed patch"
-  refute_output --partial "resource mapping not found"
+  refute_output --partial "${1}"
+  refute_output --partial "kubectl diff failed"
+}
+
+@test "bootstrap::apply --dry-run: an inconclusive diff (ensure CRDs are installed first) prints no kubectl text" {
+  _dry_race_case "ensure CRDs are installed first" 'error: unable to recognize "STDIN": ensure CRDs are installed first'
+}
+
+@test "bootstrap::apply --dry-run: an inconclusive diff (failed calling webhook) prints no kubectl text" {
+  _dry_race_case "failed calling webhook" 'Error from server (InternalError): Internal error occurred: failed calling webhook "x.example.com": connection refused'
+}
+
+@test "bootstrap::apply --dry-run: an inconclusive diff (no matches for kind) prints no kubectl text" {
+  _dry_race_case "no matches for kind" 'error: unable to recognize "STDIN": no matches for kind "X" in version "example.com/v1"'
+}
+
+@test "bootstrap::apply --dry-run: an inconclusive diff (resource mapping not found) prints no kubectl text" {
+  _dry_race_case "resource mapping not found" 'error: resource mapping not found for name: "x" namespace: ""'
 }
 
 # restore.d goes through the same diff: its failed diff prints the fixed line
-# with restore.d.yaml, also at debug, and never the kubectl message. The Go
-# twin is TestDryRunRestoreDFailedDiffPrintsNoKubectlText.
+# with restore.d.yaml, also at debug, and never the kubectl message;
+# restore.d.diff holds the stdout of the diff only. The Go twin is
+# TestDryRunRestoreDFailedDiffPrintsNoKubectlText.
 @test "bootstrap::apply --dry-run: a failed restore.d diff prints no kubectl text, also at debug" {
   write_cluster_spec "testcni"
   local d="${PATH_CLUSTERS}/test.lok8s.dev"
@@ -3139,16 +3324,74 @@ _dry_value_text() {
   printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls-e\n' > "${d}/secrets/restore.d/tls-e.yaml"
   sops() { echo "sops must not run: the working copy exists" >&2; return 1; }
   export -f sops
-  _dry_text_stub "$(_dry_value_text)" 2 0
+  local bootstrap_dry_run=1 rd
+  local -r head="[error] bootstrap: kubectl diff failed for restore.d (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, "
+  for rd in "" "${BATS_TEST_TMPDIR}/out"; do
+    _dry_text_stub "$(_dry_partial_text)" "$(_dry_value_text)" 2 0
+    local bootstrap_render_dir="${rd}"
+    DEBUG=1 run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+    [ "${status}" -eq 2 ]
+    assert_line "bootstrap dry-run: restore.d: error"
+    if [[ -z "${rd}" ]]; then
+      assert_line "${head}do the dry run again with --render-dir <dir> (<dir> is a directory that you choose), then run: 'kubectl' --kubeconfig '${KUBECONFIG_FILE}' diff --server-side --force-conflicts -f '<dir>/restore.d.yaml'"
+    else
+      assert_line "${head}run: 'kubectl' --kubeconfig '${KUBECONFIG_FILE}' diff --server-side --force-conflicts -f '${rd}/restore.d.yaml'"
+    fi
+    refute_output --partial "canary-value-0000"
+    refute_output --partial "Invalid value"
+    refute_output --partial "typed patch"
+    refute_output --partial "sops must not run"
+    if [[ -n "${rd}" ]]; then
+      _dry_assert_diff_file "${rd}/restore.d.diff" "$(_dry_partial_text)"
+    fi
+  done
+}
+
+# An interrupt or a SIGTERM that ends kubectl (rc 130, 143) prints a fixed
+# "interrupted" line, not the hint to diff by hand, and never the kubectl
+# message. The Go twin is TestDryRunInterruptedDiffPrintsNoHint.
+@test "bootstrap::apply --dry-run: an interrupted diff prints the interrupted line" {
+  write_cluster_spec "testcni"
+  local bootstrap_dry_run=1 rc
+  for rc in 130 143; do
+    _dry_text_stub "" "$(_dry_value_text)" "${rc}"
+    run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+    [ "${status}" -eq 2 ]
+    assert_line "bootstrap dry-run: testcni: error"
+    assert_line "[error] bootstrap: kubectl diff was interrupted for testcni (rc=${rc})"
+    refute_output --partial "To see it"
+    refute_output --partial "kubectl diff failed for"
+    refute_output --partial "canary-value-0000"
+  done
+}
+
+# kubectl that is not found prints the fixed "failed to start" line, not the
+# hint (bash: rc 127). PATH is a directory of links to every program on the
+# test's PATH but kubectl, and no kubectl function is set: bash does not
+# find kubectl. The Go twin is TestDryRunDiffLaunchFailure.
+@test "bootstrap::apply --dry-run: kubectl that is not found prints the failed to start line" {
+  write_cluster_spec "testcni"
+  local -r farm="${BATS_TEST_TMPDIR}/path-without-kubectl"
+  local dir dirs
+  mkdir -p "${farm}"
+  IFS=: read -r -a dirs <<< "${PATH}"
+  for dir in "${dirs[@]}"; do
+    [[ -d "${dir}" ]] || continue
+    ln -s "${dir}"/* "${farm}/" 2>/dev/null || true
+  done
+  rm -f "${farm}/kubectl"
+  [ -e "${farm}/bash" ]
+  unset -f kubectl
+  PATH="${farm}" run command -v kubectl
+  [ "${status}" -ne 0 ]
   local bootstrap_dry_run=1
-  DEBUG=1 run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  PATH="${farm}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
   [ "${status}" -eq 2 ]
-  assert_line "bootstrap dry-run: restore.d: error"
-  assert_line "[error] bootstrap: kubectl diff failed for restore.d (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, do the dry run again with --render-dir <dir>, then run: kubectl --kubeconfig ${KUBECONFIG_FILE} diff --server-side --force-conflicts -f <dir>/restore.d.yaml"
-  refute_output --partial "canary-value-0000"
-  refute_output --partial "Invalid value"
-  refute_output --partial "typed patch"
-  refute_output --partial "sops must not run"
+  assert_line "bootstrap dry-run: testcni: error"
+  assert_line "[error] bootstrap: kubectl diff failed to start for testcni: kubectl: executable not found"
+  refute_output --partial "To see it"
+  refute_output --partial "kubectl diff failed for"
+  refute_output --partial "command not found"
 }
 
 # kubectl diff's rc 1 means "differences found" by convention, but a
