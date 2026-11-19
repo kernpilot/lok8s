@@ -65,12 +65,11 @@ case "${kind}" in
   int)
     echo "$$" > "${STUB_PID}"
     sleep 1 3>&-
-    # The subshell of the reads: the parent, or the parent of timeout(1).
+    # The subshell of the reads is INT_HOPS parents up: 1 is the parent,
+    # 2 the parent of timeout(1). _ppid (test_helper, exported by the test)
+    # reads /proc where it exists, so the case needs no ps.
     target="${PPID}"
-    comm="$(ps -o comm= -p "${target}")"
-    if [[ "${comm##*/}" == timeout ]]; then
-      target="$(ps -o ppid= -p "${target}" | tr -d ' ')"
-    fi
+    if (( INT_HOPS > 1 )); then target="$(_ppid "${target}")"; fi
     kill -INT "${target}"
     sleep "${a}" 3>&-
     cat "${FIX}/json/${b}" ;;
@@ -256,11 +255,20 @@ NO_ANSWER="  ! RBAC migration leftovers not checked: kubectl did not answer with
   _assert_case
 }
 
-# A Ctrl-C in a read: the INT trap of the reads' subshell stops the read and
-# removes the temp dir. The caller here gets no SIGINT, so it goes on and
-# prints the fixed reason; its own trap stays as it was.
+# _ctrl_c <PATH> <hops> — a Ctrl-C in a read: the INT trap of the reads'
+# subshell stops the read and removes the temp dir. The caller here gets no
+# SIGINT, so it goes on and prints the fixed reason; its own trap stays as
+# it was. <hops>: the parents from the stand-in up to that subshell.
 _ctrl_c() {
   _hang_case "int 5 crb-narrowed.json" "  ! RBAC migration leftovers not checked: kubectl failed or did not return a valid list"
+  export INT_HOPS="${2}" PS_RAN="${BATS_TEST_TMPDIR}/ps.ran"
+  export -f _ppid
+  # With /proc (Linux), as in the CI bats container: no ps. A ps call fails
+  # here and leaves a mark. Without /proc (macOS), _ppid needs the real ps.
+  if [[ -d /proc/self ]]; then
+    ps() { : > "${PS_RAN}"; echo "ps ran" >&2; return 127; }
+    export -f ps
+  fi
   _caller() {
     trap ': the caller' INT
     doctor::_rbac_check rbac.example
@@ -270,6 +278,7 @@ _ctrl_c() {
   assert_success
   assert_output "$(cat "${CASE}/want")"$'\n'"trap -- ': the caller' SIGINT"
   _assert_no_temp_dir
+  [[ ! -e "${PS_RAN}" ]] || fail "ps ran"
   # The TERM of the trap ends the stand-in at once; allow 2 s for the reap.
   local pid i
   pid="$(cat "${STUB_PID}")"
@@ -282,11 +291,11 @@ _ctrl_c() {
 
 @test "rbac: a Ctrl-C in a read removes the temp dir and stops the read (timeout)" {
   command -v timeout >/dev/null 2>&1 || skip "no timeout(1)"
-  _ctrl_c "${PATH}"
+  _ctrl_c "${PATH}" 2
 }
 
 @test "rbac: a Ctrl-C in a read removes the temp dir and stops the read (no timeout)" {
-  _ctrl_c "$(_path_without timeout)"
+  _ctrl_c "$(_path_without timeout)" 1
 }
 
 # Every case directory has a @test above, and the Go twin reads the same
