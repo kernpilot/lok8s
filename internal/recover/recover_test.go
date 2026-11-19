@@ -749,7 +749,8 @@ func TestRunClusterNameGuardRefusesWhenTheClustersDirCannotBeRead(t *testing.T) 
 	if err := h.r.Run(t.Context(), "test.dom", false, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v, want ErrHandled", err)
 	}
-	if want := "[error] recover: could not check if another domain has the cluster_name 'shared' of 'test.dom'. Nothing was changed. Run lo recover again.\n"; !strings.Contains(h.errBuf.String(), want) {
+	if want := "[error] recover: could not check if another domain has the cluster_name 'shared' of 'test.dom': lo cannot read the directory " + h.r.Paths.Clusters +
+		". Nothing was changed. Make " + h.r.Paths.Clusters + " a directory that you can read and search, then run lo recover again.\n"; !strings.Contains(h.errBuf.String(), want) {
 		t.Errorf("missing %q in stderr:\n%s", want, h.errBuf.String())
 	}
 	if got := h.recorded(); got != "resolve" {
@@ -869,6 +870,8 @@ var configShapes = []struct{ name, config, want string }{
 	{"a merge key with a list", "base: &b {x: 1}\n<<: [*b]\ncluster_name: a\n", "merge"},
 	{"a quoted << key", "\"<<\": x\ncluster_name: a\n", "merge"},
 	{"a key with the explicit tag !!merge", "x: 1\n!!merge base: {cluster_name: merged}\n", "merge"},
+	{"an alias key that names a plain <<", "x: &k <<\n*k : {cluster_name: merged}\ncluster_name: a\n", "merge"},
+	{"an alias key that names a quoted <<", "x: &k '<<'\n*k : {cluster_name: merged}\ncluster_name: a\n", "merge"},
 	{"int", "cluster_name: 0123\n", "quote"},
 	{"hex int", "cluster_name: 0x1F\n", "quote"},
 	{"float", "cluster_name: 1.5\n", "quote"},

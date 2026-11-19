@@ -171,7 +171,8 @@ func (d *Dispatcher) guardDestroy(ctx context.Context, domainName, kind, cluster
 		return true, "", driver.ErrDeclined
 	}
 	if err != nil {
-		ui.ErrorTo(w, "could not check if another domain has the cluster_name '%s' of '%s'. Nothing was deleted. Run lo destroy again.", name, domainName)
+		unread := domain.UnreadableDir(err, d.Paths.Clusters)
+		ui.ErrorTo(w, "could not check if another domain has the cluster_name '%s' of '%s': lo cannot read the directory %s. Nothing was deleted. Make %s a directory that you can read and search, then run lo destroy again.", name, domainName, unread, unread)
 		return true, "", driver.ErrDeclined
 	}
 	if len(users) > 0 {

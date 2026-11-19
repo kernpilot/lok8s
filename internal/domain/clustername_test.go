@@ -100,10 +100,31 @@ func TestClusterNameUsersReadAnUnreadableFileAsNoName(t *testing.T) {
 	}
 }
 
-// A clusters dir that the scan cannot list, or a clusters path that is not a
-// dir: the scan cannot tell the other domains, so it returns an error (not a
-// *MergeKeyError) and the guards refuse ("could not check"). The bash twin
-// returns 1 (destroy_guard_test.bats).
+// assertUnreadable runs both scans on clusters and wants an *UnreadableError
+// for dir from each (the guards refuse with "could not check" and name dir;
+// the bash twin prints dir and returns 1, destroy_guard_test.bats).
+func assertUnreadable(t *testing.T, clusters, dir string) {
+	t.Helper()
+	for _, sc := range []struct {
+		label string
+		users func(clusters, self, name string) ([]string, error)
+	}{
+		{"ProviderClusterNameUsers", ProviderClusterNameUsers},
+		{"ClusterNameUsers", ClusterNameUsers},
+	} {
+		list, err := sc.users(clusters, "self.cloud", "prod")
+		var ue *UnreadableError
+		if !errors.As(err, &ue) || ue.Dir != dir || list != nil {
+			t.Errorf("%s(%s) = %v, %v, want nil and an *UnreadableError for %s", sc.label, clusters, list, err, dir)
+		}
+		if got := UnreadableDir(err, "fallback"); got != dir {
+			t.Errorf("UnreadableDir = %q, want %q", got, dir)
+		}
+	}
+}
+
+// A clusters dir that the scan cannot list: the scan cannot tell the other
+// domains, so the guards refuse ("could not check").
 func TestClusterNameUsersFailWhenTheClustersDirCannotBeRead(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads a dir without the read permission")
@@ -114,22 +135,94 @@ func TestClusterNameUsersFailWhenTheClustersDirCannotBeRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	assertUnreadable(t, locked, locked)
+}
+
+// A clusters path that is not a dir fails the scan in the same way. It needs
+// no chmod, so root runs it too.
+func TestClusterNameUsersFailWhenTheClustersPathIsAFile(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "clusters")
 	testutil.WriteFile(t, file, "not a dir\n")
-	for _, clusters := range []string{locked, file} {
-		for _, sc := range []struct {
-			label string
-			users func(clusters, self, name string) ([]string, error)
-		}{
-			{"ProviderClusterNameUsers", ProviderClusterNameUsers},
-			{"ClusterNameUsers", ClusterNameUsers},
-		} {
-			list, err := sc.users(clusters, "self.cloud", "prod")
-			var merge *MergeKeyError
-			if err == nil || errors.As(err, &merge) || list != nil {
-				t.Errorf("%s(%s) = %v, %v, want nil and an error that is not a *MergeKeyError", sc.label, clusters, list, err)
-			}
+	assertUnreadable(t, file, file)
+	if UnreadableDir(errors.New("other"), "fallback") != "fallback" {
+		t.Error("UnreadableDir of another error is not the fallback")
+	}
+}
+
+// A directory that the scan lists but cannot search (read, no search
+// permission): it cannot tell whether a file is there, so it refuses and
+// names that directory. The clusters dir (an entry cannot be read), the dir
+// of a domain, and a dir on the way to a configRef file. The domain itself
+// is never read, and a provider file behind a link into a dir that cannot be
+// searched is no file (the walk reads each name with Lstat).
+func TestClusterNameUsersFailWhenADirCannotBeSearched(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root searches a dir without the search permission")
+	}
+	lock := func(t *testing.T, dir string) {
+		t.Helper()
+		if err := os.Chmod(dir, 0o400); err != nil {
+			t.Fatal(err)
 		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	}
+	t.Run("the clusters dir", func(t *testing.T) {
+		clusters := filepath.Join(t.TempDir(), "clusters")
+		testutil.WriteFile(t, filepath.Join(clusters, "o.cloud", "hetzner.json"), `{"cluster_name": "other"}`)
+		lock(t, clusters)
+		assertUnreadable(t, clusters, clusters)
+	})
+	t.Run("the clusters dir with the domain itself only", func(t *testing.T) {
+		clusters := filepath.Join(t.TempDir(), "clusters")
+		testutil.WriteFile(t, filepath.Join(clusters, "self.cloud", "hetzner.json"), `{"cluster_name": "prod"}`)
+		lock(t, clusters)
+		if got, err := ClusterNameUsers(clusters, "self.cloud", "prod"); got != nil || err != nil {
+			t.Fatalf("got %v, %v, want nil, nil", got, err)
+		}
+	})
+	t.Run("the dir of a domain", func(t *testing.T) {
+		clusters := filepath.Join(t.TempDir(), "clusters")
+		testutil.WriteFile(t, filepath.Join(clusters, "o.cloud", "hetzner.json"), `{"cluster_name": "other"}`)
+		lock(t, filepath.Join(clusters, "o.cloud"))
+		assertUnreadable(t, clusters, filepath.Join(clusters, "o.cloud"))
+	})
+	t.Run("a dir on the way to the configRef file", func(t *testing.T) {
+		clusters := filepath.Join(t.TempDir(), "clusters")
+		testutil.WriteFile(t, filepath.Join(clusters, "o.cloud", "cluster.lok8s.yaml"), "spec:\n  provider:\n    configRef: infra/desc.yaml\n")
+		testutil.WriteFile(t, filepath.Join(clusters, "o.cloud", "infra", "desc.yaml"), "cluster_name: other\n")
+		lock(t, filepath.Join(clusters, "o.cloud", "infra"))
+		assertUnreadable(t, clusters, filepath.Join(clusters, "o.cloud", "infra"))
+	})
+	t.Run("a provider file behind a link into a dir that cannot be searched", func(t *testing.T) {
+		base := t.TempDir()
+		testutil.WriteFile(t, filepath.Join(base, "locked", "x.json"), `{"cluster_name": "prod"}`)
+		clusters := filepath.Join(base, "clusters")
+		if err := os.MkdirAll(filepath.Join(clusters, "o.cloud"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(base, "locked", "x.json"), filepath.Join(clusters, "o.cloud", "hetzner.json")); err != nil {
+			t.Fatal(err)
+		}
+		lock(t, filepath.Join(base, "locked"))
+		if got, err := ProviderClusterNameUsers(clusters, "self.cloud", "prod"); got != nil || err != nil {
+			t.Fatalf("got %v, %v, want nil, nil", got, err)
+		}
+	})
+}
+
+// An entry that is a link to nothing, or a link loop, is no domain: the scan
+// reads on (bash: -d is false).
+func TestClusterNameUsersSkipALinkToNothing(t *testing.T) {
+	clusters := filepath.Join(t.TempDir(), "clusters")
+	testutil.WriteFile(t, filepath.Join(clusters, "o.cloud", "hetzner.json"), `{"cluster_name": "prod"}`)
+	for _, l := range []struct{ name, dest string }{{"gone.cloud", "nowhere"}, {"loop.cloud", "loop.cloud"}} {
+		if err := os.Symlink(l.dest, filepath.Join(clusters, l.name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := ProviderClusterNameUsers(clusters, "self.cloud", "prod")
+	if err != nil || strings.Join(got, ",") != "o.cloud" {
+		t.Fatalf("got %v, %v, want [o.cloud], nil", got, err)
 	}
 }
 
@@ -193,8 +286,32 @@ func TestClusterNameUsersRefuseAMergeKeyOnThePath(t *testing.T) {
 		{"a redefined anchor: the merge key is in the mapping that the alias does not name", map[string]string{
 			"cluster.lok8s.yaml": "b: &b {cluster_name: other, <<: {x: 1}}\nb2: &b {cluster_name: prod}\nspec:\n  provider:\n    config: *b\n",
 		}, "o.cloud", "o.cloud"},
+		// An anchor on a complex key (a mapping as a key): yq's `..` skips
+		// the keys, `...` visits them.
+		{"an anchor on a complex key: the merge key is in the mapping that the alias names", map[string]string{
+			"cluster.lok8s.yaml": "? &m {<<: {cluster_name: prod}}\n: x\nspec:\n  provider:\n    config: *m\n",
+		}, "merge", "merge"},
+		{"an anchor on a value, then on a key: the alias names the key", map[string]string{
+			"cluster.lok8s.yaml": "a: &m {x: 1}\n? &m {<<: {cluster_name: prod}}\n: y\nspec: {provider: {config: *m}}\n",
+		}, "merge", "merge"},
+		{"an anchor on a key, then on a value: the alias names the value", map[string]string{
+			"cluster.lok8s.yaml": "? &m {<<: {cluster_name: prod}}\n: y\na: &m {x: 1}\nspec: {provider: {config: *m}}\n",
+		}, "", ""},
+		{"an anchor on a scalar key after a mapping anchor of that name: the alias names the scalar", map[string]string{
+			"cluster.lok8s.yaml": "base: &b {<<: {cluster_name: prod}}\n&b k: v\nspec: {provider: {config: *b}}\n",
+		}, "", ""},
+		// An anchor and its alias on one line: the column decides.
+		{"an anchor and its alias on one line", map[string]string{
+			"cluster.lok8s.yaml": "{a: &s {<<: {cluster_name: prod}}, spec: {provider: {config: *s}}}\n",
+		}, "merge", "merge"},
 		{"a key with the explicit tag !!merge", map[string]string{
 			"hetzner.json": "x: {cluster_name: other}\n!!merge base: {cluster_name: prod}\n",
+		}, "merge", "merge"},
+		{"an alias key that names a plain <<", map[string]string{
+			"cluster.lok8s.yaml": "x: &k <<\nspec:\n  provider:\n    config:\n      *k : {cluster_name: prod}\n",
+		}, "merge", "merge"},
+		{"an alias key that names a quoted <<", map[string]string{
+			"cluster.lok8s.yaml": "x: &k '<<'\nspec:\n  provider:\n    config:\n      *k : {cluster_name: prod}\n",
 		}, "merge", "merge"},
 		{"a merge key in a mapping with its own tag", map[string]string{
 			"cluster.lok8s.yaml": spec("    config: !cfg {<<: {cluster_name: prod}}\n"),
@@ -229,6 +346,12 @@ func TestClusterNameUsersRefuseAMergeKeyOnThePath(t *testing.T) {
 		}, "o.cloud", "o.cloud"},
 		{"a spec with a second document: the configRef of the first counts", map[string]string{
 			"cluster.lok8s.yaml": spec("    configRef: desc.yaml\n") + "---\nspec: {provider: {configRef: other.yaml}}\n",
+			"desc.yaml":          "cluster_name: prod\n",
+		}, "o.cloud", "o.cloud"},
+		// yaml.v3 stops after the first document; yq prints its value and
+		// exits 1.
+		{"a spec whose second document does not parse: the configRef of the first counts", map[string]string{
+			"cluster.lok8s.yaml": spec("    configRef: desc.yaml\n") + "---\nb: [\n",
 			"desc.yaml":          "cluster_name: prod\n",
 		}, "o.cloud", "o.cloud"},
 		{"an anchor and an alias, another name", map[string]string{

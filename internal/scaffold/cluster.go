@@ -158,7 +158,8 @@ func WriteClusterSpec(clusters, dom, driverName string, force bool, out, stderr 
 		return ErrHandled
 	}
 	if err != nil {
-		ui.ErrorTo(stderr, "could not check if another domain uses the cluster name '%s' (the first label of %s). Nothing was written. Run lo init cluster again.", name, dom)
+		unread := domain.UnreadableDir(err, clusters)
+		ui.ErrorTo(stderr, "could not check if another domain uses the cluster name '%s' (the first label of %s): lo cannot read the directory %s. Nothing was written. Make %s a directory that you can read and search, then run lo init cluster again.", name, dom, unread, unread)
 		return ErrHandled
 	}
 	if len(users) > 0 {

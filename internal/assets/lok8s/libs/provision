@@ -170,48 +170,69 @@ provision::confirm_infra() {
 # --yaml-fix-merge-anchor-to-spec changes both, and yq says that this will
 # become its default. The Go twin does not merge at all. The path is the top
 # of each file, and the top, spec, spec.provider and spec.provider.config of
-# the spec; the rule is the one of recover::_config_name: a key whose text
-# is "<<", quoted or not. A key with the explicit tag !!merge is a merge key
-# for yq too, so it counts. A node of the path that is an alias counts with
-# the mapping that it names: the last anchor of that name before the alias,
-# as yaml.v3 (the Go twin) resolves it. yq's keys does not follow an alias,
-# and explode(.) would apply the merge keys that the scan counts. Only the
-# first document counts, as in the Go twin, for the merge keys and the names.
+# the spec; the rule is PROVISION_YQ_IS_MERGE, the one of
+# recover::_config_name too. Only the first document counts, as in the Go
+# twin, for the merge keys and the names.
 #
 # A provider file goes to yq on stdin, so yq parses it as YAML (JSON is
 # YAML too) whatever its extension, as the provider and the Go twin read it:
 # with the path, yq reads hetzner.json as JSON only and gives no name for a
 # YAML one.
 #
-# No clusters dir is no other domain. A clusters path that is not a dir
-# that the scan can list returns 1 (Go twin: the error of os.ReadDir), so
-# the guards refuse.
+# No clusters dir is no other domain. When the scan cannot read a directory
+# that it must list or search, it prints that directory and returns 1 (Go
+# twin: domain.UnreadableError), so the guards refuse: a clusters path that
+# is not a dir that the scan can list, a clusters dir without search
+# permission (an entry that it lists but cannot read), the dir of a domain
+# without search permission, or a dir on the way to a configRef file that
+# cannot be searched (provision::_unsearchable).
 provision::_cluster_name_users() {
-  local self="${1}" name="${2}" dir other spec ref f merge p terms=""
+  local self="${1}" name="${2}" entry dir other spec ref f merge p terms="" unread
   local -a files=() names=() users=() merged=()
   if [[ -e "${PATH_CLUSTERS}" ]] && ! [[ -d "${PATH_CLUSTERS}" && -r "${PATH_CLUSTERS}" ]]; then
+    printf '%s\n' "${PATH_CLUSTERS}"
     return 1
   fi
   # The number of merge keys in the mappings on the path (Go: mergeOnPath).
   # Each node of the path is its own term: a yq collect gives an array
   # also when its input is empty.
-  local -r is_merge='select(. == "<<" or tag == "!!merge")'
-  local -r deref='alias as $a | line as $l | column as $c | [$doc | .. | select(anchor == $a and (line < $l or (line == $l and column < $c)))] | select(length > 0) | .[-1]'
   for p in . .spec .spec.provider .spec.provider.config; do
-    terms+="${terms:+, }(${p} | select(kind == \"map\") | keys[]), (${p} | select(kind == \"alias\") | ${deref} | select(kind == \"map\") | keys[])"
+    terms+="${terms:+, }(${p} | select(kind == \"map\") | keys[]), (${p} | select(kind == \"alias\") | ${PROVISION_YQ_DEREF} | select(kind == \"map\") | keys[])"
   done
-  local -r merge_spec="select(document_index == 0) | . as \$doc | [${terms}] | map(${is_merge}) | length"
-  local -r merge_file="select(document_index == 0) | [select(kind == \"map\") | keys[]] | map(${is_merge}) | length"
-  for dir in "${PATH_CLUSTERS}"/*/; do
-    [[ -d "${dir}" ]] || continue
-    other="$(basename "${dir}")"
+  local -r merge_spec="select(document_index == 0) | . as \$doc | [${terms}] | map(${PROVISION_YQ_IS_MERGE}) | length"
+  local -r merge_file="select(document_index == 0) | . as \$doc | [select(kind == \"map\") | keys[]] | map(${PROVISION_YQ_IS_MERGE}) | length"
+  for entry in "${PATH_CLUSTERS}"/*; do
+    other="${entry##*/}"
     [[ "${other}" != "${self}" && "${other}" != .* ]] || continue
+    # An entry that the glob lists but that neither stat nor lstat can
+    # read: the clusters dir has no search permission (Go: the Lstat fails
+    # with EACCES). The pattern itself stays when nothing matches.
+    if [[ ! -e "${entry}" && ! -L "${entry}" ]]; then
+      [[ "${entry}" != "${PATH_CLUSTERS}/"'*' ]] || continue
+      printf '%s\n' "${PATH_CLUSTERS}"
+      return 1
+    fi
+    # -d follows a link; a link to nothing is no domain.
+    [[ -d "${entry}" ]] || continue
+    if [[ ! -x "${entry}" ]]; then
+      printf '%s\n' "${entry}"
+      return 1
+    fi
+    dir="${entry}/"
     files=() names=() merge=""
     [[ ! -f "${dir}hetzner.json" ]] || files+=("${dir}hetzner.json")
     spec="${dir}cluster.lok8s.yaml"
     if [[ -f "${spec}" ]]; then
       merge+="$(yq -r "${merge_spec}" "${spec}" 2>/dev/null)"
-      ref="$(yq -r 'select(document_index == 0) | .spec.provider.configRef // ""' "${spec}" 2>/dev/null)" || ref=""
+      # When a later document does not parse, yq prints the value of the
+      # first one and exits 1. The Go twin reads the first document too
+      # (yaml.v3 stops after it), so the value counts and the status does
+      # not, as for the merge and the name reads.
+      ref="$(yq -r 'select(document_index == 0) | .spec.provider.configRef // ""' "${spec}" 2>/dev/null)"
+      if [[ -n "${ref}" ]] && unread="$(provision::_unsearchable "${entry}" "${ref}")"; then
+        printf '%s\n' "${unread}"
+        return 1
+      fi
       [[ -z "${ref}" || ! -f "${dir}${ref}" ]] || files+=("${dir}${ref}")
       names+=("$(yq -r 'select(document_index == 0) | .spec.provider.config.cluster_name // ""' "${spec}" 2>/dev/null)")
     fi
@@ -234,6 +255,43 @@ provision::_cluster_name_users() {
     return 2
   fi
   (( ${#users[@]} == 0 )) || printf '%s\n' "${users[@]}" | LC_ALL=C sort
+}
+
+# The merge-key rule of the cluster_name reads in yq (Go twin:
+# domain.IsMergeKey): a key whose text is "<<", quoted or not, or whose tag
+# is !!merge (yq merges such a key too). An alias counts with the node that
+# it names (PROVISION_YQ_DEREF), as a node of the path (the mapping) and as
+# a key (the key). That node is the last anchor of that name before the
+# alias, as yaml.v3 (the Go twin) resolves it. `...` visits the map keys
+# too, so an anchor on a key counts; `..` skips the keys. yq's keys does not
+# follow an alias, and explode(.) would apply the merge keys that the scans
+# count. Both expressions read $doc, the document: bind it first
+# (. as $doc). provision::_cluster_name_users and recover::_config_name use
+# them.
+# shellcheck disable=SC2016 # $doc, $a, $l and $c are yq variables, not shell ones
+PROVISION_YQ_DEREF='alias as $a | line as $l | column as $c | [$doc | ... | select(anchor == $a and (line < $l or (line == $l and column < $c)))] | select(length > 0) | .[-1]'
+PROVISION_YQ_IS_MERGE="(if kind == \"alias\" then (${PROVISION_YQ_DEREF}) else . end) | select(. == \"<<\" or tag == \"!!merge\")"
+
+# provision::_unsearchable <dir> <rel>: the first directory on the way from
+# <dir> (itself included) to the file <dir>/<rel> that exists but cannot be
+# searched, on stdout, and status 0. Status 1 when there is none: the walk
+# stops at a name that does not exist (Go twin: domain.regularIn, an Lstat
+# that fails with EACCES). The scan then cannot tell whether the file is
+# there.
+provision::_unsearchable() {
+  local p="${1%/}" rest="${2}" name
+  while [[ -n "${rest}" ]]; do
+    name="${rest%%/*}"
+    if [[ "${rest}" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+    [[ -n "${name}" ]] || continue
+    if [[ -d "${p}" && ! -x "${p}" ]]; then
+      printf '%s\n' "${p}"
+      return 0
+    fi
+    [[ -e "${p}/${name}" || -L "${p}/${name}" ]] || return 1
+    p+="/${name}"
+  done
+  return 1
 }
 
 # provision::_destroy_guard_skip <kind> <cluster_yaml> <provider_name>
@@ -375,7 +433,9 @@ provision::_destroy_guard() {
     return 3
   fi
   if (( rc != 0 )); then
-    provision::_guard_error "could not check if another domain has the cluster_name '${name}' of '${domain}'. Nothing was deleted. Run lo destroy again."
+    # The scan prints the directory that it cannot read.
+    local unread="${users:-${PATH_CLUSTERS}}"
+    provision::_guard_error "could not check if another domain has the cluster_name '${name}' of '${domain}': lo cannot read the directory ${unread}. Nothing was deleted. Make ${unread} a directory that you can read and search, then run lo destroy again."
     return 3
   fi
   if [[ -n "${users}" ]]; then

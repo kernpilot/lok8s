@@ -305,9 +305,12 @@ before anything is deleted:
    of the file, or `spec`, `spec.provider` or `spec.provider.config` of
    `cluster.lok8s.yaml`. YAML readers give different names for a merged
    `cluster_name`, so `lo` cannot compare it. Write `cluster_name` as a
-   literal key. A key with the tag `!!merge` is a merge key too, and an
-   alias on the path counts with the mapping that it names. The destroy
-   also stops when `lo` cannot list `clusters/`.
+   literal key. A key with the tag `!!merge` is a merge key too. An alias
+   on the path counts with the mapping that it names, and an alias as a key
+   counts with the key that it names. The destroy also stops when `lo`
+   cannot list or search a directory that it must read: `clusters/`, the
+   directory of a domain, or a directory on the way to a
+   `spec.provider.configRef` file. The message names that directory.
 3. The destroy lists the resources that the provider would delete. When a
    list fails, the destroy stops.
 4. On a terminal, type the `cluster_name` to continue. Off a terminal, pass

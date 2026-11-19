@@ -288,7 +288,8 @@ func TestWriteClusterSpecRefusesWhenTheClustersDirCannotBeRead(t *testing.T) {
 	if !errors.Is(err, ErrHandled) {
 		t.Fatalf("err = %v, want ErrHandled", err)
 	}
-	if want := "could not check if another domain uses the cluster name 'green' (the first label of green.cloud). Nothing was written. Run lo init cluster again."; !strings.Contains(stderr.String(), want) {
+	if want := "could not check if another domain uses the cluster name 'green' (the first label of green.cloud): lo cannot read the directory " + clusters +
+		". Nothing was written. Make " + clusters + " a directory that you can read and search, then run lo init cluster again."; !strings.Contains(stderr.String(), want) {
 		t.Errorf("stderr = %s, want %q", stderr.String(), want)
 	}
 	if _, err := os.Stat(filepath.Join(clusters, "green.cloud")); err == nil {

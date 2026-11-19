@@ -27,7 +27,12 @@ package domain
 // The rule is the one of the recover guard's own read (configClusterName):
 // a key whose text is "<<", quoted or not. A key with the explicit tag
 // !!merge (`!!merge base: *b`) is a merge key for yq too, so it counts. An
-// alias on the path counts with the mapping that it names.
+// alias on the path counts with the mapping that it names, and an alias as
+// a key with the key that it names.
+//
+// When the scan cannot read a directory that it must list or search, it
+// cannot tell the names of the other domains: an *UnreadableError, and the
+// guards refuse.
 
 import (
 	"errors"
@@ -57,12 +62,63 @@ func (e *MergeKeyError) Error() string {
 	return "the cluster config of: " + strings.Join(e.Domains, ", ") + " has a merge key (<<) on the path to a cluster name"
 }
 
+// UnreadableError: the cluster_name scan cannot read Dir, a directory that
+// it must list or search: the clusters dir (it cannot be listed, or an entry
+// in it cannot be read), the dir of a domain, or a dir on the way to its
+// configRef file. So the scan cannot tell the names of the other domains,
+// and the guards refuse (bash: the scan prints Dir and returns 1).
+type UnreadableError struct {
+	Dir string
+	Err error
+}
+
+func (e *UnreadableError) Error() string {
+	return "cannot read the directory " + e.Dir + ": " + e.Err.Error()
+}
+func (e *UnreadableError) Unwrap() error { return e.Err }
+
+// UnreadableDir is the Dir of an *UnreadableError in err, else fallback:
+// the directory that a guard names in its refusal.
+func UnreadableDir(err error, fallback string) string {
+	if ue := (*UnreadableError)(nil); errors.As(err, &ue) {
+		return ue.Dir
+	}
+	return fallback
+}
+
 // IsMergeKey: a key whose text is "<<" (a merge key, or the quoted text) or
-// whose tag is !!merge (bash: select(. == "<<" or tag == "!!merge")). The
-// rule of both cluster_name reads: this scan (mergeOnPath) and the recover
-// guard's own read of the provider config (configClusterName).
+// whose tag is !!merge, an alias key counting with the key that it names
+// (bash: PROVISION_YQ_IS_MERGE). The rule of both cluster_name reads: this
+// scan (mergeOnPath) and the recover guard's own read of the provider config
+// (configClusterName).
 func IsMergeKey(k *yaml.Node) bool {
-	return k.Value == "<<" || k.ShortTag() == "!!merge"
+	k = yqsem.Deref(k)
+	return k != nil && (k.Value == "<<" || k.ShortTag() == "!!merge")
+}
+
+// regularIn reports whether dir/rel is a regular file (fsutil.IsRegular: a
+// link counts by its target). It reads each name on the way from dir with
+// Lstat first: an Lstat that fails with EACCES means that the directory
+// before the name cannot be searched, so the scan cannot tell whether the
+// file is there. That is an *UnreadableError for that directory (bash:
+// provision::_unsearchable). A name that does not exist, or a file on the
+// way, is no file.
+func regularIn(dir, rel string) (bool, error) {
+	p := dir
+	for name := range strings.SplitSeq(rel, "/") {
+		if name == "" {
+			continue
+		}
+		next := p + "/" + name
+		if _, err := os.Lstat(next); err != nil {
+			if errors.Is(err, fs.ErrPermission) {
+				return false, &UnreadableError{Dir: p, Err: err}
+			}
+			return false, nil
+		}
+		p = next
+	}
+	return fsutil.IsRegular(filepath.Join(dir, rel)), nil
 }
 
 // mergeOnPath reports a merge key (IsMergeKey) in n or in a mapping on path
@@ -91,34 +147,42 @@ func mergeOnPath(n *yaml.Node, path ...string) bool {
 // an inline spec.provider.config (bash: yq -r '.cluster_name // ""' on each).
 // merge is true when a merge key is on the path to one of them: the top of
 // each file, and the top, spec, spec.provider and spec.provider.config of
-// the spec.
-func providerClusterNames(dir string, spec *yaml.Node) (names []string, merge bool) {
-	read := func(f string) {
-		n := yqsem.LoadNode(f)
+// the spec. An *UnreadableError when a directory on the way to a file
+// cannot be searched (regularIn).
+func providerClusterNames(dir string, spec *yaml.Node) (names []string, merge bool, err error) {
+	read := func(rel string) error {
+		ok, err := regularIn(dir, rel)
+		if err != nil || !ok {
+			return err
+		}
+		n := yqsem.LoadNode(filepath.Join(dir, rel))
 		merge = merge || mergeOnPath(n)
 		names = append(names, yqsem.Or(yqsem.MapGet(n, "cluster_name"), ""))
+		return nil
 	}
-	if f := filepath.Join(dir, "hetzner.json"); fsutil.IsRegular(f) {
-		read(f)
+	if err := read("hetzner.json"); err != nil {
+		return nil, false, err
 	}
 	if spec == nil {
-		return names, merge
+		return names, merge, nil
 	}
 	merge = merge || mergeOnPath(spec, "spec", "provider", "config")
 	if ref := yqsem.Or(yqsem.Lookup(spec, "spec", "provider", "configRef"), ""); ref != "" {
-		if f := filepath.Join(dir, ref); fsutil.IsRegular(f) {
-			read(f)
+		if err := read(ref); err != nil {
+			return nil, false, err
 		}
 	}
-	return append(names, yqsem.Or(yqsem.Lookup(spec, "spec", "provider", "config", "cluster_name"), "")), merge
+	return append(names, yqsem.Or(yqsem.Lookup(spec, "spec", "provider", "config", "cluster_name"), "")), merge, nil
 }
 
 // nameUsers lists the domains under clusters, other than self, for which
 // names(dir, spec) holds name. Sorted. A *MergeKeyError when names reports
-// a merge key for a domain. No clusters dir is no other domain; a clusters
-// dir that cannot be read is an error (bash: the scan returns 1), so the
-// guards refuse.
-func nameUsers(clusters, self, name string, names func(dir string, spec *yaml.Node) ([]string, bool)) ([]string, error) {
+// a merge key for a domain. No clusters dir is no other domain. An
+// *UnreadableError (bash: the scan prints the directory and returns 1), so
+// the guards refuse, when clusters cannot be listed, when an entry that it
+// lists cannot be read (clusters has no search permission: the Lstat fails
+// with EACCES), or when names cannot search a directory.
+func nameUsers(clusters, self, name string, names func(dir string, spec *yaml.Node) ([]string, bool, error)) ([]string, error) {
 	if name == "" {
 		return nil, nil
 	}
@@ -127,7 +191,7 @@ func nameUsers(clusters, self, name string, names func(dir string, spec *yaml.No
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, &UnreadableError{Dir: clusters, Err: err}
 	}
 	var users, merged []string
 	for _, e := range entries {
@@ -136,15 +200,29 @@ func nameUsers(clusters, self, name string, names func(dir string, spec *yaml.No
 			continue
 		}
 		dir := filepath.Join(clusters, other)
-		// fsutil.DirExists follows a link, as the bash glob clusters/*/ does.
+		if _, err := os.Lstat(dir); err != nil {
+			if errors.Is(err, fs.ErrPermission) {
+				return nil, &UnreadableError{Dir: clusters, Err: err}
+			}
+			continue
+		}
+		// fsutil.DirExists follows a link, as the bash -d does: a link to
+		// nothing is no domain.
 		if !fsutil.DirExists(dir) {
 			continue
 		}
 		var spec *yaml.Node
-		if f := filepath.Join(dir, "cluster.lok8s.yaml"); fsutil.IsRegular(f) {
-			spec = yqsem.LoadNode(f)
+		ok, err := regularIn(dir, "cluster.lok8s.yaml")
+		if err != nil {
+			return nil, err
 		}
-		got, merge := names(dir, spec)
+		if ok {
+			spec = yqsem.LoadNode(filepath.Join(dir, "cluster.lok8s.yaml"))
+		}
+		got, merge, err := names(dir, spec)
+		if err != nil {
+			return nil, err
+		}
 		switch {
 		case merge:
 			merged = append(merged, other)
@@ -173,12 +251,15 @@ func ProviderClusterNameUsers(clusters, self, name string) ([]string, error) {
 // cluster.lok8s.yaml. Sorted. A *MergeKeyError as ProviderClusterNameUsers,
 // and for a merge key in the top or the metadata of the spec too.
 func ClusterNameUsers(clusters, self, name string) ([]string, error) {
-	return nameUsers(clusters, self, name, func(dir string, spec *yaml.Node) ([]string, bool) {
-		names, merge := providerClusterNames(dir, spec)
+	return nameUsers(clusters, self, name, func(dir string, spec *yaml.Node) ([]string, bool, error) {
+		names, merge, err := providerClusterNames(dir, spec)
+		if err != nil {
+			return nil, false, err
+		}
 		if spec != nil {
 			merge = merge || mergeOnPath(spec, "metadata")
 			names = append(names, yqsem.Or(yqsem.Lookup(spec, "metadata", "name"), ""))
 		}
-		return names, merge
+		return names, merge, nil
 	})
 }

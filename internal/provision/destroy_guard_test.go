@@ -154,7 +154,8 @@ func TestDestroyGuardRefusesWhenTheClustersDirCannotBeRead(t *testing.T) {
 	d.Force, d.ConfirmCluster = true, "prod-a"
 	err := d.DispatchDestroy(t.Context(), "test.prod")
 	assertDeclinedNothingRan(t, err, log)
-	assertContains(t, errBuf.String(), "[error] could not check if another domain has the cluster_name 'prod-a' of 'test.prod'. Nothing was deleted. Run lo destroy again.")
+	assertContains(t, errBuf.String(), "[error] could not check if another domain has the cluster_name 'prod-a' of 'test.prod': lo cannot read the directory "+d.Paths.Clusters+
+		". Nothing was deleted. Make "+d.Paths.Clusters+" a directory that you can read and search, then run lo destroy again.")
 	refuteContains(t, errBuf.String(), "destroy deletes these resources")
 }
 

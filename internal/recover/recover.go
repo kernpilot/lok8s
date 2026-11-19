@@ -459,7 +459,8 @@ func (r *Runner) guardClusterName(ctx context.Context) error {
 		return ErrHandled
 	}
 	if err != nil {
-		ui.ErrorTo(w, "recover: could not check if another domain has the cluster_name '%s' of '%s'. Nothing was changed. Run lo recover again.", name, r.domain)
+		unread := domain.UnreadableDir(err, r.Paths.Clusters)
+		ui.ErrorTo(w, "recover: could not check if another domain has the cluster_name '%s' of '%s': lo cannot read the directory %s. Nothing was changed. Make %s a directory that you can read and search, then run lo recover again.", name, r.domain, unread, unread)
 		return ErrHandled
 	}
 	if len(users) == 0 {

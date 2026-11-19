@@ -24,6 +24,10 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
   # shellcheck source=/dev/null
   source "${_PROJECT_ROOT}/.lok8s/libs/recover"
+  # The lib imports libs/provision (its merge-key rule, PROVISION_YQ_IS_MERGE,
+  # and its scan); import is a no-op here.
+  # shellcheck source=/dev/null
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
 
   # Every fake appends its name to this file, so the parent can assert call order.
   export RECORD="${BATS_TEST_TMPDIR}/record"
@@ -808,7 +812,7 @@ _assert_refused() {
   run recover::_run "test.dom" 0 0 </dev/null
   chmod 0755 "${PATH_CLUSTERS}"
   assert_failure 1
-  assert_output --partial "[error] recover: could not check if another domain has the cluster_name 'shared' of 'test.dom'. Nothing was changed. Run lo recover again."
+  assert_output --partial "[error] recover: could not check if another domain has the cluster_name 'shared' of 'test.dom': lo cannot read the directory ${PATH_CLUSTERS}. Nothing was changed. Make ${PATH_CLUSTERS} a directory that you can read and search, then run lo recover again."
   run cat "${RECORD}"
   assert_output "resolve"
 }
@@ -919,6 +923,8 @@ _guard_row() {
   _guard_row "a merge key with a list" merge $'base: &b {x: 1}\n<<: [*b]\ncluster_name: a\n'
   _guard_row "a quoted << key" merge $'"<<": x\ncluster_name: a\n'
   _guard_row "a key with the explicit tag !!merge" merge $'x: 1\n!!merge base: {cluster_name: merged}\n'
+  _guard_row "an alias key that names a plain <<" merge $'x: &k <<\n*k : {cluster_name: merged}\ncluster_name: a\n'
+  _guard_row "an alias key that names a quoted <<" merge $'x: &k \'<<\'\n*k : {cluster_name: merged}\ncluster_name: a\n'
 }
 
 @test "recover guard: refuses a cluster_name that is not a text, and says to quote it" {
