@@ -343,9 +343,10 @@ SH
   chmod +x "${YQ_STUBS}/yq"
 }
 
-# _assert_name_refused <name>: kubeone::_yq_edit with <name> after the
-# expression returns 1 with its message, runs no yq and leaves the file as
-# it was.
+# _assert_name_refused <name> [<message part>]: kubeone::_yq_edit with
+# <name> after the expression returns 1 with <message part> (by default the
+# message of a name that is not a variable name), runs no yq and leaves the
+# file as it was.
 _assert_name_refused() {
   local saved_path="${PATH}"
   : > "${YQ_LOG}"
@@ -354,7 +355,7 @@ _assert_name_refused() {
   run kubeone::_yq_edit "${RW}/m.yaml" '.x = 1' "${1}"
   PATH="${saved_path}"
   [ "${status}" -eq 1 ] || { echo "name '${1}': status ${status}, want 1" >&2; return 1; }
-  assert_output --partial "kubeone::_yq_edit: an argument after the expression is not a variable name"
+  assert_output --partial "${2:-kubeone::_yq_edit: an argument after the expression is not a variable name}"
   [ ! -s "${YQ_LOG}" ] || { echo "name '${1}': yq ran" >&2; return 1; }
   cmp "${RW}/m.yaml" "${BATS_TEST_TMPDIR}/m.before" || { echo "name '${1}': the file changed" >&2; return 1; }
 }
@@ -416,11 +417,11 @@ if [[ "$(trap -p INT TERM HUP)" == "${before}" ]]; then echo "traps after failur
   # A nameref passes the name pattern, but the export follows it to the
   # variable that it names, here one of the helper's own.
   local -n fixture_ref=_ye_file
-  _assert_name_refused 'fixture_ref'
+  _assert_name_refused 'fixture_ref' "kubeone::_yq_edit: a nameref named fixture_ref is visible in the caller's scope (declare -pn lists it)"
   # An unset nameref (no target yet) is refused as well; `[[ -R name ]]`
   # is false for it.
   local -n fixture_unset_ref
-  _assert_name_refused 'fixture_unset_ref'
+  _assert_name_refused 'fixture_unset_ref' "kubeone::_yq_edit: a nameref named fixture_unset_ref is visible in the caller's scope (declare -pn lists it)"
   # Anti-vacuity of the anchors: a plain variable whose name is the start
   # of a nameref's name is not a nameref. It passes and reaches yq.
   local FIXTURE_P=8
@@ -775,14 +776,15 @@ echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s" "
   done
 }
 
-# _registry_array_case <declare arguments>: the registry merge under
-# localvar_inherit, with `declare <declare arguments>` in the caller. Bash
-# exports no array, so an inherited array local would give yq an empty
-# strenv(). The merge must return 1 with its message, before a cat of a
-# credential file and before the yq of the write (the stubs of
+# _registry_stops <message part> <declare arguments> <shell options>: the
+# registry merge in a child bash, with `declare <declare arguments>` in the
+# caller (no declare when empty). With "localvar_inherit" in <shell options>
+# the child turns that shopt on; with "no-compgen" it turns the compgen
+# builtin off (`enable -n compgen`), as in a bash without programmable
+# completion. The merge must return 1 with <message part>, before a cat of
+# a credential file and before the yq of the write (the stubs of
 # _count_stubs log both), and leave the manifest as it was (sha256).
-_registry_array_case() {
-  _need_localvar_inherit
+_registry_stops() {
   _registry_fixture 1
   local stubs="${BATS_TEST_TMPDIR}/stubs" work="${RW}/.kubeone.yaml.work" before
   _count_stubs "${stubs}" 'strenv(RUSER)'
@@ -792,29 +794,43 @@ _registry_array_case() {
   PATH="${stubs}:${PATH}"
   run bash -c 'import() { :; }
 source "$3/utils/verbose.sh"; source "$3/drivers/kubeone/config"
-shopt -s localvar_inherit
-declare $4
+[[ $5 != *localvar_inherit* ]] || shopt -s localvar_inherit
+[[ $5 != *no-compgen* ]] || enable -n compgen
+[[ -z $4 ]] || declare $4
 kubeone::_inject_registry_auth "$1" "$2"
-echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s" "${1}"
+echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s" "${2}" "${3}"
   PATH="${saved_path}"
   assert_success
-  assert_output --partial "is an array (an array of the caller, under localvar_inherit)"
+  assert_output --partial "${1}"
   assert_output --partial "the merge returned 1"
   _assert_no_credential_in_output
   [ ! -s "${ENV_LOG}" ] || { echo "a cat of a credential or the yq of the write ran ($(wc -l < "${ENV_LOG}") lines logged)" >&2; return 1; }
   [[ "$(sha256sum < "${work}")" == "${before}" ]] || { echo "the manifest changed" >&2; return 1; }
 }
 
+# _registry_array_case <declare arguments> <name> [<shell options>]: the
+# registry merge stops (_registry_stops) because compgen -A arrayvar lists
+# an array named <name>, the first of username, password, RUSER and RPASS
+# that is an array. <shell options> is "localvar_inherit" when omitted. The
+# scan sees only that an array of that name is in scope, not why, so the
+# message names no cause (no localvar_inherit).
+_registry_array_case() {
+  local opts="${3-localvar_inherit}"
+  [[ "${opts}" != *localvar_inherit* ]] || _need_localvar_inherit
+  _registry_stops "kubeone::_inject_registry_auth: an array named ${2} is visible in the caller's scope (compgen -A arrayvar lists it)" "${1}" "${opts}"
+  refute_output --partial "localvar_inherit"
+}
+
 @test "the registry merge stops before it reads a credential when the caller has indexed arrays RUSER and RPASS under localvar_inherit" {
-  _registry_array_case '-a RUSER RPASS'
+  _registry_array_case '-a RUSER RPASS' RUSER
 }
 
 @test "the registry merge stops before it reads a credential when the caller has associative arrays RUSER and RPASS under localvar_inherit" {
-  _registry_array_case '-A RUSER RPASS'
+  _registry_array_case '-A RUSER RPASS' RUSER
 }
 
 @test "the registry merge stops before it reads a credential when the caller has arrays username and password under localvar_inherit" {
-  _registry_array_case '-a username password'
+  _registry_array_case '-a username password' username
 }
 
 # One name a case: only that name is an array of the caller, so each empty
@@ -825,27 +841,40 @@ echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s" "
 # is listed with or without the empty value; the last case checks that
 # the merge refuses it too.
 @test "the registry merge stops before it reads a credential when only username is an indexed array of the caller, never assigned, under localvar_inherit" {
-  _registry_array_case '-a username'
+  _registry_array_case '-a username' username
 }
 
 @test "the registry merge stops before it reads a credential when only password is an indexed array of the caller, never assigned, under localvar_inherit" {
-  _registry_array_case '-a password'
+  _registry_array_case '-a password' password
 }
 
 @test "the registry merge stops before it reads a credential when only RUSER is an indexed array of the caller, never assigned, under localvar_inherit" {
-  _registry_array_case '-a RUSER'
+  _registry_array_case '-a RUSER' RUSER
 }
 
 @test "the registry merge stops before it reads a credential when only RPASS is an indexed array of the caller, never assigned, under localvar_inherit" {
-  _registry_array_case '-a RPASS'
+  _registry_array_case '-a RPASS' RPASS
 }
 
 @test "the registry merge stops before it reads a credential when only RPASS is an associative array of the caller, never assigned, under localvar_inherit" {
-  _registry_array_case '-A RPASS'
+  _registry_array_case '-A RPASS' RPASS
 }
 
 @test "the registry merge stops before it reads a credential when RUSER is an indexed array of the caller with no element (=()) under localvar_inherit" {
-  _registry_array_case '-a RUSER=()'
+  _registry_array_case '-a RUSER=()' RUSER
+}
+
+@test "the registry merge stops before it reads a credential when a plain local RUSER hides a set array RUSER of the caller (no localvar_inherit)" {
+  # Without localvar_inherit the local RUSER is a plain variable, but
+  # compgen -A arrayvar also lists the caller's array that it hides. The
+  # merge stops (fail closed), and the message says what the scan saw.
+  _registry_array_case '-a RUSER=(x)' RUSER ''
+}
+
+@test "the registry merge stops before it reads a credential in a bash without compgen" {
+  # Without compgen the arrays in scope cannot be listed, so the merge
+  # cannot check its names and stops (fail closed).
+  _registry_stops "kubeone::_inject_registry_auth: the arrays in scope cannot be listed (compgen -A arrayvar failed" '' no-compgen
 }
 
 @test "kubeone::_yq_edit refuses an array as a name argument, and runs no yq" {
@@ -853,8 +882,8 @@ echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s" "
   _yq_log_stub
   local -a FIXTURE_LIST=(x)
   local -A FIXTURE_MAP=([k]=x)
-  _assert_name_refused 'FIXTURE_LIST'
-  _assert_name_refused 'FIXTURE_MAP'
+  _assert_name_refused 'FIXTURE_LIST' "kubeone::_yq_edit: an array named FIXTURE_LIST is visible in the caller's scope (compgen -A arrayvar lists it)"
+  _assert_name_refused 'FIXTURE_MAP' "kubeone::_yq_edit: an array named FIXTURE_MAP is visible in the caller's scope (compgen -A arrayvar lists it)"
   # Anti-vacuity of the whole-name match: arrays whose names start or end
   # with the name of a scalar do not make the scalar refused. It reaches yq.
   local FIXTURE_S=9
@@ -868,6 +897,43 @@ echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s" "
   [ -s "${YQ_LOG}" ] || { echo "the stub logged no yq run" >&2; return 1; }
   run yq -r '.x' "${RW}/m.yaml"
   assert_output "9"
+}
+
+@test "kubeone::_yq_edit and kubeone::_yq_replace edit without names in a bash without compgen, and stop with a name" {
+  # A bash without programmable completion has no compgen builtin. The
+  # child bash turns the builtin off with `enable -n compgen`; then a call
+  # of compgen fails with "command not found" (127), as in such a bash. The
+  # inventory edits (kubeone::_yq_replace) and the audit-log and OIDC
+  # merges pass no names, so they need no compgen. A name cannot be
+  # checked without it: that call stops before yq runs (fail closed).
+  _yq_log_stub
+  : > "${YQ_LOG}"
+  local saved_path="${PATH}"
+  PATH="${YQ_STUBS}:${saved_path}"
+  run bash -c 'import() { :; }
+source "$2/utils/verbose.sh"; source "$2/drivers/kubeone/config"
+enable -n compgen || echo "enable -n compgen failed"
+if compgen -A arrayvar >/dev/null 2>&1; then echo "compgen still runs"; fi
+kubeone::_yq_edit "$1" ".x = 1"
+echo "the edit without names returned $?"
+kubeone::_yq_replace "$1" ".y = 2"
+echo "the replace returned $?"
+FIXTURE_N=3
+kubeone::_yq_edit "$1" ".z = strenv(FIXTURE_N)" FIXTURE_N
+echo "the edit with a name returned $?"' bash "${RW}/m.yaml" "${_PROJECT_ROOT}/.lok8s"
+  PATH="${saved_path}"
+  assert_success
+  refute_output --partial "enable -n compgen failed"
+  refute_output --partial "compgen still runs"
+  assert_output --partial "the edit without names returned 0"
+  assert_output --partial "the replace returned 0"
+  assert_output --partial "kubeone::_yq_edit: the arrays in scope cannot be listed (compgen -A arrayvar failed"
+  assert_output --partial "the edit with a name returned 1"
+  # yq ran for the two edits without names only.
+  [ "$(wc -l < "${YQ_LOG}")" -eq 2 ] || { echo "want 2 yq runs, got $(wc -l < "${YQ_LOG}")" >&2; return 1; }
+  run yq -r '[.x, .y, (.z // "unset")] | join(",")' "${RW}/m.yaml"
+  assert_output "1,2,unset"
+  _assert_only "${RW}" m.yaml
 }
 
 @test "the registry merge goes through when the caller has arrays whose names hold a checked name, and a scalar RUSER" {

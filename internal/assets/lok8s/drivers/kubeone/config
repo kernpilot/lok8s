@@ -407,7 +407,12 @@ kubeone::_inject_audit_log() {
 # would get an empty strenv() for one. An array that is declared and never
 # assigned is not listed and passes; it holds no value, so its name exports
 # nothing, as an empty variable does. An array assigned with no element
-# (=()) is listed and refused.
+# (=()) is listed and refused. compgen also lists an array of an outer scope
+# when a plain local of the same name hides it; such a name is refused too
+# (fail closed). The checks run only when names follow the expression: a
+# call without names needs no compgen and also edits in a bash without
+# programmable completion. In such a bash, a call with names stops before
+# yq runs (fail closed).
 # It does not use `yq -i`: yq -i writes through a temp file in TMPDIR, and
 # when its last write fails, it keeps that file there, a copy of the manifest
 # outside the work directory. Here the result stays in memory until the
@@ -426,20 +431,30 @@ kubeone::_yq_edit() {
   local +x +i +l +u _ye_file="${1}" _ye_expr="${2}" _ye_nl=$'\n' _ye_out _ye_n _ye_refs _ye_arrays \
     || { error "kubeone::_yq_edit: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
   shift 2
-  # declare -pn lists the nameref declarations without dereferencing them; a
-  # target's text (a name, or an array element with its subscript) is
-  # printed, never the referenced value.
-  _ye_refs="${_ye_nl}$(declare -pn)${_ye_nl}"
-  # compgen -A arrayvar lists the names of the arrays in scope, one a line.
-  _ye_arrays="${_ye_nl}$(compgen -A arrayvar)${_ye_nl}" \
-    || { error "kubeone::_yq_edit: the arrays in scope cannot be listed"; return 1; }
-  # The newline is in _ye_nl: shellcheck misreads $'\n' inside =~ (SC1011).
-  for _ye_n in "$@"; do
-    [[ "${_ye_n}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "${_ye_n}" != _ye_* && "${_ye_n}" != _ko_* ]] \
-      && [[ ! "${_ye_refs}" =~ ${_ye_nl}declare\ -[[:alpha:]]*n[[:alpha:]]*\ ${_ye_n}(=|${_ye_nl}) ]] \
-      && [[ "${_ye_arrays}" != *"${_ye_nl}${_ye_n}${_ye_nl}"* ]] \
-      || { error "kubeone::_yq_edit: an argument after the expression is not a variable name of the caller (_ye_* and _ko_* are reserved, a nameref or an array is refused)"; return 1; }
-  done
+  # The checks of the names run only when names follow the expression. A
+  # call without names exports nothing and needs no compgen, so it also
+  # edits in a bash without programmable completion.
+  if (( $# > 0 )); then
+    # declare -pn lists the nameref declarations without dereferencing them;
+    # a target's text (a name, or an array element with its subscript) is
+    # printed, never the referenced value.
+    _ye_refs="${_ye_nl}$(declare -pn)${_ye_nl}"
+    # compgen -A arrayvar lists the names of the arrays in scope, one a line.
+    # Without compgen the names cannot be checked, and the call stops.
+    _ye_arrays="${_ye_nl}$(compgen -A arrayvar)${_ye_nl}" \
+      || { error "kubeone::_yq_edit: the arrays in scope cannot be listed (compgen -A arrayvar failed; a bash without programmable completion has no compgen), so the names after the expression cannot be checked"; return 1; }
+    # The newline is in _ye_nl: shellcheck misreads $'\n' inside =~ (SC1011).
+    # A name is printed only after the first check: then it is a variable
+    # name, and the nameref and array scans saw it in scope.
+    for _ye_n in "$@"; do
+      [[ "${_ye_n}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && "${_ye_n}" != _ye_* && "${_ye_n}" != _ko_* ]] \
+        || { error "kubeone::_yq_edit: an argument after the expression is not a variable name of the caller (_ye_* and _ko_* are reserved)"; return 1; }
+      [[ ! "${_ye_refs}" =~ ${_ye_nl}declare\ -[[:alpha:]]*n[[:alpha:]]*\ ${_ye_n}(=|${_ye_nl}) ]] \
+        || { error "kubeone::_yq_edit: a nameref named ${_ye_n} is visible in the caller's scope (declare -pn lists it); a nameref is refused as a name after the expression"; return 1; }
+      [[ "${_ye_arrays}" != *"${_ye_nl}${_ye_n}${_ye_nl}"* ]] \
+        || { error "kubeone::_yq_edit: an array named ${_ye_n} is visible in the caller's scope (compgen -A arrayvar lists it); bash exports no array, so it is refused as a name after the expression"; return 1; }
+    done
+  fi
   # shellcheck disable=SC2163 # "$@" holds variable names, checked above: export them by name
   _ye_out=$([[ $# == 0 ]] || export -- "$@"; yq "${_ye_expr}" "${_ye_file}" && printf .) || return 1
   { printf '%s' "${_ye_out%.}" > "${_ye_file}"; } 2>/dev/null
@@ -551,15 +566,19 @@ kubeone::_inject_registry_auth() {
     # line make such a local a set array, which compgen -A arrayvar lists
     # (names only, never a value); without a value, a local that takes a
     # caller's array that is declared and never assigned is not listed. Then
-    # the merge stops before it reads a credential. The _ra_ locals hold the
-    # list.
+    # the merge stops before it reads a credential. compgen also lists a
+    # caller's set array that one of these locals hides as a plain variable
+    # (without localvar_inherit); the merge stops then too (fail closed). So
+    # the message says what compgen saw, not why. Without compgen (a bash
+    # without programmable completion) the merge stops as well. The _ra_
+    # locals hold the list.
     local +x +i +l +u ns="${sns:-provisioning}" username='' password='' RUSER='' RPASS='' _ra_nl=$'\n' _ra_arrays _ra_n \
       || { error "kubeone::_inject_registry_auth: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
     _ra_arrays="${_ra_nl}$(compgen -A arrayvar)${_ra_nl}" \
-      || { error "kubeone::_inject_registry_auth: the arrays in scope cannot be listed"; return 1; }
+      || { error "kubeone::_inject_registry_auth: the arrays in scope cannot be listed (compgen -A arrayvar failed; a bash without programmable completion has no compgen), so the merge stops before it reads a credential"; return 1; }
     for _ra_n in username password RUSER RPASS; do
       [[ "${_ra_arrays}" != *"${_ra_nl}${_ra_n}${_ra_nl}"* ]] \
-        || { error "kubeone::_inject_registry_auth: ${_ra_n} is an array (an array of the caller, under localvar_inherit)"; return 1; }
+        || { error "kubeone::_inject_registry_auth: an array named ${_ra_n} is visible in the caller's scope (compgen -A arrayvar lists it); bash exports no array, so the merge stops before it reads a credential"; return 1; }
     done
     username="$(cat "${secrets_dir}/Secret.${sname}.${ns}.username" 2>/dev/null || true)"
     password="$(cat "${secrets_dir}/Secret.${sname}.${ns}.password" 2>/dev/null || true)"
