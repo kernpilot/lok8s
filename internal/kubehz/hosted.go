@@ -259,8 +259,7 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 		return ErrHandled
 	}
 	if err := writePrivateFile(ctx, kubeconfigPath, kc); err != nil {
-		var refused privateFileError
-		if errors.As(err, &refused) {
+		if refused, ok := errors.AsType[privateFileError](err); ok {
 			c.errorf("%s", refused)
 		}
 		c.errorf("Failed to download kubeconfig for hosted cluster %s", clusterID)
