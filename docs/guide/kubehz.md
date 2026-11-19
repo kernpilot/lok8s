@@ -815,20 +815,22 @@ Properties worth knowing:
 - **Outbound-only.** The agent pushes; the platform never connects into your
   cluster and holds no credentials for it (only verifier hashes).
 - **Least-privilege RBAC.** The `kubehz-agent` ServiceAccount can read cluster
-  state: `get`/`list` on nodes and CSRs, `list` pods in `kube-system` only
+  state: `list` on nodes and CSRs, `list` pods in `kube-system` only
   (control-plane health), and `get` on the `/readyz` + `/version` API paths.
-  On top of that it holds `get`+`create` (never
-  `update`/`patch`/`delete`) on Secrets in its own `kubehz-system` namespace,
-  to bootstrap its identity Secret once. It reads no Secrets elsewhere and can rotate nothing. The
+  On top of that it holds `get` on its identity Secret and `create` on
+  Secrets (never `update`/`patch`/`delete`) in its own `kubehz-system`
+  namespace, to bootstrap that Secret once. It reads no other Secret and can
+  rotate nothing. The
   [assessment](#assessment-and-handover) adds read-only probe grants
-  (storageclasses, persistentvolumes, services `list`, webhook configuration
-  `list`, `get` on the one CAPI CRD, kube-system daemonset `list` + the
-  `kubeadm-config` ConfigMap). The agent keeps its markers (the assessment
-  send gate, the claim nonce and the desired-state validator) as annotations
-  on one ConfigMap, `kubehz-agent-state`, and `get`/`patch` on that ConfigMap
-  is its only write grant. It has no access to `kubehz-agent-config`, its
-  configuration: the pod gets it through `envFrom`, so the agent cannot change
-  its own API URL.
+  (`list` on storageclasses, persistentvolumes, services and webhook
+  configurations, `get` on the one CAPI CRD, kube-system daemonset `list` +
+  the `kubeadm-config` ConfigMap). The agent keeps its markers (the
+  assessment send gate, the claim nonce and the desired-state validator) as
+  annotations on one ConfigMap, `kubehz-agent-state`. `get`/`patch` on that
+  ConfigMap is its only grant that changes an existing object, and the
+  Secret `create` above is its only other write grant. It has no access to
+  `kubehz-agent-config`, its configuration: the pod gets it through
+  `envFrom`, so the agent cannot change its own API URL.
 - **Domain-keyed.** The payload's `clusterId` is the cluster domain, the same
   identity it registers under.
 - **Hardened.** Stock `alpine/k8s` image (pinned by digest), non-root, read-only

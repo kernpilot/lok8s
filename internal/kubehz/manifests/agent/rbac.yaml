@@ -8,22 +8,23 @@ metadata:
 rules:
   # nodes: the heartbeat's one node list, and the control-plane count of
   # the assessment. The agent reads no other core resource cluster-wide
-  # except the assessment probes below.
+  # except the assessment probes below. `list` only, here and for the CSRs,
+  # storageclasses and persistentvolumes: every call of the script on them
+  # is a list (`get --raw /api/v1/nodes`, `get <kind> -o json`, `get nodes
+  # -l …`), and none reads one object by name.
   - apiGroups:
       - ""
     resources:
       - nodes
     verbs:
-      - get
       - list
   - apiGroups:
       - certificates.k8s.io
     resources:
       - certificatesigningrequests
     verbs:
-      - get
       - list
-  # Assessment probes (handover contract §1) — read-only, list/get only:
+  # Assessment probes (handover contract §1), read-only: list, and one get:
   #   storageclasses          → storageClasses[] (name/provisioner/isDefault)
   #   persistentvolumes       → pvSummary (count + Gi grouped by provisioner)
   #   services (cluster-wide) → loadBalancers count (type=LoadBalancer)
@@ -37,14 +38,12 @@ rules:
     resources:
       - storageclasses
     verbs:
-      - get
       - list
   - apiGroups:
       - ""
     resources:
       - persistentvolumes
     verbs:
-      - get
       - list
   - apiGroups:
       - ""

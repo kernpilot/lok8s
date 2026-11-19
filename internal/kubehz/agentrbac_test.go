@@ -129,20 +129,22 @@ func agentRoles(t *testing.T) []rbacDoc {
 	return roles
 }
 
-// TestAgentClusterRoleIsTheScriptSet pins the ClusterRole rule by rule: core
-// nodes with get and list, and no namespaces or componentstatuses (the
-// script reads neither).
+// TestAgentClusterRoleIsTheScriptSet pins the ClusterRole rule by rule:
+// list only on nodes, CSRs, storageclasses and persistentvolumes (each call
+// of the script on them is a list, and TestHeartbeatKubectlCallsDoNotGrowWithTheCluster
+// refuses a call that reads one node), and no namespaces or
+// componentstatuses (the script reads neither).
 func TestAgentClusterRoleIsTheScriptSet(t *testing.T) {
 	t.Parallel()
 	core := []string{""}
-	gl := []string{"get", "list"}
+	list := []string{"list"}
 	want := []rbacRule{
-		{APIGroups: core, Resources: []string{"nodes"}, Verbs: gl},
-		{APIGroups: []string{"certificates.k8s.io"}, Resources: []string{"certificatesigningrequests"}, Verbs: gl},
-		{APIGroups: []string{"storage.k8s.io"}, Resources: []string{"storageclasses"}, Verbs: gl},
-		{APIGroups: core, Resources: []string{"persistentvolumes"}, Verbs: gl},
-		{APIGroups: core, Resources: []string{"services"}, Verbs: []string{"list"}},
-		{APIGroups: []string{"admissionregistration.k8s.io"}, Resources: []string{"validatingwebhookconfigurations", "mutatingwebhookconfigurations"}, Verbs: []string{"list"}},
+		{APIGroups: core, Resources: []string{"nodes"}, Verbs: list},
+		{APIGroups: []string{"certificates.k8s.io"}, Resources: []string{"certificatesigningrequests"}, Verbs: list},
+		{APIGroups: []string{"storage.k8s.io"}, Resources: []string{"storageclasses"}, Verbs: list},
+		{APIGroups: core, Resources: []string{"persistentvolumes"}, Verbs: list},
+		{APIGroups: core, Resources: []string{"services"}, Verbs: list},
+		{APIGroups: []string{"admissionregistration.k8s.io"}, Resources: []string{"validatingwebhookconfigurations", "mutatingwebhookconfigurations"}, Verbs: list},
 		{APIGroups: []string{"apiextensions.k8s.io"}, Resources: []string{"customresourcedefinitions"}, ResourceNames: []string{"clusters.cluster.x-k8s.io"}, Verbs: []string{"get"}},
 		{NonResourceURLs: []string{"/readyz", "/version"}, Verbs: []string{"get"}},
 	}
