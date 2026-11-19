@@ -315,7 +315,9 @@ registry::status() {
     local marker="${_c_err}✗${_c_off}" state="not running" repos=""
     if [[ -n "${container_on_network}" ]]; then
       local catalog
-      if catalog=$(curl -sf --connect-timeout 1 --max-time 2 "${endpoint}/v2/_catalog" 2>/dev/null); then
+      # -q first: curl reads no config file of the user. No credential, so
+      # no TLS helper (the allowlist of tests/lib/curl_gate.bash).
+      if catalog=$(curl -q -sf --connect-timeout 1 --max-time 2 "${endpoint}/v2/_catalog" 2>/dev/null); then
         marker="${_c_ok}✓${_c_off}"
         local n
         n=$(jq -r '.repositories | length' <<<"${catalog}" 2>/dev/null || echo "")

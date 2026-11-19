@@ -1208,7 +1208,8 @@ teardown() {
 # older than 7.73 does not look in XDG_CONFIG_HOME: that control is left
 # out, with a note. The pod runs the script with its own HOME and no
 # writable file system (cronjob.yaml), so -q there guards against a config
-# file in the image.
+# file in the image. The register carries a synthetic bind secret: the stub
+# logs bind=yes when that value is in the body (it never logs the value).
 @test "heartbeat: curl reads no config file of the user (register, beat, plain retry, desired poll)" {
   command -v python3 >/dev/null || skip "no python3"
   [[ -n "$(type -P curl)" ]] || skip "no curl"
@@ -1221,11 +1222,13 @@ teardown() {
     cat "${HEARTBEAT}"; } > "${real}"
   hex=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
   export STUB_AGENT_TOKEN="khz_agt_${hex}" STUB_CLAIM_CODE="khzc_${hex}" STUB_BEARER="khz_agt_${hex}"
+  export BIND_SECRET="${hex}${hex}${hex}${hex}"
+  export STUB_BIND_SECRET="${BIND_SECRET}"
   # The beat with the assessment gets a 400, the plain retry a 200.
   export STUB_ROUTES="${BATS_TEST_TMPDIR}/routes.json"
   cat > "${STUB_ROUTES}" <<'JSON'
 {
-  "POST /api/clusters/agent-register": {"code": 201, "body": {"ok": true}},
+  "POST /api/clusters/agent-register": {"code": 201, "bind_secret": true, "body": {"ok": true}},
   "POST /api/clusters/test.example.com/heartbeat": {"code": 200, "body": {"ok": true},
     "fail_if_body_has": "\"assessment\""},
   "GET /api/clusters/test.example.com/desired": {"code": 304, "headers": {"Etag": "\"7-100\""}}
@@ -1249,7 +1252,7 @@ JSON
     diff "${ref}.out" "${o}"
     diff "${ref}.err" "${e}"
     [ "${rc}" -eq "${ref_rc}" ]
-    run grep -qF -e "${STUB_AGENT_TOKEN}" -e "${STUB_CLAIM_CODE}" "${o}" "${e}"
+    run grep -qF -e "${STUB_AGENT_TOKEN}" -e "${STUB_CLAIM_CODE}" -e "${BIND_SECRET}" "${o}" "${e}"
     [ "${status}" -eq 1 ]
     if [[ "${var}" == XDG_CONFIG_HOME ]] && ! curl_reads_xdg; then
       echo "# no control for XDG_CONFIG_HOME: this curl is older than 7.73 and does not look there" >&3
@@ -1258,10 +1261,102 @@ JSON
       controls=$((controls + 1))
     fi
   done
-  [ "$(grep -c '^POST /api/clusters/agent-register none$' "${STUB_LOG}")" -eq 4 ]
+  [ "$(grep -c '^POST /api/clusters/agent-register none bind=yes$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^POST /api/clusters/test.example.com/heartbeat bearer$' "${STUB_LOG}")" -eq 8 ]
   [ "$(grep -c '^GET /api/clusters/test.example.com/desired bearer$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^GET /control none$' "${STUB_LOG}")" -eq "${controls}" ]
   [ "$(wc -l < "${STUB_LOG}")" -eq $((16 + controls)) ]
+  http_stub_stop
+}
+
+# ── the TLS log and trace controls (the real curl against a local server) ──
+# The pod gets each key of the agent ConfigMap as an environment variable
+# (envFrom), so the script clears the TLS log and trace controls itself
+# before its first curl call (the image has no utils/http.sh). The script
+# runs against the https stub with each name of _HTTP_TLS_LOG_VARS
+# (utils/http.sh) set and a spy for curl (tls_spy_on: a record of names,
+# never a value, then the real curl): the four calls (register, beat, plain
+# retry, desired poll) get none of them, each record has the control, and
+# no key log or trace file is written. The key log control first: this
+# curl writes a key log for a request to the same server when SSLKEYLOGFILE
+# reaches it. A curl that writes none leaves the record check alone. A
+# control request that does not get to the stub fails the test. Then a
+# readonly SSLKEYLOGFILE: the script stops with the line that names it,
+# curl does not run and no request reaches the stub.
+@test "heartbeat: curl gets no TLS log or trace variable, and a readonly one stops the script" {
+  command -v python3 >/dev/null || skip "no python3"
+  [[ -n "$(type -P curl)" ]] || skip "no curl"
+  [[ -n "$(command -v openssl)" ]] || skip "no openssl: the https stub needs a self-signed certificate"
+  source "${_PROJECT_ROOT}/.lok8s/utils/http.sh"
+  source "${_PROJECT_ROOT}/tests/lib/http_stub.bash"
+  local real="${BATS_TEST_TMPDIR}/run-spy-curl.sh" spy="${BATS_TEST_TMPDIR}/curl-env"
+  local o="${BATS_TEST_TMPDIR}/tls.stdout" e="${BATS_TEST_TMPDIR}/tls.stderr" hex name f before rc=0 kc=0
+  (( ${#_HTTP_TLS_LOG_VARS[@]} >= 6 ))
+  hex=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+  export STUB_AGENT_TOKEN="khz_agt_${hex}" STUB_CLAIM_CODE="khzc_${hex}" STUB_BEARER="khz_agt_${hex}"
+  export BIND_SECRET="${hex}${hex}${hex}${hex}"
+  export STUB_BIND_SECRET="${BIND_SECRET}"
+  export STUB_ROUTES="${BATS_TEST_TMPDIR}/routes.json"
+  cat > "${STUB_ROUTES}" <<'JSON'
+{
+  "POST /api/clusters/agent-register": {"code": 201, "bind_secret": true, "body": {"ok": true}},
+  "POST /api/clusters/test.example.com/heartbeat": {"code": 200, "body": {"ok": true},
+    "fail_if_body_has": "\"assessment\""},
+  "GET /api/clusters/test.example.com/desired": {"code": 304, "headers": {"Etag": "\"7-100\""}}
+}
+JSON
+  unset CURL_HOME XDG_CONFIG_HOME http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+  export HOME="${BATS_TEST_TMPDIR}/curlrc-none"
+  mkdir -p "${HOME}"
+  stub_cert
+  http_stub_start "${STUB_CERT}" "${STUB_KEY}"
+  export CURL_CA_BUNDLE="${STUB_CERT}" KUBEHZ_API_URL="https://127.0.0.1:${STUB_PORT}"
+  keylog_control || kc=$?
+  # 2: the control request did not get to the stub. That is a fault, not a skip.
+  [ "${kc}" -ne 2 ]
+  if (( kc != 0 )); then
+    echo "# this curl writes no TLS key log (its TLS backend ignores SSLKEYLOGFILE): the record check alone" >&3
+  fi
+  # The runner without the curl stub: the spy, then the real curl.
+  tls_spy_on "${spy}"
+  { cat "${_PROJECT_ROOT}/tests/lib/curl_capture.sh" "${BATS_TEST_TMPDIR}/stubs.sh"
+    echo 'unset -f curl'
+    declare -f curl
+    cat "${HEARTBEAT}"; } > "${real}"
+  unset -f curl
+  for name in "${_HTTP_TLS_LOG_VARS[@]}"; do
+    case "${name}" in
+      GNUTLS_DEBUG_LEVEL) export "${name}=9" ;;
+      SSLTRACE | SSLDEBUG) export "${name}=99" ;;
+      *) export "${name}=${BATS_TEST_TMPDIR}/tls.${name}" ;;
+    esac
+  done
+  export TLS_ENV_CONTROL=on
+  bash "${real}" > "${o}" 2> "${e}" || rc=$?
+  [ "${rc}" -eq 0 ]
+  grep -qx '{"ok":true}' "${o}"
+  [ "$(find "${spy}" -type f | wc -l)" -eq 4 ]
+  for f in "${spy}"/env.*; do
+    [ "$(cat "${f}")" = $'record\ncontrol' ]
+  done
+  for name in "${_HTTP_TLS_LOG_VARS[@]}"; do
+    [ ! -e "${BATS_TEST_TMPDIR}/tls.${name}" ]
+  done
+  [ "$(grep -c '^POST /api/clusters/agent-register none bind=yes$' "${STUB_LOG}")" -eq 1 ]
+  [ "$(grep -c '^POST /api/clusters/test.example.com/heartbeat bearer$' "${STUB_LOG}")" -eq 2 ]
+  [ "$(grep -c '^GET /api/clusters/test.example.com/desired bearer$' "${STUB_LOG}")" -eq 1 ]
+  find "${spy}" -type f -name 'env.*' -delete
+  before=$(wc -l < "${STUB_LOG}")
+  { echo 'readonly SSLKEYLOGFILE'; cat "${real}"; } > "${real}.ro"
+  rc=0
+  bash "${real}.ro" > "${o}" 2> "${e}" || rc=$?
+  [ "${rc}" -eq 1 ]
+  grep -qxF 'kubehz: SSLKEYLOGFILE is readonly, so the agent cannot clear it for curl: no request is sent' "${e}"
+  # That line only: the script stops at its check, before the unset that
+  # the readonly name would fail with a message of the shell.
+  [ "$(wc -l < "${e}")" -eq 1 ]
+  [ "$(find "${spy}" -type f | wc -l)" -eq 0 ]
+  [ "$(wc -l < "${STUB_LOG}")" -eq "${before}" ]
+  [ ! -e "${SSLKEYLOGFILE}" ]
   http_stub_stop
 }

@@ -104,6 +104,11 @@ kkp::api() {
   # Redact token from debug output
   debug "KKP API: ${method} ${url} (token=<redacted>)"
 
+  # A readonly TLS log or trace variable stops each call below before curl
+  # runs (http::tls_log_vars_unset). The check names it here; the loop
+  # would only see an empty answer.
+  http::tls_log_vars_ok || return 1
+
   local attempt=0 response http_code output
   while (( attempt < KKP_MAX_RETRIES )); do
     attempt=$(( attempt + 1 ))
@@ -113,9 +118,7 @@ kkp::api() {
     # log the bearer and the body, an output line would write the answer to
     # another file. curl obeys -q only as its first argument. In the
     # subshell, http::tls_log_vars_unset clears the TLS log and trace
-    # controls for curl only (utils/http.sh). A readonly name in that list
-    # stops the call before curl runs: the output is then empty, and the
-    # call fails with an empty HTTP status.
+    # controls for curl only (utils/http.sh).
     output=$(printf '%s\n' "${curl_config}" | (
       http::tls_log_vars_unset &&
         curl -q "${curl_args[@]}" "${url}" 2>&1

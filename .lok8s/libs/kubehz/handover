@@ -201,7 +201,7 @@ handover::fetch_snapshot() {
       # the reasons are in utils/http.sh). Each could give away the URL with
       # its signature, or the snapshot. A readonly name in the list stops
       # the download before curl runs.
-      ( umask 077 && http::tls_log_vars_unset && curl -q -fsSL "${location}" -o "${out}" ) || {
+      ( http::tls_log_vars_unset && umask 077 && curl -q -fsSL "${location}" -o "${out}" ) || {
         # Without the query: a presigned URL carries its signature there
         # (as the Go twin's stripQuery).
         error "handover: downloading the snapshot from ${location%%\?*} failed — download it yourself and re-run with --snapshot <file>"

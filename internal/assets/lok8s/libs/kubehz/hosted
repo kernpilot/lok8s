@@ -196,18 +196,27 @@ kubehz::provision_hosted() {
   kubehz::wait_for_cluster "${api_url}" "${cluster_id}" || return 1
 
   # Download kubeconfig
-  local kubeconfig_path="${PATH_BASE}/.kubeconfig/${domain}.yaml"
+  local kubeconfig_path="${PATH_BASE}/.kubeconfig/${domain}.yaml" kubeconfig_tmp
   mkdir -p "$(dirname "${kubeconfig_path}")"
+  # The download goes to a temp file beside the kubeconfig (0600: mktemp,
+  # under umask 077), and replaces the kubeconfig only when curl succeeds.
+  # A failed download leaves the old file as it was, and the kubeconfig is
+  # never readable by others, not even for a moment.
+  kubeconfig_tmp=$(umask 077 && mktemp "${kubeconfig_path}.XXXXXX") || {
+    error "Cannot create a temp file beside ${kubeconfig_path}"
+    return 1
+  }
   # -q first: an output line in a config file of the user would take the
   # kubeconfig. The subshell with http::tls_log_vars_unset: curl gets no TLS
   # log or trace control (utils/http.sh).
-  http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" | (
+  if ! http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" | (
     http::tls_log_vars_unset &&
       curl -q -K - -fsSL "${api_url}/api/clusters/${cluster_id}/kubeconfig"
-  ) > "${kubeconfig_path}" || {
+  ) > "${kubeconfig_tmp}" || ! mv -f -- "${kubeconfig_tmp}" "${kubeconfig_path}"; then
+    rm -f -- "${kubeconfig_tmp}"
     error "Failed to download kubeconfig for hosted cluster ${cluster_id}"
     return 1
-  }
+  fi
 
   debug "Hosted cluster ${domain} ready, kubeconfig at ${kubeconfig_path}"
 

@@ -500,7 +500,7 @@ func (c *Context) List(ctx context.Context) (int, error) {
 	catalogURL := scheme + "://" + net.ip + "/v2/_catalog"
 	fmt.Fprintf(c.Out, ":: cache registry @ %s\n", catalogURL)
 
-	// bash: `curl -s "$url" | jq . 2>/dev/null || curl -s "$url"` — run the
+	// bash: `curl -q -s "$url" | jq . 2>/dev/null || curl -q -s "$url"` — run the
 	// SAME pipeline through the Runner (only the same binaries guarantee
 	// byte-identical pretty-printing AND curl's own exit codes). Under
 	// pipefail a failed curl fails the pipeline even though jq succeeded on
@@ -509,12 +509,12 @@ func (c *Context) List(ctx context.Context) (int, error) {
 	// re-fetch prints it raw (yes, a second request — observable via the
 	// registry's access log, so preserved).
 	var body strings.Builder
-	curlErr := c.Runner.Run(ctx, execx.Cmd{Name: "curl", Args: []string{"-s", catalogURL},
+	curlErr := c.Runner.Run(ctx, execx.Cmd{Name: "curl", Args: []string{"-q", "-s", catalogURL},
 		Stdout: &body, Stderr: c.ErrOut})
 	jqErr := c.Runner.Run(ctx, execx.Cmd{Name: "jq", Args: []string{"."},
 		Stdin: strings.NewReader(body.String()), Stdout: c.Out, Stderr: io.Discard})
 	if curlErr != nil || jqErr != nil {
-		refetchErr := c.Runner.Run(ctx, execx.Cmd{Name: "curl", Args: []string{"-s", catalogURL},
+		refetchErr := c.Runner.Run(ctx, execx.Cmd{Name: "curl", Args: []string{"-q", "-s", catalogURL},
 			Stdout: c.Out, Stderr: c.ErrOut})
 		return execx.ExitCode(refetchErr), nil
 	}

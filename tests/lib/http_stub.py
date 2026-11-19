@@ -23,8 +23,11 @@ request, keyed "<METHOD> <path>" (the path as curl sends it, with the
 query). An entry is {"code": <status>, "body": <a string, or JSON that the
 server sends compact>, "headers": {<name>: <value>}}. With
 "fail_if_body_has": <text>, a request body that holds <text> gets
-"fail_code" (default 400) and no body. A key without the query matches too
-when the full path has no entry.
+"fail_code" (default 400) and no body. With "bind_secret": true, the log
+line of the request ends with " bind=yes" when the body holds
+"bindSecret":"<STUB_BIND_SECRET>" (a synthetic value of the test), else
+" bind=no". The log never holds the value. A key without the query
+matches too when the full path has no entry.
 
 Each request appends one line to <request-log>: the method, the path and the
 credential: "bearer" when the Authorization header is "Bearer " followed by
@@ -77,13 +80,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _answer(self):
         length = int(self.headers.get("Content-Length") or 0)
         data = self.rfile.read(length) if length else b""
-        log_line(f"{self.command} {self.path} {self._credential()}")
-
-        parts = self.path.split("?")[0].split("/")
-        code, body, headers = 404, compact({"ok": False}), {}
         routes = load_routes()
         route = routes.get(f"{self.command} {self.path}") or routes.get(
             f"{self.command} {self.path.split('?')[0]}")
+        bind = ""
+        if route is not None and route.get("bind_secret"):
+            secret = os.environ.get("STUB_BIND_SECRET", "")
+            want = f'"bindSecret":"{secret}"'.encode()
+            bind = " bind=yes" if secret and want in data else " bind=no"
+        log_line(f"{self.command} {self.path} {self._credential()}{bind}")
+
+        parts = self.path.split("?")[0].split("/")
+        code, body, headers = 404, compact({"ok": False}), {}
         if route is not None:
             code = route.get("code", 200)
             raw = route.get("body", "")

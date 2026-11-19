@@ -97,9 +97,11 @@ http::credential_ok() {
 
 # Unset the controls in the environment that make curl or its TLS library
 # write session keys, or a trace with plaintext, before a call that carries
-# a credential. Call it in the subshell that runs curl, so that the caller
-# keeps its environment:
+# a credential. Call it as the first command of the subshell that runs
+# curl, joined to curl with &&, so that the caller keeps its environment:
 #   ( http::tls_log_vars_unset && curl -q ... )
+# Each curl call of the bash tree has this form, except the calls in the
+# allowlist of tests/lib/curl_gate.bash (the source gate).
 # The list:
 #   SSLKEYLOGFILE        curl appends the TLS session keys to this file, for
 #                        each backend that has a key log. The keys decrypt a
@@ -113,14 +115,64 @@ http::credential_ok() {
 #                        NSS-backed curl, NSS built with DEBUG or TRACE). It
 #                        can hold the plaintext (a bearer, a signed URL).
 #                        Without SSLDEBUGFILE it goes to stderr.
-# One unset for the whole list: its status is 1 when any name in it is
-# readonly (it still unsets the others), so `&& curl` does not run curl.
-# The caller then gets that 1, not a status of curl.
+# A readonly name cannot be unset. The function then unsets the others,
+# prints one error line for each readonly name and returns 1, so
+# `&& curl` does not run curl. The caller then gets that 1, not a status
+# of curl.
 # Not covered: a curl or TLS library built to write keys or a trace by
 # itself (wolfSSL built with --enable-keylog-export, a debug build of a TLS
 # library), and an environment that an attacker controls (who sets the
 # environment can also set LD_PRELOAD).
+#
+# _HTTP_TLS_LOG_VARS is the one list. The tests read it, and tests compare
+# it with the two copies that cannot read this file: the Go list
+# (credentials.TLSLogVars) and the script of the agent CronJob
+# (libs/kubehz/manifests/agent/cronjob.yaml).
+_HTTP_TLS_LOG_VARS=(SSLKEYLOGFILE GNUTLS_KEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE)
+
 # Usage: http::tls_log_vars_unset
 http::tls_log_vars_unset() {
-  unset -v SSLKEYLOGFILE GNUTLS_KEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE
+  local _http_name _http_rc=0
+  for _http_name in "${_HTTP_TLS_LOG_VARS[@]}"; do
+    unset -v "${_http_name}" 2>/dev/null && continue
+    http::_tls_log_var_stop "${_http_name}"
+    _http_rc=1
+  done
+  return "${_http_rc}"
+}
+
+# http::tls_log_vars_readonly: print the names of the list that are
+# readonly here (one line, a space between two names). Status 1 when no
+# name is readonly. The probe of each name runs in a subshell, so the
+# function changes no variable.
+# Usage: names=$(http::tls_log_vars_readonly)
+http::tls_log_vars_readonly() {
+  local _http_name
+  local -a _http_found=()
+  for _http_name in "${_HTTP_TLS_LOG_VARS[@]}"; do
+    ( unset -v "${_http_name}" ) 2>/dev/null || _http_found+=("${_http_name}")
+  done
+  (( ${#_http_found[@]} > 0 )) || return 1
+  printf '%s\n' "${_http_found[*]}"
+}
+
+# http::tls_log_vars_ok: status 0 when no name of the list is readonly.
+# Else the same error line as http::tls_log_vars_unset for each readonly
+# name, and status 1. For a caller that sends the stderr of its curl call
+# to /dev/null: the check before the call shows the cause, and the
+# caller stops.
+# Usage: http::tls_log_vars_ok || return 1
+http::tls_log_vars_ok() {
+  local _http_name _http_rc=0
+  for _http_name in "${_HTTP_TLS_LOG_VARS[@]}"; do
+    ( unset -v "${_http_name}" ) 2>/dev/null && continue
+    http::_tls_log_var_stop "${_http_name}"
+    _http_rc=1
+  done
+  return "${_http_rc}"
+}
+
+# The error line for a readonly name of the list.
+http::_tls_log_var_stop() {
+  error "${1} is readonly, so lo cannot clear it for curl: the request does not run"
 }

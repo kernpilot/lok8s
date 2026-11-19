@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
-# curl_user_config_test.bats — each curl call of the bash tree that carries
-# a credential reads no config file of the user and gets no TLS log or
-# trace control.
+# curl_user_config_test.bats — each curl call of the bash tree reads no
+# config file of the user, and each call that carries a credential gets no
+# TLS log or trace control.
 #
 # Unless -q is its FIRST argument, curl reads one config file of the user:
 # $CURL_HOME/.curlrc, else $XDG_CONFIG_HOME/curlrc, else $HOME/.curlrc. A
@@ -13,17 +13,21 @@
 # http::tls_log_vars_unset (utils/http.sh).
 #
 # Two kinds of check:
-#   - the source gate (tests/lib/curl_gate.bash): every call with a
-#     credential in the bash tree passes -q first, and every one outside the
-#     agent CronJob runs after http::tls_log_vars_unset;
+#   - the source gate (tests/lib/curl_gate.bash): every curl call in the
+#     bash tree passes -q first, and every one outside the manifests runs
+#     as the first command after http::tls_log_vars_unset in its subshell,
+#     except the calls of the gate's allowlist (no credential, each named);
 #   - for each caller family, the real curl against a local server
 #     (tests/lib/http_stub.bash, 127.0.0.1 only): with a hostile config file
 #     in each place curl looks, no trace or output file appears and the
-#     result is the same as without one; with the six TLS log and trace
+#     result is the same as without one; with the TLS log and trace
 #     variables set, curl gets none of them and writes no key log, and a
-#     readonly one stops the call before curl runs.
-# The agent CronJob script has its config file case in
-# kubehz_heartbeat_test.bats: it runs in its own image, without utils/http.sh.
+#     readonly one stops the call before curl runs, with a line that names
+#     it.
+# The list of the TLS variables is _HTTP_TLS_LOG_VARS of utils/http.sh: the
+# tests read it there. The agent CronJob script has its cases in
+# kubehz_heartbeat_test.bats: it runs in its own image, without
+# utils/http.sh, and clears the same names itself.
 
 setup() {
   load "../test_helper"
@@ -59,7 +63,7 @@ setup() {
   export HOME="${BATS_TEST_TMPDIR}/home"
   unset CURL_HOME XDG_CONFIG_HOME CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR \
     http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY \
-    SSLKEYLOGFILE GNUTLS_KEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE
+    "${_HTTP_TLS_LOG_VARS[@]}"
 
   # One value for each credential.
   local hex
@@ -70,9 +74,11 @@ setup() {
   export KUBEHZ_AGENT_CLIENT_ID="client-rc" KUBEHZ_AGENT_CLIENT_SECRET="client-secret-${hex}"
   export AGENT_TOKEN_IN_CLUSTER="khz_agt_rc_${hex}"
   export STUB_BEARER="${KUBEHZ_TOKEN} ${HCLOUD_TOKEN} ${KKP_TOKEN} ${KUBEHZ_AGENT_BEARER}"
+  # A synthetic bind secret (64 hex, as the api mints it): the register
+  # bodies carry it, and the stub logs only whether it arrived.
+  export STUB_BIND_SECRET="${hex}${hex}${hex}${hex}"
   SECRETS=("${KUBEHZ_TOKEN}" "${HCLOUD_TOKEN}" "${KKP_TOKEN}" "${KUBEHZ_AGENT_BEARER}"
-    "${HROBOT_PASSWORD}" "${KUBEHZ_AGENT_CLIENT_SECRET}" "${AGENT_TOKEN_IN_CLUSTER}")
-  TLS_NAMES=(SSLKEYLOGFILE GNUTLS_KEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE)
+    "${HROBOT_PASSWORD}" "${KUBEHZ_AGENT_CLIENT_SECRET}" "${AGENT_TOKEN_IN_CLUSTER}" "${STUB_BIND_SECRET}")
 }
 
 teardown() {
@@ -82,29 +88,33 @@ teardown() {
 
 # ── the source gate ──────────────────────────────────────
 
-# The detection itself: the list of the calls with a credential that the
-# gate finds in the tree. Each caller family must be in it, and the count is
-# the number of such calls today (a new call raises it: then add the call
-# to a family case below). A broken pattern would list fewer calls and let
-# the two gates below pass on nothing.
-@test "curl gate: the detection finds each curl call with a credential in the bash tree" {
+# The detection itself: the curl calls that the gate finds in the tree. The
+# count is the number of calls today, and the second count the number of
+# them with a credential (a new call raises one: then give it -q and the
+# helper, and a family case below when it carries a credential). A broken
+# pattern would list fewer calls and let the gates below pass on nothing.
+@test "curl gate: the detection finds each curl call in the bash tree" {
   local -a files=()
   mapfile -t files < <(curl_gate_files)
   run curl_gate list "${files[@]}"
   assert_success
   local f
-  for f in libs/kubehz/main libs/kubehz/hosted libs/kubehz/agent libs/kubehz/shared \
-    drivers/kubeone/config drivers/kkp/api providers/hetzner/main libs/kubehz/manifests/agent/cronjob.yaml; do
+  for f in libs/kubehz/main libs/kubehz/hosted libs/kubehz/agent libs/kubehz/shared libs/kubehz/handover \
+    drivers/kubeone/config drivers/kkp/api providers/hetzner/main libs/kubehz/manifests/agent/cronjob.yaml \
+    libs/image drivers/lo/libs/registry; do
     assert_output --partial "/.lok8s/${f}:"
   done
-  [ "$(grep -c "/.lok8s/libs/kubehz/main:" <<<"${output}")" -eq 14 ]
-  [ "$(grep -c "/.lok8s/libs/kubehz/hosted:" <<<"${output}")" -eq 4 ]
-  [ "$(grep -c "/.lok8s/drivers/kubeone/config:" <<<"${output}")" -eq 2 ]
-  [ "$(grep -c "/.lok8s/libs/kubehz/manifests/agent/cronjob.yaml:" <<<"${output}")" -eq 4 ]
-  [ "${#lines[@]}" -eq 28 ]
+  [ "$(grep -c "/.lok8s/libs/kubehz/main:[0-9]* credential$" <<<"${output}")" -eq 14 ]
+  [ "$(grep -c "/.lok8s/libs/kubehz/hosted:[0-9]* credential$" <<<"${output}")" -eq 4 ]
+  [ "$(grep -c "/.lok8s/drivers/kubeone/config:[0-9]* credential$" <<<"${output}")" -eq 2 ]
+  [ "$(grep -c "/.lok8s/libs/kubehz/manifests/agent/cronjob.yaml:[0-9]* credential$" <<<"${output}")" -eq 4 ]
+  [ "$(grep -c "/.lok8s/providers/hetzner/cloud-init/cloud.d/ci/write_files/bootstrap/install-tools.sh:[0-9]*$" <<<"${output}")" -eq 6 ]
+  [ "$(grep -c "/.lok8s/libs/image:[0-9]*$" <<<"${output}")" -eq 2 ]
+  [ "$(grep -c ' credential$' <<<"${output}")" -eq 28 ]
+  [ "${#lines[@]}" -eq 40 ]
 }
 
-@test "curl gate: each curl call with a credential in the bash tree passes -q first" {
+@test "curl gate: each curl call in the bash tree passes -q first" {
   local -a files=()
   mapfile -t files < <(curl_gate_files)
   run curl_gate q "${files[@]}"
@@ -112,67 +122,118 @@ teardown() {
   assert_output ""
 }
 
-# The agent CronJob runs its script in its own image, without utils/http.sh.
-# Its environment is the manifest's (the pod spec and the agent ConfigMap),
-# not a user's shell, so the TLS gate leaves the manifests out.
-@test "curl gate: each curl call with a credential outside the manifests runs after http::tls_log_vars_unset" {
+# The agent CronJob runs its script in its own image, without utils/http.sh:
+# the gate leaves the files under manifests/ out of this rule, and the
+# script clears the same names itself (the drift case below). Each other
+# exception is an entry of the allowlist, which must name exactly one call
+# without a credential.
+@test "curl gate: each curl call outside the manifests runs after http::tls_log_vars_unset, or is in the allowlist" {
   local -a files=()
-  mapfile -t files < <(curl_gate_files | grep -v '/manifests/')
-  (( ${#files[@]} >= 15 ))
+  mapfile -t files < <(curl_gate_files)
   run curl_gate tls "${files[@]}"
   assert_success
   assert_output ""
+  [ "${#CURL_GATE_ALLOW[@]}" -eq 11 ]
 }
 
-# The anti-vacuity half: each canary breaks the rule in one way, and the
-# gate names its file and line. The compliant forms (and the forms that are
-# not a call with a credential) give no line.
+# The anti-vacuity half: each canary breaks a rule in one way, and the gate
+# names its file and line. The compliant forms (and the forms that are not
+# a curl call) give no line.
 @test "curl gate: each canary breaks the rule it shows, and the compliant forms pass" {
   local bad="${BATS_TEST_TMPDIR}/bad.sh" good="${BATS_TEST_TMPDIR}/good.sh"
   cat > "${bad}" <<'SH'
 curl -K - https://h.example/a
 x=$(printf '%s' "${c}" | curl -sS --config - https://h.example/b)
-curl -sS -H "Authorization: Bearer ${T}" https://h.example/c
-curl -sS -u "${U}:${P}" https://h.example/d
-http::curl_config header "Authorization: Bearer ${T}" |
-  curl -sS https://h.example/e
-printf '%s' "${body}" | curl -sS --data-binary @- https://h.example/f
-raw=$(printf '%s\n' "${b}" |
-  curl -sSL -X POST "https://h.example/g" \
-    -K <(http::curl_config header "Authorization: Bearer ${T}") \
-    --data-binary @-) || rc=$?
-if out=$(http::curl_config user "u:p" | command curl -K - https://h.example/h); then :; fi
-( true && curl -q -K - https://h.example/i )
+curl -sS https://h.example/c
+args=(-u "${U}:${P}")
+curl "${args[@]}" "${url}"
+c=curl
+"${c}" -K - https://h.example/d
+timeout 5 curl -K - https://h.example/e
+FOO=1 curl -sS https://h.example/f
+\curl -sS https://h.example/g
+/usr/bin/curl -sS https://h.example/h
+command curl -K - https://h.example/i
+env -u X curl -sS https://h.example/j
+printf '%s\n' https://h.example/k | xargs curl -sS
+exec curl -sS https://h.example/l
+local tool="/usr/bin/curl"
+"${CURL:-curl}" -sS https://h.example/m
+      - curl -fsSL https://h.example/n
+true | http::tls_log_vars_unset && curl -q -K - "${url}"
+( http::tls_log_vars_unset; curl -q -K - "${url}" )
+http::tls_log_vars_unset && ( curl -q -K - "${url}" )
+( true && http::tls_log_vars_unset && curl -q -K - "${url}" )
+x=$( http::tls_log_vars_unset && curl -q -K - "${url}" )
+( http::tls_log_vars_unset || true && curl -q -K - "${url}" )
+( http::tls_log_vars_unset && foo | curl -q -sS "${url}" )
 SH
   cat > "${good}" <<'SH'
 # curl -K - https://h.example/n1
 echo "  curl -X POST https://h.example/n2 -H 'Authorization: Bearer <token>' \\"
-curl -sS https://h.example/n3
+echo "heartbeat failed (curl rc=${rc}); retrying" >&2
 local -a curl_args=(
   --config -
 )
 error "a value for the curl option holds a control character"
+command -v curl >/dev/null
+apt-get -y install jq curl gnupg
 x=$(http::curl_config header "Authorization: Bearer ${T}" | (
   http::tls_log_vars_unset &&
     curl -q -K - -fsSL \
       https://h.example/n4
 ) ) || x=""
-( umask 077 && http::tls_log_vars_unset && curl -q -sS -u "${U}:${P}" https://h.example/n5 )
+( http::tls_log_vars_unset && umask 077 && curl -q -sS -u "${U}:${P}" https://h.example/n5 )
+( http::tls_log_vars_unset && command curl -q -sS https://h.example/n6 )
+( http::tls_log_vars_unset && timeout 5 curl -q -sS https://h.example/n7 )
+if out=$(printf '%s' "${b}" | ( http::tls_log_vars_unset && curl -q -sS --data-binary @- https://h.example/n8 )); then :; fi
 SH
+  local q="a curl call: -q is not its first argument"
+  local v="curl named through a variable: the gate cannot check that call"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
   run curl_gate q "${bad}"
   assert_failure 1
-  assert_output "${bad}:1: a curl call with a credential: -q is not its first argument
-${bad}:2: a curl call with a credential: -q is not its first argument
-${bad}:3: a curl call with a credential: -q is not its first argument
-${bad}:4: a curl call with a credential: -q is not its first argument
-${bad}:6: a curl call with a credential: -q is not its first argument
-${bad}:7: a curl call with a credential: -q is not its first argument
-${bad}:9: a curl call with a credential: -q is not its first argument
-${bad}:12: a curl call with a credential: -q is not its first argument"
+  assert_output "${bad}:1: ${q}
+${bad}:2: ${q}
+${bad}:3: ${q}
+${bad}:5: ${q}
+${bad}:6: ${v}
+${bad}:8: ${q}
+${bad}:9: ${q}
+${bad}:10: ${q}
+${bad}:11: ${q}
+${bad}:12: ${q}
+${bad}:13: ${q}
+${bad}:14: ${q}
+${bad}:15: ${q}
+${bad}:16: ${v}
+${bad}:17: ${v}
+${bad}:18: ${q}"
   run curl_gate tls "${bad}"
   assert_failure 1
-  [ "${#lines[@]}" -eq 9 ]
-  assert_line "${bad}:13: a curl call with a credential does not run after http::tls_log_vars_unset &&"
+  assert_output "${bad}:1: ${t}
+${bad}:2: ${t}
+${bad}:3: ${t}
+${bad}:5: ${t}
+${bad}:6: ${v}
+${bad}:8: ${t}
+${bad}:9: ${t}
+${bad}:10: ${t}
+${bad}:11: ${t}
+${bad}:12: ${t}
+${bad}:13: ${t}
+${bad}:14: ${t}
+${bad}:15: ${t}
+${bad}:16: ${v}
+${bad}:17: ${v}
+${bad}:18: ${t}
+${bad}:19: ${t}
+${bad}:20: ${t}
+${bad}:21: ${t}
+${bad}:22: ${t}
+${bad}:23: ${t}
+${bad}:24: ${t}
+${bad}:25: ${t}"
   run curl_gate q "${good}"
   assert_success
   assert_output ""
@@ -180,10 +241,56 @@ ${bad}:12: a curl call with a credential: -q is not its first argument"
   assert_success
   assert_output ""
   run curl_gate list "${good}"
-  assert_output "${good}:10
-${good}:13"
+  assert_output "${good}:12 credential
+${good}:15 credential
+${good}:16
+${good}:17
+${good}:18 credential"
   run curl_gate x "${good}"
   assert_failure 2
+}
+
+# The allowlist: an entry exempts exactly one call of its file from the
+# helper rule. A call in the allowlist that carries a credential (here only
+# -K: each credential form must count) is a finding, and so is an entry
+# that names no call or more than one. An entry for a file that the run
+# does not read is not checked.
+@test "curl gate: an allowlist entry names exactly one call, and that call carries no credential" {
+  local f="${BATS_TEST_TMPDIR}/allow.sh"
+  cat > "${f}" <<'SH'
+curl -q -sS https://h.example/a1
+curl -q -K "${cfg}" https://h.example/a2
+curl -q -sS https://h.example/a3
+curl -q -sS https://h.example/a4
+SH
+  CURL_GATE_ALLOW=()
+  curl_gate_allow allow.sh '@@curl -q -sS https://h\.example/a1' "a canary"
+  curl_gate_allow allow.sh '@@curl -q -K "\$\{cfg\}" https://h\.example/a2' "a canary"
+  curl_gate_allow allow.sh 'https://h\.example/a[34]' "a canary"
+  curl_gate_allow allow.sh 'https://h\.example/gone' "a canary"
+  curl_gate_allow other.sh 'https://h\.example/a1' "a canary"
+  run curl_gate tls "${f}"
+  assert_failure 1
+  assert_output "${f}:2: a curl call in the allowlist carries a credential
+allow.sh: the allowlist entry /https://h\.example/a[34]/ matches 2 curl calls, want 1
+allow.sh: the allowlist entry /https://h\.example/gone/ matches 0 curl calls, want 1"
+  run curl_gate_allow allow.sh 'x'
+  assert_failure 2
+}
+
+# One list of the TLS log and trace variables: _HTTP_TLS_LOG_VARS of
+# utils/http.sh. The agent CronJob cannot read that file, so its script
+# holds a copy: the same names in the same order, cleared before its first
+# curl call. (The Go copy is checked by TestTLSLogVarsMatchBash.)
+@test "the TLS list: the agent CronJob clears the names of utils/http.sh before its first curl call" {
+  local yaml="${_PROJECT_ROOT}/.lok8s/libs/kubehz/manifests/agent/cronjob.yaml" list first_unset first_curl
+  (( ${#_HTTP_TLS_LOG_VARS[@]} >= 6 ))
+  list=$(sed -n 's/^ *TLS_LOG_VARS="\([^"]*\)"$/\1/p' "${yaml}")
+  [ "${list}" = "${_HTTP_TLS_LOG_VARS[*]}" ]
+  first_unset=$(grep -n '^ *unset \${TLS_LOG_VARS}' "${yaml}" | head -1 | cut -d: -f1)
+  first_curl=$(grep -nE '^ *curl -q ' "${yaml}" | head -1 | cut -d: -f1)
+  [ -n "${first_unset}" ] && [ -n "${first_curl}" ]
+  (( first_unset < first_curl ))
 }
 
 # ── the family cases: helpers ────────────────────────────
@@ -201,7 +308,7 @@ _routes() {
   export STUB_ROUTES="${BATS_TEST_TMPDIR}/routes.json"
   cat > "${STUB_ROUTES}" <<'JSON'
 {
-  "POST /api/clusters/register": {"code": 201, "body": {"id": "cl-1", "registered": true, "claimed": true,
+  "POST /api/clusters/register": {"code": 201, "bind_secret": true, "body": {"id": "cl-1", "registered": true, "claimed": true,
     "claimKey": {"publicKey": "ssh-ed25519 AAAA k", "fingerprint": "aa:bb", "name": "kubehz-claim-d.example"}}},
   "POST /api/credentials": {"code": 200, "body": {"data": {"validation": {"writable": true}}}},
   "GET /api/clusters?perPage=500": {"code": 200, "body": {"ok": true, "data": [{"id": "cl-1", "domain": "d.example",
@@ -311,62 +418,77 @@ _curlrc_case() {
   done
 }
 
-# _tls_case <flow> <calls> <one>: the TLS log and trace controls. The key
-# log control first (keylog_control): this curl writes a key log for a
-# request to the same server when SSLKEYLOGFILE reaches it. A curl that
-# writes none leaves only the record check below, which needs no key log.
-# A control request that does not get to the stub fails the case. Then
-# <flow> runs with the six variables set and a spy for curl that records
-# its environment and runs the real curl: <calls> records, none with one of
-# the six names, each with the control variable (an empty record would pass
-# otherwise), no key log, and the caller keeps all six. Then <one> (a single
-# call) runs with a readonly SSLKEYLOGFILE: bash says that it cannot unset
-# it, the call fails, curl does not run and no request reaches the stub.
+# _tls_value <name>: the value of a TLS variable in the cases below: a
+# level for the debug levels, else a file in the test dir (no case writes
+# it unless curl gets the variable).
+_tls_value() {
+  case "${1}" in
+    GNUTLS_DEBUG_LEVEL) echo 9 ;;
+    SSLTRACE | SSLDEBUG) echo 99 ;;
+    *) echo "${BATS_TEST_TMPDIR}/tls.${1}" ;;
+  esac
+}
+
+# _tls_case <flow> <calls> <one>: the TLS log and trace controls, for each
+# name of _HTTP_TLS_LOG_VARS (utils/http.sh). The key log control first
+# (keylog_control): this curl writes a key log for a request to the same
+# server when SSLKEYLOGFILE reaches it. A curl that writes none leaves only
+# the record check below, which needs no key log. A control request that
+# does not get to the stub fails the case. Then <flow> runs with each name
+# set and a spy for curl (tls_spy_on: a record of names, never a value,
+# then the real curl): <calls> records, none with a name of the list, each
+# with the control (an empty record would pass otherwise), no file of a
+# name written, and the caller keeps each name with its value. Then <one>
+# (a single call) runs twice: as it is, where it must succeed and run curl
+# (so the next failure has the stop as its cause), then with a readonly
+# SSLKEYLOGFILE: the call fails with the line that names the variable,
+# curl does not run and no request reaches the stub.
 _tls_case() {
   local flow="${1}" calls="${2}" one="${3}" kc=0 rc=0 before name f
   local o="${BATS_TEST_TMPDIR}/tls.stdout" e="${BATS_TEST_TMPDIR}/tls.stderr"
+  (( ${#_HTTP_TLS_LOG_VARS[@]} >= 6 ))
   keylog_control "${CONTROL_URL}" || kc=$?
   # 2: the control request did not get to the stub. That is a fault, not a skip.
   [ "${kc}" -ne 2 ]
   if (( kc != 0 )); then
     echo "# this curl writes no TLS key log (its TLS backend ignores SSLKEYLOGFILE): the record check alone" >&3
   fi
-  export CURL_ENV_DIR="${BATS_TEST_TMPDIR}/curl-env"
-  mkdir -p "${CURL_ENV_DIR}"
-  curl() {
-    command env > "$(command mktemp "${CURL_ENV_DIR}/env.XXXXXX")"
-    command curl "$@"
-  }
-  export -f curl
-  export SSLKEYLOGFILE="${BATS_TEST_TMPDIR}/tls.keys" GNUTLS_KEYLOGFILE="${BATS_TEST_TMPDIR}/gnutls.keys" \
-    GNUTLS_DEBUG_LEVEL=9 SSLTRACE=99 SSLDEBUG=99 SSLDEBUGFILE="${BATS_TEST_TMPDIR}/nss.trace" TLS_ENV_CONTROL=on
+  local spy="${BATS_TEST_TMPDIR}/curl-env"
+  tls_spy_on "${spy}"
+  for name in "${_HTTP_TLS_LOG_VARS[@]}"; do
+    export "${name}=$(_tls_value "${name}")"
+  done
+  export TLS_ENV_CONTROL=on
   "${flow}" > "${o}" 2> "${e}" || rc=$?
   [ "${rc}" -eq 0 ]
   [ "$(grep -c '^== .*: rc=[^0]' "${o}")" -eq 0 ]
-  [ ! -e "${SSLKEYLOGFILE}" ]
-  [ ! -e "${GNUTLS_KEYLOGFILE}" ]
-  [ ! -e "${SSLDEBUGFILE}" ]
+  for name in "${_HTTP_TLS_LOG_VARS[@]}"; do
+    [ ! -e "${BATS_TEST_TMPDIR}/tls.${name}" ]
+  done
   _no_secret "${o}" "${e}"
-  [ "$(find "${CURL_ENV_DIR}" -type f | wc -l)" -eq "${calls}" ]
-  for f in "${CURL_ENV_DIR}"/env.*; do
-    grep -qx 'TLS_ENV_CONTROL=on' "${f}"
-    for name in "${TLS_NAMES[@]}"; do
-      [ "$(grep -c "^${name}=" "${f}")" -eq 0 ]
-    done
+  [ "$(find "${spy}" -type f | wc -l)" -eq "${calls}" ]
+  for f in "${spy}"/env.*; do
+    [ "$(head -1 "${f}")" = record ]
+    grep -qx control "${f}"
+    [ "$(wc -l < "${f}")" -eq 2 ]
   done
   # The caller keeps each one, with its value, as an export.
-  for name in "${TLS_NAMES[@]}"; do
+  for name in "${_HTTP_TLS_LOG_VARS[@]}"; do
     [[ "$(declare -p "${name}")" == "declare -x ${name}="* ]]
+    [ "${!name}" = "$(_tls_value "${name}")" ]
   done
-  [ "${SSLKEYLOGFILE}|${GNUTLS_KEYLOGFILE}|${GNUTLS_DEBUG_LEVEL}|${SSLTRACE}|${SSLDEBUG}|${SSLDEBUGFILE}" = \
-    "${BATS_TEST_TMPDIR}/tls.keys|${BATS_TEST_TMPDIR}/gnutls.keys|9|99|99|${BATS_TEST_TMPDIR}/nss.trace" ]
-  find "${CURL_ENV_DIR}" -type f -name 'env.*' -delete
+  find "${spy}" -type f -name 'env.*' -delete
+  rc=0
+  ( "${one}" ) > "${o}" 2> "${e}" || rc=$?
+  [ "${rc}" -eq 0 ]
+  [ "$(find "${spy}" -type f | wc -l)" -ge 1 ]
+  find "${spy}" -type f -name 'env.*' -delete
   before=$(wc -l < "${STUB_LOG}")
   rc=0
   ( readonly SSLKEYLOGFILE && "${one}" ) > "${o}" 2> "${e}" || rc=$?
   [ "${rc}" -ne 0 ]
-  grep -qF 'unset: SSLKEYLOGFILE: cannot unset: readonly variable' "${e}"
-  [ "$(find "${CURL_ENV_DIR}" -type f | wc -l)" -eq 0 ]
+  grep -qF 'SSLKEYLOGFILE is readonly, so lo cannot clear it for curl: the request does not run' "${e}"
+  [ "$(find "${spy}" -type f | wc -l)" -eq 0 ]
   [ "$(wc -l < "${STUB_LOG}")" -eq "${before}" ]
   [ ! -e "${SSLKEYLOGFILE}" ]
 }
@@ -404,8 +526,8 @@ YAML
 # the family. HCLOUD_TOKEN only for the token connect, so deregister leaves
 # the claim key alone (the Hetzner Cloud family).
 _kubehz_api_flow() {
-  printf '%s' '{"domain":"d.example"}' | _step "register (bearer)" kubehz::register_post d.example "${API}" "lo next" bearer
-  printf '%s' '{"domain":"d.example"}' | _step "register" kubehz::register_post d.example "${API}" "lo next"
+  _register_body | _step "register (bearer)" kubehz::register_post d.example "${API}" "lo next" bearer
+  _register_body | _step "register" kubehz::register_post d.example "${API}" "lo next"
   ( export HCLOUD_TOKEN LOK8S_KUBEHZ_CONNECT_TOKEN=true &&
     _step "direct claim" kubehz::direct_claim d.example "${YAML}" "${API}" )
   ( unset HCLOUD_TOKEN &&
@@ -416,17 +538,25 @@ _kubehz_api_flow() {
 }
 
 _kubehz_api_one() {
-  printf '%s' '{"domain":"d.example"}' | kubehz::register_post d.example "${API}" "lo next" bearer
+  _register_body | kubehz::register_post d.example "${API}" "lo next" bearer
+}
+
+# The body of a register with the synthetic bind secret: the stub logs
+# bind=yes only when it arrives (the route has "bind_secret": true).
+_register_body() {
+  printf '{"domain":"d.example","bindSecret":"%s"}' "${STUB_BIND_SECRET}"
 }
 
 @test "kubehz api: curl reads no config file of the user" {
   _need_real_curl
   _kubehz_api_setup
   _curlrc_case _kubehz_api_flow 7
-  # Each run: 3 registers (2 with the bearer), the token connect, 4 lists,
-  # the assessment, the agent token and the delete.
-  [ "$(grep -c '^POST /api/clusters/register bearer$' "${STUB_LOG}")" -eq 8 ]
-  [ "$(grep -c '^POST /api/clusters/register none$' "${STUB_LOG}")" -eq 4 ]
+  # Each run: 3 registers (2 with the bearer; the two of the fixture carry
+  # the bind secret, the direct claim has none), the token connect, 4
+  # lists, the assessment, the agent token and the delete.
+  [ "$(grep -c '^POST /api/clusters/register bearer bind=yes$' "${STUB_LOG}")" -eq 4 ]
+  [ "$(grep -c '^POST /api/clusters/register bearer bind=no$' "${STUB_LOG}")" -eq 4 ]
+  [ "$(grep -c '^POST /api/clusters/register none bind=yes$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^POST /api/credentials bearer$' "${STUB_LOG}")" -eq 4 ]
   [ "$(grep -c '^GET /api/clusters?perPage=500 bearer$' "${STUB_LOG}")" -eq 16 ]
   [ "$(grep -c '^GET /api/clusters/cl-1/assessment bearer$' "${STUB_LOG}")" -eq 4 ]
@@ -451,10 +581,16 @@ _hcloud_flow() {
   _step deregister kubehz::deregister_cluster d.example "${YAML}"
 }
 
-# The hcloud lookup of deregister alone: the api part refuses the plain
-# http URL first (a dead end), and the claim key cleanup still runs.
+# The Hetzner Cloud calls of the claim key alone: the register answer is
+# given (kubehz::register_post is replaced in the subshell of the case), so
+# the first curl call is the key lookup. Its status is the status of the
+# upload, the last call: without the stop it succeeds.
 _hcloud_one() {
-  LOK8S_KUBEHZ_API_URL="http://127.0.0.1:9" kubehz::deregister_cluster d.example "${YAML}"
+  kubehz::register_post() {
+    cat > /dev/null
+    printf '%s' '{"id":"cl-1","claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"aa:bb","name":"kubehz-claim-d.example"}}'
+  }
+  kubehz::ensure_claim_key d.example "${API}"
 }
 
 @test "hetzner cloud: curl reads no config file of the user" {
@@ -578,6 +714,47 @@ _hosted_setup() {
   _tls_case _hosted_flow 5 _hosted_one
 }
 
+# The kubeconfig download goes to a temp file beside the kubeconfig, which
+# is 0600 from its creation (also under umask 022), and replaces the
+# kubeconfig only after curl succeeded. A spy for curl records the mode of
+# its stdout when that is a file (the download; the other calls write to a
+# pipe). A failed download (HTTP 500) keeps the old kubeconfig and leaves
+# no temp file.
+@test "kubehz hosted: the kubeconfig is 0600 while curl writes it, and a failed download keeps the old one" {
+  _need_real_curl
+  [[ -e "/proc/${BASHPID}/fd/1" ]] || skip "no /proc/<pid>/fd"
+  _hosted_setup
+  local kc="${PATH_BASE}/.kubeconfig/d.example.yaml" o="${BATS_TEST_TMPDIR}/hk.out" e="${BATS_TEST_TMPDIR}/hk.err" rc=0
+  export CURL_MODES="${BATS_TEST_TMPDIR}/modes"
+  curl() {
+    if [[ -f "/proc/${BASHPID}/fd/1" ]]; then
+      stat -L -c %a "/proc/${BASHPID}/fd/1" >> "${CURL_MODES}"
+    fi
+    command curl "$@"
+  }
+  export -f curl
+  mkdir -p "${PATH_BASE}/.kubeconfig"
+  printf 'old\n' > "${kc}"
+  jq '."GET /api/clusters/cl-1/kubeconfig" = {"code": 500, "body": "no"}' "${STUB_ROUTES}" > "${STUB_ROUTES}.new"
+  mv -- "${STUB_ROUTES}.new" "${STUB_ROUTES}"
+  ( umask 022 && kubehz::provision_hosted d.example "${YAML}" ) > "${o}" 2> "${e}" || rc=$?
+  [ "${rc}" -ne 0 ]
+  grep -qF 'Failed to download kubeconfig for hosted cluster cl-1' "${e}"
+  [ "$(cat "${kc}")" = old ]
+  [ -z "$(find "${PATH_BASE}/.kubeconfig" -name 'd.example.yaml.*')" ]
+  [ "$(cat "${CURL_MODES}")" = 600 ]
+  _routes
+  : > "${CURL_MODES}"
+  rc=0
+  ( umask 022 && kubehz::provision_hosted d.example "${YAML}" ) > "${o}" 2> "${e}" || rc=$?
+  [ "${rc}" -eq 0 ]
+  grep -qx 'kind: Config' "${kc}"
+  [ "$(stat -c %a "${kc}")" = 600 ]
+  [ "$(cat "${CURL_MODES}")" = 600 ]
+  [ -z "$(find "${PATH_BASE}/.kubeconfig" -name 'd.example.yaml.*')" ]
+  [ "$(grep -c '^GET /api/clusters/cl-1/kubeconfig bearer$' "${STUB_LOG}")" -eq 2 ]
+}
+
 # ── kubeone Robot naming (drivers/kubeone/config, user and password) ──
 
 # The driver calls the Robot API at its fixed host, so the stub is the
@@ -685,8 +862,12 @@ _kkp_one() {
   [ "$(wc -l < "${STUB_LOG}")" -eq $((4 * 2 + CONTROLS)) ]
 }
 
+# The stop line is the only line of the readonly run: the call reports no
+# HTTP status (it has none, as curl did not run).
 @test "kkp api: curl gets no TLS log or trace variable and writes no TLS key log" {
   _need_real_curl
   _kkp_setup
   _tls_case _kkp_flow 2 _kkp_one
+  [ "$(wc -l < "${BATS_TEST_TMPDIR}/tls.stderr")" -eq 1 ]
+  [ "$(grep -c 'HTTP' "${BATS_TEST_TMPDIR}/tls.stderr")" -eq 0 ]
 }

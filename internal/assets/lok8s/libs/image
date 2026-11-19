@@ -342,7 +342,9 @@ image::list() {
   local catalog_url="${scheme}://${cache_ip}/v2/_catalog"
   echo ":: cache registry @ ${catalog_url}"
   # In TLS mode the mkcert CA in the host trust store validates the cert.
-  curl -s "${catalog_url}" | jq . 2>/dev/null || curl -s "${catalog_url}"
+  # -q first: curl reads no config file of the user. No credential, so no
+  # TLS helper (the allowlist of tests/lib/curl_gate.bash).
+  curl -q -s "${catalog_url}" | jq . 2>/dev/null || curl -q -s "${catalog_url}"
 }
 
 # image::clean — drop everything from the cache registry by recreating its volume

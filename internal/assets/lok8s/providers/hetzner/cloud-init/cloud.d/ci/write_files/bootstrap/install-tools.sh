@@ -13,29 +13,29 @@ ARCH="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
 
 # kind
 KIND_VERSION="v0.27.0"
-curl -fLo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${ARCH}"
+curl -q -fLo /usr/local/bin/kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${ARCH}"
 chmod +x /usr/local/bin/kind
 
 # kubectl (latest stable)
-KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
-curl -fLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
+KUBECTL_VERSION="$(curl -q -fsSL https://dl.k8s.io/release/stable.txt)"
+curl -q -fLo /usr/local/bin/kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
 chmod +x /usr/local/bin/kubectl
 
 # kustomize — pinned to the project's mise/b version, direct release tarball
 # (NOT the piped install_kustomize.sh script).
 KUSTOMIZE_VERSION="v5.8.1"
-curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_${ARCH}.tar.gz" \
+curl -q -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_${ARCH}.tar.gz" \
   | tar xz -C /usr/local/bin kustomize
 
 # yq — the version the project pins (.bin/b.yaml, internal/toolchain
 # YQVersion): the bash readers need it.
 YQ_VERSION="v4.54.3"
-curl -fLo /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${ARCH}"
+curl -q -fLo /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${ARCH}"
 chmod +x /usr/local/bin/yq
 
 # tilt
 TILT_VERSION="0.37.0"
-curl -fsSL "https://github.com/tilt-dev/tilt/releases/download/v${TILT_VERSION}/tilt.${TILT_VERSION}.linux.${ARCH}.tar.gz" | tar xz -C /usr/local/bin tilt
+curl -q -fsSL "https://github.com/tilt-dev/tilt/releases/download/v${TILT_VERSION}/tilt.${TILT_VERSION}.linux.${ARCH}.tar.gz" | tar xz -C /usr/local/bin tilt
 
 # NOTE: argsh is intentionally NOT installed here — the rsync'd .bin/ ships it
 # (with its matching argsh.so) and is first on PATH; piping arg.sh/install would

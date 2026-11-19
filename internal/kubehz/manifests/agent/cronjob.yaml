@@ -48,6 +48,25 @@ spec:
                 - |
                   set -e
 
+                  # ── TLS log and trace controls: cleared before the first curl call ──
+                  # The pod gets each key of the agent ConfigMap as an environment
+                  # variable (envFrom, below). SSLKEYLOGFILE and GNUTLS_KEYLOGFILE make
+                  # curl write the TLS session keys; GNUTLS_DEBUG_LEVEL and the NSS
+                  # SSLTRACE, SSLDEBUG and SSLDEBUGFILE make it write a trace that can
+                  # hold the bearer. The list and the reasons are in utils/http.sh of
+                  # lok8s (http::tls_log_vars_unset); this image does not have it, so the
+                  # script clears the same names itself. A readonly name cannot be
+                  # cleared: the script then stops before its first request.
+                  TLS_LOG_VARS="SSLKEYLOGFILE GNUTLS_KEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE"
+                  for TLS_LOG_VAR in ${TLS_LOG_VARS}; do
+                    (unset "${TLS_LOG_VAR}") 2>/dev/null || {
+                      echo "kubehz: ${TLS_LOG_VAR} is readonly, so the agent cannot clear it for curl: no request is sent" >&2
+                      exit 1
+                    }
+                  done
+                  # shellcheck disable=SC2086 # the names split on the spaces
+                  unset ${TLS_LOG_VARS} TLS_LOG_VAR
+
                   # ── Agent identity: self-generated, create-if-absent, NEVER rotated ──
                   # One Secret (kubehz-system/kubehz-agent) holds two 256-bit values:
                   #   agent-token A = khz_agt_<hex32> — the live heartbeat credential,

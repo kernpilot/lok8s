@@ -33,6 +33,18 @@
 #                               must skip. 2: the request is not in the stub
 #                               log (no connect, a TLS failure): the test
 #                               fails, because a skip would hide it
+#   tls_spy_on DIR              a curl function for the code under test:
+#                               for each call it writes a record file in DIR
+#                               (tls_spy_record), then runs the real curl.
+#                               Needs utils/http.sh: the names are those of
+#                               its list _HTTP_TLS_LOG_VARS
+#   tls_spy_record FILE         write the record of this process to FILE:
+#                               the line "record", each name of the TLS list
+#                               (TLS_SPY_NAMES) that is in the exported
+#                               environment, and "control" when
+#                               TLS_ENV_CONTROL is exported. Names only,
+#                               never a value: no credential of the host
+#                               gets to the disk
 #
 # Unless -q is its first argument, curl reads one config file of the user:
 # $CURL_HOME/.curlrc, else $XDG_CONFIG_HOME/curlrc (no dot), else
@@ -114,4 +126,32 @@ keylog_control() {
     return 2
   fi
   [[ -s "${log}" ]]
+}
+
+tls_spy_on() {
+  TLS_SPY_DIR="${1}"
+  TLS_SPY_NAMES="${_HTTP_TLS_LOG_VARS[*]:-}"
+  export TLS_SPY_DIR TLS_SPY_NAMES
+  [[ -n "${TLS_SPY_NAMES}" ]] || { echo "tls_spy_on: no TLS list: source utils/http.sh first" >&2; return 1; }
+  mkdir -p "${TLS_SPY_DIR}"
+  curl() {
+    tls_spy_record "$(command mktemp "${TLS_SPY_DIR}/env.XXXXXX")"
+    command curl "$@"
+  }
+  export -f curl tls_spy_record
+}
+
+tls_spy_record() {
+  local name
+  local -a names exported
+  read -ra names <<<"${TLS_SPY_NAMES:-}"
+  mapfile -t exported < <(compgen -e)
+  {
+    echo record
+    (( ${#names[@]} > 0 )) || echo "no-list"
+    for name in "${exported[@]}"; do
+      [[ " ${TLS_SPY_NAMES:-} " != *" ${name} "* ]] || echo "${name}"
+    done
+    [[ " ${exported[*]} " != *" TLS_ENV_CONTROL "* ]] || echo control
+  } > "${1}"
 }

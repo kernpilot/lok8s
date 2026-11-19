@@ -620,12 +620,12 @@ kubehz::ensure_claim_key() {
   fi
   jq -n --arg n "${key_name}" --arg k "${public_key}" --arg l "${_KUBEHZ_CLAIM_LABEL}" --arg m "${mark}" \
     '{name: $n, public_key: $k, labels: {($l): $m}}' | (
-    http::tls_log_vars_unset &&
-      curl -q -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
-        -K <(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}") \
-        -H "Content-Type: application/json" \
-        --data-binary @- >/dev/null
-  ) || return 1
+      http::tls_log_vars_unset &&
+        curl -q -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
+          -K <(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}") \
+          -H "Content-Type: application/json" \
+          --data-binary @- >/dev/null
+    ) || return 1
 
   debug "Cluster registered with kubehz claim key (pending claim): ${cluster_id}"
   echo "kubehz: cluster '${domain}' registered (pending). Claim key '${key_name}' uploaded to your Hetzner Cloud account."
@@ -707,12 +707,12 @@ kubehz::direct_claim() {
     # (utils/http.sh).
     cred=$(printf '%s' "${HCLOUD_TOKEN}" |
       jq -Rs --arg c "${cluster_id}" '{type: "hcloud_token", value: ., validate: true, clusterId: $c}' | (
-      http::tls_log_vars_unset &&
-        curl -q -fsSL --proto-redir =https -X POST "${api_url}/api/credentials" \
-          -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}") \
-          -H "Content-Type: application/json" \
-          --data-binary @-
-    ) ) || {
+        http::tls_log_vars_unset &&
+          curl -q -fsSL --proto-redir =https -X POST "${api_url}/api/credentials" \
+            -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}") \
+            -H "Content-Type: application/json" \
+            --data-binary @-
+      ) ) || {
       warn "kubehz: could not connect the hcloud token (provisioning stays locked until you add it in the dashboard)."
       return 0
     }
