@@ -233,7 +233,7 @@ func dropRecipient(content, recipient string) (edited string, rules, last int) {
 		if m := ageListRe.FindStringSubmatch(line); m != nil {
 			var kept []string
 			found := false
-			for _, r := range strings.Split(m[2], ",") {
+			for r := range strings.SplitSeq(m[2], ",") {
 				r = strings.Trim(r, " \t")
 				switch {
 				case r == recipient:
