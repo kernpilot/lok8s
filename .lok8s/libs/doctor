@@ -247,8 +247,16 @@ doctor::_rbac_bound() { echo 30; }
 # subshell, so its temp dir, its variables and its traps never reach the
 # caller. On an exit or a Ctrl-C, the traps stop a read that still runs and
 # remove the temp dir. A Ctrl-C then ends the subshell with SIGINT, so that
-# the caller acts on it.
-doctor::_rbac_fetch() (
+# the caller acts on it. The subshell only calls doctor::_rbac_fetch_in:
+# the _rbac_* variables are set and read in plain function scope (no
+# assignment in the subshell group itself, ShellCheck SC2030/SC2031).
+doctor::_rbac_fetch() ( doctor::_rbac_fetch_in "$@" )
+
+# doctor::_rbac_fetch_in <kubeconfig> <chart_rbac 0|1> — the body of
+# doctor::_rbac_fetch, always in its subshell. The _rbac_* variables are
+# globals of that subshell, not locals: the EXIT trap reads them after this
+# function has returned.
+doctor::_rbac_fetch_in() {
   _rbac_tmp="" _rbac_pid="" _rbac_dog="" _rbac_rc=0 _rbac_stopped=0 _rbac_reason=""
   trap 'doctor::_rbac_cleanup' EXIT
   trap 'doctor::_rbac_cleanup; trap - EXIT INT; kill -INT "${BASHPID}"' INT
@@ -267,7 +275,7 @@ doctor::_rbac_fetch() (
   else
     printf 'fail\t%s\n' "${invalid}"
   fi
-)
+}
 
 # doctor::_rbac_cleanup — the EXIT and INT action of doctor::_rbac_fetch:
 # stop a read and its watchdog that still run, and remove the temp dir.
