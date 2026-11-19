@@ -767,12 +767,13 @@ func TestRunClusterNameGuardPasses(t *testing.T) {
 // The refusal texts of the cluster_name guard for test.dom (the bats file
 // has the same texts).
 const (
-	msgConfig  = "[error] recover: the provider config of 'test.dom' is not one YAML or JSON document whose top is a mapping with a plain cluster_name (not an alias, a mapping or a list), so recover cannot compare its cluster_name with the other domains. Nothing was changed. Correct the provider config, then run lo recover again.\n"
-	msgMerge   = "[error] recover: the provider config of 'test.dom' has a merge key (<<) at the top. The rebuild can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write cluster_name as a literal key, without a merge key, then run lo recover again.\n"
-	msgQuote   = "[error] recover: the cluster_name of the provider config of 'test.dom' is not a text: YAML reads it as a number, as true or as another type. The rebuild writes it as JSON, which can change how it is written, so recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write the cluster_name in quotes, then run lo recover again.\n"
-	msgUnshown = "[error] recover: the provider config of 'test.dom' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was changed. Correct the cluster_name in the provider config, then run lo recover again.\n"
-	msgExpand  = "[error] recover: could not expand the variables of the provider config of 'test.dom' as the rebuild does (envsubst failed). Nothing was changed. Check the provider config and that envsubst runs, then run lo recover again.\n"
-	msgChanged = "[error] recover: the provider config of 'test.dom' gives another cluster_name when the rebuild expands its variables (a variable adds or changes it), so recover cannot compare the cluster_name that the rebuild uses with the other domains. Nothing was changed. Write the provider config so that no variable sets or changes the cluster_name, then run lo recover again.\n"
+	msgConfig   = "[error] recover: the provider config of 'test.dom' is not one YAML or JSON document whose top is a mapping with a plain cluster_name (not an alias, a mapping or a list), so recover cannot compare its cluster_name with the other domains. Nothing was changed. Correct the provider config, then run lo recover again.\n"
+	msgMerge    = "[error] recover: the provider config of 'test.dom' has a merge key (<<) at the top. The rebuild can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write cluster_name as a literal key, without a merge key, then run lo recover again.\n"
+	msgQuote    = "[error] recover: the cluster_name of the provider config of 'test.dom' is not a text: YAML reads it as a number, as true or as another type. The rebuild writes it as JSON, which can change how it is written, so recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write the cluster_name in quotes, then run lo recover again.\n"
+	msgUnshown  = "[error] recover: the provider config of 'test.dom' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was changed. Correct the cluster_name in the provider config, then run lo recover again.\n"
+	msgExpand   = "[error] recover: could not expand the variables of the provider config of 'test.dom' as the rebuild does (the provider shell or envsubst failed). Nothing was changed. Check the provider config, that the provider loads and that envsubst runs, then run lo recover again.\n"
+	msgUnquoted = "[error] recover: the provider config of 'test.dom' parses only after its variables are expanded. recover reads the cluster_name before and after the expansion, so it cannot compare it with the other domains. A variable outside quotes can cause this. Nothing was changed. Write each variable of the provider config in quotes, then run lo recover again.\n"
+	msgChanged  = "[error] recover: the provider config of 'test.dom' gives another cluster_name when the rebuild expands its variables (a variable adds or changes it), so recover cannot compare the cluster_name that the rebuild uses with the other domains. Nothing was changed. Write the provider config so that no variable sets or changes the cluster_name, then run lo recover again.\n"
 )
 
 func msgDollar(n string) string {
@@ -804,7 +805,7 @@ var configShapes = []struct{ name, config, want string }{
 	{"a quoted false is a text", "cluster_name: \"false\"\n", "shared:false"},
 	{"yes is a text", "cluster_name: yes\n", "shared:yes"},
 	{"two keys: the last one", "cluster_name: a\ncluster_name: b\n", "shared:b"},
-	{"does not parse", `{"cluster_name": "a", "token": ${TOKEN}}`, "config"},
+	{"does not parse", `{"cluster_name": "a", "token": [}`, "config"},
 	{"top is a list", "- a\n- b\n", "config"},
 	{"top is a text", "hello\n", "config"},
 	{"top has a custom tag", "!foo {cluster_name: a}\n", "config"},
@@ -930,6 +931,14 @@ func TestGuardClusterNameExpandsAsTheRebuild(t *testing.T) {
 		{"a variable takes the cluster_name away", `{"cluster_name": "a", "note": "${NOTE}"}`, `{"cluster_name": "a", "note": "x", "cluster_name": null}`, msgChanged},
 		{"a variable adds a merge key", "cluster_name: a\nnote: ${NOTE}\n", "cluster_name: a\nnote: x\n<<: {cluster_name: shared}\n", msgChanged},
 		{"a variable breaks the config", "cluster_name: a\nnote: ${NOTE}\n", "cluster_name: a\nnote: [\n", msgChanged},
+		// No cluster_name before the expansion: only the verdict of the read
+		// changes, not the name ("" before and after).
+		{"a variable adds a merge key with a cluster_name, no cluster_name before", "x: 1\nnote: ${NOTE}\n", "x: 1\nnote: x\n<<: {cluster_name: shared}\n", msgChanged},
+		{"a variable adds a cluster_name that is not a text", `{"x": 1, "note": "${NOTE}"}`, `{"x": 1, "note": "a", "cluster_name": 123, "y": ""}`, msgChanged},
+		{"a variable breaks a config without a cluster_name", "x: 1\nnote: ${NOTE}\n", "x: 1\nnote: [\n", msgChanged},
+		// A config that parses only after the expansion names the cause.
+		{"a variable outside quotes", `{"cluster_name": "a", "count": ${NOTE}}`, `{"cluster_name": "a", "count": 3}`, msgUnquoted},
+		{"a config that does not parse after the expansion either", `{"cluster_name": "a", "count": ${NOTE}`, `{"cluster_name": "a", "count": 3`, msgConfig},
 		{"an expansion that keeps the cluster_name", `{"cluster_name": "a", "token": "${TOKEN}"}`, `{"cluster_name": "a", "token": "xyz"}` + "\n\n", ""},
 		{"an expansion without a cluster_name", `{"token": "${TOKEN}"}`, `{"token": "xyz"}`, ""},
 		{"envsubst fails", `{"cluster_name": "a"}`, "", msgExpand},
@@ -961,6 +970,56 @@ func TestGuardClusterNameExpandsAsTheRebuild(t *testing.T) {
 			}
 			if got := h.recorded(); got != "resolve" {
 				t.Errorf("record = %q, want only the resolve", got)
+			}
+		})
+	}
+}
+
+// A config that does not parse, and whose expansion fails: the general
+// text, not the text about a variable outside quotes.
+func TestGuardClusterNameUnparsedConfigWithAFailedExpansion(t *testing.T) {
+	h := newHarness(t)
+	testutil.WriteFile(t, h.cfg, `{"cluster_name": "a", "count": ${NOTE}}`)
+	h.prov.expand = func(string) ([]byte, error) { return nil, errors.New("the provider shell failed") }
+	h.r.domain, h.r.config, h.r.prov = "test.dom", h.cfg, h.prov
+	if err := h.r.guardClusterName(t.Context()); !errors.Is(err, ErrHandled) || h.errBuf.String() != msgConfig {
+		t.Errorf("err = %v, stderr = %q; want %q", err, h.errBuf.String(), msgConfig)
+	}
+}
+
+// Under DEBUG, resolve prints the resolved cluster name. The line comes after
+// the guard: a name that the guard refuses never reaches it.
+func TestResolveDebugLineComesAfterTheGuard(t *testing.T) {
+	t.Setenv("DEBUG", "1")
+	cases := []struct {
+		name, value string
+		refused     bool
+	}{
+		{"a refused name", "a\x1b[2Jb", true},
+		{"a name that passes", "solo", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			raw, err := json.Marshal(map[string]string{"cluster_name": c.value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			testutil.WriteFile(t, h.cfg, string(raw)+"\n")
+			h.r.Force = true
+			err = h.r.Run(t.Context(), "test.dom", false, false)
+			stderr := h.errBuf.String()
+			if !c.refused {
+				if err != nil || !strings.Contains(stderr, "recover: resolved test.dom → provider=") {
+					t.Fatalf("err = %v, want the debug line after the guard\n%s", err, h.all())
+				}
+				return
+			}
+			if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, msgUnshown) {
+				t.Fatalf("err = %v, stderr = %q; want the refusal", err, stderr)
+			}
+			if strings.Contains(stderr, "recover: resolved") || strings.Contains(stderr, "\x1b[2J") {
+				t.Errorf("the debug line showed the refused name: %q", stderr)
 			}
 		})
 	}

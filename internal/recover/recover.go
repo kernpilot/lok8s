@@ -350,8 +350,13 @@ func (r *Runner) resolve(ctx context.Context) error {
 	}
 
 	r.clusterName = r.resolveClusterName()
+	// The debug line shows the name, so it comes after the guard: the guard
+	// refuses a name that a message cannot show as it is.
+	if err := r.guardClusterName(ctx); err != nil {
+		return err
+	}
 	ui.DebugTo(stderr, "recover: resolved %s → provider=%s cluster=%s", r.domain, r.provider, r.clusterName)
-	return r.guardClusterName(ctx)
+	return nil
 }
 
 // guardClusterName refuses a cluster_name that another domain under
@@ -372,10 +377,13 @@ func (r *Runner) resolve(ctx context.Context) error {
 //  1. a provider config that gives no plain cluster_name
 //     (configClusterName): one that does not parse, has more than one
 //     document or a top that is not a mapping, has a merge key (<<) at the
-//     top, or a cluster_name that is not a text;
+//     top, or a cluster_name that is not a text. A config that parses only
+//     after the expansion of the rebuild gets a text that names the likely
+//     cause: a variable outside quotes;
 //  2. a cluster_name that a message cannot show as it is: the rule of the
 //     destroy guard (a character of ui.Unshown, a backslash, U+FFFD or a
-//     byte that is not UTF-8), before a message shows the name;
+//     byte that is not UTF-8), before a message shows the name (the debug
+//     line of resolve comes after this check too);
 //  3. a cluster_name with a '$': the rebuild expands the variables of the
 //     config, so the name that it uses can differ from the text here;
 //  4. a provider config that gives another cluster_name (or none) when the
@@ -401,6 +409,14 @@ func (r *Runner) guardClusterName(ctx context.Context) error {
 	}
 	switch read {
 	case readConfig:
+		// A config that parses only after the expansion of the rebuild: a
+		// variable outside quotes is the likely cause, so the text says it.
+		if expanded, err := r.prov.Expand(ctx, r.config); err == nil {
+			if _, k := configClusterName(bytes.TrimRight(expanded, "\n")); k != readConfig {
+				ui.ErrorTo(w, "recover: the provider config of '%s' parses only after its variables are expanded. recover reads the cluster_name before and after the expansion, so it cannot compare it with the other domains. A variable outside quotes can cause this. Nothing was changed. Write each variable of the provider config in quotes, then run lo recover again.", r.domain)
+				return ErrHandled
+			}
+		}
 		ui.ErrorTo(w, "recover: the provider config of '%s' is not one YAML or JSON document whose top is a mapping with a plain cluster_name (not an alias, a mapping or a list), so recover cannot compare its cluster_name with the other domains. Nothing was changed. Correct the provider config, then run lo recover again.", r.domain)
 		return ErrHandled
 	case readMerge:
@@ -425,7 +441,7 @@ func (r *Runner) guardClusterName(ctx context.Context) error {
 	}
 	expanded, err := r.prov.Expand(ctx, r.config)
 	if err != nil {
-		ui.ErrorTo(w, "recover: could not expand the variables of the provider config of '%s' as the rebuild does (envsubst failed). Nothing was changed. Check the provider config and that envsubst runs, then run lo recover again.", r.domain)
+		ui.ErrorTo(w, "recover: could not expand the variables of the provider config of '%s' as the rebuild does (the provider shell or envsubst failed). Nothing was changed. Check the provider config, that the provider loads and that envsubst runs, then run lo recover again.", r.domain)
 		return ErrHandled
 	}
 	if n, k := configClusterName(bytes.TrimRight(expanded, "\n")); n != name || k != read {

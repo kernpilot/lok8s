@@ -193,8 +193,10 @@ recover::_resolve() {
   fi
 
   _RECOVER_CLUSTER_NAME="$(recover::_cluster_name)"
+  # The debug line shows the name, so it comes after the guard: the guard
+  # refuses a name that a message cannot show as it is.
+  recover::_cluster_name_guard || return 1
   debug "recover: resolved ${_RECOVER_DOMAIN} → provider=${_RECOVER_PROVIDER} cluster=${_RECOVER_CLUSTER_NAME}"
-  recover::_cluster_name_guard
 }
 
 # recover::_cluster_name_guard — refuse a cluster_name that another domain under
@@ -214,11 +216,14 @@ recover::_resolve() {
 #   1. a provider config that gives no plain cluster_name
 #      (recover::_config_name): one that does not parse, has more than one
 #      document or a top that is not a mapping, has a merge key (<<) at the
-#      top, or a cluster_name that is not a text;
+#      top, or a cluster_name that is not a text. A config that parses only
+#      after the expansion of the rebuild gets a text that names the likely
+#      cause: a variable outside quotes;
 #   2. a cluster_name that a message cannot show as it is: the rule of the
 #      destroy guard (a code point of the jq def unshown, a backslash, U+FFFD),
-#      before a message shows the name. The check reads the name as JSON, so
-#      it sees a NUL and the newlines at the end too;
+#      before a message shows the name (the debug line of resolve comes after
+#      this check too). The check reads the name as JSON, so it sees a NUL and
+#      the newlines at the end too;
 #   3. a cluster_name with a '$': the rebuild expands the variables of the
 #      config, so the name that it uses can differ from the text here;
 #   4. a provider config that gives another cluster_name (or none) when the
@@ -240,7 +245,14 @@ recover::_cluster_name_guard() {
   raw="$(recover::_config_name file "${_RECOVER_CONFIG}")"
   case "${raw}" in
     config)
-      error "recover: the provider config of '${_RECOVER_DOMAIN}' is not one YAML or JSON document whose top is a mapping with a plain cluster_name (not an alias, a mapping or a list), so recover cannot compare its cluster_name with the other domains. Nothing was changed. Correct the provider config, then run lo recover again."
+      # A config that parses only after the expansion of the rebuild: a
+      # variable outside quotes is the likely cause, so the text says it.
+      if expanded="$(envsubst <"${_RECOVER_CONFIG}" 2>/dev/null)" \
+        && [[ "$(recover::_config_name text "${expanded}")" != config ]]; then
+        error "recover: the provider config of '${_RECOVER_DOMAIN}' parses only after its variables are expanded. recover reads the cluster_name before and after the expansion, so it cannot compare it with the other domains. A variable outside quotes can cause this. Nothing was changed. Write each variable of the provider config in quotes, then run lo recover again."
+      else
+        error "recover: the provider config of '${_RECOVER_DOMAIN}' is not one YAML or JSON document whose top is a mapping with a plain cluster_name (not an alias, a mapping or a list), so recover cannot compare its cluster_name with the other domains. Nothing was changed. Correct the provider config, then run lo recover again."
+      fi
       return 1 ;;
     merge)
       error "recover: the provider config of '${_RECOVER_DOMAIN}' has a merge key (<<) at the top. The rebuild can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write cluster_name as a literal key, without a merge key, then run lo recover again."
@@ -274,7 +286,7 @@ recover::_cluster_name_guard() {
   # The expansion holds the expanded variables (credentials too): it stays in
   # this shell, and recover::_cfg_yq gives it to yq through a pipe.
   if ! expanded="$(envsubst <"${_RECOVER_CONFIG}" 2>/dev/null)"; then
-    error "recover: could not expand the variables of the provider config of '${_RECOVER_DOMAIN}' as the rebuild does (envsubst failed). Nothing was changed. Check the provider config and that envsubst runs, then run lo recover again."
+    error "recover: could not expand the variables of the provider config of '${_RECOVER_DOMAIN}' as the rebuild does (the provider shell or envsubst failed). Nothing was changed. Check the provider config, that the provider loads and that envsubst runs, then run lo recover again."
     return 1
   fi
   seen="$(recover::_config_name text "${expanded}")"

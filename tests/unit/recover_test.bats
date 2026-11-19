@@ -821,13 +821,14 @@ _msg_config="[error] recover: the provider config of 'test.dom' is not one YAML 
 _msg_merge="[error] recover: the provider config of 'test.dom' has a merge key (<<) at the top. The rebuild can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write cluster_name as a literal key, without a merge key, then run lo recover again."
 _msg_quote="[error] recover: the cluster_name of the provider config of 'test.dom' is not a text: YAML reads it as a number, as true or as another type. The rebuild writes it as JSON, which can change how it is written, so recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write the cluster_name in quotes, then run lo recover again."
 _msg_unshown="[error] recover: the provider config of 'test.dom' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was changed. Correct the cluster_name in the provider config, then run lo recover again."
-_msg_expand="[error] recover: could not expand the variables of the provider config of 'test.dom' as the rebuild does (envsubst failed). Nothing was changed. Check the provider config and that envsubst runs, then run lo recover again."
+_msg_expand="[error] recover: could not expand the variables of the provider config of 'test.dom' as the rebuild does (the provider shell or envsubst failed). Nothing was changed. Check the provider config, that the provider loads and that envsubst runs, then run lo recover again."
+_msg_unquoted="[error] recover: the provider config of 'test.dom' parses only after its variables are expanded. recover reads the cluster_name before and after the expansion, so it cannot compare it with the other domains. A variable outside quotes can cause this. Nothing was changed. Write each variable of the provider config in quotes, then run lo recover again."
 _msg_changed="[error] recover: the provider config of 'test.dom' gives another cluster_name when the rebuild expands its variables (a variable adds or changes it), so recover cannot compare the cluster_name that the rebuild uses with the other domains. Nothing was changed. Write the provider config so that no variable sets or changes the cluster_name, then run lo recover again."
 
 # _guard_row <row name> <want> <config text>: run the guard on the config and
 # check the result. <want>: none:<text> (no refusal), shared:<n> (the refusal
-# names <n>), or config, merge, quote, unshown or changed (that refusal and
-# nothing else).
+# names <n>), or config, merge, quote, unshown, changed or unquoted (that
+# refusal and nothing else).
 _guard_row() {
   local row="${1}" want="${2}" other="a-name-no-row-reads"
   echo "row: ${row}"
@@ -844,7 +845,7 @@ _guard_row() {
     shared:*)
       assert_failure 1
       assert_output --partial "[error] recover: cluster_name '${other}' of 'test.dom' is also the cluster_name of: copy.dom. " ;;
-    config | merge | quote | unshown | changed)
+    config | merge | quote | unshown | changed | unquoted)
       local msg="_msg_${want}"
       assert_failure 1
       assert_output "${!msg}" ;;
@@ -879,7 +880,7 @@ _guard_row() {
 
 @test "recover guard: refuses a provider config that does not parse or is not one mapping" {
   _shared_name_setup
-  _guard_row "does not parse" config '{"cluster_name": "a", "token": ${TOKEN}}'
+  _guard_row "does not parse" config '{"cluster_name": "a", "token": [}'
   _guard_row "top is a list" config $'- a\n- b\n'
   _guard_row "top is a text" config $'hello\n'
   _guard_row "top has a custom tag" config $'!foo {cluster_name: a}\n'
@@ -940,6 +941,17 @@ _expand_row() {
   _expand_row "a variable takes the cluster_name away" 'x", "cluster_name": null, "y": "' changed '{"cluster_name": "a", "note": "${GUARD_NOTE}"}'
   _expand_row "a variable adds a merge key" $'x\n<<: {cluster_name: shared}' changed $'cluster_name: a\nnote: ${GUARD_NOTE}\n'
   _expand_row "a variable breaks the config" $'[\n' changed $'cluster_name: a\nnote: ${GUARD_NOTE}\n'
+  # No cluster_name before the expansion: only the verdict of the read
+  # changes, not the name (none before, another verdict after).
+  _expand_row "a variable adds a merge key with a cluster_name, no cluster_name before" $'x\n<<: {cluster_name: shared}' changed $'x: 1\nnote: ${GUARD_NOTE}\n'
+  _expand_row "a variable adds a cluster_name that is not a text" 'a", "cluster_name": 123, "y": "' changed '{"x": 1, "note": "${GUARD_NOTE}"}'
+  _expand_row "a variable breaks a config without a cluster_name" $'[\n' changed $'x: 1\nnote: ${GUARD_NOTE}\n'
+}
+
+@test "recover guard: a config that parses only after the expansion names a variable outside quotes" {
+  _shared_name_setup
+  _expand_row "a variable outside quotes" 3 unquoted '{"cluster_name": "a", "count": ${GUARD_NOTE}}'
+  _expand_row "a config that does not parse after the expansion either" 3 config '{"cluster_name": "a", "count": ${GUARD_NOTE}'
 }
 
 @test "recover guard: an expansion that keeps the cluster_name passes (the real envsubst)" {
@@ -947,6 +959,30 @@ _expand_row() {
   _expand_row "an expansion that keeps the cluster_name" xyz shared:a '{"cluster_name": "a", "token": "${GUARD_NOTE}"}'
   _expand_row "an unset variable" "" shared:a '{"cluster_name": "a", "token": "${GUARD_UNSET_NOTE}"}'
   _expand_row "an expansion without a cluster_name" xyz none:null '{"token": "${GUARD_NOTE}"}'
+}
+
+@test "recover guard: a config that does not parse, with a failed expansion, gets the general text" {
+  _shared_name_setup
+  envsubst() { return 1; }
+  _guard_row "a variable outside quotes, envsubst fails" config '{"cluster_name": "a", "count": ${GUARD_NOTE}}'
+}
+
+@test "recover: the resolve debug line comes after the guard (DEBUG)" {
+  _shared_name_setup
+  export DEBUG=1
+  force=1
+  # A name that the guard refuses never reaches the debug line.
+  jq -nc --arg n $'a\e[2Jb' '{cluster_name: $n}' > "${_FAKE_CFG}"
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_failure 1
+  assert_output --partial "${_msg_unshown}"
+  refute_output --partial "recover: resolved"
+  refute_output --partial $'\e[2J'
+  # A name that passes: the debug line follows the guard.
+  printf '{"cluster_name": "solo"}\n' > "${_FAKE_CFG}"
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_output --partial "recover: resolved test.dom → provider="
+  unset DEBUG
 }
 
 @test "recover stops when envsubst fails (a stub envsubst that fails)" {

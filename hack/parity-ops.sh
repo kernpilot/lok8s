@@ -109,17 +109,20 @@ for d in twin-a twin-b; do
   printf 'cluster_name: twiny\n' > "${PROJ}/clusters/${d}.cloud/provider.yaml"
 done
 # Provider configs whose cluster_name recover cannot compare: a variable (the
-# rebuild expands it), a config that does not parse, a backslash (a message
-# cannot show it as it is), a merge key, a number, and a variable outside the
-# name that adds one when the rebuild expands it. Without the refusal, the mock rebuild would run
-# (and fail): refused_with checks the refusal text and that it did not run.
-for d in tmpl unparsed bslash merge quote expand; do
+# rebuild expands it), a config that parses only after the expansion (a
+# variable outside quotes), a config that does not parse, a backslash (a
+# message cannot show it as it is), a merge key, a number, and a variable
+# outside the name that adds one when the rebuild expands it. Without the
+# refusal, the mock rebuild would run (and fail): refused_with checks the
+# refusal text and that it did not run.
+for d in tmpl unparsed broken bslash merge quote expand; do
   mkdir -p "${PROJ}/clusters/${d}.cloud"
   printf 'kind: KubeOne\nmetadata:\n  name: %s\nspec:\n  provider:\n    name: mock\n    configRef: provider.yaml\n' "${d}" \
     > "${PROJ}/clusters/${d}.cloud/cluster.lok8s.yaml"
 done
 printf 'cluster_name: ${NAME}-a\n' > "${PROJ}/clusters/tmpl.cloud/provider.yaml"
-printf '{"cluster_name": "twiny", "token": ${TOKEN}}\n' > "${PROJ}/clusters/unparsed.cloud/provider.yaml"
+printf '{"cluster_name": "twiny", "token": ${LOK8S_PARITY_TOKEN}}\n' > "${PROJ}/clusters/unparsed.cloud/provider.yaml"
+printf '{"cluster_name": "twiny", "token": [}\n' > "${PROJ}/clusters/broken.cloud/provider.yaml"
 printf 'cluster_name: "a\\\\b"\n' > "${PROJ}/clusters/bslash.cloud/provider.yaml"
 # Its own merged name: the scan of the other domains reads a merge key in
 # bash (yq) but not in Go, so a merged twiny would change the twin checks.
@@ -292,8 +295,12 @@ refused_with() {
 }
 check - recover --force tmpl.cloud
 refused_with tmpl.cloud "[error] recover: the cluster_name '\${NAME}-a' of 'tmpl.cloud' has a '\$'. The rebuild expands the variables in the provider config"
+# The variable is unset: the expansion gives `"token": }`, which parses.
+unset LOK8S_PARITY_TOKEN
 check - recover --force unparsed.cloud
-refused_with unparsed.cloud "[error] recover: the provider config of 'unparsed.cloud' is not one YAML or JSON document whose top is a mapping"
+refused_with unparsed.cloud "[error] recover: the provider config of 'unparsed.cloud' parses only after its variables are expanded."
+check - recover --force broken.cloud
+refused_with broken.cloud "[error] recover: the provider config of 'broken.cloud' is not one YAML or JSON document whose top is a mapping"
 check - recover --force bslash.cloud
 refused_with bslash.cloud "[error] recover: the provider config of 'bslash.cloud' names a cluster_name with a character that a message cannot show as it is"
 check - recover --force merge.cloud
