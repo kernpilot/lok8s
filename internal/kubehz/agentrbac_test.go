@@ -494,7 +494,7 @@ func TestAgentScriptMarkersUseTheStateConfigMap(t *testing.T) {
 		!slices.ContainsFunc(writes, func(w []string) bool { return slices.Equal(w, write) }) {
 		t.Errorf("script line %d: the send gate kubectl %s is not the 24h marker write plus --dry-run=server", gate.line, strings.Join(gate.args, " "))
 	}
-	if at := strings.Index(script, "ASSESSMENT=$(jq "); at < 0 || gate.line >= strings.Count(script[:at], "\n")+1 {
+	if before, _, found := strings.Cut(script, "ASSESSMENT=$(jq "); !found || gate.line >= strings.Count(before, "\n")+1 {
 		t.Errorf("script line %d: the send gate must run before the assessment is put together", gate.line)
 	}
 
