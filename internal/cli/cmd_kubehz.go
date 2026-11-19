@@ -347,7 +347,7 @@ func newKubehzNodeJoin(paths *config.Paths) *cobra.Command {
 	f.StringP("name", "n", "", "Node name; default: the short hostname of this machine")
 	f.String("node-ip", "", "Address other nodes reach this machine on (needed behind NAT)")
 	f.String("kubelet-version", "", "Kubelet version to declare; default: read from this machine")
-	f.Bool("print-only", false, "Print the join command and run nothing")
+	f.Bool("print-only", false, "Print the join command and run nothing. The command holds the bootstrap token: when you run it, the token is on argv")
 	return c
 }
 

@@ -3,21 +3,27 @@ package kubehz
 // node_test.go ports tests/unit/kubehz_node_test.bats.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/execx"
+	"github.com/kernpilot/lok8s/internal/interrupt"
 )
 
 const (
 	stubNodesBody  = `{"ok":true,"data":{"nodes":[],"usage":{"nodes":0,"maxStaticNodes":20},"discoveryReady":true}}`
-	stubMintBody   = `{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","joinCommand":"kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1","nodeName":"box-1","pool":"metal","expiresAt":"2026-09-01T12:00:00Z","ready":true}}`
+	stubMintBody   = `{"ok":true,"data":{"token":"` + joinToken + `","joinCommand":"kubeadm join cp.example.test:6443 --token ` + joinToken + ` --discovery-token-ca-cert-hash ` + caPin + ` --node-name box-1","nodeName":"box-1","pool":"metal","expiresAt":"2026-09-01T12:00:00Z","ready":true}}`
 	stubRemoveBody = `{"ok":true,"data":{"name":"box-1","pool":"metal","status":"Draining"}}`
 )
 
@@ -52,11 +58,21 @@ func nodeHarness(t *testing.T, s nodeStubs, hosting, apiURL string) *harness {
 // a secret scanner flags a long literal next to a token keyword.
 const joinToken = "a1b2c3" + "." + "d4e5f6g7h8i9j0k1"
 
-// joinSeen is what the fake kubeadm read of its join config at the join.
+// caPin and caPin2 are CA pins in the shape kubeadm reads (sha256: and 64
+// hex digits; caPin2 in upper case), built from parts as joinToken is.
+const (
+	caPin  = "sha256:" + "0123456789abcdef" + "0123456789abcdef" + "0123456789abcdef" + "0123456789abcdef"
+	caPin2 = "sha256:" + "FEDCBA9876543210" + "FEDCBA9876543210" + "FEDCBA9876543210" + "FEDCBA9876543210"
+)
+
+// joinSeen is what the fake kubeadm read of its join config at the join,
+// and whether the mint was asked when `kubeadm version` ran.
 type joinSeen struct {
 	path, content     string
 	fileMode, dirMode os.FileMode
 	err               error
+	mintedAtVersion   bool
+	cmd               execx.Cmd // the join call
 }
 
 // fakeKubeadm answers `kubeadm version -o short` with version and returns
@@ -71,10 +87,12 @@ func fakeKubeadm(h *harness, version string, joinErr error) *joinSeen {
 		}
 		switch strings.Join(c.Args, " ") {
 		case "version -o short":
+			seen.mintedAtVersion = h.anyReq("POST", "/join-token")
 			_, _ = io.WriteString(c.Stdout, version)
 			return nil
 		}
 		if len(c.Args) == 3 && c.Args[0] == "join" && c.Args[1] == "--config" {
+			seen.cmd = c
 			seen.path = c.Args[2]
 			b, err := os.ReadFile(seen.path)
 			seen.content, seen.err = string(b), err
@@ -351,14 +369,26 @@ func TestNodeJoinKubeletVersionRidesWithMint(t *testing.T) {
 
 func TestNodeJoinPrintOnly(t *testing.T) {
 	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", NodeIP: "203.0.113.7", PrintOnly: true}), h.output())
-	mustContain(t, h.output(), "kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1")
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", PrintOnly: true}), h.output())
+	mustContain(t, h.output(), "\n    kubeadm join cp.example.test:6443 --token "+joinToken+" --discovery-token-ca-cert-hash "+caPin+" --node-name box-1\n")
 	mustContain(t, h.output(), "2026-09-01T12:00:00Z")
 	mustContain(t, h.output(), "single use")
-	mustContain(t, h.output(), "--node-ip 203.0.113.7")
 	// Not even `kubeadm version`: the join runs on another machine.
 	if n := kubeadmCalls(h); n != 0 {
 		t.Fatalf("kubeadm ran %d times, want 0", n)
+	}
+}
+
+// kubeadm join has no --node-ip flag, so --print-only with --node-ip is
+// refused before the mint (the printed line would fail after the ticket
+// was spent).
+func TestNodeJoinPrintOnlyRefusesNodeIPBeforeTheMint(t *testing.T) {
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", NodeIP: "203.0.113.7", PrintOnly: true}))
+	mustContain(t, h.output(), "kubehz: --print-only cannot carry --node-ip: kubeadm join has no such flag.\n")
+	mustContain(t, h.output(), "  Nothing was minted. Run it without --print-only: the join config then sets the node-ip of the kubelet.\n")
+	if h.anyReq("POST", "/join-token") || kubeadmCalls(h) != 0 {
+		t.Error("minted or ran kubeadm")
 	}
 }
 
@@ -372,7 +402,7 @@ discovery:
     apiServerEndpoint: "cp.example.test:6443"
     token: "` + joinToken + `"
     caCertHashes:
-      - "sha256:1111"
+      - "` + caPin + `"
 nodeRegistration:
   name: "box-1"
 `
@@ -387,7 +417,7 @@ discovery:
     apiServerEndpoint: "cp.example.test:6443"
     token: "` + joinToken + `"
     caCertHashes:
-      - "sha256:1111"
+      - "` + caPin + `"
 nodeRegistration:
   name: "box-1"
   kubeletExtraArgs:
@@ -438,7 +468,15 @@ func TestNodeJoinRunsTheJoinConfig(t *testing.T) {
 	mustContain(t, h.output(), "node 'box-1' joined cluster cl-1234abcd")
 	mustJoinWithConfig(t, h, seen, joinConfigV1beta4)
 	if first := h.runner.calls[0]; argvLine(first) != "kubeadm version -o short" {
-		t.Errorf("first call = %q, want the version before the mint", argvLine(first))
+		t.Errorf("first call = %q, want the version first", argvLine(first))
+	}
+	// The mint is an HTTP request, not a runner call: the fake kubeadm
+	// records whether it was asked when the version ran.
+	if seen.mintedAtVersion || !h.anyReq("POST", "/join-token") {
+		t.Errorf("minted before the version: %v; minted at all: %v", seen.mintedAtVersion, h.anyReq("POST", "/join-token"))
+	}
+	if seen.cmd.WaitDelay != joinStopDelay {
+		t.Errorf("kubeadm join WaitDelay = %v, want %v (a SIGKILL after it)", seen.cmd.WaitDelay, joinStopDelay)
 	}
 
 	h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
@@ -503,15 +541,279 @@ func TestNodeJoinFailingKubeadm(t *testing.T) {
 	mustJoinWithConfig(t, h, seen, joinConfigV1beta4)
 }
 
+// stopKubeadm makes the join of the fake kubeadm a process that runs until
+// the runner context ends: act sends the signal or calls the cancel, and
+// the fake returns when the context is done (as a stopped kubeadm). It
+// fails the test when the context does not end in time.
+func stopKubeadm(t *testing.T, h *harness, act func()) *joinSeen {
+	t.Helper()
+	seen := fakeKubeadm(h, "v1.36.0\n", nil)
+	fake := h.runner.handler
+	h.runner.handler = func(c execx.Cmd, stdin string) error {
+		if c.Name != "kubeadm" || len(c.Args) == 0 || c.Args[0] != "join" {
+			return fake(c, stdin)
+		}
+		_ = fake(c, stdin) // records the config and its modes
+		ctx := h.runner.ctx
+		act()
+		select {
+		case <-ctx.Done():
+			return errors.New("signal: interrupt")
+		case <-time.After(5 * time.Second):
+			t.Error("the context of kubeadm join did not end")
+			return nil
+		}
+	}
+	return seen
+}
+
+// waitDone fails the test when ctx does not end in time.
+func waitDone(t *testing.T, ctx context.Context) {
+	t.Helper()
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Error("the signal did not end the context")
+	}
+}
+
+// mustStopAfterTheMint checks a join that a signal stopped after the mint:
+// the slot note, no failure or success text, and no config left.
+func mustStopAfterTheMint(t *testing.T, h *harness, err error) {
+	t.Helper()
+	if !errors.Is(err, ErrHandled) {
+		t.Fatalf("err = %v, want ErrHandled", err)
+	}
+	mustContain(t, h.output(), "interrupted after the ticket was minted")
+	mustContain(t, h.output(), "lo kubehz node remove --name box-1")
+	mustNotContain(t, h.output(), "kubeadm join failed")
+	mustNotContain(t, h.output(), "joined cluster")
+	mustLeaveNoJoinDir(t, h)
+}
+
+// A cancel while kubeadm runs (main cancels the command context on SIGINT
+// and SIGTERM): the runner stops kubeadm, the config is removed, and the
+// slot note goes out instead of the failure text.
+func TestNodeJoinCancelStopsKubeadmAndRemovesTheConfig(t *testing.T) {
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	seen := stopKubeadm(t, h, cancel)
+	mustStopAfterTheMint(t, h, h.ctx.NodeJoin(ctx, "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+	if seen.content != joinConfigV1beta4 {
+		t.Errorf("the config at the join:\n%s\nwant:\n%s", seen.content, joinConfigV1beta4)
+	}
+	if seen.cmd.WaitDelay != joinStopDelay {
+		t.Errorf("kubeadm join WaitDelay = %v, want %v", seen.cmd.WaitDelay, joinStopDelay)
+	}
+}
+
+// A cancel while the config is written: kubeadm does not start, and the
+// directory is removed.
+func TestNodeJoinCancelDuringTheWriteRemovesTheConfig(t *testing.T) {
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	wrote := false
+	h.ctx.joinWrite = func(f *os.File, s string) error {
+		wrote = true
+		cancel()
+		_, err := f.WriteString(s)
+		return err
+	}
+	mustStopAfterTheMint(t, h, h.ctx.NodeJoin(ctx, "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+	if !wrote {
+		t.Fatal("the config was not written")
+	}
+	if kubeadmJoin(h) != nil {
+		t.Error("kubeadm join started after the cancel")
+	}
+}
+
+// A real SIGHUP after the mint, under the Watch of main: while the config
+// is written, and while kubeadm runs. The catch of NodeJoin ends the
+// command context: kubeadm does not start or stops, the config is
+// removed, and the exit code is 129. Not parallel: the signal goes to the
+// test process.
+func TestNodeJoinHangupStopsTheJoin(t *testing.T) {
+	if signal.Ignored(syscall.SIGHUP) {
+		t.Skip("SIGHUP is ignored here (nohup): the catch does nothing then")
+	}
+	// keep holds the test process alive when no catch is in place: the
+	// default action of a SIGHUP ends the process.
+	keep := make(chan os.Signal, 1)
+	signal.Notify(keep, syscall.SIGHUP)
+	defer signal.Stop(keep)
+	hangup := func() { _ = syscall.Kill(os.Getpid(), syscall.SIGHUP) }
+	for _, during := range []string{"the write", "kubeadm"} {
+		t.Run(during, func(t *testing.T) {
+			h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+			ctx, exitCode := interrupt.Watch(t.Context())
+			if during == "kubeadm" {
+				stopKubeadm(t, h, hangup)
+			} else {
+				h.ctx.joinWrite = func(f *os.File, s string) error {
+					hangup()
+					waitDone(t, ctx)
+					_, err := f.WriteString(s)
+					return err
+				}
+			}
+			err := h.ctx.NodeJoin(ctx, "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"})
+			code := exitCode()
+			mustStopAfterTheMint(t, h, err)
+			if code != 129 {
+				t.Errorf("exit code = %d, want 129 (128 + SIGHUP)", code)
+			}
+			if during == "the write" && kubeadmJoin(h) != nil {
+				t.Error("kubeadm join started after the SIGHUP")
+			}
+		})
+	}
+}
+
+// No refusal prints a word of the line: a word can hold a ticket. A token
+// after a flag this CLI does not run, and a token as a word that follows
+// no flag.
+func TestNodeJoinRefusalsPrintNoWordOfTheLine(t *testing.T) {
+	const otherToken = "z9y8x7" + "." + "w6v5u4t3s2r1q0p9"
+	const head = "kubeadm join cp.example.test:6443 --token " + joinToken + " --discovery-token-ca-cert-hash " + caPin
+	for line, want := range map[string]string{
+		head + " --node-name box-1 --tls-bootstrap-token " + otherToken: "kubehz: word 10 of the join command is a flag this CLI will not run.\n",
+		head + " " + otherToken + " --node-name box-1":                  "kubehz: word 8 of the join command follows no flag.\n",
+	} {
+		h := joinWithMint(t, `{"ok":true,"data":{"joinCommand":"`+line+`","expiresAt":"x","ready":true}}`)
+		mustContain(t, h.output(), want)
+		mustContain(t, h.output(), "holds a node slot")
+		for _, word := range []string{otherToken, joinToken, "--tls-bootstrap-token"} {
+			mustNotContain(t, h.output(), word)
+		}
+	}
+}
+
+// A control character in the line (a newline at the end or inside, CR,
+// NUL, tab, DEL) is refused as the response is read, with the text of the
+// bash twin: one mint, nothing runs, no file.
+func TestNodeJoinRefusesAControlCharacterInTheLine(t *testing.T) {
+	const line = "kubeadm join cp.example.test:6443 --token " + joinToken + " --discovery-token-ca-cert-hash " + caPin + " --node-name box-1"
+	for name, bad := range map[string]string{
+		"a trailing newline":  line + "\n",
+		"an embedded newline": strings.Replace(line, " --node-name", "\n--node-name", 1),
+		"a CR":                line + "\r",
+		"a NUL":               strings.Replace(line, " --node-name", "\x00 --node-name", 1),
+		"a tab":               strings.Replace(line, " --node-name", "\t--node-name", 1),
+		"a DEL":               line + "\x7f",
+		// Before the check of the first two words too.
+		"a tab after kubeadm": strings.Replace(line, "kubeadm join", "kubeadm\tjoin", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			js, err := json.Marshal(bad)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := joinWithMint(t, `{"ok":true,"data":{"joinCommand":`+string(js)+`,"expiresAt":"x","ready":true}}`)
+			mustContain(t, h.output(), "kubehz: the join command carries characters this CLI does not run.\n")
+			mustContain(t, h.output(), "holds a node slot")
+			mustNotContain(t, h.output(), joinToken)
+			mints := 0
+			for _, r := range h.reqs() {
+				if r.Method == "POST" && strings.HasSuffix(r.Path, "/join-token") {
+					mints++
+				}
+			}
+			if mints != 1 {
+				t.Errorf("minted %d times, want 1", mints)
+			}
+			mustLeaveNoJoinDir(t, h)
+		})
+	}
+}
+
+// --print-only reads the line as strictly as a join, first: a line that
+// fails the read prints no command.
+func TestNodeJoinPrintOnlyRefusesALineItCannotRead(t *testing.T) {
+	s := defaultNodeStubs()
+	s.mintBody = `{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token ` + joinToken + ` --discovery-token-ca-cert-hash ` + caPin + ` stray --node-name box-1","expiresAt":"x","ready":true}}`
+	h := nodeHarness(t, s, "hosted", "")
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", PrintOnly: true}))
+	mustContain(t, h.output(), "kubehz: word 8 of the join command follows no flag.\n")
+	mustContain(t, h.output(), "holds a node slot")
+	mustNotContain(t, h.output(), "kubeadm join cp")
+	mustNotContain(t, h.output(), joinToken)
+	if n := kubeadmCalls(h); n != 0 {
+		t.Fatalf("kubeadm ran %d times, want 0", n)
+	}
+}
+
+// Each flag of nodeJoinAllowedFlags reads into the config: a flag that is
+// added to the allowlist and not to joinConfig fails here.
+func TestNodeJoinConfigReadsEveryAllowedFlag(t *testing.T) {
+	values := map[string]string{"--token": joinToken, "--discovery-token-ca-cert-hash": caPin, "--node-name": "box-1"}
+	line := "kubeadm join cp.example.test:6443"
+	for _, flag := range nodeJoinAllowedFlags {
+		v, ok := values[flag]
+		if !ok {
+			t.Fatalf("no test value for the allowed flag %s: add one here", flag)
+		}
+		line += " " + flag + " " + v
+	}
+	h := newHarness(t)
+	mustOK(t, h.ctx.AssertJoinCommand(line), h.output())
+	config, err := h.ctx.joinConfig(line, "v1beta4", "")
+	mustOK(t, err, h.output())
+	for _, flag := range nodeJoinAllowedFlags {
+		mustContain(t, config, `"`+values[flag]+`"`)
+	}
+}
+
 // A removal that fails after the join names the directory, which holds
 // the ticket.
 func TestNodeJoinNamesAConfigDirItCannotRemove(t *testing.T) {
 	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
 	seen := fakeKubeadm(h, "v1.36.0\n", nil)
-	h.ctx.RemoveAll = func(string) error { return errors.New("device busy") }
+	var removed []string
+	h.ctx.Remove = func(p string) error {
+		removed = append(removed, p)
+		if p == seen.path {
+			return os.Remove(p)
+		}
+		return errors.New("device busy")
+	}
 	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}), h.output())
 	mustContain(t, h.output(), "could not remove "+filepath.Dir(seen.path)+"\n")
 	mustContain(t, h.output(), "It holds the join ticket until the ticket expires.")
+	// The file, then the directory (rm -f, then rmdir, as the bash twin):
+	// never a removal of the whole tree.
+	if want := []string{seen.path, filepath.Dir(seen.path)}; !slices.Equal(removed, want) {
+		t.Errorf("removed %q, want %q", removed, want)
+	}
+}
+
+// A directory that holds more than the config stays, with the warning:
+// the removal takes the file and then the empty directory only.
+func TestNodeJoinLeavesAConfigDirThatHoldsMore(t *testing.T) {
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	seen := fakeKubeadm(h, "v1.36.0\n", nil)
+	inner := h.runner.handler
+	var other string
+	h.runner.handler = func(c execx.Cmd, stdin string) error {
+		err := inner(c, stdin)
+		if len(c.Args) == 3 && c.Args[0] == "join" {
+			other = filepath.Join(filepath.Dir(c.Args[2]), "other")
+			if werr := os.WriteFile(other, []byte("x"), 0o600); werr != nil {
+				t.Fatal(werr)
+			}
+		}
+		return err
+	}
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}), h.output())
+	mustContain(t, h.output(), "could not remove "+filepath.Dir(seen.path)+"\n")
+	if _, err := os.Lstat(seen.path); !os.IsNotExist(err) {
+		t.Errorf("the config is still there: %v", err)
+	}
+	if _, err := os.Lstat(other); err != nil {
+		t.Errorf("the other file is gone: %v", err)
+	}
 }
 
 // --node-ip goes into the config: a value outside the address shape is
@@ -574,7 +876,7 @@ func TestNodeJoinConfigWriteFailure(t *testing.T) {
 
 	h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
 	h.ctx.joinWrite = func(*os.File, string) error { return errors.New("disk full") }
-	h.ctx.RemoveAll = func(string) error { return errors.New("device busy") }
+	h.ctx.Remove = func(string) error { return errors.New("device busy") }
 	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
 	mustContain(t, h.output(), "The cleanup failed too: ")
 	mustContain(t, h.output(), "may still hold the join ticket. Delete that directory.")
@@ -583,16 +885,23 @@ func TestNodeJoinConfigWriteFailure(t *testing.T) {
 // The line is read into the config after the mint; a line this CLI cannot
 // read that way runs nothing, names the slot and writes no file.
 func TestNodeJoinRefusesALineItCannotReadIntoAConfig(t *testing.T) {
-	const ca = " --discovery-token-ca-cert-hash sha256:1111"
+	const ca = " --discovery-token-ca-cert-hash " + caPin
 	for line, want := range map[string]string{
 		"kubeadm join cp.example.test:6443" + ca + " --node-name box-1":                                                  "exactly one bootstrap token (--token)",
 		"kubeadm join cp.example.test:6443 --token " + joinToken + " --token " + joinToken[:len(joinToken)-1] + "2" + ca: "exactly one bootstrap token (--token)",
 		"kubeadm join cp.example.test:6443 --token A1B2C3.D4E5F6G7H8I9J0K1" + ca:                                         "does not have the kubeadm token shape",
 		"kubeadm join cp.example.test:6443 --token " + joinToken + ca + " --node-name a --node-name=b":                   "names the node more than once (--node-name)",
-		"kubeadm join cp.example.test:6443 extra --token " + joinToken + ca:                                              "a word that follows no flag",
-		"kubeadm join cp.example.test:6443 --token= " + joinToken + ca:                                                   "a flag without a value: --token",
-		"kubeadm join cp.example.test:6443 --token " + joinToken + ca + " --node-name":                                   "a flag without a value: --node-name",
-		"kubeadm join cp.example.test:6443 --token" + ca:                                                                 "a flag without a value: --token",
+		"kubeadm join cp.example.test:6443 extra --token " + joinToken + ca:                                              "kubehz: word 4 of the join command follows no flag.\n",
+		"kubeadm join cp.example.test:6443 --token= " + joinToken + ca:                                                   "kubehz: word 4 of the join command is a flag without a value.\n",
+		"kubeadm join cp.example.test:6443 --token " + joinToken + ca + " --node-name":                                   "kubehz: word 8 of the join command is a flag without a value.\n",
+		"kubeadm join cp.example.test:6443 --token" + ca:                                                                 "kubehz: word 4 of the join command is a flag without a value.\n",
+		// The CA pin: sha256: and 64 hex digits, as kubeadm reads it.
+		"kubeadm join cp.example.test:6443 --token " + joinToken + " --discovery-token-ca-cert-hash sha256:1111":                       "kubehz: word 6 of the join command is a CA pin that is not sha256: and 64 hex digits.\n",
+		"kubeadm join cp.example.test:6443 --token " + joinToken + " --discovery-token-ca-cert-hash " + caPin + "0":                    "kubehz: word 6 of the join command is a CA pin that is not sha256: and 64 hex digits.\n",
+		"kubeadm join cp.example.test:6443 --token " + joinToken + " --discovery-token-ca-cert-hash " + caPin[:70] + " " + caPin[70:]:  "kubehz: word 6 of the join command is a CA pin that is not sha256: and 64 hex digits.\n",
+		"kubeadm join cp.example.test:6443 --token " + joinToken + " --discovery-token-ca-cert-hash SHA256:" + caPin[7:]:               "kubehz: word 6 of the join command is a CA pin that is not sha256: and 64 hex digits.\n",
+		"kubeadm join cp.example.test:6443 --token " + joinToken + " --discovery-token-ca-cert-hash " + caPin + ca + "x":               "kubehz: word 8 of the join command is a CA pin that is not sha256: and 64 hex digits.\n",
+		"kubeadm join cp.example.test:6443 --token " + joinToken + " --discovery-token-ca-cert-hash " + caPin[:70] + `\"` + caPin[71:]: "kubehz: the join command carries characters this CLI does not run.\n",
 	} {
 		s := defaultNodeStubs()
 		s.mintBody = `{"ok":true,"data":{"joinCommand":"` + line + `","expiresAt":"x","ready":true}}`
@@ -607,7 +916,7 @@ func TestNodeJoinRefusesALineItCannotReadIntoAConfig(t *testing.T) {
 	}
 	// The --flag=value form and a second CA pin read the same way.
 	s := defaultNodeStubs()
-	s.mintBody = `{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token=` + joinToken + ` --discovery-token-ca-cert-hash=sha256:1111 --discovery-token-ca-cert-hash sha256:2222","expiresAt":"x","ready":true}}`
+	s.mintBody = `{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token=` + joinToken + ` --discovery-token-ca-cert-hash=` + caPin + ` --discovery-token-ca-cert-hash ` + caPin2 + `","expiresAt":"x","ready":true}}`
 	h := nodeHarness(t, s, "hosted", "")
 	seen := fakeKubeadm(h, "v1.36.0\n", nil)
 	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}), h.output())
@@ -618,14 +927,14 @@ discovery:
     apiServerEndpoint: "cp.example.test:6443"
     token: "`+joinToken+`"
     caCertHashes:
-      - "sha256:1111"
-      - "sha256:2222"
+      - "`+caPin+`"
+      - "`+caPin2+`"
 `)
 }
 
 func TestNodeJoinUnarmedTicketWarns(t *testing.T) {
 	s := defaultNodeStubs()
-	s.mintBody = `{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1","expiresAt":"2026-09-01T12:00:00Z","ready":false}}`
+	s.mintBody = `{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token ` + joinToken + ` --discovery-token-ca-cert-hash ` + caPin + ` --node-name box-1","expiresAt":"2026-09-01T12:00:00Z","ready":false}}`
 	h := nodeHarness(t, s, "hosted", "")
 	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}), h.output())
 	mustContain(t, h.output(), "has not armed this ticket yet")
@@ -653,31 +962,34 @@ func TestNodeJoinRefusesNonJoinLines(t *testing.T) {
 
 func TestAssertJoinCommandFlagAllowlist(t *testing.T) {
 	cases := map[string]string{
-		"--discovery-file":  "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --discovery-file https://evil.test/kubeconfig --node-name box-1",
-		"--config":          "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --config=/tmp/kubeadm.conf --node-name box-1",
-		"--control-plane":   "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --control-plane --node-name box-1",
-		"--certificate-key": "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --certificate-key deadbeef --node-name box-1",
-		"--discovery-token-unsafe-skip-ca-verification": "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --discovery-token-unsafe-skip-ca-verification --node-name box-1",
-		"--ignore-preflight-errors":                     "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --ignore-preflight-errors=all --node-name box-1",
+		"--discovery-file":  "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash " + caPin + " --discovery-file https://evil.test/kubeconfig --node-name box-1",
+		"--config":          "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash " + caPin + " --config=/tmp/kubeadm.conf --node-name box-1",
+		"--control-plane":   "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash " + caPin + " --control-plane --node-name box-1",
+		"--certificate-key": "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash " + caPin + " --certificate-key deadbeef --node-name box-1",
+		"--discovery-token-unsafe-skip-ca-verification": "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash " + caPin + " --discovery-token-unsafe-skip-ca-verification --node-name box-1",
+		"--ignore-preflight-errors":                     "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash " + caPin + " --ignore-preflight-errors=all --node-name box-1",
 	}
 	for flag, line := range cases {
 		h := newHarness(t)
 		mustErr(t, h.ctx.AssertJoinCommand(line))
-		mustContain(t, h.output(), "join flag this CLI will not run: "+flag)
+		// The number of the word, never its text.
+		mustContain(t, h.output(), "kubehz: word 6 of the join command is a flag this CLI will not run.\n")
+		mustNotContain(t, h.output(), flag)
 	}
 	h := newHarness(t)
-	mustOK(t, h.ctx.AssertJoinCommand("kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1"), h.output())
-	mustOK(t, h.ctx.AssertJoinCommand("kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --discovery-token-ca-cert-hash sha256:2222 --node-name box-1"), h.output())
+	mustOK(t, h.ctx.AssertJoinCommand("kubeadm join cp.example.test:6443 --token "+joinToken+" --discovery-token-ca-cert-hash "+caPin+" --node-name box-1"), h.output())
+	mustOK(t, h.ctx.AssertJoinCommand("kubeadm join cp.example.test:6443 --token "+joinToken+" --discovery-token-ca-cert-hash "+caPin+" --discovery-token-ca-cert-hash "+caPin2+" --node-name box-1"), h.output())
 	mustErr(t, h.ctx.AssertJoinCommand("kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --node-name box-1"))
 	mustContain(t, h.output(), "pins no CA fingerprint")
 	h.reset()
-	mustErr(t, h.ctx.AssertJoinCommand("kubeadm join not-an-endpoint --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1"))
+	mustErr(t, h.ctx.AssertJoinCommand("kubeadm join not-an-endpoint --token "+joinToken+" --discovery-token-ca-cert-hash "+caPin+" --node-name box-1"))
 	mustContain(t, h.output(), "not a host:port")
 }
 
 func TestNodeJoinPostMintRefusalsNameTheSlot(t *testing.T) {
-	h := joinWithMint(t, `{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --discovery-token-unsafe-skip-ca-verification --node-name box-1","expiresAt":"x","ready":true}}`)
-	mustContain(t, h.output(), "join flag this CLI will not run: --discovery-token-unsafe-skip-ca-verification")
+	h := joinWithMint(t, `{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash `+caPin+` --discovery-token-unsafe-skip-ca-verification --node-name box-1","expiresAt":"x","ready":true}}`)
+	mustContain(t, h.output(), "kubehz: word 6 of the join command is a flag this CLI will not run.\n")
+	mustNotContain(t, h.output(), "--discovery-token-unsafe-skip-ca-verification")
 	mustContain(t, h.output(), "holds a node slot")
 	mustContain(t, h.output(), "lo kubehz node remove --name box-1")
 
@@ -779,7 +1091,7 @@ func TestNodeStatus(t *testing.T) {
 
 func TestNodeScrubsANSI(t *testing.T) {
 	s := defaultNodeStubs()
-	s.mintBody = `{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1","expiresAt":"2026-09-01T12:00:00Z\u001b[2J\u001b[Hpwned\u009b\u2028\u202e","ready":true}}`
+	s.mintBody = `{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token ` + joinToken + ` --discovery-token-ca-cert-hash ` + caPin + ` --node-name box-1","expiresAt":"2026-09-01T12:00:00Z\u001b[2J\u001b[Hpwned\u009b\u2028\u202e","ready":true}}`
 	h := nodeHarness(t, s, "hosted", "")
 	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", PrintOnly: true}), h.output())
 	mustContain(t, h.output(), "2026-09-01T12:00:00Z[2J[Hpwned")

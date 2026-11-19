@@ -824,8 +824,10 @@ need no project. `lo mcp` offers them as tools. See
 
 The `node` group is the node-level surface of a **hosted** control plane: the
 machines you bring yourself (`kind: static` worker pools). `node join` mints a
-ticket and runs the `kubeadm join` line the platform composes, so run it as
-root on the machine you are adding; `--print-only` prints the line instead.
+ticket, reads the `kubeadm join` line the platform composes into a join
+configuration file, and runs `kubeadm join --config`, so run it as root on
+the machine you are adding. `--print-only` prints the line instead; the line
+holds the bootstrap token.
 Cluster-level `join` and `deregister` above keep their own meaning. See the
 [kubehz guide](../guide/kubehz.md#nodes-you-bring-static-pools).
 

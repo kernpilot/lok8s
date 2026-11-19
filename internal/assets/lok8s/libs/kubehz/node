@@ -338,9 +338,16 @@ readonly -a NODE_JOIN_ALLOWED_FLAGS=(
 # check keeps a shell metacharacter out (nothing can escape into a shell); the
 # structural check keeps a dangerous kubeadm FLAG out (nothing can escape into
 # root on this machine). A command we cannot read is a command we must not run.
+# No refusal prints a word of the line: a word can hold the ticket, so a
+# refusal names the number of the word (the first word is 1).
 # Usage: node::assert_join_command <line>
 node::assert_join_command() {
-  local line="${1}"
+  # The line holds the ticket. +x, +i and the refusal: as in
+  # kubehz::space_api_call (an export of a caller would give the line to a
+  # child, an integer of a caller would print it in an arithmetic error).
+  local +x +i line alphabet_re endpoint_re i flag seen_ca allowed candidate || { error "node::assert_join_command: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  local +x +i -a tok || { error "node::assert_join_command: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  line="${1}" seen_ca=0
   if [[ "${line}" != "kubeadm join "* ]]; then
     error "kubehz: the platform returned a command this CLI does not run."
     echo "  Expected a 'kubeadm join' line. Nothing ran on this machine." >&2
@@ -348,10 +355,13 @@ node::assert_join_command() {
     return 1
   fi
   # Word characters, dots, colons, slashes, equals, plus and dash — the whole
-  # alphabet of an address, a bootstrap token, a sha256 pin and a DNS label.
-  # This is the shell-injection guard, and it MUST stand before `read -ra`
-  # splits the line: a token this alphabet rejects never reaches the argv.
-  if [[ ! "${line}" =~ ^[A-Za-z0-9._:/=+-]+([[:blank:]][A-Za-z0-9._:/=+-]+)*$ ]]; then
+  # alphabet of an address, a bootstrap token, a sha256 pin and a DNS label —
+  # and one space between two words (a tab, a newline or another control
+  # character is refused, as in the Go twin). This is the shell-injection
+  # guard, and it MUST stand before `read -ra` splits the line: a token this
+  # alphabet rejects never reaches the argv.
+  alphabet_re='^[A-Za-z0-9._:/=+-]+( [A-Za-z0-9._:/=+-]+)*$'
+  if [[ ! "${line}" =~ ${alphabet_re} ]]; then
     error "kubehz: the join command carries characters this CLI does not run."
     echo "  Nothing ran on this machine. Print the command and read it:  --print-only" >&2
     return 1
@@ -363,27 +373,26 @@ node::assert_join_command() {
   # a flag's value, because a value the api emits (an endpoint, a token, a
   # sha256 pin, a DNS label) never begins with `--`. At least one CA fingerprint
   # is REQUIRED: without it a node would trust whatever apiserver answers.
-  local -a tok
-  read -ra tok <<<"${line}"
+  # A pipe, not a here-string: bash before 5.1 writes a here-string to a file
+  # in TMPDIR, and the line holds the ticket.
+  IFS=' ' read -ra tok < <(printf '%s\n' "${line}")
 
-  local endpoint_re='^[A-Za-z0-9.-]+:[0-9]{1,5}$'
+  endpoint_re='^[A-Za-z0-9.-]+:[0-9]{1,5}$'
   if [[ ! "${tok[2]:-}" =~ ${endpoint_re} ]]; then
     error "kubehz: the join command's server address is not a host:port."
     echo "  Nothing ran on this machine. Print the command and read it:  --print-only" >&2
     return 1
   fi
 
-  local i flag seen_ca=0 allowed
   for (( i = 3; i < ${#tok[@]}; i++ )); do
     [[ "${tok[i]}" == --* ]] || continue   # a value following an allowed flag
     flag="${tok[i]%%=*}"                    # tolerate --flag=value as well as --flag value
     allowed=0
-    local candidate
     for candidate in "${NODE_JOIN_ALLOWED_FLAGS[@]}"; do
       [[ "${flag}" == "${candidate}" ]] && { allowed=1; break; }
     done
     if (( ! allowed )); then
-      error "kubehz: the platform sent a join flag this CLI will not run: ${flag}"
+      error "kubehz: word $(( i + 1 )) of the join command is a flag this CLI will not run."
       echo "  Nothing ran on this machine. This CLI runs only the join, token, CA-pin" >&2
       echo "  and node-name flags. Print the command and read it:  --print-only" >&2
       return 1
@@ -409,11 +418,12 @@ node::is_root() {
 # is minted but before kubeadm finishes: the ticket already holds a node slot for about ten
 # minutes, so name the way to free it — the same note the kubeadm-failed branch
 # carries. `node_name` is read from the interrupted node::join through dynamic
-# scope (the trap handler runs while node::join is still on the stack).
+# scope. node::join prints it after the cleanup. A write that fails (the
+# terminal is gone after a hangup) must not end a shell under set -e: `|| :`.
 node::interrupted_slot_note() {
-  echo "" >&2
-  warn "kubehz: interrupted after the ticket was minted — it holds a node slot for about ten minutes."
-  warn "Free the slot if you are not retrying:  lo kubehz node remove --name ${node_name}"
+  echo "" >&2 || :
+  warn "kubehz: interrupted after the ticket was minted — it holds a node slot for about ten minutes." || :
+  warn "Free the slot if you are not retrying:  lo kubehz node remove --name ${node_name}" || :
 }
 
 # Printed when a post-mint gate refuses the returned join line: nothing ran on
@@ -458,21 +468,37 @@ node::join_config_version() {
 # The values come from the join alphabet (no quote, no backslash), so a
 # double-quoted YAML scalar holds each of them as it is. The bytes are the
 # ones of the Go twin (joinConfig). printf is a builtin: the token is on no
-# argv. Call it in a command substitution: it prints the config, which ends
-# in one newline (the substitution drops it). Returns 1 with a message for
-# a line it cannot read that way.
+# argv. With an empty <version> it checks the line and prints nothing (the
+# check before --print-only prints the line). No refusal prints a word of
+# the line (see node::assert_join_command). Call it in a subshell or a
+# command substitution: it turns nocasematch off, and its last match leaves
+# the token in BASH_REMATCH. The config ends in one newline (a substitution
+# drops it). Returns 1 with a message for a line it cannot read that way.
 # Usage: node::join_config <line> <version> <node_ip>
 node::join_config() {
   [[ $- != *[xa]* ]] || { local -; set +xa; }  # the ticket
-  local line="${1}" version="${2}" node_ip="${3}"
-  local IFS=$' \t\n' i flag value inline token="" name="" h
-  local -a tok hashes=()
-  read -ra tok <<<"${line}"
+  # +x, +i and the refusal: as in node::assert_join_command.
+  local +x +i line version node_ip i at flag value inline token name h || { error "node::join_config: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  local +x +i -a tok hashes || { error "node::join_config: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  local IFS=$' \t\n'
+  line="${1}" version="${2}" node_ip="${3}" token="" name="" hashes=()
+  # nocasematch would let an uppercase token through: off here.
+  shopt -u nocasematch
+  # The kubeadm token shape, as the Go twin's joinTokenRe, and the shape of
+  # a CA pin (sha256: and 64 hex digits, either case), as its joinPinRe. The
+  # characters are spelled out: in a bash regex, a range like a-z follows
+  # the locale.
+  local tok_c='[abcdefghijklmnopqrstuvwxyz0123456789]'
+  local tok_re="^${tok_c}{6}[.]${tok_c}{16}\$"
+  local pin_re='^sha256:[0123456789abcdefABCDEF]{64}$'
+  # A pipe, not a here-string: see node::assert_join_command.
+  read -ra tok < <(printf '%s\n' "${line}")
   for (( i = 3; i < ${#tok[@]}; i++ )); do
+    at=$(( i + 1 ))   # the number of the word of the flag
     flag="${tok[i]%%=*}" value="" inline=0
     [[ "${tok[i]}" != *=* ]] || { value="${tok[i]#*=}"; inline=1; }
     if [[ "${flag}" != --* ]]; then
-      node::_join_config_refused "kubehz: the join command has a word that follows no flag."
+      node::_join_config_refused "kubehz: word ${at} of the join command follows no flag."
       return 1
     fi
     if (( ! inline && i + 1 < ${#tok[@]} )); then
@@ -480,7 +506,7 @@ node::join_config() {
       value="${tok[i]}"
     fi
     if [[ -z "${value}" || "${value}" == -* ]]; then
-      node::_join_config_refused "kubehz: the join command has a flag without a value: ${flag}"
+      node::_join_config_refused "kubehz: word ${at} of the join command is a flag without a value."
       return 1
     fi
     case "${flag}" in
@@ -490,7 +516,12 @@ node::join_config() {
           return 1
         fi
         token="${value}" ;;
-      --discovery-token-ca-cert-hash) hashes+=("${value}") ;;
+      --discovery-token-ca-cert-hash)
+        if [[ ! "${value}" =~ ${pin_re} ]]; then
+          node::_join_config_refused "kubehz: word ${at} of the join command is a CA pin that is not sha256: and 64 hex digits."
+          return 1
+        fi
+        hashes+=("${value}") ;;
       --node-name)
         if [[ -n "${name}" ]]; then
           node::_join_config_refused "kubehz: the join command names the node more than once (--node-name)."
@@ -498,7 +529,7 @@ node::join_config() {
         fi
         name="${value}" ;;
       *)
-        node::_join_config_refused "kubehz: the platform sent a join flag this CLI will not run: ${flag}"
+        node::_join_config_refused "kubehz: word ${at} of the join command is a flag this CLI will not run."
         return 1 ;;
     esac
   done
@@ -506,16 +537,15 @@ node::join_config() {
     node::_join_config_refused "kubehz: the join command must carry exactly one bootstrap token (--token)."
     return 1
   fi
-  # The kubeadm token shape, as the Go twin's joinTokenRe, spelled out (see
-  # above). nocasematch would let an uppercase token through: off here (the
-  # substitution runs in a subshell).
-  local tok_c='[abcdefghijklmnopqrstuvwxyz0123456789]'
-  local tok_re="^${tok_c}{6}[.]${tok_c}{16}\$"
-  shopt -u nocasematch
   if [[ ! "${token}" =~ ${tok_re} ]]; then
     node::_join_config_refused "kubehz: the bootstrap token of the join command does not have the kubeadm token shape."
     return 1
   fi
+  if (( ${#hashes[@]} == 0 )); then
+    node::_join_config_refused "kubehz: the join command pins no CA fingerprint, so a node could not verify the control plane."
+    return 1
+  fi
+  [[ -n "${version}" ]] || return 0
   printf 'apiVersion: kubeadm.k8s.io/%s\n' "${version}"
   printf 'kind: JoinConfiguration\n'
   printf 'discovery:\n'
@@ -559,10 +589,34 @@ node::remove_join_config() {
   fi
 }
 
-# Join THIS machine to a hosted cluster. The join line and the join config
-# hold the ticket: they stay out of a trace (set -x) and out of the
-# environment of a child (set -a). The guard lines (as in utils/keysonly.sh)
-# turn both off.
+# Stop the kubeadm of an interrupted join (<pid>, a child of this shell): a
+# TERM, then a KILL when it still runs after 10 seconds. Returns when it has
+# ended.
+# Usage: node::_join_stop <pid>
+node::_join_stop() {
+  local pid="${1}" n=0
+  kill -TERM "${pid}" 2>/dev/null || :
+  while kill -0 "${pid}" 2>/dev/null && (( n < 100 )); do
+    sleep 0.1 || :
+    n=$(( n + 1 ))
+  done
+  kill -KILL "${pid}" 2>/dev/null || :
+  wait "${pid}" 2>/dev/null || :
+}
+
+# The jq filter that reads the join line of a mint response: "line <the
+# line>", or "control" for a line with a control character (U+0000 to
+# U+001F, U+007F), so that bash never holds such a line: $(...) drops a
+# trailing newline, and bash cannot hold a NUL. The Go twin refuses the same
+# set (AssertJoinCommand). No line: no output.
+readonly NODE_JOIN_LINE_JQ='(.data? // .) | .joinCommand // empty
+  | if type == "string" and (explode | any(. < 32 or . == 127)) then "control" else "line " + tostring end'
+
+# Join THIS machine to a hosted cluster. The join line, the join config and
+# the response of the mint hold the ticket: they stay out of a trace (set
+# -x) and out of the environment of a child (set -a). The guard lines (as in
+# utils/keysonly.sh) turn both off, and the response global is unset before
+# the options and the traps of the caller come back.
 node::join() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *[xa]* ]] || { local -; set +xa; }  # the ticket
@@ -574,7 +628,7 @@ node::join() {
     'name|n'            'Node name; default: the short hostname of this machine'
     'node-ip|'          'Address other nodes reach this machine on (needed behind NAT)'
     'kubelet-version|'  'Kubelet version to declare; default: read from this machine'
-    'print-only|:+'     'Print the join command and run nothing'
+    'print-only|:+'     'Print the join command and run nothing. The command holds the bootstrap token: when you run it, the token is on argv'
     'domain|:^~domain'  'Domain to use'
     "${args[@]:-}"
   )
@@ -595,6 +649,13 @@ node::join() {
   if [[ -n "${node_ip}" && ! "${node_ip}" =~ ${ip_re} ]]; then
     error "kubehz: --node-ip must be one IP address, or an IPv4 and an IPv6 address with a comma: $(kubehz::space_bound_string "${node_ip}")"
     echo "  Example:  --node-ip 203.0.113.7" >&2
+    return 1
+  fi
+  # kubeadm join has no --node-ip flag: only the join config sets the
+  # node-ip of the kubelet, and --print-only prints a line, not a config.
+  if (( print_only )) && [[ -n "${node_ip}" ]]; then
+    error "kubehz: --print-only cannot carry --node-ip: kubeadm join has no such flag."
+    echo "  Nothing was minted. Run it without --print-only: the join config then sets the node-ip of the kubelet." >&2
     return 1
   fi
 
@@ -642,6 +703,12 @@ node::join() {
   local declared="${kubelet_version}"
   [[ -n "${declared}" ]] || declared=$(node::kubelet_version)
 
+  # The names that hold the line, the config or a field of the response,
+  # before the mint: a refusal here costs no ticket. +x, +i and the
+  # refusal: as in kubehz::space_api_call. node::_join_minted sets them
+  # through dynamic scope.
+  local +x +i join_command expires ready config path cause join_signal saved_traps || { error "node::join: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+
   local payload
   payload=$(jq -n \
     --arg nodeName "${node_name}" \
@@ -654,22 +721,71 @@ node::join() {
   kubehz::space_api POST "/api/clusters/${NODE_CLUSTER_ID}/nodes/join-token" "${payload}" || rc=$?
   if (( rc != 0 )); then
     (( rc == 2 )) && node::api_error "Failed to mint a join ticket for '${node_name}'"
+    unset KUBEHZ_SPACE_API_BODY
     return 1
   fi
 
+  # The ticket holds a slot from here until the join lands. A signal (INT,
+  # TERM, HUP) only sets join_signal: node::_join_minted stops at its next
+  # step, stops kubeadm and removes the join config. Then the slot note
+  # goes out, the traps of the caller come back (as in kubeone::_yq_replace),
+  # and node::join returns 128 + the number of the signal. Without a trap,
+  # a hangup would end the shell before the config is removed.
+  saved_traps=$(trap -p INT TERM HUP)
+  join_signal=""
+  trap 'join_signal=2' INT
+  trap 'join_signal=15' TERM
+  trap 'join_signal=1' HUP
+  rc=0
+  node::_join_minted || rc=$?
+  unset KUBEHZ_SPACE_API_BODY
+  if [[ -n "${join_signal}" ]] && (( rc != 0 )); then
+    node::interrupted_slot_note
+    rc=$(( 128 + join_signal ))
+  fi
+  trap - INT TERM HUP
+  eval "${saved_traps}"
+  return "${rc}"
+}
+
+# The steps of node::join after the mint. Call node::join: it holds the
+# guard, the traps and the names that this function sets through dynamic
+# scope (join_command, expires, ready, config, path, cause). It reads
+# node_name, node_pool, print_only, config_version, node_ip and
+# join_signal of node::join the same way. Before each step that makes
+# something it reads join_signal: after a signal it removes what it made
+# and returns 1 (node::join prints the note). It removes the config before
+# it prints a result.
+node::_join_minted() {
+  local rc=0 kpid krc=0
   # Guard every read: the mint returned 2xx, but a 2xx body is not a promise of
   # JSON. Under errexit a bare `$(jq …)` on a non-JSON body would kill `lo` with
   # a raw parse error AFTER the ticket was minted — and that ticket holds a
   # slot. Fall back to empty and let the empty-join_command branch below say so.
-  local join_command expires ready
-  join_command=$(jq -r '(.data? // .) | .joinCommand // empty' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || join_command=""
-  expires=$(jq -r '(.data? // .) | .expiresAt // empty' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || expires=""
-  expires=$(kubehz::scrub "${expires}")
+  # The body goes to jq through a pipe, not a here-string: bash before 5.1
+  # writes a here-string to a file in TMPDIR, and the body holds the ticket.
+  join_command=$(printf '%s' "${KUBEHZ_SPACE_API_BODY}" | jq -r "${NODE_JOIN_LINE_JQ}" 2>/dev/null) || join_command=""
+  expires=$(printf '%s' "${KUBEHZ_SPACE_API_BODY}" | jq -r '(.data? // .) | .expiresAt // empty' 2>/dev/null) || expires=""
   # `.ready` WITHOUT a `//` alternative: jq's `//` takes the right side when
   # the left is null OR FALSE, so `.ready // empty` erases the one value this
   # warning exists to catch. An absent key reads "null" here and warns about
   # nothing, which is the honest answer for an api that did not say.
-  ready=$(jq -r '(.data? // .) | .ready' <<<"${KUBEHZ_SPACE_API_BODY}" 2>/dev/null) || ready=""
+  ready=$(printf '%s' "${KUBEHZ_SPACE_API_BODY}" | jq -r '(.data? // .) | .ready' 2>/dev/null) || ready=""
+  # The reads are done: the response goes now (node::join unsets it again
+  # on each way out).
+  unset KUBEHZ_SPACE_API_BODY
+  expires=$(kubehz::scrub "${expires}") || expires=""
+  if [[ "${join_command}" == control ]]; then
+    error "kubehz: the join command carries characters this CLI does not run."
+    echo "  Nothing ran on this machine. Print the command and read it:  --print-only" >&2
+    node::minted_slot_note
+    return 1
+  fi
+  if [[ "${join_command}" == "line "* ]]; then
+    join_command="${join_command#line }"
+  else
+    join_command=""
+  fi
   if [[ -z "${join_command}" ]]; then
     error "kubehz: the platform accepted the mint but returned no join command this CLI could read."
     echo "  A ticket may have been minted — if so it holds a node slot for about ten" >&2
@@ -687,16 +803,18 @@ node::join() {
     warn "kubehz: the platform has not armed this ticket yet — the join may time out."
     warn "Mint again in a minute if it does."
   fi
+  # The strict read of the line, before --print-only too: the same verdicts.
+  # An empty version checks the line and prints nothing; the subshell keeps
+  # nocasematch and BASH_REMATCH of this shell.
+  ( node::join_config "${join_command}" "" "" ) || { node::minted_slot_note; return 1; }
 
   if (( print_only )); then
-    local -a join_argv
-    read -ra join_argv <<<"${join_command}"
-    [[ -n "${node_ip}" ]] && join_argv+=(--node-ip "${node_ip}")
+    # The line passed the alphabet check: its words are split by one space.
     echo ""
     echo "  Node '${node_name}' joins pool '${node_pool}' of cluster ${NODE_CLUSTER_ID}."
     echo "  Run this as root on that machine before ${expires:-the ticket expires}:"
     echo ""
-    echo "    ${join_argv[*]}"
+    echo "    ${join_command}"
     echo ""
     echo "  The ticket is single use and lasts ten minutes. It already holds a node"
     echo "  slot. Mint a fresh one with the same command when it expires."
@@ -705,12 +823,15 @@ node::join() {
 
   # The line, read into a kubeadm join config in a private file
   # (kubehz::write_join_file): the bootstrap token is on no argv.
-  local config path cause
+  [[ -z "${join_signal}" ]] || return 1
   config=$(node::join_config "${join_command}" "${config_version}" "${node_ip}") \
     || { node::minted_slot_note; return 1; }
   config+=$'\n'
-  rc=0
+  [[ -z "${join_signal}" ]] || { config=""; return 1; }
+  # The writer runs in a subshell with traps of its own: a signal there
+  # removes what it made, and it fails as a write that failed.
   path=$(kubehz::write_join_file "${node_name}" .yaml "${config}") || rc=$?
+  config=""
   if (( rc != 0 )); then
     # rc 2: the node name was refused (the message is printed). Else the
     # first line is the cause (empty when a message was printed already);
@@ -721,33 +842,46 @@ node::join() {
       error "kubehz: could not write the join config for '${node_name}'${cause:+: ${cause}}"
       (( rc != 3 )) || echo "  The cleanup failed too: ${path} may still hold the join ticket. Delete that directory." >&2
     fi
-    node::minted_slot_note
+    [[ -n "${join_signal}" ]] || node::minted_slot_note
+    return 1
+  fi
+  if [[ -n "${join_signal}" ]]; then
+    node::remove_join_config "${path}"
     return 1
   fi
 
   echo "kubehz: joining '${node_name}' to pool '${node_pool}' of cluster ${NODE_CLUSTER_ID}"
-  # The ticket is live and holds a slot from here until the join lands. A
-  # Ctrl-C mid-join would otherwise leave the caller unaware the slot is held.
-  # The handler returns, so the run goes on to the cleanup below, also after
-  # a TERM or a hangup (without a trap, a hangup would end the shell before
-  # the config is removed).
-  trap 'node::interrupted_slot_note' INT TERM HUP
   # argv, never a shell. The token is in the config file, not on argv.
-  if ! kubeadm join --config "${path}"; then
+  # kubeadm runs in the background, with the stdin of lo, so that a signal
+  # ends the wait at once (bash runs a trap only after a foreground child
+  # ends): then node::_join_stop stops kubeadm. A kubeadm that ended
+  # before the signal counts. A signal that came before the wait set
+  # join_signal already, and the wait would then last until kubeadm ends:
+  # the check skips the wait.
+  kubeadm join --config "${path}" <&0 &
+  kpid=$!
+  if [[ -z "${join_signal}" ]]; then
+    wait "${kpid}" || krc=$?
+  else
+    krc=1
+  fi
+  if [[ -n "${join_signal}" ]] && (( krc != 0 )); then
+    node::_join_stop "${kpid}"
+    node::remove_join_config "${path}"
+    return 1
+  fi
+  node::remove_join_config "${path}"
+  if (( krc != 0 )); then
     error "kubehz: kubeadm join failed — read its output above."
     echo "  The node keeps its slot until you remove it:" >&2
     echo "    lo kubehz node remove --name ${node_name}" >&2
     echo "  Run 'kubeadm reset' on this machine before you join it again." >&2
-    node::remove_join_config "${path}"
-    trap - INT TERM HUP
     return 1
   fi
   echo ""
   echo "kubehz: node '${node_name}' joined cluster ${NODE_CLUSTER_ID}."
   echo "  It reports Ready within a few minutes. Watch it with:"
   echo "    lo kubehz node status"
-  node::remove_join_config "${path}"
-  trap - INT TERM HUP
 }
 
 # ── Remove ───────────────────────────────────────────────

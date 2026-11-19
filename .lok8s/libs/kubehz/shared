@@ -638,16 +638,33 @@ kubehz::space_join_tmp_dir() {
 # directory fails too. When the write fails, the first line on stdout is
 # its cause (empty when a message was printed already); with 3, the second
 # line is the directory, which may still hold a part of the ticket.
+# The body runs in a subshell of its own, with traps for INT, TERM and HUP
+# (kubehz::_join_write_signalled): a signal during the write removes the
+# file and the directory, and the writer returns as a failed write does
+# (1, or 3 with the directory), with the cause "the write was interrupted".
+# (A caller runs the writer in a command substitution, whose subshell does
+# not keep the traps of the caller: a Ctrl-C reaches it too.)
 # Usage: kubehz::write_join_file <node_name> <ext> <content>
 kubehz::write_join_file() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *[xa]* ]] || { local -; set +xa; }  # the ticket
+  ( kubehz::_write_join_file "$@" )
+}
+
+# The body of kubehz::write_join_file (call that one: it holds the guard
+# and the subshell that ends the traps of this function).
+kubehz::_write_join_file() {
   # +x: a local takes the export flag of an exported variable of the same
   # name, and a child (mktemp, stat, chmod) would get the ticket. +i and the
   # refusal: as in kubehz::space_api_call (an integer of a caller would
   # print the ticket; a readonly nameref would take it).
   local +x +i node_name ext content dir priv path || { error "kubehz::write_join_file: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
-  node_name="${1}" ext="${2}" content="${3}"
+  # Empty first: under localvar_inherit a local takes the value of a caller
+  # too, and the trap removes what priv and path name.
+  node_name="${1}" ext="${2}" content="${3}" dir="" priv="" path=""
+  # Before the directory is made: a signal from here on removes what the
+  # write made.
+  trap 'kubehz::_join_write_signalled' INT TERM HUP
   node::assert_node_name "${node_name}" || return 2
   # rc 2: the check printed why (no cause); rc 1: TMPDIR cannot be resolved.
   dir=$(kubehz::space_join_tmp_dir) || {
@@ -691,6 +708,23 @@ kubehz::space_write_join_ticket() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *[xa]* ]] || { local -; set +xa; }  # the ticket
   kubehz::write_join_file "${1}" .token "${2}"$'\n'
+}
+
+# The trap of a write that a signal stopped (kubehz::_write_join_file):
+# prints the cause, removes the file and the fresh directory when the write
+# made them (priv and path of the writer, through dynamic scope), and ends
+# the subshell of the writer as kubehz::_join_write_failed returns: 1, or 3
+# when the removal fails (the directory is then the second line).
+kubehz::_join_write_signalled() {
+  local rc=1
+  printf '%s\n' "the write was interrupted" || :
+  if [[ -n "${priv:-}" ]]; then
+    if ! { [[ -z "${path:-}" ]] || rm -f -- "${path}" 2>/dev/null; } || ! rmdir -- "${priv}" 2>/dev/null; then
+      printf '%s\n' "${priv}" || :
+      rc=3
+    fi
+  fi
+  exit "${rc}"
 }
 
 # The cleanup of a failed write of a join file (kubehz::write_join_file):

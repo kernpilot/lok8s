@@ -10,18 +10,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"os/signal"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/interrupt"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -306,15 +305,29 @@ func (c *Context) inferPool(ctx context.Context, cfg *Config, clusterID string) 
 var nodeJoinAllowedFlags = []string{"--token", "--discovery-token-ca-cert-hash", "--node-name"}
 
 var (
-	joinAlphabetRe = regexp.MustCompile(`^[A-Za-z0-9._:/=+-]+([ \t][A-Za-z0-9._:/=+-]+)*$`)
+	// joinAlphabetRe: the words of the join alphabet, with one space
+	// between two words (no tab, no other control character).
+	joinAlphabetRe = regexp.MustCompile(`^[A-Za-z0-9._:/=+-]+( [A-Za-z0-9._:/=+-]+)*$`)
 	joinEndpointRe = regexp.MustCompile(`^[A-Za-z0-9.-]+:[0-9]{1,5}$`)
 )
+
+// isJoinControl reports a control character: U+0000 to U+001F and U+007F.
+func isJoinControl(r rune) bool { return r < 0x20 || r == 0x7f }
 
 // AssertJoinCommand ports node::assert_join_command: refuse a join line
 // whose SEMANTICS this CLI does not recognise — the alphabet check keeps a
 // shell metacharacter out, the structural allowlist keeps a dangerous
-// kubeadm FLAG out, and at least one CA fingerprint is required.
+// kubeadm FLAG out, and at least one CA fingerprint is required. No
+// refusal prints a word of the line: a word can hold the ticket, so a
+// refusal names the number of the word (the first word is 1).
 func (c *Context) AssertJoinCommand(line string) error {
+	// A control character first: the bash twin refuses it as it reads the
+	// response (NODE_JOIN_LINE_JQ), before any other check, with this text.
+	if strings.ContainsFunc(line, isJoinControl) {
+		c.errorf("kubehz: the join command carries characters this CLI does not run.")
+		c.echoErr("  Nothing ran on this machine. Print the command and read it:  --print-only")
+		return ErrHandled
+	}
 	if !strings.HasPrefix(line, "kubeadm join ") {
 		c.errorf("kubehz: the platform returned a command this CLI does not run.")
 		c.echoErr("  Expected a 'kubeadm join' line. Nothing ran on this machine.")
@@ -347,7 +360,7 @@ func (c *Context) AssertJoinCommand(line string) error {
 		}
 		allowed := slices.Contains(nodeJoinAllowedFlags, flag)
 		if !allowed {
-			c.errorf("kubehz: the platform sent a join flag this CLI will not run: %s", flag)
+			c.errorf("kubehz: word %d of the join command is a flag this CLI will not run.", i+1)
 			c.echoErr("  Nothing ran on this machine. This CLI runs only the join, token, CA-pin")
 			c.echoErr("  and node-name flags. Print the command and read it:  --print-only")
 			return ErrHandled
@@ -392,6 +405,13 @@ func (c *Context) NodeJoin(ctx context.Context, domain string, o NodeOpts) error
 	if o.NodeIP != "" && !nodeIPRe.MatchString(o.NodeIP) {
 		c.errorf("kubehz: --node-ip must be one IP address, or an IPv4 and an IPv6 address with a comma: %s", clip(scrub(o.NodeIP)))
 		c.echoErr("  Example:  --node-ip 203.0.113.7")
+		return ErrHandled
+	}
+	// kubeadm join has no --node-ip flag: only the join config sets the
+	// node-ip of the kubelet, and --print-only prints a line, not a config.
+	if o.PrintOnly && o.NodeIP != "" {
+		c.errorf("kubehz: --print-only cannot carry --node-ip: kubeadm join has no such flag.")
+		c.echoErr("  Nothing was minted. Run it without --print-only: the join config then sets the node-ip of the kubelet.")
 		return ErrHandled
 	}
 	nodePool := o.Pool
@@ -440,13 +460,27 @@ func (c *Context) NodeJoin(ctx context.Context, domain string, o NodeOpts) error
 	if err != nil {
 		return err
 	}
+	// The ticket holds a slot from here until the join lands. A signal ends
+	// ctx: SIGINT and SIGTERM through cli.WatchInterrupt, a SIGHUP through
+	// CatchHangup (which also ends the command context, so main ends lo
+	// with the SIGHUP). Then kubeadm stops or does not start, the config
+	// is removed, and the slot note goes out (bash: the traps of
+	// node::join).
+	ctx, stopHangup := interrupt.CatchHangup(ctx)
+	defer stopHangup()
+	// The strict read of the line, before --print-only too: the same
+	// verdicts. An empty version checks the line and makes no config.
+	if _, err := c.joinConfig(ticket.joinCommand, "", ""); err != nil {
+		c.mintedSlotNote(nodeName)
+		return err
+	}
 	if o.PrintOnly {
-		joinArgv := strings.Fields(ticket.joinCommand)
-		if o.NodeIP != "" {
-			joinArgv = append(joinArgv, "--node-ip", o.NodeIP)
-		}
-		c.printJoin(nodeName, nodePool, clusterID, ticket.expires, joinArgv)
+		c.printJoin(nodeName, nodePool, clusterID, ticket.expires, ticket.joinCommand)
 		return nil
+	}
+	if ctx.Err() != nil {
+		c.interruptedSlotNote(nodeName)
+		return ErrHandled
 	}
 	config, err := c.joinConfig(ticket.joinCommand, configVersion, o.NodeIP)
 	if err != nil {
@@ -464,6 +498,9 @@ var (
 	// nodeIPRe is the shape of --node-ip: one address, or an IPv4 and an
 	// IPv6 address with a comma (the kubelet checks the addresses).
 	nodeIPRe = regexp.MustCompile(`^[0-9A-Fa-f.:]+(,[0-9A-Fa-f.:]+)?$`)
+	// joinPinRe is the shape of a CA pin of the join line: sha256: and 64
+	// hex digits, either case (the bash twin's pin_re).
+	joinPinRe = regexp.MustCompile(`^sha256:[0-9A-Fa-f]{64}$`)
 	// kubeadmVersionRe reads `kubeadm version -o short` (v1.36.0); group 1
 	// is the minor version.
 	kubeadmVersionRe = regexp.MustCompile(`^v1\.([0-9]{1,3})\.[0-9]+([-+][0-9A-Za-z.+-]*)?$`)
@@ -501,7 +538,10 @@ func (c *Context) joinConfigVersion(ctx context.Context) (string, error) {
 // from the bootstrap token (its defaults, in both versions), as it does for
 // --token. The values come from the join alphabet (no quote, no backslash),
 // so a double-quoted YAML scalar holds each of them as it is. The bash twin
-// (node::join_config) prints the same bytes.
+// (node::join_config) prints the same bytes. With an empty apiVersion it
+// checks the line and returns no config (the check before --print-only
+// prints the line). No refusal prints a word of the line (see
+// AssertJoinCommand).
 func (c *Context) joinConfig(line, apiVersion, nodeIP string) (string, error) {
 	refuse := func(format string, a ...any) (string, error) {
 		c.errorf(format, a...)
@@ -513,16 +553,17 @@ func (c *Context) joinConfig(line, apiVersion, nodeIP string) (string, error) {
 	var token, name string
 	var hashes []string
 	for i := 3; i < len(tok); i++ {
+		at := i + 1 // the number of the word of the flag
 		flag, value, inline := strings.Cut(tok[i], "=")
 		if !strings.HasPrefix(flag, "--") {
-			return refuse("kubehz: the join command has a word that follows no flag.")
+			return refuse("kubehz: word %d of the join command follows no flag.", at)
 		}
 		if !inline && i+1 < len(tok) {
 			i++
 			value = tok[i]
 		}
 		if value == "" || strings.HasPrefix(value, "-") {
-			return refuse("kubehz: the join command has a flag without a value: %s", flag)
+			return refuse("kubehz: word %d of the join command is a flag without a value.", at)
 		}
 		switch flag {
 		case "--token":
@@ -531,6 +572,9 @@ func (c *Context) joinConfig(line, apiVersion, nodeIP string) (string, error) {
 			}
 			token = value
 		case "--discovery-token-ca-cert-hash":
+			if !joinPinRe.MatchString(value) {
+				return refuse("kubehz: word %d of the join command is a CA pin that is not sha256: and 64 hex digits.", at)
+			}
 			hashes = append(hashes, value)
 		case "--node-name":
 			if name != "" {
@@ -538,7 +582,7 @@ func (c *Context) joinConfig(line, apiVersion, nodeIP string) (string, error) {
 			}
 			name = value
 		default:
-			return refuse("kubehz: the platform sent a join flag this CLI will not run: %s", flag)
+			return refuse("kubehz: word %d of the join command is a flag this CLI will not run.", at)
 		}
 	}
 	if token == "" {
@@ -546,6 +590,12 @@ func (c *Context) joinConfig(line, apiVersion, nodeIP string) (string, error) {
 	}
 	if !joinTokenRe.MatchString(token) {
 		return refuse("kubehz: the bootstrap token of the join command does not have the kubeadm token shape.")
+	}
+	if len(hashes) == 0 {
+		return refuse("kubehz: the join command pins no CA fingerprint, so a node could not verify the control plane.")
+	}
+	if apiVersion == "" {
+		return "", nil
 	}
 	var b strings.Builder
 	b.WriteString("apiVersion: kubeadm.k8s.io/" + apiVersion + "\n")
@@ -596,19 +646,17 @@ func (c *Context) joinConfigWriteFailed(nodeName string, err error) error {
 	return ErrHandled
 }
 
-// removeJoinConfig removes the private directory of the join config at
-// path. runJoin defers it, so it runs on each way out: a join that landed,
-// a join that failed, and a join that a signal stopped (the signal cancels
-// the context, kubeadm stops, and the run returns).
+// removeJoinConfig removes the join config at path, then its private
+// directory (removeJoinFile, as node::remove_join_config): a directory
+// that is not empty stays, and the warning names it. runJoin runs it on
+// each way out: a join that landed, a join that failed, and a join that a
+// signal stopped (the signal ends the context, kubeadm stops, and the run
+// returns).
 func (c *Context) removeJoinConfig(path string) {
-	removeAll := c.RemoveAll
-	if removeAll == nil {
-		removeAll = os.RemoveAll
-	}
 	dir := filepath.Dir(path)
 	// The text of the bash twin (node::remove_join_config), which has no
 	// cause to name.
-	if err := removeAll(dir); err != nil {
+	if err := c.removeJoinFile(dir, path); err != nil {
 		c.warnf("kubehz: could not remove %s", dir)
 		c.warnf("It holds the join ticket until the ticket expires. Delete that directory.")
 	}
@@ -669,8 +717,9 @@ func (c *Context) mintTicket(ctx context.Context, cfg *Config, clusterID, nodeNa
 	return t, nil
 }
 
-// printJoin is --print-only: the join command for another machine.
-func (c *Context) printJoin(nodeName, nodePool, clusterID, expires string, joinArgv []string) {
+// printJoin is --print-only: the join command for another machine. The
+// line passed the alphabet check: its words are split by one space.
+func (c *Context) printJoin(nodeName, nodePool, clusterID, expires, line string) {
 	if expires == "" {
 		expires = "the ticket expires"
 	}
@@ -678,36 +727,58 @@ func (c *Context) printJoin(nodeName, nodePool, clusterID, expires string, joinA
 	c.echo("  Node '%s' joins pool '%s' of cluster %s.", nodeName, nodePool, clusterID)
 	c.echo("  Run this as root on that machine before %s:", expires)
 	c.echo("")
-	c.echo("    %s", strings.Join(joinArgv, " "))
+	c.echo("    %s", line)
 	c.echo("")
 	c.echo("  The ticket is single use and lasts ten minutes. It already holds a node")
 	c.echo("  slot. Mint a fresh one with the same command when it expires.")
 }
 
+// joinStopDelay bounds the stop of an interrupted kubeadm join: the runner
+// sends it a SIGINT when ctx ends, and a SIGKILL after this delay.
+const joinStopDelay = 10 * time.Second
+
+// interruptedSlotNote ports node::interrupted_slot_note: a signal stopped
+// the join after the mint, and the ticket holds a slot.
+func (c *Context) interruptedSlotNote(nodeName string) {
+	c.echoErr("")
+	c.warnf("kubehz: interrupted after the ticket was minted — it holds a node slot for about ten minutes.")
+	c.warnf("Free the slot if you are not retrying:  lo kubehz node remove --name %s", nodeName)
+}
+
 // runJoin runs kubeadm join here with the join config at configPath, and
-// removes the config on each way out. The ticket is live and holds a slot
-// from here until the join lands: a Ctrl-C mid-join must not leave the
-// caller unaware (bash: trap INT TERM HUP). A hangup is caught too: by
-// default it would end lo before the config is removed.
+// removes the config on each way out, before it prints the result. When
+// ctx ends (a signal, see NodeJoin), kubeadm does not start, or the
+// runner stops it (a SIGINT, then a SIGKILL after joinStopDelay); the
+// slot note then goes out. A kubeadm that ended without an error before
+// the signal counts as a join that landed (as in the bash twin).
 func (c *Context) runJoin(ctx context.Context, nodeName, nodePool, clusterID, configPath string) error {
-	defer c.removeJoinConfig(configPath)
-	c.echo("kubehz: joining '%s' to pool '%s' of cluster %s", nodeName, nodePool, clusterID)
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	done := make(chan struct{})
-	go func() {
-		select {
-		case <-sigs:
-			c.echoErr("")
-			c.warnf("kubehz: interrupted after the ticket was minted — it holds a node slot for about ten minutes.")
-			c.warnf("Free the slot if you are not retrying:  lo kubehz node remove --name %s", nodeName)
-		case <-done:
+	removed := false
+	remove := func() {
+		if !removed {
+			removed = true
+			c.removeJoinConfig(configPath)
 		}
-	}()
+	}
+	defer remove()
+	if ctx.Err() != nil {
+		remove()
+		c.interruptedSlotNote(nodeName)
+		return ErrHandled
+	}
+	c.echo("kubehz: joining '%s' to pool '%s' of cluster %s", nodeName, nodePool, clusterID)
 	// argv, never a shell. The token is in the config file, not on argv.
-	runErr := c.Runner.Run(ctx, execx.Cmd{Name: "kubeadm", Args: []string{"join", "--config", configPath}, Stdout: c.out(), Stderr: c.errOut()})
-	close(done)
-	signal.Stop(sigs)
+	runErr := c.Runner.Run(ctx, execx.Cmd{
+		Name:      "kubeadm",
+		Args:      []string{"join", "--config", configPath},
+		Stdout:    c.out(),
+		Stderr:    c.errOut(),
+		WaitDelay: joinStopDelay,
+	})
+	remove()
+	if runErr != nil && ctx.Err() != nil {
+		c.interruptedSlotNote(nodeName)
+		return ErrHandled
+	}
 	if runErr != nil {
 		c.errorf("kubehz: kubeadm join failed — read its output above.")
 		c.echoErr("  The node keeps its slot until you remove it:")

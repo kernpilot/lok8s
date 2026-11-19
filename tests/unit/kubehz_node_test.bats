@@ -92,8 +92,12 @@ setup() {
   # The fixture token, built from parts: a secret scanner flags a long
   # literal next to a token keyword.
   JOIN_TOKEN=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  # CA pins in the shape kubeadm reads (sha256: and 64 hex digits; CA_PIN2
+  # in upper case), built from parts as the token is.
+  CA_PIN="sha256:$(printf '0123456789abcdef%.0s' 1 2 3 4)"
+  CA_PIN2="sha256:$(printf 'FEDCBA9876543210%.0s' 1 2 3 4)"
   export STUB_MINT_CODE="201"
-  export STUB_MINT_BODY='{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","joinCommand":"kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1","nodeName":"box-1","pool":"metal","expiresAt":"2026-09-01T12:00:00Z","ready":true}}'
+  export STUB_MINT_BODY='{"ok":true,"data":{"token":"'"${JOIN_TOKEN}"'","joinCommand":"kubeadm join cp.example.test:6443 --token '"${JOIN_TOKEN}"' --discovery-token-ca-cert-hash '"${CA_PIN}"' --node-name box-1","nodeName":"box-1","pool":"metal","expiresAt":"2026-09-01T12:00:00Z","ready":true}}'
   export STUB_REMOVE_CODE="200"
   export STUB_REMOVE_BODY='{"ok":true,"data":{"name":"box-1","pool":"metal","status":"Draining"}}'
 
@@ -213,7 +217,7 @@ _config_v1beta4() {
     '    apiServerEndpoint: "cp.example.test:6443"' \
     "    token: \"${JOIN_TOKEN}\"" \
     '    caCertHashes:' \
-    '      - "sha256:1111"' \
+    '      - "'"${CA_PIN}"'"' \
     'nodeRegistration:' \
     '  name: "box-1"'
 }
@@ -237,7 +241,7 @@ _config_v1beta3_node_ip() {
     '    apiServerEndpoint: "cp.example.test:6443"' \
     "    token: \"${JOIN_TOKEN}\"" \
     '    caCertHashes:' \
-    '      - "sha256:1111"' \
+    '      - "'"${CA_PIN}"'"' \
     'nodeRegistration:' \
     '  name: "box-1"' \
     '  kubeletExtraArgs:' \
@@ -548,7 +552,7 @@ _stub_all() {
 
   run node::join --name box-1 --pool metal --print-only
   assert_success
-  assert_output --partial "kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1"
+  assert_line "    kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN} --discovery-token-ca-cert-hash ${CA_PIN} --node-name box-1"
   assert_output --partial "2026-09-01T12:00:00Z"
   assert_output --partial "single use"
   [ ! -f "${KUBEADM_LOG}" ]
@@ -556,12 +560,35 @@ _stub_all() {
   [ ! -f "${KUBEADM_VERSION_LOG}" ]
 }
 
-@test "join --print-only: --node-ip is appended to the printed command" {
+# kubeadm join has no --node-ip flag: the printed line would fail after the
+# ticket was spent, so the pair is refused before the mint.
+@test "join --print-only: --node-ip is refused before the mint" {
   _stub_all
+  touch "${CURL_LOG}"
 
   run node::join --name box-1 --pool metal --node-ip 203.0.113.7 --print-only
-  assert_success
-  assert_output --partial "--node-ip 203.0.113.7"
+  assert_failure
+  assert_output --partial "kubehz: --print-only cannot carry --node-ip: kubeadm join has no such flag."
+  assert_output --partial "  Nothing was minted. Run it without --print-only: the join config then sets the node-ip of the kubelet."
+  run grep -c -F POST -- "${CURL_LOG}"
+  [ "${output}" = 0 ]
+  [ ! -f "${KUBEADM_LOG}" ]
+  [ ! -f "${KUBEADM_VERSION_LOG}" ]
+}
+
+# --print-only reads the line as strictly as a join, first: a line that
+# fails the read prints no command.
+@test "join --print-only: a line that cannot be read into a config prints no command" {
+  _stub_all
+  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token '"${JOIN_TOKEN}"' --discovery-token-ca-cert-hash '"${CA_PIN}"' stray --node-name box-1","expiresAt":"x","ready":true}}'
+
+  run node::join --name box-1 --pool metal --print-only
+  assert_failure
+  assert_output --partial "kubehz: word 8 of the join command follows no flag."
+  assert_output --partial "holds a node slot"
+  refute_output --partial "kubeadm join cp"
+  refute_output --partial "${JOIN_TOKEN}"
+  [ ! -f "${KUBEADM_VERSION_LOG}" ]
 }
 
 # ── join: the run ────────────────────────────────────────
@@ -613,29 +640,135 @@ _stub_all() {
   _assert_join_config _config_v1beta4
 }
 
-# The terminal sends SIGINT to kubeadm and to the shell. The trap prints the
-# slot note and returns, so the run goes on to the cleanup.
-@test "join: an interrupt mid-join names the slot, and removes the config" {
-  _stub_all
+# A kubeadm that runs until a signal stops it: version answers as the
+# default stub does; the join keeps its path and its pid, then becomes a
+# sleep (exec keeps the pid).
+_stub_sleeping_kubeadm() {
   kubeadm() {
     if [[ "${1}" == version ]]; then
       printf 'v1.36.0\n'
       return 0
     fi
     printf '%s\n' "${3}" > "${KUBEADM_SEEN}.path"
-    kill -INT "${BASHPID}"
-    return 130
+    printf '%s\n' "${BASHPID}" > "${KUBEADM_SEEN}.pid"
+    exec sleep 30
   }
   export -f kubeadm
+}
 
-  run node::join --name box-1 --pool metal
+# Run node::join in the background as the lo process, send <signal> to it
+# alone once kubeadm runs, and check the end: the exit code <rc>, kubeadm
+# stopped within the bound, the slot note, no failure text, no config.
+# (An asynchronous job ignores SIGINT in a shell without job control, so
+# INT has no case here; INT and TERM set the same trap.)
+# Usage: _signal_mid_join <signal> <rc>
+_signal_mid_join() {
+  local sig="${1}" want="${2}" lo kpid i rc=0 start
+  ( node::join --name box-1 --pool metal ) > "${BATS_TEST_TMPDIR}/join.out" 2>&1 3>&- &
+  lo=$!
+  for (( i = 0; i < 100; i++ )); do
+    [[ ! -s "${KUBEADM_SEEN}.pid" ]] || break
+    sleep 0.1
+  done
+  [ -s "${KUBEADM_SEEN}.pid" ]
+  kpid=$(cat "${KUBEADM_SEEN}.pid")
+  # lo is in the wait for kubeadm by now.
+  sleep 0.2
+  start=${EPOCHREALTIME//[.,]/}
+  kill "-${sig}" "${lo}"
+  wait "${lo}" || rc=$?
+  [ "${rc}" -eq "${want}" ]
+  # Below the 10 s bound of node::_join_stop: the TERM stopped kubeadm.
+  (( ${EPOCHREALTIME//[.,]/} - start < 10000000 ))
+  run kill -0 "${kpid}"
   assert_failure
+  run cat "${BATS_TEST_TMPDIR}/join.out"
   assert_output --partial "interrupted after the ticket was minted"
-  assert_output --partial "kubeadm join failed"
+  assert_output --partial "lo kubehz node remove --name box-1"
+  refute_output --partial "kubeadm join failed"
+  refute_output --partial "joined cluster"
   local path
   path=$(cat "${KUBEADM_SEEN}.path")
   [[ "${path}" == */kubehz-join-*/kubehz-join-box-1.yaml ]]
   [ ! -e "${path%/*}" ]
+  _assert_tmpdir_empty
+}
+
+@test "join: a TERM to lo mid-join stops kubeadm, removes the config, and exits 143" {
+  _stub_all
+  _stub_sleeping_kubeadm
+  _signal_mid_join TERM 143
+}
+
+@test "join: a HUP to lo mid-join stops kubeadm, removes the config, and exits 129" {
+  _stub_all
+  _stub_sleeping_kubeadm
+  _signal_mid_join HUP 129
+}
+
+# After a hangup the terminal is gone, and a write to it fails (here
+# /dev/full). The cleanup runs before the note, and a failed write of the
+# note does not end the shell under set -e: the exit code is still the one
+# of the signal.
+@test "join: a HUP mid-join with a broken stderr still cleans up and exits 129" {
+  _stub_all
+  _stub_sleeping_kubeadm
+  local lo kpid i rc=0 path
+  ( set -e; node::join --name box-1 --pool metal ) > "${BATS_TEST_TMPDIR}/join.out" 2>/dev/full 3>&- &
+  lo=$!
+  for (( i = 0; i < 100; i++ )); do
+    [[ ! -s "${KUBEADM_SEEN}.pid" ]] || break
+    sleep 0.1
+  done
+  [ -s "${KUBEADM_SEEN}.pid" ]
+  kpid=$(cat "${KUBEADM_SEEN}.pid")
+  sleep 0.2
+  kill -HUP "${lo}"
+  wait "${lo}" || rc=$?
+  [ "${rc}" -eq 129 ]
+  run kill -0 "${kpid}"
+  assert_failure
+  path=$(cat "${KUBEADM_SEEN}.path")
+  [ ! -e "${path%/*}" ]
+  _assert_tmpdir_empty
+}
+
+# A signal while the config is written. To lo: its trap sets the flag, the
+# writer ends, and the config is removed before kubeadm starts. To the
+# writer's own subshell: its trap removes what it made, and the write
+# fails as a failed write does.
+@test "join: a TERM to lo during the write of the config removes it and runs no join" {
+  _stub_all
+  export LO_PID_FILE="${BATS_TEST_TMPDIR}/lo.pid"
+  chmod() {
+    [[ "${1}" != 00700 ]] || kill -TERM "$(cat "${LO_PID_FILE}")"
+    command chmod "$@"
+  }
+  export -f chmod
+  local rc=0
+  ( printf '%s\n' "${BASHPID}" > "${LO_PID_FILE}"; node::join --name box-1 --pool metal ) > "${BATS_TEST_TMPDIR}/join.out" 2>&1 3>&- &
+  wait "$!" || rc=$?
+  [ "${rc}" -eq 143 ]
+  run cat "${BATS_TEST_TMPDIR}/join.out"
+  assert_output --partial "interrupted after the ticket was minted"
+  refute_output --partial "joining 'box-1'"
+  [ ! -f "${KUBEADM_LOG}" ]
+  _assert_tmpdir_empty
+}
+
+@test "join: a TERM to the writer during the write of the config removes it and runs no join" {
+  _stub_all
+  chmod() {
+    [[ "${1}" != 00700 ]] || kill -TERM "${BASHPID}"
+    command chmod "$@"
+  }
+  export -f chmod
+
+  run node::join --name box-1 --pool metal
+  assert_failure 1
+  assert_output --partial "could not write the join config for 'box-1': the write was interrupted"
+  assert_output --partial "holds a node slot"
+  [ ! -f "${KUBEADM_LOG}" ]
   _assert_tmpdir_empty
 }
 
@@ -748,16 +881,23 @@ _stub_all() {
 # read that way runs nothing, names the slot, and writes no file.
 @test "join: a line that cannot be read into a config runs nothing and names the slot" {
   _stub_all
-  local ca=' --discovery-token-ca-cert-hash sha256:1111' line want
+  local ca=' --discovery-token-ca-cert-hash '"${CA_PIN}" line want
   local -a cases=(
     "kubeadm join cp.example.test:6443${ca} --node-name box-1|exactly one bootstrap token (--token)"
     "kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN} --token ${JOIN_TOKEN%?}2${ca}|exactly one bootstrap token (--token)"
     "kubeadm join cp.example.test:6443 --token A1B2C3.D4E5F6G7H8I9J0K1${ca}|does not have the kubeadm token shape"
     "kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN}${ca} --node-name a --node-name=b|names the node more than once (--node-name)"
-    "kubeadm join cp.example.test:6443 extra --token ${JOIN_TOKEN}${ca}|a word that follows no flag"
-    "kubeadm join cp.example.test:6443 --token= ${JOIN_TOKEN}${ca}|a flag without a value: --token"
-    "kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN}${ca} --node-name|a flag without a value: --node-name"
-    "kubeadm join cp.example.test:6443 --token${ca}|a flag without a value: --token"
+    "kubeadm join cp.example.test:6443 extra --token ${JOIN_TOKEN}${ca}|kubehz: word 4 of the join command follows no flag."
+    "kubeadm join cp.example.test:6443 --token= ${JOIN_TOKEN}${ca}|kubehz: word 4 of the join command is a flag without a value."
+    "kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN}${ca} --node-name|kubehz: word 8 of the join command is a flag without a value."
+    "kubeadm join cp.example.test:6443 --token${ca}|kubehz: word 4 of the join command is a flag without a value."
+    # The CA pin: sha256: and 64 hex digits, as kubeadm reads it.
+    "kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN} --discovery-token-ca-cert-hash sha256:1111|kubehz: word 6 of the join command is a CA pin that is not sha256: and 64 hex digits."
+    "kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN} --discovery-token-ca-cert-hash ${CA_PIN}0|kubehz: word 6 of the join command is a CA pin that is not sha256: and 64 hex digits."
+    "kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN} --discovery-token-ca-cert-hash ${CA_PIN:0:70} ${CA_PIN:70}|kubehz: word 6 of the join command is a CA pin that is not sha256: and 64 hex digits."
+    "kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN} --discovery-token-ca-cert-hash SHA256:${CA_PIN:7}|kubehz: word 6 of the join command is a CA pin that is not sha256: and 64 hex digits."
+    "kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN} --discovery-token-ca-cert-hash ${CA_PIN}${ca}x|kubehz: word 8 of the join command is a CA pin that is not sha256: and 64 hex digits."
+    "kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN} --discovery-token-ca-cert-hash ${CA_PIN:0:70}\\\"${CA_PIN:71}|kubehz: the join command carries characters this CLI does not run."
   )
   for line in "${cases[@]}"; do
     want="${line#*|}" line="${line%%|*}"
@@ -772,7 +912,7 @@ _stub_all() {
   # The --flag=value form and a second CA pin read the same way. Each refused
   # run asked for the version: a fresh log for the run below.
   rm -f -- "${KUBEADM_VERSION_LOG}"
-  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token='"${JOIN_TOKEN}"' --discovery-token-ca-cert-hash=sha256:1111 --discovery-token-ca-cert-hash sha256:2222","expiresAt":"x","ready":true}}'
+  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token='"${JOIN_TOKEN}"' --discovery-token-ca-cert-hash='"${CA_PIN}"' --discovery-token-ca-cert-hash '"${CA_PIN2}"'","expiresAt":"x","ready":true}}'
   run node::join --name box-1 --pool metal
   assert_success
   _assert_join_config _config_two_pins
@@ -789,13 +929,177 @@ _config_two_pins() {
     '    apiServerEndpoint: "cp.example.test:6443"' \
     "    token: \"${JOIN_TOKEN}\"" \
     '    caCertHashes:' \
-    '      - "sha256:1111"' \
-    '      - "sha256:2222"'
+    '      - "'"${CA_PIN}"'"' \
+    '      - "'"${CA_PIN2}"'"'
+}
+
+# No refusal prints a word of the line: a word can hold a ticket. A token
+# after a flag this CLI does not run, and a token as a word that follows no
+# flag. The texts are the ones of the Go twin.
+@test "join: a refusal names the position of a word, never the word" {
+  _stub_all
+  local other head line want
+  other=$(printf '%s.%s' z9y8x7 w6v5u4t3s2r1q0p9)
+  head="kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN} --discovery-token-ca-cert-hash ${CA_PIN}"
+  local -a cases=(
+    "${head} --node-name box-1 --tls-bootstrap-token ${other}|kubehz: word 10 of the join command is a flag this CLI will not run."
+    "${head} ${other} --node-name box-1|kubehz: word 8 of the join command follows no flag."
+  )
+  for line in "${cases[@]}"; do
+    want="${line#*|}" line="${line%%|*}"
+    STUB_MINT_BODY="{\"ok\":true,\"data\":{\"joinCommand\":\"${line}\",\"expiresAt\":\"x\",\"ready\":true}}"
+    run node::join --name box-1 --pool metal
+    assert_failure
+    assert_output --partial "${want}"
+    assert_output --partial "holds a node slot"
+    refute_output --partial "${other}"
+    refute_output --partial "${JOIN_TOKEN}"
+    refute_output --partial "--tls-bootstrap-token"
+    [ ! -f "${KUBEADM_LOG}" ]
+  done
+}
+
+# A control character in the line (a newline at the end or inside, CR, NUL,
+# tab, DEL) is refused as the response is read, with the text of the Go
+# twin: one mint, nothing runs, no file. A command substitution drops a
+# trailing newline, so the check is in jq.
+@test "join: a control character in the line is refused as the response is read" {
+  _stub_all
+  local esc line
+  local pre="kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN} --discovery-token-ca-cert-hash ${CA_PIN}"
+  local -a cases=(
+    "${pre} --node-name box-1\\n"
+    "${pre}\\n--node-name box-1"
+    "${pre} --node-name box-1\\r"
+    "${pre}\\u0000 --node-name box-1"
+    "${pre}\\t--node-name box-1"
+    "${pre} --node-name box-1\\u007f"
+    "kubeadm\\tjoin cp.example.test:6443 --token ${JOIN_TOKEN} --discovery-token-ca-cert-hash ${CA_PIN}"
+  )
+  for line in "${cases[@]}"; do
+    rm -f -- "${CURL_LOG}"
+    STUB_MINT_BODY="{\"ok\":true,\"data\":{\"joinCommand\":\"${line}\",\"expiresAt\":\"x\",\"ready\":true}}"
+    run node::join --name box-1 --pool metal
+    assert_failure
+    assert_output --partial "kubehz: the join command carries characters this CLI does not run."
+    assert_output --partial "holds a node slot"
+    refute_output --partial "${JOIN_TOKEN}"
+    run grep -c -F POST -- "${CURL_LOG}"
+    [ "${output}" = 1 ]
+    [ ! -f "${KUBEADM_LOG}" ]
+    _assert_tmpdir_empty
+  done
+}
+
+# Each flag of NODE_JOIN_ALLOWED_FLAGS reads into the config: a flag that is
+# added to the allowlist and not to node::join_config fails here.
+@test "join: every allowed flag reads into the config" {
+  local flag line="kubeadm join cp.example.test:6443" config
+  local -A values=([--token]="${JOIN_TOKEN}" [--discovery-token-ca-cert-hash]="${CA_PIN}" [--node-name]=box-1)
+  for flag in "${NODE_JOIN_ALLOWED_FLAGS[@]}"; do
+    [[ -n "${values[${flag}]:-}" ]] || { echo "no test value for the allowed flag ${flag}: add one here"; return 1; }
+    line+=" ${flag} ${values[${flag}]}"
+  done
+  node::assert_join_command "${line}"
+  config=$(node::join_config "${line}" v1beta4 "")
+  for flag in "${NODE_JOIN_ALLOWED_FLAGS[@]}"; do
+    [[ "${config}" == *"\"${values[${flag}]}\""* ]]
+  done
+}
+
+# The names that hold the line, the token, the config or the response are
+# locals with +x and +i: a caller that exports a variable of the same name,
+# or declares it an integer, gets the ticket into no child and into no
+# arithmetic error text.
+@test "join: a caller's exported or integer names keep the ticket out of children and errors" {
+  _stub_all
+  export CHILD_ENV="${BATS_TEST_TMPDIR}/child.env"
+  # STUB_MINT_BODY holds the token: the curl stub is a function and reads it
+  # without the export.
+  export -n STUB_MINT_BODY
+  kubeadm() { env >> "${CHILD_ENV}"; [[ "${1}" != join ]] || cp -- "${3}" "${KUBEADM_SEEN}.config"; [[ "${1}" != version ]] || printf 'v1.36.0\n'; }
+  stat() { env >> "${CHILD_ENV}"; command stat "$@"; }
+  jq() { env >> "${CHILD_ENV}"; command jq "$@"; }
+  export -f kubeadm stat jq
+  shopt -s localvar_inherit
+  local -x join_command=caller config=caller expires=caller ready=caller path=caller cause=caller
+  local -x line=caller token=caller value=caller h=caller content=caller
+  declare -i -x i=1
+  declare -i config line token value
+
+  run node::join --name box-1 --pool metal
+  assert_success
+  refute_output --partial "${JOIN_TOKEN}"
+  cmp -- "${KUBEADM_SEEN}.config" <(_config_v1beta4)
+  [ -s "${CHILD_ENV}" ]
+  run grep -F -e "${JOIN_TOKEN}" -e "apiVersion: kubeadm" -e "kubeadm join cp" -- "${CHILD_ENV}"
+  assert_failure 1
+}
+
+# The response holds the ticket: no way out of node::join leaves it set.
+@test "join: the mint response is unset on every way out" {
+  _stub_all
+  local rc
+  rc=0; node::join --name box-1 --pool metal > /dev/null 2>&1 || rc=$?
+  [ "${rc}" -eq 0 ]
+  [ -z "${KUBEHZ_SPACE_API_BODY+set}" ]
+  STUB_KUBEADM_RC=1
+  rc=0; node::join --name box-1 --pool metal > /dev/null 2>&1 || rc=$?
+  [ "${rc}" -eq 1 ]
+  [ -z "${KUBEHZ_SPACE_API_BODY+set}" ]
+  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash '"${CA_PIN}"' --control-plane --node-name box-1","expiresAt":"x","ready":true}}'
+  rc=0; node::join --name box-1 --pool metal > /dev/null 2>&1 || rc=$?
+  [ "${rc}" -eq 1 ]
+  [ -z "${KUBEHZ_SPACE_API_BODY+set}" ]
+  STUB_MINT_CODE=500
+  STUB_MINT_BODY='{"ok":false,"data":{"code":"INTERNAL","message":"boom"}}'
+  rc=0; node::join --name box-1 --pool metal > /dev/null 2>&1 || rc=$?
+  [ "${rc}" -eq 1 ]
+  [ -z "${KUBEHZ_SPACE_API_BODY+set}" ]
+}
+
+# node::join catches INT, TERM and HUP for its time, and gives the caller
+# its traps back.
+@test "join: the caller's traps on INT, TERM and HUP are in place after the join" {
+  _stub_all
+  local runner before after
+  # The traps of the test runner come back at the end.
+  runner=$(trap -p INT TERM HUP)
+  trap 'echo caller-int' INT
+  trap 'echo caller-term' TERM
+  before=$(trap -p INT TERM HUP)
+  node::join --name box-1 --pool metal > /dev/null 2>&1
+  after=$(trap -p INT TERM HUP)
+  trap - INT TERM HUP
+  eval "${runner}"
+  [ "${after}" = "${before}" ]
+  [[ "${before}" == *caller-int* && "${before}" == *caller-term* ]]
+}
+
+# No credential goes through a here-string: bash before 5.1 writes each one
+# to a file in TMPDIR (5.1 and later from 64 KiB on). The mint body is
+# padded past 64 KiB, and jq says when its stdin is a file.
+@test "join: the mint body reaches jq through a pipe, never a here-string file" {
+  _stub_all
+  export HERESTRING_LOG="${BATS_TEST_TMPDIR}/herestring.log"
+  jq() {
+    [[ "${1}" == -n || ! -f /dev/stdin ]] || printf 'jq read a file on stdin: %s\n' "$*" >> "${HERESTRING_LOG}"
+    command jq "$@"
+  }
+  export -f jq
+  local pad
+  pad=$(printf 'x%.0s' {1..70000})
+  STUB_MINT_BODY='{"ok":true,"pad":"'"${pad}"'","data":{"joinCommand":"kubeadm join cp.example.test:6443 --token '"${JOIN_TOKEN}"' --discovery-token-ca-cert-hash '"${CA_PIN}"' --node-name box-1","expiresAt":"2026-09-01T12:00:00Z","ready":true}}'
+
+  run node::join --name box-1 --pool metal
+  assert_success
+  [ ! -e "${HERESTRING_LOG}" ]
+  _assert_join_config _config_v1beta4
 }
 
 @test "join: an unarmed ticket (ready:false) warns before the join runs" {
   _stub_all
-  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1","expiresAt":"2026-09-01T12:00:00Z","ready":false}}'
+  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token '"${JOIN_TOKEN}"' --discovery-token-ca-cert-hash '"${CA_PIN}"' --node-name box-1","expiresAt":"2026-09-01T12:00:00Z","ready":false}}'
 
   run node::join --name box-1 --pool metal
   assert_success
@@ -829,56 +1133,59 @@ _config_two_pins() {
 # Every dangerous kubeadm flag below is built from the SAME innocent characters
 # the alphabet gate accepts, so only a flag-level allowlist can stop it. Each
 # crafted line is otherwise legit — it carries a CA pin — so the ONLY reason it
-# is refused is the offending flag, which the error must NAME. Remove the
+# is refused is the offending flag. The error names its position (word 6),
+# never the flag: a word can hold a ticket. Remove the
 # allowlist loop in node::assert_join_command and every one of these reddens
 # (the line then passes the CA-present check and is accepted).
 
-# One helper: assert node::assert_join_command refuses <line>, naming <flag>.
+# One helper: assert node::assert_join_command refuses <line> at word 6,
+# and does not print <flag>.
 _refuse_flag() {
   local flag="${1}" line="${2}"
   run node::assert_join_command "${line}"
   assert_failure
-  assert_output --partial "join flag this CLI will not run: ${flag}"
+  assert_output --partial "kubehz: word 6 of the join command is a flag this CLI will not run."
+  refute_output --partial "${flag}"
 }
 
-@test "join gate: --discovery-file is refused by name" {
+@test "join gate: --discovery-file is refused by its position" {
   _refuse_flag "--discovery-file" \
-    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --discovery-file https://evil.test/kubeconfig --node-name box-1"
+    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash ${CA_PIN} --discovery-file https://evil.test/kubeconfig --node-name box-1"
 }
 
-@test "join gate: --config is refused by name" {
+@test "join gate: --config is refused by its position" {
   _refuse_flag "--config" \
-    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --config=/tmp/kubeadm.conf --node-name box-1"
+    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash ${CA_PIN} --config=/tmp/kubeadm.conf --node-name box-1"
 }
 
-@test "join gate: --control-plane is refused by name" {
+@test "join gate: --control-plane is refused by its position" {
   _refuse_flag "--control-plane" \
-    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --control-plane --node-name box-1"
+    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash ${CA_PIN} --control-plane --node-name box-1"
 }
 
-@test "join gate: --certificate-key is refused by name" {
+@test "join gate: --certificate-key is refused by its position" {
   _refuse_flag "--certificate-key" \
-    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --certificate-key deadbeef --node-name box-1"
+    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash ${CA_PIN} --certificate-key deadbeef --node-name box-1"
 }
 
-@test "join gate: --discovery-token-unsafe-skip-ca-verification is refused by name" {
+@test "join gate: --discovery-token-unsafe-skip-ca-verification is refused by its position" {
   _refuse_flag "--discovery-token-unsafe-skip-ca-verification" \
-    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --discovery-token-unsafe-skip-ca-verification --node-name box-1"
+    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash ${CA_PIN} --discovery-token-unsafe-skip-ca-verification --node-name box-1"
 }
 
-@test "join gate: --ignore-preflight-errors is refused by name" {
+@test "join gate: --ignore-preflight-errors is refused by its position" {
   _refuse_flag "--ignore-preflight-errors" \
-    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --ignore-preflight-errors=all --node-name box-1"
+    "kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash ${CA_PIN} --ignore-preflight-errors=all --node-name box-1"
 }
 
 @test "join gate: the legit api shape with one CA hash is accepted" {
   node::assert_join_command \
-    "kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1"
+    "kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN} --discovery-token-ca-cert-hash ${CA_PIN} --node-name box-1"
 }
 
 @test "join gate: the legit api shape with two CA hashes is accepted" {
   node::assert_join_command \
-    "kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --discovery-token-ca-cert-hash sha256:2222 --node-name box-1"
+    "kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN} --discovery-token-ca-cert-hash ${CA_PIN} --discovery-token-ca-cert-hash ${CA_PIN2} --node-name box-1"
 }
 
 @test "join gate: a line with no CA fingerprint is refused" {
@@ -890,18 +1197,19 @@ _refuse_flag() {
 
 @test "join gate: a server address that is not host:port is refused" {
   run node::assert_join_command \
-    "kubeadm join not-an-endpoint --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1"
+    "kubeadm join not-an-endpoint --token ${JOIN_TOKEN} --discovery-token-ca-cert-hash ${CA_PIN} --node-name box-1"
   assert_failure
   assert_output --partial "not a host:port"
 }
 
 @test "join gate: a dangerous flag reaches nothing through the full join path" {
   _stub_all
-  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --discovery-token-unsafe-skip-ca-verification --node-name box-1","expiresAt":"2026-09-01T12:00:00Z","ready":true}}'
+  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash '"${CA_PIN}"' --discovery-token-unsafe-skip-ca-verification --node-name box-1","expiresAt":"2026-09-01T12:00:00Z","ready":true}}'
 
   run node::join --name box-1 --pool metal
   assert_failure
-  assert_output --partial "join flag this CLI will not run: --discovery-token-unsafe-skip-ca-verification"
+  assert_output --partial "kubehz: word 6 of the join command is a flag this CLI will not run."
+  refute_output --partial "--discovery-token-unsafe-skip-ca-verification"
   [ ! -f "${KUBEADM_LOG}" ]
 }
 
@@ -911,11 +1219,12 @@ _refuse_flag() {
 # happened", and a slot stays held server-side for about ten minutes.
 @test "join gate: a disallowed-flag refusal names the slot the mint holds" {
   _stub_all
-  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash sha256:1111 --control-plane --node-name box-1","expiresAt":"2026-09-01T12:00:00Z","ready":true}}'
+  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --discovery-token-ca-cert-hash '"${CA_PIN}"' --control-plane --node-name box-1","expiresAt":"2026-09-01T12:00:00Z","ready":true}}'
 
   run node::join --name box-1 --pool metal
   assert_failure
-  assert_output --partial "join flag this CLI will not run: --control-plane"
+  assert_output --partial "kubehz: word 6 of the join command is a flag this CLI will not run."
+  refute_output --partial "--control-plane"
   assert_output --partial "holds a node slot"
   assert_output --partial "lo kubehz node remove --name box-1"
   [ ! -f "${KUBEADM_LOG}" ]
@@ -1144,7 +1453,7 @@ _refuse_flag() {
 
 @test "join --print-only: an ANSI escape in expiresAt is stripped" {
   _stub_all
-  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1","expiresAt":"2026-09-01T12:00:00Z\u001b[2J\u001b[Hpwned\u009b\u2028\u202e","ready":true}}'
+  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token '"${JOIN_TOKEN}"' --discovery-token-ca-cert-hash '"${CA_PIN}"' --node-name box-1","expiresAt":"2026-09-01T12:00:00Z\u001b[2J\u001b[Hpwned\u009b\u2028\u202e","ready":true}}'
 
   run node::join --name box-1 --pool metal --print-only
   assert_success

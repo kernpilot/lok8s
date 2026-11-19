@@ -233,6 +233,16 @@ curl with `-q`. A `config` or a `trace` line in `~/.curlrc` can read or
 record what `lo` sends, the credentials included. Thus keep `~/.curlrc`
 private, and examine it on a shared machine.
 
-One exception stays: `lo kubehz node join` runs the `kubeadm join` line
-of the platform, and `kubeadm join` takes its bootstrap token as `--token`.
-The token is valid for a short time only.
+`lo kubehz node join` keeps the bootstrap token off argv too. It reads the
+`kubeadm join` line of the platform into a kubeadm join configuration. It
+writes the configuration to a file of mode 0600 in a new directory of mode
+0700 under your temp dir (`TMPDIR`), and runs `kubeadm join --config <file>`.
+It removes the file and the directory on each way out: after the join, after
+a failure, and after Ctrl-C, SIGTERM or SIGHUP (it stops `kubeadm` first). If
+the removal fails, it names the directory. Delete that directory: it holds
+the token until the ticket expires.
+
+One exception stays: `lo kubehz node join --print-only` prints the
+`kubeadm join` line, and that line holds the bootstrap token. When you run
+the printed line, the token is on the argv of `kubeadm`. The token is valid
+for ten minutes and for one join.

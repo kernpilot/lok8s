@@ -84,9 +84,10 @@ type Context struct {
 	// Lstat is os.Lstat (nil = os.Lstat): the read of each part of the
 	// temp dir of a join file (joinTempDir). Tests log the order.
 	Lstat func(path string) (fs.FileInfo, error)
-	// RemoveAll is os.RemoveAll (nil = os.RemoveAll): the cleanup of a
-	// join file whose write failed (writeJoinFile).
-	RemoveAll func(path string) error
+	// Remove is os.Remove (nil = os.Remove): the removal of a join file
+	// and then of its directory (removeJoinFile), after a failed write
+	// (writeJoinFile) and after a join (removeJoinConfig).
+	Remove func(path string) error
 	// LookPath is `command -v <tool>` (nil = execx.Look over Paths).
 	LookPath func(tool string) bool
 	// IsTTY reports whether stdout is a terminal (nil = false) — the
