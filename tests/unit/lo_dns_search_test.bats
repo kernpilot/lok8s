@@ -603,9 +603,11 @@ _provision_stubs() {
   registry::is_shared() { return 1; }
   lo::registries_tls_cert() { :; }
   lo::registries() { :; }
-  # The registry network of the nodes (docker) acts only when the environment
-  # names a registry document (LOK8S_REGISTRY_JSON).
-  lo::reconcile_registry_network_nodes() { :; }
+  # The registry network of the nodes (docker) acts only when a registry
+  # document exists (LOK8S_REGISTRY_JSON). The stub records a run with one.
+  lo::reconcile_registry_network_nodes() {
+    [[ ! -s "${LOK8S_REGISTRY_JSON:-}" ]] || touch "${BATS_TEST_TMPDIR}/reconcile-had-document"
+  }
   lo::write_certs_d() { :; }
   lo::write_oidc_auth_config() { :; }
   lo::registries_tls_nudge() { :; }
@@ -663,20 +665,31 @@ _provision_stubs() {
   [ ! -e "${BATS_TEST_TMPDIR}/kind-config" ]
 }
 
-@test "lo provision: a registry document in the environment reaches no real tool" {
-  # The registry steps act on LOK8S_REGISTRY_JSON. A shell that exports it
-  # would send the real lo::reconcile_registry_network_nodes to docker. The
-  # stub in _provision_stubs keeps it off, and teardown fails this test when
-  # a tool on PATH ran.
+@test "lo provision: a registry document reaches no real tool" {
+  # The registry steps act on the document that LOK8S_REGISTRY_JSON names.
+  # Sourcing the driver sets it to "" (utils/config-registry.sh:31), and only
+  # the real lo::read_config sets it (:179). So this test's lo::read_config
+  # sets it, as the real one does. The real
+  # lo::reconcile_registry_network_nodes would then run docker. The stub in
+  # _provision_stubs keeps it off and records that it ran with the document.
+  # Teardown fails this test when a tool on PATH ran.
   _provision_stubs
-  export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/registries.json"
-  cat > "${LOK8S_REGISTRY_JSON}" <<'JSON'
+  cat > "${BATS_TEST_TMPDIR}/registries.json" <<'JSON'
 {"shared": false, "tls": false, "port": 80,
  "project_network": "lok8s-test",
  "network": {"name": "lok8s-registry", "cidr": "172.30.0.0/24"},
  "registries": [{"name": "cache", "ip": "172.30.0.10", "url": "", "domain": "", "host": "", "type": "local"}]}
 JSON
+  lo::read_config() {
+    lo::read_dns_search_config "${1}" || return 1
+    LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/registries.json"
+    export LOK8S_REGISTRY_JSON
+  }
   local rc=0
   driver::provision test.dev || rc=$?
   [ "${rc}" -eq 0 ] || { echo "the provision with a registry document failed (rc=${rc})" >&2; return 1; }
+  [ -e "${BATS_TEST_TMPDIR}/reconcile-had-document" ] || {
+    echo "lo::reconcile_registry_network_nodes did not run with the registry document" >&2
+    return 1
+  }
 }

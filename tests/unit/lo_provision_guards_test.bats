@@ -101,11 +101,16 @@ _load() {
   kind() { case "${1:-}" in get) return 0 ;; *) return 0 ;; esac; }
   # The registry and node steps run docker, kind and kubectl for real: the
   # registry containers, the registry network of the nodes, the node IP heal.
-  # lo::registries and lo::reconcile_registry_network_nodes act only when the
-  # environment names a registry document (LOK8S_REGISTRY_JSON);
+  # lo::registries and lo::reconcile_registry_network_nodes act only when a
+  # registry document exists (LOK8S_REGISTRY_JSON, set by the real
+  # lo::read_config); each stub records a run with one.
   # lo::nodes_on_registry_network asks docker on every run that gets that far.
-  lo::registries()                       { return 0; }
-  lo::reconcile_registry_network_nodes() { return 0; }
+  lo::registries() {
+    [[ ! -s "${LOK8S_REGISTRY_JSON:-}" ]] || touch "${BATS_TEST_TMPDIR}/registries-had-document"
+  }
+  lo::reconcile_registry_network_nodes() {
+    [[ ! -s "${LOK8S_REGISTRY_JSON:-}" ]] || touch "${BATS_TEST_TMPDIR}/reconcile-had-document"
+  }
   # No node is on the registry network, so the heal branch stays off. The two
   # tests of the heal gate below turn it on and off.
   lo::nodes_on_registry_network()        { return 1; }
@@ -380,15 +385,21 @@ _load() {
   }
 }
 
-@test "lo provision: a registry document in the environment reaches no real tool" {
-  # The registry steps act on LOK8S_REGISTRY_JSON. A shell that exports it (the
-  # registry map of a lok8s project) would send the real lo::registries and
-  # lo::reconcile_registry_network_nodes to docker: inspect, run, network
-  # inspect. The stubs in _load keep them off, and teardown fails this test
+@test "lo provision: a registry document reaches no real tool" {
+  # The registry steps act on the document that LOK8S_REGISTRY_JSON names (the
+  # registry map of a lok8s project). Sourcing the driver sets it to ""
+  # (utils/config-registry.sh:31), and only the real lo::read_config sets it
+  # (:179). So this test's lo::read_config sets it, as the real one does. The
+  # real lo::registries and lo::reconcile_registry_network_nodes would then
+  # run docker: inspect, run, network inspect. The stubs in _load keep them
+  # off and record that they ran with the document. Teardown fails this test
   # when a tool on PATH ran.
   _load
-  export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/registries.json"
-  cat > "${LOK8S_REGISTRY_JSON}" <<'JSON'
+  lo::read_config() {
+    LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/registries.json"
+    export LOK8S_REGISTRY_JSON
+  }
+  cat > "${BATS_TEST_TMPDIR}/registries.json" <<'JSON'
 {"shared": false, "tls": false, "port": 80,
  "project_network": "lok8s-test",
  "network": {"name": "lok8s-registry", "cidr": "172.30.0.0/24"},
@@ -399,9 +410,16 @@ JSON
   driver::provision test.dev || rc=$?
 
   [ "${rc}" -eq 0 ] || {
-    echo "the happy path with a registry document in the environment failed (rc=${rc})" >&2
+    echo "the happy path with a registry document failed (rc=${rc})" >&2
     return 1
   }
+  local step
+  for step in registries reconcile; do
+    [ -e "${BATS_TEST_TMPDIR}/${step}-had-document" ] || {
+      echo "the ${step} stub did not run with the registry document" >&2
+      return 1
+    }
+  done
 }
 
 # The node IP heal gate (drivers/lo/main): a cluster that is not shared runs
