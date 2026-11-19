@@ -1,10 +1,17 @@
 #!/usr/bin/env bats
 # kind_contract_test.bats — unit tests for kind contract implementations
 # Tests .lok8s/drivers/lo/main and .lok8s/drivers/capi/main contract functions with mocked externals
+#
+# The tests stub docker, kind, kubectl, helm and mkcert as functions. As a net
+# under them, setup puts failing stubs of those tools (and ssh, scp, rsync,
+# curl, clusterctl) first on PATH (stub_tools in tests/test_helper.bash), and
+# teardown fails the test when one of them ran: a call that no function stub
+# answers never reaches the host's docker or a live cluster.
 
 setup() {
   load "../test_helper"
   setup_tmpdir
+  stub_tools docker kind kubectl helm mkcert clusterctl ssh scp rsync curl
   export LOK8S_NONINTERACTIVE=1   # kapply::run → direct exec (no progress UI in tests)
 
   export PATH_BASE="${BATS_TEST_TMPDIR}"
@@ -52,8 +59,12 @@ setup() {
     "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/cluster.lok8s.yaml"
 }
 
+# Every test ends with the check that no tool on PATH ran.
 teardown() {
+  local rc=0
+  assert_no_tool_ran || rc=$?
   teardown_tmpdir
+  return "${rc}"
 }
 
 # ── .lok8s/drivers/lo/main ─────────────────────────────────────
