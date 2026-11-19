@@ -11,9 +11,13 @@ Two scopes:
   - Objects in the CSI namespace (rook-ceph, POD_NAMESPACE of both
     plugins): a Role and a RoleBinding there. When the deployment fixes
     the object name, the rule names it (resourceNames).
-  - Objects in the namespace of the PVC (the tenant): a ClusterRole and a
-    ClusterRoleBinding. The plugin learns that namespace from each volume
-    request, so a Role cannot cover it.
+  - Objects in the namespace of the PVC (the tenant): a ClusterRole. The
+    plugin learns that namespace from each volume request, so a Role in
+    one namespace cannot cover it. Without `tenantNamespaces` a
+    ClusterRoleBinding applies it in every namespace: the plugins can get
+    any Secret whose name they know, and with vaulttenantsa mint a token
+    for any ServiceAccount. With `tenantNamespaces: [ns, ...]` one
+    RoleBinding in each listed namespace applies it there only.
 
 A KMS runs on both sides: the controller plugin sets up the key at
 CreateVolume (internal/rbd/controllerserver.go:205), the node plugin opens
@@ -23,11 +27,18 @@ the node plugin only: the controller plugin makes no such call, and it
 keeps `tokenreviews create` in its own chart role (the rook-ceph addon does
 not remove it).
 
-No value, or an unknown one, stops the render: the addon never selects a
-set of grants for a cluster.
+Every object carries the label csi-kms.lok8s.dev/option (the option that
+renders it; kms-config for the Role that all KMS types share), and the
+addon's kustomization adds lok8s.dev/name: rook-ceph-csi-kms. The
+bootstrap applies without prune: the cleanup before a change of the
+options deletes by lok8s.dev/name (docs/guide/addons.md).
+
+No value, an unknown value or a value of the wrong shape stops the
+render: the addon never selects a set of grants for a cluster.
 */ -}}
 {{- $options := list "all" "metadata" "vault" "vaulttokens" "vaulttenantsa" "aws-metadata" "aws-sts-metadata" "azure-kv" "kmip" "ibmkeyprotect" "vault-tokenreview" "rbd-nbd" "block-volume-stats" }}
 {{- $types := list "metadata" "vault" "vaulttokens" "vaulttenantsa" "aws-metadata" "aws-sts-metadata" "azure-kv" "kmip" "ibmkeyprotect" }}
+{{- $tenantOptions := list "metadata" "vaulttokens" "vaulttenantsa" "aws-sts-metadata" }}
 {{- $kms := .Values.kms }}
 {{- if not $kms }}
 {{- fail (printf "rook-ceph-csi-kms: no kms option is set. Set `values: {kms: [...]}` on its spec.bootstrap entry to the ceph-csi features that this cluster uses. The options: %s. `all` renders the rule set of earlier releases (five cluster-wide rules on both plugins). See docs/guide/addons.md, section rook-ceph" (join ", " $options)) }}
@@ -48,6 +59,39 @@ set of grants for a cluster.
 {{- $anyType = true }}
 {{- end }}
 {{- end }}
+{{- $anyTenant := false }}
+{{- range $tenantOptions }}
+{{- if hasKey $on . }}
+{{- $anyTenant = true }}
+{{- end }}
+{{- end }}
+{{- /*
+tenantNamespaces: optional. When the key is there, it must be a non-empty
+list of namespace names (DNS-1123 labels). The errors name the position
+of a bad value, never the value.
+*/ -}}
+{{- $tenantNS := list }}
+{{- if hasKey .Values "tenantNamespaces" }}
+{{- $tn := .Values.tenantNamespaces }}
+{{- if not (kindIs "slice" $tn) }}
+{{- fail (printf "rook-ceph-csi-kms: tenantNamespaces must be a list of namespace names; the value is of kind %s. Remove the key to bind the tenant options in every namespace" (kindOf $tn | replace "invalid" "null")) }}
+{{- end }}
+{{- if eq (len $tn) 0 }}
+{{- fail "rook-ceph-csi-kms: tenantNamespaces is an empty list. List the namespaces of the PVCs and of the KMS Secrets, or remove the key" }}
+{{- end }}
+{{- range $i, $ns := $tn }}
+{{- if not (and (kindIs "string" $ns) (le (len $ns) 63) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $ns)) }}
+{{- fail (printf "rook-ceph-csi-kms: tenantNamespaces[%d] is not a namespace name (a DNS-1123 label: at most 63 lowercase letters, digits or '-', with a letter or digit at each end)" $i) }}
+{{- end }}
+{{- end }}
+{{- if hasKey $on "all" }}
+{{- fail "rook-ceph-csi-kms: `all` renders the rule set of earlier releases, bound in every namespace, and takes no tenantNamespaces. Remove tenantNamespaces, or list the options that the cluster uses in place of `all`" }}
+{{- end }}
+{{- if not $anyTenant }}
+{{- fail (printf "rook-ceph-csi-kms: tenantNamespaces is set, but no kms option grants in the namespace of a PVC (%s). Remove tenantNamespaces" (join ", " $tenantOptions)) }}
+{{- end }}
+{{- $tenantNS = uniq $tn }}
+{{- end }}
 {{- if hasKey $on "all" }}
 ---
 # all: the rule set of earlier releases, as one ClusterRole bound to the
@@ -55,11 +99,14 @@ set of grants for a cluster.
 # addon removes from the node plugin ClusterRole, verbatim from the
 # ceph-csi-drivers chart (templates/rbd-nodeplugin-cr-rbac.yaml). With it,
 # both plugins can read every Secret and mint a token for any
-# ServiceAccount, as with the upstream chart.
+# ServiceAccount, as with the upstream chart. The names, rules and
+# subjects are those of the earlier rbac.yaml; the option label is new.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: rook-ceph-csi-nodeplugin-kms-cr
+  labels:
+    csi-kms.lok8s.dev/option: all
 rules:
   - apiGroups: [""]
     resources: [secrets]
@@ -81,6 +128,8 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: rook-ceph-csi-nodeplugin-kms-crb
+  labels:
+    csi-kms.lok8s.dev/option: all
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -104,12 +153,14 @@ kind: Role
 metadata:
   name: rook-ceph-csi-kms-config
   namespace: rook-ceph
+  labels:
+    csi-kms.lok8s.dev/option: kms-config
 rules:
   - apiGroups: [""]
     resources: [configmaps]
     resourceNames: [csi-kms-connection-details]
     verbs: [get]
-{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-config" "plugins" (list "node" "ctrl")) }}
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-config" "option" "kms-config" "plugins" (list "node" "ctrl")) }}
 {{- end }}
 {{- if hasKey $on "metadata" }}
 ---
@@ -119,11 +170,13 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: rook-ceph-csi-kms-metadata
+  labels:
+    csi-kms.lok8s.dev/option: metadata
 rules:
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get]
-{{ include "rook-ceph-csi-kms.binding" (dict "kind" "ClusterRole" "name" "rook-ceph-csi-kms-metadata" "plugins" (list "node" "ctrl")) }}
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "ClusterRole" "name" "rook-ceph-csi-kms-metadata" "option" "metadata" "plugins" (list "node" "ctrl") "namespaces" $tenantNS) }}
 {{- end }}
 {{- if hasKey $on "vaulttokens" }}
 ---
@@ -135,6 +188,8 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: rook-ceph-csi-kms-vaulttokens
+  labels:
+    csi-kms.lok8s.dev/option: vaulttokens
 rules:
   - apiGroups: [""]
     resources: [secrets]
@@ -142,7 +197,7 @@ rules:
   - apiGroups: [""]
     resources: [configmaps]
     verbs: [get]
-{{ include "rook-ceph-csi-kms.binding" (dict "kind" "ClusterRole" "name" "rook-ceph-csi-kms-vaulttokens" "plugins" (list "node" "ctrl")) }}
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "ClusterRole" "name" "rook-ceph-csi-kms-vaulttokens" "option" "vaulttokens" "plugins" (list "node" "ctrl") "namespaces" $tenantNS) }}
 {{- end }}
 {{- if hasKey $on "vaulttenantsa" }}
 ---
@@ -151,11 +206,13 @@ rules:
 # of that ServiceAccount when the TokenRequest fails (vault_sa.go:280), the
 # TLS Secrets (vault_tokens.go:415,441,468) and the tenant ConfigMap
 # (vault_sa.go:174, vault_tokens.go:552). `serviceaccounts/token create`
-# lets the plugin mint a token for any ServiceAccount.
+# lets the plugin mint a token for any ServiceAccount where it is bound.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: rook-ceph-csi-kms-vaulttenantsa
+  labels:
+    csi-kms.lok8s.dev/option: vaulttenantsa
 rules:
   - apiGroups: [""]
     resources: [secrets]
@@ -169,7 +226,7 @@ rules:
   - apiGroups: [""]
     resources: [serviceaccounts/token]
     verbs: [create]
-{{ include "rook-ceph-csi-kms.binding" (dict "kind" "ClusterRole" "name" "rook-ceph-csi-kms-vaulttenantsa" "plugins" (list "node" "ctrl")) }}
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "ClusterRole" "name" "rook-ceph-csi-kms-vaulttenantsa" "option" "vaulttenantsa" "plugins" (list "node" "ctrl") "namespaces" $tenantNS) }}
 {{- end }}
 {{- if hasKey $on "aws-metadata" }}
 ---
@@ -181,12 +238,14 @@ kind: Role
 metadata:
   name: rook-ceph-csi-kms-aws-metadata
   namespace: rook-ceph
+  labels:
+    csi-kms.lok8s.dev/option: aws-metadata
 rules:
   - apiGroups: [""]
     resources: [secrets]
     resourceNames: [ceph-csi-aws-credentials]
     verbs: [get]
-{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-aws-metadata" "plugins" (list "node" "ctrl")) }}
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-aws-metadata" "option" "aws-metadata" "plugins" (list "node" "ctrl")) }}
 {{- end }}
 {{- if hasKey $on "aws-sts-metadata" }}
 ---
@@ -196,11 +255,13 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: rook-ceph-csi-kms-aws-sts-metadata
+  labels:
+    csi-kms.lok8s.dev/option: aws-sts-metadata
 rules:
   - apiGroups: [""]
     resources: [secrets]
     verbs: [get]
-{{ include "rook-ceph-csi-kms.binding" (dict "kind" "ClusterRole" "name" "rook-ceph-csi-kms-aws-sts-metadata" "plugins" (list "node" "ctrl")) }}
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "ClusterRole" "name" "rook-ceph-csi-kms-aws-sts-metadata" "option" "aws-sts-metadata" "plugins" (list "node" "ctrl") "namespaces" $tenantNS) }}
 {{- end }}
 {{- if hasKey $on "azure-kv" }}
 ---
@@ -212,12 +273,14 @@ kind: Role
 metadata:
   name: rook-ceph-csi-kms-azure-kv
   namespace: rook-ceph
+  labels:
+    csi-kms.lok8s.dev/option: azure-kv
 rules:
   - apiGroups: [""]
     resources: [secrets]
     resourceNames: [ceph-csi-azure-credentials]
     verbs: [get]
-{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-azure-kv" "plugins" (list "node" "ctrl")) }}
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-azure-kv" "option" "azure-kv" "plugins" (list "node" "ctrl")) }}
 {{- end }}
 {{- if hasKey $on "kmip" }}
 ---
@@ -229,12 +292,14 @@ kind: Role
 metadata:
   name: rook-ceph-csi-kms-kmip
   namespace: rook-ceph
+  labels:
+    csi-kms.lok8s.dev/option: kmip
 rules:
   - apiGroups: [""]
     resources: [secrets]
     resourceNames: [ceph-csi-kmip-credentials]
     verbs: [get]
-{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-kmip" "plugins" (list "node" "ctrl")) }}
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-kmip" "option" "kmip" "plugins" (list "node" "ctrl")) }}
 {{- end }}
 {{- if hasKey $on "ibmkeyprotect" }}
 ---
@@ -246,12 +311,14 @@ kind: Role
 metadata:
   name: rook-ceph-csi-kms-ibmkeyprotect
   namespace: rook-ceph
+  labels:
+    csi-kms.lok8s.dev/option: ibmkeyprotect
 rules:
   - apiGroups: [""]
     resources: [secrets]
     resourceNames: [ceph-csi-kp-credentials]
     verbs: [get]
-{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-ibmkeyprotect" "plugins" (list "node" "ctrl")) }}
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-ibmkeyprotect" "option" "ibmkeyprotect" "plugins" (list "node" "ctrl")) }}
 {{- end }}
 {{- if hasKey $on "vault-tokenreview" }}
 ---
@@ -264,11 +331,13 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: rook-ceph-csi-kms-vault-tokenreview
+  labels:
+    csi-kms.lok8s.dev/option: vault-tokenreview
 rules:
   - apiGroups: [authentication.k8s.io]
     resources: [tokenreviews]
     verbs: [create]
-{{ include "rook-ceph-csi-kms.binding" (dict "kind" "ClusterRole" "name" "rook-ceph-csi-kms-vault-tokenreview" "plugins" (list "node")) }}
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "ClusterRole" "name" "rook-ceph-csi-kms-vault-tokenreview" "option" "vault-tokenreview" "plugins" (list "node")) }}
 {{- end }}
 {{- if hasKey $on "rbd-nbd" }}
 ---
@@ -282,12 +351,14 @@ kind: Role
 metadata:
   name: rook-ceph-csi-kms-rbd-nbd
   namespace: rook-ceph
+  labels:
+    csi-kms.lok8s.dev/option: rbd-nbd
 rules:
   - apiGroups: [""]
     resources: [secrets]
     resourceNames: [rook-csi-rbd-node]
     verbs: [get]
-{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-rbd-nbd" "plugins" (list "node")) }}
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-rbd-nbd" "option" "rbd-nbd" "plugins" (list "node")) }}
 {{- end }}
 {{- if hasKey $on "block-volume-stats" }}
 ---
@@ -301,10 +372,12 @@ kind: Role
 metadata:
   name: rook-ceph-csi-kms-block-volume-stats
   namespace: rook-ceph
+  labels:
+    csi-kms.lok8s.dev/option: block-volume-stats
 rules:
   - apiGroups: [""]
     resources: [secrets]
     resourceNames: [rook-csi-rbd-provisioner]
     verbs: [get]
-{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-block-volume-stats" "plugins" (list "node")) }}
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-block-volume-stats" "option" "block-volume-stats" "plugins" (list "node")) }}
 {{- end }}

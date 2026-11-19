@@ -36,6 +36,18 @@
 # rules on both plugins, so that both can read every Secret and mint a
 # token for any ServiceAccount.
 #
+# The four options that read objects in the namespace of the PVC
+# (metadata, vaulttokens, vaulttenantsa, aws-sts-metadata) are bound in
+# every namespace, unless `tenantNamespaces: [ns, ...]` lists the
+# namespaces: then one RoleBinding in each. Cluster-wide, the plugins can
+# get any Secret whose name they know, and vaulttenantsa can mint a token
+# for any ServiceAccount.
+#
+# Every object carries lok8s.dev/name: rook-ceph-csi-kms (the labels below)
+# and csi-kms.lok8s.dev/option (the chart). The bootstrap applies without
+# prune: before a change of the options, delete the addon's objects by
+# lok8s.dev/name, then apply again (docs/guide/addons.md).
+#
 # No `kms:` value stops the render with an error that names the options:
 # the addon never selects a set of grants for a cluster. An entry of an
 # earlier release (no `values:`) fails at render time, before anything is

@@ -70,6 +70,17 @@ _kms_cluster_yaml() {
   [ "$(yq -o=json -I=0 '.kms' "${SEEN}/values.merged.yaml")" = '["all"]' ]
 }
 
+@test "rook-ceph-csi-kms: tenantNamespaces reaches the chart beside kms, and values.yaml sets none" {
+  run addons::render "${KMS_ADDON}" lo "" 'kms: [metadata]
+tenantNamespaces: [team-a, team-b]'
+  [ "${status}" -eq 0 ]
+  [ "$(yq -o=json -I=0 '.kms' "${SEEN}/values.merged.yaml")" = '["metadata"]' ]
+  [ "$(yq -o=json -I=0 '.tenantNamespaces' "${SEEN}/values.merged.yaml")" = '["team-a","team-b"]' ]
+  run addons::render "${KMS_ADDON}" lo "" 'kms: [metadata]'
+  [ "${status}" -eq 0 ]
+  [ "$(yq -r 'has("tenantNamespaces")' "${SEEN}/values.merged.yaml")" = "false" ]
+}
+
 @test "rook-ceph-csi-kms: no kms value keeps the empty list, which the chart refuses" {
   run addons::render "${KMS_ADDON}" lo "" ""
   [ "${status}" -eq 0 ]
