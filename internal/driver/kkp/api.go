@@ -99,10 +99,9 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 	// CURL_HOME or HOME, curlrc in XDG_CONFIG_HOME). A trace-ascii line
 	// there would log the bearer and the body, an output line would write
 	// the answer to another file. curl obeys -q only as its first
-	// argument. The bash twin (kkp::api) also clears the TLS log and trace
-	// controls for curl (http::tls_log_vars_unset). This call does not:
-	// execx.Cmd can add a variable to the inherited environment but not
-	// remove one (catalogue D44).
+	// argument. The child also runs without the TLS log and trace
+	// controls (credentials.TLSLogVars, removed through Cmd.Unset), as the
+	// bash twin (kkp::api) runs curl after http::tls_log_vars_unset.
 	curlArgs := []string{
 		"-q",
 		"--silent",
@@ -140,6 +139,7 @@ func (d *Driver) api(ctx context.Context, method, path, body string, stderr io.W
 		var buf strings.Builder
 		_ = d.deps.Runner.Run(ctx, execx.Cmd{
 			Name: "curl", Args: append(append([]string{}, curlArgs...), url),
+			Unset:  credentials.TLSLogVars(),
 			Stdin:  strings.NewReader(curlConfig),
 			Stdout: &buf, Stderr: &buf,
 		})

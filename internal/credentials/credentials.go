@@ -67,3 +67,17 @@ func RequireHTTPS(url, label string, stderr io.Writer) error {
 	}
 	return nil
 }
+
+// TLSLogVars returns the environment variables that make curl or its TLS
+// library write the TLS session keys, or a trace that can hold the
+// plaintext: SSLKEYLOGFILE and GNUTLS_KEYLOGFILE (a key log),
+// GNUTLS_DEBUG_LEVEL (GnuTLS debug output, with key material at high
+// levels), SSLTRACE, SSLDEBUG and SSLDEBUGFILE (the trace and debug output
+// of NSS). A curl call that carries a credential runs without them
+// (execx.Cmd.Unset). The bash twin is the list _HTTP_TLS_LOG_VARS of
+// utils/http.sh (http::tls_log_vars_unset), which has the reasons;
+// TestTLSLogVarsMatchBash keeps the two equal. Each call returns a new
+// slice.
+func TLSLogVars() []string {
+	return []string{"SSLKEYLOGFILE", "GNUTLS_KEYLOGFILE", "GNUTLS_DEBUG_LEVEL", "SSLTRACE", "SSLDEBUG", "SSLDEBUGFILE"}
+}

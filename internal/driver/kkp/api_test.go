@@ -8,9 +8,11 @@ package kkp
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/credentials"
 	"github.com/kernpilot/lok8s/internal/execx"
 )
 
@@ -587,5 +589,40 @@ func TestWaitComponentsTimesOut(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "Timed out waiting for KKP cluster cluster-abc components (machineController operatingSystemManager) after 1s") {
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+// The curl of the KKP call runs without the TLS log and trace controls,
+// also when the parent environment holds each one: the Cmd removes them
+// (execx.Cmd.Unset), and the environment the default Runner gives the
+// child (execx.ChildEnv) has none of them. The control variable stays.
+func TestAPICurlRunsWithoutTheTLSLogVars(t *testing.T) {
+	setKKPEnv(t)
+	names := credentials.TLSLogVars()
+	if len(names) == 0 {
+		t.Fatal("credentials.TLSLogVars is empty")
+	}
+	for _, name := range names {
+		t.Setenv(name, filepath.Join(t.TempDir(), name))
+	}
+	t.Setenv("LO_KKP_ENV_CONTROL", "on")
+	d, runner, stderr := testDriver(t)
+	runner.handler = curlRespond(`{"ok": true}`, "200")
+	if _, err := d.api(t.Context(), "GET", "/api/v2/dc", "", stderr); err != nil {
+		t.Fatal(err)
+	}
+	got := runner.calls[0]
+	if !slices.Equal(got.Unset, names) {
+		t.Fatalf("Cmd.Unset = %q, want %q", got.Unset, names)
+	}
+	env := execx.ChildEnv(got)
+	if !slices.Contains(env, "LO_KKP_ENV_CONTROL=on") {
+		t.Fatal("the child environment lost the control variable")
+	}
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if slices.Contains(names, name) {
+			t.Errorf("the curl child gets %s", name)
+		}
 	}
 }
