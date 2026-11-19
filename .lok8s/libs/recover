@@ -338,9 +338,9 @@ recover::_cfg_yq() {
 #   config       yq fails, more than one document, a top that is not a
 #                mapping (a !!map), or an alias, a mapping or a list as the
 #                cluster_name;
-#   merge        a key << at the top mapping (a merge key or the text "<<"):
-#                yq and the rebuild can take the cluster_name from the merged
-#                mapping;
+#   merge        a key << at the top mapping (a merge key or the text "<<")
+#                or a key with the tag !!merge: yq and the rebuild can take
+#                the cluster_name from the merged mapping;
 #   quote        another tag (!!int, !!float, true, !!timestamp, a custom
 #                tag): the rebuild writes it as JSON (jq), which can change it
 #                (0123 is 123).
@@ -355,7 +355,7 @@ recover::_config_name() {
     '!!map '*) ;;
     *) echo config; return 0 ;;
   esac
-  merge="$(recover::_cfg_yq "${kind}" "${src}" -r '[keys[] | select(. == "<<")] | length')" \
+  merge="$(recover::_cfg_yq "${kind}" "${src}" -r '[keys[] | select(. == "<<" or tag == "!!merge")] | length')" \
     || { echo config; return 0; }
   if [[ "${merge}" != 0 ]]; then
     echo merge

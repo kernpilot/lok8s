@@ -918,6 +918,7 @@ _guard_row() {
   _guard_row "a merge key after the name" merge $'base: &b {cluster_name: merged}\ncluster_name: a\n<<: *b\n'
   _guard_row "a merge key with a list" merge $'base: &b {x: 1}\n<<: [*b]\ncluster_name: a\n'
   _guard_row "a quoted << key" merge $'"<<": x\ncluster_name: a\n'
+  _guard_row "a key with the explicit tag !!merge" merge $'x: 1\n!!merge base: {cluster_name: merged}\n'
 }
 
 @test "recover guard: refuses a cluster_name that is not a text, and says to quote it" {

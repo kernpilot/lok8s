@@ -868,6 +868,7 @@ var configShapes = []struct{ name, config, want string }{
 	{"a merge key after the name", "base: &b {cluster_name: merged}\ncluster_name: a\n<<: *b\n", "merge"},
 	{"a merge key with a list", "base: &b {x: 1}\n<<: [*b]\ncluster_name: a\n", "merge"},
 	{"a quoted << key", "\"<<\": x\ncluster_name: a\n", "merge"},
+	{"a key with the explicit tag !!merge", "x: 1\n!!merge base: {cluster_name: merged}\n", "merge"},
 	{"int", "cluster_name: 0123\n", "quote"},
 	{"hex int", "cluster_name: 0x1F\n", "quote"},
 	{"float", "cluster_name: 1.5\n", "quote"},

@@ -57,13 +57,15 @@ func (e *MergeKeyError) Error() string {
 	return "the cluster config of: " + strings.Join(e.Domains, ", ") + " has a merge key (<<) on the path to a cluster name"
 }
 
-// isMergeKey: a key whose text is "<<" (a merge key, or the quoted text) or
-// whose tag is !!merge (bash: select(. == "<<" or tag == "!!merge")).
-func isMergeKey(k *yaml.Node) bool {
+// IsMergeKey: a key whose text is "<<" (a merge key, or the quoted text) or
+// whose tag is !!merge (bash: select(. == "<<" or tag == "!!merge")). The
+// rule of both cluster_name reads: this scan (mergeOnPath) and the recover
+// guard's own read of the provider config (configClusterName).
+func IsMergeKey(k *yaml.Node) bool {
 	return k.Value == "<<" || k.ShortTag() == "!!merge"
 }
 
-// mergeOnPath reports a merge key (isMergeKey) in n or in a mapping on path
+// mergeOnPath reports a merge key (IsMergeKey) in n or in a mapping on path
 // from n: each mapping that a merge key in it can give the next key of the
 // path or the name (bash: the yq keys of each, in
 // provision::_cluster_name_users). Each node of the path is dereferenced, so
@@ -72,7 +74,7 @@ func mergeOnPath(n *yaml.Node, path ...string) bool {
 	n = yqsem.Deref(n)
 	for i := 0; n != nil && n.Kind == yaml.MappingNode; i++ {
 		for k := 0; k+1 < len(n.Content); k += 2 {
-			if isMergeKey(n.Content[k]) {
+			if IsMergeKey(n.Content[k]) {
 				return true
 			}
 		}

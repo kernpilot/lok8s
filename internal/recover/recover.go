@@ -492,8 +492,8 @@ const (
 //     its top is not a mapping (a !!map); or the cluster_name is an alias, a
 //     mapping or a list;
 //   - readMerge: the top mapping has a key << (a merge key or the text
-//     "<<"): yq and the rebuild can take the cluster_name from the merged
-//     mapping;
+//     "<<") or a key with the tag !!merge (domain.IsMergeKey): yq and the
+//     rebuild can take the cluster_name from the merged mapping;
 //   - readQuote: the cluster_name has another tag (!!int, !!float, true,
 //     !!timestamp, a custom tag): the rebuild writes it as JSON (jq), which
 //     can change it (0123 is 123).
@@ -524,10 +524,10 @@ func configClusterName(raw []byte) (string, nameRead) {
 	}
 	var v *yaml.Node
 	for i := 0; i+1 < len(top.Content); i += 2 {
-		switch top.Content[i].Value {
-		case "<<":
+		switch k := top.Content[i]; {
+		case domain.IsMergeKey(k):
 			return "", readMerge
-		case "cluster_name":
+		case k.Value == "cluster_name":
 			v = top.Content[i+1]
 		}
 	}
