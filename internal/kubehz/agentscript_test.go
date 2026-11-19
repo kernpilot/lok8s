@@ -260,7 +260,7 @@ func TestAgentProbesAreBoundedByTimeout(t *testing.T) {
 	marker := 0
 	for _, c := range kubectlCalls(script) {
 		joined := strings.Join(c.args, " ")
-		if strings.HasPrefix(joined, "get configmap kubehz-agent-config ") && strings.Contains(joined, "{.metadata.annotations}") {
+		if strings.HasPrefix(joined, "get configmap kubehz-agent-state ") && strings.Contains(joined, "{.metadata.annotations}") {
 			marker++
 			if !bounded.MatchString(c.prefix) {
 				t.Errorf("script line %d: the marker read is not bounded by `timeout 5`: %q kubectl %s", c.line, c.prefix, joined)

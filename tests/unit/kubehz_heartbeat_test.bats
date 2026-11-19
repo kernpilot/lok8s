@@ -141,10 +141,15 @@ kubectl() {
     *"/readyz"*) printf 'ok\n'; return 0 ;;
 
     # ── Assessment fixtures (handover contract §1) ──
-    # Gate marker: the annotations map on the kubehz-agent-config ConfigMap.
+    # The agent's RBAC grants nothing on kubehz-agent-config (the pod gets
+    # it through envFrom): any call on it is refused, as the apiserver does.
+    *"configmap kubehz-agent-config"*)
+      echo 'Error from server (Forbidden): configmaps "kubehz-agent-config" is forbidden' >&2
+      return 1 ;;
+    # Gate marker: the annotations map on the kubehz-agent-state ConfigMap.
     # STUB_MARKER holds the JSON annotations; STUB_MARKER_FORBIDDEN simulates
-    # an old install without the marker RBAC (read fails -> fail-closed).
-    "get configmap kubehz-agent-config"*)
+    # an install without that ConfigMap or its RBAC (read fails -> fail-closed).
+    "get configmap kubehz-agent-state"*)
       [ -z "${STUB_MARKER_FORBIDDEN:-}" ] || return 1
       printf '%s' "${STUB_MARKER:-}" ;;
     "annotate "*) printf '%s\n' "$*" >> "${STUB_ANNOTATE_LOG}"; return 0 ;;
@@ -820,20 +825,148 @@ teardown() {
 }
 
 # ── Assessment: fail-closed when the marker is unreadable ──
-# An old install without the kubehz-agent-marker RBAC must NOT spam a full
-# assessment every 5-minute tick — an unreadable marker sends nothing.
+# An install without the kubehz-agent-state ConfigMap (the script of a new lo
+# on an agent that an older lo deployed, until `lo kubehz deploy` runs again)
+# or without the kubehz-agent-marker RBAC must NOT spam a full assessment
+# every 5-minute tick: an unreadable marker sends nothing.
 
-@test "assessment: an unreadable marker (missing RBAC) sends NO assessment" {
+@test "assessment: an unreadable marker (no kubehz-agent-state, or no RBAC for it) sends NO assessment" {
   export STUB_MARKER_FORBIDDEN=1
 
   run bash --posix "${RUNNER}"
   assert_success
+  assert_output --partial "desired-state poll skipped (marker ConfigMap unreadable)"
 
   run command jq -e '.assessment' "${STUB_PAYLOAD_OUT}"
   assert_failure
   # The heartbeat itself still went out intact.
   run command jq -r '.clusterId' "${STUB_PAYLOAD_OUT}"
   assert_output "test.example.com"
+  # Nothing was written: there is no ConfigMap to write to.
+  [ ! -s "${STUB_ANNOTATE_LOG}" ]
+}
+
+# ── The markers live on kubehz-agent-state ───────────────
+# The agent's RBAC grants get and patch on that one ConfigMap and nothing on
+# kubehz-agent-config. The kubectl stub refuses every call on
+# kubehz-agent-config, as the apiserver does.
+
+# _state_only: every annotate call of the last run names the state ConfigMap,
+# and no kubectl call names kubehz-agent-config. $1 is the number of annotate
+# calls that the run must make.
+_state_only() {
+  local want=$1 all state
+  all=$(grep -c '' "${STUB_ANNOTATE_LOG}") || all=0
+  state=$(grep -cE '^annotate (--overwrite )?configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/' "${STUB_ANNOTATE_LOG}") || state=0
+  [ "${all}" = "${want}" ] || { echo "annotate calls: ${all}, want ${want}" >&2; return 1; }
+  [ "${state}" = "${want}" ] || { echo "annotate calls on kubehz-agent-state: ${state}, want ${want}" >&2; return 1; }
+  if grep -F 'kubehz-agent-config' "${STUB_KUBECTL_LOG}" >&2; then
+    echo "a kubectl call names kubehz-agent-config" >&2
+    return 1
+  fi
+}
+
+@test "state ConfigMap: each of the nine marker writers and the marker read name kubehz-agent-state only" {
+  local now
+  now=$(date -u +%s)
+  export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+
+  # Tick 1: no last-assessment, a served assess request, an expired nonce, a
+  # stored refusal, a changed desired state and an "assess" in the response:
+  # the nonce clear, the 24h marker, the request clear, the re-arm, the
+  # desired-state validator and the refusal clear.
+  export STUB_MARKER='{"kubehz.cloud/assess-requested":"true","kubehz.cloud/claim-nonce":"khzn_eXp1rEd_n0ncE_43charsBase64urlValue00000","kubehz.cloud/claim-nonce-placed":"'$(( now - 1000 ))'","kubehz.cloud/desired-error":"401"}'
+  export STUB_DESIRED_CODE=200
+  export STUB_DESIRED_ETAG='"9-120"'
+  export STUB_RESPONSE='{"status":"ok","actions":["assess"]}'
+  run bash --posix "${RUNNER}"
+  assert_success
+  run _state_only 6
+  assert_success
+  run grep -F 'kubehz.cloud/claim-nonce- kubehz.cloud/claim-nonce-placed-' "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -F "kubehz.cloud/last-assessment=" "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -F "kubehz.cloud/assess-requested-" "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -F "kubehz.cloud/assess-requested=true" "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -F 'kubehz.cloud/desired-etag="9-120" kubehz.cloud/desired-revision=7' "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -F "kubehz.cloud/desired-error-" "${STUB_ANNOTATE_LOG}"
+  assert_success
+  # The marker read: one call, on the state ConfigMap.
+  run grep -c '^get configmap kubehz-agent-state -n kubehz-system -o jsonpath={.metadata.annotations}$' "${STUB_KUBECTL_LOG}"
+  assert_output "1"
+
+  # Tick 2: a live nonce that the platform verifies, and a stored refusal
+  # with an unchanged desired state: the nonce clear and the refusal clear.
+  : > "${STUB_ANNOTATE_LOG}"
+  : > "${STUB_KUBECTL_LOG}"
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_vEr1f1Ed_n0ncE_43charsBase64urlValue000","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'","kubehz.cloud/desired-error":"401"}'
+  export STUB_DESIRED_CODE=304
+  export STUB_RESPONSE='{"status":"ok","claim":{"verified":true}}'
+  run bash --posix "${RUNNER}"
+  assert_success
+  assert_output --partial "claim verified"
+  run _state_only 2
+  assert_success
+  run grep -F 'kubehz.cloud/claim-nonce- kubehz.cloud/claim-nonce-placed-' "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run grep -F "kubehz.cloud/desired-error-" "${STUB_ANNOTATE_LOG}"
+  assert_success
+
+  # Tick 3: a new refusal of the desired-state poll is stored.
+  : > "${STUB_ANNOTATE_LOG}"
+  : > "${STUB_KUBECTL_LOG}"
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'"}'
+  export STUB_DESIRED_CODE=403
+  export STUB_RESPONSE='{"status":"ok"}'
+  run bash --posix "${RUNNER}"
+  assert_success
+  run _state_only 1
+  assert_success
+  run grep -F "kubehz.cloud/desired-error=403" "${STUB_ANNOTATE_LOG}"
+  assert_success
+}
+
+# ── Upgrade: an agent that an older lo deployed ──────────
+# That agent kept its markers on kubehz-agent-config. After `lo kubehz deploy`
+# the agent reads only kubehz-agent-state, which starts empty. The cost is one
+# extra assessment, then the 24h gate holds again. A claim nonce placed on
+# the old ConfigMap is not echoed.
+
+@test "upgrade: the first tick on a new, empty kubehz-agent-state sends one assessment, the next tick sends none" {
+  export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+  # The new ConfigMap has no annotations: the read prints nothing.
+  export STUB_MARKER=''
+
+  run bash --posix "${RUNNER}"
+  assert_success
+  run command jq -e '.assessment' "${STUB_PAYLOAD_OUT}"
+  assert_success
+  run command jq -e '.claim' "${STUB_PAYLOAD_OUT}"
+  assert_failure
+  run grep -c '' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
+  run grep -E '^annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+$' "${STUB_ANNOTATE_LOG}"
+  assert_success
+  local stamp
+  stamp=$(sed -n 's/.*kubehz\.cloud\/last-assessment=//p' "${STUB_ANNOTATE_LOG}")
+  run grep -F 'kubehz-agent-config' "${STUB_KUBECTL_LOG}"
+  assert_failure
+
+  # The next tick reads the marker that the first tick wrote.
+  : > "${STUB_ANNOTATE_LOG}"
+  rm -f -- "${STUB_PAYLOAD_OUT:?}"
+  export STUB_MARKER='{"kubehz.cloud/last-assessment":"'"${stamp}"'"}'
+  run bash --posix "${RUNNER}"
+  assert_success
+  run command jq -r '.clusterId' "${STUB_PAYLOAD_OUT}"
+  assert_output "test.example.com"
+  run command jq -e '.assessment' "${STUB_PAYLOAD_OUT}"
+  assert_failure
+  [ ! -s "${STUB_ANNOTATE_LOG}" ]
 }
 
 # ── in-cluster kubectl takes no client-config flag ──
@@ -860,7 +993,7 @@ teardown() {
   run bash --posix "${RUNNER}"
   assert_success
   run cat "${STUB_TIMEOUT_LOG}"
-  assert_line "5 kubectl get configmap kubehz-agent-config -n kubehz-system -o jsonpath={.metadata.annotations}"
+  assert_line "5 kubectl get configmap kubehz-agent-state -n kubehz-system -o jsonpath={.metadata.annotations}"
   assert_line --partial "5 kubectl get pods -n kube-system -l component=kube-apiserver -o jsonpath="
   assert_line --partial "5 kubectl get pods -n kube-system -l component=etcd -o jsonpath="
   assert_line "5 kubectl get crd clusters.cluster.x-k8s.io -o name"

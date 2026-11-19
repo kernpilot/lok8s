@@ -58,7 +58,7 @@ kubectl() {
     "get --raw /api/v1/nodes") printf '{"items":[{"metadata":{"name":"cp-1"}}]}\n' ;;
     "get csr -o json") printf '{}\n' ;;
     *"/readyz"*) printf 'ok\n'; return 0 ;;
-    "get configmap kubehz-agent-config"*) printf '%s' "${STUB_MARKER:-{\}}" ;;
+    "get configmap kubehz-agent-state"*) printf '%s' "${STUB_MARKER:-{\}}" ;;
     "annotate "*) return 0 ;;
     "get pods"*) printf ''; return 0 ;;
     *) printf '' ;;

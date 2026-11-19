@@ -815,16 +815,20 @@ Properties worth knowing:
 - **Outbound-only.** The agent pushes; the platform never connects into your
   cluster and holds no credentials for it (only verifier hashes).
 - **Least-privilege RBAC.** The `kubehz-agent` ServiceAccount can read cluster
-  state: `get`/`list` on nodes, namespaces, componentstatuses and CSRs, `list`
-  pods in `kube-system` only (control-plane health), and `get` on the `/readyz`
-  + `/version` API paths. On top of that it holds `get`+`create` (never
+  state: `get`/`list` on nodes and CSRs, `list` pods in `kube-system` only
+  (control-plane health), and `get` on the `/readyz` + `/version` API paths.
+  On top of that it holds `get`+`create` (never
   `update`/`patch`/`delete`) on Secrets in its own `kubehz-system` namespace,
   to bootstrap its identity Secret once. It reads no Secrets elsewhere and can rotate nothing. The
   [assessment](#assessment-and-handover) adds read-only probe grants
   (storageclasses, persistentvolumes, services `list`, webhook configuration
   `list`, `get` on the one CAPI CRD, kube-system daemonset `list` + the
-  `kubeadm-config` ConfigMap) and `get`/`patch` scoped to the single
-  `kubehz-agent-config` ConfigMap for its send-gate marker.
+  `kubeadm-config` ConfigMap). The agent keeps its markers (the assessment
+  send gate, the claim nonce and the desired-state validator) as annotations
+  on one ConfigMap, `kubehz-agent-state`, and `get`/`patch` on that ConfigMap
+  is its only write grant. It has no access to `kubehz-agent-config`, its
+  configuration: the pod gets it through `envFrom`, so the agent cannot change
+  its own API URL.
 - **Domain-keyed.** The payload's `clusterId` is the cluster domain, the same
   identity it registers under.
 - **Hardened.** Stock `alpine/k8s` image (pinned by digest), non-root, read-only
@@ -885,6 +889,27 @@ The manifests ship with lok8s as kustomize directories:
 `.lok8s/libs/kubehz/manifests/live-agent/` (live agent, base and managed). So
 you can read exactly what `deploy` applies, or render it first with
 `lo kubehz deploy --dry-run`.
+
+### An agent that an older lo deployed
+
+An older lo kept the agent's markers as annotations on `kubehz-agent-config`,
+and the agent could patch that ConfigMap. lo now keeps them on
+`kubehz-agent-state`. After you update lo, run `lo kubehz deploy` again. It
+adds `kubehz-agent-state` and the new RBAC, and the CronJob reads its markers
+there from the next tick.
+
+- Until you deploy again, the agent in the cluster keeps the old script and
+  beats as before. `lo kubehz claim` stops with
+  `configmap/kubehz-agent-state not found`.
+- The first tick after the deploy finds no markers. It sends one assessment,
+  and the desired-state poll gets one full answer. Then the 24-hour gate holds
+  again.
+- The agent does not echo a claim nonce that you placed before the deploy.
+  Place a new one with `lo kubehz claim`.
+- The old annotations stay on `kubehz-agent-config`. Nothing reads them.
+
+Each later `lo kubehz deploy` keeps the markers on `kubehz-agent-state`:
+`kubectl apply` removes only what an earlier apply set.
 
 ## Status and deregistration
 
