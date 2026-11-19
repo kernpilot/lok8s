@@ -197,7 +197,9 @@ func (c *Context) httpClient() *http.Client {
 	// handover (handover.go fetchSnapshot), which can legitimately take
 	// longer than any fixed cap. The default transport's dial timeout plus
 	// a response-header deadline cover a platform API that never answers.
-	// bash curl had no --max-time either; this is a deliberate divergence.
+	// bash curl has no --max-time on these calls either. The mint of a node
+	// join is the exception in both twins: mintMaxTime here, curl
+	// --max-time in bash.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = 2 * time.Minute
 	return &http.Client{

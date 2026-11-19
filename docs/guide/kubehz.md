@@ -479,7 +479,8 @@ Ctrl-C). If `kubeadm join` ended with 0 all the same, the command says
 that the node joined. Otherwise it says that the ticket holds a node slot
 for about ten minutes, and prints the command that frees it. A signal
 during the mint gets the same note: the platform may have minted the
-ticket.
+ticket. The mint request ends within 150 seconds (30 seconds for the
+connect), also when the platform does not answer.
 
 After the mint, the command joins only with a line it can read:
 `kubeadm join <host>:<port>`, exactly one `--token`, at least one

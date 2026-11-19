@@ -184,6 +184,11 @@ kubehz::space_api() {
   return "${rc}"
 }
 
+# The bound of curl --max-time for the mint of a node join
+# (kubehz::space_api_call mark-nul), in seconds: mintMaxTime of the Go
+# twin. A function, so that a test can make it short.
+kubehz::space_api_mint_max_time() { echo 150; }
+
 # kubehz::space_api without the "unreachable" line: a caller that must tell
 # a failure before the send from one after it (node::maintain) reads the
 # curl exit code in KUBEHZ_SPACE_API_CURL_RC (empty when curl did not run or
@@ -196,6 +201,8 @@ kubehz::space_api() {
 # JSON. U+0001 is a control byte that jq refuses in JSON, as the Go twin
 # refuses the NUL (parseJSON). The node join uses it; the other callers do
 # not (the Go twin writes the body of a Space kubeconfig as it is).
+# With mark-nul, curl also ends within --connect-timeout 30 and --max-time
+# (kubehz::space_api_mint_max_time).
 # Usage: kubehz::space_api_call <method> <path> [json_body] [mark-nul]
 kubehz::space_api_call() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
@@ -234,8 +241,16 @@ kubehz::space_api_call() {
   }
   http::credential_ok KUBEHZ_TOKEN || return 1
 
-  local -a extra=() curl_argv
+  local -a extra=() bounds=()
   [[ -n "${body}" ]] && extra=(-H "Content-Type: application/json" -d "${body}")
+  # mark-nul (the mint of a node join): curl ends within its bounds, as the
+  # Go twin does (mintMaxTime, and its dialer gives up a connect after 30
+  # seconds). The traps of the join are in place during the mint, and bash
+  # runs a trap only after the command substitution ended: a signal sent
+  # to lo alone waits for curl, and a second one does not cut that short.
+  # The bound ends that wait. A Ctrl-C signals the process group: curl
+  # gets it too and stops at once.
+  [[ "${nul}" != mark-nul ]] || bounds=(--connect-timeout 30 --max-time "$(kubehz::space_api_mint_max_time)")
 
   # The bearer reaches curl in a config on stdin, never on argv. -q first:
   # curl then reads no config file of the user (.curlrc in CURL_HOME or
@@ -249,18 +264,17 @@ kubehz::space_api_call() {
   # utils/http.sh). Each could give away the bearer or the answer. A
   # readonly name in the list stops the call before curl runs:
   # KUBEHZ_SPACE_API_CURL_RC then holds the status of unset (1), not a
-  # status of curl. With mark-nul, tr maps the NUL, and pipefail keeps the
-  # status of curl.
-  curl_argv=(curl -q -K - -sSL -w $'\n%{http_code}' -X "${method}" "${LOK8S_KUBEHZ_API_URL}${path}" "${extra[@]}")
+  # status of curl. With mark-nul, tr maps the NUL after curl; the other
+  # calls pass the answer through cat. The status is the one of the
+  # subshell (curl, or 1 from the unset), with or without pipefail: the
+  # writer of the config and the filter do not count.
   raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
-    http::tls_log_vars_unset || exit
-    if [[ "${nul}" == mark-nul ]]; then
-      set -o pipefail
-      "${curl_argv[@]}" | tr '\000' '\001'
-    else
-      "${curl_argv[@]}"
-    fi
-  ) ) || {
+    http::tls_log_vars_unset &&
+      curl -q -K - "${bounds[@]}" -sSL -w $'\n%{http_code}' -X "${method}" \
+        "${LOK8S_KUBEHZ_API_URL}${path}" \
+        "${extra[@]}"
+  ) | if [[ "${nul}" == mark-nul ]]; then tr '\000' '\001'; else cat; fi
+    exit "${PIPESTATUS[1]}") || {
     KUBEHZ_SPACE_API_CURL_RC=$?
     return 1
   }

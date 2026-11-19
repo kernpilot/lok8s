@@ -849,7 +849,7 @@ func readPid(t *testing.T, path string) int {
 func mustBeGone(t *testing.T, pid int) {
 	t.Helper()
 	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
-		t.Errorf("kubeadm (pid %d) still runs after lo ended (%v)", pid, err)
+		t.Errorf("the stand-in (pid %d) still runs after lo ended (%v)", pid, err)
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	}
 }
@@ -907,6 +907,105 @@ func TestNodeJoinAKubeadmThatEndsWithZeroOnTheStopLanded(t *testing.T) {
 	mustNotContain(t, h.output(), "interrupted after the ticket was minted")
 	mustLeaveNoJoinDir(t, h)
 	mustBeGone(t, pid)
+}
+
+// stubKubeletRunner runs a shell script as `kubelet --version` (a real
+// child process, through the runner of lo). Each other call fails: the
+// tests that use it mint with --print-only, which runs no kubeadm.
+type stubKubeletRunner struct{ script string }
+
+func (r stubKubeletRunner) Run(ctx context.Context, c execx.Cmd) error {
+	if c.Name != "kubelet" {
+		return errors.New(c.Name + ": not in this test")
+	}
+	c.Name = r.script
+	return execx.NewRunner(nil).Run(ctx, c)
+}
+
+// writeKubeletScript writes a stand-in for `kubelet --version` to
+// dir/kubelet that ignores SIGINT and SIGTERM. It writes its pid to
+// <script>.pid, the marker that it runs, and prints a version only after
+// 20 seconds.
+func writeKubeletScript(t *testing.T, dir string) string {
+	t.Helper()
+	script := filepath.Join(dir, "kubelet")
+	body := "#!/bin/sh\ntrap '' INT TERM\necho $$ > \"$0.pid\"\n" +
+		"i=0\nwhile [ \"$i\" -lt 400 ]; do sleep 0.05; i=$((i + 1)); done\necho 'Kubernetes v1.36.0'\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil { // #nosec G306 -- the stand-in runs as a program
+		t.Fatal(err)
+	}
+	return script
+}
+
+// The version probe runs while the join holds the signals. A kubelet that
+// ignores the SIGINT of the stop is killed after joinStopDelay (here
+// 300 ms), as kubeadm is: the join ends with the mint note, prints no
+// join line, and sends no mint.
+func TestNodeJoinStopKillsAKubeletProbeThatIgnoresTheInterrupt(t *testing.T) {
+	shortStopDelay(t, 300*time.Millisecond)
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	h.ctx.LookPath = func(tool string) bool { return tool == "kubelet" }
+	script := writeKubeletScript(t, t.TempDir())
+	h.ctx.Runner = stubKubeletRunner{script: script}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		if waitForLines(script+".pid", 1, 10*time.Second) {
+			cancel()
+		}
+	}()
+	start := time.Now()
+	err := h.ctx.NodeJoin(ctx, "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", PrintOnly: true})
+	took := time.Since(start)
+	if !errors.Is(err, ErrHandled) {
+		t.Fatalf("err = %v, want ErrHandled; output:\n%s", err, h.output())
+	}
+	if took > 5*time.Second {
+		t.Errorf("the join took %s; the stand-in runs 20 s, the stop bound is 300 ms", took)
+	}
+	mustContain(t, h.output(), "interrupted during the mint")
+	mustNotContain(t, h.output(), "kubeadm join cp.example.test")
+	h.mu.Lock()
+	for _, r := range h.requests {
+		if strings.HasSuffix(r.Path, "/join-token") {
+			t.Errorf("the mint was sent: %s %s", r.Method, r.Path)
+		}
+	}
+	h.mu.Unlock()
+	mustBeGone(t, readPid(t, script+".pid"))
+}
+
+// A mint that gets no answer ends after mintMaxTime (here 200 ms), as
+// curl --max-time ends it in the bash twin: the api is unreachable,
+// nothing is printed or run, and there is no note of a signal. The bound
+// is 150 s, the bound of the bash twin (kubehz::space_api_mint_max_time).
+func TestNodeJoinMintWithoutAnAnswerEndsAfterItsBound(t *testing.T) {
+	old := mintMaxTime
+	if old != 150*time.Second {
+		t.Errorf("mintMaxTime = %s, want 150s (the bash twin)", old)
+	}
+	mintMaxTime = 200 * time.Millisecond
+	t.Cleanup(func() { mintMaxTime = old })
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	h.handleFunc("POST /api/clusters/cl-1234abcd/nodes/join-token", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+		w.WriteHeader(http.StatusGatewayTimeout)
+	})
+	start := time.Now()
+	err := h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", PrintOnly: true})
+	took := time.Since(start)
+	if !errors.Is(err, ErrHandled) {
+		t.Fatalf("err = %v, want ErrHandled; output:\n%s", err, h.output())
+	}
+	if took > 5*time.Second {
+		t.Errorf("the join took %s; the stub answers after 10 s, the bound is 200 ms", took)
+	}
+	mustContain(t, h.output(), "kubehz API unreachable (POST /api/clusters/cl-1234abcd/nodes/join-token)")
+	mustNotContain(t, h.output(), "interrupted")
+	mustNotContain(t, h.output(), "kubeadm join cp.example.test")
 }
 
 // joinHelperEnv names the directory of TestNodeJoinHelperProcess; only

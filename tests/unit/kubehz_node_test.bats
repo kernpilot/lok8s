@@ -902,6 +902,86 @@ _signal_mid_join() {
   [ ! -f "${KUBEADM_LOG}" ]
 }
 
+# A curl for the mint that hangs: it ignores TERM, sends the signal
+# <send> (term: a TERM to lo; group-int: an INT to the process group of
+# lo, as a Ctrl-C does), and ends only at the --max-time it got (with 28,
+# as curl), or after 20 s without one. Then it writes that bound to
+# curl.ended. The other calls get the answers of _stub_curl.
+# Usage: _stub_hanging_mint <send>
+_stub_hanging_mint() {
+  export STUB_MINT_SEND="${1}"
+  eval "_curl_stub() $(declare -f curl | tail -n +2)"
+  curl() {
+    [[ " $* " == *" POST "*"/join-token "* ]] || { _curl_stub "$@"; return; }
+    trap '' TERM
+    local max=20 i
+    while (( $# )); do
+      [[ "${1}" != --max-time ]] || max="${2}"
+      shift
+    done
+    case "${STUB_MINT_SEND}" in
+      term) kill -TERM "$(cat "${LO_PID_FILE}")" ;;
+      group-int) kill -INT -- "-$(cat "${LO_PID_FILE}")" ;;
+    esac
+    for (( i = 0; i < max * 20; i++ )); do sleep 0.05; done
+    printf '%s\n' "${max}" > "${BATS_TEST_TMPDIR}/curl.ended"
+    return 28
+  }
+}
+
+# The end of a join that a signal stopped during the mint: the exit code
+# <rc> within <bound> seconds of <start> (microseconds), the unreachable
+# line and the mint note, no kubeadm, no config.
+# Usage: _assert_stopped_mint <rc> <got-rc> <start> <bound>
+_assert_stopped_mint() {
+  [ "${2}" -eq "${1}" ]
+  (( ${EPOCHREALTIME//[.,]/} - ${3} < ${4} * 1000000 ))
+  run cat "${BATS_TEST_TMPDIR}/join.out"
+  assert_output --partial "kubehz API unreachable (POST /api/clusters/cl-1234abcd/nodes/join-token)"
+  assert_output --partial "interrupted during the mint. If the platform minted the ticket, it holds a node slot"
+  assert_output --partial "lo kubehz node remove --name box-1"
+  refute_output --partial "interrupted after the ticket was minted"
+  [ ! -f "${KUBEADM_LOG}" ]
+  _assert_tmpdir_empty
+}
+
+# A signal to lo alone while the mint request hangs: bash runs the trap of
+# the join only after the command substitution of the mint, so lo waits
+# for curl. curl ends at its --max-time (kubehz::space_api_mint_max_time,
+# here 1 s), and the join ends with the mint note. Without the bound the
+# stub runs 20 s, and the case fails on time.
+@test "join: a TERM to lo while the mint hangs ends at the --max-time of curl, with the mint note, and exits 143" {
+  _stub_all
+  _stub_hanging_mint term
+  export LO_PID_FILE="${BATS_TEST_TMPDIR}/lo.pid"
+  kubehz::space_api_mint_max_time() { echo 1; }
+  local rc=0 start
+  start=${EPOCHREALTIME//[.,]/}
+  ( printf '%s\n' "${BASHPID}" > "${LO_PID_FILE}"; node::join --name box-1 --pool metal --cluster-id cl-1234abcd ) > "${BATS_TEST_TMPDIR}/join.out" 2>&1 3>&- &
+  wait "$!" || rc=$?
+  [ "$(cat "${BATS_TEST_TMPDIR}/curl.ended")" = 1 ]
+  _assert_stopped_mint 143 "${rc}" "${start}" 10
+}
+
+# A Ctrl-C while the mint request hangs: the INT reaches curl too, and
+# curl stops at once, long before its --max-time (here 10 s). set -m gives
+# lo a group of its own.
+@test "join: a Ctrl-C (INT to the process group) while the mint hangs stops curl at once and exits 130" {
+  _stub_all
+  _stub_hanging_mint group-int
+  export LO_PID_FILE="${BATS_TEST_TMPDIR}/lo.pid"
+  kubehz::space_api_mint_max_time() { echo 10; }
+  local lo rc=0 start
+  start=${EPOCHREALTIME//[.,]/}
+  set -m
+  ( printf '%s\n' "${BASHPID}" > "${LO_PID_FILE}"; node::join --name box-1 --pool metal --cluster-id cl-1234abcd ) > "${BATS_TEST_TMPDIR}/join.out" 2>&1 3>&- &
+  lo=$!
+  set +m
+  wait "${lo}" || rc=$?
+  [ ! -e "${BATS_TEST_TMPDIR}/curl.ended" ]
+  _assert_stopped_mint 130 "${rc}" "${start}" 5
+}
+
 # After a hangup the terminal is gone, and a write to it fails (here
 # /dev/full). The cleanup runs before the note, and a failed write of the
 # note does not end the shell under set -e: the exit code is still the one

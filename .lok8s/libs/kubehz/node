@@ -791,7 +791,12 @@ node::join() {
   node::_join_traps
   # mark-nul: a NUL byte of the response becomes a control byte that jq
   # refuses, so that it cannot vanish in $(...); the Go twin refuses such a
-  # body as JSON (parseJSON).
+  # body as JSON (parseJSON). mark-nul also bounds curl: 30 s for the
+  # connect, 150 s for the request (kubehz::space_api_mint_max_time). bash
+  # runs a trap only after the mint returned, so a signal to lo alone waits
+  # for curl, at most that long, and a second signal does not cut it short.
+  # A Ctrl-C reaches curl too and stops it at once. The Go twin stops the
+  # mint at once on each signal.
   local rc=0 minted=0
   kubehz::space_api POST "/api/clusters/${NODE_CLUSTER_ID}/nodes/join-token" "${payload}" mark-nul || rc=$?
   if (( rc == 0 )); then

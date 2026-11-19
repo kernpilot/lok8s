@@ -7,9 +7,11 @@ package kubehz
 // token is on no argv. It never builds a join command of its own.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -253,16 +255,25 @@ func (c *Context) defaultNodeName() string {
 var kubeletVersionRe = regexp.MustCompile(`(v[0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*)`)
 
 // kubeletVersion ports node::kubelet_version: the kubelet on THIS machine,
-// "" when there is none to ask.
+// "" when there is none to ask. A node join asks while it holds the
+// signals (holdJoinSignals): a signal ends ctx, and the runner stops the
+// kubelet as it stops kubeadm (a SIGINT, then a SIGKILL after
+// joinStopDelay). Without the bound, a kubelet that ignores the SIGINT
+// would keep the join waiting, and a second signal could not end it.
 func (c *Context) kubeletVersion(ctx context.Context) string {
 	if !c.lookPath("kubelet") {
 		return ""
 	}
-	out, err := c.capture(ctx, true, "kubelet", "--version")
+	var out bytes.Buffer
+	err := c.Runner.Run(ctx, execx.Cmd{
+		Name: "kubelet", Args: []string{"--version"},
+		Stdout: &out, Stderr: io.Discard,
+		WaitDelay: joinStopDelay,
+	})
 	if err != nil {
 		return ""
 	}
-	m := kubeletVersionRe.FindStringSubmatch(execx.TrimNewlines(out))
+	m := kubeletVersionRe.FindStringSubmatch(execx.TrimNewlines(out.String()))
 	if m == nil {
 		return ""
 	}
@@ -679,6 +690,13 @@ type mintedTicket struct {
 	expires     string
 }
 
+// mintMaxTime bounds the mint request of a node join, the answer
+// included: the bound of curl --max-time in the bash twin
+// (kubehz::space_api_mint_max_time). With the dial bound (30 s) and the
+// response header bound (2 minutes) of the client, a mint that gets no
+// answer ends. A variable, so that a test can make it short.
+var mintMaxTime = 150 * time.Second
+
 // mintTicket asks the platform for a join ticket and checks the join
 // command it returned. A 2xx body is not a promise of JSON — every read
 // is guarded.
@@ -691,7 +709,12 @@ func (c *Context) mintTicket(ctx context.Context, cfg *Config, clusterID, nodeNa
 	if declared != "" {
 		pairs = append(pairs, jsonPair{"kubeletVersion", declared})
 	}
-	res, err := c.spaceAPI(ctx, cfg, "POST", "/api/clusters/"+clusterID+"/nodes/join-token", compactJSON(pairs...))
+	// The mint ends within mintMaxTime, the answer included (bash: curl
+	// --max-time). The dialer of the client gives up a connect after 30
+	// seconds (bash: curl --connect-timeout 30).
+	mintCtx, cancel := context.WithTimeout(ctx, mintMaxTime)
+	res, err := c.spaceAPI(mintCtx, cfg, "POST", "/api/clusters/"+clusterID+"/nodes/join-token", compactJSON(pairs...))
+	cancel()
 	if err != nil {
 		if ctx.Err() != nil {
 			c.interruptedMintNote(nodeName)

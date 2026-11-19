@@ -2448,6 +2448,31 @@ _stub_mktemp() {
   [[ "${stderr}" != *"unreachable"* ]]
 }
 
+# The mint of a node join (mark-nul) bounds curl as the Go twin bounds the
+# request: a connect ends after 30 s, the whole request after
+# kubehz::space_api_mint_max_time (150 s). The other calls get no bound.
+@test "space_api_call: mark-nul gives curl --connect-timeout 30 and --max-time of the mint, the other calls none" {
+  local argv="${BATS_TEST_TMPDIR}/curl.argv"
+  curl() {
+    printf '%s\n' "$@" > "${BATS_TEST_TMPDIR}/curl.argv"
+    printf '{"ok":true}\n200'
+  }
+  export -f curl
+
+  kubehz::space_api_call POST /api/clusters/cl-1234abcd/nodes/join-token '{}' mark-nul
+  [ "$(head -n 8 "${argv}")" = "$(printf '%s\n' -q -K - --connect-timeout 30 --max-time 150 -sSL)" ]
+
+  # The bound comes from the function.
+  kubehz::space_api_mint_max_time() { echo 7; }
+  kubehz::space_api_call POST /api/clusters/cl-1234abcd/nodes/join-token '{}' mark-nul
+  [ "$(sed -n '6,7p' "${argv}")" = "$(printf '%s\n' --max-time 7)" ]
+
+  kubehz::space_api_call POST /api/spaces '{}'
+  [ "$(head -n 4 "${argv}")" = "$(printf '%s\n' -q -K - -sSL)" ]
+  run grep -c -x -e --connect-timeout -e --max-time -- "${argv}"
+  [ "${output}" = 0 ]
+}
+
 # ── mutation pins for the round-1/round-2 guards ─────────
 # Each of these fails if its guard is deleted (review round 2: "revert every
 # hunk except the grep/auth-test and the suite stays green" — no longer true).
