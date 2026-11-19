@@ -362,9 +362,11 @@ func TestRestoreDApplyFailurePrintsNoKubectlText(t *testing.T) {
 	calls := 0
 	e.Runner = runnerFunc(func(ctx context.Context, c execx.Cmd) error {
 		calls++
-		if c.Stderr != nil {
-			fmt.Fprintln(c.Stderr, applyErrText)
+		if c.Stderr == nil {
+			t.Error("kubectl ran with a nil stderr: its message would reach the terminal")
+			return &rcError{1}
 		}
+		fmt.Fprintln(c.Stderr, applyErrText)
 		return &rcError{1}
 	})
 	e.restoreD(t.Context(), "test.lok8s.dev", "/kc")

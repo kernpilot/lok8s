@@ -93,10 +93,11 @@ func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 				ui.DebugTo(stderr, "bootstrap: restore.d %s store-copy apply failed", base)
 			}
 		}
-		// Decrypt and apply as SEPARATE steps with separate stderr: piping
-		// `sops 2>&1 | kubectl` would inject sops warnings into kubectl's
-		// stdin (corrupting the YAML). The Go port decrypts IN MEMORY via
-		// the sops library — no pipe exists to get this wrong.
+		// Decrypt and apply as SEPARATE steps: piping `sops 2>&1 | kubectl`
+		// would inject sops warnings into kubectl's stdin (corrupting the
+		// YAML). The Go port decrypts IN MEMORY via the sops library, so no
+		// pipe exists to get this wrong. Neither the sops error nor the
+		// kubectl stderr is printed: both can quote secret material.
 		dec, err := e.sopsDecrypt(f)
 		if err != nil {
 			skipped++
