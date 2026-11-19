@@ -179,7 +179,8 @@ func (p *bashProviderImpl) Expand(ctx context.Context, configFile string) ([]byt
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	// A read-only file: its Close error says nothing about the expanded data.
+	defer func() { _ = f.Close() }()
 	var out bytes.Buffer
 	if err := p.call(ctx, "envsubst", f, &out, io.Discard); err != nil {
 		return nil, err
