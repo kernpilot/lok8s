@@ -426,6 +426,42 @@ _class() {
   [ ! -s "${ENCRYPT_LOG}" ]
 }
 
+# _rm_path <dir> <argv...> — _rm with PATH set to <dir> alone.
+_rm_path() {
+  local PATH="${1}"
+  shift
+  _rm "${@}"
+}
+
+@test "without flock, remove-key refuses before any write and makes no lock file" {
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  # A PATH with the tools of the run and no flock: a link to each one found
+  # on PATH.
+  local bin="${BATS_TEST_TMPDIR}/no-flock" tool path
+  mkdir -p "${bin}"
+  for tool in sops yq jq grep cat mktemp mv rm cp dirname basename touch readlink; do
+    path="$(type -P "${tool}")" || continue
+    ln -s "${path}" "${bin}/${tool}"
+  done
+  for tool in yq jq; do
+    [ -e "${bin}/${tool}" ] || skip "${tool} not installed"
+  done
+  [ ! -e "${bin}/flock" ]
+  local enc="${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.K.enc"
+  cp -p "${CFG}" "${BATS_TEST_TMPDIR}/cfg.saved"
+  cp -p "${enc}" "${BATS_TEST_TMPDIR}/enc.saved"
+  DOMAIN=a.dev run _rm_path "${bin}" "${RCPT_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] flock not found — add-key and remove-key do not run without the lock of .sops.yaml; nothing was changed
+[error]   install flock, or use the lo binary: it locks on every platform" ] || { echo "$output" >&2; return 1; }
+  cmp -s "${CFG}" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
+  cmp -s "${enc}" "${BATS_TEST_TMPDIR}/enc.saved" || { echo "the .enc changed" >&2; return 1; }
+  [ ! -e "${CFG}.lock" ] || { echo "a lock file was made" >&2; return 1; }
+  [ ! -s "${ENCRYPT_LOG}" ]
+}
+
 @test "a stale cache (an .enc newer than its plaintext) is refused before any write" {
   # The re-key encrypts the plaintext: an older plaintext would overwrite the
   # newer value of the .enc.

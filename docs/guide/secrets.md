@@ -230,8 +230,10 @@ re-key.
 `add-key` and `remove-key` hold a lock on `.sops.yaml.lock`, next to
 `.sops.yaml`, for the whole run, so that two runs do not undo each other. A
 second run waits `LO_SECRETS_LOCK_WAIT` seconds (60 by default), then stops
-and changes nothing. The lock file holds no data. Both commands replace
-`.sops.yaml` through a temporary file and a rename.
+and changes nothing. The lock file holds no data. The `lo` binary locks on
+every platform. The bash implementation locks with `flock`: without it (macOS
+has none by default), both commands stop before they change a file. Both
+commands replace `.sops.yaml` through a temporary file and a rename.
 
 ::: warning A removal does not revoke access
 The removed key can still decrypt the older `.enc` files in the git history,

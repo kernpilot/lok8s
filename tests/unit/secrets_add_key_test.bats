@@ -118,6 +118,28 @@ _add() { # <key> [all] [skip_orphans]
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
 }
 
+@test "without flock, add-key refuses before .sops.yaml is touched and makes no lock file" {
+  # A run without the lock can undo another run's change. The PATH has the
+  # tools of the run and no flock: a link to each one found on PATH.
+  _load
+  local bin="${BATS_TEST_TMPDIR}/no-flock" tool path
+  mkdir -p "${bin}"
+  for tool in sops grep sed cat; do
+    path="$(type -P "${tool}")" || continue
+    ln -s "${path}" "${bin}/${tool}"
+  done
+  [ ! -e "${bin}/flock" ]
+  cp -p "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved"
+  _add_path() { local PATH="${1}"; shift; _add "${@}"; }
+  DOMAIN=a.dev run _add_path "${bin}" "${KEY_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] flock not found — add-key and remove-key do not run without the lock of .sops.yaml; nothing was changed
+[error]   install flock, or use the lo binary: it locks on every platform" ] || { echo "$output" >&2; return 1; }
+  cmp -s "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
+  [ ! -e "${PATH_BASE}/.sops.yaml.lock" ] || { echo "a lock file was made" >&2; return 1; }
+  [ ! -s "${ENCRYPT_RAN}" ]
+}
+
 @test "a malformed age key is refused before .sops.yaml is touched" {
   # A typo here is silent: sops accepts the config and every later encrypt writes
   # a recipient nobody holds.
