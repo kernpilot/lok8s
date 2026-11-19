@@ -413,10 +413,13 @@ kubeone::_inject_audit_log() {
 # call without names needs no compgen and also edits in a bash without
 # programmable completion. In such a bash, a call with names stops before
 # yq runs (fail closed).
-# It does not use `yq -i`: yq -i writes through a temp file in TMPDIR, and
-# when its last write fails, it keeps that file there, a copy of the manifest
-# outside the work directory. Here the result stays in memory until the
-# write, so yq makes no temp copy, also not on a signal. The write goes into
+# It does not use `yq -i`, whose temp file depends on the yq release. yq
+# v4.54.1 writes through a temp file in TMPDIR and keeps it there when the
+# in-place write fails: a copy of the manifest outside the work directory.
+# yq v4.54.3 refuses a read-only file before it makes a temp file, and
+# otherwise makes .yq-inplace-* beside the target, which a SIGKILL leaves
+# there. Here the result stays in memory until the write, so yq makes no
+# temp copy with any release, also not on a signal. The write goes into
 # <file> in place, through the path as the caller opened it (a symlink is
 # followed), so a failed write can leave a partial file. Use it only on a
 # staging file that the caller removes on a failure: the temp manifest of
@@ -592,10 +595,13 @@ kubeone::_inject_registry_auth() {
       warn "registry auth: secret ${ns}/${sname} lacks username/password — '${host}' left anonymous"
       unset username password; continue
     fi
-    # kubeone::_yq_edit, not `yq -i`: a failed yq -i keeps its temp copy of
-    # the manifest, with these credentials, in TMPDIR. RUSER and RPASS are
-    # not exported (local +x, set -a off): kubeone::_yq_edit exports them to
-    # the yq process only.
+    # kubeone::_yq_edit, not `yq -i`: with these credentials in the
+    # manifest, a temp copy of yq would hold them. yq v4.54.1 keeps its temp
+    # copy in TMPDIR when the in-place write fails; yq v4.54.3 makes
+    # .yq-inplace-* beside the manifest, which a SIGKILL leaves there.
+    # kubeone::_yq_edit makes no temp copy. RUSER and RPASS are not exported
+    # (local +x, set -a off): kubeone::_yq_edit exports them to the yq
+    # process only.
     RUSER="${username}" RPASS="${password}"
     kubeone::_yq_edit "${manifest}" ".containerRuntime.containerd.registries.\"${host}\".auth.username = strenv(RUSER) | .containerRuntime.containerd.registries.\"${host}\".auth.password = strenv(RPASS)" RUSER RPASS \
       || { error "registry auth: failed to inject '${host}'"; unset username password RUSER RPASS; return 1; }

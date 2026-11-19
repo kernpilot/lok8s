@@ -376,11 +376,17 @@ _append_inventory() {
     [[ "${net_id}" =~ ^[a-zA-Z0-9_-]+$ ]] \
       || { error "kubeone inventory: invalid networkID from provider: ${net_id}"; return 1; }
     # kubeone::_yq_replace, not `yq -i`: the manifest already holds the
-    # registry credentials, and a failed yq -i keeps its temp copy of it in
-    # TMPDIR. kubeone reset and kubeone status read kubeone.yaml as it is,
-    # also after a failed provision, so a failed edit must leave the whole
-    # old file: the edit goes into a temp file beside it, which is renamed
-    # over it.
+    # registry credentials, and where the temp copy of `yq -i` goes depends
+    # on the yq release. yq v4.54.1 keeps it in TMPDIR when the in-place
+    # write fails. yq v4.54.3 refuses a read-only file before it makes a
+    # temp file, and otherwise makes .yq-inplace-* beside the file, which a
+    # SIGKILL leaves there. kubeone::_yq_replace does the same with every
+    # release: its own temp file (mktemp, 0600) beside kubeone.yaml, removed
+    # on a failure and by its INT, TERM and HUP traps (a SIGKILL leaves it),
+    # and a rename inside one folder, so on one filesystem. kubeone reset and
+    # kubeone status read kubeone.yaml as it is, also after a failed
+    # provision, so a failed edit must leave the whole old file: the old
+    # file stays until the rename.
     kubeone::_yq_replace "${manifest}" ".cloudProvider.hetzner.networkID = \"${net_id}\"" \
       || { error "kubeone inventory: cannot write cloudProvider.hetzner.networkID into ${manifest}. Check the free disk space and the permissions of ${manifest%/*}, then run lo provision again."; return 1; }
   fi

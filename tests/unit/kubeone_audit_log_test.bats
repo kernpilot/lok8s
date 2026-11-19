@@ -382,7 +382,8 @@ exec "${REAL_YQ}" "$@"'
   assert_failure
   assert_output --partial "audit log: lok8s cannot read the rendered manifest in ${BATS_TEST_TMPDIR}. Check the permissions of the directory, then run lo provision again."
   # A read-only file in a read-only directory: no write can replace it, also
-  # not `yq -i`, which writes through a temp file and falls back to a copy.
+  # not `yq -i`. yq v4.54.1 writes through a temp file in TMPDIR and falls
+  # back to a copy; yq v4.54.3 refuses the read-only file.
   [[ "$(id -u)" != 0 ]] || skip "root writes a read-only file"
   local ro="${BATS_TEST_TMPDIR}/ro" tmpd="${BATS_TEST_TMPDIR}/tmpdir" left
   mkdir -p "${ro}" "${tmpd}"
@@ -394,8 +395,9 @@ exec "${REAL_YQ}" "$@"'
   chmod 600 "${ro}/m.yaml"
   assert_failure
   assert_output --partial "audit log: cannot write the manifest in ${ro}. Check the free disk space and the permissions of the directory, then run lo provision again."
-  # The failed write leaves TMPDIR as it was: a failed `yq -i` keeps its
-  # temp copy of the manifest there.
+  # The failed write leaves TMPDIR as it was. In this setup a `yq -i` of
+  # yq v4.54.1 keeps its temp copy of the manifest there; yq v4.54.3 makes
+  # no temp file, because it refuses the read-only file first.
   left=$(find "${tmpd}" -mindepth 1 -printf '%P (mode %m)\n')
   [ -z "${left}" ] || { echo "left in TMPDIR: ${left}" >&2; return 1; }
 }
