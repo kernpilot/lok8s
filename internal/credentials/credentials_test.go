@@ -54,3 +54,14 @@ func TestTLSLogVarsMatchBash(t *testing.T) {
 		t.Fatalf("TLSLogVars() = %q, utils/http.sh _HTTP_TLS_LOG_VARS = %q", got, bash)
 	}
 }
+
+// The six names as literals, apart from the list itself: the drift tests
+// compare the copies with each other, so a name dropped from every copy
+// would pass them.
+func TestTLSLogVarsAreTheSix(t *testing.T) {
+	t.Parallel()
+	want := []string{"SSLKEYLOGFILE", "GNUTLS_KEYLOGFILE", "GNUTLS_DEBUG_LEVEL", "SSLTRACE", "SSLDEBUG", "SSLDEBUGFILE"}
+	if got := TLSLogVars(); !slices.Equal(got, want) {
+		t.Fatalf("TLSLogVars() = %q, want %q", got, want)
+	}
+}

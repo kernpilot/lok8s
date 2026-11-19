@@ -76,8 +76,15 @@ func RequireHTTPS(url, label string, stderr io.Writer) error {
 // of NSS). A curl call that carries a credential runs without them
 // (execx.Cmd.Unset). The bash twin is the list _HTTP_TLS_LOG_VARS of
 // utils/http.sh (http::tls_log_vars_unset), which has the reasons;
-// TestTLSLogVarsMatchBash keeps the two equal. Each call returns a new
-// slice.
+// TestTLSLogVarsMatchBash keeps the two equal, and TestTLSLogVarsAreTheSix
+// pins the names. Each call returns a new slice.
+//
+// execx.ChildEnv matches the names case-sensitively, as the environment
+// of Linux and macOS is. On Windows the names of the environment do not
+// depend on case, so a name in other case (Sslkeylogfile) would stay in
+// the child. lok8s does not support Windows: its release builds are for
+// linux and darwin only (.goreleaser.yaml, goos; README), so this is a
+// named limit, not a case that the code handles.
 func TLSLogVars() []string {
 	return []string{"SSLKEYLOGFILE", "GNUTLS_KEYLOGFILE", "GNUTLS_DEBUG_LEVEL", "SSLTRACE", "SSLDEBUG", "SSLDEBUGFILE"}
 }

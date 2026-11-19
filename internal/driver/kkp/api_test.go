@@ -6,13 +6,17 @@ package kkp
 // core_healthy and the two waits. curl is the fake Runner.
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/credentials"
+	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 )
 
@@ -593,9 +597,12 @@ func TestWaitComponentsTimesOut(t *testing.T) {
 }
 
 // The curl of the KKP call runs without the TLS log and trace controls,
-// also when the parent environment holds each one: the Cmd removes them
-// (execx.Cmd.Unset), and the environment the default Runner gives the
-// child (execx.ChildEnv) has none of them. The control variable stays.
+// also when the parent environment holds each one. The call goes through
+// the Runner that lo gives the driver (execx.NewRunner, the production
+// path), and its curl is a script in paths.Bin (execx.Look takes that
+// first). The script records which of the names it gets, never a value.
+// So a Runner or a wrapper that drops Cmd.Unset fails the test. The
+// control variable must arrive.
 func TestAPICurlRunsWithoutTheTLSLogVars(t *testing.T) {
 	setKKPEnv(t)
 	names := credentials.TLSLogVars()
@@ -606,23 +613,58 @@ func TestAPICurlRunsWithoutTheTLSLogVars(t *testing.T) {
 		t.Setenv(name, filepath.Join(t.TempDir(), name))
 	}
 	t.Setenv("LO_KKP_ENV_CONTROL", "on")
-	d, runner, stderr := testDriver(t)
-	runner.handler = curlRespond(`{"ok": true}`, "200")
-	if _, err := d.api(t.Context(), "GET", "/api/v2/dc", "", stderr); err != nil {
+	base := t.TempDir()
+	paths := &config.Paths{
+		Base:     base,
+		Bin:      filepath.Join(base, ".bin"),
+		Lok8s:    filepath.Join(base, ".lok8s"),
+		Clusters: filepath.Join(base, "clusters"),
+	}
+	if err := os.MkdirAll(paths.Bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got := runner.calls[0]
-	if !slices.Equal(got.Unset, names) {
-		t.Fatalf("Cmd.Unset = %q, want %q", got.Unset, names)
+	record := filepath.Join(base, "record")
+	var script strings.Builder
+	script.WriteString("#!/bin/sh\ncat >/dev/null\n: > '" + record + "'\n")
+	for _, name := range append(slices.Clone(names), "LO_KKP_ENV_CONTROL") {
+		fmt.Fprintf(&script, "if [ -n \"${%s+x}\" ]; then echo %s >> '%s'; fi\n", name, name, record)
 	}
-	env := execx.ChildEnv(got)
-	if !slices.Contains(env, "LO_KKP_ENV_CONTROL=on") {
-		t.Fatal("the child environment lost the control variable")
+	script.WriteString("printf '%s\\n%s' '{\"ok\": true}' 200\n")
+	if err := os.WriteFile(filepath.Join(paths.Bin, "curl"), []byte(script.String()), 0o755); err != nil { // #nosec G306 -- the fake curl must be executable
+		t.Fatal(err)
 	}
-	for _, kv := range env {
-		name, _, _ := strings.Cut(kv, "=")
-		if slices.Contains(names, name) {
-			t.Errorf("the curl child gets %s", name)
-		}
+	var stderr bytes.Buffer
+	d := New(&driver.Deps{Paths: paths, Runner: execx.NewRunner(paths), Stderr: &stderr})
+	if _, err := d.api(t.Context(), "GET", "/api/v2/dc", "", &stderr); err != nil {
+		t.Fatalf("%v: %s", err, stderr.String())
+	}
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Fields(string(raw)); !slices.Equal(got, []string{"LO_KKP_ENV_CONTROL"}) {
+		t.Fatalf("the curl child got %q, want only LO_KKP_ENV_CONTROL", got)
+	}
+}
+
+// An empty list of the TLS log and trace controls would remove nothing:
+// the call is refused with one line, and curl does not run (the bash twin
+// refuses an empty _HTTP_TLS_LOG_VARS).
+func TestAPIRefusesAnEmptyTLSLogVarsList(t *testing.T) {
+	setKKPEnv(t)
+	prev := tlsLogVars
+	tlsLogVars = func() []string { return nil }
+	t.Cleanup(func() { tlsLogVars = prev })
+	d, runner, stderr := testDriver(t)
+	runner.handler = curlRespond(`{"ok": true}`, "200")
+	if _, err := d.api(t.Context(), "GET", "/api/v2/dc", "", stderr); err == nil {
+		t.Fatal("the call ran with an empty list")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("curl ran %d times", len(runner.calls))
+	}
+	if got := stderr.String(); strings.Count(got, "\n") != 1 ||
+		!strings.Contains(got, "the list of TLS log and trace variables (credentials.TLSLogVars) is empty: the request does not run") {
+		t.Fatalf("stderr = %q", got)
 	}
 }

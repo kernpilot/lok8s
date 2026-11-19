@@ -1278,7 +1278,7 @@ hetzner::_doctor_checks() {
     elif robot_ro=$(http::tls_log_vars_readonly); then
       # The Robot call below sends its stderr to /dev/null: name the cause
       # here, not the credentials.
-      printf 'warn\t%s is readonly, so lo cannot clear it for curl: no call to the Robot API\n' "${robot_ro}"
+      printf 'warn\t%s: no call to the Robot API\n' "$(http::tls_log_var_readonly_text "${robot_ro}")"
     elif hetzner::_robot_curl -f -sS --connect-timeout "${HROBOT_DOCTOR_CONNECT_TIMEOUT}" --max-time "${HROBOT_DOCTOR_MAX_TIME}" \
          "${HROBOT_API}/server" >/dev/null 2>&1; then
       robot_api_ok=1

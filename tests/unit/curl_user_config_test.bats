@@ -138,9 +138,11 @@ teardown() {
 
 # The anti-vacuity half: each canary breaks a rule in one way, and the gate
 # names its file and line. The compliant forms (and the forms that are not
-# a curl call) give no line.
+# a curl call) give no line. The allowlist of the tree is cleared here: its
+# entries name files that this run does not read.
 @test "curl gate: each canary breaks the rule it shows, and the compliant forms pass" {
   local bad="${BATS_TEST_TMPDIR}/bad.sh" good="${BATS_TEST_TMPDIR}/good.sh"
+  CURL_GATE_ALLOW=()
   cat > "${bad}" <<'SH'
 curl -K - https://h.example/a
 x=$(printf '%s' "${c}" | curl -sS --config - https://h.example/b)
@@ -167,6 +169,18 @@ http::tls_log_vars_unset && ( curl -q -K - "${url}" )
 x=$( http::tls_log_vars_unset && curl -q -K - "${url}" )
 ( http::tls_log_vars_unset || true && curl -q -K - "${url}" )
 ( http::tls_log_vars_unset && foo | curl -q -sS "${url}" )
+cu\
+rl -K - https://h.example/o
+eval 'curl -u "${U}:${P}" "${url}"'
+eval "${c} -sS https://h.example/p"
+( http::tls_log_vars_unset && env SSLKEYLOGFILE=/tmp/k curl -q -K - "${url}" )
+( http::tls_log_vars_unset && SSLKEYLOGFILE=/tmp/k curl -q -K - "${url}" )
+( http::tls_log_vars_unset && command curl -q -sS https://h.example/n6 )
+( http::tls_log_vars_unset && exec curl -q -K - "${url}" )
+( http::tls_log_vars_unset && sudo curl -q -K - "${url}" )
+( http::tls_log_vars_unset && timeout -s KILL 5 curl -q -K - "${url}" )
+( http::tls_log_vars_unset && nice curl -q -K - "${url}" )
+( http::tls_log_vars_unset && umask 077 && umask 022 && curl -q -K - "${url}" )
 SH
   cat > "${good}" <<'SH'
 # curl -K - https://h.example/n1
@@ -184,13 +198,18 @@ x=$(http::curl_config header "Authorization: Bearer ${T}" | (
       https://h.example/n4
 ) ) || x=""
 ( http::tls_log_vars_unset && umask 077 && curl -q -sS -u "${U}:${P}" https://h.example/n5 )
-( http::tls_log_vars_unset && command curl -q -sS https://h.example/n6 )
 ( http::tls_log_vars_unset && timeout 5 curl -q -sS https://h.example/n7 )
 if out=$(printf '%s' "${b}" | ( http::tls_log_vars_unset && curl -q -sS --data-binary @- https://h.example/n8 )); then :; fi
+( http::tls_log_vars_unset && umask 077 && timeout 30 curl -q -sS https://h.example/n9 )
+( http::tls_log_vars_unset && cu\
+rl -q -sS https://h.example/n10 )
+eval "${saved_traps}"
 SH
   local q="a curl call: -q is not its first argument"
   local v="curl named through a variable: the gate cannot check that call"
   local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local e="an eval of a command that holds curl: the gate cannot check that call"
+  local ev="an eval of a variable that names curl: the gate cannot check that call"
   run curl_gate q "${bad}"
   assert_failure 1
   assert_output "${bad}:1: ${q}
@@ -208,7 +227,10 @@ ${bad}:14: ${q}
 ${bad}:15: ${q}
 ${bad}:16: ${v}
 ${bad}:17: ${v}
-${bad}:18: ${q}"
+${bad}:18: ${q}
+${bad}:26: ${q}
+${bad}:28: ${e}
+${bad}:29: ${ev}"
   run curl_gate tls "${bad}"
   assert_failure 1
   assert_output "${bad}:1: ${t}
@@ -233,7 +255,18 @@ ${bad}:21: ${t}
 ${bad}:22: ${t}
 ${bad}:23: ${t}
 ${bad}:24: ${t}
-${bad}:25: ${t}"
+${bad}:25: ${t}
+${bad}:26: ${t}
+${bad}:28: ${e}
+${bad}:30: ${t}
+${bad}:31: ${t}
+${bad}:32: ${t}
+${bad}:33: ${t}
+${bad}:34: ${t}
+${bad}:35: ${t}
+${bad}:36: ${t}
+${bad}:37: ${t}
+${bad}:29: ${ev}"
   run curl_gate q "${good}"
   assert_success
   assert_output ""
@@ -244,38 +277,136 @@ ${bad}:25: ${t}"
   assert_output "${good}:12 credential
 ${good}:15 credential
 ${good}:16
-${good}:17
-${good}:18 credential"
+${good}:17 credential
+${good}:18
+${good}:19"
   run curl_gate x "${good}"
   assert_failure 2
 }
 
+# The credential forms: each call of cred.sh carries one form, each call
+# of plain.sh none (a short option of another command of the pipeline, as
+# head -n or grep -E, does not count). The list mode shows the
+# classification that the allowlist rule uses.
+@test "curl gate: each credential form counts, and an option of another command does not" {
+  local cred="${BATS_TEST_TMPDIR}/cred.sh" plain="${BATS_TEST_TMPDIR}/plain.sh" i want=""
+  cat > "${cred}" <<'SH'
+curl -q --netrc https://h.example/c1
+curl -q --netrc-file "${f}" https://h.example/c2
+curl -q --netrc-optional https://h.example/c3
+curl -q -n https://h.example/c4
+curl -q -sn https://h.example/c5
+curl -q -E "${crt}" https://h.example/c6
+curl -q --cert "${crt}" https://h.example/c7
+curl -q --key "${k}" https://h.example/c8
+curl -q -H @"${h}" https://h.example/c9
+curl -q --header @headers.txt https://h.example/c10
+curl -q -H "X-API-Key: ${TOKEN}" https://h.example/c11
+curl -q -sK "${cfg}" https://h.example/c12
+curl -q --config "${cfg}" https://h.example/c13
+curl -q --oauth2-bearer "${t}" https://h.example/c14
+curl -q -b "${jar}" https://h.example/c15
+curl -q --cookie "s=${s}" https://h.example/c16
+curl -q -d @body.json https://h.example/c17
+curl -q --data-ascii "${b}" https://h.example/c18
+curl -q -F "f=@${p}" https://h.example/c19
+curl -q -T "${p}" https://h.example/c20
+curl -q --upload-file "${p}" https://h.example/c21
+curl -q -sS https://h.example/c22 2>&1 --netrc
+SH
+  cat > "${plain}" <<'SH'
+curl -q -fsSL https://h.example/p1 | head -n 1
+curl -q -sS https://h.example/p2 | grep -E 'x|y'
+curl -q -H "Accept: application/json" https://h.example/p3
+curl -q -fLo /tmp/p4 https://h.example/p4
+x=$(curl -q -sS https://h.example/p5 2>&1 | sed -n 1p)
+SH
+  for i in $(seq 1 22); do
+    want+="${cred}:${i} credential"$'\n'
+  done
+  run curl_gate list "${cred}"
+  assert_success
+  assert_output "${want%$'\n'}"
+  run curl_gate list "${plain}"
+  assert_success
+  assert_output "${plain}:1
+${plain}:2
+${plain}:3
+${plain}:4
+${plain}:5"
+}
+
 # The allowlist: an entry exempts exactly one call of its file from the
-# helper rule. A call in the allowlist that carries a credential (here only
-# -K: each credential form must count) is a finding, and so is an entry
-# that names no call or more than one. An entry for a file that the run
-# does not read is not checked.
-@test "curl gate: an allowlist entry names exactly one call, and that call carries no credential" {
+# helper rule, and it pins the full text of that command (runs of white
+# space as one space). An added argument (an array expansion here) breaks
+# the match: the call is then a finding. A call in the allowlist that
+# carries a credential is a finding (-K, a header with a variable,
+# --netrc: each form must count), and so is an entry that names no call or
+# more than one, and an entry whose file the run does not read.
+@test "curl gate: an allowlist entry pins the text of exactly one call without a credential, in a file of the run" {
   local f="${BATS_TEST_TMPDIR}/allow.sh"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local c="a curl call in the allowlist carries a credential"
   cat > "${f}" <<'SH'
 curl -q -sS https://h.example/a1
 curl -q -K "${cfg}" https://h.example/a2
 curl -q -sS https://h.example/a3
-curl -q -sS https://h.example/a4
+curl -q -sS https://h.example/a3
+curl -q -sS https://h.example/a5 "${args[@]}"
+curl -q -sS -H "X-API-Key: ${TOKEN}" https://h.example/a6
+curl -q --netrc https://h.example/a7
+  curl   -q -sS    https://h.example/a8
 SH
   CURL_GATE_ALLOW=()
-  curl_gate_allow allow.sh '@@curl -q -sS https://h\.example/a1' "a canary"
-  curl_gate_allow allow.sh '@@curl -q -K "\$\{cfg\}" https://h\.example/a2' "a canary"
-  curl_gate_allow allow.sh 'https://h\.example/a[34]' "a canary"
-  curl_gate_allow allow.sh 'https://h\.example/gone' "a canary"
-  curl_gate_allow other.sh 'https://h\.example/a1' "a canary"
+  curl_gate_allow allow.sh '@@curl -q -sS https://h.example/a1' "a canary"
+  curl_gate_allow allow.sh '@@curl -q -K "${cfg}" https://h.example/a2' "a canary"
+  curl_gate_allow allow.sh '@@curl -q -sS https://h.example/a3' "a canary"
+  curl_gate_allow allow.sh '@@curl -q -sS https://h.example/a5' "a canary"
+  curl_gate_allow allow.sh '@@curl -q -sS -H "X-API-Key: ${TOKEN}" https://h.example/a6' "a canary"
+  curl_gate_allow allow.sh '@@curl -q --netrc https://h.example/a7' "a canary"
+  curl_gate_allow allow.sh '@@curl -q -sS https://h.example/a8' "a canary"
+  curl_gate_allow allow.sh '@@curl -q -sS https://h.example/gone' "a canary"
+  curl_gate_allow other.sh '@@curl -q -sS https://h.example/a1' "a canary"
   run curl_gate tls "${f}"
   assert_failure 1
-  assert_output "${f}:2: a curl call in the allowlist carries a credential
-allow.sh: the allowlist entry /https://h\.example/a[34]/ matches 2 curl calls, want 1
-allow.sh: the allowlist entry /https://h\.example/gone/ matches 0 curl calls, want 1"
+  assert_output "${f}:2: ${c}
+${f}:5: ${t}
+${f}:6: ${c}
+${f}:7: ${c}
+allow.sh: the allowlist entry <@@curl -q -sS https://h.example/a3> matches 2 curl calls, want 1
+allow.sh: the allowlist entry <@@curl -q -sS https://h.example/a5> matches 0 curl calls, want 1
+allow.sh: the allowlist entry <@@curl -q -sS https://h.example/gone> matches 0 curl calls, want 1
+other.sh: the allowlist entry names a file that this run does not read (a stale entry)"
   run curl_gate_allow allow.sh 'x'
   assert_failure 2
+}
+
+# The TLS list holds the six names: a pin with the literal names, apart
+# from the list itself (the drift cases compare the copies with the list,
+# so a name dropped from all copies would pass them).
+@test "the TLS list: _HTTP_TLS_LOG_VARS holds the six names" {
+  [ "${_HTTP_TLS_LOG_VARS[*]}" = "SSLKEYLOGFILE GNUTLS_KEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE" ]
+}
+
+# An empty or an unset list would clear nothing: both helpers refuse it
+# with one line, status 1, and the command after && does not run.
+@test "the TLS helper: an empty or an unset list stops the call" {
+  local fn form rc o="${BATS_TEST_TMPDIR}/list.out" e="${BATS_TEST_TMPDIR}/list.err"
+  for fn in http::tls_log_vars_unset http::tls_log_vars_ok; do
+    for form in empty unset; do
+      rc=0
+      (
+        if [[ "${form}" == empty ]]; then _HTTP_TLS_LOG_VARS=(); else unset _HTTP_TLS_LOG_VARS; fi
+        set -u
+        export SSLKEYLOGFILE="${BATS_TEST_TMPDIR}/keys"
+        "${fn}" && echo "the command after the helper ran"
+      ) > "${o}" 2> "${e}" || rc=$?
+      [ "${rc}" -eq 1 ]
+      [ ! -s "${o}" ]
+      [ "$(wc -l < "${e}")" -eq 1 ]
+      grep -qF 'the list of TLS log and trace variables (_HTTP_TLS_LOG_VARS) is empty or not set: the request does not run' "${e}"
+    done
+  done
 }
 
 # One list of the TLS log and trace variables: _HTTP_TLS_LOG_VARS of

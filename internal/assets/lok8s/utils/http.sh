@@ -118,7 +118,8 @@ http::credential_ok() {
 # A readonly name cannot be unset. The function then unsets the others,
 # prints one error line for each readonly name and returns 1, so
 # `&& curl` does not run curl. The caller then gets that 1, not a status
-# of curl.
+# of curl. An empty or unset list is refused the same way (one error
+# line, status 1): with no names the function would clear nothing.
 # Not covered: a curl or TLS library built to write keys or a trace by
 # itself (wolfSSL built with --enable-keylog-export, a debug build of a TLS
 # library), and an environment that an attacker controls (who sets the
@@ -133,6 +134,7 @@ _HTTP_TLS_LOG_VARS=(SSLKEYLOGFILE GNUTLS_KEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE 
 # Usage: http::tls_log_vars_unset
 http::tls_log_vars_unset() {
   local _http_name _http_rc=0
+  http::_tls_log_list_ok || return 1
   for _http_name in "${_HTTP_TLS_LOG_VARS[@]}"; do
     unset -v "${_http_name}" 2>/dev/null && continue
     http::_tls_log_var_stop "${_http_name}"
@@ -164,6 +166,7 @@ http::tls_log_vars_readonly() {
 # Usage: http::tls_log_vars_ok || return 1
 http::tls_log_vars_ok() {
   local _http_name _http_rc=0
+  http::_tls_log_list_ok || return 1
   for _http_name in "${_HTTP_TLS_LOG_VARS[@]}"; do
     ( unset -v "${_http_name}" ) 2>/dev/null && continue
     http::_tls_log_var_stop "${_http_name}"
@@ -172,7 +175,25 @@ http::tls_log_vars_ok() {
   return "${_http_rc}"
 }
 
+# http::tls_log_var_readonly_text <names>: the start of each message
+# about a readonly name of the list, "<names> is readonly, so lo cannot
+# clear it for curl". The callers add what does not run.
+http::tls_log_var_readonly_text() {
+  printf '%s is readonly, so lo cannot clear it for curl' "${1}"
+}
+
 # The error line for a readonly name of the list.
 http::_tls_log_var_stop() {
-  error "${1} is readonly, so lo cannot clear it for curl: the request does not run"
+  error "$(http::tls_log_var_readonly_text "${1}"): the request does not run"
+}
+
+# Status 0 when the list has at least one name. Else one error line and
+# status 1: an empty or unset list would clear nothing, and the request
+# would run with each TLS log and trace control of the environment. (The
+# ${…[@]+…} form expands to nothing for an unset array under set -u too.)
+http::_tls_log_list_ok() {
+  set -- ${_HTTP_TLS_LOG_VARS[@]+"${_HTTP_TLS_LOG_VARS[@]}"}
+  (( $# > 0 )) && return 0
+  error "the list of TLS log and trace variables (_HTTP_TLS_LOG_VARS) is empty or not set: the request does not run"
+  return 1
 }
