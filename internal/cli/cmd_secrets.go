@@ -255,6 +255,8 @@ lists the recipient.
 
 Before the first write, the command refuses:
   - a key argument that looks like a private key (it is not printed),
+  - a YAML tag under creation_rules other than !!str, !!seq or !!map, or a
+    mapping key in .sops.yaml that is not a string,
   - a recipient outside a single-quoted age: list (an unquoted list, an
     escaped string, a YAML list, key_groups, an alias or a merge key),
   - the last recipient of a rule,

@@ -309,6 +309,58 @@ _refused() {
   [ "$(cat "${CFG}")" = "${before}" ]
 }
 
+# _form_refused <yaml before creation_rules> <second rule> <message> — the
+# recipient is in the bytes of the first rule only, and the second rule holds
+# a YAML form that yq and the Go twin read differently; the refusal names the
+# form, and nothing is written.
+_form_refused() {
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  printf "%screation_rules:\n  - path_regex: 'Secret\\\\..*'\n    age: '%s,%s'\n%s" "${1}" "${RCPT_A}" "${RCPT_B}" "${2}" > "${CFG}"
+  [ "$(grep -cF "${RCPT_B}" "${CFG}")" -eq 1 ] || { echo "fixture: the recipient must be in the first rule only" >&2; return 1; }
+  local before; before="$(cat "${CFG}")"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${CFG} ${3}" ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${CFG}")" = "${before}" ] || { echo ".sops.yaml was written" >&2; return 1; }
+  [ ! -s "${ENCRYPT_LOG}" ]
+}
+
+_tagged='has a YAML tag under creation_rules other than !!str, !!seq or !!map — remove-key does not read tagged values; remove the tag by hand'
+_keyed='has a mapping key that is not a string — remove-key does not read such a mapping; quote the key or remove it by hand'
+
+@test "a !!binary recipient is refused (a YAML tag)" {
+  local b64; b64="$(printf '%s' "${RCPT_B}" | base64 | tr -d '\n')"
+  _form_refused "" "  - path_regex: 'Other\\..*'
+    age: !!binary ${b64}
+" "${_tagged}"
+}
+
+@test "a numeric mapping key is refused" {
+  _form_refused "shared: &shared ${ESC_B}
+" "  - path_regex: 'Other\\..*'
+    age: *shared
+    1: x
+" "${_keyed}"
+}
+
+@test "a bool mapping key is refused" {
+  _form_refused "shared: &shared ${ESC_B}
+" "  - path_regex: 'Other\\..*'
+    age: *shared
+    true: x
+" "${_keyed}"
+}
+
+@test "a null mapping key is refused" {
+  _form_refused "shared: &shared ${ESC_B}
+" "  - path_regex: 'Other\\..*'
+    age: *shared
+    ~: x
+" "${_keyed}"
+}
+
 @test "an .enc that matches no creation rule is refused before any write" {
   _load
   _stub_encrypt

@@ -1,10 +1,11 @@
 package secrets
 
 // sopsrules.go: the YAML read of .sops.yaml behind remove-key (bash:
-// secrets::_rules_hits and secrets::_rules_check, through yq). The edit in
-// dropRecipient works on lines. These checks parse the file, so that a
-// recipient in an escaped string, a YAML list, an alias, a merge key or a key
-// group cannot stay in a rule while the edit reports it removed.
+// secrets::_rules_form, secrets::_rules_hits and secrets::_rules_check,
+// through yq). The edit in dropRecipient works on lines. These checks parse
+// the file, so that a recipient in an escaped string, a YAML list, an alias,
+// a merge key or a key group cannot stay in a rule while the edit reports it
+// removed.
 
 import (
 	"errors"
@@ -73,6 +74,109 @@ func encodedAgeHits(doc *yaml.Node, recipient string) int {
 		}
 	}
 	return hits
+}
+
+// yamlForm is what yamlFormCheck found in .sops.yaml.
+type yamlForm int
+
+const (
+	formOK  yamlForm = iota
+	formTag          // an explicit tag other than !!str, !!seq or !!map under creation_rules
+	formKey          // a mapping key that is not a string
+)
+
+// yamlFormCheck refuses, it does not interpret (bash: secrets::_rules_form).
+// It finds a node under creation_rules (aliases and merge keys followed) that
+// carries an explicit tag other than !!str, !!seq or !!map, and a mapping key
+// anywhere in the file whose tag is not !!str: an int, a bool or a null key,
+// implicit or not. yaml.v3 decodes a !!binary value to its bytes where yq
+// keeps it tagged, and decodes a mapping with a key that is not a string as
+// map[any]any, which the rule reads skip: either would let a recipient stay
+// in a rule that one twin does not read. A merge key (<<) is allowed; the
+// mappings it merges are checked like any other.
+func yamlFormCheck(doc *yaml.Node) yamlForm {
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return formOK
+	}
+	root := doc.Content[0]
+	tags := &formWalk{seen: map[*yaml.Node]bool{}}
+	for _, rules := range creationRules(root, map[*yaml.Node]bool{}) {
+		tags.walk(rules)
+	}
+	if tags.tag {
+		return formTag
+	}
+	keys := &formWalk{seen: map[*yaml.Node]bool{}}
+	keys.walk(root)
+	if keys.key {
+		return formKey
+	}
+	return formOK
+}
+
+// formWalk visits a node and every value below it once, aliases followed. It
+// notes a node with an explicit tag other than !!str, !!seq or !!map (tag),
+// and a mapping key whose tag is not !!str or !!merge (key).
+type formWalk struct {
+	seen     map[*yaml.Node]bool
+	tag, key bool
+}
+
+func (w *formWalk) walk(n *yaml.Node) {
+	if n == nil || w.seen[n] {
+		return
+	}
+	w.seen[n] = true
+	if n.Kind == yaml.AliasNode {
+		w.walk(n.Alias)
+		return
+	}
+	if n.Style&yaml.TaggedStyle != 0 {
+		switch n.ShortTag() {
+		case "!!str", "!!seq", "!!map":
+		default:
+			w.tag = true
+		}
+	}
+	for i, child := range n.Content {
+		if n.Kind == yaml.MappingNode && i%2 == 0 {
+			if t := child.ShortTag(); t != "!!str" && t != "!!merge" {
+				w.key = true
+			}
+			continue
+		}
+		w.walk(child)
+	}
+}
+
+// creationRules is the value of each creation_rules key of the top mapping,
+// a key that a merge key brings in included.
+func creationRules(n *yaml.Node, seen map[*yaml.Node]bool) []*yaml.Node {
+	for n != nil && n.Kind == yaml.AliasNode {
+		n = n.Alias
+	}
+	if n == nil || seen[n] {
+		return nil
+	}
+	seen[n] = true
+	var out []*yaml.Node
+	switch n.Kind {
+	case yaml.SequenceNode: // the value of a merge key can list mappings
+		for _, item := range n.Content {
+			out = append(out, creationRules(item, seen)...)
+		}
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k, v := n.Content[i], n.Content[i+1]
+			switch {
+			case k.ShortTag() == "!!merge":
+				out = append(out, creationRules(v, seen)...)
+			case k.Kind == yaml.ScalarNode && k.Value == "creation_rules":
+				out = append(out, v)
+			}
+		}
+	}
+	return out
 }
 
 // mappingValue is the value of key in a mapping node, as written: nil for a

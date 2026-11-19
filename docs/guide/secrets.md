@@ -202,6 +202,10 @@ lo secrets remove-key age1<recipient> --all     # every clusters/<domain>/secret
 
 - The key argument looks like a private key. The command does not print it.
   `add-key` refuses it too.
+- `.sops.yaml` has a YAML tag under `creation_rules` other than `!!str`,
+  `!!seq` or `!!map` (for example `!!binary`), or a mapping key that is not a
+  string (for example `1:`, `true:` or `~:`). The command does not read such
+  a value. Remove the tag, or quote the key.
 - `.sops.yaml` holds the key in a place that the edit does not change: an
   unquoted list, an escaped or double-quoted string, a YAML list, `key_groups`,
   an alias or a merge key. Remove the key there by hand.

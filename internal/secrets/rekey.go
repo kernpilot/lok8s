@@ -499,6 +499,16 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 		ui.ErrorTo(c.ErrOut, "%s does not parse as YAML", sopsConfig)
 		return ErrHandled
 	}
+	// Refuse, do not interpret: the YAML forms that yaml.v3 and yq read
+	// differently.
+	switch yamlFormCheck(&doc) {
+	case formTag:
+		ui.ErrorTo(c.ErrOut, "%s has a YAML tag under creation_rules other than !!str, !!seq or !!map — remove-key does not read tagged values; remove the tag by hand", sopsConfig)
+		return ErrHandled
+	case formKey:
+		ui.ErrorTo(c.ErrOut, "%s has a mapping key that is not a string — remove-key does not read such a mapping; quote the key or remove it by hand", sopsConfig)
+		return ErrHandled
+	}
 	if ruleHits(decoded, agePubkey, true) > 0 {
 		ui.ErrorTo(c.ErrOut, "%s lists the recipient in key_groups — remove-key does not edit key groups; remove it there by hand", sopsConfig)
 		ui.ErrorTo(c.ErrOut, "  %s", agePubkey)
