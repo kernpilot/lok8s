@@ -462,6 +462,47 @@ _rm_path() {
   [ ! -s "${ENCRYPT_LOG}" ]
 }
 
+# _sops_writes <text> <rc> — a stub sops that writes the text to its --output
+# file and returns rc.
+_sops_writes() {
+  _sops_text="${1}" _sops_rc="${2}"
+  sops() {
+    local out=""
+    while (( ${#} )); do
+      [[ "${1}" != --output ]] || { out="${2}"; shift; }
+      shift
+    done
+    printf '%s' "${_sops_text}" > "${out}"
+    return "${_sops_rc}"
+  }
+}
+
+@test "an .enc is written through a temp file and a rename: a sops run that stops half way leaves the old .enc" {
+  _load
+  local store="${PATH_CLUSTERS}/a.dev/secrets" f
+  f="${store}/Secret.app.default.K"
+  printf 'v' > "${f}"
+  printf 'old\n' > "${f}.enc"
+  cp -p "${f}.enc" "${BATS_TEST_TMPDIR}/enc.saved"
+  ln "${f}.enc" "${BATS_TEST_TMPDIR}/enc.link"
+  _sops_writes 'ne' 1
+  run secrets::_encrypt_file "${f}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] Failed to encrypt Secret.app.default.K" ] || { echo "$output" >&2; return 1; }
+  cmp -s "${f}.enc" "${BATS_TEST_TMPDIR}/enc.saved" || { echo "the old .enc changed" >&2; return 1; }
+  [ -z "$(find "${store}" -name '.*.tmp-*')" ] || { echo "a temp file was left" >&2; return 1; }
+
+  # A run that ends replaces the .enc (mode 0600); the hard link keeps the old
+  # bytes.
+  _sops_writes 'new' 0
+  run secrets::_encrypt_file "${f}"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${f}.enc")" = "new" ]
+  cmp -s "${BATS_TEST_TMPDIR}/enc.link" "${BATS_TEST_TMPDIR}/enc.saved" || { echo "the .enc was written in place" >&2; return 1; }
+  [ "$(stat -c %a "${f}.enc")" = "600" ]
+  [ -z "$(find "${store}" -name '.*.tmp-*')" ] || { echo "a temp file was left" >&2; return 1; }
+}
+
 @test "a stale cache (an .enc newer than its plaintext) is refused before any write" {
   # The re-key encrypts the plaintext: an older plaintext would overwrite the
   # newer value of the .enc.

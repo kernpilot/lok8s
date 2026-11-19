@@ -357,10 +357,13 @@ func TestRemoveKeyResumesAStoppedRekey(t *testing.T) {
 	encryptStore(t, c, "a.dev", out, errOut)
 	encryptStore(t, c, "b.dev", out, errOut)
 	freshen(t, a+"/Secret.app.default.K", b+"/Secret.app.default.K")
-	// The encrypt of the second store fails: its .enc cannot be written.
-	if err := os.Chmod(b+"/Secret.app.default.K.enc", 0o400); err != nil {
+	// The encrypt of the second store fails: its directory takes no temp
+	// file. (A read-only .enc no longer stops it: the encrypt writes a temp
+	// file and renames it over the .enc.)
+	if err := os.Chmod(b, 0o500); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.Chmod(b, 0o700) })
 
 	if err := c.RemoveKey(g, true, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
@@ -374,7 +377,7 @@ func TestRemoveKeyResumesAStoppedRekey(t *testing.T) {
 	if strings.Contains(readFile(t, c.sopsConfigPath()), g) || opens(t, a+"/Secret.app.default.K.enc", gone, "v") {
 		t.Fatal("fixture: the first store was expected to be re-keyed")
 	}
-	if err := os.Chmod(b+"/Secret.app.default.K.enc", 0o600); err != nil {
+	if err := os.Chmod(b, 0o700); err != nil {
 		t.Fatal(err)
 	}
 
