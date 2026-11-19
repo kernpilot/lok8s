@@ -158,11 +158,11 @@ func gatherStatus(ctx context.Context, deps statusDeps, domainName string) statu
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if hasKubectl() && fsutil.FileExists(kubeconfig) {
 		var nodes strings.Builder
-		if err := deps.runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"get", "nodes", "-o", "json"}, Stdout: &nodes, Stderr: io.Discard}); err == nil {
+		if err := deps.runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"get", "nodes", "-o", "json", statusRequestTimeout}, Stdout: &nodes, Stderr: io.Discard}); err == nil {
 			r.Nodes = parseNodes(nodes.String())
 		}
 		var inv strings.Builder
-		if err := deps.runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"get", "clusterinventories.lok8s.dev", "cluster", "-o", "json"}, Stdout: &inv, Stderr: io.Discard}); err == nil {
+		if err := deps.runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"get", "clusterinventories.lok8s.dev", "cluster", "-o", "json", statusRequestTimeout}, Stdout: &inv, Stderr: io.Discard}); err == nil {
 			var doc map[string]any
 			if json.Unmarshal([]byte(inv.String()), &doc) == nil {
 				r.Inventory = doc

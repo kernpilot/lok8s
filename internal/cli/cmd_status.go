@@ -27,6 +27,13 @@ import (
 
 func init() { registerPorted("status", newStatusCommand) }
 
+// statusRequestTimeout is the last argument of each kubectl read of the
+// report (bash: status::nodes and status::inventory; the -o json report
+// too). After `lo down` the kubeconfig can point to an API server that does
+// not answer. Without a request timeout, kubectl can wait about two minutes
+// before it stops.
+const statusRequestTimeout = "--request-timeout=5s"
+
 // statusDeps are the report's seams.
 type statusDeps struct {
 	paths  *config.Paths
@@ -103,7 +110,7 @@ func runStatus(ctx context.Context, out io.Writer, deps statusDeps, domainName s
 	// ── Nodes ──
 	if kubectlOK {
 		ui.Section(out, "Nodes")
-		if err := deps.runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"get", "nodes", "-o", "wide"}, Stdout: out, Stderr: io.Discard}); err != nil {
+		if err := deps.runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"get", "nodes", "-o", "wide", statusRequestTimeout}, Stdout: out, Stderr: io.Discard}); err != nil {
 			fmt.Fprintln(out, "  (not reachable)")
 		}
 		fmt.Fprintln(out)
@@ -113,7 +120,7 @@ func runStatus(ctx context.Context, out io.Writer, deps statusDeps, domainName s
 	// the cluster is reachable and the CR exists.
 	if kubectlOK {
 		var inv strings.Builder
-		err := deps.runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"get", "clusterinventories.lok8s.dev", "cluster", "-o", "json"}, Stdout: &inv, Stderr: io.Discard})
+		err := deps.runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"get", "clusterinventories.lok8s.dev", "cluster", "-o", "json", statusRequestTimeout}, Stdout: &inv, Stderr: io.Discard})
 		if err == nil && strings.TrimSpace(inv.String()) != "" {
 			ui.Section(out, "Inventory (ClusterInventory/cluster)")
 			if lines, ok := renderInventory(inv.String()); ok {
