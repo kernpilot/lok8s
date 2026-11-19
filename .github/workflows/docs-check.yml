@@ -1,0 +1,47 @@
+name: Docs Check
+
+# The strict docs build on a pull request, so that a dead link, a broken
+# page or a yarn.lock that does not match package.json fails before the
+# merge. Deploy Docs (docs.yml) runs the same install and build only after
+# the merge, and it holds the pages rights. This workflow reads the
+# repository and nothing more: no secrets, no artifact, no deploy.
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'package.json'
+      - 'yarn.lock'
+      - '.github/workflows/docs-check.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Docs build (strict)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 20
+          cache: yarn
+
+      - name: Install deps
+        run: yarn install --frozen-lockfile
+
+      # VitePress fails the build on a dead link. The addon index step of
+      # docs.yml is not here: no page reads docs/public/addons-index.json
+      # (the guide names it by its full URL), so the build does not need it.
+      - name: Build docs
+        run: yarn docs:build
