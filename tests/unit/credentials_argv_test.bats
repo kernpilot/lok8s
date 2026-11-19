@@ -442,7 +442,7 @@ kubeadm_respond() {
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/node"
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
   local join_token=sntnl1.sentinel0join0to
-  export JOIN_MINT_BODY="{\"ok\":true,\"data\":{\"joinCommand\":\"kubeadm join cp.example.test:6443 --token ${join_token} --discovery-token-ca-cert-hash sha256:1111 --node-name box-1\",\"expiresAt\":\"2026-09-01T12:00:00Z\",\"ready\":true}}"
+  export JOIN_MINT_BODY="{\"ok\":true,\"data\":{\"joinCommand\":\"kubeadm join cp.example.test:6443 --token ${join_token} --discovery-token-ca-cert-hash sha256:1111111111111111111111111111111111111111111111111111111111111111 --node-name box-1\",\"expiresAt\":\"2026-09-01T12:00:00Z\",\"ready\":true}}"
   export -f kubeadm_respond
   argv_spy kubeadm
   cat > "${PATH_CLUSTERS}/d.example/cluster.lok8s.yaml" <<'YAML'
