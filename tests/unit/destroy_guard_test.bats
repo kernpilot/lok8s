@@ -170,6 +170,17 @@ _SPEC='apiVersion: cluster.lok8s.dev/v1beta1\nkind: KubeOne\nmetadata:\n  name: 
   _scan_case merge 'cluster.lok8s.yaml=base: &b {spec: {provider: {config: {cluster_name: prod}}}}\n<<: *b\n'
   # on the path through an alias
   _scan_case merge 'cluster.lok8s.yaml=p: &p\n  config: {<<: {cluster_name: prod}}\nspec:\n  provider: *p\n'
+  # in the mapping that an alias on the path names, not below it
+  _scan_case merge 'cluster.lok8s.yaml=b: &b {cluster_name: prod, <<: {cluster_name: other}}\nspec:\n  provider:\n    config: *b\n'
+  _scan_case merge 'cluster.lok8s.yaml=p: &p\n  config: {cluster_name: prod}\n  <<: {config: {cluster_name: other}}\nspec:\n  provider: *p\n'
+  # an anchor name used twice: the alias names the last one before it
+  _scan_case merge 'cluster.lok8s.yaml=b: &b {cluster_name: other}\nb2: &b {cluster_name: prod, <<: {x: 1}}\nspec:\n  provider:\n    config: *b\n'
+  # an anchor name used again after the alias: the alias names the one before it
+  _scan_case merge 'cluster.lok8s.yaml=b: &b {cluster_name: prod, <<: {x: 1}}\nspec:\n  provider:\n    config: *b\nlater: &b {cluster_name: other}\n'
+  # a key with the explicit tag !!merge
+  _scan_case merge 'hetzner.json=x: {cluster_name: other}\n!!merge base: {cluster_name: prod}\n'
+  # in a mapping with its own tag
+  _scan_case merge "cluster.lok8s.yaml=${_SPEC}    config: !cfg {<<: {cluster_name: prod}}\n"
   # a quoted << key (the rule of recover::_config_name)
   _scan_case merge 'hetzner.json={"<<": {"cluster_name": "prod"}, "cluster_name": "other"}'
   # on the path without a cluster_name
@@ -187,6 +198,50 @@ _SPEC='apiVersion: cluster.lok8s.dev/v1beta1\nkind: KubeOne\nmetadata:\n  name: 
   _scan_case o.cloud 'hetzner.json=cluster_name: prod\n'
   # only the first document counts (the Go twin reads the first one)
   _scan_case "" 'hetzner.json=cluster_name: other\n---\n<<: {cluster_name: prod}\n'
+  # an anchor name used twice: the merge key is in the mapping that the alias does not name
+  _scan_case o.cloud 'cluster.lok8s.yaml=b: &b {cluster_name: other, <<: {x: 1}}\nb2: &b {cluster_name: prod}\nspec:\n  provider:\n    config: *b\n'
+}
+
+@test "cluster_name scan: the names of the first document count, a second document does not hide them" {
+  _scan_case o.cloud 'hetzner.json=cluster_name: prod\n---\ncluster_name: x\n'
+  _scan_case o.cloud "cluster.lok8s.yaml=${_SPEC}    config: {cluster_name: prod}\n---\nspec: {provider: {config: {cluster_name: x}}}\n"
+  _scan_case o.cloud "cluster.lok8s.yaml=${_SPEC}    configRef: desc.yaml\n---\nspec: {provider: {configRef: other.yaml}}\n" 'desc.yaml=cluster_name: prod\n'
+}
+
+# Go twin: TestClusterNameUsersFailWhenTheClustersDirCannotBeRead.
+@test "cluster_name scan: a clusters dir that the scan cannot list fails the scan (rc 1)" {
+  [[ "$(id -u)" -ne 0 ]] || skip "root reads a dir without the read permission"
+  local PATH_CLUSTERS="${BATS_TEST_TMPDIR}/locked"
+  mkdir -p "${PATH_CLUSTERS}/o.cloud"
+  printf '{"cluster_name": "prod"}\n' > "${PATH_CLUSTERS}/o.cloud/hetzner.json"
+  chmod 0300 "${PATH_CLUSTERS}"
+  run provision::_cluster_name_users self.cloud prod
+  chmod 0755 "${PATH_CLUSTERS}"
+  [ "${status}" -eq 1 ]
+  [ -z "${output}" ]
+  # a clusters path that is not a dir
+  PATH_CLUSTERS="${BATS_TEST_TMPDIR}/file"
+  printf 'not a dir\n' > "${PATH_CLUSTERS}"
+  run provision::_cluster_name_users self.cloud prod
+  [ "${status}" -eq 1 ]
+  # no clusters dir: no other domain
+  PATH_CLUSTERS="${BATS_TEST_TMPDIR}/nope"
+  run provision::_cluster_name_users self.cloud prod
+  [ "${status}" -eq 0 ]
+  [ -z "${output}" ]
+}
+
+# Go twin: TestClusterNameUsersReadAnUnreadableFileAsNoName.
+@test "cluster_name scan: a provider file that cannot be read reads as no name, with no error text" {
+  [[ "$(id -u)" -ne 0 ]] || skip "root reads a file without the read permission"
+  local PATH_CLUSTERS="${BATS_TEST_TMPDIR}/unreadable"
+  mkdir -p "${PATH_CLUSTERS}/o.cloud"
+  printf '{"cluster_name": "prod"}\n' > "${PATH_CLUSTERS}/o.cloud/hetzner.json"
+  chmod 0000 "${PATH_CLUSTERS}/o.cloud/hetzner.json"
+  run provision::_cluster_name_users self.cloud prod
+  chmod 0644 "${PATH_CLUSTERS}/o.cloud/hetzner.json"
+  [ "${status}" -eq 0 ]
+  [ -z "${output}" ]
 }
 
 @test "destroy guard: a merge key in the provider config of another domain is refused, even with --force and --confirm-cluster" {
@@ -201,13 +256,16 @@ _SPEC='apiVersion: cluster.lok8s.dev/v1beta1\nkind: KubeOne\nmetadata:\n  name: 
   _nothing_ran
 }
 
-# The real scan fails (rc 1) only when its printf | sort pipeline fails, so
-# a stub pins the fail-closed branch. The Go scan has no such failure.
-@test "destroy guard: a failed cluster_name scan stops the destroy (a stub)" {
+# A clusters dir that the scan cannot list (no read permission): the scan
+# returns 1 and the guard refuses, with --force too (Go twin:
+# TestDestroyGuardRefusesWhenTheClustersDirCannotBeRead).
+@test "destroy guard: an unreadable clusters dir stops the destroy" {
+  [[ "$(id -u)" -ne 0 ]] || skip "root reads a dir without the read permission"
   _assume_no_tty
-  provision::_cluster_name_users() { return 1; }
-  local confirm_cluster=prod-a
+  local force=1 confirm_cluster=prod-a
+  chmod 0300 "${PATH_CLUSTERS}"
   run provision::dispatch_destroy test.prod < /dev/null
+  chmod 0755 "${PATH_CLUSTERS}"
   [ "${status}" -eq 3 ]
   assert_output --partial "[error] could not check if another domain has the cluster_name 'prod-a' of 'test.prod'. Nothing was deleted. Run lo destroy again."
   _nothing_ran

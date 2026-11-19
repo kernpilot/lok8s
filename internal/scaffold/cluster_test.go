@@ -271,6 +271,31 @@ func TestWriteClusterSpecRefusesAClusterNameInUse(t *testing.T) {
 	}
 }
 
+// A clusters dir that the check cannot list (no read permission): it cannot
+// tell the names of the other domains, so a new domain is refused (fail
+// closed) and nothing is written.
+func TestWriteClusterSpecRefusesWhenTheClustersDirCannotBeRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a dir without the read permission")
+	}
+	clusters := t.TempDir()
+	if err := os.Chmod(clusters, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(clusters, 0o755) })
+	var out, stderr bytes.Buffer
+	err := WriteClusterSpec(clusters, "green.cloud", "kubeone", false, &out, &stderr)
+	if !errors.Is(err, ErrHandled) {
+		t.Fatalf("err = %v, want ErrHandled", err)
+	}
+	if want := "could not check if another domain uses the cluster name 'green' (the first label of green.cloud). Nothing was written. Run lo init cluster again."; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %s, want %q", stderr.String(), want)
+	}
+	if _, err := os.Stat(filepath.Join(clusters, "green.cloud")); err == nil {
+		t.Error("the refused domain was written")
+	}
+}
+
 // A domain with a merge key (<<) on the path to its cluster_name or its
 // metadata.name: the check cannot tell its names, so a new domain is
 // refused (fail closed) and nothing is written.

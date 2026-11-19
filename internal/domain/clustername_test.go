@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -81,6 +82,57 @@ func TestClusterNameUsersWithoutClustersDir(t *testing.T) {
 	}
 }
 
+// A provider file that cannot be read reads as no name, as a file that does
+// not parse (bash: yq gets nothing on stdin, and the error of the
+// redirection goes to /dev/null).
+func TestClusterNameUsersReadAnUnreadableFileAsNoName(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file without the read permission")
+	}
+	clusters := filepath.Join(t.TempDir(), "clusters")
+	f := filepath.Join(clusters, "o.cloud", "hetzner.json")
+	testutil.WriteFile(t, f, `{"cluster_name": "prod"}`)
+	if err := os.Chmod(f, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ProviderClusterNameUsers(clusters, "self.cloud", "prod"); got != nil || err != nil {
+		t.Fatalf("got %v, %v, want nil, nil", got, err)
+	}
+}
+
+// A clusters dir that the scan cannot list, or a clusters path that is not a
+// dir: the scan cannot tell the other domains, so it returns an error (not a
+// *MergeKeyError) and the guards refuse ("could not check"). The bash twin
+// returns 1 (destroy_guard_test.bats).
+func TestClusterNameUsersFailWhenTheClustersDirCannotBeRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a dir without the read permission")
+	}
+	locked := filepath.Join(t.TempDir(), "clusters")
+	testutil.WriteFile(t, filepath.Join(locked, "o.cloud", "hetzner.json"), `{"cluster_name": "prod"}`)
+	if err := os.Chmod(locked, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	file := filepath.Join(t.TempDir(), "clusters")
+	testutil.WriteFile(t, file, "not a dir\n")
+	for _, clusters := range []string{locked, file} {
+		for _, sc := range []struct {
+			label string
+			users func(clusters, self, name string) ([]string, error)
+		}{
+			{"ProviderClusterNameUsers", ProviderClusterNameUsers},
+			{"ClusterNameUsers", ClusterNameUsers},
+		} {
+			list, err := sc.users(clusters, "self.cloud", "prod")
+			var merge *MergeKeyError
+			if err == nil || errors.As(err, &merge) || list != nil {
+				t.Errorf("%s(%s) = %v, %v, want nil and an error that is not a *MergeKeyError", sc.label, clusters, list, err)
+			}
+		}
+	}
+}
+
 // A merge key (<<) on the path to a cluster_name stops the scan with the
 // domains that have one (the guards refuse): the name it brings in is not
 // one value (yq and yaml.v3 merge in different ways). A merge key that is
@@ -124,6 +176,29 @@ func TestClusterNameUsersRefuseAMergeKeyOnThePath(t *testing.T) {
 		{"a merge key on the path through an alias", map[string]string{
 			"cluster.lok8s.yaml": "p: &p\n  config: {<<: {cluster_name: prod}}\nspec:\n  provider: *p\n",
 		}, "merge", "merge"},
+		// The merge key is in the mapping that the alias names, not below it.
+		{"a merge key in the config that an alias names", map[string]string{
+			"cluster.lok8s.yaml": "b: &b {cluster_name: prod, <<: {cluster_name: other}}\nspec:\n  provider:\n    config: *b\n",
+		}, "merge", "merge"},
+		{"a merge key in the provider that an alias names", map[string]string{
+			"cluster.lok8s.yaml": "p: &p\n  config: {cluster_name: prod}\n  <<: {config: {cluster_name: other}}\nspec:\n  provider: *p\n",
+		}, "merge", "merge"},
+		// An anchor name used twice: the alias names the last one before it.
+		{"a redefined anchor: the merge key is in the mapping that the alias names", map[string]string{
+			"cluster.lok8s.yaml": "b: &b {cluster_name: other}\nb2: &b {cluster_name: prod, <<: {x: 1}}\nspec:\n  provider:\n    config: *b\n",
+		}, "merge", "merge"},
+		{"an anchor name used again after the alias: the alias names the one before it", map[string]string{
+			"cluster.lok8s.yaml": "b: &b {cluster_name: prod, <<: {x: 1}}\nspec:\n  provider:\n    config: *b\nlater: &b {cluster_name: other}\n",
+		}, "merge", "merge"},
+		{"a redefined anchor: the merge key is in the mapping that the alias does not name", map[string]string{
+			"cluster.lok8s.yaml": "b: &b {cluster_name: other, <<: {x: 1}}\nb2: &b {cluster_name: prod}\nspec:\n  provider:\n    config: *b\n",
+		}, "o.cloud", "o.cloud"},
+		{"a key with the explicit tag !!merge", map[string]string{
+			"hetzner.json": "x: {cluster_name: other}\n!!merge base: {cluster_name: prod}\n",
+		}, "merge", "merge"},
+		{"a merge key in a mapping with its own tag", map[string]string{
+			"cluster.lok8s.yaml": spec("    config: !cfg {<<: {cluster_name: prod}}\n"),
+		}, "merge", "merge"},
 		{"a quoted << key (the rule of the recover guard)", map[string]string{
 			"hetzner.json": `{"<<": {"cluster_name": "prod"}, "cluster_name": "other"}`,
 		}, "merge", "merge"},
@@ -146,6 +221,16 @@ func TestClusterNameUsersRefuseAMergeKeyOnThePath(t *testing.T) {
 		{"only the first document counts", map[string]string{
 			"hetzner.json": "cluster_name: other\n---\n<<: {cluster_name: prod}\n",
 		}, "", ""},
+		{"the first document has the name, a second document follows", map[string]string{
+			"hetzner.json": "cluster_name: prod\n---\ncluster_name: x\n",
+		}, "o.cloud", "o.cloud"},
+		{"a spec with a second document: the inline config of the first counts", map[string]string{
+			"cluster.lok8s.yaml": spec("    config: {cluster_name: prod}\n") + "---\nspec: {provider: {config: {cluster_name: x}}}\n",
+		}, "o.cloud", "o.cloud"},
+		{"a spec with a second document: the configRef of the first counts", map[string]string{
+			"cluster.lok8s.yaml": spec("    configRef: desc.yaml\n") + "---\nspec: {provider: {configRef: other.yaml}}\n",
+			"desc.yaml":          "cluster_name: prod\n",
+		}, "o.cloud", "o.cloud"},
 		{"an anchor and an alias, another name", map[string]string{
 			"cluster.lok8s.yaml": "base: &b {cluster_name: other}\nspec:\n  provider:\n    name: hetzner\n    config: *b\n",
 		}, "", ""},
@@ -193,7 +278,7 @@ func TestClusterNameUsersNameEveryMergeKey(t *testing.T) {
 	if !errors.As(err, &merge) || strings.Join(merge.Domains, ",") != "a.cloud,z.cloud" {
 		t.Fatalf("err = %v, want a *MergeKeyError for a.cloud, z.cloud", err)
 	}
-	if want := "the provider config of: a.cloud, z.cloud has a merge key (<<) on the path to its cluster_name"; err.Error() != want {
+	if want := "the cluster config of: a.cloud, z.cloud has a merge key (<<) on the path to a cluster name"; err.Error() != want {
 		t.Errorf("Error() = %q, want %q", err.Error(), want)
 	}
 	// No name, no scan.

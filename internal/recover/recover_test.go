@@ -732,6 +732,31 @@ func TestRunClusterNameGuardRefusesAMergeKeyInAnotherDomain(t *testing.T) {
 	}
 }
 
+// A clusters dir that the scan cannot list (no read permission): recover
+// cannot tell the other domains, so it is refused at resolve (fail closed).
+func TestRunClusterNameGuardRefusesWhenTheClustersDirCannotBeRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a dir without the read permission")
+	}
+	h := newHarness(t)
+	h.r.Force = true
+	testutil.WriteFile(t, h.cfg, `{"cluster_name": "shared"}`+"\n")
+	testutil.WriteFile(t, filepath.Join(h.r.Paths.Clusters, "copy.dom", "hetzner.json"), `{"cluster_name": "other"}`+"\n")
+	if err := os.Chmod(h.r.Paths.Clusters, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(h.r.Paths.Clusters, 0o755) })
+	if err := h.r.Run(t.Context(), "test.dom", false, false); !errors.Is(err, ErrHandled) {
+		t.Fatalf("err = %v, want ErrHandled", err)
+	}
+	if want := "[error] recover: could not check if another domain has the cluster_name 'shared' of 'test.dom'. Nothing was changed. Run lo recover again.\n"; !strings.Contains(h.errBuf.String(), want) {
+		t.Errorf("missing %q in stderr:\n%s", want, h.errBuf.String())
+	}
+	if got := h.recorded(); got != "resolve" {
+		t.Errorf("record = %q, want only the resolve (no doctor, rebuild or provision)", got)
+	}
+}
+
 // The refusal names every other domain with the cluster_name, sorted.
 func TestRunClusterNameGuardNamesEveryDomain(t *testing.T) {
 	h := newHarness(t)

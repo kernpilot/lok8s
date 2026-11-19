@@ -25,9 +25,13 @@ package domain
 // and yq says that this will become its default. yaml.v3 does not merge at
 // all. So a scan cannot tell which name the provider of that domain uses.
 // The rule is the one of the recover guard's own read (configClusterName):
-// a key whose text is "<<", quoted or not.
+// a key whose text is "<<", quoted or not. A key with the explicit tag
+// !!merge (`!!merge base: *b`) is a merge key for yq too, so it counts. An
+// alias on the path counts with the mapping that it names.
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -40,26 +44,35 @@ import (
 	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
-// MergeKeyError: the provider config of each of Domains (sorted) has a
-// merge key (<<) on the path to its cluster_name, so the scan cannot tell
-// the cluster_name that its provider uses. The guards refuse with it.
+// MergeKeyError: the cluster config of each of Domains (sorted) has a merge
+// key (<<) on the path to a cluster name: the cluster_name of its provider
+// config, or (ClusterNameUsers) the metadata.name of its cluster.lok8s.yaml.
+// So the scan cannot tell the name that the domain uses. The guards refuse
+// with it.
 type MergeKeyError struct {
 	Domains []string
 }
 
 func (e *MergeKeyError) Error() string {
-	return "the provider config of: " + strings.Join(e.Domains, ", ") + " has a merge key (<<) on the path to its cluster_name"
+	return "the cluster config of: " + strings.Join(e.Domains, ", ") + " has a merge key (<<) on the path to a cluster name"
 }
 
-// mergeOnPath reports a key "<<" (a merge key, or the quoted text) in n or
-// in a mapping on path from n: each mapping that a merge key in it can give
-// the next key of the path or the name (bash: the yq keys of each, in
-// provision::_cluster_name_users).
+// isMergeKey: a key whose text is "<<" (a merge key, or the quoted text) or
+// whose tag is !!merge (bash: select(. == "<<" or tag == "!!merge")).
+func isMergeKey(k *yaml.Node) bool {
+	return k.Value == "<<" || k.ShortTag() == "!!merge"
+}
+
+// mergeOnPath reports a merge key (isMergeKey) in n or in a mapping on path
+// from n: each mapping that a merge key in it can give the next key of the
+// path or the name (bash: the yq keys of each, in
+// provision::_cluster_name_users). Each node of the path is dereferenced, so
+// an alias counts with the mapping that it names.
 func mergeOnPath(n *yaml.Node, path ...string) bool {
 	n = yqsem.Deref(n)
 	for i := 0; n != nil && n.Kind == yaml.MappingNode; i++ {
 		for k := 0; k+1 < len(n.Content); k += 2 {
-			if n.Content[k].Value == "<<" {
+			if isMergeKey(n.Content[k]) {
 				return true
 			}
 		}
@@ -100,14 +113,19 @@ func providerClusterNames(dir string, spec *yaml.Node) (names []string, merge bo
 
 // nameUsers lists the domains under clusters, other than self, for which
 // names(dir, spec) holds name. Sorted. A *MergeKeyError when names reports
-// a merge key for a domain.
+// a merge key for a domain. No clusters dir is no other domain; a clusters
+// dir that cannot be read is an error (bash: the scan returns 1), so the
+// guards refuse.
 func nameUsers(clusters, self, name string, names func(dir string, spec *yaml.Node) ([]string, bool)) ([]string, error) {
 	if name == "" {
 		return nil, nil
 	}
 	entries, err := os.ReadDir(clusters)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 	var users, merged []string
 	for _, e := range entries {

@@ -171,18 +171,37 @@ provision::confirm_infra() {
 # become its default. The Go twin does not merge at all. The path is the top
 # of each file, and the top, spec, spec.provider and spec.provider.config of
 # the spec; the rule is the one of recover::_config_name: a key whose text
-# is "<<", quoted or not. Only the first document counts, as in the Go twin.
+# is "<<", quoted or not. A key with the explicit tag !!merge is a merge key
+# for yq too, so it counts. A node of the path that is an alias counts with
+# the mapping that it names: the last anchor of that name before the alias,
+# as yaml.v3 (the Go twin) resolves it. yq's keys does not follow an alias,
+# and explode(.) would apply the merge keys that the scan counts. Only the
+# first document counts, as in the Go twin, for the merge keys and the names.
 #
 # A provider file goes to yq on stdin, so yq parses it as YAML (JSON is
 # YAML too) whatever its extension, as the provider and the Go twin read it:
 # with the path, yq reads hetzner.json as JSON only and gives no name for a
 # YAML one.
+#
+# No clusters dir is no other domain. A clusters path that is not a dir
+# that the scan can list returns 1 (Go twin: the error of os.ReadDir), so
+# the guards refuse.
 provision::_cluster_name_users() {
-  local self="${1}" name="${2}" dir other spec ref f merge
+  local self="${1}" name="${2}" dir other spec ref f merge p terms=""
   local -a files=() names=() users=() merged=()
-  # The number of keys "<<" in the mappings on the path (Go: mergeOnPath).
-  local -r merge_spec='select(document_index == 0) | [(., .spec, .spec.provider, .spec.provider.config) | select(tag == "!!map") | keys[] | select(. == "<<")] | length'
-  local -r merge_file='select(document_index == 0) | [select(tag == "!!map") | keys[] | select(. == "<<")] | length'
+  if [[ -e "${PATH_CLUSTERS}" ]] && ! [[ -d "${PATH_CLUSTERS}" && -r "${PATH_CLUSTERS}" ]]; then
+    return 1
+  fi
+  # The number of merge keys in the mappings on the path (Go: mergeOnPath).
+  # Each node of the path is its own term: a yq collect gives an array
+  # also when its input is empty.
+  local -r is_merge='select(. == "<<" or tag == "!!merge")'
+  local -r deref='alias as $a | line as $l | column as $c | [$doc | .. | select(anchor == $a and (line < $l or (line == $l and column < $c)))] | select(length > 0) | .[-1]'
+  for p in . .spec .spec.provider .spec.provider.config; do
+    terms+="${terms:+, }(${p} | select(kind == \"map\") | keys[]), (${p} | select(kind == \"alias\") | ${deref} | select(kind == \"map\") | keys[])"
+  done
+  local -r merge_spec="select(document_index == 0) | . as \$doc | [${terms}] | map(${is_merge}) | length"
+  local -r merge_file="select(document_index == 0) | [select(kind == \"map\") | keys[]] | map(${is_merge}) | length"
   for dir in "${PATH_CLUSTERS}"/*/; do
     [[ -d "${dir}" ]] || continue
     other="$(basename "${dir}")"
@@ -192,13 +211,15 @@ provision::_cluster_name_users() {
     spec="${dir}cluster.lok8s.yaml"
     if [[ -f "${spec}" ]]; then
       merge+="$(yq -r "${merge_spec}" "${spec}" 2>/dev/null)"
-      ref="$(yq -r '.spec.provider.configRef // ""' "${spec}" 2>/dev/null)" || ref=""
+      ref="$(yq -r 'select(document_index == 0) | .spec.provider.configRef // ""' "${spec}" 2>/dev/null)" || ref=""
       [[ -z "${ref}" || ! -f "${dir}${ref}" ]] || files+=("${dir}${ref}")
-      names+=("$(yq -r '.spec.provider.config.cluster_name // ""' "${spec}" 2>/dev/null)")
+      names+=("$(yq -r 'select(document_index == 0) | .spec.provider.config.cluster_name // ""' "${spec}" 2>/dev/null)")
     fi
+    # 2>/dev/null before <"${f}": the error of a file that cannot be opened
+    # goes to /dev/null too, as the Go twin is silent.
     for f in "${files[@]}"; do
-      merge+="$(yq -r "${merge_file}" - <"${f}" 2>/dev/null)"
-      names+=("$(yq -r '.cluster_name // ""' - <"${f}" 2>/dev/null)")
+      merge+="$(yq -r "${merge_file}" - 2>/dev/null <"${f}")"
+      names+=("$(yq -r 'select(document_index == 0) | .cluster_name // ""' - 2>/dev/null <"${f}")")
     done
     if [[ "${merge}" == *[1-9]* ]]; then
       merged+=("${other}")

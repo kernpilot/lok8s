@@ -796,14 +796,17 @@ _assert_refused() {
   assert_output "resolve"
 }
 
-# The real scan (provision::_cluster_name_users) fails only when its
-# printf | sort pipeline fails: a yq error reads as no name. So this test
-# stubs the scan to pin the fail-closed branch of the guard.
-@test "recover stops when the cluster_name scan fails (a stub: the real scan fails only when its printf | sort fails)" {
+# A clusters dir that the scan cannot list (no read permission): the scan
+# returns 1 and recover stops at resolve (Go twin:
+# TestRunClusterNameGuardRefusesWhenTheClustersDirCannotBeRead). A yq error
+# in a file still reads as no name.
+@test "recover stops when the clusters dir cannot be listed" {
+  [[ "$(id -u)" -ne 0 ]] || skip "root reads a dir without the read permission"
   _shared_name_setup
-  provision::_cluster_name_users() { return 1; }
   force=1
+  chmod 0300 "${PATH_CLUSTERS}"
   run recover::_run "test.dom" 0 0 </dev/null
+  chmod 0755 "${PATH_CLUSTERS}"
   assert_failure 1
   assert_output --partial "[error] recover: could not check if another domain has the cluster_name 'shared' of 'test.dom'. Nothing was changed. Run lo recover again."
   run cat "${RECORD}"
