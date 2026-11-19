@@ -315,6 +315,36 @@ _ref() {
   printf '%s' "${ref}"
 }
 
+# _FAILED_WRITE: the action of a fake yq (_fake_yq) whose write fails part
+# way. As the real yq does with -i, it first writes its output into a temp
+# file in TMPDIR, and that file stays there when the write fails. Then it
+# saves the file that it reads (SNAP), empties it and fails. Without -i the
+# real yq makes no temp file, and this one makes none either. So an empty
+# TMPDIR after the step shows that the edit ran no yq -i.
+# shellcheck disable=SC2016 # expanded by the fake yq, not here
+_FAILED_WRITE='if [[ " $* " == *" -i "* ]]; then
+  [[ -n "${TMPDIR:-}" ]] || exit 3
+  t=$(mktemp "${TMPDIR}/tempXXXXXXXXXX") || exit 3
+  a=(); for x in "$@"; do [[ "${x}" == -i ]] || a+=("${x}"); done
+  "${REAL_YQ}" "${a[@]}" > "${t}"
+fi
+cp -- "${F}" "${SNAP}"; : > "${F}"; exit 1'
+
+# _assert_fake_leaves_temp <expression>: anti-vacuity of the empty TMPDIR.
+# Run as `yq -i <expression>` on a copy of the seed manifest, the fake yq
+# fails and leaves one temp file in a fresh TMPDIR. It uses its own TMPDIR
+# and SNAP, so the files of the case stay as they are.
+_assert_fake_leaves_temp() {
+  local td="${BATS_TEST_TMPDIR}/tmpdir-fake-check" c="${BATS_TEST_TMPDIR}/fake-check.yaml" left
+  mkdir -p "${td}"
+  cp -- "${MANIFEST}" "${c}"
+  if TMPDIR="${td}" SNAP="${BATS_TEST_TMPDIR}/fake-check.snap" "${BATS_TEST_TMPDIR}/fakeyq/yq" -i "${1}" "${c}"; then
+    echo "the fake yq -i did not fail" >&2; return 1
+  fi
+  left=$(find "${td}" -mindepth 1 -printf '%P\n')
+  [[ "${left}" =~ ^temp[[:alnum:]]+$ ]] || { echo "the fake yq -i left no single temp file in TMPDIR: ${left//$'\n'/ }" >&2; return 1; }
+}
+
 @test "networkID edit: kubeone.yaml holds what yq -i writes from the same input" {
   _edit_setup net-7
   _fake_yq 'networkID =' '[[ -e "${SNAP}" ]] || cp -- "${F}" "${SNAP}"'
@@ -333,9 +363,8 @@ _ref() {
 
 @test "networkID edit: a failed write leaves the old kubeone.yaml, no temp file and an empty TMPDIR, and stops the step" {
   _edit_setup net-7
-  # A write that fails part way: this yq saves the file that it reads, then
-  # empties it and fails.
-  _fake_yq 'networkID =' 'cp -- "${F}" "${SNAP}"; : > "${F}"; exit 1'
+  # A write that fails part way (_FAILED_WRITE).
+  _fake_yq 'networkID =' "${_FAILED_WRITE}"
   _run_step
   [ "${status}" -eq 1 ] || { echo "status ${status}, want 1" >&2; return 1; }
   assert_output --partial "kubeone inventory: cannot write cloudProvider.hetzner.networkID into ${WD}/kubeone.yaml"
@@ -346,6 +375,7 @@ _ref() {
   # The step stopped: the addons edit did not run.
   run yq -r '.addons.enable // "unset"' "${WD}/kubeone.yaml"
   assert_output "unset"
+  _assert_fake_leaves_temp '.cloudProvider.hetzner.networkID = "net-7"'
 }
 
 @test "networkID edit: a kubeone.yaml that cannot be written stops the step and leaves TMPDIR empty" {
@@ -381,7 +411,7 @@ _ref() {
 
 @test "addons edit: a failed write leaves the old kubeone.yaml, no temp file and an empty TMPDIR, and stops the step" {
   _edit_setup ""
-  _fake_yq '.addons.enable = true' 'cp -- "${F}" "${SNAP}"; : > "${F}"; exit 1'
+  _fake_yq '.addons.enable = true' "${_FAILED_WRITE}"
   _run_step
   [ "${status}" -eq 1 ] || { echo "status ${status}, want 1" >&2; return 1; }
   assert_output --partial "kubeone inventory: cannot write the addons path into ${WD}/kubeone.yaml"
@@ -389,6 +419,7 @@ _ref() {
   cmp "${SNAP}" "${WD}/kubeone.yaml" || { echo "kubeone.yaml is not the old file" >&2; return 1; }
   _assert_only "${WD}" kubeone.yaml
   _assert_tmpdir_empty
+  _assert_fake_leaves_temp '.addons.enable = true | .addons.path = "./addons"'
 }
 
 @test "addons edit: a kubeone.yaml that cannot be written stops the step and leaves TMPDIR empty" {
