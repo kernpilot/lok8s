@@ -2522,6 +2522,66 @@ YAML
   [[ "$output" == *"restore.d — 0 applied, 1 skipped"* ]]
 }
 
+# Issue #304: a failed decrypt prints fixed text that names the file, also at
+# debug, and never the sops stderr: on a MAC mismatch it holds two unkeyed
+# SHA-512 digests of the plaintext. The stub prints obvious fakes (128 zeros,
+# 128 ones). The Go twin is TestRestoreDDecryptFailurePrintsNoSopsText.
+@test "restore_d: a failed decrypt prints no sops text, also at debug" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters" DEBUG=1
+  unset PATH_SECRETS
+  local d="${PATH_CLUSTERS}/test.lok8s.dev"
+  mkdir -p "${d}/restore.d"
+  echo "cipher" > "${d}/restore.d/tls-c.sops.yaml"
+  kubectl() { echo "kubectl-called" >> "${BATS_TEST_TMPDIR}/kubectl.log"; return 1; }
+  sops() {
+    local a b
+    a="$(printf '0%.0s' {1..128})"; b="${a//0/1}"
+    printf 'MAC mismatch. File has %s, computed %s\nsecond line\n' "${a}" "${b}" >&2
+    return 1
+  }
+  run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
+  assert_success
+  assert_line "[debug] bootstrap: restore.d tls-c.sops.yaml decrypt failed"
+  assert_line "[warn] bootstrap: restore.d could not decrypt/apply tls-c — skipping (its owner will re-create/re-issue)"
+  assert_output --partial "restore.d — 0 applied, 1 skipped"
+  refute_output --partial "0000000000000000"
+  refute_output --partial "1111111111111111"
+  refute_output --partial "MAC mismatch"
+  refute_output --partial "second line"
+  [ ! -f "${BATS_TEST_TMPDIR}/kubectl.log" ]
+}
+
+# A failed apply prints fixed text, also at debug, and never the kubectl
+# stderr: it can quote a value of the manifest. Both applies of the entry
+# fail: the store working copy, then the decrypted .sops.yaml. The Go twin is
+# TestRestoreDApplyFailurePrintsNoKubectlText.
+@test "restore_d: a failed apply prints no kubectl text, also at debug" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters" DEBUG=1
+  unset PATH_SECRETS
+  local d="${PATH_CLUSTERS}/test.lok8s.dev"
+  mkdir -p "${d}/restore.d" "${d}/secrets/restore.d"
+  echo "cipher" > "${d}/restore.d/tls-d.sops.yaml"
+  echo "kind: Secret" > "${d}/secrets/restore.d/tls-d.yaml"
+  kubectl() {
+    cat > /dev/null
+    echo "kubectl-called" >> "${BATS_TEST_TMPDIR}/kubectl.log"
+    echo "Error from server: failed to create typed patch object (/v1, Kind=Secret) default/tls: .stringData.tls.crt: expected string, got &value.valueUnstructured{Value:apply-value-canary}" >&2
+    return 1
+  }
+  sops() { echo "kind: Secret"; }
+  run bootstrap::_restore_d "test.lok8s.dev" "${BATS_TEST_TMPDIR}/kubeconfig"
+  assert_success
+  [ "$(wc -l < "${BATS_TEST_TMPDIR}/kubectl.log")" -eq 2 ]
+  assert_line "[debug] bootstrap: restore.d tls-d store-copy apply failed"
+  assert_line "[debug] bootstrap: restore.d tls-d apply failed"
+  assert_line "[warn] bootstrap: restore.d could not decrypt/apply tls-d — skipping (its owner will re-create/re-issue)"
+  assert_output --partial "restore.d — 0 applied, 1 skipped"
+  refute_output --partial "apply-value-canary"
+  refute_output --partial "typed patch"
+}
+
 # ── Buffered parallel output → de-interleaved collapsed blocks ────────────────
 
 @test "bootstrap::apply flushes each parallel entry as one collapsed block (no raw interleaving)" {
@@ -5051,6 +5111,34 @@ SH
   [ "${status}" -eq 2 ]
   assert_line "bootstrap dry-run: restore.d: error"
   assert_output --partial "[error] bootstrap: dry-run: restore.d: cannot decrypt wildcard-tls.sops.yaml"
+}
+
+# Issue #304: the dry run names the file that does not decrypt, also at
+# debug, and never prints the sops stderr (on a MAC mismatch, two unkeyed
+# SHA-512 digests of the plaintext). The stub prints obvious fakes. The Go
+# twin is TestDryRunRestoreDDecryptFailurePrintsNoSopsText.
+@test "bootstrap::apply --dry-run: a restore.d decrypt failure prints no sops text, also at debug" {
+  write_cluster_spec "testcni"
+  mkdir -p "${PATH_CLUSTERS}/test.lok8s.dev/restore.d"
+  echo 'sops: {}' > "${PATH_CLUSTERS}/test.lok8s.dev/restore.d/wildcard-tls.sops.yaml"
+  sops() {
+    local a b
+    a="$(printf '0%.0s' {1..128})"; b="${a//0/1}"
+    printf 'MAC mismatch. File has %s, computed %s\n' "${a}" "${b}" >&2
+    return 1
+  }
+  export -f sops
+  _dry_kubectl_stub 0
+  local bootstrap_dry_run=1
+  DEBUG=1 run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 2 ]
+  assert_line "bootstrap dry-run: restore.d: error"
+  assert_line "[error] bootstrap: dry-run: restore.d: cannot decrypt wildcard-tls.sops.yaml"
+  assert_output --partial "[debug] "
+  refute_output --partial "0000000000000000"
+  refute_output --partial "1111111111111111"
+  refute_output --partial "MAC mismatch"
+  refute_output --partial "[debug] bootstrap: dry-run: restore.d: wildcard-tls.sops.yaml"
 }
 
 # The same with REAL sops material when the toolchain has sops, ssh-keygen

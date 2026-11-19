@@ -1192,13 +1192,20 @@ bootstrap::_resolve_parked() {
 # failed apply does, because lo checks the decrypted manifest too. The
 # manifest goes to kubectl byte for byte, and tracing is off (the rules at
 # the top of utils/keysonly.sh).
+#
+# A failed decrypt or apply prints fixed text that names the entry, also at
+# debug, and never the sops or kubectl message: on a MAC mismatch the sops
+# message holds two unkeyed SHA-512 digests of the plaintext, and a kubectl
+# message can quote a value of the manifest (an "Invalid value" field error,
+# or a typed-patch error such as "expected string, got ..."). Both are
+# discarded, as in Go.
 bootstrap::_restore_d() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }
   local domain="${1}" kubeconfig="${2}"
   local rdir="${PATH_CLUSTERS}/${domain}/restore.d"
   [[ -d "${rdir}" ]] || return 0
-  local f base plain applied=0 skipped=0 _err=""
+  local f base plain applied=0 skipped=0
   for f in "${rdir}"/*.sops.yaml; do
     # Nullglob-style guard; `continue` (not break) so one dangling entry can't
     # abort the remaining valid restores.
@@ -1228,13 +1235,13 @@ bootstrap::_restore_d() {
           continue
           ;;
         1)
-          if _err="$(printf '%s' "${_doc}" \
-            | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - 2>&1 >/dev/null)"; then
+          if printf '%s' "${_doc}" \
+            | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - >/dev/null 2>&1; then
             applied=$(( applied + 1 ))
             debug "bootstrap: restore.d applied ${base} (store working copy)"
             continue
           fi
-          debug "bootstrap: restore.d ${base} store-copy apply failed: ${_err%%$'\n'*}"
+          debug "bootstrap: restore.d ${base} store-copy apply failed"
           ;;
         unreadable) warn "bootstrap: restore.d: ${_what} cannot be read; lo uses ${base}.sops.yaml" ;;
         2) warn "bootstrap: restore.d: ${_what} does not parse as YAML; lo uses ${base}.sops.yaml" ;;
@@ -1242,31 +1249,28 @@ bootstrap::_restore_d() {
       esac
       _doc=""
     fi
-    # Decrypt and apply as SEPARATE steps with separate stderr: piping
-    # `sops 2>&1 | kubectl` would inject sops warnings into kubectl's stdin
-    # (corrupting the YAML) and _err would only ever see kubectl's stderr.
-    local _dec="" _serr
-    _serr="$(mktemp)"
-    if _dec="$(sops -d "${f}" 2>"${_serr}" && printf .)"; then
+    # Decrypt and apply as SEPARATE steps: piping `sops 2>&1 | kubectl` would
+    # inject sops warnings into kubectl's stdin (corrupting the YAML). The
+    # sops stderr is discarded (see above).
+    local _dec=""
+    if _dec="$(sops -d "${f}" 2>/dev/null && printf .)"; then
       _dec="${_dec%.}"
       if ! printf '%s' "${_dec}" | keysonly::refuse_stream "bootstrap: restore.d" "${base} (sops)" -; then
         skipped=$(( skipped + 1 ))
-      elif _err="$(printf '%s' "${_dec}" \
-        | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - 2>&1 >/dev/null)"; then
+      elif printf '%s' "${_dec}" \
+        | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - >/dev/null 2>&1; then
         applied=$(( applied + 1 ))
         debug "bootstrap: restore.d applied ${base} (sops)"
       else
         skipped=$(( skipped + 1 ))
-        # First line only — kubectl errors can quote input fragments.
-        debug "bootstrap: restore.d ${base} apply failed: ${_err%%$'\n'*}"
+        debug "bootstrap: restore.d ${base} apply failed"
         warn "bootstrap: restore.d could not decrypt/apply ${base} — skipping (its owner will re-create/re-issue)"
       fi
     else
       skipped=$(( skipped + 1 ))
-      debug "bootstrap: restore.d ${base} decrypt failed: $(head -n1 "${_serr}" 2>/dev/null)"
+      debug "bootstrap: restore.d ${base}.sops.yaml decrypt failed"
       warn "bootstrap: restore.d could not decrypt/apply ${base} — skipping (its owner will re-create/re-issue)"
     fi
-    rm -f "${_serr}"
   done
   (( applied == 0 && skipped == 0 )) \
     || printf '\033[32m✓\033[0m bootstrap: restore.d — %d applied, %d skipped\n' "${applied}" "${skipped}" >&2
@@ -1902,19 +1906,17 @@ bootstrap::_dry_run_restore_d() {
       _rd_docs+="$(cat "${_rd_plain}")"$'\n---\n'
       continue
     fi
-    local _rd_err
-    _rd_err="$(mktemp -p "${bootstrap_dry_boundary:-${TMPDIR:-/tmp}}")" || { error "bootstrap: dry-run: no temp file"; echo error; return 0; }
-    if _rd_dec="$(sops -d "${_rd_f}" 2>"${_rd_err}" </dev/null)"; then
+    if _rd_dec="$(sops -d "${_rd_f}" 2>/dev/null </dev/null)"; then
       _rd_docs+="${_rd_dec}"$'\n---\n'
     else
       # Decrypted with the normal sops key discovery (HOME is the real one):
       # a file that does not decrypt makes the preview of restore.d
-      # incomplete, so the run cannot say "nothing would change".
-      debug "bootstrap: dry-run: restore.d: ${_rd_base}.sops.yaml: $(head -n1 "${_rd_err}" 2>/dev/null)"
+      # incomplete, so the run cannot say "nothing would change". The line
+      # names the file only, also at debug: on a MAC mismatch the sops
+      # stderr holds two unkeyed SHA-512 digests of the plaintext.
       error "bootstrap: dry-run: restore.d: cannot decrypt ${_rd_base}.sops.yaml"
       _rd_failed=1
     fi
-    rm -f "${_rd_err}"
   done
   if (( _rd_failed )); then
     echo error

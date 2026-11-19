@@ -233,6 +233,27 @@ func TestDryRunRestoreDDecryptFailureIsExitTwo(t *testing.T) {
 	}
 }
 
+// Issue #304: the dry run names the file that does not decrypt, also at
+// debug, and never prints the sops message (on a MAC mismatch, two
+// unkeyed SHA-512 digests of the plaintext). The bats twin is
+// "bootstrap::apply --dry-run: a restore.d decrypt failure prints no sops
+// text, also at debug".
+func TestDryRunRestoreDDecryptFailurePrintsNoSopsText(t *testing.T) {
+	t.Setenv("DEBUG", "1")
+	e, f, spec, kc := dryEngine(t, "testcni")
+	testutil.WriteFile(t, filepath.Join(e.Paths.Clusters, "test.lok8s.dev", "restore.d", "wildcard-tls.sops.yaml"), "sops: {}\n")
+	e.SopsDecrypt = func(string) ([]byte, error) { return nil, errors.New(macMismatchErr) }
+	diffAnswers(t, f, 0)
+	err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
+	if driver.ExitCode(err) != 2 {
+		t.Fatalf("exit = %d, want 2 (err %v)", driver.ExitCode(err), err)
+	}
+	if !strings.Contains(stderrOf(e), "[error] bootstrap: dry-run: restore.d: cannot decrypt wildcard-tls.sops.yaml\n") {
+		t.Errorf("stderr:\n%s", stderrOf(e))
+	}
+	refuteOutput(t, stderrOf(e)+stdoutOf(e), fakeDigestA[:16], fakeDigestB[:16], "verify data integrity", "[debug] bootstrap: dry-run: restore.d: wildcard-tls.sops.yaml")
+}
+
 // The same with REAL sops material: a restore.d file encrypted by the
 // pinned sops CLI to a fresh age key decrypts through the normal key
 // discovery (SOPS_AGE_KEY here) and is diffed; with another key in the

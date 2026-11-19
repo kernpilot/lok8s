@@ -34,6 +34,12 @@ import (
 // sees why. A working copy that cannot be read or does not parse falls
 // back to the .sops.yaml file, as a failed apply does, because lo checks
 // the decrypted manifest too. kubectl gets the bytes exactly.
+//
+// A failed decrypt or apply prints fixed text that names the entry, also
+// at debug, and never the sops or kubectl message: on a MAC mismatch the
+// sops message holds two unkeyed SHA-512 digests of the plaintext, and a
+// kubectl message can quote a value of the manifest (an "Invalid value"
+// field error, or a typed-patch error such as "expected string, got ...").
 func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 	stderr := e.stderr()
 	rdir := e.Paths.Clusters + "/" + domain + "/restore.d"
@@ -79,13 +85,12 @@ func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 				ui.WarnTo(stderr, "bootstrap: restore.d skips %s — lo does not fall back to %s.sops.yaml after it finds a keys-only Secret in the store working copy", base, base)
 				continue
 			default:
-				errOut, rc := e.restoreApply(ctx, kubeconfig, doc)
-				if rc == 0 {
+				if e.restoreApply(ctx, kubeconfig, doc) {
 					applied++
 					ui.DebugTo(stderr, "bootstrap: restore.d applied %s (store working copy)", base)
 					continue
 				}
-				ui.DebugTo(stderr, "bootstrap: restore.d %s store-copy apply failed: %s", base, firstLine(errOut))
+				ui.DebugTo(stderr, "bootstrap: restore.d %s store-copy apply failed", base)
 			}
 		}
 		// Decrypt and apply as SEPARATE steps with separate stderr: piping
@@ -95,7 +100,7 @@ func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 		dec, err := e.sopsDecrypt(f)
 		if err != nil {
 			skipped++
-			ui.DebugTo(stderr, "bootstrap: restore.d %s decrypt failed: %s", base, firstLine(err.Error()))
+			ui.DebugTo(stderr, "bootstrap: restore.d %s.sops.yaml decrypt failed", base)
 			ui.WarnTo(stderr, "bootstrap: restore.d could not decrypt/apply %s — skipping (its owner will re-create/re-issue)", base)
 			continue
 		}
@@ -103,14 +108,12 @@ func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 			skipped++
 			continue
 		}
-		errOut, rc := e.restoreApply(ctx, kubeconfig, dec)
-		if rc == 0 {
+		if e.restoreApply(ctx, kubeconfig, dec) {
 			applied++
 			ui.DebugTo(stderr, "bootstrap: restore.d applied %s (sops)", base)
 		} else {
 			skipped++
-			// First line only — kubectl errors can quote input fragments.
-			ui.DebugTo(stderr, "bootstrap: restore.d %s apply failed: %s", base, firstLine(errOut))
+			ui.DebugTo(stderr, "bootstrap: restore.d %s apply failed", base)
 			ui.WarnTo(stderr, "bootstrap: restore.d could not decrypt/apply %s — skipping (its owner will re-create/re-issue)", base)
 		}
 	}
@@ -124,23 +127,18 @@ func (e *Engine) restoreD(ctx context.Context, domain, kubeconfig string) {
 const restoreGuard = "bootstrap: restore.d"
 
 // restoreApply runs one server-side apply for restore.d of the checked
-// manifest on stdin, byte for byte, stdout discarded and stderr captured
-// (bash: `_err="$(printf '%s' "${doc}" | kubectl … -f - 2>&1 >/dev/null)"`).
-func (e *Engine) restoreApply(ctx context.Context, kubeconfig string, doc []byte) (string, int) {
-	var errBuf strings.Builder
+// manifest on stdin, byte for byte, and reports whether it succeeded. It
+// discards stdout and stderr: the kubectl message can quote a value of the
+// manifest (bash: `printf '%s' "${doc}" | kubectl … -f - >/dev/null 2>&1`).
+func (e *Engine) restoreApply(ctx context.Context, kubeconfig string, doc []byte) bool {
 	c := execx.Cmd{
 		Name:   "kubectl",
 		Args:   []string{"--kubeconfig", kubeconfig, "apply", "--server-side", "--force-conflicts", "-f", "-"},
 		Stdin:  bytes.NewReader(doc),
 		Stdout: io.Discard,
-		Stderr: &errBuf,
+		Stderr: io.Discard,
 	}
-	err := e.Runner.Run(ctx, c)
-	rc := 0
-	if err != nil {
-		rc = 1
-	}
-	return strings.TrimRight(errBuf.String(), "\n"), rc
+	return e.Runner.Run(ctx, c) == nil
 }
 
 // sopsDecrypt resolves the decrypt seam. PATH_SECRETS note: Apply exports
