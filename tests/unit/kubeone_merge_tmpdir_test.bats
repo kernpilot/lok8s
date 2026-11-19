@@ -695,11 +695,18 @@ _written() {
   yq -r ".containerRuntime.containerd.registries.\"registry1.example.com\".auth.${1} == \"${2}\"" "${work}"
 }
 
+# _need_localvar_inherit: skip the case when this bash has no
+# `shopt localvar_inherit` (bash 5.0 and later have it).
+_need_localvar_inherit() {
+  bash -c 'shopt -s localvar_inherit' 2>/dev/null || skip "this bash has no shopt localvar_inherit"
+}
+
 @test "the registry merge keeps the password out of an arithmetic error under localvar_inherit and a caller's declare -i" {
   # With localvar_inherit (BASHOPTS can turn it on), a local inherits the
   # attributes of the caller's variable of the same name: with -i, the
   # assignment of the password is arithmetic, and the error quotes it.
   # The fixture password holds a ':' so that the arithmetic fails.
+  _need_localvar_inherit
   _registry_fixture 1
   _registry_password 'fixture-password-1:x'
   local work="${RW}/.kubeone.yaml.work"
@@ -720,6 +727,7 @@ echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s"
 }
 
 @test "kubeone::_yq_edit keeps the manifest out of an arithmetic error under localvar_inherit and a caller's declare -i _ye_out" {
+  _need_localvar_inherit
   local work="${RW}/.kubeone.yaml.work"
   printf 'auth:\n  username: fixture-user-1\n  password: fixture-password-1\n' > "${work}"
   run bash -c 'import() { :; }
@@ -741,6 +749,7 @@ echo "the edit returned $?"' bash "${work}" "${_PROJECT_ROOT}/.lok8s"
   # the username, the password or the captured manifest, without an error.
   # Two runs: the names that are -u in the first run are -l in the second.
   # Both credentials hold upper and lower case letters.
+  _need_localvar_inherit
   _registry_fixture 1
   _registry_password 'fixture-Password-1'
   printf '%s' 'fixture-User-1' > "${PATH_CLUSTERS}/ko.cloud/secrets/Secret.fixture-pull-1.provisioning.username"
@@ -764,12 +773,6 @@ echo "the merge returned $?"' bash "${work}" "${CY}" "${_PROJECT_ROOT}/.lok8s" "
     run _written password 'fixture-Password-1'
     assert_output "true"
   done
-}
-
-# _need_localvar_inherit: skip the case when this bash has no
-# `shopt localvar_inherit` (bash 5.0 and later have it).
-_need_localvar_inherit() {
-  bash -c 'shopt -s localvar_inherit' 2>/dev/null || skip "this bash has no shopt localvar_inherit"
 }
 
 # _registry_array_case <declare arguments>: the registry merge under
