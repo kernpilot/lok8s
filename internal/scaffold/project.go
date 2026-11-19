@@ -150,7 +150,6 @@ var gitignoreEntries = []string{
 	"**/clusters/*/.kkp/",
 	"**/clusters/*/.provider/",
 	"**/clusters/*/.oidc/",
-	"**/clusters/*/.containerd/",
 	"**/clusters/*/.registries.json",
 	"**/clusters/*/.docker.sock",
 }
