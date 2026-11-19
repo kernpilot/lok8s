@@ -100,6 +100,14 @@ for d in mock nodoc norebuild; do
     > "${PROJ}/clusters/${d}.cloud/cluster.lok8s.yaml"
   printf 'cluster_name: %sy\n' "${d}" > "${PROJ}/clusters/${d}.cloud/provider.yaml"
 done
+# twin-a.cloud and twin-b.cloud: one domain copied from the other with the
+# same cluster_name (recover refuses both).
+for d in twin-a twin-b; do
+  mkdir -p "${PROJ}/clusters/${d}.cloud"
+  printf 'kind: KubeOne\nmetadata:\n  name: %s\nspec:\n  provider:\n    name: mock\n    configRef: provider.yaml\n' "${d}" \
+    > "${PROJ}/clusters/${d}.cloud/cluster.lok8s.yaml"
+  printf 'cluster_name: twiny\n' > "${PROJ}/clusters/${d}.cloud/provider.yaml"
+done
 echo alpha.dev > "${PROJ}/clusters/.active"
 
 # The deploy artifact: one CRD, one labelled Namespace (with an UNQUOTED
@@ -236,6 +244,27 @@ check - recover mock.cloud
 check "   " recover mock.cloud
 check no recover mock.cloud --skip-rebuild     # re-provision wording
 check no recover nodoc.cloud                   # "no doctor hook" branch, then the prompt
+# A cluster_name that another domain also has: refused at resolve, before the
+# doctor, the dry run and the consent. A "yes", --force, --dry-run and
+# LOK8S_NONINTERACTIVE do not skip it. Both implementations could pass the
+# diff and still run the rebuild, so check the refusal and that no rebuild ran.
+refused_shared() {
+  grep -qF "[error] recover: cluster_name 'twiny' of '${1}' is also the cluster_name of: ${2}. " "${WORK}/go.err" \
+    || fail "recover ${1}: no refusal of the shared cluster_name on stderr"
+  ! grep -qF "mock rebuild" "${WORK}/go.out" "${WORK}/go.err" || fail "recover ${1}: the rebuild ran"
+}
+check yes recover twin-a.cloud
+refused_shared twin-a.cloud twin-b.cloud
+check - recover --force twin-a.cloud
+refused_shared twin-a.cloud twin-b.cloud
+check - recover --dry-run twin-b.cloud
+refused_shared twin-b.cloud twin-a.cloud
+check - recover --force --skip-rebuild twin-b.cloud
+refused_shared twin-b.cloud twin-a.cloud
+export LOK8S_NONINTERACTIVE=1
+check - recover twin-a.cloud
+refused_shared twin-a.cloud twin-b.cloud
+unset LOK8S_NONINTERACTIVE
 # --dry-run: the mock rebuild runs under CLOUD_DRY_RUN; provision never.
 check - recover --dry-run mock.cloud
 check - recover -v --dry-run mock.cloud

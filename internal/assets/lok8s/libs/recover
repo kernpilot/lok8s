@@ -23,6 +23,9 @@
 #   • `--dry-run` is genuinely safe: it exports CLOUD_DRY_RUN so provider::rebuild
 #     takes its dry-run branches (prints the plan, reimages NOTHING), then STOPS
 #     before any real provision/verify.
+#   • A cluster_name that another domain also has is refused at resolve
+#     (recover::_cluster_name_guard), as `lo destroy` refuses it. --force,
+#     LOK8S_NONINTERACTIVE and --dry-run do not skip this check.
 #   • The consent prompt reads stdin, and nothing reads it first. Every call
 #     before the consent runs with </dev/null: an ssh probe in provider::doctor
 #     without -n reads its stdin to the end, so a piped `yes` never reached the
@@ -191,6 +194,40 @@ recover::_resolve() {
 
   _RECOVER_CLUSTER_NAME="$(recover::_cluster_name)"
   debug "recover: resolved ${_RECOVER_DOMAIN} → provider=${_RECOVER_PROVIDER} cluster=${_RECOVER_CLUSTER_NAME}"
+  recover::_cluster_name_guard
+}
+
+# recover::_cluster_name_guard — refuse a cluster_name that another domain under
+# clusters/ also has in its provider config (Go twin: Runner.guardClusterName).
+# It is the check of the destroy guard (provision::_destroy_guard): the hetzner
+# provider::rebuild resets the servers with lok8s.dev/cluster=<cluster_name> and
+# the owner mark of this domain. A domain copied from another one that kept the
+# cluster_name and the token labels its servers the same way, and only the mark
+# keeps the two apart: a server of the other domain with a wrong mark would be
+# reset.
+#
+# It reads the cluster_name of the provider config only, because the provider
+# finds its servers by that name. The other names of recover::_cluster_name (the
+# spec metadata.name, the domain) are names for the prompt. A config without a
+# cluster_name is not checked: the hetzner rebuild refuses it. A scan that fails
+# stops the recover.
+#
+# As in the destroy guard, nothing skips this check: not --force, not
+# LOK8S_NONINTERACTIVE, not --dry-run. It runs at the end of resolve, before the
+# doctor, the dry run and the consent.
+recover::_cluster_name_guard() {
+  local name="" users
+  if [[ -f "${_RECOVER_CONFIG:-}" ]]; then
+    name="$(yq -r '.cluster_name // ""' "${_RECOVER_CONFIG}" 2>/dev/null)" || name=""
+  fi
+  [[ -n "${name}" ]] || return 0
+  if ! users="$(provision::_cluster_name_users "${_RECOVER_DOMAIN}" "${name}")"; then
+    error "recover: could not check if another domain has the cluster_name '${name}' of '${_RECOVER_DOMAIN}'. Nothing was changed. Run lo recover again."
+    return 1
+  fi
+  [[ -n "${users}" ]] || return 0
+  error "recover: cluster_name '${name}' of '${_RECOVER_DOMAIN}' is also the cluster_name of: ${users//$'\n'/, }. The rebuild resets only the servers with this cluster_name and the owner mark of '${_RECOVER_DOMAIN}'. The servers of those domains have the same cluster label, so only the mark keeps them apart: a server of another domain with a wrong mark would be reset. Nothing was changed. Give each domain its own cluster_name, then run lo recover again."
+  return 1
 }
 
 # recover::_load_provider — resolve + source the cluster's infrastructure

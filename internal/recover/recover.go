@@ -29,6 +29,9 @@
 //   - `--dry-run` is genuinely safe: it exports CLOUD_DRY_RUN so
 //     provider::rebuild takes its dry-run branches (prints the plan, reimages
 //     NOTHING), then STOPS before any real provision/verify.
+//   - A cluster_name that another domain also has is refused at resolve
+//     (guardClusterName), as `lo destroy` refuses it. --force,
+//     LOK8S_NONINTERACTIVE and --dry-run do not skip this check.
 //
 // Providers and the provision dispatch are BASH plugins today (no Go
 // hetzner provider; the Go provision.Dispatcher has no provider loader and
@@ -63,6 +66,7 @@ import (
 	"github.com/kernpilot/lok8s/internal/provision"
 	"github.com/kernpilot/lok8s/internal/toolchain"
 	"github.com/kernpilot/lok8s/internal/ui"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // ErrHandled marks a failure whose diagnostic was already printed.
@@ -338,7 +342,38 @@ func (r *Runner) resolve(ctx context.Context) error {
 
 	r.clusterName = r.resolveClusterName()
 	ui.DebugTo(stderr, "recover: resolved %s → provider=%s cluster=%s", r.domain, r.provider, r.clusterName)
-	return nil
+	return r.guardClusterName()
+}
+
+// guardClusterName refuses a cluster_name that another domain under
+// clusters/ also has in its provider config (bash:
+// recover::_cluster_name_guard). It is the check of the destroy guard
+// (provision guardDestroy): the hetzner provider::rebuild resets the servers
+// with lok8s.dev/cluster=<cluster_name> and the owner mark of this domain. A
+// domain copied from another one that kept the cluster_name and the token
+// labels its servers the same way, and only the mark keeps the two apart: a
+// server of the other domain with a wrong mark would be reset.
+//
+// It reads the cluster_name of the provider config only, because the
+// provider finds its servers by that name. The other names of
+// resolveClusterName (the spec metadata.name, the domain) are names for the
+// prompt. A config without a cluster_name is not checked: the hetzner
+// rebuild refuses it.
+//
+// As in the destroy guard, nothing skips this check: not --force, not
+// LOK8S_NONINTERACTIVE, not --dry-run. It runs at the end of resolve, before
+// the doctor, the dry run and the consent.
+func (r *Runner) guardClusterName() error {
+	name := ""
+	if fsutil.IsRegular(r.config) {
+		name = yqsem.Or(yqsem.MapGet(yqsem.LoadNode(r.config), "cluster_name"), "")
+	}
+	users := domain.ProviderClusterNameUsers(r.Paths.Clusters, r.domain, name)
+	if len(users) == 0 {
+		return nil
+	}
+	ui.ErrorTo(r.errOut(), "recover: cluster_name '%s' of '%s' is also the cluster_name of: %s. The rebuild resets only the servers with this cluster_name and the owner mark of '%s'. The servers of those domains have the same cluster label, so only the mark keeps them apart: a server of another domain with a wrong mark would be reset. Nothing was changed. Give each domain its own cluster_name, then run lo recover again.", name, r.domain, strings.Join(users, ", "), r.domain)
+	return ErrHandled
 }
 
 // providerNameRe is provider::read_name's allowlist.

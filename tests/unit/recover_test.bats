@@ -667,3 +667,128 @@ EOF
   [ "$status" -ne 0 ]
   [[ "$output" == *"too many arguments"*"stray-token"* ]]
 }
+
+# ── the cluster_name guard ───────────────────────────────────────────────────
+# The hetzner provider::rebuild resets the servers with
+# lok8s.dev/cluster=<cluster_name> and the owner mark of the domain. A
+# cluster_name that another domain under clusters/ also has in its provider
+# config is refused at resolve (recover::_cluster_name_guard, Go twin:
+# Runner.guardClusterName), before the doctor, the dry run and the consent.
+# As in the destroy guard, nothing skips it. The real
+# provision::_cluster_name_users of the provision lib scans clusters/.
+
+# _shared_name_setup: the provision lib (for its scan), the fakes, and a
+# provider::rebuild that records a line that the refusal tests refute. The
+# provider config of test.dom and the hetzner.json of copy.dom have the
+# cluster_name "shared".
+_shared_name_setup() {
+  # shellcheck source=/dev/null
+  source "${_PROJECT_ROOT}/.lok8s/libs/provision"
+  _fakes_all
+  provision::load_provider_creds() { :; }
+  provider::rebuild() { echo "REBUILD-RAN" >> "${RECORD}"; return 1; }
+  printf '{"cluster_name": "shared"}\n' > "${_FAKE_CFG}"
+  mkdir -p "${PATH_CLUSTERS}/copy.dom"
+  printf '{"cluster_name": "shared"}\n' > "${PATH_CLUSTERS}/copy.dom/hetzner.json"
+}
+
+# _assert_refused: the refusal, and nothing ran after the resolve (no doctor,
+# no rebuild, no provision).
+_assert_refused() {
+  assert_failure 1
+  assert_output --partial "[error] recover: cluster_name 'shared' of 'test.dom' is also the cluster_name of: copy.dom. The rebuild resets only the servers with this cluster_name and the owner mark of 'test.dom'."
+  assert_output --partial "Nothing was changed. Give each domain its own cluster_name, then run lo recover again."
+  refute_output --partial "continue? [type yes"
+  refute_output --partial "DRY RUN"
+  run cat "${RECORD}"
+  assert_output "resolve"
+}
+
+@test "recover refuses a cluster_name that another domain has: a yes at the prompt" {
+  _shared_name_setup
+  run recover::_run "test.dom" 0 0 <<<"yes"
+  _assert_refused
+}
+
+@test "recover refuses a cluster_name that another domain has: --force" {
+  _shared_name_setup
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  _assert_refused
+}
+
+@test "recover refuses a cluster_name that another domain has: LOK8S_NONINTERACTIVE" {
+  _shared_name_setup
+  export LOK8S_NONINTERACTIVE=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  _assert_refused
+}
+
+@test "recover refuses a cluster_name that another domain has: --dry-run" {
+  _shared_name_setup
+  run recover::_run "test.dom" 0 1 </dev/null
+  _assert_refused
+}
+
+@test "recover refuses a cluster_name that another domain has: --force --skip-rebuild" {
+  _shared_name_setup
+  force=1
+  run recover::_run "test.dom" 1 0 </dev/null
+  _assert_refused
+}
+
+@test "recover refuses a cluster_name of an inline config and a configRef too, and names each domain, sorted" {
+  _shared_name_setup
+  mkdir -p "${PATH_CLUSTERS}/b.dom" "${PATH_CLUSTERS}/ref.dom/infra"
+  printf 'kind: KubeOne\nmetadata:\n  name: b\nspec:\n  provider:\n    name: mock\n    config:\n      cluster_name: shared\n' \
+    > "${PATH_CLUSTERS}/b.dom/cluster.lok8s.yaml"
+  printf 'kind: KubeOne\nmetadata:\n  name: ref\nspec:\n  provider:\n    name: mock\n    configRef: infra/desc.yaml\n' \
+    > "${PATH_CLUSTERS}/ref.dom/cluster.lok8s.yaml"
+  printf 'cluster_name: shared\n' > "${PATH_CLUSTERS}/ref.dom/infra/desc.yaml"
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_failure 1
+  assert_output --partial "is also the cluster_name of: b.dom, copy.dom, ref.dom. "
+  run cat "${RECORD}"
+  assert_output "resolve"
+}
+
+@test "recover runs when only this domain has the cluster_name (its own files, a dot dir, another name)" {
+  _shared_name_setup
+  _fake_rebuild
+  printf '{"cluster_name": "other"}\n' > "${PATH_CLUSTERS}/copy.dom/hetzner.json"
+  mkdir -p "${PATH_CLUSTERS}/test.dom" "${PATH_CLUSTERS}/.old"
+  printf '{"cluster_name": "shared"}\n' > "${PATH_CLUSTERS}/test.dom/hetzner.json"
+  printf '{"cluster_name": "shared"}\n' > "${PATH_CLUSTERS}/.old/hetzner.json"
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_success
+  refute_output --partial "is also the cluster_name of"
+  run cat "${RECORD}"
+  assert_output --partial "rebuild cfg=${_FAKE_CFG}"
+  assert_output --partial "provision test.dom"
+}
+
+@test "recover checks the cluster_name of the provider config only, not the name of the prompt" {
+  _shared_name_setup
+  _fake_rebuild
+  printf '{}\n' > "${_FAKE_CFG}"
+  printf '{"cluster_name": "test.dom"}\n' > "${PATH_CLUSTERS}/copy.dom/hetzner.json"
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_success
+  refute_output --partial "is also the cluster_name of"
+  run cat "${RECORD}"
+  assert_output --partial "provision test.dom"
+}
+
+@test "recover stops when the cluster_name scan fails" {
+  _shared_name_setup
+  provision::_cluster_name_users() { return 1; }
+  force=1
+  run recover::_run "test.dom" 0 0 </dev/null
+  assert_failure 1
+  assert_output --partial "[error] recover: could not check if another domain has the cluster_name 'shared' of 'test.dom'. Nothing was changed. Run lo recover again."
+  run cat "${RECORD}"
+  assert_output "resolve"
+}

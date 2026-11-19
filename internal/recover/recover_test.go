@@ -611,3 +611,137 @@ func (a *argvRecorder) Run(ctx context.Context, c execx.Cmd) error {
 	}
 	return nil
 }
+
+// sharedNameForms are the three places where the spec of another domain can
+// carry the cluster_name "shared": hetzner.json, the file of
+// spec.provider.configRef, and an inline spec.provider.config.
+var sharedNameForms = []struct {
+	name  string
+	write func(t *testing.T, dir string)
+}{
+	{"hetzner.json", func(t *testing.T, dir string) {
+		testutil.WriteFile(t, filepath.Join(dir, "hetzner.json"), `{"cluster_name": "shared"}`+"\n")
+	}},
+	{"configRef", func(t *testing.T, dir string) {
+		testutil.WriteFile(t, filepath.Join(dir, "cluster.lok8s.yaml"), "kind: KubeOne\nmetadata:\n  name: copy\nspec:\n  provider:\n    name: mock\n    configRef: infra/desc.yaml\n")
+		testutil.WriteFile(t, filepath.Join(dir, "infra", "desc.yaml"), "cluster_name: shared\n")
+	}},
+	{"inline", func(t *testing.T, dir string) {
+		testutil.WriteFile(t, filepath.Join(dir, "cluster.lok8s.yaml"), "kind: KubeOne\nmetadata:\n  name: copy\nspec:\n  provider:\n    name: mock\n    config:\n      cluster_name: shared\n")
+	}},
+}
+
+// bats: "recover refuses a cluster_name that another domain has: ..."
+// Another domain has the cluster_name of this domain's provider config. Run
+// refuses at resolve, before the doctor, the dry run and the consent: the
+// fake provider records no doctor and no rebuild, and nothing is
+// provisioned. No mode skips the check (the destroy guard has no bypass
+// either): not a "yes" at the prompt, not --force, not
+// LOK8S_NONINTERACTIVE, not --dry-run, not --skip-rebuild.
+func TestRunRefusesAClusterNameOfAnotherDomain(t *testing.T) {
+	modes := []struct {
+		name                                       string
+		force, nonInteractive, skipRebuild, dryRun bool
+	}{
+		{name: "yes at the prompt"},
+		{name: "force", force: true},
+		{name: "noninteractive", nonInteractive: true},
+		{name: "dry-run", dryRun: true},
+		{name: "force dry-run", force: true, dryRun: true},
+		{name: "force skip-rebuild", force: true, skipRebuild: true},
+	}
+	for _, form := range sharedNameForms {
+		for _, m := range modes {
+			t.Run(form.name+"/"+m.name, func(t *testing.T) {
+				h := newHarness(t)
+				testutil.WriteFile(t, h.cfg, `{"cluster_name": "shared"}`+"\n")
+				form.write(t, filepath.Join(h.r.Paths.Clusters, "copy.dom"))
+				h.r.Force = m.force
+				h.r.In = strings.NewReader("yes\n")
+				if m.nonInteractive {
+					t.Setenv("LOK8S_NONINTERACTIVE", "1")
+				}
+				err := h.r.Run(t.Context(), "test.dom", m.skipRebuild, m.dryRun)
+				if !errors.Is(err, ErrHandled) {
+					t.Fatalf("err = %v, want ErrHandled", err)
+				}
+				for _, want := range []string{
+					"[error] recover: cluster_name 'shared' of 'test.dom' is also the cluster_name of: copy.dom. The rebuild resets only the servers with this cluster_name and the owner mark of 'test.dom'.",
+					" Nothing was changed. Give each domain its own cluster_name, then run lo recover again.\n",
+				} {
+					if !strings.Contains(h.errBuf.String(), want) {
+						t.Errorf("missing %q in stderr:\n%s", want, h.errBuf.String())
+					}
+				}
+				if got := h.recorded(); got != "resolve" {
+					t.Errorf("record = %q, want only the resolve (no doctor, rebuild or provision)", got)
+				}
+				for _, not := range []string{"continue? [type yes", "DRY RUN"} {
+					if strings.Contains(h.all(), not) {
+						t.Errorf("%q after the refusal:\n%s", not, h.all())
+					}
+				}
+				if os.Getenv("CLOUD_DRY_RUN") != "" {
+					t.Error("CLOUD_DRY_RUN must be unset after the refusal")
+				}
+			})
+		}
+	}
+}
+
+// The refusal names every other domain with the cluster_name, sorted.
+func TestRunClusterNameGuardNamesEveryDomain(t *testing.T) {
+	h := newHarness(t)
+	h.r.Force = true
+	testutil.WriteFile(t, h.cfg, `{"cluster_name": "shared"}`+"\n")
+	sharedNameForms[0].write(t, filepath.Join(h.r.Paths.Clusters, "copy.dom"))
+	sharedNameForms[2].write(t, filepath.Join(h.r.Paths.Clusters, "b.dom"))
+	if err := h.r.Run(t.Context(), "test.dom", false, false); !errors.Is(err, ErrHandled) {
+		t.Fatalf("err = %v, want ErrHandled", err)
+	}
+	if want := "is also the cluster_name of: b.dom, copy.dom. "; !strings.Contains(h.errBuf.String(), want) {
+		t.Errorf("missing %q in stderr:\n%s", want, h.errBuf.String())
+	}
+}
+
+// The check counts the other domains only, and reads the cluster_name of
+// this domain's provider config only. This domain's own files, a dot dir
+// and a domain with another cluster_name refuse nothing. A config without
+// a cluster_name is not checked: a domain whose cluster_name is the name
+// that the prompt shows for this domain (the domain itself) refuses
+// nothing. The recover runs to the end.
+func TestRunClusterNameGuardPasses(t *testing.T) {
+	cases := []struct {
+		name   string
+		config string
+		files  map[string]string
+	}{
+		{"own files, a dot dir, another name", `{"cluster_name": "shared"}`, map[string]string{
+			"test.dom/hetzner.json":  `{"cluster_name": "shared"}`,
+			".old/hetzner.json":      `{"cluster_name": "shared"}`,
+			"other.dom/hetzner.json": `{"cluster_name": "other"}`,
+		}},
+		{"no cluster_name in the config", `{}`, map[string]string{
+			"other.dom/hetzner.json": `{"cluster_name": "test.dom"}`,
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.r.Force = true
+			testutil.WriteFile(t, h.cfg, c.config+"\n")
+			for rel, body := range c.files {
+				testutil.WriteFile(t, filepath.Join(h.r.Paths.Clusters, filepath.FromSlash(rel)), body+"\n")
+			}
+			if err := h.r.Run(t.Context(), "test.dom", false, false); err != nil {
+				t.Fatalf("err = %v\n%s", err, h.all())
+			}
+			if rec := h.recorded(); !strings.Contains(rec, "rebuild cfg=") || !strings.Contains(rec, "provision test.dom") {
+				t.Errorf("record = %q, want the rebuild and the provision", rec)
+			}
+			if strings.Contains(h.errBuf.String(), "is also the cluster_name of") {
+				t.Errorf("refused:\n%s", h.errBuf.String())
+			}
+		})
+	}
+}
