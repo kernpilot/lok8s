@@ -124,9 +124,12 @@ spec:
                       '{"domain":"%s","agentTokenHash":"%s","claimCodeHash":"%s"%s}' \
                       "${CLUSTER_ID}" "${AGENT_TOKEN_HASH}" "${CLAIM_CODE_HASH}" "${BIND_FIELD}")
                     # The payload (it can carry the bind secret) reaches curl on stdin,
-                    # never on argv.
+                    # never on argv. -q first, here and in each call below: curl reads
+                    # no config file (.curlrc in CURL_HOME or HOME, curlrc in
+                    # XDG_CONFIG_HOME). A trace-ascii line there would log the bearer or
+                    # the body. curl obeys -q only as its first argument.
                     printf '%s' "${REGISTER_PAYLOAD}" |
-                      curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/agent-register" \
+                      curl -q -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/agent-register" \
                       -H "Content-Type: application/json" \
                       --data-binary @- >/dev/null 2>&1 \
                       || echo "kubehz: agent-register attempt failed; retrying next tick" >&2
@@ -633,7 +636,7 @@ spec:
                   # The bearer reaches curl in a config on fd 3 (a here-document), the
                   # payload (it can carry the claim nonce) on stdin. Neither is on argv.
                   RESPONSE=$(printf '%s' "${PAYLOAD}" |
-                    curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
+                    curl -q -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
                     -H "Content-Type: application/json" \
                     -K /dev/fd/3 --data-binary @- 3<<AUTH_EOF
                   header = "Authorization: Bearer ${AGENT_TOKEN}"
@@ -659,7 +662,7 @@ spec:
                   )
                     HB_RC=0
                     RESPONSE=$(printf '%s' "${PLAIN_PAYLOAD}" |
-                      curl -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
+                      curl -q -fsSL -X POST "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/heartbeat" \
                       -H "Content-Type: application/json" \
                       -K /dev/fd/3 --data-binary @- 3<<AUTH_EOF
                   header = "Authorization: Bearer ${AGENT_TOKEN}"
@@ -755,7 +758,7 @@ spec:
                   DES_RC=0
                   # The bearer reaches curl in a config on stdin (-K -), never on argv.
                   DES_OUT=$(printf 'header = "Authorization: Bearer %s"\n' "${AGENT_TOKEN}" |
-                    curl -sS -D - -w '\n__code=%{http_code}' -K - "$@" \
+                    curl -q -sS -D - -w '\n__code=%{http_code}' -K - "$@" \
                     "${KUBEHZ_API_URL}/api/clusters/${CLUSTER_ID}/desired" 2>/dev/null) || DES_RC=$?
                   if [ "${DES_RC}" -ne 0 ]; then
                     echo "kubehz: desired-state poll failed (curl rc=${DES_RC}); retrying next tick" >&2

@@ -57,9 +57,13 @@ kubehz::wait_for_cluster() {
   while (( elapsed < timeout )); do
     # GET /api/clusters/{id} is an enveloped UI route ({ok,data,traceId}), so the
     # status is at .data.status; the // .status fallback tolerates a bare body.
-    status_val=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
-      curl -K - -fsSL "${api_url}/api/clusters/${cluster_id}" 2>/dev/null \
-      | jq -r '.data.status // .status // "Unknown"') || status_val="Unknown"
+    # -q first and the subshell with http::tls_log_vars_unset: curl reads no
+    # config file of the user and gets no TLS log or trace control
+    # (utils/http.sh).
+    status_val=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
+      http::tls_log_vars_unset &&
+        curl -q -K - -fsSL "${api_url}/api/clusters/${cluster_id}" 2>/dev/null
+    ) | jq -r '.data.status // .status // "Unknown"') || status_val="Unknown"
 
     case "${status_val}" in
       Running|ready|Ready)
@@ -142,11 +146,16 @@ kubehz::provision_hosted() {
   # curl's -f (fail-silently-on-HTTP-error) here so a 503 AT_CAPACITY body is
   # available to render — the capacity envelope is the whole point. The status is
   # appended on its own trailing line via -w and split off.
+  # -q first and the subshell with http::tls_log_vars_unset: curl reads no
+  # config file of the user and gets no TLS log or trace control
+  # (utils/http.sh).
   local raw response http_code
-  raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" |
-    curl -K - -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters" \
-    -H "Content-Type: application/json" \
-    -d "${payload}") || {
+  raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" | (
+    http::tls_log_vars_unset &&
+      curl -q -K - -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters" \
+        -H "Content-Type: application/json" \
+        -d "${payload}"
+  ) ) || {
     error "Failed to create hosted cluster via kubehz API (network error)"
     return 1
   }
@@ -189,9 +198,13 @@ kubehz::provision_hosted() {
   # Download kubeconfig
   local kubeconfig_path="${PATH_BASE}/.kubeconfig/${domain}.yaml"
   mkdir -p "$(dirname "${kubeconfig_path}")"
-  http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" |
-    curl -K - -fsSL "${api_url}/api/clusters/${cluster_id}/kubeconfig" \
-    > "${kubeconfig_path}" || {
+  # -q first: an output line in a config file of the user would take the
+  # kubeconfig. The subshell with http::tls_log_vars_unset: curl gets no TLS
+  # log or trace control (utils/http.sh).
+  http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}" | (
+    http::tls_log_vars_unset &&
+      curl -q -K - -fsSL "${api_url}/api/clusters/${cluster_id}/kubeconfig"
+  ) > "${kubeconfig_path}" || {
     error "Failed to download kubeconfig for hosted cluster ${cluster_id}"
     return 1
   }
@@ -252,9 +265,14 @@ kubehz::destroy_hosted() {
   else
     # Status + body captured (the re-enroll idiom): a refused delete must
     # surface with the api's own message, not vanish into `curl -f`.
+    # -q first and the subshell with http::tls_log_vars_unset: curl reads no
+    # config file of the user and gets no TLS log or trace control
+    # (utils/http.sh).
     local response http_code
-    response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
-      curl -K - -sSL -w $'\n%{http_code}' -X DELETE "${api_url}/api/clusters/${cluster_id}") || {
+    response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
+      http::tls_log_vars_unset &&
+        curl -q -K - -sSL -w $'\n%{http_code}' -X DELETE "${api_url}/api/clusters/${cluster_id}"
+    ) ) || {
       error "kubehz: DELETE /api/clusters/${cluster_id} failed (network) — the hosted cluster can still exist and bill. Retry when ${api_url} is reachable."
       return 1
     }

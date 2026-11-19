@@ -1338,17 +1338,25 @@ kubeone::_name_robot_workers() {
     # exit instead of a 200-shaped error body; a real failure here must surface —
     # an unnamed server can't be matched by the CCM and stays NotReady. The
     # user and password reach curl in a config on stdin, never on argv
-    # (http::curl_config).
-    if ! servers=$(http::curl_config user "${HROBOT_USER}:${HROBOT_PASSWORD}" | curl -K - -sS -f \
-        "https://robot-ws.your-server.de/server" 2>/dev/null); then
+    # (http::curl_config). -q first and the subshell with
+    # http::tls_log_vars_unset: curl reads no config file of the user and
+    # gets no TLS log or trace control (utils/http.sh).
+    if ! servers=$(http::curl_config user "${HROBOT_USER}:${HROBOT_PASSWORD}" | (
+        http::tls_log_vars_unset &&
+          curl -q -K - -sS -f \
+            "https://robot-ws.your-server.de/server" 2>/dev/null
+      ) ); then
       error "robot: failed to list servers (network/credentials?) — cannot name worker ${hostname}"
       return 1
     fi
     num=$(jq -r --arg ip "${pubip}" '.[].server | select(.server_ip==$ip) | .server_number' <<<"${servers}" 2>/dev/null | head -1)
     # Not in the Robot inventory → a cloud (non-bare-metal) static worker; skip.
     [[ -n "${num}" ]] || continue
-    if ! http::curl_config user "${HROBOT_USER}:${HROBOT_PASSWORD}" | curl -K - -sS -f \
-        -d "server_name=${hostname}" "https://robot-ws.your-server.de/server/${num}" >/dev/null 2>&1; then
+    if ! http::curl_config user "${HROBOT_USER}:${HROBOT_PASSWORD}" | (
+        http::tls_log_vars_unset &&
+          curl -q -K - -sS -f \
+            -d "server_name=${hostname}" "https://robot-ws.your-server.de/server/${num}" >/dev/null 2>&1
+      ); then
       error "robot: failed to set name '${hostname}' on server ${num}"
       return 1
     fi

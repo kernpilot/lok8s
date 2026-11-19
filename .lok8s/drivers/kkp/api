@@ -108,7 +108,18 @@ kkp::api() {
   while (( attempt < KKP_MAX_RETRIES )); do
     attempt=$(( attempt + 1 ))
 
-    output=$(printf '%s\n' "${curl_config}" | curl "${curl_args[@]}" "${url}" 2>&1) || true
+    # -q first: curl reads no config file of the user (.curlrc in CURL_HOME
+    # or HOME, curlrc in XDG_CONFIG_HOME). A trace-ascii line there would
+    # log the bearer and the body, an output line would write the answer to
+    # another file. curl obeys -q only as its first argument. In the
+    # subshell, http::tls_log_vars_unset clears the TLS log and trace
+    # controls for curl only (utils/http.sh). A readonly name in that list
+    # stops the call before curl runs: the output is then empty, and the
+    # call fails with an empty HTTP status.
+    output=$(printf '%s\n' "${curl_config}" | (
+      http::tls_log_vars_unset &&
+        curl -q "${curl_args[@]}" "${url}" 2>&1
+    ) ) || true
 
     # Split response body and HTTP status code
     http_code=$(echo "${output}" | tail -n1)

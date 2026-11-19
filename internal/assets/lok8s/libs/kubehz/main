@@ -439,19 +439,27 @@ kubehz::register_post() (
   trap 'rm -rf "${tmp}"' EXIT
   while :; do
     rc=0
+    # Both bodies can carry the bind secret, and the answer can hand one
+    # out. -q first and the subshell with http::tls_log_vars_unset: curl
+    # reads no config file of the user and gets no TLS log or trace
+    # control (the reasons are in utils/http.sh).
     if [[ "${auth}" == bearer ]]; then
-      raw=$(printf '%s\n' "${body}" |
-        curl -sSL --proto-redir =https -X POST "${api_url}/api/clusters/register" \
-          -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}") \
-          -H "Content-Type: application/json" \
-          -D "${tmp}/headers" -w $'\n%{http_code}' \
-          --data-binary @-) || rc=$?
+      raw=$(printf '%s\n' "${body}" | (
+        http::tls_log_vars_unset &&
+          curl -q -sSL --proto-redir =https -X POST "${api_url}/api/clusters/register" \
+            -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}") \
+            -H "Content-Type: application/json" \
+            -D "${tmp}/headers" -w $'\n%{http_code}' \
+            --data-binary @-
+      ) ) || rc=$?
     else
-      raw=$(printf '%s\n' "${body}" |
-        curl -sSL --proto-redir =https -X POST "${api_url}/api/clusters/register" \
-          -H "Content-Type: application/json" \
-          -D "${tmp}/headers" -w $'\n%{http_code}' \
-          --data-binary @-) || rc=$?
+      raw=$(printf '%s\n' "${body}" | (
+        http::tls_log_vars_unset &&
+          curl -q -sSL --proto-redir =https -X POST "${api_url}/api/clusters/register" \
+            -H "Content-Type: application/json" \
+            -D "${tmp}/headers" -w $'\n%{http_code}' \
+            --data-binary @-
+      ) ) || rc=$?
     fi
     # A non-zero rc is a transport failure (curl's own line shows): no answer.
     (( rc == 0 )) || return 1
@@ -593,20 +601,31 @@ kubehz::ensure_claim_key() {
     kubehz::claim_key_no_mark "${key_name}"
     return 1
   fi
-  keys=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL \
-    "${hcloud_api}/v1/ssh_keys?name=${key_name}") || keys=""
+  # -q first and the subshell with http::tls_log_vars_unset: curl reads no
+  # config file of the user and gets no TLS log or trace control
+  # (utils/http.sh).
+  keys=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | (
+    http::tls_log_vars_unset &&
+      curl -q -K - -fsSL \
+        "${hcloud_api}/v1/ssh_keys?name=${key_name}"
+  ) ) || keys=""
   existing_id=$(jq -r '.ssh_keys[0].id // empty' <<<"${keys}" 2>/dev/null) || existing_id=""
   if [[ -n "${existing_id}" ]]; then
     kubehz::claim_key_own "${keys}" "${domain}" replace "${key_name}" || return 1
-    http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL -X DELETE \
-      "${hcloud_api}/v1/ssh_keys/${existing_id}" >/dev/null || true
+    http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | (
+      http::tls_log_vars_unset &&
+        curl -q -K - -fsSL -X DELETE \
+          "${hcloud_api}/v1/ssh_keys/${existing_id}" >/dev/null
+    ) || true
   fi
   jq -n --arg n "${key_name}" --arg k "${public_key}" --arg l "${_KUBEHZ_CLAIM_LABEL}" --arg m "${mark}" \
-    '{name: $n, public_key: $k, labels: {($l): $m}}' |
-    curl -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
-      -K <(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}") \
-      -H "Content-Type: application/json" \
-      --data-binary @- >/dev/null || return 1
+    '{name: $n, public_key: $k, labels: {($l): $m}}' | (
+    http::tls_log_vars_unset &&
+      curl -q -fsSL -X POST "${hcloud_api}/v1/ssh_keys" \
+        -K <(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}") \
+        -H "Content-Type: application/json" \
+        --data-binary @- >/dev/null
+  ) || return 1
 
   debug "Cluster registered with kubehz claim key (pending claim): ${cluster_id}"
   echo "kubehz: cluster '${domain}' registered (pending). Claim key '${key_name}' uploaded to your Hetzner Cloud account."
@@ -683,12 +702,17 @@ kubehz::direct_claim() {
       return 0
     fi
     local cred
+    # -q first and the subshell with http::tls_log_vars_unset: curl reads
+    # no config file of the user and gets no TLS log or trace control
+    # (utils/http.sh).
     cred=$(printf '%s' "${HCLOUD_TOKEN}" |
-      jq -Rs --arg c "${cluster_id}" '{type: "hcloud_token", value: ., validate: true, clusterId: $c}' |
-      curl -fsSL --proto-redir =https -X POST "${api_url}/api/credentials" \
-        -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}") \
-        -H "Content-Type: application/json" \
-        --data-binary @-) || {
+      jq -Rs --arg c "${cluster_id}" '{type: "hcloud_token", value: ., validate: true, clusterId: $c}' | (
+      http::tls_log_vars_unset &&
+        curl -q -fsSL --proto-redir =https -X POST "${api_url}/api/credentials" \
+          -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}") \
+          -H "Content-Type: application/json" \
+          --data-binary @-
+    ) ) || {
       warn "kubehz: could not connect the hcloud token (provisioning stays locked until you add it in the dashboard)."
       return 0
     }
@@ -842,10 +866,15 @@ kubehz::deregister_cluster() {
     else
       # Status + body captured (the re-enroll idiom): a refused delete must
       # surface with the api's own message, not vanish into `curl -f`.
+      # -q first and the subshell with http::tls_log_vars_unset: curl reads
+      # no config file of the user and gets no TLS log or trace control
+      # (utils/http.sh).
       local response http_code
-      if ! response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
-        curl -K - -sSL -w $'\n%{http_code}' -X DELETE \
-        "${api_url}/api/clusters/${cluster_id}"); then
+      if ! response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
+        http::tls_log_vars_unset &&
+          curl -q -K - -sSL -w $'\n%{http_code}' -X DELETE \
+            "${api_url}/api/clusters/${cluster_id}"
+      ) ); then
         error "kubehz: DELETE /api/clusters/${cluster_id} failed (network) — the registration for ${domain} was not removed. Retry when ${api_url} is reachable."
         rc=1
       else
@@ -870,12 +899,18 @@ kubehz::deregister_cluster() {
   if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
     local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}" keys key_id
     if http::require_https "${hcloud_api}" "HCLOUD_API_BASE" && http::credential_ok HCLOUD_TOKEN; then
-      keys=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | curl -K - -fsSL \
-        "${hcloud_api}/v1/ssh_keys?name=kubehz-claim-${domain}") || keys=""
+      # -q first and the subshell with http::tls_log_vars_unset (utils/http.sh).
+      keys=$(http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | (
+        http::tls_log_vars_unset &&
+          curl -q -K - -fsSL \
+            "${hcloud_api}/v1/ssh_keys?name=kubehz-claim-${domain}"
+      ) ) || keys=""
       key_id=$(jq -r '.ssh_keys[0].id // empty' <<<"${keys}" 2>/dev/null) || key_id=""
       if [[ -n "${key_id}" ]] && kubehz::claim_key_own "${keys}" "${domain}" delete "kubehz-claim-${domain}"; then
-        http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" |
-          curl -K - -fsSL -X DELETE "${hcloud_api}/v1/ssh_keys/${key_id}" >/dev/null 2>&1 || true
+        http::curl_config header "Authorization: Bearer ${HCLOUD_TOKEN}" | (
+          http::tls_log_vars_unset &&
+            curl -q -K - -fsSL -X DELETE "${hcloud_api}/v1/ssh_keys/${key_id}" >/dev/null 2>&1
+        ) || true
       fi
     fi
   fi
@@ -1001,9 +1036,14 @@ kubehz::status() {
   # The KUBEHZ_TOKEN bearer travels on this URL — never over plain HTTP.
   http::require_https "${api_url}" "spec.kubehz.apiUrl" || return 1
   http::credential_ok KUBEHZ_TOKEN || return 1
+  # -q first and the subshell with http::tls_log_vars_unset: curl reads no
+  # config file of the user and gets no TLS log or trace control
+  # (utils/http.sh).
   local raw http_code response
-  raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
-    curl -K - -sSL -w $'\n%{http_code}' "${api_url}/api/clusters?perPage=500" 2>/dev/null) || {
+  raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
+    http::tls_log_vars_unset &&
+      curl -q -K - -sSL -w $'\n%{http_code}' "${api_url}/api/clusters?perPage=500" 2>/dev/null
+  ) ) || {
     echo "Status:  unknown (API unreachable: ${api_url})"
     return 0
   }
@@ -1125,9 +1165,14 @@ kubehz::assess() {
     return 1
   }
 
+  # -q first and the subshell with http::tls_log_vars_unset: curl reads no
+  # config file of the user and gets no TLS log or trace control
+  # (utils/http.sh).
   local response
-  response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
-    curl -K - -fsSL "${api_url}/api/clusters/${cluster_id}/assessment") || {
+  response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
+    http::tls_log_vars_unset &&
+      curl -q -K - -fsSL "${api_url}/api/clusters/${cluster_id}/assessment"
+  ) ) || {
     error "kubehz: could not fetch the assessment for ${domain} (${cluster_id})"
     return 1
   }
@@ -1275,8 +1320,13 @@ kubehz::claim-code() {
 kubehz::resolve_cluster_id() {
   local domain="${1}" api_url="${2}" response cluster_id
   http::credential_ok KUBEHZ_TOKEN || return 1
-  response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" |
-    curl -K - -fsSL "${api_url}/api/clusters?perPage=500" 2>/dev/null) || return 1
+  # -q first and the subshell with http::tls_log_vars_unset: curl reads no
+  # config file of the user and gets no TLS log or trace control
+  # (utils/http.sh).
+  response=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN:-}" | (
+    http::tls_log_vars_unset &&
+      curl -q -K - -fsSL "${api_url}/api/clusters?perPage=500" 2>/dev/null
+  ) ) || return 1
   # perPage=500 (the api's hard cap) + sort_by(createdAt) ascending: the list
   # is served newest-first, but the server binds agent identity (heartbeat,
   # desired) to the OLDEST active row for a domain — picking the newest armed
@@ -1473,16 +1523,22 @@ kubehz::token_access() {
 
   # client_secret_basic. http::curl_config quotes backslashes and quotes,
   # so a value can never end the string early. The control-character check
-  # above refused a line break.
+  # above refused a line break. -q first and the subshell with
+  # http::tls_log_vars_unset: curl reads no config file of the user and
+  # gets no TLS log or trace control (utils/http.sh). A readonly name in
+  # that list stops the request before curl runs (status 1, no answer).
   local answer status reason code expires_in msg attempt retry rc
   local -a delays=(0.25 0.5 1)
   for (( attempt = 0; ; attempt++ )); do
     retry=0
-    if answer=$(http::curl_config user "${client_id}:${secret}" | curl -q -sS --proto =https \
-      --connect-timeout 10 --max-time 30 -K - \
-      -H 'Accept: application/json' \
-      --data-urlencode 'grant_type=client_credentials' --data-urlencode "scope=${scope}" \
-      -w $'\n%{http_code}' "${token_url}" 2>/dev/null); then
+    if answer=$(http::curl_config user "${client_id}:${secret}" | (
+      http::tls_log_vars_unset &&
+        curl -q -sS --proto =https \
+          --connect-timeout 10 --max-time 30 -K - \
+          -H 'Accept: application/json' \
+          --data-urlencode 'grant_type=client_credentials' --data-urlencode "scope=${scope}" \
+          -w $'\n%{http_code}' "${token_url}" 2>/dev/null
+    ) ); then
       status="${answer##*$'\n'}"
       answer="${answer%$'\n'*}"
       [[ "${status}" == "200" ]] && break
@@ -1670,12 +1726,17 @@ kubehz::re-enroll() {
   # AGENT_TOKEN_CONFLICT = the hash is already registered/revoked (generate a
   # fresh token); 404 = not this tenant's cluster (the api answers a uniform
   # 404 cross-tenant).
+  # -q first and the subshell with http::tls_log_vars_unset: curl reads no
+  # config file of the user and gets no TLS log or trace control
+  # (utils/http.sh).
   local response http_code body
-  response=$(jq -n --arg h "${token_hash}" '{agentTokenHash: $h}' |
-    curl -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters/${cluster_id}/agent-token" \
-    -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}") \
-    -H "Content-Type: application/json" \
-    --data-binary @-) || {
+  response=$(jq -n --arg h "${token_hash}" '{agentTokenHash: $h}' | (
+    http::tls_log_vars_unset &&
+      curl -q -sSL -w $'\n%{http_code}' -X POST "${api_url}/api/clusters/${cluster_id}/agent-token" \
+        -K <(http::curl_config header "Authorization: Bearer ${KUBEHZ_TOKEN}") \
+        -H "Content-Type: application/json" \
+        --data-binary @-
+  ) ) || {
     error "kubehz: agent-token request failed (network) — retry once ${api_url} is reachable"
     return 1
   }

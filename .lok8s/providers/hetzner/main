@@ -1124,9 +1124,19 @@ hetzner::_rescue_fingerprint() {
 # /proc/<pid>/cmdline) and audit tools store: it can boot a bare-metal
 # server into rescue and reset it. A user or password with a control
 # character is refused with its name (http::credential_ok), and no call runs.
+# -q first: curl reads no config file of the user (.curlrc in CURL_HOME or
+# HOME, curlrc in XDG_CONFIG_HOME). A trace-ascii line there would log the
+# user and password, an output line would write the answer to another file.
+# curl obeys -q only as its first argument. In the subshell,
+# http::tls_log_vars_unset clears the TLS log and trace controls for curl
+# only (utils/http.sh). A readonly name in that list stops the call before
+# curl runs (status 1).
 hetzner::_robot_curl() {
   http::credential_ok HROBOT_USER HROBOT_PASSWORD || return 1
-  http::curl_config user "${HROBOT_USER}:${HROBOT_PASSWORD}" | curl -K - "${@}"
+  http::curl_config user "${HROBOT_USER}:${HROBOT_PASSWORD}" | (
+    http::tls_log_vars_unset &&
+      curl -q -K - "${@}"
+  )
 }
 
 # hetzner::_robot_server_number_by_ip <ip> [connect_timeout] [max_time]
