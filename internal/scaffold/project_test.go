@@ -136,17 +136,17 @@ func TestGitignoreEntriesCoverTheSplitScratch(t *testing.T) {
 
 // workDirEntries are the drivers' per-cluster work dirs under
 // clusters/<domain>/: .kubeone/ (the kubeone driver: the admin kubeconfig,
-// the rendered kubeone.yaml with registry auth), .kkp/ (the kkp driver's
-// saved cluster and project ids), and the lo driver's .provider/ (the cloud
-// VM's provider state), .oidc/ (the apiserver auth config) and
-// .registries.json (the registry slot plan). .docker.sock has no writer
-// today; the repository's own .gitignore has it. The list is written here,
-// not read from gitignoreEntries, so a removed entry fails the tests below.
-// .containerd/ is not in the list: the lo driver writes its own
-// .gitignore there (TestGitignoreKeepsTheContainerdGitignore).
+// the rendered kubeone.yaml with registry auth), and the lo driver's
+// .provider/ (the cloud VM's provider state), .oidc/ (the apiserver auth
+// config) and .registries.json (the registry slot plan). .docker.sock has
+// no writer today; the repository's own .gitignore has it. The list is
+// written here, not read from gitignoreEntries, so a removed entry fails
+// the tests below. Two work dirs are not in the list: the lo driver writes
+// its own .gitignore in .containerd/
+// (TestGitignoreKeepsTheContainerdGitignore), and the kkp driver keeps
+// only ids in .kkp/ (TestGitignoreTracksTheKkpIds).
 var workDirEntries = []string{
 	"**/clusters/*/.kubeone/",
-	"**/clusters/*/.kkp/",
 	"**/clusters/*/.provider/",
 	"**/clusters/*/.oidc/",
 	"**/clusters/*/.registries.json",
@@ -158,22 +158,37 @@ var workDirEntries = []string{
 var workDirFiles = []string{
 	"clusters/x/.kubeone/state",
 	"clusters/x/.kubeone/x-kubeconfig",
-	"clusters/x/.kkp/cluster_id",
 	"clusters/x/.provider/y",
 	"clusters/x/.oidc/auth-config.yaml",
 	"clusters/x/.registries.json",
 	"clusters/x/.docker.sock",
 }
 
-// handLines is a .gitignore written by hand with some work-dir entries. git
-// reads the .provider/ line (trailing spaces) and the .oidc/ line (a CRLF
-// line end) as the entry. It reads the .kubeone/ line (leading spaces) and
-// the .kkp/ line (a trailing tab) as other patterns, which do not ignore the
-// work dir. TestGitignoreHandLinesIgnoredByGit checks this with git.
-const handLines = "node_modules/\n**/clusters/*/.provider/  \n  **/clusters/*/.kubeone/\n**/clusters/*/.kkp/\t\n**/clusters/*/.oidc/\r\n"
+// handCases are lines of a .gitignore written by hand. Each has the entry it
+// is written for, a file that the entry ignores, and whether git reads the
+// line as the entry. git removes one carriage return at the end of the line,
+// then the trailing spaces, and nothing else. TestGitignoreHandLinesIgnoredByGit
+// checks each verdict with git.
+var handCases = []struct {
+	line, entry, path string
+	present           bool
+}{
+	{"**/clusters/*/.provider/  ", "**/clusters/*/.provider/", "clusters/x/.provider/y", true},                   // trailing spaces
+	{"**/clusters/*/.oidc/\r", "**/clusters/*/.oidc/", "clusters/x/.oidc/auth-config.yaml", true},                // a CRLF line end
+	{"  **/clusters/*/.kubeone/", "**/clusters/*/.kubeone/", "clusters/x/.kubeone/state", false},                 // leading spaces
+	{"**/clusters/*/.registries.json\t", "**/clusters/*/.registries.json", "clusters/x/.registries.json", false}, // a trailing tab
+	{"**/clusters/*/.docker.sock\r ", "**/clusters/*/.docker.sock", "clusters/x/.docker.sock", false},            // a carriage return, then a space
+	{".kustomize/\r\r", ".kustomize/", ".kustomize/plugin", false},                                               // two carriage returns
+}
 
-// handPresent are the entries that a line of handLines stands for.
-var handPresent = map[string]bool{"**/clusters/*/.provider/": true, "**/clusters/*/.oidc/": true}
+// handLines is the .gitignore of handCases, after a line that is no entry.
+var handLines = func() string {
+	s := "node_modules/\n"
+	for _, c := range handCases {
+		s += c.line + "\n"
+	}
+	return s
+}()
 
 // lineCounts counts each line of a .gitignore as it is written (no trim).
 func lineCounts(raw []byte) map[string]int {
@@ -206,11 +221,11 @@ func TestGitignoreEntriesCoverTheDriverWorkDirs(t *testing.T) {
 }
 
 // An entry is appended only when no line reads as it in git. A .gitignore
-// with the hand lines of handLines keeps them first and unchanged. It gets
-// each entry that no hand line stands for once (a line with leading spaces
-// or a trailing tab is not the entry), and no entry that a hand line stands
-// for (trailing spaces, a CRLF line end). A second run changes nothing and
-// says so.
+// with the lines of handCases keeps them first and unchanged. It gets each
+// entry that no line stands for once (leading spaces, a trailing tab, a
+// carriage return before a space, two carriage returns), and no entry that
+// a line stands for (trailing spaces, a CRLF line end). A second run changes
+// nothing and says so.
 func TestGitignoreWorkDirEntriesAppendOnlyWhenAbsent(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -230,11 +245,17 @@ func TestGitignoreWorkDirEntriesAppendOnlyWhenAbsent(t *testing.T) {
 		t.Errorf("the existing lines must stay first and unchanged:\n%q", first)
 	}
 	counts := lineCounts(first)
-	for _, want := range workDirEntries {
-		n := 1
-		if handPresent[want] {
-			n = 0
+	wantCounts := map[string]int{}
+	for _, e := range workDirEntries {
+		wantCounts[e] = 1
+	}
+	for _, c := range handCases {
+		wantCounts[c.entry] = 1
+		if c.present {
+			wantCounts[c.entry] = 0
 		}
+	}
+	for want, n := range wantCounts {
 		if counts[want] != n {
 			t.Errorf("%q must be appended %d time(s) (found %d):\n%q", want, n, counts[want], first)
 		}
@@ -331,7 +352,7 @@ func checkGitIgnores(t *testing.T, git gitFunc, repo string, ignored, kept []str
 
 // git ignores the files in the work dirs with the written .gitignore and
 // still tracks the cluster spec. The entries start with **/, so a
-// .gitignore at the repository root also ignores the work dirs of a
+// .gitignore at the repository root also ignores each work dir of a
 // clusters/ tree in a sub dir (infra/clusters/).
 func TestGitignoreWorkDirsIgnoredByGit(t *testing.T) {
 	t.Parallel()
@@ -341,11 +362,10 @@ func TestGitignoreWorkDirsIgnoredByGit(t *testing.T) {
 	if err := EnsureGitignore(repo, &out); err != nil {
 		t.Fatal(err)
 	}
-	ignored := append(append([]string(nil), workDirFiles...),
-		"clusters/x/.kubeconfig/admin",
-		"infra/clusters/x/.kubeone/state",
-		"infra/clusters/x/.provider/y",
-	)
+	ignored := append(append([]string(nil), workDirFiles...), "clusters/x/.kubeconfig/admin")
+	for _, p := range workDirFiles {
+		ignored = append(ignored, "infra/"+p)
+	}
 	checkGitIgnores(t, git, repo, ignored, []string{"clusters/x/cluster.lok8s.yaml", "lok8s.yaml"})
 }
 
@@ -375,9 +395,9 @@ func TestGitignoreWorkDirsIgnoredInANestedProject(t *testing.T) {
 	checkGitIgnores(t, git, repo, ignored, []string{"infra/clusters/x/cluster.lok8s.yaml", "infra/lok8s.yaml"})
 }
 
-// git reads the hand lines of handLines as handPresent says: before the
-// scaffold runs, git ignores the work dirs that a hand line stands for and
-// not the others. After EnsureGitignore, git ignores every work dir.
+// git reads each line of handCases as its verdict says: before the scaffold
+// runs, git ignores the file of each line that stands for its entry, and
+// not the others. After EnsureGitignore, git ignores every file.
 func TestGitignoreHandLinesIgnoredByGit(t *testing.T) {
 	t.Parallel()
 	git := isolatedGit(t)
@@ -385,14 +405,36 @@ func TestGitignoreHandLinesIgnoredByGit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte(handLines), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stands := []string{"clusters/x/.provider/y", "clusters/x/.oidc/auth-config.yaml"}
-	others := []string{"clusters/x/.kubeone/state", "clusters/x/.kkp/cluster_id"}
+	var stands, others, all []string
+	for _, c := range handCases {
+		all = append(all, c.path)
+		if c.present {
+			stands = append(stands, c.path)
+		} else {
+			others = append(others, c.path)
+		}
+	}
 	checkGitIgnores(t, git, repo, stands, others)
 	var out bytes.Buffer
 	if err := EnsureGitignore(repo, &out); err != nil {
 		t.Fatal(err)
 	}
-	checkGitIgnores(t, git, repo, workDirFiles, []string{"clusters/x/cluster.lok8s.yaml"})
+	checkGitIgnores(t, git, repo, append(all, workDirFiles...), []string{"clusters/x/cluster.lok8s.yaml"})
+}
+
+// .kkp/ is not ignored: the kkp driver keeps only the cluster and project
+// ids there (identifiers, not credentials; its kubeconfig goes to
+// .kubeconfig/), and cluster_id is the handle that `lo down` needs, also in
+// another checkout of the project.
+func TestGitignoreTracksTheKkpIds(t *testing.T) {
+	t.Parallel()
+	git := isolatedGit(t)
+	repo := newRepo(t, git)
+	var out bytes.Buffer
+	if err := EnsureGitignore(repo, &out); err != nil {
+		t.Fatal(err)
+	}
+	checkGitIgnores(t, git, repo, nil, []string{"clusters/x/.kkp/cluster_id", "clusters/x/.kkp/project_id"})
 }
 
 // loContainerdGitignore is the .gitignore that the lo driver writes in
