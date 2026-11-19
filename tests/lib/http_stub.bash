@@ -17,12 +17,15 @@
 #                               file of curlrc_dir VAR (the trace appears)
 #   curl_reads_xdg              0 when this curl looks in XDG_CONFIG_HOME
 #                               (curl 7.73 and later)
-#   stub_cert                   a throwaway self-signed certificate for
-#                               127.0.0.1 in the test dir (openssl):
-#                               STUB_CERT, STUB_KEY
-#   keylog_control              the control of a key log test: curl with
-#                               SSLKEYLOGFILE, to /control of the https
-#                               stub. 0: the request is in the stub log and
+#   stub_cert [SAN]             a throwaway self-signed certificate for
+#                               SAN (default IP:127.0.0.1) in the test dir
+#                               (openssl): STUB_CERT, STUB_KEY. Another call
+#                               overwrites them: copy the paths first
+#   keylog_control [URL]        the control of a key log test: curl with
+#                               SSLKEYLOGFILE, to URL (default /control of
+#                               the https stub; the path must be /control,
+#                               the URL can go through a tunnel of the
+#                               stub). 0: the request is in the stub log and
 #                               curl wrote a key log. 1: the request is in
 #                               the stub log and curl wrote no key log (its
 #                               TLS backend ignores SSLKEYLOGFILE): a test
@@ -30,6 +33,18 @@
 #                               must skip. 2: the request is not in the stub
 #                               log (no connect, a TLS failure): the test
 #                               fails, because a skip would hide it
+#   tls_spy_on DIR              a curl function for the code under test:
+#                               for each call it writes a record file in DIR
+#                               (tls_spy_record), then runs the real curl.
+#                               Needs utils/http.sh: the names are those of
+#                               its list _HTTP_TLS_LOG_VARS
+#   tls_spy_record FILE         write the record of this process to FILE:
+#                               the line "record", each name of the TLS list
+#                               (TLS_SPY_NAMES) that is in the exported
+#                               environment, and "control" when
+#                               TLS_ENV_CONTROL is exported. Names only,
+#                               never a value: no credential of the host
+#                               gets to the disk
 #
 # Unless -q is its first argument, curl reads one config file of the user:
 # $CURL_HOME/.curlrc, else $XDG_CONFIG_HOME/curlrc (no dot), else
@@ -96,7 +111,7 @@ stub_cert() {
   STUB_CERT="${BATS_TEST_TMPDIR}/stub.crt"
   STUB_KEY="${BATS_TEST_TMPDIR}/stub.key"
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=127.0.0.1 \
-    -addext subjectAltName=IP:127.0.0.1 -keyout "${STUB_KEY}" -out "${STUB_CERT}" 2>/dev/null
+    -addext "subjectAltName=${1:-IP:127.0.0.1}" -keyout "${STUB_KEY}" -out "${STUB_CERT}" 2>/dev/null
 }
 
 keylog_control() {
@@ -104,11 +119,39 @@ keylog_control() {
   rm -f -- "${log}"
   # The stub writes the log line before it answers.
   before=$(grep -c '^GET /control none$' "${STUB_LOG}") || :
-  SSLKEYLOGFILE="${log}" command curl -q -sS -o /dev/null "https://127.0.0.1:${STUB_PORT}/control" 2>/dev/null || :
+  SSLKEYLOGFILE="${log}" command curl -q -sS -o /dev/null "${1:-https://127.0.0.1:${STUB_PORT}/control}" 2>/dev/null || :
   after=$(grep -c '^GET /control none$' "${STUB_LOG}") || :
   if [[ "${after}" != "$((before + 1))" ]]; then
     echo "keylog_control: the control request did not get to the https stub, so the test cannot tell a skip from a fault" >&2
     return 2
   fi
   [[ -s "${log}" ]]
+}
+
+tls_spy_on() {
+  TLS_SPY_DIR="${1}"
+  TLS_SPY_NAMES="${_HTTP_TLS_LOG_VARS[*]:-}"
+  export TLS_SPY_DIR TLS_SPY_NAMES
+  [[ -n "${TLS_SPY_NAMES}" ]] || { echo "tls_spy_on: no TLS list: source utils/http.sh first" >&2; return 1; }
+  mkdir -p "${TLS_SPY_DIR}"
+  curl() {
+    tls_spy_record "$(command mktemp "${TLS_SPY_DIR}/env.XXXXXX")"
+    command curl "$@"
+  }
+  export -f curl tls_spy_record
+}
+
+tls_spy_record() {
+  local name
+  local -a names exported
+  read -ra names <<<"${TLS_SPY_NAMES:-}"
+  mapfile -t exported < <(compgen -e)
+  {
+    echo record
+    (( ${#names[@]} > 0 )) || echo "no-list"
+    for name in "${exported[@]}"; do
+      [[ " ${TLS_SPY_NAMES:-} " != *" ${name} "* ]] || echo "${name}"
+    done
+    [[ " ${exported[*]} " != *" TLS_ENV_CONTROL "* ]] || echo control
+  } > "${1}"
 }

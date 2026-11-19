@@ -427,9 +427,16 @@ kubehz::agent_api() {
   [[ -z "${body}" ]] || extra=(-H 'Content-Type: application/json' --data-binary "${body}")
   # http::curl_config quotes backslashes and quotes, so the value can never
   # end the string early. kubehz::agent_session refused a control character.
-  if ! raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_AGENT_BEARER}" | curl -q -sS --proto =https \
-    --connect-timeout 10 --max-time 60 -K - -X "${method}" -H 'Accept: application/json' "${extra[@]}" \
-    -w $'\n%{http_code}' "${KUBEHZ_AGENT_BASE}${path}" 2>/dev/null); then
+  # -q first: curl reads no config file of the user. In the subshell,
+  # http::tls_log_vars_unset clears the TLS log and trace controls for curl
+  # only (utils/http.sh). A readonly name in that list stops the call before
+  # curl runs: it then counts as no answer.
+  if ! raw=$(http::curl_config header "Authorization: Bearer ${KUBEHZ_AGENT_BEARER}" | (
+    http::tls_log_vars_unset &&
+      curl -q -sS --proto =https \
+        --connect-timeout 10 --max-time 60 -K - -X "${method}" -H 'Accept: application/json' "${extra[@]}" \
+        -w $'\n%{http_code}' "${KUBEHZ_AGENT_BASE}${path}" 2>/dev/null
+  ) ); then
     error "kubehz ${action}: the api at ${KUBEHZ_AGENT_BASE} did not answer"
     echo "  Check KUBEHZ_API_URL and the network. Then try again." >&2
     return 1

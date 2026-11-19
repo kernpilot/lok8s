@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,6 +26,12 @@ type Cmd struct {
 	Dir string
 	// Env entries are appended to the inherited environment.
 	Env []string
+	// Unset names variables that the child does not inherit: the child's
+	// environment is the inherited one without these names, then Env. A
+	// name in both is set to its Env value. An empty value is not an
+	// unset (some TLS backends test only that a variable exists), so the
+	// name must be removed (see ChildEnv).
+	Unset []string
 	// Stdin/Stdout/Stderr default to the process's own when nil.
 	Stdin  io.Reader
 	Stdout io.Writer
@@ -92,9 +99,7 @@ func (r *osRunner) Run(ctx context.Context, c Cmd) error {
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = c.WaitDelay
 	cmd.Dir = c.Dir
-	if len(c.Env) > 0 {
-		cmd.Env = append(os.Environ(), c.Env...)
-	}
+	cmd.Env = ChildEnv(c)
 	if c.Stdin != nil {
 		cmd.Stdin = c.Stdin
 	} else {
@@ -118,6 +123,28 @@ func (r *osRunner) Run(ctx context.Context, c Cmd) error {
 		fmt.Fprintf(DebugOut, "[debug] exec: %s: exit %d\n", shellWords(append([]string{path}, c.Args...)), ExitCode(err))
 	}
 	return err
+}
+
+// ChildEnv is the environment the default Runner gives the child of c: nil
+// (inherit the process environment as it is) when c has no Env and no
+// Unset; else os.Environ() without each entry whose name is in c.Unset,
+// then c.Env. A fake Runner can call it to see what the child would get.
+func ChildEnv(c Cmd) []string {
+	if len(c.Env) == 0 && len(c.Unset) == 0 {
+		return nil
+	}
+	env := os.Environ()
+	if len(c.Unset) > 0 {
+		kept := make([]string, 0, len(env))
+		for _, kv := range env {
+			name, _, _ := strings.Cut(kv, "=")
+			if !slices.Contains(c.Unset, name) {
+				kept = append(kept, kv)
+			}
+		}
+		env = kept
+	}
+	return append(env, c.Env...)
 }
 
 // shellWords joins argv for a human, quoting the words a shell would need

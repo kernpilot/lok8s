@@ -9,6 +9,7 @@ package recover
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +33,8 @@ type fakeProvider struct {
 	rebuildFail bool
 	output      string
 	outputErr   error
+	// expand is the envsubst of Expand; nil gives the config as it is.
+	expand func(cfg string) ([]byte, error)
 }
 
 func (f *fakeProvider) HasRebuild() bool { return !f.noRebuild }
@@ -48,6 +51,13 @@ func (f *fakeProvider) Rebuild(ctx context.Context, cfg, wd string) error {
 		return errors.New("rebuild failed")
 	}
 	return nil
+}
+
+func (f *fakeProvider) Expand(ctx context.Context, cfg string) ([]byte, error) {
+	if f.expand != nil {
+		return f.expand(cfg)
+	}
+	return os.ReadFile(cfg)
 }
 
 func (f *fakeProvider) Output(ctx context.Context, cfg string) ([]byte, error) {
@@ -599,10 +609,21 @@ type argvRecorder struct {
 	cmds  []execx.Cmd
 	probe string
 	fail  bool
+	// stdins holds what each child read on its stdin ("" for none).
+	stdins []string
 }
 
 func (a *argvRecorder) Run(ctx context.Context, c execx.Cmd) error {
 	a.cmds = append(a.cmds, c)
+	in := ""
+	if c.Stdin != nil {
+		raw, err := io.ReadAll(c.Stdin)
+		if err != nil {
+			return err
+		}
+		in = string(raw)
+	}
+	a.stdins = append(a.stdins, in)
 	if a.fail {
 		return errors.New("exit status 1")
 	}
@@ -610,4 +631,442 @@ func (a *argvRecorder) Run(ctx context.Context, c execx.Cmd) error {
 		fmt.Fprint(c.Stdout, a.probe)
 	}
 	return nil
+}
+
+// sharedNameForms are the three places where the spec of another domain can
+// carry the cluster_name "shared": hetzner.json, the file of
+// spec.provider.configRef, and an inline spec.provider.config.
+var sharedNameForms = []struct {
+	name  string
+	write func(t *testing.T, dir string)
+}{
+	{"hetzner.json", func(t *testing.T, dir string) {
+		testutil.WriteFile(t, filepath.Join(dir, "hetzner.json"), `{"cluster_name": "shared"}`+"\n")
+	}},
+	{"configRef", func(t *testing.T, dir string) {
+		testutil.WriteFile(t, filepath.Join(dir, "cluster.lok8s.yaml"), "kind: KubeOne\nmetadata:\n  name: copy\nspec:\n  provider:\n    name: mock\n    configRef: infra/desc.yaml\n")
+		testutil.WriteFile(t, filepath.Join(dir, "infra", "desc.yaml"), "cluster_name: shared\n")
+	}},
+	{"inline", func(t *testing.T, dir string) {
+		testutil.WriteFile(t, filepath.Join(dir, "cluster.lok8s.yaml"), "kind: KubeOne\nmetadata:\n  name: copy\nspec:\n  provider:\n    name: mock\n    config:\n      cluster_name: shared\n")
+	}},
+}
+
+// bats: "recover refuses a cluster_name that another domain has: ..."
+// Another domain has the cluster_name of this domain's provider config. Run
+// refuses at resolve, before the doctor, the dry run and the consent: the
+// fake provider records no doctor and no rebuild, and nothing is
+// provisioned. No mode skips the check (the destroy guard has no bypass
+// either): not a "yes" at the prompt, not --force, not
+// LOK8S_NONINTERACTIVE, not --dry-run, not --skip-rebuild.
+func TestRunRefusesAClusterNameOfAnotherDomain(t *testing.T) {
+	modes := []struct {
+		name                                       string
+		force, nonInteractive, skipRebuild, dryRun bool
+	}{
+		{name: "yes at the prompt"},
+		{name: "force", force: true},
+		{name: "noninteractive", nonInteractive: true},
+		{name: "dry-run", dryRun: true},
+		{name: "force dry-run", force: true, dryRun: true},
+		{name: "force skip-rebuild", force: true, skipRebuild: true},
+	}
+	for _, form := range sharedNameForms {
+		for _, m := range modes {
+			t.Run(form.name+"/"+m.name, func(t *testing.T) {
+				h := newHarness(t)
+				testutil.WriteFile(t, h.cfg, `{"cluster_name": "shared"}`+"\n")
+				form.write(t, filepath.Join(h.r.Paths.Clusters, "copy.dom"))
+				h.r.Force = m.force
+				h.r.In = strings.NewReader("yes\n")
+				if m.nonInteractive {
+					t.Setenv("LOK8S_NONINTERACTIVE", "1")
+				}
+				err := h.r.Run(t.Context(), "test.dom", m.skipRebuild, m.dryRun)
+				if !errors.Is(err, ErrHandled) {
+					t.Fatalf("err = %v, want ErrHandled", err)
+				}
+				for _, want := range []string{
+					"[error] recover: cluster_name 'shared' of 'test.dom' is also the cluster_name of: copy.dom. The rebuild resets only the servers with this cluster_name and the owner mark of 'test.dom'.",
+					" Nothing was changed. Give each domain its own cluster_name, then run lo recover again.\n",
+				} {
+					if !strings.Contains(h.errBuf.String(), want) {
+						t.Errorf("missing %q in stderr:\n%s", want, h.errBuf.String())
+					}
+				}
+				if got := h.recorded(); got != "resolve" {
+					t.Errorf("record = %q, want only the resolve (no doctor, rebuild or provision)", got)
+				}
+				for _, not := range []string{"continue? [type yes", "DRY RUN"} {
+					if strings.Contains(h.all(), not) {
+						t.Errorf("%q after the refusal:\n%s", not, h.all())
+					}
+				}
+			})
+		}
+	}
+}
+
+// The refusal names every other domain with the cluster_name, sorted.
+func TestRunClusterNameGuardNamesEveryDomain(t *testing.T) {
+	h := newHarness(t)
+	h.r.Force = true
+	testutil.WriteFile(t, h.cfg, `{"cluster_name": "shared"}`+"\n")
+	sharedNameForms[0].write(t, filepath.Join(h.r.Paths.Clusters, "copy.dom"))
+	sharedNameForms[2].write(t, filepath.Join(h.r.Paths.Clusters, "b.dom"))
+	if err := h.r.Run(t.Context(), "test.dom", false, false); !errors.Is(err, ErrHandled) {
+		t.Fatalf("err = %v, want ErrHandled", err)
+	}
+	if want := "is also the cluster_name of: b.dom, copy.dom. "; !strings.Contains(h.errBuf.String(), want) {
+		t.Errorf("missing %q in stderr:\n%s", want, h.errBuf.String())
+	}
+}
+
+// The check counts the other domains only, and reads the cluster_name of
+// this domain's provider config only. This domain's own files, a dot dir
+// and a domain with another cluster_name refuse nothing. A config without
+// a cluster_name is not checked: a domain whose cluster_name is the name
+// that the prompt shows for this domain (the domain itself) refuses
+// nothing. The recover runs to the end.
+func TestRunClusterNameGuardPasses(t *testing.T) {
+	cases := []struct {
+		name   string
+		config string
+		files  map[string]string
+	}{
+		{"own files, a dot dir, another name", `{"cluster_name": "shared"}`, map[string]string{
+			"test.dom/hetzner.json":  `{"cluster_name": "shared"}`,
+			".old/hetzner.json":      `{"cluster_name": "shared"}`,
+			"other.dom/hetzner.json": `{"cluster_name": "other"}`,
+		}},
+		{"no cluster_name in the config", `{}`, map[string]string{
+			"other.dom/hetzner.json": `{"cluster_name": "test.dom"}`,
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.r.Force = true
+			testutil.WriteFile(t, h.cfg, c.config+"\n")
+			for rel, body := range c.files {
+				testutil.WriteFile(t, filepath.Join(h.r.Paths.Clusters, filepath.FromSlash(rel)), body+"\n")
+			}
+			if err := h.r.Run(t.Context(), "test.dom", false, false); err != nil {
+				t.Fatalf("err = %v\n%s", err, h.all())
+			}
+			if rec := h.recorded(); !strings.Contains(rec, "rebuild cfg=") || !strings.Contains(rec, "provision test.dom") {
+				t.Errorf("record = %q, want the rebuild and the provision", rec)
+			}
+			if strings.Contains(h.errBuf.String(), "is also the cluster_name of") {
+				t.Errorf("refused:\n%s", h.errBuf.String())
+			}
+		})
+	}
+}
+
+// The refusal texts of the cluster_name guard for test.dom (the bats file
+// has the same texts).
+const (
+	msgConfig   = "[error] recover: the provider config of 'test.dom' is not one YAML or JSON document whose top is a mapping with a plain cluster_name (not an alias, a mapping or a list), so recover cannot compare its cluster_name with the other domains. Nothing was changed. Correct the provider config, then run lo recover again.\n"
+	msgMerge    = "[error] recover: the provider config of 'test.dom' has a merge key (<<) at the top. The rebuild can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write cluster_name as a literal key, without a merge key, then run lo recover again.\n"
+	msgQuote    = "[error] recover: the cluster_name of the provider config of 'test.dom' is not a text: YAML reads it as a number, as true or as another type. The rebuild writes it as JSON, which can change how it is written, so recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write the cluster_name in quotes, then run lo recover again.\n"
+	msgUnshown  = "[error] recover: the provider config of 'test.dom' names a cluster_name with a character that a message cannot show as it is (a control, separator, bidi or invisible character, a backslash, U+FFFD, or a byte that is not UTF-8). Nothing was changed. Correct the cluster_name in the provider config, then run lo recover again.\n"
+	msgExpand   = "[error] recover: could not expand the variables of the provider config of 'test.dom' as the rebuild does (the provider shell or envsubst failed). Nothing was changed. Check the provider config, that the provider loads and that envsubst runs, then run lo recover again.\n"
+	msgUnquoted = "[error] recover: the provider config of 'test.dom' parses only after its variables are expanded. recover reads the cluster_name before and after the expansion, so it cannot compare it with the other domains. A variable outside quotes can cause this. Nothing was changed. Write each variable of the provider config in quotes, then run lo recover again.\n"
+	msgChanged  = "[error] recover: the provider config of 'test.dom' gives another cluster_name when the rebuild expands its variables (a variable adds or changes it), so recover cannot compare the cluster_name that the rebuild uses with the other domains. Nothing was changed. Write the provider config so that no variable sets or changes the cluster_name, then run lo recover again.\n"
+)
+
+func msgDollar(n string) string {
+	return "[error] recover: the cluster_name '" + n + "' of 'test.dom' has a '$'. The rebuild expands the variables in the provider config, so the cluster_name that it uses can differ from this text, and recover cannot compare it with the cluster_name of the other domains. Nothing was changed. Write the cluster_name without a variable, then run lo recover again.\n"
+}
+
+// configShapes are provider configs of this domain in the shapes that the
+// bash twin reads with yq (tests/unit/recover_test.bats has the same table).
+// want is one of:
+//   - "none:<text>": no cluster_name, so no check. Another domain has the
+//     cluster_name <text>, the text that a wrong read gives (yq without
+//     `// ""` prints "null" and "false");
+//   - "shared:<name>": the guard reads <name>, and another domain with that
+//     name is refused;
+//   - "config", "merge", "quote" or "unshown": that refusal.
+var configShapes = []struct{ name, config, want string }{
+	{"empty file", "", "none:null"},
+	{"only a comment", "# a comment\n", "none:null"},
+	{"null document", "null\n", "none:null"},
+	{"empty mapping", "{}\n", "none:null"},
+	{"a mapping without the key", "x: 1\n", "none:null"},
+	{"null", "cluster_name: null\n", "none:null"},
+	{"false", "cluster_name: false\n", "none:false"},
+	{"False", "cluster_name: False\n", "none:False"},
+	{"json", `{"cluster_name": "a"}`, "shared:a"},
+	{"json with tabs", "{\n\t\"cluster_name\": \"a\"\n}\n", "shared:a"},
+	{"yaml with a leading document marker", "---\ncluster_name: a\n", "shared:a"},
+	{"a quoted number is a text", "cluster_name: \"0123\"\n", "shared:0123"},
+	{"a quoted false is a text", "cluster_name: \"false\"\n", "shared:false"},
+	{"yes is a text", "cluster_name: yes\n", "shared:yes"},
+	{"two keys: the last one", "cluster_name: a\ncluster_name: b\n", "shared:b"},
+	{"does not parse", `{"cluster_name": "a", "token": [}`, "config"},
+	{"top is a list", "- a\n- b\n", "config"},
+	{"top is a text", "hello\n", "config"},
+	{"top has a custom tag", "!foo {cluster_name: a}\n", "config"},
+	{"two documents", "cluster_name: a\n---\ncluster_name: b\n", "config"},
+	{"an empty second document", "cluster_name: a\n---\n", "config"},
+	{"name is a mapping", "cluster_name:\n  x: 1\n", "config"},
+	{"name is a list", "cluster_name: [a]\n", "config"},
+	{"name is an alias", "n: &x a\ncluster_name: *x\n", "config"},
+	{"a merge key gives the name", "base: &b {cluster_name: merged}\n<<: *b\n", "merge"},
+	{"a merge key after the name", "base: &b {cluster_name: merged}\ncluster_name: a\n<<: *b\n", "merge"},
+	{"a merge key with a list", "base: &b {x: 1}\n<<: [*b]\ncluster_name: a\n", "merge"},
+	{"a quoted << key", "\"<<\": x\ncluster_name: a\n", "merge"},
+	{"int", "cluster_name: 0123\n", "quote"},
+	{"hex int", "cluster_name: 0x1F\n", "quote"},
+	{"float", "cluster_name: 1.5\n", "quote"},
+	{"true", "cluster_name: true\n", "quote"},
+	{"True", "cluster_name: True\n", "quote"},
+	{"name has a custom tag", "cluster_name: !foo a\n", "quote"},
+	{"name is a timestamp", "cluster_name: 2001-12-14\n", "quote"},
+	{"name ends with a newline", "cluster_name: \"a\\n\"\n", "unshown"},
+	{"name has a NUL", "cluster_name: \"a\\0b\"\n", "unshown"},
+}
+
+// The guard reads this domain's provider config as the bash twin does: the
+// same name, the same refusals (configShapes).
+func TestGuardClusterNameReadsTheConfigAsYq(t *testing.T) {
+	refusal := map[string]string{"config": msgConfig, "merge": msgMerge, "quote": msgQuote, "unshown": msgUnshown}
+	for _, c := range configShapes {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			testutil.WriteFile(t, h.cfg, c.config)
+			other := "a-name-no-row-reads"
+			kind, n, found := strings.Cut(c.want, ":")
+			if found {
+				other = n
+			}
+			raw, err := json.Marshal(map[string]string{"cluster_name": other})
+			if err != nil {
+				t.Fatal(err)
+			}
+			testutil.WriteFile(t, filepath.Join(h.r.Paths.Clusters, "copy.dom", "hetzner.json"), string(raw)+"\n")
+			h.r.domain, h.r.config, h.r.prov = "test.dom", h.cfg, h.prov
+			err = h.r.guardClusterName(t.Context())
+			stderr := h.errBuf.String()
+			switch kind {
+			case "none":
+				if err != nil || stderr != "" {
+					t.Errorf("err = %v, stderr = %q; want no refusal", err, stderr)
+				}
+			case "shared":
+				if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "cluster_name '"+other+"' of 'test.dom' is also the cluster_name of: copy.dom. ") {
+					t.Errorf("err = %v, stderr = %q; want the shared-name refusal for %q", err, stderr, other)
+				}
+			default:
+				if want := refusal[kind]; !errors.Is(err, ErrHandled) || stderr != want {
+					t.Errorf("err = %v, stderr = %q; want %q", err, stderr, want)
+				}
+			}
+		})
+	}
+}
+
+// A cluster_name that a message cannot show is refused before a message
+// shows it (the rule of the destroy guard), and a cluster_name with a '$'
+// is refused: the rebuild expands it, so the guard cannot compare it.
+func TestGuardClusterNameRefusesNamesItCannotCompare(t *testing.T) {
+	unshown, config, dollar := msgUnshown, msgConfig, msgDollar
+	cases := []struct{ name, value, want string }{
+		{"escape", "a\x1b[2Jb", unshown},
+		{"backslash", `a\\b`, unshown},
+		{"bidi", "a\u202eb", unshown},
+		{"zero width", "a\u200bb", unshown},
+		{"U+FFFD", "a\ufffdb", unshown},
+		{"NUL", "a\x00b", unshown},
+		// yaml (both twins) does not parse a file that is not UTF-8.
+		{"not UTF-8", "a\xffb", config},
+		{"braced variable", "${NAME}-a", dollar("${NAME}-a")},
+		{"bare variable", "prod-$ENV", dollar("prod-$ENV")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			raw, err := json.Marshal(map[string]string{"cluster_name": c.value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.name == "not UTF-8" {
+				raw = []byte("cluster_name: " + c.value + "\n")
+			}
+			testutil.WriteFile(t, h.cfg, string(raw)+"\n")
+			// Another domain with the same text: the guard must refuse
+			// before it compares.
+			testutil.WriteFile(t, filepath.Join(h.r.Paths.Clusters, "copy.dom", "hetzner.json"), string(raw)+"\n")
+			h.r.Force = true
+			err = h.r.Run(t.Context(), "test.dom", false, false)
+			if !errors.Is(err, ErrHandled) {
+				t.Fatalf("err = %v, want ErrHandled", err)
+			}
+			if !strings.Contains(h.errBuf.String(), c.want) || strings.Contains(h.errBuf.String(), "is also the cluster_name of") {
+				t.Errorf("stderr = %q, want %q", h.errBuf.String(), c.want)
+			}
+			// The header of recover has colour codes; the name must not
+			// bring its own escape sequence.
+			if strings.Contains(h.errBuf.String(), "\x1b[2J") {
+				t.Errorf("the escape sequence of the name reached stderr: %q", h.errBuf.String())
+			}
+			if got := h.recorded(); got != "resolve" {
+				t.Errorf("record = %q, want only the resolve", got)
+			}
+		})
+	}
+}
+
+// The guard reads the config again after the expansion of the rebuild
+// (Provider.Expand): a variable that adds or changes the cluster_name is
+// refused, an expansion that keeps it passes, and a failed expansion stops
+// the recover.
+func TestGuardClusterNameExpandsAsTheRebuild(t *testing.T) {
+	cases := []struct{ name, config, expanded, want string }{
+		{"a variable adds a cluster_name", `{"x": 1, "note": "${NOTE}"}`, `{"x": 1, "note": "a", "cluster_name": "shared"}`, msgChanged},
+		{"a variable adds a cluster_name in yaml", "x: 1\nnote: ${NOTE}\n", "x: 1\nnote: a\ncluster_name: shared\n", msgChanged},
+		{"a variable changes the cluster_name", `{"cluster_name": "a", "note": "${NOTE}"}`, `{"cluster_name": "a", "note": "b", "cluster_name": "shared"}`, msgChanged},
+		{"a variable takes the cluster_name away", `{"cluster_name": "a", "note": "${NOTE}"}`, `{"cluster_name": "a", "note": "x", "cluster_name": null}`, msgChanged},
+		{"a variable adds a merge key", "cluster_name: a\nnote: ${NOTE}\n", "cluster_name: a\nnote: x\n<<: {cluster_name: shared}\n", msgChanged},
+		{"a variable breaks the config", "cluster_name: a\nnote: ${NOTE}\n", "cluster_name: a\nnote: [\n", msgChanged},
+		// No cluster_name before the expansion: only the verdict of the read
+		// changes, not the name ("" before and after).
+		{"a variable adds a merge key with a cluster_name, no cluster_name before", "x: 1\nnote: ${NOTE}\n", "x: 1\nnote: x\n<<: {cluster_name: shared}\n", msgChanged},
+		{"a variable adds a cluster_name that is not a text", `{"x": 1, "note": "${NOTE}"}`, `{"x": 1, "note": "a", "cluster_name": 123, "y": ""}`, msgChanged},
+		{"a variable breaks a config without a cluster_name", "x: 1\nnote: ${NOTE}\n", "x: 1\nnote: [\n", msgChanged},
+		// A config that parses only after the expansion names the cause.
+		{"a variable outside quotes", `{"cluster_name": "a", "count": ${NOTE}}`, `{"cluster_name": "a", "count": 3}`, msgUnquoted},
+		{"a config that does not parse after the expansion either", `{"cluster_name": "a", "count": ${NOTE}`, `{"cluster_name": "a", "count": 3`, msgConfig},
+		{"an expansion that keeps the cluster_name", `{"cluster_name": "a", "token": "${TOKEN}"}`, `{"cluster_name": "a", "token": "xyz"}` + "\n\n", ""},
+		{"an expansion without a cluster_name", `{"token": "${TOKEN}"}`, `{"token": "xyz"}`, ""},
+		{"envsubst fails", `{"cluster_name": "a"}`, "", msgExpand},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			testutil.WriteFile(t, h.cfg, c.config)
+			testutil.WriteFile(t, filepath.Join(h.r.Paths.Clusters, "copy.dom", "hetzner.json"), `{"cluster_name": "shared"}`+"\n")
+			h.prov.expand = func(cfg string) ([]byte, error) {
+				if cfg != h.cfg {
+					t.Errorf("Expand(%q), want the config %q", cfg, h.cfg)
+				}
+				if c.want == msgExpand {
+					return nil, errors.New("envsubst failed")
+				}
+				return []byte(c.expanded), nil
+			}
+			h.r.Force = true
+			err := h.r.Run(t.Context(), "test.dom", false, false)
+			if c.want == "" {
+				if err != nil || strings.Contains(h.errBuf.String(), "[error]") {
+					t.Fatalf("err = %v, want no refusal\n%s", err, h.all())
+				}
+				return
+			}
+			if !errors.Is(err, ErrHandled) || !strings.Contains(h.errBuf.String(), c.want) {
+				t.Errorf("err = %v, stderr = %q, want %q", err, h.errBuf.String(), c.want)
+			}
+			if got := h.recorded(); got != "resolve" {
+				t.Errorf("record = %q, want only the resolve", got)
+			}
+		})
+	}
+}
+
+// A config that does not parse, and whose expansion fails: the general
+// text, not the text about a variable outside quotes.
+func TestGuardClusterNameUnparsedConfigWithAFailedExpansion(t *testing.T) {
+	h := newHarness(t)
+	testutil.WriteFile(t, h.cfg, `{"cluster_name": "a", "count": ${NOTE}}`)
+	h.prov.expand = func(string) ([]byte, error) { return nil, errors.New("the provider shell failed") }
+	h.r.domain, h.r.config, h.r.prov = "test.dom", h.cfg, h.prov
+	if err := h.r.guardClusterName(t.Context()); !errors.Is(err, ErrHandled) || h.errBuf.String() != msgConfig {
+		t.Errorf("err = %v, stderr = %q; want %q", err, h.errBuf.String(), msgConfig)
+	}
+}
+
+// Under DEBUG, resolve prints the resolved cluster name. The line comes after
+// the guard: a name that the guard refuses never reaches it.
+func TestResolveDebugLineComesAfterTheGuard(t *testing.T) {
+	t.Setenv("DEBUG", "1")
+	cases := []struct {
+		name, value string
+		refused     bool
+	}{
+		{"a refused name", "a\x1b[2Jb", true},
+		{"a name that passes", "solo", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			raw, err := json.Marshal(map[string]string{"cluster_name": c.value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			testutil.WriteFile(t, h.cfg, string(raw)+"\n")
+			h.r.Force = true
+			err = h.r.Run(t.Context(), "test.dom", false, false)
+			stderr := h.errBuf.String()
+			if !c.refused {
+				if err != nil || !strings.Contains(stderr, "recover: resolved test.dom → provider=") {
+					t.Fatalf("err = %v, want the debug line after the guard\n%s", err, h.all())
+				}
+				return
+			}
+			if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, msgUnshown) {
+				t.Fatalf("err = %v, stderr = %q; want the refusal", err, stderr)
+			}
+			if strings.Contains(stderr, "recover: resolved") || strings.Contains(stderr, "\x1b[2J") {
+				t.Errorf("the debug line showed the refused name: %q", stderr)
+			}
+		})
+	}
+}
+
+// The guard with this domain's own spec: a configRef file and an inline
+// config, through the real loadProvider (provision.WriteProviderConfig).
+func TestRunGuardWithTheRealProviderConfig(t *testing.T) {
+	forms := []struct {
+		name  string
+		write func(t *testing.T, dir string)
+	}{
+		{"configRef", func(t *testing.T, dir string) {
+			testutil.WriteFile(t, filepath.Join(dir, "cluster.lok8s.yaml"), "kind: KubeOne\nmetadata:\n  name: test\nspec:\n  provider:\n    name: mock\n    configRef: infra/desc.yaml\n")
+			testutil.WriteFile(t, filepath.Join(dir, "infra", "desc.yaml"), "cluster_name: shared\n")
+		}},
+		{"inline", func(t *testing.T, dir string) {
+			testutil.WriteFile(t, filepath.Join(dir, "cluster.lok8s.yaml"), "kind: KubeOne\nmetadata:\n  name: test\nspec:\n  provider:\n    name: mock\n    config:\n      cluster_name: shared\n")
+		}},
+	}
+	for _, f := range forms {
+		t.Run(f.name, func(t *testing.T) {
+			// WriteProviderConfig exports these; t.Setenv restores them.
+			t.Setenv("PROVIDER_DOMAIN", "")
+			t.Setenv("PROVIDER_CONFIG_FILE", "")
+			h := newHarness(t)
+			dir := filepath.Join(h.r.Paths.Clusters, "test.dom")
+			f.write(t, dir)
+			sharedNameForms[0].write(t, filepath.Join(h.r.Paths.Clusters, "copy.dom"))
+			spec := filepath.Join(dir, "cluster.lok8s.yaml")
+			h.r.ResolveSpec = func(d string) (*provision.Spec, error) {
+				h.record = append(h.record, "resolve")
+				return &provision.Spec{Domain: d, File: spec, Kind: provision.SpecKindCluster}, nil
+			}
+			h.r.LoadProvider = nil
+			h.r.NewProvider = func(ctx context.Context, name string) (Provider, error) { return h.prov, nil }
+			h.r.Force = true
+			err := h.r.Run(t.Context(), "test.dom", false, false)
+			if !errors.Is(err, ErrHandled) {
+				t.Fatalf("err = %v, want ErrHandled\n%s", err, h.all())
+			}
+			if want := "cluster_name 'shared' of 'test.dom' is also the cluster_name of: copy.dom. "; !strings.Contains(h.errBuf.String(), want) {
+				t.Errorf("missing %q in stderr:\n%s", want, h.errBuf.String())
+			}
+			if got := h.recorded(); got != "resolve" {
+				t.Errorf("record = %q, want only the resolve", got)
+			}
+		})
+	}
 }

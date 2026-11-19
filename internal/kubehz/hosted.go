@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strconv"
 	"time"
+
+	"github.com/kernpilot/lok8s/internal/interrupt"
 )
 
 // buildClusterPayload ports kubehz::build_cluster_payload. `kind` is the
@@ -191,10 +193,20 @@ func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 
 // ProvisionHosted ports kubehz::provision_hosted: create the cluster via
 // POST /api/clusters, wait for it, download the kubeconfig to
-// .kubeconfig/<domain>.yaml (0600) and mirror it to
-// .kubeconfig/<metadata.name>.yaml for the dispatch tail.
+// .kubeconfig/<domain>.yaml and mirror it to
+// .kubeconfig/<metadata.name>.yaml for the dispatch tail. Both files are
+// written by writePrivateFile (a 0600 temp file and one rename): a failed
+// download or write leaves the old file as it was. The kubeconfig path is
+// checked before the create: a path that the write refuses stops the
+// provision there, so a refusal creates no cluster.
 func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clusterYAML string) error {
 	apiURL := cfg.APIURL
+	// bash: kubehz::_private_target before the POST.
+	kubeconfigPath := filepath.Join(c.Paths.Base, ".kubeconfig", domain+".yaml")
+	if _, err := privateTarget(kubeconfigPath); err != nil {
+		c.errorf("%s", err)
+		return ErrHandled
+	}
 	payload := buildClusterPayload(clusterYAML)
 	if payload == nil {
 		payload = []byte{}
@@ -235,35 +247,117 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 		return err
 	}
 
-	kubeconfigPath := filepath.Join(c.Paths.Base, ".kubeconfig", domain+".yaml")
 	if err := os.MkdirAll(filepath.Dir(kubeconfigPath), 0o755); err != nil {
 		return err
 	}
+	// A failed download leaves the old kubeconfig as it was: the file is
+	// written only after the whole answer is here (bash: the download goes
+	// into the temp file of kubehz::_write_private).
 	kc, err := c.fetch(ctx, "GET", apiURL+"/api/clusters/"+clusterID+"/kubeconfig", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
 	if err != nil {
-		// bash: the `>` redirection creates the file before curl fails.
-		// 0600, not bash's umask default: the file holds a credential.
-		_ = os.WriteFile(kubeconfigPath, nil, 0o600)
 		c.errorf("Failed to download kubeconfig for hosted cluster %s", clusterID)
 		return ErrHandled
 	}
-	if err := os.WriteFile(kubeconfigPath, kc, 0o600); err != nil {
+	if err := writePrivateFile(ctx, kubeconfigPath, kc); err != nil {
+		if refused, ok := errors.AsType[privateFileError](err); ok {
+			c.errorf("%s", refused)
+		}
 		c.errorf("Failed to download kubeconfig for hosted cluster %s", clusterID)
 		return ErrHandled
 	}
 	c.debugf("Hosted cluster %s ready, kubeconfig at %s", domain, kubeconfigPath)
 
-	_ = os.Chmod(kubeconfigPath, 0o600)
+	// The mirror is written in the same way, not onto the old file.
 	clusterName := loadSpec(clusterYAML).Raw("metadata", "name")
 	if clusterName != "" && clusterName != "null" && clusterName != domain {
 		mirror := filepath.Join(c.Paths.Base, ".kubeconfig", clusterName+".yaml")
-		if err := os.WriteFile(mirror, kc, 0o600); err == nil {
-			_ = os.Chmod(mirror, 0o600)
-		} else {
+		if err := writePrivateFile(ctx, mirror, kc); err != nil {
 			c.echoErr("[kubehz] warning: could not mirror the kubeconfig to .kubeconfig/%s.yaml — the bootstrap step will report it missing", clusterName)
 		}
 	}
 	return nil
+}
+
+// privateFileError is a refusal of writePrivateFile; its text is the
+// error line that bash prints (kubehz::_write_private).
+type privateFileError string
+
+func (e privateFileError) Error() string { return string(e) }
+
+// writePrivateFile ports kubehz::_write_private: data goes into a new
+// temp file beside the file (os.CreateTemp: mode 0600, the name
+// <file>.<random>), and one rename replaces the file. So dest is the old
+// file or the complete new one, never a part, and never readable by
+// others. A failed write or rename leaves the old file as it was, and the
+// deferred removal deletes the temp file on each return with an error.
+// A dest that is a symlink is resolved (privateTarget): the temp file goes
+// beside the file that the link names, and the rename replaces that file,
+// so the link stays. A link to nothing, a link that cannot be resolved and
+// a directory are refused (privateFileError). os.Rename is a rename onto
+// the exact path: it fails when another operation put a directory there
+// during the download (it never moves the file into it, as a mv without
+// -T does), so bash's check after the rename has no twin here. A failed
+// rename is a privateFileError with the text of bash.
+// Signals: INT and TERM (interrupt.Watch) and HUP (interrupt.CatchHangup,
+// for the time of the call) cancel the contexts and do not stop lo in the
+// middle of this function: the write ends, and the rename or the deferred
+// removal takes the temp file. Bash removes the temp file on such a signal
+// and keeps the old file: a deliberate deviation (catalogue D45). SIGKILL cannot be caught: in the short time
+// between CreateTemp and Rename it leaves the temp file (mode 0600).
+func writePrivateFile(ctx context.Context, dest string, data []byte) (err error) {
+	_, stopHangup := interrupt.CatchHangup(ctx)
+	defer stopHangup()
+	target, err := privateTarget(dest)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".*")
+	if err != nil {
+		return privateFileError("Cannot create a temp file beside " + target)
+	}
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	if _, err = tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	if err = renameFile(tmp.Name(), target); err != nil {
+		if info, serr := os.Stat(target); serr == nil && info.IsDir() {
+			return privateFileError(dest + " is a directory, not a file")
+		}
+		return privateFileError("Cannot rename the temp file to " + target)
+	}
+	return nil
+}
+
+// renameFile is os.Rename. A test replaces it, to make the rename fail
+// after the temp file exists.
+var renameFile = os.Rename
+
+// privateTarget ports kubehz::_private_target: the file that a write of
+// dest replaces (dest, or for a symlink the file that it names). A link
+// to nothing, a link that cannot be resolved and a directory are refused
+// (privateFileError, the text of bash).
+func privateTarget(dest string) (string, error) {
+	target := dest
+	info, lerr := os.Lstat(dest)
+	if lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		var err error
+		if target, err = filepath.EvalSymlinks(dest); err != nil {
+			return "", privateFileError("Cannot resolve the symlink " + dest)
+		}
+		info, lerr = os.Stat(target)
+	}
+	if lerr == nil && info.IsDir() {
+		return "", privateFileError(dest + " is a directory, not a file")
+	}
+	return target, nil
 }
 
 // DestroyHosted ports kubehz::destroy_hosted: resolve the cluster id from

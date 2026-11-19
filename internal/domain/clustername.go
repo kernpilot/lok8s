@@ -7,8 +7,9 @@ package domain
 // lok8s.dev/cluster=<cluster_name> and the owner mark of the domain), and
 // the spec's metadata.name (the
 // kubeconfig file, the kind cluster). A domain copied from another one keeps
-// both. `lo destroy` refuses a provider cluster_name that another domain
-// uses (ProviderClusterNameUsers; bash twin: provision::_cluster_name_users);
+// both. `lo destroy` and `lo recover` (the rebuild finds its servers by the
+// same label) refuse a provider cluster_name that another domain uses
+// (ProviderClusterNameUsers; bash twin: provision::_cluster_name_users);
 // `lo init cluster` refuses a name that another domain uses as either
 // (ClusterNameUsers).
 //

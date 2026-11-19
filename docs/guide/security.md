@@ -225,13 +225,31 @@ token, the KKP token, the AWS keys and the kubehz agent token in the agent
 CronJob. Both implementations follow the rule. `tests/unit/credentials_argv_test.bats`
 and `internal/execx/argv_credentials_test.go` check it with sentinel values.
 
-curl still reads `~/.curlrc` (for example a proxy setting) when `lo` starts
-it without `-q`. That is so for most calls of the bash implementation, and
-for the KKP calls of both implementations. The agent tools
-(`lo kubehz space …`, `lo kubehz cluster …`) and `lo kubehz token` start
-curl with `-q`. A `config` or a `trace` line in `~/.curlrc` can read or
-record what `lo` sends, the credentials included. Thus keep `~/.curlrc`
-private, and examine it on a shared machine.
+Each curl call of the lok8s tree passes `-q` as its first argument: the
+calls of the bash implementation, the KKP calls of both implementations
+and the script of the agent CronJob. curl then reads no config file of the
+user: not `~/.curlrc`, not `$CURL_HOME/.curlrc` and not
+`$XDG_CONFIG_HOME/curlrc`. A setting that you keep in that file (a proxy,
+a CA bundle) does not apply to `lo`. Each call also runs without the TLS
+log and trace variables `SSLKEYLOGFILE`, `GNUTLS_KEYLOGFILE`,
+`GNUTLS_DEBUG_LEVEL`, `SSLTRACE`, `SSLDEBUG` and `SSLDEBUGFILE`: `lo`
+removes them for curl only. When one of them is readonly in the bash
+implementation, the call does not run, and `lo` names the variable.
+
+Use these settings instead:
+
+- A proxy: the environment variables `https_proxy` or `HTTPS_PROXY`,
+  `http_proxy` (curl reads only the lower-case name), `ALL_PROXY` and
+  `NO_PROXY`. No curl call of `lo` sets a proxy of its own.
+- The CA for the TLS check: `CURL_CA_BUNDLE`, `SSL_CERT_FILE` or
+  `SSL_CERT_DIR`, else the trust store of the system. For the KKP calls,
+  `KKP_CA_CERT` (or `spec.kkp.caCert`) gives the CA: curl gets it as
+  `--cacert`, which comes before `CURL_CA_BUNDLE`.
+
+The kubehz api calls of the Go binary do not start curl: they use the
+HTTP client of Go. It reads `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`
+(also in lower case), not `ALL_PROXY`. On Linux it reads `SSL_CERT_FILE`
+and `SSL_CERT_DIR`, not `CURL_CA_BUNDLE`.
 
 `lo kubehz node join` keeps the bootstrap token off argv too. It reads the
 `kubeadm join` line of the platform into a kubeadm join configuration. It

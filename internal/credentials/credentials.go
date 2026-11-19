@@ -67,3 +67,24 @@ func RequireHTTPS(url, label string, stderr io.Writer) error {
 	}
 	return nil
 }
+
+// TLSLogVars returns the environment variables that make curl or its TLS
+// library write the TLS session keys, or a trace that can hold the
+// plaintext: SSLKEYLOGFILE and GNUTLS_KEYLOGFILE (a key log),
+// GNUTLS_DEBUG_LEVEL (GnuTLS debug output, with key material at high
+// levels), SSLTRACE, SSLDEBUG and SSLDEBUGFILE (the trace and debug output
+// of NSS). A curl call that carries a credential runs without them
+// (execx.Cmd.Unset). The bash twin is the list _HTTP_TLS_LOG_VARS of
+// utils/http.sh (http::tls_log_vars_unset), which has the reasons;
+// TestTLSLogVarsMatchBash keeps the two equal, and TestTLSLogVarsAreTheSix
+// pins the names. Each call returns a new slice.
+//
+// execx.ChildEnv matches the names case-sensitively, as the environment
+// of Linux and macOS is. On Windows the names of the environment do not
+// depend on case, so a name in other case (Sslkeylogfile) would stay in
+// the child. lok8s does not support Windows: its release builds are for
+// linux and darwin only (.goreleaser.yaml, goos; README), so this is a
+// named limit, not a case that the code handles.
+func TLSLogVars() []string {
+	return []string{"SSLKEYLOGFILE", "GNUTLS_KEYLOGFILE", "GNUTLS_DEBUG_LEVEL", "SSLTRACE", "SSLDEBUG", "SSLDEBUGFILE"}
+}

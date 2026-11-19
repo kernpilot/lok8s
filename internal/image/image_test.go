@@ -423,7 +423,8 @@ func TestListRunsTheCurlJqPipeline(t *testing.T) {
 	runner.handler = func(cmd execx.Cmd) error {
 		switch cmd.Name {
 		case "curl":
-			if cmd.Args[0] != "-s" || cmd.Args[1] != "https://10.99.7.102/v2/_catalog" {
+			// -q first, as in the bash twin: curl reads no config file of the user.
+			if strings.Join(cmd.Args, " ") != "-q -s https://10.99.7.102/v2/_catalog" {
 				t.Errorf("curl args = %v", cmd.Args)
 			}
 			fmt.Fprint(cmd.Stdout, `{"repositories":["p/one"]}`)
@@ -463,7 +464,7 @@ func TestListPlainHTTPWithoutTLS(t *testing.T) {
 	if !strings.Contains(out.String(), ":: cache registry @ http://10.99.7.102/v2/_catalog") {
 		t.Errorf("stdout = %q", out.String())
 	}
-	if got := runner.matching("curl -s http://10.99.7.102/v2/_catalog"); len(got) != 1 {
+	if got := runner.matching("curl -q -s http://10.99.7.102/v2/_catalog"); len(got) != 1 {
 		t.Errorf("curl calls = %v", runner.calls)
 	}
 }

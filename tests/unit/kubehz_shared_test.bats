@@ -2671,8 +2671,8 @@ _stub_mktemp() {
 # control first: this curl writes a key log for a request to the same
 # server when the variable reaches it. A curl that writes none makes the
 # test skip, because it could not fail. A control request that does not get
-# to the stub fails the test. A readonly SSLKEYLOGFILE cannot be unset: bash
-# says so, and the call stops before curl sends a request.
+# to the stub fails the test. A readonly SSLKEYLOGFILE cannot be unset: one
+# line names it, and the call stops before curl sends a request.
 @test "space_api_call and space_mint_join: curl writes no TLS key log" {
   command -v python3 >/dev/null || skip "no python3"
   [[ -n "$(command -v openssl)" ]] || skip "no openssl: the https stub needs a self-signed certificate"
@@ -2706,7 +2706,7 @@ _stub_mktemp() {
   rc=0
   ( readonly SSLKEYLOGFILE && kubehz::space_api_call GET /api/spaces/sp-r ) > "${o}" 2> "${e}" || rc=$?
   [ "${rc}" -ne 0 ]
-  grep -qF 'unset: SSLKEYLOGFILE: cannot unset: readonly variable' "${e}"
+  grep -qF 'SSLKEYLOGFILE is readonly, so lo cannot clear it for curl: the request does not run' "${e}"
   [ ! -e "${SSLKEYLOGFILE}" ]
   [ "$(grep -c '^GET /api/spaces/sp-q bearer$' "${STUB_LOG}")" -eq 1 ]
   [ "$(grep -c '^POST /api/spaces/sp-q/join-token bearer$' "${STUB_LOG}")" -eq 1 ]
@@ -2716,39 +2716,40 @@ _stub_mktemp() {
 }
 
 # http::tls_log_vars_unset at the api call, with a curl stand-in that
-# records its environment: curl gets none of the six TLS log and trace
-# variables (SSLKEYLOGFILE, GNUTLS_KEYLOGFILE, GNUTLS_DEBUG_LEVEL, SSLTRACE,
-# SSLDEBUG, SSLDEBUGFILE), the call works, and the caller keeps all six. The record
-# must hold a control variable, else an empty record would pass. Then each
-# name is readonly in turn: bash says that it cannot unset that name, the
-# stand-in does not run, and the call fails with 1 in
-# KUBEHZ_SPACE_API_CURL_RC (the status of unset). This test needs no GnuTLS
-# or NSS curl, so it never skips.
+# records which names of the TLS list (_HTTP_TLS_LOG_VARS of utils/http.sh)
+# it gets (tls_spy_record: names, never a value): curl gets none of them,
+# the call works, and the caller keeps each one. The record must hold the
+# control, else an empty record would pass. Then each name is readonly in
+# turn: one line names it, the stand-in does not run, and the call fails
+# with 1 in KUBEHZ_SPACE_API_CURL_RC (the status of the helper). This test
+# needs no GnuTLS or NSS curl, so it never skips.
 @test "space_api_call: curl gets no TLS log or trace variable, and a readonly one stops the call" {
+  source "${_PROJECT_ROOT}/tests/lib/http_stub.bash"
   local name r rc o="${BATS_TEST_TMPDIR}/tl.stdout" e="${BATS_TEST_TMPDIR}/tl.stderr"
-  local -a names=(SSLKEYLOGFILE GNUTLS_KEYLOGFILE GNUTLS_DEBUG_LEVEL SSLTRACE SSLDEBUG SSLDEBUGFILE)
-  export CURL_ENV_LOG="${BATS_TEST_TMPDIR}/curl.env"
+  local -a names=("${_HTTP_TLS_LOG_VARS[@]}")
+  (( ${#names[@]} >= 6 ))
+  export CURL_ENV_LOG="${BATS_TEST_TMPDIR}/curl.env" TLS_SPY_NAMES="${names[*]}"
   curl() {
-    command env > "${CURL_ENV_LOG}"
+    tls_spy_record "${CURL_ENV_LOG}"
     command cat > /dev/null
     printf '{"ok":true,"data":{"id":"sp-t"}}\n200'
   }
-  export -f curl
-  export SSLKEYLOGFILE="${BATS_TEST_TMPDIR}/tls.keys" GNUTLS_KEYLOGFILE="${BATS_TEST_TMPDIR}/gnutls.keys" \
-    GNUTLS_DEBUG_LEVEL=9 SSLTRACE=99 SSLDEBUG=99 SSLDEBUGFILE="${BATS_TEST_TMPDIR}/nss.trace" KUBEHZ_ENV_CONTROL=on
+  export -f curl tls_spy_record
+  for name in "${names[@]}"; do
+    export "${name}=${BATS_TEST_TMPDIR}/tls.${name}"
+  done
+  export TLS_ENV_CONTROL=on
   kubehz::space_api_call GET /api/spaces/sp-t > "${o}" 2> "${e}"
   [ "${KUBEHZ_SPACE_API_STATUS}" = 200 ]
   [ "${KUBEHZ_SPACE_API_BODY}" = '{"ok":true,"data":{"id":"sp-t"}}' ]
   [ ! -s "${e}" ]
-  # The control: the record is the exported environment of the stand-in.
-  grep -qx 'KUBEHZ_ENV_CONTROL=on' "${CURL_ENV_LOG}"
+  # The record: the marker and the control, no name of the list.
+  [ "$(cat "${CURL_ENV_LOG}")" = $'record\ncontrol' ]
   for name in "${names[@]}"; do
-    [ "$(grep -c "^${name}=" "${CURL_ENV_LOG}")" -eq 0 ]
     # The caller keeps each one, with its value, as an export.
     [[ "$(declare -p "${name}")" == "declare -x ${name}="* ]]
+    [ "${!name}" = "${BATS_TEST_TMPDIR}/tls.${name}" ]
   done
-  [ "${SSLKEYLOGFILE}|${GNUTLS_KEYLOGFILE}|${GNUTLS_DEBUG_LEVEL}|${SSLTRACE}|${SSLDEBUG}|${SSLDEBUGFILE}" = \
-    "${BATS_TEST_TMPDIR}/tls.keys|${BATS_TEST_TMPDIR}/gnutls.keys|9|99|99|${BATS_TEST_TMPDIR}/nss.trace" ]
   for name in "${names[@]}"; do
     rm -f -- "${CURL_ENV_LOG}" "${BATS_TEST_TMPDIR}/tl.rc"
     rc=0
@@ -2760,8 +2761,8 @@ _stub_mktemp() {
     ) > "${o}" 2> "${e}" || rc=$?
     [ "${rc}" -eq 0 ]
     [ "$(cat "${BATS_TEST_TMPDIR}/tl.rc")" = '1|1' ]
-    grep -qF "unset: ${name}: cannot unset: readonly variable" "${e}"
-    [ "$(grep -c 'cannot unset' "${e}")" -eq 1 ]
+    grep -qF "${name} is readonly, so lo cannot clear it for curl: the request does not run" "${e}"
+    [ "$(grep -c 'is readonly' "${e}")" -eq 1 ]
     [ ! -e "${CURL_ENV_LOG}" ]
   done
 }

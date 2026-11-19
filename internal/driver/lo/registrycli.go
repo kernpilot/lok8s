@@ -160,7 +160,8 @@ func (d *Driver) RegistryStatus(ctx context.Context, domain string, shared, tty 
 
 		marker, state, repos := cErr+"✗"+cOff, "not running", ""
 		if onNetwork {
-			catalog, err := d.output(ctx, "curl", "-sf", "--connect-timeout", "1", "--max-time", "2", endpoint+"/v2/_catalog")
+			// -q first, as in the bash twin: curl reads no config file of the user.
+			catalog, err := d.output(ctx, "curl", "-q", "-sf", "--connect-timeout", "1", "--max-time", "2", endpoint+"/v2/_catalog")
 			if err == nil {
 				marker = cOK + "✓" + cOff
 				var doc struct {

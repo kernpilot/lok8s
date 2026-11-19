@@ -6,6 +6,7 @@ package kubehz
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -125,6 +126,256 @@ func TestProvisionHostedMirrorsToMetadataName(t *testing.T) {
 	mustOK(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec), h.output())
 	if readFile(t, filepath.Join(h.base, ".kubeconfig", "shortname.yaml")) != "kc-bytes\n" {
 		t.Fatal("metadata.name mirror missing")
+	}
+}
+
+// The kubeconfig writes (writePrivateFile). The fixtures are the same as
+// in kubehz_hosted_test.bats (kubehz::_write_private).
+
+// hostedTemps lists the temp files of writePrivateFile for file in dir
+// (the name <file>.<random>).
+func hostedTemps(t *testing.T, dir, file string) []string {
+	t.Helper()
+	m, err := filepath.Glob(filepath.Join(dir, file+".*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// hostedKubeconfigRoutes answers the create, the wait and the download
+// (code and body of the download).
+func hostedKubeconfigRoutes(h *harness, code int, body string) {
+	h.handle("POST /api/clusters", 201, `{"data":{"id":"cl-1","status":"Running"}}`)
+	h.handle("GET /api/clusters/cl-1", 200, `{"data":{"status":"Running"}}`)
+	h.handle("GET /api/clusters/cl-1/kubeconfig", code, body)
+}
+
+// A failed download leaves the old kubeconfig as it was, and no temp file.
+func TestProvisionHostedFailedDownloadKeepsTheOldKubeconfig(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := hostedSpec(h, "test.kubehz.dev")
+	hostedKubeconfigRoutes(h, 500, "partial")
+	dir := filepath.Join(h.base, ".kubeconfig")
+	kc := filepath.Join(dir, "test.kubehz.dev.yaml")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kc, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustErr(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec))
+	mustContain(t, h.output(), "Failed to download kubeconfig for hosted cluster cl-1")
+	if got := readFile(t, kc); got != "old\n" {
+		t.Fatalf("kubeconfig = %q, want the old one", got)
+	}
+	if tmp := hostedTemps(t, dir, "test.kubehz.dev.yaml"); len(tmp) != 0 {
+		t.Fatalf("temp files left: %q", tmp)
+	}
+}
+
+// The mirror is never written in place (cp truncated the old file and
+// wrote into it). The mirror here is a link to a file that the user can
+// write, in a directory without write permission: no temp file can go
+// beside it, so the old file stays, with a warning, and the provision
+// succeeds.
+func TestProvisionHostedMirrorIsNotWrittenInPlace(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root can write into a directory without write permission")
+	}
+	h := newHarness(t)
+	spec := hostedSpec(h, "shortname")
+	hostedKubeconfigRoutes(h, 200, "new\n")
+	dir := filepath.Join(h.base, ".kubeconfig")
+	ro := filepath.Join(h.base, "ro")
+	for _, d := range []string{dir, ro} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := filepath.Join(ro, "shortname.yaml")
+	if err := os.WriteFile(old, []byte("old-mirror\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "ro", "shortname.yaml"), filepath.Join(dir, "shortname.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(ro, 0o500); err != nil { // #nosec G302 -- a directory without write permission is the fixture
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ro, 0o700) }) // #nosec G302 -- so that the temp dir can go
+	mustOK(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec), h.output())
+	mustContain(t, h.output(), "could not mirror the kubeconfig to .kubeconfig/shortname.yaml")
+	if got := readFile(t, old); got != "old-mirror\n" {
+		t.Fatalf("mirror = %q, want the old one", got)
+	}
+	if tmp := hostedTemps(t, ro, "shortname.yaml"); len(tmp) != 0 {
+		t.Fatalf("temp files left: %q", tmp)
+	}
+	if got := readFile(t, filepath.Join(dir, "test.kubehz.dev.yaml")); got != "new\n" {
+		t.Fatalf("kubeconfig = %q", got)
+	}
+}
+
+// A kubeconfig that is a symlink keeps the link: the new content goes to
+// the file that the link names, with mode 0600, and no temp file stays.
+func TestProvisionHostedSymlinkedKubeconfigKeepsTheLink(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := hostedSpec(h, "test.kubehz.dev")
+	hostedKubeconfigRoutes(h, 200, "new\n")
+	dir := filepath.Join(h.base, ".kubeconfig")
+	realDir := filepath.Join(h.base, "real")
+	for _, d := range []string{dir, realDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(realDir, "test.kubehz.dev.yaml")
+	if err := os.WriteFile(target, []byte("old\n"), 0o644); err != nil { // #nosec G306 -- the old mode that the write must not keep
+		t.Fatal(err)
+	}
+	kc := filepath.Join(dir, "test.kubehz.dev.yaml")
+	link := filepath.Join("..", "real", "test.kubehz.dev.yaml")
+	if err := os.Symlink(link, kc); err != nil {
+		t.Fatal(err)
+	}
+	mustOK(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec), h.output())
+	if got, err := os.Readlink(kc); err != nil || got != link {
+		t.Fatalf("the link is gone: %q, %v", got, err)
+	}
+	if got := readFile(t, target); got != "new\n" {
+		t.Fatalf("target = %q", got)
+	}
+	if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("target mode: %v, %v", info, err)
+	}
+	for _, d := range []string{dir, realDir} {
+		if tmp := hostedTemps(t, d, "test.kubehz.dev.yaml"); len(tmp) != 0 {
+			t.Fatalf("temp files left: %q", tmp)
+		}
+	}
+}
+
+// writePrivateFile refuses a link to nothing (also when the directory of
+// its target exists) and a directory, with the line that bash prints, and
+// leaves no temp file.
+func TestWritePrivateFileRefusals(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dangling := filepath.Join(dir, "dangling.yaml")
+	if err := os.Symlink(filepath.Join(dir, "none.yaml"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, "sub.yaml")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ dest, want string }{
+		{dangling, "Cannot resolve the symlink " + dangling},
+		{sub, sub + " is a directory, not a file"},
+	} {
+		err := writePrivateFile(t.Context(), tc.dest, []byte("x"))
+		var refused privateFileError
+		if !errors.As(err, &refused) || refused.Error() != tc.want {
+			t.Fatalf("%s: err = %v, want %q", tc.dest, err, tc.want)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries: %v", entries)
+	}
+}
+
+// A kubeconfig path that the write refuses stops the provision before the
+// create: the refusal creates no cluster (bash: kubehz::_private_target
+// before the POST).
+func TestProvisionHostedRefusedKubeconfigCreatesNoCluster(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := hostedSpec(h, "test.kubehz.dev")
+	hostedKubeconfigRoutes(h, 200, "new\n")
+	kc := filepath.Join(h.base, ".kubeconfig", "test.kubehz.dev.yaml")
+	if err := os.MkdirAll(kc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustErr(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec))
+	mustContain(t, h.output(), kc+" is a directory, not a file")
+	if h.anyReq("POST", "/api/clusters") {
+		t.Fatalf("the create ran: %+v", h.reqs())
+	}
+}
+
+// A rename that fails after the temp file exists: the old file stays as it
+// was, and no temp file is left. In the first case another operation puts
+// a directory at the path between the write and the rename (the old file
+// goes aside): os.Rename fails on it, nothing lands in it, and the error
+// names it. In the second the rename fails for another cause. Not
+// parallel: it replaces renameFile.
+func TestWritePrivateFileRenameFailureLeavesNoTempFile(t *testing.T) {
+	t.Cleanup(func() { renameFile = os.Rename })
+	for _, tc := range []struct {
+		name   string
+		rename func(dir, dest string) func(string, string) error
+		want   func(dest string) string
+	}{
+		{
+			name: "a directory takes the place of the file",
+			rename: func(dir, dest string) func(string, string) error {
+				return func(from, to string) error {
+					if err := os.Rename(dest, filepath.Join(dir, "moved-old.yaml")); err != nil {
+						return err
+					}
+					if err := os.Mkdir(dest, 0o700); err != nil {
+						return err
+					}
+					return os.Rename(from, to)
+				}
+			},
+			want: func(dest string) string { return dest + " is a directory, not a file" },
+		},
+		{
+			name: "the rename fails",
+			rename: func(_, _ string) func(string, string) error {
+				return func(_, _ string) error { return errors.New("injected") }
+			},
+			want: func(dest string) string { return "Cannot rename the temp file to " + dest },
+		},
+	} {
+		dir := t.TempDir()
+		dest := filepath.Join(dir, "kc.yaml")
+		if err := os.WriteFile(dest, []byte("old\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		renameFile = tc.rename(dir, dest)
+		err := writePrivateFile(t.Context(), dest, []byte("new\n"))
+		renameFile = os.Rename
+		var refused privateFileError
+		if !errors.As(err, &refused) || refused.Error() != tc.want(dest) {
+			t.Fatalf("%s: err = %v, want %q", tc.name, err, tc.want(dest))
+		}
+		if tmp := hostedTemps(t, dir, "kc.yaml"); len(tmp) != 0 {
+			t.Fatalf("%s: temp files left: %q", tc.name, tmp)
+		}
+		old := dest
+		if info, serr := os.Stat(dest); serr == nil && info.IsDir() {
+			entries, rerr := os.ReadDir(dest)
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("%s: the new file landed in the directory: %v", tc.name, entries)
+			}
+			old = filepath.Join(dir, "moved-old.yaml")
+		}
+		if got := readFile(t, old); got != "old\n" {
+			t.Fatalf("%s: old file = %q, want the old one", tc.name, got)
+		}
 	}
 }
 
