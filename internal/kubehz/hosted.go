@@ -196,9 +196,17 @@ func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 // .kubeconfig/<domain>.yaml and mirror it to
 // .kubeconfig/<metadata.name>.yaml for the dispatch tail. Both files are
 // written by writePrivateFile (a 0600 temp file and one rename): a failed
-// download or write leaves the old file as it was.
+// download or write leaves the old file as it was. The kubeconfig path is
+// checked before the create: a path that the write refuses stops the
+// provision there, so a refusal creates no cluster.
 func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clusterYAML string) error {
 	apiURL := cfg.APIURL
+	// bash: kubehz::_private_target before the POST.
+	kubeconfigPath := filepath.Join(c.Paths.Base, ".kubeconfig", domain+".yaml")
+	if _, err := privateTarget(kubeconfigPath); err != nil {
+		c.errorf("%s", err)
+		return ErrHandled
+	}
 	payload := buildClusterPayload(clusterYAML)
 	if payload == nil {
 		payload = []byte{}
@@ -239,7 +247,6 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 		return err
 	}
 
-	kubeconfigPath := filepath.Join(c.Paths.Base, ".kubeconfig", domain+".yaml")
 	if err := os.MkdirAll(filepath.Dir(kubeconfigPath), 0o755); err != nil {
 		return err
 	}
@@ -284,28 +291,26 @@ func (e privateFileError) Error() string { return string(e) }
 // file or the complete new one, never a part, and never readable by
 // others. A failed write or rename leaves the old file as it was, and the
 // deferred removal deletes the temp file on each return with an error.
-// A dest that is a symlink is resolved (filepath.EvalSymlinks): the temp
-// file goes beside the file that the link names, and the rename replaces
-// that file, so the link stays. A link to nothing, a link that cannot be
-// resolved and a directory are refused (privateFileError).
+// A dest that is a symlink is resolved (privateTarget): the temp file goes
+// beside the file that the link names, and the rename replaces that file,
+// so the link stays. A link to nothing, a link that cannot be resolved and
+// a directory are refused (privateFileError). os.Rename is a rename onto
+// the exact path: it fails when another operation put a directory there
+// during the download (it never moves the file into it, as a mv without
+// -T does), so bash's check after the rename has no twin here. A failed
+// rename is a privateFileError with the text of bash.
 // Signals: INT and TERM (interrupt.Watch) and HUP (interrupt.CatchHangup,
 // for the time of the call) cancel the contexts and do not stop lo in the
 // middle of this function: the write ends, and the rename or the deferred
-// removal takes the temp file. SIGKILL cannot be caught: in the short time
+// removal takes the temp file. Bash removes the temp file on such a signal
+// and keeps the old file: a deliberate deviation (catalogue D45). SIGKILL cannot be caught: in the short time
 // between CreateTemp and Rename it leaves the temp file (mode 0600).
 func writePrivateFile(ctx context.Context, dest string, data []byte) (err error) {
 	_, stopHangup := interrupt.CatchHangup(ctx)
 	defer stopHangup()
-	target := dest
-	info, lerr := os.Lstat(dest)
-	if lerr == nil && info.Mode()&os.ModeSymlink != 0 {
-		if target, err = filepath.EvalSymlinks(dest); err != nil {
-			return privateFileError("Cannot resolve the symlink " + dest)
-		}
-		info, lerr = os.Stat(target)
-	}
-	if lerr == nil && info.IsDir() {
-		return privateFileError(dest + " is a directory, not a file")
+	target, err := privateTarget(dest)
+	if err != nil {
+		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".*")
 	if err != nil {
@@ -323,7 +328,37 @@ func writePrivateFile(ctx context.Context, dest string, data []byte) (err error)
 	if err = tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), target)
+	if err = renameFile(tmp.Name(), target); err != nil {
+		if info, serr := os.Stat(target); serr == nil && info.IsDir() {
+			return privateFileError(dest + " is a directory, not a file")
+		}
+		return privateFileError("Cannot rename the temp file to " + target)
+	}
+	return nil
+}
+
+// renameFile is os.Rename. A test replaces it, to make the rename fail
+// after the temp file exists.
+var renameFile = os.Rename
+
+// privateTarget ports kubehz::_private_target: the file that a write of
+// dest replaces (dest, or for a symlink the file that it names). A link
+// to nothing, a link that cannot be resolved and a directory are refused
+// (privateFileError, the text of bash).
+func privateTarget(dest string) (string, error) {
+	target := dest
+	info, lerr := os.Lstat(dest)
+	if lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		var err error
+		if target, err = filepath.EvalSymlinks(dest); err != nil {
+			return "", privateFileError("Cannot resolve the symlink " + dest)
+		}
+		info, lerr = os.Stat(target)
+	}
+	if lerr == nil && info.IsDir() {
+		return "", privateFileError(dest + " is a directory, not a file")
+	}
+	return target, nil
 }
 
 // DestroyHosted ports kubehz::destroy_hosted: resolve the cluster id from

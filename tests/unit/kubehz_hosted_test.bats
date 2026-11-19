@@ -791,9 +791,23 @@ _hosted_temps() {
   [ "$(cat "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml")" = kc-bytes ]
 }
 
+# The mode is checked while the content is written too (the stdout of the
+# download): a write in place through the link would write into the old
+# 0644 file, and a chmod after it would make the end mode 0600 all the same.
 @test "provision_hosted: a symlinked kubeconfig keeps the link and gets the new content, mode 0600" {
+  [[ -e "/proc/${BASHPID}/fd/1" ]] || skip "no /proc/<pid>/fd"
   _hosted_kc_harness
   yq() { case "$2" in '.metadata.name') echo "test.kubehz.dev" ;; *) echo "1" ;; esac; }
+  export KC_MODES="${BATS_TEST_TMPDIR}/modes"
+  curl() {
+    if [[ "$*" == *"/api/clusters/"*"/kubeconfig"* ]]; then
+      stat -L -c %a "/proc/${BASHPID}/fd/1" >> "${KC_MODES}"
+      echo "kc-bytes"
+      return 0
+    fi
+    printf '{"data":{"id":"cl-1","status":"Running"}}\n201'
+  }
+  export -f curl
   local real="${PATH_BASE}/real" kc="${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml"
   mkdir -p "${real}"
   printf 'old\n' > "${real}/test.kubehz.dev.yaml"
@@ -804,8 +818,122 @@ _hosted_temps() {
   [ "$(readlink "${kc}")" = ../real/test.kubehz.dev.yaml ]
   [ "$(cat "${real}/test.kubehz.dev.yaml")" = kc-bytes ]
   [ "$(stat -c %a "${real}/test.kubehz.dev.yaml")" = 600 ]
+  [ "$(cat "${KC_MODES}")" = 600 ]
   [ -z "$(_hosted_temps "${real}" test.kubehz.dev.yaml)" ]
   [ -z "$(_hosted_temps "${PATH_BASE}/.kubeconfig" test.kubehz.dev.yaml)" ]
+}
+
+# A kubeconfig path that the write refuses stops the provision before the
+# create: the refusal creates no cluster (a re-run would create another
+# one).
+@test "provision_hosted: a refused kubeconfig path stops the provision before the create" {
+  _hosted_kc_harness
+  yq() { case "$2" in '.metadata.name') echo "test.kubehz.dev" ;; *) echo "1" ;; esac; }
+  export CURL_CALLS="${BATS_TEST_TMPDIR}/curl.calls"
+  curl() { printf '%s\n' "$*" >> "${CURL_CALLS}"; printf '{"data":{"id":"cl-1","status":"Running"}}\n201'; }
+  export -f curl
+  local kc="${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml"
+  mkdir -p "${kc}"
+  run kubehz::provision_hosted "test.kubehz.dev" "/dev/null"
+  assert_failure
+  assert_output "ERR: ${kc} is a directory, not a file"
+  [ ! -e "${CURL_CALLS}" ]
+  rmdir "${kc}"
+  ln -s "${PATH_BASE}/none.yaml" "${kc}"
+  run kubehz::provision_hosted "test.kubehz.dev" "/dev/null"
+  assert_failure
+  assert_output "ERR: Cannot resolve the symlink ${kc}"
+  [ ! -e "${CURL_CALLS}" ]
+}
+
+@test "kubehz::_write_private: fewer than two arguments are refused, and nothing is written" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local f="${BATS_TEST_TMPDIR}/kc.yaml"
+  printf 'old\n' > "${f}"
+  run kubehz::_write_private "${f}"
+  assert_failure
+  assert_output --partial "kubehz::_write_private: it takes a file and a command (<dest> <command...>), not 1 argument(s); it writes nothing"
+  [ "${#lines[@]}" -eq 1 ]
+  run kubehz::_write_private
+  assert_failure
+  assert_output --partial "not 0 argument(s)"
+  [ "$(cat "${f}")" = old ]
+  [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}" kc.yaml)" ]
+}
+
+# Another operation puts a directory at the path during the write (the old
+# file goes aside): with mv -T the rename fails on it, and without -T the
+# check just before the rename refuses it. Nothing lands in the directory,
+# the old file is as it was, no temp file stays, and one line names it.
+@test "kubehz::_write_private: a path that becomes a directory during the write gets nothing, with mv -T and without" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local kc="${BATS_TEST_TMPDIR}/kc.yaml" aside="${BATS_TEST_TMPDIR}/aside.yaml" exact
+  swap() { printf new; mv -- "${kc}" "${aside}"; mkdir -- "${kc}"; }
+  for exact in 1 0; do
+    rm -rf -- "${kc:?}" "${aside:?}"
+    printf 'old\n' > "${kc}"
+    _KUBEHZ_MV_EXACT="${exact}"
+    run kubehz::_write_private "${kc}" swap
+    assert_failure
+    assert_output --partial "${kc} is a directory, not a file"
+    [ "${#lines[@]}" -eq 1 ] || { echo "mv -T ${exact}: ${output}" >&2; return 1; }
+    [ -z "$(find "${kc}" -mindepth 1)" ]
+    [ "$(cat "${aside}")" = old ]
+    [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}" kc.yaml)" ]
+  done
+}
+
+# Without mv -T, a directory can still come between the check and the
+# rename (here the mv itself puts it there first): mv then moves the new
+# file into it. The check after the rename finds no regular file, takes the
+# new file out of the directory by its exact path, and fails with one line.
+@test "kubehz::_write_private: without mv -T, a directory just before the rename gets the new file out again" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local kc="${BATS_TEST_TMPDIR}/kc.yaml" aside="${BATS_TEST_TMPDIR}/aside.yaml"
+  printf 'old\n' > "${kc}"
+  _KUBEHZ_MV_EXACT=0
+  mv() {
+    if [[ -f "${kc}" ]]; then command mv -- "${kc}" "${aside}" && mkdir -- "${kc}"; fi
+    command mv "$@"
+  }
+  run kubehz::_write_private "${kc}" printf new
+  assert_failure
+  assert_output --partial "${kc} is not a regular file after the rename: the new file is removed"
+  [ "${#lines[@]}" -eq 1 ]
+  [ -z "$(find "${kc}" -mindepth 1)" ]
+  [ "$(cat "${aside}")" = old ]
+  [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}" kc.yaml)" ]
+}
+
+# The probe of mv -T runs once, in a temp directory of its own that it
+# removes. A mv without -T (the BSD mv of macOS) selects the check before
+# the rename, and a write through that path works.
+@test "kubehz::_mv_exact_ok: probes mv once, and a mv without -T selects the directory check" {
+  mv --help 2>&1 | grep -q -- '-T' || skip "the mv of this host has no -T"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local probe="${BATS_TEST_TMPDIR}/probe" kc="${BATS_TEST_TMPDIR}/kc.yaml" rc=0
+  mkdir -p "${probe}"
+  _KUBEHZ_MV_EXACT=""
+  TMPDIR="${probe}" kubehz::_mv_exact_ok
+  [ "${_KUBEHZ_MV_EXACT}" = 1 ]
+  [ -z "$(ls -A "${probe}")" ]
+  mv() {
+    local a
+    for a in "$@"; do
+      [[ "${a}" != -T ]] || { echo "mv: illegal option -- T" >&2; return 64; }
+    done
+    command mv "$@"
+  }
+  _KUBEHZ_MV_EXACT=""
+  TMPDIR="${probe}" kubehz::_mv_exact_ok || rc=$?
+  [ "${rc}" -eq 1 ]
+  [ "${_KUBEHZ_MV_EXACT}" = 0 ]
+  [ -z "$(ls -A "${probe}")" ]
+  printf 'old\n' > "${kc}"
+  kubehz::_write_private "${kc}" printf new
+  [ "$(cat "${kc}")" = new ]
+  [ "$(stat -c %a "${kc}")" = 600 ]
+  [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}" kc.yaml)" ]
 }
 
 @test "kubehz::_write_private refuses a link to nothing and a directory, and leaves no temp file" {
@@ -828,7 +956,10 @@ _hosted_temps() {
 # sends the signal to its own shell and then goes on, so without the trap
 # the shell would end at once and leave the partial temp file. (INT has
 # the same trap. It has no case: a shell that starts with INT ignored, as
-# a background job does, cannot trap it.)
+# a background job does, cannot trap it.) Here a builtin sends the signal.
+# In production the signal comes while curl runs in the pipeline: the trap
+# runs when curl ends, and the call sets no time limit (--max-time), so a
+# hung download holds the trap.
 @test "kubehz::_write_private: TERM and HUP remove the temp file, and the old file stays" {
   local kc="${BATS_TEST_TMPDIR}/kc.yaml" pair sig code
   for pair in TERM:143 HUP:129; do
@@ -842,6 +973,29 @@ source "$3/libs/kubehz/hosted"
 test_signal="$2"
 dl() { printf partial; kill -s "${test_signal}" "$$"; printf rest; }
 kubehz::_write_private "$1" dl
+echo "returned $?"' bash "${kc}" "${sig}" "${_PROJECT_ROOT}/.lok8s"
+    [ "${status}" -eq "${code}" ] || { echo "${sig}: status ${status}, want ${code}" >&2; return 1; }
+    refute_output --partial returned
+    [ "$(cat "${kc}")" = old ]
+    [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}" kc.yaml)" ]
+  done
+}
+
+# A TERM or a HUP while mktemp runs (in its command substitution): the
+# traps are set before it, and the shell runs them after the substitution
+# gives the name, so the new temp file goes too.
+@test "kubehz::_write_private: TERM and HUP while mktemp runs remove the new temp file" {
+  local kc="${BATS_TEST_TMPDIR}/kc.yaml" pair sig code
+  for pair in TERM:143 HUP:129; do
+    sig="${pair%:*}" code="${pair#*:}"
+    printf 'old\n' > "${kc}"
+    run bash -c 'import() { :; }
+source "$3/utils/verbose.sh"
+source "$3/utils/http.sh"
+source "$3/libs/kubehz/hosted"
+test_signal="$2"
+mktemp() { command mktemp "$@" && kill -s "${test_signal}" "$$"; }
+kubehz::_write_private "$1" printf new
 echo "returned $?"' bash "${kc}" "${sig}" "${_PROJECT_ROOT}/.lok8s"
     [ "${status}" -eq "${code}" ] || { echo "${sig}: status ${status}, want ${code}" >&2; return 1; }
     refute_output --partial returned

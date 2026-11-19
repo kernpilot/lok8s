@@ -137,6 +137,13 @@ kubehz::provision_hosted() {
   local api_url="${LOK8S_KUBEHZ_API_URL}"
   http::credential_ok KUBEHZ_TOKEN || return 1
 
+  # The kubeconfig path is checked before the create: a path that the
+  # write refuses (a link to nothing, a directory) stops the provision
+  # here, so a refusal creates no cluster (kubehz::_private_target, the
+  # check of kubehz::_write_private).
+  local kubeconfig_path="${PATH_BASE}/.kubeconfig/${domain}.yaml"
+  kubehz::_private_target "${kubeconfig_path}" > /dev/null || return 1
+
   local payload
   payload=$(kubehz::build_cluster_payload "${cluster_yaml}")
 
@@ -198,7 +205,6 @@ kubehz::provision_hosted() {
   # Download kubeconfig. kubehz::_write_private: a private temp file beside
   # the kubeconfig, renamed onto it only after a complete download. A
   # failed download leaves the old file as it was.
-  local kubeconfig_path="${PATH_BASE}/.kubeconfig/${domain}.yaml"
   mkdir -p "$(dirname "${kubeconfig_path}")"
   if ! kubehz::_write_private "${kubeconfig_path}" \
     kubehz::_hosted_kubeconfig_get "${api_url}" "${cluster_id}"; then
@@ -243,23 +249,64 @@ kubehz::_hosted_kubeconfig_get() {
 # kubehz::_write_private <dest> <command...>: run the command with its
 # stdout in a new private file, and put that file at <dest> only when the
 # command succeeds. The temp file is beside the file (mode 0600: mktemp
-# under umask 077), and one rename replaces the file. So <dest> is the old
-# file or the complete new one, never a part, and never readable by
-# others. A failed command or rename leaves the old file as it was and
-# removes the temp file.
-# A <dest> that is a symlink is resolved (readlink -f): the temp file goes
-# beside the file that the link names, and the rename replaces that file,
-# so the link stays. A link to nothing, a link that cannot be resolved and
-# a directory are refused (one error line).
+# under umask 077), and one rename onto the exact path replaces the file
+# (kubehz::_publish_private). So <dest> is the old file or the complete new
+# one, never a part, and never readable by others. A failed command or
+# rename leaves the old file as it was and removes the temp file.
+# A <dest> that is a symlink is resolved (kubehz::_private_target): the
+# temp file goes beside the file that the link names, and the rename
+# replaces that file, so the link stays. A link to nothing, a link that
+# cannot be resolved and a directory are refused (one error line).
 # INT, TERM and HUP remove the temp file, then end the shell with that
-# signal. The INT, TERM and HUP traps of the caller come back when the
-# function returns. SIGKILL cannot be caught: it leaves the temp file
-# (mode 0600, the name <file>.XXXXXX).
+# signal. The traps are set before the temp file exists and read its path
+# when they run, so a signal while mktemp runs is covered too. The INT,
+# TERM and HUP traps of the caller come back when the function returns.
+# Not covered: SIGKILL, and a signal to the whole process group while
+# mktemp runs (mktemp then ends before it gives the name). Either can
+# leave the temp file (mode 0600, the name <file>.XXXXXX). A signal during
+# the download takes effect when curl ends (the trap runs after the
+# current command; the call sets no time limit).
 # Status 0 when <dest> holds the new content, else 1.
 kubehz::_write_private() {
-  local dest="${1}" target tmp q sig saved_traps rc=0
+  (( $# >= 2 )) || {
+    error "kubehz::_write_private: it takes a file and a command (<dest> <command...>), not $# argument(s); it writes nothing"
+    return 1
+  }
+  local dest="${1}" target sig saved_traps rc=0
+  # The trap reads the temp path at run time: a name of its own, so that no
+  # local of the command (a function in this shell) hides it.
+  local _kubehz_wp_tmp=""
   shift
-  target="${dest}"
+  target=$(kubehz::_private_target "${dest}") || return 1
+  saved_traps=$(trap -p INT TERM HUP)
+  for sig in INT TERM HUP; do
+    # shellcheck disable=SC2064 # the signal name now, the path when the trap runs
+    trap "[[ -z \"\${_kubehz_wp_tmp:-}\" ]] || rm -f -- \"\${_kubehz_wp_tmp}\"; trap - ${sig}; kill -${sig} \${BASHPID}" "${sig}"
+  done
+  if ! _kubehz_wp_tmp=$(umask 077 && mktemp "${target}.XXXXXX"); then
+    _kubehz_wp_tmp=""
+    error "Cannot create a temp file beside ${target}"
+    rc=1
+  elif ! "$@" > "${_kubehz_wp_tmp}"; then
+    rc=1
+  elif ! kubehz::_publish_private "${_kubehz_wp_tmp}" "${target}" "${dest}"; then
+    rc=1
+  fi
+  if (( rc != 0 )) && [[ -n "${_kubehz_wp_tmp}" ]]; then
+    rm -f -- "${_kubehz_wp_tmp}"
+  fi
+  _kubehz_wp_tmp=""
+  trap - INT TERM HUP
+  eval "${saved_traps}"
+  return "${rc}"
+}
+
+# kubehz::_private_target <dest>: the file that a write of <dest> replaces,
+# on stdout: <dest>, or for a symlink the file that it names (readlink -f).
+# A link to nothing, a link that cannot be resolved and a directory are
+# refused with one error line, status 1.
+kubehz::_private_target() {
+  local dest="${1}" target="${1}"
   if [[ -L "${dest}" ]]; then
     target=""
     if [[ -e "${dest}" ]]; then
@@ -274,23 +321,64 @@ kubehz::_write_private() {
     error "${dest} is a directory, not a file"
     return 1
   }
-  tmp=$(umask 077 && mktemp "${target}.XXXXXX") || {
-    error "Cannot create a temp file beside ${target}"
-    return 1
-  }
-  saved_traps=$(trap -p INT TERM HUP)
-  q=$(printf '%q' "${tmp}")
-  for sig in INT TERM HUP; do
-    # shellcheck disable=SC2064 # expand the path now, while it is known
-    trap "rm -f -- ${q}; trap - ${sig}; kill -${sig} \${BASHPID}" "${sig}"
-  done
-  if ! "$@" > "${tmp}" || ! mv -f -- "${tmp}" "${target}"; then
-    rm -f -- "${tmp}"
-    rc=1
+  printf '%s\n' "${target}"
+}
+
+# _KUBEHZ_MV_EXACT: 1 when mv takes -T (GNU coreutils and others: the
+# rename goes onto the exact path and fails on a directory), 0 when it
+# does not (the BSD mv of macOS). Empty until kubehz::_mv_exact_ok probes
+# mv once, in a temp directory of its own.
+_KUBEHZ_MV_EXACT=""
+
+kubehz::_mv_exact_ok() {
+  if [[ -z "${_KUBEHZ_MV_EXACT}" ]]; then
+    local d
+    _KUBEHZ_MV_EXACT=0
+    if d=$(mktemp -d 2>/dev/null); then
+      if : > "${d}/a" 2>/dev/null && mv -f -T -- "${d}/a" "${d}/b" 2>/dev/null \
+        && [[ -f "${d}/b" && ! -e "${d}/a" ]]; then
+        _KUBEHZ_MV_EXACT=1
+      fi
+      rm -rf -- "${d:?}"
+    fi
   fi
-  trap - INT TERM HUP
-  eval "${saved_traps}"
-  return "${rc}"
+  [[ "${_KUBEHZ_MV_EXACT}" == 1 ]]
+}
+
+# kubehz::_publish_private <tmp> <target> <dest>: rename <tmp> onto the
+# exact path <target>. With mv -T the rename fails when <target> is a
+# directory (another operation can put one there during the download).
+# A mv without -T would move <tmp> into a directory: there the call
+# refuses a directory just before the rename. After the rename, <target>
+# must be a regular file. If it is not (a directory took its place between
+# the check and the rename of a mv without -T), the new file is removed
+# from it by its exact path. One error line on each failure, status 1.
+kubehz::_publish_private() {
+  local tmp="${1}" target="${2}" dest="${3}"
+  if kubehz::_mv_exact_ok; then
+    if ! mv -f -T -- "${tmp}" "${target}" 2>/dev/null; then
+      if [[ -d "${target}" ]]; then
+        error "${dest} is a directory, not a file"
+      else
+        error "Cannot rename the temp file to ${target}"
+      fi
+      return 1
+    fi
+  else
+    [[ ! -d "${target}" ]] || {
+      error "${dest} is a directory, not a file"
+      return 1
+    }
+    mv -f -- "${tmp}" "${target}" 2>/dev/null || {
+      error "Cannot rename the temp file to ${target}"
+      return 1
+    }
+  fi
+  if [[ -L "${target}" || ! -f "${target}" ]]; then
+    rm -f -- "${target:?}/${tmp##*/}"
+    error "${target} is not a regular file after the rename: the new file is removed"
+    return 1
+  fi
 }
 
 # Destroy a hosted cluster via the kubehz API.

@@ -292,6 +292,93 @@ func TestWritePrivateFileRefusals(t *testing.T) {
 	}
 }
 
+// A kubeconfig path that the write refuses stops the provision before the
+// create: the refusal creates no cluster (bash: kubehz::_private_target
+// before the POST).
+func TestProvisionHostedRefusedKubeconfigCreatesNoCluster(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	spec := hostedSpec(h, "test.kubehz.dev")
+	hostedKubeconfigRoutes(h, 200, "new\n")
+	kc := filepath.Join(h.base, ".kubeconfig", "test.kubehz.dev.yaml")
+	if err := os.MkdirAll(kc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustErr(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec))
+	mustContain(t, h.output(), kc+" is a directory, not a file")
+	if h.anyReq("POST", "/api/clusters") {
+		t.Fatalf("the create ran: %+v", h.reqs())
+	}
+}
+
+// A rename that fails after the temp file exists: the old file stays as it
+// was, and no temp file is left. In the first case another operation puts
+// a directory at the path between the write and the rename (the old file
+// goes aside): os.Rename fails on it, nothing lands in it, and the error
+// names it. In the second the rename fails for another cause. Not
+// parallel: it replaces renameFile.
+func TestWritePrivateFileRenameFailureLeavesNoTempFile(t *testing.T) {
+	t.Cleanup(func() { renameFile = os.Rename })
+	for _, tc := range []struct {
+		name   string
+		rename func(dir, dest string) func(string, string) error
+		want   func(dest string) string
+	}{
+		{
+			name: "a directory takes the place of the file",
+			rename: func(dir, dest string) func(string, string) error {
+				return func(from, to string) error {
+					if err := os.Rename(dest, filepath.Join(dir, "moved-old.yaml")); err != nil {
+						return err
+					}
+					if err := os.Mkdir(dest, 0o700); err != nil {
+						return err
+					}
+					return os.Rename(from, to)
+				}
+			},
+			want: func(dest string) string { return dest + " is a directory, not a file" },
+		},
+		{
+			name: "the rename fails",
+			rename: func(_, _ string) func(string, string) error {
+				return func(_, _ string) error { return errors.New("injected") }
+			},
+			want: func(dest string) string { return "Cannot rename the temp file to " + dest },
+		},
+	} {
+		dir := t.TempDir()
+		dest := filepath.Join(dir, "kc.yaml")
+		if err := os.WriteFile(dest, []byte("old\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		renameFile = tc.rename(dir, dest)
+		err := writePrivateFile(t.Context(), dest, []byte("new\n"))
+		renameFile = os.Rename
+		var refused privateFileError
+		if !errors.As(err, &refused) || refused.Error() != tc.want(dest) {
+			t.Fatalf("%s: err = %v, want %q", tc.name, err, tc.want(dest))
+		}
+		if tmp := hostedTemps(t, dir, "kc.yaml"); len(tmp) != 0 {
+			t.Fatalf("%s: temp files left: %q", tc.name, tmp)
+		}
+		old := dest
+		if info, serr := os.Stat(dest); serr == nil && info.IsDir() {
+			entries, rerr := os.ReadDir(dest)
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("%s: the new file landed in the directory: %v", tc.name, entries)
+			}
+			old = filepath.Join(dir, "moved-old.yaml")
+		}
+		if got := readFile(t, old); got != "old\n" {
+			t.Fatalf("%s: old file = %q, want the old one", tc.name, got)
+		}
+	}
+}
+
 func TestProvisionHostedNoClusterID(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
