@@ -4,9 +4,11 @@ package kubehz
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -42,16 +44,108 @@ func nodeHarness(t *testing.T, s nodeStubs, hosting, apiURL string) *harness {
 	h.handle("DELETE /api/clusters/cl-1234abcd/nodes/box-1", s.removeCode, s.removeBody)
 	h.ctx.IsRoot = func() bool { return true }
 	h.ctx.LookPath = func(tool string) bool { return tool == "kubeadm" }
+	fakeKubeadm(h, "v1.36.0\n", nil)
 	return h
 }
 
-func kubeadmArgv(h *harness) []string {
+// joinToken is the bootstrap token of stubMintBody. It is built from parts:
+// a secret scanner flags a long literal next to a token keyword.
+const joinToken = "a1b2c3" + "." + "d4e5f6g7h8i9j0k1"
+
+// joinSeen is what the fake kubeadm read of its join config at the join.
+type joinSeen struct {
+	path, content     string
+	fileMode, dirMode os.FileMode
+	err               error
+}
+
+// fakeKubeadm answers `kubeadm version -o short` with version and returns
+// joinErr for `kubeadm join --config <path>`. At the join it reads the
+// config file and the modes of the file and its directory (the CLI removes
+// them after the join).
+func fakeKubeadm(h *harness, version string, joinErr error) *joinSeen {
+	seen := &joinSeen{}
+	h.runner.handler = func(c execx.Cmd, _ string) error {
+		if c.Name != "kubeadm" {
+			return nil
+		}
+		switch strings.Join(c.Args, " ") {
+		case "version -o short":
+			_, _ = io.WriteString(c.Stdout, version)
+			return nil
+		}
+		if len(c.Args) == 3 && c.Args[0] == "join" && c.Args[1] == "--config" {
+			seen.path = c.Args[2]
+			b, err := os.ReadFile(seen.path)
+			seen.content, seen.err = string(b), err
+			if fi, err := os.Lstat(seen.path); err == nil {
+				seen.fileMode = fi.Mode()
+			}
+			if fi, err := os.Lstat(filepath.Dir(seen.path)); err == nil {
+				seen.dirMode = fi.Mode()
+			}
+			if joinErr != nil {
+				_, _ = io.WriteString(c.Stderr, "preflight failed\n")
+			}
+			return joinErr
+		}
+		return nil
+	}
+	return seen
+}
+
+// kubeadmJoin returns the argv of the kubeadm join call, nil when no join
+// ran.
+func kubeadmJoin(h *harness) []string {
 	for _, c := range h.runner.calls {
-		if c.Name == "kubeadm" {
+		if c.Name == "kubeadm" && len(c.Args) > 0 && c.Args[0] == "join" {
 			return c.Args
 		}
 	}
 	return nil
+}
+
+// kubeadmCalls counts the kubeadm calls: the version and the join.
+func kubeadmCalls(h *harness) int {
+	n := 0
+	for _, c := range h.runner.calls {
+		if c.Name == "kubeadm" {
+			n++
+		}
+	}
+	return n
+}
+
+var tokenFlagRe = regexp.MustCompile(`^--([a-z0-9]+-)*token(=|$)`)
+
+// mustKeepTokenOffArgv fails when an argv word of a process holds the
+// bootstrap token or a kubeadm token flag (--token, --tls-bootstrap-token,
+// --discovery-token). No process at all proves nothing, and fails too.
+func mustKeepTokenOffArgv(t *testing.T, h *harness) {
+	t.Helper()
+	if len(h.runner.calls) == 0 {
+		t.Fatal("no process ran")
+	}
+	for _, c := range h.runner.calls {
+		for _, a := range append([]string{c.Name}, c.Args...) {
+			if strings.Contains(a, joinToken) || tokenFlagRe.MatchString(a) {
+				t.Errorf("the bootstrap token can reach argv: %s", argvLine(c))
+			}
+		}
+	}
+}
+
+// mustLeaveNoJoinDir fails when the temp dir still holds an entry: each
+// way out of a join removes the private directory of its config.
+func mustLeaveNoJoinDir(t *testing.T, h *harness) {
+	t.Helper()
+	entries, err := os.ReadDir(h.env["TMPDIR"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		t.Errorf("left in the temp dir: %s", e.Name())
+	}
 }
 
 func mintBody(t *testing.T, h *harness) map[string]any {
@@ -262,41 +356,271 @@ func TestNodeJoinPrintOnly(t *testing.T) {
 	mustContain(t, h.output(), "2026-09-01T12:00:00Z")
 	mustContain(t, h.output(), "single use")
 	mustContain(t, h.output(), "--node-ip 203.0.113.7")
-	if kubeadmArgv(h) != nil {
-		t.Fatal("kubeadm must not run")
+	// Not even `kubeadm version`: the join runs on another machine.
+	if n := kubeadmCalls(h); n != 0 {
+		t.Fatalf("kubeadm ran %d times, want 0", n)
 	}
 }
 
-func TestNodeJoinRunsExactArgv(t *testing.T) {
+// The join config of stubMintBody, as both twins write it (the bats twin
+// pins the same bytes).
+const (
+	joinConfigV1beta4 = `apiVersion: kubeadm.k8s.io/v1beta4
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    apiServerEndpoint: "cp.example.test:6443"
+    token: "` + joinToken + `"
+    caCertHashes:
+      - "sha256:1111"
+nodeRegistration:
+  name: "box-1"
+`
+	joinConfigV1beta4NodeIP = joinConfigV1beta4 + `  kubeletExtraArgs:
+    - name: "node-ip"
+      value: "203.0.113.7"
+`
+	joinConfigV1beta3NodeIP = `apiVersion: kubeadm.k8s.io/v1beta3
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    apiServerEndpoint: "cp.example.test:6443"
+    token: "` + joinToken + `"
+    caCertHashes:
+      - "sha256:1111"
+nodeRegistration:
+  name: "box-1"
+  kubeletExtraArgs:
+    node-ip: "203.0.113.7"
+`
+)
+
+// mustJoinWithConfig checks the one join call: `kubeadm join --config
+// <path>`, the path a 0600 file in a fresh 0700 directory under TMPDIR, the
+// content want. The directory must be gone after the run.
+func mustJoinWithConfig(t *testing.T, h *harness, seen *joinSeen, want string) {
+	t.Helper()
+	got := kubeadmJoin(h)
+	if len(got) != 3 || got[0] != "join" || got[1] != "--config" || got[2] != seen.path {
+		t.Fatalf("join argv = %q, want [join --config <path>]", got)
+	}
+	tmp, err := filepath.EvalSymlinks(h.env["TMPDIR"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(seen.path)
+	if filepath.Dir(dir) != tmp || !strings.HasPrefix(filepath.Base(dir), "kubehz-join-") || filepath.Base(seen.path) != "kubehz-join-box-1.yaml" {
+		t.Errorf("config path = %s, want %s/kubehz-join-<random>/kubehz-join-box-1.yaml", seen.path, tmp)
+	}
+	if seen.err != nil {
+		t.Fatalf("the config was not readable at the join: %v", seen.err)
+	}
+	if seen.content != want {
+		t.Errorf("config:\n%s\nwant:\n%s", seen.content, want)
+	}
+	if !seen.fileMode.IsRegular() || seen.fileMode.Perm() != 0o600 {
+		t.Errorf("config file mode = %v, want a regular file 0600", seen.fileMode)
+	}
+	if !seen.dirMode.IsDir() || seen.dirMode.Perm() != 0o700 {
+		t.Errorf("config dir mode = %v, want a directory 0700", seen.dirMode)
+	}
+	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
+		t.Errorf("the config dir %s is still there after the run (%v)", dir, err)
+	}
+	mustLeaveNoJoinDir(t, h)
+	mustKeepTokenOffArgv(t, h)
+}
+
+func TestNodeJoinRunsTheJoinConfig(t *testing.T) {
 	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	seen := fakeKubeadm(h, "v1.36.0\n", nil)
 	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}), h.output())
 	mustContain(t, h.output(), "node 'box-1' joined cluster cl-1234abcd")
-	want := []string{"join", "cp.example.test:6443", "--token", "a1b2c3.d4e5f6g7h8i9j0k1", "--discovery-token-ca-cert-hash", "sha256:1111", "--node-name", "box-1"}
-	if got := kubeadmArgv(h); strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("argv:\n%v\nwant\n%v", got, want)
+	mustJoinWithConfig(t, h, seen, joinConfigV1beta4)
+	if first := h.runner.calls[0]; argvLine(first) != "kubeadm version -o short" {
+		t.Errorf("first call = %q, want the version before the mint", argvLine(first))
 	}
 
 	h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	seen = fakeKubeadm(h, "v1.36.0\n", nil)
 	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", NodeIP: "203.0.113.7"}), h.output())
-	got := kubeadmArgv(h)
-	if strings.Join(got[len(got)-2:], "\n") != "--node-ip\n203.0.113.7" {
-		t.Fatalf("node-ip tail: %v", got)
+	mustJoinWithConfig(t, h, seen, joinConfigV1beta4NodeIP)
+}
+
+// The config version follows `kubeadm version -o short`; a version that
+// cannot be mapped is refused before the mint.
+func TestNodeJoinConfigVersion(t *testing.T) {
+	for version, want := range map[string]string{
+		"v1.36.0\n":      "v1beta4",
+		"v1.31.0\n":      "v1beta4",
+		"v1.31.0-rc.1\n": "v1beta4",
+		"v1.30.14\n":     "v1beta3",
+		"v1.22.0+k3s1\n": "v1beta3",
+		"v1.022.3\n":     "v1beta3",
+		"v1.100.0\n\n\n": "v1beta4",
+		"v1.29.2":        "v1beta3",
+	} {
+		h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+		seen := fakeKubeadm(h, version, nil)
+		mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", NodeIP: "203.0.113.7"}), h.output())
+		wantConfig := joinConfigV1beta4NodeIP
+		if want == "v1beta3" {
+			wantConfig = joinConfigV1beta3NodeIP
+		}
+		mustJoinWithConfig(t, h, seen, wantConfig)
+	}
+	for _, version := range []string{"v1.21.14\n", "v1.0.0\n", "v2.0.0\n", "1.31.0\n", "v1.31\n", "\n", "", "v1.31.0\nv1.30.0\n", "v1.31.0 extra\n", "v1.1234.0\n"} {
+		h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+		fakeKubeadm(h, version, nil)
+		mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+		mustContain(t, h.output(), "cannot write a join config for the kubeadm on this machine")
+		mustContain(t, h.output(), "kubeadm 1.22 and later. Nothing was minted.")
+		if h.anyReq("POST", "/join-token") || kubeadmJoin(h) != nil {
+			t.Errorf("version %q: minted or joined", version)
+		}
+	}
+	// A kubeadm that fails to answer is refused the same way.
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	h.runner.handler = func(c execx.Cmd, _ string) error {
+		_, _ = io.WriteString(c.Stdout, "v1.36.0\n")
+		return exitErr(1)
+	}
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+	mustContain(t, h.output(), "cannot write a join config for the kubeadm on this machine: ''")
+	if h.anyReq("POST", "/join-token") {
+		t.Error("minted after a failed kubeadm version")
 	}
 }
 
 func TestNodeJoinFailingKubeadm(t *testing.T) {
 	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
-	h.runner.handler = func(c execx.Cmd, _ string) error {
-		if c.Name == "kubeadm" {
-			io.WriteString(c.Stderr, "preflight failed\n")
-			return exitErr(1)
-		}
-		return nil
-	}
+	seen := fakeKubeadm(h, "v1.36.0\n", exitErr(1))
 	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
 	mustContain(t, h.output(), "kubeadm join failed")
 	mustContain(t, h.output(), "lo kubehz node remove --name box-1")
 	mustContain(t, h.output(), "kubeadm reset")
+	// The failed join removes the config too.
+	mustJoinWithConfig(t, h, seen, joinConfigV1beta4)
+}
+
+// A removal that fails after the join names the directory, which holds
+// the ticket.
+func TestNodeJoinNamesAConfigDirItCannotRemove(t *testing.T) {
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	seen := fakeKubeadm(h, "v1.36.0\n", nil)
+	h.ctx.RemoveAll = func(string) error { return errors.New("device busy") }
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}), h.output())
+	mustContain(t, h.output(), "could not remove "+filepath.Dir(seen.path)+"\n")
+	mustContain(t, h.output(), "It holds the join ticket until the ticket expires.")
+}
+
+// --node-ip goes into the config: a value outside the address shape is
+// refused before the mint, with --print-only too.
+func TestNodeJoinRefusesABadNodeIP(t *testing.T) {
+	for _, ip := range []string{"203.0.113.7 --control-plane", "203.0.113.7\nkind: x", "203.0.113.7,", `"x"`, "a,b,c"} {
+		for _, printOnly := range []bool{false, true} {
+			h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+			mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", NodeIP: ip, PrintOnly: printOnly}))
+			mustContain(t, h.output(), "--node-ip must be one IP address, or an IPv4 and an IPv6 address with a comma")
+			if h.anyReq("POST", "/join-token") || kubeadmCalls(h) != 0 {
+				t.Errorf("node ip %q: minted or ran kubeadm", ip)
+			}
+		}
+	}
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	seen := fakeKubeadm(h, "v1.36.0\n", nil)
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal", NodeIP: "203.0.113.7,2001:db8::7"}), h.output())
+	mustContain(t, seen.content, "      value: \"203.0.113.7,2001:db8::7\"\n")
+}
+
+// A temp dir that fails the check is refused before the mint: the config
+// could not be written after it.
+func TestNodeJoinRefusesAnOpenTempDirBeforeTheMint(t *testing.T) {
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	open := filepath.Join(h.base, "open")
+	if err := os.Mkdir(open, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(open, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	h.env["TMPDIR"] = open
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+	mustContain(t, h.output(), "is writable by others and has no sticky bit")
+	if h.anyReq("POST", "/join-token") || kubeadmJoin(h) != nil {
+		t.Error("minted or joined with an open temp dir")
+	}
+
+	h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	h.env["TMPDIR"] = filepath.Join(h.base, "missing")
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+	mustContain(t, h.output(), "the temp dir (TMPDIR) cannot be resolved, so the join config cannot be written.")
+	if h.anyReq("POST", "/join-token") {
+		t.Error("minted with a temp dir that cannot be resolved")
+	}
+}
+
+// A failed write after the mint names the slot, and runs no join.
+func TestNodeJoinConfigWriteFailure(t *testing.T) {
+	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	h.ctx.joinWrite = func(*os.File, string) error { return errors.New("disk full") }
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+	mustContain(t, h.output(), "could not write the join config for 'box-1': disk full")
+	mustContain(t, h.output(), "lo kubehz node remove --name box-1")
+	if kubeadmJoin(h) != nil {
+		t.Error("joined without a config")
+	}
+	mustLeaveNoJoinDir(t, h)
+
+	h = nodeHarness(t, defaultNodeStubs(), "hosted", "")
+	h.ctx.joinWrite = func(*os.File, string) error { return errors.New("disk full") }
+	h.ctx.RemoveAll = func(string) error { return errors.New("device busy") }
+	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+	mustContain(t, h.output(), "The cleanup failed too: ")
+	mustContain(t, h.output(), "may still hold the join ticket. Delete that directory.")
+}
+
+// The line is read into the config after the mint; a line this CLI cannot
+// read that way runs nothing, names the slot and writes no file.
+func TestNodeJoinRefusesALineItCannotReadIntoAConfig(t *testing.T) {
+	const ca = " --discovery-token-ca-cert-hash sha256:1111"
+	for line, want := range map[string]string{
+		"kubeadm join cp.example.test:6443" + ca + " --node-name box-1":                                                  "exactly one bootstrap token (--token)",
+		"kubeadm join cp.example.test:6443 --token " + joinToken + " --token " + joinToken[:len(joinToken)-1] + "2" + ca: "exactly one bootstrap token (--token)",
+		"kubeadm join cp.example.test:6443 --token A1B2C3.D4E5F6G7H8I9J0K1" + ca:                                         "does not have the kubeadm token shape",
+		"kubeadm join cp.example.test:6443 --token " + joinToken + ca + " --node-name a --node-name=b":                   "names the node more than once (--node-name)",
+		"kubeadm join cp.example.test:6443 extra --token " + joinToken + ca:                                              "a word that follows no flag",
+		"kubeadm join cp.example.test:6443 --token= " + joinToken + ca:                                                   "a flag without a value: --token",
+		"kubeadm join cp.example.test:6443 --token " + joinToken + ca + " --node-name":                                   "a flag without a value: --node-name",
+		"kubeadm join cp.example.test:6443 --token" + ca:                                                                 "a flag without a value: --token",
+	} {
+		s := defaultNodeStubs()
+		s.mintBody = `{"ok":true,"data":{"joinCommand":"` + line + `","expiresAt":"x","ready":true}}`
+		h := nodeHarness(t, s, "hosted", "")
+		mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
+		mustContain(t, h.output(), want)
+		mustContain(t, h.output(), "holds a node slot")
+		if kubeadmJoin(h) != nil {
+			t.Errorf("%q: joined", line)
+		}
+		mustLeaveNoJoinDir(t, h)
+	}
+	// The --flag=value form and a second CA pin read the same way.
+	s := defaultNodeStubs()
+	s.mintBody = `{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token=` + joinToken + ` --discovery-token-ca-cert-hash=sha256:1111 --discovery-token-ca-cert-hash sha256:2222","expiresAt":"x","ready":true}}`
+	h := nodeHarness(t, s, "hosted", "")
+	seen := fakeKubeadm(h, "v1.36.0\n", nil)
+	mustOK(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}), h.output())
+	mustJoinWithConfig(t, h, seen, `apiVersion: kubeadm.k8s.io/v1beta4
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    apiServerEndpoint: "cp.example.test:6443"
+    token: "`+joinToken+`"
+    caCertHashes:
+      - "sha256:1111"
+      - "sha256:2222"
+`)
 }
 
 func TestNodeJoinUnarmedTicketWarns(t *testing.T) {
@@ -314,7 +638,7 @@ func joinWithMint(t *testing.T, mint string) *harness {
 	s.mintBody = mint
 	h := nodeHarness(t, s, "hosted", "")
 	mustErr(t, h.ctx.NodeJoin(t.Context(), "acme.example.org", NodeOpts{Name: "box-1", Pool: "metal"}))
-	if kubeadmArgv(h) != nil {
+	if kubeadmJoin(h) != nil {
 		t.Fatal("nothing may run")
 	}
 	return h

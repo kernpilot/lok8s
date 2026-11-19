@@ -1954,9 +1954,10 @@ _stub_mktemp() {
   [ "$(cat "${path}")" = "${ticket}" ]
 }
 
-# The writer on its own: a readonly nameref of a caller on the name of any
-# of its five locals stops it before the write (an error, rc 1, no child,
-# no directory), and the target of the nameref stays empty.
+# The writer on its own (kubehz::write_join_file, through the ticket
+# wrapper): a readonly nameref of a caller on the name of any of its six
+# locals stops it before the write (an error, rc 1, no child, no
+# directory), and the target of the nameref stays empty.
 @test "space_write_join_ticket: a readonly nameref on a local name stops it before the write" {
   local ticket name
   local -a dirs
@@ -1979,11 +1980,11 @@ _stub_mktemp() {
     printf '%s' "${escaped}" > "${ENV_DIR}/escaped.after"
     return "${rc}"
   }
-  for name in node_name token dir priv path; do
+  for name in node_name ext content dir priv path; do
     rm -f -- "${ENV_DIR}/mktemp.env" "${ENV_DIR}/after.env" "${ENV_DIR}/escaped.after"
     run _nameref_write "${name}"
     assert_failure 1
-    assert_output --partial "kubehz::space_write_join_ticket: a local cannot be declared (a readonly name or a nameref of the caller)"
+    assert_output --partial "kubehz::write_join_file: a local cannot be declared (a readonly name or a nameref of the caller)"
     refute_output --partial "${ticket#*.}"
     [ ! -e "${ENV_DIR}/mktemp.env" ]
     [ -s "${ENV_DIR}/after.env" ]
@@ -1995,9 +1996,10 @@ _stub_mktemp() {
   done
 }
 
-# The writer on its own under localvar_inherit, with each of its five
-# names an integer local of the caller: the write goes through, no ticket
-# is printed or reaches a child, and the integers keep their values.
+# The writer on its own under localvar_inherit (kubehz::write_join_file,
+# through the ticket wrapper), with each of its six names an integer local
+# of the caller: the write goes through, no ticket is printed or reaches a
+# child, and the integers keep their values.
 @test "space_write_join_ticket: under localvar_inherit, integers of a caller print no ticket" {
   local ticket
   ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
@@ -2013,10 +2015,10 @@ _stub_mktemp() {
     local t
     t=$(cat "${ENV_DIR}/ticket")
     shopt -s localvar_inherit
-    local -i node_name=0 token=0 dir=0 priv=0 path=0
+    local -i node_name=0 ext=0 content=0 dir=0 priv=0 path=0
     kubehz::space_write_join_ticket worker-1 "${t}" || return
     env > "${ENV_DIR}/after.env"
-    declare -p node_name token dir priv path > "${ENV_DIR}/caller.after"
+    declare -p node_name ext content dir priv path > "${ENV_DIR}/caller.after"
   }
   run _inherit_write
   assert_success
@@ -2025,7 +2027,7 @@ _stub_mktemp() {
   [ -s "${ENV_DIR}/mktemp.env" ]
   [ "$(grep -c -F -- "${ticket#*.}" "${ENV_DIR}/mktemp.env")" -eq 0 ]
   [ "$(grep -c -F -- "${ticket#*.}" "${ENV_DIR}/after.env")" -eq 0 ]
-  [ "$(wc -l < "${ENV_DIR}/caller.after")" -eq 5 ]
+  [ "$(wc -l < "${ENV_DIR}/caller.after")" -eq 6 ]
   [ "$(grep -c -v -x -E 'declare -i [a-z_]+="0"' "${ENV_DIR}/caller.after")" -eq 0 ]
 }
 

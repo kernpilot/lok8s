@@ -100,6 +100,8 @@ curl_respond() {
     */agent-token) out='{"rotated":true,"clusterId":"cl-1"}' ;;
     */assessment) out='{"data":{}}' ;;
     */api/clusters/cl-1) out='{"data":{"status":"Running"}}' ;;
+    # The node join mint: the test sets the join line.
+    */nodes/join-token) out="${JOIN_MINT_BODY}"; code=201 ;;
   esac
   printf '%s' "${out}"
   [[ " $* " != *'%{http_code}'* ]] || printf '\n%s' "${code}"
@@ -415,6 +417,62 @@ YAML
   assert_success
   assert_argv_clean
   [ "$(req_count "POST https://api.kubehz.example/api/spaces | user= | headers=Content-Type: application/json; Authorization: Bearer ${KUBEHZ_TOKEN} | body={\"name\":\"acme\"}")" = 1 ]
+}
+
+# ── kubehz node join: the bootstrap token ──
+
+# kubeadm_respond: `kubeadm version -o short` answers a version. At
+# `kubeadm join --config <path>` the config goes to REQ_LOG as one line (a
+# line break as ;): the token reached kubeadm in the file. It reads the file
+# with a builtin, so no spy logs it.
+kubeadm_respond() {
+  local config
+  case "$*" in
+    "version -o short") printf 'v1.36.0\n' ;;
+    "join --config "*)
+      config=$(< "${3}")
+      printf 'join-config: %s\n' "${config//$'\n'/;}" >> "${REQ_LOG}"
+      ;;
+  esac
+  return 0
+}
+
+@test "kubehz node join: the bootstrap token reaches kubeadm in the config file, on no argv" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/shared"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/node"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  local join_token=sntnl1.sentinel0join0to
+  export JOIN_MINT_BODY="{\"ok\":true,\"data\":{\"joinCommand\":\"kubeadm join cp.example.test:6443 --token ${join_token} --discovery-token-ca-cert-hash sha256:1111 --node-name box-1\",\"expiresAt\":\"2026-09-01T12:00:00Z\",\"ready\":true}}"
+  export -f kubeadm_respond
+  argv_spy kubeadm
+  cat > "${PATH_CLUSTERS}/d.example/cluster.lok8s.yaml" <<'YAML'
+kind: Lo
+metadata:
+  name: d
+spec:
+  cluster:
+    domain: d.example
+  kubehz:
+    hosting: hosted
+    apiUrl: https://api.kubehz.example
+YAML
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
+  node::is_root() { return 0; }
+
+  run node::join --domain d.example --name box-1 --pool metal
+  assert_success
+  assert_output --partial "node 'box-1' joined cluster cl-1"
+
+  assert_argv_clean "${SENTINELS[@]}" "${join_token}" --token
+  # The token still reached kubeadm: in the config, once.
+  [ "$(req_count "join-config: apiVersion: kubeadm.k8s.io/v1beta4;kind: JoinConfiguration;")" = 1 ]
+  [ "$(req_count "    token: \"${join_token}\";")" = 1 ]
+  [ "$(req_count "${join_token}")" = 1 ]
+  # kubeadm ran twice (the version, the join), and the config is gone.
+  [ "$(ARGV_LOG="" grep -c '^kubeadm ' "${ARGV_LOG}")" = 2 ]
+  local -a left=("${TMPDIR}"/*)
+  [ ! -e "${left[0]}" ]
 }
 
 # http::curl_config holds the credential line in its locals (opt, value,

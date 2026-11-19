@@ -618,9 +618,11 @@ kubehz::space_join_tmp_dir() {
   printf '%s\n' "${real}"
 }
 
-# Write a join ticket to a FRESH private directory under the user's temp dir
-# (kubehz::space_join_tmp_dir): <tmp>/kubehz-join-<random>/kubehz-join-<node>.token,
-# 0700 over 0600, as the Go twin writes it (writeJoinFile). mktemp -d picks a
+# Write a join file to a FRESH private directory under the user's temp dir
+# (kubehz::space_join_tmp_dir): <tmp>/kubehz-join-<random>/kubehz-join-<node><ext>,
+# 0700 over 0600, as the Go twin writes it (writeJoinFile). The file holds
+# the ticket: the ticket alone (ext .token, kubehz::space_write_join_ticket)
+# or the kubeadm join config of `lo kubehz node join` (ext .yaml). mktemp -d picks a
 # name nobody can plant in a shared /tmp. The directory is set to 0700 and
 # must be 0700 before anything goes into it, as in the Go twin. The file is made empty first,
 # under noclobber, and must then be a regular file of ours, not a link:
@@ -636,16 +638,16 @@ kubehz::space_join_tmp_dir() {
 # directory fails too. When the write fails, the first line on stdout is
 # its cause (empty when a message was printed already); with 3, the second
 # line is the directory, which may still hold a part of the ticket.
-# Usage: kubehz::space_write_join_ticket <node_name> <token>
-kubehz::space_write_join_ticket() {
+# Usage: kubehz::write_join_file <node_name> <ext> <content>
+kubehz::write_join_file() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *[xa]* ]] || { local -; set +xa; }  # the ticket
   # +x: a local takes the export flag of an exported variable of the same
   # name, and a child (mktemp, stat, chmod) would get the ticket. +i and the
   # refusal: as in kubehz::space_api_call (an integer of a caller would
   # print the ticket; a readonly nameref would take it).
-  local +x +i node_name token dir priv path || { error "kubehz::space_write_join_ticket: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
-  node_name="${1}" token="${2}"
+  local +x +i node_name ext content dir priv path || { error "kubehz::write_join_file: a local cannot be declared (a readonly name or a nameref of the caller)"; return 1; }
+  node_name="${1}" ext="${2}" content="${3}"
   node::assert_node_name "${node_name}" || return 2
   # rc 2: the check printed why (no cause); rc 1: TMPDIR cannot be resolved.
   dir=$(kubehz::space_join_tmp_dir) || {
@@ -656,7 +658,7 @@ kubehz::space_write_join_ticket() {
     printf '%s\n' "mktemp -d failed in ${dir}"
     return 1
   }
-  path="${priv}/kubehz-join-${node_name}.token"
+  path="${priv}/kubehz-join-${node_name}${ext}"
   # Each check before the write; `|| return` returns the status of the
   # cleanup (1 or 3), and keeps set -e of a caller from ending the shell.
   # In a setgid TMPDIR the fresh directory is 2700 (it takes the setgid
@@ -676,12 +678,22 @@ kubehz::space_write_join_ticket() {
   [[ "$(stat -c '%a' -- "${path}" 2>/dev/null)" == 600 ]] \
     || { kubehz::_join_write_failed "${priv}" "${path}" "not a private file" || return; }
   # printf is a builtin: the ticket is on no argv.
-  ( printf '%s\n' "${token}" >> "${path}" ) 2>/dev/null \
+  ( printf '%s' "${content}" >> "${path}" ) 2>/dev/null \
     || { kubehz::_join_write_failed "${priv}" "${path}" "the write failed" || return; }
   printf '%s\n' "${path}"
 }
 
-# The cleanup of a failed ticket write (kubehz::space_write_join_ticket):
+# Write a join ticket, and a newline, to a fresh private file
+# (kubehz::write_join_file, ext .token). Prints the path; the return codes
+# and the lines on stdout are the ones of kubehz::write_join_file.
+# Usage: kubehz::space_write_join_ticket <node_name> <token>
+kubehz::space_write_join_ticket() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # the ticket
+  kubehz::write_join_file "${1}" .token "${2}"$'\n'
+}
+
+# The cleanup of a failed write of a join file (kubehz::write_join_file):
 # prints the cause, removes the file and the fresh directory, and when that
 # fails, prints the directory too (it may still hold a part of the ticket).
 # Returns 1, or 3 when the removal failed.

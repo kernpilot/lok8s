@@ -405,8 +405,8 @@ node::is_root() {
   [[ "${EUID}" -eq 0 ]]
 }
 
-# Printed when a join is interrupted (Ctrl-C) after the ticket is minted but
-# before kubeadm finishes: the ticket already holds a node slot for about ten
+# Printed when a join is interrupted (Ctrl-C, TERM, a hangup) after the ticket
+# is minted but before kubeadm finishes: the ticket already holds a node slot for about ten
 # minutes, so name the way to free it — the same note the kubeadm-failed branch
 # carries. `node_name` is read from the interrupted node::join through dynamic
 # scope (the trap handler runs while node::join is still on the stack).
@@ -428,8 +428,144 @@ node::minted_slot_note() {
   echo "    lo kubehz node remove --name ${node_name}" >&2
 }
 
-# Join THIS machine to a hosted cluster.
+# The JoinConfiguration API version that the kubeadm on this machine reads:
+# v1beta3 for kubeadm 1.22 to 1.30, v1beta4 from 1.31 on (kubeadm 1.31 and
+# later read v1beta3 too, with a deprecation warning). Another answer, or
+# none, is refused before the mint, as in the Go twin (joinConfigVersion).
+# The characters are spelled out: in a bash regex, a range like a-z follows
+# the locale. Prints the version.
+node::join_config_version() {
+  local out minor d='[0123456789]'
+  local s='[0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.+-]'
+  local re="^v1[.](${d}{1,3})[.]${d}+([-+]${s}*)?\$"
+  out=$(kubeadm version -o short 2>/dev/null) || out=""
+  if [[ "${out}" =~ ${re} ]]; then
+    minor=$(( 10#${BASH_REMATCH[1]} ))
+    if (( minor >= 31 )); then echo v1beta4; return 0; fi
+    if (( minor >= 22 )); then echo v1beta3; return 0; fi
+  fi
+  error "kubehz: this CLI cannot write a join config for the kubeadm on this machine: '$(kubehz::space_bound_string "${out}")'"
+  echo "  It supports kubeadm 1.22 and later. Nothing was minted." >&2
+  echo "  Check the output of:  kubeadm version -o short" >&2
+  return 1
+}
+
+# Print the kubeadm JoinConfiguration of API version <version> for a join
+# line that node::assert_join_command passed: the endpoint, the one
+# bootstrap token, the CA pins and the node name of the line, and <node_ip>
+# as the kubelet's node-ip. kubeadm takes the TLS bootstrap token from the
+# bootstrap token (its defaults, in both versions), as it does for --token.
+# The values come from the join alphabet (no quote, no backslash), so a
+# double-quoted YAML scalar holds each of them as it is. The bytes are the
+# ones of the Go twin (joinConfig). printf is a builtin: the token is on no
+# argv. Call it in a command substitution: it prints the config, which ends
+# in one newline (the substitution drops it). Returns 1 with a message for
+# a line it cannot read that way.
+# Usage: node::join_config <line> <version> <node_ip>
+node::join_config() {
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # the ticket
+  local line="${1}" version="${2}" node_ip="${3}"
+  local IFS=$' \t\n' i flag value inline token="" name="" h
+  local -a tok hashes=()
+  read -ra tok <<<"${line}"
+  for (( i = 3; i < ${#tok[@]}; i++ )); do
+    flag="${tok[i]%%=*}" value="" inline=0
+    [[ "${tok[i]}" != *=* ]] || { value="${tok[i]#*=}"; inline=1; }
+    if [[ "${flag}" != --* ]]; then
+      node::_join_config_refused "kubehz: the join command has a word that follows no flag."
+      return 1
+    fi
+    if (( ! inline && i + 1 < ${#tok[@]} )); then
+      i=$(( i + 1 ))
+      value="${tok[i]}"
+    fi
+    if [[ -z "${value}" || "${value}" == -* ]]; then
+      node::_join_config_refused "kubehz: the join command has a flag without a value: ${flag}"
+      return 1
+    fi
+    case "${flag}" in
+      --token)
+        if [[ -n "${token}" ]]; then
+          node::_join_config_refused "kubehz: the join command must carry exactly one bootstrap token (--token)."
+          return 1
+        fi
+        token="${value}" ;;
+      --discovery-token-ca-cert-hash) hashes+=("${value}") ;;
+      --node-name)
+        if [[ -n "${name}" ]]; then
+          node::_join_config_refused "kubehz: the join command names the node more than once (--node-name)."
+          return 1
+        fi
+        name="${value}" ;;
+      *)
+        node::_join_config_refused "kubehz: the platform sent a join flag this CLI will not run: ${flag}"
+        return 1 ;;
+    esac
+  done
+  if [[ -z "${token}" ]]; then
+    node::_join_config_refused "kubehz: the join command must carry exactly one bootstrap token (--token)."
+    return 1
+  fi
+  # The kubeadm token shape, as the Go twin's joinTokenRe, spelled out (see
+  # above). nocasematch would let an uppercase token through: off here (the
+  # substitution runs in a subshell).
+  local tok_c='[abcdefghijklmnopqrstuvwxyz0123456789]'
+  local tok_re="^${tok_c}{6}[.]${tok_c}{16}\$"
+  shopt -u nocasematch
+  if [[ ! "${token}" =~ ${tok_re} ]]; then
+    node::_join_config_refused "kubehz: the bootstrap token of the join command does not have the kubeadm token shape."
+    return 1
+  fi
+  printf 'apiVersion: kubeadm.k8s.io/%s\n' "${version}"
+  printf 'kind: JoinConfiguration\n'
+  printf 'discovery:\n'
+  printf '  bootstrapToken:\n'
+  printf '    apiServerEndpoint: "%s"\n' "${tok[2]}"
+  printf '    token: "%s"\n' "${token}"
+  printf '    caCertHashes:\n'
+  for h in "${hashes[@]}"; do
+    printf '      - "%s"\n' "${h}"
+  done
+  [[ -z "${name}${node_ip}" ]] || printf 'nodeRegistration:\n'
+  [[ -z "${name}" ]] || printf '  name: "%s"\n' "${name}"
+  if [[ -n "${node_ip}" ]]; then
+    printf '  kubeletExtraArgs:\n'
+    # v1beta3: a map; v1beta4: a list of name/value pairs.
+    if [[ "${version}" == v1beta3 ]]; then
+      printf '    node-ip: "%s"\n' "${node_ip}"
+    else
+      printf '    - name: "node-ip"\n'
+      printf '      value: "%s"\n' "${node_ip}"
+    fi
+  fi
+}
+
+# A join line that node::join_config cannot read: the reason, and the way
+# to read the line.
+node::_join_config_refused() {
+  error "${1}"
+  echo "  Nothing ran on this machine. Print the command and read it:  --print-only" >&2
+}
+
+# Remove the private directory of the join config at <path> (the file, then
+# the directory, as kubehz::_join_write_failed does). A removal that fails
+# names the directory: it holds the ticket until the ticket expires.
+# Usage: node::remove_join_config <path>
+node::remove_join_config() {
+  local path="${1}" dir="${1%/*}"
+  if ! rm -f -- "${path}" 2>/dev/null || ! rmdir -- "${dir}" 2>/dev/null; then
+    warn "kubehz: could not remove ${dir}"
+    warn "It holds the join ticket until the ticket expires. Delete that directory."
+  fi
+}
+
+# Join THIS machine to a hosted cluster. The join line and the join config
+# hold the ticket: they stay out of a trace (set -x) and out of the
+# environment of a child (set -a). The guard lines (as in utils/keysonly.sh)
+# turn both off.
 node::join() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # the ticket
   local domain="${domain:-${DOMAIN_NAME:-}}"
   local cluster_id="" pool="" name="" node_ip="" kubelet_version="" print_only=0
   local -a args=(
@@ -450,6 +586,17 @@ node::join() {
   local node_name="${name}"
   [[ -n "${node_name}" ]] || node_name=$(node::default_name)
   node::assert_node_name "${node_name}" || return 1
+
+  # The address goes into the join config: its shape is checked before the
+  # api is asked anything (one address, or an IPv4 and an IPv6 address with
+  # a comma; the kubelet checks the addresses). Spelled out, as above.
+  local ip_c='[0123456789abcdefABCDEF.:]'
+  local ip_re="^${ip_c}+(,${ip_c}+)?\$"
+  if [[ -n "${node_ip}" && ! "${node_ip}" =~ ${ip_re} ]]; then
+    error "kubehz: --node-ip must be one IP address, or an IPv4 and an IPv6 address with a comma: $(kubehz::space_bound_string "${node_ip}")"
+    echo "  Example:  --node-ip 203.0.113.7" >&2
+    return 1
+  fi
 
   local node_pool="${pool}"
   [[ -n "${node_pool}" ]] || node_pool=$(node::infer_pool "${NODE_CLUSTER_ID}")
@@ -476,6 +623,20 @@ node::join() {
     echo "  lo environment, which plain sudo would strip." >&2
     echo "  Or add --print-only and run the printed command as root yourself." >&2
     return 1
+  fi
+  # Before the mint: the config version that this kubeadm reads, and a temp
+  # dir that passes the check (it printed why, rc 2). A refusal here costs
+  # no ticket. The writer checks the temp dir again: it can change in
+  # between.
+  local config_version="" tmp_rc=0
+  if (( ! print_only )); then
+    config_version=$(node::join_config_version) || return 1
+    kubehz::space_join_tmp_dir >/dev/null || tmp_rc=$?
+    if (( tmp_rc == 1 )); then
+      error "kubehz: the temp dir (TMPDIR) cannot be resolved, so the join config cannot be written."
+      echo "  Set TMPDIR to a directory of your own that only you can write (mode 0700)." >&2
+    fi
+    (( tmp_rc == 0 )) || return 1
   fi
 
   local declared="${kubelet_version}"
@@ -527,11 +688,10 @@ node::join() {
     warn "Mint again in a minute if it does."
   fi
 
-  local -a join_argv
-  read -ra join_argv <<<"${join_command}"
-  [[ -n "${node_ip}" ]] && join_argv+=(--node-ip "${node_ip}")
-
   if (( print_only )); then
+    local -a join_argv
+    read -ra join_argv <<<"${join_command}"
+    [[ -n "${node_ip}" ]] && join_argv+=(--node-ip "${node_ip}")
     echo ""
     echo "  Node '${node_name}' joins pool '${node_pool}' of cluster ${NODE_CLUSTER_ID}."
     echo "  Run this as root on that machine before ${expires:-the ticket expires}:"
@@ -543,24 +703,51 @@ node::join() {
     return 0
   fi
 
+  # The line, read into a kubeadm join config in a private file
+  # (kubehz::write_join_file): the bootstrap token is on no argv.
+  local config path cause
+  config=$(node::join_config "${join_command}" "${config_version}" "${node_ip}") \
+    || { node::minted_slot_note; return 1; }
+  config+=$'\n'
+  rc=0
+  path=$(kubehz::write_join_file "${node_name}" .yaml "${config}") || rc=$?
+  if (( rc != 0 )); then
+    # rc 2: the node name was refused (the message is printed). Else the
+    # first line is the cause (empty when a message was printed already);
+    # with rc 3 the second line is the directory the cleanup left.
+    if (( rc != 2 )); then
+      cause="${path%%$'\n'*}"
+      if [[ "${path}" == *$'\n'* ]]; then path="${path#*$'\n'}"; else path=""; fi
+      error "kubehz: could not write the join config for '${node_name}'${cause:+: ${cause}}"
+      (( rc != 3 )) || echo "  The cleanup failed too: ${path} may still hold the join ticket. Delete that directory." >&2
+    fi
+    node::minted_slot_note
+    return 1
+  fi
+
   echo "kubehz: joining '${node_name}' to pool '${node_pool}' of cluster ${NODE_CLUSTER_ID}"
   # The ticket is live and holds a slot from here until the join lands. A
   # Ctrl-C mid-join would otherwise leave the caller unaware the slot is held.
-  trap 'node::interrupted_slot_note' INT TERM
-  # argv, never a shell: the line was checked above and is passed word by word.
-  if ! "${join_argv[@]}"; then
-    trap - INT TERM
+  # The handler returns, so the run goes on to the cleanup below, also after
+  # a TERM or a hangup (without a trap, a hangup would end the shell before
+  # the config is removed).
+  trap 'node::interrupted_slot_note' INT TERM HUP
+  # argv, never a shell. The token is in the config file, not on argv.
+  if ! kubeadm join --config "${path}"; then
     error "kubehz: kubeadm join failed — read its output above."
     echo "  The node keeps its slot until you remove it:" >&2
     echo "    lo kubehz node remove --name ${node_name}" >&2
     echo "  Run 'kubeadm reset' on this machine before you join it again." >&2
+    node::remove_join_config "${path}"
+    trap - INT TERM HUP
     return 1
   fi
-  trap - INT TERM
   echo ""
   echo "kubehz: node '${node_name}' joined cluster ${NODE_CLUSTER_ID}."
   echo "  It reports Ready within a few minutes. Watch it with:"
   echo "    lo kubehz node status"
+  node::remove_join_config "${path}"
+  trap - INT TERM HUP
 }
 
 # ── Remove ───────────────────────────────────────────────

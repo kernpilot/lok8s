@@ -7,8 +7,9 @@
 #   preflight  hosting gate (hosted only), HTTPS, KUBEHZ_TOKEN, and the two
 #              ways a cluster id is found (--cluster-id, or the registry)
 #   join       node-name default + shape, pool inference, the kubeadm/root
-#              preconditions BEFORE a ticket is minted, --print-only, and the
-#              argv the CLI actually runs
+#              preconditions BEFORE a ticket is minted, --print-only, the
+#              argv the CLI actually runs, and the join config file (its
+#              version, content, modes and removal on each way out)
 #   safety     a join line that is not a `kubeadm join` line, or that carries
 #              characters outside the join alphabet, runs NOTHING
 #   errors     the api's refusal codes each render an instruction
@@ -72,6 +73,15 @@ setup() {
   export CURL_LOG="${BATS_TEST_TMPDIR}/curl.log"
   export CURL_BODY="${BATS_TEST_TMPDIR}/curl-body.json"
   export KUBEADM_LOG="${BATS_TEST_TMPDIR}/kubeadm.log"
+  export KUBEADM_VERSION_LOG="${BATS_TEST_TMPDIR}/kubeadm-version.log"
+  export KUBEADM_SEEN="${BATS_TEST_TMPDIR}/kubeadm-seen"
+  export STUB_KUBEADM_VERSION=$'v1.36.0\n'
+  export STUB_KUBEADM_VERSION_RC=0
+  export STUB_KUBEADM_RC=0
+  # A join writes its config below the test's own tree, never into the
+  # host's temp dir.
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -p "${TMPDIR}"
 
   # The mock's default answers live HERE, never as `${VAR:-{...}}` inside the
   # mock: a default value that contains `}` closes the parameter expansion
@@ -79,6 +89,9 @@ setup() {
   # that no jq filter reads, which is a silently green mock.
   export STUB_NODES_CODE="200"
   export STUB_NODES_BODY='{"ok":true,"data":{"nodes":[],"usage":{"nodes":0,"maxStaticNodes":20},"discoveryReady":true}}'
+  # The fixture token, built from parts: a secret scanner flags a long
+  # literal next to a token keyword.
+  JOIN_TOKEN=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
   export STUB_MINT_CODE="201"
   export STUB_MINT_BODY='{"ok":true,"data":{"token":"a1b2c3.d4e5f6g7h8i9j0k1","joinCommand":"kubeadm join cp.example.test:6443 --token a1b2c3.d4e5f6g7h8i9j0k1 --discovery-token-ca-cert-hash sha256:1111 --node-name box-1","nodeName":"box-1","pool":"metal","expiresAt":"2026-09-01T12:00:00Z","ready":true}}'
   export STUB_REMOVE_CODE="200"
@@ -165,9 +178,99 @@ _stub_curl() {
 # ONE ARGV WORD PER LINE. Under the old `"$*"` logging, three words and one
 # space-joined word wrote the same line, so a word-merge or word-split
 # regression in the argv was invisible to every assertion that read the log.
+# `kubeadm version -o short` goes to its own log and prints
+# STUB_KUBEADM_VERSION (status STUB_KUBEADM_VERSION_RC), so KUBEADM_LOG holds
+# the join alone. At `kubeadm join --config <path>` it keeps the path, a copy
+# of the config, and the modes of the file and its directory under
+# KUBEADM_SEEN (the CLI removes them after the join). STUB_KUBEADM_RC is the
+# status of every other call.
 _stub_kubeadm() {
-  kubeadm() { printf '%s\n' "$@" >> "${KUBEADM_LOG}"; }
+  kubeadm() {
+    if [[ $# -eq 3 && "${1}" == version && "${2}" == -o && "${3}" == short ]]; then
+      printf '%s\n' "$@" >> "${KUBEADM_VERSION_LOG}"
+      printf '%s' "${STUB_KUBEADM_VERSION}"
+      return "${STUB_KUBEADM_VERSION_RC}"
+    fi
+    printf '%s\n' "$@" >> "${KUBEADM_LOG}"
+    if [[ $# -eq 3 && "${1}" == join && "${2}" == --config ]]; then
+      printf '%s\n' "${3}" > "${KUBEADM_SEEN}.path"
+      cp -- "${3}" "${KUBEADM_SEEN}.config"
+      stat -c '%a %F' -- "${3}" "${3%/*}" > "${KUBEADM_SEEN}.mode"
+    fi
+    return "${STUB_KUBEADM_RC}"
+  }
   export -f kubeadm
+}
+
+# The join config of STUB_MINT_BODY, as both twins write it. The Go twin
+# pins the same bytes (internal/kubehz/node_test.go, joinConfigV1beta4).
+_config_v1beta4() {
+  printf '%s\n' \
+    'apiVersion: kubeadm.k8s.io/v1beta4' \
+    'kind: JoinConfiguration' \
+    'discovery:' \
+    '  bootstrapToken:' \
+    '    apiServerEndpoint: "cp.example.test:6443"' \
+    "    token: \"${JOIN_TOKEN}\"" \
+    '    caCertHashes:' \
+    '      - "sha256:1111"' \
+    'nodeRegistration:' \
+    '  name: "box-1"'
+}
+
+# With --node-ip 203.0.113.7: v1beta4 lists the kubelet flags.
+_config_v1beta4_node_ip() {
+  _config_v1beta4
+  printf '%s\n' \
+    '  kubeletExtraArgs:' \
+    '    - name: "node-ip"' \
+    '      value: "203.0.113.7"'
+}
+
+# With --node-ip 203.0.113.7: v1beta3 maps the kubelet flags.
+_config_v1beta3_node_ip() {
+  printf '%s\n' \
+    'apiVersion: kubeadm.k8s.io/v1beta3' \
+    'kind: JoinConfiguration' \
+    'discovery:' \
+    '  bootstrapToken:' \
+    '    apiServerEndpoint: "cp.example.test:6443"' \
+    "    token: \"${JOIN_TOKEN}\"" \
+    '    caCertHashes:' \
+    '      - "sha256:1111"' \
+    'nodeRegistration:' \
+    '  name: "box-1"' \
+    '  kubeletExtraArgs:' \
+    '    node-ip: "203.0.113.7"'
+}
+
+# The one join call ran `kubeadm join --config <path>`: the path a 0600 file
+# in a fresh 0700 directory under TMPDIR, the content the output of
+# <expected-fn>, the token on no argv. The directory is gone after the run,
+# and TMPDIR holds nothing.
+# Usage: _assert_join_config <expected-fn>
+_assert_join_config() {
+  local path tmp
+  path=$(cat "${KUBEADM_SEEN}.path")
+  tmp=$(cd -P -- "${TMPDIR}" && pwd -P)
+  [ "$(cat "${KUBEADM_LOG}")" = "$(printf '%s\n' join --config "${path}")" ]
+  [ "$(cat "${KUBEADM_VERSION_LOG}")" = "$(printf '%s\n' version -o short)" ]
+  [[ "${path}" == "${tmp}"/kubehz-join-*/kubehz-join-box-1.yaml ]]
+  [ "${path%/*/*}" = "${tmp}" ]
+  cmp -- "${KUBEADM_SEEN}.config" <("${1}")
+  [ "$(cat "${KUBEADM_SEEN}.mode")" = "$(printf '%s\n' '600 regular file' '700 directory')" ]
+  [ ! -e "${path%/*}" ]
+  _assert_tmpdir_empty
+  run grep -F -e "${JOIN_TOKEN}" -e --token -- "${KUBEADM_LOG}" "${KUBEADM_VERSION_LOG}"
+  assert_failure 1
+}
+
+# Each way out of a join removes the private directory of its config.
+_assert_tmpdir_empty() {
+  local -a left
+  left=("${TMPDIR}"/* "${TMPDIR}"/.[!.]*)
+  [ ! -e "${left[0]}" ]
+  [ ! -e "${left[1]}" ]
 }
 
 _stub_hostname() {
@@ -449,6 +552,8 @@ _stub_all() {
   assert_output --partial "2026-09-01T12:00:00Z"
   assert_output --partial "single use"
   [ ! -f "${KUBEADM_LOG}" ]
+  # Not even `kubeadm version`: the join runs on another machine.
+  [ ! -f "${KUBEADM_VERSION_LOG}" ]
 }
 
 @test "join --print-only: --node-ip is appended to the printed command" {
@@ -461,27 +566,24 @@ _stub_all() {
 
 # ── join: the run ────────────────────────────────────────
 
-@test "join: runs kubeadm with exactly the argv the api composed" {
+@test "join: runs kubeadm join --config with a private 0600 file, and removes it" {
   _stub_all
 
   run node::join --name box-1 --pool metal
   assert_success
   assert_output --partial "node 'box-1' joined cluster cl-1234abcd"
   # One argv word per line, compared whole: a word too many, too few, merged
-  # or split writes a different log than this exact one.
-  [ "$(cat "${KUBEADM_LOG}")" = "$(printf '%s\n' \
-    join cp.example.test:6443 \
-    --token a1b2c3.d4e5f6g7h8i9j0k1 \
-    --discovery-token-ca-cert-hash sha256:1111 \
-    --node-name box-1)" ]
+  # or split writes a different log than this exact one. The token is in the
+  # file, on no argv.
+  _assert_join_config _config_v1beta4
 }
 
-@test "join: --node-ip reaches the kubeadm argv as two words" {
+@test "join: --node-ip goes into the config as the node-ip of the kubelet" {
   _stub_all
 
   run node::join --name box-1 --pool metal --node-ip 203.0.113.7
   assert_success
-  [ "$(tail -n 2 "${KUBEADM_LOG}")" = "$(printf '%s\n' --node-ip 203.0.113.7)" ]
+  _assert_join_config _config_v1beta4_node_ip
 }
 
 # The property the per-line mock buys: one argv word that CARRIES a space and
@@ -499,16 +601,196 @@ _stub_all() {
   [ "$(cat "${KUBEADM_LOG}")" != "$(printf '%s\n' --node-name 'box-1 --control-plane')" ]
 }
 
-@test "join: a failing kubeadm names the slot the node still holds" {
+@test "join: a failing kubeadm names the slot the node still holds, and removes the config" {
   _stub_all
-  kubeadm() { echo "preflight failed" >&2; return 1; }
-  export -f kubeadm
+  STUB_KUBEADM_RC=1
 
   run node::join --name box-1 --pool metal
   assert_failure
   assert_output --partial "kubeadm join failed"
   assert_output --partial "lo kubehz node remove --name box-1"
   assert_output --partial "kubeadm reset"
+  _assert_join_config _config_v1beta4
+}
+
+# The terminal sends SIGINT to kubeadm and to the shell. The trap prints the
+# slot note and returns, so the run goes on to the cleanup.
+@test "join: an interrupt mid-join names the slot, and removes the config" {
+  _stub_all
+  kubeadm() {
+    if [[ "${1}" == version ]]; then
+      printf 'v1.36.0\n'
+      return 0
+    fi
+    printf '%s\n' "${3}" > "${KUBEADM_SEEN}.path"
+    kill -INT "${BASHPID}"
+    return 130
+  }
+  export -f kubeadm
+
+  run node::join --name box-1 --pool metal
+  assert_failure
+  assert_output --partial "interrupted after the ticket was minted"
+  assert_output --partial "kubeadm join failed"
+  local path
+  path=$(cat "${KUBEADM_SEEN}.path")
+  [[ "${path}" == */kubehz-join-*/kubehz-join-box-1.yaml ]]
+  [ ! -e "${path%/*}" ]
+  _assert_tmpdir_empty
+}
+
+# The config version follows `kubeadm version -o short`.
+@test "join: the config version follows the kubeadm version" {
+  _stub_all
+  local v want
+  for v in v1.36.0 v1.31.0 v1.31.0-rc.1 v1.30.14 v1.22.0+k3s1 v1.022.3 $'v1.100.0\n\n' v1.29.2; do
+    rm -f -- "${KUBEADM_LOG}" "${KUBEADM_VERSION_LOG}" "${KUBEADM_SEEN}.path" "${KUBEADM_SEEN}.config" "${KUBEADM_SEEN}.mode"
+    STUB_KUBEADM_VERSION="${v}"
+    run node::join --name box-1 --pool metal --node-ip 203.0.113.7
+    assert_success
+    case "${v}" in
+      v1.3[1-9]*|v1.100*) want=_config_v1beta4_node_ip ;;
+      *) want=_config_v1beta3_node_ip ;;
+    esac
+    _assert_join_config "${want}"
+  done
+}
+
+# A kubeadm version that cannot be mapped mints nothing and runs no join.
+@test "join: a kubeadm version the CLI cannot map is refused before the mint" {
+  _stub_all
+  local v
+  for v in v1.21.14 v1.0.0 v2.0.0 1.31.0 v1.31 '' $'v1.31.0\nv1.30.0' 'v1.31.0 extra' v1.1234.0; do
+    STUB_KUBEADM_VERSION="${v}"
+    run node::join --name box-1 --pool metal
+    assert_failure
+    assert_output --partial "cannot write a join config for the kubeadm on this machine"
+    assert_output --partial "kubeadm 1.22 and later. Nothing was minted."
+    [ ! -f "${CURL_BODY}" ]
+    [ ! -f "${KUBEADM_LOG}" ]
+  done
+  # A kubeadm that fails to answer is refused the same way.
+  STUB_KUBEADM_VERSION=$'v1.36.0\n' STUB_KUBEADM_VERSION_RC=1
+  run node::join --name box-1 --pool metal
+  assert_failure
+  assert_output --partial "cannot write a join config for the kubeadm on this machine: ''"
+  [ ! -f "${CURL_BODY}" ]
+}
+
+# --node-ip goes into the config: a value outside the address shape is
+# refused before the mint, with --print-only too.
+@test "join: a --node-ip outside the address shape is refused before the mint" {
+  _stub_all
+  local ip extra
+  for ip in '203.0.113.7 --control-plane' $'203.0.113.7\nkind: x' '203.0.113.7,' '"x"' 'a,b,c'; do
+    for extra in '' --print-only; do
+      run node::join --name box-1 --pool metal --node-ip "${ip}" ${extra:+"${extra}"}
+      assert_failure
+      assert_output --partial "--node-ip must be one IP address, or an IPv4 and an IPv6 address with a comma"
+      [ ! -f "${CURL_BODY}" ]
+      [ ! -f "${KUBEADM_VERSION_LOG}" ]
+    done
+  done
+  run node::join --name box-1 --pool metal --node-ip 203.0.113.7,2001:db8::7
+  assert_success
+  grep -qxF -- '      value: "203.0.113.7,2001:db8::7"' "${KUBEADM_SEEN}.config"
+}
+
+# A temp dir that fails the check is refused before the mint: the config
+# could not be written after it.
+@test "join: a temp dir others can change is refused before the mint" {
+  _stub_all
+  mkdir -p "${BATS_TEST_TMPDIR}/open"
+  chmod 0777 "${BATS_TEST_TMPDIR}/open"
+  TMPDIR="${BATS_TEST_TMPDIR}/open" run node::join --name box-1 --pool metal
+  assert_failure
+  assert_output --partial "is writable by others and has no sticky bit"
+  [ ! -f "${CURL_BODY}" ]
+  [ ! -f "${KUBEADM_LOG}" ]
+
+  TMPDIR="${BATS_TEST_TMPDIR}/missing" run node::join --name box-1 --pool metal
+  assert_failure
+  assert_output --partial "the temp dir (TMPDIR) cannot be resolved, so the join config cannot be written."
+  [ ! -f "${CURL_BODY}" ]
+}
+
+# A failed write after the mint names the slot, and runs no join.
+@test "join: a failed write of the config names the slot and runs no join" {
+  _stub_all
+  mktemp() { return 1; }
+  export -f mktemp
+
+  run node::join --name box-1 --pool metal
+  assert_failure
+  assert_output --partial "could not write the join config for 'box-1': mktemp -d failed in "
+  assert_output --partial "holds a node slot"
+  assert_output --partial "lo kubehz node remove --name box-1"
+  [ ! -f "${KUBEADM_LOG}" ]
+  _assert_tmpdir_empty
+}
+
+# A removal that fails after the join names the directory: it holds the
+# ticket.
+@test "join: a config directory it cannot remove is named" {
+  _stub_all
+  rmdir() { return 1; }
+  export -f rmdir
+
+  run node::join --name box-1 --pool metal
+  assert_success
+  local path
+  path=$(cat "${KUBEADM_SEEN}.path")
+  assert_output --partial "could not remove ${path%/*}"
+  assert_output --partial "It holds the join ticket until the ticket expires."
+}
+
+# The line is read into the config after the mint. A line that cannot be
+# read that way runs nothing, names the slot, and writes no file.
+@test "join: a line that cannot be read into a config runs nothing and names the slot" {
+  _stub_all
+  local ca=' --discovery-token-ca-cert-hash sha256:1111' line want
+  local -a cases=(
+    "kubeadm join cp.example.test:6443${ca} --node-name box-1|exactly one bootstrap token (--token)"
+    "kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN} --token ${JOIN_TOKEN%?}2${ca}|exactly one bootstrap token (--token)"
+    "kubeadm join cp.example.test:6443 --token A1B2C3.D4E5F6G7H8I9J0K1${ca}|does not have the kubeadm token shape"
+    "kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN}${ca} --node-name a --node-name=b|names the node more than once (--node-name)"
+    "kubeadm join cp.example.test:6443 extra --token ${JOIN_TOKEN}${ca}|a word that follows no flag"
+    "kubeadm join cp.example.test:6443 --token= ${JOIN_TOKEN}${ca}|a flag without a value: --token"
+    "kubeadm join cp.example.test:6443 --token ${JOIN_TOKEN}${ca} --node-name|a flag without a value: --node-name"
+    "kubeadm join cp.example.test:6443 --token${ca}|a flag without a value: --token"
+  )
+  for line in "${cases[@]}"; do
+    want="${line#*|}" line="${line%%|*}"
+    STUB_MINT_BODY="{\"ok\":true,\"data\":{\"joinCommand\":\"${line}\",\"expiresAt\":\"x\",\"ready\":true}}"
+    run node::join --name box-1 --pool metal
+    assert_failure
+    assert_output --partial "${want}"
+    assert_output --partial "holds a node slot"
+    [ ! -f "${KUBEADM_LOG}" ]
+    _assert_tmpdir_empty
+  done
+  # The --flag=value form and a second CA pin read the same way. Each refused
+  # run asked for the version: a fresh log for the run below.
+  rm -f -- "${KUBEADM_VERSION_LOG}"
+  STUB_MINT_BODY='{"ok":true,"data":{"joinCommand":"kubeadm join cp.example.test:6443 --token='"${JOIN_TOKEN}"' --discovery-token-ca-cert-hash=sha256:1111 --discovery-token-ca-cert-hash sha256:2222","expiresAt":"x","ready":true}}'
+  run node::join --name box-1 --pool metal
+  assert_success
+  _assert_join_config _config_two_pins
+}
+
+# The --flag=value line of the test above, with no node name: two CA pins
+# and no nodeRegistration.
+_config_two_pins() {
+  printf '%s\n' \
+    'apiVersion: kubeadm.k8s.io/v1beta4' \
+    'kind: JoinConfiguration' \
+    'discovery:' \
+    '  bootstrapToken:' \
+    '    apiServerEndpoint: "cp.example.test:6443"' \
+    "    token: \"${JOIN_TOKEN}\"" \
+    '    caCertHashes:' \
+    '      - "sha256:1111"' \
+    '      - "sha256:2222"'
 }
 
 @test "join: an unarmed ticket (ready:false) warns before the join runs" {

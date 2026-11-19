@@ -690,8 +690,9 @@ func (c *Context) ownerTrusted(part string, uid int) bool {
 	return uid == 0 || (uid == c.euid() && c.euid() != ovf) || (part == string(filepath.Separator) && uid == ovf)
 }
 
-// writeJoinFile stores a join file, the api's join recipe (ext ".sh") or
-// the ticket alone (ext ".token"), under the user's temp dir (joinTempDir)
+// writeJoinFile stores a join file, the api's join recipe (ext ".sh"), the
+// ticket alone (ext ".token") or the kubeadm join config of `lo kubehz node
+// join` (ext ".yaml"), under the user's temp dir (joinTempDir)
 // in a FRESH private directory: <tmp>/kubehz-join-<random>/kubehz-join-<node><ext>.
 // The directory comes from os.MkdirTemp (unpredictable name), so there is
 // no name to pre-plant in a shared /tmp. The file is created through a

@@ -3,7 +3,8 @@ package kubehz
 // node.go — libs/kubehz/node: machines you bring, joined to a kubehz-HOSTED
 // control plane (static pools). The platform composes the whole
 // `kubeadm join` line; this file mints the ticket, checks the line, and
-// runs it. It never builds a join command of its own.
+// runs it as a kubeadm join config in a private file, so the bootstrap
+// token is on no argv. It never builds a join command of its own.
 
 import (
 	"context"
@@ -11,9 +12,11 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -384,6 +387,13 @@ func (c *Context) NodeJoin(ctx context.Context, domain string, o NodeOpts) error
 	if err := c.assertNodeName(nodeName); err != nil {
 		return err
 	}
+	// The address goes into the join config: its shape is checked before
+	// the api is asked anything.
+	if o.NodeIP != "" && !nodeIPRe.MatchString(o.NodeIP) {
+		c.errorf("kubehz: --node-ip must be one IP address, or an IPv4 and an IPv6 address with a comma: %s", clip(scrub(o.NodeIP)))
+		c.echoErr("  Example:  --node-ip 203.0.113.7")
+		return ErrHandled
+	}
 	nodePool := o.Pool
 	if nodePool == "" {
 		nodePool = c.inferPool(ctx, cfg, clusterID)
@@ -409,19 +419,199 @@ func (c *Context) NodeJoin(ctx context.Context, domain string, o NodeOpts) error
 		c.echoErr("  Or add --print-only and run the printed command as root yourself.")
 		return ErrHandled
 	}
+	// Before the mint: the config version that this kubeadm reads, and a
+	// temp dir that passes the check (joinTempDir printed why). A refusal
+	// here costs no ticket. The writer checks the temp dir again: it can
+	// change in between.
+	configVersion := ""
+	if !o.PrintOnly {
+		if configVersion, err = c.joinConfigVersion(ctx); err != nil {
+			return err
+		}
+		if _, err := c.joinTempDir(); err != nil {
+			if !errors.Is(err, errTmpNotPrivate) {
+				c.errorf("kubehz: the temp dir (TMPDIR) cannot be resolved, so the join config cannot be written.")
+				c.echoErr("  Set TMPDIR to a directory of your own that only you can write (mode 0700).")
+			}
+			return ErrHandled
+		}
+	}
 	ticket, err := c.mintTicket(ctx, cfg, clusterID, nodeName, nodePool, o.KubeletVersion)
 	if err != nil {
 		return err
 	}
-	joinArgv := strings.Fields(ticket.joinCommand)
-	if o.NodeIP != "" {
-		joinArgv = append(joinArgv, "--node-ip", o.NodeIP)
-	}
 	if o.PrintOnly {
+		joinArgv := strings.Fields(ticket.joinCommand)
+		if o.NodeIP != "" {
+			joinArgv = append(joinArgv, "--node-ip", o.NodeIP)
+		}
 		c.printJoin(nodeName, nodePool, clusterID, ticket.expires, joinArgv)
 		return nil
 	}
-	return c.runJoin(ctx, nodeName, nodePool, clusterID, joinArgv)
+	config, err := c.joinConfig(ticket.joinCommand, configVersion, o.NodeIP)
+	if err != nil {
+		c.mintedSlotNote(nodeName)
+		return err
+	}
+	path, err := c.writeJoinFile(nodeName, ".yaml", config)
+	if err != nil {
+		return c.joinConfigWriteFailed(nodeName, err)
+	}
+	return c.runJoin(ctx, nodeName, nodePool, clusterID, path)
+}
+
+var (
+	// nodeIPRe is the shape of --node-ip: one address, or an IPv4 and an
+	// IPv6 address with a comma (the kubelet checks the addresses).
+	nodeIPRe = regexp.MustCompile(`^[0-9A-Fa-f.:]+(,[0-9A-Fa-f.:]+)?$`)
+	// kubeadmVersionRe reads `kubeadm version -o short` (v1.36.0); group 1
+	// is the minor version.
+	kubeadmVersionRe = regexp.MustCompile(`^v1\.([0-9]{1,3})\.[0-9]+([-+][0-9A-Za-z.+-]*)?$`)
+)
+
+// joinConfigVersion returns the JoinConfiguration API version that the
+// kubeadm on this machine reads: v1beta3 for kubeadm 1.22 to 1.30, v1beta4
+// from 1.31 on (kubeadm 1.31 and later read v1beta3 too, with a deprecation
+// warning). Another answer, or none, is refused before the mint.
+func (c *Context) joinConfigVersion(ctx context.Context) (string, error) {
+	out, err := c.capture(ctx, true, "kubeadm", "version", "-o", "short")
+	if err != nil {
+		out = ""
+	}
+	v := execx.TrimNewlines(out)
+	if m := kubeadmVersionRe.FindStringSubmatch(v); m != nil {
+		minor, _ := strconv.Atoi(m[1])
+		switch {
+		case minor >= 31:
+			return "v1beta4", nil
+		case minor >= 22:
+			return "v1beta3", nil
+		}
+	}
+	c.errorf("kubehz: this CLI cannot write a join config for the kubeadm on this machine: '%s'", clip(scrub(v)))
+	c.echoErr("  It supports kubeadm 1.22 and later. Nothing was minted.")
+	c.echoErr("  Check the output of:  kubeadm version -o short")
+	return "", ErrHandled
+}
+
+// joinConfig reads the join line that AssertJoinCommand passed into a
+// kubeadm JoinConfiguration of the API version apiVersion: the endpoint,
+// the one bootstrap token, the CA pins and the node name of the line, and
+// nodeIP as the kubelet's node-ip. kubeadm takes the TLS bootstrap token
+// from the bootstrap token (its defaults, in both versions), as it does for
+// --token. The values come from the join alphabet (no quote, no backslash),
+// so a double-quoted YAML scalar holds each of them as it is. The bash twin
+// (node::join_config) prints the same bytes.
+func (c *Context) joinConfig(line, apiVersion, nodeIP string) (string, error) {
+	refuse := func(format string, a ...any) (string, error) {
+		c.errorf(format, a...)
+		c.echoErr("  Nothing ran on this machine. Print the command and read it:  --print-only")
+		return "", ErrHandled
+	}
+	tok := strings.Fields(line)
+	endpoint := tok[2]
+	var token, name string
+	var hashes []string
+	for i := 3; i < len(tok); i++ {
+		flag, value, inline := strings.Cut(tok[i], "=")
+		if !strings.HasPrefix(flag, "--") {
+			return refuse("kubehz: the join command has a word that follows no flag.")
+		}
+		if !inline && i+1 < len(tok) {
+			i++
+			value = tok[i]
+		}
+		if value == "" || strings.HasPrefix(value, "-") {
+			return refuse("kubehz: the join command has a flag without a value: %s", flag)
+		}
+		switch flag {
+		case "--token":
+			if token != "" {
+				return refuse("kubehz: the join command must carry exactly one bootstrap token (--token).")
+			}
+			token = value
+		case "--discovery-token-ca-cert-hash":
+			hashes = append(hashes, value)
+		case "--node-name":
+			if name != "" {
+				return refuse("kubehz: the join command names the node more than once (--node-name).")
+			}
+			name = value
+		default:
+			return refuse("kubehz: the platform sent a join flag this CLI will not run: %s", flag)
+		}
+	}
+	if token == "" {
+		return refuse("kubehz: the join command must carry exactly one bootstrap token (--token).")
+	}
+	if !joinTokenRe.MatchString(token) {
+		return refuse("kubehz: the bootstrap token of the join command does not have the kubeadm token shape.")
+	}
+	var b strings.Builder
+	b.WriteString("apiVersion: kubeadm.k8s.io/" + apiVersion + "\n")
+	b.WriteString("kind: JoinConfiguration\n")
+	b.WriteString("discovery:\n")
+	b.WriteString("  bootstrapToken:\n")
+	b.WriteString("    apiServerEndpoint: \"" + endpoint + "\"\n")
+	b.WriteString("    token: \"" + token + "\"\n")
+	b.WriteString("    caCertHashes:\n")
+	for _, h := range hashes {
+		b.WriteString("      - \"" + h + "\"\n")
+	}
+	if name != "" || nodeIP != "" {
+		b.WriteString("nodeRegistration:\n")
+	}
+	if name != "" {
+		b.WriteString("  name: \"" + name + "\"\n")
+	}
+	if nodeIP != "" {
+		b.WriteString("  kubeletExtraArgs:\n")
+		// v1beta3: a map; v1beta4: a list of name/value pairs.
+		if apiVersion == "v1beta3" {
+			b.WriteString("    node-ip: \"" + nodeIP + "\"\n")
+		} else {
+			b.WriteString("    - name: \"node-ip\"\n")
+			b.WriteString("      value: \"" + nodeIP + "\"\n")
+		}
+	}
+	return b.String(), nil
+}
+
+// joinConfigWriteFailed reports a failed write of the join config. The
+// mint happened, so the ticket holds a node slot (mintedSlotNote). An
+// ErrHandled error (a refused node name) printed its own message, and
+// errTmpNotPrivate printed why (joinTempDir).
+func (c *Context) joinConfigWriteFailed(nodeName string, err error) error {
+	switch {
+	case errors.Is(err, ErrHandled):
+	case errors.Is(err, errTmpNotPrivate):
+		c.errorf("kubehz: could not write the join config for '%s'", nodeName)
+	default:
+		c.errorf("kubehz: could not write the join config for '%s': %v", nodeName, err)
+	}
+	if left, ok := errors.AsType[*joinLeftError](err); ok {
+		c.echoErr("  The cleanup failed too: %s may still hold the join ticket. Delete that directory.", left.dir)
+	}
+	c.mintedSlotNote(nodeName)
+	return ErrHandled
+}
+
+// removeJoinConfig removes the private directory of the join config at
+// path. runJoin defers it, so it runs on each way out: a join that landed,
+// a join that failed, and a join that a signal stopped (the signal cancels
+// the context, kubeadm stops, and the run returns).
+func (c *Context) removeJoinConfig(path string) {
+	removeAll := c.RemoveAll
+	if removeAll == nil {
+		removeAll = os.RemoveAll
+	}
+	dir := filepath.Dir(path)
+	// The text of the bash twin (node::remove_join_config), which has no
+	// cause to name.
+	if err := removeAll(dir); err != nil {
+		c.warnf("kubehz: could not remove %s", dir)
+		c.warnf("It holds the join ticket until the ticket expires. Delete that directory.")
+	}
 }
 
 // mintedTicket is a minted join ticket as the platform returned it.
@@ -494,13 +684,16 @@ func (c *Context) printJoin(nodeName, nodePool, clusterID, expires string, joinA
 	c.echo("  slot. Mint a fresh one with the same command when it expires.")
 }
 
-// runJoin runs kubeadm join here. The ticket is live and holds a slot from
-// here until the join lands: a Ctrl-C mid-join must not leave the caller
-// unaware (bash: trap INT TERM).
-func (c *Context) runJoin(ctx context.Context, nodeName, nodePool, clusterID string, joinArgv []string) error {
+// runJoin runs kubeadm join here with the join config at configPath, and
+// removes the config on each way out. The ticket is live and holds a slot
+// from here until the join lands: a Ctrl-C mid-join must not leave the
+// caller unaware (bash: trap INT TERM HUP). A hangup is caught too: by
+// default it would end lo before the config is removed.
+func (c *Context) runJoin(ctx context.Context, nodeName, nodePool, clusterID, configPath string) error {
+	defer c.removeJoinConfig(configPath)
 	c.echo("kubehz: joining '%s' to pool '%s' of cluster %s", nodeName, nodePool, clusterID)
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -511,8 +704,8 @@ func (c *Context) runJoin(ctx context.Context, nodeName, nodePool, clusterID str
 		case <-done:
 		}
 	}()
-	// argv, never a shell: the line was checked above and is passed word by word.
-	runErr := c.Runner.Run(ctx, execx.Cmd{Name: joinArgv[0], Args: joinArgv[1:], Stdout: c.out(), Stderr: c.errOut()})
+	// argv, never a shell. The token is in the config file, not on argv.
+	runErr := c.Runner.Run(ctx, execx.Cmd{Name: "kubeadm", Args: []string{"join", "--config", configPath}, Stdout: c.out(), Stderr: c.errOut()})
 	close(done)
 	signal.Stop(sigs)
 	if runErr != nil {
