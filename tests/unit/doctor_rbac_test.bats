@@ -67,7 +67,8 @@ case "${kind}" in
     sleep 1 3>&-
     # The subshell of the reads: the parent, or the parent of timeout(1).
     target="${PPID}"
-    if [[ "$(ps -o comm= -p "${target}")" == timeout ]]; then
+    comm="$(ps -o comm= -p "${target}")"
+    if [[ "${comm##*/}" == timeout ]]; then
       target="$(ps -o ppid= -p "${target}" | tr -d ' ')"
     fi
     kill -INT "${target}"
