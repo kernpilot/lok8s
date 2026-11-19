@@ -1,0 +1,4 @@
+{"apiVersion": "v1", "kind": "List", "metadata": {"resourceVersion": ""}, "items": [
+{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "metadata": {"name": "lok8s-redis-operator", "labels": {"lok8s.dev/name": "redis-operator"}}, "rules": [{"apiGroups": ["redis.redis.opstreelabs.in"], "resources": ["redis", "redisclusters"], "verbs": ["list", "watch", "update"]}, {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "patch"]}]},
+{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole", "metadata": {"name": "exec-wildcard-resource"}, "rules": [{"apiGroups": [""], "resources": ["*"], "verbs": ["create"]}]}
+]}

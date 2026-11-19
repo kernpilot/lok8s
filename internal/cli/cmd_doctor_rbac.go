@@ -15,10 +15,13 @@ package cli
 // The check runs only when spec.bootstrap has one of the two addons (read
 // with the entry parser of `lo addons --detail`) and the domain has a
 // kubeconfig (the file that the bash entrypoint exports as KUBECONFIG). It
-// makes two reads, each with --request-timeout=10s. A failed read is a
-// warning with a fixed reason per class. kubectl's stderr can name the
-// server and the user, so the check never prints it. Every line is
-// advisory: the check never changes the doctor exit code.
+// makes two reads, each with --request-timeout=10s and a bound of 30 s
+// (rbacReadBound). A read runs the credential plugin of that kubeconfig,
+// which can ask for a login. A failed read is a warning with a fixed reason
+// per class. kubectl's stderr can name the server and the user, so the
+// check never prints it. A binding name goes into a printed delete command
+// only when it is a DNS-1123 subdomain. Every line is advisory: the check
+// never changes the doctor exit code.
 
 import (
 	"bytes"
@@ -27,6 +30,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -74,12 +78,16 @@ const (
 
 // rbacReadTimeout is the --request-timeout of each read. rbacReadBound
 // stops a kubectl that does not end after it (an exec credential plugin
-// that waits for a login): the reads are a diagnosis, never a hang.
+// that waits for a login): the reads are a diagnosis, never a hang. The
+// bash twin uses the same 30 s (doctor::_rbac_bound). rbacReadBound is a
+// variable so that a test can make it short; rbacReasonNoAnswer names the
+// 30 s as a fixed text.
 const (
 	rbacReadTimeout = "10s"
-	rbacReadBound   = 30 * time.Second
 	rbacReadGrace   = 2 * time.Second
 )
+
+var rbacReadBound = 30 * time.Second
 
 // The fixed reasons of a failed read, one per class.
 const (
@@ -87,9 +95,15 @@ const (
 	rbacReasonNoKubectl   = "kubectl not found"
 	rbacReasonForbidden   = "the kubeconfig user cannot list ClusterRoles and ClusterRoleBindings (forbidden or unauthorized)"
 	rbacReasonUnreachable = "the cluster API did not answer (unreachable or timed out)"
+	rbacReasonNoAnswer    = "kubectl did not answer within 30 s (the cluster API, or a credential plugin that waits for a login)"
 	rbacReasonOther       = "kubectl failed or did not return a valid list"
 	rbacSkipped           = "RBAC migration check skipped: "
 )
+
+// rbacNameRe is a DNS-1123 subdomain (with a length of at most 253). An
+// RBAC name can also hold `;`, `$(`, an ESC, a TAB or a newline: a delete
+// command is printed only for a name that matches.
+var rbacNameRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
 
 type rbacSubject struct {
 	Kind      string `json:"kind"`
@@ -127,10 +141,14 @@ type rbacRole struct {
 // section. resolve reads spec.bootstrap (bootstrapEntries in production).
 func doctorRBACLeftovers(ctx context.Context, r execx.Runner, paths *config.Paths, d, path string, resolve addons.EntryResolver, out io.Writer) {
 	if d == "" {
-		doctorInfo(out, rbacSkipped+"no active domain")
+		// The domain section above says it (no active domain).
 		return
 	}
 	spec := filepath.Join(paths.Clusters, d, "cluster.lok8s.yaml")
+	if domain.NameRe.MatchString(d) && !fsutil.FileExists(spec) && fsutil.FileExists(filepath.Join(paths.Clusters, d, "deploy.lok8s.yaml")) {
+		doctorInfo(out, rbacSkipped+d+" is a deploy domain (run the check on its cluster domain: lo doctor --domain <cluster domain>)")
+		return
+	}
 	if !domain.NameRe.MatchString(d) || !fsutil.FileExists(spec) {
 		doctorInfo(out, rbacSkipped+d+" has no cluster.lok8s.yaml")
 		return
@@ -140,6 +158,8 @@ func doctorRBACLeftovers(ctx context.Context, r execx.Runner, paths *config.Path
 		doctorInfo(out, rbacSkipped+"the cluster spec of "+d+" cannot be read (run: lo lint)")
 		return
 	}
+	// An addon counts only as a bare entry name (Builtin), never as a path
+	// entry (bash: the same rule on the entry key).
 	enabled := map[string]bool{}
 	for _, e := range resolve(spec, kind, d) {
 		if e.Builtin {
@@ -204,7 +224,7 @@ func rbacRead[T any](ctx context.Context, r execx.Runner, kubectl, kubeconfig, r
 	})
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return rbacReasonUnreachable
+			return rbacReasonNoAnswer
 		}
 		return rbacReadReason(stderr.String())
 	}
@@ -227,7 +247,9 @@ func rbacReadReason(stderr string) string {
 			return rbacReasonForbidden
 		}
 	}
-	for _, w := range []string{"unable to connect", "connection refused", "no such host", "timeout", "deadline exceeded", "network is unreachable", "no route to host"} {
+	// "was refused": kubectl's own text for a refused connection ("The
+	// connection to the server <host> was refused").
+	for _, w := range []string{"unable to connect", "connection refused", "was refused", "no such host", "timeout", "deadline exceeded", "network is unreachable", "no route to host"} {
 		if strings.Contains(s, w) {
 			return rbacReasonUnreachable
 		}
@@ -309,8 +331,29 @@ func rbacNewMissing(bindings []rbacBinding, sa rbacSubject, newRole string, out 
 	}
 }
 
+// rbacBindingLine reports one old binding. A name that is not a DNS-1123
+// subdomain is never printed: the line then has no name and no command.
 func rbacBindingLine(b rbacBinding, sa rbacSubject, out io.Writer) {
-	doctorWarn(out, "migration incomplete: ClusterRoleBinding "+b.Metadata.Name+" binds the "+sa.Name+" ServiceAccount to "+b.RoleRef.Name+" (run: kubectl delete clusterrolebinding "+b.Metadata.Name+")")
+	role := b.RoleRef.Name
+	name := b.Metadata.Name
+	if len(name) > 253 || !rbacNameRe.MatchString(name) {
+		doctorWarn(out, "migration incomplete: a ClusterRoleBinding with an unusual name (not a DNS-1123 subdomain) binds the "+sa.Name+" ServiceAccount to "+role+". Doctor does not print that name or a delete command: find the binding and delete it")
+		return
+	}
+	keep := ""
+	if rbacOptInRole(sa, role) {
+		keep = ", unless you keep it on purpose"
+	}
+	doctorWarn(out, "migration incomplete: ClusterRoleBinding "+name+" binds the "+sa.Name+" ServiceAccount to "+role+" (run: kubectl delete clusterrolebinding "+name+keep+")")
+}
+
+// rbacOptInRole reports a role that an opt-in addon binds the account to
+// (system-upgrade-controller-cluster-admin: cluster-admin;
+// redis-operator-chart-rbac: its chart role). The check finds an opt-in
+// addon only as a bare entry name, so such a binding can be one that the
+// person keeps on purpose.
+func rbacOptInRole(sa rbacSubject, role string) bool {
+	return (sa == rbacSUCAccount && role == rbacClusterAdmin) || (sa == rbacRedisAccount && role == rbacRedisChartRole)
 }
 
 // rbacAggregateLabels are the aggregate-to-* labels with the value "true"

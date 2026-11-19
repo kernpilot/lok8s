@@ -1,0 +1,1 @@
+  ! migration incomplete: ClusterRoleBinding lok8s-redis-operator-chart-rbac binds the redis-operator ServiceAccount to lok8s-redis-operator-chart-rbac (run: kubectl delete clusterrolebinding lok8s-redis-operator-chart-rbac, unless you keep it on purpose)

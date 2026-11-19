@@ -1,0 +1,1 @@
+  ℹ RBAC migration check skipped: rbac.example is a deploy domain (run the check on its cluster domain: lo doctor --domain <cluster domain>)

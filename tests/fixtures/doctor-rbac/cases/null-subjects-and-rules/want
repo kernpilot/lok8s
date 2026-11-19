@@ -1,0 +1,2 @@
+  ✓ system-upgrade-controller: no RBAC migration leftovers
+  ✓ redis-operator: no RBAC migration leftovers

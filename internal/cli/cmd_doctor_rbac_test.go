@@ -2,14 +2,21 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"gopkg.in/yaml.v3"
+
+	"github.com/kernpilot/lok8s/internal/assets"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/testutil"
@@ -20,6 +27,8 @@ import (
 // tests/fixtures/doctor-rbac/cases/<case>/:
 //
 //	cluster.lok8s.yaml   the domain's spec (absent: the domain has none)
+//	deploy.lok8s.yaml    the domain's deploy spec (absent: none)
+//	kubeconfig-name      the name of the kubeconfig file (absent: rbac-test)
 //	no-kubeconfig        present: the domain has no kubeconfig
 //	clusterrolebindings  the answer of that read: `json <file in json/>`, or
 //	clusterroles         `fail <rc> <stderr>`. Absent: the read must not run.
@@ -51,10 +60,16 @@ func rbacCase(t *testing.T, name string) (*config.Paths, string, *scriptRunner) 
 	}
 	p := synthProject(t)
 	t.Setenv("LOK8S_CLUSTER_NAME", "")
-	if raw, err := os.ReadFile(filepath.Join(dir, "cluster.lok8s.yaml")); err == nil {
-		testutil.WriteFile(t, filepath.Join(p.Clusters, rbacTestDomain, "cluster.lok8s.yaml"), string(raw))
+	for _, f := range []string{"cluster.lok8s.yaml", "deploy.lok8s.yaml"} {
+		if raw, err := os.ReadFile(filepath.Join(dir, f)); err == nil {
+			testutil.WriteFile(t, filepath.Join(p.Clusters, rbacTestDomain, f), string(raw))
+		}
 	}
-	kubeconfig := filepath.Join(p.Base, ".kubeconfig", rbacTestName+".yaml")
+	kcName := rbacTestName
+	if raw, err := os.ReadFile(filepath.Join(dir, "kubeconfig-name")); err == nil {
+		kcName = strings.TrimSpace(string(raw))
+	}
+	kubeconfig := filepath.Join(p.Base, ".kubeconfig", kcName+".yaml")
 	if _, err := os.Stat(filepath.Join(dir, "no-kubeconfig")); err != nil {
 		testutil.WriteFile(t, kubeconfig, "apiVersion: v1\nkind: Config\n")
 	}
@@ -118,9 +133,13 @@ func rbacWantReads(t *testing.T, name string) []string {
 // TestDoctorRBACCases runs every shared case: (a) a leftover SUC binding
 // under another name than the chart's; (b) a narrowed cluster passes; (c)
 // no kubeconfig skips; (d) neither addon in spec.bootstrap skips; (e) each
-// failed read prints its fixed reason and never kubectl's output; (f) each
-// redis-operator form (the old binding, the old role, its aggregation
-// labels, no pods/exec), and the guards around them.
+// failed read prints its fixed reason and never kubectl's output, one case
+// per classifier word; (f) each redis-operator form (the old binding, the
+// old role, its aggregation labels, no pods/exec, each wildcard arm of the
+// pods/exec check), and the guards around them; (g) a binding name that is
+// not a DNS-1123 subdomain prints no name and no command; (h) an opt-in
+// addon as a path entry does not count; (i) a deploy domain, a spec without
+// metadata.name, subjects: null and rules: null.
 func TestDoctorRBACCases(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join(rbacFixtures, "cases"))
 	if err != nil {
@@ -159,13 +178,14 @@ func TestDoctorRBACCases(t *testing.T) {
 	}
 }
 
-// No active domain, and no kubectl on the PATH: one line each, no read.
+// No active domain: no line (the domain section says it). No kubectl on the
+// PATH: one line. No read in either.
 func TestDoctorRBACSkipsWithoutDomainOrKubectl(t *testing.T) {
 	p, _, r := rbacCase(t, "narrowed")
 	var out strings.Builder
 	doctorRBACLeftovers(context.Background(), r, p, "", t.TempDir(), bootstrapEntries(p), &out)
-	if got, want := out.String(), "  ℹ RBAC migration check skipped: no active domain\n"; got != want {
-		t.Errorf("no domain: %q, want %q", got, want)
+	if got := out.String(); got != "" {
+		t.Errorf("no domain: %q, want no line", got)
 	}
 
 	out.Reset()
@@ -178,20 +198,134 @@ func TestDoctorRBACSkipsWithoutDomainOrKubectl(t *testing.T) {
 	}
 }
 
-// A kubectl that does not end (an exec credential plugin that waits for a
-// login) is stopped at the bound, and the read is unreachable.
-func TestDoctorRBACReadBoundIsUnreachable(t *testing.T) {
-	r := &scriptRunner{handler: func(c execx.Cmd) error {
-		c.Stderr.Write([]byte("error: CANARY\n")) // alone, the class "other"
-		return context.DeadlineExceeded
-	}}
-	ctx, cancel := context.WithTimeout(context.Background(), 0)
-	defer cancel()
-	<-ctx.Done()
-	var items []rbacBinding
-	if got := rbacRead(ctx, r, "kubectl", "kc", "clusterrolebindings", &items); got != rbacReasonUnreachable {
-		t.Errorf("an ended context: %q, want %q", got, rbacReasonUnreachable)
+// rbacHangRunner is a kubectl that does not end (an exec credential plugin
+// that waits for a login): each run blocks until its context ends. If the
+// context never ends, the run gives up after fallback with an error of the
+// class "other", so that a lost bound fails the test and does not hang it.
+type rbacHangRunner struct {
+	fallback time.Duration
+	calls    int
+}
+
+func (r *rbacHangRunner) Run(ctx context.Context, c execx.Cmd) error {
+	r.calls++
+	select {
+	case <-ctx.Done():
+		return errors.New("signal: interrupt")
+	case <-time.After(r.fallback):
+		c.Stderr.Write([]byte("error: CANARY\n"))
+		return rbacExit(1)
 	}
+}
+
+// The bound (rbacReadBound) stops a read that does not end, and the check
+// prints its fixed reason. The parent context never ends: only the bound
+// of rbacRead can stop the run.
+func TestDoctorRBACReadBoundStopsAHungRead(t *testing.T) {
+	p, bin, _ := rbacCase(t, "narrowed")
+	defer func(d time.Duration) { rbacReadBound = d }(rbacReadBound)
+	rbacReadBound = 5 * time.Millisecond
+	r := &rbacHangRunner{fallback: 5 * time.Second}
+	var out strings.Builder
+	doctorRBACLeftovers(context.Background(), r, p, rbacTestDomain, bin, bootstrapEntries(p), &out)
+	want := "  ! RBAC migration leftovers not checked: " + rbacReasonNoAnswer + "\n"
+	if got := out.String(); got != want {
+		t.Errorf("a hung read: %q, want %q", got, want)
+	}
+	if r.calls != 1 {
+		t.Errorf("reads after a hung read: %d, want 1", r.calls)
+	}
+}
+
+// The names, ServiceAccounts and namespaces that the check looks for are
+// the ones that the embedded addons apply: the narrowed bindings of both
+// addons, the pods/exec grant, and the bindings of the two opt-in addons.
+// A rename in a manifest fails here, not as a silent false finding.
+func TestDoctorRBACConstantsMatchTheAddons(t *testing.T) {
+	for _, name := range []string{rbacSUCAddon, rbacSUCAdminAddon, rbacRedisAddon, rbacRedisChartAddon} {
+		if !slices.Contains(assets.AddonNames(), name) {
+			t.Errorf("no embedded addon %s", name)
+		}
+	}
+	read := func(rel string) ([]rbacBinding, []rbacRole, []string) {
+		t.Helper()
+		raw, err := fs.ReadFile(assets.FS(), rel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var bindings []rbacBinding
+		var roles []rbacRole
+		var namespaces []string
+		dec := yaml.NewDecoder(strings.NewReader(string(raw)))
+		for {
+			var doc map[string]any
+			if err := dec.Decode(&doc); err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				t.Fatalf("%s: %v", rel, err)
+			}
+			body, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatalf("%s: %v", rel, err)
+			}
+			switch doc["kind"] {
+			case "ClusterRoleBinding":
+				var b rbacBinding
+				if err := json.Unmarshal(body, &b); err != nil {
+					t.Fatalf("%s: %v", rel, err)
+				}
+				bindings = append(bindings, b)
+			case "ClusterRole":
+				var r rbacRole
+				if err := json.Unmarshal(body, &r); err != nil {
+					t.Fatalf("%s: %v", rel, err)
+				}
+				roles = append(roles, r)
+			case "Namespace":
+				var n struct {
+					Metadata struct {
+						Name string `json:"name"`
+					} `json:"metadata"`
+				}
+				if err := json.Unmarshal(body, &n); err != nil {
+					t.Fatalf("%s: %v", rel, err)
+				}
+				namespaces = append(namespaces, n.Metadata.Name)
+			}
+		}
+		return bindings, roles, namespaces
+	}
+	bound := func(rel string, bindings []rbacBinding, sa rbacSubject, role string) {
+		t.Helper()
+		if len(rbacBindingsOf(bindings, sa, []string{role})) == 0 {
+			t.Errorf("%s: no ClusterRoleBinding binds %+v to %s", rel, sa, role)
+		}
+	}
+
+	const sucRBAC = "addons/" + rbacSUCAddon + "/rbac.yaml"
+	b, _, _ := read(sucRBAC)
+	bound(sucRBAC, b, rbacSUCAccount, rbacSUCNewRole)
+	if _, _, ns := read("addons/" + rbacSUCAddon + "/namespace.yaml"); !slices.Equal(ns, []string{rbacSUCAccount.Namespace}) {
+		t.Errorf("%s namespace.yaml: %q, want %q", rbacSUCAddon, ns, rbacSUCAccount.Namespace)
+	}
+	const sucAdmin = "addons/" + rbacSUCAdminAddon + "/clusterrolebinding.yaml"
+	b, _, _ = read(sucAdmin)
+	bound(sucAdmin, b, rbacSUCAccount, rbacClusterAdmin)
+
+	const redisRBAC = "addons/" + rbacRedisAddon + "/rbac.yaml"
+	b, r, _ := read(redisRBAC)
+	bound(redisRBAC, b, rbacRedisAccount, rbacRedisNewRole)
+	bound(redisRBAC, b, rbacRedisAccount, rbacRedisExecRole)
+	if !rbacGrantsExec(b, r, rbacRedisAccount) {
+		t.Errorf("%s: the check does not see the pods/exec grant", redisRBAC)
+	}
+	if _, _, ns := read("addons/" + rbacRedisAddon + "/namespace.yaml"); !slices.Equal(ns, []string{rbacRedisAccount.Namespace}) {
+		t.Errorf("%s namespace.yaml: %q, want %q", rbacRedisAddon, ns, rbacRedisAccount.Namespace)
+	}
+	const chartRBAC = "addons/" + rbacRedisChartAddon + "/rbac.yaml"
+	b, _, _ = read(chartRBAC)
+	bound(chartRBAC, b, rbacRedisAccount, rbacRedisChartRole)
 }
 
 // The real command: the lines close the domain section, after the active

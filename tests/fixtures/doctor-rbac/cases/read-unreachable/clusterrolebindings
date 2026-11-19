@@ -1,1 +1,1 @@
-fail 1 Unable to connect to the server: dial tcp CANARY:6443: i/o timeout
+fail 1 Unable to connect to the server: CANARY: EOF
