@@ -1,0 +1,310 @@
+{{- /*
+The API grants of the Ceph CSI RBD plugins, one `kms:` value per ceph-csi
+feature that reads objects through the Kubernetes API. Each value renders
+only the rules that the feature calls, and binds them only to the plugin
+that calls them. The call sites are in ceph-csi v3.17.0 (the plugin image
+of ceph-csi-operator v1.0.4, internal/controller/defaults.go:37) and Rook
+v1.20.6; internal/addons/rookceph_kms_test.go holds the inventory with
+file:line and checks every render against it.
+
+Two scopes:
+  - Objects in the CSI namespace (rook-ceph, POD_NAMESPACE of both
+    plugins): a Role and a RoleBinding there. When the deployment fixes
+    the object name, the rule names it (resourceNames).
+  - Objects in the namespace of the PVC (the tenant): a ClusterRole and a
+    ClusterRoleBinding. The plugin learns that namespace from each volume
+    request, so a Role cannot cover it.
+
+A KMS runs on both sides: the controller plugin sets up the key at
+CreateVolume (internal/rbd/controllerserver.go:205), the node plugin opens
+it at NodeStageVolume (internal/rbd/nodeserver.go:228). The KMS rules bind
+to both plugins. rbd-nbd, block-volume-stats and vault-tokenreview bind to
+the node plugin only: the controller plugin makes no such call, and it
+keeps `tokenreviews create` in its own chart role (the rook-ceph addon does
+not remove it).
+
+No value, or an unknown one, stops the render: the addon never selects a
+set of grants for a cluster.
+*/ -}}
+{{- $options := list "all" "metadata" "vault" "vaulttokens" "vaulttenantsa" "aws-metadata" "aws-sts-metadata" "azure-kv" "kmip" "ibmkeyprotect" "vault-tokenreview" "rbd-nbd" "block-volume-stats" }}
+{{- $types := list "metadata" "vault" "vaulttokens" "vaulttenantsa" "aws-metadata" "aws-sts-metadata" "azure-kv" "kmip" "ibmkeyprotect" }}
+{{- $kms := .Values.kms }}
+{{- if not $kms }}
+{{- fail (printf "rook-ceph-csi-kms: no kms option is set. Set `values: {kms: [...]}` on its spec.bootstrap entry to the ceph-csi features that this cluster uses. The options: %s. `all` renders the rule set of earlier releases (five cluster-wide rules on both plugins). See docs/guide/addons.md, section rook-ceph" (join ", " $options)) }}
+{{- end }}
+{{- if not (kindIs "slice" $kms) }}
+{{- fail (printf "rook-ceph-csi-kms: kms must be a list, got %s %v. The options: %s" (kindOf $kms) $kms (join ", " $options)) }}
+{{- end }}
+{{- $on := dict }}
+{{- range $kms }}
+{{- if not (has . $options) }}
+{{- fail (printf "rook-ceph-csi-kms: unknown kms option %q. The options: %s" (toString .) (join ", " $options)) }}
+{{- end }}
+{{- $_ := set $on . true }}
+{{- end }}
+{{- $anyType := false }}
+{{- range $types }}
+{{- if hasKey $on . }}
+{{- $anyType = true }}
+{{- end }}
+{{- end }}
+{{- if hasKey $on "all" }}
+---
+# all: the rule set of earlier releases, as one ClusterRole bound to the
+# node plugin and the controller plugin. It is the five rules the rook-ceph
+# addon removes from the node plugin ClusterRole, verbatim from the
+# ceph-csi-drivers chart (templates/rbd-nodeplugin-cr-rbac.yaml). With it,
+# both plugins can read every Secret and mint a token for any
+# ServiceAccount, as with the upstream chart.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rook-ceph-csi-nodeplugin-kms-cr
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [serviceaccounts/token]
+    verbs: [create]
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rook-ceph-csi-nodeplugin-kms-crb
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rook-ceph-csi-nodeplugin-kms-cr
+subjects:
+  - kind: ServiceAccount
+    name: rook-ceph-rbd-csi-ceph-com-nodeplugin-sa
+    namespace: rook-ceph
+  - kind: ServiceAccount
+    name: rook-ceph-rbd-csi-ceph-com-ctrlplugin-sa
+    namespace: rook-ceph
+{{- end }}
+{{- if $anyType }}
+---
+# Every KMS type: the KMS configuration ConfigMap. ceph-csi reads it from
+# the API in its own namespace when the Driver does not mount it
+# (internal/kms/kms.go:100,153-160; the name is KMS_CONFIGMAP_NAME, which
+# the operator does not set, else csi-kms-connection-details).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rook-ceph-csi-kms-config
+  namespace: rook-ceph
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [csi-kms-connection-details]
+    verbs: [get]
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-config" "plugins" (list "node" "ctrl")) }}
+{{- end }}
+{{- if hasKey $on "metadata" }}
+---
+# metadata: the passphrase Secret (`secretName`) in `secretNamespace`, else
+# in the PVC namespace (internal/kms/secretskms.go:129,239-263).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rook-ceph-csi-kms-metadata
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "ClusterRole" "name" "rook-ceph-csi-kms-metadata" "plugins" (list "node" "ctrl")) }}
+{{- end }}
+{{- if hasKey $on "vaulttokens" }}
+---
+# vaulttokens: in the PVC namespace, the Vault token Secret
+# (internal/kms/vault_tokens.go:263,496), the TLS Secrets
+# (vault_tokens.go:415,441,468; a miss falls back to the CSI namespace) and
+# the tenant ConfigMap (vault_tokens.go:347,552).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rook-ceph-csi-kms-vaulttokens
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get]
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "ClusterRole" "name" "rook-ceph-csi-kms-vaulttokens" "plugins" (list "node" "ctrl")) }}
+{{- end }}
+{{- if hasKey $on "vaulttenantsa" }}
+---
+# vaulttenantsa: in the PVC namespace, the tenant ServiceAccount and a
+# TokenRequest for it (internal/kms/vault_sa.go:265,318), the token Secrets
+# of that ServiceAccount when the TokenRequest fails (vault_sa.go:280), the
+# TLS Secrets (vault_tokens.go:415,441,468) and the tenant ConfigMap
+# (vault_sa.go:174, vault_tokens.go:552). `serviceaccounts/token create`
+# lets the plugin mint a token for any ServiceAccount.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rook-ceph-csi-kms-vaulttenantsa
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [serviceaccounts/token]
+    verbs: [create]
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "ClusterRole" "name" "rook-ceph-csi-kms-vaulttenantsa" "plugins" (list "node" "ctrl")) }}
+{{- end }}
+{{- if hasKey $on "aws-metadata" }}
+---
+# aws-metadata: the AWS credentials Secret in the CSI namespace
+# (internal/kms/aws_metadata.go:82,90,187). Another name (KMS_SECRET_NAME)
+# needs its own Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rook-ceph-csi-kms-aws-metadata
+  namespace: rook-ceph
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [ceph-csi-aws-credentials]
+    verbs: [get]
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-aws-metadata" "plugins" (list "node" "ctrl")) }}
+{{- end }}
+{{- if hasKey $on "aws-sts-metadata" }}
+---
+# aws-sts-metadata: the AWS STS Secret in the PVC namespace
+# (internal/kms/aws_sts_metadata.go:80,162).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rook-ceph-csi-kms-aws-sts-metadata
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "ClusterRole" "name" "rook-ceph-csi-kms-aws-sts-metadata" "plugins" (list "node" "ctrl")) }}
+{{- end }}
+{{- if hasKey $on "azure-kv" }}
+---
+# azure-kv: the Azure certificate Secret in the CSI namespace
+# (internal/kms/azure_vault.go:77,85,186). Another name
+# (AZURE_CERT_SECRET_NAME) needs its own Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rook-ceph-csi-kms-azure-kv
+  namespace: rook-ceph
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [ceph-csi-azure-credentials]
+    verbs: [get]
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-azure-kv" "plugins" (list "node" "ctrl")) }}
+{{- end }}
+{{- if hasKey $on "kmip" }}
+---
+# kmip: the KMIP credentials Secret in the CSI namespace
+# (internal/kms/kmip.go:109,117,392). Another name (KMIP_SECRET_NAME) needs
+# its own Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rook-ceph-csi-kms-kmip
+  namespace: rook-ceph
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [ceph-csi-kmip-credentials]
+    verbs: [get]
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-kmip" "plugins" (list "node" "ctrl")) }}
+{{- end }}
+{{- if hasKey $on "ibmkeyprotect" }}
+---
+# ibmkeyprotect: the Key Protect credentials Secret in the CSI namespace
+# (internal/kms/keyprotect.go:83,90,202). Another name (IBM_KP_SECRET_NAME)
+# needs its own Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rook-ceph-csi-kms-ibmkeyprotect
+  namespace: rook-ceph
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [ceph-csi-kp-credentials]
+    verbs: [get]
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-ibmkeyprotect" "plugins" (list "node" "ctrl")) }}
+{{- end }}
+{{- if hasKey $on "vault-tokenreview" }}
+---
+# vault-tokenreview: not a ceph-csi call. Vault's Kubernetes auth method
+# sends a TokenReview for the token of the node plugin; when the Vault role
+# has no token_reviewer_jwt, it sends it with that same token (ceph-csi
+# docs/rbd/deploy.md:376-381). The controller plugin keeps this rule in its
+# own chart role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rook-ceph-csi-kms-vault-tokenreview
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "ClusterRole" "name" "rook-ceph-csi-kms-vault-tokenreview" "plugins" (list "node")) }}
+{{- end }}
+{{- if hasKey $on "rbd-nbd" }}
+---
+# rbd-nbd: after a node plugin restart, the volume healer reads the
+# node-stage Secret of each attached `mounter: rbd-nbd` volume
+# (internal/rbd/rbd_healer.go:91-93,172). Rook names it rook-csi-rbd-node
+# in the CephCluster namespace (pkg/operator/ceph/csi/secrets.go:44). A
+# StorageClass with another node-stage Secret needs its own Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rook-ceph-csi-kms-rbd-nbd
+  namespace: rook-ceph
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [rook-csi-rbd-node]
+    verbs: [get]
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-rbd-nbd" "plugins" (list "node")) }}
+{{- end }}
+{{- if hasKey $on "block-volume-stats" }}
+---
+# block-volume-stats: NodeGetVolumeStats on a `volumeMode: Block` volume
+# reads the controller-publish Secret of the ClientProfile to count the used
+# bytes (internal/rbd/nodeserver.go:1574,1587). Rook sets it to
+# rook-csi-rbd-provisioner in the CephCluster namespace
+# (pkg/operator/ceph/csi/config.go:66-72, secrets.go:45).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rook-ceph-csi-kms-block-volume-stats
+  namespace: rook-ceph
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [rook-csi-rbd-provisioner]
+    verbs: [get]
+{{ include "rook-ceph-csi-kms.binding" (dict "kind" "Role" "name" "rook-ceph-csi-kms-block-volume-stats" "plugins" (list "node")) }}
+{{- end }}

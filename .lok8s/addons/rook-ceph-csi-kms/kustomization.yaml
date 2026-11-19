@@ -1,42 +1,53 @@
-# rook-ceph-csi-kms — opt-in. Gives the Ceph CSI node plugin AND controller
-# plugin back the API grants the `rook-ceph` addon removes from their
-# ClusterRoles (see the `patches:` blocks in ../rook-ceph/kustomization.yaml
-# for the per-rule evidence): Secrets, ConfigMaps, ServiceAccounts,
-# ServiceAccount tokens and TokenReviews. A KMS runs on both sides: the
-# controller plugin creates the encryption key, the node plugin unlocks it.
-# Bootstrap it only when a cluster uses one of the ceph-csi
-# features that reads them through the Kubernetes API:
+# rook-ceph-csi-kms — opt-in. Gives the Ceph CSI RBD node plugin and
+# controller plugin back API grants that the `rook-ceph` addon removes from
+# their ClusterRoles (see the `patches:` blocks in
+# ../rook-ceph/kustomization.yaml), one ceph-csi feature at a time. Use it
+# only when a cluster uses a feature that reads objects through the
+# Kubernetes API:
 #
-#   - volume encryption with an external KMS (`encrypted: "true"` +
-#     `encryptionKMSID` on a StorageClass: Vault, vaulttokens, vaulttenantsa,
-#     the metadata/secrets KMS, …);
-#   - the `mounter: rbd-nbd` StorageClass parameter (the plugin's volume
-#     healer re-reads the node-stage Secret after a restart);
-#   - usage metrics for `volumeMode: Block` volumes (NodeGetVolumeStats reads
-#     the controller-publish Secret to report the used bytes).
+#   - volume encryption with a KMS (`encrypted: "true"` and an
+#     `encryptionKMSID` on a StorageClass): one option per KMS type;
+#   - the `mounter: rbd-nbd` StorageClass parameter (the volume healer reads
+#     the node-stage Secret after a node plugin restart);
+#   - usage metrics of `volumeMode: Block` volumes (NodeGetVolumeStats reads
+#     the controller-publish Secret);
+#   - Vault's Kubernetes auth with the plugin token as the reviewer token.
 #
-# A plain krbd/CephFS mount needs none of them: kubelet passes the Ceph user
-# credentials inside the CSI request.
+# A plain krbd/CephFS mount, and encryption with the passphrase in the
+# StorageClass secret (no `encryptionKMSID`), need none of them: kubelet
+# passes those secrets inside the CSI request.
 #
-# What this addon restores is the upstream rule set, not the minimum each
-# feature needs. With it, root on any node that runs the plugin, and the
-# controller pod, can read every Secret in the cluster and mint a token for
-# any ServiceAccount again (`serviceaccounts/token create` is cluster-wide).
-# Keep it off unless one of
-# the three cases above applies. Narrower, per-feature grants are tracked in
-# https://github.com/kernpilot/lok8s/issues/265.
+# The `kms:` value names the features. Each option renders only the rules
+# of its feature, bound only to the plugin that calls them: a Role in
+# rook-ceph for objects there, a ClusterRole for objects in the namespace
+# of the PVC:
 #
 #   spec:
 #     bootstrap:
 #       - rook-ceph
 #       - rook-ceph-csi-kms:
 #           dependsOn: [rook-ceph]
+#           values:
+#             kms: [metadata]
 #
-# The binding targets the RBD node plugin and controller plugin
-# ServiceAccounts the `rook-ceph` addon creates. A cluster that also turns on
-# the CephFS or NVMe-oF driver adds their ServiceAccounts
-# (`rook-ceph-<type>-csi-ceph-com-nodeplugin-sa` and `…-ctrlplugin-sa`) as
-# further subjects from a patch in its own target.
+# The options, their rules and the upstream call sites:
+# chart/templates/rbac.yaml and docs/guide/addons.md (section rook-ceph).
+# `kms: [all]` renders the rule set of earlier releases: five cluster-wide
+# rules on both plugins, so that both can read every Secret and mint a
+# token for any ServiceAccount.
+#
+# No `kms:` value stops the render with an error that names the options:
+# the addon never selects a set of grants for a cluster. An entry of an
+# earlier release (no `values:`) fails at render time, before anything is
+# applied; add `kms: [all]` to keep its grants.
+#
+# The bindings name the RBD plugin ServiceAccounts that the `rook-ceph`
+# addon creates. A cluster that also runs the CephFS or NVMe-oF driver with
+# a KMS binds their ServiceAccounts to the same roles from its own target
+# (docs/guide/addons.md).
+#
+# The chart is LOCAL (./chart) and khelm renders it, like mailpit; chart.yaml
+# has no repository, so the render downloads nothing.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -47,5 +58,5 @@ labels:
       lok8s.dev/type: system
       lok8s.dev/category: storage
 
-resources:
-  - rbac.yaml
+generators:
+  - chart.yaml

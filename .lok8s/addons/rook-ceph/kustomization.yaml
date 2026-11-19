@@ -80,7 +80,8 @@ resources:
 # Secret when the ClientProfile carries one, to report the used bytes. With
 # the narrowed role that call fails on the volume stats of block volumes, not
 # on their mount; kubelet logs the error and the volume keeps working. A
-# cluster that needs block-volume usage metrics bootstraps rook-ceph-csi-kms.
+# cluster that needs block-volume usage metrics bootstraps rook-ceph-csi-kms
+# with `kms: [block-volume-stats]`.
 #
 # Kept: nodes get (topology labels at start-up), persistentvolumes +
 # volumeattachments get/list (the rbd-nbd healer scans them on every start),
@@ -109,10 +110,12 @@ resources:
 # (its header says how). Descending order keeps the indices valid while
 # earlier removes are applied.
 #
-# Need the upstream grants back (encrypted volumes with a KMS, the
+# Need some of the upstream grants back (encrypted volumes with a KMS, the
 # `mounter: rbd-nbd` healer, block-volume usage metrics)? Bootstrap the
-# `rook-ceph-csi-kms` addon after this one: it binds these five rules to the
-# node plugin ServiceAccount again. See docs/guide/addons.md.
+# `rook-ceph-csi-kms` addon after this one, with one `kms:` option per
+# feature: each option grants only the rules of its feature. `kms: [all]`
+# binds these five rules to the node plugin ServiceAccount again. See
+# docs/guide/addons.md.
 #
 # ── Least privilege for the CSI controller plugin ─────────────────────────────
 # The controller plugin Deployment (ceph-csi + the external-provisioner,

@@ -1,0 +1,3 @@
+# The ceph-csi features to grant (templates/rbac.yaml lists the options).
+# An empty list stops the render.
+kms: []

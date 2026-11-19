@@ -1,0 +1,19 @@
+# rook-ceph-csi-kms values: the override surface. Set `kms:` on the
+# spec.bootstrap entry, under `values:` (docs/guide/addons.md, section
+# rook-ceph):
+#
+#   - rook-ceph-csi-kms:
+#       dependsOn: [rook-ceph]
+#       values:
+#         kms: [metadata, rbd-nbd]
+#
+# The options (chart/templates/rbac.yaml has the rules of each one):
+#   KMS types (the `encryptionKMSType` of the KMS configuration):
+#     metadata, vault, vaulttokens, vaulttenantsa, aws-metadata,
+#     aws-sts-metadata, azure-kv, kmip, ibmkeyprotect
+#   other features: vault-tokenreview, rbd-nbd, block-volume-stats
+#   all: the rule set of earlier releases (five cluster-wide rules on both
+#     plugins)
+#
+# The empty default stops the render with an error that names the options.
+kms: []

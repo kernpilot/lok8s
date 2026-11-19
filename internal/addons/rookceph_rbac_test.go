@@ -578,9 +578,9 @@ func checkPluginRoles(t *testing.T, p plugin, names map[string]string, fixture, 
 		if !reflect.DeepEqual(got.Doc, wantDoc) {
 			t.Errorf("%s: effective ClusterRole\n got: %s\nwant: %s", name, canon(t, got.Doc), canon(t, wantDoc))
 		}
-		// What the patch removed is what rook-ceph-csi-kms gives back: the
-		// node plugin's five rules exactly; the controller plugin's four
-		// (it keeps tokenreviews). Not for nfs: it has no KMS, and its
+		// What the patch removed is what rook-ceph-csi-kms with `kms: [all]`
+		// gives back: the node plugin's five rules exactly; the controller
+		// plugin's four (it keeps tokenreviews). Not for nfs: it has no KMS, and its
 		// cluster-wide `secrets get` is replaced by the namespaced Role.
 		if p.removed[typ] == nil || typ == "nfs" {
 			continue
@@ -704,9 +704,10 @@ func TestRookCephCSIRBACPatches(t *testing.T) {
 		t.Errorf("kustomization.yaml does not list ctrlplugin-secrets-rbac.yaml as a resource")
 	}
 
-	// rook-ceph-csi-kms binds its ClusterRole to the node plugin AND the
-	// controller plugin ServiceAccount of the rbd driver.
-	kmsObjs := readObjects(t, filepath.Join(root, rookCephKMSAddon, "rbac.yaml"))
+	// rook-ceph-csi-kms with `kms: [all]` binds its ClusterRole to the node
+	// plugin AND the controller plugin ServiceAccount of the rbd driver.
+	// kmsAllFixture is what `all` renders (TestRookCephCSIKMSOptions).
+	kmsObjs := readObjects(t, kmsAllFixture)
 	kmsCR, ok := kmsObjs["ClusterRole/"+kmsRole]
 	if !ok {
 		t.Fatalf("rook-ceph-csi-kms: ClusterRole %s missing", kmsRole)
