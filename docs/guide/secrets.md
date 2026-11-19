@@ -188,8 +188,10 @@ lo secrets --domain app.example.com add-key ~/keys/alice_ed25519.pub
 
 Remove a recipient with `lo secrets remove-key`, for example when a teammate
 leaves or a key is lost. It removes the key from every creation rule, then
-re-encrypts the store so that no `.enc` file lists the key. With `--all` it
-re-encrypts every domain store:
+re-encrypts each `.enc` file of the selected stores that lists the key. Without
+`--all` that is the store of the current domain. With `--all` it is every
+`clusters/<domain>/secrets` store. The command does not re-key the flat
+`.secrets/` store. A warning names each other store that still lists the key:
 
 ```bash
 lo secrets --domain app.example.com remove-key ~/keys/alice_ed25519.pub
@@ -198,16 +200,38 @@ lo secrets remove-key age1<recipient> --all     # every clusters/<domain>/secret
 
 `remove-key` changes nothing when one of these is true:
 
+- The key argument looks like a private key. The command does not print it.
+  `add-key` refuses it too.
+- `.sops.yaml` holds the key in a place that the edit does not change: an
+  unquoted list, an escaped or double-quoted string, a YAML list, `key_groups`,
+  an alias or a merge key. Remove the key there by hand.
 - The key is the last recipient of a creation rule. Nothing could then decrypt
   the files that the rule matches. Add another recipient first.
+- The key is in no creation rule and in no `.enc` file. A typo then does not
+  look like a removal. The message names the other stores that still list the
+  key.
+- The command cannot read a store or an `.enc` file.
+- An `.enc` file that lists the key is newer than its plaintext. The re-key
+  encrypts the plaintext, so it would write the old value back over the newer
+  one. Run `lo secrets decrypt` first.
+- An `.enc` file matches no creation rule, a rule with a recipient that is not
+  age, or a rule with an age recipient that does not parse.
 - An `.enc` file has no decrypted twin. The re-key cannot rewrite that file, so
   it would keep the removed recipient. Run `lo secrets decrypt` first, or pass
-  `--skip-orphans` to accept it.
-- The key is in no creation rule and in no `.enc` file. A typo then does not
-  look like a removal.
+  `--skip-orphans` to accept it. With `--skip-orphans` the command names the
+  files that still list the key.
 
-After the re-key the command reads the `.enc` files again. It fails when a
-file still lists the removed key.
+After the re-key the command reads the `.enc` files of the selected stores
+again. It fails when a file that it re-keyed still lists the removed key. If
+the re-key stops after the `.sops.yaml` write (for example, when an encrypt
+fails), the command prints the command to run again. That run resumes the
+re-key.
+
+`add-key` and `remove-key` hold a lock on `.sops.yaml.lock`, next to
+`.sops.yaml`, for the whole run, so that two runs do not undo each other. A
+second run waits `LO_SECRETS_LOCK_WAIT` seconds (60 by default), then stops
+and changes nothing. The lock file holds no data. Both commands replace
+`.sops.yaml` through a temporary file and a rename.
 
 ::: warning A removal does not revoke access
 The removed key can still decrypt the older `.enc` files in the git history,
