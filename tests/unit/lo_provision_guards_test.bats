@@ -111,7 +111,7 @@ _load() {
   lo::reconcile_registry_network_nodes() {
     [[ ! -s "${LOK8S_REGISTRY_JSON:-}" ]] || touch "${BATS_TEST_TMPDIR}/reconcile-had-document"
   }
-  # No node is on the registry network, so the heal branch stays off. The two
+  # No node is on the registry network, so the heal branch stays off. The
   # tests of the heal gate below turn it on and off.
   lo::nodes_on_registry_network()        { return 1; }
   lo::heal_node_ips()                    { return 0; }
@@ -422,19 +422,44 @@ JSON
   done
 }
 
-# The node IP heal gate (drivers/lo/main): a cluster that is not shared runs
-# the heal only when one of its nodes is on the registry network. A node
-# that is there runs it.
+# The node IP heal gate (drivers/lo/main): for a cluster that is not shared,
+# the driver runs the heal only when one of the cluster's nodes is on the
+# registry network. The heal gets the cluster name and the node kubeconfig.
 @test "lo provision: a node on the registry network gets the node IP heal" {
   _load
   lo::nodes_on_registry_network() { return 0; }
-  lo::heal_node_ips() { touch "${BATS_TEST_TMPDIR}/healed"; }
+  lo::heal_node_ips() { printf '%s\n' "${@}" > "${BATS_TEST_TMPDIR}/healed"; }
 
   local rc=0
   driver::provision test.dev || rc=$?
 
   [ -e "${BATS_TEST_TMPDIR}/healed" ] || {
     echo "a node is on the registry network, but the node IP heal did not run (rc=${rc})" >&2
+    return 1
+  }
+  local want
+  want="$(printf '%s\n' lotest "${PATH_BASE}/.kubeconfig/lotest.yaml")"
+  [ "$(cat "${BATS_TEST_TMPDIR}/healed")" = "${want}" ] || {
+    echo "the heal got these arguments:" >&2
+    cat "${BATS_TEST_TMPDIR}/healed" >&2
+    echo "want the cluster name and the node kubeconfig:" >&2
+    echo "${want}" >&2
+    return 1
+  }
+}
+
+# The heal is advisory: when it fails, the provision still ends with 0.
+@test "lo provision: a failing node IP heal does not fail the provision" {
+  _load
+  lo::nodes_on_registry_network() { return 0; }
+  lo::heal_node_ips() { touch "${BATS_TEST_TMPDIR}/healed"; return 1; }
+
+  local rc=0
+  driver::provision test.dev || rc=$?
+
+  [ -e "${BATS_TEST_TMPDIR}/healed" ] && [ "${rc}" -eq 0 ] || {
+    echo "rc=${rc}; healed: $([ -e "${BATS_TEST_TMPDIR}/healed" ] && echo yes || echo no)" >&2
+    echo "want the heal to run, fail, and the provision to end with 0" >&2
     return 1
   }
 }
