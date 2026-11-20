@@ -280,12 +280,23 @@ func TestRemoveKeyFailsClosedOnWhatItCannotRead(t *testing.T) {
 	}
 }
 
+// lockPath is the lock that a run of c takes: beside .sops.yaml, or beside
+// the file that a .sops.yaml link names (sopsConfigDest).
+func lockPath(t *testing.T, c *Context) string {
+	t.Helper()
+	dest, err := resolveConfig(c.sopsConfigPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dest + ".lock"
+}
+
 // holdLock takes the lock of .sops.yaml as another run would, and makes the
 // command under test give up at once.
 func holdLock(t *testing.T, c *Context) {
 	t.Helper()
 	t.Setenv(lockWaitEnv, "0")
-	f, err := os.OpenFile(c.sopsConfigLock(), os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(lockPath(t, c), os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +330,7 @@ func TestKeyCommandsRefuseWhileTheLockIsHeld(t *testing.T) {
 			if err := tc.run(c); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v", err)
 			}
-			want := "[error] " + c.sopsConfigLock() + " is held by another lo secrets add-key or remove-key — nothing was changed; run it again when that one ends\n"
+			want := "[error] " + lockPath(t, c) + " is held by another lo secrets add-key or remove-key — nothing was changed; run it again when that one ends\n"
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 			}
@@ -388,7 +399,8 @@ func TestKeyCommandsRefuseALockThatIsNotARegularFile(t *testing.T) {
 }
 
 // The replace keeps the mode, leaves a hard link to the old file with the
-// old content, and replaces the target of a symlink, not the link.
+// old content, and, given the path that resolveConfig makes of a symlink,
+// replaces the target of the link, not the link.
 func TestReplaceFile(t *testing.T) {
 	dir := t.TempDir()
 	target := dir + "/target.yaml"
@@ -403,7 +415,11 @@ func TestReplaceFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := replaceFile(dir+"/link", []byte("new\n")); err != nil {
+	dest, err := resolveConfig(dir + "/link")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceFile(dest, []byte("new\n")); err != nil {
 		t.Fatal(err)
 	}
 	if got := readFile(t, target); got != "new\n" {

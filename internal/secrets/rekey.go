@@ -740,16 +740,14 @@ func ownIdentity(recipient string) string {
 // not. A run that prints no match warning has not read the others.
 const ownIdentityScope = "the check for your own decrypt identity reads only SOPS_AGE_KEY_FILE (default ~/.config/sops/age/keys.txt) and the .pub of LOK8S_SSH_KEY (default ~/.ssh/id_ed25519); it does not read SOPS_AGE_KEY, SOPS_AGE_KEY_CMD or other files"
 
-// replaceFile writes content to path through a temp file in the same
-// directory and a rename (bash: secrets::_replace), so no reader sees half a
-// file. The new file keeps the mode of the old one. For a symlink it
-// replaces the file the link points to. A temp file that it cannot remove
-// is named in the error (removeTemp).
-func replaceFile(path string, content []byte) (err error) {
-	target, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return err
-	}
+// replaceFile writes content to target, the file that sopsConfigDest
+// resolved, through a temp file in the same directory and a rename (bash:
+// secrets::_replace), so no reader sees half a file. The new file keeps the
+// mode of the old one. It does not resolve target again: the caller took the
+// lock beside it and read it. The rename replaces a link at target instead
+// of writing through it, and never moves the temp file into a directory. A
+// temp file that it cannot remove is named in the error (removeTemp).
+func replaceFile(target string, content []byte) (err error) {
 	info, err := os.Stat(target)
 	if err != nil {
 		return err
@@ -1071,13 +1069,19 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 		ui.ErrorTo(c.ErrOut, "%s not found — run: lo secrets init", sopsConfig)
 		return ErrHandled
 	}
-	unlock, err := c.lockSopsConfig()
+	// The file that the lock, the read and the write use, resolved once
+	// (lock.go).
+	dest, err := c.sopsConfigDest()
+	if err != nil {
+		return err
+	}
+	unlock, err := c.lockSopsConfig(dest)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 
-	raw, err := os.ReadFile(sopsConfig)
+	raw, err := os.ReadFile(dest)
 	if err != nil {
 		return err
 	}
@@ -1215,7 +1219,7 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 	// resumed by running the command again: the recipient is then in no
 	// rule, and every managed .enc is re-keyed again.
 	if rules > 0 {
-		if err := replaceFile(sopsConfig, []byte(edited)); err != nil {
+		if err := replaceFile(dest, []byte(edited)); err != nil {
 			return err
 		}
 		fmt.Fprintf(c.Out, "removed recipient from .sops.yaml (%d creation rule(s))\n", rules)

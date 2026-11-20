@@ -15,6 +15,7 @@ package secrets
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -245,7 +246,7 @@ func TestAddKeyRefusesEveryEncThatTheEncryptRefusesBeforeAnyWrite(t *testing.T) 
 			tc.make(t, f, enc)
 			// The lock file is there before the run, so that the listing of
 			// the project shows any other new entry.
-			write(t, f.c.sopsConfigLock(), "")
+			write(t, lockPath(t, f.c), "")
 			before := fileStates(t, f.c.Paths.Base)
 
 			if err := f.run(); !errors.Is(err, ErrHandled) {
@@ -286,7 +287,7 @@ func TestAddKeyRefusesAnEncPathThatItCannotLookUpBeforeAnyWrite(t *testing.T) {
 	if _, err := os.Lstat(plain + ".enc"); err == nil || errors.Is(err, fs.ErrNotExist) {
 		t.Skipf("the lstat of a name of %d bytes does not fail with another error: %v", len(name)+len(".enc"), err)
 	}
-	write(t, f.c.sopsConfigLock(), "")
+	write(t, lockPath(t, f.c), "")
 	before := fileStates(t, f.c.Paths.Base)
 
 	if err := f.run(); !errors.Is(err, ErrHandled) {
@@ -345,7 +346,7 @@ func TestAddKeyRefusesALinkAndADirectoryInOneStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	mkdir(t, db)
-	write(t, f.c.sopsConfigLock(), "")
+	write(t, lockPath(t, f.c), "")
 	before := fileStates(t, f.c.Paths.Base)
 
 	if err := f.run(); !errors.Is(err, ErrHandled) {
@@ -414,7 +415,7 @@ func TestAddKeyRefusesAStoreThatDoesNotResolveBeforeAnyWrite(t *testing.T) {
 			f := newLinkFixture(t, "add-key")
 			mkdir(t, f.c.Paths.Clusters+"/c.dev")
 			f.c.Domain = "c.dev"
-			write(t, f.c.sopsConfigLock(), "")
+			write(t, lockPath(t, f.c), "")
 			before := fileStates(t, f.c.Paths.Base)
 			f.out.Reset()
 			f.errOut.Reset()
@@ -467,7 +468,7 @@ func TestRemoveKeyResumeRefusesASymlinkedEncThatDoesNotListTheKey(t *testing.T) 
 	if strings.Contains(readFile(t, target), g) || !strings.Contains(readFile(t, f.store+"/Secret.db.default.K.enc"), g) {
 		t.Fatal("fixture: the link lists the recipient, or the .enc of db does not")
 	}
-	write(t, f.c.sopsConfigLock(), "")
+	write(t, lockPath(t, f.c), "")
 	before := fileStates(t, f.c.Paths.Base)
 
 	if err := f.run(); !errors.Is(err, ErrHandled) {
@@ -623,37 +624,56 @@ func TestKeyCommandsNameTheDirectoryOfALockThatCannotBeOpened(t *testing.T) {
 	}
 }
 
-// Two .sops.yaml links that name one file take one lock, beside that file:
-// while a run through one link holds it, a run through the other is refused
-// and changes nothing, and no lock is made beside a link.
+// Two .sops.yaml links that name one file take one lock, beside that file,
+// also when one of them gets there through a second link: while a run
+// through the other link holds it, a run is refused and changes nothing, and
+// no lock is made beside a link. When the lock is free again, the same run
+// goes on and writes the file at the end of the chain.
 func TestKeyCommandsTakeOneLockForTwoLinksToOneSopsConfig(t *testing.T) {
 	for _, cmd := range []string{"add-key", "remove-key"} {
 		t.Run(cmd, func(t *testing.T) {
 			f := newLinkFixture(t, cmd)
-			conf := filepath.Join(t.TempDir(), "sops.yaml")
+			dir := t.TempDir()
+			conf := filepath.Join(dir, "sops.yaml")
 			if err := os.Rename(f.c.sopsConfigPath(), conf); err != nil {
+				t.Fatal(err)
+			}
+			mid := filepath.Join(dir, "mid.yaml")
+			if err := os.Symlink("sops.yaml", mid); err != nil {
 				t.Fatal(err)
 			}
 			other := *f.c
 			paths := *f.c.Paths
 			paths.Base = t.TempDir()
 			other.Paths = &paths
-			for _, c := range []*Context{f.c, &other} {
-				if err := os.Symlink(conf, c.sopsConfigPath()); err != nil {
-					t.Fatal(err)
-				}
+			// .sops.yaml -> mid.yaml -> sops.yaml, and the other project's
+			// .sops.yaml -> sops.yaml.
+			if err := os.Symlink(mid, f.c.sopsConfigPath()); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(conf, other.sopsConfigPath()); err != nil {
+				t.Fatal(err)
 			}
 			t.Setenv(lockWaitEnv, "0")
-			unlock, err := other.lockSopsConfig()
+			dest, err := other.sopsConfigDest()
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer unlock()
+			unlock, err := other.lockSopsConfig(dest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			released := false
+			defer func() {
+				if !released {
+					unlock()
+				}
+			}()
 			target, err := filepath.EvalSymlinks(conf)
 			if err != nil {
 				t.Fatal(err)
 			}
-			before := fileStates(t, f.c.Paths.Base, other.Paths.Base, filepath.Dir(conf))
+			before := fileStates(t, f.c.Paths.Base, other.Paths.Base, dir)
 
 			if err := f.run(); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
@@ -662,11 +682,123 @@ func TestKeyCommandsTakeOneLockForTwoLinksToOneSopsConfig(t *testing.T) {
 			if f.errOut.String() != want || f.out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
 			}
-			sameStates(t, before, fileStates(t, f.c.Paths.Base, other.Paths.Base, filepath.Dir(conf)))
-			for _, c := range []*Context{f.c, &other} {
-				if _, err := os.Lstat(c.sopsConfigPath() + ".lock"); !errors.Is(err, fs.ErrNotExist) {
-					t.Errorf("a lock beside the link %s: %v", c.sopsConfigPath(), err)
+			sameStates(t, before, fileStates(t, f.c.Paths.Base, other.Paths.Base, dir))
+
+			unlock()
+			released = true
+			if err := f.run(); err != nil {
+				t.Fatalf("the run after the release: %v\n%s", err, f.errOut.String())
+			}
+			has := strings.Contains(readFile(t, conf), f.gone.Recipient().String())
+			if has != (cmd == "add-key") {
+				t.Errorf("%s after the release: the file at the end of the chain was not edited:\n%s", cmd, readFile(t, conf))
+			}
+			for _, p := range []string{f.c.sopsConfigPath(), mid} {
+				if info, err := os.Lstat(p); err != nil || info.Mode()&fs.ModeSymlink == 0 {
+					t.Errorf("%s is no longer a link", p)
 				}
+			}
+			for _, p := range []string{f.c.sopsConfigPath(), other.sopsConfigPath(), mid} {
+				if _, err := os.Lstat(p + ".lock"); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("a lock beside the link %s: %v", p, err)
+				}
+			}
+			f.rekeyed("app", "v")
+		})
+	}
+}
+
+// The resolution of .sops.yaml fails closed: a link that names no file, or a
+// directory, is refused with one line, and no path comes back to lock
+// beside (bash: secrets::_config_dest).
+func TestSopsConfigDestRefusesALinkThatNamesNoRegularFile(t *testing.T) {
+	for _, target := range []string{"gone.yaml", "dir"} {
+		t.Run(target, func(t *testing.T) {
+			c, out, errOut := testEnv(t)
+			mkdir(t, c.Paths.Base+"/dir")
+			if err := os.Symlink(target, c.sopsConfigPath()); err != nil {
+				t.Fatal(err)
+			}
+			dest, err := c.sopsConfigDest()
+			if !errors.Is(err, ErrHandled) || dest != "" {
+				t.Fatalf("want ErrHandled and no path, got %q, %v", dest, err)
+			}
+			want := "[error] " + c.sopsConfigPath() + " does not resolve to a regular file — nothing was changed; run this command again\n"
+			if errOut.String() != want || out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+			}
+		})
+	}
+}
+
+// The lock and the write name one file. A run resolves the .sops.yaml link
+// once: when the link names another file while the run waits for the lock,
+// the run still reads and writes the file beside the lock that it took, and
+// the other file keeps its bytes. The re-key reads the creation rules
+// through the link, so b.yaml holds the rules of the edit already (plus a
+// comment that the edit of a.yaml does not have).
+func TestKeyCommandsWriteTheFileThatTheyLocked(t *testing.T) {
+	for _, cmd := range []string{"add-key", "remove-key"} {
+		t.Run(cmd, func(t *testing.T) {
+			f := newLinkFixture(t, cmd)
+			dir := mkdir(t, f.c.Paths.Base+"/conf")
+			a, b := dir+"/a.yaml", dir+"/b.yaml"
+			if err := os.Rename(f.c.sopsConfigPath(), a); err != nil {
+				t.Fatal(err)
+			}
+			rules := strings.Replace(readFile(t, a), ","+f.gone.Recipient().String(), "", 1)
+			write(t, b, "# b.yaml\n"+rules)
+			if err := os.Symlink("conf/a.yaml", f.c.sopsConfigPath()); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(lockWaitEnv, "5")
+			held, err := os.OpenFile(a+".lock", os.O_CREATE|os.O_WRONLY, 0o644)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = held.Close() })
+			if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+				t.Fatal(err)
+			}
+			// The first wait for the lock points the link at b.yaml, then
+			// frees the lock beside a.yaml.
+			waits := 0
+			saved := lockSleep
+			t.Cleanup(func() { lockSleep = saved })
+			lockSleep = func(context.Context, time.Duration) error {
+				waits++
+				if waits == 1 {
+					if err := os.Remove(f.c.sopsConfigPath()); err != nil {
+						t.Error(err)
+					}
+					if err := os.Symlink("conf/b.yaml", f.c.sopsConfigPath()); err != nil {
+						t.Error(err)
+					}
+					if err := syscall.Flock(int(held.Fd()), syscall.LOCK_UN); err != nil {
+						t.Error(err)
+					}
+				}
+				return nil
+			}
+			wantB := readFile(t, b)
+
+			if err := f.run(); err != nil {
+				t.Fatalf("%v\n%s", err, f.errOut.String())
+			}
+			if waits == 0 {
+				t.Fatal("the run did not wait for the lock")
+			}
+			if got := strings.Contains(readFile(t, a), f.gone.Recipient().String()); got != (cmd == "add-key") {
+				t.Errorf("the file beside the lock was not edited:\n%s", readFile(t, a))
+			}
+			if got := readFile(t, b); got != wantB {
+				t.Errorf("the file that the link names after the lock was written:\n%s", got)
+			}
+			if target, err := os.Readlink(f.c.sopsConfigPath()); err != nil || target != "conf/b.yaml" {
+				t.Errorf("the link names %q (%v), want conf/b.yaml", target, err)
+			}
+			if _, err := os.Lstat(b + ".lock"); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("a lock beside b.yaml: %v", err)
 			}
 		})
 	}

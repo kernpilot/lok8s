@@ -550,3 +550,26 @@ _ls_then_missing() {
   [ "$(ls -A "${dir}")" = sops.yaml ] || { echo "the dir of the target: $(ls -A "${dir}")" >&2; return 1; }
   [ ! -s "${ENCRYPT_RAN}" ]
 }
+
+@test "add-key writes the .sops.yaml file that it locked, also when the link names another file after the open of the lock" {
+  # The link is resolved once. A link pointed at b.yaml between the open of
+  # the lock and the write does not move the write (Go twin:
+  # TestKeyCommandsWriteTheFileThatTheyLocked).
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load
+  local dir="${BATS_TEST_TMPDIR}/conf" before_b
+  mkdir -p "${dir}"
+  mv -- "${PATH_BASE}/.sops.yaml" "${dir}/a.yaml"
+  { echo '# b.yaml'; cat -- "${dir}/a.yaml"; } > "${dir}/b.yaml"
+  ln -s "${dir}/a.yaml" "${PATH_BASE}/.sops.yaml"
+  before_b="$(cat "${dir}/b.yaml")"
+  # secrets::_lock runs flock after the open of the lock file.
+  flock() { rm -f -- "${PATH_BASE}/.sops.yaml" && ln -s -- "${dir}/b.yaml" "${PATH_BASE}/.sops.yaml" && command flock "$@"; }
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qF "age: '${KEY_A},${KEY_B}'" "${dir}/a.yaml" || { echo "the file beside the lock was not edited" >&2; cat "${dir}/a.yaml" >&2; return 1; }
+  [ "$(cat "${dir}/b.yaml")" = "${before_b}" ] || { echo "the write went to the file that the link names now" >&2; return 1; }
+  [ "$(readlink "${PATH_BASE}/.sops.yaml")" = "${dir}/b.yaml" ]
+  [ ! -e "${dir}/b.yaml.lock" ]
+  [ -s "${ENCRYPT_RAN}" ]
+}

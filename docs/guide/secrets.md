@@ -307,8 +307,11 @@ re-keyed. Commit the `.enc` files together with `.sops.yaml`.
 
 `add-key` and `remove-key` hold a lock on `.sops.yaml.lock`, next to
 `.sops.yaml`, for the whole run, so that two runs do not undo each other.
-When `.sops.yaml` is a symlink, the lock is next to the file that it names,
-so two links to one file use one lock. A second run waits
+When `.sops.yaml` is a symlink, the lock is next to the file at the end of
+its links, so two links to one file use one lock. The command finds that
+file once, at the start: the lock, the read and the write use it, also when
+the link changes during the run. When the link does not name a regular
+file, the command stops and changes nothing. A second run waits
 `LO_SECRETS_LOCK_WAIT` seconds (60 by default), then stops
 and changes nothing. The lock file holds no data. The command must be able to
 write in the directory of the lock: when it cannot, it stops, names that

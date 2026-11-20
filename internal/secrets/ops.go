@@ -146,14 +146,20 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		ui.ErrorTo(c.ErrOut, "%s not found — run: lo secrets init", sopsConfig)
 		return ErrHandled
 	}
+	// The file that the lock, the read and the write use, resolved once
+	// (lock.go).
+	dest, err := c.sopsConfigDest()
+	if err != nil {
+		return err
+	}
 	// One run at a time, from this read to the last encrypt (lock.go).
-	unlock, err := c.lockSopsConfig()
+	unlock, err := c.lockSopsConfig(dest)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 
-	raw, err := os.ReadFile(sopsConfig)
+	raw, err := os.ReadFile(dest)
 	if err != nil {
 		return err
 	}
@@ -181,11 +187,11 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	}
 
 	// Append to every creation rule's age list (comma-separated, sops' own
-	// format). replaceFile writes through a symlinked .sops.yaml to its
-	// target, and the link stays a link.
+	// format). replaceFile writes dest, the file that a symlinked .sops.yaml
+	// names, and the link stays a link.
 	before := 0
 	edited, after := appendRecipient(string(raw), agePubkey, &before)
-	if err := replaceFile(sopsConfig, []byte(edited)); err != nil {
+	if err := replaceFile(dest, []byte(edited)); err != nil {
 		return err
 	}
 	if after < 1 {

@@ -1694,28 +1694,85 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   [ ! -s "${ENCRYPT_LOG}" ]
 }
 
-@test "two .sops.yaml links that name one file take one lock, beside that file" {
+@test "two .sops.yaml links that name one file take one lock, beside that file, also through a chain of links" {
   # A run through the other link holds the lock (in this shell); remove-key
-  # through the first link is refused and changes nothing (Go twin:
+  # through the first link, which gets to the file through a second link, is
+  # refused and changes nothing. When the lock is free again, the same run
+  # edits the file at the end of the chain (Go twin:
   # TestKeyCommandsTakeOneLockForTwoLinksToOneSopsConfig).
   command -v flock >/dev/null 2>&1 || skip "flock not installed"
   _load
   _stub_encrypt
   _cache a.dev app "${RCPT_B}"
-  local conf="${BATS_TEST_TMPDIR}/conf/sops.yaml" other="${BATS_TEST_TMPDIR}/other" before
+  local conf="${BATS_TEST_TMPDIR}/conf/sops.yaml" mid="${BATS_TEST_TMPDIR}/conf/mid.yaml"
+  local other="${BATS_TEST_TMPDIR}/other" before dest="" lockfd p
   mkdir -p "${conf%/*}" "${other}"
   mv -- "${CFG}" "${conf}"
-  ln -s "${conf}" "${CFG}"
+  ln -s "${conf}" "${mid}"
+  ln -s "${mid}" "${CFG}"
   ln -s "${conf}" "${other}/.sops.yaml"
   before="$(cat "${conf}")"
-  LO_SECRETS_LOCK_WAIT=0 secrets::_lock "${other}/.sops.yaml"
+  secrets::_config_dest "${other}/.sops.yaml"
+  exec {lockfd}>>"${dest}.lock"
+  flock -n "${lockfd}"
   LO_SECRETS_LOCK_WAIT=0 DOMAIN=a.dev run _rm "${RCPT_B}"
+  exec {lockfd}>&-
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
   [ "$output" = "[error] $(readlink -f -- "${conf}").lock is held by another lo secrets add-key or remove-key — nothing was changed; run it again when that one ends" ] || {
     echo "$output" >&2; return 1; }
   [ "$(cat "${conf}")" = "${before}" ]
   [ ! -s "${ENCRYPT_LOG}" ]
-  [ ! -e "${CFG}.lock" ] && [ ! -e "${other}/.sops.yaml.lock" ] || { echo "a lock beside a link" >&2; return 1; }
+
+  LO_SECRETS_LOCK_WAIT=0 DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 0 ] || { echo "the run after the release: status $status: $output" >&2; return 1; }
+  grep -qF -- "age: '${RCPT_A}'" "${conf}" || { echo "the file at the end of the chain was not edited" >&2; cat "${conf}" >&2; return 1; }
+  [ -L "${CFG}" ] && [ -L "${mid}" ] || { echo "a link was replaced by a file" >&2; return 1; }
+  [ -s "${ENCRYPT_LOG}" ]
+  for p in "${CFG}" "${other}/.sops.yaml" "${mid}"; do
+    [ ! -e "${p}.lock" ] || { echo "a lock beside the link ${p}" >&2; return 1; }
+  done
+}
+
+@test "the resolution of a .sops.yaml link that names no regular file is refused with one line" {
+  # It fails closed: no path comes back to lock beside (Go twin:
+  # TestSopsConfigDestRefusesALinkThatNamesNoRegularFile).
+  _load
+  local target
+  mkdir -p "${PATH_BASE}/dir"
+  for target in gone.yaml dir; do
+    rm -f -- "${CFG}"
+    ln -s "${target}" "${CFG}"
+    run secrets::_config_dest "${CFG}"
+    [ "$status" -eq 1 ] || { echo "${target}: status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] ${CFG} does not resolve to a regular file — nothing was changed; run this command again" ] || {
+      echo "${target}: $output" >&2; return 1; }
+  done
+}
+
+@test "remove-key writes the .sops.yaml file that it locked, also when the link names another file after the open of the lock" {
+  # The link is resolved once. A link pointed at b.yaml between the open of
+  # the lock and the write does not move the write (Go twin:
+  # TestKeyCommandsWriteTheFileThatTheyLocked). The stub encrypt reads the
+  # rules through the link, so b.yaml holds the rules of the edit already,
+  # plus a comment that the edit of a.yaml does not have.
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  local dir="${BATS_TEST_TMPDIR}/conf" before_b
+  mkdir -p "${dir}"
+  mv -- "${CFG}" "${dir}/a.yaml"
+  { echo '# b.yaml'; sed "s|,${RCPT_B}||" "${dir}/a.yaml"; } > "${dir}/b.yaml"
+  ln -s "${dir}/a.yaml" "${CFG}"
+  before_b="$(cat "${dir}/b.yaml")"
+  # secrets::_lock runs flock after the open of the lock file.
+  flock() { rm -f -- "${CFG}" && ln -s -- "${dir}/b.yaml" "${CFG}" && command flock "$@"; }
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qF -- "age: '${RCPT_A}'" "${dir}/a.yaml" || { echo "the file beside the lock was not edited" >&2; cat "${dir}/a.yaml" >&2; return 1; }
+  [ "$(cat "${dir}/b.yaml")" = "${before_b}" ] || { echo "the write went to the file that the link names now" >&2; return 1; }
+  [ "$(readlink "${CFG}")" = "${dir}/b.yaml" ]
+  [ ! -e "${dir}/b.yaml.lock" ]
 }
 
 @test ".sops.yaml is replaced, not rewritten in place, and keeps its mode" {
