@@ -139,16 +139,16 @@ func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag
 	doctorDomainSection(paths, d, out)
 	// The RBAC migration check of the domain's cluster (advisory; it sends
 	// only GET requests, and the credential plugin of the kubeconfig runs
-	// as kubectl runs it; cmd_doctor_rbac.go). Its lines close the domain
-	// section.
+	// as kubectl runs it; cmd_doctor_rbac.go). Its lines come after the
+	// lines of the domain section; the two checks below follow them.
 	doctorRBACLeftovers(ctx, r, paths, d, path, bootstrapEntries(paths), out)
 	// The rook-ceph-csi-kms objects that the current values do not render
 	// (advisory, with the same GET requests and plugin caveat;
 	// cmd_doctor_csikms.go).
 	doctorKMSLeftovers(ctx, r, paths, d, path, kmsEntries(paths), out)
 	// The SecurityPolicy CRD of envoy-gateway, when spec.bootstrap has
-	// sso-gate (advisory, one GET request with the same plugin caveat;
-	// cmd_doctor_ssogate.go).
+	// sso-gate as an entry name (advisory; one kubectl read of the CRD, GET
+	// requests only, with the same plugin caveat; cmd_doctor_ssogate.go).
 	doctorSSOGateMergeType(ctx, r, paths, d, path, bootstrapEntries(paths), out)
 
 	// Provider / infrastructure diagnosis — advisory, never affects the exit

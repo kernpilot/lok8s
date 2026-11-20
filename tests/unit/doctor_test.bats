@@ -394,7 +394,7 @@ _kind_domains() {
 # No real kubectl runs and no cluster is reached.
 
 _sso_no_answer="kubectl did not answer within 30 s (the cluster API, or a credential plugin that waits for a login)"
-_sso_read="get crd securitypolicies.gateway.envoyproxy.io --ignore-not-found -o json --request-timeout=10s"
+_sso_read="get customresourcedefinitions.apiextensions.k8s.io securitypolicies.gateway.envoyproxy.io --ignore-not-found -o json --request-timeout=10s"
 
 # _sso_setup — the bootstrap entry parser, a project under BATS_TEST_TMPDIR
 # and the stand-in kubectl.
@@ -419,7 +419,7 @@ _sso_setup() {
   cat > "${SSO_STUB}/kubectl" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${CALLS}"
-[[ "${3:-} ${4:-}" == "get crd" ]] || exit 99
+[[ "${3:-} ${4:-}" == "get customresourcedefinitions.apiextensions.k8s.io" ]] || exit 99
 if [[ ! -f "${CASE}/crd" ]]; then
   echo "unexpected read"
   exit 0
@@ -511,6 +511,11 @@ _sso_path_without() {
 @test "sso: an empty List is no CRD" { _sso_case no-crd-empty-list; }
 @test "sso: JSON white space only is no CRD" { _sso_case no-crd-white-space; }
 @test "sso: a CRD without v1alpha1 is not checked" { _sso_case no-v1alpha1; }
+@test "sso: mergeType only at a nested place is not the field" { _sso_case field-nested-only; }
+@test "sso: a v1alpha1 that is not served is not checked" { _sso_case v1alpha1-not-served; }
+@test "sso: a storage version without the field fails" { _sso_case stored-without-field; }
+@test "sso: a storage version with the field passes" { _sso_case stored-with-field; }
+@test "sso: no field in v1alpha1 and in the storage version gives the line of v1alpha1" { _sso_case absent-in-v1alpha1-and-storage; }
 @test "sso: a forbidden read prints the reason of the CRD" { _sso_case read-forbidden; }
 @test "sso: an unauthorized read prints the reason of the CRD" { _sso_case read-unauthorized; }
 @test "sso: a refused connection prints the fixed reason" { _sso_case read-refused; }
@@ -528,6 +533,11 @@ _sso_path_without() {
 @test "sso: a field that is not an object is invalid" { _sso_case read-field-not-an-object; }
 @test "sso: versions that are not a list are invalid" { _sso_case read-versions-not-a-list; }
 @test "sso: a version that is not an object is invalid" { _sso_case read-version-not-an-object; }
+@test "sso: a served flag that is not a boolean is invalid" { _sso_case read-served-not-a-boolean; }
+@test "sso: a version without the storage flag is invalid" { _sso_case read-storage-absent; }
+@test "sso: no storage version is invalid" { _sso_case read-no-storage-version; }
+@test "sso: two storage versions are invalid" { _sso_case read-two-storage-versions; }
+@test "sso: a field of the storage version that is not an object is invalid" { _sso_case read-stored-field-not-an-object; }
 @test "sso: no sso-gate in spec.bootstrap prints nothing and reads nothing" { _sso_case addon-not-in-spec; }
 @test "sso: the default spec.bootstrap has no sso-gate" { _sso_case default-bootstrap; }
 @test "sso: sso-gate as a path entry does not count" { _sso_case addon-as-path-entry; }

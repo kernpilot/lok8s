@@ -1,0 +1,1 @@
+  ✗ sso-gate: the storage version of the SecurityPolicy CRD has no spec.mergeType, so the apiserver drops the field when it stores the policy: reinstall the CRDs of envoy-gateway first, then reconcile sso-gate
