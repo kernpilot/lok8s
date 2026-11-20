@@ -347,8 +347,11 @@ driver::status() {
   fi
 
   local mgmt_kubeconfig="${PATH_BASE}/.kubeconfig/${mgmt_domain}.yaml"
+  # An empty stdin, as in the Go twin (execx.Output): timeout runs kubectl
+  # in a process group that is not the foreground group of a terminal, so
+  # a credential plugin that reads the terminal would stop until the bound.
   capi::_status_bounded kubectl get cluster "${cluster_name}" --kubeconfig "${mgmt_kubeconfig}" \
-    -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound"
+    -o jsonpath='{.status.phase}' 2>/dev/null </dev/null || echo "NotFound"
 }
 
 # capi::_status_bound — the bound of the whole status read, in seconds (Go:
