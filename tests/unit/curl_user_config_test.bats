@@ -879,6 +879,46 @@ ${yaml}:18 credential"
   assert_output "${good}:10"
 }
 
+# A folded block (">") joins its lines with a space, and an empty line
+# becomes the newline: YAML gives "cat <<EOF\nEOF '$(curl …)'\nEOF\n", and
+# bash runs the $( ) in the unquoted body. The gate does not decode the
+# folding, so each line with a << in a folded block is a finding in the q
+# and tls modes (fold.yaml:2), also a << whose delimiter is on the next
+# line (fold.yaml:9). The controls: a literal block ("|"), a tab after the
+# indentation, and a <<< in a folded block.
+@test "curl gate: a here-document in a folded YAML block is a finding" {
+  local fold="${BATS_TEST_TMPDIR}/fold.yaml" good="${BATS_TEST_TMPDIR}/fold-good.yaml"
+  CURL_GATE_ALLOW=()
+  cat > "${fold}" <<'YAML'
+run: >
+  cat <<EOF
+
+  EOF
+  '$(curl -u u:p https://h.example/f1)'
+
+  EOF
+also: >-
+  cat <<
+  EOF
+  echo x
+YAML
+  printf '%b' "lit: |\n  cat <<EOF\n\n  EOF\n  '\$(curl -u u:p https://h.example/g1)'\ntabbed: |\n    cat <<-EOF\n    \tbody\n    \tEOF\nstr: >\n  cat <<<\"x\"\n" > "${good}"
+  local f="a here-document in a folded YAML block (>) the gate cannot place"
+  local mode
+  for mode in q tls; do
+    run curl_gate "${mode}" "${fold}"
+    assert_failure 1
+    assert_output "${fold}:2: ${f}
+${fold}:9: ${f}"
+    run curl_gate "${mode}" "${good}"
+    assert_success
+    assert_output ""
+  done
+  run curl_gate list "${fold}" "${good}"
+  assert_success
+  assert_output ""
+}
+
 # The operand of a redirection is one shell word, with its quotes and
 # escapes: the -q in it is no argument (lines 1 to 3). A keyword starts a
 # command only in a command position: in "echo if curl" the curl is an

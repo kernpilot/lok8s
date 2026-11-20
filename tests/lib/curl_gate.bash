@@ -125,7 +125,10 @@
 # first line of the block after its "|" or ">" line. A line of the body
 # that is the delimiter after more white space, or in a block with an
 # indentation indicator (|2), is a finding ("a here-document delimiter
-# the gate cannot place"), and the body goes on.
+# the gate cannot place"), and the body goes on. A folded block (">")
+# joins its lines with a space, and the gate does not decode that: each
+# line of a folded block with a << that is not a <<< is a finding ("a
+# here-document in a folded YAML block (>) the gate cannot place").
 # The first argument of a call is the first word after the curl word that
 # is not a redirection: the operand of a redirection is one shell word,
 # with its quotes and escapes (curl >"a -q " -u … has -u first).
@@ -683,20 +686,36 @@ curl_gate() {
     # of the block (yb_ind), when it has more indentation than that line
     # (yb_par). The block ends at a line with less indentation. With an
     # indentation indicator (|2), the gate does not know the indentation
-    # of the block (yb_ind -2). A comment line starts no block.
+    # of the block (yb_ind -2). A comment line starts no block. In the q
+    # and tls modes, a line of a folded block can be a finding (yaml_fold).
     function yaml_line(   ind, h) {
       if ($0 ~ /^[[:space:]]*$/) return
       match($0, /^ */); ind = RLENGTH
       if (yb_wait) {
         yb_wait = 0
-        if (ind > yb_par) { yb_ind = yb_dig ? -2 : ind; return }
+        if (ind > yb_par) { yb_ind = yb_dig ? -2 : ind; yaml_fold(); return }
       }
       if ((yb_ind >= 0 && ind < yb_ind) || (yb_ind == -2 && ind <= yb_par)) yb_ind = -1
-      if (yb_ind != -1 || $0 ~ /^[[:space:]]*#/) return
+      if (yb_ind != -1) { yaml_fold(); return }
+      if ($0 ~ /^[[:space:]]*#/) return
       if (match($0, /(^[[:space:]]*-|:)[[:space:]]+[|>][-+0-9]*[[:space:]]*(#.*)?$/)) {
-        h = substr($0, RSTART, RLENGTH); sub(/^[^|>]*[|>]/, "", h); sub(/[[:space:]#].*$/, "", h)
+        h = substr($0, RSTART, RLENGTH); sub(/^[^|>]*/, "", h)
+        yb_fold = substr(h, 1, 1) == ">"; h = substr(h, 2); sub(/[[:space:]#].*$/, "", h)
         yb_wait = 1; yb_par = ind; yb_dig = h ~ /[1-9]/
       }
+    }
+    # yaml_fold(): a line of a folded block (">") with a << that is not a
+    # <<< (a here-document, also one whose delimiter is on the next line).
+    # YAML joins the lines of a folded block with a space, and an empty
+    # line becomes the newline. So the shell reads a body other than the
+    # lines that the gate reads, and its end at another line. The gate does
+    # not decode the folding: in the q and tls modes each such line is a
+    # finding (fail closed). Folding only removes newlines, so it makes no
+    # << that the line does not hold.
+    function yaml_fold(   t) {
+      if (!yb_fold || mode == "list") return
+      t = $0; gsub(/<<</, "", t)
+      if (t ~ /<</) printf "%s:%d: %s\n", FILENAME, FNR, "a here-document in a folded YAML block (>) the gate cannot place"
     }
     # The end of a body: the next here-document of the command, if any.
     function body_end() {
@@ -809,7 +828,7 @@ curl_gate() {
       reset()
     }
     FNR == 1 {
-      check(); reset(); hd_close(); IS_top = 0; yb_ind = -1; yb_wait = 0
+      check(); reset(); hd_close(); IS_top = 0; yb_ind = -1; yb_wait = 0; yb_fold = 0
       for (i = 1; i <= na; i++) if (path_is(FILENAME, apath[i])) aseen[i] = 1
     }
     FILENAME ~ /\.ya?ml$/ { yaml_line() }
