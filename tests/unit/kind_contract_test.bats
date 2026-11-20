@@ -457,6 +457,11 @@ YAML
 
   kubectl() { return 1; }
   export -f kubectl
+  # The read runs under timeout(1) (capi::_status_bounded), and timeout
+  # runs a program, not a function. This stand-in drops its three options
+  # and runs the rest, so the read reaches the kubectl stub above.
+  timeout() { shift 3; "$@"; }
+  export -f timeout
 
   source "${_PROJECT_ROOT}/.lok8s/drivers/capi/main"
 
