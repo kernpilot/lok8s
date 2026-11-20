@@ -163,7 +163,8 @@ func rbacWantReads(t *testing.T, name string) []string {
 // shape (a malformed field, a label that is not a string, a key in
 // another case, a second JSON document, a null item) prints the fixed
 // reason in both twins; (k) each of the four addons as a bare entry with a
-// trailing "/" or "/." counts.
+// trailing "/" or "/." counts; (l) the two opt-ins without their addons
+// skip as neither addon (the name of an addon is not a prefix match).
 func TestDoctorRBACCases(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join(rbacFixtures, "cases"))
 	if err != nil {

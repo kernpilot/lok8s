@@ -550,11 +550,14 @@ spec::suc_kubectl() {
 
 # spec::is_addon <dir> <name> — returns 0 when the dir of a bare
 # spec.bootstrap entry names the addon <name>. It ignores a trailing "/" or
-# "/." of the dir (also a sequence of them), so `<name>/` and `<name>/.` name
-# the addon, as in Go: the Go parser cleans the path of a bare entry
+# "/." of the dir (also a sequence of them, such as "/./" or "//"), so
+# `<name>/` and `<name>/.` name the addon. For these trailing forms the result
+# is the same as in Go: the Go parser cleans the path of a bare entry
 # (assets.Peek), and filepath.Base removes trailing separators. The bash
 # parser keeps the entry as written (bootstrap::_parse_entry), so
-# "${dir##*/}" alone gives an empty name or ".".
+# "${dir##*/}" alone gives an empty name or ".". The helper does not resolve
+# a ".." element, so there the result can differ from Go: Go cleans
+# `<name>/x/..` to <name>, and the helper reads "..".
 spec::is_addon() {
   local d="${1}" want="${2}"
   while :; do

@@ -544,6 +544,8 @@ _sso_path_without() {
 @test "sso: sso-gate as a path entry does not count" { _sso_case addon-as-path-entry; }
 @test "sso: sso-gate with a trailing slash counts" { _sso_case trailing-slash; }
 @test "sso: sso-gate with a trailing /. counts" { _sso_case trailing-dot; }
+@test "sso: sso-gate with a trailing /./ counts" { _sso_case trailing-dot-slash; }
+@test "sso: sso-gate with a trailing // counts" { _sso_case trailing-double-slash; }
 @test "sso: no kubeconfig skips" { _sso_case no-kubeconfig; }
 @test "sso: a kubeconfig path with a control character skips" { _sso_case kubeconfig-control-char; }
 @test "sso: a deploy domain prints nothing" { _sso_case deploy-domain; }
