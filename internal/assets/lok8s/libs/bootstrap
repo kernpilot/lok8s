@@ -1607,7 +1607,13 @@ bootstrap::_dry_run_one() {
   [[ -z "${_ndout}" ]] || mapfile -t _nd <<< "${_ndout}"
   local _diff_input="${rendered}"
   if (( ${bootstrap_ignore_nondet:-0} )) && (( ${#_nd[@]} > 0 )); then
-    _diff_input="$(bootstrap::_without_objects "${rendered}" "${_nd[@]}")"
+    # A failed pass can leave an empty diff input, which would read as
+    # unchanged: the entry is an error (the Go twin returns an error too).
+    if ! _diff_input="$(bootstrap::_without_objects "${rendered}" "${_nd[@]}")"; then
+      error "bootstrap: ${addon_name}: cannot remove the non-deterministic objects from the diff input"
+      echo "error${_tail}"
+      return 0
+    fi
   fi
   local _status
   _status="$(bootstrap::_diff_manifest "${rendered}" "${stem}" "${kubeconfig}" "${addon_name}" "${_diff_input}")"

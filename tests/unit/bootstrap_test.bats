@@ -5818,6 +5818,40 @@ SH
   [ ! -s "${dir}/01-testcni.diff" ]
 }
 
+# The pass that removes the non-deterministic objects from the diff input
+# can fail. Here a yq function fails for that pass only (the only yq call
+# with --header-preprocess=false); each other yq call of the dry run runs
+# the real yq. The entry is then an error, not unchanged, and kubectl diff
+# does not run. The Go twin returns an error there too.
+@test "bootstrap::apply --dry-run --ignore-nondeterministic: a failed pass without the non-deterministic objects is an error" {
+  write_cluster_spec "testcni"
+  export RENDERS="${BATS_TEST_TMPDIR}/renders" YQ_FAILED="${BATS_TEST_TMPDIR}/yq.failed"
+  : > "${RENDERS}"; : > "${YQ_FAILED}"
+  kustomize() {
+    echo x >> "${RENDERS}"
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: stable\n  namespace: kube-system\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: cilium-ca\n  namespace: kube-system\ndata:\n  ca.crt: Q0Et%d\n' "$(wc -l < "${RENDERS}")"
+  }
+  yq() {
+    if [[ " $* " == *" --header-preprocess=false "* ]]; then
+      cat > /dev/null
+      echo x >> "${YQ_FAILED}"
+      return 5
+    fi
+    command yq "$@"
+  }
+  export -f kustomize yq
+  _dry_kubectl_stub 0
+  local bootstrap_dry_run=1 bootstrap_ignore_nondet=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  [ "${status}" -eq 2 ] || { echo "rc=${status}: ${output}"; return 1; }
+  [ "$(wc -l < "${YQ_FAILED}")" -eq 1 ]
+  assert_line "[error] bootstrap: testcni: cannot remove the non-deterministic objects from the diff input"
+  assert_line "bootstrap dry-run: testcni: error"
+  refute_output --partial "testcni: unchanged"
+  assert_output --partial " errors=1 "
+  [ ! -s "${KLOG}" ]
+}
+
 # Item D: an entry whose YAML declares a KRM function is marked partial
 # (without --enable-exec kustomize skips an exec function silently);
 # --allow-generators runs it, so there is no mark then.

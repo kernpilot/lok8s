@@ -249,6 +249,16 @@ YAML
   [[ -z "${got//[[:space:]]/}" ]] || fail "without all the objects, the output is: ${got}"
 }
 
+# A failed yq pass fails bootstrap::_without_objects with the status of yq,
+# so that its caller can tell a failure from an empty diff input (nothing
+# left to diff).
+@test "diff input: a failed yq pass fails bootstrap::_without_objects with its status" {
+  yq() { cat > /dev/null; return 7; }
+  run bootstrap::_without_objects "$(printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: a\n')" "v1 Secret none"
+  [ "${status}" -eq 7 ] || fail "the status is ${status}, not 7: ${output}"
+  [ -z "${output}" ] || fail "the output is: ${output}"
+}
+
 # A document that is not a map (an empty document, a document with only a
 # comment, a scalar or a list) is not in the diff input, at the start of the
 # stream and in the middle, as before: bootstrap::_object_lines does not
