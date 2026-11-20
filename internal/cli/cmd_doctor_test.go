@@ -204,7 +204,7 @@ func TestDoctorToolsSectionPrintsOneKindLine(t *testing.T) {
 		var out strings.Builder
 		doctorToolsSection(context.Background(), kindVersionRunner(tc.out, nil), p, "", tc.bin, &out)
 		n := 0
-		for _, line := range strings.Split(out.String(), "\n") {
+		for line := range strings.SplitSeq(out.String(), "\n") {
 			if f := strings.Fields(line); len(f) > 1 && f[1] == "kind" {
 				n++
 			}
