@@ -15,6 +15,9 @@ setup() {
   import() { :; }
   export -f import
   source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+  # bootstrap::_diff_manifest calls kapply::output_matches: load it, so the
+  # diff runs the code of a real dry run.
+  source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
   source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
   type -P yq >/dev/null || fail "yq is not on PATH"
 }
