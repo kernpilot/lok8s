@@ -58,3 +58,24 @@ func CountedLines(out string) string {
 	}
 	return b.String()
 }
+
+// EscapeText returns s with each control byte (below 0x20, and 0x7f) as
+// \xNN (two lower-case hex digits) and each backslash as \\. A value from a
+// manifest or a diff file name then prints as one line, and its bytes cannot
+// steer the terminal. Other bytes pass unchanged. The bash twin:
+// kapply::escape.
+func EscapeText(s string) string {
+	var b strings.Builder
+	for i := range len(s) {
+		c := s[i]
+		switch {
+		case c == '\\':
+			b.WriteString(`\\`)
+		case c < 0x20 || c == 0x7f:
+			fmt.Fprintf(&b, `\x%02x`, c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}

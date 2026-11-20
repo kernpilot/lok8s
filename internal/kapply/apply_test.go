@@ -243,6 +243,67 @@ func TestSealedSecretInteractiveAcceptRecreates(t *testing.T) {
 	}
 }
 
+// The kind and the name of an immutable-field error come from kubectl's
+// error text, which an admission webhook can write. A name that is in no
+// manifest object is not healed and no part of it is printed: one fixed
+// line instead. A manifest object named next to it is healed as before.
+func TestImmutableHealSkipsANameThatIsInNoManifestObject(t *testing.T) {
+	f := &fakeKubectl{applyRC: 1,
+		applyOut: "Error from server (Invalid): Deployment.apps \"" + canaryValue + "\" is invalid: spec.selector: field is immutable\n" +
+			"Error from server (Invalid): Deployment.apps \"web\" is invalid: spec.selector: field is immutable"}
+	a, out, errOut := testApplier(f)
+	a.ForceRecreate = true
+	a.Apply(t.Context(), "resources", deployManifest)
+	refuteText(t, out.String()+errOut.String(), canaryValue)
+	if !strings.Contains(errOut.String(), UnmatchedImmutableText) {
+		t.Errorf("no fixed line %q:\n%s", UnmatchedImmutableText, errOut.String())
+	}
+	if n := strings.Count(f.log(), "replace --force"); n != 1 {
+		t.Errorf("replace calls = %d, want 1 (the manifest object only):\n%s", n, f.log())
+	}
+	if !strings.Contains(errOut.String(), "recreating immutable Deployment/web") {
+		t.Errorf("the manifest object was not healed:\n%s", errOut.String())
+	}
+}
+
+// The object line of the heal comes from the manifest values, with the
+// control bytes escaped (EscapeText).
+func TestImmutableHealPrintsTheManifestNameEscaped(t *testing.T) {
+	manifest := "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: \"we\\eb\"\n  namespace: default\n"
+	f := &fakeKubectl{applyRC: 1,
+		applyOut: "Error from server (Invalid): Deployment.apps \"we\x1bb\" is invalid: spec.selector: field is immutable"}
+	a, _, errOut := testApplier(f)
+	a.ForceRecreate = true
+	a.Apply(t.Context(), "resources", manifest)
+	if !strings.Contains(errOut.String(), `recreating immutable Deployment/we\x1bb`) {
+		t.Errorf("no escaped object line:\n%q", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "\x1b") {
+		t.Errorf("a raw ESC byte was printed:\n%q", errOut.String())
+	}
+	if !strings.Contains(f.log(), "replace --force") {
+		t.Errorf("no recreate call:\n%s", f.log())
+	}
+}
+
+func TestEscapeText(t *testing.T) {
+	t.Parallel()
+	for in, want := range map[string]string{
+		"web":         "web",
+		"we\x1bb":     `we\x1bb`,
+		"a\\b":        `a\\b`,
+		"tab\there":   `tab\x09here`,
+		"nl\n":        `nl\x0a`,
+		"del\x7f":     `del\x7f`,
+		"\x1b[31mred": `\x1b[31mred`,
+		"é":           "é",
+	} {
+		if got := EscapeText(in); got != want {
+			t.Errorf("EscapeText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestStuckTerminatingForceClearsCRFinalizers(t *testing.T) {
 	f := &fakeKubectl{applyRC: 1,
 		applyOut: `Error from server: object is being deleted: clusters.postgresql.cnpg.io "db" already exists`,

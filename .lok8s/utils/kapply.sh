@@ -73,6 +73,25 @@ _KAPPLY_TERMINATING_RE='object is being deleted|being deleted:|because it is bei
 # bootstrap dry run). The Go twin: kapply.ShowSensitive.
 kapply::show_sensitive() { [[ "${LO_SHOW_SENSITIVE_OUTPUT:-}" == 1 ]]; }
 
+# kapply::escape <text>: prints <text> with each control byte (below 0x20,
+# and 0x7f) as \xNN (two lower-case hex digits) and each backslash as \\, with
+# no newline at the end. A value from a manifest or a diff file name then
+# prints as one line, and its bytes cannot steer the terminal. Other bytes
+# pass unchanged. The Go twin: kapply.EscapeText.
+kapply::escape() {
+  local LC_ALL=C
+  local s="${1}" out="" c i
+  for (( i = 0; i < ${#s}; i++ )); do
+    c="${s:i:1}"
+    case "${c}" in
+      '\') out+='\\' ;;
+      [[:cntrl:]]) printf -v c '\\x%02x' "'${c}"; out+="${c}" ;;
+      *) out+="${c}" ;;
+    esac
+  done
+  printf '%s' "${out}"
+}
+
 # kapply::counted_lines < output — the lines of a kubectl output that
 # kapply::render_captured counts and never prints: a line that ends in an OK
 # verb and whose first word has the <type>/<name> shape. The bootstrap
@@ -518,33 +537,50 @@ kapply::_progress() {
 #   server-side : `Error from server (Invalid): <Kind>.<group> "<name>" is invalid: ...`
 # (core resources have no `.<group>`). We recreate by kind+name from the same
 # manifest — `replace --force` = delete + create, which bypasses immutability.
+# The kind and the name come from the error text, which an admission webhook
+# can write: the heal acts only on the manifest objects with that kind and
+# name (yq gets them through strenv, never in the expression), and prints the
+# object from the manifest values, escaped (kapply::escape). A name that
+# matches none is not healed and not printed; one fixed line says so. The
+# error text gives no namespace. The Go twin: Applier.healImmutable.
 kapply::_heal_immutable() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   local manifest="${1}" out="${2}"; shift 2
   local -a kubectl_flags=("${@}")
-  local kind name
+  local kind name sel label oname unmatched=0
   while read -r kind name; do
     [[ -n "${kind}" && -n "${name}" ]] || continue
+    sel=$(printf '%s' "${manifest}" \
+      | KAPPLY_HEAL_KIND="${kind}" KAPPLY_HEAL_NAME="${name}" \
+        yq 'select(.kind == strenv(KAPPLY_HEAL_KIND) and .metadata.name == strenv(KAPPLY_HEAL_NAME))' 2>/dev/null) || sel=""
+    if [[ -z "${sel}" ]]; then
+      unmatched=1
+      continue
+    fi
+    label=$(printf '%s\n' "${sel}" | yq 'select(document_index == 0) | .kind + "/" + .metadata.name' 2>/dev/null) || label=""
+    label=$(kapply::escape "${label}")
+    oname="${label#*/}"
     # The crown-jewel confirm applies only to Secrets the manifest actually
     # SEALS (immutable: true) — a plain Secret can hit "field is immutable"
     # too (e.g. a type: change) and gets the generic heal, no re-key drama.
     if [[ "${kind}" == "Secret" ]]; then
       local sealed
-      sealed=$(printf '%s' "${manifest}" \
-        | yq "select(.kind == \"Secret\" and .metadata.name == \"${name}\") | .immutable // false" 2>/dev/null)
+      sealed=$(printf '%s\n' "${sel}" | yq '.immutable // false' 2>/dev/null)
       if [[ "${sealed}" == *true* ]]; then
-        kapply::_confirm_secret_recreate "${name}" \
-          || { warn "  keeping sealed Secret/${name} (re-key declined)"; continue; }
+        kapply::_confirm_secret_recreate "${oname}" \
+          || { warn "  keeping sealed Secret/${oname} (re-key declined)"; continue; }
       fi
     fi
-    warn "  recreating immutable ${kind}/${name}"
-    printf '%s' "${manifest}" \
-      | yq "select(.kind == \"${kind}\" and .metadata.name == \"${name}\")" \
+    warn "  recreating immutable ${label}"
+    printf '%s\n' "${sel}" \
       | KUBERC=off kubectl "${kubectl_flags[@]}" replace --force -f - >/dev/null 2>&1 \
-      || warn "  could not recreate ${kind}/${name}"
+      || warn "  could not recreate ${label}"
   done < <(printf '%s\n' "${out}" | grep -oE '[A-Z][A-Za-z]+(\.[a-z0-9.-]+)? "[^"]+" is invalid' \
             | sed -E 's/(\.[a-z0-9.-]+)? "/ /; s/" is invalid$//' | sort -u)
+  if (( unmatched )); then
+    warn "kapply: an immutable-field error named no object of this manifest"
+  fi
 }
 
 # Force-complete a stuck-Terminating namespace by dropping its spec.finalizers

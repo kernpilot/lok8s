@@ -438,15 +438,22 @@ func marshalDoc(d manifestDoc) string {
 	return buf.String()
 }
 
-// healImmutable recreates the objects kubectl reported as having an
-// immutable-field conflict, by kind+name from the same manifest —
-// `replace --force` = delete + create, which bypasses immutability (bash:
-// kapply::_heal_immutable).
-func (a *Applier) healImmutable(ctx context.Context, manifest, out string, kubectlFlags []string) {
-	docs := parseManifestDocs(manifest)
-	type obj struct{ kind, name string }
-	seen := map[obj]bool{}
-	var objs []obj
+// UnmatchedImmutableText is the fixed line for an immutable-field error
+// that names no object of the manifest: the name comes from the error
+// text only (an admission webhook can write it), so lo prints no part of
+// it and heals nothing for it (bash: kapply::_heal_immutable).
+const UnmatchedImmutableText = "kapply: an immutable-field error named no object of this manifest"
+
+// immutableObject is a kind and a name that an immutable-field error of
+// kubectl names.
+type immutableObject struct{ kind, name string }
+
+// immutableObjects returns the kind and the name of each object that the
+// immutable-field errors in out name, once each, sorted (bash: `sort -u`).
+// The error text gives no namespace.
+func immutableObjects(out string) []immutableObject {
+	seen := map[immutableObject]bool{}
+	var objs []immutableObject
 	for _, m := range immutableObjRe.FindAllString(out, -1) {
 		// `<Kind>[.<group>] "<name>" is invalid` → kind, name.
 		head, rest, _ := strings.Cut(m, ` "`)
@@ -455,50 +462,88 @@ func (a *Applier) healImmutable(ctx context.Context, manifest, out string, kubec
 		if kind == "" || name == "" {
 			continue
 		}
-		o := obj{kind, name}
+		o := immutableObject{kind, name}
 		if !seen[o] {
 			seen[o] = true
 			objs = append(objs, o)
 		}
 	}
-	// bash pipes through `sort -u`, so healing order is sorted.
 	sort.Slice(objs, func(i, j int) bool {
 		if objs[i].kind != objs[j].kind {
 			return objs[i].kind < objs[j].kind
 		}
 		return objs[i].name < objs[j].name
 	})
-	for _, o := range objs {
-		// The crown-jewel confirm applies only to Secrets the manifest
-		// actually SEALS (immutable: true) — a plain Secret can hit "field
-		// is immutable" too (e.g. a type: change) and gets the generic heal.
-		if o.kind == "Secret" {
-			sealed := false
-			for _, d := range docs {
-				if d.kind == "Secret" && d.name == o.name {
-					if imm := yqsem.Scalar(yqsem.Lookup(d.node, "immutable")); imm == "true" {
-						sealed = true
-					}
-				}
-			}
-			if sealed && !a.confirmSecretRecreate(o.name) {
-				ui.WarnTo(a.Stderr, "  keeping sealed Secret/%s (re-key declined)", o.name)
-				continue
-			}
-		}
-		ui.WarnTo(a.Stderr, "  recreating immutable %s/%s", o.kind, o.name)
-		var sel strings.Builder
-		for _, d := range docs {
-			if d.kind == o.kind && d.name == o.name {
-				sel.WriteString("---\n")
-				sel.WriteString(marshalDoc(d))
-			}
-		}
-		args := append(append([]string{}, kubectlFlags...), "replace", "--force", "-f", "-")
-		if rc := a.kubectlQuiet(ctx, writeEnv, sel.String(), args...); rc != 0 {
-			ui.WarnTo(a.Stderr, "  could not recreate %s/%s", o.kind, o.name)
+	return objs
+}
+
+// manifestObjects returns the documents of the manifest with the kind and
+// the name of o, in any namespace.
+func manifestObjects(docs []manifestDoc, o immutableObject) []manifestDoc {
+	var sel []manifestDoc
+	for _, d := range docs {
+		if d.kind == o.kind && d.name == o.name {
+			sel = append(sel, d)
 		}
 	}
+	return sel
+}
+
+// healImmutable recreates the objects kubectl reported as having an
+// immutable-field conflict — `replace --force` = delete + create, which
+// bypasses immutability (bash: kapply::_heal_immutable). The kind and the
+// name come from the error text, which a webhook can write: the heal acts
+// only on the manifest objects with that kind and name. A name that
+// matches none is not healed and not printed; one fixed line
+// (UnmatchedImmutableText) says so.
+func (a *Applier) healImmutable(ctx context.Context, manifest, out string, kubectlFlags []string) {
+	docs := parseManifestDocs(manifest)
+	unmatched := false
+	for _, o := range immutableObjects(out) {
+		sel := manifestObjects(docs, o)
+		if len(sel) == 0 {
+			unmatched = true
+			continue
+		}
+		a.recreate(ctx, sel, kubectlFlags)
+	}
+	if unmatched {
+		ui.WarnTo(a.Stderr, "%s", UnmatchedImmutableText)
+	}
+}
+
+// recreate replaces the manifest objects sel (one kind and name) with
+// `replace --force`. Each printed line names the object from the manifest
+// values, escaped (EscapeText).
+func (a *Applier) recreate(ctx context.Context, sel []manifestDoc, kubectlFlags []string) {
+	kind, name := EscapeText(sel[0].kind), EscapeText(sel[0].name)
+	// The crown-jewel confirm applies only to Secrets the manifest actually
+	// SEALS (immutable: true) — a plain Secret can hit "field is immutable"
+	// too (e.g. a type: change) and gets the generic heal.
+	if sel[0].kind == "Secret" && sealedSecret(sel) && !a.confirmSecretRecreate(name) {
+		ui.WarnTo(a.Stderr, "  keeping sealed Secret/%s (re-key declined)", name)
+		return
+	}
+	ui.WarnTo(a.Stderr, "  recreating immutable %s/%s", kind, name)
+	var b strings.Builder
+	for _, d := range sel {
+		b.WriteString("---\n")
+		b.WriteString(marshalDoc(d))
+	}
+	args := append(append([]string{}, kubectlFlags...), "replace", "--force", "-f", "-")
+	if rc := a.kubectlQuiet(ctx, writeEnv, b.String(), args...); rc != 0 {
+		ui.WarnTo(a.Stderr, "  could not recreate %s/%s", kind, name)
+	}
+}
+
+// sealedSecret reports whether a document of sel sets immutable: true.
+func sealedSecret(sel []manifestDoc) bool {
+	for _, d := range sel {
+		if yqsem.Scalar(yqsem.Lookup(d.node, "immutable")) == "true" {
+			return true
+		}
+	}
+	return false
 }
 
 // finalizeNamespace force-completes a stuck-Terminating namespace by

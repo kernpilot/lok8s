@@ -118,6 +118,41 @@ _kapply() { printf '%s' "$1" | kapply::apply; }       # pipe manifest → kapply
   assert_output 2
 }
 
+# The kind and the name of an immutable-field error come from kubectl's error
+# text, which an admission webhook can write. The heal acts only on manifest
+# objects and prints them from the manifest values, escaped.
+@test "heal: a name in the error that is in no manifest object is not healed, and no part of it prints" {
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1
+  export APPLY_OUT="Error from server (Invalid): Deployment.apps \"${CANARY_VALUE}\" is invalid: spec.selector: field is immutable
+Error from server (Invalid): Deployment.apps \"web\" is invalid: spec.selector: field is immutable"
+  run _kapply "${DEPLOY_MANIFEST}"
+  refute_output --partial "${CANARY_VALUE}"
+  assert_line '[warn] kapply: an immutable-field error named no object of this manifest'
+  assert_output --partial 'recreating immutable Deployment/web'
+  run grep -c 'replace --force' "${KLOG}"
+  assert_output 1
+}
+
+@test "heal: the object line comes from the manifest, with its control bytes escaped" {
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1
+  export APPLY_OUT=$'Error from server (Invalid): Deployment.apps "we\eb" is invalid: spec.selector: field is immutable'
+  local m='apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: "we\eb"
+  namespace: default'
+  run _kapply "${m}"
+  assert_output --partial 'recreating immutable Deployment/we\x1bb'
+  refute_output --partial $'\e'
+  grep -q 'replace --force' "${KLOG}"
+}
+
+@test "escape: a control byte prints as \\xNN, a backslash as \\\\, other bytes unchanged" {
+  run kapply::escape $'we\eb a\\b tab\there nl\n del\x7f \xc3\xa9'
+  assert_success
+  assert_output 'we\x1bb a\\b tab\x09here nl\x0a del\x7f é'
+}
+
 @test "sealed Secret WITH --force-recreate: recreates, but with a pointed RE-KEY warning" {
   export APPLY_RC=1
   export APPLY_OUT='Error from server (Invalid): Secret "zitadel-credentials" is invalid: data: Forbidden: field is immutable when `immutable` is set'
