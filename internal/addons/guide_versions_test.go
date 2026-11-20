@@ -600,7 +600,7 @@ func TestDocsHaveNoUncheckedPin(t *testing.T) {
 		want[strings.TrimPrefix(tag, "v")] = true
 	}
 	hits := scanVersions(t, filepath.Join(root, docsDir), want)
-	checked := append(table, restated...)
+	checked := slices.Concat(table, restated)
 	// Each checked mention is a hit too: a checked mention that the scan
 	// misses means that the scan is broken.
 	for _, c := range checked {
