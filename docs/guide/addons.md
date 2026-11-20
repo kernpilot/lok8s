@@ -1254,12 +1254,18 @@ so they stay.
 entry of `spec.bootstrap` as the bootstrap does (offline: the chart is
 local), reads the roles and bindings with the label
 `lok8s.dev/name=rook-ceph-csi-kms`, and prints one line for each object
-that the render does not hold, with the delete command of that object:
+that the render does not hold. Such an object is a candidate leftover: a
+label does not prove that the addon made it. A binding gets its delete
+command. A Role or a ClusterRole gets one only when no binding outside the
+candidates refers to it, and a ClusterRole only when it has no
+`rbac.authorization.k8s.io/aggregate-to-*` label. For that check, doctor
+reads all RoleBindings and ClusterRoleBindings without the label, so your
+own CephFS bindings (below) count too:
 
 ```console
 $ lo doctor
 ...
-  ! rook-ceph-csi-kms: ClusterRole rook-ceph-csi-kms-vaulttokens (option vaulttokens) is not in the render of the current values. It keeps its grant. Delete it: kubectl --kubeconfig '/path/to/project/.kubeconfig/my-cluster.yaml' delete clusterrole rook-ceph-csi-kms-vaulttokens
+  ! rook-ceph-csi-kms: ClusterRole rook-ceph-csi-kms-vaulttokens (option vaulttokens) is a candidate leftover: it has the label lok8s.dev/name=rook-ceph-csi-kms, and the current values do not render it. It keeps its grant. No binding outside the candidates refers to it. If no other tool manages it, delete it: kubectl --kubeconfig '/path/to/project/.kubeconfig/my-cluster.yaml' delete clusterrole rook-ceph-csi-kms-vaulttokens
 ```
 
 So you can also change the options without the gap between steps 2 and 3:
@@ -1267,14 +1273,20 @@ So you can also change the options without the gap between steps 2 and 3:
 1. Render first, and stop if the render fails:
    `lo bootstrap --only rook-ceph-csi-kms --dry-run`.
 2. Apply: `lo bootstrap --only rook-ceph-csi-kms`.
-3. Run `lo doctor`, and run each delete command that it prints. Until you
-   delete them, those objects keep their grants.
+3. Run `lo doctor`. Run each delete command that it prints for an object
+   that no other tool manages. Until you delete them, those objects keep
+   their grants.
 
 When you remove the addon from `spec.bootstrap` and keep `rook-ceph`,
-`lo doctor` prints each object with the label as a leftover of the addon.
-Doctor only reads. It prints a name only in the DNS-1123 form, and counts
-the other objects in one line with the command that lists them (see
-[`lo doctor`](../reference/cli.md#lo-doctor)).
+`lo doctor` prints each object with the label as a candidate. Doctor does
+not render a path entry of `spec.bootstrap` (its kustomize plugins can
+read the secret store), and a path entry can render these objects too. So
+with a path entry, a candidate makes doctor say that it did not check. An
+entry that does not parse stops the check too. Doctor sends only GET
+requests: you run the delete. A kubeconfig exec credential plugin runs as
+kubectl runs it, and lo does not limit what it does. Doctor prints a name
+only in the DNS-1123 form, and counts the other objects in one line with
+the command that lists them (see [`lo doctor`](../reference/cli.md#lo-doctor)).
 
 The bindings name the RBD ServiceAccounts only. A cluster that also runs
 the CephFS driver with a KMS binds both CephFS ServiceAccounts to the same
@@ -1516,15 +1528,16 @@ line names the binding and the count of the other subjects, and says to
 remove the ServiceAccount from its subjects (for example with
 `kubectl edit`).
 
-Doctor only reads: you run the delete. When doctor finds a leftover and
+Doctor sends only GET requests: you run the delete. When doctor finds a leftover and
 no binding gives the ServiceAccount `lok8s-system-upgrade-controller`
 yet, it first says to apply the bootstrap. A cluster without leftovers
 prints `✓ system-upgrade-controller: no RBAC migration leftovers`. The
 check needs the domain's kubeconfig (`.kubeconfig/<metadata.name>.yaml`)
 and the right to list ClusterRoleBindings and ClusterRoles. Doctor reads
 them with that kubeconfig, so its credential plugin
-(`users[].user.exec`) runs and can ask you to log in; each read stops
-after 30 s. The check does not run when `spec.bootstrap` has
+(`users[].user.exec`) runs as kubectl runs it and can ask you to log in;
+lo does not limit what the plugin does. Each read stops after 30 s. The
+check does not run when `spec.bootstrap` has
 `system-upgrade-controller-cluster-admin`. Doctor finds that opt-in addon
 only as a bare entry name, not as a path entry, so the line of each
 `cluster-admin` binding says "Keep it only on purpose, else delete it:"
@@ -1829,14 +1842,15 @@ delete command: give their subjects another role first. Doctor does not
 read RoleBindings, so the role line also says to check that no
 RoleBinding refers to the role before the delete.
 
-Doctor only reads: you run the deletes. When doctor finds a leftover and
+Doctor sends only GET requests: you run the deletes. When doctor finds a leftover and
 no binding gives the ServiceAccount `lok8s-redis-operator` yet, it first
 says to apply the bootstrap. A cluster without leftovers prints
 `✓ redis-operator: no RBAC migration leftovers`. The check needs the
 domain's kubeconfig (`.kubeconfig/<metadata.name>.yaml`) and the right to
 list ClusterRoleBindings and ClusterRoles. Doctor reads them with that
-kubeconfig, so its credential plugin (`users[].user.exec`) runs and can
-ask you to log in; each read stops after 30 s. Doctor finds the opt-in
+kubeconfig, so its credential plugin (`users[].user.exec`) runs as kubectl
+runs it and can ask you to log in; lo does not limit what the plugin does.
+Each read stops after 30 s. Doctor finds the opt-in
 addon only as a bare entry name (`- redis-operator-chart-rbac`), not as a
 path entry, so the line for its binding says "Keep it only on purpose,
 else delete it:" before the command.
