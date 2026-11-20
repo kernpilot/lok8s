@@ -491,29 +491,44 @@ func TestEnsureCredentialsRefusesNewlineInValue(t *testing.T) {
 }
 
 // The Robot credentials in the env file, as capi::_credential_env_file
-// takes them: a CR at the end is refused with the newline line of the bash
-// twin, before kubectl runs. A tab stays inside its line (kubectl keeps it
-// in the value), and both twins pass it on.
+// takes them: a CR or an LF is refused with the newline line of the bash
+// twin, before kubectl runs. A tab or a DEL stays inside its line (kubectl
+// keeps it in the value), and both twins pass it on. The subtests are
+// named by a label, never by a value.
 func TestEnsureCredentialsRobotControlCharacters(t *testing.T) {
 	keys := map[string]string{"HROBOT_USER": "robot-user", "HROBOT_PASSWORD": "robot-password"}
+	forms := []struct {
+		label  string
+		value  func(key string) string
+		refuse bool
+	}{
+		{"CR", func(key string) string { return key + "-not-real\r" }, true},
+		{"LF", func(key string) string { return key + "-not\nreal" }, true},
+		{"TAB", func(key string) string { return key + "-not\treal" }, false},
+		{"DEL", func(key string) string { return key + "-not-real\x7f" }, false},
+	}
 	for _, name := range []string{"HROBOT_USER", "HROBOT_PASSWORD"} {
 		key := keys[name]
-		for _, value := range []string{key + "-not-real\r", key + "-not\treal"} {
-			t.Run(name+"/"+strings.NewReplacer("\r", "CR", "\t", "TAB").Replace(value), func(t *testing.T) {
+		for _, form := range forms {
+			value := form.value(key)
+			t.Run(name+"/"+form.label, func(t *testing.T) {
 				t.Setenv("HCLOUD_TOKEN", "test-token")
 				t.Setenv("HROBOT_USER", "robot-user-not-real")
 				t.Setenv("HROBOT_PASSWORD", "robot-password-not-real")
 				t.Setenv(name, value)
 				d, runner, stderr := testDriver(t)
 				err := d.EnsureCredentialsSecret(t.Context(), hetznerFixture(t), "hetzner", "/tmp/kubeconfig.yaml")
-				if strings.HasSuffix(value, "\r") {
+				if form.refuse {
 					if !errors.Is(err, ui.ErrHandled) {
 						t.Fatalf("error %v, want ErrHandled", err)
+					}
+					if got, want := err.Error(), "credentials: "+name+" contains a newline"; got != want {
+						t.Errorf("error %q, want %q", got, want)
 					}
 					if got, want := stderr.String(), "[error] environment variable "+name+" must not contain a newline\n"; got != want {
 						t.Errorf("stderr %q, want %q", got, want)
 					}
-					if strings.Contains(stderr.String()+err.Error(), "not-real") {
+					if strings.Contains(stderr.String()+err.Error(), key) {
 						t.Errorf("the output holds the value: %q %v", stderr.String(), err)
 					}
 					if len(runner.calls) != 0 {
@@ -522,7 +537,7 @@ func TestEnsureCredentialsRobotControlCharacters(t *testing.T) {
 					return
 				}
 				if err != nil || stderr.Len() != 0 {
-					t.Fatalf("a tab was refused: %v %q", err, stderr.String())
+					t.Fatalf("a %s was refused: %v %q", form.label, err, stderr.String())
 				}
 				if len(runner.calls) != 2 || !strings.Contains(runner.stdins[0], "\n"+key+"="+value+"\n") {
 					t.Errorf("calls %d, env file %q", len(runner.calls), runner.stdins)

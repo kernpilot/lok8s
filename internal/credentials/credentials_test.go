@@ -64,6 +64,9 @@ func TestNoControlRefusesExactlyTheControlBytes(t *testing.T) {
 		if refuse && !errors.Is(err, ui.ErrHandled) {
 			t.Errorf("%q: the error must be marked handled: %v", value, err)
 		}
+		if refuse && err != nil && err.Error() != "credentials: TEST_CREDENTIAL must not contain a control character" {
+			t.Errorf("%q: error %q", value, err.Error())
+		}
 	}
 	for b := 0; b <= 0xff; b++ {
 		check("a"+string([]byte{byte(b)})+"b", b <= 0x1f || b == 0x7f)
@@ -108,6 +111,42 @@ func TestIsControlIsC0AndDEL(t *testing.T) {
 	for r := rune(0); r <= 0x10ffff; r++ {
 		if got, want := IsControl(r), r < 0x20 || r == 0x7f; got != want {
 			t.Fatalf("IsControl(%U) = %v, want %v", r, got, want)
+		}
+	}
+}
+
+// NoControl is the Go copy of http::credential_ok (utils/http.sh): the
+// bash body must be the one that tests [[:cntrl:]] under LC_ALL=C and
+// prints the two Go lines (noControlLine, noControlHint), and IsControl
+// must be the cntrl class of the C locale (POSIX: 0x00-0x1f and 0x7f).
+// The bash file is the embedded tree, as for TestTLSLogVarsMatchBash.
+func TestNoControlMatchesBash(t *testing.T) {
+	t.Parallel()
+	src, err := fs.ReadFile(assets.FS(), "utils/http.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?ms)^http::credential_ok\(\) \{\n(.*?)\n\}$`).FindAllSubmatch(src, -1)
+	if len(m) != 1 {
+		t.Fatalf("utils/http.sh: %d functions http::credential_ok, want 1", len(m))
+	}
+	want := strings.Join([]string{
+		`  local LC_ALL=C name rc=0`,
+		`  for name in "${@}"; do`,
+		`    if [[ "${!name:-}" == *[[:cntrl:]]* ]]; then`,
+		`      error "` + strings.Replace(noControlLine, "%s", "${name}", 1) + `"`,
+		`      echo "` + noControlHint + `" >&2`,
+		`      rc=1`,
+		`    fi`,
+		`  done`,
+		`  return "${rc}"`,
+	}, "\n")
+	if got := string(m[0][1]); got != want {
+		t.Fatalf("utils/http.sh http::credential_ok body\n%s\nwant (from the Go text)\n%s", got, want)
+	}
+	for r := rune(0); r <= 0xff; r++ {
+		if got, want := IsControl(r), r <= 0x1f || r == 0x7f; got != want {
+			t.Errorf("IsControl(%U) = %v, the cntrl class of the C locale: %v", r, got, want)
 		}
 	}
 }

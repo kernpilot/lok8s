@@ -137,6 +137,15 @@ func (d *Driver) Provision(ctx context.Context, domain string) error {
 		return err
 	}
 
+	// 1c. Check the Robot credentials BEFORE the infrastructure step too: a
+	// control character in HROBOT_USER or HROBOT_PASSWORD stops the apply,
+	// and it must not do so after the servers exist. Apply checks them
+	// again for a direct caller. The bash twin checks only inside
+	// kubeone::apply, after the servers exist.
+	if err := credentials.NoControl(os.Getenv, d.stderr(), "HROBOT_USER", "HROBOT_PASSWORD"); err != nil {
+		return err
+	}
+
 	// 2. Provision infrastructure via the provider contract. Guarded:
 	// without it a failed INFRASTRUCTURE reconcile would fall through to
 	// the manifest render and `kubeone apply` against hosts that were
@@ -220,6 +229,17 @@ func (d *Driver) Destroy(ctx context.Context, domain string) error {
 	}
 
 	workDir := d.workDir(domain)
+
+	// 0. Check the Robot credentials before any step. Reset refuses a
+	// control character in them, and a failed reset only warns: the
+	// provider destroy would then delete the cloud servers, and the
+	// bare-metal workers would keep their Kubernetes install with no
+	// control plane left to reset them. So a refusal here resets nothing,
+	// destroys nothing and keeps the kubeconfig. The bash twin has no
+	// check in driver::destroy.
+	if err := credentials.NoControl(os.Getenv, d.stderr(), "HROBOT_USER", "HROBOT_PASSWORD"); err != nil {
+		return err
+	}
 
 	// 1. Reset Kubernetes (kubeone reset). Fail-soft: warn and continue
 	// with the infrastructure destroy.
@@ -343,8 +363,8 @@ func (d *Driver) Reset(ctx context.Context, workDir string) error {
 		return ui.Handled(fmt.Errorf("kubeone: kubeone.yaml not found in %s", workDir))
 	}
 	// kubeone reset gets the Robot credentials too (robotEnv): the same
-	// check as in Apply. The bash kubeone::reset has none. Destroy goes on
-	// after a refusal, as after any failed reset.
+	// check as in Apply, for a direct caller. The bash kubeone::reset has
+	// none. Destroy checks them before it calls Reset.
 	if err := credentials.NoControl(os.Getenv, d.stderr(), "HROBOT_USER", "HROBOT_PASSWORD"); err != nil {
 		return err
 	}
