@@ -378,12 +378,14 @@ _refused_later() {
   _refused_later mixed
 }
 
-@test "a plaintext whose .enc name is too long is refused before any write" {
-  # The lstat of the .enc fails with ENAMETOOLONG, and [[ -e ]] reads that as
-  # a path that does not exist. The check must not: the encrypt would stop
-  # after the .sops.yaml write, and a rerun would find the recipient present
-  # (Go twin: TestAddKeyRefusesAnEncPathThatItCannotLookUpBeforeAnyWrite).
-  _load
+# _long_name_refused — the body of the long-name tests, after the library is
+# loaded. The lstat of the .enc fails with ENAMETOOLONG, and [[ -e ]] reads
+# that as a path that does not exist. The check must not: the encrypt would
+# stop after the .sops.yaml write, and a rerun would find the recipient
+# present (Go twin: TestAddKeyRefusesAnEncPathThatItCannotLookUpBeforeAnyWrite).
+# It lists the project with command ls, so an ls function of the test does
+# not run here.
+_long_name_refused() {
   local store="${PATH_CLUSTERS}/a.dev/secrets" max name before
   max="$(getconf NAME_MAX "${store}" 2>/dev/null)" || max=255
   [[ "${max}" =~ ^[0-9]+$ ]] || skip "the test dir has no NAME_MAX"
@@ -398,15 +400,15 @@ _refused_later() {
   # The lock file is there before the run (the lock writes it), so that the
   # listing of the project shows any other new entry.
   : > "${PATH_BASE}/.sops.yaml.lock"
-  before="$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; ls -A "${PATH_BASE}")"
+  before="$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; command ls -A "${PATH_BASE}")"
   DOMAIN=a.dev run _add "${KEY_B}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
   [ "$output" = "[error] ${store}/${name}.enc cannot be looked up (an error other than \"no such file or directory\", for example a name that is too long): the re-key does not write an .enc there
 [error]   remove or fix each entry named above, then run this command again; nothing was written" ] || {
     echo "$output" >&2; return 1; }
-  [ "$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; ls -A "${PATH_BASE}")" = "${before}" ] || {
+  [ "$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; command ls -A "${PATH_BASE}")" = "${before}" ] || {
     echo "a file changed:" >&2
-    diff <(echo "${before}") <(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; ls -A "${PATH_BASE}") >&2
+    diff <(echo "${before}") <(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; command ls -A "${PATH_BASE}") >&2
     return 1
   }
   [ ! -s "${ENCRYPT_RAN}" ]
@@ -416,6 +418,36 @@ _refused_later() {
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
   grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
   [ -s "${ENCRYPT_RAN}" ]
+}
+
+# _ls_then_missing <arg>... — runs ls, then lists a path that does not
+# exist: the last line of its stderr is always "No such file or directory",
+# whatever the first listing found.
+_ls_then_missing() {
+  command ls "${@}"
+  command ls -ld -- "${BATS_TEST_TMPDIR}/no-such-entry"
+}
+
+@test "a plaintext whose .enc name is too long is refused before any write" {
+  _load
+  _long_name_refused
+}
+
+@test "the long name is refused when a shell function named ls adds a line of its own" {
+  # secrets::_absent runs the ls command (command ls), not the function: the
+  # message of the function ends in "No such file or directory".
+  _load
+  ls() { _ls_then_missing "${@}"; }
+  _long_name_refused
+}
+
+@test "the long name is refused when an ls alias is set before the library is read" {
+  # Bash expands an alias when it reads the library, also after LC_ALL=C. It
+  # does not expand the word after command.
+  shopt -s expand_aliases
+  alias ls=_ls_then_missing
+  _load
+  _long_name_refused
 }
 
 @test "the encrypt reads the list that add-key checked, not a new listing of the store" {
