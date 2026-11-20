@@ -341,6 +341,52 @@ func TestKeyCommandsReleaseTheLock(t *testing.T) {
 	}
 }
 
+// The lock can sit in the directory of the file that a .sops.yaml link
+// names, where another user can write. A lock path that is a symlink or a
+// directory is refused before the open: both commands print the line of the
+// bash twin, change nothing, and the file that the link names keeps its
+// bytes.
+func TestKeyCommandsRefuseALockThatIsNotARegularFile(t *testing.T) {
+	for _, kind := range []string{"a symlink", "a directory"} {
+		for _, cmd := range []string{"add-key", "remove-key"} {
+			t.Run(kind+"/"+cmd, func(t *testing.T) {
+				c, out, errOut := testEnv(t)
+				c.Domain = "a.dev"
+				sopsRules(t, c, keyA+","+keyB)
+				if cmd == "add-key" {
+					sopsRules(t, c, keyA)
+				}
+				lock := c.sopsConfigPath() + ".lock"
+				victim := c.Paths.Base + "/elsewhere/victim"
+				write(t, victim, "the bytes of another file\n")
+				if kind == "a symlink" {
+					if err := os.Symlink(victim, lock); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					mkdir(t, lock)
+				}
+				before := fileStates(t, c.Paths.Base)
+
+				var err error
+				if cmd == "add-key" {
+					err = c.AddKey(keyB, false, false)
+				} else {
+					err = c.RemoveKey(keyB, false, false)
+				}
+				if !errors.Is(err, ErrHandled) {
+					t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+				}
+				want := "[error] " + lock + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed — remove it, then run this command again\n"
+				if errOut.String() != want || out.String() != "" {
+					t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+				}
+				sameStates(t, before, fileStates(t, c.Paths.Base))
+			})
+		}
+	}
+}
+
 // The replace keeps the mode, leaves a hard link to the old file with the
 // old content, and replaces the target of a symlink, not the link.
 func TestReplaceFile(t *testing.T) {

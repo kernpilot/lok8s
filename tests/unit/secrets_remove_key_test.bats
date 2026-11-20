@@ -1671,6 +1671,29 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   [ ! -s "${ENCRYPT_LOG}" ]
 }
 
+@test "a lock path that is a symlink is refused before the open, and the file that it names keeps its bytes" {
+  # The lock can sit in the directory of the file that a .sops.yaml link
+  # names, where another user can write. The open appends and the run never
+  # uses a lock that a link names (Go twin:
+  # TestKeyCommandsRefuseALockThatIsNotARegularFile).
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  local victim="${BATS_TEST_TMPDIR}/victim" before
+  printf 'the bytes of another file\n' > "${victim}"
+  ln -s "${victim}" "${CFG}.lock"
+  before="$(cat "${CFG}")"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${CFG}.lock is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed — remove it, then run this command again" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(cat "${victim}")" = 'the bytes of another file' ] || { echo "the file that the link names changed" >&2; return 1; }
+  [ "$(readlink "${CFG}.lock")" = "${victim}" ]
+  [ "$(cat "${CFG}")" = "${before}" ]
+  [ ! -s "${ENCRYPT_LOG}" ]
+}
+
 @test "two .sops.yaml links that name one file take one lock, beside that file" {
   # A run through the other link holds the lock (in this shell); remove-key
   # through the first link is refused and changes nothing (Go twin:

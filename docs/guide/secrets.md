@@ -310,8 +310,13 @@ re-keyed. Commit the `.enc` files together with `.sops.yaml`.
 When `.sops.yaml` is a symlink, the lock is next to the file that it names,
 so two links to one file use one lock. A second run waits
 `LO_SECRETS_LOCK_WAIT` seconds (60 by default), then stops
-and changes nothing. The lock file holds no data. The `lo` binary locks on
-every platform. The bash implementation locks with `flock`: without it (macOS
+and changes nothing. The lock file holds no data. The command must be able to
+write in the directory of the lock: when it cannot, it stops, names that
+directory and changes nothing, also when there is nothing to add or remove.
+A lock path that is not a regular file (a symlink, a directory, a FIFO, a
+socket or a device) stops the command before it opens the lock: the command
+never writes through a link there and never empties the lock file. The `lo`
+binary locks on every platform. The bash implementation locks with `flock`: without it (macOS
 has none by default), both commands stop before they change a file. Both
 commands replace `.sops.yaml` through a temporary file and a rename. When
 `.sops.yaml` is a symlink, they replace the file that it names, and the link

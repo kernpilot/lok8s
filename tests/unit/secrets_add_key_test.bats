@@ -527,3 +527,26 @@ _ls_then_missing() {
   [ "$(ls -A "${conf%/*}")" = $'sops.yaml\nsops.yaml.lock' ] || { echo "the dir of the target: $(ls -A "${conf%/*}")" >&2; return 1; }
   [ ! -e "${PATH_BASE}/.sops.yaml.lock" ] || { echo "a lock beside the link" >&2; return 1; }
 }
+
+@test "a lock in a directory that it cannot write is refused, also for a recipient that is already there, and the line names the directory" {
+  # With a .sops.yaml link the lock goes beside the file that the link
+  # names (Go twin: TestKeyCommandsNameTheDirectoryOfALockThatCannotBeOpened).
+  [ "$(id -u)" -ne 0 ] || skip "root writes every directory"
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load
+  local dir="${BATS_TEST_TMPDIR}/conf" before
+  mkdir -p "${dir}"
+  mv -- "${PATH_BASE}/.sops.yaml" "${dir}/sops.yaml"
+  ln -s "${dir}/sops.yaml" "${PATH_BASE}/.sops.yaml"
+  dir="$(readlink -f -- "${dir}")"
+  before="$(cat "${dir}/sops.yaml")"
+  chmod 555 "${dir}"
+  DOMAIN=a.dev run _add "${KEY_A}"
+  chmod 755 "${dir}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] cannot open the lock file ${dir}/sops.yaml.lock — the lock goes beside the file that .sops.yaml names, so lo needs write access to ${dir}; nothing was changed" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(cat "${dir}/sops.yaml")" = "${before}" ]
+  [ "$(ls -A "${dir}")" = sops.yaml ] || { echo "the dir of the target: $(ls -A "${dir}")" >&2; return 1; }
+  [ ! -s "${ENCRYPT_RAN}" ]
+}
