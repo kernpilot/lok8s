@@ -508,19 +508,29 @@ func TestAgentKubeconfigTempFileInThePhysicalParent(t *testing.T) {
 	}
 }
 
+// One split gives the directory and the last name. A target that ends in
+// "/" has an empty name, and "." and ".." stay as names: the publish
+// refuses them.
 func TestKubeconfigTempDir(t *testing.T) {
-	for target, want := range map[string]string{
-		"config":             ".",
-		"/config":            "/",
-		"//config":           "/",
-		"a/config":           "a",
-		"a//config":          "a/",
-		"ro/alias/../config": "ro/alias/..",
-		"/tmp/safe\n/real":   "/tmp/safe\n",
-		"/tmp/sa\nfe/real":   "/tmp/sa\nfe",
+	for target, want := range map[string][2]string{
+		"config":             {".", "config"},
+		"/config":            {"/", "config"},
+		"//config":           {"/", "config"},
+		"a/config":           {"a", "config"},
+		"a//config":          {"a/", "config"},
+		"ro/alias/../config": {"ro/alias/..", "config"},
+		"/tmp/safe\n/real":   {"/tmp/safe\n", "real"},
+		"/tmp/sa\nfe/real":   {"/tmp/sa\nfe", "real"},
+		"":                   {".", ""},
+		"a/":                 {"a", ""},
+		"/":                  {"/", ""},
+		".":                  {".", "."},
+		"..":                 {".", ".."},
+		"a/.":                {"a", "."},
+		"a/..":               {"a", ".."},
 	} {
-		if got := kubeconfigTempDir(target); got != want {
-			t.Errorf("kubeconfigTempDir(%q) = %q, want %q", target, got, want)
+		if dir, name := kubeconfigTempDir(target); dir != want[0] || name != want[1] {
+			t.Errorf("kubeconfigTempDir(%q) = %q, %q, want %q, %q", target, dir, name, want[0], want[1])
 		}
 	}
 }

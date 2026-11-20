@@ -1280,6 +1280,36 @@ the mode of every file, often 0644: then `lo` writes the file and prints a
 warning that names the mode. A hard link to the old file keeps the old
 content.
 
+`lo` first writes the kubeconfig to a temporary file (mode 0600) in the
+directory of the file. With `--force`, a rename puts the temporary file at
+the path. Without `--force`, the hard link publishes it, and the exclusive
+create above is the fallback. `lo` opens that directory one time. After a successful open,
+each step of the publish and of the cleanup works relative to the open
+directory: the create of the temporary file, the rename, the hard link, the
+exclusive create, each check and each remove. Thus when a directory of the
+path changes after the open (another directory, or a link put in its
+place), no step goes to another directory. This is for the builds of `lo`
+for Linux and macOS (amd64 and arm64). The tests run on Linux.
+
+The exclusive create checks that the name still names the new file before
+it writes to the file, and before it removes a part of the file. Each check
+is a separate step before the write or the remove. At the end, `lo` makes
+one attempt to remove the temporary file, and removes it only while its
+name still names that file. When the `Stat` of the open temporary file
+fails, `lo` removes the name with no check, because a temporary file that
+stays holds the kubeconfig. A process that can change the entries of the
+directory can still interfere. It can put another file in place of the
+temporary file before the link or the rename. It can also put a file at a
+name between a check and the remove after it.
+
+To open the directory, `lo` needs the read right on it. A directory with
+only the write and the search rights (mode 0300) is refused with
+`cannot write` and a hint that names the read right. The bash
+implementation (`lok8s.yaml` `spec.implementation`) does each step by path,
+needs no read right on the directory, and removes the temporary file by
+path with no check. There, a change of a directory of the path during the
+write can still send a step to another directory.
+
 When the path is a link, `--force` replaces the file that the link points
 to, and the link stays. `lo` does this only when the owners and the mode
 bits on the way let no other user send the write to another file:
