@@ -96,7 +96,7 @@ of a refusal), and fail on a row they cannot build. The bats twin skips
 without helm v3.3+ locally (`bats --filter-tags real-helm tests/unit/` with
 a helm v3.3+ on `PATH` runs every test with that tag). The argsh container
 of `unit-tests` has no helm, so that job runs the tag a second time
-natively, with a pinned helm v3.21.2, where `CI=true` turns a missing helm
+natively, with a pinned helm v3.22.1, where `CI=true` turns a missing helm
 into a failure and the step fails when no test runs or one skips. The dry run prevents accidental side
 effects of legitimate addon code; it is not a security boundary against an
 addon that is made to do harm (see the trust model in

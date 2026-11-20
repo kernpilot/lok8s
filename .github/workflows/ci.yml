@@ -103,7 +103,7 @@ jobs:
         # variable, so the bats tests tagged `real-helm` (the bash dry-run
         # chart gate against the real helm on real charts), in any file of
         # tests/unit/, skip there. This step runs them on the runner: helm
-        # v3.21.2 (the helm that khelm v2.8.0 and lo link,
+        # v3.22.1 (the helm that khelm v2.9.0 and lo link,
         # internal/toolchain/pins.go) and bats with its two libraries at the
         # versions e2e.yml pins, each tarball checksum-verified. CI=true
         # (Actions sets it) makes a missing helm v3 fail the test; the step
@@ -111,9 +111,9 @@ jobs:
         run: |
           set -euo pipefail
           tmp="$(mktemp -d)"
-          HELM_VERSION=3.21.2
+          HELM_VERSION=3.22.1
           curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" -o "${tmp}/helm.tar.gz"
-          echo "0a745198de24545d0055cd8414bc8d2ba10363ef5f5d38369ea1b399671cc083  ${tmp}/helm.tar.gz" | sha256sum -c -
+          echo "896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea  ${tmp}/helm.tar.gz" | sha256sum -c -
           tar -xzf "${tmp}/helm.tar.gz" -C "${tmp}" linux-amd64/helm
           install -m 0755 "${tmp}/linux-amd64/helm" "${HOME}/.local/bin/helm"
           install_tarball() { # <repo> <tag> <sha256> <dest>

@@ -1075,7 +1075,7 @@ _stub_mktemp() {
 
 # TMPDIR=<safe>/link/.. with link pointing to <unsafe>/child: ".." goes up
 # from the target of the link, as the kernel does (cd -P), so the check
-# reads <unsafe>, which others can write, and refuses it. A lexical clean
+# reads <unsafe>, which its group can write, and refuses it. A lexical clean
 # would read <safe> and pass. Also as a relative TMPDIR. As the Go twin's
 # TestSpaceMintJoinResolvesDotDotAfterALinkPhysically.
 @test "space_join_tmp_dir: .. after a link goes up from the target of the link" {
@@ -1087,13 +1087,13 @@ _stub_mktemp() {
   ln -s "${base}/unsafe/child" "${base}/safe/link"
   TMPDIR="${base}/safe/link/.." run kubehz::space_join_tmp_dir
   assert_failure 2
-  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${base}/unsafe") is writable by others and has no sticky bit"
+  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${base}/unsafe") is writable by its group and has no sticky bit"
   _relative_link_dotdot() {
     cd -- "${1}" && TMPDIR=link/.. kubehz::space_join_tmp_dir
   }
   run _relative_link_dotdot "${base}/safe"
   assert_failure 2
-  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${base}/unsafe") is writable by others and has no sticky bit"
+  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${base}/unsafe") is writable by its group and has no sticky bit"
 }
 
 # The writer checks the node name itself (the name is part of the path),
@@ -1141,6 +1141,34 @@ _stub_mktemp() {
   assert_output --partial "is not a node name the platform accepts"
   refute_output --partial "${ticket}"
   [ ! -e "${CURL_CALLS}" ]
+  local dirs=("${TMPDIR}"/kubehz-join-*)
+  [ ! -e "${dirs[0]}" ]
+}
+
+# A signal to the writer during the ticket write: the trap of the writer
+# removes what it made, and the note says that a signal stopped the write
+# (the note form of the node join), not that the temp dir must become
+# writable.
+@test "space_mint_join: a signal during the ticket write says so, not that TMPDIR must be writable" {
+  local ticket
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  _MINT_BODY=$(jq -nc --arg t "${ticket}" '{ok: true, data: {token: $t, expiresAt: "2026-08-07T20:00:00Z"}}')
+  export _MINT_BODY
+  curl() {
+    printf '%s\n201' "${_MINT_BODY}"
+  }
+  chmod() {
+    [[ "${1}" != 00700 ]] || kill -TERM "${BASHPID}"
+    command chmod "$@"
+  }
+  export -f curl chmod
+  run kubehz::space_mint_join sp-123 worker-1
+  assert_failure 1
+  assert_output --partial "kubehz: interrupted after the ticket was minted. It stays valid until 2026-08-07T20:00:00Z, single use, and no copy was saved."
+  assert_output --partial "Mint a fresh one if you are not retrying:  lo kubehz join worker-1"
+  refute_output --partial "could not write the join ticket"
+  refute_output --partial "is writable"
+  refute_output --partial "${ticket}"
   local dirs=("${TMPDIR}"/kubehz-join-*)
   [ ! -e "${dirs[0]}" ]
 }
@@ -1254,8 +1282,8 @@ _stub_mktemp() {
 }
 
 # A TMPDIR whose path a foreign owner could change is refused before any
-# directory is made: a part others can write without the sticky bit (the
-# TMPDIR itself or a parent), and a link to such a directory (the resolved
+# directory is made: a part its group or others can write without the
+# sticky bit (the TMPDIR itself or a parent), and a link to such a directory (the resolved
 # path counts). A part with the sticky bit passes, as /tmp does. As the Go
 # twin's TestSpaceMintJoinRefusesATMPDIROthersCanChange.
 @test "space_write_join_ticket: a TMPDIR others can change is refused" {
@@ -1269,13 +1297,14 @@ _stub_mktemp() {
   chmod 700 "${BATS_TEST_TMPDIR}/wp/sub"
   chmod 1777 "${BATS_TEST_TMPDIR}/st"
   ln -s "${BATS_TEST_TMPDIR}/lw" "${BATS_TEST_TMPDIR}/link"
-  # TMPDIR|the part that fails
-  for pair in "gw|gw" "ow|ow" "wp/sub|wp" "link|lw"; do
+  # TMPDIR|the part that fails|the class that has the write bit
+  for pair in "gw|gw|its group" "ow|ow|others" "wp/sub|wp|others" "link|lw|its group"; do
     tmpdir="${BATS_TEST_TMPDIR}/${pair%%|*}"
-    bad=$(_real "${BATS_TEST_TMPDIR}/${pair#*|}")
+    bad="${pair#*|}"
+    bad=$(_real "${BATS_TEST_TMPDIR}/${bad%%|*}")
     TMPDIR="${tmpdir}" run kubehz::space_write_join_ticket worker-1 "${ticket}"
     assert_failure 1
-    assert_output --partial "the temp dir for the join ticket is not safe: ${bad} is writable by others and has no sticky bit"
+    assert_output --partial "the temp dir for the join ticket is not safe: ${bad} is writable by ${pair##*|} and has no sticky bit"
     assert_output --partial "Set TMPDIR to a directory of your own that only you can write (mode 0700)."
     refute_output --partial "${ticket}"
     dirs=("${tmpdir}"/kubehz-join-*)
@@ -1455,7 +1484,7 @@ _stub_mktemp() {
   chmod 770 "${tmpd}"
   TMPDIR="${tmpd}" run kubehz::space_mint_join sp-123 worker-1
   assert_failure
-  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${tmpd}") is writable by others and has no sticky bit"
+  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${tmpd}") is writable by its group and has no sticky bit"
   assert_output --partial "Set TMPDIR to a directory of your own that only you can write (mode 0700)."
   refute_output --partial "could not write"
   refute_output --partial "The ticket was minted"
@@ -1483,7 +1512,7 @@ _stub_mktemp() {
   export -f curl
   TMPDIR="${CHG_DIR}" run kubehz::space_mint_join sp-123 worker-1
   assert_failure
-  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${CHG_DIR}") is writable by others and has no sticky bit"
+  assert_output --partial "the temp dir for the join ticket is not safe: $(_real "${CHG_DIR}") is writable by its group and has no sticky bit"
   assert_output --partial "could not write the join ticket for 'worker-1'"
   assert_output --partial "The ticket was minted before the write failed"
   refute_output --partial "${ticket}"
@@ -1954,9 +1983,10 @@ _stub_mktemp() {
   [ "$(cat "${path}")" = "${ticket}" ]
 }
 
-# The writer on its own: a readonly nameref of a caller on the name of any
-# of its five locals stops it before the write (an error, rc 1, no child,
-# no directory), and the target of the nameref stays empty.
+# The writer on its own (kubehz::write_join_file, through the ticket
+# wrapper): a readonly nameref of a caller on the name of any of its six
+# locals stops it before the write (an error, rc 1, no child, no
+# directory), and the target of the nameref stays empty.
 @test "space_write_join_ticket: a readonly nameref on a local name stops it before the write" {
   local ticket name
   local -a dirs
@@ -1979,11 +2009,11 @@ _stub_mktemp() {
     printf '%s' "${escaped}" > "${ENV_DIR}/escaped.after"
     return "${rc}"
   }
-  for name in node_name token dir priv path; do
+  for name in node_name ext content dir priv path; do
     rm -f -- "${ENV_DIR}/mktemp.env" "${ENV_DIR}/after.env" "${ENV_DIR}/escaped.after"
     run _nameref_write "${name}"
     assert_failure 1
-    assert_output --partial "kubehz::space_write_join_ticket: a local cannot be declared (a readonly name or a nameref of the caller)"
+    assert_output --partial "kubehz::write_join_file: a local cannot be declared (a readonly name or a nameref of the caller)"
     refute_output --partial "${ticket#*.}"
     [ ! -e "${ENV_DIR}/mktemp.env" ]
     [ -s "${ENV_DIR}/after.env" ]
@@ -1995,9 +2025,10 @@ _stub_mktemp() {
   done
 }
 
-# The writer on its own under localvar_inherit, with each of its five
-# names an integer local of the caller: the write goes through, no ticket
-# is printed or reaches a child, and the integers keep their values.
+# The writer on its own under localvar_inherit (kubehz::write_join_file,
+# through the ticket wrapper), with each of its six names an integer local
+# of the caller: the write goes through, no ticket is printed or reaches a
+# child, and the integers keep their values.
 @test "space_write_join_ticket: under localvar_inherit, integers of a caller print no ticket" {
   local ticket
   ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
@@ -2013,10 +2044,10 @@ _stub_mktemp() {
     local t
     t=$(cat "${ENV_DIR}/ticket")
     shopt -s localvar_inherit
-    local -i node_name=0 token=0 dir=0 priv=0 path=0
+    local -i node_name=0 ext=0 content=0 dir=0 priv=0 path=0
     kubehz::space_write_join_ticket worker-1 "${t}" || return
     env > "${ENV_DIR}/after.env"
-    declare -p node_name token dir priv path > "${ENV_DIR}/caller.after"
+    declare -p node_name ext content dir priv path > "${ENV_DIR}/caller.after"
   }
   run _inherit_write
   assert_success
@@ -2025,7 +2056,7 @@ _stub_mktemp() {
   [ -s "${ENV_DIR}/mktemp.env" ]
   [ "$(grep -c -F -- "${ticket#*.}" "${ENV_DIR}/mktemp.env")" -eq 0 ]
   [ "$(grep -c -F -- "${ticket#*.}" "${ENV_DIR}/after.env")" -eq 0 ]
-  [ "$(wc -l < "${ENV_DIR}/caller.after")" -eq 5 ]
+  [ "$(wc -l < "${ENV_DIR}/caller.after")" -eq 6 ]
   [ "$(grep -c -v -x -E 'declare -i [a-z_]+="0"' "${ENV_DIR}/caller.after")" -eq 0 ]
 }
 
@@ -2416,6 +2447,31 @@ _stub_mktemp() {
   [ "$status" -eq 1 ]
   [[ "${stderr}" == *"must not contain a control character"* ]]
   [[ "${stderr}" != *"unreachable"* ]]
+}
+
+# The mint of a node join (mark-nul) bounds curl as the Go twin bounds the
+# request: a connect ends after 30 s, the whole request after
+# kubehz::space_api_mint_max_time (150 s). The other calls get no bound.
+@test "space_api_call: mark-nul gives curl --connect-timeout 30 and --max-time of the mint, the other calls none" {
+  local argv="${BATS_TEST_TMPDIR}/curl.argv"
+  curl() {
+    printf '%s\n' "$@" > "${BATS_TEST_TMPDIR}/curl.argv"
+    printf '{"ok":true}\n200'
+  }
+  export -f curl
+
+  kubehz::space_api_call POST /api/clusters/cl-1234abcd/nodes/join-token '{}' mark-nul
+  [ "$(head -n 8 "${argv}")" = "$(printf '%s\n' -q -K - --connect-timeout 30 --max-time 150 -sSL)" ]
+
+  # The bound comes from the function.
+  kubehz::space_api_mint_max_time() { echo 7; }
+  kubehz::space_api_call POST /api/clusters/cl-1234abcd/nodes/join-token '{}' mark-nul
+  [ "$(sed -n '6,7p' "${argv}")" = "$(printf '%s\n' --max-time 7)" ]
+
+  kubehz::space_api_call POST /api/spaces '{}'
+  [ "$(head -n 4 "${argv}")" = "$(printf '%s\n' -q -K - -sSL)" ]
+  run grep -c -x -e --connect-timeout -e --max-time -- "${argv}"
+  [ "${output}" = 0 ]
 }
 
 # ── mutation pins for the round-1/round-2 guards ─────────

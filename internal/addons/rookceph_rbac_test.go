@@ -21,6 +21,7 @@ package addons
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -141,11 +142,13 @@ var plugins = []plugin{
 	},
 }
 
-// object is one Kubernetes object as a generic document, metadata reduced
-// to name (+ namespace) because the addon's label transformer adds labels
-// the chart does not.
+// object is one Kubernetes object as a generic document. Doc has the
+// metadata reduced to name (+ namespace), because the addon's label
+// transformer adds labels the chart does not; Labels and Annotations keep
+// the rest, so that a gate can still check them (rbacCheckMetadata).
 type object struct {
 	Kind, Name, Namespace string
+	Labels, Annotations   map[string]string
 	Doc                   map[string]any
 }
 
@@ -171,9 +174,10 @@ func objKey(kind, ns, name string) string {
 }
 
 // decodeObjects returns every object of a multi-document stream, keyed by
-// objKey, with the metadata reduced to the name and the namespace (the
-// addons' label transformers add labels the charts do not). decodeDocs
-// fails the test on a decode error and on a key that comes twice.
+// objKey, with the metadata of Doc reduced to the name and the namespace
+// (the addons' label transformers add labels the charts do not) and the
+// labels and annotations in their own fields. decodeDocs fails the test on
+// a decode error and on a key that comes twice.
 func decodeObjects(t *testing.T, stream []byte) map[string]object {
 	t.Helper()
 	objs := map[string]object{}
@@ -186,9 +190,28 @@ func decodeObjects(t *testing.T, stream []byte) map[string]object {
 			m["namespace"] = ns
 		}
 		d.Doc["metadata"] = m
-		objs[d.Key] = object{Kind: d.Kind, Name: name, Namespace: ns, Doc: d.Doc}
+		objs[d.Key] = object{
+			Kind: d.Kind, Name: name, Namespace: ns, Doc: d.Doc,
+			Labels: stringMap(meta["labels"]), Annotations: stringMap(meta["annotations"]),
+		}
 	}
 	return objs
+}
+
+// stringMap returns a decoded labels or annotations map as strings (a
+// value that is not a string keeps its YAML text, so a compare still sees
+// it); a missing map is empty.
+func stringMap(v any) map[string]string {
+	m, _ := v.(map[string]any)
+	out := make(map[string]string, len(m))
+	for k, val := range m {
+		if s, ok := val.(string); ok {
+			out[k] = s
+		} else {
+			out[k] = fmt.Sprint(val)
+		}
+	}
+	return out
 }
 
 // clusterRoles filters decoded objects to the ClusterRoles with a suffix.
@@ -503,6 +526,50 @@ func cosiBindings(objs map[string]object) []object {
 	return out
 }
 
+// withoutAddedLabels returns copies of objs without the labels that the
+// addon's kustomization adds: a label goes only when its key and its value
+// are a pair of added. Every other label stays (the chart's own labels,
+// and a label with an added key but another value), so that a compare
+// against an upstream fixture still sees it. The input objects do not
+// change.
+func withoutAddedLabels(objs []object, added map[string]string) []object {
+	var out []object
+	for _, o := range objs {
+		labels := make(map[string]string, len(o.Labels))
+		for k, v := range o.Labels {
+			if a, ok := added[k]; ok && a == v {
+				continue
+			}
+			labels[k] = v
+		}
+		o.Labels = labels
+		out = append(out, o)
+	}
+	return out
+}
+
+// sameObjects reports whether a and b hold equal objects in the same
+// order: the kind, the name, the namespace, the labels, the annotations
+// and the document (the subjects and the roleRef of a binding). An empty
+// map equals a missing one.
+func sameObjects(a, b []object) bool {
+	return slices.EqualFunc(a, b, func(x, y object) bool {
+		return x.Kind == y.Kind && x.Name == y.Name && x.Namespace == y.Namespace &&
+			maps.Equal(x.Labels, y.Labels) && maps.Equal(x.Annotations, y.Annotations) &&
+			reflect.DeepEqual(x.Doc, y.Doc)
+	})
+}
+
+// matchFixture compares rendered objects with an upstream fixture: the
+// render without the labels of the addon's kustomization (added) must
+// equal the fixture as whole objects (sameObjects). The fixture keeps the
+// chart's own labels and none of the added ones. It returns the render as
+// compared.
+func matchFixture(rendered, fixture []object, added map[string]string) ([]object, bool) {
+	got := withoutAddedLabels(rendered, added)
+	return got, sameObjects(got, fixture)
+}
+
 // roleRefName returns a binding's roleRef name.
 func roleRefName(b object) string {
 	ref, _ := b.Doc["roleRef"].(map[string]any)
@@ -578,9 +645,15 @@ func checkPluginRoles(t *testing.T, p plugin, names map[string]string, fixture, 
 		if !reflect.DeepEqual(got.Doc, wantDoc) {
 			t.Errorf("%s: effective ClusterRole\n got: %s\nwant: %s", name, canon(t, got.Doc), canon(t, wantDoc))
 		}
-		// What the patch removed is what rook-ceph-csi-kms gives back: the
-		// node plugin's five rules exactly; the controller plugin's four
-		// (it keeps tokenreviews). Not for nfs: it has no KMS, and its
+		// The patches change rules only: the labels and annotations stay
+		// those of the chart, and none of them grants through aggregation.
+		if !maps.Equal(got.Labels, fixture[name].Labels) || !maps.Equal(got.Annotations, fixture[name].Annotations) {
+			t.Errorf("%s: labels %v annotations %v, the fixture has labels %v annotations %v", name, got.Labels, got.Annotations, fixture[name].Labels, fixture[name].Annotations)
+		}
+		rbacCheckMetadata(t, got)
+		// What the patch removed is what rook-ceph-csi-kms with `kms: [all]`
+		// gives back: the node plugin's five rules exactly; the controller
+		// plugin's four (it keeps tokenreviews). Not for nfs: it has no KMS, and its
 		// cluster-wide `secrets get` is replaced by the namespaced Role.
 		if p.removed[typ] == nil || typ == "nfs" {
 			continue
@@ -704,9 +777,10 @@ func TestRookCephCSIRBACPatches(t *testing.T) {
 		t.Errorf("kustomization.yaml does not list ctrlplugin-secrets-rbac.yaml as a resource")
 	}
 
-	// rook-ceph-csi-kms binds its ClusterRole to the node plugin AND the
-	// controller plugin ServiceAccount of the rbd driver.
-	kmsObjs := readObjects(t, filepath.Join(root, rookCephKMSAddon, "rbac.yaml"))
+	// rook-ceph-csi-kms with `kms: [all]` binds its ClusterRole to the node
+	// plugin AND the controller plugin ServiceAccount of the rbd driver.
+	// kmsAllFixture is what `all` renders (TestRookCephCSIKMSOptions).
+	kmsObjs := readObjects(t, kmsAllFixture)
 	kmsCR, ok := kmsObjs["ClusterRole/"+kmsRole]
 	if !ok {
 		t.Fatalf("rook-ceph-csi-kms: ClusterRole %s missing", kmsRole)
@@ -817,13 +891,16 @@ func TestRookCephFixturesMatchChart(t *testing.T) {
 		}
 	}
 
-	// The COSI binding: the unpatched chart renders exactly the fixture's.
+	// The COSI binding: the unpatched chart renders exactly the fixture's,
+	// the chart's own labels included. The labels of the addon's
+	// kustomization are not in the fixture: the compare drops them from the
+	// render (TestRookCephFixtureCompareDropsOnlyAddedLabels).
 	cosiRaw, err := os.ReadFile(cosiFixture)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cosiFx := cosiBindings(decodeObjects(t, cosiRaw))
-	if got := cosiBindings(chart); !reflect.DeepEqual(got, cosiFx) {
+	if got, ok := matchFixture(cosiBindings(chart), cosiFx, kustomizationLabels(t, addon)); !ok {
 		t.Errorf("the chart binds %s/%s with\n%s\nbut the fixture has\n%s\nrefresh %s", rookCephNS, cosiSA, canon(t, got), canon(t, cosiFx), cosiFixture)
 	}
 
@@ -858,6 +935,84 @@ func TestRookCephFixturesMatchChart(t *testing.T) {
 				t.Errorf("%s still grants %s in the shipped render", name, canon(t, r))
 			}
 		}
+	}
+}
+
+// TestRookCephFixtureCompareDropsOnlyAddedLabels checks the compare of
+// TestRookCephFixturesMatchChart (matchFixture) offline, with hand-built
+// object pairs: the labels that the addon's kustomization adds (read from
+// it) do not reach the compare, and every other part of an object does:
+// the chart's own labels, the annotations, the name, the namespace, the
+// subjects and the roleRef.
+func TestRookCephFixtureCompareDropsOnlyAddedLabels(t *testing.T) {
+	t.Parallel()
+	addon := filepath.Join(testutil.RepoRoot(t), rookCephAddon)
+	added := kustomizationLabels(t, addon)
+	// The reader finds the labels: the name label is the addon directory
+	// and the category label is the one that the addon list reads.
+	if len(added) == 0 || added["lok8s.dev/name"] != filepath.Base(addon) || added["lok8s.dev/category"] != Category(addon) {
+		t.Fatalf("kustomizationLabels(%s) = %v, want lok8s.dev/name %s and lok8s.dev/category %s", addon, added, filepath.Base(addon), Category(addon))
+	}
+
+	// fixture is the binding as the fixture file holds it: the chart's own
+	// labels, no added label. render is the same binding as the addon
+	// renders it: the added labels too.
+	fixture := func(edit func(o *object)) []object {
+		o := object{
+			Kind: "ClusterRoleBinding", Name: "binding",
+			Labels:      map[string]string{"app.kubernetes.io/name": "driver", "app.kubernetes.io/part-of": "storage"},
+			Annotations: map[string]string{},
+			Doc: map[string]any{
+				"apiVersion": "rbac.authorization.k8s.io/v1",
+				"kind":       "ClusterRoleBinding",
+				"metadata":   map[string]any{"name": "binding"},
+				"roleRef":    map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "role"},
+				"subjects":   []any{map[string]any{"kind": "ServiceAccount", "name": cosiSA, "namespace": rookCephNS}},
+			},
+		}
+		if edit != nil {
+			edit(&o)
+		}
+		return []object{o}
+	}
+	render := func(edit func(o *object)) []object {
+		return fixture(func(o *object) {
+			maps.Copy(o.Labels, added)
+			if edit != nil {
+				edit(o)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name            string
+		render, fixture []object
+		match           bool
+	}{
+		{"a clean render matches", render(nil), fixture(nil), true},
+		{"a chart label changed in the fixture", render(nil), fixture(func(o *object) { o.Labels["app.kubernetes.io/name"] = "other" }), false},
+		{"a chart label missing from the render", render(func(o *object) { delete(o.Labels, "app.kubernetes.io/part-of") }), fixture(nil), false},
+		{"an added key with another value stays", render(func(o *object) { o.Labels["lok8s.dev/name"] = "other" }), fixture(nil), false},
+		{"an added label in the fixture", render(nil), fixture(func(o *object) { maps.Copy(o.Labels, added) }), false},
+		{"an annotation differs", render(nil), fixture(func(o *object) { o.Annotations["note"] = "other" }), false},
+		{"the roleRef differs", render(nil), fixture(func(o *object) { o.Doc["roleRef"].(map[string]any)["name"] = "other" }), false},
+		{"a subject differs", render(nil), fixture(func(o *object) {
+			o.Doc["subjects"] = []any{map[string]any{"kind": "ServiceAccount", "name": "other", "namespace": rookCephNS}}
+		}), false},
+		{"the name differs", render(nil), fixture(func(o *object) { o.Name = "other" }), false},
+		{"the namespace differs", render(nil), fixture(func(o *object) { o.Namespace = "other" }), false},
+		{"a binding more in the render", append(render(nil), render(nil)...), fixture(nil), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := maps.Clone(tc.render[0].Labels)
+			got, ok := matchFixture(tc.render, tc.fixture, added)
+			if ok != tc.match {
+				t.Errorf("match %v, want %v: the render as compared\n%s\nthe fixture\n%s", ok, tc.match, canon(t, got), canon(t, tc.fixture))
+			}
+			if !maps.Equal(tc.render[0].Labels, before) {
+				t.Errorf("matchFixture changed the labels of the render from %v to %v", before, tc.render[0].Labels)
+			}
+		})
 	}
 }
 

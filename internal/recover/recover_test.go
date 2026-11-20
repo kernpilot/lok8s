@@ -707,6 +707,57 @@ func TestRunRefusesAClusterNameOfAnotherDomain(t *testing.T) {
 	}
 }
 
+// Another domain whose provider config has a merge key (<<) on the path to
+// its cluster_name: the scan cannot tell the name that its provider uses,
+// so recover is refused at resolve (fail closed), before the doctor, the
+// rebuild and the provision; a plain user does not hide it.
+func TestRunClusterNameGuardRefusesAMergeKeyInAnotherDomain(t *testing.T) {
+	h := newHarness(t)
+	h.r.Force = true
+	testutil.WriteFile(t, h.cfg, `{"cluster_name": "shared"}`+"\n")
+	sharedNameForms[0].write(t, filepath.Join(h.r.Paths.Clusters, "copy.dom"))
+	testutil.WriteFile(t, filepath.Join(h.r.Paths.Clusters, "merge.dom", "cluster.lok8s.yaml"),
+		"kind: KubeOne\nmetadata:\n  name: m\nspec:\n  provider:\n    name: mock\n    config:\n      <<: {cluster_name: shared}\n")
+	if err := h.r.Run(t.Context(), "test.dom", false, false); !errors.Is(err, ErrHandled) {
+		t.Fatalf("err = %v, want ErrHandled", err)
+	}
+	if want := "[error] recover: a domain has a merge key (<<) on the path to the cluster_name of its provider config: merge.dom. The provider can take the cluster_name from the merged mapping, so recover cannot compare it with the cluster_name 'shared' of 'test.dom'. Nothing was changed. Write cluster_name as a literal key, without a merge key, in the provider config of that domain, then run lo recover again.\n"; !strings.Contains(h.errBuf.String(), want) {
+		t.Errorf("missing %q in stderr:\n%s", want, h.errBuf.String())
+	}
+	if strings.Contains(h.errBuf.String(), "is also the cluster_name of") {
+		t.Errorf("the guard compared the name:\n%s", h.errBuf.String())
+	}
+	if got := h.recorded(); got != "resolve" {
+		t.Errorf("record = %q, want only the resolve (no doctor, rebuild or provision)", got)
+	}
+}
+
+// A clusters dir that the scan cannot list (no read permission): recover
+// cannot tell the other domains, so it is refused at resolve (fail closed).
+func TestRunClusterNameGuardRefusesWhenTheClustersDirCannotBeRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a dir without the read permission")
+	}
+	h := newHarness(t)
+	h.r.Force = true
+	testutil.WriteFile(t, h.cfg, `{"cluster_name": "shared"}`+"\n")
+	testutil.WriteFile(t, filepath.Join(h.r.Paths.Clusters, "copy.dom", "hetzner.json"), `{"cluster_name": "other"}`+"\n")
+	if err := os.Chmod(h.r.Paths.Clusters, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(h.r.Paths.Clusters, 0o755) })
+	if err := h.r.Run(t.Context(), "test.dom", false, false); !errors.Is(err, ErrHandled) {
+		t.Fatalf("err = %v, want ErrHandled", err)
+	}
+	if want := "[error] recover: could not check if another domain has the cluster_name 'shared' of 'test.dom': lo cannot read the directory " + h.r.Paths.Clusters +
+		". Nothing was changed. Make " + h.r.Paths.Clusters + " a directory that you can read and search, then run lo recover again.\n"; !strings.Contains(h.errBuf.String(), want) {
+		t.Errorf("missing %q in stderr:\n%s", want, h.errBuf.String())
+	}
+	if got := h.recorded(); got != "resolve" {
+		t.Errorf("record = %q, want only the resolve (no doctor, rebuild or provision)", got)
+	}
+}
+
 // The refusal names every other domain with the cluster_name, sorted.
 func TestRunClusterNameGuardNamesEveryDomain(t *testing.T) {
 	h := newHarness(t)
@@ -818,6 +869,9 @@ var configShapes = []struct{ name, config, want string }{
 	{"a merge key after the name", "base: &b {cluster_name: merged}\ncluster_name: a\n<<: *b\n", "merge"},
 	{"a merge key with a list", "base: &b {x: 1}\n<<: [*b]\ncluster_name: a\n", "merge"},
 	{"a quoted << key", "\"<<\": x\ncluster_name: a\n", "merge"},
+	{"a key with the explicit tag !!merge", "x: 1\n!!merge base: {cluster_name: merged}\n", "merge"},
+	{"an alias key that names a plain <<", "x: &k <<\n*k : {cluster_name: merged}\ncluster_name: a\n", "merge"},
+	{"an alias key that names a quoted <<", "x: &k '<<'\n*k : {cluster_name: merged}\ncluster_name: a\n", "merge"},
 	{"int", "cluster_name: 0123\n", "quote"},
 	{"hex int", "cluster_name: 0x1F\n", "quote"},
 	{"float", "cluster_name: 1.5\n", "quote"},

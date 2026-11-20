@@ -29,7 +29,8 @@ import (
 
 // argshMcpTools is the surface the argsh `lo mcp` builtin advertised
 // (captured from `.lok8s/lo mcp` tools/list, 2026-09-02; the kubehz node
-// leaves re-captured 2026-09-13). The ophis surface must stay a superset of
+// leaves re-captured 2026-09-13; lo_secrets_remove-key added with the
+// command, 2026-11-19). The ophis surface must stay a superset of
 // it under the documented renames (argshMcpRenames).
 var argshMcpTools = []string{
 	"lo_addons", "lo_ai_check", "lo_ai_link", "lo_ai_skills", "lo_ai_unlink", "lo_audit",
@@ -44,6 +45,7 @@ var argshMcpTools = []string{
 	"lo_registry_clean", "lo_registry_down", "lo_registry_status", "lo_registry_up",
 	"lo_secrets_add-key", "lo_secrets_allow", "lo_secrets_decrypt", "lo_secrets_encrypt",
 	"lo_secrets_env", "lo_secrets_init", "lo_secrets_list", "lo_secrets_path", "lo_secrets_print",
+	"lo_secrets_remove-key",
 	"lo_secrets_set", "lo_status", "lo_tilt_ci", "lo_tilt_down", "lo_tilt_preflight",
 	"lo_tilt_restart", "lo_tilt_status", "lo_tilt_up", "lo_trust", "lo_up", "lo_use", "lo_version",
 }
@@ -744,6 +746,17 @@ func TestMcpRefusesADashArgumentAndRunsNothing(t *testing.T) {
 	}
 }
 
+// TestMcpDoesNotEchoAPrivateKeyArgument: a dash argument with the shape of
+// a private key (the first line of a PEM block) is refused like any dash
+// argument, and the refusal does not print it.
+func TestMcpDoesNotEchoAPrivateKeyArgument(t *testing.T) {
+	res := mcpCall(t, mcpExposure{destructive: true}, "lo_kubehz_space_get", map[string]any{}, []string{"-----BEGIN OPENSSH PRIVATE KEY-----"})
+	text := resultText(res)
+	if !res.IsError || !strings.Contains(text, "starts with a dash") || strings.Contains(text, "OPENSSH") {
+		t.Errorf("isError=%v text=%q, want the refusal without the argument", res.IsError, text)
+	}
+}
+
 // TestMcpRunsAnAllowedCallWithItsArgvUnchanged: the argv of an allowed
 // call is <command path> <flags> <args>, nothing added. A routed project
 // hands it to the argsh tree, which has no "--" marker.
@@ -794,7 +807,7 @@ func TestMcpTierCountsMatchTheDocs(t *testing.T) {
 	}{
 		{mcpExposure{}, 29},
 		{mcpExposure{mutating: true}, 55},
-		{mcpExposure{destructive: true}, 98},
+		{mcpExposure{destructive: true}, 99},
 	} {
 		if got := len(mcpToolNames(t, tc.x)); got != tc.want {
 			t.Errorf("%+v: %d tools, want %d (update the count here and in docs/reference/cli.md)", tc.x, got, tc.want)

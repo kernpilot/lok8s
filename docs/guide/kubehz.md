@@ -424,9 +424,9 @@ node-level surface, so a verb never touches more than its name says.
 ### `lo kubehz node join`
 
 Run it **as root on the machine you are adding**. It mints a join ticket from
-the platform, then runs the `kubeadm join` line the platform composes. The
-platform composes that line because the join address and the CA fingerprints
-are properties of a control plane you do not run.
+the platform, then joins with the `kubeadm join` line the platform composes.
+The platform composes that line because the join address and the CA
+fingerprints are properties of a control plane you do not run.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -437,9 +437,64 @@ are properties of a control plane you do not run.
 | `--kubelet-version` | read from this machine | The kubelet version to declare. The platform refuses a version more than two minors behind the control plane. |
 | `--print-only` | off | Mint the ticket, print the command, and run nothing. |
 
-The command refuses before it mints anything when `kubeadm` is absent, or when
-the shell is not root. Use `--print-only` to mint on one machine and join on
-another.
+The command refuses before it mints anything, so a refusal costs no ticket,
+when:
+
+- `--node-ip` is not one IP address, or an IPv4 and an IPv6 address with a
+  comma between them.
+- `--print-only` and `--node-ip` are both set. `kubeadm join` has no
+  `--node-ip` flag. Without `--print-only`, the join configuration sets the
+  node IP of the kubelet.
+- `kubeadm` is absent, or the shell is not root (not checked with
+  `--print-only`).
+- `kubeadm version -o short` reports a version older than 1.22, or an answer
+  the command cannot read (not checked with `--print-only`).
+- A part of the temp dir path fails the owner check (not checked with
+  `--print-only`). The path is `TMPDIR` (else `/tmp`) with each symlink
+  resolved. Each part, from `/` down, must belong to root or to you, and
+  must not be writable by its group or by others unless it has the sticky
+  bit. Thus `/tmp` (root, mode 1777) passes, and so does a directory of
+  yours of mode 0755 or 0700. A directory of yours of mode 0775 fails, and
+  so does a directory of another user. In a user namespace that does not
+  map your uid, a part of yours fails too: the command cannot prove that
+  it is yours.
+
+Use `--print-only` to mint on one machine and join on another.
+
+**The bootstrap token stays off argv.** The command reads the line into a
+kubeadm join configuration (`v1beta3` for kubeadm 1.22 to 1.30, `v1beta4`
+from 1.31). It writes the configuration to a file of mode 0600 in a new
+directory of mode 0700 under `TMPDIR`, and runs
+`kubeadm join --config <file>`. It removes the file and the directory after the join, after a
+failure, and after Ctrl-C, SIGTERM or SIGHUP. On a signal it stops
+`kubeadm` first: it signals `kubeadm`, waits at most 10 seconds, then
+kills it. A second Ctrl-C, SIGTERM or SIGHUP does not end the command
+sooner: the stop and the removal finish first. Only SIGKILL ends the
+command at once, and then the file and the directory stay. If the removal
+fails, the command names the directory. Delete that directory: it holds
+the token until the ticket expires.
+
+After a signal, the command exits with 128 plus the signal number (130 for
+Ctrl-C). If `kubeadm join` ended with 0 all the same, the command says
+that the node joined. Otherwise it says that the ticket holds a node slot
+for about ten minutes, and prints the command that frees it. A signal
+during the mint gets the same note: the platform may have minted the
+ticket. The mint request ends within 150 seconds (30 seconds for the
+connect), also when the platform does not answer.
+
+After the mint, the command joins only with a line it can read:
+`kubeadm join <host>:<port>`, exactly one `--token`, at least one
+`--discovery-token-ca-cert-hash sha256:<64 hex digits>`, and an optional
+`--node-name`. Any other word, flag or control character stops the join,
+with or without `--print-only`. The error names the position of the word,
+never the word, because a word can hold a token. A refusal after the mint
+holds a node slot, and the error prints the command that frees it.
+
+::: warning `--print-only` prints the bootstrap token
+The printed `kubeadm join` line holds the token. When you run it, the token
+is on the argv of `kubeadm`, where other users of that machine can read it.
+The token is valid for ten minutes and for one join.
+:::
 
 ::: warning Re-run with `sudo -E`, not plain `sudo`
 `kubeadm join` must run as root, but the join reads `KUBEHZ_TOKEN` and the
@@ -815,16 +870,22 @@ Properties worth knowing:
 - **Outbound-only.** The agent pushes; the platform never connects into your
   cluster and holds no credentials for it (only verifier hashes).
 - **Least-privilege RBAC.** The `kubehz-agent` ServiceAccount can read cluster
-  state: `get`/`list` on nodes, namespaces, componentstatuses and CSRs, `list`
-  pods in `kube-system` only (control-plane health), and `get` on the `/readyz`
-  + `/version` API paths. On top of that it holds `get`+`create` (never
-  `update`/`patch`/`delete`) on Secrets in its own `kubehz-system` namespace,
-  to bootstrap its identity Secret once. It reads no Secrets elsewhere and can rotate nothing. The
+  state: `list` on nodes and CSRs, `list` pods in `kube-system` only
+  (control-plane health), and `get` on the `/readyz` + `/version` API paths.
+  On top of that it holds `get` on its identity Secret and `create` on
+  Secrets (never `update`/`patch`/`delete`) in its own `kubehz-system`
+  namespace, to bootstrap that Secret once. It reads no other Secret and can
+  rotate nothing. The
   [assessment](#assessment-and-handover) adds read-only probe grants
-  (storageclasses, persistentvolumes, services `list`, webhook configuration
-  `list`, `get` on the one CAPI CRD, kube-system daemonset `list` + the
-  `kubeadm-config` ConfigMap) and `get`/`patch` scoped to the single
-  `kubehz-agent-config` ConfigMap for its send-gate marker.
+  (`list` on storageclasses, persistentvolumes, services and webhook
+  configurations, `get` on the one CAPI CRD, kube-system daemonset `list` +
+  the `kubeadm-config` ConfigMap). The agent keeps its markers (the
+  assessment send gate, the claim nonce and the desired-state validator) as
+  annotations on one ConfigMap, `kubehz-agent-state`. `get`/`patch` on that
+  ConfigMap is its only grant that changes an existing object, and the
+  Secret `create` above is its only other write grant. It has no access to
+  `kubehz-agent-config`, its configuration: the pod gets it through
+  `envFrom`, so the agent cannot change its own API URL.
 - **Domain-keyed.** The payload's `clusterId` is the cluster domain, the same
   identity it registers under.
 - **Hardened.** Stock `alpine/k8s` image (pinned by digest), non-root, read-only
@@ -885,6 +946,50 @@ The manifests ship with lok8s as kustomize directories:
 `.lok8s/libs/kubehz/manifests/live-agent/` (live agent, base and managed). So
 you can read exactly what `deploy` applies, or render it first with
 `lo kubehz deploy --dry-run`.
+
+### An agent that an older lo deployed
+
+An older lo kept the agent's markers as annotations on `kubehz-agent-config`,
+and the agent could patch that ConfigMap. lo now keeps them on
+`kubehz-agent-state`. After you update lo, run `lo kubehz deploy` again. It
+adds `kubehz-agent-state` and the new RBAC, and the CronJob reads its markers
+there from the next tick.
+
+- Until you deploy again, the agent in the cluster keeps the old script and
+  beats as before. `lo kubehz claim` stops with
+  `configmap/kubehz-agent-state not found`.
+- The first tick after the deploy finds no markers. It sends one assessment,
+  and the desired-state poll gets one full answer. Then the 24-hour gate holds
+  again.
+- The agent does not echo a claim nonce that you placed before the deploy.
+  Place a new one with `lo kubehz claim`.
+- The old annotations stay on `kubehz-agent-config`. Nothing reads them.
+- Deploy and claim with one lo version. `lo kubehz claim` only checks that
+  `kubehz-agent-state` exists, and that does not prove that the agent in the
+  cluster reads it. A `lo kubehz deploy` with an older lo puts back the old
+  agent, which reads its markers from `kubehz-agent-config`, and leaves
+  `kubehz-agent-state` behind with nothing reading it. An older lo's
+  `lo kubehz claim` places the nonce on `kubehz-agent-config`, which the
+  current agent does not read. In both cases the claim never verifies: run
+  `lo kubehz deploy` with the current lo, then place a new nonce with
+  `lo kubehz claim`.
+
+Each later `lo kubehz deploy` keeps the markers on `kubehz-agent-state`:
+`kubectl apply` removes only what an earlier apply set.
+
+If a GitOps controller applies the agent manifests, make sure that it does
+not reset `kubehz-agent-state`: let it create the ConfigMap only. For Flux,
+add the annotation `kustomize.toolkit.fluxcd.io/ssa: IfNotPresent` to that
+ConfigMap in your overlay. The shipped manifest of the ConfigMap has no
+annotations. A reset deletes all the markers:
+
+- The time of the last assessment and a pending platform request go. The
+  next tick sends an assessment and writes the time again. A controller that
+  resets the ConfigMap again and again thus causes at most one assessment
+  per reset, and at most one per 5-minute tick.
+- A pending claim nonce goes. That claim never verifies: place a new one
+  with `lo kubehz claim`.
+- The desired-state validator goes. The next poll gets one full answer.
 
 ## Status and deregistration
 
@@ -1078,10 +1183,46 @@ new file belongs to you and has mode 0600. A hard link to the old file keeps
 the old content.
 
 When the path is a link, `--force` replaces the file that the link points
-to, and the link stays. `lo` does this only when you own the link and its
-target. Thus a link that another user puts in a shared directory such as
-`/tmp` cannot make `lo` replace one of your files. A directory, a link to
-one, and a link to nothing are refused.
+to, and the link stays. `lo` does this only when the owners and the mode
+bits on the way let no other user send the write to another file:
+
+- `lo` follows each link on the way itself, one at a time, and at most 8. A
+  loop or a longer chain is refused.
+- Each link must belong to root or to you.
+- Each directory that holds a link, and each directory above it up to `/`,
+  must belong to root or to you. It must not be writable by its group or by
+  others, unless it has the sticky bit (as `/tmp` has).
+- The directory of the target gets the same check, and the target must be a
+  regular file of yours. A FIFO, a socket, a device or a directory is
+  refused.
+
+Thus a link that another user puts in a shared directory such as `/tmp`, or
+a link in a directory that another user can write, cannot make `lo` replace
+one of your files. The refusal names the part of the path that failed, and
+why: "writable by its group" or "writable by others" names the class that
+has the write bit. A directory, a link to one, and a link to nothing are
+refused. A plain file and a new file do not get these checks. But a path
+that exists must be a regular file: `lo` refuses a FIFO, a socket or a
+device there too.
+
+The check reads the owners and the mode bits only. A POSIX ACL entry that
+lets another user write a directory shows in the group bits of its mode
+(the ACL mask), so the check refuses such a directory unless it has the
+sticky bit. The check does not see a right that the mode bits do not show,
+for example the rights of root or of a process with a capability such as
+`CAP_DAC_OVERRIDE`. `lo` does not read who is in a group, so a directory with
+mode 775 is refused, also when the group is your own (umask 002 makes such
+directories). `chmod g-w <dir>` removes the group write bit.
+
+Each name of the path that a `/` follows must be a directory that exists,
+as the kernel requires. Thus `real/`, `real/.`, `missing/../real` and
+`file/../real` are refused before `lo` calls the api, in the path that you
+name and in the target of a link. A `..` after a link to a directory goes
+up from where the link points, as in the kernel. A relative path starts at
+the working directory that the kernel knows, not at `$PWD`, also when
+`$PWD` names that directory through a link. The temporary file of the
+write goes to the directory that the kernel resolves for the path, so for
+`alias/../config` it goes where `alias` points, one level up.
 
 A path in `/proc` or `/dev` is refused, also when a link in the path points
 there. Some of these paths change with the process that opens them: for
@@ -1178,6 +1319,37 @@ webhook counts, node/control-plane counts. It is kubectl-only, read-only,
 fail-soft, and sent **at most once per 24 h** (or when the platform requests
 a refresh through the heartbeat response). The platform turns it into a
 handover **feasibility** verdict.
+
+The agent keeps the time of the last send on `kubehz-agent-state`, and it
+sends an assessment only when it has stored that time. Before the probes, it
+writes the new time, and the same call removes a pending platform request
+(one `kubectl annotate`, one patch). The write comes first, so the agent
+never sends an assessment whose time it has not stored: an agent that cannot
+store the time sends no assessment, and thus cannot send one on every tick.
+What the agent writes for each outcome of the send:
+
+| Outcome | Before the send | After the send |
+|---|---|---|
+| Delivered: the beat with the assessment lands | the new time; a pending request removed | nothing |
+| Rejected: that beat fails, the plain retry lands | the new time; a pending request removed | nothing (the next assessment comes after 24 h) |
+| Failed: both beats fail | the new time; a pending request removed | the old time (or none) and the request put back, in one call (the next tick sends again) |
+
+A tick that writes the time and then sends no assessment (a probe has no
+answer, or the beat is skipped) puts back the old values the same way.
+
+If the agent cannot write the ConfigMap (its RBAC lacks the `patch`, or an
+admission webhook refuses it), the tick sends no assessment, keeps the
+request, and logs
+`kubehz: assessment not sent: the agent cannot write configmap/kubehz-agent-state in kubehz-system; run 'lo kubehz deploy'`.
+If the agent cannot read the ConfigMap, the tick logs
+`kubehz: assessment and desired-state poll skipped: …`. In both cases the
+plain heartbeat still goes out. `lo kubehz deploy` puts back the ConfigMap
+and the agent's RBAC. An admission webhook that refuses the write is yours
+to change.
+
+If the write that puts back the old values fails too, the tick logs
+`kubehz: could not put back the assessment marker on configmap/kubehz-agent-state in kubehz-system; the next assessment comes after the 24h window or on a platform request`.
+That assessment is lost. The agent does not send it again on each tick.
 
 ```bash
 lo kubehz assess    # pretty-print the stored assessment + feasibility

@@ -6,4 +6,5 @@ resources:
   - serviceaccount.yaml
   - rbac.yaml
   - configmap.yaml
+  - state-configmap.yaml
   - cronjob.yaml

@@ -143,7 +143,9 @@ _write_descriptor() {
   CFGDIR="${BATS_TEST_TMPDIR}/clusters/test.example"
   mkdir -p "${CFGDIR}/cloud-init" "${CFGDIR}/pub"
   printf 'ssh-ed25519 AAAAtest test\n' > "${CFGDIR}/pub/id.pub"
+  # A private key that only its owner can access, as ssh requires.
   : > "${BATS_TEST_TMPDIR}/id_key"
+  chmod 600 "${BATS_TEST_TMPDIR}/id_key"
   DESC="${CFGDIR}/hetzner.json"
   WORK="${BATS_TEST_TMPDIR}/work"
   cat > "${DESC}" <<JSON
@@ -798,6 +800,12 @@ _lb_descriptor() {
 # _lb_hcloud: the LB api-lb exists. `describe -o json` prints LIVE_LB (the API
 # schema of hcloud-go: targets[].type label_selector|server|ip, use_private_ip,
 # services[].listen_port/destination_port). LB_FAIL=<verb> fails that verb.
+# LB_DESCRIBE_STDERR=<text>: the load-balancer describe also writes this line
+# to stderr, and succeeds. LB_ADD_ALREADY=<error>: the first add-target is
+# done, but its answer is lost (it fails); every later add-target fails with
+# this error and changes nothing. LB_REREAD_FAIL=1 (with LB_ADD_ALREADY): the
+# first describe after the first such error fails with a rate limit; every
+# other describe succeeds.
 _lb_hcloud() {
   export LB_ADOPTED='[{"id":5,"name":"api-lb","labels":{"lok8s.dev/owner":"'"${MARK}"'"}}]'
   hcloud() {
@@ -811,6 +819,12 @@ _lb_hcloud() {
           echo "${LB_LIST:-${LB_ADOPTED}}"
         fi ;;
       "load-balancer describe")
+        [[ -z "${LB_DESCRIBE_STDERR:-}" ]] || printf '%s\n' "${LB_DESCRIBE_STDERR}" >&2
+        if [[ -f "${BATS_TEST_TMPDIR}/lb-reread-fail" ]]; then
+          rm -f "${BATS_TEST_TMPDIR}/lb-reread-fail"
+          echo "hcloud: limit of requests reached (rate_limit_exceeded)" >&2
+          return 1
+        fi
         if [[ -f "${BATS_TEST_TMPDIR}/lb-created" ]]; then
           echo '{"id":6,"name":"api-lb","labels":{"lok8s.dev/owner":"'"${MARK}"'"},"targets":[],"services":[]}'
           return 0
@@ -822,6 +836,15 @@ _lb_hcloud() {
         local n; n=$(grep -c '^load-balancer add-target' "${HCLOUD_LOG}")
         (( n > ${LB_ADD_FAILS:-0} )) || { echo "hcloud: target not found (server_error)" >&2; return 1; }
         [[ "${LB_FAIL:-}" != "add-target" ]] || { echo "hcloud: add-target failed (server_error)" >&2; return 1; }
+        if [[ -n "${LB_ADD_ALREADY:-}" ]]; then
+          (( n > 1 )) || { : > "${BATS_TEST_TMPDIR}/lb-changed"; echo "hcloud: timeout awaiting response headers" >&2; return 1; }
+          if [[ -n "${LB_REREAD_FAIL:-}" && ! -f "${BATS_TEST_TMPDIR}/lb-reread-failed" ]]; then
+            : > "${BATS_TEST_TMPDIR}/lb-reread-fail"
+            : > "${BATS_TEST_TMPDIR}/lb-reread-failed"
+          fi
+          printf '%s\n' "${LB_ADD_ALREADY}" >&2
+          return 1
+        fi
         : > "${BATS_TEST_TMPDIR}/lb-changed" ;;
       "server list")            echo '[{"id":42,"name":"cp-0","status":"running","labels":{"lok8s.dev/owner":"'"${MARK}"'"}}]' ;;
       "server describe")        echo '{"id":42,"name":"cp-0","labels":{"lok8s.dev/owner":"'"${MARK}"'"}}' ;;
@@ -958,7 +981,7 @@ load-balancer add-service 6 --protocol tcp --listen-port 6443 --destination-port
   run hetzner::load-balancer
   assert_failure
   assert_output --partial "before: label_selector lok8s.dev/role=control-plane${OWN} use-private-ip=true"
-  assert_output --partial "lb api-lb: removed target label-selector 'lok8s.dev/role=control-plane${OWN}', but could not add it again with use-private-ip false in 3 attempts: hcloud: add-target failed (server_error). The load balancer does not route to this target now. Add it with 'hcloud load-balancer add-target api-lb --label-selector lok8s.dev/role=control-plane${OWN}', or run the provision again."
+  assert_output --partial "lb api-lb: removed target label-selector 'lok8s.dev/role=control-plane${OWN}', but could not add it again with use-private-ip false in 3 attempts: hcloud: add-target failed (server_error). The load balancer does not route to this target now. Run the provision again, or add the target with this command: hcloud load-balancer add-target api-lb --label-selector lok8s.dev/role=control-plane${OWN}"
   assert_output --partial "hetzner: the load balancer does not match the descriptor"
   run grep -c '^load-balancer remove-target' "${HCLOUD_LOG}"
   assert_output "1"
@@ -1000,10 +1023,212 @@ load-balancer add-service 6 --protocol tcp --listen-port 6443 --destination-port
   _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane" }'
   run hetzner::load-balancer
   assert_failure
-  assert_output --partial "hetzner: did not change load-balancer 5: could not read it right before the change ('hcloud load-balancer describe 5')."
+  assert_output --partial "hetzner: did not change load-balancer 5: could not read it right before the change ('hcloud load-balancer describe 5': hcloud: load balancer not found: 5)."
   assert_output --partial "lb api-lb: did not change the targets and services of the load balancer"
   run grep -cE '^load-balancer (add|remove)-(target|service)' "${HCLOUD_LOG}"
   assert_output "0"
+}
+
+# ── issue #305: the provider items of the #297 review ────────────────────────
+
+# _lb_replace_fixture: an adopted target with use-private-ip true, and a
+# descriptor without it: the hook removes the target and adds it again.
+# LIVE_LB_AFTER (the read after the first add) is set by the test.
+_lb_replace_fixture() {
+  _lb_hcloud
+  export HETZNER_LB_ADD_TRIES=3 HETZNER_LB_ADD_DELAY=0
+  _live_lb '{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane'"${OWN}"'"},"use_private_ip":true}'
+  _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane" }'
+}
+
+# _lb_after <targets>: LIVE_LB_AFTER, the load balancer with these targets.
+_lb_after() {
+  export LIVE_LB_AFTER='{"id":5,"name":"api-lb","labels":{"lok8s.dev/owner":"'"${MARK}"'"},"private_net":[{"network":9,"ip":"10.0.0.2"}],"targets":['"${1}"']}'
+}
+
+# _argv_of <command line>: ARGV, the words of the command line as the shell
+# reads them.
+_argv_of() {
+  eval "ARGV=(${1})"
+}
+
+# hcloud prints an API error as "hcloud: <message> (<code>)", or with a
+# correlation id after the code (hcloud-go Error.Error). The code of a
+# target that the load balancer has already is target_already_defined.
+@test "hetzner::load-balancer counts a re-add that answers target_already_defined as done when a new read shows the target" {
+  local answer
+  for answer in \
+      'hcloud: The Load Balancer target you are trying to define is already defined (target_already_defined)' \
+      'hcloud: The Load Balancer target you are trying to define is already defined (target_already_defined, a6c75d4a)'; do
+    rm -f "${BATS_TEST_TMPDIR}/lb-changed"
+    : > "${CLOUD_LOG_FILE}"
+    _lb_replace_fixture
+    export LB_ADD_ALREADY="${answer}"
+    _lb_after '{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane'"${OWN}"'"},"use_private_ip":false}'
+    run hetzner::load-balancer
+    assert_success
+    refute_output --partial "could not add it again"
+    # The first add was done (its answer was lost); the second answered "already".
+    run grep -c '^load-balancer add-target 5 ' "${HCLOUD_LOG}"
+    assert_output "2"
+    run grep -c 'add-target attempt 2/3: the target is defined already, and a new read shows it with use-private-ip false' "${CLOUD_LOG_FILE}"
+    assert_output "1"
+  done
+}
+
+@test "hetzner::load-balancer fails a re-add that answers target_already_defined when a new read does not show the target" {
+  _lb_replace_fixture
+  export LB_ADD_ALREADY='hcloud: The Load Balancer target you are trying to define is already defined (target_already_defined)'
+  _lb_after ''
+  run hetzner::load-balancer
+  assert_failure
+  assert_output --partial "lb api-lb: removed target label-selector 'lok8s.dev/role=control-plane${OWN}', but could not add it again with use-private-ip false in 3 attempts: ${LB_ADD_ALREADY}."
+  assert_output --partial "hetzner: the load balancer does not match the descriptor"
+  run grep -c '^load-balancer add-target 5 ' "${HCLOUD_LOG}"
+  assert_output "3"
+}
+
+# A new read that shows the target with the other use-private-ip stops the
+# re-add at once: each later attempt gets the same answer. The message names
+# the value that the read shows, and the load balancer routes to the target.
+@test "hetzner::load-balancer stops a re-add that answers target_already_defined at once when a new read shows the target with another use-private-ip" {
+  _lb_replace_fixture
+  export LB_ADD_ALREADY='hcloud: The Load Balancer target you are trying to define is already defined (target_already_defined)'
+  _lb_after '{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane'"${OWN}"'"},"use_private_ip":true}'
+  run hetzner::load-balancer
+  assert_failure
+  assert_output --partial "lb api-lb: removed target label-selector 'lok8s.dev/role=control-plane${OWN}' to set use-private-ip false, but the add answered that the target is defined already, and a new read shows it with use-private-ip true. Another run or person changed the load balancer at the same time. The load balancer routes to this target with use-private-ip true now. Run the provision again."
+  refute_output --partial "could not add it again"
+  refute_output --partial "does not route to this target now"
+  assert_output --partial "hetzner: the load balancer does not match the descriptor"
+  # The first add was done (its answer was lost); the second answered "already": no third.
+  run grep -c '^load-balancer add-target 5 ' "${HCLOUD_LOG}"
+  assert_output "2"
+}
+
+# A failed new read after target_already_defined stops the re-add at once:
+# the caller reports it once, and no later attempt that succeeds leaves the
+# message of the read behind as a false error.
+@test "hetzner::load-balancer stops a re-add at once when the new read after target_already_defined fails" {
+  _lb_replace_fixture
+  export LB_ADD_ALREADY='hcloud: The Load Balancer target you are trying to define is already defined (target_already_defined)' LB_REREAD_FAIL=1
+  _lb_after '{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane'"${OWN}"'"},"use_private_ip":false}'
+  run hetzner::load-balancer
+  assert_failure
+  assert_output --partial "hetzner: did not change load-balancer 5: could not read it right before the change ('hcloud load-balancer describe 5': hcloud: limit of requests reached (rate_limit_exceeded))."
+  assert_output --partial "lb api-lb: removed target label-selector 'lok8s.dev/role=control-plane${OWN}', and did not add it again: the load balancer or the server changed (the message above)."
+  local out="${output}"
+  run grep -c 'could not read it right before the change' <<<"${out}"
+  assert_output "1"
+  run grep -c '^load-balancer add-target 5 ' "${HCLOUD_LOG}"
+  assert_output "2"
+}
+
+# Only the code target_already_defined: another error with "already" in it
+# is not an answer that this target is on the load balancer.
+@test "hetzner::load-balancer fails a re-add whose error has 'already' but another code, also when a new read shows the target" {
+  _lb_replace_fixture
+  export LB_ADD_ALREADY='hcloud: the load balancer is already locked by another action (locked)'
+  _lb_after '{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane'"${OWN}"'"},"use_private_ip":false}'
+  run hetzner::load-balancer
+  assert_failure
+  assert_output --partial "but could not add it again with use-private-ip false in 3 attempts: ${LB_ADD_ALREADY}."
+  run grep -c '^load-balancer add-target 5 ' "${HCLOUD_LOG}"
+  assert_output "3"
+}
+
+# A successful describe can write a line to stderr (a warning of hcloud). It
+# does not go into the JSON that lok8s reads, and lok8s does not print it.
+@test "hetzner::load-balancer reads a describe that also writes to stderr, and does not print that line" {
+  _lb_hcloud
+  export LB_DESCRIBE_STDERR='canary-7f3e1b: a line on the stderr of hcloud'
+  _live_lb '{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane'"${OWN}"'"},"use_private_ip":false}'
+  _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane" }'
+  # A TMPDIR of its own: the temp file of each describe is removed after it.
+  export TMPDIR="${BATS_TEST_TMPDIR}/describe-tmp"
+  mkdir -p "${TMPDIR}"
+  run hetzner::load-balancer
+  assert_success
+  refute_output --partial "canary-7f3e1b"
+  run find "${TMPDIR}" -mindepth 1
+  assert_output ""
+  # The live read gave the target: kept, no write.
+  run grep -cE '^load-balancer (remove-target|add-target|add-service|update-service)' "${HCLOUD_LOG}"
+  assert_output "0"
+  run grep -c '^load-balancer describe 5 -o json' "${HCLOUD_LOG}"
+  refute_output "0"
+}
+
+# A describe that fails: the error gives the reason of hcloud, the last line
+# that it wrote to stderr (a 401, a 429 or a 404), and no earlier line.
+@test "hetzner::load-balancer gives the last stderr line of a describe that fails in its error" {
+  _lb_hcloud
+  unset LIVE_LB
+  export LB_DESCRIBE_STDERR='canary-7f3e1b: a line on the stderr of hcloud'
+  _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane" }'
+  # A TMPDIR of its own: the temp file of the describe is removed after it.
+  export TMPDIR="${BATS_TEST_TMPDIR}/describe-tmp"
+  mkdir -p "${TMPDIR}"
+  run hetzner::load-balancer
+  assert_failure
+  assert_output --partial "hetzner: did not change load-balancer 5: could not read it right before the change ('hcloud load-balancer describe 5': hcloud: load balancer not found: 5)."
+  refute_output --partial "canary-7f3e1b"
+  run find "${TMPDIR}" -mindepth 1
+  assert_output ""
+}
+
+# Only a describe that fails gives its stderr: one that succeeds with a line
+# on stderr, but answers no load balancer object, gets the error without it.
+@test "hetzner::load-balancer gives no stderr line in the error of a describe that succeeds with an answer it cannot use" {
+  _lb_hcloud
+  export LIVE_LB='[]' LB_DESCRIBE_STDERR='canary-7f3e1b: a line on the stderr of hcloud'
+  _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane" }'
+  run hetzner::load-balancer
+  assert_failure
+  assert_output --partial "hetzner: did not change load-balancer 5: could not read it right before the change ('hcloud load-balancer describe 5')."
+  refute_output --partial "canary-7f3e1b"
+}
+
+# Hetzner label selectors can have a space ("env in (a, b)"). The command in
+# the message gives each argument as one shell word. A word can hold \'
+# (printf %q), so the command ends the message without quotes around it.
+@test "hetzner::load-balancer quotes a selector with a space or a quote in the re-add command, and the command reads back to the same arguments" {
+  local sel re hint
+  for sel in 'lok8s.dev/role in (control-plane, worker)' "lok8s.dev/role in (it's)"; do
+    : > "${HCLOUD_LOG}"
+    _lb_hcloud
+    export LB_FAIL=add-target HETZNER_LB_ADD_TRIES=1 HETZNER_LB_ADD_DELAY=0
+    _live_lb '{"type":"label_selector","label_selector":{"selector":"'"${sel}${OWN}"'"},"use_private_ip":true}'
+    _lb_descriptor '{ "type": "label-selector", "value": "'"${sel}"'" }'
+    run hetzner::load-balancer
+    assert_failure
+    re="or add the target with this command: ([^"$'\n'"]*)"
+    [[ "${output}" =~ ${re} ]]
+    hint="${BASH_REMATCH[1]}"
+    [[ "${hint}" != *"${sel}"* ]]
+    _argv_of "${hint}"
+    [ "${#ARGV[@]}" -eq 6 ]
+    [ "${ARGV[*]:0:5}" = "hcloud load-balancer add-target api-lb --label-selector" ]
+    [ "${ARGV[5]}" = "${sel}${OWN}" ]
+  done
+}
+
+@test "hetzner::load-balancer quotes a selector with a space in the remove command of the audit" {
+  local sel='env in (a, b)'
+  _lb_hcloud
+  export LB_FAIL=remove-target
+  _live_lb '{"type":"label_selector","label_selector":{"selector":"lok8s.dev/role=control-plane'"${OWN}"'"},"use_private_ip":false},
+            {"type":"label_selector","label_selector":{"selector":"'"${sel}"'"},"use_private_ip":false}'
+  _lb_descriptor '{ "type": "label-selector", "value": "lok8s.dev/role=control-plane" }'
+  run hetzner::load-balancer
+  assert_failure
+  local re="Run this command, then run the provision again: ([^"$'\n'"]*)"
+  [[ "${output}" =~ ${re} ]]
+  [[ "${BASH_REMATCH[1]}" != *"${sel}"* ]]
+  _argv_of "${BASH_REMATCH[1]}"
+  [ "${#ARGV[@]}" -eq 6 ]
+  [ "${ARGV[*]:0:5}" = "hcloud load-balancer remove-target api-lb --label-selector" ]
+  [ "${ARGV[5]}" = "${sel}" ]
 }
 
 # The readiness barrier connects with sshPrivateKey after the reimage: a
@@ -1038,6 +1263,125 @@ load-balancer add-service 6 --protocol tcp --listen-port 6443 --destination-port
   run provider::rebuild "${DESC}" "${WORK}"
   assert_failure
   assert_output --partial "rebuild: sshPrivateKey '${BATS_TEST_TMPDIR}/id_key' does not exist"
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
+}
+
+# ssh does not use a private key that group or other users can access ("bad
+# permissions"): the `ssh -i` of the barrier goes on without it, so the
+# barrier cannot reach the reimaged nodes. The rebuild stops before it.
+@test "provider::rebuild stops before any reimage when group or other users can access sshPrivateKey" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  local key="${BATS_TEST_TMPDIR}/id_key" m
+  for m in 644 640 604; do
+    chmod "${m}" "${key}"
+    : > "${HCLOUD_LOG}"; : > "${CURL_LOG}"; : > "${SSH_LOG}"
+    run provider::rebuild "${DESC}" "${WORK}"
+    assert_failure
+    assert_output --partial "rebuild: sshPrivateKey '${key}' (${key}) has mode ${m}: group or other users can access it. ssh does not use a private key with these permissions, so the readiness check cannot connect after the reimage, and nothing was reimaged. Make the key private: chmod 600 ${key}"
+    run cat "${HCLOUD_LOG}"
+    refute_output --partial "server rebuild"
+    run cat "${CURL_LOG}"
+    refute_output --partial "/rescue"
+    run grep -c -- ' -y ' "${SSH_LOG}"
+    assert_output "0"
+  done
+}
+
+@test "provider::rebuild checks the mode of sshPrivateKey also without sshPublicKey" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  yq -i -o json 'del(.sshPublicKey)' "${DESC}"
+  chmod 644 "${BATS_TEST_TMPDIR}/id_key"
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "rebuild: sshPrivateKey '${BATS_TEST_TMPDIR}/id_key' (${BATS_TEST_TMPDIR}/id_key) has mode 644"
+  run cat "${HCLOUD_LOG}"
+  refute_output --partial "server rebuild"
+}
+
+@test "provider::rebuild gives the chmod command of a key path with a space as one shell word" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  local key="${BATS_TEST_TMPDIR}/my keys/id key"
+  mkdir -p "${key%/*}"
+  : > "${key}"
+  chmod 644 "${key}"
+  KEY="${key}" yq -i -o json '.sshPrivateKey = strenv(KEY)' "${DESC}"
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_failure
+  local re="Make the key private: chmod 600 ([^"$'\n'"]*)"
+  [[ "${output}" =~ ${re} ]]
+  _argv_of "${BASH_REMATCH[1]}"
+  [ "${#ARGV[@]}" -eq 1 ]
+  [ "${ARGV[0]}" = "${key}" ]
+}
+
+@test "provider::rebuild accepts a sshPrivateKey that only its owner can access" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  local m
+  for m in 600 400; do
+    chmod "${m}" "${BATS_TEST_TMPDIR}/id_key"
+    : > "${HCLOUD_LOG}"
+    run provider::rebuild "${DESC}" "${WORK}"
+    assert_success
+    refute_output --partial "has mode"
+    run grep -c 'server rebuild 10 ' "${HCLOUD_LOG}"
+    assert_output "1"
+  done
+}
+
+# ssh checks the mode only of a key that the running user owns (OpenSSH
+# sshkey_perm_ok: st_uid == getuid()). It uses a key of another owner, for
+# example a root-owned 0440 Secret mount that a non-root runner reads. A
+# test cannot make a file of another owner without root: a stat stand-in
+# shows the key with the owner STAT_OWNER and its real mode.
+@test "provider::rebuild accepts a sshPrivateKey of another owner whose mode lets group or other users access it" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  local key="${BATS_TEST_TMPDIR}/id_key" m
+  export STAT_KEY="${key}" STAT_OWNER=$(( UID + 1 ))
+  stat() {
+    local out
+    out="$(command stat "$@")" || return
+    if [[ "${!#}" == "${STAT_KEY}" && " $* " == *" %u %a "* ]]; then
+      out="${STAT_OWNER} ${out#* }"
+    fi
+    printf '%s\n' "${out}"
+  }
+  export -f stat
+  for m in 644 440; do
+    chmod "${m}" "${key}"
+    : > "${HCLOUD_LOG}"
+    run provider::rebuild "${DESC}" "${WORK}"
+    assert_success
+    refute_output --partial "has mode"
+    run grep -c 'server rebuild 10 ' "${HCLOUD_LOG}"
+    assert_output "1"
+  done
+}
+
+# ssh opens the file that a link points to and checks the mode of that file,
+# not the mode of the link (a link has mode 777).
+@test "provider::rebuild accepts a sshPrivateKey link to a key with mode 600 that the running user owns" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  local link="${BATS_TEST_TMPDIR}/id_link"
+  chmod 600 "${BATS_TEST_TMPDIR}/id_key"
+  ln -s "${BATS_TEST_TMPDIR}/id_key" "${link}"
+  LINK="${link}" yq -i -o json '.sshPrivateKey = strenv(LINK)' "${DESC}"
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_success
+  refute_output --partial "has mode"
+  run grep -c 'server rebuild 10 ' "${HCLOUD_LOG}"
+  assert_output "1"
+}
+
+@test "provider::rebuild stops before any reimage for a sshPrivateKey link to a key with mode 644 that the running user owns" {
+  export PROVIDER_ROBOT_RESCUE_FP="de:ad:be:ef"
+  local link="${BATS_TEST_TMPDIR}/id_link"
+  chmod 644 "${BATS_TEST_TMPDIR}/id_key"
+  ln -s "${BATS_TEST_TMPDIR}/id_key" "${link}"
+  LINK="${link}" yq -i -o json '.sshPrivateKey = strenv(LINK)' "${DESC}"
+  run provider::rebuild "${DESC}" "${WORK}"
+  assert_failure
+  assert_output --partial "rebuild: sshPrivateKey '${link}' (${link}) has mode 644: group or other users can access it."
   run cat "${HCLOUD_LOG}"
   refute_output --partial "server rebuild"
 }

@@ -2,7 +2,9 @@ package execx
 
 // runner_test.go covers the default Runner: env merge, Dir, a name with a
 // path separator, an unresolvable tool, the interrupt on cancel, the wait
-// after it (WaitDelay), and the stop of a process group (ProcessGroup).
+// after it (WaitDelay), the state of the child (Exited), the variables
+// that the child does not inherit (Unset), and the stop of a process group
+// (ProcessGroup).
 
 import (
 	"bytes"
@@ -258,6 +260,53 @@ func processGone(pid int) bool {
 	}
 	_, rest, ok := strings.Cut(string(raw), ") ")
 	return ok && strings.HasPrefix(rest, "Z")
+}
+
+// After the cancel, Run returns the error of the context also when the
+// child ended with 0 on the interrupt: Exited gets the state, which says
+// so. A child that did not start (the context ended before) gives no
+// state: Run returns the same error.
+func TestRunExitedGetsTheStateOfTheChild(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	var out lockedBuffer
+	var state *os.ProcessState
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- NewRunner(nil).Run(ctx, Cmd{
+			Name:   "/bin/sh",
+			Args:   []string{"-c", `trap 'exit 0' INT; echo up; while :; do sleep 0.05; done`},
+			Stdout: &out,
+			Stderr: &out,
+			Exited: func(s *os.ProcessState) { state = s },
+		})
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(out.String(), "up") {
+		if time.Now().After(deadline) {
+			t.Fatal("child did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child did not stop after the cancel")
+	}
+	if err == nil || state == nil || !state.Success() {
+		t.Errorf("err = %v, state = %v; want the error of the context and a state with 0", err, state)
+	}
+
+	called := false
+	err = NewRunner(nil).Run(ctx, Cmd{
+		Name:   "/bin/sh",
+		Args:   []string{"-c", "exit 0"},
+		Exited: func(*os.ProcessState) { called = true },
+	})
+	if err == nil || called {
+		t.Errorf("a done context: err = %v, Exited called = %v; want an error and no call", err, called)
+	}
 }
 
 // Run with Unset: the child does not inherit the named variables, also one

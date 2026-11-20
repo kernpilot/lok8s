@@ -53,6 +53,12 @@ type Cmd struct {
 	// terminal stops there until the stop. False keeps the default: the
 	// child stays in the process group of lo.
 	ProcessGroup bool
+	// Exited, when set, gets the state of the child after it ended (not
+	// when it did not start). After the context ends, Run returns the
+	// error of the context also for a child that ended with 0
+	// (exec.Cmd.Cancel), and Start returns the same error when the child
+	// did not start: the state tells the two apart.
+	Exited func(*os.ProcessState)
 }
 
 // Runner runs external commands. The single seam that lets driver code run
@@ -140,6 +146,9 @@ func (r *osRunner) Run(ctx context.Context, c Cmd) error {
 	err := cmd.Run()
 	if t := stopped.Load(); t != 0 && cmd.Process != nil {
 		stopGroup(cmd.Process.Pid, time.Unix(0, t).Add(c.WaitDelay))
+	}
+	if c.Exited != nil && cmd.ProcessState != nil {
+		c.Exited(cmd.ProcessState)
 	}
 	if err != nil && Debug {
 		fmt.Fprintf(DebugOut, "[debug] exec: %s: exit %d\n", shellWords(append([]string{path}, c.Args...)), ExitCode(err))

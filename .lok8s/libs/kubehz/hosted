@@ -25,7 +25,10 @@ kubehz::build_cluster_payload() {
   kind=$(yq -r '.kind' "${cluster_yaml}")
   provider=$(yq -r '.spec.provider // "hetzner"' "${cluster_yaml}")
   region=$(yq -r '.spec.hcloud.region // .spec.aws.region // "fsn1"' "${cluster_yaml}")
-  k8s_version=$(yq -r '.spec.kubernetes.version' "${cluster_yaml}")
+  # An unset version (no key, a YAML null, an empty string) is left out of
+  # the payload. The bare read printed the word "null", which went out as
+  # the version string "null" (issue #272). Go twin: buildClusterPayload.
+  k8s_version=$(yq -r '.spec.kubernetes.version // ""' "${cluster_yaml}")
   cp_replicas=$(yq -r '.spec.controlPlane.replicas // 1' "${cluster_yaml}")
   hosting=$(yq -r '.spec.kubehz.hosting // "self"' "${cluster_yaml}")
   access=$(yq -r '.spec.kubehz.access // "none"' "${cluster_yaml}")
@@ -39,9 +42,9 @@ kubehz::build_cluster_payload() {
     --argjson controlPlaneReplicas "${cp_replicas}" \
     --arg hosting "${hosting}" \
     --arg access "${access}" \
-    '{domain: $domain, kind: $kind, provider: $provider, region: $region,
-      kubernetesVersion: $kubernetesVersion, controlPlaneReplicas: $controlPlaneReplicas,
-      hosting: $hosting, access: $access}'
+    '{domain: $domain, kind: $kind, provider: $provider, region: $region}
+      + (if $kubernetesVersion != "" then {kubernetesVersion: $kubernetesVersion} else {} end)
+      + {controlPlaneReplicas: $controlPlaneReplicas, hosting: $hosting, access: $access}'
 }
 
 # Wait for a hosted cluster to reach Running state.

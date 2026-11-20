@@ -1,0 +1,56 @@
+name: Docs Check
+
+# The strict docs build on a pull request, so that a dead link, a broken
+# page, a broken addon index or a yarn.lock that does not match
+# package.json fails before the merge. Deploy Docs (docs.yml) runs the same install and build only after
+# the merge, and it holds the pages rights. This workflow reads the
+# repository and nothing more: no secrets, no artifact, no deploy.
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'package.json'
+      - 'yarn.lock'
+      - '.lok8s/addons/**'
+      - '.lok8s/libs/addons'
+      - '.lok8s/utils/verbose.sh'
+      - '.github/workflows/docs-check.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Docs build (strict)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 20
+          cache: yarn
+
+      - name: Install deps
+        run: yarn install --frozen-lockfile
+
+      # The same addon index step as docs.yml: its jq check fails the deploy
+      # when an addon pin or the addons lib breaks, so it runs here too. The
+      # file it writes is gitignored and stays on the runner.
+      - name: Build addons index (served at /addons-index.json)
+        run: |
+          bash docs/.vitepress/build-addons-index.sh > docs/public/addons-index.json
+          jq -e '.generatedAt and (.addons | length > 0)' docs/public/addons-index.json
+
+      # VitePress fails the build on a dead link.
+      - name: Build docs
+        run: yarn docs:build

@@ -132,3 +132,38 @@ func TestRequireDriverMismatchMessage(t *testing.T) {
 		t.Errorf("message = %q, want to contain %q", buf.String(), want)
 	}
 }
+
+// A cluster spec with two YAML documents: the gate names the layout (the
+// line `lo provision` prints), not "no readable spec" (issue #272). The
+// other refusals keep the old message. Bash twin: the require_driver
+// cases in tests/unit/domain_resolve_test.bats.
+func TestRequireDriverNamesTheSpecLayout(t *testing.T) {
+	t.Parallel()
+	clusters := t.TempDir()
+	two := filepath.Join(clusters, "two.dev", "cluster.lok8s.yaml")
+	testutil.WriteFile(t, two, "kind: Lo\n---\nkind: KubeOne\n")
+	testutil.WriteFile(t, filepath.Join(clusters, "bad.dev", "cluster.lok8s.yaml"), "kind: ../lo\n")
+
+	var buf bytes.Buffer
+	err := RequireDriver("lo", clusters, "two.dev", "registry management", &buf)
+	if !IsSpecLayout(err) {
+		t.Fatalf("two documents: err = %v, want ErrSpecLayout", err)
+	}
+	want := "[error] " + two + " holds more than one YAML document. Remove lines 2 to 3 (the '---' at line 2 and everything after it).\n"
+	if buf.String() != want {
+		t.Errorf("two documents: message = %q, want %q", buf.String(), want)
+	}
+
+	for d, want := range map[string]string{
+		"missing.dev": "error: domain 'missing.dev' has no readable cluster/deploy spec under clusters/ — cannot run registry management\n",
+		"bad.dev":     "error: domain 'bad.dev' has no readable cluster/deploy spec under clusters/ — cannot run registry management\n",
+	} {
+		buf.Reset()
+		if err := RequireDriver("lo", clusters, d, "registry management", &buf); err == nil || IsSpecLayout(err) {
+			t.Errorf("%s: err = %v, want the no-readable-spec refusal", d, err)
+		}
+		if buf.String() != want {
+			t.Errorf("%s: message = %q, want %q", d, buf.String(), want)
+		}
+	}
+}

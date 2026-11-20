@@ -19,10 +19,22 @@
 #   - a shape that cannot be read, or a value that is not an image tag → an
 #     error BEFORE any docker, kind or provider call, never "unset".
 # The reader cases are shared with the Go twin: tests/fixtures/kind-node-version/.
+#
+# No test may reach a real tool. The docker and kind calls of the provision
+# tests go to the function stubs in _load (also the node IP heal gate of
+# drivers/lo/main, which runs for real and finds no node on the registry
+# network). As a net under them, setup puts failing stubs of eight tools first
+# on PATH (stub_tools in tests/test_helper.bash), and teardown fails the test
+# when one of them ran.
 
 setup() {
   load "../test_helper"
   setup_tmpdir
+  stub_tools docker kind kubectl helm ssh scp rsync curl
+  # A shell that exports one of these sends driver::provision down another
+  # path: LOK8S_REMOTE* to the remote branch and the expose, PROVIDER_NAME to
+  # the provider, LOK8S_BOOTSTRAP_DRYRUN* to the registry document of a dry run.
+  unset "${!LOK8S_REMOTE@}" PROVIDER_NAME "${!LOK8S_BOOTSTRAP_DRYRUN@}"
   export PATH_CLUSTERS="${BATS_TEST_TMPDIR}/clusters"
   export PATH_BASE="${BATS_TEST_TMPDIR}/base"
   export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s"
@@ -36,7 +48,13 @@ setup() {
   : > "${CALLS}"
 }
 
-teardown() { teardown_tmpdir; }
+# Every test ends with the check that no tool on PATH ran.
+teardown() {
+  local rc=0
+  assert_no_tool_ran || rc=$?
+  teardown_tmpdir
+  return "${rc}"
+}
 
 DIGEST="@sha256:0f5cc49c5e73c0c2bb6e2df56e7df189240d83cf94edfa30946482eb08ec57d2"
 

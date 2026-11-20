@@ -693,7 +693,8 @@ func TestAgentKubeconfigRefusals(t *testing.T) {
 		body, want string
 	}{
 		{"a missing directory", filepath.Join(dir, "no", "kc.yaml"), 200, agentKubeconfigYAML,
-			"[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write " + filepath.Join(dir, "no", "kc.yaml") + "\n  Name a file in a directory that exists and that you can write to.\n"},
+			"[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write " + filepath.Join(dir, "no", "kc.yaml") + ": " + filepath.Join(dir, "no") +
+				" does not exist or cannot be read\n  Name a file in a directory that exists and that you can write to.\n"},
 		{"an empty answer", filepath.Join(dir, "kc.yaml"), 200, " \n",
 			"[error] kubehz cluster kubeconfig cl-1a2b3c4d: the api answered without a kubeconfig\n"},
 		{"a refusal", filepath.Join(dir, "kc.yaml"), 409, refusalBody("KUBECONFIG_NOT_READY", "not ready", "Poll, then retry."),
@@ -785,7 +786,7 @@ func TestAgentKubeconfigPathRules(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			h := agentHarness(t)
 			h.handle("GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent", 200, agentKubeconfigYAML)
-			dir := t.TempDir()
+			dir := linkTestDir(t)
 			file := c.setup(dir)
 			_, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", file, c.force)
 			got := strings.ReplaceAll(h.errOut.String(), dir, "DIR")
@@ -805,43 +806,30 @@ func TestAgentKubeconfigPathRules(t *testing.T) {
 	}
 }
 
-// A link is written through only when the link and its target belong to
-// this user: a link that another user planted in a shared directory must
-// not send the write to a file of this user.
-func TestAgentKubeconfigWritesThroughOnlyALinkOfOurOwn(t *testing.T) {
+// A link is written through only to a file of this user: a link that
+// points at another user's file is refused before any request. The other
+// owner and mode rules of the walk are in agent_link_unix_test.go.
+func TestAgentKubeconfigWritesThroughOnlyToAFileOfOurOwn(t *testing.T) {
 	foreign := foreignFile(t)
-	const want = "[error] kubehz cluster kubeconfig cl-1a2b3c4d: DIR/link is a link, and the link or its target belongs to another user\n" +
-		"  lo writes through a link only when you own the link and its target. Name another file.\n"
-	for _, tc := range []struct {
-		name   string
-		target func(dir string) string
-		euid   func() int
-	}{
-		{"the target belongs to another user", func(string) string { return foreign }, nil},
-		// The seam makes root the user: the target (root's) passes, the
-		// link (ours) does not.
-		{"the link belongs to another user", func(string) string { return foreign }, func() int { return 0 }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := agentHarness(t)
-			h.handle("GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent", 200, agentKubeconfigYAML)
-			h.ctx.Euid = tc.euid
-			dir := t.TempDir()
-			must(t, os.Symlink(tc.target(dir), filepath.Join(dir, "link")))
-			_, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", filepath.Join(dir, "link"), true)
-			mustErr(t, err)
-			if got := strings.ReplaceAll(h.errOut.String(), dir, "DIR"); got != want {
-				t.Errorf("stderr = %q, want %q", got, want)
-			}
-			if n := len(h.reqs()); n != 0 {
-				t.Errorf("%d requests: the refusal must come before the grant", n)
-			}
-		})
+	h := agentHarness(t)
+	h.handle("GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent", 200, agentKubeconfigYAML)
+	dir := linkTestDir(t)
+	must(t, os.Symlink(foreign, filepath.Join(dir, "link")))
+	_, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", filepath.Join(dir, "link"), true)
+	mustErr(t, err)
+	real := realDir(t, foreign)
+	want := "[error] kubehz cluster kubeconfig cl-1a2b3c4d: DIR/link is a link, and its path is not safe: " + real + " belongs to another user (uid 0)\n" +
+		linkNotSafeHint
+	if got := strings.ReplaceAll(h.errOut.String(), dir, "DIR"); got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+	if n := len(h.reqs()); n != 0 {
+		t.Errorf("%d requests: the refusal must come before the grant", n)
 	}
 }
 
-// The owner check reads the user from the Euid seam: a link and a target of
-// ours count as another user's when the user is root.
+// The owner check reads the user from the Euid seam: the parts of ours on
+// the way count as another user's when the user is root.
 func TestAgentKubeconfigOwnerCheckReadsTheEffectiveUser(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("the test needs a user other than root")
@@ -849,12 +837,13 @@ func TestAgentKubeconfigOwnerCheckReadsTheEffectiveUser(t *testing.T) {
 	h := agentHarness(t)
 	h.handle("GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent", 200, agentKubeconfigYAML)
 	h.ctx.Euid = func() int { return 0 }
-	dir := t.TempDir()
+	dir := linkTestDir(t)
 	must(t, os.WriteFile(filepath.Join(dir, "real"), []byte("contexts"), 0o600))
 	must(t, os.Symlink("real", filepath.Join(dir, "link")))
 	_, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", filepath.Join(dir, "link"), true)
 	mustErr(t, err)
-	mustContain(t, h.errOut.String(), "is a link, and the link or its target belongs to another user\n")
+	mustContain(t, h.errOut.String(), "link is a link, and its path is not safe: ")
+	mustContain(t, h.errOut.String(), fmt.Sprintf(" belongs to another user (uid %d)\n", os.Geteuid()))
 	if got := readFile(t, filepath.Join(dir, "real")); got != "contexts" {
 		t.Errorf("real = %q", got)
 	}
@@ -976,7 +965,7 @@ func TestPublishKubeconfigNeverReplacesWithoutForce(t *testing.T) {
 func TestAgentKubeconfigChecksThePathAgainBeforeTheWrite(t *testing.T) {
 	foreign := foreignFile(t)
 	h := agentHarness(t)
-	dir := t.TempDir()
+	dir := linkTestDir(t)
 	link := filepath.Join(dir, "link")
 	must(t, os.WriteFile(filepath.Join(dir, "real"), []byte("contexts"), 0o600))
 	must(t, os.Symlink("real", link))
@@ -987,7 +976,7 @@ func TestAgentKubeconfigChecksThePathAgainBeforeTheWrite(t *testing.T) {
 	})
 	_, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", link, true)
 	mustErr(t, err)
-	mustContain(t, h.errOut.String(), "is a link, and the link or its target belongs to another user\n")
+	mustContain(t, h.errOut.String(), "link is a link, and its path is not safe: "+realDir(t, foreign)+" belongs to another user (uid 0)\n")
 	if got := readFile(t, filepath.Join(dir, "real")); got != "contexts" {
 		t.Errorf("real = %q", got)
 	}

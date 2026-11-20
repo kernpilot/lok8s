@@ -73,6 +73,7 @@ func diffAnswers(t *testing.T, f *fakeRunner, codes ...int) {
 		if c.Stdin == nil {
 			t.Error("kubectl diff got no manifest on stdin")
 		}
+		refuseTerminalStreams(t, c)
 		rc := 0
 		if call < len(codes) {
 			rc = codes[call]
@@ -176,15 +177,470 @@ func TestDryRunExitCodes(t *testing.T) {
 			if !strings.Contains(stdoutOf(e), "bootstrap dry-run: testcni: "+tc.status+"\n") {
 				t.Errorf("stdout:\n%s", stdoutOf(e))
 			}
+			// diffAnswers prints its stderr line only at rc > 1: the rc 0
+			// and rc 1 cases with a kubectl message are the tests below.
 			if tc.rc == 2 {
-				for _, want := range []string{"error: the server could not be reached", "bootstrap: kubectl diff failed for testcni (rc=2)"} {
-					if !strings.Contains(stderrOf(e), want) {
-						t.Errorf("stderr missing %q:\n%s", want, stderrOf(e))
-					}
+				if want := "bootstrap: kubectl diff failed for testcni (rc=2). "; !strings.Contains(stderrOf(e), want) {
+					t.Errorf("stderr missing %q:\n%s", want, stderrOf(e))
 				}
+				refuteOutput(t, stderrOf(e), "the server could not be reached")
 			}
 		})
 	}
+}
+
+// The kubectl output of the next tests is synthetic. Its stderr has the
+// shapes of a field error and of a typed-patch error of a server-side
+// diff, which quote a value of the manifest; its stdout is diff text. The
+// two streams carry different canaries, obvious fakes, so a test can tell
+// which stream leaked.
+const (
+	diffValueCanary = "canary-value-0000"     // on stderr
+	diffTextCanary  = "diff-text-canary-1111" // on stdout
+	diffErrText     = `The Secret "tls" is invalid: data[tls.crt]: Invalid value: "` + diffValueCanary + `": a value in the manifest` + "\n" +
+		`Error from server: failed to create typed patch object (/v1, Kind=Secret) default/tls: .stringData.tls.crt: expected string, got &value.valueUnstructured{Value:` + diffValueCanary + `}`
+	diffPartialText = "partial diff text: " + diffTextCanary + "\n"
+	// diffOutWithCanary is cannedDiff with the stdout canary in its last
+	// hunk (the counts stay changed=1 new=2).
+	diffOutWithCanary = cannedDiff + "+  note: " + diffTextCanary + "\n"
+)
+
+// refuseTerminalStreams fails the test when the kubectl diff of c writes
+// its stdout or its stderr to nil (the terminal of lo) or to an *os.File
+// (os.Stderr, for example): its output would reach the terminal.
+func refuseTerminalStreams(t *testing.T, c execx.Cmd) {
+	t.Helper()
+	for _, s := range []struct {
+		name string
+		w    io.Writer
+	}{{"stdout", c.Stdout}, {"stderr", c.Stderr}} {
+		if s.w == nil {
+			t.Errorf("kubectl diff ran with a nil %s: its output would reach the terminal", s.name)
+		} else if _, ok := s.w.(*os.File); ok {
+			t.Errorf("kubectl diff writes its %s to a file (%T): its output can reach the terminal", s.name, s.w)
+		}
+	}
+}
+
+// diffScript scripts the kubectl diff calls: call i exits codes[i] (0 past
+// the end) and prints outText on stdout and errText on stderr, at every
+// exit code. Any other kubectl verb fails the test.
+func diffScript(t *testing.T, f *fakeRunner, outText, errText string, codes ...int) {
+	t.Helper()
+	call := 0
+	f.handler = func(c execx.Cmd) error {
+		if len(c.Args) < 3 || c.Args[2] != "diff" {
+			t.Errorf("a dry run reached kubectl %v", c.Args)
+			return &rcError{9}
+		}
+		refuseTerminalStreams(t, c)
+		if c.Stdout == nil || c.Stderr == nil {
+			return &rcError{9}
+		}
+		rc := 0
+		if call < len(codes) {
+			rc = codes[call]
+		}
+		call++
+		fmt.Fprint(c.Stdout, outText)
+		if errText != "" {
+			fmt.Fprintln(c.Stderr, errText)
+		}
+		if rc == 0 {
+			return nil
+		}
+		return &rcError{rc}
+	}
+}
+
+// plantKubectl puts an executable kubectl into the project's .bin, which
+// the runner resolves first (execx.Look), and returns its path: the hint
+// of a failed diff must name it. The fake runner never runs it.
+func plantKubectl(t *testing.T, e *Engine) string {
+	t.Helper()
+	path := filepath.Join(e.Paths.Bin, "kubectl")
+	testutil.WriteFile(t, path, "#!/bin/sh\nexit 9\n")
+	if err := os.Chmod(path, 0o755); err != nil { // #nosec G302 -- a test stand-in that must be executable
+		t.Fatal(err)
+	}
+	return path
+}
+
+// setDebug sets DEBUG for the test: "1" or empty (off).
+func setDebug(t *testing.T, on bool) {
+	t.Helper()
+	if on {
+		t.Setenv("DEBUG", "1")
+	} else {
+		t.Setenv("DEBUG", "")
+	}
+}
+
+// wantFailedLine is the fixed line of a failed diff (rc 2) as the tests
+// expect it on stderr. It has its own copy of the quoting rule.
+func wantFailedLine(label, kubectl, kc, renderDir, stem string, filtered bool) string {
+	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+	dir, again, more := renderDir, "", ""
+	if dir == "" {
+		dir, again = "<dir>", "do the dry run again with --render-dir <dir> (<dir> is a directory that you choose), then "
+	}
+	if filtered {
+		more = " (this diff can show more: the dry run diffed the render without its non-deterministic objects)"
+	}
+	return "[error] bootstrap: kubectl diff failed for " + label + " (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, " +
+		again + "run" + more + ": " + q(kubectl) + " --kubeconfig " + q(kc) + " diff --server-side --force-conflicts -f " + q(dir+"/"+stem+".yaml") + "\n"
+}
+
+// readDiffFile returns the content of a .diff file under --render-dir.
+func readDiffFile(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the dry run did not write %s: %v", path, err)
+	}
+	return string(raw)
+}
+
+// The line of a failed diff, byte for byte, for paths that hold a space,
+// `$(...)`, a `;` and a single quote: each argument that lo puts into the
+// command is in single quotes (shQuote has the rule). The bats
+// twin "bootstrap::_diff_failed_text prints the bytes of the Go twin"
+// holds the same three lines.
+func TestDiffFailedTextGolden(t *testing.T) {
+	const odd = "/p/a b $(touch x); c'd"
+	for _, tc := range []struct {
+		name, renderDir string
+		filtered        bool
+		want            string
+	}{
+		{"render dir", odd + "/out", false,
+			`bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, run: '/p/a b $(touch x); c'\''d/.bin/kubectl' --kubeconfig '/p/a b $(touch x); c'\''d/kc.yaml' diff --server-side --force-conflicts -f '/p/a b $(touch x); c'\''d/out/01-testcni.yaml'`},
+		{"no render dir", "", false,
+			`bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, do the dry run again with --render-dir <dir> (<dir> is a directory that you choose), then run: '/p/a b $(touch x); c'\''d/.bin/kubectl' --kubeconfig '/p/a b $(touch x); c'\''d/kc.yaml' diff --server-side --force-conflicts -f '<dir>/01-testcni.yaml'`},
+		{"filtered", odd + "/out", true,
+			`bootstrap: kubectl diff failed for testcni (rc=2). lo does not show the kubectl message: it can quote a value of the manifest. To see it, run (this diff can show more: the dry run diffed the render without its non-deterministic objects): '/p/a b $(touch x); c'\''d/.bin/kubectl' --kubeconfig '/p/a b $(touch x); c'\''d/kc.yaml' diff --server-side --force-conflicts -f '/p/a b $(touch x); c'\''d/out/01-testcni.yaml'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := diffFailedText("testcni", 2, odd+"/.bin/kubectl", odd+"/kc.yaml", tc.renderDir, "01-testcni", tc.filtered); got != tc.want {
+				t.Errorf("got:\n%s\nwant:\n%s", got, tc.want)
+			}
+		})
+	}
+}
+
+// A failed server-side diff (rc 2) prints fixed text that names the entry,
+// also at debug, and never the kubectl message: it can quote a value of
+// the manifest. The line names the project's kubectl and the rendered file
+// to diff by hand: under --render-dir, or the file a dry run with
+// --render-dir writes. The .diff file holds the stdout of the diff and
+// never its stderr. The bats twin is "bootstrap::apply --dry-run: a failed
+// diff prints no kubectl text, also at debug".
+func TestDryRunFailedDiffPrintsNoKubectlText(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		debug     bool
+		renderDir bool
+	}{
+		{"default level", false, false},
+		{"debug", true, false},
+		{"default level, render dir", false, true},
+		{"debug, render dir", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setDebug(t, tc.debug)
+			e, f, spec, kc := dryEngine(t, "testcni")
+			kubectl := plantKubectl(t, e)
+			dir := ""
+			if tc.renderDir {
+				dir = filepath.Join(t.TempDir(), "out")
+				e.Options.RenderDir = dir
+			}
+			diffScript(t, f, diffPartialText, diffErrText, 2)
+			err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
+			if driver.ExitCode(err) != 2 {
+				t.Fatalf("exit = %d (%v), want 2", driver.ExitCode(err), err)
+			}
+			if !strings.Contains(stdoutOf(e), "bootstrap dry-run: testcni: error\n") {
+				t.Errorf("stdout:\n%s", stdoutOf(e))
+			}
+			if want := wantFailedLine("testcni", kubectl, kc, dir, "01-testcni", false); !strings.Contains(stderrOf(e), want) {
+				t.Errorf("stderr misses %q:\n%s", want, stderrOf(e))
+			}
+			if tc.renderDir {
+				if !fsutil.FileExists(filepath.Join(dir, "01-testcni.yaml")) {
+					t.Errorf("the line names %s/01-testcni.yaml, which the dry run did not write", dir)
+				}
+				if got := readDiffFile(t, filepath.Join(dir, "01-testcni.diff")); got != diffPartialText {
+					t.Errorf("01-testcni.diff = %q, want the stdout of the diff only (%q)", got, diffPartialText)
+				}
+			}
+			if got := strings.Contains(stderrOf(e), "[debug] "); got != tc.debug {
+				t.Errorf("debug lines on stderr = %v, want %v:\n%s", got, tc.debug, stderrOf(e))
+			}
+			// A failed diff prints no diff text, also at debug.
+			refuteOutput(t, stderrOf(e)+stdoutOf(e), diffValueCanary, "Invalid value", "typed patch", diffTextCanary)
+		})
+	}
+}
+
+// The command in the line quotes each path: a render dir and a kubeconfig
+// path with a space, `$(...)`, a `;` and a single quote paste as one word
+// each. The bats twin is "bootstrap::apply --dry-run: the line of a failed
+// diff quotes the paths".
+func TestDryRunFailedDiffQuotesThePaths(t *testing.T) {
+	const odd = "a b $(touch pwned); c'd"
+	e, f, spec, _ := dryEngine(t, "testcni")
+	kubectl := plantKubectl(t, e)
+	kc := filepath.Join(e.Paths.Base, odd, "kc.yaml")
+	testutil.WriteFile(t, kc, "")
+	dir := filepath.Join(t.TempDir(), odd)
+	e.Options.RenderDir = dir
+	diffScript(t, f, "", diffErrText, 2)
+	err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
+	if driver.ExitCode(err) != 2 {
+		t.Fatalf("exit = %d (%v), want 2", driver.ExitCode(err), err)
+	}
+	want := wantFailedLine("testcni", kubectl, kc, dir, "01-testcni", false)
+	if !strings.Contains(stderrOf(e), want) {
+		t.Errorf("stderr misses %q:\n%s", want, stderrOf(e))
+	}
+	for _, quoted := range []string{
+		" --kubeconfig '" + e.Paths.Base + `/a b $(touch pwned); c'\''d/kc.yaml' diff `,
+		" -f '" + filepath.Dir(dir) + `/a b $(touch pwned); c'\''d/01-testcni.yaml'` + "\n",
+	} {
+		if !strings.Contains(stderrOf(e), quoted) {
+			t.Errorf("stderr misses %q:\n%s", quoted, stderrOf(e))
+		}
+	}
+	refuteOutput(t, stderrOf(e), diffValueCanary)
+}
+
+// The hint names the kubectl that the runner runs: the project's .bin
+// first, else the one on PATH, else the bare name.
+func TestDryRunFailedDiffNamesTheKubectlThatRuns(t *testing.T) {
+	t.Run("on PATH", func(t *testing.T) {
+		e, f, spec, kc := dryEngine(t, "testcni")
+		bin := t.TempDir()
+		onPath := filepath.Join(bin, "kubectl")
+		testutil.WriteFile(t, onPath, "#!/bin/sh\nexit 9\n")
+		if err := os.Chmod(onPath, 0o755); err != nil { // #nosec G302 -- a test stand-in that must be executable
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", bin)
+		diffScript(t, f, "", diffErrText, 2)
+		_ = e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
+		if want := wantFailedLine("testcni", onPath, kc, "", "01-testcni", false); !strings.Contains(stderrOf(e), want) {
+			t.Errorf("stderr misses %q:\n%s", want, stderrOf(e))
+		}
+	})
+	t.Run("not found", func(t *testing.T) {
+		e, f, spec, kc := dryEngine(t, "testcni")
+		t.Setenv("PATH", t.TempDir())
+		diffScript(t, f, "", diffErrText, 2)
+		_ = e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
+		if want := wantFailedLine("testcni", "kubectl", kc, "", "01-testcni", false); !strings.Contains(stderrOf(e), want) {
+			t.Errorf("stderr misses %q:\n%s", want, stderrOf(e))
+		}
+	})
+}
+
+// With --ignore-nondeterministic, the dry run diffed the render without
+// its non-deterministic objects, but the file under --render-dir holds
+// the full render: the line says that the diff by hand can show more.
+// Without the option, the line does not say it.
+func TestDryRunFailedDiffUnderIgnoreNondeterministic(t *testing.T) {
+	for _, ignore := range []bool{false, true} {
+		t.Run(fmt.Sprintf("ignore=%v", ignore), func(t *testing.T) {
+			e, _, spec, kc := dryEngine(t, "testcni")
+			kubectl := plantKubectl(t, e)
+			e.Runner = &alternatingRunner{diffRC: func(string) int { return 2 }}
+			e.Options.IgnoreNondeterministic = ignore
+			e.Options.RenderDir = filepath.Join(t.TempDir(), "out")
+			err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
+			if driver.ExitCode(err) != 2 {
+				t.Fatalf("exit = %d (%v), want 2", driver.ExitCode(err), err)
+			}
+			if want := wantFailedLine("testcni", kubectl, kc, e.Options.RenderDir, "01-testcni", ignore); !strings.Contains(stderrOf(e), want) {
+				t.Errorf("stderr misses %q:\n%s", want, stderrOf(e))
+			}
+		})
+	}
+}
+
+// A diff with differences (rc 1) still reports as before, also when kubectl
+// prints a message on stderr: "differs" with the counts, exit 1, and the
+// diff text at debug (kubectl masks the data of a Secret in it). The
+// kubectl stderr is not printed, and the .diff file holds the diff text
+// only. The bats twin is "bootstrap::apply --dry-run: a diff with
+// differences and a kubectl message still differs (rc 1)".
+func TestDryRunDiffersWithKubectlTextStillDiffers(t *testing.T) {
+	for _, debug := range []bool{false, true} {
+		t.Run(fmt.Sprintf("debug=%v", debug), func(t *testing.T) {
+			setDebug(t, debug)
+			e, f, spec, kc := dryEngine(t, "testcni")
+			dir := filepath.Join(t.TempDir(), "out")
+			e.Options.RenderDir = dir
+			diffScript(t, f, diffOutWithCanary, diffErrText, 1)
+			err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
+			if !errors.Is(err, ErrDryRunDiffers) || driver.ExitCode(err) != 1 {
+				t.Fatalf("err = %v (rc %d), want ErrDryRunDiffers rc 1", err, driver.ExitCode(err))
+			}
+			want := "bootstrap dry-run: testcni: differs changed=1 new=2\n" +
+				"bootstrap dry-run: entries=1 unchanged=0 differs=1 rendered=0 skipped=0 inconclusive=0 errors=0 nondeterministic=0\n"
+			if got := stdoutOf(e); got != want {
+				t.Errorf("stdout:\n%s\nwant:\n%s", got, want)
+			}
+			if got := strings.Contains(stderrOf(e), diffTextCanary); got != debug {
+				t.Errorf("the diff text on stderr = %v, want %v (debug only):\n%s", got, debug, stderrOf(e))
+			}
+			if got := readDiffFile(t, filepath.Join(dir, "01-testcni.diff")); got != diffOutWithCanary {
+				t.Errorf("01-testcni.diff = %q, want the stdout of the diff only", got)
+			}
+			refuteOutput(t, stderrOf(e), diffValueCanary, "Invalid value", "typed patch", "kubectl diff failed")
+		})
+	}
+}
+
+// A clean diff (rc 0) with a kubectl warning on stderr is unchanged, exit
+// 0, and the warning is not printed, also at debug, nor written to the
+// .diff file. The bats twin is "bootstrap::apply --dry-run: a clean diff
+// with a kubectl warning is unchanged (rc 0)".
+func TestDryRunUnchangedWithKubectlWarning(t *testing.T) {
+	setDebug(t, true)
+	e, f, spec, kc := dryEngine(t, "testcni")
+	dir := filepath.Join(t.TempDir(), "out")
+	e.Options.RenderDir = dir
+	diffScript(t, f, "", `Warning: the value "`+diffValueCanary+`" is deprecated`, 0)
+	if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
+		t.Fatalf("err = %v (rc %d), want nil", err, driver.ExitCode(err))
+	}
+	if !strings.Contains(stdoutOf(e), "bootstrap dry-run: testcni: unchanged\n") {
+		t.Errorf("stdout:\n%s", stdoutOf(e))
+	}
+	if got := readDiffFile(t, filepath.Join(dir, "01-testcni.diff")); got != "" {
+		t.Errorf("01-testcni.diff = %q, want empty", got)
+	}
+	refuteOutput(t, stderrOf(e)+stdoutOf(e), diffValueCanary, "is deprecated")
+}
+
+// raceTexts are kubectl messages with one alternative each of the
+// race-class pattern (raceRe): a test per alternative fails when the
+// pattern loses it.
+var raceTexts = []struct{ name, text string }{
+	{"ensure CRDs are installed first", `error: unable to recognize "STDIN": ensure CRDs are installed first`},
+	{"failed calling webhook", `Error from server (InternalError): Internal error occurred: failed calling webhook "x.example.com": connection refused`},
+	{"no matches for kind", `error: unable to recognize "STDIN": no matches for kind "X" in version "example.com/v1"`},
+	{"resource mapping not found", `error: resource mapping not found for name: "x" namespace: ""`},
+}
+
+// The race-class pattern stays inconclusive (needs-crd), and the rest of
+// the kubectl stderr is not printed either. The bats twins are
+// "bootstrap::apply --dry-run: an inconclusive diff (<alternative>)
+// prints no kubectl text".
+func TestDryRunInconclusiveDiffPrintsNoKubectlText(t *testing.T) {
+	for _, rt := range raceTexts {
+		t.Run(rt.name, func(t *testing.T) {
+			setDebug(t, true)
+			e, f, spec, kc := dryEngine(t, "testcni")
+			diffScript(t, f, "", diffErrText+"\n"+rt.text, 2)
+			err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
+			if driver.ExitCode(err) != 2 {
+				t.Fatalf("exit = %d (%v), want 2", driver.ExitCode(err), err)
+			}
+			if !strings.Contains(stdoutOf(e), "bootstrap dry-run: testcni: inconclusive (needs-crd)\n") {
+				t.Errorf("stdout:\n%s", stdoutOf(e))
+			}
+			refuteOutput(t, stderrOf(e)+stdoutOf(e), diffValueCanary, "Invalid value", "typed patch", rt.name, "kubectl diff failed")
+		})
+	}
+}
+
+// restore.d goes through the same diff: its failed diff prints the fixed
+// line with restore.d.yaml, also at debug, and never the kubectl message;
+// restore.d.diff holds the stdout of the diff only. The bats twin is
+// "bootstrap::apply --dry-run: a failed restore.d diff prints no kubectl
+// text, also at debug".
+func TestDryRunRestoreDFailedDiffPrintsNoKubectlText(t *testing.T) {
+	for _, renderDir := range []bool{false, true} {
+		t.Run(fmt.Sprintf("render dir=%v", renderDir), func(t *testing.T) {
+			setDebug(t, true)
+			e, f, spec, kc := dryEngine(t, "testcni")
+			kubectl := plantKubectl(t, e)
+			dir := ""
+			if renderDir {
+				dir = filepath.Join(t.TempDir(), "out")
+				e.Options.RenderDir = dir
+			}
+			d := filepath.Join(e.Paths.Clusters, "test.lok8s.dev")
+			testutil.WriteFile(t, filepath.Join(d, "restore.d", "tls-e.sops.yaml"), "cipher\n")
+			testutil.WriteFile(t, filepath.Join(d, "secrets", "restore.d", "tls-e.yaml"), "apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls-e\n")
+			diffScript(t, f, diffPartialText, diffErrText, 2, 0)
+			err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
+			if driver.ExitCode(err) != 2 {
+				t.Fatalf("exit = %d (%v), want 2", driver.ExitCode(err), err)
+			}
+			if !strings.Contains(stdoutOf(e), "bootstrap dry-run: restore.d: error\n") {
+				t.Errorf("stdout:\n%s", stdoutOf(e))
+			}
+			if want := wantFailedLine("restore.d", kubectl, kc, dir, "restore.d", false); !strings.Contains(stderrOf(e), want) {
+				t.Errorf("stderr misses %q:\n%s", want, stderrOf(e))
+			}
+			if renderDir {
+				if got := readDiffFile(t, filepath.Join(dir, "restore.d.diff")); got != diffPartialText {
+					t.Errorf("restore.d.diff = %q, want the stdout of the diff only (%q)", got, diffPartialText)
+				}
+			}
+			refuteOutput(t, stderrOf(e)+stdoutOf(e), diffValueCanary, "Invalid value", "typed patch")
+		})
+	}
+}
+
+// An interrupt or a SIGTERM that ends kubectl (rc 130, 143) prints a fixed
+// "interrupted" line, not the hint to diff by hand, and never the kubectl
+// message. The bats twin is "bootstrap::apply --dry-run: an interrupted
+// diff prints the interrupted line".
+func TestDryRunInterruptedDiffPrintsNoHint(t *testing.T) {
+	for _, rc := range []int{130, 143} {
+		t.Run(fmt.Sprintf("rc=%d", rc), func(t *testing.T) {
+			e, f, spec, kc := dryEngine(t, "testcni")
+			plantKubectl(t, e)
+			diffScript(t, f, "", diffErrText, rc)
+			err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
+			if driver.ExitCode(err) != 2 {
+				t.Fatalf("exit = %d (%v), want 2", driver.ExitCode(err), err)
+			}
+			if !strings.Contains(stdoutOf(e), "bootstrap dry-run: testcni: error\n") {
+				t.Errorf("stdout:\n%s", stdoutOf(e))
+			}
+			if want := fmt.Sprintf("[error] bootstrap: kubectl diff was interrupted for testcni (rc=%d)\n", rc); !strings.Contains(stderrOf(e), want) {
+				t.Errorf("stderr misses %q:\n%s", want, stderrOf(e))
+			}
+			refuteOutput(t, stderrOf(e), "To see it", "kubectl diff failed for", diffValueCanary)
+		})
+	}
+}
+
+// kubectl that does not start (not found) prints the fixed "failed to
+// start" line, not the hint. The bats twin (bash: rc 127) is
+// "bootstrap::apply --dry-run: kubectl that is not found prints the failed
+// to start line".
+func TestDryRunDiffLaunchFailure(t *testing.T) {
+	e, f, spec, kc := dryEngine(t, "testcni")
+	f.handler = func(c execx.Cmd) error {
+		refuseTerminalStreams(t, c)
+		return fmt.Errorf("kubectl: %w", execx.ErrNotFound)
+	}
+	err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc)
+	if driver.ExitCode(err) != 2 {
+		t.Fatalf("exit = %d (%v), want 2", driver.ExitCode(err), err)
+	}
+	if !strings.Contains(stdoutOf(e), "bootstrap dry-run: testcni: error\n") {
+		t.Errorf("stdout:\n%s", stdoutOf(e))
+	}
+	if want := "[error] bootstrap: kubectl diff failed to start for testcni: kubectl: executable not found\n"; !strings.Contains(stderrOf(e), want) {
+		t.Errorf("stderr misses %q:\n%s", want, stderrOf(e))
+	}
+	refuteOutput(t, stderrOf(e), "To see it", "kubectl diff failed for")
 }
 
 // cancelAtThePlugin cancels the run when the dry run's check of the Secret
@@ -302,9 +758,12 @@ func TestDryRunIgnoresForce(t *testing.T) {
 	if log := f.log(); strings.Contains(log, "replace") || strings.Contains(log, "apply") {
 		t.Errorf("force healed under a dry run:\n%s", log)
 	}
-	if !strings.Contains(stderrOf(e), "field is immutable") {
-		t.Errorf("the diff's stderr must be forwarded:\n%s", stderrOf(e))
+	if !strings.Contains(stdoutOf(e), "bootstrap dry-run: testcni: differs changed=1 new=2\n") {
+		t.Errorf("stdout:\n%s", stdoutOf(e))
 	}
+	// The diff's stderr is not printed: an immutable-field error can quote
+	// the object (a Job's pod template with its env values, for example).
+	refuteOutput(t, stderrOf(e), "field is immutable")
 }
 
 func TestDryRunReportsTheRealRunsSkips(t *testing.T) {

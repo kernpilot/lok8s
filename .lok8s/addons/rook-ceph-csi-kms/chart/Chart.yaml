@@ -1,0 +1,9 @@
+apiVersion: v2
+name: rook-ceph-csi-kms
+description: >-
+  The Kubernetes API grants of the Ceph CSI RBD plugins for the ceph-csi
+  features that read objects through the API (the KMS types, the rbd-nbd
+  volume healer, the stats of block volumes, the Vault token review). One
+  `kms:` value per feature; each renders only the rules of that feature.
+type: application
+version: 0.1.0

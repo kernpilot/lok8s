@@ -147,7 +147,7 @@ func Doctor(ctx context.Context, o DoctorOptions) []Check {
 		want: KustomizeCLI, version: firstField,
 	})
 
-	// khelm ChartRenderer: `<plugin> version` prints "2.8.0 (helm 3.21.2)".
+	// khelm ChartRenderer: `<plugin> version` prints "2.9.0 (helm 3.22.1)".
 	crPath := filepath.Join(o.PluginHome, filepath.FromSlash(ChartRendererPluginRel))
 	d.checkTool(tool{
 		what: "khelm ChartRenderer", path: crPath, missingAt: crPath,

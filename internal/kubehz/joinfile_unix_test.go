@@ -70,8 +70,8 @@ func TestSpaceMintJoinNeverWritesIntoAPlantedFIFO(t *testing.T) {
 }
 
 // A TMPDIR whose path a foreign owner could change is refused BEFORE the
-// mint, so it costs no ticket: a part that others can write without the
-// sticky bit (the TMPDIR itself or a parent), a part of another user (the
+// mint, so it costs no ticket: a part that its group or others can write
+// without the sticky bit (the TMPDIR itself or a parent), a part of another user (the
 // Euid seam makes us someone else), the same part when its owner is the
 // overflow uid (only "/" may be), and a link to such a directory. With
 // the Euid seam each part of ours is another user's, so the top-down walk
@@ -86,7 +86,7 @@ func TestSpaceMintJoinRefusesATMPDIROthersCanChange(t *testing.T) {
 		overflow  bool
 		mk        func(t *testing.T, base string) (tmpdir, bad string)
 	}{
-		{"group-writable", "is writable by others and has no sticky bit", false, false, func(t *testing.T, base string) (string, string) {
+		{"group-writable", "is writable by its group and has no sticky bit", false, false, func(t *testing.T, base string) (string, string) {
 			return modeDir(t, base, "gw", 0o770), filepath.Join(base, "gw")
 		}},
 		{"other-writable", "is writable by others and has no sticky bit", false, false, func(t *testing.T, base string) (string, string) {
@@ -96,7 +96,7 @@ func TestSpaceMintJoinRefusesATMPDIROthersCanChange(t *testing.T) {
 			parent := modeDir(t, base, "wp", 0o777)
 			return modeDir(t, parent, "sub", 0o700), parent
 		}},
-		{"link-to-writable", "is writable by others and has no sticky bit", false, false, func(t *testing.T, base string) (string, string) {
+		{"link-to-writable", "is writable by its group and has no sticky bit", false, false, func(t *testing.T, base string) (string, string) {
 			target := modeDir(t, base, "lw", 0o770)
 			link := filepath.Join(base, "link")
 			if err := os.Symlink(target, link); err != nil {
@@ -169,7 +169,7 @@ func TestSpaceMintJoinChecksTheTMPDIRAgainAtTheWrite(t *testing.T) {
 		_, _ = io.WriteString(w, noScriptJSON)
 	})
 	mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
-	mustContain(t, h.output(), "the temp dir for the join ticket is not safe: "+realDir(t, tmpdir)+" is writable by others and has no sticky bit\n")
+	mustContain(t, h.output(), "the temp dir for the join ticket is not safe: "+realDir(t, tmpdir)+" is writable by its group and has no sticky bit\n")
 	mustContain(t, h.output(), "could not write the join ticket for 'worker-1'\n")
 	mustContain(t, h.output(), "The ticket was minted before the write failed")
 	mustNotContain(t, h.output(), joinTicket)
@@ -256,7 +256,7 @@ func TestSpaceMintJoinRefusesTheOwnPartsOfAnUnmappedCaller(t *testing.T) {
 
 // TMPDIR=<safe>/link/.. with link pointing to <unsafe>/child: ".." goes up
 // from the target of the link, as the kernel and cd -P (the bash twin) do,
-// so the check reads <unsafe> (others can write it) and refuses it before
+// so the check reads <unsafe> (its group can write it) and refuses it before
 // the mint. filepath.Abs or Clean before EvalSymlinks would make it <safe>
 // and pass. The relative form is joined to the working directory (t.Chdir,
 // so no t.Parallel here).
@@ -279,9 +279,9 @@ func TestSpaceMintJoinResolvesDotDotAfterALinkPhysically(t *testing.T) {
 			h.env["TMPDIR"] = tmpdir
 			h.handle("POST /api/spaces/sp-123/join-token", 201, noScriptJSON)
 			mustErr(t, h.ctx.spaceMintJoin(t.Context(), &Config{APIURL: h.apiURL()}, "sp-123", "worker-1", false))
-			mustContain(t, h.output(), "the temp dir for the join ticket is not safe: "+realDir(t, unsafe)+" is writable by others and has no sticky bit\n")
+			mustContain(t, h.output(), "the temp dir for the join ticket is not safe: "+realDir(t, unsafe)+" is writable by its group and has no sticky bit\n")
 			if h.anyReq("POST", "/join-token") {
-				t.Fatal("a TMPDIR that resolves to a directory others can write still minted a ticket")
+				t.Fatal("a TMPDIR that resolves to a directory its group can write still minted a ticket")
 			}
 		})
 	}

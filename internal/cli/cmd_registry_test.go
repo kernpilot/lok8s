@@ -35,3 +35,19 @@ func TestRegistryDriverGate(t *testing.T) {
 		t.Errorf("gate must be skipped with LOK8S_REGISTRY_JSON: %v", err)
 	}
 }
+
+// A cluster spec with two YAML documents: every registry verb stops at the
+// gate with the layout line (the line `lo provision` prints), not with "no
+// readable spec" (issue #272).
+func TestRegistryDriverGateNamesTheSpecLayout(t *testing.T) {
+	p, _, _ := orchestrateProject(t)
+	spec := filepath.Join(p.Clusters, "two.dev", "cluster.lok8s.yaml")
+	testutil.WriteFile(t, spec, "kind: Lo\nmetadata:\n  name: two\n---\nkind: KubeOne\n")
+	want := "[error] " + spec + " holds more than one YAML document. Remove lines 4 to 5 (the '---' at line 4 and everything after it).\n"
+	for _, verb := range []string{"status", "up", "down", "clean"} {
+		_, stderr, err := runLo(t, NewRoot(p), "registry", verb, "--domain", "two.dev")
+		if !errors.Is(err, ErrHandled) || stderr != want {
+			t.Errorf("registry %s --domain two.dev: err=%v stderr=%q, want %q", verb, err, stderr, want)
+		}
+	}
+}

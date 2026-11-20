@@ -40,7 +40,7 @@ teardown() {
       '.kind') echo "KubeOne" ;;
       '.spec.provider // "hetzner"') echo "hetzner" ;;
       '.spec.hcloud.region // .spec.aws.region // "fsn1"') echo "nbg1" ;;
-      '.spec.kubernetes.version') echo "v1.31.10" ;;
+      '.spec.kubernetes.version // ""') echo "v1.31.10" ;;
       '.spec.controlPlane.replicas // 1') echo "3" ;;
       *) echo "" ;;
     esac
@@ -78,7 +78,7 @@ teardown() {
       '.kind') echo "Capi" ;;
       '.spec.provider // "hetzner"') echo "hetzner" ;;
       '.spec.hcloud.region // .spec.aws.region // "fsn1"') echo "fsn1" ;;
-      '.spec.kubernetes.version') echo "v1.30.0" ;;
+      '.spec.kubernetes.version // ""') echo "v1.30.0" ;;
       '.spec.controlPlane.replicas // 1') echo "1" ;;
       *) echo "" ;;
     esac
@@ -97,6 +97,59 @@ teardown() {
 
   echo "${output}" | jq -e '.provider == "hetzner"'
   echo "${output}" | jq -e '.controlPlaneReplicas == 1'
+}
+
+# Issue #272: an unset spec.kubernetes.version (no key, a YAML null, an
+# empty string) is left out of the payload, and a set one is sent as
+# written. The real yq and jq read a real spec file. Go twin:
+# TestBuildClusterPayloadKubernetesVersion (internal/kubehz/hosted_test.go).
+_payload_setup() {
+  command -v yq &>/dev/null || skip "yq not available"
+  command -v jq &>/dev/null || skip "jq not available"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+}
+# _payload_for_version [<the YAML text of spec.kubernetes.version>] — no
+# argument: the spec has no spec.kubernetes key. Prints the compact payload.
+_payload_for_version() {
+  local spec="${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" block="" out
+  if (( $# )); then
+    block="  kubernetes:"$'\n'"    version: ${1}"$'\n'
+  fi
+  printf 'kind: KubeOne\nspec:\n  cluster:\n    domain: test.kubehz.dev\n%s  kubehz:\n    hosting: hosted\n' "${block}" > "${spec}"
+  out=$(kubehz::build_cluster_payload "${spec}") || return 1
+  jq -c . <<<"${out}"
+}
+_PAYLOAD_UNSET='{"domain":"test.kubehz.dev","kind":"KubeOne","provider":"hetzner","region":"fsn1","controlPlaneReplicas":1,"hosting":"hosted","access":"none"}'
+
+@test "build_cluster_payload: no spec.kubernetes.version key leaves kubernetesVersion out" {
+  _payload_setup
+  local got
+  got=$(_payload_for_version)
+  assert_equal "${got}" "${_PAYLOAD_UNSET}"
+}
+
+@test "build_cluster_payload: a null spec.kubernetes.version leaves kubernetesVersion out" {
+  _payload_setup
+  local got value
+  for value in null '~' ''; do
+    got=$(_payload_for_version "${value}")
+    assert_equal "${got}" "${_PAYLOAD_UNSET}"
+  done
+}
+
+@test "build_cluster_payload: an empty spec.kubernetes.version leaves kubernetesVersion out" {
+  _payload_setup
+  local got
+  got=$(_payload_for_version '""')
+  assert_equal "${got}" "${_PAYLOAD_UNSET}"
+}
+
+@test "build_cluster_payload: a set spec.kubernetes.version is sent as written" {
+  _payload_setup
+  local got
+  got=$(_payload_for_version v1.31.10)
+  assert_equal "${got}" '{"domain":"test.kubehz.dev","kind":"KubeOne","provider":"hetzner","region":"fsn1","kubernetesVersion":"v1.31.10","controlPlaneReplicas":1,"hosting":"hosted","access":"none"}'
 }
 
 # ── wait_for_cluster ─────────────────────────────────────
@@ -193,7 +246,7 @@ clusters:
       '.kind') echo "KubeOne" ;;
       '.spec.provider // "hetzner"') echo "hetzner" ;;
       '.spec.hcloud.region // .spec.aws.region // "fsn1"') echo "fsn1" ;;
-      '.spec.kubernetes.version') echo "v1.31.10" ;;
+      '.spec.kubernetes.version // ""') echo "v1.31.10" ;;
       '.spec.controlPlane.replicas // 1') echo "1" ;;
       *) echo "" ;;
     esac
@@ -270,7 +323,7 @@ clusters:
   yq() {
     case "$2" in
       '.spec.cluster.domain') echo "test.kubehz.dev" ;;
-      '.spec.kubernetes.version') echo "v1.31.10" ;;
+      '.spec.kubernetes.version // ""') echo "v1.31.10" ;;
       '.spec.controlPlane.replicas // 1') echo "1" ;;
       '.spec.provider // "hetzner"') echo "hetzner" ;;
       '.spec.hcloud.region // .spec.aws.region // "fsn1"') echo "fsn1" ;;
@@ -331,7 +384,7 @@ clusters:
   yq() {
     case "$2" in
       '.spec.cluster.domain') echo "test.kubehz.dev" ;;
-      '.spec.kubernetes.version') echo "v1.31.10" ;;
+      '.spec.kubernetes.version // ""') echo "v1.31.10" ;;
       '.spec.controlPlane.replicas // 1') echo "1" ;;
       *) echo "" ;;
     esac
@@ -391,7 +444,7 @@ clusters:
   yq() {
     case "$2" in
       '.spec.cluster.domain') echo "test.kubehz.dev" ;;
-      '.spec.kubernetes.version') echo "v1.31.10" ;;
+      '.spec.kubernetes.version // ""') echo "v1.31.10" ;;
       '.spec.controlPlane.replicas // 1') echo "1" ;;
       *) echo "" ;;
     esac

@@ -43,10 +43,20 @@ teardown() {
 _make_runner() {
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
-# timeout: the pod's `timeout SECS CMD ARGS`. It runs the command as a shell
+# timeout: the pod's `timeout -k 2 SECS CMD ARGS` (the BusyBox applet and
+# GNU coreutils take the same form). It runs the command as a shell
 # function, so the kubectl stub below answers it and no real kubectl runs.
+# Any other form, such as a call without the kill-after, goes to
+# STUB_TIMEOUT_FORM_LOG and fails (rc 125), so it does not pass unseen.
 timeout() {
-  shift
+  case "$1:$2:$3" in
+    -k:2:5|-k:2:30) ;;
+    *)
+      printf '%s\n' "$*" >> "${STUB_TIMEOUT_FORM_LOG}"
+      echo "stub: timeout without -k 2: $*" >&2
+      return 125 ;;
+  esac
+  shift 3
   "$@"
 }
 kubectl() {
@@ -58,7 +68,7 @@ kubectl() {
     "get --raw /api/v1/nodes") printf '{"items":[{"metadata":{"name":"cp-1"}}]}\n' ;;
     "get csr -o json") printf '{}\n' ;;
     *"/readyz"*) printf 'ok\n'; return 0 ;;
-    "get configmap kubehz-agent-config"*) printf '%s' "${STUB_MARKER:-{\}}" ;;
+    "get configmap kubehz-agent-state"*) printf '%s' "${STUB_MARKER:-{\}}" ;;
     "annotate "*) return 0 ;;
     "get pods"*) printf ''; return 0 ;;
     *) printf '' ;;
@@ -87,6 +97,8 @@ STUBS_EOF
   export KUBEHZ_API_URL="https://api.example.com"
   export STUB_CURL_LOG="${BATS_TEST_TMPDIR}/curl.log"
   : > "${STUB_CURL_LOG}"
+  export STUB_TIMEOUT_FORM_LOG="${BATS_TEST_TMPDIR}/timeout-form.log"
+  : > "${STUB_TIMEOUT_FORM_LOG}"
 }
 
 # Source the deploy lib against the REAL manifests: PATH_LOK8S must point at the
@@ -112,6 +124,8 @@ _source_deploy() {
 
   run bash "${RUNNER}"
   assert_success
+  # Every kubectl call ran under `timeout -k 2 SECS`.
+  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
 
   # The identity work still ran — the Go agent mints nothing and only ever
   # READS Secret kubehz-agent, so if the CronJob stopped enrolling, a cluster
@@ -132,6 +146,8 @@ _source_deploy() {
 
   run bash "${RUNNER}"
   assert_success
+  # Every kubectl call ran under `timeout -k 2 SECS`.
+  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
 
   run grep -c '/heartbeat' "${STUB_CURL_LOG}"
   assert_output "1"
@@ -143,6 +159,8 @@ _source_deploy() {
 
   run bash "${RUNNER}"
   assert_success
+  # Every kubectl call ran under `timeout -k 2 SECS`.
+  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
 
   # Fail-safe direction: an old ConfigMap without the key must keep beating,
   # never fall silent.
@@ -156,6 +174,8 @@ _source_deploy() {
 
   run bash "${RUNNER}"
   assert_success
+  # Every kubectl call ran under `timeout -k 2 SECS`.
+  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
   run grep -c '/heartbeat' "${STUB_CURL_LOG}"
   assert_output "1"
 }

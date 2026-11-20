@@ -300,7 +300,17 @@ before anything is deleted:
    domains carry the same cluster label. Only the owner mark keeps them
    apart: a resource of the other domain with a wrong mark (for example,
    from an `add-label` command that was run for the wrong domain) would be
-   deleted.
+   deleted. The destroy also stops when the provider config of another
+   domain has a merge key (`<<`) on the path to its `cluster_name`: the top
+   of the file, or `spec`, `spec.provider` or `spec.provider.config` of
+   `cluster.lok8s.yaml`. YAML readers give different names for a merged
+   `cluster_name`, so `lo` cannot compare it. Write `cluster_name` as a
+   literal key. A key with the tag `!!merge` is a merge key too. An alias
+   on the path counts with the mapping that it names, and an alias as a key
+   counts with the key that it names. The destroy also stops when `lo`
+   cannot list or search a directory that it must read: `clusters/`, the
+   directory of a domain, or a directory on the way to a
+   `spec.provider.configRef` file. The message names that directory.
 3. The destroy lists the resources that the provider would delete. When a
    list fails, the destroy stops.
 4. On a terminal, type the `cluster_name` to continue. Off a terminal, pass
@@ -315,12 +325,14 @@ This guard replaces the `yes` prompt for such a provider. It runs for the
 `lo` driver and a KubeOne cluster that is not hosted (the drivers that
 destroy through the provider). `--confirm-cluster` on a destroy without the
 guard (no `-r`, a hosted or a `capi`/`kkp` cluster) is refused with exit
-code `1`. The guard sees only the `clusters/` of this checkout, and
-`lo recover` has no such guard yet (#302).
+code `1`. The guard sees only the `clusters/` of this checkout.
+`lo recover` refuses a shared `cluster_name` and such a merge key in the
+same way, before its doctor and its consent.
 
 `lo init cluster` refuses a domain whose cluster name (the first label of
 the domain) another domain already uses as its `metadata.name` or its
-`cluster_name`.
+`cluster_name`. A merge key (`<<`) on the path to one of these names in
+another domain stops it too.
 
 ### lo recover
 
@@ -419,7 +431,7 @@ lo toolchain doctor
 
 **`lo toolchain install`** runs four steps. The project is the nearest `kind: Project` `lok8s.yaml` (or `clusters/`) above the working directory, never the ambient `PATH_BASE` of a direnv/mise shell; `--path` names one explicitly.
 
-1. `.bin/b.yaml` from a template whose pins are the releases this `lo` was built and byte-parity-tested against: `kustomize` v5.8.1 (the CLI built from the kustomize API `lo-full` links), `github.com/mgoltzsche/khelm` v2.8.0 installed as the `ChartRenderer` exec plugin under `.kustomize/`, and `github.com/kernpilot/lok8s`'s `kustomize-secret-*` asset at **this `lo`'s own version** installed as the `secrets.lok8s.dev` Secret plugin. The other entries are `kubectl` (group `core`), `kind`/`tilt`/`mkcert` (group `local`, on by default), `kubeone`/`hcloud` (group `cloud`, opt-in) and `argsh`/`yq`/`jq`/`envsubst`/`sops`/`ssh-to-age` (group `bash`, opt-in). The template writes entries outside the selected groups commented out. `go test` checks the pins against `go.mod` (`internal/toolchain`), so the template cannot lag the binary. `kind` and `yq` are pinned too. The other entries float, and `internal/toolchain/pins.go` names each one with its reason. The `bash` group is the runtime of the frozen bash implementation (a command routed to bash, see [Choosing the implementation](#choosing-the-implementation)) and of the provider plugins. The binary does not need those tools for its own paths. The bash tree itself ships inside the binary (see [`lo assets`](#lo-assets)). **An existing `.bin/b.yaml` is never overwritten**: a unified diff against the template is printed with the instructions (move it aside and re-run, or merge the pins by hand). Of the `b.yaml` entries, `lo toolchain doctor` checks only the render tools against their pins. It also checks that `.bin/b` is not older than the b this `lo` ships.
+1. `.bin/b.yaml` from a template whose pins are the releases this `lo` was built and byte-parity-tested against: `kustomize` v5.8.1 (the CLI built from the kustomize API `lo-full` links), `github.com/mgoltzsche/khelm` v2.9.0 installed as the `ChartRenderer` exec plugin under `.kustomize/`, and `github.com/kernpilot/lok8s`'s `kustomize-secret-*` asset at **this `lo`'s own version** installed as the `secrets.lok8s.dev` Secret plugin. The other entries are `kubectl` (group `core`), `kind`/`tilt`/`mkcert` (group `local`, on by default), `kubeone`/`hcloud` (group `cloud`, opt-in) and `argsh`/`yq`/`jq`/`envsubst`/`sops`/`ssh-to-age` (group `bash`, opt-in). The template writes entries outside the selected groups commented out. `go test` checks the pins against `go.mod` (`internal/toolchain`), so the template cannot lag the binary. `kind` and `yq` are pinned too. The other entries float, and `internal/toolchain/pins.go` names each one with its reason. The `bash` group is the runtime of the frozen bash implementation (a command routed to bash, see [Choosing the implementation](#choosing-the-implementation)) and of the provider plugins. The binary does not need those tools for its own paths. The bash tree itself ships inside the binary (see [`lo assets`](#lo-assets)). **An existing `.bin/b.yaml` is never overwritten**: a unified diff against the template is printed with the instructions (move it aside and re-run, or merge the pins by hand). Of the `b.yaml` entries, `lo toolchain doctor` checks only the render tools against their pins. It also checks that `.bin/b` is not older than the b this `lo` ships.
 2. The `.gitignore` entries (`.bin/*` with `b.yaml`/`b.lock` kept, `.kustomize/`, …).
 3. `b` itself into `.bin/b` when absent, from b's own release tarball (`b-<os>-<arch>.tar.gz`, the same asset b's installer and `b install b` resolve), pinned to a release whose SHA-256 sums are recorded in the binary from that release's published `checksums.txt`; downloaded over https to a temp file, verified, and only then extracted. A redirect off https and an oversized archive or `b` member are refused. Never `curl | sh`. An existing `.bin/b` stays, also when it is older than the pinned release: `lo toolchain doctor` warns about it, and `.bin/b update b` updates it. `GITHUB_TOKEN` is passed through when set (b works token-free for public sources). b publishes no darwin build: on macOS the command stops with the manual-install pointer ([binary.help](https://binary.help)); put `b` on `PATH` or at `.bin/b` and re-run.
 4. `.bin/b install` in the project (`PATH_BIN=.bin`), so every binary lands in `.bin/` and the two plugins under `.kustomize/`.
@@ -494,6 +506,8 @@ lo status [--domain <domain>]
 ```
 
 Delegates to the driver contract's `driver::status` function. For Lo clusters: checks if the kind cluster exists. For Capi clusters: queries the CAPI Cluster resource phase.
+
+When the kubeconfig file exists, `lo status` (also with `-o json`) reads the nodes and the `ClusterInventory/cluster` object with kubectl. Each request of these two reads stops after 5 seconds (`--request-timeout=5s`). After `lo down` the kubeconfig can point to an API server that does not answer. The Nodes section then shows `(not reachable)`.
 
 ### lo gitops
 
@@ -599,6 +613,7 @@ lo secrets allow                               # approve bash: generators after 
 lo secrets encrypt                             # write committable Secret.*.enc files
 lo secrets decrypt                             # restore the plaintext cache from .enc
 lo secrets add-key <ssh-pubkey-path|age1…>     # add an age recipient to .sops.yaml + re-key the store (--all: every domain)
+lo secrets remove-key <ssh-pubkey-path|age1…>  # remove an age recipient from .sops.yaml + re-key (--all: every domain store); rotate what it could read
 lo secrets env --name <n> [--namespace <ns>]   # emit injection-safe `export KEY=value` lines for a cached secret (for eval)
 lo secrets list | print [pattern...] | path    # inspect the cache
 ```
@@ -658,11 +673,11 @@ The server key stays `lok8s`, so the tool names (`lo_status`, `lo_build`, `lo_ti
 
 The server needs no other environment. `PATH_BASE: "."` pins the project root to the directory the editor starts the server in, so a `PATH_BASE` inherited from another project's shell cannot redirect it. Without that line the server takes the root from an exported `PATH_BASE` when set, else from the working directory. For every tool call it prepends the toolchain (`.bin`) and framework (`.lok8s`) directories to PATH.
 
-`LO_MCP_ALLOW=destructive` opens the full surface (98 tools). The count starts from the 84 tools of the argsh builtin. The Go server drops eight of them: the six commands whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`, `kubehz claim-code`, `kubehz space kubeconfig`, `kubehz cluster kubeconfig`), `chat`, and the single `drivers` tool. It adds 22 leaves that only the Go tree has: `init project`, `init cluster`, and one tool for each of the 20 driver operations (`lo_drivers_lo_provision`, …). 84 − 8 + 22 = 98. The Go-only top-level commands (`assets`, `mcp`, `operator`, `toolchain`) are never tools: the server projects the command tree without them. Remove the `env` entry for the readonly default (29 tools), or set `mutating` for the middle tier (55 tools). The tiers follow the marker table above. The [agent tools](../guide/kubehz.md#agent-tools) (`lo_kubehz_space_*`, `lo_kubehz_cluster_*`) follow the same tiers. List and get are in the default tier. Create needs `mutating`. Delete and lease need `destructive`. Of the [node maintenance commands](../guide/kubehz.md#cordon-uncordon-and-drain-a-node), cordon and uncordon are `@idempotent` and need `mutating`; drain needs `destructive`.
+`LO_MCP_ALLOW=destructive` opens the full surface (99 tools). The count starts from the 85 tools of the argsh builtin. The Go server drops eight of them: the six commands whose output is a credential (`kubeconfig`, `secrets print`, `secrets env`, `kubehz claim-code`, `kubehz space kubeconfig`, `kubehz cluster kubeconfig`), `chat`, and the single `drivers` tool. It adds 22 leaves that only the Go tree has: `init project`, `init cluster`, and one tool for each of the 20 driver operations (`lo_drivers_lo_provision`, …). 85 − 8 + 22 = 99. The Go-only top-level commands (`assets`, `mcp`, `operator`, `toolchain`) are never tools: the server projects the command tree without them. Remove the `env` entry for the readonly default (29 tools), or set `mutating` for the middle tier (55 tools). The tiers follow the marker table above. The [agent tools](../guide/kubehz.md#agent-tools) (`lo_kubehz_space_*`, `lo_kubehz_cluster_*`) follow the same tiers. List and get are in the default tier. Create needs `mutating`. Delete and lease need `destructive`. Of the [node maintenance commands](../guide/kubehz.md#cordon-uncordon-and-drain-a-node), cordon and uncordon are `@idempotent` and need `mutating`; drain needs `destructive`.
 
 #### Bash variant
 
-The frozen argsh implementation serves the same protocol from the `mcp` builtin in `argsh.so` (`argsh builtins install`). argsh loads it from `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh.so`, `BASH_LOADABLES_PATH` or `LD_LIBRARY_PATH`. The builtin has no tiers: every leaf is a tool (84 tools), and the editor's own approval prompt is the only gate. `lo chat` still drives this server.
+The frozen argsh implementation serves the same protocol from the `mcp` builtin in `argsh.so` (`argsh builtins install`). argsh loads it from `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh.so`, `BASH_LOADABLES_PATH` or `LD_LIBRARY_PATH`. The builtin has no tiers: every leaf is a tool (85 tools), and the editor's own approval prompt is the only gate. `lo chat` still drives this server.
 
 The `lok8s.yaml` routing (`spec.implementation`, see [Choosing the implementation](#choosing-the-implementation)) does not select this server. `mcp` is a Go-only command, so no routing applies to it, and `lo mcp start` is always the Go server. In a project with `spec.implementation.default: bash`, each tool call of the Go server runs `lo <cmd> …`, and the routing sends that command to the bash tree.
 
@@ -826,8 +841,10 @@ need no project. `lo mcp` offers them as tools. See
 
 The `node` group is the node-level surface of a **hosted** control plane: the
 machines you bring yourself (`kind: static` worker pools). `node join` mints a
-ticket and runs the `kubeadm join` line the platform composes, so run it as
-root on the machine you are adding; `--print-only` prints the line instead.
+ticket, reads the `kubeadm join` line the platform composes into a join
+configuration file, and runs `kubeadm join --config`, so run it as root on
+the machine you are adding. `--print-only` prints the line instead; the line
+holds the bootstrap token.
 Cluster-level `join` and `deregister` above keep their own meaning. See the
 [kubehz guide](../guide/kubehz.md#nodes-you-bring-static-pools).
 

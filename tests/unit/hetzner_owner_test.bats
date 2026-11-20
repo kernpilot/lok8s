@@ -1162,7 +1162,7 @@ load-balancer remove-target 14 --server 77"
   run _provision
   assert_failure
   assert_output --partial "lb prod-api: could not remove the target label_selector '${old}'"
-  assert_output --partial "It can route to a server of another owner. Remove it with 'hcloud load-balancer remove-target prod-api --label-selector ${old}'"
+  assert_output --partial "It can route to a server of another owner. Run this command, then run the provision again: hcloud load-balancer remove-target prod-api --label-selector ${old}"
 }
 
 # ── load balancer: a failed check stops the hook ─────────

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -822,7 +823,7 @@ func partialWrite(f *os.File, s string) error {
 }
 
 // When the write fails after a part of the content went out and the
-// removal of the fresh directory fails too (the RemoveAll seam), the note
+// removal of the file fails too (the Remove seam), the note
 // names that directory, which may still hold a part of the ticket, and
 // does not say that no copy was saved. The 5 bytes are still there.
 func TestSpaceMintJoinNamesTheDirectoryWhenTheCleanupFails(t *testing.T) {
@@ -838,11 +839,12 @@ func TestSpaceMintJoinNamesTheDirectoryWhenTheCleanupFails(t *testing.T) {
 			if err := os.Mkdir(priv, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			var parent, removed string
+			var parent string
+			var removed []string
 			h.ctx.MkdirTemp = joinDir(priv, &parent)
 			h.ctx.joinWrite = partialWrite
-			h.ctx.RemoveAll = func(p string) error {
-				removed = p
+			h.ctx.Remove = func(p string) error {
+				removed = append(removed, p)
 				return errors.New("read-only file system (test)")
 			}
 			h.handle("POST /api/spaces/sp-123/join-token", 201, c.body)
@@ -853,8 +855,10 @@ func TestSpaceMintJoinNamesTheDirectoryWhenTheCleanupFails(t *testing.T) {
 			mustContain(t, h.output(), "  delete that directory. Mint a fresh one once the temp dir (TMPDIR) is writable:\n")
 			mustNotContain(t, h.output(), "no copy was saved")
 			mustNotContain(t, h.output(), joinTicket)
-			if removed != priv {
-				t.Fatalf("removed %q, want %q", removed, priv)
+			// The file first, and the directory not after a failed
+			// removal of the file (rm -f, then rmdir; never a tree).
+			if want := filepath.Join(priv, "kubehz-join-worker-1"+c.ext); !slices.Equal(removed, []string{want}) {
+				t.Fatalf("removed %q, want [%q]", removed, want)
 			}
 			raw, err := os.ReadFile(filepath.Join(priv, "kubehz-join-worker-1"+c.ext))
 			if err != nil || len(raw) != 5 {

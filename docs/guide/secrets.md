@@ -178,9 +178,81 @@ git add clusters/app.example.com/secrets/*.enc  # each store's .gitignore commit
 lo secrets --domain app.example.com decrypt     # restore plaintext from the .enc files
 ```
 
-Add teammates by putting their age public keys (derived from their SSH keys)
-into `.sops.yaml`'s `creation_rules`, then re-`encrypt`. Scope those rules by
-path to give each environment **different** recipients. See below.
+Add a teammate with `lo secrets add-key`. It takes their age public key, or the
+path to their ed25519 SSH public key. It adds the key to every creation rule in
+`.sops.yaml`, then re-encrypts the store so that the new recipient can read it:
+
+```bash
+lo secrets --domain app.example.com add-key ~/keys/alice_ed25519.pub
+```
+
+Remove a recipient with `lo secrets remove-key`, for example when a teammate
+leaves or a key is lost. It removes the key from every creation rule, then
+re-encrypts each `.enc` file of the selected stores that lists the key. Without
+`--all` that is the store of the current domain. With `--all` it is every
+`clusters/<domain>/secrets` store. The command does not re-key the flat
+`.secrets/` store. A warning names each other store that still lists the key:
+
+```bash
+lo secrets --domain app.example.com remove-key ~/keys/alice_ed25519.pub
+lo secrets remove-key age1<recipient> --all     # every clusters/<domain>/secrets store
+```
+
+`remove-key` changes nothing when one of these is true:
+
+- The key argument looks like a private key. The command does not print it.
+  `add-key` refuses it too.
+- `.sops.yaml` has a YAML tag under `creation_rules` other than `!!str`,
+  `!!seq` or `!!map` (for example `!!binary`), or a mapping key that is not a
+  string (for example `1:`, `true:` or `~:`). The command does not read such
+  a value. Remove the tag, or quote the key.
+- `.sops.yaml` holds the key in a place that the edit does not change: an
+  unquoted list, an escaped or double-quoted string, a YAML list, `key_groups`,
+  an alias or a merge key. Remove the key there by hand.
+- The key is the last recipient of a creation rule. Nothing could then decrypt
+  the files that the rule matches. Add another recipient first.
+- The key is in no creation rule and in no `.enc` file. A typo then does not
+  look like a removal. The message names the other stores that still list the
+  key.
+- The command cannot stat or read a store path or an `.enc` file. A symlink
+  whose target is missing counts as a file that it cannot read.
+- The sops metadata of an `.enc` file does not parse, or lists no age
+  recipient. The command reads the recipients of each file from that
+  metadata, so a JSON escape cannot hide one. Fix or restore the file first.
+- An `.enc` file that lists the key is newer than its plaintext. The re-key
+  encrypts the plaintext, so it would write the old value back over the newer
+  one. Run `lo secrets decrypt` first.
+- An `.enc` file matches no creation rule, a rule with a recipient that is not
+  age, or a rule with an age recipient that does not parse.
+- An `.enc` file has no decrypted twin. The re-key cannot rewrite that file, so
+  it would keep the removed recipient. Run `lo secrets decrypt` first, or pass
+  `--skip-orphans` to accept it. With `--skip-orphans` the command names the
+  files that still list the key.
+
+After the re-key the command reads the `.enc` files of the selected stores
+again. It fails when a file that it re-keyed still lists the removed key. If
+the re-key stops after the `.sops.yaml` write (for example, when an encrypt
+fails), the command prints the command to run again. That run resumes the
+re-key.
+
+`add-key` and `remove-key` hold a lock on `.sops.yaml.lock`, next to
+`.sops.yaml`, for the whole run, so that two runs do not undo each other. A
+second run waits `LO_SECRETS_LOCK_WAIT` seconds (60 by default), then stops
+and changes nothing. The lock file holds no data. The `lo` binary locks on
+every platform. The bash implementation locks with `flock`: without it (macOS
+has none by default), both commands stop before they change a file. Both
+commands replace `.sops.yaml` through a temporary file and a rename. Each
+encrypt writes its `.enc` file the same way, so an encrypt that stops leaves
+the old file whole.
+
+::: warning A removal does not revoke access
+The removed key can still decrypt the older `.enc` files in the git history,
+and its holder keeps every value that they decrypted before. After a removal,
+rotate the secrets that the key could read.
+:::
+
+Scope the creation rules by path to give each environment **different**
+recipients. See below.
 
 ## Per-environment isolation
 
@@ -205,7 +277,7 @@ them share a store:
 ```yaml
 # .sops.yaml — first match wins, so specific rules go BEFORE any catch-all
 creation_rules:
-  - path_regex: clusters/kubehz\.cloud/secrets/Secret\..*
+  - path_regex: clusters/example\.com/secrets/Secret\..*
     age: 'age1prod…'                 # prod-key holders only
   - path_regex: clusters/.*/secrets/Secret\..*
     age: 'age1dev…,age1prod…'        # dev/CI (+ prod, who may read everything)

@@ -6,23 +6,25 @@ metadata:
     app.kubernetes.io/name: kubehz-agent
     app.kubernetes.io/part-of: kubehz
 rules:
+  # nodes: the heartbeat's one node list, and the control-plane count of
+  # the assessment. The agent reads no other core resource cluster-wide
+  # except the assessment probes below. `list` only, here and for the CSRs,
+  # storageclasses and persistentvolumes: every call of the script on them
+  # is a list (`get --raw /api/v1/nodes`, `get <kind> -o json`, `get nodes
+  # -l …`), and none reads one object by name.
   - apiGroups:
       - ""
     resources:
       - nodes
-      - componentstatuses
-      - namespaces
     verbs:
-      - get
       - list
   - apiGroups:
       - certificates.k8s.io
     resources:
       - certificatesigningrequests
     verbs:
-      - get
       - list
-  # Assessment probes (handover contract §1) — read-only, list/get only:
+  # Assessment probes (handover contract §1), read-only: list, and one get:
   #   storageclasses          → storageClasses[] (name/provisioner/isDefault)
   #   persistentvolumes       → pvSummary (count + Gi grouped by provisioner)
   #   services (cluster-wide) → loadBalancers count (type=LoadBalancer)
@@ -36,14 +38,12 @@ rules:
     resources:
       - storageclasses
     verbs:
-      - get
       - list
   - apiGroups:
       - ""
     resources:
       - persistentvolumes
     verbs:
-      - get
       - list
   - apiGroups:
       - ""
@@ -204,13 +204,18 @@ subjects:
     name: kubehz-agent
     namespace: kubehz-system
 ---
-# Assessment gate marker (handover contract §1). The CronJob pod is ephemeral,
-# so the "sent at most once per 24h / send-on-request" gate persists as
-# annotations on the kubehz-agent-config ConfigMap
-# (kubehz.cloud/last-assessment + kubehz.cloud/assess-requested). get+patch
-# only, BOTH resourceNames-scoped to that single ConfigMap (both verbs honor
-# resourceNames) — the agent can annotate nothing else and still cannot
-# create/update/delete any ConfigMap.
+# Agent state (handover contract §1). The CronJob pod is ephemeral, so its
+# markers persist as annotations on the kubehz-agent-state ConfigMap
+# (state-configmap.yaml): the "sent at most once per 24h / send-on-request"
+# assessment gate (kubehz.cloud/last-assessment, kubehz.cloud/assess-requested),
+# the claim nonce that `lo kubehz claim` places, and the desired-state
+# validator. get+patch only, BOTH resourceNames-scoped to that single
+# ConfigMap (both verbs honor resourceNames): the agent can annotate nothing
+# else and cannot create/update/delete any ConfigMap. The agent's
+# configuration (kubehz-agent-config: the API URL, the cluster id, the
+# heartbeat owner) is a separate ConfigMap, and no rule here names it: the
+# pod gets its keys through envFrom, which the kubelet reads, so the agent
+# cannot read or change its configuration through the API.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -225,7 +230,7 @@ rules:
     resources:
       - configmaps
     resourceNames:
-      - kubehz-agent-config
+      - kubehz-agent-state
     verbs:
       - get
       - patch

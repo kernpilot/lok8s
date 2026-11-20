@@ -101,7 +101,12 @@ func kubectlStub(h *harness, cmMissing, secretMissing bool) {
 	h.runner.handler = func(c execx.Cmd, _ string) error {
 		line := argvLine(c)
 		switch {
-		case strings.Contains(line, "get configmap kubehz-agent-config"):
+		// The nonce goes on kubehz-agent-state. A call on kubehz-agent-config
+		// (the agent's configuration) fails, so a claim on the old ConfigMap
+		// fails here.
+		case strings.Contains(line, "configmap kubehz-agent-config"):
+			return exitErr(1)
+		case strings.Contains(line, "get configmap kubehz-agent-state"):
 			if cmMissing {
 				return exitErr(1)
 			}
@@ -150,7 +155,7 @@ func TestClaimPlacesNonceInOneAnnotateCall(t *testing.T) {
 		if !strings.Contains(l, "patch configmap") {
 			continue
 		}
-		mustContain(t, l, "kubectl -n kubehz-system patch configmap kubehz-agent-config --type merge --patch-file /dev/stdin")
+		mustContain(t, l, "kubectl -n kubehz-system patch configmap kubehz-agent-state --type merge --patch-file /dev/stdin")
 		want := `{"metadata":{"annotations":{"kubehz.cloud/claim-nonce":"` + nonce + `","kubehz.cloud/claim-nonce-placed":"1700000000"}}}`
 		if got := h.runner.stdins[i]; got != want {
 			t.Fatalf("patch on stdin = %q, want %q", got, want)
@@ -197,8 +202,13 @@ func TestClaimMissingConfigMap(t *testing.T) {
 	h := newHarness(t)
 	kubectlStub(h, true, false)
 	mustErr(t, h.ctx.Claim(t.Context(), "khzn_batsPlacedNonce_43charsBase64urlValue000"))
-	mustContain(t, h.output(), "not found")
+	mustContain(t, h.output(), "configmap/kubehz-agent-state not found in kubehz-system")
 	mustContain(t, h.output(), "Deploy the heartbeat agent")
+	// An agent that an older lo deployed has no kubehz-agent-state.
+	mustContain(t, h.output(), "run 'lo kubehz deploy' again for an agent that an older lo deployed")
+	if n := h.runner.countCalls("patch configmap"); n != 0 {
+		t.Fatalf("patch calls without the ConfigMap: %d", n)
+	}
 }
 
 func TestClaimCodePrintsCNeverA(t *testing.T) {

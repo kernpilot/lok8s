@@ -84,9 +84,10 @@ type Context struct {
 	// Lstat is os.Lstat (nil = os.Lstat): the read of each part of the
 	// temp dir of a join file (joinTempDir). Tests log the order.
 	Lstat func(path string) (fs.FileInfo, error)
-	// RemoveAll is os.RemoveAll (nil = os.RemoveAll): the cleanup of a
-	// join file whose write failed (writeJoinFile).
-	RemoveAll func(path string) error
+	// Remove is os.Remove (nil = os.Remove): the removal of a join file
+	// and then of its directory (removeJoinFile), after a failed write
+	// (writeJoinFile) and after a join (removeJoinConfig).
+	Remove func(path string) error
 	// LookPath is `command -v <tool>` (nil = execx.Look over Paths).
 	LookPath func(tool string) bool
 	// IsTTY reports whether stdout is a terminal (nil = false) — the
@@ -101,6 +102,10 @@ type Context struct {
 	// fail, to see that the fresh directory goes.
 	joinWrite func(f *os.File, s string) error
 	joinClose func(f *os.File) error
+	// joinMinted runs after the mint of a node join returned a ticket (nil
+	// = nothing). Tests send a signal there, between the mint and the
+	// next step.
+	joinMinted func()
 	// ProviderOutput is the loaded provider's inventory JSON
 	// (provider::output on PROVIDER_CONFIG_FILE), consulted by the kubeone
 	// fingerprint reader when set. nil = no provider loaded → the spec's
@@ -192,7 +197,9 @@ func (c *Context) httpClient() *http.Client {
 	// handover (handover.go fetchSnapshot), which can legitimately take
 	// longer than any fixed cap. The default transport's dial timeout plus
 	// a response-header deadline cover a platform API that never answers.
-	// bash curl had no --max-time either; this is a deliberate divergence.
+	// bash curl has no --max-time on these calls either. The mint of a node
+	// join is the exception in both twins: mintMaxTime here, curl
+	// --max-time in bash.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = 2 * time.Minute
 	return &http.Client{

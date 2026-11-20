@@ -299,3 +299,89 @@ func TestRestoreDRefusesTheDecryptedManifest(t *testing.T) {
 		})
 	}
 }
+
+// The sops and kubectl messages of the next tests are synthetic. The two
+// digests are obvious fakes (128 zeros, 128 ones), never real ones.
+var (
+	fakeDigestA = strings.Repeat("0", 128)
+	fakeDigestB = strings.Repeat("1", 128)
+	// The shape of the sops library error on a MAC mismatch (decrypt.File).
+	macMismatchErr = `Failed to verify data integrity. expected mac "` + fakeDigestA + `", got "` + fakeDigestB + `"`
+	// A kubectl message that quotes a value of the manifest (the shape of
+	// a server-side apply typed-patch error).
+	applyValueCanary = "apply-value-canary"
+	applyErrText     = "Error from server: failed to create typed patch object (/v1, Kind=Secret) default/tls: .stringData.tls.crt: expected string, got &value.valueUnstructured{Value:" + applyValueCanary + "}"
+)
+
+// refuteOutput fails the test for each text of leaks that out holds.
+func refuteOutput(t *testing.T, out string, leaks ...string) {
+	t.Helper()
+	for _, leak := range leaks {
+		if strings.Contains(out, leak) {
+			t.Errorf("stderr holds %q:\n%s", leak, out)
+		}
+	}
+}
+
+// Issue #304: a failed decrypt prints fixed text that names the file, also
+// at debug, and never the sops message: on a MAC mismatch it holds two
+// unkeyed SHA-512 digests of the plaintext. The bats twin is "restore_d: a
+// failed decrypt prints no sops text, also at debug".
+func TestRestoreDDecryptFailurePrintsNoSopsText(t *testing.T) {
+	t.Setenv("DEBUG", "1")
+	e, f, _, errOut, p := testEngine(t)
+	testutil.WriteFile(t, filepath.Join(p.Clusters, "test.lok8s.dev", "restore.d", "tls-c.sops.yaml"), "cipher\n")
+	e.SopsDecrypt = func(string) ([]byte, error) { return nil, fmt.Errorf("%s\nsecond line", macMismatchErr) }
+	e.restoreD(t.Context(), "test.lok8s.dev", "/kc")
+	if len(f.calls) != 0 {
+		t.Errorf("kubectl ran after a failed decrypt:\n%s", f.log())
+	}
+	for _, want := range []string{
+		"[debug] bootstrap: restore.d tls-c.sops.yaml decrypt failed\n",
+		"[warn] bootstrap: restore.d could not decrypt/apply tls-c — skipping (its owner will re-create/re-issue)\n",
+		"restore.d — 0 applied, 1 skipped",
+	} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("stderr misses %q:\n%s", want, errOut.String())
+		}
+	}
+	refuteOutput(t, errOut.String(), fakeDigestA[:16], fakeDigestB[:16], "verify data integrity", "second line")
+}
+
+// A failed apply prints fixed text, also at debug, and never the kubectl
+// message: it can quote a value of the manifest. Both applies of the entry
+// fail: the store working copy, then the decrypted .sops.yaml. The bats
+// twin is "restore_d: a failed apply prints no kubectl text, also at debug".
+func TestRestoreDApplyFailurePrintsNoKubectlText(t *testing.T) {
+	t.Setenv("DEBUG", "1")
+	e, _, _, errOut, p := testEngine(t)
+	d := filepath.Join(p.Clusters, "test.lok8s.dev")
+	testutil.WriteFile(t, filepath.Join(d, "restore.d", "tls-d.sops.yaml"), "cipher\n")
+	testutil.WriteFile(t, filepath.Join(d, "secrets", "restore.d", "tls-d.yaml"), "kind: Secret\n")
+	e.SopsDecrypt = func(string) ([]byte, error) { return []byte("kind: Secret\n"), nil }
+	calls := 0
+	e.Runner = runnerFunc(func(ctx context.Context, c execx.Cmd) error {
+		calls++
+		if c.Stderr == nil {
+			t.Error("kubectl ran with a nil stderr: its message would reach the terminal")
+			return &rcError{1}
+		}
+		fmt.Fprintln(c.Stderr, applyErrText)
+		return &rcError{1}
+	})
+	e.restoreD(t.Context(), "test.lok8s.dev", "/kc")
+	if calls != 2 {
+		t.Fatalf("kubectl calls = %d, want 2 (store copy, then sops)", calls)
+	}
+	for _, want := range []string{
+		"[debug] bootstrap: restore.d tls-d store-copy apply failed\n",
+		"[debug] bootstrap: restore.d tls-d apply failed\n",
+		"[warn] bootstrap: restore.d could not decrypt/apply tls-d — skipping (its owner will re-create/re-issue)\n",
+		"restore.d — 0 applied, 1 skipped",
+	} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Errorf("stderr misses %q:\n%s", want, errOut.String())
+		}
+	}
+	refuteOutput(t, errOut.String(), applyValueCanary, "typed patch")
+}

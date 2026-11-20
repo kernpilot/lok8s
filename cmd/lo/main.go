@@ -76,6 +76,11 @@ func run(ctx context.Context, interrupted func() int) int {
 	// to the exit code the bash entrypoint died with, 128+n, with nothing
 	// printed on top.
 	root := cli.NewRoot(paths)
+	// Before cobra parses: its flag and argument errors print the value, and
+	// a private key pasted into add-key or remove-key must not be printed.
+	if cli.GuardPrivateKeyArgv(root, os.Args[1:], os.Stderr) {
+		return 1
+	}
 	err = root.ExecuteContext(ctx)
 	if rc := interrupted(); rc != 0 {
 		return rc

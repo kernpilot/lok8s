@@ -74,12 +74,17 @@ _stub_config() {
 }
 
 # kubectl stub: logs every call; serves the marker ConfigMap get and the
-# kubehz-agent Secret's agent-token (base64, as jsonpath emits it).
+# kubehz-agent Secret's agent-token (base64, as jsonpath emits it). The
+# nonce goes on kubehz-agent-state; a call on kubehz-agent-config (the agent's
+# configuration) fails, so a claim on the old ConfigMap fails here.
 _stub_kubectl() {
   kubectl() {
     printf '%s\n' "$*" >> "${KUBECTL_LOG}"
     case "$*" in
-      *"get configmap kubehz-agent-config"*)
+      *"configmap kubehz-agent-config"*)
+        echo 'Error from server (Forbidden): configmaps "kubehz-agent-config" is forbidden' >&2
+        return 1 ;;
+      *"get configmap kubehz-agent-state"*)
         [ -z "${STUB_CM_MISSING:-}" ] || return 1
         return 0 ;;
       *"annotate"*) return 0 ;;
@@ -160,7 +165,10 @@ _stub_curl() {
   run grep -c "patch configmap" "${KUBECTL_LOG}"
   assert_output "1"
   run grep "patch configmap" "${KUBECTL_LOG}"
-  assert_output "-n kubehz-system patch configmap kubehz-agent-config --type merge --patch-file /dev/stdin"
+  assert_output "-n kubehz-system patch configmap kubehz-agent-state --type merge --patch-file /dev/stdin"
+  # The ConfigMap check before the patch names the state ConfigMap too.
+  run grep -c "configmap kubehz-agent-config" "${KUBECTL_LOG}"
+  assert_output "0"
   run grep -c -F "${nonce}" "${KUBECTL_LOG}"
   assert_output "0"
   run command jq -r '.metadata.annotations["kubehz.cloud/claim-nonce"]' "${KUBECTL_PATCH_OUT}"
@@ -192,8 +200,13 @@ _stub_curl() {
 
   run kubehz::claim --nonce "khzn_batsPlacedNonce_43charsBase64urlValue000"
   assert_failure
-  assert_output --partial "not found"
+  assert_output --partial "configmap/kubehz-agent-state not found in kubehz-system"
   assert_output --partial "Deploy the heartbeat agent"
+  # An agent that an older lo deployed has no kubehz-agent-state.
+  assert_output --partial "run 'lo kubehz deploy' again for an agent that an older lo deployed"
+  # No patch without the ConfigMap.
+  run grep -c "patch configmap" "${KUBECTL_LOG}"
+  assert_output "0"
 }
 
 # ── re-enroll: happy path ────────────────────────────────
