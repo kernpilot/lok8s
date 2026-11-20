@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -939,20 +940,20 @@ func TestPublishKubeconfigNeverReplacesWithoutForce(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "kc.yaml")
 	must(t, os.WriteFile(file, []byte("planted"), 0o644))
-	if err := publishKubeconfig(file, []byte("new"), false); err == nil {
+	if _, err := publishKubeconfig(file, []byte("new"), false); err == nil {
 		t.Fatal("publish without force replaced a file that exists")
 	}
 	if got := readFile(t, file); got != "planted" {
 		t.Errorf("file = %q", got)
 	}
-	if err := publishKubeconfig(file, []byte("new"), true); err != nil {
+	if _, err := publishKubeconfig(file, []byte("new"), true); err != nil {
 		t.Fatal(err)
 	}
 	if got := readFile(t, file); got != "new" {
 		t.Errorf("file = %q after force", got)
 	}
 	fresh := filepath.Join(dir, "fresh.yaml")
-	if err := publishKubeconfig(fresh, []byte("new"), false); err != nil {
+	if _, err := publishKubeconfig(fresh, []byte("new"), false); err != nil {
 		t.Fatal(err)
 	}
 	if fi, _ := os.Stat(fresh); fi.Mode().Perm() != 0o600 {
@@ -1011,8 +1012,12 @@ func TestPublishKubeconfigWithoutHardLinks(t *testing.T) {
 			file := filepath.Join(dir, "kc.yaml")
 			calls := 0
 			linkKubeconfig = failLink(t, tc.errno, &calls, nil)
-			if err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false); err != nil {
+			wide, err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
+			if err != nil {
 				t.Fatalf("publish: %v", err)
+			}
+			if wide != 0 {
+				t.Errorf("wide = %04o, want 0", wide)
 			}
 			if calls != 1 {
 				t.Errorf("the link ran %d times, want 1", calls)
@@ -1055,8 +1060,8 @@ func failWrite(t *testing.T, calls *int, hook func()) func(*os.File, []byte) err
 // at the path: the publish removes it and fails with a
 // kubeconfigWriteError that names the cause. A file that takes the place
 // of the made file during the write stays: the publish removes only the
-// file that the create made. Not parallel: it replaces linkKubeconfig and
-// writeKubeconfigFile.
+// file that the create made, and left says that the part stays. Not
+// parallel: it replaces linkKubeconfig and writeKubeconfigFile.
 func TestPublishKubeconfigWriteFailureRemovesTheFile(t *testing.T) {
 	write := writeKubeconfigFile
 	t.Cleanup(func() { linkKubeconfig, writeKubeconfigFile = os.Link, write })
@@ -1082,13 +1087,16 @@ func TestPublishKubeconfigWriteFailureRemovesTheFile(t *testing.T) {
 				}
 			}
 			writeKubeconfigFile = failWrite(t, &writes, hook)
-			err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
+			_, err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
 			var werr *kubeconfigWriteError
 			if !errors.As(err, &werr) {
 				t.Fatalf("publish: err = %v, want a kubeconfigWriteError", err)
 			}
 			if got := werr.cause(); got != "no space left on device" {
 				t.Errorf("cause = %q", got)
+			}
+			if werr.left != tc.swap {
+				t.Errorf("left = %v, want %v", werr.left, tc.swap)
 			}
 			if writes != 1 {
 				t.Errorf("the write ran %d times, want 1", writes)
@@ -1131,7 +1139,7 @@ func TestPublishKubeconfigWithoutHardLinksKeepsAFileThatAppears(t *testing.T) {
 			linkKubeconfig = failLink(t, tc.errno, &calls, func() {
 				must(t, os.WriteFile(file, []byte("planted"), 0o640))
 			})
-			err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
+			_, err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
 			if !errors.Is(err, fs.ErrExist) {
 				t.Fatalf("publish: err = %v, want a refusal of the path that exists", err)
 			}
@@ -1160,7 +1168,7 @@ func TestPublishKubeconfigEEXISTHasNoFallback(t *testing.T) {
 	file := filepath.Join(dir, "kc.yaml")
 	calls := 0
 	linkKubeconfig = failLink(t, syscall.EEXIST, &calls, nil)
-	err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
+	_, err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
 	if !errors.Is(err, syscall.EEXIST) {
 		t.Fatalf("publish: err = %v, want the link error EEXIST", err)
 	}
@@ -1172,6 +1180,150 @@ func TestPublishKubeconfigEEXISTHasNoFallback(t *testing.T) {
 	}
 	if got := dirNames(t, dir); got != "" {
 		t.Errorf("dir holds %q: a temporary file was left behind", got)
+	}
+}
+
+// The fallback needs the temporary file at its path, the file that the
+// publish wrote. When a directory of the path is swapped during the link,
+// the link source is missing in the new directory (ENOENT): the publish
+// fails with the link error and writes no file there. Here the link step
+// moves the temporary file away. Not parallel: it replaces linkKubeconfig.
+func TestPublishKubeconfigNoFallbackWithoutTheTemporaryFile(t *testing.T) {
+	t.Cleanup(func() { linkKubeconfig = os.Link })
+	dir := t.TempDir()
+	file := filepath.Join(dir, "kc.yaml")
+	moved := filepath.Join(dir, "moved")
+	calls := 0
+	linkKubeconfig = func(oldname, newname string) error {
+		calls++
+		must(t, os.Rename(oldname, moved))
+		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: syscall.ENOENT}
+	}
+	_, err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
+	if !errors.Is(err, syscall.ENOENT) {
+		t.Fatalf("publish: err = %v, want the link error ENOENT", err)
+	}
+	if calls != 1 {
+		t.Errorf("the link ran %d times, want 1", calls)
+	}
+	if _, err := os.Lstat(file); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a file is at the path (lstat: %v): the fallback ran without the temporary file", err)
+	}
+	if got := dirNames(t, dir); got != "moved" {
+		t.Errorf("dir holds %q, want only the moved temporary file", got)
+	}
+}
+
+// After the create, the path must still name the file of the create: else
+// nothing is written or removed. Here the chmod step moves the new file
+// away and puts another file at the path. Not parallel: it replaces
+// linkKubeconfig, chmodKubeconfig and writeKubeconfigFile.
+func TestPublishKubeconfigWritesNothingWhenThePathChangesAfterTheCreate(t *testing.T) {
+	chmod, write := chmodKubeconfig, writeKubeconfigFile
+	t.Cleanup(func() { linkKubeconfig, chmodKubeconfig, writeKubeconfigFile = os.Link, chmod, write })
+	dir := t.TempDir()
+	file := filepath.Join(dir, "kc.yaml")
+	calls, writes := 0, 0
+	linkKubeconfig = failLink(t, syscall.EPERM, &calls, nil)
+	chmodKubeconfig = func(f *os.File) error {
+		must(t, os.Rename(file, file+".made"))
+		must(t, os.WriteFile(file, []byte("other"), 0o600))
+		return chmod(f)
+	}
+	writeKubeconfigFile = func(f *os.File, data []byte) error {
+		writes++
+		return write(f, data)
+	}
+	_, err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
+	if !errors.Is(err, errKubeconfigMoved) {
+		t.Fatalf("publish: err = %v, want errKubeconfigMoved", err)
+	}
+	if writes != 0 {
+		t.Errorf("the write ran %d times, want 0", writes)
+	}
+	if got := readFile(t, file); got != "other" {
+		t.Errorf("file = %q: the file at the path was changed", got)
+	}
+	if got := readFile(t, file+".made"); got != "" {
+		t.Errorf("the made file holds %q, want nothing", got)
+	}
+	if got := dirNames(t, dir); got != "kc.yaml kc.yaml.made" {
+		t.Errorf("dir holds %q", got)
+	}
+}
+
+// aclRights lists the entries of a getfacl listing that give a group or
+// another user an effective right: the rights after "#effective:" when the
+// mask cuts the entry, else the rights of the entry. The entry of the
+// owner ("user::") does not count.
+func aclRights(listing string) string {
+	var bad []string
+	for _, line := range strings.Split(listing, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "user::") {
+			continue
+		}
+		entry, effective, cut := strings.Cut(line, "#effective:")
+		rights := strings.TrimSpace(effective)
+		if !cut {
+			rights = entry[strings.LastIndex(entry, ":")+1:]
+		}
+		if rights != "---" {
+			bad = append(bad, line)
+		}
+	}
+	return strings.Join(bad, "; ")
+}
+
+// A default ACL of the directory replaces the umask. Under one that gives
+// the group and others read, the file of the fallback has mode 0600, and
+// no entry of its ACL gives a group or another user an effective right.
+// The Go create asks for 0600, so this holds without the chmod too; the
+// bash twin asks for 0666 and needs the chmod. Skips without setfacl or
+// getfacl, and on a file system of the test dir with no ACLs. Not
+// parallel: it replaces linkKubeconfig.
+func TestPublishKubeconfigUnderADefaultACL(t *testing.T) {
+	setfacl, serr := exec.LookPath("setfacl")
+	getfacl, gerr := exec.LookPath("getfacl")
+	if serr != nil || gerr != nil {
+		t.Skip("setfacl or getfacl is missing")
+	}
+	t.Cleanup(func() { linkKubeconfig = os.Link })
+	dir := t.TempDir()
+	if out, err := exec.Command(setfacl, "-d", "-m", "u::rw,g::r,o::r", dir).CombinedOutput(); err != nil {
+		t.Skipf("no ACLs on the file system of the test dir: %v: %s", err, out)
+	}
+	// The default ACL applies: a file that asks for 0666 gets 0644,
+	// whatever the umask.
+	probe := filepath.Join(dir, "probe")
+	must(t, os.WriteFile(probe, nil, 0o666))
+	if fi, err := os.Stat(probe); err != nil || fi.Mode().Perm() != 0o644 {
+		t.Skipf("the default ACL does not apply on the file system of the test dir (stat: %v, %v)", fi, err)
+	}
+	must(t, os.Remove(probe))
+	file := filepath.Join(dir, "kc.yaml")
+	calls := 0
+	linkKubeconfig = failLink(t, syscall.EPERM, &calls, nil)
+	wide, err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if wide != 0 {
+		t.Errorf("wide = %04o, want 0", wide)
+	}
+	fi, err := os.Lstat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("mode = %04o, want 0600", perm)
+	}
+	out, err := exec.Command(getfacl, "-cp", "--", file).Output()
+	if err != nil {
+		t.Fatalf("getfacl: %v", err)
+	}
+	if bad := aclRights(string(out)); bad != "" {
+		t.Errorf("ACL entries with an effective right: %s (getfacl %q)", bad, out)
 	}
 }
 
@@ -1240,6 +1392,59 @@ func TestAgentKubeconfigWithoutHardLinks(t *testing.T) {
 	}
 	if got := dirNames(t, dir); got != "kc.yaml race.yaml" {
 		t.Errorf("dir holds %q: the part of full.yaml or a temporary file was left behind", got)
+	}
+
+	// A file that takes the place of the made file during the write stays,
+	// so the part is not removed: the error names the file to remove.
+	swap := filepath.Join(dir, "swap.yaml")
+	writeKubeconfigFile = failWrite(t, &writes, func() {
+		must(t, os.Rename(swap, swap+".made"))
+		must(t, os.WriteFile(swap, []byte("other"), 0o600))
+	})
+	h.errOut.Reset()
+	_, err = h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", swap, false)
+	mustErr(t, err)
+	want = "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write " + swap + ": no space left on device\n" +
+		"  " + swap + " can hold a part of the kubeconfig. Remove it before the next run.\n"
+	if got := h.errOut.String(); got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+	if got := dirNames(t, dir); got != "kc.yaml race.yaml swap.yaml swap.yaml.made" {
+		t.Errorf("dir holds %q", got)
+	}
+}
+
+// The mode read back decides. When the file keeps group or other bits
+// after the chmod (vfat and exFAT set the mode at the mount, and can
+// refuse the chmod), the command writes the file and prints one warning
+// that names the mode. Not parallel: it replaces linkKubeconfig and
+// chmodKubeconfig.
+func TestAgentKubeconfigWarnsWhenTheModeStaysWide(t *testing.T) {
+	chmod := chmodKubeconfig
+	t.Cleanup(func() { linkKubeconfig, chmodKubeconfig = os.Link, chmod })
+	calls := 0
+	linkKubeconfig = failLink(t, syscall.EPERM, &calls, nil)
+	chmodKubeconfig = func(f *os.File) error {
+		// As a mount with fmask=0133: the mode is 0644, the chmod fails.
+		must(t, f.Chmod(0o644))
+		return syscall.EPERM
+	}
+	h := agentHarness(t)
+	file := filepath.Join(t.TempDir(), "kc.yaml")
+	h.handle("GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent", 200, agentKubeconfigYAML)
+	res, err := h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", file, false)
+	if err != nil {
+		t.Fatalf("kubeconfig: %v (stderr %q)", err, h.errOut.String())
+	}
+	want := "[warn] kubehz cluster kubeconfig cl-1a2b3c4d: " + file + " has mode 0644: the mount options of its file system set the mode\n"
+	if got := h.errOut.String(); got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+	if res.File != file {
+		t.Errorf("result file = %q", res.File)
+	}
+	if got := readFile(t, file); got != agentKubeconfigYAML {
+		t.Errorf("file = %q", got)
 	}
 }
 

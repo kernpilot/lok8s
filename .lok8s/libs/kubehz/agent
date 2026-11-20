@@ -631,10 +631,15 @@ kubehz::agent_kubeconfig() {
   kubehz::agent_target "${action}" "${file}" "${force}" || return 1
   kubehz::agent_write "${KUBEHZ_AGENT_TARGET}" "${force}" || wrc=$?
   # First: after a failed write the path can still hold a part of the
-  # file, and "exists" would name the wrong cause.
-  if (( wrc == 2 )); then
+  # file, and "exists" would name the wrong cause. rc 3: the part was not
+  # removed (the path names another file, or the remove failed).
+  if (( wrc == 2 || wrc == 3 )); then
     error "kubehz ${action}: cannot write ${file}: ${KUBEHZ_AGENT_WRITE_ERROR}"
-    echo "  Check the free space and the file system of the directory, then run the command again." >&2
+    if (( wrc == 3 )); then
+      echo "  ${file} can hold a part of the kubeconfig. Remove it before the next run." >&2
+    else
+      echo "  Check the free space and the file system of the directory, then run the command again." >&2
+    fi
     return 1
   fi
   if (( wrc != 0 )); then
@@ -646,6 +651,10 @@ kubehz::agent_kubeconfig() {
     echo "  Name a file in a directory that exists and that you can write to." >&2
     return 1
   fi
+  # The exclusive create could not take the group and other bits away: on
+  # vfat or exFAT the mount sets the mode.
+  [[ -z "${KUBEHZ_AGENT_WIDE_MODE}" ]] ||
+    warn "kubehz ${action}: ${file} has mode ${KUBEHZ_AGENT_WIDE_MODE}: the mount options of its file system set the mode"
   case "${format}" in
     text) printf '%s\n' "${file}" ;;
     json) jq -n --arg id "${id}" --arg file "${file}" '{id: $id, file: $file}' ;;
@@ -1022,13 +1031,20 @@ kubehz::agent_exists() {
 # mounts), ln fails with EPERM, ENOTSUP, EOPNOTSUPP or ENOSYS, and the
 # texts differ between ln builds and C libraries. So lo reads no text:
 # after a failed ln, a file or a link at the path is the refusal, with no
-# second write (Go: EEXIST). Else kubehz::agent_create writes the file
-# under noclobber. An error that the write cannot get past (EACCES,
-# EROFS, ENOSPC) fails it too. `command` keeps a function or an alias
-# named ln out of it.
-# rc 1 is a refusal or an error before the file exists. rc 2 is a write
-# that failed after the create: kubehz::agent_create removed the file and
-# KUBEHZ_AGENT_WRITE_ERROR holds the cause.
+# second write (Go: EEXIST). The fallback also needs the temporary file at
+# its path, the file that mktemp made (the device and the inode of stat,
+# without -L, as Go's os.SameFile of an Lstat). When a directory of the
+# path was swapped, the link source is missing in the new directory, and
+# the fallback would write the file there: that is a refusal too. Else
+# kubehz::agent_create writes the file under noclobber. An error that the
+# write cannot get past (EACCES, EROFS, ENOSPC) fails it too. `command`
+# keeps a function or an alias named ln out of it.
+# rc 1 is a refusal or an error before the first byte of the file. rc 2
+# and rc 3 are a write that failed after the create:
+# KUBEHZ_AGENT_WRITE_ERROR holds the cause, and kubehz::agent_create
+# removed the part (rc 2) or did not (rc 3). After a fallback with rc 0,
+# KUBEHZ_AGENT_WIDE_MODE holds the mode of the file when it has group or
+# other bits (vfat, exFAT), else it is empty.
 # The temporary file goes to the directory of <file> as written, the part
 # before its last "/" (Go: kubeconfigTempDir). A parameter expansion takes
 # it, not $(dirname): a command substitution drops the trailing newlines of
@@ -1037,14 +1053,15 @@ kubehz::agent_exists() {
 # temporary file and the mv stay in one directory.
 # Usage: kubehz::agent_write <file> <force>
 kubehz::agent_write() {
-  local file="${1}" force="${2}" dir=. tmp rc=0
-  KUBEHZ_AGENT_WRITE_ERROR=""
+  local file="${1}" force="${2}" dir=. tmp rc=0 made out
+  KUBEHZ_AGENT_WRITE_ERROR="" KUBEHZ_AGENT_WIDE_MODE=""
   [[ ! -d "${file}" ]] || return 1
   # "/" for a name in /: the part is empty, and the template adds the "/".
   [[ "${file}" != */* ]] || dir="${file%/*}"
   # mktemp prints a newline: the x keeps the trailing newlines of a name.
   tmp=$(mktemp "${dir%/}/.kubeconfig-XXXXXX" 2>/dev/null && printf x) || return 1
   tmp="${tmp%$'\n'x}"
+  made=$(stat -c '%d:%i' -- "${tmp}" 2>/dev/null) || made=""
   if ! printf '%s' "${KUBEHZ_AGENT_BODY}" >"${tmp}"; then
     rc=1
   elif (( force )); then
@@ -1052,8 +1069,15 @@ kubehz::agent_write() {
   elif ! command ln -T -- "${tmp}" "${file}" 2>/dev/null; then
     if [[ -e "${file}" || -L "${file}" ]]; then
       rc=1
+    elif [[ -z "${made}" || "$(stat -c '%d:%i' -- "${tmp}" 2>/dev/null)" != "${made}" ]]; then
+      rc=1
     else
-      KUBEHZ_AGENT_WRITE_ERROR=$(kubehz::agent_create "${file}" 2>/dev/null) || rc=$?
+      out=$(kubehz::agent_create "${file}" 2>/dev/null) || rc=$?
+      if (( rc == 0 )); then
+        KUBEHZ_AGENT_WIDE_MODE="${out}"
+      else
+        KUBEHZ_AGENT_WRITE_ERROR="${out}"
+      fi
     fi
   fi
   rm -f -- "${tmp}" 2>/dev/null
@@ -1064,32 +1088,50 @@ kubehz::agent_write() {
 # noclobber in a subshell with umask 077 (Go: createKubeconfig).
 # Noclobber stats the path first: it opens a missing path with O_EXCL and
 # refuses a regular file, but it opens a FIFO or a device without O_EXCL.
-# Thus a FIFO or a device that appears between the check of
-# kubehz::agent_write and the open gets the write, and on a FIFO the open
-# waits for a reader. The create and the write are two steps, so the rc
-# says which one failed:
-#   1  the create failed: there is no file to remove, and none is removed.
-#   2  the write failed after the create: the path holds a part of the
-#      file. It is removed while the path names the file of descriptor 3
-#      (not a link, the same file), never a file that took its place. The
-#      cause goes to stdout: the C-locale text of the shell, its first
-#      letter in lower case, as Go prints it ("no space left on device").
+# A regular file at descriptor 3 is thus one that the open made. So the
+# steps before the first byte are:
+#   - descriptor 3 must be a regular file and empty. Else a FIFO or a
+#     device appeared after the check of kubehz::agent_write: nothing is
+#     written, changed or removed, it is not ours. (On a FIFO with no
+#     reader the open waits.)
+#   - chmod 600 on the open file: the open asks for 0666, and a default
+#     ACL of the directory replaces the umask. vfat can refuse the chmod,
+#     so the mode that stat reads back decides.
+#   - the path must still name the file of descriptor 3 (not a link, the
+#     same file), and stat must read its mode.
+# The rc says which step failed:
+#   1  a step before the first byte: nothing is written or removed.
+#   2  the write failed after the create: the part of the file is removed
+#      while the path names the file of descriptor 3.
+#   3  the write failed, and the part was not removed: the path names
+#      another file, or rm failed.
+# For rc 2 and 3 the cause goes to stdout: the C-locale text of the
+# shell, its first letter in lower case, as Go prints it ("no space left
+# on device"). For rc 0, stdout holds the mode (0644) when the file has
+# group or other bits, as on vfat or exFAT, else nothing.
 # Bash does not see an error of the close.
 # Usage: kubehz::agent_create <file>
 kubehz::agent_create() {
-  local err
+  local err mode
   (
     set -o noclobber
     umask 077
     LC_ALL=C
     exec 3>"${1}" || exit 1
+    [[ -f /dev/fd/3 && ! -s /dev/fd/3 ]] || exit 1
+    chmod 600 /dev/fd/3 2>/dev/null || :
+    [[ ! -L "${1}" && /dev/fd/3 -ef "${1}" ]] || exit 1
+    mode=$(stat -L -c '%a' /dev/fd/3 2>/dev/null) || exit 1
     if ! err=$(printf '%s' "${KUBEHZ_AGENT_BODY}" 2>&1 >&3); then
-      [[ -L "${1}" || ! /dev/fd/3 -ef "${1}" ]] || rm -f -- "${1}"
       err="${err##*: }"
       err="${err,}"
       printf '%s\n' "${err:-write error}"
-      exit 2
+      if [[ ! -L "${1}" && /dev/fd/3 -ef "${1}" ]] && rm -f -- "${1}" 2>/dev/null; then
+        exit 2
+      fi
+      exit 3
     fi
     exec 3>&-
+    (( (8#${mode} & 8#077) == 0 )) || printf '%04o\n' "$(( 8#${mode} & 8#777 ))"
   )
 }

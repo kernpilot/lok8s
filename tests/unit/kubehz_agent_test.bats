@@ -1332,11 +1332,12 @@ _write_fails() {
   run ls -A "${d}"
   assert_output ''
   # A file that takes the place of the made file during the write stays:
-  # only the file that the create made is removed.
+  # only the file that the create made is removed, so the part stays (rc 3).
   WRITE_HOOK="mv -- '${d}/kc.yaml' '${d}/kc.yaml.made' && builtin printf other > '${d}/kc.yaml'"
   wrc=0
   kubehz::agent_write "${d}/kc.yaml" 0 || wrc=$?
-  [[ "${wrc}" == 2 ]] || fail "a file in its place: rc ${wrc}, want 2"
+  [[ "${wrc}" == 3 ]] || fail "a file in its place: rc ${wrc}, want 3"
+  [[ "${KUBEHZ_AGENT_WRITE_ERROR}" == "no space left on device" ]] || fail "cause: ${KUBEHZ_AGENT_WRITE_ERROR}"
   run cat "${d}/kc.yaml"
   assert_output other
   run ls -A "${d}"
@@ -1350,6 +1351,15 @@ _write_fails() {
   Check the free space and the file system of the directory, then run the command again."
   run ls -A "${d}"
   assert_output ''
+  # When the part stays, the command names the file to remove.
+  _write_fails "${d}/swap.yaml"
+  WRITE_HOOK="mv -- '${d}/swap.yaml' '${d}/swap.yaml.made' && builtin printf other > '${d}/swap.yaml'"
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/swap.yaml"
+  assert_failure
+  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write ${d}/swap.yaml: no space left on device
+  ${d}/swap.yaml can hold a part of the kubeconfig. Remove it before the next run."
+  run ls -A "${d}"
+  assert_output $'swap.yaml\nswap.yaml.made'
 }
 
 # A failed create made no file: a file or a dangling link at the path
@@ -1372,6 +1382,146 @@ _write_fails() {
   [[ -L "${d}/dangling.yaml" ]] || fail "the dangling link was removed"
   run ls -A "${d}"
   assert_output $'dangling.yaml\nkc.yaml'
+}
+
+# noclobber opens a FIFO or a device at the path without O_EXCL: the
+# create step writes nothing to it, and removes, changes and opens nothing
+# more. The test holds the FIFO open for reading and writing itself (Linux
+# does not wait on that open), so that no open of the step waits, and the
+# read of what reached the FIFO waits 1 s at most.
+@test "kubeconfig: the create step on its own writes nothing to a FIFO or a device at the path" {
+  local d="${BATS_TEST_TMPDIR}/special" got="" ffd
+  mkdir -p "${d}"
+  timeout 5 mkfifo -m 644 "${d}/kc.yaml"
+  exec {ffd}<>"${d}/kc.yaml"
+  KUBEHZ_AGENT_BODY='apiVersion: v1'
+  run kubehz::agent_create "${d}/kc.yaml"
+  assert_failure 1
+  read -r -t 1 -N 1 -u "${ffd}" got || :
+  exec {ffd}<&-
+  [[ -z "${got}" ]] || fail "the create step wrote to the FIFO"
+  [[ -p "${d}/kc.yaml" ]] || fail "the FIFO was removed"
+  # No chmod on the FIFO either.
+  run stat -c '%a' "${d}/kc.yaml"
+  assert_output 644
+  ln -s /dev/null "${d}/device.yaml"
+  run kubehz::agent_create "${d}/device.yaml"
+  assert_failure 1
+  [[ -L "${d}/device.yaml" && "$(readlink -- "${d}/device.yaml")" == /dev/null ]] || fail "the link to the device was changed"
+  run ls -A "${d}"
+  assert_output $'device.yaml\nkc.yaml'
+}
+
+# _chmod_stub <line>...: a stand-in chmod in the bin directory of _ln_fails
+# (call that first), with the given lines. REAL_CHMOD is the chmod of the
+# system.
+_chmod_stub() {
+  REAL_CHMOD="$(command -v chmod)"
+  export REAL_CHMOD
+  printf '%s\n' '#!/usr/bin/env bash' "$@" > "${BATS_TEST_TMPDIR}/ln-bin/chmod"
+  "${REAL_CHMOD}" 755 "${BATS_TEST_TMPDIR}/ln-bin/chmod"
+}
+
+# _acl_rights <file>: the entries of the ACL of <file> that give a group or
+# another user an effective right: the rights after "#effective:" when the
+# mask cuts the entry, else the rights of the entry. The entry of the owner
+# ("user::") does not count. The Go twin is aclRights.
+_acl_rights() {
+  getfacl -cp -- "${1}" | awk '
+    { sub(/^[ \t]+/, ""); sub(/[ \t]+$/, "") }
+    $0 == "" || /^#/ || /^user::/ { next }
+    {
+      r = $0
+      if (index(r, "#effective:")) { sub(/.*#effective:/, "", r) } else { sub(/[ \t].*$/, "", r); sub(/.*:/, "", r) }
+      if (r != "---") print
+    }'
+}
+
+# A default ACL of the directory replaces the umask, and the open of
+# noclobber asks for 0666: without the chmod on the open file the fallback
+# made 0644 here. The Go twin is TestPublishKubeconfigUnderADefaultACL.
+@test "kubeconfig: under a default ACL that gives the group read, the fallback file has 0600 and no other effective right" {
+  command -v setfacl >/dev/null && command -v getfacl >/dev/null || skip "setfacl or getfacl is missing"
+  local d="${BATS_TEST_TMPDIR}/acl"
+  mkdir -p "${d}"
+  setfacl -d -m u::rw,g::r,o::r "${d}" 2>/dev/null || skip "no ACLs on the file system of the test dir"
+  # The default ACL applies: a file that asks for 0666 gets 0644, whatever
+  # the umask.
+  : > "${d}/probe"
+  [[ "$(stat -c '%a' "${d}/probe")" == 644 ]] || skip "the default ACL does not apply on the file system of the test dir"
+  rm -f -- "${d}/probe"
+  _ln_fails
+  LN_ERROR='Operation not permitted'
+  KUBEHZ_AGENT_BODY='apiVersion: v1'
+  kubehz::agent_write "${d}/kc.yaml" 0 || fail "the write failed: rc $?"
+  [[ -z "${KUBEHZ_AGENT_WIDE_MODE}" ]] || fail "wide mode: ${KUBEHZ_AGENT_WIDE_MODE}"
+  run stat -c '%a' "${d}/kc.yaml"
+  assert_output 600
+  run _acl_rights "${d}/kc.yaml"
+  assert_output ''
+  run cat "${d}/kc.yaml"
+  assert_output 'apiVersion: v1'
+}
+
+# The fallback needs the temporary file at its path, the file that mktemp
+# made. When a directory of the path is swapped during the link, the link
+# source is missing in the new directory: that is a refusal, with no file
+# written there. Here the stand-in ln moves the temporary file away. The
+# Go twin is TestPublishKubeconfigNoFallbackWithoutTheTemporaryFile.
+@test "kubeconfig: without the temporary file at its path, a link error refuses and writes no file" {
+  local d="${BATS_TEST_TMPDIR}/nolink-moved"
+  mkdir -p "${d}"
+  _ln_fails
+  LN_ERROR='No such file or directory'
+  LN_HOOK="mv -- \"\${3}\" '${d}/moved'"
+  KUBEHZ_AGENT_BODY='apiVersion: v1'
+  run kubehz::agent_write "${d}/kc.yaml" 0
+  assert_failure 1
+  [[ ! -e "${d}/kc.yaml" && ! -L "${d}/kc.yaml" ]] || fail "the fallback wrote the file without the temporary file"
+  run ls -A "${d}"
+  assert_output moved
+  run cat "${LN_LOG}"
+  assert_output ln
+}
+
+# After the create, the path must still name the file of descriptor 3:
+# else nothing is written or removed. Here the stand-in chmod moves the new
+# file away and puts another file at the path. The Go twin is
+# TestPublishKubeconfigWritesNothingWhenThePathChangesAfterTheCreate.
+@test "kubeconfig: a path that names another file after the create gets no write" {
+  local d="${BATS_TEST_TMPDIR}/nolink-swapped"
+  mkdir -p "${d}"
+  _ln_fails
+  LN_ERROR='Operation not permitted'
+  _chmod_stub "mv -- '${d}/kc.yaml' '${d}/kc.yaml.made' && printf other > '${d}/kc.yaml'"
+  KUBEHZ_AGENT_BODY='apiVersion: v1'
+  run kubehz::agent_write "${d}/kc.yaml" 0
+  assert_failure 1
+  run cat "${d}/kc.yaml"
+  assert_output other
+  [[ -f "${d}/kc.yaml.made" && ! -s "${d}/kc.yaml.made" ]] || fail "the made file holds a part of the kubeconfig"
+  run ls -A "${d}"
+  assert_output $'kc.yaml\nkc.yaml.made'
+}
+
+# The mode read back decides. When the file keeps group or other bits
+# after the chmod (vfat and exFAT set the mode at the mount, and can refuse
+# the chmod), the command writes the file and prints one warning that
+# names the mode. The stand-in chmod gives the file 0644 and fails. The Go
+# twin is TestAgentKubeconfigWarnsWhenTheModeStaysWide.
+@test "kubeconfig: a mode that stays wide after the chmod gets one warning that names it" {
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  local d="${BATS_TEST_TMPDIR}/nolink-wide"
+  mkdir -p "${d}"
+  _ln_fails
+  LN_ERROR='Operation not permitted'
+  _chmod_stub '"${REAL_CHMOD}" 644 "${@: -1}"' 'exit 1'
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/kc.yaml"
+  assert_success
+  assert_output "[warn] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/kc.yaml has mode 0644: the mount options of its file system set the mode
+${d}/kc.yaml"
+  run cat "${d}/kc.yaml"
+  assert_output 'apiVersion: v1'
 }
 
 @test "kubeconfig: without hard links, the command writes a new file, and a file that appears in the link step stays" {
