@@ -85,8 +85,12 @@ func sameYAML11Value(back, v any) bool {
 // prints it as a key too (`<scalar>: 1`). The output reads back with go-yaml
 // v2, a YAML 1.1 reader (yes, on and y are bools there), as the JSON value:
 // a string stays a string, and a real bool, null or number stays one.
-// go-yaml v2 has no base 60 and no case-insensitive words, so for 1:20 or
-// tRUE the exact text is the check.
+// go-yaml v2 cannot show each row: it has no base 60 (PyYAML has), it reads a
+// time into an any as a string, and it has only the three case forms of each
+// word (yes, Yes, YES) that YAML 1.1 has. So for 1:20, 2026-11-20 or tRUE the
+// exact text is the check. YAML 1.1 reads the other case forms (tRUE) and a
+// base 60 int with a first digit 0 (0:30) as strings: the pattern quotes them
+// without need, which is harmless.
 func TestYAML11QuotesWhatAYAML11ReaderReadsAsABoolANullOrANumber(t *testing.T) {
 	for _, c := range readYAML11Cases(t) {
 		var v any
@@ -128,8 +132,14 @@ func TestYAML11QuotesWhatAYAML11ReaderReadsAsABoolANullOrANumber(t *testing.T) {
 
 // The pattern holds the set: it matches each string of the table that is in
 // the set, and no other string. The output alone cannot show this for a form
-// that yaml.v3 quotes itself (0o17, 0777, 1e3), so a class could go missing
-// from the pattern and the output test would still pass.
+// that yaml.v3 or yq quotes itself, so a class could go missing from the
+// pattern and the output test would still pass. Both quote these forms
+// themselves: true, false and null in the three case forms, ~, the empty
+// string, each number form but base 60 and .5_ (7, 0x1F, 0o17, 0777, 08, 1.5,
+// 1e3, -_1, 0_x1f, 1e_+3), .inf and .nan in the three case forms, and the
+// dates and times that go-yaml reads as a time (2026-11-20,
+// 2026-11-20T10:00:00Z, 2026-11-20 10:00:00). yaml.v3 also quotes 0b-1 and
+// 0b+1, and yq does not.
 func TestYAML11PatternHoldsTheSet(t *testing.T) {
 	n := 0
 	for _, c := range readYAML11Cases(t) {
