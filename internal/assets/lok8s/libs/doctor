@@ -9,6 +9,7 @@
 # (doctor::_kms_check). Exits non-zero when a REQUIRED prerequisite is missing.
 
 import ^utils/domain
+import ^utils/spec
 import ^utils/verbose
 import ^utils/provider
 import ^utils/template
@@ -124,6 +125,10 @@ main::doctor() {
   # as an entry name (advisory; one kubectl read of the CRD, GET requests
   # only, with the same plugin caveat).
   doctor::_sso_check "${domain}"
+  # The Kubernetes minors that the kubectl image of system-upgrade-controller
+  # serves, when spec.bootstrap has the addon as an entry name (advisory; it
+  # reads the spec only).
+  doctor::_suc_check "${domain}"
 
   # Provider / infrastructure diagnosis — advisory, never affects the exit code.
   doctor::_provider_section "${domain}"
@@ -1752,6 +1757,68 @@ doctor::_sso_state() {
     *) state=invalid ;;
   esac
   printf '%s\n' "${state}"
+}
+
+# doctor::_suc_check <domain>
+# The kubectl range check for the system-upgrade-controller addon. Go twin:
+# internal/cli/cmd_doctor_suc.go. The piped lines are the same in both.
+#
+# The drain container of a Plan with cordon or drain runs the kubectl image
+# that the addon pins, and that image serves only the Kubernetes minors of
+# spec::suc_kubectl_range (utils/spec.sh has the details). The check reads the
+# spec only: no kubectl, no cluster.
+#
+# It runs when spec.bootstrap has system-upgrade-controller as a bare entry
+# name (read with the entry parser of `lo addons --detail`, as the RBAC
+# migration check reads its addons). spec.kubernetes.version comes from the one
+# reader (spec::kubernetes_version). The lines: ✓ when the minor is in the
+# range; ! with the range and the fixes when it is not; ℹ for a Lo cluster
+# without a version (kind runs its default node image); ! (not checked) when
+# the version cannot be read or is not vX.Y or vX.Y.Z. A cluster of another
+# kind without a version gets no line: `lo lint` refuses that spec. Without a
+# domain, with a deploy domain, without a cluster spec, with a spec whose kind
+# cannot be read, or without yq, it prints nothing: the RBAC migration check
+# above says it. Every line is advisory: it always returns 0.
+doctor::_suc_check() {
+  local domain="${1}" not_checked="system-upgrade-controller kubectl range not checked: "
+  [[ "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || return 0
+  local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  [[ -f "${spec}" ]] || return 0
+  command -v yq >/dev/null 2>&1 || return 0
+  local kind
+  kind=$(domain::spec_driver "${spec}" lo 2>/dev/null) || return 0
+  if ! declare -F bootstrap::_resolve_entries >/dev/null || ! declare -F bootstrap::_parse_entry >/dev/null; then
+    return 0
+  fi
+  # The addon counts only as a bare entry name, never as a path entry, as in
+  # the RBAC migration check (Go: the Builtin flag of the parsed entry).
+  local -a entries=()
+  mapfile -t entries < <(bootstrap::_resolve_entries "${spec}" "${kind}" 2>/dev/null)
+  local e nm dr inl ev wt dp ex key enabled=0
+  for e in "${entries[@]+"${entries[@]}"}"; do
+    [[ -n "${e}" ]] || continue
+    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""; ex=""; key=""
+    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp ex key 2>/dev/null || continue
+    [[ "${key}" != /* && "${key}" != ./* && "${key}" != ../* ]] || continue
+    [[ "${dr##*/}" != system-upgrade-controller ]] || enabled=1
+  done
+  (( enabled )) || return 0
+  local version verdict
+  if ! version=$(spec::kubernetes_version "${spec}" 2>/dev/null); then
+    doctor::_warn "${not_checked}spec.kubernetes.version cannot be read"
+    return 0
+  fi
+  if [[ -z "${version}" ]]; then
+    [[ "${kind}" != lo ]] || doctor::_info "system-upgrade-controller: spec.kubernetes.version is not set, so kind runs its default node image (${_SPEC_KIND_DEFAULT_NODE} with kind ${_SPEC_KIND_VERSION}, the pinned release); the kubectl image of the drain container serves Kubernetes $(spec::suc_kubectl_range)"
+    return 0
+  fi
+  verdict="$(spec::suc_kubectl "${version}")"
+  case "${verdict}" in
+    in\ *)  doctor::_ok "system-upgrade-controller: the kubectl image of the drain container serves Kubernetes ${verdict#in } (it serves $(spec::suc_kubectl_range))" ;;
+    out\ *) doctor::_warn "$(spec::suc_kubectl_out_of_range_line "${verdict#out }")" ;;
+    *)      doctor::_warn "${not_checked}spec.kubernetes.version is not a version of the form vX.Y or vX.Y.Z" ;;
+  esac
+  return 0
 }
 
 # doctor::_provider_section <domain>

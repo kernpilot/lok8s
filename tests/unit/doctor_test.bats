@@ -626,3 +626,72 @@ _sso_path_without() {
   grep -qxF -- "--kubeconfig ${PATH_BASE}/.kubeconfig/sso-test.yaml ${_sso_read}" "${CALLS}" \
     || fail "no CRD read in: $(cat "${CALLS}")"
 }
+
+# ── doctor::_suc_check: the kubectl range of system-upgrade-controller ───────
+# The cases are shared with the Go twin (internal/cli/cmd_doctor_suc_test.go)
+# and with the lint tests of both twins, under
+# tests/fixtures/doctor-suc-kubectl/cases/<case>/ (the files are listed in the
+# Go test). The check reads the spec only: no kubectl runs.
+
+# _suc_setup — the bootstrap entry parser and a project under BATS_TEST_TMPDIR.
+_suc_setup() {
+  :usage() { :; }
+  :args() { shift; }
+  # shellcheck source=/dev/null
+  source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+  # shellcheck source=/dev/null
+  source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+  export SUC_FIX="${_PROJECT_ROOT}/tests/fixtures/doctor-suc-kubectl"
+  export PATH_BASE="${BATS_TEST_TMPDIR}/project"
+  export PATH_CLUSTERS="${PATH_BASE}/clusters"
+  export PATH_LOK8S="${PATH_BASE}/.lok8s"
+  unset LOK8S_CLUSTER_NAME
+}
+
+# _suc_case <name> — run the check for the shared case.
+_suc_case() {
+  _suc_setup
+  local case_dir="${SUC_FIX}/cases/${1}"
+  [[ -f "${case_dir}/want" ]] || fail "no case ${1}"
+  mkdir -p "${PATH_CLUSTERS}/suc.example"
+  cp "${case_dir}/cluster.lok8s.yaml" "${PATH_CLUSTERS}/suc.example/"
+  run doctor::_suc_check suc.example
+  assert_success
+  assert_output "$(cat "${case_dir}/want")"
+}
+
+@test "suc: 1.31 is below the range and warns" { _suc_case v1.31; }
+@test "suc: 1.32 is below the range and warns" { _suc_case v1.32; }
+@test "suc: 1.33 is the first minor of the range" { _suc_case v1.33; }
+@test "suc: 1.35 without a v passes on KubeOne" { _suc_case v1.35; }
+@test "suc: 1.37 is the last minor of the range" { _suc_case v1.37; }
+@test "suc: 1.38 is above the range and warns" { _suc_case v1.38; }
+@test "suc: a version with a digest is read without the digest" { _suc_case digest; }
+@test "suc: the addon as a map entry counts" { _suc_case map-entry; }
+@test "suc: a Lo cluster without a version names the kind default" { _suc_case unset; }
+@test "suc: a KubeOne cluster without a version prints no line" { _suc_case unset-kubeone; }
+@test "suc: a spec.bootstrap without the addon prints no line" { _suc_case no-entry; }
+@test "suc: the addon as a path entry does not count" { _suc_case path-entry; }
+@test "suc: a version that is not vX.Y or vX.Y.Z is not checked" { _suc_case not-a-version; }
+@test "suc: a version that cannot be read is not checked" { _suc_case unreadable; }
+
+@test "suc: every shared case has a bats test" {
+  local dir name missing=""
+  for dir in "${_PROJECT_ROOT}"/tests/fixtures/doctor-suc-kubectl/cases/*/; do
+    name="$(basename "${dir}")"
+    grep -qE "\{ _suc_case ${name//./\\.}; \}\$" "${BATS_TEST_FILENAME}" || missing+=" ${name}"
+  done
+  [[ -z "${missing}" ]] || fail "cases without a bats test:${missing}"
+}
+
+@test "suc: no active domain and a deploy domain print no line" {
+  _suc_setup
+  run doctor::_suc_check ""
+  assert_success
+  assert_output ""
+  mkdir -p "${PATH_CLUSTERS}/deploy.example"
+  cp "${SUC_FIX}/cases/v1.31/cluster.lok8s.yaml" "${PATH_CLUSTERS}/deploy.example/deploy.lok8s.yaml"
+  run doctor::_suc_check deploy.example
+  assert_success
+  assert_output ""
+}

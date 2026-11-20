@@ -1661,6 +1661,33 @@ for Windows nodes too: a cordon or drain on a Windows node still fails to
 pull it. The images a Plan names for its own containers are not pinned
 here.
 
+#### Kubernetes versions
+
+The pinned kubectl image serves Kubernetes 1.33 to 1.37 only. It bundles
+kubectl v1.34.8, v1.35.5 and v1.36.1, its binary downloads are off, and
+kuberlr accepts one minor of skew. On another minor, a Plan with cordon or
+drain fails at once in its drain container, with `kuberlr: ensure compatible
+kubectl available: the right kubectl is missing`. The Job retries and the
+Plan never completes. A Plan without cordon and drain is not affected.
+
+When `spec.bootstrap` has `system-upgrade-controller` as an entry name, `lo
+doctor` and `lo lint` compare `spec.kubernetes.version` with the range:
+
+- A minor outside the range gets a warning in both commands: `system-upgrade-controller: the kubectl image of the drain container serves Kubernetes 1.33 to 1.37, not 1.31, so a Plan with cordon or drain fails: set spec.kubernetes.version to a version from 1.33 to 1.37, or use a Plan without cordon or drain`.
+- In the range, `lo doctor` prints a check mark line.
+- A Lo cluster without a version runs the default node image of the
+  installed kind (`v1.36.1` with the pinned kind `v0.32.0`), which is in
+  the range. `lo doctor` prints an info line that names it.
+- A version that is not `vX.Y` or `vX.Y.Z` (a Lo cluster can use any image
+  tag), or one that cannot be read, gets a `not checked` line from `lo
+  doctor`.
+
+To fix a warning, set `spec.kubernetes.version` to a version in the range,
+or use Plans without `spec.cordon` and `spec.drain`. No release of the image
+serves every minor from 1.31 to 1.36, so the addon keeps the pin. A test
+(`internal/addons/suc_test.go`) fails when the tag of the pin changes and
+the range does not.
+
 ### redis-operator: narrowed RBAC, no aggregation into admin {#redis-operator}
 
 The `redis-operator` addon installs the OT-CONTAINER-KIT Redis operator

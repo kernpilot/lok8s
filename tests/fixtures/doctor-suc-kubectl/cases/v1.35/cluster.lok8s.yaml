@@ -1,0 +1,9 @@
+kind: KubeOne
+apiVersion: lok8s.dev/v1
+metadata:
+  name: suc-test
+spec:
+  kubernetes:
+    version: "1.35.5"
+  bootstrap:
+    - system-upgrade-controller

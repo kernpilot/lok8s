@@ -1,0 +1,9 @@
+kind: Lo
+apiVersion: lok8s.dev/v1
+metadata:
+  name: suc-test
+spec:
+  kubernetes:
+    version: v1.36.1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  bootstrap:
+    - system-upgrade-controller

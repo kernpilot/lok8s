@@ -577,6 +577,33 @@ spec:
 EOF
 [[ ! -e "${PROJ}/.kubeconfig/sso.yaml" ]] || fail "doctor: the sso.dev case needs no kubeconfig"
 check PATH_SECRETS doctor --domain sso.dev             # sso-gate: the CRD check skips without a kubeconfig
+# suc.dev — system-upgrade-controller in spec.bootstrap on a Lo cluster with
+# Kubernetes v1.31.12, below the range of the addon's kubectl image: lint and
+# doctor print the same warning, and the text is pinned on each side. The
+# spec only is read, so no cluster is reached. The domain is made here,
+# after the earlier cases.
+mkdir -p "${CL}/suc.dev"
+cat > "${CL}/suc.dev/cluster.lok8s.yaml" <<'EOF'
+kind: Lo
+apiVersion: lok8s.dev/v1
+metadata:
+  name: suc
+spec:
+  kubernetes:
+    version: v1.31.12
+  bootstrap:
+    - cilium
+    - system-upgrade-controller
+EOF
+suc_line="system-upgrade-controller: the kubectl image of the drain container serves Kubernetes 1.33 to 1.37, not 1.31, so a Plan with cordon or drain fails: set spec.kubernetes.version to a version from 1.33 to 1.37, or use a Plan without cordon or drain"
+check - lint --domain suc.dev                          # the kubectl range warning of lint
+for side in bash go; do
+  kver_pin "${side}: lint suc.dev warns about the kubectl range" "${WORK}/${side}.err" "[warn]   ${suc_line}"
+done
+check PATH_SECRETS doctor --domain suc.dev             # the kubectl range warning of doctor
+for side in bash go; do
+  kver_pin "${side}: doctor suc.dev warns about the kubectl range" "${WORK}/${side}.out" "  ! ${suc_line}"
+done
 parity::select "${PROJ}" go
 if (cd "${PROJ}" && "${LO_BIN}" doctor </dev/null 2>/dev/null || true) | grep -q 'PATH_SECRETS unset (per-domain stores; the flat store is retired)'; then
   echo "ok: doctor: the binary reports PATH_SECRETS unset"

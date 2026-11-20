@@ -51,9 +51,16 @@ const YQVersion = "v4.54.3"
 // until b installs kubectl from dl.k8s.io. A test in internal/assets ties
 // the image's kind and kubectl downloads to these two: bump a pin, the image
 // URL and its sums together.
+//
+// KindDefaultNodeVersion is the tag of the default node image of
+// KindVersion: a Lo cluster without spec.kubernetes.version runs it when
+// kind is the pinned release. `lo doctor` names it (bash: the same literal
+// in .lok8s/utils/spec.sh). TestKindDefaultNodeVersionFollowsKindVersion
+// fails when KindVersion moves and this constant does not.
 const (
-	KubectlVersion = "v1.36.2"
-	KindVersion    = "v0.32.0"
+	KubectlVersion         = "v1.36.2"
+	KindVersion            = "v0.32.0"
+	KindDefaultNodeVersion = "v1.36.1"
 )
 
 // floatingEntries are the template entries that carry no version, each with

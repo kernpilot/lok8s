@@ -602,3 +602,23 @@ func floatProblems(tpl string, floating map[string]string) []string {
 	}
 	return problems
 }
+
+// kindDefaultNodes is the default node image of each kind release, from the
+// release notes of kind. Add the row of a new KindVersion before the bump.
+var kindDefaultNodes = map[string]string{
+	"v0.32.0": "v1.36.1",
+}
+
+// The default node image moves with the kind release: a KindVersion without
+// a row, or a KindDefaultNodeVersion that is not the row of KindVersion,
+// fails.
+func TestKindDefaultNodeVersionFollowsKindVersion(t *testing.T) {
+	t.Parallel()
+	want, ok := kindDefaultNodes[KindVersion]
+	if !ok {
+		t.Fatalf("kindDefaultNodes has no row for kind %s: add its default node image", KindVersion)
+	}
+	if KindDefaultNodeVersion != want {
+		t.Errorf("KindDefaultNodeVersion = %s, but kind %s defaults to kindest/node %s", KindDefaultNodeVersion, KindVersion, want)
+	}
+}

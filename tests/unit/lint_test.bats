@@ -1063,3 +1063,49 @@ _kver_spec() {  # <dir> <kind> [version line]
   [ "${status}" -eq 1 ]
   assert_output "[error]   spec.network.dnsSearch[0] has a character that is not valid in a DNS name: 'a\\nb.example'. Use only letters, digits, hyphens and dots."
 }
+
+# --- lint tests: the kubectl range of system-upgrade-controller (real yq) ---
+#
+# The lint cases of the shared fixtures of the doctor check
+# (tests/fixtures/doctor-suc-kubectl, the cases with a lint-want file; the Go
+# twin is TestBootstrapSUCKubectlCases in internal/lint): a minor out of the
+# range of the kubectl image is a warning with the doctor line, never an
+# error, and every other case prints nothing.
+
+# _suc_lint_case <name> — lint::bootstrap on the spec of the shared case.
+_suc_lint_case() {
+  bats_require_minimum_version 1.5.0
+  local case_dir="${_PROJECT_ROOT}/tests/fixtures/doctor-suc-kubectl/cases/${1}"
+  [[ -f "${case_dir}/lint-want" ]] || fail "no lint case ${1}"
+  local domain_dir="${PATH_CLUSTERS}/suc.example"
+  mkdir -p "${domain_dir}" "${PATH_LOK8S}/addons/cilium" "${PATH_LOK8S}/addons/system-upgrade-controller"
+  cp "${case_dir}/cluster.lok8s.yaml" "${domain_dir}/"
+  run --separate-stderr lint::bootstrap "${domain_dir}" "${domain_dir}/cluster.lok8s.yaml"
+  assert_success
+  assert_output ""
+  assert_equal "${stderr}" "$(cat "${case_dir}/lint-want")"
+}
+
+@test "lint::bootstrap suc: 1.31 is below the range and warns" { _suc_lint_case v1.31; }
+@test "lint::bootstrap suc: 1.32 is below the range and warns" { _suc_lint_case v1.32; }
+@test "lint::bootstrap suc: 1.33 is the first minor of the range" { _suc_lint_case v1.33; }
+@test "lint::bootstrap suc: 1.35 without a v passes on KubeOne" { _suc_lint_case v1.35; }
+@test "lint::bootstrap suc: 1.37 is the last minor of the range" { _suc_lint_case v1.37; }
+@test "lint::bootstrap suc: 1.38 is above the range and warns" { _suc_lint_case v1.38; }
+@test "lint::bootstrap suc: a version with a digest passes" { _suc_lint_case digest; }
+@test "lint::bootstrap suc: the addon as a map entry counts" { _suc_lint_case map-entry; }
+@test "lint::bootstrap suc: a Lo cluster without a version prints nothing" { _suc_lint_case unset; }
+@test "lint::bootstrap suc: a KubeOne cluster without a version prints nothing" { _suc_lint_case unset-kubeone; }
+@test "lint::bootstrap suc: a spec.bootstrap without the addon prints nothing" { _suc_lint_case no-entry; }
+@test "lint::bootstrap suc: a version that is not vX.Y or vX.Y.Z prints nothing" { _suc_lint_case not-a-version; }
+@test "lint::bootstrap suc: a version that cannot be read prints nothing here" { _suc_lint_case unreadable; }
+
+@test "lint::bootstrap suc: every shared lint case has a bats test" {
+  local dir name missing=""
+  for dir in "${_PROJECT_ROOT}"/tests/fixtures/doctor-suc-kubectl/cases/*/; do
+    [[ -f "${dir}/lint-want" ]] || continue
+    name="$(basename "${dir}")"
+    grep -qE "\{ _suc_lint_case ${name//./\\.}; \}\$" "${BATS_TEST_FILENAME}" || missing+=" ${name}"
+  done
+  [[ -z "${missing}" ]] || fail "lint cases without a bats test:${missing}"
+}

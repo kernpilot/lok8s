@@ -1,6 +1,7 @@
 # shellcheck shell=bash
-# spec.sh — the ONE reader for spec.workers, shared by every driver, and for
-# the kind node version of a Lo cluster (spec::kind_node_version, at the end).
+# spec.sh — the ONE reader for spec.workers, shared by every driver, for the
+# kind node version of a Lo cluster (spec::kind_node_version), and the kubectl
+# range of the system-upgrade-controller addon (spec::suc_kubectl, at the end).
 #
 # Three drivers (kkp, kubeone, capi) turn `spec.workers` into machine
 # deployments. Each one used to carry its own copy of the same three facts, and
@@ -508,4 +509,54 @@ spec::kind_node_version() {
 spec::_is_image_tag() {
   local LC_ALL=C
   [[ "${1}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}(@sha256:[0-9a-f]{64})?$ ]]
+}
+
+# ── The kubectl range of system-upgrade-controller ──────────────────────────
+# Go twin: internal/addons/suc.go (the same rules and lines). For a Plan with
+# cordon or drain, the controller adds a cordon and a drain init container to
+# the Plan's Job. Both run the kubectl image that the addon pins (kubectl.image
+# in addons/system-upgrade-controller/values.yaml). rancher/kuberlr-kubectl
+# v8.1.1 bundles kubectl v1.34.8, v1.35.5 and v1.36.1, and its binary downloads
+# are off. kuberlr accepts one minor of skew, so the image serves Kubernetes
+# 1.33 to 1.37 only. `lo doctor` and `lo lint` compare spec.kubernetes.version
+# with the range. A Go test ties the range to the tag of the pin, and the
+# shared doctor cases (tests/fixtures/doctor-suc-kubectl) tie this twin to Go.
+_SPEC_SUC_KUBECTL_MIN=33
+_SPEC_SUC_KUBECTL_MAX=37
+# The default node image of the pinned kind release (Go: KindDefaultNodeVersion
+# and KindVersion in internal/toolchain/pins.go). A Lo cluster without
+# spec.kubernetes.version runs it when kind is the pinned release.
+_SPEC_KIND_DEFAULT_NODE=v1.36.1
+_SPEC_KIND_VERSION=v0.32.0
+
+# spec::suc_kubectl <version> — compares a set value of spec.kubernetes.version
+# with the range. Prints "in <major.minor>", "out <major.minor>" or
+# "notversion". A version is vX.Y or vX.Y.Z, the v optional, with an optional
+# @sha256 digest. Major and minor have no leading zero and at most three digits,
+# so the arithmetic below reads them as decimal numbers.
+spec::suc_kubectl() {
+  local LC_ALL=C
+  if [[ ! "${1}" =~ ^v?(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})(\.[0-9]+)?(@sha256:[0-9a-f]{64})?$ ]]; then
+    echo notversion
+    return 0
+  fi
+  local major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}"
+  if (( major != 1 || minor < _SPEC_SUC_KUBECTL_MIN || minor > _SPEC_SUC_KUBECTL_MAX )); then
+    echo "out ${major}.${minor}"
+  else
+    echo "in ${major}.${minor}"
+  fi
+}
+
+# spec::suc_kubectl_range — the range as the lines name it: "1.33 to 1.37".
+spec::suc_kubectl_range() {
+  echo "1.${_SPEC_SUC_KUBECTL_MIN} to 1.${_SPEC_SUC_KUBECTL_MAX}"
+}
+
+# spec::suc_kubectl_out_of_range_line <major.minor> — the warning of `lo doctor`
+# and `lo lint` for a minor that the image does not serve.
+spec::suc_kubectl_out_of_range_line() {
+  local r
+  r="$(spec::suc_kubectl_range)"
+  echo "system-upgrade-controller: the kubectl image of the drain container serves Kubernetes ${r}, not ${1}, so a Plan with cordon or drain fails: set spec.kubernetes.version to a version from ${r}, or use a Plan without cordon or drain"
 }
