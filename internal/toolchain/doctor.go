@@ -8,6 +8,7 @@ package toolchain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -118,6 +119,10 @@ func Doctor(ctx context.Context, o DoctorOptions) []Check {
 		older := false
 		if err == nil {
 			older, err = OlderRelease(got, BRelease.Version)
+			if errors.Is(err, errNotRelease) {
+				// The b line names what b --version printed.
+				err = fmt.Errorf("--version printed %q, not a version", got)
+			}
 		}
 		switch {
 		case err != nil:
@@ -246,15 +251,21 @@ func probe(ctx context.Context, r execx.Runner, path string, args ...string) (st
 	return strings.TrimSpace(string(out)), nil
 }
 
-// OlderRelease reports whether the release got (as `b --version` prints
-// it: 4.18.7, or v4.18.7) is below want. Only major.minor.patch counts: a
-// pre-release of the same release is not older. A version that does not
-// parse is an error, because it cannot be compared. lo doctor also uses it
-// for the minimum kind release (internal/cli/cmd_doctor.go).
+// errNotRelease is the error of OlderRelease for a got that is not a
+// version. The b check names the output of b --version in its place.
+var errNotRelease = errors.New("not a version")
+
+// OlderRelease reports whether the release got (4.18.7, or v4.18.7) is
+// below want. Only major.minor.patch counts: a pre-release of the same
+// release is not older. A version that does not parse is an error,
+// because it cannot be compared: `"<got>" is not a version` (it wraps
+// errNotRelease), or `the pin "<want>" is not a version`. The b check and
+// the minimum kind release of lo doctor (internal/cli/cmd_doctor.go) use
+// it.
 func OlderRelease(got, want string) (bool, error) {
 	g, err := semver.NewVersion(got)
 	if err != nil {
-		return false, fmt.Errorf("--version printed %q, not a version", got)
+		return false, fmt.Errorf("%q is %w", got, errNotRelease)
 	}
 	w, err := semver.NewVersion(want)
 	if err != nil {
