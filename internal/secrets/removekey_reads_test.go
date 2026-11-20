@@ -948,10 +948,15 @@ func TestWriteReplacingKeepsTheOldFile(t *testing.T) {
 
 // A failed write whose temp file cannot be removed (the directory is made
 // read-only during the write): the error holds the write error and the
-// remove error, and names the temp file that stays.
+// remove error, and the report prints the two errors, then the line of the
+// bash twin with the path of the temp file from the project root.
 func TestWriteReplacingReportsATempFileItCannotRemove(t *testing.T) {
 	skipUnlessPermissionsHold(t)
-	dir := t.TempDir()
+	c, _, errOut := testEnv(t)
+	dir := c.Paths.Base + "/clusters/a.dev/secrets"
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 	stop := errors.New("stopped half way")
 	err := writeReplacing(dir+"/Secret.app.default.K.enc", 0o600, func(io.Writer) error {
@@ -964,8 +969,21 @@ func TestWriteReplacingReportsATempFileItCannotRemove(t *testing.T) {
 		t.Fatalf("want the write error and the remove error, got %v", err)
 	}
 	left, _ := filepath.Glob(dir + "/.Secret.app.default.K.enc.tmp-*")
-	if len(left) != 1 || !strings.Contains(err.Error(), "cannot remove the temp file, remove it by hand: remove "+left[0]+": ") {
-		t.Errorf("the error does not name the temp file %q: %v", left, err)
+	if len(left) != 1 {
+		t.Fatalf("want one temp file that stays, got %q", left)
+	}
+	if !c.reportTempLeft(err) {
+		t.Fatalf("the error is not reported as a temp file that stays: %v", err)
+	}
+	rel := strings.TrimPrefix(left[0], c.Paths.Base+"/")
+	want := "stopped half way\nremove " + left[0] + ": permission denied\n" +
+		"[error] cannot remove the temp file " + rel + ": remove it by hand\n"
+	if got := errOut.String(); got != want {
+		t.Errorf("report\n got %q\nwant %q", got, want)
+	}
+	errOut.Reset()
+	if c.reportTempLeft(stop) || errOut.Len() != 0 {
+		t.Errorf("another error is reported as a temp file that stays: %q", errOut.String())
 	}
 }
 

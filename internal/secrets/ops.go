@@ -206,6 +206,9 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	before := 0
 	edited, after := appendRecipient(string(raw), agePubkey, &before)
 	if err := replaceFile(dest, []byte(edited)); err != nil {
+		if c.reportTempLeft(err) {
+			return ErrHandled
+		}
 		return err
 	}
 	if after < 1 {
@@ -408,7 +411,9 @@ func (c *Context) encryptFile(plaintext string) error {
 	if err := sopsEncryptFile(sopsConfig, plaintext, encPath); err != nil {
 		// The bash path surfaces the sops CLI's own stderr before the [error]
 		// line; the library error stands in for it here.
-		fmt.Fprintln(c.ErrOut, err)
+		if !c.reportTempLeft(err) {
+			fmt.Fprintln(c.ErrOut, err)
+		}
 		ui.ErrorTo(c.ErrOut, "Failed to encrypt %s", filepath.Base(plaintext))
 		return ErrHandled
 	}

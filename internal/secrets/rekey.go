@@ -748,7 +748,8 @@ const ownIdentityScope = "the check for your own decrypt identity reads only SOP
 // mode of the old one. It does not resolve target again: the caller took the
 // lock beside it and read it. The rename replaces a link at target instead
 // of writing through it, and never moves the temp file into a directory. A
-// temp file that it cannot remove is named in the error (removeTemp).
+// temp file that it cannot remove gives a *tempLeftError (removeTemp), and
+// the callers print it with reportTempLeft.
 func replaceFile(target string, content []byte) (err error) {
 	info, err := os.Stat(target)
 	if err != nil {
@@ -1222,6 +1223,9 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 	// rule, and every managed .enc is re-keyed again.
 	if rules > 0 {
 		if err := replaceFile(dest, []byte(edited)); err != nil {
+			if c.reportTempLeft(err) {
+				return ErrHandled
+			}
 			return err
 		}
 		fmt.Fprintf(c.Out, "removed recipient from .sops.yaml (%d creation rule(s))\n", rules)

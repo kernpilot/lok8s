@@ -197,7 +197,9 @@ func (c *Context) ensureGitignore(dir string) error {
 		_, err := io.WriteString(w, gitignoreContent)
 		return err
 	}); err != nil {
-		fmt.Fprintln(c.ErrOut, err)
+		if !c.reportTempLeft(err) {
+			fmt.Fprintln(c.ErrOut, err)
+		}
 		ui.ErrorTo(c.ErrOut, "cannot write %s: it was not changed", c.rel(gitignore))
 		return ErrHandled
 	}

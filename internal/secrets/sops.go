@@ -28,6 +28,7 @@ import (
 	"github.com/getsops/sops/v3/version"
 
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/ui"
 )
 
 // binaryStore is the store the sops CLI uses for --input-type/--output-type
@@ -141,15 +142,45 @@ func writeReplacing(path string, perm fs.FileMode, write func(io.Writer) error) 
 	return err
 }
 
-// removeTemp removes name, the temp file of a write that failed, and adds a
-// remove that fails to err: the temp file stays, and the error names it
-// (bash: the "cannot remove the temp file" line of secrets::_encrypt_file).
-// A temp file that is gone already is no error.
+// removeTemp removes name, the temp file of a write that failed. A remove
+// that fails too gives a *tempLeftError: the temp file stays, and
+// reportTempLeft names it. A temp file that is gone already is no error.
 func removeTemp(err error, name string) error {
 	if rerr := os.Remove(name); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
-		return errors.Join(err, fmt.Errorf("cannot remove the temp file, remove it by hand: %w", rerr))
+		return &tempLeftError{err: err, name: name, rm: rerr}
 	}
 	return err
+}
+
+// tempLeftError is the error of a write through a temp file that failed,
+// and whose temp file stays because its remove failed too.
+type tempLeftError struct {
+	err  error  // the error of the write
+	name string // the temp file that stays
+	rm   error  // the error of the remove
+}
+
+func (e *tempLeftError) Error() string {
+	return fmt.Sprintf("%v; cannot remove the temp file %s: %v", e.err, e.name, e.rm)
+}
+
+func (e *tempLeftError) Unwrap() []error { return []error{e.err, e.rm} }
+
+// reportTempLeft prints the error of a write whose temp file stays: the
+// write error and the remove error (in bash, the tools print them), then
+// "[error] cannot remove the temp file <path>: remove it by hand" (bash: the
+// same line after the rm in secrets::_encrypt_file, secrets::_replace and
+// secrets::_ensure_gitignore). For any other error it prints nothing and
+// reports false.
+func (c *Context) reportTempLeft(err error) bool {
+	var left *tempLeftError
+	if !errors.As(err, &left) {
+		return false
+	}
+	fmt.Fprintln(c.ErrOut, left.err)
+	fmt.Fprintln(c.ErrOut, left.rm)
+	ui.ErrorTo(c.ErrOut, "cannot remove the temp file %s: remove it by hand", c.rel(left.name))
+	return true
 }
 
 // DecryptYAMLFile decrypts a sops-encrypted YAML file (a

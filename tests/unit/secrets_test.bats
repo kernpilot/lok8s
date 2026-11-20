@@ -262,6 +262,36 @@ _gitignore_refused() { # <link|dir>
   [ "$(cat "${PATH_SECRETS}/.gitignore")" = '# old' ]
 }
 
+# A write that fails and whose temp file cannot be removed names the temp
+# file with the same line in the three writes through a temp file: the
+# .gitignore, the .sops.yaml and an .enc (Go twin:
+# TestWriteReplacingReportsATempFileItCannotRemove). The functions below
+# fail for a temp file only, so the teardown removes the rest.
+@test "secrets: a temp file that a failed write cannot remove is named, with the same line in each write" {
+  rm() { case "${*: -1}" in *.tmp-*) echo "rm: cannot remove '${*: -1}'" >&2; return 1 ;; esac; command rm "$@"; }
+  chmod() { case "${*: -1}" in *.tmp-*) return 1 ;; esac; command chmod "$@"; }
+  cp() { case "${*: -1}" in *.tmp-*) return 1 ;; esac; command cp "$@"; }
+  sops() { return 1; }
+  local re='\[error\] cannot remove the temp file '
+
+  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qxE "${re}\.secrets/\.\.gitignore\.tmp-[[:alnum:]]{6}: remove it by hand" <<< "${output}" || { echo "$output" >&2; return 1; }
+  [ "${output##*$'\n'}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
+
+  printf 'creation_rules: []\n' > "${PATH_BASE}/.sops.yaml"
+  run secrets::_replace "${PATH_BASE}/.sops.yaml" 'new'
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qxE "${re}\.sops\.yaml\.tmp-[[:alnum:]]{6}: remove it by hand" <<< "${output}" || { echo "$output" >&2; return 1; }
+  [ "$(cat "${PATH_BASE}/.sops.yaml")" = 'creation_rules: []' ]
+
+  printf 'v' > "${PATH_SECRETS}/Secret.app.default.K"
+  run secrets::_encrypt_file "${PATH_SECRETS}/Secret.app.default.K"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qxE "${re}\.secrets/\.Secret\.app\.default\.K\.enc\.tmp-[[:alnum:]]{6}: remove it by hand" <<< "${output}" || { echo "$output" >&2; return 1; }
+  [ "${output##*$'\n'}" = "[error] Failed to encrypt Secret.app.default.K" ] || { echo "$output" >&2; return 1; }
+}
+
 # init checks the .gitignore of the store before its first write, and a
 # rerun with a config checks it too. Its status is the refusal's: 1, no
 # .sops.yaml, and the file that the link names keeps its bytes (Go twin:
