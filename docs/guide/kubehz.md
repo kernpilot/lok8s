@@ -864,10 +864,17 @@ Properties worth knowing:
 - **Self-bootstrapping identity.** The deploy creates one Secret,
   `kubehz-agent` in `kubehz-system`, empty. On its first run the agent fills
   it with a self-generated agent-token `A` (`khz_agt_…`) and claim-code `C`
-  (`khzc_…`), in one patch. A tick writes the Secret only when it holds
-  neither key, so the agent **never rotates** them. When two ticks fill it at
-  the same time, the apiserver refuses the second patch (it carries the
+  (`khzc_…`), in one patch. A tick writes the Secret only when it has no
+  entry at all, whatever the values, so the agent **never rotates** them and
+  never writes over a key that is there. When two ticks fill it at the same
+  time, the apiserver refuses the second patch (it carries the
   `resourceVersion` of its read), and both ticks use the values of the first.
+  A Secret with entries, but not both keys with a value (one of the keys, an
+  empty value, or another key), stays as it is. The tick logs
+  `kubehz: Secret kubehz-agent in kubehz-system has data, but not both an agent-token and a claim-code with a value; the agent does not write it`
+  and uses the values that are there: a heartbeat needs `A`, the register
+  `A` and `C`. To give the agent a new identity, delete the Secret and run
+  `lo kubehz deploy` (see the reset of the Secret below).
   The platform only ever receives `sha256(A)`/`sha256(C)`.
 - **Authenticated.** Every heartbeat carries `Authorization: Bearer A`. Once a
   cluster has enrolled a token, the platform rejects anonymous heartbeats for
@@ -995,6 +1002,21 @@ started before the deploy runs the old script against the new Role. It
 cannot create the Secret, but it does not have to: the deploy created it.
 If that Secret is still empty, the pod has no identity and skips its beat,
 and the next tick fills the Secret.
+
+Do not deploy with an older lo after this one. A `lo kubehz deploy` with an
+older lo has two effects:
+
+- It puts back the older Role, which gives the agent `create` on every
+  Secret in `kubehz-system`. Each deploy replaces the Role, so the next
+  deploy with the current lo removes that grant again.
+- If it comes before the first fill, the Secret stays empty. The older agent
+  creates its Secret only when there is none, and it does not fill one that
+  is there. The agent has no identity: it does not register, and it skips
+  each beat.
+
+To recover, run `lo kubehz deploy` with the current lo: the next tick fills
+the empty Secret. You can also delete the empty Secret first, and then run
+`lo kubehz deploy` with the current lo.
 
 If a GitOps controller applies the agent manifests, make sure that it does
 not reset `kubehz-agent-state` or the Secret `kubehz-agent`: let it create
@@ -1394,19 +1416,38 @@ Each tick has a time budget, so that it ends before the Job's
 `activeDeadlineSeconds` (120 s) stops the pod and leaves the new time in
 place. Every kubectl call runs under `timeout -k 2 5` (the node list under
 `timeout -k 2 30`), the register POST and the desired-state poll under
-`timeout -k 2 10`, and each heartbeat POST under `timeout -k 2 15`. Those
-bounds sum to more than the deadline. So a call starts only if it ends
-before the budget:
+`timeout -k 2 10`, and each heartbeat POST under `timeout -k 2 15`. Each
+`jq` and `awk` step on an answer runs under `timeout -k 2 5` too (the `jq`
+of the node list under the bound of its call), so the local work on a large
+answer counts, and a step that hangs stops. Those bounds sum to more than
+the deadline. So a call or a step starts only if it ends before the budget:
 
-| Calls | Budget ends after the start of the tick |
+| Calls and steps | Budget ends after the start of the tick |
 |---|---|
 | The reads before the assessment | 73 s |
 | The send gate and the probes | 56 s |
 | The heartbeat POSTs and the calls after them | 90 s |
 
-The write that puts back the old values runs outside the budget, so the
-tick ends 97 s after its start at the latest. A call that does not start
-logs `kubehz: tick budget: … not started: …`. When the probes run out of the
+The budget counts the seconds since the node started (`/proc/uptime`), so a
+step of the wall clock does not make it longer or shorter. If
+`/proc/uptime` gives no number, the budget uses the wall clock, and the tick
+logs
+`kubehz: /proc/uptime gives no seconds; the tick budget uses the wall clock, which a clock step can move`.
+
+The write that puts back the old values runs outside the budget. So the
+calls and the steps of a tick end 97 s after its start at the latest. That
+bound does not include:
+
+- the pod start and the image pull, before the tick starts;
+- the local work between two budget checks: shell builtins and short text
+  filters such as `sed`, `sort` and `base64`;
+- a second pod when the Job runs again (`backoffLimit: 1`). The deadline
+  counts from the start of the Job, not of the pod, so it can stop that pod
+  during its tick. A time that its send gate wrote then stays: one lost
+  window, as above.
+
+A call or a step that does not start logs
+`kubehz: tick budget: … not started: …`. When the probes run out of the
 budget, the tick logs
 `kubehz: assessment deferred: the tick budget ran out during the probes; the next tick probes again`
 and puts back the old values. When the reads run out of the budget, the
