@@ -26,6 +26,7 @@
 package secrets
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -179,7 +180,11 @@ func (c *Context) initStorePath() string {
 // plaintext but allows .enc files. Creates (or rewrites) the file when the
 // `!Secret.*.enc` allow line is missing (bash: secrets::_ensure_gitignore).
 // A .gitignore that is not a regular file is refused before it is read
-// (gitignoreOK).
+// (gitignoreOK). The write goes to a temp file in the store and a rename
+// over the old name (writeReplacing, mode 0644): it replaces a link or a
+// hard link instead of writing through it. A write that fails leaves the
+// old file as it was, prints the error and one line that names the file,
+// and returns ErrHandled.
 func (c *Context) ensureGitignore(dir string) error {
 	gitignore := dir + "/.gitignore"
 	if !c.gitignoreOK(dir) {
@@ -188,8 +193,13 @@ func (c *Context) ensureGitignore(dir string) error {
 	if raw, err := os.ReadFile(gitignore); err == nil && strings.Contains(string(raw), "!Secret.*.enc") {
 		return nil
 	}
-	if err := os.WriteFile(gitignore, []byte(gitignoreContent), 0o644); err != nil { // #nosec G306 -- the store's .gitignore
+	if err := writeReplacing(gitignore, 0o644, func(w io.Writer) error {
+		_, err := io.WriteString(w, gitignoreContent)
 		return err
+	}); err != nil {
+		fmt.Fprintln(c.ErrOut, err)
+		ui.ErrorTo(c.ErrOut, "cannot write %s: it was not changed", c.rel(gitignore))
+		return ErrHandled
 	}
 	ui.Debug("Created %s", gitignore)
 	return nil

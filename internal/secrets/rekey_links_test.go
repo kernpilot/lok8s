@@ -708,6 +708,81 @@ func TestKeyCommandsTakeOneLockForTwoLinksToOneSopsConfig(t *testing.T) {
 	}
 }
 
+// The .gitignore write goes to a temp file in the store and a rename: a hard
+// link to the old file keeps its bytes, the new file has mode 0644, and no
+// temp file stays (bash: tests/unit/secrets_test.bats).
+func TestEnsureGitignoreReplacesAHardLink(t *testing.T) {
+	c, _, errOut := testEnv(t)
+	dir := mkdir(t, c.Paths.Base+"/.secrets")
+	outside := c.Paths.Base + "/elsewhere"
+	write(t, outside, "# old\n")
+	if err := os.Link(outside, dir+"/.gitignore"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ensureGitignore(dir); err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
+	}
+	if got := readFile(t, outside); got != "# old\n" {
+		t.Errorf("the hard link sees %q: the write went through it", got)
+	}
+	if got := readFile(t, dir+"/.gitignore"); got != gitignoreContent {
+		t.Errorf(".gitignore: %q", got)
+	}
+	info, err := os.Stat(dir + "/.gitignore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("mode %v, want 0644", info.Mode().Perm())
+	}
+	if left, _ := filepath.Glob(dir + "/..gitignore.tmp-*"); len(left) != 0 {
+		t.Errorf("temp files stay: %q", left)
+	}
+}
+
+// A .gitignore that it cannot write (the store is read-only): the old file
+// stays, and ensureGitignore prints the error and a last line that names the
+// file, and returns ErrHandled (bash: tests/unit/secrets_test.bats).
+func TestEnsureGitignoreReportsAWriteThatFails(t *testing.T) {
+	skipUnlessPermissionsHold(t)
+	c, _, errOut := testEnv(t)
+	dir := mkdir(t, c.Paths.Base+"/.secrets")
+	write(t, dir+"/.gitignore", "# old\n")
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if err := c.ensureGitignore(dir); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+	}
+	if !strings.HasSuffix(errOut.String(), "\n[error] cannot write .secrets/.gitignore: it was not changed\n") {
+		t.Errorf("stderr:\n%s", errOut.String())
+	}
+	if got := readFile(t, dir+"/.gitignore"); got != "# old\n" {
+		t.Errorf(".gitignore: %q", got)
+	}
+}
+
+// Init returns the refusal of its .gitignore write (bash:
+// tests/unit/secrets_test.bats).
+func TestInitReturnsAGitignoreWriteThatFails(t *testing.T) {
+	skipUnlessPermissionsHold(t)
+	c, _, errOut := testEnv(t)
+	_, pubPath := testSSHKeypair(t, c.Paths.Base)
+	dir := mkdir(t, c.Paths.Base+"/.secrets")
+	write(t, dir+"/.gitignore", "# old\n")
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if err := c.Init(pubPath); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+	}
+	if !strings.HasSuffix(errOut.String(), "\n[error] cannot write .secrets/.gitignore: it was not changed\n") {
+		t.Errorf("stderr:\n%s", errOut.String())
+	}
+}
+
 // add-key checks the .gitignore of the store before its first write, the
 // lock file included: a .gitignore that is a symlink is refused with one
 // line, also for a recipient that is already there, and nothing is

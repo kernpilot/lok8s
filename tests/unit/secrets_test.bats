@@ -214,6 +214,54 @@ _gitignore_refused() { # <link|dir>
   [ "$(_states)" = "${before}" ] || { diff <(echo "${before}") <(_states) >&2; return 1; }
 }
 
+# The .gitignore write goes to a temp file in the store and a rename: a hard
+# link to the old file keeps its bytes, the new file has mode 0644, and no
+# temp file stays (Go twin: TestEnsureGitignoreReplacesAHardLink).
+@test "secrets: the .gitignore write replaces a hard link instead of writing through it" {
+  local outside="${BATS_TEST_TMPDIR}/elsewhere"
+  printf '# old\n' > "${outside}"
+  ln "${outside}" "${PATH_SECRETS}/.gitignore"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$(cat "${outside}")" = '# old' ] || { echo "the write went through the hard link" >&2; return 1; }
+  grep -qxF '!Secret.*.enc' "${PATH_SECRETS}/.gitignore"
+  [ ! "${outside}" -ef "${PATH_SECRETS}/.gitignore" ]
+  [ "$(stat -c %a "${PATH_SECRETS}/.gitignore")" = 644 ]
+  [ -z "$(find "${PATH_SECRETS}" -name '..gitignore.tmp-*')" ]
+}
+
+# A .gitignore that it cannot write (the store is read-only): status 1, the
+# last line names the file, and the old file stays (Go twin:
+# TestEnsureGitignoreReportsAWriteThatFails).
+@test "secrets: a .gitignore write that fails gives status 1 and keeps the old file" {
+  [ "$(id -u)" -ne 0 ] || skip "root writes every directory"
+  printf '# old\n' > "${PATH_SECRETS}/.gitignore"
+  chmod 555 "${PATH_SECRETS}"
+  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  chmod 755 "${PATH_SECRETS}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "${output##*$'\n'}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${PATH_SECRETS}/.gitignore")" = '# old' ]
+}
+
+# init returns the status of its .gitignore write (Go twin:
+# TestInitReturnsAGitignoreWriteThatFails). ssh-to-age and sops are
+# functions: no crypto tools.
+@test "secrets init: a .gitignore write that fails gives status 1" {
+  [ "$(id -u)" -ne 0 ] || skip "root writes every directory"
+  ssh-to-age() { echo 'age1zvkyg2lc7kjhpnjwqpjkwzr9qkxnwqp5xzdmqvxqjhqx0nqwqjqs3xqzq7'; }
+  sops() { :; }
+  printf 'ssh-ed25519 AAAA test\n' > "${BATS_TEST_TMPDIR}/id.pub"
+  export LOK8S_SSH_KEY="${BATS_TEST_TMPDIR}/id.pub"
+  printf '# old\n' > "${PATH_SECRETS}/.gitignore"
+  chmod 555 "${PATH_SECRETS}"
+  run secrets::init
+  chmod 755 "${PATH_SECRETS}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "${output##*$'\n'}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${PATH_SECRETS}/.gitignore")" = '# old' ]
+}
+
 # init checks the .gitignore of the store before its first write, and a
 # rerun with a config checks it too. Its status is the refusal's: 1, no
 # .sops.yaml, and the file that the link names keeps its bytes (Go twin:

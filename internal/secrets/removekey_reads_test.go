@@ -908,7 +908,7 @@ func TestWriteReplacingKeepsTheOldFile(t *testing.T) {
 	}
 
 	stop := errors.New("stopped half way")
-	err := writeReplacing(path, func(w io.Writer) error {
+	err := writeReplacing(path, 0o600, func(w io.Writer) error {
 		if _, err := io.WriteString(w, "ne"); err != nil {
 			return err
 		}
@@ -924,7 +924,7 @@ func TestWriteReplacingKeepsTheOldFile(t *testing.T) {
 		t.Errorf("a failed write left %d entries, want 2 (no temp file)", n)
 	}
 
-	if err := writeReplacing(path, func(w io.Writer) error {
+	if err := writeReplacing(path, 0o600, func(w io.Writer) error {
 		_, err := io.WriteString(w, "new\n")
 		return err
 	}); err != nil {
@@ -954,7 +954,7 @@ func TestWriteReplacingReportsATempFileItCannotRemove(t *testing.T) {
 	dir := t.TempDir()
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 	stop := errors.New("stopped half way")
-	err := writeReplacing(dir+"/Secret.app.default.K.enc", func(io.Writer) error {
+	err := writeReplacing(dir+"/Secret.app.default.K.enc", 0o600, func(io.Writer) error {
 		if err := os.Chmod(dir, 0o500); err != nil {
 			t.Fatal(err)
 		}

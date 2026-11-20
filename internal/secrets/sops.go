@@ -103,7 +103,7 @@ func sopsEncryptFile(configPath, plaintextPath, encPath string) error {
 	}
 	// A temp file and a rename, not a write in place: an encrypt that stops
 	// half way leaves the old .enc whole (bash: secrets::_encrypt_file).
-	if err := writeReplacing(encPath, func(w io.Writer) error {
+	if err := writeReplacing(encPath, 0o600, func(w io.Writer) error {
 		_, err := w.Write(out)
 		return err
 	}); err != nil {
@@ -114,16 +114,18 @@ func sopsEncryptFile(configPath, plaintextPath, encPath string) error {
 }
 
 // writeReplacing writes path through a temp file in the same directory, mode
-// 0600, and a rename over path; write fills the temp file. A write that fails
-// leaves the old file as it was, and the temp file is removed. The temp name
-// starts with a dot, so the store reads (Secret.*) never list it.
-func writeReplacing(path string, write func(io.Writer) error) error {
+// perm, and a rename over path; write fills the temp file. A write that
+// fails leaves the old file as it was, and the temp file is removed. The
+// rename replaces a symlink or a hard link at path instead of writing
+// through it. The temp name starts with a dot, so the store reads
+// (Secret.*) never list it.
+func writeReplacing(path string, perm fs.FileMode, write func(io.Writer) error) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
 	}
 	name := tmp.Name()
-	err = tmp.Chmod(0o600)
+	err = tmp.Chmod(perm)
 	if err == nil {
 		err = write(tmp)
 	}
