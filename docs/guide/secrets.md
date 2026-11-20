@@ -279,12 +279,12 @@ a path that does not exist yet. When the `.enc` path is a symlink (to a file or
 to a directory), a directory, a FIFO or a device, the encrypt stops with an
 error that names the path, and it writes nothing there or through it. A
 symlinked `.enc` file is not followed and not replaced: remove the link, then
-encrypt again. The bash implementation renames the new file with GNU
-`mv -T`, which never moves a file into a directory. With a `mv` that has no
-`-T` (BSD and macOS), the encrypt checks the `.enc` path after the rename:
-when the path turned into a directory or a symlink during the encrypt, the
-encrypt removes its file from there and stops with an error that names the
-path. This check finds the move after it occurs; it does not prevent it.
+encrypt again. The bash implementation needs GNU `mv`: it renames the new
+file with `mv -T`, which never moves a file into a directory, or with `gmv -T`
+when `mv` has no `-T` (the `mv` of BSD and macOS). Without one of them, each
+command that encrypts stops before it writes a file, with an error that says
+to install GNU coreutils or to use the `lo` binary. The `lo` binary needs no
+`mv`.
 
 These checks read the last part of the `.enc` path only. `lo` trusts the
 store directory and its parent directories: they must belong to the user who

@@ -135,11 +135,12 @@ _add() { # <key> [all] [skip_orphans]
 
 @test "without flock, add-key refuses before .sops.yaml is touched and makes no lock file" {
   # A run without the lock can undo another run's change. The PATH has the
-  # tools of the run and no flock: a link to each one found on PATH.
+  # tools of the run and no flock: a link to each one found on PATH (mv too:
+  # the check for a mv that takes -T comes before the lock).
   _load
   local bin="${BATS_TEST_TMPDIR}/no-flock" tool path
   mkdir -p "${bin}"
-  for tool in sops grep sed cat; do
+  for tool in sops grep sed cat mv; do
     path="$(type -P "${tool}")" || continue
     ln -s "${path}" "${bin}/${tool}"
   done

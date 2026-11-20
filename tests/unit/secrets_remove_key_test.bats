@@ -1064,49 +1064,113 @@ EOF
   [ "$(cat "${f}.enc")" = "new" ]
 }
 
-@test "with a mv without -T, a path that turns into a directory during the encrypt fails it and leaves no temp file" {
-  # The check after the move detects the move INTO a directory and fails
-  # closed; it does not prevent the move (GNU mv -T does).
-  _load
-  local store="${PATH_CLUSTERS}/a.dev/secrets" outside="${BATS_TEST_TMPDIR}/outside" f bin kind real_mv
-  f="${store}/Secret.app.default.K"
-  printf 'v' > "${f}"
-  mkdir -p "${outside}"
-  real_mv="$(type -P mv)" || skip "mv not installed"
-  # A mv without -T, first on the PATH of this test only: before it moves, it
-  # turns the destination into a directory, or into a symlink to a directory
-  # outside the store.
-  bin="${BATS_TEST_TMPDIR}/mv-without-t"
-  mkdir -p "${bin}"
-  cat > "${bin}/mv" <<'EOF'
-#!/usr/bin/env bash
+# ── A mv that takes -T ───────────────────────────────────────────────────
+# The bash encrypt renames each .enc with a mv that takes -T (GNU mv, else
+# gmv): a mv without -T moves a file INTO a directory at the .enc path. Each
+# command that encrypts refuses before its first write without one, and
+# secrets::_encrypt_file refuses before it stages a file. The binary needs no
+# mv (Go twin: writeReplacing, os.Rename).
+
+_no_t='[error] this mv has no -T, so the encrypt cannot rename onto the .enc safely: install GNU coreutils (gmv) or use the lo binary'
+
+# _mv_stub <dir> <name> <with_t> — a mv program <dir>/<name> that logs each
+# move to MV_STUB_LOG and moves with the real mv (MV_STUB_REAL). Its help text
+# names --no-target-directory only when with_t is 1.
+_mv_stub() {
+  {
+    printf '#!%s\n' "${BASH}"
+    printf 'name=%q with_t=%q\n' "${2}" "${3}"
+    cat <<'EOF'
 if [[ "${1:-}" == --help ]]; then
-  echo "usage: mv [-f] source target"
+  echo "usage: ${name} [-f] source target"
+  (( with_t == 0 )) || echo "  -T, --no-target-directory  treat DEST as a normal file"
   exit 0
 fi
-dest="${*: -1}"
-rm -f -- "${dest}"
-case "${MV_STUB_KIND}" in
-  dir) mkdir -- "${dest}" ;;
-  link) ln -s -- "${MV_STUB_OUTSIDE}" "${dest}" ;;
-esac
+echo "${name} $*" >> "${MV_STUB_LOG}"
 exec "${MV_STUB_REAL}" "$@"
 EOF
-  chmod +x "${bin}/mv"
-  export MV_STUB_REAL="${real_mv}" MV_STUB_OUTSIDE="${outside}"
+  } > "${1}/${2}"
+  chmod +x "${1}/${2}"
+}
+
+# _no_t_run <path> <command> — one command that encrypts, with PATH set to
+# <path>: remove-key, add-key, set --encrypt, encrypt, or _encrypt_file (the
+# last guard) on the cache file Secret.new.default.K of a.dev.
+_no_t_run() {
+  local PATH="${1}" _cmd="${2}" domain="a.dev"
+  :args() {
+    case "${FUNCNAME[1]}" in
+      secrets::remove-key) key="${RCPT_B}" ;;
+      secrets::add-key) key="${RCPT_A}" ;;
+      secrets::set) name=new; key=K; value=w; encrypt=1 ;;
+    esac
+  }
+  case "${_cmd}" in
+    _encrypt_file) secrets::_encrypt_file "${PATH_CLUSTERS}/a.dev/secrets/Secret.new.default.K" ;;
+    *) "secrets::${_cmd}" ;;
+  esac
+}
+
+@test "with a mv without -T and no gmv, each command that encrypts refuses before it writes a file" {
+  _load
+  # A sops stub that writes its --output file: no sops run may come.
+  _sops_writes 'new' 0
+  _cache a.dev app "${RCPT_B}"
+  printf 'n' > "${PATH_CLUSTERS}/a.dev/secrets/Secret.new.default.K"
+  # The PATH of the commands: the tools that they run before the encrypt, a
+  # mv without -T, and no gmv.
+  local bin="${BATS_TEST_TMPDIR}/mv-without-t" tool path cmd
+  mkdir -p "${bin}"
+  for tool in yq jq flock grep cat mktemp rm cp dirname basename touch readlink find sort chmod; do
+    path="$(type -P "${tool}")" || continue
+    ln -s "${path}" "${bin}/${tool}"
+  done
+  for tool in yq jq; do
+    [ -e "${bin}/${tool}" ] || skip "${tool} not installed"
+  done
+  export MV_STUB_LOG="${BATS_TEST_TMPDIR}/mv.log" MV_STUB_REAL
+  MV_STUB_REAL="$(type -P mv)" || skip "mv not installed"
+  _mv_stub "${bin}" mv 0
+  : > "${MV_STUB_LOG}"
+  [ ! -e "${bin}/gmv" ]
+  cp -a "${PATH_BASE}" "${BATS_TEST_TMPDIR}/base.saved"
+  cp -a "${PATH_CLUSTERS}" "${BATS_TEST_TMPDIR}/clusters.saved"
+  for cmd in remove-key add-key set encrypt _encrypt_file; do
+    run _no_t_run "${bin}" "${cmd}"
+    [ "$status" -eq 1 ] || { echo "${cmd}: status $status: $output" >&2; return 1; }
+    [ "$output" = "${_no_t}" ] || { echo "${cmd}: $output" >&2; return 1; }
+    # .sops.yaml, the plaintexts and every .enc are byte-equal, and no file
+    # was added: no lock file, no temp file, no .gitignore.
+    diff -r "${BATS_TEST_TMPDIR}/base.saved" "${PATH_BASE}" >&2 || { echo "${cmd}: a file under PATH_BASE changed" >&2; return 1; }
+    diff -r "${BATS_TEST_TMPDIR}/clusters.saved" "${PATH_CLUSTERS}" >&2 || { echo "${cmd}: a store file changed" >&2; return 1; }
+  done
+  [ ! -s "${MV_STUB_LOG}" ] || { echo "the mv stub moved a file: $(cat "${MV_STUB_LOG}")" >&2; return 1; }
+}
+
+@test "with a mv without -T, the encrypt renames with a gmv that takes -T" {
+  _load
+  local store="${PATH_CLUSTERS}/a.dev/secrets" bin="${BATS_TEST_TMPDIR}/mv-without-t" f log
+  f="${store}/Secret.app.default.K"
+  printf 'v' > "${f}"
+  printf 'old\n' > "${f}.enc"
+  mkdir -p "${bin}"
+  export MV_STUB_LOG="${BATS_TEST_TMPDIR}/mv.log" MV_STUB_REAL
+  MV_STUB_REAL="$(type -P mv)" || skip "mv not installed"
+  secrets::_mv_has_t "${MV_STUB_REAL}" || skip "mv has no -T (not GNU mv): the gmv stub moves with it"
+  # First on the PATH of this test only: a mv without -T and a gmv with -T.
+  _mv_stub "${bin}" mv 0
+  _mv_stub "${bin}" gmv 1
+  : > "${MV_STUB_LOG}"
   local PATH="${bin}:${PATH}"
   ! secrets::_mv_has_t || { echo "fixture: the mv stub takes -T" >&2; return 1; }
   _sops_writes 'new' 0
-  for kind in dir link; do
-    rm -rf -- "${f}.enc"
-    export MV_STUB_KIND="${kind}"
-    run secrets::_encrypt_file "${f}"
-    [ "$status" -eq 1 ] || { echo "${kind}: status $status: $output" >&2; return 1; }
-    [ "$output" = "[error] ${f}.enc is not a regular file after the rename (a directory or a symlink made during the encrypt): the .enc was not written — check that path, then encrypt again
-[error] Failed to encrypt Secret.app.default.K" ] || { echo "${kind}: $output" >&2; return 1; }
-    [ -z "$(find -H "${store}" "${outside}" -name '.*.tmp-*')" ] || { echo "${kind}: a temp file was left" >&2; return 1; }
-    [ -z "$(ls -A "${outside}")" ] || { echo "${kind}: a file was left in the directory outside the store" >&2; return 1; }
-  done
+  run secrets::_encrypt_file "${f}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$(cat "${f}.enc")" = "new" ]
+  log="$(cat "${MV_STUB_LOG}")"
+  [[ "${log}" == "gmv -f -T -- ${store}/.Secret.app.default.K.enc.tmp-"*" ${f}.enc" && "${log}" != *$'\n'* ]] || {
+    echo "the moves: ${log}" >&2; return 1; }
+  [ -z "$(find "${store}" -name '.*.tmp-*')" ] || { echo "a temp file was left" >&2; return 1; }
 }
 
 @test "a stale cache (an .enc newer than its plaintext) is refused before any write" {
