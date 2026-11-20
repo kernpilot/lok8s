@@ -1247,7 +1247,9 @@ handover::install_cmd() {
 # into place before it. A last line that names no step (text from the
 # node's shell) also says that the state is unknown. An unknown state names
 # each destination to check. The Go twin (preseedInstallFailure) gives the
-# same messages.
+# same messages. It also has causes that bash does not have: a cancel or a
+# timeout of its context, and an error of the ssh client that gives no exit
+# status.
 handover::install_failure() {
   local last="${1}" rc="${2}" node="${3}" key done_keys="" seen msg cause=""
   local dests="${KUBEHZ_HANDOVER_PKI_KEYS[*]/#//etc/kubernetes/pki/}"

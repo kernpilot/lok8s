@@ -1632,7 +1632,7 @@ EOF
   done
 }
 
-@test "handover preseed: a signal after the install call ran makes the state UNKNOWN, also after a chmod step line" {
+@test "handover preseed: a signal after the install call ran makes the state UNKNOWN, also after a chmod or a mv step line" {
   # bash sees a status above 128 for an ssh client that a signal killed and
   # for a remote command that a signal killed. Both say UNKNOWN: the node
   # can have run steps after the last line that came back. Exit 0
@@ -1661,6 +1661,9 @@ EOF
         # The node runs the whole install, but only the first three step
         # lines come back.
         killed) cmd="{ ${cmd}; } | sed -n 1,3p" ;;
+        # The same, but the first seven step lines come back: the last one
+        # is the mv step of ca.crt.
+        killed-mv) cmd="{ ${cmd}; } | sed -n 1,7p" ;;
         # The stub dies before the node runs a step.
         killed-first) cmd=":" ;;
         # A command on the node dies of a signal after the third step line.
@@ -1674,9 +1677,10 @@ EOF
   local dests="/etc/kubernetes/pki/ca.crt /etc/kubernetes/pki/ca.key /etc/kubernetes/pki/sa.pub /etc/kubernetes/pki/sa.key"
   dests+=" /etc/kubernetes/pki/front-proxy-ca.crt /etc/kubernetes/pki/front-proxy-ca.key"
   local third='the last step that arrived is "chmod sa.pub", and later steps can have run'
+  local seventh='the last step that arrived is "mv ca.crt", and later steps can have run'
   local client want key
   local -a placed
-  for client in done killed killed-first remote; do
+  for client in done killed killed-mv killed-first remote; do
     rm -rf "${NODE_ROOT}/etc/kubernetes/pki"
     : > "${CALLS}"
     export CLIENT="${client}"
@@ -1684,6 +1688,7 @@ EOF
     case "${client}" in
       done) want="handover: PKI pre-seeded on 203.0.113.7." ;;
       killed | remote) want="${unknown} ${third}. Check each of these files on 203.0.113.7: ${dests}" ;;
+      killed-mv) want="${unknown} ${seventh}. Check each of these files on 203.0.113.7: ${dests}" ;;
       killed-first)
         want="${unknown} no step arrived, but steps can have run. Check each of these files on 203.0.113.7: ${dests}"
         placed=()
@@ -1702,6 +1707,7 @@ EOF
       assert_output --partial "${want}"
       refute_output --partial "PKI pre-seeded"
       refute_output --partial "no file was moved"
+      refute_output --partial "could not move the staging file"
       refute_output --partial "could not remove the staging files"
       run tail -n 1 "${CALLS}"
       assert_output --regexp '^ssh .* root@203\.0\.113\.7 rm -f -- /etc/kubernetes/pki/\.'

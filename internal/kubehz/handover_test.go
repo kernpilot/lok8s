@@ -1864,12 +1864,14 @@ func TestHandoverPreseedEachFailureStepRemovesTheStagingFiles(t *testing.T) {
 
 // After the node ran the install call, an end of the call that is not a
 // normal exit of the remote command makes the state of the install
-// UNKNOWN, also when the last line that came back is a chmod step: a
-// signal (exit 128+N, of the ssh client or of a remote command), an error
-// of the ssh client (it did not start, or its wait failed) and a cancel.
-// The fake ssh returns what osRunner returns for each: a killed client is
-// a real *exec.ExitError of SIGKILL. Exit 0 pre-seeds. The table above has
-// exit 255.
+// UNKNOWN, also when the last line that came back is a chmod or a mv
+// step: a signal (exit 128+N, of the ssh client or of a remote command),
+// an error of the ssh client (it did not start, or its wait failed) and a
+// cancel. The fake ssh returns what osRunner returns for each: a killed
+// client is a real *exec.ExitError of SIGKILL. Exit 0 pre-seeds. The table
+// above has exit 255. The cleanup call also runs after a cancel, on a
+// context that is not done and that has a deadline of its own. When that
+// call fails, preseed names the staging files.
 func TestHandoverPreseedInstallStateIsUnknownAfterAClientFailure(t *testing.T) {
 	isInstall := func(c execx.Cmd) bool { return strings.Contains(c.Args[len(c.Args)-1], " && mv -f -T ") }
 	unknown := func(cause, seen string) string {
@@ -1878,6 +1880,7 @@ func TestHandoverPreseedInstallStateIsUnknownAfterAClientFailure(t *testing.T) {
 	}
 	const (
 		third     = `the last step that arrived is "chmod sa.pub", and later steps can have run`
+		seventh   = `the last step that arrived is "mv ca.crt", and later steps can have run`
 		none      = "no step arrived, but steps can have run"
 		killed    = "exit 137 (a signal, to ssh or to a command on the node)"
 		clientErr = "an error of the ssh client ("
@@ -1885,9 +1888,12 @@ func TestHandoverPreseedInstallStateIsUnknownAfterAClientFailure(t *testing.T) {
 		// preseeded starts the line of a preseed that ends with exit 0.
 		preseeded = "handover: PKI pre-seeded on 203.0.113.7."
 	)
-	// cut runs the whole install on the node, but only its first three
-	// step lines come back.
-	cut := func(cmd string) string { return "{ " + cmd + "; } | sed -n 1,3p" }
+	// cutAt runs the whole install on the node, but only its first n step
+	// lines come back. cut gives the first three.
+	cutAt := func(n int) func(cmd string) string {
+		return func(cmd string) string { return fmt.Sprintf("{ %s; } | sed -n 1,%dp", cmd, n) }
+	}
+	cut := cutAt(3)
 	// run is the client status of the install call: ssh runs the remote
 	// command on the fake node and gives the status of its sh.
 	run := func(ssh func() error, _ context.CancelFunc) error { return ssh() }
@@ -1901,23 +1907,30 @@ func TestHandoverPreseedInstallStateIsUnknownAfterAClientFailure(t *testing.T) {
 		want     string
 		placed   []string
 		signaled bool
+		// cleanupFails fails the cleanup call (the rm of the staging files).
+		cleanupFails bool
 	}{
-		{"ssh exits 0 after the install", nil, run, preseeded, handoverPKIKeys, false},
+		{"ssh exits 0 after the install", nil, run, preseeded, handoverPKIKeys, false, false},
 		{"ssh dies of SIGKILL after the third step line", func(cmd string) string { return cut(cmd) + "; kill -KILL $$" }, run,
-			unknown(killed, third), handoverPKIKeys, true},
+			unknown(killed, third), handoverPKIKeys, true, false},
+		{"ssh dies of SIGKILL after the seventh step line, a mv step", func(cmd string) string { return cutAt(7)(cmd) + "; kill -KILL $$" }, run,
+			unknown(killed, seventh), handoverPKIKeys, true, false},
 		{"ssh dies of SIGKILL before a step line", func(cmd string) string { return "kill -KILL $$; " + cmd }, run,
-			unknown(killed, none), nil, true},
+			unknown(killed, none), nil, true, false},
 		{"ssh exits 137 for a remote command that a signal killed after the third step line",
-			func(cmd string) string { return cut(cmd) + "; exit 137" }, run, unknown(killed, third), handoverPKIKeys, false},
+			func(cmd string) string { return cut(cmd) + "; exit 137" }, run, unknown(killed, third), handoverPKIKeys, false, false},
 		{"the ssh client does not start", nil, func(func() error, context.CancelFunc) error {
 			return fmt.Errorf("ssh: %w", execx.ErrNotFound)
-		}, unknown(clientErr+"ssh: "+execx.ErrNotFound.Error()+")", none), nil, false},
+		}, unknown(clientErr+"ssh: "+execx.ErrNotFound.Error()+")", none), nil, false, false},
+		// exec.ErrWaitDelay stands for a wait error that gives no exit
+		// status. osRunner sets no WaitDelay for these calls, so it does
+		// not return this error itself.
 		{"the wait of the ssh client fails after the third step line", cut, func(ssh func() error, _ context.CancelFunc) error {
 			if err := ssh(); err != nil {
 				return err
 			}
 			return exec.ErrWaitDelay
-		}, unknown(clientErr+exec.ErrWaitDelay.Error()+")", third), handoverPKIKeys, false},
+		}, unknown(clientErr+exec.ErrWaitDelay.Error()+")", third), handoverPKIKeys, false, false},
 		// A cancel after the child ended with 0: Wait gives ctx.Err().
 		{"a cancel, then ssh exits 0 after the third step line", cut, func(ssh func() error, cancel context.CancelFunc) error {
 			err := ssh()
@@ -1926,12 +1939,17 @@ func TestHandoverPreseedInstallStateIsUnknownAfterAClientFailure(t *testing.T) {
 				return err
 			}
 			return context.Canceled
-		}, unknown(canceled, third), handoverPKIKeys, false},
+		}, unknown(canceled, third), handoverPKIKeys, false, false},
 		{"a cancel, then ssh exits 1 after the third step line", cut, func(ssh func() error, cancel context.CancelFunc) error {
 			_ = ssh()
 			cancel()
 			return exitErr(1)
-		}, unknown(canceled, third), handoverPKIKeys, false},
+		}, unknown(canceled, third), handoverPKIKeys, false, false},
+		{"a cancel, then ssh exits 1 after the third step line, and the cleanup fails", cut, func(ssh func() error, cancel context.CancelFunc) error {
+			_ = ssh()
+			cancel()
+			return exitErr(1)
+		}, unknown(canceled, third), handoverPKIKeys, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancelCtx := context.WithCancel(t.Context())
@@ -1946,11 +1964,21 @@ func TestHandoverPreseedInstallStateIsUnknownAfterAClientFailure(t *testing.T) {
 			})
 			ssh := node["ssh"]
 			var installErr error
+			var cleanupCtx context.Context
 			node["ssh"] = func(c execx.Cmd) error {
 				if !isInstall(c) {
-					// After a cancel, exec.CommandContext starts no call.
-					if err := ctx.Err(); err != nil {
+					// exec.CommandContext starts no call on a context that
+					// is done. The fake reads the context of the call.
+					callCtx := ho.runner.ctx
+					cleanup := strings.HasPrefix(c.Args[len(c.Args)-1], "rm -f -- ")
+					if cleanup {
+						cleanupCtx = callCtx
+					}
+					if err := callCtx.Err(); err != nil {
 						return err
+					}
+					if cleanup && tc.cleanupFails {
+						return exitErr(1)
 					}
 					return ssh(c)
 				}
@@ -1969,13 +1997,19 @@ func TestHandoverPreseedInstallStateIsUnknownAfterAClientFailure(t *testing.T) {
 				mustContain(t, out, tc.want)
 				mustNotContain(t, out, "PKI pre-seeded")
 				mustNotContain(t, out, "no file was moved")
+				mustNotContain(t, out, "could not move the staging file")
 				calls := ho.sshCalls()
 				if last := calls[len(calls)-1]; !strings.HasPrefix(last, "ssh ") || !strings.Contains(last, " root@203.0.113.7 rm -f -- /etc/kubernetes/pki/.") {
 					t.Fatalf("the last call must remove the staging files:\n%s", strings.Join(calls, "\n"))
 				}
-				// After a cancel the cleanup call does not start, and preseed
-				// names the staging files (here the install moved each one).
-				if ctx.Err() != nil {
+				// The cleanup call also runs after a cancel: on a context
+				// that is not done, with a deadline of its own.
+				if dl, ok := cleanupCtx.Deadline(); !ok || time.Until(dl) > preseedCleanupTimeout {
+					t.Fatalf("the cleanup call must have a deadline of at most %v, got %v %v", preseedCleanupTimeout, dl, ok)
+				}
+				// When the cleanup call fails, preseed names the staging
+				// files (here the install moved each one).
+				if tc.cleanupFails {
 					mustContain(t, out, "handover: could not remove the staging files on 203.0.113.7; they can hold key bytes. Remove them yourself: /etc/kubernetes/pki/.")
 				} else {
 					mustNotContain(t, out, "could not remove the staging files")
@@ -1998,6 +2032,32 @@ func TestHandoverPreseedInstallStateIsUnknownAfterAClientFailure(t *testing.T) {
 			}
 			if left := stagingLeft(t, root); len(left) != 0 {
 				t.Fatalf("staging files left: %v", left)
+			}
+		})
+	}
+}
+
+// The cause of an install call that ends after the context of preseed is
+// done says "a timeout" when its deadline passed, else "a cancel".
+func TestPreseedInstallCauseNamesATimeoutOrACancel(t *testing.T) {
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want string
+	}{
+		{"a cancel", canceled, context.Canceled, "a cancel (context canceled)"},
+		{"a cancel after exit 1", canceled, exitErr(1), "a cancel (context canceled)"},
+		{"a deadline that passed", expired, context.DeadlineExceeded, "a timeout (context deadline exceeded)"},
+		{"a deadline that passed after exit 1", expired, exitErr(1), "a timeout (context deadline exceeded)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := preseedInstallCause(tc.ctx, tc.err); got != tc.want {
+				t.Fatalf("preseedInstallCause = %q, want %q", got, tc.want)
 			}
 		})
 	}
