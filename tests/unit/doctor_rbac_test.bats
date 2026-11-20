@@ -197,6 +197,10 @@ NO_ANSWER="  ! RBAC migration leftovers not checked: kubectl did not answer with
 @test "rbac: an answer that is not a list prints the fixed reason" { _case read-not-a-list; }
 @test "rbac: a failed second read prints the fixed reason" { _case read-second-fails; }
 @test "rbac: a malformed field prints the fixed reason and never its value" { _case read-malformed-field; }
+@test "rbac: a label that is not a string makes the list invalid" { _case read-malformed-label; }
+@test "rbac: a key in another case is not the field" { _case read-key-case; }
+@test "rbac: a second JSON document makes the list invalid" { _case read-two-documents; }
+@test "rbac: a null item makes the list invalid" { _case read-null-item; }
 @test "rbac: redis-operator old binding, old role and aggregation labels" { _case redis-old-role-binding-and-labels; }
 @test "rbac: redis-operator old role without its binding" { _case redis-old-role-alone; }
 @test "rbac: redis-operator leftovers before the new bindings exist" { _case redis-new-bindings-missing; }

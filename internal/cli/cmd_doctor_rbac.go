@@ -113,36 +113,39 @@ const (
 // command is printed only for a name that matches.
 var rbacNameRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
 
+// The fields of the lists that the check reads. rbacParseBinding and
+// rbacParseRole fill them from the decoded JSON (no struct tags: the keys
+// match exactly, not with the case-insensitive match of encoding/json).
 type rbacSubject struct {
-	Kind      string `json:"kind"`
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
+	Kind      string
+	Name      string
+	Namespace string
 }
 
 type rbacBinding struct {
 	Metadata struct {
-		Name string `json:"name"`
-	} `json:"metadata"`
+		Name string
+	}
 	RoleRef struct {
-		Kind string `json:"kind"`
-		Name string `json:"name"`
-	} `json:"roleRef"`
-	Subjects []rbacSubject `json:"subjects"`
+		Kind string
+		Name string
+	}
+	Subjects []rbacSubject
 }
 
 type rbacRule struct {
-	APIGroups     []string `json:"apiGroups"`
-	Resources     []string `json:"resources"`
-	Verbs         []string `json:"verbs"`
-	ResourceNames []string `json:"resourceNames"`
+	APIGroups     []string
+	Resources     []string
+	Verbs         []string
+	ResourceNames []string
 }
 
 type rbacRole struct {
 	Metadata struct {
-		Name   string            `json:"name"`
-		Labels map[string]string `json:"labels"`
-	} `json:"metadata"`
-	Rules []rbacRule `json:"rules"`
+		Name   string
+		Labels map[string]string
+	}
+	Rules []rbacRule
 }
 
 // doctorRBACLeftovers prints the lines of the check under the domain
@@ -202,12 +205,12 @@ func doctorRBACLeftovers(ctx context.Context, r execx.Runner, paths *config.Path
 		return
 	}
 	var bindings []rbacBinding
-	if reason := rbacRead(ctx, r, kubectl, kubeconfig, "clusterrolebindings", &bindings); reason != "" {
+	if reason := rbacRead(ctx, r, kubectl, kubeconfig, "clusterrolebindings", rbacParseBinding, &bindings); reason != "" {
 		doctorWarn(out, rbacNotChecked+reason)
 		return
 	}
 	var roles []rbacRole
-	if reason := rbacRead(ctx, r, kubectl, kubeconfig, "clusterroles", &roles); reason != "" {
+	if reason := rbacRead(ctx, r, kubectl, kubeconfig, "clusterroles", rbacParseRole, &roles); reason != "" {
 		doctorWarn(out, rbacNotChecked+reason)
 		return
 	}
@@ -221,8 +224,10 @@ func doctorRBACLeftovers(ctx context.Context, r execx.Runner, paths *config.Path
 
 // rbacRead runs one `kubectl get <resource> -o json` into items and
 // returns "" or the fixed reason of the failure. The stderr goes into a
-// buffer for the class and nowhere else.
-func rbacRead[T any](ctx context.Context, r execx.Runner, kubectl, kubeconfig, resource string, items *[]T) string {
+// buffer for the class and nowhere else. The output must be one JSON
+// object whose items is a list of objects, each of the shape that parse
+// reads (bash: doctor::_rbac_shape): else the whole list is invalid.
+func rbacRead[T any](ctx context.Context, r execx.Runner, kubectl, kubeconfig, resource string, parse func(map[string]any) (T, bool), items *[]T) string {
 	ctx, cancel := context.WithTimeout(ctx, rbacReadBound)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
@@ -240,14 +245,170 @@ func rbacRead[T any](ctx context.Context, r execx.Runner, kubectl, kubeconfig, r
 		}
 		return rbacReadReason(stderr.String())
 	}
-	var list struct {
-		Items *[]T `json:"items"`
-	}
-	if json.Unmarshal(stdout.Bytes(), &list) != nil || list.Items == nil {
+	var doc any
+	if json.Unmarshal(stdout.Bytes(), &doc) != nil {
 		return rbacReasonOther
 	}
-	*items = *list.Items
+	top, _ := doc.(map[string]any)
+	list, ok := top["items"].([]any)
+	if !ok {
+		return rbacReasonOther
+	}
+	out := make([]T, 0, len(list))
+	for _, v := range list {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return rbacReasonOther
+		}
+		item, ok := parse(m)
+		if !ok {
+			return rbacReasonOther
+		}
+		out = append(out, item)
+	}
+	*items = out
 	return ""
+}
+
+// The shape that both twins read (bash: doctor::_rbac_shape). A field may
+// be absent or null: it is then empty. A field that is there has the type
+// that the check reads, and so has each element of a list (no null). Any
+// other value makes the whole list invalid, also in an item that the
+// check does not report.
+
+// rbacParseBinding reads metadata.name, roleRef.kind, roleRef.name and the
+// kind, name and namespace of each subject.
+func rbacParseBinding(m map[string]any) (rbacBinding, bool) {
+	var b rbacBinding
+	md, ok1 := rbacObject(m["metadata"])
+	ref, ok2 := rbacObject(m["roleRef"])
+	subjects, ok3 := rbacObjects(m["subjects"])
+	if !ok1 || !ok2 || !ok3 {
+		return b, false
+	}
+	var ok4, ok5, ok6 bool
+	b.Metadata.Name, ok4 = rbacString(md["name"])
+	b.RoleRef.Kind, ok5 = rbacString(ref["kind"])
+	b.RoleRef.Name, ok6 = rbacString(ref["name"])
+	if !ok4 || !ok5 || !ok6 {
+		return b, false
+	}
+	for _, sm := range subjects {
+		kind, ok1 := rbacString(sm["kind"])
+		name, ok2 := rbacString(sm["name"])
+		namespace, ok3 := rbacString(sm["namespace"])
+		if !ok1 || !ok2 || !ok3 {
+			return b, false
+		}
+		b.Subjects = append(b.Subjects, rbacSubject{Kind: kind, Name: name, Namespace: namespace})
+	}
+	return b, true
+}
+
+// rbacParseRole reads metadata.name, metadata.labels (string values) and
+// the apiGroups, resources, verbs and resourceNames of each rule.
+func rbacParseRole(m map[string]any) (rbacRole, bool) {
+	var role rbacRole
+	md, ok1 := rbacObject(m["metadata"])
+	rules, ok2 := rbacObjects(m["rules"])
+	if !ok1 || !ok2 {
+		return role, false
+	}
+	var ok3, ok4 bool
+	role.Metadata.Name, ok3 = rbacString(md["name"])
+	role.Metadata.Labels, ok4 = rbacStringMap(md["labels"])
+	if !ok3 || !ok4 {
+		return role, false
+	}
+	for _, rm := range rules {
+		var rule rbacRule
+		var ok [4]bool
+		rule.APIGroups, ok[0] = rbacStrings(rm["apiGroups"])
+		rule.Resources, ok[1] = rbacStrings(rm["resources"])
+		rule.Verbs, ok[2] = rbacStrings(rm["verbs"])
+		rule.ResourceNames, ok[3] = rbacStrings(rm["resourceNames"])
+		if ok != [4]bool{true, true, true, true} {
+			return role, false
+		}
+		role.Rules = append(role.Rules, rule)
+	}
+	return role, true
+}
+
+// rbacObject is v as an object; absent or null is an empty one.
+func rbacObject(v any) (map[string]any, bool) {
+	if v == nil {
+		return nil, true
+	}
+	m, ok := v.(map[string]any)
+	return m, ok
+}
+
+// rbacObjects is v as a list of objects; absent or null is an empty one.
+func rbacObjects(v any) ([]map[string]any, bool) {
+	if v == nil {
+		return nil, true
+	}
+	list, ok := v.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]map[string]any, 0, len(list))
+	for _, e := range list {
+		m, ok := e.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, m)
+	}
+	return out, true
+}
+
+// rbacString is v as a string; absent or null is "".
+func rbacString(v any) (string, bool) {
+	if v == nil {
+		return "", true
+	}
+	s, ok := v.(string)
+	return s, ok
+}
+
+// rbacStrings is v as a list of strings; absent or null is an empty one.
+func rbacStrings(v any) ([]string, bool) {
+	if v == nil {
+		return nil, true
+	}
+	list, ok := v.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(list))
+	for _, e := range list {
+		s, ok := e.(string)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, s)
+	}
+	return out, true
+}
+
+// rbacStringMap is v as an object of strings; absent or null is an empty
+// one.
+func rbacStringMap(v any) (map[string]string, bool) {
+	m, ok := rbacObject(v)
+	if !ok {
+		return nil, false
+	}
+	out := make(map[string]string, len(m))
+	for k, e := range m {
+		s, ok := e.(string)
+		if !ok {
+			return nil, false
+		}
+		out[k] = s
+	}
+	return out, true
 }
 
 // rbacReadReason maps kubectl's stderr to the class of the failure (bash:

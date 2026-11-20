@@ -158,7 +158,10 @@ func rbacWantReads(t *testing.T, name string) []string {
 // pods/exec check), and the guards around them; (g) a binding name that is
 // not a DNS-1123 subdomain prints no name and no command; (h) an opt-in
 // addon as a path entry does not count; (i) a deploy domain, a spec without
-// metadata.name, subjects: null and rules: null.
+// metadata.name, subjects: null and rules: null; (j) a list of another
+// shape (a malformed field, a label that is not a string, a key in
+// another case, a second JSON document, a null item) prints the fixed
+// reason in both twins.
 func TestDoctorRBACCases(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join(rbacFixtures, "cases"))
 	if err != nil {
@@ -285,17 +288,22 @@ func TestDoctorRBACConstantsMatchTheAddons(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: %v", rel, err)
 			}
+			// The parsers of the check read the manifest, as JSON.
+			var item map[string]any
+			if err := json.Unmarshal(body, &item); err != nil {
+				t.Fatalf("%s: %v", rel, err)
+			}
 			switch doc["kind"] {
 			case "ClusterRoleBinding":
-				var b rbacBinding
-				if err := json.Unmarshal(body, &b); err != nil {
-					t.Fatalf("%s: %v", rel, err)
+				b, ok := rbacParseBinding(item)
+				if !ok {
+					t.Fatalf("%s: the check cannot read a ClusterRoleBinding", rel)
 				}
 				bindings = append(bindings, b)
 			case "ClusterRole":
-				var r rbacRole
-				if err := json.Unmarshal(body, &r); err != nil {
-					t.Fatalf("%s: %v", rel, err)
+				r, ok := rbacParseRole(item)
+				if !ok {
+					t.Fatalf("%s: the check cannot read a ClusterRole", rel)
 				}
 				roles = append(roles, r)
 			case "Namespace":

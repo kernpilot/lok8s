@@ -302,9 +302,9 @@ doctor::_rbac_cleanup() {
 
 # doctor::_rbac_read <kubeconfig> <resource> <out file> <err file>
 # One bounded `kubectl get <resource> -o json` (in doctor::_rbac_fetch). Sets
-# _rbac_reason to "" when the output is a list, else to the fixed reason of
-# the failure's class. The stderr goes to <err file> for the class and is
-# never printed.
+# _rbac_reason to "" when the output is a list of the shape that the check
+# reads (doctor::_rbac_shape), else to the fixed reason of the failure's
+# class. The stderr goes to <err file> for the class and is never printed.
 doctor::_rbac_read() {
   local kubeconfig="${1}" resource="${2}" out="${3}" err="${4}"
   _rbac_reason=""
@@ -315,10 +315,36 @@ doctor::_rbac_read() {
     else
       _rbac_reason=$(doctor::_rbac_reason "$(cat "${err}" 2>/dev/null)")
     fi
-  elif ! jq -e '(.items | type) == "array"' "${out}" > /dev/null 2>&1; then
+  elif ! doctor::_rbac_shape "${resource}" "${out}"; then
     _rbac_reason="kubectl failed or did not return a valid list"
   fi
   return 0
+}
+
+# doctor::_rbac_shape <resource> <file> — 0 when <file> is one JSON object
+# whose items is a list of objects of the shape that both twins read (Go:
+# rbacRead with rbacParseBinding or rbacParseRole). A field may be absent or
+# null: it is then empty. A field that is there has the type that the check
+# reads, and so has each element of a list (no null). Any other value makes
+# the whole list invalid, also in an item that the check does not report.
+# --slurp: a second JSON value in the file makes it invalid too. The stderr
+# of jq is never printed.
+doctor::_rbac_shape() {
+  # shellcheck disable=SC2016 # jq program text
+  jq -e -s --arg res "${1}" '
+    def str: . == null or type == "string";
+    def obj: . == null or type == "object";
+    def strs: . == null or (type == "array" and all(.[]; type == "string"));
+    def objs(f): . == null or (type == "array" and all(.[]; type == "object" and f));
+    def binding: (.metadata | obj) and (.metadata.name | str)
+      and (.roleRef | obj) and (.roleRef.kind | str) and (.roleRef.name | str)
+      and (.subjects | objs((.kind | str) and (.name | str) and (.namespace | str)));
+    def role: (.metadata | obj) and (.metadata.name | str)
+      and (.metadata.labels | . == null or (type == "object" and all(.[]; type == "string")))
+      and (.rules | objs((.apiGroups | strs) and (.resources | strs) and (.verbs | strs) and (.resourceNames | strs)));
+    length == 1 and (.[0] | type == "object" and (.items | type == "array")
+      and all(.items[]; type == "object" and (if $res == "clusterroles" then role else binding end)))
+  ' "${2}" > /dev/null 2>&1
 }
 
 # doctor::_rbac_run <out file> <err file> <command...>
