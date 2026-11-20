@@ -545,7 +545,7 @@ such a fix brings it to the bash implementation too.
 | D5 | Go only | **`lo version` drops the `bash` row.** The binary has no interpreter to report. `lo doctor` still reports the bash the prepared `PATH` resolves, because the provider plugins run under it. | `internal/cli/cmd_version.go`, `cmd_doctor.go` |
 | D6 | Go only | **`lo kubehz node … --cluster X` is refused.** Through the real `lo`, argsh's inherited global `--cluster` consumed the flag before the node guard saw argv, so the bash guard was dead and the flag silently ignored. The binary enforces the guard as intended. | `hack/parity-kubehz.sh` |
 | D7 | Go only | **Spec parse errors carry the binary's own message.** An unparsable `cluster.lok8s.yaml` surfaces yq's `Error: bad file …` line in bash and `[error] cannot parse cluster spec: …` in Go; same rc. | `internal/kubehz`, `hack/parity-kubehz.sh` |
-| D8 |  | **`lo status` on a domain without a spec.** The bash `dispatch_status` ignores `resolve_spec`'s return and dies on an unbound variable (`set -u`); the binary prints the invalid-domain error and continues with the cluster-free sections. A bash defect, not a parity target. | `hack/parity-orchestrate.sh` |
+| D8 | Both implementations | **`lo status` on a domain without a spec.** Both implementations print the error of the spec lookup in the Cluster section and continue with the cluster-free sections. A domain without a spec prints `No cluster.lok8s.yaml or deploy.lok8s.yaml found in clusters/<domain>/`, and a traversal-shaped domain (`../evil`) prints the raw `error: invalid domain name: <domain>` line. Before #269, the bash `dispatch_status` ignored `resolve_spec`'s return and died on an unbound variable (`set -u`, defect B5). No parity case diffs it. | `internal/provision/spec.go` (`ResolveSpec`), `.lok8s/libs/provision` (`provision::dispatch_status`), `.lok8s/libs/status` (`status::cluster`), `hack/parity-orchestrate.sh` |
 | D9 | Go only | **`lo kubehz register` / `join` do not print `LOK8S_SPEC_FILE: unbound variable`.** See defect B3 below; the binary passes the spec path. | `hack/parity-kubehz.sh` |
 | D23 | Go only | **A `-s` placed before the subcommand binds to the leaf's own `-s` on `secrets set`, `secrets env` and `kubehz handover receive`.** Those leaves give `-s` to `--namespace` / `--snapshot` (the bash spec); cobra hands the leaf every flag on the line regardless of position, so `lo -s myns secrets set …` reads `myns` as the namespace, where argsh's main consumed it as `--cluster` first. After the subcommand both agree. The harnesses place `-s` after the verb. | `internal/cli/cmd_secrets.go`, `cmd_kubehz.go` |
 | D31 | Go only | **`lo init` scaffolds files only; the toolchain, the lint notes and the assets view moved.** `lo init project` writes `clusters/`, `lok8s.yaml`, the `.gitignore` entries and one environment file (`--env mise\|direnv\|none`; `both` is refused). The network step is `lo toolchain install`; `lo toolchain doctor` is the pinned-tools section of `lo doctor` on its own; `lo init toolchain` is a hidden alias for one release. `lo lint --notes` prints a `[note]` line per Lo spec key equal to its documented default. `lo assets show` is gone (`lo assets diff <rel>` lists the files). All Go-only: `init service`, `init test` and every `lint` case without `--notes` stay byte-identical to bash; bare `lo init` keeps its rc and shape pinned, and its help text carries three Go-only flags (D32). | `internal/cli/cmd_init.go`, `cmd_toolchain.go`, `cmd_lint.go`, `cmd_assets.go`, `internal/scaffold/project.go`, `internal/lint/defaults.go` |
@@ -597,8 +597,9 @@ and tables on a terminal are the binary's presentation
 
 ### Credentials on disk and on the terminal
 
-Go-only hardening. The bash tree keeps its behaviour; the harnesses never
-reach these paths (they stop at the local refusals, tokens unset).
+Hardening of credentials. D21 and D27 are in both implementations. For
+D20 and D22, the bash tree keeps its behaviour. The harnesses never reach
+these paths (they stop at the local refusals, tokens unset).
 
 | # | Implementations | Deviation | Where |
 |---|---|---|---|
@@ -664,7 +665,7 @@ harness in the same change.
 | B2 | **Registry ConfigMap port is hardcoded `5000`.** The registries listen on 80/443 (TLS-mode dependent). In-cluster consumers may compensate; correcting it is a coordinated change. | `internal/driver/lo/registries.go` |
 | B3 | **`lo kubehz register` / `join` read `LOK8S_SPEC_FILE` before it is set.** `validate_config` reads a variable only `provision::resolve_spec` sets, and `register` calls it after `validate`, so bash prints a spurious `unbound variable` line and the per-kind validation rules are dead on those two verbs (kind reads as `""`). The binary passes the spec path (D9); the kind rules are exercised through `deploy`, where the bash sets the variable itself. | `hack/parity-kubehz.sh`, `.lok8s/libs/kubehz/` |
 | B4 | **`lo kubehz node … --cluster` guard is dead on dispatch** in bash (D6). | `hack/parity-kubehz.sh` |
-| B5 | **`lo status` on a domain without a spec crashes on an unbound variable** in bash (D8): `dispatch_status` ignores `resolve_spec`'s return and dies on `LOK8S_SPEC_KIND` under `set -u`. A traversal-shaped domain (`../evil`) takes the same path. | `hack/parity-orchestrate.sh` |
+| B5 | **Fixed in #269: `lo status` on a domain without a spec crashed on an unbound variable** in bash. `dispatch_status` ignored `resolve_spec`'s return and died on `LOK8S_SPEC_KIND` under `set -u`, and a traversal-shaped domain (`../evil`) took the same path. Now `dispatch_status` returns 1 when the lookup fails, and `lo status` continues in both implementations (D8). The row stays, so that a link to B5 still works. | `.lok8s/libs/provision` (`provision::dispatch_status`), `hack/parity-orchestrate.sh` |
 
 ## Release artifacts
 
