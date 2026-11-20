@@ -851,7 +851,7 @@ _register_sandbox() {
     [[ "${CURL_URL}" != *"/api/clusters/register" ]] || printf '%s' "${CURL_BODY}" >> "${STUB_CURL_BODY}"
     case "$*" in
       *"/api/clusters/register"*)
-        printf '{"id":"cl-001","registered":true,"claimed":true,"bindSecret":"%s","claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"aa:bb","name":"kubehz-claim-test.kubehz.dev"}}\n200' "${STUB_NEXT}" ;;
+        printf '{"id":"cl-001","registered":true,"claimed":true,"bindSecret":"%s","claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"%s","name":"kubehz-claim-test.kubehz.dev"}}\n200' "${STUB_NEXT}" "${STUB_FINGERPRINT:-aa:bb}" ;;
       *"/v1/ssh_keys?name="*) printf '{"ssh_keys":[]}\n' ;;
       *) printf '{}\n' ;;
     esac
@@ -1670,4 +1670,118 @@ ${_CLAIM_DELETE42}"
   run kubehz::claim_key_no_mark 'k\e[2J'
   assert_output "[warn] kubehz: lo needs sha256sum or shasum to mark the claim key 'k\e[2J', so it does not change the key in your Hetzner Cloud project."
   [[ "${output}" != *$'\033'* ]]
+}
+
+# ── the claim ticket in CI logs ──────────────────────────
+# spinup.yml and provision.yml run `lo provision` with HCLOUD_TOKEN, and a
+# public repo shows their job logs to everyone. Any signed-in kubehz user who
+# has the claim ticket (the fingerprint of the claim key) can claim the
+# cluster, so both workflows pipe the output through hide_claim_ticket, an
+# inline function of the run script. This test runs the function of
+# spinup.yml on the register output of the bash implementation. The Go twin,
+# internal/kubehz/claim_ticket_workflow_test.go, runs it on the output of the
+# Go implementation and checks that both workflows have the same function.
+
+_TICKET="aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"
+# A second ticket in capital hex digits, a ticket without the MD5 shape
+# (only the exact match of the two register lines hides it), and a
+# server-key fingerprint as the legacy announce prints it.
+_TICKET_UPPER="AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:01"
+_TICKET_OTHER="SHA256:fake+claim/ticket=without-the-md5-shape"
+_SERVER_FP="12:34:56:78:9a:bc:de:f0:12:34:56:78:9a:bc:de:f0"
+_FP_TAIL="   (also visible in Hetzner Console -> Security -> SSH keys)"
+_TICKET_HIDDEN="<hidden: one-time claim ticket>"
+
+# _hide_claim_ticket_fn: the definition of hide_claim_ticket in spinup.yml,
+# without the 10-space indent of the run block.
+_hide_claim_ticket_fn() {
+  awk '
+    $0 == "          hide_claim_ticket() {" { on = 1 }
+    on { print substr($0, 11) }
+    on && $0 == "          }" { exit }' "${_PROJECT_ROOT}/.github/workflows/spinup.yml"
+}
+
+# _ticket_register <claim-key|announce>: one register_cluster call, with
+# HCLOUD_TOKEN (the claim key) or without it (the fingerprint announce).
+_ticket_register() {
+  if [[ "${1}" == claim-key ]]; then
+    HCLOUD_TOKEN="hc_test" HCLOUD_API_BASE="https://hc.example" \
+      kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  else
+    kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  fi
+}
+
+@test "claim ticket: the workflow filter hides it in the register output, and every other line stays" {
+  local fn claim announce l hidden other input want
+  local -a ins=() wants=()
+  fn="$(_hide_claim_ticket_fn)"
+  [[ "${fn}" == "hide_claim_ticket() {"*"}" ]] || fail "no hide_claim_ticket function in spinup.yml"
+  eval "${fn}"
+
+  export STUB_FINGERPRINT="${_TICKET}"
+  _register_sandbox ""
+  run _ticket_register claim-key
+  assert_success
+  claim="${output}"
+  [[ "$(grep -cF -- "${_TICKET}" <<<"${claim}")" == 2 ]] ||
+    fail "the claim-key registration does not print the ticket on two lines: ${claim}"
+  _register_sandbox ""
+  run _ticket_register announce
+  assert_success
+  assert_line "  fingerprint: lo:test.kubehz.dev"
+  announce="${output}"
+
+  # Each input line, and the line that the filter must write for it.
+  _add() {
+    ins+=("${1}")
+    wants+=("${2}")
+  }
+  # The real register lines: with LF and CRLF, with a ticket without the
+  # MD5 shape, and behind a log prefix.
+  while IFS= read -r l; do
+    hidden="${l//"${_TICKET}"/${_TICKET_HIDDEN}}"
+    other="${l//"${_TICKET}"/${_TICKET_OTHER}}"
+    _add "${l}" "${hidden}"
+    _add "${l}"$'\r' "${hidden}"$'\r'
+    _add "${other}" "${hidden}"
+    _add "${other}"$'\r' "${hidden}"$'\r'
+    _add "  [info] ${l}" "  [info] ${hidden}"
+  done <<<"${claim}"
+  # The announce stays: its "lo:<domain>" has no MD5 shape.
+  while IFS= read -r l; do
+    _add "${l}" "${l}"
+  done <<<"${announce}"
+  _add "  fingerprint: ${_SERVER_FP}" "  fingerprint: ${_TICKET_HIDDEN}"
+  _add "warning: ${_TICKET}" "warning: ${_TICKET_HIDDEN}"
+  _add "two: ${_TICKET} and ${_TICKET_UPPER}." "two: ${_TICKET_HIDDEN} and ${_TICKET_HIDDEN}."
+  _add "17 pairs: ${_TICKET}:01" "17 pairs: ${_TICKET_HIDDEN}"
+  _add "  fingerprint: "$'\xff'"${_TICKET}${_FP_TAIL}" "  fingerprint: ${_TICKET_HIDDEN}${_FP_TAIL}"
+  _add "bytes: "$'\xff'"${_TICKET}" "bytes: "$'\xff'"${_TICKET_HIDDEN}"
+  # Lines like ticket lines that are not: a looser match changes them.
+  while IFS= read -r l; do
+    _add "${l}" "${l}"
+  done <<'EOF'
+  fingerprint: 11:22   (also visible in Hetzner Console -> Security -> SSH keys) and more
+   fingerprint: 11:22   (also visible in Hetzner Console -> Security -> SSH keys)
+x       -H 'Content-Type: application/json' -d '{"fingerprint":"11:22"}'
+       -H 'Content-Type: application/json' -d '{"fingerprint":"11:22"}' and more
+a line without a fingerprint
+15 pairs: aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88
+one digit short: aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:9
+EOF
+  # The last line has no newline, and holds a ticket.
+  _add "last: ${_TICKET}" "last: ${_TICKET_HIDDEN}"
+  input="$(printf '%s\n' "${ins[@]}")"
+  want="$(printf '%s\n' "${wants[@]}")"
+
+  # A UTF-8 locale: the function's own LC_ALL=C makes it compare bytes.
+  export LC_ALL=C.UTF-8
+  run hide_claim_ticket < <(printf '%s' "${input}")
+  assert_success
+  refute_output --partial "${_TICKET}"
+  refute_output --partial "${_TICKET_UPPER}"
+  refute_output --partial "${_TICKET_OTHER}"
+  refute_output --partial "${_SERVER_FP}"
+  assert_output "${want}"
 }

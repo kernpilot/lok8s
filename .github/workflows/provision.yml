@@ -18,7 +18,10 @@ jobs:
   provision:
     runs-on: ubuntu-latest
     steps:
+      # Depth 2: the detect step diffs the pushed commit with its parent.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
 
       - name: Install dependencies
         env:
@@ -47,24 +50,108 @@ jobs:
         id: detect
         if: github.event_name == 'push'
         run: |
-          domains=$(git diff --name-only HEAD~1 HEAD -- '.lok8s/*/cluster.lok8s.yaml' \
-            | sed 's|.lok8s/\(.*\)/cluster.lok8s.yaml|\1|' \
-            | tr '\n' ' ')
-          echo "domains=${domains}" >> "$GITHUB_OUTPUT"
+          # is_name <rule> <value>: the value matches the regex rule, as bytes.
+          is_name() {
+            local LC_ALL=C
+            [[ "${2}" =~ ${1} ]]
+          }
+          # git -z separates the paths with NUL, so a space or a newline in
+          # a directory name stays in that name. The list goes into a file
+          # first, so that a failed git diff (for example, a first commit
+          # without a parent) stops the step, also after a part of the list.
+          # Each directory name must match the domain rule of lo. A bad name
+          # or a failed git diff stops the step before it writes an output,
+          # and the error lines do not print a name.
+          domain_rule='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+          changed="$(mktemp "${RUNNER_TEMP:?}/changed-domains.XXXXXX")"
+          if ! git diff -z --name-only HEAD~1 HEAD -- '.lok8s/*/cluster.lok8s.yaml' > "${changed}"; then
+            echo "::error::git diff of the pushed commit and its parent failed. No domain was passed on."
+            exit 1
+          fi
+          domains=()
+          while IFS= read -r -d '' path; do
+            domain="${path#.lok8s/}"
+            domain="${domain%/cluster.lok8s.yaml}"
+            if ! is_name "${domain_rule}" "${domain}"; then
+              echo "::error::A changed cluster directory does not match the lo domain rule ${domain_rule}. No domain was passed on."
+              exit 1
+            fi
+            domains+=("${domain}")
+          done < "${changed}"
+          echo "domains=${domains[*]}" >> "${GITHUB_OUTPUT}"
 
-      # Cluster registration with kubehz needs NO platform token — `lo provision`
-      # registers a PENDING cluster anonymously and the user proves ownership by
+      # Cluster registration with kubehz needs NO platform token: `lo provision`
+      # registers a PENDING cluster anonymously, and the user proves ownership by
       # claiming it in the dashboard (see the `spinup` reusable workflow for the
-      # full claim handshake). Only HCLOUD_TOKEN is required.
+      # full claim handshake). Only HCLOUD_TOKEN is required. With it, lo prints
+      # a one-time claim ticket, and this public repo shows its job logs to
+      # everyone, so every `lo provision` goes through hide_claim_ticket. It is
+      # the function of spinup.yml; a Go test keeps the two the same. The
+      # changed domains come in through env, never as shell source: each name
+      # must match the domain rule of lo before lo runs.
       - name: Provision
         env:
           HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
           DOMAIN: ${{ github.event.inputs.domain }}
+          DOMAINS: ${{ steps.detect.outputs.domains }}
         run: |
-          if [[ -n "${DOMAIN}" ]]; then
-            lo provision --force --domain "${DOMAIN}"
-          else
-            for domain in ${{ steps.detect.outputs.domains }}; do
-              lo provision --force --domain "${domain}"
+          set -o pipefail
+          # is_name <rule> <value>: the value matches the regex rule, as bytes.
+          is_name() {
+            local LC_ALL=C
+            [[ "${2}" =~ ${1} ]]
+          }
+          # hide_claim_ticket: see the same function in spinup.yml. Limit: it
+          # hides a ticket that is on one line, as lo prints it today. A
+          # ticket split over two lines, or in another encoding, passes.
+          hide_claim_ticket() {
+            local LC_ALL=C line eol cr out
+            local hidden='<hidden: one-time claim ticket>'
+            local curl_head="       -H 'Content-Type: application/json' -d '{\"fingerprint\":\""
+            local curl_tail="\"}'"
+            local fp_head='  fingerprint: '
+            local fp_tail='   (also visible in Hetzner Console -> Security -> SSH keys)'
+            local md5='[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){15,}'
+            while :; do
+              eol=$'\n'
+              if ! IFS= read -r line; then
+                [[ -n "${line}" ]] || break
+                eol=""
+              fi
+              cr=""
+              if [[ "${line}" == *$'\r' ]]; then
+                cr=$'\r'
+                line="${line%$'\r'}"
+              fi
+              if [[ "${line}" == "${curl_head}"*"${curl_tail}" ]]; then
+                line="${curl_head}${hidden}${curl_tail}"
+              elif [[ "${line}" == "${fp_head}"*"${fp_tail}" ]]; then
+                line="${fp_head}${hidden}${fp_tail}"
+              fi
+              out=""
+              while [[ "${line}" =~ ${md5} ]]; do
+                out+="${line%%"${BASH_REMATCH[0]}"*}${hidden}"
+                line="${line#*"${BASH_REMATCH[0]}"}"
+              done
+              printf '%s%s%s%s' "${out}" "${line}" "${cr}" "${eol}"
+              [[ -n "${eol}" ]] || break
             done
+          }
+          # The input domain, or the changed domains (split on white space:
+          # no glob, no evaluation).
+          domains=()
+          if [[ -n "${DOMAIN}" ]]; then
+            domains=("${DOMAIN}")
+          else
+            IFS=$' \t\n' read -r -d '' -a domains <<< "${DOMAINS}" || true
           fi
+          domain_rule='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+          for domain in "${domains[@]}"; do
+            if ! is_name "${domain_rule}" "${domain}"; then
+              echo "::error::A domain does not match the lo domain rule ${domain_rule}. lo did not run."
+              exit 1
+            fi
+          done
+          for domain in "${domains[@]}"; do
+            lo provision --force --domain "${domain}" 2>&1 | hide_claim_ticket
+          done
