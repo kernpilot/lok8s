@@ -286,6 +286,12 @@ when the path turned into a directory or a symlink during the encrypt, the
 encrypt removes its file from there and stops with an error that names the
 path. This check finds the move after it occurs; it does not prevent it.
 
+These checks read the last part of the `.enc` path only. `lo` trusts the
+store directory and its parent directories: they must belong to the user who
+runs `lo`, and no other user may write to them. A symlink in a parent
+directory is followed. A user who can replace a parent directory can move
+the temporary file and the rename of an encrypt out of the store.
+
 ::: warning A removal does not revoke access
 The removed key can still decrypt the older `.enc` files in the git history,
 and its holder keeps every value that they decrypted before. After a removal,

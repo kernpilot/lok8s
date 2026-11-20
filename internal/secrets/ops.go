@@ -373,6 +373,12 @@ func (c *Context) encryptFile(plaintext string) error {
 // encDestinationOK reports whether path, read with lstat (a symlink is not
 // followed), is a regular file or does not exist (bash: the check at the top
 // of secrets::_encrypt_file). Any other lstat error refuses too.
+//
+// It checks the last part of the path only. The store directory and its
+// parent directories are trusted: they belong to the user who runs lo. A
+// symlink in a parent is followed, and a parent that another user can
+// replace could move the temp file and the rename out of the store. The
+// encrypt does not anchor its writes to an opened store directory.
 func encDestinationOK(path string) bool {
 	fi, err := os.Lstat(path)
 	if err != nil {
