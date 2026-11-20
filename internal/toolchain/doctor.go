@@ -117,7 +117,7 @@ func Doctor(ctx context.Context, o DoctorOptions) []Check {
 		got := firstField(v)
 		older := false
 		if err == nil {
-			older, err = olderRelease(got, BRelease.Version)
+			older, err = OlderRelease(got, BRelease.Version)
 		}
 		switch {
 		case err != nil:
@@ -246,11 +246,12 @@ func probe(ctx context.Context, r execx.Runner, path string, args ...string) (st
 	return strings.TrimSpace(string(out)), nil
 }
 
-// olderRelease reports whether the release got (as `b --version` prints
+// OlderRelease reports whether the release got (as `b --version` prints
 // it: 4.18.7, or v4.18.7) is below want. Only major.minor.patch counts: a
 // pre-release of the same release is not older. A version that does not
-// parse is an error, because it cannot be compared.
-func olderRelease(got, want string) (bool, error) {
+// parse is an error, because it cannot be compared. lo doctor also uses it
+// for the minimum kind release (internal/cli/cmd_doctor.go).
+func OlderRelease(got, want string) (bool, error) {
 	g, err := semver.NewVersion(got)
 	if err != nil {
 		return false, fmt.Errorf("--version printed %q, not a version", got)

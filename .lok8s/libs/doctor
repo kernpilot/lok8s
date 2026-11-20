@@ -13,6 +13,13 @@ import ^utils/verbose
 import ^utils/provider
 import ^utils/template
 
+# The oldest kind release that the Lo driver can use. The kind config that
+# lo up renders sets networking.dnsSearch (drivers/lo/utils/render.sh), and
+# kind reads that field from v0.18.0. An older kind stops at `kind create`
+# with an unknown-field error. Go twin: doctorKindMin in
+# internal/cli/cmd_doctor.go.
+DOCTOR_KIND_MIN=v0.18.0
+
 main::doctor() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
   local -a args=(
@@ -52,7 +59,7 @@ main::doctor() {
   # jq is REQUIRED: template::envsubst's native path (any non-GNU envsubst,
   # e.g. b's renvsubst alias) substitutes via jq.
   doctor::_tool jq         1 "JSON processor (restricted substitution)"       || fail=1
-  doctor::_tool kind       0 "local clusters (Lo driver)"
+  doctor::_kind             "local clusters (Lo driver)"               || fail=1
   doctor::_tool tilt       0 "dev loop (Lo driver)"
   doctor::_tool mkcert     0 "local TLS (Lo driver)"
   doctor::_tool sops       0 "secret encryption"
@@ -1578,6 +1585,49 @@ doctor::_tool() {
   fi
   doctor::_warn "${name} not found (optional) — ${purpose}"
   return 0
+}
+
+# doctor::_kind <purpose> — the kind line of the tools section (Go:
+# doctorKind). kind is optional: when it is absent, the line is a warning.
+# When it is present, it must be DOCTOR_KIND_MIN or later: an older kind is
+# a failure (returns 1). Only major.minor.patch counts, so a pre-release of
+# a later release passes. A failed `kind version`, or an output without the
+# version field, is a warning. `kind version` prints
+# "kind v0.32.0 go1.25.5 linux/amd64": the fields of the first line are
+# split at spaces and tabs, the first field must be "kind", and the second
+# starts with vX.Y.Z, then a "-", a "+" or the end. A number has 9 digits at
+# most, so shell arithmetic compares it as Go does. The line names only the
+# matched numbers, no other byte of the output.
+doctor::_kind() {
+  local purpose="${1}"
+  if ! command -v kind >/dev/null 2>&1; then
+    doctor::_warn "kind not found (optional) — ${purpose}"
+    return 0
+  fi
+  local need="lo up needs kind ${DOCTOR_KIND_MIN} or later for networking.dnsSearch"
+  local re='^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})([-+]|$)'
+  local out="" known=1
+  out="$(kind version 2>/dev/null </dev/null)" || known=0
+  local -a f=()
+  IFS=$' \t' read -r -a f <<< "${out%%$'\n'*}"
+  if (( ! known )) || [[ "${f[0]:-}" != kind ]] || ! [[ "${f[1]:-}" =~ ${re} ]]; then
+    doctor::_warn "kind — ${purpose}; version unknown, ${need}"
+    return 0
+  fi
+  local -a got=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+  [[ "${DOCTOR_KIND_MIN}" =~ ${re} ]]
+  local -a want=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+  local i
+  for i in 0 1 2; do
+    if (( 10#${got[i]} > 10#${want[i]} )); then
+      break
+    fi
+    if (( 10#${got[i]} < 10#${want[i]} )); then
+      doctor::_bad "kind v${got[0]}.${got[1]}.${got[2]} — ${purpose}; ${need} (fix: b update kind)"
+      return 1
+    fi
+  done
+  doctor::_ok "kind — ${purpose}"
 }
 
 doctor::_dir() {
