@@ -125,13 +125,14 @@ handover::cleanup_cmd() {
 # bytes never land in a file with a wider mode, and an existing dst (a run
 # with --force) is replaced: its own mode, a link there or a second name of
 # it does not get the bytes. A dir at dst fails. On a failure the new file
-# goes, and dst is as it was.
+# goes, and dst is as it was. A new file that cannot go is named: it can
+# hold key bytes.
 handover::install_file() {
   local dst="${1}" mode="${2}" tmp
   [[ ! -d "${dst}" ]] || return 1
   tmp="$(umask 077 && mktemp "${dst%/*}/.${dst##*/}.XXXXXXXXXX" 2>/dev/null)" || return 1
   if ! cat > "${tmp}" || ! chmod "${mode}" "${tmp}" 2>/dev/null || ! mv -f -- "${tmp}" "${dst}"; then
-    rm -f -- "${tmp}"
+    rm -f -- "${tmp}" || error "handover: could not remove ${tmp}, which can hold key bytes. Delete it yourself."
     return 1
   fi
 }
@@ -911,8 +912,14 @@ handover::preseed() {
   # user's ssh config opens or shares (ControlMaster, ControlPath) would
   # carry these calls without a new host key check. ssh takes the first
   # value it gets for an option, so these win over the config.
+  # NoHostAuthenticationForLocalhost=no: with yes, ssh skips the host key
+  # check for a loopback address (a node behind a forwarded port), also with
+  # StrictHostKeyChecking=yes. VerifyHostKeyDNS=no: with yes, ssh takes a key
+  # from a DNS SSHFP record that is in no known_hosts file. UpdateHostKeys=no:
+  # the node cannot add or remove keys in the known_hosts file.
   local -a ssh_opts=(-o IdentitiesOnly=yes -o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=10
-    -o ControlMaster=no -o ControlPath=none)
+    -o ControlMaster=no -o ControlPath=none
+    -o NoHostAuthenticationForLocalhost=no -o VerifyHostKeyDNS=no -o UpdateHostKeys=no)
   [[ -z "${known_hosts}" ]] || ssh_opts+=(-o "UserKnownHostsFile=${known_hosts}")
   [[ -z "${ssh_key}" ]] || ssh_opts+=(-i "${ssh_key}")
   local first_contact=yes
@@ -938,26 +945,118 @@ handover::preseed() {
     handover::host_key_recorded "${node}" "${port}" "${known_hosts:-${HOME}/.ssh/known_hosts}" || return 1
   fi
   ssh_opts=(-o StrictHostKeyChecking=yes "${ssh_opts[@]}")
+  local -a remote=(ssh "${ssh_opts[@]}" -p "${port}" "${user}@${node}")
 
-  # Per-file transfer with an IMMEDIATE per-key chmod (never one chmod at the
-  # very end): private keys are 0600 even when a later copy dies mid-transfer.
-  local key
+  # scp writes into a file that is there already: a hard link at the
+  # destination gives the key bytes to its other name too, and a symlink
+  # sends them to its target. So each file goes to a new staging file in the
+  # 0700 pki dir first. One call makes them (umask 077 and mktemp: mode
+  # 0600) and prints their names, the scp calls fill them, and one call sets
+  # each mode and renames each file over its destination. A rename (mv -T)
+  # replaces a link or a file there and never writes through it. A failure
+  # removes the staging files, or names them when that fails too.
+  local pki=/etc/kubernetes/pki stage_cmd="umask 077" install_cmd="" failed="" out="" key i
+  local -a lines=() staged=()
   for key in "${KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
-    scp "${ssh_opts[@]}" -P "${port}" "${bundle_dir}/${key}" \
-      "${user}@${node}:/etc/kubernetes/pki/${key}" || {
-      error "handover: copying ${key} to ${node} failed"
-      return 1
-    }
-    case "${key}" in
-      *.key)
-        ssh "${ssh_opts[@]}" -p "${port}" "${user}@${node}" \
-          "chmod 600 /etc/kubernetes/pki/${key}" || {
-          error "handover: could not chmod 600 /etc/kubernetes/pki/${key} on ${node} — key material must not stay readable; fix the mode and re-run"
-          return 1
-        }
-        ;;
-    esac
+    stage_cmd+=" && mktemp ${pki}/.${key}.XXXXXXXXXX"
   done
+  out="$("${remote[@]}" "${stage_cmd}")" ||
+    failed="could not make the staging files ${pki}/.<key>.XXXXXXXXXX on ${node}"
+  [[ -z "${out}" ]] || mapfile -t lines <<< "${out}"
+  # Only a name of the expected shape goes into a later command.
+  for i in "${!KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
+    key="${KUBEHZ_HANDOVER_PKI_KEYS[i]}"
+    handover::staging_name "${key}" "${lines[i]:-}" && continue
+    [[ -n "${failed}" ]] || failed="${node} printed a staging name for ${key} that is not ${pki}/.${key}. and 10 letters or digits: \"${lines[i]:-}\""
+    break
+  done
+  if [[ -z "${failed}" ]] && (( ${#lines[@]} != ${#KUBEHZ_HANDOVER_PKI_KEYS[@]} )); then
+    failed="${node} printed ${#lines[@]} lines for ${#KUBEHZ_HANDOVER_PKI_KEYS[@]} staging names"
+  fi
+  if [[ -z "${failed}" ]]; then
+    staged=("${lines[@]}")
+  else
+    # The cleanup takes each line that is a staging name of some key.
+    for i in "${!lines[@]}"; do
+      for key in "${KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
+        handover::staging_name "${key}" "${lines[i]}" || continue
+        staged+=("${lines[i]}")
+        break
+      done
+    done
+  fi
+
+  if [[ -z "${failed}" ]]; then
+    for i in "${!KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
+      key="${KUBEHZ_HANDOVER_PKI_KEYS[i]}"
+      scp "${ssh_opts[@]}" -P "${port}" "${bundle_dir}/${key}" "${user}@${node}:${staged[i]}" && continue
+      failed="copying ${key} to ${node} failed"
+      break
+    done
+  fi
+
+  if [[ -z "${failed}" ]]; then
+    install_cmd="$(handover::install_cmd "${staged[@]}")"
+    out="$("${remote[@]}" "${install_cmd}")" || failed="$(handover::install_failure "${out##*$'\n'}" "${node}")"
+  fi
+
+  if [[ -n "${failed}" ]]; then
+    error "handover: ${failed}"
+    if (( ${#staged[@]} )) && ! "${remote[@]}" "rm -f -- ${staged[*]}"; then
+      error "handover: could not remove the staging files on ${node}; they can hold key bytes. Remove them yourself: ${staged[*]}"
+    fi
+    return 1
+  fi
 
   echo "handover: PKI pre-seeded on ${node}. Provision now (lo provision) — kubeone's kubeadm reuses the existing CA files, preserving cluster identity."
+}
+
+# Return 0 when name is the shape of a staging file that preseed's mktemp
+# makes for key: /etc/kubernetes/pki/.<key>. and 10 ASCII letters or digits.
+# The letters are listed, so the check does not depend on the locale.
+handover::staging_name() {
+  local key="${1}" name="${2}" rest
+  local alnum=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
+  rest="${name#"/etc/kubernetes/pki/.${key}."}"
+  [[ "${rest}" != "${name}" && ${#rest} -eq 10 && "${rest}" != *[!${alnum}]* ]]
+}
+
+# Print the remote command of preseed's install call for the staging names
+# (one per PKI key, in order): first it sets the mode of each staging file
+# (the keys 0600, the certs and sa.pub 0644), then it renames each over its
+# destination. Before each step it prints the step, so the last line of a
+# failed call names the step that failed.
+handover::install_cmd() {
+  local -a staged=("${@}")
+  local cmd="" key mode i
+  for i in "${!KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
+    key="${KUBEHZ_HANDOVER_PKI_KEYS[i]}"
+    mode=0644
+    [[ "${key}" != *.key ]] || mode=0600
+    cmd+="${cmd:+ && }echo 'chmod ${key}' && chmod ${mode} ${staged[i]}"
+  done
+  for i in "${!KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
+    key="${KUBEHZ_HANDOVER_PKI_KEYS[i]}"
+    cmd+=" && echo 'mv ${key}' && mv -f -T ${staged[i]} /etc/kubernetes/pki/${key}"
+  done
+  printf '%s\n' "${cmd}"
+}
+
+# Print the cause of a failed install call from the last line that it
+# printed (handover::install_cmd). A mv failure names the files that went
+# into place before it.
+handover::install_failure() {
+  local last="${1}" node="${2}" key done_keys=""
+  for key in "${KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
+    if [[ "${last}" == "chmod ${key}" ]]; then
+      printf '%s\n' "could not set the mode of the staging file of ${key} on ${node}; no file was moved into place"
+      return 0
+    fi
+    if [[ "${last}" == "mv ${key}" ]]; then
+      printf '%s\n' "could not move the staging file of ${key} to /etc/kubernetes/pki/${key} on ${node}; in place before it: ${done_keys:-none}"
+      return 0
+    fi
+    done_keys+="${done_keys:+ }${key}"
+  done
+  printf '%s\n' "the install call on ${node} failed before its first step"
 }

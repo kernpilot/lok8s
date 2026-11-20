@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"io"
 	"io/fs"
@@ -336,7 +337,8 @@ func (c *Context) placePKI(bundle, k8sDir string) error {
 // a file with a wider mode, and an existing dst (a run with --force) is
 // replaced: its own mode, a link there or a second name of it does not get
 // the bytes. A dir at dst (or a link to one) fails, as in the bash twin. On
-// a failure the new file goes, and dst is as it was.
+// a failure the new file goes, and dst is as it was. A new file that cannot
+// go is named: it can hold key bytes.
 func (c *Context) installFile(dst string, data []byte, mode fs.FileMode) error {
 	if info, err := os.Stat(dst); err == nil && info.IsDir() {
 		return errors.New(dst + " is a directory")
@@ -357,7 +359,9 @@ func (c *Context) installFile(dst string, data []byte, mode fs.FileMode) error {
 		err = os.Rename(tmp, dst)
 	}
 	if err != nil {
-		_ = os.Remove(tmp)
+		if rerr := os.Remove(tmp); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+			c.errorf("handover: could not remove %s, which can hold key bytes. Delete it yourself.", tmp)
+		}
 	}
 	return err
 }
@@ -962,8 +966,15 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	// user's ssh config opens or shares (ControlMaster, ControlPath) would
 	// carry these calls without a new host key check. ssh takes the first
 	// value it gets for an option, so these win over the config.
+	// NoHostAuthenticationForLocalhost=no: with yes, ssh skips the host key
+	// check for a loopback address (a node behind a forwarded port), also
+	// with StrictHostKeyChecking=yes. VerifyHostKeyDNS=no: with yes, ssh
+	// takes a key from a DNS SSHFP record that is in no known_hosts file.
+	// UpdateHostKeys=no: the node cannot add or remove keys in the
+	// known_hosts file.
 	sshOpts := []string{"-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10",
-		"-o", "ControlMaster=no", "-o", "ControlPath=none"}
+		"-o", "ControlMaster=no", "-o", "ControlPath=none",
+		"-o", "NoHostAuthenticationForLocalhost=no", "-o", "VerifyHostKeyDNS=no", "-o", "UpdateHostKeys=no"}
 	if o.KnownHosts != "" {
 		sshOpts = append(sshOpts, "-o", "UserKnownHostsFile="+o.KnownHosts)
 	}
@@ -1004,22 +1015,164 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 			return err
 		}
 	}
-	// Per-file transfer with an IMMEDIATE per-key chmod.
+	remote := func(cmd string) (string, error) {
+		return c.capture(ctx, false, "ssh", append(checked("yes"), "-p", portStr, target, cmd)...)
+	}
+
+	// scp writes into a file that is there already: a hard link at the
+	// destination gives the key bytes to its other name too, and a symlink
+	// sends them to its target. So each file goes to a new staging file in
+	// the 0700 pki dir first. One call makes them (umask 077 and mktemp:
+	// mode 0600) and prints their names, the scp calls fill them, and one
+	// call sets each mode and renames each file over its destination. A
+	// rename (mv -T) replaces a link or a file there and never writes
+	// through it. A failure removes the staging files, or names them when
+	// that fails too. The bash twin does the same steps.
+	stageCmd := "umask 077"
 	for _, key := range handoverPKIKeys {
-		args := append(checked("yes"), "-P", portStr, filepath.Join(bundleDir, key), target+":/etc/kubernetes/pki/"+key)
-		if err := c.run(ctx, "scp", args...); err != nil {
-			c.errorf("handover: copying %s to %s failed", key, o.Node)
-			return ErrHandled
-		}
-		if handoverPKIRe.MatchString(key) {
-			if err := ssh("yes", "chmod 600 /etc/kubernetes/pki/"+key); err != nil {
-				c.errorf("handover: could not chmod 600 /etc/kubernetes/pki/%s on %s — key material must not stay readable; fix the mode and re-run", key, o.Node)
-				return ErrHandled
+		stageCmd += " && mktemp " + preseedPKIDir + "/." + key + ".XXXXXXXXXX"
+	}
+	failed := ""
+	out, err := remote(stageCmd)
+	if err != nil {
+		failed = "could not make the staging files " + preseedPKIDir + "/.<key>.XXXXXXXXXX on " + o.Node
+	}
+	staged, problem := preseedStaged(out)
+	if failed == "" && problem != "" {
+		failed = o.Node + " printed " + problem
+	}
+	if failed == "" {
+		for i, key := range handoverPKIKeys {
+			args := append(checked("yes"), "-P", portStr, filepath.Join(bundleDir, key), target+":"+staged[i])
+			if err := c.run(ctx, "scp", args...); err != nil {
+				failed = "copying " + key + " to " + o.Node + " failed"
+				break
 			}
 		}
 	}
+	if failed == "" {
+		out, err = remote(preseedInstallCmd(staged))
+		if err != nil {
+			failed = preseedInstallFailure(lastLine(out), o.Node)
+		}
+	}
+	if failed != "" {
+		c.errorf("handover: %s", failed)
+		if len(staged) > 0 {
+			if err := ssh("yes", "rm -f -- "+strings.Join(staged, " ")); err != nil {
+				c.errorf("handover: could not remove the staging files on %s; they can hold key bytes. Remove them yourself: %s", o.Node, strings.Join(staged, " "))
+			}
+		}
+		return ErrHandled
+	}
 	c.echo("handover: PKI pre-seeded on %s. Provision now (lo provision) — kubeone's kubeadm reuses the existing CA files, preserving cluster identity.", o.Node)
 	return nil
+}
+
+// preseedPKIDir is the pki dir on the node that preseed writes into.
+const preseedPKIDir = "/etc/kubernetes/pki"
+
+// stagingName ports handover::staging_name: it reports whether name is the
+// shape of a staging file that preseed's mktemp makes for key:
+// /etc/kubernetes/pki/.<key>. and 10 ASCII letters or digits.
+func stagingName(key, name string) bool {
+	rest, ok := strings.CutPrefix(name, preseedPKIDir+"/."+key+".")
+	if !ok || len(rest) != 10 {
+		return false
+	}
+	for i := 0; i < len(rest); i++ {
+		b := rest[i]
+		if (b < 'A' || b > 'Z') && (b < 'a' || b > 'z') && (b < '0' || b > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// preseedStaged reads the output of the stage call. With one staging name
+// per PKI key, in order, problem is empty and names holds them. Else
+// problem says what is wrong, and names holds each line that is a staging
+// name of some key, so that the cleanup can remove it. A line of another
+// shape never goes into a command.
+func preseedStaged(out string) (names []string, problem string) {
+	var lines []string
+	if s := strings.TrimRight(out, "\n"); s != "" {
+		lines = strings.Split(s, "\n")
+	}
+	for i, key := range handoverPKIKeys {
+		line := ""
+		if i < len(lines) {
+			line = lines[i]
+		}
+		if !stagingName(key, line) {
+			problem = fmt.Sprintf("a staging name for %s that is not %s/.%s. and 10 letters or digits: %q", key, preseedPKIDir, key, line)
+			break
+		}
+	}
+	if problem == "" && len(lines) != len(handoverPKIKeys) {
+		problem = fmt.Sprintf("%d lines for %d staging names", len(lines), len(handoverPKIKeys))
+	}
+	if problem == "" {
+		return lines, ""
+	}
+	for _, line := range lines {
+		for _, key := range handoverPKIKeys {
+			if stagingName(key, line) {
+				names = append(names, line)
+				break
+			}
+		}
+	}
+	return names, problem
+}
+
+// preseedInstallCmd ports handover::install_cmd: the remote command of the
+// install call for the staging names (one per PKI key, in order). First it
+// sets the mode of each staging file (the keys 0600, the certs and sa.pub
+// 0644), then it renames each over its destination. Before each step it
+// prints the step, so the last line of a failed call names the step that
+// failed.
+func preseedInstallCmd(staged []string) string {
+	var steps []string
+	for i, key := range handoverPKIKeys {
+		mode := "0644"
+		if handoverPKIRe.MatchString(key) {
+			mode = "0600"
+		}
+		steps = append(steps, "echo 'chmod "+key+"'", "chmod "+mode+" "+staged[i])
+	}
+	for i, key := range handoverPKIKeys {
+		steps = append(steps, "echo 'mv "+key+"'", "mv -f -T "+staged[i]+" "+preseedPKIDir+"/"+key)
+	}
+	return strings.Join(steps, " && ")
+}
+
+// preseedInstallFailure ports handover::install_failure: the cause of a
+// failed install call from the last line that it printed. A mv failure
+// names the files that went into place before it.
+func preseedInstallFailure(last, node string) string {
+	var placed []string
+	for _, key := range handoverPKIKeys {
+		switch last {
+		case "chmod " + key:
+			return "could not set the mode of the staging file of " + key + " on " + node + "; no file was moved into place"
+		case "mv " + key:
+			before := "none"
+			if len(placed) > 0 {
+				before = strings.Join(placed, " ")
+			}
+			return "could not move the staging file of " + key + " to " + preseedPKIDir + "/" + key + " on " + node + "; in place before it: " + before
+		}
+		placed = append(placed, key)
+	}
+	return "the install call on " + node + " failed before its first step"
+}
+
+// lastLine is bash "${out##*$'\n'}" after a command substitution: the
+// last line of out without its trailing newlines.
+func lastLine(out string) string {
+	out = strings.TrimRight(out, "\n")
+	return out[strings.LastIndexByte(out, '\n')+1:]
 }
 
 // readableRegularFile is bash `[[ -f path && -r path ]]`: it follows a

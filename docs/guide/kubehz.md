@@ -1398,6 +1398,14 @@ on the node's console first. `--accept-new-host-key` trusts the key that the
 node shows on the first contact instead: the handover then checks that ssh
 recorded it, and every later call checks against that record.
 
+Your ssh config cannot weaken that check. Every call sets
+`NoHostAuthenticationForLocalhost=no` (so a node behind a forwarded port on
+localhost is checked too), `VerifyHostKeyDNS=no` and `UpdateHostKeys=no`, and
+it opens no shared connection. On the node, each file goes to a new private
+file in `/etc/kubernetes/pki` first, and a rename then puts it in place. A
+link that is already at a destination is replaced, and its target never gets
+a key. If a step fails, `preseed` names it and removes the new files.
+
 ## Troubleshooting
 
 **No heartbeats arriving?** Check the CronJob is present, not suspended,
