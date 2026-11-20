@@ -211,10 +211,6 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list]
-  # drain evicts each pod (drain.go:165).
-  - apiGroups: [""]
-    resources: [pods/eviction]
-    verbs: [create]
   # drain deletes the pods instead with disableEviction (drain.go:148,257).
   - apiGroups: [""]
     resources: [pods]
