@@ -228,10 +228,14 @@ lists each other store once. On the first run that is after the write of
 `.sops.yaml`: when such a listing fails, the command names the store and
 stops before it re-encrypts a file.
 
-When `.sops.yaml` (at the end of its links) is the same file as the
-`.gitignore` of the store or as an `.enc` file of the store, `add-key` stops
-before it changes a file: the write of that file would replace `.sops.yaml`.
-Give `.sops.yaml` a file of its own.
+When `.sops.yaml` (at the end of its links, or through a hard link) is the
+same file as the `.gitignore` of the store or as the `.enc` file of a
+plaintext of the store, `add-key` stops before it changes `.sops.yaml`, the
+`.gitignore` or an `.enc` file: the write of that file would replace
+`.sops.yaml`. Only the lock file can be new. The check compares these files
+only: an orphan `.enc` file, a plaintext and a file outside the store are
+not compared. It runs once, before the first write. Give `.sops.yaml` a file
+of its own.
 
 `add-key` writes the `.gitignore` of the store before it changes
 `.sops.yaml`. When that write fails, the command stops, and `.sops.yaml` and
@@ -244,17 +248,19 @@ It reads the sops metadata of the `.enc` file of each plaintext of the
 store. A finished file passes the recipient envelope check: its metadata has
 a `mac` and a `lastmodified` value, and an `age` entry for the key with an
 `enc` value that is an armored age block (its header line and its footer
-line). The check reads only the entries of the key. An entry of another
-key does not change the result.
+line). Only the `enc` values of the entries of the key take part in this
+test. The check still reads every entry: an entry of another key whose
+recipient is missing, empty or not a string, or a member that the metadata
+holds twice, makes the file fail the check.
 
 The command re-encrypts only the plaintexts whose `.enc` file is missing or
 not finished. A finished `.enc` file keeps its bytes and its time, also when
 its plaintext is older. When each file is finished, the command prints
-`nothing to add` and changes no file, but it writes a missing `.gitignore` of
-the store. The check is structural: it reads the sops metadata only, and
-does not decrypt the file. It does not show that sops wrote the entry, or
-that the key can decrypt the file. A damaged file whose metadata passes the
-check is not found.
+`nothing to add`. It does not change `.sops.yaml` or an `.enc` file, but it
+writes a missing `.gitignore` of the store. The check is structural: it reads
+the sops metadata only, and does not decrypt the file. It does not show that
+sops wrote the entry, or that the key can decrypt the file. A damaged file
+whose metadata passes the check is not found.
 
 After that re-encrypt, the command reads the metadata again. When a file is
 still not finished, the command names it and stops with an error, and it
@@ -263,7 +269,7 @@ key, for example when the key is only in a comment of `.sops.yaml`. Fix
 `.sops.yaml`, then run the command again.
 
 When `.sops.yaml` lists the key already, the command also stops, before it
-writes a file, in these cases:
+changes `.sops.yaml`, the `.gitignore` or an `.enc` file, in these cases:
 
 - An `.enc` path of the store is a symlink, a directory, a FIFO, a socket or
   a device. The first run refuses these too.
@@ -423,7 +429,9 @@ the lock path, and its error says to remove the lock path and the file that
 a link there names. A FIFO that appears after the check makes the bash open
 wait until a program opens the FIFO to read. When another regular file
 replaces the lock file after the open, both stop with an error that says
-that the lock path changed after its check. The bash implementation keeps
+that the lock path changed after its check, and that the command stopped
+before it changed `.sops.yaml`, a `.gitignore` or an `.enc` file. The open
+can have made the lock file. The bash implementation keeps
 the lock until its process exits; the `lo` binary releases it when the
 command ends. When `flock` fails for a cause other than a lock that another
 run holds, the bash implementation says that it cannot lock the file and
