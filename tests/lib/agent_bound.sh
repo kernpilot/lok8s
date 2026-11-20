@@ -25,8 +25,15 @@ timeout() {
       return 125 ;;
   esac
   shift 3
-  local STUB_BOUND=1
+  # POSIX sh has no `local`: save STUB_BOUND, set it for the call, put it
+  # back. stub_call reads it with ${STUB_BOUND:-}, so an empty value is
+  # the same as no value.
+  _stub_bound_was="${STUB_BOUND:-}"
+  STUB_BOUND=1
   "$@"
+  _stub_rc=$?
+  STUB_BOUND="${_stub_bound_was}"
+  return "${_stub_rc}"
 }
 
 # stub_call TOOL ARGS: one line in STUB_CALL_LOG. STUB_BOUND is set only

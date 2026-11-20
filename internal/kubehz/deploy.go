@@ -507,7 +507,7 @@ func oneLine(s string) string { return strings.ReplaceAll(strings.TrimRight(s, "
 // identityTokenTemplate prints the word agent-token when the identity
 // Secret holds a non-empty agent-token, else nothing. The read never gets
 // the value: the deploy needs only to know that the key is there.
-const identityTokenTemplate = `go-template={{with .data}}{{if index . "agent-token"}}agent-token{{end}}{{end}}`
+const identityTokenTemplate = `go-template={{with .data}}{{if index . "agent-token"}}agent-token{{end}}{{end}}` // #nosec G101 -- a go-template that prints a key name, never a value
 
 // identityHasToken reports whether the merged output of the
 // identityTokenTemplate read has the line agent-token (a warning line on
