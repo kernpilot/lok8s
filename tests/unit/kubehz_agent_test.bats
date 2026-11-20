@@ -347,6 +347,21 @@ Created:     2026-10-04T12:00:00.000Z"
 status: Deleting'
 }
 
+@test "yaml: a string that a YAML 1.1 reader reads as a bool or a number prints in double quotes" {
+  route DELETE /api/spaces/sp-1a2b3c4d 200 '{"ok":true,"data":{"id":"sp-1a2b3c4d","status":"No"}}'
+  run kubehz::space::delete sp-1a2b3c4d -o yaml
+  assert_success
+  assert_output 'id: sp-1a2b3c4d
+status: "No"'
+  route GET /api/spaces/sp-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  mkdir -p "${BATS_TEST_TMPDIR}/out"
+  cd "${BATS_TEST_TMPDIR}/out"
+  run kubehz::space::kubeconfig sp-1a2b3c4d --file off -o yaml
+  assert_success
+  assert_output 'id: sp-1a2b3c4d
+file: "off"'
+}
+
 @test "an id outside the api's shape reaches no request, not even the grant" {
   run kubehz::space::get ../clusters
   assert_failure
