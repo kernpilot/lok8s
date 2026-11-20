@@ -7,15 +7,17 @@
 #     controller's own ServiceAccount, the one that the ClusterRole
 #     lok8s-system-upgrade-controller-drainer is bound to;
 #   - cordon and drain: the Job's drain container (the pinned kubectl
-#     image) cordons the node and evicts its pods (nodes get, patch; pods
-#     list, get; pods/eviction create; daemonsets get);
+#     image) cordons the node and evicts its pods, with the rules of that
+#     ClusterRole (rbac.yaml of the addon is the source);
 #   - secrets: the controller reads the Secret from its cache, and the
 #     upgrade container reads the mounted file;
 #   - when the Job completes, the controller writes the Plan status, puts
 #     the Plan label on the node and makes the node schedulable again.
 #
 # The cluster has one node. The pods that the drain evicts wait as Pending
-# until the controller makes the node schedulable again.
+# until the controller makes the node schedulable again. The drain skips
+# every pod with the label upgrade.cattle.io/controller: the Job pods and
+# the controller pod.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -43,6 +45,11 @@ spec:
     # The drain stops waiting for a deleted pod after 60 s. A pod that
     # cannot move to another node does not hold it for ever.
     skipWaitForDeleteTimeout: 60
+    # kubectl drain gives up after 120 s; its default waits for ever. An
+    # eviction that a PodDisruptionBudget refuses is retried until then.
+    # The CRD types this field int-or-string, and the controller passes a
+    # string to --timeout as it is.
+    timeout: 120s
   secrets:
     - name: e2e-suc-plan
       path: /run/e2e-suc
@@ -57,5 +64,6 @@ spec:
     # Pinned by digest, like the two images of the addon.
     image: ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
     command: [/bin/sh, -c]
+    # Single quotes: a plain scalar that holds ": " is a map, not a string.
     args:
-      - test "$(cat /run/e2e-suc/marker)" = e2e-suc-secret && echo "e2e-suc: the Plan Secret is mounted"
+      - 'test "$(cat /run/e2e-suc/marker)" = e2e-suc-secret && echo "e2e-suc: the Plan Secret is mounted"'

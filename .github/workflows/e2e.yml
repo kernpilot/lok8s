@@ -198,7 +198,7 @@ jobs:
         # suc runs the go leg only. Its subject is the
         # system-upgrade-controller addon (the narrowed RBAC and the two
         # images pinned by digest) with one real Plan, not the
-        # implementation. Its budget is 29 minutes at most
+        # implementation. Its budget is 31 minutes at most
         # (tests/e2e/suc/test.bats).
         include:
           - {scenario: lifecycle, impl: go}
