@@ -1314,9 +1314,11 @@ after 30 s. The check does not run when `spec.bootstrap` has
 `system-upgrade-controller-cluster-admin`. Doctor finds that opt-in addon
 only as a bare entry name, not as a path entry, so the line of each
 `cluster-admin` binding says "Keep it only on purpose, else delete it:"
-before the command. Doctor prints a binding name only when it is a
-DNS-1123 subdomain. For any other name, the line has no name and no
-delete command.
+before the command. A line without a command (a binding with other
+subjects, or an unusual name) also says to keep the grant only on
+purpose. Doctor prints a binding name only when it is a DNS-1123
+subdomain. For any other name, the line has no name and no delete
+command.
 
 The `can-i` lines are spot checks. Until now cluster-admin hid any call
 the new roles miss. Restart the controller, run one Plan that does what
@@ -1591,16 +1593,27 @@ and ClusterRoles of the active domain's cluster and prints one
   `lok8s-redis-operator-chart-rbac` when `spec.bootstrap` does not have
   the opt-in addon (see below);
 - the ClusterRole `redis-operator`;
-- its `aggregate-to-*` labels (with the value `true`): the built-in roles
-  keep the copied rules until the delete.
+- its labels `rbac.authorization.k8s.io/aggregate-to-admin`,
+  `rbac.authorization.k8s.io/aggregate-to-edit` and
+  `rbac.authorization.k8s.io/aggregate-to-view` with the value `true`:
+  the built-in roles keep the copied rules until the delete. Doctor
+  prints no other label key.
 
-The binding and role lines end with the delete command, which names the
+The binding lines end with the delete command, which names the
 kubeconfig that doctor read. As for the system-upgrade-controller, a
 binding counts in each form of the ServiceAccount (the User name of its
 token, `system:serviceaccount:redis-operator:redis-operator`, and the
 groups of its token), and doctor prints no delete command for a grant
 through a group or for a binding with other subjects: the line names the
 binding and says what to do.
+
+A delete of the ClusterRole `redis-operator` ends the grant of every
+binding that refers to it. When a ClusterRoleBinding gives the role to
+other subjects than the operator's ServiceAccount (a group, a user,
+another ServiceAccount), the role line names those bindings and has no
+delete command: give their subjects another role first. Doctor does not
+read RoleBindings, so the role line also says to check that no
+RoleBinding refers to the role before the delete.
 
 Doctor only reads: you run the deletes. When doctor finds a leftover and
 no binding gives the ServiceAccount `lok8s-redis-operator` yet, it first
