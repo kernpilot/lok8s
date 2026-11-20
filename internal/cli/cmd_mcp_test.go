@@ -324,6 +324,14 @@ func TestMcpToolsNeverExposeSensitiveFlags(t *testing.T) {
 	if flagNames(t, tools["lo_secrets_decrypt"])["ssh-key"] || flagNames(t, tools["lo_kubehz_handover_preseed"])["ssh-key"] {
 		t.Error("--ssh-key exposed")
 	}
+	// Trust on first use for the host that gets the CA keys is a person's
+	// choice, never an agent's.
+	if flagNames(t, tools["lo_kubehz_handover_preseed"])["accept-new-host-key"] {
+		t.Error("lo_kubehz_handover_preseed exposes --accept-new-host-key")
+	}
+	if !flagNames(t, tools["lo_kubehz_handover_preseed"])["known-hosts"] {
+		t.Error("lo_kubehz_handover_preseed lost --known-hosts: the --accept-new-host-key check proves nothing")
+	}
 	if !flagNames(t, tools["lo_kubehz_deploy"])["dry-run"] {
 		t.Error("lo_kubehz_deploy lost its --dry-run flag")
 	}

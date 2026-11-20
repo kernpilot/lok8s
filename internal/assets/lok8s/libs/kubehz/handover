@@ -53,6 +53,10 @@ KUBEHZ_HANDOVER_BUNDLE_KEYS=(
   "${KUBEHZ_HANDOVER_PKI_KEYS[@]}"
   encryption-key snapshot-location endpoint-dns
 )
+# The optional keys (see the header): read when they are there.
+KUBEHZ_HANDOVER_OPTIONAL_KEYS=(
+  encryption-provider encryption-key-name etcd-version
+)
 
 kubehz::handover() {
   local -a usage=(
@@ -84,8 +88,30 @@ handover::require_private() {
 # bit that the dir got from its parent: GNU chmod keeps that bit on a
 # directory for a plain `chmod 700`.
 handover::make_private() {
-  chmod 00700 "${1}" 2>/dev/null || :
+  chmod 00700 "${1}" 2>/dev/null || {
+    error "handover: cannot set ${1} to mode 700, so the bundle's keys would not be private in it. Check the file system of TMPDIR, then retry."
+    return 1
+  }
   handover::require_private "${1}"
+}
+
+# The RETURN trap command that removes dir. printf %q quotes the path for
+# the shell, so a TMPDIR with an apostrophe or a space still goes.
+handover::cleanup_cmd() {
+  local cmd
+  printf -v cmd 'rm -rf -- %q' "${1}"
+  printf '%s\n' "${cmd}"
+}
+
+# Print the first path under dir that is not a directory or a regular file
+# with one link (a hardlink gives a second name to one file). A find error
+# fails: the caller then refuses the dir.
+handover::first_odd_entry() {
+  find "${1}" -mindepth 1 \( \( ! -type f ! -type d \) -o \( -type f -links +1 \) \) -print -quit
+}
+
+handover::refuse_entry_type() {
+  error "handover: refusing ${1}: an archive entry is not a regular file or a directory (a link, a device or a FIFO)"
 }
 
 # Resolve --bundle into a directory: a directory is used as-is; a file (the
@@ -127,6 +153,33 @@ handover::resolve_bundle() {
           ;;
       esac
     done < <(tar -tzf "${bundle}" 2>/dev/null)
+    # Only regular files and directories. A link entry can name a file
+    # outside the bundle (ca.key -> /etc/shadow), and preseed would send
+    # that file to the node. A symlink with an entry through it can write
+    # outside the dir with a tar that follows links. So this listing check
+    # runs before the unpack writes a byte: each `tar -tv` line starts with
+    # the mode of its entry, and its first character is the type ("-" a
+    # file, "d" a dir). bsdtar shows a hardlink as "-" with " link to ", and
+    # busybox shows it with " -> ", so those words are refused too. A name
+    # with a newline only adds a line that does not start with a mode, and
+    # that line is refused. The check after the unpack reads the file system
+    # itself and catches what a listing format can hide.
+    local listing line
+    if ! listing="$(tar -tvzf "${bundle}" 2>/dev/null)"; then
+      error "handover: ${bundle} is neither a bundle directory nor a readable .tar.gz archive"
+      rm -rf -- "${dir}"
+      return 1
+    fi
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      case "${line}" in
+        *" -> "* | *" link to "*) ;;
+        [-d]*) continue ;;
+      esac
+      handover::refuse_entry_type "${bundle}"
+      rm -rf -- "${dir}"
+      return 1
+    done <<<"${listing}"
     # An archive made with `tar -C <dir> .` has a "./" entry, and tar gives
     # its mode to the private dir: 0755 with umask 022, the archive's own mode
     # for root. So the unpack runs with umask 077, --no-same-permissions and
@@ -143,8 +196,16 @@ handover::resolve_bundle() {
       rm -rf "${dir}"
       return 1
     fi
-    # Fail closed: the unpack must not have opened the dir to other users.
-    handover::require_private "${dir}" || { rm -rf "${dir}"; return 1; }
+    # Fail closed: the unpack must not have opened the dir to other users,
+    # and it must have made only directories and regular files.
+    handover::require_private "${dir}" || { rm -rf -- "${dir}"; return 1; }
+    local odd
+    odd="$(handover::first_odd_entry "${dir}" 2>/dev/null)" || odd="${dir}"
+    if [[ -n "${odd}" ]]; then
+      handover::refuse_entry_type "${bundle}"
+      rm -rf -- "${dir}"
+      return 1
+    fi
     echo "${dir}"
     return 0
   fi
@@ -152,10 +213,20 @@ handover::resolve_bundle() {
   return 1
 }
 
-# Validate bundle completeness: every contract §2 key must exist and be
-# non-empty. The error NAMES the missing key.
+# Validate the bundle: every contract §2 key must exist and be non-empty,
+# and every key that is there (an optional one too) must be a regular file,
+# not a link. The handover reads and sends each key from the bundle itself,
+# never from a path that a link names (ca.key -> /etc/shadow), for a .tar.gz
+# and for a directory the user gives. The error NAMES the key.
 handover::validate_bundle() {
-  local dir="${1}" key
+  local dir="${1}" key path
+  for key in "${KUBEHZ_HANDOVER_BUNDLE_KEYS[@]}" "${KUBEHZ_HANDOVER_OPTIONAL_KEYS[@]}"; do
+    path="${dir}/${key}"
+    if [[ -L "${path}" ]] || { [[ -e "${path}" ]] && [[ ! -f "${path}" ]]; }; then
+      error "handover: bundle key ${key} is not a regular file (a link, a directory or a special file): ${path}"
+      return 1
+    fi
+  done
   for key in "${KUBEHZ_HANDOVER_BUNDLE_KEYS[@]}"; do
     if [[ ! -s "${dir}/${key}" ]]; then
       error "handover: bundle is incomplete — missing or empty key: ${key} (expected at ${dir}/${key})"
@@ -177,8 +248,11 @@ handover::place_pki() {
       return 1
     }
   done
-  chmod 644 "${k8s_dir}/pki/ca.crt" "${k8s_dir}/pki/front-proxy-ca.crt" "${k8s_dir}/pki/sa.pub"
-  chmod 600 "${k8s_dir}/pki/ca.key" "${k8s_dir}/pki/front-proxy-ca.key" "${k8s_dir}/pki/sa.key"
+  if ! chmod 644 "${k8s_dir}/pki/ca.crt" "${k8s_dir}/pki/front-proxy-ca.crt" "${k8s_dir}/pki/sa.pub" ||
+    ! chmod 600 "${k8s_dir}/pki/ca.key" "${k8s_dir}/pki/front-proxy-ca.key" "${k8s_dir}/pki/sa.key"; then
+    error "handover: could not set the modes of the PKI files in ${k8s_dir}/pki"
+    return 1
+  fi
 }
 
 # Obtain the etcd snapshot: an explicit --snapshot file wins; otherwise the
@@ -199,7 +273,7 @@ handover::fetch_snapshot() {
   fi
   if [[ -z "${workdir}" ]]; then
     workdir=$(mktemp -d) || return 1
-    chmod 700 "${workdir}"
+    handover::make_private "${workdir}" || { rm -rf -- "${workdir}"; return 1; }
   fi
   local location out="${workdir}/kubehz-handover-snapshot.db"
   location=$(<"${bundle}/snapshot-location")
@@ -449,9 +523,11 @@ EOF
 # The InitConfiguration sets one value: a TTL of 1 h (kubeadm's default is
 # 24 h) for the bootstrap token that kubeadm init creates. No later step of
 # the handover uses that token: verify and the untaint use admin.conf, and
-# --skip-token-print keeps it off the screen. A later join mints its own token
-# (kubeadm token create). The cluster-info ConfigMap and the bootstrap RBAC
-# that joins need do not depend on this token, and init still creates them.
+# --skip-token-print keeps it off the screen. No step of the handover joins a
+# node: a join after it needs a token of its own (for example from `kubeadm
+# token create --print-join-command` on this node), and lok8s does not run
+# that command. The cluster-info ConfigMap and the bootstrap RBAC that joins
+# need do not depend on this token, and init still creates them.
 # kubeadm fills in the default groups and usages. A TTL of 0 means "never
 # expires", so the value must stay above 0.
 handover::write_kubeadm_config() {
@@ -594,11 +670,11 @@ handover::receive() {
   # Scrubbed on EVERY exit path; a user-provided --bundle dir or --snapshot
   # file lives outside it and is never touched. Expand NOW (locals are out of
   # scope when the trap fires — the libs/build idiom); a re-fire on a caller
-  # return is a harmless idempotent rm.
+  # return is a harmless idempotent rm. handover::cleanup_cmd quotes the path.
   local workdir
   workdir=$(mktemp -d) || return 1
   # shellcheck disable=SC2064
-  trap "rm -rf '${workdir}'" RETURN
+  trap "$(handover::cleanup_cmd "${workdir}")" RETURN
   handover::make_private "${workdir}" || return 1
 
   local bundle_dir
@@ -698,19 +774,33 @@ handover::receive() {
   echo "  3. join workers / additional control planes as needed"
 }
 
+# Check that ssh recorded the node's host key in the known_hosts file that it
+# uses (--known-hosts, else ssh's own user file): the later calls check the
+# key against that record. ssh records a node in lowercase, and on a port
+# other than 22 as [node]:port. `ssh-keygen -F` also finds a hashed entry
+# (HashKnownHosts).
+handover::host_key_recorded() {
+  local host="${1,,}" port="${2}" file="${3}"
+  [[ "${port}" == "22" ]] || host="[${host}]:${port}"
+  ssh-keygen -F "${host}" -f "${file}" >/dev/null 2>&1 && return 0
+  error "handover: the host key of ${host} is not in ${file} after the first contact, so the next calls could not check it. Make sure that ssh can write that file (or name the file with --known-hosts), then retry."
+  return 1
+}
+
 # `lo kubehz handover preseed` — kubeone-driver variant, deliberately THIN:
 # place the six PKI files on node0 over SSH before `kubeone apply`
 # (lo provision) runs; kubeadm reuses existing CA files by design, so the
 # provisioned cluster keeps the exported identity. No snapshot, no init here.
 handover::preseed() {
-  local bundle="" node="" user="root" port=22 ssh_key="" known_hosts=""
+  local bundle="" node="" user="root" port=22 ssh_key="" known_hosts="" accept_new_host_key=0
   local -a args=(
-    'bundle|b:!'    'Export bundle: a directory or .tar.gz with the contract keys'
-    'node|n:!'      'Target node address (kubeone node0) to place the PKI on'
-    'user|u'        'SSH user'
-    'port|p:~int'   'SSH port'
-    'ssh-key|i'     'SSH private key file'
-    'known-hosts|'  "known_hosts file for the node's host key (default: ssh's own); a new host is recorded, a changed key fails"
+    'bundle|b:!'              'Export bundle: a directory or .tar.gz with the contract keys'
+    'node|n:!'                'Target node address (kubeone node0) to place the PKI on'
+    'user|u'                  'SSH user'
+    'port|p:~int'             'SSH port'
+    'ssh-key|i'               'SSH private key file'
+    'known-hosts|'            "known_hosts file with the node's host key (default: ssh's own files); the file must exist, and an unknown or changed key fails"
+    'accept-new-host-key|:+'  'Trust an unknown host key on the first contact and record it in the known_hosts file (trust on first use)'
     "${args[@]:-}"
   )
   :args "Pre-seed exported PKI onto a kubeone node before kubeone apply" "${@}"
@@ -722,39 +812,60 @@ handover::preseed() {
     error "handover: --known-hosts path must not contain whitespace: \"${known_hosts}\""
     return 1
   fi
+  # A missing path, /dev/null, a dir, a FIFO or a device holds no key to
+  # check against, and ssh cannot record a key in it.
+  if [[ -n "${known_hosts}" ]] && { [[ ! -f "${known_hosts}" ]] || [[ ! -r "${known_hosts}" ]]; }; then
+    error "handover: --known-hosts must name an existing regular file that you can read: \"${known_hosts}\""
+    return 1
+  fi
 
   # Same scratch + cleanup contract as receive: an extracted .tar.gz bundle
   # (PKI + encryption key on disk) is scrubbed on every exit path. Expand NOW
   # (libs/build idiom); a trap re-fire is a harmless idempotent rm.
+  # handover::cleanup_cmd quotes the path.
   local workdir
   workdir=$(mktemp -d) || return 1
   # shellcheck disable=SC2064
-  trap "rm -rf '${workdir}'" RETURN
+  trap "$(handover::cleanup_cmd "${workdir}")" RETURN
   handover::make_private "${workdir}" || return 1
 
   local bundle_dir
   bundle_dir=$(handover::resolve_bundle "${bundle}" "${workdir}") || return 1
   handover::validate_bundle "${bundle_dir}" || return 1
 
-  # These calls carry the CA private keys, so the host key is checked: a node
-  # seen for the first time is recorded (accept-new), and a changed key fails
-  # the transfer. Never StrictHostKeyChecking=no or /dev/null here. The kubeone
-  # driver's node probes carry no secret and keep their own options.
-  local -a ssh_opts=(
-    -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
-    -o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=10
-  )
+  # These calls carry the CA private keys, so each one checks the host key
+  # (StrictHostKeyChecking=yes): an unknown or a changed key fails before a
+  # key leaves this machine. With --accept-new-host-key, only the first call
+  # (the mkdir, which sends no key) takes an unknown key and records it
+  # (accept-new). The handover then checks that the key is in the known_hosts
+  # file, and every later call uses yes. Never StrictHostKeyChecking=no or
+  # /dev/null here. The kubeone driver's node probes carry no secret and keep
+  # their own options.
+  local -a ssh_opts=(-o IdentitiesOnly=yes -o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=10)
   [[ -z "${known_hosts}" ]] || ssh_opts+=(-o "UserKnownHostsFile=${known_hosts}")
   [[ -z "${ssh_key}" ]] || ssh_opts+=(-i "${ssh_key}")
+  local first_contact=yes
+  if (( accept_new_host_key )); then
+    first_contact=accept-new
+    warn "handover: --accept-new-host-key: the first contact trusts the host key that ${node} shows, without a check"
+  fi
 
   # umask 077 → the pki dir is 0700 from the start: even a file that lands
   # loose is unreachable while the transfer is in flight.
-  ssh "${ssh_opts[@]}" -p "${port}" "${user}@${node}" \
+  ssh -o "StrictHostKeyChecking=${first_contact}" "${ssh_opts[@]}" -p "${port}" "${user}@${node}" \
     'umask 077 && mkdir -p /etc/kubernetes/pki' || {
     error "handover: cannot reach ${user}@${node} over SSH"
-    error "handover: a changed host key also fails here; check the node and the known_hosts entry before you retry"
+    if (( accept_new_host_key )); then
+      error "handover: a changed host key also fails here; check the node and the known_hosts entry before you retry"
+    else
+      error "handover: an unknown or changed host key also fails here. Compare the fingerprints of \"ssh-keyscan -p ${port} ${node} | ssh-keygen -lf -\" with \"ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub\" on the node's console, and add the key to the known_hosts file if they match. Or retry with --accept-new-host-key to trust the first contact."
+    fi
     return 1
   }
+  if (( accept_new_host_key )); then
+    handover::host_key_recorded "${node}" "${port}" "${known_hosts:-${HOME}/.ssh/known_hosts}" || return 1
+  fi
+  ssh_opts=(-o StrictHostKeyChecking=yes "${ssh_opts[@]}")
 
   # Per-file transfer with an IMMEDIATE per-key chmod (never one chmod at the
   # very end): private keys are 0600 even when a later copy dies mid-transfer.

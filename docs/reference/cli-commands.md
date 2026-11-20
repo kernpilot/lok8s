@@ -2208,13 +2208,14 @@ lo kubehz handover preseed --bundle <path> --node <ip> [flags]
 ### Options
 
 ```
-  -b, --bundle string        Export bundle: a directory or .tar.gz with the contract keys
-  -h, --help                 help for preseed
-      --known-hosts string   known_hosts file for the node's host key (default: ssh's own); a new host is recorded, a changed key fails
-  -n, --node string          Target node address (kubeone node0) to place the PKI on
-  -p, --port int             SSH port (default 22)
-  -i, --ssh-key string       SSH private key file
-  -u, --user string          SSH user (default "root")
+      --accept-new-host-key   Trust an unknown host key on the first contact and record it in the known_hosts file (trust on first use)
+  -b, --bundle string         Export bundle: a directory or .tar.gz with the contract keys
+  -h, --help                  help for preseed
+      --known-hosts string    known_hosts file with the node's host key (default: ssh's own files); the file must exist, and an unknown or changed key fails
+  -n, --node string           Target node address (kubeone node0) to place the PKI on
+  -p, --port int              SSH port (default 22)
+  -i, --ssh-key string        SSH private key file
+  -u, --user string           SSH user (default "root")
 ```
 
 ### SEE ALSO

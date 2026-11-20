@@ -84,6 +84,10 @@ type Context struct {
 	// Lstat is os.Lstat (nil = os.Lstat): the read of each part of the
 	// temp dir of a join file (joinTempDir). Tests log the order.
 	Lstat func(path string) (fs.FileInfo, error)
+	// Chmod is os.Chmod (nil = os.Chmod): the 0700 of the private dirs of
+	// a handover (makePrivate) and the modes of the PKI files it places.
+	// Tests make it fail, or leave a dir open.
+	Chmod func(path string, mode fs.FileMode) error
 	// Remove is os.Remove (nil = os.Remove): the removal of a join file
 	// and then of its directory (removeJoinFile), after a failed write
 	// (writeJoinFile) and after a join (removeJoinConfig).
@@ -167,6 +171,13 @@ func (c *Context) lstat(path string) (fs.FileInfo, error) {
 		return c.Lstat(path)
 	}
 	return os.Lstat(path)
+}
+
+func (c *Context) chmod(path string, mode fs.FileMode) error {
+	if c.Chmod != nil {
+		return c.Chmod(path, mode)
+	}
+	return os.Chmod(path, mode)
 }
 
 func (c *Context) isRoot() bool {

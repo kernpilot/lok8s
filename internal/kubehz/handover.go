@@ -38,6 +38,8 @@ import (
 var (
 	handoverPKIKeys    = []string{"ca.crt", "ca.key", "sa.pub", "sa.key", "front-proxy-ca.crt", "front-proxy-ca.key"}
 	handoverBundleKeys = append(append([]string{}, handoverPKIKeys...), "encryption-key", "snapshot-location", "endpoint-dns")
+	// The optional keys: read when they are there (bundleValue).
+	handoverOptionalKeys = []string{"encryption-provider", "encryption-key-name", "etcd-version"}
 )
 
 // ReceiveOpts carries the `handover receive` flags.
@@ -55,11 +57,14 @@ type PreseedOpts struct {
 	User   string
 	Port   int
 	SSHKey string
-	// KnownHosts is the known_hosts file ssh and scp verify the node's
-	// host key against ("" = ssh's default, ~/.ssh/known_hosts). A node
-	// seen for the first time is recorded (StrictHostKeyChecking
-	// accept-new); a changed key fails the transfer.
+	// KnownHosts is the known_hosts file ssh and scp check the node's host
+	// key against ("" = ssh's own files). It must be an existing regular
+	// file. An unknown or a changed key fails (StrictHostKeyChecking=yes).
 	KnownHosts string
+	// AcceptNewHostKey trusts an unknown host key on the first call only
+	// (accept-new), then checks that ssh recorded it, and every later call
+	// checks against that record.
+	AcceptNewHostKey bool
 }
 
 // resolveBundle ports handover::resolve_bundle: a directory is used as-is;
@@ -84,7 +89,10 @@ func (c *Context) resolveBundle(bundle, workdir string) (string, error) {
 			}
 			dir = d
 		}
-		_ = os.Chmod(dir, 0o700) // #nosec G302 -- a directory: 0700 is owner-only
+		if err := c.makePrivate(dir); err != nil {
+			_ = os.RemoveAll(dir)
+			return "", err
+		}
 		if err := c.extractBundle(bundle, dir); err != nil {
 			_ = os.RemoveAll(dir)
 			return "", err
@@ -93,6 +101,26 @@ func (c *Context) resolveBundle(bundle, workdir string) (string, error) {
 	}
 	c.errorf("handover: bundle not found: %s", bundle)
 	return "", ErrHandled
+}
+
+// makePrivate ports handover::make_private: set dir to 0700, then check
+// the mode it has. The bundle's keys land in it, so a failed chmod or a
+// file system that keeps group or other bits fails closed.
+func (c *Context) makePrivate(dir string) error {
+	if err := c.chmod(dir, 0o700); err != nil { // #nosec G302 -- a directory: 0700 is owner-only
+		c.errorf("handover: cannot set %s to mode 700, so the bundle's keys would not be private in it. Check the file system of TMPDIR, then retry.", dir)
+		return ErrHandled
+	}
+	info, err := c.lstat(dir)
+	if err == nil && info.IsDir() && info.Mode().Perm()&0o077 == 0 {
+		return nil
+	}
+	mode := "unknown"
+	if err == nil {
+		mode = strconv.FormatUint(uint64(info.Mode().Perm()), 8)
+	}
+	c.errorf("handover: %s has mode %s, not 700, so other users could read the bundle's keys in it. Check the archive and the file system of TMPDIR, then retry.", dir, mode)
+	return ErrHandled
 }
 
 // bundleEntryEscapes is the traversal guard's truth table: absolute paths
@@ -108,19 +136,37 @@ func bundleEntryEscapes(entry string) bool {
 }
 
 // extractBundle lists, guards, then extracts a .tar.gz (bash: `tar -tzf`
-// over every entry, then `tar -xzf`). Two passes over the file: the first
-// reads headers only, the second streams each file to disk, so the
-// archive is never held in memory.
+// and `tar -tvzf` over every entry, then `tar -xzf`). Two passes over the
+// file: the first reads headers only, the second streams each file to
+// disk, so the archive is never held in memory.
+//
+// Only regular files and directories: a link entry can name a file
+// outside the bundle (ca.key -> /etc/shadow), and preseed would send that
+// file to the node. Any other entry type refuses the whole bundle before
+// a byte is written. A path that escapes is refused at its entry, as the
+// bash traversal check reads every name before it reads the types.
 func (c *Context) extractBundle(bundle, dir string) error {
+	odd := false
 	guard := func(_ *tar.Reader, hdr *tar.Header) error {
 		if bundleEntryEscapes(hdr.Name) {
 			c.errorf("handover: refusing %s — archive entry escapes the bundle dir: %s", bundle, hdr.Name)
 			return ErrHandled
 		}
+		switch hdr.Typeflag {
+		case tar.TypeReg, tar.TypeDir:
+		case tar.TypeXGlobalHeader:
+			// pax metadata for the archive, not an entry: nothing lands.
+		default:
+			odd = true
+		}
 		return nil
 	}
 	if err := c.walkBundle(bundle, guard); err != nil {
 		return err
+	}
+	if odd {
+		c.errorf("handover: refusing %s: an archive entry is not a regular file or a directory (a link, a device or a FIFO)", bundle)
+		return ErrHandled
 	}
 	extract := func(tr *tar.Reader, hdr *tar.Header) error {
 		target := filepath.Join(dir, filepath.Clean("/"+hdr.Name))
@@ -131,9 +177,8 @@ func (c *Context) extractBundle(bundle, dir string) error {
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return err
 			}
-			// #nosec G115 -- the conversion happens first; only the low 9 bits
-			// survive the &0o777 mask, so a wrapped value cannot widen the mode.
-			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, fs.FileMode(hdr.Mode)&0o777|0o600)
+			// 0600 whatever mode the archive gives: the files are keys.
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 			if err != nil {
 				return err
 			}
@@ -142,12 +187,6 @@ func (c *Context) extractBundle(bundle, dir string) error {
 				return c.extractCopyError(bundle, target, err)
 			}
 			return out.Close()
-		case tar.TypeSymlink, tar.TypeLink:
-			// The bash `tar -xzf` extracted links. A link in a PKI bundle
-			// points nowhere useful and can point outside the private dir,
-			// so the binary skips it and says so. Deliberate deviation
-			// (catalogue D27).
-			c.debugf("handover: skipping link entry %s in %s (links are not extracted)", hdr.Name, bundle)
 		}
 		return nil
 	}
@@ -200,11 +239,20 @@ func (c *Context) notArchive(bundle string) error {
 }
 
 // validateBundle ports handover::validate_bundle: every contract §2 key must
-// exist and be non-empty; the error NAMES the missing key.
+// exist and be non-empty, and every key that is there (an optional one too)
+// must be a regular file, not a link (Lstat). The handover reads and sends
+// each key from the bundle itself, never from a path that a link names,
+// for a .tar.gz and for a directory the user gives. The error NAMES the key.
 func (c *Context) validateBundle(dir string) error {
+	for _, key := range append(append([]string{}, handoverBundleKeys...), handoverOptionalKeys...) {
+		if info, err := c.lstat(filepath.Join(dir, key)); err == nil && !info.Mode().IsRegular() {
+			c.errorf("handover: bundle key %s is not a regular file (a link, a directory or a special file): %s/%s", key, dir, key)
+			return ErrHandled
+		}
+	}
 	for _, key := range handoverBundleKeys {
-		info, err := os.Stat(filepath.Join(dir, key))
-		if err != nil || info.IsDir() || info.Size() == 0 {
+		info, err := c.lstat(filepath.Join(dir, key))
+		if err != nil || info.Size() == 0 {
 			c.errorf("handover: bundle is incomplete — missing or empty key: %s (expected at %s/%s)", key, dir, key)
 			return ErrHandled
 		}
@@ -224,11 +272,19 @@ func (c *Context) placePKI(bundle, k8sDir string) error {
 			return ErrHandled
 		}
 	}
-	for _, f := range []string{"ca.crt", "front-proxy-ca.crt", "sa.pub"} {
-		_ = os.Chmod(filepath.Join(k8sDir, "pki", f), 0o644) // #nosec G302 -- the PUBLIC halves (certs, sa.pub); the keys stay 0600
+	modes := []struct {
+		file string
+		mode fs.FileMode
+	}{
+		// The PUBLIC halves (certs, sa.pub) are 0644; the keys stay 0600.
+		{"ca.crt", 0o644}, {"front-proxy-ca.crt", 0o644}, {"sa.pub", 0o644},
+		{"ca.key", 0o600}, {"front-proxy-ca.key", 0o600}, {"sa.key", 0o600},
 	}
-	for _, f := range []string{"ca.key", "front-proxy-ca.key", "sa.key"} {
-		_ = os.Chmod(filepath.Join(k8sDir, "pki", f), 0o600)
+	for _, m := range modes {
+		if err := c.chmod(filepath.Join(k8sDir, "pki", m.file), m.mode); err != nil {
+			c.errorf("handover: could not set the modes of the PKI files in %s/pki", k8sDir)
+			return ErrHandled
+		}
 	}
 	return nil
 }
@@ -269,7 +325,10 @@ func (c *Context) fetchSnapshot(ctx context.Context, bundle, override, workdir s
 		if err != nil {
 			return "", err
 		}
-		_ = os.Chmod(d, 0o700) // #nosec G302 -- a directory: 0700 is owner-only
+		if err := c.makePrivate(d); err != nil {
+			_ = os.RemoveAll(d)
+			return "", err
+		}
 		workdir = d
 	}
 	out := filepath.Join(workdir, "kubehz-handover-snapshot.db")
@@ -294,7 +353,9 @@ func (c *Context) fetchSnapshot(ctx context.Context, bundle, override, workdir s
 			c.errorf("handover: fetching %s via the aws CLI failed — download it yourself and re-run with --snapshot <file>", location)
 			return "", ErrHandled
 		}
-		_ = os.Chmod(out, 0o600)
+		if err := os.Chmod(out, 0o600); err != nil {
+			return "", err
+		}
 	case strings.HasPrefix(location, "https://"):
 		if err := touch600(out); err != nil {
 			return "", err
@@ -517,9 +578,11 @@ func (c *Context) endpointDNS(bundle string) (string, error) {
 // The InitConfiguration sets one value: a TTL of 1 h (kubeadm's default is
 // 24 h) for the bootstrap token that kubeadm init creates. No later step of
 // the handover uses that token: verify and the untaint use admin.conf, and
-// --skip-token-print keeps it off the screen. A later join mints its own
-// token (kubeadm token create). The cluster-info ConfigMap and the bootstrap
-// RBAC that joins need do not depend on this token, and init still creates
+// --skip-token-print keeps it off the screen. No step of the handover joins
+// a node: a join after it needs a token of its own (for example from
+// `kubeadm token create --print-join-command` on this node), and lok8s does
+// not run that command. The cluster-info ConfigMap and the bootstrap RBAC
+// that joins need do not depend on this token, and init still creates
 // them. kubeadm fills in the default groups and usages. A TTL of 0 means
 // "never expires", so the value must stay above 0.
 func (c *Context) writeKubeadmConfig(bundle, k8sDir, out, etcdTag string) error {
@@ -729,8 +792,10 @@ func (c *Context) HandoverReceive(ctx context.Context, o ReceiveOpts) error {
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(workdir, 0o700) // #nosec G302 -- a directory: 0700 is owner-only
 	defer func() { _ = os.RemoveAll(workdir) }()
+	if err := c.makePrivate(workdir); err != nil {
+		return err
+	}
 
 	bundleDir, err := c.resolveBundle(o.Bundle, workdir)
 	if err != nil {
@@ -791,6 +856,12 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 		c.errorf("handover: --known-hosts path must not contain whitespace: %q", o.KnownHosts)
 		return ErrHandled
 	}
+	// A missing path, /dev/null, a dir, a FIFO or a device holds no key to
+	// check against, and ssh cannot record a key in it.
+	if o.KnownHosts != "" && !readableRegularFile(o.KnownHosts) {
+		c.errorf("handover: --known-hosts must name an existing regular file that you can read: %q", o.KnownHosts)
+		return ErrHandled
+	}
 	user := o.User
 	if user == "" {
 		user = "root"
@@ -803,8 +874,10 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	if err != nil {
 		return err
 	}
-	_ = os.Chmod(workdir, 0o700) // #nosec G302 -- a directory: 0700 is owner-only
 	defer func() { _ = os.RemoveAll(workdir) }()
+	if err := c.makePrivate(workdir); err != nil {
+		return err
+	}
 
 	bundleDir, err := c.resolveBundle(o.Bundle, workdir)
 	if err != nil {
@@ -814,14 +887,15 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 		return err
 	}
 
-	// These calls carry the CA private keys, so the host key is checked: a
-	// node seen for the first time is recorded (accept-new), and a changed
-	// key fails the transfer. Never StrictHostKeyChecking=no or /dev/null
-	// here. The bash twin (handover::preseed) uses the same options.
-	sshOpts := []string{
-		"-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new",
-		"-o", "BatchMode=yes", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10",
-	}
+	// These calls carry the CA private keys, so each one checks the host
+	// key (StrictHostKeyChecking=yes): an unknown or a changed key fails
+	// before a key leaves this machine. With --accept-new-host-key, only
+	// the first call (the mkdir, which sends no key) takes an unknown key
+	// and records it (accept-new). The handover then checks that the key is
+	// in the known_hosts file, and every later call uses yes. Never
+	// StrictHostKeyChecking=no or /dev/null here. The bash twin
+	// (handover::preseed) uses the same options.
+	sshOpts := []string{"-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10"}
 	if o.KnownHosts != "" {
 		sshOpts = append(sshOpts, "-o", "UserKnownHostsFile="+o.KnownHosts)
 	}
@@ -830,26 +904,45 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	}
 	portStr := strconv.Itoa(port)
 	target := user + "@" + o.Node
-
-	ssh := func(remote string) error {
-		args := append(append([]string{}, sshOpts...), "-p", portStr, target, remote)
-		return c.run(ctx, "ssh", args...)
+	firstContact := "yes"
+	if o.AcceptNewHostKey {
+		firstContact = "accept-new"
+		c.warnf("handover: --accept-new-host-key: the first contact trusts the host key that %s shows, without a check", o.Node)
+	}
+	checked := func(policy string) []string {
+		return append([]string{"-o", "StrictHostKeyChecking=" + policy}, sshOpts...)
+	}
+	ssh := func(policy, remote string) error {
+		return c.run(ctx, "ssh", append(checked(policy), "-p", portStr, target, remote)...)
 	}
 	// umask 077 → the pki dir is 0700 from the start.
-	if err := ssh("umask 077 && mkdir -p /etc/kubernetes/pki"); err != nil {
+	if err := ssh(firstContact, "umask 077 && mkdir -p /etc/kubernetes/pki"); err != nil {
 		c.errorf("handover: cannot reach %s over SSH", target)
-		c.errorf("handover: a changed host key also fails here; check the node and the known_hosts entry before you retry")
+		if o.AcceptNewHostKey {
+			c.errorf("handover: a changed host key also fails here; check the node and the known_hosts entry before you retry")
+		} else {
+			c.errorf("handover: an unknown or changed host key also fails here. Compare the fingerprints of \"ssh-keyscan -p %s %s | ssh-keygen -lf -\" with \"ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub\" on the node's console, and add the key to the known_hosts file if they match. Or retry with --accept-new-host-key to trust the first contact.", portStr, o.Node)
+		}
 		return ErrHandled
+	}
+	if o.AcceptNewHostKey {
+		knownHosts := o.KnownHosts
+		if knownHosts == "" {
+			knownHosts = c.getenv("HOME") + "/.ssh/known_hosts"
+		}
+		if err := c.hostKeyRecorded(ctx, o.Node, port, knownHosts); err != nil {
+			return err
+		}
 	}
 	// Per-file transfer with an IMMEDIATE per-key chmod.
 	for _, key := range handoverPKIKeys {
-		args := append(append([]string{}, sshOpts...), "-P", portStr, filepath.Join(bundleDir, key), target+":/etc/kubernetes/pki/"+key)
+		args := append(checked("yes"), "-P", portStr, filepath.Join(bundleDir, key), target+":/etc/kubernetes/pki/"+key)
 		if err := c.run(ctx, "scp", args...); err != nil {
 			c.errorf("handover: copying %s to %s failed", key, o.Node)
 			return ErrHandled
 		}
 		if handoverPKIRe.MatchString(key) {
-			if err := ssh("chmod 600 /etc/kubernetes/pki/" + key); err != nil {
+			if err := ssh("yes", "chmod 600 /etc/kubernetes/pki/"+key); err != nil {
 				c.errorf("handover: could not chmod 600 /etc/kubernetes/pki/%s on %s — key material must not stay readable; fix the mode and re-run", key, o.Node)
 				return ErrHandled
 			}
@@ -857,4 +950,36 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	}
 	c.echo("handover: PKI pre-seeded on %s. Provision now (lo provision) — kubeone's kubeadm reuses the existing CA files, preserving cluster identity.", o.Node)
 	return nil
+}
+
+// readableRegularFile is bash `[[ -f path && -r path ]]`: it follows a
+// link, so a link to /dev/null fails too.
+func readableRegularFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	f, err := os.Open(path) // #nosec G304 -- the caller's own --known-hosts path, opened only to see that it is readable
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
+}
+
+// hostKeyRecorded ports handover::host_key_recorded: ssh must have recorded
+// the node's host key in the known_hosts file that it uses (--known-hosts,
+// else ssh's own user file), so the later calls check the key against that
+// record. ssh records a node in lowercase, and on a port other than 22 as
+// [node]:port. `ssh-keygen -F` also finds a hashed entry (HashKnownHosts).
+func (c *Context) hostKeyRecorded(ctx context.Context, node string, port int, file string) error {
+	host := strings.ToLower(node)
+	if port != 22 {
+		host = "[" + host + "]:" + strconv.Itoa(port)
+	}
+	if err := c.runQuiet(ctx, "ssh-keygen", "-F", host, "-f", file); err == nil {
+		return nil
+	}
+	c.errorf("handover: the host key of %s is not in %s after the first contact, so the next calls could not check it. Make sure that ssh can write that file (or name the file with --known-hosts), then retry.", host, file)
+	return ErrHandled
 }
