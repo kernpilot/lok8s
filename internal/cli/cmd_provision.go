@@ -193,6 +193,7 @@ func newProvisionCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	}
 	cmd.Flags().BoolVarP(&bootstrapOnly, "bootstrap", "b", false, "Re-apply spec.bootstrap only on an existing cluster (skip the infra reconcile)")
 	mode.bind(cmd)
+	printTokenFlag(cmd)
 	return mode.parseErrors(cmd)
 }
 

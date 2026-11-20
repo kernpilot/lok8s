@@ -1366,6 +1366,11 @@ EOF
   for KEY_DOMAIN in own-key.dev legacy-key.dev other-key.dev; do
     key_check "${UNBOUND}" kubehz register --domain "${KEY_DOMAIN}"
   done
+  # The stdout of the harness is not a terminal, so the runs above print the
+  # placeholder in place of the one-time claim ticket. With --print-token,
+  # both print the ticket (the argsh flag sets print_token to 1).
+  KEY_DOMAIN=own-key.dev
+  key_check "${UNBOUND}" kubehz register --domain "${KEY_DOMAIN}" --print-token
   export KUBEHZ_TOKEN=parity-jwt
   for KEY_DOMAIN in own-key.dev legacy-key.dev other-key.dev; do
     key_check - kubehz deregister --domain "${KEY_DOMAIN}"

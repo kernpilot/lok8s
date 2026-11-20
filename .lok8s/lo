@@ -276,12 +276,14 @@ _lo_header() {
 
 main::up() {
   local force="${force:-0}"
-  local open_tilt ci timeout
+  # print_token reaches kubehz::ensure_claim_key through dynamic scope.
+  local open_tilt ci timeout print_token=0
   local -a args=(
     'open-tilt|o:+'  'Open Tilt in a browser (interactive mode only)'
     'ci|:+'          'Headless: build+deploy+wait-ready via `tilt ci`, exit with real status (no TTY/browser)'
     'timeout|t'      'Readiness timeout for --ci (e.g. 300s, 10m); passed to `tilt ci`'
     'force|f:^:+'    'Skip the real-infrastructure confirmation (cloud drivers)'
+    'print-token|:+' 'Also print the one-time claim ticket when stdout is not a terminal'
     "${args[@]}"
   )
   :args "Starting cluster" "${@}"

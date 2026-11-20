@@ -143,9 +143,28 @@ func (c *Context) ensureClaimKey(ctx context.Context, domain, apiURL string) err
 	c.echo("kubehz: cluster '%s' registered (pending). Claim key '%s' uploaded to your Hetzner Cloud account.", domain, keyName)
 	c.echo("kubehz: claim it with the fingerprint ALONE — dashboard /claim (SSH fingerprint tab), or:")
 	c.echo("  curl -X POST %s/api/claims/verify -H 'Authorization: Bearer <khzt_ token (clusters:write)>' \\", apiURL)
+	if !c.claimTicketShown() {
+		c.echo("       -H 'Content-Type: application/json' -d '{\"fingerprint\":\"%s\"}'", claimTicketHidden)
+		c.echo("  fingerprint: %s   (in Hetzner Console -> Security -> SSH keys, key '%s'; --print-token shows it here)", claimTicketHidden, keyName)
+		return nil
+	}
 	c.echo("       -H 'Content-Type: application/json' -d '{\"fingerprint\":\"%s\"}'", fingerprint)
 	c.echo("  fingerprint: %s   (also visible in Hetzner Console -> Security -> SSH keys)", fingerprint)
 	return nil
+}
+
+// claimTicketHidden is what the register prints in place of the claim
+// ticket. The log filter of the provision workflows writes the same text.
+const claimTicketHidden = "<hidden: one-time claim ticket>"
+
+// claimTicketShown reports whether the register prints the one-time claim
+// ticket: on a terminal, or with --print-token (PrintToken). Any signed-in
+// user who has the ticket can claim the cluster. A pipe or a file (a CI
+// log, a captured output) is a copy that nobody asked for, and the ticket
+// stays in the Hetzner Console, where the next line points. The bash twin
+// checks `[[ -t 1 ]]` and its print_token flag.
+func (c *Context) claimTicketShown() bool {
+	return c.PrintToken || ui.For(c.out()).TTY
 }
 
 // directClaim ports kubehz::direct_claim — register a cluster ATTRIBUTED

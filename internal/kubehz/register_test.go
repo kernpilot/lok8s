@@ -483,7 +483,9 @@ func TestEnsureClaimKeyUploadsAndReplaces(t *testing.T) {
 	h.handle("POST /v1/ssh_keys", 201, `{"ssh_key":{"id":43}}`)
 	mustOK(t, h.ctx.ensureClaimKey(t.Context(), "test.kubehz.dev", h.apiURL()), h.output())
 	mustContain(t, h.output(), "Claim key 'kubehz-claim-test.kubehz.dev' uploaded")
-	mustContain(t, h.output(), "fingerprint: aa:bb")
+	// A buffer is not a terminal: the ticket stays off it.
+	mustContain(t, h.output(), "fingerprint: <hidden: one-time claim ticket>")
+	mustNotContain(t, h.output(), "aa:bb")
 	if !h.anyReq("DELETE", "/v1/ssh_keys/42") || !h.anyReq("POST", "/v1/ssh_keys") {
 		t.Fatalf("replace-by-name sequence missing: %+v", h.reqs())
 	}

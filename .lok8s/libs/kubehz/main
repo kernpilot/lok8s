@@ -564,7 +564,16 @@ kubehz::claim_key_own() {
 # Usage: kubehz::ensure_claim_key <domain> <api_url> [<next>]
 # <next> is the command the error of an unavailable platform names (see
 # kubehz::register_post). rc 3: that error, no fall back.
+# The one-time claim ticket (the fingerprint) goes to stdout only when it is
+# a terminal, or with --print-token (print_token, through bash's dynamic
+# scope from kubehz::register, main::provision and main::up). Any signed-in
+# user who has the ticket can claim the cluster: a pipe or a file (a CI log,
+# a captured output) is a copy that nobody asked for. Go: claimTicketShown.
+# The response, the ticket and the Hetzner token stay out of a trace
+# (set -x) and out of the environment of a child (set -a): the guard line
+# turns both off until the function returns.
 kubehz::ensure_claim_key() {
+  [[ $- != *[xa]* ]] || { local -; set +xa; }  # the response, the ticket and the Hetzner token
   local domain="${1}" api_url="${2}" next="${3:-lo kubehz register --domain ${1}}"
   local hcloud_api="${HCLOUD_API_BASE:-https://api.hetzner.cloud}"
   # HCLOUD_TOKEN travels on this base below — never over plain HTTP.
@@ -631,6 +640,13 @@ kubehz::ensure_claim_key() {
   echo "kubehz: cluster '${domain}' registered (pending). Claim key '${key_name}' uploaded to your Hetzner Cloud account."
   echo "kubehz: claim it with the fingerprint ALONE — dashboard /claim (SSH fingerprint tab), or:"
   echo "  curl -X POST ${api_url}/api/claims/verify -H 'Authorization: Bearer <khzt_ token (clusters:write)>' \\"
+  # A string test, not arithmetic: print_token can come from the
+  # environment. The flag sets it to 1.
+  if [[ ! -t 1 && "${print_token:-}" != 1 ]]; then
+    echo "       -H 'Content-Type: application/json' -d '{\"fingerprint\":\"<hidden: one-time claim ticket>\"}'"
+    echo "  fingerprint: <hidden: one-time claim ticket>   (in Hetzner Console -> Security -> SSH keys, key '${key_name}'; --print-token shows it here)"
+    return 0
+  fi
   echo "       -H 'Content-Type: application/json' -d '{\"fingerprint\":\"${fingerprint}\"}'"
   echo "  fingerprint: ${fingerprint}   (also visible in Hetzner Console -> Security -> SSH keys)"
 }
@@ -924,8 +940,10 @@ kubehz::deregister_cluster() {
 # Reads config from active domain, validates, and calls the API.
 kubehz::register() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
+  local print_token=0
   local -a args=(
     'domain|:^~domain'  'Domain to use'
+    'print-token|:+'    'Also print the one-time claim ticket when stdout is not a terminal'
     "${args[@]:-}"
   )
   :args "Register cluster with kubehz" "${@}"

@@ -653,6 +653,38 @@ deletes the wrong one.
   registration while it is still pending (see the next section).
 :::
 
+::: details The claim ticket on a terminal and on a pipe
+The fingerprint of the claim key is the one-time claim ticket. lo prints it
+only when stdout is a terminal. This applies to `lo kubehz register` and to
+the register step of `lo provision` and `lo up`. On a terminal, the last
+lines of the claim key mode are:
+
+```text
+  curl -X POST <api>/api/claims/verify -H 'Authorization: Bearer <khzt_ token (clusters:write)>' \
+       -H 'Content-Type: application/json' -d '{"fingerprint":"<ticket>"}'
+  fingerprint: <ticket>   (also visible in Hetzner Console -> Security -> SSH keys)
+```
+
+When stdout is a pipe, a file or the log of a CI job, lo prints a
+placeholder in place of the ticket:
+
+```text
+  curl -X POST <api>/api/claims/verify -H 'Authorization: Bearer <khzt_ token (clusters:write)>' \
+       -H 'Content-Type: application/json' -d '{"fingerprint":"<hidden: one-time claim ticket>"}'
+  fingerprint: <hidden: one-time claim ticket>   (in Hetzner Console -> Security -> SSH keys, key 'kubehz-claim-<domain>'; --print-token shows it here)
+```
+
+- Read the ticket in the Hetzner Console (**Security → SSH keys**, the key
+  `kubehz-claim-<domain>`).
+- Or run the command again with `--print-token`. Then lo prints the ticket on
+  any stdout. Use the flag only where the output stays private: not in a CI
+  job and not in a shared log. The re-run registers again, so it replaces the
+  claim key and prints a new ticket.
+- A shell trace (`set -x`) of the bash implementation does not show the
+  ticket: the function that reads it stops the trace until it returns.
+- The Go `lo mcp` does not offer `--print-token` to an agent.
+:::
+
 ::: details Claim before you deploy: the bind secret
 The pre-agent announce also hands back a one-time **bind secret**.
 `lo kubehz register` stores it at `clusters/<domain>/.kubehz-bind` (mode

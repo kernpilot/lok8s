@@ -403,6 +403,15 @@ func TestMcpToolsNeverExposeSensitiveFlags(t *testing.T) {
 	if flagNames(t, tools["lo_kubehz_claim"])["nonce"] {
 		t.Error("lo_kubehz_claim exposes --nonce")
 	}
+	// --print-token puts the one-time claim ticket on a stdout that is not
+	// a terminal, which is the stdout of an agent.
+	for _, name := range []string{"lo_kubehz_register", "lo_provision", "lo_up"} {
+		if tools[name] == nil {
+			t.Errorf("%s is gone: the --print-token check proves nothing", name)
+		} else if flagNames(t, tools[name])["print-token"] {
+			t.Errorf("%s exposes --print-token (it prints the claim ticket)", name)
+		}
+	}
 	if flagNames(t, tools["lo_secrets_decrypt"])["ssh-key"] || flagNames(t, tools["lo_kubehz_handover_preseed"])["ssh-key"] {
 		t.Error("--ssh-key exposed")
 	}

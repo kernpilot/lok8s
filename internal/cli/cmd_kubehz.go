@@ -98,9 +98,25 @@ func kubehzSimple(paths *config.Paths, use, alias, short string, spec commandSpe
 }
 
 func newKubehzRegister(paths *config.Paths) *cobra.Command {
-	return kubehzSimple(paths, "register", "r", "Register cluster with kubehz", commandSpec{destructive: true},
-		func(c *kubehz.Context, cmd *cobra.Command, d string) error { return c.Register(cmd.Context(), d) })
+	c := kubehzSimple(paths, "register", "r", "Register cluster with kubehz", commandSpec{destructive: true},
+		func(c *kubehz.Context, cmd *cobra.Command, d string) error {
+			c.PrintToken, _ = cmd.Flags().GetBool("print-token")
+			return c.Register(cmd.Context(), d)
+		})
+	printTokenFlag(c)
+	return c
 }
+
+// printTokenFlag adds --print-token to a command that can register a
+// cluster with a claim key (lo kubehz register, lo provision, lo up). The
+// word "token" keeps the flag out of the lo mcp tool schema.
+func printTokenFlag(c *cobra.Command) {
+	c.Flags().Bool("print-token", false, claimTicketFlagHelp)
+}
+
+// claimTicketFlagHelp is the help of --print-token, the same text as the
+// bash twin.
+const claimTicketFlagHelp = "Also print the one-time claim ticket when stdout is not a terminal"
 
 func newKubehzDeregister(paths *config.Paths) *cobra.Command {
 	return kubehzSimple(paths, "deregister", "d", "Remove cluster from kubehz", commandSpec{destructive: true},

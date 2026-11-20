@@ -19,6 +19,8 @@ main::provision() {
   local domain="${domain:-${DOMAIN_NAME:-}}"
   local force="${force:-0}"
   local bootstrap=0 dry_run=0 render_dir="" no_diff=0 only="" allow_generators=0 with_restore=0 ignore_nondeterministic=0
+  # --print-token reaches kubehz::ensure_claim_key through dynamic scope.
+  local print_token=0
   # Review round 2, item E: see bootstrap::_flag_given's doc comment.
   local _only_given=0
   bootstrap::_flag_given only "${@}" && _only_given=1
@@ -33,6 +35,7 @@ main::provision() {
     'allow-generators|:+' "Run the addon's own executable code in a dry run (exec plugins, KRM functions, bash: generators, remote bases) as trusted, with a real run's side effects (default: refused)"
     'with-restore|:+'    'With --only, also apply restore.d first (default: --only skips it and warns when it is non-empty)'
     'ignore-nondeterministic|:+' 'Dry run: judge each entry without the objects its chart regenerates on every apply (they are still listed)'
+    'print-token|:+'     'Also print the one-time claim ticket when stdout is not a terminal'
     "${args[@]:-}"
   )
   :args "Provision a cluster" "${@}"

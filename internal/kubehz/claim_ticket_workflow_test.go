@@ -156,11 +156,15 @@ func runHideClaimTicket(t *testing.T, fn, input string) string {
 
 // registerOutput is the output of RegisterCluster for a Lo cluster: with
 // HCLOUD_TOKEN the claim-key registration (its answer carries testTicket),
-// without it the fingerprint announce.
+// without it the fingerprint announce. The claim-key registration runs with
+// --print-token (PrintToken): the harness writes to a buffer, and without
+// the flag lo prints the ticket only on a terminal. The filter is for the
+// output with the ticket in it.
 func registerOutput(t *testing.T, claimKey bool) string {
 	t.Helper()
 	h := newHarness(t)
 	delete(h.env, "KUBEHZ_TOKEN")
+	h.ctx.PrintToken = claimKey
 	if claimKey {
 		h.env["HCLOUD_TOKEN"], h.env["HCLOUD_API_BASE"] = "hc_test", h.apiURL()
 		h.handle("POST /api/clusters/register", 200,

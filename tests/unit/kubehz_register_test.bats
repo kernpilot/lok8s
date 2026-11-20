@@ -1714,6 +1714,10 @@ _ticket_register() {
 
 @test "claim ticket: the workflow filter hides it in the register output, and every other line stays" {
   local fn claim announce l hidden other input want
+  # The filter is for the output with the ticket in it: run captures
+  # stdout, which is not a terminal, so the register runs with
+  # --print-token (print_token, through dynamic scope).
+  local print_token=1
   local -a ins=() wants=()
   fn="$(_hide_claim_ticket_fn)"
   [[ "${fn}" == "hide_claim_ticket() {"*"}" ]] || fail "no hide_claim_ticket function in spinup.yml"
@@ -1784,4 +1788,128 @@ EOF
   refute_output --partial "${_TICKET_OTHER}"
   refute_output --partial "${_SERVER_FP}"
   assert_output "${want}"
+}
+
+# ── The claim ticket on stdout: a terminal, or --print-token ─────────────
+# The claim-key registration prints the one-time claim ticket only when
+# stdout is a terminal, or with --print-token (print_token). Elsewhere the
+# curl hint gets the placeholder, and the "fingerprint:" line names the key
+# in the Hetzner Console and the flag. The Go twin:
+# internal/kubehz/register_ticket_test.go.
+
+_TICKET_HIDDEN_CURL="       -H 'Content-Type: application/json' -d '{\"fingerprint\":\"<hidden: one-time claim ticket>\"}'"
+_TICKET_HIDDEN_FP="  fingerprint: <hidden: one-time claim ticket>   (in Hetzner Console -> Security -> SSH keys, key 'kubehz-claim-test.kubehz.dev'; --print-token shows it here)"
+_TICKET_SHOWN_CURL="       -H 'Content-Type: application/json' -d '{\"fingerprint\":\"${_TICKET}\"}'"
+_TICKET_SHOWN_FP="  fingerprint: ${_TICKET}${_FP_TAIL}"
+# A string with the shape of an MD5 fingerprint.
+_TICKET_SHAPE='[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){15}'
+
+@test "claim ticket: a stdout that is not a terminal gets no ticket, and the lines say where to read it" {
+  export STUB_FINGERPRINT="${_TICKET}"
+  _register_sandbox ""
+  run _ticket_register claim-key
+  assert_success
+  refute_output --partial "${_TICKET}"
+  refute_output --regexp "${_TICKET_SHAPE}"
+  assert_line "${_TICKET_HIDDEN_CURL}"
+  assert_line "${_TICKET_HIDDEN_FP}"
+}
+
+@test "claim ticket: --print-token shows it on a stdout that is not a terminal" {
+  export STUB_FINGERPRINT="${_TICKET}"
+  _register_sandbox ""
+  local print_token=1
+  run _ticket_register claim-key
+  assert_success
+  assert_line "${_TICKET_SHOWN_CURL}"
+  assert_line "${_TICKET_SHOWN_FP}"
+  refute_output --partial "<hidden: one-time claim ticket>"
+}
+
+# Only the flag (print_token 1) shows the ticket. Another value from the
+# environment does not, and it is never evaluated as arithmetic.
+@test "claim ticket: a print_token other than 1 shows no ticket" {
+  export STUB_FINGERPRINT="${_TICKET}"
+  _register_sandbox ""
+  local v
+  for v in 0 true ' 1' 'x[$(echo PWNED >&2)]'; do
+    print_token="${v}" run _ticket_register claim-key
+    assert_success
+    refute_output --partial "${_TICKET}"
+    refute_output --partial "PWNED"
+    assert_line "${_TICKET_HIDDEN_FP}"
+  done
+}
+
+# The argsh parse of the flag is the parity harness's (it runs the real lo):
+# here :args is a stub that sets what the parse of --print-token sets.
+@test "claim ticket: kubehz::register takes --print-token to the claim key" {
+  export STUB_FINGERPRINT="${_TICKET}"
+  _register_sandbox ""
+  declare -f kubehz::register | grep -qF "'print-token|:+'" ||
+    fail "kubehz::register has no print-token flag"
+  yq() {
+    case "$2" in
+      '.kind // ""') echo "Lo" ;;
+      '.spec.cluster.domain // ""') echo "test.kubehz.dev" ;;
+      '.spec.kubehz.hosting // "self"') echo "self" ;;
+      '.spec.kubehz.apiUrl // ""') echo "https://api.kubehz.dev" ;;
+      '.spec.kubehz.access') echo "registered" ;;
+      *) echo "" ;;
+    esac
+  }
+  export -f yq
+  touch "${BATS_TEST_TMPDIR}/clusters/test.kubehz.dev/cluster.lok8s.yaml"
+  export HCLOUD_TOKEN="hc_test" HCLOUD_API_BASE="https://hc.example"
+  :args() { domain="test.kubehz.dev" print_token=1; }
+  run kubehz::register
+  assert_success
+  assert_line "${_TICKET_SHOWN_FP}"
+  :args() { domain="test.kubehz.dev"; }
+  run kubehz::register
+  assert_success
+  refute_output --partial "${_TICKET}"
+  assert_line "${_TICKET_HIDDEN_FP}"
+}
+
+# script(1) gives the register a terminal. The child bash gets the stubs
+# that the sandbox exports, and sources the libs again.
+@test "claim ticket: a terminal gets the ticket" {
+  command -v script >/dev/null || skip "no script(1) for a terminal"
+  export STUB_FINGERPRINT="${_TICKET}"
+  _register_sandbox ""
+  export _PROJECT_ROOT
+  run script -qec 'source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh" && source "${_PROJECT_ROOT}/.lok8s/utils/http.sh" && source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main" && [[ -t 1 ]] && HCLOUD_TOKEN=hc_test HCLOUD_API_BASE=https://hc.example kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev' /dev/null
+  assert_success
+  assert_output --partial "${_TICKET_SHOWN_CURL}"
+  assert_output --partial "${_TICKET_SHOWN_FP}"
+  refute_output --partial "<hidden: one-time claim ticket>"
+}
+
+# _traced_claim_key: the claim key under set -x, with the Hetzner token in
+# the environment before the trace starts.
+_traced_claim_key() {
+  local rc=0
+  export HCLOUD_TOKEN="hc_test" HCLOUD_API_BASE="https://hc.example"
+  set -x
+  kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev || rc=$?
+  set +x
+  return "${rc}"
+}
+
+# Without the guard, the trace shows the response and the fingerprint, and
+# the curl config line with the Hetzner token. The guard also gives the
+# trace back after the function: the caller's next line is traced.
+@test "claim ticket: set -x in ensure_claim_key prints neither the ticket nor the Hetzner token" {
+  export STUB_FINGERPRINT="${_TICKET}"
+  _register_sandbox ""
+  run _traced_claim_key
+  assert_success
+  # The trace is on before and after the function.
+  assert_output --partial "kubehz::ensure_claim_key test.kubehz.dev https://api.kubehz.dev"
+  assert_output --regexp $'\n[+]+ set \\+x'
+  refute_output --partial "${_TICKET}"
+  refute_output --regexp "${_TICKET_SHAPE}"
+  refute_output --partial "hc_test"
+  assert_line "${_TICKET_HIDDEN_FP}"
 }
