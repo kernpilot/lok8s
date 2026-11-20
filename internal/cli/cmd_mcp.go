@@ -87,8 +87,12 @@ type mcpExposure struct {
 	destructive bool
 }
 
-// resolve folds LO_MCP_ALLOW into the flag state (flags win) and applies
-// "destructive implies mutating".
+// resolve folds LO_MCP_ALLOW into the flag state and applies "destructive
+// implies mutating". The environment only adds to the flags: the higher of
+// the two tiers applies. Thus --allow-mutating with LO_MCP_ALLOW=destructive
+// exposes the destructive commands. LO_MCP_ALLOW=mutating does not take them
+// away from --allow-destructive. An empty value acts as unset. Any other
+// value is an error, also when a flag is set.
 func (x *mcpExposure) resolve() error {
 	switch v := os.Getenv(mcpAllowEnv); v {
 	case "":
@@ -428,7 +432,8 @@ node verbs (they take --cluster-id or --space-id), and --force on kubehz
 node drain (it takes --evict-unmanaged).
 A command that is not exposed is not registered, so it cannot be called.
 LO_MCP_ALLOW=mutating|destructive is the environment form of the opt-in,
-for editor configs (flags win).
+for editor configs. It adds to the flags: the higher of the two tiers
+applies.
 
 Transports: 'start' serves stdio (what editors launch); 'serve' serves
 streamable HTTP on loopback — it has no authentication, keep it there.
