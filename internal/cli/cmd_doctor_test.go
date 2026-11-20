@@ -172,17 +172,51 @@ func TestDoctorKindMinimumRelease(t *testing.T) {
 // The bash twin keeps its own copy of the minimum (DOCTOR_KIND_MIN in the
 // embedded mirror of .lok8s/libs/doctor). Two hand-kept copies drift; this
 // fails first. The file must set it once: a second assignment would win.
+// An assignment counts also when it is indented, or when it follows
+// readonly, declare (with options such as -g), typeset or export.
 func TestDoctorKindMinMatchesBash(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join(testutil.RepoRoot(t), "internal", "assets", "lok8s", "libs", "doctor"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := regexp.MustCompile(`(?m)^DOCTOR_KIND_MIN=(\S+)$`).FindAllSubmatch(src, -1)
+	m := doctorKindMinAssignRe.FindAllSubmatch(src, -1)
 	if len(m) != 1 {
 		t.Fatalf("libs/doctor sets DOCTOR_KIND_MIN %d times, want once", len(m))
 	}
 	if got := string(m[0][1]); got != doctorKindMin {
 		t.Errorf("bash DOCTOR_KIND_MIN %q != Go doctorKindMin %q", got, doctorKindMin)
+	}
+}
+
+// doctorKindMinAssignRe matches an assignment of DOCTOR_KIND_MIN at the
+// start of a line: after spaces or tabs, and after readonly, declare,
+// typeset or export with their options. The value is the text up to white
+// space.
+var doctorKindMinAssignRe = regexp.MustCompile(`(?m)^[ \t]*(?:(?:readonly|declare|typeset|export)(?:[ \t]+-[A-Za-z]+)*[ \t]+)?DOCTOR_KIND_MIN=(\S*)`)
+
+// The pattern of TestDoctorKindMinMatchesBash finds each form of the
+// assignment, and no other name.
+func TestDoctorKindMinAssignmentForms(t *testing.T) {
+	for _, tc := range []struct {
+		line string
+		want bool
+	}{
+		{"DOCTOR_KIND_MIN=v0.18.0", true},
+		{"  DOCTOR_KIND_MIN=v0.18.0", true},
+		{"\tDOCTOR_KIND_MIN=v0.18.0", true},
+		{"readonly DOCTOR_KIND_MIN=v0.18.0", true},
+		{"declare DOCTOR_KIND_MIN=v0.18.0", true},
+		{"declare -g DOCTOR_KIND_MIN=v0.18.0", true},
+		{"  declare -gr DOCTOR_KIND_MIN=v0.18.0", true},
+		{"typeset DOCTOR_KIND_MIN=v0.18.0", true},
+		{"export DOCTOR_KIND_MIN=v0.18.0", true},
+		{"# DOCTOR_KIND_MIN=v0.18.0", false},
+		{"XDOCTOR_KIND_MIN=v0.18.0", false},
+		{"echo ${DOCTOR_KIND_MIN}", false},
+	} {
+		if got := doctorKindMinAssignRe.MatchString(tc.line); got != tc.want {
+			t.Errorf("%q: match %v, want %v", tc.line, got, tc.want)
+		}
 	}
 }
 
