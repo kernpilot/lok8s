@@ -380,6 +380,7 @@ func credentialEnvFile(stderr io.Writer, keyVar ...string) (string, error) {
 	for i := 0; i+1 < len(keyVar); i += 2 {
 		key, name := keyVar[i], keyVar[i+1]
 		value := os.Getenv(name)
+		// Only CR and LF, as capi::_credential_env_file: a tab passes in both twins, so it is no deviation.
 		if err := credentials.NoNewline(name, value, stderr); err != nil {
 			return "", err
 		}

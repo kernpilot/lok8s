@@ -1,9 +1,13 @@
 package kubehz
 
+import "github.com/kernpilot/lok8s/internal/credentials"
+
 // credentialOK ports http::credential_ok: it succeeds when no named
 // environment variable holds a control character (isControl). Each refused
 // variable gets the error of the bash twin, with its name. Each entry point
-// calls it before its first request that carries the credential.
+// calls it before its first request that carries the credential. The check
+// itself is credentials.NoControl, over the context's environment and
+// stderr; the kubeone driver calls it too.
 //
 // The bash twin puts a credential on a curl config line, and a control
 // character ends that line: the rest becomes a curl option. The Go client
@@ -14,13 +18,5 @@ package kubehz
 // with CRLF line ends. An unset or empty variable passes: the caller decides
 // on that.
 func (c *Context) credentialOK(names ...string) bool {
-	ok := true
-	for _, name := range names {
-		if hasControl(c.getenv(name)) {
-			c.errorf("environment variable %s must not contain a control character", name)
-			c.echoErr("  A file with CRLF line ends can leave a CR at the end of the value. Remove it, then try again.")
-			ok = false
-		}
-	}
-	return ok
+	return credentials.NoControl(c.getenv, c.errOut(), names...) == nil
 }

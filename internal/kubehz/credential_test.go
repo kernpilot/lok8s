@@ -797,7 +797,8 @@ func TestSpaceQuietCallsSendAValidToken(t *testing.T) {
 // row of credentialCases names, and why.
 var credentialSitesNotInTable = map[string]string{
 	"nodeAPIAccess KUBEHZ_TOKEN":  "the node preflights: TestNodePreflightHTTPSAndToken and TestNodeMaintenanceRefusesAControlCharacterInTheToken",
-	"credentialOK hasControl":     "the check itself: TestCredentialOKRefusesExactlyTheControlBytes",
+	"credentialOK NoControl":      "the check itself: TestCredentialOKRefusesExactlyTheControlBytes",
+	"isControl IsControl":         "the definition of isControl: the control set of the credentials package",
 	"openSession hasControl":      "the access token of the agent commands, with its own text (kubehz::agent_session): TestAgentSessionRefusals",
 	"agentAccessToken hasControl": "the agent key, with its own text (kubehz::token_access): TestTokenRefusals",
 	"spaceAPIQuiet hasControl":    "a quiet call, with no line: TestSpaceQuietCallsRefuseAControlCharacterInTheToken",
@@ -871,7 +872,8 @@ func TestCredentialCheckSiteInventoryFixture(t *testing.T) {
 		"var six = func(c *C) bool { return c.credentialOK(\"F\") }\n" +
 		"func seven(s string) bool { return strings.ContainsFunc(s, isControl) || isControl('x') }\n" +
 		"func eight(c *C) { c.credentialOK() }\n" +
-		"func nine(c *C) { go func() { _ = c.credentialOK(\"G\") }() }\n"
+		"func nine(c *C) { go func() { _ = c.credentialOK(\"G\") }() }\n" +
+		"func ten(c *C) bool { return credentials.NoControl(c.getenv, nil, \"H\") == nil || credentials.IsControl('y') }\n"
 	if err := os.WriteFile(filepath.Join(dir, "x.go"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -879,7 +881,7 @@ func TestCredentialCheckSiteInventoryFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	sites, unattributed := credentialSitesIn(t, dir)
-	if got, want := strings.Join(sites, "|"), "nine G|one A|one B|seven isControl|three C|three C|two hasControl"; got != want {
+	if got, want := strings.Join(sites, "|"), "nine G|one A|one B|seven isControl|ten IsControl|ten NoControl|three C|three C|two hasControl"; got != want {
 		t.Errorf("sites\n%s\nwant\n%s", got, want)
 	}
 	want := "(package) credentialOK: in a package-level declaration|" +
@@ -900,8 +902,10 @@ func credentialSites(t *testing.T) (sites, unattributed []string) {
 	return credentialSitesIn(t, ".")
 }
 
-// checkNames are the checks that the inventory counts.
-var checkNames = map[string]bool{"credentialOK": true, "hasControl": true, "isControl": true}
+// checkNames are the checks that the inventory counts. NoControl and
+// IsControl are the shared check and its control set (internal/credentials):
+// a direct call of either counts as a site too.
+var checkNames = map[string]bool{"credentialOK": true, "hasControl": true, "isControl": true, "NoControl": true, "IsControl": true}
 
 // credentialSitesIn is the check-site inventory of the non-test Go files of
 // dir. sites holds each direct call of a check in a function body, with the
