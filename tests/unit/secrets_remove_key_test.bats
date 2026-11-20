@@ -15,9 +15,9 @@
 # real one and skips without sops, ssh-to-age or ssh-keygen. Each test that
 # runs the real sops carries the tag real-sops: the argsh container of CI has
 # no ssh-keygen, so CI runs that tag again on the runner, where a skip fails
-# the step. That step also checks the TAP plan 1..7: a test that gets or
-# loses the tag changes that number in .github/workflows/ci.yml. No test
-# prints a private key.
+# the step. That step also checks the TAP plan of every tagged test under
+# tests/unit (1..14): a test that gets or loses the tag changes that number
+# in .github/workflows/ci.yml and TESTING.md. No test prints a private key.
 
 setup() {
   load "../test_helper"
@@ -120,6 +120,23 @@ _stub_encrypt() {
 
 _stub_compare() {
   secrets::_twin_matches() { return 0; }
+}
+
+# _stub_sops — the real secrets::_encrypt_file, with sops as a function: the
+# encrypt writes the envelope of the first rule to its --output path and logs
+# the plaintext (relative to PATH_CLUSTERS), as _stub_encrypt does.
+_stub_sops() {
+  sops() {
+    local -a a=("${@}")
+    local i out=""
+    for (( i = 0; i + 1 < ${#a[@]}; i++ )); do
+      [[ "${a[i]}" != --output ]] || out="${a[i + 1]}"
+    done
+    [[ -n "${out}" ]] || return 1
+    echo "${a[-1]#"${PATH_CLUSTERS}/"}" >> "${ENCRYPT_LOG}"
+    _first_rule_envelope > "${out}"
+  }
+  _stub_compare
 }
 
 # _cache <domain> <name> <recipient> — a plaintext cache file and its .enc
@@ -1790,17 +1807,30 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   [ -z "$(find "${PATH_BASE}" -name '.sops.yaml.tmp-*')" ]
 }
 
-@test "the re-key makes each new .enc newer than a plaintext dated in the future" {
-  # (Go twin: nudgeNewer in sopsEncryptFile.)
+@test "a plaintext dated in the future stays the newer file after the re-key, and an edit of it is encrypted" {
+  # The real secrets::_encrypt_file runs around a sops stub. The .enc keeps
+  # the time of the encrypt, never a time later than now, and one warning
+  # line names the plaintext. An edit after the run gets the time of now, and
+  # the encrypt sweep writes the .enc again (Go twin:
+  # TestRemoveKeyKeepsAFutureDatedPlaintextNewerAndAnEditIsNotLost).
   _load
-  _stub_encrypt
+  _stub_sops
   _cache a.dev app "${RCPT_B}"
-  local plain="${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.K"
+  local plain="${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.K" line
+  line="[warn] ${plain} has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again — set the time of the plaintext to now (touch it)"
   touch -t 209901010000 "${plain}"
   DOMAIN=a.dev run _rm "${RCPT_B}"
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$(grep -cxF -- "${line}" <<< "${output}")" = 1 ] || { echo "$output" >&2; return 1; }
   [ "$(cat "${ENCRYPT_LOG}")" = a.dev/secrets/Secret.app.default.K ] || { cat "${ENCRYPT_LOG}" >&2; return 1; }
-  [[ "${plain}.enc" -nt "${plain}" ]] || { echo "the plaintext is still the newer file" >&2; return 1; }
+  [[ "${plain}" -nt "${plain}.enc" ]] || { echo "the .enc is dated after the plaintext" >&2; return 1; }
+  [ "$(stat -c %Y -- "${plain}.enc")" -le "$(date +%s)" ] || { echo "the .enc has a time in the future" >&2; return 1; }
+
+  printf 'w' > "${plain}"
+  run secrets::_encrypt_store "${PATH_CLUSTERS}/a.dev/secrets" "" find
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$(cat "${ENCRYPT_LOG}")" = $'a.dev/secrets/Secret.app.default.K\na.dev/secrets/Secret.app.default.K' ] || {
+    echo "the encrypt skipped the edit:" >&2; cat "${ENCRYPT_LOG}" >&2; return 1; }
 }
 
 @test "a re-key that stops after the write prints the command that resumes it" {

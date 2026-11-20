@@ -359,9 +359,11 @@ func (l sweepList) encs() []string {
 // before its first write. It does not list the store again, so a file that
 // the run itself changes (a plaintext link to the .gitignore that the sweep
 // writes) is not added. Another process that writes to the store during the
-// run is outside the threat model.
+// run is outside the threat model. It encrypts every file of the list,
+// whatever the times say (force): an .enc dated in the future would
+// otherwise keep the old recipients.
 func (c *Context) encryptChecked(l sweepList) error {
-	return c.encryptSweep(l.dir, "", func() []string { return l.plains })
+	return c.encryptSweep(l.dir, "", true, func() []string { return l.plains })
 }
 
 // refuseEncPaths refuses each .enc of encs that the encrypt refuses

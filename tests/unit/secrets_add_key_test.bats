@@ -473,6 +473,22 @@ _ls_then_missing() {
   [ "$(cat "${store}/Secret.db.default.KEY.enc")" = "stub-enc w" ]
 }
 
+@test "add-key encrypts every file of the list that it checked, also one whose .enc is dated in the future" {
+  # The run sets the plaintexts to now, so an .enc dated in the future stays
+  # the newer file, and a sweep that skips it would leave it without the new
+  # recipient (Go twin: TestAddKeyRekeysAnEncDatedInTheFuture).
+  _load_sweep
+  local store="${PATH_CLUSTERS}/a.dev/secrets"
+  printf 'v' > "${store}/Secret.app.default.K"
+  printf 'old' > "${store}/Secret.app.default.K.enc"
+  touch -t 209901010000 "${store}/Secret.app.default.K.enc"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$(cat "${SOPS_LOG}")" = "${store}/Secret.app.default.K" ] || { echo "sops ran on:" >&2; cat "${SOPS_LOG}" >&2; return 1; }
+  [ "$(cat "${store}/Secret.app.default.K.enc")" = "stub-enc v" ]
+  [ "$(stat -c %Y -- "${store}/Secret.app.default.K.enc")" -le "$(date +%s)" ] || { echo "the .enc has a time in the future" >&2; return 1; }
+}
+
 @test "a domain whose store does not resolve is refused before any write, with --all and without" {
   # secrets::path says why, and the last line says that .sops.yaml did not
   # change and what to do. Before, the run added the recipient, then

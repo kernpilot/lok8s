@@ -109,7 +109,7 @@ func sopsEncryptFile(configPath, plaintextPath, encPath string) error {
 	}); err != nil {
 		return err
 	}
-	nudgeNewer(encPath, plaintextPath)
+	// The time of the .enc is set by encryptFile (nudgeNewer).
 	return nil
 }
 

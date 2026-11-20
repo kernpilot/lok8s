@@ -210,23 +210,36 @@ func newerThan(a, b string) bool {
 	return ai.ModTime().After(bi.ModTime())
 }
 
-// nudgeNewer makes dst's mtime strictly newer than src's when it isn't
-// already. The bash implementation gets this ordering for free — spawning the
+// nudgeNewer makes dst, the file just written from src, strictly newer than
+// src when the two have the same mtime, and never sets a time later than
+// now. The bash implementation gets this ordering for free — spawning the
 // sops binary always lands the output file a clock tick after its input — and
 // the -nt freshness skips depend on it: an in-process encrypt/decrypt can
 // finish within the SAME tick, and an equal mtime reads as "stale", causing
 // pointless .enc/plaintext churn on every subsequent sweep.
-func nudgeNewer(dst, src string) {
+//
+// It returns false when src is newer than dst: src has a time in the future,
+// and dst keeps the time of its write. A dst dated after src would make a
+// later edit of src (dated now) look older than dst, so encrypt would skip
+// the edit and decrypt could overwrite it.
+func nudgeNewer(dst, src string) bool {
 	si, err := os.Stat(src)
 	if err != nil {
-		return
+		return true
 	}
 	di, err := os.Stat(dst)
 	if err != nil || di.ModTime().After(si.ModTime()) {
-		return
+		return true
+	}
+	if si.ModTime().After(di.ModTime()) {
+		return false
 	}
 	t := si.ModTime().Add(time.Microsecond)
+	if now := time.Now(); t.After(now) {
+		t = now
+	}
 	_ = os.Chtimes(dst, t, t)
+	return true
 }
 
 // CheckUnencrypted reports plaintext secrets without a fresh .enc twin in dir

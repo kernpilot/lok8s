@@ -398,6 +398,13 @@ func (c *Context) encryptFile(plaintext string) error {
 		ui.ErrorTo(c.ErrOut, "Failed to encrypt %s", filepath.Base(plaintext))
 		return ErrHandled
 	}
+	// No .enc time later than now, on every encrypt (bash: the test after
+	// the rename in secrets::_encrypt_file). A plaintext dated in the future
+	// stays the newer file: each encrypt writes its .enc again, and an edit
+	// of it is not lost.
+	if !nudgeNewer(encPath, plaintext) {
+		ui.WarnTo(c.ErrOut, "%s has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again — set the time of the plaintext to now (touch it)", c.rel(plaintext))
+	}
 	return nil
 }
 
@@ -471,7 +478,7 @@ func (c *Context) Encrypt(name string) error {
 	if name != "" {
 		prefix = "Secret." + name + "."
 	}
-	return c.encryptSweep(secretsDir, name, func() []string { return sweepPlaintexts(secretsDir, prefix) })
+	return c.encryptSweep(secretsDir, name, false, func() []string { return sweepPlaintexts(secretsDir, prefix) })
 }
 
 // encryptSweep is the sweep of Encrypt over the store secretsDir (bash:
@@ -480,7 +487,12 @@ func (c *Context) Encrypt(name string) error {
 // after the .gitignore write: Encrypt lists the store there, and AddKey
 // gives the list that it checked before its first write (encryptChecked).
 // name is for the message when nothing matched.
-func (c *Context) encryptSweep(secretsDir, name string, list func() []string) error {
+//
+// With force it encrypts every file of the list, also one whose .enc is
+// newer: the re-key of AddKey, where a new .enc must list the new recipient
+// whatever the times say (an .enc dated in the future stays newer than the
+// plaintexts that the run set to now).
+func (c *Context) encryptSweep(secretsDir, name string, force bool, list func() []string) error {
 	if !fsutil.DirExists(secretsDir) {
 		ui.WarnTo(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil
@@ -500,7 +512,7 @@ func (c *Context) encryptSweep(secretsDir, name string, list func() []string) er
 	for _, plaintext := range list() {
 		// Skip if .enc is newer than plaintext (already up to date)
 		encFile := plaintext + ".enc"
-		if fsutil.IsRegular(encFile) && newerThan(encFile, plaintext) {
+		if !force && fsutil.IsRegular(encFile) && newerThan(encFile, plaintext) {
 			skipped++
 			continue
 		}
@@ -637,7 +649,9 @@ func (c *Context) Decrypt(sshKey string) error {
 		if err := os.Chmod(plaintext, 0o600); err != nil {
 			return err
 		}
-		nudgeNewer(plaintext, encFile)
+		// An .enc dated in the future keeps the plaintext the older file,
+		// as in the bash twin, which sets no time.
+		_ = nudgeNewer(plaintext, encFile)
 		count++
 	}
 

@@ -178,6 +178,12 @@ git add clusters/app.example.com/secrets/*.enc  # each store's .gitignore commit
 lo secrets --domain app.example.com decrypt     # restore plaintext from the .enc files
 ```
 
+`encrypt` skips a plaintext whose `.enc` file is newer. No command gives an
+`.enc` file a time after the current time. A plaintext with a time in the
+future stays the newer file: each encrypt writes its `.enc` file again and
+prints a warning that names the plaintext. Set the time of that plaintext
+to now (`touch` it).
+
 Add a teammate with `lo secrets add-key`. It takes their age public key, or the
 path to their ed25519 SSH public key. It adds the key to every creation rule in
 `.sops.yaml`, then re-encrypts the store so that the new recipient can read it:
@@ -186,7 +192,10 @@ path to their ed25519 SSH public key. It adds the key to every creation rule in
 lo secrets --domain app.example.com add-key ~/keys/alice_ed25519.pub
 ```
 
-`add-key` re-encrypts the store of the current domain, also with `--all`. When
+`add-key` re-encrypts the store of the current domain, also with `--all`. It
+re-encrypts every plaintext of that store, also one whose `.enc` file is
+newer. The other stores of `--all` get a plaintext time of now, and a later
+`lo secrets encrypt` of each domain re-encrypts them. When
 that store does not resolve (the domain directory has no `secrets` directory,
 and the project keeps a store per domain), `add-key` stops before it changes
 `.sops.yaml`. Create the directory, or select a domain that has a store, then
