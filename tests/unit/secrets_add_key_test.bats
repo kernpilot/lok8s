@@ -260,11 +260,13 @@ _state() {
 # the later pair (or, for kind sha, the .enc of the .sha file of db), is a
 # directory (dir, sha), a FIFO (fifo) or a symlink (link): add-key must
 # refuse it before any write. The project (.sops.yaml, the lock file, any
-# temp file), the store and the link target stay as they were. The control:
-# with the entry removed, the run adds the recipient and re-keys the store.
+# temp file), the store and the link target stay as they were, and sops
+# does not run. The control: with the entry removed, the run adds the
+# recipient, and the real sweep (_load_sweep: sops alone is a stub) writes
+# the .enc of each plaintext of the store, the .sha.enc too.
 # (Go twin: TestAddKeyRefusesEveryEncThatTheEncryptRefusesBeforeAnyWrite.)
 _refused_later() {
-  local kind="${1}" store="${PATH_CLUSTERS}/a.dev/secrets" away="${BATS_TEST_TMPDIR}/elsewhere" enc line tail before
+  local kind="${1}" store="${PATH_CLUSTERS}/a.dev/secrets" away="${BATS_TEST_TMPDIR}/elsewhere" enc line tail before plain want=""
   mkdir -p "${away}"
   printf 'v\n' > "${store}/Secret.app.default.KEY"
   printf 'enc %s\n' "${KEY_A}" > "${store}/Secret.app.default.KEY.enc"
@@ -302,34 +304,44 @@ _refused_later() {
     diff <(echo "${before}") <(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}" "${away}"; ls -A "${PATH_BASE}") >&2
     return 1
   }
-  [ ! -s "${ENCRYPT_RAN}" ]
+  [ ! -s "${SOPS_LOG}" ] || { echo "sops ran on:" >&2; cat "${SOPS_LOG}" >&2; return 1; }
   rm -r -- "${enc}"
   DOMAIN=a.dev run _add "${KEY_B}"
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
   grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
-  [ -s "${ENCRYPT_RAN}" ]
+  # Each plaintext of the store, in glob order, and its new .enc: a regular
+  # file with the stub's bytes. No temp file is left.
+  for plain in "${store}"/Secret.*; do
+    [[ "${plain}" != *.enc ]] || continue
+    want+="${want:+$'\n'}${plain}"
+    [[ -f "${plain}.enc" && ! -L "${plain}.enc" ]] || { echo "${plain}.enc is not a regular file" >&2; return 1; }
+    [ "$(cat "${plain}.enc")" = "stub-enc $(cat "${plain}")" ] || { echo "${plain}.enc was not written" >&2; return 1; }
+  done
+  [ "$(cat "${SOPS_LOG}")" = "${want}" ] || { echo "sops ran on:" >&2; cat "${SOPS_LOG}" >&2; return 1; }
+  [ -z "$(find "${store}" -name '.*.tmp-*')" ] || { echo "a temp file was left" >&2; return 1; }
+  [[ "${kind}" != sha ]] || grep -qxF "${store}/Secret.db.default.KEY.sha" "${SOPS_LOG}" || { echo "the .sha file was not encrypted" >&2; return 1; }
 }
 
 # A device node needs root to make, so no test makes one: secrets::_enc_path_ok
 # refuses it as it refuses a FIFO.
 @test "the .enc of a later pair that is a directory is refused before any write" {
-  _load
+  _load_sweep
   _refused_later dir
 }
 
 @test "the .enc of a later pair that is a FIFO is refused before any write" {
   command -v mkfifo >/dev/null 2>&1 || skip "mkfifo not installed"
-  _load
+  _load_sweep
   _refused_later fifo
 }
 
 @test "the .enc of a later pair that is a symlink is refused before any write" {
-  _load
+  _load_sweep
   _refused_later link
 }
 
 @test "the .enc of a .sha file that is a directory is refused before any write" {
-  _load
+  _load_sweep
   _refused_later sha
 }
 
