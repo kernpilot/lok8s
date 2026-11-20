@@ -264,7 +264,7 @@ if command -v flock >/dev/null 2>&1; then
 fi
 sec_check secrets remove-key age1nope
 sec_check secrets remove-key /no/such/file
-sec_check secrets remove-key "age1$(printf 'q%.0s' {1..57})z"   # valid shape, not a recipient
+sec_check secrets remove-key "age1$(printf 'q%.0s' {1..57})z"   # valid shape, in no rule and on no label: a warning, not a refusal
 for impl in go bash; do                                   # a second rule that lists only key2
   printf "  - path_regex: 'Other\\\\..*'\n    age: '%s'\n" "${KEY2B}" >> "${WORK}/sec-${impl}/.sops.yaml"
   cp -p "${WORK}/sec-${impl}/.sops.yaml" "${WORK}/sops-${impl}.last"
@@ -291,8 +291,9 @@ for impl in go bash; do
   grep -qF "${KEY2B}" "${WORK}/sec-${impl}/clusters/beta.dev/secrets/Secret.app.default.TOKEN.enc" \
     || fail "secrets remove-key fixture (${impl}): the beta.dev store does not list key2"
 done
-# Right after an encrypt each .enc is newer than its plaintext: the re-key
-# would write the older plaintext back. Refused until a decrypt.
+# Right after an encrypt each .enc is newer than its plaintext, and the
+# plaintext holds the value of the .enc. The compare reads the values, not
+# the file times, so a newer .enc is no reason to refuse.
 sec_check secrets --domain alpha.dev remove-key "${WORK}/home/key2.pub"
 sec_prep secrets --domain alpha.dev decrypt
 sec_prep secrets --domain beta.dev decrypt
