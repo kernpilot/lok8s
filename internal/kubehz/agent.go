@@ -32,6 +32,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1215,12 +1216,17 @@ func inProcOrDev(file string) bool {
 // publishKubeconfig writes data to target through a temporary file next to
 // it (mode 0600). With force, a rename replaces the target. Without force,
 // a hard link publishes the file. link(2) fails when the path exists, so a
-// file that appeared during the download stays as it is. The temporary
-// file goes in both cases. For a link, target is the file that linkTarget
-// checked: no other user can change a directory from / down to it, so the
-// path names that file up to the rename. The temporary file goes to the
-// directory of target as written (kubeconfigTempDir), the directory that
-// the rename resolves.
+// file that appeared during the download stays as it is. On a file system
+// with no hard links (vfat, exFAT, some FUSE and SMB mounts), link(2)
+// fails with EPERM, ENOTSUP or EOPNOTSUPP (noHardLinks). Then an exclusive
+// create writes the file (createKubeconfig), which also fails when the
+// path exists. Every other error of the link, EEXIST too, is the error,
+// with no second write. The temporary file goes in all cases. For a link,
+// target is the file that linkTarget checked: no other user can change a
+// directory from / down to it, so the path names that file up to the
+// rename. The temporary file goes to the directory of target as written
+// (kubeconfigTempDir), the directory that the rename resolves. The bash
+// twin is kubehz::agent_write.
 func publishKubeconfig(target string, data []byte, force bool) error {
 	tmp, err := os.CreateTemp(kubeconfigTempDir(target), ".kubeconfig-*")
 	if err != nil {
@@ -1234,11 +1240,42 @@ func publishKubeconfig(target string, data []byte, force bool) error {
 	if err == nil && force {
 		err = os.Rename(name, target)
 	} else if err == nil {
-		err = os.Link(name, target)
+		err = linkKubeconfig(name, target)
+		if noHardLinks(err) {
+			err = createKubeconfig(target, data)
+		}
 		_ = os.Remove(name)
 	}
 	if err != nil {
 		_ = os.Remove(name)
+	}
+	return err
+}
+
+// linkKubeconfig is os.Link. A test replaces it, to make the link fail as
+// it fails on a file system with no hard links.
+var linkKubeconfig = os.Link
+
+// noHardLinks reports whether a link(2) error says that the file system
+// has no hard links: EPERM, ENOTSUP or EOPNOTSUPP. On Linux ENOTSUP and
+// EOPNOTSUPP are one number, on darwin two. EEXIST is not one of them: the
+// path exists.
+func noHardLinks(err error) bool {
+	return errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, syscall.EOPNOTSUPP)
+}
+
+// createKubeconfig writes data to a new file at target, mode 0600, with an
+// exclusive create (O_EXCL). The create fails when the path exists, a link
+// too, so a file that appeared during the download stays as it is. Unlike
+// the hard link, a reader can see the file before all of it is written.
+func createKubeconfig(target string, data []byte) error {
+	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
 	}
 	return err
 }

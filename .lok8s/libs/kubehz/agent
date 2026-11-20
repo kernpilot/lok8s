@@ -1006,10 +1006,19 @@ kubehz::agent_exists() {
 # (mktemp: mode 0600). With force, mv replaces the file. Without force, a
 # hard link publishes it. ln fails when the path exists, so a file that
 # appeared during the download stays as it is. -T keeps both from moving the
-# file into a directory. The temporary file goes in both cases. For a link,
+# file into a directory. The temporary file goes in all cases. For a link,
 # <file> is the file that kubehz::agent_link_target checked: no other user
 # can change a directory from / down to it, so the path names that file up
 # to the mv.
+# On a file system with no hard links (vfat, exFAT, some FUSE and SMB
+# mounts), ln fails with EPERM, ENOTSUP or EOPNOTSUPP. Then a write under
+# noclobber, in a subshell with umask 077, writes the file (Go:
+# createKubeconfig). Bash opens a missing path with O_EXCL and refuses a
+# regular file, so a file that appears stays here too. ln tells the error
+# on its stderr: under LC_ALL=C the C text of the errno ends the line,
+# whatever the names hold, so "File exists" (EEXIST) never matches. Every
+# other error, EEXIST too, is the error, with no second write. `command`
+# keeps a function or an alias named ln out of it.
 # The temporary file goes to the directory of <file> as written, the part
 # before its last "/" (Go: kubeconfigTempDir). A parameter expansion takes
 # it, not $(dirname): a command substitution drops the trailing newlines of
@@ -1018,7 +1027,7 @@ kubehz::agent_exists() {
 # temporary file and the mv stay in one directory.
 # Usage: kubehz::agent_write <file> <force>
 kubehz::agent_write() {
-  local file="${1}" force="${2}" dir=. tmp rc=0
+  local file="${1}" force="${2}" dir=. tmp err rc=0
   [[ ! -d "${file}" ]] || return 1
   # "/" for a name in /: the part is empty, and the template adds the "/".
   [[ "${file}" != */* ]] || dir="${file%/*}"
@@ -1029,8 +1038,13 @@ kubehz::agent_write() {
     rc=1
   elif (( force )); then
     mv -fT -- "${tmp}" "${file}" 2>/dev/null || rc=1
-  else
-    ln -T -- "${tmp}" "${file}" 2>/dev/null || rc=1
+  elif ! err=$(LC_ALL=C command ln -T -- "${tmp}" "${file}" 2>&1 >/dev/null); then
+    case "${err}" in
+      # EPERM, and ENOTSUP or EOPNOTSUPP (one number and text on Linux).
+      *": Operation not permitted" | *": Operation not supported")
+        ( set -o noclobber && umask 077 && printf '%s' "${KUBEHZ_AGENT_BODY}" >"${file}" ) 2>/dev/null || rc=1 ;;
+      *) rc=1 ;;
+    esac
   fi
   rm -f -- "${tmp}" 2>/dev/null
   return "${rc}"
