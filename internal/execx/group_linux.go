@@ -163,20 +163,35 @@ func stopMembers(pgid int, termAt time.Time, waitDelay time.Duration) {
 // othersInGroup reports whether a process other than the leader pgid is in
 // the process group pgid. While the leader is not reaped, kill(-pgid, 0)
 // cannot tell: the zombie leader is a member. So it reads the process group
-// of each process in /proc. A member that its new parent has not reaped yet
-// (a zombie) still counts. When /proc does not show the leader in its
-// group, /proc is not usable, and it reports true: the stop then sends
-// SIGKILL after WaitDelay.
+// of each process in /proc (scanGroup). One scan can miss a member: a
+// member can start a child after the scan read the list of /proc, and end
+// before the scan reads its own entry. So it reports false only after two
+// scans in a row found no member.
 func othersInGroup(pgid int) bool {
-	if g, ok := procGroup(pgid); !ok || g != pgid {
-		return true
-	}
+	return scanGroup(pgid) || scanGroup(pgid)
+}
+
+// procNames reads the names in /proc. A test replaces it.
+var procNames = func() ([]string, error) {
 	d, err := os.Open("/proc")
 	if err != nil {
-		return true
+		return nil, err
 	}
 	names, err := d.Readdirnames(-1)
 	_ = d.Close() // a read-only dir: a close error changes nothing here
+	return names, err
+}
+
+// scanGroup reads the list of /proc once, and reports whether a process in
+// it other than the leader pgid is in the process group pgid. A member that
+// its new parent has not reaped yet (a zombie) still counts. When /proc
+// does not show the leader in its group, /proc is not usable, and it
+// reports true: the stop then sends SIGKILL after the grace.
+func scanGroup(pgid int) bool {
+	if g, ok := procGroup(pgid); !ok || g != pgid {
+		return true
+	}
+	names, err := procNames()
 	if err != nil {
 		return true
 	}
