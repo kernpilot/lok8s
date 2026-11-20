@@ -1015,13 +1015,16 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	// it shows the lines of the call that failed (preseedStream). bash
 	// command substitution drops each NUL byte, so the twins read the same
 	// lines.
-	call := func(name string, args []string) (stdout, stderr string, err error) {
+	call := func(ctx context.Context, name string, args []string) (stdout, stderr string, err error) {
 		var outBuf, errBuf bytes.Buffer
 		err = c.Runner.Run(ctx, execx.Cmd{Name: name, Args: args, Stdout: &outBuf, Stderr: &errBuf})
 		return strings.ReplaceAll(outBuf.String(), "\x00", ""), strings.ReplaceAll(errBuf.String(), "\x00", ""), err
 	}
+	sshOn := func(ctx context.Context, policy, remote string) (string, string, error) {
+		return call(ctx, "ssh", append(checked(policy), "-p", portStr, target, remote))
+	}
 	ssh := func(policy, remote string) (string, string, error) {
-		return call("ssh", append(checked(policy), "-p", portStr, target, remote))
+		return sshOn(ctx, policy, remote)
 	}
 	show := func(lines []string) {
 		for _, line := range lines {
@@ -1076,7 +1079,7 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	if failed == "" {
 		for i, key := range handoverPKIKeys {
 			args := append(checked("yes"), "-q", "-P", portStr, filepath.Join(bundleDir, key), target+":"+staged[i])
-			if stdout, stderr, err := call("scp", args); err != nil {
+			if stdout, stderr, err := call(ctx, "scp", args); err != nil {
 				failed = "copying " + key + " to " + o.Node + " failed"
 				shown = preseedStreams("the copy of "+key+" to "+o.Node, stdout, stderr)
 				break
@@ -1086,9 +1089,10 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	if failed == "" {
 		stdout, stderr, err = ssh("yes", preseedInstallCmd(staged))
 		if err != nil {
-			// ssh exits 255 on its own error, a lost connection too. The
-			// node can then run steps after the last line that came back.
-			failed = preseedInstallFailure(stdout, execx.ExitCode(err) == 255, o.Node)
+			// After a cancel or a timeout, an error of the ssh client, exit
+			// 255 (an ssh error, a lost connection too) or a signal, the
+			// node can run steps after the last line that came back.
+			failed = preseedInstallFailure(stdout, preseedInstallCause(ctx, err), o.Node)
 			shown = preseedStreams("the install call on "+o.Node, stdout, stderr)
 		}
 	}
@@ -1096,7 +1100,13 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 		c.errorf("handover: %s", failed)
 		show(shown)
 		if len(staged) > 0 {
-			stdout, stderr, err := ssh("yes", "rm -f -- "+strings.Join(staged, " "))
+			// The staging files can hold key bytes, so a cancel or a
+			// timeout of ctx does not stop their cleanup: it runs on a
+			// context without them, with a timeout of its own. The bash
+			// twin also runs its cleanup after the install call ended.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), preseedCleanupTimeout)
+			stdout, stderr, err := sshOn(cleanupCtx, "yes", "rm -f -- "+strings.Join(staged, " "))
+			cancel()
 			if err != nil {
 				c.errorf("handover: could not remove the staging files on %s; they can hold key bytes. Remove them yourself: %s", o.Node, strings.Join(staged, " "))
 				show(preseedStreams("the cleanup call on "+o.Node, stdout, stderr))
@@ -1110,6 +1120,11 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 
 // preseedPKIDir is the pki dir on the node that preseed writes into.
 const preseedPKIDir = "/etc/kubernetes/pki"
+
+// preseedCleanupTimeout bounds the cleanup call of preseed (the rm of the
+// staging files). That call also runs after a cancel or a timeout of the
+// context of preseed, so it has a timeout of its own.
+const preseedCleanupTimeout = 30 * time.Second
 
 // stagingName ports handover::staging_name: it reports whether name is the
 // shape of a staging file that preseed's mktemp makes for key:
@@ -1362,28 +1377,55 @@ func preseedInstallCmd(staged []string) string {
 	return strings.Join(steps, " && ")
 }
 
+// preseedInstallCause names the end of a failed install call after which
+// the node can have run steps after the last line that came back, or
+// returns "" for a normal exit of the remote command. In this order: a
+// cancel or a timeout of ctx (a timeout when its deadline passed), an
+// error of the ssh client (it did not start, or its wait failed: no exit
+// status), exit 255 (an ssh error, a lost connection too) and an exit
+// above 128. That last one is a signal: ExitCode gives 128+N for a client
+// that a signal killed, and ssh gives the status of a remote command that
+// a signal killed as it is. bash cannot tell the two apart, so the twins
+// treat both the same.
+func preseedInstallCause(ctx context.Context, err error) string {
+	code := execx.ExitCode(err)
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return "a timeout (" + context.Cause(ctx).Error() + ")"
+	case ctx.Err() != nil:
+		return "a cancel (" + context.Cause(ctx).Error() + ")"
+	case execx.LaunchFailed(err):
+		return "an error of the ssh client (" + err.Error() + ")"
+	case code == 255:
+		return "exit 255 (an ssh error, such as a lost connection)"
+	case code > 128:
+		return "exit " + strconv.Itoa(code) + " (a signal, to ssh or to a command on the node)"
+	}
+	return ""
+}
+
 // preseedInstallFailure ports handover::install_failure: the cause of a
-// failed install call from its output. lost is true for exit 255 (an ssh
-// error, a lost connection too): the node can run steps after the last
-// line that came back, so the state is unknown whatever step that line
-// names. Else the last line names the step that failed, and a mv failure
-// names the files that went into place before it. A last line that names
-// no step (text from the node's shell) also says that the state is
-// unknown. An unknown state names each destination to check.
-func preseedInstallFailure(out string, lost bool, node string) string {
+// failed install call from its output. A cause (preseedInstallCause) means
+// that the node can run steps after the last line that came back, so the
+// state is unknown whatever step that line names. Else the last line names
+// the step that failed, and a mv failure names the files that went into
+// place before it. A last line that names no step (text from the node's
+// shell) also says that the state is unknown. An unknown state names each
+// destination to check.
+func preseedInstallFailure(out, cause, node string) string {
 	last := lastLine(out)
 	dests := make([]string, 0, len(handoverPKIKeys))
 	for _, key := range handoverPKIKeys {
 		dests = append(dests, preseedPKIDir+"/"+key)
 	}
-	if lost {
+	if cause != "" {
 		seen := "no step arrived, but steps can have run"
 		for _, key := range handoverPKIKeys {
 			if last == "chmod "+key || last == "mv "+key {
 				seen = `the last step that arrived is "` + last + `", and later steps can have run`
 			}
 		}
-		return "the install call on " + node + " ended with exit 255 (an ssh error, such as a lost connection), so the state of the install is UNKNOWN: " +
+		return "the install call on " + node + " ended with " + cause + ", so the state of the install is UNKNOWN: " +
 			seen + ". Check each of these files on " + node + ": " + strings.Join(dests, " ")
 	}
 	var placed []string

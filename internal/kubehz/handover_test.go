@@ -1862,6 +1862,207 @@ func TestHandoverPreseedEachFailureStepRemovesTheStagingFiles(t *testing.T) {
 	}
 }
 
+// After the node ran the install call, an end of the call that is not a
+// normal exit of the remote command makes the state of the install
+// UNKNOWN, also when the last line that came back is a chmod or a mv
+// step: a signal (exit 128+N, of the ssh client or of a remote command),
+// an error of the ssh client (it did not start, or its wait failed) and a
+// cancel. The fake ssh returns what osRunner returns for each: a killed
+// client is a real *exec.ExitError of SIGKILL. Exit 0 pre-seeds. The table
+// above has exit 255. The cleanup call also runs after a cancel, on a
+// context that is not done and that has a deadline of its own. When that
+// call fails, preseed names the staging files.
+func TestHandoverPreseedInstallStateIsUnknownAfterAClientFailure(t *testing.T) {
+	isInstall := func(c execx.Cmd) bool { return strings.Contains(c.Args[len(c.Args)-1], " && mv -f -T ") }
+	unknown := func(cause, seen string) string {
+		return "handover: the install call on 203.0.113.7 ended with " + cause + ", so the state of the install is UNKNOWN: " + seen +
+			". Check each of these files on 203.0.113.7: " + preseedDests
+	}
+	const (
+		third     = `the last step that arrived is "chmod sa.pub", and later steps can have run`
+		seventh   = `the last step that arrived is "mv ca.crt", and later steps can have run`
+		none      = "no step arrived, but steps can have run"
+		killed    = "exit 137 (a signal, to ssh or to a command on the node)"
+		clientErr = "an error of the ssh client ("
+		canceled  = "a cancel (context canceled)"
+		// preseeded starts the line of a preseed that ends with exit 0.
+		preseeded = "handover: PKI pre-seeded on 203.0.113.7."
+	)
+	// cutAt runs the whole install on the node, but only its first n step
+	// lines come back. cut gives the first three.
+	cutAt := func(n int) func(cmd string) string {
+		return func(cmd string) string { return fmt.Sprintf("{ %s; } | sed -n 1,%dp", cmd, n) }
+	}
+	cut := cutAt(3)
+	// run is the client status of the install call: ssh runs the remote
+	// command on the fake node and gives the status of its sh.
+	run := func(ssh func() error, _ context.CancelFunc) error { return ssh() }
+	for _, tc := range []struct {
+		name string
+		// node changes the remote command of the install call (nil: as it is).
+		node func(cmd string) string
+		// status is what the install call returns. ssh runs the call on the
+		// fake node, and cancel cancels the context of preseed.
+		status   func(ssh func() error, cancel context.CancelFunc) error
+		want     string
+		placed   []string
+		signaled bool
+		// cleanupFails fails the cleanup call (the rm of the staging files).
+		cleanupFails bool
+	}{
+		{"ssh exits 0 after the install", nil, run, preseeded, handoverPKIKeys, false, false},
+		{"ssh dies of SIGKILL after the third step line", func(cmd string) string { return cut(cmd) + "; kill -KILL $$" }, run,
+			unknown(killed, third), handoverPKIKeys, true, false},
+		{"ssh dies of SIGKILL after the seventh step line, a mv step", func(cmd string) string { return cutAt(7)(cmd) + "; kill -KILL $$" }, run,
+			unknown(killed, seventh), handoverPKIKeys, true, false},
+		{"ssh dies of SIGKILL before a step line", func(cmd string) string { return "kill -KILL $$; " + cmd }, run,
+			unknown(killed, none), nil, true, false},
+		{"ssh exits 137 for a remote command that a signal killed after the third step line",
+			func(cmd string) string { return cut(cmd) + "; exit 137" }, run, unknown(killed, third), handoverPKIKeys, false, false},
+		{"the ssh client does not start", nil, func(func() error, context.CancelFunc) error {
+			return fmt.Errorf("ssh: %w", execx.ErrNotFound)
+		}, unknown(clientErr+"ssh: "+execx.ErrNotFound.Error()+")", none), nil, false, false},
+		// exec.ErrWaitDelay stands for a wait error that gives no exit
+		// status. osRunner sets no WaitDelay for these calls, so it does
+		// not return this error itself.
+		{"the wait of the ssh client fails after the third step line", cut, func(ssh func() error, _ context.CancelFunc) error {
+			if err := ssh(); err != nil {
+				return err
+			}
+			return exec.ErrWaitDelay
+		}, unknown(clientErr+exec.ErrWaitDelay.Error()+")", third), handoverPKIKeys, false, false},
+		// A cancel after the child ended with 0: Wait gives ctx.Err().
+		{"a cancel, then ssh exits 0 after the third step line", cut, func(ssh func() error, cancel context.CancelFunc) error {
+			err := ssh()
+			cancel()
+			if err != nil {
+				return err
+			}
+			return context.Canceled
+		}, unknown(canceled, third), handoverPKIKeys, false, false},
+		{"a cancel, then ssh exits 1 after the third step line", cut, func(ssh func() error, cancel context.CancelFunc) error {
+			_ = ssh()
+			cancel()
+			return exitErr(1)
+		}, unknown(canceled, third), handoverPKIKeys, false, false},
+		{"a cancel, then ssh exits 1 after the third step line, and the cleanup fails", cut, func(ssh func() error, cancel context.CancelFunc) error {
+			_ = ssh()
+			cancel()
+			return exitErr(1)
+		}, unknown(canceled, third), handoverPKIKeys, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancelCtx := context.WithCancel(t.Context())
+			defer cancelCtx()
+			ho := newHandover(t)
+			root := filepath.Join(ho.base, "node")
+			node := fakeNode(t, root, func(c execx.Cmd, cmd string) (string, error) {
+				if tc.node != nil && isInstall(c) {
+					return tc.node(cmd), nil
+				}
+				return cmd, nil
+			})
+			ssh := node["ssh"]
+			var installErr error
+			var cleanupCtx context.Context
+			node["ssh"] = func(c execx.Cmd) error {
+				if !isInstall(c) {
+					// exec.CommandContext starts no call on a context that
+					// is done. The fake reads the context of the call.
+					callCtx := ho.runner.ctx
+					cleanup := strings.HasPrefix(c.Args[len(c.Args)-1], "rm -f -- ")
+					if cleanup {
+						cleanupCtx = callCtx
+					}
+					if err := callCtx.Err(); err != nil {
+						return err
+					}
+					if cleanup && tc.cleanupFails {
+						return exitErr(1)
+					}
+					return ssh(c)
+				}
+				installErr = tc.status(func() error { return ssh(c) }, cancelCtx)
+				return installErr
+			}
+			ho.mockNodeBinaries(node)
+			err := ho.ctx.HandoverPreseed(ctx, PreseedOpts{Bundle: ho.bundle, Node: "203.0.113.7"})
+			out := ho.output()
+			if tc.want == preseeded {
+				mustOK(t, err, out)
+				mustContain(t, out, tc.want)
+				mustNotContain(t, out, "UNKNOWN")
+			} else {
+				mustErr(t, err)
+				mustContain(t, out, tc.want)
+				mustNotContain(t, out, "PKI pre-seeded")
+				mustNotContain(t, out, "no file was moved")
+				mustNotContain(t, out, "could not move the staging file")
+				calls := ho.sshCalls()
+				if last := calls[len(calls)-1]; !strings.HasPrefix(last, "ssh ") || !strings.Contains(last, " root@203.0.113.7 rm -f -- /etc/kubernetes/pki/.") {
+					t.Fatalf("the last call must remove the staging files:\n%s", strings.Join(calls, "\n"))
+				}
+				// The cleanup call also runs after a cancel: on a context
+				// that is not done, with a deadline of its own.
+				if dl, ok := cleanupCtx.Deadline(); !ok || time.Until(dl) > preseedCleanupTimeout {
+					t.Fatalf("the cleanup call must have a deadline of at most %v, got %v %v", preseedCleanupTimeout, dl, ok)
+				}
+				// When the cleanup call fails, preseed names the staging
+				// files (here the install moved each one).
+				if tc.cleanupFails {
+					mustContain(t, out, "handover: could not remove the staging files on 203.0.113.7; they can hold key bytes. Remove them yourself: /etc/kubernetes/pki/.")
+				} else {
+					mustNotContain(t, out, "could not remove the staging files")
+				}
+			}
+			if tc.signaled {
+				xe, ok := errors.AsType[*exec.ExitError](installErr)
+				if !ok {
+					t.Fatalf("the fake ssh must return an *exec.ExitError, got %T: %v", installErr, installErr)
+				}
+				if ws, ok := xe.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
+					t.Fatalf("the fake ssh must die of SIGKILL, got %v", xe)
+				}
+			}
+			ho.installedPKI(t, root, tc.placed...)
+			for _, key := range handoverPKIKeys[len(tc.placed):] {
+				if info, err := os.Lstat(root + preseedPKIDir + "/" + key); err == nil && !info.IsDir() {
+					t.Fatalf("%s went into place, but the node did not run its mv", key)
+				}
+			}
+			if left := stagingLeft(t, root); len(left) != 0 {
+				t.Fatalf("staging files left: %v", left)
+			}
+		})
+	}
+}
+
+// The cause of an install call that ends after the context of preseed is
+// done says "a timeout" when its deadline passed, else "a cancel".
+func TestPreseedInstallCauseNamesATimeoutOrACancel(t *testing.T) {
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	expired, cancelExpired := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want string
+	}{
+		{"a cancel", canceled, context.Canceled, "a cancel (context canceled)"},
+		{"a cancel after exit 1", canceled, exitErr(1), "a cancel (context canceled)"},
+		{"a deadline that passed", expired, context.DeadlineExceeded, "a timeout (context deadline exceeded)"},
+		{"a deadline that passed after exit 1", expired, exitErr(1), "a timeout (context deadline exceeded)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := preseedInstallCause(tc.ctx, tc.err); got != tc.want {
+				t.Fatalf("preseedInstallCause = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // The stage call refuses before its first mktemp, so before any scp, when
 // a dir on the path of the pki dir is not a dir (a link or a file), has a
 // write bit for the group or others, or has an owner that it may not have:
@@ -1929,7 +2130,7 @@ func TestHandoverPreseedRefusesAnUntrustedDir(t *testing.T) {
 				}
 			}, checkAt("/", "/tmp"), false},
 		// The ssh user may own /etc/kubernetes, but not /etc. The check of
-		// /etc reads root/etc (checkAt below).
+		// /etc reads root/etc (checkAt below), a dir of the ssh user.
 		{"/etc of the ssh user", "/etc", fmt.Sprintf("%d 755 directory", other),
 			func(t *testing.T, root string) {
 				if err := os.Chmod(root+"/etc", 0o755); err != nil {
@@ -1950,7 +2151,14 @@ func TestHandoverPreseedRefusesAnUntrustedDir(t *testing.T) {
 				hook = tc.hook(root)
 			}
 			if tc.dir == "/etc" {
-				hook = checkAt("/etc", root+"/etc")(root)
+				// The fake node answers id -u with the owner of root/etc
+				// (as root, 4242), so the ssh user owns that dir, and a
+				// rule that lets the ssh user own /etc lets it pass.
+				at := checkAt("/etc", root+"/etc")(root)
+				hook = func(c execx.Cmd, cmd string) (string, error) {
+					cmd, err := at(c, cmd)
+					return strings.ReplaceAll(cmd, `"$(id -u)"`, fmt.Sprintf(`"%d"`, other)), err
+				}
 			}
 			if tc.otherOwner {
 				// The ssh user is another uid than the owner of the dir:

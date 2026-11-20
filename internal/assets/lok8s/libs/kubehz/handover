@@ -1035,8 +1035,8 @@ handover::preseed() {
     out="$("${remote[@]}" "${install_cmd}" 2> "${errfile}")" || rc=$?
     err="$(< "${errfile}")"
     if (( rc )); then
-      # ssh exits 255 on its own error, a lost connection too. The node can
-      # then run steps after the last line that came back.
+      # After exit 255 (an ssh error, a lost connection too) or a signal,
+      # the node can run steps after the last line that came back.
       failed="$(handover::install_failure "${out##*$'\n'}" "${rc}" "${node}")"
       shown="$(handover::streams "the install call on ${node}" "${out}" "${err}")"
     fi
@@ -1239,22 +1239,32 @@ handover::install_cmd() {
 
 # Print the cause of a failed install call from the last line that it
 # printed (handover::install_cmd) and its exit status. Exit 255 is an ssh
-# error, a lost connection too: the node can run steps after the last line
-# that came back, so the state is unknown whatever step that line names.
-# Else the last line names the step that failed, and a mv failure names the
-# files that went into place before it. A last line that names no step
-# (text from the node's shell) also says that the state is unknown. An
-# unknown state names each destination to check.
+# error, a lost connection too. An exit above 128 is a signal: to the ssh
+# client, or to a command on the node (bash cannot tell the two apart).
+# After either, the node can run steps after the last line that came back,
+# so the state is unknown whatever step that line names. Else the last line
+# names the step that failed, and a mv failure names the files that went
+# into place before it. A last line that names no step (text from the
+# node's shell) also says that the state is unknown. An unknown state names
+# each destination to check. The Go twin (preseedInstallFailure) gives the
+# same messages. It also has causes that bash does not have: a cancel or a
+# timeout of its context, and an error of the ssh client that gives no exit
+# status.
 handover::install_failure() {
-  local last="${1}" rc="${2}" node="${3}" key done_keys="" seen msg
+  local last="${1}" rc="${2}" node="${3}" key done_keys="" seen msg cause=""
   local dests="${KUBEHZ_HANDOVER_PKI_KEYS[*]/#//etc/kubernetes/pki/}"
   if (( rc == 255 )); then
+    cause="exit 255 (an ssh error, such as a lost connection)"
+  elif (( rc > 128 )); then
+    cause="exit ${rc} (a signal, to ssh or to a command on the node)"
+  fi
+  if [[ -n "${cause}" ]]; then
     seen="no step arrived, but steps can have run"
     for key in "${KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
       [[ "${last}" == "chmod ${key}" || "${last}" == "mv ${key}" ]] || continue
       seen="the last step that arrived is \"${last}\", and later steps can have run"
     done
-    msg="the install call on ${node} ended with exit 255 (an ssh error, such as a lost connection), so the state of the install is UNKNOWN: ${seen}."
+    msg="the install call on ${node} ended with ${cause}, so the state of the install is UNKNOWN: ${seen}."
     printf '%s\n' "${msg} Check each of these files on ${node}: ${dests}"
     return 0
   fi
