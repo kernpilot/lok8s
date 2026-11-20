@@ -171,9 +171,11 @@ ${root}/libs/split"
 }
 
 # The anti-vacuity half: each canary breaks a rule in one way, and the gate
-# names its file and line. The compliant forms (and the forms that are not
-# a curl call) give no line. The allowlist of the tree is cleared here: its
-# entries name files that this run does not read.
+# names its file and line. The compliant forms give no line, and so do the
+# forms that are not a curl call: in quotes, in a comment, or on a line
+# that opts out of the backstop with "# curl-gate: not a call". The
+# allowlist of the tree is cleared here: its entries name files that this
+# run does not read.
 @test "curl gate: each canary breaks the rule it shows, and the compliant forms pass" {
   local bad="${BATS_TEST_TMPDIR}/bad.sh" good="${BATS_TEST_TMPDIR}/good.sh"
   CURL_GATE_ALLOW=()
@@ -237,8 +239,8 @@ local -a curl_args=(
   --config -
 )
 error "a value for the curl option holds a control character"
-command -v curl >/dev/null
-apt-get -y install jq curl gnupg
+command -v curl >/dev/null # curl-gate: not a call
+apt-get -y install jq curl gnupg # curl-gate: not a call
 x=$(http::curl_config header "Authorization: Bearer ${T}" | (
   http::tls_log_vars_unset &&
     curl -q -K - -fsSL \
@@ -251,9 +253,9 @@ if out=$(printf '%s' "${b}" | ( http::tls_log_vars_unset && curl -q -sS --data-b
 ( http::tls_log_vars_unset && cu\
 rl -q -sS https://h.example/n10 )
 eval "${saved_traps}"
-x=$(echo curl is a word, not a call)
+x=$(echo curl is a word, not a call) # curl-gate: not a call
 printf '%s\n' "${a}" | tr -d '\n' | ( http::tls_log_vars_unset && curl -q -sS https://h.example/n11 )
-y="$(echo curl is a word here too)"
+y="$(echo curl is a word here too)" # curl-gate: not a call
 SH
   local q="a curl call: -q is not its first argument"
   local v="curl named through a variable: the gate cannot check that call"
@@ -370,7 +372,7 @@ ${good}:23"
 # their verdicts: a real assignment prefix (also with an operator in
 # quotes) is still a call with -q, a quoted operator is no operator, and
 # the & of a redirection (>&x=y, a file) ends no word, so the curl after
-# it stays an argument.
+# it stays an argument (its line opts out of the backstop).
 @test "curl gate: a shell operator ends a word, so an assignment before it hides no curl call" {
   local bad="${BATS_TEST_TMPDIR}/ops-bad.sh" good="${BATS_TEST_TMPDIR}/ops-good.sh" n
   CURL_GATE_ALLOW=()
@@ -399,7 +401,7 @@ echo 'x=y&& curl -u u:p https://h.example/c4'
 ( http::tls_log_vars_unset && curl -q -sS "https://h.example/c5?a=1;b=2" )
 x=$(X=1 curl -q -sS https://h.example/c6)
 echo x=y 2>&1 | curl -q -sS https://h.example/c7
-echo a >&x=y curl -sS https://h.example/c8
+echo a >&x=y curl -sS https://h.example/c8 # curl-gate: not a call
 SH
   local q="a curl call: -q is not its first argument"
   local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
@@ -438,6 +440,170 @@ ${good}:2: ${t}
 ${good}:3: ${t}
 ${good}:7: ${t}
 ${good}:8: ${t}"
+}
+
+# A ${ } nests: a ${ in it opens one more, quotes in it are quotes, and
+# only its own } ends it. A $( ) or a `…` in a ${ } or in double quotes is
+# a command, and the gate finds a call there as at the top level. A call
+# also starts at curl and a redirection (curl</dev/null). Each canary is a
+# credential call in both modes. The controls: curl in the text of a ${ }
+# is no call, and a redirection is no argument, so a -q after it is the
+# first argument.
+@test "curl gate: an expansion nests, a command in it is a command, and a call starts at curl and a redirection" {
+  local bad="${BATS_TEST_TMPDIR}/nest-bad.sh" good="${BATS_TEST_TMPDIR}/nest-good.sh" n
+  CURL_GATE_ALLOW=()
+  cat > "${bad}" <<'SH'
+X=${a:-${b};} curl -u "${U}:${P}" "${url}"
+echo ${y:-$(X=${z} curl -u "${U}:${P}" "${url}")}
+echo ${y:-`curl -u "${U}:${P}" "${url}"`}
+echo "x `curl -u u:p https://h.example/t4`"
+X=${a:-"}"} curl -u "${U}:${P}" "${url}"
+curl</dev/null -u "${U}:${P}" "${url}"
+curl>/tmp/out -u "${U}:${P}" "${url}"
+SH
+  cat > "${good}" <<'SH'
+echo ${a:-${b};curl -u u:p https://h.example/n1}
+echo ${a:-see curl docs}
+curl</dev/null -q -sS https://h.example/n3
+curl 2>/dev/null -q -sS https://h.example/n4
+SH
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local want_q="" want_t="" want_l=""
+  for n in 1 2 3 4 5 6 7; do
+    want_q+="${bad}:${n}: ${q}"$'\n'
+    want_t+="${bad}:${n}: ${t}"$'\n'
+    want_l+="${bad}:${n} credential"$'\n'
+  done
+  run curl_gate q "${bad}"
+  assert_failure 1
+  assert_output "${want_q%$'\n'}"
+  run curl_gate tls "${bad}"
+  assert_failure 1
+  assert_output "${want_t%$'\n'}"
+  run curl_gate list "${bad}"
+  assert_success
+  assert_output "${want_l%$'\n'}"
+  run curl_gate q "${good}"
+  assert_success
+  assert_output ""
+  run curl_gate list "${good}"
+  assert_success
+  assert_output "${good}:3
+${good}:4"
+  run curl_gate tls "${good}"
+  assert_failure 1
+  assert_output "${good}:3: ${t}
+${good}:4: ${t}"
+}
+
+# The backstop: a curl word in code that the gate cannot place as a call
+# is a finding in the q and tls modes. The canaries: a case arm, a
+# redirection before the command (also before \curl and a path), a lookup,
+# an argument, and six lines that do not opt out: more text after the
+# marker, no space after its #, other text of the same length, no white
+# space before its #, the marker text in a string before a comment of
+# the same length, and a marker in a string that goes on to the next
+# line (no comment). A line opts out only with the trailing comment
+# "# curl-gate: not a call" after white space. The controls hold no curl
+# word in code: in quotes, in a comment, in a ${ }, in a longer word, and
+# on a line that opts out.
+@test "curl gate: a curl word that the gate cannot place is a finding, unless its line opts out" {
+  local bad="${BATS_TEST_TMPDIR}/word-bad.sh" good="${BATS_TEST_TMPDIR}/word-good.sh" n
+  CURL_GATE_ALLOW=()
+  cat > "${bad}" <<'SH'
+case "${x}" in a) curl -u "${U}:${P}" "${url}" ;; esac
+2>&1 curl -u "${U}:${P}" "${url}"
+2>/dev/null \curl -u "${U}:${P}" "${url}"
+2>/dev/null /usr/bin/curl -u "${U}:${P}" "${url}"
+command -v curl >/dev/null
+x=$(echo curl is a word, not a call)
+cmd -x curl # curl-gate: not a call here
+cmd -x curl #curl-gate: not a call
+cmd -x curl # curl-gate: not a CALL
+cmd -x curl;# curl-gate: not a call
+echo "# curl-gate: not a call" curl # curl-gate: not a CALL
+echo curl "x # curl-gate: not a call
+y"
+SH
+  cat > "${good}" <<'SH'
+echo "curl -u ${U}:${P} ${url}"
+# curl -u "${U}:${P}" "${url}"
+cmd # curl -u "${U}:${P}" "${url}"
+echo ${a:-see curl docs}
+curl_gate q x.sh
+source lib/curl.sh
+cmd -x curl # curl-gate: not a call
+SH
+  local c="a curl word the gate cannot place" want=""
+  for n in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    want+="${bad}:${n}: ${c}"$'\n'
+  done
+  run curl_gate q "${bad}"
+  assert_failure 1
+  assert_output "${want%$'\n'}"
+  run curl_gate tls "${bad}"
+  assert_failure 1
+  assert_output "${want%$'\n'}"
+  run curl_gate list "${bad}"
+  assert_success
+  assert_output ""
+  local m
+  for m in q tls list; do
+    run curl_gate "${m}" "${good}"
+    assert_success
+    assert_output ""
+  done
+}
+
+# An alias or a function named curl: the gate checks the source text, not
+# the command that a curl call runs, so each definition is a finding in
+# the q mode. The calls in a function body stay calls. The controls name
+# curl in no definition: a function that calls curl, and the words alias
+# and function as arguments.
+@test "curl gate: an alias or a function named curl is a finding in the q mode" {
+  local bad="${BATS_TEST_TMPDIR}/shadow-bad.sh" good="${BATS_TEST_TMPDIR}/shadow-good.sh" n
+  CURL_GATE_ALLOW=()
+  cat > "${bad}" <<'SH'
+alias curl='command curl -s'
+alias ll='ls -l' curl=wget
+alias 'curl=command curl -s'
+curl() { command curl -q "$@"; }
+curl () { command curl -q "$@"; }
+function curl { command curl -q "$@"; }
+function curl() { :; }
+SH
+  cat > "${good}" <<'SH'
+x() { curl -q -sS https://h.example/s1; }
+echo function curl # curl-gate: not a call
+echo alias curl=x # curl-gate: not a call
+curl_alias=1
+SH
+  local s="an alias or a function named curl: the gate cannot check what a curl call runs"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local want=""
+  for n in 1 2 3 4 5 6 7; do
+    want+="${bad}:${n}: ${s}"$'\n'
+  done
+  run curl_gate q "${bad}"
+  assert_failure 1
+  assert_output "${want%$'\n'}"
+  run curl_gate tls "${bad}"
+  assert_failure 1
+  assert_output "${bad}:4: ${t}
+${bad}:5: ${t}
+${bad}:6: ${t}"
+  run curl_gate list "${bad}"
+  assert_success
+  assert_output "${bad}:4
+${bad}:5
+${bad}:6"
+  run curl_gate q "${good}"
+  assert_success
+  assert_output ""
+  run curl_gate list "${good}"
+  assert_success
+  assert_output "${good}:1"
 }
 
 # The credential forms: each call of cred.sh carries one form, each call
