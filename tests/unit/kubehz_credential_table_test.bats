@@ -45,6 +45,77 @@ CR_TABLE=(
   "claim|-|invalid claim nonce|1|none"
 )
 
+# The checks of the kubehz libs that are no credential check of an entry
+# point, and why. Each one is a site as _lib_sites prints it.
+SITES_NOT_IN_TABLE=(
+  "kubehz::token_has_control [[:cntrl:]]|the check itself: the table has a row for each call of it"
+  "handover::ssh_path_unsafe [[:cntrl:]]|a check of a path for an ssh -o option, not of a credential"
+)
+
+# _lib_sites <file>...: one line for each check in the files, with the
+# function that holds it: "<function> http::credential_ok <name>" for each
+# name of a call (a name can be in quotes), "<function>
+# kubehz::token_has_control" for each call, and "<function> [[:cntrl:]]" for
+# each other check of the class. A line that starts a function sets the
+# function; the rest of that line is read too. A comment line is no call. A
+# call with a name that it cannot read (a $variable, a line that goes on with
+# a backslash, no name) gives "UNREAD <file>:<line>: <text>". The finder does
+# not strip a comment or a string at the end of a line: a match there only
+# adds a site, so the gate fails on it and hides none.
+_lib_sites() {
+  LC_ALL=C awk -v q="'" '
+    function site(s) { print f " " s }
+    function unread() { print "UNREAD " FILENAME ":" FNR ": " $0 }
+    BEGIN {
+      plain = "^[A-Za-z_][A-Za-z0-9_]*"
+      dq = "^\"[A-Za-z_][A-Za-z0-9_]*\""
+      sq = "^" q "[A-Za-z_][A-Za-z0-9_]*" q
+    }
+    FNR == 1 { f = "(top level)" }
+    /^[[:space:]]*#/ { next }
+    {
+      s = $0
+      if (match(s, /^[A-Za-z_][A-Za-z0-9_:.-]*[[:space:]]*\(\)/)) {
+        f = substr(s, 1, RLENGTH)
+        sub(/[[:space:]]*\(\)$/, "", f)
+        s = substr(s, RLENGTH + 1)
+      }
+      t = s
+      while (match(t, /kubehz::token_has_control/)) {
+        site("kubehz::token_has_control")
+        t = substr(t, RSTART + RLENGTH)
+      }
+      t = s
+      while (match(t, /\[:cntrl:\]/)) {
+        site("[[:cntrl:]]")
+        t = substr(t, RSTART + RLENGTH)
+      }
+      t = s
+      while (match(t, /http::credential_ok/)) {
+        t = substr(t, RSTART + RLENGTH)
+        r = t
+        n = 0
+        while (1) {
+          sub(/^[[:space:]]+/, "", r)
+          if (r == "" || r ~ /^(\|\||&&|;|\||\)|#)/) break
+          if (match(r, plain) || match(r, dq) || match(r, sq)) {
+            name = substr(r, 1, RLENGTH)
+            r = substr(r, RLENGTH + 1)
+            gsub(/"/, "", name)
+            gsub(q, "", name)
+            if (r != "" && r !~ /^([[:space:]]|;|\||&|\))/) { n = -1; break }
+            site("http::credential_ok " name)
+            n++
+            continue
+          }
+          n = -1
+          break
+        }
+        if (n <= 0) unread()
+      }
+    }' "$@"
+}
+
 setup() {
   load "../test_helper"
   setup_tmpdir
@@ -269,39 +340,78 @@ _case() {
   fi
 }
 
-# The sites of the table must be the sites of the libs: each call of
-# http::credential_ok and kubehz::token_has_control in the kubehz libs,
-# with the function that holds it. A new check of a credential then fails
-# here until the table has a row for it.
+# The sites of the table must be the sites of the libs: each check in the
+# kubehz libs (_lib_sites), with the function that holds it. A new check of
+# a credential then fails here until the table has a row for it. Two rows
+# can go through one site (two entry points, one check), so the table side
+# counts each site once. The lib side counts each check: a second check of
+# one name in one function fails, and so does a check that goes.
 @test "the table has a row for each credential check of the kubehz libs" {
-  local row name site want rc calls f want_sites got_sites
+  local row name site want rc calls f want_sites got_sites unread
   local -a sites=() libs=()
   for row in "${CR_TABLE[@]}"; do
     IFS='|' read -r name site want rc calls <<<"${row}"
     [[ "${site}" == - ]] || sites+=("${site}")
+  done
+  for row in "${SITES_NOT_IN_TABLE[@]}"; do
+    sites+=("${row%%|*}")
   done
   want_sites=$(printf '%s\n' "${sites[@]}" | LC_ALL=C sort -u)
   for f in "${_PROJECT_ROOT}/.lok8s/libs/kubehz"/*; do
     [[ ! -f "${f}" ]] || libs+=("${f}")
   done
   (( ${#libs[@]} >= 5 ))
-  # A line that starts a function sets the function. A comment line and
-  # the line that defines the check are no call.
-  got_sites=$(LC_ALL=C awk '
-    /^[A-Za-z_][A-Za-z0-9_:.-]*\(\)[[:space:]]*[({]/ { f = $1; sub(/\(\).*/, "", f); next }
-    /^[[:space:]]*#/ { next }
-    {
-      s = $0
-      while (match(s, /http::credential_ok [A-Z_]+|kubehz::token_has_control/)) {
-        print f " " substr(s, RSTART, RLENGTH)
-        s = substr(s, RSTART + RLENGTH)
-      }
-    }' "${libs[@]}" | LC_ALL=C sort -u)
+  got_sites=$(_lib_sites "${libs[@]}")
+  unread=$(grep '^UNREAD ' <<<"${got_sites}" || true)
+  if [[ -n "${unread}" ]]; then
+    printf 'a check that the gate cannot read:\n%s\n' "${unread}"
+    return 1
+  fi
+  got_sites=$(LC_ALL=C sort <<<"${got_sites}")
   [ -n "${got_sites}" ]
   if [[ "${got_sites}" != "${want_sites}" ]]; then
     diff <(printf '%s\n' "${want_sites}") <(printf '%s\n' "${got_sites}") || true
     return 1
   fi
+}
+
+# Each shape of a check that _lib_sites must find, and each shape that it
+# must refuse to read.
+@test "the site finder reads each shape of a check" {
+  local fx="${BATS_TEST_TMPDIR}/fixture-lib" got
+  cat > "${fx}" <<'FIXTURE'
+# http::credential_ok IN_A_COMMENT
+fx::def() { http::credential_ok DEF_LINE || return 1; }
+fx::names() {
+  http::credential_ok FIRST SECOND_2 "QUOTED" 'SINGLE' || return 1
+  if ! http::credential_ok AFTER_NOT; then return 1; fi
+  http::require_https "${u}" x && http::credential_ok AFTER_AND && kubehz::token_has_control "${v}"
+  [[ "${w}" == *[[:cntrl:]]* ]] && return 1
+  http::credential_ok "${dynamic}" || return 1
+  http::credential_ok ONE \
+    TWO
+  http::credential_ok || return 1
+  http::credential_ok NAME$suffix || return 1
+}
+FIXTURE
+  got=$(_lib_sites "${fx}" | sed "s|${fx}|fx|" | LC_ALL=C sort)
+  assert_equal "${got}" "$(LC_ALL=C sort <<'WANT'
+fx::def http::credential_ok DEF_LINE
+fx::names http::credential_ok FIRST
+fx::names http::credential_ok SECOND_2
+fx::names http::credential_ok QUOTED
+fx::names http::credential_ok SINGLE
+fx::names http::credential_ok AFTER_NOT
+fx::names http::credential_ok AFTER_AND
+fx::names kubehz::token_has_control
+fx::names [[:cntrl:]]
+fx::names http::credential_ok ONE
+UNREAD fx:8:   http::credential_ok "${dynamic}" || return 1
+UNREAD fx:9:   http::credential_ok ONE \
+UNREAD fx:11:   http::credential_ok || return 1
+UNREAD fx:12:   http::credential_ok NAME$suffix || return 1
+WANT
+)"
 }
 
 # `lo kubehz claim --nonce -` reads one line from stdin and removes the
