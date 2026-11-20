@@ -39,9 +39,23 @@ setup() {
   export KIND_EXPERIMENTAL_DOCKER_NETWORK="lok8s-test"
   export CALLS="${BATS_TEST_TMPDIR}/calls"
   : > "${CALLS}"
+  # The kubectl stub logs a call that it does not know here too. No test
+  # clears this file.
+  export UNEXPECTED="${BATS_TEST_TMPDIR}/unexpected"
 }
 
-teardown() { teardown_tmpdir; }
+# A kubectl call that the stub does not know fails the test, also when the
+# test does not look for it.
+teardown() {
+  local unexpected=""
+  if [[ -s "${UNEXPECTED:-}" ]]; then unexpected=$(cat "${UNEXPECTED}"); fi
+  teardown_tmpdir
+  [[ -z "${unexpected}" ]] || {
+    echo "The kubectl stub got calls that it does not know:" >&2
+    echo "${unexpected}" >&2
+    return 1
+  }
+}
 
 # Two nodes: `good` already agrees with the cluster network, `bad` is pinned to
 # the registry network's (stale) address.
@@ -278,8 +292,8 @@ _load() {
   #   the node to $BATS_TEST_TMPDIR/nudges).
   #
   # The read and the nudge must also name the kubeconfig of the cluster. Any
-  # other call logs "kubectl-unexpected: …" and fails, so a new call shape
-  # fails loud.
+  # other call logs "kubectl-unexpected: …" to $CALLS and $UNEXPECTED and
+  # fails, so a new call shape fails loud.
   kubectl() {
     local call="${*}" kc="" ns="" shape n answer
     local nudge='<delete><pod><-l><k8s-app=cilium><--field-selector>'
@@ -287,8 +301,9 @@ _load() {
     while (( $# )); do
       case "${1}" in
         --kubeconfig|-n)
-          # A flag without its value stays in the words: no shape matches.
-          (( $# >= 2 )) || { words+=("${1}"); break; }
+          # A flag without its value clears the words. No shape is empty, so
+          # the call is unexpected.
+          (( $# >= 2 )) || { words=(); break; }
           if [[ "${1}" == -n ]]; then ns="${2}"; else kc="${2}"; fi
           shift 2
           ;;
@@ -300,7 +315,7 @@ _load() {
     printf -v shape '<%s>' "${words[@]}"
     if [[ "${shape}" == '<get><--raw></readyz>' ]]; then
       [[ "${call}" == "--kubeconfig ${BATS_TEST_TMPDIR}/kubeconfig --request-timeout=5s get --raw /readyz" ]] || {
-        echo "readyz-unexpected: kubectl ${call}" >> "${CALLS}"
+        echo "readyz-unexpected: kubectl ${call}" | tee -a "${UNEXPECTED}" >> "${CALLS}"
         return 1
       }
       echo "readyz" >> "${CALLS}"
@@ -319,7 +334,7 @@ _load() {
           ;;
       esac
     fi
-    echo "kubectl-unexpected: kubectl ${call}" >> "${CALLS}"
+    echo "kubectl-unexpected: kubectl ${call}" | tee -a "${UNEXPECTED}" >> "${CALLS}"
     return 1
   }
 }
@@ -456,7 +471,8 @@ _load() {
   lo::heal_node_ips lotest
 
   grep -q '^repair:bad$' "${CALLS}"
-  ! grep -qE '^(cni-restart|readyz)$' "${CALLS}" || {
+  # The stub logs a call without the kubeconfig as "…-unexpected: …".
+  ! grep -qE '^(cni-restart|readyz)$|-unexpected: ' "${CALLS}" || {
     echo "kubectl was invoked without a kubeconfig — it would talk to whatever" >&2
     echo "\$KUBECONFIG/current-context happens to point at: the WRONG cluster." >&2
     return 1
@@ -467,36 +483,38 @@ _load() {
   # The kubeconfig path is in a mktemp directory, so it can hold any word
   # (seen on CI: /tmp/tmp.GjVWxF6get). A kubectl stub that globs over the
   # whole argv then takes the CNI nudge for a `get node` read, or answers a
-  # read for the wrong node. Here all paths of the test are in a directory
-  # whose name holds the words that the stub routes on. This
-  # BATS_TEST_TMPDIR is local to the test: teardown removes the directory of
-  # the test, and this directory with it.
-  local BATS_TEST_TMPDIR="${BATS_TEST_TMPDIR}/get-node-good-bad"
-  mkdir -p "${BATS_TEST_TMPDIR}"
-  _load
-  # Both nodes drift, so both get a repair and a CNI nudge.
-  echo 'KUBELET_KUBEADM_ARGS="--node-ip=172.31.0.9 --node-labels="' > "$(node_flag good)"
+  # read for the wrong node. Here every path that reaches the kubectl argv
+  # is in a directory whose name holds the words that the stub routes on.
+  # The body runs in a subshell, so the changed BATS_TEST_TMPDIR never
+  # reaches teardown, which removes the directory of the test.
+  (
+    BATS_TEST_TMPDIR="${BATS_TEST_TMPDIR}/get-node-good-bad"
+    mkdir -p "${BATS_TEST_TMPDIR}"
+    _load
+    # Both nodes drift, so both get a repair and a CNI nudge.
+    echo 'KUBELET_KUBEADM_ARGS="--node-ip=172.31.0.9 --node-labels="' > "$(node_flag good)"
 
-  lo::heal_node_ips lotest "${BATS_TEST_TMPDIR}/kubeconfig"
+    lo::heal_node_ips lotest "${BATS_TEST_TMPDIR}/kubeconfig"
 
-  grep -q '^repair:good$' "${CALLS}" && grep -q '^repair:bad$' "${CALLS}" \
-    && [ "$(grep -c '^cni-restart$' "${CALLS}")" = 2 ] \
-    && [ "$(tr '\n' ' ' < "${BATS_TEST_TMPDIR}/nudges")" = "good bad " ] || {
-    echo "The heal did not send one CNI nudge for each healed node (good, bad):" >&2
-    cat "${CALLS}" >&2
-    return 1
-  }
+    grep -q '^repair:good$' "${CALLS}" && grep -q '^repair:bad$' "${CALLS}" \
+      && [ "$(grep -c '^cni-restart$' "${CALLS}")" = 2 ] \
+      && [ "$(tr '\n' ' ' < "${BATS_TEST_TMPDIR}/nudges")" = "good bad " ] || {
+      echo "The heal did not send one CNI nudge for each healed node (good, bad):" >&2
+      cat "${CALLS}" >&2
+      return 1
+    }
 
-  # Now both flags agree. The next heal reads the Node object of each node
-  # (the latch-up check). Each node reports its own address, so the heal does
-  # nothing. An answer for the wrong node restarts kubelet.
-  : > "${CALLS}"
-  lo::heal_node_ips lotest "${BATS_TEST_TMPDIR}/kubeconfig"
-  [ ! -s "${CALLS}" ] || {
-    echo "The next heal acted on two nodes whose flag and Node object agree:" >&2
-    cat "${CALLS}" >&2
-    return 1
-  }
+    # Now both flags agree. The next heal reads the Node object of each node
+    # (the latch-up check). Each node reports its own address, so the heal
+    # does nothing. An answer for the wrong node restarts kubelet.
+    : > "${CALLS}"
+    lo::heal_node_ips lotest "${BATS_TEST_TMPDIR}/kubeconfig"
+    [ ! -s "${CALLS}" ] || {
+      echo "The next heal acted on two nodes whose flag and Node object agree:" >&2
+      cat "${CALLS}" >&2
+      return 1
+    }
+  )
 }
 
 # readyz_run — the /readyz checks and the CNI nudges of $CALLS, in order, on
