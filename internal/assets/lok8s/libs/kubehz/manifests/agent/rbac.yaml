@@ -161,8 +161,9 @@ subjects:
 # (identity-secret.yaml), and the bootstrap fills it with one patch.
 # No update or delete. The patch can change the Secret, so RBAC alone no longer
 # keeps A and C from rotating. The script keeps them: it patches only a Secret
-# that holds neither key, and the patch carries the resourceVersion that its
-# read saw, so the apiserver refuses it when the Secret changed in between.
+# with no entry in its data (whatever the values), and the patch carries the
+# resourceVersion that its read saw, so the apiserver refuses it when the
+# Secret changed in between.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

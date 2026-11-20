@@ -81,8 +81,12 @@ spec:
                   # when SECS + 2 seconds end before BUDGET_END. Else it starts
                   # nothing, writes one line to the log, and fails at once (exit
                   # 124, as a timeout), and the caller takes its path for a call
-                  # that timed out. The budget ends at TICK_END, 90 s after the
-                  # script starts, and the heartbeat POST comes first:
+                  # that timed out. Each kubectl and curl call runs under it, and
+                  # each jq and awk step too: the local work on an answer (the PV
+                  # list, the services of a large cluster) counts against the
+                  # budget, and a step that hangs stops at its bound. The budget
+                  # ends at TICK_END, 90 s after the script starts, and the
+                  # heartbeat POST comes first:
                   #   READ_END (17 s before TICK_END): every call before the
                   #     heartbeat, so that one POST always fits after them;
                   #   PROBE_END (34 s before TICK_END): the send gate and the
@@ -90,22 +94,44 @@ spec:
                   #     fit after them;
                   #   TICK_END: the POSTs and every call after them.
                   # One call runs outside the budget: the write-back of the send
-                  # gate (at most 7 s, once per tick). So the script ends at the
-                  # latest 97 s after it starts, and 23 s of the 120 s are left
-                  # for the pod to start.
+                  # gate (at most 7 s, once per tick). So the calls and the steps
+                  # under `bounded` end at the latest 97 s after the script
+                  # starts. That bound leaves out the pod start and the image pull
+                  # before the script, the local work between two checks (shell
+                  # builtins and short text filters such as sed, sort and base64),
+                  # and a second pod when backoffLimit runs the Job again:
+                  # activeDeadlineSeconds counts from the start of the Job, not of
+                  # the pod.
+                  # The budget reads the seconds since boot (the first field of
+                  # /proc/uptime). A step of the wall clock does not move them: a
+                  # wall clock set back would make the budget longer. The wall
+                  # clock (date) gives only the times that leave the pod: the time
+                  # of the send gate and the timestamps. Without a number in
+                  # /proc/uptime, the budget uses the wall clock, and the tick logs
+                  # one line.
                   # The log line goes to fd 4 (stderr): most callers send the
                   # stderr of a call to /dev/null.
                   exec 4>&2
-                  TICK_END=$(( $(date -u +%s) + 90 ))
+                  mono_now() {
+                    read -r MONO_UP _ < /proc/uptime && echo "${MONO_UP%%.*}"
+                  }
+                  case "$(mono_now 2>/dev/null)" in
+                    ''|*[!0-9]*)
+                      echo "kubehz: /proc/uptime gives no seconds; the tick budget uses the wall clock, which a clock step can move" >&2
+                      mono_now() {
+                        date -u +%s
+                      } ;;
+                  esac
+                  TICK_END=$(( $(mono_now) + 90 ))
                   READ_END=$(( TICK_END - 17 ))
                   PROBE_END=$(( TICK_END - 34 ))
                   BUDGET_END="${READ_END}"
                   budget_fits() {
-                    [ $(( $(date -u +%s) + $1 )) -le "${BUDGET_END}" ]
+                    [ $(( $(mono_now) + $1 )) -le "${BUDGET_END}" ]
                   }
                   bounded() {
                     if ! budget_fits $(( $1 + 2 )); then
-                      echo "kubehz: tick budget: ${2} ${3} not started: it can take $(( $1 + 2 ))s, and the budget ends in $(( BUDGET_END - $(date -u +%s) ))s" >&4
+                      echo "kubehz: tick budget: ${2} ${3} not started: it can take $(( $1 + 2 ))s, and the budget ends in $(( BUDGET_END - $(mono_now) ))s" >&4
                       return 124
                     fi
                     BOUND_SECS="$1"
@@ -146,19 +172,25 @@ spec:
                   #
                   # The deploy creates the Secret empty (identity-secret.yaml).
                   # The agent's RBAC holds get and patch on that one name, and
-                  # no create. The read gives the Secret's resourceVersion and
-                  # the keys that it holds (A, C), never a value. A Secret that
-                  # holds neither key gets both in one merge patch, which carries
-                  # the resourceVersion of the read: when the Secret changed
-                  # after the read (another tick filled it), the apiserver
-                  # refuses the patch (409 Conflict), and the read-back below
-                  # gets the values of the tick that won. A Secret that holds a
-                  # key is never written, so A and C never rotate. A Secret that
-                  # the agent cannot read (absent, or no RBAC) stays as it is:
-                  # the agent cannot create it, and the tick has no identity (no
-                  # register, no heartbeat).
+                  # no create. The read gives the Secret's resourceVersion, the
+                  # number of entries in its data, and the keys of the identity
+                  # that have a value (A, C), never a value. A read never shows
+                  # stringData: the apiserver merges it into data on a write.
+                  # Only a Secret with no entry at all gets A and C, in one merge
+                  # patch, which carries the resourceVersion of the read: when the
+                  # Secret changed after the read (another tick filled it), the
+                  # apiserver refuses the patch (409 Conflict), and the read-back
+                  # below gets the values of the tick that won. A Secret with an
+                  # entry is never written, whatever its value, so A and C never
+                  # rotate. With A and C it holds the identity. With other entries
+                  # (one of the two keys, an empty value, another key) the tick
+                  # logs one line, does not write, and uses the values that the
+                  # read-back gets: the heartbeat needs A, the register A and C. A
+                  # Secret that the agent cannot read (absent, or no RBAC) stays as
+                  # it is: the agent cannot create it, and the tick has no identity
+                  # (no register, no heartbeat).
                   if ID_STATE=$(bounded 5 kubectl get secret kubehz-agent -n kubehz-system \
-                      -o 'go-template={{.metadata.resourceVersion}} {{with .data}}{{if index . "agent-token"}}A{{end}}{{if index . "claim-code"}}C{{end}}{{end}}' 2>/dev/null); then
+                      -o 'go-template={{.metadata.resourceVersion}} {{with .data}}{{len .}} {{if index . "agent-token"}}A{{end}}{{if index . "claim-code"}}C{{end}}{{end}}' 2>/dev/null); then
                     ID_RV="${ID_STATE%% *}"
                     ID_KEYS="${ID_STATE#* }"
                     # The patch takes the resourceVersion as it is, so it must be
@@ -169,19 +201,27 @@ spec:
                         echo "kubehz: Secret kubehz-agent in kubehz-system has no resourceVersion of digits; the agent does not fill it" >&2
                         ID_KEYS="unknown" ;;
                     esac
-                    if [ -z "${ID_KEYS}" ]; then
-                      NEW_A="khz_agt_$(rand_hex)"
-                      NEW_C="khzc_$(rand_hex)"
-                      # A and C reach kubectl in the patch on stdin, never on argv: every
-                      # process on the node can read argv (ps, /proc/<pid>/cmdline).
-                      printf '{"metadata":{"resourceVersion":"%s"},"stringData":{"agent-token":"%s","claim-code":"%s"}}' \
-                        "${ID_RV}" "${NEW_A}" "${NEW_C}" |
-                        bounded 5 kubectl patch secret kubehz-agent -n kubehz-system \
-                        --type=merge --patch-file=/dev/stdin >/dev/null 2>&1 \
-                        || echo "kubehz: the fill of Secret kubehz-agent did not land (another tick filled it, or the patch failed); the values are read back from the Secret" >&2
-                      NEW_A=""
-                      NEW_C=""
-                    fi
+                    # ID_KEYS: empty for a Secret with no entry, else the number of
+                    # entries, a space, and A and C for the keys with a value.
+                    case "${ID_KEYS}" in
+                      '')
+                        NEW_A="khz_agt_$(rand_hex)"
+                        NEW_C="khzc_$(rand_hex)"
+                        # A and C reach kubectl in the patch on stdin, never on argv: every
+                        # process on the node can read argv (ps, /proc/<pid>/cmdline).
+                        printf '{"metadata":{"resourceVersion":"%s"},"stringData":{"agent-token":"%s","claim-code":"%s"}}' \
+                          "${ID_RV}" "${NEW_A}" "${NEW_C}" |
+                          bounded 5 kubectl patch secret kubehz-agent -n kubehz-system \
+                          --type=merge --patch-file=/dev/stdin >/dev/null 2>&1 \
+                          || echo "kubehz: the fill of Secret kubehz-agent did not land (another tick filled it, or the patch failed); the values are read back from the Secret" >&2
+                        NEW_A=""
+                        NEW_C=""
+                        ;;
+                      unknown|*' AC') ;;
+                      *)
+                        echo "kubehz: Secret kubehz-agent in kubehz-system has data, but not both an agent-token and a claim-code with a value; the agent does not write it" >&2
+                        ;;
+                    esac
                   else
                     echo "kubehz: cannot read Secret kubehz-agent in kubehz-system; the deploy creates it: run 'lo kubehz deploy'" >&2
                   fi
@@ -314,9 +354,12 @@ spec:
                   # so the pipe's status is jq's. A failed or empty kubectl
                   # answer gives jq no input, and jq -e fails on no input; a
                   # body without .items fails too. `bounded 30` bounds
-                  # a stalled apiserver below the job's 120 s deadline.
+                  # a stalled apiserver below the job's 120 s deadline. jq
+                  # starts with the call and has the same bound (`timeout -k 2
+                  # 30`), so the pipe ends within the bound that the budget check
+                  # of the call counted.
                   NODES_OK=""
-                  if NODE_LIST=$(bounded 30 kubectl get --raw /api/v1/nodes 2>/dev/null | jq -ce '[.items[] |
+                  if NODE_LIST=$(bounded 30 kubectl get --raw /api/v1/nodes 2>/dev/null | timeout -k 2 30 jq -ce '[.items[] |
                         (.metadata.labels // {}) as $l | {
                           name: .metadata.name,
                           status: ([.status.conditions[]? | select(.type == "Ready") | .status][0]
@@ -333,11 +376,12 @@ spec:
                   # heartbeat. Keep this cap at or under the api's. A larger
                   # cluster reports its first 500 nodes AND logs the
                   # truncation to stderr (never a silent drop). NODE_TOTAL
-                  # stays the true count.
+                  # stays the true count. When its step fails or does not start,
+                  # the count is unknown (NODES_OK empty), never 0.
                   NODE_CAP=500
-                  NODE_TOTAL=$(printf '%s' "${NODE_LIST}" | jq 'length' 2>/dev/null) || NODE_TOTAL=0
+                  NODE_TOTAL=$(printf '%s' "${NODE_LIST}" | bounded 5 jq 'length' 2>/dev/null) || { NODE_TOTAL=0; NODES_OK=""; }
                   [ "${NODE_TOTAL}" -gt "${NODE_CAP}" ] && echo "kubehz: heartbeat summarizes the first ${NODE_CAP} of ${NODE_TOTAL} nodes" >&2
-                  NODE_ARRAY=$(printf '%s' "${NODE_LIST}" | jq -c --argjson cap "${NODE_CAP}" '.[:$cap]' 2>/dev/null) || NODE_ARRAY="[]"
+                  NODE_ARRAY=$(printf '%s' "${NODE_LIST}" | bounded 5 jq -c --argjson cap "${NODE_CAP}" '.[:$cap]' 2>/dev/null) || NODE_ARRAY="[]"
 
                   CERT_EXPIRY=$(bounded 5 kubectl get csr -o json 2>/dev/null | \
                     sed -n 's/.*"expirationTimestamp": *"\([^"]*\)".*/\1/p' | \
@@ -448,8 +492,8 @@ spec:
                   elif MARKER=$(bounded 5 kubectl get configmap kubehz-agent-state -n kubehz-system \
                       -o jsonpath='{.metadata.annotations}' 2>/dev/null); then
                     MARKER_OK=1
-                    LAST_ASSESS=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/last-assessment" // ""' 2>/dev/null) || LAST_ASSESS=""
-                    ASSESS_REQ=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/assess-requested" // ""' 2>/dev/null) || ASSESS_REQ=""
+                    LAST_ASSESS=$(printf '%s' "${MARKER}" | bounded 5 jq -r '."kubehz.cloud/last-assessment" // ""' 2>/dev/null) || LAST_ASSESS=""
+                    ASSESS_REQ=$(printf '%s' "${MARKER}" | bounded 5 jq -r '."kubehz.cloud/assess-requested" // ""' 2>/dev/null) || ASSESS_REQ=""
                     case "${LAST_ASSESS}" in
                       ''|*[!0-9]*) ASSESS_NOW=1 ;;
                       *) [ $(( NOW_EPOCH - LAST_ASSESS )) -lt 86400 ] || ASSESS_NOW=1 ;;
@@ -469,8 +513,8 @@ spec:
                   # the marker Role's existing get/patch — no new RBAC.
                   CLAIM_NONCE=""
                   if [ -n "${MARKER_OK}" ]; then
-                    CLAIM_NONCE=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/claim-nonce" // ""' 2>/dev/null) || CLAIM_NONCE=""
-                    CLAIM_PLACED=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/claim-nonce-placed" // ""' 2>/dev/null) || CLAIM_PLACED=""
+                    CLAIM_NONCE=$(printf '%s' "${MARKER}" | bounded 5 jq -r '."kubehz.cloud/claim-nonce" // ""' 2>/dev/null) || CLAIM_NONCE=""
+                    CLAIM_PLACED=$(printf '%s' "${MARKER}" | bounded 5 jq -r '."kubehz.cloud/claim-nonce-placed" // ""' 2>/dev/null) || CLAIM_PLACED=""
                     if [ -n "${CLAIM_NONCE}" ]; then
                       # Expire a dead nonce so it never echoes forever: the
                       # api's challenge TTL is 15 minutes (900s, the server
@@ -659,29 +703,31 @@ spec:
 
                     SC_RAW=$(bounded 5 kubectl get storageclasses -o json 2>/dev/null) || SC_RAW=""
                     SC_JSON=$(printf '%s' "${SC_RAW}" | \
-                      jq -c '[.items[] | {name: .metadata.name, provisioner: .provisioner,
+                      bounded 5 jq -c '[.items[] | {name: .metadata.name, provisioner: .provisioner,
                           isDefault: ((.metadata.annotations["storageclass.kubernetes.io/is-default-class"] // "false") == "true")}]' \
                         2>/dev/null) || SC_JSON=""
                     [ -n "${SC_JSON}" ] || { UNKNOWN="${UNKNOWN} storageClasses"; SC_JSON="[]"; }
                     # The api's zod schema caps arrays at 50 — an uncapped list
                     # 400s the WHOLE heartbeat. Cap here (first 50, logged, never
                     # a silent drop) so the beat always fits the contract.
-                    SC_TOTAL=$(printf '%s' "${SC_JSON}" | jq 'length' 2>/dev/null) || SC_TOTAL=0
+                    SC_TOTAL=$(printf '%s' "${SC_JSON}" | bounded 5 jq 'length' 2>/dev/null) || { UNKNOWN="${UNKNOWN} storageClasses"; SC_TOTAL=0; }
                     if [ "${SC_TOTAL:-0}" -gt 50 ]; then
                       echo "kubehz: assessment reports the first 50 of ${SC_TOTAL} StorageClasses" >&2
-                      SC_JSON=$(printf '%s' "${SC_JSON}" | jq -c '.[:50]' 2>/dev/null) || SC_JSON="[]"
+                      SC_JSON=$(printf '%s' "${SC_JSON}" | bounded 5 jq -c '.[:50]' 2>/dev/null) || { UNKNOWN="${UNKNOWN} storageClasses"; SC_JSON="[]"; }
                     fi
 
                     # PV summary: jq flattens each PV to "provisioner<TAB>capacity",
-                    # awk converts capacities to Gi and groups by provisioner.
+                    # awk converts capacities to Gi and groups by provisioner. Each
+                    # step runs under `bounded 5`: one that fails, times out or does
+                    # not start leaves the summary unknown, never zero PVs.
                     PV_RAW=$(bounded 5 kubectl get pv -o json 2>/dev/null) || PV_RAW=""
                     # `.items |` first: input that is not a PV list fails jq,
                     # and the summary is unknown instead of zero PVs.
                     PV_LINES=$(printf '%s' "${PV_RAW}" | \
-                      jq -er '.items | map([(.metadata.annotations["pv.kubernetes.io/provisioned-by"] // .spec.csi.driver // "unknown"),
+                      bounded 5 jq -er '.items | map([(.metadata.annotations["pv.kubernetes.io/provisioned-by"] // .spec.csi.driver // "unknown"),
                           (.spec.capacity.storage // "0")] | @tsv) | join("\n")' 2>/dev/null) || {
                       UNKNOWN="${UNKNOWN} pvSummary"; PV_LINES=""; }
-                    PV_SUMMARY=$(printf '%s\n' "${PV_LINES}" | awk -F'\t' '
+                    PV_SUMMARY=$(printf '%s\n' "${PV_LINES}" | bounded 5 awk -F'\t' '
                       function gi(s,  n, u) {
                         n = s + 0; u = s
                         sub(/^[0-9.]+/, "", u)
@@ -708,19 +754,19 @@ spec:
                           printf "%s\"%s\":{\"count\":%d,\"totalGi\":%s}", sep, p, c[p], fmt(g[p]); sep = ","
                         }
                         printf "}}"
-                      }') || PV_SUMMARY='{"count":0,"totalGi":0,"byProvisioner":{}}'
+                      }') || { UNKNOWN="${UNKNOWN} pvSummary"; PV_SUMMARY=""; }
 
                     # The counts: each from a call that answered, else unknown.
                     # An empty kubectl answer makes jq print nothing.
                     LB_RAW=$(bounded 5 kubectl get services -A -o json 2>/dev/null) || LB_RAW=""
                     LB_COUNT=$(printf '%s' "${LB_RAW}" | \
-                      jq '[.items[] | select(.spec.type == "LoadBalancer")] | length' 2>/dev/null) || LB_COUNT=""
+                      bounded 5 jq '[.items[] | select(.spec.type == "LoadBalancer")] | length' 2>/dev/null) || LB_COUNT=""
                     [ -n "${LB_COUNT}" ] || UNKNOWN="${UNKNOWN} loadBalancers"
                     VW_RAW=$(bounded 5 kubectl get validatingwebhookconfigurations -o json 2>/dev/null) || VW_RAW=""
-                    VALIDATING=$(printf '%s' "${VW_RAW}" | jq '.items | length' 2>/dev/null) || VALIDATING=""
+                    VALIDATING=$(printf '%s' "${VW_RAW}" | bounded 5 jq '.items | length' 2>/dev/null) || VALIDATING=""
                     [ -n "${VALIDATING}" ] || UNKNOWN="${UNKNOWN} webhooks.validating"
                     MW_RAW=$(bounded 5 kubectl get mutatingwebhookconfigurations -o json 2>/dev/null) || MW_RAW=""
-                    MUTATING=$(printf '%s' "${MW_RAW}" | jq '.items | length' 2>/dev/null) || MUTATING=""
+                    MUTATING=$(printf '%s' "${MW_RAW}" | bounded 5 jq '.items | length' 2>/dev/null) || MUTATING=""
                     [ -n "${MUTATING}" ] || UNKNOWN="${UNKNOWN} webhooks.mutating"
 
                     # cpNodes: the control-plane label, else the legacy master
@@ -754,7 +800,7 @@ spec:
                     elif [ -n "${UNKNOWN}" ]; then
                       echo "kubehz: assessment deferred: no answer for${UNKNOWN}; the next tick probes again" >&2
                     else
-                      ASSESSMENT=$(jq -cn \
+                      ASSESSMENT=$(bounded 5 jq -cn \
                         --arg collectedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                         --arg k8sVersion "${KUBE_VERSION}" \
                         --arg datastore "${DATASTORE}" \
@@ -902,7 +948,7 @@ spec:
                   # expired carries NO cue and clears nothing — the expiry
                   # window above bounds how long such a nonce keeps echoing.
                   if [ -n "${CLAIM_NONCE}" ] && printf '%s' "${RESPONSE}" | \
-                      jq -e '(.claim.verified // .data.claim.verified // false) == true' >/dev/null 2>&1; then
+                      bounded 5 jq -e '(.claim.verified // .data.claim.verified // false) == true' >/dev/null 2>&1; then
                     bounded 5 kubectl annotate configmap kubehz-agent-state -n kubehz-system \
                       "kubehz.cloud/claim-nonce-" "kubehz.cloud/claim-nonce-placed-" >/dev/null 2>&1 \
                       || echo "kubehz: claim verified but the nonce annotation could not be cleared; the next tick will expire it" >&2
@@ -921,7 +967,7 @@ spec:
                   # NOT with an unreadable marker either: that tick writes
                   # nothing (fail-closed, as for the assessment gate above).
                   if [ -n "${MARKER_OK}" ] && [ -z "${ASSESS_REJECTED:-}" ] && printf '%s' "${RESPONSE}" | \
-                      jq -e '((.actions // .data.actions // []) | index("assess")) != null' >/dev/null 2>&1; then
+                      bounded 5 jq -e '((.actions // .data.actions // []) | index("assess")) != null' >/dev/null 2>&1; then
                     bounded 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                       "kubehz.cloud/assess-requested=true" >/dev/null 2>&1 || true
                   fi
@@ -946,8 +992,8 @@ spec:
                   DESIRED_ETAG=""
                   DESIRED_ERR=""
                   if [ -n "${MARKER_OK}" ]; then
-                    DESIRED_ETAG=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/desired-etag" // ""' 2>/dev/null) || DESIRED_ETAG=""
-                    DESIRED_ERR=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/desired-error" // ""' 2>/dev/null) || DESIRED_ERR=""
+                    DESIRED_ETAG=$(printf '%s' "${MARKER}" | bounded 5 jq -r '."kubehz.cloud/desired-etag" // ""' 2>/dev/null) || DESIRED_ETAG=""
+                    DESIRED_ERR=$(printf '%s' "${MARKER}" | bounded 5 jq -r '."kubehz.cloud/desired-error" // ""' 2>/dev/null) || DESIRED_ERR=""
                   fi
                   if [ -z "${MARKER_OK}" ]; then
                     # Fail closed like the assessment gate: without the marker
@@ -986,16 +1032,16 @@ spec:
                         # header is stored verbatim (opaque validator).
                         DES_BODY=$(printf '%s\n' "${DES_OUT}" | tr -d '\r' | sed -e '1,/^$/d' -e '/^__code=/d') || DES_BODY=""
                         DES_NEW_ETAG=$(printf '%s\n' "${DES_OUT}" | tr -d '\r' | sed -n 's/^[Ee][Tt][Aa][Gg]: *//p' | tail -1)
-                        DES_REV=$(printf '%s' "${DES_BODY}" | jq -r '.revision // empty' 2>/dev/null) || DES_REV=""
+                        DES_REV=$(printf '%s' "${DES_BODY}" | bounded 5 jq -r '.revision // empty' 2>/dev/null) || DES_REV=""
                         # Missing ETag counts as unparseable too: persisting an
                         # empty validator would wipe If-None-Match and force a
                         # full 200 every tick.
                         if [ -z "${DES_REV}" ] || [ -z "${DES_NEW_ETAG}" ]; then
                           echo "kubehz: desired-state response was unparseable; retrying next tick" >&2
                         else
-                          DES_FLAGS=$(printf '%s' "${DES_BODY}" | jq -r '[.execution // {} | to_entries[] | select(.value == true) | .key] | join(",")' 2>/dev/null) || DES_FLAGS=""
+                          DES_FLAGS=$(printf '%s' "${DES_BODY}" | bounded 5 jq -r '[.execution // {} | to_entries[] | select(.value == true) | .key] | join(",")' 2>/dev/null) || DES_FLAGS=""
                           [ -n "${DES_FLAGS}" ] || DES_FLAGS="none"
-                          DES_K8S=$(printf '%s' "${DES_BODY}" | jq -r '.kubernetesVersion // empty' 2>/dev/null) || DES_K8S=""
+                          DES_K8S=$(printf '%s' "${DES_BODY}" | bounded 5 jq -r '.kubernetesVersion // empty' 2>/dev/null) || DES_K8S=""
                           DES_SKEW=""
                           if [ -n "${DES_K8S}" ] && [ "${DES_K8S}" != "${KUBE_VERSION}" ]; then
                             DES_SKEW=" — desired k8s ${DES_K8S}, local ${KUBE_VERSION}"
