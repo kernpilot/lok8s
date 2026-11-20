@@ -584,7 +584,7 @@ func TestKeyCommandsRefuseALockFileReplacedAfterTheOpen(t *testing.T) {
 			if calls != 1 {
 				t.Fatalf("the seam ran %d times, want 1", calls)
 			}
-			want := "[error] " + lock + " changed after its check (another file is there now): the command stopped before it wrote .sops.yaml or the store; run this command again\n"
+			want := "[error] " + lock + " changed after its check (another file is there now): the command stopped before it changed .sops.yaml, a .gitignore or an .enc file, but its open can have made the lock file; run this command again\n"
 			if errOut.String() != want || out.String() != "" {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 			}

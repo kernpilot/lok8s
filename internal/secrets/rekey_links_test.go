@@ -1004,8 +1004,10 @@ func ageEntry(t *testing.T, meta map[string]any, recipient string) map[string]an
 
 // A rerun after a finished run, with the .enc of app in a state that is not
 // finished: it is missing, it holds the label of the recipient alone, its
-// envelope has no mac or no lastmodified, the enc of the entry is not an
-// armored age block, or it lists the old recipients only. The rerun re-keys
+// envelope has no mac or no lastmodified, the entry of the recipient has
+// no enc (and the entry of the other recipient has a good one), the enc of
+// the entry is not an armored age block, or it lists the old recipients
+// only. The rerun re-keys
 // that file only: the .enc of db keeps its bytes and its mtime, and
 // .sops.yaml stays as it was. The run after it changes nothing (bash:
 // tests/unit/secrets_add_key_test.bats).
@@ -1027,6 +1029,11 @@ func TestAddKeyRerunReKeysOnlyTheFilesThatAreNotFinished(t *testing.T) {
 		}},
 		{"an empty lastmodified", func(f *linkFixture, enc, _ string) {
 			envelope(f.t, enc, func(_, meta map[string]any) { meta["lastmodified"] = "" })
+		}},
+		{"the entry of the key has no enc", func(f *linkFixture, enc, _ string) {
+			envelope(f.t, enc, func(_, meta map[string]any) {
+				delete(ageEntry(f.t, meta, f.gone.Recipient().String()), "enc")
+			})
 		}},
 		{"an enc that is not armored", func(f *linkFixture, enc, _ string) {
 			envelope(f.t, enc, func(_, meta map[string]any) {
@@ -1696,7 +1703,7 @@ func TestAddKeyRefusesAConfigThatIsTheGitignore(t *testing.T) {
 			if err := f.run(); !errors.Is(err, ErrHandled) {
 				t.Fatalf("want ErrHandled, got %v\n%s", err, f.out.String())
 			}
-			want := "[error] .sops.yaml names " + f.c.rel(dest) + ", and add-key writes that file as " + f.c.rel(gitignore) + ": nothing was changed; give .sops.yaml a file of its own, then run this command again\n"
+			want := "[error] .sops.yaml names " + f.c.rel(dest) + ", and add-key writes that file as " + f.c.rel(gitignore) + ": add-key stopped before it changed .sops.yaml, the .gitignore or an .enc file, but the lock file " + f.c.rel(dest) + ".lock can be new; give .sops.yaml a file of its own, then run this command again\n"
 			if f.out.String() != "" || f.errOut.String() != want {
 				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
 			}
@@ -1708,5 +1715,139 @@ func TestAddKeyRefusesAConfigThatIsTheGitignore(t *testing.T) {
 				t.Errorf(".sops.yaml is no longer a link: %v", err)
 			}
 		})
+	}
+}
+
+// A read of the store that returns entries together with an error (the
+// readDir seam: the entries of the directory and EIO, as a read that fails
+// after a first batch) is refused as a read that returns no entry: a part
+// of the store is not the store. Nothing changes, with the key in
+// .sops.yaml and without it (bash: a find that prints a name and then
+// fails, in tests/unit/secrets_add_key_test.bats).
+func TestAddKeyRefusesAListingThatFailsAfterSomeEntries(t *testing.T) {
+	for _, present := range []bool{false, true} {
+		t.Run(fmt.Sprintf("present=%v", present), func(t *testing.T) {
+			f := newLinkFixture(t, "add-key")
+			if present {
+				f.finished()
+			}
+			config := readFile(t, f.c.sopsConfigPath())
+			id := configFile(t, f.c)
+			states := fileStates(t, f.store)
+			orig := readDir
+			returned := 0
+			readDir = func(name string) ([]os.DirEntry, error) {
+				entries, err := orig(name)
+				if name != f.store || err != nil {
+					return entries, err
+				}
+				returned = len(entries)
+				return entries, &fs.PathError{Op: "readdirent", Path: name, Err: syscall.EIO}
+			}
+			t.Cleanup(func() { readDir = orig })
+			if err := f.run(); !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, f.out.String())
+			}
+			if returned == 0 {
+				t.Fatal("fixture: the seam returned no entry of the store")
+			}
+			want := unlistable(f.c, f.store, "add-key did not change .sops.yaml")
+			if f.out.String() != "" || f.errOut.String() != want {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
+			}
+			sameStates(t, states, fileStates(t, f.store))
+			unchanged(t, f.c, config)
+			sameConfigFile(t, f.c, id)
+		})
+	}
+}
+
+// After a finished run, the .enc of app holds two entries of the recipient:
+// the good one, and one whose enc is not an armored age block, first or
+// last. Any good entry of the recipient passes the envelope check, so the
+// rerun finds nothing to do in both orders, and the .enc keeps its bytes
+// (bash: the same fixture in tests/unit/secrets_add_key_test.bats).
+func TestAddKeyRerunPassesWithOneGoodEntryOfTheKey(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first bool
+	}{{"the bad entry first", true}, {"the bad entry last", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLinkFixture(t, "add-key")
+			config := f.finished()
+			id := configFile(t, f.c)
+			gone := f.gone.Recipient().String()
+			envelope(t, f.store+"/Secret.app.default.K.enc", func(_, meta map[string]any) {
+				list, _ := meta["age"].([]any)
+				bad := map[string]any{"recipient": gone, "enc": "x"}
+				if tc.first {
+					meta["age"] = append([]any{bad}, list...)
+				} else {
+					meta["age"] = append(list, bad)
+				}
+			})
+			write(t, f.store+"/Secret.app.default.K", "not the value of the .enc")
+			states := fileStates(t, f.store)
+			if err := f.run(); err != nil {
+				t.Fatalf("%v\n%s", err, f.errOut.String())
+			}
+			if want := "recipient already present in .sops.yaml — nothing to add\n  " + gone + "\n"; f.out.String() != want || f.errOut.String() != "" {
+				t.Errorf("stdout %q\nstderr %q\nwant stdout %q", f.out.String(), f.errOut.String(), want)
+			}
+			sameStates(t, states, fileStates(t, f.store))
+			unchanged(t, f.c, config)
+			sameConfigFile(t, f.c, id)
+		})
+	}
+}
+
+// .sops.yaml is a hard link to the .gitignore of the store, or to an .enc
+// of the sweep, and that file holds valid rule YAML (with the key, and
+// without it). os.SameFile compares the files, so a hard link counts, and
+// an .enc of the sweep counts as the .gitignore does. add-key refuses
+// before it changes .sops.yaml, the .gitignore or an .enc file: the files
+// of the store keep their state, and .sops.yaml stays that file (bash: the
+// same fixture in tests/unit/secrets_add_key_test.bats).
+func TestAddKeyRefusesAConfigThatIsAHardLinkOfAFileThatItWrites(t *testing.T) {
+	for _, target := range []string{".gitignore", "Secret.app.default.K.enc"} {
+		for _, present := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/present=%v", target, present), func(t *testing.T) {
+				f := newLinkFixture(t, "add-key")
+				if present {
+					f.finished()
+				}
+				sops := f.c.sopsConfigPath()
+				out := f.store + "/" + target
+				write(t, out, readFile(t, sops))
+				if err := os.Remove(sops); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(out, sops); err != nil {
+					t.Fatal(err)
+				}
+				dest, err := f.c.sopsConfigDest()
+				if err != nil {
+					t.Fatal(err)
+				}
+				config := readFile(t, sops)
+				states := fileStates(t, f.store)
+				if err := f.run(); !errors.Is(err, ErrHandled) {
+					t.Fatalf("want ErrHandled, got %v\n%s", err, f.out.String())
+				}
+				want := "[error] .sops.yaml names " + f.c.rel(dest) + ", and add-key writes that file as " + f.c.rel(out) + ": add-key stopped before it changed .sops.yaml, the .gitignore or an .enc file, but the lock file " + f.c.rel(dest) + ".lock can be new; give .sops.yaml a file of its own, then run this command again\n"
+				if f.out.String() != "" || f.errOut.String() != want {
+					t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
+				}
+				sameStates(t, states, fileStates(t, f.store))
+				if got := readFile(t, sops); got != config {
+					t.Errorf(".sops.yaml changed: %q", got)
+				}
+				conf, err1 := os.Stat(sops)
+				info, err2 := os.Stat(out)
+				if err1 != nil || err2 != nil || !os.SameFile(conf, info) {
+					t.Errorf(".sops.yaml is no longer the file of %s: %v %v", f.c.rel(out), err1, err2)
+				}
+			})
+		}
 	}
 }

@@ -139,7 +139,7 @@ func (c *Context) lockSopsConfig(dest string) (func(), error) {
 	switch ok, swapped := openedPathOK(f, path); {
 	case swapped:
 		_ = f.Close()
-		ui.ErrorTo(c.ErrOut, "%s changed after its check (another file is there now): the command stopped before it wrote .sops.yaml or the store; run this command again", path)
+		ui.ErrorTo(c.ErrOut, "%s changed after its check (another file is there now): the command stopped before it changed .sops.yaml, a .gitignore or an .enc file, but its open can have made the lock file; run this command again", path)
 		return nil, ErrHandled
 	case !ok:
 		_ = f.Close()

@@ -768,8 +768,10 @@ _finished_store() {
 
 @test "a rerun re-keys only the .enc files that are not finished, and the other .enc keeps its bytes and its mtime" {
   # The .enc of app is missing, holds the label of the recipient alone, has
-  # no mac or an empty lastmodified, has an enc that is not an armored age
-  # block (or has no footer line), or lists the old key only. The rerun
+  # no mac or an empty lastmodified, has an entry of the recipient with no
+  # enc (and no other entry of the recipient, while the entry of the other
+  # key has a good one), has an enc that is not an armored age block (or
+  # has no footer line), or lists the old key only. The rerun
   # re-keys that file only: a plaintext that is older than a pulled .enc
   # does not replace it (Go twin:
   # TestAddKeyRerunReKeysOnlyTheFilesThatAreNotFinished).
@@ -780,13 +782,14 @@ _finished_store() {
   local store="${PATH_CLUSTERS}/a.dev/secrets" app db kind before id
   app="${store}/Secret.app.default.K.enc"
   db="${store}/Secret.db.default.K.enc"
-  for kind in missing label no-mac no-lastmodified not-armored no-footer old; do
+  for kind in missing label no-mac no-lastmodified no-enc not-armored no-footer old; do
     _finished_store
     case "${kind}" in
       missing) rm -- "${app}" ;;
       label) printf '{"data":"ENC[x]","sops":{"age":[{"recipient":"%s"}]}}\n' "${KEY_B}" > "${app}" ;;
       no-mac) jq -c 'del(.sops.mac)' "${db}" > "${app}" ;;
       no-lastmodified) jq -c '.sops.lastmodified = ""' "${db}" > "${app}" ;;
+      no-enc) jq -c --arg r "${KEY_B}" '(.sops.age[] | select(.recipient == $r)) |= del(.enc)' "${db}" > "${app}" ;;
       not-armored) jq -c --arg r "${KEY_B}" '(.sops.age[] | select(.recipient == $r) | .enc) = "x"' "${db}" > "${app}" ;;
       no-footer) jq -c --arg r "${KEY_B}" '(.sops.age[] | select(.recipient == $r) | .enc) |= rtrimstr("-----END AGE ENCRYPTED FILE-----\n")' "${db}" > "${app}" ;;
       old) _envelope "${KEY_A}" > "${app}" ;;
@@ -973,7 +976,7 @@ Encrypted 2 secret(s)
   DOMAIN=a.dev run _add "${KEY_A}"
   unset -f command
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] jq not found: add-key reads the sops metadata of each .enc with jq; nothing was changed
+  [ "$output" = "[error] jq not found: add-key reads the sops metadata of each .enc with jq; it stopped before it changed .sops.yaml, the .gitignore or an .enc file, but the lock file .sops.yaml.lock can be new
 [error]   install jq (b install), or use the lo binary: it needs no jq" ] || { echo "$output" >&2; return 1; }
   cmp -s "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
   [ ! -s "${ENCRYPT_RAN}" ]
@@ -1027,11 +1030,11 @@ EOF
 }
 
 # The refusal of the test after the open of the lock: @lock@ is the lock
-# path. The open (>>) can have made an empty file through a link, so the
-# lines say so; the Go twin opens with O_NOFOLLOW and prints the line of the
-# check.
-_lock_changed='[error] @lock@ changed after its check (a symlink or another file is there now): the command stopped before it wrote .sops.yaml or the store
-[error]   but the open can have made an empty file at the path that a symlink there names: remove the lock path and that file, then run this command again'
+# path. The open (>>) can have made the lock file, or an empty file through
+# a link, so the lines say so; the Go twin opens with O_NOFOLLOW and prints
+# the line of the check.
+_lock_changed='[error] @lock@ changed after its check (a symlink or another file is there now): the command stopped before it changed .sops.yaml, a .gitignore or an .enc file
+[error]   but the open can have made the lock file, or an empty file at the path that a symlink there names: remove the lock path and that file, then run this command again'
 
 @test "a lock link put there after the check is refused by the test after the open, and the file that it names keeps its bytes" {
   # The check of the lock path (secrets::_enc_path_ok) and the open are two
@@ -1223,6 +1226,78 @@ ${want}"
   done
 }
 
+# _find_records <start> <status> <record>... — a find function of the test:
+# a listing (-maxdepth 1) of <start> prints each record with a NUL at its
+# end, as find -print0 does, and exits with <status>. Every other find runs
+# the real one. A test feeds a listing of / with it, and does not list the
+# real /.
+_find_records() {
+  _t_start="${1}" _t_status="${2}"
+  _t_records=("${@:3}")
+  find() {
+    if [[ "${2}" == "${_t_start}" && " ${*} " == *" -maxdepth 1 "* ]]; then
+      local r
+      for r in "${_t_records[@]}"; do
+        printf '%s\0' "${r}"
+      done
+      return "${_t_status}"
+    fi
+    command find "${@}"
+  }
+}
+
+@test "the listing of a store at / keeps each name: the prefix of the records has one slash" {
+  # find prints /<name> for the start /. A match against "<start>/", which is
+  # // there, dropped each record while the listing passed: an empty sweep
+  # and a false done line. A find function of the test feeds that listing.
+  # The Go twin takes the names from os.ReadDir and strips no prefix.
+  _load
+  local names=() d="${BATS_TEST_TMPDIR}/store" start
+  _find_records / 0 /Secret.b.default.K.enc /Secret.a.default.K
+  for start in / //; do
+    names=()
+    secrets::_store_names "${start}" || { echo "${start}: the listing failed" >&2; return 1; }
+    [ "${names[*]}" = "Secret.a.default.K Secret.b.default.K.enc" ] || { echo "${start}: names: ${names[*]}" >&2; return 1; }
+  done
+  unset -f find
+  # A real directory, with a trailing slash and without one: the same names.
+  mkdir -p "${d}"
+  : > "${d}/Secret.x.default.K"
+  : > "${d}/other"
+  for start in "${d}" "${d}/" "${d}//"; do
+    names=()
+    secrets::_store_names "${start}" || { echo "${start}: the listing failed" >&2; return 1; }
+    [ "${names[*]}" = "Secret.x.default.K" ] || { echo "${start}: names: ${names[*]}" >&2; return 1; }
+  done
+}
+
+@test "a listing of the store that prints a name and then fails is refused before any write, with the key in .sops.yaml and without it" {
+  # find prints the record of the plaintext, then exits 1 (a find function
+  # of the test): a part of the store is not the store (Go twin:
+  # TestAddKeyRefusesAListingThatFailsAfterSomeEntries).
+  command -v jq >/dev/null 2>&1 || skip "jq not installed"
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load_sweep
+  _sops_envelope
+  local store="${PATH_CLUSTERS}/a.dev/secrets" key before id want
+  printf 'v' > "${store}/Secret.app.default.K"
+  _envelope "${KEY_A}" > "${store}/Secret.app.default.K.enc"
+  want="${_unlistable//@store@/${store}}"
+  want="${want//@outcome@/add-key did not change .sops.yaml}"
+  for key in "${KEY_B}" "${KEY_A}"; do
+    before="$(_state "${PATH_BASE}/.sops.yaml" "${store}")"
+    id="$(_file_id "${PATH_BASE}/.sops.yaml")"
+    _find_records "${store}" 1 "${store}/Secret.app.default.K"
+    DOMAIN=a.dev run _add "${key}"
+    unset -f find
+    [ "$status" -eq 1 ] || { echo "${key}: status $status: $output" >&2; return 1; }
+    [ "$output" = "${want}" ] || { echo "${key}: $output" >&2; return 1; }
+    [ "$(_state "${PATH_BASE}/.sops.yaml" "${store}")" = "${before}" ] || { echo "${key}: a file changed" >&2; return 1; }
+    [ "$(_file_id "${PATH_BASE}/.sops.yaml")" = "${id}" ] || { echo "${key}: .sops.yaml was written" >&2; return 1; }
+    [ ! -s "${SOPS_LOG}" ]
+  done
+}
+
 @test "an orphan .enc that is a symlink to a path that does not exist is counted as an orphan, not skipped" {
   # It is in the store, and a re-key cannot rewrite it. The first run and a
   # rerun refuse it without --skip-orphans; with --skip-orphans the rerun
@@ -1295,6 +1370,38 @@ ${store}/Secret.db.default.K" ] || { echo "sops ran on: $(cat "${SOPS_LOG}")" >&
   [ ! -s "${SOPS_LOG}" ]
 }
 
+@test "two entries of the recipient, one with an enc that is not armored and one good, in both orders: a rerun finds the .enc finished" {
+  # Any good entry of the recipient passes the envelope check: the order of
+  # the entries does not decide (Go twin:
+  # TestAddKeyRerunPassesWithOneGoodEntryOfTheKey).
+  command -v jq >/dev/null 2>&1 || skip "jq not installed"
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load_sweep
+  _sops_envelope
+  local store="${PATH_CLUSTERS}/a.dev/secrets" app order before
+  app="${store}/Secret.app.default.K.enc"
+  for order in first last; do
+    _finished_store
+    if [[ "${order}" == first ]]; then
+      jq -c --arg r "${KEY_B}" '.sops.age = [{recipient: $r, enc: "x"}] + .sops.age' "${store}/Secret.db.default.K.enc" > "${app}"
+    else
+      jq -c --arg r "${KEY_B}" '.sops.age += [{recipient: $r, enc: "x"}]' "${store}/Secret.db.default.K.enc" > "${app}"
+    fi
+    touch -t 200001010000 "${app}"
+    printf 'not the value of the .enc' > "${store}/Secret.app.default.K"
+    # The .gitignore that a rerun writes when it is missing.
+    secrets::_ensure_gitignore "${store}"
+    before="$(_state "${PATH_BASE}/.sops.yaml" "${store}")"
+    : > "${SOPS_LOG}"
+    DOMAIN=a.dev run _add "${KEY_B}"
+    [ "$status" -eq 0 ] || { echo "${order}: status $status: $output" >&2; return 1; }
+    [ "$output" = "recipient already present in .sops.yaml — nothing to add
+  ${KEY_B}" ] || { echo "${order}: $output" >&2; return 1; }
+    [ "$(_state "${PATH_BASE}/.sops.yaml" "${store}")" = "${before}" ] || { echo "${order}: a file changed" >&2; return 1; }
+    [ ! -s "${SOPS_LOG}" ] || { echo "${order}: sops ran on: $(cat "${SOPS_LOG}")" >&2; return 1; }
+  done
+}
+
 @test "a .sops.yaml that is a link to the .gitignore of the store is refused before any change, and the file keeps its bytes" {
   # The .gitignore holds valid rule YAML (with the key, and without it) and
   # no allow line, so its write would replace the file of .sops.yaml (Go
@@ -1318,12 +1425,47 @@ ${store}/Secret.db.default.K" ] || { echo "sops ran on: $(cat "${SOPS_LOG}")" >&
     before="$(_state "${store}")"
     DOMAIN=a.dev run _add "${key}"
     [ "$status" -eq 1 ] || { echo "${key}: status $status: $output" >&2; return 1; }
-    [ "$output" = "[error] .sops.yaml names ${dest}, and add-key writes that file as ${gitignore}: nothing was changed; give .sops.yaml a file of its own, then run this command again" ] || {
+    [ "$output" = "[error] .sops.yaml names ${dest}, and add-key writes that file as ${gitignore}: add-key stopped before it changed .sops.yaml, the .gitignore or an .enc file, but the lock file ${dest}.lock can be new; give .sops.yaml a file of its own, then run this command again" ] || {
       echo "${key}: $output" >&2; return 1; }
     [ "$(_state "${store}")" = "${before}" ] || { echo "${key}: a file of the store changed" >&2; return 1; }
     cmp -s "${gitignore}" "${BATS_TEST_TMPDIR}/rules.yaml" || { echo "${key}: the file of .sops.yaml changed" >&2; return 1; }
     [ -L "${PATH_BASE}/.sops.yaml" ] || { echo "${key}: .sops.yaml is no longer a link" >&2; return 1; }
     [ ! -s "${SOPS_LOG}" ]
+  done
+}
+
+@test "a .sops.yaml that is a hard link to the .gitignore or to an .enc of the sweep is refused before any change of .sops.yaml or the .gitignore" {
+  # -ef compares the files, so a hard link counts, and an .enc of the sweep
+  # counts as the .gitignore does. Only the lock file can be new (Go twin:
+  # TestAddKeyRefusesAConfigThatIsAHardLinkOfAFileThatItWrites).
+  command -v jq >/dev/null 2>&1 || skip "jq not installed"
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load_sweep
+  _sops_envelope
+  local store="${PATH_CLUSTERS}/a.dev/secrets" key target out before dest
+  cp -- "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/rules.yaml"
+  for target in .gitignore Secret.app.default.K.enc; do
+    for key in "${KEY_A}" "${KEY_B}"; do
+      rm -f -- "${PATH_BASE}/.sops.yaml" "${PATH_BASE}/.sops.yaml.lock" "${store}/.gitignore" \
+        "${store}/Secret.app.default.K" "${store}/Secret.app.default.K.enc"
+      printf 'v' > "${store}/Secret.app.default.K"
+      _envelope "${KEY_A}" > "${store}/Secret.app.default.K.enc"
+      out="${store}/${target}"
+      cp -- "${BATS_TEST_TMPDIR}/rules.yaml" "${out}"
+      ln -- "${out}" "${PATH_BASE}/.sops.yaml"
+      dest="$(readlink -f -- "${PATH_BASE}/.sops.yaml")"
+      dest="${dest#"${PATH_BASE}/"}"
+      before="$(_state "${store}")"
+      DOMAIN=a.dev run _add "${key}"
+      [ "$status" -eq 1 ] || { echo "${target} ${key}: status $status: $output" >&2; return 1; }
+      [ "$output" = "[error] .sops.yaml names ${dest}, and add-key writes that file as ${out}: add-key stopped before it changed .sops.yaml, the .gitignore or an .enc file, but the lock file ${dest}.lock can be new; give .sops.yaml a file of its own, then run this command again" ] || {
+        echo "${target} ${key}: $output" >&2; return 1; }
+      [ "$(_state "${store}")" = "${before}" ] || { echo "${target} ${key}: a file of the store changed" >&2; return 1; }
+      cmp -s "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/rules.yaml" || { echo "${target} ${key}: .sops.yaml changed" >&2; return 1; }
+      [ "${PATH_BASE}/.sops.yaml" -ef "${out}" ] || { echo "${target} ${key}: .sops.yaml is no longer that file" >&2; return 1; }
+      [[ "${target}" == .gitignore || ! -e "${store}/.gitignore" ]] || { echo "${target} ${key}: the .gitignore was written" >&2; return 1; }
+      [ ! -s "${SOPS_LOG}" ]
+    done
   done
 }
 
@@ -1337,7 +1479,7 @@ ${store}/Secret.db.default.K" ] || { echo "sops ran on: $(cat "${SOPS_LOG}")" >&
   DOMAIN=a.dev run _add "${KEY_B}"
   unset -f flock
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] cannot lock ${PATH_BASE}/.sops.yaml.lock (flock exited with 66): nothing was changed" ] || {
+  [ "$output" = "[error] cannot lock ${PATH_BASE}/.sops.yaml.lock (flock exited with 66): the command stopped before it changed .sops.yaml, a .gitignore or an .enc file, but its open can have made the lock file; fix the cause of the flock error, then run this command again" ] || {
     echo "$output" >&2; return 1; }
   cmp -s "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
   [ ! -s "${ENCRYPT_RAN}" ]

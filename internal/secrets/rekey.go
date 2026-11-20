@@ -430,7 +430,9 @@ func (c *Context) storeListing(stores []string, checked sweepList, wrote bool) (
 // before its first change of .sops.yaml, the .gitignore or an .enc. A path
 // that it cannot stat is not a file that it can compare, and is no alias:
 // the .gitignore and an .enc that do not exist yet, and dest after a change
-// during the run (outside the threat model).
+// during the run (outside the threat model). It does not compare an orphan
+// .enc, a plaintext or a file outside the store, and it runs once, not
+// before each write. The lock file can be new when it refuses.
 func (c *Context) refuseConfigAlias(dest string, checked sweepList) bool {
 	conf, err := os.Stat(dest)
 	if err != nil {
@@ -441,7 +443,7 @@ func (c *Context) refuseConfigAlias(dest string, checked sweepList) bool {
 		if err != nil || !os.SameFile(conf, info) {
 			continue
 		}
-		ui.ErrorTo(c.ErrOut, ".sops.yaml names %s, and add-key writes that file as %s: nothing was changed; give .sops.yaml a file of its own, then run this command again", c.rel(dest), c.rel(out))
+		ui.ErrorTo(c.ErrOut, ".sops.yaml names %s, and add-key writes that file as %s: add-key stopped before it changed .sops.yaml, the .gitignore or an .enc file, but the lock file %s.lock can be new; give .sops.yaml a file of its own, then run this command again", c.rel(dest), c.rel(out), c.rel(dest))
 		return true
 	}
 	return false
@@ -579,12 +581,14 @@ func (c *Context) keyAdded(enc, recipient string) (bool, error) {
 // recipient (in sops.age or in a sops.key_groups item) holds an enc that is
 // an armored age block: its first line is the header of the age armor and
 // its last line the footer. A label alone ({"recipient"} with no enc) does
-// not pass. Only the entries of recipient are read for their enc: an entry
-// of another recipient does not change the state of this one, so a fault
-// there does not make the run re-key the file from a plaintext that can be
-// older than the .enc (the bash twin reads the same entries). The check is
-// structural: it does not decrypt the file, so it does not show that sops
-// wrote the entry or that the key can decrypt the file.
+// not pass. Only the enc fields of the entries of recipient take part in
+// the envelope test: a fault in the enc of another entry does not make the
+// run re-key the file from a plaintext that can be older than the .enc
+// (the bash twin reads the same fields). encRecipients still reads every
+// entry: a recipient of another entry that is not a non-empty string, or
+// a member that the metadata holds twice, fails the check of the whole
+// file. The check is structural: it does not decrypt the file, so it does
+// not show that sops wrote the entry or that the key can decrypt the file.
 func encAdded(raw []byte, recipient string) bool {
 	if _, err := encRecipients(raw); err != nil {
 		return false

@@ -357,9 +357,10 @@ func (c *Context) rerunLeft(checked sweepList, recipient string, all, skipOrphan
 // re-keys the files of left only: an .enc whose re-key is finished keeps
 // its bytes, so a plaintext that is older than a pulled .enc does not
 // replace it. Then it reads the sweep again (unfinishedEncs). An .enc that
-// still does not pass the recipient envelope check means that its creation
-// rule does not list the key (the key can be in a comment of .sops.yaml
-// only): the run names each such file and fails, with no "done" line.
+// still does not pass the recipient envelope check can mean that its
+// creation rule does not list the key (for example, the key is in a
+// comment of .sops.yaml only): the run names each such file and fails,
+// with no "done" line.
 func (c *Context) finishReKey(checked sweepList, left []string, recipient string) error {
 	if len(left) == 0 {
 		fmt.Fprintln(c.Out, "recipient already present in .sops.yaml — nothing to add")
