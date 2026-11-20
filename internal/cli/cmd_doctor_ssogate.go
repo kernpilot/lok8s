@@ -209,6 +209,7 @@ func ssoParse(data []byte) ssoState {
 		return ssoInvalid
 	}
 	var version, stored map[string]any
+	var versionServed, versionStored bool
 	n, nStored := 0, 0
 	for _, v := range versions {
 		m, ok := v.(map[string]any)
@@ -219,7 +220,8 @@ func ssoParse(data []byte) ssoState {
 		if !ok {
 			return ssoInvalid
 		}
-		if _, ok := m["served"].(bool); !ok {
+		served, ok := m["served"].(bool)
+		if !ok {
 			return ssoInvalid
 		}
 		storage, ok := m["storage"].(bool)
@@ -231,7 +233,7 @@ func ssoParse(data []byte) ssoState {
 			nStored++
 		}
 		if name == ssoVersion {
-			version = m
+			version, versionServed, versionStored = m, served, storage
 			n++
 		}
 	}
@@ -243,11 +245,11 @@ func ssoParse(data []byte) ssoState {
 	case n > 1:
 		return ssoInvalid
 	}
-	if !version["served"].(bool) {
+	if !versionServed {
 		return ssoNotServed
 	}
 	state := ssoField(version)
-	if state != ssoPresent || version["storage"].(bool) {
+	if state != ssoPresent || versionStored {
 		return state
 	}
 	if state = ssoField(stored); state == ssoAbsent {
