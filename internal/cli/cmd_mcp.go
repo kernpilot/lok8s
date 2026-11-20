@@ -32,7 +32,8 @@ package cli
 //     --allow-destructive; --verbose never (ophis renders a count flag as
 //     `--verbose N`, which cobra would take as a stray positional);
 //   - a flag that a command always refuses is not in that tool's schema
-//     (mcpRefusedFlags: --force on `kubehz node drain`);
+//     (mcpRefusedFlags: the global --cluster on the `kubehz node` verbs,
+//     and --force on `kubehz node drain`);
 //   - a command that parses its own argv (DisableFlagParsing: `lo chat`) is
 //     never exposed: the flag policy cannot see what reaches it, and
 //     `lo chat --lo <path>` would run any file with the server's
@@ -246,10 +247,18 @@ func mcpHiddenSubtree(cmd *cobra.Command) bool {
 
 // mcpRefusedFlags are flags that one command always refuses, by command
 // path. That tool's schema does not show them, also with --allow-destructive.
-// A drain refuses the global --force/-f (kubehz.Context.NodeDrain): its own
-// flag for `kubectl drain --force` is --evict-unmanaged.
+// The node verbs refuse the global --cluster/-s, which names the kind cluster
+// lo manages (kubehz.Context.RejectGlobalClusterFlag, RejectSpaceClusterFlag):
+// their own flags are --cluster-id and --space-id. A drain also refuses the
+// global --force/-f (kubehz.Context.NodeDrain): its own flag for
+// `kubectl drain --force` is --evict-unmanaged.
 var mcpRefusedFlags = map[string]map[string]bool{
-	"lo kubehz node drain": {"force": true},
+	"lo kubehz node cordon":   {"cluster": true},
+	"lo kubehz node uncordon": {"cluster": true},
+	"lo kubehz node drain":    {"cluster": true, "force": true},
+	"lo kubehz node join":     {"cluster": true},
+	"lo kubehz node remove":   {"cluster": true},
+	"lo kubehz node status":   {"cluster": true},
 }
 
 // mcpSelectors are the ophis selectors. Each selects leaves only
@@ -386,7 +395,7 @@ func mcpExposureFlags(cmd *cobra.Command, x *mcpExposure) {
 	f.BoolVar(&x.mutating, "allow-mutating", false,
 		"Also expose mutating, non-destructive commands (build, use, secrets encrypt, …)")
 	f.BoolVar(&x.destructive, "allow-destructive", false,
-		"Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate; implies --allow-mutating")
+		"Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate (not on kubehz node drain, which refuses --force); implies --allow-mutating")
 }
 
 const mcpLong = `Serve the lo commands to AI agents and editors as MCP tools.
@@ -413,7 +422,10 @@ claim-code, kubehz space|cluster kubeconfig) is never exposed: a tool
 result lands in the model's transcript. Neither is chat: it passes its
 arguments on unread. A call whose positional argument starts with "-" is
 refused, and nothing runs. Flags that carry a credential (token, secret, password, key,
-nonce, ...) are never exposed either.
+nonce, ...) are never exposed either. A flag that a command always
+refuses is not in that tool's schema: the global --cluster on the kubehz
+node verbs (they take --cluster-id or --space-id), and --force on kubehz
+node drain (it takes --evict-unmanaged).
 A command that is not exposed is not registered, so it cannot be called.
 LO_MCP_ALLOW=mutating|destructive is the environment form of the opt-in,
 for editor configs (flags win).

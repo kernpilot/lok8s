@@ -325,6 +325,38 @@ func TestMcpDrainToolHidesTheForceItRefuses(t *testing.T) {
 	}
 }
 
+// TestMcpNodeToolsHideTheClusterTheyRefuse: the node verbs always refuse
+// the global --cluster/-s, so their tools do not offer it, also with
+// --allow-destructive. Each tool keeps its own target flag. lo_down reads
+// --cluster (the kind cluster), so its tool keeps it.
+func TestMcpNodeToolsHideTheClusterTheyRefuse(t *testing.T) {
+	tools := mcpToolNames(t, mcpExposure{destructive: true})
+	for name, own := range map[string]string{
+		"lo_kubehz_node_cordon":   "space-id",
+		"lo_kubehz_node_uncordon": "space-id",
+		"lo_kubehz_node_drain":    "space-id",
+		"lo_kubehz_node_join":     "cluster-id",
+		"lo_kubehz_node_remove":   "cluster-id",
+		"lo_kubehz_node_status":   "cluster-id",
+	} {
+		tool := tools[name]
+		if tool == nil {
+			t.Errorf("%s missing with --allow-destructive", name)
+			continue
+		}
+		flags := flagNames(t, tool)
+		if flags["cluster"] {
+			t.Errorf("--cluster on %s, which always refuses it", name)
+		}
+		if !flags[own] {
+			t.Errorf("--%s missing on %s", own, name)
+		}
+	}
+	if tools["lo_down"] == nil || !flagNames(t, tools["lo_down"])["cluster"] {
+		t.Error("--cluster missing on lo_down with --allow-destructive")
+	}
+}
+
 // TestMcpRefusedFlagsNameRealFlags: every entry of mcpRefusedFlags names a
 // command of the MCP tree and a flag that this command has. A renamed command
 // or flag would otherwise make the entry do nothing.
@@ -781,15 +813,28 @@ func resultText(res *mcp.CallToolResult) string {
 // positional argument that starts with "-" is an MCP error and no process
 // starts. ophis puts the model's arguments after the flags, so "-o" or
 // "--force" there would parse as a flag the schema does not offer.
+//
+// The drain tool has its own selector (mcpRefusedFlags), so it gets the same
+// calls: "--force" or "-s" there would set a flag that its schema hides.
 func TestMcpRefusesADashArgumentAndRunsNothing(t *testing.T) {
-	for _, args := range [][]string{{"sp-1a2b3c4d", "-o", "json"}, {"sp-1a2b3c4d", "--force"}, {"-"}} {
-		res := mcpCall(t, mcpExposure{destructive: true}, "lo_kubehz_space_get", map[string]any{}, args)
+	for _, c := range []struct {
+		tool  string
+		flags map[string]any
+		args  []string
+	}{
+		{"lo_kubehz_space_get", map[string]any{}, []string{"sp-1a2b3c4d", "-o", "json"}},
+		{"lo_kubehz_space_get", map[string]any{}, []string{"sp-1a2b3c4d", "--force"}},
+		{"lo_kubehz_space_get", map[string]any{}, []string{"-"}},
+		{"lo_kubehz_node_drain", map[string]any{"name": "worker-1"}, []string{"--force"}},
+		{"lo_kubehz_node_drain", map[string]any{"name": "worker-1"}, []string{"-s", "kind-1"}},
+	} {
+		res := mcpCall(t, mcpExposure{destructive: true}, c.tool, c.flags, c.args)
 		text := resultText(res)
 		if !res.IsError || !strings.Contains(text, "starts with a dash") || !strings.Contains(text, "Nothing ran") {
-			t.Errorf("args %q: isError=%v text=%q, want the refusal", args, res.IsError, text)
+			t.Errorf("%s args %q: isError=%v text=%q, want the refusal", c.tool, c.args, res.IsError, text)
 		}
 		if strings.Contains(text, toolCallArgvMark) {
-			t.Errorf("args %q: a process ran: %q", args, text)
+			t.Errorf("%s args %q: a process ran: %q", c.tool, c.args, text)
 		}
 	}
 }
