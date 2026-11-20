@@ -346,7 +346,7 @@ var configHints = map[string]string{
 	"redis-operator-chart-rbac":    "opt-in after redis-operator, not recommended: binds the chart's broad ClusterRole rules to the operator again",
 	"reflector":                    "annotate the source Secret/ConfigMap to mirror across namespaces",
 	"rook-ceph":                    "CephCluster/pool/StorageClass in a target: replica count + device filter",
-	"rook-ceph-csi-kms":            "opt-in after rook-ceph: restores the node plugin's Secret + ServiceAccount-token grants (KMS encryption, mounter=rbd-nbd)",
+	"rook-ceph-csi-kms":            "opt-in after rook-ceph: values.kms lists the ceph-csi features to grant (a KMS type, rbd-nbd, block-volume-stats); all = the five upstream rules",
 	"sso-gate":                     "patch issuer/clientID from a target + Secret sso-gate-client; label routes sso.lok8s.dev/protect",
 	"system-upgrade-controller":    "declare upgrade Plans in a target (Rancher SUC); the controller runs without cluster-admin",
 	"tempo":                        "configure trace storage/retention via the tempo values",

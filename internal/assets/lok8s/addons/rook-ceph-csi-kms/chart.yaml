@@ -1,0 +1,12 @@
+# khelm spec rendering the LOCAL chart (./chart): there is no `repository:`
+# field, so khelm reads `chart:` as a directory. values.yaml is the override
+# surface; the bootstrap stacks the entry's `values:` on top of it.
+apiVersion: khelm.mgoltzsche.github.com/v2
+kind: ChartRenderer
+metadata:
+  name: rook-ceph-csi-kms
+  namespace: rook-ceph
+kubeVersion: "1.35.5"
+chart: ./chart
+valueFiles:
+  - values.yaml

@@ -1,3 +1,10 @@
+# Fixture for internal/addons/rookceph_kms_test.go and
+# rookceph_rbac_test.go: the rbac.yaml of the rook-ceph-csi-kms addon
+# before the per-feature split (issue #265), byte for byte below this
+# header. `kms: [all]` must render exactly these objects: it is the upgrade
+# path that keeps the grants of earlier releases. Do not edit it to follow
+# the addon: a change here is a change of what `all` grants.
+#
 # The five rules the rook-ceph addon strips from the node plugin ClusterRole,
 # verbatim from the ceph-csi-drivers chart
 # (templates/rbd-nodeplugin-cr-rbac.yaml),
