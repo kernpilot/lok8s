@@ -966,9 +966,9 @@ func TestPublishKubeconfigNeverReplacesWithoutForce(t *testing.T) {
 
 // failLink is a linkKubeconfig that fails as link(2) fails with errno. It
 // runs hook first (when not nil), and counts its calls in calls.
-func failLink(t *testing.T, errno syscall.Errno, calls *int, hook func()) func(string, string) error {
+func failLink(t *testing.T, errno syscall.Errno, calls *int, hook func()) func(*os.Root, string, string) error {
 	t.Helper()
-	return func(oldname, newname string) error {
+	return func(_ *os.Root, oldname, newname string) error {
 		*calls++
 		if hook != nil {
 			hook()
@@ -999,7 +999,8 @@ func dirNames(t *testing.T, dir string) string {
 // bash twin is in kubehz_agent_test.bats. Not parallel: it replaces
 // linkKubeconfig.
 func TestPublishKubeconfigWithoutHardLinks(t *testing.T) {
-	t.Cleanup(func() { linkKubeconfig = os.Link })
+	link := linkKubeconfig
+	t.Cleanup(func() { linkKubeconfig = link })
 	for _, tc := range []struct {
 		name  string
 		errno syscall.Errno
@@ -1063,8 +1064,8 @@ func failWrite(t *testing.T, calls *int, hook func()) func(*os.File, []byte) err
 // file that the create made, and left says that the part stays. Not
 // parallel: it replaces linkKubeconfig and writeKubeconfigFile.
 func TestPublishKubeconfigWriteFailureRemovesTheFile(t *testing.T) {
-	write := writeKubeconfigFile
-	t.Cleanup(func() { linkKubeconfig, writeKubeconfigFile = os.Link, write })
+	link, write := linkKubeconfig, writeKubeconfigFile
+	t.Cleanup(func() { linkKubeconfig, writeKubeconfigFile = link, write })
 	links := 0
 	linkKubeconfig = failLink(t, syscall.EPERM, &links, nil)
 	for _, tc := range []struct {
@@ -1118,8 +1119,8 @@ func TestPublishKubeconfigWriteFailureRemovesTheFile(t *testing.T) {
 // exclusive create fails on the file before any write. Not parallel: it
 // replaces linkKubeconfig and writeKubeconfigFile.
 func TestPublishKubeconfigWithoutHardLinksKeepsAFileThatAppears(t *testing.T) {
-	write := writeKubeconfigFile
-	t.Cleanup(func() { linkKubeconfig, writeKubeconfigFile = os.Link, write })
+	link, write := linkKubeconfig, writeKubeconfigFile
+	t.Cleanup(func() { linkKubeconfig, writeKubeconfigFile = link, write })
 	writes := 0
 	writeKubeconfigFile = func(f *os.File, data []byte) error {
 		writes++
@@ -1163,7 +1164,8 @@ func TestPublishKubeconfigWithoutHardLinksKeepsAFileThatAppears(t *testing.T) {
 // and writes nothing, also when no file is at the path by then. Not
 // parallel: it replaces linkKubeconfig.
 func TestPublishKubeconfigEEXISTHasNoFallback(t *testing.T) {
-	t.Cleanup(func() { linkKubeconfig = os.Link })
+	link := linkKubeconfig
+	t.Cleanup(func() { linkKubeconfig = link })
 	dir := t.TempDir()
 	file := filepath.Join(dir, "kc.yaml")
 	calls := 0
@@ -1183,20 +1185,21 @@ func TestPublishKubeconfigEEXISTHasNoFallback(t *testing.T) {
 	}
 }
 
-// The fallback needs the temporary file at its path, the file that the
-// publish wrote. When a directory of the path is swapped during the link,
-// the link source is missing in the new directory (ENOENT): the publish
-// fails with the link error and writes no file there. Here the link step
-// moves the temporary file away. Not parallel: it replaces linkKubeconfig.
+// The fallback needs the temporary file at its name, the file that the
+// publish wrote. When another process moves the temporary file during the
+// link, the link source is missing (ENOENT): the publish fails with the
+// link error and writes no file. Here the link step moves the temporary
+// file away. Not parallel: it replaces linkKubeconfig.
 func TestPublishKubeconfigNoFallbackWithoutTheTemporaryFile(t *testing.T) {
-	t.Cleanup(func() { linkKubeconfig = os.Link })
+	link := linkKubeconfig
+	t.Cleanup(func() { linkKubeconfig = link })
 	dir := t.TempDir()
 	file := filepath.Join(dir, "kc.yaml")
 	moved := filepath.Join(dir, "moved")
 	calls := 0
-	linkKubeconfig = func(oldname, newname string) error {
+	linkKubeconfig = func(_ *os.Root, oldname, newname string) error {
 		calls++
-		must(t, os.Rename(oldname, moved))
+		must(t, os.Rename(filepath.Join(dir, oldname), moved))
 		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: syscall.ENOENT}
 	}
 	_, err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
@@ -1219,8 +1222,8 @@ func TestPublishKubeconfigNoFallbackWithoutTheTemporaryFile(t *testing.T) {
 // away and puts another file at the path. Not parallel: it replaces
 // linkKubeconfig, chmodKubeconfig and writeKubeconfigFile.
 func TestPublishKubeconfigWritesNothingWhenThePathChangesAfterTheCreate(t *testing.T) {
-	chmod, write := chmodKubeconfig, writeKubeconfigFile
-	t.Cleanup(func() { linkKubeconfig, chmodKubeconfig, writeKubeconfigFile = os.Link, chmod, write })
+	link, chmod, write := linkKubeconfig, chmodKubeconfig, writeKubeconfigFile
+	t.Cleanup(func() { linkKubeconfig, chmodKubeconfig, writeKubeconfigFile = link, chmod, write })
 	dir := t.TempDir()
 	file := filepath.Join(dir, "kc.yaml")
 	calls, writes := 0, 0
@@ -1290,8 +1293,8 @@ func TestPublishKubeconfigUnderADefaultACL(t *testing.T) {
 	if serr != nil || gerr != nil {
 		t.Skip("setfacl or getfacl is missing")
 	}
-	chmod := chmodKubeconfig
-	t.Cleanup(func() { linkKubeconfig, chmodKubeconfig = os.Link, chmod })
+	link, chmod := linkKubeconfig, chmodKubeconfig
+	t.Cleanup(func() { linkKubeconfig, chmodKubeconfig = link, chmod })
 	dir := t.TempDir()
 	if out, err := exec.Command(setfacl, "-d", "-m", "u::rw,g::r,o::r", dir).CombinedOutput(); err != nil {
 		t.Skipf("no ACLs on the file system of the test dir: %v: %s", err, out)
@@ -1350,7 +1353,8 @@ func TestPublishKubeconfigUnderADefaultACL(t *testing.T) {
 // check (in the link step) stays, with the refusal of a path that exists.
 // Not parallel: it replaces linkKubeconfig.
 func TestAgentKubeconfigWithoutHardLinks(t *testing.T) {
-	t.Cleanup(func() { linkKubeconfig = os.Link })
+	link := linkKubeconfig
+	t.Cleanup(func() { linkKubeconfig = link })
 	calls := 0
 	linkKubeconfig = failLink(t, syscall.EPERM, &calls, nil)
 	h := agentHarness(t)
@@ -1438,8 +1442,8 @@ func TestAgentKubeconfigWithoutHardLinks(t *testing.T) {
 // that names the mode. Not parallel: it replaces linkKubeconfig and
 // chmodKubeconfig.
 func TestAgentKubeconfigWarnsWhenTheModeStaysWide(t *testing.T) {
-	chmod := chmodKubeconfig
-	t.Cleanup(func() { linkKubeconfig, chmodKubeconfig = os.Link, chmod })
+	link, chmod := linkKubeconfig, chmodKubeconfig
+	t.Cleanup(func() { linkKubeconfig, chmodKubeconfig = link, chmod })
 	calls := 0
 	linkKubeconfig = failLink(t, syscall.EPERM, &calls, nil)
 	chmodKubeconfig = func(f *os.File) error {

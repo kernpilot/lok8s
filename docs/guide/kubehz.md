@@ -1254,6 +1254,20 @@ the mode of every file, often 0644: then `lo` writes the file and prints a
 warning that names the mode. A hard link to the old file keeps the old
 content.
 
+`lo` opens the directory of the file one time, and does each step of the
+write relative to that open directory: the temporary file, the rename, the
+hard link or the exclusive create, each check and each remove. Thus when a
+directory of the path changes during the write (another directory, or a
+link put in its place), no step goes to another directory. The name of the
+file itself can still change between two steps. Before `lo` writes to the
+new file or removes a file, it checks that the name still names the file
+that `lo` made. To open the directory, `lo` needs the read right on it: a
+directory with only the write and the search rights (mode 0300) is refused
+with `cannot write`. The bash implementation (`lok8s.yaml`
+`spec.implementation`) does each step by path, and needs no read right on
+the directory. There, a change of a directory of the path during the write
+can still send a step to another directory.
+
 When the path is a link, `--force` replaces the file that the link points
 to, and the link stays. `lo` does this only when the owners and the mode
 bits on the way let no other user send the write to another file:
