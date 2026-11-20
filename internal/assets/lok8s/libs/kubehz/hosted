@@ -547,11 +547,35 @@ kubehz::_private_link_hops() {
   done
 }
 
+# kubehz::_lstat_line <path>: one lookup of the entry at <path> itself (a
+# link is not followed). Status 0: <path> is there, and the line of
+# LC_ALL=C ls -ldn is on stdout. Status 1: <path> is not there (ENOENT):
+# ls fails, and its error output is one line that ends in the C text of
+# ENOENT, ": No such file or directory" (GNU, BSD and busybox ls put the
+# text of the error at the end of the line). Status 2: the lookup cannot
+# tell, because it failed for another cause (EIO, ESTALE, EACCES, ENOTDIR,
+# and so on), or because its output is not one line of ls. -e and -L
+# cannot tell these apart: both are false on each error. Go twin: the
+# error of os.Lstat, and errors.Is(err, fs.ErrNotExist).
+kubehz::_lstat_line() {
+  local out rc=0
+  out=$(LC_ALL=C ls -ldn -- "${1}" 2>&1) || rc=$?
+  if (( rc == 0 )); then
+    [[ "${out}" != *$'\n'* && "${out}" =~ ^[-dlcbps][-rwxsStT]{9} ]] || return 2
+    printf '%s\n' "${out}"
+    return 0
+  fi
+  [[ "${out}" != *$'\n'* && "${out}" == *": No such file or directory" ]] || return 2
+  return 1
+}
+
 # kubehz::_private_dir_ok <dir>: status 0 when no other user can replace a
 # file in <dir>. It refuses, with one error line and status 1:
-# - a <dir> that is not there when its parent is not a directory that
-#   this user can search (then the check cannot tell that <dir> is not
-#   there), and a line of ls that the check cannot read;
+# - a <dir> whose lookup fails for a cause other than "not there"
+#   (kubehz::_lstat_line: EIO, ESTALE, a parent that this user cannot
+#   search, a parent that is a file), a <dir> that is not there when its
+#   parent is not a directory that this user can search, and a line of ls
+#   that the check cannot read;
 # - a path that is there but is not a directory (also a link to nothing);
 # - a directory that belongs to a user other than this user or root (that
 #   user can change its mode);
@@ -569,12 +593,15 @@ kubehz::_private_link_hops() {
 # uid and the gid in the same form on GNU and BSD (their stat takes other
 # options), and it follows a link, as the create does.
 kubehz::_private_dir_ok() {
-  local dir="${1}" line="" mode="" uid="" gid="" me parent
-  if [[ ! -e "${dir}" && ! -L "${dir}" ]]; then
+  local dir="${1}" line="" mode="" uid="" gid="" me parent rc=0
+  kubehz::_lstat_line "${dir}" > /dev/null || rc=$?
+  if (( rc == 1 )); then
     parent=$(dirname -- "${dir}")
     if [[ -d "${parent}" && -x "${parent}" ]]; then
       return 0
     fi
+  fi
+  if (( rc != 0 )); then
     error "Cannot read the owner and the mode of the directory ${dir}: nothing is written"
     return 1
   fi

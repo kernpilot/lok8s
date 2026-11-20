@@ -1621,6 +1621,47 @@ _link_owner_ls() {
   unset -f ls
 }
 
+# The lookup of the directory tells "not there" (ENOENT) from an error
+# (kubehz::_lstat_line). ls is faked for ls -ldn of a directory that is
+# not there, with a parent that this user can search: an error line of
+# another cause (EIO, ESTALE, EACCES) is refused, because the directory
+# can be there. The ENOENT line of GNU and of BSD passes. An error output
+# of more than one line is refused. Before, -e and -L were false on each
+# error, and the check passed. Go twin: privateDirRefusal reads the error
+# of os.Stat.
+@test "kubehz::_private_dir_ok refuses a lookup error other than not there" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local d="${BATS_TEST_TMPDIR}/lookup/kube" err
+  mkdir -p "${BATS_TEST_TMPDIR}/lookup"
+  FAKE_DIR="${d}"
+  ls() {
+    if [[ "${1}" == -ldn && "${!#}" == "${FAKE_DIR}" ]]; then
+      printf '%s\n' "${FAKE_ERR}" >&2
+      return 2
+    fi
+    command ls "$@"
+  }
+  for err in "Input/output error" "Stale file handle" "Permission denied"; do
+    FAKE_ERR="ls: cannot access '${d}': ${err}"
+    run kubehz::_private_dir_ok "${d}"
+    assert_failure
+    assert_output "$(_dir_refused unread "${d}")"
+  done
+  FAKE_ERR="ls: cannot access '${d}': No such file or directory"
+  run kubehz::_private_dir_ok "${d}"
+  assert_success
+  assert_output ""
+  FAKE_ERR="ls: ${d}: No such file or directory"
+  run kubehz::_private_dir_ok "${d}"
+  assert_success
+  assert_output ""
+  FAKE_ERR=$'ls: cannot access \'a\nb\': No such file or directory'
+  run kubehz::_private_dir_ok "${d}"
+  assert_failure
+  assert_output "$(_dir_refused unread "${d}")"
+  unset -f ls
+}
+
 # In a directory with the sticky bit, another user can put a link at the
 # name of the file, to a file of this user: the rename would replace that
 # file. So each link that the name follows must belong to this user or to
