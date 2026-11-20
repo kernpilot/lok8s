@@ -814,11 +814,10 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 		return err
 	}
 
-	// The bash sent the PKI with `StrictHostKeyChecking=no` and
-	// `UserKnownHostsFile=/dev/null`: any host that answered on the address
-	// got the CA private keys. This is a deliberate deviation: the host key
-	// is recorded on first contact and verified after that, against a real
-	// known_hosts file.
+	// These calls carry the CA private keys, so the host key is checked: a
+	// node seen for the first time is recorded (accept-new), and a changed
+	// key fails the transfer. Never StrictHostKeyChecking=no or /dev/null
+	// here. The bash twin (handover::preseed) uses the same options.
 	sshOpts := []string{
 		"-o", "IdentitiesOnly=yes", "-o", "StrictHostKeyChecking=accept-new",
 		"-o", "BatchMode=yes", "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10",
