@@ -5525,6 +5525,7 @@ SH
 # The same with REAL sops material when the toolchain has sops, ssh-keygen
 # and ssh-to-age: the normal key discovery (SOPS_AGE_KEY) decrypts and the
 # file is diffed; another key fails and the run exits 2.
+# bats test_tags=real-sops
 @test "bootstrap::apply --dry-run: restore.d with real sops (right key diffs, wrong key rc 2)" {
   local t
   for t in sops ssh-keygen ssh-to-age; do

@@ -31,6 +31,7 @@ require_tools() {
   done
 }
 
+# bats test_tags=real-sops
 @test "secrets: SOPS/age encrypt → decrypt round-trips a value" {
   require_tools
   ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q
@@ -59,6 +60,7 @@ require_tools() {
 # it (the recreate: "Decrypted 71" of 103, 32 skipped without a word). Now it
 # compares the kept plaintext with the decrypted .enc, names each one that
 # differs (never its value), counts both kinds in the summary and exits 0.
+# bats test_tags=real-sops
 @test "secrets decrypt: a kept newer plaintext is compared with its .enc" {
   require_tools
   ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q
@@ -146,6 +148,7 @@ require_tools() {
 
 # A kept plaintext whose .enc this key cannot decrypt fails the run, the same
 # way a decrypt of a missing plaintext does.
+# bats test_tags=real-sops
 @test "secrets decrypt: the compare fails on an .enc the key cannot decrypt" {
   require_tools
   ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q
@@ -163,6 +166,7 @@ require_tools() {
   assert_line '[error] Failed to decrypt Secret.app.default.K.enc'
 }
 
+# bats test_tags=real-sops
 @test "secrets: encrypt writes a .secrets/.gitignore that commits only .enc" {
   require_tools
   ssh-keygen -t ed25519 -N '' -C test -f "${BATS_TEST_TMPDIR}/id" -q

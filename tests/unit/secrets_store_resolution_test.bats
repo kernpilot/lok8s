@@ -309,6 +309,7 @@ _require_crypto() {
 # The same with the real sops and an identity derived from LOK8S_SSH_KEY.
 # The .enc is made by secrets::encrypt (the production producer) to a
 # throwaway key.
+# bats test_tags=real-sops
 @test "load_provider_creds: an .enc-only store is decrypted in memory (real sops)" {
   _require_crypto
   _creds_setup
