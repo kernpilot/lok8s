@@ -5,7 +5,7 @@ package kubehz
 // hosted_dir_unix_test.go ports the cases of tests/unit/kubehz_hosted_test.bats
 // for a kubeconfig directory that another user can write into
 // (privateDirRefusal, the twin of kubehz::_private_dir_ok) and for a link of
-// another user (privateLinkRefusal, the twin of kubehz::_private_link_hops).
+// another user (privateWalk, the twin of kubehz::_private_link_hops).
 // The texts are the texts of bash.
 
 import (
@@ -347,12 +347,8 @@ func TestWritePrivateFileRefusesALinkOfAnotherUser(t *testing.T) {
 	fakeLinkOwner(hop, 0, true)
 	mustRefusePrivate(t, kc, dirRefused("linkread", hop, 0))
 	fakeLinkOwner(hop, 0, false)
-	want, err := filepath.EvalSymlinks(rc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, err := privateTarget(kc); err != nil || got != want {
-		t.Fatalf("a link of root: %q, %v, want %q", got, err, want)
+	if got, err := privateTarget(kc); err != nil || got != rc {
+		t.Fatalf("a link of root: %q, %v, want %q", got, err, rc)
 	}
 	privateLstat = os.Lstat
 	mustWritePrivate(t, kc)
@@ -429,6 +425,151 @@ func TestPrivateDirRefusalRefusesALookupError(t *testing.T) {
 	}
 }
 
+// insertLinkAfterLookup makes privateLstat put a link at dest, to victim,
+// right after the first lookup of dest that finds nothing there. Another
+// user who can write into the directory can do that between the lookup
+// and the write. Other lookups get os.Lstat. The result reports whether
+// the link was put there.
+func insertLinkAfterLookup(t *testing.T, dest, victim string) *bool {
+	t.Helper()
+	done := new(bool)
+	privateLstat = func(p string) (fs.FileInfo, error) {
+		info, err := os.Lstat(p)
+		if p == dest && !*done && errors.Is(err, fs.ErrNotExist) {
+			*done = true
+			if serr := os.Symlink(victim, dest); serr != nil {
+				t.Errorf("the insertion of the link: %v", serr)
+			}
+		}
+		return info, err
+	}
+	return done
+}
+
+// In a directory with the sticky bit and a shared group (mode 1770),
+// another user can put a link at the name of the file when nothing is
+// there, to a file of this user. The walk found nothing at the name, and
+// the write does not look the name up again: the rename replaces the link
+// that was put there after the walk, and the file that the link names
+// stays as it was (privateLstat puts the link there right after the
+// lookup of the walk). Before, a second resolution after the walk followed
+// that link and replaced the file of this user (bash: "kubehz::_write_private
+// replaces a link put at the name after the walk"). Not parallel: it
+// replaces privateLstat.
+func TestWritePrivateFileReplacesALinkPutAfterTheWalk(t *testing.T) {
+	t.Cleanup(func() { privateLstat = os.Lstat })
+	d := t.TempDir()
+	victim := oldFileIn(t, filepath.Join(d, "home"), 0o700)
+	shared := filepath.Join(d, "shared")
+	if err := os.Mkdir(shared, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(shared, 0o770|os.ModeSticky); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(shared, "kc.yaml")
+	done := insertLinkAfterLookup(t, dest, victim)
+	if err := writePrivateFile(t.Context(), dest, []byte("new\n")); err != nil {
+		t.Fatalf("%s: %v", dest, err)
+	}
+	if !*done {
+		t.Fatal("the walk did not look up the name: no link was put there")
+	}
+	if got := readFile(t, victim); got != "old\n" {
+		t.Fatalf("the file that the link names changed: %q", got)
+	}
+	info, err := os.Lstat(dest)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("%s is not a regular file with mode 0600: %v, %v", dest, info, err)
+	}
+	if got := readFile(t, dest); got != "new\n" {
+		t.Fatalf("%s = %q", dest, got)
+	}
+	for _, dir := range []string{shared, filepath.Dir(victim)} {
+		if tmp := hostedTemps(t, dir, "kc.yaml"); len(tmp) != 0 {
+			t.Fatalf("temp files left in %s: %q", dir, tmp)
+		}
+	}
+}
+
+// Each link of the chain is read only when no other user can replace it:
+// a link in a directory that another user can write into without the
+// sticky bit (0777, 0770) is refused, at the name and as the second link,
+// and the file that the chain names stays as it was. A link in a directory
+// with the sticky bit passes: there, another user cannot rename or remove
+// a link of this user (bash: the same cases).
+func TestWritePrivateFileChecksTheDirectoryOfEachLink(t *testing.T) {
+	t.Parallel()
+	d := t.TempDir()
+	kc := oldFileIn(t, filepath.Join(d, "safe"), 0o700)
+	linkIn := func(dir string, mode os.FileMode, to string) string {
+		t.Helper()
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		l := filepath.Join(dir, "kc.yaml")
+		if err := os.Symlink(to, l); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, mode); err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	world := linkIn(filepath.Join(d, "world"), 0o777, kc)
+	mustRefusePrivate(t, world, dirRefused("world", filepath.Dir(world), 0))
+	group := linkIn(filepath.Join(d, "group"), 0o770, kc)
+	mustRefusePrivate(t, group, dirRefused("group", filepath.Dir(group), 0))
+	first := linkIn(filepath.Join(d, "first"), 0o700, world)
+	mustRefusePrivate(t, first, dirRefused("world", filepath.Dir(world), 0))
+	sticky := linkIn(filepath.Join(d, "sticky"), 0o777|os.ModeSticky, kc)
+	mustWritePrivate(t, sticky)
+	if got := readFile(t, kc); got != "new\n" {
+		t.Fatalf("%s = %q", kc, got)
+	}
+}
+
+// The end of the walk keeps a ".." after a link to a directory, and the
+// kernel reads that ".." from the directory that the link names:
+// d/alias/../store is d/deep/store, not d/store. So the check and the
+// create take the directory of the path as it is (privateDir), not a
+// cleaned path (filepath.Dir). A world-writable d/deep/store is refused
+// although d/store is a directory of this user only, and the write goes
+// into d/deep/store when no d/store is there (bash: the same case).
+func TestWritePrivateFileTakesTheDirectoryOfTheWalkAsItIs(t *testing.T) {
+	t.Parallel()
+	d := t.TempDir()
+	kc := oldFileIn(t, filepath.Join(d, "deep", "store"), 0o777)
+	real := filepath.Join(d, "deep", "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../store/kc.yaml", filepath.Join(real, "kc.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(d, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(d, "store"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(d, "alias", "kc.yaml")
+	mustRefusePrivate(t, dest, dirRefused("world", d+"/alias/../store", 0))
+	if err := os.Remove(filepath.Join(d, "store")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Dir(kc), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustWritePrivate(t, dest)
+	if got := readFile(t, kc); got != "new\n" {
+		t.Fatalf("%s = %q", kc, got)
+	}
+	if _, err := os.Lstat(filepath.Join(d, "store")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the write made %s: %v", filepath.Join(d, "store"), err)
+	}
+}
+
 // A chain of 8 links passes, and a chain of 9 links is refused (bash: the
 // same case).
 func TestPrivateTargetFollowsEightLinksAndRefusesNine(t *testing.T) {
@@ -449,12 +590,8 @@ func TestPrivateTargetFollowsEightLinksAndRefusesNine(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	want, err := filepath.EvalSymlinks(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, err := privateTarget(filepath.Join(d, "c1")); err != nil || got != want {
-		t.Fatalf("8 links: %q, %v, want %q", got, err, want)
+	if got, err := privateTarget(filepath.Join(d, "c1")); err != nil || got != f {
+		t.Fatalf("8 links: %q, %v, want %q", got, err, f)
 	}
 	c0 := filepath.Join(d, "c0")
 	if got, want := targetRefusal(t, c0), dirRefused("resolve", c0, 0); got != want {

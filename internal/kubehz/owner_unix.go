@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -99,11 +98,10 @@ func readPrivateFile(file string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(f, 1<<20))
 }
 
-// privateEUID gives privateDirRefusal and privateLinkRefusal the
-// effective uid of this process (bash: id -u), and privateLstat reads a
-// name of the chain in privateLinkRefusal and a directory that os.Stat
-// does not find in privateDirRefusal (bash: kubehz::_lstat_line). A test
-// replaces them.
+// privateEUID gives privateDirRefusal and privateWalk the effective uid
+// of this process (bash: id -u), and privateLstat reads each name of the
+// walk in privateWalk and a directory that os.Stat does not find in
+// privateDirRefusal (bash: kubehz::_lstat_line). A test replaces them.
 var (
 	privateEUID  = os.Geteuid
 	privateLstat = os.Lstat
@@ -117,46 +115,59 @@ func privateNotThere(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
-// privateLinkRefusal ports kubehz::_private_link_hops: "" when each link
-// that the last name of dest follows (the link at dest, then the link that
-// it names, and so on) belongs to this user or root, else the error line
-// of bash. In a directory with the sticky bit, another user can put a link
-// at the name, to a file of this user: the rename would then replace that
-// file. A link of another user, a link whose owner cannot be read, a name
-// that Lstat cannot read for a cause other than "not there" (EIO, EACCES:
-// the check cannot tell that it is no link) and a chain of more than
-// maxLinkHops links are refused. A relative link names
-// a path from the directory of the link (the text before the last "/", not
-// cleaned, as in bash). A link to a directory on the way (not the last
-// name) is not checked here. This is not linkTarget of the agent
-// kubeconfig: that walk also checks each parent directory, wants a regular
-// file of this user at the end, and gives the texts of the agent command.
-func privateLinkRefusal(dest string) string {
+// privateWalk ports kubehz::_private_link_hops: the one walk of the last
+// name of dest. It gives the path at the end of the walk, the Lstat of
+// that path (nil when nothing is there), and "", else the error line of
+// bash. It reads each name once (privateLstat: the type and the owner come
+// from the same lookup), and it follows a link only after these checks:
+// the link belongs to this user or root, and no other user can replace a
+// file in the directory of the link (privateDirRefusal), so the link
+// cannot change before os.Readlink reads it. The end of the walk is the
+// path that the write replaces: the caller never resolves it again. In a
+// directory with the sticky bit, another user can put a link at a name
+// that is not there: os.Rename replaces that link, and does not follow it.
+// A link of another user (it can point at a file of this user), a link
+// whose owner cannot be read, a name that Lstat cannot read for a cause
+// other than "not there" (EIO, EACCES: the walk cannot tell that it is no
+// link), a link to nothing and a chain of more than maxLinkHops links are
+// refused. A relative link names a path from the directory of the link
+// (the text before the last "/", not cleaned, as in bash). A link to a
+// directory on the way (not the last name) is not checked here. This is
+// not linkTarget of the agent kubeconfig: that walk also checks each
+// parent directory, wants a regular file of this user at the end, and
+// gives the texts of the agent command.
+func privateWalk(dest string) (string, fs.FileInfo, string) {
 	p := dest
 	for hops := 0; ; hops++ {
 		info, err := privateLstat(p)
 		if privateNotThere(err) {
-			return ""
+			if hops > 0 {
+				return "", nil, "Cannot resolve the symlink " + dest
+			}
+			return p, nil, ""
 		}
 		if err != nil {
-			return "Cannot read the path " + p + ": nothing is written"
+			return "", nil, "Cannot read the path " + p + ": nothing is written"
 		}
 		if info.Mode()&fs.ModeSymlink == 0 {
-			return ""
+			return p, info, ""
 		}
 		if hops == maxLinkHops {
-			return "Cannot resolve the symlink " + dest
+			return "", nil, "Cannot resolve the symlink " + dest
 		}
 		uid, ok := fileOwner(info)
 		if !ok {
-			return "Cannot read the owner of the link " + p + ": nothing is written"
+			return "", nil, "Cannot read the owner of the link " + p + ": nothing is written"
 		}
 		if uid != 0 && uid != privateEUID() {
-			return fmt.Sprintf("The link %s belongs to uid %d, not to this user or to root, so another user can point it at a file of this user: nothing is written. Remove the link, or use a path of your own.", p, uid)
+			return "", nil, fmt.Sprintf("The link %s belongs to uid %d, not to this user or to root, so another user can point it at a file of this user: nothing is written. Remove the link, or use a path of your own.", p, uid)
+		}
+		if refused := privateDirRefusal(privateDir(p)); refused != "" {
+			return "", nil, refused
 		}
 		next, err := os.Readlink(p)
 		if err != nil || next == "" {
-			return "Cannot resolve the symlink " + dest
+			return "", nil, "Cannot resolve the symlink " + dest
 		}
 		if !strings.HasPrefix(next, "/") {
 			if i := strings.LastIndex(p, "/"); i >= 0 {
@@ -203,7 +214,7 @@ func privateDirRefusal(dir string) string {
 		if !privateNotThere(lerr) {
 			return unread
 		}
-		if parent, perr := os.Stat(filepath.Dir(dir)); perr != nil || !parent.IsDir() {
+		if parent, perr := os.Stat(privateDir(dir)); perr != nil || !parent.IsDir() {
 			return unread
 		}
 		return ""
