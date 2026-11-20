@@ -398,6 +398,201 @@ func TestKeyCommandsRefuseALockThatIsNotARegularFile(t *testing.T) {
 	}
 }
 
+// A link put at the lock path after the check and before the open (the
+// lockChecked seam) is not followed: the open has O_NOFOLLOW, and both
+// commands refuse with the line of the check. The file that the link names
+// keeps its bytes, a link to a path that does not exist makes no file there,
+// and .sops.yaml stays as it was (bash: the test after the open, in
+// tests/unit/secrets_add_key_test.bats).
+func TestKeyCommandsRefuseALockLinkPutThereAfterTheCheck(t *testing.T) {
+	for _, victimExists := range []bool{true, false} {
+		for _, cmd := range []string{"add-key", "remove-key"} {
+			name := cmd + "/a link to a missing file"
+			if victimExists {
+				name = cmd + "/a link to a file"
+			}
+			t.Run(name, func(t *testing.T) {
+				c, out, errOut := testEnv(t)
+				c.Domain = "a.dev"
+				sopsRules(t, c, keyA+","+keyB)
+				if cmd == "add-key" {
+					sopsRules(t, c, keyA)
+				}
+				lock := c.sopsConfigPath() + ".lock"
+				victim := mkdir(t, c.Paths.Base+"/elsewhere") + "/victim"
+				const victimBytes = "the bytes of another file\n"
+				if victimExists {
+					write(t, victim, victimBytes)
+				}
+				before := readFile(t, c.sopsConfigPath())
+				calls := 0
+				lockChecked = func(path string) {
+					calls++
+					if path != lock {
+						t.Errorf("the check ran on %s, not on %s", path, lock)
+					}
+					if err := os.Symlink(victim, path); err != nil {
+						t.Fatal(err)
+					}
+				}
+				t.Cleanup(func() { lockChecked = func(string) {} })
+
+				var err error
+				if cmd == "add-key" {
+					err = c.AddKey(keyB, false, false)
+				} else {
+					err = c.RemoveKey(keyB, false, false)
+				}
+				if !errors.Is(err, ErrHandled) {
+					t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+				}
+				if calls != 1 {
+					t.Fatalf("the seam ran %d times, want 1", calls)
+				}
+				want := "[error] " + lock + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed — remove it, then run this command again\n"
+				if errOut.String() != want || out.String() != "" {
+					t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+				}
+				unchanged(t, c, before)
+				if victimExists {
+					if got := readFile(t, victim); got != victimBytes {
+						t.Errorf("the file that the link names changed: %q", got)
+					}
+				} else if _, err := os.Lstat(victim); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("the open made a file through the link: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// A FIFO put at the lock path after the check and before the open (the
+// lockChecked seam). Without a reader, a write-only open that may block
+// waits for one: the open has O_NONBLOCK, so it fails (ENXIO) at once. With
+// a reader, the open passes and fstat refuses the FIFO (openedPathOK). Both
+// commands refuse with the line of the check, and .sops.yaml stays as it
+// was. The run goes in a goroutine: an open that blocks fails the test after
+// five seconds (the test opens the read end then, so the run ends) instead
+// of hanging the suite.
+func TestKeyCommandsRefuseALockFIFOPutThereAfterTheCheck(t *testing.T) {
+	for _, reader := range []bool{false, true} {
+		for _, cmd := range []string{"add-key", "remove-key"} {
+			name := cmd + "/a FIFO with no reader"
+			if reader {
+				name = cmd + "/a FIFO with a reader"
+			}
+			t.Run(name, func(t *testing.T) {
+				c, out, errOut := testEnv(t)
+				c.Domain = "a.dev"
+				sopsRules(t, c, keyA+","+keyB)
+				if cmd == "add-key" {
+					sopsRules(t, c, keyA)
+				}
+				lock := c.sopsConfigPath() + ".lock"
+				before := readFile(t, c.sopsConfigPath())
+				calls := 0
+				lockChecked = func(path string) {
+					calls++
+					if err := syscall.Mkfifo(path, 0o644); err != nil {
+						t.Error(err)
+						return
+					}
+					if !reader {
+						return
+					}
+					r, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					t.Cleanup(func() { _ = r.Close() })
+				}
+				t.Cleanup(func() { lockChecked = func(string) {} })
+
+				done := make(chan error, 1)
+				go func() {
+					if cmd == "add-key" {
+						done <- c.AddKey(keyB, false, false)
+					} else {
+						done <- c.RemoveKey(keyB, false, false)
+					}
+				}()
+				var err error
+				select {
+				case err = <-done:
+				case <-time.After(5 * time.Second):
+					// Release the open that waits, then fail.
+					if r, rerr := os.OpenFile(lock, os.O_RDONLY|syscall.O_NONBLOCK, 0); rerr == nil {
+						<-done
+						_ = r.Close()
+					}
+					t.Fatal("the open of the lock waited on a FIFO")
+				}
+				if !errors.Is(err, ErrHandled) {
+					t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+				}
+				if calls != 1 {
+					t.Fatalf("the seam ran %d times, want 1", calls)
+				}
+				want := "[error] " + lock + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed — remove it, then run this command again\n"
+				if errOut.String() != want || out.String() != "" {
+					t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+				}
+				unchanged(t, c, before)
+			})
+		}
+	}
+}
+
+// Another regular file put at the lock path after the open and before the
+// test of the opened file (the lockOpened seam): the opened file and the
+// file at the path are two regular files, not the same file. Both commands
+// refuse with a line that says that the file at the lock path changed after
+// its check, not with the line of a path that is not a regular file, and
+// .sops.yaml stays as it was (bash: tests/unit/secrets_add_key_test.bats).
+func TestKeyCommandsRefuseALockFileReplacedAfterTheOpen(t *testing.T) {
+	for _, cmd := range []string{"add-key", "remove-key"} {
+		t.Run(cmd, func(t *testing.T) {
+			c, out, errOut := testEnv(t)
+			c.Domain = "a.dev"
+			sopsRules(t, c, keyA+","+keyB)
+			if cmd == "add-key" {
+				sopsRules(t, c, keyA)
+			}
+			lock := c.sopsConfigPath() + ".lock"
+			before := readFile(t, c.sopsConfigPath())
+			calls := 0
+			lockOpened = func(path string) {
+				calls++
+				if err := os.Remove(path); err != nil {
+					t.Error(err)
+					return
+				}
+				write(t, path, "")
+			}
+			t.Cleanup(func() { lockOpened = func(string) {} })
+
+			var err error
+			if cmd == "add-key" {
+				err = c.AddKey(keyB, false, false)
+			} else {
+				err = c.RemoveKey(keyB, false, false)
+			}
+			if !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+			}
+			if calls != 1 {
+				t.Fatalf("the seam ran %d times, want 1", calls)
+			}
+			want := "[error] " + lock + " changed after its check (another file is there now): the command stopped before it changed .sops.yaml, a .gitignore or an .enc file, but its open can have made the lock file; run this command again\n"
+			if errOut.String() != want || out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+			}
+			unchanged(t, c, before)
+		})
+	}
+}
+
 // The replace keeps the mode, leaves a hard link to the old file with the
 // old content, and, given the path that resolveConfig makes of a symlink,
 // replaces the target of the link, not the link.

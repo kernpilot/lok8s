@@ -161,7 +161,7 @@ sec_state .secrets/.gitignore
 sec_check secrets add-key /no/such/file
 sec_check secrets add-key age1nope
 KEY2="$("${ROOT}/.bin/ssh-to-age" < "${WORK}/home/key.pub")"
-sec_check secrets add-key "${KEY2}"                       # already present → no-op
+sec_check secrets add-key "${KEY2}"                       # already present: encrypts the .sha with no .enc
 ssh-keygen -t ed25519 -N '' -C parity2 -f "${WORK}/home/key2" -q
 sec_check secrets add-key "${WORK}/home/key2.pub"         # re-key + sweep
 sec_state .sops.yaml
