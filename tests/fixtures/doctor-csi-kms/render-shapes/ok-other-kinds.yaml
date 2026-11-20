@@ -1,0 +1,8 @@
+# ids: ClusterRoleBinding//b
+kind: Namespace
+---
+kind: ConfigMap
+metadata: {name: 7}
+---
+kind: ClusterRoleBinding
+metadata: {name: b}

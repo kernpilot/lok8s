@@ -9,8 +9,9 @@ package cli
 // without prune, so a cluster that ran an earlier version of an addon keeps
 // the old objects until a person deletes them. This check reads the
 // ClusterRoleBindings and ClusterRoles of the active domain's cluster and
-// reports each old object with its delete command. It never changes the
-// cluster.
+// reports each old object with its delete command. It deletes nothing:
+// lo doctor sends only GET requests; a kubeconfig exec credential plugin
+// runs as kubectl runs it, and lo does not limit what it does.
 //
 // The check runs only when spec.bootstrap has one of the two addons (read
 // with the entry parser of `lo addons --detail`) and the domain has a
@@ -242,10 +243,14 @@ func doctorRBACLeftovers(ctx context.Context, r execx.Runner, paths *config.Path
 // stderr goes into a
 // buffer for the class and nowhere else. The output must be one JSON
 // object whose items is a list of objects, each of the shape that parse
-// reads (bash: doctor::_rbac_shape): else the whole list is invalid. The
-// decode into float64 refuses a number out of its range, as the bash twin
-// refuses NaN and infinite numbers. A read that the bound stopped gives
-// rbacReasonNoAnswer, also when kubectl handled the SIGTERM and exited 0.
+// reads (bash: doctor::_rbac_shape): else the whole list is invalid. A
+// list with a continue token (a metadata.continue that is not empty) is a
+// part of the list, so it is invalid too: kubectl follows the token itself
+// and prints the whole list. The decode into float64 refuses a number out
+// of its range, as the bash twin refuses NaN and infinite numbers. A read
+// that the bound stopped gives rbacReasonNoAnswer, also when kubectl
+// handled the SIGTERM and exited 0. The whole output is in memory only
+// for the decode; items keeps only what parse returns.
 func rbacRead[T any](ctx context.Context, r execx.Runner, kubectl, kubeconfig, resource string, extra []string, parse func(map[string]any) (T, bool), items *[]T) string {
 	ctx, cancel := context.WithTimeout(ctx, rbacReadBound)
 	defer cancel()
@@ -273,6 +278,13 @@ func rbacRead[T any](ctx context.Context, r execx.Runner, kubectl, kubeconfig, r
 	top, _ := doc.(map[string]any)
 	list, ok := top["items"].([]any)
 	if !ok {
+		return rbacReasonOther
+	}
+	md, ok := rbacObject(top["metadata"])
+	if !ok {
+		return rbacReasonOther
+	}
+	if cont, ok := rbacString(md["continue"]); !ok || cont != "" {
 		return rbacReasonOther
 	}
 	out := make([]T, 0, len(list))

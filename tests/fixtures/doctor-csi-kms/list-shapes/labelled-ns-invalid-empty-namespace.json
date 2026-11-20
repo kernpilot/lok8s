@@ -1,0 +1,33 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "kind": "Role",
+      "metadata": {
+        "name": "rook-ceph-csi-kms-metadata",
+        "namespace": "",
+        "labels": {
+          "lok8s.dev/name": "rook-ceph-csi-kms",
+          "csi-kms.lok8s.dev/option": "metadata"
+        }
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "secrets"
+          ],
+          "verbs": [
+            "get"
+          ]
+        }
+      ]
+    }
+  ],
+  "kind": "List",
+  "metadata": {
+    "resourceVersion": ""
+  }
+}

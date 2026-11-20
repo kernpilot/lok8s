@@ -34,7 +34,7 @@
       "kind": "Role",
       "metadata": {
         "name": "rook-ceph-csi-kms-azure-kv",
-        "namespace": "",
+        "namespace": "canary.ns",
         "labels": {
           "lok8s.dev/name": "rook-ceph-csi-kms",
           "lok8s.dev/type": "system",

@@ -11,10 +11,15 @@
 #                        must not run.
 #   values               lines that the merged values of the render must hold
 #                        (the values of the spec.bootstrap entry)
-#   clusterroles         the answer of that read: `json <file in json/>`, or
-#   clusterrolebindings  `fail <rc> <stderr>`. Absent: the read must not run.
-#   roles
+#   clusterroles         the answer of that labelled read: `json <file in
+#   clusterrolebindings  json/>`, or `fail <rc> <stderr>`. Absent: the read
+#   roles                must not run.
 #   rolebindings
+#   refs-clusterrolebindings
+#   refs-rolebindings    the answer of that reference read (no selector), the
+#                        same forms
+#   fake-render-only     present: the render file is not a real render of the
+#                        addon (the Go twin's real render test skips the case)
 #   want                 the exact output of the check; @BASE@ stands for the
 #                        project directory (the kubeconfig in a command)
 # Every failed read or render, and every name that the check must not print,
@@ -59,11 +64,21 @@ setup() {
 
   STUB="${BATS_TEST_TMPDIR}/stub"
   mkdir -p "${STUB}"
-  # The stand-in kubectl: records its argv, answers from the case directory.
+  # The stand-in kubectl: records its argv, answers from the case directory:
+  # a labelled read from the file of its resource, a reference read (no
+  # selector) from refs-<resource>.
   cat > "${STUB}/kubectl" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${CALLS}"
+# The check removes each raw list right after its read: no other .json file
+# is next to the output file of this read (Linux: /proc).
+if out="$(readlink "/proc/$$/fd/1" 2>/dev/null)" && [[ "${out}" == */lo-doctor-rbac.*/*.json ]]; then
+  for f in "${out%/*}"/*.json; do
+    [[ ! -e "${f}" || "${f}" == "${out}" ]] || echo "RAW-LEFT ${f##*/}" >> "${CALLS}"
+  done
+fi
 res="${4:-}"
+[[ " $* " == *" --selector "* ]] || res="refs-${res}"
 if [[ ! -f "${CASE}/${res}" ]]; then
   echo "unexpected read ${res}"
   exit 0
@@ -161,6 +176,11 @@ _assert_case() {
       want_calls+="--kubeconfig ${PATH_BASE}/.kubeconfig/rbac-test.yaml get ${res} --all-namespaces --selector ${SELECTOR} -o json --request-timeout=10s"$'\n'
     fi
   done
+  for res in clusterrolebindings rolebindings; do
+    if [[ -f "${CASE}/refs-${res}" ]]; then
+      want_calls+="--kubeconfig ${PATH_BASE}/.kubeconfig/rbac-test.yaml get ${res} --all-namespaces -o json --request-timeout=10s"$'\n'
+    fi
+  done
   assert_equal "$(cat "${CALLS}" 2>/dev/null)" "${want_calls%$'\n'}"
   _assert_no_temp_dir
 }
@@ -201,10 +221,10 @@ _inline_case() {
   _setup_case "${dir}"
 }
 
-@test "kms: an object of an earlier option set of each kind warns with its delete command" { _case extra-objects; }
+@test "kms: a candidate of an earlier option set of each kind warns with its delete command" { _case extra-objects; }
 @test "kms: an equal set prints nothing" { _case equal; }
-@test "kms: a ClusterRoleBinding of the option after a change of tenantNamespaces warns" { _case tenant-namespaces; }
-@test "kms: without the addon but with rook-ceph each object of the addon is a leftover" { _case disabled-leftovers; }
+@test "kms: a ClusterRoleBinding of the option after a change of tenantNamespaces keeps its command while its role is in the render" { _case tenant-namespaces; }
+@test "kms: without the addon but with rook-ceph each object of the addon is a candidate" { _case disabled-leftovers; }
 @test "kms: without the addon but with rook-ceph and no object, nothing prints" { _case disabled-none; }
 @test "kms: a leftover with an unusual name is counted, never printed" { _case disabled-hostile; }
 @test "kms: a failed read of a leftover check is one warning" { _case disabled-read-fails; }
@@ -218,11 +238,112 @@ _inline_case() {
 @test "kms: a failed render is one warning, with no read" { _case render-fails; }
 @test "kms: no kubeconfig prints the skip line when the addon is in spec.bootstrap" { _case no-kubeconfig; }
 @test "kms: no kubeconfig prints nothing without the addon" { _case no-kubeconfig-disabled; }
+@test "kms: a role that a binding outside the candidates names gets no delete command" { _case role-still-bound; }
+@test "kms: a forbidden reference read gives the roles no delete command" { _case refs-forbidden; }
+@test "kms: a reference read with a binding without its role is not a valid list" { _case refs-item-no-roleref; }
+@test "kms: a ClusterRole with an aggregate-to label gets no delete command" { _case aggregated; }
+@test "kms: with rook-ceph and path entries, a candidate makes the check say not checked" { _case path-entry-and-parent; }
+@test "kms: with path entries and no candidate, nothing prints" { _case path-entry-no-candidate; }
+@test "kms: an entry that does not parse stops the check, by its position" { _case entry-does-not-parse; }
+@test "kms: a list with a continue token is not a valid list" { _case list-continue; }
+@test "kms: an item without a name is not a valid list" { _case item-no-name; }
+@test "kms: a Role without a namespace is not a valid list" { _case item-no-namespace; }
+@test "kms: a render with a scalar document is malformed" { _case render-scalar-doc; }
+@test "kms: a render with a Role without a name is malformed" { _case render-item-no-name; }
+@test "kms: an env name of the entry changes the render through its envsubst" { _case render-env; }
 
 # The bootstrap refuses an entry's env name that is lo's own (Go:
 # addons.ProtectedEnvOverride, bash: bootstrap::_reserved_env_name): the
 # check treats the entry as a failed render, with no build and no read.
 @test "kms: an env name that the bootstrap refuses is a failed render" { _case render-reserved-env; }
+
+# bootstrap::_resolve_entries does not return the status of its yq: the
+# check reads the spec with yq first. Here the driver read passes and that
+# yq fails.
+@test "kms: a spec.bootstrap that yq cannot read stops the check" {
+  _setup_case "${FIX}/cases/disabled-leftovers"
+  printf 'kind: KubeOne\nspec: {bootstrap: [rook-ceph\n' > "${PATH_CLUSTERS}/rbac.example/cluster.lok8s.yaml"
+  domain::spec_driver() { echo kubeone; }
+  run doctor::_kms_check rbac.example
+  assert_success
+  assert_output "${NOT_CHECKED}spec.bootstrap: doctor cannot read the list of entries (see: lo bootstrap --dry-run)"
+  [[ ! -e "${CALLS}" ]] || fail "a call ran: $(cat "${CALLS}")"
+}
+
+@test "kms: a resolver that fails stops the check" {
+  _setup_case "${FIX}/cases/disabled-leftovers"
+  bootstrap::_resolve_entries() { echo rook-ceph; return 1; }
+  run doctor::_kms_check rbac.example
+  assert_success
+  assert_output "${NOT_CHECKED}spec.bootstrap: doctor cannot read the list of entries (see: lo bootstrap --dry-run)"
+  [[ ! -e "${CALLS}" ]] || fail "a call ran: $(cat "${CALLS}")"
+}
+
+# doctor::_kms_ids accepts a render only in the shape that both twins read
+# (Go: TestDoctorKMSRenderShapes reads the same files).
+@test "kms: the render shapes" {
+  local f name got want n=0
+  for f in "${FIX}"/render-shapes/*.yaml; do
+    name="$(basename "${f}")"
+    n=$(( n + 1 ))
+    case "${name}" in
+      ok-*)
+        got="$(doctor::_kms_ids "[]" < "${f}")" || fail "${name}: refused"
+        got="$(jq -r '[.[] | "\(.kind)/\(.namespace)/\(.name)"] | sort | join(" ")' <<< "${got}")"
+        want="$(head -n 1 "${f}")"
+        want="${want#"# ids: "}"
+        [[ "${got}" == "${want}" ]] || fail "${name}: ids ${got}, want ${want}"
+        ;;
+      malformed-*)
+        if got="$(doctor::_kms_ids "[]" < "${f}")"; then fail "${name}: accepted: ${got}"; fi
+        ;;
+      *) fail "${name}: neither ok- nor malformed-" ;;
+    esac
+  done
+  (( n >= 10 )) || fail "only ${n} render shapes"
+}
+
+# doctor::_rbac_shape accepts a list only in the shape that both twins read
+# (Go: TestDoctorKMSListShapes reads the same files).
+@test "kms: the list shapes" {
+  local f name shape n=0
+  for f in "${FIX}"/list-shapes/*.json; do
+    name="$(basename "${f}")"
+    n=$(( n + 1 ))
+    case "${name}" in
+      labelled-cluster-*) shape=labelled-cluster ;;
+      labelled-ns-*) shape=labelled-ns ;;
+      ref-cluster-*) shape=ref-cluster ;;
+      ref-ns-*) shape=ref-ns ;;
+      *) fail "${name}: no known shape" ;;
+    esac
+    case "${name}" in
+      *-ok-*) doctor::_rbac_shape "${shape}" "${f}" || fail "${name}: refused" ;;
+      *-invalid-*) if doctor::_rbac_shape "${shape}" "${f}"; then fail "${name}: accepted"; fi ;;
+      *) fail "${name}: neither -ok- nor -invalid-" ;;
+    esac
+  done
+  (( n >= 10 )) || fail "only ${n} list shapes"
+}
+
+# The stand-in kubectl sees the temp dir of the reads (Linux: /proc): there
+# the raw list of an earlier read is gone (see the stand-in).
+@test "kms: the stand-in kubectl sees the temp dir of the reads" {
+  [[ -e /proc/self/fd/1 ]] || skip "no /proc"
+  _setup_case "${FIX}/cases/disabled-leftovers"
+  cat > "${STUB}/kubectl-probe" <<'PROBE'
+#!/usr/bin/env bash
+readlink "/proc/$$/fd/1" >> "${CALLS}.probe"
+exec "${STUB_KUBECTL}" "$@"
+PROBE
+  chmod +x "${STUB}/kubectl-probe"
+  mv "${STUB}/kubectl" "${STUB}/kubectl-real"
+  mv "${STUB}/kubectl-probe" "${STUB}/kubectl"
+  STUB_KUBECTL="${STUB}/kubectl-real" run doctor::_kms_check rbac.example
+  assert_success
+  [[ "$(head -n 1 "${CALLS}.probe")" == "${TMPDIR}"/lo-doctor-rbac.*/kms-clusterroles.json ]] \
+    || fail "the read writes to $(head -n 1 "${CALLS}.probe")"
+}
 
 @test "kms: no kubectl says not checked when the addon is in spec.bootstrap" {
   _setup_case "${FIX}/cases/equal"

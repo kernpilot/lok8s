@@ -1,0 +1,7 @@
+# ids: Role/rook-ceph/a
+---
+---
+kind: Role
+metadata: {name: a, namespace: rook-ceph}
+---
+# only a comment

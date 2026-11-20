@@ -1,0 +1,13 @@
+apiVersion: lok8s.dev/v1
+kind: KubeOne
+metadata:
+  name: rbac-test
+spec:
+  bootstrap:
+    - cilium
+    - rook-ceph
+    - ./targets/a
+    - ./targets/rook-ceph-csi-kms
+    - ../shared/kms
+    - /CANARY/abs path
+    - ./targets/b

@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kernpilot/lok8s/internal/addons"
 	"github.com/kernpilot/lok8s/internal/assets"
+	"github.com/kernpilot/lok8s/internal/bootstrap"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/render"
@@ -31,23 +31,30 @@ import (
 //	                     must not run.
 //	values               lines that the merged values of the render must
 //	                     hold (the values of the spec.bootstrap entry)
-//	clusterroles         the answer of that read: `json <file in json/>`, or
-//	clusterrolebindings  `fail <rc> <stderr>`. Absent: the read must not run.
-//	roles
+//	clusterroles         the answer of that labelled read: `json <file in
+//	clusterrolebindings  json/>`, or `fail <rc> <stderr>`. Absent: the read
+//	roles                must not run.
 //	rolebindings
+//	refs-clusterrolebindings
+//	refs-rolebindings    the answer of that reference read (no selector),
+//	                     the same forms
+//	fake-render-only     present: the render file is not a real render of
+//	                     the addon (the file says why), so the real render
+//	                     test skips the case
 //	want                 the exact output of the check; @BASE@ stands for the
 //	                     project directory (the kubeconfig in a command)
 //
-// The files in render/ are real renders of the addon (TestDoctorKMSCasesWithTheRealRender
-// checks them on lo-full). Every failed read or render, and every name that
-// the check must not print, carries the word CANARY: the check must never
-// print it. The runner is a fake: no kubectl and no kustomize runs, and no
-// cluster is reached.
+// The other files in render/ are real renders of the addon
+// (TestDoctorKMSCasesWithTheRealRender checks them on lo-full). Every failed
+// read or render, and every name that the check must not print, carries the
+// word CANARY: the check must never print it. The runner is a fake: no
+// kubectl and no kustomize runs, and no cluster is reached.
 
 const kmsFixtures = "../../tests/fixtures/doctor-csi-kms"
 
-// kmsResources are the reads of the check, in order.
-var kmsResources = []string{"clusterroles", "clusterrolebindings", "roles", "rolebindings"}
+// kmsResources are the reads of the check, in order: the labelled reads,
+// then the reference reads.
+var kmsResources = []string{"clusterroles", "clusterrolebindings", "roles", "rolebindings", "refs-clusterrolebindings", "refs-rolebindings"}
 
 // kmsCase sets up one case in a synthetic project and returns the project,
 // the PATH that holds the (never executed) kubectl, and the fake runner.
@@ -140,17 +147,23 @@ func kmsFakeRender(t *testing.T, dir string, c execx.Cmd) error {
 	return nil
 }
 
-// kmsFakeRead answers one read from the case.
+// kmsFakeRead answers one read from the case: a labelled read from the file
+// of its resource, a reference read (no selector) from refs-<resource>.
 func kmsFakeRead(t *testing.T, dir, kubeconfig string, c execx.Cmd) error {
 	t.Helper()
 	res := c.Args[3]
 	want := []string{"--kubeconfig", kubeconfig, "get", res, "--all-namespaces", "--selector", "lok8s.dev/name=rook-ceph-csi-kms", "-o", "json", "--request-timeout=10s"}
+	file := res
+	if !slices.Contains(c.Args, "--selector") {
+		want = []string{"--kubeconfig", kubeconfig, "get", res, "--all-namespaces", "-o", "json", "--request-timeout=10s"}
+		file = "refs-" + res
+	}
 	if !slices.Equal(c.Args, want) {
 		t.Errorf("kubectl args = %q, want %q", c.Args, want)
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, res))
+	raw, err := os.ReadFile(filepath.Join(dir, file))
 	if err != nil {
-		t.Errorf("unexpected read of %s", res)
+		t.Errorf("unexpected read of %s", file)
 		return errors.New("unexpected read")
 	}
 	kind, rest, _ := strings.Cut(strings.TrimRight(string(raw), "\n"), " ")
@@ -212,8 +225,10 @@ func kmsGotCalls(r *scriptRunner) []string {
 		switch {
 		case f[0] == "kustomize":
 			calls = append(calls, "kustomize")
-		case len(f) > 4:
+		case len(f) > 4 && slices.Contains(f, "--selector"):
 			calls = append(calls, f[4])
+		case len(f) > 4:
+			calls = append(calls, "refs-"+f[4])
 		}
 	}
 	return calls
@@ -226,7 +241,7 @@ func runKMSCases(t *testing.T, realRender bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) < 15 {
+	if len(entries) < 30 {
 		t.Fatalf("only %d cases under %s", len(entries), kmsFixtures)
 	}
 	for _, e := range entries {
@@ -235,9 +250,12 @@ func runKMSCases(t *testing.T, realRender bool) {
 			if raw, err := os.ReadFile(filepath.Join(kmsFixtures, "cases", name, "render")); realRender && err == nil && strings.TrimSpace(string(raw)) == "fail" {
 				t.Skip("a case of a failed render: the real render of its values does not fail")
 			}
+			if _, err := os.Stat(filepath.Join(kmsFixtures, "cases", name, "fake-render-only")); realRender && err == nil {
+				t.Skip("a case of the fake render only (see its fake-render-only file)")
+			}
 			p, bin, r := kmsCase(t, name, realRender)
 			var out strings.Builder
-			doctorKMSLeftovers(context.Background(), r, p, rbacTestDomain, bin, bootstrapEntries(p), &out)
+			doctorKMSLeftovers(context.Background(), r, p, rbacTestDomain, bin, kmsEntries(p), &out)
 			if want := kmsWant(t, p, name); out.String() != want {
 				t.Errorf("output:\n%s\nwant:\n%s", out.String(), want)
 			}
@@ -251,20 +269,28 @@ func runKMSCases(t *testing.T, realRender bool) {
 	}
 }
 
-// TestDoctorKMSCases runs every shared case with the fake render: (a) an
-// object of an earlier option set of each kind warns with its delete
-// command; (b) an equal set prints nothing; (c) a ClusterRoleBinding of the
-// option after a change to tenantNamespaces warns; (d) without the addon
-// in spec.bootstrap but with rook-ceph, each object of the addon is a
-// leftover, and none prints nothing; (e) without either addon, or with the
-// addon as a path entry, there is no read; (f) a failed read is one
-// warning, the reads stop, and no finding of an earlier read prints; (g) a
-// name or namespace that is not DNS-1123 is counted and never printed, and
-// an option label that is not a DNS-1123 label is not printed; (h) an
-// object without the addon's label is never a finding; (i) a failed render
-// is one warning, with no read, and so is an env name that the bootstrap
-// refuses (no render runs); (j) no kubeconfig: one line for the addon, none
-// without it.
+// TestDoctorKMSCases runs every shared case with the fake render: (a) a
+// candidate of an earlier option set of each kind warns, with its delete
+// command when no binding outside the candidates refers to a role; (b) an
+// equal set prints nothing; (c) a ClusterRoleBinding of the option after a
+// change to tenantNamespaces warns with its command, while its role is in
+// the render; (d) without the addon in spec.bootstrap but with rook-ceph,
+// each object of the addon is a candidate, and none prints nothing; (e)
+// without either addon, or with the addon as a path entry, there is no
+// read; (f) a failed read is one warning, the reads stop, and no finding of
+// an earlier read prints; (g) a name or namespace that is not DNS-1123 is
+// counted and never printed, and an option label that is not a DNS-1123
+// label is not printed; (h) an object without the addon's label is never a
+// finding; (i) a failed or malformed render is one warning, with no read,
+// and so is an env name that the bootstrap refuses (no render runs); (j)
+// no kubeconfig: one line for the addon, none without it; (k) a role that
+// a binding outside the candidates still names, a role with an
+// aggregate-to label, and a failed reference read: no delete command for
+// the role; (l) with a path entry, a candidate makes the check say that it
+// did not check; (m) an entry that does not parse, a list with a continue
+// token, and an item without its name or namespace stop the check; (n) an
+// env name of the entry changes the render through the envsubst of the
+// render.
 func TestDoctorKMSCases(t *testing.T) { runKMSCases(t, false) }
 
 // TestDoctorKMSCasesWithTheRealRender runs the cases with the in-process
@@ -290,7 +316,7 @@ func TestDoctorKMSSkipsWithoutKubectl(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			p, _, r := kmsCase(t, name, false)
 			var out strings.Builder
-			doctorKMSLeftovers(context.Background(), r, p, rbacTestDomain, t.TempDir(), bootstrapEntries(p), &out)
+			doctorKMSLeftovers(context.Background(), r, p, rbacTestDomain, t.TempDir(), kmsEntries(p), &out)
 			if got := out.String(); got != want {
 				t.Errorf("no kubectl: %q, want %q", got, want)
 			}
@@ -309,7 +335,7 @@ func TestDoctorKMSReadBoundStopsAHungRead(t *testing.T) {
 	rbacReadBound = 5 * time.Millisecond
 	r := &rbacHangRunner{fallback: 5 * time.Second}
 	var out strings.Builder
-	doctorKMSLeftovers(context.Background(), r, p, rbacTestDomain, bin, bootstrapEntries(p), &out)
+	doctorKMSLeftovers(context.Background(), r, p, rbacTestDomain, bin, kmsEntries(p), &out)
 	if got, want := out.String(), "  ! rook-ceph-csi-kms RBAC leftovers not checked: "+rbacReasonNoAnswer+"\n"; got != want {
 		t.Errorf("a hung read: %q, want %q", got, want)
 	}
@@ -390,13 +416,147 @@ func TestDoctorKMSEntryCarriesValuesAndEnv(t *testing.T) {
 	spec := filepath.Join(p.Clusters, rbacTestDomain, "cluster.lok8s.yaml")
 	testutil.WriteFile(t, spec, "apiVersion: lok8s.dev/v1\nkind: KubeOne\nmetadata:\n  name: rbac-test\nspec:\n  bootstrap:\n"+
 		"    - rook-ceph-csi-kms:\n        values: {kms: [kmip]}\n        env: {LOK8S_USER_X: \"1\"}\n")
-	var got []addons.Resolved
-	for _, e := range bootstrapEntries(p)(spec, "kubeone", rbacTestDomain) {
+	entries, reason := kmsEntries(p)(spec, "kubeone", rbacTestDomain)
+	var got []*bootstrap.Entry
+	for _, e := range entries {
 		if e.Builtin && filepath.Base(e.Dir) == kmsAddon {
 			got = append(got, e)
 		}
 	}
-	if len(got) != 1 || !strings.Contains(got[0].Inline, "kmip") || got[0].Env["LOK8S_USER_X"] != "1" {
-		t.Errorf("entries = %+v", got)
+	if reason != "" || len(got) != 1 || !strings.Contains(got[0].Inline, "kmip") || bootstrap.EnvMap(got[0].EnvLines)["LOK8S_USER_X"] != "1" {
+		t.Errorf("entries = %+v, reason %q", got, reason)
 	}
+}
+
+// The entry resolver of the check drops no error: a spec that it cannot
+// read gives the resolve reason, and an entry that does not parse gives its
+// position (not its text). The check prints the reason and reads nothing.
+func TestDoctorKMSEntriesDropNoError(t *testing.T) {
+	p := synthProject(t)
+	spec := filepath.Join(p.Clusters, rbacTestDomain, "cluster.lok8s.yaml")
+	testutil.WriteFile(t, spec, "apiVersion: lok8s.dev/v1\nkind: KubeOne\nspec: {bootstrap: [rook-ceph\n")
+	if entries, reason := kmsEntries(p)(spec, "kubeone", rbacTestDomain); reason != kmsReasonResolve || entries != nil {
+		t.Errorf("a spec that does not parse: %v, %q", entries, reason)
+	}
+	testutil.WriteFile(t, spec, "apiVersion: lok8s.dev/v1\nkind: KubeOne\nspec:\n  bootstrap:\n    - rook-ceph\n    - rook-ceph-csi-kms:\n        wait: CANARY\n")
+	want := "spec.bootstrap entry 2: it does not parse (see: lo bootstrap --dry-run)"
+	if entries, reason := kmsEntries(p)(spec, "kubeone", rbacTestDomain); reason != want || entries != nil {
+		t.Errorf("an entry that does not parse: %v, %q", entries, reason)
+	}
+	// The check prints the reason of the resolver, and reads nothing.
+	p2, bin, r := kmsCase(t, "disabled-leftovers", false)
+	failing := func(spec, kind, d string) ([]*bootstrap.Entry, string) { return nil, kmsReasonResolve }
+	var out strings.Builder
+	doctorKMSLeftovers(context.Background(), r, p2, rbacTestDomain, bin, failing, &out)
+	if got := out.String(); got != "  ! "+kmsNotChecked+kmsReasonResolve+"\n" {
+		t.Errorf("a resolver that fails: %q", got)
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("calls after a resolver that fails: %q", r.calls)
+	}
+}
+
+// kmsRenderedIDs accepts a render only in the shape that both twins read:
+// each file in render-shapes/ starts with ok- or malformed-, and the bats
+// twin reads the same files (bash: doctor::_kms_ids).
+func TestDoctorKMSRenderShapes(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join(kmsFixtures, "render-shapes", "*.yaml"))
+	if err != nil || len(files) < 10 {
+		t.Fatalf("render shapes: %d files, %v", len(files), err)
+	}
+	for _, f := range files {
+		name := filepath.Base(f)
+		t.Run(name, func(t *testing.T) {
+			raw, err := os.ReadFile(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			set := map[kmsID]bool{}
+			ok := kmsRenderedIDs(string(raw), set)
+			switch {
+			case strings.HasPrefix(name, "ok-"):
+				if !ok {
+					t.Errorf("refused")
+				}
+				want := strings.TrimPrefix(firstLine(string(raw)), "# ids: ")
+				if got := kmsIDsText(set); got != want {
+					t.Errorf("ids = %q, want %q", got, want)
+				}
+			case strings.HasPrefix(name, "malformed-"):
+				if ok {
+					t.Errorf("accepted: %v", set)
+				}
+			default:
+				t.Fatalf("a render shape that starts with neither ok- nor malformed-")
+			}
+		})
+	}
+}
+
+// rbacRead accepts a list only in the shape that both twins read: each
+// file in list-shapes/ is named <shape>-ok-* or <shape>-invalid-*, and the
+// bats twin checks the same files with doctor::_rbac_shape.
+func TestDoctorKMSListShapes(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join(kmsFixtures, "list-shapes", "*.json"))
+	if err != nil || len(files) < 10 {
+		t.Fatalf("list shapes: %d files, %v", len(files), err)
+	}
+	for _, f := range files {
+		name := filepath.Base(f)
+		t.Run(name, func(t *testing.T) {
+			body, err := os.ReadFile(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := &scriptRunner{handler: func(c execx.Cmd) error {
+				c.Stdout.Write(body)
+				return nil
+			}}
+			ctx := context.Background()
+			var items []kmsItem
+			var refs []kmsRef
+			var reason string
+			switch {
+			case strings.HasPrefix(name, "labelled-cluster-"):
+				reason = rbacRead(ctx, r, "kubectl", "/k", "clusterroles", kmsReadArgs, kmsParseFor(false), &items)
+			case strings.HasPrefix(name, "labelled-ns-"):
+				reason = rbacRead(ctx, r, "kubectl", "/k", "roles", kmsReadArgs, kmsParseFor(true), &items)
+			case strings.HasPrefix(name, "ref-cluster-"):
+				reason = rbacRead(ctx, r, "kubectl", "/k", "clusterrolebindings", kmsRefArgs, kmsParseRefFor(kmsKinds[1]), &refs)
+			case strings.HasPrefix(name, "ref-ns-"):
+				reason = rbacRead(ctx, r, "kubectl", "/k", "rolebindings", kmsRefArgs, kmsParseRefFor(kmsKinds[3]), &refs)
+			default:
+				t.Fatalf("a list shape of no known shape")
+			}
+			switch {
+			case strings.Contains(name, "-ok-"):
+				if reason != "" {
+					t.Errorf("refused: %q", reason)
+				}
+			case strings.Contains(name, "-invalid-"):
+				if reason != rbacReasonOther {
+					t.Errorf("reason %q, want %q", reason, rbacReasonOther)
+				}
+			default:
+				t.Fatalf("a list shape with neither -ok- nor -invalid-")
+			}
+		})
+	}
+}
+
+// firstLine is the first line of s.
+func firstLine(s string) string {
+	l, _, _ := strings.Cut(s, "\n")
+	return l
+}
+
+// kmsIDsText is the set as sorted "<kind>/<namespace>/<name>" words, the
+// form of the "# ids:" line of a render shape.
+func kmsIDsText(set map[kmsID]bool) string {
+	var ids []string
+	for id := range set {
+		ids = append(ids, id.kind+"/"+id.namespace+"/"+id.name)
+	}
+	slices.Sort(ids)
+	return strings.Join(ids, " ")
 }

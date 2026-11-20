@@ -137,12 +137,15 @@ func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag
 	doctorTLSSection(ctx, r, path, d, out)
 	doctorRegistryTLS(ctx, r, paths, d, out)
 	doctorDomainSection(paths, d, out)
-	// The RBAC migration check of the domain's cluster (advisory, read-only;
-	// cmd_doctor_rbac.go). Its lines close the domain section.
+	// The RBAC migration check of the domain's cluster (advisory; it sends
+	// only GET requests, and the credential plugin of the kubeconfig runs
+	// as kubectl runs it; cmd_doctor_rbac.go). Its lines close the domain
+	// section.
 	doctorRBACLeftovers(ctx, r, paths, d, path, bootstrapEntries(paths), out)
 	// The rook-ceph-csi-kms objects that the current values do not render
-	// (advisory, read-only; cmd_doctor_csikms.go).
-	doctorKMSLeftovers(ctx, r, paths, d, path, bootstrapEntries(paths), out)
+	// (advisory, with the same GET requests and plugin caveat;
+	// cmd_doctor_csikms.go).
+	doctorKMSLeftovers(ctx, r, paths, d, path, kmsEntries(paths), out)
 
 	// Provider / infrastructure diagnosis — advisory, never affects the exit
 	// code.

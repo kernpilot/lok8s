@@ -16,42 +16,61 @@ package cli
 // provider of the spec). The chart of the addon is local, so the render
 // downloads nothing, and a render never reaches the cluster. The check then
 // reads the ClusterRoles, ClusterRoleBindings, Roles and RoleBindings with
-// the label in all namespaces, and warns once for each object that no
-// render holds (the same kind, namespace and name), with its delete
-// command. When spec.bootstrap has rook-ceph but not the addon, the check
-// reads too (no render): each object with the label is a leftover of the
-// addon. Without either addon the check does nothing, so it does not run
-// the credential plugin of the kubeconfig for a cluster that cannot have
-// such objects.
+// the label in all namespaces. Each object that no render holds (the same
+// kind, namespace and name) is a candidate leftover: a label is not proof
+// that the addon made the object, so a line says "if no other tool manages
+// it" before a delete command. When spec.bootstrap has rook-ceph but not the
+// addon, the check reads too (no render): each object with the label is a
+// candidate. Without either addon the check does nothing, so it does not
+// run the credential plugin of the kubeconfig for a cluster that cannot
+// have such objects.
+//
+// A candidate Role or ClusterRole gets a delete command only when no
+// binding outside the candidates refers to it and, for a ClusterRole, when
+// it has no aggregate-to label. For that, the check reads all RoleBindings
+// and (with a ClusterRole candidate) all ClusterRoleBindings without the
+// label selector (kmsRefs). A candidate binding always gets its command: a
+// delete removes its grant and cannot break an object of the render.
+//
+// The check does not render a path entry of spec.bootstrap: its kustomize
+// plugins can read the secret store. A path entry can render the objects of
+// the addon too, so with a path entry the check prints no candidate: when
+// it finds one, it says that it did not check. An entry that does not parse
+// stops the check before the reads.
 //
 // The check uses the machinery of the RBAC migration check
 // (cmd_doctor_rbac.go): the domain's kubeconfig, rbacRead (the bound of
-// each read, its process group and the fixed reasons: kubectl's output is
-// never printed) and rbacDeleteCommandIn. Of each object it reads only the
-// name, the namespace and the labels, and it keeps two labels. A name that
-// is not a DNS-1123 subdomain, or a namespace that is not a DNS-1123 label,
+// each read, its process group, the fixed reasons, and a list that must be
+// complete: kubectl's output is never printed) and rbacDeleteCommandIn. Of
+// each object it keeps only the fields of kmsItem or kmsRef. A name that is
+// not a DNS-1123 subdomain, or a namespace that is not a DNS-1123 label,
 // never goes into a line: such objects are counted. The option label is
 // printed only when it is a DNS-1123 label. A failed render or read is one
 // warning, and the check stops. An equal set prints nothing. The check
-// never changes the cluster or the doctor exit code.
+// never changes the doctor exit code. lo doctor sends only GET requests; a
+// kubeconfig exec credential plugin runs as kubectl runs it, and lo does
+// not limit what it does.
 
 import (
 	"context"
 	"errors"
 	"io"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/addons"
+	"github.com/kernpilot/lok8s/internal/bootstrap"
 	"github.com/kernpilot/lok8s/internal/build"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/toolchain"
+	"github.com/kernpilot/lok8s/internal/yqsem"
 )
 
 // The addon, the addon that it needs, and its two labels.
@@ -61,19 +80,29 @@ const (
 	kmsNameLabel   = "lok8s.dev/name"
 	kmsOptionLabel = "csi-kms.lok8s.dev/option"
 	kmsSelector    = kmsNameLabel + "=" + kmsAddon
+	// kmsAggregatePrefix starts the labels that put the rules of a
+	// ClusterRole into an aggregated ClusterRole.
+	kmsAggregatePrefix = "rbac.authorization.k8s.io/aggregate-to-"
 )
 
 // The fixed texts of the check.
 const (
-	kmsNotChecked      = kmsAddon + " RBAC leftovers not checked: "
-	kmsSkipped         = kmsAddon + " RBAC check skipped: "
-	kmsReasonForbidden = "the kubeconfig user cannot list ClusterRoles, ClusterRoleBindings, Roles and RoleBindings in all namespaces (forbidden or unauthorized)"
-	kmsReasonRender    = "the addon does not render with the values of its spec.bootstrap entry (see: lo bootstrap --only " + kmsAddon + " --dry-run)"
+	kmsNotChecked          = kmsAddon + " RBAC leftovers not checked: "
+	kmsSkipped             = kmsAddon + " RBAC check skipped: "
+	kmsReasonForbidden     = "the kubeconfig user cannot list ClusterRoles, ClusterRoleBindings, Roles and RoleBindings in all namespaces (forbidden or unauthorized)"
+	kmsReasonRefsForbidden = "the kubeconfig user cannot list RoleBindings and ClusterRoleBindings in all namespaces (forbidden or unauthorized)"
+	kmsReasonRender        = "the addon does not render with the values of its spec.bootstrap entry (see: lo bootstrap --only " + kmsAddon + " --dry-run)"
+	kmsReasonMalformed     = "the render of the addon is malformed (a document that is not an object, an object without a kind, or an RBAC object without a name or, for a Role or RoleBinding, a namespace)"
+	kmsReasonResolve       = "spec.bootstrap: doctor cannot read the list of entries (see: lo bootstrap --dry-run)"
 )
 
 // kmsReadArgs come after the resource of each read: all namespaces, and
-// only the objects with the label of the addon.
-var kmsReadArgs = []string{"--all-namespaces", "--selector", kmsSelector}
+// only the objects with the label of the addon. kmsRefArgs are the
+// arguments of the reference reads: all namespaces, no selector.
+var (
+	kmsReadArgs = []string{"--all-namespaces", "--selector", kmsSelector}
+	kmsRefArgs  = []string{"--all-namespaces"}
+)
 
 // kmsKind is a kind that the check reads: its name, the resource of the
 // read, the resource of the delete command, and its scope.
@@ -90,25 +119,79 @@ var kmsKinds = []kmsKind{
 	{"RoleBinding", "rolebindings", "rolebinding", true},
 }
 
+// binding reports a kind that grants a role.
+func (k kmsKind) binding() bool { return strings.HasSuffix(k.kind, "Binding") }
+
 // kmsID is an object by kind, namespace ("" for a cluster-scoped kind) and
 // name.
 type kmsID struct{ kind, namespace, name string }
 
-// kmsItem is what the check keeps of a listed object.
-type kmsItem struct{ name, namespace, addon, option string }
+// kmsItem is what the check keeps of a listed object: its name, its
+// namespace, the two labels of the addon, and whether a label starts with
+// kmsAggregatePrefix (not the label itself).
+type kmsItem struct {
+	name, namespace, addon, option string
+	aggregated                     bool
+}
+
+// kmsRef is what the check keeps of a binding of the reference reads: the
+// binding, and the kind and the name of its role.
+type kmsRef struct {
+	id                 kmsID
+	roleKind, roleName string
+}
 
 // kmsExtra is an object that no render holds.
 type kmsExtra struct {
-	kind   kmsKind
-	id     kmsID
-	option string
+	kind       kmsKind
+	id         kmsID
+	option     string
+	aggregated bool
+}
+
+// kmsRefResult is the result of the reference reads: the bindings outside
+// the candidates per candidate role, or the reason why the reads failed.
+type kmsRefResult struct {
+	bound  map[kmsID][]kmsID
+	reason string
+}
+
+// kmsResolver reads spec.bootstrap for the check (kmsEntries in
+// production): the parsed entries, or the fixed reason why it cannot.
+type kmsResolver func(spec, kind, d string) ([]*bootstrap.Entry, string)
+
+// kmsEntries is the kmsResolver over the bootstrap parser (bash: the loop
+// over bootstrap::_resolve_entries and _parse_entry in doctor::_kms_check).
+// Unlike bootstrapEntries, it drops no error: an entry that does not parse
+// can be the addon or rook-ceph, so the check cannot know what the
+// bootstrap applies. The reason names the position of the entry, not its
+// text: an entry holds values, and values can hold secrets.
+func kmsEntries(paths *config.Paths) kmsResolver {
+	return func(spec, kind, d string) ([]*bootstrap.Entry, string) {
+		raw, err := bootstrap.ResolveEntries(spec, kind)
+		if err != nil {
+			return nil, kmsReasonResolve
+		}
+		var out []*bootstrap.Entry
+		for i, r := range raw {
+			if r == "" {
+				continue
+			}
+			e, err := bootstrap.ParseEntry(paths, io.Discard, d, r)
+			if err != nil {
+				return nil, "spec.bootstrap entry " + strconv.Itoa(i+1) + ": it does not parse (see: lo bootstrap --dry-run)"
+			}
+			out = append(out, e)
+		}
+		return out, ""
+	}
 }
 
 // doctorKMSLeftovers prints the lines of the check under the domain
 // section, after the RBAC migration check (which prints why a domain has
-// no spec that it can read). resolve reads spec.bootstrap
-// (bootstrapEntries in production).
-func doctorKMSLeftovers(ctx context.Context, r execx.Runner, paths *config.Paths, d, path string, resolve addons.EntryResolver, out io.Writer) {
+// no spec that it can read). resolve reads spec.bootstrap (kmsEntries in
+// production).
+func doctorKMSLeftovers(ctx context.Context, r execx.Runner, paths *config.Paths, d, path string, resolve kmsResolver, out io.Writer) {
 	if d == "" || !domain.NameRe.MatchString(d) {
 		return
 	}
@@ -120,12 +203,19 @@ func doctorKMSLeftovers(ctx context.Context, r execx.Runner, paths *config.Paths
 	if err != nil {
 		return
 	}
+	parsed, reason := resolve(spec, kind, d)
+	if reason != "" {
+		doctorWarn(out, kmsNotChecked+reason)
+		return
+	}
 	// An addon counts only as a bare entry name (Builtin), as in the RBAC
-	// migration check.
-	var entries []addons.Resolved
+	// migration check. The check does not render a path entry.
+	var entries []*bootstrap.Entry
+	var pathKeys []string
 	parent := false
-	for _, e := range resolve(spec, kind, d) {
+	for _, e := range parsed {
 		if !e.Builtin {
+			pathKeys = append(pathKeys, e.Key)
 			continue
 		}
 		switch filepath.Base(e.Dir) {
@@ -162,15 +252,21 @@ func doctorKMSLeftovers(ctx context.Context, r execx.Runner, paths *config.Paths
 		return
 	}
 	rendered := map[kmsID]bool{}
-	if enabled && !kmsRender(ctx, r, paths, spec, kind, entries, rendered) {
-		doctorWarn(out, kmsNotChecked+kmsReasonRender)
-		return
+	if enabled {
+		if reason := kmsRender(ctx, r, paths, spec, kind, entries, rendered); reason != "" {
+			doctorWarn(out, kmsNotChecked+reason)
+			return
+		}
 	}
 	var extras []kmsExtra
+	// candidates holds every object that no render holds, also the ones
+	// with an unusual name: a binding among them does not count as a
+	// reference to a role.
+	candidates := map[kmsID]bool{}
 	unusual := 0
 	for _, k := range kmsKinds {
 		var items []kmsItem
-		if reason := rbacRead(ctx, r, kubectl, kubeconfig, k.resource, kmsReadArgs, kmsParse, &items); reason != "" {
+		if reason := rbacRead(ctx, r, kubectl, kubeconfig, k.resource, kmsReadArgs, kmsParseFor(k.namespaced), &items); reason != "" {
 			if reason == rbacReasonForbidden {
 				reason = kmsReasonForbidden
 			}
@@ -190,15 +286,26 @@ func doctorKMSLeftovers(ctx context.Context, r execx.Runner, paths *config.Paths
 			if rendered[id] {
 				continue
 			}
+			candidates[id] = true
 			if !rbacNameOK(id.name) || (k.namespaced && !rbacLabelOK(id.namespace)) {
 				unusual++
 				continue
 			}
-			extras = append(extras, kmsExtra{kind: k, id: id, option: it.option})
+			extras = append(extras, kmsExtra{kind: k, id: id, option: it.option, aggregated: it.aggregated})
 		}
 	}
+	if len(candidates) == 0 {
+		// A path entry can only add objects to the render: no candidate
+		// without it is no candidate with it too.
+		return
+	}
+	if len(pathKeys) > 0 {
+		doctorWarn(out, kmsNotChecked+"spec.bootstrap has path entries ("+kmsPathList(pathKeys)+"), which can render these objects too")
+		return
+	}
+	refs := kmsRefs(ctx, r, kubectl, kubeconfig, extras, candidates)
 	for _, x := range extras {
-		kmsExtraLine(x, enabled, kubeconfig, &unusual, out)
+		kmsExtraLine(x, enabled, kubeconfig, refs, &unusual, out)
 	}
 	if unusual > 0 {
 		kmsUnusualLine(unusual, enabled, kubeconfig, out)
@@ -206,73 +313,204 @@ func doctorKMSLeftovers(ctx context.Context, r execx.Runner, paths *config.Paths
 }
 
 // kmsRender adds the RBAC objects of each entry's render to set, and
-// reports false when a render fails. The render's messages are not
-// printed: the line of the failure names the command that shows them.
-func kmsRender(ctx context.Context, r execx.Runner, paths *config.Paths, spec, kind string, entries []addons.Resolved, set map[kmsID]bool) bool {
+// returns "" or the reason of a failed or malformed render. The render's
+// messages are not printed: the line of the failure names the command that
+// shows them. addons.Render refuses an env name that the bootstrap refuses
+// (addons.ProtectedEnvOverride, before any build), so such an entry is a
+// failed render.
+func kmsRender(ctx context.Context, r execx.Runner, paths *config.Paths, spec, kind string, entries []*bootstrap.Entry, set map[kmsID]bool) string {
 	provider := specProviderName(spec)
 	for _, e := range entries {
-		stream, err := addons.Render(ctx, paths, r, io.Discard, e.Dir, kind, provider, e.Inline, e.Env)
-		if err != nil || !kmsRenderedIDs(stream, set) {
-			return false
+		stream, err := addons.Render(ctx, paths, r, io.Discard, e.Dir, kind, provider, e.Inline, bootstrap.EnvMap(e.EnvLines))
+		if err != nil {
+			return kmsReasonRender
+		}
+		if !kmsRenderedIDs(stream, set) {
+			return kmsReasonMalformed
 		}
 	}
-	return true
+	return ""
 }
 
 // kmsRenderedIDs adds the ClusterRoles, ClusterRoleBindings, Roles and
-// RoleBindings of a rendered stream to set (bash: the yq of
-// doctor::_kms_check). A cluster-scoped kind has no namespace.
+// RoleBindings of a rendered stream to set (bash: doctor::_kms_ids). A
+// cluster-scoped kind has no namespace. It reports false for a stream
+// that does not parse, a document that is not an object (an empty
+// document is skipped), an object without a string kind, and an RBAC
+// object without a string metadata.name or, for a Role or a RoleBinding, a
+// string metadata.namespace: the check cannot know what such a render
+// applies.
 func kmsRenderedIDs(stream string, set map[kmsID]bool) bool {
 	dec := yaml.NewDecoder(strings.NewReader(stream))
 	for {
-		var doc struct {
-			Kind     string `yaml:"kind"`
-			Metadata struct {
-				Name      string `yaml:"name"`
-				Namespace string `yaml:"namespace"`
-			} `yaml:"metadata"`
-		}
+		var doc yaml.Node
 		if err := dec.Decode(&doc); err != nil {
 			return errors.Is(err, io.EOF)
 		}
+		n := yqsem.Deref(&doc)
+		if n == nil || (n.Kind == yaml.ScalarNode && n.ShortTag() == "!!null") {
+			continue
+		}
+		if n.Kind != yaml.MappingNode {
+			return false
+		}
+		kind, ok := kmsYAMLString(yqsem.MapGet(n, "kind"))
+		if !ok || kind == "" {
+			return false
+		}
 		for _, k := range kmsKinds {
-			if doc.Kind != k.kind {
+			if kind != k.kind {
 				continue
 			}
-			id := kmsID{kind: k.kind, name: doc.Metadata.Name}
+			// MapGet of a metadata that is not a mapping is nil: no name.
+			md := yqsem.MapGet(n, "metadata")
+			name, ok := kmsYAMLString(yqsem.MapGet(md, "name"))
+			if !ok || name == "" {
+				return false
+			}
+			id := kmsID{kind: k.kind, name: name}
 			if k.namespaced {
-				id.namespace = doc.Metadata.Namespace
+				ns, ok := kmsYAMLString(yqsem.MapGet(md, "namespace"))
+				if !ok || ns == "" {
+					return false
+				}
+				id.namespace = ns
 			}
 			set[id] = true
 		}
 	}
 }
 
-// kmsParse reads metadata.name, metadata.namespace and metadata.labels
-// (string values) of a listed object (bash: the "labelled" shape of
-// doctor::_rbac_shape), and keeps the two labels of the addon.
-func kmsParse(m map[string]any) (kmsItem, bool) {
-	var it kmsItem
-	md, ok := rbacObject(m["metadata"])
-	if !ok {
-		return it, false
+// kmsYAMLString is n as a string: a scalar with the tag !!str, or
+// !!timestamp, which yq -o=json prints as the string of its text (bash:
+// a JSON string after yq -o=json).
+func kmsYAMLString(n *yaml.Node) (string, bool) {
+	n = yqsem.Deref(n)
+	if n == nil || n.Kind != yaml.ScalarNode {
+		return "", false
 	}
-	var ok1, ok2, ok3 bool
-	var labels map[string]string
-	it.name, ok1 = rbacString(md["name"])
-	it.namespace, ok2 = rbacString(md["namespace"])
-	labels, ok3 = rbacStringMap(md["labels"])
-	if !ok1 || !ok2 || !ok3 {
-		return it, false
+	if t := n.ShortTag(); t != "!!str" && t != "!!timestamp" {
+		return "", false
 	}
-	it.addon, it.option = labels[kmsNameLabel], labels[kmsOptionLabel]
-	return it, true
+	return n.Value, true
 }
 
-// kmsExtraLine is the warning of one object that no render holds, with its
-// delete command as the rest of the line. rbacDeleteCommandIn checks the
-// name and the namespace again: an object that fails is counted instead.
-func kmsExtraLine(x kmsExtra, enabled bool, kubeconfig string, unusual *int, out io.Writer) {
+// kmsParseFor is the parse of the labelled reads (bash: the labelled-ns and
+// labelled-cluster shapes of doctor::_rbac_shape): a string
+// metadata.name, of a namespaced kind a string metadata.namespace, both
+// not empty, and string labels. An item without its name or namespace is
+// a list that the check cannot compare, so the whole list is invalid. It
+// keeps the name, the namespace, the two labels of the addon and whether a
+// label starts with kmsAggregatePrefix.
+func kmsParseFor(namespaced bool) func(map[string]any) (kmsItem, bool) {
+	return func(m map[string]any) (kmsItem, bool) {
+		var it kmsItem
+		md, ok := rbacObject(m["metadata"])
+		if !ok {
+			return it, false
+		}
+		var ok1, ok2, ok3 bool
+		var labels map[string]string
+		it.name, ok1 = rbacString(md["name"])
+		it.namespace, ok2 = rbacString(md["namespace"])
+		labels, ok3 = rbacStringMap(md["labels"])
+		if !ok1 || !ok2 || !ok3 || it.name == "" || (namespaced && it.namespace == "") {
+			return it, false
+		}
+		it.addon, it.option = labels[kmsNameLabel], labels[kmsOptionLabel]
+		for k := range labels {
+			if strings.HasPrefix(k, kmsAggregatePrefix) {
+				it.aggregated = true
+			}
+		}
+		return it, true
+	}
+}
+
+// kmsParseRefFor is the parse of the reference reads (bash: the ref-ns and
+// ref-cluster shapes of doctor::_rbac_shape): a string metadata.name, of a
+// RoleBinding a string metadata.namespace, and a string roleRef.kind and
+// roleRef.name, all not empty. It keeps only these fields: not the
+// subjects, the labels or the annotations.
+func kmsParseRefFor(k kmsKind) func(map[string]any) (kmsRef, bool) {
+	return func(m map[string]any) (kmsRef, bool) {
+		ref := kmsRef{id: kmsID{kind: k.kind}}
+		md, ok1 := rbacObject(m["metadata"])
+		rr, ok2 := rbacObject(m["roleRef"])
+		if !ok1 || !ok2 {
+			return ref, false
+		}
+		var ok3, ok4, ok5, ok6 bool
+		ref.id.name, ok3 = rbacString(md["name"])
+		ref.id.namespace, ok4 = rbacString(md["namespace"])
+		ref.roleKind, ok5 = rbacString(rr["kind"])
+		ref.roleName, ok6 = rbacString(rr["name"])
+		if !ok3 || !ok4 || !ok5 || !ok6 || ref.id.name == "" || ref.roleKind == "" || ref.roleName == "" || (k.namespaced && ref.id.namespace == "") {
+			return ref, false
+		}
+		if !k.namespaced {
+			ref.id.namespace = ""
+		}
+		return ref, true
+	}
+}
+
+// kmsRefs reads the bindings that can refer to a candidate role, without
+// the label selector: all ClusterRoleBindings (only with a ClusterRole
+// among the extras) and all RoleBindings (with a Role or a ClusterRole
+// among them). A binding that is a candidate itself does not count. A
+// RoleBinding refers to a ClusterRole by its name, and to a Role by its
+// name in the namespace of the binding. The first failed read stops the
+// reads: then no role of the extras gets a delete command.
+func kmsRefs(ctx context.Context, r execx.Runner, kubectl, kubeconfig string, extras []kmsExtra, candidates map[kmsID]bool) kmsRefResult {
+	clusterRole, role := false, false
+	for _, x := range extras {
+		switch x.kind.kind {
+		case "ClusterRole":
+			clusterRole, role = true, true
+		case "Role":
+			role = true
+		}
+	}
+	res := kmsRefResult{bound: map[kmsID][]kmsID{}}
+	if !role {
+		return res
+	}
+	for _, k := range kmsKinds {
+		if !k.binding() || (!k.namespaced && !clusterRole) {
+			continue
+		}
+		var refs []kmsRef
+		if reason := rbacRead(ctx, r, kubectl, kubeconfig, k.resource, kmsRefArgs, kmsParseRefFor(k), &refs); reason != "" {
+			if reason == rbacReasonForbidden {
+				reason = kmsReasonRefsForbidden
+			}
+			return kmsRefResult{reason: reason}
+		}
+		for _, ref := range refs {
+			if candidates[ref.id] {
+				continue
+			}
+			var target kmsID
+			switch {
+			case ref.roleKind == "ClusterRole":
+				target = kmsID{kind: "ClusterRole", name: ref.roleName}
+			case ref.roleKind == "Role" && k.namespaced:
+				target = kmsID{kind: "Role", namespace: ref.id.namespace, name: ref.roleName}
+			default:
+				continue
+			}
+			res.bound[target] = append(res.bound[target], ref.id)
+		}
+	}
+	return res
+}
+
+// kmsExtraLine is the warning of one candidate, with its delete command as
+// the rest of the line when the check prints one. rbacDeleteCommandIn
+// checks the name and the namespace again: an object that fails is
+// counted instead.
+func kmsExtraLine(x kmsExtra, enabled bool, kubeconfig string, refs kmsRefResult, unusual *int, out io.Writer) {
 	cmd, ok := rbacDeleteCommandIn(kubeconfig, x.kind.singular, x.id.namespace, x.id.name)
 	if !ok {
 		*unusual++
@@ -285,30 +523,120 @@ func kmsExtraLine(x kmsExtra, enabled bool, kubeconfig string, unusual *int, out
 	if rbacLabelOK(x.option) {
 		what += " (option " + x.option + ")"
 	}
-	line := kmsAddon + ": " + what
+	line := kmsAddon + ": " + what + " is a candidate leftover: it has the label " + kmsSelector + ", and "
 	if enabled {
-		line += " is not in the render of the current values"
+		line += "the current values do not render it"
 	} else {
-		line += " is a leftover of the addon, which spec.bootstrap does not have"
+		line += "spec.bootstrap does not have the addon"
 	}
-	doctorWarn(out, line+". It keeps its grant. Delete it: "+cmd)
+	line += ". It keeps its grant."
+	// A candidate binding keeps its command, also when its role is in the
+	// render: the delete removes a grant, and the render does not hold the
+	// binding.
+	if x.kind.binding() {
+		doctorWarn(out, line+" If no other tool manages it, delete it: "+cmd)
+		return
+	}
+	noCommand := false
+	if refs.reason != "" {
+		line += " References not checked: " + refs.reason + "."
+		noCommand = true
+	} else if b := refs.bound[x.id]; len(b) > 0 {
+		line += " It is still bound by " + kmsBoundList(b) + "."
+		noCommand = true
+	}
+	if x.kind.kind == "ClusterRole" && x.aggregated {
+		line += " It has an aggregate-to label: an aggregated ClusterRole takes its rules."
+		noCommand = true
+	}
+	if noCommand {
+		doctorWarn(out, line+" Doctor prints no delete command for it.")
+		return
+	}
+	doctorWarn(out, line+" No binding outside the candidates refers to it. If no other tool manages it, delete it: "+cmd)
 }
 
-// kmsUnusualLine is the warning of the objects with an unusual name or
+// kmsListMax is the number of names that a list of the check shows.
+const kmsListMax = 3
+
+// kmsBoundList names the bindings of a role: ClusterRoleBinding/<name> or
+// RoleBinding/<namespace>/<name>, only for a name that is a DNS-1123
+// subdomain and a namespace that is a DNS-1123 label, at most kmsListMax.
+// The others are counted.
+func kmsBoundList(ids []kmsID) string {
+	var shown []string
+	more, odd := 0, 0
+	for _, id := range ids {
+		switch {
+		case !rbacNameOK(id.name) || (id.namespace != "" && !rbacLabelOK(id.namespace)):
+			odd++
+		case len(shown) == kmsListMax:
+			more++
+		case id.namespace == "":
+			shown = append(shown, id.kind+"/"+id.name)
+		default:
+			shown = append(shown, id.kind+"/"+id.namespace+"/"+id.name)
+		}
+	}
+	return kmsList(shown, more, odd, "binding", "bindings")
+}
+
+// kmsPathKeyRe is the form of a path entry that the check prints.
+var kmsPathKeyRe = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,253}$`)
+
+// kmsPathList names the path entries of spec.bootstrap as the spec writes
+// them, only in the form of kmsPathKeyRe, at most kmsListMax. The others
+// are counted.
+func kmsPathList(keys []string) string {
+	var shown []string
+	more, odd := 0, 0
+	for _, k := range keys {
+		switch {
+		case !kmsPathKeyRe.MatchString(k):
+			odd++
+		case len(shown) == kmsListMax:
+			more++
+		default:
+			shown = append(shown, k)
+		}
+	}
+	return kmsList(shown, more, odd, "entry", "entries")
+}
+
+// kmsList joins the shown names, the count of the other names, and the
+// count of the names that the check does not print, with ", ".
+func kmsList(shown []string, more, odd int, one, many string) string {
+	word := func(n int) string {
+		if n == 1 {
+			return one
+		}
+		return many
+	}
+	parts := shown
+	if more > 0 {
+		parts = append(parts, strconv.Itoa(more)+" more "+word(more))
+	}
+	if odd > 0 {
+		parts = append(parts, strconv.Itoa(odd)+" "+word(odd)+" with an unusual name")
+	}
+	return strings.Join(parts, ", ")
+}
+
+// kmsUnusualLine is the warning of the candidates with an unusual name or
 // namespace: their count, and the command that lists the objects of the
 // addon (it prints no name).
 func kmsUnusualLine(n int, enabled bool, kubeconfig string, out io.Writer) {
-	what := "1 object with the label " + kmsSelector + " and an unusual name or namespace (not DNS-1123)"
-	verb, leftover := " is", " a leftover"
+	what := "1 object with the label " + kmsSelector + " and an unusual name or namespace (not DNS-1123) is a candidate leftover: "
+	it := "it"
 	if n > 1 {
-		what = strconv.Itoa(n) + " objects with the label " + kmsSelector + " and an unusual name or namespace (not DNS-1123)"
-		verb, leftover = " are", " leftovers"
+		what = strconv.Itoa(n) + " objects with the label " + kmsSelector + " and an unusual name or namespace (not DNS-1123) are candidate leftovers: "
+		it = "them"
 	}
-	line := kmsAddon + ": " + what + verb
+	line := kmsAddon + ": " + what
 	if enabled {
-		line += " not in the render of the current values"
+		line += "the current values do not render " + it
 	} else {
-		line += leftover + " of the addon, which spec.bootstrap does not have"
+		line += "spec.bootstrap does not have the addon"
 	}
 	doctorWarn(out, line+". Doctor does not print those names. List the objects of the addon: kubectl --kubeconfig "+rbacShQuote(kubeconfig)+" get clusterroles,clusterrolebindings,roles,rolebindings --all-namespaces --selector "+kmsSelector)
 }

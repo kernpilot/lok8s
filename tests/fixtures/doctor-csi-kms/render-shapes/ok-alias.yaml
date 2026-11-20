@@ -1,0 +1,4 @@
+# ids: RoleBinding/ns/rook-ceph-a
+x: &n rook-ceph-a
+kind: RoleBinding
+metadata: {name: *n, namespace: ns}

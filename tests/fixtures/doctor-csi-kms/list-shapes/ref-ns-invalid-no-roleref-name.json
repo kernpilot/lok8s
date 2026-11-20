@@ -1,0 +1,26 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "kind": "RoleBinding",
+      "metadata": {
+        "name": "b",
+        "namespace": "team-a"
+      },
+      "subjects": [
+        {
+          "kind": "Group",
+          "name": "CANARY"
+        }
+      ],
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole"
+      }
+    }
+  ],
+  "kind": "List",
+  "metadata": {
+    "resourceVersion": ""
+  }
+}
