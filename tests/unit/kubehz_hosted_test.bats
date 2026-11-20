@@ -1374,20 +1374,35 @@ _dir_refused() {
     unread) printf '[error] Cannot read the owner and the mode of the directory %s: nothing is written' "${2}" ;;
     link) printf '[error] The link %s belongs to uid %s, not to this user or to root, so another user can point it at a file of this user: nothing is written. Remove the link, or use a path of your own.' "${2}" "${3}" ;;
     linkread) printf '[error] Cannot read the owner of the link %s: nothing is written' "${2}" ;;
+    lstat) printf '[error] Cannot read the path %s: nothing is written' "${2}" ;;
     resolve) printf '[error] Cannot resolve the symlink %s' "${2}" ;;
   esac
 }
 
 # _link_owner_ls <path> <uid>: replace ls with a function that gives, for
 # ls -ldn <path> (the owner of the link itself), the line of a link of
-# <uid> (gid 5353), and no line when <uid> is empty. Any other call runs
-# ls.
+# <uid> (gid 5353). A <uid> that is not a number is an owner that the
+# check cannot read. Any other call runs ls.
 _link_owner_ls() {
   FAKE_LINK="${1}" FAKE_LINK_UID="${2}"
   ls() {
     if [[ "${1}" == -ldn && "${!#}" == "${FAKE_LINK}" ]]; then
-      [[ -z "${FAKE_LINK_UID}" ]] || printf 'lrwxrwxrwx 1 %s 5353 9 Nov 20 08:00 %s -> x\n' "${FAKE_LINK_UID}" "${FAKE_LINK}"
+      printf 'lrwxrwxrwx 1 %s 5353 9 Nov 20 08:00 %s -> x\n' "${FAKE_LINK_UID}" "${FAKE_LINK}"
       return 0
+    fi
+    command ls "$@"
+  }
+}
+
+# _lstat_error_ls <path> <error>: replace ls with a function that fails
+# for ls -ldn <path> with the error line of GNU ls for <error>. Any other
+# call runs ls.
+_lstat_error_ls() {
+  FAKE_LINK="${1}" FAKE_ERR="${2}"
+  ls() {
+    if [[ "${1}" == -ldn && "${!#}" == "${FAKE_LINK}" ]]; then
+      printf "ls: cannot access '%s': %s\n" "${FAKE_LINK}" "${FAKE_ERR}" >&2
+      return 2
     fi
     command ls "$@"
   }
@@ -1688,7 +1703,7 @@ _link_owner_ls() {
   run kubehz::_write_private "${d}/kc.yaml" touch "${ran}"
   assert_failure
   assert_output "$(_dir_refused link "${d}/hop" 4242)"
-  _link_owner_ls "${d}/hop" ""
+  _link_owner_ls "${d}/hop" someone
   run kubehz::_private_target "${d}/kc.yaml"
   assert_failure
   assert_output "$(_dir_refused linkread "${d}/hop")"
@@ -1706,6 +1721,35 @@ _link_owner_ls() {
   [ "$(stat -c %a "${d}/home.rc")" = 600 ]
   [ -L "${d}/kc.yaml" ]
   [ -L "${d}/hop" ]
+}
+
+# A lookup of a name of the chain that fails for a cause other than "not
+# there" (EIO, ESTALE, EACCES) is refused: the check cannot tell that the
+# name is no link, and a link there can be a link of another user (ls is
+# faked for one name of the chain). Before, -L was false on each error,
+# and the walk ended as a pass. Nothing is written, and the file at the
+# end of the chain stays as it was. Go twin:
+# TestWritePrivateFileRefusesALookupErrorOfTheChain.
+@test "kubehz::_write_private refuses a lookup error of a name of the chain" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local d="${BATS_TEST_TMPDIR}/lookup-links" ran="${BATS_TEST_TMPDIR}/ran" p err
+  mkdir -p "${d}"
+  chmod 0700 "${d}"
+  printf 'old\n' > "${d}/home.rc"
+  ln -s hop "${d}/kc.yaml"
+  ln -s "${d}/home.rc" "${d}/hop"
+  for p in "${d}/kc.yaml" "${d}/hop"; do
+    for err in "Input/output error" "Stale file handle" "Permission denied"; do
+      _lstat_error_ls "${p}" "${err}"
+      run kubehz::_write_private "${d}/kc.yaml" touch "${ran}"
+      assert_failure
+      assert_output "$(_dir_refused lstat "${p}")"
+    done
+  done
+  unset -f ls
+  [ ! -e "${ran}" ]
+  [ "$(cat "${d}/home.rc")" = old ]
+  [ -z "$(_hosted_temps "${d}" home.rc)" ]
 }
 
 # A chain of 8 links passes, and a chain of 9 links is refused.

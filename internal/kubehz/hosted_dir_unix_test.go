@@ -35,6 +35,8 @@ func dirRefused(kind, path string, id int) string {
 		return fmt.Sprintf("The link %s belongs to uid %d, not to this user or to root, so another user can point it at a file of this user: nothing is written. Remove the link, or use a path of your own.", path, id)
 	case "linkread":
 		return "Cannot read the owner of the link " + path + ": nothing is written"
+	case "lstat":
+		return "Cannot read the path " + path + ": nothing is written"
 	case "resolve":
 		return "Cannot resolve the symlink " + path
 	}
@@ -358,6 +360,72 @@ func TestWritePrivateFileRefusesALinkOfAnotherUser(t *testing.T) {
 		if info, err := os.Lstat(l); err != nil || info.Mode()&fs.ModeSymlink == 0 {
 			t.Fatalf("%s is no longer a link: %v, %v", l, info, err)
 		}
+	}
+}
+
+// failLstat makes privateLstat fail for path with errno, as the lstat of
+// the kernel does. Other paths get os.Lstat.
+func failLstat(path string, errno syscall.Errno) {
+	privateLstat = func(p string) (fs.FileInfo, error) {
+		if p == path {
+			return nil, &fs.PathError{Op: "lstat", Path: p, Err: errno}
+		}
+		return os.Lstat(p)
+	}
+}
+
+// A lookup of a name of the chain that fails for a cause other than "not
+// there" (EIO, ESTALE, EACCES) is refused: the check cannot tell that the
+// name is no link, and a link there can be a link of another user. Before,
+// each Lstat error ended the walk as a pass. Nothing is written, and the
+// file at the end of the chain stays as it was (bash: "kubehz::_write_private
+// refuses a lookup error of a name of the chain"). Not parallel: it
+// replaces privateLstat.
+func TestWritePrivateFileRefusesALookupErrorOfTheChain(t *testing.T) {
+	t.Cleanup(func() { privateLstat = os.Lstat })
+	d := filepath.Join(t.TempDir(), "lookup-links")
+	if err := os.Mkdir(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rc := filepath.Join(d, "home.rc")
+	if err := os.WriteFile(rc, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	kc, hop := filepath.Join(d, "kc.yaml"), filepath.Join(d, "hop")
+	if err := os.Symlink("hop", kc); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(rc, hop); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{kc, hop} {
+		for _, errno := range []syscall.Errno{syscall.EIO, syscall.ESTALE, syscall.EACCES} {
+			failLstat(p, errno)
+			mustRefusePrivate(t, kc, dirRefused("lstat", p, 0))
+		}
+	}
+	if tmp := hostedTemps(t, d, "home.rc"); len(tmp) != 0 {
+		t.Fatalf("temp files left beside the target: %q", tmp)
+	}
+}
+
+// A directory that os.Stat does not find, and whose Lstat fails for a
+// cause other than "not there", is refused: the directory can be there
+// (bash: "kubehz::_private_dir_ok refuses a lookup error other than not
+// there"). A Lstat that says "not there" passes, when the parent is a
+// directory. Not parallel: it replaces privateLstat.
+func TestPrivateDirRefusalRefusesALookupError(t *testing.T) {
+	t.Cleanup(func() { privateLstat = os.Lstat })
+	dir := filepath.Join(t.TempDir(), "kube")
+	for _, errno := range []syscall.Errno{syscall.EIO, syscall.ESTALE, syscall.EACCES} {
+		failLstat(dir, errno)
+		if got, want := privateDirRefusal(dir), dirRefused("unread", dir, 0); got != want {
+			t.Fatalf("%v: %q, want %q", errno, got, want)
+		}
+	}
+	failLstat(dir, syscall.ENOENT)
+	if got := privateDirRefusal(dir); got != "" {
+		t.Fatalf("ENOENT: %q, want a pass", got)
 	}
 }
 

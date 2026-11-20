@@ -509,19 +509,28 @@ kubehz::_private_target() {
 # and so on) belongs to this user or root. In a directory with the sticky
 # bit, another user can put a link at the name, to a file of this user:
 # the rename would then replace that file. A link of another user, a link
-# whose owner cannot be read and a chain of more than 8 links are refused
-# with one error line, status 1. A relative link names a path from the
-# directory of the link. A link to a directory on the way (not the last
-# name) is not checked here. ls -ldn gives the owner of the link itself.
+# whose owner cannot be read, a name whose lookup fails for a cause other
+# than "not there" (kubehz::_lstat_line: then the check cannot tell that
+# it is no link) and a chain of more than 8 links are refused with one
+# error line, status 1. A relative link names a path from the directory
+# of the link. A link to a directory on the way (not the last name) is
+# not checked here. The line of ls -ldn gives the type and the owner of
+# the entry itself.
 kubehz::_private_link_hops() {
-  local dest="${1}" p="${1}" next line uid me hops=0
+  local dest="${1}" p="${1}" next line uid me hops=0 rc
   me=$(id -u 2>/dev/null) || me=""
-  while [[ -L "${p}" ]]; do
+  while :; do
+    rc=0
+    line=$(kubehz::_lstat_line "${p}") || rc=$?
+    if (( rc == 2 )); then
+      error "Cannot read the path ${p}: nothing is written"
+      return 1
+    fi
+    [[ "${rc}" == 0 && "${line}" == l* ]] || return 0
     if (( ++hops > 8 )); then
       error "Cannot resolve the symlink ${dest}"
       return 1
     fi
-    line=$(LC_ALL=C ls -ldn -- "${p}" 2>/dev/null) || line=""
     uid=""
     read -r _ _ uid _ <<< "${line}"
     if [[ ! "${uid}" =~ ^[0-9]+$ ]]; then
@@ -549,14 +558,15 @@ kubehz::_private_link_hops() {
 
 # kubehz::_lstat_line <path>: one lookup of the entry at <path> itself (a
 # link is not followed). Status 0: <path> is there, and the line of
-# LC_ALL=C ls -ldn is on stdout. Status 1: <path> is not there (ENOENT):
-# ls fails, and its error output is one line that ends in the C text of
-# ENOENT, ": No such file or directory" (GNU, BSD and busybox ls put the
-# text of the error at the end of the line). Status 2: the lookup cannot
-# tell, because it failed for another cause (EIO, ESTALE, EACCES, ENOTDIR,
-# and so on), or because its output is not one line of ls. -e and -L
-# cannot tell these apart: both are false on each error. Go twin: the
-# error of os.Lstat, and errors.Is(err, fs.ErrNotExist).
+# LC_ALL=C ls -ldn is on stdout. Status 1: <path> is not there: ls fails,
+# and its error output is one line that ends in the C text of ENOENT
+# (": No such file or directory") or of ENOTDIR (": Not a directory": a
+# part of the path before the last name is not a directory, so no entry
+# can be there). GNU, BSD and busybox ls put the text of the error at the
+# end of the line. Status 2: the lookup cannot tell, because it failed for
+# another cause (EIO, ESTALE, EACCES, and so on), or because its output is
+# not one line of ls. -e and -L cannot tell these apart: both are false
+# on each error. Go twin: the error of os.Lstat (privateNotThere).
 kubehz::_lstat_line() {
   local out rc=0
   out=$(LC_ALL=C ls -ldn -- "${1}" 2>&1) || rc=$?
@@ -565,7 +575,8 @@ kubehz::_lstat_line() {
     printf '%s\n' "${out}"
     return 0
   fi
-  [[ "${out}" != *$'\n'* && "${out}" == *": No such file or directory" ]] || return 2
+  [[ "${out}" != *$'\n'* ]] || return 2
+  [[ "${out}" == *": No such file or directory" || "${out}" == *": Not a directory" ]] || return 2
   return 1
 }
 
