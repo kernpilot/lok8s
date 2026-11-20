@@ -88,22 +88,115 @@ parity::init() {
 # prints a `bash` row from the frozen tree and none from Go; a switch that
 # silently ran Go on both sides would leave every diff green and prove
 # nothing. Exit 2 unless each side answers as itself.
+#
+# Both implementations of `lo version` run each tool of their list that
+# they find, docker included (internal/cli/cmd_version.go versionTools,
+# .lok8s/libs/version). So the probe has its own .bin (parity::probe_bin),
+# first on its PATH (parity::probe_path), with a stub for each host tool.
+# Exit 2 also when the PATH does not resolve a host tool to its stub
+# (parity::probe_selfcheck), or when a stub refused a call
+# (parity::probe_refused).
 parity::prove_switch() {
   local probe="${WORK}/probe" out
+  PARITY_PROBE_LOG="${WORK}/probe-refused.log"
   parity::new_project "${probe}"
+  parity::probe_bin "${probe}" "${PARITY_PROBE_LOG}"
+  parity::probe_selfcheck "${probe}"
   parity::implementation "${probe}" bash
-  out="$(cd "${probe}" && "${LO_BIN}" version </dev/null 2>&1)" || true
+  out="$(cd "${probe}" && PATH="$(parity::probe_path "${probe}")" "${LO_BIN}" version </dev/null 2>&1)" || true
+  parity::probe_refused
   if ! grep -q '^bash ' <<<"${out}"; then
     printf 'error: the bash twin did not run the bash tree (lo version):\n%s\n' "${out}" >&2
     exit 2
   fi
   parity::implementation "${probe}" go
-  out="$(cd "${probe}" && "${LO_BIN}" version </dev/null 2>&1)" || true
+  out="$(cd "${probe}" && PATH="$(parity::probe_path "${probe}")" "${LO_BIN}" version </dev/null 2>&1)" || true
+  parity::probe_refused
   if grep -q '^bash ' <<<"${out}"; then
     echo "error: the Go side ran the bash tree (lo version printed a bash row)" >&2
     exit 2
   fi
   rm -rf "${probe}"
+}
+
+# PARITY_PROBE_TOOLS: the host tools that the probe must not run. The
+# probe's .bin has a stub for each one (parity::probe_stub). An entry
+# "<tool>=<argv>" lets the stub answer that one argv: it is the version
+# query that `lo version` sends. A plain "<tool>" answers no call.
+PARITY_PROBE_TOOLS=(
+  "docker=--version"
+  "kubectl=version --client"
+  "kind=--version"
+  "tilt=version"
+  helm hcloud ssh curl
+)
+
+# parity::probe_bin <dir> <log>: the probe's own .bin. The toolchain is
+# linked entry by entry (parity::own_bin), then each tool of
+# PARITY_PROBE_TOOLS gets its stub in place of a link. <log> starts empty.
+parity::probe_bin() {
+  local dir="${1}" log="${2}" entry
+  parity::own_bin "${dir}"
+  : >"${log}"
+  for entry in "${PARITY_PROBE_TOOLS[@]}"; do
+    if [[ "${entry}" == *=* ]]; then
+      parity::probe_stub "${dir}" "${entry%%=*}" "${entry#*=}" "${log}"
+    else
+      parity::probe_stub "${dir}" "${entry}" "" "${log}"
+    fi
+  done
+}
+
+# parity::probe_stub <dir> <tool> <argv> <log>: the stub of a host tool.
+# A call with exactly <argv> (not empty) prints "parity-stub v0.0.0" and
+# exits 0: both implementations read a version from that line. The stub
+# refuses every other call: it writes the call to <log> and exits 1.
+parity::probe_stub() {
+  local dir="${1}" tool="${2}" argv="${3}" log="${4}" answer=":"
+  if [[ -n "${argv}" ]]; then
+    answer="[[ \"\$*\" != $(printf '%q' "${argv}") ]] || { echo 'parity-stub v0.0.0'; exit 0; }"
+  fi
+  parity::stub "${dir}" "${tool}" <<SH
+#!/usr/bin/env bash
+# The parity probe's ${tool}: a stub, never the host tool (hack/lib/parity.sh).
+${answer}
+printf '%s\n' "${tool} \$*" >>$(printf '%q' "${log}")
+echo "parity stub: the probe must not run ${tool} \$*" >&2
+exit 1
+SH
+}
+
+# parity::probe_path <dir>: the PATH of a probe run, <dir>/.bin first. lo
+# also looks in the project's .bin first (Go: execx.Look; bash: the PATH
+# of the shim), so this PATH has the order that lo uses.
+parity::probe_path() {
+  printf '%s\n' "${1}/.bin:${PATH}"
+}
+
+# parity::probe_selfcheck <dir>: exit 2 unless the probe's PATH resolves
+# each tool of PARITY_PROBE_TOOLS to its stub in <dir>/.bin. A tool that
+# resolves to a host file (for example /usr/bin/docker) would run for real.
+parity::probe_selfcheck() {
+  local dir="${1}" entry tool got
+  for entry in "${PARITY_PROBE_TOOLS[@]}"; do
+    tool="${entry%%=*}"
+    got="$(PATH="$(parity::probe_path "${dir}")"; type -P "${tool}")" || got=""
+    if [[ "${got}" != "${dir}/.bin/${tool}" ]]; then
+      printf 'error: the probe PATH resolves %s to %s, not to its stub %s\n' \
+        "${tool}" "${got:-nothing}" "${dir}/.bin/${tool}" >&2
+      exit 2
+    fi
+  done
+}
+
+# parity::probe_refused: exit 2 when a probe stub refused a call (its log
+# is not empty). Each line names a host tool call that the probe made.
+parity::probe_refused() {
+  if [[ -s "${PARITY_PROBE_LOG}" ]]; then
+    echo "error: the probe called a host tool that it must not run (a parity stub refused it):" >&2
+    sed 's/^/  /' "${PARITY_PROBE_LOG}" >&2
+    exit 2
+  fi
 }
 
 # parity::cleanup: the EXIT trap. A harness-defined parity_cleanup hook
