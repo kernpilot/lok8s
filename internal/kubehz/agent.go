@@ -1293,7 +1293,8 @@ var linkKubeconfig = os.Link
 // exclusive create (O_EXCL). The create fails when the path exists, a link
 // too, so a file that appeared during the download stays as it is. Unlike
 // the hard link, a reader can see the file before all of it is written.
-// The steps before the first byte, the same in the bash twin:
+// The steps before the first byte, as in the bash twin (bash also checks
+// descriptor 3 and refuses under a default ACL):
 //   - chmod 0600 on the open file. A default ACL of the directory replaces
 //     the umask; the create asks for 0600, but the bash twin asks for 0666.
 //     vfat can refuse the chmod, so the mode that the Stat reads back

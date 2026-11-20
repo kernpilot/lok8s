@@ -1516,6 +1516,39 @@ ${d}/kc.yaml"
   assert_output 'apiVersion: v1'
 }
 
+# The refusal under a default ACL needs the chmod to take the group and
+# other bits away. When the chmod fails and changes nothing (as on vfat, or
+# a denied chmod), the 0644 of the open stays: the command writes the file
+# and prints the one warning. The stand-in chmod fails and changes
+# nothing. The Go create asks for 0600 and writes the file with 0600 here.
+@test "kubeconfig: under a default ACL with a chmod that changes nothing, the bash fallback writes the file and warns" {
+  command -v setfacl >/dev/null || skip "setfacl is missing"
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  local d="${BATS_TEST_TMPDIR}/acl-nochmod"
+  mkdir -p "${d}"
+  setfacl -d -m u::rw,g::r,o::r "${d}" 2>/dev/null || skip "no ACLs on the file system of the test dir"
+  # The default ACL applies: a file that asks for 0666 gets 0644, whatever
+  # the umask.
+  : > "${d}/probe"
+  [[ "$(stat -c '%a' "${d}/probe")" == 644 ]] || skip "the default ACL does not apply on the file system of the test dir"
+  rm -f -- "${d}/probe"
+  _ln_fails
+  LN_ERROR='Operation not permitted'
+  _chmod_stub 'exit 1'
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/kc.yaml"
+  assert_success
+  assert_output "[warn] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/kc.yaml has mode 0644: the mount options of its file system set the mode
+${d}/kc.yaml"
+  run cat "${d}/kc.yaml"
+  assert_output 'apiVersion: v1'
+  run stat -c '%a' "${d}/kc.yaml"
+  assert_output 644
+  run ls -A "${d}"
+  assert_output kc.yaml
+  run cat "${LN_LOG}"
+  assert_output ln
+}
+
 @test "kubeconfig: without hard links, the command writes a new file, and a file that appears in the link step stays" {
   route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
   route GET /api/spaces/sp-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'

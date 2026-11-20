@@ -1278,18 +1278,20 @@ func aclRights(listing string) string {
 // A default ACL of the directory replaces the umask. Under one that gives
 // the group and others read, the file of the fallback has mode 0600, and
 // no entry of its ACL gives a group or another user an effective right.
-// The Go create asks for 0600, so this holds without the chmod too. The
-// bash twin asks for 0666, so its new file is open to others until the
-// chmod, and it refuses there (kubehz_agent_test.bats). Skips without
-// setfacl or getfacl, and on a file system of the test dir with no ACLs.
-// Not parallel: it replaces linkKubeconfig.
+// The Go create asks for 0600, so the file has no group or other bits
+// already before the chmod: the chmod step reads the mode of the open file
+// first. The bash twin asks for 0666, so its new file is open to others
+// until the chmod, and it refuses there (kubehz_agent_test.bats). Skips
+// without setfacl or getfacl, and on a file system of the test dir with
+// no ACLs. Not parallel: it replaces linkKubeconfig and chmodKubeconfig.
 func TestPublishKubeconfigUnderADefaultACL(t *testing.T) {
 	setfacl, serr := exec.LookPath("setfacl")
 	getfacl, gerr := exec.LookPath("getfacl")
 	if serr != nil || gerr != nil {
 		t.Skip("setfacl or getfacl is missing")
 	}
-	t.Cleanup(func() { linkKubeconfig = os.Link })
+	chmod := chmodKubeconfig
+	t.Cleanup(func() { linkKubeconfig, chmodKubeconfig = os.Link, chmod })
 	dir := t.TempDir()
 	if out, err := exec.Command(setfacl, "-d", "-m", "u::rw,g::r,o::r", dir).CombinedOutput(); err != nil {
 		t.Skipf("no ACLs on the file system of the test dir: %v: %s", err, out)
@@ -1305,9 +1307,24 @@ func TestPublishKubeconfigUnderADefaultACL(t *testing.T) {
 	file := filepath.Join(dir, "kc.yaml")
 	calls := 0
 	linkKubeconfig = failLink(t, syscall.EPERM, &calls, nil)
+	// The mode that the open gave, read before the chmod.
+	var opened os.FileMode
+	read := false
+	chmodKubeconfig = func(f *os.File) error {
+		if fi, err := f.Stat(); err == nil {
+			opened, read = fi.Mode().Perm(), true
+		}
+		return f.Chmod(0o600)
+	}
 	wide, err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
 	if err != nil {
 		t.Fatalf("publish: %v", err)
+	}
+	if !read {
+		t.Fatal("the chmod step did not read the mode of the open file")
+	}
+	if opened&0o077 != 0 {
+		t.Errorf("the open gave mode %04o, want no group or other bits", opened)
 	}
 	if wide != 0 {
 		t.Errorf("wide = %04o, want 0", wide)
