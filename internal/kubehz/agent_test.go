@@ -1278,10 +1278,11 @@ func aclRights(listing string) string {
 // A default ACL of the directory replaces the umask. Under one that gives
 // the group and others read, the file of the fallback has mode 0600, and
 // no entry of its ACL gives a group or another user an effective right.
-// The Go create asks for 0600, so this holds without the chmod too; the
-// bash twin asks for 0666 and needs the chmod. Skips without setfacl or
-// getfacl, and on a file system of the test dir with no ACLs. Not
-// parallel: it replaces linkKubeconfig.
+// The Go create asks for 0600, so this holds without the chmod too. The
+// bash twin asks for 0666, so its new file is open to others until the
+// chmod, and it refuses there (kubehz_agent_test.bats). Skips without
+// setfacl or getfacl, and on a file system of the test dir with no ACLs.
+// Not parallel: it replaces linkKubeconfig.
 func TestPublishKubeconfigUnderADefaultACL(t *testing.T) {
 	setfacl, serr := exec.LookPath("setfacl")
 	getfacl, gerr := exec.LookPath("getfacl")

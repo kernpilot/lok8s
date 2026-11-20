@@ -1422,26 +1422,15 @@ _chmod_stub() {
   "${REAL_CHMOD}" 755 "${BATS_TEST_TMPDIR}/ln-bin/chmod"
 }
 
-# _acl_rights <file>: the entries of the ACL of <file> that give a group or
-# another user an effective right: the rights after "#effective:" when the
-# mask cuts the entry, else the rights of the entry. The entry of the owner
-# ("user::") does not count. The Go twin is aclRights.
-_acl_rights() {
-  getfacl -cp -- "${1}" | awk '
-    { sub(/^[ \t]+/, ""); sub(/[ \t]+$/, "") }
-    $0 == "" || /^#/ || /^user::/ { next }
-    {
-      r = $0
-      if (index(r, "#effective:")) { sub(/.*#effective:/, "", r) } else { sub(/[ \t].*$/, "", r); sub(/.*:/, "", r) }
-      if (r != "---") print
-    }'
-}
-
 # A default ACL of the directory replaces the umask, and the open of
-# noclobber asks for 0666: without the chmod on the open file the fallback
-# made 0644 here. The Go twin is TestPublishKubeconfigUnderADefaultACL.
-@test "kubeconfig: under a default ACL that gives the group read, the fallback file has 0600 and no other effective right" {
-  command -v setfacl >/dev/null && command -v getfacl >/dev/null || skip "setfacl or getfacl is missing"
+# noclobber asks for 0666: the new empty file gets 0644 here before the
+# chmod, and a process could open it then and read the kubeconfig later.
+# So the bash fallback refuses, writes nothing and removes the empty file.
+# The Go create asks for 0600 at the open and writes the file
+# (TestPublishKubeconfigUnderADefaultACL).
+@test "kubeconfig: under a default ACL that gives the group read, the bash fallback refuses and writes nothing" {
+  command -v setfacl >/dev/null || skip "setfacl is missing"
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
   local d="${BATS_TEST_TMPDIR}/acl"
   mkdir -p "${d}"
   setfacl -d -m u::rw,g::r,o::r "${d}" 2>/dev/null || skip "no ACLs on the file system of the test dir"
@@ -1452,15 +1441,15 @@ _acl_rights() {
   rm -f -- "${d}/probe"
   _ln_fails
   LN_ERROR='Operation not permitted'
-  KUBEHZ_AGENT_BODY='apiVersion: v1'
-  kubehz::agent_write "${d}/kc.yaml" 0 || fail "the write failed: rc $?"
-  [[ -z "${KUBEHZ_AGENT_WIDE_MODE}" ]] || fail "wide mode: ${KUBEHZ_AGENT_WIDE_MODE}"
-  run stat -c '%a' "${d}/kc.yaml"
-  assert_output 600
-  run _acl_rights "${d}/kc.yaml"
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/kc.yaml"
+  assert_failure
+  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write ${d}/kc.yaml safely: its directory gives other users access to a new file (a default ACL)
+  Name a file in a directory that gives no other user access to a new file."
+  # No file at the path, and no temporary file.
+  run ls -A "${d}"
   assert_output ''
-  run cat "${d}/kc.yaml"
-  assert_output 'apiVersion: v1'
+  run cat "${LN_LOG}"
+  assert_output ln
 }
 
 # The fallback needs the temporary file at its path, the file that mktemp
