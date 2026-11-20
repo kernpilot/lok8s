@@ -370,8 +370,9 @@ doctor::_rbac_shape() {
 # and as its own process group (set -m: its pgid is its pid), so that a
 # stop also reaches the children of a credential plugin. That group is not
 # the foreground group of the terminal: a Ctrl-C reaches this shell, whose
-# INT trap stops the group. The check does not use timeout(1): BusyBox
-# timeout signals only the one process, and macOS has no timeout(1). Sets
+# INT trap stops the group. The check does not use timeout(1): macOS has
+# no timeout(1), and a BusyBox timeout can signal the command only, not
+# its children (not tested here; GNU timeout signals the group). Sets
 # _rbac_rc to the exit code and _rbac_stopped to 1 when the bound stopped
 # the command.
 doctor::_rbac_run() {
