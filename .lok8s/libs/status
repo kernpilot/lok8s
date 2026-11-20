@@ -41,41 +41,84 @@ status::cluster() {
 # call: a `kubectl get` can make discovery requests before the GET and
 # retry them, and an exec credential plugin of the kubeconfig runs outside
 # the flag. So status::all first sends one /readyz probe (no discovery).
-# When the probe fails, the report skips both reads. When it passes, each
-# read runs with a bound for the whole call. The probe has the same bound.
+# When the probe gets no HTTP answer, the report skips both reads
+# (status::reachable). Else each read runs with a bound for the whole call.
+# The probe has the same bound.
 #
 # The bound is timeout(1): status::_read_bound seconds, then SIGKILL 2 s
 # after the SIGTERM (Go twin: statusReadBound and statusReadGrace). timeout
 # signals its own process group, so a credential plugin stops too. Without
 # timeout on PATH, each call has only the request timeout, as before.
+#
+# Each call gets an empty stdin (</dev/null). timeout runs kubectl in a
+# process group that is not the foreground group of a terminal, so a
+# credential plugin that reads the terminal would stop (SIGTTIN) until the
+# bound. With an empty stdin it reads end of file at once.
 
 # status::_read_bound — the bound of one kubectl call of the report, in
 # seconds (Go: statusReadBound). A test makes it short.
 status::_read_bound() { echo 10; }
 
 # status::_kubectl <args...> — one kubectl call of the report: kubectl
-# <args> --request-timeout=5s, under timeout(1) when it is on PATH.
+# <args> --request-timeout=5s with an empty stdin, under timeout(1) when it
+# is on PATH.
 status::_kubectl() {
   if command -v timeout &>/dev/null; then
-    timeout -k 2 "$(status::_read_bound)" kubectl "$@" --request-timeout=5s
+    timeout -k 2 "$(status::_read_bound)" kubectl "$@" --request-timeout=5s </dev/null
   else
-    kubectl "$@" --request-timeout=5s
+    kubectl "$@" --request-timeout=5s </dev/null
   fi
 }
 
 # status::reachable — 0 when kubectl and the kubeconfig file are there and
-# the API server answers the /readyz probe (Go: statusReachable).
+# the API server gives an HTTP answer to the /readyz probe, of any status
+# (Go: statusReachable). A 401, a 403 (a cluster that removed the
+# system:public-info-viewer grant), a 404 (an older API server, or a proxy
+# in front of it) or a 500 (an API server that is not ready) fails the
+# probe, but the server answers, so the reads run, each with its bound.
+# Only a probe with no HTTP answer skips the reads: a connection, DNS or
+# TLS error, the request timeout, or the bound. The stderr of the probe
+# goes to a file, not to a pipe: a credential plugin that left the process
+# group of timeout(1) could keep a pipe open after the bound. When mktemp
+# fails, the stderr goes to /dev/null, and each failed probe skips the
+# reads.
 # Usage: status::reachable
 status::reachable() {
   command -v kubectl &>/dev/null || return 1
   [[ -f "${KUBECONFIG:-}" ]] || return 1
-  status::_kubectl get --raw /readyz >/dev/null 2>&1
+  local errfile rc=1
+  errfile="$(mktemp 2>/dev/null)" || errfile=/dev/null
+  if status::_kubectl get --raw /readyz >/dev/null 2>"${errfile}" ||
+    status::_http_answer < "${errfile}"; then
+    rc=0
+  fi
+  [[ "${errfile}" == /dev/null ]] || rm -f "${errfile}"
+  return "${rc}"
+}
+
+# status::_http_answer — 0 when stdin, the stderr of a kubectl call that
+# failed, holds the form that kubectl prints for an HTTP answer that is
+# not 2xx (Go: statusHTTPAnswer). kubectl's StandardErrorMessage
+# (k8s.io/kubectl/pkg/cmd/util) starts the line with "Error from server"
+# for such an answer, and with "error: You must be logged in to the
+# server" for a 401. An error with no HTTP answer has other forms:
+# "Unable to connect to the server: ..." (DNS, TLS, the request timeout)
+# and "The connection to the server ... was refused ...".
+# Usage: status::_http_answer < <stderr file>
+status::_http_answer() {
+  local line
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    case "${line}" in
+      "Error from server"* | "error: You must be logged in to the server"*) return 0 ;;
+    esac
+  done
+  return 1
 }
 
 # ── Node status ─────────────────────────────────────────
 # Reports node status via kubectl (if kubeconfig is available). With
-# reachable not 1 (the /readyz probe of status::all failed), the section
-# shows (not reachable) and kubectl does not read the nodes.
+# reachable not 1 (the /readyz probe of status::all got no HTTP answer),
+# the section shows (not reachable) and kubectl does not read the nodes.
 # Usage: status::nodes [reachable]
 status::nodes() {
   local reachable="${1:-0}"

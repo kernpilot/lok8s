@@ -40,13 +40,14 @@ const statusRequestTimeout = "--request-timeout=5s"
 // get` can make discovery requests before the GET and retry them, and an
 // exec credential plugin of the kubeconfig runs outside the flag. So the
 // report first sends one /readyz probe (statusProbeArgs: no discovery).
-// When the probe fails, the report skips both reads. When it passes, each
-// read runs with a bound for the whole call: statusReadBound, as a context
-// deadline. The probe has the same bound. Each call runs as its own process
-// group (execx.Cmd.ProcessGroup): at the bound the group gets SIGTERM, and
-// SIGKILL after statusReadGrace, so a credential plugin stops too. The bash
-// twin uses timeout(1) with the same 10 s and 2 s (status::_kubectl).
-// statusReadBound is a variable so that a test can make it short.
+// When the probe gets no HTTP answer, the report skips both reads
+// (statusReachable). Else each read runs with a bound for the whole call:
+// statusReadBound, as a context deadline. The probe has the same bound.
+// Each call runs as its own process group (execx.Cmd.ProcessGroup): at the
+// bound the group gets SIGTERM, and SIGKILL after statusReadGrace, so a
+// credential plugin stops too. The bash twin uses timeout(1) with the same
+// 10 s and 2 s (status::_kubectl). statusReadBound is a variable so that a
+// test can make it short.
 const statusReadGrace = 2 * time.Second
 
 var statusReadBound = 10 * time.Second
@@ -55,18 +56,29 @@ var statusReadBound = 10 * time.Second
 // status::reachable).
 var statusProbeArgs = []string{"get", "--raw", "/readyz"}
 
-// statusKubectl runs one kubectl call of the report (bash:
-// status::_kubectl): kubectl <args> --request-timeout=5s, with stderr
-// discarded and the bound of statusReadBound. A call that the bound
-// stopped is an error, also when kubectl handled the signal and exited 0.
+// statusKubectl runs one read of the report (bash: status::_kubectl):
+// statusKubectlCall with stderr discarded.
 func statusKubectl(ctx context.Context, r execx.Runner, stdout io.Writer, args ...string) error {
+	return statusKubectlCall(ctx, r, stdout, io.Discard, args...)
+}
+
+// statusKubectlCall runs one kubectl call of the report (bash:
+// status::_kubectl): kubectl <args> --request-timeout=5s, with an empty
+// stdin and the bound of statusReadBound. A call that the bound stopped is
+// an error, also when kubectl handled the signal and exited 0. The empty
+// stdin is there because the call runs as its own process group, which is
+// not the foreground group of a terminal: a credential plugin that reads
+// the terminal would stop (SIGTTIN) until the bound. With an empty stdin it
+// reads end of file at once.
+func statusKubectlCall(ctx context.Context, r execx.Runner, stdout, stderr io.Writer, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, statusReadBound)
 	defer cancel()
 	err := r.Run(ctx, execx.Cmd{
 		Name:         "kubectl",
 		Args:         append(slices.Clone(args), statusRequestTimeout),
+		Stdin:        strings.NewReader(""),
 		Stdout:       stdout,
-		Stderr:       io.Discard,
+		Stderr:       stderr,
 		WaitDelay:    statusReadGrace,
 		ProcessGroup: true,
 	})
@@ -87,9 +99,33 @@ func statusKubectlOK(deps statusDeps) bool {
 }
 
 // statusReachable is the /readyz probe (bash: status::reachable): true when
-// the API server answers it.
+// the API server gives an HTTP answer to it, of any status. A 401, a 403 (a
+// cluster that removed the system:public-info-viewer grant), a 404 (an
+// older API server, or a proxy in front of it) or a 500 (an API server that
+// is not ready) fails the probe, but the server answers, so the reads run,
+// each with its bound. Only a probe with no HTTP answer skips the reads: a
+// connection, DNS or TLS error, the request timeout, or the bound.
 func statusReachable(ctx context.Context, deps statusDeps) bool {
-	return statusKubectl(ctx, deps.runner, io.Discard, statusProbeArgs...) == nil
+	var stderr bytes.Buffer
+	err := statusKubectlCall(ctx, deps.runner, io.Discard, &stderr, statusProbeArgs...)
+	return err == nil || statusHTTPAnswer(stderr.String())
+}
+
+// statusHTTPAnswer reports whether stderr, the stderr of a kubectl call
+// that failed, holds the form that kubectl prints for an HTTP answer that
+// is not 2xx (bash: status::_http_answer). kubectl's StandardErrorMessage
+// (k8s.io/kubectl/pkg/cmd/util) starts the line with "Error from server"
+// for such an answer, and with "error: You must be logged in to the
+// server" for a 401. An error with no HTTP answer has other forms:
+// "Unable to connect to the server: …" (DNS, TLS, the request timeout) and
+// "The connection to the server … was refused …".
+func statusHTTPAnswer(stderr string) bool {
+	for line := range strings.Lines(stderr) {
+		if strings.HasPrefix(line, "Error from server") || strings.HasPrefix(line, "error: You must be logged in to the server") {
+			return true
+		}
+	}
+	return false
 }
 
 // statusDeps are the report's seams.
