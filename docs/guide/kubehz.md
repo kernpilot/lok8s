@@ -1232,16 +1232,16 @@ handover **feasibility** verdict.
 The agent keeps the time of the last send on `kubehz-agent-state`, and it
 sends an assessment only when it has stored that time. Before the probes, it
 writes the new time, and the same call removes a pending platform request
-(one `kubectl annotate`, one patch). The write comes first so that the time
-on the ConfigMap is never older than the last assessment sent: an agent that
-cannot store the time sends no assessment, and thus cannot send one on every
-tick. What the agent writes for each outcome of the send:
+(one `kubectl annotate`, one patch). The write comes first, so the agent
+never sends an assessment whose time it has not stored: an agent that cannot
+store the time sends no assessment, and thus cannot send one on every tick.
+What the agent writes for each outcome of the send:
 
 | Outcome | Before the send | After the send |
 |---|---|---|
-| Delivered: the beat with the assessment lands | the new time; the request removed | nothing |
-| Rejected: that beat fails, the plain retry lands | the new time; the request removed | nothing (the next assessment comes after 24 h) |
-| Failed: both beats fail | the new time; the request removed | the old time and the request, in one call (the next tick sends again) |
+| Delivered: the beat with the assessment lands | the new time; a pending request removed | nothing |
+| Rejected: that beat fails, the plain retry lands | the new time; a pending request removed | nothing (the next assessment comes after 24 h) |
+| Failed: both beats fail | the new time; a pending request removed | the old time (or none) and the request put back, in one call (the next tick sends again) |
 
 A tick that writes the time and then sends no assessment (a probe has no
 answer, or the beat is skipped) puts back the old values the same way.
