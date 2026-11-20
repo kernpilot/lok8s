@@ -14,11 +14,21 @@
 #                        project directory (the kubeconfig in a command)
 # Every failed read carries the word CANARY in its stderr (or its stdout): the
 # check must never print it. kubectl is a stand-in script of this test, first
-# on PATH (the check runs it through timeout(1), which cannot run a shell
-# function). No real kubectl runs and no cluster is reached. Only this file
-# knows two more answers: `hang <s> <json file>` (the read ends after <s>
-# seconds) and `int <s> <json file>` (the stand-in sends SIGINT to the
-# subshell of the reads, as a Ctrl-C does).
+# on PATH (the check runs it as a process, not as a shell function). No real
+# kubectl runs and no cluster is reached. Only this file knows three more
+# answers:
+#   hang <s> <json file>          the read ends after <s> seconds
+#   tree <s> <json file> <term|ignore>
+#                                 the stand-in starts a child that ignores
+#                                 TERM (as a credential plugin can), and ends
+#                                 after <s> seconds; with "ignore" it ignores
+#                                 TERM too
+#   int <s> <json file>           the same tree, with "ignore": after 1 s the
+#                                 stand-in sends SIGINT to the subshell of the
+#                                 reads, as a Ctrl-C does
+# The stand-in and its child write their pids to STUB_PID and CHILD_PID. The
+# stand-in writes the clock (in microseconds) when it starts to STUB_START,
+# and when it sends the SIGINT to INT_SENT.
 
 setup() {
   load "../test_helper"
@@ -43,7 +53,8 @@ setup() {
   export PATH_LOK8S="${PATH_BASE}/.lok8s"
   unset LOK8S_CLUSTER_NAME
   export CALLS="${BATS_TEST_TMPDIR}/kubectl.calls"
-  export STUB_PID="${BATS_TEST_TMPDIR}/kubectl.pid"
+  export STUB_PID="${BATS_TEST_TMPDIR}/kubectl.pid" CHILD_PID="${BATS_TEST_TMPDIR}/child.pid"
+  export STUB_START="${BATS_TEST_TMPDIR}/kubectl.start" INT_SENT="${BATS_TEST_TMPDIR}/int.sent"
   export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
   mkdir -p "${TMPDIR}"
 
@@ -59,19 +70,30 @@ if [[ ! -f "${CASE}/${res}" ]]; then
   exit 0
 fi
 read -r kind a b < "${CASE}/${res}"
+# _tree <term|ignore>: the pid files, and a child that ignores TERM (its
+# exec'd sleep inherits that). fd 3 (of bats) stays closed in each sleep.
+_tree() {
+  echo "${EPOCHREALTIME//[!0-9]/}" > "${STUB_START}"
+  echo "$$" > "${STUB_PID}"
+  [[ "${1}" == term ]] || trap '' TERM
+  bash -c 'trap "" TERM; echo "$$" > "${CHILD_PID}"; exec sleep 30' 3>&- &
+}
 case "${kind}" in
   json) cat "${FIX}/json/${a}" ;;
   fail) printf '%s\n' "${b}" >&2; exit "${a}" ;;
   hang) sleep "${a}" 3>&-; cat "${FIX}/json/${b}" ;;
+  tree)
+    read -r b mode <<< "${b}"
+    _tree "${mode}"
+    sleep "${a}" 3>&-
+    cat "${FIX}/json/${b}" ;;
   int)
-    echo "$$" > "${STUB_PID}"
+    _tree ignore
     sleep 1 3>&-
-    # The subshell of the reads is INT_HOPS parents up: 1 is the parent,
-    # 2 the parent of timeout(1). _ppid (test_helper, exported by the test)
-    # reads /proc where it exists, so the case needs no ps.
-    target="${PPID}"
-    if (( INT_HOPS > 1 )); then target="$(_ppid "${target}")"; fi
-    kill -INT "${target}"
+    # The parent is the subshell of the reads: the check starts the read
+    # as its job.
+    echo "${EPOCHREALTIME//[!0-9]/}" > "${INT_SENT}"
+    kill -INT "${PPID}"
     sleep "${a}" 3>&-
     cat "${FIX}/json/${b}" ;;
 esac
@@ -171,6 +193,36 @@ _hang_case() {
 
 NO_ANSWER="  ! RBAC migration leftovers not checked: kubectl did not answer within 30 s (the cluster API, or a credential plugin that waits for a login)"
 
+# _alive <pid> — 0 when the process runs (a zombie does not count): /proc
+# where it exists (the CI bats container has no ps), else kill -0.
+_alive() {
+  if [[ -d /proc/self ]]; then
+    local stat
+    stat="$(cat "/proc/${1}/stat" 2>/dev/null)" || return 1
+    [[ -n "${stat}" ]] || return 1
+    stat="${stat##*) }"
+    [[ "${stat:0:1}" != Z ]]
+  else
+    kill -0 "${1}" 2>/dev/null
+  fi
+}
+
+# _assert_tree_gone <clock file> <max ms> — the stand-in and its child no
+# longer run, at once after the check returned (the check waits for them),
+# and the check returned less than <max ms> after the clock in the file (in
+# microseconds, EPOCHREALTIME of bash 5).
+_assert_tree_gone() {
+  local now="${EPOCHREALTIME//[!0-9]/}" start took pid
+  start="$(cat "${1}")"
+  [[ "${start}" =~ ^[0-9]+$ ]] || fail "no clock in ${1}"
+  took=$(( (now - start) / 1000 ))
+  for pid in "$(cat "${STUB_PID}")" "$(cat "${CHILD_PID}")"; do
+    [[ -n "${pid}" ]] || fail "a pid file is empty"
+    ! _alive "${pid}" || fail "process ${pid} still runs after the check"
+  done
+  (( took < ${2} )) || fail "the check took ${took} ms, want less than ${2} ms"
+}
+
 @test "rbac: a leftover SUC binding under another name with another subject gets no delete command" { _case suc-leftover-under-another-name; }
 @test "rbac: the User name of the token and the groups of the token count" { _case identity-forms; }
 @test "rbac: the new role and pods/exec count through the User name of the token" { _case user-form; }
@@ -264,63 +316,51 @@ NO_ANSWER="  ! RBAC migration leftovers not checked: kubectl did not answer with
 # The bound stops a read that does not end (a credential plugin that waits
 # for a login). The stand-in answers a valid list after 5 s: without the
 # bound, the check passes and this fails.
-@test "rbac: the bound stops a hung read (timeout)" {
-  command -v timeout >/dev/null 2>&1 || skip "no timeout(1)"
+@test "rbac: the bound stops a hung read" {
   doctor::_rbac_bound() { echo 1; }
   _hang_case "hang 5 crb-narrowed.json" "${NO_ANSWER}"
   run doctor::_rbac_check rbac.example
   _assert_case
 }
 
-@test "rbac: the bound stops a hung read (no timeout, the watchdog)" {
+# The bound stops the whole process group of the read: a child that ignores
+# TERM gets the KILL after the grace (2 s). The check returns only when the
+# stand-in and its child are gone: after the start of the stand-in, within
+# the bound (1 s) plus the grace, plus 1 s for the processes of the test.
+@test "rbac: the bound stops a child of the read that ignores TERM" {
   doctor::_rbac_bound() { echo 1; }
-  _hang_case "hang 5 crb-narrowed.json" "${NO_ANSWER}"
-  local p; p="$(_path_without timeout)"
-  PATH="${p}" run doctor::_rbac_check rbac.example
+  _hang_case "tree 30 crb-narrowed.json term" "${NO_ANSWER}"
+  run doctor::_rbac_check rbac.example
   _assert_case
+  _assert_tree_gone "${STUB_START}" 4000
 }
 
-# _ctrl_c <PATH> <hops> — a Ctrl-C in a read: the INT trap of the reads'
-# subshell stops the read and removes the temp dir. The caller here gets no
-# SIGINT, so it goes on and prints the fixed reason; its own trap stays as
-# it was. <hops>: the parents from the stand-in up to that subshell.
-_ctrl_c() {
-  _hang_case "int 5 crb-narrowed.json" "  ! RBAC migration leftovers not checked: kubectl failed or did not return a valid list"
-  export INT_HOPS="${2}" PS_RAN="${BATS_TEST_TMPDIR}/ps.ran"
-  export -f _ppid
-  # With /proc (Linux), as in the CI bats container: no ps. A ps call fails
-  # here and leaves a mark. Without /proc (macOS), _ppid needs the real ps.
-  if [[ -d /proc/self ]]; then
-    ps() { : > "${PS_RAN}"; echo "ps ran" >&2; return 127; }
-    export -f ps
-  fi
+@test "rbac: the bound stops a read that ignores TERM, and its child" {
+  doctor::_rbac_bound() { echo 1; }
+  _hang_case "tree 30 crb-narrowed.json ignore" "${NO_ANSWER}"
+  run doctor::_rbac_check rbac.example
+  _assert_case
+  _assert_tree_gone "${STUB_START}" 4000
+}
+
+# A Ctrl-C in a read: the INT trap of the reads' subshell stops the process
+# group of the read (the stand-in and its child ignore TERM: the KILL after
+# the grace ends them), waits for it, and removes the temp dir. The caller
+# here gets no SIGINT, so it goes on and prints the fixed reason; its own
+# trap stays as it was. The check returns within the grace after the
+# SIGINT, plus 1 s for the processes of the test.
+@test "rbac: a Ctrl-C in a read stops its process group and removes the temp dir" {
+  _hang_case "int 30 crb-narrowed.json" "  ! RBAC migration leftovers not checked: kubectl failed or did not return a valid list"
   _caller() {
     trap ': the caller' INT
     doctor::_rbac_check rbac.example
     trap -p INT
   }
-  PATH="${1}" run _caller
+  run _caller
   assert_success
   assert_output "$(cat "${CASE}/want")"$'\n'"trap -- ': the caller' SIGINT"
   _assert_no_temp_dir
-  [[ ! -e "${PS_RAN}" ]] || fail "ps ran"
-  # The TERM of the trap ends the stand-in at once; allow 2 s for the reap.
-  local pid i
-  pid="$(cat "${STUB_PID}")"
-  for (( i = 0; i < 20; i++ )); do
-    kill -0 "${pid}" 2>/dev/null || return 0
-    sleep 0.1
-  done
-  fail "the read still runs (pid ${pid})"
-}
-
-@test "rbac: a Ctrl-C in a read removes the temp dir and stops the read (timeout)" {
-  command -v timeout >/dev/null 2>&1 || skip "no timeout(1)"
-  _ctrl_c "${PATH}" 2
-}
-
-@test "rbac: a Ctrl-C in a read removes the temp dir and stops the read (no timeout)" {
-  _ctrl_c "$(_path_without timeout)" 1
+  _assert_tree_gone "${INT_SENT}" 3000
 }
 
 # Every case directory has a @test above, and the Go twin reads the same

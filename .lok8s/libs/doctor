@@ -145,7 +145,9 @@ doctor::_info() { if doctor::_color; then printf '  \033[2mℹ %s\033[0m\n' "${1
 # file that the entrypoint exports as KUBECONFIG). It makes two reads, each
 # with --request-timeout=10s and a bound of 30 s (doctor::_rbac_bound). A
 # read runs the credential plugin of that kubeconfig, which can ask for a
-# login. A failed read is a warning with a fixed reason per class. kubectl's
+# login. Each read runs as its own process group: the bound and a Ctrl-C
+# stop the whole group (TERM, then KILL after 2 s), so the children of a
+# credential plugin stop too, and the check waits for them. A failed read is a warning with a fixed reason per class. kubectl's
 # stderr can name the server and the user, so the check never prints it. A
 # binding counts when it gives the role to the account in any form: the
 # ServiceAccount, the User name of its token, or a group of the token. A
@@ -289,10 +291,23 @@ doctor::_rbac_fetch_in() {
 }
 
 # doctor::_rbac_cleanup — the EXIT and INT action of doctor::_rbac_fetch:
-# stop a read and its watchdog that still run, and remove the temp dir.
+# stop the process group of a read that still runs (doctor::_rbac_stop, as a
+# job, so that this shell reaps the read meanwhile), wait for the read and
+# the stop, stop the watchdog, and then remove the temp dir.
 doctor::_rbac_cleanup() {
-  [[ -z "${_rbac_pid}" ]] || kill -TERM "${_rbac_pid}" 2>/dev/null || true
-  [[ -z "${_rbac_dog}" ]] || kill -TERM "${_rbac_dog}" 2>/dev/null || true
+  local stop=""
+  if [[ -n "${_rbac_pid}" ]]; then
+    doctor::_rbac_stop "${_rbac_pid}" < /dev/null > /dev/null 2>&1 &
+    stop=$!
+    wait "${_rbac_pid}" 2>/dev/null || true
+    wait "${stop}" 2>/dev/null || true
+    _rbac_pid=""
+  fi
+  if [[ -n "${_rbac_dog}" ]]; then
+    kill -TERM "${_rbac_dog}" 2>/dev/null || true
+    wait "${_rbac_dog}" 2>/dev/null || true
+    _rbac_dog=""
+  fi
   if [[ -n "${_rbac_tmp}" ]]; then
     rm -f -- "${_rbac_tmp}/crb.json" "${_rbac_tmp}/cr.json" "${_rbac_tmp}/err" "${_rbac_tmp}/stopped"
     rmdir -- "${_rbac_tmp}" 2>/dev/null || true
@@ -350,30 +365,32 @@ doctor::_rbac_shape() {
 # doctor::_rbac_run <out file> <err file> <command...>
 # Runs the command with stdin /dev/null, stdout to <out file> and stderr to
 # <err file>, and stops it after doctor::_rbac_bound seconds (Go: the
-# context of rbacRead): with timeout(1) when PATH has it, else with
-# doctor::_rbac_watchdog. The command runs as a background job, so that the
-# INT trap of doctor::_rbac_fetch runs at once. Sets _rbac_rc to its exit
-# code and _rbac_stopped to 1 when the bound stopped it.
+# context of rbacRead) with doctor::_rbac_watchdog. The command runs as a
+# background job, so that the INT trap of doctor::_rbac_fetch runs at once,
+# and as its own process group (set -m: its pgid is its pid), so that a
+# stop also reaches the children of a credential plugin. That group is not
+# the foreground group of the terminal: a Ctrl-C reaches this shell, whose
+# INT trap stops the group. The check does not use timeout(1): BusyBox
+# timeout signals only the one process, and macOS has no timeout(1). Sets
+# _rbac_rc to the exit code and _rbac_stopped to 1 when the bound stopped
+# the command.
 doctor::_rbac_run() {
   local out="${1}" err="${2}" bound
   shift 2
   bound="$(doctor::_rbac_bound)"
   _rbac_rc=0 _rbac_stopped=0
-  if command -v timeout >/dev/null 2>&1; then
-    timeout -k 2 "${bound}" "$@" < /dev/null > "${out}" 2> "${err}" &
-    _rbac_pid=$!
-    wait "${_rbac_pid}" || _rbac_rc=$?
-    _rbac_pid=""
-    # timeout(1) exits 124 after its TERM, and 137 after the KILL of -k.
-    if (( _rbac_rc == 124 || _rbac_rc == 137 )); then _rbac_stopped=1; fi
-    return 0
-  fi
+  set -m
   "$@" < /dev/null > "${out}" 2> "${err}" &
   _rbac_pid=$!
+  set +m
   doctor::_rbac_watchdog "${bound}" "${_rbac_pid}" "${_rbac_tmp}/stopped" < /dev/null > /dev/null 2>&1 &
   _rbac_dog=$!
-  wait "${_rbac_pid}" || _rbac_rc=$?
+  # 2>/dev/null: bash reports a job that a KILL ended on stderr, with the
+  # text of the command.
+  wait "${_rbac_pid}" 2>/dev/null || _rbac_rc=$?
   _rbac_pid=""
+  # After the bound the watchdog ignores TERM: the wait then lasts until
+  # the group is gone (at most the grace of doctor::_rbac_stop).
   kill -TERM "${_rbac_dog}" 2>/dev/null || true
   wait "${_rbac_dog}" 2>/dev/null || true
   _rbac_dog=""
@@ -384,22 +401,44 @@ doctor::_rbac_run() {
   return 0
 }
 
-# doctor::_rbac_watchdog <seconds> <pid> <mark file>
-# The bound without timeout(1), as a background job: after <seconds> it
-# creates <mark file> and sends TERM to <pid>, and KILL 2 s later (Go: the
-# interrupt of the context, then the WaitDelay). A TERM to the watchdog
-# ends it and its sleep.
+# doctor::_rbac_watchdog <seconds> <pgid> <mark file>
+# The bound, as a background job: after <seconds> it creates <mark file> and
+# stops the process group <pgid> (doctor::_rbac_stop; Go: the interrupt of
+# the context, then the WaitDelay). A TERM before the bound ends it and its
+# sleep. After the bound it ignores TERM, so that the stop always gets to
+# its KILL.
 doctor::_rbac_watchdog() {
   local s=""
   trap '[[ -z "${s}" ]] || kill -TERM "${s}" 2>/dev/null; exit 0' TERM
   sleep "${1}" & s=$!
   wait "${s}" || exit 0
+  trap '' TERM
   : > "${3}"
-  kill -TERM "${2}" 2>/dev/null || exit 0
-  sleep 2 & s=$!
-  wait "${s}" || exit 0
-  s=""
-  kill -KILL "${2}" 2>/dev/null || true
+  doctor::_rbac_stop "${2}"
+}
+
+# doctor::_rbac_stop <pgid> — stop the process group <pgid>: TERM (and CONT,
+# so that a stopped member gets the TERM), then up to 2 s (the grace; Go:
+# rbacReadGrace) for the group to end, then KILL. It runs as a process of
+# its own (the watchdog, or a job of doctor::_rbac_cleanup), so that the
+# shell of the read reaps the read meanwhile: a zombie still counts as a
+# member of the group. Without that group (set -m did not make it), each
+# signal goes to the process <pgid> itself.
+doctor::_rbac_stop() {
+  local i
+  doctor::_rbac_signal TERM "${1}" || return 0
+  doctor::_rbac_signal CONT "${1}" || true
+  for (( i = 0; i < 20; i++ )); do
+    doctor::_rbac_signal 0 "${1}" || return 0
+    sleep 0.1
+  done
+  doctor::_rbac_signal KILL "${1}" || true
+}
+
+# doctor::_rbac_signal <signal> <pgid> — send the signal to the process group
+# <pgid>, else to the process <pgid>. Fails when neither exists.
+doctor::_rbac_signal() {
+  kill "-${1}" -- "-${2}" 2>/dev/null || kill "-${1}" "${2}" 2>/dev/null
 }
 
 # doctor::_rbac_reason <stderr> — the fixed reason of a failed read (Go:

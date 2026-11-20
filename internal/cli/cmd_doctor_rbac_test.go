@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -253,6 +254,45 @@ func TestDoctorRBACReadBoundStopsAHungRead(t *testing.T) {
 	}
 	if r.calls != 1 {
 		t.Errorf("reads after a hung read: %d, want 1", r.calls)
+	}
+}
+
+// The bound with the real runner (execx.NewRunner) and a real process: a
+// kubectl that ignores the interrupt of the cancel (and TERM) ends with the
+// KILL after the grace (rbacReadGrace), and the check prints its fixed
+// reason. The runner signals the kubectl process only, not its process
+// group: a child of a credential plugin can outlive the bound (the bash
+// twin stops the group).
+func TestDoctorRBACReadBoundStopsARealKubectl(t *testing.T) {
+	p, bin, _ := rbacCase(t, "narrowed")
+	defer func(d time.Duration) { rbacReadBound = d }(rbacReadBound)
+	rbacReadBound = 500 * time.Millisecond
+	pidFile := filepath.Join(t.TempDir(), "kubectl.pid")
+	testutil.WriteFile(t, filepath.Join(bin, "kubectl"), "#!/bin/sh\ntrap '' INT TERM\necho $$ > '"+pidFile+"'\nexec sleep 30\n")
+	var out strings.Builder
+	start := time.Now()
+	doctorRBACLeftovers(context.Background(), execx.NewRunner(p), p, rbacTestDomain, bin, bootstrapEntries(p), &out)
+	took := time.Since(start)
+	want := "  ! RBAC migration leftovers not checked: " + rbacReasonNoAnswer + "\n"
+	if got := out.String(); got != want {
+		t.Errorf("a kubectl that ignores the interrupt: %q, want %q", got, want)
+	}
+	if limit := rbacReadBound + rbacReadGrace + time.Second; took >= limit {
+		t.Errorf("the check took %s, want less than %s", took, limit)
+	}
+	if took < rbacReadBound+rbacReadGrace {
+		t.Errorf("the check took %s: the kubectl ended before the KILL of the grace", took)
+	}
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("the kubectl did not start: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Errorf("the kubectl (pid %d) still exists after the check: %v", pid, err)
 	}
 }
 

@@ -87,9 +87,12 @@ const (
 // rbacReadTimeout is the --request-timeout of each read. rbacReadBound
 // stops a kubectl that does not end after it (an exec credential plugin
 // that waits for a login): the reads are a diagnosis, never a hang. The
-// bash twin uses the same 30 s (doctor::_rbac_bound). rbacReadBound is a
-// variable so that a test can make it short; rbacReasonNoAnswer names the
-// 30 s as a fixed text.
+// runner (execx) then interrupts the kubectl process, and kills it after
+// rbacReadGrace. It signals that process only: a child of a credential
+// plugin can outlive the bound. The bash twin uses the same 30 s and 2 s
+// (doctor::_rbac_bound, doctor::_rbac_stop) on the process group of the
+// read. rbacReadBound is a variable so that a test can make it short;
+// rbacReasonNoAnswer names the 30 s as a fixed text.
 const (
 	rbacReadTimeout = "10s"
 	rbacReadGrace   = 2 * time.Second
