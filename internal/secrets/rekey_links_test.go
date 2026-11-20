@@ -561,10 +561,68 @@ func TestKeyCommandsEditTheTargetOfASymlinkedSopsConfig(t *testing.T) {
 			if info.Mode().Perm() != 0o640 {
 				t.Errorf("the mode of the target was not kept: %v", info.Mode().Perm())
 			}
-			if entries, _ := os.ReadDir(filepath.Dir(conf)); len(entries) != 1 {
-				t.Errorf("a temp file was left: %d entries", len(entries))
+			// No temp file is left, and the lock is beside the target.
+			var names []string
+			entries, _ := os.ReadDir(filepath.Dir(conf))
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			if strings.Join(names, " ") != "sops.yaml sops.yaml.lock" {
+				t.Errorf("the dir of the target holds %q, want the file and its lock", names)
+			}
+			if _, err := os.Lstat(f.c.sopsConfigPath() + ".lock"); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("a lock beside the link: %v", err)
 			}
 			f.rekeyed("app", "v")
+		})
+	}
+}
+
+// Two .sops.yaml links that name one file take one lock, beside that file:
+// while a run through one link holds it, a run through the other is refused
+// and changes nothing, and no lock is made beside a link.
+func TestKeyCommandsTakeOneLockForTwoLinksToOneSopsConfig(t *testing.T) {
+	for _, cmd := range []string{"add-key", "remove-key"} {
+		t.Run(cmd, func(t *testing.T) {
+			f := newLinkFixture(t, cmd)
+			conf := filepath.Join(t.TempDir(), "sops.yaml")
+			if err := os.Rename(f.c.sopsConfigPath(), conf); err != nil {
+				t.Fatal(err)
+			}
+			other := *f.c
+			paths := *f.c.Paths
+			paths.Base = t.TempDir()
+			other.Paths = &paths
+			for _, c := range []*Context{f.c, &other} {
+				if err := os.Symlink(conf, c.sopsConfigPath()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv(lockWaitEnv, "0")
+			unlock, err := other.lockSopsConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer unlock()
+			target, err := filepath.EvalSymlinks(conf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := fileStates(t, f.c.Paths.Base, other.Paths.Base, filepath.Dir(conf))
+
+			if err := f.run(); !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
+			}
+			want := "[error] " + target + ".lock is held by another lo secrets add-key or remove-key — nothing was changed; run it again when that one ends\n"
+			if f.errOut.String() != want || f.out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
+			}
+			sameStates(t, before, fileStates(t, f.c.Paths.Base, other.Paths.Base, filepath.Dir(conf)))
+			for _, c := range []*Context{f.c, &other} {
+				if _, err := os.Lstat(c.sopsConfigPath() + ".lock"); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("a lock beside the link %s: %v", c.sopsConfigPath(), err)
+				}
+			}
 		})
 	}
 }

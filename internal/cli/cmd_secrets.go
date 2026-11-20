@@ -286,7 +286,8 @@ Before the first write, the command refuses:
     and the re-key encrypts the twin.
 
 The command holds the lock .sops.yaml.lock for the whole run, and waits for
-it LO_SECRETS_LOCK_WAIT seconds (60 by default). If the re-key stops after
+it LO_SECRETS_LOCK_WAIT seconds (60 by default). When .sops.yaml is a
+symlink, the lock is next to the file that it names. If the re-key stops after
 the .sops.yaml write, run the same command again to resume it. At the end
 it prints the number of creation rules that changed, of .enc files whose
 labels listed the recipient, and of .enc files that it re-keyed. Commit the

@@ -306,8 +306,10 @@ the end the command prints the number of creation rules that changed, of
 re-keyed. Commit the `.enc` files together with `.sops.yaml`.
 
 `add-key` and `remove-key` hold a lock on `.sops.yaml.lock`, next to
-`.sops.yaml`, for the whole run, so that two runs do not undo each other. A
-second run waits `LO_SECRETS_LOCK_WAIT` seconds (60 by default), then stops
+`.sops.yaml`, for the whole run, so that two runs do not undo each other.
+When `.sops.yaml` is a symlink, the lock is next to the file that it names,
+so two links to one file use one lock. A second run waits
+`LO_SECRETS_LOCK_WAIT` seconds (60 by default), then stops
 and changes nothing. The lock file holds no data. The `lo` binary locks on
 every platform. The bash implementation locks with `flock`: without it (macOS
 has none by default), both commands stop before they change a file. Both

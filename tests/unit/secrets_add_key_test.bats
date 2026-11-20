@@ -523,5 +523,7 @@ _ls_then_missing() {
   [ "$(readlink "${PATH_BASE}/.sops.yaml")" = "${conf}" ]
   cmp "${conf}" "${want}" || { cat "${conf}" >&2; return 1; }
   [ "$(stat -c %a "${conf}")" = 640 ] || { echo "mode $(stat -c %a "${conf}")" >&2; return 1; }
-  [ "$(ls -A "${conf%/*}")" = sops.yaml ] || { echo "a temp file was left: $(ls -A "${conf%/*}")" >&2; return 1; }
+  # No temp file is left, and the lock is beside the target, not the link.
+  [ "$(ls -A "${conf%/*}")" = $'sops.yaml\nsops.yaml.lock' ] || { echo "the dir of the target: $(ls -A "${conf%/*}")" >&2; return 1; }
+  [ ! -e "${PATH_BASE}/.sops.yaml.lock" ] || { echo "a lock beside the link" >&2; return 1; }
 }

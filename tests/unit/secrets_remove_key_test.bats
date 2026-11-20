@@ -720,7 +720,9 @@ a.dev/secrets/Secret.db.default.K" ] || { echo "encrypted: $(cat "${ENCRYPT_LOG}
   [ "$(readlink "${CFG}")" = "${conf}" ]
   cmp "${conf}" "${want}" || { cat "${conf}" >&2; return 1; }
   [ "$(stat -c %a "${conf}")" = 640 ] || { echo "mode $(stat -c %a "${conf}")" >&2; return 1; }
-  [ "$(ls -A "${conf%/*}")" = sops.yaml ] || { echo "a temp file was left: $(ls -A "${conf%/*}")" >&2; return 1; }
+  # No temp file is left, and the lock is beside the target, not the link.
+  [ "$(ls -A "${conf%/*}")" = $'sops.yaml\nsops.yaml.lock' ] || { echo "the dir of the target: $(ls -A "${conf%/*}")" >&2; return 1; }
+  [ ! -e "${CFG}.lock" ] || { echo "a lock beside the link" >&2; return 1; }
 }
 
 @test "with --all, a domain directory it cannot search is refused before any write" {
@@ -1639,6 +1641,30 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
     echo "$output" >&2; return 1; }
   [ "$(cat "${CFG}")" = "${before}" ]
   [ ! -s "${ENCRYPT_LOG}" ]
+}
+
+@test "two .sops.yaml links that name one file take one lock, beside that file" {
+  # A run through the other link holds the lock (in this shell); remove-key
+  # through the first link is refused and changes nothing (Go twin:
+  # TestKeyCommandsTakeOneLockForTwoLinksToOneSopsConfig).
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  local conf="${BATS_TEST_TMPDIR}/conf/sops.yaml" other="${BATS_TEST_TMPDIR}/other" before
+  mkdir -p "${conf%/*}" "${other}"
+  mv -- "${CFG}" "${conf}"
+  ln -s "${conf}" "${CFG}"
+  ln -s "${conf}" "${other}/.sops.yaml"
+  before="$(cat "${conf}")"
+  LO_SECRETS_LOCK_WAIT=0 secrets::_lock "${other}/.sops.yaml"
+  LO_SECRETS_LOCK_WAIT=0 DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] $(readlink -f -- "${conf}").lock is held by another lo secrets add-key or remove-key — nothing was changed; run it again when that one ends" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(cat "${conf}")" = "${before}" ]
+  [ ! -s "${ENCRYPT_LOG}" ]
+  [ ! -e "${CFG}.lock" ] && [ ! -e "${other}/.sops.yaml.lock" ] || { echo "a lock beside a link" >&2; return 1; }
 }
 
 @test ".sops.yaml is replaced, not rewritten in place, and keeps its mode" {
