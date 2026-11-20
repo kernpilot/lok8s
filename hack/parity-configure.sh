@@ -560,6 +560,23 @@ check PATH_SECRETS doctor                   # active alpha.dev (kind lo)
 check PATH_SECRETS doctor --domain gamma.app           # Deploy -> alpha.dev
 check PATH_SECRETS doctor --domain nowhere.dev         # active domain has no spec
 check PATH_SECRETS doctor --domain prov.dev            # provider / infrastructure section (hetzner, offline)
+# sso.dev — sso-gate in spec.bootstrap and no .kubeconfig/sso.yaml: the
+# SecurityPolicy CRD check prints its skip line before any kubectl read, so
+# no cluster is reached. The domain is made here, after the earlier cases.
+mkdir -p "${CL}/sso.dev"
+cat > "${CL}/sso.dev/cluster.lok8s.yaml" <<'EOF'
+kind: KubeOne
+apiVersion: lok8s.dev/v1
+metadata:
+  name: sso
+spec:
+  bootstrap:
+    - cilium
+    - envoy-gateway
+    - sso-gate
+EOF
+[[ ! -e "${PROJ}/.kubeconfig/sso.yaml" ]] || fail "doctor: the sso.dev case needs no kubeconfig"
+check PATH_SECRETS doctor --domain sso.dev             # sso-gate: the CRD check skips without a kubeconfig
 parity::select "${PROJ}" go
 if (cd "${PROJ}" && "${LO_BIN}" doctor </dev/null 2>/dev/null || true) | grep -q 'PATH_SECRETS unset (per-domain stores; the flat store is retired)'; then
   echo "ok: doctor: the binary reports PATH_SECRETS unset"

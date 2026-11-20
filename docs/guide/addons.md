@@ -810,7 +810,23 @@ Three consequences:
   apply (`kubectl apply --server-side`, and every GitOps controller) with
   `.spec.mergeType: field not declared in schema`, while a client-side
   apply drops the field **silently** and leaves you with the replace
-  behaviour. Check the CRD before you trust the field:
+  behaviour. Check the CRD before you trust the field. When
+  `spec.bootstrap` has `sso-gate`, `lo doctor` does this check for you.
+  It reads the CRD from the domain's cluster (one GET request) and
+  prints one line at the end of the domain section:
+
+  ```console
+  $ lo doctor --domain <domain>
+    ✓ sso-gate: the SecurityPolicy CRD declares spec.mergeType
+  ```
+
+  A `✗` line says that envoy-gateway is older than v1.8.0: upgrade it
+  first, then reconcile `sso-gate`. The line is advisory: it does not
+  change the exit code of `lo doctor`, so a script must read the line,
+  not the exit code. A `!` or `ℹ` line gives the reason when the check
+  did not run (for example: no kubeconfig, no kubectl, no CRD, or no
+  answer in 30 s). In that case, or without `lo doctor`, do the same
+  check by hand:
 
   ```console
   $ JP='{.spec.versions[?(@.name=="v1alpha1")]'
@@ -819,9 +835,8 @@ Three consequences:
   string     # empty output = your Envoy Gateway is too old
   ```
 
-  (Select the version by name, not by `versions[0]`: the order of that
-  list is not a contract. Running this for you from `lo doctor` is
-  [kernpilot/lok8s#141](https://github.com/kernpilot/lok8s/issues/141).)
+  (Both select the version by name, not by `versions[0]`: the order of
+  that list is not a contract.)
 
 - **Upgrade Envoy Gateway before the policy reconciles.** Under `lo up`
   that ordering comes free from `dependsOn: [envoy-gateway]`, and a

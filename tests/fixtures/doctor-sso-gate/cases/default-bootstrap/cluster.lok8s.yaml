@@ -1,0 +1,7 @@
+apiVersion: lok8s.dev/v1
+kind: KubeOne
+metadata:
+  name: sso-test
+spec:
+  provider:
+    name: hcloud

@@ -252,27 +252,12 @@ func doctorRBACLeftovers(ctx context.Context, r execx.Runner, paths *config.Path
 // handled the SIGTERM and exited 0. The whole output is in memory only
 // for the decode; items keeps only what parse returns.
 func rbacRead[T any](ctx context.Context, r execx.Runner, kubectl, kubeconfig, resource string, extra []string, parse func(map[string]any) (T, bool), items *[]T) string {
-	ctx, cancel := context.WithTimeout(ctx, rbacReadBound)
-	defer cancel()
-	var stdout, stderr bytes.Buffer
-	args := append([]string{"--kubeconfig", kubeconfig, "get", resource}, extra...)
-	err := r.Run(ctx, execx.Cmd{
-		Name:         kubectl,
-		Args:         append(args, "-o", "json", "--request-timeout="+rbacReadTimeout),
-		Stdin:        strings.NewReader(""),
-		Stdout:       &stdout,
-		Stderr:       &stderr,
-		WaitDelay:    rbacReadGrace,
-		ProcessGroup: true,
-	})
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return rbacReasonNoAnswer
-	}
-	if err != nil {
-		return rbacReadReason(stderr.String())
+	data, reason := rbacGet(ctx, r, kubectl, kubeconfig, append([]string{"get", resource}, extra...))
+	if reason != "" {
+		return reason
 	}
 	var doc any
-	if json.Unmarshal(stdout.Bytes(), &doc) != nil {
+	if json.Unmarshal(data, &doc) != nil {
 		return rbacReasonOther
 	}
 	top, _ := doc.(map[string]any)
@@ -301,6 +286,35 @@ func rbacRead[T any](ctx context.Context, r execx.Runner, kubectl, kubeconfig, r
 	}
 	*items = out
 	return ""
+}
+
+// rbacGet runs one `kubectl --kubeconfig <kubeconfig> <args...> -o json
+// --request-timeout=10s` with the bound of a read (rbacReadBound), its own
+// process group and the grace (rbacReadGrace). It returns the stdout and "",
+// or nil and the fixed reason of the failure (rbacReadReason). The stderr
+// goes into a buffer for the class and nowhere else. rbacRead and the
+// sso-gate check (cmd_doctor_ssogate.go) use it (bash: doctor::_rbac_get).
+func rbacGet(ctx context.Context, r execx.Runner, kubectl, kubeconfig string, args []string) ([]byte, string) {
+	ctx, cancel := context.WithTimeout(ctx, rbacReadBound)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	full := append([]string{"--kubeconfig", kubeconfig}, args...)
+	err := r.Run(ctx, execx.Cmd{
+		Name:         kubectl,
+		Args:         append(full, "-o", "json", "--request-timeout="+rbacReadTimeout),
+		Stdin:        strings.NewReader(""),
+		Stdout:       &stdout,
+		Stderr:       &stderr,
+		WaitDelay:    rbacReadGrace,
+		ProcessGroup: true,
+	})
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return nil, rbacReasonNoAnswer
+	}
+	if err != nil {
+		return nil, rbacReadReason(stderr.String())
+	}
+	return stdout.Bytes(), ""
 }
 
 // The shape that both twins read (bash: doctor::_rbac_shape). A field may
