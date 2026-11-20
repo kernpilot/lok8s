@@ -136,6 +136,11 @@ missing member, dry run, darwin, plain-http refusal), `b install` through the
 `execx.Runner` seam, doctor through a `Probe` seam over placeholder
 executables. Nothing reaches the network. The pin-drift test reads the
 repo's `go.mod` — mutation-check it by editing a version there.
+The khelm and helm pin tests also read the khelm of `.bin/b.lock` and
+`mise.toml`, the `HELM_VERSION` of `.github/workflows/ci.yml` and the helm
+that the bash chart gate names (`libs/addons`, both trees), and
+`TestPinSourcesFailWithoutThePin` proves that each reader fails on its file
+without the pin: `go test ./internal/toolchain/ -run 'Pin'`.
 
 Two Go modules ship alongside the root module and have their own tests:
 
