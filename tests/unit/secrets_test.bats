@@ -292,6 +292,48 @@ _gitignore_refused() { # <link|dir>
   [ "${output##*$'\n'}" = "[error] Failed to encrypt Secret.app.default.K" ] || { echo "$output" >&2; return 1; }
 }
 
+# An .enc that is older than its plaintext, with a plaintext that is not
+# after now, is no time in the future: the clock that stamps a write can be
+# behind the time of the system, so an .enc written after its plaintext can
+# get the older time. The encrypt prints no warning (Go twin:
+# TestNudgeNewerWarnsOnlyForATimeAfterNow). The sops function dates the .enc
+# one second before the plaintext, and the plaintext is one minute old: the
+# test sets each time, so the result does not depend on the clock.
+@test "secrets encrypt: an .enc older than a plaintext that is not after now gets no warning" {
+  sops() {
+    [ "${8}" = --output ] || return 1
+    printf 'enc' > "${9}" && touch -r "${10}" -d '-1 second' -- "${9}"
+  }
+  printf 'creation_rules: []\n' > "${PATH_BASE}/.sops.yaml"
+  local plain="${PATH_SECRETS}/Secret.app.default.K"
+  printf 'v' > "${plain}"
+  touch -d '-1 minute' -- "${plain}"
+  run secrets::_encrypt_file "${plain}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [[ "${output}" != *'[warn]'* ]] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${plain}.enc")" = enc ]
+  [[ "${plain}" -nt "${plain}.enc" ]] || { echo "fixture: the .enc is not the older file" >&2; return 1; }
+  [ -z "$(find "${PATH_SECRETS}" -name '.*.now-*')" ] || { echo "a temp file of the time check stayed" >&2; return 1; }
+}
+
+# A plaintext dated after now gets the warning, and the encrypt ends with
+# status 0 (Go twin: TestNudgeNewerWarnsOnlyForATimeAfterNow).
+@test "secrets encrypt: a plaintext dated after now gets the future-time warning" {
+  sops() {
+    [ "${8}" = --output ] || return 1
+    printf 'enc' > "${9}"
+  }
+  printf 'creation_rules: []\n' > "${PATH_BASE}/.sops.yaml"
+  local plain="${PATH_SECRETS}/Secret.app.default.K" line
+  line="[warn] .secrets/Secret.app.default.K has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again — set the time of the plaintext to now (touch it)"
+  printf 'v' > "${plain}"
+  touch -d '+1 hour' -- "${plain}"
+  run secrets::_encrypt_file "${plain}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "${output}" = "${line}" ] || { echo "$output" >&2; return 1; }
+  [ -z "$(find "${PATH_SECRETS}" -name '.*.now-*')" ] || { echo "a temp file of the time check stayed" >&2; return 1; }
+}
+
 # init checks the .gitignore of the store before its first write, and a
 # rerun with a config checks it too. Its status is the refusal's: 1, no
 # .sops.yaml, and the file that the link names keeps its bytes (Go twin:

@@ -26,6 +26,7 @@
 package secrets
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -35,6 +36,9 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
+
+	"github.com/kernpilot/lok8s/internal/clock"
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
 	"github.com/kernpilot/lok8s/internal/execx"
@@ -247,17 +251,29 @@ func newerThan(a, b string) bool {
 }
 
 // nudgeNewer makes dst, the file just written from src, strictly newer than
-// src when the two have the same mtime, and never sets a time later than
-// now. The bash implementation gets this ordering for free — spawning the
-// sops binary always lands the output file a clock tick after its input — and
-// the -nt freshness skips depend on it: an in-process encrypt/decrypt can
-// finish within the SAME tick, and an equal mtime reads as "stale", causing
-// pointless .enc/plaintext churn on every subsequent sweep.
+// src when the two have the same mtime. The bash implementation gets this
+// ordering for free — spawning the sops binary always lands the output file
+// a clock tick after its input — and the -nt freshness skips depend on it:
+// an in-process encrypt/decrypt can finish within the SAME tick, and an
+// equal mtime reads as "stale", causing pointless .enc/plaintext churn on
+// every subsequent sweep.
 //
-// It returns false when src is newer than dst: src has a time in the future,
-// and dst keeps the time of its write. A dst dated after src would make a
-// later edit of src (dated now) look older than dst, so encrypt would skip
-// the edit and decrypt could overwrite it.
+// It sets no time from time.Now(). The kernel stamps a write with its own
+// clock, which can be behind time.Now() by up to one tick: a time from
+// time.Now() can be newer than a file that the kernel writes after it. So
+// on an equal time it touches dst with the clock of the kernel (touchNow)
+// until dst is newer than src, one try per millisecond. A later edit of src,
+// stamped by the same clock, is never older than dst. When dst is not newer
+// after stampTries tries (a file system that keeps whole seconds), the
+// times stay equal.
+//
+// It returns false only when src has a time after now (a time in the
+// future): dst keeps the time of its write. A dst dated after src would make
+// a later edit of src (dated now) look older than dst, so encrypt would skip
+// the edit and decrypt could overwrite it. A src that is newer than dst but
+// not after now (a program set its time, or src changed after the write of
+// dst) keeps its time too, with no warning: the next encrypt writes dst
+// again.
 func nudgeNewer(dst, src string) bool {
 	si, err := os.Stat(src)
 	if err != nil {
@@ -267,15 +283,44 @@ func nudgeNewer(dst, src string) bool {
 	if err != nil || di.ModTime().After(si.ModTime()) {
 		return true
 	}
-	if si.ModTime().After(di.ModTime()) {
+	if si.ModTime().After(time.Now()) {
 		return false
 	}
-	t := si.ModTime().Add(time.Microsecond)
-	if now := time.Now(); t.After(now) {
-		t = now
+	if si.ModTime().After(di.ModTime()) {
+		return true
 	}
-	_ = os.Chtimes(dst, t, t)
+	for try := range stampTries {
+		if try > 0 {
+			_ = stampSleep(context.Background(), time.Millisecond)
+		}
+		if stampTouch(dst) != nil {
+			return true
+		}
+		if di, err = os.Stat(dst); err != nil || di.ModTime().After(si.ModTime()) {
+			return true
+		}
+	}
 	return true
+}
+
+// stampTries bounds the tries of nudgeNewer: 50 ms, more than one tick of
+// the clock of the kernel (at most 10 ms).
+const stampTries = 50
+
+// stampTouch and stampSleep are the touch and the wait of each try of
+// nudgeNewer (seams for the tests).
+var (
+	stampTouch                 = touchNow
+	stampSleep clock.SleepFunc = clock.Sleep
+)
+
+// touchNow sets the access and modification times of path to the current
+// time of the kernel (utimensat with no times, as touch(1) does; bash:
+// touch). The kernel stamps a write with the same clock, so a file written
+// after the touch is never older than path. os.Chtimes with time.Now() can
+// set a time that is newer than such a file.
+func touchNow(path string) error {
+	return unix.UtimesNanoAt(unix.AT_FDCWD, path, nil, 0)
 }
 
 // CheckUnencrypted reports plaintext secrets without a fresh .enc twin in dir

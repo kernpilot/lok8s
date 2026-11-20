@@ -20,7 +20,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -302,10 +301,11 @@ func (c *Context) rel(path string) string {
 // to now and returns the count (bash: secrets::_touch_plaintexts). Encrypt
 // skips a file whose .enc is newer, and a recipient change does not touch the
 // plaintext, so without this nudge a re-key re-encrypts nothing: the manual
-// step these commands exist to remove.
+// step these commands exist to remove. The time is the one of the kernel
+// (touchNow, as the touch of the bash twin), not time.Now(): an .enc that
+// the encrypt writes right after is then never older than its plaintext.
 func touchPlaintexts(stores []string) (int, error) {
 	touched := 0
-	now := time.Now()
 	for _, store := range stores {
 		for _, base := range storeEntries(store, "Secret.") {
 			plain := store + "/" + base
@@ -314,7 +314,7 @@ func touchPlaintexts(stores []string) (int, error) {
 			if !fsutil.Exists(plain) || strings.HasSuffix(base, ".enc") {
 				continue
 			}
-			if err := os.Chtimes(plain, now, now); err != nil {
+			if err := touchNow(plain); err != nil {
 				return touched, err
 			}
 			touched++

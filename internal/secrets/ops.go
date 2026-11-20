@@ -417,10 +417,13 @@ func (c *Context) encryptFile(plaintext string) error {
 		ui.ErrorTo(c.ErrOut, "Failed to encrypt %s", filepath.Base(plaintext))
 		return ErrHandled
 	}
-	// No .enc time later than now, on every encrypt (bash: the test after
-	// the rename in secrets::_encrypt_file). A plaintext dated in the future
-	// stays the newer file: each encrypt writes its .enc again, and an edit
-	// of it is not lost.
+	// An .enc with the same time as its plaintext gets a time of the kernel
+	// after it (nudgeNewer). A plaintext dated after now stays the newer
+	// file, with a warning (bash: the test after the rename in
+	// secrets::_encrypt_file): each encrypt writes its .enc again, and an
+	// edit of it is not lost. A plaintext that is newer than its .enc but
+	// not after now gets no warning: the clock of the kernel, which stamps
+	// the .enc, can be behind time.Now().
 	if !nudgeNewer(encPath, plaintext) {
 		ui.WarnTo(c.ErrOut, "%s has a time in the future: its .enc keeps the time of the encrypt, and each encrypt writes it again — set the time of the plaintext to now (touch it)", c.rel(plaintext))
 	}
@@ -669,7 +672,8 @@ func (c *Context) Decrypt(sshKey string) error {
 			return err
 		}
 		// An .enc dated in the future keeps the plaintext the older file,
-		// as in the bash twin, which sets no time.
+		// as in the bash twin, which sets no time. On an equal time the
+		// plaintext gets a time of the kernel after the .enc.
 		_ = nudgeNewer(plaintext, encFile)
 		count++
 	}
