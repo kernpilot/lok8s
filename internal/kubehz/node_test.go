@@ -580,6 +580,20 @@ func waitDone(t *testing.T, ctx context.Context) {
 	}
 }
 
+// waitDropped fails the test when the client does not drop the request r
+// in time. The server ends the context of r when the client closes the
+// connection (the harness reads the body, so the server watches the
+// connection). A handler that answers after this writes into a closed
+// connection, so the client cannot read the answer.
+func waitDropped(t *testing.T, r *http.Request) {
+	t.Helper()
+	select {
+	case <-r.Context().Done():
+	case <-time.After(5 * time.Second):
+		t.Error("the client did not drop the request")
+	}
+}
+
 // mustStopAfterTheMint checks a join that a signal stopped after the mint:
 // the slot note, no failure or success text, and no config left.
 func mustStopAfterTheMint(t *testing.T, h *harness, err error) {
@@ -655,9 +669,27 @@ func TestNodeJoinHangupStopsTheJoin(t *testing.T) {
 			if during == "kubeadm" {
 				stopKubeadm(t, h, hangup)
 			} else {
+				// The join reads a context below the Watch. That context
+				// ends a moment after the Watch, so the write waits for
+				// its end too. The kubelet probe runs with that context.
+				// The probe prints no version, so the mint declares none,
+				// as without a kubelet.
+				var joinCtx context.Context
+				fake := h.runner.handler
+				h.runner.handler = func(c execx.Cmd, stdin string) error {
+					if c.Name == "kubelet" {
+						joinCtx = h.runner.ctx
+					}
+					return fake(c, stdin)
+				}
+				h.ctx.LookPath = func(tool string) bool { return tool == "kubeadm" || tool == "kubelet" }
 				h.ctx.joinWrite = func(f *os.File, s string) error {
+					if joinCtx == nil {
+						t.Fatal("the kubelet probe did not run before the write")
+					}
 					hangup()
 					waitDone(t, ctx)
+					waitDone(t, joinCtx)
 					_, err := f.WriteString(s)
 					return err
 				}
@@ -678,7 +710,10 @@ func TestNodeJoinHangupStopsTheJoin(t *testing.T) {
 // A SIGHUP during the mint request: the hold is in place before the mint,
 // so the SIGHUP ends ctx and the request. The platform may have minted the
 // ticket: the note says so. No kubeadm runs, and the exit code is 129. Not
-// parallel: the signal goes to the test process.
+// parallel: the signal goes to the test process. The stub answers only
+// after the client dropped the request. When ctx ends, the client does not
+// stop at once: an answer that comes before it closes the connection still
+// reaches it, and the join then goes on as after a mint.
 func TestNodeJoinHangupDuringTheMint(t *testing.T) {
 	if signal.Ignored(syscall.SIGHUP) {
 		t.Skip("SIGHUP is ignored here (nohup): the catch does nothing then")
@@ -688,9 +723,10 @@ func TestNodeJoinHangupDuringTheMint(t *testing.T) {
 	defer signal.Stop(keep)
 	h := nodeHarness(t, defaultNodeStubs(), "hosted", "")
 	ctx, exitCode := interrupt.Watch(t.Context())
-	h.handleFunc("POST /api/clusters/cl-1234abcd/nodes/join-token", func(w http.ResponseWriter, _ *http.Request) {
+	h.handleFunc("POST /api/clusters/cl-1234abcd/nodes/join-token", func(w http.ResponseWriter, r *http.Request) {
 		_ = syscall.Kill(os.Getpid(), syscall.SIGHUP)
 		waitDone(t, ctx)
+		waitDropped(t, r)
 		w.WriteHeader(201)
 		_, _ = io.WriteString(w, stubMintBody)
 	})
