@@ -208,7 +208,8 @@ func TestMcpExposureGates(t *testing.T) {
 func TestMcpAllowEnvRaisesTheFlagTier(t *testing.T) {
 	cases := []struct {
 		name    string
-		env     string // "" means LO_MCP_ALLOW is not set
+		env     string
+		unset   bool // LO_MCP_ALLOW is not set; env is ignored
 		args    []string
 		want    []string
 		absent  []string
@@ -219,7 +220,14 @@ func TestMcpAllowEnvRaisesTheFlagTier(t *testing.T) {
 		args: []string{"--allow-mutating"},
 		want: []string{"lo_down", "lo_build"},
 	}, {
-		name:   "no LO_MCP_ALLOW with --allow-mutating refuses a destructive tool",
+		name:   "no LO_MCP_ALLOW with --allow-mutating does not list a destructive tool",
+		unset:  true,
+		args:   []string{"--allow-mutating"},
+		want:   []string{"lo_build"},
+		absent: []string{"lo_down"},
+	}, {
+		name:   "an empty LO_MCP_ALLOW with --allow-mutating acts as unset",
+		env:    "",
 		args:   []string{"--allow-mutating"},
 		want:   []string{"lo_build"},
 		absent: []string{"lo_down"},
@@ -229,6 +237,13 @@ func TestMcpAllowEnvRaisesTheFlagTier(t *testing.T) {
 		args: []string{"--allow-destructive"},
 		want: []string{"lo_down", "lo_build"},
 	}, {
+		// The setup that the kubehz guide recommends for an editor config.
+		name:   "LO_MCP_ALLOW=mutating with no flag lists a mutating tool and does not list a destructive tool",
+		env:    "mutating",
+		args:   []string{}, // not nil: cobra reads os.Args when the args are nil
+		want:   []string{"lo_build"},
+		absent: []string{"lo_down"},
+	}, {
 		name:    "LO_MCP_ALLOW=bogus is an error, also with --allow-mutating",
 		env:     "bogus",
 		args:    []string{"--allow-mutating"},
@@ -237,7 +252,7 @@ func TestMcpAllowEnvRaisesTheFlagTier(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(mcpAllowEnv, tc.env) // restores the outer value after the case
-			if tc.env == "" {
+			if tc.unset {
 				if err := os.Unsetenv(mcpAllowEnv); err != nil {
 					t.Fatal(err)
 				}
@@ -271,14 +286,18 @@ func TestMcpAllowEnvRaisesTheFlagTier(t *testing.T) {
 			if len(names) == 0 {
 				t.Fatalf("lo mcp tools %v printed no tools", tc.args)
 			}
+			env := fmt.Sprintf("LO_MCP_ALLOW=%q", tc.env)
+			if tc.unset {
+				env = "LO_MCP_ALLOW not set"
+			}
 			for _, name := range tc.want {
 				if !names[name] {
-					t.Errorf("LO_MCP_ALLOW=%q, lo mcp tools %v: %s missing", tc.env, tc.args, name)
+					t.Errorf("%s, lo mcp tools %v: %s missing", env, tc.args, name)
 				}
 			}
 			for _, name := range tc.absent {
 				if names[name] {
-					t.Errorf("LO_MCP_ALLOW=%q, lo mcp tools %v: %s exposed", tc.env, tc.args, name)
+					t.Errorf("%s, lo mcp tools %v: %s exposed", env, tc.args, name)
 				}
 			}
 		})
@@ -643,6 +662,12 @@ func TestMcpDefaultEnvCarriesToolchainPathAndBase(t *testing.T) {
 }
 
 func TestMcpCommandTree(t *testing.T) {
+	// The readonly check below needs LO_MCP_ALLOW unset: an exported
+	// LO_MCP_ALLOW=destructive would list lo_up.
+	t.Setenv(mcpAllowEnv, "") // restores the outer value after the test
+	if err := os.Unsetenv(mcpAllowEnv); err != nil {
+		t.Fatal(err)
+	}
 	root := NewRoot(synthProject(t))
 	for _, path := range [][]string{{"mcp"}, {"mcp", "start"}, {"mcp", "serve"}, {"mcp", "tools"}, {"mcp", "claude", "enable"}, {"mcp", "vscode", "enable"}, {"mcp", "cursor", "enable"}} {
 		cmd, _, err := root.Find(path)

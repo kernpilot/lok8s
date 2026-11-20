@@ -89,10 +89,10 @@ type mcpExposure struct {
 
 // resolve folds LO_MCP_ALLOW into the flag state and applies "destructive
 // implies mutating". The environment only adds to the flags: the higher of
-// the two tiers applies, so --allow-mutating with LO_MCP_ALLOW=destructive
-// exposes the destructive commands, and LO_MCP_ALLOW=mutating does not take
-// them away from --allow-destructive. Any other value is an error, also when
-// a flag is set.
+// the two tiers applies. Thus --allow-mutating with LO_MCP_ALLOW=destructive
+// exposes the destructive commands. LO_MCP_ALLOW=mutating does not take them
+// away from --allow-destructive. An empty value acts as unset. Any other
+// value is an error, also when a flag is set.
 func (x *mcpExposure) resolve() error {
 	switch v := os.Getenv(mcpAllowEnv); v {
 	case "":
