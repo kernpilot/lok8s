@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -147,6 +148,9 @@ func TestDoctorKindMinimumRelease(t *testing.T) {
 		{"an empty output warns", "", nil, unknown, true},
 		{"the version must be on the first line", "\nkind v0.32.0 go1.25.5 linux/amd64\n", nil, unknown, true},
 		{"a carriage return ends no field", "kind v0.32.0\r\n", nil, unknown, true},
+		{"a tab separates the fields too", "kind\tv0.17.0\tgo1.19.4 linux/amd64\n", nil, older("v0.17.0"), false},
+		{"leading spaces and tabs are skipped", " \t kind v0.32.0 go1.25.5 linux/amd64\n", nil, pass, true},
+		{"a leading space before an older release", " kind v0.17.0 go1.19.4 linux/amd64\n", nil, older("v0.17.0"), false},
 		{"a failed kind version warns", "kind v0.32.0 go1.25.5 linux/amd64\n", errors.New("exit status 1"), unknown, true},
 	}
 	bin := doctorStubBin(t, "kind")
@@ -162,6 +166,52 @@ func TestDoctorKindMinimumRelease(t *testing.T) {
 				t.Errorf("calls %q, want [%q]", r.calls, want)
 			}
 		})
+	}
+}
+
+// The bash twin keeps its own copy of the minimum (DOCTOR_KIND_MIN in the
+// embedded mirror of .lok8s/libs/doctor). Two hand-kept copies drift; this
+// fails first. The file must set it once: a second assignment would win.
+func TestDoctorKindMinMatchesBash(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(testutil.RepoRoot(t), "internal", "assets", "lok8s", "libs", "doctor"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^DOCTOR_KIND_MIN=(\S+)$`).FindAllSubmatch(src, -1)
+	if len(m) != 1 {
+		t.Fatalf("libs/doctor sets DOCTOR_KIND_MIN %d times, want once", len(m))
+	}
+	if got := string(m[0][1]); got != doctorKindMin {
+		t.Errorf("bash DOCTOR_KIND_MIN %q != Go doctorKindMin %q", got, doctorKindMin)
+	}
+}
+
+// The tools section prints one kind line, the line of doctorKind. kind is
+// also a row of doctorToolsPost (for its purpose): without the skip of
+// that row, the generic doctorTool line follows it. Each state of the line
+// counts: older, the minimum, version unknown and absent.
+func TestDoctorToolsSectionPrintsOneKindLine(t *testing.T) {
+	tools := []string{"argsh", "yq", "kustomize", "kubectl", "envsubst", "docker", "jq"}
+	withKind := doctorStubBin(t, append(tools, "kind")...)
+	withoutKind := doctorStubBin(t, tools...)
+	p := synthProject(t)
+	for _, tc := range []struct{ bin, out string }{
+		{withKind, "kind v0.17.0 go1.19.4 linux/amd64\n"},
+		{withKind, "kind v0.18.0 go1.20.2 linux/amd64\n"},
+		{withKind, "kind vdev\n"},
+		{withoutKind, ""},
+	} {
+		var out strings.Builder
+		doctorToolsSection(context.Background(), kindVersionRunner(tc.out, nil), p, "", tc.bin, &out)
+		n := 0
+		for _, line := range strings.Split(out.String(), "\n") {
+			if f := strings.Fields(line); len(f) > 1 && f[1] == "kind" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("kind version %q: %d kind lines, want 1:\n%s", tc.out, n, out.String())
+		}
 	}
 }
 

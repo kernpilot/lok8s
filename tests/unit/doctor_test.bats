@@ -192,6 +192,12 @@ _kind_unknown() {
   # matched numbers.
   _kind_run 'kind v0.17.0-rc.1+abc go1.19 linux/amd64\n'
   _kind_older v0.17.0
+  # A tab separates the fields too, and a leading space is skipped (the
+  # split of the Go twin).
+  _kind_run 'kind\tv0.17.0\tgo1.19.4 linux/amd64\n'
+  _kind_older v0.17.0
+  _kind_run ' kind v0.17.0 go1.19.4 linux/amd64\n'
+  _kind_older v0.17.0
 }
 
 @test "doctor::_kind passes v0.18.0 and later, also a pre-release of a later release" {
@@ -206,6 +212,9 @@ _kind_unknown() {
   _kind_pass
   # Leading zeros compare as decimal numbers, not as octal.
   _kind_run 'kind v0.018.0 go1.20 linux/amd64\n'
+  _kind_pass
+  # Leading spaces and tabs are skipped.
+  _kind_run ' \t kind v0.32.0 go1.25.5 linux/amd64\n'
   _kind_pass
 }
 
