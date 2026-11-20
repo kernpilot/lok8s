@@ -57,6 +57,18 @@ KUBEHZ_HANDOVER_BUNDLE_KEYS=(
 KUBEHZ_HANDOVER_OPTIONAL_KEYS=(
   encryption-provider encryption-key-name etcd-version
 )
+# The dirs on the path of the pki dir on the node, from the top, that
+# preseed's stage call checks before it makes a staging file. The owner of
+# such a dir (or a user who can write it) could rename or replace a dir
+# below it, or put a link at a staging name between the mktemp and the scp,
+# and scp would write the key through it. So each one must be a dir, not a
+# link, with no write bit for the group or others. Root must own the dirs in
+# KUBEHZ_HANDOVER_ROOT_DIRS, and root or the ssh user the others. The check
+# trusts the mounts that root made: it does not read the type of a file
+# system.
+KUBEHZ_HANDOVER_TRUSTED_DIRS=(/ /etc /etc/kubernetes /etc/kubernetes/pki)
+# The trusted dirs that only root may own.
+KUBEHZ_HANDOVER_ROOT_DIRS=(/ /etc)
 
 kubehz::handover() {
   local -a usage=(
@@ -125,13 +137,14 @@ handover::cleanup_cmd() {
 # bytes never land in a file with a wider mode, and an existing dst (a run
 # with --force) is replaced: its own mode, a link there or a second name of
 # it does not get the bytes. A dir at dst fails. On a failure the new file
-# goes, and dst is as it was.
+# goes, and dst is as it was. A new file that cannot go is named: it can
+# hold key bytes.
 handover::install_file() {
   local dst="${1}" mode="${2}" tmp
   [[ ! -d "${dst}" ]] || return 1
   tmp="$(umask 077 && mktemp "${dst%/*}/.${dst##*/}.XXXXXXXXXX" 2>/dev/null)" || return 1
   if ! cat > "${tmp}" || ! chmod "${mode}" "${tmp}" 2>/dev/null || ! mv -f -- "${tmp}" "${dst}"; then
-    rm -f -- "${tmp}"
+    rm -f -- "${tmp}" || error "handover: could not remove ${tmp}, which can hold key bytes. Delete it yourself."
     return 1
   fi
 }
@@ -871,11 +884,16 @@ handover::preseed() {
   )
   :args "Pre-seed exported PKI onto a kubeone node before kubeone apply" "${@}"
 
-  # ssh reads the value of `-o UserKnownHostsFile=<path>` as a list of files
-  # separated by whitespace. A path with a space becomes two known_hosts
-  # files, and neither is the file the caller named.
-  if [[ "${known_hosts}" == *[[:space:]]* ]]; then
-    error "handover: --known-hosts path must not contain whitespace: \"${known_hosts}\""
+  # ssh reads the value of `-o UserKnownHostsFile=<path>` in its config
+  # language: it expands % tokens, ${VAR} and ~, it splits the value at
+  # whitespace, and quotes and backslashes change the split. The file checks
+  # here and ssh-keygen -f read the path as it is. So a path with such a
+  # byte is refused before any ssh call. A relative path is made absolute
+  # first (the working dir as it is, no link resolved), so the check reads
+  # the path that ssh gets.
+  [[ -z "${known_hosts}" || "${known_hosts}" == /* ]] || known_hosts="${PWD}/${known_hosts}"
+  if handover::ssh_path_unsafe "${known_hosts}"; then
+    error "handover: --known-hosts path must not hold %, \$, ~, \", ', \\, whitespace or a control byte, because ssh expands %, \$ and ~ in it and splits it at whitespace, quotes and backslashes: $(handover::quote "${known_hosts}" 0)"
     return 1
   fi
   # A missing path, /dev/null, a dir, a FIFO or a device holds no key to
@@ -905,15 +923,24 @@ handover::preseed() {
   # (the mkdir, which sends no key) takes an unknown key and records it
   # (accept-new). The handover then checks that the key is in the known_hosts
   # file, and every later call uses yes. Never StrictHostKeyChecking=no or
-  # /dev/null here. The kubeone driver's node probes carry no secret and keep
-  # their own options.
+  # UserKnownHostsFile=/dev/null here. The kubeone driver's node probes carry
+  # no secret and keep their own options.
+  # With --known-hosts, GlobalKnownHostsFile=/dev/null makes that file the
+  # only known_hosts file: a key in the system files (/etc/ssh/
+  # ssh_known_hosts) is then no trust source.
   # ControlMaster=no and ControlPath=none: a master connection that the
   # user's ssh config opens or shares (ControlMaster, ControlPath) would
   # carry these calls without a new host key check. ssh takes the first
   # value it gets for an option, so these win over the config.
+  # NoHostAuthenticationForLocalhost=no: with yes, ssh skips the host key
+  # check for a loopback address (a node behind a forwarded port), also with
+  # StrictHostKeyChecking=yes. VerifyHostKeyDNS=no: with yes, ssh takes a key
+  # from a DNS SSHFP record that is in no known_hosts file. UpdateHostKeys=no:
+  # the node cannot add or remove keys in the known_hosts file.
   local -a ssh_opts=(-o IdentitiesOnly=yes -o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=10
-    -o ControlMaster=no -o ControlPath=none)
-  [[ -z "${known_hosts}" ]] || ssh_opts+=(-o "UserKnownHostsFile=${known_hosts}")
+    -o ControlMaster=no -o ControlPath=none
+    -o NoHostAuthenticationForLocalhost=no -o VerifyHostKeyDNS=no -o UpdateHostKeys=no)
+  [[ -z "${known_hosts}" ]] || ssh_opts+=(-o "UserKnownHostsFile=${known_hosts}" -o GlobalKnownHostsFile=/dev/null)
   [[ -z "${ssh_key}" ]] || ssh_opts+=(-i "${ssh_key}")
   local first_contact=yes
   if (( accept_new_host_key )); then
@@ -921,43 +948,327 @@ handover::preseed() {
     warn "handover: --accept-new-host-key: the first contact trusts the host key that ${node} shows, without a check"
   fi
 
+  # Each ssh and scp call captures its stdout and its stderr (in a file in
+  # the private workdir), so no byte from the node reaches the terminal as
+  # it is. On success preseed shows none of it, except the stderr of the
+  # first call. On a failure it shows the lines of the call that failed
+  # (handover::stream).
+  local out="" err="" rc=0 errfile="${workdir}/stderr" first_call="the mkdir call on ${node}"
   # The pki dir is 0700 before any key lands in it: umask 077 makes a new
   # dir 0700, and chmod sets a dir that is there already (kubeadm makes it
   # 0755). A chmod that fails fails the call.
-  ssh -o "StrictHostKeyChecking=${first_contact}" "${ssh_opts[@]}" -p "${port}" "${user}@${node}" \
-    'umask 077 && mkdir -p /etc/kubernetes/pki && chmod 0700 /etc/kubernetes/pki' || {
+  out="$(ssh -o "StrictHostKeyChecking=${first_contact}" "${ssh_opts[@]}" -p "${port}" "${user}@${node}" \
+    'umask 077 && mkdir -p /etc/kubernetes/pki && chmod 0700 /etc/kubernetes/pki' 2> "${errfile}")" || rc=$?
+  err="$(< "${errfile}")"
+  if (( rc )); then
     error "handover: cannot reach ${user}@${node} over SSH, or cannot set /etc/kubernetes/pki on it to mode 700"
+    handover::streams "${first_call}" "${out}" "${err}" >&2
     if (( accept_new_host_key )); then
       error "handover: a changed host key also fails here; check the node and the known_hosts entry before you retry"
     else
       error "handover: an unknown or changed host key also fails here. Compare the fingerprints of \"ssh-keyscan -p ${port} ${node} | ssh-keygen -lf -\" with \"ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub\" on the node's console, and add the key to the known_hosts file if they match. Or retry with --accept-new-host-key to trust the first contact."
     fi
     return 1
-  }
+  fi
+  # The stderr of the first call holds only what ssh prints at LogLevel
+  # ERROR. ssh does not print the line about a recorded host key at that
+  # level, so the recorded key is checked below.
+  handover::stream "${first_call}" stderr "${err}" >&2
   if (( accept_new_host_key )); then
     handover::host_key_recorded "${node}" "${port}" "${known_hosts:-${HOME}/.ssh/known_hosts}" || return 1
   fi
   ssh_opts=(-o StrictHostKeyChecking=yes "${ssh_opts[@]}")
+  local -a remote=(ssh "${ssh_opts[@]}" -p "${port}" "${user}@${node}")
 
-  # Per-file transfer with an IMMEDIATE per-key chmod (never one chmod at the
-  # very end): private keys are 0600 even when a later copy dies mid-transfer.
-  local key
+  # scp writes into a file that is there already: a hard link at the
+  # destination gives the key bytes to its other name too, and a symlink
+  # sends them to its target. So each file goes to a new staging file in the
+  # 0700 pki dir first. One call checks the dirs and makes the files (umask
+  # 077 and mktemp: mode 0600) and prints their names, the scp calls fill
+  # them, and one call sets each mode and renames each file over its
+  # destination. A rename (mv -T) replaces a link or a file there and never
+  # writes through it. A failure removes the staging files, or names them
+  # when that fails too.
+  # shown holds the lines of the call that failed.
+  local install_cmd="" failed="" shown="" key i
+  local -a lines=() staged=()
+  rc=0
+  out="$("${remote[@]}" "$(handover::stage_cmd)" 2> "${errfile}")" || rc=$?
+  err="$(< "${errfile}")"
+  [[ -z "${out}" ]] || mapfile -t lines <<< "${out}"
+  # Only a name of the expected shape goes into a later command.
+  if (( rc )); then
+    failed="$(handover::stage_failure "${out##*$'\n'}" "${node}")"
+  else
+    failed="$(handover::stage_lines "${node}" "${lines[@]}")"
+  fi
+  if [[ -z "${failed}" ]]; then
+    staged=("${lines[@]:${#KUBEHZ_HANDOVER_TRUSTED_DIRS[@]}+1}")
+  else
+    shown="$(handover::streams "the stage call on ${node}" "${out}" "${err}")"
+    # The cleanup takes each line that is a staging name of some key.
+    for i in "${!lines[@]}"; do
+      for key in "${KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
+        handover::staging_name "${key}" "${lines[i]}" || continue
+        staged+=("${lines[i]}")
+        break
+      done
+    done
+  fi
+
+  if [[ -z "${failed}" ]]; then
+    for i in "${!KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
+      key="${KUBEHZ_HANDOVER_PKI_KEYS[i]}"
+      rc=0
+      out="$(scp "${ssh_opts[@]}" -q -P "${port}" "${bundle_dir}/${key}" "${user}@${node}:${staged[i]}" 2> "${errfile}")" || rc=$?
+      err="$(< "${errfile}")"
+      (( rc )) || continue
+      failed="copying ${key} to ${node} failed"
+      shown="$(handover::streams "the copy of ${key} to ${node}" "${out}" "${err}")"
+      break
+    done
+  fi
+
+  if [[ -z "${failed}" ]]; then
+    install_cmd="$(handover::install_cmd "${staged[@]}")"
+    rc=0
+    out="$("${remote[@]}" "${install_cmd}" 2> "${errfile}")" || rc=$?
+    err="$(< "${errfile}")"
+    if (( rc )); then
+      # ssh exits 255 on its own error, a lost connection too. The node can
+      # then run steps after the last line that came back.
+      failed="$(handover::install_failure "${out##*$'\n'}" "${rc}" "${node}")"
+      shown="$(handover::streams "the install call on ${node}" "${out}" "${err}")"
+    fi
+  fi
+
+  if [[ -n "${failed}" ]]; then
+    error "handover: ${failed}"
+    [[ -z "${shown}" ]] || printf '%s\n' "${shown}" >&2
+    if (( ${#staged[@]} )); then
+      rc=0
+      out="$("${remote[@]}" "rm -f -- ${staged[*]}" 2> "${errfile}")" || rc=$?
+      err="$(< "${errfile}")"
+      if (( rc )); then
+        error "handover: could not remove the staging files on ${node}; they can hold key bytes. Remove them yourself: ${staged[*]}"
+        handover::streams "the cleanup call on ${node}" "${out}" "${err}" >&2
+      fi
+    fi
+    return 1
+  fi
+
+  echo "handover: PKI pre-seeded on ${node}. Provision now (lo provision) — kubeone's kubeadm reuses the existing CA files, preserving cluster identity."
+}
+
+# Return 0 when name is the shape of a staging file that preseed's mktemp
+# makes for key: /etc/kubernetes/pki/.<key>. and 10 ASCII letters or digits.
+# The letters are listed, so the check does not depend on the locale.
+handover::staging_name() {
+  local key="${1}" name="${2}" rest
+  local alnum=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
+  rest="${name#"/etc/kubernetes/pki/.${key}."}"
+  [[ "${rest}" != "${name}" && ${#rest} -eq 10 && "${rest}" != *[!${alnum}]* ]]
+}
+
+# Print the find test of the owners that the trusted dir may have, then a
+# tab, then the same owners in words.
+handover::dir_owners() {
+  local dir
+  for dir in "${KUBEHZ_HANDOVER_ROOT_DIRS[@]}"; do
+    [[ "${1}" == "${dir}" ]] || continue
+    printf '%s\t%s\n' '-uid 0' root
+    return 0
+  done
+  # shellcheck disable=SC2016  # the $( ) runs on the node, in the find of the stage call
+  printf '%s\t%s\n' '\( -uid 0 -o -uid "$(id -u)" \)' 'root or the ssh user'
+}
+
+# Print the remote command of preseed's stage call. Before each check it
+# prints "check <dir> <uid> <mode> <type>" (GNU stat), and after the checks
+# "stage", so the last line of a failed call names the dir that failed. Then
+# it makes one staging file per PKI key (umask 077 and mktemp: mode 0600)
+# and prints its name.
+handover::stage_cmd() {
+  local cmd="umask 077" dir key owners
+  for dir in "${KUBEHZ_HANDOVER_TRUSTED_DIRS[@]}"; do
+    owners="$(handover::dir_owners "${dir}")"
+    cmd+=" && echo \"check ${dir} \$(stat -c '%u %a %F' -- ${dir})\""
+    cmd+=" && test -n \"\$(find ${dir} -maxdepth 0 -type d ! -perm /022 ${owners%%$'\t'*} -print)\""
+  done
+  cmd+=" && echo stage"
   for key in "${KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
-    scp "${ssh_opts[@]}" -P "${port}" "${bundle_dir}/${key}" \
-      "${user}@${node}:/etc/kubernetes/pki/${key}" || {
-      error "handover: copying ${key} to ${node} failed"
-      return 1
-    }
-    case "${key}" in
-      *.key)
-        ssh "${ssh_opts[@]}" -p "${port}" "${user}@${node}" \
-          "chmod 600 /etc/kubernetes/pki/${key}" || {
-          error "handover: could not chmod 600 /etc/kubernetes/pki/${key} on ${node} — key material must not stay readable; fix the mode and re-run"
-          return 1
-        }
+    cmd+=" && mktemp /etc/kubernetes/pki/.${key}.XXXXXXXXXX"
+  done
+  printf '%s\n' "${cmd}"
+}
+
+# Print the cause of a failed stage call from the last line that it printed.
+# A check line names the dir that failed its check and what stat showed.
+handover::stage_failure() {
+  local last="${1}" node="${2}" dir msg who
+  for dir in "${KUBEHZ_HANDOVER_TRUSTED_DIRS[@]}"; do
+    [[ "${last}" == "check ${dir} "* ]] || continue
+    who="$(handover::dir_owners "${dir}")"
+    msg="${dir} on ${node} must be a dir, not a link, that ${who#*$'\t'} owns, with no write bit for the group or others."
+    msg+=" stat shows (uid, mode, type) $(handover::quote "${last#"check ${dir} "}"). No key was sent"
+    printf '%s\n' "${msg}"
+    return 0
+  done
+  printf '%s\n' "could not make the staging files /etc/kubernetes/pki/.<key>.XXXXXXXXXX on ${node}"
+}
+
+# Print the problem with the output lines of a stage call that passed, or
+# nothing. They must be a check line per trusted dir, "stage", then one
+# staging name per PKI key, in order.
+handover::stage_lines() {
+  local node="${1}" dir key i head n
+  shift
+  local -a lines=("${@}")
+  for i in "${!KUBEHZ_HANDOVER_TRUSTED_DIRS[@]}"; do
+    dir="${KUBEHZ_HANDOVER_TRUSTED_DIRS[i]}"
+    [[ "${lines[i]:-}" == "check ${dir} "* ]] && continue
+    printf '%s\n' "${node} printed $(handover::quote "${lines[i]:-}") where the stage call prints the check of ${dir}"
+    return 0
+  done
+  head=${#KUBEHZ_HANDOVER_TRUSTED_DIRS[@]}
+  if [[ "${lines[head]:-}" != stage ]]; then
+    printf '%s\n' "${node} printed $(handover::quote "${lines[head]:-}") where the stage call prints \"stage\""
+    return 0
+  fi
+  for i in "${!KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
+    key="${KUBEHZ_HANDOVER_PKI_KEYS[i]}"
+    handover::staging_name "${key}" "${lines[head + 1 + i]:-}" && continue
+    printf '%s\n' "${node} printed a staging name for ${key} that is not /etc/kubernetes/pki/.${key}. and 10 letters or digits: $(handover::quote "${lines[head + 1 + i]:-}")"
+    return 0
+  done
+  n=$(( ${#lines[@]} - head - 1 ))
+  (( n == ${#KUBEHZ_HANDOVER_PKI_KEYS[@]} )) ||
+    printf '%s\n' "${node} printed ${n} lines for ${#KUBEHZ_HANDOVER_PKI_KEYS[@]} staging names"
+}
+
+# Print a line from the node, safe to print: its first 200 bytes in double
+# quotes. A byte below 0x20, 0x7f and a byte from 0x80 shows as \xNN (so no
+# terminal control, C1 controls too, reaches the terminal), a backslash as
+# \\ and a double quote as \". A longer line also says how many bytes it
+# has. A second argument sets the number of bytes to show; 0 shows every
+# byte (a path that the user gave). LC_ALL=C makes each step one byte.
+handover::quote() {
+  local LC_ALL=C
+  local s="${1}" limit="${2:-200}" out="" c hex i n
+  n=${#s}
+  (( limit > 0 && limit < n )) || limit=${n}
+  for (( i = 0; i < limit; i++ )); do
+    c="${s:i:1}"
+    # shellcheck disable=SC1003  # '\' is one backslash, not an escaped quote
+    case "${c}" in
+      '\') out+='\\' ;;
+      '"') out+='\"' ;;
+      [[:print:]]) out+="${c}" ;;
+      *)
+        printf -v hex '%02x' "'${c}"
+        out+="\\x${hex}"
         ;;
     esac
   done
+  out="\"${out}\""
+  (( limit == n )) || out+=" (the first ${limit} of ${n} bytes)"
+  printf '%s\n' "${out}"
+}
 
-  echo "handover: PKI pre-seeded on ${node}. Provision now (lo provision) — kubeone's kubeadm reuses the existing CA files, preserving cluster identity."
+# Print the lines of one stream (stdout or stderr) of an ssh or scp call,
+# safe to print. Each line is "handover: <call>, <stream>: " and the line
+# through handover::quote, without one CR at its end (ssh ends its own
+# messages with CR LF, so "Host key verification failed." stays readable).
+# It prints at most 20 lines; the last one that it prints then also says how
+# many lines it does not print.
+handover::stream() {
+  local call="${1}" stream="${2}" text="${3}" line i n more unit
+  [[ -n "${text}" ]] || return 0
+  local -a lines=()
+  mapfile -t lines <<< "${text}"
+  n=${#lines[@]}
+  for (( i = 0; i < n && i < 20; i++ )); do
+    line="handover: ${call}, ${stream}: $(handover::quote "${lines[i]%$'\r'}")"
+    more=$(( n - 20 ))
+    if (( i == 19 && more > 0 )); then
+      unit=lines
+      (( more != 1 )) || unit=line
+      line+=" (${more} more ${unit})"
+    fi
+    printf '%s\n' "${line}"
+  done
+}
+
+# Print the lines of the stdout and then of the stderr of an ssh or scp call
+# (handover::stream).
+handover::streams() {
+  handover::stream "${1}" stdout "${2}"
+  handover::stream "${1}" stderr "${3}"
+}
+
+# Return 0 when path holds a byte that ssh reads as syntax in the value of
+# an -o option: % (a token), $ (an environment variable), ~ (the home dir), a
+# quote or a backslash (they change how ssh splits the value), whitespace,
+# or another control byte (below 0x20, and 0x7f). LC_ALL=C makes the classes
+# bytes.
+handover::ssh_path_unsafe() {
+  local LC_ALL=C
+  [[ "${1}" == *[[:cntrl:][:space:]%\$~\"\'\\]* ]]
+}
+
+# Print the remote command of preseed's install call for the staging names
+# (one per PKI key, in order): first it sets the mode of each staging file
+# (the keys 0600, the certs and sa.pub 0644), then it renames each over its
+# destination. Before each step it prints the step, so the last line of a
+# failed call names the step that failed.
+handover::install_cmd() {
+  local -a staged=("${@}")
+  local cmd="" key mode i
+  for i in "${!KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
+    key="${KUBEHZ_HANDOVER_PKI_KEYS[i]}"
+    mode=0644
+    [[ "${key}" != *.key ]] || mode=0600
+    cmd+="${cmd:+ && }echo 'chmod ${key}' && chmod ${mode} ${staged[i]}"
+  done
+  for i in "${!KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
+    key="${KUBEHZ_HANDOVER_PKI_KEYS[i]}"
+    cmd+=" && echo 'mv ${key}' && mv -f -T ${staged[i]} /etc/kubernetes/pki/${key}"
+  done
+  printf '%s\n' "${cmd}"
+}
+
+# Print the cause of a failed install call from the last line that it
+# printed (handover::install_cmd) and its exit status. Exit 255 is an ssh
+# error, a lost connection too: the node can run steps after the last line
+# that came back, so the state is unknown whatever step that line names.
+# Else the last line names the step that failed, and a mv failure names the
+# files that went into place before it. A last line that names no step
+# (text from the node's shell) also says that the state is unknown. An
+# unknown state names each destination to check.
+handover::install_failure() {
+  local last="${1}" rc="${2}" node="${3}" key done_keys="" seen msg
+  local dests="${KUBEHZ_HANDOVER_PKI_KEYS[*]/#//etc/kubernetes/pki/}"
+  if (( rc == 255 )); then
+    seen="no step arrived, but steps can have run"
+    for key in "${KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
+      [[ "${last}" == "chmod ${key}" || "${last}" == "mv ${key}" ]] || continue
+      seen="the last step that arrived is \"${last}\", and later steps can have run"
+    done
+    msg="the install call on ${node} ended with exit 255 (an ssh error, such as a lost connection), so the state of the install is UNKNOWN: ${seen}."
+    printf '%s\n' "${msg} Check each of these files on ${node}: ${dests}"
+    return 0
+  fi
+  for key in "${KUBEHZ_HANDOVER_PKI_KEYS[@]}"; do
+    if [[ "${last}" == "chmod ${key}" ]]; then
+      printf '%s\n' "could not set the mode of the staging file of ${key} on ${node}; no file was moved into place"
+      return 0
+    fi
+    if [[ "${last}" == "mv ${key}" ]]; then
+      printf '%s\n' "could not move the staging file of ${key} to /etc/kubernetes/pki/${key} on ${node}; in place before it: ${done_keys:-none}"
+      return 0
+    fi
+    done_keys+="${done_keys:+ }${key}"
+  done
+  msg="the install call on ${node} failed, and its output names no step, so the state of the install is UNKNOWN."
+  printf '%s\n' "${msg} Check each of these files on ${node}: ${dests}"
 }

@@ -1502,6 +1502,62 @@ on the node's console first. `--accept-new-host-key` trusts the key that the
 node shows on the first contact instead: the handover then checks that ssh
 recorded it, and every later call checks against that record.
 
+Every call sets the host key options itself. `StrictHostKeyChecking=yes`
+turns the check on, `NoHostAuthenticationForLocalhost=no` checks a node behind
+a forwarded port on localhost too, `VerifyHostKeyDNS=no` takes no key from
+DNS, and `UpdateHostKeys=no` keeps the node from changing your known_hosts
+file. No call opens a shared connection.
+
+With `--known-hosts`, that file is the only known_hosts file: every call also
+sets `GlobalKnownHostsFile=/dev/null`. ssh expands `%`, `$` and `~` in that
+path and splits it at whitespace, quotes and backslashes, so `preseed`
+refuses a path with one of these characters or with a control character. A
+relative path starts at the working directory. The check still assumes that
+you trust your ssh config, because the config controls other sources of
+trust:
+
+- a `KnownHostsCommand`
+- a `HostName` or a `HostKeyAlias` (each one changes the name that ssh checks)
+- a `Match exec` block
+- without `--known-hosts`, the known_hosts files that it names (`UserKnownHostsFile`, `GlobalKnownHostsFile`, by default `/etc/ssh/ssh_known_hosts`)
+
+On the node, `preseed` stops before a key leaves your machine unless each
+directory on the path to `/etc/kubernetes/pki` is safe. `/` and `/etc` must be
+directories (not links) that root owns. `/etc/kubernetes` and
+`/etc/kubernetes/pki` must be directories (not links) that root or the ssh
+user owns. None of them can have a write bit for the group or others. The
+message names the directory and what `stat` shows (owner, mode, type).
+
+These checks have limits:
+
+- `preseed` trusts the mounts that root made on the node. It does not check
+  the type of a file system, so a mount that another user controls (a network
+  or a FUSE file system, for example) can still show the keys to that user.
+- A node that is fully hostile and holds a host key that you accepted is out
+  of scope. Such a node can change what each command prints, and no check
+  that runs on the node can find that.
+
+Each file then goes to a new private file in `/etc/kubernetes/pki` first, and
+a rename puts it in place. A link that is already at a destination is
+replaced, and its target never gets a key.
+
+`preseed` keeps the output of the node off your terminal. On success, it
+shows only the stderr of the first call (ssh's error lines). On a failure,
+it shows the lines of the call that failed, escaped, and at most 20 lines
+for each stream.
+
+The node needs GNU coreutils and findutils: `mv -T`, `stat -c` and
+`find -perm /MODE`.
+
+If a step fails, `preseed` names it and removes the new files. If a rename
+fails, the files before it are already in place, and the message names
+them. If the install
+call fails and its output names no step, the state of the install is unknown:
+`preseed` lists the six destination files to check on the node. If the ssh
+connection of the install call fails (exit 255), the state is unknown too,
+also when the output names a step: the node can run more steps after the last
+line that came back.
+
 ## Troubleshooting
 
 **No heartbeats arriving?** Check the CronJob is present, not suspended,
