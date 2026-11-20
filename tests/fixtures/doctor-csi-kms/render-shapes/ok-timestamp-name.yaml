@@ -1,0 +1,5 @@
+# ids: Role/rook-ceph/2024-01-01
+kind: Role
+metadata:
+  name: 2024-01-01
+  namespace: rook-ceph

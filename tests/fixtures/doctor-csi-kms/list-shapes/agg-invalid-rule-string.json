@@ -1,0 +1,15 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "metadata": {
+        "name": "a"
+      },
+      "aggregationRule": "CANARY"
+    }
+  ],
+  "kind": "List",
+  "metadata": {
+    "resourceVersion": ""
+  }
+}

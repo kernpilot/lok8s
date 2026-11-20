@@ -1,0 +1,1 @@
+  ! rook-ceph-csi-kms: Role rook-ceph-csi-kms-config in namespace rook-ceph (option kms-config) is a candidate leftover: it has the label lok8s.dev/name=rook-ceph-csi-kms, and spec.bootstrap does not have the addon. It keeps its grant. References not checked: kubectl failed or did not return a valid list. Doctor prints no delete command for it.

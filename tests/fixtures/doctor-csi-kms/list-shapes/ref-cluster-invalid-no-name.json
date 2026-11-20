@@ -1,0 +1,41 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "name": "b"
+      },
+      "subjects": [
+        {
+          "kind": "Group",
+          "name": "CANARY"
+        }
+      ],
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "rook-ceph-csi-kms-metadata"
+      }
+    },
+    {
+      "kind": "ClusterRoleBinding",
+      "metadata": {},
+      "subjects": [
+        {
+          "kind": "Group",
+          "name": "CANARY"
+        }
+      ],
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "rook-ceph-csi-kms-metadata"
+      }
+    }
+  ],
+  "kind": "List",
+  "metadata": {
+    "resourceVersion": ""
+  }
+}

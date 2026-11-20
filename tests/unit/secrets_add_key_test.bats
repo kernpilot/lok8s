@@ -190,3 +190,66 @@ _add() { # <key> [all] [skip_orphans]
   [ "$(cat "${PATH_BASE}/.sops.yaml")" = "${before}" ]
   [ ! -s "${ENCRYPT_RAN}" ]
 }
+
+# _state <path>... — one line per entry under the paths (its path, type, link
+# target and mtime), then the checksum of each regular file: any write shows.
+_state() {
+  find "${@}" -printf '%p %y %l %T@\n' | LC_ALL=C sort
+  find "${@}" -type f -print0 | LC_ALL=C sort -z | xargs -0 -r cksum
+}
+
+@test "a symlinked .enc in the store is refused before any write" {
+  # The encrypt does not write through a link (secrets::_encrypt_file refuses
+  # one). Found after the .sops.yaml write, the link would stop the run half
+  # way, and a rerun would find the recipient present and re-key nothing (Go
+  # twin: TestKeyCommandsRefuseASymlinkedEncBeforeAnyWrite).
+  _load
+  local store="${PATH_CLUSTERS}/a.dev/secrets" away="${BATS_TEST_TMPDIR}/elsewhere" before
+  mkdir -p "${away}"
+  printf 'v\n' > "${store}/Secret.app.default.KEY"
+  printf 'enc %s\n' "${KEY_A}" > "${away}/Secret.app.default.KEY.enc"
+  ln -s "${away}/Secret.app.default.KEY.enc" "${store}/Secret.app.default.KEY.enc"
+  printf 'w\n' > "${store}/Secret.db.default.KEY"
+  printf 'enc %s\n' "${KEY_A}" > "${store}/Secret.db.default.KEY.enc"
+  touch -t 200001010000 "${away}/Secret.app.default.KEY.enc" "${store}/Secret.db.default.KEY.enc"
+  touch -t 200001010001 "${store}/Secret.app.default.KEY" "${store}/Secret.db.default.KEY"
+  before="$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}" "${away}")"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${store}/Secret.app.default.KEY.enc is a symlink: the re-key does not write an .enc through a link
+[error]   replace each link with the file it names, or remove it from the store, then run this command again; nothing was written" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}" "${away}")" = "${before}" ] || {
+    echo "a file changed:" >&2
+    diff <(echo "${before}") <(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}" "${away}") >&2
+    return 1
+  }
+  [ ! -s "${ENCRYPT_RAN}" ]
+  # The control: the file in the place of the link. The run adds the
+  # recipient and re-keys the store.
+  rm -- "${store}/Secret.app.default.KEY.enc"
+  mv -- "${away}/Secret.app.default.KEY.enc" "${store}/"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
+  [ -s "${ENCRYPT_RAN}" ]
+}
+
+@test "a .sops.yaml that is a symlink stays a link: its target gets the recipient and keeps its mode" {
+  # sed -i would put a regular file in the place of the link and leave the
+  # target as it was (Go twin: TestKeyCommandsEditTheTargetOfASymlinkedSopsConfig).
+  _load
+  local conf="${BATS_TEST_TMPDIR}/conf/sops.yaml" want="${BATS_TEST_TMPDIR}/want.yaml"
+  mkdir -p "${conf%/*}"
+  mv -- "${PATH_BASE}/.sops.yaml" "${conf}"
+  chmod 640 "${conf}"
+  ln -s "${conf}" "${PATH_BASE}/.sops.yaml"
+  printf "creation_rules:\n  - path_regex: 'Secret\\\\..*'\n    age: '%s,%s'\n" "${KEY_A}" "${KEY_B}" > "${want}"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ -L "${PATH_BASE}/.sops.yaml" ] || { echo "the link was replaced by a file" >&2; return 1; }
+  [ "$(readlink "${PATH_BASE}/.sops.yaml")" = "${conf}" ]
+  cmp "${conf}" "${want}" || { cat "${conf}" >&2; return 1; }
+  [ "$(stat -c %a "${conf}")" = 640 ] || { echo "mode $(stat -c %a "${conf}")" >&2; return 1; }
+  [ "$(ls -A "${conf%/*}")" = sops.yaml ] || { echo "a temp file was left: $(ls -A "${conf%/*}")" >&2; return 1; }
+}

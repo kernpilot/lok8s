@@ -1,0 +1,2 @@
+kind: RoleBinding
+metadata: {name: a, namespace: ""}

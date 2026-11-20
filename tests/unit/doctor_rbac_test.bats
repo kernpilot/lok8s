@@ -15,22 +15,25 @@
 # Every failed read carries the word CANARY in its stderr (or its stdout): the
 # check must never print it. kubectl is a stand-in script of this test, first
 # on PATH (the check runs it as a process, not as a shell function). No real
-# kubectl runs and no cluster is reached. Only this file knows three more
-# answers:
+# kubectl runs and no cluster is reached. Only this file knows more answers:
 #   hang <s> <json file>          the read ends after <s> seconds
 #   tree <s> <json file> <term|ignore>
 #                                 the stand-in starts a child that ignores
 #                                 TERM (as a credential plugin can), and ends
 #                                 after <s> seconds; with "ignore" it ignores
 #                                 TERM too
+#   early <json file>             the stand-in starts the same child, prints
+#                                 the list and exits 0 at once: the child
+#                                 stays in the process group of the read
 #   int <s> <json file>           the same tree, with "ignore": after 1 s the
 #                                 stand-in sends SIGINT to the subshell of the
 #                                 reads, as a Ctrl-C does
 #   termok <json file>            the read waits; on a TERM it prints the
 #                                 list and exits 0
-# The stand-in and its child write their pids to STUB_PID and CHILD_PID. The
-# stand-in writes the clock (in microseconds) when it starts to STUB_START,
-# and when it sends the SIGINT to INT_SENT.
+# The stand-in and its child write their pids to STUB_PID and CHILD_PID, and
+# the stand-in writes its process group to STUB_PGID. The stand-in writes the
+# clock (in microseconds) when it starts to STUB_START, and when it sends the
+# SIGINT to INT_SENT.
 
 setup() {
   load "../test_helper"
@@ -56,15 +59,19 @@ setup() {
   unset LOK8S_CLUSTER_NAME
   export CALLS="${BATS_TEST_TMPDIR}/kubectl.calls"
   export STUB_PID="${BATS_TEST_TMPDIR}/kubectl.pid" CHILD_PID="${BATS_TEST_TMPDIR}/child.pid"
+  export STUB_PGID="${BATS_TEST_TMPDIR}/kubectl.pgid"
   export STUB_START="${BATS_TEST_TMPDIR}/kubectl.start" INT_SENT="${BATS_TEST_TMPDIR}/int.sent"
   export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
   mkdir -p "${TMPDIR}"
 
   # The stand-in kubectl: records its argv, answers from the case directory.
+  # It gets _stat_field of test_helper (a script does not load that file).
   STUB="${BATS_TEST_TMPDIR}/stub"
   mkdir -p "${STUB}"
-  cat > "${STUB}/kubectl" <<'STUB'
-#!/usr/bin/env bash
+  {
+    echo '#!/usr/bin/env bash'
+    declare -f _stat_field
+    cat <<'STUB'
 printf '%s\n' "$*" >> "${CALLS}"
 res="${4:-}"
 if [[ ! -f "${CASE}/${res}" ]]; then
@@ -77,8 +84,11 @@ read -r kind a b < "${CASE}/${res}"
 _tree() {
   echo "${EPOCHREALTIME//[!0-9]/}" > "${STUB_START}"
   echo "$$" > "${STUB_PID}"
+  _stat_field "$$" 3 > "${STUB_PGID}"
   [[ "${1}" == term ]] || trap '' TERM
   bash -c 'trap "" TERM; echo "$$" > "${CHILD_PID}"; exec sleep 30' 3>&- &
+  # The child has written its pid before the stand-in goes on.
+  while [[ ! -s "${CHILD_PID}" ]]; do sleep 0.01; done
 }
 case "${kind}" in
   json) cat "${FIX}/json/${a}" ;;
@@ -89,13 +99,16 @@ case "${kind}" in
     _tree "${mode}"
     sleep "${a}" 3>&-
     cat "${FIX}/json/${b}" ;;
+  early)
+    _tree term
+    cat "${FIX}/json/${a}" ;;
   int)
     _tree ignore
     sleep 1 3>&-
-    # The parent is the subshell of the reads: the check starts the read
-    # as its job.
+    # The parent of the parent is the subshell of the reads: the check runs
+    # the read under a leader, a coprocess of that subshell.
     echo "${EPOCHREALTIME//[!0-9]/}" > "${INT_SENT}"
-    kill -INT "${PPID}"
+    kill -INT "$(_stat_field "${PPID}" 2)"
     sleep "${a}" 3>&-
     cat "${FIX}/json/${b}" ;;
   termok)
@@ -105,6 +118,7 @@ case "${kind}" in
     wait ;;
 esac
 STUB
+  } > "${STUB}/kubectl"
   chmod +x "${STUB}/kubectl"
   export PATH="${STUB}:${PATH}"
   [[ "$(command -v kubectl)" == "${STUB}/kubectl" ]] || fail "the stand-in kubectl is not first on PATH"
@@ -198,6 +212,17 @@ _hang_case() {
   _setup_case "${dir}"
 }
 
+# _early_case — the narrowed case, with a first read that ends at once and
+# leaves a child in its process group (the early answer). Both reads give
+# valid lists, so the lines are the ones of the narrowed case.
+_early_case() {
+  local dir="${BATS_TEST_TMPDIR}/case-early"
+  mkdir -p "${dir}"
+  cp "${FIX}/cases/narrowed/cluster.lok8s.yaml" "${FIX}/cases/narrowed/clusterroles" "${FIX}/cases/narrowed/want" "${dir}/"
+  echo "early crb-narrowed.json" > "${dir}/clusterrolebindings"
+  _setup_case "${dir}"
+}
+
 NO_ANSWER="  ! RBAC migration leftovers not checked: kubectl did not answer within 30 s (the cluster API, or a credential plugin that waits for a login)"
 
 # _alive <pid> — 0 when the process runs (a zombie does not count): /proc
@@ -232,13 +257,13 @@ _group_alive() {
 }
 
 # _assert_tree_gone <clock file> <max ms> — the stand-in and its child no
-# longer run, and no other process of the stand-in's process group (the
-# check makes the stand-in the leader of a group: its pgid is its pid), at
-# once after the check returned (the check waits for them). The check
-# returned less than <max ms> after the clock in the file (in
-# microseconds, EPOCHREALTIME of bash 5).
+# longer run, and no other process of the stand-in's process group, at once
+# after the check returned (the check waits for them). The stand-in is not
+# the leader of that group: the check runs it under a leader that holds the
+# group. The check returned less than <max ms> after the clock in the file
+# (in microseconds, EPOCHREALTIME of bash 5).
 _assert_tree_gone() {
-  local now="${EPOCHREALTIME//[!0-9]/}" start took pid
+  local now="${EPOCHREALTIME//[!0-9]/}" start took pid pgid
   start="$(cat "${1}")"
   [[ "${start}" =~ ^[0-9]+$ ]] || fail "no clock in ${1}"
   took=$(( (now - start) / 1000 ))
@@ -246,8 +271,45 @@ _assert_tree_gone() {
     [[ -n "${pid}" ]] || fail "a pid file is empty"
     ! _alive "${pid}" || fail "process ${pid} still runs after the check"
   done
-  ! _group_alive "$(cat "${STUB_PID}")" || fail "a process of the group of the read still runs after the check"
+  pgid="$(cat "${STUB_PGID}")"
+  [[ "${pgid}" =~ ^[0-9]+$ ]] || fail "no process group in ${STUB_PGID}"
+  [[ "${pgid}" != "$(cat "${STUB_PID}")" ]] || fail "the stand-in leads its process group"
+  ! _group_alive "${pgid}" || fail "a process of the group of the read still runs after the check"
   (( took < ${2} )) || fail "the check took ${took} ms, want less than ${2} ms"
+}
+
+# _log_kill — the check's kill(1) calls go to KILL_LOG, each with the state
+# of the target group's leader at the call: "<args>|<state> <parent>
+# <group> <shell>" from /proc (the shell is the process that calls kill).
+# Then the builtin kill runs. The stand-ins are scripts, so they do not see
+# this function.
+_log_kill() {
+  export KILL_LOG="${BATS_TEST_TMPDIR}/kill.log"
+  kill() {
+    local t="${*: -1}"
+    t="${t#-}"
+    printf '%s|%s %s %s %s\n' "$*" "$(_stat_field "${t}" 1)" "$(_stat_field "${t}" 2)" "$(_stat_field "${t}" 3)" "${BASHPID}" >> "${KILL_LOG}"
+    builtin kill "$@"
+  }
+}
+
+# _assert_group_signals <min> — KILL_LOG has at least <min> calls, and each
+# one sends TERM, CONT or KILL to the process group of the stand-in
+# (never to one pid), while the leader of that group runs (not a zombie)
+# as a child of the shell that sends the signal.
+_assert_group_signals() {
+  local pgid line args st n=0
+  pgid="$(cat "${STUB_PGID}")"
+  [[ -s "${KILL_LOG}" ]] || fail "no kill call"
+  while IFS= read -r line; do
+    n=$(( n + 1 ))
+    args="${line%%|*}" st="${line#*|}"
+    [[ "${args}" =~ ^-(TERM|CONT|KILL)\ --\ -${pgid}$ ]] || fail "a kill call that is not a signal to the group -${pgid}: ${args}"
+    read -r -a st <<< "${st}"
+    [[ "${st[0]}" != Z && -n "${st[0]}" ]] || fail "a signal after the leader ended: ${line}"
+    [[ "${st[1]}" == "${st[3]}" && "${st[2]}" == "${pgid}" ]] || fail "a signal while the leader is not a child of the shell that leads the group: ${line}"
+  done < "${KILL_LOG}"
+  (( n >= ${1} )) || fail "${n} kill calls, want at least ${1}"
 }
 
 @test "rbac: a leftover SUC binding under another name with another subject gets no delete command" { _case suc-leftover-under-another-name; }
@@ -364,17 +426,41 @@ _assert_tree_gone() {
 @test "rbac: the bound stops a child of the read that ignores TERM" {
   doctor::_rbac_bound() { echo 1; }
   _hang_case "tree 30 crb-narrowed.json term" "${NO_ANSWER}"
+  _log_kill
   run doctor::_rbac_check rbac.example
+  unset -f kill
   _assert_case
   _assert_tree_gone "${STUB_START}" 4000
+  _assert_group_signals 3
 }
 
+# A read that ends first (here with 0 and a valid list) and leaves a child
+# in its process group: the child gets the stop of the group too (Go:
+# stopMembers), TERM and, as it ignores TERM, KILL after the grace (2 s). The
+# lines are the ones of the valid lists. The check returns after the grace,
+# plus 1 s for the second read and the processes of the test.
+@test "rbac: a read that ends first stops the child that it leaves in its group" {
+  _early_case
+  _log_kill
+  run doctor::_rbac_check rbac.example
+  unset -f kill
+  _assert_case
+  _assert_tree_gone "${STUB_START}" 4000
+  _assert_group_signals 3
+}
+
+# Each signal of the stop goes to the process group of the read, never to
+# one pid, and only while the leader of the group runs: the leader holds the
+# id of the group until the stop is done.
 @test "rbac: the bound stops a read that ignores TERM, and its child" {
   doctor::_rbac_bound() { echo 1; }
   _hang_case "tree 30 crb-narrowed.json ignore" "${NO_ANSWER}"
+  _log_kill
   run doctor::_rbac_check rbac.example
+  unset -f kill
   _assert_case
   _assert_tree_gone "${STUB_START}" 4000
+  _assert_group_signals 3
 }
 
 # A read that the bound stopped gives the reason of the bound, also when the

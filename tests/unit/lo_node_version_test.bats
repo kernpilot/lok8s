@@ -581,9 +581,9 @@ _kill_left() {
 
 # The CI bats container has no ps and no pgrep: a test that calls one sees
 # "command not found", and a check built on it passes without checking. The
-# /proc helpers of test_helper (_ppid, _children, _pgrep_f) call them only
-# where /proc does not exist. The guard reads lines, not the shell: it
-# misses a call in a quoted string (bash -c 'pgrep -f x'), a quoted name
+# /proc helpers of test_helper (_ppid, _children, _stat_field, _pgrep_f) call
+# them only where /proc does not exist. The guard reads lines, not the shell:
+# it misses a call in a quoted string (bash -c 'pgrep -f x'), a quoted name
 # ("pgrep"), `ps ax` or a bare `ps`, a one-line @test, and a call in a
 # heredoc line that starts with #. It finds none of these in the tree today.
 @test "the unit tests call ps and pgrep only in the fallbacks of test_helper" {
@@ -603,9 +603,9 @@ _kill_left() {
     fi
   done <<< "${output}"
   [ -z "${bad}" ] || { echo "calls outside the fallbacks: ${bad}" >&2; return 1; }
-  # The three fallbacks (_ppid, _children, _pgrep_f). A count of 0 means that
-  # the grep itself failed.
-  [ "${n}" -eq 3 ] || { echo "test_helper has ${n} calls, want 3: ${output}" >&2; return 1; }
+  # The four fallbacks (_ppid, _children, _stat_field, _pgrep_f). A count of 0
+  # means that the grep itself failed.
+  [ "${n}" -eq 4 ] || { echo "test_helper has ${n} calls, want 4: ${output}" >&2; return 1; }
 }
 
 # _pgrep_f must find a process, not only report none: every other caller
@@ -629,6 +629,39 @@ _kill_left() {
   kill "${pid}" 2>/dev/null || :
   [ "${rc}" -eq 0 ] || { echo "_pgrep_f failed with status ${rc}" >&2; return 1; }
   [ "${found}" = "${pid}" ] || { echo "_pgrep_f gave '${found}', want '${pid}'" >&2; return 1; }
+}
+
+# _stat_field must find the fields after the command name also when the name
+# has a space, a ")" and a newline. The kernel takes the command name from
+# the file that the process runs: here a link to sleep with such a name
+# (argv[0] stays "sleep", so a busybox sleep runs too).
+@test "_stat_field reads the state, the parent and the group after a command name with a space, a ) and a newline" {
+  [[ -d /proc/self ]] || skip "no /proc: _stat_field uses ps"
+  local name link pid i comm="" state="" got want shell_comm pgrp
+  name=$'x) y\n) z'
+  link="${BATS_TEST_TMPDIR}/${name}"
+  ln -s "$(type -P sleep)" "${link}"
+  # The child stays in the group of this shell. The command name of the
+  # shell has no space, so a plain read finds that group.
+  read -r _ shell_comm _ _ pgrp _ < "/proc/${BASHPID}/stat"
+  [[ "${shell_comm}" =~ ^\([^\ \)]*\)$ ]] || { echo "the command name of the shell is '${shell_comm}'" >&2; return 1; }
+  want="S ${BASHPID} ${pgrp}"
+  # 3>&-: a sleep left behind must not hold bats' output open.
+  exec -a sleep "${link}" 30 3>&- &
+  pid=$!
+  # Until the child has run exec, its command name is the shell's. The kill
+  # runs on every path.
+  for (( i = 0; i < 50; i++ )); do
+    { comm="$(< "/proc/${pid}/comm")"; } 2>/dev/null || :
+    state="$(sed -n 's/^State:[[:space:]]*\([A-Z]\).*/\1/p' "/proc/${pid}/status" 2>/dev/null)" || :
+    [[ "${comm}" != "${name}" || "${state}" != S ]] || break
+    sleep 0.1
+  done
+  got="$(_stat_field "${pid}" 1) $(_stat_field "${pid}" 2) $(_stat_field "${pid}" 3)"
+  kill "${pid}" 2>/dev/null || :
+  [[ "${comm}" == "${name}" ]] || { echo "the command name is '${comm}', want '${name}'" >&2; return 1; }
+  [[ "${state}" == S ]] || { echo "the state is '${state}', want S" >&2; return 1; }
+  [ "${got}" = "${want}" ] || { echo "_stat_field gave '${got}', want '${want}'" >&2; return 1; }
 }
 
 # A `read -t N` on a process substitution opened read-write (`<> <(:)`)

@@ -1,0 +1,5 @@
+# ids: ClusterRole//a
+null
+---
+kind: ClusterRole
+metadata: {name: a}

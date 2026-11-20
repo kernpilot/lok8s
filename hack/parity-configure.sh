@@ -640,6 +640,8 @@ PARITY_ROUTE_GO=doctor check - doctor --domain gamma.app
 # tree never sees the flag (argsh would reject it).
 check PATH_SECRETS doctor --no-color               # native vs the shim; the D35 line
 PARITY_ROUTE_GO=doctor check - doctor --no-color   # routed on both sides
-PARITY_ROUTE_GO=version check - version
+# lo version runs each tool that it finds, docker included: the probe
+# stubs (parity::probe_case). doctor only looks the tools up.
+PARITY_ROUTE_GO=version parity::probe_case "${PROJ}" check - version
 
 report

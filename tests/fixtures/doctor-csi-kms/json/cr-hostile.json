@@ -1,0 +1,61 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "rook-ceph-csi-kms-metadata",
+        "labels": {
+          "lok8s.dev/name": "rook-ceph-csi-kms",
+          "lok8s.dev/type": "system",
+          "lok8s.dev/category": "storage",
+          "csi-kms.lok8s.dev/option": "metadata"
+        }
+      }
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "CANARY a b",
+        "labels": {
+          "lok8s.dev/name": "rook-ceph-csi-kms",
+          "lok8s.dev/type": "system",
+          "lok8s.dev/category": "storage",
+          "csi-kms.lok8s.dev/option": "metadata"
+        }
+      }
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "canary\u001b[31m",
+        "labels": {
+          "lok8s.dev/name": "rook-ceph-csi-kms",
+          "lok8s.dev/type": "system",
+          "lok8s.dev/category": "storage",
+          "csi-kms.lok8s.dev/option": "metadata"
+        }
+      }
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "rook-ceph-csi-kms-vaulttokens",
+        "labels": {
+          "lok8s.dev/name": "rook-ceph-csi-kms",
+          "lok8s.dev/type": "system",
+          "lok8s.dev/category": "storage",
+          "csi-kms.lok8s.dev/option": "$(CANARY)"
+        }
+      }
+    }
+  ],
+  "kind": "List",
+  "metadata": {
+    "resourceVersion": ""
+  }
+}

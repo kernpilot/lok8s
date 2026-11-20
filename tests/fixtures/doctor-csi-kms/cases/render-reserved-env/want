@@ -1,0 +1,1 @@
+  ! rook-ceph-csi-kms RBAC leftovers not checked: the addon does not render with the values of its spec.bootstrap entry (see: lo bootstrap --only rook-ceph-csi-kms --dry-run)
