@@ -257,42 +257,116 @@ func TestDoctorRBACReadBoundStopsAHungRead(t *testing.T) {
 	}
 }
 
-// The bound with the real runner (execx.NewRunner) and a real process: a
-// kubectl that ignores the interrupt of the cancel (and TERM) ends with the
-// KILL after the grace (rbacReadGrace), and the check prints its fixed
-// reason. The runner signals the kubectl process only, not its process
-// group: a child of a credential plugin can outlive the bound (the bash
-// twin stops the group).
+// The bound with the real runner (execx.NewRunner) and real processes: the
+// kubectl starts a child that ignores TERM (as a credential plugin can) and
+// ignores TERM itself, or ends on it. Each read runs as its own process
+// group: at the bound the group gets SIGTERM, and SIGKILL after the grace
+// (rbacReadGrace). The check prints its fixed reason, and when it returns,
+// neither the kubectl nor its child exists: kill(pid, 0) fails with ESRCH
+// (a zombie that its new parent has not reaped yet also counts as gone).
+// The child keeps the kubectl's stdout, so the check returns after the
+// grace and before the bound plus the grace plus 1 s.
 func TestDoctorRBACReadBoundStopsARealKubectl(t *testing.T) {
+	for _, tc := range []struct{ name, trap string }{
+		{"a kubectl that ignores TERM", "trap '' INT TERM\n"},
+		{"a kubectl that ends on TERM", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, bin, _ := rbacCase(t, "narrowed")
+			defer func(d time.Duration) { rbacReadBound = d }(rbacReadBound)
+			rbacReadBound = 500 * time.Millisecond
+			dir := t.TempDir()
+			pidFile, childFile := filepath.Join(dir, "kubectl.pid"), filepath.Join(dir, "child.pid")
+			testutil.WriteFile(t, filepath.Join(bin, "kubectl"), "#!/bin/sh\n"+tc.trap+
+				"echo $$ > '"+pidFile+"'\n"+
+				"sh -c 'trap \"\" TERM; echo $$ > \""+childFile+"\"; exec sleep 30' &\n"+
+				"sleep 30\n")
+			var out strings.Builder
+			start := time.Now()
+			doctorRBACLeftovers(context.Background(), execx.NewRunner(p), p, rbacTestDomain, bin, bootstrapEntries(p), &out)
+			took := time.Since(start)
+			want := "  ! RBAC migration leftovers not checked: " + rbacReasonNoAnswer + "\n"
+			if got := out.String(); got != want {
+				t.Errorf("output: %q, want %q", got, want)
+			}
+			if limit := rbacReadBound + rbacReadGrace + time.Second; took >= limit {
+				t.Errorf("the check took %s, want less than %s", took, limit)
+			}
+			if took < rbacReadBound+rbacReadGrace {
+				t.Errorf("the check took %s: the child ended before the KILL of the grace", took)
+			}
+			for _, f := range []string{pidFile, childFile} {
+				raw, err := os.ReadFile(f)
+				if err != nil {
+					t.Fatalf("a process did not start: %v", err)
+				}
+				pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !rbacProcessGone(pid) {
+					t.Errorf("process %d (%s) still exists after the check", pid, filepath.Base(f))
+				}
+			}
+		})
+	}
+}
+
+// rbacProcessGone reports that pid does not exist (kill(pid, 0) fails with
+// ESRCH), or is a zombie that its new parent has not reaped yet.
+func rbacProcessGone(pid int) bool {
+	if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		return true
+	}
+	raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return false
+	}
+	_, rest, ok := strings.Cut(string(raw), ") ")
+	return ok && strings.HasPrefix(rest, "Z")
+}
+
+// rbacTermOKRunner is a kubectl that handles the SIGTERM of the bound and
+// exits 0 with a valid list: the run ends with the context and returns nil.
+type rbacTermOKRunner struct{ body []byte }
+
+func (r *rbacTermOKRunner) Run(ctx context.Context, c execx.Cmd) error {
+	<-ctx.Done()
+	c.Stdout.Write(r.body)
+	return nil
+}
+
+// A read that the bound stopped gives the fixed reason of the bound, also
+// when kubectl exited 0 with a valid list after the SIGTERM (bash: the
+// timeout mark comes before the exit code).
+func TestDoctorRBACReadBoundWinsOverASuccessAfterTheStop(t *testing.T) {
 	p, bin, _ := rbacCase(t, "narrowed")
 	defer func(d time.Duration) { rbacReadBound = d }(rbacReadBound)
-	rbacReadBound = 500 * time.Millisecond
-	pidFile := filepath.Join(t.TempDir(), "kubectl.pid")
-	testutil.WriteFile(t, filepath.Join(bin, "kubectl"), "#!/bin/sh\ntrap '' INT TERM\necho $$ > '"+pidFile+"'\nexec sleep 30\n")
-	var out strings.Builder
-	start := time.Now()
-	doctorRBACLeftovers(context.Background(), execx.NewRunner(p), p, rbacTestDomain, bin, bootstrapEntries(p), &out)
-	took := time.Since(start)
-	want := "  ! RBAC migration leftovers not checked: " + rbacReasonNoAnswer + "\n"
-	if got := out.String(); got != want {
-		t.Errorf("a kubectl that ignores the interrupt: %q, want %q", got, want)
-	}
-	if limit := rbacReadBound + rbacReadGrace + time.Second; took >= limit {
-		t.Errorf("the check took %s, want less than %s", took, limit)
-	}
-	if took < rbacReadBound+rbacReadGrace {
-		t.Errorf("the check took %s: the kubectl ended before the KILL of the grace", took)
-	}
-	raw, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatalf("the kubectl did not start: %v", err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	rbacReadBound = 5 * time.Millisecond
+	body, err := os.ReadFile(filepath.Join(rbacFixtures, "json", "crb-narrowed.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
-		t.Errorf("the kubectl (pid %d) still exists after the check: %v", pid, err)
+	var out strings.Builder
+	doctorRBACLeftovers(context.Background(), &rbacTermOKRunner{body: body}, p, rbacTestDomain, bin, bootstrapEntries(p), &out)
+	if got, want := out.String(), "  ! RBAC migration leftovers not checked: "+rbacReasonNoAnswer+"\n"; got != want {
+		t.Errorf("a read that exits 0 after the stop: %q, want %q", got, want)
+	}
+}
+
+// rbacDeleteCommand checks the name again where it builds the command: no
+// command for a name that is not a DNS-1123 subdomain of at most 253
+// characters, also when a caller did not check it.
+func TestDoctorRBACDeleteCommandChecksTheName(t *testing.T) {
+	for _, name := range []string{"", "a b", "a;rm -rf x", "a\nb", "a\tb", "A", "a$(x)", "-a", "a.", strings.Repeat("a", 254), "a\x1b[31m"} {
+		if cmd, ok := rbacDeleteCommand("/k", "clusterrolebinding", name); ok || cmd != "" {
+			t.Errorf("name %q: command %q", name, cmd)
+		}
+	}
+	for _, name := range []string{"a", "redis-operator", "a.b-c", strings.Repeat("a", 253), rbacRedisOldRole} {
+		if cmd, ok := rbacDeleteCommand("/k", "clusterrolebinding", name); !ok || cmd != "kubectl --kubeconfig '/k' delete clusterrolebinding "+name {
+			t.Errorf("name %q: command %q, %v", name, cmd, ok)
+		}
 	}
 }
 

@@ -24,11 +24,15 @@ package cli
 // a group of the token. A delete command is printed only for a binding of
 // the account alone: a binding that the account shares gets a line that
 // names it, with no command. A binding name goes into a printed delete
-// command only when it is a DNS-1123 subdomain. Each delete command names the
-// kubeconfig of the reads (shell-quoted) and is the rest of its line, so
-// a copy of it deletes in the cluster that the check read and nothing
-// else. Every line is advisory: the check never changes the doctor exit
-// code.
+// command only when it is a DNS-1123 subdomain (rbacDeleteCommand checks
+// it again). Each delete command names the kubeconfig of the reads
+// (shell-quoted) and is the rest of its line, so a copy of it deletes in
+// the cluster that the check read and nothing else. The old ClusterRole
+// gets a delete command only when no ClusterRoleBinding gives it to
+// another subject, and the line says to check the RoleBindings first (the
+// check does not read them). Of the labels of that role, the check prints
+// only the three aggregation keys of the built-in roles. Every line is
+// advisory: the check never changes the doctor exit code.
 
 import (
 	"bytes"
@@ -39,7 +43,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -75,24 +78,32 @@ var (
 // reports an old binding under any name, so a binding from an older
 // upstream manifest (system-upgrade, roleRef cluster-admin) counts too.
 const (
-	rbacSUCNewRole      = "lok8s-system-upgrade-controller"         // #nosec G101 -- a role name, not a credential
-	rbacRedisOldRole    = "redis-operator"                          // #nosec G101 -- a role name, not a credential
-	rbacRedisNewRole    = "lok8s-redis-operator"                    // #nosec G101 -- a role name, not a credential
-	rbacRedisChartRole  = "lok8s-redis-operator-chart-rbac"         // #nosec G101 -- a role name, not a credential
-	rbacRedisExecRole   = "lok8s-redis-operator-exec"               // #nosec G101 -- a role name, not a credential
-	rbacClusterAdmin    = "cluster-admin"                           // #nosec G101 -- a role name, not a credential
-	rbacAggregatePrefix = "rbac.authorization.k8s.io/aggregate-to-" // #nosec G101 -- a label prefix, not a credential
+	rbacSUCNewRole     = "lok8s-system-upgrade-controller" // #nosec G101 -- a role name, not a credential
+	rbacRedisOldRole   = "redis-operator"                  // #nosec G101 -- a role name, not a credential
+	rbacRedisNewRole   = "lok8s-redis-operator"            // #nosec G101 -- a role name, not a credential
+	rbacRedisChartRole = "lok8s-redis-operator-chart-rbac" // #nosec G101 -- a role name, not a credential
+	rbacRedisExecRole  = "lok8s-redis-operator-exec"       // #nosec G101 -- a role name, not a credential
+	rbacClusterAdmin   = "cluster-admin"                   // #nosec G101 -- a role name, not a credential
+)
+
+// The aggregation labels of the built-in ClusterRoles admin, edit and view
+// (the keys of their clusterRoleSelectors). The check reports only these
+// keys of the old role, matched exactly: it never prints any other key.
+const (
+	rbacAggregateToAdmin = "rbac.authorization.k8s.io/aggregate-to-admin" // #nosec G101 -- a label key, not a credential
+	rbacAggregateToEdit  = "rbac.authorization.k8s.io/aggregate-to-edit"  // #nosec G101 -- a label key, not a credential
+	rbacAggregateToView  = "rbac.authorization.k8s.io/aggregate-to-view"  // #nosec G101 -- a label key, not a credential
 )
 
 // rbacReadTimeout is the --request-timeout of each read. rbacReadBound
 // stops a kubectl that does not end after it (an exec credential plugin
-// that waits for a login): the reads are a diagnosis, never a hang. The
-// runner (execx) then interrupts the kubectl process, and kills it after
-// rbacReadGrace. It signals that process only: a child of a credential
-// plugin can outlive the bound. The bash twin uses the same 30 s and 2 s
-// (doctor::_rbac_bound, doctor::_rbac_stop) on the process group of the
-// read. rbacReadBound is a variable so that a test can make it short;
-// rbacReasonNoAnswer names the 30 s as a fixed text.
+// that waits for a login): the reads are a diagnosis, never a hang. Each
+// read runs as its own process group (execx.Cmd.ProcessGroup): at the
+// bound the group gets SIGTERM, and SIGKILL after rbacReadGrace, so the
+// children of a credential plugin stop too. The bash twin uses the same
+// 30 s and 2 s (doctor::_rbac_bound, doctor::_rbac_stop). rbacReadBound is
+// a variable so that a test can make it short; rbacReasonNoAnswer names
+// the 30 s as a fixed text.
 const (
 	rbacReadTimeout = "10s"
 	rbacReadGrace   = 2 * time.Second
@@ -229,23 +240,27 @@ func doctorRBACLeftovers(ctx context.Context, r execx.Runner, paths *config.Path
 // returns "" or the fixed reason of the failure. The stderr goes into a
 // buffer for the class and nowhere else. The output must be one JSON
 // object whose items is a list of objects, each of the shape that parse
-// reads (bash: doctor::_rbac_shape): else the whole list is invalid.
+// reads (bash: doctor::_rbac_shape): else the whole list is invalid. The
+// decode into float64 refuses a number out of its range, as the bash twin
+// refuses NaN and infinite numbers. A read that the bound stopped gives
+// rbacReasonNoAnswer, also when kubectl handled the SIGTERM and exited 0.
 func rbacRead[T any](ctx context.Context, r execx.Runner, kubectl, kubeconfig, resource string, parse func(map[string]any) (T, bool), items *[]T) string {
 	ctx, cancel := context.WithTimeout(ctx, rbacReadBound)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	err := r.Run(ctx, execx.Cmd{
-		Name:      kubectl,
-		Args:      []string{"--kubeconfig", kubeconfig, "get", resource, "-o", "json", "--request-timeout=" + rbacReadTimeout},
-		Stdin:     strings.NewReader(""),
-		Stdout:    &stdout,
-		Stderr:    &stderr,
-		WaitDelay: rbacReadGrace,
+		Name:         kubectl,
+		Args:         []string{"--kubeconfig", kubeconfig, "get", resource, "-o", "json", "--request-timeout=" + rbacReadTimeout},
+		Stdin:        strings.NewReader(""),
+		Stdout:       &stdout,
+		Stderr:       &stderr,
+		WaitDelay:    rbacReadGrace,
+		ProcessGroup: true,
 	})
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return rbacReasonNoAnswer
+	}
 	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return rbacReasonNoAnswer
-		}
 		return rbacReadReason(stderr.String())
 	}
 	var doc any
@@ -475,15 +490,76 @@ func rbacCheckRedis(bindings []rbacBinding, roles []rbacRole, chartRBAC bool, ku
 			rbacGrantLine(g, rbacRedisAccount, kubeconfig, out)
 		}
 		if oldRole != nil {
-			doctorWarn(out, "migration incomplete: ClusterRole "+rbacRedisOldRole+", the old role of the chart, is still in the cluster. Delete it: "+rbacDeleteCommand(kubeconfig, "clusterrole", rbacRedisOldRole))
+			line, command := rbacOldRoleLine(rbacOtherRefs(bindings, rbacRedisAccount, rbacRedisOldRole), kubeconfig)
+			doctorWarn(out, "migration incomplete: "+line)
 			if labels := rbacAggregateLabels(oldRole); len(labels) > 0 {
-				doctorWarn(out, "migration incomplete: ClusterRole "+rbacRedisOldRole+" copies its rules into built-in roles ("+strings.Join(labels, ", ")+"). The aggregation controller removes the copies when the role is deleted (the command above)")
+				line = "migration incomplete: ClusterRole " + rbacRedisOldRole + " copies its rules into built-in roles (" + strings.Join(labels, ", ") + "). The aggregation controller removes the copies when the role is deleted"
+				if command {
+					line += " (the command above)"
+				}
+				doctorWarn(out, line)
 			}
 		}
 	}
 	if !rbacGrantsExec(bindings, roles, rbacRedisAccount) {
 		doctorInfo(out, rbacRedisAddon+": no ClusterRoleBinding gives the "+rbacRedisAccount.Name+" ServiceAccount create on pods/exec. A RedisCluster cannot form or scale without it (restore ClusterRoleBinding "+rbacRedisExecRole+" before you add one)")
 	}
+}
+
+// rbacOtherRefs returns the ClusterRoleBindings to the ClusterRole role
+// that give it to a subject that is not sa in any form (rbacGrantOf
+// counts them): a group, a user or another ServiceAccount. A delete of
+// the role ends their grant too. A binding of sa alone has a line and a
+// delete command of its own.
+func rbacOtherRefs(bindings []rbacBinding, sa rbacSubject, role string) []rbacBinding {
+	var out []rbacBinding
+	for _, b := range bindings {
+		if b.RoleRef.Kind != "ClusterRole" || b.RoleRef.Name != role {
+			continue
+		}
+		if g, _ := rbacGrantOf(b, sa); g.others > 0 {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// rbacOldRoleLine is the line of the old ClusterRole (bash: the redis-ref
+// records in doctor::_rbac_report). Without refs (rbacOtherRefs) it ends
+// with the delete command, after the advice to check the RoleBindings,
+// which the check does not read. With refs it names them (a name that is
+// not a DNS-1123 subdomain only in a count) and has no command: a delete
+// would end their grants too. command reports a printed command.
+func rbacOldRoleLine(refs []rbacBinding, kubeconfig string) (line string, command bool) {
+	line = "ClusterRole " + rbacRedisOldRole + ", the old role of the chart, is still in the cluster"
+	cmd, ok := rbacDeleteCommand(kubeconfig, "clusterrole", rbacRedisOldRole)
+	switch {
+	case len(refs) == 0 && ok:
+		return line + ". Doctor does not read RoleBindings: check that none refers to it, and then delete it: " + cmd, true
+	case len(refs) == 0:
+		return line + ". Doctor prints no delete command for the role: check that no RoleBinding refers to it (doctor does not read RoleBindings), and then delete it", false
+	}
+	var names []string
+	odd := 0
+	for _, b := range refs {
+		if rbacNameOK(b.Metadata.Name) {
+			names = append(names, b.Metadata.Name)
+		} else {
+			odd++
+		}
+	}
+	if odd > 0 {
+		names = append(names, strconv.Itoa(odd)+" with an unusual name")
+	}
+	those := "those bindings"
+	if len(refs) == 1 {
+		line += ", and 1 ClusterRoleBinding gives it to subjects other than the " + rbacRedisAccount.Name + " ServiceAccount"
+		those = "that binding"
+	} else {
+		line += ", and " + strconv.Itoa(len(refs)) + " ClusterRoleBindings give it to subjects other than the " + rbacRedisAccount.Name + " ServiceAccount"
+	}
+	line += " (" + strings.Join(names, ", ") + "). Doctor prints no delete command for the role: give the subjects of " + those + " another role first, check that no RoleBinding refers to it (doctor does not read RoleBindings), and then delete it"
+	return line, false
 }
 
 // rbacGrant is a ClusterRoleBinding that gives its role to an account:
@@ -561,16 +637,23 @@ func rbacNewMissing(bindings []rbacBinding, sa rbacSubject, newRole string, out 
 // gives the role to other accounts) and a binding with other subjects
 // get no command: a delete would also remove the grant of the others. A
 // name that is not a DNS-1123 subdomain is never printed: the line then
-// has no name and no command.
+// has no name and no command. For a role that an opt-in addon binds the
+// account to (rbacOptInRole), each advice to remove the grant says to
+// keep it only on purpose.
 func rbacGrantLine(g rbacGrant, sa rbacSubject, kubeconfig string, out io.Writer) {
 	role := g.binding.RoleRef.Name
 	name := g.binding.Metadata.Name
-	shown := len(name) <= 253 && rbacNameRe.MatchString(name)
+	shown := rbacNameOK(name)
 	what := "ClusterRoleBinding " + name
 	if !shown {
 		what = "a ClusterRoleBinding with an unusual name (not a DNS-1123 subdomain)"
 	}
 	account := "the " + sa.Name + " ServiceAccount"
+	keep := ""
+	if rbacOptInRole(sa, role) {
+		keep = "keep it only on purpose, else "
+	}
+	const unusual = "Doctor does not print that name or a delete command: "
 	var line string
 	switch {
 	case g.group != "":
@@ -578,23 +661,28 @@ func rbacGrantLine(g rbacGrant, sa rbacSubject, kubeconfig string, out io.Writer
 		if shown {
 			line += "Doctor prints no delete command for a shared grant: review the binding"
 		} else {
-			line += "Doctor does not print that name or a delete command: find the binding and review it"
+			line += unusual + "find the binding and review it"
 		}
 	case g.others > 0:
 		line = what + " binds " + account + " and " + rbacOtherSubjects(g.others) + " to " + role + ". "
 		if shown {
-			line += "Doctor prints no delete command for a binding with other subjects: remove " + account + " from its subjects (for example with kubectl edit)"
+			line += "Doctor prints no delete command for a binding with other subjects: " + keep + "remove " + account + " from its subjects (for example with kubectl edit)"
 		} else {
-			line += "Doctor does not print that name or a delete command: find the binding and remove " + account + " from its subjects"
+			line += unusual + keep + "find the binding and remove " + account + " from its subjects"
 		}
-	case !shown:
-		line = what + " binds " + account + " to " + role + ". Doctor does not print that name or a delete command: find the binding and delete it"
 	default:
-		del := "Delete it: "
-		if rbacOptInRole(sa, role) {
-			del = "Keep it only on purpose, else delete it: "
+		line = what + " binds " + account + " to " + role + ". "
+		// rbacDeleteCommand checks the name again: a name that fails gets
+		// the line without the command.
+		if cmd, ok := rbacDeleteCommand(kubeconfig, "clusterrolebinding", name); shown && ok {
+			del := "Delete it: "
+			if keep != "" {
+				del = "Keep it only on purpose, else delete it: "
+			}
+			line += del + cmd
+		} else {
+			line += unusual + keep + "find the binding and delete it"
 		}
-		line = what + " binds " + account + " to " + role + ". " + del + rbacDeleteCommand(kubeconfig, "clusterrolebinding", name)
 	}
 	doctorWarn(out, "migration incomplete: "+line)
 }
@@ -608,11 +696,21 @@ func rbacOtherSubjects(n int) string {
 }
 
 // rbacDeleteCommand is the delete command of one object in the cluster of
-// the kubeconfig that the reads used. The name is a DNS-1123 subdomain (a
-// binding name) or a constant role name; the kubeconfig path is
-// shell-quoted (rbacShQuote).
-func rbacDeleteCommand(kubeconfig, resource, name string) string {
-	return "kubectl --kubeconfig " + rbacShQuote(kubeconfig) + " delete " + resource + " " + name
+// the kubeconfig that the reads used (bash: doctor::_rbac_delete). It
+// checks the name again where it builds the command: ok is false, and
+// there is no command, for a name that is not a DNS-1123 subdomain
+// (rbacNameOK). The kubeconfig path is shell-quoted (rbacShQuote).
+func rbacDeleteCommand(kubeconfig, resource, name string) (string, bool) {
+	if !rbacNameOK(name) {
+		return "", false
+	}
+	return "kubectl --kubeconfig " + rbacShQuote(kubeconfig) + " delete " + resource + " " + name, true
+}
+
+// rbacNameOK reports a DNS-1123 subdomain of at most 253 characters: the
+// only names that the check prints.
+func rbacNameOK(name string) bool {
+	return len(name) <= 253 && rbacNameRe.MatchString(name)
 }
 
 // rbacShQuote quotes s for a POSIX shell: in single quotes, and each
@@ -638,16 +736,17 @@ func rbacOptInRole(sa rbacSubject, role string) bool {
 	return (sa == rbacSUCAccount && role == rbacClusterAdmin) || (sa == rbacRedisAccount && role == rbacRedisChartRole)
 }
 
-// rbacAggregateLabels are the aggregate-to-* labels with the value "true"
-// (the selectors of the built-in roles match that value), sorted.
+// rbacAggregateLabels are the aggregation keys of the built-in roles
+// (admin, edit, view) that role has with the value "true" (the selectors
+// of the built-in roles match that value), in that order. A key matches
+// only exactly: any other key of the role is never printed.
 func rbacAggregateLabels(role *rbacRole) []string {
 	var labels []string
-	for k, v := range role.Metadata.Labels {
-		if strings.HasPrefix(k, rbacAggregatePrefix) && v == "true" {
+	for _, k := range []string{rbacAggregateToAdmin, rbacAggregateToEdit, rbacAggregateToView} {
+		if role.Metadata.Labels[k] == "true" {
 			labels = append(labels, k)
 		}
 	}
-	sort.Strings(labels)
 	return labels
 }
 

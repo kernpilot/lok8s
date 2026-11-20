@@ -26,6 +26,8 @@
 #   int <s> <json file>           the same tree, with "ignore": after 1 s the
 #                                 stand-in sends SIGINT to the subshell of the
 #                                 reads, as a Ctrl-C does
+#   termok <json file>            the read waits; on a TERM it prints the
+#                                 list and exits 0
 # The stand-in and its child write their pids to STUB_PID and CHILD_PID. The
 # stand-in writes the clock (in microseconds) when it starts to STUB_START,
 # and when it sends the SIGINT to INT_SENT.
@@ -96,6 +98,11 @@ case "${kind}" in
     kill -INT "${PPID}"
     sleep "${a}" 3>&-
     cat "${FIX}/json/${b}" ;;
+  termok)
+    # wait returns at once for a trapped signal: the trap then runs.
+    trap 'cat "${FIX}/json/${a}"; exit 0' TERM
+    sleep 30 3>&- &
+    wait ;;
 esac
 STUB
   chmod +x "${STUB}/kubectl"
@@ -207,9 +214,28 @@ _alive() {
   fi
 }
 
+# _group_alive <pgid> — 0 when a process of the process group runs (a zombie
+# does not count): the pgrp field of each /proc/<pid>/stat where /proc
+# exists, else kill -0 of the group.
+_group_alive() {
+  if [[ -d /proc/self ]]; then
+    local f stat state pgrp
+    for f in /proc/[0-9]*/stat; do
+      { IFS= read -r stat < "${f}"; } 2>/dev/null || continue
+      # After the command name: state, ppid, pgrp.
+      read -r state _ pgrp _ <<< "${stat##*) }"
+      if [[ "${pgrp}" == "${1}" && "${state}" != Z ]]; then return 0; fi
+    done
+    return 1
+  fi
+  kill -0 -- "-${1}" 2>/dev/null
+}
+
 # _assert_tree_gone <clock file> <max ms> — the stand-in and its child no
-# longer run, at once after the check returned (the check waits for them),
-# and the check returned less than <max ms> after the clock in the file (in
+# longer run, and no other process of the stand-in's process group (the
+# check makes the stand-in the leader of a group: its pgid is its pid), at
+# once after the check returned (the check waits for them). The check
+# returned less than <max ms> after the clock in the file (in
 # microseconds, EPOCHREALTIME of bash 5).
 _assert_tree_gone() {
   local now="${EPOCHREALTIME//[!0-9]/}" start took pid
@@ -220,6 +246,7 @@ _assert_tree_gone() {
     [[ -n "${pid}" ]] || fail "a pid file is empty"
     ! _alive "${pid}" || fail "process ${pid} still runs after the check"
   done
+  ! _group_alive "$(cat "${STUB_PID}")" || fail "a process of the group of the read still runs after the check"
   (( took < ${2} )) || fail "the check took ${took} ms, want less than ${2} ms"
 }
 
@@ -253,8 +280,15 @@ _assert_tree_gone() {
 @test "rbac: a key in another case is not the field" { _case read-key-case; }
 @test "rbac: a second JSON document makes the list invalid" { _case read-two-documents; }
 @test "rbac: a null item makes the list invalid" { _case read-null-item; }
+@test "rbac: a leading byte-order mark makes the list invalid" { _case read-bom; }
+@test "rbac: a NaN makes the list invalid" { _case read-nan; }
+@test "rbac: an infinite number makes the list invalid" { _case read-infinity; }
+@test "rbac: a number out of the float64 range makes the list invalid" { _case read-out-of-range; }
 @test "rbac: redis-operator old binding, old role and aggregation labels" { _case redis-old-role-binding-and-labels; }
 @test "rbac: redis-operator old role without its binding" { _case redis-old-role-alone; }
+@test "rbac: only the exact aggregation keys are printed, never another key" { _case redis-old-role-hostile-labels; }
+@test "rbac: the old role gets no delete command while bindings give it to other subjects" { _case redis-old-role-shared; }
+@test "rbac: the old role with one binding of other subjects" { _case redis-old-role-one-ref; }
 @test "rbac: redis-operator leftovers before the new bindings exist" { _case redis-new-bindings-missing; }
 @test "rbac: redis-operator without pods/exec (issue #315)" { _case redis-no-exec; }
 @test "rbac: the redis-operator-chart-rbac binding after its opt-out" { _case redis-chart-rbac-opt-out; }
@@ -341,6 +375,34 @@ _assert_tree_gone() {
   run doctor::_rbac_check rbac.example
   _assert_case
   _assert_tree_gone "${STUB_START}" 4000
+}
+
+# A read that the bound stopped gives the reason of the bound, also when the
+# read handles the TERM and exits 0 with a valid list: the timeout mark comes
+# before the exit code (Go: rbacRead checks the context first).
+@test "rbac: a read that exits 0 after the stop of the bound gives the reason of the bound" {
+  doctor::_rbac_bound() { echo 1; }
+  _hang_case "termok crb-narrowed.json" "${NO_ANSWER}"
+  run doctor::_rbac_check rbac.example
+  _assert_case
+}
+
+# The command builder checks the name again (Go: rbacDeleteCommand): for a
+# name that is not a DNS-1123 subdomain of at most 253 characters it prints
+# nothing and fails, also when a caller did not check the name.
+@test "rbac: the delete command builder refuses a name that is not a DNS-1123 subdomain" {
+  local name long
+  long="$(printf 'a%.0s' {1..253})"
+  for name in "" "a b" 'a;rm -rf x' $'a\nb' $'a\tb' A 'a$(x)' -a a. "${long}a" $'a\e[31m' é; do
+    run doctor::_rbac_delete /k clusterrolebinding "${name}"
+    assert_failure
+    assert_output ""
+  done
+  for name in a redis-operator a.b-c "${long}"; do
+    run doctor::_rbac_delete /k clusterrolebinding "${name}"
+    assert_success
+    assert_output "kubectl --kubeconfig '/k' delete clusterrolebinding ${name}"
+  done
 }
 
 # A Ctrl-C in a read: the INT trap of the reads' subshell stops the process
