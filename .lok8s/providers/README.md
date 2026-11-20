@@ -84,7 +84,7 @@ The provider reads from `PROVIDER_CONFIG_FILE` either way. `lo` also exports
 `PROVIDER_DOMAIN`, the domain of the cluster (the name of the
 `clusters/<domain>/` directory, after a clean of `.` and `..` parts as in
 Go's `filepath.Clean`). The hetzner provider keys the owner mark of the
-cluster's parts on it ([owner mark](https://kernpilot.github.io/lok8s/guide/deployment#hetzner-owner-mark)).
+cluster's parts on it ([owner mark](https://lok8s.io/guide/deployment#hetzner-owner-mark)).
 
 The hetzner provider reads a part by its id and checks its owner mark right
 before each change, and it gives `hcloud` only ids. The check and the change
@@ -104,7 +104,7 @@ No driver changes needed. The standard output contract is the bridge.
 
 ## Documentation
 
-- [Concepts — Two Deployment Planes](https://kernpilot.github.io/lok8s/guide/concepts#two-deployment-planes)
-- [Specs Reference — Provider](https://kernpilot.github.io/lok8s/reference/specs#default-resolution)
-- [Addons Guide](https://kernpilot.github.io/lok8s/guide/addons)
+- [Concepts — Two Deployment Planes](https://lok8s.io/guide/concepts#two-deployment-planes)
+- [Specs Reference — Provider](https://lok8s.io/reference/specs#default-resolution)
+- [Addons Guide](https://lok8s.io/guide/addons)
 - [Driver README](../drivers/README.md)
