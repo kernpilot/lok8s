@@ -220,7 +220,53 @@ old recipients. When
 that store does not resolve (the domain directory has no `secrets` directory,
 and the project keeps a store per domain), `add-key` stops before it changes
 `.sops.yaml`. Create the directory, or select a domain that has a store, then
-run the command again.
+run the command again. When the command cannot list the store (it is not a
+directory, or you have no read or search permission on it), it also stops
+before it changes `.sops.yaml`.
+
+`add-key` writes the `.gitignore` of the store before it changes
+`.sops.yaml`. When that write fails, the command stops, and `.sops.yaml` and
+the `.enc` files stay as they were.
+
+When `.sops.yaml` lists the key already, `add-key` does not change
+`.sops.yaml`: it finishes the re-key of an earlier run that stopped (for
+example, after its write of `.sops.yaml`). It reads the sops metadata of the
+`.enc` file of each plaintext of the store. A finished file has metadata
+with a `mac` and a `lastmodified` value, and an `age` entry for the key with
+an `enc` value that is an armored age block (its header line and its footer
+line).
+
+The command re-encrypts only the plaintexts whose `.enc` file is missing or
+not finished. A finished `.enc` file keeps its bytes and its time, also when
+its plaintext is older. When each file is finished, the command prints
+`nothing to add` and changes no file, but it writes a missing `.gitignore` of
+the store. This check shows that sops added the key to the file. It does not
+show that the key decrypts the file.
+
+After that re-encrypt, the command reads the metadata again. When a file is
+still not finished, the command names it and stops with an error, and it
+does not print `done`. The creation rule of the file may then not list the
+key, for example when the key is only in a comment of `.sops.yaml`. Fix
+`.sops.yaml`, then run the command again.
+
+When `.sops.yaml` lists the key already, the command also stops, before it
+writes a file, in these cases:
+
+- An `.enc` path of the store is a symlink, a directory, a FIFO, a socket or
+  a device. The first run refuses these too.
+- An `.enc` file is larger than 16 MiB. The command does not read the
+  metadata of such a file: no `.enc` file that `lo` writes is that large.
+  Restore or remove the file.
+- An `.enc` file has no decrypted twin and does not list the key, and you do
+  not pass `--skip-orphans`. This is the refusal of the first run. An orphan
+  that lists the key needs no re-key.
+- The bash implementation cannot find `jq`, which reads the metadata. The
+  `lo` binary needs no `jq`.
+
+The first run (the key is not in `.sops.yaml` yet) re-encrypts every
+plaintext of the store. A plaintext that is older than its `.enc` file (for
+example, after a `git pull` that changed the `.enc` file) then replaces the
+value of the `.enc` file. Run `lo secrets decrypt` before `add-key`.
 
 Remove a recipient with `lo secrets remove-key`, for example when a teammate
 leaves or a key is lost. It removes the key from every creation rule, then
@@ -355,21 +401,31 @@ that the command can write opens also in a directory that it cannot write.
 A lock path that is not a regular file (a symlink, a directory, a FIFO, a
 socket or a device) stops the command before it opens the lock, and no open
 empties the lock file. The `lo` binary opens the lock without following a
-link. The bash implementation opens it with `>>`, which follows a link that
-appears after that check: through a link to a path that does not exist, it
-can make an empty file, then it stops because the open file is not the lock
-path. The lock excludes runs only where no other user can change the
-entries of the directory of the lock. When another user can write in that
+link and without a wait on a FIFO, and it stops when the opened file is not
+a regular file. The bash implementation opens it with `>>`, which follows a
+link that appears after that check: through a link to a path that does not
+exist, it can make an empty file. It then stops because the open file is not
+the lock path, and its error says to remove the lock path and the file that
+a link there names. A FIFO that appears after the check makes the bash open
+wait until a program opens the FIFO to read. The directory of the lock must
+be one that you trust. The lock excludes runs only where no other user can
+change the entries of that directory. When another user can write in that
 directory (for example, the directory of the file that a `.sops.yaml` link
 names), that user can remove or replace the lock file, and the lock gives
-no exclusion. The `lo` binary locks on every platform. The bash
+no exclusion. The lock belongs to the `.sops.yaml` file, not to a store:
+each store that uses one `.sops.yaml` file uses the same lock, so a run for
+one domain waits for a run for another. The `lo` binary locks on every
+platform. The bash
 implementation locks with `flock`: without it (macOS
 has none by default), both commands stop before they change a file. Both
 commands replace `.sops.yaml` through a temporary file and a rename. When
 `.sops.yaml` is a symlink, they replace the file that it names, and the link
 stays a link. Each
 encrypt writes its `.enc` file the same way, so an encrypt that stops leaves
-the old file whole.
+the old file whole. This holds when a command stops or a signal kills it,
+not for a power loss or a crash of the host: the commands do not sync the files
+to the disk (no `fsync`), so after a power loss a write can be lost, or the
+writes can be on the disk in another order.
 
 An encrypt (`lo secrets set --encrypt`, `lo secrets encrypt` and the re-key of
 `add-key` and `remove-key`) writes an `.enc` file only to a regular file or to
