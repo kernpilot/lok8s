@@ -21,13 +21,40 @@ teardown() {
   teardown_tmpdir
 }
 
-@test "yaml11: each value of the table prints as its scalar, and a string as a key too" {
-  local line json want out n=0 bad=0
+# _cases — the rows of the table as <json> TAB <scalar> TAB <why>, with the
+# comments and the empty lines dropped. A row of another shape fails.
+_cases() {
+  local line
   while IFS= read -r line; do
     [[ -n "${line}" && "${line}" != "#"* ]] || continue
-    [[ "${line}" == *$'\t'* ]] || fail "not <json value> TAB <yaml scalar>: ${line}"
-    json="${line%%$'\t'*}"
-    want="${line#*$'\t'}"
+    [[ "${line}" =~ ^[^$'\t']+$'\t'[^$'\t']+$'\t'(set|encoder|plain|value)$ ]] \
+      || { echo "not <json value> TAB <yaml scalar> TAB <why>: ${line}" >&2; return 1; }
+    printf '%s\n' "${line}"
+  done < "${_PROJECT_ROOT}/tests/fixtures/yaml11-quote/cases"
+}
+
+@test "yaml11: the pattern matches each string of the set and no other string" {
+  local rows json want why s got n=0 bad=0
+  rows="$(_cases)" || fail "the table has a row of another shape"
+  while IFS=$'\t' read -r json want why; do
+    [[ "${why}" != value ]] || continue
+    s="$(jq -r . <<<"${json}")" || fail "${json}: jq failed"
+    got="$(S="${s}" KUBEHZ_AGENT_YAML11="${KUBEHZ_AGENT_YAML11}" yq -n 'strenv(S) | test(strenv(KUBEHZ_AGENT_YAML11))')" \
+      || fail "${json}: yq failed"
+    n=$(( n + 1 ))
+    if [[ "${got}" != "$([[ "${why}" == set ]] && echo true || echo false)" ]]; then
+      printf 'the pattern matches %s: %s (%s)\n' "${json}" "${got}" "${why}"
+      bad=$(( bad + 1 ))
+    fi
+  done <<< "${rows}"
+  (( n >= 100 )) || fail "${n} strings checked, want at least 100"
+  (( bad == 0 )) || fail "${bad} of ${n} strings (see above)"
+}
+
+@test "yaml11: each value of the table prints as its scalar, and a string as a key too" {
+  local rows json want why out n=0 bad=0
+  rows="$(_cases)" || fail "the table has a row of another shape"
+  while IFS=$'\t' read -r json want why; do
     n=$(( n + 1 ))
     if ! out="$(printf '{"v":%s}\n' "${json}" | kubehz::agent_yaml)"; then
       echo "${json}: yq failed"
@@ -48,7 +75,7 @@ teardown() {
       printf 'the key %s prints %q, want %q\n' "${json}" "${out}" "${want}: 1"
       bad=$(( bad + 1 ))
     fi
-  done < "${_PROJECT_ROOT}/tests/fixtures/yaml11-quote/cases"
+  done <<< "${rows}"
   (( n >= 100 )) || fail "the table has ${n} cases, want at least 100"
   (( bad == 0 )) || fail "${bad} of ${n} cases print another scalar (see above)"
 }

@@ -356,10 +356,10 @@ status: "No"'
   route GET /api/spaces/sp-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
   mkdir -p "${BATS_TEST_TMPDIR}/out"
   cd "${BATS_TEST_TMPDIR}/out"
-  run kubehz::space::kubeconfig sp-1a2b3c4d --file 0777 -o yaml
+  run kubehz::space::kubeconfig sp-1a2b3c4d --file off -o yaml
   assert_success
   assert_output 'id: sp-1a2b3c4d
-file: "0777"'
+file: "off"'
 }
 
 @test "an id outside the api's shape reaches no request, not even the grant" {

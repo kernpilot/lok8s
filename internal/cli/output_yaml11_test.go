@@ -12,12 +12,13 @@ import (
 	yaml11 "go.yaml.in/yaml/v2"
 )
 
-// yaml11Case is one line of tests/fixtures/yaml11-quote/cases: a JSON value
-// and the yaml scalar that it prints as. The bats twin
+// yaml11Case is one line of tests/fixtures/yaml11-quote/cases: a JSON value,
+// the yaml scalar that it prints as, and why (set, encoder, plain or value;
+// the header of the file says what each means). The bats twin
 // (tests/unit/kubehz_agent_yaml11_test.bats) reads the same file.
 type yaml11Case struct {
-	line       int
-	json, want string
+	line            int
+	json, want, why string
 }
 
 func readYAML11Cases(t *testing.T) []yaml11Case {
@@ -35,10 +36,23 @@ func readYAML11Cases(t *testing.T) []yaml11Case {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 2 || !json.Valid([]byte(fields[0])) {
-			t.Fatalf("cases line %d: want <json value> TAB <yaml scalar>, got %q", n, line)
+		if len(fields) != 3 || !json.Valid([]byte(fields[0])) {
+			t.Fatalf("cases line %d: want <json value> TAB <yaml scalar> TAB <why>, got %q", n, line)
 		}
-		cases = append(cases, yaml11Case{line: n, json: fields[0], want: fields[1]})
+		isString := strings.HasPrefix(fields[0], `"`)
+		switch fields[2] {
+		case "set", "encoder", "plain":
+			if !isString {
+				t.Fatalf("cases line %d: %s is %s, but not a string", n, fields[0], fields[2])
+			}
+		case "value":
+			if isString {
+				t.Fatalf("cases line %d: %s is a string, not a value", n, fields[0])
+			}
+		default:
+			t.Fatalf("cases line %d: why %q is not set, encoder, plain or value", n, fields[2])
+		}
+		cases = append(cases, yaml11Case{line: n, json: fields[0], want: fields[1], why: fields[2]})
 	}
 	if err := sc.Err(); err != nil {
 		t.Fatal(err)
@@ -109,6 +123,30 @@ func TestYAML11QuotesWhatAYAML11ReaderReadsAsABoolANullOrANumber(t *testing.T) {
 		} else if len(keys) != 1 || keys[s] != 1 {
 			t.Errorf("line %d: the key %s reads back as %#v under YAML 1.1", c.line, c.json, keys)
 		}
+	}
+}
+
+// The pattern holds the set: it matches each string of the table that is in
+// the set, and no other string. The output alone cannot show this for a form
+// that yaml.v3 quotes itself (0o17, 0777, 1e3), so a class could go missing
+// from the pattern and the output test would still pass.
+func TestYAML11PatternHoldsTheSet(t *testing.T) {
+	n := 0
+	for _, c := range readYAML11Cases(t) {
+		if c.why == "value" {
+			continue
+		}
+		var s string
+		if err := json.Unmarshal([]byte(c.json), &s); err != nil {
+			t.Fatalf("line %d: %v", c.line, err)
+		}
+		if got, want := yaml11ScalarRe.MatchString(s), c.why == "set"; got != want {
+			t.Errorf("line %d: the pattern matches %s: %v, want %v (%s)", c.line, c.json, got, want, c.why)
+		}
+		n++
+	}
+	if n < 100 {
+		t.Fatalf("%d strings checked, want at least 100", n)
 	}
 }
 
