@@ -922,6 +922,20 @@ there from the next tick.
 Each later `lo kubehz deploy` keeps the markers on `kubehz-agent-state`:
 `kubectl apply` removes only what an earlier apply set.
 
+If a GitOps controller applies the agent manifests, make sure that it does
+not reset `kubehz-agent-state`: let it create the ConfigMap only. For Flux,
+add the annotation `kustomize.toolkit.fluxcd.io/ssa: IfNotPresent` to that
+ConfigMap in your overlay. The shipped manifest of the ConfigMap has no
+annotations. A reset deletes all the markers:
+
+- The time of the last assessment and a pending platform request go. The
+  next tick sends an assessment and writes the time again. A controller that
+  resets the ConfigMap again and again thus causes at most one assessment
+  per reset, and at most one per 5-minute tick.
+- A pending claim nonce goes. That claim never verifies: place a new one
+  with `lo kubehz claim`.
+- The desired-state validator goes. The next poll gets one full answer.
+
 ## Status and deregistration
 
 ```bash
@@ -1216,16 +1230,35 @@ a refresh through the heartbeat response). The platform turns it into a
 handover **feasibility** verdict.
 
 The agent keeps the time of the last send on `kubehz-agent-state`, and it
-sends an assessment only when it can store that time. Before the probes, it
-sends the write as a server-side dry run. If the agent cannot write the
-ConfigMap (its RBAC lacks the `patch`, or an admission webhook refuses it),
-the tick sends no assessment and logs
+sends an assessment only when it has stored that time. Before the probes, it
+writes the new time, and the same call removes a pending platform request
+(one `kubectl annotate`, one patch). The write comes first so that the time
+on the ConfigMap is never older than the last assessment sent: an agent that
+cannot store the time sends no assessment, and thus cannot send one on every
+tick. What the agent writes for each outcome of the send:
+
+| Outcome | Before the send | After the send |
+|---|---|---|
+| Delivered: the beat with the assessment lands | the new time; the request removed | nothing |
+| Rejected: that beat fails, the plain retry lands | the new time; the request removed | nothing (the next assessment comes after 24 h) |
+| Failed: both beats fail | the new time; the request removed | the old time and the request, in one call (the next tick sends again) |
+
+A tick that writes the time and then sends no assessment (a probe has no
+answer, or the beat is skipped) puts back the old values the same way.
+
+If the agent cannot write the ConfigMap (its RBAC lacks the `patch`, or an
+admission webhook refuses it), the tick sends no assessment, keeps the
+request, and logs
 `kubehz: assessment not sent: the agent cannot write configmap/kubehz-agent-state in kubehz-system; run 'lo kubehz deploy'`.
 If the agent cannot read the ConfigMap, the tick logs
 `kubehz: assessment and desired-state poll skipped: …`. In both cases the
 plain heartbeat still goes out. `lo kubehz deploy` puts back the ConfigMap
 and the agent's RBAC. An admission webhook that refuses the write is yours
 to change.
+
+If the write that puts back the old values fails too, the tick logs
+`kubehz: could not put back the assessment marker on configmap/kubehz-agent-state in kubehz-system; the next assessment comes after the 24h window or on a platform request`.
+That assessment is lost. The agent does not send it again on each tick.
 
 ```bash
 lo kubehz assess    # pretty-print the stored assessment + feasibility
