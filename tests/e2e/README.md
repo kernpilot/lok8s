@@ -15,11 +15,14 @@ slot under `10.125.0.0/16` (see [SUBNETS.md](./SUBNETS.md)).
 | `registry-tls` | 131 | the certificate volume: mint, mount, serve, `tls status`, `tls renew`, `registry clean`, the one-time import from `.secrets/tls/registries` | go, bash |
 | `shared-registries` | 132 + 133 | two domains, one mirror set: reuse instead of a second set, `lo down` on one leaves it up, `registry clean --shared` removes it and its network | go, bash |
 | `lifecycle` | 134 | up, up again (idempotent), `--force-recreate`, down, up, destroy — and the confirmation prompts on a real terminal | go, bash, mixed |
+| `suc` | 135 | the `system-upgrade-controller` addon as shipped: the controller runs on its narrowed RBAC and its pinned image, and one Plan (cordon, drain, a Secret) completes on the pinned kubectl image, before and after a restart, with no `forbidden` in any log | go |
 | `remote-lo` | 129 | a Lo cluster on a remote Hetzner VM, docker mode | opt-in (`E2E_REMOTE=1`) |
 | `remote-ci` | 130 | the same, CI mode | opt-in (`E2E_REMOTE=1`) |
 
 Every scenario ends by asserting that the machine is clean:
 `e2e::assert_torn_down` after `lo down` and again after `lo destroy`.
+`suc` asserts it after `lo destroy` only. Its subject is the addon, and
+its teardown destroys the live cluster (`e2e::final_teardown`).
 
 The two remote scenarios need a Hetzner account, an `HCLOUD_TOKEN` and a
 few minutes of a billed VM. They are opt-in, they are NOT in CI, and
@@ -186,7 +189,8 @@ tests/e2e/
 ├── cache-mode/             # slot 128 — build:false cache pre-pull
 ├── registry-tls/           # slot 131 — the certificate volume
 ├── shared-registries/      # slots 132 + 133 — one mirror set, two domains
-└── lifecycle/              # slot 134 — up/down/up/destroy + the prompts
+├── lifecycle/              # slot 134 — up/down/up/destroy + the prompts
+└── suc/                    # slot 135 — the system-upgrade-controller addon + one Plan
 ```
 
 Each scenario dir also holds per-run state, all of it gitignored: the
