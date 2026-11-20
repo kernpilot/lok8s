@@ -255,7 +255,8 @@ Before the first write, the command warns when the key is your own decrypt
 identity: the public key line of the sops age keys file (`SOPS_AGE_KEY_FILE`,
 by default `~/.config/sops/age/keys.txt`), or the `.pub` of the SSH key that
 `lo` decrypts with (`LOK8S_SSH_KEY`, by default `~/.ssh/id_ed25519`). After
-the removal, that identity cannot decrypt the re-keyed files. Every run that
+the removal, that identity cannot decrypt the re-keyed files, so a resume of
+a stopped run needs another identity that decrypts every file. Every run that
 comes to this check prints a line that says which sources the check reads.
 It does not read `SOPS_AGE_KEY`, `SOPS_AGE_KEY_CMD` or other files, so no
 warning does not mean that the key is not yours.
@@ -268,6 +269,8 @@ a decrypted twin that it did not re-key, or, without `--skip-orphans`, an
 `.enc` file with no decrypted twin. Each error names the path. If the re-key
 stops after the `.sops.yaml` write (for example, when an encrypt fails or
 this check fails), the command prints the command to run again. That run resumes the re-key.
+The resume needs an identity that decrypts every managed file of the selected
+stores, because it compares each file with its twin again.
 
 The selected stores must be quiet while the command runs: no other command
 or program may write to them. The lock (below) keeps a second `add-key` or

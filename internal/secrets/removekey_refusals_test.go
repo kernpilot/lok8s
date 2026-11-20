@@ -411,7 +411,7 @@ func TestRemoveKeyResumesAStoppedRekey(t *testing.T) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
 	wantTail := "[error] Failed to encrypt Secret.app.default.K\n" +
-		"[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again resumes it:\n" +
+		"[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again, with an identity that decrypts every file, resumes it:\n" +
 		"[error]   lo secrets remove-key " + g + " --domain a.dev --all\n"
 	if !strings.HasSuffix(errOut.String(), wantTail) {
 		t.Errorf("stderr:\n%q\nwant the tail:\n%q", errOut.String(), wantTail)
@@ -640,7 +640,7 @@ func TestRemoveKeyWarnsAboutTheCallersOwnIdentity(t *testing.T) {
 			if err := c.RemoveKey(g, false, false); err != nil {
 				t.Fatalf("%v\n%s", err, errOut.String())
 			}
-			want := "[warn] the recipient is your own decrypt identity (" + file + "): once it is removed, that identity cannot decrypt the re-keyed files\n" +
+			want := "[warn] the recipient is your own decrypt identity (" + file + "): once it is removed, that identity cannot decrypt the re-keyed files, and a resume of a stopped run needs another identity that decrypts every file\n" +
 				scopeWarn + rotateWarn
 			if errOut.String() != want {
 				t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)

@@ -1006,7 +1006,7 @@ _sops_writes() {
   [[ "$output" == *"Encrypted 1 secret(s)
 [error] the sops metadata of ${enc} holds a duplicate member
 [error] 0 .enc file(s) still list the removed recipient after the re-key, 1 cannot be read or do not parse
-[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again resumes it:
+[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again, with an identity that decrypts every file, resumes it:
 [error]   lo secrets remove-key ${RCPT_B} --domain a.dev" ]] || { echo "$output" >&2; return 1; }
   ! grep -qF "${RCPT_B}" "${CFG}" || { echo ".sops.yaml still lists the recipient: the run stopped before the first write" >&2; return 1; }
 }
@@ -1065,7 +1065,7 @@ ${changed}" ;;
     [ "$status" -eq 1 ] || { echo "${kind}: status $status: $output" >&2; return 1; }
     [[ "$output" == *"Encrypted 1 secret(s)
 ${want}
-[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again resumes it:
+[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again, with an identity that decrypts every file, resumes it:
 [error]   lo secrets remove-key ${RCPT_B} --domain a.dev" ]] || { echo "${kind}: $output" >&2; return 1; }
     ! grep -qF "${RCPT_B}" "${s}/Secret.app.default.K.enc" || { echo "${kind}: the managed .enc was not re-keyed" >&2; return 1; }
   done
@@ -1561,7 +1561,7 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   DOMAIN=a.dev run _rm "${RCPT_B}" 1
   [ "$status" -eq 1 ]
   [[ "$output" == *"[error] Failed to encrypt Secret.app.default.K
-[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again resumes it:
+[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again, with an identity that decrypts every file, resumes it:
 [error]   lo secrets remove-key ${RCPT_B} --domain a.dev --all" ]] || { echo "$output" >&2; return 1; }
 
   # Each file that the re-key re-keyed is left with the .enc the newer file
@@ -1599,7 +1599,7 @@ ${_rotate}" ]] || { echo "$output" >&2; return 1; }
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
   # The scope line follows: the two sources the check reads, and those it
   # does not.
-  [[ "$output" == *"[warn] the recipient is your own decrypt identity (${SOPS_AGE_KEY_FILE}): once it is removed, that identity cannot decrypt the re-keyed files
+  [[ "$output" == *"[warn] the recipient is your own decrypt identity (${SOPS_AGE_KEY_FILE}): once it is removed, that identity cannot decrypt the re-keyed files, and a resume of a stopped run needs another identity that decrypts every file
 ${_scope}
 "* ]] || {
     echo "$output" >&2; return 1; }

@@ -776,7 +776,7 @@ func (c *Context) rerunRemoveKey(recipient string, all, skipOrphans bool) {
 	if skipOrphans {
 		cmd += " --skip-orphans"
 	}
-	ui.ErrorTo(c.ErrOut, "the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again resumes it:")
+	ui.ErrorTo(c.ErrOut, "the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again, with an identity that decrypts every file, resumes it:")
 	ui.ErrorTo(c.ErrOut, "  %s", cmd)
 }
 
@@ -1121,7 +1121,7 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 		return ErrHandled
 	}
 	if own := ownIdentity(agePubkey); own != "" {
-		ui.WarnTo(c.ErrOut, "the recipient is your own decrypt identity (%s): once it is removed, that identity cannot decrypt the re-keyed files", own)
+		ui.WarnTo(c.ErrOut, "the recipient is your own decrypt identity (%s): once it is removed, that identity cannot decrypt the re-keyed files, and a resume of a stopped run needs another identity that decrypts every file", own)
 	}
 	ui.WarnTo(c.ErrOut, "%s", ownIdentityScope)
 

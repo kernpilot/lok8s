@@ -363,7 +363,7 @@ func TestRemoveKeyPostCheckRefusesADuplicateMember(t *testing.T) {
 	want := scopeWarn +
 		"[error] the sops metadata of clusters/a.dev/secrets/Secret.app.default.K.enc holds a duplicate member\n" +
 		"[error] 0 .enc file(s) still list the removed recipient after the re-key, 1 cannot be read or do not parse\n" +
-		"[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again resumes it:\n" +
+		"[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again, with an identity that decrypts every file, resumes it:\n" +
 		"[error]   lo secrets remove-key " + g + " --domain a.dev\n"
 	if errOut.String() != want {
 		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
@@ -466,7 +466,7 @@ func TestRemoveKeyPostCheckRefusesAFileThatAppears(t *testing.T) {
 					t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 				}
 				want := scopeWarn + tc.want +
-					"[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again resumes it:\n" +
+					"[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again, with an identity that decrypts every file, resumes it:\n" +
 					"[error]   lo secrets remove-key " + g + " --domain a.dev\n"
 				if errOut.String() != want {
 					t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
