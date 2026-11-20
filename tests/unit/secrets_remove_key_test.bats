@@ -1008,6 +1008,51 @@ EOF
   [ "$(cat "${f}.enc")" = "new" ]
 }
 
+@test "with a mv without -T, a path that turns into a directory during the encrypt fails it and leaves no temp file" {
+  # The check after the move detects the move INTO a directory and fails
+  # closed; it does not prevent the move (GNU mv -T does).
+  _load
+  local store="${PATH_CLUSTERS}/a.dev/secrets" outside="${BATS_TEST_TMPDIR}/outside" f bin kind real_mv
+  f="${store}/Secret.app.default.K"
+  printf 'v' > "${f}"
+  mkdir -p "${outside}"
+  real_mv="$(type -P mv)" || skip "mv not installed"
+  # A mv without -T, first on the PATH of this test only: before it moves, it
+  # turns the destination into a directory, or into a symlink to a directory
+  # outside the store.
+  bin="${BATS_TEST_TMPDIR}/mv-without-t"
+  mkdir -p "${bin}"
+  cat > "${bin}/mv" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == --help ]]; then
+  echo "usage: mv [-f] source target"
+  exit 0
+fi
+dest="${*: -1}"
+rm -f -- "${dest}"
+case "${MV_STUB_KIND}" in
+  dir) mkdir -- "${dest}" ;;
+  link) ln -s -- "${MV_STUB_OUTSIDE}" "${dest}" ;;
+esac
+exec "${MV_STUB_REAL}" "$@"
+EOF
+  chmod +x "${bin}/mv"
+  export MV_STUB_REAL="${real_mv}" MV_STUB_OUTSIDE="${outside}"
+  local PATH="${bin}:${PATH}"
+  ! secrets::_mv_has_t || { echo "fixture: the mv stub takes -T" >&2; return 1; }
+  _sops_writes 'new' 0
+  for kind in dir link; do
+    rm -rf -- "${f}.enc"
+    export MV_STUB_KIND="${kind}"
+    run secrets::_encrypt_file "${f}"
+    [ "$status" -eq 1 ] || { echo "${kind}: status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] ${f}.enc is not a regular file after the rename (a directory or a symlink made during the encrypt): the .enc was not written — check that path, then encrypt again
+[error] Failed to encrypt Secret.app.default.K" ] || { echo "${kind}: $output" >&2; return 1; }
+    [ -z "$(find -H "${store}" "${outside}" -name '.*.tmp-*')" ] || { echo "${kind}: a temp file was left" >&2; return 1; }
+    [ -z "$(ls -A "${outside}")" ] || { echo "${kind}: a file was left in the directory outside the store" >&2; return 1; }
+  done
+}
+
 @test "a stale cache (an .enc newer than its plaintext) is refused before any write" {
   # The re-key encrypts the plaintext: an older plaintext would overwrite the
   # newer value of the .enc.
