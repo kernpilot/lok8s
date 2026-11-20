@@ -19,8 +19,13 @@ metadata:
 spec:
   runtime: kind
   kubernetes:
-    # The node image the lifecycle scenario pins: the framework default.
-    version: v1.31.12@sha256:0f5cc49c5e73c0c2bb6e2df56e7df189240d83cf94edfa30946482eb08ec57d2
+    # Not the framework default (v1.31.12). The addon's kubectl image
+    # (rancher/kuberlr-kubectl v8.1.1) bundles kubectl 1.34 to 1.36, and
+    # kuberlr allows one minor version of skew, so the drain works on 1.33
+    # to 1.37 only. The addon renders for 1.35, so the scenario runs on
+    # 1.35: the v1.35.0 image of the release notes of kind v0.31.0, the
+    # kind that .bin/b.lock pins.
+    version: v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f
   cluster:
     domain: 135.lok8s.dev
   network:

@@ -33,6 +33,9 @@
 #
 # The go leg only: the subject is the addon, not the implementation.
 #
+# The node runs 1.35, the addon's target, not the framework default: the
+# drain's kubectl image works on 1.33 to 1.37 only (cluster.lok8s.yaml).
+#
 # The budget, at most: provision 300 s, two waits for the controller and
 # the CRD (240 s each), two Plan runs (300 s each) and after each a wait
 # of 60 s for the node to be schedulable, the restart (240 s) and the
