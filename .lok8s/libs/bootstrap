@@ -1748,17 +1748,31 @@ bootstrap::_nd_objects() {
 
 # bootstrap::_without_objects <stream> <label>...
 # The rendered stream without the named objects (what
-# --ignore-nondeterministic diffs). Empty when nothing is left.
+# --ignore-nondeterministic diffs), in the order of the stream. Empty when
+# nothing is left. One yq pass reads the stream itself, so each object that
+# stays is as the render wrote it: a scalar keeps its style. kubectl reads
+# the diff input as YAML 1.1, as it reads the real apply: a quoted "yes" or
+# "1:20" stays a string, and a plain yes stays a bool. The Go twin
+# (withoutObjects) keeps the styles in the same way. The label is the label
+# of bootstrap::_object_lines: it is built from the JSON form of the object
+# (to_json), so a field that is not a string in the JSON gives "". Only
+# documents that are maps stay, as in bootstrap::_object_lines: an empty
+# document, a document with only a comment, a scalar or a list is not in the
+# output. --header-preprocess=false keeps the comments and the --- before
+# the first document out of the output too.
 bootstrap::_without_objects() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the render can hold Secret values (utils/keysonly.sh)
   local _stream="${1}"; shift
-  local _kept
-  _kept="$(bootstrap::_object_lines "${_stream}" | awk -F'\t' -v drop="$(printf '%s\n' "${@}")" '
-    BEGIN { n = split(drop, d, "\n"); for (i = 1; i <= n; i++) if (d[i] != "") skip[d[i]] = 1 }
-    !($1 in skip) { print substr($0, length($1) + 2) }')"
-  [[ -n "${_kept}" ]] || return 0
-  printf '%s\n' "${_kept}" | yq -p=json -o=yaml '.'
+  printf '%s\n' "${_stream}" | BOOTSTRAP_DROP_LABELS="$(printf '%s\n' "${@}")" yq --header-preprocess=false '
+    select(. != null and tag == "!!map")
+    | select(
+        ((to_json(0) | from_json) as $j
+          | (($j.metadata | select(tag == "!!map")) // {}) as $m
+          | (($m.namespace | select(tag == "!!str")) // "") as $ns
+          | (($j.apiVersion | select(tag == "!!str")) // "") + " " + (($j.kind | select(tag == "!!str")) // "") + " "
+            + (if $ns != "" then $ns + "/" else "" end) + (($m.name | select(tag == "!!str")) // "")) as $l
+        | strenv(BOOTSTRAP_DROP_LABELS) | split("\n") | any_c(. == $l) | not)'
 }
 
 # bootstrap::_diff_manifest <rendered> <stem> <kubeconfig> <label> [diff-input]
