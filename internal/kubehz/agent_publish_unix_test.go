@@ -15,6 +15,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -206,9 +208,11 @@ func TestPublishKubeconfigWriteFailureRemovesOnlyInTheOpenedDirectory(t *testing
 
 // The open needs the read right on the directory (os.OpenRoot opens it
 // read-only). In a directory with only the write and the search rights
-// (mode 0300), the publish fails and writes nothing, and the command
-// prints "cannot write". The bash twin writes the file there. Skips as
-// root, which can read any directory.
+// (mode 0300), the publish fails and writes nothing. The command prints
+// "cannot write" and a hint for the read right on the directory, not the
+// hint for a directory that the user cannot write to. The bash twin writes
+// the file there, so the hint is Go-only. Skips as root, which can read
+// any directory.
 func TestPublishKubeconfigNeedsTheReadRightOnTheDirectory(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root can read any directory")
@@ -226,7 +230,7 @@ func TestPublishKubeconfigNeedsTheReadRightOnTheDirectory(t *testing.T) {
 	_, err = h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", file, false)
 	mustErr(t, err)
 	want := "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write " + file + "\n" +
-		"  Name a file in a directory that exists and that you can write to.\n"
+		"  lo also needs the read right on " + dir + ". Name a file in a directory that you can read and write to.\n"
 	if got := h.errOut.String(); got != want {
 		t.Errorf("stderr = %q, want %q", got, want)
 	}
@@ -249,4 +253,205 @@ func TestPublishKubeconfigRenameStaysInTheOpenedDirectory(t *testing.T) {
 	}
 	checkPublished(t, opened, agentKubeconfigYAML)
 	checkDecoys(t, other, target)
+}
+
+// A last name that names no file in the directory (empty, ".", "..", or a
+// "/" at the end) is refused before the publish makes the temporary file,
+// with and without force. The command prints the refusal of a directory.
+// kubeconfigTarget refuses these paths first, so this is a second check.
+// Not parallel: it changes the working directory.
+func TestPublishKubeconfigRefusesANameThatNamesNoFile(t *testing.T) {
+	base := linkTestDir(t)
+	a := filepath.Join(base, "a")
+	must(t, os.Mkdir(a, 0o700))
+	t.Chdir(base)
+	for _, target := range []string{"", "a/", ".", "..", "a/.", "a/..", a + "/.."} {
+		for _, force := range []bool{false, true} {
+			if _, err := publishKubeconfig(target, []byte(agentKubeconfigYAML), force); !errors.Is(err, errKubeconfigNoName) {
+				t.Errorf("publish(%q, force %v): err = %v, want errKubeconfigNoName", target, force, err)
+			}
+		}
+	}
+	if got := dirNames(t, base); got != "a" {
+		t.Errorf("the test dir holds %q, want only a: a temporary file was left behind", got)
+	}
+	if got := dirNames(t, a); got != "" {
+		t.Errorf("a holds %q, want nothing: a temporary file was left behind", got)
+	}
+	h := agentHarness(t)
+	mustErr(t, h.ctx.kubeconfigPublishFailed("cluster kubeconfig cl-1a2b3c4d", "a/..", false, errKubeconfigNoName))
+	want := "[error] kubehz cluster kubeconfig cl-1a2b3c4d: a/.. is a directory\n  Name a file, not a directory.\n"
+	if got := h.errOut.String(); got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+}
+
+// The cleanup makes one attempt to remove the temporary file, and only
+// while its name names that file. Here the link step moves the temporary
+// file away and puts another file at its name: the fallback does not run
+// (the check of the temporary file fails), and the other file stays. Not
+// parallel: it replaces linkKubeconfig.
+func TestPublishKubeconfigCleanupKeepsAFileAtTheTemporaryName(t *testing.T) {
+	link := linkKubeconfig
+	t.Cleanup(func() { linkKubeconfig = link })
+	dir := t.TempDir()
+	moved := filepath.Join(dir, "moved")
+	other := ""
+	linkKubeconfig = func(_ *os.Root, oldname, newname string) error {
+		must(t, os.Rename(filepath.Join(dir, oldname), moved))
+		other = plant(t, dir, oldname)
+		return &os.LinkError{Op: "link", Old: oldname, New: newname, Err: syscall.ENOSYS}
+	}
+	_, err := publishKubeconfig(filepath.Join(dir, "kc.yaml"), []byte(agentKubeconfigYAML), false)
+	if !errors.Is(err, syscall.ENOSYS) {
+		t.Fatalf("publish: err = %v, want the link error ENOSYS", err)
+	}
+	if raw, err := os.ReadFile(other); err != nil || string(raw) != "decoy" {
+		t.Errorf("the file at the temporary name holds %q (read: %v): the cleanup removed or changed it", raw, err)
+	}
+	if got, want := dirNames(t, dir), filepath.Base(other)+" moved"; got != want {
+		t.Errorf("dir holds %q, want %q", got, want)
+	}
+}
+
+// With force, a rename that fails (here: a directory at the target) leaves
+// the target as it was, and the cleanup removes the temporary file.
+func TestPublishKubeconfigFailedRenameRemovesTheTemporaryFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "kc.yaml")
+	must(t, os.Mkdir(target, 0o700))
+	inside := plant(t, target, "inside")
+	if _, err := publishKubeconfig(target, []byte(agentKubeconfigYAML), true); err == nil {
+		t.Fatal("the rename onto a directory worked")
+	}
+	if got := dirNames(t, dir); got != "kc.yaml" {
+		t.Errorf("dir holds %q, want only kc.yaml: a temporary file was left behind", got)
+	}
+	if got := dirNames(t, target); got != "inside" {
+		t.Errorf("the target directory holds %q, want only inside", got)
+	}
+	if got := readFile(t, inside); got != "decoy" {
+		t.Errorf("inside = %q: the target was changed", got)
+	}
+}
+
+// A close of the fallback file that fails after the write (EIO on a
+// network file system) is a failed write: the publish removes the part and
+// returns a kubeconfigWriteError with the cause and with left false. Not
+// parallel: it replaces linkKubeconfig and closeKubeconfigFile.
+func TestPublishKubeconfigCloseFailureRemovesThePart(t *testing.T) {
+	link, closeFile := linkKubeconfig, closeKubeconfigFile
+	t.Cleanup(func() { linkKubeconfig, closeKubeconfigFile = link, closeFile })
+	links, closes := 0, 0
+	linkKubeconfig = failLink(t, syscall.EPERM, &links, nil)
+	closeKubeconfigFile = func(f *os.File) error {
+		closes++
+		must(t, f.Close())
+		return &os.PathError{Op: "close", Path: f.Name(), Err: syscall.EIO}
+	}
+	dir := t.TempDir()
+	_, err := publishKubeconfig(filepath.Join(dir, "kc.yaml"), []byte(agentKubeconfigYAML), false)
+	var werr *kubeconfigWriteError
+	if !errors.As(err, &werr) {
+		t.Fatalf("publish: err = %v, want a kubeconfigWriteError", err)
+	}
+	if got := werr.cause(); got != "input/output error" {
+		t.Errorf("cause = %q", got)
+	}
+	if werr.left {
+		t.Error("left = true: the part was not removed")
+	}
+	if closes != 1 {
+		t.Errorf("the close ran %d times, want 1", closes)
+	}
+	if got := dirNames(t, dir); got != "" {
+		t.Errorf("dir holds %q, want nothing: the part or the temporary file stays", got)
+	}
+}
+
+// kubeconfigTempNameRe is the name of a temporary file: ".kubeconfig-" and
+// 26 characters of the base32 alphabet (crypto/rand.Text).
+var kubeconfigTempNameRe = regexp.MustCompile(`^\.kubeconfig-[A-Z2-7]{26}$`)
+
+// Each temporary file gets a new name of that form, mode 0600.
+func TestCreateKubeconfigTempName(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	names := map[string]bool{}
+	for i := range 2 {
+		f, name, err := createKubeconfigTemp(root)
+		if err != nil {
+			t.Fatalf("create %d: %v", i+1, err)
+		}
+		fi, serr := f.Stat()
+		must(t, f.Close())
+		if serr != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("create %d: mode %v (stat: %v), want 0600", i+1, fi.Mode(), serr)
+		}
+		if !kubeconfigTempNameRe.MatchString(name) {
+			t.Errorf("create %d: name %q, want %s", i+1, name, kubeconfigTempNameRe)
+		}
+		names[name] = true
+	}
+	if len(names) != 2 {
+		t.Errorf("two creates gave the names %v, want two names", names)
+	}
+}
+
+// openFDsUnder counts the descriptors of this process that name dir or a
+// file under it (/proc/self/fd).
+func openFDsUnder(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("no /proc/self/fd: %v", err)
+	}
+	n := 0
+	for _, e := range entries {
+		dest, err := os.Readlink("/proc/self/fd/" + e.Name())
+		if err == nil && (dest == dir || strings.HasPrefix(dest, dir+"/")) {
+			n++
+		}
+	}
+	return n
+}
+
+// The publish closes each descriptor that it opens: the directory (the
+// os.Root), the temporary file and the file of the fallback. Linux only:
+// it reads /proc/self/fd. Not parallel: it replaces linkKubeconfig.
+func TestPublishKubeconfigClosesItsDescriptors(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads /proc/self/fd")
+	}
+	link := linkKubeconfig
+	t.Cleanup(func() { linkKubeconfig = link })
+	dir := linkTestDir(t)
+	calls := 0
+	for _, tc := range []struct {
+		name     string
+		force    bool
+		fallback bool
+	}{
+		{name: "link.yaml"},
+		{name: "rename.yaml", force: true},
+		{name: "fallback.yaml", fallback: true},
+	} {
+		linkKubeconfig = link
+		if tc.fallback {
+			linkKubeconfig = failLink(t, syscall.EPERM, &calls, nil)
+		}
+		before := openFDsUnder(t, dir)
+		if _, err := publishKubeconfig(filepath.Join(dir, tc.name), []byte(agentKubeconfigYAML), tc.force); err != nil {
+			t.Fatalf("publish %s: %v", tc.name, err)
+		}
+		if after := openFDsUnder(t, dir); after != before {
+			t.Errorf("publish %s: %d descriptors in the test dir before, %d after", tc.name, before, after)
+		}
+	}
+	if got := dirNames(t, dir); got != "fallback.yaml link.yaml rename.yaml" {
+		t.Errorf("dir holds %q", got)
+	}
 }
