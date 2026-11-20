@@ -436,8 +436,9 @@ func TestSetEncryptRefusesAnEncPathThatIsNotARegularFile(t *testing.T) {
 			for _, e := range entries {
 				names = append(names, e.Name())
 			}
-			if !slices.Equal(names, []string{"Secret.app.default.K", "Secret.app.default.K.enc"}) {
-				t.Errorf("the store holds %q, want the plaintext and the .enc path only", names)
+			// set writes the .gitignore before the plaintext.
+			if !slices.Equal(names, []string{".gitignore", "Secret.app.default.K", "Secret.app.default.K.enc"}) {
+				t.Errorf("the store holds %q, want the .gitignore, the plaintext and the .enc path only", names)
 			}
 		})
 	}

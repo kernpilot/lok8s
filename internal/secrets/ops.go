@@ -57,6 +57,14 @@ func (c *Context) Init(sshKey string) error {
 	}
 
 	if fsutil.IsRegular(sopsConfig) {
+		// A rerun writes no config, but it checks the .gitignore of the
+		// store and writes it when it needs a change, as the first run
+		// does. A store that does not exist holds no plaintext.
+		if store := c.initStorePath(); fsutil.DirExists(store) {
+			if err := c.ensureGitignore(store); err != nil {
+				return err
+			}
+		}
 		raw, _ := os.ReadFile(sopsConfig)
 		// Check if this key is already present
 		if grepQF(string(raw), agePubkey) {
@@ -474,6 +482,10 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 	if err := os.MkdirAll(secretsDir, 0o755); err != nil {
 		return err
 	}
+	// Before the plaintext: the .gitignore that keeps it out of git.
+	if err := c.ensureGitignore(secretsDir); err != nil {
+		return err
+	}
 
 	cacheFile := secretsDir + "/Secret." + name + "." + namespace + "." + key
 	if err := os.WriteFile(cacheFile, []byte(value), 0o600); err != nil {
@@ -727,6 +739,10 @@ func (c *Context) Decrypt(sshKey string) error {
 	if !fsutil.DirExists(secretsDir) {
 		ui.WarnTo(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil
+	}
+	// Before the first plaintext: the .gitignore that keeps it out of git.
+	if err := c.ensureGitignore(secretsDir); err != nil {
+		return err
 	}
 
 	// Resolve the age private key. Checked in order:

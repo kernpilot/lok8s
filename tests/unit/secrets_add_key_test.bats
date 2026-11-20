@@ -917,6 +917,34 @@ Encrypted 2 secret(s)
   [ ! -s "${SOPS_LOG}" ]
 }
 
+# A .gitignore with a rule that can re-include a plaintext is refused before
+# any write: the first run (a new recipient) and the rerun with nothing to
+# do (the recipient is there) both stop before the lock file and the
+# config, with the line of the rule (Go twin:
+# TestAddKeyRerunRefusesAGitignoreThatReIncludesAPlaintext).
+@test "a .gitignore that can re-include a plaintext is refused before any write, also on a rerun with nothing to do" {
+  _load
+  local store="${PATH_CLUSTERS}/a.dev/secrets" key before
+  { builtin printf '%s\n' \
+      '# BEGIN lok8s secrets. lo rewrites the lines up to the END line: add your own rules below it.' \
+      '# Ignore everything except this file and the SOPS-encrypted secret files.' \
+      '# A plaintext secret file must never be committed.' \
+      '*' '!.gitignore' '!Secret.*.enc' '# END lok8s secrets' '!*'; } > "${store}/.gitignore"
+  printf 'v' > "${store}/Secret.app.default.K"
+  touch -t 200001010000 "${store}/Secret.app.default.K"
+  for key in "${KEY_B}" "${KEY_A}"; do
+    before="$(_state "${PATH_BASE}" "${store}")"
+    DOMAIN=a.dev run _add "${key}"
+    [ "$status" -eq 1 ] || { echo "${key}: status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] ${store}/.gitignore:8: !*: this rule can re-include a plaintext secret file (the last matching rule wins): remove it
+[error] ${store}/.gitignore was not changed, and nothing was written: fix the lines above, then run this command again" ] || {
+      echo "${key}: $output" >&2; return 1; }
+    [ "$(_state "${PATH_BASE}" "${store}")" = "${before}" ] || { echo "${key}: a write" >&2; return 1; }
+    [ ! -e "${PATH_BASE}/.sops.yaml.lock" ] || { echo "${key}: a lock file" >&2; return 1; }
+    [ ! -s "${ENCRYPT_RAN}" ]
+  done
+}
+
 @test "a store that add-key cannot list is refused before any write, with the key in .sops.yaml and without it" {
   # No read permission on the store: the lookup of the .gitignore in it still
   # works (Go twin: TestAddKeyRefusesAStoreThatItCannotList).

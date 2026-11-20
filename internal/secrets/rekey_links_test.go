@@ -729,7 +729,8 @@ func TestEnsureGitignoreReplacesAHardLink(t *testing.T) {
 	if got := readFile(t, outside); got != "# old\n" {
 		t.Errorf("the hard link sees %q: the write went through it", got)
 	}
-	if got := readFile(t, dir+"/.gitignore"); got != gitignoreContent {
+	// The old file has no block: the block goes on top of its line.
+	if got := readFile(t, dir+"/.gitignore"); got != gitignoreContent+"# old\n" {
 		t.Errorf(".gitignore: %q", got)
 	}
 	info, err := os.Stat(dir + "/.gitignore")
@@ -861,7 +862,7 @@ func TestAddKeyWritesTheGitignoreBeforeTheConfig(t *testing.T) {
 	}
 	f.rekeyed("app", "v")
 	f.rekeyed("db", "w")
-	if got := readFile(t, f.store+"/.gitignore"); got != gitignoreContent {
+	if got := readFile(t, f.store+"/.gitignore"); got != gitignoreContent+"# old\n" {
 		t.Errorf(".gitignore: %q", got)
 	}
 }
@@ -1310,9 +1311,9 @@ func TestAddKeyKeepsTheGitignoreOnAPartialWrite(t *testing.T) {
 	states := fileStates(t, f.store)
 	orig := writeGitignore
 	calls := 0
-	writeGitignore = func(w io.Writer) error {
+	writeGitignore = func(w io.Writer, want []byte) error {
 		calls++
-		if _, err := io.WriteString(w, gitignoreContent[:len(gitignoreContent)/2]); err != nil {
+		if _, err := w.Write(want[:len(want)/2]); err != nil {
 			return err
 		}
 		return errors.New("no space left on device")
@@ -1343,7 +1344,8 @@ func TestAddKeyKeepsTheGitignoreOnAPartialWrite(t *testing.T) {
 	if err := f.run(); err != nil {
 		t.Fatalf("the control: %v\n%s", err, f.errOut.String())
 	}
-	if got := readFile(t, f.store+"/.gitignore"); got != gitignoreContent {
+	// The old file has no block: the block goes on top of its line.
+	if got := readFile(t, f.store+"/.gitignore"); got != gitignoreContent+"# old\n" {
 		t.Errorf("the control: .gitignore %q", got)
 	}
 	f.rekeyed("app", "v")
