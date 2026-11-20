@@ -1485,6 +1485,34 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
 }
 
 # bats test_tags=real-sops
+@test "an identity that does not decrypt the .enc is refused by the compare before any write" {
+  # A third key, in no rule and on no label: the real sops fails to decrypt,
+  # and the compare does not read that failure as a twin that matches (an
+  # absent identity is a case of the test above). .sops.yaml and every file
+  # of the stores stay byte-equal.
+  command -v sops >/dev/null 2>&1 || skip "sops not installed"
+  command -v ssh-to-age >/dev/null 2>&1 || skip "ssh-to-age not installed"
+  command -v ssh-keygen >/dev/null 2>&1 || skip "ssh-keygen not installed"
+  _load
+  local k="${BATS_TEST_TMPDIR}/keys" keep gone saved="${BATS_TEST_TMPDIR}/saved" store="${PATH_CLUSTERS}/a.dev/secrets"
+  _keep_gone "${k}"
+  ssh-keygen -q -t ed25519 -N '' -C other -f "${k}/other" </dev/null >/dev/null 2>&1
+  ssh-to-age -private-key -i "${k}/other" -o "${k}/other.age" 2>/dev/null
+  _rules "${keep},${gone}"
+  printf 'v' > "${store}/Secret.app.default.K"
+  domain=a.dev secrets::encrypt >/dev/null
+  mkdir -p "${saved}"
+  cp -p "${CFG}" "${saved}/sops.yaml"
+  cp -a "${PATH_CLUSTERS}" "${saved}/clusters"
+
+  DOMAIN=a.dev SOPS_AGE_KEY_FILE="${k}/other.age" run _rm "${k}/gone.pub"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] cannot decrypt ${store}/Secret.app.default.K.enc to compare it with its twin
+${_twin_tail}" ] || { echo "$output" >&2; return 1; }
+  _same_store "${saved}"
+}
+
+# bats test_tags=real-sops
 @test "a twin with the value of its .enc passes the compare when it is the older file, and is re-keyed" {
   # The times of the files do not count: app as lo secrets encrypt leaves
   # it, other set back in time (Go twin:
