@@ -67,8 +67,8 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 		}
 	}
 	if bin == "" {
-		ui.ErrorTo(stderr, "lochat binary not found. Build it once:")
-		ui.ErrorTo(stderr, `  go build -C ai/lochat -o "${PATH_BIN}/lochat" .`)
+		ui.ErrorTo(stderr, "lochat binary not found in %s or on PATH.", paths.Bin)
+		ui.ErrorTo(stderr, "To install it, do the set-up steps at https://lok8s.io/guide/lo-chat#set-up")
 		return "", nil, assets.Tree{}, ErrHandled
 	}
 

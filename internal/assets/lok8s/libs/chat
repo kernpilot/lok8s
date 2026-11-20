@@ -17,8 +17,8 @@ main::chat() {
   bin="${PATH_BIN}/lochat"
   [[ -x "${bin}" ]] || bin="$(command -v lochat 2>/dev/null || true)"
   [[ -x "${bin}" ]] || {
-    error "lochat binary not found. Build it once:"
-    error "  go build -C ai/lochat -o \"\${PATH_BIN}/lochat\" ."
+    error "lochat binary not found in ${PATH_BIN} or on PATH."
+    error "To install it, do the set-up steps at https://lok8s.io/guide/lo-chat#set-up"
     return 1
   }
 

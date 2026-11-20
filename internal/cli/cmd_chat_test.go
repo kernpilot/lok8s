@@ -89,9 +89,13 @@ func TestChatPreflightErrors(t *testing.T) {
 
 	p := synthProject(t)
 	_, stderr, err := runLo(t, NewRoot(p), "chat")
-	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "lochat binary not found. Build it once:") ||
-		!strings.Contains(stderr, `  go build -C ai/lochat -o "${PATH_BIN}/lochat" .`) {
-		t.Errorf("missing lochat: err=%v stderr=%q", err, stderr)
+	// The hint names the two places that were searched and points at the
+	// install steps of the guide. A user project has no lochat source, so the
+	// hint gives no build command.
+	wantHint := "[error] lochat binary not found in " + p.Bin + " or on PATH.\n" +
+		"[error] To install it, do the set-up steps at https://lok8s.io/guide/lo-chat#set-up\n"
+	if !errors.Is(err, ErrHandled) || stderr != wantHint {
+		t.Errorf("missing lochat: err=%v\n got stderr=%q\nwant stderr=%q", err, stderr, wantHint)
 	}
 
 	testutil.WriteFile(t, filepath.Join(p.Bin, "lochat"), "#!/bin/sh\n")
