@@ -2201,6 +2201,57 @@ bootstrap::_dry_run_untrap() {
   _BOOTSTRAP_DRY_PREV_TRAP=""
 }
 
+# bootstrap::_sched_trap <dir>
+# Removes the private dir of the scheduler (it holds the kubectl output of
+# the entries, which can quote a value of the manifest) when the shell
+# exits or gets INT, TERM or HUP, and keeps the traps that were there: the
+# EXIT trap removes the dir, then runs the earlier EXIT trap; INT, TERM and
+# HUP remove the dir, put the earlier traps back and send the signal again,
+# so the earlier trap or the default action still runs. Only the main shell
+# chains: in a subshell `trap -p` shows the traps of the parent, which do
+# not run there, so a subshell installs only its own removal (as
+# bootstrap::_dry_run_trap). bootstrap::_sched_untrap puts the earlier
+# traps back. A SIGKILL cannot be trapped: it leaves the dir behind.
+bootstrap::_sched_trap() {
+  _BS_SCHED_DIR="${1}"
+  _BS_SCHED_PREV=""
+  local _prev=""
+  if (( BASHPID == $$ )); then
+    local -a _trap_words=()
+    eval "_trap_words=($(trap -p EXIT))"
+    (( ${#_trap_words[@]} < 3 )) || _prev="${_trap_words[2]}"
+    _BS_SCHED_PREV="$(trap -p EXIT INT TERM HUP)"
+  fi
+  # shellcheck disable=SC2064 # expand now: the earlier EXIT trap is a fixed value
+  trap "bootstrap::_sched_rm${_prev:+; ${_prev}}" EXIT
+  trap 'bootstrap::_sched_signal INT' INT
+  trap 'bootstrap::_sched_signal TERM' TERM
+  trap 'bootstrap::_sched_signal HUP' HUP
+}
+
+# bootstrap::_sched_rm: removes the private dir of the scheduler, if one is
+# set.
+bootstrap::_sched_rm() {
+  [[ -z "${_BS_SCHED_DIR:-}" ]] || rm -rf -- "${_BS_SCHED_DIR:?}"
+}
+
+# bootstrap::_sched_untrap: removes the private dir and puts the earlier
+# EXIT, INT, TERM and HUP traps back.
+bootstrap::_sched_untrap() {
+  bootstrap::_sched_rm
+  _BS_SCHED_DIR=""
+  trap - EXIT INT TERM HUP
+  [[ -z "${_BS_SCHED_PREV:-}" ]] || eval "${_BS_SCHED_PREV}"
+  _BS_SCHED_PREV=""
+}
+
+# bootstrap::_sched_signal <signal>: the INT, TERM and HUP trap of the
+# scheduler.
+bootstrap::_sched_signal() {
+  bootstrap::_sched_untrap
+  kill -s "${1}" "${BASHPID}"
+}
+
 # bootstrap::apply <domain> <cluster_yaml> <kubeconfig>
 # Reads spec.bootstrap from the cluster YAML and runs the entries as a
 # topological-parallel DAG (capped at LOK8S_BOOTSTRAP_PARALLEL, default 8);
@@ -2587,6 +2638,7 @@ bootstrap::apply() {
   # kapply writes the private files only into an absolute dir (a relative
   # TMPDIR gives a relative mktemp path).
   [[ "${_rcdir}" == /* ]] || _rcdir="${PWD}/${_rcdir}"
+  bootstrap::_sched_trap "${_rcdir}"
   _BS_INFLIGHT=(); _BS_RCFILES=(); _BS_RUNIDX=(); _BS_OUTFILES=()
   unset '_BS_COMPLETED'; declare -gA _BS_COMPLETED=()
   _BS_DONE=0; _BS_OVERALL_RC=0; _BS_PARKED=(); _BS_PARKED_NS=()
@@ -2668,7 +2720,8 @@ bootstrap::apply() {
   done
 
   bootstrap::_drain   # safety: never leave an orphan behind
-  rm -rf "${_rcdir}"
+  rm -rf -- "${_rcdir:?}"
+  bootstrap::_sched_untrap
   # Non-zero if anything failed OR was skipped behind a failure; 0 only when every
   # entry completed cleanly. _BS_OVERALL_RC alone suffices: _skip is only ever
   # populated by bootstrap::_skip_dependents, and both call sites set

@@ -2784,6 +2784,73 @@ Warning: unknown field \"data.${CANARY_VALUE}\"" 0
   done < "${SEEN}"
 }
 
+# The private dir of the scheduler holds the kubectl output of the entries.
+# A TERM in the middle of a run removes it, and the caller's traps stay
+# (chained while the run lasts, put back afterwards).
+@test "bootstrap::apply: a TERM removes the scheduler's private dir and keeps the caller's EXIT trap" {
+  write_cluster_spec "testcni"
+  export SCHED_SEEN="${BATS_TEST_TMPDIR}/sched-dir" SCHED_GO="${BATS_TEST_TMPDIR}/sched-go"
+  export CALLER_TRAP="${BATS_TEST_TMPDIR}/caller-trap"
+  # kubectl records the private dir of the entry in its apply, then blocks
+  # until SCHED_GO exists (at most 10 s). Every other call returns 0.
+  kubectl() {
+    [[ " $* " != *" -f - "* ]] || cat >/dev/null
+    [[ " $* " == *" apply "* && -n "${KAPPLY_PRIVATE_DIR-}" ]] || return 0
+    printf '%s\n' "${KAPPLY_PRIVATE_DIR}" > "${SCHED_SEEN}"
+    local i
+    for (( i = 0; i < 100; i++ )); do
+      [[ ! -e "${SCHED_GO}" ]] || break
+      sleep 0.1
+    done
+    return 0
+  }
+  export -f kubectl
+  export _PROJECT_ROOT
+  local script="${BATS_TEST_TMPDIR}/sched-term.sh"
+  cat > "${script}" <<'SH'
+source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh"
+source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"
+source "${_PROJECT_ROOT}/.lok8s/utils/template.sh"
+source "${_PROJECT_ROOT}/.lok8s/libs/addons"
+source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
+source "${_PROJECT_ROOT}/.lok8s/utils/keysonly.sh"
+source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap"
+trap 'echo ran > "${CALLER_TRAP}"' EXIT
+bootstrap::apply test.lok8s.dev "$1" "$2"
+SH
+  local log="${BATS_TEST_TMPDIR}/sched-term.log"
+  ( exec bash "${script}" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null >"${log}" 2>&1 ) &
+  local pid=$! rc=0 i dir
+  for (( i = 0; i < 100; i++ )); do
+    [[ ! -s "${SCHED_SEEN}" ]] || break
+    sleep 0.1
+  done
+  dir="$(cat "${SCHED_SEEN}" 2>/dev/null || true)"
+  [[ -n "${dir}" && -d "${dir}" ]] || { : > "${SCHED_GO}"; echo "no private dir seen"; cat "${log}"; return 1; }
+  kill -TERM "${pid}"
+  wait "${pid}" || rc=$?
+  : > "${SCHED_GO}"   # release the entry, which outlives its scheduler
+  [ "${rc}" -eq 143 ] || { echo "rc ${rc}"; return 1; }
+  [ ! -e "${dir}" ] || { ls -la "${dir}"; return 1; }
+  [ "$(cat "${CALLER_TRAP}")" = ran ]
+
+  # The main-shell path: chained while the run lasts, put back afterwards.
+  bash -c '
+    source "${_PROJECT_ROOT}/.lok8s/libs/bootstrap" 2>/dev/null
+    trap "echo caller" EXIT
+    trap "echo term" TERM
+    bootstrap::_sched_trap /nonexistent/x
+    trap -p EXIT TERM
+    bootstrap::_sched_untrap
+    trap -p EXIT TERM' > "${BATS_TEST_TMPDIR}/traps" 2>&1 || true
+  run cat "${BATS_TEST_TMPDIR}/traps"
+  assert_line --index 0 "trap -- 'bootstrap::_sched_rm; echo caller' EXIT"
+  assert_line --index 1 "trap -- 'bootstrap::_sched_signal TERM' SIGTERM"
+  assert_line --index 2 "trap -- 'echo caller' EXIT"
+  assert_line --index 3 "trap -- 'echo term' SIGTERM"
+  assert_line --index 4 "caller"
+}
+
 # ── hosted platform-owned skip (cilium/ccm never bootstrap onto hosted) ──────
 
 @test "hosted: _apply_one skips cilium unconditionally when LOK8S_BOOTSTRAP_HOSTED=true" {
