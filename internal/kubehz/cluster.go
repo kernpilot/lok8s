@@ -123,6 +123,9 @@ func (c *Context) statusReport(ctx context.Context, cfg *Config, domain, cy stri
 	if err := c.requireHTTPS(apiURL, "spec.kubehz.apiUrl"); err != nil {
 		return err
 	}
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return ErrHandled
+	}
 	res, err := c.fetchStatus(ctx, "GET", apiURL+"/api/clusters?perPage=500", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
 	if err != nil {
 		c.echo("Status:  unknown (API unreachable: %s)", apiURL)
@@ -244,6 +247,9 @@ func (c *Context) Assess(ctx context.Context, domain string) error {
 	}
 	if err := c.requireHTTPS(apiURL, "spec.kubehz.apiUrl"); err != nil {
 		return err
+	}
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return ErrHandled
 	}
 	clusterID, err := c.ResolveClusterID(ctx, domain, apiURL)
 	if err != nil {
@@ -525,6 +531,11 @@ func (c *Context) ReEnroll(ctx context.Context, domain string) error {
 	}
 	if err := c.requireHTTPS(apiURL, "spec.kubehz.apiUrl"); err != nil {
 		return err
+	}
+	// Before the kubectl read below: that read does not carry the token,
+	// but the bash twin refuses first, and nothing else runs on a refusal.
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return ErrHandled
 	}
 	token := c.getenv("KUBEHZ_TOKEN")
 	if token == "" {

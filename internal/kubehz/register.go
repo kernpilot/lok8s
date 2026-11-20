@@ -100,6 +100,11 @@ func (c *Context) ensureClaimKey(ctx context.Context, domain, apiURL string) err
 	if err := c.requireHTTPS(hcloudAPI, "HCLOUD_API_BASE"); err != nil {
 		return err
 	}
+	// Before the register: it makes the platform mint a claim key, and
+	// that key needs the hcloud token for its upload.
+	if !c.credentialOK("HCLOUD_TOKEN") {
+		return ErrHandled
+	}
 
 	body, err := c.registerPost(ctx, apiURL, bearer{},
 		c.registerBody(domain, jsonPair{"domain", domain}, jsonPair{"claimKey", true}))
@@ -149,6 +154,9 @@ func (c *Context) ensureClaimKey(ctx context.Context, domain, apiURL string) err
 // it then hands the platform the hcloud token (sent ONLY on the HTTPS api
 // URL, never printed). Fail-soft: an error means "fall back".
 func (c *Context) directClaim(ctx context.Context, cfg *Config, domain, clusterYAML, apiURL string) error {
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return ErrHandled
+	}
 	fingerprint, err := c.SSHFingerprint(ctx, clusterYAML)
 	if err != nil {
 		c.warnf("Could not extract SSH fingerprint for %s", domain)
@@ -185,6 +193,12 @@ func (c *Context) directClaim(ctx context.Context, cfg *Config, domain, clusterY
 		hcloudToken := c.getenv("HCLOUD_TOKEN")
 		if hcloudToken == "" {
 			c.warnf("spec.kubehz.connectHcloudToken is true but HCLOUD_TOKEN is unset — skipping token connect.")
+			return nil
+		}
+		// The token goes in the JSON body, where a control character is
+		// escaped and sent. The register above did not carry the token.
+		if !c.credentialOK("HCLOUD_TOKEN") {
+			c.warnf("kubehz: could not connect the hcloud token (provisioning stays locked until you add it in the dashboard).")
 			return nil
 		}
 		cred, err := c.fetch(ctx, "POST", apiURL+"/api/credentials", auth,
@@ -335,6 +349,9 @@ var errNotRegistered = errors.New("kubehz: no cluster registered for domain")
 // domain is errNotRegistered — deregister/destroy branch on the distinction
 // so a lookup FAILURE is never reported as "not registered".
 func (c *Context) ResolveClusterID(ctx context.Context, domain, apiURL string) (string, error) {
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return "", ErrHandled
+	}
 	body, err := c.fetch(ctx, "GET", apiURL+"/api/clusters?perPage=500", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
 	if err != nil {
 		return "", err
@@ -370,7 +387,7 @@ func (c *Context) DeregisterCluster(ctx context.Context, cfg *Config, domain, cl
 
 	// deregister skips validate_config (reachable standalone), so guard each
 	// call by its own URL.
-	if err := c.requireHTTPS(apiURL, "spec.kubehz.apiUrl"); err != nil {
+	if err := c.requireHTTPS(apiURL, "spec.kubehz.apiUrl"); err != nil || !c.credentialOK("KUBEHZ_TOKEN") {
 		rc = ErrHandled
 	} else {
 		clusterID, err := c.ResolveClusterID(ctx, domain, apiURL)
@@ -404,7 +421,7 @@ func (c *Context) DeregisterCluster(ctx context.Context, cfg *Config, domain, cl
 	// result as it is.
 	if hcloudToken := c.getenv("HCLOUD_TOKEN"); hcloudToken != "" {
 		hcloudAPI := c.hcloudAPIBase()
-		if err := c.requireHTTPS(hcloudAPI, "HCLOUD_API_BASE"); err == nil {
+		if err := c.requireHTTPS(hcloudAPI, "HCLOUD_API_BASE"); err == nil && c.credentialOK("HCLOUD_TOKEN") {
 			auth := withBearer(hcloudToken)
 			keyID, _ := c.findOwnClaimKey(ctx, hcloudAPI, auth, "kubehz-claim-"+domain, domain, "delete")
 			if keyID != "" {

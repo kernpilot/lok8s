@@ -76,6 +76,9 @@ func missingVersionLine(clusterYAML string) string {
 // waitForCluster ports kubehz::wait_for_cluster: poll GET /api/clusters/{id}
 // at 10-second intervals up to timeout seconds.
 func (c *Context) waitForCluster(ctx context.Context, apiURL, clusterID string, timeout int) error {
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return ErrHandled
+	}
 	c.debugf("Waiting for hosted cluster %s to become ready (timeout: %ds)", clusterID, timeout)
 	auth := withBearer(c.getenv("KUBEHZ_TOKEN"))
 	for elapsed := 0; elapsed < timeout; elapsed += 10 {
@@ -234,6 +237,9 @@ func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clusterYAML string) error {
 	if loadSpec(clusterYAML).kubernetesVersion() == "" {
 		c.errorf("%s", missingVersionLine(clusterYAML))
+		return ErrHandled
+	}
+	if !c.credentialOK("KUBEHZ_TOKEN") {
 		return ErrHandled
 	}
 	apiURL := cfg.APIURL
@@ -462,6 +468,9 @@ func (c *Context) DestroyHosted(ctx context.Context, cfg *Config, domain, cluste
 	apiURL := cfg.APIURL
 	if err := c.requireHTTPS(apiURL, "spec.kubehz.apiUrl"); err != nil {
 		return err
+	}
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return ErrHandled
 	}
 
 	clusterID, err := c.ResolveClusterID(ctx, domain, apiURL)
