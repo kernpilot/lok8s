@@ -1683,6 +1683,13 @@ ${_CLAIM_DELETE42}"
 # Go implementation and checks that both workflows have the same function.
 
 _TICKET="aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"
+# A second ticket in capital hex digits, a ticket without the MD5 shape
+# (only the exact match of the two register lines hides it), and a
+# server-key fingerprint as the legacy announce prints it.
+_TICKET_UPPER="AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:01"
+_TICKET_OTHER="SHA256:fake+claim/ticket=without-the-md5-shape"
+_SERVER_FP="12:34:56:78:9a:bc:de:f0:12:34:56:78:9a:bc:de:f0"
+_FP_TAIL="   (also visible in Hetzner Console -> Security -> SSH keys)"
 _TICKET_HIDDEN="<hidden: one-time claim ticket>"
 
 # _hide_claim_ticket_fn: the definition of hide_claim_ticket in spinup.yml,
@@ -1706,7 +1713,8 @@ _ticket_register() {
 }
 
 @test "claim ticket: the workflow filter hides it in the register output, and every other line stays" {
-  local fn claim announce near input want
+  local fn claim announce l hidden other input want
+  local -a ins=() wants=()
   fn="$(_hide_claim_ticket_fn)"
   [[ "${fn}" == "hide_claim_ticket() {"*"}" ]] || fail "no hide_claim_ticket function in spinup.yml"
   eval "${fn}"
@@ -1724,24 +1732,56 @@ _ticket_register() {
   assert_line "  fingerprint: lo:test.kubehz.dev"
   announce="${output}"
 
-  # Lines like the ticket lines that are not: a looser match changes them.
-  near="$(cat <<'EOF'
+  # Each input line, and the line that the filter must write for it.
+  _add() {
+    ins+=("${1}")
+    wants+=("${2}")
+  }
+  # The real register lines: with LF and CRLF, with a ticket without the
+  # MD5 shape, and behind a log prefix.
+  while IFS= read -r l; do
+    hidden="${l//"${_TICKET}"/${_TICKET_HIDDEN}}"
+    other="${l//"${_TICKET}"/${_TICKET_OTHER}}"
+    _add "${l}" "${hidden}"
+    _add "${l}"$'\r' "${hidden}"$'\r'
+    _add "${other}" "${hidden}"
+    _add "${other}"$'\r' "${hidden}"$'\r'
+    _add "  [info] ${l}" "  [info] ${hidden}"
+  done <<<"${claim}"
+  # The announce stays: its "lo:<domain>" has no MD5 shape.
+  while IFS= read -r l; do
+    _add "${l}" "${l}"
+  done <<<"${announce}"
+  _add "  fingerprint: ${_SERVER_FP}" "  fingerprint: ${_TICKET_HIDDEN}"
+  _add "warning: ${_TICKET}" "warning: ${_TICKET_HIDDEN}"
+  _add "two: ${_TICKET} and ${_TICKET_UPPER}." "two: ${_TICKET_HIDDEN} and ${_TICKET_HIDDEN}."
+  _add "17 pairs: ${_TICKET}:01" "17 pairs: ${_TICKET_HIDDEN}"
+  _add "  fingerprint: "$'\xff'"${_TICKET}${_FP_TAIL}" "  fingerprint: ${_TICKET_HIDDEN}${_FP_TAIL}"
+  _add "bytes: "$'\xff'"${_TICKET}" "bytes: "$'\xff'"${_TICKET_HIDDEN}"
+  # Lines like ticket lines that are not: a looser match changes them.
+  while IFS= read -r l; do
+    _add "${l}" "${l}"
+  done <<'EOF'
   fingerprint: 11:22   (also visible in Hetzner Console -> Security -> SSH keys) and more
    fingerprint: 11:22   (also visible in Hetzner Console -> Security -> SSH keys)
 x       -H 'Content-Type: application/json' -d '{"fingerprint":"11:22"}'
        -H 'Content-Type: application/json' -d '{"fingerprint":"11:22"}' and more
 a line without a fingerprint
+15 pairs: aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88
+one digit short: aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:9
 EOF
-)"
-  input="${claim}"$'\n'"${announce}"$'\n'"${near}"$'\n'$'  fingerprint: \xff'"${_TICKET}"'   (also visible in Hetzner Console -> Security -> SSH keys)'$'\n''the last line without a newline'
-  want="${input//$'\xff'${_TICKET}/${_TICKET_HIDDEN}}"
-  want="${want//${_TICKET}/${_TICKET_HIDDEN}}"
+  # The last line has no newline, and holds a ticket.
+  _add "last: ${_TICKET}" "last: ${_TICKET_HIDDEN}"
+  input="$(printf '%s\n' "${ins[@]}")"
+  want="$(printf '%s\n' "${wants[@]}")"
 
   # A UTF-8 locale: the function's own LC_ALL=C makes it compare bytes.
   export LC_ALL=C.UTF-8
   run hide_claim_ticket < <(printf '%s' "${input}")
   assert_success
   refute_output --partial "${_TICKET}"
+  refute_output --partial "${_TICKET_UPPER}"
+  refute_output --partial "${_TICKET_OTHER}"
+  refute_output --partial "${_SERVER_FP}"
   assert_output "${want}"
-  [[ "$(grep -cF -- "${_TICKET_HIDDEN}" <<<"${output}")" == 3 ]] || fail "not 3 hidden lines: ${output}"
 }

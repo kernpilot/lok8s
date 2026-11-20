@@ -58,44 +58,70 @@ jobs:
       # full claim handshake). Only HCLOUD_TOKEN is required. With it, lo prints
       # a one-time claim ticket, and this public repo shows its job logs to
       # everyone, so every `lo provision` goes through hide_claim_ticket. It is
-      # the function of spinup.yml; a Go test keeps the two the same.
+      # the function of spinup.yml; a Go test keeps the two the same. The
+      # changed domains come in through env, never as shell source: each name
+      # must match the domain rule of lo before lo runs.
       - name: Provision
         env:
           HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
           DOMAIN: ${{ github.event.inputs.domain }}
+          DOMAINS: ${{ steps.detect.outputs.domains }}
         run: |
           set -o pipefail
-          # hide_claim_ticket: copy stdin to stdout line by line, and replace
-          # the claim ticket on the two register lines that carry it. Only a
-          # line with the exact head and tail of these lines changes, so every
-          # other line stays as lo printed it. LC_ALL=C: the match compares
-          # bytes. Each line goes out when it comes in, so the log streams.
+          # is_name <rule> <value>: the value matches the regex rule, as bytes.
+          is_name() {
+            local LC_ALL=C
+            [[ "${2}" =~ ${1} ]]
+          }
+          # hide_claim_ticket: see the same function in spinup.yml.
           hide_claim_ticket() {
-            local LC_ALL=C line eol
+            local LC_ALL=C line eol cr out
             local hidden='<hidden: one-time claim ticket>'
             local curl_head="       -H 'Content-Type: application/json' -d '{\"fingerprint\":\""
             local curl_tail="\"}'"
             local fp_head='  fingerprint: '
             local fp_tail='   (also visible in Hetzner Console -> Security -> SSH keys)'
+            local md5='[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){15,}'
             while :; do
               eol=$'\n'
               if ! IFS= read -r line; then
                 [[ -n "${line}" ]] || break
                 eol=""
               fi
+              cr=""
+              if [[ "${line}" == *$'\r' ]]; then
+                cr=$'\r'
+                line="${line%$'\r'}"
+              fi
               if [[ "${line}" == "${curl_head}"*"${curl_tail}" ]]; then
                 line="${curl_head}${hidden}${curl_tail}"
               elif [[ "${line}" == "${fp_head}"*"${fp_tail}" ]]; then
                 line="${fp_head}${hidden}${fp_tail}"
               fi
-              printf '%s%s' "${line}" "${eol}"
+              out=""
+              while [[ "${line}" =~ ${md5} ]]; do
+                out+="${line%%"${BASH_REMATCH[0]}"*}${hidden}"
+                line="${line#*"${BASH_REMATCH[0]}"}"
+              done
+              printf '%s%s%s%s' "${out}" "${line}" "${cr}" "${eol}"
               [[ -n "${eol}" ]] || break
             done
           }
+          # The input domain, or the changed domains (split on white space:
+          # no glob, no evaluation).
+          domains=()
           if [[ -n "${DOMAIN}" ]]; then
-            lo provision --force --domain "${DOMAIN}" 2>&1 | hide_claim_ticket
+            domains=("${DOMAIN}")
           else
-            for domain in ${{ steps.detect.outputs.domains }}; do
-              lo provision --force --domain "${domain}" 2>&1 | hide_claim_ticket
-            done
+            IFS=$' \t\n' read -r -d '' -a domains <<< "${DOMAINS}" || true
           fi
+          domain_rule='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+          for domain in "${domains[@]}"; do
+            if ! is_name "${domain_rule}" "${domain}"; then
+              echo "::error::A domain does not match the lo domain rule ${domain_rule}. lo did not run."
+              exit 1
+            fi
+          done
+          for domain in "${domains[@]}"; do
+            lo provision --force --domain "${domain}" 2>&1 | hide_claim_ticket
+          done

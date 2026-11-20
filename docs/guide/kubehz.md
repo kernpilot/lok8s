@@ -635,8 +635,10 @@ domain exactly as you give it, so another spelling of the domain (letter
 case, for example) gives another value. lo then refuses the key; it never
 deletes the wrong one.
 
-- The next `lo kubehz register` replaces the key, because the platform mints
-  a new one each time. `lo kubehz deregister` deletes it.
+- The next `lo kubehz register` replaces the key in Hetzner, because the
+  platform mints a new one each time. The ticket of the earlier key stops
+  working only when that register sends the stored bind secret (see the next
+  section). `lo kubehz deregister` deletes the key.
 - Both commands act only on a key with this label and this value. A Hetzner
   project can be shared, so a key of the same name that a person or another
   cluster made stays. lo prints a warning that names the key. The register
@@ -644,9 +646,10 @@ deletes the wrong one.
 - An older lo uploaded the key without the label. lo cannot tell that key
   from a key that a person made, so it does not replace or delete it. If an
   older lo made the key for this cluster, delete it in the Hetzner Console
-  (**Security → SSH keys**), then run `lo kubehz register` again. The old
-  key has no use: the platform does not accept its fingerprint after the
-  next register.
+  (**Security → SSH keys**), then run `lo kubehz register` again. That
+  register uploads a new key. The fingerprint of the old key stops working
+  only when that register sends the stored bind secret of the old
+  registration (see the next section).
 :::
 
 ::: details Claim before you deploy: the bind secret
@@ -660,13 +663,24 @@ the agent binds there instead of making a second row, so a cluster you
 claim before the agent deploys still shows its own heartbeats.
 
 The secret proves only that the operator who deploys is the operator who
-announced. It rotates on every re-announce and is spent on the first
-adoption. It is a credential: keep `.kubehz-bind` out of version control.
+announced. It rotates on each re-announce that sends it, and is spent on
+the first adoption. It is a credential: keep `.kubehz-bind` out of version
+control.
 
-A re-run of `lo kubehz register` sends the stored secret, so the re-run
-keeps the same cluster record and stores the new secret it gets back. lo
-uses the file only when it is readable and holds exactly 64 lowercase hex
+A re-run of `lo kubehz register` sends the stored secret. Then the platform
+keeps the same cluster record and sends a new secret, which lo stores. With
+a claim key, that re-run also rotates the claim ticket: the record gets the
+fingerprint of the new key, and the earlier ticket stops working. lo uses
+the file only when it is readable and holds exactly 64 lowercase hex
 characters, and it never puts the value on a command line.
+
+A re-run without the stored secret (on another machine, or in CI, where the
+runner does not keep the file) does not change the earlier record. With a
+claim key, it adds a new pending record with its own ticket and bind secret.
+The earlier ticket keeps working until someone claims it, or until its
+record expires (by default after 14 days; the kubehz deployment can change
+this). With the fingerprint announce, the platform returns the same record
+and no new secret.
 
 The platform does not adopt the announced row by its domain alone. An agent
 that registers without the secret gets a separate pending row, and the

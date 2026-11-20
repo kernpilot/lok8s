@@ -850,8 +850,10 @@ jobs:
 ```
 
 It needs **only** `HCLOUD_TOKEN` (your Hetzner Cloud API token, used to create the
-infrastructure). The `cluster.lok8s.yaml` for the domain must already be committed
-under `clusters/<domain>/`.
+infrastructure and to upload the claim key). The `cluster.lok8s.yaml` for the domain
+must already be committed under `clusters/<domain>/`. The domain must match the
+domain rule of lo (`^[A-Za-z0-9][A-Za-z0-9._-]*$`), or the workflow stops before
+`lo` runs.
 
 ### Claiming a registered cluster
 
@@ -867,22 +869,34 @@ A public repository shows its job logs and job summaries to everyone, so the
 workflow keeps the ticket out of them:
 
 - The job log shows `<hidden: one-time claim ticket>` in place of the ticket.
-  Every other line stays as `lo` printed it.
+  The log also hides every other string with the shape of an MD5 fingerprint
+  (16 or more pairs of hex digits, with a colon between each two), for example
+  the server-key fingerprint of the legacy registration. Every other text
+  stays as `lo` printed it.
 - No step output, environment value or job summary holds the ticket.
-- The job summary tells you where only you can read the ticket: in the Hetzner
-  Console (**Security → SSH keys**, the key `kubehz-claim-<domain>`), or in the
-  output of `lo kubehz register --domain <domain>` on your own machine with the
-  same `HCLOUD_TOKEN`. That command registers again, so it prints a new ticket,
-  and the old one stops working.
+- The job summary tells you where to read the ticket: in the Hetzner Console
+  (**Security → SSH keys**, the key `kubehz-claim-<domain>`). People with
+  access to that Hetzner Cloud project can read it there.
 
-Claim the cluster soon. The ticket works only while the registration is
-pending, and the next registration of the cluster (the next run of the
-workflow, for example) replaces it.
+Claim the cluster soon. Each run of the workflow registers the cluster again.
+The runner does not keep the bind secret of an earlier run
+(`clusters/<domain>/.kubehz-bind`), so each run adds a new pending
+registration with its own ticket, and lo replaces the claim key in Hetzner
+with the key of the new run. The tickets of earlier runs keep working until
+someone claims them, or until their registration expires (by default after 14
+days; the kubehz deployment can change this).
 
-When lo registers the cluster without a claim key (the claim-key registration
-failed, so lo used the fingerprint announce), there is no ticket. The job
-summary then tells you to claim the cluster with the heartbeat agent and `lo
-kubehz claim-code`.
+::: warning Job logs of earlier runs
+An earlier version of this workflow wrote the ticket in clear text into the
+job log and the job summary. If your repository ran it, delete those workflow
+runs (this removes their logs and summaries). Then claim the cluster, or let
+its registration expire.
+:::
+
+When a run used the legacy registration (no claim key: for example, the
+claim-key registration failed), there is no ticket. The job summary then
+tells you to claim the cluster with the heartbeat agent and `lo kubehz
+claim-code`.
 
 See the [kubehz Platform guide](./kubehz.md#claiming) for the full flow:
 registration, claiming, the heartbeat agent, and troubleshooting.
