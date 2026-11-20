@@ -310,6 +310,49 @@ mock_yq_value() {
   export -f yq
 }
 
+# stub_tools <tool>... — a failing stub of each <tool> FIRST on PATH. A stub
+# logs its argv to ${BATS_TEST_TMPDIR}/tools.log and exits 97, so a call that
+# the function stubs of a test miss never reaches the host's docker or a live
+# cluster. A function of the same name still answers first: the net is for
+# the calls that no function stub answers. Call it after setup_tmpdir, and
+# call assert_no_tool_ran in teardown, before teardown_tmpdir.
+stub_tools() {
+  (( $# )) || { echo "stub_tools: name at least one tool" >&2; return 1; }
+  [[ -d "${BATS_TEST_TMPDIR:-}" ]] || { echo "stub_tools: BATS_TEST_TMPDIR is not a directory (call stub_tools in setup or in a test, not in setup_file)" >&2; return 1; }
+  local tool
+  mkdir -p "${BATS_TEST_TMPDIR}/stub-bin"
+  for tool in "$@"; do
+    [[ "${tool}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]] || { echo "stub_tools: '${tool}' is not a tool name" >&2; return 1; }
+    printf '#!%s\necho "%s $*" >> %q\nexit 97\n' \
+      "${BASH}" "${tool}" "${BATS_TEST_TMPDIR}/tools.log" > "${BATS_TEST_TMPDIR}/stub-bin/${tool}"
+    chmod +x "${BATS_TEST_TMPDIR}/stub-bin/${tool}"
+  done
+  export PATH="${BATS_TEST_TMPDIR}/stub-bin:${PATH}"
+}
+
+# assert_no_tool_ran — fail when a stub of stub_tools ran, and print its
+# calls. It also fails when the net is not there: stub_tools did not run in
+# this test, or a stub is no longer the first <tool> on PATH (a test that
+# reset PATH). A check without the net would pass for any call.
+assert_no_tool_ran() {
+  [[ -d "${BATS_TEST_TMPDIR:-}/stub-bin" ]] || {
+    echo "assert_no_tool_ran: no stub_tools net in this test (call stub_tools in setup)" >&2
+    return 1
+  }
+  local stub
+  for stub in "${BATS_TEST_TMPDIR}/stub-bin"/*; do
+    [[ "$(type -P "${stub##*/}")" == "${stub}" ]] || {
+      echo "assert_no_tool_ran: ${stub##*/} on PATH is '$(type -P "${stub##*/}")', not the stub of stub_tools" >&2
+      return 1
+    }
+  done
+  [ ! -s "${BATS_TEST_TMPDIR}/tools.log" ] || {
+    echo "a tool on PATH ran (only the function stubs may answer):" >&2
+    cat "${BATS_TEST_TMPDIR}/tools.log" >&2
+    return 1
+  }
+}
+
 # _path_without_yq <dir> — make <dir> a PATH that has the tools of the
 # bounded yq reads (yqbound.sh, spec.sh, dnssearch.sh) and no yq: a link
 # to each of them, found on PATH. Prints <dir>. For the cases of a missing

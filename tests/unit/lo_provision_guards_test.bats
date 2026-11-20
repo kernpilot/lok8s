@@ -36,30 +36,9 @@
 #
 # No test may reach a real tool. On the tested paths, the function stubs in
 # _load answer every call that would run docker, kind, kubectl, ssh or rsync.
-# As a net under them, _stub_tools puts failing stubs of those tools first on
-# PATH, and teardown fails the test when one of them ran.
-
-# _stub_tools — docker, kind, kubectl, helm, ssh, scp, rsync and curl FIRST on
-# PATH: each logs its argv and fails, so a call that a function stub misses
-# never reaches the host's docker or a live cluster.
-_stub_tools() {
-  local tool
-  mkdir -p "${BATS_TEST_TMPDIR}/stub-bin"
-  for tool in docker kind kubectl helm ssh scp rsync curl; do
-    printf '#!/usr/bin/env bash\necho "%s $*" >> "%s"\nexit 97\n' \
-      "${tool}" "${BATS_TEST_TMPDIR}/tools.log" > "${BATS_TEST_TMPDIR}/stub-bin/${tool}"
-    chmod +x "${BATS_TEST_TMPDIR}/stub-bin/${tool}"
-  done
-  export PATH="${BATS_TEST_TMPDIR}/stub-bin:${PATH}"
-}
-
-_no_tool_ran() {
-  [ ! -s "${BATS_TEST_TMPDIR}/tools.log" ] || {
-    echo "a tool on PATH ran (only the function stubs may answer):" >&2
-    cat "${BATS_TEST_TMPDIR}/tools.log" >&2
-    return 1
-  }
-}
+# As a net under them, setup puts failing stubs of eight tools first on PATH
+# (stub_tools in tests/test_helper.bash: docker, kind, kubectl, helm, ssh,
+# scp, rsync and curl), and teardown fails the test when one of them ran.
 
 setup() {
   load "../test_helper"
@@ -69,7 +48,11 @@ setup() {
   export PATH_LOK8S="${_PROJECT_ROOT}/.lok8s"
   export KIND_EXPERIMENTAL_DOCKER_NETWORK="lok8s-test"
   mkdir -p "${PATH_CLUSTERS}/test.dev" "${PATH_BASE}/.kubeconfig"
-  _stub_tools
+  # A shell that exports one of these sends driver::provision down another
+  # path: LOK8S_REMOTE* to the remote branch and the expose, PROVIDER_NAME to
+  # the provider, LOK8S_BOOTSTRAP_DRYRUN* to the registry document of a dry run.
+  unset "${!LOK8S_REMOTE@}" PROVIDER_NAME "${!LOK8S_BOOTSTRAP_DRYRUN@}"
+  stub_tools docker kind kubectl helm ssh scp rsync curl
   import() { :; }
   export -f import
   command -v yq &>/dev/null || skip "yq not available"
@@ -88,7 +71,7 @@ YAML
 # Every test ends with the check that no tool on PATH ran.
 teardown() {
   local rc=0
-  _no_tool_ran || rc=$?
+  assert_no_tool_ran || rc=$?
   teardown_tmpdir
   return "${rc}"
 }
@@ -118,13 +101,18 @@ _load() {
   kind() { case "${1:-}" in get) return 0 ;; *) return 0 ;; esac; }
   # The registry and node steps run docker, kind and kubectl for real: the
   # registry containers, the registry network of the nodes, the node IP heal.
-  # lo::registries and lo::reconcile_registry_network_nodes act only when the
-  # environment names a registry document (LOK8S_REGISTRY_JSON);
+  # lo::registries and lo::reconcile_registry_network_nodes act only when a
+  # registry document exists (LOK8S_REGISTRY_JSON, set by the real
+  # lo::read_config); each stub records a run with one.
   # lo::nodes_on_registry_network asks docker on every run that gets that far.
-  lo::registries()                       { return 0; }
-  lo::reconcile_registry_network_nodes() { return 0; }
-  # No node is on the registry network, so the heal branch stays off unless a
-  # test turns it on.
+  lo::registries() {
+    [[ ! -s "${LOK8S_REGISTRY_JSON:-}" ]] || touch "${BATS_TEST_TMPDIR}/registries-had-document"
+  }
+  lo::reconcile_registry_network_nodes() {
+    [[ ! -s "${LOK8S_REGISTRY_JSON:-}" ]] || touch "${BATS_TEST_TMPDIR}/reconcile-had-document"
+  }
+  # No node is on the registry network, so the heal branch stays off. The
+  # tests of the heal gate below turn it on and off.
   lo::nodes_on_registry_network()        { return 1; }
   lo::heal_node_ips()                    { return 0; }
   # The remote expose (docker) runs only with LOK8S_REMOTE_EXPOSE=true.
@@ -397,15 +385,21 @@ _load() {
   }
 }
 
-@test "lo provision: a registry document in the environment reaches no real tool" {
-  # The registry steps act on LOK8S_REGISTRY_JSON. A shell that exports it (the
-  # registry map of a lok8s project) would send the real lo::registries and
-  # lo::reconcile_registry_network_nodes to docker: inspect, run, network
-  # inspect. The stubs in _load keep them off, and teardown fails this test
+@test "lo provision: a registry document reaches no real tool" {
+  # The registry steps act on the document that LOK8S_REGISTRY_JSON names (the
+  # registry map of a lok8s project). Sourcing the driver sets it to ""
+  # (utils/config-registry.sh:31), and only the real lo::read_config sets it
+  # (:179). So this test's lo::read_config sets it, as the real one does. The
+  # real lo::registries and lo::reconcile_registry_network_nodes would then
+  # run docker: inspect, run, network inspect. The stubs in _load keep them
+  # off and record that they ran with the document. Teardown fails this test
   # when a tool on PATH ran.
   _load
-  export LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/registries.json"
-  cat > "${LOK8S_REGISTRY_JSON}" <<'JSON'
+  lo::read_config() {
+    LOK8S_REGISTRY_JSON="${BATS_TEST_TMPDIR}/registries.json"
+    export LOK8S_REGISTRY_JSON
+  }
+  cat > "${BATS_TEST_TMPDIR}/registries.json" <<'JSON'
 {"shared": false, "tls": false, "port": 80,
  "project_network": "lok8s-test",
  "network": {"name": "lok8s-registry", "cidr": "172.30.0.0/24"},
@@ -416,7 +410,73 @@ JSON
   driver::provision test.dev || rc=$?
 
   [ "${rc}" -eq 0 ] || {
-    echo "the happy path with a registry document in the environment failed (rc=${rc})" >&2
+    echo "the happy path with a registry document failed (rc=${rc})" >&2
+    return 1
+  }
+  local step
+  for step in registries reconcile; do
+    [ -e "${BATS_TEST_TMPDIR}/${step}-had-document" ] || {
+      echo "the ${step} stub did not run with the registry document" >&2
+      return 1
+    }
+  done
+}
+
+# The node IP heal gate (drivers/lo/main): for a cluster that is not shared,
+# the driver runs the heal only when one of the cluster's nodes is on the
+# registry network. The heal gets the cluster name and the node kubeconfig.
+@test "lo provision: a node on the registry network gets the node IP heal" {
+  _load
+  lo::nodes_on_registry_network() { return 0; }
+  lo::heal_node_ips() { printf '%s\n' "${@}" > "${BATS_TEST_TMPDIR}/healed"; }
+
+  local rc=0
+  driver::provision test.dev || rc=$?
+
+  [ -e "${BATS_TEST_TMPDIR}/healed" ] || {
+    echo "a node is on the registry network, but the node IP heal did not run (rc=${rc})" >&2
+    return 1
+  }
+  local want
+  want="$(printf '%s\n' lotest "${PATH_BASE}/.kubeconfig/lotest.yaml")"
+  [ "$(cat "${BATS_TEST_TMPDIR}/healed")" = "${want}" ] || {
+    echo "the heal got these arguments:" >&2
+    cat "${BATS_TEST_TMPDIR}/healed" >&2
+    echo "want the cluster name and the node kubeconfig:" >&2
+    echo "${want}" >&2
+    return 1
+  }
+}
+
+# The heal is advisory: when it fails, the provision still ends with 0.
+@test "lo provision: a failing node IP heal does not fail the provision" {
+  _load
+  lo::nodes_on_registry_network() { return 0; }
+  lo::heal_node_ips() { touch "${BATS_TEST_TMPDIR}/healed"; return 1; }
+
+  local rc=0
+  driver::provision test.dev || rc=$?
+
+  [ -e "${BATS_TEST_TMPDIR}/healed" ] && [ "${rc}" -eq 0 ] || {
+    echo "rc=${rc}; healed: $([ -e "${BATS_TEST_TMPDIR}/healed" ] && echo yes || echo no)" >&2
+    echo "want the heal to run, fail, and the provision to end with 0" >&2
+    return 1
+  }
+}
+
+# No node on the registry network, and not shared: the heal does not run.
+# The run must also end with 0, so that it passed the gate and did not stop
+# before it.
+@test "lo provision: without a node on the registry network, the node IP heal does not run" {
+  _load
+  lo::heal_node_ips() { touch "${BATS_TEST_TMPDIR}/healed"; }
+
+  local rc=0
+  driver::provision test.dev || rc=$?
+
+  [ "${rc}" -eq 0 ] && [ ! -e "${BATS_TEST_TMPDIR}/healed" ] || {
+    echo "rc=${rc}; healed: $([ -e "${BATS_TEST_TMPDIR}/healed" ] && echo yes || echo no)" >&2
+    echo "want rc=0 and no node IP heal: no node is on the registry network" >&2
     return 1
   }
 }
