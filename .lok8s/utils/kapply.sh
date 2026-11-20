@@ -21,10 +21,17 @@
 # Every OTHER apply error is returned unchanged so existing retry logic
 # (CRD-not-established, webhook-not-ready) keeps working.
 #
-# Display: on a terminal, the per-object "…serverside-applied" spam is
-# collapsed to a single in-place line + a one-line summary (like docker
-# build). Off a terminal, full output is printed (CI/Tilt logs). The raw
-# output is always stashed in KAPPLY_LAST_OUTPUT for callers to inspect.
+# Display: the kubectl output of an apply stays private. It can quote a value
+# of the manifest, also of a Secret (a field error prints "Invalid value:
+# <value>", an admission webhook can quote the object it refused). On a
+# terminal a spinner line with the phase and a count, then a one-line summary
+# (like docker build); off a terminal the summary line. A failed pass prints a
+# fixed line with the exit code. The raw output is always stashed in
+# KAPPLY_LAST_OUTPUT for callers to inspect (and appended to
+# KAPPLY_PRIVATE_LOG when set), never printed. LO_SHOW_SENSITIVE_OUTPUT=1
+# prints it as before (kapply::show_sensitive). Each kubectl apply runs with
+# the kubectl user defaults off (KUBERC=off: a kubectl before v1.33 has no
+# kuberc and ignores it). The Go twin: internal/kapply (private.go).
 #
 # A plain sourceable util — it uses error/warn/debug from utils/verbose.sh,
 # which every caller (the CLI, deploy, bootstrap, the drivers) loads first.
@@ -56,6 +63,32 @@ _KAPPLY_OK=' (serverside-applied|created|configured|unchanged|applied|deleted|an
 # heal, or heal-but-not-park).
 _KAPPLY_IMMUTABLE_RE='field is immutable'
 _KAPPLY_TERMINATING_RE='object is being deleted|being deleted:|because it is being terminated'
+
+# kapply::show_sensitive — whether the opt-in is on: LO_SHOW_SENSITIVE_OUTPUT
+# is exactly 1. With it, lo prints the kubectl output that it keeps private by
+# default (the output of kubectl apply, and at debug the diff text of a
+# bootstrap dry run). The Go twin: kapply.ShowSensitive.
+kapply::show_sensitive() { [[ "${LO_SHOW_SENSITIVE_OUTPUT:-}" == 1 ]]; }
+
+# kapply::counted_lines < output — the lines of a kubectl output that
+# kapply::render_captured counts and never prints: a line that ends in an OK
+# verb and whose first word has the <type>/<name> shape. The bootstrap
+# scheduler feeds these lines of the private output to render_captured for the
+# "· N resources" count; every other line stays out of the log. The Go twin:
+# kapply.CountedLines.
+kapply::counted_lines() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }   # the output can quote a Secret value
+  local line key
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    [[ "${line}" =~ ${_KAPPLY_OK} ]] || continue
+    key="${line%% *}"
+    if [[ -n "${key}" && "${key}" == */* ]]; then
+      printf '%s\n' "${line}"
+    fi
+  done
+  return 0
+}
 
 # Collapse repeated identical error lines (e.g. one webhook-not-ready message
 # emitted once per object) into a single line with a "(×N)" count, preserving
@@ -227,29 +260,54 @@ kapply::wait_ready() {
 #   Reads a manifest on stdin. Extra args (e.g. --kubeconfig <path>) thread
 #   through every kubectl call. Returns the apply's exit status; stashes the
 #   raw kubectl output in KAPPLY_LAST_OUTPUT.
-# One server-side apply: collapse the output on a tty (full off-tty), stash
-# the raw output in KAPPLY_LAST_OUTPUT, surface ONLY error lines on failure,
-# and return kubectl's exit. Used for BOTH the initial apply and the post-heal
-# re-apply, so the re-apply renders the same named progress block (never
-# escapes as raw output).
+# One server-side apply: capture the kubectl output (stdout and stderr) in
+# private, stash it in KAPPLY_LAST_OUTPUT (and append it to
+# KAPPLY_PRIVATE_LOG when set), print fixed lines, and return kubectl's exit.
+# On a tty the spinner line, then "✓ <label> · N resources"; off a tty the
+# same summary line plain (none with KAPPLY_PRIVATE_LOG: the bootstrap
+# scheduler prints the block of the entry). A failed pass prints the fixed
+# [error] line with the exit code, never the kubectl text. Under
+# LO_SHOW_SENSITIVE_OUTPUT=1 the old display: the full output off a tty, the
+# error lines (deduped) on a tty. Used for BOTH the initial apply and the
+# post-heal re-apply, so the re-apply renders the same named progress block
+# (never escapes as raw output). The kubectl user defaults are off
+# (KUBERC=off).
 kapply::_apply_pass() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }   # the manifest can hold Secret values (utils/keysonly.sh)
   local label="${1}" manifest="${2}"; shift 2
   local -a kubectl_flags=("${@}")
-  local out rc rc_file; rc_file=$(mktemp)
-  if kapply::_tty; then
+  local out rc rc_file n tty=0; rc_file=$(mktemp)
+  kapply::_tty && tty=1
+  if (( tty )); then
     out=$( { printf '%s' "${manifest}" \
       | KUBERC=off kubectl "${kubectl_flags[@]}" apply --server-side --force-conflicts -f - 2>&1; echo "$?" >"${rc_file}"; } \
       | kapply::_progress "${label}" )
   else
     out=$(printf '%s' "${manifest}" \
       | KUBERC=off kubectl "${kubectl_flags[@]}" apply --server-side --force-conflicts -f - 2>&1); echo "$?" >"${rc_file}"
-    printf '%s\n' "${out}"
   fi
   rc=$(cat "${rc_file}"); rm -f "${rc_file}"
   KAPPLY_LAST_OUTPUT="${out}"
-  (( rc == 0 )) || { kapply::_tty && printf '%s\n' "${out}" | grep -vE "${_KAPPLY_OK}" | kapply::_aggregate >&2 || true; }
+  if [[ -n "${KAPPLY_PRIVATE_LOG:-}" && -n "${out}" ]]; then
+    printf '%s\n' "${out}" >>"${KAPPLY_PRIVATE_LOG}"
+  fi
+  n=$(printf '%s\n' "${out}" | grep -cE "${_KAPPLY_OK}" || true)
+  debug "kapply: kubectl apply for ${label} exited ${rc} (${n} resources)"
+  if kapply::show_sensitive; then
+    warn "kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for ${label}, which can quote a value of the manifest"
+    if (( tty )); then
+      (( rc == 0 )) || { printf '%s\n' "${out}" | grep -vE "${_KAPPLY_OK}" | kapply::_aggregate >&2 || true; }
+    else
+      printf '%s\n' "${out}"
+    fi
+    return "${rc}"
+  fi
+  if (( ! tty && n > 0 )) && [[ -z "${KAPPLY_PRIVATE_LOG:-}" ]]; then
+    local noun=resources; (( n == 1 )) && noun=resource
+    printf '✓ %s · %d %s\n' "${label}" "${n}" "${noun}"
+  fi
+  (( rc == 0 )) || error "kapply: kubectl apply failed for ${label} (rc=${rc}). lo does not show the kubectl output: it can quote a value of the manifest. To see it, run again with LO_SHOW_SENSITIVE_OUTPUT=1"
   return "${rc}"
 }
 
@@ -368,46 +426,30 @@ kapply::_confirm_ns_finalize() {
 }
 
 # Stream filter: pass every line through to stdout (so the caller still
-# captures the full output), and on a terminal render a compact, self-erasing
-# block — a spinner header (named after the phase) plus the last ≤3 lines
-# scrolling up:
+# captures the full output), and on a terminal redraw ONE line in place: a
+# spinner, the phase and the count of objects so far:
 #
-#   ⠹ cilium
-#       configmap/cilium-config serverside-applied
-#       secret/cilium-ca serverside-applied
-#       service/cilium-envoy serverside-applied
+#   ⠹ cilium · 12
 #
-# On EOF the block is erased and replaced by a single  ✓ <phase> · N applied.
+# On EOF the line is replaced by a single  ✓ <phase> · N resources. The
+# kubectl lines themselves are not drawn: they are kubectl text, and the
+# apply output stays private (kapply::_apply_pass).
 kapply::_progress() {
   local label="${1:-resources}"
   local ui; ui="$(kapply::_ui)"
-  local n=0 drawn=0 line frame width l
-  local -a win=()
-  width=$(( $(tput cols 2>/dev/null || echo 80) - 6 )); (( width > 20 )) || width=74
+  local n=0 line frame
   while IFS= read -r line; do
     printf '%s\n' "${line}"
     case "${line}" in
       *' serverside-applied'|*' created'|*' configured'|*' unchanged'|*' applied'|*' deleted'|*' annotated'|*' labeled'|*' patched'|*' restarted'|*' scaled'|*' condition met')
         n=$(( n + 1 ))
-        win+=("${line}"); (( ${#win[@]} > 3 )) && win=("${win[@]: -3}")
         frame="${_KAPPLY_SPIN[$(( n % ${#_KAPPLY_SPIN[@]} ))]}"
-        {
-          (( drawn )) && printf '\033[%dA' "${drawn}"        # back to block top
-          printf '\r\033[K\033[36m%s\033[0m %s\n' "${frame}" "${label}"
-          drawn=1
-          for l in "${win[@]}"; do
-            printf '\033[K      \033[2m%.*s\033[0m\n' "${width}" "${l}"
-            drawn=$(( drawn + 1 ))
-          done
-        } >>"${ui}" 2>/dev/null ;;
+        printf '\r\033[K\033[36m%s\033[0m %s · %d' "${frame}" "${label}" "${n}" >>"${ui}" 2>/dev/null ;;
     esac
   done
   if (( n )); then
     local noun=resources; (( n == 1 )) && noun=resource
-    {
-      (( drawn )) && printf '\033[%dA\033[0J' "${drawn}"     # erase the block
-      printf '\r\033[K\033[32m✓\033[0m %s · %d %s\n' "${label}" "${n}" "${noun}"
-    } >>"${ui}" 2>/dev/null
+    printf '\r\033[K\033[32m✓\033[0m %s · %d %s\n' "${label}" "${n}" "${noun}" >>"${ui}" 2>/dev/null
   fi
 }
 

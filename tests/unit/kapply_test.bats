@@ -14,7 +14,9 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
 
   export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
-  unset LOK8S_FORCE_RECREATE APPLY_OUT GET_OUT KAPPLY_TTY
+  # KENV: one line per kubectl call, the verb and the KUBERC it ran with.
+  export KENV="${BATS_TEST_TMPDIR}/kubectl.env"; : > "${KENV}"
+  unset LOK8S_FORCE_RECREATE APPLY_OUT GET_OUT KAPPLY_TTY KAPPLY_PRIVATE_LOG LO_SHOW_SENSITIVE_OUTPUT KUBERC DEBUG
   export APPLY_RC=0
 
   # Stub kubectl: log every call; drive `apply` via APPLY_OUT/APPLY_RC and
@@ -22,6 +24,8 @@ setup() {
   # command-substitution / pipeline subshells see it.
   kubectl() {
     echo "kubectl $*" >> "${KLOG}"
+    local verb="$1"; [[ "$1" == "--kubeconfig" ]] && verb="$3"
+    echo "${verb} KUBERC=${KUBERC-<unset>}" >> "${KENV}"
     local cmd="$1"; [[ "$1" == "--kubeconfig" ]] && cmd="$3"
     case "${cmd}" in
       apply) [[ -n "${APPLY_OUT:-}" ]] && echo "${APPLY_OUT}"; return "${APPLY_RC:-0}" ;;
@@ -206,21 +210,20 @@ data: {}'
   refute_output --partial 'finalize'      # the destructive API call never happened
 }
 
-@test "progress: named rolling window collapses to a phase summary" {
+@test "progress: one in-place line with the count collapses to a phase summary" {
   # KAPPLY_TTY redirects the live UI to a file so we can assert on the render.
   export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"; : > "${KAPPLY_TTY}"
   local pass
   pass=$(printf 'configmap/a serverside-applied\nsecret/b serverside-applied\nservice/c serverside-applied\nrole/d serverside-applied\n' | kapply::_progress "cilium")
   # full output still passes through (for capture/logs)
   [[ "${pass}" == *"role/d serverside-applied"* ]]
-  # the UI rendered a header named after the phase, used in-place cursor-up
-  # redraws, and collapsed to a single "<phase> · N applied" summary.
-  grep -q 'cilium' "${KAPPLY_TTY}"
-  grep -qE $'\033\\[[0-9]+A' "${KAPPLY_TTY}"
+  # the UI redrew one line in place (the phase and the count so far) and
+  # collapsed to a single "<phase> · N resources" summary. It draws no
+  # kubectl line and moves no cursor up.
+  grep -q 'cilium · 3' "${KAPPLY_TTY}"
   grep -q 'cilium · 4 resources' "${KAPPLY_TTY}"
-  # window never exceeds 3 lines: the last redraw frame must not show line "a"
-  local last_frame; last_frame=$(awk 'BEGIN{RS="\033\\[[0-9]+A"} END{print}' "${KAPPLY_TTY}")
-  [[ "${last_frame}" != *"configmap/a"* ]]
+  run grep -cE $'\033\\[[0-9]+A|serverside-applied' "${KAPPLY_TTY}"
+  assert_output 0
 }
 
 @test "progress: summary is singular for a single resource" {
@@ -311,6 +314,137 @@ metadata: {name: cfg, namespace: default}'
   run cat "${KLOG}"
   refute_output --partial 'replace --force'
   refute_output --partial 'patch'
+}
+
+# ── the kubectl output stays private ─────────────────────────────────────────
+# CANARY_VALUE stands for a value of the manifest that kubectl quotes in its
+# output (a field error prints "Invalid value: <value>"). It is a made-up
+# string. lo prints fixed lines; the kubectl text prints only under
+# LO_SHOW_SENSITIVE_OUTPUT=1.
+
+CANARY_VALUE=zq7Canary9xLm2
+CFG_MANIFEST='apiVersion: v1
+kind: ConfigMap
+metadata: {name: cfg, namespace: default}'
+
+_fixed_fail_line() {
+  printf '[error] kapply: kubectl apply failed for %s (rc=%s). lo does not show the kubectl output: it can quote a value of the manifest. To see it, run again with LO_SHOW_SENSITIVE_OUTPUT=1' "$1" "$2"
+}
+
+@test "private: each apply pass runs kubectl with the user defaults off (KUBERC=off)" {
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1
+  export APPLY_OUT='Error from server (Invalid): Deployment.apps "web" is invalid: spec.selector: field is immutable'
+  run _kapply "${DEPLOY_MANIFEST}"
+  # the first pass and the pass after the heal
+  run grep -c '^apply ' "${KENV}"
+  assert_output 2
+  run grep -c '^apply KUBERC=off$' "${KENV}"
+  assert_output 2
+}
+
+@test "private: a failed pass prints the fixed line, never the kubectl output (off a tty, each level)" {
+  export APPLY_RC=1
+  export APPLY_OUT="The ConfigMap \"cfg\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\""
+  local level
+  for level in "" 1; do
+    DEBUG="${level}" run _kapply "${CFG_MANIFEST}"
+    assert_failure
+    refute_output --partial "${CANARY_VALUE}"
+    assert_line "$(_fixed_fail_line resources 1)"
+  done
+  assert_line '[debug] kapply: kubectl apply for resources exited 1 (0 resources)'
+}
+
+@test "private: the pass after a heal prints the fixed line too, never the kubectl output" {
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1
+  export APPLY_OUT="Error from server (Invalid): Deployment.apps \"web\" is invalid: spec.selector: Invalid value: \"${CANARY_VALUE}\": field is immutable"
+  local level fixed
+  fixed="$(_fixed_fail_line resources 1)"
+  for level in "" 1; do
+    DEBUG="${level}" run _kapply "${DEPLOY_MANIFEST}"
+    assert_failure
+    refute_output --partial "${CANARY_VALUE}"
+    assert_output --partial 'healing blocked objects, then re-applying once'
+    [[ "$(grep -cxF "${fixed}" <<<"${output}")" -eq 2 ]]
+  done
+}
+
+@test "private: on a tty a failed pass prints the fixed line, never the kubectl output" {
+  export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"
+  export APPLY_RC=1
+  export APPLY_OUT="configmap/a serverside-applied
+The ConfigMap \"cfg\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\""
+  local level
+  for level in "" 1; do
+    : > "${KAPPLY_TTY}"
+    DEBUG="${level}" run _kapply "${CFG_MANIFEST}"
+    assert_failure
+    refute_output --partial "${CANARY_VALUE}"
+    assert_line "$(_fixed_fail_line resources 1)"
+    grep -q 'resources · 1 resource' "${KAPPLY_TTY}"
+    run grep -c "${CANARY_VALUE}" "${KAPPLY_TTY}"
+    assert_output 0
+  done
+}
+
+@test "private: a clean pass prints the summary line, never the kubectl output" {
+  export APPLY_OUT="configmap/cfg serverside-applied
+Warning: unknown field \"data.${CANARY_VALUE}\""
+  local level
+  for level in "" 1; do
+    DEBUG="${level}" run _kapply "${CFG_MANIFEST}"
+    assert_success
+    refute_output --partial "${CANARY_VALUE}"
+    assert_line '✓ resources · 1 resource'
+  done
+  assert_line '[debug] kapply: kubectl apply for resources exited 0 (1 resources)'
+}
+
+@test "private: KAPPLY_PRIVATE_LOG gets the kubectl output, the pass prints no summary" {
+  export KAPPLY_PRIVATE_LOG="${BATS_TEST_TMPDIR}/priv.log"
+  export APPLY_RC=1
+  export APPLY_OUT="configmap/cfg serverside-applied
+Invalid value: \"${CANARY_VALUE}\""
+  run _kapply "${CFG_MANIFEST}"
+  assert_failure
+  refute_output --partial "${CANARY_VALUE}"
+  refute_output --partial '✓ resources'
+  assert_line "$(_fixed_fail_line resources 1)"
+  grep -qF "Invalid value: \"${CANARY_VALUE}\"" "${KAPPLY_PRIVATE_LOG}"
+}
+
+@test "private: LO_SHOW_SENSITIVE_OUTPUT=1 prints the kubectl output after a [warn] line" {
+  export LO_SHOW_SENSITIVE_OUTPUT=1 APPLY_RC=1
+  export APPLY_OUT="Invalid value: \"${CANARY_VALUE}\""
+  local warn_line='[warn] kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for resources, which can quote a value of the manifest'
+  # off a tty: the full output
+  run _kapply "${CFG_MANIFEST}"
+  assert_failure
+  assert_line "${warn_line}"
+  assert_output --partial "${CANARY_VALUE}"
+  refute_output --partial 'kapply: kubectl apply failed for'
+  # on a tty: the error lines (deduped)
+  export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"; : > "${KAPPLY_TTY}"
+  run _kapply "${CFG_MANIFEST}"
+  assert_failure
+  assert_line "${warn_line}"
+  assert_output --partial "${CANARY_VALUE}"
+}
+
+@test "private: only LO_SHOW_SENSITIVE_OUTPUT=1 is the opt-in" {
+  LO_SHOW_SENSITIVE_OUTPUT=1 run kapply::show_sensitive
+  assert_success
+  local v
+  for v in "" 0 true yes; do
+    LO_SHOW_SENSITIVE_OUTPUT="${v}" run kapply::show_sensitive
+    assert_failure
+  done
+}
+
+@test "counted_lines: keeps the <type>/<name> lines that end in an OK verb, nothing else" {
+  run kapply::counted_lines < <(printf 'configmap/a serverside-applied\nWarning: %s configured\n  indented/x created\nInvalid value: "%s"\nsecret/b unchanged' "${CANARY_VALUE}" "${CANARY_VALUE}")
+  assert_success
+  assert_output $'configmap/a serverside-applied\nsecret/b unchanged'
 }
 
 # ── kapply::render_captured (offline block for buffered bootstrap jobs) ───────

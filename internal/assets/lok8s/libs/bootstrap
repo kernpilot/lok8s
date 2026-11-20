@@ -966,6 +966,22 @@ bootstrap::_ticker_stop() {
   printf '\r\033[K'   # erase the status line before results flush
 }
 
+# bootstrap::_captured_stream <private-file> <out-file> — the stream the reap
+# renders for one background entry: the counted lines of its private kubectl
+# output (kapply::counted_lines: <type>/<name> lines that render_captured counts
+# and never prints), then its printed buffer. Every other line of the private
+# file stays out of the log. A missing file adds nothing. The Go twin:
+# Engine.reap (kapply.CountedLines(priv)+out).
+bootstrap::_captured_stream() {
+  if [[ -f "${1}" ]] && declare -F kapply::counted_lines >/dev/null 2>&1; then
+    kapply::counted_lines < "${1}"
+  fi
+  if [[ -f "${2}" ]]; then
+    cat -- "${2}"
+  fi
+  return 0
+}
+
 bootstrap::_reap_one() {
   (( ${#_BS_INFLIGHT[@]} )) || return 0
   bootstrap::_ticker_start   # animate the status line while we block below
@@ -1000,11 +1016,16 @@ bootstrap::_reap_one() {
       # rcfile + the marker text) and PARK the entry: record it for the drain-point
       # batch heal and DON'T complete it / DON'T OR overall_rc. Anything else falls
       # through to the normal complete + collect_rc + render below (the `else`).
-      local _exrc=1
+      # The job's private file (KAPPLY_PRIVATE_LOG, see the launch site) holds
+      # the kubectl output of its apply passes: read here to park and to count,
+      # never printed (it can quote a value of the manifest). The classification
+      # reads it and the printed buffer, which holds the kubectl output too
+      # under LO_SHOW_SENSITIVE_OUTPUT=1.
+      local _exrc=1 _priv="${_BS_OUTFILES[_i]%.out}.priv"
       [[ -f "${_BS_RCFILES[_i]}" ]] && _exrc="$(cat "${_BS_RCFILES[_i]}" 2>/dev/null || echo 1)"
       if [[ "${_exrc}" != "0" ]] && [[ -f "${_BS_OUTFILES[_i]}" ]] \
         && [[ -n "${_KAPPLY_IMMUTABLE_RE:-}" && -n "${_KAPPLY_TERMINATING_RE:-}" ]] \
-        && grep -qE "${_KAPPLY_IMMUTABLE_RE}|${_KAPPLY_TERMINATING_RE}" "${_BS_OUTFILES[_i]}"; then
+        && grep -sqE "${_KAPPLY_IMMUTABLE_RE}|${_KAPPLY_TERMINATING_RE}" "${_priv}" "${_BS_OUTFILES[_i]}"; then
         _BS_PARKED+=("${_ridx}")
         # Harvest the namespaces this conflict would force-finalize BEFORE the
         # buffered output is deleted below — the drain prompt has to name them,
@@ -1020,20 +1041,20 @@ bootstrap::_reap_one() {
               [[ "${_known}" == "${_pns}" ]] && { _seen=1; break; }
             done
             (( _seen )) || _BS_PARKED_NS+=("${_pns}")
-          done < <(kapply::terminating_namespaces < "${_BS_OUTFILES[_i]}")
+          done < <(cat -- "${_priv}" "${_BS_OUTFILES[_i]}" 2>/dev/null | kapply::terminating_namespaces)
         fi
-        # Surface the conflict detail NOW (we own the foreground): parking would
-        # otherwise discard the buffered kubectl error, and on a fail-fast / declined
-        # heal the user needs to see WHICH object/field is blocked to resolve by hand.
-        # Then note the deferral — the batched recreate confirmation is at the drain.
+        # Print the entry's block NOW (we own the foreground): its fixed lines name
+        # the entry and the exit code, and say how to see the kubectl output (it
+        # stays private). Then note the deferral — the batched recreate
+        # confirmation is at the drain.
         if declare -F kapply::render_captured >/dev/null 2>&1; then
-          kapply::render_captured "${_names[_ridx]}" 1 < "${_BS_OUTFILES[_i]}" || true
+          bootstrap::_captured_stream "${_priv}" "${_BS_OUTFILES[_i]}" | kapply::render_captured "${_names[_ridx]}" 1 || true
         else
           cat "${_BS_OUTFILES[_i]}" >&2 || true
         fi
         printf '\033[33m⏸\033[0m %s \033[2m· needs recreate (immutable/terminating) — will confirm at the end\033[0m\n' \
           "${_names[_ridx]}" >&2
-        rm -f "${_BS_RCFILES[_i]}" "${_BS_OUTFILES[_i]}"
+        rm -f "${_BS_RCFILES[_i]}" "${_BS_OUTFILES[_i]}" "${_priv}"
       else
         _BS_COMPLETED["${_ridx}"]=1
         _BS_DONE=$(( _BS_DONE + 1 ))
@@ -1047,18 +1068,23 @@ bootstrap::_reap_one() {
         # we render it here — collapsed on success, errors surfaced on failure.
         # `|| true` on every flush path: a rendering hiccup must never abort the
         # reap loop under errexit (that would skip _drain + the rcdir cleanup).
+        # The count comes from the private kubectl output (its <type>/<name>
+        # lines only, which render_captured counts and never prints).
         if [[ -f "${_BS_OUTFILES[_i]}" ]]; then
           if [[ -n "${DEBUG:-}" ]]; then
             # verbose (lo -v): honor kapply's "print everything, don't aggregate"
-            # contract — still de-interleaved (buffered per job), but verbatim.
+            # contract — still de-interleaved (buffered per job), but verbatim:
+            # the printed buffer only (kapply's [debug] line carries the exit code
+            # and the count), never the private output.
             cat "${_BS_OUTFILES[_i]}" || true
           elif declare -F kapply::render_captured >/dev/null 2>&1; then
-            kapply::render_captured "${_names[_ridx]}" "${_jrc}" < "${_BS_OUTFILES[_i]}" || true
+            bootstrap::_captured_stream "${_priv}" "${_BS_OUTFILES[_i]}" | kapply::render_captured "${_names[_ridx]}" "${_jrc}" || true
           else
             cat "${_BS_OUTFILES[_i]}" || true   # fallback: de-interleaved, not collapsed
           fi
           rm -f "${_BS_OUTFILES[_i]}"
         fi
+        rm -f "${_priv}"
         # iff this entry FAILED, skip only its transitive dependents (they would fail
         # behind the broken dep). A failure no longer stops the world.
         (( _jrc == 0 )) || bootstrap::_skip_dependents "${_ridx}"
@@ -2548,8 +2574,11 @@ bootstrap::apply() {
       # Capture the rc EXPLICITLY (|| _arc=$?) — under errexit a failing
       # _apply_one would abort before `echo $?` runs; _collect_rc treats a missing
       # file as a failure too. Set LOK8S_BOOTSTRAP_PARALLEL=1 for clean
-      # one-at-a-time output.
-      ( export LOK8S_NONINTERACTIVE=1
+      # one-at-a-time output. KAPPLY_PRIVATE_LOG: kapply appends the kubectl
+      # output of the entry's apply passes to ${_rcdir}/<seq>.priv (the 0700
+      # mktemp dir), never to ${_out}; the reap parks and counts from it and
+      # never prints it.
+      ( export LOK8S_NONINTERACTIVE=1 KAPPLY_PRIVATE_LOG="${_rcdir}/${_seq}.priv"
         _arc=0
         bootstrap::_apply_one "${_names[_i2]}" "${_dirs[_i2]}" "${kind}" "${provider_name}" \
           "${kubeconfig}" "${_inlines[_i2]}" "${_wflag}" "${_envs[_i2]}" > "${_out}" 2>&1 || _arc=$?

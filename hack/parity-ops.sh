@@ -227,17 +227,20 @@ export PARITY_KUBECTL_APPLY_RC=1
 check - deploy --domain alpha.dev -l lok8s.dev/type=platform
 unset PARITY_KUBECTL_APPLY_RC
 # An artifact with the keys-only marker, and one that does not parse: both
-# routes refuse before kubectl runs (the stub kubectl prints its verbs).
+# routes refuse before kubectl runs. kapply keeps the output of the stub
+# kubectl private and prints its own lines (the summary "✓ <label> · N
+# resources", or the line of a failed apply), so a kubectl that ran shows as
+# one of those or as the wait output.
 for artifact in artifact_keys_only artifact_unparsed; do
   "${artifact}"
   check - deploy --domain alpha.dev
   grep -qF "[error] refusing to apply alpha.dev: PROJ/clusters/alpha.dev/artifacts.yaml" "${WORK}/go.err" \
     || fail "deploy (${artifact}): no refusal on stderr"
-  ! grep -qE 'serverside-applied|condition met' "${WORK}/go.out" "${WORK}/go.err" || fail "deploy (${artifact}): kubectl ran"
+  ! grep -qE 'serverside-applied|condition met|✓ .* · [0-9]+ resources?$|kubectl apply failed for' "${WORK}/go.out" "${WORK}/go.err" || fail "deploy (${artifact}): kubectl ran"
   check - deploy --domain alpha.dev -l lok8s.dev/type=platform
   grep -qF "[error] refusing to apply alpha.dev: PROJ/clusters/alpha.dev/artifacts.yaml" "${WORK}/go.err" \
     || fail "deploy -l (${artifact}): no refusal on stderr"
-  ! grep -qE 'serverside-applied|condition met' "${WORK}/go.out" "${WORK}/go.err" || fail "deploy -l (${artifact}): kubectl ran"
+  ! grep -qE 'serverside-applied|condition met|✓ .* · [0-9]+ resources?$|kubectl apply failed for' "${WORK}/go.out" "${WORK}/go.err" || fail "deploy -l (${artifact}): kubectl ran"
 done
 unset LOK8S_NONINTERACTIVE   # recover below treats it as CONSENT
 

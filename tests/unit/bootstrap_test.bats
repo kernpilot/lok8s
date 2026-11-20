@@ -2662,6 +2662,128 @@ YAML
   [[ "$output" != *"· 1 resource"* ]]
 }
 
+# ── the kubectl output of an entry stays private ─────────────────────────────
+# CANARY_VALUE stands for a value of the manifest that kubectl quotes in its
+# output (a field error prints "Invalid value: <value>"). It is a made-up
+# string. A background entry's kapply appends the kubectl output to
+# KAPPLY_PRIVATE_LOG; the reap parks and counts from that file and prints
+# fixed lines. The Go twins are in internal/bootstrap/private_test.go.
+
+CANARY_VALUE=zq7Canary9xLm2
+
+# _private_kubectl_stub <apply-output> <apply-rc> — kubectl answers `apply`
+# with <apply-output> and <apply-rc>, every other verb with 0 and no output.
+# KENV gets the verb and the KUBERC of each call.
+_private_kubectl_stub() {
+  export KENV="${BATS_TEST_TMPDIR}/kubectl.env"; : > "${KENV}"
+  export APPLY_OUT="${1}" APPLY_RC="${2}"
+  kubectl() {
+    local verb="$1"; [[ "$1" == "--kubeconfig" ]] && verb="$3"
+    echo "${verb} KUBERC=${KUBERC-<unset>}" >> "${KENV}"
+    [[ " $* " != *" -f - "* ]] || cat >/dev/null
+    if [[ "${verb}" == apply ]]; then
+      printf '%s\n' "${APPLY_OUT}"
+      return "${APPLY_RC}"
+    fi
+    return 0
+  }
+  export -f kubectl
+}
+
+@test "bootstrap::apply: the kubectl output of an entry stays private (each level, success and failure)" {
+  write_cluster_spec "testcni"
+  unset LO_SHOW_SENSITIVE_OUTPUT
+  local lvl
+  for lvl in "" 1; do
+    # A clean apply: the count comes from the private output.
+    _private_kubectl_stub "configmap/testcni serverside-applied
+Warning: unknown field \"data.${CANARY_VALUE}\"" 0
+    DEBUG="${lvl}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+    assert_success
+    refute_output --partial "${CANARY_VALUE}"
+    if [[ -n "${lvl}" ]]; then
+      assert_line '[debug] kapply: kubectl apply for testcni exited 0 (1 resources)'
+    else
+      assert_line '✓ testcni · 1 resource'
+    fi
+    [ "$(grep -c '^apply ' "${KENV}")" -eq 1 ]
+    [ "$(grep -c '^apply KUBERC=off$' "${KENV}")" -eq 1 ]
+    # A failed apply: the fixed lines, never the kubectl output.
+    _private_kubectl_stub "The ConfigMap \"testcni\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\"" 1
+    DEBUG="${lvl}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+    assert_failure
+    refute_output --partial "${CANARY_VALUE}"
+    refute_output --partial "Invalid value"
+    assert_output --partial '[error] kapply: kubectl apply failed for testcni (rc=1). lo does not show the kubectl output: it can quote a value of the manifest. To see it, run again with LO_SHOW_SENSITIVE_OUTPUT=1'
+    assert_output --partial '[error] bootstrap: testcni apply failed (rc=1)'
+    [ "$(grep -c '^apply KUBERC=off$' "${KENV}")" -eq 1 ]
+  done
+}
+
+@test "bootstrap::apply: LO_SHOW_SENSITIVE_OUTPUT=1 shows the kubectl output of a failed entry" {
+  write_cluster_spec "testcni"
+  _private_kubectl_stub "The ConfigMap \"testcni\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\"" 1
+  LO_SHOW_SENSITIVE_OUTPUT=1 run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_failure
+  assert_output --partial "${CANARY_VALUE}"
+  assert_output --partial '[warn] kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for testcni, which can quote a value of the manifest'
+}
+
+@test "bootstrap::apply: an immutable conflict in the private output PARKS the entry, and no kubectl text prints" {
+  write_cluster_spec "testcni"
+  unset LO_SHOW_SENSITIVE_OUTPUT LOK8S_FORCE_RECREATE
+  local lvl
+  for lvl in "" 1; do
+    _private_kubectl_stub "Error from server (Invalid): ConfigMap \"testcni\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\": field is immutable" 1
+    DEBUG="${lvl}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+    assert_failure
+    assert_output --partial 'will confirm at the end'
+    assert_output --partial 'needs recreate'
+    refute_output --partial "${CANARY_VALUE}"
+    refute_output --partial 'field is immutable'
+  done
+}
+
+@test "bootstrap::apply: a terminating-namespace 403 in the private output reaches the prompt" {
+  local p="${BATS_TEST_TMPDIR}/prompt.txt"
+  write_cluster_spec "testcni"
+  _private_kubectl_stub "Error from server (Forbidden): error when creating \"x\": secrets \"${CANARY_VALUE}\" is forbidden: unable to create new content in namespace app-system because it is being terminated" 1
+  bootstrap::_interactive() { return 0; }
+  bootstrap::_ask() { printf '%s' "${1}" > "${p}"; return 1; }
+  unset LOK8S_FORCE_RECREATE LO_SHOW_SENSITIVE_OUTPUT
+  local out="${BATS_TEST_TMPDIR}/ns.out" rc=0
+  bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" > "${out}" 2>&1 </dev/null || rc=$?
+  [ "${rc}" -ne 0 ]
+  grep -q "app-system" "${p}"
+  grep -q 'will confirm at the end' "${out}"
+  [ "$(cat "${out}" "${p}" | grep -c "${CANARY_VALUE}" || true)" -eq 0 ]
+}
+
+@test "bootstrap::apply: a background job's private file sits in the 0700 scheduler dir and is removed at the reap" {
+  export LOK8S_BOOTSTRAP_PARALLEL=8
+  export SEEN="${BATS_TEST_TMPDIR}/seen"; : > "${SEEN}"
+  bootstrap::_apply_one() {
+    printf 'configmap/%s-one serverside-applied\n' "${1}" >> "${KAPPLY_PRIVATE_LOG}"
+    printf '%s %s\n' "${KAPPLY_PRIVATE_LOG}" "$(stat -c %a "${KAPPLY_PRIVATE_LOG%/*}")" >> "${SEEN}"
+    return 0
+  }
+  local n
+  for n in a b; do mkdir -p "${PATH_LOK8S}/addons/${n}"; done
+  write_cluster_spec "a" "b"
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"a "*"· 1 resource"* ]]
+  [[ "$output" == *"b "*"· 1 resource"* ]]
+  [[ "$output" != *"serverside-applied"* ]]
+  [ "$(wc -l < "${SEEN}")" -eq 2 ]
+  local path mode
+  while read -r path mode; do
+    [[ "${path}" == *.priv ]]
+    [ "${mode}" = "700" ]
+    [ ! -e "${path}" ]
+  done < "${SEEN}"
+}
+
 # ── hosted platform-owned skip (cilium/ccm never bootstrap onto hosted) ──────
 
 @test "hosted: _apply_one skips cilium unconditionally when LOK8S_BOOTSTRAP_HOSTED=true" {

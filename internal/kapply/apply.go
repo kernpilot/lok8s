@@ -22,10 +22,13 @@
 // so existing retry logic (CRD-not-established, webhook-not-ready) keeps
 // working.
 //
-// Display: the same documented simplification as Run — off a terminal the
-// full kubectl output is printed (CI/Tilt logs, byte-identical to bash); on
-// a terminal the identical FINAL state is rendered (summary line / surfaced
-// errors) without the in-flight animation.
+// Display: the kubectl output stays private (private.go): it can quote a
+// value of the manifest. A pass prints a summary line and, on a failure, a
+// fixed line with the exit code — off a terminal byte-identical to bash. On
+// a terminal the summary is the FINAL state, without the in-flight spinner
+// of bash (the documented simplification of Run). LO_SHOW_SENSITIVE_OUTPUT=1
+// prints the kubectl output as before: off a terminal the whole text, on a
+// terminal the surfaced error lines.
 package kapply
 
 import (
@@ -60,10 +63,24 @@ var immutableObjRe = regexp.MustCompile(`[A-Z][A-Za-z]+(\.[a-z0-9.-]+)? "[^"]+" 
 // implementation did) or fill the fields explicitly in tests.
 type Applier struct {
 	Runner execx.Runner
-	// Stdout receives the apply output (off-tty passthrough) and summaries.
+	// Stdout receives the summary line of a pass ("✓ <label> · N
+	// resources"), and the kubectl output under ShowSensitive.
 	Stdout io.Writer
-	// Stderr receives warn/error lines and surfaced apply errors.
+	// Stderr receives the warn/error lines (the fixed line of a failed
+	// pass), and the surfaced kubectl errors under ShowSensitive.
 	Stderr io.Writer
+
+	// Private, when set, receives the kubectl output of each pass (stdout
+	// and stderr together), which lo never prints: the bootstrap scheduler
+	// reads it to park an entry on a conflict and to count its objects. With
+	// Private set, a pass prints no summary line: the scheduler prints one
+	// block per entry (bash: KAPPLY_PRIVATE_LOG).
+	Private io.Writer
+	// ShowSensitive is LO_SHOW_SENSITIVE_OUTPUT=1: print the kubectl output
+	// of each pass as lo did before it kept the output private (off a
+	// terminal the whole text, on a terminal the error lines of a failed
+	// pass), after a [warn] line.
+	ShowSensitive bool
 
 	// ForceRecreate is LOK8S_FORCE_RECREATE: heal without prompting.
 	ForceRecreate bool
@@ -88,7 +105,8 @@ type Applier struct {
 
 // NewApplier builds an Applier over the runner, reading the decision env
 // exactly like the bash implementation (LOK8S_FORCE_RECREATE,
-// LOK8S_NONINTERACTIVE, CI, KAPPLY_NS_WAIT, KAPPLY_POLL_INTERVAL).
+// LOK8S_NONINTERACTIVE, CI, KAPPLY_NS_WAIT, KAPPLY_POLL_INTERVAL,
+// LO_SHOW_SENSITIVE_OUTPUT).
 func NewApplier(r execx.Runner, stdout, stderr io.Writer) *Applier {
 	return &Applier{
 		Runner:         r,
@@ -98,6 +116,7 @@ func NewApplier(r execx.Runner, stdout, stderr io.Writer) *Applier {
 		NonInteractive: os.Getenv("LOK8S_NONINTERACTIVE") != "" || os.Getenv("CI") != "",
 		NsWait:         envInt("KAPPLY_NS_WAIT", 20),
 		PollInterval:   envInterval(),
+		ShowSensitive:  ShowSensitive(),
 	}
 }
 
@@ -162,47 +181,83 @@ func (a *Applier) kubectlQuiet(ctx context.Context, stdin string, args ...string
 	return execx.ExitCode(a.Runner.Run(ctx, c))
 }
 
-// applyPass is one server-side apply (bash: kapply::_apply_pass): collapse
-// the output on a tty (full off-tty), surface ONLY error lines on failure,
-// and return (raw output, kubectl's exit). Used for BOTH the initial apply
-// and the post-heal re-apply, so the re-apply renders the same named
-// progress block.
+// applyPass is one server-side apply (bash: kapply::_apply_pass). kubectl
+// writes its stdout and stderr into one private buffer, which lo never
+// prints: the output can quote a value of the manifest. The pass returns
+// (the kubectl output, kubectl's exit) for the classification of the
+// caller (conflict, race), copies the output to Private, and prints fixed
+// lines: a [debug] line with the exit code and the count, the summary
+// "✓ <label> · N resources" (not with Private), and on a failure the line
+// of ApplyFailedText. Used for BOTH the initial apply and the post-heal
+// re-apply, so the re-apply prints the same lines. Under ShowSensitive the
+// pass prints the kubectl output as before: off a terminal the whole text,
+// on a terminal the summary and the error lines of a failed pass.
 func (a *Applier) applyPass(ctx context.Context, label, manifest string, kubectlFlags []string) (string, int) {
 	args := append(append([]string{}, kubectlFlags...),
 		"apply", "--server-side", "--force-conflicts", "-f", "-")
 	out, rc := a.kubectl(ctx, manifest, args...)
-
-	if !ttyUI() {
-		// bash: out=$(kubectl … 2>&1); printf '%s\n' "${out}" — the command
-		// substitution strips trailing newlines, so exactly ONE follows.
-		fmt.Fprintf(a.Stdout, "%s\n", strings.TrimRight(out, "\n"))
-		return out, rc
+	if a.Private != nil && out != "" {
+		_, _ = io.WriteString(a.Private, strings.TrimRight(out, "\n")+"\n")
 	}
-	// tty: render the FINAL collapsed state (documented simplification — no
-	// in-flight spinner; the summary/aggregated errors match bash's end state).
-	lines := splitLines(out)
+
 	okCount := 0
 	var rest []string
-	for _, l := range lines {
+	for _, l := range splitLines(out) {
 		if OKRe.MatchString(l) {
 			okCount++
 		} else if l != "" {
 			rest = append(rest, l)
 		}
 	}
-	if okCount > 0 {
-		noun := "resources"
-		if okCount == 1 {
-			noun = "resource"
+	ui.DebugTo(a.Stderr, "kapply: kubectl apply for %s exited %d (%d resources)", label, rc, okCount)
+	tty := ttyUI()
+
+	if a.ShowSensitive {
+		ui.WarnTo(a.Stderr, "kapply: %s", ShowSensitiveText("the kubectl output for "+label))
+		if !tty {
+			// bash: out=$(kubectl … 2>&1); printf '%s\n' "${out}" — the
+			// command substitution strips trailing newlines, so exactly ONE
+			// follows.
+			fmt.Fprintf(a.Stdout, "%s\n", strings.TrimRight(out, "\n"))
+			return out, rc
 		}
-		fmt.Fprintf(a.Stdout, "\033[32m✓\033[0m %s · %d %s\n", label, okCount, noun)
+		// tty: the FINAL collapsed state (documented simplification — no
+		// in-flight spinner; the summary/aggregated errors match bash's end
+		// state).
+		a.summary(label, okCount, tty)
+		if rc != 0 {
+			for _, l := range Aggregate(rest) {
+				fmt.Fprintln(a.Stderr, l)
+			}
+		}
+		return out, rc
 	}
+
+	a.summary(label, okCount, tty)
 	if rc != 0 {
-		for _, l := range Aggregate(rest) {
-			fmt.Fprintln(a.Stderr, l)
-		}
+		ui.ErrorTo(a.Stderr, "%s", ApplyFailedText(label, rc))
 	}
 	return out, rc
+}
+
+// summary prints "✓ <label> · N resources" for a pass that reported N
+// objects (green on a terminal, plain off it; bash: the last line of
+// kapply::_progress, and the plain line of kapply::_apply_pass). Nothing
+// with Private set (the bootstrap scheduler prints the block of the entry)
+// or for N 0.
+func (a *Applier) summary(label string, n int, tty bool) {
+	if a.Private != nil || n == 0 {
+		return
+	}
+	noun := "resources"
+	if n == 1 {
+		noun = "resource"
+	}
+	if tty {
+		fmt.Fprintf(a.Stdout, "\033[32m✓\033[0m %s · %d %s\n", label, n, noun)
+		return
+	}
+	fmt.Fprintf(a.Stdout, "✓ %s · %d %s\n", label, n, noun)
 }
 
 // Apply reads a manifest and applies it server-side with the bounded heal

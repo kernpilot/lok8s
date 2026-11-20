@@ -28,6 +28,7 @@ func (e *rcError) ExitCode() int { return e.code }
 // via applyOut/applyRC and `get` via getOut; replace/patch just succeed.
 type fakeKubectl struct {
 	calls    []string
+	envs     [][]string // the Env of each call, in call order
 	applyOut string
 	applyRC  int
 	getOut   string
@@ -36,6 +37,7 @@ type fakeKubectl struct {
 func (f *fakeKubectl) Run(ctx context.Context, c execx.Cmd) error {
 	line := c.Name + " " + strings.Join(c.Args, " ")
 	f.calls = append(f.calls, line)
+	f.envs = append(f.envs, c.Env)
 	// Skip a leading --kubeconfig pair, like the bats stub's cmd probe.
 	args := c.Args
 	if len(args) >= 2 && args[0] == "--kubeconfig" {
