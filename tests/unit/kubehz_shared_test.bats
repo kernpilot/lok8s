@@ -1884,6 +1884,71 @@ _stub_mktemp() {
   [ "$(grep -c -x -F -- "${real}" "${STAT_LOG}")" -eq 0 ]
 }
 
+# A command substitution strips every trailing newline, also those of a
+# name. A TMPDIR whose name ends in a newline is checked and used under that
+# name, not under the shorter name, which is another dir. Here the real dir
+# is open to others and the shorter one is private: the check refuses the
+# real one, and the writer makes nothing in either dir.
+@test "space_join_tmp_dir: a TMPDIR whose name ends in a newline is checked under that name" {
+  local base short long
+  base=$(_real "${BATS_TEST_TMPDIR}")
+  short="${base}/t" long="${base}/t"$'\n'
+  mkdir -m 700 -- "${short}" "${long}"
+  chmod 777 -- "${long}"
+  TMPDIR="${long}" run kubehz::space_join_tmp_dir
+  assert_failure 2
+  assert_output --partial "the temp dir for the join ticket is not safe: ${long} is writable by others and has no sticky bit"
+  TMPDIR="${long}" run kubehz::space_write_join_ticket worker-1 "$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)"
+  assert_failure 1
+  run find "${short}" "${long}" -mindepth 1
+  assert_success
+  assert_output ""
+}
+
+# The reverse: the real dir is private and the shorter one is open. The
+# check passes, it prints the real name and a newline, and the ticket lands
+# under the real name. The shorter dir stays empty.
+@test "space_join_tmp_dir: a TMPDIR whose name ends in a newline gets the ticket under that name" {
+  local base short long ticket path
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  base=$(_real "${BATS_TEST_TMPDIR}")
+  short="${base}/t" long="${base}/t"$'\n'
+  mkdir -m 700 -- "${short}" "${long}"
+  chmod 777 -- "${short}"
+  # The x keeps the trailing newlines of the output.
+  _tmp_dir_and_x() { TMPDIR="${long}" kubehz::space_join_tmp_dir && printf x; }
+  run _tmp_dir_and_x
+  assert_success
+  [ "${output}" = "${long}"$'\n'x ]
+  path=$(TMPDIR="${long}" kubehz::space_write_join_ticket worker-1 "${ticket}")
+  [[ "${path}" == "${long}"/kubehz-join-*/kubehz-join-worker-1.token ]]
+  [ "$(cat -- "${path}")" = "${ticket}" ]
+  run find "${short}" -mindepth 1
+  assert_success
+  assert_output ""
+}
+
+# The physical path comes from pwd -P. A result that is empty or not
+# absolute fails closed: no part is read, and the writer says that TMPDIR
+# cannot be resolved and makes no dir.
+@test "space_join_tmp_dir: a physical path that is empty or not absolute fails closed" {
+  local out ticket
+  ticket=$(printf '%s.%s' a1b2c3 d4e5f6g7h8i9j0k1)
+  for out in '' 'relative/dir'; do
+    export PWD_OUT="${out}"
+    pwd() { printf '%s\n' "${PWD_OUT}"; }
+    TMPDIR="${BATS_TEST_TMPDIR}" run kubehz::space_join_tmp_dir
+    assert_failure 1
+    assert_output ""
+    TMPDIR="${BATS_TEST_TMPDIR}" run kubehz::space_write_join_ticket worker-1 "${ticket}"
+    unset -f pwd
+    assert_failure 1
+    assert_output "the temp dir (TMPDIR) cannot be resolved"
+    run find "${BATS_TEST_TMPDIR}" -maxdepth 1 -name 'kubehz-join-*'
+    assert_output ""
+  done
+}
+
 # A readonly name makes a local fail. A readonly nameref of a caller on the
 # name of a ticket local would then take the ticket into the variable it
 # names (here an exported one, so a child would get it). The mint declares
