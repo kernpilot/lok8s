@@ -122,8 +122,9 @@ func ssoCase(t *testing.T, name string) (*config.Paths, string, *scriptRunner) {
 // (b) the version is selected by its name: v1alpha1 after another version
 // that lacks the field is OK, and another version first that has the field
 // does not hide a v1alpha1 without it; (c) the flags: a v1alpha1 that is
-// not served is not checked; a storage version other than v1alpha1 without
-// the field is a FAIL of its own, with the field it is OK, and when
+// not served is not checked, also when it lacks the field (the served
+// check comes before the field); a storage version other than v1alpha1
+// without the field is a FAIL of its own, with the field it is OK, and when
 // v1alpha1 lacks the field too, the line of v1alpha1 wins; (d) no CRD (no
 // output, white space, an empty List) skips; (e) each failed read prints
 // its fixed reason and never kubectl's output; (f) an answer of another

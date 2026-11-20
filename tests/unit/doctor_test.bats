@@ -513,6 +513,7 @@ _sso_path_without() {
 @test "sso: a CRD without v1alpha1 is not checked" { _sso_case no-v1alpha1; }
 @test "sso: mergeType only at a nested place is not the field" { _sso_case field-nested-only; }
 @test "sso: a v1alpha1 that is not served is not checked" { _sso_case v1alpha1-not-served; }
+@test "sso: not served wins over a v1alpha1 without the field" { _sso_case v1alpha1-not-served-without-field; }
 @test "sso: a storage version without the field fails" { _sso_case stored-without-field; }
 @test "sso: a storage version with the field passes" { _sso_case stored-with-field; }
 @test "sso: no field in v1alpha1 and in the storage version gives the line of v1alpha1" { _sso_case absent-in-v1alpha1-and-storage; }

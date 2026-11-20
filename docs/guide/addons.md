@@ -834,6 +834,11 @@ Three consequences:
     field: the apiserver removes the field when it stores the policy.
     Reinstall the CRDs of envoy-gateway first, then reconcile `sso-gate`.
 
+  When more than one case applies, the check prints one line: a
+  `v1alpha1` that is not served gives the `!` line, also when it does
+  not declare the field, and when `v1alpha1` does not declare the field,
+  its `✗` line wins over the line of the storage version.
+
   The line is advisory: it does not change the exit code of `lo doctor`,
   so a script must read the line, not the exit code. A `!` or `ℹ` line
   gives the reason when the check did not run (for example: no
@@ -857,9 +862,10 @@ Three consequences:
   ```
 
   `v1alpha1` must be served. When the storage version is another
-  version, run the second command again with its name in place of
-  `v1alpha1`: it must print `string` too. (Both select a version by
-  name, not by `versions[0]`: the order of that list is not a contract.)
+  version, set `JP` again with the name of the storage version in place
+  of `v1alpha1`, and run the last command again: it must print `string`
+  too. (Both select a version by name, not by `versions[0]`: the order
+  of that list is not a contract.)
 
 - **Upgrade Envoy Gateway before the policy reconciles.** Under `lo up`
   that ordering comes free from `dependsOn: [envoy-gateway]`, and a
