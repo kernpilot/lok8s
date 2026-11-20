@@ -510,15 +510,18 @@ hetzner::_shell_word() {
 # the load balancer, and the server of a server target (<server-id>; empty
 # for a selector or an ip target). An add can be done while its answer is
 # lost: then the next attempt gets the API error target_already_defined.
-# That answer is a success only when a new read of the load balancer by id
-# shows the target (<api-type> <value>, as hetzner::_lb_target_private
-# reads it) with use_private_ip <want-private>. rc 1 with the last hcloud
-# error on stdout; rc 2 when a read or a check before an attempt failed (the
-# message is on stderr): then the caller stops.
+# Then a new read of the load balancer by id decides at once, by the target
+# (<api-type> <value>, as hetzner::_lb_target_private reads it): with
+# use_private_ip <want-private> it is a success; with the other value no
+# attempt can change it (rc 3); without the target the attempts go on.
+# rc 1 with the last hcloud error on stdout; rc 2 when a read or a check
+# failed, before an attempt or after target_already_defined (the message is
+# on stderr): then the caller stops; rc 3 with the use_private_ip that the
+# new read shows on stdout.
 hetzner::_lb_add_target() {
   local lb="${1}" lbname="${2}" mark="${3}" sid="${4}" sname="${5}"
   local api_type="${6}" value="${7}" want="${8}"; shift 8
-  local tries="${HETZNER_LB_ADD_TRIES:-4}" delay="${HETZNER_LB_ADD_DELAY:-2}" n err="" live
+  local tries="${HETZNER_LB_ADD_TRIES:-4}" delay="${HETZNER_LB_ADD_DELAY:-2}" n err="" live got
   # hcloud prints an API error as "<message> (<code>)" or "<message> (<code>,
   # <correlation id>)". Only this code: another "already" is not this target.
   local defined='\(target_already_defined[,)]'
@@ -528,11 +531,20 @@ hetzner::_lb_add_target() {
       hetzner::_still_ours server "${sid}" "${mark}" "${sname}" >/dev/null || return 2
     fi
     err="$(dry-run::cmd hcloud load-balancer add-target "${lb}" "${@}" 2>&1)" && return 0
-    if [[ "${err}" =~ ${defined} ]] &&
-       live="$(hetzner::_still_ours load-balancer "${lb}" "${mark}" "${lbname}")" &&
-       [[ "$(hetzner::_lb_target_private "${live}" "${api_type}" "${value}")" == "${want}" ]]; then
-      _hetzner_log "lb ${lb}: add-target attempt ${n}/${tries}: the target is defined already, and a new read shows it with use-private-ip ${want}"
-      return 0
+    if [[ "${err}" =~ ${defined} ]]; then
+      # A failed read stops here: the caller reports it once, and no later
+      # attempt can leave its message behind as a false error.
+      live="$(hetzner::_still_ours load-balancer "${lb}" "${mark}" "${lbname}")" || return 2
+      got="$(hetzner::_lb_target_private "${live}" "${api_type}" "${value}")"
+      if [[ "${got}" == "${want}" ]]; then
+        _hetzner_log "lb ${lb}: add-target attempt ${n}/${tries}: the target is defined already, and a new read shows it with use-private-ip ${want}"
+        return 0
+      fi
+      if [[ -n "${got}" ]]; then
+        _hetzner_log "lb ${lb}: add-target attempt ${n}/${tries}: the target is defined already, and a new read shows it with use-private-ip ${got}, not ${want}"
+        printf '%s' "${got}"
+        return 3
+      fi
     fi
     _hetzner_log "lb ${lb}: add-target attempt ${n}/${tries} failed: ${err}"
     (( n == tries )) || sleep "${delay}"
@@ -620,10 +632,12 @@ hetzner::_lb_audit() {
     esac
     hetzner::_still_ours load-balancer "${lb}" "${mark}" "${lbname}" >/dev/null || return 1
     if ! err=$(dry-run::cmd hcloud load-balancer remove-target "${lb}" "${rm_flags[@]}" 2>&1); then
-      # One shell word per argument: a selector can have a space.
+      # One shell word per argument: a selector can have a space. The
+      # command ends the message, without quotes around it: a word can hold
+      # \' (printf %q).
       hint="hcloud load-balancer remove-target"
       for word in "${lbname}" "${rm_flags[@]}"; do hint+=" $(hetzner::_shell_word "${word}")"; done
-      error "lb ${lbname}: could not remove the target ${type} '${value}': ${err}. It can route to a server of another owner. Remove it with '${hint}', then run the provision again."
+      error "lb ${lbname}: could not remove the target ${type} '${value}': ${err}. It can route to a server of another owner. Run this command, then run the provision again: ${hint}"
       rc=1
     fi
   done < <(jq -r '(.targets // [])[]
@@ -817,13 +831,18 @@ hetzner::load-balancer() {
           _HETZNER_LB_FAILED=1
           return 0
         fi
-        if (( arc != 0 )); then
-          # One shell word per argument: a selector can have a space.
+        if (( arc == 3 )); then
+          error "lb ${name}: removed target ${target_type} '${target_value}' to set use-private-ip ${want_private}, but the add answered that the target is defined already, and a new read shows it with use-private-ip ${err}. Another run or person changed the load balancer at the same time. The load balancer routes to this target with use-private-ip ${err} now. Run the provision again."
+          _HETZNER_LB_FAILED=1
+        elif (( arc != 0 )); then
+          # One shell word per argument: a selector can have a space. The
+          # command ends the message, without quotes around it: a word can
+          # hold \' (printf %q).
           local hint="hcloud load-balancer add-target" word
           for word in "${name}" "${target_args[@]}" "${private_arg[@]}"; do
             hint+=" $(hetzner::_shell_word "${word}")"
           done
-          error "lb ${name}: removed target ${target_type} '${target_value}', but could not add it again with use-private-ip ${want_private} in ${HETZNER_LB_ADD_TRIES:-4} attempts: ${err}. The load balancer does not route to this target now. Add it with '${hint}', or run the provision again."
+          error "lb ${name}: removed target ${target_type} '${target_value}', but could not add it again with use-private-ip ${want_private} in ${HETZNER_LB_ADD_TRIES:-4} attempts: ${err}. The load balancer does not route to this target now. Run the provision again, or add the target with this command: ${hint}"
           _HETZNER_LB_FAILED=1
         fi
         if [[ -z "${CLOUD_DRY_RUN:-}" ]]; then

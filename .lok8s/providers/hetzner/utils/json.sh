@@ -784,6 +784,7 @@ hetzner::refs() {
 # change the part between them (the API has no precondition on labels).
 hetzner::_still_ours() {
   local kind="${1}" id="${2}" mark="${3}" want="${4-}" json state
+  local err_file="" reason="" line rc=0
   if [[ ! "${id}" =~ ^[0-9]+$ ]]; then
     if [[ -n "${CLOUD_DRY_RUN:-}" ]]; then
       printf '{}\n'
@@ -792,11 +793,26 @@ hetzner::_still_ours() {
     error "hetzner: did not change ${kind} '${id}': it is not a verified id. lok8s changes a part only by the id of a part with the owner mark of this cluster."
     return 1
   fi
-  # stderr goes to /dev/null: a successful call can write a line there (a
-  # warning), and lok8s does not print what hcloud writes. A failed read
-  # gets the error below, which names the command.
-  if ! json="$(hcloud "${kind}" describe "${id}" -o json 2>/dev/null)" ||
-     ! state="$(jq -er --arg id "${id}" --arg key "${_HETZNER_OWNER_KEY}" --arg mark "${mark}" --arg n "${want}" '
+  # The stderr of hcloud goes to a temp file of its own, never into the
+  # JSON: a successful call can write a line there (a warning), and lok8s
+  # does not print it. When the call fails, the error below gives the last
+  # line of that file (the reason of hcloud, for example a 401, a 429 or a
+  # 404). When mktemp fails, stderr goes to /dev/null and the error gives
+  # no reason.
+  err_file="$(mktemp 2>/dev/null)" || err_file=""
+  json="$(hcloud "${kind}" describe "${id}" -o json 2>"${err_file:-/dev/null}")" || rc=$?
+  if (( rc != 0 )) && [[ -n "${err_file}" ]]; then
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+      line="${line%$'\r'}"
+      [[ -z "${line}" ]] || reason="${line}"
+    done < "${err_file}"
+  fi
+  [[ -z "${err_file}" ]] || rm -f -- "${err_file}"
+  if (( rc != 0 )); then
+    error "hetzner: did not change ${kind} ${id}: could not read it right before the change ('hcloud ${kind} describe ${id}'${reason:+: ${reason}})."
+    return 1
+  fi
+  if ! state="$(jq -er --arg id "${id}" --arg key "${_HETZNER_OWNER_KEY}" --arg mark "${mark}" --arg n "${want}" '
          if type != "object" then empty
          elif (.id | tostring) != $id then "the answer is for the id \(.id)"
          elif ((.labels // {})[$key] // "") != $mark then "it does not have the owner mark of this cluster now (\($key)=\((.labels // {})[$key] // "none"); this cluster: \($mark))"
