@@ -12,8 +12,10 @@
 # SOPS_AGE_KEY_FILE point into BATS_TEST_TMPDIR, and so do PATH_BASE and
 # PATH_CLUSTERS. Most tests stub secrets::_encrypt_file, and their .enc files
 # are sops envelopes with no ciphertext (_envelope); the round trip runs the
-# real one and skips without sops, ssh-to-age or ssh-keygen. No test prints a
-# private key.
+# real one and skips without sops, ssh-to-age or ssh-keygen. Each test that
+# runs the real sops carries the tag real-sops: the argsh container of CI has
+# no ssh-keygen, so CI runs that tag again on the runner, where a skip fails
+# the step. No test prints a private key.
 
 setup() {
   load "../test_helper"
@@ -841,6 +843,7 @@ ${_duplicate}" ] || { echo "$output" >&2; return 1; }
   _duplicate_refused '{"data":"ENC[x]","sops":{"key_groups":[{"age":[{"recipient":"B","enc":"x"},{"recipient":"A","enc":"x"}]}],"key_groups":[{"age":[{"recipient":"A","enc":"x"}]}]}}'
 }
 
+# bats test_tags=real-sops
 @test "a real .enc with a member twice: sops opens one with the removed key, and remove-key refuses both" {
   command -v sops >/dev/null 2>&1 || skip "sops not installed"
   command -v ssh-to-age >/dev/null 2>&1 || skip "ssh-to-age not installed"
@@ -1387,6 +1390,7 @@ _keep_gone() {
   gone="$(ssh-to-age -i "${1}/gone.pub")"
 }
 
+# bats test_tags=real-sops
 @test "a twin that differs from its decrypted .enc, an .enc the caller cannot decrypt and a twin it cannot read are refused before any write" {
   # Before the first write, remove-key decrypts each file that it re-keys, in
   # memory, with the identity of the caller, and compares it with its twin:
@@ -1441,6 +1445,7 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   fi
 }
 
+# bats test_tags=real-sops
 @test "a twin with the value of its .enc passes the compare when it is the older file, and is re-keyed" {
   # The times of the files do not count: app as lo secrets encrypt leaves
   # it, other set back in time (Go twin:
@@ -1472,6 +1477,7 @@ ${_rotate}" ]] || { echo "$output" >&2; return 1; }
   [ "$(_open keep other)" = "w" ] || { echo "the key that stays cannot decrypt other" >&2; return 1; }
 }
 
+# bats test_tags=real-sops
 @test "a twin with another value than its .enc is refused by the compare when it is the older file, also one whose labels do not list the key" {
   # The times of the files do not count, and the compare reads every
   # managed file. .sops.yaml and every file of the stores stay byte-equal
@@ -1507,6 +1513,7 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   _same_store "${saved}"
 }
 
+# bats test_tags=real-sops
 @test "after a remove-key the encrypt sweep re-encrypts nothing and the lint check names no secret" {
   # Each re-keyed .enc is the newer file of its pair, as after
   # lo secrets encrypt. The store starts in the state after a decrypt (Go
@@ -1761,6 +1768,7 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   [ "${last}" -eq 1 ] || { echo "last ${last}" >&2; return 1; }
 }
 
+# bats test_tags=real-sops
 @test "round trip: the removed key cannot decrypt the store, the other key can" {
   command -v sops >/dev/null 2>&1 || skip "sops not installed"
   command -v ssh-to-age >/dev/null 2>&1 || skip "ssh-to-age not installed"
@@ -1795,6 +1803,7 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   ! grep -qF "${gone}" "${store}/Secret.app.default.K.enc"
 }
 
+# bats test_tags=real-sops
 @test "every managed .enc is re-keyed, also a file whose labels do not list the removed key" {
   # The labels are not trusted to choose the files. The file whose labels do
   # not list the key gets new bytes (a new data key) and still decrypts with
