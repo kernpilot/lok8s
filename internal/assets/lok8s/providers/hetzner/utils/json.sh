@@ -792,7 +792,10 @@ hetzner::_still_ours() {
     error "hetzner: did not change ${kind} '${id}': it is not a verified id. lok8s changes a part only by the id of a part with the owner mark of this cluster."
     return 1
   fi
-  if ! json="$(hcloud "${kind}" describe "${id}" -o json)" ||
+  # stderr goes to /dev/null: a successful call can write a line there (a
+  # warning), and lok8s does not print what hcloud writes. A failed read
+  # gets the error below, which names the command.
+  if ! json="$(hcloud "${kind}" describe "${id}" -o json 2>/dev/null)" ||
      ! state="$(jq -er --arg id "${id}" --arg key "${_HETZNER_OWNER_KEY}" --arg mark "${mark}" --arg n "${want}" '
          if type != "object" then empty
          elif (.id | tostring) != $id then "the answer is for the id \(.id)"

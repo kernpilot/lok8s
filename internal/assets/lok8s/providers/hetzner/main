@@ -1083,16 +1083,28 @@ hetzner::_authorized_key() {
 }
 
 # hetzner::_check_key_pair <sshPublicKey> <sshPrivateKey>
-# Error when sshPublicKey is not the public key of sshPrivateKey (`ssh-keygen
-# -y` derives it), or when sshPrivateKey does not exist. Only a warning when
-# ssh-keygen cannot read the private key (it has a passphrase). Nothing to
-# check when one of the two is not set.
+# Error when group or other users can access sshPrivateKey (its mode has a
+# bit of 077): ssh does not use such a key ("bad permissions"), so the `ssh
+# -i` of the readiness barrier goes on without it. Error when sshPublicKey
+# is not the public key of sshPrivateKey (`ssh-keygen -y` derives it), or
+# when sshPrivateKey does not exist. Only a warning when ssh-keygen cannot
+# read the private key for another reason (it has a passphrase). The mode
+# check needs sshPrivateKey only; the pair checks need the two.
 hetzner::_check_key_pair() {
-  local pub="${1}" priv="${2}" file want derived got
-  [[ -n "${pub}" && -n "${priv}" ]] || return 0
+  local pub="${1}" priv="${2}" file want derived got mode
+  [[ -n "${priv}" ]] || return 0
   file="${priv}"
   # shellcheck disable=SC2088 # literal "~/" prefix match, expanded via $HOME on the same line
   [[ "${file}" != "~/"* ]] || file="${HOME}/${file:2}"
+  # -L: the mode of the file that a link points to, which ssh checks. When
+  # stat cannot tell the mode, there is no mode check (with sshPublicKey set,
+  # the ssh-keygen -y below then warns about a bad key).
+  if [[ -f "${file}" ]] && mode="$(stat -L -c '%a' -- "${file}" 2>/dev/null)" &&
+     [[ "${mode}" =~ ^[0-7]+$ ]] && (( (8#${mode} & 8#077) != 0 )); then
+    error "rebuild: sshPrivateKey '${priv}' (${file}) has mode ${mode}: group or other users can access it. ssh does not use a private key with these permissions, so the readiness check cannot connect after the reimage, and nothing was reimaged. Make the key private: chmod 600 $(hetzner::_shell_word "${file}")"
+    return 1
+  fi
+  [[ -n "${pub}" ]] || return 0
   if [[ ! -f "${file}" ]]; then
     error "rebuild: sshPrivateKey '${priv}' does not exist (${file}). The readiness check connects with it after the reimage, so nothing was reimaged. Correct sshPrivateKey in the descriptor."
     return 1

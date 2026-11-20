@@ -488,23 +488,52 @@ hetzner::_lb_targets() {
   printf '%s\n' "${out:-(no target)}"
 }
 
-# hetzner::_lb_add_target <lb> <lb-name> <mark> <server-id> <server-name> <add-target args...>
+# hetzner::_shell_word <value>
+# <value> as one shell word, for a command that a message tells the user to
+# run. A value of only the characters A-Z a-z 0-9 . _ / = , : @ % + - stays
+# as it is; any other value is quoted with printf %q. A label selector can
+# have a space, a "!" or parentheses ("env in (a, b)", "!key").
+hetzner::_shell_word() {
+  local plain='^[A-Za-z0-9._/=,:@%+-]+$'
+  if [[ "${1}" =~ ${plain} ]]; then
+    printf '%s' "${1}"
+  else
+    printf '%q' "${1}"
+  fi
+}
+
+# hetzner::_lb_add_target <lb> <lb-name> <mark> <server-id> <server-name>
+#                         <api-type> <value> <want-private> <add-target args...>
 # add-target with retries: HETZNER_LB_ADD_TRIES attempts (default 4); the
 # wait starts at HETZNER_LB_ADD_DELAY seconds (default 2) and doubles. Right
 # before each attempt it reads both ends by id and checks their owner mark:
 # the load balancer, and the server of a server target (<server-id>; empty
-# for a selector or an ip target). rc 1 with the last hcloud error on
-# stdout; rc 2 when a read or a check failed (the message is on stderr):
-# then the caller stops.
+# for a selector or an ip target). An add can be done while its answer is
+# lost: then the next attempt gets the API error target_already_defined.
+# That answer is a success only when a new read of the load balancer by id
+# shows the target (<api-type> <value>, as hetzner::_lb_target_private
+# reads it) with use_private_ip <want-private>. rc 1 with the last hcloud
+# error on stdout; rc 2 when a read or a check before an attempt failed (the
+# message is on stderr): then the caller stops.
 hetzner::_lb_add_target() {
-  local lb="${1}" lbname="${2}" mark="${3}" sid="${4}" sname="${5}"; shift 5
-  local tries="${HETZNER_LB_ADD_TRIES:-4}" delay="${HETZNER_LB_ADD_DELAY:-2}" n err=""
+  local lb="${1}" lbname="${2}" mark="${3}" sid="${4}" sname="${5}"
+  local api_type="${6}" value="${7}" want="${8}"; shift 8
+  local tries="${HETZNER_LB_ADD_TRIES:-4}" delay="${HETZNER_LB_ADD_DELAY:-2}" n err="" live
+  # hcloud prints an API error as "<message> (<code>)" or "<message> (<code>,
+  # <correlation id>)". Only this code: another "already" is not this target.
+  local defined='\(target_already_defined[,)]'
   for (( n = 1; n <= tries; n++ )); do
     hetzner::_still_ours load-balancer "${lb}" "${mark}" "${lbname}" >/dev/null || return 2
     if [[ -n "${sid}" ]]; then
       hetzner::_still_ours server "${sid}" "${mark}" "${sname}" >/dev/null || return 2
     fi
     err="$(dry-run::cmd hcloud load-balancer add-target "${lb}" "${@}" 2>&1)" && return 0
+    if [[ "${err}" =~ ${defined} ]] &&
+       live="$(hetzner::_still_ours load-balancer "${lb}" "${mark}" "${lbname}")" &&
+       [[ "$(hetzner::_lb_target_private "${live}" "${api_type}" "${value}")" == "${want}" ]]; then
+      _hetzner_log "lb ${lb}: add-target attempt ${n}/${tries}: the target is defined already, and a new read shows it with use-private-ip ${want}"
+      return 0
+    fi
     _hetzner_log "lb ${lb}: add-target attempt ${n}/${tries} failed: ${err}"
     (( n == tries )) || sleep "${delay}"
     delay=$(( delay * 2 ))
@@ -560,7 +589,7 @@ hetzner::_owned_selector() {
 # fails (the message names the target); the caller then stops the hook of
 # this load balancer, so no service changes after it.
 hetzner::_lb_audit() {
-  local lb="${1}" lbname="${2}" mark="${3}" live servers type value owned err rc=0
+  local lb="${1}" lbname="${2}" mark="${3}" live servers type value owned err hint word rc=0
   local -a rm_flags=()
   live="$(hetzner::_still_ours load-balancer "${lb}" "${mark}" "${lbname}")" || return 1
   servers='[]'
@@ -591,7 +620,10 @@ hetzner::_lb_audit() {
     esac
     hetzner::_still_ours load-balancer "${lb}" "${mark}" "${lbname}" >/dev/null || return 1
     if ! err=$(dry-run::cmd hcloud load-balancer remove-target "${lb}" "${rm_flags[@]}" 2>&1); then
-      error "lb ${lbname}: could not remove the target ${type} '${value}': ${err}. It can route to a server of another owner. Remove it with 'hcloud load-balancer remove-target ${lbname} ${rm_flags[*]}', then run the provision again."
+      # One shell word per argument: a selector can have a space.
+      hint="hcloud load-balancer remove-target"
+      for word in "${lbname}" "${rm_flags[@]}"; do hint+=" $(hetzner::_shell_word "${word}")"; done
+      error "lb ${lbname}: could not remove the target ${type} '${value}': ${err}. It can route to a server of another owner. Remove it with '${hint}', then run the provision again."
       rc=1
     fi
   done < <(jq -r '(.targets // [])[]
@@ -778,6 +810,7 @@ hetzner::load-balancer() {
         local add_sid=""
         [[ "${api_type}" != "server" ]] || add_sid="${target_value}"
         err=$(hetzner::_lb_add_target "${rid}" "${name}" "${mark}" "${add_sid}" "${server_name}" \
+          "${api_type}" "${match_value}" "${want_private}" \
           "${target_args[@]}" "${private_arg[@]}") || arc=$?
         if (( arc == 2 )); then
           error "lb ${name}: removed target ${target_type} '${target_value}', and did not add it again: the load balancer or the server changed (the message above). The load balancer does not route to this target now."
@@ -785,8 +818,11 @@ hetzner::load-balancer() {
           return 0
         fi
         if (( arc != 0 )); then
-          local hint="hcloud load-balancer add-target ${name} ${target_args[*]}"
-          (( ${#private_arg[@]} == 0 )) || hint+=" ${private_arg[*]}"
+          # One shell word per argument: a selector can have a space.
+          local hint="hcloud load-balancer add-target" word
+          for word in "${name}" "${target_args[@]}" "${private_arg[@]}"; do
+            hint+=" $(hetzner::_shell_word "${word}")"
+          done
           error "lb ${name}: removed target ${target_type} '${target_value}', but could not add it again with use-private-ip ${want_private} in ${HETZNER_LB_ADD_TRIES:-4} attempts: ${err}. The load balancer does not route to this target now. Add it with '${hint}', or run the provision again."
           _HETZNER_LB_FAILED=1
         fi
