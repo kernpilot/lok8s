@@ -128,7 +128,12 @@
 # the gate cannot place"), and the body goes on. A folded block (">")
 # joins its lines with a space, and the gate does not decode that: each
 # line of a folded block with a << that is not a <<< is a finding ("a
-# here-document in a folded YAML block (>) the gate cannot place").
+# here-document in a folded YAML block (>) the gate cannot place"). YAML
+# takes only spaces as indentation: a tab in the leading white space of
+# the first line of a block (also a line of white space only), or after
+# fewer spaces than the indentation of the block, is a finding ("a YAML
+# block line the gate cannot place: a tab in its indentation"). From that
+# line on, the gate does not know the indentation of the block.
 # The first argument of a call is the first word after the curl word that
 # is not a redirection: the operand of a redirection is one shell word,
 # with its quotes and escapes (curl >"a -q " -u … has -u first).
@@ -687,8 +692,9 @@ curl_gate() {
     # (yb_par). The block ends at a line with less indentation. With an
     # indentation indicator (|2), the gate does not know the indentation
     # of the block (yb_ind -2). A comment line starts no block. In the q
-    # and tls modes, a line of a folded block can be a finding (yaml_fold).
+    # and tls modes, two block lines are findings (yaml_tab, yaml_fold).
     function yaml_line(   ind, h) {
+      yaml_tab()
       if ($0 ~ /^[[:space:]]*$/) return
       match($0, /^ */); ind = RLENGTH
       if (yb_wait) {
@@ -703,6 +709,25 @@ curl_gate() {
         yb_fold = substr(h, 1, 1) == ">"; h = substr(h, 2); sub(/[[:space:]#].*$/, "", h)
         yb_wait = 1; yb_par = ind; yb_dig = h ~ /[1-9]/
       }
+    }
+    # yaml_tab(): a tab in the leading white space of a block line, before
+    # the indentation of the block: in the first line of the block (also a
+    # line of white space only), in a block whose indentation the gate does
+    # not know, or after fewer spaces than the indentation. YAML takes only
+    # spaces as indentation, and the parsers do not agree on such a line
+    # (the spaces before the tab, an end of the block, or an error), so
+    # the gate cannot place the indentation of the block. In the q and tls
+    # modes the line is a finding, and from it on the gate does not know
+    # the indentation of the block (yb_ind -2: each delimiter of a body is
+    # a finding, hd_near).
+    function yaml_tab(   lead, sp) {
+      if (!yb_wait && yb_ind == -1) return
+      match($0, /^[ \t]*/); lead = substr($0, 1, RLENGTH)
+      if (lead !~ /\t/) return
+      sp = index(lead, "\t") - 1
+      if (!yb_wait && yb_ind >= 0 && sp >= yb_ind) return
+      if (mode != "list") printf "%s:%d: %s\n", FILENAME, FNR, "a YAML block line the gate cannot place: a tab in its indentation"
+      yb_wait = 0; yb_ind = -2
     }
     # yaml_fold(): a line of a folded block (">") with a << that is not a
     # <<< (a here-document, also one whose delimiter is on the next line).

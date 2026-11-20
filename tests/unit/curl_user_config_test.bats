@@ -919,6 +919,42 @@ ${fold}:9: ${f}"
   assert_output ""
 }
 
+# YAML takes only spaces as indentation. In first.yaml, the first line of
+# the block is two spaces and a tab: the parsers do not agree on it (YAML
+# takes indentation two and the tab as content, a parser can also stop
+# with an error). With indentation two, bash keeps two spaces before the
+# first EOF and runs the $( ); the last EOF ends the body. The gate took
+# the line as blank and indentation four. Now a tab in the leading white
+# space of the first line of a block (also a line of white space only),
+# or after fewer spaces than the indentation of the block (in.yaml:3), is
+# a finding in the q and tls modes. From that line on the gate does not
+# know the indentation of the block, so each delimiter of a body is a
+# finding too. The control: a tab after the indentation (fold-good.yaml
+# in the case above).
+@test "curl gate: a tab in the indentation of a YAML block is a finding" {
+  local first="${BATS_TEST_TMPDIR}/first.yaml" in="${BATS_TEST_TMPDIR}/in.yaml"
+  CURL_GATE_ALLOW=()
+  printf '%b' "run: |\n  \t\n    cat <<EOF\n    EOF\n    '\$(curl -u u:p https://h.example/t1)'\n  EOF\n" > "${first}"
+  printf '%b' "run: |\n    cat <<EOF\n  \tEOF\n    EOF\n" > "${in}"
+  local b="a YAML block line the gate cannot place: a tab in its indentation"
+  local c="a curl word the gate cannot place" d="a here-document delimiter the gate cannot place"
+  local mode
+  for mode in q tls; do
+    run curl_gate "${mode}" "${first}" "${in}"
+    assert_failure 1
+    assert_output "${first}:2: ${b}
+${first}:4: ${d}
+${first}:5: ${c}
+${first}:6: ${d}
+${in}:3: ${b}
+${in}:3: ${d}
+${in}:4: ${d}"
+  done
+  run curl_gate list "${first}" "${in}"
+  assert_success
+  assert_output ""
+}
+
 # The operand of a redirection is one shell word, with its quotes and
 # escapes: the -q in it is no argument (lines 1 to 3). A keyword starts a
 # command only in a command position: in "echo if curl" the curl is an
