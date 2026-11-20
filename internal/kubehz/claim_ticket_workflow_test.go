@@ -330,10 +330,11 @@ func TestClaimTicketWorkflowsPassNoFingerprint(t *testing.T) {
 var stepRefRe = regexp.MustCompile(`steps\.([A-Za-z0-9_-]+)\.`)
 
 // Each steps.<id> reference of a step (in its if, env, with or run) names
-// an earlier step of the same job: with a renamed id, the runner gives an
-// empty value and the summary step does not run. No step uses an
-// upload-artifact action, and no with value names the provision log: the
-// log stays on the runner.
+// an earlier step of the same job, and each step id is unique in its job:
+// with a renamed id, the runner gives an empty value and the summary step
+// does not run. No step uses an upload-artifact action, and no with value
+// names the provision log: the log stays on the runner. These are targeted
+// structural checks, not a data-flow check.
 func TestClaimTicketWorkflowsStepRefsAndArtifacts(t *testing.T) {
 	refs := 0
 	for _, file := range claimTicketWorkflows {
@@ -365,6 +366,9 @@ func TestClaimTicketWorkflowsStepRefsAndArtifacts(t *testing.T) {
 					}
 				}
 				if st.ID != "" {
+					if ids[st.ID] {
+						t.Errorf("%s: job %s: the step id %q is not unique", file, job, st.ID)
+					}
 					ids[st.ID] = true
 				}
 			}
@@ -891,9 +895,10 @@ func TestProvisionStepRefusesABadDomain(t *testing.T) {
 
 // fakeGit writes a git into dir/bin. It adds its arguments as one line to
 // $GIT_CALLS. As git does, it prints the paths with a NUL after each when
-// an argument is -z, else one path per line. It returns the env for these
-// values.
-func fakeGit(t *testing.T, dir string, paths []string) []string {
+// an argument is -z, else one path per line. With fail "before", it exits
+// 128 before it prints a path; with fail "after", it exits 128 after it
+// printed the paths. It returns the env for these values.
+func fakeGit(t *testing.T, dir string, paths []string, fail string) []string {
 	t.Helper()
 	nul, lf := "", ""
 	for _, p := range paths {
@@ -902,44 +907,81 @@ func fakeGit(t *testing.T, dir string, paths []string) []string {
 	}
 	testWrite(t, filepath.Join(dir, "git.nul"), nul)
 	testWrite(t, filepath.Join(dir, "git.lf"), lf)
-	testWrite(t, filepath.Join(dir, "bin", "git"),
-		"#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GIT_CALLS\"\nfor a in \"$@\"; do\n  if [ \"$a\" = -z ]; then\n    exec cat \"$GIT_NUL\"\n  fi\ndone\nexec cat \"$GIT_LF\"\n")
+	testWrite(t, filepath.Join(dir, "bin", "git"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GIT_CALLS"
+if [ "$GIT_FAIL" = before ]; then
+  echo "fatal: bad revision 'HEAD~1'" >&2
+  exit 128
+fi
+out=$GIT_LF
+for a in "$@"; do
+  if [ "$a" = -z ]; then
+    out=$GIT_NUL
+  fi
+done
+cat "$out"
+if [ "$GIT_FAIL" = after ]; then
+  echo "fatal: a read failed" >&2
+  exit 128
+fi
+`)
 	if err := os.Chmod(filepath.Join(dir, "bin", "git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return []string{"GIT_CALLS=" + filepath.Join(dir, "git.calls"), "GIT_NUL=" + filepath.Join(dir, "git.nul"), "GIT_LF=" + filepath.Join(dir, "git.lf")}
+	return []string{"GIT_CALLS=" + filepath.Join(dir, "git.calls"), "GIT_NUL=" + filepath.Join(dir, "git.nul"), "GIT_LF=" + filepath.Join(dir, "git.lf"), "GIT_FAIL=" + fail}
 }
 
-// detectError is the error line of the detect step of provision.yml.
-const detectError = "::error::A changed cluster directory does not match the lo domain rule ^[A-Za-z0-9][A-Za-z0-9._-]*$. No domain was passed on.\n"
+// The error lines of the detect step of provision.yml.
+const (
+	detectError    = "::error::A changed cluster directory does not match the lo domain rule ^[A-Za-z0-9][A-Za-z0-9._-]*$. No domain was passed on.\n"
+	detectGitError = "::error::git diff of the pushed commit and its parent failed. No domain was passed on.\n"
+)
 
 // The detect step of provision.yml, with a fake git, and its output in the
-// Provision step, with a stub lo. Each changed directory is one domain, also
-// with a space or a newline in its name. A directory name that does not
-// match the domain rule stops the detect step with a static error line,
-// before it writes an output, so the job stops before lo runs.
+// Provision step, with a stub lo. The detect step runs on a push, after a
+// checkout of depth 2. Each changed directory is one domain, also with a
+// space or a newline in its name. A directory name that does not match the
+// domain rule, or a git diff that fails (before or after a part of the
+// list), stops the detect step with a static error line, before it writes
+// an output, so the job stops before lo runs.
 func TestProvisionDetectorThroughTheProvisionStep(t *testing.T) {
 	det := workflowStepNamed(t, "provision.yml", "provision", "Detect changed domains")
 	prov := workflowStepNamed(t, "provision.yml", "provision", "Provision")
-	if det.ID != "detect" || prov.If != "" {
-		t.Fatalf("the detect step has the id %q, and the Provision step runs if %q: want detect, and no if", det.ID, prov.If)
+	if det.ID != "detect" || det.If != "github.event_name == 'push'" || prov.If != "" {
+		t.Fatalf("the detect step has the id %q and runs if %q, the Provision step runs if %q: want detect, a push, and no if", det.ID, det.If, prov.If)
+	}
+	_, wf := readWorkflow(t, "provision.yml")
+	checkouts := 0
+	for _, st := range wf.Jobs["provision"].Steps {
+		if strings.HasPrefix(st.Uses, "actions/checkout@") {
+			checkouts++
+			if st.With["fetch-depth"] != "2" {
+				t.Errorf("the checkout has the fetch-depth %q, want 2: the detect step diffs HEAD~1", st.With["fetch-depth"])
+			}
+		}
+	}
+	if checkouts != 1 {
+		t.Errorf("the provision job has %d checkout steps, want 1", checkouts)
 	}
 	claim := registerOutput(t, true)
 	for _, c := range []struct {
 		name    string
 		dirs    []string
+		gitFail string // "", "before" or "after"
 		domains string // the output of the detect step; "" when it refuses
-		refused bool
+		wantErr string // the last line of a refusal; "" when the step passes
 	}{
-		{"two good directories", []string{"a.example.com", "b.example.com"}, "a.example.com b.example.com", false},
-		{"one good directory", []string{testDomain}, testDomain, false},
-		{"no change", nil, "", false},
-		{"a space in a directory name", []string{"a.example.com b.example.com"}, "", true},
-		{"a newline in a directory name", []string{"a.example.com\nb.example.com"}, "", true},
-		{"a tab in a directory name", []string{"a.example.com\tb.example.com"}, "", true},
-		{"a command in a directory name", []string{"a$(touch PWNED)"}, "", true},
-		{"a nested directory", []string{"a/b"}, "", true},
-		{"a good and a bad directory", []string{"a.example.com", "-x"}, "", true},
+		{"two good directories", []string{"a.example.com", "b.example.com"}, "", "a.example.com b.example.com", ""},
+		{"one good directory", []string{testDomain}, "", testDomain, ""},
+		{"no change", nil, "", "", ""},
+		{"a space in a directory name", []string{"a.example.com b.example.com"}, "", "", detectError},
+		{"a newline in a directory name", []string{"a.example.com\nb.example.com"}, "", "", detectError},
+		{"a tab in a directory name", []string{"a.example.com\tb.example.com"}, "", "", detectError},
+		{"a command in a directory name", []string{"a$(touch PWNED)"}, "", "", detectError},
+		{"a nested directory", []string{"a/b"}, "", "", detectError},
+		{"a good and a bad directory", []string{"a.example.com", "-x"}, "", "", detectError},
+		{"git fails before a path", []string{"a.example.com"}, "before", "", detectGitError},
+		{"git fails after a complete path", []string{"a.example.com"}, "after", "", detectGitError},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -947,17 +989,30 @@ func TestProvisionDetectorThroughTheProvisionStep(t *testing.T) {
 			for _, d := range c.dirs {
 				paths = append(paths, ".lok8s/"+d+"/cluster.lok8s.yaml")
 			}
-			genv := fakeGit(t, dir, paths)
+			genv := fakeGit(t, dir, paths, c.gitFail)
+			runnerTemp := filepath.Join(dir, "runner-temp")
+			if err := os.Mkdir(runnerTemp, 0o755); err != nil {
+				t.Fatal(err)
+			}
 			outFile := filepath.Join(dir, "outputs")
 			ctx := provisionContext("", "")
-			out, rc := runStep(t, dir, resolveExpr(t, det.Run, ctx), append(append(stepEnv(t, det, ctx), "GITHUB_OUTPUT="+outFile), genv...)...)
+			out, rc := runStep(t, dir, resolveExpr(t, det.Run, ctx),
+				append(append(stepEnv(t, det, ctx), "GITHUB_OUTPUT="+outFile, "RUNNER_TEMP="+runnerTemp), genv...)...)
 			if calls := testRead(t, filepath.Join(dir, "git.calls")); calls != "diff -z --name-only HEAD~1 HEAD -- .lok8s/*/cluster.lok8s.yaml\n" {
 				t.Errorf("git ran as %q", calls)
 			}
+			if tmp, _ := filepath.Glob(filepath.Join(runnerTemp, "changed-domains.*")); len(tmp) != 1 {
+				t.Errorf("the runner temp dir has %d list files, want 1", len(tmp))
+			}
 			detected := ""
-			if c.refused {
-				if rc != 1 || out != detectError {
-					t.Errorf("the detect step exits %d with %q, want 1 with only the error line", rc, out)
+			if c.wantErr != "" {
+				wantOut := c.wantErr
+				if c.gitFail != "" {
+					// git prints its own error before the error line.
+					_, wantOut, _ = strings.Cut(out, "\n")
+				}
+				if rc != 1 || wantOut != c.wantErr {
+					t.Errorf("the detect step exits %d with %q, want 1 with the error line %q", rc, out, c.wantErr)
 				}
 				if fileExists(outFile) {
 					t.Errorf("the detect step wrote GITHUB_OUTPUT: %q", testRead(t, outFile))

@@ -670,22 +670,29 @@ of version control.
 
 A re-run of `lo kubehz register` sends the stored secret. It counts only when
 it is the current secret of the record: an older secret counts as no secret.
-With the current secret, the platform keeps the same cluster record and sends
-a new secret, which lo stores. With a claim key and a record that is still
-pending, that re-run also rotates the claim ticket: the record gets the
-fingerprint of the new key, and the earlier ticket stops working. lo uses the
-file only when it is readable and holds exactly 64 lowercase hex characters,
-and it never puts the value on a command line.
+With the fingerprint announce and the current secret, the platform keeps the
+same cluster record and sends a new secret, which lo stores. With a claim key,
+the current secret keeps the same record only when that record can still
+rotate: it is a pending claim-key record that is not deleted and not claimed,
+that the heartbeat agent has not taken over, and that still shows the cluster
+as being created. Then the re-run rotates the claim ticket: the record gets
+the fingerprint of the new key and a new secret, and the earlier ticket stops
+working. Otherwise the re-run counts as a re-run without the current secret
+(see below). lo uses the file only when it is readable and holds exactly 64
+lowercase hex characters, and it never puts the value on a command line.
 
 A re-run without the current secret (on another machine, in CI, where the
 runner does not keep the file, or with an older file) does not change the
 earlier record. With a claim key, a re-run that registers with success adds
-a new pending record with its own ticket and bind secret. The platform
-refuses a new pending record when the domain already has five. The earlier
-ticket keeps working until someone claims it, or until the cleanup removes
-its record (by default after about 14 days without a heartbeat; the kubehz
-deployment can change this). With the fingerprint announce, the platform
-returns the same record and no new secret.
+a new pending record with its own ticket and bind secret. At registration,
+the platform refuses a new pending record when the domain already has five;
+that is a check at registration time, not a hard limit. The earlier ticket
+keeps working until someone claims it, or until the cleanup removes its
+record: by default when the record is older than about 14 days and has had
+no heartbeat for that time (the kubehz deployment can change this). The
+cleanup can run late; it is not a promised time at which the ticket stops
+working. With the fingerprint announce, the platform returns the same record
+and no new secret.
 
 The platform does not adopt the announced row by its domain alone. An agent
 that registers without the secret gets a separate pending row, and the

@@ -18,7 +18,10 @@ jobs:
   provision:
     runs-on: ubuntu-latest
     steps:
+      # Depth 2: the detect step diffs the pushed commit with its parent.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
 
       - name: Install dependencies
         env:
@@ -53,10 +56,18 @@ jobs:
             [[ "${2}" =~ ${1} ]]
           }
           # git -z separates the paths with NUL, so a space or a newline in
-          # a directory name stays in that name. Each directory name must
-          # match the domain rule of lo. A bad name stops the step before it
-          # writes an output, and the error line does not print the name.
+          # a directory name stays in that name. The list goes into a file
+          # first, so that a failed git diff (for example, a first commit
+          # without a parent) stops the step, also after a part of the list.
+          # Each directory name must match the domain rule of lo. A bad name
+          # or a failed git diff stops the step before it writes an output,
+          # and the error lines do not print a name.
           domain_rule='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+          changed="$(mktemp "${RUNNER_TEMP:?}/changed-domains.XXXXXX")"
+          if ! git diff -z --name-only HEAD~1 HEAD -- '.lok8s/*/cluster.lok8s.yaml' > "${changed}"; then
+            echo "::error::git diff of the pushed commit and its parent failed. No domain was passed on."
+            exit 1
+          fi
           domains=()
           while IFS= read -r -d '' path; do
             domain="${path#.lok8s/}"
@@ -66,7 +77,7 @@ jobs:
               exit 1
             fi
             domains+=("${domain}")
-          done < <(git diff -z --name-only HEAD~1 HEAD -- '.lok8s/*/cluster.lok8s.yaml')
+          done < "${changed}"
           echo "domains=${domains[*]}" >> "${GITHUB_OUTPUT}"
 
       # Cluster registration with kubehz needs NO platform token: `lo provision`

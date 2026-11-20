@@ -872,7 +872,8 @@ workflow keeps the ticket out of them:
   The log also hides every other string with the shape of an MD5 fingerprint
   (16 or more pairs of hex digits, with a colon between each two), for example
   the server-key fingerprint of the legacy registration. A longer run of such
-  pairs is hidden whole. Every other text stays as `lo` printed it.
+  pairs is hidden whole. Every other text stays as `lo` printed it (the
+  filter drops a NUL byte).
 - No step output, environment value or job summary holds the ticket.
 - The job summary tells you where to read the ticket: in the Hetzner Console
   (**Security → SSH keys**, the key `kubehz-claim-<domain>`). People with
@@ -886,30 +887,36 @@ Claim the cluster soon. The runner does not keep the bind secret of an earlier
 run (`clusters/<domain>/.kubehz-bind`). So each run that registers a claim key
 with success adds a new pending registration with its own ticket, and lo
 replaces the claim key in Hetzner with the key of that run. A registration can
-also fail, and the platform refuses a new pending registration when the
-domain already has five. The tickets of earlier runs keep working until
-someone claims them, or until the cleanup removes their registration. By
-default, the cleanup removes a pending registration after about 14 days
-without a heartbeat (the kubehz deployment can change this). It is a cleanup,
-not a promised time at which a ticket stops working.
+also fail. At registration, the platform refuses a new pending registration
+when the domain already has five. That is a check at registration time, not a
+hard limit on the number of pending registrations. The tickets of earlier runs
+keep working until someone claims them, or until the cleanup removes their
+registration. By default, the cleanup removes a pending registration that is
+older than about 14 days and has had no heartbeat for that time (the kubehz
+deployment can change this). It is a cleanup that can run late, not a promised
+time at which a ticket stops working.
 
 ::: warning Job logs of earlier runs
 An earlier version of this workflow wrote the ticket in clear text into the
 job log and the job summary. If your repository ran it, each pending
 registration of those runs is exposed, and claiming the newest one does not
 spend the tickets of the others. For each exposed registration, claim it with
-its ticket. The cluster is then in your account, and an owner or admin of the
-account can remove it there. The platform has no other way to remove a pending
-registration: without a claim, it ends only when the cleanup removes it. Then
-delete those workflow runs (this removes their logs and summaries). Deleting a
-log does not take back a copy that someone already read.
+its ticket: the claim ends the pending registration. The cluster is then in
+your account, and an owner or admin of the account can delete it there.
+Before the claim, a pending registration is in no account, so neither the
+cluster delete of your account nor `lo kubehz deregister` can remove it.
+Deleting the claim key in Hetzner does not end a ticket either: the claim
+compares the ticket with the registration, not with the key in Hetzner.
+Without a claim, a pending registration ends at the cleanup. Then delete
+those workflow runs (this removes their logs and summaries). Deleting a log
+does not take back a copy that someone already read.
 :::
 
-When a run did not confirm a claim-key upload, lo used the legacy
-registration and printed no ticket. That does not mean that no ticket exists:
-the platform can make one before the upload fails, and the tickets of earlier
-runs stay. The job summary then tells you to claim the cluster with the
-heartbeat agent and `lo kubehz claim-code`.
+When lo reports a successful legacy registration, it did not confirm a
+claim-key upload, and it printed no ticket. That does not mean that no ticket
+exists: the platform can make one before the upload fails, and the tickets of
+earlier runs stay. The job summary then tells you to claim the cluster with
+the heartbeat agent and `lo kubehz claim-code`.
 
 See the [kubehz Platform guide](./kubehz.md#claiming) for the full flow:
 registration, claiming, the heartbeat agent, and troubleshooting.
