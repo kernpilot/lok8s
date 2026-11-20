@@ -396,7 +396,7 @@ data:
   localRegistryHosting.v1: |
     host: "%s"
     hostFromClusterNetwork: "%s"
-    help: "https://kernpilot.github.io/lok8s/guide/services#how-the-image-swap-actually-works"
+    help: "https://lok8s.io/guide/services#how-the-image-swap-actually-works"
 `, buildIP, buildHost)
 	return d.runInput(ctx, manifest, out, errOut, "kubectl", "apply", "--kubeconfig", kubeconfig, "-f", "-")
 }

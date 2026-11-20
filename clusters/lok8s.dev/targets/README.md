@@ -9,7 +9,7 @@ eventually applied to the cluster.
 > does **not** live here. That lives in the cluster spec's
 > `spec.bootstrap: []` and is applied by `driver::bootstrap` at
 > provision time, before anything under `targets/` runs.
-> See [Concepts — Two Deployment Planes](https://kernpilot.github.io/lok8s/guide/concepts#two-deployment-planes).
+> See [Concepts — Two Deployment Planes](https://lok8s.io/guide/concepts#two-deployment-planes).
 
 ## What is a target?
 
@@ -62,7 +62,7 @@ resources:
 ```
 
 (The relative path is ugly but deliberate — kustomize does not resolve
-symlinks reliably.) See the [Addons Guide](https://kernpilot.github.io/lok8s/guide/addons)
+symlinks reliably.) See the [Addons Guide](https://lok8s.io/guide/addons)
 for addon authoring and the full vendor matrix.
 
 ## How targets get built
@@ -192,7 +192,7 @@ lo deploy apps                      # applies it to the cluster
 
 ## See also
 
-- [Concepts](https://kernpilot.github.io/lok8s/guide/concepts) — two planes, build/deploy pipeline
-- [Addons](https://kernpilot.github.io/lok8s/guide/addons) — how to write and reference addons
-- [Specs Reference](https://kernpilot.github.io/lok8s/reference/specs) — `spec.bootstrap` and related fields
-- [Services Configuration](https://kernpilot.github.io/lok8s/guide/services) — `services.yaml` and Tilt wiring
+- [Concepts](https://lok8s.io/guide/concepts) — two planes, build/deploy pipeline
+- [Addons](https://lok8s.io/guide/addons) — how to write and reference addons
+- [Specs Reference](https://lok8s.io/reference/specs) — `spec.bootstrap` and related fields
+- [Services Configuration](https://lok8s.io/guide/services) — `services.yaml` and Tilt wiring
