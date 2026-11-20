@@ -16,7 +16,7 @@ setup() {
   export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
   # KENV: one line per kubectl call, the verb and the KUBERC it ran with.
   export KENV="${BATS_TEST_TMPDIR}/kubectl.env"; : > "${KENV}"
-  unset LOK8S_FORCE_RECREATE APPLY_OUT GET_OUT KAPPLY_TTY KAPPLY_PRIVATE_LOG LO_SHOW_SENSITIVE_OUTPUT KUBERC DEBUG
+  unset LOK8S_FORCE_RECREATE APPLY_OUT GET_OUT KAPPLY_TTY KAPPLY_PRIVATE_LOG KAPPLY_PRIVATE_DIR _KAPPLY_PRIVATE_MADE LO_SHOW_SENSITIVE_OUTPUT KUBERC DEBUG
   export APPLY_RC=0
 
   # Stub kubectl: log every call; drive `apply` via APPLY_OUT/APPLY_RC and
@@ -446,8 +446,28 @@ Warning: unknown field \"data.${CANARY_VALUE}\""
   assert_line '[debug] kapply: kubectl apply for resources exited 0 (1 resources)'
 }
 
-@test "private: KAPPLY_PRIVATE_LOG gets the kubectl output, the pass prints no summary" {
-  export KAPPLY_PRIVATE_LOG="${BATS_TEST_TMPDIR}/priv.log"
+# _private_dir: a 0700 dir like the one of the bootstrap scheduler, with
+# KAPPLY_PRIVATE_DIR and KAPPLY_PRIVATE_LOG set in this shell, not exported
+# (the launch site of libs/bootstrap).
+_private_dir() {
+  KAPPLY_PRIVATE_DIR="$(mktemp -d "${BATS_TEST_TMPDIR}/sched.XXXXXX")"
+  KAPPLY_PRIVATE_LOG="${KAPPLY_PRIVATE_DIR}/1.priv"
+  export -n KAPPLY_PRIVATE_DIR KAPPLY_PRIVATE_LOG
+}
+
+PRIVATE_REFUSED='[warn] kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before or a file open to others): lo does not write the kubectl output to it'
+
+# _assert_private_refused: the pass printed the fixed refusal line and the
+# fixed failure line, never the kubectl output.
+_assert_private_refused() {
+  assert_failure
+  assert_line "${PRIVATE_REFUSED}"
+  assert_line "$(_fixed_fail_line resources 1)"
+  refute_output --partial "${CANARY_VALUE}"
+}
+
+@test "private: the scheduler's private file gets the kubectl output (made fresh, 0600), the pass prints no summary" {
+  _private_dir
   export APPLY_RC=1
   export APPLY_OUT="configmap/cfg serverside-applied
 Invalid value: \"${CANARY_VALUE}\""
@@ -455,8 +475,79 @@ Invalid value: \"${CANARY_VALUE}\""
   assert_failure
   refute_output --partial "${CANARY_VALUE}"
   refute_output --partial '✓ resources'
+  refute_output --partial 'not safe to write'
   assert_line "$(_fixed_fail_line resources 1)"
   grep -qF "Invalid value: \"${CANARY_VALUE}\"" "${KAPPLY_PRIVATE_LOG}"
+  [[ -f "${KAPPLY_PRIVATE_LOG}" && ! -L "${KAPPLY_PRIVATE_LOG}" ]]
+  [ "$(find "${KAPPLY_PRIVATE_LOG}" -prune -perm 0600 -print)" = "${KAPPLY_PRIVATE_LOG}" ]
+}
+
+@test "private: the pass after a heal appends to the file that kapply made" {
+  _private_dir
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1
+  export APPLY_OUT="Error from server (Invalid): Deployment.apps \"web\" is invalid: spec.selector: Invalid value: \"${CANARY_VALUE}\": field is immutable"
+  run _kapply "${DEPLOY_MANIFEST}"
+  refute_output --partial 'not safe to write'
+  refute_output --partial "${CANARY_VALUE}"
+  [ "$(grep -c "${CANARY_VALUE}" "${KAPPLY_PRIVATE_LOG}")" -eq 2 ]
+}
+
+@test "private: a symlink at the private path is refused, nothing is written through it" {
+  _private_dir
+  local target="${BATS_TEST_TMPDIR}/elsewhere.log"; : > "${target}"
+  ln -s "${target}" "${KAPPLY_PRIVATE_LOG}"
+  export APPLY_RC=1 APPLY_OUT="Invalid value: \"${CANARY_VALUE}\""
+  run _kapply "${CFG_MANIFEST}"
+  _assert_private_refused
+  [ ! -s "${target}" ]
+}
+
+@test "private: a file that is already there and open to others is refused, nothing is written" {
+  _private_dir
+  ( umask 022; : > "${KAPPLY_PRIVATE_LOG}" )
+  chmod 0644 "${KAPPLY_PRIVATE_LOG}"
+  export APPLY_RC=1 APPLY_OUT="Invalid value: \"${CANARY_VALUE}\""
+  run _kapply "${CFG_MANIFEST}"
+  _assert_private_refused
+  [ ! -s "${KAPPLY_PRIVATE_LOG}" ]
+}
+
+@test "private: a FIFO at the private path is refused, nothing is written to it" {
+  _private_dir
+  mkfifo "${KAPPLY_PRIVATE_LOG}"
+  # Hold the FIFO open for reading and writing: a write would not block, and
+  # the read below would see it.
+  local fd line=""
+  exec {fd}<>"${KAPPLY_PRIVATE_LOG}"
+  export APPLY_RC=1 APPLY_OUT="Invalid value: \"${CANARY_VALUE}\""
+  run _kapply "${CFG_MANIFEST}"
+  read -r -t 1 -u "${fd}" line || true
+  exec {fd}<&-
+  _assert_private_refused
+  [ -z "${line}" ]
+}
+
+@test "private: a value from the environment or a dir open to others is refused, nothing is written" {
+  export APPLY_RC=1 APPLY_OUT="Invalid value: \"${CANARY_VALUE}\""
+  # exported: the value did not come from the shell code of lo
+  _private_dir
+  export KAPPLY_PRIVATE_DIR KAPPLY_PRIVATE_LOG
+  run _kapply "${CFG_MANIFEST}"
+  _assert_private_refused
+  [ ! -e "${KAPPLY_PRIVATE_LOG}" ]
+  export -n KAPPLY_PRIVATE_DIR KAPPLY_PRIVATE_LOG
+  # a dir with mode 0755
+  _private_dir
+  chmod 0755 "${KAPPLY_PRIVATE_DIR}"
+  run _kapply "${CFG_MANIFEST}"
+  _assert_private_refused
+  [ ! -e "${KAPPLY_PRIVATE_LOG}" ]
+  # a file outside the dir
+  _private_dir
+  KAPPLY_PRIVATE_LOG="${BATS_TEST_TMPDIR}/outside.priv"
+  run _kapply "${CFG_MANIFEST}"
+  _assert_private_refused
+  [ ! -e "${KAPPLY_PRIVATE_LOG}" ]
 }
 
 @test "private: LO_SHOW_SENSITIVE_OUTPUT=1 prints the kubectl output after a [warn] line" {

@@ -27,8 +27,9 @@
 # terminal a spinner line with the phase and a count, then a one-line summary
 # (like docker build); off a terminal the summary line. A failed pass prints a
 # fixed line with the exit code. The raw output is always stashed in
-# KAPPLY_LAST_OUTPUT for callers to inspect (and appended to
-# KAPPLY_PRIVATE_LOG when set), never printed. LO_SHOW_SENSITIVE_OUTPUT=1
+# KAPPLY_LAST_OUTPUT for callers to inspect (and appended to the private
+# file of the bootstrap scheduler, see kapply::_private_ok), never printed.
+# LO_SHOW_SENSITIVE_OUTPUT=1
 # prints it as before (kapply::show_sensitive). Each kubectl write from
 # stdin (the apply, the replace of the immutable heal, the replace of the
 # namespace finalize) runs with the kubectl user defaults off (KUBERC=off:
@@ -258,13 +259,65 @@ kapply::wait_ready() {
   done
 }
 
+# kapply::_set_by_lo <name>: whether the variable <name> is set and not
+# exported. A variable that the shell got from the environment is always
+# exported, so an unexported one was set by the shell code of lo.
+kapply::_set_by_lo() {
+  local decl
+  decl="$(declare -p "${1}" 2>/dev/null)" || return 1
+  decl="${decl#declare -}"
+  [[ "${decl%% *}" != *x* ]]
+}
+
+# kapply::_mode_is <path> <octal>: whether the permission bits of <path>
+# are exactly <octal> (POSIX find, so the same on Linux and macOS).
+kapply::_mode_is() {
+  local got
+  got="$(find "${1}" -prune -perm "0${2}" -print 2>/dev/null)" || return 1
+  [[ "${got}" == "${1}" ]]
+}
+
+# kapply::_private_ok: whether kapply::_apply_pass may append the kubectl
+# output to KAPPLY_PRIVATE_LOG. The bootstrap scheduler sets
+# KAPPLY_PRIVATE_DIR (its mktemp -d dir) and KAPPLY_PRIVATE_LOG
+# (<dir>/<seq>.priv) in its own shell, not exported. kapply writes only when:
+#   - lo set both (not exported: a value from the environment is refused);
+#   - the dir is an absolute path, a directory and not a link, owned by the
+#     user, with mode 0700, and the file is a plain name in it;
+#   - before the first write the file is not there: kapply makes it with
+#     noclobber and umask 077 and records it (_KAPPLY_PRIVATE_MADE); a later
+#     pass needs the recorded file;
+#   - the file is a regular file and not a link, owned by the user, with
+#     mode 0600.
+# A link, a FIFO or a file that was there before, or one open to others, is
+# refused: the caller prints one fixed line and writes nothing.
+kapply::_private_ok() {
+  local dir="${KAPPLY_PRIVATE_DIR-}" log="${KAPPLY_PRIVATE_LOG-}" base
+  [[ -n "${dir}" && -n "${log}" ]] || return 1
+  if ! kapply::_set_by_lo KAPPLY_PRIVATE_DIR || ! kapply::_set_by_lo KAPPLY_PRIVATE_LOG; then
+    return 1
+  fi
+  base="${log##*/}"
+  [[ "${dir}" == /* && "${log%/*}" == "${dir}" && -n "${base}" && "${base}" != . && "${base}" != .. ]] || return 1
+  [[ -d "${dir}" && ! -L "${dir}" && -O "${dir}" ]] || return 1
+  kapply::_mode_is "${dir}" 700 || return 1
+  if [[ "${log}" != "${_KAPPLY_PRIVATE_MADE-}" ]] || ! kapply::_set_by_lo _KAPPLY_PRIVATE_MADE; then
+    [[ ! -e "${log}" && ! -L "${log}" ]] || return 1
+    ( set -C; umask 077; : > "${log}" ) 2>/dev/null || return 1
+    _KAPPLY_PRIVATE_MADE="${log}"
+  fi
+  [[ -f "${log}" && ! -L "${log}" && -O "${log}" ]] || return 1
+  kapply::_mode_is "${log}" 600
+}
+
 # kapply::apply [extra kubectl flags...] < manifest
 #   Reads a manifest on stdin. Extra args (e.g. --kubeconfig <path>) thread
 #   through every kubectl call. Returns the apply's exit status; stashes the
 #   raw kubectl output in KAPPLY_LAST_OUTPUT.
 # One server-side apply: capture the kubectl output (stdout and stderr) in
 # private, stash it in KAPPLY_LAST_OUTPUT (and append it to
-# KAPPLY_PRIVATE_LOG when set), print fixed lines, and return kubectl's exit.
+# KAPPLY_PRIVATE_LOG when set and kapply::_private_ok passes), print fixed
+# lines, and return kubectl's exit.
 # On a tty the spinner line, then "✓ <label> · N resources"; off a tty the
 # same summary line plain (none with KAPPLY_PRIVATE_LOG: the bootstrap
 # scheduler prints the block of the entry). A failed pass prints the fixed
@@ -292,7 +345,11 @@ kapply::_apply_pass() {
   rc=$(cat "${rc_file}"); rm -f "${rc_file}"
   KAPPLY_LAST_OUTPUT="${out}"
   if [[ -n "${KAPPLY_PRIVATE_LOG:-}" && -n "${out}" ]]; then
-    printf '%s\n' "${out}" >>"${KAPPLY_PRIVATE_LOG}"
+    if kapply::_private_ok; then
+      printf '%s\n' "${out}" >>"${KAPPLY_PRIVATE_LOG}"
+    else
+      warn "kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before or a file open to others): lo does not write the kubectl output to it"
+    fi
   fi
   n=$(printf '%s\n' "${out}" | grep -cE "${_KAPPLY_OK}" || true)
   debug "kapply: kubectl apply for ${label} exited ${rc} (${n} resources)"
