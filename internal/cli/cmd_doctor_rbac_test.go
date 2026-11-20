@@ -322,8 +322,9 @@ func rbacProcessGone(pid int) bool {
 	if err != nil {
 		return false
 	}
-	_, rest, ok := strings.Cut(string(raw), ") ")
-	return ok && strings.HasPrefix(rest, "Z")
+	// The state follows the name, which ends at the last ")".
+	i := strings.LastIndexByte(string(raw), ')')
+	return i >= 0 && strings.HasPrefix(strings.TrimLeft(string(raw[i+1:]), " "), "Z")
 }
 
 // rbacTermOKRunner is a kubectl that handles the SIGTERM of the bound and
