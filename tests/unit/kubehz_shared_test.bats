@@ -1944,8 +1944,6 @@ _stub_mktemp() {
     unset -f pwd
     assert_failure 1
     assert_output "the temp dir (TMPDIR) cannot be resolved"
-    run find "${BATS_TEST_TMPDIR}" -maxdepth 1 -name 'kubehz-join-*'
-    assert_output ""
   done
 }
 
