@@ -92,10 +92,16 @@ justified `# shellcheck disable=SCxxxx` with a one-line reason).
 ## Docs
 
 ```bash
-npm install            # or: npx -y yarn@1.22.22 install
-npm run docs:dev       # local VitePress preview
-npm run docs:build     # the strict build (dead links fail)
+npx -y yarn@1.22.22 install      # yarn 1, the version that yarn.lock needs
+npx -y yarn@1.22.22 docs:dev     # local VitePress preview
+npx -y yarn@1.22.22 docs:build   # the strict build (dead links fail)
 ```
+
+Do not run `npm install`: it writes a `package-lock.json`, and the repo must
+not commit one (it uses `yarn.lock`). A pull request that changes `docs/**`,
+the addon metadata under `.lok8s/`, `package.json` or `yarn.lock` runs a
+frozen install, the addon index and the strict build, as the deploy does
+(`.github/workflows/docs-check.yml`).
 
 ## Conventions
 
