@@ -169,7 +169,12 @@ func stopMembers(pgid int, termAt time.Time, waitDelay time.Duration) {
 // before the scan reads its own entry. So it reports false only after two
 // scans in a row found no member.
 func othersInGroup(pgid int) bool {
-	return scanGroup(pgid) || scanGroup(pgid)
+	for range 2 {
+		if scanGroup(pgid) {
+			return true
+		}
+	}
+	return false
 }
 
 // procNames reads the names in /proc. A test replaces it.
