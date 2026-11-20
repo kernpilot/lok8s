@@ -193,7 +193,7 @@ func (m *MCP) request(method string, params any) (json.RawMessage, error) {
 		}
 		if errOut := m.stderr.tail(); errOut != "" {
 			if strings.Contains(errOut, "Invalid command: mcp") {
-				errOut += "\n  hint: `lo mcp` is an argsh.so builtin — run `argsh builtins install` to add it next to argsh"
+				errOut += "\n  hint: `lo mcp` is an argsh builtin in argsh.so, which must be in the .bin/ directory of the project. To install the latest release there, run `argsh builtins install --force --path .bin` in the project directory."
 			}
 			return nil, fmt.Errorf("%s: lo mcp exited: %s", method, errOut)
 		}
