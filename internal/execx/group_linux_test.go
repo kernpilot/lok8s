@@ -293,7 +293,7 @@ func TestRunProcessGroupHoldsTheLeaderAtEachSignal(t *testing.T) {
 			}
 			select {
 			case err := <-errCh:
-				if err != nil && !(tc.cancel && errors.Is(err, context.Canceled)) {
+				if err != nil && (!tc.cancel || !errors.Is(err, context.Canceled)) {
 					t.Errorf("err = %v; output %q", err, out.String())
 				}
 			case <-time.After(10 * time.Second):
@@ -691,7 +691,7 @@ func TestRunProcessGroupPanicAfterStartReapsTheChild(t *testing.T) {
 			ProcessGroup: true,
 		})
 	}()
-	if got != errDonePanic {
+	if err, ok := got.(error); !ok || !errors.Is(err, errDonePanic) {
 		t.Errorf("the caller got the panic %v, want %v", got, errDonePanic)
 	}
 	var p int
