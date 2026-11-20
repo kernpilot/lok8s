@@ -376,13 +376,15 @@ func (c *Context) encryptChecked(l sweepList) error {
 }
 
 // refuseEncPaths refuses each .enc of encs that the encrypt refuses
-// (encDestinationOK: a symlink, a directory, a FIFO or a device, or a path
-// whose lstat fails with an error other than "does not exist"), before the
-// first write, and reports whether it refused (bash: secrets::_enc_paths).
-// The re-key writes each .enc in place, and encryptFile refuses such an
-// entry, so one in the list would stop the run after .sops.yaml was
-// written. A rerun of RemoveKey would then stop at the same file, and a
-// rerun of AddKey would find the recipient present and re-key nothing.
+// (encDestinationOK: a symlink, a directory, a FIFO, a socket or a device,
+// or a path whose lstat fails with an error other than "does not exist"),
+// before the first write, and reports whether it refused (bash:
+// secrets::_enc_paths). The re-key writes each .enc in place, and
+// encryptFile refuses such an entry, so one in the list would stop the run
+// after .sops.yaml was written. A rerun of RemoveKey would then stop at the
+// same file, and a rerun of AddKey would find the recipient present and
+// re-key nothing. The last line names what was refused: links, other
+// entries, or both.
 func (c *Context) refuseEncPaths(encs []string) bool {
 	links, others := 0, 0
 	for _, enc := range encs {
@@ -398,7 +400,7 @@ func (c *Context) refuseEncPaths(encs []string) bool {
 			ui.ErrorTo(c.ErrOut, "%s is a symlink: the re-key does not write an .enc through a link", c.rel(enc))
 			links++
 		default:
-			ui.ErrorTo(c.ErrOut, "%s is not a regular file (a directory, a FIFO or a device): the re-key does not write an .enc there", c.rel(enc))
+			ui.ErrorTo(c.ErrOut, "%s is not a regular file (a directory, a FIFO, a socket or a device): the re-key does not write an .enc there", c.rel(enc))
 			others++
 		}
 	}
@@ -407,8 +409,10 @@ func (c *Context) refuseEncPaths(encs []string) bool {
 		return false
 	case others == 0:
 		ui.ErrorTo(c.ErrOut, "  replace each link with the file it names, or remove it from the store, then run this command again; nothing was written")
+	case links == 0:
+		ui.ErrorTo(c.ErrOut, "  remove or fix each entry named above, then run this command again; nothing was written")
 	default:
-		ui.ErrorTo(c.ErrOut, "  replace each link with the file it names, and remove each other entry from the store, then run this command again; nothing was written")
+		ui.ErrorTo(c.ErrOut, "  replace each link with the file it names, and remove or fix each other entry, then run this command again; nothing was written")
 	}
 	return true
 }

@@ -258,13 +258,16 @@ _state() {
 
 # _refused_later <kind> — a store with the pairs app and db. The .enc of db,
 # the later pair (or, for kind sha, the .enc of the .sha file of db), is a
-# directory (dir, sha), a FIFO (fifo) or a symlink (link): add-key must
-# refuse it before any write. The project (.sops.yaml, the lock file, any
-# temp file), the store and the link target stay as they were, and sops
-# does not run. The control: with the entry removed, the run adds the
-# recipient, and the real sweep (_load_sweep: sops alone is a stub) writes
-# the .enc of each plaintext of the store, the .sha.enc too.
-# (Go twin: TestAddKeyRefusesEveryEncThatTheEncryptRefusesBeforeAnyWrite.)
+# directory (dir, sha), a FIFO (fifo), a unix socket (socket) or a symlink
+# (link); for kind mixed the .enc of db is a directory and the .enc of app
+# is a symlink. add-key must refuse it before any write, and its last line
+# names what it refused. The project (.sops.yaml, the lock file, any temp
+# file), the store and the link target stay as they were, and sops does not
+# run. The control: with the entry removed, the run adds the recipient, and
+# the real sweep (_load_sweep: sops alone is a stub) writes the .enc of each
+# plaintext of the store, the .sha.enc too. (Go twins:
+# TestAddKeyRefusesEveryEncThatTheEncryptRefusesBeforeAnyWrite and
+# TestAddKeyRefusesALinkAndADirectoryInOneStore.)
 _refused_later() {
   local kind="${1}" store="${PATH_CLUSTERS}/a.dev/secrets" away="${BATS_TEST_TMPDIR}/elsewhere" enc line tail before plain want=""
   mkdir -p "${away}"
@@ -277,16 +280,31 @@ _refused_later() {
     printf 's\n' > "${store}/Secret.db.default.KEY.sha"
     enc="${store}/Secret.db.default.KEY.sha.enc"
   fi
-  line="${enc} is not a regular file (a directory, a FIFO or a device): the re-key does not write an .enc there"
-  tail="replace each link with the file it names, and remove each other entry from the store, then run this command again; nothing was written"
+  line="${enc} is not a regular file (a directory, a FIFO, a socket or a device): the re-key does not write an .enc there"
+  tail="remove or fix each entry named above, then run this command again; nothing was written"
   case "${kind}" in
     dir|sha) mkdir -- "${enc}" ;;
     fifo) mkfifo -- "${enc}" ;;
+    socket)
+      # A socket path is limited to about 108 bytes and the test dir is
+      # longer: bind the short name from inside the store.
+      ( cd -- "${store}" && python3 -I -B -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "${enc##*/}" ) 2>/dev/null \
+        || skip "cannot bind a unix socket in the test dir"
+      [[ -S "${enc}" ]] || skip "the bind made no socket"
+      ;;
     link)
       printf 'enc %s\n' "${KEY_A}" > "${away}/Secret.db.default.KEY.enc"
       ln -s "${away}/Secret.db.default.KEY.enc" "${enc}"
       line="${enc} is a symlink: the re-key does not write an .enc through a link"
       tail="replace each link with the file it names, or remove it from the store, then run this command again; nothing was written"
+      ;;
+    mixed)
+      mkdir -- "${enc}"
+      mv -- "${store}/Secret.app.default.KEY.enc" "${away}/"
+      ln -s "${away}/Secret.app.default.KEY.enc" "${store}/Secret.app.default.KEY.enc"
+      line="${store}/Secret.app.default.KEY.enc is a symlink: the re-key does not write an .enc through a link
+[error] ${line}"
+      tail="replace each link with the file it names, and remove or fix each other entry, then run this command again; nothing was written"
       ;;
   esac
   find "${store}" "${away}" -type f -name '*.enc' -exec touch -t 200001010000 {} +
@@ -306,6 +324,10 @@ _refused_later() {
   }
   [ ! -s "${SOPS_LOG}" ] || { echo "sops ran on:" >&2; cat "${SOPS_LOG}" >&2; return 1; }
   rm -r -- "${enc}"
+  if [[ "${kind}" == mixed ]]; then
+    rm -- "${store}/Secret.app.default.KEY.enc"
+    mv -- "${away}/Secret.app.default.KEY.enc" "${store}/"
+  fi
   DOMAIN=a.dev run _add "${KEY_B}"
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
   grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
@@ -345,6 +367,17 @@ _refused_later() {
   _refused_later sha
 }
 
+@test "the .enc of a later pair that is a unix socket is refused before any write" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 not installed: no tool to bind a unix socket"
+  _load_sweep
+  _refused_later socket
+}
+
+@test "a symlinked .enc and a directory .enc in one store: the last line names both" {
+  _load_sweep
+  _refused_later mixed
+}
+
 @test "a plaintext whose .enc name is too long is refused before any write" {
   # The lstat of the .enc fails with ENAMETOOLONG, and [[ -e ]] reads that as
   # a path that does not exist. The check must not: the encrypt would stop
@@ -369,7 +402,7 @@ _refused_later() {
   DOMAIN=a.dev run _add "${KEY_B}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
   [ "$output" = "[error] ${store}/${name}.enc cannot be looked up (an error other than \"no such file or directory\", for example a name that is too long): the re-key does not write an .enc there
-[error]   replace each link with the file it names, and remove each other entry from the store, then run this command again; nothing was written" ] || {
+[error]   remove or fix each entry named above, then run this command again; nothing was written" ] || {
     echo "$output" >&2; return 1; }
   [ "$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; ls -A "${PATH_BASE}")" = "${before}" ] || {
     echo "a file changed:" >&2

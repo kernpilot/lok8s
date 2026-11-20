@@ -4,8 +4,10 @@ package secrets
 // stores follows a symlinked .enc, but the re-key never writes through one
 // (encryptFile refuses it), so a link in the files that a run re-keys is
 // refused before the first write. add-key refuses every other .enc that the
-// encrypt refuses too (a directory, a FIFO). A .sops.yaml that is a symlink
-// stays a link: both commands write the edit to its target.
+// encrypt refuses too (a directory, a FIFO, a socket, a path that it cannot
+// look up), and its encrypt reads the list that it checked. A .sops.yaml
+// that is a symlink stays a link: both commands write the edit to its
+// target.
 // tests/unit/secrets_add_key_test.bats and
 // tests/unit/secrets_remove_key_test.bats run the same cases through the bash
 // twin.
@@ -189,15 +191,17 @@ func TestKeyCommandsRefuseASymlinkedEncBeforeAnyWrite(t *testing.T) {
 	}
 }
 
-// The .enc of a later pair that the encrypt refuses, a directory, a FIFO or
-// a symlink, also the .enc of a .sha file: add-key refuses it before any
-// write, with the list of the encrypt sweep. .sops.yaml, the other .enc
-// (its bytes and its mtime), the entry and every plaintext stay as they
-// were, and no temp file appears in the project or the store. A device node
-// needs root to make, so no case makes one: encDestinationOK refuses it as
-// it refuses a FIFO. The control: with the entry removed, the run passes.
+// The .enc of a later pair that the encrypt refuses, a directory, a FIFO, a
+// socket or a symlink, also the .enc of a .sha file: add-key refuses it
+// before any write, with the list of the encrypt sweep. .sops.yaml, the
+// other .enc (its bytes and its mtime), the entry and every plaintext stay
+// as they were, and no temp file appears in the project or the store. A
+// device node needs root to make, so no case makes one: encDestinationOK
+// refuses it as it refuses a FIFO. The control: with the entry removed, the
+// run passes.
 func TestAddKeyRefusesEveryEncThatTheEncryptRefusesBeforeAnyWrite(t *testing.T) {
-	const other = "[error]   replace each link with the file it names, and remove each other entry from the store, then run this command again; nothing was written\n"
+	const kind = " is not a regular file (a directory, a FIFO, a socket or a device): the re-key does not write an .enc there\n"
+	const other = "[error]   remove or fix each entry named above, then run this command again; nothing was written\n"
 	cases := []struct {
 		name, plain string // plain: the plaintext whose .enc is the entry
 		make        func(t *testing.T, f *linkFixture, enc string)
@@ -205,12 +209,15 @@ func TestAddKeyRefusesEveryEncThatTheEncryptRefusesBeforeAnyWrite(t *testing.T) 
 	}{
 		{"a directory", "Secret.db.default.K", func(t *testing.T, _ *linkFixture, enc string) {
 			mkdir(t, enc)
-		}, "[error] clusters/a.dev/secrets/Secret.db.default.K.enc is not a regular file (a directory, a FIFO or a device): the re-key does not write an .enc there\n" + other},
+		}, "[error] clusters/a.dev/secrets/Secret.db.default.K.enc" + kind + other},
 		{"a FIFO", "Secret.db.default.K", func(t *testing.T, _ *linkFixture, enc string) {
 			if err := syscall.Mkfifo(enc, 0o600); err != nil {
 				t.Fatal(err)
 			}
-		}, "[error] clusters/a.dev/secrets/Secret.db.default.K.enc is not a regular file (a directory, a FIFO or a device): the re-key does not write an .enc there\n" + other},
+		}, "[error] clusters/a.dev/secrets/Secret.db.default.K.enc" + kind + other},
+		{"a socket", "Secret.db.default.K", func(t *testing.T, _ *linkFixture, enc string) {
+			bindSocket(t, enc)
+		}, "[error] clusters/a.dev/secrets/Secret.db.default.K.enc" + kind + other},
 		{"a symlink", "Secret.db.default.K", func(t *testing.T, f *linkFixture, enc string) {
 			target := f.c.Paths.Base + "/elsewhere/Secret.db.default.K.enc"
 			write(t, target, "x")
@@ -221,7 +228,7 @@ func TestAddKeyRefusesEveryEncThatTheEncryptRefusesBeforeAnyWrite(t *testing.T) 
 			"[error]   replace each link with the file it names, or remove it from the store, then run this command again; nothing was written\n"},
 		{"the .enc of a .sha file", "Secret.db.default.K.sha", func(t *testing.T, _ *linkFixture, enc string) {
 			mkdir(t, enc)
-		}, "[error] clusters/a.dev/secrets/Secret.db.default.K.sha.enc is not a regular file (a directory, a FIFO or a device): the re-key does not write an .enc there\n" + other},
+		}, "[error] clusters/a.dev/secrets/Secret.db.default.K.sha.enc" + kind + other},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -285,7 +292,7 @@ func TestAddKeyRefusesAnEncPathThatItCannotLookUpBeforeAnyWrite(t *testing.T) {
 		t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
 	}
 	want := "[error] clusters/a.dev/secrets/" + name + ".enc cannot be looked up (an error other than \"no such file or directory\", for example a name that is too long): the re-key does not write an .enc there\n" +
-		"[error]   replace each link with the file it names, and remove each other entry from the store, then run this command again; nothing was written\n"
+		"[error]   remove or fix each entry named above, then run this command again; nothing was written\n"
 	if f.errOut.String() != want || f.out.String() != "" {
 		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
 	}
@@ -299,6 +306,57 @@ func TestAddKeyRefusesAnEncPathThatItCannotLookUpBeforeAnyWrite(t *testing.T) {
 	}
 	f.rekeyed("app", "v")
 	f.rekeyed("db", "w")
+}
+
+// bindSocket makes a unix socket at path. A socket path is limited to about
+// 108 bytes, and the temp dir of a test can be longer, so it binds the base
+// name from the directory of path (t.Chdir). It skips the test when it
+// cannot bind a socket there.
+func bindSocket(t *testing.T, path string) {
+	t.Helper()
+	t.Chdir(filepath.Dir(path))
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Skipf("cannot make a unix socket: %v", err)
+	}
+	defer func() { _ = syscall.Close(fd) }()
+	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: filepath.Base(path)}); err != nil {
+		t.Skipf("cannot bind a unix socket in the test dir: %v", err)
+	}
+}
+
+// A store whose .enc of app is a symlink and whose .enc of db is a
+// directory: add-key refuses both before any write, and the last line names
+// both kinds. Nothing changes in the project.
+func TestAddKeyRefusesALinkAndADirectoryInOneStore(t *testing.T) {
+	f := newLinkFixture(t, "add-key")
+	app := f.store + "/Secret.app.default.K.enc"
+	target := f.c.Paths.Base + "/elsewhere/Secret.app.default.K.enc"
+	mkdir(t, filepath.Dir(target))
+	if err := os.Rename(app, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, app); err != nil {
+		t.Fatal(err)
+	}
+	db := f.store + "/Secret.db.default.K.enc"
+	if err := os.Remove(db); err != nil {
+		t.Fatal(err)
+	}
+	mkdir(t, db)
+	write(t, f.c.sopsConfigLock(), "")
+	before := fileStates(t, f.c.Paths.Base)
+
+	if err := f.run(); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
+	}
+	want := "[error] clusters/a.dev/secrets/Secret.app.default.K.enc is a symlink: the re-key does not write an .enc through a link\n" +
+		"[error] clusters/a.dev/secrets/Secret.db.default.K.enc is not a regular file (a directory, a FIFO, a socket or a device): the re-key does not write an .enc there\n" +
+		"[error]   replace each link with the file it names, and remove or fix each other entry, then run this command again; nothing was written\n"
+	if f.errOut.String() != want || f.out.String() != "" {
+		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
+	}
+	sameStates(t, before, fileStates(t, f.c.Paths.Base))
 }
 
 // The store has no .gitignore, a dangling plaintext link Secret.app.default.K
