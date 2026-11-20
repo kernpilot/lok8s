@@ -16,10 +16,12 @@
 #   want   a text of the refusal (the name of the variable where the text
 #          has one)
 #   rc     the status of the entry point
-#   calls  none: no curl call and no kubectl call. not:<text>: no call to a
-#          URL that holds <text>, and no call carries the credential
-#          (the entry point makes other calls before the check, which is
-#          correct: those calls do not carry it)
+#   calls  none: no call through the curl or kubectl function, and no call
+#          of a stand-in on PATH (curl, kubectl, hcloud, wget).
+#          not:<text>: no call to a URL that holds <text>, no call carries
+#          the credential, and no call of a stand-in on PATH (the entry
+#          point makes other calls before the check, which is correct:
+#          those calls do not carry it)
 # A second case pins that the sites of the table are all the sites of the
 # kubehz libs, so a new check of a credential needs a row here.
 
@@ -29,7 +31,7 @@ CR_TABLE=(
   "re-enroll|kubehz::re-enroll http::credential_ok KUBEHZ_TOKEN|environment variable KUBEHZ_TOKEN must not contain a control character|1|none"
   "resolve-cluster-id|kubehz::resolve_cluster_id http::credential_ok KUBEHZ_TOKEN|environment variable KUBEHZ_TOKEN must not contain a control character|1|none"
   "deregister|kubehz::deregister_cluster http::credential_ok KUBEHZ_TOKEN|environment variable KUBEHZ_TOKEN must not contain a control character|1|none"
-  "deregister-hcloud|kubehz::deregister_cluster http::credential_ok HCLOUD_TOKEN|environment variable HCLOUD_TOKEN must not contain a control character|1|not:https://api.hetzner.cloud/"
+  "deregister-hcloud|kubehz::deregister_cluster http::credential_ok HCLOUD_TOKEN|environment variable HCLOUD_TOKEN must not contain a control character|0|not:https://api.hetzner.cloud/"
   "claim-key|kubehz::ensure_claim_key http::credential_ok HCLOUD_TOKEN|environment variable HCLOUD_TOKEN must not contain a control character|1|none"
   "direct-claim|kubehz::direct_claim http::credential_ok KUBEHZ_TOKEN|environment variable KUBEHZ_TOKEN must not contain a control character|1|none"
   "direct-claim-hcloud|kubehz::direct_claim http::credential_ok HCLOUD_TOKEN|environment variable HCLOUD_TOKEN must not contain a control character|0|not:/api/credentials"
@@ -182,8 +184,10 @@ setup() {
   # Each curl call goes into CALL_LOG: its method and URL, then its headers,
   # user, body and config, as curl reads them (tests/lib/curl_capture.sh).
   # The register of a cluster gets an answer (a claimed cluster), so the
-  # hcloud connect of kubehz::direct_claim comes after it. Each other call
-  # fails as curl does when it cannot connect (exit 7).
+  # hcloud connect of kubehz::direct_claim comes after it. The list of
+  # clusters has no row, so kubehz::deregister_cluster has nothing to
+  # remove and goes on to the claim key. Each other call fails as curl
+  # does when it cannot connect (exit 7).
   export CALL_LOG="${BATS_TEST_TMPDIR}/calls.log"
   curl() {
     curl_capture "$@"
@@ -193,6 +197,7 @@ setup() {
     } >> "${CALL_LOG}"
     case "${CURL_URL}" in
       */api/clusters/register) printf '%s\n200' '{"id":"cl-9","claimed":true}' ;;
+      *'/api/clusters?perPage=500') printf '%s\n' '{"data":[]}' ;;
       *) return 7 ;;
     esac
   }
@@ -246,8 +251,10 @@ _case() {
       export KUBEHZ_TOKEN="${BAD}" LOK8S_KUBEHZ_API_URL="${api}"
       kubehz::deregister_cluster acme.example.org "${SPEC}" ;;
     deregister-hcloud)
-      # The registry read fails (curl exit 7), and the removal of the claim
-      # key comes after it.
+      # The registry has no row for the domain (nothing to remove, status
+      # 0). The removal of the claim key comes after it, and its refusal
+      # leaves the status as it is: so the status is 0, and the text and
+      # the calls show the refusal.
       export KUBEHZ_TOKEN="${GOOD}" HCLOUD_TOKEN="${BAD}" LOK8S_KUBEHZ_API_URL="${api}"
       kubehz::deregister_cluster acme.example.org "${SPEC}" ;;
     claim-key)
@@ -300,11 +307,27 @@ _case() {
 }
 
 @test "each kubehz entry point refuses a credential with a CR at its end before a request" {
-  local row name site want rc calls before
+  local row name site want rc calls before tool
   local -a bad=()
+  # The curl and kubectl functions see only the calls by these names. A
+  # directory of stand-ins first on PATH also sees a call that goes past
+  # them (`command curl`, `env curl`, `timeout 5 curl`) or a call of
+  # another tool: each stand-in writes its call into TOOL_LOG and fails.
+  local stubs="${BATS_TEST_TMPDIR}/stubs"
+  export TOOL_LOG="${BATS_TEST_TMPDIR}/tools.log"
+  mkdir -p "${stubs}"
+  for tool in curl kubectl hcloud wget; do
+    cat > "${stubs}/${tool}" <<STUB
+#!/bin/sh
+printf '%s %s\n' "\${0##*/}" "\$*" >> "${TOOL_LOG}"
+exit 1
+STUB
+    chmod +x "${stubs}/${tool}"
+  done
+  PATH="${stubs}:${PATH}"
   for row in "${CR_TABLE[@]}"; do
     IFS='|' read -r name site want rc calls <<<"${row}"
-    rm -f "${CALL_LOG}" "${KUBECTL_LOG}"
+    rm -f "${CALL_LOG}" "${KUBECTL_LOG}" "${TOOL_LOG}"
     before=${#bad[@]}
     run _case "${name}"
     if [[ "${status}" != "${rc}" ]]; then
@@ -318,15 +341,18 @@ _case() {
     fi
     case "${calls}" in
       none)
-        if [[ -e "${CALL_LOG}" || -e "${KUBECTL_LOG}" ]]; then
-          bad+=("${name}: a request before the refusal: $(cat "${CALL_LOG}" "${KUBECTL_LOG}" 2>/dev/null | grep -E '^(call|kubectl) ' || true)")
+        if [[ -e "${CALL_LOG}" || -e "${KUBECTL_LOG}" || -e "${TOOL_LOG}" ]]; then
+          bad+=("${name}: a request before the refusal: $(cat "${CALL_LOG}" "${KUBECTL_LOG}" "${TOOL_LOG}" 2>/dev/null | grep -E '^(call|kubectl|curl|hcloud|wget) ' || true)")
         fi ;;
       not:?*)
-        if cat "${CALL_LOG}" "${KUBECTL_LOG}" 2>/dev/null | grep -qF cr-test-credential; then
+        if cat "${CALL_LOG}" "${KUBECTL_LOG}" "${TOOL_LOG}" 2>/dev/null | grep -qF cr-test-credential; then
           bad+=("${name}: a request carries the credential")
         fi
-        if [[ -e "${CALL_LOG}" ]] && grep '^call ' "${CALL_LOG}" | grep -qF -- "${calls#not:}"; then
+        if cat "${CALL_LOG}" "${TOOL_LOG}" 2>/dev/null | grep -E '^(call|curl|wget|hcloud) ' | grep -qF -- "${calls#not:}"; then
           bad+=("${name}: a request to ${calls#not:}")
+        fi
+        if [[ -e "${TOOL_LOG}" ]]; then
+          bad+=("${name}: a call past the curl and kubectl functions: $(cat "${TOOL_LOG}")")
         fi ;;
       *) bad+=("${name}: no calls rule ${calls}") ;;
     esac
