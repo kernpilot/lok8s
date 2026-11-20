@@ -51,6 +51,10 @@ func lockWait() int {
 // lockSleep is the wait between two tries of the lock (the clock seam).
 var lockSleep clock.SleepFunc = clock.Sleep
 
+// lockChecked runs after the check of the lock path and before its open (a
+// seam: a test puts a link at the path there).
+var lockChecked = func(string) {}
+
 // sopsConfigDest resolves the project's .sops.yaml once for a run of add-key
 // or remove-key (bash: secrets::_config_dest): the path itself, or, when it
 // is a symlink, the file at the end of all its links. The lock sits beside
@@ -99,14 +103,20 @@ func resolveConfig(path string) (string, error) {
 // (encDestinationOK) is refused before the open, with the line of the bash
 // twin. The open has O_NOFOLLOW and no O_TRUNC, and the opened file must be
 // a regular file that the path still names (openedPathOK): a link put there
-// after the check is not followed, and the run is refused.
+// after the check is not followed, and the run is refused with the line of
+// the check (the open fails with ELOOP).
 func (c *Context) lockSopsConfig(dest string) (func(), error) {
 	path := dest + ".lock"
 	if !encDestinationOK(path) {
 		c.refuseLockPath(path)
 		return nil, ErrHandled
 	}
+	lockChecked(path)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW, 0o644) // #nosec G302 G304 -- an empty lock file next to .sops.yaml
+	if errors.Is(err, syscall.ELOOP) {
+		c.refuseLockPath(path)
+		return nil, ErrHandled
+	}
 	if err != nil {
 		ui.ErrorTo(c.ErrOut, "cannot open the lock file %s — the lock goes beside the file that .sops.yaml names, so lo needs write access to %s; nothing was changed", path, filepath.Dir(path))
 		return nil, ErrHandled

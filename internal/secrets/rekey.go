@@ -345,6 +345,46 @@ func (c *Context) encryptTargets() (sweepList, error) {
 	return sweepList{dir: dir, plains: sweepPlaintexts(dir, "Secret.")}, nil
 }
 
+// unfinishedEncs lists the store of the context as encryptTargets does, and
+// returns that list with each .enc of it that does not list recipient (bash:
+// secrets::_unfinished): a regular file that it cannot read, whose sops
+// metadata does not parse (encRecipients), or whose age recipients do not
+// hold recipient, and a path whose lookup fails. An .enc that does not
+// exist, and an entry that is not a regular file, are not in it. A store
+// that does not resolve gives an empty list and no refusal: nothing is
+// there to re-key. AddKey reads it when .sops.yaml lists the recipient
+// already: an .enc in it is the work of an earlier run that stopped after
+// its write of .sops.yaml.
+func (c *Context) unfinishedEncs(recipient string) (sweepList, []string) {
+	dir, err := c.resolveStore(io.Discard)
+	if err != nil {
+		return sweepList{}, nil
+	}
+	l := sweepList{dir: dir, plains: sweepPlaintexts(dir, "Secret.")}
+	var left []string
+	for _, enc := range l.encs() {
+		info, err := os.Lstat(enc)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			continue
+		case err != nil:
+			left = append(left, enc)
+			continue
+		case !info.Mode().IsRegular():
+			continue
+		}
+		raw, err := os.ReadFile(enc) // #nosec G304 -- an .enc of the store
+		if err != nil {
+			left = append(left, enc)
+			continue
+		}
+		if rcpts, err := encRecipients(raw); err != nil || !slices.Contains(rcpts, recipient) {
+			left = append(left, enc)
+		}
+	}
+	return l, left
+}
+
 // encs returns the .enc path of each plaintext of the list.
 func (l sweepList) encs() []string {
 	var encs []string
@@ -372,10 +412,8 @@ func (c *Context) encryptChecked(l sweepList) error {
 // before the first write, and reports whether it refused (bash:
 // secrets::_enc_paths). The re-key writes each .enc in place, and
 // encryptFile refuses such an entry, so one in the list would stop the run
-// after .sops.yaml was written. A rerun of RemoveKey would then stop at the
-// same file, and a rerun of AddKey would find the recipient present and
-// re-key nothing. The last line names what was refused: links, other
-// entries, or both.
+// after .sops.yaml was written, and a rerun would stop at the same file.
+// The last line names what was refused: links, other entries, or both.
 func (c *Context) refuseEncPaths(encs []string) bool {
 	links, others := 0, 0
 	for _, enc := range encs {

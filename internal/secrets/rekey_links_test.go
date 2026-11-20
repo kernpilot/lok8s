@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -815,6 +816,130 @@ func TestAddKeyRefusesABadGitignoreBeforeAnyWrite(t *testing.T) {
 			sameStates(t, before, fileStates(t, f.c.Paths.Base))
 		})
 	}
+}
+
+// add-key writes the .gitignore of the store before .sops.yaml: a .gitignore
+// that it cannot write (the store is read-only) stops the run with
+// .sops.yaml and the store as they were. The run after the fix adds the
+// recipient, re-keys both pairs and writes the .gitignore (bash:
+// tests/unit/secrets_add_key_test.bats).
+func TestAddKeyWritesTheGitignoreBeforeTheConfig(t *testing.T) {
+	skipUnlessPermissionsHold(t)
+	f := newLinkFixture(t, "add-key")
+	write(t, f.store+"/.gitignore", "# old\n")
+	info, err := os.Stat(f.store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode := info.Mode().Perm()
+	before := readFile(t, f.c.sopsConfigPath())
+	states := fileStates(t, f.store)
+	if err := os.Chmod(f.store, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.store, mode) })
+
+	if err := f.run(); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
+	}
+	want := "\n[error] cannot write " + f.c.rel(f.store) + "/.gitignore: it was not changed\n" +
+		"[error]   add-key did not change .sops.yaml or an .enc file: fix the cause above, then run this command again\n"
+	if !strings.HasSuffix(f.errOut.String(), want) || f.out.String() != "" {
+		t.Errorf("stdout %q\nstderr:\n%q\nwant the end:\n%q", f.out.String(), f.errOut.String(), want)
+	}
+	unchanged(t, f.c, before)
+	if err := os.Chmod(f.store, mode); err != nil {
+		t.Fatal(err)
+	}
+	sameStates(t, states, fileStates(t, f.store))
+
+	if err := f.run(); err != nil {
+		t.Fatalf("the run after the fix: %v\n%s", err, f.errOut.String())
+	}
+	f.rekeyed("app", "v")
+	f.rekeyed("db", "w")
+	if got := readFile(t, f.store+"/.gitignore"); got != gitignoreContent {
+		t.Errorf(".gitignore: %q", got)
+	}
+}
+
+// A run that stops after its write of .sops.yaml (here at the orphan check:
+// an .enc with no plaintext twin) leaves the recipient in .sops.yaml and no
+// .enc re-keyed. The rerun that the message names (--skip-orphans) finds the
+// recipient present and the .enc files of the sweep without it: it finishes
+// the re-key and does not write .sops.yaml again. The run after that changes
+// nothing (bash: tests/unit/secrets_add_key_test.bats).
+func TestAddKeyRerunFinishesAReKeyThatAnEarlierRunLeft(t *testing.T) {
+	f := newLinkFixture(t, "add-key")
+	gone := f.gone.Recipient().String()
+	write(t, f.store+"/Secret.orphan.default.K.enc", readFile(t, f.store+"/Secret.app.default.K.enc"))
+	if err := f.run(); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
+	}
+	config := readFile(t, f.c.sopsConfigPath())
+	if !strings.Contains(config, gone) {
+		t.Fatal("fixture: the first run did not write .sops.yaml before it stopped")
+	}
+
+	f.out.Reset()
+	f.errOut.Reset()
+	if err := f.c.AddKey(gone, false, true); err != nil {
+		t.Fatalf("the rerun: %v\n%s", err, f.errOut.String())
+	}
+	head := "recipient already present in .sops.yaml, but 2 .enc file(s) of the store do not list it: finishing the re-key\n  " + gone + "\n"
+	tail := "done — commit .sops.yaml and the updated .enc files together\n"
+	if got := f.out.String(); !strings.HasPrefix(got, head) || !strings.HasSuffix(got, tail) {
+		t.Errorf("stdout:\n%q\nwant the start %q and the end %q", got, head, tail)
+	}
+	f.rekeyed("app", "v")
+	f.rekeyed("db", "w")
+	unchanged(t, f.c, config)
+
+	states := fileStates(t, f.store)
+	if err := f.run(); err != nil {
+		t.Fatalf("the last run: %v\n%s", err, f.errOut.String())
+	}
+	if want := "recipient already present in .sops.yaml — nothing to add\n  " + gone + "\n"; f.out.String() != want || f.errOut.String() != "" {
+		t.Errorf("stdout %q\nstderr %q\nwant stdout %q", f.out.String(), f.errOut.String(), want)
+	}
+	sameStates(t, states, fileStates(t, f.store))
+	unchanged(t, f.c, config)
+}
+
+// A write of the .gitignore that stops part way (the writeGitignore seam
+// writes half the content, then fails): add-key stops before .sops.yaml, the
+// old .gitignore stays, and no temp file is left. The error comes first,
+// then the line that names the file (bash: tests/unit/secrets_test.bats).
+func TestAddKeyKeepsTheGitignoreOnAPartialWrite(t *testing.T) {
+	f := newLinkFixture(t, "add-key")
+	write(t, f.store+"/.gitignore", "# old\n")
+	before := readFile(t, f.c.sopsConfigPath())
+	states := fileStates(t, f.store)
+	orig := writeGitignore
+	writeGitignore = func(w io.Writer) error {
+		if _, err := io.WriteString(w, gitignoreContent[:len(gitignoreContent)/2]); err != nil {
+			return err
+		}
+		return errors.New("no space left on device")
+	}
+	t.Cleanup(func() { writeGitignore = orig })
+
+	if err := f.run(); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
+	}
+	want := "no space left on device\n" +
+		"[error] cannot write " + f.c.rel(f.store) + "/.gitignore: it was not changed\n" +
+		"[error]   add-key did not change .sops.yaml or an .enc file: fix the cause above, then run this command again\n"
+	if f.errOut.String() != want || f.out.String() != "" {
+		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
+	}
+	unchanged(t, f.c, before)
+	// The temp file was made and removed: the time of the store directory
+	// changes, and each entry in it stays as it was.
+	after := fileStates(t, f.store)
+	delete(states, f.store)
+	delete(after, f.store)
+	sameStates(t, states, after)
 }
 
 // The resolution of .sops.yaml fails closed: a link that names no file, or a

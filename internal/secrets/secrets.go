@@ -119,8 +119,13 @@ func (c *Context) StorePath() string {
 // per domain, does not fall back to the flat store: ResolveStore prints the
 // refusal (domain.CheckSecretsStore) and returns ErrHandled.
 func (c *Context) ResolveStore() (string, error) {
+	return c.resolveStore(c.ErrOut)
+}
+
+// resolveStore is ResolveStore, with the refusal printed to w.
+func (c *Context) resolveStore(w io.Writer) (string, error) {
 	if c.Domain == "" || !fsutil.DirExists(c.Paths.Clusters+"/"+c.Domain+"/secrets") {
-		if err := domain.CheckSecretsStore(c.Paths.Clusters, c.Domain, c.flatStore(), c.ErrOut); err != nil {
+		if err := domain.CheckSecretsStore(c.Paths.Clusters, c.Domain, c.flatStore(), w); err != nil {
 			return "", ErrHandled
 		}
 	}
@@ -197,10 +202,7 @@ func (c *Context) ensureGitignore(dir string) error {
 	if raw, err := os.ReadFile(gitignore); err == nil && strings.Contains(string(raw), "!Secret.*.enc") {
 		return nil
 	}
-	if err := writeReplacing(gitignore, 0o644, func(w io.Writer) error {
-		_, err := io.WriteString(w, gitignoreContent)
-		return err
-	}); err != nil {
+	if err := writeReplacing(gitignore, 0o644, writeGitignore); err != nil {
 		if !c.reportTempLeft(err) {
 			fmt.Fprintln(c.ErrOut, err)
 		}
@@ -209,6 +211,13 @@ func (c *Context) ensureGitignore(dir string) error {
 	}
 	ui.Debug("Created %s", gitignore)
 	return nil
+}
+
+// writeGitignore fills the temp file of the .gitignore write of
+// ensureGitignore (a seam: a test makes it stop part way).
+var writeGitignore = func(w io.Writer) error {
+	_, err := io.WriteString(w, gitignoreContent)
+	return err
 }
 
 // storeEntries lists the store's file names in bash glob order (byte-sorted),

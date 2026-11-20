@@ -138,7 +138,14 @@ func grepQF(content, pattern string) bool {
 // store that is not a regular file, a store of the context that does not
 // resolve, and an .enc of the store that the encrypt refuses (a symlink, a
 // directory, a FIFO, a socket or a device), are refused BEFORE the write,
-// so the run cannot stop half way at them.)
+// and the .gitignore of the store is written before it, so the run cannot
+// stop half way at them.)
+//
+// A rerun finishes the work of a run that stopped after its write: when
+// .sops.yaml lists the recipient already, but an .enc of the sweep does not
+// (unfinishedEncs), the run re-keys as if it had added the recipient, and
+// leaves .sops.yaml as it is. With each .enc listing it, the run changes
+// nothing.
 //
 // The argument check and the re-key steps are the helpers in rekey.go, which
 // RemoveKey shares; rekey_test.go pins this command's output and effects.
@@ -177,46 +184,74 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	if err != nil {
 		return err
 	}
-	if strings.Contains(string(raw), agePubkey) {
-		fmt.Fprintln(c.Out, "recipient already present in .sops.yaml — nothing to add")
-		fmt.Fprintf(c.Out, "  %s\n", agePubkey)
-		return nil
-	}
 
-	// Before the first write: the store of the context must resolve, with
-	// --all too, because the encrypt below re-keys that store. Found after
-	// the write, a store that does not resolve stopped the run with the
-	// recipient in .sops.yaml, and a rerun found it present and re-keyed
-	// nothing. Then each .enc that the encrypt below writes must be a
-	// regular file or absent (encryptFile refuses any other entry, and that
-	// refusal comes after the write). The list is the one of the sweep, and
-	// the encrypt below reads this same list (encryptChecked).
-	checked, err := c.encryptTargets()
-	if err != nil {
-		ui.ErrorTo(c.ErrOut, "  add-key did not change .sops.yaml: create that directory, or select a domain that has a store, then run this command again")
-		return err
+	// A recipient that .sops.yaml lists already is done when each .enc of
+	// the sweep lists it too. An .enc that does not list it is the work of
+	// an earlier run that stopped after its write of .sops.yaml (at the
+	// orphan check, or in the encrypt), and this run finishes that work.
+	present := strings.Contains(string(raw), agePubkey)
+	var checked sweepList
+	var left []string
+	if present {
+		checked, left = c.unfinishedEncs(agePubkey)
+		if len(left) == 0 {
+			fmt.Fprintln(c.Out, "recipient already present in .sops.yaml — nothing to add")
+			fmt.Fprintf(c.Out, "  %s\n", agePubkey)
+			return nil
+		}
+	} else {
+		// Before the first write: the store of the context must resolve,
+		// with --all too, because the encrypt below re-keys that store.
+		// Found after the write, a store that does not resolve stopped the
+		// run with the recipient in .sops.yaml, and a rerun found nothing
+		// to re-key. The list is the one of the sweep, and the encrypt
+		// below reads this same list (encryptChecked).
+		checked, err = c.encryptTargets()
+		if err != nil {
+			ui.ErrorTo(c.ErrOut, "  add-key did not change .sops.yaml: create that directory, or select a domain that has a store, then run this command again")
+			return err
+		}
 	}
+	// Each .enc that the encrypt below writes must be a regular file or
+	// absent (encryptFile refuses any other entry, and that refusal comes
+	// after the write).
 	if c.refuseEncPaths(checked.encs()) {
 		return ErrHandled
 	}
+	// The .gitignore of the store keeps the plaintext cache files out of
+	// git. The encrypt writes it too, but after the write of .sops.yaml: a
+	// .gitignore that it cannot write stopped the run there, with the
+	// recipient in .sops.yaml and no .enc re-keyed. A store directory that
+	// does not exist holds no plaintext, and the encrypt skips it.
+	if fsutil.DirExists(checked.dir) {
+		if err := c.ensureGitignore(checked.dir); err != nil {
+			ui.ErrorTo(c.ErrOut, "  add-key did not change .sops.yaml or an .enc file: fix the cause above, then run this command again")
+			return err
+		}
+	}
 
-	// Append to every creation rule's age list (comma-separated, sops' own
-	// format). replaceFile writes dest, the file that a symlinked .sops.yaml
-	// names, and the link stays a link.
-	before := 0
-	edited, after := appendRecipient(string(raw), agePubkey, &before)
-	if err := replaceFile(dest, []byte(edited)); err != nil {
-		if c.reportTempLeft(err) {
+	if present {
+		fmt.Fprintf(c.Out, "recipient already present in .sops.yaml, but %d .enc file(s) of the store do not list it: finishing the re-key\n", len(left))
+		fmt.Fprintf(c.Out, "  %s\n", agePubkey)
+	} else {
+		// Append to every creation rule's age list (comma-separated, sops'
+		// own format). replaceFile writes dest, the file that a symlinked
+		// .sops.yaml names, and the link stays a link.
+		before := 0
+		edited, after := appendRecipient(string(raw), agePubkey, &before)
+		if err := replaceFile(dest, []byte(edited)); err != nil {
+			if c.reportTempLeft(err) {
+				return ErrHandled
+			}
+			return err
+		}
+		if after < 1 {
+			ui.ErrorTo(c.ErrOut, "failed to add the recipient to %s — is the age: line quoted with '?", sopsConfig)
 			return ErrHandled
 		}
-		return err
+		fmt.Fprintf(c.Out, "added recipient to .sops.yaml (%d creation rule(s))\n", before)
+		fmt.Fprintf(c.Out, "  %s\n", agePubkey)
 	}
-	if after < 1 {
-		ui.ErrorTo(c.ErrOut, "failed to add the recipient to %s — is the age: line quoted with '?", sopsConfig)
-		return ErrHandled
-	}
-	fmt.Fprintf(c.Out, "added recipient to .sops.yaml (%d creation rule(s))\n", before)
-	fmt.Fprintf(c.Out, "  %s\n", agePubkey)
 
 	// Re-key the stores. Without this the recipient is listed but holds
 	// nothing.

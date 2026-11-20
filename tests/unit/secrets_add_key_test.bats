@@ -612,3 +612,190 @@ _ls_then_missing() {
   [ ! -e "${dir}/b.yaml.lock" ]
   [ -s "${ENCRYPT_RAN}" ]
 }
+
+@test "add-key writes the .gitignore of the store before .sops.yaml: a .gitignore that it cannot write stops the run before any change" {
+  # The encrypt writes the .gitignore too, but after the write of .sops.yaml:
+  # a .gitignore that it cannot write (the store is read-only) stopped the
+  # run there, with the recipient in .sops.yaml and no .enc re-keyed. The
+  # run after the fix adds the recipient and re-keys (Go twin:
+  # TestAddKeyWritesTheGitignoreBeforeTheConfig).
+  [ "$(id -u)" -ne 0 ] || skip "root writes every directory"
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load_sweep
+  local store="${PATH_CLUSTERS}/a.dev/secrets" before tail
+  printf 'v' > "${store}/Secret.app.default.K"
+  printf 'old' > "${store}/Secret.app.default.K.enc"
+  printf '# old\n' > "${store}/.gitignore"
+  cp -p "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved"
+  before="$(_state "${store}")"
+  chmod 555 "${store}"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  chmod 755 "${store}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  tail="[error] cannot write ${store}/.gitignore: it was not changed
+[error]   add-key did not change .sops.yaml or an .enc file: fix the cause above, then run this command again"
+  [[ "${output}" == *$'\n'"${tail}" && "${output}" != *"added recipient"* ]] || { echo "$output" >&2; return 1; }
+  cmp -s "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
+  [ "$(_state "${store}")" = "${before}" ] || { echo "a store file changed" >&2; return 1; }
+  [ ! -s "${SOPS_LOG}" ]
+
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 0 ] || { echo "the run after the fix: status $status: $output" >&2; return 1; }
+  grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
+  [ "$(cat "${SOPS_LOG}")" = "${store}/Secret.app.default.K" ] || { echo "sops ran on:" >&2; cat "${SOPS_LOG}" >&2; return 1; }
+  grep -qxF '!Secret.*.enc' "${store}/.gitignore"
+}
+
+# _envelope <recipient>... — the JSON envelope of an .enc (the binary store of
+# sops) whose sops.age lists each recipient: secrets::_enc_lists reads it.
+_envelope() {
+  local r sep=""
+  printf '{"data":"ENC[x]","sops":{"age":['
+  for r in "${@}"; do
+    printf '%s{"recipient":"%s","enc":"x"}' "${sep}" "${r}"
+    sep=,
+  done
+  printf ']}}\n'
+}
+
+# _sops_envelope — after _load_sweep: a sops function that writes, to the
+# --output path, the envelope of each recipient of the age: line of
+# .sops.yaml, and logs each plaintext to SOPS_LOG.
+_sops_envelope() {
+  sops() {
+    local -a a=("${@}") rcpts=()
+    local i out="" list
+    for (( i = 0; i + 1 < ${#a[@]}; i++ )); do
+      [[ "${a[i]}" != --output ]] || out="${a[i + 1]}"
+    done
+    [[ -n "${out}" ]] || return 1
+    list="$(sed -nE "s/^[[:space:]]*age:[[:space:]]*'([^']*)'.*/\1/p" "${PATH_BASE}/.sops.yaml")"
+    IFS=, read -r -a rcpts <<< "${list}"
+    printf '%s\n' "${a[-1]}" >> "${SOPS_LOG}"
+    _envelope "${rcpts[@]}" > "${out}"
+  }
+}
+
+@test "a rerun finishes the re-key of a run that stopped after its write of .sops.yaml, and the run after that changes nothing" {
+  # The first run stops at the orphan check (an .enc with no plaintext twin),
+  # after .sops.yaml got the recipient. The rerun that its message names
+  # (--skip-orphans) finds the recipient present and the .enc files of the
+  # sweep without it: it re-keys them and does not write .sops.yaml again
+  # (Go twin: TestAddKeyRerunFinishesAReKeyThatAnEarlierRunLeft).
+  command -v jq >/dev/null 2>&1 || skip "jq not installed"
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load_sweep
+  _sops_envelope
+  local store="${PATH_CLUSTERS}/a.dev/secrets" p before
+  for p in app db; do
+    printf 'v' > "${store}/Secret.${p}.default.K"
+    _envelope "${KEY_A}" > "${store}/Secret.${p}.default.K.enc"
+  done
+  _envelope "${KEY_A}" > "${store}/Secret.orphan.default.K.enc"
+
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [[ "$output" == *"no decrypted twin"* ]] || { echo "$output" >&2; return 1; }
+  grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || {
+    echo "fixture: the first run did not write .sops.yaml before it stopped" >&2; return 1; }
+  [ ! -s "${SOPS_LOG}" ]
+  cp -p "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved"
+
+  DOMAIN=a.dev run _add "${KEY_B}" 0 1
+  [ "$status" -eq 0 ] || { echo "the rerun: status $status: $output" >&2; return 1; }
+  [ "${lines[0]}" = "recipient already present in .sops.yaml, but 2 .enc file(s) of the store do not list it: finishing the re-key" ] || {
+    echo "$output" >&2; return 1; }
+  [ "${lines[1]}" = "  ${KEY_B}" ]
+  [ "${lines[-1]}" = "done — commit .sops.yaml and the updated .enc files together" ] || { echo "$output" >&2; return 1; }
+  cmp -s "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo "the rerun wrote .sops.yaml" >&2; return 1; }
+  [ "$(LC_ALL=C sort "${SOPS_LOG}")" = "${store}/Secret.app.default.K
+${store}/Secret.db.default.K" ] || { echo "sops ran on:" >&2; cat "${SOPS_LOG}" >&2; return 1; }
+  for p in app db; do
+    [ "$(secrets::_enc_lists "${KEY_B}" "${store}/Secret.${p}.default.K.enc")" = listed ] || {
+      echo "${p}: the .enc does not list the recipient" >&2; return 1; }
+  done
+
+  before="$(_state "${PATH_BASE}/.sops.yaml" "${store}")"
+  : > "${SOPS_LOG}"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 0 ] || { echo "the last run: status $status: $output" >&2; return 1; }
+  [ "$output" = "recipient already present in .sops.yaml — nothing to add
+  ${KEY_B}" ] || { echo "$output" >&2; return 1; }
+  [ "$(_state "${PATH_BASE}/.sops.yaml" "${store}")" = "${before}" ] || { echo "the last run changed a file" >&2; return 1; }
+  [ ! -s "${SOPS_LOG}" ]
+}
+
+_no_fd='[error] bash cannot test an open file through /dev/fd (on Linux, /proc/self/fd): add-key and remove-key do not run without that test of the lock of .sops.yaml; nothing was changed
+[error]   mount /proc, or use the lo binary: it tests the lock without /dev/fd'
+
+@test "when bash cannot test a descriptor through /dev/fd, add-key refuses before the lock file with a line that names the cause" {
+  # The test after the open of the lock reads the descriptor through /dev/fd
+  # (on Linux, /proc/self/fd). Without it, the run made the lock file and
+  # then stopped with the line of a lock path that is not a regular file.
+  # Here secrets::_fd_ok is a function that fails; the next test runs
+  # without /proc. remove-key takes the same lock (secrets::_lock).
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load
+  secrets::_fd_ok || { echo "fixture: bash cannot test /dev/fd on this host" >&2; return 1; }
+  cp -p "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved"
+  secrets::_fd_ok() { return 1; }
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "${_no_fd}" ] || { echo "$output" >&2; return 1; }
+  cmp -s "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
+  [ ! -e "${PATH_BASE}/.sops.yaml.lock" ] || { echo "a lock file was made" >&2; return 1; }
+  [ ! -s "${ENCRYPT_RAN}" ]
+}
+
+@test "in a mount namespace with no /proc, add-key refuses before the lock file with the line of a /dev/fd that bash cannot test" {
+  # A tmpfs over /proc in a user and mount namespace of the test: bash then
+  # finds no /proc/self/fd for /dev/fd/<n>.
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  command -v unshare >/dev/null 2>&1 || skip "unshare not installed"
+  unshare --user --map-current-user --keep-caps --mount true 2>/dev/null || skip "no user namespace here"
+  local script="${BATS_TEST_TMPDIR}/no-proc.sh"
+  cp -p "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved"
+  cat > "${script}" <<'EOF'
+mount -t tmpfs none /proc 2>/dev/null || exit 99
+source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh" 2>/dev/null || true
+source "${_PROJECT_ROOT}/.lok8s/libs/secrets"
+secrets::_encrypt_store() { return 0; }
+:args() { key="${KEY_B}"; all=0; skip_orphans=0; domain=a.dev; }
+secrets::add-key
+EOF
+  run env _PROJECT_ROOT="${_PROJECT_ROOT}" KEY_B="${KEY_B}" unshare --user --map-current-user --keep-caps --mount bash "${script}"
+  [ "$status" -ne 99 ] || skip "a user namespace cannot mount over /proc here"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "${_no_fd}" ] || { echo "$output" >&2; return 1; }
+  cmp -s "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
+  [ ! -e "${PATH_BASE}/.sops.yaml.lock" ] || { echo "a lock file was made" >&2; return 1; }
+}
+
+@test "a lock link put there after the check is refused by the test after the open, and the file that it names keeps its bytes" {
+  # The check of the lock path (secrets::_enc_path_ok) and the open are two
+  # steps. A link put there between them is followed by the open (>>, which
+  # writes nothing), and the test after the open refuses the run with the
+  # line of the check. Here the check is a function that puts the link there
+  # after it passed (Go twin: TestKeyCommandsRefuseALockLinkPutThereAfterTheCheck,
+  # where the open does not follow the link). remove-key takes the same lock.
+  command -v flock >/dev/null 2>&1 || skip "flock not installed"
+  _load
+  local _t_lock="${PATH_BASE}/.sops.yaml.lock" _t_victim="${BATS_TEST_TMPDIR}/elsewhere/victim"
+  mkdir -p "${_t_victim%/*}"
+  printf 'the bytes of another file\n' > "${_t_victim}"
+  cp -p "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved"
+  eval "_enc_path_ok_real() $(declare -f secrets::_enc_path_ok | tail -n +2)"
+  secrets::_enc_path_ok() {
+    _enc_path_ok_real "${@}" || return
+    [[ "${1}" == "${_t_lock}" ]] || return 0
+    ln -s -- "${_t_victim}" "${_t_lock}"
+  }
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${_t_lock} is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed — remove it, then run this command again" ] || {
+    echo "$output" >&2; return 1; }
+  [ -L "${_t_lock}" ] || { echo "fixture: the link was not put there" >&2; return 1; }
+  [ "$(cat "${_t_victim}")" = 'the bytes of another file' ] || { echo "the file that the link names changed" >&2; return 1; }
+  cmp -s "${PATH_BASE}/.sops.yaml" "${BATS_TEST_TMPDIR}/cfg.saved" || { echo ".sops.yaml changed" >&2; return 1; }
+  [ ! -s "${ENCRYPT_RAN}" ]
+}
