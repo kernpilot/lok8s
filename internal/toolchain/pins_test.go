@@ -108,8 +108,8 @@ func TestTemplateCarriesThePins(t *testing.T) {
 // khelm v3.0.0 next to the linked v2.8.0 (2026-10-21), and the chart
 // byte-parity test failed on every PR. The test also reads the version of
 // the one khelm entry of .bin/b.lock and the khelm release of mise.toml,
-// and checks that both are KhelmVersion. It does not check the sha256 of
-// the b.lock entry.
+// and checks that both name KhelmVersion (b.lock writes it after a "v").
+// It does not check the sha256 of the b.lock entry.
 func TestContributorBYamlCarriesThePins(t *testing.T) {
 	t.Parallel()
 	root := testutil.RepoRoot(t)
