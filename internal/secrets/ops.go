@@ -128,9 +128,10 @@ func grepQF(content, pattern string) bool {
 // new recipient would appear to be added while some secrets stayed unreadable
 // to them. Decrypt first, or pass skipOrphans to accept the gap knowingly.
 // (Like bash, the orphan check runs AFTER .sops.yaml was already modified —
-// the ordering is part of the observable contract. An .enc of the store
-// that is a symlink is refused BEFORE the write: the encrypt does not write
-// through a link, so the run would stop half way.)
+// the ordering is part of the observable contract. A store of the context
+// that does not resolve, and an .enc of the store that the encrypt refuses
+// (a symlink, a directory, a FIFO, a socket or a device), are refused
+// BEFORE the write, so the run cannot stop half way at them.)
 //
 // The argument check and the re-key steps are the helpers in rekey.go, which
 // RemoveKey shares; rekey_test.go pins this command's output and effects.
@@ -162,10 +163,20 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		return nil
 	}
 
-	// Before the first write: no .enc that the Encrypt below writes may be a
-	// symlink (encryptFile refuses one, and that refusal comes after the
-	// write).
-	if c.refuseLinkedEncs(c.encryptTargets()) {
+	// Before the first write: the store of the context must resolve, with
+	// --all too, because the encrypt below re-keys that store. Found after
+	// the write, a store that does not resolve stopped the run with the
+	// recipient in .sops.yaml, and a rerun found it present and re-keyed
+	// nothing. Then each .enc that the encrypt below writes must be a
+	// regular file or absent (encryptFile refuses any other entry, and that
+	// refusal comes after the write). The list is the one of the sweep, and
+	// the encrypt below reads this same list (encryptChecked).
+	checked, err := c.encryptTargets()
+	if err != nil {
+		ui.ErrorTo(c.ErrOut, "  add-key did not change .sops.yaml: create that directory, or select a domain that has a store, then run this command again")
+		return err
+	}
+	if c.refuseEncPaths(checked.encs()) {
 		return ErrHandled
 	}
 
@@ -210,8 +221,9 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	// store, so the whole store is exactly what must be re-encrypted here.
 	// (Faithful to bash: the sweep covers the CURRENT context's store; other
 	// stores' touched plaintexts stay newer than their .enc twins, so a later
-	// per-domain encrypt still picks them up.)
-	if err := c.Encrypt(""); err != nil {
+	// per-domain encrypt still picks them up.) The sweep is the list checked
+	// before the write.
+	if err := c.encryptChecked(checked); err != nil {
 		return err
 	}
 	fmt.Fprintln(c.Out, "done — commit .sops.yaml and the updated .enc files together")
@@ -354,8 +366,9 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 // creation_rules/recipients than the one we validated.
 //
 // The .enc path must be a regular file or absent (encDestinationOK) before
-// sops runs: a symlink (to a file or to a directory), a directory, a FIFO or
-// a device is refused with the same line as the bash twin, and nothing is
+// sops runs: a symlink (to a file or to a directory), a directory, a FIFO, a
+// socket, a device or a path whose lstat fails with another error than "does
+// not exist" is refused with the same line as the bash twin, and nothing is
 // written. The rename would replace a symlink and refuse a directory. The
 // bash twin renames with GNU mv -T (or gmv -T) for the same reason, and
 // refuses to encrypt without one: a mv without -T moves the file INTO a
@@ -368,7 +381,7 @@ func (c *Context) encryptFile(plaintext string) error {
 	}
 	encPath := plaintext + ".enc"
 	if !encDestinationOK(encPath) {
-		ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO or a device): the .enc was not written — remove it, then encrypt again", c.rel(encPath))
+		ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: the .enc was not written — remove it, then encrypt again", c.rel(encPath))
 		return ErrHandled
 	}
 	ui.Debug("Encrypting %s", filepath.Base(plaintext))
@@ -383,8 +396,10 @@ func (c *Context) encryptFile(plaintext string) error {
 }
 
 // encDestinationOK reports whether path, read with lstat (a symlink is not
-// followed), is a regular file or does not exist (bash: the check at the top
-// of secrets::_encrypt_file). Any other lstat error refuses too.
+// followed), is a regular file or does not exist (bash:
+// secrets::_enc_path_ok). Any other lstat error refuses too, for example
+// ENAMETOOLONG for a name that is too long: the bash twin tells "does not
+// exist" from the other errors with secrets::_absent.
 //
 // It checks the last part of the path only. The store directory and its
 // parent directories are trusted: they belong to the user who runs lo. A
@@ -397,6 +412,26 @@ func encDestinationOK(path string) bool {
 		return errors.Is(err, fs.ErrNotExist)
 	}
 	return fi.Mode().IsRegular()
+}
+
+// sweepPlaintexts returns the plaintext cache files of dir that the encrypt
+// sweep reads: each regular file whose name starts with prefix and does not
+// end in .enc (bash: secrets::_sweep_files). Encrypt lists the store with it
+// after the .gitignore write. AddKey lists the store with it once, before
+// its first write (encryptTargets): it checks the .enc of each file, and its
+// encrypt reads that same list (encryptChecked), so a file that the run
+// itself changes is not added. Another process that writes to the store
+// during the run is outside the threat model.
+func sweepPlaintexts(dir, prefix string) []string {
+	var plains []string
+	for _, base := range storeEntries(dir, prefix) {
+		plaintext := dir + "/" + base
+		if !fsutil.IsRegular(plaintext) || strings.HasSuffix(base, ".enc") {
+			continue
+		}
+		plains = append(plains, plaintext)
+	}
+	return plains
 }
 
 // Encrypt sweeps plaintext cache files into .enc twins (bash:
@@ -423,6 +458,22 @@ func (c *Context) Encrypt(name string) error {
 	if err != nil {
 		return err
 	}
+	// Cache files are Secret.<name>.<namespace>.<key>, so name anchors on the
+	// second field.
+	prefix := "Secret."
+	if name != "" {
+		prefix = "Secret." + name + "."
+	}
+	return c.encryptSweep(secretsDir, name, func() []string { return sweepPlaintexts(secretsDir, prefix) })
+}
+
+// encryptSweep is the sweep of Encrypt over the store secretsDir (bash:
+// secrets::_encrypt_store): the .gitignore of the store, the .sops.yaml
+// check, then each plaintext of list() whose .enc is not newer. list runs
+// after the .gitignore write: Encrypt lists the store there, and AddKey
+// gives the list that it checked before its first write (encryptChecked).
+// name is for the message when nothing matched.
+func (c *Context) encryptSweep(secretsDir, name string, list func() []string) error {
 	if !fsutil.DirExists(secretsDir) {
 		ui.WarnTo(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil
@@ -438,24 +489,8 @@ func (c *Context) Encrypt(name string) error {
 		return ErrHandled
 	}
 
-	// Cache files are Secret.<name>.<namespace>.<key>, so name anchors on the
-	// second field.
-	prefix := "Secret."
-	if name != "" {
-		prefix = "Secret." + name + "."
-	}
-
 	count, skipped := 0, 0
-	for _, base := range storeEntries(secretsDir, prefix) {
-		plaintext := secretsDir + "/" + base
-		if !fsutil.IsRegular(plaintext) {
-			continue
-		}
-		// Skip .enc files
-		if strings.HasSuffix(base, ".enc") {
-			continue
-		}
-
+	for _, plaintext := range list() {
 		// Skip if .enc is newer than plaintext (already up to date)
 		encFile := plaintext + ".enc"
 		if fsutil.IsRegular(encFile) && newerThan(encFile, plaintext) {

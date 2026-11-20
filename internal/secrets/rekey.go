@@ -3,7 +3,7 @@ package secrets
 // rekey.go: the re-key path that add-key and remove-key share, and
 // remove-key itself. Each helper has a bash twin of the same shape in
 // .lok8s/libs/secrets (secrets::_no_private_key, _recipient, _lstat,
-// _domain_stores, _rekey_stores, _orphans, _touch_plaintexts, _linked_encs, _encs_with,
+// _domain_stores, _rekey_stores, _orphans, _touch_plaintexts, _enc_paths, _encs_with,
 // _other_encs, _enc_lists, _other_stores, _own_identity, _replace,
 // _drop_recipient, _rekey_files).
 
@@ -323,50 +323,86 @@ func touchPlaintexts(stores []string) (int, error) {
 	return touched, nil
 }
 
-// encryptTargets returns the .enc path of each plaintext cache file that
-// Encrypt("") sweeps in the store of the context (bash: the loop before the
-// first write of secrets::add-key). It resolves the store with its errors
-// discarded and returns nil when the store does not resolve: AddKey reports
-// that after its write, as before.
-func (c *Context) encryptTargets() []string {
-	quiet := *c
-	quiet.ErrOut = io.Discard
-	dir, err := quiet.ResolveStore()
+// sweepList is the list of the encrypt sweep that AddKey checks before its
+// first write, and that its encrypt then reads (encryptChecked): the store
+// of the context and its plaintext cache files.
+type sweepList struct {
+	dir    string
+	plains []string
+}
+
+// encryptTargets resolves the store of the context and lists the plaintext
+// cache files that the sweep of Encrypt("") reads there (bash: the list
+// before the first write of secrets::add-key), with sweepPlaintexts, the
+// helper of the sweep itself. A store that does not resolve is an error
+// (ResolveStore prints why), and AddKey stops before its first write, with
+// --all too: its encrypt re-keys this store.
+func (c *Context) encryptTargets() (sweepList, error) {
+	dir, err := c.ResolveStore()
 	if err != nil {
-		return nil
+		return sweepList{}, err
 	}
+	return sweepList{dir: dir, plains: sweepPlaintexts(dir, "Secret.")}, nil
+}
+
+// encs returns the .enc path of each plaintext of the list.
+func (l sweepList) encs() []string {
 	var encs []string
-	for _, base := range storeEntries(dir, "Secret.") {
-		plaintext := dir + "/" + base
-		if !fsutil.IsRegular(plaintext) || strings.HasSuffix(base, ".enc") {
-			continue
-		}
+	for _, plaintext := range l.plains {
 		encs = append(encs, plaintext+".enc")
 	}
 	return encs
 }
 
-// refuseLinkedEncs refuses each .enc of encs that is a symlink, before the
-// first write, and reports whether it refused (bash: secrets::_linked_encs).
-// The re-key writes each .enc in place and never through a link
-// (encryptFile refuses one), so a link in the list would stop the run after
-// .sops.yaml was written. A rerun of RemoveKey would then stop at the same
-// file, and a rerun of AddKey would find the recipient present and re-key
-// nothing.
-func (c *Context) refuseLinkedEncs(encs []string) bool {
-	n := 0
+// encryptChecked is the encrypt of AddKey (bash: secrets::_encrypt_store
+// with list): the sweep of Encrypt("") over the list that AddKey checked
+// before its first write. It does not list the store again, so a file that
+// the run itself changes (a plaintext link to the .gitignore that the sweep
+// writes) is not added. Another process that writes to the store during the
+// run is outside the threat model.
+func (c *Context) encryptChecked(l sweepList) error {
+	return c.encryptSweep(l.dir, "", func() []string { return l.plains })
+}
+
+// refuseEncPaths refuses each .enc of encs that the encrypt refuses
+// (encDestinationOK: a symlink, a directory, a FIFO, a socket or a device,
+// or a path whose lstat fails with an error other than "does not exist"),
+// before the first write, and reports whether it refused (bash:
+// secrets::_enc_paths). The re-key writes each .enc in place, and
+// encryptFile refuses such an entry, so one in the list would stop the run
+// after .sops.yaml was written. A rerun of RemoveKey would then stop at the
+// same file, and a rerun of AddKey would find the recipient present and
+// re-key nothing. The last line names what was refused: links, other
+// entries, or both.
+func (c *Context) refuseEncPaths(encs []string) bool {
+	links, others := 0, 0
 	for _, enc := range encs {
-		info, err := os.Lstat(enc)
-		if err != nil || info.Mode()&fs.ModeSymlink == 0 {
+		if encDestinationOK(enc) {
 			continue
 		}
-		ui.ErrorTo(c.ErrOut, "%s is a symlink: the re-key does not write an .enc through a link", c.rel(enc))
-		n++
+		info, err := os.Lstat(enc)
+		switch {
+		case err != nil:
+			ui.ErrorTo(c.ErrOut, "%s cannot be looked up (an error other than \"no such file or directory\", for example a name that is too long): the re-key does not write an .enc there", c.rel(enc))
+			others++
+		case info.Mode()&fs.ModeSymlink != 0:
+			ui.ErrorTo(c.ErrOut, "%s is a symlink: the re-key does not write an .enc through a link", c.rel(enc))
+			links++
+		default:
+			ui.ErrorTo(c.ErrOut, "%s is not a regular file (a directory, a FIFO, a socket or a device): the re-key does not write an .enc there", c.rel(enc))
+			others++
+		}
 	}
-	if n == 0 {
+	switch {
+	case links+others == 0:
 		return false
+	case others == 0:
+		ui.ErrorTo(c.ErrOut, "  replace each link with the file it names, or remove it from the store, then run this command again; nothing was written")
+	case links == 0:
+		ui.ErrorTo(c.ErrOut, "  remove or fix each entry named above, then run this command again; nothing was written")
+	default:
+		ui.ErrorTo(c.ErrOut, "  replace each link with the file it names, and remove or fix each other entry, then run this command again; nothing was written")
 	}
-	ui.ErrorTo(c.ErrOut, "  replace each link with the file it names, or remove it from the store, then run this command again; nothing was written")
 	return true
 }
 
@@ -1142,7 +1178,7 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 		}
 	}
 	// The scan follows a symlink, but the re-key does not write through one.
-	if c.refuseLinkedEncs(rekey) {
+	if c.refuseEncPaths(rekey) {
 		return ErrHandled
 	}
 	// sops picks the first creation rule whose path_regex matches the

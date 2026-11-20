@@ -140,6 +140,36 @@ jobs:
           grep -q '^ok ' <<< "${out}" || { echo "::error::no real-helm bats test ran"; exit 1; }
           if grep -q '# skip' <<< "${out}"; then echo "::error::a real-helm bats test skipped"; exit 1; fi
 
+      - name: Real-sops bats tests (native, ssh-keygen and the b-installed sops)
+        # The argsh container of "Run unit tests" has no ssh-keygen, so the
+        # bats tests tagged `real-sops` (the secret re-key against the real
+        # sops, with throwaway keys) skip there. This step runs them on the
+        # runner: its ssh-keygen, the sops and ssh-to-age that `b install`
+        # put in .bin, and the bats and libraries that the step above
+        # installed. It downloads nothing. .bin comes first on PATH, and the
+        # step fails before bats runs when sops or ssh-to-age resolves to
+        # another file. The TAP output goes through tee into a log, under
+        # pipefail (as in "Provision & register" of spinup.yml), so a failed
+        # test fails the step. The step also fails when the plan is not 1..7
+        # (the seven tagged tests) or when a test skipped.
+        run: |
+          set -euo pipefail
+          export PATH="${GITHUB_WORKSPACE}/.bin:${HOME}/.local/bin:${PATH}"
+          bats --version
+          for tool in sops ssh-to-age; do
+            got="$(command -v "${tool}" || true)"
+            if [[ "${got}" != "${GITHUB_WORKSPACE}/.bin/${tool}" ]]; then
+              echo "::error::${tool} resolves to '${got}', not to ${GITHUB_WORKSPACE}/.bin/${tool} (b install)"
+              exit 1
+            fi
+          done
+          echo "ssh-keygen: $(command -v ssh-keygen || echo none)"
+          log="$(mktemp)"
+          bats --filter-tags real-sops tests/unit/ | tee "${log}"
+          plan="$(head -n 1 "${log}")"
+          if [[ "${plan}" != "1..7" ]]; then echo "::error::the real-sops TAP plan is '${plan}', not 1..7"; exit 1; fi
+          if grep -q '# skip' "${log}"; then echo "::error::a real-sops bats test skipped"; exit 1; fi
+
       - name: CRD drift gate (lo crds check)
         # libs/crds calls itself "the CI drift gate" — this is the workflow
         # step that runs it. Fails when any operator/crds/*.yaml (or the

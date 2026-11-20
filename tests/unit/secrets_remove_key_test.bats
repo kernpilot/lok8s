@@ -12,8 +12,12 @@
 # SOPS_AGE_KEY_FILE point into BATS_TEST_TMPDIR, and so do PATH_BASE and
 # PATH_CLUSTERS. Most tests stub secrets::_encrypt_file, and their .enc files
 # are sops envelopes with no ciphertext (_envelope); the round trip runs the
-# real one and skips without sops, ssh-to-age or ssh-keygen. No test prints a
-# private key.
+# real one and skips without sops, ssh-to-age or ssh-keygen. Each test that
+# runs the real sops carries the tag real-sops: the argsh container of CI has
+# no ssh-keygen, so CI runs that tag again on the runner, where a skip fails
+# the step. That step also checks the TAP plan 1..7: a test that gets or
+# loses the tag changes that number in .github/workflows/ci.yml. No test
+# prints a private key.
 
 setup() {
   load "../test_helper"
@@ -664,6 +668,41 @@ a.dev/secrets/Secret.db.default.K" ] || { echo "encrypted: $(cat "${ENCRYPT_LOG}
   ! grep -qF "${RCPT_B}" "${CFG}" || { cat "${CFG}" >&2; return 1; }
 }
 
+@test "a resumed run refuses a symlinked .enc that does not list the recipient before any write" {
+  # A stopped re-key: .sops.yaml no longer lists the recipient, the .enc of
+  # app was re-keyed and is now a link to a file that does not list it, and
+  # the .enc of db still lists it. The labels do not choose the files, so the
+  # link is in the re-key list (Go twin:
+  # TestRemoveKeyResumeRefusesASymlinkedEncThatDoesNotListTheKey).
+  _load
+  _stub_encrypt
+  _rules "${RCPT_A}"
+  _cache a.dev app "${RCPT_A}"
+  _cache a.dev db "${RCPT_B}"
+  local store="${PATH_CLUSTERS}/a.dev/secrets" away="${BATS_TEST_TMPDIR}/elsewhere" before
+  _envelope "${RCPT_A}" "${RCPT_B}" > "${store}/Secret.db.default.K.enc"
+  touch -t 200001010000 "${store}/Secret.db.default.K.enc"
+  mkdir -p "${away}"
+  mv -- "${store}/Secret.app.default.K.enc" "${away}/"
+  ln -s "${away}/Secret.app.default.K.enc" "${store}/Secret.app.default.K.enc"
+  ! grep -qF "${RCPT_B}" "${away}/Secret.app.default.K.enc" || { echo "fixture: the link lists the recipient" >&2; return 1; }
+  # The lock file is there before the run (the lock writes it), so that the
+  # listing of the project shows any other new entry.
+  : > "${CFG}.lock"
+  before="$(_state "${CFG}" "${PATH_CLUSTERS}" "${away}"; ls -A "${PATH_BASE}")"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${store}/Secret.app.default.K.enc is a symlink: the re-key does not write an .enc through a link
+[error]   replace each link with the file it names, or remove it from the store, then run this command again; nothing was written" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(_state "${CFG}" "${PATH_CLUSTERS}" "${away}"; ls -A "${PATH_BASE}")" = "${before}" ] || {
+    echo "a file changed:" >&2
+    diff <(echo "${before}") <(_state "${CFG}" "${PATH_CLUSTERS}" "${away}"; ls -A "${PATH_BASE}") >&2
+    return 1
+  }
+  [ ! -s "${ENCRYPT_LOG}" ]
+}
+
 @test "a .sops.yaml that is a symlink stays a link: its target loses the recipient and keeps its mode" {
   # (Go twin: TestKeyCommandsEditTheTargetOfASymlinkedSopsConfig.)
   _load
@@ -841,6 +880,7 @@ ${_duplicate}" ] || { echo "$output" >&2; return 1; }
   _duplicate_refused '{"data":"ENC[x]","sops":{"key_groups":[{"age":[{"recipient":"B","enc":"x"},{"recipient":"A","enc":"x"}]}],"key_groups":[{"age":[{"recipient":"A","enc":"x"}]}]}}'
 }
 
+# bats test_tags=real-sops
 @test "a real .enc with a member twice: sops opens one with the removed key, and remove-key refuses both" {
   command -v sops >/dev/null 2>&1 || skip "sops not installed"
   command -v ssh-to-age >/dev/null 2>&1 || skip "ssh-to-age not installed"
@@ -1152,7 +1192,7 @@ ${_rotate}" ]] || { echo "$output" >&2; return 1; }
 # writes an .enc only to a regular file or a path that does not exist (Go
 # twin: TestSetEncryptRefusesAnEncPathThatIsNotARegularFile).
 
-_enc_path_refusal='is not a regular file (a symlink, a directory, a FIFO or a device): the .enc was not written — remove it, then encrypt again'
+_enc_path_refusal='is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: the .enc was not written — remove it, then encrypt again'
 
 # _set_encrypt <proj> — `lo secrets --domain a.dev set -n app --encrypt K v`
 # through the real entrypoint in the project, as _run_lo runs it, bounded at
@@ -1387,6 +1427,7 @@ _keep_gone() {
   gone="$(ssh-to-age -i "${1}/gone.pub")"
 }
 
+# bats test_tags=real-sops
 @test "a twin that differs from its decrypted .enc, an .enc the caller cannot decrypt and a twin it cannot read are refused before any write" {
   # Before the first write, remove-key decrypts each file that it re-keys, in
   # memory, with the identity of the caller, and compares it with its twin:
@@ -1441,6 +1482,7 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   fi
 }
 
+# bats test_tags=real-sops
 @test "a twin with the value of its .enc passes the compare when it is the older file, and is re-keyed" {
   # The times of the files do not count: app as lo secrets encrypt leaves
   # it, other set back in time (Go twin:
@@ -1472,6 +1514,7 @@ ${_rotate}" ]] || { echo "$output" >&2; return 1; }
   [ "$(_open keep other)" = "w" ] || { echo "the key that stays cannot decrypt other" >&2; return 1; }
 }
 
+# bats test_tags=real-sops
 @test "a twin with another value than its .enc is refused by the compare when it is the older file, also one whose labels do not list the key" {
   # The times of the files do not count, and the compare reads every
   # managed file. .sops.yaml and every file of the stores stay byte-equal
@@ -1507,6 +1550,7 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   _same_store "${saved}"
 }
 
+# bats test_tags=real-sops
 @test "after a remove-key the encrypt sweep re-encrypts nothing and the lint check names no secret" {
   # Each re-keyed .enc is the newer file of its pair, as after
   # lo secrets encrypt. The store starts in the state after a decrypt (Go
@@ -1761,6 +1805,7 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   [ "${last}" -eq 1 ] || { echo "last ${last}" >&2; return 1; }
 }
 
+# bats test_tags=real-sops
 @test "round trip: the removed key cannot decrypt the store, the other key can" {
   command -v sops >/dev/null 2>&1 || skip "sops not installed"
   command -v ssh-to-age >/dev/null 2>&1 || skip "ssh-to-age not installed"
@@ -1795,6 +1840,7 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   ! grep -qF "${gone}" "${store}/Secret.app.default.K.enc"
 }
 
+# bats test_tags=real-sops
 @test "every managed .enc is re-keyed, also a file whose labels do not list the removed key" {
   # The labels are not trusted to choose the files. The file whose labels do
   # not list the key gets new bytes (a new data key) and still decrypts with

@@ -17,8 +17,9 @@
 #
 # Everything here runs against a THROWAWAY store. These tests must never be able
 # to touch clusters/*/secrets — PATH_BASE and PATH_CLUSTERS are redirected into
-# BATS_TEST_TMPDIR, and the encrypt step is stubbed, so no sops key is needed and
-# no real cache file is reachable. HOME, XDG_CONFIG_HOME (sops reads <config
+# BATS_TEST_TMPDIR, and the encrypt step is stubbed (the whole sweep, or sops
+# alone: _load_sweep), so no sops key is needed and no real cache file is
+# reachable. HOME, XDG_CONFIG_HOME (sops reads <config
 # dir>/sops/age/keys.txt) and SOPS_AGE_KEY_FILE point into BATS_TEST_TMPDIR too.
 
 setup() {
@@ -52,8 +53,28 @@ _load() {
   source "${_PROJECT_ROOT}/.lok8s/libs/secrets"
   # :args normally parses the spec; drive the function directly instead.
   ENCRYPT_RAN="${BATS_TEST_TMPDIR}/encrypt.ran"; : > "${ENCRYPT_RAN}"
-  secrets::encrypt() { echo ran >> "${ENCRYPT_RAN}"; return 0; }
+  secrets::_encrypt_store() { echo ran >> "${ENCRYPT_RAN}"; return 0; }
   command -v sops >/dev/null 2>&1 || sops() { return 0; }
+}
+
+# _load_sweep — the library with the real encrypt sweep (secrets::_encrypt_store
+# and secrets::_encrypt_file). Only sops is a stub: a function, so no sops on
+# PATH runs. It writes "stub-enc <bytes of the plaintext>" to the --output path
+# and logs each plaintext that it encrypts to SOPS_LOG.
+_load_sweep() {
+  source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh" 2>/dev/null || true
+  source "${_PROJECT_ROOT}/.lok8s/libs/secrets"
+  SOPS_LOG="${BATS_TEST_TMPDIR}/sops.log"; : > "${SOPS_LOG}"
+  sops() {
+    local -a a=("${@}")
+    local i out=""
+    for (( i = 0; i + 1 < ${#a[@]}; i++ )); do
+      [[ "${a[i]}" != --output ]] || out="${a[i + 1]}"
+    done
+    [[ -n "${out}" ]] || return 1
+    printf '%s\n' "${a[-1]}" >> "${SOPS_LOG}"
+    { printf 'stub-enc '; cat -- "${a[-1]}"; } > "${out}"
+  }
 }
 
 # secrets::add-key declares its own locals and lets :args populate them — argsh's
@@ -230,6 +251,257 @@ _state() {
   rm -- "${store}/Secret.app.default.KEY.enc"
   mv -- "${away}/Secret.app.default.KEY.enc" "${store}/"
   DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
+  [ -s "${ENCRYPT_RAN}" ]
+}
+
+# _refused_later <kind> — a store with the pairs app and db. The .enc of db,
+# the later pair (or, for kind sha, the .enc of the .sha file of db), is a
+# directory (dir, sha), a FIFO (fifo), a unix socket (socket) or a symlink
+# (link); for kind mixed the .enc of db is a directory and the .enc of app
+# is a symlink. add-key must refuse it before any write, and its last line
+# names what it refused. The project (.sops.yaml, the lock file, any temp
+# file), the store and the link target stay as they were, and sops does not
+# run. The control: with the entry removed, the run adds the recipient, and
+# the real sweep (_load_sweep: sops alone is a stub) writes the .enc of each
+# plaintext of the store, the .sha.enc too. (Go twins:
+# TestAddKeyRefusesEveryEncThatTheEncryptRefusesBeforeAnyWrite and
+# TestAddKeyRefusesALinkAndADirectoryInOneStore.)
+_refused_later() {
+  local kind="${1}" store="${PATH_CLUSTERS}/a.dev/secrets" away="${BATS_TEST_TMPDIR}/elsewhere" enc line tail before plain want=""
+  mkdir -p "${away}"
+  printf 'v\n' > "${store}/Secret.app.default.KEY"
+  printf 'enc %s\n' "${KEY_A}" > "${store}/Secret.app.default.KEY.enc"
+  printf 'w\n' > "${store}/Secret.db.default.KEY"
+  enc="${store}/Secret.db.default.KEY.enc"
+  if [[ "${kind}" == sha ]]; then
+    printf 'enc %s\n' "${KEY_A}" > "${enc}"
+    printf 's\n' > "${store}/Secret.db.default.KEY.sha"
+    enc="${store}/Secret.db.default.KEY.sha.enc"
+  fi
+  line="${enc} is not a regular file (a directory, a FIFO, a socket or a device): the re-key does not write an .enc there"
+  tail="remove or fix each entry named above, then run this command again; nothing was written"
+  case "${kind}" in
+    dir|sha) mkdir -- "${enc}" ;;
+    fifo) mkfifo -- "${enc}" ;;
+    socket)
+      # A socket path is limited to about 108 bytes and the test dir is
+      # longer: bind the short name from inside the store.
+      ( cd -- "${store}" && python3 -I -B -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "${enc##*/}" ) 2>/dev/null \
+        || skip "cannot bind a unix socket in the test dir"
+      [[ -S "${enc}" ]] || skip "the bind made no socket"
+      ;;
+    link)
+      printf 'enc %s\n' "${KEY_A}" > "${away}/Secret.db.default.KEY.enc"
+      ln -s "${away}/Secret.db.default.KEY.enc" "${enc}"
+      line="${enc} is a symlink: the re-key does not write an .enc through a link"
+      tail="replace each link with the file it names, or remove it from the store, then run this command again; nothing was written"
+      ;;
+    mixed)
+      mkdir -- "${enc}"
+      mv -- "${store}/Secret.app.default.KEY.enc" "${away}/"
+      ln -s "${away}/Secret.app.default.KEY.enc" "${store}/Secret.app.default.KEY.enc"
+      line="${store}/Secret.app.default.KEY.enc is a symlink: the re-key does not write an .enc through a link
+[error] ${line}"
+      tail="replace each link with the file it names, and remove or fix each other entry, then run this command again; nothing was written"
+      ;;
+  esac
+  find "${store}" "${away}" -type f -name '*.enc' -exec touch -t 200001010000 {} +
+  find "${store}" -type f ! -name '*.enc' -exec touch -t 200001010001 {} +
+  # The lock file is there before the run (the lock writes it), so that the
+  # listing of the project shows any other new entry.
+  : > "${PATH_BASE}/.sops.yaml.lock"
+  before="$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}" "${away}"; ls -A "${PATH_BASE}")"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${line}
+[error]   ${tail}" ] || { echo "$output" >&2; return 1; }
+  [ "$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}" "${away}"; ls -A "${PATH_BASE}")" = "${before}" ] || {
+    echo "a file changed:" >&2
+    diff <(echo "${before}") <(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}" "${away}"; ls -A "${PATH_BASE}") >&2
+    return 1
+  }
+  [ ! -s "${SOPS_LOG}" ] || { echo "sops ran on:" >&2; cat "${SOPS_LOG}" >&2; return 1; }
+  rm -r -- "${enc}"
+  if [[ "${kind}" == mixed ]]; then
+    rm -- "${store}/Secret.app.default.KEY.enc"
+    mv -- "${away}/Secret.app.default.KEY.enc" "${store}/"
+  fi
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
+  # Each plaintext of the store, in glob order, and its new .enc: a regular
+  # file with the stub's bytes. No temp file is left.
+  for plain in "${store}"/Secret.*; do
+    [[ "${plain}" != *.enc ]] || continue
+    want+="${want:+$'\n'}${plain}"
+    [[ -f "${plain}.enc" && ! -L "${plain}.enc" ]] || { echo "${plain}.enc is not a regular file" >&2; return 1; }
+    [ "$(cat "${plain}.enc")" = "stub-enc $(cat "${plain}")" ] || { echo "${plain}.enc was not written" >&2; return 1; }
+  done
+  [ "$(cat "${SOPS_LOG}")" = "${want}" ] || { echo "sops ran on:" >&2; cat "${SOPS_LOG}" >&2; return 1; }
+  [ -z "$(find "${store}" -name '.*.tmp-*')" ] || { echo "a temp file was left" >&2; return 1; }
+  [[ "${kind}" != sha ]] || grep -qxF "${store}/Secret.db.default.KEY.sha" "${SOPS_LOG}" || { echo "the .sha file was not encrypted" >&2; return 1; }
+}
+
+# A device node needs root to make, so no test makes one: secrets::_enc_path_ok
+# refuses it as it refuses a FIFO.
+@test "the .enc of a later pair that is a directory is refused before any write" {
+  _load_sweep
+  _refused_later dir
+}
+
+@test "the .enc of a later pair that is a FIFO is refused before any write" {
+  command -v mkfifo >/dev/null 2>&1 || skip "mkfifo not installed"
+  _load_sweep
+  _refused_later fifo
+}
+
+@test "the .enc of a later pair that is a symlink is refused before any write" {
+  _load_sweep
+  _refused_later link
+}
+
+@test "the .enc of a .sha file that is a directory is refused before any write" {
+  _load_sweep
+  _refused_later sha
+}
+
+@test "the .enc of a later pair that is a unix socket is refused before any write" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 not installed: no tool to bind a unix socket"
+  _load_sweep
+  _refused_later socket
+}
+
+@test "a symlinked .enc and a directory .enc in one store: the last line names both" {
+  _load_sweep
+  _refused_later mixed
+}
+
+# _long_name_refused — the body of the long-name tests, after the library is
+# loaded. The lstat of the .enc fails with ENAMETOOLONG, and [[ -e ]] reads
+# that as a path that does not exist. The check must not: the encrypt would
+# stop after the .sops.yaml write, and a rerun would find the recipient
+# present (Go twin: TestAddKeyRefusesAnEncPathThatItCannotLookUpBeforeAnyWrite).
+# It lists the project with command ls, so an ls function of the test does
+# not run here.
+_long_name_refused() {
+  local store="${PATH_CLUSTERS}/a.dev/secrets" max name before
+  max="$(getconf NAME_MAX "${store}" 2>/dev/null)" || max=255
+  [[ "${max}" =~ ^[0-9]+$ ]] || skip "the test dir has no NAME_MAX"
+  name="Secret.app.default."
+  while (( ${#name} < max - 2 )); do name+=K; done
+  { printf 'v\n' > "${store}/${name}"; } 2>/dev/null || skip "the filesystem refuses a name of ${#name} bytes"
+  ! ( : > "${store}/${name}.enc" ) 2>/dev/null || skip "the filesystem takes a name of $(( ${#name} + 4 )) bytes"
+  printf 'w\n' > "${store}/Secret.db.default.KEY"
+  printf 'enc %s\n' "${KEY_A}" > "${store}/Secret.db.default.KEY.enc"
+  touch -t 200001010000 "${store}/Secret.db.default.KEY.enc"
+  touch -t 200001010001 "${store}/${name}" "${store}/Secret.db.default.KEY"
+  # The lock file is there before the run (the lock writes it), so that the
+  # listing of the project shows any other new entry.
+  : > "${PATH_BASE}/.sops.yaml.lock"
+  before="$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; command ls -A "${PATH_BASE}")"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${store}/${name}.enc cannot be looked up (an error other than \"no such file or directory\", for example a name that is too long): the re-key does not write an .enc there
+[error]   remove or fix each entry named above, then run this command again; nothing was written" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; command ls -A "${PATH_BASE}")" = "${before}" ] || {
+    echo "a file changed:" >&2
+    diff <(echo "${before}") <(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; command ls -A "${PATH_BASE}") >&2
+    return 1
+  }
+  [ ! -s "${ENCRYPT_RAN}" ]
+  # The control: without the long name, the run adds the recipient.
+  rm -- "${store}/${name}"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
+  [ -s "${ENCRYPT_RAN}" ]
+}
+
+# _ls_then_missing <arg>... — runs ls, then lists a path that does not
+# exist: the last line of its stderr is always "No such file or directory",
+# whatever the first listing found.
+_ls_then_missing() {
+  command ls "${@}"
+  command ls -ld -- "${BATS_TEST_TMPDIR}/no-such-entry"
+}
+
+@test "a plaintext whose .enc name is too long is refused before any write" {
+  _load
+  _long_name_refused
+}
+
+@test "the long name is refused when a shell function named ls adds a line of its own" {
+  # secrets::_absent runs the ls command (command ls), not the function: the
+  # message of the function ends in "No such file or directory".
+  _load
+  ls() { _ls_then_missing "${@}"; }
+  _long_name_refused
+}
+
+@test "the long name is refused when an ls alias is set before the library is read" {
+  # Bash expands an alias when it reads the library, also after LC_ALL=C. It
+  # does not expand the word after command.
+  shopt -s expand_aliases
+  alias ls=_ls_then_missing
+  _load
+  _long_name_refused
+}
+
+@test "the encrypt reads the list that add-key checked, not a new listing of the store" {
+  # No .gitignore, a dangling plaintext link to .gitignore and a dangling .enc
+  # link. The check leaves the plaintext out: the link names nothing yet. The
+  # encrypt writes the .gitignore, and the link then names a regular file. A
+  # new listing would take it and stop at its .enc, after the .sops.yaml
+  # write. The checked list leaves both links as they were (Go twin:
+  # TestAddKeyEncryptsTheListThatItChecked).
+  _load_sweep
+  local store="${PATH_CLUSTERS}/a.dev/secrets"
+  [ ! -e "${store}/.gitignore" ]
+  ln -s .gitignore "${store}/Secret.app.default.KEY"
+  ln -s missing "${store}/Secret.app.default.KEY.enc"
+  printf 'w\n' > "${store}/Secret.db.default.KEY"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
+  [ "$(readlink "${store}/Secret.app.default.KEY")" = .gitignore ]
+  [ "$(readlink "${store}/Secret.app.default.KEY.enc")" = missing ]
+  [ -f "${store}/.gitignore" ] || { echo "the encrypt wrote no .gitignore" >&2; return 1; }
+  [ "$(cat "${SOPS_LOG}")" = "${store}/Secret.db.default.KEY" ] || { echo "sops ran on:" >&2; cat "${SOPS_LOG}" >&2; return 1; }
+  [ "$(cat "${store}/Secret.db.default.KEY.enc")" = "stub-enc w" ]
+}
+
+@test "a domain whose store does not resolve is refused before any write, with --all and without" {
+  # secrets::path says why, and the last line says that .sops.yaml did not
+  # change and what to do. Before, the run added the recipient, then
+  # stopped, and a rerun found the recipient present and re-keyed nothing
+  # (Go twin: TestAddKeyRefusesAStoreThatDoesNotResolveBeforeAnyWrite).
+  _load
+  source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"
+  local store="${PATH_CLUSTERS}/c.dev/secrets" before all
+  mkdir -p "${PATH_CLUSTERS}/c.dev"
+  printf 'v\n' > "${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.KEY"
+  : > "${PATH_BASE}/.sops.yaml.lock"
+  before="$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; command ls -A "${PATH_BASE}")"
+  for all in 0 1; do
+    DOMAIN=c.dev run _add "${KEY_B}" "${all}"
+    [ "$status" -eq 1 ] || { echo "all=${all}: status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] domain c.dev has no secrets store: ${store} does not exist, and this project keeps a store per domain (${PATH_CLUSTERS}/a.dev/secrets). lo does not fall back to ${PATH_SECRETS:-${PATH_BASE}/.secrets}.
+[error]   Create the empty directory ${store} to generate new values for c.dev.
+[error]   add-key did not change .sops.yaml: create that directory, or select a domain that has a store, then run this command again" ] || {
+      echo "all=${all}: $output" >&2; return 1; }
+    [ "$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; command ls -A "${PATH_BASE}")" = "${before}" ] || {
+      echo "all=${all}: a file changed:" >&2
+      diff <(echo "${before}") <(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; command ls -A "${PATH_BASE}") >&2
+      return 1
+    }
+    [ ! -s "${ENCRYPT_RAN}" ]
+  done
+  # The control: with the store made, the run adds the recipient.
+  mkdir "${store}"
+  DOMAIN=c.dev run _add "${KEY_B}" 1
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
   grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
   [ -s "${ENCRYPT_RAN}" ]

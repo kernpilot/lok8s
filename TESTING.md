@@ -292,6 +292,17 @@ reaches the container only through the `ARGSH_ENV_<X>` prefix (see
 [tests/README.md](tests/README.md)). CI pins `PATH_BIN` to the workspace
 `.bin` so `kustomize`-dependent render tests find the b-pinned binary.
 
+The argsh container has no `ssh-keygen`, so the tests that run the real
+sops (tagged `real-sops`) skip there. The `unit-tests` job runs that tag a
+second time on the runner, with the sops and ssh-to-age of `b install`. The
+step puts `.bin` first on `PATH`, and it fails before bats runs when `sops`
+or `ssh-to-age` resolves to a file other than the one in `.bin`. It also
+fails when a test fails, when the TAP plan is not `1..7` (the seven tagged
+tests: a change to the tags changes that number in
+`.github/workflows/ci.yml`), or when a test skips. Locally,
+`bats --filter-tags real-sops tests/unit/` runs them when `ssh-keygen`,
+`sops` and `ssh-to-age` are on `PATH`.
+
 The bats suites keep running against the frozen tree because a command
 routed to bash, the provider plugins and the `lo drivers` fallback still
 execute it. A behaviour change lands in Go first; touch the bash only when
