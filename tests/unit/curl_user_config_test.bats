@@ -357,6 +357,80 @@ ${good}:23"
   assert_failure 2
 }
 
+# A shell operator ends a word: in "echo x=y; curl …" the word before the
+# ; is x=y, not the assignment word "x=y;" that the wrapper step dropped (it
+# then saw "echo curl", a curl that is no command, and both modes passed).
+# Each canary has a word before the assignment and no space before the
+# operator (or an assignment just after the ( of a subshell), and each one
+# is a credential call in both modes. The controls keep their verdicts: a
+# real assignment prefix (also with an operator in quotes) is still a call
+# with -q, a quoted operator is no operator, and the & of a redirection
+# (>&x=y, a file) ends no word, so the curl after it stays an argument.
+@test "curl gate: a shell operator ends a word, so an assignment before it hides no curl call" {
+  local bad="${BATS_TEST_TMPDIR}/ops-bad.sh" good="${BATS_TEST_TMPDIR}/ops-good.sh" n
+  CURL_GATE_ALLOW=()
+  cat > "${bad}" <<'SH'
+echo x=y; curl -u "${U}:${P}" "${url}"
+echo x=y&& curl -u "${U}:${P}" "${url}"
+echo x=y|| curl -u "${U}:${P}" "${url}"
+echo x=y|curl -u "${U}:${P}" "${url}"
+echo x=y& curl -u "${U}:${P}" "${url}"
+(echo x=y; curl -u "${U}:${P}" "${url}")
+out=$(echo x=y; curl -u "${U}:${P}" "${url}")
+(echo x=y)&& curl -u "${U}:${P}" "${url}"
+{ echo x=y;}&& curl -u "${U}:${P}" "${url}"
+(X=1 curl -u "${U}:${P}" "${url}")
+SH
+  cat > "${good}" <<'SH'
+X=1 curl -q -sS https://h.example/c1
+X="a;b" curl -q -sS https://h.example/c2
+X='a|b' Y="c&&d" curl -q -sS https://h.example/c3
+echo "x=y; curl -u ${U}:${P} ${url}"
+echo 'x=y&& curl -u u:p https://h.example/c4'
+( http::tls_log_vars_unset && curl -q -sS "https://h.example/c5?a=1;b=2" )
+x=$(X=1 curl -q -sS https://h.example/c6)
+echo x=y 2>&1 | curl -q -sS https://h.example/c7
+echo a >&x=y curl -sS https://h.example/c8
+SH
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local want_q="" want_t="" want_l=""
+  for n in 1 2 3 4 5 6 7 8 9 10; do
+    want_q+="${bad}:${n}: ${q}"$'\n'
+    want_t+="${bad}:${n}: ${t}"$'\n'
+    want_l+="${bad}:${n} credential"$'\n'
+  done
+  run curl_gate q "${bad}"
+  assert_failure 1
+  assert_output "${want_q%$'\n'}"
+  run curl_gate tls "${bad}"
+  assert_failure 1
+  assert_output "${want_t%$'\n'}"
+  run curl_gate list "${bad}"
+  assert_success
+  assert_output "${want_l%$'\n'}"
+  run curl_gate q "${good}"
+  assert_success
+  assert_output ""
+  run curl_gate list "${good}"
+  assert_success
+  assert_output "${good}:1
+${good}:2
+${good}:3
+${good}:6
+${good}:7
+${good}:8"
+  # The assignment prefixes are outside the TLS form (as before), the
+  # helper form with a quoted ; is not.
+  run curl_gate tls "${good}"
+  assert_failure 1
+  assert_output "${good}:1: ${t}
+${good}:2: ${t}
+${good}:3: ${t}
+${good}:7: ${t}
+${good}:8: ${t}"
+}
+
 # The credential forms: each call of cred.sh carries one form, each call
 # of plain.sh none (a short option of another command of the pipeline, as
 # head -n or grep -E, does not count). The list mode shows the
