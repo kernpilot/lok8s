@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kernpilot/lok8s/internal/credentials"
 	"github.com/kernpilot/lok8s/internal/driver"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -281,6 +282,17 @@ func (d *Driver) Apply(ctx context.Context, workDir, clusterYAML string) error {
 	}
 	tfjson := fsutil.FileExists(filepath.Join(workDir, "output.json"))
 
+	// The Robot credentials go to the pre-apply steps (the bridge child that
+	// names the Robot servers and renders the CCM Secret) and to kubeone
+	// (robotEnv). A control character in either is refused first, with the
+	// two lines of http::credential_ok and no child. The bash twin checks in
+	// kubeone::_name_robot_workers, after the stale-worker cleanup and only
+	// when both are set; here each set value is checked, before every step,
+	// because robotEnv passes each one on alone.
+	if err := credentials.NoControl(os.Getenv, d.stderr(), "HROBOT_USER", "HROBOT_PASSWORD"); err != nil {
+		return err
+	}
+
 	// Pre-apply steps (stale-worker cleanup, Robot naming, addon render) —
 	// injectable, ports with the addon engine.
 	if d.Hooks.PrepareApply != nil {
@@ -330,6 +342,12 @@ func (d *Driver) Reset(ctx context.Context, workDir string) error {
 		ui.ErrorTo(d.stderr(), "kubeone.yaml not found in %s", workDir)
 		return ui.Handled(fmt.Errorf("kubeone: kubeone.yaml not found in %s", workDir))
 	}
+	// kubeone reset gets the Robot credentials too (robotEnv): the same
+	// check as in Apply. The bash kubeone::reset has none. Destroy goes on
+	// after a refusal, as after any failed reset.
+	if err := credentials.NoControl(os.Getenv, d.stderr(), "HROBOT_USER", "HROBOT_PASSWORD"); err != nil {
+		return err
+	}
 	args := []string{"reset", "--manifest", manifest, "--auto-approve"}
 	if tf := filepath.Join(workDir, "output.json"); fsutil.FileExists(tf) {
 		args = append(args, "--tfjson", tf)
@@ -374,6 +392,8 @@ func KubeconfigPath(workDir, clusterName string) string {
 
 // robotEnv mirrors the env exports of the bash apply subshell: the Hetzner
 // Robot credentials ride along under every alias the CCM tooling reads.
+// Apply and Reset refuse a value with a control character before they call
+// it (credentials.NoControl).
 func robotEnv() []string {
 	var env []string
 	if u := os.Getenv("HROBOT_USER"); u != "" {

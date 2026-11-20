@@ -2,7 +2,9 @@
 // talks to a cloud API: the provider credential presence check
 // (bash: utils/credentials.sh, credentials::require) and the HTTPS-only
 // URL check (bash: utils/http.sh, http::require_https). Bearer tokens
-// travel on these calls, never over plain HTTP.
+// travel on these calls, never over plain HTTP. It also holds the check of
+// a credential for a control character (bash: http::credential_ok), which
+// the kubehz commands and the kubeone driver share.
 package credentials
 
 import (
@@ -53,6 +55,34 @@ func NoNewline(name, value string, stderr io.Writer) error {
 	if strings.ContainsAny(value, "\r\n") {
 		ui.ErrorTo(stderr, "environment variable %s must not contain a newline", name)
 		return ui.Handled(fmt.Errorf("credentials: %s contains a newline", name))
+	}
+	return nil
+}
+
+// IsControl reports a C0 control character or DEL: the set of [[:cntrl:]]
+// under LC_ALL=C, which http::credential_ok tests (utils/http.sh). A C1
+// character in UTF-8, or a byte 0x80-0xff that is not valid UTF-8, is not
+// in the set, as in bash.
+func IsControl(r rune) bool { return r < 0x20 || r == 0x7f }
+
+// NoControl ports http::credential_ok: it fails when a named environment
+// variable holds a control character (IsControl). getenv reads the
+// variables. Each refused variable gets the error of the bash twin on
+// stderr, with its name, and the hint for a CR from a file with CRLF line
+// ends. The value is in no line and not in the error. An unset or empty
+// variable passes: the caller decides on that. The returned error is
+// already printed (ui.Handled).
+func NoControl(getenv func(string) string, stderr io.Writer, names ...string) error {
+	var refused []string
+	for _, name := range names {
+		if strings.ContainsFunc(getenv(name), IsControl) {
+			ui.ErrorTo(stderr, "environment variable %s must not contain a control character", name)
+			fmt.Fprintln(stderr, "  A file with CRLF line ends can leave a CR at the end of the value. Remove it, then try again.")
+			refused = append(refused, name)
+		}
+	}
+	if len(refused) > 0 {
+		return ui.Handled(fmt.Errorf("credentials: %s must not contain a control character", strings.Join(refused, ", ")))
 	}
 	return nil
 }
