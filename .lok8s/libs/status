@@ -33,17 +33,59 @@ status::cluster() {
   echo ""
 }
 
+# ── kubectl calls of the report ─────────────────────────
+# After `lo down` the kubeconfig can point to an API server that does not
+# answer. Each kubectl call of the report ends with --request-timeout=5s
+# (Go twin: statusRequestTimeout). Without it, kubectl can wait about two
+# minutes before it stops. But the flag bounds one request, not the whole
+# call: a `kubectl get` can make discovery requests before the GET and
+# retry them, and an exec credential plugin of the kubeconfig runs outside
+# the flag. So status::all first sends one /readyz probe (no discovery).
+# When the probe fails, the report skips both reads. When it passes, each
+# read runs with a bound for the whole call. The probe has the same bound.
+#
+# The bound is timeout(1): status::_read_bound seconds, then SIGKILL 2 s
+# after the SIGTERM (Go twin: statusReadBound and statusReadGrace). timeout
+# signals its own process group, so a credential plugin stops too. Without
+# timeout on PATH, each call has only the request timeout, as before.
+
+# status::_read_bound — the bound of one kubectl call of the report, in
+# seconds (Go: statusReadBound). A test makes it short.
+status::_read_bound() { echo 10; }
+
+# status::_kubectl <args...> — one kubectl call of the report: kubectl
+# <args> --request-timeout=5s, under timeout(1) when it is on PATH.
+status::_kubectl() {
+  if command -v timeout &>/dev/null; then
+    timeout -k 2 "$(status::_read_bound)" kubectl "$@" --request-timeout=5s
+  else
+    kubectl "$@" --request-timeout=5s
+  fi
+}
+
+# status::reachable — 0 when kubectl and the kubeconfig file are there and
+# the API server answers the /readyz probe (Go: statusReachable).
+# Usage: status::reachable
+status::reachable() {
+  command -v kubectl &>/dev/null || return 1
+  [[ -f "${KUBECONFIG:-}" ]] || return 1
+  status::_kubectl get --raw /readyz >/dev/null 2>&1
+}
+
 # ── Node status ─────────────────────────────────────────
-# Reports node status via kubectl (if kubeconfig is available).
-# Both kubectl reads of the report end with --request-timeout=5s (Go twin:
-# statusRequestTimeout). After `lo down` the kubeconfig can point to an API
-# server that does not answer. Without a request timeout, kubectl can wait
-# about two minutes before it stops.
-# Usage: status::nodes
+# Reports node status via kubectl (if kubeconfig is available). With
+# reachable not 1 (the /readyz probe of status::all failed), the section
+# shows (not reachable) and kubectl does not read the nodes.
+# Usage: status::nodes [reachable]
 status::nodes() {
+  local reachable="${1:-0}"
   if command -v kubectl &>/dev/null && [[ -f "${KUBECONFIG:-}" ]]; then
     echo "--- Nodes ---"
-    kubectl get nodes -o wide --request-timeout=5s 2>/dev/null || echo "  (not reachable)"
+    if [[ "${reachable}" == 1 ]]; then
+      status::_kubectl get nodes -o wide 2>/dev/null || echo "  (not reachable)"
+    else
+      echo "  (not reachable)"
+    fi
     echo ""
   fi
 }
@@ -52,15 +94,16 @@ status::nodes() {
 # Shows the in-cluster ClusterInventory (lok8s.dev/v1alpha1 singleton
 # "cluster", written by lo at the end of provision/bootstrap) when the
 # cluster is reachable and the CR exists. Read-only, fail-soft: silently
-# skipped otherwise.
-# Usage: status::inventory
+# skipped otherwise (also when reachable is not 1).
+# Usage: status::inventory [reachable]
 status::inventory() {
+  [[ "${1:-0}" == 1 ]] || return 0
   command -v kubectl &>/dev/null || return 0
   command -v jq &>/dev/null || return 0
   [[ -f "${KUBECONFIG:-}" ]] || return 0
 
   local inv
-  inv=$(kubectl get clusterinventories.lok8s.dev cluster -o json --request-timeout=5s 2>/dev/null) || return 0
+  inv=$(status::_kubectl get clusterinventories.lok8s.dev cluster -o json 2>/dev/null) || return 0
   [[ -n "${inv}" ]] || return 0
 
   echo "--- Inventory (ClusterInventory/cluster) ---"
@@ -145,8 +188,11 @@ status::all() {
   kind=$(domain::spec_driver "${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml") || kind=""
 
   status::cluster "${domain}"
-  status::nodes
-  status::inventory
+  # One /readyz probe for both kubectl reads.
+  local reachable=0
+  status::reachable && reachable=1
+  status::nodes "${reachable}"
+  status::inventory "${reachable}"
   status::targets "${domain}"
   status::tilt "${kind}"
 }

@@ -91,6 +91,9 @@ func TestStatusSectionsByteExact(t *testing.T) {
 	t.Setenv("KUBECONFIG", kc)
 	r.handler = func(c execx.Cmd) error {
 		switch strings.Join(c.Args, " ") {
+		case "get --raw /readyz --request-timeout=5s":
+			io.WriteString(c.Stdout, "ok")
+			return nil
 		case "get nodes -o wide --request-timeout=5s":
 			io.WriteString(c.Stdout, "NAME   STATUS\nx-control-plane   Ready\n")
 			return nil
@@ -159,29 +162,37 @@ func TestStatusSkipsKubectlWithoutKubeconfig(t *testing.T) {
 	}
 }
 
-// statusReadCalls are the two kubectl reads of the text report, as the
-// fake runner records them: each ends with --request-timeout=5s.
+// statusProbeCall is the /readyz probe as the fake runner records it.
+const statusProbeCall = "kubectl get --raw /readyz --request-timeout=5s"
+
+// statusReadCalls are the kubectl calls of the text report when the probe
+// passes, as the fake runner records them: the probe, then the two reads.
+// Each ends with --request-timeout=5s.
 var statusReadCalls = []string{
+	statusProbeCall,
 	"kubectl get nodes -o wide --request-timeout=5s",
 	"kubectl get clusterinventories.lok8s.dev cluster -o json --request-timeout=5s",
 }
 
 // After `lo down` the kubeconfig can point to an API server that does not
-// answer (issue #194). Both kubectl reads then stop after 5 s per request.
+// answer (issue #194). Each kubectl call then stops after 5 s per request.
 // The driver status reaches runStatus only as text on the report, so a gone
-// cluster ("NotFound") still gets both reads: the timeout is the bound for
-// every driver result. bats twin: the status::all tests in
-// tests/unit/status_test.bats.
+// cluster ("NotFound") still gets the /readyz probe: the probe and the
+// timeout are the bound for every driver result. A failed probe skips both
+// reads. bats twin: the status::all tests in tests/unit/status_test.bats.
 func TestStatusKubectlReadsCarryRequestTimeout(t *testing.T) {
 	cases := []struct {
 		name  string
-		word  string // what the driver status prints
-		fail  bool   // every kubectl call fails
-		nodes string // the Nodes section
+		word  string   // what the driver status prints
+		probe bool     // the /readyz probe passes
+		fail  bool     // the two reads fail
+		calls []string // the kubectl calls
+		nodes string   // the Nodes section
 	}{
-		{"running cluster", "Running", false, "--- Nodes ---\nNAME   STATUS\nx-control-plane   Ready\n\n"},
-		{"gone cluster", "NotFound", true, "--- Nodes ---\n  (not reachable)\n\n"},
-		{"kubectl fails", "Running", true, "--- Nodes ---\n  (not reachable)\n\n"},
+		{"running cluster", "Running", true, false, statusReadCalls, "--- Nodes ---\nNAME   STATUS\nx-control-plane   Ready\n\n"},
+		{"gone cluster", "NotFound", false, true, []string{statusProbeCall}, "--- Nodes ---\n  (not reachable)\n\n"},
+		{"probe fails", "Running", false, true, []string{statusProbeCall}, "--- Nodes ---\n  (not reachable)\n\n"},
+		{"reads fail after the probe", "Running", true, true, statusReadCalls, "--- Nodes ---\n  (not reachable)\n\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -195,6 +206,12 @@ func TestStatusKubectlReadsCarryRequestTimeout(t *testing.T) {
 			testutil.WriteFile(t, kc, "apiVersion: v1\n")
 			t.Setenv("KUBECONFIG", kc)
 			r.handler = func(c execx.Cmd) error {
+				if c.Args[1] == "--raw" {
+					if !tc.probe {
+						return errors.New("dial tcp 10.0.0.1:6443: i/o timeout")
+					}
+					return nil
+				}
 				if tc.fail {
 					return errors.New("dial tcp 10.0.0.1:6443: i/o timeout")
 				}
@@ -205,8 +222,8 @@ func TestStatusKubectlReadsCarryRequestTimeout(t *testing.T) {
 				return errors.New(`clusterinventories.lok8s.dev "cluster" not found`)
 			}
 			runStatus(t.Context(), out, deps, "x.dev")
-			if !slices.Equal(r.calls, statusReadCalls) {
-				t.Errorf("kubectl calls:\n%q\nwant:\n%q", r.calls, statusReadCalls)
+			if !slices.Equal(r.calls, tc.calls) {
+				t.Errorf("kubectl calls:\n%q\nwant:\n%q", r.calls, tc.calls)
 			}
 			want := "=== Domain: x.dev ===\n\n--- Cluster ---\n" + tc.word + "\n\n" + tc.nodes +
 				"--- Targets ---\n  No targets directory\n  artifacts.yaml: not built (run 'lo build')\n\n"
@@ -217,15 +234,22 @@ func TestStatusKubectlReadsCarryRequestTimeout(t *testing.T) {
 	}
 }
 
-// `lo status -o json` runs its two kubectl reads with the same bound.
+// `lo status -o json` runs the same probe, and its two kubectl reads with
+// the same request timeout.
 func TestGatherStatusKubectlReadsCarryRequestTimeout(t *testing.T) {
 	deps, r, _ := statusHarness(t, true, nil)
 	kc := filepath.Join(deps.paths.Base, ".kubeconfig", "x.yaml")
 	testutil.WriteFile(t, kc, "apiVersion: v1\n")
 	t.Setenv("KUBECONFIG", kc)
-	r.handler = func(execx.Cmd) error { return errors.New("dial tcp 10.0.0.1:6443: i/o timeout") }
+	r.handler = func(c execx.Cmd) error {
+		if c.Args[1] == "--raw" {
+			return nil
+		}
+		return errors.New("dial tcp 10.0.0.1:6443: i/o timeout")
+	}
 	rep := gatherStatus(t.Context(), deps, "x.dev")
 	want := []string{
+		statusProbeCall,
 		"kubectl get nodes -o json --request-timeout=5s",
 		"kubectl get clusterinventories.lok8s.dev cluster -o json --request-timeout=5s",
 	}

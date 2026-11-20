@@ -224,10 +224,10 @@ check - status --domain alpha.dev                  # targets listed, built, stal
 check - status --domain alpha.dev                  # empty pidfile
 rm -f "${PROJ}/.tilt.pid"
 # A gone cluster with its kubeconfig left behind, as after `lo down`
-# (issue #194): the driver says NotFound and both kubectl reads still run.
-# This stub prints its arguments, so the diff also compares the
-# --request-timeout=5s of the node read in the two twins. Then it fails,
-# as an API server that does not answer.
+# (issue #194): the driver says NotFound and the /readyz probe still runs.
+# This stub prints its arguments and then fails, as an API server that
+# does not answer. Both twins discard the output of the probe and skip the
+# two reads, so the Nodes section is the same `(not reachable)` line.
 mkdir -p "${PROJ}/.kubeconfig"
 printf 'apiVersion: v1\n' > "${PROJ}/.kubeconfig/sharedc.yaml"
 parity::stub "${PROJ}" kubectl <<'SH'
