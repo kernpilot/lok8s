@@ -17,9 +17,12 @@ setup() {
   import() { :; }
   export -f import
 
-  # provider contract helpers (read_name/write_config/load) + the doctor lib.
+  # provider contract helpers (read_name/write_config/load), the domain
+  # readers (domain::driver, for doctor::_kind_fails) + the doctor lib.
   # shellcheck source=/dev/null
   source "${_PROJECT_ROOT}/.lok8s/utils/provider.sh"
+  # shellcheck source=/dev/null
+  source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"
   # shellcheck source=/dev/null
   source "${_PROJECT_ROOT}/.lok8s/libs/doctor"
 
@@ -142,17 +145,24 @@ YAML
 _kind_purpose="local clusters (Lo driver)"
 _kind_need="lo up needs kind v0.18.0 or later for networking.dnsSearch"
 
-# _kind_run <kind version output, printf %b> [<kind exit code>] — runs
-# doctor::_kind with a stub kind first on PATH. The stub answers only
+# _kind_stub <kind version output, printf %b> [<kind exit code>] — writes
+# a stub kind into ${BATS_TEST_TMPDIR}/kind-bin. The stub answers only
 # `kind version`; any other argv exits 98 (a version unknown line).
-_kind_run() {
+_kind_stub() {
   local bin="${BATS_TEST_TMPDIR}/kind-bin"
   mkdir -p "${bin}"
   printf '%b' "${1}" > "${bin}/kind.out"
   printf '#!/usr/bin/env bash\n[[ "$*" == version ]] || exit 98\ncat "%s"\nexit %s\n' \
     "${bin}/kind.out" "${2:-0}" > "${bin}/kind"
   chmod +x "${bin}/kind"
-  PATH="${bin}:${PATH}" run doctor::_kind "${_kind_purpose}"
+}
+
+# _kind_run <kind version output, printf %b> [<kind exit code>] — runs
+# doctor::_kind for the domain ${_kind_domain} (default: no domain) with
+# the stub kind (_kind_stub) first on PATH.
+_kind_run() {
+  _kind_stub "$@"
+  PATH="${BATS_TEST_TMPDIR}/kind-bin:${PATH}" run doctor::_kind "${_kind_domain-}" "${_kind_purpose}"
 }
 
 _kind_older() {
@@ -182,6 +192,12 @@ _kind_unknown() {
   # matched numbers.
   _kind_run 'kind v0.17.0-rc.1+abc go1.19 linux/amd64\n'
   _kind_older v0.17.0
+  # A tab separates the fields too, and a leading space is skipped (the
+  # split of the Go twin).
+  _kind_run 'kind\tv0.17.0\tgo1.19.4 linux/amd64\n'
+  _kind_older v0.17.0
+  _kind_run ' kind v0.17.0 go1.19.4 linux/amd64\n'
+  _kind_older v0.17.0
 }
 
 @test "doctor::_kind passes v0.18.0 and later, also a pre-release of a later release" {
@@ -196,6 +212,9 @@ _kind_unknown() {
   _kind_pass
   # Leading zeros compare as decimal numbers, not as octal.
   _kind_run 'kind v0.018.0 go1.20 linux/amd64\n'
+  _kind_pass
+  # Leading spaces and tabs are skipped.
+  _kind_run ' \t kind v0.32.0 go1.25.5 linux/amd64\n'
   _kind_pass
 }
 
@@ -228,7 +247,138 @@ _kind_unknown() {
   for d in "${dirs[@]}"; do
     [[ -x "${d}/kind" ]] || p+="${p:+:}${d}"
   done
-  PATH="${p}" run doctor::_kind "${_kind_purpose}"
+  PATH="${p}" run doctor::_kind "" "${_kind_purpose}"
   assert_success
   assert_output "  ! kind not found (optional) — ${_kind_purpose}"
+}
+
+# A kind file without the exec bit is not a kind that can run: the line is
+# the warning of an absent kind, as in the Go twin (toolchain.LookPath).
+# command -v alone prints such a file when no kind on PATH can run (the
+# first check). Go twin: TestDoctorKindNeedsTheExecBit.
+@test "doctor::_kind takes a kind without the exec bit as not found" {
+  local bin="${BATS_TEST_TMPDIR}/noexec-bin" p="" d
+  mkdir -p "${bin}"
+  printf '#!/bin/sh\necho kind v0.32.0\n' > "${bin}/kind"
+  chmod 0644 "${bin}/kind"
+  local -a dirs=()
+  IFS=: read -r -a dirs <<< "${PATH}"
+  for d in "${dirs[@]}"; do
+    [[ -x "${d}/kind" ]] || p+="${p:+:}${d}"
+  done
+  p="${bin}:${p}"
+  [ "$(PATH="${p}" && command -v kind)" = "${bin}/kind" ]
+  PATH="${p}" run doctor::_kind "" "${_kind_purpose}"
+  assert_success
+  assert_output "  ! kind not found (optional) — ${_kind_purpose}"
+}
+
+# Before a kind that can run, a kind without the exec bit is skipped: the
+# first kind on PATH that can run is the one that runs.
+@test "doctor::_kind runs the first kind on PATH that can run" {
+  local bin="${BATS_TEST_TMPDIR}/noexec-bin"
+  mkdir -p "${bin}"
+  printf '#!/bin/sh\necho kind v0.17.0\n' > "${bin}/kind"
+  chmod 0644 "${bin}/kind"
+  _kind_stub 'kind v0.18.0 go1.20.2 linux/amd64\n'
+  PATH="${bin}:${BATS_TEST_TMPDIR}/kind-bin:${PATH}" run doctor::_kind "" "${_kind_purpose}"
+  _kind_pass
+}
+
+# _kind_domains — one domain of each kind that doctor::_kind_fails tells
+# apart (Go twin: doctorKindDomains in internal/cli/cmd_doctor_test.go).
+_kind_domains() {
+  local d
+  for d in lo.dev metal.dev app.dev nokind.dev badkind.dev; do
+    mkdir -p "${PATH_CLUSTERS}/${d}"
+  done
+  printf 'kind: Lo\nmetadata:\n  name: lo\n' > "${PATH_CLUSTERS}/lo.dev/cluster.lok8s.yaml"
+  printf 'kind: KubeOne\nmetadata:\n  name: metal\n' > "${PATH_CLUSTERS}/metal.dev/cluster.lok8s.yaml"
+  printf 'kind: Deploy\nspec:\n  clusterRef:\n    domain: lo.dev\n' > "${PATH_CLUSTERS}/app.dev/deploy.lok8s.yaml"
+  printf 'metadata:\n  name: nokind\n' > "${PATH_CLUSTERS}/nokind.dev/cluster.lok8s.yaml"
+  printf 'kind: ../lo\nmetadata:\n  name: badkind\n' > "${PATH_CLUSTERS}/badkind.dev/cluster.lok8s.yaml"
+}
+
+# An older kind fails where lo up runs kind (a domain of the Lo driver),
+# and where there is no active domain: no name, no spec, or a spec whose
+# driver doctor cannot read. For a domain of another driver, a deploy
+# domain included, it is a warning with the same text. The minimum kind
+# passes for every domain. Go twin: TestDoctorToolsSectionOlderKindByDomain.
+@test "doctor::_kind fails an older kind only where the domain needs it" {
+  _kind_domains
+  local d
+  for d in lo.dev "" missing.dev nokind.dev badkind.dev; do
+    _kind_domain="${d}" _kind_run 'kind v0.17.0 go1.19.4 linux/amd64\n'
+    _kind_older v0.17.0
+  done
+  for d in metal.dev app.dev; do
+    _kind_domain="${d}" _kind_run 'kind v0.17.0 go1.19.4 linux/amd64\n'
+    assert_success
+    assert_output "  ! kind v0.17.0 — ${_kind_purpose}; ${_kind_need} (fix: b update kind)"
+  done
+  for d in lo.dev "" missing.dev nokind.dev badkind.dev metal.dev app.dev; do
+    _kind_domain="${d}" _kind_run 'kind v0.18.0 go1.20.2 linux/amd64\n'
+    _kind_pass
+  done
+}
+
+# Without yq, doctor::_kind_fails does not read the driver of a domain with
+# a cluster.lok8s.yaml: an older kind is a warning there, and a second
+# warning says why. A deploy domain needs no yq, and with no domain (no
+# name, no spec) an older kind still fails. The Go twin reads the driver
+# without yq, so it fails an older kind for lo.dev (see doctor::_kind_fails).
+@test "doctor::_kind without yq warns for a cluster spec and says why" {
+  _kind_domains
+  _kind_stub 'kind v0.17.0 go1.19.4 linux/amd64\n'
+  local tools="${BATS_TEST_TMPDIR}/no-yq-bin" t d
+  mkdir -p "${tools}"
+  for t in bash env cat; do
+    ln -s "$(command -v "${t}")" "${tools}/${t}"
+  done
+  local p="${BATS_TEST_TMPDIR}/kind-bin:${tools}"
+  [ -z "$(PATH="${p}" && command -v yq)" ]
+  for d in lo.dev metal.dev nokind.dev badkind.dev; do
+    PATH="${p}" run doctor::_kind "${d}" "${_kind_purpose}"
+    assert_success
+    assert_output "  ! kind v0.17.0 — ${_kind_purpose}; ${_kind_need} (fix: b update kind)
+  ! kind: the driver of ${d} not checked: yq not found"
+  done
+  PATH="${p}" run doctor::_kind app.dev "${_kind_purpose}"
+  assert_success
+  assert_output "  ! kind v0.17.0 — ${_kind_purpose}; ${_kind_need} (fix: b update kind)"
+  for d in "" missing.dev; do
+    PATH="${p}" run doctor::_kind "${d}" "${_kind_purpose}"
+    _kind_older v0.17.0
+  done
+}
+
+# main::doctor gives the active domain (DOMAIN_NAME here, as the entrypoint
+# exports it) to the kind line: an older kind is a failure for a domain of
+# the Lo driver and a warning for a KubeOne domain. Every required tool
+# but yq is a stub that exits 99, and mkcert too, so doctor reaches no
+# cluster (the domain readers need the real yq, and setup skips without
+# it). So the exit status comes from the kind line alone, and the minimum
+# kind passes for the Lo domain. Go twin:
+# TestDoctorKindLineReadsTheActiveDomain.
+@test "lo doctor reads the active domain for the kind line" {
+  _kind_domains
+  _kind_stub 'kind v0.17.0 go1.19.4 linux/amd64\n'
+  local bin="${BATS_TEST_TMPDIR}/kind-bin" tool
+  for tool in argsh kustomize kubectl envsubst docker jq mkcert; do
+    printf '#!/bin/sh\nexit 99\n' > "${bin}/${tool}"
+    chmod +x "${bin}/${tool}"
+  done
+  :args() { :; }
+  local line="kind v0.17.0 — ${_kind_purpose}; ${_kind_need} (fix: b update kind)"
+  DOMAIN_NAME=lo.dev PATH="${bin}:${PATH}" run main::doctor < /dev/null
+  assert_failure 1
+  assert_line "  ✗ ${line}"
+  refute_line --partial "MISSING (required)"
+  DOMAIN_NAME=metal.dev PATH="${bin}:${PATH}" run main::doctor < /dev/null
+  assert_success
+  assert_line "  ! ${line}"
+  _kind_stub 'kind v0.18.0 go1.20.2 linux/amd64\n'
+  DOMAIN_NAME=lo.dev PATH="${bin}:${PATH}" run main::doctor < /dev/null
+  assert_success
+  assert_line "  ✓ kind — ${_kind_purpose}"
 }

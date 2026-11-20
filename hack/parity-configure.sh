@@ -641,7 +641,10 @@ PARITY_ROUTE_GO=doctor check - doctor --domain gamma.app
 check PATH_SECRETS doctor --no-color               # native vs the shim; the D35 line
 PARITY_ROUTE_GO=doctor check - doctor --no-color   # routed on both sides
 # lo version runs each tool that it finds, docker included: the probe
-# stubs (parity::probe_case). doctor only looks the tools up.
+# stubs (parity::probe_case). doctor runs some of the tools that it finds
+# too (envsubst --version, mkcert -CAROOT, kind version; the binary also
+# runs bash), but not docker: no domain here has a registry file. So the
+# doctor cases run with the real toolchain.
 PARITY_ROUTE_GO=version parity::probe_case "${PROJ}" check - version
 
 report

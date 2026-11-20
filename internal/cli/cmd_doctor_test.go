@@ -6,9 +6,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/testutil"
 )
@@ -146,6 +148,9 @@ func TestDoctorKindMinimumRelease(t *testing.T) {
 		{"an empty output warns", "", nil, unknown, true},
 		{"the version must be on the first line", "\nkind v0.32.0 go1.25.5 linux/amd64\n", nil, unknown, true},
 		{"a carriage return ends no field", "kind v0.32.0\r\n", nil, unknown, true},
+		{"a tab separates the fields too", "kind\tv0.17.0\tgo1.19.4 linux/amd64\n", nil, older("v0.17.0"), false},
+		{"leading spaces and tabs are skipped", " \t kind v0.32.0 go1.25.5 linux/amd64\n", nil, pass, true},
+		{"a leading space before an older release", " kind v0.17.0 go1.19.4 linux/amd64\n", nil, older("v0.17.0"), false},
 		{"a failed kind version warns", "kind v0.32.0 go1.25.5 linux/amd64\n", errors.New("exit status 1"), unknown, true},
 	}
 	bin := doctorStubBin(t, "kind")
@@ -153,7 +158,7 @@ func TestDoctorKindMinimumRelease(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := kindVersionRunner(tc.out, tc.err)
 			var out strings.Builder
-			ok := doctorKind(context.Background(), r, &out, bin, purpose)
+			ok := doctorKind(context.Background(), r, &out, bin, purpose, true)
 			if got := out.String(); got != tc.want || ok != tc.ok {
 				t.Errorf("kind version %q: %q ok=%v, want %q ok=%v", tc.out, got, ok, tc.want, tc.ok)
 			}
@@ -164,12 +169,92 @@ func TestDoctorKindMinimumRelease(t *testing.T) {
 	}
 }
 
+// The bash twin keeps its own copy of the minimum (DOCTOR_KIND_MIN in the
+// embedded mirror of .lok8s/libs/doctor). Two hand-kept copies drift; this
+// fails first. The file must set it once: a second assignment would win.
+// An assignment counts also when it is indented, or when it follows
+// readonly, declare (with options such as -g), typeset or export.
+func TestDoctorKindMinMatchesBash(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join(testutil.RepoRoot(t), "internal", "assets", "lok8s", "libs", "doctor"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := doctorKindMinAssignRe.FindAllSubmatch(src, -1)
+	if len(m) != 1 {
+		t.Fatalf("libs/doctor sets DOCTOR_KIND_MIN %d times, want once", len(m))
+	}
+	if got := string(m[0][1]); got != doctorKindMin {
+		t.Errorf("bash DOCTOR_KIND_MIN %q != Go doctorKindMin %q", got, doctorKindMin)
+	}
+}
+
+// doctorKindMinAssignRe matches an assignment of DOCTOR_KIND_MIN at the
+// start of a line: after spaces or tabs, and after readonly, declare,
+// typeset or export with their options. The value is the text up to white
+// space.
+var doctorKindMinAssignRe = regexp.MustCompile(`(?m)^[ \t]*(?:(?:readonly|declare|typeset|export)(?:[ \t]+-[A-Za-z]+)*[ \t]+)?DOCTOR_KIND_MIN=(\S*)`)
+
+// The pattern of TestDoctorKindMinMatchesBash finds each form of the
+// assignment, and no other name.
+func TestDoctorKindMinAssignmentForms(t *testing.T) {
+	for _, tc := range []struct {
+		line string
+		want bool
+	}{
+		{"DOCTOR_KIND_MIN=v0.18.0", true},
+		{"  DOCTOR_KIND_MIN=v0.18.0", true},
+		{"\tDOCTOR_KIND_MIN=v0.18.0", true},
+		{"readonly DOCTOR_KIND_MIN=v0.18.0", true},
+		{"declare DOCTOR_KIND_MIN=v0.18.0", true},
+		{"declare -g DOCTOR_KIND_MIN=v0.18.0", true},
+		{"  declare -gr DOCTOR_KIND_MIN=v0.18.0", true},
+		{"typeset DOCTOR_KIND_MIN=v0.18.0", true},
+		{"export DOCTOR_KIND_MIN=v0.18.0", true},
+		{"# DOCTOR_KIND_MIN=v0.18.0", false},
+		{"XDOCTOR_KIND_MIN=v0.18.0", false},
+		{"echo ${DOCTOR_KIND_MIN}", false},
+	} {
+		if got := doctorKindMinAssignRe.MatchString(tc.line); got != tc.want {
+			t.Errorf("%q: match %v, want %v", tc.line, got, tc.want)
+		}
+	}
+}
+
+// The tools section prints one kind line, the line of doctorKind. kind is
+// also a row of doctorToolsPost (for its purpose): without the skip of
+// that row, the generic doctorTool line follows it. Each state of the line
+// counts: older, the minimum, version unknown and absent.
+func TestDoctorToolsSectionPrintsOneKindLine(t *testing.T) {
+	tools := []string{"argsh", "yq", "kustomize", "kubectl", "envsubst", "docker", "jq"}
+	withKind := doctorStubBin(t, append(tools, "kind")...)
+	withoutKind := doctorStubBin(t, tools...)
+	p := synthProject(t)
+	for _, tc := range []struct{ bin, out string }{
+		{withKind, "kind v0.17.0 go1.19.4 linux/amd64\n"},
+		{withKind, "kind v0.18.0 go1.20.2 linux/amd64\n"},
+		{withKind, "kind vdev\n"},
+		{withoutKind, ""},
+	} {
+		var out strings.Builder
+		doctorToolsSection(context.Background(), kindVersionRunner(tc.out, nil), p, "", tc.bin, &out)
+		n := 0
+		for line := range strings.SplitSeq(out.String(), "\n") {
+			if f := strings.Fields(line); len(f) > 1 && f[1] == "kind" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("kind version %q: %d kind lines, want 1:\n%s", tc.out, n, out.String())
+		}
+	}
+}
+
 // kind is optional: without it the line is the warning of every optional
 // tool, and nothing runs.
 func TestDoctorKindAbsentWarns(t *testing.T) {
 	r := kindVersionRunner("kind v0.17.0\n", nil)
 	var out strings.Builder
-	if !doctorKind(context.Background(), r, &out, t.TempDir(), "local clusters (Lo driver)") {
+	if !doctorKind(context.Background(), r, &out, t.TempDir(), "local clusters (Lo driver)", true) {
 		t.Error("an absent kind fails")
 	}
 	if want := "  ! kind not found (optional) — local clusters (Lo driver)\n"; out.String() != want {
@@ -180,20 +265,124 @@ func TestDoctorKindAbsentWarns(t *testing.T) {
 	}
 }
 
-// An older kind fails the tools section (and so the doctor exit code);
-// the same toolchain with the minimum kind passes it.
-func TestDoctorToolsSectionFailsOnAnOlderKind(t *testing.T) {
+// A kind file without the exec bit is not found (toolchain.LookPath): the
+// line is the warning of an absent kind, and nothing runs. Before a kind
+// that can run, it is skipped, and the second one runs. Bash twin: the
+// doctor::_kind exec-bit cases in tests/unit/doctor_test.bats.
+func TestDoctorKindNeedsTheExecBit(t *testing.T) {
+	const purpose = "local clusters (Lo driver)"
+	noexec := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(noexec, "kind"), "#!/bin/sh\nexit 99\n")
+	if err := os.Chmod(filepath.Join(noexec, "kind"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := kindVersionRunner("kind v0.18.0 go1.20.2 linux/amd64\n", nil)
+	var out strings.Builder
+	ok := doctorKind(context.Background(), r, &out, noexec, purpose, true)
+	if want := "  ! kind not found (optional) — " + purpose + "\n"; !ok || out.String() != want || len(r.calls) != 0 {
+		t.Errorf("a kind without the exec bit: %q ok=%v calls %q, want %q ok=true and no call", out.String(), ok, r.calls, want)
+	}
+
+	bin := doctorStubBin(t, "kind")
+	r = kindVersionRunner("kind v0.18.0 go1.20.2 linux/amd64\n", nil)
+	out.Reset()
+	ok = doctorKind(context.Background(), r, &out, noexec+string(os.PathListSeparator)+bin, purpose, true)
+	if want := "  ✓ kind — " + purpose + "\n"; !ok || out.String() != want {
+		t.Errorf("a kind that can run after one without the exec bit: %q ok=%v, want %q", out.String(), ok, want)
+	}
+	if want := filepath.Join(bin, "kind") + " version"; len(r.calls) != 1 || r.calls[0] != want {
+		t.Errorf("calls %q, want [%q]", r.calls, want)
+	}
+}
+
+// doctorKindDomains is a project with one domain of each kind that
+// kindFails tells apart. The bash twin writes the same specs
+// (tests/unit/doctor_test.bats, _kind_domains).
+func doctorKindDomains(t *testing.T) *config.Paths {
+	t.Helper()
+	p := synthProject(t)
+	for d, spec := range map[string]string{
+		"lo.dev/cluster.lok8s.yaml":      "kind: Lo\nmetadata:\n  name: lo\n",
+		"metal.dev/cluster.lok8s.yaml":   "kind: KubeOne\nmetadata:\n  name: metal\n",
+		"app.dev/deploy.lok8s.yaml":      "kind: Deploy\nspec:\n  clusterRef:\n    domain: lo.dev\n",
+		"nokind.dev/cluster.lok8s.yaml":  "metadata:\n  name: nokind\n",
+		"badkind.dev/cluster.lok8s.yaml": "kind: ../lo\nmetadata:\n  name: badkind\n",
+	} {
+		testutil.WriteFile(t, filepath.Join(p.Clusters, filepath.FromSlash(d)), spec)
+	}
+	return p
+}
+
+// An older kind fails the tools section (and so the doctor exit code)
+// when the active domain uses the Lo driver, and when there is no active
+// domain: no name, no spec, or a spec whose driver doctor cannot read.
+// For a domain of another driver, a deploy domain included, the line is
+// a warning with the same text, and the section passes. The minimum kind
+// passes for every domain. Bash twin: "doctor::_kind fails an older kind
+// only where the domain needs it" in tests/unit/doctor_test.bats.
+func TestDoctorToolsSectionOlderKindByDomain(t *testing.T) {
 	bin := doctorStubBin(t, "argsh", "yq", "kustomize", "kubectl", "envsubst", "docker", "jq", "kind")
+	p := doctorKindDomains(t)
+	const line = "kind v0.17.0 — local clusters (Lo driver); lo up needs kind v0.18.0 or later for networking.dnsSearch (fix: b update kind)\n"
 	for _, tc := range []struct {
-		out string
-		ok  bool
+		d    string
+		ok   bool
+		mark string
 	}{
-		{"kind v0.17.0 go1.19.4 linux/amd64\n", false},
-		{"kind v0.18.0 go1.20.2 linux/amd64\n", true},
+		{"lo.dev", false, "✗"},
+		{"", false, "✗"},
+		{"missing.dev", false, "✗"},
+		{"nokind.dev", false, "✗"},
+		{"badkind.dev", false, "✗"},
+		{"metal.dev", true, "!"},
+		{"app.dev", true, "!"},
 	} {
 		var out strings.Builder
-		if got := doctorToolsSection(context.Background(), kindVersionRunner(tc.out, nil), bin, &out); got != tc.ok {
-			t.Errorf("kind version %q: section ok=%v, want %v:\n%s", tc.out, got, tc.ok, out.String())
+		got := doctorToolsSection(context.Background(), kindVersionRunner("kind v0.17.0 go1.19.4 linux/amd64\n", nil), p, tc.d, bin, &out)
+		if got != tc.ok || !strings.Contains(out.String(), "\n  "+tc.mark+" "+line) {
+			t.Errorf("domain %q, an older kind: section ok=%v, want %v and the line %q:\n%s", tc.d, got, tc.ok, tc.mark+" "+line, out.String())
+		}
+		out.Reset()
+		got = doctorToolsSection(context.Background(), kindVersionRunner("kind v0.18.0 go1.20.2 linux/amd64\n", nil), p, tc.d, bin, &out)
+		if !got || !strings.Contains(out.String(), "\n  ✓ kind — local clusters (Lo driver)\n") {
+			t.Errorf("domain %q, the minimum kind: section ok=%v, want true:\n%s", tc.d, got, out.String())
+		}
+	}
+}
+
+// `lo doctor --domain` gives the active domain to the kind line: an older
+// kind on PATH is a failure for a domain of the Lo driver and a warning
+// for a KubeOne domain. PATH holds only stubs: bash (it prints its
+// version), every required tool and kind. So the exit code comes from the
+// kind line alone, and the minimum kind passes for the Lo domain. Bash
+// twin: "lo doctor reads the active domain for the kind line".
+func TestDoctorKindLineReadsTheActiveDomain(t *testing.T) {
+	p := doctorKindDomains(t)
+	bin := doctorStubBin(t, "argsh", "yq", "kustomize", "kubectl", "envsubst", "docker", "jq")
+	stub := func(name, body string) {
+		testutil.WriteFile(t, filepath.Join(bin, name), "#!/bin/sh\n"+body+"\n")
+		if err := os.Chmod(filepath.Join(bin, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stub("bash", "echo 5.2")
+	t.Setenv("PATH", bin)
+	const line = "kind v0.17.0 — local clusters (Lo driver); lo up needs kind v0.18.0 or later for networking.dnsSearch (fix: b update kind)\n"
+	for _, tc := range []struct {
+		d, release, want string
+		ok               bool
+	}{
+		{"lo.dev", "v0.17.0", "✗ " + line, false},
+		{"metal.dev", "v0.17.0", "! " + line, true},
+		{"lo.dev", "v0.18.0", "✓ kind — local clusters (Lo driver)\n", true},
+	} {
+		stub("kind", "echo 'kind "+tc.release+" go1.19.4 linux/amd64'")
+		stdout, _, err := runLo(t, NewRoot(p), "doctor", "--domain", tc.d)
+		if (err == nil) != tc.ok || !strings.Contains(stdout, "\n  "+tc.want) {
+			t.Errorf("doctor --domain %s, kind %s: err=%v, want ok=%v and the line %q in:\n%s", tc.d, tc.release, err, tc.ok, tc.want, stdout)
+		}
+		if strings.Contains(stdout, "MISSING (required)") {
+			t.Errorf("doctor --domain %s: a required tool is missing:\n%s", tc.d, stdout)
 		}
 	}
 }

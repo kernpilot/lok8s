@@ -59,7 +59,7 @@ main::doctor() {
   # jq is REQUIRED: template::envsubst's native path (any non-GNU envsubst,
   # e.g. b's renvsubst alias) substitutes via jq.
   doctor::_tool jq         1 "JSON processor (restricted substitution)"       || fail=1
-  doctor::_kind             "local clusters (Lo driver)"               || fail=1
+  doctor::_kind "${domain}" "local clusters (Lo driver)"               || fail=1
   doctor::_tool tilt       0 "dev loop (Lo driver)"
   doctor::_tool mkcert     0 "local TLS (Lo driver)"
   doctor::_tool sops       0 "secret encryption"
@@ -1587,27 +1587,62 @@ doctor::_tool() {
   return 0
 }
 
-# doctor::_kind <purpose> — the kind line of the tools section (Go:
+# doctor::_kind_fails <domain> — status 0 when an older kind is a failure
+# for the active domain (Go: kindFails). It is when the domain uses the Lo
+# driver (lo up runs kind for it), and when there is no active domain: the
+# name is empty, or domain::driver cannot read the driver of the domain (no
+# cluster.lok8s.yaml and no deploy.lok8s.yaml, or a spec without a kind or
+# with a malformed one). For a domain of another driver, a deploy domain
+# included, an older kind is a warning. domain::driver reads a
+# cluster.lok8s.yaml with yq (the Go twin needs no yq). As the other yq
+# readers of doctor do, the check looks for yq first: when the domain has a
+# cluster.lok8s.yaml and there is no yq, the driver is not read (status 2,
+# doctor::_kind prints a warning and says why). There the twins can differ:
+# Go reads the driver and fails an older kind for a domain of the Lo driver.
+# The doctor exit code is 1 in both, because yq is required.
+doctor::_kind_fails() {
+  local drv clusters="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}"
+  [[ -n "${1}" ]] || return 0
+  if [[ -f "${clusters}/${1}/cluster.lok8s.yaml" ]] && ! command -v yq >/dev/null 2>&1; then
+    return 2
+  fi
+  drv=$(domain::driver "${1}" 2>/dev/null) || return 0
+  [[ "${drv}" == lo ]]
+}
+
+# doctor::_kind <domain> <purpose> — the kind line of the tools section (Go:
 # doctorKind). kind is optional: when it is absent, the line is a warning.
-# When it is present, it must be DOCTOR_KIND_MIN or later: an older kind is
-# a failure (returns 1). Only major.minor.patch counts, so a pre-release of
-# a later release passes. A failed `kind version`, or an output without the
-# version field, is a warning. `kind version` prints
+# When it is present, it must be DOCTOR_KIND_MIN or later. An older kind is
+# a failure (returns 1) for the domain of doctor::_kind_fails, else a
+# warning with the same text. When doctor::_kind_fails cannot read the
+# driver because yq is not there, a second warning line says so. Only
+# major.minor.patch counts, so a
+# pre-release of a later release passes. A failed `kind version`, or an
+# output without the version field, is a warning. `kind version` prints
 # "kind v0.32.0 go1.25.5 linux/amd64": the fields of the first line are
 # split at spaces and tabs, the first field must be "kind", and the second
 # starts with vX.Y.Z, then a "-", a "+" or the end. A number has 9 digits at
 # most, so shell arithmetic compares it as Go does. The line names only the
 # matched numbers, no other byte of the output.
 doctor::_kind() {
-  local purpose="${1}"
-  if ! command -v kind >/dev/null 2>&1; then
+  local domain="${1}" purpose="${2}" kind=""
+  # The first kind on PATH that can run. For plain files (a file of this
+  # user, on a mount that allows exec), this is the kind that the Go twin
+  # finds (toolchain.LookPath). When no kind on PATH can run, command -v
+  # prints a file without the exec bit: that kind is not found here either.
+  # The twins differ for other files: -x asks access(2), and Go reads only
+  # the mode bits. For a file that only another user can run, or a file on
+  # a noexec mount, bash prints "not found", and Go finds the file, cannot
+  # run it and prints "version unknown". Both lines are warnings.
+  kind=$(command -v kind 2>/dev/null) || kind=""
+  if [[ -z "${kind}" || -d "${kind}" || ! -x "${kind}" ]]; then
     doctor::_warn "kind not found (optional) — ${purpose}"
     return 0
   fi
   local need="lo up needs kind ${DOCTOR_KIND_MIN} or later for networking.dnsSearch"
   local re='^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})([-+]|$)'
   local out="" known=1
-  out="$(kind version 2>/dev/null </dev/null)" || known=0
+  out="$("${kind}" version 2>/dev/null </dev/null)" || known=0
   local -a f=()
   IFS=$' \t' read -r -a f <<< "${out%%$'\n'*}"
   if (( ! known )) || [[ "${f[0]:-}" != kind ]] || ! [[ "${f[1]:-}" =~ ${re} ]]; then
@@ -1623,7 +1658,14 @@ doctor::_kind() {
       break
     fi
     if (( 10#${got[i]} < 10#${want[i]} )); then
-      doctor::_bad "kind v${got[0]}.${got[1]}.${got[2]} — ${purpose}; ${need} (fix: b update kind)"
+      local msg="kind v${got[0]}.${got[1]}.${got[2]} — ${purpose}; ${need} (fix: b update kind)" rc=0
+      doctor::_kind_fails "${domain}" || rc=$?
+      if (( rc )); then
+        doctor::_warn "${msg}"
+        (( rc != 2 )) || doctor::_warn "kind: the driver of ${domain} not checked: yq not found"
+        return 0
+      fi
+      doctor::_bad "${msg}"
       return 1
     fi
   done

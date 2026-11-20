@@ -196,3 +196,37 @@ func TestDoctorFlagsAnOlderB(t *testing.T) {
 		})
 	}
 }
+
+// OlderRelease names no tool in its errors: lo doctor uses it for kind
+// too. A got that is not a version wraps errNotRelease, which the b check
+// turns into its own words (TestDoctorFlagsAnOlderB); a pin that is not
+// a version does not.
+func TestOlderReleaseErrorsNameNoTool(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		got, want, msg string
+		notRelease     bool
+	}{
+		{"dev", "0.18.0", `"dev" is not a version`, true},
+		{"", "0.18.0", `"" is not a version`, true},
+		{"0.18.0", "pin", `the pin "pin" is not a version`, false},
+	} {
+		older, err := OlderRelease(c.got, c.want)
+		if older || err == nil || err.Error() != c.msg || errors.Is(err, errNotRelease) != c.notRelease {
+			t.Errorf("OlderRelease(%q, %q) = %v, %v; want false, %q (errNotRelease %v)", c.got, c.want, older, err, c.msg, c.notRelease)
+		}
+	}
+	for _, c := range []struct {
+		got, want string
+		older     bool
+	}{
+		{"0.17.0", "0.18.0", true},
+		{"v0.18.0", "v0.18.0", false},
+		{"0.18.0-rc.1", "0.18.0", false},
+		{"1.0.0", "0.18.0", false},
+	} {
+		if older, err := OlderRelease(c.got, c.want); err != nil || older != c.older {
+			t.Errorf("OlderRelease(%q, %q) = %v, %v; want %v, nil", c.got, c.want, older, err, c.older)
+		}
+	}
+}
