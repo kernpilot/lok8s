@@ -394,7 +394,7 @@ kubehz::deploy_apply() {
     # 1. The marker first. From the CronJob's next tick on it bootstraps and
     #    enrolls but does not beat, so the beat is unowned rather than
     #    contested while we start the live agent.
-    kubectl apply -k "${workdir}/agent" || {
+    KUBERC=off kubectl apply -k "${workdir}/agent" || {
       error "kubehz: could not apply the CronJob agent (identity bootstrap) — ${changed}"
       return 1
     }
@@ -409,7 +409,7 @@ kubehz::deploy_apply() {
     #     the time. Run the bootstrap now and wait for its Job to complete.
     kubehz::ensure_identity_secret || return 1
     # 3. Now the live agent, which becomes the only producer.
-    kubectl apply -k "${overlay}" || {
+    KUBERC=off kubectl apply -k "${overlay}" || {
       error "kubehz: could not apply the live agent. The CronJob is no longer beating (KUBEHZ_HEARTBEAT_OWNER=operator), so this cluster is reporting NOTHING until you retry or set spec.kubehz.agent back to cronjob and re-run."
       return 1
     }
@@ -457,7 +457,7 @@ kubehz::deploy_apply() {
   # background and the Go agent beats until its process exits. Wait it out
   # before the CronJob is allowed to beat again.
   kubehz::wait_live_agent_gone || return 1
-  kubectl apply -k "${workdir}/agent" || {
+  KUBERC=off kubectl apply -k "${workdir}/agent" || {
     error "kubehz: could not apply the CronJob agent. The live agent is gone and the marker was not rewritten, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy'."
     return 1
   }
@@ -599,10 +599,10 @@ kubehz::stage_bind_secret() {
 # Usage: kubehz::apply_bind_secret <workdir> <path>
 kubehz::apply_bind_secret() {
   local workdir="${1}" path="${2}" manifest
-  kubectl apply -f "${workdir}/agent/namespace.yaml" || return 1
+  KUBERC=off kubectl apply -f "${workdir}/agent/namespace.yaml" || return 1
   manifest=$(kubectl -n kubehz-system create secret generic kubehz-agent-bind \
     --from-file=bind-secret="${path}" --dry-run=client -o yaml) || return 1
-  printf '%s\n' "${manifest}" | kubectl apply --server-side --force-conflicts -f -
+  printf '%s\n' "${manifest}" | KUBERC=off kubectl apply --server-side --force-conflicts -f -
 }
 
 # The read of the identity Secret prints the word agent-token when the Secret

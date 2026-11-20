@@ -571,7 +571,7 @@ and tables on a terminal are the binary's presentation
 
 | # | Deviation | Where |
 |---|---|---|
-| D13 | **Progress UI on a terminal is the final state, not a live spinner.** The bash tty path streams a spinner and a 3-line scrolling window to `/dev/tty`; the binary renders the identical *final* summary / surfaced errors after the phase. Off a terminal (CI, Tilt logs, `LOK8S_NONINTERACTIVE`, `DEBUG`) the output is byte-identical. | `internal/kapply` |
+| D13 | **Progress UI on a terminal is the final state, not a live spinner.** The bash tty path redraws one spinner line with the count of objects in place on `/dev/tty` (no kubectl line: the apply output stays private); the binary renders the identical *final* summary and the fixed error line after the phase. Off a terminal (CI, Tilt logs, `LOK8S_NONINTERACTIVE`, `DEBUG`) the output is byte-identical. | `internal/kapply` |
 | D14 | **YAML edits re-serialize with yaml.v3 formatting.** The CAPI placement-group and KubeOne value edits keep the merged *content* as the contract; edited documents come out with 2-space indentation (comments preserved), untouched documents pass through byte-identical. yq's 4-space sequence indent is not reproduced. | `internal/driver/capi/pg.go`, kubeone `yamledit` |
 | D15 | **`lo image cache` / `list` do not rewrite `.registries.json`.** The bash sourced the whole Lo driver, which regenerated the file as a side effect; the binary computes the same values from the spec without the rewrite. | `internal/image/image.go` |
 | D16 | **SOPS output is not byte-compared.** Encryption is nondeterministic; cross-tool decrypt is the contract. | `internal/secrets/sops.go`, `hack/parity-build.sh` |

@@ -14,17 +14,36 @@ setup() {
   source "${_PROJECT_ROOT}/.lok8s/utils/kapply.sh"
 
   export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
-  unset LOK8S_FORCE_RECREATE APPLY_OUT GET_OUT KAPPLY_TTY
+  # KENV: one line per kubectl call, the verb and the KUBERC it ran with.
+  export KENV="${BATS_TEST_TMPDIR}/kubectl.env"; : > "${KENV}"
+  unset LOK8S_FORCE_RECREATE APPLY_OUT APPLY_ERR GET_OUT KAPPLY_TTY KAPPLY_PRIVATE_LOG KAPPLY_PRIVATE_DIR _KAPPLY_PRIVATE_MADE LO_SHOW_SENSITIVE_OUTPUT KUBERC DEBUG
   export APPLY_RC=0
 
-  # Stub kubectl: log every call; drive `apply` via APPLY_OUT/APPLY_RC and
-  # `get` via GET_OUT; replace/patch just succeed. Exported so kapply's
-  # command-substitution / pipeline subshells see it.
+  # Stub kubectl: log every call; drive `apply` via APPLY_OUT (stdout),
+  # APPLY_ERR (stderr) and APPLY_RC, and `get` via GET_OUT; replace/patch
+  # just succeed. Exported so kapply's command-substitution / pipeline
+  # subshells see it.
   kubectl() {
     echo "kubectl $*" >> "${KLOG}"
-    local cmd="$1"; [[ "$1" == "--kubeconfig" ]] && cmd="$3"
+    # The verb is the first argument after the global flags of the caller
+    # (--kubeconfig <path>, --server <url>, --server=<url>). A replace adds
+    # its next argument (--force, --raw) to the KENV line.
+    local -a rest=("$@")
+    while (( ${#rest[@]} )); do
+      case "${rest[0]}" in
+        --kubeconfig|--server) rest=("${rest[@]:2}") ;;
+        --server=*)            rest=("${rest[@]:1}") ;;
+        *)                     break ;;
+      esac
+    done
+    local cmd="${rest[0]-}" verb="${rest[0]-}"
+    [[ "${cmd}" != "replace" ]] || verb="replace ${rest[1]-}"
+    echo "${verb} KUBERC=${KUBERC-<unset>}" >> "${KENV}"
     case "${cmd}" in
-      apply) [[ -n "${APPLY_OUT:-}" ]] && echo "${APPLY_OUT}"; return "${APPLY_RC:-0}" ;;
+      apply)
+        [[ -z "${APPLY_OUT:-}" ]] || echo "${APPLY_OUT}"
+        [[ -z "${APPLY_ERR:-}" ]] || echo "${APPLY_ERR}" >&2
+        return "${APPLY_RC:-0}" ;;
       get)   echo "${GET_OUT:-}"; return 0 ;;
       *)     return 0 ;;
     esac
@@ -101,6 +120,41 @@ _kapply() { printf '%s' "$1" | kapply::apply; }       # pipe manifest → kapply
   # healed → re-applied: two apply calls total
   run bash -c "grep -c 'apply --server-side' '${KLOG}'"
   assert_output 2
+}
+
+# The kind and the name of an immutable-field error come from kubectl's error
+# text, which an admission webhook can write. The heal acts only on manifest
+# objects and prints them from the manifest values, escaped.
+@test "heal: a name in the error that is in no manifest object is not healed, and no part of it prints" {
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1
+  export APPLY_OUT="Error from server (Invalid): Deployment.apps \"${CANARY_VALUE}\" is invalid: spec.selector: field is immutable
+Error from server (Invalid): Deployment.apps \"web\" is invalid: spec.selector: field is immutable"
+  run _kapply "${DEPLOY_MANIFEST}"
+  refute_output --partial "${CANARY_VALUE}"
+  assert_line '[warn] kapply: an immutable-field error named no object of this manifest'
+  assert_output --partial 'recreating immutable Deployment/web'
+  run grep -c 'replace --force' "${KLOG}"
+  assert_output 1
+}
+
+@test "heal: the object line comes from the manifest, with its control bytes escaped" {
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1
+  export APPLY_OUT=$'Error from server (Invalid): Deployment.apps "we\eb" is invalid: spec.selector: field is immutable'
+  local m='apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: "we\eb"
+  namespace: default'
+  run _kapply "${m}"
+  assert_output --partial 'recreating immutable Deployment/we\x1bb'
+  refute_output --partial $'\e'
+  grep -q 'replace --force' "${KLOG}"
+}
+
+@test "escape: a control byte prints as \\xNN, a backslash as \\\\, other bytes unchanged" {
+  run kapply::escape $'we\eb a\\b tab\there nl\n del\x7f \xc3\xa9'
+  assert_success
+  assert_output 'we\x1bb a\\b tab\x09here nl\x0a del\x7f é'
 }
 
 @test "sealed Secret WITH --force-recreate: recreates, but with a pointed RE-KEY warning" {
@@ -206,21 +260,20 @@ data: {}'
   refute_output --partial 'finalize'      # the destructive API call never happened
 }
 
-@test "progress: named rolling window collapses to a phase summary" {
+@test "progress: one in-place line with the count collapses to a phase summary" {
   # KAPPLY_TTY redirects the live UI to a file so we can assert on the render.
   export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"; : > "${KAPPLY_TTY}"
   local pass
   pass=$(printf 'configmap/a serverside-applied\nsecret/b serverside-applied\nservice/c serverside-applied\nrole/d serverside-applied\n' | kapply::_progress "cilium")
   # full output still passes through (for capture/logs)
   [[ "${pass}" == *"role/d serverside-applied"* ]]
-  # the UI rendered a header named after the phase, used in-place cursor-up
-  # redraws, and collapsed to a single "<phase> · N applied" summary.
-  grep -q 'cilium' "${KAPPLY_TTY}"
-  grep -qE $'\033\\[[0-9]+A' "${KAPPLY_TTY}"
+  # the UI redrew one line in place (the phase and the count so far) and
+  # collapsed to a single "<phase> · N resources" summary. It draws no
+  # kubectl line and moves no cursor up.
+  grep -q 'cilium · 3' "${KAPPLY_TTY}"
   grep -q 'cilium · 4 resources' "${KAPPLY_TTY}"
-  # window never exceeds 3 lines: the last redraw frame must not show line "a"
-  local last_frame; last_frame=$(awk 'BEGIN{RS="\033\\[[0-9]+A"} END{print}' "${KAPPLY_TTY}")
-  [[ "${last_frame}" != *"configmap/a"* ]]
+  run grep -cE $'\033\\[[0-9]+A|serverside-applied' "${KAPPLY_TTY}"
+  assert_output 0
 }
 
 @test "progress: summary is singular for a single resource" {
@@ -311,6 +364,334 @@ metadata: {name: cfg, namespace: default}'
   run cat "${KLOG}"
   refute_output --partial 'replace --force'
   refute_output --partial 'patch'
+}
+
+# ── the kubectl output stays private ─────────────────────────────────────────
+# CANARY_VALUE stands for a value of the manifest that kubectl quotes in its
+# output (a field error prints "Invalid value: <value>"). It is a made-up
+# string. lo prints fixed lines; the kubectl text prints only under
+# LO_SHOW_SENSITIVE_OUTPUT=1.
+
+CANARY_VALUE=zq7Canary9xLm2
+CFG_MANIFEST='apiVersion: v1
+kind: ConfigMap
+metadata: {name: cfg, namespace: default}'
+
+_fixed_fail_line() {
+  printf '[error] kapply: kubectl apply failed for %s (rc=%s). lo does not show the kubectl output: it can quote a value of the manifest. To see it, run again with LO_SHOW_SENSITIVE_OUTPUT=1' "$1" "$2"
+}
+
+@test "private: each apply pass runs kubectl with the user defaults off (KUBERC=off)" {
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1
+  export APPLY_OUT='Error from server (Invalid): Deployment.apps "web" is invalid: spec.selector: field is immutable'
+  run _kapply "${DEPLOY_MANIFEST}"
+  # the first pass and the pass after the heal
+  run grep -c '^apply ' "${KENV}"
+  assert_output 2
+  run grep -c '^apply KUBERC=off$' "${KENV}"
+  assert_output 2
+}
+
+# An immutable-field error and a 403 of a terminating namespace in one pass:
+# the heal replaces the Deployment and finalizes the namespace.
+BOTH_HEALS_OUT='Error from server (Invalid): Deployment.apps "web" is invalid: spec.selector: field is immutable
+Error from server (Forbidden): configmaps "ca-bundle" is forbidden: unable to create new content in namespace kubermatic because it is being terminated'
+
+_kapply_flags() { local m="$1"; shift; printf '%s' "${m}" | kapply::apply "$@"; }
+
+@test "kuberc: the replace of the immutable heal and of the namespace finalize run with KUBERC=off" {
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1 KAPPLY_NS_WAIT=0 GET_OUT='2026-01-01T00:00:00Z'
+  export APPLY_OUT="${BOTH_HEALS_OUT}"
+  run _kapply "${DEPLOY_MANIFEST}"
+  run grep -c '^replace --force KUBERC=off$' "${KENV}"
+  assert_output 1
+  run grep -c '^replace --raw KUBERC=off$' "${KENV}"
+  assert_output 1
+  # the reads keep the environment of lo
+  run grep -c '^get KUBERC=<unset>$' "${KENV}"
+  refute_output 0
+}
+
+@test "kuberc: a --server <url> flag in front of the verb keeps KUBERC=off on each write" {
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1 KAPPLY_NS_WAIT=0 GET_OUT='2026-01-01T00:00:00Z'
+  export APPLY_OUT="${BOTH_HEALS_OUT}"
+  local flags
+  for flags in '--server https://203.0.113.1:6443' '--server=https://203.0.113.1:6443'; do
+    : > "${KLOG}"; : > "${KENV}"
+    # shellcheck disable=SC2086 # the flags split into words on purpose
+    run _kapply_flags "${DEPLOY_MANIFEST}" ${flags}
+    [ "$(grep -c '^apply KUBERC=off$' "${KENV}")" -eq 2 ] || { cat "${KENV}"; return 1; }
+    [ "$(grep -c '^replace --force KUBERC=off$' "${KENV}")" -eq 1 ] || { cat "${KENV}"; return 1; }
+    [ "$(grep -c '^replace --raw KUBERC=off$' "${KENV}")" -eq 1 ] || { cat "${KENV}"; return 1; }
+    grep -qF "kubectl ${flags} replace --force -f -" "${KLOG}" || { cat "${KLOG}"; return 1; }
+  done
+}
+
+# The kubectl of PATH (kubectl_path_stub) is a child process: its log holds
+# the KUBERC that lo gave it, with a KUBERC of the user set. The two apply
+# passes, the replace of the immutable heal and the replace of the namespace
+# finalize read stdin and run with KUBERC=off; the reads keep the KUBERC of
+# the user. The Go twin is TestApplyChildrenGetKubeRCOffOnEachWrite.
+@test "kuberc: a kubectl on PATH runs the apply, the heal's replace and the finalize with KUBERC=off" {
+  kubectl_path_stub
+  export KUBERC=/user/kuberc LOK8S_FORCE_RECREATE=1 KAPPLY_NS_WAIT=0 APPLY_OUT="${BOTH_HEALS_OUT}"
+  export FIRST_APPLY="${BATS_TEST_TMPDIR}/first-apply"
+  kubectl_path_answer() {
+    [[ " $* " != *" -f - "* ]] || cat >/dev/null
+    case "${1}" in
+      apply)
+        [[ ! -e "${FIRST_APPLY}" ]] || return 0
+        : > "${FIRST_APPLY}"
+        printf '%s\n' "${APPLY_OUT}" >&2
+        return 1 ;;
+      get) echo '2026-01-01T00:00:00Z' ;;
+    esac
+    return 0
+  }
+  export -f kubectl_path_answer
+  run _kapply "${DEPLOY_MANIFEST}"
+  assert_success
+  local log="${KUBECTL_PATH_LOG}"
+  [ "$(grep -c $'^KUBERC=off\tapply --server-side --force-conflicts -f -$' "${log}")" -eq 2 ] || { cat "${log}"; return 1; }
+  [ "$(grep -c $'^KUBERC=off\treplace --force -f -$' "${log}")" -eq 1 ] || { cat "${log}"; return 1; }
+  [ "$(grep -c $'^KUBERC=off\treplace --raw /api/v1/namespaces/kubermatic/finalize -f -$' "${log}")" -eq 1 ] || { cat "${log}"; return 1; }
+  [ "$(grep -c $'^KUBERC=/user/kuberc\tget ' "${log}")" -ge 1 ] || { cat "${log}"; return 1; }
+  [ "$(kubectl_path_file_calls | grep -c .)" -eq 4 ] || { cat "${log}"; return 1; }
+  [ -z "$(kubectl_path_file_calls | grep -v $'^KUBERC=off\t')" ] || { cat "${log}"; return 1; }
+}
+
+# STDERR_CANARY stands for a value that kubectl quotes on its stderr (an
+# error or a warning), apart from CANARY_VALUE on its stdout: a pass that
+# keeps the stdout private but lets the stderr through to the terminal
+# prints it. The Go twin is TestApplyStderrStaysPrivate.
+STDERR_CANARY=zq7StderrCanary4kWp
+
+@test "private: the kubectl stderr stays private too, off and on a tty, each level" {
+  export APPLY_RC=1
+  export APPLY_OUT="configmap/a serverside-applied
+The ConfigMap \"cfg\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\""
+  export APPLY_ERR="Warning: the value \"${STDERR_CANARY}\" of ConfigMap cfg is deprecated"
+  local level tty
+  for tty in "" "${BATS_TEST_TMPDIR}/ui.txt"; do
+    for level in "" 1; do
+      unset KAPPLY_TTY
+      if [[ -n "${tty}" ]]; then
+        export KAPPLY_TTY="${tty}"
+        : > "${tty}"
+      fi
+      DEBUG="${level}" run _kapply "${CFG_MANIFEST}"
+      assert_failure
+      refute_output --partial "${STDERR_CANARY}"
+      refute_output --partial "${CANARY_VALUE}"
+      assert_line "$(_fixed_fail_line resources 1)"
+      if [[ -n "${tty}" ]]; then
+        run grep -c "${STDERR_CANARY}" "${tty}"
+        assert_output 0
+      fi
+    done
+  done
+  # The private file of the scheduler gets the stderr with the stdout.
+  unset KAPPLY_TTY
+  _private_dir
+  run _kapply "${CFG_MANIFEST}"
+  refute_output --partial "${STDERR_CANARY}"
+  grep -qF "${STDERR_CANARY}" "${KAPPLY_PRIVATE_LOG}"
+}
+
+@test "private: a failed pass prints the fixed line, never the kubectl output (off a tty, each level)" {
+  export APPLY_RC=1
+  export APPLY_OUT="The ConfigMap \"cfg\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\""
+  local level
+  for level in "" 1; do
+    DEBUG="${level}" run _kapply "${CFG_MANIFEST}"
+    assert_failure
+    refute_output --partial "${CANARY_VALUE}"
+    assert_line "$(_fixed_fail_line resources 1)"
+  done
+  assert_line '[debug] kapply: kubectl apply for resources exited 1 (0 resources)'
+}
+
+@test "private: the pass after a heal prints the fixed line too, never the kubectl output" {
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1
+  export APPLY_OUT="Error from server (Invalid): Deployment.apps \"web\" is invalid: spec.selector: Invalid value: \"${CANARY_VALUE}\": field is immutable"
+  local level fixed
+  fixed="$(_fixed_fail_line resources 1)"
+  for level in "" 1; do
+    DEBUG="${level}" run _kapply "${DEPLOY_MANIFEST}"
+    assert_failure
+    refute_output --partial "${CANARY_VALUE}"
+    assert_output --partial 'healing blocked objects, then re-applying once'
+    [[ "$(grep -cxF "${fixed}" <<<"${output}")" -eq 2 ]]
+  done
+}
+
+@test "private: on a tty a failed pass prints the fixed line, never the kubectl output" {
+  export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"
+  export APPLY_RC=1
+  export APPLY_OUT="configmap/a serverside-applied
+The ConfigMap \"cfg\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\""
+  local level
+  for level in "" 1; do
+    : > "${KAPPLY_TTY}"
+    DEBUG="${level}" run _kapply "${CFG_MANIFEST}"
+    assert_failure
+    refute_output --partial "${CANARY_VALUE}"
+    assert_line "$(_fixed_fail_line resources 1)"
+    grep -q 'resources · 1 resource' "${KAPPLY_TTY}"
+    run grep -c "${CANARY_VALUE}" "${KAPPLY_TTY}"
+    assert_output 0
+  done
+}
+
+@test "private: a clean pass prints the summary line, never the kubectl output" {
+  export APPLY_OUT="configmap/cfg serverside-applied
+Warning: unknown field \"data.${CANARY_VALUE}\""
+  local level
+  for level in "" 1; do
+    DEBUG="${level}" run _kapply "${CFG_MANIFEST}"
+    assert_success
+    refute_output --partial "${CANARY_VALUE}"
+    assert_line '✓ resources · 1 resource'
+  done
+  assert_line '[debug] kapply: kubectl apply for resources exited 0 (1 resources)'
+}
+
+# _private_dir: a 0700 dir like the one of the bootstrap scheduler, with
+# KAPPLY_PRIVATE_DIR and KAPPLY_PRIVATE_LOG set in this shell, not exported
+# (the launch site of libs/bootstrap).
+_private_dir() {
+  KAPPLY_PRIVATE_DIR="$(mktemp -d "${BATS_TEST_TMPDIR}/sched.XXXXXX")"
+  KAPPLY_PRIVATE_LOG="${KAPPLY_PRIVATE_DIR}/1.priv"
+  export -n KAPPLY_PRIVATE_DIR KAPPLY_PRIVATE_LOG
+}
+
+PRIVATE_REFUSED='[warn] kapply: the private output file is not safe to write (lo did not set it, or it is a link, a file that was there before or a file open to others): lo does not write the kubectl output to it'
+
+# _assert_private_refused: the pass printed the fixed refusal line and the
+# fixed failure line, never the kubectl output.
+_assert_private_refused() {
+  assert_failure
+  assert_line "${PRIVATE_REFUSED}"
+  assert_line "$(_fixed_fail_line resources 1)"
+  refute_output --partial "${CANARY_VALUE}"
+}
+
+@test "private: the scheduler's private file gets the kubectl output (made fresh, 0600), the pass prints no summary" {
+  _private_dir
+  export APPLY_RC=1
+  export APPLY_OUT="configmap/cfg serverside-applied
+Invalid value: \"${CANARY_VALUE}\""
+  run _kapply "${CFG_MANIFEST}"
+  assert_failure
+  refute_output --partial "${CANARY_VALUE}"
+  refute_output --partial '✓ resources'
+  refute_output --partial 'not safe to write'
+  assert_line "$(_fixed_fail_line resources 1)"
+  grep -qF "Invalid value: \"${CANARY_VALUE}\"" "${KAPPLY_PRIVATE_LOG}"
+  [[ -f "${KAPPLY_PRIVATE_LOG}" && ! -L "${KAPPLY_PRIVATE_LOG}" ]]
+  [ "$(find "${KAPPLY_PRIVATE_LOG}" -prune -perm 0600 -print)" = "${KAPPLY_PRIVATE_LOG}" ]
+}
+
+@test "private: the pass after a heal appends to the file that kapply made" {
+  _private_dir
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1
+  export APPLY_OUT="Error from server (Invalid): Deployment.apps \"web\" is invalid: spec.selector: Invalid value: \"${CANARY_VALUE}\": field is immutable"
+  run _kapply "${DEPLOY_MANIFEST}"
+  refute_output --partial 'not safe to write'
+  refute_output --partial "${CANARY_VALUE}"
+  [ "$(grep -c "${CANARY_VALUE}" "${KAPPLY_PRIVATE_LOG}")" -eq 2 ]
+}
+
+@test "private: a symlink at the private path is refused, nothing is written through it" {
+  _private_dir
+  local target="${BATS_TEST_TMPDIR}/elsewhere.log"; : > "${target}"
+  ln -s "${target}" "${KAPPLY_PRIVATE_LOG}"
+  export APPLY_RC=1 APPLY_OUT="Invalid value: \"${CANARY_VALUE}\""
+  run _kapply "${CFG_MANIFEST}"
+  _assert_private_refused
+  [ ! -s "${target}" ]
+}
+
+@test "private: a file that is already there and open to others is refused, nothing is written" {
+  _private_dir
+  ( umask 022; : > "${KAPPLY_PRIVATE_LOG}" )
+  chmod 0644 "${KAPPLY_PRIVATE_LOG}"
+  export APPLY_RC=1 APPLY_OUT="Invalid value: \"${CANARY_VALUE}\""
+  run _kapply "${CFG_MANIFEST}"
+  _assert_private_refused
+  [ ! -s "${KAPPLY_PRIVATE_LOG}" ]
+}
+
+@test "private: a FIFO at the private path is refused, nothing is written to it" {
+  _private_dir
+  mkfifo "${KAPPLY_PRIVATE_LOG}"
+  # Hold the FIFO open for reading and writing: a write would not block, and
+  # the read below would see it.
+  local fd line=""
+  exec {fd}<>"${KAPPLY_PRIVATE_LOG}"
+  export APPLY_RC=1 APPLY_OUT="Invalid value: \"${CANARY_VALUE}\""
+  run _kapply "${CFG_MANIFEST}"
+  read -r -t 1 -u "${fd}" line || true
+  exec {fd}<&-
+  _assert_private_refused
+  [ -z "${line}" ]
+}
+
+@test "private: a value from the environment or a dir open to others is refused, nothing is written" {
+  export APPLY_RC=1 APPLY_OUT="Invalid value: \"${CANARY_VALUE}\""
+  # exported: the value did not come from the shell code of lo
+  _private_dir
+  export KAPPLY_PRIVATE_DIR KAPPLY_PRIVATE_LOG
+  run _kapply "${CFG_MANIFEST}"
+  _assert_private_refused
+  [ ! -e "${KAPPLY_PRIVATE_LOG}" ]
+  export -n KAPPLY_PRIVATE_DIR KAPPLY_PRIVATE_LOG
+  # a dir with mode 0755
+  _private_dir
+  chmod 0755 "${KAPPLY_PRIVATE_DIR}"
+  run _kapply "${CFG_MANIFEST}"
+  _assert_private_refused
+  [ ! -e "${KAPPLY_PRIVATE_LOG}" ]
+  # a file outside the dir
+  _private_dir
+  KAPPLY_PRIVATE_LOG="${BATS_TEST_TMPDIR}/outside.priv"
+  run _kapply "${CFG_MANIFEST}"
+  _assert_private_refused
+  [ ! -e "${KAPPLY_PRIVATE_LOG}" ]
+}
+
+@test "private: LO_SHOW_SENSITIVE_OUTPUT=1 prints the kubectl output after a [warn] line" {
+  export LO_SHOW_SENSITIVE_OUTPUT=1 APPLY_RC=1
+  export APPLY_OUT="Invalid value: \"${CANARY_VALUE}\""
+  local warn_line='[warn] kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for resources, which can quote a value of the manifest'
+  # off a tty: the full output
+  run _kapply "${CFG_MANIFEST}"
+  assert_failure
+  assert_line "${warn_line}"
+  assert_output --partial "${CANARY_VALUE}"
+  refute_output --partial 'kapply: kubectl apply failed for'
+  # on a tty: the error lines (deduped)
+  export KAPPLY_TTY="${BATS_TEST_TMPDIR}/ui.txt"; : > "${KAPPLY_TTY}"
+  run _kapply "${CFG_MANIFEST}"
+  assert_failure
+  assert_line "${warn_line}"
+  assert_output --partial "${CANARY_VALUE}"
+}
+
+@test "private: only LO_SHOW_SENSITIVE_OUTPUT=1 is the opt-in" {
+  LO_SHOW_SENSITIVE_OUTPUT=1 run kapply::show_sensitive
+  assert_success
+  local v
+  for v in "" 0 true yes; do
+    LO_SHOW_SENSITIVE_OUTPUT="${v}" run kapply::show_sensitive
+    assert_failure
+  done
+}
+
+@test "counted_lines: keeps the <type>/<name> lines that end in an OK verb, nothing else" {
+  run kapply::counted_lines < <(printf 'configmap/a serverside-applied\nWarning: %s configured\n  indented/x created\nInvalid value: "%s"\nsecret/b unchanged' "${CANARY_VALUE}" "${CANARY_VALUE}")
+  assert_success
+  assert_output $'configmap/a serverside-applied\nsecret/b unchanged'
 }
 
 # ── kapply::render_captured (offline block for buffered bootstrap jobs) ───────

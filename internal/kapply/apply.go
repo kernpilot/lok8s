@@ -22,10 +22,13 @@
 // so existing retry logic (CRD-not-established, webhook-not-ready) keeps
 // working.
 //
-// Display: the same documented simplification as Run — off a terminal the
-// full kubectl output is printed (CI/Tilt logs, byte-identical to bash); on
-// a terminal the identical FINAL state is rendered (summary line / surfaced
-// errors) without the in-flight animation.
+// Display: the kubectl output stays private (private.go): it can quote a
+// value of the manifest. A pass prints a summary line and, on a failure, a
+// fixed line with the exit code — off a terminal byte-identical to bash. On
+// a terminal the summary is the FINAL state, without the in-flight spinner
+// of bash (the documented simplification of Run). LO_SHOW_SENSITIVE_OUTPUT=1
+// prints the kubectl output as before: off a terminal the whole text, on a
+// terminal the surfaced error lines.
 package kapply
 
 import (
@@ -60,10 +63,24 @@ var immutableObjRe = regexp.MustCompile(`[A-Z][A-Za-z]+(\.[a-z0-9.-]+)? "[^"]+" 
 // implementation did) or fill the fields explicitly in tests.
 type Applier struct {
 	Runner execx.Runner
-	// Stdout receives the apply output (off-tty passthrough) and summaries.
+	// Stdout receives the summary line of a pass ("✓ <label> · N
+	// resources"), and the kubectl output under ShowSensitive.
 	Stdout io.Writer
-	// Stderr receives warn/error lines and surfaced apply errors.
+	// Stderr receives the warn/error lines (the fixed line of a failed
+	// pass), and the surfaced kubectl errors under ShowSensitive.
 	Stderr io.Writer
+
+	// Private, when set, receives the kubectl output of each pass (stdout
+	// and stderr together), which lo never prints: the bootstrap scheduler
+	// reads it to park an entry on a conflict and to count its objects. With
+	// Private set, a pass prints no summary line: the scheduler prints one
+	// block per entry (bash: KAPPLY_PRIVATE_LOG).
+	Private io.Writer
+	// ShowSensitive is LO_SHOW_SENSITIVE_OUTPUT=1: print the kubectl output
+	// of each pass as lo did before it kept the output private (off a
+	// terminal the whole text, on a terminal the error lines of a failed
+	// pass), after a [warn] line.
+	ShowSensitive bool
 
 	// ForceRecreate is LOK8S_FORCE_RECREATE: heal without prompting.
 	ForceRecreate bool
@@ -88,7 +105,8 @@ type Applier struct {
 
 // NewApplier builds an Applier over the runner, reading the decision env
 // exactly like the bash implementation (LOK8S_FORCE_RECREATE,
-// LOK8S_NONINTERACTIVE, CI, KAPPLY_NS_WAIT, KAPPLY_POLL_INTERVAL).
+// LOK8S_NONINTERACTIVE, CI, KAPPLY_NS_WAIT, KAPPLY_POLL_INTERVAL,
+// LO_SHOW_SENSITIVE_OUTPUT).
 func NewApplier(r execx.Runner, stdout, stderr io.Writer) *Applier {
 	return &Applier{
 		Runner:         r,
@@ -98,6 +116,7 @@ func NewApplier(r execx.Runner, stdout, stderr io.Writer) *Applier {
 		NonInteractive: os.Getenv("LOK8S_NONINTERACTIVE") != "" || os.Getenv("CI") != "",
 		NsWait:         envInt("KAPPLY_NS_WAIT", 20),
 		PollInterval:   envInterval(),
+		ShowSensitive:  ShowSensitive(),
 	}
 }
 
@@ -139,11 +158,15 @@ func (a *Applier) pollInterval() time.Duration {
 	return time.Second
 }
 
-// kubectl runs one kubectl invocation with combined stdout+stderr captured
-// (bash: `kubectl … 2>&1`), returning the output and the exit code.
+// kubectl runs one kubectl apply with combined stdout+stderr captured
+// (bash: `kubectl … 2>&1`), returning the output and the exit code. Its
+// only caller is applyPass, so it runs with the kubectl user defaults off
+// (execx.KubeRCOff; bash: `KUBERC=off kubectl …`). The Env is set here,
+// not guessed from args: the extra flags of the caller (--server <url>)
+// come before the subcommand.
 func (a *Applier) kubectl(ctx context.Context, stdin string, args ...string) (string, int) {
 	var buf strings.Builder
-	c := execx.Cmd{Name: "kubectl", Args: args, Stdout: &buf, Stderr: &buf}
+	c := execx.Cmd{Name: "kubectl", Args: args, Env: []string{execx.KubeRCOff}, Stdout: &buf, Stderr: &buf}
 	if stdin != "" {
 		c.Stdin = strings.NewReader(stdin)
 	}
@@ -151,56 +174,99 @@ func (a *Applier) kubectl(ctx context.Context, stdin string, args ...string) (st
 	return buf.String(), execx.ExitCode(err)
 }
 
+// writeEnv is the Env of a kubectlQuiet call that writes from stdin (the
+// replace of the heal, the replace of the namespace finalize): the kubectl
+// user defaults are off (bash: `KUBERC=off kubectl …`). A read passes nil.
+var writeEnv = []string{execx.KubeRCOff}
+
 // kubectlQuiet runs kubectl with all output discarded (bash: &>/dev/null).
-func (a *Applier) kubectlQuiet(ctx context.Context, stdin string, args ...string) int {
-	c := execx.Cmd{Name: "kubectl", Args: args, Stdout: io.Discard, Stderr: io.Discard}
+// env is the Env of the child: writeEnv for a write from stdin, nil for a
+// read (each caller says which).
+func (a *Applier) kubectlQuiet(ctx context.Context, env []string, stdin string, args ...string) int {
+	c := execx.Cmd{Name: "kubectl", Args: args, Env: env, Stdout: io.Discard, Stderr: io.Discard}
 	if stdin != "" {
 		c.Stdin = strings.NewReader(stdin)
 	}
 	return execx.ExitCode(a.Runner.Run(ctx, c))
 }
 
-// applyPass is one server-side apply (bash: kapply::_apply_pass): collapse
-// the output on a tty (full off-tty), surface ONLY error lines on failure,
-// and return (raw output, kubectl's exit). Used for BOTH the initial apply
-// and the post-heal re-apply, so the re-apply renders the same named
-// progress block.
+// applyPass is one server-side apply (bash: kapply::_apply_pass). kubectl
+// writes its stdout and stderr into one private buffer, which lo never
+// prints: the output can quote a value of the manifest. The pass returns
+// (the kubectl output, kubectl's exit) for the classification of the
+// caller (conflict, race), copies the output to Private, and prints fixed
+// lines: a [debug] line with the exit code and the count, the summary
+// "✓ <label> · N resources" (not with Private), and on a failure the line
+// of ApplyFailedText. Used for BOTH the initial apply and the post-heal
+// re-apply, so the re-apply prints the same lines. Under ShowSensitive the
+// pass prints the kubectl output as before: off a terminal the whole text,
+// on a terminal the summary and the error lines of a failed pass.
 func (a *Applier) applyPass(ctx context.Context, label, manifest string, kubectlFlags []string) (string, int) {
 	args := append(append([]string{}, kubectlFlags...),
 		"apply", "--server-side", "--force-conflicts", "-f", "-")
 	out, rc := a.kubectl(ctx, manifest, args...)
-
-	if !ttyUI() {
-		// bash: out=$(kubectl … 2>&1); printf '%s\n' "${out}" — the command
-		// substitution strips trailing newlines, so exactly ONE follows.
-		fmt.Fprintf(a.Stdout, "%s\n", strings.TrimRight(out, "\n"))
-		return out, rc
+	if a.Private != nil && out != "" {
+		_, _ = io.WriteString(a.Private, strings.TrimRight(out, "\n")+"\n")
 	}
-	// tty: render the FINAL collapsed state (documented simplification — no
-	// in-flight spinner; the summary/aggregated errors match bash's end state).
-	lines := splitLines(out)
+
 	okCount := 0
 	var rest []string
-	for _, l := range lines {
+	for _, l := range splitLines(out) {
 		if OKRe.MatchString(l) {
 			okCount++
 		} else if l != "" {
 			rest = append(rest, l)
 		}
 	}
-	if okCount > 0 {
-		noun := "resources"
-		if okCount == 1 {
-			noun = "resource"
+	ui.DebugTo(a.Stderr, "kapply: kubectl apply for %s exited %d (%d resources)", label, rc, okCount)
+	tty := ttyUI()
+
+	if a.ShowSensitive {
+		ui.WarnTo(a.Stderr, "kapply: %s", ShowSensitiveText("the kubectl output for "+label))
+		if !tty {
+			// bash: out=$(kubectl … 2>&1); printf '%s\n' "${out}" — the
+			// command substitution strips trailing newlines, so exactly ONE
+			// follows.
+			fmt.Fprintf(a.Stdout, "%s\n", strings.TrimRight(out, "\n"))
+			return out, rc
 		}
-		fmt.Fprintf(a.Stdout, "\033[32m✓\033[0m %s · %d %s\n", label, okCount, noun)
+		// tty: the FINAL collapsed state (documented simplification — no
+		// in-flight spinner; the summary/aggregated errors match bash's end
+		// state).
+		a.summary(label, okCount, tty)
+		if rc != 0 {
+			for _, l := range Aggregate(rest) {
+				fmt.Fprintln(a.Stderr, l)
+			}
+		}
+		return out, rc
 	}
+
+	a.summary(label, okCount, tty)
 	if rc != 0 {
-		for _, l := range Aggregate(rest) {
-			fmt.Fprintln(a.Stderr, l)
-		}
+		ui.ErrorTo(a.Stderr, "%s", ApplyFailedText(label, rc))
 	}
 	return out, rc
+}
+
+// summary prints "✓ <label> · N resources" for a pass that reported N
+// objects (green on a terminal, plain off it; bash: the last line of
+// kapply::_progress, and the plain line of kapply::_apply_pass). Nothing
+// with Private set (the bootstrap scheduler prints the block of the entry)
+// or for N 0.
+func (a *Applier) summary(label string, n int, tty bool) {
+	if a.Private != nil || n == 0 {
+		return
+	}
+	noun := "resources"
+	if n == 1 {
+		noun = "resource"
+	}
+	if tty {
+		fmt.Fprintf(a.Stdout, "\033[32m✓\033[0m %s · %d %s\n", label, n, noun)
+		return
+	}
+	fmt.Fprintf(a.Stdout, "✓ %s · %d %s\n", label, n, noun)
 }
 
 // Apply reads a manifest and applies it server-side with the bounded heal
@@ -372,15 +438,22 @@ func marshalDoc(d manifestDoc) string {
 	return buf.String()
 }
 
-// healImmutable recreates the objects kubectl reported as having an
-// immutable-field conflict, by kind+name from the same manifest —
-// `replace --force` = delete + create, which bypasses immutability (bash:
-// kapply::_heal_immutable).
-func (a *Applier) healImmutable(ctx context.Context, manifest, out string, kubectlFlags []string) {
-	docs := parseManifestDocs(manifest)
-	type obj struct{ kind, name string }
-	seen := map[obj]bool{}
-	var objs []obj
+// UnmatchedImmutableText is the fixed line for an immutable-field error
+// that names no object of the manifest: the name comes from the error
+// text only (an admission webhook can write it), so lo prints no part of
+// it and heals nothing for it (bash: kapply::_heal_immutable).
+const UnmatchedImmutableText = "kapply: an immutable-field error named no object of this manifest"
+
+// immutableObject is a kind and a name that an immutable-field error of
+// kubectl names.
+type immutableObject struct{ kind, name string }
+
+// immutableObjects returns the kind and the name of each object that the
+// immutable-field errors in out name, once each, sorted (bash: `sort -u`).
+// The error text gives no namespace.
+func immutableObjects(out string) []immutableObject {
+	seen := map[immutableObject]bool{}
+	var objs []immutableObject
 	for _, m := range immutableObjRe.FindAllString(out, -1) {
 		// `<Kind>[.<group>] "<name>" is invalid` → kind, name.
 		head, rest, _ := strings.Cut(m, ` "`)
@@ -389,50 +462,88 @@ func (a *Applier) healImmutable(ctx context.Context, manifest, out string, kubec
 		if kind == "" || name == "" {
 			continue
 		}
-		o := obj{kind, name}
+		o := immutableObject{kind, name}
 		if !seen[o] {
 			seen[o] = true
 			objs = append(objs, o)
 		}
 	}
-	// bash pipes through `sort -u`, so healing order is sorted.
 	sort.Slice(objs, func(i, j int) bool {
 		if objs[i].kind != objs[j].kind {
 			return objs[i].kind < objs[j].kind
 		}
 		return objs[i].name < objs[j].name
 	})
-	for _, o := range objs {
-		// The crown-jewel confirm applies only to Secrets the manifest
-		// actually SEALS (immutable: true) — a plain Secret can hit "field
-		// is immutable" too (e.g. a type: change) and gets the generic heal.
-		if o.kind == "Secret" {
-			sealed := false
-			for _, d := range docs {
-				if d.kind == "Secret" && d.name == o.name {
-					if imm := yqsem.Scalar(yqsem.Lookup(d.node, "immutable")); imm == "true" {
-						sealed = true
-					}
-				}
-			}
-			if sealed && !a.confirmSecretRecreate(o.name) {
-				ui.WarnTo(a.Stderr, "  keeping sealed Secret/%s (re-key declined)", o.name)
-				continue
-			}
-		}
-		ui.WarnTo(a.Stderr, "  recreating immutable %s/%s", o.kind, o.name)
-		var sel strings.Builder
-		for _, d := range docs {
-			if d.kind == o.kind && d.name == o.name {
-				sel.WriteString("---\n")
-				sel.WriteString(marshalDoc(d))
-			}
-		}
-		args := append(append([]string{}, kubectlFlags...), "replace", "--force", "-f", "-")
-		if rc := a.kubectlQuiet(ctx, sel.String(), args...); rc != 0 {
-			ui.WarnTo(a.Stderr, "  could not recreate %s/%s", o.kind, o.name)
+	return objs
+}
+
+// manifestObjects returns the documents of the manifest with the kind and
+// the name of o, in any namespace.
+func manifestObjects(docs []manifestDoc, o immutableObject) []manifestDoc {
+	var sel []manifestDoc
+	for _, d := range docs {
+		if d.kind == o.kind && d.name == o.name {
+			sel = append(sel, d)
 		}
 	}
+	return sel
+}
+
+// healImmutable recreates the objects kubectl reported as having an
+// immutable-field conflict — `replace --force` = delete + create, which
+// bypasses immutability (bash: kapply::_heal_immutable). The kind and the
+// name come from the error text, which a webhook can write: the heal acts
+// only on the manifest objects with that kind and name. A name that
+// matches none is not healed and not printed; one fixed line
+// (UnmatchedImmutableText) says so.
+func (a *Applier) healImmutable(ctx context.Context, manifest, out string, kubectlFlags []string) {
+	docs := parseManifestDocs(manifest)
+	unmatched := false
+	for _, o := range immutableObjects(out) {
+		sel := manifestObjects(docs, o)
+		if len(sel) == 0 {
+			unmatched = true
+			continue
+		}
+		a.recreate(ctx, sel, kubectlFlags)
+	}
+	if unmatched {
+		ui.WarnTo(a.Stderr, "%s", UnmatchedImmutableText)
+	}
+}
+
+// recreate replaces the manifest objects sel (one kind and name) with
+// `replace --force`. Each printed line names the object from the manifest
+// values, escaped (EscapeText).
+func (a *Applier) recreate(ctx context.Context, sel []manifestDoc, kubectlFlags []string) {
+	kind, name := EscapeText(sel[0].kind), EscapeText(sel[0].name)
+	// The crown-jewel confirm applies only to Secrets the manifest actually
+	// SEALS (immutable: true) — a plain Secret can hit "field is immutable"
+	// too (e.g. a type: change) and gets the generic heal.
+	if sel[0].kind == "Secret" && sealedSecret(sel) && !a.confirmSecretRecreate(name) {
+		ui.WarnTo(a.Stderr, "  keeping sealed Secret/%s (re-key declined)", name)
+		return
+	}
+	ui.WarnTo(a.Stderr, "  recreating immutable %s/%s", kind, name)
+	var b strings.Builder
+	for _, d := range sel {
+		b.WriteString("---\n")
+		b.WriteString(marshalDoc(d))
+	}
+	args := append(append([]string{}, kubectlFlags...), "replace", "--force", "-f", "-")
+	if rc := a.kubectlQuiet(ctx, writeEnv, b.String(), args...); rc != 0 {
+		ui.WarnTo(a.Stderr, "  could not recreate %s/%s", kind, name)
+	}
+}
+
+// sealedSecret reports whether a document of sel sets immutable: true.
+func sealedSecret(sel []manifestDoc) bool {
+	for _, d := range sel {
+		if yqsem.Scalar(yqsem.Lookup(d.node, "immutable")) == "true" {
+			return true
+		}
+	}
+	return false
 }
 
 // finalizeNamespace force-completes a stuck-Terminating namespace by
@@ -463,14 +574,14 @@ func (a *Applier) finalizeNamespace(ctx context.Context, name string, kubectlFla
 	payload := deleteSpecFinalizers(nsJSON.String())
 	repArgs := append(append([]string{}, kubectlFlags...),
 		"replace", "--raw", "/api/v1/namespaces/"+name+"/finalize", "-f", "-")
-	if rc := a.kubectlQuiet(ctx, payload, repArgs...); rc != 0 {
+	if rc := a.kubectlQuiet(ctx, writeEnv, payload, repArgs...); rc != 0 {
 		ui.WarnTo(a.Stderr, "  could not finalize namespace/%s", name)
 		return
 	}
 	waitN := a.NsWait
 	for range waitN {
 		probe := append(append([]string{}, kubectlFlags...), "get", "ns", name)
-		if rc := a.kubectlQuiet(ctx, "", probe...); rc != 0 {
+		if rc := a.kubectlQuiet(ctx, nil, "", probe...); rc != 0 {
 			return
 		}
 		if a.sleep(ctx, a.pollInterval()) != nil {
@@ -549,7 +660,9 @@ func (a *Applier) healTerminating(ctx context.Context, manifest, out string, kub
 			patch = append(patch, "-n", d.namespace)
 		}
 		patch = append(patch, "--type", "merge", "-p", `{"metadata":{"finalizers":null}}`)
-		if rc := a.kubectlQuiet(ctx, "", patch...); rc != 0 {
+		// A merge patch from the argv, not from a file or stdin: the bash
+		// twin runs it without the KUBERC=off prefix too.
+		if rc := a.kubectlQuiet(ctx, nil, "", patch...); rc != 0 {
 			ui.WarnTo(a.Stderr, "  could not clear finalizers on %s/%s", d.kind, d.name)
 		}
 	}

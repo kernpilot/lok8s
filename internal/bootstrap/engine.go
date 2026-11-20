@@ -57,6 +57,11 @@ type Job struct {
 	// LOK8S_NONINTERACTIVE=1 on every concurrent subshell — no shared
 	// /dev/tty, so kapply never prompts and never draws).
 	NonInteractive bool
+	// Private, when set, receives the kubectl output of the entry's apply
+	// passes (kapply.Applier.Private): the scheduler parks and counts from
+	// it, and never prints it (bash: KAPPLY_PRIVATE_LOG of the background
+	// job). nil for a foreground apply.
+	Private io.Writer
 }
 
 // Engine drives the bootstrap addon system. Zero-value fields fall back to
@@ -152,6 +157,10 @@ type node struct {
 	completed  bool
 	skipped    bool
 	buf        *bytes.Buffer
+	// priv is the kubectl output of the entry's apply passes
+	// (Job.Private). The reap reads it to park and count; it never
+	// prints it.
+	priv *bytes.Buffer
 }
 
 // Apply reads spec.bootstrap from the cluster YAML and runs the entries as
@@ -634,6 +643,7 @@ func (e *Engine) runDAG(ctx context.Context, stderr io.Writer, nodes []*node, ba
 		nd := nodes[i]
 		nd.started = true
 		nd.buf = &bytes.Buffer{}
+		nd.priv = &bytes.Buffer{}
 		// wait: true GATES run through the SAME background path as
 		// everything else — the barrier is enforced by DAG edges, NOT
 		// by foreground execution. Immutable/terminating heal is
@@ -643,6 +653,7 @@ func (e *Engine) runDAG(ctx context.Context, stderr io.Writer, nodes []*node, ba
 		job.Name, job.Dir, job.Inline, job.EnvLines = nd.entry.Name, nd.entry.Dir, nd.entry.Inline, nd.entry.EnvLines
 		job.Wait = sched.wait(nodes, i)
 		job.Force, job.NonInteractive = sched.forceEnv, true
+		job.Private = nd.priv
 		buf := nd.buf
 		go func() {
 			rc := apply(ctx, job, buf, buf)
@@ -726,30 +737,38 @@ func (nd *node) ready(nodes []*node) bool {
 func (e *Engine) reap(stderr io.Writer, sched *schedule, nodes []*node, f finished) {
 	nd := nodes[f.idx]
 	out := nd.buf.String()
+	// priv is the kubectl output of the entry's apply passes: read to park
+	// and to count, never printed (it can quote a value of the manifest).
+	// The classification reads it and the printed buffer, which holds the
+	// kubectl output too under LO_SHOW_SENSITIVE_OUTPUT=1.
+	priv := ""
+	if nd.priv != nil {
+		priv = nd.priv.String()
+	}
+	classify := priv + "\n" + out
 	// PARK check FIRST. A background kapply runs non-interactive, so on
 	// an immutable/terminating conflict it can't prompt — it errors and
-	// the buffered output names the conflict. Detect that pair and PARK
+	// the kubectl output names the conflict. Detect that pair and PARK
 	// the entry: record it for the drain-point batch heal and DON'T
 	// complete it / DON'T OR overall rc.
-	if f.rc != 0 && (kapply.ImmutableRe.MatchString(out) || kapply.TerminatingRe.MatchString(out)) {
+	if f.rc != 0 && (kapply.ImmutableRe.MatchString(classify) || kapply.TerminatingRe.MatchString(classify)) {
 		sched.parked = append(sched.parked, f.idx)
 		// Harvest the namespaces this conflict would force-finalize
 		// BEFORE the buffered output is discarded — the drain prompt
 		// has to name them. Same extractor the terminating heal acts
 		// on, so the prompt cannot name a different set than the heal
 		// destroys.
-		for _, ns := range kapply.TerminatingNamespaces(out) {
+		for _, ns := range kapply.TerminatingNamespaces(classify) {
 			if !slices.Contains(sched.parkedNS, ns) {
 				sched.parkedNS = append(sched.parkedNS, ns)
 			}
 		}
-		// Surface the conflict detail NOW (we own the foreground):
-		// parking would otherwise discard the buffered kubectl error,
-		// and on a fail-fast / declined heal the user needs to see
-		// WHICH object/field is blocked to resolve by hand.
-		kapply.RenderCaptured(e.stdout(), nd.entry.Name, 1, strings.NewReader(out))
+		// Print the entry's block NOW (we own the foreground): its fixed
+		// lines name the entry and the exit code, and say how to see the
+		// kubectl output (it stays private).
+		kapply.RenderCaptured(e.stdout(), nd.entry.Name, 1, strings.NewReader(kapply.CountedLines(priv)+out))
 		fmt.Fprintf(stderr, "\033[33m⏸\033[0m %s \033[2m· needs recreate (immutable/terminating) — will confirm at the end\033[0m\n", nd.entry.Name)
-		nd.buf = nil
+		nd.buf, nd.priv = nil, nil
 		return
 	}
 	nd.completed = true
@@ -761,15 +780,18 @@ func (e *Engine) reap(stderr io.Writer, sched *schedule, nodes []*node, f finish
 	}
 	// Flush this entry's buffered output as ONE de-interleaved block,
 	// now that we own the foreground: collapsed on success, errors
-	// surfaced on failure. Under DEBUG (lo -v): honor kapply's "print
+	// surfaced on failure. The count comes from the private kubectl
+	// output (its <type>/<name> lines only, which RenderCaptured counts
+	// and never prints). Under DEBUG (lo -v): honor kapply's "print
 	// everything, don't aggregate" contract — still de-interleaved,
-	// but verbatim.
+	// but verbatim: the printed buffer only (kapply's [debug] line
+	// carries the exit code and the count), never the private output.
 	if os.Getenv("DEBUG") != "" {
 		_, _ = io.Copy(e.stdout(), strings.NewReader(out))
 	} else {
-		kapply.RenderCaptured(e.stdout(), nd.entry.Name, jrc, strings.NewReader(out))
+		kapply.RenderCaptured(e.stdout(), nd.entry.Name, jrc, strings.NewReader(kapply.CountedLines(priv)+out))
 	}
-	nd.buf = nil
+	nd.buf, nd.priv = nil, nil
 	// iff this entry FAILED, skip only its transitive dependents (they
 	// would fail behind the broken dep). A failure no longer stops the
 	// world.

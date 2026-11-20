@@ -30,10 +30,28 @@ setup() {
   kapply::wait_ready() { cat >/dev/null; }
   export -f kapply::wait_ready
 
-  # Mock kubectl: consume the piped manifest, record verbs on stdout.
+  # Mock kubectl. Each call goes to ${KUBECTL_CALLS}. An apply keeps the
+  # manifest that it gets on stdin in ${KUBECTL_STDIN}.<n> (one file per
+  # call: kapply runs kubectl in a subshell) and prints a kubectl line per
+  # object, then ${KUBECTL_CANARY} when set. lo keeps the output of an
+  # apply private (utils/kapply.sh), so a test reads what kubectl got from
+  # the files, not from the output of lo.
+  unset LO_SHOW_SENSITIVE_OUTPUT KUBECTL_CANARY
+  export KUBECTL_CALLS="${BATS_TEST_TMPDIR}/kubectl.calls" KUBECTL_STDIN="${BATS_TEST_TMPDIR}/kubectl.stdin"
   kubectl() {
+    echo "kubectl $*" >> "${KUBECTL_CALLS}"
     case "$1" in
-      apply) cat >/dev/null 2>&1 || true; echo "applied" ;;
+      apply)
+        local n=1 line
+        while [[ -e "${KUBECTL_STDIN}.${n}" ]]; do n=$(( n + 1 )); done
+        cat > "${KUBECTL_STDIN}.${n}"
+        while IFS= read -r line; do
+          case "${line}" in
+            "kind: "*) echo "${line#kind: }/fake serverside-applied" ;;
+          esac
+        done < "${KUBECTL_STDIN}.${n}"
+        [[ -z "${KUBECTL_CANARY:-}" ]] || echo "${KUBECTL_CANARY}"
+        ;;
       wait)  echo "waited: $*" ;;
       *)     echo "kubectl $*" ;;
     esac
@@ -104,10 +122,17 @@ _shim_main_deploy() {
 
 # --- deploy::apply ---
 
+# lo prints the summary line of each phase, never the kubectl output. The
+# stub keeps what kubectl got: the CRDs, then the artifact byte for byte.
 @test "deploy::apply applies the single domain artifact" {
   run deploy::apply "test.lok8s.dev"
   assert_success
-  assert_output --partial "applied"
+  assert_line '✓ test.lok8s.dev crds · 1 resource'
+  assert_line '✓ test.lok8s.dev · 3 resources'
+  refute_output --partial 'serverside-applied'
+  [ "$(yq -r '.kind' "${KUBECTL_STDIN}.1")" = CustomResourceDefinition ]
+  cmp "${KUBECTL_STDIN}.2" "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
+  [ ! -e "${KUBECTL_STDIN}.3" ]
 }
 
 @test "deploy::apply applies CRDs first (waits for Established)" {
@@ -115,6 +140,34 @@ _shim_main_deploy() {
   assert_success
   # The CRD in the artifact is applied + waited on before the rest.
   assert_output --partial "crd/widgets.test.lok8s.dev"
+}
+
+# The kubectl output of an apply stays off the output of lo deploy, on both
+# routes: lo prints the summary line instead. With LO_SHOW_SENSITIVE_OUTPUT=1
+# lo prints the kubectl output, after a [warn] line. The canary stands for a
+# value of the manifest that kubectl quotes in its output; it is a made-up
+# string. Go: TestApplyPrintsTheKubectlOutputOnlyWithTheOptIn.
+@test "deploy::apply and deploy::apply_filtered print the kubectl output only with LO_SHOW_SENSITIVE_OUTPUT=1" {
+  local canary=zq7DeployCanary5tRw route
+  local warn='[warn] kapply: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the kubectl output for test.lok8s.dev'
+  export KUBECTL_CANARY="Warning: the value \"${canary}\" is deprecated"
+  for route in apply filtered; do
+    local -a argv=(deploy::apply "test.lok8s.dev")
+    [[ "${route}" == apply ]] || argv=(deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "platform")
+    rm -f "${KUBECTL_STDIN}".*
+    run "${argv[@]}"
+    assert_success
+    [ -e "${KUBECTL_STDIN}.1" ]
+    refute_output --partial "${canary}"
+    refute_output --partial 'serverside-applied'
+    assert_output --partial '✓ test.lok8s.dev'
+    rm -f "${KUBECTL_STDIN}".*
+    LO_SHOW_SENSITIVE_OUTPUT=1 run "${argv[@]}"
+    assert_success
+    [ -e "${KUBECTL_STDIN}.1" ]
+    assert_output --partial "${canary}"
+    assert_line --partial "${warn}"
+  done
 }
 
 @test "deploy::apply errors when the artifact is missing (build not run)" {
@@ -128,7 +181,7 @@ _shim_main_deploy() {
   printf '# just a comment\n---\n' > "${BATS_TEST_TMPDIR}/clusters/test.lok8s.dev/artifacts.yaml"
   run deploy::apply "test.lok8s.dev"
   assert_success
-  refute_output --partial "applied"
+  [ ! -e "${KUBECTL_CALLS}" ]
 }
 
 # lo deploy refuses an artifact with the keys-only marker (a Secret with
@@ -154,22 +207,22 @@ YAML
   run deploy::apply "test.lok8s.dev"
   assert_failure
   assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} holds a keys-only Secret (secrets.lok8s.dev/keys-only), which would replace each value with an empty one — run 'lo build' again"
-  refute_output --partial "applied"
+  [ ! -e "${KUBECTL_CALLS}" ]
   refute_output --partial "waited"
   run deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "platform"
   assert_failure
   assert_output --partial "holds a keys-only Secret (secrets.lok8s.dev/keys-only)"
-  refute_output --partial "applied"
+  [ ! -e "${KUBECTL_CALLS}" ]
 
   printf 'apiVersion: v1\nkind: ConfigMap\ndata: [x\n' > "${artifact}"
   run deploy::apply "test.lok8s.dev"
   assert_failure
   assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} does not parse as YAML, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
-  refute_output --partial "applied"
+  [ ! -e "${KUBECTL_CALLS}" ]
   run deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "platform"
   assert_failure
   assert_output --partial "does not parse as YAML"
-  refute_output --partial "applied"
+  [ ! -e "${KUBECTL_CALLS}" ]
 }
 
 # An artifact that cannot be read, and a yq that cannot run the check (one
@@ -186,7 +239,7 @@ YAML
     assert_failure
     assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} cannot be read, so it cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only)"
     refute_output --partial "does not parse"
-    refute_output --partial "applied"
+    [ ! -e "${KUBECTL_CALLS}" ]
   fi
 
   yq() {
@@ -203,7 +256,7 @@ YAML
   assert_failure
   assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): the installed yq does not know the flag --yaml-fix-merge-anchor-to-spec. Install yq v4.54.3 or later (b install installs the pinned yq)."
   refute_output --partial "does not parse"
-  refute_output --partial "applied"
+  [ ! -e "${KUBECTL_CALLS}" ]
 
   # No yq on the PATH: the message names that, not an old yq. The PATH
   # keeps cat, which reads the artifact.
@@ -215,7 +268,7 @@ YAML
   assert_failure
   assert_output --partial "refusing to apply test.lok8s.dev: ${artifact} cannot be checked for a keys-only Secret (secrets.lok8s.dev/keys-only): yq is not installed. Install yq v4.54.3 or later (b install installs the pinned yq)."
   refute_output --partial "does not know the flag"
-  refute_output --partial "applied"
+  [ ! -e "${KUBECTL_CALLS}" ]
 }
 
 # lo deploy reads the artifact once, checks that copy and applies that copy,
@@ -422,10 +475,28 @@ YAML
 # --- deploy::apply_filtered ---
 
 @test "deploy::apply_filtered applies only the matching subset (full label key)" {
-  # Record exactly which objects reach kubectl apply.
+  # Record exactly which objects reach kubectl apply. lo keeps the kubectl
+  # output private, so the stub also writes each mark to ${APPLIED}, and
+  # the test reads that file. A kubectl line per object gives the count of
+  # the summary line.
+  export APPLIED="${BATS_TEST_TMPDIR}/applied"
   kubectl() {
     case "$1" in
-      apply) local m; m=$(cat); grep -q 'kind: Deployment' <<<"${m}" && echo "applied:deployment"; grep -q 'kind: Namespace' <<<"${m}" && echo "applied:namespace"; grep -q 'kind: CustomResourceDefinition' <<<"${m}" && echo "applied:crd"; return 0 ;;
+      apply)
+        local m; m=$(cat)
+        if grep -q 'kind: Deployment' <<<"${m}"; then
+          echo "applied:deployment" | tee -a "${APPLIED}"
+          echo "deployment.apps/test-app serverside-applied"
+        fi
+        if grep -q 'kind: Namespace' <<<"${m}"; then
+          echo "applied:namespace" | tee -a "${APPLIED}"
+          echo "namespace/networking serverside-applied"
+        fi
+        if grep -q 'kind: CustomResourceDefinition' <<<"${m}"; then
+          echo "applied:crd" | tee -a "${APPLIED}"
+          echo "customresourcedefinition.apiextensions.k8s.io/widgets.test.lok8s.dev serverside-applied"
+        fi
+        return 0 ;;
       wait)  echo "waited" ;;
       *)     return 0 ;;
     esac
@@ -434,9 +505,11 @@ YAML
 
   run deploy::apply_filtered "test.lok8s.dev" "lok8s.dev/type" "platform"
   assert_success
-  assert_output --partial "applied:deployment"
-  refute_output --partial "applied:namespace"
-  refute_output --partial "applied:crd"
+  assert_line '✓ test.lok8s.dev (lok8s.dev/type=platform) · 1 resource'
+  refute_output --partial 'applied:'
+  refute_output --partial 'serverside-applied'
+  run cat "${APPLIED}"
+  assert_output 'applied:deployment'
 }
 
 @test "deploy::apply_filtered warns and exits 0 when nothing matches" {

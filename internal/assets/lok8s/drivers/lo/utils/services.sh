@@ -9,8 +9,8 @@ lo::coredns() {
   cluster_name=$(yq -r '.metadata.name' "${cluster_yaml}")
   kubeconfig="${PATH_BASE}/.kubeconfig/${cluster_name}.yaml"
 
-  kubectl apply --kubeconfig "${kubeconfig}" -f "${coredns_dir}/corefile.yaml"
-  kubectl apply --kubeconfig "${kubeconfig}" -f "${coredns_dir}/expose.yaml"
+  KUBERC=off kubectl apply --kubeconfig "${kubeconfig}" -f "${coredns_dir}/corefile.yaml"
+  KUBERC=off kubectl apply --kubeconfig "${kubeconfig}" -f "${coredns_dir}/expose.yaml"
 
   # Pin coredns-external to the LAST loadBalancer.pool IP so it does not race the
   # ingress/Envoy gateway for pool[0]. coredns-external is created HERE — before
@@ -32,7 +32,8 @@ lo::coredns() {
   # (see corefile.yaml + patch.json). Declarative + committed, survives `lo up`.
   lo::coredns_custom "${domain}" "${cluster_yaml}" "${kubeconfig}"
 
-  kubectl patch deployment coredns -n kube-system \
+  # A patch from a file: it runs with the kubectl user defaults off.
+  KUBERC=off kubectl patch deployment coredns -n kube-system \
     --kubeconfig "${kubeconfig}" \
     --type json \
     --patch-file "${coredns_dir}/patch.json" 2>/dev/null || true
@@ -111,7 +112,7 @@ EOF
   if compgen -G "${tmp}/*" >/dev/null 2>&1; then
     kubectl create configmap coredns-custom -n kube-system --kubeconfig "${kubeconfig}" \
       --from-file="${tmp}" --dry-run=client -o yaml \
-      | kubectl apply --kubeconfig "${kubeconfig}" -f -
+      | KUBERC=off kubectl apply --kubeconfig "${kubeconfig}" -f -
   fi
 
   rm -rf "${tmp}"

@@ -966,6 +966,22 @@ bootstrap::_ticker_stop() {
   printf '\r\033[K'   # erase the status line before results flush
 }
 
+# bootstrap::_captured_stream <private-file> <out-file> — the stream the reap
+# renders for one background entry: the counted lines of its private kubectl
+# output (kapply::counted_lines: <type>/<name> lines that render_captured counts
+# and never prints), then its printed buffer. Every other line of the private
+# file stays out of the log. A missing file adds nothing. The Go twin:
+# Engine.reap (kapply.CountedLines(priv)+out).
+bootstrap::_captured_stream() {
+  if [[ -f "${1}" ]] && declare -F kapply::counted_lines >/dev/null 2>&1; then
+    kapply::counted_lines < "${1}"
+  fi
+  if [[ -f "${2}" ]]; then
+    cat -- "${2}"
+  fi
+  return 0
+}
+
 bootstrap::_reap_one() {
   (( ${#_BS_INFLIGHT[@]} )) || return 0
   bootstrap::_ticker_start   # animate the status line while we block below
@@ -1000,11 +1016,16 @@ bootstrap::_reap_one() {
       # rcfile + the marker text) and PARK the entry: record it for the drain-point
       # batch heal and DON'T complete it / DON'T OR overall_rc. Anything else falls
       # through to the normal complete + collect_rc + render below (the `else`).
-      local _exrc=1
+      # The job's private file (KAPPLY_PRIVATE_LOG, see the launch site) holds
+      # the kubectl output of its apply passes: read here to park and to count,
+      # never printed (it can quote a value of the manifest). The classification
+      # reads it and the printed buffer, which holds the kubectl output too
+      # under LO_SHOW_SENSITIVE_OUTPUT=1.
+      local _exrc=1 _priv="${_BS_OUTFILES[_i]%.out}.priv"
       [[ -f "${_BS_RCFILES[_i]}" ]] && _exrc="$(cat "${_BS_RCFILES[_i]}" 2>/dev/null || echo 1)"
       if [[ "${_exrc}" != "0" ]] && [[ -f "${_BS_OUTFILES[_i]}" ]] \
         && [[ -n "${_KAPPLY_IMMUTABLE_RE:-}" && -n "${_KAPPLY_TERMINATING_RE:-}" ]] \
-        && grep -qE "${_KAPPLY_IMMUTABLE_RE}|${_KAPPLY_TERMINATING_RE}" "${_BS_OUTFILES[_i]}"; then
+        && grep -sqE "${_KAPPLY_IMMUTABLE_RE}|${_KAPPLY_TERMINATING_RE}" "${_priv}" "${_BS_OUTFILES[_i]}"; then
         _BS_PARKED+=("${_ridx}")
         # Harvest the namespaces this conflict would force-finalize BEFORE the
         # buffered output is deleted below — the drain prompt has to name them,
@@ -1020,20 +1041,20 @@ bootstrap::_reap_one() {
               [[ "${_known}" == "${_pns}" ]] && { _seen=1; break; }
             done
             (( _seen )) || _BS_PARKED_NS+=("${_pns}")
-          done < <(kapply::terminating_namespaces < "${_BS_OUTFILES[_i]}")
+          done < <(cat -- "${_priv}" "${_BS_OUTFILES[_i]}" 2>/dev/null | kapply::terminating_namespaces)
         fi
-        # Surface the conflict detail NOW (we own the foreground): parking would
-        # otherwise discard the buffered kubectl error, and on a fail-fast / declined
-        # heal the user needs to see WHICH object/field is blocked to resolve by hand.
-        # Then note the deferral — the batched recreate confirmation is at the drain.
+        # Print the entry's block NOW (we own the foreground): its fixed lines name
+        # the entry and the exit code, and say how to see the kubectl output (it
+        # stays private). Then note the deferral — the batched recreate
+        # confirmation is at the drain.
         if declare -F kapply::render_captured >/dev/null 2>&1; then
-          kapply::render_captured "${_names[_ridx]}" 1 < "${_BS_OUTFILES[_i]}" || true
+          bootstrap::_captured_stream "${_priv}" "${_BS_OUTFILES[_i]}" | kapply::render_captured "${_names[_ridx]}" 1 || true
         else
           cat "${_BS_OUTFILES[_i]}" >&2 || true
         fi
         printf '\033[33m⏸\033[0m %s \033[2m· needs recreate (immutable/terminating) — will confirm at the end\033[0m\n' \
           "${_names[_ridx]}" >&2
-        rm -f "${_BS_RCFILES[_i]}" "${_BS_OUTFILES[_i]}"
+        rm -f "${_BS_RCFILES[_i]}" "${_BS_OUTFILES[_i]}" "${_priv}"
       else
         _BS_COMPLETED["${_ridx}"]=1
         _BS_DONE=$(( _BS_DONE + 1 ))
@@ -1047,18 +1068,23 @@ bootstrap::_reap_one() {
         # we render it here — collapsed on success, errors surfaced on failure.
         # `|| true` on every flush path: a rendering hiccup must never abort the
         # reap loop under errexit (that would skip _drain + the rcdir cleanup).
+        # The count comes from the private kubectl output (its <type>/<name>
+        # lines only, which render_captured counts and never prints).
         if [[ -f "${_BS_OUTFILES[_i]}" ]]; then
           if [[ -n "${DEBUG:-}" ]]; then
             # verbose (lo -v): honor kapply's "print everything, don't aggregate"
-            # contract — still de-interleaved (buffered per job), but verbatim.
+            # contract — still de-interleaved (buffered per job), but verbatim:
+            # the printed buffer only (kapply's [debug] line carries the exit code
+            # and the count), never the private output.
             cat "${_BS_OUTFILES[_i]}" || true
           elif declare -F kapply::render_captured >/dev/null 2>&1; then
-            kapply::render_captured "${_names[_ridx]}" "${_jrc}" < "${_BS_OUTFILES[_i]}" || true
+            bootstrap::_captured_stream "${_priv}" "${_BS_OUTFILES[_i]}" | kapply::render_captured "${_names[_ridx]}" "${_jrc}" || true
           else
             cat "${_BS_OUTFILES[_i]}" || true   # fallback: de-interleaved, not collapsed
           fi
           rm -f "${_BS_OUTFILES[_i]}"
         fi
+        rm -f "${_priv}"
         # iff this entry FAILED, skip only its transitive dependents (they would fail
         # behind the broken dep). A failure no longer stops the world.
         (( _jrc == 0 )) || bootstrap::_skip_dependents "${_ridx}"
@@ -1236,7 +1262,7 @@ bootstrap::_restore_d() {
           ;;
         1)
           if printf '%s' "${_doc}" \
-            | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - >/dev/null 2>&1; then
+            | KUBERC=off kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - >/dev/null 2>&1; then
             applied=$(( applied + 1 ))
             debug "bootstrap: restore.d applied ${base} (store working copy)"
             continue
@@ -1258,7 +1284,7 @@ bootstrap::_restore_d() {
       if ! printf '%s' "${_dec}" | keysonly::refuse_stream "bootstrap: restore.d" "${base} (sops)" -; then
         skipped=$(( skipped + 1 ))
       elif printf '%s' "${_dec}" \
-        | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - >/dev/null 2>&1; then
+        | KUBERC=off kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - >/dev/null 2>&1; then
         applied=$(( applied + 1 ))
         debug "bootstrap: restore.d applied ${base} (sops)"
       else
@@ -1814,7 +1840,7 @@ bootstrap::_diff_manifest() {
   local _derr _diff _drc=0 _emsg
   _derr="$(mktemp -p "${bootstrap_dry_boundary:-${TMPDIR:-/tmp}}")" || { error "bootstrap: dry-run: no temp file"; echo error; return 0; }
   _diff=$(printf '%s\n' "${diff_input}" \
-    | kubectl --kubeconfig "${kubeconfig}" diff --server-side --force-conflicts -f - 2>"${_derr}") || _drc=$?
+    | KUBERC=off kubectl --kubeconfig "${kubeconfig}" diff --server-side --force-conflicts -f - 2>"${_derr}") || _drc=$?
   _emsg="$(cat "${_derr}" 2>/dev/null || true)"
   rm -f "${_derr}"
   if [[ -n "${bootstrap_render_dir:-}" ]]; then
@@ -1860,7 +1886,7 @@ bootstrap::_diff_manifest() {
   case "${_drc}" in
     0) echo unchanged; return 0 ;;
     1)
-      [[ -z "${DEBUG:-}" ]] || printf '%s\n' "${_diff}" >&2
+      [[ -z "${DEBUG:-}" ]] || bootstrap::_debug_diff "${label}" "${stem}" "${_diff}" "${diff_input}"
       # One `--- ` header per object that differs (GNU diff -u -N over the
       # LIVE and MERGED trees); an object the live side lacks shows an
       # empty old side, the hunk `@@ -0,0 `. An external diff tool
@@ -1892,6 +1918,163 @@ bootstrap::_diff_manifest() {
   [[ "${diff_input}" == "${rendered}" ]] || _filtered=1
   error "$(bootstrap::_diff_failed_text "${label}" "${_drc}" "${_kubectl}" "${kubeconfig}" "${bootstrap_render_dir:-}" "${stem}" "${_filtered}")"
   echo error
+  return 0
+}
+
+# bootstrap::_debug_diff <label> <stem> <diff> <diff-input>
+# Prints at debug what a diff with differences (rc 1) found, without the diff
+# text: one line for each object of <diff-input> (the manifest that kubectl
+# diff got) that differs (bootstrap::_diff_objects), then where the text is
+# (${bootstrap_render_dir}/<stem>.diff under --render-dir). The diff text can
+# quote a value of the manifest: kubectl masks only the data of a core v1
+# Secret. It prints only under LO_SHOW_SENSITIVE_OUTPUT=1, after a [warn]
+# line. The Go twin: Engine.debugDiff (the same bytes).
+bootstrap::_debug_diff() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # the diff text can quote a Secret value
+  local _label="${1}" _stem="${2}" _obj
+  while IFS= read -r _obj; do
+    debug "bootstrap dry-run: ${_label}: differs: ${_obj}"
+  done < <(bootstrap::_diff_objects "${3}" "${4-}")
+  if kapply::show_sensitive; then
+    if [[ -n "${3}" ]]; then
+      warn "bootstrap dry-run: ${_label}: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the diff text, which can quote a value of the manifest"
+      printf '%s\n' "${3}" >&2
+    fi
+  elif [[ -n "${bootstrap_render_dir:-}" ]]; then
+    debug "bootstrap dry-run: ${_label}: the diff text is in ${bootstrap_render_dir}/${_stem}.diff. lo does not print it: it can quote a value of the manifest (LO_SHOW_SENSITIVE_OUTPUT=1 prints it)"
+  else
+    debug "bootstrap dry-run: ${_label}: lo does not print the diff text: it can quote a value of the manifest. To keep it in a file, do the dry run again with --render-dir <dir> (LO_SHOW_SENSITIVE_OUTPUT=1 prints it)"
+  fi
+  return 0
+}
+
+# bootstrap::_diff_objects <diff> <manifest>
+# Names the objects of a `kubectl diff` from the `--- ` file headers of its
+# unified-diff framing, one per line: `<apiVersion> <kind>
+# <namespace>/<name>`, or `<apiVersion> <kind> <name>` for a cluster-scoped
+# object, escaped (kapply::escape). kubectl names the file of an object in its
+# LIVE and MERGED trees [<group>.]<version>.<Kind>.<namespace>.<name>
+# (k8s.io/kubectl/pkg/cmd/diff, InfoObject.Name). A header names an object
+# only when:
+#   - the framing puts it where a file header can start (the start, after a
+#     `diff ` line, or after the last line of the hunks of the file before,
+#     counted from each `@@ -a,b +c,d @@` line; a missing count is 1, and a
+#     `\ No newline at end of file` line counts for neither), and a `+++ `
+#     line follows it. A `--- ` line inside a hunk is a removed line, and a
+#     line that breaks the framing stops the parse for the rest of the diff;
+#   - its path is a file of the LIVE tree of kubectl (a directory whose name
+#     starts with LIVE-) with the kubectl file name;
+#   - its group, version, kind, namespace and name match an object of
+#     <manifest> (the diff input). A manifest object with no namespace
+#     matches its group, version, kind and name in any namespace.
+# Any other header (an external diff tool, a line of the diff text) names
+# nothing: lo prints a name of the manifest only, never a line of the diff
+# text. The Go twin: diffObjects and diffParser (the same regexes).
+bootstrap::_diff_objects() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # the diff text can quote a Secret value
+  local -A _exact=() _anyns=()
+  local _key
+  while IFS= read -r _key; do
+    case "${_key}" in
+      exact/*) _exact["${_key#exact/}"]=1 ;;
+      anyns/*) _anyns["${_key#anyns/}"]=1 ;;
+    esac
+  done < <(bootstrap::_diff_keys "${2-}")
+  local _hre='^@@ -([0-9]{1,9})(,([0-9]{1,9}))? \+([0-9]{1,9})(,([0-9]{1,9}))? @@'
+  local _line _st=start _pending="" _old=0 _new=0 _obj
+  while IFS= read -r _line; do
+    if [[ "${_st}" == hunk || ( "${_st}" == next && "${_line}" == '@@ '* ) ]]; then
+      [[ "${_line}" =~ ${_hre} ]] || break
+      _old=1 _new=1
+      [[ -z "${BASH_REMATCH[2]}" ]] || _old=$(( 10#${BASH_REMATCH[3]} ))
+      [[ -z "${BASH_REMATCH[5]}" ]] || _new=$(( 10#${BASH_REMATCH[6]} ))
+      _st=body
+      (( _old || _new )) || _st=next
+      continue
+    fi
+    case "${_st}" in
+      body)
+        case "${_line:0:1}" in
+          ' ') _old=$(( _old - 1 )) _new=$(( _new - 1 )) ;;
+          -) _old=$(( _old - 1 )) ;;
+          +) _new=$(( _new - 1 )) ;;
+          \\) ;;
+          *) break ;;
+        esac
+        (( _old >= 0 && _new >= 0 )) || break
+        (( _old || _new )) || _st=next
+        ;;
+      plus)
+        [[ "${_line}" == '+++ '* ]] || break
+        _st=hunk
+        _obj="$(bootstrap::_diff_header_object "${_pending}")" || continue
+        printf '%s\n' "${_obj}"
+        ;;
+      diff)
+        [[ "${_line}" == '--- '* ]] || break
+        _pending="${_line}" _st=plus
+        ;;
+      *)
+        if [[ "${_line}" == 'diff '* ]]; then
+          _st='diff'
+        elif [[ "${_line}" == '--- '* ]]; then
+          _pending="${_line}" _st=plus
+        elif [[ "${_st}" == next && "${_line}" == \\* ]]; then
+          :
+        else
+          break
+        fi
+        ;;
+    esac
+  done < <(printf '%s\n' "${1}")
+  return 0
+}
+
+# bootstrap::_diff_header_object <header>
+# The escaped label of the object of a `--- ` header line of kubectl diff
+# (bootstrap::_diff_objects): a file of the LIVE tree with the kubectl file
+# name whose key is in _exact, or, with no namespace, in _anyns (the arrays
+# of the caller). Returns 1 for any other header.
+bootstrap::_diff_header_object() {
+  local _re='^(([a-z0-9][a-z0-9.-]*)\.)?(v[0-9]+[a-z0-9]*)\.([A-Z][A-Za-z0-9]*)\.([a-z0-9-]*)\.([^[:space:]/]+)$'
+  local _path _dir _api _name
+  _path="${1#'--- '}"
+  _path="${_path%%$'\t'*}"
+  _dir="${_path%/*}"
+  [[ "${_path}" == */* && "${_dir##*/}" == LIVE-* ]] || return 1
+  [[ "${_path##*/}" =~ ${_re} ]] || return 1
+  local _g="${BASH_REMATCH[2]}" _v="${BASH_REMATCH[3]}" _k="${BASH_REMATCH[4]}" _ns="${BASH_REMATCH[5]}" _n="${BASH_REMATCH[6]}"
+  if [[ -z "${_exact["${_g}/${_v}/${_k}/${_ns}/${_n}"]:-}" && -z "${_anyns["${_g}/${_v}/${_k}/${_n}"]:-}" ]]; then
+    return 1
+  fi
+  _api="${_v}"
+  [[ -z "${_g}" ]] || _api="${_g}/${_v}"
+  _name="${_n}"
+  [[ -z "${_ns}" ]] || _name="${_ns}/${_n}"
+  kapply::escape "${_api} ${_k} ${_name}"
+}
+
+# bootstrap::_diff_keys <manifest>
+# One line per object of a manifest stream (bootstrap::_diff_objects):
+# `exact/<group>/<version>/<kind>/<namespace>/<name>` for an object with a
+# namespace, `anyns/<group>/<version>/<kind>/<name>` for one without. The
+# group is empty for a core apiVersion. A field with a tab or a newline (no
+# kubectl file name has one) leaves the object out. Prints nothing for an
+# empty manifest. The Go twin: manifestDiffKeys.
+bootstrap::_diff_keys() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # the manifest can hold Secret values (utils/keysonly.sh)
+  [[ -n "${1//[[:space:]]/}" ]] || return 0
+  printf '%s\n' "${1}" | yq -o=json -I=0 'select(. != null and tag == "!!map")' 2>/dev/null | jq -r '
+    def str: if type == "string" then . else "" end;
+    (.metadata | if type == "object" then . else {} end) as $m
+    | [(.apiVersion | str), (.kind | str), ($m.namespace | str), ($m.name | str)] as $f
+    | select($f | all(test("^[^\t\n]*$")))
+    | ($f[0] | if contains("/") then (split("/") | [.[0], (.[1:] | join("/"))]) else ["", .] end) as $gv
+    | if $f[2] != "" then "exact/\($gv[0])/\($gv[1])/\($f[1])/\($f[2])/\($f[3])"
+      else "anyns/\($gv[0])/\($gv[1])/\($f[1])/\($f[3])" end' 2>/dev/null
   return 0
 }
 
@@ -2114,6 +2297,57 @@ bootstrap::_dry_run_untrap() {
     trap - EXIT
   fi
   _BOOTSTRAP_DRY_PREV_TRAP=""
+}
+
+# bootstrap::_sched_trap <dir>
+# Removes the private dir of the scheduler (it holds the kubectl output of
+# the entries, which can quote a value of the manifest) when the shell
+# exits or gets INT, TERM or HUP, and keeps the traps that were there: the
+# EXIT trap removes the dir, then runs the earlier EXIT trap; INT, TERM and
+# HUP remove the dir, put the earlier traps back and send the signal again,
+# so the earlier trap or the default action still runs. Only the main shell
+# chains: in a subshell `trap -p` shows the traps of the parent, which do
+# not run there, so a subshell installs only its own removal (as
+# bootstrap::_dry_run_trap). bootstrap::_sched_untrap puts the earlier
+# traps back. A SIGKILL cannot be trapped: it leaves the dir behind.
+bootstrap::_sched_trap() {
+  _BS_SCHED_DIR="${1}"
+  _BS_SCHED_PREV=""
+  local _prev=""
+  if (( BASHPID == $$ )); then
+    local -a _trap_words=()
+    eval "_trap_words=($(trap -p EXIT))"
+    (( ${#_trap_words[@]} < 3 )) || _prev="${_trap_words[2]}"
+    _BS_SCHED_PREV="$(trap -p EXIT INT TERM HUP)"
+  fi
+  # shellcheck disable=SC2064 # expand now: the earlier EXIT trap is a fixed value
+  trap "bootstrap::_sched_rm${_prev:+; ${_prev}}" EXIT
+  trap 'bootstrap::_sched_signal INT' INT
+  trap 'bootstrap::_sched_signal TERM' TERM
+  trap 'bootstrap::_sched_signal HUP' HUP
+}
+
+# bootstrap::_sched_rm: removes the private dir of the scheduler, if one is
+# set.
+bootstrap::_sched_rm() {
+  [[ -z "${_BS_SCHED_DIR:-}" ]] || rm -rf -- "${_BS_SCHED_DIR:?}"
+}
+
+# bootstrap::_sched_untrap: removes the private dir and puts the earlier
+# EXIT, INT, TERM and HUP traps back.
+bootstrap::_sched_untrap() {
+  bootstrap::_sched_rm
+  _BS_SCHED_DIR=""
+  trap - EXIT INT TERM HUP
+  [[ -z "${_BS_SCHED_PREV:-}" ]] || eval "${_BS_SCHED_PREV}"
+  _BS_SCHED_PREV=""
+}
+
+# bootstrap::_sched_signal <signal>: the INT, TERM and HUP trap of the
+# scheduler.
+bootstrap::_sched_signal() {
+  bootstrap::_sched_untrap
+  kill -s "${1}" "${BASHPID}"
 }
 
 # bootstrap::apply <domain> <cluster_yaml> <kubeconfig>
@@ -2499,6 +2733,10 @@ bootstrap::apply() {
   # already in _skip (the BFS reaches every transitive dependent).
   local _rcdir; _rcdir=$(mktemp -d) \
     || { error "bootstrap: failed to create scheduler temp dir"; return 1; }
+  # kapply writes the private files only into an absolute dir (a relative
+  # TMPDIR gives a relative mktemp path).
+  [[ "${_rcdir}" == /* ]] || _rcdir="${PWD}/${_rcdir}"
+  bootstrap::_sched_trap "${_rcdir}"
   _BS_INFLIGHT=(); _BS_RCFILES=(); _BS_RUNIDX=(); _BS_OUTFILES=()
   unset '_BS_COMPLETED'; declare -gA _BS_COMPLETED=()
   _BS_DONE=0; _BS_OVERALL_RC=0; _BS_PARKED=(); _BS_PARKED_NS=()
@@ -2548,8 +2786,15 @@ bootstrap::apply() {
       # Capture the rc EXPLICITLY (|| _arc=$?) — under errexit a failing
       # _apply_one would abort before `echo $?` runs; _collect_rc treats a missing
       # file as a failure too. Set LOK8S_BOOTSTRAP_PARALLEL=1 for clean
-      # one-at-a-time output.
+      # one-at-a-time output. KAPPLY_PRIVATE_LOG: kapply appends the kubectl
+      # output of the entry's apply passes to ${_rcdir}/<seq>.priv (the 0700
+      # mktemp dir, KAPPLY_PRIVATE_DIR), never to ${_out}; the reap parks and
+      # counts from it and never prints it. Both are set in this shell, not
+      # exported: kapply refuses a value from the environment and checks the
+      # dir and the file (kapply::_private_ok).
       ( export LOK8S_NONINTERACTIVE=1
+        KAPPLY_PRIVATE_DIR="${_rcdir}" KAPPLY_PRIVATE_LOG="${_rcdir}/${_seq}.priv"
+        export -n KAPPLY_PRIVATE_DIR KAPPLY_PRIVATE_LOG
         _arc=0
         bootstrap::_apply_one "${_names[_i2]}" "${_dirs[_i2]}" "${kind}" "${provider_name}" \
           "${kubeconfig}" "${_inlines[_i2]}" "${_wflag}" "${_envs[_i2]}" > "${_out}" 2>&1 || _arc=$?
@@ -2573,7 +2818,8 @@ bootstrap::apply() {
   done
 
   bootstrap::_drain   # safety: never leave an orphan behind
-  rm -rf "${_rcdir}"
+  rm -rf -- "${_rcdir:?}"
+  bootstrap::_sched_untrap
   # Non-zero if anything failed OR was skipped behind a failure; 0 only when every
   # entry completed cleanly. _BS_OVERALL_RC alone suffices: _skip is only ever
   # populated by bootstrap::_skip_dependents, and both call sites set

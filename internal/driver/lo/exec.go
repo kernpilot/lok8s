@@ -42,16 +42,19 @@ func (d *Driver) errOutput(ctx context.Context, name string, args ...string) (st
 }
 
 // runInput executes a tool with the given stdin, output inherited-by-writer
-// (bash: cmd <<EOF … EOF / printf … | cmd).
+// (bash: cmd <<EOF … EOF / printf … | cmd). Each kubectl child runs with
+// the kubectl user defaults off (execx.KubectlEnv), whatever its arguments.
 func (d *Driver) runInput(ctx context.Context, stdin string, stdout, stderr io.Writer, name string, args ...string) error {
 	return d.deps.Runner.Run(ctx, execx.Cmd{
 		Name: name, Args: args,
+		Env:    execx.KubectlEnv(name),
 		Stdin:  strings.NewReader(stdin),
 		Stdout: stdout, Stderr: stderr,
 	})
 }
 
-// cmdWith builds an execx.Cmd bound to the given writers.
+// cmdWith builds an execx.Cmd bound to the given writers. Each kubectl
+// child runs with the kubectl user defaults off (execx.KubectlEnv).
 func cmdWith(name string, args []string, stdout, stderr io.Writer) execx.Cmd {
-	return execx.Cmd{Name: name, Args: args, Stdout: stdout, Stderr: stderr}
+	return execx.Cmd{Name: name, Args: args, Env: execx.KubectlEnv(name), Stdout: stdout, Stderr: stderr}
 }
