@@ -92,12 +92,13 @@ wait:
 	if waitErr != nil {
 		// The end of the child is not known without a reap. The child is
 		// not reaped, so the id is still this group's: stop the group
-		// now, and send SIGKILL after WaitDelay, before the reap.
+		// now, and send SIGKILL after the grace (stopGrace), before the
+		// reap.
 		if termAt.IsZero() {
 			termAt = time.Now()
 			_ = termGroup(pgid)
 		}
-		time.Sleep(time.Until(termAt.Add(waitDelay)))
+		time.Sleep(time.Until(termAt.Add(stopGrace(waitDelay))))
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	}
 	stopMembers(pgid, termAt, waitDelay)
@@ -136,9 +137,9 @@ func termGroup(pgid int) error {
 // stopMembers ends the members of the group pgid other than its leader,
 // which has ended and is not reaped. When no other member is left, it
 // sends nothing. Else it sends SIGTERM and SIGCONT if the group did not get
-// them yet (termAt is zero), waits until WaitDelay after the SIGTERM for
-// the members to end, sends SIGKILL to the group, and waits up to 1 s for
-// the members to go.
+// them yet (termAt is zero), waits until the grace after the SIGTERM
+// (stopGrace) for the members to end, sends SIGKILL to the group, and
+// waits up to 1 s for the members to go.
 func stopMembers(pgid int, termAt time.Time, waitDelay time.Duration) {
 	if !othersInGroup(pgid) {
 		return
@@ -147,7 +148,7 @@ func stopMembers(pgid int, termAt time.Time, waitDelay time.Duration) {
 		termAt = time.Now()
 		_ = termGroup(pgid)
 	}
-	killAt := termAt.Add(waitDelay)
+	killAt := termAt.Add(stopGrace(waitDelay))
 	for othersInGroup(pgid) {
 		if time.Now().After(killAt) {
 			_ = syscall.Kill(-pgid, syscall.SIGKILL)

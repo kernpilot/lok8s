@@ -34,7 +34,7 @@ func groupCmd(ctx context.Context, path string, args []string, waitDelay time.Du
 	return cmd, func() error {
 		err := cmd.Run()
 		if t := stopped.Load(); t != 0 && cmd.Process != nil {
-			stopGroup(cmd.Process.Pid, time.Unix(0, t).Add(waitDelay))
+			stopGroup(cmd.Process.Pid, time.Unix(0, t).Add(stopGrace(waitDelay)))
 		}
 		return err
 	}

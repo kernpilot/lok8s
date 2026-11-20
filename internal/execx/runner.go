@@ -39,25 +39,31 @@ type Cmd struct {
 	// WaitDelay bounds the wait for a child after its context ends, and
 	// for its output pipes after it exits (exec.Cmd.WaitDelay): a child
 	// that still runs then is killed, and the pipes close. Zero keeps the
-	// default: the parent waits for the child to end.
+	// default: the parent waits for the child to end. For the grace of a
+	// group stop, see ProcessGroup.
 	WaitDelay time.Duration
 	// ProcessGroup starts the child as the leader of a new process group,
 	// so that a stop also reaches the children of the child (the exec
 	// credential plugin of a kubectl). On a cancelled context the group
 	// gets SIGTERM and SIGCONT, not the SIGINT of the child alone. When
 	// the child ends first and other members of its group are left, they
-	// get the same SIGTERM and SIGCONT. When WaitDelay has passed after
-	// that signal, the group gets SIGKILL, and Run then waits up to 1 s
-	// more for the group to be gone. On Linux, Run reaps the child only
-	// after this stop: while the child is not reaped, no other process can
-	// get its pid, so no other group can get the id of its group, and the
-	// signals reach this group only (groupCmd). Then Run waits up to
-	// WaitDelay for the output pipes, which a process outside the group
-	// can keep open. On other systems, Run reaps the child first and stops
-	// the group only after a cancelled context. The group is not the
-	// foreground group of a terminal: a member that reads the terminal
-	// stops there until the stop. False keeps the default: the child stays
-	// in the process group of lo.
+	// get the same SIGTERM and SIGCONT, also after an exit with 0. This
+	// also stops a process that a member started in the group to outlive
+	// the child, for example a browser that a credential plugin opened for
+	// a login. When the grace has passed after that signal, the group gets
+	// SIGKILL, and Run then waits up to 1 s more for the group to be gone.
+	// The grace is WaitDelay, or groupGrace when WaitDelay is zero. With
+	// zero, Run still waits for the child itself to end after a cancel, as
+	// the default does. On Linux, Run reaps the child only after this
+	// stop: while the child is not reaped, no other process can get its
+	// pid, so no other group can get the id of its group, and the signals
+	// reach this group only (groupCmd). Then Run waits up to WaitDelay for
+	// the output pipes, which a process outside the group can keep open.
+	// On other systems, Run reaps the child first and stops the group only
+	// after a cancelled context. The group is not the foreground group of
+	// a terminal: a member that reads the terminal stops there until the
+	// stop. False keeps the default: the child stays in the process group
+	// of lo.
 	ProcessGroup bool
 	// Exited, when set, gets the state of the child after it ended (not
 	// when it did not start). After the context ends, Run returns the
@@ -65,6 +71,19 @@ type Cmd struct {
 	// (exec.Cmd.Cancel), and Start returns the same error when the child
 	// did not start: the state tells the two apart.
 	Exited func(*os.ProcessState)
+}
+
+// groupGrace is the grace of a group stop (ProcessGroup) for a Cmd
+// without a WaitDelay: the time from the SIGTERM to the SIGKILL.
+const groupGrace = 2 * time.Second
+
+// stopGrace returns the grace of a group stop: waitDelay, or groupGrace
+// when waitDelay is zero.
+func stopGrace(waitDelay time.Duration) time.Duration {
+	if waitDelay > 0 {
+		return waitDelay
+	}
+	return groupGrace
 }
 
 // Runner runs external commands. The single seam that lets driver code run
