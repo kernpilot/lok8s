@@ -54,12 +54,23 @@
 #     white space, an operator, = or `. So these forms are findings, not
 #     calls: a case arm (a) curl …), a redirection before the command
 #     (2>&1 curl …), a lookup or an argument (command -v curl, apt-get
-#     install curl), and a line of a here-document or of a string over
-#     more lines that the gate reads as a command of its own. A line that
-#     holds no call opts out only with the trailing comment
+#     install curl, echo if curl). A curl word in quotes is a finding too
+#     when the gate and the shell can read its quotes in two ways: on a
+#     line that starts in a quote, a ${ }, a $( ) or a `…` of a line
+#     before (a string over more lines), and after a single quote in a
+#     ${ } in double quotes ("${a:-'}": the gate reads that quote as text,
+#     as POSIX does, but bash in its default mode reads it as a quote). A
+#     line that holds no call opts out only with the trailing comment
 #     "# curl-gate: not a call" (exactly this text, after white space, as
 #     a comment in code).
 #     The opt-out does not apply to a call that the gate places.
+#   - a curl word in the body of a here-document whose delimiter has no
+#     quote and no backslash (<<EOF): the shell runs the $( ) and `…` of
+#     such a body, and the gate does not read them ("a curl word the gate
+#     cannot place"; a backslash at the end of a line of the body joins
+#     the next line). A quoted delimiter (<<'EOF', <<"EOF", <<\EOF) makes
+#     the body text: a curl word there is no finding, unless the file ends
+#     before the delimiter line.
 # In the q mode, a definition of curl is a finding too: an alias
 # (alias curl=…) or a function (curl(), function curl). The gate checks
 # the source text, not the command that a call then runs.
@@ -67,8 +78,10 @@
 # A curl call is the word curl, \curl, "curl" or a path that ends in /curl,
 # then white space, a redirection (curl</dev/null, curl>out) or the end of
 # the command, in a command position: at the start of a command, after |,
-# (, ;, &, !, {, `, $(, <(, &&, ||, a YAML list item "- ", or the words if,
-# then, do, else, elif, while, until and time. Before it can stand
+# (, ;, &, {, `, $(, <(, &&, ||, a YAML list item "- ", or the words if,
+# then, do, else, elif, while, until, time and ! when that word is in a
+# command position itself (if curl, x; then curl; not echo if curl).
+# Before it can stand
 # wrappers: command, exec, env, xargs, timeout, nice, nohup, sudo,
 # stdbuf, setsid, builtin, bounded (the tick budget helper of the agent
 # CronJob, which runs its arguments under timeout), their options and
@@ -78,16 +91,28 @@
 # end one, and an operator of the shell (;, &&, ||, |, &, ( or )) in code
 # ends one, so the x=y of "echo x=y; curl" is no assignment word before
 # curl. A ${ } nests (a ${ in it opens one more, quotes in it are quotes,
-# only its own } ends it), and its text is no code. A $( ) or a `…` is a
-# command of its own, also in double quotes and in a ${ }: the gate finds
-# a call there as at the top level. A curl in a quoted string (an echo of
-# a command for the user), in the text of a ${ } and in a comment (a #
-# that starts a word, to the end of its line) does not count, and comment
-# lines neither end nor continue a command. Before any other step, a line
-# that ends in a backslash is joined to the next line without the
+# only its own } ends it), and its text is no code. In double quotes, a
+# single quote is text, also in a ${ } in double quotes. A $( ) or a `…`
+# is a command of its own, also in double quotes and in a ${ }: the gate
+# finds a call there as at the top level. A curl in a quoted string (an
+# echo of a command for the user), in the text of a ${ } and in a comment
+# (a # that starts a word, to the end of its line) does not count, and
+# comment lines neither end nor continue a command. Before any other step,
+# a line that ends in a backslash is joined to the next line without the
 # backslash and the newline, as the shell does (so cu\<newline>rl is
-# curl). The lines that a trailing |, &&,
-# || or ( joins are one command.
+# curl). The lines that a trailing |, &&, || or ( joins are one command,
+# and so are the lines of a quote that is still open at the end of a line
+# (there a line that starts with # is text, not a comment). After a line
+# that ends in a $( ) or a `…` that is still open, the next line is a new
+# command in that $( ) or `…` (the newline ends a command there), so the
+# ) and the " of a "$( )" over more lines close what they open. The body
+# of a here-document (<< or <<- and a delimiter word, in code, not <<<
+# and not a shift in (( ))) is no command: it starts at the next line and
+# ends at the line that holds only the delimiter (white space around it
+# does not count, so the body of a script in a YAML block also ends).
+# The first argument of a call is the first word after the curl word that
+# is not a redirection: the operand of a redirection is one shell word,
+# with its quotes and escapes (curl >"a -q " -u … has -u first).
 #
 # A call carries a credential when its own arguments (from the curl word up
 # to the next |, ;, & of && or ||, or the ")" that ends its subshell: not an
@@ -114,9 +139,13 @@
 # of the tree today hold neither), an alias or a function of curl that is
 # defined outside the tree, and the text of a ${ } in a command position
 # (${a:-curl -u x} https://h: only ${X:-curl} is the finding above). The
-# gate does not keep the state of a here-document or of a string over more
-# lines: it reads each of their lines as a command, so a curl word there
-# is a call that it checks, or a backstop finding.
+# lexer does not model all of bash: an ANSI-C string with an escaped
+# quote ($'it\'s') and the ) of a case arm in a $( ) can give it a wrong
+# quote state for the rest of that line (the lines after it then start in
+# that state, and their curl words in quotes are findings). A quoted body
+# of a here-document that the tree writes to a script, and a call in a
+# body that another program runs (bash <<'EOF'), are code that the tree
+# generates.
 #
 # The check reads the source text only: it needs no shellcheck and runs no
 # code of the tree. curl_gate_files gives it every file of the tree, not
@@ -181,7 +210,7 @@ curl_gate() {
     function norm(t) { gsub(/[[:space:]]+/, " ", t); sub(/^ /, "", t); sub(/ $/, "", t); return t }
     BEGIN {
       SQ = sprintf("%c", 39)
-      na = 0; ne = 0
+      na = 0; ne = 0; hq_n = 0; hq_i = 1
       if (ENVIRON["CURL_GATE_ALLOW_TEXT"] != "") {
         k = split(ENVIRON["CURL_GATE_ALLOW_TEXT"], entries, "\n")
         for (i = 1; i <= k; i++) {
@@ -195,7 +224,7 @@ curl_gate() {
     # One command: the text and, for each joined line, its start and its
     # line number. A line that ends in a backslash (cont) joins the next
     # line without a space: the backslash and the newline go away.
-    function reset() { buf = ""; n = 0; evalfrom = 0; LXSET = 0; split("", placed); split("", handled) }
+    function reset() { buf = ""; n = 0; evalfrom = 0; LXSET = 0; hfrom = 1; inq = 0; split("", placed); split("", handled) }
     function add(text, cont) {
       if (n == 0) cmdfile = FILENAME
       n++
@@ -256,17 +285,35 @@ curl_gate() {
     # its } ends it. A # that starts a word in code starts a comment, which
     # ends at the end of its line. CL[k] is the character that ends context
     # k: ")" for $( ), "`" for `…`, "" for the command.
-    function lex(s,   i, c, nx, L, top, st, cx, dp, ws, nctx, ls, k, pc, nc) {
+    # In double quotes a single quote is text, also in a ${ } in double
+    # quotes (dq[] marks such a ${ }). LQ is the position of the first single
+    # quote in such a ${ }, else 0: bash in its default mode reads that quote
+    # as a quote, so the backstop reports each curl word in quotes after it.
+    # The state at the start is the code of the command, or IS: the state
+    # at the end of the command before, when that command ended in a $( )
+    # or a `…` that is still open (carry). ES is the state at the end of s.
+    function lex(s,   i, c, nx, L, top, st, cx, dp, ws, dq, nctx, ls, k, pc, nc) {
       L = length(s)
       if (LXSET && s == LXS) return
-      LXSET = 1; LXS = s
+      LXSET = 1; LXS = s; LQ = 0
       split("", LS); split("", LC); split("", LD); split("", LW); split("", LE); split("", CL)
       for (k = 2; k <= n; k++) ls[starts[k]] = 1
-      top = 1; st[1] = "c"; cx[1] = 1; dp[1] = 0; ws[1] = 1; nctx = 1; CL[1] = ""
+      top = 1; st[1] = "c"; cx[1] = 1; dp[1] = 0; ws[1] = 1; dq[1] = 0; nctx = 1; CL[1] = ""
+      if (IS_top > 1) {
+        top = IS_top; nctx = IS_nctx
+        for (k = 1; k <= top; k++) { st[k] = IS_st[k]; cx[k] = IS_cx[k]; dp[k] = IS_dp[k]; dq[k] = IS_dq[k]; ws[k] = 1 }
+        for (k = 1; k <= nctx; k++) CL[k] = IS_CL[k]
+      }
       for (i = 1; i <= L + 1; i++) {
         if (st[top] == "#" && (i in ls)) top--
         lex_rec(i, st, cx, dp, ws, top)
-        if (i > L) break
+        if (i > L) {
+          # A comment ends at the end of the line.
+          if (st[top] == "#") top--
+          ES_top = top; ES_nctx = nctx
+          for (k = 1; k <= top; k++) { ES_st[k] = st[k]; ES_cx[k] = cx[k]; ES_dp[k] = dp[k]; ES_dq[k] = dq[k] }
+          break
+        }
         c = substr(s, i, 1); nx = substr(s, i + 1, 1)
         if (st[top] == "#") continue
         if (st[top] == "s") { if (c == SQ) top--; continue }
@@ -274,21 +321,22 @@ curl_gate() {
         if (c == "$" && (nx == "(" || nx == "{")) {
           i++; lex_rec(i, st, cx, dp, ws, top)
           top++
-          if (nx == "(") { st[top] = "c"; cx[top] = ++nctx; dp[top] = 0; ws[top] = i + 1; CL[nctx] = ")" }
-          else { st[top] = "b"; cx[top] = cx[top - 1]; dp[top] = dp[top - 1] }
+          if (nx == "(") { st[top] = "c"; cx[top] = ++nctx; dp[top] = 0; ws[top] = i + 1; dq[top] = 0; CL[nctx] = ")" }
+          else { st[top] = "b"; cx[top] = cx[top - 1]; dp[top] = dp[top - 1]; dq[top] = st[top - 1] == "d" || (st[top - 1] == "b" && dq[top - 1]) }
           continue
         }
         if (c == "`") {
           if (st[top] == "c" && CL[cx[top]] == "`") { top--; continue }
-          top++; st[top] = "c"; cx[top] = ++nctx; dp[top] = 0; ws[top] = i + 1; CL[nctx] = "`"
+          top++; st[top] = "c"; cx[top] = ++nctx; dp[top] = 0; ws[top] = i + 1; dq[top] = 0; CL[nctx] = "`"
           continue
         }
         if (st[top] == "d") { if (c == "\"") top--; continue }
-        if (c == SQ || c == "\"") { top++; st[top] = (c == SQ ? "s" : "d"); cx[top] = cx[top - 1]; dp[top] = dp[top - 1]; continue }
+        if (c == SQ && st[top] == "b" && dq[top]) { if (!LQ) LQ = i; continue }
+        if (c == SQ || c == "\"") { top++; st[top] = (c == SQ ? "s" : "d"); cx[top] = cx[top - 1]; dp[top] = dp[top - 1]; dq[top] = 0; continue }
         if (st[top] == "b") { if (c == "}") top--; continue }
         # Code.
         pc = i > 1 ? substr(s, i - 1, 1) : ""
-        if (c == "#" && (i == 1 || pc ~ /[[:space:];&|()<>]/)) { top++; st[top] = "#"; cx[top] = cx[top - 1]; dp[top] = dp[top - 1]; continue }
+        if (c == "#" && (i == 1 || pc ~ /[[:space:];&|()<>]/)) { top++; st[top] = "#"; cx[top] = cx[top - 1]; dp[top] = dp[top - 1]; dq[top] = 0; continue }
         if (c == "(") { dp[top]++; ws[top] = i + 1; continue }
         if (c == ")") {
           if (dp[top] > 0) { dp[top]--; ws[top] = i + 1 }
@@ -331,6 +379,20 @@ curl_gate() {
           pc = substr(buf, i - 1, 1); nc = substr(buf, i + 1, 1)
           if (pc != ">" && pc != "<" && nc != ">") return i
         }
+      }
+      return L + 1
+    }
+    # The end of the shell word that starts at position a of buf in the
+    # context cb: the first white space or operator in the code of that
+    # context. Quotes, escapes, a ${ }, a $( ) and a `…` stay in the word.
+    function word_end(a, cb,   i, L, c) {
+      lex(buf); L = length(buf)
+      for (i = a; i <= L; i++) {
+        if (LS[i] != "c" || LC[i] != cb || LE[i]) continue
+        c = substr(buf, i, 1)
+        if (c == "(" && i > 1 && substr(buf, i - 1, 1) == "$" && !LE[i - 1]) continue
+        if (c == "`" && CL[cb] != "`") continue
+        if (c ~ /[[:space:];&|()<>`]/) return i
       }
       return L + 1
     }
@@ -377,11 +439,18 @@ curl_gate() {
         return p
       }
     }
-    function command_position(p) {
+    # A command position: the start of a command, after an operator, or
+    # after a keyword (if, then, do, else, elif, while, until, time or !)
+    # that is in a command position itself (so the if of "echo if" is no
+    # keyword).
+    function command_position(p,   q) {
       sub(/[[:space:]]+$/, "", p)
       if (p == "") return 1
-      if (p ~ /[|(;&!{`]$/) return 1
-      if (p ~ /(^|[[:space:]])(if|then|do|else|elif|while|until|time)$/) return 1
+      if (match(p, /(if|then|do|else|elif|while|until|time|!)$/)) {
+        q = substr(p, 1, RSTART - 1)
+        if (q == "" || q ~ /[[:space:];&|({`]$/) return command_position(q)
+      }
+      if (p ~ /[|(;&{`]$/) return 1
       if (p ~ /^[[:space:]]*-$/) return 1
       return 0
     }
@@ -492,23 +561,98 @@ curl_gate() {
       }
       return 0
     }
-    # The backstop: each curl word in code (after the start of the command,
+    # A curl word at position p of s: the text curl after the start of s,
     # white space, an operator, =, `, / or a backslash, and before the end,
-    # white space, an operator, = or `) that no rule placed or reported is a
-    # finding, unless its line opts out.
-    function backstop(   s, off, k, p, nc) {
+    # white space, an operator, = or `.
+    function curl_word(s, p,   nc) {
+      if (p > 1 && substr(s, p - 1, 1) !~ /[[:space:];&|()<>=`\/\\]/) return 0
+      nc = substr(s, p + 4, 1)
+      return nc == "" || nc ~ /[[:space:];&|()<>=`]/
+    }
+    # The backstop: each curl word in code that no rule placed or reported
+    # is a finding, unless its line opts out. In quotes it is a finding too
+    # when its line starts in a quote (a string over more lines) or when a
+    # single quote in a ${ } in double quotes comes before it (LQ): there
+    # the gate and the shell can disagree on what is quoted.
+    function backstop(   s, off, k, p, lq, qs) {
+      lex(buf); lq = LQ
+      split("", qs)
+      if (IS_top > 1) qs[lines[1]] = 1
+      for (k = 2; k <= n; k++) if (LS[starts[k]] ~ /^[sdb]$/ || LC[starts[k]] > 1) qs[lines[k]] = 1
       s = buf; off = 0
       while ((k = index(s, "curl")) > 0) {
         p = off + k; off += k + 3; s = substr(s, k + 4)
-        if (p > 1 && substr(buf, p - 1, 1) !~ /[[:space:];&|()<>=`\/\\]/) continue
-        nc = substr(buf, p + 4, 1)
-        if (nc != "" && nc !~ /[[:space:];&|()<>=`]/) continue
-        if ((p in placed) || (p in handled) || (evalfrom && p > evalfrom) || quoted(buf, p)) continue
+        if (!curl_word(buf, p)) continue
+        if ((p in placed) || (p in handled) || (evalfrom && p > evalfrom)) continue
+        if (quoted(buf, p) && !(line_at(p) in qs) && !(lq && p > lq)) continue
         if (optout(line_at(p))) continue
         report(line_at(p), "a curl word the gate cannot place")
       }
     }
-    function check(   s, off, c0, b, adv, prefix, stripped, rest, l, marked, i, hit, cred, manifest, seg, e) {
+    # The here-documents that the command opens: each << or <<- in code
+    # (not <<<, not a shift in (( ))) and its delimiter word, from position
+    # hfrom of buf on. A quote or a backslash in the delimiter makes a
+    # quoted body (text to the shell); else the shell runs the $( ) and `…`
+    # of the body. The bodies start at the next line, in this order.
+    function heredocs(   i, L, j, w, we, t, q) {
+      lex(buf); L = length(buf)
+      for (i = hfrom; i < L; i++) {
+        if (substr(buf, i, 2) != "<<" || LS[i] != "c" || LE[i]) continue
+        if (substr(buf, i + 2, 1) == "<") { i += 2; continue }
+        j = i + 2
+        if (substr(buf, j, 1) == "-") j++
+        while (substr(buf, j, 1) ~ /[ \t]/) j++
+        if (j > L || substr(buf, j, 1) ~ /[;&|()<>=]/) continue
+        t = substr(buf, 1, i - 1)
+        if (gsub(/\(\(/, "&", t) > gsub(/\)\)/, "&", t)) continue
+        we = word_end(j, LC[i])
+        w = substr(buf, j, we - j)
+        q = w ~ /["\047\\]/
+        gsub(/["\047\\]/, "", w)
+        hq_n++; hq_delim[hq_n] = w; hq_quoted[hq_n] = q; hfile = FILENAME
+        i = we - 1
+      }
+      hfrom = L + 1
+    }
+    # A line of a here-document body (FNR, the text $0). A curl word in an
+    # unquoted body is a finding: the gate does not read the $( ) and `…`
+    # there. A quoted body is text: its curl words are findings only when
+    # the body has no end in the file (hd_close). A backslash at the end of
+    # a line of an unquoted body joins the next line, as the shell does.
+    function body_line(   t) {
+      t = $0; sub(/^[[:space:]]+/, "", t); sub(/[[:space:]]+$/, "", t)
+      if (t == hq_delim[hq_i]) {
+        body_words(hbuf, hbl, 0); hbuf = ""; hb_n = 0
+        if (++hq_i > hq_n) { hq_n = 0; hq_i = 1 }
+        return
+      }
+      if (hq_quoted[hq_i]) { body_words($0, FNR, 1); return }
+      t = $0
+      if (hbuf == "") hbl = FNR
+      if (match(t, /\\+$/) && RLENGTH % 2 == 1) { hbuf = hbuf substr(t, 1, length(t) - 1); return }
+      t = hbuf t; hbuf = ""
+      body_words(t, hbl, 0)
+    }
+    function body_words(t, l, keep,   s, off, k, p) {
+      if (mode == "list") return
+      s = t; off = 0
+      while ((k = index(s, "curl")) > 0) {
+        p = off + k; off += k + 3; s = substr(s, k + 4)
+        if (!curl_word(t, p)) continue
+        if (keep) hb_line[++hb_n] = l
+        else printf "%s:%d: %s\n", hfile, l, "a curl word the gate cannot place"
+      }
+    }
+    # The end of a file in a here-document body: the curl words of a quoted
+    # body that did not end are findings.
+    function hd_close(   i) {
+      if (hq_n > 0) {
+        if (hbuf != "") body_words(hbuf, hbl, 0)
+        for (i = 1; i <= hb_n; i++) printf "%s:%d: %s\n", hfile, hb_line[i], "a curl word the gate cannot place"
+      }
+      hq_n = 0; hq_i = 1; hb_n = 0; hbuf = ""
+    }
+    function check(   s, off, c0, b, adv, prefix, stripped, rest, l, marked, i, hit, cred, manifest, seg, e, a, cb) {
       if (buf == "") { reset(); return }
       if (mode != "list") {
         indirect("(^|[[:space:];&|({])((local|declare|typeset|readonly|export)[[:space:]]+(-[A-Za-z]+[[:space:]]+)*)?[A-Za-z_][A-Za-z0-9_]*(\\[[^]]*\\])?\\+?=(\\([[:space:]]*)?[\"\047]?([^[:space:]\"\047()]*/)?curl[\"\047]?([[:space:]);]|$)", 0, "assign")
@@ -550,11 +694,14 @@ curl_gate() {
         if (mode == "list")
           printf "%s:%d%s\n", cmdfile, l, cred ? " credential" : ""
         # The first argument: a redirection (curl </dev/null -q, curl 2>&1
-        # -q) is no argument.
-        rest = substr(buf, c0 + 4)
-        sub(/^["\047]/, "", rest)
-        while (match(rest, /^[[:space:]]*([0-9]+|&)?(<<<|>>|>&|<&|>\||<|>)[[:space:]]*[^[:space:]<>|;&]+/))
-          rest = substr(rest, RLENGTH + 1)
+        # -q) is no argument. Its operand is one shell word, with its
+        # quotes and escapes (curl >"a -q " -u … gives -u first).
+        lex(buf); cb = LC[c0]
+        a = c0 + 4
+        if (substr(buf, a, 1) ~ /["\047]/) a++
+        while (match(substr(buf, a), /^[[:space:]]*([0-9]+|&|\{[A-Za-z_][A-Za-z0-9_]*\})?(<<<|<<-|<<|>>|>&|<&|<>|>\||<|>)[[:space:]]*/))
+          a = word_end(a + RLENGTH, cb)
+        rest = substr(buf, a)
         if (mode == "q" && rest !~ /^[[:space:]]*-q([[:space:]]|$)/)
           report(l, "a curl call: -q is not its first argument")
         if (mode == "tls" && !manifest && !helper_form(prefix)) {
@@ -574,22 +721,37 @@ curl_gate() {
       reset()
     }
     FNR == 1 {
-      check(); reset()
+      check(); reset(); hd_close(); IS_top = 0
       for (i = 1; i <= na; i++) if (path_is(FILENAME, apath[i])) aseen[i] = 1
     }
-    # A comment line neither ends nor continues a command.
-    /^[[:space:]]*#/ { next }
+    hq_n > 0 { body_line(); next }
+    # A comment line neither ends nor continues a command. In a string over
+    # more lines it is text of the string.
+    !inq && /^[[:space:]]*#/ { next }
+    # The command goes on at the next line after a backslash, a trailing |,
+    # &&, || or (, and in a quote that is still open (inq): there the
+    # newline is text. In a $( ) or a `…` that is still open, the newline
+    # ends the command, and the next command starts in that state (IS).
     {
       text = $0
       cont = 0
       if (match(text, /\\+$/) && RLENGTH % 2 == 1) { text = substr(text, 1, length(text) - 1); cont = 1 }
       add(text, cont)
-      if (cont || $0 ~ /(\\|\||&&|\(|\$\()[[:space:]]*$/) next
+      lex(buf)
+      NS_top = ES_top; NS_nctx = ES_nctx
+      for (k = 1; k <= ES_top; k++) { NS_st[k] = ES_st[k]; NS_cx[k] = ES_cx[k]; NS_dp[k] = ES_dp[k]; NS_dq[k] = ES_dq[k] }
+      for (k = 1; k <= ES_nctx; k++) NS_CL[k] = CL[k]
+      e = NS_st[NS_top]; inq = e == "s" || e == "d" || e == "b"
+      if (!cont) heredocs()
+      if (cont || inq || $0 ~ /(\\|\||&&|\(|\$\()[[:space:]]*$/) next
       check()
+      IS_top = NS_top; IS_nctx = NS_nctx
+      for (k = 1; k <= NS_top; k++) { IS_st[k] = NS_st[k]; IS_cx[k] = NS_cx[k]; IS_dp[k] = NS_dp[k]; IS_dq[k] = NS_dq[k] }
+      for (k = 1; k <= NS_nctx; k++) IS_CL[k] = NS_CL[k]
     }
     END {
       if (bad) exit 2
-      check()
+      check(); hd_close()
       for (i = 1; i <= ne; i++)
         for (nm in curlname)
           if (evtext[i] ~ ("\\$\\{?" nm "([^A-Za-z0-9_]|$)")) {

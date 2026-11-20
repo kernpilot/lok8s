@@ -556,6 +556,174 @@ SH
   done
 }
 
+# The state of a line goes on at the next line: a quote that is still
+# open (the lines are one command), a $( ) that is still open (the next
+# command starts in it), and a here-document (its body is no command).
+# The calls (q): a single quote in a ${ } in double quotes is text (line
+# 1), a quote that a line before opened ends at its ' (line 3), a call
+# after the end of a "$( )" over more lines (lines 8 and 9), and a call
+# after a body (lines 20 and 26), after a shift in (( )) (line 22). The
+# findings that the gate cannot place: a curl word in a string over more
+# lines, also on a line that starts with # (line 5); a curl word in an
+# unquoted body, where the shell runs the $( ) (lines 11 and 14, a split
+# name); a curl word in quotes on a line that starts in a $( ) of a line
+# before (line 28: the ) of the case arm ends the $( ) for the gate). In
+# amb.sh, a single quote in a ${ } in double quotes comes before the curl
+# word in quotes: in its default mode bash reads that quote as a quote. In
+# open.sh, a quoted body has no end in the file. The controls: a quoted
+# body is text (also with <<-), libcurl and curl_config are no curl words,
+# and the calls after a string or a $( ) over more lines are calls.
+@test "curl gate: a quote, a \$( ) and a here-document over more lines keep their state, and a line that the gate cannot read is a finding" {
+  local bad="${BATS_TEST_TMPDIR}/multi-bad.sh" amb="${BATS_TEST_TMPDIR}/amb.sh"
+  local open="${BATS_TEST_TMPDIR}/open.sh" good="${BATS_TEST_TMPDIR}/multi-good.sh" n
+  CURL_GATE_ALLOW=()
+  cat > "${bad}" <<'SH'
+X="${a:-'}" curl -u u:p https://h.example/a1
+x='
+'; curl -u u:p https://h.example/a2
+echo "a
+# curl -u u:p https://h.example/a3
+b"
+x="$(
+  printf '%s' "${y}" | curl -u u:p https://h.example/a4
+)"; curl -u u:p https://h.example/a5
+cat <<EOF
+'$(curl -u u:p https://h.example/a6)'
+EOF
+cat <<EOF
+$(cu\
+rl -u u:p https://h.example/a7)
+EOF
+cat <<'EOF'
+x
+EOF
+curl -u u:p https://h.example/a8
+y=$(( 1 << n ))
+curl -u u:p https://h.example/a9
+cat <<EOF &&
+body
+EOF
+curl -u u:p https://h.example/a10
+z="$(f
+case "${y}" in a) curl -u u:p https://h.example/a11 ;; esac
+)"
+SH
+  printf '%s\n' 'X="${a:-'"'"'"'"'"'}" curl -u u:p https://h.example/b1' > "${amb}"
+  printf '%s\n' "cat <<'EOF'" 'curl -u u:p https://h.example/c1' 'EOF-not' > "${open}"
+  cat > "${good}" <<'SH'
+y="${a:-'x'}"; ( http::tls_log_vars_unset && curl -q -sS https://h.example/g1 )
+cat <<'EOF'
+curl -u u:p https://h.example/g2
+EOF
+cat <<-"EOF"
+	$(curl -u u:p https://h.example/g3)
+	EOF
+cat <<EOF
+libcurl and curl_config are no words of the gate
+EOF
+echo "x
+y" && ( http::tls_log_vars_unset && curl -q -sS https://h.example/g4 )
+z=$(
+  echo a
+) && ( http::tls_log_vars_unset && curl -q -sS https://h.example/g5 )
+echo "a ' b" && ( http::tls_log_vars_unset && curl -q -sS https://h.example/g6 )
+SH
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local c="a curl word the gate cannot place"
+  local want_q="" want_t="" want_l=""
+  for n in 1 3 5 8 9 11 14 20 22 26 28; do
+    case "${n}" in
+      5 | 11 | 14 | 28) want_q+="${bad}:${n}: ${c}"$'\n'; want_t+="${bad}:${n}: ${c}"$'\n' ;;
+      *) want_q+="${bad}:${n}: ${q}"$'\n'; want_t+="${bad}:${n}: ${t}"$'\n'; want_l+="${bad}:${n} credential"$'\n' ;;
+    esac
+  done
+  run curl_gate q "${bad}" "${amb}" "${open}"
+  assert_failure 1
+  assert_output "${want_q}${amb}:1: ${c}
+${open}:2: ${c}"
+  run curl_gate tls "${bad}" "${amb}" "${open}"
+  assert_failure 1
+  assert_output "${want_t}${amb}:1: ${c}
+${open}:2: ${c}"
+  run curl_gate list "${bad}" "${amb}" "${open}"
+  assert_success
+  assert_output "${want_l%$'\n'}"
+  run curl_gate q "${good}"
+  assert_success
+  assert_output ""
+  run curl_gate tls "${good}"
+  assert_success
+  assert_output ""
+  run curl_gate list "${good}"
+  assert_success
+  assert_output "${good}:1
+${good}:12
+${good}:15
+${good}:16"
+}
+
+# The operand of a redirection is one shell word, with its quotes and
+# escapes: the -q in it is no argument (lines 1 to 3). A keyword starts a
+# command only in a command position: in "echo if curl" the curl is an
+# argument, no call, and so a finding of the backstop in the q and tls
+# modes (lines 4 to 6). The controls: a -q after an operand with white
+# space in quotes or in a $( ), and curl after if, then, ! and time in a
+# command position (also after ; with no space).
+@test "curl gate: a redirection operand is one shell word, and a keyword starts a command only in a command position" {
+  local bad="${BATS_TEST_TMPDIR}/redir-bad.sh" good="${BATS_TEST_TMPDIR}/redir-good.sh" n
+  CURL_GATE_ALLOW=()
+  cat > "${bad}" <<'SH'
+curl >"/tmp/log -q " -u u:p https://h.example/r1
+curl 2>'/tmp/a -q ' -u u:p https://h.example/r2
+curl >/tmp/a\ -q -u u:p https://h.example/r3
+echo if curl -u u:p https://h.example/r4
+echo then curl -u u:p https://h.example/r5
+echo ! curl -u u:p https://h.example/r6
+SH
+  cat > "${good}" <<'SH'
+curl >"/tmp/a b" -q -sS https://h.example/k1
+curl 2>"$(printf '%s' x) y" -q -sS https://h.example/k2
+if curl -q -sS https://h.example/k3; then :; fi
+if true; then curl -q -sS https://h.example/k4; fi
+while ! curl -q -sS https://h.example/k5; do :; done
+x;then curl -q -sS https://h.example/k6
+time curl -q -sS https://h.example/k7
+SH
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  local c="a curl word the gate cannot place"
+  run curl_gate q "${bad}"
+  assert_failure 1
+  assert_output "${bad}:1: ${q}
+${bad}:2: ${q}
+${bad}:3: ${q}
+${bad}:4: ${c}
+${bad}:5: ${c}
+${bad}:6: ${c}"
+  run curl_gate tls "${bad}"
+  assert_failure 1
+  assert_output "${bad}:1: ${t}
+${bad}:2: ${t}
+${bad}:3: ${t}
+${bad}:4: ${c}
+${bad}:5: ${c}
+${bad}:6: ${c}"
+  run curl_gate list "${bad}"
+  assert_success
+  assert_output "${bad}:1 credential
+${bad}:2 credential
+${bad}:3 credential"
+  run curl_gate q "${good}"
+  assert_success
+  assert_output ""
+  local want=""
+  for n in 1 2 3 4 5 6 7; do want+="${good}:${n}"$'\n'; done
+  run curl_gate list "${good}"
+  assert_success
+  assert_output "${want%$'\n'}"
+}
+
 # An alias or a function named curl: the gate checks the source text, not
 # the command that a curl call runs, so each definition is a finding in
 # the q mode. The calls in a function body stay calls. The controls name
