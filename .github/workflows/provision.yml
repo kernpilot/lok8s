@@ -47,10 +47,27 @@ jobs:
         id: detect
         if: github.event_name == 'push'
         run: |
-          domains=$(git diff --name-only HEAD~1 HEAD -- '.lok8s/*/cluster.lok8s.yaml' \
-            | sed 's|.lok8s/\(.*\)/cluster.lok8s.yaml|\1|' \
-            | tr '\n' ' ')
-          echo "domains=${domains}" >> "$GITHUB_OUTPUT"
+          # is_name <rule> <value>: the value matches the regex rule, as bytes.
+          is_name() {
+            local LC_ALL=C
+            [[ "${2}" =~ ${1} ]]
+          }
+          # git -z separates the paths with NUL, so a space or a newline in
+          # a directory name stays in that name. Each directory name must
+          # match the domain rule of lo. A bad name stops the step before it
+          # writes an output, and the error line does not print the name.
+          domain_rule='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+          domains=()
+          while IFS= read -r -d '' path; do
+            domain="${path#.lok8s/}"
+            domain="${domain%/cluster.lok8s.yaml}"
+            if ! is_name "${domain_rule}" "${domain}"; then
+              echo "::error::A changed cluster directory does not match the lo domain rule ${domain_rule}. No domain was passed on."
+              exit 1
+            fi
+            domains+=("${domain}")
+          done < <(git diff -z --name-only HEAD~1 HEAD -- '.lok8s/*/cluster.lok8s.yaml')
+          echo "domains=${domains[*]}" >> "${GITHUB_OUTPUT}"
 
       # Cluster registration with kubehz needs NO platform token: `lo provision`
       # registers a PENDING cluster anonymously, and the user proves ownership by
@@ -73,7 +90,9 @@ jobs:
             local LC_ALL=C
             [[ "${2}" =~ ${1} ]]
           }
-          # hide_claim_ticket: see the same function in spinup.yml.
+          # hide_claim_ticket: see the same function in spinup.yml. Limit: it
+          # hides a ticket that is on one line, as lo prints it today. A
+          # ticket split over two lines, or in another encoding, passes.
           hide_claim_ticket() {
             local LC_ALL=C line eol cr out
             local hidden='<hidden: one-time claim ticket>'

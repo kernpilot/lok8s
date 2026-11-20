@@ -126,12 +126,17 @@ jobs:
           #    of a CRLF line end; the CR stays.
           # 2. Every string with the shape of an MD5 fingerprint (16 or more
           #    pairs of hex digits, with a colon between each two) gets the
-          #    placeholder. So a ticket in another line format is hidden too,
-          #    and so is the public server-key fingerprint of the legacy
-          #    registration. "lo:<domain>" stays.
+          #    placeholder. A longer run of such pairs is hidden whole. So a
+          #    ticket in another line format is hidden too, and so is the
+          #    public server-key fingerprint of the legacy registration.
+          #    "lo:<domain>" stays.
           # Every other text stays as lo printed it. LC_ALL=C: the match
           # compares bytes. The function is for text: bash read drops a NUL
-          # byte. Each line goes out when it comes in, so the log streams.
+          # byte, and a line stays in memory until its newline comes. Each
+          # line goes out when it comes in, so the log streams.
+          # Limit: the function hides a ticket that is on one line, as lo
+          # prints it today. A ticket split over two lines (a newline or a CR
+          # in it), or in another encoding, passes.
           hide_claim_ticket() {
             local LC_ALL=C line eol cr out
             local hidden='<hidden: one-time claim ticket>'
@@ -229,15 +234,18 @@ jobs:
               echo "this cluster. So this workflow does not show it: the log has a placeholder in its place,"
               echo "and this summary does not hold it. Keep it private: do not paste it into an issue, a chat or a CI log."
               echo ""
-              echo "Claim the cluster soon. Each run of this workflow registers the cluster again. The runner"
-              echo "does not keep the bind secret of an earlier run (\`clusters/<domain>/.kubehz-bind\`), so each"
-              echo "run adds a new pending registration with its own ticket, and lo replaces the claim key in"
-              echo "Hetzner with the key of the new run. The tickets of earlier runs keep working until someone"
-              echo "claims them, or until their registration expires (by default after 14 days; the kubehz"
+              echo "Claim the cluster soon. The runner does not keep the bind secret of an earlier run"
+              echo "(\`clusters/<domain>/.kubehz-bind\`). So each run that registers a claim key with success adds"
+              echo "a new pending registration with its own ticket (the platform refuses a new one when the domain"
+              echo "has five pending registrations), and lo replaces the claim key in Hetzner with the key of that"
+              echo "run. The tickets of earlier runs keep working until someone claims them, or until the cleanup"
+              echo "removes their registration (by default after about 14 days without a heartbeat; the kubehz"
               echo "deployment can change this)."
             else
-              echo "This run used the legacy registration (no claim key), so it has no claim ticket. To claim"
-              echo "the cluster, deploy the kubehz agent in it (\`lo kubehz deploy\`), then run"
-              echo "\`lo kubehz claim-code\` and paste the code on the dashboard **Claim** page while you are signed in."
+              echo "This run did not confirm a claim-key upload, so lo used the legacy registration and printed"
+              echo "no claim ticket. That does not mean that no ticket exists: the platform can make one before"
+              echo "the upload fails, and the tickets of earlier runs stay. To claim the cluster, deploy the kubehz"
+              echo "agent in it (\`lo kubehz deploy\`), then run \`lo kubehz claim-code\` and paste the code on the"
+              echo "dashboard **Claim** page while you are signed in."
             fi
           } >> "${GITHUB_STEP_SUMMARY}"

@@ -871,32 +871,45 @@ workflow keeps the ticket out of them:
 - The job log shows `<hidden: one-time claim ticket>` in place of the ticket.
   The log also hides every other string with the shape of an MD5 fingerprint
   (16 or more pairs of hex digits, with a colon between each two), for example
-  the server-key fingerprint of the legacy registration. Every other text
-  stays as `lo` printed it.
+  the server-key fingerprint of the legacy registration. A longer run of such
+  pairs is hidden whole. Every other text stays as `lo` printed it.
 - No step output, environment value or job summary holds the ticket.
 - The job summary tells you where to read the ticket: in the Hetzner Console
   (**Security → SSH keys**, the key `kubehz-claim-<domain>`). People with
   access to that Hetzner Cloud project can read it there.
 
-Claim the cluster soon. Each run of the workflow registers the cluster again.
-The runner does not keep the bind secret of an earlier run
-(`clusters/<domain>/.kubehz-bind`), so each run adds a new pending
-registration with its own ticket, and lo replaces the claim key in Hetzner
-with the key of the new run. The tickets of earlier runs keep working until
-someone claims them, or until their registration expires (by default after 14
-days; the kubehz deployment can change this).
+The log filter covers what `lo` prints today: the ticket on one line. It is a
+text filter, not a guarantee for any encoding: a ticket split over two lines,
+or in another form, would pass it.
+
+Claim the cluster soon. The runner does not keep the bind secret of an earlier
+run (`clusters/<domain>/.kubehz-bind`). So each run that registers a claim key
+with success adds a new pending registration with its own ticket, and lo
+replaces the claim key in Hetzner with the key of that run. A registration can
+also fail, and the platform refuses a new pending registration when the
+domain already has five. The tickets of earlier runs keep working until
+someone claims them, or until the cleanup removes their registration. By
+default, the cleanup removes a pending registration after about 14 days
+without a heartbeat (the kubehz deployment can change this). It is a cleanup,
+not a promised time at which a ticket stops working.
 
 ::: warning Job logs of earlier runs
 An earlier version of this workflow wrote the ticket in clear text into the
-job log and the job summary. If your repository ran it, delete those workflow
-runs (this removes their logs and summaries). Then claim the cluster, or let
-its registration expire.
+job log and the job summary. If your repository ran it, each pending
+registration of those runs is exposed, and claiming the newest one does not
+spend the tickets of the others. For each exposed registration, claim it with
+its ticket. The cluster is then in your account, and an owner or admin of the
+account can remove it there. The platform has no other way to remove a pending
+registration: without a claim, it ends only when the cleanup removes it. Then
+delete those workflow runs (this removes their logs and summaries). Deleting a
+log does not take back a copy that someone already read.
 :::
 
-When a run used the legacy registration (no claim key: for example, the
-claim-key registration failed), there is no ticket. The job summary then
-tells you to claim the cluster with the heartbeat agent and `lo kubehz
-claim-code`.
+When a run did not confirm a claim-key upload, lo used the legacy
+registration and printed no ticket. That does not mean that no ticket exists:
+the platform can make one before the upload fails, and the tickets of earlier
+runs stay. The job summary then tells you to claim the cluster with the
+heartbeat agent and `lo kubehz claim-code`.
 
 See the [kubehz Platform guide](./kubehz.md#claiming) for the full flow:
 registration, claiming, the heartbeat agent, and troubleshooting.
