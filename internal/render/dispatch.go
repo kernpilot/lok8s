@@ -33,7 +33,7 @@ import (
 //     LOK8S_SECRETS_* from the environment. Failure prints "secret plugin:
 //     <err>" like plugin.Fail.
 //   - ChartRenderer → khelm as a library (khelm.go), reproducing the khelm
-//     v2.8.0 kustomize-plugin mode. Failure prints "khelm: <err>" like its
+//     v2.9.0 kustomize-plugin mode. Failure prints "khelm: <err>" like its
 //     log.Fatalf.
 //
 // The match is on the LAST TWO path elements (…/secret/Secret,

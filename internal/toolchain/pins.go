@@ -23,13 +23,13 @@ const (
 	// mapping the drift test enforces.
 	KustomizeCLI = "v5.8.1"
 	// KhelmVersion is the khelm release: the library lo-full links
-	// (go.mod: github.com/mgoltzsche/khelm/v2 v2.8.0) and the ChartRenderer
+	// (go.mod: github.com/mgoltzsche/khelm/v2 v2.9.0) and the ChartRenderer
 	// binary b installs under .kustomize/ for lo core.
-	KhelmVersion = "2.8.0"
-	// HelmVersion is helm.sh/helm/v3 as khelm v2.8.0 requires it — pinned in
+	KhelmVersion = "2.9.0"
+	// HelmVersion is helm.sh/helm/v3 as khelm v2.9.0 requires it — pinned in
 	// go.mod as well, so the in-process chart inflation is the helm the khelm
 	// binary was built from.
-	HelmVersion = "3.21.2"
+	HelmVersion = "3.22.1"
 )
 
 // YQVersion is the yq release the bash implementation is tested with: the
