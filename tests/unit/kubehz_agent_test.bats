@@ -1297,6 +1297,83 @@ _ln_fails() {
   done
 }
 
+# _write_fails <file>: printf as a write that fails after a part, as a full
+# disk fails. When it writes KUBEHZ_AGENT_BODY to <file>, it writes the
+# first 3 bytes, runs WRITE_HOOK, prints the write error of bash under
+# LC_ALL=C and fails. Every other printf runs as it is: the DEBUG trap of
+# bats calls printf -v before each command, also while the output is
+# <file>. The Go twin is failWrite.
+_write_fails() {
+  export WRITE_FAILS="${1}" WRITE_HOOK=""
+  printf() {
+    if [[ $# == 2 && "${1}" == '%s' && "${2}" == "${KUBEHZ_AGENT_BODY}" && /dev/fd/1 -ef "${WRITE_FAILS}" ]]; then
+      builtin printf '%s' "${2:0:3}"
+      [[ -z "${WRITE_HOOK}" ]] || eval "${WRITE_HOOK}"
+      builtin printf 'bash: printf: write error: No space left on device\n' >&2
+      return 1
+    fi
+    builtin printf "$@"
+  }
+}
+
+# The Go twin is TestPublishKubeconfigWriteFailureRemovesTheFile and the
+# last part of TestAgentKubeconfigWithoutHardLinks.
+@test "kubeconfig: a write that fails after the exclusive create removes the part, and the command names the cause" {
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  local d="${BATS_TEST_TMPDIR}/nolink-full" wrc=0
+  mkdir -p "${d}"
+  _ln_fails
+  LN_ERROR='Operation not permitted'
+  _write_fails "${d}/kc.yaml"
+  KUBEHZ_AGENT_BODY='apiVersion: v1'
+  kubehz::agent_write "${d}/kc.yaml" 0 || wrc=$?
+  [[ "${wrc}" == 2 ]] || fail "rc ${wrc}, want 2"
+  [[ "${KUBEHZ_AGENT_WRITE_ERROR}" == "no space left on device" ]] || fail "cause: ${KUBEHZ_AGENT_WRITE_ERROR}"
+  run ls -A "${d}"
+  assert_output ''
+  # A file that takes the place of the made file during the write stays:
+  # only the file that the create made is removed.
+  WRITE_HOOK="mv -- '${d}/kc.yaml' '${d}/kc.yaml.made' && builtin printf other > '${d}/kc.yaml'"
+  wrc=0
+  kubehz::agent_write "${d}/kc.yaml" 0 || wrc=$?
+  [[ "${wrc}" == 2 ]] || fail "a file in its place: rc ${wrc}, want 2"
+  run cat "${d}/kc.yaml"
+  assert_output other
+  run ls -A "${d}"
+  assert_output $'kc.yaml\nkc.yaml.made'
+  rm -f -- "${d}/kc.yaml" "${d}/kc.yaml.made"
+  # The command names the cause, not a file that exists.
+  _write_fails "${d}/full.yaml"
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/full.yaml"
+  assert_failure
+  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write ${d}/full.yaml: no space left on device
+  Check the free space and the file system of the directory, then run the command again."
+  run ls -A "${d}"
+  assert_output ''
+}
+
+# A failed create made no file: a file or a dangling link at the path
+# stays as it was.
+@test "kubeconfig: the create step on its own removes no file that it did not make" {
+  local d="${BATS_TEST_TMPDIR}/create"
+  mkdir -p "${d}"
+  printf planted > "${d}/kc.yaml"
+  chmod 640 "${d}/kc.yaml"
+  ln -s missing "${d}/dangling.yaml"
+  KUBEHZ_AGENT_BODY='new'
+  run kubehz::agent_create "${d}/kc.yaml"
+  assert_failure 1
+  run cat "${d}/kc.yaml"
+  assert_output planted
+  run stat -c '%a' "${d}/kc.yaml"
+  assert_output 640
+  run kubehz::agent_create "${d}/dangling.yaml"
+  assert_failure 1
+  [[ -L "${d}/dangling.yaml" ]] || fail "the dangling link was removed"
+  run ls -A "${d}"
+  assert_output $'dangling.yaml\nkc.yaml'
+}
+
 @test "kubeconfig: without hard links, the command writes a new file, and a file that appears in the link step stays" {
   route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
   route GET /api/spaces/sp-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'

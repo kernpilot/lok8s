@@ -1034,12 +1034,89 @@ func TestPublishKubeconfigWithoutHardLinks(t *testing.T) {
 	}
 }
 
+// failWrite is a writeKubeconfigFile that writes the first 3 bytes, runs
+// hook (when not nil) and fails as a full disk fails. It counts its calls
+// in calls.
+func failWrite(t *testing.T, calls *int, hook func()) func(*os.File, []byte) error {
+	t.Helper()
+	return func(f *os.File, data []byte) error {
+		*calls++
+		if _, err := f.Write(data[:3]); err != nil {
+			return err
+		}
+		if hook != nil {
+			hook()
+		}
+		return &os.PathError{Op: "write", Path: f.Name(), Err: syscall.ENOSPC}
+	}
+}
+
+// A write that fails after the exclusive create leaves a part of the file
+// at the path: the publish removes it and fails with a
+// kubeconfigWriteError that names the cause. A file that takes the place
+// of the made file during the write stays: the publish removes only the
+// file that the create made. Not parallel: it replaces linkKubeconfig and
+// writeKubeconfigFile.
+func TestPublishKubeconfigWriteFailureRemovesTheFile(t *testing.T) {
+	write := writeKubeconfigFile
+	t.Cleanup(func() { linkKubeconfig, writeKubeconfigFile = os.Link, write })
+	links := 0
+	linkKubeconfig = failLink(t, syscall.EPERM, &links, nil)
+	for _, tc := range []struct {
+		name string
+		swap bool
+		want string
+	}{
+		{name: "the part is removed", want: ""},
+		{name: "a file that took its place stays", swap: true, want: "kc.yaml kc.yaml.made"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			file := filepath.Join(dir, "kc.yaml")
+			writes := 0
+			var hook func()
+			if tc.swap {
+				hook = func() {
+					must(t, os.Rename(file, file+".made"))
+					must(t, os.WriteFile(file, []byte("other"), 0o600))
+				}
+			}
+			writeKubeconfigFile = failWrite(t, &writes, hook)
+			err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
+			var werr *kubeconfigWriteError
+			if !errors.As(err, &werr) {
+				t.Fatalf("publish: err = %v, want a kubeconfigWriteError", err)
+			}
+			if got := werr.cause(); got != "no space left on device" {
+				t.Errorf("cause = %q", got)
+			}
+			if writes != 1 {
+				t.Errorf("the write ran %d times, want 1", writes)
+			}
+			if got := dirNames(t, dir); got != tc.want {
+				t.Errorf("dir holds %q, want %q", got, tc.want)
+			}
+			if tc.swap {
+				if got := readFile(t, file); got != "other" {
+					t.Errorf("file = %q: the file that took the place of the made file was changed", got)
+				}
+			}
+		})
+	}
+}
+
 // A link error with a file at the path refuses, and the file stays as it
 // was: with EEXIST there is no second write, and with another error the
-// exclusive create fails on the file. Not parallel: it replaces
-// linkKubeconfig.
+// exclusive create fails on the file before any write. Not parallel: it
+// replaces linkKubeconfig and writeKubeconfigFile.
 func TestPublishKubeconfigWithoutHardLinksKeepsAFileThatAppears(t *testing.T) {
-	t.Cleanup(func() { linkKubeconfig = os.Link })
+	write := writeKubeconfigFile
+	t.Cleanup(func() { linkKubeconfig, writeKubeconfigFile = os.Link, write })
+	writes := 0
+	writeKubeconfigFile = func(f *os.File, data []byte) error {
+		writes++
+		return write(f, data)
+	}
 	for _, tc := range []struct {
 		name  string
 		errno syscall.Errno
@@ -1066,6 +1143,9 @@ func TestPublishKubeconfigWithoutHardLinksKeepsAFileThatAppears(t *testing.T) {
 			}
 			if got := dirNames(t, dir); got != "kc.yaml" {
 				t.Errorf("dir holds %q: a temporary file was left behind", got)
+			}
+			if writes != 0 {
+				t.Errorf("a second write ran %d times", writes)
 			}
 		})
 	}
@@ -1140,6 +1220,26 @@ func TestAgentKubeconfigWithoutHardLinks(t *testing.T) {
 	}
 	if got := dirNames(t, dir); got != "kc.yaml race.yaml" {
 		t.Errorf("dir holds %q: a temporary file was left behind", got)
+	}
+
+	// A write that fails after the create: the part is removed, and the
+	// error names the cause, not a file that exists.
+	write := writeKubeconfigFile
+	t.Cleanup(func() { writeKubeconfigFile = write })
+	writes := 0
+	writeKubeconfigFile = failWrite(t, &writes, nil)
+	linkKubeconfig = failLink(t, syscall.EPERM, &calls, nil)
+	h.errOut.Reset()
+	full := filepath.Join(dir, "full.yaml")
+	_, err = h.ctx.ClusterKubeconfig(context.Background(), "cl-1a2b3c4d", full, false)
+	mustErr(t, err)
+	want = "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write " + full + ": no space left on device\n" +
+		"  Check the free space and the file system of the directory, then run the command again.\n"
+	if got := h.errOut.String(); got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+	if got := dirNames(t, dir); got != "kc.yaml race.yaml" {
+		t.Errorf("dir holds %q: the part of full.yaml or a temporary file was left behind", got)
 	}
 }
 

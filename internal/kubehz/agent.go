@@ -849,6 +849,14 @@ func (c *Context) agentKubeconfig(ctx context.Context, k agentKind, id, file str
 		return nil, err
 	}
 	if err := publishKubeconfig(target, res.Body, force); err != nil {
+		// First: after a failed write the path can still hold a part of
+		// the file, and "exists" would name the wrong cause.
+		var werr *kubeconfigWriteError
+		if errors.As(err, &werr) {
+			c.errorf("kubehz %s: cannot write %s: %s", action, file, werr.cause())
+			c.echoErr("  Check the free space and the file system of the directory, then run the command again.")
+			return nil, ErrHandled
+		}
 		if _, lerr := os.Lstat(file); !force && lerr == nil {
 			c.kubeconfigExists(action, file)
 			return nil, ErrHandled
@@ -1262,16 +1270,54 @@ var linkKubeconfig = os.Link
 // exclusive create (O_EXCL). The create fails when the path exists, a link
 // too, so a file that appeared during the download stays as it is. Unlike
 // the hard link, a reader can see the file before all of it is written.
+// When the write or the close fails after the create (a short write,
+// ENOSPC, EIO), the path holds a part of the file: createKubeconfig removes
+// it and returns a kubeconfigWriteError. It removes the file only while the
+// path still names the file that the create made, never a file that took
+// its place. A failed create removes nothing.
 func createKubeconfig(target string, data []byte) error {
 	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
-	_, err = f.Write(data)
+	made, serr := f.Stat()
+	err = writeKubeconfigFile(f, data)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
+	if err == nil {
+		return nil
+	}
+	if now, lerr := os.Lstat(target); serr == nil && lerr == nil && os.SameFile(made, now) {
+		_ = os.Remove(target)
+	}
+	return &kubeconfigWriteError{err: err}
+}
+
+// writeKubeconfigFile writes data to f. A test replaces it, to make the
+// write fail after the exclusive create.
+var writeKubeconfigFile = func(f *os.File, data []byte) error {
+	_, err := f.Write(data)
 	return err
+}
+
+// kubeconfigWriteError is a write or a close that failed after the
+// exclusive create made the file (createKubeconfig).
+type kubeconfigWriteError struct{ err error }
+
+func (e *kubeconfigWriteError) Error() string { return e.err.Error() }
+
+func (e *kubeconfigWriteError) Unwrap() error { return e.err }
+
+// cause is the text of the system error without the operation and the
+// path ("no space left on device"). The bash twin prints the C-locale
+// text of the shell with its first letter in lower case.
+func (e *kubeconfigWriteError) cause() string {
+	var pe *os.PathError
+	if errors.As(e.err, &pe) {
+		return pe.Err.Error()
+	}
+	return e.err.Error()
 }
 
 // kubeconfigTempDir is the directory of target as written: the part before
