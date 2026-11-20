@@ -179,7 +179,7 @@ func TestYAML11PatternIsTheBashPattern(t *testing.T) {
 			t.Fatal(err)
 		}
 		var found []string
-		for _, line := range strings.Split(string(raw), "\n") {
+		for line := range strings.SplitSeq(string(raw), "\n") {
 			if strings.HasPrefix(line, prefix) && strings.HasSuffix(line, "'") && len(line) > len(prefix) {
 				found = append(found, line[len(prefix):len(line)-1])
 			}
