@@ -323,24 +323,56 @@ func touchPlaintexts(stores []string) (int, error) {
 	return touched, nil
 }
 
-// encryptTargets returns the .enc path of each plaintext cache file that
-// Encrypt("") sweeps in the store of the context (bash: the list before the
-// first write of secrets::add-key). The list comes from sweepPlaintexts, the
-// helper of the sweep itself. It resolves the store with its errors
-// discarded and returns nil when the store does not resolve: AddKey reports
-// that after its write, as before.
-func (c *Context) encryptTargets() []string {
+// sweepList is the list of the encrypt sweep that AddKey checks before its
+// first write, and that its encrypt then reads (encryptChecked): the store
+// of the context and its plaintext cache files. resolved is false when the
+// store did not resolve.
+type sweepList struct {
+	dir      string
+	plains   []string
+	resolved bool
+}
+
+// encryptTargets lists the plaintext cache files that the sweep of
+// Encrypt("") reads in the store of the context (bash: the list before the
+// first write of secrets::add-key), with sweepPlaintexts, the helper of the
+// sweep itself. It resolves the store with its errors discarded: AddKey
+// reports a store that does not resolve after its write, as before.
+func (c *Context) encryptTargets() sweepList {
 	quiet := *c
 	quiet.ErrOut = io.Discard
 	dir, err := quiet.ResolveStore()
 	if err != nil {
-		return nil
+		return sweepList{}
 	}
+	return sweepList{dir: dir, plains: sweepPlaintexts(dir, "Secret."), resolved: true}
+}
+
+// encs returns the .enc path of each plaintext of the list.
+func (l sweepList) encs() []string {
 	var encs []string
-	for _, plaintext := range sweepPlaintexts(dir, "Secret.") {
+	for _, plaintext := range l.plains {
 		encs = append(encs, plaintext+".enc")
 	}
 	return encs
+}
+
+// encryptChecked is the encrypt of AddKey (bash: secrets::_encrypt_store
+// with list): the sweep of Encrypt("") over the list that AddKey checked
+// before its first write. It does not list the store again, so a file that
+// the run itself changes (a plaintext link to the .gitignore that the sweep
+// writes) is not added. Another process that writes to the store during the
+// run is outside the threat model. A store that did not resolve before the
+// write is reported now, and nothing is encrypted.
+func (c *Context) encryptChecked(l sweepList) error {
+	if !l.resolved {
+		if _, err := c.ResolveStore(); err != nil {
+			return err
+		}
+		ui.ErrorTo(c.ErrOut, "the secret store resolved only after .sops.yaml was written, so add-key did not check its files: run lo secrets encrypt")
+		return ErrHandled
+	}
+	return c.encryptSweep(l.dir, "", func() []string { return l.plains })
 }
 
 // refuseEncPaths refuses each .enc of encs that the encrypt refuses

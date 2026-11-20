@@ -162,10 +162,12 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		return nil
 	}
 
-	// Before the first write: each .enc that the Encrypt below writes must
+	// Before the first write: each .enc that the encrypt below writes must
 	// be a regular file or absent (encryptFile refuses any other entry, and
-	// that refusal comes after the write). The list is the one of the sweep.
-	if c.refuseEncPaths(c.encryptTargets()) {
+	// that refusal comes after the write). The list is the one of the sweep,
+	// and the encrypt below reads this same list (encryptChecked).
+	checked := c.encryptTargets()
+	if c.refuseEncPaths(checked.encs()) {
 		return ErrHandled
 	}
 
@@ -210,8 +212,9 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	// store, so the whole store is exactly what must be re-encrypted here.
 	// (Faithful to bash: the sweep covers the CURRENT context's store; other
 	// stores' touched plaintexts stay newer than their .enc twins, so a later
-	// per-domain encrypt still picks them up.)
-	if err := c.Encrypt(""); err != nil {
+	// per-domain encrypt still picks them up.) The sweep is the list checked
+	// before the write.
+	if err := c.encryptChecked(checked); err != nil {
 		return err
 	}
 	fmt.Fprintln(c.Out, "done — commit .sops.yaml and the updated .enc files together")
@@ -403,9 +406,12 @@ func encDestinationOK(path string) bool {
 
 // sweepPlaintexts returns the plaintext cache files of dir that the encrypt
 // sweep reads: each regular file whose name starts with prefix and does not
-// end in .enc (bash: secrets::_sweep_files). Encrypt encrypts each one, and
-// AddKey checks the .enc of each one before its first write
-// (encryptTargets), so the two lists cannot differ.
+// end in .enc (bash: secrets::_sweep_files). Encrypt lists the store with it
+// after the .gitignore write. AddKey lists the store with it once, before
+// its first write (encryptTargets): it checks the .enc of each file, and its
+// encrypt reads that same list (encryptChecked), so a file that the run
+// itself changes is not added. Another process that writes to the store
+// during the run is outside the threat model.
 func sweepPlaintexts(dir, prefix string) []string {
 	var plains []string
 	for _, base := range storeEntries(dir, prefix) {
@@ -442,6 +448,22 @@ func (c *Context) Encrypt(name string) error {
 	if err != nil {
 		return err
 	}
+	// Cache files are Secret.<name>.<namespace>.<key>, so name anchors on the
+	// second field.
+	prefix := "Secret."
+	if name != "" {
+		prefix = "Secret." + name + "."
+	}
+	return c.encryptSweep(secretsDir, name, func() []string { return sweepPlaintexts(secretsDir, prefix) })
+}
+
+// encryptSweep is the sweep of Encrypt over the store secretsDir (bash:
+// secrets::_encrypt_store): the .gitignore of the store, the .sops.yaml
+// check, then each plaintext of list() whose .enc is not newer. list runs
+// after the .gitignore write: Encrypt lists the store there, and AddKey
+// gives the list that it checked before its first write (encryptChecked).
+// name is for the message when nothing matched.
+func (c *Context) encryptSweep(secretsDir, name string, list func() []string) error {
 	if !fsutil.DirExists(secretsDir) {
 		ui.WarnTo(c.ErrOut, "No secrets directory: %s", secretsDir)
 		return nil
@@ -457,15 +479,8 @@ func (c *Context) Encrypt(name string) error {
 		return ErrHandled
 	}
 
-	// Cache files are Secret.<name>.<namespace>.<key>, so name anchors on the
-	// second field.
-	prefix := "Secret."
-	if name != "" {
-		prefix = "Secret." + name + "."
-	}
-
 	count, skipped := 0, 0
-	for _, plaintext := range sweepPlaintexts(secretsDir, prefix) {
+	for _, plaintext := range list() {
 		// Skip if .enc is newer than plaintext (already up to date)
 		encFile := plaintext + ".enc"
 		if fsutil.IsRegular(encFile) && newerThan(encFile, plaintext) {

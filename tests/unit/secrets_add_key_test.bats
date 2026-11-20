@@ -17,8 +17,9 @@
 #
 # Everything here runs against a THROWAWAY store. These tests must never be able
 # to touch clusters/*/secrets — PATH_BASE and PATH_CLUSTERS are redirected into
-# BATS_TEST_TMPDIR, and the encrypt step is stubbed, so no sops key is needed and
-# no real cache file is reachable. HOME, XDG_CONFIG_HOME (sops reads <config
+# BATS_TEST_TMPDIR, and the encrypt step is stubbed (the whole sweep, or sops
+# alone: _load_sweep), so no sops key is needed and no real cache file is
+# reachable. HOME, XDG_CONFIG_HOME (sops reads <config
 # dir>/sops/age/keys.txt) and SOPS_AGE_KEY_FILE point into BATS_TEST_TMPDIR too.
 
 setup() {
@@ -52,8 +53,28 @@ _load() {
   source "${_PROJECT_ROOT}/.lok8s/libs/secrets"
   # :args normally parses the spec; drive the function directly instead.
   ENCRYPT_RAN="${BATS_TEST_TMPDIR}/encrypt.ran"; : > "${ENCRYPT_RAN}"
-  secrets::encrypt() { echo ran >> "${ENCRYPT_RAN}"; return 0; }
+  secrets::_encrypt_store() { echo ran >> "${ENCRYPT_RAN}"; return 0; }
   command -v sops >/dev/null 2>&1 || sops() { return 0; }
+}
+
+# _load_sweep — the library with the real encrypt sweep (secrets::_encrypt_store
+# and secrets::_encrypt_file). Only sops is a stub: a function, so no sops on
+# PATH runs. It writes "stub-enc <bytes of the plaintext>" to the --output path
+# and logs each plaintext that it encrypts to SOPS_LOG.
+_load_sweep() {
+  source "${_PROJECT_ROOT}/.lok8s/utils/verbose.sh" 2>/dev/null || true
+  source "${_PROJECT_ROOT}/.lok8s/libs/secrets"
+  SOPS_LOG="${BATS_TEST_TMPDIR}/sops.log"; : > "${SOPS_LOG}"
+  sops() {
+    local -a a=("${@}")
+    local i out=""
+    for (( i = 0; i + 1 < ${#a[@]}; i++ )); do
+      [[ "${a[i]}" != --output ]] || out="${a[i + 1]}"
+    done
+    [[ -n "${out}" ]] || return 1
+    printf '%s\n' "${a[-1]}" >> "${SOPS_LOG}"
+    { printf 'stub-enc '; cat -- "${a[-1]}"; } > "${out}"
+  }
 }
 
 # secrets::add-key declares its own locals and lets :args populate them — argsh's
@@ -350,6 +371,43 @@ _refused_later() {
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
   grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
   [ -s "${ENCRYPT_RAN}" ]
+}
+
+@test "the encrypt reads the list that add-key checked, not a new listing of the store" {
+  # No .gitignore, a dangling plaintext link to .gitignore and a dangling .enc
+  # link. The check leaves the plaintext out: the link names nothing yet. The
+  # encrypt writes the .gitignore, and the link then names a regular file. A
+  # new listing would take it and stop at its .enc, after the .sops.yaml
+  # write. The checked list leaves both links as they were (Go twin:
+  # TestAddKeyEncryptsTheListThatItChecked).
+  _load_sweep
+  local store="${PATH_CLUSTERS}/a.dev/secrets"
+  [ ! -e "${store}/.gitignore" ]
+  ln -s .gitignore "${store}/Secret.app.default.KEY"
+  ln -s missing "${store}/Secret.app.default.KEY.enc"
+  printf 'w\n' > "${store}/Secret.db.default.KEY"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
+  [ "$(readlink "${store}/Secret.app.default.KEY")" = .gitignore ]
+  [ "$(readlink "${store}/Secret.app.default.KEY.enc")" = missing ]
+  [ -f "${store}/.gitignore" ] || { echo "the encrypt wrote no .gitignore" >&2; return 1; }
+  [ "$(cat "${SOPS_LOG}")" = "${store}/Secret.db.default.KEY" ] || { echo "sops ran on:" >&2; cat "${SOPS_LOG}" >&2; return 1; }
+  [ "$(cat "${store}/Secret.db.default.KEY.enc")" = "stub-enc w" ]
+}
+
+@test "--all in a domain whose store does not resolve stops after the write and encrypts nothing" {
+  # The check before the write lists no file, so the encrypt does not list a
+  # store either: it says why the store does not resolve (Go twin:
+  # TestAddKeyAllWithAnUnresolvedStoreEncryptsNothing).
+  _load
+  source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"
+  mkdir -p "${PATH_CLUSTERS}/c.dev"
+  DOMAIN=c.dev run _add "${KEY_B}" 1
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [[ "$output" == *"[error] domain c.dev has no secrets store"* ]] || { echo "$output" >&2; return 1; }
+  grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
+  [ ! -s "${ENCRYPT_RAN}" ]
 }
 
 @test "a .sops.yaml that is a symlink stays a link: its target gets the recipient and keeps its mode" {

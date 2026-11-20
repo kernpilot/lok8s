@@ -301,6 +301,69 @@ func TestAddKeyRefusesAnEncPathThatItCannotLookUpBeforeAnyWrite(t *testing.T) {
 	f.rekeyed("db", "w")
 }
 
+// The store has no .gitignore, a dangling plaintext link Secret.app.default.K
+// -> .gitignore and a dangling Secret.app.default.K.enc -> missing, next to
+// the pair db. When add-key checks the list of the sweep, the plaintext link
+// names nothing, so it is not in the list. The encrypt writes the
+// .gitignore, and the link then names a regular file. The encrypt reads the
+// list that add-key checked: it leaves both links as they were and re-keys
+// db. A new listing of the store would take the link and stop at its .enc,
+// after the .sops.yaml write.
+func TestAddKeyEncryptsTheListThatItChecked(t *testing.T) {
+	f := newLinkFixture(t, "add-key")
+	app := f.store + "/Secret.app.default.K"
+	for _, p := range []string{app, app + ".enc", f.store + "/.gitignore"} {
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
+	links := map[string]string{app: ".gitignore", app + ".enc": "missing"}
+	for path, target := range links {
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := f.run(); err != nil {
+		t.Fatalf("%v\n%s", err, f.errOut.String())
+	}
+	for path, target := range links {
+		if got, err := os.Readlink(path); err != nil || got != target {
+			t.Errorf("%s: %q, %v; want the link to %s", f.c.rel(path), got, err, target)
+		}
+	}
+	if !fsutil.IsRegular(f.store + "/.gitignore") {
+		t.Error("the encrypt wrote no .gitignore")
+	}
+	f.rekeyed("db", "w")
+}
+
+// add-key --all in a domain whose store does not resolve (the domain has no
+// store, and the project keeps a store per domain): the check before the
+// write lists no file, and after the write the encrypt says why the store
+// does not resolve and encrypts nothing. It does not list a store that it
+// did not check.
+func TestAddKeyAllWithAnUnresolvedStoreEncryptsNothing(t *testing.T) {
+	f := newLinkFixture(t, "add-key")
+	mkdir(t, f.c.Paths.Clusters+"/c.dev")
+	f.c.Domain = "c.dev"
+	err := f.c.AddKey(f.gone.Recipient().String(), true, false)
+	if !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
+	}
+	if !strings.Contains(f.errOut.String(), "[error] domain c.dev has no secrets store") {
+		t.Errorf("stderr:\n%s", f.errOut.String())
+	}
+	if !strings.Contains(readFile(t, f.c.sopsConfigPath()), f.gone.Recipient().String()) {
+		t.Error("the recipient was not added")
+	}
+	for name, plain := range map[string]string{"app": "v", "db": "w"} {
+		if enc := f.store + "/Secret." + name + ".default.K.enc"; opens(t, enc, f.gone, plain) {
+			t.Errorf("%s was encrypted", f.c.rel(enc))
+		}
+	}
+}
+
 // remove-key resumes a stopped re-key: .sops.yaml no longer lists the
 // recipient, the .enc of app was re-keyed and is now a symlink to a file
 // that does not list it, and the .enc of db still lists it. The labels do
