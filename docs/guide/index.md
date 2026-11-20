@@ -92,7 +92,7 @@ lo toolchain doctor    # b, kustomize, khelm and the Secret plugin verified agai
 
 `lo toolchain install` (in a new or an existing project) writes
 `.bin/b.yaml` from a template pinned to the `lo` you run:
-kustomize `v5.8.1`, khelm `v2.8.0`, the `secrets.lok8s.dev` Secret plugin at
+kustomize `v5.8.1`, khelm `v2.9.0`, the `secrets.lok8s.dev` Secret plugin at
 `lo`'s own version, plus kubectl (`core`), kind/Tilt/mkcert (`local`,
 on by default) and kubeone/hcloud (`cloud`, opt-in with
 `--groups core,local,cloud`). It then installs `b` itself into `.bin/` from
