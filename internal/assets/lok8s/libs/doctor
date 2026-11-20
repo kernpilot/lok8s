@@ -1593,10 +1593,19 @@ doctor::_tool() {
 # name is empty, or domain::driver cannot read the driver of the domain (no
 # cluster.lok8s.yaml and no deploy.lok8s.yaml, or a spec without a kind or
 # with a malformed one). For a domain of another driver, a deploy domain
-# included, an older kind is a warning.
+# included, an older kind is a warning. domain::driver reads a
+# cluster.lok8s.yaml with yq (the Go twin needs no yq). As the other yq
+# readers of doctor do, the check looks for yq first: when the domain has a
+# cluster.lok8s.yaml and there is no yq, the driver is not read (status 2,
+# doctor::_kind prints a warning and says why). There the twins can differ:
+# Go reads the driver and fails an older kind for a domain of the Lo driver.
+# The doctor exit code is 1 in both, because yq is required.
 doctor::_kind_fails() {
-  local drv
+  local drv clusters="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}"
   [[ -n "${1}" ]] || return 0
+  if [[ -f "${clusters}/${1}/cluster.lok8s.yaml" ]] && ! command -v yq >/dev/null 2>&1; then
+    return 2
+  fi
   drv=$(domain::driver "${1}" 2>/dev/null) || return 0
   [[ "${drv}" == lo ]]
 }
@@ -1605,7 +1614,9 @@ doctor::_kind_fails() {
 # doctorKind). kind is optional: when it is absent, the line is a warning.
 # When it is present, it must be DOCTOR_KIND_MIN or later. An older kind is
 # a failure (returns 1) for the domain of doctor::_kind_fails, else a
-# warning with the same text. Only major.minor.patch counts, so a
+# warning with the same text. When doctor::_kind_fails cannot read the
+# driver because yq is not there, a second warning line says so. Only
+# major.minor.patch counts, so a
 # pre-release of a later release passes. A failed `kind version`, or an
 # output without the version field, is a warning. `kind version` prints
 # "kind v0.32.0 go1.25.5 linux/amd64": the fields of the first line are
@@ -1642,9 +1653,11 @@ doctor::_kind() {
       break
     fi
     if (( 10#${got[i]} < 10#${want[i]} )); then
-      local msg="kind v${got[0]}.${got[1]}.${got[2]} — ${purpose}; ${need} (fix: b update kind)"
-      if ! doctor::_kind_fails "${domain}"; then
+      local msg="kind v${got[0]}.${got[1]}.${got[2]} — ${purpose}; ${need} (fix: b update kind)" rc=0
+      doctor::_kind_fails "${domain}" || rc=$?
+      if (( rc )); then
         doctor::_warn "${msg}"
+        (( rc != 2 )) || doctor::_warn "kind: the driver of ${domain} not checked: yq not found"
         return 0
       fi
       doctor::_bad "${msg}"

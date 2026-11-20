@@ -322,6 +322,36 @@ _kind_domains() {
   done
 }
 
+# Without yq, doctor::_kind_fails does not read the driver of a domain with
+# a cluster.lok8s.yaml: an older kind is a warning there, and a second
+# warning says why. A deploy domain needs no yq, and with no domain (no
+# name, no spec) an older kind still fails. The Go twin reads the driver
+# without yq, so it fails an older kind for lo.dev (see doctor::_kind_fails).
+@test "doctor::_kind without yq warns for a cluster spec and says why" {
+  _kind_domains
+  _kind_stub 'kind v0.17.0 go1.19.4 linux/amd64\n'
+  local tools="${BATS_TEST_TMPDIR}/no-yq-bin" t d
+  mkdir -p "${tools}"
+  for t in bash env cat; do
+    ln -s "$(command -v "${t}")" "${tools}/${t}"
+  done
+  local p="${BATS_TEST_TMPDIR}/kind-bin:${tools}"
+  [ -z "$(PATH="${p}" && command -v yq)" ]
+  for d in lo.dev metal.dev nokind.dev badkind.dev; do
+    PATH="${p}" run doctor::_kind "${d}" "${_kind_purpose}"
+    assert_success
+    assert_output "  ! kind v0.17.0 — ${_kind_purpose}; ${_kind_need} (fix: b update kind)
+  ! kind: the driver of ${d} not checked: yq not found"
+  done
+  PATH="${p}" run doctor::_kind app.dev "${_kind_purpose}"
+  assert_success
+  assert_output "  ! kind v0.17.0 — ${_kind_purpose}; ${_kind_need} (fix: b update kind)"
+  for d in "" missing.dev; do
+    PATH="${p}" run doctor::_kind "${d}" "${_kind_purpose}"
+    _kind_older v0.17.0
+  done
+}
+
 # main::doctor gives the active domain (DOMAIN_NAME here, as the entrypoint
 # exports it) to the kind line: an older kind is a failure for a domain of
 # the Lo driver and a warning for a KubeOne domain. kubectl, mkcert and
