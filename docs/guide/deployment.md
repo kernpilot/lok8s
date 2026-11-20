@@ -776,9 +776,11 @@ the skips of the real run: an entry that the run skips is `skipped`, not an
 error.
 
 At debug (`-v`), a diff with differences prints one line for each object
-that differs, and where the diff text is. It does not print the diff text:
-the text can quote a value of the manifest (kubectl masks only the data of a
-core `v1` Secret):
+of the manifest that differs, and where the diff text is. It does not print
+the diff text: the text can quote a value of the manifest (kubectl masks only
+the data of a core `v1` Secret). lo reads the object names from the file
+headers of the diff and prints only the names of objects of the rendered
+manifest:
 
 ```
 [debug] bootstrap dry-run: cert-manager: differs: v1 ConfigMap cert-manager/cert-manager
@@ -789,7 +791,9 @@ Without `--render-dir` the second line tells you to do the dry run again
 with `--render-dir <dir>` to keep the text in a file. `LO_SHOW_SENSITIVE_OUTPUT=1`
 prints the diff text at debug, after a `[warn]` line. The kubectl diff runs
 with the kubectl user defaults off (`KUBERC=off`), so a kuberc cannot turn
-on `--show-secrets` for it.
+on `--show-secrets` for it. The same privacy holds for the applies of the
+bootstrap entries; the other applies of lo are not yet covered (see
+[Output that can quote a value](../reference/cli.md#output-that-can-quote-a-value)).
 
 `--render-dir <dir>` keeps the rendered manifests (`NN-<entry>.yaml`) and
 the diff text (`NN-<entry>.diff`, empty when unchanged). Each file has mode
