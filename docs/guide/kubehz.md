@@ -1438,6 +1438,7 @@ The write that puts back the old values runs outside the budget. So the
 calls and the steps of a tick end 97 s after its start at the latest. That
 bound does not include:
 
+- less than 1 s more, because the budget counts whole seconds;
 - the pod start and the image pull, before the tick starts;
 - the local work between two budget checks: shell builtins and short text
   filters such as `sed`, `sort` and `base64`;

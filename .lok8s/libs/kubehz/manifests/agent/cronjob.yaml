@@ -96,15 +96,16 @@ spec:
                   # One call runs outside the budget: the write-back of the send
                   # gate (at most 7 s, once per tick). So the calls and the steps
                   # under `bounded` end at the latest 97 s after the script
-                  # starts. That bound leaves out the pod start and the image pull
+                  # starts, plus less than 1 s: the budget counts whole seconds.
+                  # That bound leaves out the pod start and the image pull
                   # before the script, the local work between two checks (shell
                   # builtins and short text filters such as sed, sort and base64),
                   # and a second pod when backoffLimit runs the Job again:
                   # activeDeadlineSeconds counts from the start of the Job, not of
                   # the pod.
                   # The budget reads the seconds since boot (the first field of
-                  # /proc/uptime). A step of the wall clock does not move them: a
-                  # wall clock set back would make the budget longer. The wall
+                  # /proc/uptime). A step of the wall clock does not move them. On
+                  # the wall clock, a step back would make the budget longer. The wall
                   # clock (date) gives only the times that leave the pod: the time
                   # of the send gate and the timestamps. Without a number in
                   # /proc/uptime, the budget uses the wall clock, and the tick logs
