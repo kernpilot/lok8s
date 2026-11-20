@@ -1626,9 +1626,14 @@ doctor::_kind_fails() {
 # matched numbers, no other byte of the output.
 doctor::_kind() {
   local domain="${1}" purpose="${2}" kind=""
-  # The first kind on PATH that can run, as the Go twin looks it up
-  # (toolchain.LookPath). When no kind on PATH can run, command -v prints
-  # a file without the exec bit: that kind is not found here either.
+  # The first kind on PATH that can run. For plain files (a file of this
+  # user, on a mount that allows exec), this is the kind that the Go twin
+  # finds (toolchain.LookPath). When no kind on PATH can run, command -v
+  # prints a file without the exec bit: that kind is not found here either.
+  # The twins differ for other files: -x asks access(2), and Go reads only
+  # the mode bits. For a file that only another user can run, or a file on
+  # a noexec mount, bash prints "not found", and Go finds the file, cannot
+  # run it and prints "version unknown". Both lines are warnings.
   kind=$(command -v kind 2>/dev/null) || kind=""
   if [[ -z "${kind}" || -d "${kind}" || ! -x "${kind}" ]]; then
     doctor::_warn "kind not found (optional) — ${purpose}"
