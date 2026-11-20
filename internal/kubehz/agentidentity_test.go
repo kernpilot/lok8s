@@ -54,7 +54,7 @@ func TestAgentIdentityReadOnTheSecretFixtures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var obj map[string]interface{}
+		var obj map[string]any
 		if err := json.Unmarshal(raw, &obj); err != nil {
 			t.Fatalf("%s: %v", file, err)
 		}
