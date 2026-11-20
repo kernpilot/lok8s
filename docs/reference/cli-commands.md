@@ -2919,7 +2919,10 @@ claim-code, kubehz space|cluster kubeconfig) is never exposed: a tool
 result lands in the model's transcript. Neither is chat: it passes its
 arguments on unread. A call whose positional argument starts with "-" is
 refused, and nothing runs. Flags that carry a credential (token, secret, password, key,
-nonce, ...) are never exposed either.
+nonce, ...) are never exposed either. A flag that a command always
+refuses is not in that tool's schema: the global --cluster on the kubehz
+node verbs (they take --cluster-id or --space-id), and --force on kubehz
+node drain (it takes --evict-unmanaged).
 A command that is not exposed is not registered, so it cannot be called.
 LO_MCP_ALLOW=mutating|destructive is the environment form of the opt-in,
 for editor configs (flags win).
@@ -3221,7 +3224,7 @@ lo mcp serve [flags]
 ### Options
 
 ```
-      --allow-destructive   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate; implies --allow-mutating
+      --allow-destructive   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate (not on kubehz node drain, which refuses --force); implies --allow-mutating
       --allow-mutating      Also expose mutating, non-destructive commands (build, use, secrets encrypt, …)
   -h, --help                help for serve
       --host string         Address to listen on (default "127.0.0.1")
@@ -3251,7 +3254,7 @@ lo mcp start [flags]
 ### Options
 
 ```
-      --allow-destructive   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate; implies --allow-mutating
+      --allow-destructive   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate (not on kubehz node drain, which refuses --force); implies --allow-mutating
       --allow-mutating      Also expose mutating, non-destructive commands (build, use, secrets encrypt, …)
   -h, --help                help for start
       --log-level string    Server log level on stderr (debug, info, warn, error) (default "info")
@@ -3279,7 +3282,7 @@ lo mcp tools [flags]
 ### Options
 
 ```
-      --allow-destructive   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate; implies --allow-mutating
+      --allow-destructive   Also expose destructive commands (up, down, deploy, destroy, …) and --force/--force-recreate (not on kubehz node drain, which refuses --force); implies --allow-mutating
       --allow-mutating      Also expose mutating, non-destructive commands (build, use, secrets encrypt, …)
   -h, --help                help for tools
       --json                Print the full tool definitions (schemas, annotations) as JSON

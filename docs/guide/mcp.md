@@ -31,7 +31,9 @@ call it. These commands are never tools, in any tier:
 - `lo chat`, because it passes its arguments on unread.
 - The hidden, framework-internal commands.
 
-A flag that carries a credential is never a tool parameter.
+A flag that carries a credential is never a tool parameter. A flag that a
+command always refuses is not a tool parameter either: the global `--cluster`
+on the `kubehz node` tools, and `--force` on the `kubehz node drain` tool.
 
 To see the tools of a tier, run `lo mcp tools`:
 

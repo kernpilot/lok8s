@@ -325,6 +325,46 @@ func TestMcpDrainToolHidesTheForceItRefuses(t *testing.T) {
 	}
 }
 
+// TestMcpNodeToolsHideTheClusterTheyRefuse: the node verbs always refuse
+// the global --cluster/-s, so their tools do not offer it, also with
+// --allow-destructive. The test walks every leaf of `kubehz node` in the MCP
+// tree: a new node verb without a `cluster` entry in mcpRefusedFlags fails
+// it. Each tool keeps its own target flag (--space-id or --cluster-id).
+// lo_down reads --cluster (the kind cluster), so its tool keeps it.
+func TestMcpNodeToolsHideTheClusterTheyRefuse(t *testing.T) {
+	node, _, err := newMCPTree(synthProject(t)).Find([]string{"kubehz", "node"})
+	if err != nil || node.CommandPath() != "lo kubehz node" {
+		t.Fatalf("lo kubehz node is not in the MCP tree (%v)", err)
+	}
+	leaves := node.Commands()
+	if len(leaves) < 6 {
+		t.Fatalf("lo kubehz node has %d leaves, want at least 6 (the check proves nothing on fewer)", len(leaves))
+	}
+	tools := mcpToolNames(t, mcpExposure{destructive: true})
+	for _, leaf := range leaves {
+		path := leaf.CommandPath()
+		if !mcpRefusedFlags[path]["cluster"] {
+			t.Errorf("mcpRefusedFlags has no cluster entry for %q", path)
+		}
+		name := strings.ReplaceAll(path, " ", "_")
+		tool := tools[name]
+		if tool == nil {
+			t.Errorf("%s missing with --allow-destructive", name)
+			continue
+		}
+		flags := flagNames(t, tool)
+		if flags["cluster"] {
+			t.Errorf("--cluster on %s, which always refuses it", name)
+		}
+		if !flags["space-id"] && !flags["cluster-id"] {
+			t.Errorf("%s has neither --space-id nor --cluster-id", name)
+		}
+	}
+	if tools["lo_down"] == nil || !flagNames(t, tools["lo_down"])["cluster"] {
+		t.Error("--cluster missing on lo_down with --allow-destructive")
+	}
+}
+
 // TestMcpRefusedFlagsNameRealFlags: every entry of mcpRefusedFlags names a
 // command of the MCP tree and a flag that this command has. A renamed command
 // or flag would otherwise make the entry do nothing.
@@ -747,6 +787,17 @@ func TestMcpAgentToolsTakeNoFlagThatMovesTheBearer(t *testing.T) {
 // its argv (toolCallArgvEnv) and exits.
 func mcpCall(t *testing.T, x mcpExposure, tool string, flags map[string]any, args []string) *mcp.CallToolResult {
 	t.Helper()
+	res, err := mcpTryCall(t, x, tool, flags, args)
+	if err != nil {
+		t.Fatalf("tools/call %s: %v", tool, err)
+	}
+	return res
+}
+
+// mcpTryCall is mcpCall, but it returns the error of the call: the server
+// refuses arguments that the input schema does not allow with an error.
+func mcpTryCall(t *testing.T, x mcpExposure, tool string, flags map[string]any, args []string) (*mcp.CallToolResult, error) {
+	t.Helper()
 	t.Setenv(toolCallArgvEnv, "1")
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
@@ -759,11 +810,35 @@ func mcpCall(t *testing.T, x mcpExposure, tool string, flags map[string]any, arg
 		t.Fatal(err)
 	}
 	defer func() { _ = session.Close(); cancel(); <-served }()
-	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: map[string]any{"flags": flags, "args": args}})
-	if err != nil {
-		t.Fatalf("tools/call %s: %v", tool, err)
+	return session.CallTool(ctx, &mcp.CallToolParams{Name: tool, Arguments: map[string]any{"flags": flags, "args": args}})
+}
+
+// TestMcpRefusesAHiddenFlagAndRunsNothing: a call that sends a flag that
+// the tool's schema does not show is refused, and no process starts. The
+// schema refuses such a flag (additionalProperties: false); this test fails
+// if a library update drops that. The same call without the hidden flag runs.
+func TestMcpRefusesAHiddenFlagAndRunsNothing(t *testing.T) {
+	x := mcpExposure{destructive: true}
+	for _, flags := range []map[string]any{
+		{"name": "worker-1", "cluster": "kind-1"},
+		{"name": "worker-1", "force": true},
+	} {
+		res, err := mcpTryCall(t, x, "lo_kubehz_node_drain", flags, []string{})
+		switch {
+		case err == nil && strings.Contains(resultText(res), toolCallArgvMark):
+			t.Errorf("flags %v: a process ran: %q", flags, resultText(res))
+		case err == nil && !res.IsError:
+			t.Errorf("flags %v: the call was not refused: %q", flags, resultText(res))
+		case err == nil:
+			t.Logf("flags %v: refused: %.160s", flags, resultText(res))
+		default:
+			t.Logf("flags %v: refused: %v", flags, err)
+		}
 	}
-	return res
+	res, err := mcpTryCall(t, x, "lo_kubehz_node_drain", map[string]any{"name": "worker-1"}, []string{})
+	if err != nil || !strings.Contains(resultText(res), toolCallArgvMark+"kubehz node drain --name worker-1") {
+		t.Errorf("the call without a hidden flag did not run: err=%v", err)
+	}
 }
 
 // resultText is every text block of a tool result, joined.
@@ -781,15 +856,28 @@ func resultText(res *mcp.CallToolResult) string {
 // positional argument that starts with "-" is an MCP error and no process
 // starts. ophis puts the model's arguments after the flags, so "-o" or
 // "--force" there would parse as a flag the schema does not offer.
+//
+// The drain tool has its own selector (mcpRefusedFlags), so it gets the same
+// calls: "--force" or "-s" there would set a flag that its schema hides.
 func TestMcpRefusesADashArgumentAndRunsNothing(t *testing.T) {
-	for _, args := range [][]string{{"sp-1a2b3c4d", "-o", "json"}, {"sp-1a2b3c4d", "--force"}, {"-"}} {
-		res := mcpCall(t, mcpExposure{destructive: true}, "lo_kubehz_space_get", map[string]any{}, args)
+	for _, c := range []struct {
+		tool  string
+		flags map[string]any
+		args  []string
+	}{
+		{"lo_kubehz_space_get", map[string]any{}, []string{"sp-1a2b3c4d", "-o", "json"}},
+		{"lo_kubehz_space_get", map[string]any{}, []string{"sp-1a2b3c4d", "--force"}},
+		{"lo_kubehz_space_get", map[string]any{}, []string{"-"}},
+		{"lo_kubehz_node_drain", map[string]any{"name": "worker-1"}, []string{"--force"}},
+		{"lo_kubehz_node_drain", map[string]any{"name": "worker-1"}, []string{"-s", "kind-1"}},
+	} {
+		res := mcpCall(t, mcpExposure{destructive: true}, c.tool, c.flags, c.args)
 		text := resultText(res)
 		if !res.IsError || !strings.Contains(text, "starts with a dash") || !strings.Contains(text, "Nothing ran") {
-			t.Errorf("args %q: isError=%v text=%q, want the refusal", args, res.IsError, text)
+			t.Errorf("%s args %q: isError=%v text=%q, want the refusal", c.tool, c.args, res.IsError, text)
 		}
 		if strings.Contains(text, toolCallArgvMark) {
-			t.Errorf("args %q: a process ran: %q", args, text)
+			t.Errorf("%s args %q: a process ran: %q", c.tool, c.args, text)
 		}
 	}
 }
