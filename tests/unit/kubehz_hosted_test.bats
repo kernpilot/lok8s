@@ -1021,6 +1021,86 @@ _hosted_temps() {
   [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}" kc.yaml)" ]
 }
 
+# _hosted_moved_run <kc> <aside> <signal> <prelude> <step>: run
+# kubehz::_write_private on <kc> without mv -T, in a new shell (bats runs
+# it). The mv of that shell puts a directory at <kc> (the old file goes to
+# <aside>), renames the temp file into it, runs <step> (shell code;
+# test_f is the moved file), writes the number of files in <kc> to
+# <aside>.seen, and then sends <signal> to the shell. So the traps run
+# before the check after the rename. <prelude> is shell code that runs
+# after the library is sourced.
+_hosted_moved_run() {
+  run bash -c 'import() { :; }
+source "$6/utils/verbose.sh"
+source "$6/utils/http.sh"
+source "$6/libs/kubehz/hosted"
+test_kc="$1" test_aside="$2" test_signal="$3" test_step="$5"
+eval "$4"
+_KUBEHZ_MV_EXACT=0
+mv() {
+  command mv -- "${test_kc}" "${test_aside}" && mkdir -- "${test_kc}" && command mv "$@" || return
+  test_f=$(find "${test_kc}" -mindepth 1 -maxdepth 1)
+  eval "${test_step}" || return
+  find "${test_kc}" -mindepth 1 | wc -l > "${test_aside}.seen"
+  kill -s "${test_signal}" "$$"
+}
+kubehz::_write_private "${test_kc}" printf new
+echo "returned $?"' bash "$1" "$2" "$3" "$4" "$5" "${_PROJECT_ROOT}/.lok8s"
+}
+
+# Without mv -T, a TERM or a HUP during the rename into a directory that
+# took the place of the file: the traps run before the check after the
+# rename. They remove the moved file from the directory (it is the temp
+# file of this run: the same inode), and the shell ends with the signal.
+@test "kubehz::_write_private: without mv -T, TERM and HUP during the rename into a directory leave no file in it" {
+  local kc="${BATS_TEST_TMPDIR}/kc.yaml" aside="${BATS_TEST_TMPDIR}/aside.yaml" pair sig code
+  for pair in TERM:143 HUP:129; do
+    sig="${pair%:*}" code="${pair#*:}"
+    rm -rf -- "${kc:?}" "${aside:?}" "${aside}.seen"
+    printf 'old\n' > "${kc}"
+    _hosted_moved_run "${kc}" "${aside}" "${sig}" ':' ':'
+    [ "${status}" -eq "${code}" ] || { echo "${sig}: status ${status}, want ${code}: ${output}" >&2; return 1; }
+    refute_output --partial returned
+    # The rename put the new file into the directory before the signal.
+    [ "$(cat "${aside}.seen")" -eq 1 ]
+    [ -d "${kc}" ]
+    [ -z "$(find "${kc}" -mindepth 1)" ] || { echo "${sig}: left in ${kc}: $(ls -A "${kc}")" >&2; return 1; }
+    [ "$(cat "${aside}")" = old ]
+    [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}" kc.yaml)" ]
+  done
+}
+
+# The traps remove only the file that this run made. Here another file
+# (of this user, mode 0600) takes the place of the moved one before the
+# signal: its inode is not the inode of the temp file, so it stays.
+@test "kubehz::_write_private: the traps leave a file in that directory that this run did not make" {
+  local kc="${BATS_TEST_TMPDIR}/kc.yaml" aside="${BATS_TEST_TMPDIR}/aside.yaml" files
+  printf 'old\n' > "${kc}"
+  _hosted_moved_run "${kc}" "${aside}" TERM ':' \
+    'printf other > "${test_aside}.other" && chmod 600 "${test_aside}.other" && command mv -f -- "${test_aside}.other" "${test_f}"'
+  [ "${status}" -eq 143 ] || { echo "status ${status}, want 143: ${output}" >&2; return 1; }
+  [ "$(cat "${aside}.seen")" -eq 1 ]
+  files=("${kc}"/*)
+  [ "${#files[@]}" -eq 1 ]
+  [ "$(cat "${files[0]}")" = other ]
+}
+
+# When the inode of the temp file cannot be read before the mv, the traps
+# remove the moved file only when it belongs to this user and has mode
+# 0600 (the mode of the temp file). A moved file of mode 0644 stays.
+@test "kubehz::_write_private: without the inode, the traps remove a moved file of this user only at mode 0600" {
+  local kc="${BATS_TEST_TMPDIR}/kc.yaml" aside="${BATS_TEST_TMPDIR}/aside.yaml" pair mode want
+  for pair in 600:0 644:1; do
+    mode="${pair%:*}" want="${pair#*:}"
+    rm -rf -- "${kc:?}" "${aside:?}" "${aside}.seen"
+    printf 'old\n' > "${kc}"
+    _hosted_moved_run "${kc}" "${aside}" TERM 'kubehz::_inode() { return 1; }' "chmod ${mode} \"\${test_f}\""
+    [ "${status}" -eq 143 ] || { echo "mode ${mode}: status ${status}, want 143: ${output}" >&2; return 1; }
+    [ "$(cat "${aside}.seen")" -eq 1 ]
+    [ "$(find "${kc}" -mindepth 1 | wc -l)" -eq "${want}" ] || { echo "mode ${mode}: $(ls -A "${kc}"), want ${want} file(s)" >&2; return 1; }
+  done
+}
+
 # The probe of mv -T runs once, in a temp directory of its own that it
 # removes. A mv without -T (the BSD mv of macOS) selects the check before
 # the rename, and a write through that path works.
