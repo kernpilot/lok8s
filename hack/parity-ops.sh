@@ -173,18 +173,22 @@ artifact_none()  { rm -f "${PROJ}/clusters/alpha.dev/artifacts.yaml"; }
 
 # check <stdin|-> <argv...> — run both impls in the shared project, diff.
 # The recover phase timer prints wall-clock seconds; a run that straddles a
-# second boundary differs by one — normalize before diffing. argsh exits 2 on
-# its own parse errors ("Error: too many arguments: …") where the Go binary
-# exits 1 with the identical message (cli.argshErrorf): tolerated when the
-# bash stderr carries that line (PARITY_PARSE_RC=auto).
+# second boundary differs by one — normalize before diffing.
+# check_parse <stdin|-> <argv...> — the same, for an argv that argsh refuses
+# with too many arguments: argsh exits 2 there, and the Go binary exits 1
+# with the identical message (cli.argshErrorf). Only these cases tolerate
+# that rc pair, and only when the bash stderr starts with the argsh line
+# "Error: too many arguments: <args>" (PARITY_PARSE_RC=auto).
 parity_normalize() {
   sed -i -E 's/took [0-9]+m [0-9]+s/took Nm Ns/; s/DONE in [0-9]+m [0-9]+s/DONE in Nm Ns/; s/=[0-9]+m[0-9]+s/=NmNs/g' "$@"
 }
-check() {
-  local stdin="${1}"; shift
+check() { ops_case 0 "$@"; }
+check_parse() { ops_case auto "$@"; }
+ops_case() {
+  local rc_mode="${1}" stdin="${2}"; shift 2
   [[ "${stdin}" != "-" ]] || stdin=""
   PARITY_STDIN="${stdin}" parity::run_pair "$@"
-  PARITY_PARSE_RC=auto parity::finish "lo $*"
+  PARITY_PARSE_RC="${rc_mode}" parity::finish "lo $*"
 }
 
 # ── lo deploy ────────────────────────────────────────────────────────────────
@@ -196,7 +200,7 @@ check() {
 export LOK8S_NONINTERACTIVE=1
 # Usage / label guards (no artifact needed, nothing applied).
 artifact_none
-check - deploy extra
+check_parse - deploy extra
 check - deploy -l foo
 check - deploy -l =v
 check - deploy -l foo=
@@ -221,7 +225,7 @@ check - deploy -v --domain alpha.dev
 check - deploy --domain alpha.dev -l lok8s.dev/type=nothing   # no match → warn, rc 0
 check - deploy --domain alpha.dev -l lok8s.dev/type=platform  # subset (no CRD phase)
 check - deploy -v --domain alpha.dev --label=flag=true        # unquoted scalar label matches
-check - deploy --domain alpha.dev -l app=x extra
+check_parse - deploy --domain alpha.dev -l app=x extra
 # Filtered: a failing kubectl apply is logged and the sequence continues (rc 0).
 export PARITY_KUBECTL_APPLY_RC=1
 check - deploy --domain alpha.dev -l lok8s.dev/type=platform
@@ -250,7 +254,7 @@ check - g f
 check - g a
 check - gitops flux --domain alpha.dev
 check - gitops --domain alpha.dev flux
-check - gitops flux extra
+check_parse - gitops flux extra
 
 # ── lo recover ───────────────────────────────────────────────────────────────
 check - recover a b
