@@ -92,8 +92,7 @@ func TestChatPreflightErrors(t *testing.T) {
 	// The hint names the two places that were searched and points at the
 	// install steps of the guide. A user project has no lochat source, so the
 	// hint gives no build command.
-	wantHint := "[error] lochat binary not found in " + p.Bin + " or on PATH.\n" +
-		"[error] To install it, do the set-up steps at https://lok8s.io/guide/lo-chat#set-up\n"
+	wantHint := lochatHint(p.Bin)
 	if !errors.Is(err, ErrHandled) || stderr != wantHint {
 		t.Errorf("missing lochat: err=%v\n got stderr=%q\nwant stderr=%q", err, stderr, wantHint)
 	}
@@ -131,6 +130,12 @@ func TestChatPreflightErrors(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(p2.Lok8s, "chat")); err == nil {
 		t.Error("LO_ASSETS_EJECT=never still wrote .lok8s/chat")
 	}
+}
+
+// lochatHint is the hint for a missing lochat when PATH_BIN is bin.
+func lochatHint(bin string) string {
+	return "[error] lochat binary not found in " + bin + " or on PATH.\n" +
+		"[error] To install it, do the set-up steps at https://lok8s.io/guide/lo-chat#set-up\n"
 }
 
 // chatExecBin swaps execProcess for the test and returns the binary that
@@ -181,7 +186,7 @@ func TestChatLochatOnPath(t *testing.T) {
 // PATH_BIN that is not <base>/.bin: chat looks in paths.Bin (resolved from
 // an exported PATH_BIN), never in a path rebuilt from the base. A decoy
 // lochat in <base>/.bin tells the two apart, when the check passes and in
-// the hint when it fails.
+// the hint when it fails. A lochat on PATH too: the one in PATH_BIN wins.
 func TestChatLochatInPathBin(t *testing.T) {
 	synth := chatProject(t) // its lochat in <base>/.bin is the decoy
 	custom := t.TempDir()
@@ -198,7 +203,9 @@ func TestChatLochatInPathBin(t *testing.T) {
 	}
 	want := lochatStub(t, custom)
 	testutil.WriteFile(t, filepath.Join(custom, "argsh.so"), "")
-	t.Setenv("PATH", t.TempDir()) // no lochat on PATH
+	onPath := t.TempDir()
+	lochatStub(t, onPath)
+	t.Setenv("PATH", onPath)
 	gotBin := chatExecBin(t)
 
 	_, stderr, err := runLo(t, NewRoot(p), "chat")
@@ -212,10 +219,10 @@ func TestChatLochatInPathBin(t *testing.T) {
 	if err := os.Remove(want); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("PATH", t.TempDir()) // no lochat on PATH
 	*gotBin = ""
 	_, stderr, err = runLo(t, NewRoot(p), "chat")
-	wantHint := "[error] lochat binary not found in " + custom + " or on PATH.\n" +
-		"[error] To install it, do the set-up steps at https://lok8s.io/guide/lo-chat#set-up\n"
+	wantHint := lochatHint(custom)
 	if !errors.Is(err, ErrHandled) || stderr != wantHint || *gotBin != "" {
 		t.Errorf("no lochat in PATH_BIN: err=%v exec=%q\n got stderr=%q\nwant stderr=%q", err, *gotBin, stderr, wantHint)
 	}

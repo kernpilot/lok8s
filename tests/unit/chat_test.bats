@@ -67,3 +67,13 @@ _chat_on_path() { PATH="${BATS_TEST_TMPDIR}/on-path" main::chat "$@"; }
   assert_output "lochat ran as ${BATS_TEST_TMPDIR}/on-path/lochat"
   assert_equal "${stderr}" ""
 }
+
+@test "chat: with a lochat in PATH_BIN and one on PATH, the one in PATH_BIN runs" {
+  _lochat "${PATH_BIN}"
+  _lochat "${BATS_TEST_TMPDIR}/on-path"
+  _ready
+  run --separate-stderr _chat_on_path
+  assert_success
+  assert_output "lochat ran as ${PATH_BIN}/lochat"
+  assert_equal "${stderr}" ""
+}
