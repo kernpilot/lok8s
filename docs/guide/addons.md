@@ -1277,8 +1277,8 @@ yes
 ```
 
 `lo doctor` finds the old binding for you. It reads the ClusterRoleBindings
-of the active domain's cluster and reports each one that binds the
-controller's ServiceAccount to `cluster-admin`, under any name (an older
+of the active domain's cluster and reports each one that gives the
+controller's ServiceAccount `cluster-admin`, under any name (an older
 upstream manifest used `system-upgrade`):
 
 ```console
@@ -1286,8 +1286,21 @@ $ lo doctor
 ...
 --- domain ---
   ✓ active: example.org (kind kubeone)
-  ! migration incomplete: ClusterRoleBinding system-upgrade-controller binds the system-upgrade-controller ServiceAccount to cluster-admin (run: kubectl delete clusterrolebinding system-upgrade-controller, unless you keep it on purpose)
+  ! migration incomplete: ClusterRoleBinding system-upgrade-controller binds the system-upgrade-controller ServiceAccount to cluster-admin. Keep it only on purpose, else delete it: kubectl --kubeconfig '/home/me/project/.kubeconfig/example.yaml' delete clusterrolebinding system-upgrade-controller
 ```
+
+The delete command names the kubeconfig that doctor read, in single
+quotes, and it is the rest of its line. A binding counts in each form of
+the ServiceAccount: the ServiceAccount itself, the User name of its token
+(`system:serviceaccount:cattle-system:system-upgrade-controller`), or a
+group of its token (`system:serviceaccounts:cattle-system`,
+`system:serviceaccounts`, `system:authenticated`). A delete removes the
+whole binding, so doctor prints a delete command only for a binding of
+the ServiceAccount alone. For a grant through a group, the line names the
+binding and says to review it. For a binding with other subjects, the
+line names the binding and the count of the other subjects, and says to
+remove the ServiceAccount from its subjects (for example with
+`kubectl edit`).
 
 Doctor only reads: you run the delete. When doctor finds a leftover and
 no binding gives the ServiceAccount `lok8s-system-upgrade-controller`
@@ -1299,10 +1312,11 @@ them with that kubeconfig, so its credential plugin
 (`users[].user.exec`) runs and can ask you to log in; each read stops
 after 30 s. The check does not run when `spec.bootstrap` has
 `system-upgrade-controller-cluster-admin`. Doctor finds that opt-in addon
-only as a bare entry name, not as a path entry, so each delete command
-ends with "unless you keep it on purpose". Doctor prints a binding name only when
-it is a DNS-1123 subdomain. For any other name, the line has no name and
-no delete command.
+only as a bare entry name, not as a path entry, so the line of each
+`cluster-admin` binding says "Keep it only on purpose, else delete it:"
+before the command. Doctor prints a binding name only when it is a
+DNS-1123 subdomain. For any other name, the line has no name and no
+delete command.
 
 The `can-i` lines are spot checks. Until now cluster-admin hid any call
 the new roles miss. Restart the controller, run one Plan that does what
@@ -1570,16 +1584,23 @@ yes
 
 `lo doctor` finds the old objects for you. It reads the ClusterRoleBindings
 and ClusterRoles of the active domain's cluster and prints one
-`! migration incomplete: …` line, with its delete command, for each of
-these:
+`! migration incomplete: …` line for each of these:
 
-- a ClusterRoleBinding, under any name, that binds the operator's
-  ServiceAccount to `redis-operator` or `cluster-admin`, or to
+- a ClusterRoleBinding, under any name, that gives the operator's
+  ServiceAccount `redis-operator` or `cluster-admin`, or
   `lok8s-redis-operator-chart-rbac` when `spec.bootstrap` does not have
   the opt-in addon (see below);
 - the ClusterRole `redis-operator`;
 - its `aggregate-to-*` labels (with the value `true`): the built-in roles
   keep the copied rules until the delete.
+
+The binding and role lines end with the delete command, which names the
+kubeconfig that doctor read. As for the system-upgrade-controller, a
+binding counts in each form of the ServiceAccount (the User name of its
+token, `system:serviceaccount:redis-operator:redis-operator`, and the
+groups of its token), and doctor prints no delete command for a grant
+through a group or for a binding with other subjects: the line names the
+binding and says what to do.
 
 Doctor only reads: you run the deletes. When doctor finds a leftover and
 no binding gives the ServiceAccount `lok8s-redis-operator` yet, it first
@@ -1590,8 +1611,8 @@ list ClusterRoleBindings and ClusterRoles. Doctor reads them with that
 kubeconfig, so its credential plugin (`users[].user.exec`) runs and can
 ask you to log in; each read stops after 30 s. Doctor finds the opt-in
 addon only as a bare entry name (`- redis-operator-chart-rbac`), not as a
-path entry, so the line for its binding ends with "unless you keep it on
-purpose".
+path entry, so the line for its binding says "Keep it only on purpose,
+else delete it:" before the command.
 
 The removal from `admin` is asynchronous. The delete of the labelled
 ClusterRole queues the clusterrole-aggregation controller, which then
