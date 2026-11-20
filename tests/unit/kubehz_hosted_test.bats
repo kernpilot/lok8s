@@ -1011,9 +1011,11 @@ _hosted_temps() {
 # Without mv -T, a directory can still come between the check and the
 # rename (here the mv itself puts it there first): mv then moves the new
 # file into it. The check after the rename finds no regular file at the
-# path and fails with one line that names the moved file. That file stays
-# (mode 0600), and nothing is removed: the mv here also puts another
-# file at the old temp path, and that file stays too.
+# path and fails with one line that names the path where the rename may
+# have put the new file. That file stays (mode 0600), and nothing is
+# removed: the mv here also puts another file at the old temp path, and
+# the cleanup after the failed rename keeps it (it is not the file of the
+# descriptor).
 @test "kubehz::_write_private: without mv -T, a directory just before the rename keeps the new file, and the error names it" {
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
   local kc="${BATS_TEST_TMPDIR}/kc.yaml" aside="${BATS_TEST_TMPDIR}/aside.yaml"
@@ -1032,8 +1034,7 @@ _hosted_temps() {
   [ -n "${f}" ]
   [ "$(cat "${f}")" = new ]
   [ "$(stat -c %a "${f}")" = 600 ]
-  assert_output --partial "${kc} is a directory, not a file: the rename moved the new file into it. Remove ${f} (mode 0600)"
-  [ "${#lines[@]}" -eq 1 ]
+  assert_output "[error] ${kc} is not a regular file after the rename: the rename may have moved the new file to ${f}"
   [ "$(cat "${aside}")" = old ]
   [ "$(cat "$(cat "${seen}")")" = other ]
 }
@@ -1043,12 +1044,12 @@ _hosted_temps() {
 # it). The mv of that shell puts a directory at <kc> (the old file goes to
 # <aside>), renames the temp file into it, runs <step> (shell code;
 # test_f is the moved file), writes the number of files in <kc> to
-# <aside>.seen, and then sends <signal> to the shell. So the traps run
-# before the check after the rename. <prelude> is shell code that runs
-# after the library is sourced. The call of mv has 2>/dev/null: a real mv
-# is a child process, and the traps run after it ends, without that
-# redirection. The mv here is a function, so it sends the signal with
-# the stderr of the shell (fd 9), and the traps write their line there.
+# <aside>.seen, and then sends <signal> to the shell, before the check
+# after the rename. <prelude> is shell code that runs after the library
+# is sourced. The call of mv has 2>/dev/null: a real mv is a child
+# process, and a trap runs after it ends, without that redirection. The
+# mv here is a function, so it sends the signal with the stderr of the
+# shell (fd 9).
 _hosted_moved_run() {
   run bash -c 'exec 9>&2
 import() { :; }
@@ -1070,9 +1071,10 @@ echo "returned $?"' bash "$1" "$2" "$3" "$4" "$5" "${_PROJECT_ROOT}/.lok8s"
 }
 
 # Without mv -T, a TERM or a HUP during the rename into a directory that
-# took the place of the file: the traps run before the check after the
-# rename. They name the moved file in one line and remove nothing in the
-# directory (the file stays, mode 0600), and the shell ends with the
+# took the place of the file: the trap only records the signal until the
+# rename and its check are done. The check names the path where the
+# rename may have put the new file in one line, nothing in the directory
+# is removed (the file stays, mode 0600), and then the shell ends with the
 # signal.
 @test "kubehz::_write_private: without mv -T, TERM and HUP during the rename into a directory name the moved file and remove nothing" {
   local kc="${BATS_TEST_TMPDIR}/kc.yaml" aside="${BATS_TEST_TMPDIR}/aside.yaml" pair sig code f
@@ -1088,17 +1090,16 @@ echo "returned $?"' bash "$1" "$2" "$3" "$4" "$5" "${_PROJECT_ROOT}/.lok8s"
     f=$(find "${kc}" -mindepth 1)
     [ -n "${f}" ] && [ "$(cat "${f}")" = new ] || { echo "${sig}: in ${kc}: $(ls -A "${kc}")" >&2; return 1; }
     [ "$(stat -c %a "${f}")" = 600 ]
-    assert_output --partial "${kc} is a directory, not a file: the rename moved the new file into it. Remove ${f} (mode 0600)"
-    [ "${#lines[@]}" -eq 1 ]
+    assert_output "[error] ${kc} is not a regular file after the rename: the rename may have moved the new file to ${f}"
     [ "$(cat "${aside}")" = old ]
     [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}" kc.yaml)" ]
   done
 }
 
-# The traps remove no file in that directory, also not one that another
-# process put there. Here another file (of this user, mode 0600) takes
-# the place of the moved one before the signal: it stays, and the line
-# names it (the traps cannot tell the two files apart).
+# A signal during that rename removes no file in that directory, also not
+# one that another process put there. Here another file (of this user,
+# mode 0600) takes the place of the moved one before the signal: it stays,
+# and the line names its path (the line does not say whose file is there).
 @test "kubehz::_write_private: the traps leave a file in that directory that this run did not make" {
   local kc="${BATS_TEST_TMPDIR}/kc.yaml" aside="${BATS_TEST_TMPDIR}/aside.yaml" files
   printf 'old\n' > "${kc}"
@@ -1109,7 +1110,133 @@ echo "returned $?"' bash "$1" "$2" "$3" "$4" "$5" "${_PROJECT_ROOT}/.lok8s"
   files=("${kc}"/*)
   [ "${#files[@]}" -eq 1 ]
   [ "$(cat "${files[0]}")" = other ]
-  assert_output --partial "${kc} is a directory, not a file: the rename moved the new file into it. Remove ${files[0]} (mode 0600)"
+  assert_output "[error] ${kc} is not a regular file after the rename: the rename may have moved the new file to ${files[0]}"
+}
+
+# A TERM or a HUP after the rename, with a file that another process put
+# at the old temp path: that file stays, with mv -T and without. The mv
+# of the new shell renames the temp file, puts the other file at the old
+# path (a new file for TERM, a hard link to the renamed file for HUP: the
+# same file as the descriptor) and then sends the signal. The new file is
+# in place, and the shell ends with the signal. The mv also records the
+# path that the traps remove at that time: it is empty (the call clears
+# it before the rename), so no trap can remove that file.
+@test "kubehz::_write_private: a signal after the rename keeps a file that another process put at the old temp path, with mv -T and without" {
+  local kc="${BATS_TEST_TMPDIR}/kc.yaml" exact pair sig code old
+  for exact in 1 0; do
+    for pair in TERM:143 HUP:129; do
+      sig="${pair%:*}" code="${pair#*:}"
+      rm -f -- "${kc}" "${kc}.old" "${kc}.trap"
+      printf 'old\n' > "${kc}"
+      run bash -c 'import() { :; }
+source "$4/utils/verbose.sh"
+source "$4/utils/http.sh"
+source "$4/libs/kubehz/hosted"
+test_signal="$2"
+_KUBEHZ_MV_EXACT="$3"
+mv() {
+  command mv "$@" || return
+  printf "%s\n" "${@: -2:1}" > "${@: -1}.old"
+  printf "%s" "${_kubehz_wp_tmp-unset}" > "${@: -1}.trap"
+  if [ "${test_signal}" = TERM ]; then
+    printf other > "${@: -2:1}"
+  else
+    ln -- "${@: -1}" "${@: -2:1}"
+  fi
+  { kill -s "${test_signal}" "$$"; } 2>&9
+}
+exec 9>&2
+kubehz::_write_private "$1" printf new
+echo "returned $?"' bash "${kc}" "${sig}" "${exact}" "${_PROJECT_ROOT}/.lok8s"
+      [ "${status}" -eq "${code}" ] || { echo "mv -T ${exact} ${sig}: status ${status}, want ${code}: ${output}" >&2; return 1; }
+      assert_output ""
+      [ "$(cat "${kc}")" = new ]
+      [ -f "${kc}.trap" ] && [ ! -s "${kc}.trap" ] || { echo "mv -T ${exact} ${sig}: the traps read <$(cat "${kc}.trap")>" >&2; return 1; }
+      old=$(cat "${kc}.old")
+      [ -e "${old}" ] || { echo "mv -T ${exact} ${sig}: ${old} is gone" >&2; return 1; }
+      if [ "${sig}" = TERM ]; then [ "$(cat "${old}")" = other ]; else [ "${old}" -ef "${kc}" ]; fi
+      rm -f -- "${old}"
+    done
+  done
+}
+
+# The write goes into the descriptor of the create, not to the path. Each
+# case puts a link at the temp path (to a 0644 file that another process
+# can read) after the create: at the end of the check of the open file
+# (the find of the mode check: so the link is there when the command
+# starts), and while the command runs. The linked file does not get the
+# content, the rename refuses the temp path (it is not the file of the
+# descriptor), the old file stays, and the link stays (another process
+# made it). The last case: a TERM after the swap, and the trap removes no
+# link that another process made.
+@test "kubehz::_write_private: a link that takes the place of the temp file after the create does not get the content" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local kc="${BATS_TEST_TMPDIR}/kc.yaml" other="${BATS_TEST_TMPDIR}/other" t at
+  export TEST_OTHER="${other}" TEST_KC="${kc}"
+  _hosted_swap_link() {
+    local f
+    for f in "${TEST_KC}".*; do rm -f -- "${f}" && ln -s -- "${TEST_OTHER}" "${f}"; done
+  }
+  for at in check command; do
+    printf 'old\n' > "${kc}"
+    : > "${other}"
+    chmod 644 "${other}"
+    if [ "${at}" = check ]; then
+      find() { command find "$@"; local rc=$?; _hosted_swap_link; return "${rc}"; }
+      run kubehz::_write_private "${kc}" printf 'kc-bytes\n'
+      unset -f find
+    else
+      swap() { _hosted_swap_link; printf 'kc-bytes\n'; }
+      run kubehz::_write_private "${kc}" swap
+    fi
+    assert_failure
+    t=$(_hosted_temps "${BATS_TEST_TMPDIR}" kc.yaml)
+    [ -L "${t}" ] || { echo "${at}: no link at the temp path: ${t}" >&2; return 1; }
+    [ "$(readlink "${t}")" = "${other}" ]
+    assert_output "[error] The temp file ${t} is not the file that this run wrote: nothing is renamed to ${kc}"
+    [ ! -s "${other}" ] || { echo "${at}: the linked file got the content" >&2; return 1; }
+    [ "$(cat "${kc}")" = old ]
+    [ ! -L "${kc}" ]
+    rm -f -- "${t}"
+  done
+  run bash -c 'import() { :; }
+source "$4/utils/verbose.sh"
+source "$4/utils/http.sh"
+source "$4/libs/kubehz/hosted"
+test_other="$2" test_kc="$1" test_seen="$3"
+swap() {
+  local f
+  for f in "${test_kc}".*; do rm -f -- "${f}" && ln -s -- "${test_other}" "${f}" && printf "%s\n" "${f}" > "${test_seen}"; done
+  printf "kc-bytes\n"
+  kill -s TERM "$$"
+}
+kubehz::_write_private "$1" swap
+echo "returned $?"' bash "${kc}" "${other}" "${BATS_TEST_TMPDIR}/seen" "${_PROJECT_ROOT}/.lok8s"
+  [ "${status}" -eq 143 ] || { echo "status ${status}, want 143: ${output}" >&2; return 1; }
+  assert_output ""
+  t=$(cat "${BATS_TEST_TMPDIR}/seen")
+  [ -L "${t}" ] || { echo "the trap removed the link ${t}" >&2; return 1; }
+  [ "$(readlink "${t}")" = "${other}" ]
+  [ ! -s "${other}" ]
+  [ "$(cat "${kc}")" = old ]
+}
+
+# The check after the create: the open file must have mode 0600. Here the
+# umask of the create is 022 (a umask function in place of the builtin),
+# so the new file has mode 0644: the call writes nothing, removes the temp
+# file (the file of this run) and keeps the old file.
+@test "kubehz::_write_private: a temp file that the create does not make with mode 0600 gets nothing" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local kc="${BATS_TEST_TMPDIR}/kc.yaml" ran="${BATS_TEST_TMPDIR}/ran"
+  printf 'old\n' > "${kc}"
+  umask() { if [ "${1:-}" = 077 ]; then builtin umask 022; else builtin umask "$@"; fi; }
+  run kubehz::_write_private "${kc}" touch "${ran}"
+  unset -f umask
+  assert_failure
+  assert_output --regexp "^\\[error\\] The temp file ${kc}\.[A-Za-z0-9]{6} is not a new file of this user with mode 0600: nothing is written$"
+  [ ! -e "${ran}" ]
+  [ "$(cat "${kc}")" = old ]
+  [ -z "$(_hosted_temps "${BATS_TEST_TMPDIR}" kc.yaml)" ]
 }
 
 # The probe of mv -T runs once, in a temp directory of its own that it
@@ -1197,10 +1324,12 @@ echo "returned $?"' bash "${kc}" "${sig}" "${_PROJECT_ROOT}/.lok8s"
   done
 }
 
-# A TERM or a HUP while mktemp runs (in its command substitution): the
-# traps are set before it, and the shell runs them after the substitution
-# gives the name, so the new temp file goes too.
-@test "kubehz::_write_private: TERM and HUP while mktemp runs remove the new temp file" {
+# A TERM or a HUP just after the create of the temp file: the traps are
+# set before it, and the path that they read is set before the open, so
+# the new temp file goes too. Here the signal comes when the call gives
+# the umask of the caller back, the step just after the open (a umask
+# function in place of the builtin).
+@test "kubehz::_write_private: TERM and HUP just after the create remove the new temp file" {
   local kc="${BATS_TEST_TMPDIR}/kc.yaml" pair sig code
   for pair in TERM:143 HUP:129; do
     sig="${pair%:*}" code="${pair#*:}"
@@ -1210,7 +1339,7 @@ source "$3/utils/verbose.sh"
 source "$3/utils/http.sh"
 source "$3/libs/kubehz/hosted"
 test_signal="$2"
-mktemp() { command mktemp "$@" && kill -s "${test_signal}" "$$"; }
+umask() { builtin umask "$@"; if [ "$#" -eq 1 ] && [ "$1" != 077 ]; then kill -s "${test_signal}" "$$"; fi; }
 kubehz::_write_private "$1" printf new
 echo "returned $?"' bash "${kc}" "${sig}" "${_PROJECT_ROOT}/.lok8s"
     [ "${status}" -eq "${code}" ] || { echo "${sig}: status ${status}, want ${code}" >&2; return 1; }
