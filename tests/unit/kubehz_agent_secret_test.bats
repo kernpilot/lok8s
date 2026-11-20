@@ -37,6 +37,8 @@ setup() {
   export REGISTER_HDRS="${BATS_TEST_TMPDIR}/register.hdrs"
   export HEARTBEAT_OUT="${BATS_TEST_TMPDIR}/heartbeat.json"
   export HEARTBEAT_HDRS="${BATS_TEST_TMPDIR}/heartbeat.hdrs"
+  # A timeout call in another form than `timeout -k 2 SECS` (the stub).
+  export STUB_TIMEOUT_FORM_LOG="${BATS_TEST_TMPDIR}/timeout-form.log"
 
   export CLUSTER_ID="test.example.com"
   export KUBEHZ_API_URL="https://api.example.com"
@@ -51,10 +53,20 @@ teardown() {
 _build_runner() {
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
-# timeout: the pod's `timeout SECS CMD ARGS`. It runs the command as a shell
+# timeout: the pod's `timeout -k 2 SECS CMD ARGS` (the BusyBox applet and
+# GNU coreutils take the same form). It runs the command as a shell
 # function, so the kubectl stub below answers it and no real kubectl runs.
+# Any other form, such as a call without the kill-after, goes to
+# STUB_TIMEOUT_FORM_LOG and fails (rc 125), so it does not pass unseen.
 timeout() {
-  shift
+  case "$1:$2:$3" in
+    -k:2:5|-k:2:30) ;;
+    *)
+      printf '%s\n' "$*" >> "${STUB_TIMEOUT_FORM_LOG}"
+      echo "stub: timeout without -k 2: $*" >&2
+      return 125 ;;
+  esac
+  shift 3
   "$@"
 }
 kubectl() {
@@ -153,6 +165,8 @@ STUBS_EOF
 
   run sh "${RUNNER}"
   assert_success
+  # Every kubectl call ran under `timeout -k 2 SECS`.
+  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
 
   # A = khz_agt_<64 hex>, C = khzc_<64 hex> — 256-bit, distinct prefixes.
   run cat "${STORE_A}"
@@ -168,6 +182,8 @@ STUBS_EOF
 
   run sh "${RUNNER}"
   assert_success
+  # Every kubectl call ran under `timeout -k 2 SECS`.
+  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
   local a1 c1
   a1="$(cat "${STORE_A}")"
   c1="$(cat "${STORE_C}")"
@@ -175,6 +191,8 @@ STUBS_EOF
   # Re-run against the SAME store (mirrors a re-applied / re-fired agent).
   run sh "${RUNNER}"
   assert_success
+  # Every kubectl call ran under `timeout -k 2 SECS`.
+  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
 
   assert_equal "$(cat "${STORE_A}")" "${a1}"
   assert_equal "$(cat "${STORE_C}")" "${c1}"
@@ -198,6 +216,8 @@ STUBS_EOF
   _build_runner
   run sh "${RUNNER}"
   assert_success
+  # Every kubectl call ran under `timeout -k 2 SECS`.
+  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
 
   local a c
   a="$(cat "${STORE_A}")"
@@ -215,6 +235,8 @@ STUBS_EOF
   _build_runner
   run sh "${RUNNER}"
   assert_success
+  # Every kubectl call ran under `timeout -k 2 SECS`.
+  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
 
   # Valid JSON with the domain and both hashes.
   run command jq -e . "${REGISTER_OUT}"
@@ -248,6 +270,8 @@ STUBS_EOF
   _build_runner
   run sh "${RUNNER}"
   assert_success
+  # Every kubectl call ran under `timeout -k 2 SECS`.
+  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
 
   local a
   a="$(cat "${STORE_A}")"

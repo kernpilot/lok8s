@@ -7,7 +7,7 @@ package kubehz
 // was proven on prod with the same image, service account and labels. The
 // marker read carried --request-timeout=5s, so it failed on every tick, and
 // the 24h assessment gate, the claim nonce and the desired-state poll were
-// off. A time bound is `timeout 5 kubectl ...`, outside kubectl.
+// off. A time bound is `timeout -k 2 5 kubectl ...`, outside kubectl.
 //
 // The tests read the embedded manifests. TestEmbeddedManifestsMatchBashTree
 // pins them to .lok8s/libs/kubehz/manifests byte for byte, so the bash tree
@@ -236,7 +236,7 @@ func TestAgentKubectlCallsCarryNoClientConfigFlag(t *testing.T) {
 			total++
 			for _, a := range c.args {
 				if f := clientConfigFlag(a); f != "" {
-					t.Errorf("%s: script line %d: kubectl %s sets %s. In the pod that skips the in-cluster config and dials localhost:8080; bound the call with `timeout 5 kubectl ...`",
+					t.Errorf("%s: script line %d: kubectl %s sets %s. In the pod that skips the in-cluster config and dials localhost:8080; bound the call with `timeout -k 2 5 kubectl ...`",
 						file, c.line, strings.Join(c.args, " "), f)
 				}
 			}
@@ -249,43 +249,46 @@ func TestAgentKubectlCallsCarryNoClientConfigFlag(t *testing.T) {
 	}
 }
 
-// TestAgentProbesAreBoundedByTimeout: the marker read and every assessment
-// probe stay bounded in time, with `timeout <seconds>` (the syntax that
-// busybox and coreutils both accept), not with a kubectl flag. The scan of
-// the assessment block starts at the send gate (the first `if [ -n
-// "${ASSESS_NOW}" ]`), so it covers the gate's dry run too.
-func TestAgentProbesAreBoundedByTimeout(t *testing.T) {
+// TestAgentKubectlCallsAreBoundedByTimeout: every kubectl call of the
+// heartbeat script is bounded in time, with `timeout -k 2 5` right before
+// kubectl, and the node list with `timeout -k 2 30`: TERM after 5 s (30 s),
+// then KILL 2 s later. The BusyBox applet and GNU coreutils both take that
+// syntax. The bound is never a kubectl flag
+// (TestAgentKubectlCallsCarryNoClientConfigFlag). A call without the bound,
+// the identity Secret calls, the marker writes and the nonce clear included,
+// can hold the tick until activeDeadlineSeconds kills it.
+func TestAgentKubectlCallsAreBoundedByTimeout(t *testing.T) {
 	t.Parallel()
 	script := heartbeatScript(t)
-	bounded := regexp.MustCompile(`(^|[\s($])timeout 5 $`)
-
-	marker := 0
-	for _, c := range kubectlCalls(script) {
+	bound := regexp.MustCompile(`(^|[\s($|])timeout -k 2 (\d+) $`)
+	calls := kubectlCalls(script)
+	marker, nodeList := 0, 0
+	for _, c := range calls {
 		joined := strings.Join(c.args, " ")
+		want := "5"
+		if joined == "get --raw /api/v1/nodes" {
+			nodeList++
+			want = "30"
+		}
 		if strings.HasPrefix(joined, "get configmap kubehz-agent-state ") && strings.Contains(joined, "{.metadata.annotations}") {
 			marker++
-			if !bounded.MatchString(c.prefix) {
-				t.Errorf("script line %d: the marker read is not bounded by `timeout 5`: %q kubectl %s", c.line, c.prefix, joined)
-			}
+		}
+		m := bound.FindStringSubmatch(c.prefix)
+		if m == nil {
+			t.Errorf("script line %d: kubectl %s is not bounded by `timeout -k 2 %s`: %q", c.line, joined, want, c.prefix)
+			continue
+		}
+		if m[2] != want {
+			t.Errorf("script line %d: kubectl %s runs under `timeout -k 2 %s`, want `timeout -k 2 %s`", c.line, joined, m[2], want)
 		}
 	}
-	if marker != 1 {
-		t.Errorf("%d marker reads found, want 1", marker)
+	if marker != 1 || nodeList != 1 {
+		t.Errorf("%d marker reads and %d node lists found, want 1 and 1", marker, nodeList)
 	}
-
-	begin := strings.Index(script, `if [ -n "${ASSESS_NOW}" ]; then`)
-	end := strings.Index(script, "ASSESSMENT=$(jq ")
-	if begin < 0 || end < begin {
-		t.Fatalf("the assessment block was not found (begin %d, end %d)", begin, end)
-	}
-	probes := kubectlCalls(script[begin:end])
-	for _, c := range probes {
-		if !bounded.MatchString(c.prefix) {
-			t.Errorf("assessment probe is not bounded by `timeout 5`: %q kubectl %s", c.prefix, strings.Join(c.args, " "))
-		}
-	}
-	if len(probes) < 12 {
-		t.Errorf("%d assessment probes found, want at least 12", len(probes))
+	// The heartbeat script has more than 30 kubectl calls. Fewer means the
+	// scan reads nothing.
+	if len(calls) < 30 {
+		t.Fatalf("the scan found %d kubectl calls, want at least 30", len(calls))
 	}
 }
 

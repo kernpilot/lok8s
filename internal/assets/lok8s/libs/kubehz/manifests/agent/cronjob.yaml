@@ -93,14 +93,17 @@ spec:
                     fi
                   }
 
-                  if ! kubectl get secret kubehz-agent -n kubehz-system >/dev/null 2>&1; then
+                  # Every kubectl call of this script runs under `timeout -k 2 5`
+                  # (the node list: `timeout -k 2 30`). The marker read below
+                  # says why the bound is outside kubectl.
+                  if ! timeout -k 2 5 kubectl get secret kubehz-agent -n kubehz-system >/dev/null 2>&1; then
                     NEW_A="khz_agt_$(rand_hex)"
                     NEW_C="khzc_$(rand_hex)"
                     # create-if-absent; tolerate a concurrent creator so we never rotate.
                     # A and C reach kubectl as an env file on stdin, never on argv: every
                     # process on the node can read argv (ps, /proc/<pid>/cmdline).
                     printf 'agent-token=%s\nclaim-code=%s\n' "${NEW_A}" "${NEW_C}" |
-                      kubectl create secret generic kubehz-agent -n kubehz-system \
+                      timeout -k 2 5 kubectl create secret generic kubehz-agent -n kubehz-system \
                       --from-env-file=/dev/stdin >/dev/null 2>&1 || true
                     NEW_A=""
                     NEW_C=""
@@ -109,9 +112,9 @@ spec:
                   # Always read the authoritative values back from the Secret (not the
                   # just-generated ones), so a concurrent creator's values win — no
                   # rotation, ever. The Secret is the single source of truth for A and C.
-                  AGENT_TOKEN=$(kubectl get secret kubehz-agent -n kubehz-system \
+                  AGENT_TOKEN=$(timeout -k 2 5 kubectl get secret kubehz-agent -n kubehz-system \
                     -o jsonpath='{.data.agent-token}' 2>/dev/null | base64 -d)
-                  CLAIM_CODE=$(kubectl get secret kubehz-agent -n kubehz-system \
+                  CLAIM_CODE=$(timeout -k 2 5 kubectl get secret kubehz-agent -n kubehz-system \
                     -o jsonpath='{.data.claim-code}' 2>/dev/null | base64 -d)
 
                   # ── Self-register: POST {domain, sha256(A), sha256(C)} — HASHES ONLY ──
@@ -198,7 +201,7 @@ spec:
                   # NOT usable: kubectl rejects it (`--output must be 'yaml' or
                   # 'json'`). /version is already reachable (used as the apiserver
                   # health fallback below), so no extra RBAC is needed.
-                  KUBE_VERSION=$(kubectl get --raw /version 2>/dev/null | \
+                  KUBE_VERSION=$(timeout -k 2 5 kubectl get --raw /version 2>/dev/null | \
                     sed -n 's/.*"gitVersion": *"\([^"]*\)".*/\1/p' | head -1)
 
                   # Nodes: ONE list call for all nodes, and jq makes the
@@ -233,10 +236,10 @@ spec:
                   # shell keeps no copy of it. The script sets no pipefail,
                   # so the pipe's status is jq's. A failed or empty kubectl
                   # answer gives jq no input, and jq -e fails on no input; a
-                  # body without .items fails too. `timeout 30` bounds a
-                  # stalled apiserver below the job's 120 s deadline.
+                  # body without .items fails too. `timeout -k 2 30` bounds
+                  # a stalled apiserver below the job's 120 s deadline.
                   NODES_OK=""
-                  if NODE_LIST=$(timeout 30 kubectl get --raw /api/v1/nodes 2>/dev/null | jq -ce '[.items[] |
+                  if NODE_LIST=$(timeout -k 2 30 kubectl get --raw /api/v1/nodes 2>/dev/null | jq -ce '[.items[] |
                         (.metadata.labels // {}) as $l | {
                           name: .metadata.name,
                           status: ([.status.conditions[]? | select(.type == "Ready") | .status][0]
@@ -259,7 +262,7 @@ spec:
                   [ "${NODE_TOTAL}" -gt "${NODE_CAP}" ] && echo "kubehz: heartbeat summarizes the first ${NODE_CAP} of ${NODE_TOTAL} nodes" >&2
                   NODE_ARRAY=$(printf '%s' "${NODE_LIST}" | jq -c --argjson cap "${NODE_CAP}" '.[:$cap]' 2>/dev/null) || NODE_ARRAY="[]"
 
-                  CERT_EXPIRY=$(kubectl get csr -o json 2>/dev/null | \
+                  CERT_EXPIRY=$(timeout -k 2 5 kubectl get csr -o json 2>/dev/null | \
                     sed -n 's/.*"expirationTimestamp": *"\([^"]*\)".*/\1/p' | \
                     sort | head -1)
                   [ -z "${CERT_EXPIRY}" ] && CERT_EXPIRY="unknown"
@@ -271,7 +274,7 @@ spec:
                   # result -> apiserver, the per-check lines -> etcd. 2>&1 on
                   # purpose: on HTTP 500 kubectl embeds the [+]/[-] check lines
                   # in its error text, which is exactly what we parse.
-                  READYZ=$(kubectl get --raw '/readyz?verbose' 2>&1) && READYZ_OK=true || READYZ_OK=false
+                  READYZ=$(timeout -k 2 5 kubectl get --raw '/readyz?verbose' 2>&1) && READYZ_OK=true || READYZ_OK=false
 
                   APISERVER_STATUS=""
                   if [ "${READYZ_OK}" = "true" ]; then
@@ -279,7 +282,7 @@ spec:
                   else
                     case "${READYZ}" in
                       *"[-]"*) APISERVER_STATUS="Unhealthy" ;;
-                      *) kubectl get --raw /version >/dev/null 2>&1 && APISERVER_STATUS="Healthy" || true ;;
+                      *) timeout -k 2 5 kubectl get --raw /version >/dev/null 2>&1 && APISERVER_STATUS="Healthy" || true ;;
                     esac
                   fi
 
@@ -302,7 +305,7 @@ spec:
                   # pods. No matching pods (managed/external control plane) ->
                   # omit the component rather than report a false Unhealthy.
                   for comp in kube-scheduler kube-controller-manager; do
-                    ready=$(kubectl get pods -n kube-system -l "component=${comp}" \
+                    ready=$(timeout -k 2 5 kubectl get pods -n kube-system -l "component=${comp}" \
                       -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{" "}{end}' 2>/dev/null) || ready=""
                     cstatus=""
                     case "${ready}" in
@@ -342,22 +345,23 @@ spec:
                   # poll gets one full answer, and a claim nonce placed before the
                   # upgrade is not echoed: place a new one.
                   #
-                  # `timeout 5` bounds a kubectl call, never a kubectl
+                  # `timeout -k 2 5` bounds a kubectl call, never a kubectl
                   # client flag. Any client-config flag (--request-timeout,
                   # --server, --kubeconfig, --context, --token, ...) makes
                   # kubectl skip the in-cluster config and dial
                   # localhost:8080, so the call always fails in this pod.
                   # The marker read failed like that on every tick: the 24h
                   # gate, the claim nonce and the desired-state poll were
-                  # off. `timeout 5 CMD` is the busybox syntax and the
-                  # coreutils syntax.
+                  # off. `timeout -k 2 5 CMD` is the syntax of the BusyBox
+                  # applet and of GNU coreutils, and both take -k: TERM
+                  # after 5 s, then KILL 2 s later if the call still runs.
                   NOW_EPOCH=$(date -u +%s)
                   ASSESS_NOW=""
                   ASSESS_REQ=""
                   LAST_ASSESS=""
                   MARKER_OK=""
                   MARKER=""
-                  if MARKER=$(timeout 5 kubectl get configmap kubehz-agent-state -n kubehz-system \
+                  if MARKER=$(timeout -k 2 5 kubectl get configmap kubehz-agent-state -n kubehz-system \
                       -o jsonpath='{.metadata.annotations}' 2>/dev/null); then
                     MARKER_OK=1
                     LAST_ASSESS=$(printf '%s' "${MARKER}" | jq -r '."kubehz.cloud/last-assessment" // ""' 2>/dev/null) || LAST_ASSESS=""
@@ -407,7 +411,7 @@ spec:
                           fi ;;
                       esac
                       if [ -z "${CLAIM_LIVE}" ]; then
-                        if kubectl annotate configmap kubehz-agent-state -n kubehz-system \
+                        if timeout -k 2 5 kubectl annotate configmap kubehz-agent-state -n kubehz-system \
                           "kubehz.cloud/claim-nonce-" "kubehz.cloud/claim-nonce-placed-" >/dev/null 2>&1; then
                           echo "kubehz: cleared an expired/invalid claim nonce (place a fresh one with 'lo kubehz claim')" >&2
                         else
@@ -447,7 +451,7 @@ spec:
                   if [ -n "${ASSESS_NOW}" ]; then
                     GATE_REQ=""
                     [ "${ASSESS_REQ}" != "true" ] || GATE_REQ="kubehz.cloud/assess-requested-"
-                    if timeout 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
+                    if timeout -k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                         "kubehz.cloud/last-assessment=${NOW_EPOCH}" ${GATE_REQ:+"${GATE_REQ}"} >/dev/null 2>&1; then
                       GATE_WRITTEN=1
                     else
@@ -467,7 +471,7 @@ spec:
                     [ -z "${LAST_ASSESS}" ] || WB_LAST="kubehz.cloud/last-assessment=${LAST_ASSESS}"
                     WB_REQ=""
                     [ "${ASSESS_REQ}" != "true" ] || WB_REQ="kubehz.cloud/assess-requested=true"
-                    timeout 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
+                    timeout -k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                       "${WB_LAST}" ${WB_REQ:+"${WB_REQ}"} >/dev/null 2>&1 \
                       || echo "kubehz: could not put back the assessment marker on configmap/kubehz-agent-state in kubehz-system; the next assessment comes after the 24h window or on a platform request" >&2
                   }
@@ -478,10 +482,11 @@ spec:
                     # or a unix socket -> kine); neither pod visible (managed /
                     # external CP) -> "unknown". Reachability falls back to the
                     # /readyz etcd check captured above.
-                    # Every assessment probe runs under `timeout 5` (see the
-                    # marker read above): a stalled apiserver degrades THAT probe
-                    # instead of eating the whole beat (activeDeadlineSeconds
-                    # is the backstop, but it kills the beat with it).
+                    # Every assessment probe runs under `timeout -k 2 5` (see
+                    # the marker read above): a stalled apiserver degrades THAT
+                    # probe instead of eating the whole beat
+                    # (activeDeadlineSeconds is the backstop, but it kills the
+                    # beat with it).
                     # A field the contract has no "unknown" value for (a count,
                     # a list, capiManaged) must come from a call that answered:
                     # a failed or timed-out call is UNKNOWN, never 0 or [].
@@ -490,11 +495,11 @@ spec:
                     # gate's marker write is put back (assess_write_back), and
                     # the next tick probes again.
                     UNKNOWN=""
-                    APISERVER_ARGS=$(timeout 5 kubectl get pods -n kube-system -l component=kube-apiserver \
+                    APISERVER_ARGS=$(timeout -k 2 5 kubectl get pods -n kube-system -l component=kube-apiserver \
                       -o jsonpath='{.items[*].spec.containers[0].command} {.items[*].spec.containers[0].args}' 2>/dev/null) || APISERVER_ARGS=""
                     DATASTORE="unknown"
                     ETCD_REACHABLE=false
-                    ETCD_READY=$(timeout 5 kubectl get pods -n kube-system -l component=etcd \
+                    ETCD_READY=$(timeout -k 2 5 kubectl get pods -n kube-system -l component=etcd \
                       -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Ready")].status}{" "}{end}' 2>/dev/null) || ETCD_READY=""
                     case "${ETCD_READY}" in
                       *[![:space:]]*)
@@ -514,7 +519,7 @@ spec:
                     # capiManaged: the CRD answers -> true; NotFound -> false;
                     # any other failure (a timeout) -> unknown.
                     CAPI=""
-                    if CAPI_OUT=$(timeout 5 kubectl get crd clusters.cluster.x-k8s.io -o name 2>&1); then
+                    if CAPI_OUT=$(timeout -k 2 5 kubectl get crd clusters.cluster.x-k8s.io -o name 2>&1); then
                       CAPI=true
                     else
                       case "${CAPI_OUT}" in *"(NotFound)"*) CAPI=false ;; esac
@@ -524,7 +529,7 @@ spec:
                     # CNI guess from the kube-system daemonsets; only kube-proxy
                     # present -> "kube-proxy-only" (no CNI daemonset visible).
                     CNI="unknown"
-                    DS_NAMES=$(timeout 5 kubectl get daemonsets -n kube-system \
+                    DS_NAMES=$(timeout -k 2 5 kubectl get daemonsets -n kube-system \
                       -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null) || DS_NAMES=""
                     case "${DS_NAMES}" in
                       *cilium*)     CNI="cilium" ;;
@@ -538,7 +543,7 @@ spec:
                     # flag for the service half; null when neither is visible.
                     POD_CIDR=""
                     SERVICE_CIDR=""
-                    KUBEADM_CFG=$(timeout 5 kubectl get configmap kubeadm-config -n kube-system \
+                    KUBEADM_CFG=$(timeout -k 2 5 kubectl get configmap kubeadm-config -n kube-system \
                       -o jsonpath='{.data.ClusterConfiguration}' 2>/dev/null) || KUBEADM_CFG=""
                     if [ -n "${KUBEADM_CFG}" ]; then
                       POD_CIDR=$(printf '%s\n' "${KUBEADM_CFG}" | sed -n 's/^ *podSubnet: *//p' | head -1)
@@ -549,7 +554,7 @@ spec:
                         sed -n 's/.*--service-cluster-ip-range=\([^" ]*\).*/\1/p' | head -1)
                     fi
 
-                    SC_RAW=$(timeout 5 kubectl get storageclasses -o json 2>/dev/null) || SC_RAW=""
+                    SC_RAW=$(timeout -k 2 5 kubectl get storageclasses -o json 2>/dev/null) || SC_RAW=""
                     SC_JSON=$(printf '%s' "${SC_RAW}" | \
                       jq -c '[.items[] | {name: .metadata.name, provisioner: .provisioner,
                           isDefault: ((.metadata.annotations["storageclass.kubernetes.io/is-default-class"] // "false") == "true")}]' \
@@ -566,7 +571,7 @@ spec:
 
                     # PV summary: jq flattens each PV to "provisioner<TAB>capacity",
                     # awk converts capacities to Gi and groups by provisioner.
-                    PV_RAW=$(timeout 5 kubectl get pv -o json 2>/dev/null) || PV_RAW=""
+                    PV_RAW=$(timeout -k 2 5 kubectl get pv -o json 2>/dev/null) || PV_RAW=""
                     # `.items |` first: input that is not a PV list fails jq,
                     # and the summary is unknown instead of zero PVs.
                     PV_LINES=$(printf '%s' "${PV_RAW}" | \
@@ -604,24 +609,24 @@ spec:
 
                     # The counts: each from a call that answered, else unknown.
                     # An empty kubectl answer makes jq print nothing.
-                    LB_RAW=$(timeout 5 kubectl get services -A -o json 2>/dev/null) || LB_RAW=""
+                    LB_RAW=$(timeout -k 2 5 kubectl get services -A -o json 2>/dev/null) || LB_RAW=""
                     LB_COUNT=$(printf '%s' "${LB_RAW}" | \
                       jq '[.items[] | select(.spec.type == "LoadBalancer")] | length' 2>/dev/null) || LB_COUNT=""
                     [ -n "${LB_COUNT}" ] || UNKNOWN="${UNKNOWN} loadBalancers"
-                    VW_RAW=$(timeout 5 kubectl get validatingwebhookconfigurations -o json 2>/dev/null) || VW_RAW=""
+                    VW_RAW=$(timeout -k 2 5 kubectl get validatingwebhookconfigurations -o json 2>/dev/null) || VW_RAW=""
                     VALIDATING=$(printf '%s' "${VW_RAW}" | jq '.items | length' 2>/dev/null) || VALIDATING=""
                     [ -n "${VALIDATING}" ] || UNKNOWN="${UNKNOWN} webhooks.validating"
-                    MW_RAW=$(timeout 5 kubectl get mutatingwebhookconfigurations -o json 2>/dev/null) || MW_RAW=""
+                    MW_RAW=$(timeout -k 2 5 kubectl get mutatingwebhookconfigurations -o json 2>/dev/null) || MW_RAW=""
                     MUTATING=$(printf '%s' "${MW_RAW}" | jq '.items | length' 2>/dev/null) || MUTATING=""
                     [ -n "${MUTATING}" ] || UNKNOWN="${UNKNOWN} webhooks.mutating"
 
                     # cpNodes: the control-plane label, else the legacy master
                     # label. `grep -c` prints 0 and exits 1 on no line.
                     CP_NODES=""
-                    if CP_NAMES=$(timeout 5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name 2>/dev/null); then
+                    if CP_NAMES=$(timeout -k 2 5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name 2>/dev/null); then
                       CP_NODES=$(printf '%s\n' "${CP_NAMES}" | grep -c .) || CP_NODES=0
                       if [ "${CP_NODES}" = "0" ]; then
-                        if CP_NAMES=$(timeout 5 kubectl get nodes -l node-role.kubernetes.io/master -o name 2>/dev/null); then
+                        if CP_NAMES=$(timeout -k 2 5 kubectl get nodes -l node-role.kubernetes.io/master -o name 2>/dev/null); then
                           CP_NODES=$(printf '%s\n' "${CP_NAMES}" | grep -c .) || CP_NODES=0
                         else
                           CP_NODES=""
@@ -784,7 +789,7 @@ spec:
                   # window above bounds how long such a nonce keeps echoing.
                   if [ -n "${CLAIM_NONCE}" ] && printf '%s' "${RESPONSE}" | \
                       jq -e '(.claim.verified // .data.claim.verified // false) == true' >/dev/null 2>&1; then
-                    kubectl annotate configmap kubehz-agent-state -n kubehz-system \
+                    timeout -k 2 5 kubectl annotate configmap kubehz-agent-state -n kubehz-system \
                       "kubehz.cloud/claim-nonce-" "kubehz.cloud/claim-nonce-placed-" >/dev/null 2>&1 \
                       || echo "kubehz: claim verified but the nonce annotation could not be cleared; the next tick will expire it" >&2
                     echo "kubehz: cluster claim verified by the platform" >&2
@@ -803,7 +808,7 @@ spec:
                   # nothing (fail-closed, as for the assessment gate above).
                   if [ -n "${MARKER_OK}" ] && [ -z "${ASSESS_REJECTED:-}" ] && printf '%s' "${RESPONSE}" | \
                       jq -e '((.actions // .data.actions // []) | index("assess")) != null' >/dev/null 2>&1; then
-                    kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
+                    timeout -k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                       "kubehz.cloud/assess-requested=true" >/dev/null 2>&1 || true
                   fi
 
@@ -853,7 +858,7 @@ spec:
                         # Unchanged — silent. Clear a sticky refusal state so a
                         # later refusal logs again (e.g. after a re-enroll).
                         if [ -n "${DESIRED_ERR}" ]; then
-                          kubectl annotate configmap kubehz-agent-state -n kubehz-system \
+                          timeout -k 2 5 kubectl annotate configmap kubehz-agent-state -n kubehz-system \
                             "kubehz.cloud/desired-error-" >/dev/null 2>&1 || true
                         fi
                         ;;
@@ -880,12 +885,12 @@ spec:
                             DES_SKEW=" — desired k8s ${DES_K8S}, local ${KUBE_VERSION}"
                           fi
                           echo "kubehz: desired state changed — revision ${DES_REV}, execution flags on: ${DES_FLAGS}${DES_SKEW} (report-only; acting arrives with the Go agent)"
-                          kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
+                          timeout -k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                             "kubehz.cloud/desired-etag=${DES_NEW_ETAG}" \
                             "kubehz.cloud/desired-revision=${DES_REV}" >/dev/null 2>&1 \
                             || echo "kubehz: could not persist the desired-state marker; the next poll re-reports" >&2
                           if [ -n "${DESIRED_ERR}" ]; then
-                            kubectl annotate configmap kubehz-agent-state -n kubehz-system \
+                            timeout -k 2 5 kubectl annotate configmap kubehz-agent-state -n kubehz-system \
                               "kubehz.cloud/desired-error-" >/dev/null 2>&1 || true
                           fi
                         fi
@@ -893,7 +898,7 @@ spec:
                       401|403|404)
                         if [ "${DESIRED_ERR}" != "${DES_CODE}" ]; then
                           echo "kubehz: desired-state poll refused (HTTP ${DES_CODE}) — check the cluster's enrollment/claim; identical refusals stay quiet" >&2
-                          kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
+                          timeout -k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                             "kubehz.cloud/desired-error=${DES_CODE}" >/dev/null 2>&1 || true
                         fi
                         ;;

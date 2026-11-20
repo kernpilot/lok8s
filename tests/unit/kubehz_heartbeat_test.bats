@@ -68,18 +68,20 @@ setup() {
   # each annotate and each heartbeat POST in their order.
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
-# timeout: the pod's `timeout SECS CMD ARGS` (busybox and coreutils take the
-# same form). It logs the bound and the command, and runs the command as a
-# shell function, so the kubectl stub below answers it. A command that
-# contains STUB_TIMEOUT_MATCH times out instead: busybox kills it with
-# SIGTERM (rc 143), and it prints nothing.
+# timeout: the pod's `timeout -k KILL SECS CMD ARGS` (the BusyBox applet and
+# GNU coreutils take the same form). It logs its whole argv, so a case sees
+# the bound of each call, and runs the command as a shell function, so the
+# kubectl stub below answers it. A kubectl call that does not run under it
+# goes to STUB_UNBOUND_LOG. A command that contains STUB_TIMEOUT_MATCH times
+# out instead: TERM kills it (rc 143), and it prints nothing.
 timeout() {
-  local secs=$1
-  shift
-  printf '%s %s\n' "${secs}" "$*" >> "${STUB_TIMEOUT_LOG}"
+  printf '%s\n' "$*" >> "${STUB_TIMEOUT_LOG}"
   case "$*" in
     *"${STUB_TIMEOUT_MATCH:-<none>}"*) return 143 ;;
   esac
+  [ "$1" != "-k" ] || shift 2
+  shift
+  local STUB_BOUND=1
   "$@"
 }
 # _stub_store_annotate ARGS: apply the annotate ARGS to STUB_STATE_FILE.
@@ -107,6 +109,7 @@ _stub_store_annotate() {
 }
 kubectl() {
   argv_log kubectl "$@"
+  [ -n "${STUB_BOUND:-}" ] || printf '%s\n' "$*" >> "${STUB_UNBOUND_LOG}"
   [ -z "${STUB_KUBECTL_LOG:-}" ] || printf '%s\n' "$*" >> "${STUB_KUBECTL_LOG}"
   [ -z "${STUB_KUBECTL_DELAY:-}" ] || sleep "${STUB_KUBECTL_DELAY}"
   # In the pod, kubectl reads the in-cluster config. A client-config flag
@@ -135,6 +138,12 @@ kubectl() {
     # The claim code: empty unless STUB_CLAIM_CODE sets one. With one, the
     # bootstrap sends its self-register.
     *"get secret kubehz-agent"*"claim-code"*) printf '%s' "${STUB_CLAIM_CODE:-}" | base64 | tr -d '\n' ;;
+    # The identity Secret exists, unless STUB_SECRET_ABSENT: then the
+    # bootstrap creates it (the values on stdin are dropped here).
+    "get secret kubehz-agent -n kubehz-system")
+      [ -z "${STUB_SECRET_ABSENT:-}" ] || return 1 ;;
+    "create secret generic kubehz-agent -n kubehz-system --from-env-file=/dev/stdin")
+      cat > /dev/null ;;
 
     # kubernetesVersion = the SERVER version. The FIX reads the apiserver
     # /version endpoint (a single "gitVersion" → unambiguous). `version -o json`
@@ -171,7 +180,11 @@ kubectl() {
     "get node "*) printf '' ;;
 
     "get csr -o json") printf '{}\n' ;;
-    *"/readyz"*) printf 'ok\n'; return 0 ;;
+    # STUB_READYZ_FAIL: /readyz answers with an error and no check lines, so
+    # the script asks /version for the apiserver status.
+    *"/readyz"*)
+      if [ -n "${STUB_READYZ_FAIL:-}" ]; then echo 'Error from server (ServiceUnavailable)' >&2; return 1; fi
+      printf 'ok\n'; return 0 ;;
 
     # ── Assessment fixtures (handover contract §1) ──
     # The agent's RBAC grants nothing on kubehz-agent-config (the pod gets
@@ -232,7 +245,7 @@ kubectl() {
       if [ -n "${STUB_DAEMONSETS+x}" ]; then printf '%s' "${STUB_DAEMONSETS}"; else printf 'cilium\nkube-proxy\n'; fi ;;
     "get configmap kubeadm-config"*)
       printf '  networking:\n    dnsDomain: cluster.local\n    podSubnet: 10.244.0.0/16\n    serviceSubnet: 10.96.0.0/12\n' ;;
-    # The assessment probes run under `timeout 5` (a stalled apiserver
+    # The assessment probes run under `timeout -k 2 5` (a stalled apiserver
     # degrades ONE probe, never the whole beat; the timeout stub above).
     # STUB_SC_JSON overrides the StorageClass dump (the >50-cap fixture).
     "get storageclasses -o json"*)
@@ -245,7 +258,10 @@ kubectl() {
       printf '%s\n' '{"items":[{"spec":{"type":"LoadBalancer"}},{"spec":{"type":"ClusterIP"}},{"spec":{"type":"LoadBalancer"}}]}' ;;
     "get validatingwebhookconfigurations -o json"*) printf '%s\n' '{"items":[{},{},{}]}' ;;
     "get mutatingwebhookconfigurations -o json"*) printf '%s\n' '{"items":[{}]}' ;;
-    "get nodes -l node-role.kubernetes.io/control-plane -o name"*) printf 'node/cp-1\n' ;;
+    # STUB_CP_NODES="" = no node with the control-plane label: the script
+    # counts the legacy master label instead.
+    "get nodes -l node-role.kubernetes.io/control-plane -o name"*)
+      if [ -n "${STUB_CP_NODES+x}" ]; then printf '%s' "${STUB_CP_NODES}"; else printf 'node/cp-1\n'; fi ;;
     "get nodes -l node-role.kubernetes.io/master -o name"*) printf '' ;;
 
     "get pods"*) printf ''; return 0 ;;
@@ -317,8 +333,10 @@ STUBS_EOF
   # Dry-run annotate calls, apart from the marker writes. The agent sends none.
   export STUB_DRYRUN_LOG="${BATS_TEST_TMPDIR}/dryrun.log"
   export STUB_CURL_LOG="${BATS_TEST_TMPDIR}/curl.log"
-  # Every `timeout SECS CMD …` call: the bound, then the command.
+  # Every `timeout …` call: its whole argv (`-k 2 5 kubectl get …`).
   export STUB_TIMEOUT_LOG="${BATS_TEST_TMPDIR}/timeout.log"
+  # Every kubectl call that does not run under timeout.
+  export STUB_UNBOUND_LOG="${BATS_TEST_TMPDIR}/unbound.log"
   # Each annotate and each heartbeat POST, in order; and per heartbeat POST
   # whether it carried an assessment.
   export STUB_EVENTS_LOG="${BATS_TEST_TMPDIR}/events.log"
@@ -1348,7 +1366,7 @@ _state_only() {
 # kubectl stub refuses such a call the same way. The marker read carried
 # --request-timeout=5s: it failed on every tick, so the 24h gate, the claim
 # nonce and the desired-state poll were off, and every assessment probe read
-# empty. `timeout 5` bounds the calls now.
+# empty. `timeout -k 2 5` bounds the calls now.
 
 @test "in-cluster kubectl: the marker read reaches the apiserver: the assessment probes and the desired-state poll run" {
   run bash --posix "${RUNNER}"
@@ -1362,33 +1380,87 @@ _state_only() {
   assert_output "etcd cilium 10.244.0.0/16 2 3 2 3 1"
 }
 
-@test "in-cluster kubectl: the marker read, the send gate and every assessment probe run under timeout 5; the node list under timeout 30" {
+@test "in-cluster kubectl: the marker read, the send gate and every assessment probe run under timeout -k 2 5; the node list under timeout -k 2 30" {
   run bash --posix "${RUNNER}"
   assert_success
   run cat "${STUB_TIMEOUT_LOG}"
-  assert_line "5 kubectl get configmap kubehz-agent-state -n kubehz-system -o jsonpath={.metadata.annotations}"
-  assert_line --regexp '^5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+$'
-  assert_line --partial "5 kubectl get pods -n kube-system -l component=kube-apiserver -o jsonpath="
-  assert_line --partial "5 kubectl get pods -n kube-system -l component=etcd -o jsonpath="
-  assert_line "5 kubectl get crd clusters.cluster.x-k8s.io -o name"
-  assert_line --partial "5 kubectl get daemonsets -n kube-system -o jsonpath="
-  assert_line "5 kubectl get configmap kubeadm-config -n kube-system -o jsonpath={.data.ClusterConfiguration}"
-  assert_line "5 kubectl get storageclasses -o json"
-  assert_line "5 kubectl get pv -o json"
-  assert_line "5 kubectl get services -A -o json"
-  assert_line "5 kubectl get validatingwebhookconfigurations -o json"
-  assert_line "5 kubectl get mutatingwebhookconfigurations -o json"
-  assert_line "5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name"
+  assert_line "-k 2 5 kubectl get configmap kubehz-agent-state -n kubehz-system -o jsonpath={.metadata.annotations}"
+  assert_line --regexp '^-k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+$'
+  assert_line --partial "-k 2 5 kubectl get pods -n kube-system -l component=kube-apiserver -o jsonpath="
+  assert_line --partial "-k 2 5 kubectl get pods -n kube-system -l component=etcd -o jsonpath="
+  assert_line "-k 2 5 kubectl get crd clusters.cluster.x-k8s.io -o name"
+  assert_line --partial "-k 2 5 kubectl get daemonsets -n kube-system -o jsonpath="
+  assert_line "-k 2 5 kubectl get configmap kubeadm-config -n kube-system -o jsonpath={.data.ClusterConfiguration}"
+  assert_line "-k 2 5 kubectl get storageclasses -o json"
+  assert_line "-k 2 5 kubectl get pv -o json"
+  assert_line "-k 2 5 kubectl get services -A -o json"
+  assert_line "-k 2 5 kubectl get validatingwebhookconfigurations -o json"
+  assert_line "-k 2 5 kubectl get mutatingwebhookconfigurations -o json"
+  assert_line "-k 2 5 kubectl get nodes -l node-role.kubernetes.io/control-plane -o name"
   # The node list has its own bound.
-  assert_line "30 kubectl get --raw /api/v1/nodes"
-  # Twelve bounded reads and the bounded gate, each in the plain-seconds form
-  # that busybox and coreutils both take.
-  run grep -c '^5 kubectl get ' "${STUB_TIMEOUT_LOG}"
-  assert_output "12"
-  run grep -c '^5 kubectl annotate --overwrite ' "${STUB_TIMEOUT_LOG}"
-  assert_output "1"
-  run grep -vcE '^(5 kubectl get |5 kubectl annotate --overwrite |30 kubectl get --raw /api/v1/nodes$)' "${STUB_TIMEOUT_LOG}"
+  assert_line "-k 2 30 kubectl get --raw /api/v1/nodes"
+  # Each call in the form that the BusyBox applet and GNU coreutils both
+  # take: TERM after the seconds, KILL 2 s later. No call is unbounded.
+  run grep -vcE '^(-k 2 5 kubectl |-k 2 30 kubectl get --raw /api/v1/nodes$)' "${STUB_TIMEOUT_LOG}"
   assert_output "0"
+  [ ! -s "${STUB_UNBOUND_LOG}" ]
+}
+
+# Every kubectl call of the script runs under `timeout -k 2 5` (the node
+# list under `timeout -k 2 30`): the identity Secret calls, the health
+# reads, the marker writes and the nonce clears too. A call without the
+# bound can hold the tick until the Job's deadline kills it. Four ticks
+# reach every call: a first run (the Secret is created, /readyz fails, no
+# control-plane label, an expired nonce, a changed desired state, a stored
+# refusal and an "assess" in the response), a verified claim with an
+# unchanged desired state, a new refusal, and a failed delivery (the
+# write-back).
+@test "in-cluster kubectl: every kubectl call of the script runs under timeout -k 2" {
+  local now
+  now=$(date -u +%s)
+  export STUB_KUBECTL_LOG="${BATS_TEST_TMPDIR}/kubectl.log"
+
+  STUB_SECRET_ABSENT=1 STUB_READYZ_FAIL=1 STUB_CP_NODES='' STUB_DESIRED_CODE=200 STUB_DESIRED_ETAG='"9-120"' \
+    STUB_MARKER='{"kubehz.cloud/claim-nonce":"khzn_eXp1rEd_n0ncE_43charsBase64urlValue00000","kubehz.cloud/claim-nonce-placed":"'$(( now - 1000 ))'","kubehz.cloud/desired-error":"401"}' \
+    STUB_RESPONSE='{"status":"ok","actions":["assess"]}' run bash --posix "${RUNNER}"
+  assert_success
+  STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/claim-nonce":"khzn_vEr1f1Ed_n0ncE_43charsBase64urlValue000","kubehz.cloud/claim-nonce-placed":"'$(( now - 30 ))'","kubehz.cloud/desired-error":"401"}' \
+    STUB_RESPONSE='{"status":"ok","claim":{"verified":true}}' run bash --posix "${RUNNER}"
+  assert_success
+  STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'"}' STUB_DESIRED_CODE=401 run bash --posix "${RUNNER}"
+  assert_success
+  STUB_MARKER='{}' STUB_CURL_FAIL=1 run bash --posix "${RUNNER}"
+  assert_failure
+
+  # No kubectl call ran outside timeout, and each one ran under the -k form.
+  [ ! -s "${STUB_UNBOUND_LOG}" ]
+  run grep -vcE '^(-k 2 5 kubectl |-k 2 30 kubectl get --raw /api/v1/nodes$)' "${STUB_TIMEOUT_LOG}"
+  assert_output "0"
+  [ "$(grep -c '' "${STUB_KUBECTL_LOG}")" = "$(grep -c ' kubectl ' "${STUB_TIMEOUT_LOG}")" ]
+  # The calls that ran without a bound before, each seen under it.
+  run cat "${STUB_TIMEOUT_LOG}"
+  assert_line "-k 2 5 kubectl get secret kubehz-agent -n kubehz-system"
+  assert_line "-k 2 5 kubectl create secret generic kubehz-agent -n kubehz-system --from-env-file=/dev/stdin"
+  assert_line "-k 2 5 kubectl get secret kubehz-agent -n kubehz-system -o jsonpath={.data.agent-token}"
+  assert_line "-k 2 5 kubectl get secret kubehz-agent -n kubehz-system -o jsonpath={.data.claim-code}"
+  assert_line "-k 2 5 kubectl get --raw /version"
+  assert_line "-k 2 5 kubectl get csr -o json"
+  assert_line "-k 2 5 kubectl get --raw /readyz?verbose"
+  assert_line --partial "-k 2 5 kubectl get pods -n kube-system -l component=kube-scheduler -o jsonpath="
+  assert_line --partial "-k 2 5 kubectl get pods -n kube-system -l component=kube-controller-manager -o jsonpath="
+  assert_line "-k 2 5 kubectl get nodes -l node-role.kubernetes.io/master -o name"
+  assert_line "-k 2 5 kubectl annotate configmap kubehz-agent-state -n kubehz-system kubehz.cloud/claim-nonce- kubehz.cloud/claim-nonce-placed-"
+  assert_line "-k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/assess-requested=true"
+  assert_line "-k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/desired-etag=\"9-120\" kubehz.cloud/desired-revision=7"
+  assert_line "-k 2 5 kubectl annotate configmap kubehz-agent-state -n kubehz-system kubehz.cloud/desired-error-"
+  assert_line "-k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/desired-error=401"
+  assert_line "-k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment-"
+  # The nonce clear runs on two paths: the expiry (tick 1) and the verified
+  # claim (tick 2).
+  [ "$(grep -cxF -- "-k 2 5 kubectl annotate configmap kubehz-agent-state -n kubehz-system kubehz.cloud/claim-nonce- kubehz.cloud/claim-nonce-placed-" "${STUB_TIMEOUT_LOG}")" = 2 ]
+  # /version runs twice in tick 1: the server version and the apiserver
+  # status after the failed /readyz.
+  [ "$(grep -cxF -- "-k 2 5 kubectl get --raw /version" "${STUB_TIMEOUT_LOG}")" -ge 5 ]
 }
 
 # A probe for a field the contract has no "unknown" value for (a count, a
