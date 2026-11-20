@@ -395,6 +395,8 @@ YAML
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
   local yaml
   yaml=$(_cluster_yaml)
+  # A hosted create needs a version (provision_hosted refuses a spec without one).
+  printf '  kubernetes:\n    version: v1.31.10\n' >> "${yaml}"
   export LOK8S_KUBEHZ_API_URL="https://api.kubehz.example"
 
   run kubehz::provision_hosted d.example "${yaml}"

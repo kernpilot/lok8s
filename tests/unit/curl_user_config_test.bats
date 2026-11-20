@@ -938,6 +938,8 @@ _hosted_one() {
 
 _hosted_setup() {
   _kubehz_api_setup
+  # A hosted create needs a version (provision_hosted refuses a spec without one).
+  printf '  kubernetes:\n    version: v1.31.10\n' >> "${YAML}"
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
 }
 

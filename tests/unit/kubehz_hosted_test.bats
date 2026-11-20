@@ -99,10 +99,11 @@ teardown() {
   echo "${output}" | jq -e '.controlPlaneReplicas == 1'
 }
 
-# Issue #272: an unset spec.kubernetes.version (no key, a YAML null, an
-# empty string) is left out of the payload, and a set one is sent as
-# written. The real yq and jq read a real spec file. Go twin:
-# TestBuildClusterPayloadKubernetesVersion (internal/kubehz/hosted_test.go).
+# Issue #272: an unset spec.kubernetes.version (no key, a YAML null,
+# false, an empty string) is left out of the payload, and a set one is sent
+# as written (a number as its text). The real yq and jq read a real spec
+# file. Go twin: TestBuildClusterPayloadKubernetesVersion
+# (internal/kubehz/hosted_test.go).
 _payload_setup() {
   command -v yq &>/dev/null || skip "yq not available"
   command -v jq &>/dev/null || skip "jq not available"
@@ -145,11 +146,31 @@ _PAYLOAD_UNSET='{"domain":"test.kubehz.dev","kind":"KubeOne","provider":"hetzner
   assert_equal "${got}" "${_PAYLOAD_UNSET}"
 }
 
+# `//` fires on false too: a read that drops only the word "null" would
+# send the string "false".
+@test "build_cluster_payload: a false spec.kubernetes.version leaves kubernetesVersion out" {
+  _payload_setup
+  local got
+  got=$(_payload_for_version false)
+  assert_equal "${got}" "${_PAYLOAD_UNSET}"
+}
+
 @test "build_cluster_payload: a set spec.kubernetes.version is sent as written" {
   _payload_setup
   local got
   got=$(_payload_for_version v1.31.10)
   assert_equal "${got}" '{"domain":"test.kubehz.dev","kind":"KubeOne","provider":"hetzner","region":"fsn1","kubernetesVersion":"v1.31.10","controlPlaneReplicas":1,"hosting":"hosted","access":"none"}'
+}
+
+# A number is not unset: 0 is sent as the string "0", and 1.30 keeps its
+# text (it is not read as the number 1.3).
+@test "build_cluster_payload: a number spec.kubernetes.version is sent as a string" {
+  _payload_setup
+  local got value
+  for value in 0 1.30; do
+    got=$(_payload_for_version "${value}")
+    assert_equal "${got}" '{"domain":"test.kubehz.dev","kind":"KubeOne","provider":"hetzner","region":"fsn1","kubernetesVersion":"'"${value}"'","controlPlaneReplicas":1,"hosting":"hosted","access":"none"}'
+  done
 }
 
 # ── wait_for_cluster ─────────────────────────────────────
@@ -284,7 +305,13 @@ clusters:
   }
   export -f jq
 
-  yq() { echo ""; }
+  # A set version gets past the refusal of a spec with no version.
+  yq() {
+    case "$2" in
+      '.spec.kubernetes.version // ""') echo "v1.31.10" ;;
+      *) echo "" ;;
+    esac
+  }
   export -f yq
 
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
@@ -296,6 +323,42 @@ clusters:
   run kubehz::provision_hosted "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
   assert_failure
   assert_output --partial "did not return a cluster ID"
+}
+
+# A hosted spec with no spec.kubernetes.version (no key, a YAML null,
+# false, an empty string) is refused before any request: the platform
+# refuses a create without it. The real yq reads a real spec file. curl
+# records each call and fails (a stub that answers would let a provision
+# without the refusal poll until its timeout), so without the refusal the
+# output and the call log differ at once. Go twin:
+# TestProvisionHostedRefusesASpecWithNoVersion.
+@test "provision_hosted: a spec with no spec.kubernetes.version is refused before any request" {
+  command -v yq &>/dev/null || skip "yq not available"
+  local spec="${BATS_TEST_TMPDIR}/cluster.lok8s.yaml" value block
+  curl() {
+    echo "curl $*" >> "${BATS_TEST_TMPDIR}/curl.calls"
+    return 7
+  }
+  export -f curl
+
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/main"
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+
+  export LOK8S_KUBEHZ_API_URL="https://api.kubehz.dev"
+  export KUBEHZ_TOKEN="test-token"
+
+  for value in no-key null false '""'; do
+    block=""
+    if [[ "${value}" != no-key ]]; then
+      block="  kubernetes:"$'\n'"    version: ${value}"$'\n'
+    fi
+    printf 'kind: KubeOne\nmetadata:\n  name: test.kubehz.dev\nspec:\n  cluster:\n    domain: test.kubehz.dev\n%s  kubehz:\n    hosting: hosted\n' "${block}" > "${spec}"
+    run kubehz::provision_hosted "test.kubehz.dev" "${spec}"
+    assert_failure
+    assert_output "[error] kubehz: spec.kubernetes.version is not set in ${spec}. A hosted cluster needs a Kubernetes version, so no cluster was created. Set it, then run the command again."
+  done
+  [[ ! -e "${BATS_TEST_TMPDIR}/curl.calls" ]]
+  [[ ! -e "${BATS_TEST_TMPDIR}/.kubeconfig/test.kubehz.dev.yaml" ]]
 }
 
 # ── provision_hosted: capacity rejection (the "max mechanism") ───────────

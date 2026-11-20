@@ -496,6 +496,17 @@ layoutempty.dev|holds an empty YAML document before the spec\. Remove line 2 \(a
 layouttwo.dev|holds more than one YAML document\. Remove lines 11 to 12 \(the '---' at line 11 and everything after it\)\.
 LAYOUT
 unset PARITY_KIND_LOG PARITY_DOCKER_LOG
+# The other Lo-driver gates read the same layout: `registry status` and
+# `image list` refuse layouttwo.dev with the same [error] line.
+layout_two="/clusters/layouttwo\.dev/cluster\.lok8s\.yaml holds more than one YAML document\. Remove lines 11 to 12 \(the '---' at line 11 and everything after it\)\.$"
+check - registry status --domain layouttwo.dev
+for side in bash go; do
+  node_pin "${side}: registry status refuses layouttwo.dev with the layout" "${WORK}/${side}.err" 1 "${layout_two}"
+done
+check - image list --domain layouttwo.dev
+for side in bash go; do
+  node_pin "${side}: image list refuses layouttwo.dev with the layout" "${WORK}/${side}.err" 1 "${layout_two}"
+done
 
 # ── lo up — spec.network.dnsSearch ───────────────────────────────────────────
 # dns.dev sets a search list, dnsalias.dev an anchored list with aliased

@@ -25,10 +25,10 @@ kubehz::build_cluster_payload() {
   kind=$(yq -r '.kind' "${cluster_yaml}")
   provider=$(yq -r '.spec.provider // "hetzner"' "${cluster_yaml}")
   region=$(yq -r '.spec.hcloud.region // .spec.aws.region // "fsn1"' "${cluster_yaml}")
-  # An unset version (no key, a YAML null, an empty string) is left out of
+  # An unset version (kubehz::_hosted_version prints "") is left out of
   # the payload. The bare read printed the word "null", which went out as
   # the version string "null" (issue #272). Go twin: buildClusterPayload.
-  k8s_version=$(yq -r '.spec.kubernetes.version // ""' "${cluster_yaml}")
+  k8s_version=$(kubehz::_hosted_version "${cluster_yaml}")
   cp_replicas=$(yq -r '.spec.controlPlane.replicas // 1' "${cluster_yaml}")
   hosting=$(yq -r '.spec.kubehz.hosting // "self"' "${cluster_yaml}")
   access=$(yq -r '.spec.kubehz.access // "none"' "${cluster_yaml}")
@@ -45,6 +45,16 @@ kubehz::build_cluster_payload() {
     '{domain: $domain, kind: $kind, provider: $provider, region: $region}
       + (if $kubernetesVersion != "" then {kubernetesVersion: $kubernetesVersion} else {} end)
       + {controlPlaneReplicas: $controlPlaneReplicas, hosting: $hosting, access: $access}'
+}
+
+# kubehz::_hosted_version <cluster_yaml>: spec.kubernetes.version on
+# stdout, or "" when it is unset: no key, a YAML null, false or an empty
+# string (`//` fires on null and on false). A number keeps its text ("0",
+# "1.30"). kubehz::build_cluster_payload and the refusal in
+# kubehz::provision_hosted use this one read. Go twin:
+# specDoc.kubernetesVersion.
+kubehz::_hosted_version() {
+  yq -r '.spec.kubernetes.version // ""' "${1}"
 }
 
 # Wait for a hosted cluster to reach Running state.
@@ -134,10 +144,19 @@ kubehz::render_capacity_rejection() {
 
 # Provision a cluster via the kubehz hosted API.
 # Creates the cluster, waits for it, and downloads the kubeconfig.
+# A spec with no spec.kubernetes.version is refused first, before any
+# request: the platform needs the version and refuses a create without it
+# (HTTP 400, a missing field). Go twin: ProvisionHosted.
 # Usage: kubehz::provision_hosted <domain> <cluster_yaml>
 kubehz::provision_hosted() {
   local domain="${1}" cluster_yaml="${2}"
   local api_url="${LOK8S_KUBEHZ_API_URL}"
+  local k8s_version
+  k8s_version=$(kubehz::_hosted_version "${cluster_yaml}") || k8s_version=""
+  if [[ -z "${k8s_version}" ]]; then
+    error "kubehz: spec.kubernetes.version is not set in ${cluster_yaml}. A hosted cluster needs a Kubernetes version, so no cluster was created. Set it, then run the command again."
+    return 1
+  fi
   http::credential_ok KUBEHZ_TOKEN || return 1
 
   # The kubeconfig path is checked before the create: a path that the
