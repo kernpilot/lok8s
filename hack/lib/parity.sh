@@ -57,6 +57,9 @@ parity::init() {
 
   unset PATH_BASE PATH_BIN PATH_LOK8S PATH_CLUSTERS PATH_SECRETS \
     DOMAIN_NAME LOK8S_CLUSTER_NAME LOK8S_SSH_KEY SOPS_AGE_KEY SOPS_AGE_KEY_FILE DEBUG
+  # PARITY_PARSE_RC is set for one case at a time (check_parse). A value
+  # from the caller's shell must not apply to every case.
+  unset PARITY_PARSE_RC
   # GITHUB_ACTIONS: on a workflow runner `lo lint` renders its findings as
   # workflow commands when stdout is not a terminal (documented). The
   # harness proves the plain contract, so it runs without the variable.
