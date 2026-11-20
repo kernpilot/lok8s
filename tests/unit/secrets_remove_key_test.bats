@@ -1462,6 +1462,11 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
 
   DOMAIN=a.dev SOPS_AGE_KEY_FILE="${k}/keep.age" run _rm "${k}/gone.pub"
   [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  # The lint check first: it writes nothing, and the sweep could make the
+  # files fresh again.
+  domain=a.dev run secrets::check_unencrypted
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ -z "$output" ] || { echo "the lint check after remove-key: $output" >&2; return 1; }
   cp -p "${store}/Secret.app.default.K.enc" "${store}/Secret.other.default.K.enc" "${saved}/"
   # DEBUG names each skip and each encrypt of the sweep.
   DEBUG=1 domain=a.dev run secrets::encrypt
@@ -1471,9 +1476,6 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
     echo "the encrypt sweep re-encrypted app" >&2; return 1; }
   cmp -s "${store}/Secret.other.default.K.enc" "${saved}/Secret.other.default.K.enc" || {
     echo "the encrypt sweep re-encrypted other" >&2; return 1; }
-  domain=a.dev run secrets::check_unencrypted
-  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
-  [ -z "$output" ] || { echo "the lint check after remove-key: $output" >&2; return 1; }
 }
 
 @test "the twin compare keeps the identity and the decrypted value out of a trace" {

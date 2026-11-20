@@ -714,6 +714,12 @@ func TestRemoveKeyLeavesNothingForTheEncryptSweepOrTheLintCheck(t *testing.T) {
 	if err := c.RemoveKey(g, false, false); err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
+	// The lint check first: it writes nothing, and the sweep could make the
+	// files fresh again.
+	var lint bytes.Buffer
+	if !CheckUnencrypted(c.Paths.Clusters+"/a.dev/secrets", &lint) || lint.String() != "" {
+		t.Errorf("the lint check after remove-key:\n%s", lint.String())
+	}
 	encs := []string{app + ".enc", other + ".enc"}
 	before := map[string]string{}
 	for _, enc := range encs {
@@ -731,10 +737,6 @@ func TestRemoveKeyLeavesNothingForTheEncryptSweepOrTheLintCheck(t *testing.T) {
 		if readFile(t, enc) != before[enc] {
 			t.Errorf("the encrypt sweep after remove-key re-encrypted %s", enc)
 		}
-	}
-	var lint bytes.Buffer
-	if !CheckUnencrypted(c.Paths.Clusters+"/a.dev/secrets", &lint) || lint.String() != "" {
-		t.Errorf("the lint check after remove-key:\n%s", lint.String())
 	}
 }
 
