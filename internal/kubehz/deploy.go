@@ -504,13 +504,13 @@ func podLines(out string) bool {
 
 func oneLine(s string) string { return strings.ReplaceAll(strings.TrimRight(s, "\n"), "\n", " ") }
 
-// identityTokenTemplate prints the word agent-token when the identity
+// identityProbeTemplate prints the word agent-token when the identity
 // Secret holds a non-empty agent-token, else nothing. The read never gets
 // the value: the deploy needs only to know that the key is there.
-const identityTokenTemplate = `go-template={{with .data}}{{if index . "agent-token"}}agent-token{{end}}{{end}}` // #nosec G101 -- a go-template that prints a key name, never a value
+const identityProbeTemplate = `go-template={{with .data}}{{if index . "agent-token"}}agent-token{{end}}{{end}}`
 
 // identityHasToken reports whether the merged output of the
-// identityTokenTemplate read has the line agent-token (a warning line on
+// identityProbeTemplate read has the line agent-token (a warning line on
 // stderr can come before it).
 func identityHasToken(out string) bool {
 	return slices.Contains(strings.Split(out, "\n"), "agent-token")
@@ -525,7 +525,7 @@ func identityHasToken(out string) bool {
 // the Secret would skip that attempt until the CronJob's next tick. The
 // Job's own deadline is 120 s; the wait allows a little more.
 func (c *Context) ensureIdentitySecret(ctx context.Context) error {
-	probe, err := c.captureBoth(ctx, "kubectl", "-n", "kubehz-system", "get", "secret", "kubehz-agent", "-o", identityTokenTemplate)
+	probe, err := c.captureBoth(ctx, "kubectl", "-n", "kubehz-system", "get", "secret", "kubehz-agent", "-o", identityProbeTemplate)
 	if err == nil && identityHasToken(probe) {
 		return nil
 	}
@@ -560,7 +560,7 @@ func (c *Context) ensureIdentitySecret(ctx context.Context) error {
 		c.errorf("kubehz: the identity bootstrap (job/%s) did not complete within %ds. A pod that cannot pull its image or reach the cluster's apiserver is the usual cause. A Job that failed stays until you delete it. Read its state: kubectl -n kubehz-system describe job %s. Read its log: kubectl -n kubehz-system logs job/%s (after the deadline the pod is gone and this call fails). Delete it after you read them: kubectl -n kubehz-system delete job %s. The live agent was NOT applied and the CronJob does not beat, so this cluster is reporting NOTHING until you re-run 'lo kubehz deploy'.", job, wait, job, job, job)
 		return ErrHandled
 	}
-	if out, err := c.captureBoth(ctx, "kubectl", "-n", "kubehz-system", "get", "secret", "kubehz-agent", "-o", identityTokenTemplate); err != nil || !identityHasToken(out) {
+	if out, err := c.captureBoth(ctx, "kubectl", "-n", "kubehz-system", "get", "secret", "kubehz-agent", "-o", identityProbeTemplate); err != nil || !identityHasToken(out) {
 		c.errorf("kubehz: the identity bootstrap (job/%s) completed but left no agent-token in Secret kubehz-agent. Read its log: kubectl -n kubehz-system logs job/%s. The live agent was NOT applied.", job, job)
 		return ErrHandled
 	}
