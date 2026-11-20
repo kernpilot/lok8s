@@ -16,7 +16,9 @@ package secrets
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -28,6 +30,7 @@ import (
 	"time"
 
 	"filippo.io/age"
+	"filippo.io/age/armor"
 
 	"github.com/kernpilot/lok8s/internal/fsutil"
 )
@@ -867,8 +870,11 @@ func TestAddKeyWritesTheGitignoreBeforeTheConfig(t *testing.T) {
 // an .enc with no plaintext twin) leaves the recipient in .sops.yaml and no
 // .enc re-keyed. The rerun that the message names (--skip-orphans) finds the
 // recipient present and the .enc files of the sweep without it: it finishes
-// the re-key and does not write .sops.yaml again. The run after that changes
-// nothing (bash: tests/unit/secrets_add_key_test.bats).
+// the re-key and does not write .sops.yaml again. The orphan still does not
+// list the recipient, so a run without --skip-orphans refuses it as the
+// first run did, before it decides that nothing is left to do. With
+// --skip-orphans, the run after that changes nothing and warns about the
+// orphan (bash: tests/unit/secrets_add_key_test.bats).
 func TestAddKeyRerunFinishesAReKeyThatAnEarlierRunLeft(t *testing.T) {
 	f := newLinkFixture(t, "add-key")
 	gone := f.gone.Recipient().String()
@@ -886,37 +892,388 @@ func TestAddKeyRerunFinishesAReKeyThatAnEarlierRunLeft(t *testing.T) {
 	if err := f.c.AddKey(gone, false, true); err != nil {
 		t.Fatalf("the rerun: %v\n%s", err, f.errOut.String())
 	}
-	head := "recipient already present in .sops.yaml, but 2 .enc file(s) of the store do not list it: finishing the re-key\n  " + gone + "\n"
-	tail := "done — commit .sops.yaml and the updated .enc files together\n"
-	if got := f.out.String(); !strings.HasPrefix(got, head) || !strings.HasSuffix(got, tail) {
-		t.Errorf("stdout:\n%q\nwant the start %q and the end %q", got, head, tail)
+	want := "recipient already present in .sops.yaml, but 2 .enc file(s) of the store are missing or not re-keyed for it: finishing the re-key\n  " + gone + "\n" +
+		"Encrypted 2 secret(s)\n" +
+		"done — commit .sops.yaml and the updated .enc files together\n"
+	if got := f.out.String(); got != want {
+		t.Errorf("stdout:\n%q\nwant:\n%q", got, want)
 	}
 	f.rekeyed("app", "v")
 	f.rekeyed("db", "w")
 	unchanged(t, f.c, config)
 
+	orphan := "[warn] orphan (no decrypted twin, cannot re-key): " + f.c.rel(f.store) + "/Secret.orphan.default.K.enc\n"
 	states := fileStates(t, f.store)
-	if err := f.run(); err != nil {
+	if err := f.run(); !errors.Is(err, ErrHandled) {
+		t.Fatalf("the run without --skip-orphans: want ErrHandled, got %v\n%s", err, f.errOut.String())
+	}
+	refusal := orphan +
+		"[error] 1 encrypted file(s) have no decrypted twin — they would keep the OLD\n" +
+		"[error]   recipient list while .sops.yaml claims the new key was added.\n" +
+		"[error]   Run 'lo secrets decrypt' first, or re-run with --skip-orphans to accept it.\n"
+	if f.out.String() != "" || f.errOut.String() != refusal {
+		t.Errorf("stdout %q\nstderr:\n%q\nwant stderr:\n%q", f.out.String(), f.errOut.String(), refusal)
+	}
+	sameStates(t, states, fileStates(t, f.store))
+
+	f.out.Reset()
+	f.errOut.Reset()
+	if err := f.c.AddKey(gone, false, true); err != nil {
 		t.Fatalf("the last run: %v\n%s", err, f.errOut.String())
 	}
-	if want := "recipient already present in .sops.yaml — nothing to add\n  " + gone + "\n"; f.out.String() != want || f.errOut.String() != "" {
-		t.Errorf("stdout %q\nstderr %q\nwant stdout %q", f.out.String(), f.errOut.String(), want)
+	if want := "recipient already present in .sops.yaml — nothing to add\n  " + gone + "\n"; f.out.String() != want || f.errOut.String() != orphan {
+		t.Errorf("stdout %q\nstderr %q\nwant stdout %q and stderr %q", f.out.String(), f.errOut.String(), want, orphan)
 	}
 	sameStates(t, states, fileStates(t, f.store))
 	unchanged(t, f.c, config)
 }
 
+// finished runs add-key in the fixture, so that each .enc of the store
+// lists both identities, and returns .sops.yaml.
+func (f *linkFixture) finished() string {
+	f.t.Helper()
+	if err := f.run(); err != nil {
+		f.t.Fatalf("the first run: %v\n%s", err, f.errOut.String())
+	}
+	f.rekeyed("app", "v")
+	f.rekeyed("db", "w")
+	return readFile(f.t, f.c.sopsConfigPath())
+}
+
+// envelope reads the JSON envelope of the .enc at path, lets edit change
+// it, and writes it back.
+func envelope(t *testing.T, path string, edit func(top, meta map[string]any)) {
+	t.Helper()
+	var top map[string]any
+	if err := json.Unmarshal([]byte(readFile(t, path)), &top); err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := top["sops"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s: no sops metadata", path)
+	}
+	edit(top, meta)
+	raw, err := json.Marshal(top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, path, string(raw))
+}
+
+// ageEntry is the age entry of recipient in the sops metadata meta.
+func ageEntry(t *testing.T, meta map[string]any, recipient string) map[string]any {
+	t.Helper()
+	list, _ := meta["age"].([]any)
+	for _, e := range list {
+		if entry, _ := e.(map[string]any); entry["recipient"] == recipient {
+			return entry
+		}
+	}
+	t.Fatalf("no age entry for %s", recipient)
+	return nil
+}
+
+// A rerun after a finished run, with the .enc of app in a state that is not
+// finished: it is missing, it holds the label of the recipient alone, its
+// envelope has no mac or no lastmodified, the enc of the entry is not an
+// armored age block, or it lists the old recipients only. The rerun re-keys
+// that file only: the .enc of db keeps its bytes and its mtime, and
+// .sops.yaml stays as it was. The run after it changes nothing (bash:
+// tests/unit/secrets_add_key_test.bats).
+func TestAddKeyRerunReKeysOnlyTheFilesThatAreNotFinished(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(f *linkFixture, enc, old string)
+	}{
+		{"a missing .enc", func(f *linkFixture, enc, _ string) {
+			if err := os.Remove(enc); err != nil {
+				f.t.Fatal(err)
+			}
+		}},
+		{"the label alone", func(f *linkFixture, enc, _ string) {
+			write(f.t, enc, `{"data":"ENC[x]","sops":{"age":[{"recipient":"`+f.gone.Recipient().String()+`"}]}}`)
+		}},
+		{"no mac", func(f *linkFixture, enc, _ string) {
+			envelope(f.t, enc, func(_, meta map[string]any) { delete(meta, "mac") })
+		}},
+		{"an empty lastmodified", func(f *linkFixture, enc, _ string) {
+			envelope(f.t, enc, func(_, meta map[string]any) { meta["lastmodified"] = "" })
+		}},
+		{"an enc that is not armored", func(f *linkFixture, enc, _ string) {
+			envelope(f.t, enc, func(_, meta map[string]any) {
+				ageEntry(f.t, meta, f.gone.Recipient().String())["enc"] = "x"
+			})
+		}},
+		{"an enc without the footer line", func(f *linkFixture, enc, _ string) {
+			envelope(f.t, enc, func(_, meta map[string]any) {
+				entry := ageEntry(f.t, meta, f.gone.Recipient().String())
+				entry["enc"] = strings.TrimSuffix(entry["enc"].(string), armor.Footer+"\n")
+			})
+		}},
+		{"the old recipients", func(f *linkFixture, enc, old string) {
+			write(f.t, enc, old)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLinkFixture(t, "add-key")
+			gone := f.gone.Recipient().String()
+			app, db := f.store+"/Secret.app.default.K.enc", f.store+"/Secret.db.default.K.enc"
+			old := readFile(t, app)
+			config := f.finished()
+			tc.set(f, app, old)
+			states := fileStates(t, db)
+
+			if err := f.run(); err != nil {
+				t.Fatalf("the rerun: %v\n%s", err, f.errOut.String())
+			}
+			want := "recipient already present in .sops.yaml, but 1 .enc file(s) of the store are missing or not re-keyed for it: finishing the re-key\n  " + gone + "\n" +
+				"Encrypted 1 secret(s)\n" +
+				"done — commit .sops.yaml and the updated .enc files together\n"
+			if f.out.String() != want || f.errOut.String() != "" {
+				t.Errorf("stdout:\n%q\nstderr %q\nwant stdout:\n%q", f.out.String(), f.errOut.String(), want)
+			}
+			f.rekeyed("app", "v")
+			sameStates(t, states, fileStates(t, db))
+			unchanged(t, f.c, config)
+
+			if err := f.run(); err != nil {
+				t.Fatalf("the last run: %v\n%s", err, f.errOut.String())
+			}
+			if want := "recipient already present in .sops.yaml — nothing to add\n  " + gone + "\n"; f.out.String() != want {
+				t.Errorf("the last run: stdout %q", f.out.String())
+			}
+		})
+	}
+}
+
+// .sops.yaml holds the new key in a comment only: the rule lists the old
+// recipient. The rerun finds the key present and re-keys both files, but
+// sops encrypts them to the rule, so they still do not list the key. The
+// run reads the sweep again after the encrypt, names each file, says that
+// the rule may not list the key, and fails, with no "done" line (bash:
+// tests/unit/secrets_add_key_test.bats).
+func TestAddKeyRerunFailsWhenTheRuleDoesNotListTheKey(t *testing.T) {
+	f := newLinkFixture(t, "add-key")
+	gone := f.gone.Recipient().String()
+	write(t, f.c.sopsConfigPath(), "# the next key: "+gone+"\n"+readFile(t, f.c.sopsConfigPath()))
+	config := readFile(t, f.c.sopsConfigPath())
+
+	if err := f.run(); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
+	}
+	wantOut := "recipient already present in .sops.yaml, but 2 .enc file(s) of the store are missing or not re-keyed for it: finishing the re-key\n  " + gone + "\n" +
+		"Encrypted 2 secret(s)\n"
+	rel := f.c.rel(f.store)
+	wantErr := "[error] the sops metadata of " + rel + "/Secret.app.default.K.enc has no entry for the recipient after the re-key\n" +
+		"[error] the sops metadata of " + rel + "/Secret.db.default.K.enc has no entry for the recipient after the re-key\n" +
+		"[error]   the key is in .sops.yaml, but the creation rule of these files may not list it (for example, the key is only in a comment): fix .sops.yaml, then run this command again\n"
+	if f.out.String() != wantOut || f.errOut.String() != wantErr {
+		t.Errorf("stdout:\n%q\nstderr:\n%q\nwant stdout:\n%q\nwant stderr:\n%q", f.out.String(), f.errOut.String(), wantOut, wantErr)
+	}
+	unchanged(t, f.c, config)
+}
+
+// An orphan-only store (an .enc with no plaintext twin, and no plaintext):
+// the first run writes .sops.yaml, then refuses the orphan. A rerun without
+// --skip-orphans refuses it too, before it decides that nothing is left to
+// do. An orphan whose envelope shows the recipient (here, a copy of an .enc
+// that the run re-keyed) needs no re-key: the run with it changes nothing,
+// without --skip-orphans and without a warning (bash:
+// tests/unit/secrets_add_key_test.bats).
+func TestAddKeyRerunRefusesAnOrphanOnlyStoreWithoutSkipOrphans(t *testing.T) {
+	f := newLinkFixture(t, "add-key")
+	orphan := f.store + "/Secret.orphan.default.K.enc"
+	finishedApp := f.store + "/Secret.app.default.K.enc"
+	write(t, orphan, readFile(t, finishedApp))
+	for _, p := range []string{"app", "db"} {
+		for _, name := range []string{"Secret." + p + ".default.K", "Secret." + p + ".default.K.enc"} {
+			if err := os.Remove(f.store + "/" + name); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	refusal := "[warn] orphan (no decrypted twin, cannot re-key): " + f.c.rel(orphan) + "\n" +
+		"[error] 1 encrypted file(s) have no decrypted twin — they would keep the OLD\n" +
+		"[error]   recipient list while .sops.yaml claims the new key was added.\n" +
+		"[error]   Run 'lo secrets decrypt' first, or re-run with --skip-orphans to accept it.\n"
+	if err := f.run(); !errors.Is(err, ErrHandled) || f.errOut.String() != refusal {
+		t.Fatalf("the first run: want ErrHandled and the refusal, got %v\n%s", err, f.errOut.String())
+	}
+	config := readFile(t, f.c.sopsConfigPath())
+	if !strings.Contains(config, f.gone.Recipient().String()) {
+		t.Fatal("fixture: the first run did not write .sops.yaml before it stopped")
+	}
+	states := fileStates(t, f.store)
+	if err := f.run(); !errors.Is(err, ErrHandled) {
+		t.Fatalf("the rerun: want ErrHandled, got %v\n%s", err, f.out.String())
+	}
+	if f.out.String() != "" || f.errOut.String() != refusal {
+		t.Errorf("the rerun: stdout %q\nstderr:\n%q\nwant stderr:\n%q", f.out.String(), f.errOut.String(), refusal)
+	}
+	sameStates(t, states, fileStates(t, f.store))
+	unchanged(t, f.c, config)
+
+	// The control: an orphan that shows the recipient.
+	g := newLinkFixture(t, "add-key")
+	g.finished()
+	write(t, g.store+"/Secret.orphan.default.K.enc", readFile(t, g.store+"/Secret.app.default.K.enc"))
+	if err := g.run(); err != nil {
+		t.Fatalf("the control: %v\n%s", err, g.errOut.String())
+	}
+	if want := "recipient already present in .sops.yaml — nothing to add\n  " + g.gone.Recipient().String() + "\n"; g.out.String() != want || g.errOut.String() != "" {
+		t.Errorf("the control: stdout %q\nstderr %q", g.out.String(), g.errOut.String())
+	}
+}
+
+// A rerun after a finished run, with the .enc of app replaced by a symlink
+// to the .enc of db (which shows the recipient) or by a directory: the run
+// refuses it with the lines of the first run before it decides that
+// nothing is left to do, and changes nothing (bash:
+// tests/unit/secrets_add_key_test.bats).
+func TestAddKeyRerunRefusesAnEncThatIsNotARegularFile(t *testing.T) {
+	for _, kind := range []string{"a symlink", "a directory"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newLinkFixture(t, "add-key")
+			config := f.finished()
+			app := f.store + "/Secret.app.default.K.enc"
+			if err := os.Remove(app); err != nil {
+				t.Fatal(err)
+			}
+			want := "[error] " + f.c.rel(app)
+			if kind == "a symlink" {
+				if err := os.Symlink("Secret.db.default.K.enc", app); err != nil {
+					t.Fatal(err)
+				}
+				want += " is a symlink: the re-key does not write an .enc through a link\n" +
+					"[error]   replace each link with the file it names, or remove it from the store, then run this command again; nothing was written\n"
+			} else {
+				mkdir(t, app)
+				want += " is not a regular file (a directory, a FIFO, a socket or a device): the re-key does not write an .enc there\n" +
+					"[error]   remove or fix each entry named above, then run this command again; nothing was written\n"
+			}
+			states := fileStates(t, f.store)
+			if err := f.run(); !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, f.out.String())
+			}
+			if f.out.String() != "" || f.errOut.String() != want {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
+			}
+			sameStates(t, states, fileStates(t, f.store))
+			unchanged(t, f.c, config)
+		})
+	}
+}
+
+// A rerun with nothing to do writes the .gitignore of the store when it is
+// missing, as the first run does, before it says "nothing to add" (bash:
+// tests/unit/secrets_add_key_test.bats).
+func TestAddKeyRerunWritesAMissingGitignore(t *testing.T) {
+	f := newLinkFixture(t, "add-key")
+	config := f.finished()
+	if err := os.Remove(f.store + "/.gitignore"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.run(); err != nil {
+		t.Fatalf("%v\n%s", err, f.errOut.String())
+	}
+	if want := "recipient already present in .sops.yaml — nothing to add\n  " + f.gone.Recipient().String() + "\n"; f.out.String() != want {
+		t.Errorf("stdout %q", f.out.String())
+	}
+	if got := readFile(t, f.store+"/.gitignore"); got != gitignoreContent {
+		t.Errorf(".gitignore: %q", got)
+	}
+	unchanged(t, f.c, config)
+}
+
+// A store that it cannot list (no read permission: the lookup of the
+// .gitignore in it still works) is refused before the first write, with the
+// key in .sops.yaml and without it: an empty list would let the run report
+// the re-key as done. (A store with no search permission is refused before,
+// at the check of its .gitignore.) (bash:
+// tests/unit/secrets_add_key_test.bats.)
+func TestAddKeyRefusesAStoreThatItCannotList(t *testing.T) {
+	skipUnlessPermissionsHold(t)
+	for _, mode := range []fs.FileMode{0o300} {
+		for _, present := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%#o/present=%v", mode, present), func(t *testing.T) {
+				f := newLinkFixture(t, "add-key")
+				if present {
+					f.finished()
+				}
+				config := readFile(t, f.c.sopsConfigPath())
+				states := fileStates(t, f.store)
+				if err := os.Chmod(f.store, mode); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(f.store, 0o755) })
+				err := f.run()
+				if cerr := os.Chmod(f.store, 0o755); cerr != nil {
+					t.Fatal(cerr)
+				}
+				if !errors.Is(err, ErrHandled) {
+					t.Fatalf("want ErrHandled, got %v\n%s", err, f.out.String())
+				}
+				want := "[error] cannot list the store " + f.c.rel(f.store) + " (not a directory, or no read or search permission): add-key did not change .sops.yaml; fix the store, then run this command again\n"
+				if f.out.String() != "" || f.errOut.String() != want {
+					t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
+				}
+				sameStates(t, states, fileStates(t, f.store))
+				unchanged(t, f.c, config)
+			})
+		}
+	}
+}
+
+// An .enc larger than 16 MiB is refused on a rerun, with one line that
+// names the file, before any change: the metadata read is bounded. The
+// control: a file of exactly 16 MiB is read (it does not parse, so the
+// rerun re-keys it) (bash: tests/unit/secrets_add_key_test.bats).
+func TestAddKeyRerunRefusesAnEncLargerThanTheLimit(t *testing.T) {
+	for _, size := range []int64{maxEncRead + 1, maxEncRead} {
+		t.Run(strconv.FormatInt(size, 10), func(t *testing.T) {
+			f := newLinkFixture(t, "add-key")
+			config := f.finished()
+			app := f.store + "/Secret.app.default.K.enc"
+			if err := os.Truncate(app, size); err != nil {
+				t.Fatal(err)
+			}
+			states := fileStates(t, f.store)
+			err := f.run()
+			if size == maxEncRead {
+				if err != nil {
+					t.Fatalf("the control: %v\n%s", err, f.errOut.String())
+				}
+				f.rekeyed("app", "v")
+				return
+			}
+			if !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, f.out.String())
+			}
+			want := "[error] " + f.c.rel(app) + " is larger than 16 MiB (more than any .enc that lo writes): add-key does not read its sops metadata and stops here; restore or remove that file, then run this command again\n"
+			if f.out.String() != "" || f.errOut.String() != want {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
+			}
+			sameStates(t, states, fileStates(t, f.store))
+			unchanged(t, f.c, config)
+		})
+	}
+}
+
 // A write of the .gitignore that stops part way (the writeGitignore seam
 // writes half the content, then fails): add-key stops before .sops.yaml, the
 // old .gitignore stays, and no temp file is left. The error comes first,
-// then the line that names the file (bash: tests/unit/secrets_test.bats).
+// then the line that names the file. The seam counts its calls, so the test
+// knows that the write ran. The control: with the real write, the run
+// passes and writes the .gitignore (bash: tests/unit/secrets_test.bats).
 func TestAddKeyKeepsTheGitignoreOnAPartialWrite(t *testing.T) {
 	f := newLinkFixture(t, "add-key")
 	write(t, f.store+"/.gitignore", "# old\n")
 	before := readFile(t, f.c.sopsConfigPath())
 	states := fileStates(t, f.store)
 	orig := writeGitignore
+	calls := 0
 	writeGitignore = func(w io.Writer) error {
+		calls++
 		if _, err := io.WriteString(w, gitignoreContent[:len(gitignoreContent)/2]); err != nil {
 			return err
 		}
@@ -934,12 +1291,24 @@ func TestAddKeyKeepsTheGitignoreOnAPartialWrite(t *testing.T) {
 		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
 	}
 	unchanged(t, f.c, before)
+	if calls != 1 {
+		t.Fatalf("the seam ran %d times, want 1", calls)
+	}
 	// The temp file was made and removed: the time of the store directory
 	// changes, and each entry in it stays as it was.
 	after := fileStates(t, f.store)
 	delete(states, f.store)
 	delete(after, f.store)
 	sameStates(t, states, after)
+
+	writeGitignore = orig
+	if err := f.run(); err != nil {
+		t.Fatalf("the control: %v\n%s", err, f.errOut.String())
+	}
+	if got := readFile(t, f.store+"/.gitignore"); got != gitignoreContent {
+		t.Errorf("the control: .gitignore %q", got)
+	}
+	f.rekeyed("app", "v")
 }
 
 // The resolution of .sops.yaml fails closed: a link that names no file, or a

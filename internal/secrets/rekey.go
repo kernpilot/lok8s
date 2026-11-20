@@ -3,9 +3,9 @@ package secrets
 // rekey.go: the re-key path that add-key and remove-key share, and
 // remove-key itself. Each helper has a bash twin of the same shape in
 // .lok8s/libs/secrets (secrets::_no_private_key, _recipient, _lstat,
-// _domain_stores, _rekey_stores, _orphans, _touch_plaintexts, _enc_paths, _encs_with,
-// _other_encs, _enc_lists, _other_stores, _own_identity, _replace,
-// _drop_recipient, _rekey_files).
+// _domain_stores, _rekey_stores, _orphans, _open_orphans, _touch_plaintexts,
+// _enc_paths, _encs_with, _other_encs, _enc_lists, _key_added, _unfinished,
+// _other_stores, _own_identity, _replace, _drop_recipient, _rekey_files).
 
 import (
 	"bytes"
@@ -20,7 +20,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 
+	"filippo.io/age/armor"
 	"gopkg.in/yaml.v3"
 
 	"github.com/kernpilot/lok8s/internal/fsutil"
@@ -334,55 +336,215 @@ type sweepList struct {
 // encryptTargets resolves the store of the context and lists the plaintext
 // cache files that the sweep of Encrypt("") reads there (bash: the list
 // before the first write of secrets::add-key), with sweepPlaintexts, the
-// helper of the sweep itself. A store that does not resolve is an error
-// (ResolveStore prints why), and AddKey stops before its first write, with
-// --all too: its encrypt re-keys this store.
+// helper of the sweep itself (listStore). AddKey reads it before its first
+// write, also when .sops.yaml lists the recipient already, and stops with
+// --all too: its encrypt re-keys this store. A store that does not resolve
+// is refused (ResolveStore prints why), and so is a store that it cannot
+// list: an empty list would let the run report the re-key as done.
 func (c *Context) encryptTargets() (sweepList, error) {
 	dir, err := c.ResolveStore()
 	if err != nil {
+		ui.ErrorTo(c.ErrOut, "  add-key did not change .sops.yaml: create that directory, or select a domain that has a store, then run this command again")
 		return sweepList{}, err
 	}
-	return sweepList{dir: dir, plains: sweepPlaintexts(dir, "Secret.")}, nil
+	plains, err := listStore(dir)
+	if err != nil {
+		ui.ErrorTo(c.ErrOut, "cannot list the store %s (not a directory, or no read or search permission): add-key did not change .sops.yaml; fix the store, then run this command again", c.rel(dir))
+		return sweepList{}, ErrHandled
+	}
+	return sweepList{dir: dir, plains: plains}, nil
 }
 
-// unfinishedEncs lists the store of the context as encryptTargets does, and
-// returns that list with each .enc of it that does not list recipient (bash:
-// secrets::_unfinished): a regular file that it cannot read, whose sops
-// metadata does not parse (encRecipients), or whose age recipients do not
-// hold recipient, and a path whose lookup fails. An .enc that does not
-// exist, and an entry that is not a regular file, are not in it. A store
-// that does not resolve gives an empty list and no refusal: nothing is
-// there to re-key. AddKey reads it when .sops.yaml lists the recipient
-// already: an .enc in it is the work of an earlier run that stopped after
-// its write of .sops.yaml.
-func (c *Context) unfinishedEncs(recipient string) (sweepList, []string) {
-	dir, err := c.resolveStore(io.Discard)
-	if err != nil {
-		return sweepList{}, nil
+// listStore returns the plaintext cache files of the store dir
+// (sweepPlaintexts), or the error of a store that it cannot list (bash:
+// secrets::_list_store): a path that is not a directory, a directory that
+// it cannot read or search, a symlink whose target it cannot stat. A store
+// that does not exist holds no file and is no error: the encrypt warns
+// about it.
+func listStore(dir string) ([]string, error) {
+	_, absent, err := statPath(dir)
+	if absent {
+		return nil, nil
 	}
-	l := sweepList{dir: dir, plains: sweepPlaintexts(dir, "Secret.")}
+	if err == nil {
+		_, err = storeNames(dir, "Secret.")
+	}
+	if err == nil {
+		_, err = os.Stat(dir + "/.")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return sweepPlaintexts(dir, "Secret."), nil
+}
+
+// unfinishedEncs returns each .enc of the list l whose re-key is not
+// finished for recipient (bash: secrets::_unfinished): an .enc that does not
+// exist, a file that it cannot open or read, and a file whose sops envelope
+// does not show that recipient was added (keyAdded). refuseEncPaths runs
+// before it, so each .enc of the list is a regular file or absent. An .enc
+// larger than maxEncRead is refused (keyAdded): ErrHandled. AddKey reads it
+// when .sops.yaml lists the recipient already, before and after its
+// re-key.
+func (c *Context) unfinishedEncs(l sweepList, recipient string) ([]string, error) {
 	var left []string
 	for _, enc := range l.encs() {
-		info, err := os.Lstat(enc)
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
-			continue
-		case err != nil:
-			left = append(left, enc)
-			continue
-		case !info.Mode().IsRegular():
-			continue
-		}
-		raw, err := os.ReadFile(enc) // #nosec G304 -- an .enc of the store
+		added, err := c.keyAdded(enc, recipient)
 		if err != nil {
-			left = append(left, enc)
-			continue
+			return nil, err
 		}
-		if rcpts, err := encRecipients(raw); err != nil || !slices.Contains(rcpts, recipient) {
+		if !added {
 			left = append(left, enc)
 		}
 	}
-	return l, left
+	return left, nil
+}
+
+// openOrphans warns about each Secret.*.enc of the stores without a
+// decrypted twin (as orphanEncs does) whose sops envelope does not show that
+// recipient was added (keyAdded), and returns them (bash:
+// secrets::_open_orphans): the orphans that a rerun of add-key cannot
+// finish. An orphan that shows the recipient needs no re-key and gets no
+// warning. An .enc larger than maxEncRead is refused: ErrHandled.
+func (c *Context) openOrphans(stores []string, recipient string) ([]string, error) {
+	var open []string
+	for _, store := range stores {
+		for _, base := range storeEntries(store, "Secret.") {
+			enc := store + "/" + base
+			if !isEncEntry(base) || !fsutil.Exists(enc) || fsutil.IsRegular(strings.TrimSuffix(enc, ".enc")) {
+				continue
+			}
+			added, err := c.keyAdded(enc, recipient)
+			if err != nil {
+				return nil, err
+			}
+			if !added {
+				ui.WarnTo(c.ErrOut, "orphan (no decrypted twin, cannot re-key): %s", c.rel(enc))
+				open = append(open, enc)
+			}
+		}
+	}
+	return open, nil
+}
+
+// refuseOrphans prints the refusal of add-key for orphan .enc files that a
+// re-key cannot rewrite (bash: secrets::_refuse_orphans): the first run and
+// a rerun print the same lines.
+func (c *Context) refuseOrphans(n int) {
+	ui.ErrorTo(c.ErrOut, "%d encrypted file(s) have no decrypted twin — they would keep the OLD", n)
+	ui.ErrorTo(c.ErrOut, "  recipient list while .sops.yaml claims the new key was added.")
+	ui.ErrorTo(c.ErrOut, "  Run 'lo secrets decrypt' first, or re-run with --skip-orphans to accept it.")
+}
+
+// maxEncRead is the largest .enc whose sops metadata add-key reads: 16 MiB.
+// A Kubernetes Secret holds at most 1 MiB, and the .enc of one of its keys
+// (the value in base64, in the JSON envelope of sops) stays below 2 MiB.
+// The bash twin has the same limit (secrets::_key_added).
+const maxEncRead = 16 << 20
+
+// errEncTooLarge: the .enc is larger than maxEncRead.
+var errEncTooLarge = errors.New("the .enc is larger than the limit of the metadata read")
+
+// errEncNotRegular: the .enc is not a regular file.
+var errEncNotRegular = errors.New("the .enc is not a regular file")
+
+// readEncMeta reads the .enc at path once, from one descriptor: the open
+// does not follow a symlink and does not wait on a FIFO, the descriptor
+// must be a regular file (fstat), and the read stops after maxEncRead
+// bytes. It returns errEncTooLarge for a larger file, errEncNotRegular for
+// another kind of file, and the error of the open or the read.
+func readEncMeta(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) // #nosec G304 -- an .enc of the store
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	switch {
+	case err != nil:
+		return nil, err
+	case !info.Mode().IsRegular():
+		return nil, errEncNotRegular
+	case info.Size() > maxEncRead:
+		return nil, errEncTooLarge
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxEncRead+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxEncRead {
+		return nil, errEncTooLarge
+	}
+	return raw, nil
+}
+
+// keyAdded reads the .enc at enc (readEncMeta) and reports whether its sops
+// envelope shows that recipient was added (encAdded). A file that does not
+// exist, or that it cannot open or read, does not. A file larger than
+// maxEncRead is refused with one line that names it: ErrHandled.
+func (c *Context) keyAdded(enc, recipient string) (bool, error) {
+	raw, err := readEncMeta(enc)
+	if errors.Is(err, errEncTooLarge) {
+		ui.ErrorTo(c.ErrOut, "%s is larger than 16 MiB (more than any .enc that lo writes): add-key does not read its sops metadata and stops here; restore or remove that file, then run this command again", c.rel(enc))
+		return false, ErrHandled
+	}
+	if err != nil {
+		return false, nil
+	}
+	return encAdded(raw, recipient), nil
+}
+
+// encAdded reports whether raw, the JSON envelope of an .enc, shows that
+// sops added recipient to the file (bash: secrets::_enc_lists with added):
+// encRecipients reads it without an error (it parses, holds no member
+// twice, and spells no key of the metadata in another case), its sops
+// metadata holds a mac and a lastmodified that are strings and not empty,
+// and an age entry of recipient (in sops.age or in a sops.key_groups item)
+// holds an enc that is an armored age block: its first line is the header
+// of the age armor and its last line the footer. A label alone ({"recipient"}
+// with no enc) does not show it. The check does not decrypt the file: it
+// shows that sops wrote an entry for the key, not that the key opens the
+// file.
+func encAdded(raw []byte, recipient string) bool {
+	if _, err := encRecipients(raw); err != nil {
+		return false
+	}
+	var top map[string]any
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return false
+	}
+	meta, _ := top["sops"].(map[string]any)
+	for _, name := range []string{"mac", "lastmodified"} {
+		v, err := metaField(meta, name)
+		if s, ok := v.(string); err != nil || !ok || s == "" {
+			return false
+		}
+	}
+	entries, _ := meta["age"].([]any)
+	groups, _ := meta["key_groups"].([]any)
+	for _, g := range groups {
+		group, _ := g.(map[string]any)
+		list, _ := group["age"].([]any)
+		entries = append(entries, list...)
+	}
+	for _, e := range entries {
+		entry, _ := e.(map[string]any)
+		if entry["recipient"] != recipient {
+			continue
+		}
+		v, err := metaField(entry, "enc")
+		if s, ok := v.(string); err == nil && ok && armoredAge(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// armoredAge reports whether s is an armored age block: its first line is
+// armor.Header and its last line armor.Footer (one newline at the end is
+// allowed, as age writes it).
+func armoredAge(s string) bool {
+	return strings.HasPrefix(s, armor.Header+"\n") && strings.HasSuffix(strings.TrimSuffix(s, "\n"), "\n"+armor.Footer)
 }
 
 // encs returns the .enc path of each plaintext of the list.

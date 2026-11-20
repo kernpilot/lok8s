@@ -98,13 +98,22 @@ func resolveConfig(path string) (string, error) {
 // another run holds the lock past the wait. Nothing is changed then.
 //
 // The lock can sit in the directory of the file that a .sops.yaml link
-// names, and another user can write there. So the open never truncates and
-// never follows a link. A lock path that is not a regular file or absent
-// (encDestinationOK) is refused before the open, with the line of the bash
-// twin. The open has O_NOFOLLOW and no O_TRUNC, and the opened file must be
-// a regular file that the path still names (openedPathOK): a link put there
-// after the check is not followed, and the run is refused with the line of
-// the check (the open fails with ELOOP).
+// names, and another user can write there. So the open never truncates,
+// never follows a link and never waits. A lock path that is not a regular
+// file or absent (encDestinationOK) is refused before the open, with the
+// line of the bash twin. The open has O_NOFOLLOW, O_NONBLOCK and no
+// O_TRUNC, and the opened file must be a regular file that the path still
+// names (openedPathOK). An entry put there after the check is refused with
+// the line of the check: a link (the open fails with ELOOP), a FIFO (with no
+// reader the open fails with ENXIO and does not wait; with a reader fstat
+// refuses it), a directory, or another regular file that the path no longer
+// names.
+//
+// The boundary: the directory of the lock must be trusted. The checks find
+// an entry that another user puts there during the run, but a user who can
+// change that directory can still replace the lock file after the checks,
+// and two runs then lock two files. The lock belongs to the .sops.yaml file,
+// not to a store: every store that uses that file shares it.
 func (c *Context) lockSopsConfig(dest string) (func(), error) {
 	path := dest + ".lock"
 	if !encDestinationOK(path) {
@@ -112,8 +121,8 @@ func (c *Context) lockSopsConfig(dest string) (func(), error) {
 		return nil, ErrHandled
 	}
 	lockChecked(path)
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW, 0o644) // #nosec G302 G304 -- an empty lock file next to .sops.yaml
-	if errors.Is(err, syscall.ELOOP) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o644) // #nosec G302 G304 -- an empty lock file next to .sops.yaml
+	if err != nil && (errors.Is(err, syscall.ELOOP) || !encDestinationOK(path)) {
 		c.refuseLockPath(path)
 		return nil, ErrHandled
 	}

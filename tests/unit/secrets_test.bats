@@ -262,25 +262,34 @@ _gitignore_refused() { # <link|dir>
   [ "$(cat "${PATH_SECRETS}/.gitignore")" = '# old' ]
 }
 
-# A .gitignore write that stops part way (the payload write ends after 20
-# bytes, as on a full disk): status 1, the last line names the file, the old
-# file stays, and no temp file is left (Go twin:
+# A .gitignore write that stops part way (the payload write ends after half
+# of the payload, as on a full disk): status 1, the last line names the file,
+# the old file stays, and no temp file is left (Go twin:
 # TestAddKeyKeepsTheGitignoreOnAPartialWrite). printf is a function here: for
-# the payload it writes the first 20 bytes, then fails. The lines of the
-# library use builtin printf.
+# the payload it writes the first half and a call marker, then fails. The
+# lines of the library use builtin printf. The control: with the real printf
+# the write passes.
 @test "secrets: a .gitignore write that stops part way keeps the old file and leaves no temp file" {
+  local marker="${BATS_TEST_TMPDIR}/printf.ran"
   printf '# old\n' > "${PATH_SECRETS}/.gitignore"
   printf() {
     [[ "${*}" == *'!Secret.*.enc'* ]] || { builtin printf "${@}"; return; }
-    builtin printf '%s' "${2:0:20}"
+    builtin printf '%s' "${2:0:${#2}/2}"
+    : >> "${marker}"
     return 1
   }
   run secrets::_ensure_gitignore "${PATH_SECRETS}"
   unset -f printf
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ -e "${marker}" ] || { echo "fixture: the payload write did not run" >&2; return 1; }
   [ "${output##*$'\n'}" = "[error] cannot write .secrets/.gitignore: it was not changed" ] || { echo "$output" >&2; return 1; }
   [ "$(cat "${PATH_SECRETS}/.gitignore")" = '# old' ] || { echo "the .gitignore changed: $(cat "${PATH_SECRETS}/.gitignore")" >&2; return 1; }
   [ -z "$(find "${PATH_SECRETS}" -name '..gitignore.tmp-*')" ] || { echo "a temp file was left" >&2; return 1; }
+
+  run secrets::_ensure_gitignore "${PATH_SECRETS}"
+  [ "$status" -eq 0 ] || { echo "the control: status $status: $output" >&2; return 1; }
+  grep -qxF '!Secret.*.enc' "${PATH_SECRETS}/.gitignore" || { echo "the control: $(cat "${PATH_SECRETS}/.gitignore")" >&2; return 1; }
+  [ -z "$(find "${PATH_SECRETS}" -name '..gitignore.tmp-*')" ] || { echo "the control left a temp file" >&2; return 1; }
 }
 
 # init asks for a mv that takes -T only when it writes the .gitignore. A

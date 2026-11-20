@@ -466,6 +466,84 @@ func TestKeyCommandsRefuseALockLinkPutThereAfterTheCheck(t *testing.T) {
 	}
 }
 
+// A FIFO put at the lock path after the check and before the open (the
+// lockChecked seam). Without a reader, a write-only open that may block
+// waits for one: the open has O_NONBLOCK, so it fails (ENXIO) at once. With
+// a reader, the open passes and fstat refuses the FIFO (openedPathOK). Both
+// commands refuse with the line of the check, and .sops.yaml stays as it
+// was. The run goes in a goroutine: an open that blocks fails the test after
+// five seconds (the test opens the read end then, so the run ends) instead
+// of hanging the suite.
+func TestKeyCommandsRefuseALockFIFOPutThereAfterTheCheck(t *testing.T) {
+	for _, reader := range []bool{false, true} {
+		for _, cmd := range []string{"add-key", "remove-key"} {
+			name := cmd + "/a FIFO with no reader"
+			if reader {
+				name = cmd + "/a FIFO with a reader"
+			}
+			t.Run(name, func(t *testing.T) {
+				c, out, errOut := testEnv(t)
+				c.Domain = "a.dev"
+				sopsRules(t, c, keyA+","+keyB)
+				if cmd == "add-key" {
+					sopsRules(t, c, keyA)
+				}
+				lock := c.sopsConfigPath() + ".lock"
+				before := readFile(t, c.sopsConfigPath())
+				calls := 0
+				lockChecked = func(path string) {
+					calls++
+					if err := syscall.Mkfifo(path, 0o644); err != nil {
+						t.Error(err)
+						return
+					}
+					if !reader {
+						return
+					}
+					r, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					t.Cleanup(func() { _ = r.Close() })
+				}
+				t.Cleanup(func() { lockChecked = func(string) {} })
+
+				done := make(chan error, 1)
+				go func() {
+					if cmd == "add-key" {
+						done <- c.AddKey(keyB, false, false)
+					} else {
+						done <- c.RemoveKey(keyB, false, false)
+					}
+				}()
+				var err error
+				select {
+				case err = <-done:
+				case <-time.After(5 * time.Second):
+					// Release the open that waits, then fail.
+					if r, rerr := os.OpenFile(lock, os.O_RDONLY|syscall.O_NONBLOCK, 0); rerr == nil {
+						<-done
+						_ = r.Close()
+					}
+					t.Fatal("the open of the lock waited on a FIFO")
+				}
+				if !errors.Is(err, ErrHandled) {
+					t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+				}
+				if calls != 1 {
+					t.Fatalf("the seam ran %d times, want 1", calls)
+				}
+				want := "[error] " + lock + " is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: nothing was changed — remove it, then run this command again\n"
+				if errOut.String() != want || out.String() != "" {
+					t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+				}
+				unchanged(t, c, before)
+			})
+		}
+	}
+}
+
 // The replace keeps the mode, leaves a hard link to the old file with the
 // old content, and, given the path that resolveConfig makes of a symlink,
 // replaces the target of the link, not the link.

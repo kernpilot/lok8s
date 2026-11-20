@@ -136,16 +136,33 @@ func grepQF(content, pattern string) bool {
 // (Like bash, the orphan check runs AFTER .sops.yaml was already modified —
 // the ordering is part of the observable contract. A .gitignore of the
 // store that is not a regular file, a store of the context that does not
-// resolve, and an .enc of the store that the encrypt refuses (a symlink, a
-// directory, a FIFO, a socket or a device), are refused BEFORE the write,
-// and the .gitignore of the store is written before it, so the run cannot
-// stop half way at them.)
+// resolve or that it cannot list, and an .enc of the store that the
+// encrypt refuses (a symlink, a directory, a FIFO, a socket or a device),
+// are refused BEFORE the write, and the .gitignore of the store is written
+// before it, so the run cannot stop half way at them.) The first run
+// re-keys every plaintext of the sweep from its cache file: a plaintext
+// that is older than its .enc (after a pull) replaces the value of that
+// .enc.
 //
-// A rerun finishes the work of a run that stopped after its write: when
-// .sops.yaml lists the recipient already, but an .enc of the sweep does not
-// (unfinishedEncs), the run re-keys as if it had added the recipient, and
-// leaves .sops.yaml as it is. With each .enc listing it, the run changes
-// nothing.
+// A rerun finishes the work of a run that stopped after its write. When
+// .sops.yaml lists the recipient already, the run reads the sops envelope
+// of each .enc of the sweep (unfinishedEncs, at most 16 MiB each): an .enc
+// that is missing, or whose envelope does not show the recipient with a mac,
+// a lastmodified and an armored age entry (encAdded), is not finished. That
+// check shows that sops added the key, not that the file decrypts. Before
+// it decides, the run refuses what the first run refuses (a store that does
+// not resolve or list, an .enc that is not a regular file, an orphan that
+// does not show the recipient without skipOrphans) and writes the
+// .gitignore. Then it re-keys the files that are not finished, and only
+// those, and leaves .sops.yaml as it is. After the encrypt it reads the
+// sweep again, and a file that still does not show the recipient (its
+// creation rule does not list the key) fails the run. With nothing left,
+// the run changes nothing.
+//
+// The writes replace each file with a rename, so a run that stops or is
+// killed leaves each file whole, old or new, and a rerun finishes the
+// work. They are not synced to the disk (no fsync): a power loss can lose a
+// write or change their order.
 //
 // The argument check and the re-key steps are the helpers in rekey.go, which
 // RemoveKey shares; rekey_test.go pins this command's output and effects.
@@ -185,73 +202,68 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		return err
 	}
 
-	// A recipient that .sops.yaml lists already is done when each .enc of
-	// the sweep lists it too. An .enc that does not list it is the work of
-	// an earlier run that stopped after its write of .sops.yaml (at the
-	// orphan check, or in the encrypt), and this run finishes that work.
-	present := strings.Contains(string(raw), agePubkey)
-	var checked sweepList
-	var left []string
-	if present {
-		checked, left = c.unfinishedEncs(agePubkey)
-		if len(left) == 0 {
-			fmt.Fprintln(c.Out, "recipient already present in .sops.yaml — nothing to add")
-			fmt.Fprintf(c.Out, "  %s\n", agePubkey)
-			return nil
-		}
-	} else {
-		// Before the first write: the store of the context must resolve,
-		// with --all too, because the encrypt below re-keys that store.
-		// Found after the write, a store that does not resolve stopped the
-		// run with the recipient in .sops.yaml, and a rerun found nothing
-		// to re-key. The list is the one of the sweep, and the encrypt
-		// below reads this same list (encryptChecked).
-		checked, err = c.encryptTargets()
-		if err != nil {
-			ui.ErrorTo(c.ErrOut, "  add-key did not change .sops.yaml: create that directory, or select a domain that has a store, then run this command again")
-			return err
-		}
+	// Before the first write, on both paths: the store of the context must
+	// resolve and list, with --all too, because the encrypt below re-keys
+	// that store (encryptTargets). Found after the write, a store that does
+	// not resolve stopped the run with the recipient in .sops.yaml, and a
+	// rerun found nothing to re-key. The list is the one of the sweep, and
+	// the encrypt below reads this same list (encryptChecked).
+	checked, err := c.encryptTargets()
+	if err != nil {
+		return err
 	}
 	// Each .enc that the encrypt below writes must be a regular file or
 	// absent (encryptFile refuses any other entry, and that refusal comes
-	// after the write).
+	// after the write). A rerun refuses it too, before it decides that
+	// nothing is left to do.
 	if c.refuseEncPaths(checked.encs()) {
 		return ErrHandled
+	}
+	// A recipient that .sops.yaml lists already is done when the re-key of
+	// the sweep is finished. An .enc that is missing or does not show the
+	// recipient is the work of an earlier run that stopped after its write
+	// of .sops.yaml (at the orphan check, or in the encrypt), and this run
+	// finishes that work (rerunLeft, finishReKey).
+	present := strings.Contains(string(raw), agePubkey)
+	var left []string
+	if present {
+		if left, err = c.rerunLeft(checked, agePubkey, all, skipOrphans); err != nil {
+			return err
+		}
 	}
 	// The .gitignore of the store keeps the plaintext cache files out of
 	// git. The encrypt writes it too, but after the write of .sops.yaml: a
 	// .gitignore that it cannot write stopped the run there, with the
-	// recipient in .sops.yaml and no .enc re-keyed. A store directory that
-	// does not exist holds no plaintext, and the encrypt skips it.
+	// recipient in .sops.yaml and no .enc re-keyed. A rerun with nothing to
+	// do writes it too. A store directory that does not exist holds no
+	// plaintext, and the encrypt skips it.
 	if fsutil.DirExists(checked.dir) {
 		if err := c.ensureGitignore(checked.dir); err != nil {
 			ui.ErrorTo(c.ErrOut, "  add-key did not change .sops.yaml or an .enc file: fix the cause above, then run this command again")
 			return err
 		}
 	}
-
 	if present {
-		fmt.Fprintf(c.Out, "recipient already present in .sops.yaml, but %d .enc file(s) of the store do not list it: finishing the re-key\n", len(left))
-		fmt.Fprintf(c.Out, "  %s\n", agePubkey)
-	} else {
-		// Append to every creation rule's age list (comma-separated, sops'
-		// own format). replaceFile writes dest, the file that a symlinked
-		// .sops.yaml names, and the link stays a link.
-		before := 0
-		edited, after := appendRecipient(string(raw), agePubkey, &before)
-		if err := replaceFile(dest, []byte(edited)); err != nil {
-			if c.reportTempLeft(err) {
-				return ErrHandled
-			}
-			return err
-		}
-		if after < 1 {
-			ui.ErrorTo(c.ErrOut, "failed to add the recipient to %s — is the age: line quoted with '?", sopsConfig)
+		return c.finishReKey(checked, left, agePubkey)
+	}
+
+	// Append to every creation rule's age list (comma-separated, sops' own
+	// format). replaceFile writes dest, the file that a symlinked .sops.yaml
+	// names, and the link stays a link.
+	before := 0
+	edited, after := appendRecipient(string(raw), agePubkey, &before)
+	if err := replaceFile(dest, []byte(edited)); err != nil {
+		if c.reportTempLeft(err) {
 			return ErrHandled
 		}
-		fmt.Fprintf(c.Out, "added recipient to .sops.yaml (%d creation rule(s))\n", before)
-		fmt.Fprintf(c.Out, "  %s\n", agePubkey)
+		return err
 	}
+	if after < 1 {
+		ui.ErrorTo(c.ErrOut, "failed to add the recipient to %s — is the age: line quoted with '?", sopsConfig)
+		return ErrHandled
+	}
+	fmt.Fprintf(c.Out, "added recipient to .sops.yaml (%d creation rule(s))\n", before)
+	fmt.Fprintf(c.Out, "  %s\n", agePubkey)
 
 	// Re-key the stores. Without this the recipient is listed but holds
 	// nothing.
@@ -264,9 +276,7 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		return ErrHandled
 	}
 	if orphans := len(c.orphanEncs(stores)); orphans > 0 && !skipOrphans {
-		ui.ErrorTo(c.ErrOut, "%d encrypted file(s) have no decrypted twin — they would keep the OLD", orphans)
-		ui.ErrorTo(c.ErrOut, "  recipient list while .sops.yaml claims the new key was added.")
-		ui.ErrorTo(c.ErrOut, "  Run 'lo secrets decrypt' first, or re-run with --skip-orphans to accept it.")
+		c.refuseOrphans(orphans)
 		return ErrHandled
 	}
 
@@ -283,6 +293,76 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	// before the write.
 	if err := c.encryptChecked(checked); err != nil {
 		return err
+	}
+	fmt.Fprintln(c.Out, "done — commit .sops.yaml and the updated .enc files together")
+	return nil
+}
+
+// rerunLeft is the check of a rerun of AddKey, when .sops.yaml lists the
+// recipient already (bash: the same steps in secrets::add-key), and returns
+// the .enc files of the sweep whose re-key is not finished
+// (unfinishedEncs). It runs before the decision that nothing is left to
+// do. The orphans of the stores of the run (rekeyStores) whose envelope
+// does not show the recipient (openOrphans) are refused without
+// skipOrphans, with the lines of the first run: an earlier run that stopped
+// at the orphan check is not reported as done.
+func (c *Context) rerunLeft(checked sweepList, recipient string, all, skipOrphans bool) ([]string, error) {
+	left, err := c.unfinishedEncs(checked, recipient)
+	if err != nil {
+		return nil, err
+	}
+	stores, _, err := c.rekeyStores(all)
+	if err != nil {
+		return nil, err
+	}
+	if len(stores) == 0 { // every domain store is a path it cannot read
+		ui.ErrorTo(c.ErrOut, "no secret store found to re-key")
+		return nil, ErrHandled
+	}
+	orphans, err := c.openOrphans(stores, recipient)
+	if err != nil {
+		return nil, err
+	}
+	if len(orphans) > 0 && !skipOrphans {
+		c.refuseOrphans(len(orphans))
+		return nil, ErrHandled
+	}
+	return left, nil
+}
+
+// finishReKey ends a rerun of AddKey (bash: the same steps in
+// secrets::add-key). With nothing left, it changes nothing. Else it
+// re-keys the files of left only: an .enc whose re-key is finished keeps
+// its bytes, so a plaintext that is older than a pulled .enc does not
+// replace it. Then it reads the sweep again (unfinishedEncs). An .enc that
+// still does not show the recipient means that its creation rule does not
+// list the key (the key can be in a comment of .sops.yaml only): the run
+// names each such file and fails, with no "done" line.
+func (c *Context) finishReKey(checked sweepList, left []string, recipient string) error {
+	if len(left) == 0 {
+		fmt.Fprintln(c.Out, "recipient already present in .sops.yaml — nothing to add")
+		fmt.Fprintf(c.Out, "  %s\n", recipient)
+		return nil
+	}
+	fmt.Fprintf(c.Out, "recipient already present in .sops.yaml, but %d .enc file(s) of the store are missing or not re-keyed for it: finishing the re-key\n", len(left))
+	fmt.Fprintf(c.Out, "  %s\n", recipient)
+	plains := make([]string, 0, len(left))
+	for _, enc := range left {
+		plains = append(plains, strings.TrimSuffix(enc, ".enc"))
+	}
+	if err := c.encryptSweep(checked.dir, "", true, func() []string { return plains }); err != nil {
+		return err
+	}
+	still, err := c.unfinishedEncs(checked, recipient)
+	if err != nil {
+		return err
+	}
+	if len(still) > 0 {
+		for _, enc := range still {
+			ui.ErrorTo(c.ErrOut, "the sops metadata of %s has no entry for the recipient after the re-key", c.rel(enc))
+		}
+		ui.ErrorTo(c.ErrOut, "  the key is in .sops.yaml, but the creation rule of these files may not list it (for example, the key is only in a comment): fix .sops.yaml, then run this command again")
+		return ErrHandled
 	}
 	fmt.Fprintln(c.Out, "done — commit .sops.yaml and the updated .enc files together")
 	return nil
