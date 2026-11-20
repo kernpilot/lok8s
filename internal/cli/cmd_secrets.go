@@ -266,6 +266,9 @@ Before the first write, the command refuses:
   - the last recipient of a rule,
   - a store path or an .enc file that it cannot stat or read (a dangling
     symlink included), or a directory in a store that it cannot read,
+  - a managed .enc file that it re-keys and that is a symlink: the re-key
+    does not write through a link (replace the link with the file that it
+    names, or remove it from the store),
   - another .enc file in a store: a name that ends in .enc, at any depth,
     that is not a Secret.*.enc file at the top of the store (the re-key
     does not rewrite it; re-key or remove it by hand),
