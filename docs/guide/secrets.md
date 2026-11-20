@@ -252,11 +252,21 @@ comes to this check prints a line that says which sources the check reads.
 It does not read `SOPS_AGE_KEY`, `SOPS_AGE_KEY_CMD` or other files, so no
 warning does not mean that the key is not yours.
 
-After the re-key the command reads the `.enc` files of the selected stores
-again. It fails when a file that it re-keyed still lists the removed key. If
-the re-key stops after the `.sops.yaml` write (for example, when an encrypt
-fails), the command prints the command to run again. That run resumes the
-re-key.
+After the re-key the command reads the selected stores again, with the same
+reads and the same walk as before the first write. It fails when a file that
+it re-keyed still lists the removed key, when it cannot read a path, and when
+a file changed during the run: another `.enc` file, a managed `.enc` file that
+was not there at the start, or, without `--skip-orphans`, an `.enc` file with
+no decrypted twin. Each error names the path. If the re-key stops after the
+`.sops.yaml` write (for example, when an encrypt fails or this check fails),
+the command prints the command to run again. That run resumes the re-key.
+
+The selected stores must be quiet while the command runs: no other command
+or program may write to them. The lock (below) keeps a second `add-key` or
+`remove-key` out. Other `lo` commands and other programs do not take it, and
+a writer that does not take the lock is outside the guarantee below. The
+check after the re-key does not see a file that is replaced in place, under
+the same name, during the run.
 
 When the command ends without an error, no managed `Secret.*.enc` file of
 the selected stores lists the removed key. `--skip-orphans` is the one

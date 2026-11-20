@@ -810,6 +810,71 @@ func (c *Context) refuseScan(s encScan) bool {
 	return true
 }
 
+// postCheck reads the stores again after the re-key, with the reads and the
+// walk of the check before the first write (scanEncs, otherEncs), and
+// reports whether the files pass (bash: secrets::_post_check). It fails on a
+// path that it cannot read (a store, an .enc, a directory below a store), an
+// .enc whose sops metadata does not parse or holds a member twice, a managed
+// .enc with a decrypted twin that still lists the recipient, a managed .enc
+// with a decrypted twin that is not in known (the run did not re-key it),
+// another .enc, and, without skipOrphans, an .enc with no decrypted twin.
+// Each line names the path. With skipOrphans an orphan that lists the
+// recipient is a warning. A file that another writer replaced in place under
+// the same name is not seen: the stores must be quiet while remove-key runs.
+func (c *Context) postCheck(stores []string, recipient string, known []string, skipOrphans bool) bool {
+	after := scanEncs(stores, recipient)
+	other, dirs := otherEncs(stores)
+	unreadable := slices.Concat(after.unreadable, dirs)
+	for _, u := range unreadable {
+		ui.ErrorTo(c.ErrOut, "cannot read %s", c.rel(u))
+	}
+	for _, m := range after.malformed {
+		ui.ErrorTo(c.ErrOut, "the sops metadata of %s does not parse or lists no age recipient", c.rel(m))
+	}
+	for _, d := range after.duplicate {
+		ui.ErrorTo(c.ErrOut, "the sops metadata of %s holds a duplicate member", c.rel(d))
+	}
+	left, changed, orphansLeft := 0, 0, 0
+	for _, enc := range after.all {
+		twin := fsutil.IsRegular(strings.TrimSuffix(enc, ".enc"))
+		switch {
+		case slices.Contains(after.malformed, enc) || slices.Contains(after.duplicate, enc):
+			// named above
+		case !twin && skipOrphans:
+			if slices.Contains(after.listed, enc) {
+				orphansLeft++
+			}
+		case !twin:
+			ui.ErrorTo(c.ErrOut, "an .enc with no decrypted twin after the re-key: %s", c.rel(enc))
+			changed++
+		case !slices.Contains(known, enc):
+			ui.ErrorTo(c.ErrOut, "a managed .enc that this run did not re-key: %s", c.rel(enc))
+			changed++
+		case slices.Contains(after.listed, enc):
+			ui.ErrorTo(c.ErrOut, "still encrypted to the removed recipient: %s", c.rel(enc))
+			left++
+		}
+	}
+	for _, o := range other {
+		ui.ErrorTo(c.ErrOut, "remove-key re-keys only the managed Secret.*.enc files; %s is another .enc file: re-key or remove it by hand, then run again", c.rel(o))
+		changed++
+	}
+	bad := len(unreadable) + len(after.malformed) + len(after.duplicate)
+	if left > 0 || bad > 0 {
+		ui.ErrorTo(c.ErrOut, "%d .enc file(s) still list the removed recipient after the re-key, %d cannot be read or do not parse", left, bad)
+	}
+	if changed > 0 {
+		ui.ErrorTo(c.ErrOut, "%d file(s) of the stores changed during the run: the stores must be quiet while remove-key runs", changed)
+	}
+	if left+bad+changed > 0 {
+		return false
+	}
+	if orphansLeft > 0 {
+		ui.WarnTo(c.ErrOut, "%d orphan .enc file(s) still list the removed recipient — its key can still decrypt them", orphansLeft)
+	}
+	return true
+}
+
 // ── Remove key ───────────────────────────────────────────
 
 // RemoveKey drops an age recipient from every creation rule in .sops.yaml
@@ -840,10 +905,13 @@ func (c *Context) refuseScan(s encScan) bool {
 // a re-key cannot rewrite that file, so it keeps the removed recipient.
 //
 // It re-encrypts each .enc that lists the recipient from its plaintext, then
-// reads the .enc files again and fails when one still lists it, with the
-// command that resumes the run. Each read takes the recipients from the
-// parsed sops metadata of the file. Other stores that still list the
-// recipient are named in a warning; they are not re-keyed.
+// reads the stores again with the same reads and walk (postCheck) and fails,
+// with the command that resumes the run, when a file still lists it, when a
+// path cannot be read, and when a file changed during the run: another .enc,
+// a managed .enc that was not there at the start, or, without skipOrphans,
+// an orphan. Each read takes the recipients from the parsed sops metadata of
+// the file. Other stores that still list the recipient are named in a
+// warning; they are not re-keyed.
 //
 // A removal does not revoke what the key already read; the last line says
 // so.
@@ -1018,33 +1086,12 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 		return err
 	}
 
-	// Check the files, not the exit codes.
-	after := scanEncs(stores, agePubkey)
-	left, orphansLeft := 0, 0
-	for _, u := range after.unreadable {
-		ui.ErrorTo(c.ErrOut, "cannot read %s", c.rel(u))
-	}
-	for _, m := range after.malformed {
-		ui.ErrorTo(c.ErrOut, "the sops metadata of %s does not parse or lists no age recipient", c.rel(m))
-	}
-	for _, d := range after.duplicate {
-		ui.ErrorTo(c.ErrOut, "the sops metadata of %s holds a duplicate member", c.rel(d))
-	}
-	for _, enc := range after.listed {
-		if !fsutil.IsRegular(strings.TrimSuffix(enc, ".enc")) {
-			orphansLeft++
-			continue
-		}
-		ui.ErrorTo(c.ErrOut, "still encrypted to the removed recipient: %s", c.rel(enc))
-		left++
-	}
-	if bad := len(after.unreadable) + len(after.malformed) + len(after.duplicate); left > 0 || bad > 0 {
-		ui.ErrorTo(c.ErrOut, "%d .enc file(s) still list the removed recipient after the re-key, %d cannot be read or do not parse", left, bad)
+	// Check the files, not the exit codes: the same reads and walk as before
+	// the first write. A managed file that was not there at the start was
+	// not re-keyed.
+	if !c.postCheck(stores, agePubkey, scan.all, skipOrphans) {
 		c.rerunRemoveKey(agePubkey, all, skipOrphans)
 		return ErrHandled
-	}
-	if orphansLeft > 0 {
-		ui.WarnTo(c.ErrOut, "%d orphan .enc file(s) still list the removed recipient — its key can still decrypt them", orphansLeft)
 	}
 	c.reportOtherStores(ui.WarnTo, stores, agePubkey)
 	fmt.Fprintln(c.Out, "done — commit .sops.yaml and the updated .enc files together")

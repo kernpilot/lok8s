@@ -375,6 +375,108 @@ func TestRemoveKeyPostCheckRefusesADuplicateMember(t *testing.T) {
 	}
 }
 
+// The post-check repeats the reads and the walk of the check before the first
+// write, so a file that appears in the store during the run fails it, by its
+// path, with the command that resumes the run: another .enc, a managed .enc
+// with a decrypted twin that the run did not re-key, an orphan, and a
+// directory that it cannot read. With --skip-orphans an orphan that lists the
+// recipient is a warning. Each file appears through c.Out, after the re-key
+// of the store and before the post-check (see
+// TestRemoveKeyPostCheckRefusesADuplicateMember), as a copy of the .enc of
+// the store before the run, which lists the recipient.
+// tests/unit/secrets_remove_key_test.bats runs the same cases with a sops
+// stub.
+func TestRemoveKeyPostCheckRefusesAFileThatAppears(t *testing.T) {
+	const changedLine = "[error] 1 file(s) of the stores changed during the run: the stores must be quiet while remove-key runs\n"
+	for _, tc := range []struct {
+		name        string
+		skipOrphans bool
+		perms       bool
+		appear      func(t *testing.T, store, managed string)
+		want        string // stderr between the scope line and the resume lines
+	}{
+		{
+			name:   "another .enc",
+			appear: func(t *testing.T, store, managed string) { write(t, store+"/backup.enc", managed) },
+			want:   "[error] remove-key re-keys only the managed Secret.*.enc files; clusters/a.dev/secrets/backup.enc is another .enc file: re-key or remove it by hand, then run again\n" + changedLine,
+		},
+		{
+			name: "a managed .enc with a decrypted twin",
+			appear: func(t *testing.T, store, managed string) {
+				write(t, store+"/Secret.new.default.K", "v")
+				write(t, store+"/Secret.new.default.K.enc", managed)
+			},
+			want: "[error] a managed .enc that this run did not re-key: clusters/a.dev/secrets/Secret.new.default.K.enc\n" + changedLine,
+		},
+		{
+			name:   "an orphan",
+			appear: func(t *testing.T, store, managed string) { write(t, store+"/Secret.orphan.default.K.enc", managed) },
+			want:   "[error] an .enc with no decrypted twin after the re-key: clusters/a.dev/secrets/Secret.orphan.default.K.enc\n" + changedLine,
+		},
+		{
+			name:        "an orphan with --skip-orphans",
+			skipOrphans: true,
+			appear:      func(t *testing.T, store, managed string) { write(t, store+"/Secret.orphan.default.K.enc", managed) },
+		},
+		{
+			name:  "a directory that it cannot read",
+			perms: true,
+			appear: func(t *testing.T, store, _ string) {
+				sub := mkdir(t, store+"/sub")
+				if err := os.Chmod(sub, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(sub, 0o700) })
+			},
+			want: "[error] cannot read clusters/a.dev/secrets/sub\n" +
+				"[error] 0 .enc file(s) still list the removed recipient after the re-key, 1 cannot be read or do not parse\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.perms {
+				skipUnlessPermissionsHold(t)
+			}
+			c, out, errOut := testEnv(t)
+			keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+			k, g := keep.Recipient().String(), gone.Recipient().String()
+			store, enc, managed := otherEncStore(t, c, k, g, out, errOut)
+			ran := false
+			hooked := &hookWriter{mark: "Encrypted 1 secret(s)\n", hook: func() {
+				ran = true
+				tc.appear(t, store, managed)
+			}}
+			c.Out = hooked
+
+			err := c.RemoveKey(g, false, tc.skipOrphans)
+			if !ran {
+				t.Fatalf("the hook did not run: no count line on stdout:\n%s", hooked.buf.String())
+			}
+			if tc.skipOrphans {
+				if err != nil {
+					t.Fatalf("%v\n%s", err, errOut.String())
+				}
+				want := scopeWarn + "[warn] 1 orphan .enc file(s) still list the removed recipient — its key can still decrypt them\n" + rotateWarn
+				if errOut.String() != want {
+					t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
+				}
+			} else {
+				if !errors.Is(err, ErrHandled) {
+					t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+				}
+				want := scopeWarn + tc.want +
+					"[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again resumes it:\n" +
+					"[error]   lo secrets remove-key " + g + " --domain a.dev\n"
+				if errOut.String() != want {
+					t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
+				}
+			}
+			if opens(t, enc, gone, "v") || !opens(t, enc, keep, "v") {
+				t.Error("the managed .enc was not re-keyed")
+			}
+		})
+	}
+}
+
 // escapeIn rewrites the recipient in an .enc as its JSON escape: the file
 // still opens to the recipient's identity, and its bytes no longer hold it.
 func escapeIn(t *testing.T, enc, rcpt string) {

@@ -955,6 +955,77 @@ _sops_writes() {
   ! grep -qF "${RCPT_B}" "${CFG}" || { echo ".sops.yaml still lists the recipient: the run stopped before the first write" >&2; return 1; }
 }
 
+# _sops_appears <kind> — a sops stub whose encrypt writes the envelope of the
+# first rule to its --output file, as sops would, and adds one file to the
+# store of a.dev during the run: another .enc (other), a managed .enc with a
+# decrypted twin (managed), an orphan (orphan), or a directory that the walk
+# cannot read (dir). Each added .enc lists RCPT_B.
+_sops_appears() {
+  _appears="${1}"
+  sops() {
+    local out="" s="${PATH_CLUSTERS}/a.dev/secrets"
+    while (( ${#} )); do
+      [[ "${1}" != --output ]] || { out="${2}"; shift; }
+      shift
+    done
+    _first_rule_envelope > "${out}"
+    case "${_appears}" in
+      other) _envelope "${RCPT_B}" > "${s}/backup.enc" ;;
+      managed) printf 'n' > "${s}/Secret.new.default.K" && _envelope "${RCPT_B}" > "${s}/Secret.new.default.K.enc" ;;
+      orphan) _envelope "${RCPT_B}" > "${s}/Secret.orphan.default.K.enc" ;;
+      dir) mkdir "${s}/sub" && chmod 000 "${s}/sub" ;;
+    esac
+  }
+}
+
+@test "the post-check refuses a file that appears during the run, names it and prints the resume command" {
+  # The post-check repeats the reads and the walk of the check before the
+  # first write (Go twin: TestRemoveKeyPostCheckRefusesAFileThatAppears).
+  _load
+  local s="${PATH_CLUSTERS}/a.dev/secrets" kind want
+  local changed='[error] 1 file(s) of the stores changed during the run: the stores must be quiet while remove-key runs'
+  for kind in other managed orphan dir; do
+    if [[ "${kind}" == dir && "$(id -u)" -eq 0 ]]; then
+      continue # root reads every directory
+    fi
+    chmod -R u+rwx "${PATH_CLUSTERS}"
+    rm -rf -- "${s}"
+    mkdir -p "${s}"
+    _rules "${RCPT_A},${RCPT_B}"
+    _cache a.dev app "${RCPT_B}"
+    _sops_appears "${kind}"
+    case "${kind}" in
+      other) want="[error] remove-key re-keys only the managed Secret.*.enc files; ${s}/backup.enc is another .enc file: re-key or remove it by hand, then run again
+${changed}" ;;
+      managed) want="[error] a managed .enc that this run did not re-key: ${s}/Secret.new.default.K.enc
+${changed}" ;;
+      orphan) want="[error] an .enc with no decrypted twin after the re-key: ${s}/Secret.orphan.default.K.enc
+${changed}" ;;
+      dir) want="[error] cannot read ${s}/sub
+[error] 0 .enc file(s) still list the removed recipient after the re-key, 1 cannot be read or do not parse" ;;
+    esac
+    DOMAIN=a.dev run _rm "${RCPT_B}"
+    [ "$status" -eq 1 ] || { echo "${kind}: status $status: $output" >&2; return 1; }
+    [[ "$output" == *"Encrypted 1 secret(s)
+${want}
+[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again resumes it:
+[error]   lo secrets remove-key ${RCPT_B} --domain a.dev" ]] || { echo "${kind}: $output" >&2; return 1; }
+    ! grep -qF "${RCPT_B}" "${s}/Secret.app.default.K.enc" || { echo "${kind}: the managed .enc was not re-keyed" >&2; return 1; }
+  done
+}
+
+@test "with --skip-orphans, an orphan that appears during the run is a warning" {
+  _load
+  _cache a.dev app "${RCPT_B}"
+  _sops_appears orphan
+  DOMAIN=a.dev run _rm "${RCPT_B}" 0 1
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [[ "$output" == *"Encrypted 1 secret(s)
+[warn] 1 orphan .enc file(s) still list the removed recipient — its key can still decrypt them
+done — commit .sops.yaml and the updated .enc files together
+${_rotate}" ]] || { echo "$output" >&2; return 1; }
+}
+
 # ── The .enc path of an encrypt ──────────────────────────────────────────
 # secrets::_encrypt_file, which set --encrypt, encrypt and the re-key share,
 # writes an .enc only to a regular file or a path that does not exist (Go
