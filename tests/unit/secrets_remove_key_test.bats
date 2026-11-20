@@ -1494,6 +1494,28 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   assert_no_trace_leak xtrace-canary-twin secrets::_twin_matches "${store}/Secret.app.default.K.enc"
 }
 
+@test "the twin compare returns to its caller with lastpipe on" {
+  # BASHOPTS=lastpipe in the environment turns lastpipe on. Then the last
+  # part of a pipeline runs in the current shell, and an exit there would
+  # end the whole remove-key with the status of the first compare, before
+  # any re-key. The caller must get the status and go on.
+  _load
+  local store="${PATH_CLUSTERS}/a.dev/secrets"
+  export SOPS_AGE_KEY_FILE="${BATS_TEST_TMPDIR}/caller.txt"
+  printf '%s\n' "AGE-SECRET-""KEY-1lastpipe-identity" > "${SOPS_AGE_KEY_FILE}"
+  sops() { printf '%s' "lastpipe-twin-value"; }
+  printf '%s' "lastpipe-twin-value" > "${store}/Secret.app.default.K"
+  printf '%s' "{}" > "${store}/Secret.app.default.K.enc"
+  compare_then_go_on() { secrets::_twin_matches "${1}"; echo "returned $?"; }
+  shopt -s lastpipe
+  set +m
+  run compare_then_go_on "${store}/Secret.app.default.K.enc"
+  [ "$output" = "returned 0" ] || { echo "a twin that matches: status $status: $output" >&2; return 1; }
+  printf '%s' "another-value" > "${store}/Secret.app.default.K"
+  run compare_then_go_on "${store}/Secret.app.default.K.enc"
+  [ "$output" = "returned 1" ] || { echo "a twin that differs: status $status: $output" >&2; return 1; }
+}
+
 @test "while another run holds the lock, remove-key refuses and changes nothing" {
   command -v flock >/dev/null 2>&1 || skip "flock not installed"
   _load
