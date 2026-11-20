@@ -160,18 +160,18 @@ wait`, stopFile)
 	if _, err := bufio.NewReader(stdout).ReadString('\n'); err != nil {
 		t.Fatalf("the member did not start: %v", err)
 	}
-	pgid := cmd.Process.Pid
+	g := newGroup(cmd.Process.Pid)
 	real := procNames
 	t.Cleanup(func() { procNames = real })
 	calls := 0
 	procNames = func() ([]string, error) {
 		calls++
 		if calls == 1 {
-			return []string{strconv.Itoa(pgid)}, nil
+			return []string{strconv.Itoa(g.pgid)}, nil
 		}
 		return real()
 	}
-	if !othersInGroup(pgid) {
+	if !othersInGroup(g) {
 		t.Error("othersInGroup = false: a first list without the member hid it")
 	}
 	if calls != 2 {
