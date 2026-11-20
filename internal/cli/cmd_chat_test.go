@@ -228,6 +228,99 @@ func TestChatLochatInPathBin(t *testing.T) {
 	}
 }
 
+// chatExportedPathBin is a chat project with PATH_BIN exported to another
+// dir, which holds the lochat. It returns the paths that lo resolves from
+// that environment and the exported dir. The project's .bin holds an
+// argsh.so, the exported dir none. PATH is an empty dir, so a real argsh on
+// the machine cannot decide the argsh.so check.
+func chatExportedPathBin(t *testing.T) (*config.Paths, string) {
+	t.Helper()
+	synth := chatProject(t)
+	exported := t.TempDir()
+	t.Setenv("PATH_BASE", synth.Base)
+	t.Setenv("PATH_BIN", exported)
+	t.Setenv("PATH_LOK8S", "")
+	t.Setenv("PATH_CLUSTERS", "")
+	t.Setenv("PATH", t.TempDir())
+	p, err := config.ResolvePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Bin != exported || filepath.Join(p.Base, ".bin") != synth.Bin {
+		t.Fatalf("paths: Bin=%q Base=%q, want %q and the parent of %q", p.Bin, p.Base, exported, synth.Bin)
+	}
+	lochatStub(t, exported)
+	return p, exported
+}
+
+// The argsh.so check reads the PATH_BIN of the `lo` child, not an exported
+// PATH_BIN: an argsh.so in the project's .bin passes, with none in the
+// exported dir. The child gets the project's .bin as PATH_BIN, so the
+// check and the child read the same dir.
+func TestChatArgshSoCheckReadsTheChildPathBin(t *testing.T) {
+	p, exported := chatExportedPathBin(t)
+	var gotBin string
+	var gotEnv []string
+	saved := execProcess
+	execProcess = func(bin string, _, env []string) error {
+		gotBin, gotEnv = bin, env
+		return nil
+	}
+	t.Cleanup(func() { execProcess = saved })
+	t.Setenv("LO_CHAT_CONFIG", "")
+
+	_, stderr, err := runLo(t, NewRoot(p), "chat")
+	if err != nil || stderr != "" {
+		t.Fatalf("argsh.so in the project's .bin: err=%v stderr=%q, want no error and no output", err, stderr)
+	}
+	if gotBin != filepath.Join(exported, "lochat") {
+		t.Errorf("exec %q, want the lochat in PATH_BIN", gotBin)
+	}
+	if want := "PATH_BIN=" + filepath.Join(p.Base, ".bin"); !slices.Contains(gotEnv, want) {
+		t.Errorf("the child env has no %s", want)
+	}
+}
+
+// The reverse: an argsh.so in the exported PATH_BIN only fails the check,
+// because the child does not load it from there.
+func TestChatArgshSoOnlyInAnExportedPathBinFailsTheCheck(t *testing.T) {
+	p, exported := chatExportedPathBin(t)
+	testutil.WriteFile(t, filepath.Join(exported, "argsh.so"), "")
+	if err := os.Remove(filepath.Join(p.Base, ".bin", "argsh.so")); err != nil {
+		t.Fatal(err)
+	}
+	gotBin := chatExecBin(t)
+
+	_, stderr, err := runLo(t, NewRoot(p), "chat")
+	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "argsh.so is missing") || *gotBin != "" {
+		t.Errorf("argsh.so in the exported PATH_BIN only: err=%v exec=%q stderr=%q, want the argsh.so error", err, *gotBin, stderr)
+	}
+}
+
+// An argsh on PATH with an argsh.so beside it does not pass the check: the
+// child sources the project's .bin/argsh, and argsh does not load argsh.so
+// from beside an argsh on PATH.
+func TestChatArgshSoBesideAnArgshOnPathFailsTheCheck(t *testing.T) {
+	p := chatProject(t)
+	if err := os.Remove(filepath.Join(p.Bin, "argsh.so")); err != nil {
+		t.Fatal(err)
+	}
+	onPath := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(onPath, "argsh"), "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(filepath.Join(onPath, "argsh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, filepath.Join(onPath, "argsh.so"), "")
+	t.Setenv("PATH", onPath)
+	t.Setenv("PATH_BIN", p.Bin)
+	gotBin := chatExecBin(t)
+
+	_, stderr, err := runLo(t, NewRoot(p), "chat")
+	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "argsh.so is missing") || *gotBin != "" {
+		t.Errorf("argsh.so beside an argsh on PATH only: err=%v exec=%q stderr=%q, want the argsh.so error", err, *gotBin, stderr)
+	}
+}
+
 // argshToolName is the tool name the argsh `lo mcp` builtin gives a command:
 // lo_ and the path, of which a command three or more levels deep keeps only
 // its last two words (`lo kubehz space kubeconfig` is lo_space_kubeconfig).

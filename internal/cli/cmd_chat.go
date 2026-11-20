@@ -93,8 +93,10 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 	}
 
 	// Preflight: `lo chat` drives `lo mcp`, and the `mcp` command is an
-	// argsh builtin provided by argsh.so (loaded from beside the argsh
-	// binary). If that shared object is missing the bridge dies with
+	// argsh builtin provided by argsh.so. The argsh that the `lo` child
+	// sources loads it from ${PATH_BIN}/argsh.so (or from ARGSH_BUILTIN_PATH,
+	// PATH_LIB, LD_LIBRARY_PATH or BASH_LOADABLES_PATH), not from beside the
+	// argsh binary. If that shared object is missing the bridge dies with
 	// "Invalid command: mcp" and the binary would just wait out its
 	// timeout — fail loudly and point at the fix.
 	if !argshBuiltinPresent(paths) {
@@ -118,14 +120,14 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 	return bin, argv, tree, nil
 }
 
-// argshBuiltinPresent checks for argsh.so next to the toolchain argsh (bash:
-// ${PATH_BIN}/argsh.so, else beside the argsh on PATH).
+// argshBuiltinPresent checks for argsh.so in the PATH_BIN of the `lo`
+// child: projectBin, which shimEnv puts in place of an exported PATH_BIN
+// (without an export, the child derives the same dir), not paths.Bin. The
+// child sources ${PATH_BIN}/argsh, and that argsh never loads argsh.so
+// from beside an argsh on PATH, so the check has no PATH fallback. The
+// other places of the argsh search are not checked. Bash reads
+// ${PATH_BIN}/argsh.so, else beside the argsh on PATH (deviation
+// catalogue: docs/reference/go-migration.md).
 func argshBuiltinPresent(paths *config.Paths) bool {
-	if fsutil.FileExists(filepath.Join(paths.Bin, "argsh.so")) {
-		return true
-	}
-	if p, err := exec.LookPath("argsh"); err == nil {
-		return fsutil.FileExists(filepath.Join(filepath.Dir(p), "argsh.so"))
-	}
-	return false
+	return fsutil.FileExists(filepath.Join(projectBin(paths), "argsh.so"))
 }

@@ -37,6 +37,9 @@ model runtime. Run the steps in the project directory.
      lo toolchain install --groups core,local,bash
      ```
 
+   `argsh.so` belongs in the `.bin/` directory of the project, next to
+   `argsh`, also when you export PATH_BIN.
+
 2. Download the `lochat` engine of the `lo` you run and the checksums of
    its release into a temporary directory, then verify the engine. This
    step uses the network.
