@@ -150,6 +150,10 @@ func runDoctor(ctx context.Context, paths *config.Paths, d string, toolchainFlag
 	// sso-gate as an entry name (advisory; one kubectl read of the CRD, GET
 	// requests only, with the same plugin caveat; cmd_doctor_ssogate.go).
 	doctorSSOGateMergeType(ctx, r, paths, d, path, bootstrapEntries(paths), out)
+	// The Kubernetes minors that the kubectl image of system-upgrade-
+	// controller serves, when spec.bootstrap has the addon as an entry name
+	// (advisory; it reads the spec only; cmd_doctor_suc.go).
+	doctorSUCKubectl(paths, d, bootstrapEntries(paths), out)
 
 	// Provider / infrastructure diagnosis — advisory, never affects the exit
 	// code.

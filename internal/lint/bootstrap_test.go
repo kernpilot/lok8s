@@ -58,3 +58,48 @@ func TestBootstrapDefaultCilium(t *testing.T) {
 		t.Fatalf("bootstrap errors with empty list = %d, want 0", got)
 	}
 }
+
+// TestBootstrapSUCKubectlCases runs the lint cases of the shared fixtures of
+// the doctor check (tests/fixtures/doctor-suc-kubectl, the cases with a
+// lint-want file; the bats twin is tests/unit/lint_test.bats): a minor out
+// of the range of the kubectl image of system-upgrade-controller is a
+// warning with the doctor line, never an error, and every other case prints
+// nothing.
+func TestBootstrapSUCKubectlCases(t *testing.T) {
+	const fixtures = "../../tests/fixtures/doctor-suc-kubectl/cases"
+	entries, err := os.ReadDir(fixtures)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ran := 0
+	for _, e := range entries {
+		name := e.Name()
+		want, err := os.ReadFile(filepath.Join(fixtures, name, "lint-want"))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		ran++
+		t.Run(name, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join(fixtures, name, "cluster.lok8s.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			l, base, _, errOut := newLinter(t)
+			dir := filepath.Join(base, "clusters", "suc.example")
+			spec := filepath.Join(dir, "cluster.lok8s.yaml")
+			testutil.WriteFile(t, spec, string(raw))
+			if got := l.bootstrap(dir, spec, "suc.example"); got != 0 {
+				t.Errorf("bootstrap errors = %d, want 0", got)
+			}
+			if got := errOut.String(); got != string(want) {
+				t.Errorf("stderr:\n%q\nwant:\n%q", got, want)
+			}
+		})
+	}
+	if ran < 12 {
+		t.Fatalf("only %d lint cases under %s", ran, fixtures)
+	}
+}

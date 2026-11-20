@@ -48,6 +48,14 @@ systemUpgradeController:
 # chart writes the same image into SYSTEM_UPGRADE_JOB_KUBECTL_IMAGE_WINDOWS,
 # and this index has no Windows image: a cordon or drain on a Windows node
 # still fails to pull it. The pin does not change that.
+#
+# The image serves Kubernetes 1.33 to 1.37 only: v8.1.1 bundles kubectl
+# v1.34.8, v1.35.5 and v1.36.1, its binary downloads are off, and kuberlr
+# accepts one minor of skew. On another minor, a Plan with cordon or drain
+# fails in its drain container. `lo doctor` and `lo lint` warn about it.
+# The range is SUCKubectlMinMinor and SUCKubectlMaxMinor in
+# internal/addons/suc.go (bash: .lok8s/utils/spec.sh): on a bump of the tag,
+# change the range there too. A test fails when the tag moves alone.
 kubectl:
   image:
     repository: rancher/kuberlr-kubectl

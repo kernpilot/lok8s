@@ -16,11 +16,14 @@ package lint
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/addons"
 	"github.com/kernpilot/lok8s/internal/bootstrapspec"
 	"github.com/kernpilot/lok8s/internal/domain"
+	lodriver "github.com/kernpilot/lok8s/internal/driver/lo"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
@@ -59,6 +62,7 @@ func (l *Linter) bootstrap(domainDir, specFile, domainName string) int {
 	}
 
 	errs := 0
+	suc := false
 	for _, item := range bootstrapspec.Resolve(firstDoc(specFile), kind) {
 		e, ok := parser.Parse(domainName, item)
 		if !ok {
@@ -73,6 +77,30 @@ func (l *Linter) bootstrap(domainDir, specFile, domainName string) int {
 			ui.ErrorTo(l.ErrOut, "  spec.bootstrap entry not found: %s (resolved to %s)", item.Raw, e.Dir)
 			errs++
 		}
+		// The addon counts only as a bare entry name, as in `lo doctor`.
+		if e.Builtin && filepath.Base(e.Dir) == addons.SUCAddon {
+			suc = true
+		}
+	}
+	if suc {
+		l.sucKubectl(specFile)
 	}
 	return errs
+}
+
+// sucKubectl warns when spec.kubernetes.version is a minor that the kubectl
+// image of system-upgrade-controller does not serve, with the line of `lo
+// doctor` (internal/addons/suc.go; bash: lint::_suc_kubectl). A version that
+// is not set, cannot be read or is not vX.Y or vX.Y.Z gets no line here;
+// only `lo doctor` reports it. The version check of lint
+// (Linter.kubernetesVersion) reads a Lo spec only, and it accepts every
+// image tag, `latest` too. Warnings only.
+func (l *Linter) sucKubectl(specFile string) {
+	version, err := lodriver.KubernetesVersion(specFile)
+	if err != nil || version == "" {
+		return
+	}
+	if state, minor := addons.SUCKubectl(version); state == addons.SUCKubectlOutOfRange {
+		ui.WarnTo(l.ErrOut, "  %s", addons.SUCKubectlOutOfRangeLine(minor))
+	}
 }

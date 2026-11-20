@@ -1,0 +1,1 @@
+  ! system-upgrade-controller kubectl range not checked: spec.kubernetes.version is not a version of the form vX.Y or vX.Y.Z

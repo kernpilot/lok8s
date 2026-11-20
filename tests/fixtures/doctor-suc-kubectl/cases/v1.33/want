@@ -1,0 +1,1 @@
+  ✓ system-upgrade-controller: the kubectl image of the drain container serves Kubernetes 1.33 (it serves 1.33 to 1.37)

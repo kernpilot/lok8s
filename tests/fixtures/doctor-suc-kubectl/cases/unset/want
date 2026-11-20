@@ -1,0 +1,1 @@
+  ℹ system-upgrade-controller: spec.kubernetes.version is not set, so kind runs its default node image (v1.36.1 with kind v0.32.0, the pinned release); the kubectl image of the drain container serves Kubernetes 1.33 to 1.37
