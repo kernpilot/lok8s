@@ -42,6 +42,8 @@ setup() {
         --user|-u)     user="$2"; shift ;;
         --port|-p)     port="$2"; shift ;;
         --ssh-key|-i)  ssh_key="$2"; shift ;;
+        --known-hosts) known_hosts="$2"; shift ;;
+        --accept-new-host-key) accept_new_host_key=1 ;;
       esac
       shift
     done
@@ -136,12 +138,594 @@ _mock_node_binaries() {
 
 @test "handover: resolve_bundle unpacks a .tar.gz into a private dir" {
   _make_bundle
+  # The mktemp dir goes under the test dir, so the teardown removes it.
+  export TMPDIR="${BATS_TEST_TMPDIR}"
   local tarball="${BATS_TEST_TMPDIR}/bundle.tar.gz"
   tar -czf "${tarball}" -C "${BUNDLE}" .
   run handover::resolve_bundle "${tarball}"
   assert_success
+  [[ "${output}" == "${BATS_TEST_TMPDIR}/"* ]]
   [ -s "${output}/ca.crt" ]
   [ -s "${output}/endpoint-dns" ]
+  run stat -c '%a' "${output}"
+  assert_output "700"
+}
+
+# `tar -C <dir> .` writes a "./" entry, and tar gives that entry's mode to
+# the dir it unpacks into. The bundle dir must stay 0700 and the keys 0600,
+# with a workdir and without one.
+@test "resolve_bundle: a './' entry of mode 0755 or 0777 leaves the dir 0700 and the keys 0600" {
+  _make_bundle
+  export TMPDIR="${BATS_TEST_TMPDIR}"
+  local m perms tarball wd first
+  for m in 755 777; do
+    case "${m}" in 755) perms="drwxr-xr-x" ;; 777) perms="drwxrwxrwx" ;; esac
+    chmod "${m}" "${BUNDLE}"
+    chmod 644 "${BUNDLE}/ca.key"
+    tarball="${BATS_TEST_TMPDIR}/bundle-${m}.tar.gz"
+    tar -czf "${tarball}" -C "${BUNDLE}" .
+    # The archive carries the mode under test on its "./" entry.
+    tar -tvzf "${tarball}" > "${BATS_TEST_TMPDIR}/list-${m}"
+    first="$(head -n 1 "${BATS_TEST_TMPDIR}/list-${m}")"
+    [[ "${first}" == "${perms} "* && "${first}" == *" ./" ]]
+
+    wd="${BATS_TEST_TMPDIR}/wd-${m}"
+    mkdir -m 700 "${wd}"
+    run handover::resolve_bundle "${tarball}" "${wd}"
+    assert_success
+    assert_output "${wd}/bundle"
+    run stat -c '%a' "${wd}/bundle"
+    assert_output "700"
+    run stat -c '%a' "${wd}/bundle/ca.key"
+    assert_output "600"
+
+    run handover::resolve_bundle "${tarball}"
+    assert_success
+    [[ "${output}" == "${BATS_TEST_TMPDIR}/"* ]]
+    run stat -c '%a' "${output}"
+    assert_output "700"
+  done
+}
+
+@test "resolve_bundle: a dir that the unpack left open fails closed and is removed" {
+  # A tar that does not honour the options (a tar run as root that restores
+  # the "./" mode, for example): the stub runs the real tar and then opens
+  # the dir that -C names.
+  _make_bundle
+  local tarball="${BATS_TEST_TMPDIR}/bundle.tar.gz" wd="${BATS_TEST_TMPDIR}/wd"
+  tar -czf "${tarball}" -C "${BUNDLE}" .
+  mkdir -m 700 "${wd}"
+  tar() {
+    command tar "$@" || return
+    local arg prev=""
+    for arg in "$@"; do
+      [[ "${prev}" != "-C" ]] || command chmod 755 "${arg}"
+      prev="${arg}"
+    done
+  }
+  export -f tar
+  run handover::resolve_bundle "${tarball}" "${wd}"
+  assert_failure
+  assert_output --partial "handover: ${wd}/bundle has mode 755, not 700"
+  [ ! -e "${wd}/bundle" ]
+}
+
+@test "handover: make_private stops when chmod fails, with its own message" {
+  local d="${BATS_TEST_TMPDIR}/d"
+  mkdir -m 700 "${d}"
+  chmod() { return 1; }
+  export -f chmod
+  run handover::make_private "${d}"
+  assert_failure
+  assert_output --partial "handover: cannot set ${d} to mode 700, so the bundle's keys would not be private in it. Check the file system of TMPDIR, then retry."
+}
+
+# A chmod stub that fails for the path that FAIL_CHMOD names (a glob), and
+# runs the real chmod for every other path.
+_fail_chmod_at() {
+  export FAIL_CHMOD="${1}"
+  chmod() {
+    # shellcheck disable=SC2254 # FAIL_CHMOD is a glob on purpose
+    case "${*: -1}" in ${FAIL_CHMOD}) return 1 ;; esac
+    command chmod "$@"
+  }
+  export -f chmod
+}
+
+@test "handover: place_pki stops when a chmod fails at the pki dir or at any file, and leaves no key" {
+  # Each chmod on its own: the dir, then the new file of each of the six
+  # PKI files (before its rename). The step stops, and the files that it
+  # placed go.
+  _make_bundle
+  local pki="${KUBEHZ_HANDOVER_K8S_DIR}/pki" target
+  for target in pki ca.crt ca.key sa.pub sa.key front-proxy-ca.crt front-proxy-ca.key; do
+    rm -rf -- "${KUBEHZ_HANDOVER_K8S_DIR}"
+    if [[ "${target}" == pki ]]; then
+      _fail_chmod_at "${pki}"
+    else
+      _fail_chmod_at "${pki}/.${target}.*"
+    fi
+    run handover::place_pki "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
+    assert_failure
+    if [[ "${target}" == pki ]]; then
+      assert_output --partial "handover: cannot set ${pki} to mode 700, so the keys would not be private in it"
+    else
+      assert_output --partial "handover: could not place ${target} into ${pki} with mode"
+    fi
+    run find "${pki}" -mindepth 1
+    assert_success
+    assert_output ""
+  done
+}
+
+# A chmod that returns 0 but leaves the pki dir open (a file system that
+# keeps the bits) fails closed too: place_pki reads the mode after it.
+@test "handover: place_pki reads the mode of the pki dir after its chmod" {
+  _make_bundle
+  export PKI="${KUBEHZ_HANDOVER_K8S_DIR}/pki"
+  chmod() {
+    if [[ "${*: -1}" == "${PKI}" ]]; then
+      command chmod 755 "${PKI}"
+      return 0
+    fi
+    command chmod "$@"
+  }
+  export -f chmod
+  run handover::place_pki "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
+  assert_failure
+  assert_output --partial "handover: cannot set ${PKI} to mode 700, so the keys would not be private in it"
+  run find "${PKI}" -mindepth 1
+  assert_output ""
+}
+
+# kubeadm makes /etc/kubernetes/pki 0755, and a run with --force finds the
+# files of an earlier run. The dir is 0700 before a key lands in it, and
+# each file is replaced, not written into: a key of mode 0644 ends 0600, a
+# second name of it outside keeps the old bytes, and a link at a key name
+# is replaced, not followed.
+@test "handover: place_pki makes an open pki dir 0700 and replaces each file with its own mode" {
+  _make_bundle
+  local pki="${KUBEHZ_HANDOVER_K8S_DIR}/pki" outside="${BATS_TEST_TMPDIR}/outside" key
+  mkdir -p "${pki}" "${outside}"
+  chmod 755 "${pki}"
+  printf 'old-ca-key\n' > "${pki}/ca.key"
+  chmod 644 "${pki}/ca.key"
+  ln "${pki}/ca.key" "${outside}/second-name"
+  printf 'outside-secret\n' > "${outside}/secret"
+  ln -s "${outside}/secret" "${pki}/sa.key"
+  run handover::place_pki "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
+  assert_success
+  run stat -c '%a' "${pki}"
+  assert_output "700"
+  for key in ca.key sa.key front-proxy-ca.key; do
+    [ ! -L "${pki}/${key}" ]
+    run stat -c '%F %a %h' "${pki}/${key}"
+    assert_output "regular file 600 1"
+    cmp -- "${BUNDLE}/${key}" "${pki}/${key}"
+  done
+  for key in ca.crt sa.pub front-proxy-ca.crt; do
+    run stat -c '%F %a' "${pki}/${key}"
+    assert_output "regular file 644"
+    cmp -- "${BUNDLE}/${key}" "${pki}/${key}"
+  done
+  run cat "${outside}/second-name"
+  assert_output "old-ca-key"
+  run cat "${outside}/secret"
+  assert_output "outside-secret"
+  # No new file is left behind.
+  run find "${pki}" -name '.*'
+  assert_output ""
+}
+
+# The encryption config holds the key: it is written 0600 from the first
+# byte, also over a file of an earlier run with mode 0644. A chmod that
+# fails stops the step and leaves no file.
+@test "handover: write_encryption_config replaces an open file with a 0600 one, and a failed chmod leaves none" {
+  _make_bundle
+  local out="${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-encryption-config.yaml"
+  mkdir -p "${KUBEHZ_HANDOVER_K8S_DIR}"
+  printf 'old\n' > "${out}"
+  chmod 644 "${out}"
+  run handover::write_encryption_config "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
+  assert_success
+  assert_output "${out}"
+  run stat -c '%a' "${out}"
+  assert_output "600"
+  # The key comes from the bundle file, so no key-like literal is in the test.
+  run grep -c -F -- "secret: $(< "${BUNDLE}/encryption-key")" "${out}"
+  assert_output "1"
+
+  rm -f -- "${out}"
+  _fail_chmod_at "${KUBEHZ_HANDOVER_K8S_DIR}/.kubehz-encryption-config.yaml.*"
+  run handover::write_encryption_config "${BUNDLE}" "${KUBEHZ_HANDOVER_K8S_DIR}"
+  assert_failure
+  assert_output --partial "handover: could not write ${out} with mode 600"
+  run find "${KUBEHZ_HANDOVER_K8S_DIR}" -mindepth 1
+  assert_output ""
+}
+
+# An archive can give a dir in it a mode without owner search (0400) or
+# without owner write (0500). The first stops the find after the unpack,
+# and the second keeps its files from rm -rf, so the keys would stay on
+# disk. The owner gets rwx on every dir before the find and before each
+# removal. tar sets the mode of a dir after the entries under it, so the
+# dir entry comes first and its file right after it (--mode sets the mode
+# in the archive only).
+@test "resolve_bundle: dirs that the archive left without owner search or write are checked and removed" {
+  _make_bundle
+  local src="${BATS_TEST_TMPDIR}/src" plain="${BATS_TEST_TMPDIR}/bundle.tar" tarball="${BATS_TEST_TMPDIR}/bundle.tar.gz" wd="${BATS_TEST_TMPDIR}/wd"
+  cp -R "${BUNDLE}" "${src}"
+  mkdir "${src}/noexec" "${src}/nowrite"
+  printf 'held\n' > "${src}/noexec/file"
+  printf 'held\n' > "${src}/nowrite/file"
+  tar -cf "${plain}" -C "${src}" --no-recursion . "${KUBEHZ_HANDOVER_BUNDLE_KEYS[@]/#/./}"
+  tar -rf "${plain}" -C "${src}" --no-recursion --mode=u=r,go= ./noexec
+  tar -rf "${plain}" -C "${src}" --no-recursion ./noexec/file
+  tar -rf "${plain}" -C "${src}" --no-recursion --mode=u=rx,go= ./nowrite
+  tar -rf "${plain}" -C "${src}" --no-recursion ./nowrite/file
+  gzip -c "${plain}" > "${tarball}"
+  run tar -tvzf "${tarball}"
+  assert_line --regexp '^dr-------- .* \./noexec/?$'
+  assert_line --regexp '^dr-x------ .* \./nowrite/?$'
+  mkdir -m 700 "${wd}"
+  run handover::resolve_bundle "${tarball}" "${wd}"
+  assert_success
+  assert_output "${wd}/bundle"
+  run handover::remove_dir "${wd}/bundle"
+  assert_success
+  [ ! -e "${wd}/bundle" ]
+
+  # An unpack that fails after it made the dirs: the dir still goes. The
+  # stub logs the two modes that the real unpack left.
+  tar() {
+    command tar "$@" || return
+    case " $* " in *" -xzf "*) ;; *) return 0 ;; esac
+    local arg prev=""
+    for arg in "$@"; do
+      [[ "${prev}" != "-C" ]] || command stat -c '%a' "${arg}/noexec" "${arg}/nowrite" >> "${CALLS}"
+      prev="${arg}"
+    done
+    return 2
+  }
+  export -f tar
+  run handover::resolve_bundle "${tarball}" "${wd}"
+  assert_failure
+  assert_output --partial "is neither a bundle directory nor a readable .tar.gz archive"
+  refute_output --partial "could not remove"
+  [ ! -e "${wd}/bundle" ]
+  run cat "${CALLS}"
+  assert_output $'400\n500'
+}
+
+# The RETURN trap of receive and preseed (handover::cleanup_cmd) removes a
+# dir that holds a dir without owner write, and a removal that fails names
+# the dir.
+@test "handover: the cleanup trap removes a dir without owner write, and names a dir it cannot remove" {
+  local wd="${BATS_TEST_TMPDIR}/it's a wd"
+  mkdir -p "${wd}/bundle/nowrite"
+  printf 'held\n' > "${wd}/bundle/nowrite/file"
+  chmod 0500 "${wd}/bundle/nowrite"
+  run eval "$(handover::cleanup_cmd "${wd}")"
+  assert_success
+  [ ! -e "${wd}" ]
+
+  mkdir -p "${wd}"
+  rm() { return 1; }
+  export -f rm
+  run handover::remove_dir "${wd}"
+  assert_failure
+  assert_output --partial "handover: could not remove ${wd}, which can hold the bundle's keys. Delete it yourself."
+  unset -f rm
+}
+
+# The listing check parses the -tv format, so it runs in the C locale.
+@test "resolve_bundle: the listing check runs with LC_ALL=C" {
+  _make_bundle
+  local tarball="${BATS_TEST_TMPDIR}/bundle.tar.gz" wd="${BATS_TEST_TMPDIR}/wd"
+  tar -czf "${tarball}" -C "${BUNDLE}" .
+  mkdir -m 700 "${wd}"
+  export LC_ALL=POSIX
+  tar() {
+    case " $* " in *" -tvzf "*) echo "listing LC_ALL=${LC_ALL-}" >> "${CALLS}" ;; esac
+    command tar "$@"
+  }
+  export -f tar
+  run handover::resolve_bundle "${tarball}" "${wd}"
+  assert_success
+  run cat "${CALLS}"
+  assert_output "listing LC_ALL=C"
+}
+
+# A tar that logs each unpack into CALLS, so a test can see that none ran.
+_log_tar_unpacks() {
+  tar() {
+    case " $* " in *" -xzf "*) echo "tar -x $*" >> "${CALLS}" ;; esac
+    command tar "$@"
+  }
+  export -f tar
+}
+
+# resolve_bundle refused <tarball> with the entry-type message before any
+# unpack, removed the bundle dir, and <outside> holds only its "secret".
+_assert_refused_before_unpack() {
+  local tarball="${1}" wd="${2}" outside="${3}"
+  run handover::resolve_bundle "${tarball}" "${wd}"
+  assert_failure
+  assert_output --partial "handover: refusing ${tarball}: an archive entry is not a regular file or a directory (a link, a device or a FIFO)"
+  [ ! -s "${CALLS}" ] || { cat "${CALLS}"; return 1; }
+  [ ! -e "${wd}/bundle" ]
+  run ls -A "${outside}"
+  assert_output "secret"
+  run cat "${outside}/secret"
+  assert_output "outside-secret"
+}
+
+# A link entry can name a file outside the bundle (ca.key -> a secret), and
+# preseed would send that file to the node.
+@test "resolve_bundle: a symlink entry is refused before the unpack, and the dir is removed" {
+  _make_bundle
+  local src="${BATS_TEST_TMPDIR}/src" outside="${BATS_TEST_TMPDIR}/outside" wd="${BATS_TEST_TMPDIR}/wd"
+  local tarball="${BATS_TEST_TMPDIR}/bundle.tar.gz"
+  mkdir -m 700 "${outside}" "${wd}"
+  printf 'outside-secret\n' > "${outside}/secret"
+  cp -R "${BUNDLE}" "${src}"
+  rm "${src}/ca.key"
+  ln -s "${outside}/secret" "${src}/ca.key"
+  tar -czf "${tarball}" -C "${src}" .
+  _log_tar_unpacks
+  _assert_refused_before_unpack "${tarball}" "${wd}" "${outside}"
+}
+
+@test "resolve_bundle: a hardlink entry is refused before the unpack, and the dir is removed" {
+  _make_bundle
+  local src="${BATS_TEST_TMPDIR}/src" outside="${BATS_TEST_TMPDIR}/outside" wd="${BATS_TEST_TMPDIR}/wd"
+  local tarball="${BATS_TEST_TMPDIR}/bundle.tar.gz"
+  mkdir -m 700 "${outside}" "${wd}"
+  printf 'outside-secret\n' > "${outside}/secret"
+  cp -R "${BUNDLE}" "${src}"
+  rm "${src}/sa.key"
+  ln "${src}/ca.key" "${src}/sa.key"
+  tar -czf "${tarball}" -C "${src}" .
+  # The archive holds the hardlink entry under test.
+  run tar -tvzf "${tarball}"
+  assert_line --regexp '^h.* link to '
+  _log_tar_unpacks
+  _assert_refused_before_unpack "${tarball}" "${wd}" "${outside}"
+}
+
+# A symlink to a dir outside, then a file entry through it: a tar that
+# follows links would write the file outside the bundle dir.
+@test "resolve_bundle: a symlink with a file entry through it is refused before the unpack" {
+  local s1="${BATS_TEST_TMPDIR}/s1" s2="${BATS_TEST_TMPDIR}/s2" outside="${BATS_TEST_TMPDIR}/outside" wd="${BATS_TEST_TMPDIR}/wd"
+  local tarball="${BATS_TEST_TMPDIR}/bundle.tar"
+  mkdir -m 700 "${outside}" "${wd}"
+  printf 'outside-secret\n' > "${outside}/secret"
+  mkdir -p "${s1}" "${s2}/x"
+  ln -s "${outside}" "${s1}/x"
+  printf 'pwned\n' > "${s2}/x/payload"
+  tar -cf "${tarball}" -C "${s1}" ./x
+  tar -rf "${tarball}" -C "${s2}" ./x/payload
+  gzip "${tarball}"
+  run tar -tvzf "${tarball}.gz"
+  assert_line --partial "./x -> ${outside}"
+  assert_line --partial "./x/payload"
+  _log_tar_unpacks
+  _assert_refused_before_unpack "${tarball}.gz" "${wd}" "${outside}"
+}
+
+@test "resolve_bundle: a link that the listing does not show is found after the unpack" {
+  # A tar whose -tv listing hides a link (a listing format the check does not
+  # know): the check after the unpack reads the file system itself.
+  _make_bundle
+  local src="${BATS_TEST_TMPDIR}/src" tarball="${BATS_TEST_TMPDIR}/bundle.tar.gz" wd="${BATS_TEST_TMPDIR}/wd"
+  cp -R "${BUNDLE}" "${src}"
+  rm "${src}/ca.key"
+  ln -s ca.crt "${src}/ca.key"
+  tar -czf "${tarball}" -C "${src}" .
+  mkdir -m 700 "${wd}"
+  tar() {
+    case " $* " in
+      *" -tvzf "*) command tar "$@" | sed -e 's/^l/-/' -e 's/ -> .*$//' ;;
+      *) command tar "$@" ;;
+    esac
+  }
+  export -f tar
+  run handover::resolve_bundle "${tarball}" "${wd}"
+  assert_failure
+  assert_output --partial "handover: refusing ${tarball}: an archive entry is not a regular file or a directory (a link, a device or a FIFO)"
+  [ ! -e "${wd}/bundle" ]
+}
+
+# A directory the user gives is read as it is. A key in it that is a link
+# (to a file outside the bundle) is refused before anything reads or sends
+# it: by preseed and by receive, for a required key and an optional one.
+@test "handover receive and preseed: a bundle dir whose key is a link is refused before anything reads it" {
+  _make_bundle
+  _mock_node_binaries
+  ssh() { echo "ssh $*" >> "${CALLS}"; return 0; }
+  scp() { echo "scp $*" >> "${CALLS}"; return 0; }
+  export -f ssh scp
+  local elsewhere="${BATS_TEST_TMPDIR}/elsewhere" key
+  printf 'outside-secret-content\n' > "${elsewhere}"
+  for key in ca.key encryption-provider; do
+    rm -f "${BUNDLE}/${key}"
+    ln -s "${elsewhere}" "${BUNDLE}/${key}"
+    run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7
+    assert_failure
+    assert_output --partial "handover: bundle key ${key} is not a regular file (a link, a directory or a special file): ${BUNDLE}/${key}"
+    run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+    assert_failure
+    assert_output --partial "handover: bundle key ${key} is not a regular file (a link, a directory or a special file): ${BUNDLE}/${key}"
+    refute_output --partial "outside-secret-content"
+    rm -f "${BUNDLE}/${key}"
+    _make_bundle
+  done
+  [ ! -s "${CALLS}" ] || { cat "${CALLS}"; return 1; }
+  [ ! -e "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+}
+
+# A key that is a second name (a hard link) of a file outside the bundle
+# passes the link check, and preseed would send that file. It is refused
+# too, for a required key and an optional one.
+@test "handover receive and preseed: a bundle dir whose key is a hard link is refused before anything reads it" {
+  _make_bundle
+  _mock_node_binaries
+  ssh() { echo "ssh $*" >> "${CALLS}"; return 0; }
+  scp() { echo "scp $*" >> "${CALLS}"; return 0; }
+  export -f ssh scp
+  local elsewhere="${BATS_TEST_TMPDIR}/elsewhere" key
+  printf 'outside-secret-content\n' > "${elsewhere}"
+  for key in ca.key encryption-provider; do
+    rm -f "${BUNDLE}/${key}"
+    ln "${elsewhere}" "${BUNDLE}/${key}"
+    run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7
+    assert_failure
+    assert_output --partial "handover: bundle key ${key} has more than one name (a hard link), so it can be a file outside the bundle: ${BUNDLE}/${key}"
+    run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+    assert_failure
+    assert_output --partial "handover: bundle key ${key} has more than one name (a hard link), so it can be a file outside the bundle: ${BUNDLE}/${key}"
+    refute_output --partial "outside-secret-content"
+    rm -f "${BUNDLE}/${key}"
+    _make_bundle
+  done
+  [ ! -s "${CALLS}" ] || { cat "${CALLS}"; return 1; }
+  [ ! -e "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+}
+
+# Each dir that the bundle's keys land in on this machine is set to 0700:
+# the workdir and the bundle dir of a .tar.gz. A chmod that fails at one of
+# them stops receive and preseed before anything runs, and TMPDIR is empty
+# after.
+@test "handover receive and preseed: a chmod that fails at the workdir or at the bundle dir stops before anything runs" {
+  _make_bundle
+  _mock_node_binaries
+  ssh() { echo "ssh $*" >> "${CALLS}"; return 0; }
+  scp() { echo "scp $*" >> "${CALLS}"; return 0; }
+  export -f ssh scp
+  local tarball="${BATS_TEST_TMPDIR}/bundle.tar.gz" cmd
+  tar -czf "${tarball}" -C "${BUNDLE}" .
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp" FAIL_AT
+  mkdir -m 700 "${TMPDIR}"
+  # The workdir is the dir in TMPDIR (mktemp -d), the bundle dir is in it.
+  chmod() {
+    local p="${*: -1}"
+    case "${FAIL_AT}" in
+      workdir) [[ "${p%/*}" != "${TMPDIR}" ]] || return 1 ;;
+      bundle) [[ "${p}" != "${TMPDIR}"/*/bundle ]] || return 1 ;;
+    esac
+    command chmod "$@"
+  }
+  export -f chmod
+  for FAIL_AT in workdir bundle; do
+    for cmd in receive preseed; do
+      if [[ "${cmd}" == receive ]]; then
+        run handover::receive --bundle "${tarball}" --snapshot "${SNAPSHOT}"
+      else
+        run handover::preseed --bundle "${tarball}" --node 203.0.113.7
+      fi
+      assert_failure
+      assert_output --regexp "handover: cannot set ${TMPDIR}/[^ ]+ to mode 700, so the bundle's keys would not be private in it"
+      run find "${TMPDIR}" -mindepth 1
+      assert_output ""
+      [ ! -s "${CALLS}" ] || { cat "${CALLS}"; return 1; }
+      [ ! -e "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+    done
+  done
+}
+
+# The chmod 600 of each key on the node runs at once after its copy. One
+# that fails stops the handover: no later file goes over the wire.
+# The fetched snapshot is 0600 before its first byte. A chmod that fails
+# there stops the receive before the download and before the restore, and
+# TMPDIR is empty.
+@test "handover receive: a chmod that fails at the fetched snapshot stops before the download" {
+  _make_bundle
+  _mock_node_binaries
+  aws() { echo "aws $*" >> "${CALLS}"; }
+  curl() { echo "curl $*" >> "${CALLS}"; }
+  export -f aws curl
+  export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
+  mkdir -m 700 "${TMPDIR}"
+  _fail_chmod_at "${TMPDIR}/*/kubehz-handover-snapshot.db"
+  local location
+  for location in s3://kubehz-backups/handover/cl-001/snap.db https://backups.example.com/snap.db; do
+    printf '%s' "${location}" > "${BUNDLE}/snapshot-location"
+    run handover::receive --bundle "${BUNDLE}"
+    assert_failure
+    run find "${TMPDIR}" -mindepth 1
+    assert_output ""
+    [ ! -s "${CALLS}" ] || { cat "${CALLS}"; return 1; }
+    [ ! -e "${KUBEHZ_HANDOVER_K8S_DIR}/pki" ]
+  done
+}
+
+@test "handover preseed: a chmod that fails on the node at any key stops the transfer" {
+  _make_bundle
+  local key
+  scp() { echo "scp $*" >> "${CALLS}"; return 0; }
+  export -f scp
+  for key in ca.key sa.key front-proxy-ca.key; do
+    : > "${CALLS}"
+    export FAIL_KEY="${key}"
+    ssh() {
+      echo "ssh $*" >> "${CALLS}"
+      [[ "${*: -1}" != "chmod 600 /etc/kubernetes/pki/${FAIL_KEY}" ]]
+    }
+    export -f ssh
+    run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7
+    assert_failure
+    assert_output --partial "handover: could not chmod 600 /etc/kubernetes/pki/${key} on 203.0.113.7"
+    run tail -n 1 "${CALLS}"
+    assert_output --partial "chmod 600 /etc/kubernetes/pki/${key}"
+  done
+}
+
+@test "handover receive and preseed: a TMPDIR with an apostrophe and a space still loses the workdir" {
+  # The RETURN trap quotes the workdir path (printf %q). Each run fails after
+  # the bundle was unpacked into the workdir.
+  _make_bundle
+  ssh() { echo "ssh $*" >> "${CALLS}"; return 255; }
+  scp() { echo "scp $*" >> "${CALLS}"; return 0; }
+  export -f ssh scp
+  local tarball="${BATS_TEST_TMPDIR}/bundle.tar.gz"
+  tar -czf "${tarball}" -C "${BUNDLE}" .
+  export TMPDIR="${BATS_TEST_TMPDIR}/it's a tmp"
+  mkdir -m 700 "${TMPDIR}"
+  run handover::preseed --bundle "${tarball}" --node 203.0.113.7
+  assert_failure
+  assert_output --partial "cannot reach"
+  run handover::receive --bundle "${tarball}" --snapshot "${BATS_TEST_TMPDIR}/no-such-snapshot"
+  assert_failure
+  assert_output --partial "--snapshot file not found"
+  run find "${TMPDIR}" -mindepth 1
+  assert_success
+  assert_output ""
+}
+
+@test "handover receive and preseed: a workdir that is not 0700 fails before anything else" {
+  _make_bundle
+  _mock_node_binaries
+  ssh() { echo "ssh $*" >> "${CALLS}"; return 0; }
+  scp() { echo "scp $*" >> "${CALLS}"; return 0; }
+  # mktemp gives an open dir, and chmod cannot close it (a file system that
+  # ignores file modes).
+  mktemp() {
+    local d="${BATS_TEST_TMPDIR}/open.${RANDOM}${RANDOM}"
+    mkdir -m 755 "${d}" && echo "${d}"
+  }
+  chmod() { :; }
+  export -f ssh scp mktemp chmod
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "has mode 755, not 700"
+  run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7
+  assert_failure
+  assert_output --partial "has mode 755, not 700"
+  # Nothing reached the node, and the RETURN trap removed both dirs.
+  [ ! -s "${CALLS}" ]
+  run compgen -G "${BATS_TEST_TMPDIR}/open.*"
+  assert_failure
 }
 
 # ── receive: the full kubeadm path against a sandbox ─────
@@ -231,6 +815,43 @@ _mock_node_binaries() {
   assert_output --partial "secret: dGVzdC1lbmNyeXB0aW9uLWtleQ=="
   run stat -c '%a' "${enc}"
   assert_output "600"
+}
+
+@test "handover receive: the kubeadm config gives the init bootstrap token a TTL of 1 h" {
+  # kubeadm init creates its bootstrap token with a TTL of 24 h by default.
+  # No later step of the handover uses the token, so it ends after 1 h.
+  _make_bundle
+  _mock_node_binaries
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+  local cfg="${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml"
+  run cat "${cfg}"
+  assert_output --partial "---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+bootstrapTokens:
+  - ttl: 1h0m0s"
+  # One TTL only: no second token, and no 0 (a token that never expires).
+  run grep -c 'ttl:' "${cfg}"
+  assert_output "1"
+}
+
+@test "handover receive: the kubeadm config equals the golden that the Go suite reads" {
+  # internal/kubehz/testdata/golden/kubeadm-config.yaml pins the Go render
+  # (TestHandoverReceiveGeneratedConfigsMatchBashGoldens). The bash render
+  # must be the same bytes, with /etc/kubernetes for the test dir.
+  _make_bundle
+  _mock_node_binaries
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+  local got="${BATS_TEST_TMPDIR}/kubeadm-config.got" cfg
+  local want="${_PROJECT_ROOT}/internal/kubehz/testdata/golden/kubeadm-config.yaml"
+  # "$(cat …; printf x)" keeps the trailing newlines that "$(< …)" strips,
+  # so cmp sees every byte.
+  cfg="$(cat "${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml" && printf x)"
+  cfg="${cfg%x}"
+  printf '%s' "${cfg//"${KUBEHZ_HANDOVER_K8S_DIR}"//etc/kubernetes}" > "${got}"
+  cmp -- "${want}" "${got}" || { diff -- "${want}" "${got}"; return 1; }
 }
 
 @test "handover receive: --single-node untaints via the LOCAL apiserver, not the pre-cutover DNS" {
@@ -550,11 +1171,11 @@ _mock_node_binaries() {
 @test "handover receive: PKI placement + encryption-config write happen BEFORE kubeadm init" {
   _make_bundle
   _mock_node_binaries
-  # Make place_pki (cp) and write_encryption_config (its chmod 600) observable
-  # in the shared CALLS log — thin pass-through wrappers over the real tools.
-  cp() { echo "cp $*" >> "${CALLS}"; command cp "$@"; }
-  chmod() { echo "chmod $*" >> "${CALLS}"; command chmod "$@"; }
-  export -f cp chmod
+  # Make place_pki and write_encryption_config observable in the shared
+  # CALLS log: each file goes in with a rename (handover::install_file), and
+  # a thin pass-through wrapper over the real mv logs it.
+  mv() { echo "mv $*" >> "${CALLS}"; command mv "$@"; }
+  export -f mv
 
   run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
   assert_success
@@ -567,14 +1188,14 @@ _mock_node_binaries() {
   # kubeadm must find them to REUSE (not re-mint) the identity.
   local key pki_line
   for key in ca.crt ca.key sa.pub sa.key front-proxy-ca.crt front-proxy-ca.key; do
-    pki_line=$(grep -n "^cp ${BUNDLE}/${key} " "${CALLS}" | head -1 | cut -d: -f1)
-    [ -n "${pki_line}" ] || { echo "no cp recorded for ${key}" >&2; return 1; }
+    pki_line=$(grep -n -F -- " ${KUBEHZ_HANDOVER_K8S_DIR}/pki/${key}" "${CALLS}" | grep -E '^[0-9]+:mv ' | head -1 | cut -d: -f1)
+    [ -n "${pki_line}" ] || { echo "no rename recorded for ${key}" >&2; return 1; }
     [ "${pki_line}" -lt "${init_line}" ] || { echo "${key} placed AFTER kubeadm init" >&2; return 1; }
   done
 
-  # …and so is the EncryptionConfiguration (its 0600 tighten is the marker).
+  # …and so is the EncryptionConfiguration.
   local enc_line
-  enc_line=$(grep -n '^chmod 600 .*kubehz-encryption-config.yaml' "${CALLS}" | head -1 | cut -d: -f1)
+  enc_line=$(grep -n -F -- " ${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-encryption-config.yaml" "${CALLS}" | grep -E '^[0-9]+:mv ' | head -1 | cut -d: -f1)
   [ -n "${enc_line}" ]
   [ "${enc_line}" -lt "${init_line}" ]
 }
@@ -843,8 +1464,145 @@ _mock_node_binaries() {
   run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7
   assert_failure
   assert_output --partial "cannot reach"
+  assert_output --partial "handover: an unknown or changed host key also fails here. Compare the fingerprints of \"ssh-keyscan -p 22 203.0.113.7 | ssh-keygen -lf -\" with \"ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub\" on the node's console, and add the key to the known_hosts file if they match."
+  assert_output --partial "Or retry with --accept-new-host-key to trust the first contact."
   run grep -c '^scp ' "${CALLS}"
   assert_output "0"
+
+  # With the opt-in an unknown key cannot fail the first call; a changed one can.
+  run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7 --accept-new-host-key
+  assert_failure
+  assert_output --partial "handover: a changed host key also fails here; check the node and the known_hosts entry before you retry"
+  refute_output --partial "Or retry with --accept-new-host-key"
+  run grep -c '^scp ' "${CALLS}"
+  assert_output "0"
+}
+
+@test "handover preseed: every ssh and scp checks the host key, never accept-new, no or /dev/null" {
+  # The scp calls carry the CA private keys. An unknown or a changed key
+  # fails before a key leaves this machine (StrictHostKeyChecking=yes).
+  _make_bundle
+  ssh() { echo "ssh $*" >> "${CALLS}"; return 0; }
+  scp() { echo "scp $*" >> "${CALLS}"; return 0; }
+  ssh-keygen() { echo "ssh-keygen $*" >> "${CALLS}"; return 0; }
+  export -f ssh scp ssh-keygen
+  local kh="${BATS_TEST_TMPDIR}/known_hosts" line n=0
+  : > "${kh}"
+
+  run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7 --known-hosts "${kh}"
+  assert_success
+  refute_output --partial "--accept-new-host-key: the first contact"
+  # 1 mkdir, 6 scp and 3 chmod, and no record check: the loop below sees
+  # every call.
+  run grep -c . "${CALLS}"
+  assert_output "10"
+  while IFS= read -r line; do
+    [[ "${line}" == "ssh -o StrictHostKeyChecking=yes "* || "${line}" == "scp -o StrictHostKeyChecking=yes "* ]] || { echo "not yes: ${line}"; return 1; }
+    [[ "${line}" == *"-o UserKnownHostsFile=${kh} "* ]] || { echo "no known_hosts file: ${line}"; return 1; }
+    [[ "${line}" != *accept-new* && "${line}" != *"StrictHostKeyChecking=no"* && "${line}" != *"/dev/null"* ]] || { echo "host key not checked: ${line}"; return 1; }
+    # A master connection of the user's ssh config never carries a call.
+    [[ "${line}" == *" -o ControlMaster=no "* && "${line}" == *" -o ControlPath=none "* ]] || { echo "connection reuse not off: ${line}"; return 1; }
+    n=$(( n + 1 ))
+  done < "${CALLS}"
+  [ "${n}" -eq 10 ]
+  # The first call makes the pki dir 0700 before any key goes out.
+  run head -n 1 "${CALLS}"
+  assert_output --regexp "^ssh .*'?umask 077 && mkdir -p /etc/kubernetes/pki && chmod 0700 /etc/kubernetes/pki'?\$"
+
+  # Without --known-hosts, ssh uses its own known_hosts files.
+  : > "${CALLS}"
+  run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7
+  assert_success
+  run grep -c -- '-o StrictHostKeyChecking=yes ' "${CALLS}"
+  assert_output "10"
+  run grep -c -e 'UserKnownHostsFile' -e 'accept-new' -e '^ssh-keygen ' "${CALLS}"
+  assert_output "0"
+}
+
+@test "handover preseed: --accept-new-host-key trusts the first call only, then checks the record" {
+  # The first call (the mkdir, no key on it) can record an unknown key. The
+  # handover then asks ssh-keygen for that record, and every later call (the
+  # scp calls with the keys) checks against it.
+  _make_bundle
+  ssh() { echo "ssh $*" >> "${CALLS}"; return 0; }
+  scp() { echo "scp $*" >> "${CALLS}"; return 0; }
+  ssh-keygen() { echo "ssh-keygen $*" >> "${CALLS}"; return 0; }
+  export -f ssh scp ssh-keygen
+  local kh="${BATS_TEST_TMPDIR}/known_hosts" line
+  : > "${kh}"
+
+  run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7 --known-hosts "${kh}" --accept-new-host-key
+  assert_success
+  [ "$(grep -c -F "handover: --accept-new-host-key: the first contact trusts the host key that 203.0.113.7 shows, without a check" <<<"${output}")" -eq 1 ]
+  local -a lines
+  mapfile -t lines < "${CALLS}"
+  # 1 mkdir, 1 record check, 6 scp and 3 chmod.
+  [ "${#lines[@]}" -eq 11 ]
+  [[ "${lines[0]}" == "ssh -o StrictHostKeyChecking=accept-new "*"umask 077 && mkdir -p /etc/kubernetes/pki && chmod 0700 /etc/kubernetes/pki" ]]
+  [ "${lines[1]}" = "ssh-keygen -F 203.0.113.7 -f ${kh}" ]
+  for line in "${lines[@]:2}"; do
+    [[ "${line}" == "ssh -o StrictHostKeyChecking=yes "* || "${line}" == "scp -o StrictHostKeyChecking=yes "* ]] || { echo "not yes: ${line}"; return 1; }
+    [[ "${line}" != *accept-new* ]] || { echo "accept-new after the first call: ${line}"; return 1; }
+  done
+
+  # ssh's own file, a node on port 2222, a name with capitals: ssh records
+  # it as [node]:port in lowercase.
+  : > "${CALLS}"
+  export HOME="${BATS_TEST_TMPDIR}/home"
+  run handover::preseed --bundle "${BUNDLE}" --node Node.Example --port 2222 --accept-new-host-key
+  assert_success
+  run grep '^ssh-keygen ' "${CALLS}"
+  assert_output "ssh-keygen -F [node.example]:2222 -f ${HOME}/.ssh/known_hosts"
+}
+
+@test "handover preseed: --accept-new-host-key with a key that ssh did not record fails closed before any scp" {
+  # ssh could not write the file, for example: the later calls would have
+  # no record to check the key against.
+  _make_bundle
+  ssh() { echo "ssh $*" >> "${CALLS}"; return 0; }
+  scp() { echo "scp $*" >> "${CALLS}"; return 0; }
+  ssh-keygen() { echo "ssh-keygen $*" >> "${CALLS}"; return 1; }
+  export -f ssh scp ssh-keygen
+  local kh="${BATS_TEST_TMPDIR}/known_hosts"
+  : > "${kh}"
+  run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7 --known-hosts "${kh}" --accept-new-host-key
+  assert_failure
+  assert_output --partial "handover: the host key of 203.0.113.7 is not in ${kh} after the first contact, so the next calls could not check it."
+  run grep -c '^ssh ' "${CALLS}"
+  assert_output "1"
+  run grep -c '^scp ' "${CALLS}"
+  assert_output "0"
+}
+
+@test "handover preseed: a --known-hosts that is missing, /dev/null, a dir, a FIFO or a device is refused before any ssh" {
+  # Such a path holds no key to check against, and ssh cannot record one in it.
+  _make_bundle
+  ssh() { echo "ssh $*" >> "${CALLS}"; return 0; }
+  scp() { echo "scp $*" >> "${CALLS}"; return 0; }
+  export -f ssh scp
+  local fifo="${BATS_TEST_TMPDIR}/fifo" dir="${BATS_TEST_TMPDIR}/kh-dir" link="${BATS_TEST_TMPDIR}/kh-link" path
+  mkfifo "${fifo}"
+  mkdir "${dir}"
+  ln -s /dev/null "${link}"
+  for path in "${BATS_TEST_TMPDIR}/missing" /dev/null "${dir}" "${fifo}" /dev/zero "${link}"; do
+    run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7 --known-hosts "${path}" --accept-new-host-key
+    assert_failure
+    assert_output --partial "handover: --known-hosts must name an existing regular file that you can read: \"${path}\""
+  done
+  [ ! -s "${CALLS}" ]
+}
+
+@test "handover preseed: a --known-hosts path with whitespace is refused before any ssh" {
+  # ssh splits the value of -o UserKnownHostsFile on whitespace, so the file
+  # it reads would not be the file the caller named.
+  _make_bundle
+  ssh() { echo "ssh $*" >> "${CALLS}"; return 0; }
+  scp() { echo "scp $*" >> "${CALLS}"; return 0; }
+  export -f ssh scp
+  run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7 --known-hosts "${BATS_TEST_TMPDIR}/known hosts"
+  assert_failure
+  assert_output --partial "handover: --known-hosts path must not contain whitespace: \"${BATS_TEST_TMPDIR}/known hosts\""
+  [ ! -s "${CALLS}" ]
 }
 
 # ── `lo kubehz assess` pretty-printer ────────────────────

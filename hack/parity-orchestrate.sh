@@ -223,16 +223,19 @@ check - status --domain alpha.dev                  # targets listed, built, stal
 : > "${PROJ}/.tilt.pid"
 check - status --domain alpha.dev                  # empty pidfile
 rm -f "${PROJ}/.tilt.pid"
-# A gone cluster with its kubeconfig left behind, as after `lo down`
-# (issue #194): the driver says NotFound and both kubectl reads still run.
-# This stub prints its arguments, so the diff also compares the
-# --request-timeout=5s of the node read in the two twins. Then it fails,
-# as an API server that does not answer.
+# A kubeconfig left behind, as after `lo down` (issue #194): the driver
+# says NotFound, and the /readyz probe still runs. This stub passes the
+# probe, then prints its arguments and fails each read, so both twins run
+# the two reads. The Nodes section shows the arguments of the node read
+# (the harness compares the read arguments of both twins), then the same
+# `(not reachable)` line. The failed inventory read prints nothing.
 mkdir -p "${PROJ}/.kubeconfig"
 printf 'apiVersion: v1\n' > "${PROJ}/.kubeconfig/sharedc.yaml"
 parity::stub "${PROJ}" kubectl <<'SH'
 #!/usr/bin/env bash
-# Parity stub: print the arguments, then fail (no live cluster is reached).
+# Parity stub: pass the /readyz probe; print the arguments of any other
+# call, then fail (no live cluster is reached).
+case "$*" in 'get --raw /readyz '*) echo ok; exit 0 ;; esac
 echo "stub: kubectl $*"
 exit 1
 SH
@@ -496,6 +499,17 @@ layoutempty.dev|holds an empty YAML document before the spec\. Remove line 2 \(a
 layouttwo.dev|holds more than one YAML document\. Remove lines 11 to 12 \(the '---' at line 11 and everything after it\)\.
 LAYOUT
 unset PARITY_KIND_LOG PARITY_DOCKER_LOG
+# The other Lo-driver gates read the same layout: `registry status` and
+# `image list` refuse layouttwo.dev with the same [error] line.
+layout_two="/clusters/layouttwo\.dev/cluster\.lok8s\.yaml holds more than one YAML document\. Remove lines 11 to 12 \(the '---' at line 11 and everything after it\)\.$"
+check - registry status --domain layouttwo.dev
+for side in bash go; do
+  node_pin "${side}: registry status refuses layouttwo.dev with the layout" "${WORK}/${side}.err" 1 "${layout_two}"
+done
+check - image list --domain layouttwo.dev
+for side in bash go; do
+  node_pin "${side}: image list refuses layouttwo.dev with the layout" "${WORK}/${side}.err" 1 "${layout_two}"
+done
 
 # ── lo up — spec.network.dnsSearch ───────────────────────────────────────────
 # dns.dev sets a search list, dnsalias.dev an anchored list with aliased

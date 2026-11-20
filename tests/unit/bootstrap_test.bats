@@ -4473,9 +4473,16 @@ _dry_plugin_stopped() {
 # grace makes the check send KILL to a plugin that ignores TERM. Every
 # signal goes to the plugin or to the check, and the watchdog sends no USR1
 # (the stop came before the time limit).
+# The test reads the first signal that goes to the plugin, not the first
+# line of the log. The test waits only until the plugin runs, so its TERM
+# can come before the check sets its stop traps. The check then only notes
+# the TERM, and when the traps are set, it sends the TERM again to itself
+# (addons::dry_run_boundary). That TERM runs the stop, which sends TERM to
+# the plugin. So one TERM of the check to itself can come before the TERM
+# to the plugin, and no other signal can.
 @test "the dry run's plugin check stop sends TERM to the plugin first and no signal to the watchdog" {
   _dry_need_clock
-  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m" b="${BATS_TEST_TMPDIR}/b" log="${BATS_TEST_TMPDIR}/kills" start job rc pid sub i
+  local plugin="${KUSTOMIZE_PLUGIN_HOME}/secrets.lok8s.dev/v1/secret/Secret" m="${BATS_TEST_TMPDIR}/m" b="${BATS_TEST_TMPDIR}/b" log="${BATS_TEST_TMPDIR}/kills" start job rc pid sub i first
   _ADDONS_DRYRUN_CHECK_GRACE=1
   mkdir -p "${m}" "${b}"
   : > "${log}"
@@ -4492,7 +4499,10 @@ _dry_plugin_stopped() {
   wait "${job}" 2>/dev/null || rc=$?
   unset -f kill
   (( rc == 143 )) || { echo "the check returned ${rc}, want 143: $(<"${b}.out")"; return 1; }
-  [[ "$(head -n 1 "${log}")" == "${sub} -TERM ${pid}" ]] || { echo "the stop's first signal is not TERM to the plugin: $(tr '\n' ' ' < "${log}")"; return 1; }
+  first=$(awk -v p="${pid}" '$3 == p { print; exit }' "${log}")
+  [[ "${first}" == "${sub} -TERM ${pid}" ]] || { echo "the stop's first signal to the plugin is not TERM from the check: $(tr '\n' ' ' < "${log}")"; return 1; }
+  ! awk -v p="${pid}" -v s="${sub}" '$3 == p { exit } { n++; if ($0 != s " -TERM " s) bad = 1 } END { exit !(bad || n > 1) }' "${log}" \
+    || { echo "a signal other than one TERM of the check to itself came before the TERM to the plugin: $(tr '\n' ' ' < "${log}")"; return 1; }
   grep -qx -- "${sub} -KILL ${pid}" "${log}" || { echo "the check sent no KILL after the grace: $(tr '\n' ' ' < "${log}")"; return 1; }
   ! awk -v p="${pid}" -v s="${sub}" '$3 != p && $3 != s { bad = 1 } END { exit !bad }' "${log}" \
     || { echo "a signal went to a process that is neither the plugin nor the check (the watchdog): $(tr '\n' ' ' < "${log}")"; return 1; }

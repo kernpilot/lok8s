@@ -72,23 +72,31 @@ func TestBuildClusterPayloadDefaults(t *testing.T) {
 	}
 }
 
-// Issue #272: an unset spec.kubernetes.version (no key, a YAML null, an
-// empty string) is left out of the payload, not sent as the string "null";
-// a set version is sent as written. Bash twin: the build_cluster_payload
-// version cases in tests/unit/kubehz_hosted_test.bats (same bytes).
+// Issue #272: an unset spec.kubernetes.version (no key, a YAML null, false,
+// an empty string) is left out of the payload, not sent as the string
+// "null" or "false"; a set version is sent as written, a number as its
+// text in a JSON string. Bash twin: the build_cluster_payload version cases
+// in tests/unit/kubehz_hosted_test.bats. Bash prints the payload pretty, so
+// that test compares the compact form (`jq -c`) with the same strings.
 func TestBuildClusterPayloadKubernetesVersion(t *testing.T) {
 	t.Parallel()
 	const unset = `{"domain":"test.kubehz.dev","kind":"KubeOne","provider":"hetzner","region":"fsn1","controlPlaneReplicas":1,"hosting":"hosted","access":"none"}`
+	withVersion := func(v string) string {
+		return `{"domain":"test.kubehz.dev","kind":"KubeOne","provider":"hetzner","region":"fsn1","kubernetesVersion":"` + v + `","controlPlaneReplicas":1,"hosting":"hosted","access":"none"}`
+	}
 	cases := []struct {
-		name, block, want string
+		name, block string
+		version     string // the kubernetesVersion sent; "" = the key is left out
 	}{
-		{"no key", "", unset},
-		{"null", "  kubernetes:\n    version: null\n", unset},
-		{"tilde", "  kubernetes:\n    version: ~\n", unset},
-		{"no value", "  kubernetes:\n    version:\n", unset},
-		{"empty string", "  kubernetes:\n    version: \"\"\n", unset},
-		{"set", "  kubernetes:\n    version: v1.31.10\n",
-			`{"domain":"test.kubehz.dev","kind":"KubeOne","provider":"hetzner","region":"fsn1","kubernetesVersion":"v1.31.10","controlPlaneReplicas":1,"hosting":"hosted","access":"none"}`},
+		{"no key", "", ""},
+		{"null", "  kubernetes:\n    version: null\n", ""},
+		{"tilde", "  kubernetes:\n    version: ~\n", ""},
+		{"no value", "  kubernetes:\n    version:\n", ""},
+		{"empty string", "  kubernetes:\n    version: \"\"\n", ""},
+		{"false", "  kubernetes:\n    version: false\n", ""},
+		{"zero", "  kubernetes:\n    version: 0\n", "0"},
+		{"a number", "  kubernetes:\n    version: 1.30\n", "1.30"},
+		{"set", "  kubernetes:\n    version: v1.31.10\n", "v1.31.10"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,20 +104,59 @@ func TestBuildClusterPayloadKubernetesVersion(t *testing.T) {
 			spec := filepath.Join(t.TempDir(), "spec.yaml")
 			testutil.WriteFile(t, spec, "kind: KubeOne\nspec:\n  cluster:\n    domain: test.kubehz.dev\n"+tc.block+"  kubehz:\n    hosting: hosted\n")
 			got := buildClusterPayload(spec)
-			if string(got) != tc.want {
-				t.Fatalf("payload:\n got %s\nwant %s", got, tc.want)
+			want := unset
+			if tc.version != "" {
+				want = withVersion(tc.version)
+			}
+			if string(got) != want {
+				t.Fatalf("payload:\n got %s\nwant %s", got, want)
 			}
 			var m map[string]any
 			if err := json.Unmarshal(got, &m); err != nil {
 				t.Fatalf("payload not JSON: %s", got)
 			}
 			v, present := m["kubernetesVersion"]
-			if tc.name == "set" {
-				if !present || v != "v1.31.10" {
-					t.Fatalf("kubernetesVersion = %v (present %v), want v1.31.10", v, present)
+			if tc.version != "" {
+				if !present || v != tc.version {
+					t.Fatalf("kubernetesVersion = %v (present %v), want the string %q", v, present, tc.version)
 				}
 			} else if present {
 				t.Fatalf("kubernetesVersion is present (%v), want it left out", v)
+			}
+		})
+	}
+}
+
+// A hosted spec with no spec.kubernetes.version is refused before any
+// request: the platform needs the version (it answers HTTP 400, a missing
+// field). No request reaches the api, and no kubeconfig is written. Bash
+// twin: the provision_hosted refusal case in
+// tests/unit/kubehz_hosted_test.bats.
+func TestProvisionHostedRefusesASpecWithNoVersion(t *testing.T) {
+	t.Parallel()
+	for name, block := range map[string]string{
+		"no key":       "",
+		"null":         "  kubernetes:\n    version: null\n",
+		"false":        "  kubernetes:\n    version: false\n",
+		"empty string": "  kubernetes:\n    version: \"\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			spec := h.writeSpec("test.kubehz.dev", "kind: KubeOne\nmetadata:\n  name: test.kubehz.dev\nspec:\n  cluster:\n    domain: test.kubehz.dev\n"+block+"  kubehz:\n    hosting: hosted\n    apiUrl: "+h.apiURL()+"\n")
+			// The routes of a create that works: without the refusal, the
+			// provision would succeed and write the kubeconfig.
+			hostedKubeconfigRoutes(h, 200, "new\n")
+			mustErr(t, h.ctx.ProvisionHosted(t.Context(), &Config{APIURL: h.apiURL()}, "test.kubehz.dev", spec))
+			want := "[error] kubehz: spec.kubernetes.version is not set in " + spec + ". A hosted cluster needs a Kubernetes version, so no cluster was created. Set it, then run the command again.\n"
+			if got := h.output(); got != want {
+				t.Fatalf("output:\n got %q\nwant %q", got, want)
+			}
+			if reqs := h.reqs(); len(reqs) != 0 {
+				t.Fatalf("requests reached the api: %+v", reqs)
+			}
+			if _, err := os.Stat(filepath.Join(h.base, ".kubeconfig", "test.kubehz.dev.yaml")); !os.IsNotExist(err) {
+				t.Fatalf("a kubeconfig was written (stat: %v)", err)
 			}
 		})
 	}

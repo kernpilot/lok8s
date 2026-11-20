@@ -167,3 +167,35 @@ func TestRequireDriverNamesTheSpecLayout(t *testing.T) {
 		}
 	}
 }
+
+// A directory in place of cluster.lok8s.yaml is no cluster spec (bash
+// `[[ -f ]]`). Without a deploy.lok8s.yaml the gate gives the
+// no-readable-spec refusal. With one beside it, the domain is a deploy
+// domain. Bash twin: the require_driver directory case in
+// tests/unit/domain_resolve_test.bats.
+func TestRequireDriverSpecIsADirectory(t *testing.T) {
+	t.Parallel()
+	clusters := t.TempDir()
+	for _, d := range []string{"dir.dev", "dirdeploy.dev"} {
+		if err := os.MkdirAll(filepath.Join(clusters, d, "cluster.lok8s.yaml"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testutil.WriteFile(t, filepath.Join(clusters, "dirdeploy.dev", "deploy.lok8s.yaml"), "kind: Deploy\n")
+
+	if got, err := Driver(clusters, "dirdeploy.dev"); err != nil || got != "deploy" {
+		t.Errorf("Driver(dirdeploy.dev) = %q, %v; want deploy", got, err)
+	}
+	for d, want := range map[string]string{
+		"dir.dev":       "error: domain 'dir.dev' has no readable cluster/deploy spec under clusters/ — cannot run registry management\n",
+		"dirdeploy.dev": "error: domain 'dirdeploy.dev' uses the 'deploy' driver — registry management is a 'lo'-driver (local cluster) feature.\n       Pass --domain <a-lo-domain> or switch with 'lo use <domain>'.\n",
+	} {
+		var buf bytes.Buffer
+		if err := RequireDriver("lo", clusters, d, "registry management", &buf); err == nil || IsSpecLayout(err) {
+			t.Errorf("%s: err = %v, want the driver refusal", d, err)
+		}
+		if buf.String() != want {
+			t.Errorf("%s: message = %q, want %q", d, buf.String(), want)
+		}
+	}
+}
