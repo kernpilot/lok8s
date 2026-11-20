@@ -51,7 +51,7 @@ const (
 	rbacSUCAddon        = "system-upgrade-controller"
 	rbacSUCAdminAddon   = "system-upgrade-controller-cluster-admin"
 	rbacRedisAddon      = "redis-operator"
-	rbacRedisChartAddon = "redis-operator-chart-rbac"
+	rbacRedisChartAddon = "redis-operator-chart-rbac" // #nosec G101 -- an addon name, not a credential
 )
 
 // The ServiceAccounts as the addons render them (kind, name, namespace).
@@ -67,13 +67,13 @@ var (
 // reports an old binding under any name, so a binding from an older
 // upstream manifest (system-upgrade, roleRef cluster-admin) counts too.
 const (
-	rbacSUCNewRole      = "lok8s-system-upgrade-controller"
-	rbacRedisOldRole    = "redis-operator"
-	rbacRedisNewRole    = "lok8s-redis-operator"
-	rbacRedisChartRole  = "lok8s-redis-operator-chart-rbac" // #nosec G101 -- a role name, not a credential
-	rbacRedisExecRole   = "lok8s-redis-operator-exec"       // #nosec G101 -- a role name, not a credential
-	rbacClusterAdmin    = "cluster-admin"                   // #nosec G101 -- a role name, not a credential
-	rbacAggregatePrefix = "rbac.authorization.k8s.io/aggregate-to-"
+	rbacSUCNewRole      = "lok8s-system-upgrade-controller"         // #nosec G101 -- a role name, not a credential
+	rbacRedisOldRole    = "redis-operator"                          // #nosec G101 -- a role name, not a credential
+	rbacRedisNewRole    = "lok8s-redis-operator"                    // #nosec G101 -- a role name, not a credential
+	rbacRedisChartRole  = "lok8s-redis-operator-chart-rbac"         // #nosec G101 -- a role name, not a credential
+	rbacRedisExecRole   = "lok8s-redis-operator-exec"               // #nosec G101 -- a role name, not a credential
+	rbacClusterAdmin    = "cluster-admin"                           // #nosec G101 -- a role name, not a credential
+	rbacAggregatePrefix = "rbac.authorization.k8s.io/aggregate-to-" // #nosec G101 -- a label prefix, not a credential
 )
 
 // rbacReadTimeout is the --request-timeout of each read. rbacReadBound
