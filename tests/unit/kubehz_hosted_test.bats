@@ -1374,20 +1374,35 @@ _dir_refused() {
     unread) printf '[error] Cannot read the owner and the mode of the directory %s: nothing is written' "${2}" ;;
     link) printf '[error] The link %s belongs to uid %s, not to this user or to root, so another user can point it at a file of this user: nothing is written. Remove the link, or use a path of your own.' "${2}" "${3}" ;;
     linkread) printf '[error] Cannot read the owner of the link %s: nothing is written' "${2}" ;;
+    lstat) printf '[error] Cannot read the path %s: nothing is written' "${2}" ;;
     resolve) printf '[error] Cannot resolve the symlink %s' "${2}" ;;
   esac
 }
 
 # _link_owner_ls <path> <uid>: replace ls with a function that gives, for
 # ls -ldn <path> (the owner of the link itself), the line of a link of
-# <uid> (gid 5353), and no line when <uid> is empty. Any other call runs
-# ls.
+# <uid> (gid 5353). A <uid> that is not a number is an owner that the
+# check cannot read. Any other call runs ls.
 _link_owner_ls() {
   FAKE_LINK="${1}" FAKE_LINK_UID="${2}"
   ls() {
     if [[ "${1}" == -ldn && "${!#}" == "${FAKE_LINK}" ]]; then
-      [[ -z "${FAKE_LINK_UID}" ]] || printf 'lrwxrwxrwx 1 %s 5353 9 Nov 20 08:00 %s -> x\n' "${FAKE_LINK_UID}" "${FAKE_LINK}"
+      printf 'lrwxrwxrwx 1 %s 5353 9 Nov 20 08:00 %s -> x\n' "${FAKE_LINK_UID}" "${FAKE_LINK}"
       return 0
+    fi
+    command ls "$@"
+  }
+}
+
+# _lstat_error_ls <path> <error>: replace ls with a function that fails
+# for ls -ldn <path> with the error line of GNU ls for <error>. Any other
+# call runs ls.
+_lstat_error_ls() {
+  FAKE_LINK="${1}" FAKE_ERR="${2}"
+  ls() {
+    if [[ "${1}" == -ldn && "${!#}" == "${FAKE_LINK}" ]]; then
+      printf "ls: cannot access '%s': %s\n" "${FAKE_LINK}" "${FAKE_ERR}" >&2
+      return 2
     fi
     command ls "$@"
   }
@@ -1621,6 +1636,47 @@ _link_owner_ls() {
   unset -f ls
 }
 
+# The lookup of the directory tells "not there" (ENOENT) from an error
+# (kubehz::_lstat_line). ls is faked for ls -ldn of a directory that is
+# not there, with a parent that this user can search: an error line of
+# another cause (EIO, ESTALE, EACCES) is refused, because the directory
+# can be there. The ENOENT line of GNU and of BSD passes. An error output
+# of more than one line is refused. Before, -e and -L were false on each
+# error, and the check passed. Go twin: privateDirRefusal reads the error
+# of os.Stat.
+@test "kubehz::_private_dir_ok refuses a lookup error other than not there" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local d="${BATS_TEST_TMPDIR}/lookup/kube" err
+  mkdir -p "${BATS_TEST_TMPDIR}/lookup"
+  FAKE_DIR="${d}"
+  ls() {
+    if [[ "${1}" == -ldn && "${!#}" == "${FAKE_DIR}" ]]; then
+      printf '%s\n' "${FAKE_ERR}" >&2
+      return 2
+    fi
+    command ls "$@"
+  }
+  for err in "Input/output error" "Stale file handle" "Permission denied"; do
+    FAKE_ERR="ls: cannot access '${d}': ${err}"
+    run kubehz::_private_dir_ok "${d}"
+    assert_failure
+    assert_output "$(_dir_refused unread "${d}")"
+  done
+  FAKE_ERR="ls: cannot access '${d}': No such file or directory"
+  run kubehz::_private_dir_ok "${d}"
+  assert_success
+  assert_output ""
+  FAKE_ERR="ls: ${d}: No such file or directory"
+  run kubehz::_private_dir_ok "${d}"
+  assert_success
+  assert_output ""
+  FAKE_ERR=$'ls: cannot access \'a\nb\': No such file or directory'
+  run kubehz::_private_dir_ok "${d}"
+  assert_failure
+  assert_output "$(_dir_refused unread "${d}")"
+  unset -f ls
+}
+
 # In a directory with the sticky bit, another user can put a link at the
 # name of the file, to a file of this user: the rename would replace that
 # file. So each link that the name follows must belong to this user or to
@@ -1647,7 +1703,7 @@ _link_owner_ls() {
   run kubehz::_write_private "${d}/kc.yaml" touch "${ran}"
   assert_failure
   assert_output "$(_dir_refused link "${d}/hop" 4242)"
-  _link_owner_ls "${d}/hop" ""
+  _link_owner_ls "${d}/hop" someone
   run kubehz::_private_target "${d}/kc.yaml"
   assert_failure
   assert_output "$(_dir_refused linkread "${d}/hop")"
@@ -1656,7 +1712,7 @@ _link_owner_ls() {
   _link_owner_ls "${d}/hop" 0
   run kubehz::_private_target "${d}/kc.yaml"
   assert_success
-  assert_output "$(readlink -f "${d}/home.rc")"
+  assert_output "${d}/home.rc"
   unset -f ls
   run kubehz::_write_private "${d}/kc.yaml" printf new
   assert_success
@@ -1665,6 +1721,163 @@ _link_owner_ls() {
   [ "$(stat -c %a "${d}/home.rc")" = 600 ]
   [ -L "${d}/kc.yaml" ]
   [ -L "${d}/hop" ]
+}
+
+# A lookup of a name of the chain that fails for a cause other than "not
+# there" (EIO, ESTALE, EACCES) is refused: the check cannot tell that the
+# name is no link, and a link there can be a link of another user (ls is
+# faked for one name of the chain). Before, -L was false on each error,
+# and the walk ended as a pass. Nothing is written, and the file at the
+# end of the chain stays as it was. Go twin:
+# TestWritePrivateFileRefusesALookupErrorOfTheChain.
+@test "kubehz::_write_private refuses a lookup error of a name of the chain" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local d="${BATS_TEST_TMPDIR}/lookup-links" ran="${BATS_TEST_TMPDIR}/ran" p err
+  mkdir -p "${d}"
+  chmod 0700 "${d}"
+  printf 'old\n' > "${d}/home.rc"
+  ln -s hop "${d}/kc.yaml"
+  ln -s "${d}/home.rc" "${d}/hop"
+  for p in "${d}/kc.yaml" "${d}/hop"; do
+    for err in "Input/output error" "Stale file handle" "Permission denied"; do
+      _lstat_error_ls "${p}" "${err}"
+      run kubehz::_write_private "${d}/kc.yaml" touch "${ran}"
+      assert_failure
+      assert_output "$(_dir_refused lstat "${p}")"
+    done
+  done
+  unset -f ls
+  [ ! -e "${ran}" ]
+  [ "$(cat "${d}/home.rc")" = old ]
+  [ -z "$(_hosted_temps "${d}" home.rc)" ]
+}
+
+# _insert_link_after_lookup <dest> <victim> <mark>: replace
+# kubehz::_lstat_line with a function that puts a link at <dest>, to
+# <victim>, right after the first lookup of <dest> that finds nothing
+# there, and then makes the file <mark>. Another user who can write into
+# the directory can do that between the lookup and the write. The lookup
+# runs in a subshell, so the file <mark> tells that the link was put
+# there. Other lookups are not changed.
+_insert_link_after_lookup() {
+  FAKE_DEST="${1}" FAKE_VICTIM="${2}" FAKE_MARK="${3}"
+  eval "$(declare -f kubehz::_lstat_line | sed '1s/kubehz::_lstat_line/_real_lstat_line/')"
+  kubehz::_lstat_line() {
+    local rc=0
+    _real_lstat_line "$@" || rc=$?
+    if [[ "${1}" == "${FAKE_DEST}" && "${rc}" == 1 && ! -e "${FAKE_MARK}" ]]; then
+      ln -s -- "${FAKE_VICTIM}" "${FAKE_DEST}" && : > "${FAKE_MARK}"
+    fi
+    return "${rc}"
+  }
+}
+
+# In a directory with the sticky bit and a shared group (mode 1770),
+# another user can put a link at the name of the file when nothing is
+# there, to a file of this user. The walk found nothing at the name, and
+# the write does not look the name up again: mv -T replaces the link that
+# was put there after the walk, and the file that the link names stays as
+# it was (the lookup of the walk is faked to put the link there right
+# after it). Before, readlink -f after the walk followed that link and
+# replaced the file of this user. Go twin:
+# TestWritePrivateFileReplacesALinkPutAfterTheWalk.
+@test "kubehz::_write_private replaces a link put at the name after the walk" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local d="${BATS_TEST_TMPDIR}/insert" mark="${BATS_TEST_TMPDIR}/inserted"
+  _KUBEHZ_MV_EXACT=""
+  kubehz::_mv_exact_ok || skip "the mv of this host has no -T"
+  mkdir -p "${d}/home" "${d}/shared"
+  printf 'old\n' > "${d}/home/kc.yaml"
+  chmod 0700 "${d}/home"
+  chmod 1770 "${d}/shared"
+  _insert_link_after_lookup "${d}/shared/kc.yaml" "${d}/home/kc.yaml" "${mark}"
+  run kubehz::_write_private "${d}/shared/kc.yaml" printf 'new\n'
+  assert_success
+  assert_output ""
+  [ -e "${mark}" ]
+  [ "$(cat "${d}/home/kc.yaml")" = old ]
+  [ ! -L "${d}/shared/kc.yaml" ]
+  [ -f "${d}/shared/kc.yaml" ]
+  [ "$(cat "${d}/shared/kc.yaml")" = new ]
+  [ "$(stat -c %a "${d}/shared/kc.yaml")" = 600 ]
+  [ -z "$(_hosted_temps "${d}/shared" kc.yaml)" ]
+  [ -z "$(_hosted_temps "${d}/home" kc.yaml)" ]
+}
+
+# Each link of the chain is read only when no other user can replace it:
+# a link in a directory that another user can write into without the
+# sticky bit (0777, 0770) is refused, at the name and as the second link,
+# and the file that the chain names stays as it was. A link in a directory
+# with the sticky bit passes, also when mv has no -T: the walk only reads
+# the link there, and the rename goes into the directory of the file. Go
+# twin: TestWritePrivateFileChecksTheDirectoryOfEachLink.
+@test "kubehz::_write_private checks the directory of each link of the chain" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local d="${BATS_TEST_TMPDIR}/linkdirs" ran="${BATS_TEST_TMPDIR}/ran" name mode
+  mkdir -p "${d}/safe"
+  printf 'old\n' > "${d}/safe/kc.yaml"
+  chmod 0700 "${d}/safe"
+  for name in world:0777 group:0770 sticky:1777; do
+    mode="${name#*:}" name="${name%:*}"
+    mkdir -p "${d}/${name}"
+    ln -s "${d}/safe/kc.yaml" "${d}/${name}/kc.yaml"
+    chmod "${mode}" "${d}/${name}"
+  done
+  mkdir -p "${d}/first"
+  ln -s "${d}/world/kc.yaml" "${d}/first/kc.yaml"
+  chmod 0700 "${d}/first"
+  run kubehz::_write_private "${d}/world/kc.yaml" touch "${ran}"
+  assert_failure
+  assert_output "$(_dir_refused world "${d}/world")"
+  run kubehz::_write_private "${d}/group/kc.yaml" touch "${ran}"
+  assert_failure
+  assert_output "$(_dir_refused group "${d}/group")"
+  run kubehz::_write_private "${d}/first/kc.yaml" touch "${ran}"
+  assert_failure
+  assert_output "$(_dir_refused world "${d}/world")"
+  [ ! -e "${ran}" ]
+  [ "$(cat "${d}/safe/kc.yaml")" = old ]
+  _KUBEHZ_MV_EXACT=0
+  run kubehz::_write_private "${d}/sticky/kc.yaml" printf 'new\n'
+  assert_success
+  assert_output ""
+  [ "$(cat "${d}/safe/kc.yaml")" = new ]
+  [ "$(stat -c %a "${d}/safe/kc.yaml")" = 600 ]
+  [ -L "${d}/sticky/kc.yaml" ]
+  [ -z "$(_hosted_temps "${d}/safe" kc.yaml)" ]
+}
+
+# The end of the walk keeps a ".." after a link to a directory, and the
+# kernel reads that ".." from the directory that the link names:
+# d/alias/../store is d/deep/store, not d/store. So the check, the create
+# and the rename take the directory of the path as it is (dirname does
+# not clean it). A world-writable d/deep/store is refused although d/store
+# is a directory of this user only, and the write goes into d/deep/store
+# when no d/store is there. Go twin:
+# TestWritePrivateFileTakesTheDirectoryOfTheWalkAsItIs.
+@test "kubehz::_write_private takes the directory of the walk as it is" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local d="${BATS_TEST_TMPDIR}/dotdot" ran="${BATS_TEST_TMPDIR}/ran"
+  mkdir -p "${d}/deep/store" "${d}/deep/real" "${d}/store"
+  printf 'old\n' > "${d}/deep/store/kc.yaml"
+  ln -s ../store/kc.yaml "${d}/deep/real/kc.yaml"
+  ln -s "${d}/deep/real" "${d}/alias"
+  chmod 0777 "${d}/deep/store"
+  chmod 0700 "${d}/deep/real" "${d}/store"
+  run kubehz::_write_private "${d}/alias/kc.yaml" touch "${ran}"
+  assert_failure
+  assert_output "$(_dir_refused world "${d}/alias/../store")"
+  [ ! -e "${ran}" ]
+  [ "$(cat "${d}/deep/store/kc.yaml")" = old ]
+  rmdir "${d}/store"
+  chmod 0700 "${d}/deep/store"
+  run kubehz::_write_private "${d}/alias/kc.yaml" printf 'new\n'
+  assert_success
+  assert_output ""
+  [ "$(cat "${d}/deep/store/kc.yaml")" = new ]
+  [ "$(stat -c %a "${d}/deep/store/kc.yaml")" = 600 ]
+  [ ! -e "${d}/store" ]
+  [ -z "$(_hosted_temps "${d}/deep/store" kc.yaml)" ]
 }
 
 # A chain of 8 links passes, and a chain of 9 links is refused.
@@ -1680,7 +1893,7 @@ _link_owner_ls() {
   done
   run kubehz::_private_target "${d}/c1"
   assert_success
-  assert_output "$(readlink -f "${d}/f")"
+  assert_output "${d}/f"
   run kubehz::_private_target "${d}/c0"
   assert_failure
   assert_output "$(_dir_refused resolve "${d}/c0")"

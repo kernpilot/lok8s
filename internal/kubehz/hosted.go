@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/interrupt"
@@ -336,13 +337,17 @@ func (e privateFileError) Error() string { return string(e) }
 // that cannot be resolved and a directory are refused (privateFileError).
 // The threat model: a process of this user is trusted, because it can
 // read the file anyway. Another user is not. Before the create,
-// privateTarget refuses a dest that is a link of another user, or that
-// follows one (privateLinkRefusal), and a directory of the file that
-// another user can write into (privateDirRefusal), with the texts of
-// bash. Thus only this user and root can write into a directory without
-// the sticky bit, and in a directory with the sticky bit another user
-// cannot rename or remove a file of this user. Under this model, these
-// steps are safe:
+// privateTarget resolves dest in one walk (privateWalk). It refuses a
+// dest that is a link of another user, or that follows one, a link in a
+// directory that another user can write into, a name that it cannot look
+// up, and a directory of the file that another user can write into
+// (privateDirRefusal), with the texts of bash. Thus only this user and
+// root can write into a directory without the sticky bit, and in a
+// directory with the sticky bit another user cannot rename or remove a
+// file or a link of this user. The end of the walk is not resolved again:
+// a link that another user puts there after the walk (at a name that was
+// not there) is replaced by os.Rename, not followed. Under this model,
+// these steps are safe:
 //   - The deferred removal takes the temp file by its path: no other user
 //     can put another file at that path before the removal.
 //   - os.CreateTemp makes the file with mode 0600 (O_EXCL), and the data
@@ -373,7 +378,7 @@ func writePrivateFile(ctx context.Context, dest string, data []byte) (err error)
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".*")
+	tmp, err := os.CreateTemp(privateDir(target), filepath.Base(target)+".*")
 	if err != nil {
 		return privateFileError("Cannot create a temp file beside " + target)
 	}
@@ -403,32 +408,50 @@ func writePrivateFile(ctx context.Context, dest string, data []byte) (err error)
 var renameFile = os.Rename
 
 // privateTarget ports kubehz::_private_target: the file that a write of
-// dest replaces (dest, or for a symlink the file that it names). First,
-// each link that the last name of dest follows must belong to this user
-// or root (privateLinkRefusal). A link to nothing, a link that cannot be
-// resolved, a directory and a file in a directory that another user can
-// write into (privateDirRefusal) are refused (privateFileError, the text
-// of bash).
+// dest replaces (dest, or for a symlink the file that it names), from one
+// walk (privateWalk). The walk checks each link of the chain, and its end
+// is not resolved again: a second resolution would follow a link that
+// another user puts at a name after the walk. A link to nothing, a link
+// that cannot be resolved, a directory and a file in a directory that
+// another user can write into (privateDirRefusal) are refused
+// (privateFileError, the text of bash).
 func privateTarget(dest string) (string, error) {
-	if refused := privateLinkRefusal(dest); refused != "" {
+	target, info, refused := privateWalk(dest)
+	if refused != "" {
 		return "", privateFileError(refused)
 	}
-	target := dest
-	info, lerr := os.Lstat(dest)
-	if lerr == nil && info.Mode()&os.ModeSymlink != 0 {
-		var err error
-		if target, err = filepath.EvalSymlinks(dest); err != nil {
-			return "", privateFileError("Cannot resolve the symlink " + dest)
-		}
-		info, lerr = os.Stat(target)
-	}
-	if lerr == nil && info.IsDir() {
+	if info != nil && info.IsDir() {
 		return "", privateFileError(dest + " is a directory, not a file")
 	}
-	if refused := privateDirRefusal(filepath.Dir(target)); refused != "" {
+	if refused := privateDirRefusal(privateDir(target)); refused != "" {
 		return "", privateFileError(refused)
 	}
 	return target, nil
+}
+
+// privateDir is the directory of the path p as bash dirname gives it: the
+// text before the last "/" (a "/" at the end of p does not count), without
+// the "/" at its end, "/" for a name in the root, and "." for a name
+// without a "/". Unlike filepath.Dir, it does not clean the path. The end
+// of privateWalk can hold a ".." after a link to a directory, and the
+// kernel reads that ".." from the directory that the link names: a
+// cleaned path would name another directory than the one that the create
+// and the rename use.
+func privateDir(p string) string {
+	if p == "" {
+		return "."
+	}
+	if p = strings.TrimRight(p, "/"); p == "" {
+		return "/"
+	}
+	i := strings.LastIndex(p, "/")
+	if i < 0 {
+		return "."
+	}
+	if d := strings.TrimRight(p[:i], "/"); d != "" {
+		return d
+	}
+	return "/"
 }
 
 // DestroyHosted ports kubehz::destroy_hosted: resolve the cluster id from

@@ -297,13 +297,17 @@ kubehz::_hosted_kubeconfig_get() {
 # cannot be resolved and a directory are refused (one error line).
 # The threat model: a process of this user is trusted, because it can
 # read the file anyway. Another user is not. Before the create, the call
-# refuses a <dest> that is a link of another user, or that follows one
-# (kubehz::_private_link_hops), and a directory of the file that another
-# user can write into (kubehz::_private_dir_ok). Thus only this user and
-# root can write into a directory without the sticky bit. In a directory
-# with the sticky bit, another user cannot rename or remove a file of
-# this user, and the call renames there only with mv -T. Under this
-# model, these steps are safe:
+# resolves <dest> in one walk (kubehz::_private_link_hops). It refuses a
+# <dest> that is a link of another user, or that follows one, a link in a
+# directory that another user can write into, a name that it cannot look
+# up, and a directory of the file that another user can write into
+# (kubehz::_private_dir_ok). Thus only this user and root can write into a
+# directory without the sticky bit. In a directory with the sticky bit,
+# another user cannot rename or remove a file or a link of this user, and
+# the call renames there only with mv -T. The end of the walk is not
+# resolved again: a link that another user puts there after the walk (at
+# a name that was not there) is replaced by mv -T, not followed. Under
+# this model, these steps are safe:
 # - The traps and a failed rename remove the temp file by its path after
 #   a check: no other user can put another file at that path between the
 #   check and the remove.
@@ -477,26 +481,21 @@ kubehz::_restore_trap() {
 }
 
 # kubehz::_private_target <dest>: the file that a write of <dest> replaces,
-# on stdout: <dest>, or for a symlink the file that it names (readlink -f).
-# First, each link that the last name of <dest> follows must belong to
-# this user or root (kubehz::_private_link_hops). A link to nothing, a
-# link that cannot be resolved, a directory and a file in a directory
-# that another user can write into (kubehz::_private_dir_ok) are refused
-# with one error line, status 1.
+# on stdout: <dest>, or for a symlink the file that it names, from one
+# walk (kubehz::_private_link_hops). The walk checks each link of the
+# chain, and its end is not resolved again: a second resolution (such as
+# readlink -f) would follow a link that another user puts at a name after
+# the walk. A link to nothing, a link that cannot be resolved, a directory
+# and a file in a directory that another user can write into
+# (kubehz::_private_dir_ok) are refused with one error line, status 1.
+# The path on stdout is the end of the walk as it is: dirname does not
+# clean a ".." after a link to a directory, so the check, the create and
+# the rename name the same directory. Go twin: privateTarget.
 kubehz::_private_target() {
-  local dest="${1}" target="${1}"
-  kubehz::_private_link_hops "${dest}" || return 1
-  if [[ -L "${dest}" ]]; then
-    target=""
-    if [[ -e "${dest}" ]]; then
-      target=$(readlink -f -- "${dest}" 2>/dev/null) || target=""
-    fi
-    [[ -n "${target}" ]] || {
-      error "Cannot resolve the symlink ${dest}"
-      return 1
-    }
-  fi
-  [[ ! -d "${target}" ]] || {
+  local dest="${1}" end target
+  end=$(kubehz::_private_link_hops "${dest}") || return 1
+  target="${end:2}"
+  [[ "${end:0:1}" != d ]] || {
     error "${dest} is a directory, not a file"
     return 1
   }
@@ -504,24 +503,52 @@ kubehz::_private_target() {
   printf '%s\n' "${target}"
 }
 
-# kubehz::_private_link_hops <dest>: status 0 when each link that the last
-# name of <dest> follows (the link at <dest>, then the link that it names,
-# and so on) belongs to this user or root. In a directory with the sticky
-# bit, another user can put a link at the name, to a file of this user:
-# the rename would then replace that file. A link of another user, a link
-# whose owner cannot be read and a chain of more than 8 links are refused
-# with one error line, status 1. A relative link names a path from the
-# directory of the link. A link to a directory on the way (not the last
-# name) is not checked here. ls -ldn gives the owner of the link itself.
+# kubehz::_private_link_hops <dest>: the one walk of the last name of
+# <dest>: the link at <dest>, then the link that it names, and so on. On
+# stdout, one line: the type of the entry at the end of the walk (the
+# first character of its mode in ls -l, or n when nothing is there), a
+# space, and the path of that entry. The walk reads each name once
+# (kubehz::_lstat_line: the type and the owner come from the same line of
+# ls -ldn), and it follows a link only after these checks: the link
+# belongs to this user or root, and no other user can replace a file in
+# the directory of the link (kubehz::_private_dir_ok, with the argument
+# link), so the link cannot change before readlink reads it. In a
+# directory with the sticky bit, another user can put a link at a name
+# that is not there: the rename onto the exact path (mv -T) replaces that
+# link, and does not follow it. A link of another user (it can point at a
+# file of this user), a link whose owner cannot be read, a name whose
+# lookup fails for a cause other than "not there" (then the walk cannot
+# tell that it is no link), a link to nothing and a chain of more than 8
+# links are refused with one error line, status 1. A relative link names
+# a path from the directory of the link (the text before the last "/",
+# not cleaned). A link to a directory on the way (not the last name) is
+# not checked here. Go twin: privateWalk.
 kubehz::_private_link_hops() {
-  local dest="${1}" p="${1}" next line uid me hops=0
+  local dest="${1}" p="${1}" next line uid me hops=0 rc
   me=$(id -u 2>/dev/null) || me=""
-  while [[ -L "${p}" ]]; do
+  while :; do
+    rc=0
+    line=$(kubehz::_lstat_line "${p}") || rc=$?
+    if (( rc == 2 )); then
+      error "Cannot read the path ${p}: nothing is written"
+      return 1
+    fi
+    if (( rc == 1 )); then
+      if (( hops > 0 )); then
+        error "Cannot resolve the symlink ${dest}"
+        return 1
+      fi
+      printf 'n %s\n' "${p}"
+      return 0
+    fi
+    if [[ "${line}" != l* ]]; then
+      printf '%s %s\n' "${line:0:1}" "${p}"
+      return 0
+    fi
     if (( ++hops > 8 )); then
       error "Cannot resolve the symlink ${dest}"
       return 1
     fi
-    line=$(LC_ALL=C ls -ldn -- "${p}" 2>/dev/null) || line=""
     uid=""
     read -r _ _ uid _ <<< "${line}"
     if [[ ! "${uid}" =~ ^[0-9]+$ ]]; then
@@ -532,6 +559,7 @@ kubehz::_private_link_hops() {
       error "The link ${p} belongs to uid ${uid}, not to this user or to root, so another user can point it at a file of this user: nothing is written. Remove the link, or use a path of your own."
       return 1
     fi
+    kubehz::_private_dir_ok "$(dirname -- "${p}")" link || return 1
     if ! next=$(readlink -- "${p}" 2>/dev/null) || [[ -z "${next}" ]]; then
       error "Cannot resolve the symlink ${dest}"
       return 1
@@ -547,11 +575,37 @@ kubehz::_private_link_hops() {
   done
 }
 
-# kubehz::_private_dir_ok <dir>: status 0 when no other user can replace a
-# file in <dir>. It refuses, with one error line and status 1:
-# - a <dir> that is not there when its parent is not a directory that
-#   this user can search (then the check cannot tell that <dir> is not
-#   there), and a line of ls that the check cannot read;
+# kubehz::_lstat_line <path>: one lookup of the entry at <path> itself (a
+# link is not followed). Status 0: <path> is there, and the line of
+# LC_ALL=C ls -ldn is on stdout. Status 1: <path> is not there: ls fails,
+# and its error output is one line that ends in the C text of ENOENT
+# (": No such file or directory") or of ENOTDIR (": Not a directory": a
+# part of the path before the last name is not a directory, so no entry
+# can be there). GNU, BSD and busybox ls put the text of the error at the
+# end of the line. Status 2: the lookup cannot tell, because it failed for
+# another cause (EIO, ESTALE, EACCES, and so on), or because its output is
+# not one line of ls. -e and -L cannot tell these apart: both are false
+# on each error. Go twin: the error of os.Lstat (privateNotThere).
+kubehz::_lstat_line() {
+  local out rc=0
+  out=$(LC_ALL=C ls -ldn -- "${1}" 2>&1) || rc=$?
+  if (( rc == 0 )); then
+    [[ "${out}" != *$'\n'* && "${out}" =~ ^[-dlcbps][-rwxsStT]{9} ]] || return 2
+    printf '%s\n' "${out}"
+    return 0
+  fi
+  [[ "${out}" != *$'\n'* ]] || return 2
+  [[ "${out}" == *": No such file or directory" || "${out}" == *": Not a directory" ]] || return 2
+  return 1
+}
+
+# kubehz::_private_dir_ok <dir> [link]: status 0 when no other user can
+# replace a file in <dir>. It refuses, with one error line and status 1:
+# - a <dir> whose lookup fails for a cause other than "not there"
+#   (kubehz::_lstat_line: EIO, ESTALE, a parent that this user cannot
+#   search, a parent that is a file), a <dir> that is not there when its
+#   parent is not a directory that this user can search, and a line of ls
+#   that the check cannot read;
 # - a path that is there but is not a directory (also a link to nothing);
 # - a directory that belongs to a user other than this user or root (that
 #   user can change its mode);
@@ -561,7 +615,10 @@ kubehz::_private_link_hops() {
 # - with the sticky bit, a directory that others can write into when mv
 #   has no -T (kubehz::_mv_exact_ok). The sticky bit lets only the owner
 #   of a file rename or remove it, but a mv without -T moves the file into
-#   a directory that another user puts at its name.
+#   a directory that another user puts at its name. The argument link (the
+#   directory of a link of the walk, kubehz::_private_link_hops) skips
+#   this case: the walk only reads the link there, and renames nothing
+#   into that directory.
 # A directory that is not there passes when its parent can be searched:
 # the write makes it with mode 0700, and the second check reads it. The
 # check reads the mode bits only, not an ACL, and the directory only, not
@@ -569,12 +626,15 @@ kubehz::_private_link_hops() {
 # uid and the gid in the same form on GNU and BSD (their stat takes other
 # options), and it follows a link, as the create does.
 kubehz::_private_dir_ok() {
-  local dir="${1}" line="" mode="" uid="" gid="" me parent
-  if [[ ! -e "${dir}" && ! -L "${dir}" ]]; then
+  local dir="${1}" line="" mode="" uid="" gid="" me parent rc=0
+  kubehz::_lstat_line "${dir}" > /dev/null || rc=$?
+  if (( rc == 1 )); then
     parent=$(dirname -- "${dir}")
     if [[ -d "${parent}" && -x "${parent}" ]]; then
       return 0
     fi
+  fi
+  if (( rc != 0 )); then
     error "Cannot read the owner and the mode of the directory ${dir}: nothing is written"
     return 1
   fi
@@ -594,7 +654,7 @@ kubehz::_private_dir_ok() {
     return 1
   fi
   if [[ "${mode:9:1}" == [tT] ]]; then
-    if [[ "${mode:5:1}" == w || "${mode:8:1}" == w ]] && ! kubehz::_mv_exact_ok; then
+    if [[ "${2:-}" != link ]] && [[ "${mode:5:1}" == w || "${mode:8:1}" == w ]] && ! kubehz::_mv_exact_ok; then
       error "The directory ${dir} has the sticky bit and other users can write into it, but this mv has no -T, so another user can put a directory at the file before the rename: nothing is written. Use a directory of your own, or a mv that takes -T (GNU coreutils)."
       return 1
     fi

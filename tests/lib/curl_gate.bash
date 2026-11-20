@@ -105,7 +105,13 @@
 # comment lines neither end nor continue a command. Before any other step,
 # a line that ends in a backslash is joined to the next line without the
 # backslash and the newline, as the shell does (so cu\<newline>rl is
-# curl). The lines that a trailing |, &&, || or ( joins are one command,
+# curl). A line that ends in a backslash in code, before a line that
+# starts with # (after white space), is a finding ("a backslash at the
+# end of a line before a # line the gate cannot place"; in a YAML file,
+# only in a block scalar). The shell joins the two lines, so
+# x=1\<newline>#;curl runs the curl, but a backslash in a comment
+# (echo #\) continues nothing. The gate does not decide which: it skips
+# the # line. The lines that a trailing |, &&, || or ( joins are one command,
 # and so are the lines of a quote that is still open at the end of a line
 # (there a line that starts with # is text, not a comment). After a line
 # that ends in a $( ) or a `…` that is still open, the next line is a new
@@ -122,10 +128,26 @@
 # <tab>E\<newline>OF ends the body. In a YAML file (.yaml, .yml), the
 # indentation of the block scalar goes from each line before that, as
 # YAML removes it before the shell sees the text: the indentation of the
-# first line of the block after its "|" or ">" line. A line of the body
+# first line of the block after its "|" or ">" line (also after a tag
+# or an anchor, and in a list item of a list item: - - >). A "|" or ">"
+# after a tag or an anchor that the gate cannot read as a header, and a
+# header on a line of its own, is a finding ("a YAML block header the
+# gate cannot place"). A line of the body
 # that is the delimiter after more white space, or in a block with an
 # indentation indicator (|2), is a finding ("a here-document delimiter
-# the gate cannot place"), and the body goes on.
+# the gate cannot place"), and the body goes on. A folded block (">")
+# joins its lines with a space, and the gate does not decode that: each
+# line of a folded block with a << that is not a <<< is a finding ("a
+# here-document in a folded YAML block (>) the gate cannot place"), and so
+# is each line of a folded block that ends in a backslash ("a backslash at
+# the end of a line of a folded YAML block (>) the gate cannot place"): an
+# empty line after it gives the backslash and a newline, which the shell
+# removes, so "cat <\", an empty line and "<EOF" give <<EOF. YAML
+# takes only spaces as indentation: a tab in the leading white space of
+# the first line of a block (also a line of white space only), or after
+# fewer spaces than the indentation of the block, is a finding ("a YAML
+# block line the gate cannot place: a tab in its indentation"). From that
+# line on, the gate does not know the indentation of the block.
 # The first argument of a call is the first word after the curl word that
 # is not a redirection: the operand of a redirection is one shell word,
 # with its quotes and escapes (curl >"a -q " -u … has -u first).
@@ -161,7 +183,12 @@
 # that state, and their curl words in quotes are findings). A quoted body
 # of a here-document that the tree writes to a script, and a call in a
 # body that another program runs (bash <<'EOF'), are code that the tree
-# generates.
+# generates. The gate reads the shell in a YAML file with a heuristic:
+# it finds the block scalars by their headers, and reads the other
+# lines as shell too (a quoted YAML scalar, run: 'curl -u …', is a shell
+# quote to it). Decoding the YAML (yq) before the scan of the shell is
+# the full fix. The list mode does not show what only a "cannot place"
+# rule finds (x=1\<newline>#;curl lists no call).
 #
 # The check reads the source text only: it needs no shellcheck and runs no
 # code of the tree. curl_gate_files gives it every file of the tree, not
@@ -679,24 +706,90 @@ curl_gate() {
     # yaml_line(): the block scalars of a YAML file, for each line that is
     # not blank. Outside a block, a line that ends in "|" or ">" (with its
     # indicators and a comment) as the value of a key or of a list item
-    # starts a block: the next line that is not blank sets the indentation
-    # of the block (yb_ind), when it has more indentation than that line
-    # (yb_par). The block ends at a line with less indentation. With an
-    # indentation indicator (|2), the gate does not know the indentation
-    # of the block (yb_ind -2). A comment line starts no block.
+    # (also "- - >"), after tags (!x, !!str, !<…>) and anchors (&a) in any
+    # order, starts a block: the next line that is not blank sets the
+    # indentation of the block (yb_ind), when it has more indentation than
+    # that line (yb_par). The block ends at a line with less indentation.
+    # With an indentation indicator (|2), the gate does not know the
+    # indentation of the block (yb_ind -2). A comment line starts no block.
+    # In the q and tls modes, a "|" or ">" after a tag or an anchor that
+    # starts no block, and a header on a line of its own (after a "---"
+    # too), is a finding: the gate cannot place it. Two block lines are
+    # findings too (yaml_tab, yaml_fold).
     function yaml_line(   ind, h) {
+      yaml_tab()
       if ($0 ~ /^[[:space:]]*$/) return
       match($0, /^ */); ind = RLENGTH
       if (yb_wait) {
         yb_wait = 0
-        if (ind > yb_par) { yb_ind = yb_dig ? -2 : ind; return }
+        if (ind > yb_par) { yb_ind = yb_dig ? -2 : ind; yaml_fold(); return }
       }
       if ((yb_ind >= 0 && ind < yb_ind) || (yb_ind == -2 && ind <= yb_par)) yb_ind = -1
-      if (yb_ind != -1 || $0 ~ /^[[:space:]]*#/) return
-      if (match($0, /(^[[:space:]]*-|:)[[:space:]]+[|>][-+0-9]*[[:space:]]*(#.*)?$/)) {
-        h = substr($0, RSTART, RLENGTH); sub(/^[^|>]*[|>]/, "", h); sub(/[[:space:]#].*$/, "", h)
+      if (yb_ind != -1) { yaml_fold(); return }
+      if ($0 ~ /^[[:space:]]*#/) return
+      if (match($0, /(^[[:space:]]*-([[:space:]]+-)*|:)[[:space:]]+((!<[^>]*>|![^[:space:]]*|&[^[:space:]]+)[[:space:]]+)*[|>][-+0-9]*[[:space:]]*(#.*)?$/)) {
+        h = substr($0, RSTART, RLENGTH); match(h, /[|>][-+0-9]*[[:space:]]*(#.*)?$/); h = substr(h, RSTART)
+        yb_fold = substr(h, 1, 1) == ">"; h = substr(h, 2); sub(/[[:space:]#].*$/, "", h)
         yb_wait = 1; yb_par = ind; yb_dig = h ~ /[1-9]/
-      }
+      } else if (mode != "list" && (match($0, /(^[[:space:]]*-|:)[[:space:]]+[!&]/) && substr($0, RSTART + RLENGTH) ~ /[|>]/ ||
+        $0 ~ /^[[:space:]]*(---[[:space:]]+)?((!<[^>]*>|![^[:space:]]*|&[^[:space:]]+)[[:space:]]+)*[|>][-+0-9]*[[:space:]]*(#.*)?$/))
+        printf "%s:%d: %s\n", FILENAME, FNR, "a YAML block header the gate cannot place"
+    }
+    # yaml_tab(): a tab in the leading white space of a block line, before
+    # the indentation of the block: in the first line of the block (also a
+    # line of white space only), in a block whose indentation the gate does
+    # not know, or after fewer spaces than the indentation. YAML takes only
+    # spaces as indentation, and the parsers do not agree on such a line
+    # (the spaces before the tab, an end of the block, or an error), so
+    # the gate cannot place the indentation of the block. In the q and tls
+    # modes the line is a finding, and from it on the gate does not know
+    # the indentation of the block (yb_ind -2: each delimiter of a body is
+    # a finding, hd_near).
+    function yaml_tab(   lead, sp) {
+      if (!yb_wait && yb_ind == -1) return
+      match($0, /^[ \t]*/); lead = substr($0, 1, RLENGTH)
+      if (lead !~ /\t/) return
+      sp = index(lead, "\t") - 1
+      if (!yb_wait && yb_ind >= 0 && sp >= yb_ind) return
+      if (mode != "list") printf "%s:%d: %s\n", FILENAME, FNR, "a YAML block line the gate cannot place: a tab in its indentation"
+      yb_wait = 0; yb_ind = -2
+    }
+    # yaml_fold(): a line of a folded block (">") with a << that is not a
+    # <<< (a here-document, also one whose delimiter is on the next line),
+    # and a line of a folded block that ends in a backslash. YAML joins the
+    # lines of a folded block with a space, and an empty line becomes the
+    # newline. So the shell reads a body other than the lines that the gate
+    # reads, and its end at another line. A backslash before such a newline
+    # joins two lines that the gate reads apart: "cat <\", an empty line and
+    # "<EOF" give a <<EOF that no line holds, and "cu\", an empty line and
+    # "rl" give curl. The gate does not decode the folding: in the q and
+    # tls modes each such line is a finding (fail closed). Folding only
+    # removes newlines and adds spaces, so it makes no << that the lines do
+    # not hold, other than through such a backslash.
+    function yaml_fold(   t) {
+      if (!yb_fold || mode == "list") return
+      t = $0; gsub(/<<</, "", t)
+      if (t ~ /<</) printf "%s:%d: %s\n", FILENAME, FNR, "a here-document in a folded YAML block (>) the gate cannot place"
+      if ($0 ~ /\\\r?$/) printf "%s:%d: %s\n", FILENAME, FNR, "a backslash at the end of a line of a folded YAML block (>) the gate cannot place"
+    }
+    # bs_hash(): in the q and tls modes, a line that ends in a backslash
+    # (in code: not in a quote and not a comment line; in a YAML file, a
+    # line of a block scalar) before a line that starts with # after white
+    # space is a finding (bs_line: the line of the backslash; a CR at its
+    # end counts as a line break). The shell joins the two lines, and the
+    # # then starts a comment or not: x=1\ and #;curl give x=1#;curl, and
+    # the curl runs. But a backslash in a comment continues nothing: after
+    # echo #\ a # line is a comment. The gate does not decide which (fail
+    # closed): it skips the # line, as each comment line. A line of a
+    # here-document body is text, and so is the backslash at its end.
+    function bs_hash(   t) {
+      if (bs_line && mode != "list" && $0 ~ /^[[:space:]]*#/)
+        printf "%s:%d: %s\n", FILENAME, bs_line, "a backslash at the end of a line before a # line the gate cannot place"
+      bs_line = 0
+      if (hq_n > 0 || (!inq && $0 ~ /^[[:space:]]*#/)) return
+      if (FILENAME ~ /\.ya?ml$/ && yb_ind == -1) return
+      t = $0; sub(/\r$/, "", t)
+      if (match(t, /\\+$/) && RLENGTH % 2 == 1) bs_line = FNR
     }
     # The end of a body: the next here-document of the command, if any.
     function body_end() {
@@ -809,10 +902,11 @@ curl_gate() {
       reset()
     }
     FNR == 1 {
-      check(); reset(); hd_close(); IS_top = 0; yb_ind = -1; yb_wait = 0
+      check(); reset(); hd_close(); IS_top = 0; yb_ind = -1; yb_wait = 0; yb_fold = 0; bs_line = 0
       for (i = 1; i <= na; i++) if (path_is(FILENAME, apath[i])) aseen[i] = 1
     }
     FILENAME ~ /\.ya?ml$/ { yaml_line() }
+    { bs_hash() }
     hq_n > 0 { body_line(); next }
     # A comment line neither ends nor continues a command. In a string over
     # more lines it is text of the string.
@@ -831,6 +925,8 @@ curl_gate() {
       for (k = 1; k <= ES_top; k++) { NS_st[k] = ES_st[k]; NS_cx[k] = ES_cx[k]; NS_dp[k] = ES_dp[k]; NS_dq[k] = ES_dq[k] }
       for (k = 1; k <= ES_nctx; k++) NS_CL[k] = CL[k]
       e = NS_st[NS_top]; inq = e == "s" || e == "d" || e == "b"
+      # A backslash in a quote that stays open is text (bs_hash).
+      if (inq) bs_line = 0
       if (!cont) heredocs()
       if (cont || inq || $0 ~ /(\\|\||&&|\(|\$\()[[:space:]]*$/) next
       check()

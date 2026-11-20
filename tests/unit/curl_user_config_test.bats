@@ -879,6 +879,292 @@ ${yaml}:18 credential"
   assert_output "${good}:10"
 }
 
+# A folded block (">") joins its lines with a space, and an empty line
+# becomes the newline: YAML gives "cat <<EOF\nEOF '$(curl …)'\nEOF\n", and
+# bash runs the $( ) in the unquoted body. The gate does not decode the
+# folding, so each line with a << in a folded block is a finding in the q
+# and tls modes (fold.yaml:2), also a << whose delimiter is on the next
+# line (fold.yaml:9) and a << on a later line of the block (fold.yaml:14).
+# The controls: a literal block ("|"), a tab after the indentation, and a
+# <<< in a folded block.
+@test "curl gate: a here-document in a folded YAML block is a finding" {
+  local fold="${BATS_TEST_TMPDIR}/fold.yaml" good="${BATS_TEST_TMPDIR}/fold-good.yaml"
+  CURL_GATE_ALLOW=()
+  cat > "${fold}" <<'YAML'
+run: >
+  cat <<EOF
+
+  EOF
+  '$(curl -u u:p https://h.example/f1)'
+
+  EOF
+also: >-
+  cat <<
+  EOF
+  echo x
+second: >
+  echo start
+  cat <<EOF
+  EOF
+YAML
+  printf '%b' "lit: |\n  cat <<EOF\n\n  EOF\n  '\$(curl -u u:p https://h.example/g1)'\ntabbed: |\n    cat <<-EOF\n    \tbody\n    \tEOF\nstr: >\n  cat <<<\"x\"\n" > "${good}"
+  local f="a here-document in a folded YAML block (>) the gate cannot place"
+  local mode
+  for mode in q tls; do
+    run curl_gate "${mode}" "${fold}"
+    assert_failure 1
+    assert_output "${fold}:2: ${f}
+${fold}:9: ${f}
+${fold}:14: ${f}"
+    run curl_gate "${mode}" "${good}"
+    assert_success
+    assert_output ""
+  done
+  run curl_gate list "${fold}" "${good}"
+  assert_success
+  assert_output ""
+}
+
+# In a folded block, an empty line after a line that ends in a backslash
+# gives the backslash and a newline, and the shell removes both. YAML gives
+# "cat <\\\n<EOF\nEOF '$(curl …)'\nEOF\n" from bs.yaml:1-9: bash reads
+# cat <<EOF and runs the $( ) in the unquoted body, but no line holds a
+# <<. And "cu\", an empty line and "rl -u …" (bs.yaml:10-13) give a curl
+# call. The gate does not decode the folding: each line of a folded block
+# that ends in a backslash is a finding in the q and tls modes. The
+# controls: a backslash at the end of a line of a literal block (the gate
+# joins the lines as the shell does), and a backslash in a line of a
+# folded block.
+@test "curl gate: a backslash at the end of a line of a folded YAML block is a finding" {
+  local bs="${BATS_TEST_TMPDIR}/bs.yaml" good="${BATS_TEST_TMPDIR}/bs-good.yaml"
+  CURL_GATE_ALLOW=()
+  cat > "${bs}" <<'YAML'
+run: >
+  cat <\
+
+  <EOF
+
+  EOF
+  '$(curl -u u:p https://h.example/b1)'
+
+  EOF
+split: >
+  cu\
+
+  rl -u u:p https://h.example/b2
+YAML
+  cat > "${good}" <<'YAML'
+lit: |
+  ( http::tls_log_vars_unset && curl -q -sS \
+    https://h.example/g1 )
+str: >
+  echo a\ b
+YAML
+  local f="a backslash at the end of a line of a folded YAML block (>) the gate cannot place"
+  local mode
+  for mode in q tls; do
+    run curl_gate "${mode}" "${bs}"
+    assert_failure 1
+    assert_output "${bs}:2: ${f}
+${bs}:11: ${f}"
+    run curl_gate "${mode}" "${good}"
+    assert_success
+    assert_output ""
+  done
+  run curl_gate list "${bs}" "${good}"
+  assert_success
+  assert_output "${good}:2"
+}
+
+# YAML takes only spaces as indentation. In first.yaml, the first line of
+# the block is two spaces and a tab: the parsers do not agree on it (YAML
+# takes indentation two and the tab as content, a parser can also stop
+# with an error). With indentation two, bash keeps two spaces before the
+# first EOF and runs the $( ); the last EOF ends the body. The gate took
+# the line as blank and indentation four. Now a tab in the leading white
+# space of the first line of a block (also a line of white space only),
+# or after fewer spaces than the indentation of the block (in.yaml:3), is
+# a finding in the q and tls modes. From that line on the gate does not
+# know the indentation of the block, so each delimiter of a body is a
+# finding too. The control: a tab after the indentation (fold-good.yaml
+# in the case above).
+@test "curl gate: a tab in the indentation of a YAML block is a finding" {
+  local first="${BATS_TEST_TMPDIR}/first.yaml" in="${BATS_TEST_TMPDIR}/in.yaml"
+  CURL_GATE_ALLOW=()
+  printf '%b' "run: |\n  \t\n    cat <<EOF\n    EOF\n    '\$(curl -u u:p https://h.example/t1)'\n  EOF\n" > "${first}"
+  printf '%b' "run: |\n    cat <<EOF\n  \tEOF\n    EOF\n" > "${in}"
+  local b="a YAML block line the gate cannot place: a tab in its indentation"
+  local c="a curl word the gate cannot place" d="a here-document delimiter the gate cannot place"
+  local mode
+  for mode in q tls; do
+    run curl_gate "${mode}" "${first}" "${in}"
+    assert_failure 1
+    assert_output "${first}:2: ${b}
+${first}:4: ${d}
+${first}:5: ${c}
+${first}:6: ${d}
+${in}:3: ${b}
+${in}:3: ${d}
+${in}:4: ${d}"
+  done
+  run curl_gate list "${first}" "${in}"
+  assert_success
+  assert_output ""
+}
+
+# A backslash at the end of a line continues the command, but not in a
+# comment: in comment.sh (the exact input of a review), bash reads
+# "echo #\" as a comment, so lines 2 and 4 are comments too, and the curl
+# subshell of line 3 runs. After x=1\, the shell joins the # line first:
+# x=1#;curl … runs the curl (lines 5-6). The gate does not decide which
+# of the two it is: in the q and tls modes, a line that ends in a
+# backslash before a line that starts with # is a finding, and the # line
+# is skipped as a comment. The call of line 3 is a finding too. The
+# controls: a comment line, a continuation, a # line after a continuation
+# that ended, and a backslash in a double quote that stays open.
+@test "curl gate: a backslash at the end of a line before a # line is a finding" {
+  local f="${BATS_TEST_TMPDIR}/comment.sh" good="${BATS_TEST_TMPDIR}/comment-good.sh"
+  CURL_GATE_ALLOW=()
+  cat > "${f}" <<'SH'
+echo #\
+#'
+( "curl" -u u:p https://h )
+#'
+x=1\
+#;curl -u u:p https://h.example/c1
+SH
+  cat > "${good}" <<'SH'
+# a comment
+echo a \
+  b
+y=1\
+z=2
+#;curl -u u:p https://h.example/c2
+echo "a\
+#b"
+SH
+  local b="a backslash at the end of a line before a # line the gate cannot place"
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  run curl_gate q "${f}"
+  assert_failure 1
+  assert_output "${f}:1: ${b}
+${f}:3: ${q}
+${f}:5: ${b}"
+  run curl_gate tls "${f}"
+  assert_failure 1
+  assert_output "${f}:1: ${b}
+${f}:3: ${t}
+${f}:5: ${b}"
+  local mode
+  for mode in q tls; do
+    run curl_gate "${mode}" "${good}"
+    assert_success
+    assert_output ""
+  done
+}
+
+# The same rule in a YAML block: in lit.yaml (the exact input of a
+# review), YAML removes the indentation, and bash runs x=1#;curl …. The
+# gate kept the indentation in the joined line (x=1  #;curl …), so the
+# curl was a comment. Now the line of the backslash is a finding in the q
+# and tls modes. The controls: a literal block with a continuation and a
+# comment line, and a folded block.
+@test "curl gate: a backslash at the end of a line of a YAML block before a # line is a finding" {
+  local f="${BATS_TEST_TMPDIR}/lit.yaml" good="${BATS_TEST_TMPDIR}/lit-good.yaml"
+  CURL_GATE_ALLOW=()
+  cat > "${f}" <<'YAML'
+run: |
+  x=1\
+  #;curl -u u:p https://h
+YAML
+  cat > "${good}" <<'YAML'
+lit: |
+  echo a \
+    b
+  # a comment
+fold: >
+  echo a
+  echo b
+YAML
+  local b="a backslash at the end of a line before a # line the gate cannot place"
+  local mode
+  for mode in q tls; do
+    run curl_gate "${mode}" "${f}"
+    assert_failure 1
+    assert_output "${f}:2: ${b}"
+    run curl_gate "${mode}" "${good}"
+    assert_success
+    assert_output ""
+  done
+}
+
+# A tag (!!str, !x, !<…>) and an anchor (&a), in any order, can come
+# before the | or > of a block header, and a header can be the value of a
+# list item in a list item (- - >) or of a key in a list item. In
+# tag.yaml (the exact input of a review), the gate did not see the
+# folded block, so the backslash rule of a folded block did not run: bash
+# reads cat <<EOF and runs the $( ) in the unquoted body. Now each such
+# header starts a block. A | or > after a tag or an anchor that the gate
+# still cannot read as a header (props.yaml:1), and a header on a line of
+# its own (props.yaml:3), are findings in the q and tls modes. The
+# control: a literal block after a tag.
+@test "curl gate: a tag or an anchor before a YAML block header, and a nested list item, start the block" {
+  local f="${BATS_TEST_TMPDIR}/tag.yaml" nest="${BATS_TEST_TMPDIR}/nest.yaml"
+  local props="${BATS_TEST_TMPDIR}/props.yaml" good="${BATS_TEST_TMPDIR}/tag-good.yaml"
+  CURL_GATE_ALLOW=()
+  cat > "${f}" <<'YAML'
+run: !!str >
+  cat <\
+
+  <EOF
+
+  EOF
+  '$(curl -u u:p https://h)'
+
+  EOF
+YAML
+  cat > "${nest}" <<'YAML'
+- - >
+    cat <\
+
+    <EOF
+- key: &a !x >
+    cu\
+
+    rl -u u:p https://h.example/n1
+YAML
+  cat > "${props}" <<'YAML'
+x: !x a > b
+run: &a
+  |
+  echo a
+YAML
+  cat > "${good}" <<'YAML'
+tag: !!str |
+  echo a \
+    b
+YAML
+  local fb="a backslash at the end of a line of a folded YAML block (>) the gate cannot place"
+  local h="a YAML block header the gate cannot place"
+  local mode
+  for mode in q tls; do
+    run curl_gate "${mode}" "${f}" "${nest}" "${props}"
+    assert_failure 1
+    assert_output "${f}:2: ${fb}
+${nest}:2: ${fb}
+${nest}:6: ${fb}
+${props}:1: ${h}
+${props}:3: ${h}"
+    run curl_gate "${mode}" "${good}"
+    assert_success
+    assert_output ""
+  done
+  run curl_gate list "${f}" "${nest}" "${props}" "${good}"
+  assert_success
+  assert_output ""
+}
+
 # The operand of a redirection is one shell word, with its quotes and
 # escapes: the -q in it is no argument (lines 1 to 3). A keyword starts a
 # command only in a command position: in "echo if curl" the curl is an
