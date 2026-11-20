@@ -37,7 +37,8 @@ import (
 //	rolebindings
 //	refs-clusterrolebindings
 //	refs-rolebindings    the answer of that reference read (no selector),
-//	                     the same forms
+//	refs-clusterroles    the same forms; refs-clusterroles is the
+//	                     aggregation read
 //	fake-render-only     present: the render file is not a real render of
 //	                     the addon (the file says why), so the real render
 //	                     test skips the case
@@ -53,8 +54,8 @@ import (
 const kmsFixtures = "../../tests/fixtures/doctor-csi-kms"
 
 // kmsResources are the reads of the check, in order: the labelled reads,
-// then the reference reads.
-var kmsResources = []string{"clusterroles", "clusterrolebindings", "roles", "rolebindings", "refs-clusterrolebindings", "refs-rolebindings"}
+// then the reference reads, then the aggregation read.
+var kmsResources = []string{"clusterroles", "clusterrolebindings", "roles", "rolebindings", "refs-clusterrolebindings", "refs-rolebindings", "refs-clusterroles"}
 
 // kmsCase sets up one case in a synthetic project and returns the project,
 // the PATH that holds the (never executed) kubectl, and the fake runner.
@@ -290,7 +291,12 @@ func runKMSCases(t *testing.T, realRender bool) {
 // did not check; (m) an entry that does not parse, a list with a continue
 // token, and an item without its name or namespace stop the check; (n) an
 // env name of the entry changes the render through the envsubst of the
-// render.
+// render; (o) a ClusterRole that another ClusterRole aggregates (by
+// matchLabels, by each operator of matchExpressions, or by an empty
+// selector), a selector that the check cannot evaluate, and a failed
+// aggregation read: no delete command; a selector that does not select
+// the role does not count, and neither does the role itself; (p) a render
+// that does not parse is malformed.
 func TestDoctorKMSCases(t *testing.T) { runKMSCases(t, false) }
 
 // TestDoctorKMSCasesWithTheRealRender runs the cases with the in-process
@@ -525,6 +531,9 @@ func TestDoctorKMSListShapes(t *testing.T) {
 				reason = rbacRead(ctx, r, "kubectl", "/k", "clusterrolebindings", kmsRefArgs, kmsParseRefFor(kmsKinds[1]), &refs)
 			case strings.HasPrefix(name, "ref-ns-"):
 				reason = rbacRead(ctx, r, "kubectl", "/k", "rolebindings", kmsRefArgs, kmsParseRefFor(kmsKinds[3]), &refs)
+			case strings.HasPrefix(name, "agg-"):
+				var roles []kmsAggRole
+				reason = rbacRead(ctx, r, "kubectl", "/k", "clusterroles", kmsRefArgs, kmsParseAgg, &roles)
 			default:
 				t.Fatalf("a list shape of no known shape")
 			}

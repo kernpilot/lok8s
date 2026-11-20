@@ -1,0 +1,1 @@
+  ! rook-ceph-csi-kms: ClusterRole rook-ceph-csi-kms-metadata (option metadata) is a candidate leftover: it has the label lok8s.dev/name=rook-ceph-csi-kms, and spec.bootstrap does not have the addon. It keeps its grant. It is aggregated into ClusterRole/dne-reader. Doctor prints no delete command for it.

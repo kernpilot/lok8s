@@ -17,7 +17,8 @@
 #   rolebindings
 #   refs-clusterrolebindings
 #   refs-rolebindings    the answer of that reference read (no selector), the
-#                        same forms
+#   refs-clusterroles    same forms; refs-clusterroles is the read of the
+#                        aggregating ClusterRoles
 #   fake-render-only     present: the render file is not a real render of the
 #                        addon (the Go twin's real render test skips the case)
 #   want                 the exact output of the check; @BASE@ stands for the
@@ -28,9 +29,17 @@
 # them as processes, not as shell functions). The render is the real
 # addons::render of the addon of this tree up to the kustomize build: the
 # values of the entry are merged, and the stand-in answers the build. No real
-# kubectl or kustomize runs and no cluster is reached. Only this file knows one
-# more read answer:
-#   hang <s> <json file>   the read ends after <s> seconds
+# kubectl or kustomize runs and no cluster is reached. Only this file knows two
+# more read answers:
+#   hang <s> <json file>   the read ends after <s> seconds (its sleep is a
+#                          child of the stand-in)
+#   early <json file>      the stand-in starts a child that ignores TERM (as a
+#                          credential plugin can), prints the list and exits
+#                          0 at once: the child stays in the process group of
+#                          the read
+# For these two the stand-in writes its pid to STUB_PID, its process group to
+# STUB_PGID, the clock (in microseconds) when it starts to STUB_START, and the
+# pid of its child to CHILD_PID.
 
 setup() {
   load "../test_helper"
@@ -59,6 +68,8 @@ setup() {
   cp -r "${_PROJECT_ROOT}/.lok8s/addons/rook-ceph-csi-kms" "${PATH_LOK8S}/addons/"
   unset LOK8S_CLUSTER_NAME KUSTOMIZE_PLUGIN_HOME
   export CALLS="${BATS_TEST_TMPDIR}/calls"
+  export STUB_PID="${BATS_TEST_TMPDIR}/kubectl.pid" STUB_PGID="${BATS_TEST_TMPDIR}/kubectl.pgid"
+  export STUB_START="${BATS_TEST_TMPDIR}/kubectl.start" CHILD_PID="${BATS_TEST_TMPDIR}/child.pid"
   export TMPDIR="${BATS_TEST_TMPDIR}/tmp"
   mkdir -p "${TMPDIR}"
 
@@ -84,10 +95,33 @@ if [[ ! -f "${CASE}/${res}" ]]; then
   exit 0
 fi
 read -r kind a b < "${CASE}/${res}"
+# _pids — the pid files: the clock, the stand-in and its process group (/proc,
+# else ps).
+_pids() {
+  local st
+  echo "${EPOCHREALTIME//[!0-9]/}" > "${STUB_START}"
+  echo "$$" > "${STUB_PID}"
+  if st="$(cat "/proc/$$/stat" 2>/dev/null)"; then
+    read -r _ _ st _ <<< "${st##*) }"
+    echo "${st}" > "${STUB_PGID}"
+  else
+    ps -o pgid= -p "$$" | tr -d ' ' > "${STUB_PGID}"
+  fi
+}
 case "${kind}" in
   json) cat "${FIX}/json/${a}" ;;
   fail) printf '%s\n' "${b}" >&2; exit "${a}" ;;
-  hang) sleep "${a}" 3>&-; cat "${FIX}/json/${b}" ;;
+  hang)
+    _pids
+    sleep "${a}" 3>&- &
+    echo "$!" > "${CHILD_PID}"
+    wait
+    cat "${FIX}/json/${b}" ;;
+  early)
+    _pids
+    bash -c 'trap "" TERM; echo "$$" > "${CHILD_PID}"; exec sleep 30' 3>&- &
+    while [[ ! -s "${CHILD_PID}" ]]; do sleep 0.01; done
+    cat "${FIX}/json/${a}" ;;
 esac
 STUB
   # The stand-in kustomize: the build of the bootstrap's render (its flags),
@@ -176,7 +210,7 @@ _assert_case() {
       want_calls+="--kubeconfig ${PATH_BASE}/.kubeconfig/rbac-test.yaml get ${res} --all-namespaces --selector ${SELECTOR} -o json --request-timeout=10s"$'\n'
     fi
   done
-  for res in clusterrolebindings rolebindings; do
+  for res in clusterrolebindings rolebindings clusterroles; do
     if [[ -f "${CASE}/refs-${res}" ]]; then
       want_calls+="--kubeconfig ${PATH_BASE}/.kubeconfig/rbac-test.yaml get ${res} --all-namespaces -o json --request-timeout=10s"$'\n'
     fi
@@ -251,6 +285,20 @@ _inline_case() {
 @test "kms: a render with a scalar document is malformed" { _case render-scalar-doc; }
 @test "kms: a render with a Role without a name is malformed" { _case render-item-no-name; }
 @test "kms: an env name of the entry changes the render through its envsubst" { _case render-env; }
+@test "kms: a build output that the render's yq cannot read is a failed render, and its error does not print" { _case render-yaml-error; }
+@test "kms: a ClusterRole that matchLabels or an empty selector selects gets no delete command" { _case aggregation-match-labels; }
+@test "kms: a ClusterRole that an In expression selects gets no delete command" { _case aggregation-in; }
+@test "kms: a ClusterRole that a NotIn expression selects gets no delete command" { _case aggregation-notin; }
+@test "kms: a ClusterRole that an Exists expression selects gets no delete command" { _case aggregation-exists; }
+@test "kms: a ClusterRole that a DoesNotExist expression selects gets no delete command" { _case aggregation-doesnotexist; }
+@test "kms: selectors that do not select a ClusterRole, and its own selector, keep its delete command" { _case aggregation-no-match; }
+@test "kms: an aggregation selector with an unknown operator gives no delete command" { _case aggregation-unknown-operator; }
+@test "kms: an In expression without values gives no delete command" { _case aggregation-in-without-values; }
+@test "kms: a NotIn expression without values gives no delete command" { _case aggregation-notin-without-values; }
+@test "kms: an Exists expression with values gives no delete command" { _case aggregation-exists-with-values; }
+@test "kms: a DoesNotExist expression with values gives no delete command" { _case aggregation-doesnotexist-with-values; }
+@test "kms: a failed aggregation read gives no ClusterRole a delete command" { _case aggregation-read-fails; }
+@test "kms: a candidate that aggregates another candidate keeps its command, and the other one gets none" { _case aggregation-by-a-candidate; }
 
 # The bootstrap refuses an entry's env name that is lo's own (Go:
 # addons.ProtectedEnvOverride, bash: bootstrap::_reserved_env_name): the
@@ -279,6 +327,19 @@ _inline_case() {
   [[ ! -e "${CALLS}" ]] || fail "a call ran: $(cat "${CALLS}")"
 }
 
+# The yq of doctor::_kms_ids sends its stderr to /dev/null: a stream that yq
+# cannot read (here an alias of an anchor that is not there, which yq names in
+# its error) gives the fixed reason only. The stand-in render gives that
+# stream as the output of a render that passed.
+@test "kms: a rendered stream that yq cannot read prints only the fixed reason" {
+  _setup_case "${FIX}/cases/extra-objects"
+  addons::render() { printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: *CANARY\n'; }
+  run doctor::_kms_check rbac.example
+  assert_success
+  assert_output "${NOT_CHECKED}the render of the addon is malformed (a document that is not an object, an object without a kind, or an RBAC object without a name or, for a Role or RoleBinding, a namespace)"
+  [[ ! -e "${CALLS}" ]] || fail "a call ran: $(cat "${CALLS}")"
+}
+
 # doctor::_kms_ids accepts a render only in the shape that both twins read
 # (Go: TestDoctorKMSRenderShapes reads the same files).
 @test "kms: the render shapes" {
@@ -295,7 +356,9 @@ _inline_case() {
         [[ "${got}" == "${want}" ]] || fail "${name}: ids ${got}, want ${want}"
         ;;
       malformed-*)
-        if got="$(doctor::_kms_ids "[]" < "${f}")"; then fail "${name}: accepted: ${got}"; fi
+        # Nothing on stdout or stderr: a parse error can quote the render.
+        if got="$(doctor::_kms_ids "[]" < "${f}" 2>&1)"; then fail "${name}: accepted: ${got}"; fi
+        [[ -z "${got}" ]] || fail "${name}: printed ${got}"
         ;;
       *) fail "${name}: neither ok- nor malformed-" ;;
     esac
@@ -315,6 +378,7 @@ _inline_case() {
       labelled-ns-*) shape=labelled-ns ;;
       ref-cluster-*) shape=ref-cluster ;;
       ref-ns-*) shape=ref-ns ;;
+      agg-*) shape=agg ;;
       *) fail "${name}: no known shape" ;;
     esac
     case "${name}" in
@@ -385,13 +449,30 @@ PROBE
 
 # The reads have the bound of the RBAC migration check: a read that does not
 # end is stopped, and the check prints the fixed reason once. The stand-in
-# answers a valid list after 5 s: without the bound, this fails.
+# answers a valid list after 5 s, and its sleep is its child. The stop ends
+# both (TERM to the group), so the check returns in less than 3.5 s: the
+# bound (1 s), the stop and the processes of the test. A stop that does
+# nothing fails here: the check then waits for the stand-in (5 s), or the
+# child still runs.
 @test "kms: the bound stops a hung read" {
   doctor::_rbac_bound() { echo 1; }
   _inline_case "$(cat "${FIX}/cases/disabled-leftovers/cluster.lok8s.yaml")" "hang 5 cr-metadata.json" \
     "${NOT_CHECKED}kubectl did not answer within 30 s (the cluster API, or a credential plugin that waits for a login)"
   run doctor::_kms_check rbac.example
   _assert_case
+  _assert_tree_gone 3500
+}
+
+# A read that ends first and leaves a child in its process group: the stop
+# of the group ends the child too, with TERM and, as the child ignores TERM,
+# with KILL after the grace (2 s). The reads give valid empty lists: no line.
+@test "kms: a read that ends first stops the child that it leaves in its group" {
+  _inline_case "$(cat "${FIX}/cases/disabled-leftovers/cluster.lok8s.yaml")" "early empty.json" ""
+  local res
+  for res in clusterrolebindings roles rolebindings; do echo "json empty.json" > "${CASE}/${res}"; done
+  run doctor::_kms_check rbac.example
+  _assert_case
+  _assert_tree_gone 4500
 }
 
 # The command builder checks the namespace again (Go: rbacDeleteCommandIn):
@@ -422,6 +503,55 @@ PROBE
   DOMAIN_NAME=rbac.example run main::doctor
   assert_output --partial "  ℹ RBAC migration check skipped: spec.bootstrap has no system-upgrade-controller and no redis-operator
   ℹ rook-ceph-csi-kms RBAC check skipped: no kubeconfig at .kubeconfig/rbac-test.yaml"
+}
+
+# _alive <pid> — 0 when the process runs (a zombie does not count): /proc
+# where it exists, else kill -0.
+_alive() {
+  if [[ -d /proc/self ]]; then
+    local stat
+    stat="$(cat "/proc/${1}/stat" 2>/dev/null)" || return 1
+    [[ -n "${stat}" ]] || return 1
+    stat="${stat##*) }"
+    [[ "${stat:0:1}" != Z ]]
+  else
+    kill -0 "${1}" 2>/dev/null
+  fi
+}
+
+# _group_alive <pgid> — 0 when a process of the process group runs (a zombie
+# does not count): /proc where it exists, else kill -0 of the group.
+_group_alive() {
+  if [[ -d /proc/self ]]; then
+    local f stat state pgrp
+    for f in /proc/[0-9]*/stat; do
+      { IFS= read -r stat < "${f}"; } 2>/dev/null || continue
+      read -r state _ pgrp _ <<< "${stat##*) }"
+      if [[ "${pgrp}" == "${1}" && "${state}" != Z ]]; then return 0; fi
+    done
+    return 1
+  fi
+  kill -0 -- "-${1}" 2>/dev/null
+}
+
+# _assert_tree_gone <max ms> — at once after the check returned: the
+# stand-in and its child no longer run, no process of their process group
+# runs, and the stand-in started less than <max ms> before. The stand-in
+# does not lead its group (the leader of doctor::_rbac_run does).
+_assert_tree_gone() {
+  local now="${EPOCHREALTIME//[!0-9]/}" start took pid pgid
+  start="$(cat "${STUB_START}")"
+  [[ "${start}" =~ ^[0-9]+$ ]] || fail "no clock in ${STUB_START}"
+  took=$(( (now - start) / 1000 ))
+  for pid in "$(cat "${STUB_PID}")" "$(cat "${CHILD_PID}")"; do
+    [[ "${pid}" =~ ^[0-9]+$ ]] || fail "a pid file has no pid"
+    ! _alive "${pid}" || fail "process ${pid} still runs after the check"
+  done
+  pgid="$(cat "${STUB_PGID}")"
+  [[ "${pgid}" =~ ^[0-9]+$ ]] || fail "no process group in ${STUB_PGID}"
+  [[ "${pgid}" != "$(cat "${STUB_PID}")" ]] || fail "the stand-in leads its process group"
+  ! _group_alive "${pgid}" || fail "a process of the group of the read still runs after the check"
+  (( took < ${1} )) || fail "the check took ${took} ms, want less than ${1} ms"
 }
 
 # Every case directory has a @test above, and the Go twin reads the same

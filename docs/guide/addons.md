@@ -1258,9 +1258,11 @@ that the render does not hold. Such an object is a candidate leftover: a
 label does not prove that the addon made it. A binding gets its delete
 command. A Role or a ClusterRole gets one only when no binding outside the
 candidates refers to it, and a ClusterRole only when it has no
-`rbac.authorization.k8s.io/aggregate-to-*` label. For that check, doctor
-reads all RoleBindings and ClusterRoleBindings without the label, so your
-own CephFS bindings (below) count too:
+`rbac.authorization.k8s.io/aggregate-to-*` label and no aggregation
+selector of another ClusterRole selects it. For these checks, doctor reads
+all RoleBindings, ClusterRoleBindings and ClusterRoles without the label, so
+your own CephFS bindings (below) and your own aggregated ClusterRoles count
+too:
 
 ```console
 $ lo doctor
