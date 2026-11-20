@@ -593,13 +593,22 @@ kubehz::space_wait_active() {
 # other unmapped owner show that uid, so "ours" proves nothing there. The
 # owner of a part could otherwise rename the fresh directory and put a
 # FIFO or a link in place of the ticket or the script. Prints the resolved
-# path. Returns 1 when TMPDIR cannot be resolved (silent: the caller
-# reports the failed write), 2 when a part fails (the message is printed).
+# path and a newline. A command substitution strips every trailing newline,
+# also those of a name, so a caller adds an x after the output and removes
+# the newline and the x (kubehz::_write_join_file). Returns 1 when TMPDIR
+# cannot be resolved, or when the resolved path is not absolute (silent:
+# the caller reports the failed write), 2 when a part fails (the message
+# is printed).
 # Usage: kubehz::space_join_tmp_dir
 kubehz::space_join_tmp_dir() {
   local dir="${TMPDIR:-/tmp}" real part rest meta uid mode why ovf="" unmapped
   [[ "${dir}" == /* ]] || dir="${PWD}/${dir}"
-  real=$(cd -P -- "${dir}" 2>/dev/null && pwd -P) || return 1
+  # pwd prints a newline: the x keeps the trailing newlines of a name.
+  # Without it, a TMPDIR whose name ends in a newline is checked under a
+  # shorter name, which is another path.
+  real=$(cd -P -- "${dir}" 2>/dev/null && pwd -P && printf x) || return 1
+  [[ "${real}" == /*$'\n'x ]] || return 1
+  real="${real%$'\n'x}"
   # pwd -P keeps a leading // (POSIX leaves it open); Go cleans it to /.
   while [[ "${real}" == //* ]]; do real="${real#/}"; done
   { read -r ovf < /proc/sys/kernel/overflowuid; } 2>/dev/null || ovf=""
@@ -698,10 +707,14 @@ kubehz::_write_join_file() {
   trap 'kubehz::_join_write_signalled' INT TERM HUP
   node::assert_node_name "${node_name}" || return 2
   # rc 2: the check printed why (no cause); rc 1: TMPDIR cannot be resolved.
-  dir=$(kubehz::space_join_tmp_dir) || {
+  # The x keeps the trailing newlines of the name (see
+  # kubehz::space_join_tmp_dir): without it, mktemp would make the
+  # directory under a shorter name, which the check did not read.
+  dir=$(kubehz::space_join_tmp_dir && printf x) || {
     (( $? == 2 )) || printf '%s\n' "the temp dir (TMPDIR) cannot be resolved"
     return 1
   }
+  dir="${dir%$'\n'x}"
   priv=$(umask 077 && mktemp -d "${dir%/}/kubehz-join-XXXXXXXXXX" 2>/dev/null) || {
     printf '%s\n' "mktemp -d failed in ${dir}"
     return 1

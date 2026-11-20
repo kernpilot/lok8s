@@ -258,8 +258,19 @@ func processGone(pid int) bool {
 	if err != nil {
 		return false
 	}
-	_, rest, ok := strings.Cut(string(raw), ") ")
-	return ok && strings.HasPrefix(rest, "Z")
+	f := statFields(raw)
+	return len(f) > 0 && f[0] == "Z"
+}
+
+// statFields returns the fields of /proc/<pid>/stat after the name, which
+// ends at the last ")" (the name itself can hold ") "): the state first,
+// then the parent pid and the process group.
+func statFields(raw []byte) []string {
+	i := bytes.LastIndexByte(raw, ')')
+	if i < 0 {
+		return nil
+	}
+	return strings.Fields(string(raw[i+1:]))
 }
 
 // After the cancel, Run returns the error of the context also when the

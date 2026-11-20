@@ -15,13 +15,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"github.com/kernpilot/lok8s/internal/testutil"
 )
 
 // ── provision guards ──────────────────────────────────────
@@ -378,6 +384,120 @@ func TestStatusPassesPhaseThrough(t *testing.T) {
 	got, err := d.Status(t.Context(), "test.dev")
 	if err != nil || got != "Provisioned" {
 		t.Fatalf("got %q, %v", got, err)
+	}
+}
+
+// statusHangRunner is a kubectl whose read against the management cluster
+// does not end: it returns when its context ends, or after fallback with a
+// phase and no error, as a read that ended on its own. With late, a read
+// whose context ended returns the phase and nil, as a kubectl that handled
+// SIGTERM and exited 0.
+type statusHangRunner struct {
+	late     bool
+	fallback time.Duration
+	cmd      execx.Cmd
+	bounded  bool // the context of the read has a deadline
+}
+
+func (r *statusHangRunner) Run(ctx context.Context, c execx.Cmd) error {
+	r.cmd = c
+	_, r.bounded = ctx.Deadline()
+	select {
+	case <-ctx.Done():
+		if r.late {
+			c.Stdout.Write([]byte("Provisioned"))
+			return nil
+		}
+		return errors.New("signal: terminated")
+	case <-time.After(r.fallback):
+		c.Stdout.Write([]byte("Provisioned"))
+		return nil
+	}
+}
+
+// The whole status read has a bound (statusReadBound): a management
+// cluster that does not answer cannot stop Status (bash twin:
+// capi::_status_bounded). The parent context never ends: only the bound
+// can stop the read, and the read that it stopped gives NotFound.
+func TestStatusReadIsBounded(t *testing.T) {
+	defer func(v time.Duration) { statusReadBound = v }(statusReadBound)
+	statusReadBound = 20 * time.Millisecond
+	const fallback = 5 * time.Second
+	d, _, _ := testDriver(t)
+	writeSpec(t, d, "test.dev", "kind: Capi\nmetadata: {name: test-prod}\nspec:\n  managementCluster: {domain: mgmt.dev}\n")
+	r := &statusHangRunner{fallback: fallback}
+	d.deps.Runner = r
+	start := time.Now()
+	got, err := d.Status(context.Background(), "test.dev")
+	if took := time.Since(start); took >= fallback {
+		t.Errorf("Status took %s: the bound did not stop the read", took)
+	}
+	if err != nil || got != "NotFound" {
+		t.Errorf("got %q, %v, want NotFound", got, err)
+	}
+	if !r.bounded || r.cmd.WaitDelay != statusReadGrace || !r.cmd.ProcessGroup {
+		t.Errorf("deadline=%v WaitDelay=%s ProcessGroup=%v, want a deadline, %s and true",
+			r.bounded, r.cmd.WaitDelay, r.cmd.ProcessGroup, statusReadGrace)
+	}
+	// An empty stdin, not the terminal (a nil Stdin): the read runs as its
+	// own process group, where a credential plugin that reads the terminal
+	// would stop until the bound.
+	if r.cmd.Stdin == nil {
+		t.Error("no Stdin (the terminal), want an empty stdin")
+	} else if b, _ := io.ReadAll(r.cmd.Stdin); len(b) != 0 {
+		t.Errorf("stdin %q, want an empty stdin", b)
+	}
+}
+
+// A read that the bound stopped gives NotFound, also when kubectl handled
+// SIGTERM and printed a phase and exited 0 (the ctx.Err() guard of
+// Status). The fake returns the phase and nil only after the context of the
+// read ended.
+func TestStatusReadStoppedAtTheBoundIsNotFoundAlsoAtExitZero(t *testing.T) {
+	defer func(v time.Duration) { statusReadBound = v }(statusReadBound)
+	statusReadBound = 20 * time.Millisecond
+	d, _, _ := testDriver(t)
+	writeSpec(t, d, "test.dev", "kind: Capi\nmetadata: {name: test-prod}\nspec:\n  managementCluster: {domain: mgmt.dev}\n")
+	d.deps.Runner = &statusHangRunner{late: true, fallback: 5 * time.Second}
+	got, err := d.Status(context.Background(), "test.dev")
+	if err != nil || got != "NotFound" {
+		t.Errorf("got %q, %v, want NotFound", got, err)
+	}
+}
+
+// statusReadBoundDefault is statusReadBound before a test makes it short.
+var statusReadBoundDefault = statusReadBound
+
+// TestStatusReadBoundMatchesTheBashTwin: the bound and the grace of the
+// status read are the same in both twins. bash: capi::_status_bound, and
+// the -k option of timeout(1) in capi::_status_bounded. The test reads the
+// embedded mirror; .lok8s is the same bytes
+// (TestEmbeddedMirrorMatchesLegacyTree).
+func TestStatusReadBoundMatchesTheBashTwin(t *testing.T) {
+	const file = "internal/assets/lok8s/drivers/capi/main"
+	raw, err := os.ReadFile(filepath.Join(testutil.RepoRoot(t), filepath.FromSlash(file)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		what, pattern string
+		want          time.Duration
+	}{
+		{"capi::_status_bound (statusReadBound)", `(?m)^capi::_status_bound\(\) \{ echo ([0-9]+); \}$`, statusReadBoundDefault},
+		{"the -k option of timeout (statusReadGrace)", `(?m)^\s+timeout -k ([0-9]+) "\$\(capi::_status_bound\)" "\$@"$`, statusReadGrace},
+	} {
+		m := regexp.MustCompile(tc.pattern).FindAllSubmatch(raw, -1)
+		if len(m) != 1 {
+			t.Errorf("%s: %d matches for %s, want one", file, len(m), tc.what)
+			continue
+		}
+		n, err := strconv.Atoi(string(m[0][1]))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := time.Duration(n) * time.Second; got != tc.want {
+			t.Errorf("%s: %s is %s, want %s (internal/driver/capi/capi.go)", file, tc.what, got, tc.want)
+		}
 	}
 }
 

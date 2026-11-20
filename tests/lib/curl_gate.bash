@@ -53,7 +53,8 @@
 # {, $(, <(, &&, ||, a YAML list item "- ", or the words if, then, do,
 # else, elif, while, until and time. Before it can stand wrappers: command,
 # exec, env, xargs, timeout, nice, nohup, sudo, stdbuf, setsid, builtin,
-# their options and values (also quoted: sudo -u "${u}"), and assignment
+# bounded (the tick budget helper of the agent CronJob, which runs its
+# arguments under timeout), their options and values (also quoted: sudo -u "${u}"), and assignment
 # words (NAME= or NAME+=, then any value: quoted, $( ) or none). The words
 # are shell words: white space in quotes or in a $( ) does not end one. A
 # curl in a quoted string (an echo of a command for the user) and comment
@@ -293,7 +294,7 @@ curl_gate() {
     # An operator of the shell in the code of a word (not in its quotes or
     # in a ${ } expansion): the wrapper search stops there.
     function has_op(w) { gsub(/"[^"]*"|\047[^\047]*\047|\$\{[^}]*\}/, "", w); return w ~ /[|;&(){}<>`]/ }
-    function is_wrapper(w) { return w ~ /^(command|exec|env|xargs|timeout|nice|nohup|sudo|stdbuf|setsid|builtin)$/ }
+    function is_wrapper(w) { return w ~ /^(command|exec|env|xargs|timeout|nice|nohup|sudo|stdbuf|setsid|builtin|bounded)$/ }
     # An assignment word: NAME= or NAME+= and then anything (a quoted or
     # unquoted value, a $( ), or nothing).
     function is_assign(w) { return w ~ /^[A-Za-z_][A-Za-z0-9_]*\+?=/ }

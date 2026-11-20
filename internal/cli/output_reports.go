@@ -18,7 +18,6 @@ import (
 
 	"github.com/kernpilot/lok8s/internal/config"
 	"github.com/kernpilot/lok8s/internal/domain"
-	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
@@ -151,18 +150,14 @@ func gatherStatus(ctx context.Context, deps statusDeps, domainName string) statu
 		}
 	}
 
-	hasKubectl := deps.hasKubectl
-	if hasKubectl == nil {
-		hasKubectl = func() bool { _, ok := execx.Look(deps.paths, "kubectl"); return ok }
-	}
-	kubeconfig := os.Getenv("KUBECONFIG")
-	if hasKubectl() && fsutil.FileExists(kubeconfig) {
+	// The /readyz probe first, then each read with its bound (runStatus).
+	if statusKubectlOK(deps) && statusReachable(ctx, deps) {
 		var nodes strings.Builder
-		if err := deps.runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"get", "nodes", "-o", "json", statusRequestTimeout}, Stdout: &nodes, Stderr: io.Discard}); err == nil {
+		if err := statusKubectl(ctx, deps.runner, &nodes, "get", "nodes", "-o", "json"); err == nil {
 			r.Nodes = parseNodes(nodes.String())
 		}
 		var inv strings.Builder
-		if err := deps.runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: []string{"get", "clusterinventories.lok8s.dev", "cluster", "-o", "json", statusRequestTimeout}, Stdout: &inv, Stderr: io.Discard}); err == nil {
+		if err := statusKubectl(ctx, deps.runner, &inv, "get", "clusterinventories.lok8s.dev", "cluster", "-o", "json"); err == nil {
 			var doc map[string]any
 			if json.Unmarshal([]byte(inv.String()), &doc) == nil {
 				r.Inventory = doc
