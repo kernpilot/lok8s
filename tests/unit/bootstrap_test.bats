@@ -3103,7 +3103,7 @@ _dry_canned_diff() {
 diff -u -N /tmp/LIVE-1/v1.ConfigMap.default.testcni /tmp/MERGED-1/v1.ConfigMap.default.testcni
 --- /tmp/LIVE-1/v1.ConfigMap.default.testcni	2026-10-12 10:00:00.000000000 +0000
 +++ /tmp/MERGED-1/v1.ConfigMap.default.testcni	2026-10-12 10:00:00.000000000 +0000
-@@ -3,4 +3,5 @@
+@@ -3,3 +3,4 @@
  kind: ConfigMap
  metadata:
    name: testcni
@@ -3428,11 +3428,12 @@ STANDIN
 }
 
 # _dry_debug_lines <label> <diff-path> — what a dry run prints at debug for
-# the canned diff of <label>: one line for each object, then the line that
-# names the .diff file at <diff-path> ("" without --render-dir). The Go twin
-# is wantDebugDiffLines.
+# the canned diff of <label>: one line for each object of the manifest that
+# differs (the render holds testcni only: extra and other are in the diff,
+# not in the manifest), then the line that names the .diff file at
+# <diff-path> ("" without --render-dir). The Go twin is wantDebugDiffLines.
 _dry_debug_lines() {
-  printf '[debug] bootstrap dry-run: %s: differs: v1 ConfigMap default/%s\n' "${1}" testcni "${1}" extra "${1}" other
+  printf '[debug] bootstrap dry-run: %s: differs: v1 ConfigMap default/%s\n' "${1}" testcni
   if [[ -z "${2}" ]]; then
     printf '[debug] bootstrap dry-run: %s: lo does not print the diff text: it can quote a value of the manifest. To keep it in a file, do the dry run again with --render-dir <dir> (LO_SHOW_SENSITIVE_OUTPUT=1 prints it)\n' "${1}"
   else
@@ -3494,6 +3495,8 @@ _dry_debug_lines() {
   refute_output --partial "diff-text-canary-1111"
   refute_output --partial "+  foo: bar"
   refute_output --partial "@@ "
+  refute_output --partial "differs: v1 ConfigMap default/extra"
+  refute_output --partial "differs: v1 ConfigMap default/other"
 }
 
 # LO_SHOW_SENSITIVE_OUTPUT=1 at debug prints the diff text after a [warn]
@@ -3521,22 +3524,89 @@ _dry_debug_lines() {
   done
 }
 
-# bootstrap::_diff_objects names the objects of the --- headers of the LIVE
-# tree only; any other line names nothing. The Go twin is TestDiffObjects
-# (the same cases).
+# bootstrap::_diff_objects names the objects of the --- file headers of the
+# LIVE tree that the unified-diff framing allows and that are objects of the
+# manifest, escaped; any other line names nothing. The Go twin is
+# TestDiffObjects (the same cases, and the same manifest: each object that
+# the cases name, and "anyns", a ConfigMap with no namespace).
 @test "bootstrap::_diff_objects names the objects of the LIVE headers only" {
   local -r ts=$'\t2026-10-12 10:00:00.000000000 +0000'
-  _objs() { run bootstrap::_diff_objects "${1}"; assert_success; assert_output "${2}"; }
-  _objs "--- /tmp/LIVE-1/v1.ConfigMap.default.cfg${ts}"$'\n'"+++ /tmp/MERGED-1/v1.ConfigMap.default.cfg${ts}" "v1 ConfigMap default/cfg"
-  _objs "--- /tmp/LIVE-22/apps.v1.Deployment.web.front${ts}" "apps/v1 Deployment web/front"
-  _objs "--- /tmp/LIVE-3/rbac.authorization.k8s.io.v1.Role.ns.r" "rbac.authorization.k8s.io/v1 Role ns/r"
-  _objs "--- /tmp/LIVE-4/rbac.authorization.k8s.io.v1.ClusterRole..admin${ts}" "rbac.authorization.k8s.io/v1 ClusterRole admin"
-  _objs "--- /tmp/LIVE-5/v1beta1.Ingress.default.a.example.com${ts}" "v1beta1 Ingress default/a.example.com"
-  _objs $'the files differ\n' ""
-  _objs "--- /tmp/MERGED-1/v1.ConfigMap.default.cfg${ts}"$'\n'"--- a/v1.ConfigMap.default.cfg" ""
-  _objs "--- v1.ConfigMap.default.cfg" ""
-  _objs "--- /tmp/LIVE-1/v1.Secret.default.s${ts}"$'\n@@ -1 +1 @@\n--- diff-text-canary-1111\n--- LIVE-9/diff-text-canary-1111' "v1 Secret default/s"
-  _objs "--- /tmp/LIVE-1/configmap-cfg.yaml${ts}"$'\n'"--- /tmp/LIVE-1/V1.ConfigMap.default.cfg" ""
+  local m
+  m="$(cat <<'YAML'
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: cfg, namespace: default}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: front, namespace: web}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: r, namespace: ns}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: admin}
+---
+apiVersion: v1beta1
+kind: Ingress
+metadata: {name: a.example.com, namespace: default}
+---
+apiVersion: v1
+kind: Secret
+metadata: {name: s, namespace: default}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: anyns}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: "we\x1bb", namespace: default}
+YAML
+)"
+  # _objs <case> <want>: the diff comes on stdin.
+  _objs() {
+    local d
+    d="$(cat)"
+    run bootstrap::_diff_objects "${d}" "${m}"
+    assert_success || { echo "case: ${1}" >&2; return 1; }
+    assert_output "${2}" || { echo "case: ${1}" >&2; return 1; }
+  }
+  # _dfile <name>: the diff, --- and +++ lines of the file of one object.
+  _dfile() {
+    printf 'diff -u -N /tmp/LIVE-1/%s /tmp/MERGED-1/%s\n' "${1}" "${1}"
+    printf -- '--- /tmp/LIVE-1/%s%s\n+++ /tmp/MERGED-1/%s%s\n' "${1}" "${ts}" "${1}" "${ts}"
+  }
+  _hunk() { printf '@@ -1 +1 @@\n-a: x\n+a: y\n'; }
+  _objs "core" "v1 ConfigMap default/cfg" < <(_dfile v1.ConfigMap.default.cfg && _hunk)
+  _objs "group" "apps/v1 Deployment web/front" < <(_dfile apps.v1.Deployment.web.front && _hunk)
+  _objs "dotted group" "rbac.authorization.k8s.io/v1 Role ns/r" < <(_dfile rbac.authorization.k8s.io.v1.Role.ns.r && _hunk)
+  _objs "cluster-scoped" "rbac.authorization.k8s.io/v1 ClusterRole admin" < <(_dfile rbac.authorization.k8s.io.v1.ClusterRole..admin && _hunk)
+  _objs "dotted name" "v1beta1 Ingress default/a.example.com" < <(_dfile v1beta1.Ingress.default.a.example.com && _hunk)
+  _objs "a header at the start, no diff line" "v1 ConfigMap default/cfg" \
+    < <(printf -- '--- /tmp/LIVE-1/v1.ConfigMap.default.cfg%s\n+++ /tmp/MERGED-1/v1.ConfigMap.default.cfg%s\n' "${ts}" "${ts}")
+  _objs "external diff tool, no header" "" < <(printf 'the files differ\n')
+  _objs "not the LIVE tree" "" < <(printf -- '--- /tmp/MERGED-1/v1.ConfigMap.default.cfg%s\n+++ a/v1.ConfigMap.default.cfg\n' "${ts}")
+  _objs "no directory" "" < <(printf -- '--- v1.ConfigMap.default.cfg\n+++ v1.ConfigMap.default.cfg\n')
+  _objs "not the kubectl shape" "" < <(_dfile configmap-cfg.yaml && _hunk && _dfile V1.ConfigMap.default.cfg && _hunk)
+  _objs "no +++ line after the header" "" < <(printf -- '--- /tmp/LIVE-1/v1.ConfigMap.default.cfg%s\n@@ -1 +1 @@\n' "${ts}")
+  _objs "a header in no manifest object" "" < <(_dfile v1.ConfigMap.default.unknown && _hunk)
+  _objs "another namespace" "" < <(_dfile v1.ConfigMap.other.cfg && _hunk)
+  _objs "another version" "" < <(_dfile apps.v2.Deployment.web.front && _hunk)
+  _objs "no manifest namespace: any namespace" "v1 ConfigMap kube-system/anyns" < <(_dfile v1.ConfigMap.kube-system.anyns && _hunk)
+  _objs "a name with an ESC byte, escaped" 'v1 ConfigMap default/we\x1bb' < <(_dfile $'v1.ConfigMap.default.we\x1bb' && _hunk)
+  _objs "a forged header inside a hunk" "v1 Secret default/s" \
+    < <(_dfile v1.Secret.default.s && printf -- '@@ -1,2 +1,2 @@\n--- /tmp/LIVE-1/v1.ConfigMap.default.cfg%s\n+++ /tmp/MERGED-1/v1.ConfigMap.default.cfg%s\n a: x\n' "${ts}" "${ts}")
+  _objs "two files" $'v1 Secret default/s\nv1 ConfigMap default/cfg' \
+    < <(_dfile v1.Secret.default.s && _hunk && _dfile v1.ConfigMap.default.cfg && _hunk)
+  _objs "two hunks and a no-newline line" $'v1 Secret default/s\nv1 ConfigMap default/cfg' \
+    < <(_dfile v1.Secret.default.s && _hunk && printf '@@ -5,2 +5 @@\n c\n-d\n\\ No newline at end of file\n' && _dfile v1.ConfigMap.default.cfg && _hunk)
+  _objs "a line that breaks the framing stops the parse" "v1 Secret default/s" \
+    < <(_dfile v1.Secret.default.s && printf '@@ -1 +1 @@\n-a: x\n+a: y\ngarbage\n' && _dfile v1.ConfigMap.default.cfg && _hunk)
+  _objs "a removed line past the count stops the parse" "v1 Secret default/s" \
+    < <(_dfile v1.Secret.default.s && printf '@@ -1 +1 @@\n-a: x\n-b: z\n+a: y\n' && _dfile v1.ConfigMap.default.cfg && _hunk)
 }
 
 # A clean diff (rc 0) with a kubectl warning on stderr is unchanged, rc 0,

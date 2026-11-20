@@ -33,7 +33,7 @@ import (
 const cannedDiff = `diff -u -N /tmp/LIVE-1/v1.ConfigMap.default.testcni /tmp/MERGED-1/v1.ConfigMap.default.testcni
 --- /tmp/LIVE-1/v1.ConfigMap.default.testcni	2026-10-12 10:00:00.000000000 +0000
 +++ /tmp/MERGED-1/v1.ConfigMap.default.testcni	2026-10-12 10:00:00.000000000 +0000
-@@ -3,4 +3,5 @@
+@@ -3,3 +3,4 @@
  kind: ConfigMap
  metadata:
    name: testcni
@@ -510,13 +510,13 @@ func TestDryRunDiffersWithKubectlTextStillDiffers(t *testing.T) {
 }
 
 // wantDebugDiffLines is what a dry run prints at debug for the canned diff
-// (diffOutWithCanary) of label: one line for each object, then the line
-// that names the .diff file at diffPath ("" without --render-dir).
+// (diffOutWithCanary) of label: one line for each object of the manifest
+// that differs (the render holds testcni only: extra and other are in the
+// diff, not in the manifest), then the line that names the .diff file at
+// diffPath ("" without --render-dir).
 func wantDebugDiffLines(label, diffPath string) []string {
 	lines := []string{
 		"[debug] bootstrap dry-run: " + label + ": differs: v1 ConfigMap default/testcni\n",
-		"[debug] bootstrap dry-run: " + label + ": differs: v1 ConfigMap default/extra\n",
-		"[debug] bootstrap dry-run: " + label + ": differs: v1 ConfigMap default/other\n",
 	}
 	if diffPath == "" {
 		return append(lines, "[debug] bootstrap dry-run: "+label+": lo does not print the diff text: it can quote a value of the manifest. To keep it in a file, do the dry run again with --render-dir <dir> (LO_SHOW_SENSITIVE_OUTPUT=1 prints it)\n")
@@ -541,7 +541,8 @@ func TestDryRunDebugDiffWithoutRenderDir(t *testing.T) {
 			t.Errorf("stderr misses %q:\n%s", line, stderrOf(e))
 		}
 	}
-	refuteOutput(t, stdoutOf(e)+stderrOf(e), diffTextCanary, "+  foo: bar", "@@ ")
+	refuteOutput(t, stdoutOf(e)+stderrOf(e), diffTextCanary, "+  foo: bar", "@@ ",
+		"differs: v1 ConfigMap default/extra", "differs: v1 ConfigMap default/other")
 }
 
 // LO_SHOW_SENSITIVE_OUTPUT=1 at debug prints the diff text after a [warn]
@@ -571,28 +572,93 @@ func TestDryRunDiffTextUnderShowSensitive(t *testing.T) {
 	}
 }
 
-// diffObjects names the objects of the --- headers of the LIVE tree only,
-// in the objectLabel shape; any other line names nothing.
+// diffManifest is the manifest (the diff input) of TestDiffObjects: each
+// object that its cases name, and "anyns", a ConfigMap with no namespace.
+const diffManifest = `apiVersion: v1
+kind: ConfigMap
+metadata: {name: cfg, namespace: default}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: front, namespace: web}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: r, namespace: ns}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: admin}
+---
+apiVersion: v1beta1
+kind: Ingress
+metadata: {name: a.example.com, namespace: default}
+---
+apiVersion: v1
+kind: Secret
+metadata: {name: s, namespace: default}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: anyns}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: "we\x1bb", namespace: default}
+`
+
+// diffFile is the `diff`, `--- ` and `+++ ` lines of the file of one
+// object (its kubectl file name), as kubectl diff prints them.
+func diffFile(name string) string {
+	const ts = "\t2026-10-12 10:00:00.000000000 +0000"
+	return "diff -u -N /tmp/LIVE-1/" + name + " /tmp/MERGED-1/" + name + "\n" +
+		"--- /tmp/LIVE-1/" + name + ts + "\n" +
+		"+++ /tmp/MERGED-1/" + name + ts + "\n"
+}
+
+// diffObjects names the objects of the --- file headers of the LIVE tree
+// that the unified-diff framing allows and that are objects of the
+// manifest, in the objectLabel shape, escaped; any other line names
+// nothing. The bats twin is "bootstrap::_diff_objects names the objects of
+// the LIVE headers only" (the same cases).
 func TestDiffObjects(t *testing.T) {
 	const ts = "\t2026-10-12 10:00:00.000000000 +0000"
+	hunk := "@@ -1 +1 @@\n-a: x\n+a: y\n"
 	for _, tc := range []struct {
 		name string
 		diff string
 		want []string
 	}{
-		{"core", "--- /tmp/LIVE-1/v1.ConfigMap.default.cfg" + ts + "\n+++ /tmp/MERGED-1/v1.ConfigMap.default.cfg" + ts, []string{"v1 ConfigMap default/cfg"}},
-		{"group", "--- /tmp/LIVE-22/apps.v1.Deployment.web.front" + ts, []string{"apps/v1 Deployment web/front"}},
-		{"dotted group", "--- /tmp/LIVE-3/rbac.authorization.k8s.io.v1.Role.ns.r", []string{"rbac.authorization.k8s.io/v1 Role ns/r"}},
-		{"cluster-scoped", "--- /tmp/LIVE-4/rbac.authorization.k8s.io.v1.ClusterRole..admin" + ts, []string{"rbac.authorization.k8s.io/v1 ClusterRole admin"}},
-		{"dotted name", "--- /tmp/LIVE-5/v1beta1.Ingress.default.a.example.com" + ts, []string{"v1beta1 Ingress default/a.example.com"}},
+		{"core", diffFile("v1.ConfigMap.default.cfg") + hunk, []string{"v1 ConfigMap default/cfg"}},
+		{"group", diffFile("apps.v1.Deployment.web.front") + hunk, []string{"apps/v1 Deployment web/front"}},
+		{"dotted group", diffFile("rbac.authorization.k8s.io.v1.Role.ns.r") + hunk, []string{"rbac.authorization.k8s.io/v1 Role ns/r"}},
+		{"cluster-scoped", diffFile("rbac.authorization.k8s.io.v1.ClusterRole..admin") + hunk, []string{"rbac.authorization.k8s.io/v1 ClusterRole admin"}},
+		{"dotted name", diffFile("v1beta1.Ingress.default.a.example.com") + hunk, []string{"v1beta1 Ingress default/a.example.com"}},
+		{"a header at the start, no diff line", "--- /tmp/LIVE-1/v1.ConfigMap.default.cfg" + ts + "\n+++ /tmp/MERGED-1/v1.ConfigMap.default.cfg" + ts, []string{"v1 ConfigMap default/cfg"}},
 		{"external diff tool, no header", "the files differ\n", nil},
-		{"not the LIVE tree", "--- /tmp/MERGED-1/v1.ConfigMap.default.cfg" + ts + "\n--- a/v1.ConfigMap.default.cfg", nil},
-		{"no directory", "--- v1.ConfigMap.default.cfg", nil},
-		{"a removed hunk line", "--- /tmp/LIVE-1/v1.Secret.default.s" + ts + "\n@@ -1 +1 @@\n--- " + diffTextCanary + "\n--- LIVE-9/" + diffTextCanary, []string{"v1 Secret default/s"}},
-		{"not the kubectl shape", "--- /tmp/LIVE-1/configmap-cfg.yaml" + ts + "\n--- /tmp/LIVE-1/V1.ConfigMap.default.cfg", nil},
+		{"not the LIVE tree", "--- /tmp/MERGED-1/v1.ConfigMap.default.cfg" + ts + "\n+++ a/v1.ConfigMap.default.cfg", nil},
+		{"no directory", "--- v1.ConfigMap.default.cfg\n+++ v1.ConfigMap.default.cfg", nil},
+		{"not the kubectl shape", diffFile("configmap-cfg.yaml") + hunk + diffFile("V1.ConfigMap.default.cfg") + hunk, nil},
+		{"no +++ line after the header", "--- /tmp/LIVE-1/v1.ConfigMap.default.cfg" + ts + "\n@@ -1 +1 @@", nil},
+		{"a header in no manifest object", diffFile("v1.ConfigMap.default.unknown") + hunk, nil},
+		{"another namespace", diffFile("v1.ConfigMap.other.cfg") + hunk, nil},
+		{"another version", diffFile("apps.v2.Deployment.web.front") + hunk, nil},
+		{"no manifest namespace: any namespace", diffFile("v1.ConfigMap.kube-system.anyns") + hunk, []string{"v1 ConfigMap kube-system/anyns"}},
+		{"a name with an ESC byte, escaped", diffFile("v1.ConfigMap.default.we\x1bb") + hunk, []string{`v1 ConfigMap default/we\x1bb`}},
+		{"a forged header inside a hunk", diffFile("v1.Secret.default.s") +
+			"@@ -1,2 +1,2 @@\n--- /tmp/LIVE-1/v1.ConfigMap.default.cfg" + ts + "\n+++ /tmp/MERGED-1/v1.ConfigMap.default.cfg" + ts + "\n a: x\n",
+			[]string{"v1 Secret default/s"}},
+		{"two files", diffFile("v1.Secret.default.s") + hunk + diffFile("v1.ConfigMap.default.cfg") + hunk,
+			[]string{"v1 Secret default/s", "v1 ConfigMap default/cfg"}},
+		{"two hunks and a no-newline line", diffFile("v1.Secret.default.s") + hunk + "@@ -5,2 +5 @@\n c\n-d\n\\ No newline at end of file\n" + diffFile("v1.ConfigMap.default.cfg") + hunk,
+			[]string{"v1 Secret default/s", "v1 ConfigMap default/cfg"}},
+		{"a line that breaks the framing stops the parse", diffFile("v1.Secret.default.s") + "@@ -1 +1 @@\n-a: x\n+a: y\ngarbage\n" + diffFile("v1.ConfigMap.default.cfg") + hunk,
+			[]string{"v1 Secret default/s"}},
+		{"a removed line past the count stops the parse", diffFile("v1.Secret.default.s") + "@@ -1 +1 @@\n-a: x\n-b: z\n+a: y\n" + diffFile("v1.ConfigMap.default.cfg") + hunk,
+			[]string{"v1 Secret default/s"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := diffObjects(tc.diff); !slices.Equal(got, tc.want) {
+			if got := diffObjects(tc.diff, diffManifest); !slices.Equal(got, tc.want) {
 				t.Errorf("diffObjects = %q, want %q", got, tc.want)
 			}
 		})

@@ -1886,7 +1886,7 @@ bootstrap::_diff_manifest() {
   case "${_drc}" in
     0) echo unchanged; return 0 ;;
     1)
-      [[ -z "${DEBUG:-}" ]] || bootstrap::_debug_diff "${label}" "${stem}" "${_diff}"
+      [[ -z "${DEBUG:-}" ]] || bootstrap::_debug_diff "${label}" "${stem}" "${_diff}" "${diff_input}"
       # One `--- ` header per object that differs (GNU diff -u -N over the
       # LIVE and MERGED trees); an object the live side lacks shows an
       # empty old side, the hunk `@@ -0,0 `. An external diff tool
@@ -1921,20 +1921,21 @@ bootstrap::_diff_manifest() {
   return 0
 }
 
-# bootstrap::_debug_diff <label> <stem> <diff>
+# bootstrap::_debug_diff <label> <stem> <diff> <diff-input>
 # Prints at debug what a diff with differences (rc 1) found, without the diff
-# text: one line for each object that differs (bootstrap::_diff_objects), then
-# where the text is (${bootstrap_render_dir}/<stem>.diff under --render-dir).
-# The diff text can quote a value of the manifest: kubectl masks only the data
-# of a core v1 Secret. It prints only under LO_SHOW_SENSITIVE_OUTPUT=1, after a
-# [warn] line. The Go twin: Engine.debugDiff (the same bytes).
+# text: one line for each object of <diff-input> (the manifest that kubectl
+# diff got) that differs (bootstrap::_diff_objects), then where the text is
+# (${bootstrap_render_dir}/<stem>.diff under --render-dir). The diff text can
+# quote a value of the manifest: kubectl masks only the data of a core v1
+# Secret. It prints only under LO_SHOW_SENSITIVE_OUTPUT=1, after a [warn]
+# line. The Go twin: Engine.debugDiff (the same bytes).
 bootstrap::_debug_diff() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the diff text can quote a Secret value
   local _label="${1}" _stem="${2}" _obj
   while IFS= read -r _obj; do
     debug "bootstrap dry-run: ${_label}: differs: ${_obj}"
-  done < <(bootstrap::_diff_objects "${3}")
+  done < <(bootstrap::_diff_objects "${3}" "${4-}")
   if kapply::show_sensitive; then
     if [[ -n "${3}" ]]; then
       warn "bootstrap dry-run: ${_label}: LO_SHOW_SENSITIVE_OUTPUT=1: lo shows the diff text, which can quote a value of the manifest"
@@ -1948,35 +1949,132 @@ bootstrap::_debug_diff() {
   return 0
 }
 
-# bootstrap::_diff_objects <diff>
-# Names the objects of a `kubectl diff` from its `--- ` header lines (one for
-# each object that differs), one per line: `<apiVersion> <kind>
+# bootstrap::_diff_objects <diff> <manifest>
+# Names the objects of a `kubectl diff` from the `--- ` file headers of its
+# unified-diff framing, one per line: `<apiVersion> <kind>
 # <namespace>/<name>`, or `<apiVersion> <kind> <name>` for a cluster-scoped
-# object. kubectl names the file of an object in its LIVE and MERGED trees
-# [<group>.]<version>.<Kind>.<namespace>.<name> (k8s.io/kubectl/pkg/cmd/diff,
-# InfoObject.Name). A header names an object only when its path is a file of
-# the LIVE tree of kubectl (a directory whose name starts with LIVE-) with the
-# kubectl file name. Any other header (an external diff tool, a removed line
-# of a hunk that starts with "-- ") names nothing: lo prints a name only,
-# never a line of the diff text. The Go twin: diffObjects (the same regex).
+# object, escaped (kapply::escape). kubectl names the file of an object in its
+# LIVE and MERGED trees [<group>.]<version>.<Kind>.<namespace>.<name>
+# (k8s.io/kubectl/pkg/cmd/diff, InfoObject.Name). A header names an object
+# only when:
+#   - the framing puts it where a file header can start (the start, after a
+#     `diff ` line, or after the last line of the hunks of the file before,
+#     counted from each `@@ -a,b +c,d @@` line; a missing count is 1, and a
+#     `\ No newline at end of file` line counts for neither), and a `+++ `
+#     line follows it. A `--- ` line inside a hunk is a removed line, and a
+#     line that breaks the framing stops the parse for the rest of the diff;
+#   - its path is a file of the LIVE tree of kubectl (a directory whose name
+#     starts with LIVE-) with the kubectl file name;
+#   - its group, version, kind, namespace and name match an object of
+#     <manifest> (the diff input). A manifest object with no namespace
+#     matches its group, version, kind and name in any namespace.
+# Any other header (an external diff tool, a line of the diff text) names
+# nothing: lo prints a name of the manifest only, never a line of the diff
+# text. The Go twin: diffObjects and diffParser (the same regexes).
 bootstrap::_diff_objects() {
   [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
   [[ $- != *x* ]] || { local -; set +x; }  # the diff text can quote a Secret value
-  local _re='^(([a-z0-9][a-z0-9.-]*)\.)?(v[0-9]+[a-z0-9]*)\.([A-Z][A-Za-z0-9]*)\.([a-z0-9-]*)\.([^[:space:]/]+)$'
-  local _line _path _dir _api _name
+  local -A _exact=() _anyns=()
+  local _key
+  while IFS= read -r _key; do
+    case "${_key}" in
+      exact/*) _exact["${_key#exact/}"]=1 ;;
+      anyns/*) _anyns["${_key#anyns/}"]=1 ;;
+    esac
+  done < <(bootstrap::_diff_keys "${2-}")
+  local _hre='^@@ -([0-9]{1,9})(,([0-9]{1,9}))? \+([0-9]{1,9})(,([0-9]{1,9}))? @@'
+  local _line _st=start _pending="" _old=0 _new=0 _obj
   while IFS= read -r _line; do
-    [[ "${_line}" == '--- '* ]] || continue
-    _path="${_line#'--- '}"
-    _path="${_path%%$'\t'*}"
-    _dir="${_path%/*}"
-    [[ "${_path}" == */* && "${_dir##*/}" == LIVE-* ]] || continue
-    [[ "${_path##*/}" =~ ${_re} ]] || continue
-    _api="${BASH_REMATCH[3]}"
-    [[ -z "${BASH_REMATCH[2]}" ]] || _api="${BASH_REMATCH[2]}/${_api}"
-    _name="${BASH_REMATCH[6]}"
-    [[ -z "${BASH_REMATCH[5]}" ]] || _name="${BASH_REMATCH[5]}/${_name}"
-    printf '%s %s %s\n' "${_api}" "${BASH_REMATCH[4]}" "${_name}"
+    if [[ "${_st}" == hunk || ( "${_st}" == next && "${_line}" == '@@ '* ) ]]; then
+      [[ "${_line}" =~ ${_hre} ]] || break
+      _old=1 _new=1
+      [[ -z "${BASH_REMATCH[2]}" ]] || _old=$(( 10#${BASH_REMATCH[3]} ))
+      [[ -z "${BASH_REMATCH[5]}" ]] || _new=$(( 10#${BASH_REMATCH[6]} ))
+      _st=body
+      (( _old || _new )) || _st=next
+      continue
+    fi
+    case "${_st}" in
+      body)
+        case "${_line:0:1}" in
+          ' ') _old=$(( _old - 1 )) _new=$(( _new - 1 )) ;;
+          -) _old=$(( _old - 1 )) ;;
+          +) _new=$(( _new - 1 )) ;;
+          '\') ;;
+          *) break ;;
+        esac
+        (( _old >= 0 && _new >= 0 )) || break
+        (( _old || _new )) || _st=next
+        ;;
+      plus)
+        [[ "${_line}" == '+++ '* ]] || break
+        _st=hunk
+        _obj="$(bootstrap::_diff_header_object "${_pending}")" || continue
+        printf '%s\n' "${_obj}"
+        ;;
+      diff)
+        [[ "${_line}" == '--- '* ]] || break
+        _pending="${_line}" _st=plus
+        ;;
+      *)
+        if [[ "${_line}" == 'diff '* ]]; then
+          _st=diff
+        elif [[ "${_line}" == '--- '* ]]; then
+          _pending="${_line}" _st=plus
+        elif [[ "${_st}" == next && "${_line}" == '\'* ]]; then
+          :
+        else
+          break
+        fi
+        ;;
+    esac
   done < <(printf '%s\n' "${1}")
+  return 0
+}
+
+# bootstrap::_diff_header_object <header>
+# The escaped label of the object of a `--- ` header line of kubectl diff
+# (bootstrap::_diff_objects): a file of the LIVE tree with the kubectl file
+# name whose key is in _exact, or, with no namespace, in _anyns (the arrays
+# of the caller). Returns 1 for any other header.
+bootstrap::_diff_header_object() {
+  local _re='^(([a-z0-9][a-z0-9.-]*)\.)?(v[0-9]+[a-z0-9]*)\.([A-Z][A-Za-z0-9]*)\.([a-z0-9-]*)\.([^[:space:]/]+)$'
+  local _path _dir _api _name
+  _path="${1#'--- '}"
+  _path="${_path%%$'\t'*}"
+  _dir="${_path%/*}"
+  [[ "${_path}" == */* && "${_dir##*/}" == LIVE-* ]] || return 1
+  [[ "${_path##*/}" =~ ${_re} ]] || return 1
+  local _g="${BASH_REMATCH[2]}" _v="${BASH_REMATCH[3]}" _k="${BASH_REMATCH[4]}" _ns="${BASH_REMATCH[5]}" _n="${BASH_REMATCH[6]}"
+  if [[ -z "${_exact["${_g}/${_v}/${_k}/${_ns}/${_n}"]:-}" && -z "${_anyns["${_g}/${_v}/${_k}/${_n}"]:-}" ]]; then
+    return 1
+  fi
+  _api="${_v}"
+  [[ -z "${_g}" ]] || _api="${_g}/${_v}"
+  _name="${_n}"
+  [[ -z "${_ns}" ]] || _name="${_ns}/${_n}"
+  kapply::escape "${_api} ${_k} ${_name}"
+}
+
+# bootstrap::_diff_keys <manifest>
+# One line per object of a manifest stream (bootstrap::_diff_objects):
+# `exact/<group>/<version>/<kind>/<namespace>/<name>` for an object with a
+# namespace, `anyns/<group>/<version>/<kind>/<name>` for one without. The
+# group is empty for a core apiVersion. A field with a tab or a newline (no
+# kubectl file name has one) leaves the object out. Prints nothing for an
+# empty manifest. The Go twin: manifestDiffKeys.
+bootstrap::_diff_keys() {
+  [[ $- != *[TE]* || -n ${_ko_at-} ]] || { local - _ko_traps _ko_rc _ko_s _ko_at="${#FUNCNAME[@]}"; _ko_traps="$(trap -p DEBUG RETURN ERR)"; trap - DEBUG RETURN ERR; set +xT -E; trap '_ko_s=$?; [[ $- != *e* ]] || { (( ${#FUNCNAME[@]} > ${_ko_at:-0} )) || { trap - DEBUG RETURN ERR; eval "${_ko_traps-}"; }; return "${_ko_s}"; }' ERR; "${FUNCNAME[0]}" "$@"; _ko_rc=$?; trap - DEBUG RETURN ERR; eval "${_ko_traps}"; return "${_ko_rc}"; }
+  [[ $- != *x* ]] || { local -; set +x; }  # the manifest can hold Secret values (utils/keysonly.sh)
+  [[ -n "${1//[[:space:]]/}" ]] || return 0
+  printf '%s\n' "${1}" | yq -o=json -I=0 'select(. != null and tag == "!!map")' 2>/dev/null | jq -r '
+    def str: if type == "string" then . else "" end;
+    (.metadata | if type == "object" then . else {} end) as $m
+    | [(.apiVersion | str), (.kind | str), ($m.namespace | str), ($m.name | str)] as $f
+    | select($f | all(test("^[^\t\n]*$")))
+    | ($f[0] | if contains("/") then (split("/") | [.[0], (.[1:] | join("/"))]) else ["", .] end) as $gv
+    | if $f[2] != "" then "exact/\($gv[0])/\($gv[1])/\($f[1])/\($f[2])/\($f[3])"
+      else "anyns/\($gv[0])/\($gv[1])/\($f[1])/\($f[3])" end' 2>/dev/null
   return 0
 }
 
