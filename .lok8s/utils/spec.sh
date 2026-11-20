@@ -548,6 +548,23 @@ spec::suc_kubectl() {
   fi
 }
 
+# spec::is_suc_addon <dir> — returns 0 when the dir of a bare spec.bootstrap
+# entry names the system-upgrade-controller addon. A trailing "/" or "/." does
+# not count, as in Go: the parser cleans the path of a bare entry
+# (assets.Peek), and filepath.Base removes trailing separators. The bash parser
+# keeps the entry as written (bootstrap::_parse_entry).
+spec::is_suc_addon() {
+  local d="${1}"
+  while :; do
+    case "${d}" in
+      */) d="${d%/}" ;;
+      */.) d="${d%/.}" ;;
+      *) break ;;
+    esac
+  done
+  [[ "${d##*/}" == system-upgrade-controller ]]
+}
+
 # spec::suc_kubectl_range — the range as the lines name it: "1.33 to 1.37".
 spec::suc_kubectl_range() {
   echo "1.${_SPEC_SUC_KUBECTL_MIN} to 1.${_SPEC_SUC_KUBECTL_MAX}"

@@ -1099,6 +1099,15 @@ _suc_lint_case() {
 @test "lint::bootstrap suc: a spec.bootstrap without the addon prints nothing" { _suc_lint_case no-entry; }
 @test "lint::bootstrap suc: a version that is not vX.Y or vX.Y.Z prints nothing" { _suc_lint_case not-a-version; }
 @test "lint::bootstrap suc: a version that cannot be read prints nothing here" { _suc_lint_case unreadable; }
+@test "lint::bootstrap suc: a pre-release tag prints nothing" { _suc_lint_case rc; }
+@test "lint::bootstrap suc: a YAML float such as 1.30 is read as written and warns" { _suc_lint_case yaml-float; }
+@test "lint::bootstrap suc: a capital V prints nothing" { _suc_lint_case capital-v; }
+@test "lint::bootstrap suc: a minor with a leading zero prints nothing" { _suc_lint_case leading-zero; }
+@test "lint::bootstrap suc: a short digest prints nothing" { _suc_lint_case short-digest; }
+@test "lint::bootstrap suc: major 2 is outside the range and warns" { _suc_lint_case major-2; }
+@test "lint::bootstrap suc: a version with a leading space prints nothing" { _suc_lint_case whitespace; }
+@test "lint::bootstrap suc: the addon with a trailing slash counts" { _suc_lint_case trailing-slash; }
+@test "lint::bootstrap suc: the addon with a trailing /. counts" { _suc_lint_case trailing-dot; }
 
 @test "lint::bootstrap suc: every shared lint case has a bats test" {
   local dir name missing=""

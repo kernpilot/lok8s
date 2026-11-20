@@ -17,7 +17,8 @@ package cli
 // fixes when it is not; ℹ for a Lo cluster without a version (kind runs its
 // default node image); ! (not checked) when the version cannot be read or is
 // not vX.Y or vX.Y.Z. A cluster of another kind without a version gets no
-// line: `lo lint` refuses that spec. Without a domain, with a deploy
+// line: lo knows no default version for its driver, and no lint rule or
+// schema requires the field there. Without a domain, with a deploy
 // domain, without a cluster spec or with a spec whose kind cannot be read,
 // it prints nothing: the RBAC migration check above says it. Every line is
 // advisory.

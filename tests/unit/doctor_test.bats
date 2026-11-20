@@ -674,6 +674,15 @@ _suc_case() {
 @test "suc: the addon as a path entry does not count" { _suc_case path-entry; }
 @test "suc: a version that is not vX.Y or vX.Y.Z is not checked" { _suc_case not-a-version; }
 @test "suc: a version that cannot be read is not checked" { _suc_case unreadable; }
+@test "suc: a pre-release tag is not checked" { _suc_case rc; }
+@test "suc: a YAML float such as 1.30 is read as written and warns" { _suc_case yaml-float; }
+@test "suc: a capital V is not checked" { _suc_case capital-v; }
+@test "suc: a minor with a leading zero is not checked" { _suc_case leading-zero; }
+@test "suc: a short digest is not checked" { _suc_case short-digest; }
+@test "suc: major 2 is outside the range and warns" { _suc_case major-2; }
+@test "suc: a version with a leading space is not checked" { _suc_case whitespace; }
+@test "suc: the addon with a trailing slash counts" { _suc_case trailing-slash; }
+@test "suc: the addon with a trailing /. counts" { _suc_case trailing-dot; }
 
 @test "suc: every shared case has a bats test" {
   local dir name missing=""

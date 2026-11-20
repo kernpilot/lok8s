@@ -528,8 +528,9 @@ lint::bootstrap() {
       error "  spec.bootstrap entry not found: ${entry} (resolved to ${b_dir})"
       errs=$(( errs + 1 ))
     fi
-    # The addon counts only as a bare entry name, as in `lo doctor`.
-    if [[ "${b_key}" != /* && "${b_key}" != ./* && "${b_key}" != ../* && "${b_dir##*/}" == system-upgrade-controller ]]; then
+    # The addon counts only as a bare entry name, as in `lo doctor`, also with
+    # a trailing "/" or "/." (spec::is_suc_addon).
+    if [[ "${b_key}" != /* && "${b_key}" != ./* && "${b_key}" != ../* ]] && spec::is_suc_addon "${b_dir}"; then
       suc=1
     fi
   done
@@ -541,8 +542,10 @@ lint::bootstrap() {
 # lint::_suc_kubectl <spec_file> — warns when spec.kubernetes.version is a minor
 # that the kubectl image of system-upgrade-controller does not serve, with the
 # line of `lo doctor` (utils/spec.sh; Go: Linter.sucKubectl). A version that is
-# not set, cannot be read or is not vX.Y or vX.Y.Z gets no line here: the
-# version checks of lint and doctor say it. Warnings only: it returns 0.
+# not set, cannot be read or is not vX.Y or vX.Y.Z gets no line here; only
+# `lo doctor` reports it. The version check of lint (lint::kubernetes_version)
+# reads a Lo spec only, and it accepts every image tag, `latest` too. Warnings
+# only: it returns 0.
 lint::_suc_kubectl() {
   local version verdict
   version=$(spec::kubernetes_version "${1}" 2>/dev/null) || return 0

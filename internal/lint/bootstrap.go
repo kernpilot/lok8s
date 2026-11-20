@@ -91,8 +91,10 @@ func (l *Linter) bootstrap(domainDir, specFile, domainName string) int {
 // sucKubectl warns when spec.kubernetes.version is a minor that the kubectl
 // image of system-upgrade-controller does not serve, with the line of `lo
 // doctor` (internal/addons/suc.go; bash: lint::_suc_kubectl). A version that
-// is not set, cannot be read or is not vX.Y or vX.Y.Z gets no line here:
-// the version checks of lint and doctor say it. Warnings only.
+// is not set, cannot be read or is not vX.Y or vX.Y.Z gets no line here;
+// only `lo doctor` reports it. The version check of lint
+// (Linter.kubernetesVersion) reads a Lo spec only, and it accepts every
+// image tag, `latest` too. Warnings only.
 func (l *Linter) sucKubectl(specFile string) {
 	version, err := lodriver.KubernetesVersion(specFile)
 	if err != nil || version == "" {

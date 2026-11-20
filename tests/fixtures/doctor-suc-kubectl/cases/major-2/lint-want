@@ -1,0 +1,1 @@
+[warn]   system-upgrade-controller: the kubectl image of the drain container serves Kubernetes 1.33 to 1.37, not 2.35, so a Plan with cordon or drain fails: set spec.kubernetes.version to a version from 1.33 to 1.37, or use a Plan without cordon or drain
