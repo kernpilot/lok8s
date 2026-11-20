@@ -6,9 +6,10 @@ package lo
 // its default route from the network with the highest gateway priority, and
 // between equal priorities Docker takes the network whose name sorts first.
 // Without a priority, a project network named after "lok8s-registries"
-// ("ops") lost the default route to the registry network (live on
-// lanisce/ops, 2026-10-12: `default via 10.125.200.128 dev eth1` on both
-// nodes, Cilium's init container hung on 10.96.0.1:443). The bash twin is
+// ("ops") lost the default route to the registry network (seen live on a
+// cluster with a shared registry network, 2026-10-12: `default via
+// 10.125.200.128 dev eth1` on both nodes, Cilium's init container hung on
+// 10.96.0.1:443). The bash twin is
 // tests/unit/lo_registry_gw_priority_test.bats.
 //
 // gwDocker simulates the parts of Docker the fix depends on: the version,
@@ -441,7 +442,7 @@ func TestDockerPicksTheRegistryNetworkForAProjectNameAfterIt(t *testing.T) {
 	g := newGWDocker(t, "ops", "29.6.2 29.6.2")
 	g.attach("c-control-plane", "lok8s-registries", 0)
 	if got := g.defaultRoute("c-control-plane"); got != "default via 10.125.200.128 dev eth1" {
-		t.Fatalf("simulation: %q, want the registry network (the bug on lanisce/ops)", got)
+		t.Fatalf("simulation: %q, want the registry network (the bug, seen live on a cluster with a shared registry network)", got)
 	}
 	k := newGWDocker(t, "kubehz", "29.6.2 29.6.2")
 	k.attach("c-control-plane", "lok8s-registries", 0)
@@ -705,6 +706,37 @@ func TestReconnectFallsBackToAPlainConnect(t *testing.T) {
 	assertProjectDefault(t, g, "ops")
 }
 
+func TestReconnectFallbackWarnsThatTheNodeIsAtPriorityZero(t *testing.T) {
+	// The plain connect after a refused -1 connect leaves the endpoint at
+	// priority 0, so each lo up disconnects the node again. One warning
+	// gives the failed command, its exit status, the result and the next
+	// action. The route still moves in the node after it.
+	g := newGWDocker(t, "ops", "29.6.2 29.6.2")
+	g.attach("c-worker", "lok8s-registries", 0, "node-a")
+	g.refuseGwPriority = true
+	d, errBuf := gwDriver(t, g, "ops")
+
+	if err := d.connectNodesToRegistryNetwork(t.Context(), "c", errBuf); err != nil {
+		t.Fatal(err)
+	}
+	want := "lo: c-worker: cannot connect the node to lok8s-registries with gateway priority -1 (docker network connect --gw-priority -1 --alias node-a lok8s-registries c-worker: exit status 125). lo connected the node to lok8s-registries with gateway priority 0. lo moves the default route in the node, but a node restart can move it to lok8s-registries again. To see the error, disconnect the node (docker network disconnect lok8s-registries c-worker) and run that connect command by hand. Then run lo up again."
+	out := errBuf.String()
+	if n := strings.Count(out, want); n != 1 {
+		t.Fatalf("%d fallback warnings, want 1:\n%s\nwant:\n%s", n, out, want)
+	}
+	if strings.Contains(out, "c-control-plane: cannot connect") {
+		t.Fatalf("the new node got the warning of the reconnect:\n%s", out)
+	}
+	moved := strings.Index(out, "c-worker: the default route did not go through ops — moved it there")
+	if moved < strings.Index(out, want) {
+		t.Fatalf("the route of c-worker did not move after the warning:\n%s", out)
+	}
+	if ep, _ := g.endpoint("c-worker", "lok8s-registries"); ep.priority != 0 {
+		t.Fatalf("c-worker: priority %d, want 0 (the plain connect)", ep.priority)
+	}
+	assertProjectDefault(t, g, "ops")
+}
+
 func TestReconnectWarnsWhenTheNodeIsLeftOffTheNetwork(t *testing.T) {
 	// Both connects fail after the disconnect: the node is not on the
 	// registry network now. The warning gives the command that attaches it,
@@ -764,6 +796,32 @@ func TestRepairWarnsForAPausedNode(t *testing.T) {
 				t.Fatalf("the running node got a warning:\n%s", errBuf.String())
 			}
 		})
+	}
+}
+
+func TestRepairSkipsAPausedNodeAtANegativePriority(t *testing.T) {
+	// Docker 28+: the negative priority comes before the paused check. A
+	// paused node at -1 has a correct route, so it gets no warning, and the
+	// inspect is the last docker call for it.
+	g := newGWDocker(t, "ops", "29.6.2 29.6.2")
+	for _, n := range g.nodes {
+		g.attach(n, "lok8s-registries", -1)
+	}
+	g.paused["c-worker"] = true
+	d, errBuf := gwDriver(t, g, "ops")
+
+	if err := d.connectNodesToRegistryNetwork(t.Context(), "c", errBuf); err != nil {
+		t.Fatal(err)
+	}
+	if errBuf.Len() != 0 {
+		t.Fatalf("output for nodes at -1:\n%s", errBuf.String())
+	}
+	inspect := slices.IndexFunc(g.log, func(l string) bool { return strings.HasPrefix(l, "docker inspect c-worker ") })
+	if inspect < 0 {
+		t.Fatalf("c-worker was not inspected:\n%s", strings.Join(g.log, "\n"))
+	}
+	if after := g.log[inspect+1:]; len(after) != 0 {
+		t.Fatalf("docker calls after the inspect of the paused node:\n%s", strings.Join(after, "\n"))
 	}
 }
 

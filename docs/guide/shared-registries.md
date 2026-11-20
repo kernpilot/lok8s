@@ -133,7 +133,7 @@ The default route of a kind node must go through the cluster network: the node s
 
 `lo up` connects a node to the registry network with `docker network connect --gw-priority -1`. The flag needs Docker 28.0 or later, for the client and for the daemon. The cluster network keeps the default priority 0, so it keeps the default route for every network name, also after a node restart.
 
-With an older Docker, `lo up` connects without the flag. Then it moves the default route in the node: `ip route replace default via <cluster gateway> dev <cluster interface>`. `lo up` reads the cluster gateway from the node's own endpoint on the cluster network (`docker inspect <node>`). It does not use `docker network inspect`. Up to Docker 28.5, that command shows no gateway for a network created without `--gateway`, and lo creates the cluster network that way. If `lo up` finds no gateway, or cannot read the route in the node, it writes a warning. The warning names the node, the network and the value that `lo up` got, and it tells you what to do. A node that does not run gets its own warning: start the node, then run `lo up` again. A paused node gets its own warning too: unpause the node (`docker unpause <node>`), then run `lo up` again. Then `lo up` continues with the next node.
+With an older Docker, `lo up` connects without the flag. Then it moves the default route in the node: `ip route replace default via <cluster gateway> dev <cluster interface>`. `lo up` reads the cluster gateway from the node's own endpoint on the cluster network (`docker inspect <node>`). It does not use `docker network inspect`. Up to Docker 28.5, that command shows no gateway for a network created without `--gateway`, and lo creates the cluster network that way. If `lo up` finds no gateway, or cannot read the route in the node, it writes a warning. The warning names the node, the network and the value that `lo up` got, and it tells you what to do. Then `lo up` continues with the next node.
 
 The route move does not survive a node restart. When the node starts again, Docker sets the default route again from the gateway priorities. Run `lo up` after a node restart: it moves the route again.
 
@@ -142,13 +142,18 @@ The route move does not survive a node restart. When the node starts again, Dock
 On Docker 28 or later, Docker sets the priority of an endpoint only when it connects the endpoint. Thus `lo up` disconnects a node whose registry endpoint has priority 0 (an older lok8s attached it). Then it connects the node again with `--gw-priority -1` and the same aliases, and writes a line that says so. This fix stays after a node restart. The node can get another address on the registry network. No config that lo writes contains that address: the registries have static addresses, and the node-IP check reads the cluster network. If a step fails, `lo up` writes a warning:
 
 - The disconnect fails: the endpoint keeps priority 0, and `lo up` moves the route in the node.
-- The connect with `--gw-priority` fails: `lo up` connects the node without the flag, and moves the route in the node.
+- The connect with `--gw-priority` fails: `lo up` connects the node without the flag, at priority 0, and moves the route in the node.
 - That connect fails too: the node is not on the registry network. The warning gives the command that connects it.
+
+On every Docker version, these nodes get their own warning:
+
+- A node that does not run. Start the node, then run `lo up` again.
+- A paused node. Unpause the node (`docker unpause <node>`), then run `lo up` again.
 
 `lo up` does not examine these containers:
 
 - The load balancer of an HA cluster (`<cluster>-external-load-balancer`). `lo up` attaches it like a node, but its image has no `ip` command. It forwards from the host to the control-plane nodes on the cluster network, so its default route does not matter.
-- On Docker 28 or later, a node whose registry endpoint has a negative gateway priority. That endpoint cannot hold the default route, so the route is correct.
+- On Docker 28 or later, a node whose registry endpoint has a negative gateway priority. That endpoint cannot hold the default route, so the route is correct. A paused node of this type gets no warning.
 
 The repair supports only the Docker engine. lok8s reads the network data in the format of `docker inspect` from Docker. lok8s does not support a `docker` command that Podman supplies.
 

@@ -9,9 +9,10 @@
 # its default route from the network with the highest gateway priority, and
 # between equal priorities Docker takes the network whose name sorts first.
 # Without a priority, a project network named after "lok8s-registries" ("ops")
-# lost the default route to the registry network (live on lanisce/ops,
-# 2026-10-12: `default via 10.125.200.128 dev eth1` on both nodes; Cilium's init
-# container hung on 10.96.0.1:443). Go twin: internal/driver/lo/gwpriority_test.go.
+# lost the default route to the registry network (seen live on a cluster with a
+# shared registry network, 2026-10-12: `default via 10.125.200.128 dev eth1` on
+# both nodes; Cilium's init container hung on 10.96.0.1:443). Go twin:
+# internal/driver/lo/gwpriority_test.go.
 #
 # The fake docker below simulates what the fix depends on: the version, the
 # endpoints of each node in attach order (eth0, eth1, …) with their priorities
@@ -517,6 +518,29 @@ docker network connect --alias node-a lok8s-registries c-worker" ] || {
   _assert_project_default
 }
 
+@test "reconnect: a refused -1 connect warns that the node is at gateway priority 0 again" {
+  # The plain connect leaves the endpoint at priority 0, so each lo up
+  # disconnects the node again. One warning gives the failed command, its
+  # exit status, the result and the next action. The route still moves in
+  # the node after it.
+  _world ops "29.6.2 29.6.2"
+  _attach c-worker lok8s-registries 0 node-a
+  REFUSE_GW_PRIORITY=1
+
+  run lo::connect_nodes_to_registry_network c
+  assert_success
+  local want="lo: c-worker: cannot connect the node to lok8s-registries with gateway priority -1 (docker network connect --gw-priority -1 --alias node-a lok8s-registries c-worker: exit status 125). lo connected the node to lok8s-registries with gateway priority 0. lo moves the default route in the node, but a node restart can move it to lok8s-registries again. To see the error, disconnect the node (docker network disconnect lok8s-registries c-worker) and run that connect command by hand. Then run lo up again."
+  assert_output --partial "${want}"
+  local rest="${output#*"${want}"}"
+  [[ "${rest}" != *"${want}"* ]] || { echo "more than one fallback warning:" >&2; echo "${output}" >&2; return 1; }
+  [[ "${rest}" == *"c-worker: the default route did not go through ops — moved it there"* ]] || {
+    echo "the route of c-worker did not move after the warning:" >&2; echo "${output}" >&2; return 1
+  }
+  refute_output --partial "c-control-plane: cannot connect"
+  [ "$(_priority c-worker lok8s-registries)" == 0 ]
+  _assert_project_default
+}
+
 @test "reconnect: both connects fail, the warning gives the command that attaches the node" {
   _world ops "29.6.2 29.6.2"
   local n
@@ -549,6 +573,23 @@ docker network connect --alias node-a lok8s-registries c-worker" ] || {
     refute_output --partial "iproute2"
     refute_output --partial "c-control-plane: cannot"
   done
+}
+
+@test "repair: Docker 28+ a paused node at a negative priority gets no warning and no docker call after the inspect" {
+  # The negative priority comes before the paused check: the route of a
+  # paused node at -1 is correct, so lo writes nothing for it.
+  _world ops "29.6.2 29.6.2"
+  local n
+  for n in ${NODES}; do _attach "${n}" lok8s-registries -1; done
+  PAUSED="c-worker"
+
+  run lo::connect_nodes_to_registry_network c
+  assert_success
+  assert_output ""
+  local at
+  at=$(grep -n '^docker inspect c-worker ' "${LOG}" | cut -d: -f1)
+  [ -n "${at}" ] || { echo "c-worker was not inspected:" >&2; cat "${LOG}" >&2; return 1; }
+  [ "${at}" -eq "$(wc -l < "${LOG}")" ] || { echo "docker calls after the inspect of the paused node:" >&2; cat "${LOG}" >&2; return 1; }
 }
 
 @test "repair: the gateway comes from the node endpoint (the network reports none before Docker 29)" {

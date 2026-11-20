@@ -317,8 +317,9 @@ lo::default_route_repair() {
 # project network, so its default route does not matter), a paused node
 # (State.Running is true, but a docker exec in it fails), and on Docker 28+ a
 # node whose registry endpoint has a negative gateway priority (correct by
-# construction). Advisory: a node that cannot be read or changed gets a
-# warning, never a failure. Go twin: repairDefaultRoute (inspectNodeRoute).
+# construction, so a paused node at that priority gets no warning).
+# Advisory: a node that cannot be read or changed gets a warning, never a
+# failure. Go twin: repairDefaultRoute (inspectNodeRoute).
 lo::repair_default_route() {
   local node="${1}" network="${2}" registry="${3}" reconnect="${4:-}"
   local fmt reg out role running paused gw prio aliases current route_get observed dev rc=0
@@ -340,11 +341,11 @@ lo::repair_default_route() {
     warn "lo: ${node}: the node is not running (State.Running: \"${running}\"). lo did not examine the default route. Start the node (docker start ${node}). Then run lo up again."
     return 0
   fi
-  if [[ "${paused}" == true ]]; then
-    warn "lo: ${node}: the node is paused (State.Paused: \"${paused}\"). lo did not examine the default route. Unpause the node (docker unpause ${node}). Then run lo up again."
+  if [[ "${prio}" =~ ^-[0-9]+$ ]] && (( 10#${prio#-} > 0 )); then
     return 0
   fi
-  if [[ "${prio}" =~ ^-[0-9]+$ ]] && (( 10#${prio#-} > 0 )); then
+  if [[ "${paused}" == true ]]; then
+    warn "lo: ${node}: the node is paused (State.Paused: \"${paused}\"). lo did not examine the default route. Unpause the node (docker unpause ${node}). Then run lo up again."
     return 0
   fi
   if ! ip::validate_format "${gw}" 2>/dev/null; then
@@ -388,14 +389,15 @@ lo::repair_default_route() {
 # connects it again with the same aliases. The node can get another address
 # on that network: no config that lo writes names it (the registries have
 # static addresses, and the node-IP healer reads the project network). A
-# connect that refuses the flag gets a plain connect, as for a new node.
-# Returns 0 when the endpoint is still at priority 0 (the disconnect failed,
-# or the plain connect attached the node): the caller then moves the route in
-# the node. Returns 1 when the endpoint has the priority now, or when the node
-# is not on the network any more (the warning gives the command that attaches
-# it). Go twin: reconnectRegistryEndpoint.
+# connect that refuses the flag gets a plain connect, as for a new node, and
+# a warning: the endpoint has priority 0 again, so each lo up repeats the
+# disconnect. Returns 0 when the endpoint is still at priority 0 (the
+# disconnect failed, or the plain connect attached the node): the caller then
+# moves the route in the node. Returns 1 when the endpoint has the priority
+# now, or when the node is not on the network any more (the warning gives the
+# command that attaches it). Go twin: reconnectRegistryEndpoint.
 lo::reconnect_registry_endpoint() {
-  local node="${1}" network="${2}" registry="${3}" alias rc=0
+  local node="${1}" network="${2}" registry="${3}" alias rc=0 prio_rc=0
   shift 3
   local -a alias_args=() with_priority plain
   for alias in "$@"; do alias_args+=(--alias "${alias}"); done
@@ -405,7 +407,8 @@ lo::reconnect_registry_endpoint() {
     return 0
   fi
   with_priority=(network connect --gw-priority "${LO_REGISTRY_GW_PRIORITY}" "${alias_args[@]}" "${registry}" "${node}")
-  if docker "${with_priority[@]}" &>/dev/null; then
+  docker "${with_priority[@]}" &>/dev/null || prio_rc=$?
+  if (( prio_rc == 0 )); then
     warn "lo: ${node}: the endpoint on ${registry} had gateway priority 0. lo connected the node to ${registry} again with gateway priority ${LO_REGISTRY_GW_PRIORITY}, so the default route stays on ${network} after a node restart."
     return 1
   fi
@@ -415,6 +418,7 @@ lo::reconnect_registry_endpoint() {
     warn "lo: ${node}: cannot connect the node to ${registry} again (docker ${plain[*]}: exit status ${rc}). The node is not on ${registry} now. Connect it (docker ${with_priority[*]}). Then run lo up again."
     return 1
   fi
+  warn "lo: ${node}: cannot connect the node to ${registry} with gateway priority ${LO_REGISTRY_GW_PRIORITY} (docker ${with_priority[*]}: exit status ${prio_rc}). lo connected the node to ${registry} with gateway priority 0. lo moves the default route in the node, but a node restart can move it to ${registry} again. To see the error, disconnect the node (docker network disconnect ${registry} ${node}) and run that connect command by hand. Then run lo up again."
   return 0
 }
 

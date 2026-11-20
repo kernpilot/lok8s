@@ -405,8 +405,9 @@ func defaultRouteRepair(current, routeGet, gw string) (dev string, needed bool) 
 // connected project network, so its default route does not matter), a
 // paused node (State.Running is true, but a docker exec in it fails), and
 // on Docker 28+ a node whose registry endpoint has a negative gateway
-// priority (correct by construction). Advisory: a node that cannot be read
-// or changed gets a warning, never a failure.
+// priority (correct by construction, so a paused node at that priority
+// gets no warning). Advisory: a node that cannot be read or changed gets a
+// warning, never a failure.
 func (d *Driver) repairDefaultRoute(ctx context.Context, node, project, registry string, reconnect bool, errOut io.Writer) {
 	st, err := d.inspectNodeRoute(ctx, node, project, registry)
 	if err != nil {
@@ -422,12 +423,12 @@ func (d *Driver) repairDefaultRoute(ctx context.Context, node, project, registry
 			node, st.running, node)
 		return
 	}
+	if n, err := strconv.Atoi(st.gwPriority); err == nil && n < 0 {
+		return
+	}
 	if st.paused == "true" {
 		ui.WarnTo(errOut, `lo: %s: the node is paused (State.Paused: "%s"). lo did not examine the default route. Unpause the node (docker unpause %s). Then run lo up again.`,
 			node, st.paused, node)
-		return
-	}
-	if n, err := strconv.Atoi(st.gwPriority); err == nil && n < 0 {
 		return
 	}
 	gw := st.gateway
@@ -476,11 +477,12 @@ func (d *Driver) repairDefaultRoute(ctx context.Context, node, project, registry
 // another address on that network: no config that lo writes names it (the
 // registries have static addresses, and the node-IP healer reads the
 // project network). A connect that refuses the flag gets a plain connect,
-// as for a new node. It returns true when the endpoint is still at priority
-// 0 (the disconnect failed, or the plain connect attached the node): the
-// caller then moves the route in the node. It returns false when the
-// endpoint has the priority now, or when the node is not on the network
-// any more (the warning gives the command that attaches it).
+// as for a new node, and a warning: the endpoint has priority 0 again, so
+// each lo up repeats the disconnect. It returns true when the endpoint is
+// still at priority 0 (the disconnect failed, or the plain connect attached
+// the node): the caller then moves the route in the node. It returns false
+// when the endpoint has the priority now, or when the node is not on the
+// network any more (the warning gives the command that attaches it).
 func (d *Driver) reconnectRegistryEndpoint(ctx context.Context, node, project, registry string, aliases []string, errOut io.Writer) bool {
 	if err := d.runQuiet(ctx, "docker", "network", "disconnect", registry, node); err != nil {
 		ui.WarnTo(errOut, "lo: %s: cannot disconnect the node from %s (docker network disconnect %s %s: exit status %d). The endpoint keeps gateway priority 0, so a node restart can move the default route to %s. Run lo up again.",
@@ -492,7 +494,8 @@ func (d *Driver) reconnectRegistryEndpoint(ctx context.Context, node, project, r
 		aliasArgs = append(aliasArgs, "--alias", a)
 	}
 	withPriority := slices.Concat([]string{"network", "connect", "--gw-priority", registryGwPriority}, aliasArgs, []string{registry, node})
-	if d.runQuiet(ctx, "docker", withPriority...) == nil {
+	prioErr := d.runQuiet(ctx, "docker", withPriority...)
+	if prioErr == nil {
 		ui.WarnTo(errOut, "lo: %s: the endpoint on %s had gateway priority 0. lo connected the node to %s again with gateway priority %s, so the default route stays on %s after a node restart.",
 			node, registry, registry, registryGwPriority, project)
 		return false
@@ -503,6 +506,8 @@ func (d *Driver) reconnectRegistryEndpoint(ctx context.Context, node, project, r
 			node, registry, strings.Join(plain, " "), execx.ExitCode(err), registry, strings.Join(withPriority, " "))
 		return false
 	}
+	ui.WarnTo(errOut, "lo: %s: cannot connect the node to %s with gateway priority %s (docker %s: exit status %d). lo connected the node to %s with gateway priority 0. lo moves the default route in the node, but a node restart can move it to %s again. To see the error, disconnect the node (docker network disconnect %s %s) and run that connect command by hand. Then run lo up again.",
+		node, registry, registryGwPriority, strings.Join(withPriority, " "), execx.ExitCode(prioErr), registry, registry, registry, node)
 	return true
 }
 
