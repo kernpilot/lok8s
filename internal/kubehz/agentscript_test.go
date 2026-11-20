@@ -16,8 +16,10 @@ package kubehz
 
 import (
 	"io/fs"
+	"maps"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -249,20 +251,38 @@ func TestAgentKubectlCallsCarryNoClientConfigFlag(t *testing.T) {
 	}
 }
 
+// The bounded helper of the heartbeat script: it runs a call under
+// `timeout -k 2 SECS` only when the call fits in the tick budget.
+const boundedHelper = `bounded() {
+  if ! budget_fits $(( $1 + 2 )); then
+    echo "kubehz: tick budget: ${2} ${3} not started: it can take $(( $1 + 2 ))s, and the budget ends in $(( BUDGET_END - $(date -u +%s) ))s" >&4
+    return 124
+  fi
+  BOUND_SECS="$1"
+  shift
+  timeout -k 2 "${BOUND_SECS}" "$@"
+}
+`
+
 // TestAgentKubectlCallsAreBoundedByTimeout: every kubectl call of the
-// heartbeat script is bounded in time, with `timeout -k 2 5` right before
-// kubectl, and the node list with `timeout -k 2 30`: TERM after 5 s (30 s),
-// then KILL 2 s later. The BusyBox applet and GNU coreutils both take that
-// syntax. The bound is never a kubectl flag
-// (TestAgentKubectlCallsCarryNoClientConfigFlag). A call without the bound,
-// the identity Secret calls, the marker writes and the nonce clear included,
-// can hold the tick until activeDeadlineSeconds kills it.
+// heartbeat script is bounded in time, with `bounded 5` right before
+// kubectl, and the node list with `bounded 30`: `timeout -k 2 5` (30), TERM
+// after 5 s (30 s), then KILL 2 s later, and only when the call fits in the
+// tick budget. The BusyBox applet and GNU coreutils both take that syntax.
+// The one exception is the write-back of the send gate, which runs outside
+// the budget under a plain `timeout -k 2 5`. The bound is never a kubectl
+// flag (TestAgentKubectlCallsCarryNoClientConfigFlag). A call without the
+// bound, the identity Secret calls, the marker writes and the nonce clear
+// included, can hold the tick until activeDeadlineSeconds kills it.
 func TestAgentKubectlCallsAreBoundedByTimeout(t *testing.T) {
 	t.Parallel()
 	script := heartbeatScript(t)
-	bound := regexp.MustCompile(`(^|[\s($|])timeout -k 2 (\d+) $`)
+	if !strings.Contains(script, boundedHelper) {
+		t.Fatal("the script must define bounded(): the budget check, then `timeout -k 2 SECS`")
+	}
+	bound := regexp.MustCompile(`(^|[\s($|])(bounded|timeout -k 2) (\d+) $`)
 	calls := kubectlCalls(script)
-	marker, nodeList := 0, 0
+	marker, nodeList, plain := 0, 0, 0
 	for _, c := range calls {
 		joined := strings.Join(c.args, " ")
 		want := "5"
@@ -275,20 +295,154 @@ func TestAgentKubectlCallsAreBoundedByTimeout(t *testing.T) {
 		}
 		m := bound.FindStringSubmatch(c.prefix)
 		if m == nil {
-			t.Errorf("script line %d: kubectl %s is not bounded by `timeout -k 2 %s`: %q", c.line, joined, want, c.prefix)
+			t.Errorf("script line %d: kubectl %s is not bounded by `bounded %s`: %q", c.line, joined, want, c.prefix)
 			continue
 		}
-		if m[2] != want {
-			t.Errorf("script line %d: kubectl %s runs under `timeout -k 2 %s`, want `timeout -k 2 %s`", c.line, joined, m[2], want)
+		if m[3] != want {
+			t.Errorf("script line %d: kubectl %s runs under `%s %s`, want `bounded %s`", c.line, joined, m[2], m[3], want)
+		}
+		if m[2] == "timeout -k 2" {
+			plain++
+			if !slices.Contains(c.args, `"${WB_LAST}"`) {
+				t.Errorf("script line %d: kubectl %s runs outside the tick budget: only the write-back may", c.line, joined)
+			}
 		}
 	}
-	if marker != 1 || nodeList != 1 {
-		t.Errorf("%d marker reads and %d node lists found, want 1 and 1", marker, nodeList)
+	if marker != 1 || nodeList != 1 || plain != 1 {
+		t.Errorf("%d marker reads, %d node lists and %d calls outside the budget found, want 1, 1 and 1", marker, nodeList, plain)
 	}
 	// The heartbeat script has more than 30 kubectl calls. Fewer means the
 	// scan reads nothing.
 	if len(calls) < 30 {
 		t.Fatalf("the scan found %d kubectl calls, want at least 30", len(calls))
+	}
+}
+
+// TestAgentCurlCallsAreBounded: each curl call of the heartbeat script runs
+// under `bounded`: the agent-register POST and the desired-state poll with
+// 10 s, each heartbeat POST with 15 s. curl has no time limit of its own
+// here, so a call without the bound can hold the tick until
+// activeDeadlineSeconds kills it, and the send gate is not put back.
+func TestAgentCurlCallsAreBounded(t *testing.T) {
+	t.Parallel()
+	script := heartbeatScript(t)
+	curlWord := regexp.MustCompile(`(^|[\s($|;&])curl(\s|$)`)
+	bound := regexp.MustCompile(`(^|[\s($|])bounded (\d+) $`)
+	got := map[string]int{}
+	for i, line := range strings.Split(script, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		for _, m := range curlWord.FindAllStringSubmatchIndex(line, -1) {
+			at := m[3]
+			rest := line[at:]
+			// "curl" inside a quoted log line is not a call.
+			if strings.Count(line[:at], `"`)%2 == 1 {
+				continue
+			}
+			b := bound.FindStringSubmatch(line[:at])
+			if b == nil {
+				t.Errorf("script line %d: %s is not bounded", i+1, strings.TrimSpace(rest))
+				continue
+			}
+			switch {
+			case strings.Contains(rest, "/agent-register"):
+				got["register "+b[2]]++
+			case strings.Contains(rest, "/heartbeat"):
+				got["heartbeat "+b[2]]++
+			case strings.Contains(rest, `-K - "$@"`):
+				got["desired "+b[2]]++
+			default:
+				t.Errorf("script line %d: an unknown curl call: %s", i+1, strings.TrimSpace(rest))
+			}
+		}
+	}
+	want := map[string]int{"register 10": 1, "heartbeat 15": 2, "desired 10": 1}
+	if !maps.Equal(got, want) {
+		t.Errorf("the curl calls and their bounds: got %v, want %v", got, want)
+	}
+}
+
+// budgetNumber reads one integer of the heartbeat script: the first match
+// of re (one group).
+func budgetNumber(t *testing.T, script, re string) int {
+	t.Helper()
+	m := regexp.MustCompile(re).FindStringSubmatch(script)
+	if m == nil {
+		t.Fatalf("the script has no match for %s", re)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestAgentTickBudgetEndsBeforeTheJobDeadline: the numbers of the tick
+// budget. The script ends at the latest when the budget ends plus the one
+// write-back outside it (7 s), and that must leave time for the pod to
+// start before activeDeadlineSeconds kills it. The reads before the
+// heartbeat leave room for one heartbeat POST, the probes for two (the
+// POST and its plain retry). The bounds alone do not fit: with every call
+// at its bound, a tick with an assessment takes far longer than the
+// deadline, which is why the budget exists.
+func TestAgentTickBudgetEndsBeforeTheJobDeadline(t *testing.T) {
+	t.Parallel()
+	script := heartbeatScript(t)
+	raw, err := fs.ReadFile(Manifests(), "agent/cronjob.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cj struct {
+		Spec struct {
+			JobTemplate struct {
+				Spec struct {
+					ActiveDeadlineSeconds int `yaml:"activeDeadlineSeconds"`
+				} `yaml:"spec"`
+			} `yaml:"jobTemplate"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal(raw, &cj); err != nil {
+		t.Fatal(err)
+	}
+	deadline := cj.Spec.JobTemplate.Spec.ActiveDeadlineSeconds
+	tick := budgetNumber(t, script, `\n\s*TICK_END=\$\(\( \$\(date -u \+%s\) \+ (\d+) \)\)\n`)
+	readReserve := budgetNumber(t, script, `\n\s*READ_END=\$\(\( TICK_END - (\d+) \)\)\n`)
+	probeReserve := budgetNumber(t, script, `\n\s*PROBE_END=\$\(\( TICK_END - (\d+) \)\)\n`)
+	const kill, writeBack, podStart = 2, 5 + 2, 20
+	heartbeat := budgetNumber(t, script, `bounded (\d+) curl -q -fsSL -X POST "\$\{KUBEHZ_API_URL\}/api/clusters/\$\{CLUSTER_ID\}/heartbeat"`) + kill
+	if end := tick + writeBack; end+podStart > deadline {
+		t.Errorf("the script can run %d s (budget %d s + write-back %d s); with %d s for the pod to start that passes activeDeadlineSeconds %d", end, tick, writeBack, podStart, deadline)
+	}
+	if readReserve < heartbeat {
+		t.Errorf("READ_END leaves %d s, want room for one heartbeat POST (%d s)", readReserve, heartbeat)
+	}
+	if probeReserve < 2*heartbeat {
+		t.Errorf("PROBE_END leaves %d s, want room for the POST and its retry (%d s)", probeReserve, 2*heartbeat)
+	}
+	// The sum of the bounds of a tick with an assessment: every kubectl call
+	// at 5 s + 2 s (the node list at 30 s + 2 s), every curl call at its own.
+	sum := 0
+	for _, c := range kubectlCalls(script) {
+		if strings.Join(c.args, " ") == "get --raw /api/v1/nodes" {
+			sum += 30 + kill
+		} else {
+			sum += 5 + kill
+		}
+	}
+	sum += 2*heartbeat + 2*(10+kill)
+	if sum <= deadline {
+		t.Errorf("the bounds sum to %d s, not more than activeDeadlineSeconds %d: the budget is no longer needed, or the scan reads too little", sum, deadline)
+	}
+	// The budget switches: the gate and the probes on PROBE_END, the
+	// heartbeat and later on TICK_END, after the probes.
+	gate := strings.Index(script, `BUDGET_END="${PROBE_END}"`)
+	probesDone := strings.Index(script, `[ -n "${ASSESSMENT}" ] || assess_write_back`)
+	full := strings.Index(script, `BUDGET_END="${TICK_END}"`)
+	post := strings.Index(script, `bounded 15 curl -q -fsSL -X POST`)
+	start := strings.Index(script, `BUDGET_END="${READ_END}"`)
+	if start < 0 || gate < start || probesDone < gate || full < probesDone || post < full {
+		t.Errorf("the budget order must be READ_END, then PROBE_END for the gate and the probes, then TICK_END before the heartbeat POST: %d %d %d %d %d", start, gate, probesDone, full, post)
 	}
 }
 

@@ -501,7 +501,8 @@ printf 'kubectl %s\n' "$*" | sed -E 's#[^ =]*/(agent|live-agent)\b#<work>/\1#g' 
 case "$*" in
   "apply -k "*) exit 0 ;;
   "-n kubehz-system get pods -l app=kubehz-heartbeat "*) exit 0 ;;
-  "-n kubehz-system get secret kubehz-agent -o name") printf 'secret/kubehz-agent\n'; exit 0 ;;
+  # The identity probe: the Secret holds an agent-token, so no bootstrap runs.
+  "-n kubehz-system get secret kubehz-agent -o go-template="*) printf 'agent-token'; exit 0 ;;
   "-n kubehz-system rollout status "*) echo 'error: timed out waiting for the condition' >&2; exit 1 ;;
   "-n kubehz-system get pods -l app.kubernetes.io/name=kubehz-live-agent "*)
     [[ -z "${PULL_PODS_FAIL:-}" ]] || exit 1

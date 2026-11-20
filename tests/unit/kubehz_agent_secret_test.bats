@@ -6,7 +6,8 @@
 #   1. The in-cluster heartbeat agent (the CronJob script embedded in
 #      .lok8s/libs/kubehz/manifests/agent/cronjob.yaml): it self-generates the
 #      agent-token A (khz_agt_…) + claim-code C (khzc_…) into Secret
-#      kubehz-agent (create-if-absent, NEVER rotate), self-registers by POSTing
+#      kubehz-agent, which the deploy creates empty (fill-if-empty with one
+#      merge patch, NEVER rotate, never create), self-registers by POSTing
 #      only sha256(A)/sha256(C) to /api/clusters/agent-register, and sends an
 #      `Authorization: Bearer A` heartbeat.
 #
@@ -30,15 +31,22 @@ setup() {
   command yq '.spec.jobTemplate.spec.template.spec.containers[0].command[2]' \
     "${CRONJOB}" > "${HEARTBEAT}"
 
-  # Fake in-cluster Secret store + curl capture sinks.
+  # Fake in-cluster Secret store + curl capture sinks. The Secret exists and
+  # is empty (the deploy created it): no key file, resourceVersion 41.
+  # STORE_ABSENT=1: no Secret at all.
   export STORE_A="${BATS_TEST_TMPDIR}/secret.agent-token"
   export STORE_C="${BATS_TEST_TMPDIR}/secret.claim-code"
+  export STORE_RV="${BATS_TEST_TMPDIR}/secret.resourceVersion"
+  printf '41' > "${STORE_RV}"
   export REGISTER_OUT="${BATS_TEST_TMPDIR}/register.json"
   export REGISTER_HDRS="${BATS_TEST_TMPDIR}/register.hdrs"
   export HEARTBEAT_OUT="${BATS_TEST_TMPDIR}/heartbeat.json"
   export HEARTBEAT_HDRS="${BATS_TEST_TMPDIR}/heartbeat.hdrs"
-  # A timeout call in another form than `timeout -k 2 SECS` (the stub).
+  # A timeout call in another form than `timeout -k 2 SECS`, and each
+  # kubectl and curl call with its bound (tests/lib/agent_bound.sh).
   export STUB_TIMEOUT_FORM_LOG="${BATS_TEST_TMPDIR}/timeout-form.log"
+  export STUB_CALL_LOG="${BATS_TEST_TMPDIR}/calls.log"
+  source "${_PROJECT_ROOT}/tests/lib/agent_bound.bash"
 
   export CLUSTER_ID="test.example.com"
   export KUBEHZ_API_URL="https://api.example.com"
@@ -53,58 +61,67 @@ teardown() {
 _build_runner() {
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
-# timeout: the pod's `timeout -k 2 SECS CMD ARGS` (the BusyBox applet and
-# GNU coreutils take the same form). It runs the command as a shell
-# function, so the kubectl stub below answers it and no real kubectl runs.
-# Any other form, such as a call without the kill-after, goes to
-# STUB_TIMEOUT_FORM_LOG and fails (rc 125), so it does not pass unseen.
-timeout() {
-  case "$1:$2:$3" in
-    -k:2:5|-k:2:30) ;;
-    *)
-      printf '%s\n' "$*" >> "${STUB_TIMEOUT_FORM_LOG}"
-      echo "stub: timeout without -k 2: $*" >&2
-      return 125 ;;
-  esac
-  shift 3
-  "$@"
+# _stub_not_found: the apiserver's answer for an absent Secret.
+_stub_not_found() {
+  echo 'Error from server (NotFound): secrets "kubehz-agent" not found' >&2
+  return 1
 }
 kubectl() {
+  stub_call kubectl "$@"
   argv_log kubectl "$@"
   case "$*" in
-    "get secret kubehz-agent -n kubehz-system")
-      # Existence probe (no -o): present iff the store file exists.
-      [ -f "${STORE_A}" ] && return 0 || return 1
+    # The identity read: the resourceVersion and the keys that the store
+    # holds (A, C), as the go-template prints them, never a value.
+    # STORE_RACE=1: another tick fills the Secret right after this read
+    # (its own values, a new resourceVersion).
+    "get secret kubehz-agent -n kubehz-system -o go-template="*)
+      [ -z "${STORE_ABSENT:-}" ] || { _stub_not_found; return 1; }
+      _keys=""
+      [ ! -f "${STORE_A}" ] || _keys="A"
+      [ ! -f "${STORE_C}" ] || _keys="${_keys}C"
+      printf '%s %s' "$(cat "${STORE_RV}")" "${_keys}"
+      if [ -n "${STORE_RACE:-}" ] && [ -z "${_keys}" ]; then
+        printf '%s' "khz_agt_$(printf 'f%.0s' $(seq 1 64))" > "${STORE_A}"
+        printf '%s' "khzc_$(printf 'e%.0s' $(seq 1 64))" > "${STORE_C}"
+        printf '%s' "$(( $(cat "${STORE_RV}") + 1 ))" > "${STORE_RV}"
+      fi
       ;;
-    *"get secret kubehz-agent"*"agent-token"*)
+    # The fill: a merge patch on stdin, as the apiserver takes it. A
+    # resourceVersion that is not the stored one is a 409 Conflict and
+    # changes nothing. stringData sets the keys that it names.
+    "patch secret kubehz-agent -n kubehz-system --type=merge --patch-file=/dev/stdin")
+      _patch=$(cat)
+      [ -z "${STORE_ABSENT:-}" ] || { _stub_not_found; return 1; }
+      _rv=$(printf '%s' "${_patch}" | jq -r '.metadata.resourceVersion // ""')
+      if [ -n "${_rv}" ] && [ "${_rv}" != "$(cat "${STORE_RV}")" ]; then
+        echo 'Error from server (Conflict): Operation cannot be fulfilled on secrets "kubehz-agent": the object has been modified; please apply your changes to the latest version and try again' >&2
+        return 1
+      fi
+      for _k in agent-token claim-code; do
+        if printf '%s' "${_patch}" | jq -e --arg k "${_k}" '.stringData | has($k)' >/dev/null; then
+          _f="${STORE_A}"
+          [ "${_k}" = agent-token ] || _f="${STORE_C}"
+          printf '%s' "${_patch}" | jq -j --arg k "${_k}" '.stringData[$k]' > "${_f}"
+        fi
+      done
+      printf '%s' "$(( $(cat "${STORE_RV}") + 1 ))" > "${STORE_RV}"
+      return 0
+      ;;
+    *"get secret kubehz-agent -n kubehz-system -o jsonpath={.data.agent-token}"*)
+      [ -z "${STORE_ABSENT:-}" ] || { _stub_not_found; return 1; }
       [ -f "${STORE_A}" ] || return 0
       base64 < "${STORE_A}" | tr -d '\n'
       ;;
-    *"get secret kubehz-agent"*"claim-code"*)
+    *"get secret kubehz-agent -n kubehz-system -o jsonpath={.data.claim-code}"*)
+      [ -z "${STORE_ABSENT:-}" ] || { _stub_not_found; return 1; }
       [ -f "${STORE_C}" ] || return 0
       base64 < "${STORE_C}" | tr -d '\n'
       ;;
-    "create secret generic kubehz-agent"*)
-      # create-if-absent: mimic kubectl (fails if the Secret already exists),
-      # which is what proves the guard never rotates.
-      [ -f "${STORE_A}" ] && return 1
-      # A and C come as an env file on stdin (kubectl_env_file), never on
-      # argv.
-      _a=""; _c=""
-      _env=$(kubectl_env_file "$@")
-      _kv_ifs="${IFS}"
-      IFS='
-'
-      for _kv in ${_env}; do
-        case "${_kv}" in
-          agent-token=*) _a="${_kv#agent-token=}" ;;
-          claim-code=*)  _c="${_kv#claim-code=}" ;;
-        esac
-      done
-      IFS="${_kv_ifs}"
-      printf '%s' "${_a}" > "${STORE_A}"
-      printf '%s' "${_c}" > "${STORE_C}"
-      return 0
+    # Any other call on the Secret (a create, a delete, an apply) is
+    # refused, as the agent's RBAC does: get and patch on this one name.
+    *"secret"*)
+      echo "Error from server (Forbidden): the agent may not: kubectl $*" >&2
+      return 1
       ;;
     # kubernetesVersion = the SERVER version. The FIX reads the apiserver
     # /version endpoint (single "gitVersion"). `version -o json` carries BOTH a
@@ -124,6 +141,7 @@ kubectl() {
   esac
 }
 curl() {
+  stub_call curl "$@"
   # curl_capture reads the call the way curl does: headers from -H and the
   # config (-K), the body from stdin.
   curl_capture "$@"
@@ -146,7 +164,8 @@ curl() {
 STUBS_EOF
 
   RUNNER="${BATS_TEST_TMPDIR}/run.sh"
-  cat "${_PROJECT_ROOT}/tests/lib/curl_capture.sh" "${stubs}" "${HEARTBEAT}" > "${RUNNER}"
+  cat "${_PROJECT_ROOT}/tests/lib/curl_capture.sh" "${_PROJECT_ROOT}/tests/lib/agent_bound.sh" \
+    "${stubs}" "${HEARTBEAT}" > "${RUNNER}"
 }
 
 # ── The shipped script stays valid POSIX sh ──────────────
@@ -156,23 +175,116 @@ STUBS_EOF
   assert_success
 }
 
-# ── L1: create-if-absent — first run mints A and C ───────
+# ── L1: fill-if-empty — first run mints A and C ──────────
 
-@test "agent: first run creates the kubehz-agent Secret with khz_agt_ / khzc_ values" {
+@test "agent: first run fills the empty kubehz-agent Secret with khz_agt_ / khzc_ values" {
   _build_runner
-  # No store yet → absent.
+  # The deploy created the Secret empty.
   [ ! -f "${STORE_A}" ]
 
   run sh "${RUNNER}"
   assert_success
-  # Every kubectl call ran under `timeout -k 2 SECS`.
-  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
+  # Every kubectl and curl call ran under `timeout -k 2 SECS`.
+  assert_agent_calls_bounded
 
   # A = khz_agt_<64 hex>, C = khzc_<64 hex> — 256-bit, distinct prefixes.
   run cat "${STORE_A}"
   assert_output --regexp '^khz_agt_[0-9a-f]{64}$'
   run cat "${STORE_C}"
   assert_output --regexp '^khzc_[0-9a-f]{64}$'
+  # One read, one patch with the read's resourceVersion, no create.
+  run grep -c '^bound kubectl patch secret kubehz-agent -n kubehz-system --type=merge --patch-file=/dev/stdin$' "${STUB_CALL_LOG}"
+  assert_output "1"
+  run grep -E 'kubectl (create|apply|replace|delete) ' "${STUB_CALL_LOG}"
+  assert_failure
+  assert_equal "$(cat "${STORE_RV}")" "42"
+}
+
+# Two ticks read the empty Secret at the same time: the patch of the
+# second one carries the resourceVersion of its read, the apiserver
+# refuses it (409), and the tick reads back the values of the first.
+@test "agent: a fill that loses the race (409) keeps the values of the tick that won" {
+  export STORE_RACE=1
+  _build_runner
+  run sh "${RUNNER}"
+  assert_success
+  assert_agent_calls_bounded
+  assert_output --partial "the fill of Secret kubehz-agent did not land"
+  local won_a won_c
+  won_a="khz_agt_$(printf 'f%.0s' $(seq 1 64))"
+  won_c="khzc_$(printf 'e%.0s' $(seq 1 64))"
+  assert_equal "$(cat "${STORE_A}")" "${won_a}"
+  assert_equal "$(cat "${STORE_C}")" "${won_c}"
+  # The register and the beat use the winner's values.
+  run command jq -r '.agentTokenHash' "${REGISTER_OUT}"
+  assert_output "$(printf %s "${won_a}" | sha256sum | cut -d' ' -f1)"
+  run cat "${HEARTBEAT_HDRS}"
+  assert_output --partial "Authorization: Bearer ${won_a} ;"
+}
+
+# A Secret that holds one of the two keys is never written: a fill would
+# rotate the key that is there.
+@test "agent: a Secret with only an agent-token is not written" {
+  local a="khz_agt_$(printf 'c%.0s' $(seq 1 64))"
+  printf '%s' "${a}" > "${STORE_A}"
+  _build_runner
+  run sh "${RUNNER}"
+  assert_success
+  assert_agent_calls_bounded
+  run grep -F 'kubectl patch ' "${STUB_CALL_LOG}"
+  assert_failure
+  assert_equal "$(cat "${STORE_A}")" "${a}"
+  [ ! -f "${STORE_C}" ]
+  # No claim code: no register; the beat goes out with A.
+  [ ! -f "${REGISTER_OUT}" ]
+  run cat "${HEARTBEAT_HDRS}"
+  assert_output --partial "Authorization: Bearer ${a} ;"
+}
+
+# The patch takes the resourceVersion as the read gave it. Only digits pass:
+# a quote in it could end the JSON string and add a key to the patch.
+@test "agent: a resourceVersion that is not digits stops the fill" {
+  printf '%s' '41","data":{"x":"y' > "${STORE_RV}"
+  _build_runner
+  run sh "${RUNNER}"
+  assert_success
+  assert_output --partial "has no resourceVersion of digits; the agent does not fill it"
+  run grep -F 'kubectl patch ' "${STUB_CALL_LOG}"
+  assert_failure
+  [ ! -f "${STORE_A}" ]
+}
+
+# The agent cannot create the Secret (no create in its Role). Without the
+# Secret the tick has no identity: no write, no register, no beat, and a
+# line that names the fix.
+@test "agent: an absent Secret is not created; the tick has no identity" {
+  export STORE_ABSENT=1
+  _build_runner
+  run sh "${RUNNER}"
+  assert_success
+  assert_output --partial "cannot read Secret kubehz-agent in kubehz-system; the deploy creates it: run 'lo kubehz deploy'"
+  assert_output --partial "agent-token unavailable; skipping heartbeat"
+  run grep -E 'kubectl (patch|create|apply|replace|delete) ' "${STUB_CALL_LOG}"
+  assert_failure
+  [ ! -f "${STORE_A}" ]
+  [ ! -f "${REGISTER_OUT}" ]
+  [ ! -f "${HEARTBEAT_OUT}" ]
+  run grep -c '^UNBOUND ' "${STUB_CALL_LOG}"
+  assert_output "0"
+}
+
+# The stub catches a call without the bound: a runner with one kubectl call
+# outside timeout fails the assertion.
+@test "agent: assert_agent_calls_bounded fails on a call without the bound" {
+  _build_runner
+  sed -i 's/bounded 5 kubectl get csr -o json/kubectl get csr -o json/' "${RUNNER}"
+  run grep -c 'kubectl get csr -o json' "${RUNNER}"
+  assert_output "1"
+  run sh "${RUNNER}"
+  assert_success
+  run assert_agent_calls_bounded
+  assert_failure
+  assert_output --partial "UNBOUND kubectl get csr -o json"
 }
 
 # ── L1: never rotate — a second run reuses the same A and C ─
@@ -182,8 +294,8 @@ STUBS_EOF
 
   run sh "${RUNNER}"
   assert_success
-  # Every kubectl call ran under `timeout -k 2 SECS`.
-  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
+  # Every kubectl and curl call ran under `timeout -k 2 SECS`.
+  assert_agent_calls_bounded
   local a1 c1
   a1="$(cat "${STORE_A}")"
   c1="$(cat "${STORE_C}")"
@@ -191,8 +303,8 @@ STUBS_EOF
   # Re-run against the SAME store (mirrors a re-applied / re-fired agent).
   run sh "${RUNNER}"
   assert_success
-  # Every kubectl call ran under `timeout -k 2 SECS`.
-  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
+  # Every kubectl and curl call ran under `timeout -k 2 SECS`.
+  assert_agent_calls_bounded
 
   assert_equal "$(cat "${STORE_A}")" "${a1}"
   assert_equal "$(cat "${STORE_C}")" "${c1}"
@@ -216,8 +328,8 @@ STUBS_EOF
   _build_runner
   run sh "${RUNNER}"
   assert_success
-  # Every kubectl call ran under `timeout -k 2 SECS`.
-  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
+  # Every kubectl and curl call ran under `timeout -k 2 SECS`.
+  assert_agent_calls_bounded
 
   local a c
   a="$(cat "${STORE_A}")"
@@ -235,8 +347,8 @@ STUBS_EOF
   _build_runner
   run sh "${RUNNER}"
   assert_success
-  # Every kubectl call ran under `timeout -k 2 SECS`.
-  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
+  # Every kubectl and curl call ran under `timeout -k 2 SECS`.
+  assert_agent_calls_bounded
 
   # Valid JSON with the domain and both hashes.
   run command jq -e . "${REGISTER_OUT}"
@@ -270,8 +382,8 @@ STUBS_EOF
   _build_runner
   run sh "${RUNNER}"
   assert_success
-  # Every kubectl call ran under `timeout -k 2 SECS`.
-  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
+  # Every kubectl and curl call ran under `timeout -k 2 SECS`.
+  assert_agent_calls_bounded
 
   local a
   a="$(cat "${STORE_A}")"
@@ -315,9 +427,13 @@ STUBS_EOF
   assert_output --partial "kind: CronJob"
   assert_output --partial "/api/clusters/agent-register"
   assert_output --partial "Authorization: Bearer"
-  # Namespaced Secret RBAC (get+create only — never rotate).
+  # Namespaced Secret RBAC: get and patch on the one name, no create.
   assert_output --partial "name: kubehz-agent-secret"
   assert_output --partial "secrets"
+  # The deploy creates the identity Secret empty: no data, no stringData.
+  run bash -c "command kustomize build '${AGENT_DIR}' | command yq -e 'select(.kind == \"Secret\" and .metadata.name == \"kubehz-agent\") | (has(\"data\") or has(\"stringData\")) | not'"
+  assert_success
+  assert_output "true"
 }
 
 # ── The agent image must be a shell-capable image, pinned by digest ─

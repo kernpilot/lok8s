@@ -6,8 +6,10 @@ package kubehz
 // heartbeat owner) through envFrom, so it needs no access to it through the
 // API. It keeps its markers (the 24h assessment gate, the claim nonce, the
 // desired-state validator) as annotations on a separate ConfigMap,
-// kubehz-agent-state, and that ConfigMap is the only object it can patch.
-// Its bindings grant only its own roles, and only to its own ServiceAccount.
+// kubehz-agent-state. That ConfigMap and its identity Secret, kubehz-agent,
+// are the only objects it can patch, and it can create nothing: the deploy
+// creates both empty. Its bindings grant only its own roles, and only to its
+// own ServiceAccount.
 //
 // The tests read the embedded manifests (internal/kubehz/manifests/agent).
 // TestEmbeddedManifestsMatchBashTree pins them to .lok8s/libs/kubehz/manifests
@@ -29,8 +31,10 @@ import (
 )
 
 const (
-	agentConfigName = "kubehz-agent-config"
-	agentStateFile  = "agent/state-configmap.yaml"
+	agentConfigName    = "kubehz-agent-config"
+	agentStateFile     = "agent/state-configmap.yaml"
+	agentIdentityFile  = "agent/identity-secret.yaml"
+	agentIdentitySName = "kubehz-agent"
 )
 
 type rbacRule struct {
@@ -204,8 +208,7 @@ var agentRoleRules = map[agentRoleKey][]rbacRule{
 		{APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{"kubeadm-config"}, Verbs: []string{"get"}},
 	},
 	{"Role", agentNamespace, "kubehz-agent-secret"}: {
-		{APIGroups: []string{""}, Resources: []string{"secrets"}, ResourceNames: []string{"kubehz-agent"}, Verbs: []string{"get"}},
-		{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"create"}},
+		{APIGroups: []string{""}, Resources: []string{"secrets"}, ResourceNames: []string{agentIdentitySName}, Verbs: []string{"get", "patch"}},
 	},
 	{"Role", agentNamespace, "kubehz-agent-marker"}: {
 		{APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{agentStateName}, Verbs: []string{"get", "patch"}},
@@ -378,8 +381,15 @@ func TestAgentRoleCheckRefusesExtraGrants(t *testing.T) {
 			rules[1].APIGroups = append(rules[1].APIGroups, "extensions")
 			return rules
 		}), "rules"},
-		{"the name scope removed from the identity Secret get", edit(secret, func(rules []rbacRule) []rbacRule {
+		{"the name scope removed from the identity Secret get and patch", edit(secret, func(rules []rbacRule) []rbacRule {
 			rules[0].ResourceNames = nil
+			return rules
+		}), "rules"},
+		{"a create on Secrets back in the Secret Role", edit(secret, func(rules []rbacRule) []rbacRule {
+			return append(rules, rbacRule{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"create"}})
+		}), "rules"},
+		{"a create verb on the identity Secret rule", edit(secret, func(rules []rbacRule) []rbacRule {
+			rules[0].Verbs = append(rules[0].Verbs, "create")
 			return rules
 		}), "rules"},
 		{"an extra non-resource URL", edit(clusterRole, func(rules []rbacRule) []rbacRule {
@@ -424,24 +434,27 @@ type agentWriteRule struct {
 // agentWriteAllowlist is every rule of the agent manifests with a write
 // verb, in its exact form:
 //   - get and patch on the one ConfigMap kubehz-agent-state (the markers);
-//   - create on Secrets in kubehz-system, for the identity Secret. RBAC
-//     cannot scope a create by name (an object has no name before it
-//     exists), so this rule has no resourceNames.
+//   - get and patch on the one Secret kubehz-agent (the identity), which
+//     the bootstrap fills once. No create: RBAC cannot scope a create by
+//     name (an object has no name before it exists), so a create rule would
+//     let the token make a Secret of any name in kubehz-system. The deploy
+//     creates the Secret empty (agent/identity-secret.yaml).
 var agentWriteAllowlist = []agentWriteRule{
 	{"Role", agentNamespace, "kubehz-agent-marker", rbacRule{
 		APIGroups: []string{""}, Resources: []string{"configmaps"},
 		ResourceNames: []string{agentStateName}, Verbs: []string{"get", "patch"},
 	}},
 	{"Role", agentNamespace, "kubehz-agent-secret", rbacRule{
-		APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"create"},
+		APIGroups: []string{""}, Resources: []string{"secrets"},
+		ResourceNames: []string{agentIdentitySName}, Verbs: []string{"get", "patch"},
 	}},
 }
 
 // TestAgentRBACWriteRulesAreTheAllowlist: each rule with a write verb is a
 // rule of agentWriteAllowlist in its exact form (the role, the API groups,
 // the resources, the names and the verbs), and each rule of the allowlist
-// is found once. No rule names kubehz-agent-config, and every rule on
-// ConfigMaps names its objects.
+// is found once. No rule names kubehz-agent-config, every rule on
+// ConfigMaps or Secrets names its objects, and no rule grants create.
 func TestAgentRBACWriteRulesAreTheAllowlist(t *testing.T) {
 	t.Parallel()
 	found := make([]int, len(agentWriteAllowlist))
@@ -452,6 +465,12 @@ func TestAgentRBACWriteRulesAreTheAllowlist(t *testing.T) {
 			}
 			if slices.Contains(rule.Resources, "configmaps") && len(rule.ResourceNames) == 0 {
 				t.Errorf("%s %s/%s grants %v on every ConfigMap", r.Kind, r.Metadata.Namespace, r.Metadata.Name, rule.Verbs)
+			}
+			if slices.Contains(rule.Resources, "secrets") && len(rule.ResourceNames) == 0 {
+				t.Errorf("%s %s/%s grants %v on every Secret in its namespace", r.Kind, r.Metadata.Namespace, r.Metadata.Name, rule.Verbs)
+			}
+			if slices.Contains(rule.Verbs, "create") {
+				t.Errorf("%s %s/%s grants create on %v: the deploy creates the agent's objects", r.Kind, r.Metadata.Namespace, r.Metadata.Name, rule.Resources)
 			}
 			if !slices.ContainsFunc(rule.Verbs, func(v string) bool { return slices.Contains(writeVerbs, v) }) {
 				continue
@@ -500,9 +519,9 @@ func TestAgentRBACHasNoWildcard(t *testing.T) {
 			}
 		}
 	}
-	// The agent's roles hold 14 rules. Fewer means the scan reads nothing.
-	if rules < 14 {
-		t.Fatalf("%d rules found in agent/, want at least 14", rules)
+	// The agent's roles hold 13 rules. Fewer means the scan reads nothing.
+	if rules < 13 {
+		t.Fatalf("%d rules found in agent/, want at least 13", rules)
 	}
 }
 
@@ -848,5 +867,99 @@ func TestAgentStateConfigMapIsDeployed(t *testing.T) {
 	}
 	if keys := slices.Sorted(maps.Keys(meta)); !slices.Equal(keys, []string{"labels", "name", "namespace"}) {
 		t.Errorf("%s: metadata keys %v, want labels, name and namespace", agentStateFile, keys)
+	}
+}
+
+// TestAgentIdentitySecretIsDeployed: the agent kustomization creates the
+// identity Secret kubehz-agent empty, so that the agent needs no create on
+// Secrets. The manifest carries no data, stringData or annotations: a value
+// in the manifest would be set back at every apply (a rotated identity),
+// and an apply of a manifest without data keeps the values that the agent
+// wrote. The type is Opaque, the type of the Secret that older agents
+// created (`kubectl create secret generic`): a Secret's type cannot change,
+// so another type would fail the apply on an upgrade.
+func TestAgentIdentitySecretIsDeployed(t *testing.T) {
+	t.Parallel()
+	docs := agentDocs(t)
+	kust := docs["agent/kustomization.yaml"]
+	if len(kust) != 1 || !slices.Contains(kust[0].Resources, "identity-secret.yaml") {
+		t.Errorf("agent/kustomization.yaml must list identity-secret.yaml: %+v", kust)
+	}
+	raw, err := fs.ReadFile(Manifests(), agentIdentityFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secret []map[string]any
+	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
+	for {
+		var doc map[string]any
+		if err := dec.Decode(&doc); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			t.Fatalf("%s: %v", agentIdentityFile, err)
+		}
+		secret = append(secret, doc)
+	}
+	if len(secret) != 1 {
+		t.Fatalf("%s: %d documents, want 1", agentIdentityFile, len(secret))
+	}
+	d := secret[0]
+	meta, _ := d["metadata"].(map[string]any)
+	if d["kind"] != "Secret" || meta["name"] != agentIdentitySName || meta["namespace"] != agentNamespace {
+		t.Errorf("%s: want the Secret %s/%s, got %+v", agentIdentityFile, agentNamespace, agentIdentitySName, d)
+	}
+	if d["type"] != "Opaque" {
+		t.Errorf("%s: type %v, want Opaque", agentIdentityFile, d["type"])
+	}
+	if keys := slices.Sorted(maps.Keys(d)); !slices.Equal(keys, []string{"apiVersion", "kind", "metadata", "type"}) {
+		t.Errorf("%s: top-level keys %v, want apiVersion, kind, metadata and type (no data, no stringData)", agentIdentityFile, keys)
+	}
+	if keys := slices.Sorted(maps.Keys(meta)); !slices.Equal(keys, []string{"labels", "name", "namespace"}) {
+		t.Errorf("%s: metadata keys %v, want labels, name and namespace (no annotations)", agentIdentityFile, keys)
+	}
+}
+
+// TestAgentScriptSecretCallsAreGetAndPatchByName: each kubectl call of the
+// heartbeat script on a Secret names kubehz-agent in kubehz-system and is a
+// get or a patch, the two verbs of its Role. No call creates, applies,
+// replaces or deletes a Secret. The one patch is the fill of the bootstrap:
+// a merge patch from stdin (A and C never on argv) whose body carries the
+// resourceVersion of the read, so that a second filler gets a 409 Conflict
+// and never overwrites the first.
+func TestAgentScriptSecretCallsAreGetAndPatchByName(t *testing.T) {
+	t.Parallel()
+	script := heartbeatScript(t)
+	gets, patches := 0, 0
+	for _, c := range kubectlCalls(script) {
+		joined := strings.Join(c.args, " ")
+		if !slices.ContainsFunc(c.args, func(a string) bool {
+			return a == "secret" || a == "secrets" || strings.HasPrefix(a, "secret/") || strings.HasPrefix(a, "secrets/")
+		}) {
+			continue
+		}
+		if !strings.HasPrefix(joined, "get secret "+agentIdentitySName+" -n "+agentNamespace) &&
+			!strings.HasPrefix(joined, "patch secret "+agentIdentitySName+" -n "+agentNamespace) {
+			t.Errorf("script line %d: kubectl %s: the agent may only get and patch Secret %s/%s", c.line, joined, agentNamespace, agentIdentitySName)
+			continue
+		}
+		switch c.args[0] {
+		case "get":
+			gets++
+		case "patch":
+			patches++
+			if joined != "patch secret "+agentIdentitySName+" -n "+agentNamespace+" --type=merge --patch-file=/dev/stdin" {
+				t.Errorf("script line %d: kubectl %s: the fill is a merge patch from stdin", c.line, joined)
+			}
+		}
+	}
+	if gets != 3 || patches != 1 {
+		t.Errorf("%d Secret reads and %d patches, want 3 and 1 (the state read, the two value reads, the fill)", gets, patches)
+	}
+	if !strings.Contains(script, `printf '{"metadata":{"resourceVersion":"%s"},"stringData":{"agent-token":"%s","claim-code":"%s"}}'`) {
+		t.Error("the fill patch must carry the resourceVersion of the read (a 409 for a second filler)")
+	}
+	if !strings.Contains(script, `if [ -z "${ID_KEYS}" ]; then`) {
+		t.Error("the fill must run only for a Secret that holds neither key (never rotate)")
 	}
 }
