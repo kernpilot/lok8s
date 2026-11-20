@@ -304,6 +304,46 @@ func TestMcpToolsDestructiveOptInIsSupersetOfArgsh(t *testing.T) {
 	}
 }
 
+// TestMcpDrainToolHidesTheForceItRefuses: a drain always refuses the global
+// --force, so its tool does not offer it, also with --allow-destructive.
+// lo_down reads --force, so its tool keeps it.
+func TestMcpDrainToolHidesTheForceItRefuses(t *testing.T) {
+	tools := mcpToolNames(t, mcpExposure{destructive: true})
+	drain := tools["lo_kubehz_node_drain"]
+	if drain == nil {
+		t.Fatal("lo_kubehz_node_drain missing with --allow-destructive")
+	}
+	flags := flagNames(t, drain)
+	if flags["force"] {
+		t.Error("--force on lo_kubehz_node_drain, which always refuses it")
+	}
+	if !flags["evict-unmanaged"] {
+		t.Error("--evict-unmanaged missing on lo_kubehz_node_drain")
+	}
+	if tools["lo_down"] == nil || !flagNames(t, tools["lo_down"])["force"] {
+		t.Error("--force missing on lo_down with --allow-destructive")
+	}
+}
+
+// TestMcpRefusedFlagsNameRealFlags: every entry of mcpRefusedFlags names a
+// command of the MCP tree and a flag that this command has. A renamed command
+// or flag would otherwise make the entry do nothing.
+func TestMcpRefusedFlagsNameRealFlags(t *testing.T) {
+	root := newMCPTree(synthProject(t))
+	for path, refused := range mcpRefusedFlags {
+		cmd, _, err := root.Find(strings.Fields(path)[1:])
+		if err != nil || cmd.CommandPath() != path {
+			t.Errorf("mcpRefusedFlags: %q is no command of the MCP tree (%v)", path, err)
+			continue
+		}
+		for name := range refused {
+			if cmd.Flag(name) == nil {
+				t.Errorf("mcpRefusedFlags: %q has no flag --%s", path, name)
+			}
+		}
+	}
+}
+
 func TestMcpToolsNeverExposeSensitiveFlags(t *testing.T) {
 	tools := mcpToolNames(t, mcpExposure{destructive: true})
 	for name, tool := range tools {

@@ -1102,13 +1102,18 @@ EOF
   # A control character in KUBEHZ_TOKEN (a CR from a file with CRLF line
   # ends, a tab): both refuse it in the shared node preflight with the same
   # two lines, and neither sends a request: with --space-id, with the space
-  # list, and on the hosted node commands.
+  # list, and on the hosted node commands (status, join --print-only and
+  # remove, with --cluster-id and with the cluster of the domain).
   for token in $'parity-jwt\r' $'parity\tjwt'; do
     KUBEHZ_TOKEN="${token}" check_api_none - kubehz node cordon --name worker-1 --domain acme.dev --space-id sp-1a2b3c4d
     KUBEHZ_TOKEN="${token}" check_api_none - kubehz node drain --name worker-1 --domain acme.dev --space-id sp-1a2b3c4d --timeout 600
     KUBEHZ_TOKEN="${token}" check_api_none - kubehz node uncordon --name worker-1 --domain acme.dev
     KUBEHZ_TOKEN="${token}" check_api_none - kubehz node status --domain hstub.dev --cluster-id cl-1a2b3c4d
     KUBEHZ_TOKEN="${token}" check_api_none - kubehz node status --domain hstub.dev
+    KUBEHZ_TOKEN="${token}" check_api_none - kubehz node join --print-only --domain hstub.dev --cluster-id cl-1a2b3c4d --pool metal
+    KUBEHZ_TOKEN="${token}" check_api_none - kubehz node join --print-only --domain hstub.dev
+    KUBEHZ_TOKEN="${token}" check_api_none - kubehz node remove --name worker-1 --domain hstub.dev --cluster-id cl-1a2b3c4d
+    KUBEHZ_TOKEN="${token}" check_api_none - kubehz node remove --name worker-1 --domain hstub.dev
   done
   # A backslash in the slug prints as typed in both (error() of the bash
   # tree prints the message as it is).

@@ -31,6 +31,8 @@ package cli
 //     are never exposed; --force and --force-recreate only with
 //     --allow-destructive; --verbose never (ophis renders a count flag as
 //     `--verbose N`, which cobra would take as a stray positional);
+//   - a flag that a command always refuses is not in that tool's schema
+//     (mcpRefusedFlags: --force on `kubehz node drain`);
 //   - a command that parses its own argv (DisableFlagParsing: `lo chat`) is
 //     never exposed: the flag policy cannot see what reaches it, and
 //     `lo chat --lo <path>` would run any file with the server's
@@ -54,6 +56,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -241,22 +244,43 @@ func mcpHiddenSubtree(cmd *cobra.Command) bool {
 	return false
 }
 
-// mcpSelectors is the single ophis selector: leaves only (dispatchers are
-// traversed, not exposed, as in the argsh server), outside hidden subtrees,
-// never a command that parses its own argv, gated by tier, with the flag
-// policy on local and inherited flags alike, and every call through
-// mcpNoDashArgs.
+// mcpRefusedFlags are flags that one command always refuses, by command
+// path. That tool's schema does not show them, also with --allow-destructive.
+// A drain refuses the global --force/-f (kubehz.Context.NodeDrain): its own
+// flag for `kubectl drain --force` is --evict-unmanaged.
+var mcpRefusedFlags = map[string]map[string]bool{
+	"lo kubehz node drain": {"force": true},
+}
+
+// mcpSelectors are the ophis selectors. Each selects leaves only
+// (dispatchers are traversed, not exposed, as in the argsh server), outside
+// hidden subtrees, never a command that parses its own argv, gated by tier,
+// with the flag policy on local and inherited flags alike, and every call
+// through mcpNoDashArgs. ophis uses the first selector that matches a
+// command, and its flag selectors get no command. Thus each command of
+// mcpRefusedFlags gets its own selector, before the general one.
 func mcpSelectors(x mcpExposure) []ophis.Selector {
-	flagOK := func(f *pflag.Flag) bool { return x.allowsFlag(f.Name) }
-	return []ophis.Selector{{
-		CmdSelector: func(cmd *cobra.Command) bool {
-			return !cmd.HasSubCommands() && !mcpHiddenSubtree(cmd) && !cmd.DisableFlagParsing &&
-				cmd.Annotations[AnnotationCredentialOutput] != "true" && x.allows(mcpTier(cmd))
-		},
-		LocalFlagSelector:     flagOK,
-		InheritedFlagSelector: flagOK,
-		Middleware:            mcpNoDashArgs,
-	}}
+	exposed := func(cmd *cobra.Command) bool {
+		return !cmd.HasSubCommands() && !mcpHiddenSubtree(cmd) && !cmd.DisableFlagParsing &&
+			cmd.Annotations[AnnotationCredentialOutput] != "true" && x.allows(mcpTier(cmd))
+	}
+	selector := func(cmdOK func(*cobra.Command) bool, refused map[string]bool) ophis.Selector {
+		flagOK := func(f *pflag.Flag) bool { return x.allowsFlag(f.Name) && !refused[f.Name] }
+		return ophis.Selector{
+			CmdSelector:           cmdOK,
+			LocalFlagSelector:     flagOK,
+			InheritedFlagSelector: flagOK,
+			Middleware:            mcpNoDashArgs,
+		}
+	}
+	paths := slices.Sorted(maps.Keys(mcpRefusedFlags))
+	selectors := make([]ophis.Selector, 0, len(paths)+1)
+	for _, path := range paths {
+		selectors = append(selectors, selector(func(cmd *cobra.Command) bool {
+			return cmd.CommandPath() == path && exposed(cmd)
+		}, mcpRefusedFlags[path]))
+	}
+	return append(selectors, selector(exposed, nil))
 }
 
 // mcpNoDashArgs refuses a call when one of the model's positional arguments
