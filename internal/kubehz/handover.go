@@ -513,6 +513,15 @@ func (c *Context) endpointDNS(bundle string) (string, error) {
 }
 
 // writeKubeadmConfig ports handover::write_kubeadm_config (v1beta4).
+//
+// The InitConfiguration sets one value: a TTL of 1 h (kubeadm's default is
+// 24 h) for the bootstrap token that kubeadm init creates. No later step of
+// the handover uses that token: verify and the untaint use admin.conf, and
+// --skip-token-print keeps it off the screen. A later join mints its own
+// token (kubeadm token create). The cluster-info ConfigMap and the bootstrap
+// RBAC that joins need do not depend on this token, and init still creates
+// them. kubeadm fills in the default groups and usages. A TTL of 0 means
+// "never expires", so the value must stay above 0.
 func (c *Context) writeKubeadmConfig(bundle, k8sDir, out, etcdTag string) error {
 	enc := filepath.Join(k8sDir, "kubehz-encryption-config.yaml")
 	dns, err := c.endpointDNS(bundle)
@@ -536,7 +545,12 @@ func (c *Context) writeKubeadmConfig(bundle, k8sDir, out, etcdTag string) error 
 		"      hostPath: " + enc + "\n" +
 		"      mountPath: " + enc + "\n" +
 		"      readOnly: true\n" +
-		"      pathType: File\n"
+		"      pathType: File\n" +
+		"---\n" +
+		"apiVersion: kubeadm.k8s.io/v1beta4\n" +
+		"kind: InitConfiguration\n" +
+		"bootstrapTokens:\n" +
+		"  - ttl: 1h0m0s\n"
 	return os.WriteFile(out, []byte(content), 0o644) // #nosec G306 -- a static-pod manifest; the secret it mounts is its own 0600 file
 }
 

@@ -42,6 +42,7 @@ setup() {
         --user|-u)     user="$2"; shift ;;
         --port|-p)     port="$2"; shift ;;
         --ssh-key|-i)  ssh_key="$2"; shift ;;
+        --known-hosts) known_hosts="$2"; shift ;;
       esac
       shift
     done
@@ -136,12 +137,102 @@ _mock_node_binaries() {
 
 @test "handover: resolve_bundle unpacks a .tar.gz into a private dir" {
   _make_bundle
+  # The mktemp dir goes under the test dir, so the teardown removes it.
+  export TMPDIR="${BATS_TEST_TMPDIR}"
   local tarball="${BATS_TEST_TMPDIR}/bundle.tar.gz"
   tar -czf "${tarball}" -C "${BUNDLE}" .
   run handover::resolve_bundle "${tarball}"
   assert_success
+  [[ "${output}" == "${BATS_TEST_TMPDIR}/"* ]]
   [ -s "${output}/ca.crt" ]
   [ -s "${output}/endpoint-dns" ]
+  run stat -c '%a' "${output}"
+  assert_output "700"
+}
+
+# `tar -C <dir> .` writes a "./" entry, and tar gives that entry's mode to
+# the dir it unpacks into. The bundle dir must stay 0700 and the keys 0600,
+# with a workdir and without one.
+@test "resolve_bundle: a './' entry of mode 0755 or 0777 leaves the dir 0700 and the keys 0600" {
+  _make_bundle
+  export TMPDIR="${BATS_TEST_TMPDIR}"
+  local m perms tarball wd first
+  for m in 755 777; do
+    case "${m}" in 755) perms="drwxr-xr-x" ;; 777) perms="drwxrwxrwx" ;; esac
+    chmod "${m}" "${BUNDLE}"
+    chmod 644 "${BUNDLE}/ca.key"
+    tarball="${BATS_TEST_TMPDIR}/bundle-${m}.tar.gz"
+    tar -czf "${tarball}" -C "${BUNDLE}" .
+    # The archive carries the mode under test on its "./" entry.
+    tar -tvzf "${tarball}" > "${BATS_TEST_TMPDIR}/list-${m}"
+    first="$(head -n 1 "${BATS_TEST_TMPDIR}/list-${m}")"
+    [[ "${first}" == "${perms} "* && "${first}" == *" ./" ]]
+
+    wd="${BATS_TEST_TMPDIR}/wd-${m}"
+    mkdir -m 700 "${wd}"
+    run handover::resolve_bundle "${tarball}" "${wd}"
+    assert_success
+    assert_output "${wd}/bundle"
+    run stat -c '%a' "${wd}/bundle"
+    assert_output "700"
+    run stat -c '%a' "${wd}/bundle/ca.key"
+    assert_output "600"
+
+    run handover::resolve_bundle "${tarball}"
+    assert_success
+    [[ "${output}" == "${BATS_TEST_TMPDIR}/"* ]]
+    run stat -c '%a' "${output}"
+    assert_output "700"
+  done
+}
+
+@test "resolve_bundle: a dir that the unpack left open fails closed and is removed" {
+  # A tar that does not honour the options (a tar run as root that restores
+  # the "./" mode, for example): the stub runs the real tar and then opens
+  # the dir that -C names.
+  _make_bundle
+  local tarball="${BATS_TEST_TMPDIR}/bundle.tar.gz" wd="${BATS_TEST_TMPDIR}/wd"
+  tar -czf "${tarball}" -C "${BUNDLE}" .
+  mkdir -m 700 "${wd}"
+  tar() {
+    command tar "$@" || return
+    local arg prev=""
+    for arg in "$@"; do
+      [[ "${prev}" != "-C" ]] || command chmod 755 "${arg}"
+      prev="${arg}"
+    done
+  }
+  export -f tar
+  run handover::resolve_bundle "${tarball}" "${wd}"
+  assert_failure
+  assert_output --partial "handover: ${wd}/bundle has mode 755, not 700"
+  [ ! -e "${wd}/bundle" ]
+}
+
+@test "handover receive and preseed: a workdir that is not 0700 fails before anything else" {
+  _make_bundle
+  _mock_node_binaries
+  ssh() { echo "ssh $*" >> "${CALLS}"; return 0; }
+  scp() { echo "scp $*" >> "${CALLS}"; return 0; }
+  # mktemp gives an open dir, and chmod cannot close it (a file system that
+  # ignores file modes).
+  mktemp() {
+    local d="${BATS_TEST_TMPDIR}/open.${RANDOM}${RANDOM}"
+    mkdir -m 755 "${d}" && echo "${d}"
+  }
+  chmod() { :; }
+  export -f ssh scp mktemp chmod
+
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_failure
+  assert_output --partial "has mode 755, not 700"
+  run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7
+  assert_failure
+  assert_output --partial "has mode 755, not 700"
+  # Nothing reached the node, and the RETURN trap removed both dirs.
+  [ ! -s "${CALLS}" ]
+  run compgen -G "${BATS_TEST_TMPDIR}/open.*"
+  assert_failure
 }
 
 # ── receive: the full kubeadm path against a sandbox ─────
@@ -231,6 +322,40 @@ _mock_node_binaries() {
   assert_output --partial "secret: dGVzdC1lbmNyeXB0aW9uLWtleQ=="
   run stat -c '%a' "${enc}"
   assert_output "600"
+}
+
+@test "handover receive: the kubeadm config gives the init bootstrap token a TTL of 1 h" {
+  # kubeadm init creates its bootstrap token with a TTL of 24 h by default.
+  # No later step of the handover uses the token, so it ends after 1 h.
+  _make_bundle
+  _mock_node_binaries
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+  local cfg="${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml"
+  run cat "${cfg}"
+  assert_output --partial "---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+bootstrapTokens:
+  - ttl: 1h0m0s"
+  # One TTL only: no second token, and no 0 (a token that never expires).
+  run grep -c 'ttl:' "${cfg}"
+  assert_output "1"
+}
+
+@test "handover receive: the kubeadm config equals the golden that the Go suite reads" {
+  # internal/kubehz/testdata/golden/kubeadm-config.yaml pins the Go render
+  # (TestHandoverReceiveGeneratedConfigsMatchBashGoldens). The bash render
+  # must be the same bytes, with /etc/kubernetes for the test dir.
+  _make_bundle
+  _mock_node_binaries
+  run handover::receive --bundle "${BUNDLE}" --snapshot "${SNAPSHOT}"
+  assert_success
+  local got want
+  got="$(< "${KUBEHZ_HANDOVER_K8S_DIR}/kubehz-handover-kubeadm.yaml")"
+  got="${got//"${KUBEHZ_HANDOVER_K8S_DIR}"//etc/kubernetes}"
+  want="$(< "${_PROJECT_ROOT}/internal/kubehz/testdata/golden/kubeadm-config.yaml")"
+  [ "${got}" = "${want}" ] || { diff <(printf '%s\n' "${want}") <(printf '%s\n' "${got}"); return 1; }
 }
 
 @test "handover receive: --single-node untaints via the LOCAL apiserver, not the pre-cutover DNS" {
@@ -843,8 +968,54 @@ _mock_node_binaries() {
   run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7
   assert_failure
   assert_output --partial "cannot reach"
+  assert_output --partial "a changed host key also fails here"
   run grep -c '^scp ' "${CALLS}"
   assert_output "0"
+}
+
+@test "handover preseed: every ssh and scp checks the host key, never StrictHostKeyChecking=no" {
+  # The scp calls carry the CA private keys. A node seen for the first time
+  # is recorded (accept-new), and a changed key fails the transfer.
+  _make_bundle
+  ssh() { echo "ssh $*" >> "${CALLS}"; return 0; }
+  scp() { echo "scp $*" >> "${CALLS}"; return 0; }
+  export -f ssh scp
+  local kh="${BATS_TEST_TMPDIR}/known_hosts" line n=0
+
+  run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7 --known-hosts "${kh}"
+  assert_success
+  # 1 mkdir, 6 scp and 3 chmod: the loop below must see every call.
+  run grep -cE '^(ssh|scp) ' "${CALLS}"
+  assert_output "10"
+  while IFS= read -r line; do
+    [[ "${line}" == *"-o StrictHostKeyChecking=accept-new "* ]] || { echo "no accept-new: ${line}"; return 1; }
+    [[ "${line}" == *"-o UserKnownHostsFile=${kh} "* ]] || { echo "no known_hosts file: ${line}"; return 1; }
+    [[ "${line}" != *"StrictHostKeyChecking=no"* && "${line}" != *"/dev/null"* ]] || { echo "host key not checked: ${line}"; return 1; }
+    n=$(( n + 1 ))
+  done < "${CALLS}"
+  [ "${n}" -eq 10 ]
+
+  # Without --known-hosts, ssh uses its own known_hosts file.
+  : > "${CALLS}"
+  run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7
+  assert_success
+  run grep -c -- '-o StrictHostKeyChecking=accept-new ' "${CALLS}"
+  assert_output "10"
+  run grep -c 'UserKnownHostsFile' "${CALLS}"
+  assert_output "0"
+}
+
+@test "handover preseed: a --known-hosts path with whitespace is refused before any ssh" {
+  # ssh splits the value of -o UserKnownHostsFile on whitespace, so the file
+  # it reads would not be the file the caller named.
+  _make_bundle
+  ssh() { echo "ssh $*" >> "${CALLS}"; return 0; }
+  scp() { echo "scp $*" >> "${CALLS}"; return 0; }
+  export -f ssh scp
+  run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7 --known-hosts "${BATS_TEST_TMPDIR}/known hosts"
+  assert_failure
+  assert_output --partial "handover: --known-hosts path must not contain whitespace: \"${BATS_TEST_TMPDIR}/known hosts\""
+  [ ! -s "${CALLS}" ]
 }
 
 # ── `lo kubehz assess` pretty-printer ────────────────────

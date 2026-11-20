@@ -65,6 +65,29 @@ kubehz::handover() {
 
 # ── Bundle handling ──────────────────────────────────────
 
+# The permission bits of a path in octal: GNU stat, then BSD stat (macOS).
+handover::mode() {
+  stat -c '%a' "${1}" 2>/dev/null || stat -f '%Lp' "${1}" 2>/dev/null
+}
+
+# Fail closed unless dir has mode 0700: the extracted bundle holds the cluster
+# CA keys, the service-account key and the encryption key.
+handover::require_private() {
+  local dir="${1}" mode
+  mode="$(handover::mode "${dir}")" || mode=""
+  [[ "${mode}" == "700" ]] && return 0
+  error "handover: ${dir} has mode ${mode:-unknown}, not 700, so other users could read the bundle's keys in it. Check the archive and the file system of TMPDIR, then retry."
+  return 1
+}
+
+# Set dir to 0700 and check it. The leading zero also clears a set-group-ID
+# bit that the dir got from its parent: GNU chmod keeps that bit on a
+# directory for a plain `chmod 700`.
+handover::make_private() {
+  chmod 00700 "${1}" 2>/dev/null || :
+  handover::require_private "${1}"
+}
+
 # Resolve --bundle into a directory: a directory is used as-is; a file (the
 # api's one-time .tar.gz download) is unpacked into a private (0700) dir —
 # inside the caller's workdir when one is given, so the caller's cleanup trap
@@ -85,7 +108,7 @@ handover::resolve_bundle() {
     else
       dir=$(mktemp -d) || return 1
     fi
-    chmod 700 "${dir}"
+    handover::make_private "${dir}" || { rm -rf "${dir}"; return 1; }
     # Path-traversal guard: reject any archive entry that is absolute or
     # climbs out (`..` component) BEFORE extraction — a malicious bundle must
     # not write outside the private dir (GNU tar defends by default, bsdtar
@@ -104,11 +127,24 @@ handover::resolve_bundle() {
           ;;
       esac
     done < <(tar -tzf "${bundle}" 2>/dev/null)
-    if ! tar -xzf "${bundle}" -C "${dir}" 2>/dev/null; then
+    # An archive made with `tar -C <dir> .` has a "./" entry, and tar gives
+    # its mode to the private dir: 0755 with umask 022, the archive's own mode
+    # for root. So the unpack runs with umask 077, --no-same-permissions and
+    # --no-same-owner (root restores the archive's modes and owners without
+    # them), and GNU tar also gets --no-overwrite-dir (it keeps the mode of the
+    # existing dir). bsdtar (the macOS tar) refuses that option, so it gets
+    # the other two only. The mode check after the unpack decides for every tar.
+    local -a tar_opts=(--no-same-owner --no-same-permissions)
+    local tar_version
+    tar_version="$(tar --version 2>/dev/null)" || tar_version=""
+    [[ "${tar_version}" != *"GNU tar"* ]] || tar_opts+=(--no-overwrite-dir)
+    if ! (umask 077 && tar -xzf "${bundle}" -C "${dir}" "${tar_opts[@]}") 2>/dev/null; then
       error "handover: ${bundle} is neither a bundle directory nor a readable .tar.gz archive"
       rm -rf "${dir}"
       return 1
     fi
+    # Fail closed: the unpack must not have opened the dir to other users.
+    handover::require_private "${dir}" || { rm -rf "${dir}"; return 1; }
     echo "${dir}"
     return 0
   fi
@@ -410,6 +446,14 @@ EOF
 # real target). Boot the SOURCE line first; upgrading etcd
 # afterwards is the standard in-place path. The caller validates the tag
 # (fail-before-touching-the-node contract).
+# The InitConfiguration sets one value: a TTL of 1 h (kubeadm's default is
+# 24 h) for the bootstrap token that kubeadm init creates. No later step of
+# the handover uses that token: verify and the untaint use admin.conf, and
+# --skip-token-print keeps it off the screen. A later join mints its own token
+# (kubeadm token create). The cluster-info ConfigMap and the bootstrap RBAC
+# that joins need do not depend on this token, and init still creates them.
+# kubeadm fills in the default groups and usages. A TTL of 0 means "never
+# expires", so the value must stay above 0.
 handover::write_kubeadm_config() {
   local bundle="${1}" k8s_dir="${2}" out="${3}"
   local enc="${k8s_dir}/kubehz-encryption-config.yaml" dns
@@ -436,6 +480,11 @@ apiServer:
       mountPath: ${enc}
       readOnly: true
       pathType: File
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+bootstrapTokens:
+  - ttl: 1h0m0s
 EOF
 }
 
@@ -548,9 +597,9 @@ handover::receive() {
   # return is a harmless idempotent rm.
   local workdir
   workdir=$(mktemp -d) || return 1
-  chmod 700 "${workdir}"
   # shellcheck disable=SC2064
   trap "rm -rf '${workdir}'" RETURN
+  handover::make_private "${workdir}" || return 1
 
   local bundle_dir
   bundle_dir=$(handover::resolve_bundle "${bundle}" "${workdir}") || return 1
@@ -654,35 +703,48 @@ handover::receive() {
 # (lo provision) runs; kubeadm reuses existing CA files by design, so the
 # provisioned cluster keeps the exported identity. No snapshot, no init here.
 handover::preseed() {
-  local bundle="" node="" user="root" port=22 ssh_key=""
+  local bundle="" node="" user="root" port=22 ssh_key="" known_hosts=""
   local -a args=(
     'bundle|b:!'    'Export bundle: a directory or .tar.gz with the contract keys'
     'node|n:!'      'Target node address (kubeone node0) to place the PKI on'
     'user|u'        'SSH user'
     'port|p:~int'   'SSH port'
     'ssh-key|i'     'SSH private key file'
+    'known-hosts|'  "known_hosts file for the node's host key (default: ssh's own); a new host is recorded, a changed key fails"
     "${args[@]:-}"
   )
   :args "Pre-seed exported PKI onto a kubeone node before kubeone apply" "${@}"
+
+  # ssh reads the value of `-o UserKnownHostsFile=<path>` as a list of files
+  # separated by whitespace. A path with a space becomes two known_hosts
+  # files, and neither is the file the caller named.
+  if [[ "${known_hosts}" == *[[:space:]]* ]]; then
+    error "handover: --known-hosts path must not contain whitespace: \"${known_hosts}\""
+    return 1
+  fi
 
   # Same scratch + cleanup contract as receive: an extracted .tar.gz bundle
   # (PKI + encryption key on disk) is scrubbed on every exit path. Expand NOW
   # (libs/build idiom); a trap re-fire is a harmless idempotent rm.
   local workdir
   workdir=$(mktemp -d) || return 1
-  chmod 700 "${workdir}"
   # shellcheck disable=SC2064
   trap "rm -rf '${workdir}'" RETURN
+  handover::make_private "${workdir}" || return 1
 
   local bundle_dir
   bundle_dir=$(handover::resolve_bundle "${bundle}" "${workdir}") || return 1
   handover::validate_bundle "${bundle_dir}" || return 1
 
-  # Same non-interactive SSH posture as the kubeone driver's node probes.
+  # These calls carry the CA private keys, so the host key is checked: a node
+  # seen for the first time is recorded (accept-new), and a changed key fails
+  # the transfer. Never StrictHostKeyChecking=no or /dev/null here. The kubeone
+  # driver's node probes carry no secret and keep their own options.
   local -a ssh_opts=(
-    -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+    -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
     -o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=10
   )
+  [[ -z "${known_hosts}" ]] || ssh_opts+=(-o "UserKnownHostsFile=${known_hosts}")
   [[ -z "${ssh_key}" ]] || ssh_opts+=(-i "${ssh_key}")
 
   # umask 077 → the pki dir is 0700 from the start: even a file that lands
@@ -690,6 +752,7 @@ handover::preseed() {
   ssh "${ssh_opts[@]}" -p "${port}" "${user}@${node}" \
     'umask 077 && mkdir -p /etc/kubernetes/pki' || {
     error "handover: cannot reach ${user}@${node} over SSH"
+    error "handover: a changed host key also fails here; check the node and the known_hosts entry before you retry"
     return 1
   }
 

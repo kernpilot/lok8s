@@ -18,9 +18,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kernpilot/lok8s/internal/execx"
 	"github.com/kernpilot/lok8s/internal/fsutil"
+	"gopkg.in/yaml.v3"
 )
 
 type hoHarness struct {
@@ -311,6 +313,47 @@ func TestHandoverReceiveGeneratedConfigsMatchBashGoldens(t *testing.T) {
 	}
 	if info, _ := os.Stat(enc); info.Mode().Perm() != 0o600 {
 		t.Fatal("encryption config mode")
+	}
+}
+
+// kubeadm init creates a bootstrap token with a TTL of 24 h by default. The
+// handover gives it 1 h: no later step of the handover uses the token. The
+// config is read as YAML, so a TTL in the wrong document fails too.
+func TestHandoverReceiveBootstrapTokenTTLIsOneHour(t *testing.T) {
+	ho := newHandover(t)
+	ho.mockNodeBinaries(nil)
+	mustOK(t, ho.receive(ReceiveOpts{Snapshot: ho.snapshot}), ho.output())
+	dec := yaml.NewDecoder(strings.NewReader(readFile(t, filepath.Join(ho.k8sDir, "kubehz-handover-kubeadm.yaml"))))
+	var kinds, ttls []string
+	for {
+		var doc struct {
+			Kind            string `yaml:"kind"`
+			BootstrapTokens []struct {
+				TTL string `yaml:"ttl"`
+			} `yaml:"bootstrapTokens"`
+		}
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("the kubeadm config is not YAML: %v", err)
+		}
+		kinds = append(kinds, doc.Kind)
+		if doc.Kind == "InitConfiguration" {
+			for _, bt := range doc.BootstrapTokens {
+				ttls = append(ttls, bt.TTL)
+			}
+		}
+	}
+	if got := strings.Join(kinds, ","); got != "ClusterConfiguration,InitConfiguration" {
+		t.Fatalf("kubeadm config documents: %s", got)
+	}
+	if len(ttls) != 1 {
+		t.Fatalf("want one bootstrap token, got %d", len(ttls))
+	}
+	if d, err := time.ParseDuration(ttls[0]); err != nil || d != time.Hour {
+		t.Fatalf("bootstrap token ttl %q, want 1h", ttls[0])
 	}
 }
 
