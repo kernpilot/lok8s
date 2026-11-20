@@ -852,8 +852,7 @@ func (c *Context) agentKubeconfig(ctx context.Context, k agentKind, id, file str
 	if err != nil {
 		// First: after a failed write the path can still hold a part of
 		// the file, and "exists" would name the wrong cause.
-		var werr *kubeconfigWriteError
-		if errors.As(err, &werr) {
+		if werr, ok := errors.AsType[*kubeconfigWriteError](err); ok {
 			c.errorf("kubehz %s: cannot write %s: %s", action, file, werr.cause())
 			if werr.left {
 				c.echoErr("  %s can hold a part of the kubeconfig. Remove it before the next run.", file)
@@ -1375,8 +1374,7 @@ func (e *kubeconfigWriteError) Unwrap() error { return e.err }
 // path ("no space left on device"). The bash twin prints the C-locale
 // text of the shell with its first letter in lower case.
 func (e *kubeconfigWriteError) cause() string {
-	var pe *os.PathError
-	if errors.As(e.err, &pe) {
+	if pe, ok := errors.AsType[*os.PathError](e.err); ok {
 		return pe.Err.Error()
 	}
 	return e.err.Error()

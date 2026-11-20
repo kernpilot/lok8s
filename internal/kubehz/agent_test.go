@@ -1258,7 +1258,7 @@ func TestPublishKubeconfigWritesNothingWhenThePathChangesAfterTheCreate(t *testi
 // owner ("user::") does not count.
 func aclRights(listing string) string {
 	var bad []string
-	for _, line := range strings.Split(listing, "\n") {
+	for line := range strings.SplitSeq(listing, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "user::") {
 			continue
