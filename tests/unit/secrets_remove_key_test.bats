@@ -487,6 +487,41 @@ _class() {
   _class "pgp" nonage "age: '${RCPT_A}'${pgp}"
 }
 
+@test "the rule check reads a file name with a newline as one path" {
+  # The paths go to yq as one JSON array. In each rule set below, the first
+  # rule matches one reading of the name only: the part after the newline
+  # alone, or the whole name across the newline.
+  _load
+  local nl="${PATH_BASE}/Secret.app.default.K"$'\n'"x.enc"
+  local pgp="    pgp: 'FFFF0000FFFF0000FFFF0000FFFF0000FFFF0000'"
+  local -a none_list=() notage_list=() badage_list=()
+  secrets::_rules_check "${nl}" <<< "$(printf "creation_rules:\n  - path_regex: '^x\$'\n    age: '%s'\n%s\n  - path_regex: 'Secret\\\\..*'\n    age: '%s'\n" "${RCPT_A}" "${pgp}" "${RCPT_A}")" || {
+    echo "the rule check fails on the name" >&2; return 1; }
+  (( ${#none_list[@]} + ${#notage_list[@]} + ${#badage_list[@]} == 0 )) || {
+    echo "the name got the rule of the part after its newline" >&2; return 1; }
+  secrets::_rules_check "${nl}" <<< "$(printf "creation_rules:\n  - path_regex: \"K\\\\nx\$\"\n    age: '%s'\n%s\n  - path_regex: 'Secret\\\\..*'\n    age: '%s'\n" "${RCPT_A}" "${pgp}" "${RCPT_A}")" || {
+    echo "the rule check fails on the name" >&2; return 1; }
+  [[ ${#notage_list[@]} -eq 1 && "${notage_list[0]}" == "${nl}" && ${#none_list[@]} -eq 0 ]] || {
+    echo "the name did not get the rule that matches it whole" >&2; return 1; }
+}
+
+@test "remove-key re-keys a managed file whose name holds a newline" {
+  # Go twin: TestRemoveKeyRekeysANameWithANewline.
+  _load
+  _stub_encrypt
+  local store="${PATH_CLUSTERS}/a.dev/secrets" nl
+  nl="${store}/Secret.app.default.K"$'\n'"x"
+  _cache a.dev app "${RCPT_B}"
+  printf 'w' > "${nl}"
+  _envelope "${RCPT_B}" > "${nl}.enc"
+  touch -t 200001010000 "${nl}.enc"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+  [[ "$output" == *"re-keying 2 cache file(s) across 1 store(s)…"* ]] || { echo "$output" >&2; return 1; }
+  ! grep -qF "${RCPT_B}" "${nl}.enc" || { echo "the .enc whose name holds a newline still lists the recipient" >&2; return 1; }
+  ! grep -qF "${RCPT_B}" "${store}/Secret.app.default.K.enc" || { echo "the other .enc still lists the recipient" >&2; return 1; }
+}
+
 @test "an .enc or a store it cannot read fails closed before any write" {
   [ "$(id -u)" -ne 0 ] || skip "root reads every file"
   _load

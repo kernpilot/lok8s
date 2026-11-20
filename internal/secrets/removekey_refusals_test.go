@@ -152,6 +152,39 @@ func TestRemoveKeyChecksTheRuleOfEveryEnc(t *testing.T) {
 	}
 }
 
+// A managed file whose name holds a newline is one path to every step: the
+// rule check matches the whole name (the first rule matches the part after
+// the newline alone, and is not age), and the re-key rewrites the file.
+// tests/unit/secrets_remove_key_test.bats runs the same case through the bash
+// twin, which hands the paths to yq as one JSON array.
+func TestRemoveKeyRekeysANameWithANewline(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	c.Domain = "a.dev"
+	keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+	k, g := keep.Recipient().String(), gone.Recipient().String()
+	write(t, c.sopsConfigPath(), "creation_rules:\n"+
+		"  - path_regex: '^x$'\n    age: '"+k+"'\n    pgp: 'FFFF0000FFFF0000FFFF0000FFFF0000FFFF0000'\n"+
+		"  - path_regex: 'Secret\\..*'\n    age: '"+k+","+g+"'\n")
+	a := c.Paths.Clusters + "/a.dev/secrets"
+	plain := a + "/Secret.app.default.K\nx"
+	write(t, plain, "v")
+	encryptStore(t, c, "a.dev", out, errOut)
+	freshen(t, plain)
+	if !opens(t, plain+".enc", gone, "v") {
+		t.Fatal("fixture: the identity to remove cannot open the file before the removal")
+	}
+
+	if err := c.RemoveKey(g, false, false); err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
+	}
+	if !strings.Contains(out.String(), "re-keying 1 cache file(s) across 1 store(s)…\n") {
+		t.Errorf("stdout:\n%q", out.String())
+	}
+	if opens(t, plain+".enc", gone, "v") || !opens(t, plain+".enc", keep, "v") {
+		t.Error("the .enc whose name holds a newline was not re-keyed")
+	}
+}
+
 // The age recipients of the matched rule, read as sops reads them. The rows
 // match the _rules_check case of tests/unit/secrets_remove_key_test.bats,
 // which checks the same values by their shape.
