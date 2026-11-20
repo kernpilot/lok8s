@@ -3981,7 +3981,11 @@ Before the first write, the command refuses:
   - an .enc file that matches no creation rule, a rule with a recipient that
     is not age, or a rule with an age recipient that does not parse,
   - without --skip-orphans, an .enc file with no decrypted twin: the re-key
-    cannot rewrite that file, so it keeps the removed recipient.
+    cannot rewrite that file, so it keeps the removed recipient,
+  - a managed .enc file that holds other bytes than its decrypted twin, one
+    that your age identity cannot decrypt, or a twin that it cannot read:
+    the command decrypts each file in memory to compare it with its twin,
+    and the re-key encrypts the twin.
 
 The command holds the lock .sops.yaml.lock for the whole run, and waits for
 it LO_SECRETS_LOCK_WAIT seconds (60 by default). If the re-key stops after

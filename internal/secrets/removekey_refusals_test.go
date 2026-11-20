@@ -9,7 +9,10 @@ package secrets
 
 import (
 	"errors"
+	"io/fs"
+	"maps"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -174,6 +177,7 @@ func TestRemoveKeyRekeysANameWithANewline(t *testing.T) {
 		t.Fatal("fixture: the identity to remove cannot open the file before the removal")
 	}
 
+	callerIdentity(t, keep)
 	if err := c.RemoveKey(g, false, false); err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
@@ -400,6 +404,7 @@ func TestRemoveKeyResumesAStoppedRekey(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(b, 0o700) })
 
+	callerIdentity(t, keep)
 	if err := c.RemoveKey(g, true, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v", err)
 	}
@@ -447,6 +452,110 @@ func TestRemoveKeyResumesAStoppedRekey(t *testing.T) {
 	}
 }
 
+// treeBytes reads every regular file under dir, by its path.
+func treeBytes(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type().IsRegular() {
+			files[path] = readFile(t, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+// Before the first write, remove-key decrypts each file that it re-keys, in
+// memory, with the identity of the caller, and compares it with its twin: the
+// re-key encrypts the twin, so a twin with another value would replace the
+// value of the .enc. A twin that differs, a file that the caller cannot
+// decrypt and a twin that it cannot read are refused by their path, and
+// .sops.yaml and every file of the store stay byte-equal. No value is
+// printed: stdout and stderr are pinned whole.
+// tests/unit/secrets_remove_key_test.bats runs the same cases.
+func TestRemoveKeyRefusesATwinThatDiffersFromItsEnc(t *testing.T) {
+	const tail = "[error]   the re-key encrypts each twin, so a twin that differs would replace the value of its .enc (lo secrets decrypt keeps a twin that is newer than its .enc: to take the .enc value, remove that twin first). Nothing was written.\n"
+	for _, tc := range []struct {
+		name    string
+		caller  bool // the caller holds the identity that stays
+		differs bool // the twin gets another value, newer than its .enc
+		unread  bool // the twin gets mode 000
+		want    string
+	}{
+		{
+			name:    "a twin that differs",
+			caller:  true,
+			differs: true,
+			want:    "[error] clusters/a.dev/secrets/Secret.app.default.K.enc differs from its decrypted twin: run lo secrets decrypt for this store, or encrypt the twin first\n",
+		},
+		{
+			name: "a file that the caller cannot decrypt",
+			want: "[error] cannot decrypt clusters/a.dev/secrets/Secret.app.default.K.enc to compare it with its twin\n" +
+				"[error] cannot decrypt clusters/a.dev/secrets/Secret.other.default.K.enc to compare it with its twin\n",
+		},
+		{
+			name:   "a twin that it cannot read",
+			caller: true,
+			unread: true,
+			want:   "[error] cannot read clusters/a.dev/secrets/Secret.app.default.K\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.unread {
+				skipUnlessPermissionsHold(t)
+			}
+			c, out, errOut := testEnv(t)
+			c.Domain = "a.dev"
+			keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+			k, g := keep.Recipient().String(), gone.Recipient().String()
+			sopsRules(t, c, k+","+g)
+			a := c.Paths.Clusters + "/a.dev/secrets"
+			app, other := a+"/Secret.app.default.K", a+"/Secret.other.default.K"
+			write(t, app, "v")
+			write(t, other, "w")
+			encryptStore(t, c, "a.dev", out, errOut)
+			freshen(t, app, other)
+			if tc.caller {
+				callerIdentity(t, keep)
+			}
+			if tc.differs {
+				write(t, app, "x")
+				freshen(t, app)
+			}
+			yaml, before := readFile(t, c.sopsConfigPath()), treeBytes(t, c.Paths.Clusters)
+			if tc.unread {
+				if err := os.Chmod(app, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(app, 0o600) })
+			}
+
+			if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+			}
+			if want := tc.want + tail; errOut.String() != want || out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+			}
+			if tc.unread {
+				_ = os.Chmod(app, 0o600)
+			}
+			unchanged(t, c, yaml)
+			if !maps.Equal(treeBytes(t, c.Paths.Clusters), before) {
+				t.Error("a file of the store changed before the refusal")
+			}
+			if !opens(t, app+".enc", gone, "v") || !opens(t, other+".enc", gone, "w") {
+				t.Error("an .enc was re-keyed before the refusal")
+			}
+		})
+	}
+}
+
 // Removing the caller's own identity is allowed, with a warning: the sops
 // age keys file by its public key line, and the SSH key lo decrypts with by
 // the age key of its .pub. The second line names the two sources the check
@@ -460,8 +569,11 @@ func TestRemoveKeyWarnsAboutTheCallersOwnIdentity(t *testing.T) {
 			k := keep.Recipient().String()
 			var g, file string
 			if source == "keys file" {
-				g, file = newAgeIdentity(t).Recipient().String(), os.Getenv("SOPS_AGE_KEY_FILE")
-				write(t, file, "# created: test\n# public key: "+g+"\n")
+				// The keys file of the identity to remove: before the
+				// first write it still decrypts the store.
+				gone := newAgeIdentity(t)
+				g, file = gone.Recipient().String(), os.Getenv("SOPS_AGE_KEY_FILE")
+				write(t, file, "# created: test\n# public key: "+g+"\n"+gone.String()+"\n")
 			} else {
 				_, pub := testSSHKeypair(t, mkdir(t, os.Getenv("HOME")+"/.ssh"))
 				derived, _, err := deriveAgePublicKey(pub)
@@ -490,13 +602,14 @@ func TestRemoveKeyWarnsAboutTheCallersOwnIdentity(t *testing.T) {
 
 // A removal whose recipient matches neither source of the own-identity check
 // prints the scope line of the check all the same: no match warning does not
-// mean that the key is not the caller's. The keys file and the SSH .pub hold
-// other keys.
+// mean that the key is not the caller's. The keys file (of the identity that
+// stays) and the SSH .pub hold other keys.
 func TestRemoveKeyPrintsTheIdentityScopeWithoutAMatch(t *testing.T) {
 	c, out, errOut := testEnv(t)
 	c.Domain = "a.dev"
-	k, g := newAgeIdentity(t).Recipient().String(), newAgeIdentity(t).Recipient().String()
-	write(t, os.Getenv("SOPS_AGE_KEY_FILE"), "# created: test\n# public key: "+newAgeIdentity(t).Recipient().String()+"\n")
+	keep := newAgeIdentity(t)
+	k, g := keep.Recipient().String(), newAgeIdentity(t).Recipient().String()
+	write(t, os.Getenv("SOPS_AGE_KEY_FILE"), "# created: test\n# public key: "+k+"\n"+keep.String()+"\n")
 	testSSHKeypair(t, mkdir(t, os.Getenv("HOME")+"/.ssh"))
 	sopsRules(t, c, k+","+g)
 	a := c.Paths.Clusters + "/a.dev/secrets"

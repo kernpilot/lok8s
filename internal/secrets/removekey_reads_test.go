@@ -350,6 +350,7 @@ func TestRemoveKeyPostCheckRefusesADuplicateMember(t *testing.T) {
 	}}
 	c.Out = hooked
 
+	callerIdentity(t, keep)
 	if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
 		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
 	}
@@ -447,6 +448,7 @@ func TestRemoveKeyPostCheckRefusesAFileThatAppears(t *testing.T) {
 			}}
 			c.Out = hooked
 
+			callerIdentity(t, keep)
 			err := c.RemoveKey(g, false, tc.skipOrphans)
 			if !ran {
 				t.Fatalf("the hook did not run: no count line on stdout:\n%s", hooked.buf.String())
@@ -505,6 +507,7 @@ func TestRemoveKeySelectsAnEscapedRecipient(t *testing.T) {
 		t.Fatal("fixture: the escaped .enc does not open to the identity to remove")
 	}
 
+	callerIdentity(t, keep)
 	if err := c.RemoveKey(g, false, false); err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
@@ -530,6 +533,7 @@ func TestRemoveKeyPostCheckReadsAnEscapedRecipient(t *testing.T) {
 	freshen(t, a+"/Secret.app.default.K")
 	write(t, a+"/Secret.orphan.default.K.enc", encEnvelope(k, jsonEscaped(g)))
 
+	callerIdentity(t, keep)
 	if err := c.RemoveKey(g, false, true); err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
@@ -867,6 +871,7 @@ func TestRemoveKeyWalksPastTheOtherFilesOfAStore(t *testing.T) {
 		t.Fatalf("fixture: the store has no .gitignore: %v", err)
 	}
 
+	callerIdentity(t, keep)
 	if err := c.RemoveKey(g, false, false); err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
@@ -958,6 +963,7 @@ func TestRemoveKeyReplacesEachEnc(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	callerIdentity(t, keep)
 	if err := c.RemoveKey(g, false, false); err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}

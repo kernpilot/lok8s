@@ -103,11 +103,19 @@ _first_rule_envelope() {
 
 # The stub re-encryption logs each file it ran on (relative to PATH_CLUSTERS)
 # and rewrites its .enc with the recipients of the first rule, as sops would.
+# The envelopes hold no ciphertext, so the compare of each twin with its
+# decrypted .enc before the first write passes too (_stub_compare); the twin
+# tests run the real compare.
 _stub_encrypt() {
   secrets::_encrypt_file() {
     echo "${1#"${PATH_CLUSTERS}/"}" >> "${ENCRYPT_LOG}"
     _first_rule_envelope > "${1}.enc"
   }
+  _stub_compare
+}
+
+_stub_compare() {
+  secrets::_twin_matches() { return 0; }
 }
 
 # _cache <domain> <name> <recipient> — a plaintext cache file and its .enc
@@ -990,6 +998,7 @@ _sops_writes() {
   local enc="${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.K.enc" dup
   dup="{\"data\":\"ENC[x]\",\"sops\":{\"age\":[{\"recipient\":\"${RCPT_B}\",\"enc\":\"x\"},{\"recipient\":\"${RCPT_A}\",\"enc\":\"x\"}],\"age\":[{\"recipient\":\"${RCPT_A}\",\"enc\":\"x\"}]}}"
   _sops_writes "${dup}" 0
+  _stub_compare
   DOMAIN=a.dev run _rm "${RCPT_B}"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
   [ "$(cat "${enc}")" = "${dup}" ] || { echo "the .enc is not the file that the stub wrote" >&2; return 1; }
@@ -1009,6 +1018,7 @@ _sops_writes() {
 # cannot read (dir). Each added .enc lists RCPT_B.
 _sops_appears() {
   _appears="${1}"
+  _stub_compare
   sops() {
     local out="" s="${PATH_CLUSTERS}/a.dev/secrets"
     while (( ${#} )); do
@@ -1328,6 +1338,84 @@ _no_t_run() {
   [ ! -s "${ENCRYPT_LOG}" ]
 }
 
+_twin_tail='[error]   the re-key encrypts each twin, so a twin that differs would replace the value of its .enc (lo secrets decrypt keeps a twin that is newer than its .enc: to take the .enc value, remove that twin first). Nothing was written.'
+# _same_store <saved dir> — fails when .sops.yaml or a file of the stores is
+# not byte-equal to the copy in the saved dir.
+_same_store() {
+  cmp -s "${CFG}" "${1}/sops.yaml" || { echo ".sops.yaml changed before the refusal" >&2; return 1; }
+  diff -r "${1}/clusters" "${PATH_CLUSTERS}" >/dev/null || { echo "a file of the stores changed before the refusal" >&2; return 1; }
+}
+
+@test "a twin that differs from its decrypted .enc, an .enc the caller cannot decrypt and a twin it cannot read are refused before any write" {
+  # Before the first write, remove-key decrypts each file that it re-keys, in
+  # memory, with the identity of the caller, and compares it with its twin:
+  # the re-key encrypts the twin, so a twin with another value would replace
+  # the value of the .enc. .sops.yaml and every file of the stores stay
+  # byte-equal (Go twin: TestRemoveKeyRefusesATwinThatDiffersFromItsEnc).
+  command -v sops >/dev/null 2>&1 || skip "sops not installed"
+  command -v ssh-to-age >/dev/null 2>&1 || skip "ssh-to-age not installed"
+  command -v ssh-keygen >/dev/null 2>&1 || skip "ssh-keygen not installed"
+  _load
+  local k="${BATS_TEST_TMPDIR}/keys" n saved="${BATS_TEST_TMPDIR}/saved"
+  mkdir -p "${k}" "${saved}"
+  for n in keep gone; do
+    ssh-keygen -q -t ed25519 -N '' -C "${n}" -f "${k}/${n}" </dev/null >/dev/null 2>&1
+    ssh-to-age -private-key -i "${k}/${n}" -o "${k}/${n}.age" 2>/dev/null
+  done
+  local keep gone store="${PATH_CLUSTERS}/a.dev/secrets"
+  keep="$(ssh-to-age -i "${k}/keep.pub")"
+  gone="$(ssh-to-age -i "${k}/gone.pub")"
+  _rules "${keep},${gone}"
+  printf 'v' > "${store}/Secret.app.default.K"
+  printf 'w' > "${store}/Secret.other.default.K"
+  domain=a.dev secrets::encrypt >/dev/null
+  # The twin of app gets another value; both twins are the newer files.
+  printf 'x' > "${store}/Secret.app.default.K"
+  touch "${store}/Secret.app.default.K" "${store}/Secret.other.default.K"
+  cp -p "${CFG}" "${saved}/sops.yaml"
+  cp -a "${PATH_CLUSTERS}" "${saved}/clusters"
+
+  DOMAIN=a.dev SOPS_AGE_KEY_FILE="${k}/keep.age" run _rm "${k}/gone.pub"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${store}/Secret.app.default.K.enc differs from its decrypted twin: run lo secrets decrypt for this store, or encrypt the twin first
+${_twin_tail}" ] || { echo "$output" >&2; return 1; }
+  _same_store "${saved}"
+
+  # No identity: setup's SOPS_AGE_KEY_FILE names no file, and no SSH key.
+  DOMAIN=a.dev run _rm "${k}/gone.pub"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] cannot decrypt ${store}/Secret.app.default.K.enc to compare it with its twin
+[error] cannot decrypt ${store}/Secret.other.default.K.enc to compare it with its twin
+${_twin_tail}" ] || { echo "$output" >&2; return 1; }
+  _same_store "${saved}"
+
+  if [ "$(id -u)" -ne 0 ]; then
+    chmod 000 "${store}/Secret.app.default.K"
+    DOMAIN=a.dev SOPS_AGE_KEY_FILE="${k}/keep.age" run _rm "${k}/gone.pub"
+    chmod 600 "${store}/Secret.app.default.K"
+    [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] cannot read ${store}/Secret.app.default.K
+${_twin_tail}" ] || { echo "$output" >&2; return 1; }
+    _same_store "${saved}"
+  fi
+}
+
+@test "the twin compare keeps the identity and the decrypted value out of a trace" {
+  # secrets::_twin_matches with a sops stub that prints the value: under
+  # set -x, BASH_XTRACEFD and the RETURN, DEBUG and ERR traps, neither the
+  # identity line nor the value is in stdout, stderr or the trace.
+  _load
+  local store="${PATH_CLUSTERS}/a.dev/secrets"
+  export SOPS_AGE_KEY_FILE="${BATS_TEST_TMPDIR}/caller.txt"
+  # Not a key: a line of the shape that secrets::decrypt_entry reads, built
+  # from parts so that no secret scanner matches the source.
+  printf '%s\n' "AGE-SECRET-""KEY-1xtrace-canary-twin-identity" > "${SOPS_AGE_KEY_FILE}"
+  sops() { printf '%s' "xtrace-canary-twin-value"; }
+  printf '%s' "xtrace-canary-twin-value" > "${store}/Secret.app.default.K"
+  printf '%s' "{}" > "${store}/Secret.app.default.K.enc"
+  assert_no_trace_leak xtrace-canary-twin secrets::_twin_matches "${store}/Secret.app.default.K.enc"
+}
+
 @test "while another run holds the lock, remove-key refuses and changes nothing" {
   command -v flock >/dev/null 2>&1 || skip "flock not installed"
   _load
@@ -1531,7 +1619,9 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   _open() { SOPS_AGE_KEY_FILE="${k}/${1}.age" sops decrypt --input-type binary --output-type binary "${store}/Secret.app.default.K.enc" 2>/dev/null; }
   [ "$(_open gone)" = "v" ] || { echo "fixture: the key to remove cannot open the store before the removal" >&2; return 1; }
 
-  DOMAIN=a.dev run _rm "${k}/gone.pub"
+  # The caller decrypts with the key that stays: remove-key compares each
+  # twin with its decrypted .enc before the first write.
+  DOMAIN=a.dev SOPS_AGE_KEY_FILE="${k}/keep.age" run _rm "${k}/gone.pub"
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
   ! _open gone >/dev/null || { echo "the removed key still decrypts the store" >&2; return 1; }
   [ "$(_open keep)" = "v" ] || { echo "the remaining key cannot decrypt the store" >&2; return 1; }
@@ -1571,7 +1661,9 @@ removed recipient from .sops.yaml"* ]] || { echo "$output" >&2; return 1; }
   [ "$(_open gone app)" = "v" ] || { echo "fixture: the key to remove cannot open app" >&2; return 1; }
   cp -p "${store}/Secret.other.default.K.enc" "${BATS_TEST_TMPDIR}/other.saved"
 
-  DOMAIN=a.dev run _rm "${k}/gone.pub"
+  # The caller decrypts with the key that stays: remove-key compares each
+  # twin with its decrypted .enc before the first write.
+  DOMAIN=a.dev SOPS_AGE_KEY_FILE="${k}/keep.age" run _rm "${k}/gone.pub"
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
   ! cmp -s "${store}/Secret.other.default.K.enc" "${BATS_TEST_TMPDIR}/other.saved" || {
     echo "the .enc whose labels do not list the key was not rewritten" >&2; return 1; }

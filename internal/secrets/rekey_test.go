@@ -31,6 +31,20 @@ func newAgeIdentity(t *testing.T) *age.X25519Identity {
 	return id
 }
 
+// callerIdentity makes id the decrypt identity of the caller: an age keys
+// file in a temp dir, named by SOPS_AGE_KEY_FILE. remove-key decrypts each
+// file that it re-keys with it, to compare the file with its twin before the
+// first write. The file holds no public key line, so the own-identity check
+// of remove-key finds no match in it.
+func callerIdentity(t *testing.T, id *age.X25519Identity) {
+	t.Helper()
+	file := t.TempDir() + "/keys.txt"
+	if err := os.WriteFile(file, []byte(id.String()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SOPS_AGE_KEY_FILE", file)
+}
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -289,6 +303,7 @@ func TestRemoveKeyRekeysEveryRule(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	callerIdentity(t, keep)
 	if err := c.RemoveKey(g, false, false); err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
@@ -343,6 +358,7 @@ func TestRemoveKeyAllRekeysEveryStore(t *testing.T) {
 		write(t, c.Paths.Base+"/.secrets/Secret.flat.default.K.enc", encEnvelope(g))
 		bBefore := readFile(t, b+"/Secret.app.default.K.enc")
 
+		callerIdentity(t, keep)
 		if err := c.RemoveKey(g, all, false); err != nil {
 			t.Fatalf("all=%v: %v\n%s", all, err, errOut.String())
 		}
@@ -441,6 +457,7 @@ func TestRemoveKeySkipOrphansWarns(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	callerIdentity(t, keep)
 	if err := c.RemoveKey(g, false, true); err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
@@ -494,6 +511,7 @@ func TestRemoveKeyWarnsAboutAKeyInNoRuleAndOnNoLabel(t *testing.T) {
 	freshen(t, a+"/Secret.app.default.K")
 	yaml, encBefore := readFile(t, c.sopsConfigPath()), readFile(t, enc)
 
+	callerIdentity(t, keep)
 	if err := c.RemoveKey(g, false, false); err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
@@ -548,6 +566,7 @@ func TestRemoveKeyRekeysAFileWhoseLabelsDoNotListTheKey(t *testing.T) {
 		t.Fatal("fixture: the labels of the two files are not as expected")
 	}
 
+	callerIdentity(t, keep)
 	if err := c.RemoveKey(g, false, false); err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
@@ -571,6 +590,7 @@ func TestRemoveKeySummaryCountsTheListedAndTheRekeyedFiles(t *testing.T) {
 	k, g := keep.Recipient().String(), gone.Recipient().String()
 	labelStore(t, c, k, g, out, errOut)
 
+	callerIdentity(t, keep)
 	if err := c.RemoveKey(g, false, false); err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}
@@ -624,6 +644,7 @@ func TestRemoveKeyRekeysStaleEncFiles(t *testing.T) {
 	sopsRules(t, c, k)
 	yaml := readFile(t, c.sopsConfigPath())
 
+	callerIdentity(t, keep)
 	if err := c.RemoveKey(g, false, false); err != nil {
 		t.Fatalf("%v\n%s", err, errOut.String())
 	}

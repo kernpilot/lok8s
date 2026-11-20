@@ -803,6 +803,42 @@ func (c *Context) removeKeySummary(rules, listed, rekeyed, orphans int) {
 	fmt.Fprintln(c.Out, "done — every managed .enc of the selected stores was rewritten: commit them together with .sops.yaml")
 }
 
+// twinsMatch compares each .enc of encs, decrypted in memory with the
+// caller's identity (DecryptEntry), with the bytes of its decrypted twin,
+// before the first write (bash: secrets::_twins_match). The re-key encrypts
+// the twin, so a twin that holds another value would replace the value of
+// the .enc. It names each .enc that differs from its twin and each that it
+// cannot decrypt, and each twin that it cannot read; it never prints or
+// keeps a value. It reports whether every file matched.
+func (c *Context) twinsMatch(encs []string) bool {
+	bad := 0
+	for _, enc := range encs {
+		plain := strings.TrimSuffix(enc, ".enc")
+		dec, err := DecryptEntry(enc)
+		if err != nil {
+			ui.ErrorTo(c.ErrOut, "cannot decrypt %s to compare it with its twin", c.rel(enc))
+			bad++
+			continue
+		}
+		twin, err := os.ReadFile(plain) // #nosec G304 -- the twin of an .enc of the store
+		switch {
+		case err != nil:
+			ui.ErrorTo(c.ErrOut, "cannot read %s", c.rel(plain))
+			bad++
+		case !bytes.Equal(dec, twin):
+			ui.ErrorTo(c.ErrOut, "%s differs from its decrypted twin: run lo secrets decrypt for this store, or encrypt the twin first", c.rel(enc))
+			bad++
+		}
+		clear(dec)
+		clear(twin)
+	}
+	if bad > 0 {
+		ui.ErrorTo(c.ErrOut, "  the re-key encrypts each twin, so a twin that differs would replace the value of its .enc (lo secrets decrypt keeps a twin that is newer than its .enc: to take the .enc value, remove that twin first). Nothing was written.")
+		return false
+	}
+	return true
+}
+
 // refuseScan prints the refusal for what the scan before the first write could
 // not read, in this order: a path it cannot read, an .enc that is not a
 // managed Secret.*.enc, an .enc whose sops metadata holds a member twice, an
@@ -927,9 +963,13 @@ func (c *Context) postCheck(stores []string, recipient string, known []string, s
 // parse or lists no age recipient, a managed .enc that is newer than its
 // plaintext (the re-key would write the old value back over the newer one),
 // and, without skipOrphans, an .enc with no decrypted twin: a re-key cannot
-// rewrite that file, so it keeps the removed recipient. A recipient that is
-// in no rule and on no .enc label is a warning, not a refusal: the run then
-// re-keys every managed .enc and changes no rule.
+// rewrite that file, so it keeps the removed recipient. Last, it decrypts
+// each file that it re-keys, in memory, with the identity of the caller, and
+// refuses a file whose twin holds other bytes, a file that it cannot decrypt
+// and a twin that it cannot read (twinsMatch): the re-key encrypts the twin,
+// so a twin that differs would replace the value of the .enc. A recipient
+// that is in no rule and on no .enc label is a warning, not a refusal: the
+// run then re-keys every managed .enc and changes no rule.
 //
 // It re-encrypts every managed .enc of the selected stores from its
 // plaintext, an orphan that skipOrphans accepts the one exception: the labels
@@ -1093,6 +1133,11 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 	}
 	if len(found.none)+len(found.notAge)+len(found.badAge) > 0 {
 		ui.ErrorTo(c.ErrOut, "  the re-key encrypts with age through the first matching rule: fix the creation rules first. Nothing was written.")
+		return ErrHandled
+	}
+	// Each twin must hold the value of its .enc: the re-key encrypts the
+	// twin.
+	if !c.twinsMatch(rekey) {
 		return ErrHandled
 	}
 	if own := ownIdentity(agePubkey); own != "" {

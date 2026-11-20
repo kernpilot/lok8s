@@ -242,6 +242,17 @@ lo secrets remove-key age1<recipient> --all     # every clusters/<domain>/secret
   it would keep the removed recipient. Run `lo secrets decrypt` first, or pass
   `--skip-orphans` to accept it. With `--skip-orphans` the command names the
   files that still list the key.
+- A managed `.enc` file holds other bytes than its decrypted twin. The re-key
+  encrypts the twin, so it would replace the value of the `.enc` file. Run
+  `lo secrets decrypt` for this store, or encrypt the twin first.
+  `lo secrets decrypt` keeps a twin that is newer than its `.enc` file: to
+  take the value of the `.enc` file, remove that twin first.
+- The command cannot decrypt a managed `.enc` file, or cannot read its twin.
+  Before the first write it decrypts each file that it re-keys with your age
+  identity (`SOPS_AGE_KEY`, `SOPS_AGE_KEY_FILE`, or `LOK8S_SSH_KEY`) to
+  compare it with its twin, so that identity must decrypt every managed file
+  of the selected stores. The decrypted value stays in memory: the command
+  does not print it or write it to a file.
 
 Before the first write, the command warns when the key is your own decrypt
 identity: the public key line of the sops age keys file (`SOPS_AGE_KEY_FILE`,
@@ -257,9 +268,9 @@ reads and the same walk as before the first write. It fails when a file that
 it re-keyed still lists the removed key, when it cannot read a path, and when
 a file changed during the run: another `.enc` file, a managed `.enc` file with
 a decrypted twin that it did not re-key, or, without `--skip-orphans`, an
-`.enc` file with no decrypted twin. Each error names the path. If the re-key stops after the
-`.sops.yaml` write (for example, when an encrypt fails or this check fails),
-the command prints the command to run again. That run resumes the re-key.
+`.enc` file with no decrypted twin. Each error names the path. If the re-key
+stops after the `.sops.yaml` write (for example, when an encrypt fails or
+this check fails), the command prints the command to run again. That run resumes the re-key.
 After each re-encrypt the command makes the plaintext the newer file, as
 `lo secrets decrypt` leaves it, so that the run that resumes does not refuse
 a file that is already re-keyed as a stale cache.
