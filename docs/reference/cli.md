@@ -84,6 +84,27 @@ on a terminal opens a select over the domains (see [`lo use`](#lo-use)).
 
 `-v` and `--debug` combine. No environment variable selects a level. `DEBUG=1` only turns on the `[debug]` lines, as before.
 
+### Output that can quote a value
+
+The output of `kubectl apply` and the diff text of a bootstrap dry run can
+quote a value of the manifest, also of a Secret (a field error prints
+`Invalid value: <value>`). `lo` keeps this output out of the log at each
+level. An apply prints `✓ <name> · N resources`, and a failed apply prints
+`[error] kapply: kubectl apply failed for <name> (rc=<code>)` with how to see
+the output. At debug, a dry run prints the objects that differ and where the
+diff text is (see [the dry run](../guide/deployment.md)), not the text. Set
+`LO_SHOW_SENSITIVE_OUTPUT=1` to print this output as `lo` printed it before:
+the full kubectl output of an apply off a terminal (its error lines on a
+terminal), and at debug the diff text. `lo` prints a `[warn]` line before it.
+Use it only where the log stays with you.
+
+Each `kubectl apply` and `kubectl diff` that `lo` runs has the kubectl user
+defaults off (`KUBERC=off` for that kubectl only), so a kuberc file (the
+kubectl user preferences) cannot change these calls, for example turn on
+`--show-secrets` for a diff. kubectl
+v1.33 and later read `KUBERC`; an older kubectl has no kuberc and ignores it.
+Your own kubectl calls keep your kuberc.
+
 ### The error shape
 
 On a terminal an error that has a next step prints as two lines:
@@ -985,6 +1006,7 @@ Rules:
 | `KUSTOMIZE_PLUGIN_HOME` | `<project>/.kustomize` | Where kustomize finds the exec plugins (the khelm `ChartRenderer`, the `Secret` generator). The binary sets it for every kustomize child (`lo build`, the addon render of `lo up`/`lo bootstrap`, `lo k8s`), for the registry TLS mint under `LO_RENDER=exec` and for every bash child; `lo doctor` prints the same value. The in-process render of `lo-full` does not read it |
 | `LOK8S_SERVICE_CONFIG` | (empty) | Service config name for override merging |
 | `DEBUG` | (empty) | Enable debug output when non-empty |
+| `LO_SHOW_SENSITIVE_OUTPUT` | (empty) | `1` prints the kubectl output that can quote a value of the manifest: the output of `kubectl apply`, and at debug the diff text of a bootstrap dry run (see [Output that can quote a value](#output-that-can-quote-a-value)). Any other value is off |
 | `LO_MCP_ALLOW` | (empty) | `mutating` or `destructive`: the environment form of `lo mcp`'s `--allow-*` opt-ins |
 | `LO_ASSETS_EJECT` | (empty) | `never`: the environment form of `--no-eject`; embedded framework assets are served from a temp dir, never written into the project (see [`lo assets`](#lo-assets)). The bash tree cache under `XDG_CACHE_HOME` is outside the project and stays in use |
 | `XDG_CACHE_HOME` | `$HOME/.cache` | Where the binary extracts the embedded bash tree (`lok8s/<version>/lok8s/`) for the provider plugins and `lo drivers <name>` when the project holds no tree. A command routed to bash never runs from it |
