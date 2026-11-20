@@ -1078,6 +1078,7 @@ handover::dir_owners() {
     printf '%s\t%s\n' '-uid 0' root
     return 0
   done
+  # shellcheck disable=SC2016  # the $( ) runs on the node, in the find of the stage call
   printf '%s\t%s\n' '\( -uid 0 -o -uid "$(id -u)" \)' 'root or the ssh user'
 }
 
@@ -1157,6 +1158,7 @@ handover::quote() {
   (( limit > 0 && limit < n )) || limit=${n}
   for (( i = 0; i < limit; i++ )); do
     c="${s:i:1}"
+    # shellcheck disable=SC1003  # '\' is one backslash, not an escaped quote
     case "${c}" in
       '\') out+='\\' ;;
       '"') out+='\"' ;;
