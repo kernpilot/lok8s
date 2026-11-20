@@ -473,7 +473,8 @@ spec:
                     [ "${ASSESS_REQ}" != "true" ] || WB_REQ="kubehz.cloud/assess-requested=true"
                     timeout -k 2 5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system \
                       "${WB_LAST}" ${WB_REQ:+"${WB_REQ}"} >/dev/null 2>&1 \
-                      || echo "kubehz: could not put back the assessment marker on configmap/kubehz-agent-state in kubehz-system; the next assessment comes after the 24h window or on a platform request" >&2
+                      || echo "kubehz: could not put back the assessment marker on configmap/kubehz-agent-state in kubehz-system;" \
+                        "the next assessment comes after the 24h window or on a platform request" >&2
                   }
                   if [ -n "${ASSESS_NOW}" ]; then
                     # datastore + etcdReachable: etcd static pods in kube-system
