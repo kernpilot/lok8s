@@ -68,10 +68,26 @@ EOF
 chmod +x "${STUBS}"/*
 export PATH="${STUBS}:${PATH}"
 
-# Lines allowed to differ on stderr: the bash `set -u` abort names the
-# script line; a bash `command not found` for a lib function the Go side
-# has wired (see the lib/ note above).
-ALLOW_ERR='BINDING_CONTEXT_PATH|Could not open file|parse error|command not found|GitOps bootstrap failed|lo gitops is being redesigned'
+# err_as_go <hook> <binding-file-or-> < bash.err: the bash stderr, with
+# each line that differs by design rewritten into the line that the Go
+# hook prints instead (operator.ReadBindingContext). Only the bash side
+# is rewritten, and only a whole line that matches the exact divergence of
+# this case, so the Go stderr is compared as it is:
+#   - no binding context (-): the bash `set -u` abort names the script line;
+#   - an unreadable file: Go adds the error of os.ReadFile;
+#   - a truncated document: bash prints where jq's parser stopped, Go names
+#     the file and the error of encoding/json.
+err_as_go() {
+  local hook="${1}" file="${2/#"${WORK}"/WORK}"
+  local file_re="${file//./\\.}"
+  if [[ "${2}" == "-" ]]; then
+    sed -E "s#^HOOKS/${hook}\\.sh: line [0-9]+: BINDING_CONTEXT_PATH: unbound variable\$#error: BINDING_CONTEXT_PATH: unbound variable#"
+  else
+    sed -E \
+      -e "s#^jq: error: Could not open file ${file_re}: No such file or directory\$#jq: error: Could not open file ${file}: open ${file}: no such file or directory#" \
+      -e "s#^jq: parse error: Unfinished JSON term at EOF at line [0-9]+, column [0-9]+\$#jq: parse error: ${file}: unexpected end of JSON input#"
+  fi
+}
 
 # run_hook <impl> <hook> <binding-file-or-> [args...] — runs one
 # implementation with its own state dir + KLOG; outputs land in
@@ -100,7 +116,8 @@ run_hook() {
 }
 
 # check <label> <hook> <binding-file-or-> [args...] — both implementations,
-# diff rc, stdout, stderr (minus ALLOW_ERR) and the stub call log.
+# diff rc, stdout, stderr (the bash side through err_as_go) and the stub
+# call log.
 check() {
   local label="${1}" hook="${2}" binding="${3}"; shift 3
   run_hook bash "${hook}" "${binding}" "$@"
@@ -115,7 +132,7 @@ check() {
   if [[ -n "${diff_out}" ]]; then
     echo "FAIL: ${hook} ${label} — stdout differs:"; echo "${diff_out}" | head -20 | sed 's/^/  /'; ok=0
   fi
-  diff_out="$(diff <(grep -vE "${ALLOW_ERR}" "${WORK}/bash.err") <(grep -vE "${ALLOW_ERR}" "${WORK}/go.err") || true)"
+  diff_out="$(diff <(err_as_go "${hook}" "${binding}" < "${WORK}/bash.err") "${WORK}/go.err" || true)"
   if [[ -n "${diff_out}" ]]; then
     echo "FAIL: ${hook} ${label} — stderr differs:"; echo "${diff_out}" | head -20 | sed 's/^/  /'; ok=0
   fi
