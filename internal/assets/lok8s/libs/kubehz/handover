@@ -295,7 +295,7 @@ handover::validate_bundle() {
 # 0600). A failure removes the files that this call placed, or names the
 # ones it could not remove.
 handover::place_pki() {
-  local bundle="${1}" k8s_dir="${2}" pki="${2}/pki" key mode left=""
+  local bundle="${1}" k8s_dir="${2}" pki="${2}/pki" key done_key mode left=""
   local -a placed=()
   mkdir -p "${pki}" || return 1
   if ! chmod 00700 "${pki}" 2>/dev/null || [[ "$(handover::mode "${pki}")" != "700" ]]; then
@@ -306,8 +306,8 @@ handover::place_pki() {
     case "${key}" in *.key) mode=600 ;; *) mode=644 ;; esac
     if ! handover::install_file "${pki}/${key}" "${mode}" < "${bundle}/${key}"; then
       error "handover: could not place ${key} into ${pki} with mode ${mode}"
-      for key in "${placed[@]}"; do
-        rm -f -- "${pki}/${key}" 2>/dev/null || left+=" ${pki}/${key}"
+      for done_key in "${placed[@]}"; do
+        rm -f -- "${pki}/${done_key}" 2>/dev/null || left+=" ${pki}/${done_key}"
       done
       [[ -z "${left}" ]] || error "handover: could not remove the files that this step placed:${left}. Delete them yourself."
       return 1
