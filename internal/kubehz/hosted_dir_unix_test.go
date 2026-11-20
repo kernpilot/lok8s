@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"testing"
 )
@@ -72,20 +73,63 @@ func targetRefusal(t *testing.T, dest string) string {
 	return refused.Error()
 }
 
-// mustRefusePrivate checks that the write of dest fails with the line want, that
-// the old file stays, and that no temp file is left. dest is no link: for a
-// link, use mustRefusePrivateAt.
-func mustRefusePrivate(t *testing.T, dest, want string) {
+// treeNames gives the path of each entry under root, relative to root and in
+// lexical order (root itself left out). It does not follow a link. A
+// directory that it cannot read is in the list, and its entries are not.
+func treeNames(t *testing.T, root string) []string {
 	t.Helper()
-	mustRefusePrivateAt(t, dest, dest, want)
+	var names []string
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && p != root {
+				return nil
+			}
+			return err
+		}
+		if p != root {
+			rel, rerr := filepath.Rel(root, p)
+			if rerr != nil {
+				return rerr
+			}
+			names = append(names, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return names
 }
 
-// mustRefusePrivateAt is mustRefusePrivate for a dest whose walk ends at the
-// file end (a path without a link and without ".."). The temp file goes
-// beside the end of the walk, with the name of that file, so the check for
-// a temp file that is left looks there.
-func mustRefusePrivateAt(t *testing.T, dest, end, want string) {
+// leftovers gives what a write of dest left: the temp files beside the name
+// dest, and each name under root that the write added or removed (before:
+// treeNames of root before the write). The tree check covers each link of
+// the walk and its end when they are under root.
+func leftovers(t *testing.T, dest, root string, before []string) []string {
 	t.Helper()
+	left := hostedTemps(t, filepath.Dir(dest), filepath.Base(dest))
+	after := treeNames(t, root)
+	if !slices.Equal(after, before) {
+		left = append(left, fmt.Sprintf("the tree under %s: %q, before %q", root, after, before))
+	}
+	return left
+}
+
+// mustRefusePrivate checks that the write of dest fails with the line want, that
+// the old file stays, and that nothing is left in the directory of dest. dest
+// is no link: for a link, use mustRefusePrivateAt.
+func mustRefusePrivate(t *testing.T, dest, want string) {
+	t.Helper()
+	mustRefusePrivateAt(t, dest, filepath.Dir(dest), want)
+}
+
+// mustRefusePrivateAt is mustRefusePrivate for a dest whose walk goes through
+// links or a "..": root holds each link of the walk and its end, and the
+// write must leave no temp file beside dest and change no name under root
+// (leftovers).
+func mustRefusePrivateAt(t *testing.T, dest, root, want string) {
+	t.Helper()
+	before := treeNames(t, root)
 	err := writePrivateFile(t.Context(), dest, []byte("new\n"))
 	var refused privateFileError
 	if !errors.As(err, &refused) || refused.Error() != want {
@@ -94,23 +138,26 @@ func mustRefusePrivateAt(t *testing.T, dest, end, want string) {
 	if got := readFile(t, dest); got != "old\n" {
 		t.Fatalf("%s: the old file changed: %q", dest, got)
 	}
-	if tmp := hostedTemps(t, filepath.Dir(end), filepath.Base(end)); len(tmp) != 0 {
-		t.Fatalf("%s: temp files left: %q", dest, tmp)
+	if left := leftovers(t, dest, root, before); len(left) != 0 {
+		t.Fatalf("%s: left: %q", dest, left)
 	}
 }
 
-// mustWritePrivate checks that the write of dest succeeds, with mode 0600 and no
-// temp file left. dest is no link: for a link, use mustWritePrivateAt.
+// mustWritePrivate checks that the write of dest succeeds, with mode 0600 and
+// nothing left in the directory of dest. dest is no link: for a link, use
+// mustWritePrivateAt.
 func mustWritePrivate(t *testing.T, dest string) {
 	t.Helper()
-	mustWritePrivateAt(t, dest, dest)
+	mustWritePrivateAt(t, dest, filepath.Dir(dest))
 }
 
-// mustWritePrivateAt is mustWritePrivate for a dest whose walk ends at the file
-// end (a path without a link and without ".."): the check for a temp file
-// that is left looks beside end (see mustRefusePrivateAt).
-func mustWritePrivateAt(t *testing.T, dest, end string) {
+// mustWritePrivateAt is mustWritePrivate for a dest whose walk goes through
+// links or a "..": the file at the end of the walk is there before the
+// write, so the write must change no name under root (see
+// mustRefusePrivateAt).
+func mustWritePrivateAt(t *testing.T, dest, root string) {
 	t.Helper()
+	before := treeNames(t, root)
 	if err := writePrivateFile(t.Context(), dest, []byte("new\n")); err != nil {
 		t.Fatalf("%s: %v", dest, err)
 	}
@@ -120,8 +167,52 @@ func mustWritePrivateAt(t *testing.T, dest, end string) {
 	if info, err := os.Stat(dest); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("%s: mode: %v, %v", dest, info, err)
 	}
-	if tmp := hostedTemps(t, filepath.Dir(end), filepath.Base(end)); len(tmp) != 0 {
-		t.Fatalf("%s: temp files left: %q", dest, tmp)
+	if left := leftovers(t, dest, root, before); len(left) != 0 {
+		t.Fatalf("%s: left: %q", dest, left)
+	}
+}
+
+// The check of the write helpers sees a file left at each name of a chain of
+// links (the name of the link, the second link, the end of the chain), and a
+// file that is gone. A check that looks only beside the name, or only beside
+// the end, misses one of them.
+func TestLeftoversSeesEachNameOfTheChain(t *testing.T) {
+	t.Parallel()
+	d := filepath.Join(t.TempDir(), "links")
+	if err := os.Mkdir(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rc, kc, hop := filepath.Join(d, "home.rc"), filepath.Join(d, "kc.yaml"), filepath.Join(d, "hop")
+	if err := os.WriteFile(rc, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("hop", kc); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(rc, hop); err != nil {
+		t.Fatal(err)
+	}
+	before := treeNames(t, d)
+	if got := leftovers(t, kc, d, before); len(got) != 0 {
+		t.Fatalf("a clean tree: %q", got)
+	}
+	for _, p := range []string{kc, hop, rc} {
+		leak := p + ".123"
+		if err := os.WriteFile(leak, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := leftovers(t, kc, d, before); len(got) == 0 {
+			t.Errorf("%s: not seen", leak)
+		}
+		if err := os.Remove(leak); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(hop); err != nil {
+		t.Fatal(err)
+	}
+	if got := leftovers(t, kc, d, before); len(got) == 0 {
+		t.Errorf("a removed %s: not seen", hop)
 	}
 }
 
@@ -359,17 +450,17 @@ func TestWritePrivateFileRefusesALinkOfAnotherUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	fakeLinkOwner(kc, 4242, false)
-	mustRefusePrivateAt(t, kc, rc, dirRefused("link", kc, 4242))
+	mustRefusePrivateAt(t, kc, d, dirRefused("link", kc, 4242))
 	fakeLinkOwner(hop, 4242, false)
-	mustRefusePrivateAt(t, kc, rc, dirRefused("link", hop, 4242))
+	mustRefusePrivateAt(t, kc, d, dirRefused("link", hop, 4242))
 	fakeLinkOwner(hop, 0, true)
-	mustRefusePrivateAt(t, kc, rc, dirRefused("linkread", hop, 0))
+	mustRefusePrivateAt(t, kc, d, dirRefused("linkread", hop, 0))
 	fakeLinkOwner(hop, 0, false)
 	if got, err := privateTarget(kc); err != nil || got != rc {
 		t.Fatalf("a link of root: %q, %v, want %q", got, err, rc)
 	}
 	privateLstat = os.Lstat
-	mustWritePrivateAt(t, kc, rc)
+	mustWritePrivateAt(t, kc, d)
 	for _, l := range []string{kc, hop} {
 		if info, err := os.Lstat(l); err != nil || info.Mode()&fs.ModeSymlink == 0 {
 			t.Fatalf("%s is no longer a link: %v, %v", l, info, err)
@@ -415,7 +506,7 @@ func TestWritePrivateFileRefusesALookupErrorOfTheChain(t *testing.T) {
 	for _, p := range []string{kc, hop} {
 		for _, errno := range []syscall.Errno{syscall.EIO, syscall.ESTALE, syscall.EACCES} {
 			failLstat(p, errno)
-			mustRefusePrivateAt(t, kc, rc, dirRefused("lstat", p, 0))
+			mustRefusePrivateAt(t, kc, d, dirRefused("lstat", p, 0))
 		}
 	}
 	if tmp := hostedTemps(t, d, "home.rc"); len(tmp) != 0 {
@@ -535,13 +626,13 @@ func TestWritePrivateFileChecksTheDirectoryOfEachLink(t *testing.T) {
 		return l
 	}
 	world := linkIn(filepath.Join(d, "world"), 0o777, kc)
-	mustRefusePrivateAt(t, world, kc, dirRefused("world", filepath.Dir(world), 0))
+	mustRefusePrivateAt(t, world, d, dirRefused("world", filepath.Dir(world), 0))
 	group := linkIn(filepath.Join(d, "group"), 0o770, kc)
-	mustRefusePrivateAt(t, group, kc, dirRefused("group", filepath.Dir(group), 0))
+	mustRefusePrivateAt(t, group, d, dirRefused("group", filepath.Dir(group), 0))
 	first := linkIn(filepath.Join(d, "first"), 0o700, world)
-	mustRefusePrivateAt(t, first, kc, dirRefused("world", filepath.Dir(world), 0))
+	mustRefusePrivateAt(t, first, d, dirRefused("world", filepath.Dir(world), 0))
 	sticky := linkIn(filepath.Join(d, "sticky"), 0o777|os.ModeSticky, kc)
-	mustWritePrivateAt(t, sticky, kc)
+	mustWritePrivateAt(t, sticky, d)
 	if got := readFile(t, kc); got != "new\n" {
 		t.Fatalf("%s = %q", kc, got)
 	}
@@ -572,14 +663,14 @@ func TestWritePrivateFileTakesTheDirectoryOfTheWalkAsItIs(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(d, "alias", "kc.yaml")
-	mustRefusePrivateAt(t, dest, kc, dirRefused("world", d+"/alias/../store", 0))
+	mustRefusePrivateAt(t, dest, d, dirRefused("world", d+"/alias/../store", 0))
 	if err := os.Remove(filepath.Join(d, "store")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(filepath.Dir(kc), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	mustWritePrivateAt(t, dest, kc)
+	mustWritePrivateAt(t, dest, d)
 	if got := readFile(t, kc); got != "new\n" {
 		t.Fatalf("%s = %q", kc, got)
 	}
