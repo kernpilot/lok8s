@@ -283,6 +283,98 @@ func TestRemoveKeyRefusesADuplicateMember(t *testing.T) {
 	}
 }
 
+// hookWriter is an io.Writer that runs hook once, before the first write
+// whose bytes hold mark.
+type hookWriter struct {
+	buf  bytes.Buffer
+	mark string
+	hook func()
+}
+
+func (w *hookWriter) Write(p []byte) (int, error) {
+	if w.hook != nil && bytes.Contains(p, []byte(w.mark)) {
+		hook := w.hook
+		w.hook = nil
+		hook()
+	}
+	return w.buf.Write(p)
+}
+
+// ageTwice is raw, an .enc that the sops library wrote, with the age list of
+// its sops metadata twice: the first list also holds an entry for g, the last
+// one is the list of the file. A read that keeps the last member does not
+// list g.
+func ageTwice(t *testing.T, raw, g string) string {
+	t.Helper()
+	var top, meta map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &top); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(top["sops"], &meta); err != nil {
+		t.Fatal(err)
+	}
+	list := strings.TrimSpace(string(meta["age"]))
+	if !strings.HasPrefix(list, "[") {
+		t.Fatal("fixture: the age metadata of the library file is not a list")
+	}
+	members := [][2]string{{"age", `[{"recipient":"` + g + `","enc":"x"},` + list[1:]}, {"age", list}}
+	for _, name := range slices.Sorted(maps.Keys(meta)) {
+		if name != "age" {
+			members = append(members, [2]string{name, string(meta[name])})
+		}
+	}
+	return orderedObject(t, [2]string{"data", string(top["data"])}, [2]string{"sops", orderedObject(t, members...)})
+}
+
+// The post-check reads each .enc again after the re-key and refuses a
+// duplicate member there too: a re-encrypt that writes metadata with the age
+// list twice (the first one with the removed recipient) fails the run, which
+// names the file and prints the command that resumes it. The encrypt runs in
+// process and has no seam, so the test writes the duplicate into the
+// re-keyed .enc through c.Out: rekeyFiles prints the count line of a store
+// after its last encrypt and before the post-check reads the files.
+// tests/unit/secrets_remove_key_test.bats runs the same case with a sops
+// stub.
+func TestRemoveKeyPostCheckRefusesADuplicateMember(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+	k, g := keep.Recipient().String(), gone.Recipient().String()
+	_, enc, _ := otherEncStore(t, c, k, g, out, errOut)
+	fixture := ""
+	hooked := &hookWriter{mark: "Encrypted 1 secret(s)\n", hook: func() {
+		if !opens(t, enc, keep, "v") || opens(t, enc, gone, "v") {
+			t.Fatal("fixture: the .enc is not re-keyed when the count line is printed")
+		}
+		fixture = ageTwice(t, readFile(t, enc), g)
+		write(t, enc, fixture)
+	}}
+	c.Out = hooked
+
+	if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+	}
+	if fixture == "" {
+		t.Fatalf("the hook did not run: no count line on stdout:\n%s", hooked.buf.String())
+	}
+	if slices.Contains(lastWinsRecipients(t, fixture), g) {
+		t.Fatal("fixture: a read that keeps the last member lists the removed recipient")
+	}
+	want := scopeWarn +
+		"[error] the sops metadata of clusters/a.dev/secrets/Secret.app.default.K.enc holds a duplicate member\n" +
+		"[error] 0 .enc file(s) still list the removed recipient after the re-key, 1 cannot be read or do not parse\n" +
+		"[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again resumes it:\n" +
+		"[error]   lo secrets remove-key " + g + " --domain a.dev\n"
+	if errOut.String() != want {
+		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
+	}
+	if readFile(t, enc) != fixture {
+		t.Error("the .enc is not the file with the duplicate member")
+	}
+	if strings.Contains(readFile(t, c.sopsConfigPath()), g) {
+		t.Error(".sops.yaml still lists the removed recipient: the run stopped before the first write")
+	}
+}
+
 // escapeIn rewrites the recipient in an .enc as its JSON escape: the file
 // still opens to the recipient's identity, and its bytes no longer hold it.
 func escapeIn(t *testing.T, enc, rcpt string) {

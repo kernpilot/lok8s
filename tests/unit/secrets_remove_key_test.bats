@@ -899,6 +899,27 @@ _sops_writes() {
   [ -z "$(find "${store}" -name '.*.tmp-*')" ] || { echo "a temp file was left" >&2; return 1; }
 }
 
+@test "the post-check refuses a duplicate member that the re-encrypt wrote, names the file and prints the resume command" {
+  # The real secrets::_encrypt_file with a sops stub whose encrypt writes
+  # metadata with the age list twice, the first one with the removed
+  # recipient (Go twin: TestRemoveKeyPostCheckRefusesADuplicateMember).
+  _load
+  _cache a.dev app "${RCPT_B}"
+  local enc="${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.K.enc" dup
+  dup="{\"data\":\"ENC[x]\",\"sops\":{\"age\":[{\"recipient\":\"${RCPT_B}\",\"enc\":\"x\"},{\"recipient\":\"${RCPT_A}\",\"enc\":\"x\"}],\"age\":[{\"recipient\":\"${RCPT_A}\",\"enc\":\"x\"}]}}"
+  _sops_writes "${dup}" 0
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$(cat "${enc}")" = "${dup}" ] || { echo "the .enc is not the file that the stub wrote" >&2; return 1; }
+  ! jq -r '.sops.age[].recipient' "${enc}" | grep -qxF "${RCPT_B}" || { echo "fixture: jq lists the removed recipient" >&2; return 1; }
+  [[ "$output" == *"Encrypted 1 secret(s)
+[error] the sops metadata of ${enc} holds a duplicate member
+[error] 0 .enc file(s) still list the removed recipient after the re-key, 1 cannot be read or do not parse
+[error] the re-key did not finish. .sops.yaml no longer lists the recipient, and running the same command again resumes it:
+[error]   lo secrets remove-key ${RCPT_B} --domain a.dev" ]] || { echo "$output" >&2; return 1; }
+  ! grep -qF "${RCPT_B}" "${CFG}" || { echo ".sops.yaml still lists the recipient: the run stopped before the first write" >&2; return 1; }
+}
+
 # ── The .enc path of an encrypt ──────────────────────────────────────────
 # secrets::_encrypt_file, which set --encrypt, encrypt and the re-key share,
 # writes an .enc only to a regular file or a path that does not exist (Go
