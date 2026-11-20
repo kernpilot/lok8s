@@ -1,0 +1,148 @@
+# The table of the -o yaml quoting, for both twins: internal/cli/output_yaml11_test.go
+# and tests/unit/kubehz_agent_yaml11_test.bats. Each line is a JSON value, a tab,
+# and the yaml scalar that the value prints as (in `v: <scalar>`; a string value
+# prints the same as a key, `<scalar>: 1`).
+#
+# The strings that a YAML 1.1 reader reads as a bool, a null or a number print
+# in double quotes.
+# the bool words in any case
+"y"	"y"
+"Y"	"Y"
+"n"	"n"
+"N"	"N"
+"yes"	"yes"
+"Yes"	"Yes"
+"YES"	"YES"
+"yEs"	"yEs"
+"no"	"no"
+"No"	"No"
+"NO"	"NO"
+"nO"	"nO"
+"on"	"on"
+"On"	"On"
+"ON"	"ON"
+"oN"	"oN"
+"off"	"off"
+"Off"	"Off"
+"OFF"	"OFF"
+"oFf"	"oFf"
+"true"	"true"
+"True"	"True"
+"TRUE"	"TRUE"
+"tRUE"	"tRUE"
+"false"	"false"
+"False"	"False"
+"FALSE"	"FALSE"
+"fAlSe"	"fAlSe"
+# the null words in any case, and ~
+"null"	"null"
+"Null"	"Null"
+"NULL"	"NULL"
+"nUll"	"nUll"
+"~"	"~"
+# binary
+"0b1"	"0b1"
+"0B1"	"0B1"
+"-0b1_0"	"-0b1_0"
+"+0b11"	"+0b11"
+# octal 0o
+"0o17"	"0o17"
+"0O17"	"0O17"
+"-0o7"	"-0o7"
+"+0o1_7"	"+0o1_7"
+# decimal, also with a leading 0 (the YAML 1.1 octal 0777, and 08)
+"0"	"0"
+"7"	"7"
+"-7"	"-7"
+"+7"	"+7"
+"1_000"	"1_000"
+"1_"	"1_"
+"0777"	"0777"
+"0_7"	"0_7"
+"-017"	"-017"
+"08"	"08"
+"019"	"019"
+"00"	"00"
+# hex
+"0x1F"	"0x1F"
+"0X1f"	"0X1f"
+"-0x1_f"	"-0x1_f"
+"0xdead_beef"	"0xdead_beef"
+# sexagesimal
+"1:20"	"1:20"
+"-1:20"	"-1:20"
+"+1:20"	"+1:20"
+"190:20:30.15"	"190:20:30.15"
+"12:30:45"	"12:30:45"
+"0:30"	"0:30"
+"1:2:3"	"1:2:3"
+# floats with a fraction or an exponent
+"1.5"	"1.5"
+"-1.5"	"-1.5"
+"+1."	"+1."
+"1."	"1."
+".5"	".5"
+"-.5"	"-.5"
+"1.5e3"	"1.5e3"
+"1.5E-3"	"1.5E-3"
+"1e3"	"1e3"
+"1E+3"	"1E+3"
+"-2e-2"	"-2e-2"
+"6.8523015e+5"	"6.8523015e+5"
+"685.230_15e+03"	"685.230_15e+03"
+"1_0.5"	"1_0.5"
+".5e3"	".5e3"
+"1e1_0"	"1e1_0"
+# .inf and .nan in any case
+".inf"	".inf"
+".Inf"	".Inf"
+".INF"	".INF"
+".iNf"	".iNf"
+"+.inf"	"+.inf"
+"-.inf"	"-.inf"
+"-.InF"	"-.InF"
+".nan"	".nan"
+".NaN"	".NaN"
+".NAN"	".NAN"
+".nAn"	".nAn"
+# the empty string
+""	""
+# The encoders quote a YAML 1.2 timestamp themselves.
+"2026-11-20"	"2026-11-20"
+"2026-11-20T10:00:00Z"	"2026-11-20T10:00:00Z"
+# Other strings stay plain.
+"word"	word
+"yess"	yess
+"nope"	nope
+"onoff"	onoff
+"Nono"	Nono
+"true1"	true1
+"nullx"	nullx
+"yes!"	yes!
+"y-es"	y-es
+"1.35.5"	1.35.5
+"1.2.3.4"	1.2.3.4
+"10.0.0.1"	10.0.0.1
+"v1.2"	v1.2
+"1:60"	1:60
+"1:2:3a"	1:2:3a
+"0x"	0x
+"0b2"	0b2
+"0o8"	0o8
+"0x1G"	0x1G
+".infinity"	.infinity
+"nan"	nan
+"inf"	inf
+"1e"	1e
+"e3"	e3
+"_1"	_1
+"."	.
+"~~"	~~
+"y es"	y es
+# A real bool, null or number stays plain.
+true	true
+false	false
+null	null
+7	7
+-1.5	-1.5
+0	0
