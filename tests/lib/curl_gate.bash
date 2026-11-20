@@ -56,7 +56,9 @@
 # bounded (the tick budget helper of the agent CronJob, which runs its
 # arguments under timeout), their options and values (also quoted: sudo -u "${u}"), and assignment
 # words (NAME= or NAME+=, then any value: quoted, $( ) or none). The words
-# are shell words: white space in quotes or in a $( ) does not end one. A
+# are shell words: white space in quotes or in a $( ) does not end one, and
+# an operator of the shell (;, &&, ||, |, &, ( or )) in code ends one, so
+# the x=y of "echo x=y; curl" is no assignment word before curl. A
 # curl in a quoted string (an echo of a command for the user) and comment
 # lines do not count. Before any other step, a line that ends in a backslash is
 # joined to the next line without the backslash and the newline, as the
@@ -265,10 +267,14 @@ curl_gate() {
     }
     # The start of the last shell word of s. Words end at white space in
     # code, not in quotes, and not in a $( ) that closes before the end
-    # (NAME="a b" and NAME=$(f x) are one word each). In a $( ) that is
-    # still open at the end, the word starts after the $( or after the
-    # last white space in it (the prefix "x=$(echo" ends in the word echo).
-    function word_start(s,   i, c, L, top, st, dp, ws) {
+    # (NAME="a b" and NAME=$(f x) are one word each). An operator of the
+    # shell in code ends a word too: ;, |, & (not of a redirection: 2>&1,
+    # &>), and a ( or ) that is not the $( ) of a word. So "echo x=y;" ends
+    # in an empty word after the ;, not in the assignment word "x=y;". In a
+    # $( ) that is still open at the end, the word starts after the $(, or
+    # after the last white space or operator in it (the prefix "x=$(echo"
+    # ends in the word echo).
+    function word_start(s,   i, c, L, top, st, dp, ws, pc, nc) {
       L = length(s); top = 1; st[1] = "c"; dp[1] = 0; ws[1] = 1
       for (i = 1; i <= L; i++) {
         c = substr(s, i, 1)
@@ -282,8 +288,14 @@ curl_gate() {
         if (c == SQ) { top++; st[top] = "s"; continue }
         if (c == "\"") { top++; st[top] = "d"; continue }
         if (c == "$" && substr(s, i + 1, 1) == "(") { top++; st[top] = "c"; dp[top] = 0; i++; ws[top] = i + 1; continue }
-        if (c == "(") { dp[top]++; continue }
-        if (c == ")") { if (dp[top] > 0) dp[top]--; else if (top > 1) top--; continue }
+        if (c == "(") { dp[top]++; ws[top] = i + 1; continue }
+        if (c == ")") { if (dp[top] > 0) { dp[top]--; ws[top] = i + 1 } else if (top > 1) top--; continue }
+        if (c == ";" || c == "|") { ws[top] = i + 1; continue }
+        if (c == "&") {
+          pc = substr(s, i - 1, 1); nc = substr(s, i + 1, 1)
+          if (pc != ">" && pc != "<" && nc != ">") ws[top] = i + 1
+          continue
+        }
         if (c ~ /[[:space:]]/) ws[top] = i + 1
       }
       while (top > 1 && st[top] != "c") top--
@@ -296,7 +308,9 @@ curl_gate() {
     function has_op(w) { gsub(/"[^"]*"|\047[^\047]*\047|\$\{[^}]*\}/, "", w); return w ~ /[|;&(){}<>`]/ }
     function is_wrapper(w) { return w ~ /^(command|exec|env|xargs|timeout|nice|nohup|sudo|stdbuf|setsid|builtin|bounded)$/ }
     # An assignment word: NAME= or NAME+= and then anything (a quoted or
-    # unquoted value, a $( ), or nothing).
+    # unquoted value, a $( ), or nothing). The word ends before an operator
+    # of the shell (word_start), so the x=y of "echo x=y; curl" is no
+    # assignment before curl.
     function is_assign(w) { return w ~ /^[A-Za-z_][A-Za-z0-9_]*\+?=/ }
     # The prefix without the wrappers, options and assignments before curl.
     # "command -v curl" (or -V) looks curl up and runs nothing: the prefix
