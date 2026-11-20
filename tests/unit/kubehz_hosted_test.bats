@@ -980,6 +980,26 @@ _hosted_temps() {
   [ ! -e "${kc}" ]
 }
 
+# Under umask 000, mkdir -p would make the .kubeconfig directory with mode
+# 0777, and the check before the temp file would refuse it after the
+# create. The write makes it with mode 0700, so the provision goes on:
+# the file is there (mode 0600), and the directory has mode 0700.
+@test "provision_hosted: under umask 000, a new .kubeconfig directory gets mode 0700 and the write goes on" {
+  _hosted_kc_harness
+  yq() { case "$2" in '.metadata.name') echo "test.kubehz.dev" ;; *) echo "1" ;; esac; }
+  local old
+  # setup makes the directory (empty): the write must make it here.
+  rmdir "${PATH_BASE}/.kubeconfig"
+  old=$(umask)
+  umask 000
+  run kubehz::provision_hosted "test.kubehz.dev" "/dev/null"
+  umask "${old}"
+  assert_success
+  [ "$(stat -c %a "${PATH_BASE}/.kubeconfig")" = 700 ]
+  [ "$(cat "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml")" = kc-bytes ]
+  [ "$(stat -c %a "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml")" = 600 ]
+}
+
 @test "kubehz::_write_private: fewer than two arguments are refused, and nothing is written" {
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
   local f="${BATS_TEST_TMPDIR}/kc.yaml"
@@ -1304,45 +1324,61 @@ echo "returned $?"' bash "${kc}" "${other}" "${BATS_TEST_TMPDIR}/seen" "${_PROJE
 }
 
 # ── a directory that another user can write into ─────────────────────────
-# The fixtures are the same as in internal/kubehz/hosted_test.go
-# (TestWritePrivateFileDirectoryRefusals and the cases after it).
+# The fixtures are the same as in internal/kubehz/hosted_dir_unix_test.go.
 
-# _dir_ids: replace id with a function that gives the FAKE_* values of the
-# test (FAKE_UID, FAKE_GID, FAKE_USER, FAKE_GROUP; a value that is set but
-# empty is given as it is), else the values of id. An option in FAKE_FAIL
-# (a list with spaces, such as "-un") prints its value and fails.
+# _dir_ids: replace id with a function that gives FAKE_UID for id -u (a
+# value that is set but empty is given as it is), else the values of id.
+# An option in FAKE_FAIL (such as "-u") prints its value and fails.
 _dir_ids() {
   id() {
     case "${1:-}" in
       -u) echo "${FAKE_UID-$(command id -u)}" ;;
-      -g) echo "${FAKE_GID-$(command id -g)}" ;;
-      -un) echo "${FAKE_USER-$(command id -un)}" ;;
-      -gn) echo "${FAKE_GROUP-$(command id -gn)}" ;;
       *) command id "$@"; return ;;
     esac
     [[ " ${FAKE_FAIL:-} " != *" ${1} "* ]]
   }
 }
 
-# _dir_refused <kind> <dir> [<gid>]: the error line of a refused directory.
+# _dir_refused <kind> <path> [<uid>]: the error line of a refused path.
 _dir_refused() {
   case "${1}" in
     owner) printf '[error] The directory %s belongs to uid %s, not to this user or to root, so another user can replace a file in it: nothing is written. Use a directory of your own.' "${2}" "${3}" ;;
     world) printf '[error] The directory %s is world-writable and has no sticky bit, so another user can replace a file in it: nothing is written. Run chmod o-w,g-w %s, or use a directory of your own.' "${2}" "${2}" ;;
-    group) printf '[error] The directory %s is group-writable and its group (gid %s) is not the private group of this user, so another user can replace a file in it: nothing is written. Run chmod o-w,g-w %s, or use a directory of your own.' "${2}" "${3}" "${2}" ;;
+    group) printf '[error] The directory %s is group-writable and has no sticky bit, so another user can replace a file in it: nothing is written. Run chmod o-w,g-w %s, or use a directory of your own.' "${2}" "${2}" ;;
+    sticky) printf '[error] The directory %s has the sticky bit and other users can write into it, but this mv has no -T, so another user can put a directory at the file before the rename: nothing is written. Use a directory of your own, or a mv that takes -T (GNU coreutils).' "${2}" ;;
+    notdir) printf '[error] The path %s is not a directory: nothing is written' "${2}" ;;
     unread) printf '[error] Cannot read the owner and the mode of the directory %s: nothing is written' "${2}" ;;
+    link) printf '[error] The link %s belongs to uid %s, not to this user or to root, so another user can point it at a file of this user: nothing is written. Remove the link, or use a path of your own.' "${2}" "${3}" ;;
+    linkread) printf '[error] Cannot read the owner of the link %s: nothing is written' "${2}" ;;
+    resolve) printf '[error] Cannot resolve the symlink %s' "${2}" ;;
   esac
+}
+
+# _link_owner_ls <path> <uid>: replace ls with a function that gives, for
+# ls -ldn <path> (the owner of the link itself), the line of a link of
+# <uid> (gid 5353), and no line when <uid> is empty. Any other call runs
+# ls.
+_link_owner_ls() {
+  FAKE_LINK="${1}" FAKE_LINK_UID="${2}"
+  ls() {
+    if [[ "${1}" == -ldn && "${!#}" == "${FAKE_LINK}" ]]; then
+      [[ -z "${FAKE_LINK_UID}" ]] || printf 'lrwxrwxrwx 1 %s 5353 9 Nov 20 08:00 %s -> x\n' "${FAKE_LINK_UID}" "${FAKE_LINK}"
+      return 0
+    fi
+    command ls "$@"
+  }
 }
 
 # A world-writable directory without the sticky bit is refused before the
 # temp file and before the command: the command makes a file, and it never
-# runs. With the sticky bit (1777) and in a directory of this user only
-# (0700), the write goes on. A link to a directory gets the check of the
-# directory that it names, where the create goes.
+# runs. In a directory of this user only (0700), the write goes on (a
+# directory with the sticky bit has a test of its own). A link to a
+# directory gets the check of the directory that it names, where the
+# create goes.
 @test "kubehz::_write_private refuses a world-writable directory without the sticky bit before the command, and writes nothing" {
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
   local d="${BATS_TEST_TMPDIR}/dirs" ran="${BATS_TEST_TMPDIR}/ran" mode
-  for mode in 0777 1777 0700; do
+  for mode in 0777 0700; do
     mkdir -p "${d}/m${mode}"
     printf 'old\n' > "${d}/m${mode}/kc.yaml"
     chmod "${mode}" "${d}/m${mode}"
@@ -1353,7 +1389,7 @@ _dir_refused() {
   [ ! -e "${ran}" ]
   [ "$(cat "${d}/m0777/kc.yaml")" = old ]
   [ -z "$(_hosted_temps "${d}/m0777" kc.yaml)" ]
-  for mode in 1777 0700; do
+  for mode in 0700; do
     run kubehz::_write_private "${d}/m${mode}/kc.yaml" printf new
     assert_success
     assert_output ""
@@ -1368,6 +1404,47 @@ _dir_refused() {
   run kubehz::_private_dir_ok "${d}/l0777"
   assert_failure
   assert_output "$(_dir_refused world "${d}/l0777")"
+}
+
+# A directory with the sticky bit that other users can write into (1777,
+# 1770 for the group, 1757 for the others): another user cannot rename or
+# remove a file of this user there, but can put a directory at the name of
+# the file. With
+# mv -T the rename fails on that directory, so the write goes on. A mv
+# without -T would move the file into it: the call refuses such a
+# directory before the command, and writes nothing. A directory with the
+# sticky bit that only its owner can write into (1700) passes without -T.
+@test "kubehz::_write_private writes into a sticky directory that others can write into only with mv -T" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local d="${BATS_TEST_TMPDIR}/sticky" ran="${BATS_TEST_TMPDIR}/ran" mode
+  for mode in 1777 1770 1757 1700; do
+    mkdir -p "${d}/m${mode}"
+    printf 'old\n' > "${d}/m${mode}/kc.yaml"
+    chmod "${mode}" "${d}/m${mode}"
+  done
+  _KUBEHZ_MV_EXACT=0
+  for mode in 1777 1770 1757; do
+    run kubehz::_write_private "${d}/m${mode}/kc.yaml" touch "${ran}"
+    assert_failure
+    assert_output "$(_dir_refused sticky "${d}/m${mode}")"
+    [ ! -e "${ran}" ]
+    [ "$(cat "${d}/m${mode}/kc.yaml")" = old ]
+    [ -z "$(_hosted_temps "${d}/m${mode}" kc.yaml)" ]
+  done
+  run kubehz::_write_private "${d}/m1700/kc.yaml" printf new
+  assert_success
+  assert_output ""
+  [ "$(cat "${d}/m1700/kc.yaml")" = new ]
+  _KUBEHZ_MV_EXACT=""
+  kubehz::_mv_exact_ok || skip "the mv of this host has no -T"
+  for mode in 1777 1770 1757; do
+    run kubehz::_write_private "${d}/m${mode}/kc.yaml" printf new
+    assert_success
+    assert_output ""
+    [ "$(cat "${d}/m${mode}/kc.yaml")" = new ]
+    [ "$(stat -c %a "${d}/m${mode}/kc.yaml")" = 600 ]
+    [ -z "$(_hosted_temps "${d}/m${mode}" kc.yaml)" ]
+  done
 }
 
 # A group-writable directory (0775) of another group of this user is
@@ -1385,81 +1462,97 @@ _dir_refused() {
   chmod 0775 "${d}"
   run kubehz::_write_private "${d}/kc.yaml" touch "${ran}"
   assert_failure
-  assert_output "$(_dir_refused group "${d}" "${other}")"
+  assert_output "$(_dir_refused group "${d}")"
   [ ! -e "${ran}" ]
   [ "$(cat "${d}/kc.yaml")" = old ]
   [ -z "$(_hosted_temps "${d}" kc.yaml)" ]
 }
 
-# A group-writable directory (0775) of the private group of this user is
-# what mkdir -p makes under umask 002 on a system with a group per user:
-# the write goes on.
-@test "kubehz::_write_private writes into a group-writable directory of the private group of this user" {
-  [[ "$(id -gn)" == "$(id -un)" ]] || skip "the primary group of this user is not a private group (id -gn is not id -un)"
+# A group-writable directory (0775) of the primary group of this user is
+# refused too: the check does not ask who else is in the group. (The
+# write makes the .kubeconfig directory with mode 0700: see the test of
+# provision_hosted under umask 000.)
+@test "kubehz::_write_private refuses a group-writable directory of the primary group of this user, and writes nothing" {
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
-  local d="${BATS_TEST_TMPDIR}/upg"
+  local d="${BATS_TEST_TMPDIR}/upg" ran="${BATS_TEST_TMPDIR}/ran"
   mkdir -p "${d}"
   chgrp "$(id -g)" "${d}"
   chmod 0775 "${d}"
   printf 'old\n' > "${d}/kc.yaml"
-  run kubehz::_write_private "${d}/kc.yaml" printf new
-  assert_success
-  [ "$(cat "${d}/kc.yaml")" = new ]
+  run kubehz::_write_private "${d}/kc.yaml" touch "${ran}"
+  assert_failure
+  assert_output "$(_dir_refused group "${d}")"
+  [ ! -e "${ran}" ]
+  [ "$(cat "${d}/kc.yaml")" = old ]
   [ -z "$(_hosted_temps "${d}" kc.yaml)" ]
 }
 
-# The ids and the names of the process decide (id is faked here, so the
-# cases do not depend on the groups of the host). A group-writable
-# directory is allowed only when its gid is the gid of the process and
-# the group name is the user name; names that are empty or that id cannot
-# give are no private group. A directory of another user is refused also
-# with the sticky bit. A directory of root passes, and a directory that is
-# not there passes (the create makes it, or fails).
-@test "kubehz::_private_dir_ok: the owner, the group and the names of the process decide" {
+# The owner of the directory and the uid of the process decide (id is
+# faked here). A directory of another user is refused also with the
+# sticky bit, and so is a directory of a user other than root when id -u
+# fails. A directory that is not there passes only when its parent is a
+# directory that this user can search: else the check cannot tell that it
+# is not there (a path below a file, below a path that is not there, or
+# below a directory that this user cannot search). A path that is there
+# but is not a directory (a file, a link to nothing) is refused. A
+# directory of root passes.
+@test "kubehz::_private_dir_ok: the owner, a path that is not there, and a path that is not a directory" {
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
   _dir_ids
-  local d="${BATS_TEST_TMPDIR}/ids" gid uid
+  local d="${BATS_TEST_TMPDIR}/ids" uid
   mkdir -p "${d}"
-  chmod 0775 "${d}"
-  gid=$(stat -c %g "${d}")
+  chmod 0700 "${d}"
   uid=$(stat -c %u "${d}")
-  FAKE_GID="${gid}" FAKE_USER=n FAKE_GROUP=n
+  FAKE_UID="${uid}"
   run kubehz::_private_dir_ok "${d}"
   assert_success
   assert_output ""
-  FAKE_GROUP=staff
-  run kubehz::_private_dir_ok "${d}"
-  assert_failure
-  assert_output "$(_dir_refused group "${d}" "${gid}")"
-  FAKE_GROUP=n FAKE_GID=$((gid + 1))
-  run kubehz::_private_dir_ok "${d}"
-  assert_failure
-  assert_output "$(_dir_refused group "${d}" "${gid}")"
-  FAKE_GID="${gid}" FAKE_USER="" FAKE_GROUP=""
-  run kubehz::_private_dir_ok "${d}"
-  assert_failure
-  assert_output "$(_dir_refused group "${d}" "${gid}")"
-  FAKE_USER=n FAKE_GROUP=n
-  for FAKE_FAIL in -g -gn -un; do
-    run kubehz::_private_dir_ok "${d}"
-    assert_failure
-    assert_output "$(_dir_refused group "${d}" "${gid}")"
-  done
-  unset FAKE_FAIL
   if (( uid != 0 )); then
-    chmod 1777 "${d}"
     FAKE_UID=$((uid + 1))
     run kubehz::_private_dir_ok "${d}"
     assert_failure
     assert_output "$(_dir_refused owner "${d}" "${uid}")"
+    chmod 1777 "${d}"
+    _KUBEHZ_MV_EXACT=1
     run kubehz::_private_target "${d}/kc.yaml"
+    chmod 0700 "${d}"
     assert_failure
     assert_output "$(_dir_refused owner "${d}" "${uid}")"
-    unset FAKE_UID
+    FAKE_UID="${uid}" FAKE_FAIL=-u
+    run kubehz::_private_dir_ok "${d}"
+    assert_failure
+    assert_output "$(_dir_refused owner "${d}" "${uid}")"
+    unset FAKE_FAIL
   fi
+  unset FAKE_UID
   run kubehz::_private_target "${BATS_TEST_TMPDIR}/none/kc.yaml"
   assert_success
   assert_output "${BATS_TEST_TMPDIR}/none/kc.yaml"
+  printf 'x\n' > "${d}/file"
+  ln -s "${d}/nowhere" "${d}/dangling"
+  run kubehz::_private_dir_ok "${d}/file"
+  assert_failure
+  assert_output "$(_dir_refused notdir "${d}/file")"
+  run kubehz::_private_target "${d}/file/kc.yaml"
+  assert_failure
+  assert_output "$(_dir_refused notdir "${d}/file")"
+  run kubehz::_private_dir_ok "${d}/dangling"
+  assert_failure
+  assert_output "$(_dir_refused notdir "${d}/dangling")"
+  run kubehz::_private_dir_ok "${d}/file/sub"
+  assert_failure
+  assert_output "$(_dir_refused unread "${d}/file/sub")"
+  run kubehz::_private_dir_ok "${BATS_TEST_TMPDIR}/none/sub"
+  assert_failure
+  assert_output "$(_dir_refused unread "${BATS_TEST_TMPDIR}/none/sub")"
+  if (( $(id -u) != 0 )); then
+    mkdir "${d}/closed"
+    chmod 0600 "${d}/closed"
+    run kubehz::_private_dir_ok "${d}/closed/sub"
+    chmod 0700 "${d}/closed"
+    assert_failure
+    assert_output "$(_dir_refused unread "${d}/closed/sub")"
+  fi
   [ "$(stat -c %u /)" = 0 ] || skip "/ does not belong to root here"
   run kubehz::_private_target /lok8s-none.yaml
   assert_success
@@ -1469,24 +1562,31 @@ _dir_refused() {
 # ls -ldnL gives the mode, the uid and the gid in the same form on GNU and
 # BSD; the BSD form has more spaces and an @ (extended attributes) or a +
 # (an ACL) after the mode. A line that the check cannot read is refused.
+# The uid of the process (4242) and the gid of the lines (5353) are fake
+# and not the same, so that a check that reads the gid as the owner fails.
 @test "kubehz::_private_dir_ok reads the ls line of GNU and of BSD, and refuses a line that it cannot read" {
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
-  local d="${BATS_TEST_TMPDIR}/ls" u g
+  _dir_ids
+  local d="${BATS_TEST_TMPDIR}/ls"
   mkdir -p "${d}"
-  u=$(id -u)
-  g=$(id -g)
+  FAKE_UID=4242
+  _KUBEHZ_MV_EXACT=1
   ls() { printf '%s\n' "${FAKE_LS}"; }
-  FAKE_LS="drwxrwxrwx@ 3 ${u}  ${g}  96 Nov 20 08:00 ${d}"
+  FAKE_LS="drwxrwxrwx@ 3 4242  5353  96 Nov 20 08:00 ${d}"
   run kubehz::_private_dir_ok "${d}"
   assert_failure
   assert_output "$(_dir_refused world "${d}")"
-  FAKE_LS="drwxrwxrwt+ 3 ${u}  ${g}  96 Nov 20 08:00 ${d}"
+  FAKE_LS="drwxrwxrwt+ 3 4242  5353  96 Nov 20 08:00 ${d}"
   run kubehz::_private_dir_ok "${d}"
   assert_success
-  FAKE_LS="drwx------ 2 ${u} ${g} 4096 Nov 20 08:00 ${d}"
+  FAKE_LS="drwx------ 2 4242 5353 4096 Nov 20 08:00 ${d}"
   run kubehz::_private_dir_ok "${d}"
   assert_success
-  FAKE_LS="drwx------ 2 ${u} staff 4096 Nov 20 08:00 ${d}"
+  FAKE_LS="drwx------ 2 5353 4242 4096 Nov 20 08:00 ${d}"
+  run kubehz::_private_dir_ok "${d}"
+  assert_failure
+  assert_output "$(_dir_refused owner "${d}" 5353)"
+  FAKE_LS="drwx------ 2 4242 staff 4096 Nov 20 08:00 ${d}"
   run kubehz::_private_dir_ok "${d}"
   assert_failure
   assert_output "$(_dir_refused unread "${d}")"
@@ -1495,6 +1595,71 @@ _dir_refused() {
   assert_failure
   assert_output "$(_dir_refused unread "${d}")"
   unset -f ls
+}
+
+# In a directory with the sticky bit, another user can put a link at the
+# name of the file, to a file of this user: the rename would replace that
+# file. So each link that the name follows must belong to this user or to
+# root (ls is faked for one link of the chain, uid 4242): a link of
+# another user, at the name or as the second link, and a link whose owner
+# cannot be read are refused before the command, and the file at the end
+# of the chain stays as it was. A link of root passes, and so does a chain
+# of links of this user: the write replaces the file at its end, and the
+# links stay.
+@test "kubehz::_write_private refuses a link of another user in the chain of the name, and follows the links of this user" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local d="${BATS_TEST_TMPDIR}/links" ran="${BATS_TEST_TMPDIR}/ran"
+  (( $(id -u) != 4242 )) || skip "the uid of this user is the fake uid of the test"
+  mkdir -p "${d}"
+  chmod 0700 "${d}"
+  printf 'rc\n' > "${d}/home.rc"
+  ln -s hop "${d}/kc.yaml"
+  ln -s "${d}/home.rc" "${d}/hop"
+  _link_owner_ls "${d}/kc.yaml" 4242
+  run kubehz::_write_private "${d}/kc.yaml" touch "${ran}"
+  assert_failure
+  assert_output "$(_dir_refused link "${d}/kc.yaml" 4242)"
+  _link_owner_ls "${d}/hop" 4242
+  run kubehz::_write_private "${d}/kc.yaml" touch "${ran}"
+  assert_failure
+  assert_output "$(_dir_refused link "${d}/hop" 4242)"
+  _link_owner_ls "${d}/hop" ""
+  run kubehz::_private_target "${d}/kc.yaml"
+  assert_failure
+  assert_output "$(_dir_refused linkread "${d}/hop")"
+  [ ! -e "${ran}" ]
+  [ "$(cat "${d}/home.rc")" = rc ]
+  _link_owner_ls "${d}/hop" 0
+  run kubehz::_private_target "${d}/kc.yaml"
+  assert_success
+  assert_output "$(readlink -f "${d}/home.rc")"
+  unset -f ls
+  run kubehz::_write_private "${d}/kc.yaml" printf new
+  assert_success
+  assert_output ""
+  [ "$(cat "${d}/home.rc")" = new ]
+  [ "$(stat -c %a "${d}/home.rc")" = 600 ]
+  [ -L "${d}/kc.yaml" ]
+  [ -L "${d}/hop" ]
+}
+
+# A chain of 8 links passes, and a chain of 9 links is refused.
+@test "kubehz::_private_target follows a chain of 8 links and refuses a chain of 9" {
+  source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
+  local d="${BATS_TEST_TMPDIR}/chain" i
+  mkdir -p "${d}"
+  chmod 0700 "${d}"
+  printf 'x\n' > "${d}/f"
+  ln -s f "${d}/c8"
+  for i in 7 6 5 4 3 2 1 0; do
+    ln -s "c$((i + 1))" "${d}/c${i}"
+  done
+  run kubehz::_private_target "${d}/c1"
+  assert_success
+  assert_output "$(readlink -f "${d}/f")"
+  run kubehz::_private_target "${d}/c0"
+  assert_failure
+  assert_output "$(_dir_refused resolve "${d}/c0")"
 }
 
 # A TERM or a HUP during the download: the trap removes the temp file and

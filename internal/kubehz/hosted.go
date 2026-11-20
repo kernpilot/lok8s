@@ -223,7 +223,10 @@ func (c *Context) renderCapacityRejection(cfg *Config, body []byte) {
 // written by writePrivateFile (a 0600 temp file and one rename): a failed
 // download or write leaves the old file as it was. The kubeconfig path is
 // checked before the create: a path that the write refuses stops the
-// provision there, so a refusal creates no cluster. A spec with no
+// provision there, so a refusal creates no cluster. A .kubeconfig
+// directory that is not there yet passes: the write makes it with mode
+// 0700, and the second check accepts that mode, so the second check
+// refuses no directory that lo made. A spec with no
 // spec.kubernetes.version is refused first, before any request: the
 // platform needs the version and refuses a create without it (HTTP 400,
 // a missing field).
@@ -280,7 +283,11 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(kubeconfigPath), 0o755); err != nil {
+	// Mode 0700 (at most, under the umask): the second check
+	// (privateTarget in writePrivateFile) refuses a directory that another
+	// user can write into, and must not refuse the directory made here
+	// (bash: mkdir -m 0700).
+	if err := os.MkdirAll(filepath.Dir(kubeconfigPath), 0o700); err != nil {
 		return err
 	}
 	// A failed download leaves the old kubeconfig as it was: the file is
@@ -325,20 +332,34 @@ func (e privateFileError) Error() string { return string(e) }
 // deferred removal deletes the temp file on each return with an error.
 // A dest that is a symlink is resolved (privateTarget): the temp file goes
 // beside the file that the link names, and the rename replaces that file,
-// so the link stays. A link to nothing, a link that cannot be resolved and
-// a directory are refused (privateFileError).
+// so the link stays. A link of another user, a link to nothing, a link
+// that cannot be resolved and a directory are refused (privateFileError).
 // The threat model: a process of this user is trusted, because it can
-// read the file anyway. Another user is not: before the create,
-// privateTarget refuses a directory of the file that another user can
-// write into (privateDirRefusal, the text of bash). It checks that
-// directory only, not its parents: another user who can write into a
-// parent can put a directory of their own in its place. In a directory
-// with the sticky bit, another user can make the write fail, but cannot
-// replace a file of this user. os.Rename is a rename onto
-// the exact path: it fails when another operation put a directory there
-// during the download (it never moves the file into it, as a mv without
-// -T does), so bash's check after the rename has no twin here. A failed
-// rename is a privateFileError with the text of bash.
+// read the file anyway. Another user is not. Before the create,
+// privateTarget refuses a dest that is a link of another user, or that
+// follows one (privateLinkRefusal), and a directory of the file that
+// another user can write into (privateDirRefusal), with the texts of
+// bash. Thus only this user and root can write into a directory without
+// the sticky bit, and in a directory with the sticky bit another user
+// cannot rename or remove a file of this user. Under this model, these
+// steps are safe:
+//   - The deferred removal takes the temp file by its path: no other user
+//     can put another file at that path before the removal.
+//   - os.CreateTemp makes the file with mode 0600 (O_EXCL), and the data
+//     goes through its descriptor. A default ACL of the directory comes
+//     from its owner, this user or root.
+//   - Between the write and os.Rename, no other user can replace the temp
+//     file or put a directory at the file. os.Rename goes onto the exact
+//     path: it fails on a directory (it never moves the file into it, as a
+//     mv without -T does), so bash's check after the rename has no twin
+//     here, and a directory with the sticky bit passes.
+//
+// What stays: a process of this user, an ACL that lets another user write
+// into the directory (the check reads the mode bits only), and the parents
+// of the directory. Another user who can write into a parent can put a
+// directory of their own in its place. In a directory with the sticky
+// bit, another user can make the write fail, but cannot replace a file of
+// this user. A failed rename is a privateFileError with the text of bash.
 // Signals: INT and TERM (interrupt.Watch) and HUP (interrupt.CatchHangup,
 // for the time of the call) cancel the contexts and do not stop lo in the
 // middle of this function: the write ends, and the rename or the deferred
@@ -382,11 +403,16 @@ func writePrivateFile(ctx context.Context, dest string, data []byte) (err error)
 var renameFile = os.Rename
 
 // privateTarget ports kubehz::_private_target: the file that a write of
-// dest replaces (dest, or for a symlink the file that it names). A link
-// to nothing, a link that cannot be resolved, a directory and a file in a
-// directory that another user can write into (privateDirRefusal) are
-// refused (privateFileError, the text of bash).
+// dest replaces (dest, or for a symlink the file that it names). First,
+// each link that the last name of dest follows must belong to this user
+// or root (privateLinkRefusal). A link to nothing, a link that cannot be
+// resolved, a directory and a file in a directory that another user can
+// write into (privateDirRefusal) are refused (privateFileError, the text
+// of bash).
 func privateTarget(dest string) (string, error) {
+	if refused := privateLinkRefusal(dest); refused != "" {
+		return "", privateFileError(refused)
+	}
 	target := dest
 	info, lerr := os.Lstat(dest)
 	if lerr == nil && info.Mode()&os.ModeSymlink != 0 {

@@ -8,7 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -99,53 +99,102 @@ func readPrivateFile(file string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(f, 1<<20))
 }
 
-// dirCheckEUID, dirCheckEGID and dirCheckNames give privateDirRefusal the
-// effective uid, the effective gid and the names of this process (bash:
-// id -u, id -g, id -un, id -gn). A test replaces them.
+// privateEUID gives privateDirRefusal and privateLinkRefusal the
+// effective uid of this process (bash: id -u), and privateLstat reads a
+// link of the chain in privateLinkRefusal. A test replaces them.
 var (
-	dirCheckEUID  = os.Geteuid
-	dirCheckEGID  = os.Getegid
-	dirCheckNames = processNames
+	privateEUID  = os.Geteuid
+	privateLstat = os.Lstat
 )
 
-// processNames gives the name of the user uid and the name of the group
-// gid (os/user). A static binary on Linux reads /etc/passwd and
-// /etc/group only: a user of a directory service (LDAP, SSSD) is not
-// found there, and the lookup fails.
-func processNames(uid, gid int) (userName, groupName string, err error) {
-	u, err := user.LookupId(strconv.Itoa(uid))
-	if err != nil {
-		return "", "", err
+// privateLinkRefusal ports kubehz::_private_link_hops: "" when each link
+// that the last name of dest follows (the link at dest, then the link that
+// it names, and so on) belongs to this user or root, else the error line
+// of bash. In a directory with the sticky bit, another user can put a link
+// at the name, to a file of this user: the rename would then replace that
+// file. A link of another user, a link whose owner cannot be read and a
+// chain of more than maxLinkHops links are refused. A relative link names
+// a path from the directory of the link (the text before the last "/", not
+// cleaned, as in bash). A link to a directory on the way (not the last
+// name) is not checked here. This is not linkTarget of the agent
+// kubeconfig: that walk also checks each parent directory, wants a regular
+// file of this user at the end, and gives the texts of the agent command.
+func privateLinkRefusal(dest string) string {
+	p := dest
+	for hops := 0; ; hops++ {
+		info, err := privateLstat(p)
+		if err != nil || info.Mode()&fs.ModeSymlink == 0 {
+			return ""
+		}
+		if hops == maxLinkHops {
+			return "Cannot resolve the symlink " + dest
+		}
+		uid, ok := fileOwner(info)
+		if !ok {
+			return "Cannot read the owner of the link " + p + ": nothing is written"
+		}
+		if uid != 0 && uid != privateEUID() {
+			return fmt.Sprintf("The link %s belongs to uid %d, not to this user or to root, so another user can point it at a file of this user: nothing is written. Remove the link, or use a path of your own.", p, uid)
+		}
+		next, err := os.Readlink(p)
+		if err != nil || next == "" {
+			return "Cannot resolve the symlink " + dest
+		}
+		if !strings.HasPrefix(next, "/") {
+			if i := strings.LastIndex(p, "/"); i >= 0 {
+				next = p[:i+1] + next
+			} else {
+				next = "./" + next
+			}
+		}
+		p = next
 	}
-	g, err := user.LookupGroupId(strconv.Itoa(gid))
-	if err != nil {
-		return "", "", err
-	}
-	return u.Username, g.Name, nil
 }
 
 // privateDirRefusal ports kubehz::_private_dir_ok: "" when no other user
-// can replace a file in dir, else the error line of bash. It refuses a
-// directory that belongs to a user other than this user or root (that
-// user can change its mode), and, when the directory has no sticky bit,
-// a world-writable directory and a group-writable one whose group is not
-// the private group of this user (privateGroup). The sticky bit lets only
-// the owner of a file rename or remove it. A directory that os.Stat
-// cannot read passes (bash: [[ -d ]] is false): the create makes it, or
-// fails. The check reads the mode bits only, not an ACL, and the
-// directory only, not its parents (see writePrivateFile). os.Stat follows
-// a link, as the create does.
+// can replace a file in dir, else the error line of bash. It refuses:
+//   - a dir that os.Stat cannot read for a cause other than "not there"
+//     (a parent that this user cannot search, a parent that is a file),
+//     and a dir that is not there when its parent is not a directory;
+//   - a path that is there but is not a directory (also a link to
+//     nothing);
+//   - a directory that belongs to a user other than this user or root
+//     (that user can change its mode);
+//   - without the sticky bit: a world-writable directory, and a
+//     group-writable one whatever its group (a group can have other
+//     members).
+//
+// A directory with the sticky bit passes: there, only the owner of a file
+// can rename or remove it, and os.Rename goes onto the exact path (bash
+// also wants mv -T there when other users can write into it). A directory
+// that is not there passes when its parent is a directory: the write makes
+// it with mode 0700, and the second check reads it. The check reads the
+// mode bits only, not an ACL, and the directory only, not its parents
+// (see writePrivateFile). os.Stat follows a link, as the create does.
 func privateDirRefusal(dir string) string {
+	unread := "Cannot read the owner and the mode of the directory " + dir + ": nothing is written"
+	notDir := "The path " + dir + " is not a directory: nothing is written"
 	info, err := os.Stat(dir)
-	if err != nil || !info.IsDir() {
+	if errors.Is(err, fs.ErrNotExist) {
+		if _, lerr := os.Lstat(dir); lerr == nil {
+			return notDir
+		}
+		if parent, perr := os.Stat(filepath.Dir(dir)); perr != nil || !parent.IsDir() {
+			return unread
+		}
 		return ""
+	}
+	if err != nil {
+		return unread
+	}
+	if !info.IsDir() {
+		return notDir
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return "Cannot read the owner and the mode of the directory " + dir + ": nothing is written"
+		return unread
 	}
-	uid, gid := int(st.Uid), int(st.Gid)
-	if uid != 0 && uid != dirCheckEUID() {
+	if uid := int(st.Uid); uid != 0 && uid != privateEUID() {
 		return fmt.Sprintf("The directory %s belongs to uid %d, not to this user or to root, so another user can replace a file in it: nothing is written. Use a directory of your own.", dir, uid)
 	}
 	mode := info.Mode()
@@ -155,20 +204,8 @@ func privateDirRefusal(dir string) string {
 	if mode.Perm()&0o002 != 0 {
 		return fmt.Sprintf("The directory %s is world-writable and has no sticky bit, so another user can replace a file in it: nothing is written. Run chmod o-w,g-w %s, or use a directory of your own.", dir, dir)
 	}
-	if mode.Perm()&0o020 != 0 && !privateGroup(gid) {
-		return fmt.Sprintf("The directory %s is group-writable and its group (gid %d) is not the private group of this user, so another user can replace a file in it: nothing is written. Run chmod o-w,g-w %s, or use a directory of your own.", dir, gid, dir)
+	if mode.Perm()&0o020 != 0 {
+		return fmt.Sprintf("The directory %s is group-writable and has no sticky bit, so another user can replace a file in it: nothing is written. Run chmod o-w,g-w %s, or use a directory of your own.", dir, dir)
 	}
 	return ""
-}
-
-// privateGroup ports kubehz::_private_group: gid is the private group of
-// this user when it is the effective gid of this process and its name is
-// the user name. An empty name or a lookup that fails is no private
-// group. An administrator can still add members to that group.
-func privateGroup(gid int) bool {
-	if gid != dirCheckEGID() {
-		return false
-	}
-	u, g, err := dirCheckNames(dirCheckEUID(), gid)
-	return err == nil && u != "" && u == g
 }
