@@ -620,6 +620,70 @@ _class() {
   [ ! -s "${ENCRYPT_LOG}" ]
 }
 
+# _state <path>... — one line per entry under the paths (its path, type, link
+# target and mtime), then the checksum of each regular file: any write shows.
+_state() {
+  find "${@}" -printf '%p %y %l %T@\n' | LC_ALL=C sort
+  find "${@}" -type f -print0 | LC_ALL=C sort -z | xargs -0 -r cksum
+}
+
+@test "a symlinked .enc that lists the recipient is refused before any write" {
+  # The scan follows the link, but the re-key does not write through one
+  # (secrets::_encrypt_file refuses it). Found after the .sops.yaml write, the
+  # link would stop the run half way, and each rerun would stop at the same
+  # file (Go twin: TestKeyCommandsRefuseASymlinkedEncBeforeAnyWrite).
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  _cache a.dev db "${RCPT_B}"
+  local store="${PATH_CLUSTERS}/a.dev/secrets" away="${BATS_TEST_TMPDIR}/elsewhere" before
+  mkdir -p "${away}"
+  mv -- "${store}/Secret.app.default.K.enc" "${away}/"
+  ln -s "${away}/Secret.app.default.K.enc" "${store}/Secret.app.default.K.enc"
+  touch -t 200001010001 "${store}/Secret.app.default.K" "${store}/Secret.db.default.K"
+  before="$(_state "${CFG}" "${PATH_CLUSTERS}" "${away}")"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${store}/Secret.app.default.K.enc is a symlink: the re-key does not write an .enc through a link
+[error]   replace each link with the file it names, or remove it from the store, then run this command again; nothing was written" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(_state "${CFG}" "${PATH_CLUSTERS}" "${away}")" = "${before}" ] || {
+    echo "a file changed:" >&2
+    diff <(echo "${before}") <(_state "${CFG}" "${PATH_CLUSTERS}" "${away}") >&2
+    return 1
+  }
+  [ ! -s "${ENCRYPT_LOG}" ]
+  # The control: the file in the place of the link. The run removes the
+  # recipient and re-keys both files.
+  rm -- "${store}/Secret.app.default.K.enc"
+  mv -- "${away}/Secret.app.default.K.enc" "${store}/"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$(cat "${ENCRYPT_LOG}")" = "a.dev/secrets/Secret.app.default.K
+a.dev/secrets/Secret.db.default.K" ] || { echo "encrypted: $(cat "${ENCRYPT_LOG}")" >&2; return 1; }
+  ! grep -qF "${RCPT_B}" "${CFG}" || { cat "${CFG}" >&2; return 1; }
+}
+
+@test "a .sops.yaml that is a symlink stays a link: its target loses the recipient and keeps its mode" {
+  # (Go twin: TestKeyCommandsEditTheTargetOfASymlinkedSopsConfig.)
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  local conf="${BATS_TEST_TMPDIR}/conf/sops.yaml" want="${BATS_TEST_TMPDIR}/want.yaml"
+  mkdir -p "${conf%/*}"
+  mv -- "${CFG}" "${conf}"
+  chmod 640 "${conf}"
+  ln -s "${conf}" "${CFG}"
+  printf "creation_rules:\n  - path_regex: 'Secret\\\\..*'\n    age: '%s'\n" "${RCPT_A}" > "${want}"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ -L "${CFG}" ] || { echo "the link was replaced by a file" >&2; return 1; }
+  [ "$(readlink "${CFG}")" = "${conf}" ]
+  cmp "${conf}" "${want}" || { cat "${conf}" >&2; return 1; }
+  [ "$(stat -c %a "${conf}")" = 640 ] || { echo "mode $(stat -c %a "${conf}")" >&2; return 1; }
+  [ "$(ls -A "${conf%/*}")" = sops.yaml ] || { echo "a temp file was left: $(ls -A "${conf%/*}")" >&2; return 1; }
+}
+
 @test "with --all, a domain directory it cannot search is refused before any write" {
   [ "$(id -u)" -ne 0 ] || skip "root reads every file"
   _load

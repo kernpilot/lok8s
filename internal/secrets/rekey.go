@@ -3,7 +3,7 @@ package secrets
 // rekey.go: the re-key path that add-key and remove-key share, and
 // remove-key itself. Each helper has a bash twin of the same shape in
 // .lok8s/libs/secrets (secrets::_no_private_key, _recipient, _lstat,
-// _domain_stores, _rekey_stores, _orphans, _touch_plaintexts, _encs_with,
+// _domain_stores, _rekey_stores, _orphans, _touch_plaintexts, _linked_encs, _encs_with,
 // _other_encs, _enc_lists, _other_stores, _own_identity, _replace,
 // _drop_recipient, _rekey_files).
 
@@ -321,6 +321,53 @@ func touchPlaintexts(stores []string) (int, error) {
 		}
 	}
 	return touched, nil
+}
+
+// encryptTargets returns the .enc path of each plaintext cache file that
+// Encrypt("") sweeps in the store of the context (bash: the loop before the
+// first write of secrets::add-key). It resolves the store with its errors
+// discarded and returns nil when the store does not resolve: AddKey reports
+// that after its write, as before.
+func (c *Context) encryptTargets() []string {
+	quiet := *c
+	quiet.ErrOut = io.Discard
+	dir, err := quiet.ResolveStore()
+	if err != nil {
+		return nil
+	}
+	var encs []string
+	for _, base := range storeEntries(dir, "Secret.") {
+		plaintext := dir + "/" + base
+		if !fsutil.IsRegular(plaintext) || strings.HasSuffix(base, ".enc") {
+			continue
+		}
+		encs = append(encs, plaintext+".enc")
+	}
+	return encs
+}
+
+// refuseLinkedEncs refuses each .enc of encs that is a symlink, before the
+// first write, and reports whether it refused (bash: secrets::_linked_encs).
+// The re-key writes each .enc in place and never through a link
+// (encryptFile refuses one), so a link in the list would stop the run after
+// .sops.yaml was written. A rerun of RemoveKey would then stop at the same
+// file, and a rerun of AddKey would find the recipient present and re-key
+// nothing.
+func (c *Context) refuseLinkedEncs(encs []string) bool {
+	n := 0
+	for _, enc := range encs {
+		info, err := os.Lstat(enc)
+		if err != nil || info.Mode()&fs.ModeSymlink == 0 {
+			continue
+		}
+		ui.ErrorTo(c.ErrOut, "%s is a symlink: the re-key does not write an .enc through a link", c.rel(enc))
+		n++
+	}
+	if n == 0 {
+		return false
+	}
+	ui.ErrorTo(c.ErrOut, "  replace each link with the file it names, or remove it from the store, then run this command again; nothing was written")
+	return true
 }
 
 // encScan is what scanEncs read in a set of stores.
@@ -1093,6 +1140,10 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 		if fsutil.IsRegular(strings.TrimSuffix(enc, ".enc")) {
 			rekey = append(rekey, enc)
 		}
+	}
+	// The scan follows a symlink, but the re-key does not write through one.
+	if c.refuseLinkedEncs(rekey) {
+		return ErrHandled
 	}
 	// sops picks the first creation rule whose path_regex matches the
 	// plaintext path. A file with no rule, or with a rule this age-only

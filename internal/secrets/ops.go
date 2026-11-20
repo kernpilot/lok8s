@@ -128,7 +128,9 @@ func grepQF(content, pattern string) bool {
 // new recipient would appear to be added while some secrets stayed unreadable
 // to them. Decrypt first, or pass skipOrphans to accept the gap knowingly.
 // (Like bash, the orphan check runs AFTER .sops.yaml was already modified —
-// the ordering is part of the observable contract.)
+// the ordering is part of the observable contract. An .enc of the store
+// that is a symlink is refused BEFORE the write: the encrypt does not write
+// through a link, so the run would stop half way.)
 //
 // The argument check and the re-key steps are the helpers in rekey.go, which
 // RemoveKey shares; rekey_test.go pins this command's output and effects.
@@ -160,8 +162,16 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		return nil
 	}
 
+	// Before the first write: no .enc that the Encrypt below writes may be a
+	// symlink (encryptFile refuses one, and that refusal comes after the
+	// write).
+	if c.refuseLinkedEncs(c.encryptTargets()) {
+		return ErrHandled
+	}
+
 	// Append to every creation rule's age list (comma-separated, sops' own
-	// format).
+	// format). replaceFile writes through a symlinked .sops.yaml to its
+	// target, and the link stays a link.
 	before := 0
 	edited, after := appendRecipient(string(raw), agePubkey, &before)
 	if err := replaceFile(sopsConfig, []byte(edited)); err != nil {
