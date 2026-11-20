@@ -851,7 +851,7 @@ _register_sandbox() {
     [[ "${CURL_URL}" != *"/api/clusters/register" ]] || printf '%s' "${CURL_BODY}" >> "${STUB_CURL_BODY}"
     case "$*" in
       *"/api/clusters/register"*)
-        printf '{"id":"cl-001","registered":true,"claimed":true,"bindSecret":"%s","claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"aa:bb","name":"kubehz-claim-test.kubehz.dev"}}\n200' "${STUB_NEXT}" ;;
+        printf '{"id":"cl-001","registered":true,"claimed":true,"bindSecret":"%s","claimKey":{"publicKey":"ssh-ed25519 AAAA k","fingerprint":"%s","name":"kubehz-claim-test.kubehz.dev"}}\n200' "${STUB_NEXT}" "${STUB_FINGERPRINT:-aa:bb}" ;;
       *"/v1/ssh_keys?name="*) printf '{"ssh_keys":[]}\n' ;;
       *) printf '{}\n' ;;
     esac
@@ -1670,4 +1670,78 @@ ${_CLAIM_DELETE42}"
   run kubehz::claim_key_no_mark 'k\e[2J'
   assert_output "[warn] kubehz: lo needs sha256sum or shasum to mark the claim key 'k\e[2J', so it does not change the key in your Hetzner Cloud project."
   [[ "${output}" != *$'\033'* ]]
+}
+
+# ── the claim ticket in CI logs ──────────────────────────
+# spinup.yml and provision.yml run `lo provision` with HCLOUD_TOKEN, and a
+# public repo shows their job logs to everyone. Any signed-in kubehz user who
+# has the claim ticket (the fingerprint of the claim key) can claim the
+# cluster, so both workflows pipe the output through hide_claim_ticket, an
+# inline function of the run script. This test runs the function of
+# spinup.yml on the register output of the bash implementation. The Go twin,
+# internal/kubehz/claim_ticket_workflow_test.go, runs it on the output of the
+# Go implementation and checks that both workflows have the same function.
+
+_TICKET="aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99"
+_TICKET_HIDDEN="<hidden: one-time claim ticket>"
+
+# _hide_claim_ticket_fn: the definition of hide_claim_ticket in spinup.yml,
+# without the 10-space indent of the run block.
+_hide_claim_ticket_fn() {
+  awk '
+    $0 == "          hide_claim_ticket() {" { on = 1 }
+    on { print substr($0, 11) }
+    on && $0 == "          }" { exit }' "${_PROJECT_ROOT}/.github/workflows/spinup.yml"
+}
+
+# _ticket_register <claim-key|announce>: one register_cluster call, with
+# HCLOUD_TOKEN (the claim key) or without it (the fingerprint announce).
+_ticket_register() {
+  if [[ "${1}" == claim-key ]]; then
+    HCLOUD_TOKEN="hc_test" HCLOUD_API_BASE="https://hc.example" \
+      kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  else
+    kubehz::register_cluster "test.kubehz.dev" "${BATS_TEST_TMPDIR}/cluster.lok8s.yaml"
+  fi
+}
+
+@test "claim ticket: the workflow filter hides it in the register output, and every other line stays" {
+  local fn claim announce near input want
+  fn="$(_hide_claim_ticket_fn)"
+  [[ "${fn}" == "hide_claim_ticket() {"*"}" ]] || fail "no hide_claim_ticket function in spinup.yml"
+  eval "${fn}"
+
+  export STUB_FINGERPRINT="${_TICKET}"
+  _register_sandbox ""
+  run _ticket_register claim-key
+  assert_success
+  claim="${output}"
+  [[ "$(grep -cF -- "${_TICKET}" <<<"${claim}")" == 2 ]] ||
+    fail "the claim-key registration does not print the ticket on two lines: ${claim}"
+  _register_sandbox ""
+  run _ticket_register announce
+  assert_success
+  assert_line "  fingerprint: lo:test.kubehz.dev"
+  announce="${output}"
+
+  # Lines like the ticket lines that are not: a looser match changes them.
+  near="$(cat <<'EOF'
+  fingerprint: 11:22   (also visible in Hetzner Console -> Security -> SSH keys) and more
+   fingerprint: 11:22   (also visible in Hetzner Console -> Security -> SSH keys)
+x       -H 'Content-Type: application/json' -d '{"fingerprint":"11:22"}'
+       -H 'Content-Type: application/json' -d '{"fingerprint":"11:22"}' and more
+a line without a fingerprint
+EOF
+)"
+  input="${claim}"$'\n'"${announce}"$'\n'"${near}"$'\n'$'  fingerprint: \xff'"${_TICKET}"'   (also visible in Hetzner Console -> Security -> SSH keys)'$'\n''the last line without a newline'
+  want="${input//$'\xff'${_TICKET}/${_TICKET_HIDDEN}}"
+  want="${want//${_TICKET}/${_TICKET_HIDDEN}}"
+
+  # A UTF-8 locale: the function's own LC_ALL=C makes it compare bytes.
+  export LC_ALL=C.UTF-8
+  run hide_claim_ticket < <(printf '%s' "${input}")
+  assert_success
+  refute_output --partial "${_TICKET}"
+  assert_output "${want}"
+  [[ "$(grep -cF -- "${_TICKET_HIDDEN}" <<<"${output}")" == 3 ]] || fail "not 3 hidden lines: ${output}"
 }

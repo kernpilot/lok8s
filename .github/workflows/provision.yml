@@ -52,19 +52,50 @@ jobs:
             | tr '\n' ' ')
           echo "domains=${domains}" >> "$GITHUB_OUTPUT"
 
-      # Cluster registration with kubehz needs NO platform token — `lo provision`
-      # registers a PENDING cluster anonymously and the user proves ownership by
+      # Cluster registration with kubehz needs NO platform token: `lo provision`
+      # registers a PENDING cluster anonymously, and the user proves ownership by
       # claiming it in the dashboard (see the `spinup` reusable workflow for the
-      # full claim handshake). Only HCLOUD_TOKEN is required.
+      # full claim handshake). Only HCLOUD_TOKEN is required. With it, lo prints
+      # a one-time claim ticket, and this public repo shows its job logs to
+      # everyone, so every `lo provision` goes through hide_claim_ticket. It is
+      # the function of spinup.yml; a Go test keeps the two the same.
       - name: Provision
         env:
           HCLOUD_TOKEN: ${{ secrets.HCLOUD_TOKEN }}
           DOMAIN: ${{ github.event.inputs.domain }}
         run: |
+          set -o pipefail
+          # hide_claim_ticket: copy stdin to stdout line by line, and replace
+          # the claim ticket on the two register lines that carry it. Only a
+          # line with the exact head and tail of these lines changes, so every
+          # other line stays as lo printed it. LC_ALL=C: the match compares
+          # bytes. Each line goes out when it comes in, so the log streams.
+          hide_claim_ticket() {
+            local LC_ALL=C line eol
+            local hidden='<hidden: one-time claim ticket>'
+            local curl_head="       -H 'Content-Type: application/json' -d '{\"fingerprint\":\""
+            local curl_tail="\"}'"
+            local fp_head='  fingerprint: '
+            local fp_tail='   (also visible in Hetzner Console -> Security -> SSH keys)'
+            while :; do
+              eol=$'\n'
+              if ! IFS= read -r line; then
+                [[ -n "${line}" ]] || break
+                eol=""
+              fi
+              if [[ "${line}" == "${curl_head}"*"${curl_tail}" ]]; then
+                line="${curl_head}${hidden}${curl_tail}"
+              elif [[ "${line}" == "${fp_head}"*"${fp_tail}" ]]; then
+                line="${fp_head}${hidden}${fp_tail}"
+              fi
+              printf '%s%s' "${line}" "${eol}"
+              [[ -n "${eol}" ]] || break
+            done
+          }
           if [[ -n "${DOMAIN}" ]]; then
-            lo provision --force --domain "${DOMAIN}"
+            lo provision --force --domain "${DOMAIN}" 2>&1 | hide_claim_ticket
           else
             for domain in ${{ steps.detect.outputs.domains }}; do
-              lo provision --force --domain "${domain}"
+              lo provision --force --domain "${domain}" 2>&1 | hide_claim_ticket
             done
           fi

@@ -1,14 +1,19 @@
 # Spin up & register a cluster from CI.
 #
 # Reusable workflow (workflow_call) + manual trigger (workflow_dispatch) that
-# provisions a committed cluster from your repo with `lo` and — when the cluster
-# opts into kubehz visibility (spec.kubehz.access != none) — registers it and
-# prints the SSH-key MD5 fingerprint to the job summary so you can claim the
-# cluster from the dashboard.
+# provisions a committed cluster from your repo with `lo`. When the cluster
+# opts into kubehz visibility (spec.kubehz.access != none), `lo provision`
+# registers it as pending and uploads a claim key to your Hetzner Cloud
+# project. The MD5 fingerprint of that key is a one-time claim ticket: any
+# signed-in kubehz user who has it can claim the cluster. A public repo shows
+# its job logs and summaries to everyone, so this workflow hides the ticket in
+# the log, and no step output, env value or job summary holds it. The job
+# summary tells you where only you can read it.
 #
 # It needs exactly ONE secret: HCLOUD_TOKEN (your Hetzner Cloud API token, used by
-# `lo`/the provider to create the infrastructure). No platform/API token is
-# required — ownership is proven later, interactively, when you claim the cluster.
+# `lo`/the provider to create the infrastructure and to upload the claim key).
+# No platform/API token is required: you prove ownership later, when you claim
+# the cluster with the ticket while signed in to the dashboard.
 #
 # Usage (as a reusable workflow from another repo):
 #
@@ -81,8 +86,18 @@ jobs:
         run: b install
 
       # Provision the cluster. For a self-hosted cluster with kubehz visibility,
-      # `lo provision` registers a PENDING cluster and prints its claim
-      # fingerprint. We tee the output so we can lift that line into the summary.
+      # `lo provision` registers a PENDING cluster. With the claim key, lo
+      # prints the one-time claim ticket on two lines: the curl hint and the
+      # "fingerprint:" line. hide_claim_ticket replaces the ticket on these two
+      # lines before tee, so it reaches neither the job log nor
+      # /tmp/provision.log. A ::add-mask:: cannot do this: GitHub masks a value
+      # only after the mask command, and lo prints the ticket in the same
+      # stream that brings it. The function is inline because a reusable
+      # workflow runs in the checkout of the calling repo, where no lok8s
+      # script exists. provision.yml has the same function. A Go test and a
+      # bats test run it on the register output of both implementations of lo
+      # (internal/kubehz/claim_ticket_workflow_test.go,
+      # tests/unit/kubehz_register_test.bats).
       - name: Provision & register
         id: provision
         env:
@@ -90,36 +105,92 @@ jobs:
           DOMAIN: ${{ inputs.domain }}
         run: |
           set -o pipefail
-          lo provision --force --domain "${DOMAIN}" 2>&1 | tee /tmp/provision.log
+          # hide_claim_ticket: copy stdin to stdout line by line, and replace
+          # the claim ticket on the two register lines that carry it. Only a
+          # line with the exact head and tail of these lines changes, so every
+          # other line stays as lo printed it. LC_ALL=C: the match compares
+          # bytes. Each line goes out when it comes in, so the log streams.
+          hide_claim_ticket() {
+            local LC_ALL=C line eol
+            local hidden='<hidden: one-time claim ticket>'
+            local curl_head="       -H 'Content-Type: application/json' -d '{\"fingerprint\":\""
+            local curl_tail="\"}'"
+            local fp_head='  fingerprint: '
+            local fp_tail='   (also visible in Hetzner Console -> Security -> SSH keys)'
+            while :; do
+              eol=$'\n'
+              if ! IFS= read -r line; then
+                [[ -n "${line}" ]] || break
+                eol=""
+              fi
+              if [[ "${line}" == "${curl_head}"*"${curl_tail}" ]]; then
+                line="${curl_head}${hidden}${curl_tail}"
+              elif [[ "${line}" == "${fp_head}"*"${fp_tail}" ]]; then
+                line="${fp_head}${hidden}${fp_tail}"
+              fi
+              printf '%s%s' "${line}" "${eol}"
+              [[ -n "${eol}" ]] || break
+            done
+          }
+          rc=0
+          lo provision --force --domain "${DOMAIN}" 2>&1 | hide_claim_ticket | tee /tmp/provision.log || rc=$?
 
-          # register_cluster prints "  fingerprint: <md5>" on success. Lift it
-          # (best-effort; absent for non-kubehz / access:none clusters).
-          fp="$(grep -oE 'fingerprint: [^ ]+' /tmp/provision.log | head -n1 | sed 's/^fingerprint: //')"
+          # How lo registered the cluster, for the summary step, also when the
+          # provision failed after the registration. Only public values leave
+          # this step: the registration mode and the name of the claim key.
+          registration="" claim_key=""
+          while IFS= read -r line; do
+            case "${line}" in
+              "kubehz: cluster '"*"' registered (pending). Claim key '"*"' uploaded to your Hetzner Cloud account.")
+                name="${line#*"). Claim key '"}"
+                name="${name%"' uploaded to your Hetzner Cloud account."}"
+                if [[ "${name}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+                  registration=claim-key claim_key="${name}"
+                fi
+                ;;
+              "kubehz: cluster '"*"' registered (pending). Claim it in the dashboard:")
+                [[ -n "${registration}" ]] || registration=announce
+                ;;
+            esac
+          done < /tmp/provision.log
           {
-            echo "fingerprint<<EOF"
-            echo "${fp}"
-            echo "EOF"
+            echo "registration=${registration}"
+            echo "claim_key=${claim_key}"
           } >> "${GITHUB_OUTPUT}"
+          exit "${rc}"
 
-      # Write the claim handshake to the job summary. The fingerprint is public
-      # (not a secret); the Hetzner token is NEVER printed here.
+      # Write the claim steps to the job summary. The summary says where only
+      # the owner can read the claim ticket. It never holds the ticket, and the
+      # Hetzner token is NEVER printed here.
       - name: Claim instructions
-        if: always() && steps.provision.outputs.fingerprint != ''
+        if: always() && steps.provision.outputs.registration != ''
         env:
           DOMAIN: ${{ inputs.domain }}
-          FINGERPRINT: ${{ steps.provision.outputs.fingerprint }}
+          REGISTRATION: ${{ steps.provision.outputs.registration }}
+          CLAIM_KEY: ${{ steps.provision.outputs.claim_key }}
         run: |
           {
-            echo "## Cluster registered — claim it to take ownership"
+            echo "## Cluster registered: claim it to take ownership"
             echo ""
             echo "Your cluster \`${DOMAIN}\` is registered with kubehz as **pending**."
-            echo "To attach it to your account, open the dashboard **Claim** page and paste:"
             echo ""
-            echo "| Field | Value |"
-            echo "| --- | --- |"
-            echo "| SSH fingerprint (MD5) | \`${FINGERPRINT}\` |"
-            echo "| Hetzner Cloud token | _(enter your own — proves ownership, used once, never stored)_ |"
-            echo ""
-            echo "kubehz verifies the fingerprint against the SSH keys in your Hetzner"
-            echo "account, then attaches the cluster to your tenant."
+            if [[ "${REGISTRATION}" == claim-key ]]; then
+              echo "To claim it, sign in to the kubehz dashboard, open the **Claim** page and paste the"
+              echo "claim ticket: the MD5 fingerprint of the SSH key \`${CLAIM_KEY}\`. Only you can read it:"
+              echo ""
+              echo "- in the Hetzner Console of the project of your \`HCLOUD_TOKEN\`: **Security → SSH keys**, the key \`${CLAIM_KEY}\`;"
+              echo "- or in the output of \`lo kubehz register --domain ${DOMAIN}\` on your own machine, with the same \`HCLOUD_TOKEN\`."
+              echo "  It registers again, so it prints a new ticket and the old one stops working."
+              echo ""
+              echo "The ticket is a **one-time claim ticket**: any signed-in kubehz user who has it can claim"
+              echo "this cluster. So this workflow does not show it: the log has a placeholder in its place,"
+              echo "and this summary does not hold it. Keep it private: do not paste it into an issue, a chat or a CI log."
+              echo ""
+              echo "Claim the cluster soon. The ticket works only while the registration is pending, and the"
+              echo "next registration of this cluster (the next run of this workflow, for example) replaces it."
+            else
+              echo "It has no claim key, so it has no claim ticket. To claim it, deploy the kubehz agent in the"
+              echo "cluster (\`lo kubehz deploy\`), then run \`lo kubehz claim-code\` and paste the code on the"
+              echo "dashboard **Claim** page while you are signed in."
+            fi
           } >> "${GITHUB_STEP_SUMMARY}"

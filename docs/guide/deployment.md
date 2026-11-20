@@ -856,10 +856,33 @@ under `clusters/<domain>/`.
 ### Claiming a registered cluster
 
 When a cluster opts into kubehz dashboard visibility (`spec.kubehz.access` is set
-to `registered` or `managed`), `lo provision` registers it as **pending** and
-prints its SSH-key **MD5 fingerprint**. You then claim the cluster in the
-dashboard with that fingerprint plus your own Hetzner Cloud token (used once as
-ownership proof, never stored). CI needs no platform token.
+to `registered` or `managed`), `lo provision` registers it as **pending**. With
+`HCLOUD_TOKEN`, lo uploads a claim key, `kubehz-claim-<domain>`, to your Hetzner
+Cloud project. The MD5 fingerprint of that key is a **one-time claim ticket**.
+Sign in to the dashboard, open the **Claim** page and paste the ticket: the
+cluster is then yours. Any signed-in user who has the ticket can claim the
+cluster, so keep it private. CI needs no platform token.
+
+A public repository shows its job logs and job summaries to everyone, so the
+workflow keeps the ticket out of them:
+
+- The job log shows `<hidden: one-time claim ticket>` in place of the ticket.
+  Every other line stays as `lo` printed it.
+- No step output, environment value or job summary holds the ticket.
+- The job summary tells you where only you can read the ticket: in the Hetzner
+  Console (**Security → SSH keys**, the key `kubehz-claim-<domain>`), or in the
+  output of `lo kubehz register --domain <domain>` on your own machine with the
+  same `HCLOUD_TOKEN`. That command registers again, so it prints a new ticket,
+  and the old one stops working.
+
+Claim the cluster soon. The ticket works only while the registration is
+pending, and the next registration of the cluster (the next run of the
+workflow, for example) replaces it.
+
+When lo registers the cluster without a claim key (the claim-key registration
+failed, so lo used the fingerprint announce), there is no ticket. The job
+summary then tells you to claim the cluster with the heartbeat agent and `lo
+kubehz claim-code`.
 
 See the [kubehz Platform guide](./kubehz.md#claiming) for the full flow:
 registration, claiming, the heartbeat agent, and troubleshooting.
