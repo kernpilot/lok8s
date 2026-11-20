@@ -188,7 +188,10 @@ func (c *Context) domainStores() (paths []string, bad map[string]bool) {
 // with all, every clusters/<domain>/secrets directory (never the flat store);
 // without it, the store of the current context. With all it also returns the
 // domain paths it cannot read: remove-key refuses them; add-key, which wrote
-// .sops.yaml before this step, does not read them.
+// .sops.yaml before this step, does not read them. When it can read no store
+// and found paths it cannot read, it returns those paths and no error, so
+// that remove-key names them in its refusal; add-key then stops with "no
+// secret store found to re-key", as before.
 func (c *Context) rekeyStores(all bool) (stores, unreadable []string, err error) {
 	if all {
 		paths, bad := c.domainStores()
@@ -206,7 +209,7 @@ func (c *Context) rekeyStores(all bool) (stores, unreadable []string, err error)
 		}
 		stores = append(stores, dir)
 	}
-	if len(stores) == 0 {
+	if len(stores) == 0 && len(unreadable) == 0 {
 		ui.ErrorTo(c.ErrOut, "no secret store found to re-key")
 		return nil, nil, ErrHandled
 	}

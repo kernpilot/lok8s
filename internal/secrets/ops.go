@@ -180,6 +180,10 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 	if err != nil {
 		return err
 	}
+	if len(stores) == 0 { // every domain store is a path it cannot read
+		ui.ErrorTo(c.ErrOut, "no secret store found to re-key")
+		return ErrHandled
+	}
 	if orphans := len(c.orphanEncs(stores)); orphans > 0 && !skipOrphans {
 		ui.ErrorTo(c.ErrOut, "%d encrypted file(s) have no decrypted twin — they would keep the OLD", orphans)
 		ui.ErrorTo(c.ErrOut, "  recipient list while .sops.yaml claims the new key was added.")

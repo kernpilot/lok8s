@@ -522,6 +522,37 @@ func TestRemoveKeyRefusesAPathItCannotStat(t *testing.T) {
 	}
 }
 
+// With --all and no domain store it can read (each domain directory mode
+// 000), the refusal names each store path, in the form of the other
+// unreadable refusals; it does not say that no store was found.
+func TestRemoveKeyAllNamesEveryStoreItCannotRead(t *testing.T) {
+	skipUnlessPermissionsHold(t)
+	c, out, errOut := testEnv(t)
+	c.Domain = "a.dev"
+	k, g := newAgeIdentity(t).Recipient().String(), newAgeIdentity(t).Recipient().String()
+	sopsRules(t, c, k+","+g)
+	for _, d := range []string{"a.dev", "b.dev"} {
+		dir := c.Paths.Clusters + "/" + d
+		write(t, mkdir(t, dir+"/secrets")+"/Secret.app.default.K.enc", encEnvelope(k, g))
+		if err := os.Chmod(dir, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	}
+	before := readFile(t, c.sopsConfigPath())
+
+	if err := c.RemoveKey(g, true, false); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+	}
+	want := "[error] cannot read clusters/a.dev/secrets\n" +
+		"[error] cannot read clusters/b.dev/secrets\n" +
+		"[error]   a file that is not read may still list the recipient — fix the permissions first; nothing was written\n"
+	if errOut.String() != want || out.String() != "" {
+		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+	}
+	unchanged(t, c, before)
+}
+
 // The write helper of every encrypt, called directly (in process, no seam):
 // a write that stops half way leaves the old file whole and no temp file; a
 // write that ends replaces the file (mode 0600) and leaves a hard link to the

@@ -548,6 +548,27 @@ _class() {
   [ ! -s "${ENCRYPT_LOG}" ]
 }
 
+@test "with --all and no domain store it can read, the refusal names each store" {
+  # Not "no secret store found": each path may still hold an .enc that lists
+  # the recipient (Go twin: TestRemoveKeyAllNamesEveryStoreItCannotRead).
+  [ "$(id -u)" -ne 0 ] || skip "root reads every file"
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  _cache b.dev app "${RCPT_B}"
+  local before; before="$(cat "${CFG}")"
+  chmod 000 "${PATH_CLUSTERS}/a.dev" "${PATH_CLUSTERS}/b.dev"
+  DOMAIN=a.dev run _rm "${RCPT_B}" 1
+  chmod 755 "${PATH_CLUSTERS}/a.dev" "${PATH_CLUSTERS}/b.dev"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] cannot read ${PATH_CLUSTERS}/a.dev/secrets
+[error] cannot read ${PATH_CLUSTERS}/b.dev/secrets
+[error]   a file that is not read may still list the recipient — fix the permissions first; nothing was written" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(cat "${CFG}")" = "${before}" ]
+  [ ! -s "${ENCRYPT_LOG}" ]
+}
+
 @test "the select scan reads the parsed metadata: an .enc that spells the recipient as a JSON escape is re-keyed" {
   _load
   _stub_encrypt

@@ -130,6 +130,33 @@ func TestAddKeyNoStoreOutputIsPinned(t *testing.T) {
 	}
 }
 
+// --all with every domain store a path it cannot read (each domain directory
+// mode 000): add-key does not read those paths, and its output stays the one
+// of no store, while remove-key names them (TestRemoveKeyAllNamesEveryStoreItCannotRead).
+func TestAddKeyAllWithEveryStoreUnreadableSaysNoStore(t *testing.T) {
+	skipUnlessPermissionsHold(t)
+	c, out, errOut := testEnv(t)
+	sopsYAMLWith(t, c, keyA)
+	for _, d := range []string{"a.dev", "b.dev"} {
+		dir := c.Paths.Clusters + "/" + d
+		mkdir(t, dir+"/secrets")
+		if err := os.Chmod(dir, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	}
+
+	if err := c.AddKey(keyB, true, false); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v", err)
+	}
+	if want := "added recipient to .sops.yaml (1 creation rule(s))\n  " + keyB + "\n"; out.String() != want {
+		t.Errorf("stdout:\n%q\nwant:\n%q", out.String(), want)
+	}
+	if want := "[error] no secret store found to re-key\n"; errOut.String() != want {
+		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), want)
+	}
+}
+
 // ── the private-key refusal (both commands) ───────────────────────────────
 
 // fakeAgeIdentity has the shape of an age identity but is made of a fixed
