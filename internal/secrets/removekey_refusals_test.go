@@ -544,12 +544,16 @@ func treeBytes(t *testing.T, dir string) map[string]string {
 // value of the .enc. A twin that differs, a file that the caller cannot
 // decrypt and a twin that it cannot read are refused by their path, and
 // .sops.yaml and every file of the store stay byte-equal. No value is
-// printed: stdout and stderr are pinned whole.
+// printed: stdout and stderr are pinned whole. An identity that is in no
+// rule is read and does not decrypt (not the error of no identity), also for
+// an empty twin: an empty failed decrypt is not a twin that matches.
 // tests/unit/secrets_remove_key_test.bats runs the same cases.
 func TestRemoveKeyRefusesATwinThatDiffersFromItsEnc(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		caller  bool // the caller holds the identity that stays
+		wrong   bool // the caller holds an identity that is in no rule
+		empty   bool // the twin of app is empty
 		differs bool // the twin gets another value, newer than its .enc
 		unread  bool // the twin gets mode 000
 		want    string
@@ -562,6 +566,13 @@ func TestRemoveKeyRefusesATwinThatDiffersFromItsEnc(t *testing.T) {
 		},
 		{
 			name: "a file that the caller cannot decrypt",
+			want: "[error] cannot decrypt clusters/a.dev/secrets/Secret.app.default.K.enc to compare it with its twin\n" +
+				"[error] cannot decrypt clusters/a.dev/secrets/Secret.other.default.K.enc to compare it with its twin\n",
+		},
+		{
+			name:  "an identity that does not decrypt the files, with an empty twin",
+			wrong: true,
+			empty: true,
 			want: "[error] cannot decrypt clusters/a.dev/secrets/Secret.app.default.K.enc to compare it with its twin\n" +
 				"[error] cannot decrypt clusters/a.dev/secrets/Secret.other.default.K.enc to compare it with its twin\n",
 		},
@@ -583,12 +594,30 @@ func TestRemoveKeyRefusesATwinThatDiffersFromItsEnc(t *testing.T) {
 			sopsRules(t, c, k+","+g)
 			a := c.Paths.Clusters + "/a.dev/secrets"
 			app, other := a+"/Secret.app.default.K", a+"/Secret.other.default.K"
-			write(t, app, "v")
+			value := "v"
+			if tc.empty {
+				value = ""
+			}
+			write(t, app, value)
 			write(t, other, "w")
 			encryptStore(t, c, "a.dev", out, errOut)
 			freshen(t, app, other)
 			if tc.caller {
 				callerIdentity(t, keep)
+			}
+			if tc.wrong {
+				callerIdentity(t, newAgeIdentity(t))
+			}
+			// The marker of the identity: an identity that is read and does
+			// not decrypt, or no identity.
+			if !tc.caller {
+				mark := ErrNoIdentity
+				if tc.wrong {
+					mark = ErrDecryptEnc
+				}
+				if _, err := DecryptEntry(app + ".enc"); !errors.Is(err, mark) {
+					t.Fatalf("the identity: want %v, got %v", mark, err)
+				}
 			}
 			if tc.differs {
 				write(t, app, "x")
@@ -615,7 +644,7 @@ func TestRemoveKeyRefusesATwinThatDiffersFromItsEnc(t *testing.T) {
 			if !maps.Equal(treeBytes(t, c.Paths.Clusters), before) {
 				t.Error("a file of the store changed before the refusal")
 			}
-			if !opens(t, app+".enc", gone, "v") || !opens(t, other+".enc", gone, "w") {
+			if !opens(t, app+".enc", gone, value) || !opens(t, other+".enc", gone, "w") {
 				t.Error("an .enc was re-keyed before the refusal")
 			}
 		})

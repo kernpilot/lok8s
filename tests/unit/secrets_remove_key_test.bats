@@ -1504,28 +1504,54 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
 # bats test_tags=real-sops
 @test "an identity that does not decrypt the .enc is refused by the compare before any write" {
   # A third key, in no rule and on no label: the real sops fails to decrypt,
-  # and the compare does not read that failure as a twin that matches (an
-  # absent identity is a case of the test above). .sops.yaml and every file
-  # of the stores stay byte-equal.
+  # and the compare does not read that failure as a twin that matches, also
+  # for an empty twin (a failed decrypt prints nothing, and cmp finds an
+  # empty twin equal to it). A marker shows that the decrypt got the third
+  # identity from its key file; with no identity, the decrypt does not run
+  # and the refusal is the same. .sops.yaml and every file of the stores stay
+  # byte-equal (Go twin: TestRemoveKeyRefusesATwinThatDiffersFromItsEnc).
   command -v sops >/dev/null 2>&1 || skip "sops not installed"
   command -v ssh-to-age >/dev/null 2>&1 || skip "ssh-to-age not installed"
   command -v ssh-keygen >/dev/null 2>&1 || skip "ssh-keygen not installed"
   _load
   local k="${BATS_TEST_TMPDIR}/keys" keep gone saved="${BATS_TEST_TMPDIR}/saved" store="${PATH_CLUSTERS}/a.dev/secrets"
+  local id marks="${BATS_TEST_TMPDIR}/marks" refusal
   _keep_gone "${k}"
   ssh-keygen -q -t ed25519 -N '' -C other -f "${k}/other" </dev/null >/dev/null 2>&1
   ssh-to-age -private-key -i "${k}/other" -o "${k}/other.age" 2>/dev/null
   _rules "${keep},${gone}"
   printf 'v' > "${store}/Secret.app.default.K"
+  : > "${store}/Secret.empty.default.K"
   domain=a.dev secrets::encrypt >/dev/null
+  [ -s "${store}/Secret.empty.default.K.enc" ] || { echo "fixture: the empty twin has no .enc" >&2; return 1; }
   mkdir -p "${saved}"
   cp -p "${CFG}" "${saved}/sops.yaml"
   cp -a "${PATH_CLUSTERS}" "${saved}/clusters"
+  # The marker: one line for each decrypt, which names the identity that
+  # the decrypt got. Nothing prints the identity.
+  id="$(grep -m1 'AGE-SECRET-KEY-' "${k}/other.age")"
+  sops() {
+    if [[ "${1:-}" == decrypt ]]; then
+      if [[ "${SOPS_AGE_KEY:-}" == "${id}" ]]; then echo "the third identity" >> "${marks}"; else echo "another identity" >> "${marks}"; fi
+    fi
+    command sops "$@"
+  }
+  refusal="[error] cannot decrypt ${store}/Secret.app.default.K.enc to compare it with its twin
+[error] cannot decrypt ${store}/Secret.empty.default.K.enc to compare it with its twin
+${_twin_tail}"
 
   DOMAIN=a.dev SOPS_AGE_KEY_FILE="${k}/other.age" run _rm "${k}/gone.pub"
   [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [ "$output" = "[error] cannot decrypt ${store}/Secret.app.default.K.enc to compare it with its twin
-${_twin_tail}" ] || { echo "$output" >&2; return 1; }
+  [ "$output" = "${refusal}" ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${marks}")" = $'the third identity\nthe third identity' ] || { echo "marks: $(cat "${marks}")" >&2; return 1; }
+  _same_store "${saved}"
+
+  # No identity: setup's SOPS_AGE_KEY_FILE names no file, and no SSH key.
+  command rm -f -- "${marks}"
+  DOMAIN=a.dev run _rm "${k}/gone.pub"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "${refusal}" ] || { echo "$output" >&2; return 1; }
+  [ ! -e "${marks}" ] || { echo "a decrypt ran with no identity: $(cat "${marks}")" >&2; return 1; }
   _same_store "${saved}"
 }
 
