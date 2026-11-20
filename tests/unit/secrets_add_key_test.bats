@@ -235,6 +235,83 @@ _state() {
   [ -s "${ENCRYPT_RAN}" ]
 }
 
+# _refused_later <kind> — a store with the pairs app and db. The .enc of db,
+# the later pair (or, for kind sha, the .enc of the .sha file of db), is a
+# directory (dir, sha), a FIFO (fifo) or a symlink (link): add-key must
+# refuse it before any write. The project (.sops.yaml, the lock file, any
+# temp file), the store and the link target stay as they were. The control:
+# with the entry removed, the run adds the recipient and re-keys the store.
+# (Go twin: TestAddKeyRefusesEveryEncThatTheEncryptRefusesBeforeAnyWrite.)
+_refused_later() {
+  local kind="${1}" store="${PATH_CLUSTERS}/a.dev/secrets" away="${BATS_TEST_TMPDIR}/elsewhere" enc line tail before
+  mkdir -p "${away}"
+  printf 'v\n' > "${store}/Secret.app.default.KEY"
+  printf 'enc %s\n' "${KEY_A}" > "${store}/Secret.app.default.KEY.enc"
+  printf 'w\n' > "${store}/Secret.db.default.KEY"
+  enc="${store}/Secret.db.default.KEY.enc"
+  if [[ "${kind}" == sha ]]; then
+    printf 'enc %s\n' "${KEY_A}" > "${enc}"
+    printf 's\n' > "${store}/Secret.db.default.KEY.sha"
+    enc="${store}/Secret.db.default.KEY.sha.enc"
+  fi
+  line="${enc} is not a regular file (a directory, a FIFO or a device): the re-key does not write an .enc there"
+  tail="replace each link with the file it names, and remove each other entry from the store, then run this command again; nothing was written"
+  case "${kind}" in
+    dir|sha) mkdir -- "${enc}" ;;
+    fifo) mkfifo -- "${enc}" ;;
+    link)
+      printf 'enc %s\n' "${KEY_A}" > "${away}/Secret.db.default.KEY.enc"
+      ln -s "${away}/Secret.db.default.KEY.enc" "${enc}"
+      line="${enc} is a symlink: the re-key does not write an .enc through a link"
+      tail="replace each link with the file it names, or remove it from the store, then run this command again; nothing was written"
+      ;;
+  esac
+  find "${store}" "${away}" -type f -name '*.enc' -exec touch -t 200001010000 {} +
+  find "${store}" -type f ! -name '*.enc' -exec touch -t 200001010001 {} +
+  # The lock file is there before the run (the lock writes it), so that the
+  # listing of the project shows any other new entry.
+  : > "${PATH_BASE}/.sops.yaml.lock"
+  before="$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}" "${away}"; ls -A "${PATH_BASE}")"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${line}
+[error]   ${tail}" ] || { echo "$output" >&2; return 1; }
+  [ "$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}" "${away}"; ls -A "${PATH_BASE}")" = "${before}" ] || {
+    echo "a file changed:" >&2
+    diff <(echo "${before}") <(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}" "${away}"; ls -A "${PATH_BASE}") >&2
+    return 1
+  }
+  [ ! -s "${ENCRYPT_RAN}" ]
+  rm -r -- "${enc}"
+  DOMAIN=a.dev run _add "${KEY_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
+  [ -s "${ENCRYPT_RAN}" ]
+}
+
+# A device node needs root to make, so no test makes one: secrets::_enc_path_ok
+# refuses it as it refuses a FIFO.
+@test "the .enc of a later pair that is a directory is refused before any write" {
+  _load
+  _refused_later dir
+}
+
+@test "the .enc of a later pair that is a FIFO is refused before any write" {
+  command -v mkfifo >/dev/null 2>&1 || skip "mkfifo not installed"
+  _load
+  _refused_later fifo
+}
+
+@test "the .enc of a later pair that is a symlink is refused before any write" {
+  _load
+  _refused_later link
+}
+
+@test "the .enc of a .sha file that is a directory is refused before any write" {
+  _load
+  _refused_later sha
+}
+
 @test "a .sops.yaml that is a symlink stays a link: its target gets the recipient and keeps its mode" {
   # sed -i would put a regular file in the place of the link and leave the
   # target as it was (Go twin: TestKeyCommandsEditTheTargetOfASymlinkedSopsConfig).

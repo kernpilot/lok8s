@@ -221,7 +221,8 @@ lo secrets remove-key age1<recipient> --all     # every clusters/<domain>/secret
 - A managed `.enc` file that the command re-keys is a symlink. The command
   reads the file through the link, but the re-key does not write through a
   link. Replace the link with the file that it names, or remove it from the
-  store. `add-key` refuses such a file too, before it changes `.sops.yaml`.
+  store. `add-key` refuses such a file too, before it changes `.sops.yaml`,
+  and also an `.enc` path that is a directory, a FIFO or a device.
 - A selected store holds another `.enc` file: a name that ends in `.enc`, at
   any depth (in a subdirectory, or a name that starts with a dot), that is
   not a `Secret.*.enc` file at the top of the store. An example is a
@@ -315,9 +316,10 @@ a path that does not exist yet. When the `.enc` path is a symlink (to a file or
 to a directory), a directory, a FIFO or a device, the encrypt stops with an
 error that names the path, and it writes nothing there or through it. A
 symlinked `.enc` file is not followed and not replaced: remove the link, then
-encrypt again. `add-key` and `remove-key` check the `.enc` files that they
-re-key before they change `.sops.yaml`, so such a link stops them before the
-first write. The bash implementation needs GNU `mv`: it renames the new
+encrypt again. `add-key` and `remove-key` check the `.enc` paths that they
+re-key before they change `.sops.yaml`, so such an entry stops them before
+the first write. `add-key` checks the same list of files that the encrypt
+reads. The bash implementation needs GNU `mv`: it renames the new
 file with `mv -T`, which never moves a file into a directory, or with `gmv -T`
 when `mv` has no `-T` (the `mv` of BSD and macOS). Without one of them, each
 command that encrypts stops before it writes a file, with an error that says

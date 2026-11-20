@@ -666,6 +666,41 @@ a.dev/secrets/Secret.db.default.K" ] || { echo "encrypted: $(cat "${ENCRYPT_LOG}
   ! grep -qF "${RCPT_B}" "${CFG}" || { cat "${CFG}" >&2; return 1; }
 }
 
+@test "a resumed run refuses a symlinked .enc that does not list the recipient before any write" {
+  # A stopped re-key: .sops.yaml no longer lists the recipient, the .enc of
+  # app was re-keyed and is now a link to a file that does not list it, and
+  # the .enc of db still lists it. The labels do not choose the files, so the
+  # link is in the re-key list (Go twin:
+  # TestRemoveKeyResumeRefusesASymlinkedEncThatDoesNotListTheKey).
+  _load
+  _stub_encrypt
+  _rules "${RCPT_A}"
+  _cache a.dev app "${RCPT_A}"
+  _cache a.dev db "${RCPT_B}"
+  local store="${PATH_CLUSTERS}/a.dev/secrets" away="${BATS_TEST_TMPDIR}/elsewhere" before
+  _envelope "${RCPT_A}" "${RCPT_B}" > "${store}/Secret.db.default.K.enc"
+  touch -t 200001010000 "${store}/Secret.db.default.K.enc"
+  mkdir -p "${away}"
+  mv -- "${store}/Secret.app.default.K.enc" "${away}/"
+  ln -s "${away}/Secret.app.default.K.enc" "${store}/Secret.app.default.K.enc"
+  ! grep -qF "${RCPT_B}" "${away}/Secret.app.default.K.enc" || { echo "fixture: the link lists the recipient" >&2; return 1; }
+  # The lock file is there before the run (the lock writes it), so that the
+  # listing of the project shows any other new entry.
+  : > "${CFG}.lock"
+  before="$(_state "${CFG}" "${PATH_CLUSTERS}" "${away}"; ls -A "${PATH_BASE}")"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] ${store}/Secret.app.default.K.enc is a symlink: the re-key does not write an .enc through a link
+[error]   replace each link with the file it names, or remove it from the store, then run this command again; nothing was written" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(_state "${CFG}" "${PATH_CLUSTERS}" "${away}"; ls -A "${PATH_BASE}")" = "${before}" ] || {
+    echo "a file changed:" >&2
+    diff <(echo "${before}") <(_state "${CFG}" "${PATH_CLUSTERS}" "${away}"; ls -A "${PATH_BASE}") >&2
+    return 1
+  }
+  [ ! -s "${ENCRYPT_LOG}" ]
+}
+
 @test "a .sops.yaml that is a symlink stays a link: its target loses the recipient and keeps its mode" {
   # (Go twin: TestKeyCommandsEditTheTargetOfASymlinkedSopsConfig.)
   _load

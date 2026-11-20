@@ -3,8 +3,9 @@ package secrets
 // rekey_links_test.go: add-key, remove-key and symlinks. The scan of the
 // stores follows a symlinked .enc, but the re-key never writes through one
 // (encryptFile refuses it), so a link in the files that a run re-keys is
-// refused before the first write. A .sops.yaml that is a symlink stays a
-// link: both commands write the edit to its target.
+// refused before the first write. add-key refuses every other .enc that the
+// encrypt refuses too (a directory, a FIFO). A .sops.yaml that is a symlink
+// stays a link: both commands write the edit to its target.
 // tests/unit/secrets_add_key_test.bats and
 // tests/unit/secrets_remove_key_test.bats run the same cases through the bash
 // twin.
@@ -17,10 +18,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"filippo.io/age"
+
+	"github.com/kernpilot/lok8s/internal/fsutil"
 )
 
 // linkFixture is a store a.dev with two pairs, Secret.app.default.K and
@@ -183,6 +187,115 @@ func TestKeyCommandsRefuseASymlinkedEncBeforeAnyWrite(t *testing.T) {
 			f.rekeyed("db", "w")
 		})
 	}
+}
+
+// The .enc of a later pair that the encrypt refuses, a directory, a FIFO or
+// a symlink, also the .enc of a .sha file: add-key refuses it before any
+// write, with the list of the encrypt sweep. .sops.yaml, the other .enc
+// (its bytes and its mtime), the entry and every plaintext stay as they
+// were, and no temp file appears in the project or the store. A device node
+// needs root to make, so no case makes one: encDestinationOK refuses it as
+// it refuses a FIFO. The control: with the entry removed, the run passes.
+func TestAddKeyRefusesEveryEncThatTheEncryptRefusesBeforeAnyWrite(t *testing.T) {
+	const other = "[error]   replace each link with the file it names, and remove each other entry from the store, then run this command again; nothing was written\n"
+	cases := []struct {
+		name, plain string // plain: the plaintext whose .enc is the entry
+		make        func(t *testing.T, f *linkFixture, enc string)
+		want        string
+	}{
+		{"a directory", "Secret.db.default.K", func(t *testing.T, _ *linkFixture, enc string) {
+			mkdir(t, enc)
+		}, "[error] clusters/a.dev/secrets/Secret.db.default.K.enc is not a regular file (a directory, a FIFO or a device): the re-key does not write an .enc there\n" + other},
+		{"a FIFO", "Secret.db.default.K", func(t *testing.T, _ *linkFixture, enc string) {
+			if err := syscall.Mkfifo(enc, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "[error] clusters/a.dev/secrets/Secret.db.default.K.enc is not a regular file (a directory, a FIFO or a device): the re-key does not write an .enc there\n" + other},
+		{"a symlink", "Secret.db.default.K", func(t *testing.T, f *linkFixture, enc string) {
+			target := f.c.Paths.Base + "/elsewhere/Secret.db.default.K.enc"
+			write(t, target, "x")
+			if err := os.Symlink(target, enc); err != nil {
+				t.Fatal(err)
+			}
+		}, "[error] clusters/a.dev/secrets/Secret.db.default.K.enc is a symlink: the re-key does not write an .enc through a link\n" +
+			"[error]   replace each link with the file it names, or remove it from the store, then run this command again; nothing was written\n"},
+		{"the .enc of a .sha file", "Secret.db.default.K.sha", func(t *testing.T, _ *linkFixture, enc string) {
+			mkdir(t, enc)
+		}, "[error] clusters/a.dev/secrets/Secret.db.default.K.sha.enc is not a regular file (a directory, a FIFO or a device): the re-key does not write an .enc there\n" + other},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLinkFixture(t, "add-key")
+			plain := f.store + "/" + tc.plain
+			if !fsutil.IsRegular(plain) {
+				write(t, plain, "s")
+			}
+			enc := plain + ".enc"
+			if err := os.Remove(enc); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				t.Fatal(err)
+			}
+			tc.make(t, f, enc)
+			// The lock file is there before the run, so that the listing of
+			// the project shows any other new entry.
+			write(t, f.c.sopsConfigLock(), "")
+			before := fileStates(t, f.c.Paths.Base)
+
+			if err := f.run(); !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
+			}
+			if f.errOut.String() != tc.want || f.out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), tc.want)
+			}
+			sameStates(t, before, fileStates(t, f.c.Paths.Base))
+
+			if err := os.RemoveAll(enc); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.run(); err != nil {
+				t.Fatalf("with the entry removed: %v\n%s", err, f.errOut.String())
+			}
+			f.rekeyed("app", "v")
+			f.rekeyed("db", "w")
+		})
+	}
+}
+
+// remove-key resumes a stopped re-key: .sops.yaml no longer lists the
+// recipient, the .enc of app was re-keyed and is now a symlink to a file
+// that does not list it, and the .enc of db still lists it. The labels do
+// not choose the files, so the link is in the re-key list, and it is
+// refused before any write.
+func TestRemoveKeyResumeRefusesASymlinkedEncThatDoesNotListTheKey(t *testing.T) {
+	f := newLinkFixture(t, "remove-key")
+	g := f.gone.Recipient().String()
+	sopsRules(t, f.c, f.keep.Recipient().String())
+	app := f.store + "/Secret.app.default.K"
+	if err := f.c.encryptFile(app); err != nil {
+		t.Fatalf("%v\n%s", err, f.errOut.String())
+	}
+	target := f.c.Paths.Base + "/elsewhere/Secret.app.default.K.enc"
+	mkdir(t, filepath.Dir(target))
+	if err := os.Rename(app+".enc", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, app+".enc"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(readFile(t, target), g) || !strings.Contains(readFile(t, f.store+"/Secret.db.default.K.enc"), g) {
+		t.Fatal("fixture: the link lists the recipient, or the .enc of db does not")
+	}
+	write(t, f.c.sopsConfigLock(), "")
+	before := fileStates(t, f.c.Paths.Base)
+
+	if err := f.run(); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
+	}
+	want := "[error] clusters/a.dev/secrets/Secret.app.default.K.enc is a symlink: the re-key does not write an .enc through a link\n" +
+		"[error]   replace each link with the file it names, or remove it from the store, then run this command again; nothing was written\n"
+	if f.errOut.String() != want || f.out.String() != "" {
+		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
+	}
+	sameStates(t, before, fileStates(t, f.c.Paths.Base))
 }
 
 // A .sops.yaml that is a symlink stays a link: both commands write the edit

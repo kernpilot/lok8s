@@ -129,8 +129,8 @@ func grepQF(content, pattern string) bool {
 // to them. Decrypt first, or pass skipOrphans to accept the gap knowingly.
 // (Like bash, the orphan check runs AFTER .sops.yaml was already modified —
 // the ordering is part of the observable contract. An .enc of the store
-// that is a symlink is refused BEFORE the write: the encrypt does not write
-// through a link, so the run would stop half way.)
+// that the encrypt refuses, a symlink, a directory, a FIFO or a device, is
+// refused BEFORE the write, so the run cannot stop half way at it.)
 //
 // The argument check and the re-key steps are the helpers in rekey.go, which
 // RemoveKey shares; rekey_test.go pins this command's output and effects.
@@ -162,10 +162,10 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		return nil
 	}
 
-	// Before the first write: no .enc that the Encrypt below writes may be a
-	// symlink (encryptFile refuses one, and that refusal comes after the
-	// write).
-	if c.refuseLinkedEncs(c.encryptTargets()) {
+	// Before the first write: each .enc that the Encrypt below writes must
+	// be a regular file or absent (encryptFile refuses any other entry, and
+	// that refusal comes after the write). The list is the one of the sweep.
+	if c.refuseEncPaths(c.encryptTargets()) {
 		return ErrHandled
 	}
 
@@ -399,6 +399,23 @@ func encDestinationOK(path string) bool {
 	return fi.Mode().IsRegular()
 }
 
+// sweepPlaintexts returns the plaintext cache files of dir that the encrypt
+// sweep reads: each regular file whose name starts with prefix and does not
+// end in .enc (bash: secrets::_sweep_files). Encrypt encrypts each one, and
+// AddKey checks the .enc of each one before its first write
+// (encryptTargets), so the two lists cannot differ.
+func sweepPlaintexts(dir, prefix string) []string {
+	var plains []string
+	for _, base := range storeEntries(dir, prefix) {
+		plaintext := dir + "/" + base
+		if !fsutil.IsRegular(plaintext) || strings.HasSuffix(base, ".enc") {
+			continue
+		}
+		plains = append(plains, plaintext)
+	}
+	return plains
+}
+
 // Encrypt sweeps plaintext cache files into .enc twins (bash:
 // secrets::encrypt). name narrows the sweep to ONE Secret's cache files.
 //
@@ -446,16 +463,7 @@ func (c *Context) Encrypt(name string) error {
 	}
 
 	count, skipped := 0, 0
-	for _, base := range storeEntries(secretsDir, prefix) {
-		plaintext := secretsDir + "/" + base
-		if !fsutil.IsRegular(plaintext) {
-			continue
-		}
-		// Skip .enc files
-		if strings.HasSuffix(base, ".enc") {
-			continue
-		}
-
+	for _, plaintext := range sweepPlaintexts(secretsDir, prefix) {
 		// Skip if .enc is newer than plaintext (already up to date)
 		encFile := plaintext + ".enc"
 		if fsutil.IsRegular(encFile) && newerThan(encFile, plaintext) {
