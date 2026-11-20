@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -84,6 +85,26 @@ func writeOutput(w io.Writer, format string, v any) error {
 	return fmt.Errorf("writeOutput: no renderer for %q", format)
 }
 
+// yaml11Scalar matches the strings that a YAML 1.1 reader (PyYAML, or the
+// go-yaml v2 of sigs.k8s.io/yaml and kubectl) reads as a bool, a null or a
+// number when they are plain. yaml.v3 quotes only the strings that YAML 1.2
+// reads so. The alternatives, in order:
+//   - y, n, yes, no, on, off, true, false and null in any case, and ~
+//   - binary 0b, octal 0o and hex 0x, with _ separators
+//   - decimal digits with _ separators, also with a leading 0 (the YAML 1.1
+//     octal 0777, and 08)
+//   - sexagesimal (base 60): 1:20, 190:20:30.15
+//   - a float with a fraction (1.5, 1., .5) or an exponent (1e3, 1.5E-3)
+//   - .inf with or without a sign, and .nan, in any case
+//   - the empty string
+//
+// The bash twin holds the same pattern (KUBEHZ_AGENT_YAML11 in
+// .lok8s/libs/kubehz/agent). TestYAML11PatternIsTheBashPattern keeps the two
+// equal, and tests/fixtures/yaml11-quote/cases is the table of both twins.
+const yaml11Scalar = `^(?:(?i:y|n|yes|no|on|off|true|false|null)|~|[-+]?0[bB][01_]+|[-+]?0[oO][0-7_]+|[-+]?0[xX][0-9a-fA-F_]+|[-+]?[0-9][0-9_]*|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+(?:[.][0-9_]*)?|[-+]?(?:[0-9][0-9_]*[.][0-9_]*|[.][0-9_]+)(?:[eE][-+]?[0-9_]+)?|[-+]?[0-9][0-9_]*[eE][-+]?[0-9_]+|[-+]?[.](?i:inf)|[.](?i:nan)|)$`
+
+var yaml11ScalarRe = regexp.MustCompile(yaml11Scalar)
+
 // writeJSONAsYAML re-encodes a JSON document as block-style yaml with the
 // same keys in the same order.
 func writeJSONAsYAML(w io.Writer, raw []byte) error {
@@ -101,9 +122,14 @@ func writeJSONAsYAML(w io.Writer, raw []byte) error {
 }
 
 // blockStyle drops the flow and quote styles the JSON text carries into
-// the node tree, so the yaml prints in block style with plain scalars.
+// the node tree, so the yaml prints in block style with plain scalars. A
+// string of yaml11Scalar (a key too) gets double quotes, so a YAML 1.1
+// reader keeps it a string. A real bool, null or number stays plain.
 func blockStyle(n *yaml.Node) {
 	n.Style = 0
+	if n.Kind == yaml.ScalarNode && n.ShortTag() == "!!str" && yaml11ScalarRe.MatchString(n.Value) {
+		n.Style = yaml.DoubleQuotedStyle
+	}
 	for _, c := range n.Content {
 		blockStyle(c)
 	}

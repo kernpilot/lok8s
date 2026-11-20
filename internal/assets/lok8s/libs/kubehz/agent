@@ -23,7 +23,8 @@
 #
 # OUTPUT: -o text prints a table for a list and label lines for one record.
 # json and yaml print fixed lowerCamel fields. The records are projections, so
-# a new api field changes no output. Every string from the api loses each
+# a new api field changes no output. yaml puts a string that a YAML 1.1 reader
+# reads as a bool, a null or a number (yes, off, 0777, 1:20) in double quotes. Every string from the api loses each
 # character of the unshown list (utils/verbose.sh) in every format (the jq
 # `clean`).
 #
@@ -518,9 +519,31 @@ kubehz::agent_one() {
   fi
 }
 
+# The strings that a YAML 1.1 reader (PyYAML, or the go-yaml v2 of kubectl)
+# reads as a bool, a null or a number when they are plain. yq quotes only the
+# strings that YAML 1.2 reads so. The alternatives, in order: y, n, yes, no,
+# on, off, true, false and null in any case, and ~; binary 0b, octal 0o and
+# hex 0x; decimal digits, also with a leading 0 (the YAML 1.1 octal 0777, and
+# 08); sexagesimal (1:20, 190:20:30.15); a float with a fraction or an
+# exponent; .inf and .nan; the empty string. The numbers can have _
+# separators. The Go twin is yaml11Scalar in internal/cli/output.go, and a Go
+# test keeps the two patterns equal (tests/fixtures/yaml11-quote/cases is the
+# table of both).
+KUBEHZ_AGENT_YAML11='^(?:(?i:y|n|yes|no|on|off|true|false|null)|~|[-+]?0[bB][01_]+|[-+]?0[oO][0-7_]+|[-+]?0[xX][0-9a-fA-F_]+|[-+]?[0-9][0-9_]*|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+(?:[.][0-9_]*)?|[-+]?(?:[0-9][0-9_]*[.][0-9_]*|[.][0-9_]+)(?:[eE][-+]?[0-9_]+)?|[-+]?[0-9][0-9_]*[eE][-+]?[0-9_]+|[-+]?[.](?i:inf)|[.](?i:nan)|)$'
+
+# The JSON document on stdin as block yaml (the Go twin: writeJSONAsYAML),
+# with each string of KUBEHZ_AGENT_YAML11 (a key too) in double quotes, so a
+# YAML 1.1 reader keeps it a string. A real bool, null or number stays plain.
+# One yq pass without -P: -P resets the styles after the expression.
+# Usage: kubehz::agent_yaml < json
+kubehz::agent_yaml() {
+  KUBEHZ_AGENT_YAML11="${KUBEHZ_AGENT_YAML11}" yq -p json -o yaml \
+    '(... style = "") | ((... | select(tag == "!!str" and test(strenv(KUBEHZ_AGENT_YAML11)))) style = "double")'
+}
+
 # Print KUBEHZ_AGENT_DATA. json is the record filter in the pretty form of
 # jq (two spaces, as the encoder of the Go twin). yaml goes through yq in
-# block style. text is the text filter over the record.
+# block style (kubehz::agent_yaml). text is the text filter over the record.
 # Usage: kubehz::agent_print <format> <record-filter> <text-filter> [input]
 kubehz::agent_print() {
   local format="${1}" record="${2}" text="${3}" input="${4:-${KUBEHZ_AGENT_DATA}}" doc
@@ -528,7 +551,7 @@ kubehz::agent_print() {
     json) jq "${KUBEHZ_AGENT_JQ} ${record}" <<<"${input}" ;;
     yaml)
       doc=$(jq -c "${KUBEHZ_AGENT_JQ} ${record}" <<<"${input}") || return 1
-      yq -p json -o yaml -P '.' <<<"${doc}" ;;
+      kubehz::agent_yaml <<<"${doc}" ;;
     *) jq -r "${KUBEHZ_AGENT_JQ} ${record} | ${text}" <<<"${input}" ;;
   esac
 }
@@ -613,7 +636,7 @@ kubehz::agent_kubeconfig() {
   case "${format}" in
     text) printf '%s\n' "${file}" ;;
     json) jq -n --arg id "${id}" --arg file "${file}" '{id: $id, file: $file}' ;;
-    yaml) jq -cn --arg id "${id}" --arg file "${file}" '{id: $id, file: $file}' | yq -p json -o yaml -P '.' ;;
+    yaml) jq -cn --arg id "${id}" --arg file "${file}" '{id: $id, file: $file}' | kubehz::agent_yaml ;;
   esac
 }
 
