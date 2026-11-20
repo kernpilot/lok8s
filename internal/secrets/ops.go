@@ -366,8 +366,9 @@ func (c *Context) Set(ctx context.Context, name, namespace, key, value string, d
 // creation_rules/recipients than the one we validated.
 //
 // The .enc path must be a regular file or absent (encDestinationOK) before
-// sops runs: a symlink (to a file or to a directory), a directory, a FIFO or
-// a device is refused with the same line as the bash twin, and nothing is
+// sops runs: a symlink (to a file or to a directory), a directory, a FIFO, a
+// socket, a device or a path whose lstat fails with another error than "does
+// not exist" is refused with the same line as the bash twin, and nothing is
 // written. The rename would replace a symlink and refuse a directory. The
 // bash twin renames with GNU mv -T (or gmv -T) for the same reason, and
 // refuses to encrypt without one: a mv without -T moves the file INTO a
@@ -380,7 +381,7 @@ func (c *Context) encryptFile(plaintext string) error {
 	}
 	encPath := plaintext + ".enc"
 	if !encDestinationOK(encPath) {
-		ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO or a device): the .enc was not written — remove it, then encrypt again", c.rel(encPath))
+		ui.ErrorTo(c.ErrOut, "%s is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: the .enc was not written — remove it, then encrypt again", c.rel(encPath))
 		return ErrHandled
 	}
 	ui.Debug("Encrypting %s", filepath.Base(plaintext))

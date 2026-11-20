@@ -1192,7 +1192,7 @@ ${_rotate}" ]] || { echo "$output" >&2; return 1; }
 # writes an .enc only to a regular file or a path that does not exist (Go
 # twin: TestSetEncryptRefusesAnEncPathThatIsNotARegularFile).
 
-_enc_path_refusal='is not a regular file (a symlink, a directory, a FIFO or a device): the .enc was not written — remove it, then encrypt again'
+_enc_path_refusal='is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: the .enc was not written — remove it, then encrypt again'
 
 # _set_encrypt <proj> — `lo secrets --domain a.dev set -n app --encrypt K v`
 # through the real entrypoint in the project, as _run_lo runs it, bounded at

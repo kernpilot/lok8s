@@ -304,7 +304,7 @@ func TestSetEncryptWithoutSopsYAMLFails(t *testing.T) {
 
 // encPathRefusal is the line both twins print for an .enc path that is not a
 // regular file.
-const encPathRefusal = "is not a regular file (a symlink, a directory, a FIFO or a device): the .enc was not written — remove it, then encrypt again"
+const encPathRefusal = "is not a regular file (a symlink, a directory, a FIFO, a socket or a device), or its lookup failed: the .enc was not written — remove it, then encrypt again"
 
 // The .enc path of set --encrypt must be a regular file or absent (an lstat):
 // a symlink to a directory outside the store, a symlink to a regular file
