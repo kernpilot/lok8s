@@ -884,8 +884,9 @@ ${yaml}:18 credential"
 # bash runs the $( ) in the unquoted body. The gate does not decode the
 # folding, so each line with a << in a folded block is a finding in the q
 # and tls modes (fold.yaml:2), also a << whose delimiter is on the next
-# line (fold.yaml:9). The controls: a literal block ("|"), a tab after the
-# indentation, and a <<< in a folded block.
+# line (fold.yaml:9) and a << on a later line of the block (fold.yaml:14).
+# The controls: a literal block ("|"), a tab after the indentation, and a
+# <<< in a folded block.
 @test "curl gate: a here-document in a folded YAML block is a finding" {
   local fold="${BATS_TEST_TMPDIR}/fold.yaml" good="${BATS_TEST_TMPDIR}/fold-good.yaml"
   CURL_GATE_ALLOW=()
@@ -901,6 +902,10 @@ also: >-
   cat <<
   EOF
   echo x
+second: >
+  echo start
+  cat <<EOF
+  EOF
 YAML
   printf '%b' "lit: |\n  cat <<EOF\n\n  EOF\n  '\$(curl -u u:p https://h.example/g1)'\ntabbed: |\n    cat <<-EOF\n    \tbody\n    \tEOF\nstr: >\n  cat <<<\"x\"\n" > "${good}"
   local f="a here-document in a folded YAML block (>) the gate cannot place"
@@ -909,7 +914,8 @@ YAML
     run curl_gate "${mode}" "${fold}"
     assert_failure 1
     assert_output "${fold}:2: ${f}
-${fold}:9: ${f}"
+${fold}:9: ${f}
+${fold}:14: ${f}"
     run curl_gate "${mode}" "${good}"
     assert_success
     assert_output ""
@@ -917,6 +923,57 @@ ${fold}:9: ${f}"
   run curl_gate list "${fold}" "${good}"
   assert_success
   assert_output ""
+}
+
+# In a folded block, an empty line after a line that ends in a backslash
+# gives the backslash and a newline, and the shell removes both. YAML gives
+# "cat <\\\n<EOF\nEOF '$(curl …)'\nEOF\n" from bs.yaml:1-9: bash reads
+# cat <<EOF and runs the $( ) in the unquoted body, but no line holds a
+# <<. And "cu\", an empty line and "rl -u …" (bs.yaml:10-13) give a curl
+# call. The gate does not decode the folding: each line of a folded block
+# that ends in a backslash is a finding in the q and tls modes. The
+# controls: a backslash at the end of a line of a literal block (the gate
+# joins the lines as the shell does), and a backslash in a line of a
+# folded block.
+@test "curl gate: a backslash at the end of a line of a folded YAML block is a finding" {
+  local bs="${BATS_TEST_TMPDIR}/bs.yaml" good="${BATS_TEST_TMPDIR}/bs-good.yaml"
+  CURL_GATE_ALLOW=()
+  cat > "${bs}" <<'YAML'
+run: >
+  cat <\
+
+  <EOF
+
+  EOF
+  '$(curl -u u:p https://h.example/b1)'
+
+  EOF
+split: >
+  cu\
+
+  rl -u u:p https://h.example/b2
+YAML
+  cat > "${good}" <<'YAML'
+lit: |
+  ( http::tls_log_vars_unset && curl -q -sS \
+    https://h.example/g1 )
+str: >
+  echo a\ b
+YAML
+  local f="a backslash at the end of a line of a folded YAML block (>) the gate cannot place"
+  local mode
+  for mode in q tls; do
+    run curl_gate "${mode}" "${bs}"
+    assert_failure 1
+    assert_output "${bs}:2: ${f}
+${bs}:11: ${f}"
+    run curl_gate "${mode}" "${good}"
+    assert_success
+    assert_output ""
+  done
+  run curl_gate list "${bs}" "${good}"
+  assert_success
+  assert_output "${good}:2"
 }
 
 # YAML takes only spaces as indentation. In first.yaml, the first line of
@@ -953,6 +1010,37 @@ ${in}:4: ${d}"
   run curl_gate list "${first}" "${in}"
   assert_success
   assert_output ""
+}
+
+# After a line that ends in a backslash, the shell joins the next line
+# first, and then reads its #: x=1\ and #;curl … give x=1#;curl …, where
+# the # is a part of the word x=1#, and the curl runs (cont.sh:2). The
+# controls: a comment line after a continuation that ended (cont.sh:5),
+# and a # at the start of a word after the join (cont.sh:7: echo # curl …
+# is a comment).
+@test "curl gate: a line that starts with # after a backslash is joined first" {
+  local f="${BATS_TEST_TMPDIR}/cont.sh"
+  CURL_GATE_ALLOW=()
+  cat > "${f}" <<'SH'
+x=1\
+#;curl -u u:p https://h.example/c1
+y=1\
+z=2
+#;curl -u u:p https://h.example/c2
+echo \
+# curl -u u:p https://h.example/c3
+SH
+  local q="a curl call: -q is not its first argument"
+  local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
+  run curl_gate q "${f}"
+  assert_failure 1
+  assert_output "${f}:2: ${q}"
+  run curl_gate tls "${f}"
+  assert_failure 1
+  assert_output "${f}:2: ${t}"
+  run curl_gate list "${f}"
+  assert_success
+  assert_output "${f}:2 credential"
 }
 
 # The operand of a redirection is one shell word, with its quotes and

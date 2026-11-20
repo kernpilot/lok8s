@@ -105,7 +105,9 @@
 # comment lines neither end nor continue a command. Before any other step,
 # a line that ends in a backslash is joined to the next line without the
 # backslash and the newline, as the shell does (so cu\<newline>rl is
-# curl). The lines that a trailing |, &&, || or ( joins are one command,
+# curl). The join comes first also for a line that starts with #: its #
+# then starts a comment only at the start of a word (x=1\<newline>#;curl
+# runs the curl). The lines that a trailing |, &&, || or ( joins are one command,
 # and so are the lines of a quote that is still open at the end of a line
 # (there a line that starts with # is text, not a comment). After a line
 # that ends in a $( ) or a `…` that is still open, the next line is a new
@@ -128,7 +130,11 @@
 # the gate cannot place"), and the body goes on. A folded block (">")
 # joins its lines with a space, and the gate does not decode that: each
 # line of a folded block with a << that is not a <<< is a finding ("a
-# here-document in a folded YAML block (>) the gate cannot place"). YAML
+# here-document in a folded YAML block (>) the gate cannot place"), and so
+# is each line of a folded block that ends in a backslash ("a backslash at
+# the end of a line of a folded YAML block (>) the gate cannot place"): an
+# empty line after it gives the backslash and a newline, which the shell
+# removes, so "cat <\", an empty line and "<EOF" give <<EOF. YAML
 # takes only spaces as indentation: a tab in the leading white space of
 # the first line of a block (also a line of white space only), or after
 # fewer spaces than the indentation of the block, is a finding ("a YAML
@@ -730,17 +736,22 @@ curl_gate() {
       yb_wait = 0; yb_ind = -2
     }
     # yaml_fold(): a line of a folded block (">") with a << that is not a
-    # <<< (a here-document, also one whose delimiter is on the next line).
-    # YAML joins the lines of a folded block with a space, and an empty
-    # line becomes the newline. So the shell reads a body other than the
-    # lines that the gate reads, and its end at another line. The gate does
-    # not decode the folding: in the q and tls modes each such line is a
-    # finding (fail closed). Folding only removes newlines, so it makes no
-    # << that the line does not hold.
+    # <<< (a here-document, also one whose delimiter is on the next line),
+    # and a line of a folded block that ends in a backslash. YAML joins the
+    # lines of a folded block with a space, and an empty line becomes the
+    # newline. So the shell reads a body other than the lines that the gate
+    # reads, and its end at another line. A backslash before such a newline
+    # joins two lines that the gate reads apart: "cat <\", an empty line and
+    # "<EOF" give a <<EOF that no line holds, and "cu\", an empty line and
+    # "rl" give curl. The gate does not decode the folding: in the q and
+    # tls modes each such line is a finding (fail closed). Folding only
+    # removes newlines and adds spaces, so it makes no << that the lines do
+    # not hold, other than through such a backslash.
     function yaml_fold(   t) {
       if (!yb_fold || mode == "list") return
       t = $0; gsub(/<<</, "", t)
       if (t ~ /<</) printf "%s:%d: %s\n", FILENAME, FNR, "a here-document in a folded YAML block (>) the gate cannot place"
+      if ($0 ~ /\\\r?$/) printf "%s:%d: %s\n", FILENAME, FNR, "a backslash at the end of a line of a folded YAML block (>) the gate cannot place"
     }
     # The end of a body: the next here-document of the command, if any.
     function body_end() {
@@ -853,14 +864,18 @@ curl_gate() {
       reset()
     }
     FNR == 1 {
-      check(); reset(); hd_close(); IS_top = 0; yb_ind = -1; yb_wait = 0; yb_fold = 0
+      check(); reset(); hd_close(); IS_top = 0; yb_ind = -1; yb_wait = 0; yb_fold = 0; cont = 0
       for (i = 1; i <= na; i++) if (path_is(FILENAME, apath[i])) aseen[i] = 1
     }
     FILENAME ~ /\.ya?ml$/ { yaml_line() }
     hq_n > 0 { body_line(); next }
     # A comment line neither ends nor continues a command. In a string over
-    # more lines it is text of the string.
-    !inq && /^[[:space:]]*#/ { next }
+    # more lines it is text of the string. After a line that ends in a
+    # backslash (cont), the shell joins the line first: its # then starts a
+    # comment only at the start of a word (x=1\ and #;curl give x=1#;curl,
+    # and the curl runs). So such a line goes on below, and the lexer
+    # decides.
+    !inq && !cont && /^[[:space:]]*#/ { next }
     # The command goes on at the next line after a backslash, a trailing |,
     # &&, || or (, and in a quote that is still open (inq): there the
     # newline is text. In a $( ) or a `…` that is still open, the newline
