@@ -16,12 +16,13 @@ setup() {
   export KLOG="${BATS_TEST_TMPDIR}/kubectl.log"; : > "${KLOG}"
   # KENV: one line per kubectl call, the verb and the KUBERC it ran with.
   export KENV="${BATS_TEST_TMPDIR}/kubectl.env"; : > "${KENV}"
-  unset LOK8S_FORCE_RECREATE APPLY_OUT GET_OUT KAPPLY_TTY KAPPLY_PRIVATE_LOG KAPPLY_PRIVATE_DIR _KAPPLY_PRIVATE_MADE LO_SHOW_SENSITIVE_OUTPUT KUBERC DEBUG
+  unset LOK8S_FORCE_RECREATE APPLY_OUT APPLY_ERR GET_OUT KAPPLY_TTY KAPPLY_PRIVATE_LOG KAPPLY_PRIVATE_DIR _KAPPLY_PRIVATE_MADE LO_SHOW_SENSITIVE_OUTPUT KUBERC DEBUG
   export APPLY_RC=0
 
-  # Stub kubectl: log every call; drive `apply` via APPLY_OUT/APPLY_RC and
-  # `get` via GET_OUT; replace/patch just succeed. Exported so kapply's
-  # command-substitution / pipeline subshells see it.
+  # Stub kubectl: log every call; drive `apply` via APPLY_OUT (stdout),
+  # APPLY_ERR (stderr) and APPLY_RC, and `get` via GET_OUT; replace/patch
+  # just succeed. Exported so kapply's command-substitution / pipeline
+  # subshells see it.
   kubectl() {
     echo "kubectl $*" >> "${KLOG}"
     # The verb is the first argument after the global flags of the caller
@@ -39,7 +40,10 @@ setup() {
     [[ "${cmd}" != "replace" ]] || verb="replace ${rest[1]-}"
     echo "${verb} KUBERC=${KUBERC-<unset>}" >> "${KENV}"
     case "${cmd}" in
-      apply) [[ -n "${APPLY_OUT:-}" ]] && echo "${APPLY_OUT}"; return "${APPLY_RC:-0}" ;;
+      apply)
+        [[ -z "${APPLY_OUT:-}" ]] || echo "${APPLY_OUT}"
+        [[ -z "${APPLY_ERR:-}" ]] || echo "${APPLY_ERR}" >&2
+        return "${APPLY_RC:-0}" ;;
       get)   echo "${GET_OUT:-}"; return 0 ;;
       *)     return 0 ;;
     esac
@@ -421,6 +425,77 @@ _kapply_flags() { local m="$1"; shift; printf '%s' "${m}" | kapply::apply "$@"; 
     [ "$(grep -c '^replace --raw KUBERC=off$' "${KENV}")" -eq 1 ] || { cat "${KENV}"; return 1; }
     grep -qF "kubectl ${flags} replace --force -f -" "${KLOG}" || { cat "${KLOG}"; return 1; }
   done
+}
+
+# The kubectl of PATH (kubectl_path_stub) is a child process: its log holds
+# the KUBERC that lo gave it, with a KUBERC of the user set. The two apply
+# passes, the replace of the immutable heal and the replace of the namespace
+# finalize read stdin and run with KUBERC=off; the reads keep the KUBERC of
+# the user. The Go twin is TestApplyChildrenGetKubeRCOffOnEachWrite.
+@test "kuberc: a kubectl on PATH runs the apply, the heal's replace and the finalize with KUBERC=off" {
+  kubectl_path_stub
+  export KUBERC=/user/kuberc LOK8S_FORCE_RECREATE=1 KAPPLY_NS_WAIT=0 APPLY_OUT="${BOTH_HEALS_OUT}"
+  export FIRST_APPLY="${BATS_TEST_TMPDIR}/first-apply"
+  kubectl_path_answer() {
+    [[ " $* " != *" -f - "* ]] || cat >/dev/null
+    case "${1}" in
+      apply)
+        [[ ! -e "${FIRST_APPLY}" ]] || return 0
+        : > "${FIRST_APPLY}"
+        printf '%s\n' "${APPLY_OUT}" >&2
+        return 1 ;;
+      get) echo '2026-01-01T00:00:00Z' ;;
+    esac
+    return 0
+  }
+  export -f kubectl_path_answer
+  run _kapply "${DEPLOY_MANIFEST}"
+  assert_success
+  local log="${KUBECTL_PATH_LOG}"
+  [ "$(grep -c $'^KUBERC=off\tapply --server-side --force-conflicts -f -$' "${log}")" -eq 2 ] || { cat "${log}"; return 1; }
+  [ "$(grep -c $'^KUBERC=off\treplace --force -f -$' "${log}")" -eq 1 ] || { cat "${log}"; return 1; }
+  [ "$(grep -c $'^KUBERC=off\treplace --raw /api/v1/namespaces/kubermatic/finalize -f -$' "${log}")" -eq 1 ] || { cat "${log}"; return 1; }
+  [ "$(grep -c $'^KUBERC=/user/kuberc\tget ' "${log}")" -ge 1 ] || { cat "${log}"; return 1; }
+  [ "$(kubectl_path_file_calls | grep -c .)" -eq 4 ] || { cat "${log}"; return 1; }
+  [ -z "$(kubectl_path_file_calls | grep -v $'^KUBERC=off\t')" ] || { cat "${log}"; return 1; }
+}
+
+# STDERR_CANARY stands for a value that kubectl quotes on its stderr (an
+# error or a warning), apart from CANARY_VALUE on its stdout: a pass that
+# keeps the stdout private but lets the stderr through to the terminal
+# prints it. The Go twin is TestApplyStderrStaysPrivate.
+STDERR_CANARY=zq7StderrCanary4kWp
+
+@test "private: the kubectl stderr stays private too, off and on a tty, each level" {
+  export APPLY_RC=1
+  export APPLY_OUT="configmap/a serverside-applied
+The ConfigMap \"cfg\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\""
+  export APPLY_ERR="Warning: the value \"${STDERR_CANARY}\" of ConfigMap cfg is deprecated"
+  local level tty
+  for tty in "" "${BATS_TEST_TMPDIR}/ui.txt"; do
+    for level in "" 1; do
+      unset KAPPLY_TTY
+      if [[ -n "${tty}" ]]; then
+        export KAPPLY_TTY="${tty}"
+        : > "${tty}"
+      fi
+      DEBUG="${level}" run _kapply "${CFG_MANIFEST}"
+      assert_failure
+      refute_output --partial "${STDERR_CANARY}"
+      refute_output --partial "${CANARY_VALUE}"
+      assert_line "$(_fixed_fail_line resources 1)"
+      if [[ -n "${tty}" ]]; then
+        run grep -c "${STDERR_CANARY}" "${tty}"
+        assert_output 0
+      fi
+    done
+  done
+  # The private file of the scheduler gets the stderr with the stdout.
+  unset KAPPLY_TTY
+  _private_dir
+  run _kapply "${CFG_MANIFEST}"
+  refute_output --partial "${STDERR_CANARY}"
+  grep -qF "${STDERR_CANARY}" "${KAPPLY_PRIVATE_LOG}"
 }
 
 @test "private: a failed pass prints the fixed line, never the kubectl output (off a tty, each level)" {

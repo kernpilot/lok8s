@@ -2670,19 +2670,24 @@ YAML
 # fixed lines. The Go twins are in internal/bootstrap/private_test.go.
 
 CANARY_VALUE=zq7Canary9xLm2
+# STDERR_CANARY stands for a value that kubectl quotes on its stderr (an
+# error or a warning), apart from CANARY_VALUE on its stdout.
+STDERR_CANARY=zq7StderrCanary4kWp
 
-# _private_kubectl_stub <apply-output> <apply-rc> — kubectl answers `apply`
-# with <apply-output> and <apply-rc>, every other verb with 0 and no output.
-# KENV gets the verb and the KUBERC of each call.
+# _private_kubectl_stub <apply-output> <apply-rc> [<apply-stderr>] — kubectl
+# answers `apply` with <apply-output> on stdout, <apply-stderr> on stderr
+# and <apply-rc>, every other verb with 0 and no output. KENV gets the verb
+# and the KUBERC of each call.
 _private_kubectl_stub() {
   export KENV="${BATS_TEST_TMPDIR}/kubectl.env"; : > "${KENV}"
-  export APPLY_OUT="${1}" APPLY_RC="${2}"
+  export APPLY_OUT="${1}" APPLY_RC="${2}" APPLY_ERR="${3-}"
   kubectl() {
     local verb="$1"; [[ "$1" == "--kubeconfig" ]] && verb="$3"
     echo "${verb} KUBERC=${KUBERC-<unset>}" >> "${KENV}"
     [[ " $* " != *" -f - "* ]] || cat >/dev/null
     if [[ "${verb}" == apply ]]; then
       printf '%s\n' "${APPLY_OUT}"
+      [[ -z "${APPLY_ERR}" ]] || printf '%s\n' "${APPLY_ERR}" >&2
       return "${APPLY_RC}"
     fi
     return 0
@@ -2697,10 +2702,11 @@ _private_kubectl_stub() {
   for lvl in "" 1; do
     # A clean apply: the count comes from the private output.
     _private_kubectl_stub "configmap/testcni serverside-applied
-Warning: unknown field \"data.${CANARY_VALUE}\"" 0
+Warning: unknown field \"data.${CANARY_VALUE}\"" 0 "Warning: unknown field \"spec.${STDERR_CANARY}\""
     DEBUG="${lvl}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
     assert_success
     refute_output --partial "${CANARY_VALUE}"
+    refute_output --partial "${STDERR_CANARY}"
     if [[ -n "${lvl}" ]]; then
       assert_line '[debug] kapply: kubectl apply for testcni exited 0 (1 resources)'
     else
@@ -2709,15 +2715,44 @@ Warning: unknown field \"data.${CANARY_VALUE}\"" 0
     [ "$(grep -c '^apply ' "${KENV}")" -eq 1 ]
     [ "$(grep -c '^apply KUBERC=off$' "${KENV}")" -eq 1 ]
     # A failed apply: the fixed lines, never the kubectl output.
-    _private_kubectl_stub "The ConfigMap \"testcni\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\"" 1
+    _private_kubectl_stub "The ConfigMap \"testcni\" is invalid: data.v: Invalid value: \"${CANARY_VALUE}\"" 1 "Error from server: ${STDERR_CANARY}"
     DEBUG="${lvl}" run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
     assert_failure
     refute_output --partial "${CANARY_VALUE}"
+    refute_output --partial "${STDERR_CANARY}"
     refute_output --partial "Invalid value"
     assert_output --partial '[error] kapply: kubectl apply failed for testcni (rc=1). lo does not show the kubectl output: it can quote a value of the manifest. To see it, run again with LO_SHOW_SENSITIVE_OUTPUT=1'
     assert_output --partial '[error] bootstrap: testcni apply failed (rc=1)'
     [ "$(grep -c '^apply KUBERC=off$' "${KENV}")" -eq 1 ]
   done
+}
+
+# The kubectl of PATH (kubectl_path_stub) is a child process: its log holds
+# the KUBERC that lo gave it, with a KUBERC of the user set. The restore.d
+# apply and the entry's apply (a real run), and the diffs of the entry and
+# of restore.d (a dry run) read stdin and run with KUBERC=off.
+@test "kuberc: a kubectl on PATH runs the restore.d apply, the entry apply and the dry-run diffs with KUBERC=off" {
+  write_cluster_spec "testcni"
+  local d="${PATH_CLUSTERS}/test.lok8s.dev" log
+  mkdir -p "${d}/restore.d" "${d}/secrets/restore.d"
+  echo "cipher" > "${d}/restore.d/tls-a.sops.yaml"
+  printf 'apiVersion: v1\nkind: Secret\nmetadata:\n  name: tls\n  namespace: default\n' > "${d}/secrets/restore.d/tls-a.yaml"
+  sops() { echo "sops-called" >> "${BATS_TEST_TMPDIR}/sops.log"; return 1; }
+  export -f sops
+  kubectl_path_stub
+  log="${KUBECTL_PATH_LOG}"
+  export KUBERC=/user/kuberc
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  assert_output --partial "restore.d — 1 applied, 0 skipped"
+  [ "$(grep -c $'^KUBERC=off\t--kubeconfig .* apply --server-side --force-conflicts -f -$' "${log}")" -eq 2 ] || { cat "${log}"; return 1; }
+  local bootstrap_dry_run=1
+  run bootstrap::apply "test.lok8s.dev" "${CLUSTER_YAML}" "${KUBECONFIG_FILE}" </dev/null
+  assert_success
+  [ "$(grep -c $'^KUBERC=off\t--kubeconfig .* diff --server-side --force-conflicts -f -$' "${log}")" -eq 2 ] || { cat "${log}"; return 1; }
+  [ "$(kubectl_path_file_calls | grep -c .)" -eq 4 ] || { cat "${log}"; return 1; }
+  [ -z "$(kubectl_path_file_calls | grep -v $'^KUBERC=off\t')" ] || { cat "${log}"; return 1; }
+  [ ! -f "${BATS_TEST_TMPDIR}/sops.log" ]
 }
 
 @test "bootstrap::apply: LO_SHOW_SENSITIVE_OUTPUT=1 shows the kubectl output of a failed entry" {

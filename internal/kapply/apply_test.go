@@ -26,11 +26,13 @@ func (e *rcError) Error() string { return fmt.Sprintf("exit status %d", e.code) 
 func (e *rcError) ExitCode() int { return e.code }
 
 // fakeKubectl mirrors the bats kubectl stub: log every call; drive `apply`
-// via applyOut/applyRC and `get` via getOut; replace/patch just succeed.
+// via applyOut (stdout), applyErr (stderr) and applyRC, and `get` via
+// getOut; replace/patch just succeed.
 type fakeKubectl struct {
 	calls    []string
 	envs     [][]string // the Env of each call, in call order
 	applyOut string
+	applyErr string
 	applyRC  int
 	getOut   string
 }
@@ -47,6 +49,9 @@ func (f *fakeKubectl) Run(ctx context.Context, c execx.Cmd) error {
 	case "apply":
 		if f.applyOut != "" && c.Stdout != nil {
 			fmt.Fprintln(c.Stdout, f.applyOut)
+		}
+		if f.applyErr != "" && c.Stderr != nil {
+			fmt.Fprintln(c.Stderr, f.applyErr)
 		}
 		if f.applyRC != 0 {
 			return &rcError{f.applyRC}

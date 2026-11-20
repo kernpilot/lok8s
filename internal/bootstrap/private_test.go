@@ -27,16 +27,21 @@ import (
 )
 
 const (
-	canaryValue      = "zq7Canary9xLm2"
+	canaryValue = "zq7Canary9xLm2"
+	// stderrCanary stands for a value that kubectl quotes on its stderr
+	// (an error or a warning), apart from canaryValue on its stdout.
+	stderrCanary     = "zq7StderrCanary4kWp"
 	canaryInvalid    = `The ConfigMap "testcni" is invalid: data.v: Invalid value: "` + canaryValue + `"`
 	canaryApplyFixed = "[error] kapply: kubectl apply failed for testcni (rc=1). lo does not show the kubectl output: it can quote a value of the manifest. To see it, run again with LO_SHOW_SENSITIVE_OUTPUT=1\n"
 )
 
-// privateKubectl answers kubectl apply with out and rc (every other verb:
-// exit 0, no output) and records the Env of each apply.
+// privateKubectl answers kubectl apply with out on stdout, errOut on
+// stderr and rc (every other verb: exit 0, no output) and records the Env
+// of each apply.
 type privateKubectl struct {
 	mu        sync.Mutex
 	out       string
+	errOut    string
 	rc        int
 	applyEnvs [][]string
 }
@@ -57,6 +62,9 @@ func (k *privateKubectl) handler(c execx.Cmd) error {
 	k.mu.Unlock()
 	if c.Stdout != nil {
 		fmt.Fprintln(c.Stdout, k.out)
+	}
+	if k.errOut != "" && c.Stderr != nil {
+		fmt.Fprintln(c.Stderr, k.errOut)
 	}
 	if k.rc != 0 {
 		return &rcError{k.rc}
@@ -104,6 +112,7 @@ func TestEntryKubectlOutputStaysPrivate(t *testing.T) {
 	for _, debug := range []bool{false, true} {
 		t.Run(fmt.Sprintf("debug=%v/success", debug), func(t *testing.T) {
 			e, k, spec, kc := privateEngine(t, debug, "configmap/testcni serverside-applied\nWarning: unknown field \"data."+canaryValue+"\"", 0)
+			k.errOut = "Warning: unknown field \"spec." + stderrCanary + "\""
 			if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err != nil {
 				t.Fatalf("Apply: %v\n%s", err, outputOf(e))
 			}
@@ -114,11 +123,12 @@ func TestEntryKubectlOutputStaysPrivate(t *testing.T) {
 			if !strings.Contains(outputOf(e), want) {
 				t.Errorf("output misses %q:\n%s", want, outputOf(e))
 			}
-			refuteOutput(t, outputOf(e), canaryValue, "Warning: unknown field")
+			refuteOutput(t, outputOf(e), canaryValue, stderrCanary, "Warning: unknown field")
 			assertKubeRCOff(t, k.applyEnvs)
 		})
 		t.Run(fmt.Sprintf("debug=%v/failure", debug), func(t *testing.T) {
 			e, k, spec, kc := privateEngine(t, debug, canaryInvalid, 1)
+			k.errOut = "Error from server: " + stderrCanary
 			if err := e.Apply(t.Context(), "test.lok8s.dev", spec, kc); err == nil {
 				t.Fatal("expected a failure")
 			}
@@ -127,7 +137,7 @@ func TestEntryKubectlOutputStaysPrivate(t *testing.T) {
 					t.Errorf("output misses %q:\n%s", want, outputOf(e))
 				}
 			}
-			refuteOutput(t, outputOf(e), canaryValue, "Invalid value")
+			refuteOutput(t, outputOf(e), canaryValue, stderrCanary, "Invalid value")
 			assertKubeRCOff(t, k.applyEnvs)
 		})
 	}

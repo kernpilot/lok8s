@@ -20,7 +20,10 @@ import (
 
 const (
 	canaryValue = "zq7Canary9xLm2"
-	cfgManifest = "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: cfg, namespace: default}"
+	// stderrCanary stands for a value that kubectl quotes on its stderr
+	// (an error or a warning), apart from canaryValue on its stdout.
+	stderrCanary = "zq7StderrCanary4kWp"
+	cfgManifest  = "apiVersion: v1\nkind: ConfigMap\nmetadata: {name: cfg, namespace: default}"
 	// fixedFailLine is the line of a failed pass of the label "resources",
 	// byte for byte (the bats twin: _fixed_fail_line).
 	fixedFailLine = "[error] kapply: kubectl apply failed for resources (rc=1). lo does not show the kubectl output: it can quote a value of the manifest. To see it, run again with LO_SHOW_SENSITIVE_OUTPUT=1\n"
@@ -100,6 +103,34 @@ func TestApplyFailurePrintsTheFixedLineOnly(t *testing.T) {
 			t.Errorf("stderr misses the fixed line once:\n%s", errOut.String())
 		}
 		refuteText(t, out.String()+errOut.String(), canaryValue, "Invalid value")
+	})
+}
+
+// The kubectl stderr stays private too: a pass that keeps the stdout
+// private but lets the stderr through to the terminal prints the canary.
+// The caller gets both streams (bash: `2>&1`), lo prints neither, and with
+// Private set both go there. bats: "private: the kubectl stderr stays
+// private too, off and on a tty, each level".
+func TestApplyStderrStaysPrivate(t *testing.T) {
+	const errText = `Warning: the value "` + stderrCanary + `" of ConfigMap cfg is deprecated`
+	eachUI(t, func(t *testing.T) {
+		f := &fakeKubectl{applyRC: 1, applyOut: "configmap/a serverside-applied\n" + invalidValue, applyErr: errText}
+		a, out, errOut := testApplier(f)
+		got, rc := a.Apply(t.Context(), "resources", cfgManifest)
+		if rc != 1 || !strings.Contains(got, stderrCanary) {
+			t.Fatalf("rc = %d, output %q: want rc 1 and the kubectl stderr in the output for the caller", rc, got)
+		}
+		if strings.Count(errOut.String(), fixedFailLine) != 1 {
+			t.Errorf("stderr misses the fixed line once:\n%s", errOut.String())
+		}
+		refuteText(t, out.String()+errOut.String(), stderrCanary, canaryValue)
+		var priv bytes.Buffer
+		a.Private = &priv
+		a.Apply(t.Context(), "resources", cfgManifest)
+		if !strings.Contains(priv.String(), stderrCanary) {
+			t.Errorf("Private = %q, want the kubectl stderr in it", priv.String())
+		}
+		refuteText(t, out.String()+errOut.String(), stderrCanary)
 	})
 }
 

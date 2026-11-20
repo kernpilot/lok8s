@@ -84,6 +84,23 @@ YAML
   assert_output "patch KUBERC=off"
 }
 
+# The kubectl of PATH (kubectl_path_stub) is a child process: its log holds
+# the KUBERC that lo gave it, with a KUBERC of the user set. Each call of
+# lo::coredns that reads a file or stdin (the two applies from a file, the
+# coredns-custom apply from stdin, the deployment patch from a file) runs
+# with KUBERC=off.
+@test "coredns: a kubectl on PATH runs each call that reads a file or stdin with KUBERC=off" {
+  kubectl_path_stub
+  export KUBERC=/user/kuberc
+  run lo::coredns "x.dev"
+  assert_success
+  local log="${KUBECTL_PATH_LOG}"
+  [ "$(kubectl_path_file_calls | grep -c .)" -eq 4 ] || { cat "${log}"; return 1; }
+  [ -z "$(kubectl_path_file_calls | grep -v $'^KUBERC=off\t')" ] || { cat "${log}"; return 1; }
+  grep -q $'^KUBERC=off\tpatch deployment coredns -n kube-system --kubeconfig .* --type json --patch-file .*/patch.json$' "${log}" || { cat "${log}"; return 1; }
+  grep -q $'^KUBERC=off\tapply --kubeconfig .* -f -$' "${log}" || { cat "${log}"; return 1; }
+}
+
 @test "coredns: pins coredns-external to the LAST pool IP (avoids gateway pool[0] race)" {
   # lo::coredns reads metadata.name -> kubeconfig path; kubectl is stubbed.
   lo::coredns "x.dev"
