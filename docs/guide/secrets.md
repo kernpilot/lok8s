@@ -190,7 +190,13 @@ the file, and the old file stays.
 `.enc` file a time after the current time. A plaintext with a time in the
 future stays the newer file: each encrypt writes its `.enc` file again and
 prints a warning that names the plaintext. Set the time of that plaintext
-to now (`touch` it).
+to now (`touch` it). An `.enc` file with a time in the future (for example,
+from an older `lo`) stays the newer file until the clock passes that time:
+`encrypt` skips its plaintext, also after a `touch` of the plaintext, and
+`decrypt` writes the value of the `.enc` file over the plaintext. The
+re-encrypt of `add-key` (in its own store) and of `remove-key` does not read
+the times. Set the time of such an `.enc` file to a time before the last
+edit of its plaintext.
 
 Add a teammate with `lo secrets add-key`. It takes their age public key, or the
 path to their ed25519 SSH public key. It adds the key to every creation rule in
@@ -203,7 +209,9 @@ lo secrets --domain app.example.com add-key ~/keys/alice_ed25519.pub
 `add-key` re-encrypts the store of the current domain, also with `--all`. It
 re-encrypts every plaintext of that store, also one whose `.enc` file is
 newer. The other stores of `--all` get a plaintext time of now, and a later
-`lo secrets encrypt` of each domain re-encrypts them. When
+`lo secrets encrypt` of each domain re-encrypts them. That encrypt skips a
+file whose `.enc` file has a time in the future, so such a file keeps its
+old recipients. When
 that store does not resolve (the domain directory has no `secrets` directory,
 and the project keeps a store per domain), `add-key` stops before it changes
 `.sops.yaml`. Create the directory, or select a domain that has a store, then
@@ -326,17 +334,31 @@ re-keyed. Commit the `.enc` files together with `.sops.yaml`.
 `.sops.yaml`, for the whole run, so that two runs do not undo each other.
 When `.sops.yaml` is a symlink, the lock is next to the file at the end of
 its links, so two links to one file use one lock. The command finds that
-file once, at the start: the lock, the read and the write use it, also when
-the link changes during the run. When the link does not name a regular
+file once, at the start: the lock and the edit of `.sops.yaml` (its read
+and its write) use it, also when the link changes during the run. The
+re-encrypt after the edit reads the creation rules through the `.sops.yaml`
+path: when the link changes during the run, the re-encrypt uses the rules
+of the file that the link names then. When the link does not name a regular
 file, the command stops and changes nothing. A second run waits
 `LO_SECRETS_LOCK_WAIT` seconds (60 by default), then stops
-and changes nothing. The lock file holds no data. The command must be able to
-write in the directory of the lock: when it cannot, it stops, names that
-directory and changes nothing, also when there is nothing to add or remove.
+and changes nothing. The lock file holds no data. The command opens the lock
+file for writing, and makes it when it is not there. When the open fails
+(for example, there is no lock file and the command cannot write in its
+directory), the command stops, names that directory and changes nothing,
+also when there is nothing to add or remove. A lock file that is there and
+that the command can write opens also in a directory that it cannot write.
 A lock path that is not a regular file (a symlink, a directory, a FIFO, a
-socket or a device) stops the command before it opens the lock: the command
-never writes through a link there and never empties the lock file. The `lo`
-binary locks on every platform. The bash implementation locks with `flock`: without it (macOS
+socket or a device) stops the command before it opens the lock, and no open
+empties the lock file. The `lo` binary opens the lock without following a
+link. The bash implementation opens it with `>>`, which follows a link that
+appears after that check: through a link to a path that does not exist, it
+can make an empty file, then it stops because the open file is not the lock
+path. The lock excludes runs only where no other user can change the
+entries of the directory of the lock. When another user can write in that
+directory (for example, the directory of the file that a `.sops.yaml` link
+names), that user can remove or replace the lock file, and the lock gives
+no exclusion. The `lo` binary locks on every platform. The bash
+implementation locks with `flock`: without it (macOS
 has none by default), both commands stop before they change a file. Both
 commands replace `.sops.yaml` through a temporary file and a rename. When
 `.sops.yaml` is a symlink, they replace the file that it names, and the link
