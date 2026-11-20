@@ -270,57 +270,178 @@ kubehz::_hosted_kubeconfig_get() {
 
 # kubehz::_write_private <dest> <command...>: run the command with its
 # stdout in a new private file, and put that file at <dest> only when the
-# command succeeds. The temp file is beside the file (mode 0600: mktemp
-# under umask 077), and one rename onto the exact path replaces the file
+# command succeeds. The temp file is beside the file (the name
+# <file>.XXXXXX), and one rename onto the exact path replaces the file
 # (kubehz::_publish_private). So <dest> is the old file or the complete new
-# one, never a part, and never readable by others. A failed command or
-# rename leaves the old file as it was and removes the temp file.
+# one, never a part. A failed command or rename leaves the old file as it
+# was and removes the temp file.
+# The temp file is made and opened once (kubehz::_create_private): an
+# exclusive create (noclobber, umask 077) into a descriptor, and a check
+# of the open file through its path before the command runs. The command
+# writes into that descriptor, not to the path: a link that another
+# process puts at the temp path after the create does not get the
+# content, and the rename refuses a temp path that is not the file of the
+# descriptor.
 # A <dest> that is a symlink is resolved (kubehz::_private_target): the
 # temp file goes beside the file that the link names, and the rename
 # replaces that file, so the link stays. A link to nothing, a link that
 # cannot be resolved and a directory are refused (one error line).
 # INT, TERM and HUP remove the temp file, then end the shell with that
-# signal. The traps are set before the temp file exists and read its path
-# when they run, so a signal while mktemp runs is covered too. The INT,
-# TERM and HUP traps of the caller come back when the function returns.
-# Not covered: SIGKILL, and a signal to the whole process group while
-# mktemp runs (mktemp then ends before it gives the name). Either can
-# leave the temp file (mode 0600, the name <file>.XXXXXX). A signal during
-# the download takes effect when curl ends (the trap runs after the
-# current command; the call sets no time limit).
+# signal (kubehz::_write_private_trap). The traps are set before the temp
+# file exists and read its path when they run, and they remove it only
+# while it is the file of the descriptor (kubehz::_private_temp_ours).
+# A signal before the rename keeps the old file. Just before the rename,
+# the call clears the path that the traps read, and from there until the
+# rename and its cleanup are done, a signal is only recorded: the call
+# then ends the shell with it. So a signal during or after the rename
+# removes nothing, also not a file that another process put at the old
+# temp path, and it keeps the new file. After a failed rename, the call
+# removes the temp file only while it is still the file of the
+# descriptor (the rename did not move it).
+# Each INT, TERM and HUP trap of the caller comes back when the function
+# returns, and a signal that had no trap goes back to the default
+# (kubehz::_restore_trap).
+# Not covered: SIGKILL, which can leave the temp file (mode 0600, the name
+# <file>.XXXXXX). A process that can write into the directory of the file:
+# a FIFO that it puts at the new name before the create makes the create
+# wait for a reader, and a file that it puts at the temp path between the
+# check before the rename and the rename is renamed onto the file. A
+# signal during the download takes effect when curl ends (the trap runs
+# after the current command; the call sets no time limit).
 # Status 0 when <dest> holds the new content, else 1.
 kubehz::_write_private() {
   (( $# >= 2 )) || {
     error "kubehz::_write_private: it takes a file and a command (<dest> <command...>), not $# argument(s); it writes nothing"
     return 1
   }
-  local dest="${1}" target sig saved_traps rc=0
-  # The trap reads the temp path at run time: a name of its own, so that no
-  # local of the command (a function in this shell) hides it.
-  local _kubehz_wp_tmp=""
+  local dest="${1}" target sig trap_int trap_term trap_hup rc=0
+  # The traps read these when they run: names of their own, so that no
+  # local of the command (a function in this shell) hides them.
+  # _kubehz_wp_tmp is the path that the traps remove (empty before the
+  # create and from just before the rename on), _kubehz_wp_name the name
+  # of the temp file for the steps after that, _kubehz_wp_fd its
+  # descriptor, and _kubehz_wp_hold is 1 while a signal is only recorded
+  # (in _kubehz_wp_sig).
+  local _kubehz_wp_tmp="" _kubehz_wp_name="" _kubehz_wp_fd="" _kubehz_wp_hold="" _kubehz_wp_sig=""
   shift
   target=$(kubehz::_private_target "${dest}") || return 1
-  saved_traps=$(trap -p INT TERM HUP)
+  trap_int=$(trap -p INT)
+  trap_term=$(trap -p TERM)
+  trap_hup=$(trap -p HUP)
   for sig in INT TERM HUP; do
-    # shellcheck disable=SC2064 # the signal name now, the path when the trap runs
-    trap "[[ -z \"\${_kubehz_wp_tmp:-}\" ]] || rm -f -- \"\${_kubehz_wp_tmp}\"; trap - ${sig}; kill -${sig} \${BASHPID}" "${sig}"
+    # shellcheck disable=SC2064 # the signal name now
+    trap "kubehz::_write_private_trap ${sig}" "${sig}"
   done
-  if ! _kubehz_wp_tmp=$(umask 077 && mktemp "${target}.XXXXXX"); then
+  if ! kubehz::_create_private "${target}"; then
+    rc=1
+  elif ! "$@" >&"${_kubehz_wp_fd}"; then
+    rc=1
+  else
+    _kubehz_wp_hold=1
     _kubehz_wp_tmp=""
-    error "Cannot create a temp file beside ${target}"
-    rc=1
-  elif ! "$@" > "${_kubehz_wp_tmp}"; then
-    rc=1
-  elif ! kubehz::_publish_private "${_kubehz_wp_tmp}" "${target}" "${dest}"; then
-    rc=1
+    kubehz::_publish_private "${_kubehz_wp_name}" "${target}" "${dest}" "${_kubehz_wp_fd}" || rc=1
   fi
-  if (( rc != 0 )) && [[ -n "${_kubehz_wp_tmp}" ]]; then
-    rm -f -- "${_kubehz_wp_tmp}"
+  if (( rc != 0 )) && [[ -n "${_kubehz_wp_name}" ]] \
+    && kubehz::_private_temp_ours "${_kubehz_wp_name}" "${_kubehz_wp_fd}"; then
+    rm -f -- "${_kubehz_wp_name}"
   fi
   _kubehz_wp_tmp=""
-  trap - INT TERM HUP
-  eval "${saved_traps}"
+  if [[ -n "${_kubehz_wp_fd}" ]]; then
+    exec {_kubehz_wp_fd}>&-
+  fi
+  _kubehz_wp_hold=""
+  if [[ -n "${_kubehz_wp_sig}" ]]; then
+    kubehz::_write_private_trap "${_kubehz_wp_sig}"
+  fi
+  kubehz::_restore_trap INT "${trap_int}"
+  kubehz::_restore_trap TERM "${trap_term}"
+  kubehz::_restore_trap HUP "${trap_hup}"
   return "${rc}"
+}
+
+# kubehz::_write_private_trap <signal>: the INT, TERM and HUP trap of
+# kubehz::_write_private. While _kubehz_wp_hold is set (the rename), it
+# only records the signal. Else it removes the temp file while that file
+# is the file of the descriptor, and then ends the shell with the signal.
+kubehz::_write_private_trap() {
+  if [[ -n "${_kubehz_wp_hold:-}" ]]; then
+    _kubehz_wp_sig="${1}"
+    return 0
+  fi
+  if [[ -n "${_kubehz_wp_tmp:-}" ]] && kubehz::_private_temp_ours "${_kubehz_wp_tmp}" "${_kubehz_wp_fd:-}"; then
+    rm -f -- "${_kubehz_wp_tmp}"
+  fi
+  trap - "${1}"
+  kill -"${1}" "${BASHPID}"
+}
+
+# kubehz::_create_private <target>: make the temp file of
+# kubehz::_write_private beside <target> and open it once, into the
+# descriptor _kubehz_wp_fd. mktemp -u gives a new name only. The create is
+# one open with noclobber under umask 077: noclobber opens a path that
+# does not exist with O_EXCL, so the create fails on a file or a link that
+# is at that name. The call sets _kubehz_wp_tmp before the open, so a
+# signal just after it removes the new file (the traps remove only the
+# file of the descriptor). Then the open file must be a regular file at
+# the path, not a link, of this user, mode 0600, and the same file as the
+# descriptor: a check through the path, once, before the command writes.
+# The noclobber option and the umask of the caller come back after the
+# open. One error line on each failure, status 1.
+kubehz::_create_private() {
+  local target="${1}" mask noclobber=0
+  if ! _kubehz_wp_name=$(mktemp -u "${target}.XXXXXX" 2>/dev/null) || [[ -z "${_kubehz_wp_name}" ]]; then
+    _kubehz_wp_name=""
+    error "Cannot create a temp file beside ${target}"
+    return 1
+  fi
+  mask=$(umask)
+  [[ $- != *C* ]] || noclobber=1
+  _kubehz_wp_tmp="${_kubehz_wp_name}"
+  umask 077
+  set -C
+  { exec {_kubehz_wp_fd}>"${_kubehz_wp_name}"; } 2>/dev/null || _kubehz_wp_fd=""
+  (( noclobber )) || set +C
+  umask "${mask}"
+  if [[ -z "${_kubehz_wp_fd}" ]]; then
+    _kubehz_wp_tmp=""
+    error "Cannot create a temp file beside ${target}"
+    return 1
+  fi
+  if ! kubehz::_private_temp_ours "${_kubehz_wp_name}" "${_kubehz_wp_fd}" \
+    || [[ ! -O "${_kubehz_wp_name}" ]] || ! kubehz::_mode_is_0600 "${_kubehz_wp_name}"; then
+    error "The temp file ${_kubehz_wp_name} is not a new file of this user with mode 0600: nothing is written"
+    return 1
+  fi
+}
+
+# kubehz::_private_temp_ours <path> <fd>: status 0 when <path> is the file
+# that the descriptor <fd> holds open: a regular file at <path>, not a
+# link, and the same file (device and inode) as the descriptor. A regular
+# file that the descriptor holds is the file that the create of this run
+# made: noclobber never opens a regular file that exists.
+kubehz::_private_temp_ours() {
+  [[ -n "${2}" && -f "/dev/fd/${2}" && -f "${1}" && ! -L "${1}" && "/dev/fd/${2}" -ef "${1}" ]]
+}
+
+# kubehz::_mode_is_0600 <path>: status 0 when the mode of <path> is 0600
+# (find -perm: the stat of GNU and of BSD take other options).
+kubehz::_mode_is_0600() {
+  local p="${1}"
+  [[ "${p}" == /* ]] || p="./${p}"
+  [[ "$(find "${p}" -prune -perm 600 -print 2>/dev/null)" == "${p}" ]]
+}
+
+# kubehz::_restore_trap <signal> <saved>: give <signal> the trap back that
+# trap -p <signal> printed before (<saved>), or the default when <saved>
+# is empty (the signal had no trap). The eval replaces the trap of
+# kubehz::_write_private at once, so the trap of the caller is never the
+# default in between.
+kubehz::_restore_trap() {
+  if [[ -n "${2}" ]]; then
+    eval "${2}"
+  else
+    trap - "${1}"
+  fi
 }
 
 # kubehz::_private_target <dest>: the file that a write of <dest> replaces,
@@ -367,16 +488,24 @@ kubehz::_mv_exact_ok() {
   [[ "${_KUBEHZ_MV_EXACT}" == 1 ]]
 }
 
-# kubehz::_publish_private <tmp> <target> <dest>: rename <tmp> onto the
-# exact path <target>. With mv -T the rename fails when <target> is a
-# directory (another operation can put one there during the download).
-# A mv without -T would move <tmp> into a directory: there the call
-# refuses a directory just before the rename. After the rename, <target>
-# must be a regular file. If it is not (a directory took its place between
-# the check and the rename of a mv without -T), the new file is removed
-# from it by its exact path. One error line on each failure, status 1.
+# kubehz::_publish_private <tmp> <target> <dest> <fd>: rename <tmp> onto
+# the exact path <target>. Just before the rename, <tmp> must still be the
+# file of the descriptor <fd> (kubehz::_private_temp_ours): else another
+# process replaced it, and the call renames nothing. With mv -T the rename
+# fails when <target> is a directory (another operation can put one there
+# during the download). A mv without -T would move <tmp> into a
+# directory: there the call refuses a directory just before the rename.
+# After the rename, <target> must be a regular file. If it is not, a
+# directory (it can be a mount) can have taken its place between the
+# check and the rename of a mv without -T: the error line names the path
+# where the rename may have put the new file, and nothing is removed. One
+# error line on each failure, status 1.
 kubehz::_publish_private() {
-  local tmp="${1}" target="${2}" dest="${3}"
+  local tmp="${1}" target="${2}" dest="${3}" fd="${4}" moved=""
+  kubehz::_private_temp_ours "${tmp}" "${fd}" || {
+    error "The temp file ${tmp} is not the file that this run wrote: nothing is renamed to ${target}"
+    return 1
+  }
   if kubehz::_mv_exact_ok; then
     if ! mv -f -T -- "${tmp}" "${target}" 2>/dev/null; then
       if [[ -d "${target}" ]]; then
@@ -391,14 +520,18 @@ kubehz::_publish_private() {
       error "${dest} is a directory, not a file"
       return 1
     }
+    moved="${target}/${tmp##*/}"
     mv -f -- "${tmp}" "${target}" 2>/dev/null || {
       error "Cannot rename the temp file to ${target}"
       return 1
     }
   fi
   if [[ -L "${target}" || ! -f "${target}" ]]; then
-    rm -f -- "${target:?}/${tmp##*/}"
-    error "${target} is not a regular file after the rename: the new file is removed"
+    if [[ -n "${moved}" ]]; then
+      error "${target} is not a regular file after the rename: the rename may have moved the new file to ${moved}"
+    else
+      error "${target} is not a regular file after the rename"
+    fi
     return 1
   fi
 }
