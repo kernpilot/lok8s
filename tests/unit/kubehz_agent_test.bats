@@ -1220,14 +1220,14 @@ ${UNMAPPED}"
 
 # _ln_fails: ln as on a file system with no hard links. A stand-in script
 # in a bin directory of the test goes first on PATH (kubehz::agent_write
-# runs `command ln`, which skips a function). It adds its LC_ALL to LN_LOG,
+# runs `command ln`, which skips a function). It adds a line to LN_LOG,
 # runs LN_HOOK, prints the GNU ln line with the text LN_ERROR and fails.
 # The Go twin is failLink in agent_test.go.
 _ln_fails() {
   local bin="${BATS_TEST_TMPDIR}/ln-bin"
   mkdir -p "${bin}"
   printf '%s\n' '#!/usr/bin/env bash' \
-    'printf "%s\n" "${LC_ALL-unset}" >> "${LN_LOG}"' \
+    'printf "ln\n" >> "${LN_LOG}"' \
     '[[ -z "${LN_HOOK}" ]] || eval "${LN_HOOK}"' \
     'printf "ln: failed to create hard link \x27%s\x27: %s\n" "${*: -1}" "${LN_ERROR}" >&2' \
     'exit 1' > "${bin}/ln"
@@ -1236,16 +1236,18 @@ _ln_fails() {
   : > "${LN_LOG}"
 }
 
-@test "kubeconfig: without hard links (EPERM, ENOTSUP), an exclusive create writes the file, mode 0600" {
+# The text of ln does not count: GNU, uutils and musl print other texts.
+@test "kubeconfig: a link error with no file at the path takes the exclusive create, mode 0600 (EPERM, ENOSYS, an unknown text)" {
   _ln_fails
   # A function named ln does not count: the write runs the ln of PATH.
   ln() { return 0; }
   umask 022
-  local d text want="${BATS_TEST_TMPDIR}/want"
+  local d text i=0 want="${BATS_TEST_TMPDIR}/want"
   KUBEHZ_AGENT_BODY=$'apiVersion: v1\nkind: Config\n'
   printf '%s' "${KUBEHZ_AGENT_BODY}" > "${want}"
-  for text in 'Operation not permitted' 'Operation not supported'; do
-    d="${BATS_TEST_TMPDIR}/nolink-${text// /-}"
+  for text in 'Operation not permitted' 'Function not implemented' 'a text that no C library prints'; do
+    (( ++i ))
+    d="${BATS_TEST_TMPDIR}/nolink${i}"
     mkdir -p "${d}"
     : > "${LN_LOG}"
     LN_ERROR="${text}"
@@ -1257,45 +1259,41 @@ _ln_fails() {
     assert_output 600
     run ls -A "${d}"
     assert_output kc.yaml
-    # ln ran once, under LC_ALL=C.
+    # The ln of PATH ran once.
     run cat "${LN_LOG}"
-    assert_output C
+    assert_output ln
   done
 }
 
-@test "kubeconfig: without hard links, a file that appears before the exclusive create stays" {
+# A file or a link at the path after the failed ln is the refusal, with
+# no second write. A link to a device shows it: noclobber would open the
+# device and write to it. The Go twin is
+# TestPublishKubeconfigWithoutHardLinksKeepsAFileThatAppears.
+@test "kubeconfig: a link error with a file or a link at the path refuses, and the path stays as it was" {
+  local d="${BATS_TEST_TMPDIR}/nolink-there"
+  mkdir -p "${d}"
+  # Made before the stand-in ln is first on PATH.
+  ln -s /dev/null "${d}/device.yaml"
   _ln_fails
   umask 022
-  local d="${BATS_TEST_TMPDIR}/nolink-race"
-  mkdir -p "${d}"
-  LN_ERROR='Operation not permitted'
-  LN_HOOK="printf planted > '${d}/kc.yaml' && chmod 640 '${d}/kc.yaml'"
   KUBEHZ_AGENT_BODY='new'
-  run kubehz::agent_write "${d}/kc.yaml" 0
-  assert_failure
-  run cat "${d}/kc.yaml"
-  assert_output planted
-  run stat -c '%a' "${d}/kc.yaml"
-  assert_output 640
-  run ls -A "${d}"
-  assert_output kc.yaml
-}
-
-@test "kubeconfig: a link error other than EPERM or ENOTSUP writes nothing (EEXIST, EACCES, EXDEV)" {
-  _ln_fails
-  local d text file
-  KUBEHZ_AGENT_BODY='new'
-  for text in 'File exists' 'Permission denied' 'Invalid cross-device link'; do
-    d="${BATS_TEST_TMPDIR}/nolink-${text// /-}"
-    mkdir -p "${d}"
-    # The name holds the EPERM text: only the end of the line counts.
-    file="${d}/kc: Operation not permitted"
+  local text
+  for text in 'File exists' 'Operation not permitted'; do
     LN_ERROR="${text}"
-    run kubehz::agent_write "${file}" 0
+    LN_HOOK="printf planted > '${d}/kc.yaml' && chmod 640 '${d}/kc.yaml'"
+    run kubehz::agent_write "${d}/kc.yaml" 0
     assert_failure
-    [[ ! -e "${file}" && ! -L "${file}" ]] || fail "${text}: a file was written after the link error"
+    run cat "${d}/kc.yaml"
+    assert_output planted
+    run stat -c '%a' "${d}/kc.yaml"
+    assert_output 640
+    rm -f -- "${d}/kc.yaml"
+    LN_HOOK=""
+    run kubehz::agent_write "${d}/device.yaml" 0
+    assert_failure
+    [[ -L "${d}/device.yaml" && "$(readlink -- "${d}/device.yaml")" == /dev/null ]] || fail "${text}: the link to the device was changed"
     run ls -A "${d}"
-    assert_output ''
+    assert_output device.yaml
   done
 }
 
@@ -1321,7 +1319,7 @@ _ln_fails() {
   run ls -A "${d}"
   assert_output $'kc.yaml\nrace.yaml'
   run cat "${LN_LOG}"
-  assert_output $'C\nC'
+  assert_output $'ln\nln'
 }
 
 @test "the bearer reaches curl's config with its quotes and backslashes escaped" {

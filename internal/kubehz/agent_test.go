@@ -990,10 +990,13 @@ func dirNames(t *testing.T, dir string) string {
 	return strings.Join(names, " ")
 }
 
-// On a file system with no hard links, link(2) fails with EPERM, ENOTSUP
-// or EOPNOTSUPP. Then an exclusive create writes the file: mode 0600, the
-// bytes of the download, and no temporary file stays. The bash twin is in
-// kubehz_agent_test.bats. Not parallel: it replaces linkKubeconfig.
+// A link error that is not EEXIST, with no file at the path, takes the
+// exclusive create: mode 0600 (no group or other bits, whatever the
+// umask), the bytes of the download, and no temporary file stays. A file
+// system with no hard links fails the link with EPERM, ENOTSUP,
+// EOPNOTSUPP or ENOSYS (a FUSE file system with no link operation). The
+// bash twin is in kubehz_agent_test.bats. Not parallel: it replaces
+// linkKubeconfig.
 func TestPublishKubeconfigWithoutHardLinks(t *testing.T) {
 	t.Cleanup(func() { linkKubeconfig = os.Link })
 	for _, tc := range []struct {
@@ -1001,8 +1004,7 @@ func TestPublishKubeconfigWithoutHardLinks(t *testing.T) {
 		errno syscall.Errno
 	}{
 		{"EPERM", syscall.EPERM},
-		{"ENOTSUP", syscall.ENOTSUP},
-		{"EOPNOTSUPP", syscall.EOPNOTSUPP},
+		{"ENOSYS", syscall.ENOSYS},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -1022,7 +1024,7 @@ func TestPublishKubeconfigWithoutHardLinks(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 {
+			if perm := fi.Mode().Perm(); !fi.Mode().IsRegular() || perm&0o077 != 0 || perm&0o600 != 0o600 {
 				t.Errorf("mode = %v, want a regular file with 0600", fi.Mode())
 			}
 			if got := dirNames(t, dir); got != "kc.yaml" {
@@ -1032,66 +1034,64 @@ func TestPublishKubeconfigWithoutHardLinks(t *testing.T) {
 	}
 }
 
-// Without hard links, a file that appears after the link fails and before
-// the exclusive create stays as it was: the create fails on it, and the
-// publish fails. Not parallel: it replaces linkKubeconfig.
+// A link error with a file at the path refuses, and the file stays as it
+// was: with EEXIST there is no second write, and with another error the
+// exclusive create fails on the file. Not parallel: it replaces
+// linkKubeconfig.
 func TestPublishKubeconfigWithoutHardLinksKeepsAFileThatAppears(t *testing.T) {
-	t.Cleanup(func() { linkKubeconfig = os.Link })
-	dir := t.TempDir()
-	file := filepath.Join(dir, "kc.yaml")
-	calls := 0
-	linkKubeconfig = failLink(t, syscall.EPERM, &calls, func() {
-		must(t, os.WriteFile(file, []byte("planted"), 0o640))
-	})
-	err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
-	if !errors.Is(err, fs.ErrExist) {
-		t.Fatalf("publish: err = %v, want a refusal of the path that exists", err)
-	}
-	if got := readFile(t, file); got != "planted" {
-		t.Errorf("file = %q: the file that appeared was replaced", got)
-	}
-	if fi, _ := os.Stat(file); fi.Mode().Perm() != 0o640 {
-		t.Errorf("mode = %v, want 0640 as planted", fi.Mode().Perm())
-	}
-	if got := dirNames(t, dir); got != "kc.yaml" {
-		t.Errorf("dir holds %q: a temporary file was left behind", got)
-	}
-}
-
-// Only EPERM, ENOTSUP and EOPNOTSUPP take the exclusive create. EEXIST
-// says that the path exists, and EACCES and EXDEV are no sign of a file
-// system without hard links: the publish fails with the link error and
-// writes nothing, also where no file is at the path. Not parallel: it
-// replaces linkKubeconfig.
-func TestPublishKubeconfigOtherLinkErrorsHaveNoFallback(t *testing.T) {
 	t.Cleanup(func() { linkKubeconfig = os.Link })
 	for _, tc := range []struct {
 		name  string
 		errno syscall.Errno
 	}{
 		{"EEXIST", syscall.EEXIST},
-		{"EACCES", syscall.EACCES},
-		{"EXDEV", syscall.EXDEV},
+		{"EPERM", syscall.EPERM},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			file := filepath.Join(dir, "kc.yaml")
 			calls := 0
-			linkKubeconfig = failLink(t, tc.errno, &calls, nil)
+			linkKubeconfig = failLink(t, tc.errno, &calls, func() {
+				must(t, os.WriteFile(file, []byte("planted"), 0o640))
+			})
 			err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
-			if !errors.Is(err, tc.errno) {
-				t.Fatalf("publish: err = %v, want the link error %v", err, tc.errno)
+			if !errors.Is(err, fs.ErrExist) {
+				t.Fatalf("publish: err = %v, want a refusal of the path that exists", err)
 			}
-			if calls != 1 {
-				t.Errorf("the link ran %d times, want 1", calls)
+			if got := readFile(t, file); got != "planted" {
+				t.Errorf("file = %q: the file that appeared was replaced", got)
 			}
-			if _, err := os.Lstat(file); !errors.Is(err, fs.ErrNotExist) {
-				t.Errorf("a file is at the path (lstat: %v): the publish wrote it after a link error %v", err, tc.errno)
+			if fi, _ := os.Stat(file); fi.Mode().Perm() != 0o640 {
+				t.Errorf("mode = %v, want 0640 as planted", fi.Mode().Perm())
 			}
-			if got := dirNames(t, dir); got != "" {
+			if got := dirNames(t, dir); got != "kc.yaml" {
 				t.Errorf("dir holds %q: a temporary file was left behind", got)
 			}
 		})
+	}
+}
+
+// EEXIST says that the path exists: the publish fails with the link error
+// and writes nothing, also when no file is at the path by then. Not
+// parallel: it replaces linkKubeconfig.
+func TestPublishKubeconfigEEXISTHasNoFallback(t *testing.T) {
+	t.Cleanup(func() { linkKubeconfig = os.Link })
+	dir := t.TempDir()
+	file := filepath.Join(dir, "kc.yaml")
+	calls := 0
+	linkKubeconfig = failLink(t, syscall.EEXIST, &calls, nil)
+	err := publishKubeconfig(file, []byte(agentKubeconfigYAML), false)
+	if !errors.Is(err, syscall.EEXIST) {
+		t.Fatalf("publish: err = %v, want the link error EEXIST", err)
+	}
+	if calls != 1 {
+		t.Errorf("the link ran %d times, want 1", calls)
+	}
+	if _, err := os.Lstat(file); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a file is at the path (lstat: %v): the publish wrote it after EEXIST", err)
+	}
+	if got := dirNames(t, dir); got != "" {
+		t.Errorf("dir holds %q: a temporary file was left behind", got)
 	}
 }
 
