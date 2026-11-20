@@ -119,6 +119,36 @@ func replaceWaitid(t *testing.T, f func(idType, id int, info *unix.Siginfo, opti
 	t.Cleanup(func() { waitid = real })
 }
 
+// replacePidfdOpen sets the pidfdOpen seam for the test.
+func replacePidfdOpen(t *testing.T, f func(pid, flags int) (int, error)) {
+	t.Helper()
+	real := pidfdOpen
+	pidfdOpen = f
+	t.Cleanup(func() { pidfdOpen = real })
+}
+
+// noPidfd is a pidfdOpen of a kernel without pidfds.
+func noPidfd(int, int) (int, error) { return -1, unix.ENOSYS }
+
+// waitFile waits up to 5 s for path to exist.
+func waitFile(t *testing.T, path string) {
+	t.Helper()
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+	}
+	t.Fatalf("%s did not appear", path)
+}
+
+// killOwnChild sends SIGKILL to pid when /proc shows it as a child of the
+// test that is not reaped (a test that failed must not leave it running).
+func killOwnChild(pid int) {
+	if e := readEntry(pid); pid > 0 && e.ok && e.ppid == os.Getpid() {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+}
+
 // sigs returns the signals of events, in order.
 func sigs(events []signalEvent) []syscall.Signal {
 	out := make([]syscall.Signal, len(events))
@@ -475,7 +505,8 @@ func TestRunProcessGroupWaitidErrors(t *testing.T) {
 
 // owned: true for the leader of a group that is not reaped; false for a
 // start time that is not the recorded one, for a child that does not lead
-// a group, and for a leader that is reaped. A false stays.
+// a group, and for a leader that is reaped. A false stays, also when the
+// identity matches again.
 func TestGroupOwnedChecksTheLeader(t *testing.T) {
 	start := func(setpgid bool) (*exec.Cmd, func()) {
 		t.Helper()
@@ -504,6 +535,19 @@ func TestGroupOwnedChecksTheLeader(t *testing.T) {
 	if other.owned() || !other.lost {
 		t.Error("another start time: owned = true")
 	}
+	// A false stays: with the identity that matches again, the lost group
+	// still reports false, and sends no signal (0: no effect, also if sent).
+	other.start = g.start
+	events := recordSignals(t)
+	if other.owned() {
+		t.Error("a lost group with a matching identity again: owned = true")
+	}
+	if sent, _ := other.signal(0); sent {
+		t.Error("a lost group sent a signal")
+	}
+	if ev := events(); len(ev) != 0 {
+		t.Errorf("a lost group got %v, want no signal", sigs(ev))
+	}
 	if !g.owned() {
 		t.Error("owned of the real group changed")
 	}
@@ -523,27 +567,36 @@ func TestGroupOwnedChecksTheLeader(t *testing.T) {
 // A group that is lost from the start: the Cmd here has no Setpgid, so
 // /proc does not show the child as the leader of a group, and newGroup
 // records a lost group. The group gets no signal, and Run says so
-// (errGroupNotStopped). The child alone gets the signals of the stop,
-// through os.Process: on a cancel it ends on its SIGTERM, and after a
-// waitid error (ENOSYS) it gets SIGTERM and SIGKILL. The child is in the
+// (errGroupNotStopped). With a pidfd, the child alone gets the signals of
+// the stop through it: on a cancel it ends on its SIGTERM (its trap writes
+// $0), and after a waitid error (ENOSYS) it gets SIGTERM and SIGKILL.
+// Without a pidfd (the seam pidfdOpen fails), the child gets no signal at
+// all: it ends on its own after about 1 s, with 0. The child is in the
 // process group of the test, so a group signal would go to -pid of a
 // group that does not exist.
 func TestRunGroupLostAtTheStartStopsTheChildAlone(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		enosys bool
+		pidfd  bool
 		want   error
 	}{
-		{"a cancel", false, context.Canceled},
-		{"ENOSYS", true, unix.ENOSYS},
+		{"a cancel", false, true, context.Canceled},
+		{"ENOSYS", true, true, unix.ENOSYS},
+		{"a cancel, no pidfd", false, false, context.Canceled},
+		{"ENOSYS, no pidfd", true, false, unix.ENOSYS},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.enosys {
 				replaceWaitid(t, func(int, int, *unix.Siginfo, int, *unix.Rusage) error { return unix.ENOSYS })
 			}
+			if !tc.pidfd {
+				replacePidfdOpen(t, noPidfd)
+			}
 			events := recordSignals(t)
+			termFile := filepath.Join(t.TempDir(), "term")
 			var out lockedBuffer
-			cmd := exec.Command("/bin/sh", "-c", `trap 'exit 0' TERM; echo up; while :; do sleep 0.05; done`)
+			cmd := exec.Command("/bin/sh", "-c", `trap ': > "$0"; exit 0' TERM; echo up; i=0; while [ "$i" -lt 20 ]; do sleep 0.05; i=$((i + 1)); done`, termFile)
 			cmd.Stdout, cmd.Stderr = &out, &out
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
@@ -564,14 +617,171 @@ func TestRunGroupLostAtTheStartStopsTheChildAlone(t *testing.T) {
 				if !errors.Is(err, tc.want) || !errors.Is(err, errGroupNotStopped) {
 					t.Errorf("err = %v, want %v and errGroupNotStopped", err, tc.want)
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(10 * time.Second):
 				// The test started this child: end it, and let Run reap it.
 				_ = cmd.Process.Kill()
 				<-errCh
-				t.Fatal("the child alone did not get the signal of the stop")
+				t.Fatal("Run did not return in 10 s")
 			}
 			if ev := events(); len(ev) != 0 {
 				t.Errorf("a lost group got %v, want no group signal", sigs(ev))
+			}
+			_, termErr := os.Stat(termFile)
+			ws, _ := cmd.ProcessState.Sys().(syscall.WaitStatus)
+			switch {
+			case !tc.pidfd && (termErr == nil || !cmd.ProcessState.Success()):
+				t.Errorf("without a pidfd the child got a signal: state %v, SIGTERM trap ran: %v", cmd.ProcessState, termErr == nil)
+			case tc.pidfd && !tc.enosys && termErr != nil:
+				t.Error("with a pidfd the child got no SIGTERM on the cancel")
+			case tc.pidfd && tc.enosys && !ws.Signaled() && termErr != nil:
+				t.Errorf("with a pidfd the child got no signal after ENOSYS: state %v", cmd.ProcessState)
+			}
+		})
+	}
+}
+
+// A leader that ignores SIGTERM: the stop must send SIGKILL. On a cancel,
+// the group gets SIGKILL after WaitDelay; after a panic in ctx.Done, the
+// guard sends SIGKILL after groupGrace, also with a zero WaitDelay. In
+// both, the leader still runs at the SIGKILL (not reaped, not a zombie),
+// the waitid goroutine ends, and the leader is reaped before Run returns
+// (or before the panic reaches the caller). The leader sets its trap
+// before it writes its ready file, and the cancel (or the panic) comes
+// after that file. Without the SIGKILL, Run would wait for the leader
+// without end.
+func TestRunProcessGroupKillsALeaderThatIgnoresTerm(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		panic bool
+		delay time.Duration
+		grace time.Duration
+	}{
+		{"a cancel", false, 300 * time.Millisecond, 300 * time.Millisecond},
+		{"a panic, no WaitDelay", true, 0, groupGrace},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var pid atomic.Int64
+			var waiterEnded atomic.Bool
+			replaceWaitid(t, func(idType, id int, info *unix.Siginfo, options int, rusage *unix.Rusage) error {
+				pid.CompareAndSwap(0, int64(id))
+				err := unix.Waitid(idType, id, info, options, rusage)
+				if !errors.Is(err, unix.EINTR) {
+					waiterEnded.Store(true)
+				}
+				return err
+			})
+			events := recordSignals(t)
+			ready := filepath.Join(t.TempDir(), "ready")
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			runCtx := ctx
+			if tc.panic {
+				runCtx = readyPanicContext{Context: ctx, ready: ready}
+			}
+			type outcome struct {
+				err   error
+				panic any
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				var o outcome
+				defer func() {
+					o.panic = recover()
+					done <- o
+				}()
+				o.err = NewRunner(nil).Run(runCtx, Cmd{
+					Name:         "/bin/sh",
+					Args:         []string{"-c", `trap '' TERM; : > "$0"; while :; do sleep 0.05; done`, ready},
+					WaitDelay:    tc.delay,
+					ProcessGroup: true,
+				})
+			}()
+			if !tc.panic {
+				waitFile(t, ready)
+				cancel()
+			}
+			var o outcome
+			select {
+			case o = <-done:
+			case <-time.After(15 * time.Second):
+				// The test started the leader: end it, so that Run reaps it.
+				killOwnChild(int(pid.Load()))
+				<-done
+				t.Fatal("Run did not end: the leader that ignores SIGTERM got no SIGKILL")
+			}
+			if tc.panic {
+				if err, ok := o.panic.(error); !ok || !errors.Is(err, errDonePanic) {
+					t.Errorf("the caller got the panic %v, want %v", o.panic, errDonePanic)
+				}
+			} else if o.panic != nil || ExitCode(o.err) != 128+int(syscall.SIGKILL) {
+				t.Errorf("err = %v, panic = %v; want the exit of a SIGKILL", o.err, o.panic)
+			}
+			ev := events()
+			if len(ev) < 3 || !slices.Equal(sigs(ev[:3]), termContKill) {
+				t.Fatalf("the group got %v, want %v first", sigs(ev), termContKill)
+			}
+			for _, e := range ev[3:] {
+				if e.sig != syscall.SIGKILL {
+					t.Errorf("after the SIGKILL the group got %v", e.sig)
+				}
+			}
+			kill := ev[2]
+			checkHeld(t, kill, false)
+			if kill.leader.state == "Z" {
+				t.Errorf("at the SIGKILL the leader was a zombie, want a leader that runs: %+v", kill.leader)
+			}
+			if took := kill.at.Sub(ev[0].at); took < tc.grace {
+				t.Errorf("the SIGKILL came %s after the SIGTERM, want at least %s", took, tc.grace)
+			}
+			if !waiterEnded.Load() {
+				t.Error("the waitid goroutine did not end before Run returned")
+			}
+			if p := int(pid.Load()); p == 0 {
+				t.Error("waitid did not run")
+			} else if e := readEntry(p); e.ok && e.ppid == os.Getpid() {
+				t.Errorf("the leader (pid %d) is not reaped: %+v", p, e)
+				killOwnChild(p)
+			}
+		})
+	}
+}
+
+// Run closes the pidfd of the child on each path: after a normal end and
+// after a panic in ctx.Done (the guard). The fd number comes from the seam
+// pidfdOpen; after Run, /proc/self/fd has no pidfd under that number.
+func TestRunProcessGroupClosesThePidfd(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  func(context.Context) context.Context
+	}{
+		{"a normal end", func(c context.Context) context.Context { return c }},
+		{"a panic", func(c context.Context) context.Context { return panicDoneContext{c} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var fd atomic.Int64
+			fd.Store(-1)
+			replacePidfdOpen(t, func(pid, flags int) (int, error) {
+				n, err := unix.PidfdOpen(pid, flags)
+				if err == nil {
+					fd.Store(int64(n))
+				}
+				return n, err
+			})
+			func() {
+				defer func() { _ = recover() }()
+				_ = NewRunner(nil).Run(tc.ctx(t.Context()), Cmd{
+					Name:         "/bin/sh",
+					Args:         []string{"-c", "exec sleep 0.1"},
+					WaitDelay:    300 * time.Millisecond,
+					ProcessGroup: true,
+				})
+			}()
+			n := int(fd.Load())
+			if n < 0 {
+				t.Fatal("Run opened no pidfd")
+			}
+			if link, err := os.Readlink("/proc/self/fd/" + strconv.Itoa(n)); err == nil && strings.Contains(link, "pidfd") {
+				t.Errorf("the pidfd %d is still open after Run (%s)", n, link)
 			}
 		})
 	}
@@ -669,6 +879,22 @@ var errDonePanic = errors.New("a Done that panics")
 type panicDoneContext struct{ context.Context }
 
 func (panicDoneContext) Done() <-chan struct{} { panic(errDonePanic) }
+
+// readyPanicContext is a context of a caller whose Done panics after the
+// file ready exists (up to 5 s): the child is ready then.
+type readyPanicContext struct {
+	context.Context
+	ready string
+}
+
+func (c readyPanicContext) Done() <-chan struct{} {
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(c.ready); err == nil {
+			break
+		}
+	}
+	panic(errDonePanic)
+}
 
 // A panic after the start (here in ctx.Done) reaches the caller with its
 // own value, and Run first stops the group, waits for the waitid goroutine
