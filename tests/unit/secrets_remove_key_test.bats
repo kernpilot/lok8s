@@ -15,7 +15,9 @@
 # real one and skips without sops, ssh-to-age or ssh-keygen. Each test that
 # runs the real sops carries the tag real-sops: the argsh container of CI has
 # no ssh-keygen, so CI runs that tag again on the runner, where a skip fails
-# the step. No test prints a private key.
+# the step. That step also checks the TAP plan 1..7: a test that gets or
+# loses the tag changes that number in .github/workflows/ci.yml. No test
+# prints a private key.
 
 setup() {
   load "../test_helper"
