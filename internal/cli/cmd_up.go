@@ -73,6 +73,7 @@ func newUpCommand(paths *config.Paths, spec commandSpec) *cobra.Command {
 	f.BoolVarP(&openTilt, "open-tilt", "o", false, "Open Tilt in a browser (interactive mode only)")
 	f.BoolVar(&ci, "ci", false, "Headless: build+deploy+wait-ready via `tilt ci`, exit with real status (no TTY/browser)")
 	f.StringVarP(&timeout, "timeout", "t", "", "Readiness timeout for --ci (e.g. 300s, 10m); passed to `tilt ci`")
+	printTokenFlag(cmd)
 	return argshFlagErrors(cmd)
 }
 

@@ -32,10 +32,9 @@ func (d *Dispatcher) interactive() bool {
 	if d.Interactive != nil {
 		return d.Interactive()
 	}
-	if os.Getenv("LOK8S_NONINTERACTIVE") != "" {
-		return false
-	}
-	if ci := os.Getenv("CI"); ci != "" && ci != "false" {
+	// The rule of the environment is shared with the claim ticket of the
+	// kubehz registration (bash: verbose::noninteractive).
+	if ui.NonInteractive(os.Getenv) {
 		return false
 	}
 	f, ok := d.stdin().(*os.File)

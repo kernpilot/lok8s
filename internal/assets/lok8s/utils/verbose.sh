@@ -13,6 +13,17 @@ RED=$'\033[0;31m'
 YELLOW=$'\033[0;33m'
 NC=$'\033[0m'
 
+# verbose::noninteractive returns 0 when the environment says that no
+# person reads the terminal: LOK8S_NONINTERACTIVE is nonempty (any value,
+# "false" too), or CI is nonempty and not exactly "false" (so CI=0 and
+# CI=FALSE count too). Then provision::_interactive does not prompt, and the
+# kubehz registration does not print the one-time claim ticket on a
+# terminal (kubehz::ensure_claim_key). The Go twin is ui.NonInteractive.
+verbose::noninteractive() {
+  [[ -n "${LOK8S_NONINTERACTIVE:-}" ]] && return 0
+  [[ -n "${CI:-}" && "${CI:-}" != "false" ]]
+}
+
 # verbose::color returns 0 when stderr may carry ANSI colour.
 verbose::color() {
   [[ -t 2 && -z "${NO_COLOR:-}" ]]
