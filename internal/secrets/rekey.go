@@ -743,8 +743,9 @@ const ownIdentityScope = "the check for your own decrypt identity reads only SOP
 // replaceFile writes content to path through a temp file in the same
 // directory and a rename (bash: secrets::_replace), so no reader sees half a
 // file. The new file keeps the mode of the old one. For a symlink it
-// replaces the file the link points to.
-func replaceFile(path string, content []byte) error {
+// replaces the file the link points to. A temp file that it cannot remove
+// is named in the error (removeTemp).
+func replaceFile(path string, content []byte) (err error) {
 	target, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return err
@@ -758,10 +759,9 @@ func replaceFile(path string, content []byte) error {
 		return err
 	}
 	name := tmp.Name()
-	done := false
 	defer func() {
-		if !done {
-			_ = os.Remove(name)
+		if err != nil {
+			err = removeTemp(err, name)
 		}
 	}()
 	if err := tmp.Chmod(info.Mode().Perm()); err != nil {
@@ -778,7 +778,6 @@ func replaceFile(path string, content []byte) error {
 	if err := os.Rename(name, target); err != nil {
 		return err
 	}
-	done = true
 	return nil
 }
 

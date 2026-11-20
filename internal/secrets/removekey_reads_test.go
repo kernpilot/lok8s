@@ -15,8 +15,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -941,6 +943,29 @@ func TestWriteReplacingKeepsTheOldFile(t *testing.T) {
 	}
 	if n := entries(); n != 2 {
 		t.Errorf("%d entries, want 2 (no temp file)", n)
+	}
+}
+
+// A failed write whose temp file cannot be removed (the directory is made
+// read-only during the write): the error holds the write error and the
+// remove error, and names the temp file that stays.
+func TestWriteReplacingReportsATempFileItCannotRemove(t *testing.T) {
+	skipUnlessPermissionsHold(t)
+	dir := t.TempDir()
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	stop := errors.New("stopped half way")
+	err := writeReplacing(dir+"/Secret.app.default.K.enc", func(io.Writer) error {
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		return stop
+	})
+	if !errors.Is(err, stop) || !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("want the write error and the remove error, got %v", err)
+	}
+	left, _ := filepath.Glob(dir + "/.Secret.app.default.K.enc.tmp-*")
+	if len(left) != 1 || !strings.Contains(err.Error(), "cannot remove the temp file, remove it by hand: remove "+left[0]+": ") {
+		t.Errorf("the error does not name the temp file %q: %v", left, err)
 	}
 }
 

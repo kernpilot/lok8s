@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -133,7 +134,18 @@ func writeReplacing(path string, write func(io.Writer) error) error {
 		err = os.Rename(name, path)
 	}
 	if err != nil {
-		_ = os.Remove(name)
+		err = removeTemp(err, name)
+	}
+	return err
+}
+
+// removeTemp removes name, the temp file of a write that failed, and adds a
+// remove that fails to err: the temp file stays, and the error names it
+// (bash: the "cannot remove the temp file" line of secrets::_encrypt_file).
+// A temp file that is gone already is no error.
+func removeTemp(err error, name string) error {
+	if rerr := os.Remove(name); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+		return errors.Join(err, fmt.Errorf("cannot remove the temp file, remove it by hand: %w", rerr))
 	}
 	return err
 }
