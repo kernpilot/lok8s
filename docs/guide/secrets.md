@@ -187,10 +187,15 @@ file keeps its content. When the write fails, the command stops and names
 the file, and the old file stays.
 
 `encrypt` skips a plaintext whose `.enc` file is newer. No command gives an
-`.enc` file a time after the current time. A plaintext with a time in the
-future stays the newer file: each encrypt writes its `.enc` file again and
+`.enc` file a time after the current time, and no command sets a time from
+its own clock: each time comes from the clock of the kernel, which stamps
+every write. A plaintext with a time in the future (after the current time)
+stays the newer file: each encrypt writes its `.enc` file again and
 prints a warning that names the plaintext. Set the time of that plaintext
-to now (`touch` it). An `.enc` file with a time in the future (for example,
+to now (`touch` it). An `.enc` file that is older than its plaintext, with a
+plaintext that is not after the current time, gets no warning: `lo lint`
+names the secret, and the next `encrypt` writes the `.enc` file again. An
+`.enc` file with a time in the future (for example,
 from an older `lo`) stays the newer file until the clock passes that time:
 `encrypt` skips its plaintext, also after a `touch` of the plaintext, and
 `decrypt` writes the value of the `.enc` file over the plaintext. The
