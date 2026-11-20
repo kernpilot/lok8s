@@ -175,8 +175,8 @@ func othersInGroup(pgid int) bool {
 	if err != nil {
 		return true
 	}
-	defer d.Close()
 	names, err := d.Readdirnames(-1)
+	_ = d.Close() // a read-only dir: a close error changes nothing here
 	if err != nil {
 		return true
 	}
