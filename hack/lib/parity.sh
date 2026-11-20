@@ -123,12 +123,23 @@ parity::prove_switch() {
 # probe's .bin has a stub for each one (parity::probe_stub). An entry
 # "<tool>=<argv>" lets the stub answer that one argv: it is the version
 # query that `lo version` sends. A plain "<tool>" answers no call.
+# tests/unit/parity_probe_test.bats reads the version lists of the two
+# implementations and fails when a host tool of a list is not here with
+# its version argv.
 PARITY_PROBE_TOOLS=(
   "docker=--version"
   "kubectl=version --client"
   "kind=--version"
   "tilt=version"
   helm hcloud ssh curl
+)
+
+# PARITY_PROBE_EMPTY: the calls "<tool>=<argv>" that the stub answers with
+# no output and exit 0. `kind get clusters` gets an empty cluster list:
+# `lo drivers lo status <domain>` sends it (parity-leaves.sh), and with an
+# empty list both implementations print NotFound.
+PARITY_PROBE_EMPTY=(
+  "kind=get clusters"
 )
 
 # parity::probe_bin <dir> <log>: the probe's own .bin. The toolchain is
@@ -149,13 +160,18 @@ parity::probe_bin() {
 
 # parity::probe_stub <dir> <tool> <argv> <log>: the stub of a host tool.
 # A call with exactly <argv> (not empty) prints "parity-stub v0.0.0" and
-# exits 0: both implementations read a version from that line. The stub
+# exits 0: both implementations read a version from that line. A call of
+# PARITY_PROBE_EMPTY for <tool> prints nothing and exits 0. The stub
 # refuses every other call: it writes the call to <log> and exits 1.
 parity::probe_stub() {
-  local dir="${1}" tool="${2}" argv="${3}" log="${4}" answer=":"
+  local dir="${1}" tool="${2}" argv="${3}" log="${4}" answer=":" entry
   if [[ -n "${argv}" ]]; then
     answer="[[ \"\$*\" != $(printf '%q' "${argv}") ]] || { echo 'parity-stub v0.0.0'; exit 0; }"
   fi
+  for entry in "${PARITY_PROBE_EMPTY[@]}"; do
+    [[ "${entry%%=*}" == "${tool}" ]] || continue
+    answer+=$'\n'"[[ \"\$*\" != $(printf '%q' "${entry#*=}") ]] || exit 0"
+  done
   parity::stub "${dir}" "${tool}" <<SH
 #!/usr/bin/env bash
 # The parity probe's ${tool}: a stub, never the host tool (hack/lib/parity.sh).
@@ -166,11 +182,25 @@ exit 1
 SH
 }
 
-# parity::probe_path <dir>: the PATH of a probe run, <dir>/.bin first. lo
-# also looks in the project's .bin first (Go: execx.Look; bash: the PATH
-# of the shim), so this PATH has the order that lo uses.
+# parity::probe_path <dir>: the PATH of a probe run, <dir>/.bin first. Go
+# looks in the project's .bin before PATH (execx.Look). The bash shim runs
+# with the PATH <dir>/.lok8s:<dir>/.bin:... (internal/cli/shim.go
+# childPATH, execx.PrependPATH: <dir>/.bin is on this PATH already, so
+# only the tree dir goes in front of it). No file in <dir>/.lok8s has the
+# name of a probe tool (.lok8s/tilt is a directory), so both find the stubs.
 parity::probe_path() {
   printf '%s\n' "${1}/.bin:${PATH}"
+}
+
+# parity::probe_which <dir> <tool>: the file that the probe PATH resolves
+# <tool> to (type -P), or nothing. PATH is local to this function, and
+# hash -r clears the hashed paths, which type -P would print first.
+parity::probe_which() {
+  local probe_path
+  probe_path="$(parity::probe_path "${1}")"
+  local PATH="${probe_path}"
+  hash -r
+  type -P "${2}"
 }
 
 # parity::probe_selfcheck <dir> <log>: exit 2 unless the stub log <log>
@@ -184,7 +214,7 @@ parity::probe_selfcheck() {
   parity::probe_log_check "${2}"
   for entry in "${PARITY_PROBE_TOOLS[@]}"; do
     tool="${entry%%=*}"
-    got="$(PATH="$(parity::probe_path "${dir}")"; type -P "${tool}")" || got=""
+    got="$(parity::probe_which "${dir}" "${tool}")" || got=""
     if [[ -L "${got}" ]]; then got="${got} -> $(readlink "${got}")"; fi
     if [[ "${got}" != "${dir}/.bin/${tool}" ]]; then
       printf 'error: the probe PATH resolves %s to %s, not to its stub %s\n' \
@@ -195,13 +225,14 @@ parity::probe_selfcheck() {
 }
 
 # parity::probe_refused: exit 2 when a probe stub refused a call (its log
-# is not empty). Each line names a host tool call that the probe made.
+# is not empty). Each line names a call that a stub refused: a host tool
+# call, or a version query that the stub does not know (a changed argv).
 # Then the log must still be writable (parity::probe_log_check): if a stub
 # could not write its line, the empty log does not prove that no stub
 # refused a call.
 parity::probe_refused() {
   if [[ -f "${PARITY_PROBE_LOG}" && -s "${PARITY_PROBE_LOG}" ]]; then
-    echo "error: the probe called a host tool that it must not run (a parity stub refused it):" >&2
+    echo "error: a parity stub refused a call (a host tool call, or a version query that the stub does not know):" >&2
     sed 's/^/  /' "${PARITY_PROBE_LOG}" >&2
     exit 2
   fi
@@ -224,14 +255,23 @@ parity::probe_log_check() {
 }
 
 # parity::probe_case <dir> <command...>: one case command (check,
-# expect_rc, ...) that runs `lo version` in <dir>, a project that links
-# the real toolchain (parity::new_project). For that command, <dir>/.bin
-# is a probe .bin (parity::probe_bin), first on PATH, as in the probe.
-# Then the project's own .bin and the PATH come back. The command runs in
-# this shell, so it counts its failure as before. Exit 2 as in the probe.
+# expect_rc, ...) that runs `lo version` or `lo drivers lo status` in
+# <dir>, a project that links the real toolchain (parity::new_project).
+# For that command, <dir>/.bin is a probe .bin (parity::probe_bin), first
+# on PATH, as in the probe. Then the project's own .bin and the PATH come
+# back. The command runs in this shell, so it counts its failure as
+# before. Exit 2 as in the probe, and exit 2 before any change when <dir>
+# is not a directory under WORK: this function moves and removes
+# <dir>/.bin.
 parity::probe_case() {
-  local dir="${1}" saved="${WORK}/probe-case.bin" path="${PATH}"
+  local dir="${1}" saved="${WORK}/probe-case.bin" path="${PATH}" real_dir real_work
   shift
+  real_dir="$(CDPATH='' cd -P -- "${dir}" 2>/dev/null && pwd -P)" || real_dir=""
+  real_work="$(CDPATH='' cd -P -- "${WORK}" 2>/dev/null && pwd -P)" || real_work=""
+  if [[ -z "${real_dir}" || -z "${real_work}" || "${real_dir}" != "${real_work}"/?* ]]; then
+    echo "error: parity::probe_case: ${dir} is not a directory under the work dir ${WORK}" >&2
+    exit 2
+  fi
   mv "${dir}/.bin" "${saved}"
   parity::probe_bin "${dir}" "${PARITY_PROBE_LOG}"
   parity::probe_selfcheck "${dir}" "${PARITY_PROBE_LOG}"

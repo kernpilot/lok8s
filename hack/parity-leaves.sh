@@ -11,8 +11,9 @@
 # trees — the scaffold bytes and the generated CRDs ARE the gate.
 #
 # Everything here is hermetic: no cluster, no Tilt, no registry, no network.
-# The only external call is `lo drivers lo status <domain>` → `kind get
-# clusters` (read-only) on a name that does not exist.
+# `lo drivers lo status <domain>` calls `kind get clusters`, and kind calls
+# docker. So those cases run with the probe stubs (parity::probe_case): the
+# stub kind answers with an empty cluster list.
 #
 # Usage: hack/parity-leaves.sh [path-to-go-lo]   (default: bin/lo)
 source "$(dirname "${BASH_SOURCE[0]}")/lib/parity.sh"
@@ -166,8 +167,10 @@ run_pair "${AD}" "${AD}" drivers ../x
 run_pair "${AD}" "${AD}" drivers 'bad name'
 run_pair "${AD}" "${AD}" drivers bogus
 expect_rc 0 "${AD}" drivers kubehz                             # Go driver since the kubehz port: cobra help vs argsh usage (documented), rc parity only
-run_pair "${AD}" "${AD}" drivers lo status alpha.dev           # read-only `kind get clusters`, absent name
-run_pair "${AD}" "${AD}" drivers lo s alpha.dev
+# The probe stub kind answers `kind get clusters` with an empty list: both
+# implementations print NotFound, as for a name that does not exist.
+parity::probe_case "${AD}" run_pair "${AD}" "${AD}" drivers lo status alpha.dev
+parity::probe_case "${AD}" run_pair "${AD}" "${AD}" drivers lo s alpha.dev
 run_pair "${AD}" "${AD}" drivers kubeone status beta.cloud     # NotProvisioned (no work dir)
 expect_rc 1 "${AD}" drivers lo status                          # missing domain (argsh: 2)
 expect_rc 1 "${AD}" drivers lo status alpha.dev extra

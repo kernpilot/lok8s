@@ -48,7 +48,8 @@ SH
   printf '#!/usr/bin/env bash\necho yq\n' >"${ROOT_FAKE}/.bin/yq"
   printf '#!/usr/bin/env bash\necho toolchain docker\n' >"${ROOT_FAKE}/.bin/docker"
   chmod +x "${ROOT_FAKE}/.bin/yq" "${ROOT_FAKE}/.bin/docker"
-  PROBE="${BATS_TEST_TMPDIR}/p"
+  # Under the WORK of run_case: parity::probe_case refuses a dir outside it.
+  PROBE="${BATS_TEST_TMPDIR}/work/p"
 }
 
 teardown() {
@@ -72,6 +73,20 @@ run_case() {
   run bash -c 'source "$1" && ROOT="$2" && WORK="$3" && PARITY_PROBE_LOG="$3/refused.log" &&
     mkdir -p "$3" "$4" && ln -s "$2/.bin" "$4/.bin" && P="$4" && '"${1}" \
     _ "${LIB}" "${ROOT_FAKE}" "${BATS_TEST_TMPDIR}/work" "${PROBE}"
+}
+
+# fixture_root <name> [tool...]: a stand-in checkout for parity::init,
+# which finds ROOT two levels above PARITY_LIB_DIR: hack/lib, an empty
+# .lok8s, and a .bin with yq and each <tool>. The test sets PARITY_LIB_DIR
+# to <name>/hack/lib after it sources the library.
+fixture_root() {
+  local root="${BATS_TEST_TMPDIR}/${1}" tool
+  shift
+  mkdir -p "${root}/hack/lib" "${root}/.lok8s" "${root}/.bin"
+  for tool in yq "$@"; do
+    printf '#!/usr/bin/env bash\necho "toolchain %s"\n' "${tool}" >"${root}/.bin/${tool}"
+    chmod +x "${root}/.bin/${tool}"
+  done
 }
 
 # run_lib <script>: the library sourced in a child bash, ROOT set to the
@@ -114,7 +129,14 @@ run_lib() {
   [ "${status}" -eq 1 ]
   run "${PROBE}/.bin/docker" ps
   [ "${status}" -eq 1 ]
-  [ "$(cat "${LOG}")" = "$(printf 'kubectl version\nhelm version\ndocker ps')" ]
+  # kind get clusters (PARITY_PROBE_EMPTY): an empty list, exit 0, no log
+  # line. Any other kind get is refused.
+  run "${PROBE}/.bin/kind" get clusters
+  [ "${status}" -eq 0 ]
+  [ -z "${output}" ]
+  run "${PROBE}/.bin/kind" get nodes
+  [ "${status}" -eq 1 ]
+  [ "$(cat "${LOG}")" = "$(printf 'kubectl version\nhelm version\ndocker ps\nkind get nodes')" ]
 }
 
 @test "prove_switch: the probe passes, and its lo finds each host tool as the probe stub" {
@@ -139,7 +161,7 @@ run_lib() {
 @test "prove_switch: a host tool call in the bash run fails the harness with exit 2 and names the call" {
   run_init FAKE_LO_CALL="bash docker ps"
   [ "${status}" -eq 2 ]
-  [[ "${output}" == *"error: the probe called a host tool that it must not run (a parity stub refused it):"* ]]
+  [[ "${output}" == *"error: a parity stub refused a call (a host tool call, or a version query that the stub does not know):"* ]]
   grep -qx '  docker ps' <<<"${output}"
   [[ "${output}" != *"probe passed"* ]]
   # The harness stopped after the bash run: the go run did not start.
@@ -169,15 +191,29 @@ run_lib() {
 }
 
 @test "prove_switch: a probe bin without the docker stub stops with exit 2 before lo runs" {
-  # The probe_stub of the library, wrapped: it writes no docker stub.
-  run env -u PARITY_KEEP bash -c 'source "$1" &&
-    eval "orig_$(declare -f parity::probe_stub)" &&
-    parity::probe_stub() { [[ "$2" == docker ]] || orig_parity::probe_stub "$@"; } &&
-    parity::init "$2" && echo "probe passed"' _ "${LIB}" "${BATS_TEST_TMPDIR}/lo"
-  [ "${status}" -eq 2 ]
-  [[ "${output}" == *"error: the probe PATH resolves docker to ${BATS_TEST_TMPDIR}/stub-bin/docker, not to its stub "*"/probe/.bin/docker"* ]]
-  [[ "${output}" != *"probe passed"* ]]
-  [ ! -e "${FAKE_LO_LOG}" ]
+  # The probe_stub of the library, wrapped: it writes no docker stub. Two
+  # stand-in checkouts, so the result does not depend on the real .bin: in
+  # with-docker the probe .bin keeps the link to the toolchain's docker, in
+  # without-docker the PATH finds the host docker (here the net stub).
+  fixture_root with-docker docker
+  fixture_root without-docker
+  local root want
+  for root in with-docker without-docker; do
+    run env -u PARITY_KEEP bash -c 'source "$1" && PARITY_LIB_DIR="$3/hack/lib" &&
+      eval "orig_$(declare -f parity::probe_stub)" &&
+      parity::probe_stub() { [[ "$2" == docker ]] || orig_parity::probe_stub "$@"; } &&
+      parity::init "$2" && echo "probe passed"' _ "${LIB}" "${BATS_TEST_TMPDIR}/lo" "${BATS_TEST_TMPDIR}/${root}"
+    [ "${status}" -eq 2 ] || { echo "${root}: rc ${status}: ${output}"; return 1; }
+    # The part that is the same in both: the stub path that is not there.
+    [[ "${output}" == *"error: the probe PATH resolves docker to "*", not to its stub "*"/probe/.bin/docker"* ]] \
+      || { echo "${root}: ${output}"; return 1; }
+    # Each checkout takes its own branch.
+    want="${BATS_TEST_TMPDIR}/stub-bin/docker,"
+    [[ "${root}" == without-docker ]] || want="/probe/.bin/docker -> ${BATS_TEST_TMPDIR}/with-docker/.bin/docker,"
+    [[ "${output}" == *"${want}"* ]] || { echo "${root}: no '${want}' in: ${output}"; return 1; }
+    [[ "${output}" != *"probe passed"* ]]
+    [ ! -e "${FAKE_LO_LOG}" ]
+  done
 }
 
 @test "prove_switch: a stub log that cannot be written stops with exit 2 before lo runs" {
@@ -236,4 +272,77 @@ run_lib() {
   [ "${status}" -eq 2 ]
   [[ "${output}" == *"error: the probe PATH resolves docker to ${PROBE}/.bin/docker -> ${ROOT_FAKE}/.bin/docker, not to its stub ${PROBE}/.bin/docker"* ]]
   [[ "${output}" != *"case ran"* ]]
+}
+
+@test "probe_case: a case that lists the kind clusters gets an empty list, and no stub refuses" {
+  run_case 'case_cmd() { local out rc=0; out="$(kind get clusters)" || rc=$?; echo "case: rc=${rc} out=[${out}]"; }
+    parity::probe_case "$P" case_cmd
+    echo "after the case"'
+  [ "${status}" -eq 0 ]
+  grep -qx 'case: rc=0 out=\[\]' <<<"${output}"
+  [[ "${output}" == *"after the case"* ]]
+}
+
+@test "probe_case: a dir that is not under the work dir stops with exit 2 before any change" {
+  local work="${BATS_TEST_TMPDIR}/work" outside="${BATS_TEST_TMPDIR}/outside" dir
+  for dir in "${outside}" "${work}/../outside" "${work}" "${BATS_TEST_TMPDIR}/absent"; do
+    rm -rf "${work}" "${outside}"
+    mkdir -p "${outside}/.bin"
+    : >"${outside}/.bin/marker"
+    export CASE_DIR="${dir}"
+    run_case 'case_cmd() { echo "case ran"; }
+      parity::probe_case "${CASE_DIR}" case_cmd
+      echo "after the case"'
+    [ "${status}" -eq 2 ] || { echo "${dir}: rc ${status}: ${output}"; return 1; }
+    [[ "${output}" == *"error: parity::probe_case: ${dir} is not a directory under the work dir ${work}"* ]] \
+      || { echo "${dir}: ${output}"; return 1; }
+    [[ "${output}" != *"case ran"* ]]
+    # The .bin outside is the one that was there: no probe stubs, no move.
+    [ -f "${outside}/.bin/marker" ]
+    [ ! -e "${outside}/.bin/docker" ]
+    [ ! -e "${work}/probe-case.bin" ]
+  done
+}
+
+@test "parity-leaves.sh: each lo drivers lo status case with a domain runs with the probe stubs" {
+  # kind get clusters calls docker: the case must get the stub kind.
+  local lines line
+  lines="$(grep -E '^[^#]*run_pair .* drivers lo (status|s) [^[:space:]#]+[[:space:]]*(#.*)?$' "${_PROJECT_ROOT}/hack/parity-leaves.sh")"
+  [ -n "${lines}" ]
+  while IFS= read -r line; do
+    [[ "${line}" == 'parity::probe_case "${AD}" run_pair '* ]] \
+      || { echo "not with the probe stubs: ${line}"; return 1; }
+  done <<<"${lines}"
+}
+
+@test "PARITY_PROBE_TOOLS: each host tool of the two version lists has a stub that answers its version argv" {
+  # The tools that lo version runs from the project's own toolchain (the
+  # links of parity::own_bin). They run for real and have no stub.
+  local toolchain=" argsh yq kustomize "
+  run bash -c 'source "$1" && printf "%s\n" "${PARITY_PROBE_TOOLS[@]}"' _ "${LIB}"
+  [ "${status}" -eq 0 ]
+  local probe="${output}" go_list bash_list bash_names
+  # Go: the versionTools entries {"<tool>", []string{"<arg>", ...}, ...}.
+  go_list="$(sed -n '/^var versionTools = /,/^}$/p' "${_PROJECT_ROOT}/internal/cli/cmd_version.go" \
+    | sed -n 's/^[[:space:]]*{"\([A-Za-z0-9_-]*\)", \[\]string{\([^}]*\)}.*/\1=\2/p' | sed 's/", "/ /g; s/"//g')"
+  # bash: the case lines of version::_of, <tool>) out="$(<tool> <argv> 2>/dev/null ...,
+  # and the tool list of the for loop in main::version.
+  bash_list="$(sed -n '/^version::_of() {/,/^}/p' "${_PROJECT_ROOT}/.lok8s/libs/version" \
+    | sed -n 's/^[[:space:]]*\([A-Za-z0-9_-]*\))[[:space:]]*out="[$](\1 \(.*\) 2>\/dev\/null.*/\1=\2/p')"
+  bash_names="$(sed -n 's/^[[:space:]]*for tool in \(.*\); do$/\1/p' "${_PROJECT_ROOT}/.lok8s/libs/version")"
+  # Each read found the docker entry: the patterns still fit the sources.
+  grep -qx 'docker=--version' <<<"${go_list}"
+  grep -qx 'docker=--version' <<<"${bash_list}"
+  [[ " ${bash_names} " == *" docker "* ]]
+  local entry tool missing=""
+  while IFS= read -r entry; do
+    tool="${entry%%=*}"
+    if [[ "${toolchain}" == *" ${tool} "* ]]; then continue; fi
+    grep -qxF -- "${entry}" <<<"${probe}" || missing+=" '${entry}'"
+  done <<<"${go_list}"$'\n'"${bash_list}"
+  for tool in ${bash_names}; do
+    if [[ "${toolchain}" == *" ${tool} "* ]]; then continue; fi
+    grep -qE "^${tool}(=|\$)" <<<"${probe}" || missing+=" '${tool}'"
+  done
+  [ -z "${missing}" ] || { echo "not in PARITY_PROBE_TOOLS (hack/lib/parity.sh):${missing}"; return 1; }
 }
