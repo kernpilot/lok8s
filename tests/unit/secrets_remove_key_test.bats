@@ -1682,6 +1682,19 @@ ${_twin_tail}" ] || { echo "$output" >&2; return 1; }
   [ -z "$(find "${PATH_BASE}" -name '.sops.yaml.tmp-*')" ]
 }
 
+@test "the re-key makes each new .enc newer than a plaintext dated in the future" {
+  # (Go twin: nudgeNewer in sopsEncryptFile.)
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  local plain="${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.K"
+  touch -t 209901010000 "${plain}"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$(cat "${ENCRYPT_LOG}")" = a.dev/secrets/Secret.app.default.K ] || { cat "${ENCRYPT_LOG}" >&2; return 1; }
+  [[ "${plain}.enc" -nt "${plain}" ]] || { echo "the plaintext is still the newer file" >&2; return 1; }
+}
+
 @test "a re-key that stops after the write prints the command that resumes it" {
   _load
   _stub_encrypt
