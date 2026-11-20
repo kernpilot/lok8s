@@ -45,9 +45,21 @@ type bearer struct {
 
 func withBearer(token string) bearer { return bearer{set: true, token: token} }
 
+// errHeaderControl is the refusal of request for a bearer with a control
+// character (isControl). The text names no value.
+var errHeaderControl = errors.New("a request header holds a control character: lo sends no request")
+
 // request performs one call and returns status + body; err only for a
 // transport failure (bash: curl's own non-zero exit).
+//
+// A bearer with a control character gets errHeaderControl, and no request
+// is built. This is the second guard, after the check of each entry point
+// (credentialOK), as http::curl_config is in the bash twin. It prints no
+// line, so a quiet caller stays quiet. An empty bearer passes.
 func (c *Context) request(ctx context.Context, method, url string, auth bearer, body []byte) (*httpResult, error) {
+	if auth.set && hasControl(auth.token) {
+		return nil, errHeaderControl
+	}
 	var rd io.Reader
 	if body != nil {
 		rd = bytes.NewReader(body)
@@ -79,7 +91,7 @@ func (c *Context) request(ctx context.Context, method, url string, auth bearer, 
 // transport error before that point (DNS, connect, the TLS handshake) sent
 // nothing. After it, possibly the server acted on the request although no
 // answer came back. The bash twin reads the same from the curl exit code
-// (node::maintain).
+// (node::maintain). A refusal of request (errHeaderControl) sent nothing.
 func (c *Context) requestSent(ctx context.Context, method, url string, auth bearer, body []byte) (*httpResult, bool, error) {
 	var sent atomic.Bool
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{WroteHeaders: func() { sent.Store(true) }})

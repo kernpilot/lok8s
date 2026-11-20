@@ -172,6 +172,10 @@ var spaceDigits = regexp.MustCompile(`^[0-9]+$`)
 // Returns status + body; err only for a transport failure (already
 // rendered, the "unreachable" line). Callers branch on is2xx(status).
 func (c *Context) spaceAPI(ctx context.Context, cfg *Config, method, path string, body []byte) (*httpResult, error) {
+	// The refusal says so itself: no "unreachable" line after it.
+	if !c.credentialOK("KUBEHZ_TOKEN") {
+		return nil, ErrHandled
+	}
 	res, err := c.fetchStatus(ctx, method, cfg.APIURL+path, withBearer(c.getenv("KUBEHZ_TOKEN")), body)
 	if err != nil {
 		c.errorf("kubehz API unreachable (%s %s)", method, path)
@@ -181,8 +185,14 @@ func (c *Context) spaceAPI(ctx context.Context, cfg *Config, method, path string
 }
 
 // spaceAPIQuiet is `kubehz::space_api … 2>/dev/null || true`: a transport
-// failure yields an empty result instead of an error line.
+// failure yields an empty result instead of an error line. So does a token
+// with a control character, with no request (the refusal of
+// http::credential_ok goes to /dev/null in the bash twin). Each caller has
+// made a spaceAPI call or a preflight before, which shows the refusal.
 func (c *Context) spaceAPIQuiet(ctx context.Context, cfg *Config, method, path string) *httpResult {
+	if hasControl(c.getenv("KUBEHZ_TOKEN")) {
+		return &httpResult{}
+	}
 	res, err := c.fetchStatus(ctx, method, cfg.APIURL+path, withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
 	if err != nil {
 		return &httpResult{}
@@ -848,6 +858,10 @@ func (c *Context) ProvisionShared(ctx context.Context, cfg *Config, domain, clus
 // the path, or "" when the api has no file for this space yet (see the
 // caller). The file holds no credential; the mode matches the hosted one.
 func (c *Context) spaceKubeconfig(ctx context.Context, cfg *Config, domain, spaceID string) string {
+	// As spaceAPIQuiet: no request, and no line (bash: >/dev/null 2>&1).
+	if hasControl(c.getenv("KUBEHZ_TOKEN")) {
+		return ""
+	}
 	res, err := c.fetchStatus(ctx, "GET", cfg.APIURL+"/api/spaces/"+spaceID+"/kubeconfig", withBearer(c.getenv("KUBEHZ_TOKEN")), nil)
 	if err != nil || !is2xx(res.Status) || len(res.Body) == 0 {
 		if err == nil {
