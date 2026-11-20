@@ -1226,12 +1226,16 @@ KUBECONFIG=agent.yaml kubectl get pods
 
 The command does not replace a file that exists, so `--file ~/.kube/config`
 cannot remove your other contexts by accident. A file that appears while
-`lo` downloads stays too. On a file system with no hard links (vfat, exFAT,
-some FUSE and SMB mounts), `lo` writes a new file with an exclusive create.
-A file that appears still stays, but a program that reads the file during
-the write can see a part of it. Add `--force` (or `-f`) to replace the
-file. The new file belongs to you and has mode 0600. A hard link to the old
-file keeps the old content.
+`lo` downloads stays too. `lo` publishes a new file with a hard link. When
+the link fails and no file is at the path, for example on a file system
+with no hard links (vfat, exFAT, some FUSE and SMB mounts), `lo` writes the
+new file with an exclusive create. A program that reads the file during
+that write can see a part of it. When the write fails, `lo` removes the
+part that it wrote and names the cause. Add `--force` (or `-f`) to replace
+the file. The new file belongs to you and has mode 0600. On vfat and exFAT,
+the mount options (`uid=`, `gid=`, `fmask=`, `umask=`) set the owner and
+the mode of every file, often 0644. A hard link to the old file keeps the
+old content.
 
 When the path is a link, `--force` replaces the file that the link points
 to, and the link stays. `lo` does this only when the owners and the mode
