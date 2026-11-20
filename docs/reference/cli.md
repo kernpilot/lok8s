@@ -507,7 +507,9 @@ lo status [--domain <domain>]
 
 Delegates to the driver contract's `driver::status` function. For Lo clusters: checks if the kind cluster exists. For Capi clusters: queries the CAPI Cluster resource phase.
 
-When the kubeconfig file exists, `lo status` (also with `-o json`) reads the nodes and the `ClusterInventory/cluster` object with kubectl. Each request of these two reads stops after 5 seconds (`--request-timeout=5s`). After `lo down` the kubeconfig can point to an API server that does not answer. The Nodes section then shows `(not reachable)`.
+When the kubeconfig file exists, `lo status` (also with `-o json`) first sends one probe, `kubectl get --raw /readyz`, and then reads the nodes and the `ClusterInventory/cluster` object with kubectl. Each of these kubectl calls ends with `--request-timeout=5s`. That flag stops one request after 5 seconds, not the whole call: a `kubectl get` can make discovery requests before the read and retry them, and the flag does not bound an exec credential plugin of the kubeconfig (`users[].user.exec`). The probe makes no discovery request. So each call, the probe too, also has a bound of 10 seconds for the whole call. At the bound, kubectl and its children (a credential plugin too) get SIGTERM, and SIGKILL 2 seconds later. The bash implementation uses `timeout` for this bound. Without `timeout` on `PATH`, each call there has only the request timeout.
+
+After `lo down` the kubeconfig can point to an API server that does not answer. When the probe fails, `lo status` skips the two reads: the Nodes section shows `(not reachable)`, and the report has no Inventory section (`-o json`: `nodes` is empty and `inventory` is `null`). A read that reaches its bound counts as a failed read: a node read that stops shows `(not reachable)`, and an inventory read that stops leaves out the Inventory section. For a Capi cluster, the read of the Cluster phase from the management cluster has the same bound of 10 seconds. A read that reaches it shows `NotFound`, as a read that fails.
 
 ### lo gitops
 
