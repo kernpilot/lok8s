@@ -119,7 +119,7 @@ kubectl_respond() {
       printf 'kind: Secret\n'
       ;;
     "apply "*) cat > /dev/null ;;
-    *"patch configmap kubehz-agent-config --type merge --patch-file /dev/stdin")
+    *"patch configmap kubehz-agent-state --type merge --patch-file /dev/stdin")
       printf 'patch: %s\n' "$(cat)" >> "${REQ_LOG}"
       ;;
     *"get secret kubehz-agent"*) printf '%s' "${AGENT_TOKEN_IN_CLUSTER}" | base64 | tr -d '\n' ;;

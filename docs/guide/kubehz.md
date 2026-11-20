@@ -870,16 +870,22 @@ Properties worth knowing:
 - **Outbound-only.** The agent pushes; the platform never connects into your
   cluster and holds no credentials for it (only verifier hashes).
 - **Least-privilege RBAC.** The `kubehz-agent` ServiceAccount can read cluster
-  state: `get`/`list` on nodes, namespaces, componentstatuses and CSRs, `list`
-  pods in `kube-system` only (control-plane health), and `get` on the `/readyz`
-  + `/version` API paths. On top of that it holds `get`+`create` (never
-  `update`/`patch`/`delete`) on Secrets in its own `kubehz-system` namespace,
-  to bootstrap its identity Secret once. It reads no Secrets elsewhere and can rotate nothing. The
+  state: `list` on nodes and CSRs, `list` pods in `kube-system` only
+  (control-plane health), and `get` on the `/readyz` + `/version` API paths.
+  On top of that it holds `get` on its identity Secret and `create` on
+  Secrets (never `update`/`patch`/`delete`) in its own `kubehz-system`
+  namespace, to bootstrap that Secret once. It reads no other Secret and can
+  rotate nothing. The
   [assessment](#assessment-and-handover) adds read-only probe grants
-  (storageclasses, persistentvolumes, services `list`, webhook configuration
-  `list`, `get` on the one CAPI CRD, kube-system daemonset `list` + the
-  `kubeadm-config` ConfigMap) and `get`/`patch` scoped to the single
-  `kubehz-agent-config` ConfigMap for its send-gate marker.
+  (`list` on storageclasses, persistentvolumes, services and webhook
+  configurations, `get` on the one CAPI CRD, kube-system daemonset `list` +
+  the `kubeadm-config` ConfigMap). The agent keeps its markers (the
+  assessment send gate, the claim nonce and the desired-state validator) as
+  annotations on one ConfigMap, `kubehz-agent-state`. `get`/`patch` on that
+  ConfigMap is its only grant that changes an existing object, and the
+  Secret `create` above is its only other write grant. It has no access to
+  `kubehz-agent-config`, its configuration: the pod gets it through
+  `envFrom`, so the agent cannot change its own API URL.
 - **Domain-keyed.** The payload's `clusterId` is the cluster domain, the same
   identity it registers under.
 - **Hardened.** Stock `alpine/k8s` image (pinned by digest), non-root, read-only
@@ -940,6 +946,50 @@ The manifests ship with lok8s as kustomize directories:
 `.lok8s/libs/kubehz/manifests/live-agent/` (live agent, base and managed). So
 you can read exactly what `deploy` applies, or render it first with
 `lo kubehz deploy --dry-run`.
+
+### An agent that an older lo deployed
+
+An older lo kept the agent's markers as annotations on `kubehz-agent-config`,
+and the agent could patch that ConfigMap. lo now keeps them on
+`kubehz-agent-state`. After you update lo, run `lo kubehz deploy` again. It
+adds `kubehz-agent-state` and the new RBAC, and the CronJob reads its markers
+there from the next tick.
+
+- Until you deploy again, the agent in the cluster keeps the old script and
+  beats as before. `lo kubehz claim` stops with
+  `configmap/kubehz-agent-state not found`.
+- The first tick after the deploy finds no markers. It sends one assessment,
+  and the desired-state poll gets one full answer. Then the 24-hour gate holds
+  again.
+- The agent does not echo a claim nonce that you placed before the deploy.
+  Place a new one with `lo kubehz claim`.
+- The old annotations stay on `kubehz-agent-config`. Nothing reads them.
+- Deploy and claim with one lo version. `lo kubehz claim` only checks that
+  `kubehz-agent-state` exists, and that does not prove that the agent in the
+  cluster reads it. A `lo kubehz deploy` with an older lo puts back the old
+  agent, which reads its markers from `kubehz-agent-config`, and leaves
+  `kubehz-agent-state` behind with nothing reading it. An older lo's
+  `lo kubehz claim` places the nonce on `kubehz-agent-config`, which the
+  current agent does not read. In both cases the claim never verifies: run
+  `lo kubehz deploy` with the current lo, then place a new nonce with
+  `lo kubehz claim`.
+
+Each later `lo kubehz deploy` keeps the markers on `kubehz-agent-state`:
+`kubectl apply` removes only what an earlier apply set.
+
+If a GitOps controller applies the agent manifests, make sure that it does
+not reset `kubehz-agent-state`: let it create the ConfigMap only. For Flux,
+add the annotation `kustomize.toolkit.fluxcd.io/ssa: IfNotPresent` to that
+ConfigMap in your overlay. The shipped manifest of the ConfigMap has no
+annotations. A reset deletes all the markers:
+
+- The time of the last assessment and a pending platform request go. The
+  next tick sends an assessment and writes the time again. A controller that
+  resets the ConfigMap again and again thus causes at most one assessment
+  per reset, and at most one per 5-minute tick.
+- A pending claim nonce goes. That claim never verifies: place a new one
+  with `lo kubehz claim`.
+- The desired-state validator goes. The next poll gets one full answer.
 
 ## Status and deregistration
 
@@ -1269,6 +1319,37 @@ webhook counts, node/control-plane counts. It is kubectl-only, read-only,
 fail-soft, and sent **at most once per 24 h** (or when the platform requests
 a refresh through the heartbeat response). The platform turns it into a
 handover **feasibility** verdict.
+
+The agent keeps the time of the last send on `kubehz-agent-state`, and it
+sends an assessment only when it has stored that time. Before the probes, it
+writes the new time, and the same call removes a pending platform request
+(one `kubectl annotate`, one patch). The write comes first, so the agent
+never sends an assessment whose time it has not stored: an agent that cannot
+store the time sends no assessment, and thus cannot send one on every tick.
+What the agent writes for each outcome of the send:
+
+| Outcome | Before the send | After the send |
+|---|---|---|
+| Delivered: the beat with the assessment lands | the new time; a pending request removed | nothing |
+| Rejected: that beat fails, the plain retry lands | the new time; a pending request removed | nothing (the next assessment comes after 24 h) |
+| Failed: both beats fail | the new time; a pending request removed | the old time (or none) and the request put back, in one call (the next tick sends again) |
+
+A tick that writes the time and then sends no assessment (a probe has no
+answer, or the beat is skipped) puts back the old values the same way.
+
+If the agent cannot write the ConfigMap (its RBAC lacks the `patch`, or an
+admission webhook refuses it), the tick sends no assessment, keeps the
+request, and logs
+`kubehz: assessment not sent: the agent cannot write configmap/kubehz-agent-state in kubehz-system; run 'lo kubehz deploy'`.
+If the agent cannot read the ConfigMap, the tick logs
+`kubehz: assessment and desired-state poll skipped: …`. In both cases the
+plain heartbeat still goes out. `lo kubehz deploy` puts back the ConfigMap
+and the agent's RBAC. An admission webhook that refuses the write is yours
+to change.
+
+If the write that puts back the old values fails too, the tick logs
+`kubehz: could not put back the assessment marker on configmap/kubehz-agent-state in kubehz-system; the next assessment comes after the 24h window or on a platform request`.
+That assessment is lost. The agent does not send it again on each tick.
 
 ```bash
 lo kubehz assess    # pretty-print the stored assessment + feasibility

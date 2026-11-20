@@ -1360,16 +1360,18 @@ kubehz::resolve_cluster_id() {
 # the agent clears the nonce; a wrong/expired nonce produces no signal (the
 # beat never fails because of it).
 #
-# The nonce persists as annotations on the kubehz-agent-config ConfigMap (the
-# agent's established marker surface): kubehz.cloud/claim-nonce + the
-# …-placed epoch stamp, written in ONE merge patch so the agent never reads a
-# half-written pair. The nonce reaches kubectl in that patch on stdin, never
-# on argv: every local user can read argv (ps, /proc/<pid>/cmdline). The Go
-# twin sends the same patch. The write runs with the OPERATOR's ambient kubeconfig
-# (exported by main from the active domain — switch clusters with
-# `lo use <domain>` first); the agent's own RBAC stays untouched — its marker
-# Role already grants get/patch on this one ConfigMap, which is exactly what
-# the CronJob needs to read and later clear the nonce.
+# The nonce persists as annotations on the kubehz-agent-state ConfigMap (the
+# agent's marker surface, apart from its configuration kubehz-agent-config):
+# kubehz.cloud/claim-nonce + the …-placed epoch stamp, written in ONE merge
+# patch so the agent never reads a half-written pair. The nonce reaches kubectl
+# in that patch on stdin, never on argv: every local user can read argv (ps,
+# /proc/<pid>/cmdline). The Go twin sends the same patch. The write runs with
+# the OPERATOR's ambient kubeconfig (exported by main from the active domain —
+# switch clusters with `lo use <domain>` first); the agent's own RBAC stays
+# untouched — its marker Role grants get/patch on this one ConfigMap, which is
+# exactly what the CronJob needs to read and later clear the nonce. An agent
+# that an older lo deployed has no kubehz-agent-state and does not read a nonce
+# here: `lo kubehz deploy` adds the ConfigMap.
 #
 # SECURITY: the nonce is a claim ticket — this command never prints it, and no
 # error message may echo it; only its presence/shape is reported.
@@ -1404,9 +1406,9 @@ kubehz::claim() {
     return 1
   fi
 
-  local ns="kubehz-system" cm="kubehz-agent-config"
+  local ns="kubehz-system" cm="kubehz-agent-state"
   if ! kubectl -n "${ns}" get configmap "${cm}" >/dev/null 2>&1; then
-    error "configmap/${cm} not found in ${ns}. Deploy the heartbeat agent first (see docs/guide/kubehz.md) and point your kubeconfig at the cluster."
+    error "configmap/${cm} not found in ${ns}. Deploy the heartbeat agent first, or run 'lo kubehz deploy' again for an agent that an older lo deployed (see docs/guide/kubehz.md), and point your kubeconfig at the cluster."
     return 1
   fi
 
