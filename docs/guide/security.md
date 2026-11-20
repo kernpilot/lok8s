@@ -221,8 +221,10 @@ gives no credential to a child process as an argument:
   stdin (`--from-env-file=/dev/stdin`), not from `--from-literal`.
 
 This includes the Hetzner Cloud token, the Hetzner Robot password, the kubehz
-token, the KKP token, the AWS keys and the kubehz agent token in the agent
-CronJob. Both implementations follow the rule. `tests/unit/credentials_argv_test.bats`
+token, the KKP token, the AWS keys, the claim nonce of `lo kubehz claim` and
+the kubehz agent token in the agent CronJob. For the claim nonce, `lo` itself
+gets the value as an argument with `--nonce <value>`: use `--nonce -` and give
+the nonce on stdin. Both implementations follow the rule. `tests/unit/credentials_argv_test.bats`
 and `internal/execx/argv_credentials_test.go` check it with sentinel values.
 
 Each curl call of the lok8s tree passes `-q` as its first argument: the

@@ -1943,7 +1943,6 @@ lo kubehz claim --nonce <khzn_…> [flags]
 ### Examples
 
 ```
-  lo kubehz claim --nonce khzn_2f9c1e
   lo kubehz claim --nonce - < nonce.txt
 ```
 

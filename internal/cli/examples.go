@@ -106,8 +106,7 @@ var commandExamples = map[string]string{ // #nosec G101 -- example command lines
 	"kubehz claim-code": `  lo kubehz claim-code`,
 	"kubehz token": `  lo kubehz token --token-url https://id.kubehz.cloud/oauth/v2/token --scope "$KUBEHZ_AGENT_SCOPE"
   KUBEHZ_TOKEN=$(lo kubehz token --format token) lo kubehz status`,
-	"kubehz claim": `  lo kubehz claim --nonce khzn_2f9c1e
-  lo kubehz claim --nonce - < nonce.txt`,
+	"kubehz claim": `  lo kubehz claim --nonce - < nonce.txt`,
 	"kubehz space": `  lo kubehz space list
   lo kubehz space create --name "CI run" --slug ci-1234 --lease-hours 3`,
 	"kubehz space list": `  lo kubehz space list
