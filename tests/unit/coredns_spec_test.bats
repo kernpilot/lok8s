@@ -41,8 +41,10 @@ YAML
 
   # Stub kubectl: capture the rendered --from-file dir before it is cleaned up,
   # and any loadBalancerIPs annotation; consume piped stdin of `| kubectl apply`.
+  # A patch records the KUBERC it ran with.
   kubectl() {
     local a
+    [[ "${1-}" != patch ]] || echo "patch KUBERC=${KUBERC-<unset>}" >>"${CAPTURE}/kenv.log"
     for a in "$@"; do
       case "$a" in
         --from-file=*) cp "${a#--from-file=}"/* "${CAPTURE}/" 2>/dev/null || true ;;
@@ -73,6 +75,13 @@ YAML
   set +u
   assert_success
   refute_output --partial "unbound variable"
+}
+
+@test "coredns: the deployment patch from a file runs with the kubectl user defaults off (KUBERC=off)" {
+  export KUBERC="${BATS_TEST_TMPDIR}/user-kuberc"   # a kuberc of the user
+  lo::coredns "x.dev"
+  run cat "${CAPTURE}/kenv.log"
+  assert_output "patch KUBERC=off"
 }
 
 @test "coredns: pins coredns-external to the LAST pool IP (avoids gateway pool[0] race)" {

@@ -2,8 +2,9 @@ package kubehz
 
 // kuberc_test.go — every kubectl apply of the agent deploy (the namespace,
 // the bind Secret, the CronJob agent and the live agent) runs with the
-// kubectl user defaults off (execx.KubeRCOff). The bash twin is
-// libs/kubehz/deploy (the KUBERC=off prefix).
+// kubectl user defaults off (execx.KubeRCOff). The applies run through
+// Context.run, which sets it on each kubectl child (execx.KubectlEnv). The
+// bash twin is libs/kubehz/deploy (the KUBERC=off prefix).
 
 import (
 	"slices"
@@ -20,10 +21,7 @@ func TestDeployAppliesRunWithKubeRCOff(t *testing.T) {
 	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
 	applies := 0
 	for _, c := range h.runner.calls {
-		if !execx.KubectlApplyOrDiff(c.Name, c.Args) {
-			if slices.Contains(c.Env, execx.KubeRCOff) {
-				t.Errorf("%s: %s set on a call that is not an apply", argvLine(c), execx.KubeRCOff)
-			}
+		if c.Name != "kubectl" || !slices.Contains(c.Args, "apply") {
 			continue
 		}
 		applies++

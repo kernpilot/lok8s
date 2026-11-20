@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,11 +39,7 @@ func (f *fakeKubectl) Run(ctx context.Context, c execx.Cmd) error {
 	line := c.Name + " " + strings.Join(c.Args, " ")
 	f.calls = append(f.calls, line)
 	f.envs = append(f.envs, c.Env)
-	// Skip a leading --kubeconfig pair, like the bats stub's cmd probe.
-	args := c.Args
-	if len(args) >= 2 && args[0] == "--kubeconfig" {
-		args = args[2:]
-	}
+	args := verbArgs(c.Args)
 	if len(args) == 0 {
 		return nil
 	}
@@ -66,6 +63,23 @@ func (f *fakeKubectl) Run(ctx context.Context, c execx.Cmd) error {
 }
 
 func (f *fakeKubectl) log() string { return strings.Join(f.calls, "\n") }
+
+// verbArgs drops the leading global flags of a call (--kubeconfig <path>,
+// --server <url>, --server=<url>), like the bats stub's cmd probe, so the
+// fake sees the subcommand.
+func verbArgs(args []string) []string {
+	for len(args) > 0 {
+		switch {
+		case len(args) >= 2 && (args[0] == "--kubeconfig" || args[0] == "--server"):
+			args = args[2:]
+		case strings.HasPrefix(args[0], "--server="):
+			args = args[1:]
+		default:
+			return args
+		}
+	}
+	return args
+}
 
 const deployManifest = `apiVersion: apps/v1
 kind: Deployment
@@ -241,6 +255,60 @@ func TestStuckTerminatingForceClearsCRFinalizers(t *testing.T) {
 	}
 	if !strings.Contains(f.log(), "finalizers") {
 		t.Errorf("no finalizer clear:\n%s", f.log())
+	}
+}
+
+// A global flag of the caller with a separate value before the subcommand
+// (--server <url> apply) must not drop the override of the kubectl user
+// defaults: each write of Apply from stdin (the apply passes, the replace
+// of the immutable heal, the replace of the namespace finalize) runs with
+// KUBERC=off, and the reads (get) run without it. The Env is set at each
+// call, not guessed from the arguments.
+func TestApplyWritesRunWithKubeRCOffAfterAServerFlag(t *testing.T) {
+	for _, flags := range [][]string{
+		{"--server", "https://203.0.113.1:6443"},
+		{"--server=https://203.0.113.1:6443"},
+	} {
+		t.Run(strings.Join(flags, " "), func(t *testing.T) {
+			f := &fakeKubectl{applyRC: 1,
+				applyOut: "Error from server (Invalid): Deployment.apps \"web\" is invalid: spec.selector: field is immutable\n" +
+					"Error from server (Forbidden): configmaps \"ca-bundle\" is forbidden: unable to create new content in namespace kubermatic because it is being terminated",
+				getOut: "2026-01-01T00:00:00Z"}
+			a, _, _ := testApplier(f)
+			a.ForceRecreate = true
+			a.Apply(t.Context(), "resources", deployManifest, flags...)
+			seen := map[string]int{}
+			for i, line := range f.calls {
+				args := verbArgs(strings.Fields(line)[1:])
+				if len(args) < 2 {
+					continue
+				}
+				verb := args[0]
+				if verb == "replace" {
+					verb += " " + args[1]
+				}
+				seen[verb]++
+				off := slices.Contains(f.envs[i], execx.KubeRCOff)
+				switch verb {
+				case "apply", "replace --force", "replace --raw":
+					if !off {
+						t.Errorf("%s runs without %s (Env %q)", line, execx.KubeRCOff, f.envs[i])
+					}
+				case "get":
+					if off {
+						t.Errorf("%s: a read runs with %s", line, execx.KubeRCOff)
+					}
+				}
+			}
+			for verb, want := range map[string]int{"apply": 2, "replace --force": 1, "replace --raw": 1} {
+				if seen[verb] != want {
+					t.Errorf("%s calls = %d, want %d:\n%s", verb, seen[verb], want, f.log())
+				}
+			}
+			if !strings.Contains(f.log(), "kubectl "+strings.Join(flags, " ")+" replace --force -f -") {
+				t.Errorf("the flags of the caller are not in front of the replace:\n%s", f.log())
+			}
+		})
 	}
 }
 

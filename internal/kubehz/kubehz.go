@@ -243,12 +243,12 @@ func (c *Context) requireHTTPS(url, label string) error {
 // ── process seam ─────────────────────────────────────────
 
 // run executes a tool with the context's streams (bash: a plain command
-// invocation whose output reaches the terminal). A kubectl apply runs with
-// the kubectl user defaults off (execx.KubectlEnv).
+// invocation whose output reaches the terminal). Each kubectl child runs
+// with the kubectl user defaults off (execx.KubectlEnv).
 func (c *Context) run(ctx context.Context, name string, args ...string) error {
 	return c.Runner.Run(ctx, execx.Cmd{
 		Name: name, Args: args,
-		Env:    execx.KubectlEnv(name, args),
+		Env:    execx.KubectlEnv(name),
 		Stdout: c.out(), Stderr: c.errOut(),
 	})
 }

@@ -24,9 +24,20 @@ setup() {
   # command-substitution / pipeline subshells see it.
   kubectl() {
     echo "kubectl $*" >> "${KLOG}"
-    local verb="$1"; [[ "$1" == "--kubeconfig" ]] && verb="$3"
+    # The verb is the first argument after the global flags of the caller
+    # (--kubeconfig <path>, --server <url>, --server=<url>). A replace adds
+    # its next argument (--force, --raw) to the KENV line.
+    local -a rest=("$@")
+    while (( ${#rest[@]} )); do
+      case "${rest[0]}" in
+        --kubeconfig|--server) rest=("${rest[@]:2}") ;;
+        --server=*)            rest=("${rest[@]:1}") ;;
+        *)                     break ;;
+      esac
+    done
+    local cmd="${rest[0]-}" verb="${rest[0]-}"
+    [[ "${cmd}" != "replace" ]] || verb="replace ${rest[1]-}"
     echo "${verb} KUBERC=${KUBERC-<unset>}" >> "${KENV}"
-    local cmd="$1"; [[ "$1" == "--kubeconfig" ]] && cmd="$3"
     case "${cmd}" in
       apply) [[ -n "${APPLY_OUT:-}" ]] && echo "${APPLY_OUT}"; return "${APPLY_RC:-0}" ;;
       get)   echo "${GET_OUT:-}"; return 0 ;;
@@ -340,6 +351,41 @@ _fixed_fail_line() {
   assert_output 2
   run grep -c '^apply KUBERC=off$' "${KENV}"
   assert_output 2
+}
+
+# An immutable-field error and a 403 of a terminating namespace in one pass:
+# the heal replaces the Deployment and finalizes the namespace.
+BOTH_HEALS_OUT='Error from server (Invalid): Deployment.apps "web" is invalid: spec.selector: field is immutable
+Error from server (Forbidden): configmaps "ca-bundle" is forbidden: unable to create new content in namespace kubermatic because it is being terminated'
+
+_kapply_flags() { local m="$1"; shift; printf '%s' "${m}" | kapply::apply "$@"; }
+
+@test "kuberc: the replace of the immutable heal and of the namespace finalize run with KUBERC=off" {
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1 KAPPLY_NS_WAIT=0 GET_OUT='2026-01-01T00:00:00Z'
+  export APPLY_OUT="${BOTH_HEALS_OUT}"
+  run _kapply "${DEPLOY_MANIFEST}"
+  run grep -c '^replace --force KUBERC=off$' "${KENV}"
+  assert_output 1
+  run grep -c '^replace --raw KUBERC=off$' "${KENV}"
+  assert_output 1
+  # the reads keep the environment of lo
+  run grep -c '^get KUBERC=<unset>$' "${KENV}"
+  refute_output 0
+}
+
+@test "kuberc: a --server <url> flag in front of the verb keeps KUBERC=off on each write" {
+  export APPLY_RC=1 LOK8S_FORCE_RECREATE=1 KAPPLY_NS_WAIT=0 GET_OUT='2026-01-01T00:00:00Z'
+  export APPLY_OUT="${BOTH_HEALS_OUT}"
+  local flags
+  for flags in '--server https://203.0.113.1:6443' '--server=https://203.0.113.1:6443'; do
+    : > "${KLOG}"; : > "${KENV}"
+    # shellcheck disable=SC2086 # the flags split into words on purpose
+    run _kapply_flags "${DEPLOY_MANIFEST}" ${flags}
+    [ "$(grep -c '^apply KUBERC=off$' "${KENV}")" -eq 2 ] || { cat "${KENV}"; return 1; }
+    [ "$(grep -c '^replace --force KUBERC=off$' "${KENV}")" -eq 1 ] || { cat "${KENV}"; return 1; }
+    [ "$(grep -c '^replace --raw KUBERC=off$' "${KENV}")" -eq 1 ] || { cat "${KENV}"; return 1; }
+    grep -qF "kubectl ${flags} replace --force -f -" "${KLOG}" || { cat "${KLOG}"; return 1; }
+  done
 }
 
 @test "private: a failed pass prints the fixed line, never the kubectl output (off a tty, each level)" {

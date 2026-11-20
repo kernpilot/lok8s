@@ -1,9 +1,9 @@
 package operator
 
-// kuberc_test.go — the kubectl applies of the hooks (kube.run: the CAPI
-// manifests, the status manifests, the Lo resources) run with the kubectl
-// user defaults off (execx.KubeRCOff); every other kubectl call keeps the
-// environment of the hook.
+// kuberc_test.go — each kubectl call of the hooks (kube.run: the applies of
+// the CAPI manifests, the status manifests and the Lo resources, and the
+// reads and patches) runs with the kubectl user defaults off
+// (execx.KubeRCOff), whatever its arguments.
 
 import (
 	"io"
@@ -24,7 +24,12 @@ func TestKubeApplyRunsWithKubeRCOff(t *testing.T) {
 	ctx := t.Context()
 	_ = k.run(ctx, strings.NewReader("kind: ConfigMap\n"), nil, nil, "apply", "-f", "-")
 	_ = k.run(ctx, nil, nil, nil, "get", "lo", "-o", "json")
-	for line, want := range map[string]bool{"kubectl apply -f -": true, "kubectl get lo -o json": false} {
+	_ = k.run(ctx, strings.NewReader("kind: ConfigMap\n"), nil, nil, "--server", "https://203.0.113.1:6443", "apply", "-f", "-")
+	for line, want := range map[string]bool{
+		"kubectl apply -f -":                                   true,
+		"kubectl get lo -o json":                               true,
+		"kubectl --server https://203.0.113.1:6443 apply -f -": true,
+	} {
 		env, ran := envs[line]
 		if !ran {
 			t.Errorf("%s did not run", line)

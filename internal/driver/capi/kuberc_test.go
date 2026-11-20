@@ -19,7 +19,7 @@ func applyCallsWithoutKubeRCOff(calls []execx.Cmd) ([]string, int) {
 	var bad []string
 	n := 0
 	for _, c := range calls {
-		if !execx.KubectlApplyOrDiff(c.Name, c.Args) {
+		if c.Name != "kubectl" || (!slices.Contains(c.Args, "apply") && !slices.Contains(c.Args, "diff")) {
 			continue
 		}
 		n++

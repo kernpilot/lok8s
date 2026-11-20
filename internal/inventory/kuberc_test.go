@@ -1,9 +1,9 @@
 package inventory
 
-// kuberc_test.go — the two server-side applies of Publish (the CRD and the
-// CR) run with the kubectl user defaults off (execx.KubeRCOff); the wait
-// keeps the environment of lo. The bash twin is libs/inventory/main (the
-// KUBERC=off prefix).
+// kuberc_test.go — each kubectl call of Publish (the server-side applies of
+// the CRD and the CR, and the wait between them) runs with the kubectl user
+// defaults off (execx.KubeRCOff). The bash twin is libs/inventory/main (the
+// KUBERC=off prefix on the applies).
 
 import (
 	"bytes"
@@ -31,9 +31,8 @@ func TestPublishAppliesRunWithKubeRCOff(t *testing.T) {
 		t.Fatalf("calls = %d, want 3:\n%s", len(f.calls), strings.Join(f.calls, "\n"))
 	}
 	for i, call := range f.calls {
-		want := strings.Contains(call, " apply ")
-		if got := slices.Contains(f.envs[i], execx.KubeRCOff); got != want {
-			t.Errorf("%s: %s in Env = %v, want %v", call, execx.KubeRCOff, got, want)
+		if !slices.Contains(f.envs[i], execx.KubeRCOff) {
+			t.Errorf("%s runs without %s (Env %q)", call, execx.KubeRCOff, f.envs[i])
 		}
 	}
 }

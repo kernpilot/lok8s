@@ -158,13 +158,15 @@ func (a *Applier) pollInterval() time.Duration {
 	return time.Second
 }
 
-// kubectl runs one kubectl invocation with combined stdout+stderr captured
-// (bash: `kubectl … 2>&1`), returning the output and the exit code. An
-// apply runs with the kubectl user defaults off (execx.KubectlEnv; bash:
-// `KUBERC=off kubectl …`).
+// kubectl runs one kubectl apply with combined stdout+stderr captured
+// (bash: `kubectl … 2>&1`), returning the output and the exit code. Its
+// only caller is applyPass, so it runs with the kubectl user defaults off
+// (execx.KubeRCOff; bash: `KUBERC=off kubectl …`). The Env is set here,
+// not guessed from args: the extra flags of the caller (--server <url>)
+// come before the subcommand.
 func (a *Applier) kubectl(ctx context.Context, stdin string, args ...string) (string, int) {
 	var buf strings.Builder
-	c := execx.Cmd{Name: "kubectl", Args: args, Env: execx.KubectlEnv("kubectl", args), Stdout: &buf, Stderr: &buf}
+	c := execx.Cmd{Name: "kubectl", Args: args, Env: []string{execx.KubeRCOff}, Stdout: &buf, Stderr: &buf}
 	if stdin != "" {
 		c.Stdin = strings.NewReader(stdin)
 	}
@@ -172,9 +174,16 @@ func (a *Applier) kubectl(ctx context.Context, stdin string, args ...string) (st
 	return buf.String(), execx.ExitCode(err)
 }
 
+// writeEnv is the Env of a kubectlQuiet call that writes from stdin (the
+// replace of the heal, the replace of the namespace finalize): the kubectl
+// user defaults are off (bash: `KUBERC=off kubectl …`). A read passes nil.
+var writeEnv = []string{execx.KubeRCOff}
+
 // kubectlQuiet runs kubectl with all output discarded (bash: &>/dev/null).
-func (a *Applier) kubectlQuiet(ctx context.Context, stdin string, args ...string) int {
-	c := execx.Cmd{Name: "kubectl", Args: args, Stdout: io.Discard, Stderr: io.Discard}
+// env is the Env of the child: writeEnv for a write from stdin, nil for a
+// read (each caller says which).
+func (a *Applier) kubectlQuiet(ctx context.Context, env []string, stdin string, args ...string) int {
+	c := execx.Cmd{Name: "kubectl", Args: args, Env: env, Stdout: io.Discard, Stderr: io.Discard}
 	if stdin != "" {
 		c.Stdin = strings.NewReader(stdin)
 	}
@@ -486,7 +495,7 @@ func (a *Applier) healImmutable(ctx context.Context, manifest, out string, kubec
 			}
 		}
 		args := append(append([]string{}, kubectlFlags...), "replace", "--force", "-f", "-")
-		if rc := a.kubectlQuiet(ctx, sel.String(), args...); rc != 0 {
+		if rc := a.kubectlQuiet(ctx, writeEnv, sel.String(), args...); rc != 0 {
 			ui.WarnTo(a.Stderr, "  could not recreate %s/%s", o.kind, o.name)
 		}
 	}
@@ -520,14 +529,14 @@ func (a *Applier) finalizeNamespace(ctx context.Context, name string, kubectlFla
 	payload := deleteSpecFinalizers(nsJSON.String())
 	repArgs := append(append([]string{}, kubectlFlags...),
 		"replace", "--raw", "/api/v1/namespaces/"+name+"/finalize", "-f", "-")
-	if rc := a.kubectlQuiet(ctx, payload, repArgs...); rc != 0 {
+	if rc := a.kubectlQuiet(ctx, writeEnv, payload, repArgs...); rc != 0 {
 		ui.WarnTo(a.Stderr, "  could not finalize namespace/%s", name)
 		return
 	}
 	waitN := a.NsWait
 	for range waitN {
 		probe := append(append([]string{}, kubectlFlags...), "get", "ns", name)
-		if rc := a.kubectlQuiet(ctx, "", probe...); rc != 0 {
+		if rc := a.kubectlQuiet(ctx, nil, "", probe...); rc != 0 {
 			return
 		}
 		if a.sleep(ctx, a.pollInterval()) != nil {
@@ -606,7 +615,9 @@ func (a *Applier) healTerminating(ctx context.Context, manifest, out string, kub
 			patch = append(patch, "-n", d.namespace)
 		}
 		patch = append(patch, "--type", "merge", "-p", `{"metadata":{"finalizers":null}}`)
-		if rc := a.kubectlQuiet(ctx, "", patch...); rc != 0 {
+		// A merge patch from the argv, not from a file or stdin: the bash
+		// twin runs it without the KUBERC=off prefix too.
+		if rc := a.kubectlQuiet(ctx, nil, "", patch...); rc != 0 {
 			ui.WarnTo(a.Stderr, "  could not clear finalizers on %s/%s", d.kind, d.name)
 		}
 	}

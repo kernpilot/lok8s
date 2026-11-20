@@ -32,7 +32,8 @@ lo::coredns() {
   # (see corefile.yaml + patch.json). Declarative + committed, survives `lo up`.
   lo::coredns_custom "${domain}" "${cluster_yaml}" "${kubeconfig}"
 
-  kubectl patch deployment coredns -n kube-system \
+  # A patch from a file: it runs with the kubectl user defaults off.
+  KUBERC=off kubectl patch deployment coredns -n kube-system \
     --kubeconfig "${kubeconfig}" \
     --type json \
     --patch-file "${coredns_dir}/patch.json" 2>/dev/null || true

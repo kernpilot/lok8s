@@ -5,8 +5,10 @@ import (
 	"testing"
 )
 
-// KubectlEnv turns the kubectl user defaults off for a kubectl apply and a
-// kubectl diff, in each argument order that lo uses, and for no other call.
+// KubectlEnv turns the kubectl user defaults off for every kubectl child of
+// a generic wrapper, whatever its arguments: no guess of the subcommand, so
+// a global flag with a separate value before it (--server <url> apply)
+// cannot make the override miss. Any other tool gets nil.
 func TestKubectlEnv(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -15,31 +17,23 @@ func TestKubectlEnv(t *testing.T) {
 		want bool
 	}{
 		{"kubectl", []string{"--kubeconfig", "kc.yaml", "apply", "--server-side", "-f", "-"}, true},
-		{"kubectl", []string{"--kubeconfig", "kc.yaml", "diff", "--server-side", "-f", "-"}, true},
-		{"kubectl", []string{"apply", "--kubeconfig", "kc.yaml", "-f", "-"}, true},
-		{"kubectl", []string{"apply", "-k", "dir"}, true},
-		{"kubectl", []string{"--kubeconfig", "apply", "get", "ns"}, false}, // a kubeconfig named apply
-		{"kubectl", []string{"--kubeconfig", "kc.yaml", "get", "ns", "apply"}, false},
-		{"kubectl", []string{"--kubeconfig", "kc.yaml", "wait", "--for=condition=Established"}, false},
-		{"kubectl", []string{"replace", "--force", "-f", "-"}, false},
-		{"kubectl", []string{"-n", "ns", "apply", "-f", "-"}, true},
-		{"kubectl", []string{"--namespace", "apply", "get", "cm"}, false}, // a namespace named apply
-		{"kubectl", []string{"--context", "c", "diff", "-f", "-"}, true},
-		{"kubectl", []string{"-n", "ns", "create", "secret", "generic", "s", "--dry-run=client"}, false},
-		{"kubectl", []string{"--namespace=ns", "apply", "-f", "-"}, true},
-		{"kubectl", nil, false},
+		{"kubectl", []string{"--server", "https://203.0.113.1:6443", "apply", "-f", "-"}, true},
+		{"kubectl", []string{"--server=https://203.0.113.1:6443", "apply", "-f", "-"}, true},
+		{"kubectl", []string{"-s", "https://203.0.113.1:6443", "diff", "-f", "-"}, true},
+		{"kubectl", []string{"--kubeconfig", "kc.yaml", "get", "ns"}, true},
+		{"kubectl", []string{"replace", "--force", "-f", "-"}, true},
+		{"kubectl", nil, true},
+		{"/opt/bin/kubectl", []string{"apply", "-f", "-"}, true},
 		{"kubeone", []string{"apply", "--manifest", "m.yaml"}, false},
 		{"helm", []string{"diff", "upgrade"}, false},
+		{"docker", []string{"apply"}, false},
 	} {
-		got := KubectlEnv(tc.name, tc.args)
+		got := KubectlEnv(tc.name)
 		if tc.want && !slices.Equal(got, []string{KubeRCOff}) {
-			t.Errorf("KubectlEnv(%s %v) = %v, want [%s]", tc.name, tc.args, got, KubeRCOff)
+			t.Errorf("KubectlEnv(%s) for %v = %v, want [%s]", tc.name, tc.args, got, KubeRCOff)
 		}
 		if !tc.want && got != nil {
-			t.Errorf("KubectlEnv(%s %v) = %v, want nil", tc.name, tc.args, got)
-		}
-		if KubectlApplyOrDiff(tc.name, tc.args) != tc.want {
-			t.Errorf("KubectlApplyOrDiff(%s %v) != %v", tc.name, tc.args, tc.want)
+			t.Errorf("KubectlEnv(%s) for %v = %v, want nil", tc.name, tc.args, got)
 		}
 	}
 	if KubeRCOff != "KUBERC=off" {

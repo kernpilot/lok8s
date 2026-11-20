@@ -29,9 +29,11 @@
 # fixed line with the exit code. The raw output is always stashed in
 # KAPPLY_LAST_OUTPUT for callers to inspect (and appended to
 # KAPPLY_PRIVATE_LOG when set), never printed. LO_SHOW_SENSITIVE_OUTPUT=1
-# prints it as before (kapply::show_sensitive). Each kubectl apply runs with
-# the kubectl user defaults off (KUBERC=off: a kubectl before v1.33 has no
-# kuberc and ignores it). The Go twin: internal/kapply (private.go).
+# prints it as before (kapply::show_sensitive). Each kubectl write from
+# stdin (the apply, the replace of the immutable heal, the replace of the
+# namespace finalize) runs with the kubectl user defaults off (KUBERC=off:
+# a kubectl before v1.33 has no kuberc and ignores it). The Go twin:
+# internal/kapply (private.go).
 #
 # A plain sourceable util — it uses error/warn/debug from utils/verbose.sh,
 # which every caller (the CLI, deploy, bootstrap, the drivers) loads first.
@@ -482,7 +484,7 @@ kapply::_heal_immutable() {
     warn "  recreating immutable ${kind}/${name}"
     printf '%s' "${manifest}" \
       | yq "select(.kind == \"${kind}\" and .metadata.name == \"${name}\")" \
-      | kubectl "${kubectl_flags[@]}" replace --force -f - >/dev/null 2>&1 \
+      | KUBERC=off kubectl "${kubectl_flags[@]}" replace --force -f - >/dev/null 2>&1 \
       || warn "  could not recreate ${kind}/${name}"
   done < <(printf '%s\n' "${out}" | grep -oE '[A-Z][A-Za-z]+(\.[a-z0-9.-]+)? "[^"]+" is invalid' \
             | sed -E 's/(\.[a-z0-9.-]+)? "/ /; s/" is invalid$//' | sort -u)
@@ -505,7 +507,7 @@ kapply::_finalize_namespace() {
   warn "  force-finalizing stuck-terminating namespace/${name}"
   kubectl "${kubectl_flags[@]}" get ns "${name}" -o json 2>/dev/null \
     | jq 'del(.spec.finalizers)' \
-    | kubectl "${kubectl_flags[@]}" replace --raw "/api/v1/namespaces/${name}/finalize" -f - >/dev/null 2>&1 \
+    | KUBERC=off kubectl "${kubectl_flags[@]}" replace --raw "/api/v1/namespaces/${name}/finalize" -f - >/dev/null 2>&1 \
     || { warn "  could not finalize namespace/${name}"; return 0; }
   local i waitn="${KAPPLY_NS_WAIT:-20}"
   for (( i = 0; i < waitn; i++ )); do
