@@ -4315,7 +4315,7 @@ Install the pinned toolchain via b
 Provision a project's toolchain with b (github.com/fentas/b):
 
   1. .bin/b.yaml from the template pinned to this lo (kustomize v5.8.1,
-     khelm v2.8.0, the secrets.lok8s.dev Secret plugin at this lo's version,
+     khelm v2.9.0, the secrets.lok8s.dev Secret plugin at this lo's version,
      plus kubectl; kind/tilt/mkcert for --groups local; kubeone/hcloud for cloud;
      argsh/yq/jq/envsubst/sops/ssh-to-age for bash, the runtime of the frozen
      bash implementation and the provider plugins, carried commented out).

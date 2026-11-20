@@ -55,7 +55,7 @@ v3.3 or later on `PATH` for it). The exit code is 0 when nothing would change, 1
 completed diff found a change, and 2 for all other failures.
 
 The two implementations decide the chart dependency check the same way. The
-Go implementation uses the Helm v3.21.2 library (the loader and the status
+Go implementation uses the Helm v3.22.1 library (the loader and the status
 rule of `helm dependency list`). The bash implementation runs `helm
 dependency list` and `helm lint` and reads only the table on stdout (helm's
 log lines on stderr, for example about a symlinked subchart, are not part of
@@ -77,7 +77,7 @@ whose render writes into the chart directory.
   `requirements.yaml` that replaces the dependencies. Helm (and khelm) then
   read only `requirements.yaml`, but the bash implementation reads both
   files and is inconclusive.
-- A helm v3 release other than v3.21.2 can give a different status for a
+- A helm v3 release other than v3.22.1 can give a different status for a
   dependency. Then either implementation can be the inconclusive one.
 
 The dry run prevents accidental side effects of legitimate addon code and

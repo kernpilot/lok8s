@@ -138,7 +138,7 @@ func loadedSubchart(parent *chart.Chart, name string) *chart.Chart {
 
 // dependencyStatus is the STATUS column of `helm dependency list` for one
 // dependency: Helm v3's action.Dependency.dependencyStatus (helm.sh/helm/v3
-// v3.21.2, pkg/action/dependency.go), which is unexported, step by step.
+// v3.22.1, pkg/action/dependency.go), which is unexported, step by step.
 // An archive charts/<name>-*.tgz decides first (with more than one, only
 // the names whose suffix is a strict semver count); otherwise the loaded
 // subchart does.

@@ -80,7 +80,7 @@ binaries:
     version: v5.8.1
     groups: [core]
   github.com/mgoltzsche/khelm:
-    version: v2.8.0
+    version: v2.9.0
     file: ../.kustomize/khelm.mgoltzsche.github.com/v2/chartrenderer/ChartRenderer
     groups: [core]
   github.com/kernpilot/lok8s:
@@ -107,7 +107,7 @@ binaries:
 
 - **The pins are drift-tested.** `kustomize v5.8.1` is the CLI release built
   from the kustomize API the `lo-full` build links (`v0.21.1`);
-  `khelm v2.8.0` is the library `lo-full` links and the `ChartRenderer`
+  `khelm v2.9.0` is the library `lo-full` links and the `ChartRenderer`
   binary `lo` core execs; the `secrets.lok8s.dev` Secret plugin is the
   `kustomize-secret-<os>-<arch>` asset of **this `lo`'s own release**. All
   three live in `internal/toolchain/pins.go` and `go test` fails when
@@ -165,7 +165,7 @@ side.
 |---|---|---|---|
 | `kubectl` (`core`) | yes | yes | `lo` execs it for apply/wait |
 | `kustomize` **v5.8.1** (`core`) | yes, pinned | yes | `lo` core: every render. `lo-full`: only `LO_RENDER=exec`; the bash side always |
-| `khelm` `ChartRenderer` **v2.8.0** (`core`) | yes, pinned, under `.kustomize/` | yes | the addons' Helm charts (core execs it; lo-full links the same release) |
+| `khelm` `ChartRenderer` **v2.9.0** (`core`) | yes, pinned, under `.kustomize/` | yes | the addons' Helm charts (core execs it; lo-full links the same release) |
 | `secrets.lok8s.dev` `Secret` plugin at **lo's version** (`core`) | yes, pinned, under `.kustomize/` | built from source (`lo kustomize build`) | every render on core and the bash side; lo-full serves it itself |
 | `kind` **v0.32.0** (pinned), `tilt`, `mkcert` (`local`) | yes (default on) | yes | the local dev loop: `lo up` (kind), Tilt, `lo trust` (mkcert) |
 | `kubeone`, `hcloud` (`cloud`) | opt-in (`--groups …,cloud`) | `kubeone`/`capi` profiles (+ `clusterctl`) | the provisioning drivers exec them |

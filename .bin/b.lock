@@ -84,8 +84,8 @@
     },
     {
       "name": "khelm",
-      "version": "v2.8.0",
-      "sha256": "f9a36519c147fc846aa69ca5a19f6259cb2c94f88550ae34de2bdb971b39495c",
+      "version": "v2.9.0",
+      "sha256": "ab507f6ac1dd4e5c2d68b570a0722c8129d06a12919c912b3a26bf9cb7cf0593",
       "source": "github.com/mgoltzsche/khelm",
       "provider": "github"
     },

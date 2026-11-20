@@ -5094,7 +5094,7 @@ EOF
 _fake_helm() {
   export FAKE_HELM="${BATS_TEST_TMPDIR}/fakehelm"
   mkdir -p "${FAKE_HELM}/bin"
-  printf 'v3.21.2+g0000000\n' > "${FAKE_HELM}/version"
+  printf 'v3.22.1+g0000000\n' > "${FAKE_HELM}/version"
   printf 'common\t0.1.0  \thttps://charts.example\tok      \n' > "${FAKE_HELM}/deplist"
   : > "${FAKE_HELM}/lint"
   cat > "${FAKE_HELM}/bin/helm" <<'SH'
@@ -5203,7 +5203,7 @@ SH
   : > "${b}/report"
   run _gate "chart: charts/app"
   assert_failure
-  assert_output "${p} helm dependency list printed no dependency table (helm v3.21.2+g0000000). Use helm v3.21.2, or use the Go implementation (lok8s.yaml: spec.implementation)."
+  assert_output "${p} helm dependency list printed no dependency table (helm v3.22.1+g0000000). Use helm v3.22.1, or use the Go implementation (lok8s.yaml: spec.implementation)."
   [ "$(cat "${b}/report")" = "chart-deps charts/app" ]
   rm "${FAKE_HELM}/table"
   : > "${b}/report"
@@ -5227,7 +5227,7 @@ SH
   run _gate "chart: charts/app"
   assert_failure
   assert_output "${p} ${needs} Found: v3.2.4+g0000000. ${use_go}"
-  printf 'v3.21.2+g0000000\n' > "${FAKE_HELM}/version"
+  printf 'v3.22.1+g0000000\n' > "${FAKE_HELM}/version"
   # No helm at all: a PATH with yq and the system tools only.
   mkdir -p "${FAKE_HELM}/nohelm"
   ln -s "$(command -v yq)" "${FAKE_HELM}/nohelm/yq"
@@ -5245,7 +5245,7 @@ SH
   run _gate "chart: charts/app"
   assert_failure
   assert_output "${p} dependency common is a file:// chart. khelm builds it into the chart directory on each render. Pass --allow-generators to render it."
-  printf 'v3.21.2+g0000000\n' > "${FAKE_HELM}/version"
+  printf 'v3.22.1+g0000000\n' > "${FAKE_HELM}/version"
 
   # A chart without dependencies, and a remote chart (a repository: khelm
   # pulls it into its cache), run. The config file argument stands in when

@@ -105,8 +105,8 @@ tag-gated imports decide what is linked. The pins that keep the two
 byte-identical live in **`internal/toolchain/pins.go`**: `KustomizeAPI`
 (`v0.21.1`, what lo-full links) ↔ `KustomizeCLI` (`v5.8.1`, what core execs
 and the b.yaml template pins; the `kustomizeAPIToCLI` table encodes the
-release pairing), `KhelmVersion` (`2.8.0`: the library and the
-`ChartRenderer` binary) and `HelmVersion` (`3.21.2`). `go test
+release pairing), `KhelmVersion` (`2.9.0`: the library and the
+`ChartRenderer` binary) and `HelmVersion` (`3.22.1`). `go test
 ./internal/toolchain/` fails when `go.mod`'s kustomize/api, khelm or helm
 version moves without the pins, when the API↔CLI table lacks the pinned
 API, or when the generated `.bin/b.yaml` template stops carrying the pins.
@@ -166,7 +166,7 @@ goal.
 |---|---|---|
 | `kustomize build --enable-alpha-plugins [--enable-exec] <dir>` | `sigs.k8s.io/kustomize/api/krusty`, driven option-for-option like the kustomize CLI's build command (`Reorder` unspecified, `EnabledPluginConfig(BploUseStaticallyLinked)`, the builtin helm inflator enabled with the default `helm` command, `KUSTOMIZE_ENABLE_MANAGEDBY_LABEL` honoured, `ResMap.AsYaml()` as the bytes) | `api v0.21.1` + `kyaml v0.21.1` — the modules behind the **kustomize v5.8.1** binary the repo pins in `.bin/b.yaml` (a downstream project pins `v5.8.1` explicitly) |
 | `secrets.lok8s.dev/v1/Secret` | `kustomize/plugins/secret` **imported** (go.mod: `replace github.com/kernpilot/lok8s/kustomize => ./kustomize`) — the same `secret.Run` the standalone `kustomize-secret` binary's `main` calls; the nested module keeps building on its own for the release assets and the bash path | the repo's own module, one source tree |
-| `khelm.mgoltzsche.github.com/v2/ChartRenderer` | `github.com/mgoltzsche/khelm/v2/pkg/{config,helm}` as a **library**, replicating khelm's kustomize-plugin `main` (config from `KUSTOMIZE_PLUGIN_CONFIG_STRING`, `helm.NewHelm()` from the helm `cli.New()` settings, `KHELM_TRUST_ANY_REPO`/`KHELM_DEBUG`/`HELM_DEBUG`, `ReadGeneratorConfig`, `Render`, then khelm's `output.Marshal` — the kyaml encoder, one `Encode` per RNode document — repeated verbatim because that package is internal to khelm) | **khelm v2.8.0** — the exact release the repo pins as the `ChartRenderer` binary (a downstream project pins it with kustomize v5.8.1 as the pair proven to reproduce its committed artifacts byte for byte); its go.mod requires **helm.sh/helm/v3 v3.21.2**, pinned in the root go.mod as well, so the chart inflation is the same helm code the binary was built from |
+| `khelm.mgoltzsche.github.com/v2/ChartRenderer` | `github.com/mgoltzsche/khelm/v2/pkg/{config,helm}` as a **library**, replicating khelm's kustomize-plugin `main` (config from `KUSTOMIZE_PLUGIN_CONFIG_STRING`, `helm.NewHelm()` from the helm `cli.New()` settings, `KHELM_TRUST_ANY_REPO`/`KHELM_DEBUG`/`HELM_DEBUG`, `ReadGeneratorConfig`, `Render`, then khelm's `output.Marshal` — the kyaml encoder, one `Encode` per RNode document — repeated verbatim because that package is internal to khelm) | **khelm v2.9.0** — the exact release the repo pins as the `ChartRenderer` binary (a downstream project pins it with kustomize v5.8.1 as the pair proven to reproduce its committed artifacts byte for byte); its go.mod requires **helm.sh/helm/v3 v3.22.1**, pinned in the root go.mod as well, so the chart inflation is the same helm code the binary was built from |
 
 **The self-exec plugin home.** kustomize's exec-plugin protocol is a
 subprocess: `<pluginhome>/<group>/<version>/<kind>/<Kind> <cfgfile>` run in
@@ -247,7 +247,7 @@ diffs it; the pinned-toolchain section doctor adds is gated on the
 not the pinned one, in both implementations. The in-process render grew the
 binary from 49 MB to 123 MB (helm + client-go + the kustomize API), which
 is why it is the `lo-full` build and `lo` core stays at ~50 MB with the
-exec pipeline. khelm v2.8.0 requires `go 1.26.0` or later in the root
+exec pipeline. khelm v2.9.0 requires `go 1.26.0` or later in the root
 `go.mod`.
 
 ## Embedded assets: the eject model
