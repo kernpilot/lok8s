@@ -1398,13 +1398,34 @@ on the node's console first. `--accept-new-host-key` trusts the key that the
 node shows on the first contact instead: the handover then checks that ssh
 recorded it, and every later call checks against that record.
 
-Your ssh config cannot weaken that check. Every call sets
-`NoHostAuthenticationForLocalhost=no` (so a node behind a forwarded port on
-localhost is checked too), `VerifyHostKeyDNS=no` and `UpdateHostKeys=no`, and
-it opens no shared connection. On the node, each file goes to a new private
-file in `/etc/kubernetes/pki` first, and a rename then puts it in place. A
-link that is already at a destination is replaced, and its target never gets
-a key. If a step fails, `preseed` names it and removes the new files.
+Every call sets the host key options itself. `StrictHostKeyChecking=yes`
+turns the check on, `NoHostAuthenticationForLocalhost=no` checks a node behind
+a forwarded port on localhost too, `VerifyHostKeyDNS=no` takes no key from
+DNS, and `UpdateHostKeys=no` keeps the node from changing your known_hosts
+file. No call opens a shared connection.
+
+With `--known-hosts`, that file is the only known_hosts file: every call also
+sets `GlobalKnownHostsFile=/dev/null`. The check still assumes that you trust
+your ssh config, because the config controls other sources of trust:
+
+- a `KnownHostsCommand`
+- a `HostName` or a `HostKeyAlias` together with a proxy (`ProxyJump`, `ProxyCommand`)
+- a `Match exec` block
+- without `--known-hosts`, the known_hosts files that it names (`UserKnownHostsFile`, `GlobalKnownHostsFile`, by default `/etc/ssh/ssh_known_hosts`)
+
+On the node, `preseed` stops before a key leaves your machine unless
+`/etc/kubernetes` and `/etc/kubernetes/pki` are directories (not links) that
+root or the ssh user owns, with no write bit for the group or others. The
+message names the directory and what `stat` shows (owner, mode, type).
+`preseed` does not check `/etc` and the directories above it.
+
+Each file then goes to a new private file in `/etc/kubernetes/pki` first, and
+a rename puts it in place. A link that is already at a destination is
+replaced, and its target never gets a key.
+
+If a step fails, `preseed` names it and removes the new files. If the install
+call fails and its output names no step, the state of the install is unknown:
+`preseed` lists the six destination files to check on the node.
 
 ## Troubleshooting
 

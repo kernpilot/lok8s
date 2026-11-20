@@ -960,8 +960,11 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 	// the first call (the mkdir, which sends no key) takes an unknown key
 	// and records it (accept-new). The handover then checks that the key is
 	// in the known_hosts file, and every later call uses yes. Never
-	// StrictHostKeyChecking=no or /dev/null here. The bash twin
-	// (handover::preseed) uses the same options.
+	// StrictHostKeyChecking=no or UserKnownHostsFile=/dev/null here. The bash
+	// twin (handover::preseed) uses the same options.
+	// With --known-hosts, GlobalKnownHostsFile=/dev/null makes that file the
+	// only known_hosts file: a key in the system files (/etc/ssh/
+	// ssh_known_hosts) is then no trust source.
 	// ControlMaster=no and ControlPath=none: a master connection that the
 	// user's ssh config opens or shares (ControlMaster, ControlPath) would
 	// carry these calls without a new host key check. ssh takes the first
@@ -976,7 +979,7 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 		"-o", "ControlMaster=no", "-o", "ControlPath=none",
 		"-o", "NoHostAuthenticationForLocalhost=no", "-o", "VerifyHostKeyDNS=no", "-o", "UpdateHostKeys=no"}
 	if o.KnownHosts != "" {
-		sshOpts = append(sshOpts, "-o", "UserKnownHostsFile="+o.KnownHosts)
+		sshOpts = append(sshOpts, "-o", "UserKnownHostsFile="+o.KnownHosts, "-o", "GlobalKnownHostsFile=/dev/null")
 	}
 	if o.SSHKey != "" {
 		sshOpts = append(sshOpts, "-i", o.SSHKey)
@@ -1015,33 +1018,24 @@ func (c *Context) HandoverPreseed(ctx context.Context, o PreseedOpts) error {
 			return err
 		}
 	}
+	// bash command substitution drops each NUL byte of the output, so the
+	// twins read the same lines.
 	remote := func(cmd string) (string, error) {
-		return c.capture(ctx, false, "ssh", append(checked("yes"), "-p", portStr, target, cmd)...)
+		out, err := c.capture(ctx, false, "ssh", append(checked("yes"), "-p", portStr, target, cmd)...)
+		return strings.ReplaceAll(out, "\x00", ""), err
 	}
 
 	// scp writes into a file that is there already: a hard link at the
 	// destination gives the key bytes to its other name too, and a symlink
 	// sends them to its target. So each file goes to a new staging file in
-	// the 0700 pki dir first. One call makes them (umask 077 and mktemp:
-	// mode 0600) and prints their names, the scp calls fill them, and one
-	// call sets each mode and renames each file over its destination. A
-	// rename (mv -T) replaces a link or a file there and never writes
-	// through it. A failure removes the staging files, or names them when
-	// that fails too. The bash twin does the same steps.
-	stageSteps := []string{"umask 077"}
-	for _, key := range handoverPKIKeys {
-		stageSteps = append(stageSteps, "mktemp "+preseedPKIDir+"/."+key+".XXXXXXXXXX")
-	}
-	stageCmd := strings.Join(stageSteps, " && ")
-	failed := ""
-	out, err := remote(stageCmd)
-	if err != nil {
-		failed = "could not make the staging files " + preseedPKIDir + "/.<key>.XXXXXXXXXX on " + o.Node
-	}
-	staged, problem := preseedStaged(out)
-	if failed == "" && problem != "" {
-		failed = o.Node + " printed " + problem
-	}
+	// the 0700 pki dir first. One call checks the dirs and makes the files
+	// (umask 077 and mktemp: mode 0600) and prints their names, the scp
+	// calls fill them, and one call sets each mode and renames each file
+	// over its destination. A rename (mv -T) replaces a link or a file there
+	// and never writes through it. A failure removes the staging files, or
+	// names them when that fails too. The bash twin does the same steps.
+	out, err := remote(preseedStageCmd())
+	staged, failed := preseedStageResult(out, err == nil, o.Node)
 	if failed == "" {
 		for i, key := range handoverPKIKeys {
 			args := append(checked("yes"), "-P", portStr, filepath.Join(bundleDir, key), target+":"+staged[i])
@@ -1090,31 +1084,51 @@ func stagingName(key, name string) bool {
 	return true
 }
 
-// preseedStaged reads the output of the stage call. With one staging name
-// per PKI key, in order, problem is empty and names holds them. Else
-// problem says what is wrong, and names holds each line that is a staging
-// name of some key, so that the cleanup can remove it. A line of another
-// shape never goes into a command.
-func preseedStaged(out string) (names []string, problem string) {
+// preseedTrustedDirs are the dirs on the node that the stage call checks
+// before it makes a staging file. The owner of such a dir (or a user who
+// can write it) could put a link at a staging name between the mktemp and
+// the scp, and scp would write the key through it. So each one must be a
+// dir, not a link, that root or the ssh user owns, with no write bit for
+// the group or others. The dirs above them (/etc) are not checked.
+var preseedTrustedDirs = []string{"/etc/kubernetes", preseedPKIDir}
+
+// preseedStageCmd ports handover::stage_cmd: the remote command of the
+// stage call. Before each check it prints "check <dir> <uid> <mode>
+// <type>" (GNU stat), and after the checks "stage", so the last line of a
+// failed call names the dir that failed. Then it makes one staging file per
+// PKI key (umask 077 and mktemp: mode 0600) and prints its name.
+func preseedStageCmd() string {
+	steps := []string{"umask 077"}
+	for _, dir := range preseedTrustedDirs {
+		steps = append(steps,
+			`echo "check `+dir+` $(stat -c '%u %a %F' -- `+dir+`)"`,
+			`test -n "$(find `+dir+` -maxdepth 0 -type d ! -perm /022 \( -uid 0 -o -uid "$(id -u)" \) -print)"`)
+	}
+	steps = append(steps, "echo stage")
+	for _, key := range handoverPKIKeys {
+		steps = append(steps, "mktemp "+preseedPKIDir+"/."+key+".XXXXXXXXXX")
+	}
+	return strings.Join(steps, " && ")
+}
+
+// preseedStageResult ports the stage step of handover::preseed: it reads
+// the output of the stage call (preseedStageCmd); ok is false when the call
+// failed. With the expected lines, failed is empty and names holds the
+// staging names, one per PKI key, in order. Else failed says what is wrong,
+// and names holds each line that is a staging name of some key, so that the
+// cleanup can remove it. A line of another shape never goes into a command.
+func preseedStageResult(out string, ok bool, node string) (names []string, failed string) {
 	var lines []string
 	if s := strings.TrimRight(out, "\n"); s != "" {
 		lines = strings.Split(s, "\n")
 	}
-	for i, key := range handoverPKIKeys {
-		line := ""
-		if i < len(lines) {
-			line = lines[i]
-		}
-		if !stagingName(key, line) {
-			problem = fmt.Sprintf("a staging name for %s that is not %s/.%s. and 10 letters or digits: %q", key, preseedPKIDir, key, line)
-			break
-		}
+	if ok {
+		failed = preseedStageLines(lines, node)
+	} else {
+		failed = preseedStageFailure(lastLine(out), node)
 	}
-	if problem == "" && len(lines) != len(handoverPKIKeys) {
-		problem = fmt.Sprintf("%d lines for %d staging names", len(lines), len(handoverPKIKeys))
-	}
-	if problem == "" {
-		return lines, ""
+	if failed == "" {
+		return lines[len(preseedTrustedDirs)+1:], ""
 	}
 	for _, line := range lines {
 		for _, key := range handoverPKIKeys {
@@ -1124,7 +1138,82 @@ func preseedStaged(out string) (names []string, problem string) {
 			}
 		}
 	}
-	return names, problem
+	return names, failed
+}
+
+// preseedStageFailure ports handover::stage_failure: the cause of a failed
+// stage call from the last line that it printed. A check line names the
+// dir that failed its check and what stat showed.
+func preseedStageFailure(last, node string) string {
+	for _, dir := range preseedTrustedDirs {
+		if facts, ok := strings.CutPrefix(last, "check "+dir+" "); ok {
+			return dir + " on " + node + " must be a dir, not a link, that root or the ssh user owns, with no write bit for the group or others. stat shows (uid, mode, type) " +
+				preseedQuote(facts) + ". No key was sent"
+		}
+	}
+	return "could not make the staging files " + preseedPKIDir + "/.<key>.XXXXXXXXXX on " + node
+}
+
+// preseedStageLines ports handover::stage_lines: the problem with the
+// output of a stage call that passed, or "". It must be a check line per
+// trusted dir, "stage", then one staging name per PKI key, in order.
+func preseedStageLines(lines []string, node string) string {
+	at := func(i int) string {
+		if i < len(lines) {
+			return lines[i]
+		}
+		return ""
+	}
+	for i, dir := range preseedTrustedDirs {
+		if !strings.HasPrefix(at(i), "check "+dir+" ") {
+			return node + " printed " + preseedQuote(at(i)) + " where the stage call prints the check of " + dir
+		}
+	}
+	head := len(preseedTrustedDirs)
+	if at(head) != "stage" {
+		return node + " printed " + preseedQuote(at(head)) + ` where the stage call prints "stage"`
+	}
+	for i, key := range handoverPKIKeys {
+		if !stagingName(key, at(head+1+i)) {
+			return fmt.Sprintf("%s printed a staging name for %s that is not %s/.%s. and 10 letters or digits: %s",
+				node, key, preseedPKIDir, key, preseedQuote(at(head+1+i)))
+		}
+	}
+	if n := len(lines) - head - 1; n != len(handoverPKIKeys) {
+		return fmt.Sprintf("%s printed %d lines for %d staging names", node, n, len(handoverPKIKeys))
+	}
+	return ""
+}
+
+// preseedQuoteLimit is the number of bytes of a line from the node that a
+// message shows.
+const preseedQuoteLimit = 200
+
+// preseedQuote ports handover::quote: a line from the node, safe to print.
+// It shows the first preseedQuoteLimit bytes in double quotes. A byte below
+// 0x20, 0x7f and a byte from 0x80 shows as \xNN (so no terminal control,
+// C1 controls too, reaches the terminal), a backslash as \\ and a double
+// quote as \". A longer line also says how many bytes it has.
+func preseedQuote(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for i := 0; i < len(s) && i < preseedQuoteLimit; i++ {
+		switch c := s[i]; {
+		case c == '\\':
+			b.WriteString(`\\`)
+		case c == '"':
+			b.WriteString(`\"`)
+		case c >= 0x20 && c < 0x7f:
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, `\x%02x`, c)
+		}
+	}
+	b.WriteByte('"')
+	if len(s) > preseedQuoteLimit {
+		fmt.Fprintf(&b, " (the first %d of %d bytes)", preseedQuoteLimit, len(s))
+	}
+	return b.String()
 }
 
 // preseedInstallCmd ports handover::install_cmd: the remote command of the
@@ -1150,7 +1239,9 @@ func preseedInstallCmd(staged []string) string {
 
 // preseedInstallFailure ports handover::install_failure: the cause of a
 // failed install call from the last line that it printed. A mv failure
-// names the files that went into place before it.
+// names the files that went into place before it. A last line that names
+// no step (a lost connection, or text from the node's shell) says that the
+// state is unknown and names each destination to check.
 func preseedInstallFailure(last, node string) string {
 	var placed []string
 	for _, key := range handoverPKIKeys {
@@ -1166,7 +1257,12 @@ func preseedInstallFailure(last, node string) string {
 		}
 		placed = append(placed, key)
 	}
-	return "the install call on " + node + " failed before its first step"
+	dests := make([]string, 0, len(handoverPKIKeys))
+	for _, key := range handoverPKIKeys {
+		dests = append(dests, preseedPKIDir+"/"+key)
+	}
+	return "the install call on " + node + " failed, and its output names no step, so the state of the install is UNKNOWN. Check each of these files on " +
+		node + ": " + strings.Join(dests, " ")
 }
 
 // lastLine is bash "${out##*$'\n'}" after a command substitution: the

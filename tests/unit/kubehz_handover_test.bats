@@ -113,21 +113,23 @@ _mock_node_binaries() {
 }
 
 # A fake node for preseed under NODE_ROOT. ssh runs the remote command with
-# sh: each /etc/kubernetes/pki in it points into NODE_ROOT, and its output
-# maps back. scp writes the source into its destination as scp does: into a
-# file that is there already, also through a hard link or a symlink.
+# sh in the C locale: each /etc/kubernetes in it points into NODE_ROOT, and
+# its output maps back. scp writes the source into its destination as scp
+# does: into a file that is there already, also through a hard link or a
+# symlink. NODE_ROOT/etc/kubernetes is a 755 dir of the test user.
 # `_node_hook TOOL ARG` prints the remote command of an ssh call or the
 # destination of an scp call. A test redefines it to change one call, or to
 # fail it before it runs (a status that is not 0).
 _fake_node() {
   export NODE_ROOT="${BATS_TEST_TMPDIR}/node"
   mkdir -p "${NODE_ROOT}/etc/kubernetes"
+  chmod 755 "${NODE_ROOT}/etc/kubernetes"
   _node_hook() { printf '%s\n' "${2}"; }
   ssh() {
     echo "ssh $*" >> "${CALLS}"
     local cmd out rc=0
     cmd="$(_node_hook ssh "${@: -1}")" || return
-    out="$(sh -c "${cmd//\/etc\/kubernetes\/pki/${NODE_ROOT}/etc/kubernetes/pki}")" || rc=$?
+    out="$(LC_ALL=C sh -c "${cmd//\/etc\/kubernetes/${NODE_ROOT}/etc/kubernetes}")" || rc=$?
     [[ -z "${out}" ]] || printf '%s\n' "${out//"${NODE_ROOT}"/}"
     return "${rc}"
   }
@@ -138,6 +140,18 @@ _fake_node() {
     cat -- "${@: -2:1}" > "${NODE_ROOT}${dst#*:}"
   }
   export -f _node_hook ssh scp
+}
+
+# The remote command of preseed's stage call, spelled out: a check of
+# /etc/kubernetes and of the pki dir (each prints its stat line first),
+# "stage", then a staging file per key. The Go suite spells out the same
+# bytes (preseedStage).
+_preseed_stage() {
+  local stage
+  IFS= read -r stage <<'EOF'
+umask 077 && echo "check /etc/kubernetes $(stat -c '%u %a %F' -- /etc/kubernetes)" && test -n "$(find /etc/kubernetes -maxdepth 0 -type d ! -perm /022 \( -uid 0 -o -uid "$(id -u)" \) -print)" && echo "check /etc/kubernetes/pki $(stat -c '%u %a %F' -- /etc/kubernetes/pki)" && test -n "$(find /etc/kubernetes/pki -maxdepth 0 -type d ! -perm /022 \( -uid 0 -o -uid "$(id -u)" \) -print)" && echo stage && mktemp /etc/kubernetes/pki/.ca.crt.XXXXXXXXXX && mktemp /etc/kubernetes/pki/.ca.key.XXXXXXXXXX && mktemp /etc/kubernetes/pki/.sa.pub.XXXXXXXXXX && mktemp /etc/kubernetes/pki/.sa.key.XXXXXXXXXX && mktemp /etc/kubernetes/pki/.front-proxy-ca.crt.XXXXXXXXXX && mktemp /etc/kubernetes/pki/.front-proxy-ca.key.XXXXXXXXXX
+EOF
+  printf '%s\n' "${stage}"
 }
 
 # The staging files left in the pki dir of the fake node (its dot files).
@@ -1448,7 +1462,7 @@ bootstrapTokens:
 # ── preseed: the thin kubeone variant ────────────────────
 
 @test "handover preseed: stages each file in the pki dir, then renames it over its destination in one call" {
-  # 1 mkdir, 1 stage call (umask 077 and mktemp), 6 scp to the staging
+  # 1 mkdir, 1 stage call (umask 077, the dir checks, mktemp), 6 scp to the staging
   # names and 1 install call. Nothing of the restore goes out.
   _make_bundle
   _fake_node
@@ -1459,9 +1473,8 @@ bootstrapTokens:
   mapfile -t lines < "${CALLS}"
   [ "${#lines[@]}" -eq 9 ] || { printf '%s\n' "${lines[@]}"; return 1; }
   [[ "${lines[0]}" == "ssh "*" umask 077 && mkdir -p /etc/kubernetes/pki && chmod 0700 /etc/kubernetes/pki" ]]
-  local stage="umask 077 && mktemp /etc/kubernetes/pki/.ca.crt.XXXXXXXXXX && mktemp /etc/kubernetes/pki/.ca.key.XXXXXXXXXX"
-  stage+=" && mktemp /etc/kubernetes/pki/.sa.pub.XXXXXXXXXX && mktemp /etc/kubernetes/pki/.sa.key.XXXXXXXXXX"
-  stage+=" && mktemp /etc/kubernetes/pki/.front-proxy-ca.crt.XXXXXXXXXX && mktemp /etc/kubernetes/pki/.front-proxy-ca.key.XXXXXXXXXX"
+  local stage
+  stage="$(_preseed_stage)"
   [[ "${lines[1]}" == "ssh "*" -p 22 root@203.0.113.7 ${stage}" ]] || { echo "stage: ${lines[1]}"; return 1; }
   local key i=2
   for key in ca.crt ca.key sa.pub sa.key front-proxy-ca.crt front-proxy-ca.key; do
@@ -1504,24 +1517,49 @@ bootstrapTokens:
 }
 
 @test "handover preseed: each failure step stops, names the step and removes the staging files" {
-  # The stage call, a staging name of another shape, an extra line, the
-  # copy, the chmod, the mv, and an install call that fails before its first
-  # step. A name of another shape goes into no later call.
+  # The stage call, a staging name of another shape, a valid name of another
+  # key, a name twice, a line with terminal controls, text before the check
+  # lines, a wrong stage marker, an extra line, the copy, the chmod, the mv,
+  # and an install call that fails and names no step. A name of another
+  # shape goes into no later call, and no raw ESC byte of the node goes into
+  # the output.
   _make_bundle
   _fake_node
+  # A line that a node can print where a staging name goes: terminal
+  # controls, a backslash, a quote, a C1 control, a NUL and 250 letters. The
+  # Go suite uses the same line (preseedHostileLine).
+  local hostile
+  IFS= read -r hostile <<'EOF'
+printf '\033[2J\\"\302\233\000%s\n' "$(printf 'A%.0s' $(seq 1 250))"
+EOF
+  export HOSTILE="${hostile}"
+  # That line as the message shows it: escaped, the NUL dropped as a command
+  # substitution drops it, and cut at 200 bytes.
+  local quoted
+  quoted='"\x1b[2J\\\"\xc2\x9b'"$(printf 'A%.0s' $(seq 1 192))"'" (the first 200 of 258 bytes)'
+  local named="handover: 203.0.113.7 printed a staging name for"
   local step want scps key
   local -a placed
-  for step in stage shape extra copy chmod mv install; do
+  for step in stage shape otherkey twice hostile motd marker extra copy chmod mv install; do
     rm -rf "${NODE_ROOT}/etc/kubernetes/pki"
     : > "${CALLS}"
     export STEP="${step}"
     _node_hook() {
       local tool="${1}" cmd="${2}" pki="${NODE_ROOT}/etc/kubernetes/pki"
-      local bad="echo /etc/kubernetes/pki/.ca.crt.AAAAAAAAA-"
+      local bad="echo /etc/kubernetes/pki/.ca.crt.AAAAAAAAA-" stage='umask 077 && echo "check '
+      local crt="mktemp /etc/kubernetes/pki/.ca.crt.XXXXXXXXXX" key="mktemp /etc/kubernetes/pki/.ca.key.XXXXXXXXXX"
       case "${STEP}:${tool}" in
         stage:ssh) cmd="${cmd/"mktemp /etc/kubernetes/pki/.sa.key.XXXXXXXXXX"/false}" ;;
-        shape:ssh) cmd="${cmd/"mktemp /etc/kubernetes/pki/.ca.crt.XXXXXXXXXX"/${bad}}" ;;
-        extra:ssh) [[ "${cmd}" != "umask 077 && mktemp "* ]] || cmd+=" && echo extra" ;;
+        shape:ssh) cmd="${cmd/"${crt}"/${bad}}" ;;
+        otherkey:ssh) cmd="${cmd/"${crt}"/echo /etc/kubernetes/pki/.ca.key.Ab12Cd34Ef}" ;;
+        twice:ssh)
+          cmd="${cmd/"${crt}"/echo /etc/kubernetes/pki/.ca.crt.Ab12Cd34Ef}"
+          cmd="${cmd/"${key}"/echo /etc/kubernetes/pki/.ca.crt.Ab12Cd34Ef}"
+          ;;
+        hostile:ssh) cmd="${cmd/"${crt}"/"${HOSTILE}"}" ;;
+        motd:ssh) [[ "${cmd}" != "${stage}"* ]] || cmd="echo 'Welcome to the node' && ${cmd}" ;;
+        marker:ssh) cmd="${cmd/" && echo stage && "/" && echo staged && "}" ;;
+        extra:ssh) [[ "${cmd}" != "${stage}"* ]] || cmd+=" && echo extra" ;;
         copy:scp) [[ "${cmd}" != *"/.sa.key."* ]] || return 1 ;;
         chmod:ssh) [[ "${cmd}" != *" && mv -f -T "* ]] || rm -f "${pki}"/.ca.key.* ;;
         mv:ssh) [[ "${cmd}" != *" && mv -f -T "* ]] || mkdir -p "${pki}/sa.key/held" ;;
@@ -1533,7 +1571,12 @@ bootstrapTokens:
     placed=()
     case "${step}" in
       stage) want="handover: could not make the staging files /etc/kubernetes/pki/.<key>.XXXXXXXXXX on 203.0.113.7" scps=0 ;;
-      shape) want="handover: 203.0.113.7 printed a staging name for ca.crt that is not /etc/kubernetes/pki/.ca.crt. and 10 letters or digits: \"/etc/kubernetes/pki/.ca.crt.AAAAAAAAA-\"" scps=0 ;;
+      shape) want="${named} ca.crt that is not /etc/kubernetes/pki/.ca.crt. and 10 letters or digits: \"/etc/kubernetes/pki/.ca.crt.AAAAAAAAA-\"" scps=0 ;;
+      otherkey) want="${named} ca.crt that is not /etc/kubernetes/pki/.ca.crt. and 10 letters or digits: \"/etc/kubernetes/pki/.ca.key.Ab12Cd34Ef\"" scps=0 ;;
+      twice) want="${named} ca.key that is not /etc/kubernetes/pki/.ca.key. and 10 letters or digits: \"/etc/kubernetes/pki/.ca.crt.Ab12Cd34Ef\"" scps=0 ;;
+      hostile) want="${named} ca.crt that is not /etc/kubernetes/pki/.ca.crt. and 10 letters or digits: ${quoted}" scps=0 ;;
+      motd) want="handover: 203.0.113.7 printed \"Welcome to the node\" where the stage call prints the check of /etc/kubernetes" scps=0 ;;
+      marker) want="handover: 203.0.113.7 printed \"staged\" where the stage call prints \"stage\"" scps=0 ;;
       extra) want="handover: 203.0.113.7 printed 7 lines for 6 staging names" scps=0 ;;
       copy) want="handover: copying sa.key to 203.0.113.7 failed" scps=4 ;;
       chmod) want="handover: could not set the mode of the staging file of ca.key on 203.0.113.7; no file was moved into place" scps=6 ;;
@@ -1541,13 +1584,19 @@ bootstrapTokens:
         want="handover: could not move the staging file of sa.key to /etc/kubernetes/pki/sa.key on 203.0.113.7; in place before it: ca.crt ca.key sa.pub" scps=6
         placed=(ca.crt ca.key sa.pub)
         ;;
-      install) want="handover: the install call on 203.0.113.7 failed before its first step" scps=6 ;;
+      install)
+        want="handover: the install call on 203.0.113.7 failed, and its output names no step, so the state of the install is UNKNOWN."
+        want+=" Check each of these files on 203.0.113.7: /etc/kubernetes/pki/ca.crt /etc/kubernetes/pki/ca.key"
+        want+=" /etc/kubernetes/pki/sa.pub /etc/kubernetes/pki/sa.key /etc/kubernetes/pki/front-proxy-ca.crt /etc/kubernetes/pki/front-proxy-ca.key"
+        scps=6
+        ;;
     esac
     run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7
     assert_failure
     assert_output --partial "${want}"
     refute_output --partial "PKI pre-seeded"
     refute_output --partial "could not remove the staging files"
+    refute_output --partial $'\e'
     run tail -n 1 "${CALLS}"
     assert_output --regexp '^ssh .* root@203\.0\.113\.7 rm -f -- /etc/kubernetes/pki/\.'
     run grep -c '^scp ' "${CALLS}"
@@ -1560,6 +1609,69 @@ bootstrapTokens:
     for key in "${KUBEHZ_HANDOVER_PKI_KEYS[@]:${#placed[@]}}"; do
       [[ ! -e "${NODE_ROOT}/etc/kubernetes/pki/${key}" || -d "${NODE_ROOT}/etc/kubernetes/pki/${key}" ]] ||
         { echo "${step}: ${key} went into place after the failure"; return 1; }
+    done
+  done
+}
+
+@test "handover preseed: an untrusted /etc/kubernetes or pki dir is refused before any scp, and the message names what stat showed" {
+  # The stage call refuses before its first mktemp, when the dir is not a
+  # dir (a link or a file), has a write bit for the group or others, or has
+  # an owner that is neither root nor the ssh user. No staging file is made,
+  # so no cleanup call runs.
+  _make_bundle
+  _fake_node
+  local uid owner dir facts stage n
+  uid="$(id -u)"
+  owner="${uid}"
+  # As root, the dir goes to uid 4242 first, because root passes -uid 0.
+  [[ "${uid}" != 0 ]] || owner=4242
+  stage="$(_preseed_stage)"
+  local pki="${NODE_ROOT}/etc/kubernetes/pki" outside="${NODE_ROOT}/outside"
+  for n in groupwrite symlink file owner; do
+    rm -rf "${pki}" "${outside}"
+    chmod 755 "${NODE_ROOT}/etc/kubernetes"
+    [[ "${uid}" != 0 ]] || chown "${uid}" "${NODE_ROOT}/etc/kubernetes"
+    : > "${CALLS}"
+    export CASE="${n}" OTHER_UID="$(( owner + 1 ))"
+    _node_hook() {
+      local cmd="${2}" pki="${NODE_ROOT}/etc/kubernetes/pki"
+      local idu='"$(id -u)"' other="\"${OTHER_UID}\""
+      [[ "${cmd}" == 'umask 077 && echo "check '* ]] || { printf '%s\n' "${cmd}"; return 0; }
+      case "${CASE}" in
+        file) rm -rf "${pki}" && : > "${pki}" && chmod 600 "${pki}" ;;
+        # The ssh user is another uid than the owner of the dir.
+        owner) cmd="${cmd//"${idu}"/"${other}"}" ;;
+      esac
+      printf '%s\n' "${cmd}"
+    }
+    export -f _node_hook
+    case "${n}" in
+      groupwrite)
+        chmod 775 "${NODE_ROOT}/etc/kubernetes"
+        dir=/etc/kubernetes facts="${uid} 775 directory"
+        ;;
+      symlink)
+        mkdir -p "${outside}"
+        ln -s "${outside}" "${pki}"
+        dir=/etc/kubernetes/pki facts="${uid} 777 symbolic link"
+        ;;
+      file) dir=/etc/kubernetes/pki facts="${uid} 600 regular empty file" ;;
+      owner)
+        [[ "${uid}" != 0 ]] || chown 4242 "${NODE_ROOT}/etc/kubernetes"
+        dir=/etc/kubernetes facts="${owner} 755 directory"
+        ;;
+    esac
+    run handover::preseed --bundle "${BUNDLE}" --node 203.0.113.7
+    assert_failure
+    assert_output --partial "handover: ${dir} on 203.0.113.7 must be a dir, not a link, that root or the ssh user owns, with no write bit for the group or others. stat shows (uid, mode, type) \"${facts}\". No key was sent"
+    # The mkdir and the stage call only: no scp and no cleanup.
+    local -a lines
+    mapfile -t lines < "${CALLS}"
+    [ "${#lines[@]}" -eq 2 ] || { echo "${n}:"; printf '%s\n' "${lines[@]}"; return 1; }
+    [[ "${lines[1]}" == "ssh "*" ${stage}" ]] || { echo "${n}: stage: ${lines[1]}"; return 1; }
+    local d
+    for d in "${pki}" "${outside}"; do
+      [[ ! -d "${d}" || -L "${d}" ]] || [ -z "$(find "${d}" -mindepth 1)" ] || { echo "${n}: a file was made in ${d}"; return 1; }
     done
   done
 }
@@ -1647,7 +1759,9 @@ _assert_no_config_bypass() {
   while IFS= read -r line; do
     [[ "${line}" == "ssh -o StrictHostKeyChecking=yes "* || "${line}" == "scp -o StrictHostKeyChecking=yes "* ]] || { echo "not yes: ${line}"; return 1; }
     [[ "${line}" == *"-o UserKnownHostsFile=${kh} "* ]] || { echo "no known_hosts file: ${line}"; return 1; }
-    [[ "${line}" != *accept-new* && "${line}" != *"StrictHostKeyChecking=no"* && "${line}" != *"/dev/null"* ]] || { echo "host key not checked: ${line}"; return 1; }
+    # The given file is the only known_hosts file: not the global one too.
+    [[ "${line}" == *" -o GlobalKnownHostsFile=/dev/null "* ]] || { echo "the global known_hosts file is a trust source: ${line}"; return 1; }
+    [[ "${line}" != *accept-new* && "${line}" != *"StrictHostKeyChecking=no"* && "${line}" != *"UserKnownHostsFile=/dev/null"* ]] || { echo "host key not checked: ${line}"; return 1; }
     # A master connection of the user's ssh config never carries a call.
     [[ "${line}" == *" -o ControlMaster=no "* && "${line}" == *" -o ControlPath=none "* ]] || { echo "connection reuse not off: ${line}"; return 1; }
     _assert_no_config_bypass "${line}"
@@ -1664,7 +1778,7 @@ _assert_no_config_bypass() {
   assert_success
   run grep -c -- '-o StrictHostKeyChecking=yes ' "${CALLS}"
   assert_output "9"
-  run grep -c -e 'UserKnownHostsFile' -e 'accept-new' -e '^ssh-keygen ' "${CALLS}"
+  run grep -c -e 'KnownHostsFile' -e 'accept-new' -e '^ssh-keygen ' "${CALLS}"
   assert_output "0"
 }
 
