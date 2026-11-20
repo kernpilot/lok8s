@@ -356,6 +356,8 @@ _assert_group_signals() {
 @test "rbac: the redis-operator-chart-rbac binding after its opt-out" { _case redis-chart-rbac-opt-out; }
 @test "rbac: the redis-operator-chart-rbac binding with its opt-in" { _case redis-chart-rbac-opt-in; }
 @test "rbac: the redis-operator-chart-rbac opt-in as a path does not count" { _case redis-chart-rbac-opt-in-by-path; }
+@test "rbac: the four addons with a trailing slash count" { _case trailing-slash; }
+@test "rbac: the four addons with a trailing /. count" { _case trailing-dot; }
 @test "rbac: pods/exec through a * group" { _case exec-wildcard-group; }
 @test "rbac: pods/exec through a * resource" { _case exec-wildcard-resource; }
 @test "rbac: pods/exec through a * verb" { _case exec-wildcard-verb; }

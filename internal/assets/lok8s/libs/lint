@@ -529,8 +529,8 @@ lint::bootstrap() {
       errs=$(( errs + 1 ))
     fi
     # The addon counts only as a bare entry name, as in `lo doctor`, also with
-    # a trailing "/" or "/." (spec::is_suc_addon).
-    if [[ "${b_key}" != /* && "${b_key}" != ./* && "${b_key}" != ../* ]] && spec::is_suc_addon "${b_dir}"; then
+    # a trailing "/" or "/." (spec::is_addon).
+    if [[ "${b_key}" != /* && "${b_key}" != ./* && "${b_key}" != ../* ]] && spec::is_addon "${b_dir}" system-upgrade-controller; then
       suc=1
     fi
   done

@@ -542,6 +542,8 @@ _sso_path_without() {
 @test "sso: no sso-gate in spec.bootstrap prints nothing and reads nothing" { _sso_case addon-not-in-spec; }
 @test "sso: the default spec.bootstrap has no sso-gate" { _sso_case default-bootstrap; }
 @test "sso: sso-gate as a path entry does not count" { _sso_case addon-as-path-entry; }
+@test "sso: sso-gate with a trailing slash counts" { _sso_case trailing-slash; }
+@test "sso: sso-gate with a trailing /. counts" { _sso_case trailing-dot; }
 @test "sso: no kubeconfig skips" { _sso_case no-kubeconfig; }
 @test "sso: a kubeconfig path with a control character skips" { _sso_case kubeconfig-control-char; }
 @test "sso: a deploy domain prints nothing" { _sso_case deploy-domain; }

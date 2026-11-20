@@ -134,8 +134,9 @@ func ssoCase(t *testing.T, name string) (*config.Paths, string, *scriptRunner) {
 // are not a list, a version that is not an object, a served flag that is
 // not a boolean, no storage flag, no or two storage versions, a field of
 // the storage version that is not an object) prints the fixed reason in
-// both twins; (g) the addon as a map entry counts, as a path entry or
-// absent it does not, and the default spec.bootstrap has no sso-gate; (h)
+// both twins; (g) the addon as a map entry or with a trailing "/" or "/."
+// counts, as a path entry or absent it does not, and the default
+// spec.bootstrap has no sso-gate; (h)
 // no kubeconfig, a kubeconfig path with a control character, a deploy
 // domain, no cluster spec and a spec that cannot be read.
 func TestDoctorSSOGateCases(t *testing.T) {
