@@ -1,0 +1,7 @@
+apiVersion: deploy.lok8s.dev/v1
+kind: Deploy
+metadata:
+  name: rbac-test
+spec:
+  clusterRef:
+    domain: cluster.example

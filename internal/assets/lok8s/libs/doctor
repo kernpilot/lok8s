@@ -3,8 +3,9 @@
 # vim: set syntax=bash:
 # doctor — environment + toolchain preflight diagnostics
 # Reports bash version (argsh needs >= 4.3), required/optional tool presence,
-# the PATH_* environment, whether the secrets plugin is built, and the active
-# domain. Exits non-zero when a REQUIRED prerequisite is missing.
+# the PATH_* environment, whether the secrets plugin is built, the active
+# domain, and the RBAC migration leftovers of its cluster (doctor::_rbac_check).
+# Exits non-zero when a REQUIRED prerequisite is missing.
 
 import ^utils/domain
 import ^utils/verbose
@@ -103,6 +104,9 @@ main::doctor() {
   else
     doctor::_warn "no active domain (run: lo use <domain>)"
   fi
+  # The RBAC migration check of the domain's cluster (advisory, read-only).
+  # Its lines close the domain section.
+  doctor::_rbac_check "${domain}"
 
   # Provider / infrastructure diagnosis — advisory, never affects the exit code.
   doctor::_provider_section "${domain}"
@@ -121,6 +125,587 @@ doctor::_color() { [[ -t 1 && -z "${NO_COLOR:-}" ]]; }
 doctor::_ok()   { if doctor::_color; then printf '  \033[32m✓\033[0m %s\n' "${1}"; else printf '  ✓ %s\n' "${1}"; fi; }
 doctor::_warn() { if doctor::_color; then printf '  \033[33m!\033[0m %s\n' "${1}"; else printf '  ! %s\n' "${1}"; fi; }
 doctor::_bad()  { if doctor::_color; then printf '  \033[31m✗\033[0m %s\n' "${1}"; else printf '  ✗ %s\n' "${1}"; fi; }
+# A neutral fact, neither a pass nor a finding (the Go binary's ℹ line): the
+# whole line is dim on a terminal.
+doctor::_info() { if doctor::_color; then printf '  \033[2mℹ %s\033[0m\n' "${1}"; else printf '  ℹ %s\n' "${1}"; fi; }
+
+# doctor::_rbac_check <domain>
+# The RBAC migration check (issues #311 and #315). Go twin:
+# internal/cli/cmd_doctor_rbac.go. The piped lines are the same in both.
+#
+# The system-upgrade-controller and redis-operator addons no longer bind the
+# broad RBAC of their charts. The bootstrap applies without prune, so a
+# cluster that ran an earlier version of an addon keeps the old objects until
+# a person deletes them. This check reads the ClusterRoleBindings and
+# ClusterRoles of the domain's cluster and reports each old object with its
+# delete command. It never changes the cluster.
+#
+# It runs only when spec.bootstrap has one of the two addons (read with the
+# entry parser of `lo addons --detail`) and the domain has a kubeconfig (the
+# file that the entrypoint exports as KUBECONFIG). It makes two reads, each
+# with --request-timeout=10s and a bound of 30 s (doctor::_rbac_bound). A
+# read runs the credential plugin of that kubeconfig, which can ask for a
+# login. Each read runs as its own process group: the bound and a Ctrl-C
+# stop the whole group (TERM, then KILL after 2 s), so the children of a
+# credential plugin stop too, and the check waits for them. A failed read
+# is a warning with a fixed reason per class. kubectl's stderr can name the
+# server and the user, so the check never prints it. A
+# binding counts when it gives the role to the account in any form: the
+# ServiceAccount, the User name of its token, or a group of the token. A
+# delete command is printed only for a binding of the account alone: a
+# binding that the account shares gets a line that names it, with no
+# command. A binding name goes into a printed delete command only when it is
+# a DNS-1123 subdomain (doctor::_rbac_delete checks it again). Each delete
+# command names the kubeconfig of the reads (shell-quoted) and is the rest
+# of its line, so a copy of it deletes in the cluster that the check read and
+# nothing else. The old ClusterRole gets a delete command only when no
+# ClusterRoleBinding gives it to another subject, and the line says to check
+# the RoleBindings first (the check does not read them). Of the labels of
+# that role, the check prints only the three aggregation keys of the
+# built-in roles. Every line is advisory: it always returns 0.
+doctor::_rbac_check() {
+  local domain="${1}"
+  local skipped="RBAC migration check skipped: "
+  local not_checked="RBAC migration leftovers not checked: "
+  local invalid="kubectl failed or did not return a valid list"
+  # The domain section above says it (no active domain).
+  [[ -n "${domain}" ]] || return 0
+  local spec="${PATH_CLUSTERS}/${domain}/cluster.lok8s.yaml"
+  if [[ "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ && ! -f "${spec}" && -f "${PATH_CLUSTERS}/${domain}/deploy.lok8s.yaml" ]]; then
+    doctor::_info "${skipped}${domain} is a deploy domain (run the check on its cluster domain: lo doctor --domain <cluster domain>)"
+    return 0
+  fi
+  if [[ ! "${domain}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ || ! -f "${spec}" ]]; then
+    doctor::_info "${skipped}${domain} has no cluster.lok8s.yaml"
+    return 0
+  fi
+  # The bash twin reads the spec with yq and the lists with jq (the Go twin
+  # needs neither). Without one of them the lines below would be wrong.
+  local tool
+  for tool in yq jq; do
+    if ! command -v "${tool}" >/dev/null 2>&1; then
+      doctor::_warn "${not_checked}${tool} not found"
+      return 0
+    fi
+  done
+  local kind
+  if ! kind=$(domain::spec_driver "${spec}" lo 2>/dev/null); then
+    doctor::_info "${skipped}the cluster spec of ${domain} cannot be read (run: lo lint)"
+    return 0
+  fi
+  # The entry parser of libs/bootstrap (the entrypoint loads it). An addon
+  # counts only as a bare entry name, never as a path entry (Go: the
+  # Builtin flag of the parsed entry).
+  if ! declare -F bootstrap::_resolve_entries >/dev/null || ! declare -F bootstrap::_parse_entry >/dev/null; then
+    doctor::_info "${skipped}the bootstrap entry parser is not loaded"
+    return 0
+  fi
+  local -a entries=()
+  mapfile -t entries < <(bootstrap::_resolve_entries "${spec}" "${kind}" 2>/dev/null)
+  local e nm dr inl ev wt dp ex key suc=0 suc_admin=0 redis=0 chart_rbac=0
+  for e in "${entries[@]+"${entries[@]}"}"; do
+    [[ -n "${e}" ]] || continue
+    nm=""; dr=""; inl=""; ev=""; wt=""; dp=""; ex=""; key=""
+    bootstrap::_parse_entry "${domain}" "${e}" nm dr inl ev wt dp ex key 2>/dev/null || continue
+    [[ "${key}" != /* && "${key}" != ./* && "${key}" != ../* ]] || continue
+    case "${dr##*/}" in
+      system-upgrade-controller) suc=1 ;;
+      system-upgrade-controller-cluster-admin) suc_admin=1 ;;
+      redis-operator) redis=1 ;;
+      redis-operator-chart-rbac) chart_rbac=1 ;;
+    esac
+  done
+  if (( ! suc && ! redis )); then
+    doctor::_info "${skipped}spec.bootstrap has no system-upgrade-controller and no redis-operator"
+    return 0
+  fi
+  if (( suc && suc_admin )); then
+    doctor::_info "RBAC migration check of system-upgrade-controller skipped: spec.bootstrap has system-upgrade-controller-cluster-admin, which owns the cluster-admin binding"
+    suc=0
+  fi
+  (( suc || redis )) || return 0
+
+  # The kubeconfig that the entrypoint exports for the domain: the spec's
+  # metadata.name, else LOK8S_CLUSTER_NAME, else local (Go:
+  # build.AmbientKubeconfig).
+  local cluster="${LOK8S_CLUSTER_NAME:-local}" spec_name=""
+  spec_name=$(yq -r '.metadata.name // ""' "${spec}" 2>/dev/null) || spec_name=""
+  [[ -z "${spec_name}" ]] || cluster="${spec_name}"
+  local kubeconfig="${PATH_BASE}/.kubeconfig/${cluster}.yaml"
+  if doctor::_rbac_has_control "${kubeconfig}"; then
+    doctor::_info "${skipped}the kubeconfig path has a control character (the delete commands of the check name that path)"
+    return 0
+  fi
+  if [[ ! -f "${kubeconfig}" ]]; then
+    doctor::_info "${skipped}no kubeconfig at ${kubeconfig#"${PATH_BASE}/"}"
+    return 0
+  fi
+  if ! command -v kubectl >/dev/null 2>&1; then
+    doctor::_warn "${not_checked}kubectl not found"
+    return 0
+  fi
+
+  local result=""
+  result=$(doctor::_rbac_fetch "${kubeconfig}" "${chart_rbac}") || result=""
+  case "${result}" in
+    ok|ok$'\n'*) doctor::_rbac_report "${result#ok}" "${suc}" "${redis}" "${kubeconfig}" ;;
+    fail$'\t'*)  doctor::_warn "${not_checked}${result#fail$'\t'}" ;;
+    *)           doctor::_warn "${not_checked}${invalid}" ;;
+  esac
+  return 0
+}
+
+# doctor::_rbac_bound — the bound of one read, in seconds (Go: rbacReadBound).
+# A test makes it short.
+doctor::_rbac_bound() { echo 30; }
+
+# doctor::_rbac_fetch <kubeconfig> <chart_rbac 0|1>
+# The two reads and the records. Prints "ok" and then the records of
+# doctor::_rbac_records, or one line "fail<TAB><reason>". It runs in a
+# subshell, so its temp dir, its variables and its traps never reach the
+# caller. On an exit or a Ctrl-C, the traps stop a read that still runs and
+# remove the temp dir. A Ctrl-C then ends the subshell with SIGINT, so that
+# the caller acts on it. The subshell only calls doctor::_rbac_fetch_in:
+# the _rbac_* variables are set and read in plain function scope (no
+# assignment in the subshell group itself, ShellCheck SC2030/SC2031).
+doctor::_rbac_fetch() ( doctor::_rbac_fetch_in "$@" )
+
+# doctor::_rbac_fetch_in <kubeconfig> <chart_rbac 0|1> — the body of
+# doctor::_rbac_fetch, always in its subshell. The _rbac_* variables are
+# globals of that subshell, not locals: the EXIT trap reads them after this
+# function has returned.
+doctor::_rbac_fetch_in() {
+  _rbac_tmp="" _rbac_pid="" _rbac_dog="" _rbac_rc=0 _rbac_stopped=0 _rbac_reason=""
+  trap 'doctor::_rbac_cleanup' EXIT
+  trap 'doctor::_rbac_cleanup; trap - EXIT INT; kill -INT "${BASHPID}"' INT
+  local invalid="kubectl failed or did not return a valid list" records=""
+  if ! _rbac_tmp=$(mktemp -d "${TMPDIR:-/tmp}/lo-doctor-rbac.XXXXXX"); then
+    _rbac_tmp=""
+    printf 'fail\t%s\n' "${invalid}"
+    exit 0
+  fi
+  doctor::_rbac_read "${1}" clusterrolebindings "${_rbac_tmp}/crb.json" "${_rbac_tmp}/err"
+  [[ -n "${_rbac_reason}" ]] || doctor::_rbac_read "${1}" clusterroles "${_rbac_tmp}/cr.json" "${_rbac_tmp}/err"
+  if [[ -n "${_rbac_reason}" ]]; then
+    printf 'fail\t%s\n' "${_rbac_reason}"
+  elif records=$(doctor::_rbac_records "${_rbac_tmp}/crb.json" "${_rbac_tmp}/cr.json" "${2}"); then
+    printf 'ok\n%s\n' "${records}"
+  else
+    printf 'fail\t%s\n' "${invalid}"
+  fi
+}
+
+# doctor::_rbac_cleanup — the EXIT and INT action of doctor::_rbac_fetch:
+# stop the process group of a read that still runs (doctor::_rbac_stop, as a
+# job, so that this shell reaps the read meanwhile), wait for the read and
+# the stop, stop the watchdog, and then remove the temp dir.
+doctor::_rbac_cleanup() {
+  local stop=""
+  if [[ -n "${_rbac_pid}" ]]; then
+    doctor::_rbac_stop "${_rbac_pid}" < /dev/null > /dev/null 2>&1 &
+    stop=$!
+    wait "${_rbac_pid}" 2>/dev/null || true
+    wait "${stop}" 2>/dev/null || true
+    _rbac_pid=""
+  fi
+  if [[ -n "${_rbac_dog}" ]]; then
+    kill -TERM "${_rbac_dog}" 2>/dev/null || true
+    wait "${_rbac_dog}" 2>/dev/null || true
+    _rbac_dog=""
+  fi
+  if [[ -n "${_rbac_tmp}" ]]; then
+    rm -f -- "${_rbac_tmp}/crb.json" "${_rbac_tmp}/cr.json" "${_rbac_tmp}/err" "${_rbac_tmp}/stopped"
+    rmdir -- "${_rbac_tmp}" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# doctor::_rbac_read <kubeconfig> <resource> <out file> <err file>
+# One bounded `kubectl get <resource> -o json` (in doctor::_rbac_fetch). Sets
+# _rbac_reason to "" when the output is a list of the shape that the check
+# reads (doctor::_rbac_shape), else to the fixed reason of the failure's
+# class. The stderr goes to <err file> for the class and is never printed.
+# A read that the bound stopped gives the reason of the bound, also when
+# kubectl handled the TERM and exited 0 (Go: rbacRead checks the context
+# first).
+doctor::_rbac_read() {
+  local kubeconfig="${1}" resource="${2}" out="${3}" err="${4}"
+  _rbac_reason=""
+  doctor::_rbac_run "${out}" "${err}" kubectl --kubeconfig "${kubeconfig}" get "${resource}" -o json --request-timeout=10s
+  if (( _rbac_stopped )); then
+    _rbac_reason="kubectl did not answer within 30 s (the cluster API, or a credential plugin that waits for a login)"
+  elif (( _rbac_rc != 0 )); then
+    _rbac_reason=$(doctor::_rbac_reason "$(cat "${err}" 2>/dev/null)")
+  elif ! doctor::_rbac_shape "${resource}" "${out}"; then
+    _rbac_reason="kubectl failed or did not return a valid list"
+  fi
+  return 0
+}
+
+# doctor::_rbac_shape <resource> <file> — 0 when <file> is one JSON object
+# whose items is a list of objects of the shape that both twins read (Go:
+# rbacRead with rbacParseBinding or rbacParseRole). A field may be absent or
+# null: it is then empty. A field that is there has the type that the check
+# reads, and so has each element of a list (no null). Any other value makes
+# the whole list invalid, also in an item that the check does not report.
+# --slurp: a second JSON value in the file makes it invalid too. The stderr
+# of jq is never printed. jq accepts some text that the JSON decoder of Go
+# refuses: of that, a leading byte-order mark, NaN, and a number out of the
+# range of a float64 (Infinity, 1e1000) make the list invalid here too.
+doctor::_rbac_shape() {
+  local bom=""
+  # The first 3 bytes (C locale: a character is a byte).
+  bom="$(LC_ALL=C; IFS= read -r -N 3 b < "${2}" && printf '%s' "${b}")" || bom=""
+  [[ "${bom}" != $'\xef\xbb\xbf' ]] || return 1
+  # shellcheck disable=SC2016 # jq program text
+  jq -e -s --arg res "${1}" '
+    def str: . == null or type == "string";
+    def obj: . == null or type == "object";
+    def strs: . == null or (type == "array" and all(.[]; type == "string"));
+    def objs(f): . == null or (type == "array" and all(.[]; type == "object" and f));
+    def binding: (.metadata | obj) and (.metadata.name | str)
+      and (.roleRef | obj) and (.roleRef.kind | str) and (.roleRef.name | str)
+      and (.subjects | objs((.kind | str) and (.name | str) and (.namespace | str)));
+    def role: (.metadata | obj) and (.metadata.name | str)
+      and (.metadata.labels | . == null or (type == "object" and all(.[]; type == "string")))
+      and (.rules | objs((.apiGroups | strs) and (.resources | strs) and (.verbs | strs) and (.resourceNames | strs)));
+    length == 1 and all(.. | numbers; (isnan or isinfinite) | not)
+      and (.[0] | type == "object" and (.items | type == "array")
+      and all(.items[]; type == "object" and (if $res == "clusterroles" then role else binding end)))
+  ' "${2}" > /dev/null 2>&1
+}
+
+# doctor::_rbac_run <out file> <err file> <command...>
+# Runs the command with stdin /dev/null, stdout to <out file> and stderr to
+# <err file>, and stops it after doctor::_rbac_bound seconds (Go: the
+# context of rbacRead) with doctor::_rbac_watchdog. The command runs as a
+# background job, so that the INT trap of doctor::_rbac_fetch runs at once,
+# and as its own process group (set -m: its pgid is its pid), so that a
+# stop also reaches the children of a credential plugin. That group is not
+# the foreground group of the terminal: a Ctrl-C reaches this shell, whose
+# INT trap stops the group. The check does not use timeout(1): macOS has
+# no timeout(1), and a BusyBox timeout can signal the command only, not
+# its children (not tested here; GNU timeout signals the group). Sets
+# _rbac_rc to the exit code and _rbac_stopped to 1 when the bound stopped
+# the command.
+doctor::_rbac_run() {
+  local out="${1}" err="${2}" bound
+  shift 2
+  bound="$(doctor::_rbac_bound)"
+  _rbac_rc=0 _rbac_stopped=0
+  set -m
+  "$@" < /dev/null > "${out}" 2> "${err}" &
+  _rbac_pid=$!
+  set +m
+  doctor::_rbac_watchdog "${bound}" "${_rbac_pid}" "${_rbac_tmp}/stopped" < /dev/null > /dev/null 2>&1 &
+  _rbac_dog=$!
+  # 2>/dev/null: bash reports a job that a KILL ended on stderr, with the
+  # text of the command.
+  wait "${_rbac_pid}" 2>/dev/null || _rbac_rc=$?
+  _rbac_pid=""
+  # After the bound the watchdog ignores TERM: the wait then lasts until
+  # the group is gone (at most the grace of doctor::_rbac_stop).
+  kill -TERM "${_rbac_dog}" 2>/dev/null || true
+  wait "${_rbac_dog}" 2>/dev/null || true
+  _rbac_dog=""
+  if [[ -e "${_rbac_tmp}/stopped" ]]; then
+    _rbac_stopped=1
+    rm -f -- "${_rbac_tmp}/stopped"
+  fi
+  return 0
+}
+
+# doctor::_rbac_watchdog <seconds> <pgid> <mark file>
+# The bound, as a background job: after <seconds> it creates <mark file> and
+# stops the process group <pgid> (doctor::_rbac_stop; Go: the interrupt of
+# the context, then the WaitDelay). A TERM before the bound ends it and its
+# sleep. After the bound it ignores TERM, so that the stop always gets to
+# its KILL.
+doctor::_rbac_watchdog() {
+  local s=""
+  trap '[[ -z "${s}" ]] || kill -TERM "${s}" 2>/dev/null; exit 0' TERM
+  sleep "${1}" & s=$!
+  wait "${s}" || exit 0
+  trap '' TERM
+  : > "${3}"
+  doctor::_rbac_stop "${2}"
+}
+
+# doctor::_rbac_stop <pgid> — stop the process group <pgid>: TERM (and CONT,
+# so that a stopped member gets the TERM), then up to 2 s (the grace; Go:
+# rbacReadGrace) for the group to end, then KILL. It runs as a process of
+# its own (the watchdog, or a job of doctor::_rbac_cleanup), so that the
+# shell of the read reaps the read meanwhile: a zombie still counts as a
+# member of the group. Without that group (set -m did not make it), each
+# signal goes to the process <pgid> itself.
+doctor::_rbac_stop() {
+  local i
+  doctor::_rbac_signal TERM "${1}" || return 0
+  doctor::_rbac_signal CONT "${1}" || true
+  for (( i = 0; i < 20; i++ )); do
+    doctor::_rbac_signal 0 "${1}" || return 0
+    sleep 0.1
+  done
+  doctor::_rbac_signal KILL "${1}" || true
+}
+
+# doctor::_rbac_signal <signal> <pgid> — send the signal to the process group
+# <pgid>, else to the process <pgid>. Fails when neither exists.
+doctor::_rbac_signal() {
+  kill "-${1}" -- "-${2}" 2>/dev/null || kill "-${1}" "${2}" 2>/dev/null
+}
+
+# doctor::_rbac_reason <stderr> — the fixed reason of a failed read (Go:
+# rbacReadReason, the same words in the same order). "was refused" is
+# kubectl's own text for a refused connection.
+doctor::_rbac_reason() {
+  local s="${1,,}"
+  case "${s}" in
+    *forbidden*|*unauthorized*|*"must be logged in"*)
+      echo "the kubeconfig user cannot list ClusterRoles and ClusterRoleBindings (forbidden or unauthorized)" ;;
+    *"unable to connect"*|*"connection refused"*|*"was refused"*|*"no such host"*|*timeout*|*"deadline exceeded"*|*"network is unreachable"*|*"no route to host"*)
+      echo "the cluster API did not answer (unreachable or timed out)" ;;
+    *)
+      echo "kubectl failed or did not return a valid list" ;;
+  esac
+}
+
+# doctor::_rbac_records <bindings file> <roles file> <chart_rbac 0|1>
+# The facts the report needs, one TAB-separated record per line, from one jq
+# run (a failed run is a failed check, never an empty pass):
+#   suc-left <role> <form> <arg> [<binding>]
+#                                  a binding that gives the SUC ServiceAccount
+#                                  cluster-admin
+#   suc-new 0|1                    a binding that gives it lok8s-system-upgrade-controller
+#   redis-left <role> <form> <arg> [<binding>]
+#                                  a binding that gives the redis-operator
+#                                  ServiceAccount cluster-admin, redis-operator or
+#                                  (without the opt-in addon)
+#                                  lok8s-redis-operator-chart-rbac
+#   redis-new 0|1                  a binding that gives it lok8s-redis-operator
+#   redis-oldrole 0|1              the chart's ClusterRole redis-operator
+#   redis-ref [<binding>]          a binding that gives that role to a subject
+#                                  that is not the account (Go: rbacOtherRefs)
+#   redis-agg <labels>             of the aggregation keys of the built-in
+#                                  roles (admin, edit, view), the ones that
+#                                  role has with the value "true"
+#   redis-exec 0|1                 a ClusterRole that a binding gives it has create
+#                                  on pods/exec
+# <form> <arg> is "group <group>" when a subject is a group of the account's
+# token (the first one), else "sa <n>": the account is a subject (as the
+# ServiceAccount or as the User name of its token) and <n> subjects are not
+# the account (Go: rbacGrantOf). A binding matches by its subjects and
+# roleRef, never by its name. jq puts the binding name in a record only
+# when it is a DNS-1123 subdomain (at most 253 characters), else it leaves
+# the field out. The other fields are fixed words, numbers, and role and
+# group names that jq matched against fixed names, so no text of the
+# response reaches a record but such a name. Each record goes through rec,
+# which fails the run when a field has a control character (a TAB or a
+# newline would split the record). The stderr of jq goes to /dev/null: an
+# error on a malformed field quotes the value of the field.
+doctor::_rbac_records() {
+  # shellcheck disable=SC2016 # jq program text
+  jq -r --slurpfile cr "${2}" --arg chart "${3}" '
+    def rec: map(tostring) | if any(.[]; test("[[:cntrl:]]")) then error("a record field has a control character") else join("\t") end;
+    def acct($n; $ns): (.kind == "ServiceAccount" and .name == $n and .namespace == $ns)
+      or (.kind == "User" and .name == "system:serviceaccount:\($ns):\($n)");
+    def grp($ns): .kind == "Group" and (.name as $g
+      | any("system:serviceaccounts:\($ns)", "system:serviceaccounts", "system:authenticated"; . == $g));
+    def holds($n; $ns): any(.subjects[]?; acct($n; $ns) or grp($ns));
+    def bound($n; $ns; $roles):
+      .items[] | select(.roleRef.kind == "ClusterRole" and (.roleRef.name as $r | any($roles[]; . == $r)) and holds($n; $ns));
+    def anyof($want): . as $list | any($want[]; . as $w | any(($list // [])[]; . == $w));
+    def shown: (type == "string") and length <= 253
+      and test("\\A[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\\z");
+    def others($n; $ns): [.subjects[]? | select(acct($n; $ns) | not)] | length;
+    def named: if (.metadata.name | shown) then [.metadata.name] else [] end;
+    def left($tag; $n; $ns):
+      ([.subjects[]? | select(grp($ns)) | .name] | .[0]) as $g
+      | [$tag, .roleRef.name] + (if $g != null then ["group", $g] else ["sa", others($n; $ns)] end) + named | rec;
+    ($cr[0].items) as $roles
+    | ([$roles[] | select(.metadata.name == "redis-operator")] | .[0]) as $old
+    | ([.items[] | select(.roleRef.kind == "ClusterRole" and holds("redis-operator"; "redis-operator")) | .roleRef.name]) as $refs
+    | (bound("system-upgrade-controller"; "cattle-system"; ["cluster-admin"])
+        | left("suc-left"; "system-upgrade-controller"; "cattle-system")),
+      (["suc-new", ([bound("system-upgrade-controller"; "cattle-system"; ["lok8s-system-upgrade-controller"])] | if length > 0 then 1 else 0 end)] | rec),
+      (bound("redis-operator"; "redis-operator";
+          ["cluster-admin", "redis-operator"] + (if $chart == "1" then [] else ["lok8s-redis-operator-chart-rbac"] end))
+        | left("redis-left"; "redis-operator"; "redis-operator")),
+      (["redis-new", ([bound("redis-operator"; "redis-operator"; ["lok8s-redis-operator"])] | if length > 0 then 1 else 0 end)] | rec),
+      (["redis-oldrole", (if $old == null then 0 else 1 end)] | rec),
+      (if $old == null then empty else
+        (.items[] | select(.roleRef.kind == "ClusterRole" and .roleRef.name == "redis-operator"
+          and others("redis-operator"; "redis-operator") > 0) | ["redis-ref"] + named | rec),
+        ((($old.metadata.labels // {}) as $l
+          | [("admin", "edit", "view") | "rbac.authorization.k8s.io/aggregate-to-\(.)" | select($l[.] == "true")]
+          | join(", ")) as $agg
+          | if $agg == "" then empty else ["redis-agg", $agg] | rec end)
+      end),
+      (["redis-exec", (if any($roles[];
+          (.metadata.name as $m | any($refs[]; . == $m))
+          and any(.rules[]?; ((.resourceNames // []) | length) == 0
+            and (.apiGroups | anyof(["", "*"]))
+            and (.resources | anyof(["pods/exec", "*", "*/exec"]))
+            and (.verbs | anyof(["create", "*"])))) then 1 else 0 end)] | rec)
+  ' "${1}" 2>/dev/null
+}
+
+# doctor::_rbac_report <records> <suc 0|1> <redis 0|1> <kubeconfig> — the
+# lines, in the order of the Go twin.
+doctor::_rbac_report() {
+  local records="${1}" suc="${2}" redis="${3}" kubeconfig="${4}" rec tag a b c d
+  local -a suc_left=() redis_left=() refs=()
+  local suc_new=0 redis_new=0 old_role=0 agg="" has_exec=0 odd=0 line
+  while IFS=$'\t' read -r tag a b c d; do
+    case "${tag}" in
+      suc-left)      suc_left+=("${a}"$'\t'"${b}"$'\t'"${c}"$'\t'"${d}") ;;
+      suc-new)       suc_new="${a}" ;;
+      redis-left)    redis_left+=("${a}"$'\t'"${b}"$'\t'"${c}"$'\t'"${d}") ;;
+      redis-new)     redis_new="${a}" ;;
+      redis-oldrole) old_role="${a}" ;;
+      redis-ref)     if [[ -n "${a}" ]]; then refs+=("${a}"); else odd=$(( odd + 1 )); fi ;;
+      redis-agg)     agg="${a}" ;;
+      redis-exec)    has_exec="${a}" ;;
+    esac
+  done <<< "${records}"
+
+  if (( suc )); then
+    if (( ${#suc_left[@]} == 0 )); then
+      doctor::_ok "system-upgrade-controller: no RBAC migration leftovers"
+    else
+      (( suc_new )) || doctor::_rbac_new_missing system-upgrade-controller lok8s-system-upgrade-controller
+      for rec in "${suc_left[@]}"; do
+        doctor::_rbac_binding_line "${rec}" system-upgrade-controller "${kubeconfig}"
+      done
+    fi
+  fi
+  if (( redis )); then
+    if (( ${#redis_left[@]} == 0 && ! old_role )); then
+      doctor::_ok "redis-operator: no RBAC migration leftovers"
+    else
+      (( redis_new )) || doctor::_rbac_new_missing redis-operator lok8s-redis-operator
+      for rec in "${redis_left[@]+"${redis_left[@]}"}"; do
+        doctor::_rbac_binding_line "${rec}" redis-operator "${kubeconfig}"
+      done
+      if (( old_role )); then
+        # Go: rbacOldRoleLine. The role gets its delete command only when
+        # no binding gives it to another subject (a redis-ref record).
+        local cmd="" n=$(( ${#refs[@]} + odd )) names those="those bindings"
+        line="ClusterRole redis-operator, the old role of the chart, is still in the cluster"
+        if (( n == 0 )) && cmd="$(doctor::_rbac_delete "${kubeconfig}" clusterrole redis-operator)"; then
+          line+=". Doctor does not read RoleBindings: check that none refers to it, and then delete it: ${cmd}"
+        elif (( n == 0 )); then
+          cmd=""
+          line+=". Doctor prints no delete command for the role: check that no RoleBinding refers to it (doctor does not read RoleBindings), and then delete it"
+        else
+          (( odd == 0 )) || refs+=("${odd} with an unusual name")
+          names="$(IFS=,; printf '%s' "${refs[*]}")"
+          if (( n == 1 )); then
+            line+=", and 1 ClusterRoleBinding gives it to subjects other than the redis-operator ServiceAccount"
+            those="that binding"
+          else
+            line+=", and ${n} ClusterRoleBindings give it to subjects other than the redis-operator ServiceAccount"
+          fi
+          line+=" (${names//,/, }). Doctor prints no delete command for the role: give the subjects of ${those} another role first, check that no RoleBinding refers to it (doctor does not read RoleBindings), and then delete it"
+        fi
+        doctor::_warn "migration incomplete: ${line}"
+        if [[ -n "${agg}" ]]; then
+          line="migration incomplete: ClusterRole redis-operator copies its rules into built-in roles (${agg}). The aggregation controller removes the copies when the role is deleted"
+          [[ -z "${cmd}" ]] || line+=" (the command above)"
+          doctor::_warn "${line}"
+        fi
+      fi
+    fi
+    (( has_exec )) || doctor::_info "redis-operator: no ClusterRoleBinding gives the redis-operator ServiceAccount create on pods/exec. A RedisCluster cannot form or scale without it (restore ClusterRoleBinding lok8s-redis-operator-exec before you add one)"
+  fi
+  return 0
+}
+
+# doctor::_rbac_new_missing <account> <new role> — a delete of the old
+# binding before the new one exists leaves the workload without access.
+doctor::_rbac_new_missing() {
+  doctor::_warn "migration incomplete: no ClusterRoleBinding binds the ${1} ServiceAccount to ${2} yet (apply the bootstrap before the deletes below: lo bootstrap)"
+}
+
+# doctor::_rbac_binding_line <role TAB form TAB arg TAB binding> <account> <kubeconfig>
+# One old grant (Go: rbacGrantLine). Only a binding of the account alone
+# ("sa 0") gets a delete command, as the rest of its line. A grant through a
+# group (it also gives the role to other accounts) and a binding with other
+# subjects get no command: a delete would also remove the grant of the
+# others. An empty binding field is a name that is not a DNS-1123 subdomain:
+# the line then has no name and no command. For a role that an opt-in addon
+# binds the account to, each advice to remove the grant says to keep it
+# only on purpose: the check finds an opt-in addon only as a bare entry
+# name (Go: rbacOptInRole).
+doctor::_rbac_binding_line() {
+  local role="" form="" arg="" name="" what account="the ${2} ServiceAccount" keep="" cmd="" line
+  local unusual="Doctor does not print that name or a delete command: "
+  IFS=$'\t' read -r role form arg name <<< "${1}"
+  what="ClusterRoleBinding ${name}"
+  [[ -n "${name}" ]] || what="a ClusterRoleBinding with an unusual name (not a DNS-1123 subdomain)"
+  case "${2}:${role}" in
+    system-upgrade-controller:cluster-admin|redis-operator:lok8s-redis-operator-chart-rbac)
+      keep="keep it only on purpose, else " ;;
+  esac
+  if [[ "${form}" == group ]]; then
+    line="${what} gives ${role} to the group ${arg}, which includes ${account}. "
+    if [[ -n "${name}" ]]; then
+      line+="Doctor prints no delete command for a shared grant: review the binding"
+    else
+      line+="${unusual}find the binding and review it"
+    fi
+  elif [[ "${arg}" != 0 ]]; then
+    local others="${arg} other subjects"
+    [[ "${arg}" != 1 ]] || others="1 other subject"
+    line="${what} binds ${account} and ${others} to ${role}. "
+    if [[ -n "${name}" ]]; then
+      line+="Doctor prints no delete command for a binding with other subjects: ${keep}remove ${account} from its subjects (for example with kubectl edit)"
+    else
+      line+="${unusual}${keep}find the binding and remove ${account} from its subjects"
+    fi
+  else
+    line="${what} binds ${account} to ${role}. "
+    # doctor::_rbac_delete checks the name again: a name that fails gets
+    # the line without the command.
+    if [[ -n "${name}" ]] && cmd="$(doctor::_rbac_delete "${3}" clusterrolebinding "${name}")"; then
+      if [[ -n "${keep}" ]]; then line+="Keep it only on purpose, else delete it: "; else line+="Delete it: "; fi
+      line+="${cmd}"
+    else
+      line+="${unusual}${keep}find the binding and delete it"
+    fi
+  fi
+  doctor::_warn "migration incomplete: ${line}"
+}
+
+# doctor::_rbac_delete <kubeconfig> <resource> <name> — the delete command of
+# one object in the cluster of the kubeconfig that the reads used (Go:
+# rbacDeleteCommand). It checks the name again where it builds the command:
+# for a name that is not a DNS-1123 subdomain of at most 253 characters, it
+# prints nothing and returns 1. The kubeconfig path is shell-quoted.
+doctor::_rbac_delete() {
+  # The letters one by one: a range like a-z can match other letters in the
+  # regex of some locales.
+  local c='abcdefghijklmnopqrstuvwxyz0123456789'
+  local re="^[${c}]([-${c}]*[${c}])?(\\.[${c}]([-${c}]*[${c}])?)*\$"
+  (( ${#3} <= 253 )) && [[ "${3}" =~ ${re} ]] || return 1
+  printf 'kubectl --kubeconfig %s delete %s %s' "$(doctor::_rbac_quote "${1}")" "${2}" "${3}"
+}
+
+# doctor::_rbac_quote <s> — s for a POSIX shell: in single quotes, with each
+# single quote as '\'' (Go: rbacShQuote).
+doctor::_rbac_quote() {
+  local q="'\\''"
+  printf "'%s'" "${1//\'/${q}}"
+}
+
+# doctor::_rbac_has_control <s> — 0 when s has an ASCII control character
+# (a byte below 0x20, or DEL; Go: rbacHasControl). The check prints the
+# kubeconfig path in its commands, and such a character can end the line
+# or drive the terminal.
+doctor::_rbac_has_control() {
+  local ctl=$'\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037\177'
+  [[ "${1}" == *["${ctl}"]* ]]
+}
 
 # doctor::_provider_section <domain>
 # If the active domain is a provider-backed cluster whose provider implements

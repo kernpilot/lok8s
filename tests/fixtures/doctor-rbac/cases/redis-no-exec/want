@@ -1,0 +1,2 @@
+  ✓ redis-operator: no RBAC migration leftovers
+  ℹ redis-operator: no ClusterRoleBinding gives the redis-operator ServiceAccount create on pods/exec. A RedisCluster cannot form or scale without it (restore ClusterRoleBinding lok8s-redis-operator-exec before you add one)

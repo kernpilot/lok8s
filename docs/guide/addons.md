@@ -1462,6 +1462,50 @@ $ kubectl auth can-i update leases/system-upgrade-controller -n cattle-system --
 yes
 ```
 
+`lo doctor` finds the old binding for you. It reads the ClusterRoleBindings
+of the active domain's cluster and reports each one that gives the
+controller's ServiceAccount `cluster-admin`, under any name (an older
+upstream manifest used `system-upgrade`):
+
+```console
+$ lo doctor
+...
+--- domain ---
+  ✓ active: example.org (kind kubeone)
+  ! migration incomplete: ClusterRoleBinding system-upgrade-controller binds the system-upgrade-controller ServiceAccount to cluster-admin. Keep it only on purpose, else delete it: kubectl --kubeconfig '/home/me/project/.kubeconfig/example.yaml' delete clusterrolebinding system-upgrade-controller
+```
+
+The delete command names the kubeconfig that doctor read, in single
+quotes, and it is the rest of its line. A binding counts in each form of
+the ServiceAccount: the ServiceAccount itself, the User name of its token
+(`system:serviceaccount:cattle-system:system-upgrade-controller`), or a
+group of its token (`system:serviceaccounts:cattle-system`,
+`system:serviceaccounts`, `system:authenticated`). A delete removes the
+whole binding, so doctor prints a delete command only for a binding of
+the ServiceAccount alone. For a grant through a group, the line names the
+binding and says to review it. For a binding with other subjects, the
+line names the binding and the count of the other subjects, and says to
+remove the ServiceAccount from its subjects (for example with
+`kubectl edit`).
+
+Doctor only reads: you run the delete. When doctor finds a leftover and
+no binding gives the ServiceAccount `lok8s-system-upgrade-controller`
+yet, it first says to apply the bootstrap. A cluster without leftovers
+prints `✓ system-upgrade-controller: no RBAC migration leftovers`. The
+check needs the domain's kubeconfig (`.kubeconfig/<metadata.name>.yaml`)
+and the right to list ClusterRoleBindings and ClusterRoles. Doctor reads
+them with that kubeconfig, so its credential plugin
+(`users[].user.exec`) runs and can ask you to log in; each read stops
+after 30 s. The check does not run when `spec.bootstrap` has
+`system-upgrade-controller-cluster-admin`. Doctor finds that opt-in addon
+only as a bare entry name, not as a path entry, so the line of each
+`cluster-admin` binding says "Keep it only on purpose, else delete it:"
+before the command. A line without a command (a binding with other
+subjects, or an unusual name) also says to keep the grant only on
+purpose. Doctor prints a binding name only when it is a DNS-1123
+subdomain. For any other name, the line has no name and no delete
+command.
+
 The `can-i` lines are spot checks. Until now cluster-admin hid any call
 the new roles miss. Restart the controller, run one Plan that does what
 your Plans do (cordon, drain, Secrets), and look for `forbidden` in the
@@ -1507,6 +1551,9 @@ the bootstrap applies without prune, so the binding stays. Delete it too:
 ```console
 $ kubectl delete clusterrolebinding system-upgrade-controller
 ```
+
+After the opt-out, `lo doctor` reports the binding as
+`migration incomplete` until you delete it.
 
 #### Images
 
@@ -1686,8 +1733,12 @@ A RedisCluster that you add later needs exec back first: put the
 ClusterRoleBinding document back into `rbac.yaml` (or run
 `lo assets update addons/redis-operator --force`), apply the bootstrap,
 then create the RedisCluster. Without exec, the operator logs `forbidden`
-for `pods/exec` and the cluster does not form. `lo doctor` does not warn
-about this yet ([#315](https://github.com/kernpilot/lok8s/issues/315)).
+for `pods/exec` and the cluster does not form. When no ClusterRoleBinding
+gives the operator's ServiceAccount create on `pods/exec`, `lo doctor`
+prints a note (`ℹ redis-operator: no ClusterRoleBinding gives the
+redis-operator ServiceAccount create on pods/exec. …`). Doctor reads RBAC
+only and cannot see RedisCluster objects, so the line is a note, not a
+warning ([#315](https://github.com/kernpilot/lok8s/issues/315)).
 
 ::: warning Upgrade note: update the ejected copy, delete the old ClusterRole and binding once
 `lo` ejects an addon into `.lok8s/addons/<name>/` on first use and never
@@ -1718,6 +1769,49 @@ $ kubectl auth can-i update leases/6cab913b.redis.opstreelabs.in \
     -n redis-operator --as="${SA}"
 yes
 ```
+
+`lo doctor` finds the old objects for you. It reads the ClusterRoleBindings
+and ClusterRoles of the active domain's cluster and prints one
+`! migration incomplete: …` line for each of these:
+
+- a ClusterRoleBinding, under any name, that gives the operator's
+  ServiceAccount `redis-operator` or `cluster-admin`, or
+  `lok8s-redis-operator-chart-rbac` when `spec.bootstrap` does not have
+  the opt-in addon (see below);
+- the ClusterRole `redis-operator`;
+- its labels `rbac.authorization.k8s.io/aggregate-to-admin`,
+  `rbac.authorization.k8s.io/aggregate-to-edit` and
+  `rbac.authorization.k8s.io/aggregate-to-view` with the value `true`:
+  the built-in roles keep the copied rules until the delete. Doctor
+  prints no other label key.
+
+The binding lines end with the delete command, which names the
+kubeconfig that doctor read. As for the system-upgrade-controller, a
+binding counts in each form of the ServiceAccount (the User name of its
+token, `system:serviceaccount:redis-operator:redis-operator`, and the
+groups of its token), and doctor prints no delete command for a grant
+through a group or for a binding with other subjects: the line names the
+binding and says what to do.
+
+A delete of the ClusterRole `redis-operator` ends the grant of every
+binding that refers to it. When a ClusterRoleBinding gives the role to
+other subjects than the operator's ServiceAccount (a group, a user,
+another ServiceAccount), the role line names those bindings and has no
+delete command: give their subjects another role first. Doctor does not
+read RoleBindings, so the role line also says to check that no
+RoleBinding refers to the role before the delete.
+
+Doctor only reads: you run the deletes. When doctor finds a leftover and
+no binding gives the ServiceAccount `lok8s-redis-operator` yet, it first
+says to apply the bootstrap. A cluster without leftovers prints
+`✓ redis-operator: no RBAC migration leftovers`. The check needs the
+domain's kubeconfig (`.kubeconfig/<metadata.name>.yaml`) and the right to
+list ClusterRoleBindings and ClusterRoles. Doctor reads them with that
+kubeconfig, so its credential plugin (`users[].user.exec`) runs and can
+ask you to log in; each read stops after 30 s. Doctor finds the opt-in
+addon only as a bare entry name (`- redis-operator-chart-rbac`), not as a
+path entry, so the line for its binding says "Keep it only on purpose,
+else delete it:" before the command.
 
 The removal from `admin` is asynchronous. The delete of the labelled
 ClusterRole queues the clusterrole-aggregation controller, which then
@@ -1810,6 +1904,10 @@ the bootstrap applies without prune. Delete the objects too:
 $ kubectl delete clusterrolebinding lok8s-redis-operator-chart-rbac
 $ kubectl delete clusterrole lok8s-redis-operator-chart-rbac
 ```
+
+After the opt-out, `lo doctor` reports the binding as
+`migration incomplete` until you delete it. It does not report the
+ClusterRole: without a binding it grants nothing.
 
 If namespace admins must manage Redis CRs, do not use the opt-in addon for
 that. Give them a ClusterRole in a target with only the

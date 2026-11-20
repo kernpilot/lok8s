@@ -1,0 +1,1 @@
+  ℹ RBAC migration check skipped: the cluster spec of rbac.example cannot be read (run: lo lint)
