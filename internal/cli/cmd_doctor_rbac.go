@@ -219,12 +219,12 @@ func doctorRBACLeftovers(ctx context.Context, r execx.Runner, paths *config.Path
 		return
 	}
 	var bindings []rbacBinding
-	if reason := rbacRead(ctx, r, kubectl, kubeconfig, "clusterrolebindings", rbacParseBinding, &bindings); reason != "" {
+	if reason := rbacRead(ctx, r, kubectl, kubeconfig, "clusterrolebindings", nil, rbacParseBinding, &bindings); reason != "" {
 		doctorWarn(out, rbacNotChecked+reason)
 		return
 	}
 	var roles []rbacRole
-	if reason := rbacRead(ctx, r, kubectl, kubeconfig, "clusterroles", rbacParseRole, &roles); reason != "" {
+	if reason := rbacRead(ctx, r, kubectl, kubeconfig, "clusterroles", nil, rbacParseRole, &roles); reason != "" {
 		doctorWarn(out, rbacNotChecked+reason)
 		return
 	}
@@ -236,21 +236,24 @@ func doctorRBACLeftovers(ctx context.Context, r execx.Runner, paths *config.Path
 	}
 }
 
-// rbacRead runs one `kubectl get <resource> -o json` into items and
-// returns "" or the fixed reason of the failure. The stderr goes into a
+// rbacRead runs one `kubectl get <resource> [extra...] -o json` into items
+// and returns "" or the fixed reason of the failure. extra are fixed
+// arguments of the caller (the label selector of the csi-kms check). The
+// stderr goes into a
 // buffer for the class and nowhere else. The output must be one JSON
 // object whose items is a list of objects, each of the shape that parse
 // reads (bash: doctor::_rbac_shape): else the whole list is invalid. The
 // decode into float64 refuses a number out of its range, as the bash twin
 // refuses NaN and infinite numbers. A read that the bound stopped gives
 // rbacReasonNoAnswer, also when kubectl handled the SIGTERM and exited 0.
-func rbacRead[T any](ctx context.Context, r execx.Runner, kubectl, kubeconfig, resource string, parse func(map[string]any) (T, bool), items *[]T) string {
+func rbacRead[T any](ctx context.Context, r execx.Runner, kubectl, kubeconfig, resource string, extra []string, parse func(map[string]any) (T, bool), items *[]T) string {
 	ctx, cancel := context.WithTimeout(ctx, rbacReadBound)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
+	args := append([]string{"--kubeconfig", kubeconfig, "get", resource}, extra...)
 	err := r.Run(ctx, execx.Cmd{
 		Name:         kubectl,
-		Args:         []string{"--kubeconfig", kubeconfig, "get", resource, "-o", "json", "--request-timeout=" + rbacReadTimeout},
+		Args:         append(args, "-o", "json", "--request-timeout="+rbacReadTimeout),
 		Stdin:        strings.NewReader(""),
 		Stdout:       &stdout,
 		Stderr:       &stderr,
@@ -701,16 +704,38 @@ func rbacOtherSubjects(n int) string {
 // there is no command, for a name that is not a DNS-1123 subdomain
 // (rbacNameOK). The kubeconfig path is shell-quoted (rbacShQuote).
 func rbacDeleteCommand(kubeconfig, resource, name string) (string, bool) {
-	if !rbacNameOK(name) {
+	return rbacDeleteCommandIn(kubeconfig, resource, "", name)
+}
+
+// rbacDeleteCommandIn is rbacDeleteCommand for an object in a namespace
+// ("" for a cluster-scoped object): the command ends with --namespace
+// <namespace>. It checks the namespace again too: ok is false for a
+// namespace that is not a DNS-1123 label (rbacLabelOK). Bash:
+// doctor::_rbac_delete with its fourth argument.
+func rbacDeleteCommandIn(kubeconfig, resource, namespace, name string) (string, bool) {
+	if !rbacNameOK(name) || (namespace != "" && !rbacLabelOK(namespace)) {
 		return "", false
 	}
-	return "kubectl --kubeconfig " + rbacShQuote(kubeconfig) + " delete " + resource + " " + name, true
+	cmd := "kubectl --kubeconfig " + rbacShQuote(kubeconfig) + " delete " + resource + " " + name
+	if namespace != "" {
+		cmd += " --namespace " + namespace
+	}
+	return cmd, true
 }
 
 // rbacNameOK reports a DNS-1123 subdomain of at most 253 characters: the
 // only names that the check prints.
 func rbacNameOK(name string) bool {
 	return len(name) <= 253 && rbacNameRe.MatchString(name)
+}
+
+// rbacLabelRe is a DNS-1123 label: the form of a namespace name, and of the
+// option label value that the csi-kms check prints.
+var rbacLabelRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+// rbacLabelOK reports a DNS-1123 label of at most 63 characters.
+func rbacLabelOK(s string) bool {
+	return len(s) <= 63 && rbacLabelRe.MatchString(s)
 }
 
 // rbacShQuote quotes s for a POSIX shell: in single quotes, and each
