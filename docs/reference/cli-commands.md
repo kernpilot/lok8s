@@ -2924,7 +2924,8 @@ node verbs (they take --cluster-id or --space-id), and --force on kubehz
 node drain (it takes --evict-unmanaged).
 A command that is not exposed is not registered, so it cannot be called.
 LO_MCP_ALLOW=mutating|destructive is the environment form of the opt-in,
-for editor configs (flags win).
+for editor configs. It adds to the flags: the higher of the two tiers
+applies.
 
 Transports: 'start' serves stdio (what editors launch); 'serve' serves
 streamable HTTP on loopback — it has no authentication, keep it there.

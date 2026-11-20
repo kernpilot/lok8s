@@ -200,6 +200,91 @@ func TestMcpExposureGates(t *testing.T) {
 	}
 }
 
+// TestMcpAllowEnvRaisesTheFlagTier pins the rule that the help text states:
+// LO_MCP_ALLOW adds to the --allow-* flags, and the higher of the two tiers
+// applies. It runs the real `lo mcp tools` command (the flag parse, resolve
+// and the tool list over the in-memory transport). It only lists the tools
+// and calls none of them.
+func TestMcpAllowEnvRaisesTheFlagTier(t *testing.T) {
+	cases := []struct {
+		name    string
+		env     string // "" means LO_MCP_ALLOW is not set
+		args    []string
+		want    []string
+		absent  []string
+		wantErr string
+	}{{
+		name: "LO_MCP_ALLOW=destructive with --allow-mutating exposes a destructive tool",
+		env:  "destructive",
+		args: []string{"--allow-mutating"},
+		want: []string{"lo_down", "lo_build"},
+	}, {
+		name:   "no LO_MCP_ALLOW with --allow-mutating refuses a destructive tool",
+		args:   []string{"--allow-mutating"},
+		want:   []string{"lo_build"},
+		absent: []string{"lo_down"},
+	}, {
+		name: "LO_MCP_ALLOW=mutating keeps the destructive tools of --allow-destructive",
+		env:  "mutating",
+		args: []string{"--allow-destructive"},
+		want: []string{"lo_down", "lo_build"},
+	}, {
+		name:    "LO_MCP_ALLOW=bogus is an error, also with --allow-mutating",
+		env:     "bogus",
+		args:    []string{"--allow-mutating"},
+		wantErr: `LO_MCP_ALLOW="bogus": want "mutating" or "destructive"`,
+	}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(mcpAllowEnv, tc.env) // restores the outer value after the case
+			if tc.env == "" {
+				if err := os.Unsetenv(mcpAllowEnv); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c := newMcpTools(synthProject(t))
+			var out, errOut strings.Builder
+			c.SetOut(&out)
+			c.SetErr(&errOut)
+			c.SetArgs(tc.args)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			err := c.ExecuteContext(ctx)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("lo mcp tools %v: err = %v, want %q", tc.args, err, tc.wantErr)
+				}
+				if out.Len() != 0 {
+					t.Errorf("a refused LO_MCP_ALLOW value still printed tools:\n%s", out.String())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("lo mcp tools %v: %v (stderr: %s)", tc.args, err, errOut.String())
+			}
+			names := map[string]bool{}
+			for line := range strings.Lines(out.String()) {
+				if f := strings.Fields(line); len(f) > 0 {
+					names[f[0]] = true
+				}
+			}
+			if len(names) == 0 {
+				t.Fatalf("lo mcp tools %v printed no tools", tc.args)
+			}
+			for _, name := range tc.want {
+				if !names[name] {
+					t.Errorf("LO_MCP_ALLOW=%q, lo mcp tools %v: %s missing", tc.env, tc.args, name)
+				}
+			}
+			for _, name := range tc.absent {
+				if names[name] {
+					t.Errorf("LO_MCP_ALLOW=%q, lo mcp tools %v: %s exposed", tc.env, tc.args, name)
+				}
+			}
+		})
+	}
+}
+
 // ── tool list from the real tree ───────────────────────────────────────
 
 func TestMcpToolsDefaultReadonlyOnly(t *testing.T) {
