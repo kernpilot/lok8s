@@ -120,12 +120,23 @@ STUB
 @test "lo deploy -l <key=value> applies only the matching subset" {
   build::artifacts "${DOMAIN}"
 
-  # Record which kinds reach kubectl apply.
+  # Record which kinds reach kubectl apply. lo keeps the kubectl output
+  # private (utils/kapply.sh), so the stub also writes each mark to
+  # ${APPLIED}, and the test reads that file. A kubectl line per object
+  # gives the count of the summary line.
+  unset LO_SHOW_SENSITIVE_OUTPUT
+  export APPLIED="${BATS_TEST_TMPDIR}/applied"
   kubectl() {
     case "$1" in
       apply) local m; m=$(cat)
-             grep -q 'kind: Namespace'  <<<"${m}" && echo "applied:Namespace"
-             grep -q 'kind: Deployment' <<<"${m}" && echo "applied:Deployment"
+             if grep -q 'kind: Namespace' <<<"${m}"; then
+               echo "applied:Namespace" | tee -a "${APPLIED}"
+               echo "namespace/networking serverside-applied"
+             fi
+             if grep -q 'kind: Deployment' <<<"${m}"; then
+               echo "applied:Deployment" | tee -a "${APPLIED}"
+               echo "deployment.apps/app serverside-applied"
+             fi
              return 0 ;;
       *) return 0 ;;
     esac
@@ -134,8 +145,11 @@ STUB
 
   run deploy::apply_filtered "${DOMAIN}" "lok8s.dev/type" "system"
   assert_success
-  assert_output --partial "applied:Namespace"
-  refute_output --partial "applied:Deployment"
+  assert_line "✓ ${DOMAIN} (lok8s.dev/type=system) · 1 resource"
+  refute_output --partial 'applied:'
+  refute_output --partial 'serverside-applied'
+  run cat "${APPLIED}"
+  assert_output 'applied:Namespace'
 }
 
 # ── The domain announcement ───────────────────────────────────────────────
