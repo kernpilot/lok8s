@@ -382,12 +382,14 @@ func TestBuildMissingSpec(t *testing.T) {
 // fakeRunner records kubectl calls; fail makes every call error.
 type fakeRunner struct {
 	calls []string
+	envs  [][]string // the Env of each call, in call order
 	stdin []string
 	fail  bool
 }
 
 func (f *fakeRunner) Run(ctx context.Context, c execx.Cmd) error {
 	f.calls = append(f.calls, c.Name+" "+strings.Join(c.Args, " "))
+	f.envs = append(f.envs, c.Env)
 	in := ""
 	if c.Stdin != nil {
 		raw, _ := io.ReadAll(c.Stdin)

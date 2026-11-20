@@ -34,7 +34,8 @@ func (k *kube) errOut() io.Writer {
 	return os.Stderr
 }
 
-// run is `kubectl <args>` with explicit streams (nil = the hook's own).
+// run is `kubectl <args>` with explicit streams (nil = the hook's own). An
+// apply runs with the kubectl user defaults off (execx.KubectlEnv).
 func (k *kube) run(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 	if stdout == nil {
 		stdout = k.out()
@@ -42,7 +43,7 @@ func (k *kube) run(ctx context.Context, stdin io.Reader, stdout, stderr io.Write
 	if stderr == nil {
 		stderr = k.errOut()
 	}
-	return k.runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: args, Stdin: stdin, Stdout: stdout, Stderr: stderr})
+	return k.runner.Run(ctx, execx.Cmd{Name: "kubectl", Args: args, Env: execx.KubectlEnv("kubectl", args), Stdin: stdin, Stdout: stdout, Stderr: stderr})
 }
 
 // capture is `$(kubectl <args> 2>/dev/null)`: stdout captured, stderr

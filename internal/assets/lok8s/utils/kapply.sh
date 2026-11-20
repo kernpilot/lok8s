@@ -240,11 +240,11 @@ kapply::_apply_pass() {
   local out rc rc_file; rc_file=$(mktemp)
   if kapply::_tty; then
     out=$( { printf '%s' "${manifest}" \
-      | kubectl "${kubectl_flags[@]}" apply --server-side --force-conflicts -f - 2>&1; echo "$?" >"${rc_file}"; } \
+      | KUBERC=off kubectl "${kubectl_flags[@]}" apply --server-side --force-conflicts -f - 2>&1; echo "$?" >"${rc_file}"; } \
       | kapply::_progress "${label}" )
   else
     out=$(printf '%s' "${manifest}" \
-      | kubectl "${kubectl_flags[@]}" apply --server-side --force-conflicts -f - 2>&1); echo "$?" >"${rc_file}"
+      | KUBERC=off kubectl "${kubectl_flags[@]}" apply --server-side --force-conflicts -f - 2>&1); echo "$?" >"${rc_file}"
     printf '%s\n' "${out}"
   fi
   rc=$(cat "${rc_file}"); rm -f "${rc_file}"

@@ -1236,7 +1236,7 @@ bootstrap::_restore_d() {
           ;;
         1)
           if printf '%s' "${_doc}" \
-            | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - >/dev/null 2>&1; then
+            | KUBERC=off kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - >/dev/null 2>&1; then
             applied=$(( applied + 1 ))
             debug "bootstrap: restore.d applied ${base} (store working copy)"
             continue
@@ -1258,7 +1258,7 @@ bootstrap::_restore_d() {
       if ! printf '%s' "${_dec}" | keysonly::refuse_stream "bootstrap: restore.d" "${base} (sops)" -; then
         skipped=$(( skipped + 1 ))
       elif printf '%s' "${_dec}" \
-        | kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - >/dev/null 2>&1; then
+        | KUBERC=off kubectl --kubeconfig "${kubeconfig}" apply --server-side --force-conflicts -f - >/dev/null 2>&1; then
         applied=$(( applied + 1 ))
         debug "bootstrap: restore.d applied ${base} (sops)"
       else
@@ -1814,7 +1814,7 @@ bootstrap::_diff_manifest() {
   local _derr _diff _drc=0 _emsg
   _derr="$(mktemp -p "${bootstrap_dry_boundary:-${TMPDIR:-/tmp}}")" || { error "bootstrap: dry-run: no temp file"; echo error; return 0; }
   _diff=$(printf '%s\n' "${diff_input}" \
-    | kubectl --kubeconfig "${kubeconfig}" diff --server-side --force-conflicts -f - 2>"${_derr}") || _drc=$?
+    | KUBERC=off kubectl --kubeconfig "${kubeconfig}" diff --server-side --force-conflicts -f - 2>"${_derr}") || _drc=$?
   _emsg="$(cat "${_derr}" 2>/dev/null || true)"
   rm -f "${_derr}"
   if [[ -n "${bootstrap_render_dir:-}" ]]; then

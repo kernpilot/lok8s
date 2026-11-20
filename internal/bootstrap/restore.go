@@ -130,11 +130,13 @@ const restoreGuard = "bootstrap: restore.d"
 // restoreApply runs one server-side apply for restore.d of the checked
 // manifest on stdin, byte for byte, and reports whether it succeeded. It
 // discards stdout and stderr: the kubectl message can quote a value of the
-// manifest (bash: `printf '%s' "${doc}" | kubectl … -f - >/dev/null 2>&1`).
+// manifest (bash: `printf '%s' "${doc}" | KUBERC=off kubectl … -f -
+// >/dev/null 2>&1`). The user defaults of kubectl are off (execx.KubeRCOff).
 func (e *Engine) restoreApply(ctx context.Context, kubeconfig string, doc []byte) bool {
 	c := execx.Cmd{
 		Name:   "kubectl",
 		Args:   []string{"--kubeconfig", kubeconfig, "apply", "--server-side", "--force-conflicts", "-f", "-"},
+		Env:    []string{execx.KubeRCOff},
 		Stdin:  bytes.NewReader(doc),
 		Stdout: io.Discard,
 		Stderr: io.Discard,

@@ -598,11 +598,13 @@ func (e *Engine) diffManifest(ctx context.Context, kubeconfig, rendered, diffInp
 	// The diff's stdout is the diff text. Its stderr goes to a buffer that
 	// only the classification below reads: lo never prints it, at any exit
 	// code and at any log level, because it can quote a value of the
-	// manifest (see diffFailedText).
+	// manifest (see diffFailedText). The user defaults of kubectl are off
+	// (execx.KubeRCOff): a kuberc cannot turn on --show-secrets for it.
 	var out, errOut strings.Builder
 	err := e.Runner.Run(ctx, execx.Cmd{
 		Name:   "kubectl",
 		Args:   []string{"--kubeconfig", kubeconfig, "diff", "--server-side", "--force-conflicts", "-f", "-"},
+		Env:    []string{execx.KubeRCOff},
 		Stdin:  strings.NewReader(diffInput),
 		Stdout: &out, Stderr: &errOut,
 	})

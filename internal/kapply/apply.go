@@ -140,10 +140,12 @@ func (a *Applier) pollInterval() time.Duration {
 }
 
 // kubectl runs one kubectl invocation with combined stdout+stderr captured
-// (bash: `kubectl … 2>&1`), returning the output and the exit code.
+// (bash: `kubectl … 2>&1`), returning the output and the exit code. An
+// apply runs with the kubectl user defaults off (execx.KubectlEnv; bash:
+// `KUBERC=off kubectl …`).
 func (a *Applier) kubectl(ctx context.Context, stdin string, args ...string) (string, int) {
 	var buf strings.Builder
-	c := execx.Cmd{Name: "kubectl", Args: args, Stdout: &buf, Stderr: &buf}
+	c := execx.Cmd{Name: "kubectl", Args: args, Env: execx.KubectlEnv("kubectl", args), Stdout: &buf, Stderr: &buf}
 	if stdin != "" {
 		c.Stdin = strings.NewReader(stdin)
 	}

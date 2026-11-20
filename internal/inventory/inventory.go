@@ -362,8 +362,9 @@ func Publish(ctx context.Context, p *config.Paths, r execx.Runner, stderr io.Wri
 		ui.WarnTo(stderr, "inventory: ClusterInventory CRD manifest not found — skipping publish")
 		return
 	}
+	// An apply runs with the kubectl user defaults off (execx.KubectlEnv).
 	quiet := func(stdin string, args ...string) error {
-		c := execx.Cmd{Name: "kubectl", Args: args, Stdout: io.Discard, Stderr: io.Discard}
+		c := execx.Cmd{Name: "kubectl", Args: args, Env: execx.KubectlEnv("kubectl", args), Stdout: io.Discard, Stderr: io.Discard}
 		if stdin != "" {
 			c.Stdin = strings.NewReader(stdin)
 		}

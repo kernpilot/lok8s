@@ -218,7 +218,7 @@ capi::ensure_credentials() {
         --namespace "${namespace}" \
         --kubeconfig "${kubeconfig}" \
         --from-env-file=/dev/stdin \
-        --dry-run=client -o yaml | kubectl apply --kubeconfig "${kubeconfig}" -f -
+        --dry-run=client -o yaml | KUBERC=off kubectl apply --kubeconfig "${kubeconfig}" -f -
       ;;
     aws)
       : "${AWS_REGION:?AWS_REGION required for AWS provider}"
@@ -228,7 +228,7 @@ capi::ensure_credentials() {
         --namespace "${namespace}" \
         --kubeconfig "${kubeconfig}" \
         --from-env-file=/dev/stdin \
-        --dry-run=client -o yaml | kubectl apply --kubeconfig "${kubeconfig}" -f -
+        --dry-run=client -o yaml | KUBERC=off kubectl apply --kubeconfig "${kubeconfig}" -f -
       ;;
     *)
       error "Unsupported provider for credentials: ${provider}"

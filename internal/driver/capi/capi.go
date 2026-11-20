@@ -524,6 +524,7 @@ func (d *Driver) applyResources(ctx context.Context, cy, provider, mgmtKubeconfi
 	if err := d.deps.Runner.Run(ctx, execx.Cmd{
 		Name:   "kubectl",
 		Args:   []string{"--kubeconfig", mgmtKubeconfig, "apply", "-f", "-"},
+		Env:    []string{execx.KubeRCOff},
 		Stdin:  strings.NewReader(nsManifest.String() + "\n"),
 		Stdout: stderr, // bash: … | kubectl apply -f - >&2
 	}); err != nil {
@@ -541,6 +542,7 @@ func (d *Driver) applyResources(ctx context.Context, cy, provider, mgmtKubeconfi
 		err := d.deps.Runner.Run(ctx, execx.Cmd{
 			Name: "kubectl",
 			Args: []string{"apply", "--kubeconfig", mgmtKubeconfig, "-f", "-"},
+			Env:  []string{execx.KubeRCOff},
 			// bash: -f <(echo "${resources}") — a process substitution; the
 			// Go port feeds stdin, same stream.
 			Stdin:  strings.NewReader(resources),
@@ -794,6 +796,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 	if err := d.deps.Runner.Run(ctx, execx.Cmd{
 		Name:  "kubectl",
 		Args:  []string{"apply", "--kubeconfig", bootstrapKubeconfig, "-f", "-"},
+		Env:   []string{execx.KubeRCOff},
 		Stdin: strings.NewReader(resources),
 	}); err != nil {
 		d.rawErrorLine("applying management cluster resources failed")
@@ -834,6 +837,7 @@ func (d *Driver) Bootstrap(ctx context.Context, domain string) error {
 		_ = d.deps.Runner.Run(ctx, execx.Cmd{
 			Name:   "kubectl",
 			Args:   []string{"apply", "--kubeconfig", mgmtKubeconfig, "-f", deployDir + "/"},
+			Env:    []string{execx.KubeRCOff},
 			Stderr: io.Discard,
 		})
 	}

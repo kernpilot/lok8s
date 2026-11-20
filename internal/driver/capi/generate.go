@@ -314,6 +314,7 @@ func (d *Driver) EnsureCredentialsSecret(ctx context.Context, clusterYAML, provi
 	if err := d.deps.Runner.Run(ctx, execx.Cmd{
 		Name:  "kubectl",
 		Args:  []string{"apply", "--kubeconfig", kubeconfig, "-f", "-"},
+		Env:   []string{execx.KubeRCOff},
 		Stdin: strings.NewReader(manifest.String()),
 	}); err != nil {
 		return err

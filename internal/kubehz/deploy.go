@@ -486,6 +486,7 @@ func (c *Context) applyBindSecret(ctx context.Context, workdir, path string) err
 	}
 	return c.Runner.Run(ctx, execx.Cmd{
 		Name: "kubectl", Args: []string{"apply", "--server-side", "--force-conflicts", "-f", "-"},
+		Env:   []string{execx.KubeRCOff},
 		Stdin: strings.NewReader(manifest), Stdout: c.out(), Stderr: c.errOut(),
 	})
 }

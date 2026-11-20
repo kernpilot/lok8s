@@ -705,7 +705,7 @@ lo::apply_local_registry_hosting() {
   [[ -n "${build_ip}" ]] || { echo "warning: build registry IP unknown, skipping local-registry-hosting" >&2; return 0; }
   [[ -n "${build_host}" ]] || build_host="lok8s.local"
 
-  kubectl apply --kubeconfig "${kubeconfig}" -f - <<EOF
+  KUBERC=off kubectl apply --kubeconfig "${kubeconfig}" -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -767,7 +767,7 @@ lo::registry_configmap() {
     (if .type == "mirror" then "  " + .name + ".shared: \"true\"\n" else "" end)
   ' "${json}")
 
-  kubectl apply --kubeconfig "${kubeconfig}" -f - <<EOF
+  KUBERC=off kubectl apply --kubeconfig "${kubeconfig}" -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
