@@ -72,6 +72,49 @@ func TestBuildClusterPayloadDefaults(t *testing.T) {
 	}
 }
 
+// Issue #272: an unset spec.kubernetes.version (no key, a YAML null, an
+// empty string) is left out of the payload, not sent as the string "null";
+// a set version is sent as written. Bash twin: the build_cluster_payload
+// version cases in tests/unit/kubehz_hosted_test.bats (same bytes).
+func TestBuildClusterPayloadKubernetesVersion(t *testing.T) {
+	t.Parallel()
+	const unset = `{"domain":"test.kubehz.dev","kind":"KubeOne","provider":"hetzner","region":"fsn1","controlPlaneReplicas":1,"hosting":"hosted","access":"none"}`
+	cases := []struct {
+		name, block, want string
+	}{
+		{"no key", "", unset},
+		{"null", "  kubernetes:\n    version: null\n", unset},
+		{"tilde", "  kubernetes:\n    version: ~\n", unset},
+		{"no value", "  kubernetes:\n    version:\n", unset},
+		{"empty string", "  kubernetes:\n    version: \"\"\n", unset},
+		{"set", "  kubernetes:\n    version: v1.31.10\n",
+			`{"domain":"test.kubehz.dev","kind":"KubeOne","provider":"hetzner","region":"fsn1","kubernetesVersion":"v1.31.10","controlPlaneReplicas":1,"hosting":"hosted","access":"none"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := filepath.Join(t.TempDir(), "spec.yaml")
+			testutil.WriteFile(t, spec, "kind: KubeOne\nspec:\n  cluster:\n    domain: test.kubehz.dev\n"+tc.block+"  kubehz:\n    hosting: hosted\n")
+			got := buildClusterPayload(spec)
+			if string(got) != tc.want {
+				t.Fatalf("payload:\n got %s\nwant %s", got, tc.want)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(got, &m); err != nil {
+				t.Fatalf("payload not JSON: %s", got)
+			}
+			v, present := m["kubernetesVersion"]
+			if tc.name == "set" {
+				if !present || v != "v1.31.10" {
+					t.Fatalf("kubernetesVersion = %v (present %v), want v1.31.10", v, present)
+				}
+			} else if present {
+				t.Fatalf("kubernetesVersion is present (%v), want it left out", v)
+			}
+		})
+	}
+}
+
 func TestWaitForCluster(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)

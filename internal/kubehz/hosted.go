@@ -35,16 +35,25 @@ func buildClusterPayload(clusterYAML string) []byte {
 	} else {
 		return nil
 	}
-	return compactJSON(
-		jsonPair{"domain", doc.Raw("spec", "cluster", "domain")},
-		jsonPair{"kind", doc.Raw("kind")},
-		jsonPair{"provider", doc.Or("hetzner", "spec", "provider")},
-		jsonPair{"region", doc.OrChain("fsn1", []string{"spec", "hcloud", "region"}, []string{"spec", "aws", "region"})},
-		jsonPair{"kubernetesVersion", doc.Raw("spec", "kubernetes", "version")},
+	pairs := []jsonPair{
+		{"domain", doc.Raw("spec", "cluster", "domain")},
+		{"kind", doc.Raw("kind")},
+		{"provider", doc.Or("hetzner", "spec", "provider")},
+		{"region", doc.OrChain("fsn1", []string{"spec", "hcloud", "region"}, []string{"spec", "aws", "region"})},
+	}
+	// An unset version (no key, a YAML null, an empty string) is left out
+	// of the payload. The bare read gave the word "null", which went out as
+	// the version string "null" (issue #272). Bash: `// ""` and the jq
+	// branch that adds the key only when it is not empty.
+	if v := doc.Or("", "spec", "kubernetes", "version"); v != "" {
+		pairs = append(pairs, jsonPair{"kubernetesVersion", v})
+	}
+	pairs = append(pairs,
 		jsonPair{"controlPlaneReplicas", replicasJSON},
 		jsonPair{"hosting", doc.Or("self", "spec", "kubehz", "hosting")},
 		jsonPair{"access", doc.Or("none", "spec", "kubehz", "access")},
 	)
+	return compactJSON(pairs...)
 }
 
 // waitForCluster ports kubehz::wait_for_cluster: poll GET /api/clusters/{id}
