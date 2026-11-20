@@ -4,8 +4,8 @@ package secrets
 // remove-key itself. Each helper has a bash twin of the same shape in
 // .lok8s/libs/secrets (secrets::_no_private_key, _recipient, _lstat,
 // _domain_stores, _rekey_stores, _orphans, _touch_plaintexts, _encs_with,
-// _enc_lists, _other_stores, _own_identity, _replace, _drop_recipient,
-// _rekey_files).
+// _other_encs, _enc_lists, _other_stores, _own_identity, _replace,
+// _drop_recipient, _rekey_files).
 
 import (
 	"bytes"
@@ -221,6 +221,56 @@ func isEncEntry(base string) bool {
 	return strings.HasSuffix(base[len("Secret."):], ".enc")
 }
 
+// managedEnc reports whether rel, a path relative to a store, is a managed
+// Secret.*.enc at the top of the store: a file that the scans read.
+func managedEnc(rel string) bool {
+	return !strings.Contains(rel, "/") && strings.HasPrefix(rel, "Secret.") && isEncEntry(rel)
+}
+
+// otherEncs walks each store, at any depth and dot names included, for an
+// entry whose name ends in .enc and that is not a managed Secret.*.enc at the
+// top of the store (bash: secrets::_other_encs). remove-key re-keys only the
+// managed files, so such a copy (a backup.enc, a file in a subdirectory)
+// would keep the removed recipient. It returns those paths and the
+// directories below a store that it cannot list or search, each list sorted
+// by byte per store. The walk follows no symlink: a link is an entry, never a
+// directory to walk into; a store that is a symlink to a directory is walked.
+// A directory named *.enc is walked, not listed. A store that it cannot
+// search is left to scanEncs, which names it (or skips it when it does not
+// exist). The temp file of an encrypt (writeReplacing:
+// .<name>.enc.tmp-<random>) does not end in .enc.
+func otherEncs(stores []string) (other, unreadable []string) {
+	for _, store := range stores {
+		if _, err := os.Stat(store + "/."); err != nil {
+			continue
+		}
+		var found, bad []string
+		_ = fs.WalkDir(os.DirFS(store), ".", func(rel string, d fs.DirEntry, err error) error {
+			if rel == "." {
+				return nil // the store itself: scanEncs reads it
+			}
+			p := store + "/" + rel
+			switch {
+			case err != nil: // a directory it cannot list
+				bad = append(bad, p)
+			case d.IsDir():
+				if _, err := os.Stat(p + "/."); err != nil { // a directory it cannot search
+					bad = append(bad, p)
+					return fs.SkipDir
+				}
+			case strings.HasSuffix(rel, ".enc") && !managedEnc(rel):
+				found = append(found, p)
+			}
+			return nil
+		})
+		slices.Sort(found)
+		slices.Sort(bad)
+		other = append(other, found...)
+		unreadable = append(unreadable, bad...)
+	}
+	return other, unreadable
+}
+
 // orphanEncs warns about each Secret.*.enc without a decrypted twin, which a
 // re-key cannot rewrite, and returns them (bash: secrets::_orphans).
 func (c *Context) orphanEncs(stores []string) []string {
@@ -280,6 +330,7 @@ type encScan struct {
 	unreadable []string // a store or an .enc it cannot stat, list or read
 	malformed  []string // an .enc whose sops metadata does not parse or lists no age recipient
 	duplicate  []string // an .enc whose sops metadata holds a member twice
+	other      []string // an .enc that is not a managed Secret.*.enc (otherEncs; RemoveKey fills it)
 }
 
 // scanEncs reads the sops metadata of every Secret.*.enc of the stores (bash:
@@ -727,9 +778,10 @@ func (c *Context) rerunRemoveKey(recipient string, all, skipOrphans bool) {
 }
 
 // refuseScan prints the refusal for what the scan before the first write could
-// not read, in this order: a path it cannot read, an .enc whose sops metadata
-// holds a member twice, an .enc whose sops metadata does not parse or lists no
-// age recipient. It reports whether it refused.
+// not read, in this order: a path it cannot read, an .enc that is not a
+// managed Secret.*.enc, an .enc whose sops metadata holds a member twice, an
+// .enc whose sops metadata does not parse or lists no age recipient. It
+// reports whether it refused.
 func (c *Context) refuseScan(s encScan) bool {
 	switch {
 	case len(s.unreadable) > 0:
@@ -737,6 +789,11 @@ func (c *Context) refuseScan(s encScan) bool {
 			ui.ErrorTo(c.ErrOut, "cannot read %s", c.rel(u))
 		}
 		ui.ErrorTo(c.ErrOut, "  a file that is not read may still list the recipient — fix the permissions first; nothing was written")
+	case len(s.other) > 0:
+		for _, o := range s.other {
+			ui.ErrorTo(c.ErrOut, "remove-key re-keys only the managed Secret.*.enc files; %s is another .enc file: re-key or remove it by hand, then run again", c.rel(o))
+		}
+		ui.ErrorTo(c.ErrOut, "  an .enc file that is not re-keyed can keep the removed recipient — nothing was written")
 	case len(s.duplicate) > 0:
 		for _, d := range s.duplicate {
 			ui.ErrorTo(c.ErrOut, "the sops metadata of %s holds a duplicate member", c.rel(d))
@@ -756,8 +813,9 @@ func (c *Context) refuseScan(s encScan) bool {
 // ── Remove key ───────────────────────────────────────────
 
 // RemoveKey drops an age recipient from every creation rule in .sops.yaml
-// and re-keys the selected stores, so that no .enc file of them lists it
-// (bash: secrets::remove-key). It is add-key in reverse, with two differences
+// and re-keys the selected stores, so that no managed Secret.*.enc of them
+// lists it, an orphan that skipOrphans accepts the one exception (bash:
+// secrets::remove-key). It is add-key in reverse, with two differences
 // that matter for a removal: every refusal runs before the first write, and
 // the re-encryption covers every selected store, not only the context's.
 //
@@ -770,8 +828,11 @@ func (c *Context) refuseScan(s encScan) bool {
 // no creation rule, a rule with a recipient that is not age, or a rule with
 // an age recipient that does not parse. It refuses a recipient that is in no
 // rule and no .enc file (a typo must not look like a removal), a store path
-// or an .enc file it cannot stat or read (a dangling symlink included), an
-// .enc whose sops metadata holds a member twice (the read keeps the last one,
+// or an .enc file it cannot stat or read (a dangling symlink included), a
+// directory below a store that it cannot list or search, a file at any depth
+// of a store whose name ends in .enc and that is not a managed Secret.*.enc
+// at its top (the re-key would not rewrite it: otherEncs), an .enc whose
+// sops metadata holds a member twice (the read keeps the last one,
 // so the first could hide a recipient), an .enc whose sops metadata does not
 // parse or lists no age recipient, an .enc that lists the recipient and is
 // newer than its plaintext (the re-key would write the old value back over
@@ -873,7 +934,9 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 		return err
 	}
 	scan := scanEncs(stores, agePubkey)
-	scan.unreadable = append(unreadableStores, scan.unreadable...)
+	other, unreadableDirs := otherEncs(stores)
+	scan.unreadable = slices.Concat(unreadableStores, scan.unreadable, unreadableDirs)
+	scan.other = other
 	if c.refuseScan(scan) {
 		return ErrHandled
 	}

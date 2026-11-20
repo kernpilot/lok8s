@@ -188,8 +188,9 @@ lo secrets --domain app.example.com add-key ~/keys/alice_ed25519.pub
 
 Remove a recipient with `lo secrets remove-key`, for example when a teammate
 leaves or a key is lost. It removes the key from every creation rule, then
-re-encrypts each `.enc` file of the selected stores that lists the key. Without
-`--all` that is the store of the current domain. With `--all` it is every
+re-encrypts each managed `.enc` file of the selected stores that lists the
+key: a `Secret.*.enc` file at the top of a store. Without `--all` that is the
+store of the current domain. With `--all` it is every
 `clusters/<domain>/secrets` store. The command does not re-key the flat
 `.secrets/` store. A warning names each other store that still lists the key:
 
@@ -214,8 +215,16 @@ lo secrets remove-key age1<recipient> --all     # every clusters/<domain>/secret
 - The key is in no creation rule and in no `.enc` file. A typo then does not
   look like a removal. The message names the other stores that still list the
   key.
-- The command cannot stat or read a store path or an `.enc` file. A symlink
-  whose target is missing counts as a file that it cannot read.
+- The command cannot stat or read a store path, a directory in a store, or
+  an `.enc` file. A symlink whose target is missing counts as a file that it
+  cannot read.
+- A selected store holds another `.enc` file: a name that ends in `.enc`, at
+  any depth (in a subdirectory, or a name that starts with a dot), that is
+  not a `Secret.*.enc` file at the top of the store. An example is a
+  `backup.enc` copy of a managed file. The command re-keys only the managed
+  files, so such a file can keep the removed key. Re-key it or remove it by
+  hand. The command does not follow a symlink into a directory: a symlink
+  whose name ends in `.enc` counts as such a file.
 - The sops metadata of an `.enc` file does not parse, or lists no age
   recipient. The command reads the recipients of each file from that
   metadata, so a JSON escape cannot hide one. Fix or restore the file first.
@@ -248,6 +257,11 @@ again. It fails when a file that it re-keyed still lists the removed key. If
 the re-key stops after the `.sops.yaml` write (for example, when an encrypt
 fails), the command prints the command to run again. That run resumes the
 re-key.
+
+When the command ends without an error, no managed `Secret.*.enc` file of
+the selected stores lists the removed key. `--skip-orphans` is the one
+exception: an orphan keeps the removed key, so that key can still decrypt
+it.
 
 `add-key` and `remove-key` hold a lock on `.sops.yaml.lock`, next to
 `.sops.yaml`, for the whole run, so that two runs do not undo each other. A

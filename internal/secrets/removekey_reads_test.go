@@ -3,11 +3,13 @@ package secrets
 // removekey_reads_test.go: what remove-key reads before its first write, and
 // how it writes each .enc. The recipients of an .enc come from its parsed
 // sops metadata; a YAML form of .sops.yaml that the twins read differently is
-// refused; a path it cannot stat is refused; an .enc is written through a temp
-// file and a rename. tests/unit/secrets_remove_key_test.bats runs the same
+// refused; a path it cannot stat is refused; an .enc that is not a managed
+// Secret.*.enc is refused; an .enc is written through a temp file and a
+// rename. tests/unit/secrets_remove_key_test.bats runs the same
 // cases through the bash twin.
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -551,6 +553,135 @@ func TestRemoveKeyAllNamesEveryStoreItCannotRead(t *testing.T) {
 		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
 	}
 	unchanged(t, c, before)
+}
+
+// otherEncStore is a store of a.dev with one managed .enc that the sops
+// library wrote for the recipients k and g (g the one to remove), in the
+// state after a decrypt. It returns the store, the .enc and its bytes.
+func otherEncStore(t *testing.T, c *Context, k, g string, out, errOut *bytes.Buffer) (store, enc, managed string) {
+	t.Helper()
+	c.Domain = "a.dev"
+	sopsRules(t, c, k+","+g)
+	store = c.Paths.Clusters + "/a.dev/secrets"
+	write(t, store+"/Secret.app.default.K", "v")
+	encryptStore(t, c, "a.dev", out, errOut)
+	freshen(t, store+"/Secret.app.default.K")
+	enc = store + "/Secret.app.default.K.enc"
+	return store, enc, readFile(t, enc)
+}
+
+// An .enc file that is not a managed Secret.*.enc at the top of the store:
+// remove-key re-keys only the managed files, so a copy of a valid ciphertext
+// elsewhere in the store would keep the removed recipient. Each one is
+// refused by its path before any write: a copy beside the managed files, a
+// dot name, a file in a subdirectory (with a managed name), and a copy in a
+// store that is a symlink to a directory. .sops.yaml and every .enc stay
+// byte-equal. tests/unit/secrets_remove_key_test.bats runs the same cases.
+func TestRemoveKeyRefusesAnotherEnc(t *testing.T) {
+	for _, tc := range []struct {
+		name, rel string
+		linked    bool
+	}{
+		{"a copy beside the managed files", "backup.enc", false},
+		{"a dot name", ".x.enc", false},
+		{"a file in a subdirectory", "old/Secret.app.default.K.enc", false},
+		{"a copy in a store that is a symlink to a directory", "backup.enc", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, out, errOut := testEnv(t)
+			keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+			k, g := keep.Recipient().String(), gone.Recipient().String()
+			if tc.linked {
+				target := mkdir(t, c.Paths.Base+"/real-store")
+				mkdir(t, c.Paths.Clusters+"/a.dev")
+				if err := os.Symlink(target, c.Paths.Clusters+"/a.dev/secrets"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			store, enc, managed := otherEncStore(t, c, k, g, out, errOut)
+			other := store + "/" + tc.rel
+			write(t, other, managed)
+			if !opens(t, other, gone, "v") {
+				t.Fatal("fixture: the copy does not open to the identity to remove")
+			}
+			before := readFile(t, c.sopsConfigPath())
+
+			if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+			}
+			want := "[error] remove-key re-keys only the managed Secret.*.enc files; clusters/a.dev/secrets/" + tc.rel + " is another .enc file: re-key or remove it by hand, then run again\n" +
+				"[error]   an .enc file that is not re-keyed can keep the removed recipient — nothing was written\n"
+			if errOut.String() != want || out.String() != "" {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+			}
+			unchanged(t, c, before)
+			if readFile(t, enc) != managed || readFile(t, other) != managed {
+				t.Error("an .enc changed before the refusal")
+			}
+		})
+	}
+}
+
+// A directory in the store that the walk cannot read may hold another .enc:
+// it is refused by its path, in the form of the other unreadable refusals.
+func TestRemoveKeyRefusesADirectoryItCannotRead(t *testing.T) {
+	skipUnlessPermissionsHold(t)
+	c, out, errOut := testEnv(t)
+	keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+	k, g := keep.Recipient().String(), gone.Recipient().String()
+	store, enc, managed := otherEncStore(t, c, k, g, out, errOut)
+	sub := mkdir(t, store+"/sub")
+	if err := os.Chmod(sub, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sub, 0o700) })
+	before := readFile(t, c.sopsConfigPath())
+
+	if err := c.RemoveKey(g, false, false); !errors.Is(err, ErrHandled) {
+		t.Fatalf("want ErrHandled, got %v\n%s", err, errOut.String())
+	}
+	want := "[error] cannot read clusters/a.dev/secrets/sub\n" +
+		"[error]   a file that is not read may still list the recipient — fix the permissions first; nothing was written\n"
+	if errOut.String() != want || out.String() != "" {
+		t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", out.String(), errOut.String(), want)
+	}
+	unchanged(t, c, before)
+	if readFile(t, enc) != managed {
+		t.Error("the .enc changed before the refusal")
+	}
+}
+
+// The other files of a store do not stop the walk: the .gitignore, the temp
+// file that an encrypt of either twin left (.<name>.enc.tmp-<random>: it does
+// not end in .enc), a restore.d working copy, a tls directory, and a
+// directory named *.enc with no .enc in it.
+func TestRemoveKeyWalksPastTheOtherFilesOfAStore(t *testing.T) {
+	c, out, errOut := testEnv(t)
+	keep, gone := newAgeIdentity(t), newAgeIdentity(t)
+	k, g := keep.Recipient().String(), gone.Recipient().String()
+	store, enc, _ := otherEncStore(t, c, k, g, out, errOut)
+	for _, rel := range []string{
+		".Secret.app.default.K.enc.tmp-123456789",
+		".Secret.app.default.K.enc.tmp-AbC123",
+		"restore.d/app.yaml",
+		"tls/tls.crt",
+		"dir.enc/notes",
+	} {
+		write(t, store+"/"+rel, "x")
+	}
+	if _, err := os.Stat(store + "/.gitignore"); err != nil {
+		t.Fatalf("fixture: the store has no .gitignore: %v", err)
+	}
+
+	if err := c.RemoveKey(g, false, false); err != nil {
+		t.Fatalf("%v\n%s", err, errOut.String())
+	}
+	if errOut.String() != scopeWarn+rotateWarn {
+		t.Errorf("stderr:\n%q\nwant:\n%q", errOut.String(), scopeWarn+rotateWarn)
+	}
+	if opens(t, enc, gone, "v") || !opens(t, enc, keep, "v") {
+		t.Error("the managed .enc was not re-keyed")
+	}
 }
 
 // The write helper of every encrypt, called directly (in process, no seam):

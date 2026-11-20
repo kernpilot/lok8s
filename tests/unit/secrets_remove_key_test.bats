@@ -744,6 +744,84 @@ ${_duplicate}" ] || { echo "$output" >&2; return 1; }
   [ "$(cat "${CFG}")" = "${before}" ] || { echo ".sops.yaml was written" >&2; return 1; }
 }
 
+# ── Another .enc in a store ──────────────────────────────────────────────
+# remove-key re-keys only the managed Secret.*.enc files at the top of a
+# store; any other file whose name ends in .enc, at any depth, is refused by
+# its path before any write (Go twin: TestRemoveKeyRefusesAnotherEnc).
+
+_other='[error]   an .enc file that is not re-keyed can keep the removed recipient — nothing was written'
+
+# _other_refused <domain> <rel> — a copy of the managed .enc of the domain at
+# <rel> under its store is refused by its path before any write; .sops.yaml
+# and both .enc files stay byte-equal. The copy is removed after.
+_other_refused() {
+  local store="${PATH_CLUSTERS}/${1}/secrets" enc before
+  enc="${store}/Secret.app.default.K.enc"
+  mkdir -p "$(dirname -- "${store}/${2}")"
+  cp -p "${enc}" "${store}/${2}"
+  cp -p "${enc}" "${BATS_TEST_TMPDIR}/enc.saved"
+  before="$(cat "${CFG}")"
+  DOMAIN="${1}" run _rm "${RCPT_B}"
+  [ "$status" -eq 1 ] || { echo "${2}: status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] remove-key re-keys only the managed Secret.*.enc files; ${store}/${2} is another .enc file: re-key or remove it by hand, then run again
+${_other}" ] || { echo "${2}: $output" >&2; return 1; }
+  [ "$(cat "${CFG}")" = "${before}" ] || { echo "${2}: .sops.yaml was written" >&2; return 1; }
+  cmp -s "${enc}" "${BATS_TEST_TMPDIR}/enc.saved" || { echo "${2}: the managed .enc changed" >&2; return 1; }
+  cmp -s "${store}/${2}" "${BATS_TEST_TMPDIR}/enc.saved" || { echo "${2}: the other .enc changed" >&2; return 1; }
+  [ ! -s "${ENCRYPT_LOG}" ] || { echo "${2}: an encrypt ran" >&2; return 1; }
+  rm -f -- "${store}/${2}"
+}
+
+@test "another .enc in a store is refused before any write: a copy, a dot name, a file in a subdirectory, a symlinked store" {
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  _other_refused a.dev backup.enc
+  _other_refused a.dev .x.enc
+  _other_refused a.dev old/Secret.app.default.K.enc
+  # A store that is a symlink to a directory is walked; links below it are not.
+  mkdir -p "${BATS_TEST_TMPDIR}/real-store" "${PATH_CLUSTERS}/c.dev"
+  ln -s "${BATS_TEST_TMPDIR}/real-store" "${PATH_CLUSTERS}/c.dev/secrets"
+  _cache c.dev app "${RCPT_B}"
+  _other_refused c.dev backup.enc
+}
+
+@test "a directory in a store that it cannot read is refused before any write" {
+  [ "$(id -u)" -ne 0 ] || skip "root reads every file"
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  local store="${PATH_CLUSTERS}/a.dev/secrets" before
+  mkdir -p "${store}/sub"
+  chmod 000 "${store}/sub"
+  before="$(cat "${CFG}")"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] cannot read ${store}/sub
+[error]   a file that is not read may still list the recipient — fix the permissions first; nothing was written" ] || {
+    echo "$output" >&2; return 1; }
+  [ "$(cat "${CFG}")" = "${before}" ]
+  [ ! -s "${ENCRYPT_LOG}" ]
+}
+
+@test "the other files of a store do not stop the walk: .gitignore, encrypt temp files, restore.d, tls, a directory named *.enc" {
+  # The temp file of an encrypt of either twin (.<name>.enc.tmp-<random>)
+  # does not end in .enc (Go twin: TestRemoveKeyWalksPastTheOtherFilesOfAStore).
+  _load
+  _stub_encrypt
+  _cache a.dev app "${RCPT_B}"
+  local store="${PATH_CLUSTERS}/a.dev/secrets" rel
+  for rel in .gitignore .Secret.app.default.K.enc.tmp-123456789 .Secret.app.default.K.enc.tmp-AbC123 \
+    restore.d/app.yaml tls/tls.crt dir.enc/notes; do
+    mkdir -p "$(dirname -- "${store}/${rel}")"
+    printf 'x' > "${store}/${rel}"
+  done
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
+  [[ "$output" != *"another .enc file"* ]] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${ENCRYPT_LOG}")" = "a.dev/secrets/Secret.app.default.K" ] || { echo "encrypted: $(cat "${ENCRYPT_LOG}")" >&2; return 1; }
+}
+
 # _rm_path <dir> <argv...> — _rm with PATH set to <dir> alone.
 _rm_path() {
   local PATH="${1}"

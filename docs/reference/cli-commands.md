@@ -3951,10 +3951,10 @@ Remove an age recipient and re-key the store
 ### Synopsis
 
 Remove an age recipient from every creation rule in .sops.yaml, then
-re-encrypt each .enc file of the selected stores that lists it. Without --all
-that is the store of the current domain; with --all, every domain store. The
-flat store is not re-keyed. A warning names each other store that still
-lists the recipient.
+re-encrypt each managed Secret.*.enc file of the selected stores that lists
+it. Without --all that is the store of the current domain; with --all, every
+domain store. The flat store is not re-keyed. A warning names each other
+store that still lists the recipient.
 
 Before the first write, the command refuses:
   - a key argument that looks like a private key (it is not printed),
@@ -3965,7 +3965,10 @@ Before the first write, the command refuses:
   - the last recipient of a rule,
   - a recipient that is in no rule and in no .enc file,
   - a store path or an .enc file that it cannot stat or read (a dangling
-    symlink included),
+    symlink included), or a directory in a store that it cannot read,
+  - another .enc file in a store: a name that ends in .enc, at any depth,
+    that is not a Secret.*.enc file at the top of the store (the re-key
+    does not rewrite it; re-key or remove it by hand),
   - an .enc file whose sops metadata holds a member twice (re-encrypt it
     with sops from its plaintext),
   - an .enc file whose sops metadata does not parse or lists no age
