@@ -73,8 +73,18 @@ func targetRefusal(t *testing.T, dest string) string {
 }
 
 // mustRefusePrivate checks that the write of dest fails with the line want, that
-// the old file stays, and that no temp file is left.
+// the old file stays, and that no temp file is left. dest is no link: for a
+// link, use mustRefusePrivateAt.
 func mustRefusePrivate(t *testing.T, dest, want string) {
+	t.Helper()
+	mustRefusePrivateAt(t, dest, dest, want)
+}
+
+// mustRefusePrivateAt is mustRefusePrivate for a dest whose walk ends at the
+// file end (a path without a link and without ".."). The temp file goes
+// beside the end of the walk, with the name of that file, so the check for
+// a temp file that is left looks there.
+func mustRefusePrivateAt(t *testing.T, dest, end, want string) {
 	t.Helper()
 	err := writePrivateFile(t.Context(), dest, []byte("new\n"))
 	var refused privateFileError
@@ -84,14 +94,22 @@ func mustRefusePrivate(t *testing.T, dest, want string) {
 	if got := readFile(t, dest); got != "old\n" {
 		t.Fatalf("%s: the old file changed: %q", dest, got)
 	}
-	if tmp := hostedTemps(t, filepath.Dir(dest), filepath.Base(dest)); len(tmp) != 0 {
+	if tmp := hostedTemps(t, filepath.Dir(end), filepath.Base(end)); len(tmp) != 0 {
 		t.Fatalf("%s: temp files left: %q", dest, tmp)
 	}
 }
 
 // mustWritePrivate checks that the write of dest succeeds, with mode 0600 and no
-// temp file left.
+// temp file left. dest is no link: for a link, use mustWritePrivateAt.
 func mustWritePrivate(t *testing.T, dest string) {
+	t.Helper()
+	mustWritePrivateAt(t, dest, dest)
+}
+
+// mustWritePrivateAt is mustWritePrivate for a dest whose walk ends at the file
+// end (a path without a link and without ".."): the check for a temp file
+// that is left looks beside end (see mustRefusePrivateAt).
+func mustWritePrivateAt(t *testing.T, dest, end string) {
 	t.Helper()
 	if err := writePrivateFile(t.Context(), dest, []byte("new\n")); err != nil {
 		t.Fatalf("%s: %v", dest, err)
@@ -102,7 +120,7 @@ func mustWritePrivate(t *testing.T, dest string) {
 	if info, err := os.Stat(dest); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("%s: mode: %v, %v", dest, info, err)
 	}
-	if tmp := hostedTemps(t, filepath.Dir(dest), filepath.Base(dest)); len(tmp) != 0 {
+	if tmp := hostedTemps(t, filepath.Dir(end), filepath.Base(end)); len(tmp) != 0 {
 		t.Fatalf("%s: temp files left: %q", dest, tmp)
 	}
 }
@@ -341,17 +359,17 @@ func TestWritePrivateFileRefusesALinkOfAnotherUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	fakeLinkOwner(kc, 4242, false)
-	mustRefusePrivate(t, kc, dirRefused("link", kc, 4242))
+	mustRefusePrivateAt(t, kc, rc, dirRefused("link", kc, 4242))
 	fakeLinkOwner(hop, 4242, false)
-	mustRefusePrivate(t, kc, dirRefused("link", hop, 4242))
+	mustRefusePrivateAt(t, kc, rc, dirRefused("link", hop, 4242))
 	fakeLinkOwner(hop, 0, true)
-	mustRefusePrivate(t, kc, dirRefused("linkread", hop, 0))
+	mustRefusePrivateAt(t, kc, rc, dirRefused("linkread", hop, 0))
 	fakeLinkOwner(hop, 0, false)
 	if got, err := privateTarget(kc); err != nil || got != rc {
 		t.Fatalf("a link of root: %q, %v, want %q", got, err, rc)
 	}
 	privateLstat = os.Lstat
-	mustWritePrivate(t, kc)
+	mustWritePrivateAt(t, kc, rc)
 	for _, l := range []string{kc, hop} {
 		if info, err := os.Lstat(l); err != nil || info.Mode()&fs.ModeSymlink == 0 {
 			t.Fatalf("%s is no longer a link: %v, %v", l, info, err)
@@ -397,7 +415,7 @@ func TestWritePrivateFileRefusesALookupErrorOfTheChain(t *testing.T) {
 	for _, p := range []string{kc, hop} {
 		for _, errno := range []syscall.Errno{syscall.EIO, syscall.ESTALE, syscall.EACCES} {
 			failLstat(p, errno)
-			mustRefusePrivate(t, kc, dirRefused("lstat", p, 0))
+			mustRefusePrivateAt(t, kc, rc, dirRefused("lstat", p, 0))
 		}
 	}
 	if tmp := hostedTemps(t, d, "home.rc"); len(tmp) != 0 {
@@ -517,13 +535,13 @@ func TestWritePrivateFileChecksTheDirectoryOfEachLink(t *testing.T) {
 		return l
 	}
 	world := linkIn(filepath.Join(d, "world"), 0o777, kc)
-	mustRefusePrivate(t, world, dirRefused("world", filepath.Dir(world), 0))
+	mustRefusePrivateAt(t, world, kc, dirRefused("world", filepath.Dir(world), 0))
 	group := linkIn(filepath.Join(d, "group"), 0o770, kc)
-	mustRefusePrivate(t, group, dirRefused("group", filepath.Dir(group), 0))
+	mustRefusePrivateAt(t, group, kc, dirRefused("group", filepath.Dir(group), 0))
 	first := linkIn(filepath.Join(d, "first"), 0o700, world)
-	mustRefusePrivate(t, first, dirRefused("world", filepath.Dir(world), 0))
+	mustRefusePrivateAt(t, first, kc, dirRefused("world", filepath.Dir(world), 0))
 	sticky := linkIn(filepath.Join(d, "sticky"), 0o777|os.ModeSticky, kc)
-	mustWritePrivate(t, sticky)
+	mustWritePrivateAt(t, sticky, kc)
 	if got := readFile(t, kc); got != "new\n" {
 		t.Fatalf("%s = %q", kc, got)
 	}
@@ -554,14 +572,14 @@ func TestWritePrivateFileTakesTheDirectoryOfTheWalkAsItIs(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(d, "alias", "kc.yaml")
-	mustRefusePrivate(t, dest, dirRefused("world", d+"/alias/../store", 0))
+	mustRefusePrivateAt(t, dest, kc, dirRefused("world", d+"/alias/../store", 0))
 	if err := os.Remove(filepath.Join(d, "store")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(filepath.Dir(kc), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	mustWritePrivate(t, dest)
+	mustWritePrivateAt(t, dest, kc)
 	if got := readFile(t, kc); got != "new\n" {
 		t.Fatalf("%s = %q", kc, got)
 	}
