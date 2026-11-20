@@ -1644,7 +1644,8 @@ kubehz::token_emit() {
 # Re-enroll a REGENERATED in-cluster agent token with the platform via
 # `lo kubehz re-enroll`. The recovery for a real incident class: the
 # kubehz-system namespace (and with it Secret kubehz-agent) is lost, the
-# agent's create-if-absent bootstrap mints a FRESH token — whose beats then
+# next `lo kubehz deploy` creates the Secret empty again, and the agent's
+# fill-if-empty bootstrap mints a FRESH token — whose beats then
 # fail the platform's hash ratchet, which still expects the old hash. This
 # command reads the CURRENT in-cluster token, hashes it (sha256, lowercase
 # hex) and registers the hash via POST /api/clusters/{id}/agent-token,

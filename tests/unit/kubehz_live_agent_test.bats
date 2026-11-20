@@ -43,24 +43,13 @@ teardown() {
 _make_runner() {
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
-# timeout: the pod's `timeout -k 2 SECS CMD ARGS` (the BusyBox applet and
-# GNU coreutils take the same form). It runs the command as a shell
-# function, so the kubectl stub below answers it and no real kubectl runs.
-# Any other form, such as a call without the kill-after, goes to
-# STUB_TIMEOUT_FORM_LOG and fails (rc 125), so it does not pass unseen.
-timeout() {
-  case "$1:$2:$3" in
-    -k:2:5|-k:2:30) ;;
-    *)
-      printf '%s\n' "$*" >> "${STUB_TIMEOUT_FORM_LOG}"
-      echo "stub: timeout without -k 2: $*" >&2
-      return 125 ;;
-  esac
-  shift 3
-  "$@"
-}
+# The timeout stub and stub_call come from tests/lib/agent_bound.sh.
 kubectl() {
+  stub_call kubectl "$@"
   case "$*" in
+    # The identity read: the Secret holds both keys with a value
+    # (resourceVersion 1, 2 entries).
+    "get secret kubehz-agent -n kubehz-system -o go-template="*) printf '1 2 AC' ;;
     *"get secret kubehz-agent"*"agent-token"*) printf 'khz_agt_test' | base64 | tr -d '\n' ;;
     *"get secret kubehz-agent"*"claim-code"*)  printf 'khzc_test'   | base64 | tr -d '\n' ;;
     *"get secret kubehz-agent"*) return 0 ;;
@@ -75,6 +64,7 @@ kubectl() {
   esac
 }
 curl() {
+  stub_call curl "$@"
   _url=""
   while [ "$#" -gt 0 ]; do
     case "$1" in http*://*) _url="$1" ;; esac
@@ -91,7 +81,7 @@ STUBS_EOF
     "${CRONJOB}" > "${heartbeat}"
 
   RUNNER="${BATS_TEST_TMPDIR}/run.sh"
-  cat "${stubs}" "${heartbeat}" > "${RUNNER}"
+  cat "${_PROJECT_ROOT}/tests/lib/agent_bound.sh" "${stubs}" "${heartbeat}" > "${RUNNER}"
 
   export CLUSTER_ID="test.example.com"
   export KUBEHZ_API_URL="https://api.example.com"
@@ -99,6 +89,10 @@ STUBS_EOF
   : > "${STUB_CURL_LOG}"
   export STUB_TIMEOUT_FORM_LOG="${BATS_TEST_TMPDIR}/timeout-form.log"
   : > "${STUB_TIMEOUT_FORM_LOG}"
+  # Each kubectl and curl call, with its bound (tests/lib/agent_bound.sh).
+  export STUB_CALL_LOG="${BATS_TEST_TMPDIR}/calls.log"
+  : > "${STUB_CALL_LOG}"
+  source "${_PROJECT_ROOT}/tests/lib/agent_bound.bash"
 }
 
 # Source the deploy lib against the REAL manifests: PATH_LOK8S must point at the
@@ -124,8 +118,8 @@ _source_deploy() {
 
   run bash "${RUNNER}"
   assert_success
-  # Every kubectl call ran under `timeout -k 2 SECS`.
-  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
+  # Every kubectl and curl call ran under `timeout -k 2 SECS`.
+  assert_agent_calls_bounded
 
   # The identity work still ran — the Go agent mints nothing and only ever
   # READS Secret kubehz-agent, so if the CronJob stopped enrolling, a cluster
@@ -146,8 +140,8 @@ _source_deploy() {
 
   run bash "${RUNNER}"
   assert_success
-  # Every kubectl call ran under `timeout -k 2 SECS`.
-  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
+  # Every kubectl and curl call ran under `timeout -k 2 SECS`.
+  assert_agent_calls_bounded
 
   run grep -c '/heartbeat' "${STUB_CURL_LOG}"
   assert_output "1"
@@ -159,8 +153,8 @@ _source_deploy() {
 
   run bash "${RUNNER}"
   assert_success
-  # Every kubectl call ran under `timeout -k 2 SECS`.
-  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
+  # Every kubectl and curl call ran under `timeout -k 2 SECS`.
+  assert_agent_calls_bounded
 
   # Fail-safe direction: an old ConfigMap without the key must keep beating,
   # never fall silent.
@@ -174,8 +168,8 @@ _source_deploy() {
 
   run bash "${RUNNER}"
   assert_success
-  # Every kubectl call ran under `timeout -k 2 SECS`.
-  [ ! -s "${STUB_TIMEOUT_FORM_LOG}" ]
+  # Every kubectl and curl call ran under `timeout -k 2 SECS`.
+  assert_agent_calls_bounded
   run grep -c '/heartbeat' "${STUB_CURL_LOG}"
   assert_output "1"
 }
@@ -456,6 +450,12 @@ _stub_kubectl_log() {
       # The drain probe: report an idle cluster so the order test is not a
       # timing test.
       *"get pods"*) printf ''; return 0 ;;
+      # The identity probe: the Secret holds an agent-token, so the deploy
+      # runs no bootstrap.
+      *"get secret kubehz-agent -o go-template="*)
+        echo "$*" >> "${STUB_KUBECTL_LOG}"
+        printf 'agent-token'
+        return 0 ;;
     esac
     echo "$*" >> "${STUB_KUBECTL_LOG}"
     return 0
@@ -478,10 +478,11 @@ _stub_kubectl_log() {
   # live agent would beat while the CronJob still did.
   run head -1 "${STUB_KUBECTL_LOG}"
   assert_output --partial "apply -k ${work}/agent"
-  # Line 2 reads the identity Secret; present here, so no bootstrap
-  # job runs and line 3 starts the live agent.
+  # Line 2 reads the identity Secret; it holds an agent-token here, so no
+  # bootstrap job runs and line 3 starts the live agent. The probe prints
+  # only whether the key is there, never a value.
   run sed -n '2p' "${STUB_KUBECTL_LOG}"
-  assert_output --partial "get secret kubehz-agent"
+  assert_output -- '-n kubehz-system get secret kubehz-agent -o go-template={{with .data}}{{if index . "agent-token"}}agent-token{{end}}{{end}}'
   run sed -n '3p' "${STUB_KUBECTL_LOG}"
   assert_output --partial "apply -k ${work}/live-agent/managed"
   run grep -c "create job" "${STUB_KUBECTL_LOG}"
@@ -499,15 +500,15 @@ _stub_kubectl_log() {
   local work="${BATS_TEST_TMPDIR}/a1b"
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
-  # The Secret is absent until the one-off bootstrap Job has completed.
-  export STUB_SECRET_FLAG="${BATS_TEST_TMPDIR}/secret-present"
+  # The apply created the Secret empty; the one-off bootstrap Job fills it.
+  export STUB_SECRET_FLAG="${BATS_TEST_TMPDIR}/secret-filled"
   kubectl() {
     case "$*" in
       *"get pods"*) printf ''; return 0 ;;
       *"get secret kubehz-agent"*)
         echo "$*" >> "${STUB_KUBECTL_LOG}"
-        [[ -f "${STUB_SECRET_FLAG}" ]] && return 0
-        echo "Error from server (NotFound): secrets \"kubehz-agent\" not found" >&2; return 1 ;;
+        [[ ! -f "${STUB_SECRET_FLAG}" ]] || printf 'agent-token'
+        return 0 ;;
       *"wait --for=condition=complete"*) echo "$*" >> "${STUB_KUBECTL_LOG}"; touch "${STUB_SECRET_FLAG}"; return 0 ;;
     esac
     echo "$*" >> "${STUB_KUBECTL_LOG}"
@@ -541,7 +542,7 @@ _stub_kubectl_log() {
   assert_output "1"
 }
 
-@test "apply order (to operator): an identity Secret that never appears FAILS the deploy before the live agent" {
+@test "apply order (to operator): an identity Secret that is never filled FAILS the deploy before the live agent" {
   _source_deploy
   _stub_kubectl_log
   local work="${BATS_TEST_TMPDIR}/a1c"
@@ -550,7 +551,7 @@ _stub_kubectl_log() {
   kubectl() {
     case "$*" in
       *"get pods"*) printf ''; return 0 ;;
-      *"get secret kubehz-agent"*) echo 'Error from server (NotFound): secrets "kubehz-agent" not found' >&2; return 1 ;;
+      *"get secret kubehz-agent"*) return 0 ;;
       *"wait --for=condition=complete"*) echo "error: timed out waiting for the condition" >&2; return 1 ;;
     esac
     echo "$*" >> "${STUB_KUBECTL_LOG}"
@@ -619,21 +620,21 @@ _stub_kubectl_log() {
   assert_output "0"
 }
 
-@test "apply order (to operator): a NotFound behind a warning line still runs the bootstrap" {
+# The apply just before created the Secret, and the agent cannot create it
+# (its Role has no create): an absent Secret stops the deploy, also behind
+# a warning line, and no bootstrap runs.
+@test "apply order (to operator): an absent identity Secret (NotFound behind a warning line) STOPS the deploy without a bootstrap" {
   _source_deploy
   _stub_kubectl_log
   local work="${BATS_TEST_TMPDIR}/a1e"
   mkdir -p "${work}"
   kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
-  export STUB_SECRET_FLAG="${BATS_TEST_TMPDIR}/secret-present"
   kubectl() {
     case "$*" in
       *"get pods"*) printf ''; return 0 ;;
       *"get secret kubehz-agent"*)
-        [[ -f "${STUB_SECRET_FLAG}" ]] && return 0
         echo "Warning: the kubeconfig field exec.apiVersion v1alpha1 is deprecated" >&2
         echo 'Error from server (NotFound): secrets "kubehz-agent" not found' >&2; return 1 ;;
-      *"wait --for=condition=complete"*) echo "$*" >> "${STUB_KUBECTL_LOG}"; touch "${STUB_SECRET_FLAG}"; return 0 ;;
     esac
     echo "$*" >> "${STUB_KUBECTL_LOG}"
     return 0
@@ -641,9 +642,43 @@ _stub_kubectl_log() {
   export -f kubectl
 
   run kubehz::deploy_apply "${work}" acme.example.com operator managed
-  assert_success
+  assert_failure
+  assert_output --partial "Secret kubehz-agent does not exist in kubehz-system, but the deploy applied it just before"
+  assert_output --partial "The agent cannot create it"
+  assert_output --partial "reporting NOTHING"
+  run grep -c "create job" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+  run grep -c "apply -k ${work}/live-agent/managed" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+}
+
+# A bootstrap Job that completes but leaves no agent-token stops the deploy
+# before the live agent; the Job stays for its log.
+@test "apply order (to operator): a bootstrap that leaves no agent-token FAILS the deploy before the live agent" {
+  _source_deploy
+  _stub_kubectl_log
+  local work="${BATS_TEST_TMPDIR}/a1g"
+  mkdir -p "${work}"
+  kubehz::render_agent "${work}" "acme.example.com" "https://api.kubehz.cloud" operator managed
+  kubectl() {
+    case "$*" in
+      *"get pods"*) printf ''; return 0 ;;
+      *"get secret kubehz-agent"*) printf 'Warning: a deprecated field\nclaim-code\n'; return 0 ;;
+    esac
+    echo "$*" >> "${STUB_KUBECTL_LOG}"
+    return 0
+  }
+  export -f kubectl
+
+  run kubehz::deploy_apply "${work}" acme.example.com operator managed
+  assert_failure
+  assert_output --partial "completed but left no agent-token in Secret kubehz-agent"
   run grep -c "create job kubehz-heartbeat-bootstrap-" "${STUB_KUBECTL_LOG}"
   assert_output "1"
+  run grep -c "delete job" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
+  run grep -c "apply -k ${work}/live-agent/managed" "${STUB_KUBECTL_LOG}"
+  assert_output "0"
 }
 
 @test "apply order (to operator): a live agent that never becomes Ready FAILS the deploy" {
@@ -653,6 +688,8 @@ _stub_kubectl_log() {
   kubectl() {
     case "$*" in
       *"get pods"*) printf ''; return 0 ;;
+      # The identity Secret holds an agent-token: no bootstrap.
+      *"get secret kubehz-agent -o go-template="*) echo "$*" >> "${STUB_KUBECTL_LOG}"; printf 'agent-token'; return 0 ;;
       # ImagePullBackOff, as the apiserver reports it: the object was accepted,
       # the pod never came up.
       *"rollout status"*) echo "$*" >> "${STUB_KUBECTL_LOG}"; return 1 ;;
@@ -696,6 +733,7 @@ _ready_timeout() {
         if [[ -n "${STUB_EVENTS_FILE}" ]]; then cat "${STUB_EVENTS_FILE}"; else printf '%s' "${STUB_EVENTS}"; fi
         return "${STUB_EVENTS_RC}" ;;
       *"get pods"*) printf ''; return 0 ;;
+      *"get secret kubehz-agent -o go-template="*) printf 'agent-token'; return 0 ;;
       *"rollout status"*) return 1 ;;
     esac
     return 0
@@ -1045,6 +1083,7 @@ AGENT_IMAGE="ghcr.io/kernpilot/kubehz-agent@sha256:474994f0a64acf179fa5d8524aac8
   kubectl() {
     case "$*" in
       *"get pods"*) echo 'Error from server (Forbidden): pods is forbidden' >&2; return 1 ;;
+      *"get secret kubehz-agent -o go-template="*) echo "$*" >> "${STUB_KUBECTL_LOG}"; printf 'agent-token'; return 0 ;;
     esac
     echo "$*" >> "${STUB_KUBECTL_LOG}"
     return 0
@@ -1540,6 +1579,8 @@ _stub_kubectl_bind() {
     case "$*" in
       *"create secret generic kubehz-agent-bind"*) printf '%s\n' "${BIND_MANIFEST}" ;;
       *"apply --server-side"*) cat > "${STUB_SSA_STDIN}" ;;
+      # The identity Secret holds an agent-token: no bootstrap.
+      *"get secret kubehz-agent -o go-template="*) printf 'agent-token' ;;
     esac
     return 0
   }

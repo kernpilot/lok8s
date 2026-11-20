@@ -7,4 +7,5 @@ resources:
   - rbac.yaml
   - configmap.yaml
   - state-configmap.yaml
+  - identity-secret.yaml
   - cronjob.yaml

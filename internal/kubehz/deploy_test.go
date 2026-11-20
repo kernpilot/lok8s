@@ -107,6 +107,11 @@ func kubectlLogger(h *harness, override func(c execx.Cmd) (bool, error)) *[]stri
 			return nil // idle cluster
 		}
 		log = append(log, argvLine(c))
+		// The identity Secret holds an agent-token: the identity probe
+		// prints the word, as the go-template does.
+		if strings.Contains(argvLine(c), "get secret kubehz-agent ") && c.Stdout != nil {
+			io.WriteString(c.Stdout, "agent-token")
+		}
 		return nil
 	}
 	return &log
@@ -167,8 +172,10 @@ func TestDeployApplyToOperatorOrder(t *testing.T) {
 	}
 	mustContain(t, (*log)[0], "apply -k "+filepath.Join(work, "agent"))
 	// The identity Secret is read between the two applies (the live agent
-	// mounts it): present here, so no bootstrap job runs.
-	mustContain(t, (*log)[1], "get secret kubehz-agent")
+	// mounts it): it holds an agent-token here, so no bootstrap job runs.
+	// The probe prints only whether the key is there, never a value.
+	mustContain(t, (*log)[1], `get secret kubehz-agent -o go-template={{with .data}}{{if index . "agent-token"}}agent-token{{end}}{{end}}`)
+	mustNotContain(t, (*log)[1], "jsonpath")
 	mustContain(t, (*log)[2], "apply -k "+filepath.Join(work, "live-agent", "managed"))
 	mustContain(t, (*log)[3], "rollout status deployment/kubehz-live-agent")
 	mustContain(t, (*log)[3], "--timeout=120s")
@@ -401,22 +408,22 @@ func mustWrite(t *testing.T, path, content string, mode os.FileMode) {
 	}
 }
 
-// A first deploy finds no identity Secret. The deploy runs the
-// CronJob's bootstrap once, waits for its Job to complete, removes the one-off job,
-// and only then applies the live agent.
+// A first deploy finds the identity Secret empty: the apply of the agent
+// manifests just created it. The deploy runs the CronJob's bootstrap once
+// (it fills the Secret), waits for its Job to complete, removes the one-off
+// job, and only then applies the live agent.
 func TestDeployApplyBootstrapsTheIdentitySecret(t *testing.T) {
 	h := newHarness(t)
 	work := renderInto(t, h, "operator", "managed")
-	// Absent before the bootstrap, present once the one-off Job completed.
+	// Empty before the bootstrap, filled once the one-off Job completed.
 	completed := false
 	log := kubectlLogger(h, func(c execx.Cmd) (bool, error) {
 		if strings.Contains(argvLine(c), "wait --for=condition=complete") {
 			completed = true
 			return false, nil
 		}
-		if strings.Contains(argvLine(c), "get secret kubehz-agent") && !completed {
-			io.WriteString(c.Stderr, "Error from server (NotFound): secrets \"kubehz-agent\" not found\n")
-			return true, exitErr(1)
+		if strings.Contains(argvLine(c), "get secret kubehz-agent ") && !completed {
+			return true, nil
 		}
 		return false, nil
 	})
@@ -447,14 +454,13 @@ func TestDeployApplyBootstrapsTheIdentitySecret(t *testing.T) {
 	}
 }
 
-func TestDeployApplyIdentitySecretNeverAppearsFails(t *testing.T) {
+func TestDeployApplyIdentitySecretNeverFilledFails(t *testing.T) {
 	h := newHarness(t)
 	work := renderInto(t, h, "operator", "managed")
 	h.env["KUBEHZ_IDENTITY_BOOTSTRAP_SECONDS"] = "10"
 	log := kubectlLogger(h, func(c execx.Cmd) (bool, error) {
-		if strings.Contains(argvLine(c), "get secret kubehz-agent") {
-			io.WriteString(c.Stderr, "Error from server (NotFound): secrets \"kubehz-agent\" not found\n")
-			return true, exitErr(1)
+		if strings.Contains(argvLine(c), "get secret kubehz-agent ") {
+			return true, nil
 		}
 		if strings.Contains(argvLine(c), "wait --for=condition=complete") {
 			io.WriteString(c.Stderr, "error: timed out waiting for the condition on jobs/kubehz-heartbeat-bootstrap\n")
@@ -508,25 +514,61 @@ func TestDeployApplyIdentitySecretProbeWithoutOutputNamesTheError(t *testing.T) 
 	mustContain(t, h.output(), "could not read Secret kubehz-agent in kubehz-system: kubectl exited without output (exit status 127)")
 }
 
-// A warning line before the NotFound (a kubeconfig deprecation, say) still
-// reads as "absent": the bootstrap runs.
-func TestDeployApplyIdentitySecretNotFoundBehindAWarningBootstraps(t *testing.T) {
+// An absent identity Secret stops the deploy, also behind a warning line
+// (a kubeconfig deprecation, say): the apply just before created it, and
+// the agent cannot create it (its Role has no create), so a bootstrap
+// cannot help.
+func TestDeployApplyIdentitySecretNotFoundStops(t *testing.T) {
 	h := newHarness(t)
 	work := renderInto(t, h, "operator", "managed")
-	completed := false
 	log := kubectlLogger(h, func(c execx.Cmd) (bool, error) {
-		if strings.Contains(argvLine(c), "wait --for=condition=complete") {
-			completed = true
-			return false, nil
-		}
-		if strings.Contains(argvLine(c), "get secret kubehz-agent") && !completed {
+		if strings.Contains(argvLine(c), "get secret kubehz-agent ") {
 			io.WriteString(c.Stderr, "Warning: the kubeconfig field exec.apiVersion v1alpha1 is deprecated\nError from server (NotFound): secrets \"kubehz-agent\" not found\n")
 			return true, exitErr(1)
 		}
 		return false, nil
 	})
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"))
+	mustContain(t, h.output(), "Secret kubehz-agent does not exist in kubehz-system, but the deploy applied it just before")
+	mustContain(t, h.output(), "The agent cannot create it")
+	mustContain(t, h.output(), "reporting NOTHING")
+	joined := strings.Join(*log, "\n")
+	mustNotContain(t, joined, "create job")
+	mustNotContain(t, joined, "apply -k "+filepath.Join(work, "live-agent", "managed"))
+}
+
+// A bootstrap Job that completes but leaves the Secret without an
+// agent-token (a key-less fill, say) stops the deploy before the live
+// agent, and the Job stays for its log. A warning line before the word
+// agent-token does not hide it.
+func TestDeployApplyIdentityBootstrapWithoutATokenFails(t *testing.T) {
+	h := newHarness(t)
+	work := renderInto(t, h, "operator", "managed")
+	log := kubectlLogger(h, func(c execx.Cmd) (bool, error) {
+		if strings.Contains(argvLine(c), "get secret kubehz-agent ") {
+			io.WriteString(c.Stdout, "Warning: a deprecated field\nclaim-code\n")
+			return true, nil
+		}
+		return false, nil
+	})
+	mustErr(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"))
+	mustContain(t, h.output(), "completed but left no agent-token in Secret kubehz-agent")
+	joined := strings.Join(*log, "\n")
+	mustContain(t, joined, "create job kubehz-heartbeat-bootstrap-")
+	mustNotContain(t, joined, "delete job")
+	mustNotContain(t, joined, "apply -k "+filepath.Join(work, "live-agent", "managed"))
+
+	// The word on a line of its own after a warning line counts.
+	h.reset()
+	log = kubectlLogger(h, func(c execx.Cmd) (bool, error) {
+		if strings.Contains(argvLine(c), "get secret kubehz-agent ") {
+			io.WriteString(c.Stdout, "Warning: a deprecated field\nagent-token")
+			return true, nil
+		}
+		return false, nil
+	})
 	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
-	mustContain(t, strings.Join(*log, "\n"), "create job kubehz-heartbeat-bootstrap-")
+	mustNotContain(t, strings.Join(*log, "\n"), "create job")
 }
 
 func TestDeployApplyNeverReadyFails(t *testing.T) {
@@ -834,6 +876,9 @@ func TestDeployApplyUnreadableHeartbeatProbeWarnsAndContinues(t *testing.T) {
 			return exitErr(1)
 		}
 		log = append(log, argvLine(c))
+		if strings.Contains(argvLine(c), "get secret kubehz-agent ") {
+			io.WriteString(c.Stdout, "agent-token")
+		}
 		return nil
 	}
 	mustOK(t, h.ctx.deployApply(t.Context(), work, "acme.example.com", "operator", "managed"), h.output())
