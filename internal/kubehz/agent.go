@@ -32,6 +32,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -847,7 +848,19 @@ func (c *Context) agentKubeconfig(ctx context.Context, k agentKind, id, file str
 	if err != nil {
 		return nil, err
 	}
-	if err := publishKubeconfig(target, res.Body, force); err != nil {
+	wide, err := publishKubeconfig(target, res.Body, force)
+	if err != nil {
+		// First: after a failed write the path can still hold a part of
+		// the file, and "exists" would name the wrong cause.
+		if werr, ok := errors.AsType[*kubeconfigWriteError](err); ok {
+			c.errorf("kubehz %s: cannot write %s: %s", action, file, werr.cause())
+			if werr.left {
+				c.echoErr("  %s can hold a part of the kubeconfig. Remove it before the next run.", file)
+			} else {
+				c.echoErr("  Check the free space and the file system of the directory, then run the command again.")
+			}
+			return nil, ErrHandled
+		}
 		if _, lerr := os.Lstat(file); !force && lerr == nil {
 			c.kubeconfigExists(action, file)
 			return nil, ErrHandled
@@ -855,6 +868,11 @@ func (c *Context) agentKubeconfig(ctx context.Context, k agentKind, id, file str
 		c.errorf("kubehz %s: cannot write %s", action, file)
 		c.echoErr("  Name a file in a directory that exists and that you can write to.")
 		return nil, ErrHandled
+	}
+	// The exclusive create could not take the group and other bits away:
+	// on vfat or exFAT the mount sets the mode.
+	if wide != 0 {
+		c.warnf("kubehz %s: %s has mode %04o: the mount options of its file system set the mode", action, file, wide)
 	}
 	return &KubeconfigResult{ID: id, File: file}, nil
 }
@@ -1215,32 +1233,152 @@ func inProcOrDev(file string) bool {
 // publishKubeconfig writes data to target through a temporary file next to
 // it (mode 0600). With force, a rename replaces the target. Without force,
 // a hard link publishes the file. link(2) fails when the path exists, so a
-// file that appeared during the download stays as it is. The temporary
-// file goes in both cases. For a link, target is the file that linkTarget
-// checked: no other user can change a directory from / down to it, so the
-// path names that file up to the rename. The temporary file goes to the
-// directory of target as written (kubeconfigTempDir), the directory that
-// the rename resolves.
-func publishKubeconfig(target string, data []byte, force bool) error {
+// file that appeared during the download stays as it is. A link that fails
+// with EEXIST is the error, with no second write. Any other link error
+// takes an exclusive create (createKubeconfig), which also fails when the
+// path exists and replaces nothing. A file system with no hard links
+// (vfat, exFAT, some FUSE and SMB mounts) fails the link with EPERM,
+// ENOTSUP, EOPNOTSUPP or ENOSYS, and the texts and the numbers differ
+// between systems. An error that the create cannot get past (EACCES,
+// EROFS, ENOSPC) fails the create too. The fallback also needs the
+// temporary file at its path, the file that it wrote (os.SameFile of its
+// Stat and an Lstat of the path). When a directory of the path was
+// swapped, the link source is missing in the new directory, and the
+// fallback would write the file there: that is the link error too. The
+// temporary file goes in all cases. For a link, target is the file that
+// linkTarget checked: no other user can change a directory from / down to
+// it, so the path names that file up to the rename. The temporary file
+// goes to the directory of target as written (kubeconfigTempDir), the
+// directory that the rename resolves. wide is the mode of the file that
+// the fallback made when it has group or other bits (vfat, exFAT), else
+// 0. The bash twin is kubehz::agent_write.
+func publishKubeconfig(target string, data []byte, force bool) (wide os.FileMode, err error) {
 	tmp, err := os.CreateTemp(kubeconfigTempDir(target), ".kubeconfig-*")
 	if err != nil {
-		return err
+		return 0, err
 	}
 	name := tmp.Name()
 	_, err = tmp.Write(data)
+	wrote, serr := tmp.Stat()
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
 	if err == nil && force {
 		err = os.Rename(name, target)
 	} else if err == nil {
-		err = os.Link(name, target)
+		err = linkKubeconfig(name, target)
+		if err != nil && !errors.Is(err, os.ErrExist) && serr == nil && kubeconfigPathNames(name, wrote) {
+			wide, err = createKubeconfig(target, data)
+		}
 		_ = os.Remove(name)
 	}
 	if err != nil {
 		_ = os.Remove(name)
 	}
+	return wide, err
+}
+
+// kubeconfigPathNames reports whether path names the file of fi itself,
+// not a link to it.
+func kubeconfigPathNames(path string, fi os.FileInfo) bool {
+	now, err := os.Lstat(path)
+	return err == nil && os.SameFile(fi, now)
+}
+
+// linkKubeconfig is os.Link. A test replaces it, to make the link fail as
+// it fails on a file system with no hard links.
+var linkKubeconfig = os.Link
+
+// createKubeconfig writes data to a new file at target, mode 0600, with an
+// exclusive create (O_EXCL). The create fails when the path exists, a link
+// too, so a file that appeared during the download stays as it is. Unlike
+// the hard link, a reader can see the file before all of it is written.
+// The steps before the first byte, as in the bash twin (bash also checks
+// descriptor 3 and refuses under a default ACL):
+//   - chmod 0600 on the open file. A default ACL of the directory replaces
+//     the umask; the create asks for 0600, but the bash twin asks for 0666.
+//     vfat can refuse the chmod, so the mode that the Stat reads back
+//     decides.
+//   - the path must still name the file of f (kubeconfigPathNames), and
+//     the Stat must read its mode. Else nothing is written or removed.
+//
+// When the write or the close fails after the create (a short write,
+// ENOSPC, EIO), the path holds a part of the file: createKubeconfig removes
+// it while the path names the file of f, and returns a
+// kubeconfigWriteError. Its left is true when the part was not removed.
+// The check and the remove are two steps. A failed create removes nothing.
+// wide is the mode read back when it has group or other bits, else 0.
+func createKubeconfig(target string, data []byte) (wide os.FileMode, err error) {
+	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return 0, err
+	}
+	_ = chmodKubeconfig(f)
+	made, err := f.Stat()
+	if err == nil && !kubeconfigPathNames(target, made) {
+		err = errKubeconfigMoved
+	}
+	if err != nil {
+		_ = f.Close()
+		return 0, err
+	}
+	if err = writeKubeconfigFile(f, data); err != nil {
+		// While f is open, so that the inode is not used again.
+		left := !removeKubeconfigPart(target, made)
+		_ = f.Close()
+		return 0, &kubeconfigWriteError{err: err, left: left}
+	}
+	if err = f.Close(); err != nil {
+		return 0, &kubeconfigWriteError{err: err, left: !removeKubeconfigPart(target, made)}
+	}
+	if perm := made.Mode().Perm(); perm&0o077 != 0 {
+		return perm, nil
+	}
+	return 0, nil
+}
+
+// removeKubeconfigPart removes target while it names the file of made, and
+// reports whether it did.
+func removeKubeconfigPart(target string, made os.FileInfo) bool {
+	return kubeconfigPathNames(target, made) && os.Remove(target) == nil
+}
+
+// errKubeconfigMoved: after the exclusive create, the path no longer names
+// the file that the create made.
+var errKubeconfigMoved = errors.New("the path no longer names the new file")
+
+// chmodKubeconfig sets mode 0600 on the file that the exclusive create
+// made. A test replaces it, to give the file the mode that a vfat mount
+// sets.
+var chmodKubeconfig = func(f *os.File) error { return f.Chmod(0o600) }
+
+// writeKubeconfigFile writes data to f. A test replaces it, to make the
+// write fail after the exclusive create.
+var writeKubeconfigFile = func(f *os.File, data []byte) error {
+	_, err := f.Write(data)
 	return err
+}
+
+// kubeconfigWriteError is a write or a close that failed after the
+// exclusive create made the file (createKubeconfig). left is true when the
+// part of the file was not removed.
+type kubeconfigWriteError struct {
+	err  error
+	left bool
+}
+
+func (e *kubeconfigWriteError) Error() string { return e.err.Error() }
+
+func (e *kubeconfigWriteError) Unwrap() error { return e.err }
+
+// cause is the text of the system error without the operation and the
+// path ("no space left on device"). The bash twin prints the C-locale
+// text of the shell with its first letter in lower case.
+func (e *kubeconfigWriteError) cause() string {
+	if pe, ok := errors.AsType[*os.PathError](e.err); ok {
+		return pe.Err.Error()
+	}
+	return e.err.Error()
 }
 
 // kubeconfigTempDir is the directory of target as written: the part before

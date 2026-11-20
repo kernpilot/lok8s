@@ -1218,6 +1218,362 @@ ${UNMAPPED}"
   assert_output 'kc.yaml'
 }
 
+# _ln_fails: ln as on a file system with no hard links. A stand-in script
+# in a bin directory of the test goes first on PATH (kubehz::agent_write
+# runs `command ln`, which skips a function). It adds a line to LN_LOG,
+# runs LN_HOOK, prints the GNU ln line with the text LN_ERROR and fails.
+# The Go twin is failLink in agent_test.go.
+_ln_fails() {
+  local bin="${BATS_TEST_TMPDIR}/ln-bin"
+  mkdir -p "${bin}"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'printf "ln\n" >> "${LN_LOG}"' \
+    '[[ -z "${LN_HOOK}" ]] || eval "${LN_HOOK}"' \
+    'printf "ln: failed to create hard link \x27%s\x27: %s\n" "${*: -1}" "${LN_ERROR}" >&2' \
+    'exit 1' > "${bin}/ln"
+  chmod 755 "${bin}/ln"
+  export PATH="${bin}:${PATH}" LN_LOG="${BATS_TEST_TMPDIR}/ln.log" LN_HOOK="" LN_ERROR=""
+  : > "${LN_LOG}"
+}
+
+# The text of ln does not count: GNU, uutils and musl print other texts.
+@test "kubeconfig: a link error with no file at the path takes the exclusive create, mode 0600 (EPERM, ENOSYS, an unknown text)" {
+  _ln_fails
+  # A function named ln does not count: the write runs the ln of PATH.
+  ln() { return 0; }
+  umask 022
+  local d text i=0 want="${BATS_TEST_TMPDIR}/want"
+  KUBEHZ_AGENT_BODY=$'apiVersion: v1\nkind: Config\n'
+  printf '%s' "${KUBEHZ_AGENT_BODY}" > "${want}"
+  for text in 'Operation not permitted' 'Function not implemented' 'a text that no C library prints'; do
+    (( ++i ))
+    d="${BATS_TEST_TMPDIR}/nolink${i}"
+    mkdir -p "${d}"
+    : > "${LN_LOG}"
+    LN_ERROR="${text}"
+    run kubehz::agent_write "${d}/kc.yaml" 0
+    assert_success
+    [[ -f "${d}/kc.yaml" && ! -L "${d}/kc.yaml" ]] || fail "${text}: kc.yaml is not a regular file"
+    cmp -- "${want}" "${d}/kc.yaml" || fail "${text}: kc.yaml does not hold the bytes of the download"
+    run stat -c '%a' "${d}/kc.yaml"
+    assert_output 600
+    run ls -A "${d}"
+    assert_output kc.yaml
+    # The ln of PATH ran once.
+    run cat "${LN_LOG}"
+    assert_output ln
+  done
+}
+
+# A file or a link at the path after the failed ln is the refusal, with
+# no second write. A link to a device shows it: noclobber would open the
+# device and write to it. The Go twin is
+# TestPublishKubeconfigWithoutHardLinksKeepsAFileThatAppears.
+@test "kubeconfig: a link error with a file or a link at the path refuses, and the path stays as it was" {
+  local d="${BATS_TEST_TMPDIR}/nolink-there"
+  mkdir -p "${d}"
+  # Made before the stand-in ln is first on PATH.
+  ln -s /dev/null "${d}/device.yaml"
+  _ln_fails
+  umask 022
+  KUBEHZ_AGENT_BODY='new'
+  local text
+  for text in 'File exists' 'Operation not permitted'; do
+    LN_ERROR="${text}"
+    LN_HOOK="printf planted > '${d}/kc.yaml' && chmod 640 '${d}/kc.yaml'"
+    run kubehz::agent_write "${d}/kc.yaml" 0
+    assert_failure
+    run cat "${d}/kc.yaml"
+    assert_output planted
+    run stat -c '%a' "${d}/kc.yaml"
+    assert_output 640
+    rm -f -- "${d}/kc.yaml"
+    LN_HOOK=""
+    run kubehz::agent_write "${d}/device.yaml" 0
+    assert_failure
+    [[ -L "${d}/device.yaml" && "$(readlink -- "${d}/device.yaml")" == /dev/null ]] || fail "${text}: the link to the device was changed"
+    run ls -A "${d}"
+    assert_output device.yaml
+  done
+}
+
+# _write_fails <file>: printf as a write that fails after a part, as a full
+# disk fails. When it writes KUBEHZ_AGENT_BODY to <file>, it writes the
+# first 3 bytes, runs WRITE_HOOK, prints the write error of bash under
+# LC_ALL=C and fails. Every other printf runs as it is: the DEBUG trap of
+# bats calls printf -v before each command, also while the output is
+# <file>. The Go twin is failWrite.
+_write_fails() {
+  export WRITE_FAILS="${1}" WRITE_HOOK=""
+  printf() {
+    if [[ $# == 2 && "${1}" == '%s' && "${2}" == "${KUBEHZ_AGENT_BODY}" && /dev/fd/1 -ef "${WRITE_FAILS}" ]]; then
+      builtin printf '%s' "${2:0:3}"
+      [[ -z "${WRITE_HOOK}" ]] || eval "${WRITE_HOOK}"
+      builtin printf 'bash: printf: write error: No space left on device\n' >&2
+      return 1
+    fi
+    builtin printf "$@"
+  }
+}
+
+# The Go twin is TestPublishKubeconfigWriteFailureRemovesTheFile and the
+# last part of TestAgentKubeconfigWithoutHardLinks.
+@test "kubeconfig: a write that fails after the exclusive create removes the part, and the command names the cause" {
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  local d="${BATS_TEST_TMPDIR}/nolink-full" wrc=0
+  mkdir -p "${d}"
+  _ln_fails
+  LN_ERROR='Operation not permitted'
+  _write_fails "${d}/kc.yaml"
+  KUBEHZ_AGENT_BODY='apiVersion: v1'
+  kubehz::agent_write "${d}/kc.yaml" 0 || wrc=$?
+  [[ "${wrc}" == 2 ]] || fail "rc ${wrc}, want 2"
+  [[ "${KUBEHZ_AGENT_WRITE_ERROR}" == "no space left on device" ]] || fail "cause: ${KUBEHZ_AGENT_WRITE_ERROR}"
+  run ls -A "${d}"
+  assert_output ''
+  # A file that takes the place of the made file during the write stays:
+  # only the file that the create made is removed, so the part stays (rc 3).
+  WRITE_HOOK="mv -- '${d}/kc.yaml' '${d}/kc.yaml.made' && builtin printf other > '${d}/kc.yaml'"
+  wrc=0
+  kubehz::agent_write "${d}/kc.yaml" 0 || wrc=$?
+  [[ "${wrc}" == 3 ]] || fail "a file in its place: rc ${wrc}, want 3"
+  [[ "${KUBEHZ_AGENT_WRITE_ERROR}" == "no space left on device" ]] || fail "cause: ${KUBEHZ_AGENT_WRITE_ERROR}"
+  run cat "${d}/kc.yaml"
+  assert_output other
+  run ls -A "${d}"
+  assert_output $'kc.yaml\nkc.yaml.made'
+  rm -f -- "${d}/kc.yaml" "${d}/kc.yaml.made"
+  # The command names the cause, not a file that exists.
+  _write_fails "${d}/full.yaml"
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/full.yaml"
+  assert_failure
+  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write ${d}/full.yaml: no space left on device
+  Check the free space and the file system of the directory, then run the command again."
+  run ls -A "${d}"
+  assert_output ''
+  # When the part stays, the command names the file to remove.
+  _write_fails "${d}/swap.yaml"
+  WRITE_HOOK="mv -- '${d}/swap.yaml' '${d}/swap.yaml.made' && builtin printf other > '${d}/swap.yaml'"
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/swap.yaml"
+  assert_failure
+  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write ${d}/swap.yaml: no space left on device
+  ${d}/swap.yaml can hold a part of the kubeconfig. Remove it before the next run."
+  run ls -A "${d}"
+  assert_output $'swap.yaml\nswap.yaml.made'
+}
+
+# A failed create made no file: a file or a dangling link at the path
+# stays as it was.
+@test "kubeconfig: the create step on its own removes no file that it did not make" {
+  local d="${BATS_TEST_TMPDIR}/create"
+  mkdir -p "${d}"
+  printf planted > "${d}/kc.yaml"
+  chmod 640 "${d}/kc.yaml"
+  ln -s missing "${d}/dangling.yaml"
+  KUBEHZ_AGENT_BODY='new'
+  run kubehz::agent_create "${d}/kc.yaml"
+  assert_failure 1
+  run cat "${d}/kc.yaml"
+  assert_output planted
+  run stat -c '%a' "${d}/kc.yaml"
+  assert_output 640
+  run kubehz::agent_create "${d}/dangling.yaml"
+  assert_failure 1
+  [[ -L "${d}/dangling.yaml" ]] || fail "the dangling link was removed"
+  run ls -A "${d}"
+  assert_output $'dangling.yaml\nkc.yaml'
+}
+
+# noclobber opens a FIFO or a device at the path without O_EXCL: the
+# create step writes nothing to it, and removes, changes and opens nothing
+# more. The test holds the FIFO open for reading and writing itself (Linux
+# does not wait on that open), so that no open of the step waits, and the
+# read of what reached the FIFO waits 1 s at most.
+@test "kubeconfig: the create step on its own writes nothing to a FIFO or a device at the path" {
+  local d="${BATS_TEST_TMPDIR}/special" got="" ffd
+  mkdir -p "${d}"
+  timeout 5 mkfifo -m 644 "${d}/kc.yaml"
+  exec {ffd}<>"${d}/kc.yaml"
+  KUBEHZ_AGENT_BODY='apiVersion: v1'
+  run kubehz::agent_create "${d}/kc.yaml"
+  assert_failure 1
+  read -r -t 1 -N 1 -u "${ffd}" got || :
+  exec {ffd}<&-
+  [[ -z "${got}" ]] || fail "the create step wrote to the FIFO"
+  [[ -p "${d}/kc.yaml" ]] || fail "the FIFO was removed"
+  # No chmod on the FIFO either.
+  run stat -c '%a' "${d}/kc.yaml"
+  assert_output 644
+  ln -s /dev/null "${d}/device.yaml"
+  run kubehz::agent_create "${d}/device.yaml"
+  assert_failure 1
+  [[ -L "${d}/device.yaml" && "$(readlink -- "${d}/device.yaml")" == /dev/null ]] || fail "the link to the device was changed"
+  run ls -A "${d}"
+  assert_output $'device.yaml\nkc.yaml'
+}
+
+# _chmod_stub <line>...: a stand-in chmod in the bin directory of _ln_fails
+# (call that first), with the given lines. REAL_CHMOD is the chmod of the
+# system.
+_chmod_stub() {
+  REAL_CHMOD="$(command -v chmod)"
+  export REAL_CHMOD
+  printf '%s\n' '#!/usr/bin/env bash' "$@" > "${BATS_TEST_TMPDIR}/ln-bin/chmod"
+  "${REAL_CHMOD}" 755 "${BATS_TEST_TMPDIR}/ln-bin/chmod"
+}
+
+# A default ACL of the directory replaces the umask, and the open of
+# noclobber asks for 0666: the new empty file gets 0644 here before the
+# chmod, and a process could open it then and read the kubeconfig later.
+# So the bash fallback refuses and writes nothing. It removes nothing
+# either: another process can put a file at the path between a check and
+# an rm, so the empty file stays. The Go create asks for 0600 at the open
+# and writes the file (TestPublishKubeconfigUnderADefaultACL).
+@test "kubeconfig: under a default ACL that gives the group read, the bash fallback refuses, writes nothing and keeps the empty file" {
+  command -v setfacl >/dev/null || skip "setfacl is missing"
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  local d="${BATS_TEST_TMPDIR}/acl"
+  mkdir -p "${d}"
+  setfacl -d -m u::rw,g::r,o::r "${d}" 2>/dev/null || skip "no ACLs on the file system of the test dir"
+  # The default ACL applies: a file that asks for 0666 gets 0644, whatever
+  # the umask.
+  : > "${d}/probe"
+  [[ "$(stat -c '%a' "${d}/probe")" == 644 ]] || skip "the default ACL does not apply on the file system of the test dir"
+  rm -f -- "${d}/probe"
+  _ln_fails
+  LN_ERROR='Operation not permitted'
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/kc.yaml"
+  assert_failure
+  assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write ${d}/kc.yaml safely: its directory gives other users access to a new file (a default ACL)
+  This run wrote no part of the kubeconfig. The path can now hold an empty file that this run made, or a file that another process put there.
+  Check the file before you remove it. Then name a file in a directory that gives no other user access to a new file."
+  # The empty file stays at the path, and no temporary file stays.
+  [[ -f "${d}/kc.yaml" && ! -L "${d}/kc.yaml" && ! -s "${d}/kc.yaml" ]]
+  run ls -A "${d}"
+  assert_output kc.yaml
+  run cat "${LN_LOG}"
+  assert_output ln
+}
+
+# The fallback needs the temporary file at its path, the file that mktemp
+# made. When a directory of the path is swapped during the link, the link
+# source is missing in the new directory: that is a refusal, with no file
+# written there. Here the stand-in ln moves the temporary file away. The
+# Go twin is TestPublishKubeconfigNoFallbackWithoutTheTemporaryFile.
+@test "kubeconfig: without the temporary file at its path, a link error refuses and writes no file" {
+  local d="${BATS_TEST_TMPDIR}/nolink-moved"
+  mkdir -p "${d}"
+  _ln_fails
+  LN_ERROR='No such file or directory'
+  LN_HOOK="mv -- \"\${3}\" '${d}/moved'"
+  KUBEHZ_AGENT_BODY='apiVersion: v1'
+  run kubehz::agent_write "${d}/kc.yaml" 0
+  assert_failure 1
+  [[ ! -e "${d}/kc.yaml" && ! -L "${d}/kc.yaml" ]] || fail "the fallback wrote the file without the temporary file"
+  run ls -A "${d}"
+  assert_output moved
+  run cat "${LN_LOG}"
+  assert_output ln
+}
+
+# After the create, the path must still name the file of descriptor 3:
+# else nothing is written or removed. Here the stand-in chmod moves the new
+# file away and puts another file at the path. The Go twin is
+# TestPublishKubeconfigWritesNothingWhenThePathChangesAfterTheCreate.
+@test "kubeconfig: a path that names another file after the create gets no write" {
+  local d="${BATS_TEST_TMPDIR}/nolink-swapped"
+  mkdir -p "${d}"
+  _ln_fails
+  LN_ERROR='Operation not permitted'
+  _chmod_stub "mv -- '${d}/kc.yaml' '${d}/kc.yaml.made' && printf other > '${d}/kc.yaml'"
+  KUBEHZ_AGENT_BODY='apiVersion: v1'
+  run kubehz::agent_write "${d}/kc.yaml" 0
+  assert_failure 1
+  run cat "${d}/kc.yaml"
+  assert_output other
+  [[ -f "${d}/kc.yaml.made" && ! -s "${d}/kc.yaml.made" ]] || fail "the made file holds a part of the kubeconfig"
+  run ls -A "${d}"
+  assert_output $'kc.yaml\nkc.yaml.made'
+}
+
+# The mode read back decides. When the file keeps group or other bits
+# after the chmod (vfat and exFAT set the mode at the mount, and can refuse
+# the chmod), the command writes the file and prints one warning that
+# names the mode. The stand-in chmod gives the file 0644 and fails. The Go
+# twin is TestAgentKubeconfigWarnsWhenTheModeStaysWide.
+@test "kubeconfig: a mode that stays wide after the chmod gets one warning that names it" {
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  local d="${BATS_TEST_TMPDIR}/nolink-wide"
+  mkdir -p "${d}"
+  _ln_fails
+  LN_ERROR='Operation not permitted'
+  _chmod_stub '"${REAL_CHMOD}" 644 "${@: -1}"' 'exit 1'
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/kc.yaml"
+  assert_success
+  assert_output "[warn] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/kc.yaml has mode 0644: the mount options of its file system set the mode
+${d}/kc.yaml"
+  run cat "${d}/kc.yaml"
+  assert_output 'apiVersion: v1'
+}
+
+# The refusal under a default ACL needs the chmod to take the group and
+# other bits away. When the chmod fails and changes nothing (as on vfat, or
+# a denied chmod), the 0644 of the open stays: the command writes the file
+# and prints the one warning. The stand-in chmod fails and changes
+# nothing. The Go create asks for 0600 and writes the file with 0600 here.
+@test "kubeconfig: under a default ACL with a chmod that changes nothing, the bash fallback writes the file and warns" {
+  command -v setfacl >/dev/null || skip "setfacl is missing"
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  local d="${BATS_TEST_TMPDIR}/acl-nochmod"
+  mkdir -p "${d}"
+  setfacl -d -m u::rw,g::r,o::r "${d}" 2>/dev/null || skip "no ACLs on the file system of the test dir"
+  # The default ACL applies: a file that asks for 0666 gets 0644, whatever
+  # the umask.
+  : > "${d}/probe"
+  [[ "$(stat -c '%a' "${d}/probe")" == 644 ]] || skip "the default ACL does not apply on the file system of the test dir"
+  rm -f -- "${d}/probe"
+  _ln_fails
+  LN_ERROR='Operation not permitted'
+  _chmod_stub 'exit 1'
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/kc.yaml"
+  assert_success
+  assert_output "[warn] kubehz cluster kubeconfig cl-1a2b3c4d: ${d}/kc.yaml has mode 0644: the mount options of its file system set the mode
+${d}/kc.yaml"
+  run cat "${d}/kc.yaml"
+  assert_output 'apiVersion: v1'
+  run stat -c '%a' "${d}/kc.yaml"
+  assert_output 644
+  run ls -A "${d}"
+  assert_output kc.yaml
+  run cat "${LN_LOG}"
+  assert_output ln
+}
+
+@test "kubeconfig: without hard links, the command writes a new file, and a file that appears in the link step stays" {
+  route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  route GET /api/spaces/sp-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
+  _ln_fails
+  LN_ERROR='Operation not permitted'
+  local d="${BATS_TEST_TMPDIR}/nolink-command"
+  mkdir -p "${d}"
+  run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/kc.yaml"
+  assert_success
+  assert_output "${d}/kc.yaml"
+  run cat "${d}/kc.yaml"
+  assert_output 'apiVersion: v1'
+  LN_HOOK="printf planted > '${d}/race.yaml'"
+  run kubehz::space::kubeconfig sp-1a2b3c4d --file "${d}/race.yaml"
+  assert_failure
+  assert_output "[error] kubehz space kubeconfig sp-1a2b3c4d: ${d}/race.yaml exists
+  Pass --force to replace it, or name a new file."
+  run cat "${d}/race.yaml"
+  assert_output planted
+  run ls -A "${d}"
+  assert_output $'kc.yaml\nrace.yaml'
+  run cat "${LN_LOG}"
+  assert_output $'ln\nln'
+}
+
 @test "the bearer reaches curl's config with its quotes and backslashes escaped" {
   route GET /api/spaces 200 '{"ok":true,"data":[]}'
   KUBEHZ_TOKEN='a"b\c' KUBEHZ_AGENT_CLIENT_ID="" KUBEHZ_AGENT_CLIENT_SECRET="" run kubehz::agent_list space text
