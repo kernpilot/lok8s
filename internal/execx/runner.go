@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/kernpilot/lok8s/internal/config"
@@ -41,6 +43,16 @@ type Cmd struct {
 	// that still runs then is killed, and the pipes close. Zero keeps the
 	// default: the parent waits for the child to end.
 	WaitDelay time.Duration
+	// ProcessGroup starts the child as the leader of a new process group,
+	// so that a stop also reaches the children of the child (the exec
+	// credential plugin of a kubectl). On a cancelled context the group
+	// gets SIGTERM and SIGCONT, not the SIGINT of the child alone. When
+	// WaitDelay has passed after that signal, the group gets SIGKILL, and
+	// Run then waits up to 1 s more for the group to be gone. The group is
+	// not the foreground group of a terminal: a member that reads the
+	// terminal stops there until the stop. False keeps the default: the
+	// child stays in the process group of lo.
+	ProcessGroup bool
 }
 
 // Runner runs external commands. The single seam that lets driver code run
@@ -91,6 +103,22 @@ func (r *osRunner) Run(ctx context.Context, c Cmd) error {
 	// deliberate deviation: the bash shell died and left the child
 	// running, the binary interrupts it and waits (catalogue D26).
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	// A ProcessGroup child is not in the foreground process group: a
+	// Ctrl-C reaches lo alone, and its interrupt watch cancels the context.
+	// The cancel then stops the whole group of the child (stopGroup).
+	var stopped atomic.Int64 // the time of the group SIGTERM (ProcessGroup)
+	if c.ProcessGroup {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			stopped.Store(time.Now().UnixNano())
+			err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGCONT)
+			if errors.Is(err, syscall.ESRCH) {
+				return os.ErrProcessDone
+			}
+			return err
+		}
+	}
 	cmd.WaitDelay = c.WaitDelay
 	cmd.Dir = c.Dir
 	cmd.Env = ChildEnv(c)
@@ -110,10 +138,33 @@ func (r *osRunner) Run(ctx context.Context, c Cmd) error {
 		cmd.Stderr = os.Stderr
 	}
 	err := cmd.Run()
+	if t := stopped.Load(); t != 0 && cmd.Process != nil {
+		stopGroup(cmd.Process.Pid, time.Unix(0, t).Add(c.WaitDelay))
+	}
 	if err != nil && Debug {
 		fmt.Fprintf(DebugOut, "[debug] exec: %s: exit %d\n", shellWords(append([]string{path}, c.Args...)), ExitCode(err))
 	}
 	return err
+}
+
+// stopGroup ends the process group pgid of a cancelled ProcessGroup child,
+// after Run reaped its leader: it waits until killAt for the group to end
+// after the SIGTERM, sends SIGKILL to the members that are left, and waits
+// up to 1 s for them to go. A member that its new parent has not reaped
+// yet (a zombie) still counts. kill(-pgid, 0) fails with ESRCH when no
+// member is left.
+func stopGroup(pgid int, killAt time.Time) {
+	gone := func() bool { return errors.Is(syscall.Kill(-pgid, 0), syscall.ESRCH) }
+	for !gone() {
+		if time.Now().After(killAt) {
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			for end := time.Now().Add(time.Second); !gone() && time.Now().Before(end); {
+				time.Sleep(10 * time.Millisecond)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // ChildEnv is the environment the default Runner gives the child of c: nil
