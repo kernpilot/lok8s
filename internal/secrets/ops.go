@@ -128,9 +128,10 @@ func grepQF(content, pattern string) bool {
 // new recipient would appear to be added while some secrets stayed unreadable
 // to them. Decrypt first, or pass skipOrphans to accept the gap knowingly.
 // (Like bash, the orphan check runs AFTER .sops.yaml was already modified —
-// the ordering is part of the observable contract. An .enc of the store
-// that the encrypt refuses, a symlink, a directory, a FIFO or a device, is
-// refused BEFORE the write, so the run cannot stop half way at it.)
+// the ordering is part of the observable contract. A store of the context
+// that does not resolve, and an .enc of the store that the encrypt refuses
+// (a symlink, a directory, a FIFO, a socket or a device), are refused
+// BEFORE the write, so the run cannot stop half way at them.)
 //
 // The argument check and the re-key steps are the helpers in rekey.go, which
 // RemoveKey shares; rekey_test.go pins this command's output and effects.
@@ -162,11 +163,19 @@ func (c *Context) AddKey(key string, all, skipOrphans bool) error {
 		return nil
 	}
 
-	// Before the first write: each .enc that the encrypt below writes must
-	// be a regular file or absent (encryptFile refuses any other entry, and
-	// that refusal comes after the write). The list is the one of the sweep,
-	// and the encrypt below reads this same list (encryptChecked).
-	checked := c.encryptTargets()
+	// Before the first write: the store of the context must resolve, with
+	// --all too, because the encrypt below re-keys that store. Found after
+	// the write, a store that does not resolve stopped the run with the
+	// recipient in .sops.yaml, and a rerun found it present and re-keyed
+	// nothing. Then each .enc that the encrypt below writes must be a
+	// regular file or absent (encryptFile refuses any other entry, and that
+	// refusal comes after the write). The list is the one of the sweep, and
+	// the encrypt below reads this same list (encryptChecked).
+	checked, err := c.encryptTargets()
+	if err != nil {
+		ui.ErrorTo(c.ErrOut, "  add-key did not change .sops.yaml: create that directory, or select a domain that has a store, then run this command again")
+		return err
+	}
 	if c.refuseEncPaths(checked.encs()) {
 		return ErrHandled
 	}

@@ -473,18 +473,38 @@ _ls_then_missing() {
   [ "$(cat "${store}/Secret.db.default.KEY.enc")" = "stub-enc w" ]
 }
 
-@test "--all in a domain whose store does not resolve stops after the write and encrypts nothing" {
-  # The check before the write lists no file, so the encrypt does not list a
-  # store either: it says why the store does not resolve (Go twin:
-  # TestAddKeyAllWithAnUnresolvedStoreEncryptsNothing).
+@test "a domain whose store does not resolve is refused before any write, with --all and without" {
+  # secrets::path says why, and the last line says that .sops.yaml did not
+  # change and what to do. Before, the run added the recipient, then
+  # stopped, and a rerun found the recipient present and re-keyed nothing
+  # (Go twin: TestAddKeyRefusesAStoreThatDoesNotResolveBeforeAnyWrite).
   _load
   source "${_PROJECT_ROOT}/.lok8s/utils/domain.sh"
+  local store="${PATH_CLUSTERS}/c.dev/secrets" before all
   mkdir -p "${PATH_CLUSTERS}/c.dev"
+  printf 'v\n' > "${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.KEY"
+  : > "${PATH_BASE}/.sops.yaml.lock"
+  before="$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; command ls -A "${PATH_BASE}")"
+  for all in 0 1; do
+    DOMAIN=c.dev run _add "${KEY_B}" "${all}"
+    [ "$status" -eq 1 ] || { echo "all=${all}: status $status: $output" >&2; return 1; }
+    [ "$output" = "[error] domain c.dev has no secrets store: ${store} does not exist, and this project keeps a store per domain (${PATH_CLUSTERS}/a.dev/secrets). lo does not fall back to ${PATH_SECRETS:-${PATH_BASE}/.secrets}.
+[error]   Create the empty directory ${store} to generate new values for c.dev.
+[error]   add-key did not change .sops.yaml: create that directory, or select a domain that has a store, then run this command again" ] || {
+      echo "all=${all}: $output" >&2; return 1; }
+    [ "$(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; command ls -A "${PATH_BASE}")" = "${before}" ] || {
+      echo "all=${all}: a file changed:" >&2
+      diff <(echo "${before}") <(_state "${PATH_BASE}/.sops.yaml" "${PATH_CLUSTERS}"; command ls -A "${PATH_BASE}") >&2
+      return 1
+    }
+    [ ! -s "${ENCRYPT_RAN}" ]
+  done
+  # The control: with the store made, the run adds the recipient.
+  mkdir "${store}"
   DOMAIN=c.dev run _add "${KEY_B}" 1
-  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
-  [[ "$output" == *"[error] domain c.dev has no secrets store"* ]] || { echo "$output" >&2; return 1; }
+  [ "$status" -eq 0 ] || { echo "status $status: $output" >&2; return 1; }
   grep -qF "age: '${KEY_A},${KEY_B}'" "${PATH_BASE}/.sops.yaml" || { cat "${PATH_BASE}/.sops.yaml" >&2; return 1; }
-  [ ! -s "${ENCRYPT_RAN}" ]
+  [ -s "${ENCRYPT_RAN}" ]
 }
 
 @test "a .sops.yaml that is a symlink stays a link: its target gets the recipient and keeps its mode" {

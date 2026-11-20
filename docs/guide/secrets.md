@@ -186,6 +186,12 @@ path to their ed25519 SSH public key. It adds the key to every creation rule in
 lo secrets --domain app.example.com add-key ~/keys/alice_ed25519.pub
 ```
 
+`add-key` re-encrypts the store of the current domain, also with `--all`. When
+that store does not resolve (the domain directory has no `secrets` directory,
+and the project keeps a store per domain), `add-key` stops before it changes
+`.sops.yaml`. Create the directory, or select a domain that has a store, then
+run the command again.
+
 Remove a recipient with `lo secrets remove-key`, for example when a teammate
 leaves or a key is lost. It removes the key from every creation rule, then
 re-encrypts every managed `.enc` file of the selected stores from its

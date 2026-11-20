@@ -396,29 +396,49 @@ func TestAddKeyEncryptsTheListThatItChecked(t *testing.T) {
 	f.rekeyed("db", "w")
 }
 
-// add-key --all in a domain whose store does not resolve (the domain has no
-// store, and the project keeps a store per domain): the check before the
-// write lists no file, and after the write the encrypt says why the store
-// does not resolve and encrypts nothing. It does not list a store that it
-// did not check.
-func TestAddKeyAllWithAnUnresolvedStoreEncryptsNothing(t *testing.T) {
-	f := newLinkFixture(t, "add-key")
-	mkdir(t, f.c.Paths.Clusters+"/c.dev")
-	f.c.Domain = "c.dev"
-	err := f.c.AddKey(f.gone.Recipient().String(), true, false)
-	if !errors.Is(err, ErrHandled) {
-		t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
-	}
-	if !strings.Contains(f.errOut.String(), "[error] domain c.dev has no secrets store") {
-		t.Errorf("stderr:\n%s", f.errOut.String())
-	}
-	if !strings.Contains(readFile(t, f.c.sopsConfigPath()), f.gone.Recipient().String()) {
-		t.Error("the recipient was not added")
-	}
-	for name, plain := range map[string]string{"app": "v", "db": "w"} {
-		if enc := f.store + "/Secret." + name + ".default.K.enc"; opens(t, enc, f.gone, plain) {
-			t.Errorf("%s was encrypted", f.c.rel(enc))
-		}
+// add-key in a domain whose store does not resolve (the domain has no
+// store, and the project keeps a store per domain), with --all and
+// without: it stops before its first write. ResolveStore says why, and the
+// last line says that .sops.yaml did not change and what to do. stdout is
+// empty, and .sops.yaml, every .enc and every plaintext stay as they were.
+// Before, the run added the recipient, then stopped, and a rerun found the
+// recipient present and re-keyed nothing. The control: with the store
+// made, the run adds the recipient.
+func TestAddKeyRefusesAStoreThatDoesNotResolveBeforeAnyWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		all  bool
+	}{{"without --all", false}, {"with --all", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLinkFixture(t, "add-key")
+			mkdir(t, f.c.Paths.Clusters+"/c.dev")
+			f.c.Domain = "c.dev"
+			write(t, f.c.sopsConfigLock(), "")
+			before := fileStates(t, f.c.Paths.Base)
+			f.out.Reset()
+			f.errOut.Reset()
+
+			err := f.c.AddKey(f.gone.Recipient().String(), tc.all, false)
+			if !errors.Is(err, ErrHandled) {
+				t.Fatalf("want ErrHandled, got %v\n%s", err, f.errOut.String())
+			}
+			store := f.c.Paths.Clusters + "/c.dev/secrets"
+			want := "[error] domain c.dev has no secrets store: " + store + " does not exist, and this project keeps a store per domain (" + f.store + "). lo does not fall back to " + f.c.flatStore() + ".\n" +
+				"[error]   Create the empty directory " + store + " to generate new values for c.dev.\n" +
+				"[error]   add-key did not change .sops.yaml: create that directory, or select a domain that has a store, then run this command again\n"
+			if f.out.String() != "" || f.errOut.String() != want {
+				t.Errorf("stdout %q\nstderr:\n%q\nwant:\n%q", f.out.String(), f.errOut.String(), want)
+			}
+			sameStates(t, before, fileStates(t, f.c.Paths.Base))
+
+			mkdir(t, store)
+			if err := f.c.AddKey(f.gone.Recipient().String(), tc.all, false); err != nil {
+				t.Fatalf("with the store made: %v\n%s", err, f.errOut.String())
+			}
+			if !strings.Contains(readFile(t, f.c.sopsConfigPath()), f.gone.Recipient().String()) {
+				t.Error("with the store made, the recipient was not added")
+			}
+		})
 	}
 }
 
