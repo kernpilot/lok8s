@@ -588,6 +588,138 @@ _class() {
   done
 }
 
+_duplicate='[error]   a duplicate member can hide a recipient from this check — re-encrypt those files with sops from their plaintext, then run this command again; nothing was written'
+
+# _row <want> <json> — what secrets::_enc_lists prints for RCPT_B on the JSON,
+# with "A" and "B" standing for RCPT_A and RCPT_B; an empty want is a refusal
+# as metadata that does not parse (rc 1, no output).
+_row() {
+  local f="${BATS_TEST_TMPDIR}/row.enc" got rc=0
+  printf '%s\n' "$(sed -e "s/\"A\"/\"${RCPT_A}\"/g" -e "s/\"B\"/\"${RCPT_B}\"/g" <<< "${2}")" > "${f}"
+  got="$(secrets::_enc_lists "${RCPT_B}" "${f}")" || rc=$?
+  if [[ -z "${1}" ]]; then
+    [[ "${rc}" -eq 1 && -z "${got}" ]] || { echo "${2}: got '${got}' (rc ${rc}), want the metadata refusal" >&2; return 1; }
+  else
+    [[ "${rc}" -eq 0 && "${got}" == "${1}" ]] || { echo "${2}: got '${got}' (rc ${rc}), want ${1}" >&2; return 1; }
+  fi
+}
+
+@test "the read of the sops metadata refuses a member twice: the rows of TestEncRecipientsRefusesADuplicateMember" {
+  # A map decode and jq keep the last of two members, so the first could hide
+  # a recipient. The Go twin reads the same rows.
+  _load
+  local esc; esc="$(printf '\134')u0073ops"
+  _row duplicate '{"data":"x","sops":{"key_groups":[{"age":[{"recipient":"B"},{"recipient":"A"}]}]},"sops":{"age":[{"recipient":"A"}]}}'
+  _row duplicate '{"sops":{"age":[{"recipient":"B"}]},"data":"x","sops":{"age":[{"recipient":"A"}]}}'
+  _row duplicate '{"sops":{"age":[{"recipient":"B"}]},"'"${esc}"'":{"age":[{"recipient":"A"}]}}'
+  _row duplicate '{"sops":{"age":[{"recipient":"B"},{"recipient":"A"}],"age":[{"recipient":"A"}]}}'
+  _row duplicate '{"sops":{"key_groups":[{"age":[{"recipient":"B"}]}],"key_groups":[{"age":[{"recipient":"A"}]}]}}'
+  _row duplicate '{"sops":{"key_groups":[{"age":[{"recipient":"B"}],"age":[{"recipient":"A"}]}]}}'
+  _row duplicate '{"sops":{"age":[{"recipient":"B","recipient":"A","enc":"x"}]}}'
+  _row duplicate '{"sops":{"age":[{"recipient":"A","enc":"x","enc":"y"}]}}'
+  _row duplicate '{"sops":{"age":[{"recipient":"A"}],"mac":"x","mac":"y"}}'
+  _row duplicate '{"sops":{"age":[{"recipient":"A"}],"other":[{"x":{"y":1,"y":2}}]}}'
+  _row duplicate '{"sops":{"age":[{"recipient":"A"}],"mac":"x","mac":{"y":1}}}'
+  _row duplicate '{"sops":{"age":[{"recipient":"A"}],"mac":{"y":1},"mac":"x"}}'
+  _row duplicate '{"sops":{"age":[{"recipient":"A"}],"mac":{},"mac":{"y":1}}}'
+  # No duplicate in the metadata: the data payload is not read for one.
+  _row clear '{"data":"x","data":"y","sops":{"age":[{"recipient":"A"}]}}'
+  _row listed '{"sops":{"key_groups":[{"age":[{"recipient":"A"}]},{"age":[{"recipient":"B"}]}]}}'
+  # The shape is read first: a last member that does not parse is the
+  # metadata refusal.
+  _row '' '{"sops":{"age":[{"recipient":"A"}]},"sops":"x"}'
+}
+
+# _duplicate_refused <json> — an .enc of a.dev whose sops metadata holds a
+# member twice ("A" and "B" stand for RCPT_A and RCPT_B, B the one to remove):
+# a read that keeps the last member does not list RCPT_B, and remove-key
+# refuses the file by name before any write.
+_duplicate_refused() {
+  local enc="${PATH_CLUSTERS}/a.dev/secrets/Secret.app.default.K.enc" before
+  printf 'v' > "${enc%.enc}"
+  printf '%s\n' "$(sed -e "s/\"A\"/\"${RCPT_A}\"/g" -e "s/\"B\"/\"${RCPT_B}\"/g" <<< "${1}")" > "${enc}"
+  touch -t 200001010000 "${enc}"
+  ! jq -r '(.sops.age[]?, .sops.key_groups[]?.age[]?) | .recipient' "${enc}" | grep -qxF "${RCPT_B}" || {
+    echo "fixture: a read that keeps the last member lists the recipient: ${1}" >&2; return 1; }
+  cp -p "${enc}" "${BATS_TEST_TMPDIR}/enc.saved"
+  before="$(cat "${CFG}")"
+  DOMAIN=a.dev run _rm "${RCPT_B}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] the sops metadata of ${enc} holds a duplicate member
+${_duplicate}" ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${CFG}")" = "${before}" ] || { echo ".sops.yaml was written" >&2; return 1; }
+  cmp -s "${enc}" "${BATS_TEST_TMPDIR}/enc.saved" || { echo "the .enc changed" >&2; return 1; }
+  [ ! -s "${ENCRYPT_LOG}" ]
+}
+
+@test "an .enc whose sops metadata holds a member twice is refused before any write" {
+  _load
+  _stub_encrypt
+  # The recipient twice in the entry of the key to remove; the sops member
+  # twice; age twice; key_groups twice.
+  _duplicate_refused '{"data":"ENC[x]","sops":{"age":[{"recipient":"B","recipient":"A","enc":"x"},{"recipient":"A","enc":"x"}]}}'
+  _duplicate_refused '{"data":"ENC[x]","sops":{"key_groups":[{"age":[{"recipient":"B","enc":"x"},{"recipient":"A","enc":"x"}]}]},"sops":{"age":[{"recipient":"A","enc":"x"}]}}'
+  _duplicate_refused '{"data":"ENC[x]","sops":{"age":[{"recipient":"B","enc":"x"},{"recipient":"A","enc":"x"}],"age":[{"recipient":"A","enc":"x"}]}}'
+  _duplicate_refused '{"data":"ENC[x]","sops":{"key_groups":[{"age":[{"recipient":"B","enc":"x"},{"recipient":"A","enc":"x"}]}],"key_groups":[{"age":[{"recipient":"A","enc":"x"}]}]}}'
+}
+
+@test "a real .enc with a member twice: sops opens one with the removed key, and remove-key refuses both" {
+  command -v sops >/dev/null 2>&1 || skip "sops not installed"
+  command -v ssh-to-age >/dev/null 2>&1 || skip "ssh-to-age not installed"
+  command -v ssh-keygen >/dev/null 2>&1 || skip "ssh-keygen not installed"
+  _load
+  # Throwaway keys in the test's temp dir, as in the round trip below.
+  local k="${BATS_TEST_TMPDIR}/keys" n
+  mkdir -p "${k}"
+  for n in keep gone; do
+    ssh-keygen -q -t ed25519 -N '' -C "${n}" -f "${k}/${n}" </dev/null >/dev/null 2>&1
+    ssh-to-age -private-key -i "${k}/${n}" -o "${k}/${n}.age" 2>/dev/null
+  done
+  local keep gone
+  keep="$(ssh-to-age -i "${k}/keep.pub")"
+  gone="$(ssh-to-age -i "${k}/gone.pub")"
+  _rules "${keep},${gone}"
+  local store="${PATH_CLUSTERS}/a.dev/secrets" enc compact kept_entry from to
+  enc="${store}/Secret.app.default.K.enc"
+  printf 'v' > "${enc%.enc}"
+  domain=a.dev secrets::encrypt >/dev/null
+  _open() { SOPS_AGE_KEY_FILE="${k}/${1}.age" sops decrypt --input-type binary --output-type binary "${enc}" 2>/dev/null; }
+  compact="$(jq -c . "${enc}")"
+  kept_entry="$(jq -c --arg r "${keep}" '.sops.age[] | select(.recipient == $r)' "${enc}")"
+  from="\"recipient\":\"${gone}\""
+  to="\"recipient\":\"${gone}\",\"recipient\":\"${keep}\""
+  [[ "${compact}" == *"${from}"* && -n "${kept_entry}" ]] || { echo "fixture: the .enc does not list both recipients" >&2; return 1; }
+
+  # The recipient twice in the entry of the removed key: sops reads the last
+  # one, and still opens the file with the removed key.
+  printf '%s\n' "${compact/"${from}"/"${to}"}" > "${enc}"
+  touch "${enc%.enc}"
+  [ "$(_open gone)" = "v" ] || { echo "fixture: sops does not open the file with the removed key" >&2; return 1; }
+  ! jq -r '.sops.age[].recipient' "${enc}" | grep -qxF "${gone}" || { echo "fixture: jq lists the removed key" >&2; return 1; }
+  cp -p "${enc}" "${BATS_TEST_TMPDIR}/enc.saved"
+  local before; before="$(cat "${CFG}")"
+  DOMAIN=a.dev run _rm "${gone}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] the sops metadata of ${enc} holds a duplicate member
+${_duplicate}" ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${CFG}")" = "${before}" ] || { echo ".sops.yaml was written" >&2; return 1; }
+  cmp -s "${enc}" "${BATS_TEST_TMPDIR}/enc.saved" || { echo "the .enc changed" >&2; return 1; }
+
+  # A second sops member with the kept key only: sops refuses the file, and
+  # remove-key names the duplicate.
+  local second=",\"sops\":{\"age\":[${kept_entry}]}}"
+  [[ "${compact}" == *'}' ]] || { echo "fixture: the compact .enc does not end with an object" >&2; return 1; }
+  printf '%s%s\n' "${compact%?}" "${second}" > "${enc}"
+  touch "${enc%.enc}"
+  ! _open gone >/dev/null || { echo "fixture: sops opens a file with the sops member twice" >&2; return 1; }
+  ! _open keep >/dev/null || { echo "fixture: sops opens a file with the sops member twice" >&2; return 1; }
+  DOMAIN=a.dev run _rm "${gone}"
+  [ "$status" -eq 1 ] || { echo "status $status: $output" >&2; return 1; }
+  [ "$output" = "[error] the sops metadata of ${enc} holds a duplicate member
+${_duplicate}" ] || { echo "$output" >&2; return 1; }
+  [ "$(cat "${CFG}")" = "${before}" ] || { echo ".sops.yaml was written" >&2; return 1; }
+}
+
 # _rm_path <dir> <argv...> — _rm with PATH set to <dir> alone.
 _rm_path() {
   local PATH="${1}"

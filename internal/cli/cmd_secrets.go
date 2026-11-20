@@ -263,6 +263,8 @@ Before the first write, the command refuses:
   - a recipient that is in no rule and in no .enc file,
   - a store path or an .enc file that it cannot stat or read (a dangling
     symlink included),
+  - an .enc file whose sops metadata holds a member twice (re-encrypt it
+    with sops from its plaintext),
   - an .enc file whose sops metadata does not parse or lists no age
     recipient (the command reads the recipients from that metadata),
   - an .enc file that lists the recipient and is newer than its plaintext

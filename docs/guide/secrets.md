@@ -219,6 +219,11 @@ lo secrets remove-key age1<recipient> --all     # every clusters/<domain>/secret
 - The sops metadata of an `.enc` file does not parse, or lists no age
   recipient. The command reads the recipients of each file from that
   metadata, so a JSON escape cannot hide one. Fix or restore the file first.
+- The sops metadata of an `.enc` file holds a member twice: the `sops` object
+  itself, or a member in it (for example two `age` lists, or two `recipient`
+  values in one entry). A JSON read keeps the last of two members, so the
+  first one could hide a recipient from the check. Encrypt the file again
+  with sops from its plaintext.
 - An `.enc` file that lists the key is newer than its plaintext. The re-key
   encrypts the plaintext, so it would write the old value back over the newer
   one. Run `lo secrets decrypt` first.

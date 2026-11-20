@@ -8,6 +8,7 @@ package secrets
 // _rekey_files).
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -275,6 +276,7 @@ type encScan struct {
 	listed     []string // those whose sops metadata lists the recipient
 	unreadable []string // a store or an .enc it cannot stat, list or read
 	malformed  []string // an .enc whose sops metadata does not parse or lists no age recipient
+	duplicate  []string // an .enc whose sops metadata holds a member twice
 }
 
 // scanEncs reads the sops metadata of every Secret.*.enc of the stores (bash:
@@ -282,8 +284,9 @@ type encScan struct {
 // metadata, so a file that lists the recipient is a file its key can open.
 // The recipients are read from the parsed metadata (encRecipients) and
 // compared exactly, so a JSON escape in the file cannot hide one. A store or
-// a file it cannot read, and a file whose metadata does not parse, are
-// reported, never taken as one that does not list it.
+// a file it cannot read, a file whose metadata does not parse, and a file
+// whose metadata holds a member twice are reported, never taken as one that
+// does not list it.
 func scanEncs(stores []string, recipient string) encScan {
 	var s encScan
 	for _, store := range stores {
@@ -325,6 +328,8 @@ func scanEncs(stores []string, recipient string) encScan {
 			}
 			rcpts, err := encRecipients(raw)
 			switch {
+			case errors.Is(err, errEncDuplicate):
+				s.duplicate = append(s.duplicate, enc)
 			case err != nil:
 				s.malformed = append(s.malformed, enc)
 			case slices.Contains(rcpts, recipient):
@@ -339,6 +344,10 @@ func scanEncs(stores []string, recipient string) encScan {
 // recipient. It never quotes the file.
 var errEncMetadata = errors.New("the sops metadata does not parse or lists no age recipient")
 
+// errEncDuplicate: the sops metadata of an .enc holds a member twice. It
+// never quotes the file.
+var errEncDuplicate = errors.New("the sops metadata holds a duplicate member")
+
 // encRecipients reads the age recipients from the sops metadata of an .enc,
 // the JSON envelope of the binary store (bash: secrets::_enc_lists): each
 // recipient of sops.age and of the age list of every sops.key_groups entry,
@@ -346,7 +355,11 @@ var errEncMetadata = errors.New("the sops metadata does not parse or lists no ag
 // not one JSON object with a sops object, when it holds no age entry or an
 // age entry without a recipient string, and when a key that the sops
 // metadata decoder matches regardless of case is spelled another way ("AGE",
-// "Recipient"): sops would then read a value that this read does not.
+// "Recipient"): sops would then read a value that this read does not. For a
+// file that passes those checks, it returns errEncDuplicate when the file
+// holds the sops member twice, or an object in the sops value holds a member
+// twice (metadataDuplicate): the map decode keeps the last of two members,
+// so the first one, with the recipients it holds, is not read.
 func encRecipients(raw []byte) ([]string, error) {
 	var top any
 	if err := json.Unmarshal(raw, &top); err != nil {
@@ -393,7 +406,86 @@ func encRecipients(raw []byte) ([]string, error) {
 	if len(out) == 0 {
 		return nil, errEncMetadata
 	}
+	if err := metadataDuplicate(raw); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// metadataDuplicate reads the tokens of raw, one JSON object, and returns
+// errEncDuplicate when it holds the sops member twice or an object in the
+// sops value holds a member twice: at the top of the sops value, in a
+// key_groups item, in a recipient entry, at any depth. The other top-level
+// members, the data payload among them, are not metadata and are skipped.
+// It returns errEncMetadata when the tokens do not parse.
+func metadataDuplicate(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return errEncMetadata
+	}
+	seen := false
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return errEncMetadata
+		}
+		if t != "sops" {
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return errEncMetadata
+			}
+			continue
+		}
+		if seen {
+			return errEncDuplicate
+		}
+		seen = true
+		if err := valueDuplicate(dec); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// valueDuplicate reads one JSON value from dec and returns errEncDuplicate
+// when an object in it holds a member twice (the names compared after their
+// escapes are decoded, as sops reads them), errEncMetadata when the tokens
+// do not parse.
+func valueDuplicate(dec *json.Decoder) error {
+	t, err := dec.Token()
+	if err != nil {
+		return errEncMetadata
+	}
+	switch t {
+	case json.Delim('{'):
+		names := map[string]bool{}
+		for dec.More() {
+			nt, err := dec.Token()
+			if err != nil {
+				return errEncMetadata
+			}
+			name, _ := nt.(string)
+			if names[name] {
+				return errEncDuplicate
+			}
+			names[name] = true
+			if err := valueDuplicate(dec); err != nil {
+				return err
+			}
+		}
+	case json.Delim('['):
+		for dec.More() {
+			if err := valueDuplicate(dec); err != nil {
+				return err
+			}
+		}
+	default:
+		return nil // a scalar
+	}
+	if _, err := dec.Token(); err != nil { // the closing delimiter
+		return errEncMetadata
+	}
+	return nil
 }
 
 // metaField is m[name], or errEncMetadata when m has another key that equals
@@ -440,7 +532,8 @@ func ageRecipients(v any) ([]string, error) {
 // that this run does not re-key and that still lists the recipient (bash:
 // secrets::_other_stores): the domain stores it did not select, then the
 // flat store, which --all does not re-key either. A path or a file it cannot
-// read, and a file whose metadata does not parse, count as one that lists it.
+// read, a file whose metadata does not parse, and a file whose metadata holds
+// a member twice count as one that lists it.
 func (c *Context) reportOtherStores(say func(io.Writer, string, ...any), selected []string, recipient string) {
 	picked := map[string]bool{}
 	for _, s := range selected {
@@ -448,7 +541,7 @@ func (c *Context) reportOtherStores(say func(io.Writer, string, ...any), selecte
 	}
 	count := func(store string) int {
 		s := scanEncs([]string{store}, recipient)
-		return len(s.listed) + len(s.unreadable) + len(s.malformed)
+		return len(s.listed) + len(s.unreadable) + len(s.malformed) + len(s.duplicate)
 	}
 	domains := 0
 	paths, _ := c.domainStores()
@@ -628,6 +721,33 @@ func (c *Context) rerunRemoveKey(recipient string, all, skipOrphans bool) {
 	ui.ErrorTo(c.ErrOut, "  %s", cmd)
 }
 
+// refuseScan prints the refusal for what the scan before the first write could
+// not read, in this order: a path it cannot read, an .enc whose sops metadata
+// holds a member twice, an .enc whose sops metadata does not parse or lists no
+// age recipient. It reports whether it refused.
+func (c *Context) refuseScan(s encScan) bool {
+	switch {
+	case len(s.unreadable) > 0:
+		for _, u := range s.unreadable {
+			ui.ErrorTo(c.ErrOut, "cannot read %s", c.rel(u))
+		}
+		ui.ErrorTo(c.ErrOut, "  a file that is not read may still list the recipient — fix the permissions first; nothing was written")
+	case len(s.duplicate) > 0:
+		for _, d := range s.duplicate {
+			ui.ErrorTo(c.ErrOut, "the sops metadata of %s holds a duplicate member", c.rel(d))
+		}
+		ui.ErrorTo(c.ErrOut, "  a duplicate member can hide a recipient from this check — re-encrypt those files with sops from their plaintext, then run this command again; nothing was written")
+	case len(s.malformed) > 0:
+		for _, m := range s.malformed {
+			ui.ErrorTo(c.ErrOut, "the sops metadata of %s does not parse or lists no age recipient", c.rel(m))
+		}
+		ui.ErrorTo(c.ErrOut, "  remove-key reads the recipients of each .enc from its sops metadata — fix or restore those files first; nothing was written")
+	default:
+		return false
+	}
+	return true
+}
+
 // ── Remove key ───────────────────────────────────────────
 
 // RemoveKey drops an age recipient from every creation rule in .sops.yaml
@@ -646,11 +766,12 @@ func (c *Context) rerunRemoveKey(recipient string, all, skipOrphans bool) {
 // an age recipient that does not parse. It refuses a recipient that is in no
 // rule and no .enc file (a typo must not look like a removal), a store path
 // or an .enc file it cannot stat or read (a dangling symlink included), an
-// .enc whose sops metadata does not parse or lists no age recipient, an .enc
-// that lists the recipient and is newer than its plaintext (the re-key would
-// write the old value back over the newer one), and, without skipOrphans, an
-// .enc with no decrypted twin: a re-key cannot rewrite that file, so it
-// keeps the removed recipient.
+// .enc whose sops metadata holds a member twice (the read keeps the last one,
+// so the first could hide a recipient), an .enc whose sops metadata does not
+// parse or lists no age recipient, an .enc that lists the recipient and is
+// newer than its plaintext (the re-key would write the old value back over
+// the newer one), and, without skipOrphans, an .enc with no decrypted twin:
+// a re-key cannot rewrite that file, so it keeps the removed recipient.
 //
 // It re-encrypts each .enc that lists the recipient from its plaintext, then
 // reads the .enc files again and fails when one still lists it, with the
@@ -748,18 +869,7 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 	}
 	scan := scanEncs(stores, agePubkey)
 	scan.unreadable = append(unreadableStores, scan.unreadable...)
-	if len(scan.unreadable) > 0 {
-		for _, u := range scan.unreadable {
-			ui.ErrorTo(c.ErrOut, "cannot read %s", c.rel(u))
-		}
-		ui.ErrorTo(c.ErrOut, "  a file that is not read may still list the recipient — fix the permissions first; nothing was written")
-		return ErrHandled
-	}
-	if len(scan.malformed) > 0 {
-		for _, m := range scan.malformed {
-			ui.ErrorTo(c.ErrOut, "the sops metadata of %s does not parse or lists no age recipient", c.rel(m))
-		}
-		ui.ErrorTo(c.ErrOut, "  remove-key reads the recipients of each .enc from its sops metadata — fix or restore those files first; nothing was written")
+	if c.refuseScan(scan) {
 		return ErrHandled
 	}
 	if rules == 0 && len(scan.listed) == 0 {
@@ -849,6 +959,9 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 	for _, m := range after.malformed {
 		ui.ErrorTo(c.ErrOut, "the sops metadata of %s does not parse or lists no age recipient", c.rel(m))
 	}
+	for _, d := range after.duplicate {
+		ui.ErrorTo(c.ErrOut, "the sops metadata of %s holds a duplicate member", c.rel(d))
+	}
 	for _, enc := range after.listed {
 		if !fsutil.IsRegular(strings.TrimSuffix(enc, ".enc")) {
 			orphansLeft++
@@ -857,7 +970,7 @@ func (c *Context) RemoveKey(key string, all, skipOrphans bool) error {
 		ui.ErrorTo(c.ErrOut, "still encrypted to the removed recipient: %s", c.rel(enc))
 		left++
 	}
-	if bad := len(after.unreadable) + len(after.malformed); left > 0 || bad > 0 {
+	if bad := len(after.unreadable) + len(after.malformed) + len(after.duplicate); left > 0 || bad > 0 {
 		ui.ErrorTo(c.ErrOut, "%d .enc file(s) still list the removed recipient after the re-key, %d cannot be read or do not parse", left, bad)
 		c.rerunRemoveKey(agePubkey, all, skipOrphans)
 		return ErrHandled
