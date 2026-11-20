@@ -69,11 +69,11 @@
 # the command, in a command position: at the start of a command, after |,
 # (, ;, &, !, {, `, $(, <(, &&, ||, a YAML list item "- ", or the words if,
 # then, do, else, elif, while, until and time. Before it can stand
-# wrappers: command,
-# exec, env, xargs, timeout, nice, nohup, sudo, stdbuf, setsid, builtin,
-# bounded (the tick budget helper of the agent CronJob, which runs its
-# arguments under timeout), their options and values (also quoted: sudo -u "${u}"), and assignment
-# words (NAME= or NAME+=, then any value: quoted, $( ) or none). The words
+# wrappers: command, exec, env, xargs, timeout, nice, nohup, sudo,
+# stdbuf, setsid, builtin, bounded (the tick budget helper of the agent
+# CronJob, which runs its arguments under timeout), their options and
+# values (also quoted: sudo -u "${u}"), and assignment words (NAME= or
+# NAME+=, then any value: quoted, $( ) or none). The words
 # are shell words: white space in quotes, in a ${ } or in a $( ) does not
 # end one, and an operator of the shell (;, &&, ||, |, &, ( or )) in code
 # ends one, so the x=y of "echo x=y; curl" is no assignment word before
@@ -84,9 +84,9 @@
 # a command for the user), in the text of a ${ } and in a comment (a #
 # that starts a word, to the end of its line) does not count, and comment
 # lines neither end nor continue a command. Before any other step, a line
-# that ends in a backslash is
-# joined to the next line without the backslash and the newline, as the
-# shell does (so cu\<newline>rl is curl). The lines that a trailing |, &&,
+# that ends in a backslash is joined to the next line without the
+# backslash and the newline, as the shell does (so cu\<newline>rl is
+# curl). The lines that a trailing |, &&,
 # || or ( joins are one command.
 #
 # A call carries a credential when its own arguments (from the curl word up
