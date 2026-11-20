@@ -41,6 +41,14 @@ func fileOwner(info fs.FileInfo) (int, bool) {
 	return int(st.Uid), true
 }
 
+// singleLink reports whether the entry has exactly one name (no hard
+// link). It is false when the platform does not say, so a check that
+// needs one name fails closed there.
+func singleLink(info fs.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && st.Nlink == 1
+}
+
 // overflowUID is the uid that an owner without a mapping shows in a user
 // namespace: /proc/sys/kernel/overflowuid, else 65534 (the bash twin reads
 // the same file).

@@ -1384,6 +1384,20 @@ pre-seeded state, and **verifies the resulting cluster CA is byte-identical
 to the bundle's** before telling you to cut DNS over. If that verify fails,
 do not cut over: the restored cluster did not keep its identity.
 
+Both commands accept a bundle that holds only regular files and directories.
+A bundle with a link (a symlink or a hardlink entry in a `.tar.gz`, or a key
+file that is a link in a bundle directory) is refused before anything reads
+it.
+
+`preseed` sends the cluster's CA keys over SSH, so it checks the node's host
+key on every call. An unknown or a changed key fails before a key leaves your
+machine. Before the first `preseed` to a new node, put the node's host key in
+your known_hosts file (or in the file that you give with `--known-hosts`).
+Compare its fingerprint with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
+on the node's console first. `--accept-new-host-key` trusts the key that the
+node shows on the first contact instead: the handover then checks that ssh
+recorded it, and every later call checks against that record.
+
 ## Troubleshooting
 
 **No heartbeats arriving?** Check the CronJob is present, not suspended,
