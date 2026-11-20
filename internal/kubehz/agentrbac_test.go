@@ -66,6 +66,9 @@ type rbacDoc struct {
 	RoleRef   rbacRoleRef   `yaml:"roleRef"`
 	Subjects  []rbacSubject `yaml:"subjects"`
 	Resources []string      `yaml:"resources"`
+	// AggregationRule keeps the node of an aggregationRule key. Its Kind is
+	// 0 only when the document has no such key: a null value is a node too.
+	AggregationRule yaml.Node `yaml:"aggregationRule"`
 }
 
 // agentDocs decodes every document of every YAML file in the embedded
@@ -171,6 +174,240 @@ func TestAgentClusterRoleIsTheScriptSet(t *testing.T) {
 	}
 	if found != 1 {
 		t.Fatalf("%d ClusterRoles found, want 1", found)
+	}
+}
+
+// agentRoleKey names a Role or ClusterRole: its kind, its namespace ("" for
+// a ClusterRole) and its name.
+type agentRoleKey struct {
+	Kind, Namespace, Name string
+}
+
+// agentRoleRules is every Role and ClusterRole of the agent manifests with
+// its full rule set: each grant has a caller in the heartbeat script (the
+// comments in rbac.yaml name them). The ClusterRole is the set of
+// TestAgentClusterRoleIsTheScriptSet.
+var agentRoleRules = map[agentRoleKey][]rbacRule{
+	{"ClusterRole", "", "kubehz-agent"}: {
+		{APIGroups: []string{""}, Resources: []string{"nodes"}, Verbs: []string{"list"}},
+		{APIGroups: []string{"certificates.k8s.io"}, Resources: []string{"certificatesigningrequests"}, Verbs: []string{"list"}},
+		{APIGroups: []string{"storage.k8s.io"}, Resources: []string{"storageclasses"}, Verbs: []string{"list"}},
+		{APIGroups: []string{""}, Resources: []string{"persistentvolumes"}, Verbs: []string{"list"}},
+		{APIGroups: []string{""}, Resources: []string{"services"}, Verbs: []string{"list"}},
+		{APIGroups: []string{"admissionregistration.k8s.io"}, Resources: []string{"validatingwebhookconfigurations", "mutatingwebhookconfigurations"}, Verbs: []string{"list"}},
+		{APIGroups: []string{"apiextensions.k8s.io"}, Resources: []string{"customresourcedefinitions"}, ResourceNames: []string{"clusters.cluster.x-k8s.io"}, Verbs: []string{"get"}},
+		{NonResourceURLs: []string{"/readyz", "/version"}, Verbs: []string{"get"}},
+	},
+	{"Role", "kube-system", "kubehz-agent"}: {
+		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"list"}},
+		{APIGroups: []string{"apps"}, Resources: []string{"daemonsets"}, Verbs: []string{"list"}},
+		{APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{"kubeadm-config"}, Verbs: []string{"get"}},
+	},
+	{"Role", agentNamespace, "kubehz-agent-secret"}: {
+		{APIGroups: []string{""}, Resources: []string{"secrets"}, ResourceNames: []string{"kubehz-agent"}, Verbs: []string{"get"}},
+		{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"create"}},
+	},
+	{"Role", agentNamespace, "kubehz-agent-marker"}: {
+		{APIGroups: []string{""}, Resources: []string{"configmaps"}, ResourceNames: []string{agentStateName}, Verbs: []string{"get", "patch"}},
+	},
+}
+
+// canonicalRules gives a rule set in a form that does not depend on order:
+// RBAC grants the union of the rules, and each list of a rule is a set. So
+// each list is sorted, each rule is printed, and the printed rules are
+// sorted. Nothing is merged or dropped: a rule or a list item that occurs
+// twice stays twice, and two rule sets are the same only when they hold the
+// same rules item for item.
+func canonicalRules(rules []rbacRule) []string {
+	sorted := func(s []string) []string { return slices.Sorted(slices.Values(s)) }
+	out := make([]string, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, fmt.Sprintf("apiGroups=%q resources=%q resourceNames=%q verbs=%q nonResourceURLs=%q",
+			sorted(r.APIGroups), sorted(r.Resources), sorted(r.ResourceNames), sorted(r.Verbs), sorted(r.NonResourceURLs)))
+	}
+	slices.Sort(out)
+	return out
+}
+
+// agentRoleProblems checks every Role and ClusterRole of docs:
+//   - role: the role is a key of agentRoleRules;
+//   - rules: its rule set equals the one of agentRoleRules (canonicalRules);
+//   - aggregation: it carries no aggregationRule (the controller would fill
+//     a ClusterRole with the rules of every ClusterRole it selects);
+//   - once: each role of agentRoleRules is defined exactly once.
+func agentRoleProblems(docs []rbacDoc) []rbacProblem {
+	var out []rbacProblem
+	add := func(rule, format string, args ...any) {
+		out = append(out, rbacProblem{rule, fmt.Sprintf(format, args...)})
+	}
+	found := map[agentRoleKey]int{}
+	for _, d := range docs {
+		if d.Kind != "Role" && d.Kind != "ClusterRole" {
+			continue
+		}
+		key := agentRoleKey{d.Kind, d.Metadata.Namespace, d.Metadata.Name}
+		if d.Kind == "ClusterRole" {
+			key.Namespace = ""
+		}
+		where := fmt.Sprintf("%s %s/%s", d.Kind, key.Namespace, key.Name)
+		if d.AggregationRule.Kind != 0 {
+			add("aggregation", "%s carries an aggregationRule: its rules would come from other ClusterRoles", where)
+		}
+		want, ok := agentRoleRules[key]
+		if !ok {
+			add("role", "%s is not one of the agent's roles", where)
+			continue
+		}
+		found[key]++
+		if got, w := canonicalRules(d.Rules), canonicalRules(want); !slices.Equal(got, w) {
+			add("rules", "%s rules:\n got %q\nwant %q", where, got, w)
+		}
+	}
+	for _, key := range slices.SortedFunc(maps.Keys(agentRoleRules), func(a, b agentRoleKey) int {
+		return strings.Compare(a.Kind+"/"+a.Namespace+"/"+a.Name, b.Kind+"/"+b.Namespace+"/"+b.Name)
+	}) {
+		if n := found[key]; n != 1 {
+			add("once", "%s %s/%s: defined %d times, want 1", key.Kind, key.Namespace, key.Name, n)
+		}
+	}
+	return out
+}
+
+// TestAgentRolesAreTheScriptSet pins the full rule set of every Role and
+// ClusterRole of the agent manifests, read and write rules alike: an extra
+// rule, verb, resource or name, or one that is missing, fails. The compare
+// does not depend on the order of the rules or of the items in a list
+// (canonicalRules). No role carries an aggregationRule.
+func TestAgentRolesAreTheScriptSet(t *testing.T) {
+	t.Parallel()
+	docs := agentDocList(t)
+	roles := 0
+	for _, d := range docs {
+		if d.Kind == "Role" || d.Kind == "ClusterRole" {
+			roles++
+		}
+	}
+	if roles != len(agentRoleRules) {
+		t.Errorf("%d Roles and ClusterRoles in agent/, want %d", roles, len(agentRoleRules))
+	}
+	for _, p := range agentRoleProblems(docs) {
+		t.Errorf("%s: %s", p.rule, p.text)
+	}
+}
+
+// TestAgentRoleCheckRefusesExtraGrants: the role check finds each change to
+// the real manifests by the rule that it breaks, and takes the same rules
+// in another order.
+func TestAgentRoleCheckRefusesExtraGrants(t *testing.T) {
+	t.Parallel()
+	base := agentDocList(t)
+	if p := agentRoleProblems(base); len(p) != 0 {
+		t.Fatalf("the real manifests break the role check: %+v", p)
+	}
+	// edit returns a copy of base in which fn changed the role key; the
+	// rules of that role are copied first, so base stays as it is.
+	edit := func(key agentRoleKey, fn func(rules []rbacRule) []rbacRule) []rbacDoc {
+		docs := slices.Clone(base)
+		n := 0
+		for i, d := range docs {
+			if d.Kind != key.Kind || d.Metadata.Name != key.Name || (d.Kind == "Role" && d.Metadata.Namespace != key.Namespace) {
+				continue
+			}
+			rules := make([]rbacRule, len(d.Rules))
+			for j, r := range d.Rules {
+				rules[j] = rbacRule{
+					APIGroups: slices.Clone(r.APIGroups), Resources: slices.Clone(r.Resources),
+					ResourceNames: slices.Clone(r.ResourceNames), Verbs: slices.Clone(r.Verbs),
+					NonResourceURLs: slices.Clone(r.NonResourceURLs),
+				}
+			}
+			docs[i].Rules = fn(rules)
+			n++
+		}
+		if n != 1 {
+			t.Fatalf("%+v: %d roles in the manifests, want 1", key, n)
+		}
+		return docs
+	}
+	clusterRole := agentRoleKey{"ClusterRole", "", "kubehz-agent"}
+	marker := agentRoleKey{"Role", agentNamespace, "kubehz-agent-marker"}
+	secret := agentRoleKey{"Role", agentNamespace, "kubehz-agent-secret"}
+	// aggregated swaps the ClusterRole for one decoded from YAML with an
+	// aggregationRule key (src is its value).
+	aggregated := func(src string) []rbacDoc {
+		var d rbacDoc
+		if err := yaml.Unmarshal([]byte("apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nmetadata:\n  name: kubehz-agent\naggregationRule:"+src), &d); err != nil {
+			t.Fatal(err)
+		}
+		d.Rules = agentRoleRules[clusterRole]
+		docs := slices.DeleteFunc(slices.Clone(base), func(x rbacDoc) bool { return x.Kind == "ClusterRole" })
+		return append(docs, d)
+	}
+	markerDoc := base[slices.IndexFunc(base, func(d rbacDoc) bool { return d.Kind == "Role" && d.Metadata.Name == marker.Name })]
+	for _, tc := range []struct {
+		name string
+		docs []rbacDoc
+		want string // "" = no problem
+	}{
+		{"the same rules in reverse order, each list reversed", edit(secret, func(rules []rbacRule) []rbacRule {
+			slices.Reverse(rules)
+			for i := range rules {
+				slices.Reverse(rules[i].Verbs)
+			}
+			return rules
+		}), ""},
+		{"the ClusterRole's lists reversed", edit(clusterRole, func(rules []rbacRule) []rbacRule {
+			for i := range rules {
+				slices.Reverse(rules[i].Resources)
+				slices.Reverse(rules[i].NonResourceURLs)
+			}
+			return rules
+		}), ""},
+		{"an extra read rule in the marker Role", edit(marker, func(rules []rbacRule) []rbacRule {
+			return append(rules, rbacRule{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get"}})
+		}), "rules"},
+		{"an extra verb in the ClusterRole", edit(clusterRole, func(rules []rbacRule) []rbacRule {
+			rules[0].Verbs = append(rules[0].Verbs, "watch")
+			return rules
+		}), "rules"},
+		{"an extra resource in the ClusterRole", edit(clusterRole, func(rules []rbacRule) []rbacRule {
+			rules[0].Resources = append(rules[0].Resources, "namespaces")
+			return rules
+		}), "rules"},
+		{"an extra API group in the kube-system Role", edit(agentRoleKey{"Role", "kube-system", "kubehz-agent"}, func(rules []rbacRule) []rbacRule {
+			rules[1].APIGroups = append(rules[1].APIGroups, "extensions")
+			return rules
+		}), "rules"},
+		{"the name scope removed from the identity Secret get", edit(secret, func(rules []rbacRule) []rbacRule {
+			rules[0].ResourceNames = nil
+			return rules
+		}), "rules"},
+		{"an extra non-resource URL", edit(clusterRole, func(rules []rbacRule) []rbacRule {
+			rules[len(rules)-1].NonResourceURLs = append(rules[len(rules)-1].NonResourceURLs, "/metrics")
+			return rules
+		}), "rules"},
+		{"a rule removed from the ClusterRole", edit(clusterRole, func(rules []rbacRule) []rbacRule {
+			return rules[1:]
+		}), "rules"},
+		{"a rule that occurs twice", edit(marker, func(rules []rbacRule) []rbacRule {
+			return append(rules, rules[0])
+		}), "rules"},
+		{"an aggregationRule on the ClusterRole", aggregated("\n  clusterRoleSelectors:\n    - matchLabels:\n        rbac.authorization.k8s.io/aggregate-to-view: \"true\"\n"), "aggregation"},
+		{"an aggregationRule with a null value", aggregated(" null\n"), "aggregation"},
+		{"an aggregationRule with no value", aggregated("\n"), "aggregation"},
+		{"a Role that is not the agent's", append(slices.Clone(base), rbacDoc{Kind: "Role", Metadata: rbacMeta{Name: "kubehz-agent-extra", Namespace: agentNamespace}}), "role"},
+		{"a role defined twice", append(slices.Clone(base), markerDoc), "once"},
+	} {
+		problems := agentRoleProblems(tc.docs)
+		if tc.want == "" {
+			if len(problems) != 0 {
+				t.Errorf("%s: %+v, want no problem", tc.name, problems)
+			}
+			continue
+		}
+		if !slices.ContainsFunc(problems, func(p rbacProblem) bool { return p.rule == tc.want }) {
+			t.Errorf("%s: no %q problem, got %+v", tc.name, tc.want, problems)
+		}
 	}
 }
 
