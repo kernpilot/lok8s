@@ -684,8 +684,13 @@ func TestNodeJoinHangupStopsTheJoin(t *testing.T) {
 				}
 				h.ctx.LookPath = func(tool string) bool { return tool == "kubeadm" || tool == "kubelet" }
 				h.ctx.joinWrite = func(f *os.File, s string) error {
-					if joinCtx == nil {
-						t.Fatal("the kubelet probe did not run before the write")
+					// The probe must have run with the live context of
+					// the join: not the Watch itself, and not one that has
+					// already ended (the mint's). Else the wait below
+					// waits on nothing and the gap comes back unseen.
+					if joinCtx == nil || joinCtx == ctx || joinCtx.Err() != nil {
+						t.Error("the kubelet probe did not run with the live join context before the write")
+						return errors.New("no live join context")
 					}
 					hangup()
 					waitDone(t, ctx)
