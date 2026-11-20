@@ -231,5 +231,6 @@ defaults), or the path in `$LO_CHAT_CONFIG`. Backends are conductor brains:
 > The engine is a separate static Go binary (`lochat`, source in `ai/lochat/`).
 > It drives the `mcp` builtin from `argsh.so`. When `lo chat` reports that
 > `argsh.so` is missing, install the `bash` group of the toolchain (see
-> [Set up](#set-up)) or run `argsh builtins install --path .bin` in the
-> project directory.
+> [Set up](#set-up)) or run `argsh builtins install --force --path .bin` in
+> the project directory. This command installs the latest release of
+> `argsh.so`.

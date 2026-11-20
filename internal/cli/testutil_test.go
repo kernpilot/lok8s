@@ -34,7 +34,13 @@ func repoRootDir(t *testing.T) string {
 // the test links the framework tree), clusters/, .bin/.
 func synthProject(t *testing.T) *config.Paths {
 	t.Helper()
-	base := t.TempDir()
+	return synthProjectAt(t, t.TempDir())
+}
+
+// synthProjectAt is synthProject with the project root at base (made with
+// its parents when missing).
+func synthProjectAt(t *testing.T, base string) *config.Paths {
+	t.Helper()
 	p := &config.Paths{
 		Base:     base,
 		Bin:      filepath.Join(base, ".bin"),

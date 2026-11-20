@@ -679,7 +679,7 @@ The server needs no other environment. `PATH_BASE: "."` pins the project root to
 
 #### Bash variant
 
-The frozen argsh implementation serves the same protocol from the `mcp` builtin in `argsh.so` (`argsh builtins install`). argsh loads it from `ARGSH_BUILTIN_PATH`, `PATH_BIN/argsh.so`, `BASH_LOADABLES_PATH` or `LD_LIBRARY_PATH`. The builtin has no tiers: every leaf is a tool (85 tools), and the editor's own approval prompt is the only gate. `lo chat` still drives this server.
+The frozen argsh implementation serves the same protocol from the `mcp` builtin in `argsh.so` (`argsh builtins install`). argsh loads the first one that it finds, in this order: `ARGSH_BUILTIN_PATH`, `PATH_LIB/argsh.so`, `PATH_BIN/argsh.so`, the directories of `LD_LIBRARY_PATH`, then the directories of `BASH_LOADABLES_PATH`. The builtin has no tiers: every leaf is a tool (85 tools), and the editor's own approval prompt is the only gate. `lo chat` still drives this server.
 
 The `lok8s.yaml` routing (`spec.implementation`, see [Choosing the implementation](#choosing-the-implementation)) does not select this server. `mcp` is a Go-only command, so no routing applies to it, and `lo mcp start` is always the Go server. In a project with `spec.implementation.default: bash`, each tool call of the Go server runs `lo <cmd> …`, and the routing sends that command to the bash tree.
 

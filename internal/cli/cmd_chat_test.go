@@ -22,7 +22,13 @@ import (
 
 func chatProject(t *testing.T) *config.Paths {
 	t.Helper()
-	p := synthProject(t)
+	return chatProjectAt(t, t.TempDir())
+}
+
+// chatProjectAt is chatProject with the project root at base.
+func chatProjectAt(t *testing.T, base string) *config.Paths {
+	t.Helper()
+	p := synthProjectAt(t, base)
 	testutil.WriteFile(t, filepath.Join(p.Bin, "lochat"), "#!/bin/sh\nexit 0\n")
 	os.Chmod(filepath.Join(p.Bin, "lochat"), 0o755)
 	testutil.WriteFile(t, filepath.Join(p.Bin, "argsh.so"), "")
@@ -202,7 +208,6 @@ func TestChatLochatInPathBin(t *testing.T) {
 		t.Fatalf("paths: Bin=%q Lok8s=%q, want %q and %q", p.Bin, p.Lok8s, custom, synth.Lok8s)
 	}
 	want := lochatStub(t, custom)
-	testutil.WriteFile(t, filepath.Join(custom, "argsh.so"), "")
 	onPath := t.TempDir()
 	lochatStub(t, onPath)
 	t.Setenv("PATH", onPath)
@@ -232,10 +237,11 @@ func TestChatLochatInPathBin(t *testing.T) {
 // dir, which holds the lochat. It returns the paths that lo resolves from
 // that environment and the exported dir. The project's .bin holds an
 // argsh.so, the exported dir none. PATH is an empty dir, so a real argsh on
-// the machine cannot decide the argsh.so check.
-func chatExportedPathBin(t *testing.T) (*config.Paths, string) {
+// the machine cannot decide the argsh.so check. The project root is root
+// in a temp dir ("" for the temp dir itself).
+func chatExportedPathBin(t *testing.T, root string) (*config.Paths, string) {
 	t.Helper()
-	synth := chatProject(t)
+	synth := chatProjectAt(t, filepath.Join(t.TempDir(), root))
 	exported := t.TempDir()
 	t.Setenv("PATH_BASE", synth.Base)
 	t.Setenv("PATH_BIN", exported)
@@ -258,7 +264,7 @@ func chatExportedPathBin(t *testing.T) (*config.Paths, string) {
 // exported dir. The child gets the project's .bin as PATH_BIN, so the
 // check and the child read the same dir.
 func TestChatArgshSoCheckReadsTheChildPathBin(t *testing.T) {
-	p, exported := chatExportedPathBin(t)
+	p, exported := chatExportedPathBin(t, "")
 	var gotBin string
 	var gotEnv []string
 	saved := execProcess
@@ -276,29 +282,82 @@ func TestChatArgshSoCheckReadsTheChildPathBin(t *testing.T) {
 	if gotBin != filepath.Join(exported, "lochat") {
 		t.Errorf("exec %q, want the lochat in PATH_BIN", gotBin)
 	}
-	if want := "PATH_BIN=" + filepath.Join(p.Base, ".bin"); !slices.Contains(gotEnv, want) {
-		t.Errorf("the child env has no %s", want)
+	var pathBin []string
+	for _, kv := range gotEnv {
+		if strings.HasPrefix(kv, "PATH_BIN=") {
+			pathBin = append(pathBin, kv)
+		}
+	}
+	if want := "PATH_BIN=" + filepath.Join(p.Base, ".bin"); len(pathBin) != 1 || pathBin[0] != want {
+		t.Errorf("the PATH_BIN entries of the child env = %q, want exactly one: %s", pathBin, want)
 	}
 }
 
 // The reverse: an argsh.so in the exported PATH_BIN only fails the check,
 // because the child does not load it from there. The error names the
-// project's .bin, never the exported dir, and the hint installs there.
+// project's .bin, never the exported dir, and the hint installs there
+// (--force: argsh writes nothing when it loads an argsh.so from elsewhere).
+// The hint quotes the dir for a POSIX shell: a single quote in it becomes
+// a quote, a backslash and two quotes.
 func TestChatArgshSoOnlyInAnExportedPathBinFailsTheCheck(t *testing.T) {
-	p, exported := chatExportedPathBin(t)
-	testutil.WriteFile(t, filepath.Join(exported, "argsh.so"), "")
-	bin := filepath.Join(p.Base, ".bin")
-	if err := os.Remove(filepath.Join(bin, "argsh.so")); err != nil {
+	for _, tc := range []struct {
+		name, root string
+		// quoted is the end of the quoted dir in the hint, after the parent
+		// of the project root.
+		quoted string
+	}{
+		{"plain", "proj", `/proj/.bin'`},
+		{"single quote", "it's", `/it'\''s/.bin'`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, exported := chatExportedPathBin(t, tc.root)
+			testutil.WriteFile(t, filepath.Join(exported, "argsh.so"), "")
+			bin := filepath.Join(p.Base, ".bin")
+			if err := os.Remove(filepath.Join(bin, "argsh.so")); err != nil {
+				t.Fatal(err)
+			}
+			gotBin := chatExecBin(t)
+
+			_, stderr, err := runLo(t, NewRoot(p), "chat")
+			want := "[error] argsh.so is missing from " + bin + ". 'lo chat' uses 'lo mcp', and 'lo mcp' is an argsh builtin in argsh.so.\n" +
+				"[error] To install the latest release of argsh.so in that directory, run this command. Then try again:\n" +
+				"[error]   argsh builtins install --force --path '" + filepath.Dir(p.Base) + tc.quoted + "\n"
+			if !errors.Is(err, ErrHandled) || stderr != want || *gotBin != "" {
+				t.Errorf("argsh.so in the exported PATH_BIN only: err=%v exec=%q\n got stderr=%q\nwant stderr=%q", err, *gotBin, stderr, want)
+			}
+		})
+	}
+}
+
+// A project dir with a control character (a newline and an ESC): both
+// errors print the dir Go-quoted, and the argsh.so error shows no command,
+// so the name cannot end a line or drive the terminal.
+func TestChatArgshSoErrorQuotesADirWithAControlCharacter(t *testing.T) {
+	parent := t.TempDir()
+	p := chatProjectAt(t, filepath.Join(parent, "a\nb\x1b[31m"))
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("PATH_BIN", p.Bin)
+	gotBin := chatExecBin(t)
+	shown := `"` + parent + `/a\nb\x1b[31m/.bin"`
+
+	if err := os.Remove(filepath.Join(p.Bin, "lochat")); err != nil {
 		t.Fatal(err)
 	}
-	gotBin := chatExecBin(t)
-
 	_, stderr, err := runLo(t, NewRoot(p), "chat")
-	want := "[error] argsh.so is missing from " + bin + ". 'lo chat' uses 'lo mcp', and 'lo mcp' is an argsh builtin in argsh.so.\n" +
-		"[error] To install argsh.so in that directory, run this command. Then try again:\n" +
-		"[error]   argsh builtins install --path '" + bin + "'\n"
+	if want := lochatHint(shown); !errors.Is(err, ErrHandled) || stderr != want {
+		t.Errorf("no lochat: err=%v\n got stderr=%q\nwant stderr=%q", err, stderr, want)
+	}
+
+	lochatStub(t, p.Bin)
+	if err := os.Remove(filepath.Join(p.Bin, "argsh.so")); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err = runLo(t, NewRoot(p), "chat")
+	want := "[error] argsh.so is missing from " + shown + ". 'lo chat' uses 'lo mcp', and 'lo mcp' is an argsh builtin in argsh.so.\n" +
+		"[error] The directory name has a control character, so lo does not show the command.\n" +
+		"[error] Install the latest release of argsh.so in that directory. Then try again.\n"
 	if !errors.Is(err, ErrHandled) || stderr != want || *gotBin != "" {
-		t.Errorf("argsh.so in the exported PATH_BIN only: err=%v exec=%q\n got stderr=%q\nwant stderr=%q", err, *gotBin, stderr, want)
+		t.Errorf("no argsh.so: err=%v exec=%q\n got stderr=%q\nwant stderr=%q", err, *gotBin, stderr, want)
 	}
 }
 
