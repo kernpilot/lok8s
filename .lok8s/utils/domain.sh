@@ -119,12 +119,14 @@ domain::spec_driver() {
 # `---` line after it, no content after a `...` line (blank lines, comments
 # and `%` directives are not content). Otherwise prints the problem, a text
 # that continues the file name ("<file> <problem>") and says which lines to
-# remove, and returns 1. A file that cannot be read returns 0: the readers
-# report that themselves.
+# remove, and returns 1. A path that is not a readable file (missing,
+# unreadable, a directory) returns 0 with no read: the readers report that
+# themselves. A read of a directory failed, and under `set -u` it ended the
+# check with an unbound variable.
 domain::spec_layout() {
   local spec="${1}" text rest n=0 last=0 content=0 started=0 end_line=0
   local -a lines=() extra=()
-  [[ -r "${spec}" ]] || return 0
+  [[ -f "${spec}" && -r "${spec}" ]] || return 0
   while IFS= read -r text || [[ -n "${text}" ]]; do
     lines+=("${text%$'\r'}")
   done < "${spec}"
@@ -240,11 +242,14 @@ domain::driver() {
 #
 #   domain::require_driver lo "${domain}" "registry management"
 #
-# The layout check runs first: a cluster spec with more than one YAML
-# document gets the domain::spec_check line, which names the cause and the
-# lines to remove (the line `lo provision` prints), not "no readable spec".
-# A missing or unreadable spec passes that check and gets the message
-# below. Go twin: domain.RequireDriver.
+# The layout check runs first. domain::spec_check refuses a cluster spec
+# with a `---` line after the content (a second document, also an empty
+# one), more than one `---` line before the content (an empty document
+# before the spec), or content after a `...` end line. Its line names the
+# cause and the lines to remove (the line `lo provision` prints), not "no
+# readable spec". A missing or unreadable spec, and a directory in its
+# place, pass that check and get the driver check below. Go twin:
+# domain.RequireDriver.
 domain::require_driver() {
   local want="${1}" domain="${2}" what="${3:-this operation}"
   local path_clusters="${PATH_CLUSTERS:-${PATH_BASE:-.}/clusters}"

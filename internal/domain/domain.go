@@ -14,6 +14,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/kernpilot/lok8s/internal/fsutil"
 	"github.com/kernpilot/lok8s/internal/ui"
 )
 
@@ -114,10 +115,13 @@ func SpecDriver(specPath, fallback string) (string, error) {
 // Driver reports the driver a domain's cluster spec declares (`kind: Lo` →
 // "lo"). Deploy-only domains (deploy.lok8s.yaml, no cluster spec) report
 // "deploy"; a missing domain dir or unreadable spec returns an error.
+// Both spec names count only as files, not as directories (bash `[[ -f ]]`
+// in domain::driver): a directory named cluster.lok8s.yaml is no cluster
+// spec, so a deploy.lok8s.yaml beside it makes a deploy domain.
 func Driver(clustersDir, domain string) (string, error) {
 	clusterYAML := filepath.Join(clustersDir, domain, "cluster.lok8s.yaml")
-	if _, err := os.Stat(clusterYAML); err != nil {
-		if _, err := os.Stat(filepath.Join(clustersDir, domain, "deploy.lok8s.yaml")); err == nil {
+	if !fsutil.FileExists(clusterYAML) {
+		if fsutil.FileExists(filepath.Join(clustersDir, domain, "deploy.lok8s.yaml")) {
 			return "deploy", nil
 		}
 		return "", ErrNoDriver
@@ -129,11 +133,14 @@ func Driver(clustersDir, domain string) (string, error) {
 // actually using that driver, failing with an actionable message naming the
 // mismatch. what names the operation (e.g. "registry management").
 //
-// The layout check runs first: a cluster spec with more than one YAML
-// document gets the CheckSpecLayout line, which names the cause and the
-// lines to remove (the line `lo provision` prints), not "no readable spec".
-// A missing or unreadable spec passes that check and gets the message
-// below. Bash twin: domain::require_driver.
+// The layout check runs first. CheckSpecLayout refuses a cluster spec with
+// a `---` line after the content (a second document, also an empty one),
+// more than one `---` line before the content (an empty document before
+// the spec), or content after a `...` end line. Its line names the cause
+// and the lines to remove (the line `lo provision` prints), not "no
+// readable spec". A missing or unreadable spec, and a directory in its
+// place, pass that check and get the driver check below. Bash twin:
+// domain::require_driver.
 func RequireDriver(want, clustersDir, domain, what string, errTo io.Writer) error {
 	if what == "" {
 		what = "this operation"
