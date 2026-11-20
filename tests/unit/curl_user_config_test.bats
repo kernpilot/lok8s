@@ -360,12 +360,17 @@ ${good}:23"
 # A shell operator ends a word: in "echo x=y; curl …" the word before the
 # ; is x=y, not the assignment word "x=y;" that the wrapper step dropped (it
 # then saw "echo curl", a curl that is no command, and both modes passed).
-# Each canary has a word before the assignment and no space before the
-# operator (or an assignment just after the ( of a subshell), and each one
-# is a credential call in both modes. The controls keep their verdicts: a
-# real assignment prefix (also with an operator in quotes) is still a call
-# with -q, a quoted operator is no operator, and the & of a redirection
-# (>&x=y, a file) ends no word, so the curl after it stays an argument.
+# Each canary is a credential call in both modes. In lines 1 to 9, a word
+# comes before the assignment, and no space comes before the operator. In
+# line 10, the assignment comes just after the ( of a subshell. In lines 11
+# to 13, an operator in a ${ } is no operator (X=${a//;/} stays one
+# assignment word), and the ${ } ends at its first }, so the ; after it
+# ends the word. In line 14, a ${ with no } before the curl skips nothing:
+# the X=1 in its $( ) is an assignment word, as before. The controls keep
+# their verdicts: a real assignment prefix (also with an operator in
+# quotes) is still a call with -q, a quoted operator is no operator, and
+# the & of a redirection (>&x=y, a file) ends no word, so the curl after
+# it stays an argument.
 @test "curl gate: a shell operator ends a word, so an assignment before it hides no curl call" {
   local bad="${BATS_TEST_TMPDIR}/ops-bad.sh" good="${BATS_TEST_TMPDIR}/ops-good.sh" n
   CURL_GATE_ALLOW=()
@@ -380,6 +385,10 @@ out=$(echo x=y; curl -u "${U}:${P}" "${url}")
 (echo x=y)&& curl -u "${U}:${P}" "${url}"
 { echo x=y;}&& curl -u "${U}:${P}" "${url}"
 (X=1 curl -u "${U}:${P}" "${url}")
+X=${a//;/} curl -u "${U}:${P}" "${url}"
+X=${a//&/+} curl -u "${U}:${P}" "${url}"
+echo X=${x:-a}; curl -u "${U}:${P}" "${url}"
+echo ${y:-$(X=1 curl -u "${U}:${P}" "${url}")}
 SH
   cat > "${good}" <<'SH'
 X=1 curl -q -sS https://h.example/c1
@@ -395,7 +404,7 @@ SH
   local q="a curl call: -q is not its first argument"
   local t="a curl call does not run as ( http::tls_log_vars_unset && curl … (the helper first in its subshell)"
   local want_q="" want_t="" want_l=""
-  for n in 1 2 3 4 5 6 7 8 9 10; do
+  for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
     want_q+="${bad}:${n}: ${q}"$'\n'
     want_t+="${bad}:${n}: ${t}"$'\n'
     want_l+="${bad}:${n} credential"$'\n'
