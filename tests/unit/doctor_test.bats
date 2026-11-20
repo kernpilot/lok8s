@@ -243,6 +243,39 @@ _kind_unknown() {
   assert_output "  ! kind not found (optional) — ${_kind_purpose}"
 }
 
+# A kind file without the exec bit is not a kind that can run: the line is
+# the warning of an absent kind, as in the Go twin (toolchain.LookPath).
+# command -v alone prints such a file when no kind on PATH can run (the
+# first check). Go twin: TestDoctorKindNeedsTheExecBit.
+@test "doctor::_kind takes a kind without the exec bit as not found" {
+  local bin="${BATS_TEST_TMPDIR}/noexec-bin" p="" d
+  mkdir -p "${bin}"
+  printf '#!/bin/sh\necho kind v0.32.0\n' > "${bin}/kind"
+  chmod 0644 "${bin}/kind"
+  local -a dirs=()
+  IFS=: read -r -a dirs <<< "${PATH}"
+  for d in "${dirs[@]}"; do
+    [[ -x "${d}/kind" ]] || p+="${p:+:}${d}"
+  done
+  p="${bin}:${p}"
+  [ "$(PATH="${p}" && command -v kind)" = "${bin}/kind" ]
+  PATH="${p}" run doctor::_kind "" "${_kind_purpose}"
+  assert_success
+  assert_output "  ! kind not found (optional) — ${_kind_purpose}"
+}
+
+# Before a kind that can run, a kind without the exec bit is skipped: the
+# first kind on PATH that can run is the one that runs.
+@test "doctor::_kind runs the first kind on PATH that can run" {
+  local bin="${BATS_TEST_TMPDIR}/noexec-bin"
+  mkdir -p "${bin}"
+  printf '#!/bin/sh\necho kind v0.17.0\n' > "${bin}/kind"
+  chmod 0644 "${bin}/kind"
+  _kind_stub 'kind v0.18.0 go1.20.2 linux/amd64\n'
+  PATH="${bin}:${BATS_TEST_TMPDIR}/kind-bin:${PATH}" run doctor::_kind "" "${_kind_purpose}"
+  _kind_pass
+}
+
 # _kind_domains — one domain of each kind that doctor::_kind_fails tells
 # apart (Go twin: doctorKindDomains in internal/cli/cmd_doctor_test.go).
 _kind_domains() {

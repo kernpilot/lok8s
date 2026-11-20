@@ -181,6 +181,36 @@ func TestDoctorKindAbsentWarns(t *testing.T) {
 	}
 }
 
+// A kind file without the exec bit is not found (toolchain.LookPath): the
+// line is the warning of an absent kind, and nothing runs. Before a kind
+// that can run, it is skipped, and the second one runs. Bash twin: the
+// doctor::_kind exec-bit cases in tests/unit/doctor_test.bats.
+func TestDoctorKindNeedsTheExecBit(t *testing.T) {
+	const purpose = "local clusters (Lo driver)"
+	noexec := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(noexec, "kind"), "#!/bin/sh\nexit 99\n")
+	if err := os.Chmod(filepath.Join(noexec, "kind"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := kindVersionRunner("kind v0.18.0 go1.20.2 linux/amd64\n", nil)
+	var out strings.Builder
+	ok := doctorKind(context.Background(), r, &out, noexec, purpose, true)
+	if want := "  ! kind not found (optional) — " + purpose + "\n"; !ok || out.String() != want || len(r.calls) != 0 {
+		t.Errorf("a kind without the exec bit: %q ok=%v calls %q, want %q ok=true and no call", out.String(), ok, r.calls, want)
+	}
+
+	bin := doctorStubBin(t, "kind")
+	r = kindVersionRunner("kind v0.18.0 go1.20.2 linux/amd64\n", nil)
+	out.Reset()
+	ok = doctorKind(context.Background(), r, &out, noexec+string(os.PathListSeparator)+bin, purpose, true)
+	if want := "  ✓ kind — " + purpose + "\n"; !ok || out.String() != want {
+		t.Errorf("a kind that can run after one without the exec bit: %q ok=%v, want %q", out.String(), ok, want)
+	}
+	if want := filepath.Join(bin, "kind") + " version"; len(r.calls) != 1 || r.calls[0] != want {
+		t.Errorf("calls %q, want [%q]", r.calls, want)
+	}
+}
+
 // doctorKindDomains is a project with one domain of each kind that
 // kindFails tells apart. The bash twin writes the same specs
 // (tests/unit/doctor_test.bats, _kind_domains).

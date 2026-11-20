@@ -1614,15 +1614,19 @@ doctor::_kind_fails() {
 # most, so shell arithmetic compares it as Go does. The line names only the
 # matched numbers, no other byte of the output.
 doctor::_kind() {
-  local domain="${1}" purpose="${2}"
-  if ! command -v kind >/dev/null 2>&1; then
+  local domain="${1}" purpose="${2}" kind=""
+  # The first kind on PATH that can run, as the Go twin looks it up
+  # (toolchain.LookPath). When no kind on PATH can run, command -v prints
+  # a file without the exec bit: that kind is not found here either.
+  kind=$(command -v kind 2>/dev/null) || kind=""
+  if [[ -z "${kind}" || -d "${kind}" || ! -x "${kind}" ]]; then
     doctor::_warn "kind not found (optional) — ${purpose}"
     return 0
   fi
   local need="lo up needs kind ${DOCTOR_KIND_MIN} or later for networking.dnsSearch"
   local re='^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})([-+]|$)'
   local out="" known=1
-  out="$(kind version 2>/dev/null </dev/null)" || known=0
+  out="$("${kind}" version 2>/dev/null </dev/null)" || known=0
   local -a f=()
   IFS=$' \t' read -r -a f <<< "${out%%$'\n'*}"
   if (( ! known )) || [[ "${f[0]:-}" != kind ]] || ! [[ "${f[1]:-}" =~ ${re} ]]; then
