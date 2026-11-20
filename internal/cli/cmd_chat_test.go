@@ -282,18 +282,23 @@ func TestChatArgshSoCheckReadsTheChildPathBin(t *testing.T) {
 }
 
 // The reverse: an argsh.so in the exported PATH_BIN only fails the check,
-// because the child does not load it from there.
+// because the child does not load it from there. The error names the
+// project's .bin, never the exported dir, and the hint installs there.
 func TestChatArgshSoOnlyInAnExportedPathBinFailsTheCheck(t *testing.T) {
 	p, exported := chatExportedPathBin(t)
 	testutil.WriteFile(t, filepath.Join(exported, "argsh.so"), "")
-	if err := os.Remove(filepath.Join(p.Base, ".bin", "argsh.so")); err != nil {
+	bin := filepath.Join(p.Base, ".bin")
+	if err := os.Remove(filepath.Join(bin, "argsh.so")); err != nil {
 		t.Fatal(err)
 	}
 	gotBin := chatExecBin(t)
 
 	_, stderr, err := runLo(t, NewRoot(p), "chat")
-	if !errors.Is(err, ErrHandled) || !strings.Contains(stderr, "argsh.so is missing") || *gotBin != "" {
-		t.Errorf("argsh.so in the exported PATH_BIN only: err=%v exec=%q stderr=%q, want the argsh.so error", err, *gotBin, stderr)
+	want := "[error] argsh.so is missing from " + bin + ". 'lo chat' uses 'lo mcp', and 'lo mcp' is an argsh builtin in argsh.so.\n" +
+		"[error] To install argsh.so in that directory, run this command. Then try again:\n" +
+		"[error]   argsh builtins install --path '" + bin + "'\n"
+	if !errors.Is(err, ErrHandled) || stderr != want || *gotBin != "" {
+		t.Errorf("argsh.so in the exported PATH_BIN only: err=%v exec=%q\n got stderr=%q\nwant stderr=%q", err, *gotBin, stderr, want)
 	}
 }
 

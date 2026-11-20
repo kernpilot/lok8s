@@ -29,13 +29,9 @@ main::chat() {
   [[ -f "${cfg}" ]] || { error "no chat config (looked for ${cfg_project} or ${PATH_LOK8S}/chat/defaults.json)"; return 1; }
 
   # Preflight: `lo chat` drives `lo mcp`, and the `mcp` command is an argsh
-  # builtin provided by argsh.so. The argsh that lo sources loads it from
-  # ${PATH_BIN}/argsh.so (or from ARGSH_BUILTIN_PATH, PATH_LIB, LD_LIBRARY_PATH
-  # or BASH_LOADABLES_PATH), not from beside the argsh binary: the check beside
-  # the argsh on PATH can pass when `lo mcp` cannot load it (the Go twin has no
-  # such check). If that shared object is missing the bridge dies with
-  # "Invalid command: mcp" and the binary would just wait out its timeout —
-  # fail loudly and point at the fix.
+  # builtin provided by argsh.so (loaded from beside the argsh binary). If that
+  # shared object is missing the bridge dies with "Invalid command: mcp" and the
+  # binary would just wait out its timeout — fail loudly and point at the fix.
   local argsh_bin
   argsh_bin="$(command -v argsh 2>/dev/null || true)"
   [[ -f "${PATH_BIN}/argsh.so" ]] || { [[ -n "${argsh_bin}" ]] && [[ -f "${argsh_bin%/*}/argsh.so" ]]; } || {

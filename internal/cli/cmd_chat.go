@@ -100,9 +100,16 @@ func chatCommandLine(paths *config.Paths, stderr interface{ Write([]byte) (int, 
 	// "Invalid command: mcp" and the binary would just wait out its
 	// timeout — fail loudly and point at the fix.
 	if !argshBuiltinPresent(paths) {
-		ui.ErrorTo(stderr, "argsh.so is missing — 'lo mcp' (which 'lo chat' drives) is an argsh builtin from it.")
-		ui.ErrorTo(stderr, "Install the matching builtin next to argsh, then retry:")
-		ui.ErrorTo(stderr, "  argsh builtins install")
+		// The error names the checked dir, and the hint installs there.
+		// Without --path, argsh installs into an exported PATH_BIN, else
+		// PATH_LIB, else a BASH_LOADABLES_PATH dir, else ~/.local/lib/bash,
+		// and its loader never reads ~/.local/lib/bash. The path in the
+		// command is quoted for a POSIX shell. Bash keeps its old hint
+		// (deviation catalogue).
+		dir := projectBin(paths)
+		ui.ErrorTo(stderr, "argsh.so is missing from %s. 'lo chat' uses 'lo mcp', and 'lo mcp' is an argsh builtin in argsh.so.", dir)
+		ui.ErrorTo(stderr, "To install argsh.so in that directory, run this command. Then try again:")
+		ui.ErrorTo(stderr, "  argsh builtins install --path %s", rbacShQuote(dir))
 		return "", nil, assets.Tree{}, ErrHandled
 	}
 	tree, err := assets.BashTree(paths)
