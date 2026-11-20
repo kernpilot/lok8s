@@ -1425,10 +1425,11 @@ _chmod_stub() {
 # A default ACL of the directory replaces the umask, and the open of
 # noclobber asks for 0666: the new empty file gets 0644 here before the
 # chmod, and a process could open it then and read the kubeconfig later.
-# So the bash fallback refuses, writes nothing and removes the empty file.
-# The Go create asks for 0600 at the open and writes the file
-# (TestPublishKubeconfigUnderADefaultACL).
-@test "kubeconfig: under a default ACL that gives the group read, the bash fallback refuses and writes nothing" {
+# So the bash fallback refuses and writes nothing. It removes nothing
+# either: another process can put a file at the path between a check and
+# an rm, so the empty file stays. The Go create asks for 0600 at the open
+# and writes the file (TestPublishKubeconfigUnderADefaultACL).
+@test "kubeconfig: under a default ACL that gives the group read, the bash fallback refuses, writes nothing and keeps the empty file" {
   command -v setfacl >/dev/null || skip "setfacl is missing"
   route GET /api/clusters/cl-1a2b3c4d/kubeconfig/agent 200 'apiVersion: v1'
   local d="${BATS_TEST_TMPDIR}/acl"
@@ -1444,10 +1445,12 @@ _chmod_stub() {
   run kubehz::cluster::kubeconfig cl-1a2b3c4d --file "${d}/kc.yaml"
   assert_failure
   assert_output "[error] kubehz cluster kubeconfig cl-1a2b3c4d: cannot write ${d}/kc.yaml safely: its directory gives other users access to a new file (a default ACL)
-  Name a file in a directory that gives no other user access to a new file."
-  # No file at the path, and no temporary file.
+  This run wrote no part of the kubeconfig. The path can now hold an empty file that this run made, or a file that another process put there.
+  Check the file before you remove it. Then name a file in a directory that gives no other user access to a new file."
+  # The empty file stays at the path, and no temporary file stays.
+  [[ -f "${d}/kc.yaml" && ! -L "${d}/kc.yaml" && ! -s "${d}/kc.yaml" ]]
   run ls -A "${d}"
-  assert_output ''
+  assert_output kc.yaml
   run cat "${LN_LOG}"
   assert_output ln
 }
