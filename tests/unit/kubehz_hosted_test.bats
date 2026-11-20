@@ -1000,6 +1000,30 @@ _hosted_temps() {
   [ "$(stat -c %a "${PATH_BASE}/.kubeconfig/test.kubehz.dev.yaml")" = 600 ]
 }
 
+# The check before the create refuses a missing parent of the .kubeconfig
+# directory, but a parent can go away later, during the wait for the
+# cluster. mkdir -p -m sets the mode of the last directory only. Under
+# umask 022 the write makes each missing directory with mode 0700: the
+# parents too, not only the .kubeconfig directory (Go twin: os.MkdirAll
+# with 0o700).
+@test "provision_hosted: under umask 022, a missing parent and the .kubeconfig directory both get mode 0700" {
+  _hosted_kc_harness
+  yq() { case "$2" in '.metadata.name') echo "test.kubehz.dev" ;; *) echo "1" ;; esac; }
+  local old top="${BATS_TEST_TMPDIR}/new"
+  mkdir -p "${top}/base"
+  PATH_BASE="${top}/base"
+  kubehz::wait_for_cluster() { rmdir -- "${BATS_TEST_TMPDIR}/new/base" "${BATS_TEST_TMPDIR}/new"; }
+  old=$(umask)
+  umask 022
+  run kubehz::provision_hosted "test.kubehz.dev" "/dev/null"
+  umask "${old}"
+  assert_success
+  [ "$(stat -c %a "${top}")" = 700 ]
+  [ "$(stat -c %a "${top}/base")" = 700 ]
+  [ "$(stat -c %a "${top}/base/.kubeconfig")" = 700 ]
+  [ "$(cat "${top}/base/.kubeconfig/test.kubehz.dev.yaml")" = kc-bytes ]
+}
+
 @test "kubehz::_write_private: fewer than two arguments are refused, and nothing is written" {
   source "${_PROJECT_ROOT}/.lok8s/libs/kubehz/hosted"
   local f="${BATS_TEST_TMPDIR}/kc.yaml"

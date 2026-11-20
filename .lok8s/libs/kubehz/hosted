@@ -230,10 +230,13 @@ kubehz::provision_hosted() {
 
   # Download kubeconfig. kubehz::_write_private: a private temp file beside
   # the kubeconfig, renamed onto it only after a complete download. A
-  # failed download leaves the old file as it was. The directory that
-  # mkdir makes here gets mode 0700 whatever the umask (-m sets the mode
-  # of the last directory), so the second check accepts it.
-  mkdir -p -m 0700 "$(dirname "${kubeconfig_path}")"
+  # failed download leaves the old file as it was. Each directory that
+  # mkdir makes here (the parents too) gets mode 0700 whatever the umask
+  # of the caller: the subshell sets umask 077 for mkdir only (Go twin:
+  # os.MkdirAll with 0o700). So the second check accepts it.
+  local kubeconfig_dir
+  kubeconfig_dir=$(dirname -- "${kubeconfig_path}")
+  ( umask 077 && mkdir -p -- "${kubeconfig_dir}" )
   if ! kubehz::_write_private "${kubeconfig_path}" \
     kubehz::_hosted_kubeconfig_get "${api_url}" "${cluster_id}"; then
     error "Failed to download kubeconfig for hosted cluster ${cluster_id}"

@@ -286,7 +286,7 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 	// Mode 0700 (at most, under the umask): the second check
 	// (privateTarget in writePrivateFile) refuses a directory that another
 	// user can write into, and must not refuse the directory made here
-	// (bash: mkdir -m 0700).
+	// (bash: mkdir -p under umask 077).
 	if err := os.MkdirAll(filepath.Dir(kubeconfigPath), 0o700); err != nil {
 		return err
 	}
