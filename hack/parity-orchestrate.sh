@@ -1720,6 +1720,9 @@ parity::stub "${PROJ}" docker <<'SH'
 #!/usr/bin/env bash
 # Parity stub (gateway priority): the argv log, the version, the endpoint
 # gateways, the members of the registry network and the in-node `ip` reads.
+# PARITY_GW_PRIO and PARITY_ALIASES are the priority and the aliases of the
+# registry endpoint; PARITY_PAUSED=1 pauses the worker. A network connect or
+# disconnect succeeds (the default below).
 echo "docker $*" >> "${PARITY_DOCKER_LOG}"
 case "${1:-} ${2:-}" in
   "version --format") echo "${PARITY_DOCKER_VERSION}"; exit 0 ;;
@@ -1757,8 +1760,10 @@ case "${1:-} ${2:-}" in
         esac
         gw=10.99.16.1
         if [[ "${PARITY_NO_GATEWAY:-0}" == 1 ]]; then gw=""; fi
-        out="${role}|true|${gw}"
-        if [[ "$*" == *GwPriority* ]]; then out+="|${PARITY_GW_PRIO:-0}"; fi
+        paused=false
+        if [[ "${PARITY_PAUSED:-0}" == 1 && "${2}" == *-worker ]]; then paused=true; fi
+        out="${role}|true|${paused}|${gw}"
+        if [[ "$*" == *GwPriority* ]]; then out+="|${PARITY_GW_PRIO:-0}|${PARITY_ALIASES:-}"; fi
         echo "${out}"
         exit 0 ;;
     esac
@@ -1818,17 +1823,29 @@ for side in bash go; do
   gw_pin "${side}: no gateway: one warning per node"             "${WORK}/${side}.err" 2 'zz-gwprio-(control-plane|worker): found no IPv4 gateway for network zz-gwnet \(docker inspect: ""\)\. lo did not examine the default route\.'
 done
 unset PARITY_NO_GATEWAY
-export PARITY_DOCKER_VERSION="29.6.2 29.6.2" PARITY_ATTACHED=1
-gw_check "attached without a priority"
+export PARITY_DOCKER_VERSION="29.6.2 29.6.2" PARITY_ATTACHED=1 PARITY_ALIASES="node-a "
+gw_check "attached at priority 0"
 for side in bash go; do
-  gw_pin "${side}: attached: no connect"                         "${WORK}/docker.${side}.log" 0 '^docker network connect '
-  gw_pin "${side}: attached: both routes move to the project network" "${WORK}/docker.${side}.log" 2 '^docker exec zz-gwprio-(control-plane|worker) ip route replace default via 10\.99\.16\.1 dev eth0$'
+  gw_pin "${side}: attached: one disconnect per node"            "${WORK}/docker.${side}.log" 2 '^docker network disconnect lok8s-registries zz-gwprio-(control-plane|worker)$'
+  gw_pin "${side}: attached: both nodes connect again at -1, with the alias" "${WORK}/docker.${side}.log" 2 '^docker network connect --gw-priority -1 --alias node-a lok8s-registries zz-gwprio-(control-plane|worker)$'
+  gw_pin "${side}: attached: no plain connect"                   "${WORK}/docker.${side}.log" 0 '^docker network connect (--alias [^ ]+ )*lok8s-registries '
+  gw_pin "${side}: attached: the route is not touched"           "${WORK}/docker.${side}.log" 0 '^docker exec .* ip '
+  gw_pin "${side}: attached: the reconnect is reported"          "${WORK}/${side}.err" 2 'zz-gwprio-(control-plane|worker): the endpoint on lok8s-registries had gateway priority 0\. lo connected the node to lok8s-registries again with gateway priority -1, so the default route stays on zz-gwnet after a node restart\.'
 done
 gw_check "shared off, attached under the old shared default" gwprio-off.dev
 for side in bash go; do
-  gw_pin "${side}: shared off, attached: no connect"             "${WORK}/docker.${side}.log" 0 '^docker network connect '
-  gw_pin "${side}: shared off, attached: both routes move to the project network" "${WORK}/docker.${side}.log" 2 '^docker exec zz-gwprio-(control-plane|worker) ip route replace default via 10\.99\.16\.1 dev eth0$'
+  gw_pin "${side}: shared off, attached: one disconnect per node" "${WORK}/docker.${side}.log" 2 '^docker network disconnect lok8s-registries zz-gwprio-(control-plane|worker)$'
+  gw_pin "${side}: shared off, attached: both nodes connect again at -1" "${WORK}/docker.${side}.log" 2 '^docker network connect --gw-priority -1 --alias node-a lok8s-registries zz-gwprio-(control-plane|worker)$'
+  gw_pin "${side}: shared off, attached: the route is not touched" "${WORK}/docker.${side}.log" 0 '^docker exec .* ip '
 done
+export PARITY_PAUSED=1
+gw_check "attached at priority 0, the worker paused"
+for side in bash go; do
+  gw_pin "${side}: paused: the worker is not changed or read"    "${WORK}/docker.${side}.log" 0 '^docker (network (dis)?connect .* zz-gwprio-worker|exec zz-gwprio-worker )'
+  gw_pin "${side}: paused: the control plane connects again at -1" "${WORK}/docker.${side}.log" 1 '^docker network connect --gw-priority -1 --alias node-a lok8s-registries zz-gwprio-control-plane$'
+  gw_pin "${side}: paused: one warning"                          "${WORK}/${side}.err" 1 'lo: zz-gwprio-worker: the node is paused \(State\.Paused: "true"\)\. lo did not examine the default route\. Unpause the node \(docker unpause zz-gwprio-worker\)\. Then run lo up again\.'
+done
+unset PARITY_PAUSED PARITY_ALIASES
 export PARITY_ATTACHED=0
 gw_check "shared off, not attached" gwprio-off.dev
 for side in bash go; do

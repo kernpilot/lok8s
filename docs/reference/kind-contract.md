@@ -118,7 +118,7 @@ on first use.
 6. Write the containerd `certs.d/` tree. The kind nodes bind-mount it.
 7. Write the apiserver authentication config, if `spec.oidc` is set.
 8. Render the kind config, and create the kind cluster if it does not exist.
-9. Connect the nodes to the shared registry network, at gateway priority `-1`, so the cluster network keeps the default route (Docker 28+). An older Docker gets a plain connect and an in-node `ip route replace` (see [The default route](/guide/shared-registries#the-default-route)). Every node on that network gets the route check.
+9. Connect the nodes to the shared registry network, at gateway priority `-1`, so the cluster network keeps the default route (Docker 28+). An older Docker gets a plain connect and an in-node `ip route replace` (see [The default route](/guide/shared-registries#the-default-route)). Every node on that network gets the route check. On Docker 28+, a node whose endpoint has priority 0 is connected again at `-1`.
 10. Write the kubeconfig.
 11. Apply the local-registry-hosting ConfigMap (KEP-1755).
 12. Apply the registry ConfigMap and the CoreDNS config, with `spec.coredns` as the `coredns-custom` ConfigMap (see [Custom in-cluster DNS](/guide/local-dev#custom-in-cluster-dns)).

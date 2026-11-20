@@ -295,41 +295,53 @@ lo::default_route_repair() {
   echo "${dev}"
 }
 
-# lo::repair_default_route <node> <network> <registry-network> — moves the
-# default route of a node back to the project network when it goes through
-# another network. It is the fallback for a Docker without --gw-priority, and
-# the repair for a node that an older lok8s attached without a priority. One
-# `docker inspect <node>` reads the kind role label, State.Running, the gateway
-# of the node's own endpoint on the project network and, on Docker 28+ only
-# (lo::docker_gw_priority: an older docker fails the whole template on
-# .GwPriority), the gateway priority of its registry endpoint. Docker fills
-# .Gateway for every connected endpoint of a running container, but up to
-# Docker 28.5 `docker network inspect` reports only a gateway that the create
-# requested, and lo::network creates the project network with --subnet and no
-# --gateway. Docker writes the route again when the node restarts, so on such
-# a Docker the next `lo up` repeats the repair. Skipped without a docker exec:
-# kind's HA load balancer (its envoy image has no `ip`; it forwards from the
-# host to the control-plane nodes on the directly connected project network,
-# so its default route does not matter), and on Docker 28+ a node whose
-# registry endpoint has a negative gateway priority (correct by construction).
-# Advisory: a node that cannot be read or changed gets a warning, never a
-# failure. Go twin: repairDefaultRoute (inspectNodeRoute).
+# lo::repair_default_route <node> <network> <registry-network> [reconnect] —
+# moves the default route of a node back to the project network when it goes
+# through another network. It is the fallback for a Docker without
+# --gw-priority. One `docker inspect <node>` reads the kind role label,
+# State.Running, State.Paused, the gateway of the node's own endpoint on the
+# project network and, on Docker 28+ only (lo::docker_gw_priority: an older
+# docker fails the whole template on .GwPriority), the gateway priority and
+# the aliases of its registry endpoint (the aliases are the last field: a
+# space-separated list). Docker fills .Gateway for every connected endpoint of
+# a running container, but up to Docker 28.5 `docker network inspect` reports
+# only a gateway that the create requested, and lo::network creates the
+# project network with --subnet and no --gateway. Docker writes the route
+# again when the node restarts, so on such a Docker the next `lo up` repeats
+# the repair. With reconnect (a node that was attached before this walk), a
+# registry endpoint at gateway priority 0 on Docker 28+ (an older lok8s
+# attached it) gets lo::reconnect_registry_endpoint first: the in-node move
+# runs only when the node is still at priority 0 after it. Skipped without a
+# docker exec: kind's HA load balancer (its envoy image has no `ip`; it
+# forwards from the host to the control-plane nodes on the directly connected
+# project network, so its default route does not matter), a paused node
+# (State.Running is true, but a docker exec in it fails), and on Docker 28+ a
+# node whose registry endpoint has a negative gateway priority (correct by
+# construction). Advisory: a node that cannot be read or changed gets a
+# warning, never a failure. Go twin: repairDefaultRoute (inspectNodeRoute).
 lo::repair_default_route() {
-  local node="${1}" network="${2}" registry="${3}"
-  local fmt out role running gw prio current route_get observed dev rc=0
-  fmt='{{index .Config.Labels "io.x-k8s.kind.role"}}|{{.State.Running}}|{{with index .NetworkSettings.Networks "'"${network}"'"}}{{.Gateway}}{{end}}'
+  local node="${1}" network="${2}" registry="${3}" reconnect="${4:-}"
+  local fmt reg out role running paused gw prio aliases current route_get observed dev rc=0
+  local -a alias_list=()
+  fmt='{{index .Config.Labels "io.x-k8s.kind.role"}}|{{.State.Running}}|{{.State.Paused}}|{{with index .NetworkSettings.Networks "'"${network}"'"}}{{.Gateway}}{{end}}'
   if lo::docker_gw_priority; then
-    fmt+='|{{with index .NetworkSettings.Networks "'"${registry}"'"}}{{.GwPriority}}{{end}}'
+    reg='{{with index .NetworkSettings.Networks "'"${registry}"'"}}'
+    fmt+="|${reg}{{.GwPriority}}{{end}}|${reg}{{range .Aliases}}{{.}} {{end}}{{end}}"
   fi
   out=$(docker inspect "${node}" --format "${fmt}" 2>/dev/null) || rc=$?
   if (( rc != 0 )); then
     warn "lo: ${node}: cannot inspect the node (docker inspect ${node}: exit status ${rc}). lo did not examine the default route. Make sure that the node exists. Then run lo up again."
     return 0
   fi
-  IFS='|' read -r role running gw prio <<<"${out}"
+  IFS='|' read -r role running paused gw prio aliases <<<"${out}"
+  read -r -a alias_list <<<"${aliases}"
   [[ "${role}" != external-load-balancer ]] || return 0
   if [[ "${running}" != true ]]; then
     warn "lo: ${node}: the node is not running (State.Running: \"${running}\"). lo did not examine the default route. Start the node (docker start ${node}). Then run lo up again."
+    return 0
+  fi
+  if [[ "${paused}" == true ]]; then
+    warn "lo: ${node}: the node is paused (State.Paused: \"${paused}\"). lo did not examine the default route. Unpause the node (docker unpause ${node}). Then run lo up again."
     return 0
   fi
   if [[ "${prio}" =~ ^-[0-9]+$ ]] && (( 10#${prio#-} > 0 )); then
@@ -337,6 +349,10 @@ lo::repair_default_route() {
   fi
   if ! ip::validate_format "${gw}" 2>/dev/null; then
     warn "lo: ${node}: found no IPv4 gateway for network ${network} (docker inspect: \"${gw}\"). lo did not examine the default route. Attach the node to ${network} (docker network connect ${network} ${node}). Then run lo up again."
+    return 0
+  fi
+  if [[ "${reconnect}" == reconnect && "${prio}" == 0 ]] &&
+      ! lo::reconnect_registry_endpoint "${node}" "${network}" "${registry}" "${alias_list[@]}"; then
     return 0
   fi
   current=$(docker exec "${node}" ip -4 route show default 2>/dev/null) || rc=$?
@@ -365,6 +381,43 @@ lo::repair_default_route() {
   warn "lo: ${node}: the default route did not go through ${network} — moved it there (via ${gw} dev ${dev})"
 }
 
+# lo::reconnect_registry_endpoint <node> <network> <registry-network> [alias...]
+# — gives the registry endpoint of an attached node the gateway priority
+# LO_REGISTRY_GW_PRIORITY. Docker sets the priority of an endpoint only when
+# it connects it, so lo disconnects the node from the registry network and
+# connects it again with the same aliases. The node can get another address
+# on that network: no config that lo writes names it (the registries have
+# static addresses, and the node-IP healer reads the project network). A
+# connect that refuses the flag gets a plain connect, as for a new node.
+# Returns 0 when the endpoint is still at priority 0 (the disconnect failed,
+# or the plain connect attached the node): the caller then moves the route in
+# the node. Returns 1 when the endpoint has the priority now, or when the node
+# is not on the network any more (the warning gives the command that attaches
+# it). Go twin: reconnectRegistryEndpoint.
+lo::reconnect_registry_endpoint() {
+  local node="${1}" network="${2}" registry="${3}" alias rc=0
+  shift 3
+  local -a alias_args=() with_priority plain
+  for alias in "$@"; do alias_args+=(--alias "${alias}"); done
+  docker network disconnect "${registry}" "${node}" &>/dev/null || rc=$?
+  if (( rc != 0 )); then
+    warn "lo: ${node}: cannot disconnect the node from ${registry} (docker network disconnect ${registry} ${node}: exit status ${rc}). The endpoint keeps gateway priority 0, so a node restart can move the default route to ${registry}. Run lo up again."
+    return 0
+  fi
+  with_priority=(network connect --gw-priority "${LO_REGISTRY_GW_PRIORITY}" "${alias_args[@]}" "${registry}" "${node}")
+  if docker "${with_priority[@]}" &>/dev/null; then
+    warn "lo: ${node}: the endpoint on ${registry} had gateway priority 0. lo connected the node to ${registry} again with gateway priority ${LO_REGISTRY_GW_PRIORITY}, so the default route stays on ${network} after a node restart."
+    return 1
+  fi
+  plain=(network connect "${alias_args[@]}" "${registry}" "${node}")
+  docker "${plain[@]}" &>/dev/null || rc=$?
+  if (( rc != 0 )); then
+    warn "lo: ${node}: cannot connect the node to ${registry} again (docker ${plain[*]}: exit status ${rc}). The node is not on ${registry} now. Connect it (docker ${with_priority[*]}). Then run lo up again."
+    return 1
+  fi
+  return 0
+}
+
 # lo::reconcile_registry_network_nodes <cluster-name> — the step after
 # `kind create`. A shared cluster attaches its nodes to the shared registry
 # network (lo::connect_nodes_to_registry_network). A cluster that is not
@@ -390,8 +443,9 @@ lo::reconcile_registry_network_nodes() {
 # gateway priority LO_REGISTRY_GW_PRIORITY, so the project network keeps the
 # default route of the node. A Docker without --gw-priority (or a connect that
 # refuses the flag) gets a plain connect, then lo::repair_default_route. An
-# attached node goes through lo::repair_default_route too: it repairs a node
-# that an older lok8s attached without a priority.
+# attached node goes through lo::repair_default_route too: on Docker 28+, a
+# node that an older lok8s attached at priority 0 is connected again with
+# LO_REGISTRY_GW_PRIORITY (lo::reconnect_registry_endpoint).
 lo::connect_nodes_to_registry_network() {
   local cluster_name="${1}"
   _lo_registry_network_nodes "${cluster_name}" attach
@@ -405,9 +459,10 @@ lo::connect_nodes_to_registry_network() {
 # lo::connect_nodes_to_registry_network); with repair, the node is left alone,
 # and an empty member list ends the walk before `kind get nodes`. A member read
 # that fails counts as empty, whatever it printed: a partial list is not a
-# membership. kind's HA load balancer is attached like a node, as before the
-# gateway priority existed; lo::repair_default_route skips it. Go twin:
-# registryNetworkNodes.
+# membership. When the network exists, that failure gets a warning (an
+# attached node then gets no reconnect). kind's HA load balancer is attached
+# like a node, as before the gateway priority existed; lo::repair_default_route
+# skips it. Go twin: registryNetworkNodes.
 _lo_registry_network_nodes() {
   local cluster_name="${1}" mode="${2}"
   local registry_network project_network repair=1
@@ -417,9 +472,15 @@ _lo_registry_network_nodes() {
 
   # Skip nodes that are already attached — a re-run must not error (nor rely
   # on the 2>/dev/null to hide a real failure for the common no-op case).
-  local members
+  local members rc=0
   members=$(docker network inspect "${registry_network}" \
-    -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null) || members=""
+    -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null) || rc=$?
+  if (( rc != 0 )); then
+    if docker network inspect "${registry_network}" &>/dev/null; then
+      warn "lo: cannot read the members of network ${registry_network} (docker network inspect ${registry_network}: exit status ${rc}). lo handles each node as not attached to that network, so an attached node can keep a wrong default route. Run lo up again."
+    fi
+    members=""
+  fi
   if [[ "${mode}" != attach && -z "${members//[[:space:]]/}" ]]; then
     return 0
   fi
@@ -427,7 +488,7 @@ _lo_registry_network_nodes() {
   local node
   for node in $(kind get nodes --name "${cluster_name}" 2>/dev/null); do
     if [[ " ${members} " == *" ${node} "* ]]; then
-      if (( repair )); then lo::repair_default_route "${node}" "${project_network}" "${registry_network}"; fi
+      if (( repair )); then lo::repair_default_route "${node}" "${project_network}" "${registry_network}" reconnect; fi
       continue
     fi
     [[ "${mode}" == attach ]] || continue

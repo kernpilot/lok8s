@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -327,11 +328,12 @@ const (
 )
 
 // nodeRoute is what repairDefaultRoute reads about a node in one `docker
-// inspect`: the kind role, State.Running, the gateway of the node's own
-// endpoint on the project network, and (Docker 28+ only) the gateway
-// priority of its endpoint on the registry network.
+// inspect`: the kind role, State.Running, State.Paused, the gateway of the
+// node's own endpoint on the project network, and (Docker 28+ only) the
+// gateway priority and the aliases of its endpoint on the registry network.
 type nodeRoute struct {
-	role, running, gateway, gwPriority string
+	role, running, paused, gateway, gwPriority string
+	aliases                                    []string
 }
 
 // inspectNodeRoute reads nodeRoute in one `docker inspect <node>` (bash:
@@ -340,22 +342,25 @@ type nodeRoute struct {
 // always carry it: up to Docker 28.5, `docker network inspect` reports only
 // a gateway that the create requested, and lo creates the project network
 // with --subnet and no --gateway (see network). .GwPriority exists from
-// Docker 28 on; an older docker fails the whole template on it, so it is
-// asked only when dockerGwPriority holds.
+// Docker 28 on; an older docker fails the whole template on it, so it and
+// the aliases (only the reconnect uses them) are asked only when
+// dockerGwPriority holds. The aliases are the last field: a space-separated
+// list.
 func (d *Driver) inspectNodeRoute(ctx context.Context, node, project, registry string) (nodeRoute, error) {
-	format := `{{index .Config.Labels "` + kindRoleLabel + `"}}|{{.State.Running}}|{{with index .NetworkSettings.Networks "` + project + `"}}{{.Gateway}}{{end}}`
+	format := `{{index .Config.Labels "` + kindRoleLabel + `"}}|{{.State.Running}}|{{.State.Paused}}|{{with index .NetworkSettings.Networks "` + project + `"}}{{.Gateway}}{{end}}`
 	if d.dockerGwPriority(ctx) {
-		format += `|{{with index .NetworkSettings.Networks "` + registry + `"}}{{.GwPriority}}{{end}}`
+		reg := `{{with index .NetworkSettings.Networks "` + registry + `"}}`
+		format += `|` + reg + `{{.GwPriority}}{{end}}|` + reg + `{{range .Aliases}}{{.}} {{end}}{{end}}`
 	}
 	out, err := d.output(ctx, "docker", "inspect", node, "--format", format)
 	if err != nil {
 		return nodeRoute{}, err
 	}
-	f := strings.SplitN(out, "|", 4)
-	for len(f) < 4 {
+	f := strings.SplitN(out, "|", 6)
+	for len(f) < 6 {
 		f = append(f, "")
 	}
-	return nodeRoute{role: f[0], running: f[1], gateway: f[2], gwPriority: f[3]}, nil
+	return nodeRoute{role: f[0], running: f[1], paused: f[2], gateway: f[3], gwPriority: f[4], aliases: strings.Fields(f[5])}, nil
 }
 
 // routeField returns the word after key in one `ip route` line ("dev",
@@ -388,17 +393,21 @@ func defaultRouteRepair(current, routeGet, gw string) (dev string, needed bool) 
 // repairDefaultRoute moves the default route of a node back to the project
 // network when it goes through another network (bash:
 // lo::repair_default_route). It is the fallback for a Docker without
-// --gw-priority, and the repair for a node that an older lok8s attached
-// without a priority. The gateway comes from the node's own endpoint on the
+// --gw-priority. The gateway comes from the node's own endpoint on the
 // project network (inspectNodeRoute). Docker writes the route again when
 // the node restarts, so on such a Docker the next `lo up` repeats the
-// repair. Skipped without a docker exec: kind's HA load balancer (its envoy
-// image has no `ip`; it forwards from the host to the control-plane nodes
-// on the directly connected project network, so its default route does not
-// matter), and on Docker 28+ a node whose registry endpoint has a negative
-// gateway priority (correct by construction). Advisory: a node that cannot
-// be read or changed gets a warning, never a failure.
-func (d *Driver) repairDefaultRoute(ctx context.Context, node, project, registry string, errOut io.Writer) {
+// repair. With reconnect (a node that was attached before this walk), a
+// registry endpoint at gateway priority 0 on Docker 28+ (an older lok8s
+// attached it) gets reconnectRegistryEndpoint first: the in-node move runs
+// only when the node is still at priority 0 after it. Skipped without a
+// docker exec: kind's HA load balancer (its envoy image has no `ip`; it
+// forwards from the host to the control-plane nodes on the directly
+// connected project network, so its default route does not matter), a
+// paused node (State.Running is true, but a docker exec in it fails), and
+// on Docker 28+ a node whose registry endpoint has a negative gateway
+// priority (correct by construction). Advisory: a node that cannot be read
+// or changed gets a warning, never a failure.
+func (d *Driver) repairDefaultRoute(ctx context.Context, node, project, registry string, reconnect bool, errOut io.Writer) {
 	st, err := d.inspectNodeRoute(ctx, node, project, registry)
 	if err != nil {
 		ui.WarnTo(errOut, "lo: %s: cannot inspect the node (docker inspect %s: exit status %d). lo did not examine the default route. Make sure that the node exists. Then run lo up again.",
@@ -413,6 +422,11 @@ func (d *Driver) repairDefaultRoute(ctx context.Context, node, project, registry
 			node, st.running, node)
 		return
 	}
+	if st.paused == "true" {
+		ui.WarnTo(errOut, `lo: %s: the node is paused (State.Paused: "%s"). lo did not examine the default route. Unpause the node (docker unpause %s). Then run lo up again.`,
+			node, st.paused, node)
+		return
+	}
 	if n, err := strconv.Atoi(st.gwPriority); err == nil && n < 0 {
 		return
 	}
@@ -420,6 +434,9 @@ func (d *Driver) repairDefaultRoute(ctx context.Context, node, project, registry
 	if ip := net.ParseIP(gw); ip == nil || ip.To4() == nil {
 		ui.WarnTo(errOut, `lo: %s: found no IPv4 gateway for network %s (docker inspect: "%s"). lo did not examine the default route. Attach the node to %s (docker network connect %s %s). Then run lo up again.`,
 			node, project, gw, project, project, node)
+		return
+	}
+	if reconnect && st.gwPriority == "0" && !d.reconnectRegistryEndpoint(ctx, node, project, registry, st.aliases, errOut) {
 		return
 	}
 	current, err := d.output(ctx, "docker", "exec", node, "ip", "-4", "route", "show", "default")
@@ -451,6 +468,44 @@ func (d *Driver) repairDefaultRoute(ctx context.Context, node, project, registry
 	ui.WarnTo(errOut, "lo: %s: the default route did not go through %s — moved it there (via %s dev %s)", node, project, gw, dev)
 }
 
+// reconnectRegistryEndpoint gives the registry endpoint of an attached node
+// the gateway priority registryGwPriority (bash:
+// lo::reconnect_registry_endpoint). Docker sets the priority of an endpoint
+// only when it connects it, so lo disconnects the node from the registry
+// network and connects it again with the same aliases. The node can get
+// another address on that network: no config that lo writes names it (the
+// registries have static addresses, and the node-IP healer reads the
+// project network). A connect that refuses the flag gets a plain connect,
+// as for a new node. It returns true when the endpoint is still at priority
+// 0 (the disconnect failed, or the plain connect attached the node): the
+// caller then moves the route in the node. It returns false when the
+// endpoint has the priority now, or when the node is not on the network
+// any more (the warning gives the command that attaches it).
+func (d *Driver) reconnectRegistryEndpoint(ctx context.Context, node, project, registry string, aliases []string, errOut io.Writer) bool {
+	if err := d.runQuiet(ctx, "docker", "network", "disconnect", registry, node); err != nil {
+		ui.WarnTo(errOut, "lo: %s: cannot disconnect the node from %s (docker network disconnect %s %s: exit status %d). The endpoint keeps gateway priority 0, so a node restart can move the default route to %s. Run lo up again.",
+			node, registry, registry, node, execx.ExitCode(err), registry)
+		return true
+	}
+	var aliasArgs []string
+	for _, a := range aliases {
+		aliasArgs = append(aliasArgs, "--alias", a)
+	}
+	withPriority := slices.Concat([]string{"network", "connect", "--gw-priority", registryGwPriority}, aliasArgs, []string{registry, node})
+	if d.runQuiet(ctx, "docker", withPriority...) == nil {
+		ui.WarnTo(errOut, "lo: %s: the endpoint on %s had gateway priority 0. lo connected the node to %s again with gateway priority %s, so the default route stays on %s after a node restart.",
+			node, registry, registry, registryGwPriority, project)
+		return false
+	}
+	plain := slices.Concat([]string{"network", "connect"}, aliasArgs, []string{registry, node})
+	if err := d.runQuiet(ctx, "docker", plain...); err != nil {
+		ui.WarnTo(errOut, "lo: %s: cannot connect the node to %s again (docker %s: exit status %d). The node is not on %s now. Connect it (docker %s). Then run lo up again.",
+			node, registry, strings.Join(plain, " "), execx.ExitCode(err), registry, strings.Join(withPriority, " "))
+		return false
+	}
+	return true
+}
+
 // reconcileRegistryNetworkNodes is the step after `kind create` (bash:
 // lo::reconcile_registry_network_nodes). A shared cluster attaches its nodes
 // to the shared registry network (connectNodesToRegistryNetwork). A cluster
@@ -479,7 +534,8 @@ func (d *Driver) reconcileRegistryNetworkNodes(ctx context.Context, clusterName 
 // project network keeps the default route of the node. A Docker without
 // --gw-priority (or a connect that refuses the flag) gets a plain connect,
 // then repairDefaultRoute. An attached node goes through repairDefaultRoute
-// too: it repairs a node that an older lok8s attached without a priority.
+// too: on Docker 28+, a node that an older lok8s attached at priority 0 is
+// connected again with registryGwPriority (reconnectRegistryEndpoint).
 func (d *Driver) connectNodesToRegistryNetwork(ctx context.Context, clusterName string, errOut io.Writer) error {
 	rf, err := regFile()
 	if err != nil {
@@ -497,12 +553,18 @@ func (d *Driver) connectNodesToRegistryNetwork(ctx context.Context, clusterName 
 // (see connectNodesToRegistryNetwork); without it, the node is left alone,
 // and an empty member list ends the walk before `kind get nodes`. A member
 // read that fails counts as empty, whatever it printed: a partial list is
-// not a membership. kind's HA load balancer is attached like a node, as
-// before the gateway priority existed; repairDefaultRoute skips it.
+// not a membership. When the network exists, that failure gets a warning
+// (an attached node then gets no reconnect). kind's HA load balancer is
+// attached like a node, as before the gateway priority existed;
+// repairDefaultRoute skips it.
 func (d *Driver) registryNetworkNodes(ctx context.Context, rf *RegistryFile, clusterName string, attach bool, errOut io.Writer) {
 	members, err := d.output(ctx, "docker", "network", "inspect", rf.Network.Name,
 		"-f", "{{range .Containers}}{{.Name}} {{end}}")
 	if err != nil {
+		if d.networkExists(ctx, rf.Network.Name) {
+			ui.WarnTo(errOut, "lo: cannot read the members of network %s (docker network inspect %s: exit status %d). lo handles each node as not attached to that network, so an attached node can keep a wrong default route. Run lo up again.",
+				rf.Network.Name, rf.Network.Name, execx.ExitCode(err))
+		}
 		members = ""
 	}
 	if !attach && strings.TrimSpace(members) == "" {
@@ -512,15 +574,15 @@ func (d *Driver) registryNetworkNodes(ctx context.Context, rf *RegistryFile, clu
 	nodes, _ := d.output(ctx, "kind", "get", "nodes", "--name", clusterName)
 	memberSet := " " + members + " "
 	project := rf.ProjectNetwork
-	repair := func(node string) {
+	repair := func(node string, reconnect bool) {
 		if project == "" || project == rf.Network.Name {
 			return
 		}
-		d.repairDefaultRoute(ctx, node, project, rf.Network.Name, errOut)
+		d.repairDefaultRoute(ctx, node, project, rf.Network.Name, reconnect, errOut)
 	}
 	for node := range strings.FieldsSeq(nodes) {
 		if strings.Contains(memberSet, " "+node+" ") {
-			repair(node)
+			repair(node, true)
 			continue
 		}
 		if !attach {
@@ -531,7 +593,7 @@ func (d *Driver) registryNetworkNodes(ctx context.Context, rf *RegistryFile, clu
 			continue
 		}
 		_ = d.runQuiet(ctx, "docker", "network", "connect", rf.Network.Name, node)
-		repair(node)
+		repair(node, false)
 	}
 }
 

@@ -19,13 +19,17 @@
 # reads and the `ip route replace` that overrides that choice. Like moby,
 # `docker network inspect` reports the gateway of a network created without
 # --gateway only from Docker 29 on; the endpoint in `docker inspect <node>`
-# always carries it. State, per node:
-#   eps/<node>       "<network> <priority> <dev>" lines, in attach order
-#   override/<node>  the default route `ip route replace` set
+# always carries it. Docker sets the priority of an endpoint only at the
+# connect: `docker network disconnect` and a connect with --gw-priority (and
+# the endpoint's --alias flags) change it. State, per node:
+#   eps/<node>                "<network> <priority> <dev>" lines, in attach order
+#   aliases/<node>@<network>  the aliases of that endpoint, space-separated
+#   override/<node>           the default route `ip route replace` set
 #
 # docker and kind are shell functions here. A failing docker and kind stub
-# sits first on PATH as well, so a call that escapes the functions (an exec,
-# `command docker`) fails the test instead of reaching a live daemon.
+# sits first on PATH as well (stub_tools in tests/test_helper.bash), so a call
+# that escapes the functions (an exec, `command docker`) never reaches a live
+# daemon, and teardown fails the test when a stub ran or is not first on PATH.
 
 setup() {
   load "../test_helper"
@@ -40,7 +44,7 @@ setup() {
 
   FAKE="${BATS_TEST_TMPDIR}/fake"
   LOG="${FAKE}/log"
-  mkdir -p "${FAKE}/eps" "${FAKE}/override" "${FAKE}/gw"
+  mkdir -p "${FAKE}/eps" "${FAKE}/aliases" "${FAKE}/override" "${FAKE}/gw"
   : > "${LOG}"
   NODES="c-control-plane c-worker"
   # LB: kind's HA load balancer ("" = none). `kind get nodes` lists it after
@@ -49,28 +53,39 @@ setup() {
   LB=""
   # FOREIGN: other members of lok8s-registries (registries, another cluster's
   # nodes); STOPPED: nodes with State.Running false; GONE: nodes that
-  # `kind get nodes` lists and docker inspect does not know.
+  # `kind get nodes` lists and docker inspect does not know; PAUSED: nodes
+  # with State.Running and State.Paused true, where a docker exec fails.
   FOREIGN=""
   STOPPED=""
   GONE=""
+  PAUSED=""
   # MEMBERS_READ: when set, the member read of lok8s-registries prints this
-  # partial list and fails.
+  # partial list and fails. NO_REGISTRY_NETWORK=1: the plain
+  # `docker network inspect lok8s-registries` fails (no such network).
   MEMBERS_READ=""
+  NO_REGISTRY_NETWORK=0
+  # REFUSE_GW_PRIORITY=1: a connect with --gw-priority fails; REFUSE_CONNECT=1:
+  # every connect fails; FAIL_DISCONNECT=1: a disconnect fails.
   REFUSE_GW_PRIORITY=0
+  REFUSE_CONNECT=0
+  FAIL_DISCONNECT=0
   NO_ENDPOINT_GATEWAY=0
   NO_ROUTE_DEV=0
   FAIL_EXEC=()
 
-  mkdir -p "${FAKE}/stubbin"
-  local tool
-  for tool in docker kind; do
-    printf '#!/usr/bin/env bash\necho "real %s reached from a unit test: $*" >&2\nexit 97\n' "${tool}" > "${FAKE}/stubbin/${tool}"
-    chmod +x "${FAKE}/stubbin/${tool}"
-  done
-  export PATH="${FAKE}/stubbin:${PATH}"
+  stub_tools docker kind
 }
 
-teardown() { teardown_tmpdir; }
+teardown() {
+  local rc=0
+  [[ "$(type -t docker) $(type -t kind)" == "function function" ]] || {
+    echo "docker or kind is not the function of this file: $(type -t docker) $(type -t kind)" >&2
+    rc=1
+  }
+  assert_no_tool_ran || rc=$?
+  teardown_tmpdir
+  return "${rc}"
+}
 
 # _world <project> <docker-version> [shared-member] — the registry map, both
 # gateways, and the containers kind created on the project network (eth0,
@@ -88,7 +103,7 @@ _world() {
   # dynamic range, as Docker assigns it.
   echo "10.125.200.128" > "${FAKE}/gw/lok8s-registries"
   echo "10.125.201.192" > "${FAKE}/gw/${PROJECT}"
-  rm -f "${FAKE}/eps/"* "${FAKE}/override/"*
+  rm -f "${FAKE}/eps/"* "${FAKE}/aliases/"* "${FAKE}/override/"*
   local n
   for n in $(_containers); do echo "${PROJECT} 0 eth0" > "${FAKE}/eps/${n}"; done
 }
@@ -107,17 +122,31 @@ _containers() { echo "${NODES}${LB:+ ${LB}}"; }
 # _in <word> <list> — true when word is in the space-separated list.
 _in() { [[ " ${2} " == *" ${1} "* ]]; }
 
-# _attach <node> <network> <priority> — an endpoint; Docker programs the
-# gateway again on a connect.
+# _attach <node> <network> <priority> [alias...] — an endpoint; Docker
+# programs the gateway again on a connect.
 _attach() {
-  local dev
-  dev="eth$(wc -l < "${FAKE}/eps/${1}")"
-  echo "${2} ${3} ${dev}" >> "${FAKE}/eps/${1}"
-  rm -f "${FAKE}/override/${1}"
+  local dev node="${1}" net="${2}" prio="${3}"
+  shift 3
+  dev="eth$(wc -l < "${FAKE}/eps/${node}")"
+  echo "${net} ${prio} ${dev}" >> "${FAKE}/eps/${node}"
+  echo "${*}" > "${FAKE}/aliases/${node}@${net}"
+  rm -f "${FAKE}/override/${node}"
+}
+
+# _detach <node> <network> — removes the endpoint; Docker programs the
+# gateway again.
+_detach() {
+  local rest
+  rest=$(grep -v "^${2} " "${FAKE}/eps/${1}") || true
+  printf '%s\n' "${rest}" | sed '/^$/d' > "${FAKE}/eps/${1}"
+  rm -f "${FAKE}/aliases/${1}@${2}" "${FAKE}/override/${1}"
 }
 
 # _attached <node> <network>
 _attached() { [[ -f "${FAKE}/eps/${1}" ]] && grep -q "^${2} " "${FAKE}/eps/${1}"; }
+
+# _priority <node> <network> — the gateway priority of that endpoint.
+_priority() { awk -v n="${2}" '$1 == n { print $2 }' "${FAKE}/eps/${1}"; }
 
 # _restart <node> — a node restart: Docker programs the default route again,
 # and the route that `ip route replace` set is gone.
@@ -162,9 +191,22 @@ _inspect() {
   [[ "${node}" != *-control-plane* ]] || role=control-plane
   [[ "${node}" != "${LB}" ]] || role=external-load-balancer
   ! _in "${node}" "${STOPPED}" || running=false
-  local p_role='{{index .Config.Labels "io.x-k8s.kind.role"}}' p_running='{{.State.Running}}'
+  local paused=false
+  ! _in "${node}" "${PAUSED}" || paused=true
+  local p_role='{{index .Config.Labels "io.x-k8s.kind.role"}}' p_running='{{.State.Running}}' p_paused='{{.State.Paused}}'
   out="${fmt//"${p_role}"/${role}}"
   out="${out//"${p_running}"/${running}}"
+  out="${out//"${p_paused}"/${paused}}"
+  local re_aliases='\{\{with index \.NetworkSettings\.Networks "([^"]+)"\}\}\{\{range \.Aliases\}\}\{\{\.\}\} \{\{end\}\}\{\{end\}\}'
+  local a list
+  while [[ "${out}" =~ ${re_aliases} ]]; do
+    local apiece="${BASH_REMATCH[0]}" anet="${BASH_REMATCH[1]}"
+    list=""
+    if [[ -f "${FAKE}/aliases/${node}@${anet}" ]]; then
+      for a in $(cat "${FAKE}/aliases/${node}@${anet}"); do list+="${a} "; done
+    fi
+    out="${out/"${apiece}"/${list}}"
+  done
   local re='\{\{with index \.NetworkSettings\.Networks "([^"]+)"\}\}\{\{\.(Gateway|GwPriority)\}\}\{\{end\}\}'
   while [[ "${out}" =~ ${re} ]]; do
     local piece="${BASH_REMATCH[0]}" want="${BASH_REMATCH[1]}" field="${BASH_REMATCH[2]}"
@@ -196,6 +238,13 @@ docker() {
       [[ -n "${DOCKER_VERSION}" ]] || return 1
       echo "${DOCKER_VERSION}" ;;
     "network inspect")
+      if (( $# == 3 )); then
+        if (( NO_REGISTRY_NETWORK )) && [[ "${3}" == lok8s-registries ]]; then
+          echo "Error response from daemon: network ${3} not found" >&2
+          return 1
+        fi
+        return 0
+      fi
       local fmt="${!#}" n
       if [[ "${fmt}" == *".Gateway"* ]]; then
         if _network_reports_gateway; then printf '%s' "$(cat "${FAKE}/gw/${3}" 2>/dev/null)"; fi
@@ -217,15 +266,35 @@ docker() {
     "network connect")
       shift 2
       local prio=0
-      if [[ "${1}" == "--gw-priority" ]]; then
-        (( ! REFUSE_GW_PRIORITY )) || { echo "unknown flag: --gw-priority" >&2; return 125; }
-        prio="${2}"; shift 2
+      local -a aliases=()
+      while (( $# > 2 )); do
+        case "${1}" in
+          --gw-priority)
+            (( ! REFUSE_GW_PRIORITY )) || { echo "unknown flag: --gw-priority" >&2; return 125; }
+            prio="${2}" ;;
+          --alias) aliases+=("${2}") ;;
+          *) echo "unexpected docker network connect flag: ${1}" >&2; return 99 ;;
+        esac
+        shift 2
+      done
+      (( $# == 2 )) || { echo "unexpected docker network connect: $*" >&2; return 99; }
+      if (( REFUSE_CONNECT )); then
+        echo "Error response from daemon: failed to set up the endpoint of ${2} on ${1}" >&2
+        return 1
       fi
       if _attached "${2}" "${1}"; then
         echo "Error response from daemon: endpoint with name ${2} already exists in network ${1}" >&2
         return 1
       fi
-      _attach "${2}" "${1}" "${prio}" ;;
+      _attach "${2}" "${1}" "${prio}" "${aliases[@]}" ;;
+    "network disconnect")
+      (( $# == 4 )) || { echo "unexpected docker network disconnect: $*" >&2; return 99; }
+      if (( FAIL_DISCONNECT )); then
+        echo "Error response from daemon: failed to remove the endpoint of ${4} from ${3}" >&2
+        return 1
+      fi
+      _attached "${4}" "${3}" || { echo "Error response from daemon: container ${4} is not connected to network ${3}" >&2; return 1; }
+      _detach "${4}" "${3}" ;;
     "inspect "*)
       [[ "${3:-}" == "--format" && $# -eq 4 ]] || { echo "unexpected docker inspect: $*" >&2; return 99; }
       _inspect "${2}" "${4}" ;;
@@ -238,6 +307,10 @@ docker() {
       fi
       if _in "${node}" "${STOPPED}"; then
         echo "Error response from daemon: container ${node} is not running" >&2
+        return 1
+      fi
+      if _in "${node}" "${PAUSED}"; then
+        echo "Error response from daemon: container ${node} is paused, unpause the container before exec" >&2
         return 1
       fi
       for p in "${FAIL_EXEC[@]}"; do
@@ -270,6 +343,23 @@ _assert_project_default() {
       return 1
     }
   done
+}
+
+# _network_calls — the docker network connect and disconnect calls, in order.
+_network_calls() { grep -E '^docker network (connect|disconnect) ' "${LOG}" || true; }
+
+@test "net: a docker or kind call that escapes the functions reaches the failing stub" {
+  # teardown fails a test when a stub ran; this test reads the record of the
+  # stub, then clears it, so that teardown sees a clean net.
+  [ "$(type -P docker)" == "${BATS_TEST_TMPDIR}/stub-bin/docker" ]
+  [ "$(type -P kind)" == "${BATS_TEST_TMPDIR}/stub-bin/kind" ]
+  run command docker version
+  assert_failure 97
+  run command kind get nodes
+  assert_failure 97
+  [ "$(cat "${BATS_TEST_TMPDIR}/tools.log")" == "docker version
+kind get nodes" ]
+  : > "${BATS_TEST_TMPDIR}/tools.log"
 }
 
 @test "simulation: Docker gives the default route to lok8s-registries for a project name after it" {
@@ -331,17 +421,134 @@ docker network connect --gw-priority -1 lok8s-registries c-worker"
 
   lo::connect_nodes_to_registry_network c
   grep -qx 'docker network connect lok8s-registries c-worker' "${LOG}"
+  ! grep -q '^docker network disconnect' "${LOG}" || { echo "a node that this walk connected was disconnected" >&2; cat "${LOG}" >&2; return 1; }
   _assert_project_default
 }
 
-@test "connect: a node an older lok8s attached without a priority is repaired, not connected again" {
+@test "reconnect: a node an older lok8s attached at priority 0 gets -1 and its aliases" {
+  # Docker sets the priority only at the connect: each node is disconnected
+  # and connected again with -1 and its aliases, so a node restart keeps the
+  # default route on the project network. A second lo up reads -1 and does
+  # nothing.
+  _world ops "29.6.2 29.6.2"
+  _attach c-control-plane lok8s-registries 0
+  _attach c-worker lok8s-registries 0 node-a node-b
+
+  run lo::connect_nodes_to_registry_network c
+  assert_success
+  [ "$(_network_calls)" == "docker network disconnect lok8s-registries c-control-plane
+docker network connect --gw-priority -1 lok8s-registries c-control-plane
+docker network disconnect lok8s-registries c-worker
+docker network connect --gw-priority -1 --alias node-a --alias node-b lok8s-registries c-worker" ] || {
+    echo "network calls:" >&2; _network_calls >&2; return 1
+  }
+  local n
+  for n in ${NODES}; do
+    [ "$(_priority "${n}" lok8s-registries)" == "-1" ] || { echo "${n}: priority $(_priority "${n}" lok8s-registries), want -1" >&2; return 1; }
+    assert_output --partial "lo: ${n}: the endpoint on lok8s-registries had gateway priority 0. lo connected the node to lok8s-registries again with gateway priority -1, so the default route stays on ops after a node restart."
+  done
+  [ "$(cat "${FAKE}/aliases/c-worker@lok8s-registries")" == "node-a node-b" ]
+  ! grep -q '^docker exec' "${LOG}" || { echo "the route was read or changed in the node after the reconnect" >&2; grep '^docker exec' "${LOG}" >&2; return 1; }
+  for n in ${NODES}; do _restart "${n}"; done
+  _assert_project_default
+
+  : > "${LOG}"
+  unset _LO_DOCKER_GW_PRIORITY
+  run lo::connect_nodes_to_registry_network c
+  assert_success
+  assert_output ""
+  [ -z "$(_network_calls)" ] || { echo "the second lo up connected or disconnected a node at -1:" >&2; _network_calls >&2; return 1; }
+  ! grep -q '^docker exec' "${LOG}" || { echo "the second lo up read a node at -1" >&2; return 1; }
+}
+
+@test "reconnect: before Docker 28 (client or daemon) the old path runs unchanged" {
+  local version n
+  for version in "27.5.1 27.5.1" "27.5.1 29.6.2"; do
+    _world ops "${version}"
+    : > "${LOG}"
+    unset _LO_DOCKER_GW_PRIORITY
+    for n in ${NODES}; do _attach "${n}" lok8s-registries 0; done
+
+    run lo::connect_nodes_to_registry_network c
+    assert_success
+    [ -z "$(_network_calls)" ] || { echo "${version}: network calls before Docker 28:" >&2; _network_calls >&2; return 1; }
+    ! grep '^docker inspect ' "${LOG}" | grep -qE '\.GwPriority|\.Aliases' || { echo "${version}: the inspect asks for a Docker 28 field" >&2; cat "${LOG}" >&2; return 1; }
+    for n in ${NODES}; do
+      [ "$(grep -c "^docker exec ${n} ip route replace" "${LOG}")" -eq 1 ] || { echo "${version}: ${n}: want one route move" >&2; cat "${LOG}" >&2; return 1; }
+    done
+    _assert_project_default
+    refute_output --partial "cannot inspect"
+    refute_output --partial "gateway priority"
+  done
+}
+
+@test "reconnect: a failed disconnect warns, connects nothing, and moves the route in the node" {
+  _world ops "29.6.2 29.6.2"
+  _attach c-worker lok8s-registries 0
+  FAIL_DISCONNECT=1
+
+  run lo::connect_nodes_to_registry_network c
+  assert_success
+  [ "$(grep '^docker network connect ' "${LOG}")" == "docker network connect --gw-priority -1 lok8s-registries c-control-plane" ] || {
+    echo "want only the connect of the new node c-control-plane:" >&2; cat "${LOG}" >&2; return 1
+  }
+  assert_output --partial "lo: c-worker: cannot disconnect the node from lok8s-registries (docker network disconnect lok8s-registries c-worker: exit status 1). The endpoint keeps gateway priority 0, so a node restart can move the default route to lok8s-registries. Run lo up again."
+  [ "$(grep -c '^docker exec c-worker ip route replace' "${LOG}")" -eq 1 ] || { echo "the route of c-worker was not moved" >&2; cat "${LOG}" >&2; return 1; }
+  [ "$(_priority c-worker lok8s-registries)" == 0 ]
+  _assert_project_default
+}
+
+@test "reconnect: a refused -1 connect falls back to a plain connect with the aliases" {
+  _world ops "29.6.2 29.6.2"
+  _attach c-worker lok8s-registries 0 node-a
+  REFUSE_GW_PRIORITY=1
+
+  run lo::connect_nodes_to_registry_network c
+  assert_success
+  [ "$(_network_calls | grep ' c-worker$')" == "docker network disconnect lok8s-registries c-worker
+docker network connect --gw-priority -1 --alias node-a lok8s-registries c-worker
+docker network connect --alias node-a lok8s-registries c-worker" ] || {
+    echo "network calls for c-worker:" >&2; _network_calls >&2; return 1
+  }
+  _attached c-worker lok8s-registries
+  [ "$(cat "${FAKE}/aliases/c-worker@lok8s-registries")" == "node-a" ]
+  assert_output --partial "c-worker: the default route did not go through ops — moved it there"
+  refute_output --partial "again with gateway priority"
+  _assert_project_default
+}
+
+@test "reconnect: both connects fail, the warning gives the command that attaches the node" {
   _world ops "29.6.2 29.6.2"
   local n
-  for n in ${NODES}; do _attach "${n}" lok8s-registries 0; done
+  for n in ${NODES}; do _attach "${n}" lok8s-registries 0 node-a; done
+  REFUSE_CONNECT=1
 
-  lo::connect_nodes_to_registry_network c
-  ! grep -q '^docker network connect' "${LOG}" || { echo "an attached node was connected again" >&2; return 1; }
-  _assert_project_default
+  run lo::connect_nodes_to_registry_network c
+  assert_success
+  for n in ${NODES}; do
+    ! _attached "${n}" lok8s-registries || { echo "${n}: still attached (the fake refuses every connect)" >&2; return 1; }
+    assert_output --partial "lo: ${n}: cannot connect the node to lok8s-registries again (docker network connect --alias node-a lok8s-registries ${n}: exit status 1). The node is not on lok8s-registries now. Connect it (docker network connect --gw-priority -1 --alias node-a lok8s-registries ${n}). Then run lo up again."
+  done
+  ! grep -q '^docker exec' "${LOG}" || { echo "docker exec in a node that is off the network" >&2; cat "${LOG}" >&2; return 1; }
+}
+
+@test "repair: a paused node gets its own warning, no reconnect and no docker exec" {
+  # A paused node reports State.Running true, and a docker exec in it fails.
+  local version n
+  for version in "29.6.2 29.6.2" "27.5.1 27.5.1"; do
+    _world ops "${version}"
+    : > "${LOG}"
+    unset _LO_DOCKER_GW_PRIORITY
+    for n in ${NODES}; do _attach "${n}" lok8s-registries 0; done
+    PAUSED="c-worker"
+
+    run lo::connect_nodes_to_registry_network c
+    assert_success
+    assert_output --partial 'lo: c-worker: the node is paused (State.Paused: "true"). lo did not examine the default route. Unpause the node (docker unpause c-worker). Then run lo up again.'
+    ! grep -qE '^docker network .* c-worker$|^docker exec c-worker' "${LOG}" || { echo "${version}: a paused node was changed or read:" >&2; cat "${LOG}" >&2; return 1; }
+    refute_output --partial "iproute2"
+    refute_output --partial "c-control-plane: cannot"
+  done
 }
 
 @test "repair: the gateway comes from the node endpoint (the network reports none before Docker 29)" {
@@ -354,9 +561,12 @@ docker network connect --gw-priority -1 lok8s-registries c-worker"
     _world ops "${version}"
     : > "${LOG}"
     unset _LO_DOCKER_GW_PRIORITY
-    # 28.5 connects with --gw-priority: test the node an older lok8s attached.
+    # 28.5 connects with --gw-priority: test the node an older lok8s attached,
+    # with a connect that refuses -1 (the reconnect falls back to a plain one).
+    REFUSE_GW_PRIORITY=0
     if [[ "${version}" == 28.* ]]; then
       for n in ${NODES}; do _attach "${n}" lok8s-registries 0; done
+      REFUSE_GW_PRIORITY=1
     fi
     ! _network_reports_gateway || { echo "precondition: ${version} must report no network gateway" >&2; return 1; }
 
@@ -445,15 +655,16 @@ _assert_only_cluster_touched() {
   # on every lo up. It is attached like a node (the connect did that before the
   # gateway priority existed), but its route is never read.
   local -a cases=(
-    "ops|29.6.2 29.6.2|-1|no|no"
-    "kubehz|27.5.1 27.5.1|0|yes|no"
-    "ops|27.5.1 27.5.1|0|yes|yes"
-    "ops|29.6.2 29.6.2|none|no|no"
-    "ops|27.5.1 27.5.1|none|yes|yes"
+    "ops|29.6.2 29.6.2|-1|no|no|no"
+    "kubehz|27.5.1 27.5.1|0|yes|no|no"
+    "ops|27.5.1 27.5.1|0|yes|yes|no"
+    "ops|29.6.2 29.6.2|0|no|no|yes"
+    "ops|29.6.2 29.6.2|none|no|no|no"
+    "ops|27.5.1 27.5.1|none|yes|yes|no"
   )
-  local c project version attached want_exec want_moves n label
+  local c project version attached want_exec want_moves want_reconnect n label
   for c in "${cases[@]}"; do
-    IFS='|' read -r project version attached want_exec want_moves <<<"${c}"
+    IFS='|' read -r project version attached want_exec want_moves want_reconnect <<<"${c}"
     _world_ha "${project}" "${version}"
     FOREIGN="other-control-plane lok8s-registry-io-docker"
     : > "${LOG}"
@@ -471,8 +682,11 @@ _assert_only_cluster_touched() {
     if grep -q '^docker exec ' "${LOG}"; then n=yes; else n=no; fi
     [[ "${n}" == "${want_exec}" ]] || { echo "${label}: docker exec called: ${n}, want ${want_exec}" >&2; cat "${LOG}" >&2; return 1; }
     [[ "${output}" != *"${LB}"* ]] || { echo "${label}: a warning names the load balancer: ${output}" >&2; return 1; }
+    ! grep -q "^docker network disconnect lok8s-registries ${LB}$" "${LOG}" || { echo "${label}: the load balancer was disconnected" >&2; return 1; }
     if [[ "${want_moves}" == yes ]]; then
       [ "$(grep -c 'moved it there' <<<"${output}")" -eq 4 ] || { echo "${label}: want a move per node: ${output}" >&2; return 1; }
+    elif [[ "${want_reconnect}" == yes ]]; then
+      [ "$(grep -c 'again with gateway priority -1' <<<"${output}")" -eq 4 ] || { echo "${label}: want a reconnect per node: ${output}" >&2; return 1; }
     else
       [[ -z "${output}" ]] || { echo "${label}: output on a healthy cluster: ${output}" >&2; return 1; }
     fi
@@ -480,16 +694,18 @@ _assert_only_cluster_touched() {
 }
 
 @test "repair: Docker 28+ skips a node whose registry endpoint has a negative priority" {
-  # The priority comes from the same `docker inspect`; the three in-node
-  # commands are skipped. A node at 0 (an older lok8s) is still repaired.
+  # The priority comes from the same `docker inspect`; the reconnect and the
+  # three in-node commands are skipped. A node at 0 (an older lok8s) is
+  # reconnected.
   _world ops "28.5.1 28.5.1"
   _attach c-control-plane lok8s-registries -1
   _attach c-worker lok8s-registries 0
 
   run lo::connect_nodes_to_registry_network c
   assert_success
-  ! grep -q '^docker exec c-control-plane' "${LOG}" || { echo "a node at priority -1 was read or changed" >&2; cat "${LOG}" >&2; return 1; }
-  [ "$(grep -c '^docker exec c-worker ip route replace' "${LOG}")" -eq 1 ] || { echo "the node at priority 0 was not repaired" >&2; cat "${LOG}" >&2; return 1; }
+  ! grep -q '^docker exec' "${LOG}" || { echo "a node was read or changed in the node" >&2; cat "${LOG}" >&2; return 1; }
+  [ "$(_network_calls)" == "docker network disconnect lok8s-registries c-worker
+docker network connect --gw-priority -1 lok8s-registries c-worker" ] || { echo "network calls:" >&2; _network_calls >&2; return 1; }
   [ "$(grep -c '^docker inspect ' "${LOG}")" -eq 2 ] || { echo "want one docker inspect per node" >&2; cat "${LOG}" >&2; return 1; }
   _assert_project_default
   refute_output --partial c-control-plane
@@ -521,11 +737,15 @@ _assert_only_cluster_touched() {
   ! grep -q '^docker exec c-worker' "${LOG}" || { echo "docker exec in a node that cannot be inspected" >&2; return 1; }
 }
 
+# MEMBERS_WARNING — the warning for a member read of lok8s-registries that
+# fails while the network exists.
+MEMBERS_WARNING="lo: cannot read the members of network lok8s-registries (docker network inspect lok8s-registries: exit status 1). lo handles each node as not attached to that network, so an attached node can keep a wrong default route. Run lo up again."
+
 @test "members: a member read that fails with partial output is no membership" {
   # The partial list names another cluster's node and c-worker, which is NOT
-  # attached. The connect still attaches every node (Docker refuses a second
-  # endpoint for c-control-plane, and the repair moves its route); the
-  # repair-only walk touches nothing.
+  # attached. The network exists, so each walk warns. The connect still
+  # attaches every node (Docker refuses a second endpoint for c-control-plane,
+  # and the repair moves its route); the repair-only walk touches nothing.
   _world ops "29.6.2 29.6.2"
   FOREIGN="other-control-plane lok8s-registry-io-docker"
   _attach c-control-plane lok8s-registries 0
@@ -533,6 +753,8 @@ _assert_only_cluster_touched() {
 
   run lo::connect_nodes_to_registry_network c
   assert_success
+  assert_output --partial "${MEMBERS_WARNING}"
+  ! grep -q '^docker network disconnect' "${LOG}" || { echo "a node was disconnected after a failed member read" >&2; return 1; }
   local n
   for n in ${NODES}; do
     _attached "${n}" lok8s-registries || { echo "${n} is not attached" >&2; cat "${LOG}" >&2; return 1; }
@@ -547,31 +769,60 @@ _assert_only_cluster_touched() {
   _attach c-worker lok8s-registries 0
   run lo::reconcile_registry_network_nodes c
   assert_success
-  assert_output ""
-  ! grep -qE '^docker (network connect|exec|inspect)|^kind get nodes' "${LOG}" || {
+  [ "$(grep -c '' <<<"${output}")" -eq 1 ] || { echo "want one line: ${output}" >&2; return 1; }
+  assert_output --partial "${MEMBERS_WARNING}"
+  ! grep -qE '^docker (network (connect|disconnect)|exec|inspect)|^kind get nodes' "${LOG}" || {
     echo "a call after a failed member read:" >&2; cat "${LOG}" >&2; return 1
   }
 }
 
-@test "reconcile: shared off or omitted, an attached node is repaired and nothing is connected" {
+@test "members: a member read that fails without the network gets no warning" {
+  _world ops "29.6.2 29.6.2" '"shared":false,'
+  MEMBERS_READ=" "
+  NO_REGISTRY_NETWORK=1
+
+  run lo::reconcile_registry_network_nodes c
+  assert_success
+  assert_output ""
+  grep -qx 'docker network inspect lok8s-registries' "${LOG}" || { echo "the network was not looked up after the failed member read" >&2; cat "${LOG}" >&2; return 1; }
+  ! grep -qE '^docker (network (connect|disconnect)|exec|inspect)|^kind get nodes' "${LOG}" || {
+    echo "a call without the network:" >&2; cat "${LOG}" >&2; return 1
+  }
+}
+
+@test "reconcile: shared off or omitted, an attached node is repaired and no other node is connected" {
   # shared.enabled defaulted to true until 2026-08. A cluster created then
   # keeps its registry attachment after the default changed, and its registry
-  # map now reads "not shared". The route repair runs for every attached node
-  # (lo::heal_node_ips gates on membership the same way). Only the worker is
-  # attached: the control plane must stay off the network.
-  local shared
+  # map now reads "not shared". The repair runs for every attached node
+  # (lo::heal_node_ips gates on membership the same way): Docker 28+
+  # reconnects the node with -1, Docker 27 moves the route in the node. Only
+  # the worker is attached: the control plane must stay off the network.
+  local shared version label want
   for shared in '"shared":false,' ''; do
-    _world ops "28.5.1 28.5.1" "${shared}"
-    : > "${LOG}"
-    unset _LO_DOCKER_GW_PRIORITY
-    _attach c-worker lok8s-registries 0
+    for version in "28.5.1 28.5.1" "27.5.1 27.5.1"; do
+      label="shared='${shared}' ${version}"
+      _world ops "${version}" "${shared}"
+      : > "${LOG}"
+      unset _LO_DOCKER_GW_PRIORITY
+      _attach c-worker lok8s-registries 0
 
-    run lo::reconcile_registry_network_nodes c
-    assert_success
-    ! grep -q '^docker network connect' "${LOG}" || { echo "shared='${shared}': a cluster that is not shared was connected" >&2; cat "${LOG}" >&2; return 1; }
-    ! grep -q '^docker exec c-control-plane' "${LOG}" || { echo "shared='${shared}': the route of a node that is not attached was read" >&2; return 1; }
-    _assert_project_default
-    assert_output --partial "c-worker: the default route did not go through ops"
+      run lo::reconcile_registry_network_nodes c
+      assert_success
+      want=""
+      if [[ "${version}" == 28.* ]]; then
+        want="docker network disconnect lok8s-registries c-worker
+docker network connect --gw-priority -1 lok8s-registries c-worker"
+      fi
+      [ "$(_network_calls)" == "${want}" ] || { echo "${label}: network calls:" >&2; _network_calls >&2; return 1; }
+      ! _attached c-control-plane lok8s-registries || { echo "${label}: a cluster that is not shared got a node attached" >&2; return 1; }
+      ! grep -q '^docker exec c-control-plane' "${LOG}" || { echo "${label}: the route of a node that is not attached was read" >&2; return 1; }
+      _assert_project_default
+      if [[ -n "${want}" ]]; then
+        assert_output --partial "c-worker: the endpoint on lok8s-registries had gateway priority 0."
+      else
+        assert_output --partial "c-worker: the default route did not go through ops"
+      fi
+    done
   done
 }
 
