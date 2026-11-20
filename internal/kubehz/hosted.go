@@ -233,7 +233,8 @@ func (c *Context) ProvisionHosted(ctx context.Context, cfg *Config, domain, clus
 		return ErrHandled
 	}
 	apiURL := cfg.APIURL
-	// bash: kubehz::_private_target before the POST.
+	// bash: kubehz::_private_target before the POST (also the directory
+	// check, privateDirRefusal).
 	kubeconfigPath := filepath.Join(c.Paths.Base, ".kubeconfig", domain+".yaml")
 	if _, err := privateTarget(kubeconfigPath); err != nil {
 		c.errorf("%s", err)
@@ -325,7 +326,15 @@ func (e privateFileError) Error() string { return string(e) }
 // A dest that is a symlink is resolved (privateTarget): the temp file goes
 // beside the file that the link names, and the rename replaces that file,
 // so the link stays. A link to nothing, a link that cannot be resolved and
-// a directory are refused (privateFileError). os.Rename is a rename onto
+// a directory are refused (privateFileError).
+// The threat model: a process of this user is trusted, because it can
+// read the file anyway. Another user is not: before the create,
+// privateTarget refuses a directory of the file that another user can
+// write into (privateDirRefusal, the text of bash). It checks that
+// directory only, not its parents: another user who can write into a
+// parent can put a directory of their own in its place. In a directory
+// with the sticky bit, another user can make the write fail, but cannot
+// replace a file of this user. os.Rename is a rename onto
 // the exact path: it fails when another operation put a directory there
 // during the download (it never moves the file into it, as a mv without
 // -T does), so bash's check after the rename has no twin here. A failed
@@ -374,8 +383,9 @@ var renameFile = os.Rename
 
 // privateTarget ports kubehz::_private_target: the file that a write of
 // dest replaces (dest, or for a symlink the file that it names). A link
-// to nothing, a link that cannot be resolved and a directory are refused
-// (privateFileError, the text of bash).
+// to nothing, a link that cannot be resolved, a directory and a file in a
+// directory that another user can write into (privateDirRefusal) are
+// refused (privateFileError, the text of bash).
 func privateTarget(dest string) (string, error) {
 	target := dest
 	info, lerr := os.Lstat(dest)
@@ -388,6 +398,9 @@ func privateTarget(dest string) (string, error) {
 	}
 	if lerr == nil && info.IsDir() {
 		return "", privateFileError(dest + " is a directory, not a file")
+	}
+	if refused := privateDirRefusal(filepath.Dir(target)); refused != "" {
+		return "", privateFileError(refused)
 	}
 	return target, nil
 }

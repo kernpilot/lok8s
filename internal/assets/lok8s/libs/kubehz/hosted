@@ -160,9 +160,10 @@ kubehz::provision_hosted() {
   http::credential_ok KUBEHZ_TOKEN || return 1
 
   # The kubeconfig path is checked before the create: a path that the
-  # write refuses (a link to nothing, a directory) stops the provision
-  # here, so a refusal creates no cluster (kubehz::_private_target, the
-  # check of kubehz::_write_private).
+  # write refuses (a link to nothing, a directory, a directory that
+  # another user can write into) stops the provision here, so a refusal
+  # creates no cluster (kubehz::_private_target, the check of
+  # kubehz::_write_private).
   local kubeconfig_path="${PATH_BASE}/.kubeconfig/${domain}.yaml"
   kubehz::_private_target "${kubeconfig_path}" > /dev/null || return 1
 
@@ -286,6 +287,12 @@ kubehz::_hosted_kubeconfig_get() {
 # temp file goes beside the file that the link names, and the rename
 # replaces that file, so the link stays. A link to nothing, a link that
 # cannot be resolved and a directory are refused (one error line).
+# The threat model: a process of this user is trusted, because it can
+# read the file anyway. Another user is not: before the create, the call
+# refuses a directory of the file that another user can write into
+# (kubehz::_private_dir_ok, one error line). It checks that directory
+# only, not its parents: another user who can write into a parent can
+# put a directory of their own in its place.
 # INT, TERM and HUP remove the temp file, then end the shell with that
 # signal (kubehz::_write_private_trap). The traps are set before the temp
 # file exists and read its path when they run, and they remove it only
@@ -302,12 +309,14 @@ kubehz::_hosted_kubeconfig_get() {
 # returns, and a signal that had no trap goes back to the default
 # (kubehz::_restore_trap).
 # Not covered: SIGKILL, which can leave the temp file (mode 0600, the name
-# <file>.XXXXXX). A process that can write into the directory of the file:
-# a FIFO that it puts at the new name before the create makes the create
-# wait for a reader, and a file that it puts at the temp path between the
-# check before the rename and the rename is renamed onto the file. A
-# signal during the download takes effect when curl ends (the trap runs
-# after the current command; the call sets no time limit).
+# <file>.XXXXXX). A process of this user that writes into the directory of
+# the file: a FIFO that it puts at the new name before the create makes
+# the create wait for a reader, and a file that it puts at the temp path
+# between the check before the rename and the rename is renamed onto the
+# file. In a directory with the sticky bit, another user can make the
+# write fail (a file or a FIFO at the name), but cannot replace a file of
+# this user. A signal during the download takes effect when curl ends
+# (the trap runs after the current command; the call sets no time limit).
 # Status 0 when <dest> holds the new content, else 1.
 kubehz::_write_private() {
   (( $# >= 2 )) || {
@@ -446,8 +455,9 @@ kubehz::_restore_trap() {
 
 # kubehz::_private_target <dest>: the file that a write of <dest> replaces,
 # on stdout: <dest>, or for a symlink the file that it names (readlink -f).
-# A link to nothing, a link that cannot be resolved and a directory are
-# refused with one error line, status 1.
+# A link to nothing, a link that cannot be resolved, a directory and a
+# file in a directory that another user can write into
+# (kubehz::_private_dir_ok) are refused with one error line, status 1.
 kubehz::_private_target() {
   local dest="${1}" target="${1}"
   if [[ -L "${dest}" ]]; then
@@ -464,7 +474,56 @@ kubehz::_private_target() {
     error "${dest} is a directory, not a file"
     return 1
   }
+  kubehz::_private_dir_ok "$(dirname -- "${target}")" || return 1
   printf '%s\n' "${target}"
+}
+
+# kubehz::_private_dir_ok <dir>: status 0 when no other user can replace a
+# file in <dir>. It refuses, with one error line and status 1, a
+# directory that belongs to a user other than this user or root (that
+# user can change its mode), and, when the directory has no sticky bit, a
+# world-writable directory and a group-writable one whose group is not
+# the private group of this user (kubehz::_private_group). The sticky bit
+# lets only the owner of a file rename or remove it. A directory that is
+# not there passes: the create makes it, or fails. The check reads the
+# mode bits only, not an ACL, and the directory only, not its parents
+# (see kubehz::_write_private). ls -ldnL gives the mode, the uid and the
+# gid in the same form on GNU and BSD (their stat takes other options),
+# and it follows a link, as the create does. A line that it cannot read
+# is refused.
+kubehz::_private_dir_ok() {
+  local dir="${1}" line="" mode="" uid="" gid="" me
+  [[ -d "${dir}" ]] || return 0
+  line=$(LC_ALL=C ls -ldnL -- "${dir}" 2>/dev/null) || line=""
+  read -r mode _ uid gid _ <<< "${line}"
+  if [[ ! "${mode}" =~ ^d[-rwxsStT]{9} || ! "${uid}" =~ ^[0-9]+$ || ! "${gid}" =~ ^[0-9]+$ ]]; then
+    error "Cannot read the owner and the mode of the directory ${dir}: nothing is written"
+    return 1
+  fi
+  me=$(id -u 2>/dev/null) || me=""
+  if [[ "${uid}" != 0 && "${uid}" != "${me}" ]]; then
+    error "The directory ${dir} belongs to uid ${uid}, not to this user or to root, so another user can replace a file in it: nothing is written. Use a directory of your own."
+    return 1
+  fi
+  [[ "${mode:9:1}" != [tT] ]] || return 0
+  if [[ "${mode:8:1}" == w ]]; then
+    error "The directory ${dir} is world-writable and has no sticky bit, so another user can replace a file in it: nothing is written. Run chmod o-w,g-w ${dir}, or use a directory of your own."
+    return 1
+  fi
+  if [[ "${mode:5:1}" == w ]] && ! kubehz::_private_group "${gid}"; then
+    error "The directory ${dir} is group-writable and its group (gid ${gid}) is not the private group of this user, so another user can replace a file in it: nothing is written. Run chmod o-w,g-w ${dir}, or use a directory of your own."
+    return 1
+  fi
+}
+
+# kubehz::_private_group <gid>: status 0 when <gid> is the private group of
+# this user: the group of this process (id -g), with a name that is the
+# user name (id -gn, id -un). An empty name or an id that fails is no
+# private group. An administrator can still add members to that group.
+kubehz::_private_group() {
+  local g n u
+  g=$(id -g 2>/dev/null) && n=$(id -gn 2>/dev/null) && u=$(id -un 2>/dev/null) || return 1
+  [[ "${1}" == "${g}" && -n "${u}" && "${u}" == "${n}" ]]
 }
 
 # _KUBEHZ_MV_EXACT: 1 when mv takes -T (GNU coreutils and others: the
