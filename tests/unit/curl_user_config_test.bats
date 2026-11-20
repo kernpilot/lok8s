@@ -533,7 +533,7 @@ other.sh: the allowlist entry names a file that this run does not read (a stale 
   list=$(sed -n 's/^ *TLS_LOG_VARS="\([^"]*\)"$/\1/p' "${yaml}")
   [ "${list}" = "${_HTTP_TLS_LOG_VARS[*]}" ]
   first_unset=$(grep -n '^ *unset \${TLS_LOG_VARS}' "${yaml}" | head -1 | cut -d: -f1)
-  first_curl=$(grep -nE '^ *curl -q ' "${yaml}" | head -1 | cut -d: -f1)
+  first_curl=$(grep -nE '^ *(bounded [0-9]+ )?curl -q ' "${yaml}" | head -1 | cut -d: -f1)
   [ -n "${first_unset}" ] && [ -n "${first_curl}" ]
   (( first_unset < first_curl ))
 }

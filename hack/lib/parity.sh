@@ -195,12 +195,13 @@ parity::run_pair() {
 # its own parse errors ("Error: too many arguments: …"), the Go binary exits
 # 1 with the identical message (cli.argshErrorf; the cli-wide convention).
 # PARITY_PARSE_RC=1 tolerates exactly that pair; PARITY_PARSE_RC=auto only
-# when the bash stderr carries the argsh "Error: " line.
+# when the first line of the bash stderr is the argsh line
+# "Error: too many arguments: <args>".
 parity::rc_tolerated() {
   (( bash_rc == 2 && go_rc == 1 )) || return 1
   case "${PARITY_PARSE_RC:-0}" in
     1) return 0 ;;
-    auto) grep -q '^Error: ' "${WORK}/bash.err" ;;
+    auto) [[ "$(sed -n 1p "${WORK}/bash.err")" =~ ^Error:\ too\ many\ arguments:\ [^[:space:]] ]] ;;
     *) return 1 ;;
   esac
 }

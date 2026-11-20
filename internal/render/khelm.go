@@ -22,7 +22,7 @@ import (
 // The khelm pin. github.com/mgoltzsche/khelm/v2 v2.9.0 is the SAME release
 // the toolchain pins as the ChartRenderer binary (internal/toolchain
 // pins.go — drift-tested against go.mod and the generated .bin/b.yaml;
-// a downstream project pins it with kustomize v5.8.1 as the pair
+// a downstream project pins khelm with kustomize v5.8.1 as the pair
 // proven to reproduce its committed artifacts byte for byte). Its go.mod
 // requires helm.sh/helm/v3 v3.22.1, which the root go.mod pins as well:
 // the chart inflation is the same helm code the binary was built from. The version

@@ -10,6 +10,7 @@ package toolchain
 import (
 	"bytes"
 	"cmp"
+	"encoding/json"
 	"io/fs"
 	"maps"
 	"os"
@@ -104,10 +105,13 @@ func TestTemplateCarriesThePins(t *testing.T) {
 // TestContributorBYamlCarriesThePins: the contributor .bin/b.yaml installs
 // the pinned kustomize and khelm releases. A floating entry let CI install
 // khelm v3.0.0 next to the linked v2.8.0 (2026-10-21), and the chart
-// byte-parity test failed on every PR.
+// byte-parity test failed on every PR. The khelm entry of .bin/b.lock (the
+// release and the sha256 that b installs) and the khelm of mise.toml (the
+// same toolchain for a contributor who uses mise) carry the khelm pin too.
 func TestContributorBYamlCarriesThePins(t *testing.T) {
 	t.Parallel()
-	raw, err := os.ReadFile(filepath.Join(testutil.RepoRoot(t), ".bin", "b.yaml"))
+	root := testutil.RepoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, ".bin", "b.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,6 +136,66 @@ func TestContributorBYamlCarriesThePins(t *testing.T) {
 		}},
 		Sync: "bump .bin/b.yaml with internal/toolchain/pins.go, then run b install to refresh .bin/b.lock",
 	}.Check(t)
+
+	testutil.Drift{
+		Want: testutil.Tree{Name: "pins.go", Files: map[string]string{
+			".bin/b.lock": "v" + KhelmVersion,
+			"mise.toml":   KhelmVersion,
+		}},
+		Got: testutil.Tree{Name: "the khelm of the contributor toolchain", Files: map[string]string{
+			".bin/b.lock": lockVersion(t, root, "github.com/mgoltzsche/khelm"),
+			"mise.toml":   onePin(t, root, "mise.toml", `(?m)^"github:mgoltzsche/khelm"\s*=\s*"([^"]+)"`),
+		}},
+		Sync: "bump mise.toml and .bin/b.yaml with internal/toolchain/pins.go, then run b install to refresh .bin/b.lock",
+	}.Check(t)
+}
+
+// lockVersion returns the version of the one .bin/b.lock entry whose
+// source is source. It reports an error and returns "" when there is no
+// such entry, or more than one.
+func lockVersion(t *testing.T, root, source string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(root, ".bin", "b.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lock struct {
+		Binaries []struct {
+			Version string `json:"version"`
+			Source  string `json:"source"`
+		} `json:"binaries"`
+	}
+	if err := json.Unmarshal(raw, &lock); err != nil {
+		t.Fatal(err)
+	}
+	var found []string
+	for _, b := range lock.Binaries {
+		if b.Source == source {
+			found = append(found, b.Version)
+		}
+	}
+	if len(found) != 1 {
+		t.Errorf(".bin/b.lock: %d entries with source %s, want one", len(found), source)
+		return ""
+	}
+	return found[0]
+}
+
+// onePin returns the first group of the one match of pattern in file
+// (relative to root). It reports an error and returns "" unless there is
+// exactly one match: a second match could name another release.
+func onePin(t *testing.T, root, file, pattern string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(file)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(pattern).FindAllSubmatch(raw, -1)
+	if len(m) != 1 {
+		t.Errorf("%s: %d matches of %s, want one", file, len(m), pattern)
+		return ""
+	}
+	return string(m[0][1])
 }
 
 // TestYQFallbacksInstallThePin: the other places that install yq install
@@ -143,19 +207,39 @@ func TestYQFallbacksInstallThePin(t *testing.T) {
 		{"internal/assets/lok8s/providers/hetzner/cloud-init/cloud.d/ci/write_files/bootstrap/install-tools.sh", `(?m)^YQ_VERSION="([^"]+)"$`, ""},
 		{"mise.toml", `(?m)^yq\s*=\s*"([^"]+)"`, "v"},
 	} {
-		raw, err := os.ReadFile(filepath.Join(root, tc.file))
-		if err != nil {
-			t.Fatal(err)
-		}
-		m := regexp.MustCompile(tc.pattern).FindAllSubmatch(raw, -1)
-		if len(m) != 1 {
-			t.Errorf("%s: %d yq versions, want one", tc.file, len(m))
-			continue
-		}
-		if got := tc.prefix + string(m[0][1]); got != YQVersion {
+		v := onePin(t, root, tc.file, tc.pattern)
+		if got := tc.prefix + v; v != "" && got != YQVersion {
 			t.Errorf("%s installs yq %s, want the pin %s (internal/toolchain YQVersion)", tc.file, got, YQVersion)
 		}
 	}
+}
+
+// TestHelmMentionsCarryThePin: the helm that CI installs for the
+// real-helm bats tests (.github/workflows/ci.yml) and the helm that the
+// refusal of the bash chart gate names (libs/addons, in both trees) are
+// the helm that lo links (HelmVersion). So a helm bump in go.mod and
+// pins.go must bump them too.
+func TestHelmMentionsCarryThePin(t *testing.T) {
+	t.Parallel()
+	root := testutil.RepoRoot(t)
+	const refusal = `Use helm v([0-9][^,\s]*), or use the Go implementation`
+	files := []struct{ file, pattern string }{
+		{".github/workflows/ci.yml", `(?m)^\s*HELM_VERSION=([^\s"]+)\s*$`},
+		{".lok8s/libs/addons", refusal},
+		{"internal/assets/lok8s/libs/addons", refusal},
+	}
+	want, got := map[string]string{}, map[string]string{}
+	for _, f := range files {
+		want[f.file] = HelmVersion
+		got[f.file] = onePin(t, root, f.file, f.pattern)
+	}
+	testutil.Drift{
+		Want: testutil.Tree{Name: "pins.go", Files: want},
+		Got:  testutil.Tree{Name: "the helm that CI installs and the bash chart gate names", Files: got},
+		Sync: "bump HELM_VERSION and the sha256 of its tarball in .github/workflows/ci.yml, and the refusal in " +
+			"internal/assets/lok8s/libs/addons (then hack/sync-legacy-assets.sh; tests/unit/bootstrap_test.bats checks the refusal text), " +
+			"with internal/toolchain/pins.go",
+	}.Check(t)
 }
 
 // yqMinimumRE finds a statement of the yq minimum: "v4.x.y or later" or

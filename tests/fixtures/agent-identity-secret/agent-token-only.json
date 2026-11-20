@@ -1,0 +1,19 @@
+{
+    "apiVersion": "v1",
+    "kind": "Secret",
+    "metadata": {
+        "creationTimestamp": "2026-11-20T08:00:00Z",
+        "labels": {
+            "app.kubernetes.io/name": "kubehz-agent",
+            "app.kubernetes.io/part-of": "kubehz"
+        },
+        "name": "kubehz-agent",
+        "namespace": "kubehz-system",
+        "resourceVersion": "41",
+        "uid": "0f6b2c1e-4d3a-4b5c-8e9f-1a2b3c4d5e6f"
+    },
+    "type": "Opaque",
+    "data": {
+        "agent-token": "a2h6X2FndF9jY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2Nj"
+    }
+}

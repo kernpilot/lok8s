@@ -576,9 +576,10 @@ two 256-bit secrets locally and announces only their SHA-256 hashes to
 
 The platform stores only `sha256(A)` and `sha256(C)`: it can never push a
 credential into your cluster, and a database leak yields no usable secret. The
-agent generates the secrets **once** and never rotates them, so re-applying it
-is a no-op. Registration is **provider-agnostic**: no SSH key, no hcloud token,
-nothing Hetzner-specific.
+deploy creates the Secret empty, and the agent generates the secrets **once**
+and never rotates them. Re-applying the manifests is a no-op: the manifest of
+the Secret has no data, so `kubectl apply` keeps the values. Registration is
+**provider-agnostic**: no SSH key, no hcloud token, nothing Hetzner-specific.
 
 ::: details Legacy: `lo kubehz register`
 A pre-agent announce still exists and runs automatically at the end of
@@ -852,7 +853,7 @@ The default agent is a CronJob `kubehz-heartbeat` in the `kubehz-system`
 namespace that runs **every five minutes** and POSTs a status snapshot to
 `/api/clusters/<domain>/heartbeat`. It also owns the cluster's identity, which
 is why it stays deployed even when the live agent takes over the heartbeat: it
-creates the identity Secret and enrolls it, and the live agent only reads that
+fills the identity Secret and enrolls it, and the live agent only reads that
 Secret. Both agents tolerate the control-plane taint, so a cluster with no
 worker yet, or one that is control-plane-only by design, runs them on the
 control plane. A first `lo kubehz deploy` with `agent: operator` runs the
@@ -860,10 +861,21 @@ CronJob's bootstrap once as a one-off Job and waits for it. The live agent
 then finds its identity Secret at once, not at the CronJob's next tick.
 Properties worth knowing:
 
-- **Self-bootstrapping identity.** On each run the agent ensures one Secret,
-  `kubehz-agent` in `kubehz-system`, holding a self-generated agent-token `A`
-  (`khz_agt_…`) and claim-code `C` (`khzc_…`). The agent creates it once and
-  **never rotates** it; the platform only ever receives `sha256(A)`/`sha256(C)`.
+- **Self-bootstrapping identity.** The deploy creates one Secret,
+  `kubehz-agent` in `kubehz-system`, empty. On its first run the agent fills
+  it with a self-generated agent-token `A` (`khz_agt_…`) and claim-code `C`
+  (`khzc_…`), in one patch. A tick writes the Secret only when it has no
+  entry at all, whatever the values, so the agent **never rotates** them and
+  never writes over a key that is there. When two ticks fill it at the same
+  time, the apiserver refuses the second patch (it carries the
+  `resourceVersion` of its read), and both ticks use the values of the first.
+  A Secret with entries, but not both keys with a value (one of the keys, an
+  empty value, or another key), stays as it is. The tick logs
+  `kubehz: Secret kubehz-agent in kubehz-system has data, but not both an agent-token and a claim-code with a value; the agent does not write it`
+  and uses the values that are there: a heartbeat needs `A`, the register
+  `A` and `C`. To give the agent a new identity, delete the Secret and run
+  `lo kubehz deploy` (see the reset of the Secret below).
+  The platform only ever receives `sha256(A)`/`sha256(C)`.
 - **Authenticated.** Every heartbeat carries `Authorization: Bearer A`. Once a
   cluster has enrolled a token, the platform rejects anonymous heartbeats for
   it: the identity is proven from the first beat.
@@ -872,18 +884,20 @@ Properties worth knowing:
 - **Least-privilege RBAC.** The `kubehz-agent` ServiceAccount can read cluster
   state: `list` on nodes and CSRs, `list` pods in `kube-system` only
   (control-plane health), and `get` on the `/readyz` + `/version` API paths.
-  On top of that it holds `get` on its identity Secret and `create` on
-  Secrets (never `update`/`patch`/`delete`) in its own `kubehz-system`
-  namespace, to bootstrap that Secret once. It reads no other Secret and can
-  rotate nothing. The
+  On top of that it holds `get` and `patch` on its identity Secret, by name,
+  in its own `kubehz-system` namespace, and no other grant on Secrets: no
+  `create` (RBAC cannot limit a `create` to one name, so the grant would let
+  a holder of the agent's token create any Secret in that namespace), no
+  `update`, no `delete`. It reads no other Secret. The `patch` grant could
+  change the values; the agent's script never does that. The
   [assessment](#assessment-and-handover) adds read-only probe grants
   (`list` on storageclasses, persistentvolumes, services and webhook
   configurations, `get` on the one CAPI CRD, kube-system daemonset `list` +
   the `kubeadm-config` ConfigMap). The agent keeps its markers (the
   assessment send gate, the claim nonce and the desired-state validator) as
-  annotations on one ConfigMap, `kubehz-agent-state`. `get`/`patch` on that
-  ConfigMap is its only grant that changes an existing object, and the
-  Secret `create` above is its only other write grant. It has no access to
+  annotations on one ConfigMap, `kubehz-agent-state`. `patch` on that
+  ConfigMap and on the identity Secret are its only write grants: it can
+  create no object. It has no access to
   `kubehz-agent-config`, its configuration: the pod gets it through
   `envFrom`, so the agent cannot change its own API URL.
 - **Domain-keyed.** The payload's `clusterId` is the cluster domain, the same
@@ -937,9 +951,10 @@ lo use my-cluster.example.com
 lo kubehz deploy
 ```
 
-On its first run the agent creates its identity Secret, self-registers, and
-starts beating. Then read the claim code with `lo kubehz claim-code` and paste
-it into the dashboard to [claim](#claiming) the cluster.
+On its first run the agent fills its identity Secret (the deploy created it
+empty), self-registers, and starts beating. Then read the claim code with
+`lo kubehz claim-code` and paste it into the dashboard to [claim](#claiming)
+the cluster.
 
 The manifests ship with lok8s as kustomize directories:
 `.lok8s/libs/kubehz/manifests/agent/` (CronJob) and
@@ -977,11 +992,44 @@ there from the next tick.
 Each later `lo kubehz deploy` keeps the markers on `kubehz-agent-state`:
 `kubectl apply` removes only what an earlier apply set.
 
+An older lo also gave the agent `create` on Secrets, and the agent created
+its identity Secret itself. lo now creates the Secret in the deploy, and the
+agent's Role holds only `get` and `patch` on it. A `lo kubehz deploy` after
+you update lo keeps the Secret that the old agent created, with its values:
+the manifest has no data, and `kubectl apply` adds only the labels. The
+agent keeps its identity, and you do not re-enroll. A heartbeat pod that
+started before the deploy runs the old script against the new Role. It
+cannot create the Secret, but it does not have to: the deploy created it.
+If that Secret is still empty, the pod has no identity and skips its beat,
+and the next tick fills the Secret.
+
+Do not deploy with an older lo after this one. A `lo kubehz deploy` with an
+older lo has two effects:
+
+- It puts back the older Role, which gives the agent `create` on every
+  Secret in `kubehz-system`. Each deploy replaces the Role, so the next
+  deploy with the current lo removes that grant again.
+- If it comes before the first fill, the Secret stays empty. The older agent
+  creates its Secret only when there is none, and it does not fill one that
+  is there. The agent has no identity: it does not register, and it skips
+  each beat.
+
+To recover, run `lo kubehz deploy` with the current lo: the next tick fills
+the empty Secret. You can also delete the empty Secret first, and then run
+`lo kubehz deploy` with the current lo.
+
 If a GitOps controller applies the agent manifests, make sure that it does
-not reset `kubehz-agent-state`: let it create the ConfigMap only. For Flux,
-add the annotation `kustomize.toolkit.fluxcd.io/ssa: IfNotPresent` to that
-ConfigMap in your overlay. The shipped manifest of the ConfigMap has no
-annotations. A reset deletes all the markers:
+not reset `kubehz-agent-state` or the Secret `kubehz-agent`: let it create
+them only. For Flux, add the annotation
+`kustomize.toolkit.fluxcd.io/ssa: IfNotPresent` to both in your overlay.
+
+A reset of the Secret deletes `A` and `C`. The next tick fills the Secret
+with new values, and the platform refuses the beats of the new token until
+you run `lo kubehz re-enroll`. Read the new claim code with
+`lo kubehz claim-code` if the cluster is not claimed yet.
+
+The shipped manifest of the ConfigMap has no annotations. A reset deletes
+all the markers:
 
 - The time of the last assessment and a pending platform request go. The
   next tick sends an assessment and writes the time again. A controller that
@@ -1335,7 +1383,13 @@ What the agent writes for each outcome of the send:
 | Failed: both beats fail | the new time; a pending request removed | the old time (or none) and the request put back, in one call (the next tick sends again) |
 
 A tick that writes the time and then sends no assessment (a probe has no
-answer, or the beat is skipped) puts back the old values the same way.
+answer, the probes run out of the tick budget, or the beat is skipped) puts
+back the old values the same way.
+
+The table shows what the agent saw, not what the api or the apiserver
+stored. A beat whose answer does not come back (the api stored it, but curl
+stopped at its bound) counts as failed, so the next tick can send the same
+assessment again. A write whose answer does not come back counts as refused.
 
 If the agent cannot write the ConfigMap (its RBAC lacks the `patch`, or an
 admission webhook refuses it), the tick sends no assessment, keeps the
@@ -1347,9 +1401,59 @@ plain heartbeat still goes out. `lo kubehz deploy` puts back the ConfigMap
 and the agent's RBAC. An admission webhook that refuses the write is yours
 to change.
 
+The write of the new time can reach the apiserver and be stored while its
+answer comes after the 5 s bound: `timeout` stops kubectl. The agent cannot
+tell this from a refusal. The tick sends no assessment, logs the line of a
+refused write (above), and puts nothing back. The stored time holds and a
+pending request is used up, so the next assessment comes after the 24-hour
+window or on a new platform request: one lost window.
+
 If the write that puts back the old values fails too, the tick logs
 `kubehz: could not put back the assessment marker on configmap/kubehz-agent-state in kubehz-system; the next assessment comes after the 24h window or on a platform request`.
 That assessment is lost. The agent does not send it again on each tick.
+
+Each tick has a time budget, so that it ends before the Job's
+`activeDeadlineSeconds` (120 s) stops the pod and leaves the new time in
+place. Every kubectl call runs under `timeout -k 2 5` (the node list under
+`timeout -k 2 30`), the register POST and the desired-state poll under
+`timeout -k 2 10`, and each heartbeat POST under `timeout -k 2 15`. Each
+`jq` and `awk` step on an answer runs under `timeout -k 2 5` too (the `jq`
+of the node list under the bound of its call), so the local work on a large
+answer counts, and a step that hangs stops. Those bounds sum to more than
+the deadline. So a call or a step starts only if it ends before the budget:
+
+| Calls and steps | Budget ends after the start of the tick |
+|---|---|
+| The reads before the assessment | 73 s |
+| The send gate and the probes | 56 s |
+| The heartbeat POSTs and the calls after them | 90 s |
+
+The budget counts the seconds since the node started (`/proc/uptime`), so a
+step of the wall clock does not make it longer or shorter. If
+`/proc/uptime` gives no number, the budget uses the wall clock, and the tick
+logs
+`kubehz: /proc/uptime gives no seconds; the tick budget uses the wall clock, which a clock step can move`.
+
+The write that puts back the old values runs outside the budget. So the
+calls and the steps of a tick end 97 s after its start at the latest. That
+bound does not include:
+
+- less than 1 s more, because the budget counts whole seconds;
+- the pod start and the image pull, before the tick starts;
+- the local work between two budget checks: shell builtins and short text
+  filters such as `sed`, `sort` and `base64`;
+- a second pod when the Job runs again (`backoffLimit: 1`). The deadline
+  counts from the start of the Job, not of the pod, so it can stop that pod
+  during its tick. A time that its send gate wrote then stays: one lost
+  window, as above.
+
+A call or a step that does not start logs
+`kubehz: tick budget: … not started: …`. When the probes run out of the
+budget, the tick logs
+`kubehz: assessment deferred: the tick budget ran out during the probes; the next tick probes again`
+and puts back the old values. When the reads run out of the budget, the
+tick logs `kubehz: assessment and desired-state poll skipped: the tick budget is spent; the next tick tries again`.
+In both cases the plain heartbeat still goes out.
 
 ```bash
 lo kubehz assess    # pretty-print the stored assessment + feasibility
