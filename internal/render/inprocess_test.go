@@ -20,11 +20,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/kernpilot/lok8s/internal/testutil"
+	"github.com/kernpilot/lok8s/internal/toolchain"
 	"github.com/kernpilot/lok8s/kustomize/plugins/secret"
 )
 
@@ -52,14 +55,63 @@ func pinnedKustomize(t *testing.T) string {
 	return bin
 }
 
+// pluginHomeEnv points the byte-parity tests at another plugin home than
+// the repo's .kustomize. Only TestChartParityRefusesAnotherChartRenderer
+// sets it, for a child run of the chart parity test against a stand-in
+// ChartRenderer.
+const pluginHomeEnv = "LOK8S_TEST_PLUGIN_HOME"
+
+// pinnedPluginHome is the plugin home of the byte-parity tests: the repo's
+// .kustomize (b install), or pluginHomeEnv when it is set.
+func pinnedPluginHome(t *testing.T) string {
+	t.Helper()
+	if home := os.Getenv(pluginHomeEnv); home != "" {
+		return home
+	}
+	return filepath.Join(testutil.RepoRoot(t), ".kustomize")
+}
+
+// chartRendererVersionRE reads the line of `ChartRenderer version`: khelm
+// prints "<khelm> (helm <helm>)" (cmd/khelm/root.go). Its release stamps
+// both versions without a leading v (khelm's .goreleaser.yml); the v is
+// optional here, as in lo doctor.
+var chartRendererVersionRE = regexp.MustCompile(`^v?(\S+) \(helm v?([^)\s]+)\)$`)
+
+// requirePinnedChartRenderer runs `ChartRenderer version` from home and
+// fails the test unless it prints the pinned khelm and helm releases
+// (internal/toolchain: KhelmVersion, HelmVersion). It skips (fails on CI)
+// when the binary is not installed. The chart parity test compares this
+// binary with the khelm library that lo-full links, so a binary of another
+// release must stop the test with this line. Without it, a fixture that
+// renders the same with both releases lets the test pass, and one that
+// renders differently fails it as a render difference.
+func requirePinnedChartRenderer(t *testing.T, home string) {
+	t.Helper()
+	bin := filepath.Join(home, filepath.FromSlash(chartRendererPluginRel))
+	if info, err := os.Stat(bin); err != nil || info.Mode()&0o111 == 0 {
+		missingToolchain(t, "pinned plugin "+chartRendererPluginRel+" not installed under .kustomize")
+	}
+	out, err := exec.Command(bin, "version").Output()
+	if err != nil {
+		t.Fatalf("%s version: %v", bin, err)
+	}
+	line := strings.TrimSpace(string(out))
+	want := toolchain.KhelmVersion + " (helm " + toolchain.HelmVersion + ")"
+	if m := chartRendererVersionRE.FindStringSubmatch(line); m == nil || m[1] != toolchain.KhelmVersion || m[2] != toolchain.HelmVersion {
+		t.Fatalf("the ChartRenderer under %s is not the pinned release: `version` prints %q, want %q "+
+			"(internal/toolchain/pins.go: KhelmVersion, HelmVersion). Install the pinned release (b install) before the parity test compares the renders.",
+			home, line, want)
+	}
+}
+
 // execKustomize runs the pinned binary the way the exec pipeline did:
 // `kustomize build --enable-alpha-plugins [--enable-exec] dir` with the
-// repo's .kustomize as KUSTOMIZE_PLUGIN_HOME (skipping when a needed plugin
-// binary is absent) and the overlay in the environment.
+// plugin home of pinnedPluginHome as KUSTOMIZE_PLUGIN_HOME (skipping when a
+// needed plugin binary is absent) and the overlay in the environment.
 func execKustomize(t *testing.T, dir string, enableExec bool, overlay []string, needPlugins ...string) []byte {
 	t.Helper()
 	bin := pinnedKustomize(t)
-	home := filepath.Join(testutil.RepoRoot(t), ".kustomize")
+	home := pinnedPluginHome(t)
 	for _, p := range needPlugins {
 		if info, err := os.Stat(filepath.Join(home, filepath.FromSlash(p))); err != nil || info.Mode()&0o111 == 0 {
 			missingToolchain(t, "pinned plugin "+p+" not installed under .kustomize")
@@ -432,8 +484,10 @@ func TestBuildInProcessFailurePrintsCobraErrorLine(t *testing.T) {
 // helm inflation runs without a repository or network. The chart uses the
 // pieces whose bytes depend on the helm/khelm version: a values file, the
 // release name/namespace from metadata, the `toYaml` + `quote` helpers, a
-// numeric value (khelm's kyaml re-serialization decides its quoting) and a
-// Namespace resource (kustomize's legacy ordering moves it first).
+// numeric value (khelm's kyaml re-serialization decides its quoting), a
+// Namespace resource (kustomize's legacy ordering moves it first), and the
+// helm version (.Capabilities.HelmVersion.Version: the helm that renders,
+// so a render with another helm minor gives other bytes).
 func chartFixture(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -464,6 +518,7 @@ data:
   port: {{ .Values.port | quote }}
   inline: {{ .Values.inline }}
   kube: {{ .Capabilities.KubeVersion.Version }}
+  helm: {{ .Capabilities.HelmVersion.Version }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -504,7 +559,12 @@ func TestBuildInProcessChartRendererViaSelfExec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v\n%s", err, stderr.String())
 	}
-	for _, s := range []string{"name: demo-cfg", "namespace: demo-ns", "replicas: 4", "tier: web", `port: "8080"`, "inline: set", "kind: Namespace"} {
+	// The linked helm renders .Capabilities.HelmVersion.Version as
+	// "v<major>.<minor>": the default of helm's internal/version, which
+	// neither lo nor khelm's release stamps.
+	v := strings.SplitN(toolchain.HelmVersion, ".", 3)
+	helm := "helm: v" + v[0] + "." + v[1]
+	for _, s := range []string{"name: demo-cfg", "namespace: demo-ns", "replicas: 4", "tier: web", `port: "8080"`, "inline: set", "kind: Namespace", helm} {
 		if !strings.Contains(string(out), s) {
 			t.Errorf("missing %q in:\n%s", s, out)
 		}
@@ -513,6 +573,7 @@ func TestBuildInProcessChartRendererViaSelfExec(t *testing.T) {
 
 func TestBuildInProcessMatchesPinnedBinaryChart(t *testing.T) {
 	t.Setenv(ModeEnv, "")
+	requirePinnedChartRenderer(t, pinnedPluginHome(t))
 	dir := chartFixture(t)
 	overlay := []string{"KHELM_TRUST_ANY_REPO=true"}
 	want := execKustomize(t, dir, true, overlay, chartRendererPluginRel)
@@ -522,6 +583,48 @@ func TestBuildInProcessMatchesPinnedBinaryChart(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("in-process khelm render differs from the pinned ChartRenderer binary:\n--- binary\n%s\n--- in-process\n%s", want, got)
+	}
+}
+
+// TestChartParityRefusesAnotherChartRenderer: the chart parity test fails
+// with the version line, before it renders, when the ChartRenderer is
+// another khelm or helm release. A child run of this test binary runs the
+// parity test with pluginHomeEnv on a stand-in that prints the version of
+// another release. Before the version check, the parity test passed with
+// any installed ChartRenderer that rendered the fixture the same. The
+// control (a stand-in that prints the pinned release, with and without a
+// leading v) gets past the check: the child then skips or fails later, at
+// the render, but never with the version line.
+func TestChartParityRefusesAnotherChartRenderer(t *testing.T) {
+	for _, tc := range []struct {
+		name, prints string
+		refused      bool
+	}{
+		{"another khelm", "2.8.0 (helm " + toolchain.HelmVersion + ")", true},
+		{"another helm", toolchain.KhelmVersion + " (helm 3.21.0)", true},
+		{"control: the pinned release", toolchain.KhelmVersion + " (helm " + toolchain.HelmVersion + ")", false},
+		{"control: the pinned release with a leading v", "v" + toolchain.KhelmVersion + " (helm v" + toolchain.HelmVersion + ")", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			writeFiles(t, home, map[string]string{chartRendererPluginRel: "#!/bin/sh\necho '" + tc.prints + "'\n"})
+			if err := os.Chmod(filepath.Join(home, filepath.FromSlash(chartRendererPluginRel)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^TestBuildInProcessMatchesPinnedBinaryChart$", "-test.count=1", "-test.v")
+			cmd.Env = append(os.Environ(), pluginHomeEnv+"="+home)
+			out, err := cmd.CombinedOutput()
+			line := "is not the pinned release: `version` prints " + strconv.Quote(tc.prints)
+			switch {
+			case !tc.refused && strings.Contains(string(out), line):
+				t.Fatalf("the version check refused the pinned release:\n%s", out)
+			case !tc.refused:
+			case err == nil:
+				t.Fatalf("the chart parity test passed with a ChartRenderer that prints %q:\n%s", tc.prints, out)
+			case !strings.Contains(string(out), line):
+				t.Fatalf("the chart parity test failed without the version line (%s):\n%s", line, out)
+			}
+		})
 	}
 }
 
