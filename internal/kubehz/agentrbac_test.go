@@ -444,16 +444,19 @@ func configmapTarget(args []string) (name, ns string) {
 
 // TestAgentScriptMarkersUseTheStateConfigMap: the heartbeat script reads its
 // markers from kubehz-agent-state once and writes them there with annotate
-// (nine writers), and no kubectl call names kubehz-agent-config. The send
-// gate is the 24h marker write plus --dry-run=server (a client dry run never
-// reaches the apiserver), and it runs before the assessment is put together.
-// The CronJob still gets kubehz-agent-config through envFrom.
+// (nine writers), and no kubectl call names kubehz-agent-config. No write is
+// a dry run: a dry run stores nothing, so it cannot hold the 24h gate. The
+// send gate is the one write of last-assessment with the time of this tick.
+// It removes a pending assess request in the same call (one PATCH), and it
+// runs before the assessment is put together, so before the send. The only
+// other write of the 24h marker or of the request removal is the write-back
+// of assess_write_back, one call that puts back both. The CronJob still gets
+// kubehz-agent-config through envFrom.
 func TestAgentScriptMarkersUseTheStateConfigMap(t *testing.T) {
 	t.Parallel()
 	script := heartbeatScript(t)
 	reads := 0
-	var writes [][]string
-	var gates []kubectlCall
+	var writes []kubectlCall
 	for _, c := range kubectlCalls(script) {
 		joined := strings.Join(c.args, " ")
 		if strings.Contains(joined, agentConfigName) {
@@ -473,10 +476,9 @@ func TestAgentScriptMarkersUseTheStateConfigMap(t *testing.T) {
 		case "get":
 			reads++
 		case "annotate":
+			writes = append(writes, c)
 			if slices.ContainsFunc(c.args, func(a string) bool { return strings.HasPrefix(a, "--dry-run") }) {
-				gates = append(gates, c)
-			} else {
-				writes = append(writes, c.args)
+				t.Errorf("script line %d: kubectl %s is a dry run: it stores nothing", c.line, joined)
 			}
 		default:
 			t.Errorf("script line %d: kubectl %s: the agent may only get and annotate (patch) %s", c.line, joined, agentStateName)
@@ -485,14 +487,44 @@ func TestAgentScriptMarkersUseTheStateConfigMap(t *testing.T) {
 	if reads != 1 || len(writes) != 9 {
 		t.Errorf("%s: %d reads and %d annotate calls, want 1 and 9", agentStateName, reads, len(writes))
 	}
-	if len(gates) != 1 {
-		t.Fatalf("%d dry-run annotate calls, want 1 (the send gate)", len(gates))
+
+	// The send gate and the write-back, by their arguments.
+	const (
+		gateTime  = `"kubehz.cloud/last-assessment=${NOW_EPOCH}"`
+		gateReq   = `${GATE_REQ:+"${GATE_REQ}"}`
+		backLast  = `"${WB_LAST}"`
+		backReq   = `${WB_REQ:+"${WB_REQ}"}`
+		overwrite = "--overwrite"
+	)
+	var gates, backs []kubectlCall
+	for _, w := range writes {
+		switch {
+		case slices.Contains(w.args, gateTime):
+			gates = append(gates, w)
+		case slices.Contains(w.args, backLast):
+			backs = append(backs, w)
+		default:
+			// Any other writer leaves the 24h marker and the request removal alone.
+			for _, a := range w.args {
+				if strings.Contains(a, "last-assessment") || strings.Contains(a, "assess-requested-") || strings.Contains(a, "GATE_REQ") || strings.Contains(a, "WB_") {
+					t.Errorf("script line %d: kubectl %s writes %s: only the send gate and the write-back may", w.line, strings.Join(w.args, " "), a)
+				}
+			}
+		}
 	}
-	gate := gates[0]
-	write := slices.DeleteFunc(slices.Clone(gate.args), func(a string) bool { return a == "--dry-run=server" })
-	if len(write) != len(gate.args)-1 || !slices.Contains(write, `"kubehz.cloud/last-assessment=${NOW_EPOCH}"`) ||
-		!slices.ContainsFunc(writes, func(w []string) bool { return slices.Equal(w, write) }) {
-		t.Errorf("script line %d: the send gate kubectl %s is not the 24h marker write plus --dry-run=server", gate.line, strings.Join(gate.args, " "))
+	if len(gates) != 1 || len(backs) != 1 {
+		t.Fatalf("%d send gates and %d write-backs, want 1 and 1", len(gates), len(backs))
+	}
+	gate, back := gates[0], backs[0]
+	if !slices.Contains(gate.args, overwrite) || !slices.Contains(gate.args, gateReq) ||
+		!strings.Contains(script, `[ "${ASSESS_REQ}" != "true" ] || GATE_REQ="kubehz.cloud/assess-requested-"`) {
+		t.Errorf("script line %d: the send gate kubectl %s must set the time and remove a pending request in one call", gate.line, strings.Join(gate.args, " "))
+	}
+	if !slices.Contains(back.args, overwrite) || !slices.Contains(back.args, backReq) ||
+		!strings.Contains(script, `WB_LAST="kubehz.cloud/last-assessment-"`) ||
+		!strings.Contains(script, `[ -z "${LAST_ASSESS}" ] || WB_LAST="kubehz.cloud/last-assessment=${LAST_ASSESS}"`) ||
+		!strings.Contains(script, `[ "${ASSESS_REQ}" != "true" ] || WB_REQ="kubehz.cloud/assess-requested=true"`) {
+		t.Errorf("script line %d: the write-back kubectl %s must put back the old time and the request in one call", back.line, strings.Join(back.args, " "))
 	}
 	if before, _, found := strings.Cut(script, "ASSESSMENT=$(jq "); !found || gate.line >= strings.Count(before, "\n")+1 {
 		t.Errorf("script line %d: the send gate must run before the assessment is put together", gate.line)

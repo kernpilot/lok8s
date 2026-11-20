@@ -56,6 +56,16 @@ setup() {
   # call, and STUB_KUBECTL_DELAY makes each call sleep (a slow apiserver).
   # curl captures the POSTed heartbeat body (-d) to STUB_PAYLOAD_OUT so the
   # test can assert the wire payload.
+  # STUB_STATE_FILE (a JSON object) is the annotation store of
+  # kubehz-agent-state: the marker read prints it, and an annotate that is
+  # not denied changes it as kubectl does (key=value sets, key- removes, all
+  # or nothing). It persists from one run of the script to the next, so a
+  # case can run several ticks. Without it, the read prints STUB_MARKER and
+  # an annotate changes nothing. The denials: STUB_GATE_DENIED refuses the
+  # first annotate of a run that writes kubehz.cloud/last-assessment (the
+  # send gate), STUB_WRITEBACK_DENIED refuses any later one (the write-back),
+  # and STUB_ANNOTATE_DENIED refuses every annotate. STUB_EVENTS_LOG gets
+  # each annotate and each heartbeat POST in their order.
   local stubs="${BATS_TEST_TMPDIR}/stubs.sh"
   cat > "${stubs}" <<'STUBS_EOF'
 # timeout: the pod's `timeout SECS CMD ARGS` (busybox and coreutils take the
@@ -71,6 +81,29 @@ timeout() {
     *"${STUB_TIMEOUT_MATCH:-<none>}"*) return 143 ;;
   esac
   "$@"
+}
+# _stub_store_annotate ARGS: apply the annotate ARGS to STUB_STATE_FILE.
+# Without --overwrite, a key that holds another value fails the call, as in
+# kubectl. Nothing changes on a failure.
+_stub_store_annotate() {
+  local overwrite="" arg cur
+  cur=$(cat "${STUB_STATE_FILE}")
+  for arg in "$@"; do
+    case "${arg}" in
+      --overwrite) overwrite=1 ;;
+      annotate|configmap|kubehz-agent-state|-n|kubehz-system) ;;
+      *=*)
+        if [ -z "${overwrite}" ] && printf '%s' "${cur}" | command jq -e --arg k "${arg%%=*}" --arg v "${arg#*=}" \
+            'has($k) and .[$k] != $v' >/dev/null; then
+          echo "error: --overwrite is false but found the following declared annotation(s): '${arg%%=*}' already has a value" >&2
+          return 1
+        fi
+        cur=$(printf '%s' "${cur}" | command jq -c --arg k "${arg%%=*}" --arg v "${arg#*=}" '.[$k] = $v') ;;
+      *-) cur=$(printf '%s' "${cur}" | command jq -c --arg k "${arg%-}" 'del(.[$k])') ;;
+      *) echo "stub: unknown annotate argument ${arg}" >&2; return 1 ;;
+    esac
+  done
+  printf '%s\n' "${cur}" > "${STUB_STATE_FILE}"
 }
 kubectl() {
   argv_log kubectl "$@"
@@ -147,30 +180,40 @@ kubectl() {
       echo 'Error from server (Forbidden): configmaps "kubehz-agent-config" is forbidden' >&2
       return 1 ;;
     # Gate marker: the annotations map on the kubehz-agent-state ConfigMap.
-    # STUB_MARKER holds the JSON annotations; STUB_MARKER_FORBIDDEN simulates
-    # an install without that ConfigMap or its RBAC (read fails -> fail-closed).
+    # STUB_STATE_FILE (the store) or STUB_MARKER holds the JSON annotations;
+    # STUB_MARKER_FORBIDDEN simulates an install without that ConfigMap or
+    # its RBAC (read fails -> fail-closed).
     "get configmap kubehz-agent-state"*)
       [ -z "${STUB_MARKER_FORBIDDEN:-}" ] || return 1
+      if [ -n "${STUB_STATE_FILE:-}" ]; then cat "${STUB_STATE_FILE}"; return 0; fi
       printf '%s' "${STUB_MARKER:-}" ;;
-    # The send gate: a server-side dry run of the 24h marker write. It goes
-    # to its own log (STUB_DRYRUN_LOG), so a grep of STUB_ANNOTATE_LOG for
-    # the marker write never matches the dry run. STUB_ANNOTATE_DENIED
-    # refuses the dry run and every annotate below, as RBAC without the
-    # patch or an admission webhook does.
-    "annotate --dry-run=server "*)
+    # A dry run stores nothing: it goes to its own log (STUB_DRYRUN_LOG) and
+    # changes no store. The agent sends none.
+    "annotate --dry-run"*)
       printf '%s\n' "$*" >> "${STUB_DRYRUN_LOG}"
-      if [ -n "${STUB_ANNOTATE_DENIED:-}" ]; then
-        echo 'Error from server (Forbidden): configmaps "kubehz-agent-state" is forbidden' >&2
-        return 1
-      fi
       return 0 ;;
+    # A marker write. The first one of a run that writes
+    # kubehz.cloud/last-assessment is the send gate (STUB_GATE_DENIED), a
+    # later one the write-back (STUB_WRITEBACK_DENIED). STUB_ANNOTATE_DENIED
+    # refuses every annotate, as RBAC without the patch or an admission
+    # webhook does.
     "annotate "*)
       printf '%s\n' "$*" >> "${STUB_ANNOTATE_LOG}"
-      if [ -n "${STUB_ANNOTATE_DENIED:-}" ]; then
+      printf '%s\n' "$*" >> "${STUB_EVENTS_LOG}"
+      local _which=""
+      case " $* " in
+        *" kubehz.cloud/last-assessment="*|*" kubehz.cloud/last-assessment- "*)
+          if [ -z "${_stub_gate_seen:-}" ]; then _which=gate; else _which=writeback; fi
+          _stub_gate_seen=1 ;;
+      esac
+      if [ -n "${STUB_ANNOTATE_DENIED:-}" ] \
+        || { [ "${_which}" = gate ] && [ -n "${STUB_GATE_DENIED:-}" ]; } \
+        || { [ "${_which}" = writeback ] && [ -n "${STUB_WRITEBACK_DENIED:-}" ]; }; then
         echo 'Error from server (Forbidden): configmaps "kubehz-agent-state" is forbidden' >&2
         return 1
       fi
-      return 0 ;;
+      [ -z "${STUB_STATE_FILE:-}" ] || _stub_store_annotate "$@"
+      return $? ;;
     # etcd static pods: default one Ready pod (datastore=etcd, reachable).
     # STUB_ETCD_READY="" = no etcd pods visible (kine/managed-CP edges).
     *"-l component=etcd"*) printf '%s' "${STUB_ETCD_READY-True }" ;;
@@ -245,6 +288,15 @@ curl() {
       ;;
   esac
   [ -z "${_body}" ] || printf '%s' "${_body}" > "${STUB_PAYLOAD_OUT}"
+  # Each heartbeat POST: "assessment" or "plain" in STUB_BEATS_LOG, and the
+  # POST in STUB_EVENTS_LOG. STUB_CURL_FAIL=1 fails every heartbeat POST
+  # (the delivery fails: no beat lands).
+  case "${_url}" in
+    */heartbeat)
+      case "${_body}" in *'"assessment"'*) echo assessment ;; *) echo plain ;; esac >> "${STUB_BEATS_LOG}"
+      echo "POST ${_url}" >> "${STUB_EVENTS_LOG}"
+      [ -z "${STUB_CURL_FAIL:-}" ] || return 22 ;;
+  esac
   if [ -n "${STUB_CURL_FAIL_ASSESS:-}" ]; then
     case "${_body}" in *'"assessment"'*) return 22 ;; esac
   fi
@@ -262,11 +314,15 @@ STUBS_EOF
   export KUBEHZ_API_URL="https://api.example.com"
   export STUB_PAYLOAD_OUT="${BATS_TEST_TMPDIR}/payload.json"
   export STUB_ANNOTATE_LOG="${BATS_TEST_TMPDIR}/annotate.log"
-  # The send gate's dry runs, apart from the marker writes.
+  # Dry-run annotate calls, apart from the marker writes. The agent sends none.
   export STUB_DRYRUN_LOG="${BATS_TEST_TMPDIR}/dryrun.log"
   export STUB_CURL_LOG="${BATS_TEST_TMPDIR}/curl.log"
   # Every `timeout SECS CMD …` call: the bound, then the command.
   export STUB_TIMEOUT_LOG="${BATS_TEST_TMPDIR}/timeout.log"
+  # Each annotate and each heartbeat POST, in order; and per heartbeat POST
+  # whether it carried an assessment.
+  export STUB_EVENTS_LOG="${BATS_TEST_TMPDIR}/events.log"
+  export STUB_BEATS_LOG="${BATS_TEST_TMPDIR}/beats.log"
   # The Authorization headers that curl got (from its config).
   export STUB_AUTH_LOG="${BATS_TEST_TMPDIR}/auth.log"
   # Desired-state poll fixtures: default 304 (unchanged → silent) so the
@@ -664,12 +720,13 @@ teardown() {
   run command jq -rc '.assessment.storageClasses[0]' "${STUB_PAYLOAD_OUT}"
   assert_output '{"name":"hcloud-volumes","provisioner":"csi.hetzner.cloud","isDefault":true}'
 
-  # Delivered → the 24h marker moved (epoch annotation on the ConfigMap).
-  run grep -F "kubehz.cloud/last-assessment=" "${STUB_ANNOTATE_LOG}"
-  assert_success
-  # The send gate ran once before the send: the same write as a dry run.
-  run grep -cE '^annotate --dry-run=server --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+$' "${STUB_DRYRUN_LOG}"
+  # Delivered → the 24h marker moved (epoch annotation on the ConfigMap):
+  # the send gate wrote it once, and no dry run was sent.
+  run grep -cE '^annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+$' "${STUB_ANNOTATE_LOG}"
   assert_output "1"
+  run grep -c 'kubehz.cloud/last-assessment' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
+  [ ! -s "${STUB_DRYRUN_LOG}" ]
 }
 
 # ── Assessment: pvSummary grouping + unit conversion ─────
@@ -742,8 +799,11 @@ teardown() {
 
   # The marker moved anyway — a known-rejected assessment must NOT resend
   # every 5 minutes; the next attempt waits for 24h or a platform request.
+  # The send gate wrote it before the send, and nothing put it back.
   run grep -F "kubehz.cloud/last-assessment=" "${STUB_ANNOTATE_LOG}"
   assert_success
+  run grep -c 'kubehz.cloud/last-assessment' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
 }
 
 # ── Assessment gating: at most once per 24h ──────────────
@@ -778,7 +838,7 @@ teardown() {
 
 # ── Assessment gating: platform-requested (actions[] assess) ──
 
-@test "assessment: assess-requested=true overrides a fresh marker and is cleared after the send" {
+@test "assessment: assess-requested=true overrides a fresh marker and is cleared with the new time" {
   local now
   now=$(date -u +%s)
   export STUB_MARKER='{"kubehz.cloud/last-assessment":"'$(( now - 100 ))'","kubehz.cloud/assess-requested":"true"}'
@@ -892,9 +952,8 @@ teardown() {
 # RBAC without the patch, or an admission webhook, can deny every write to
 # kubehz-agent-state while the read works. The 24h marker then never moves,
 # so without the gate the full assessment went out on every 5-minute tick.
-# The gate sends the marker write as a server-side dry run first: on a
-# denial the tick sends the plain heartbeat, no assessment, and consumes no
-# assess request.
+# The gate writes the marker before the send: on a denial the tick sends
+# the plain heartbeat, no assessment, and consumes no assess request.
 
 @test "assessment: a denied marker write sends no assessment; the heartbeat goes out and one line names the fix" {
   export STUB_ANNOTATE_DENIED=1
@@ -919,18 +978,232 @@ teardown() {
   run command jq -rc '[.nodes[].name]' "${STUB_PAYLOAD_OUT}"
   assert_output '["cp-1","worker-1"]'
 
-  # The gate tried once, on the state ConfigMap.
-  run grep -c '' "${STUB_DRYRUN_LOG}"
+  # The gate tried once, on the state ConfigMap: the time and the request
+  # removal in one call.
+  run grep -cE '^annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+ kubehz\.cloud/assess-requested-$' "${STUB_ANNOTATE_LOG}"
   assert_output "1"
-  run grep -E '^annotate --dry-run=server --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+$' "${STUB_DRYRUN_LOG}"
-  assert_success
-  # No probe ran, and nothing tried to move the marker or clear the request.
+  [ ! -s "${STUB_DRYRUN_LOG}" ]
+  # No probe ran, and nothing else tried to move the marker or clear the
+  # request (no write-back: the gate wrote nothing).
   run grep -F 'get storageclasses' "${STUB_TIMEOUT_LOG}"
   assert_failure
-  run grep -F "kubehz.cloud/last-assessment=" "${STUB_ANNOTATE_LOG}"
+  run grep -c 'kubehz.cloud/last-assessment' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
+  run grep -c 'kubehz.cloud/assess-requested-' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
+}
+
+# ── The send gate over several ticks ─────────────────────
+# The gate writes the marker before the send, in one annotate call that
+# also removes a pending assess request. The three outcomes of the send:
+#   delivered: the beat with the assessment lands; the gate write stays;
+#   rejected:  that beat fails and the plain retry lands; the gate write
+#              stays (the heartbeat case of the rejected POST above);
+#   failed:    both POSTs fail; the write-back puts back the old time and
+#              the request, so the next tick sends again.
+# A write-back that fails too costs the assessment of this window, and the
+# agent does not loop. Each case runs the real script several times against
+# the stub's annotation store (STUB_STATE_FILE), which persists between the
+# runs.
+
+# _tick: one run of the script with fresh per-run logs. The store stays.
+_tick() {
+  : > "${STUB_ANNOTATE_LOG}"
+  : > "${STUB_BEATS_LOG}"
+  : > "${STUB_EVENTS_LOG}"
+  : > "${STUB_DRYRUN_LOG}"
+  : > "${STUB_TIMEOUT_LOG}"
+  rm -f -- "${STUB_PAYLOAD_OUT:?}"
+  run bash --posix "${RUNNER}"
+}
+
+# _store: the annotation store, keys sorted.
+_store() {
+  command jq -S -c . "${STUB_STATE_FILE}"
+}
+
+# The send gate's line in STUB_ANNOTATE_LOG: the new time, and the request
+# removal when a request was pending.
+GATE_RE='^annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+'
+
+@test "send gate: a delivered assessment: the gate writes the marker before the send, and nothing writes it after" {
+  local now stamp
+  now=$(date -u +%s)
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '{"kubehz.cloud/last-assessment":"%s"}\n' "$(( now - 90000 ))" > "${STUB_STATE_FILE}"
+
+  # Tick 1: due. The gate write, then the one POST, which carries the
+  # assessment. No dry run, no write after the send.
+  _tick
+  assert_success
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "assessment"
+  run cat "${STUB_EVENTS_LOG}"
+  assert_line --index 0 --regexp "${GATE_RE}\$"
+  assert_line --index 1 "POST https://api.example.com/api/clusters/test.example.com/heartbeat"
+  [ "${#lines[@]}" -eq 2 ]
+  [ ! -s "${STUB_DRYRUN_LOG}" ]
+  stamp=$(command jq -r '."kubehz.cloud/last-assessment"' "${STUB_STATE_FILE}")
+  [ "${stamp}" -ge "${now}" ]
+
+  # Tick 2: the marker is fresh. The plain beat, and nothing is written.
+  _tick
+  assert_success
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "plain"
+  [ ! -s "${STUB_ANNOTATE_LOG}" ]
+  run _store
+  assert_output "{\"kubehz.cloud/last-assessment\":\"${stamp}\"}"
+}
+
+# (a) RBAC without the patch, or an admission webhook, refuses the gate
+# write on every tick.
+@test "send gate: a gate write denied on every tick sends no assessment, keeps the request and logs one line per tick" {
+  local tick line="kubehz: assessment not sent: the agent cannot write configmap/kubehz-agent-state in kubehz-system; run 'lo kubehz deploy'"
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '{"kubehz.cloud/assess-requested":"true"}\n' > "${STUB_STATE_FILE}"
+  export STUB_GATE_DENIED=1
+  for tick in 1 2 3; do
+    _tick
+    assert_success
+    [ "$(printf '%s\n' "${output}" | grep -cxF -- "${line}")" = "1" ] || fail "tick ${tick}: the fixed line is not there once"
+    run cat "${STUB_BEATS_LOG}"
+    assert_output "plain"
+    # One annotate: the refused gate (the time and the request removal).
+    run cat "${STUB_ANNOTATE_LOG}"
+    assert_line --index 0 --regexp "${GATE_RE} kubehz\.cloud/assess-requested-\$"
+    [ "${#lines[@]}" -eq 1 ]
+    # The request stays, and no probe ran.
+    run _store
+    assert_output '{"kubehz.cloud/assess-requested":"true"}'
+    run grep -F 'get storageclasses' "${STUB_TIMEOUT_LOG}"
+    assert_failure
+  done
+}
+
+# (b) The gate write lands, and the delivery fails: both POSTs.
+@test "send gate: a failed delivery puts back the time and the request; the next tick sends the assessment once" {
+  local now old before stamp
+  now=$(date -u +%s)
+  old=$(( now - 100 ))
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '{"kubehz.cloud/last-assessment":"%s","kubehz.cloud/assess-requested":"true"}\n' "${old}" > "${STUB_STATE_FILE}"
+  before=$(_store)
+
+  # Tick 1: the gate, two failed POSTs, the write-back in one call.
+  export STUB_CURL_FAIL=1
+  _tick
   assert_failure
-  run grep -F "kubehz.cloud/assess-requested-" "${STUB_ANNOTATE_LOG}"
+  assert_output --partial "kubehz: heartbeat POST failed (curl rc=22); retrying next tick"
+  run cat "${STUB_BEATS_LOG}"
+  assert_line --index 0 "assessment"
+  assert_line --index 1 "plain"
+  [ "${#lines[@]}" -eq 2 ]
+  run cat "${STUB_ANNOTATE_LOG}"
+  assert_line --index 0 --regexp "${GATE_RE} kubehz\.cloud/assess-requested-\$"
+  assert_line --index 1 "annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment=${old} kubehz.cloud/assess-requested=true"
+  [ "${#lines[@]}" -eq 2 ]
+  run _store
+  assert_output "${before}"
+
+  # Tick 2: the delivery works. The assessment goes out once, the gate
+  # write stays.
+  unset STUB_CURL_FAIL
+  _tick
+  assert_success
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "assessment"
+  run cat "${STUB_ANNOTATE_LOG}"
+  assert_line --index 0 --regexp "${GATE_RE} kubehz\.cloud/assess-requested-\$"
+  [ "${#lines[@]}" -eq 1 ]
+  stamp=$(command jq -r '."kubehz.cloud/last-assessment"' "${STUB_STATE_FILE}")
+  [ "${stamp}" -ge "${now}" ]
+  run _store
+  assert_output "{\"kubehz.cloud/last-assessment\":\"${stamp}\"}"
+
+  # Tick 3: the marker is fresh. No assessment.
+  _tick
+  assert_success
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "plain"
+  [ ! -s "${STUB_ANNOTATE_LOG}" ]
+}
+
+# (c) The gate write lands, the delivery fails, and the write-back fails
+# too. (A gate write that fails sends nothing, so it has no write-back.)
+@test "send gate: a write-back that fails too loses this assessment and never loops: the next ticks send none" {
+  local tick stamp line="kubehz: could not put back the assessment marker on configmap/kubehz-agent-state in kubehz-system; the next assessment comes after the 24h window or on a platform request"
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '{"kubehz.cloud/assess-requested":"true"}\n' > "${STUB_STATE_FILE}"
+
+  # Tick 1: the gate, two failed POSTs, the refused write-back, one line.
+  export STUB_CURL_FAIL=1 STUB_WRITEBACK_DENIED=1
+  _tick
   assert_failure
+  [ "$(printf '%s\n' "${output}" | grep -cxF -- "${line}")" = "1" ]
+  run cat "${STUB_BEATS_LOG}"
+  assert_line --index 0 "assessment"
+  assert_line --index 1 "plain"
+  [ "${#lines[@]}" -eq 2 ]
+  run cat "${STUB_ANNOTATE_LOG}"
+  assert_line --index 0 --regexp "${GATE_RE} kubehz\.cloud/assess-requested-\$"
+  assert_line --index 1 "annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment- kubehz.cloud/assess-requested=true"
+  [ "${#lines[@]}" -eq 2 ]
+  # The gate write stays: the new time, no request.
+  stamp=$(command jq -r '."kubehz.cloud/last-assessment"' "${STUB_STATE_FILE}")
+  run _store
+  assert_output "{\"kubehz.cloud/last-assessment\":\"${stamp}\"}"
+
+  # Ticks 2 and 3: everything works, and the marker is fresh: the plain
+  # beat, no write, no line.
+  unset STUB_CURL_FAIL STUB_WRITEBACK_DENIED
+  for tick in 2 3; do
+    _tick
+    assert_success
+    refute_output --partial "${line}"
+    run cat "${STUB_BEATS_LOG}"
+    assert_output "plain"
+    [ ! -s "${STUB_ANNOTATE_LOG}" ] || fail "tick ${tick}: an annotate ran"
+    run _store
+    assert_output "{\"kubehz.cloud/last-assessment\":\"${stamp}\"}"
+  done
+}
+
+# (d) The request goes only with the new time: one annotate call (one
+# PATCH) writes the time and removes the request, and no call removes the
+# request alone.
+@test "send gate: a pending request is used up only in the call that writes the new time" {
+  local now stamp
+  now=$(date -u +%s)
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
+  printf '{"kubehz.cloud/last-assessment":"%s","kubehz.cloud/assess-requested":"true"}\n' "$(( now - 100 ))" > "${STUB_STATE_FILE}"
+  local before
+  before=$(_store)
+
+  # Tick 1: the gate write is refused: the request stays.
+  export STUB_GATE_DENIED=1
+  _tick
+  assert_success
+  run grep -c 'kubehz.cloud/assess-requested-' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
+  run grep -E "${GATE_RE} kubehz\.cloud/assess-requested-\$" "${STUB_ANNOTATE_LOG}"
+  assert_success
+  run _store
+  assert_output "${before}"
+
+  # Tick 2: the gate write lands: one call, the time and the removal.
+  unset STUB_GATE_DENIED
+  _tick
+  assert_success
+  run cat "${STUB_BEATS_LOG}"
+  assert_output "assessment"
+  run cat "${STUB_ANNOTATE_LOG}"
+  assert_line --index 0 --regexp "${GATE_RE} kubehz\.cloud/assess-requested-\$"
+  [ "${#lines[@]}" -eq 1 ]
+  stamp=$(command jq -r '."kubehz.cloud/last-assessment"' "${STUB_STATE_FILE}")
+  [ "${stamp}" -ge "${now}" ]
+  run _store
+  assert_output "{\"kubehz.cloud/last-assessment\":\"${stamp}\"}"
 }
 
 # ── The markers live on kubehz-agent-state ───────────────
@@ -960,21 +1233,19 @@ _state_only() {
 
   # Tick 1: no last-assessment, a served assess request, an expired nonce, a
   # stored refusal, a changed desired state and an "assess" in the response:
-  # the nonce clear, the 24h marker, the request clear, the re-arm, the
-  # desired-state validator and the refusal clear.
+  # the nonce clear, the send gate (the 24h marker and the request clear in
+  # one call), the re-arm, the desired-state validator and the refusal clear.
   export STUB_MARKER='{"kubehz.cloud/assess-requested":"true","kubehz.cloud/claim-nonce":"khzn_eXp1rEd_n0ncE_43charsBase64urlValue00000","kubehz.cloud/claim-nonce-placed":"'$(( now - 1000 ))'","kubehz.cloud/desired-error":"401"}'
   export STUB_DESIRED_CODE=200
   export STUB_DESIRED_ETAG='"9-120"'
   export STUB_RESPONSE='{"status":"ok","actions":["assess"]}'
   run bash --posix "${RUNNER}"
   assert_success
-  run _state_only 6
+  run _state_only 5
   assert_success
   run grep -F 'kubehz.cloud/claim-nonce- kubehz.cloud/claim-nonce-placed-' "${STUB_ANNOTATE_LOG}"
   assert_success
-  run grep -F "kubehz.cloud/last-assessment=" "${STUB_ANNOTATE_LOG}"
-  assert_success
-  run grep -F "kubehz.cloud/assess-requested-" "${STUB_ANNOTATE_LOG}"
+  run grep -E 'kubehz\.cloud/last-assessment=[0-9]+ kubehz\.cloud/assess-requested-$' "${STUB_ANNOTATE_LOG}"
   assert_success
   run grep -F "kubehz.cloud/assess-requested=true" "${STUB_ANNOTATE_LOG}"
   assert_success
@@ -1015,6 +1286,21 @@ _state_only() {
   assert_success
   run grep -F "kubehz.cloud/desired-error=403" "${STUB_ANNOTATE_LOG}"
   assert_success
+
+  # Tick 4: a due assessment whose delivery fails: the send gate and the
+  # write-back, which removes the time again (the marker read saw none).
+  : > "${STUB_ANNOTATE_LOG}"
+  : > "${STUB_KUBECTL_LOG}"
+  export STUB_MARKER='{}'
+  export STUB_CURL_FAIL=1
+  run bash --posix "${RUNNER}"
+  assert_failure
+  run _state_only 2
+  assert_success
+  run grep -cxE 'annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
+  run grep -cxF 'annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment-' "${STUB_ANNOTATE_LOG}"
+  assert_output "1"
 }
 
 # ── Upgrade: an agent that an older lo deployed ──────────
@@ -1081,7 +1367,7 @@ _state_only() {
   assert_success
   run cat "${STUB_TIMEOUT_LOG}"
   assert_line "5 kubectl get configmap kubehz-agent-state -n kubehz-system -o jsonpath={.metadata.annotations}"
-  assert_line --regexp '^5 kubectl annotate --dry-run=server --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+$'
+  assert_line --regexp '^5 kubectl annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+$'
   assert_line --partial "5 kubectl get pods -n kube-system -l component=kube-apiserver -o jsonpath="
   assert_line --partial "5 kubectl get pods -n kube-system -l component=etcd -o jsonpath="
   assert_line "5 kubectl get crd clusters.cluster.x-k8s.io -o name"
@@ -1099,22 +1385,25 @@ _state_only() {
   # that busybox and coreutils both take.
   run grep -c '^5 kubectl get ' "${STUB_TIMEOUT_LOG}"
   assert_output "12"
-  run grep -c '^5 kubectl annotate --dry-run=server ' "${STUB_TIMEOUT_LOG}"
+  run grep -c '^5 kubectl annotate --overwrite ' "${STUB_TIMEOUT_LOG}"
   assert_output "1"
-  run grep -vcE '^(5 kubectl get |5 kubectl annotate --dry-run=server |30 kubectl get --raw /api/v1/nodes$)' "${STUB_TIMEOUT_LOG}"
+  run grep -vcE '^(5 kubectl get |5 kubectl annotate --overwrite |30 kubectl get --raw /api/v1/nodes$)' "${STUB_TIMEOUT_LOG}"
   assert_output "0"
 }
 
 # A probe for a field the contract has no "unknown" value for (a count, a
 # list, capiManaged) that times out is unknown, never 0 or []: the tick sends
 # no assessment, the heartbeat still goes out, and the 24h marker does not
-# move, so the next tick probes again.
+# move: the write-back puts back what the send gate wrote, so the next tick
+# probes again.
 @test "assessment: a timed-out probe defers the assessment, never a 0" {
   local match
+  export STUB_STATE_FILE="${BATS_TEST_TMPDIR}/state.json"
   for match in "get services -A" "get validatingwebhookconfigurations" "get mutatingwebhookconfigurations" \
       "node-role.kubernetes.io/control-plane" "get storageclasses" "get pv " "get crd clusters.cluster.x-k8s.io"; do
     export STUB_TIMEOUT_MATCH="${match}"
     rm -f "${STUB_PAYLOAD_OUT}" "${STUB_ANNOTATE_LOG}"
+    printf '{}\n' > "${STUB_STATE_FILE}"
     run bash --posix "${RUNNER}"
     assert_success
     assert_output --partial "kubehz: assessment deferred: no answer for "
@@ -1122,8 +1411,13 @@ _state_only() {
     assert_success
     run command jq -r '.clusterId' "${STUB_PAYLOAD_OUT}"
     assert_output "test.example.com"
-    run grep -F "kubehz.cloud/last-assessment=" "${STUB_ANNOTATE_LOG}"
-    assert_failure
+    # The send gate, then the write-back: the marker is as before the tick.
+    run cat "${STUB_ANNOTATE_LOG}"
+    assert_line --index 0 --regexp '^annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz\.cloud/last-assessment=[0-9]+$'
+    assert_line --index 1 'annotate --overwrite configmap kubehz-agent-state -n kubehz-system kubehz.cloud/last-assessment-'
+    [ "${#lines[@]}" -eq 2 ]
+    run command jq -c . "${STUB_STATE_FILE}"
+    assert_output '{}'
   done
 }
 
